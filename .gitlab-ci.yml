@@ -1,0 +1,51 @@
+stages:
+  - lint
+  - test
+
+variables:
+  PIP_CACHE_DIR: "$CI_PROJECT_DIR/.pip-cache"
+
+# Python syntax check on changed .py files
+syntax-check:
+  stage: lint
+  tags:
+    - shared
+  script:
+    - echo "=== Python Syntax Check ==="
+    - |
+      CHANGED_PY=$(git diff --name-only $CI_MERGE_REQUEST_DIFF_BASE_SHA..HEAD -- '*.py' 2>/dev/null || git diff --name-only HEAD~1..HEAD -- '*.py' 2>/dev/null || true)
+      if [ -n "$CHANGED_PY" ]; then
+        echo "Checking files: $CHANGED_PY"
+        FAIL=0
+        for f in $CHANGED_PY; do
+          if [ -f "$f" ]; then
+            python -m py_compile "$f" || FAIL=1
+          fi
+        done
+        if [ $FAIL -ne 0 ]; then
+          echo "Syntax errors found!"
+          exit 1
+        fi
+        echo "All syntax checks passed"
+      else
+        echo "No Python files changed, skipping"
+      fi
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == "main"'
+
+# Unit tests
+unit-tests:
+  stage: test
+  tags:
+    - shared
+  before_script:
+    - pip install -r requirements-dev.txt 2>/dev/null || true
+    - pip install -r requirements-core.txt 2>/dev/null || true
+  script:
+    - echo "=== Running Unit Tests ==="
+    - python -m pytest tests/unit/ -x -q --tb=short --timeout=120
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == "main"'
+  allow_failure: false
