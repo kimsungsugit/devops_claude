@@ -1,0 +1,273 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE testcase_data>
+<testcase_data xml_testcase_version="2.0">
+  <compound>
+    <name>&lt;&lt;COMPOUND&gt;&gt;</name>
+  </compound>
+  <init>
+    <name>&lt;&lt;INIT&gt;&gt;</name>
+  </init>
+  <unit index="9" coverage_type="Statement+Branch">
+    <name>EEPROM</name>
+    <subprogram index="1">
+      <name>BackupSector</name>
+      <testcase index="1">
+        <name>SwUFn_2104.001</name>
+        <unique_id>135</unique_id>
+      </testcase>
+      <testcase index="2">
+        <name>SwUFn_2104.002</name>
+        <unique_id>136</unique_id>
+      </testcase>
+      <testcase index="3">
+        <name>SwUFn_2104.003</name>
+        <unique_id>137</unique_id>
+      </testcase>
+      <testcase index="4">
+        <name>SwUFn_2104.004</name>
+        <unique_id>138</unique_id>
+      </testcase>
+      <testcase index="5">
+        <name>SwUFn_2104.005</name>
+        <unique_id>139</unique_id>
+      </testcase>
+      <testcase index="6">
+        <name>SwUFn_2104.006</name>
+        <unique_id>140</unique_id>
+      </testcase>
+      <testcase index="7">
+        <name>SwUFn_2104.007</name>
+        <unique_id>141</unique_id>
+      </testcase>
+    </subprogram>
+    <subprogram index="2">
+      <name>WriteBlock</name>
+      <testcase index="1">
+        <name>SwUFn_2105.001</name>
+        <unique_id>179</unique_id>
+      </testcase>
+      <testcase index="2">
+        <name>SwUFn_2105.002</name>
+        <unique_id>180</unique_id>
+      </testcase>
+      <testcase index="3">
+        <name>SwUFn_2105.003</name>
+        <unique_id>181</unique_id>
+      </testcase>
+      <testcase index="4">
+        <name>SwUFn_2105.004</name>
+        <unique_id>182</unique_id>
+      </testcase>
+      <testcase index="5">
+        <name>SwUFn_2105.005</name>
+        <unique_id>183</unique_id>
+      </testcase>
+      <testcase index="6">
+        <name>SwUFn_2105.006</name>
+        <unique_id>184</unique_id>
+      </testcase>
+      <testcase index="7">
+        <name>SwUFn_2105.007</name>
+        <unique_id>185</unique_id>
+      </testcase>
+      <testcase index="8">
+        <name>SwUFn_2105.008</name>
+        <unique_id>186</unique_id>
+      </testcase>
+    </subprogram>
+    <subprogram index="3">
+      <name>SetupFCCOB</name>
+      <testcase index="1">
+        <name>SwUFn_2108.001</name>
+        <unique_id>170</unique_id>
+      </testcase>
+      <testcase index="2">
+        <name>SwUFn_2108.002</name>
+        <unique_id>171</unique_id>
+      </testcase>
+      <testcase index="3">
+        <name>SwUFn_2108.003</name>
+        <unique_id>172</unique_id>
+      </testcase>
+      <testcase index="4">
+        <name>SwUFn_2108.004</name>
+        <unique_id>173</unique_id>
+      </testcase>
+      <testcase index="5">
+        <name>SwUFn_2108.005</name>
+        <unique_id>174</unique_id>
+      </testcase>
+      <testcase index="6">
+        <name>SwUFn_2108.006</name>
+        <unique_id>175</unique_id>
+      </testcase>
+      <testcase index="7">
+        <name>SwUFn_2108.007</name>
+        <unique_id>176</unique_id>
+      </testcase>
+      <testcase index="8">
+        <name>SwUFn_2108.008</name>
+        <unique_id>177</unique_id>
+      </testcase>
+      <testcase index="9">
+        <name>SwUFn_2108.009</name>
+        <unique_id>178</unique_id>
+      </testcase>
+    </subprogram>
+    <subprogram index="4">
+      <name>EraseSectorInternal</name>
+      <testcase index="1">
+        <name>SwUFn_2106.001</name>
+        <unique_id>163</unique_id>
+      </testcase>
+      <testcase index="2">
+        <name>SwUFn_2106.002</name>
+        <unique_id>164</unique_id>
+      </testcase>
+      <testcase index="3">
+        <name>SwUFn_2106.003</name>
+        <unique_id>165</unique_id>
+      </testcase>
+      <testcase index="4">
+        <name>SwUFn_2106.004</name>
+        <unique_id>166</unique_id>
+      </testcase>
+      <testcase index="5">
+        <name>SwUFn_2106.005</name>
+        <unique_id>167</unique_id>
+      </testcase>
+      <testcase index="6">
+        <name>SwUFn_2106.006</name>
+        <unique_id>168</unique_id>
+      </testcase>
+      <testcase index="7">
+        <name>SwUFn_2106.007</name>
+        <unique_id>169</unique_id>
+      </testcase>
+    </subprogram>
+    <subprogram index="5">
+      <name>WriteWord</name>
+      <testcase index="1">
+        <name>SwUFn_2107.001</name>
+        <unique_id>187</unique_id>
+      </testcase>
+      <testcase index="2">
+        <name>SwUFn_2107.002</name>
+        <unique_id>188</unique_id>
+      </testcase>
+      <testcase index="3">
+        <name>SwUFn_2107.003</name>
+        <unique_id>189</unique_id>
+      </testcase>
+      <testcase index="4">
+        <name>SwUFn_2107.004</name>
+        <unique_id>190</unique_id>
+      </testcase>
+      <testcase index="5">
+        <name>SwUFn_2107.005</name>
+        <unique_id>191</unique_id>
+      </testcase>
+      <testcase index="6">
+        <name>SwUFn_2107.006</name>
+        <unique_id>192</unique_id>
+      </testcase>
+      <testcase index="7">
+        <name>SwUFn_2107.007</name>
+        <unique_id>193</unique_id>
+      </testcase>
+    </subprogram>
+    <subprogram index="6">
+      <name>EEPROM_SetByte</name>
+      <testcase index="1">
+        <name>SwUFn_2101.001</name>
+        <unique_id>153</unique_id>
+      </testcase>
+      <testcase index="2">
+        <name>SwUFn_2101.002</name>
+        <unique_id>154</unique_id>
+      </testcase>
+      <testcase index="3">
+        <name>SwUFn_2101.003</name>
+        <unique_id>155</unique_id>
+      </testcase>
+      <testcase index="4">
+        <name>SwUFn_2101.004</name>
+        <unique_id>156</unique_id>
+      </testcase>
+      <testcase index="5">
+        <name>SwUFn_2101.005</name>
+        <unique_id>157</unique_id>
+      </testcase>
+      <testcase index="6">
+        <name>SwUFn_2101.006</name>
+        <unique_id>158</unique_id>
+      </testcase>
+      <testcase index="7">
+        <name>SwUFn_2101.007</name>
+        <unique_id>159</unique_id>
+      </testcase>
+      <testcase index="8">
+        <name>SwUFn_2101.008</name>
+        <unique_id>160</unique_id>
+      </testcase>
+      <testcase index="9">
+        <name>SwUFn_2101.009</name>
+        <unique_id>161</unique_id>
+      </testcase>
+      <testcase index="10">
+        <name>SwUFn_2101.010</name>
+        <unique_id>162</unique_id>
+      </testcase>
+    </subprogram>
+    <subprogram index="7">
+      <name>EEPROM_GetByte</name>
+      <testcase index="1">
+        <name>SwUFn_2102.001</name>
+        <unique_id>142</unique_id>
+      </testcase>
+      <testcase index="2">
+        <name>SwUFn_2102.002</name>
+        <unique_id>143</unique_id>
+      </testcase>
+      <testcase index="3">
+        <name>SwUFn_2102.003</name>
+        <unique_id>144</unique_id>
+      </testcase>
+      <testcase index="4">
+        <name>SwUFn_2102.004</name>
+        <unique_id>145</unique_id>
+      </testcase>
+      <testcase index="5">
+        <name>SwUFn_2102.005</name>
+        <unique_id>146</unique_id>
+      </testcase>
+      <testcase index="6">
+        <name>SwUFn_2102.006</name>
+        <unique_id>147</unique_id>
+      </testcase>
+      <testcase index="7">
+        <name>SwUFn_2102.007</name>
+        <unique_id>148</unique_id>
+      </testcase>
+      <testcase index="8">
+        <name>SwUFn_2102.008</name>
+        <unique_id>149</unique_id>
+      </testcase>
+      <testcase index="9">
+        <name>SwUFn_2102.009</name>
+        <unique_id>150</unique_id>
+      </testcase>
+      <testcase index="10">
+        <name>SwUFn_2102.010</name>
+        <unique_id>151</unique_id>
+      </testcase>
+    </subprogram>
+    <subprogram index="8">
+      <name>EEPROM_Init</name>
+      <testcase index="1">
+        <name>SwUFn_2103.001</name>
+        <unique_id>152</unique_id>
+      </testcase>
+    </subprogram>
+  </unit>
+</testcase_data>

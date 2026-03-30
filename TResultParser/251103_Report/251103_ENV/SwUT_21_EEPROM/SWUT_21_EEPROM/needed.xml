@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<env_info>
+  <needed_entities>
+    <unit id="9">
+      <variable id="_FCLKDIV" name="_FCLKDIV" defined="0" type="compound" file="1"/>
+      <variable id="_FCCOBIX" name="_FCCOBIX" defined="0" type="compound" file="1"/>
+      <variable id="_FSTAT" name="_FSTAT" defined="0" type="compound" file="1"/>
+      <variable id="_FCCOB0" name="_FCCOB0" defined="0" type="compound" file="1"/>
+      <variable id="_FCCOB1" name="_FCCOB1" defined="0" type="compound" file="1"/>
+      <variable id="_FCCOB2" name="_FCCOB2" defined="0" type="compound" file="1"/>
+      <function id="EEPROM_SetByte" name="EEPROM_SetByte" defined="1" const="0" file="2" return="byte">
+        <parameters>
+          <parameter type="EEPROM_TAddress_Const" name="Addr"/>
+          <parameter type="byte" name="Data"/>
+        </parameters>
+      </function>
+      <function id="EEPROM_GetByte" name="EEPROM_GetByte" defined="1" const="0" file="2" return="byte">
+        <parameters>
+          <parameter type="EEPROM_TAddress_Const" name="Addr"/>
+          <parameter type="byte*" name="Data"/>
+        </parameters>
+      </function>
+      <function id="EEPROM_Init" name="EEPROM_Init" defined="1" const="0" file="2" return=""/>
+    </unit>
+  </needed_entities>
+  <files>
+    <file id="1">C:/workspace/NE1AW_PORTING/Generated_Code/IO_Map.h</file>
+    <file id="2">C:/workspace/NE1AW_PORTING/Generated_Code/EEPROM.c</file>
+  </files>
+</env_info>

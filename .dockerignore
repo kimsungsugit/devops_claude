@@ -1,0 +1,13 @@
+# huge build context 방지
+.git
+**/.git
+**/__pycache__
+**/*.pyc
+my_lin_gateway/reports
+my_lin_gateway/build
+**/.pytest_cache
+**/.mypy_cache
+**/.ruff_cache
+**/node_modules
+**/.venv
+libs/pico-sdk

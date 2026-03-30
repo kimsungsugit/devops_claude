@@ -1,0 +1,155 @@
+{
+  "root": "C:\\Users\\kss11\\.devops_pro_cache\\jenkins\\http_192.168.110.40_7000_job_KJPDS02_DV\\build_311",
+  "scanned_at": "2026-01-19T11:04:25",
+  "source_roots": [],
+  "files": {
+    "html": [
+      "KJPDS02_DV_CRR_19012026_091503.html",
+      "KJPDS02_DV_HMR_19012026_091520.html",
+      "KJPDS02_DV_RCR_19012026_091539.html",
+      "KJPDS02_DV_SUR_19012026_091529.html"
+    ],
+    "xlsx": [],
+    "log": [
+      ".log",
+      "KJPDS02_DV_MDR_19012026_091512.xml",
+      "command.log",
+      "complete_build.log",
+      "jenkins_console.log",
+      "remotelaunch.log",
+      "reports/analysis_summary.json",
+      "reports/jenkins_scan.json",
+      "reports/jenkins_scan_export/jenkins_scan.json",
+      "reports/jenkins_scan_export/jenkins_scan.md",
+      "reports/status.json",
+      "reports/vectorcast_rag/vectorcast_rag.json",
+      "reports/vectorcast_rag/vectorcast_rag.md"
+    ],
+    "other": []
+  },
+  "kpis_by_file": {
+    ".log": {
+      "FAIL_token": 0,
+      "ERROR_token": 0,
+      "WARN_token": 0,
+      "PASS_token": 0
+    },
+    "command.log": {
+      "FAIL_token": 0,
+      "ERROR_token": 608,
+      "WARN_token": 139,
+      "PASS_token": 0
+    },
+    "complete_build.log": {
+      "FAIL_token": 0,
+      "ERROR_token": 0,
+      "WARN_token": 0,
+      "PASS_token": 0
+    },
+    "jenkins_console.log": {
+      "FAIL_token": 0,
+      "ERROR_token": 1,
+      "WARN_token": 267,
+      "PASS_token": 0
+    },
+    "KJPDS02_DV_CRR_19012026_091503.html": {
+      "FAIL_token": 0,
+      "ERROR_token": 0,
+      "WARN_token": 0,
+      "PASS_token": 0
+    },
+    "KJPDS02_DV_HMR_19012026_091520.html": {
+      "FAIL_token": 0,
+      "ERROR_token": 0,
+      "WARN_token": 0,
+      "PASS_token": 0
+    },
+    "KJPDS02_DV_MDR_19012026_091512.xml": {
+      "FAIL_token": 0,
+      "ERROR_token": 0,
+      "WARN_token": 0,
+      "PASS_token": 0
+    },
+    "KJPDS02_DV_RCR_19012026_091539.html": {
+      "FAIL_token": 0,
+      "ERROR_token": 3,
+      "WARN_token": 0,
+      "PASS_token": 0
+    },
+    "KJPDS02_DV_SUR_19012026_091529.html": {
+      "FAIL_token": 0,
+      "ERROR_token": 0,
+      "WARN_token": 0,
+      "PASS_token": 0
+    },
+    "remotelaunch.log": {
+      "FAIL_token": 0,
+      "ERROR_token": 0,
+      "WARN_token": 0,
+      "PASS_token": 0
+    },
+    "reports/analysis_summary.json": {
+      "FAIL_token": 0,
+      "ERROR_token": 0,
+      "WARN_token": 0,
+      "PASS_token": 0
+    },
+    "reports/jenkins_scan.json": {
+      "FAIL_token": 0,
+      "ERROR_token": 0,
+      "WARN_token": 0,
+      "PASS_token": 0
+    },
+    "reports/status.json": {
+      "FAIL_token": 0,
+      "ERROR_token": 0,
+      "WARN_token": 1,
+      "PASS_token": 0
+    },
+    "reports/jenkins_scan_export/jenkins_scan.json": {
+      "FAIL_token": 0,
+      "ERROR_token": 0,
+      "WARN_token": 0,
+      "PASS_token": 0
+    },
+    "reports/jenkins_scan_export/jenkins_scan.md": {
+      "FAIL_token": 0,
+      "ERROR_token": 0,
+      "WARN_token": 0,
+      "PASS_token": 0
+    },
+    "reports/vectorcast_rag/vectorcast_rag.json": {
+      "FAIL_token": 0,
+      "ERROR_token": 0,
+      "WARN_token": 0,
+      "PASS_token": 0
+    },
+    "reports/vectorcast_rag/vectorcast_rag.md": {
+      "FAIL_token": 0,
+      "ERROR_token": 0,
+      "WARN_token": 0,
+      "PASS_token": 0
+    }
+  },
+  "summary": {
+    "files_total": 17,
+    "bytes_total": 12645276,
+    "ext_counts": {
+      "json": 5,
+      "html": 4,
+      "log": 4,
+      "md": 2,
+      "(no_ext)": 1,
+      "xml": 1
+    },
+    "html_count": 4,
+    "xlsx_count": 0,
+    "log_count": 13,
+    "other_count": 0,
+    "FAIL_token": 0,
+    "ERROR_token": 612,
+    "WARN_token": 407,
+    "PASS_token": 0,
+    "fail_error_tokens": 612
+  }
+}

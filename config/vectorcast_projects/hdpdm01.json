@@ -1,0 +1,29 @@
+{
+  "project_id": "HDPDM01",
+  "source_root": "D:\\Project\\Ados\\PDS64_RD",
+  "env_mode": "new_env",
+  "compiler": "CC",
+  "linker": "",
+  "compiler_options": [],
+  "linker_options": [],
+  "include_paths": [
+    "D:\\Project\\Ados\\PDS64_RD\\Sources",
+    "D:\\Project\\Ados\\PDS64_RD\\Sources\\APP",
+    "D:\\Project\\Ados\\PDS64_RD\\Sources\\IF",
+    "D:\\Project\\Ados\\PDS64_RD\\Sources\\SYSTEM",
+    "D:\\Project\\Ados\\PDS64_RD\\Lib",
+    "D:\\Project\\Ados\\PDS64_RD\\Project_Headers"
+  ],
+  "source_paths": [
+    "D:\\Project\\Ados\\PDS64_RD\\Sources",
+    "D:\\Project\\Ados\\PDS64_RD\\Lib"
+  ],
+  "uut_sources": [],
+  "uut_headers": [],
+  "dependency_sources": [],
+  "dependency_libs": [],
+  "dependency_objects": [],
+  "existing_env_file": "",
+  "existing_project_file": "",
+  "regression_command_template": "vcastcli -e HDPDM01 -u <ENV_NAME> -f run_vectorcast_import.cmd"
+}

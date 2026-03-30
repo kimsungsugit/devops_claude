@@ -1,0 +1,5 @@
+# umbrella requirements
+-r requirements-core.txt
+-r requirements-llm.txt
+-r requirements-gui.txt
+-r requirements-dev.txt

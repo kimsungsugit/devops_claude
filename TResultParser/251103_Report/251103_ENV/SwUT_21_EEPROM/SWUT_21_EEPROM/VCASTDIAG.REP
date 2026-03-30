@@ -1,0 +1,245 @@
+
+###################################
+############# MISC ################
+###################################
+Tool version: 25.sp4 (08/19/25)
+Current directory: c:\MDS_work\PSD_ENV\UT\SwUT_21_EEPROM\SWUT_21_EEPROM
+Current directory is writable.
+
+--------------------------------------------------------------------------------
+Environment Overview
+--------------------------------------------------------------------------------
+  Environment Name:    SWUT_21_EEPROM
+  Environment Status:  Normal
+  Environment Version: REVISION_2025_DEFAULT_SFP
+  Environment Build Type: Full
+  Coverage Status:     Statement+Branch (enabled)
+  Language:            C
+  Compiler Name:       CodeWarrior_S12Z_S12ZVMC_Trace32 Simulator_C
+  White Box:           Yes
+  Search List:         $(PROJECT_DIR)\Sources  (testable)
+                       $(PROJECT_DIR)\Sources\LIN\LIN_driver  (testable)
+                       $(PROJECT_DIR)\Sources\LIN\LIN_driver\bsp\SCI  (testable)
+                       $(PROJECT_DIR)\Sources\LIN\LIN_driver\coreapi  (testable)
+                       $(PROJECT_DIR)\Sources\LIN\LIN_driver\diagnostic  (testable)
+                       $(PROJECT_DIR)\Sources\LIN\LIN_driver\include  (testable)
+                       $(PROJECT_DIR)\Sources\LIN\LIN_driver\lowlevel  (testable)
+                       $(PROJECT_DIR)\Sources\LIN\LIN_driver\transport  (testable)
+                       $(PROJECT_DIR)\Sources\LIN\lin16_cfg  (testable)
+                       $(PROJECT_DIR)\Sources\APP  (testable)
+                       $(PROJECT_DIR)\Sources\IF  (testable)
+                       $(PROJECT_DIR)\Sources\SYSTEM  (testable)
+                       $(PROJECT_DIR)\Lib  (testable)
+                       $(PROJECT_DIR)\Generated_Code  (testable)
+                       $(PROJECT_DIR)\Project_Headers  (testable)
+                       $(VCAST_CW_INSTALL_DIR)\MCU\lib\wizard_data\S12Z\DataBase\device\include  (library include)
+                       $(VCAST_CW_INSTALL_DIR)\MCU\S12lisa_Support\s12lisac\include  (library include)
+                       $(VCAST_CW_INSTALL_DIR)\MCU\S12lisa_Support\s12lisac\src  (library include)
+                       $(VCAST_CW_INSTALL_DIR)\MCU\S12lisa_Support\s12lisac\lib_large  (library include)
+  Units Under Test:    EEPROM
+  Stub List:           None
+  Stub None (Source Files): None
+###################################
+
+###################################
+### COMPILER/PREPROCESSOR/LINKER ##
+###################################
+Found preprocessor C:\VCAST\edgfe.exe
+Found compiler C:\Freescale\CWMCUV~1.7\MCU\S12lisa_Tools\Build_Tools\mwccs12lisa.exe
+###################################
+
+
+
+###################################
+############ ENV. VARS ############
+###################################
+ALLUSERSPROFILE=C:\ProgramData
+APPDATA=C:\Users\HB_T2\AppData\Roaming
+COMMONPROGRAMFILES=C:\Program Files\Common Files
+COMMONPROGRAMFILES(X86)=C:\Program Files (x86)\Common Files
+COMMONPROGRAMW6432=C:\Program Files\Common Files
+COMPUTERNAME=DESKTOP-R19VTDQ
+COMSPEC=C:\Windows\system32\cmd.exe
+DRIVERDATA=C:\Windows\System32\Drivers\DriverData
+ECLIPSE_HOME=C:\Freescale\CWMCUV~1.7\eclipse
+FPS_BROWSER_APP_PROFILE_STRING=Internet Explorer
+FPS_BROWSER_USER_PROFILE_STRING=Default
+HOMEDRIVE=C:
+HOMEPATH=\Users\HB_T2
+LM_LICENSE_FILE=C:\Freescale\CWMCUV~1.7\MCU\license.dat
+LOCALAPPDATA=C:\Users\HB_T2\AppData\Local
+LOGONSERVER=\\DESKTOP-R19VTDQ
+MWCINCLUDES=C:\Freescale\CWMCUV~1.7\MCU\S12lisa_Support\s12lisac\include;C:\Freescale\CWMCUV~1.7\MCU\lib\wizard_data\S12Z\DataBase\device\include
+MWCLIBRARIES=C:\Freescale\CWMCUV~1.7\MCU\S12lisa_Support\s12lisac\lib_small
+NUMBER_OF_PROCESSORS=8
+ONEDRIVE=C:\Users\HB_T2\OneDrive
+OS=Windows_NT
+PATH=C:\VCAST\MinGW\bin;C:\Freescale\CWMCUV~1.7\MCU\S12lisa_Tools\Build_Tools;C:\sim12;C:\Windows\system32;C:\Windows;C:\Windows\System32\Wbem;C:\Windows\System32\WindowsPowerShell\v1.0\;C:\Windows\System32\OpenSSH\;C:\Program Files\TortoiseSVN\bin;C:\Users\HB_T2\AppData\Local\Microsoft\WindowsApps;;C:\Users\HB_T2\AppData\Local\Programs\Microsoft VS Code\bin
+PATHEXT=.COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC
+PROCESSOR_ARCHITECTURE=AMD64
+PROCESSOR_IDENTIFIER=AMD64 Family 23 Model 96 Stepping 1, AuthenticAMD
+PROCESSOR_LEVEL=23
+PROCESSOR_REVISION=6001
+PROGRAMDATA=C:\ProgramData
+PROGRAMFILES=C:\Program Files
+PROGRAMFILES(X86)=C:\Program Files (x86)
+PROGRAMW6432=C:\Program Files
+PROJECT_DIR=C:\workspace\NE1AW_PORTING
+PROMPT=$P$G
+PSMODULEPATH=C:\Program Files\WindowsPowerShell\Modules;C:\Windows\system32\WindowsPowerShell\v1.0\Modules
+PUBLIC=C:\Users\Public
+QT_D3DCREATE_MULTITHREADED=1
+SESSIONNAME=Console
+SYSTEMDRIVE=C:
+SYSTEMROOT=C:\Windows
+TEMP=C:\Users\HB_T2\AppData\Local\Temp
+TMP=C:\Users\HB_T2\AppData\Local\Temp
+USERDOMAIN=DESKTOP-R19VTDQ
+USERDOMAIN_ROAMINGPROFILE=DESKTOP-R19VTDQ
+USERNAME=HB_T2
+USERPROFILE=C:\Users\HB_T2
+VCAST_CW_INSTALL_DIR=C:\Freescale\CWMCUV~1.7
+VCAST_PROG_STARTED_FROM_GUI=true
+VCAST_TRACE32=C:\sim12
+VCV_ENVIRONMENT_DIR=c:\MDS_work\PSD_ENV\UT\SwUT_21_EEPROM\SWUT_21_EEPROM
+VCV_ENVIRONMENT_NAME=SWUT_21_EEPROM
+VECTORCAST_DIR=C:\VCAST
+VECTORCAST_SUB_PROCESS_VERBOSE=TRUE
+VECTOR_LICENSE_FILE=27000@192.168.41.238
+WINDIR=C:\Windows
+Z3_LIBRARY_PATH=C:/VCAST/python/3rd_party/z3
+
+###################################
+
+
+###################################
+######## MISSING BINARIES #########
+###################################
+none
+###################################
+
+
+###################################
+########## CONFIG FILES ###########
+###################################
+CCAST Options read from file:
+(exists) c:\MDS_work\PSD_ENV\UT\SwUT_21_EEPROM\CCAST_.CFG (current dir)
+Contents of c:\MDS_work\PSD_ENV\UT\SwUT_21_EEPROM\CCAST_.CFG:
+  C_COMPILER_CFG_SOURCE: CONFIG_FILE_63
+  C_COMPILER_HIERARCHY_STRING: CodeWarrior_S12Z_S12ZVMC_Trace32 Simulator_C
+  C_COMPILER_TAG: CODEWARRIOR_HC12ZVMC256_SIM
+  C_COMPILE_CMD: mwccs12lisa -c -nostdinc -nosyspath  -w illpragmas -w possible -w extended -w extracomma -w emptydecl -w structclass -w notinlined -model medium -bfield_lsbit_first -bfield_reduce_type -opt level=3 -opt speed -requireprotos -Cpp_Exceptions off -char unsigned -msgstyle parseable -sym full -MD -gccext on
+  C_DEBUG_CMD: $(VECTORCAST_DIR)\DATA\trace32\simulator_debug.bat t32m12 MCS12ZVMC256 $(VCAST_TRACE32)
+  C_DEFINE_LIST: const=
+  C_EDG_FLAGS: -w --c --code_warrior --code_warrior_version=hc12 --define_macro=__STDC__=0 --define_macro=__VERSION__=5032 --define_macro=__PRODUCT_HICROSS_PLUS__  --define_macro=__BITFIELD_LSBIT_FIRST__ --define_macro=__BITFIELD_MSBYTE_FIRST__ --define_macro=__BITFIELD_MSWORD_FIRST__ --define_macro=__BITFIELD_TYPE_SIZE_REDUCTION__ --define_macro=__VTAB_DELTA_IS_16BIT__ --define_macro=__PLAIN_BITFIELD_IS_SIGNED__ --define_macro=__LONG_LONG_DOUBLE_IS_IEEE32__ --define_macro=__HC12__ --define_macro=__HCS12__ --define_macro=__HCS12Z__ --define_macro=__SIZE_T_IS_UINT__ --define_macro=__PTRDIFF_T_IS_INT__ --define_macro=__CHAR_IS_SIGNED__ --define_macro=__CHAR_IS_8BIT__ --define_macro=__SHORT_IS_16BIT__ --define_macro=__INT_IS_16BIT__ --define_macro=__ENUM_IS_16BIT__ --define_macro=__ENUM_IS_SIGNED__ --define_macro=__LONG_IS_32BIT__ --define_macro=__LONG_LONG_IS_32BIT__ --define_macro=__FLOAT_IS_IEEE32__ --define_macro=__DOUBLE_IS_IEEE32__ --define_macro=__PTRMBR_OFFSET_IS_16BIT__ --signed_chars --active_option=-Mb --active_option=-CPUHCS12Z
+  C_EXECUTE_CMD: $(VECTORCAST_DIR)\DATA\trace32\simulator.bat t32m12 MCS12ZVMC256 $(VCAST_TRACE32)
+  C_LINK_CMD: linker -M -ViewHidden -WmsgSd1100 -WmsgSd1912
+  C_OUTPUT_FLAG: -o^
+  C_PREPROCESS_CMD: mwccs12lisa -E -ppopt noline -ppopt nospace
+  C_PREPROCESS_FILE: ?.pre
+  EXECUTABLE_EXTENSION: .abs
+  RANGE_CHECK: NONE
+  VARIANT_LOGICS_PATH: 
+  VCAST_BUFFER_OUTPUT: TRUE
+  VCAST_COLLAPSE_STD_HEADERS: COLLAPSE_NONE
+  VCAST_COVERAGE_SOURCE_FILE_PERSPECTIVE: FALSE
+  VCAST_DISABLE_STD_WSTRING_DETECTION: TRUE
+  VCAST_DISPLAY_UNINST_EXPR: FALSE
+  VCAST_ENVIRONMENT_FILES: $(VECTORCAST_DIR)\DATA\codewarrior\s12zvmc_sim\uut.lkf
+  VCAST_EXECUTE_WITH_STDOUT: TRUE
+  VCAST_FILE_INDEX: TRUE
+  VCAST_MAX_STRING_LENGTH: 256
+  VCAST_NO_EXIT: TRUE
+  VCAST_NO_FLOAT: TRUE
+  VCAST_NO_MALLOC: TRUE
+  VCAST_NO_SIGNAL: TRUE
+  VCAST_NO_STDIN: TRUE
+  VCAST_OUTPUT_BUFFER_SIZE: 1024
+  VCAST_POST_PREPROCESS_COMMAND: $(VECTORCAST_DIR)\vpython $(VECTORCAST_DIR)\DATA\codewarrior\s12zvmc_sim\post_preprocess_scrub_pragma.py
+  VCAST_REMOVE_PREPROCESSOR_COMMENTS: FALSE
+  VCAST_TEST_VALUES_DICTIONARY: 
+  VCAST_USE_EDG_PREPROCESSOR: TRUE
+  VCDB_CMD_VERB: 
+  VCDB_FILENAME: 
+  WHITEBOX: YES
+  BASE_DIRECTORY: PROJECT_DIR=C:\workspace\NE1AW_PORTING
+  TESTABLE_SOURCE_DIR: C:\workspace\NE1AW_PORTING\Sources
+  TESTABLE_SOURCE_DIR: C:\workspace\NE1AW_PORTING\Sources\LIN\LIN_driver
+  TESTABLE_SOURCE_DIR: C:\workspace\NE1AW_PORTING\Sources\LIN\LIN_driver\bsp\SCI
+  TESTABLE_SOURCE_DIR: C:\workspace\NE1AW_PORTING\Sources\LIN\LIN_driver\coreapi
+  TESTABLE_SOURCE_DIR: C:\workspace\NE1AW_PORTING\Sources\LIN\LIN_driver\diagnostic
+  TESTABLE_SOURCE_DIR: C:\workspace\NE1AW_PORTING\Sources\LIN\LIN_driver\include
+  TESTABLE_SOURCE_DIR: C:\workspace\NE1AW_PORTING\Sources\LIN\LIN_driver\lowlevel
+  TESTABLE_SOURCE_DIR: C:\workspace\NE1AW_PORTING\Sources\LIN\LIN_driver\transport
+  TESTABLE_SOURCE_DIR: C:\workspace\NE1AW_PORTING\Sources\LIN\lin16_cfg
+  TESTABLE_SOURCE_DIR: C:\workspace\NE1AW_PORTING\Sources\APP
+  TESTABLE_SOURCE_DIR: C:\workspace\NE1AW_PORTING\Sources\IF
+  TESTABLE_SOURCE_DIR: C:\workspace\NE1AW_PORTING\Sources\SYSTEM
+  TESTABLE_SOURCE_DIR: C:\workspace\NE1AW_PORTING\Lib
+  TESTABLE_SOURCE_DIR: C:\workspace\NE1AW_PORTING\Generated_Code
+  TESTABLE_SOURCE_DIR: C:\workspace\NE1AW_PORTING\Project_Headers
+  LIBRARY_INCLUDE_DIR: $(VCAST_CW_INSTALL_DIR)\MCU\S12lisa_Support\s12lisac\include\
+  LIBRARY_INCLUDE_DIR: $(VCAST_CW_INSTALL_DIR)\MCU\S12lisa_Support\s12lisac\src\
+  LIBRARY_INCLUDE_DIR: $(VCAST_CW_INSTALL_DIR)\MCU\S12lisa_Support\s12lisac\lib_large\
+  VCAST_STARTUP_FILE: $(VCAST_CW_INSTALL_DIR)\MCU\S12lisa_Support\s12lisac\src\starts12z.c
+
+ADACAST Options read from file:
+( none ) c:\MDS_work\PSD_ENV\UT\SwUT_21_EEPROM\ADACAST_.CFG (current dir)
+
+###################################
+
+
+###################################
+######## ENV. VAR. CONFIG #########
+###################################
+These config options are being set by environment vars:
+none
+
+These env. vars contain VCAST and could be affecting behavior:
+PATH=C:\VCAST\MinGW\bin;C:\Freescale\CWMCUV~1.7\MCU\S12lisa_Tools\Build_Tools;C:\sim12;C:\Windows\system32;C:\Windows;C:\Windows\System32\Wbem;C:\Windows\System32\WindowsPowerShell\v1.0\;C:\Windows\System32\OpenSSH\;C:\Program Files\TortoiseSVN\bin;C:\Users\HB_T2\AppData\Local\Microsoft\WindowsApps;;C:\Users\HB_T2\AppData\Local\Programs\Microsoft VS Code\bin
+VCAST_CW_INSTALL_DIR=C:\Freescale\CWMCUV~1.7
+VCAST_PROG_STARTED_FROM_GUI=true
+VCAST_TRACE32=C:\sim12
+VECTORCAST_DIR=C:\VCAST
+Z3_LIBRARY_PATH=C:/VCAST/python/3rd_party/z3
+
+###################################
+
+###################################
+####### ENVIRONMENT SCRIPT ########
+###################################
+Contents of C:\MDS_work\PSD_ENV\UT\SwUT_21_EEPROM\VCAST_REBUILD_TEMP.env:
+  ENVIRO.NEW
+  ENVIRO.NAME:SWUT_21_EEPROM
+  ENVIRO.BASE_DIRECTORY: PROJECT_DIR=C:\workspace\NE1AW_PORTING
+  ENVIRO.COVERAGE_TYPE:Statement+Branch
+  ENVIRO.STUB_BY_FUNCTION:EEPROM
+  ENVIRO.WHITE_BOX:YES
+  ENVIRO.MAX_VARY_RANGE: 20
+  ENVIRO.STUB: ALL_BY_PROTOTYPE
+  ENVIRO.SEARCH_LIST: $(PROJECT_DIR)\Sources
+  ENVIRO.SEARCH_LIST: $(PROJECT_DIR)\Sources\LIN\LIN_driver
+  ENVIRO.SEARCH_LIST: $(PROJECT_DIR)\Sources\LIN\LIN_driver\bsp\SCI
+  ENVIRO.SEARCH_LIST: $(PROJECT_DIR)\Sources\LIN\LIN_driver\coreapi
+  ENVIRO.SEARCH_LIST: $(PROJECT_DIR)\Sources\LIN\LIN_driver\diagnostic
+  ENVIRO.SEARCH_LIST: $(PROJECT_DIR)\Sources\LIN\LIN_driver\include
+  ENVIRO.SEARCH_LIST: $(PROJECT_DIR)\Sources\LIN\LIN_driver\lowlevel
+  ENVIRO.SEARCH_LIST: $(PROJECT_DIR)\Sources\LIN\LIN_driver\transport
+  ENVIRO.SEARCH_LIST: $(PROJECT_DIR)\Sources\LIN\lin16_cfg
+  ENVIRO.SEARCH_LIST: $(PROJECT_DIR)\Sources\APP
+  ENVIRO.SEARCH_LIST: $(PROJECT_DIR)\Sources\IF
+  ENVIRO.SEARCH_LIST: $(PROJECT_DIR)\Sources\SYSTEM
+  ENVIRO.SEARCH_LIST: $(PROJECT_DIR)\Lib
+  ENVIRO.SEARCH_LIST: $(PROJECT_DIR)\Generated_Code
+  ENVIRO.SEARCH_LIST: $(PROJECT_DIR)\Project_Headers
+  ENVIRO.LIBRARY_INCLUDE_DIR: $(VCAST_CW_INSTALL_DIR)\MCU\lib\wizard_data\S12Z\DataBase\device\include
+  ENVIRO.LIBRARY_INCLUDE_DIR: $(VCAST_CW_INSTALL_DIR)\MCU\S12lisa_Support\s12lisac\include
+  ENVIRO.LIBRARY_INCLUDE_DIR: $(VCAST_CW_INSTALL_DIR)\MCU\S12lisa_Support\s12lisac\src
+  ENVIRO.LIBRARY_INCLUDE_DIR: $(VCAST_CW_INSTALL_DIR)\MCU\S12lisa_Support\s12lisac\lib_large
+  ENVIRO.TYPE_HANDLED_DIRS_ALLOWED:
+  ENVIRO.LIBRARY_STUBS:
+  ENVIRO.END
+
+###################################
+
+

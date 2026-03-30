@@ -1,0 +1,12 @@
+mwccs12lisa|Compiler|Warning
+(C:\MDS_work\PSD_ENV\UT\SwUT_01_Lib_sha256\SWUT_01_LIB_SHA256\Lib_sha256_exp_inst_driver.c|663|0|4|27722|4)
+=void VCAST_RUN_DATA_IF_9( int VCAST_SUB_INDEX, int VCAST_PARAM_INDEX ) {  
+>function has no prototype
+mwccs12lisa|Compiler|Warning
+(C:\MDS_work\PSD_ENV\UT\SwUT_01_Lib_sha256\SWUT_01_LIB_SHA256\Lib_sha256_exp_inst_driver.c|1377|0|4|48854|4)
+=void VCAST_TI_RANGE_DATA_9 ( void ) {  
+>function has no prototype
+mwccs12lisa|Compiler|Warning
+(C:\MDS_work\PSD_ENV\UT\SwUT_01_Lib_sha256\SWUT_01_LIB_SHA256\Lib_sha256_exp_inst_driver.c|1462|0|4|52852|4)
+=void VCAST_USER_CODE_UNIT_9( VCAST_USER_CODE_TYPE uct, int vcast_slot_index ) {  
+>function has no prototype

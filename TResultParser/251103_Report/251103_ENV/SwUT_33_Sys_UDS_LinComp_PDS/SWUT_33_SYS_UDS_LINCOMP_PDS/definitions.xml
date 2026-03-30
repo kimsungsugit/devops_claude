@@ -1,0 +1,103 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<definitions>
+  <unit id="8">
+    <variables>
+      <variable defined="1">VECTORCAST_INT1</variable>
+      <variable defined="1">VECTORCAST_INT2</variable>
+      <variable defined="1">VECTORCAST_INT3</variable>
+      <variable defined="1">VECTORCAST_STR1</variable>
+      <variable defined="1">VECTORCAST_BUFFER</variable>
+    </variables>
+  </unit>
+  <unit id="9">
+    <functions>
+      <function defined="1" stubbed="1">g_Lib_Sha256_Nb_GetState</function>
+      <function defined="1" stubbed="1">ld_send_message</function>
+      <function defined="1" stubbed="1">u8g_SysEepromCtrl_ReadInlineData</function>
+      <function defined="1" stubbed="1">u8g_SysEepromCtrl_ReadDiagData</function>
+      <function defined="1" stubbed="1">u8g_SysEepromCtrl_ReadProdDate</function>
+      <function defined="1" stubbed="1">u8g_SysEepromCtrl_ReadPartNo</function>
+      <function defined="1" stubbed="1">u8g_SysEepromCtrl_ReadHwVer</function>
+      <function defined="1" stubbed="1">u8g_SysEepromCtrl_ReadDbVer</function>
+      <function defined="1" stubbed="1">u8g_SysEepromCtrl_ReadCrcByte</function>
+      <function defined="1" stubbed="1">u8g_SysEepromCtrl_ReadUdsData</function>
+      <function defined="1" stubbed="1">g_SysEepromCtrl_Reset</function>
+      <function defined="1" stubbed="1">g_SysOptionCtrl</function>
+      <function defined="1">u16s_Pwm2Spd_Conv</function>
+      <function defined="1">g_UDS_RDBI_Paser</function>
+      <function defined="1">s_UDS_RDBI_ProdDate</function>
+      <function defined="1">s_UDS_RDBI_PartNumber</function>
+      <function defined="1">s_UDS_RDBI_SW_Version</function>
+      <function defined="1">s_UDS_RDBI_HW_Version</function>
+      <function defined="1">s_UDS_RDBI_DB_Version</function>
+      <function defined="1">s_UDS_RDBI_SW_Unit1_Version</function>
+      <function defined="1">s_UDS_RDBI_StatusCheck1</function>
+      <function defined="1">s_UDS_RDBI_StatusCheck2</function>
+      <function defined="1">s_UDS_RDBI_StatusCheck3</function>
+      <function defined="1">g_UDS_WDBI_Paser</function>
+      <function defined="1">s_UDS_WDBI_UserOptRecordId</function>
+      <function defined="1">s_UDS_WDBI_UsOptMain</function>
+      <function defined="1">s_UDS_WDBI_UsOpt_F1G</function>
+      <function defined="1">s_UDS_WDBI_UsOpt_E2G_1</function>
+      <function defined="1">s_UDS_WDBI_UsOpt_E2G_2</function>
+      <function defined="1">s_UDS_WDBI_UsOpt_E2G_3</function>
+      <function defined="1">s_UDS_WDBI_ProdDate</function>
+      <function defined="1">s_UDS_WDBI_PartNumber</function>
+      <function defined="1">s_UDS_WDBI_HW_Version</function>
+      <function defined="1">s_UDS_WDBI_DB_Version</function>
+      <function defined="1">s_UDS_WDBI_US_ReadEeprom</function>
+      <function defined="1">s_UDS_WDBI_US_WiteEeprom</function>
+      <function defined="1">s_UDS_WDBI_US_ApplyParam</function>
+      <function defined="1">s_UDS_WDBI_US_ClearEeprom</function>
+      <function defined="1">s_UDS_WDBI_US_ReadSysSts</function>
+      <function defined="1">s_UDS_WDBI_US_UserCtrl</function>
+      <function defined="1">s_UDS_WDBI_US_OpDataRead</function>
+      <function defined="1">s_UDS_WDBI_US_SysOpt</function>
+      <function defined="1">s_UDS_WDBI_US_BuzzTest</function>
+      <function defined="1">s_UDS_WDBI_US_Reprogram</function>
+      <function defined="1">s_UDS_WDBI_US_Write_Checksum</function>
+      <function defined="1">s_UDS_WDBI_US_Read_Checksum</function>
+      <function defined="1">g_UDS_SessionCtrl</function>
+      <function defined="1">s_UDS_DSC_ProgSession</function>
+      <function defined="1">s_UDS_SendNRC22_ConditionsNotCorrect</function>
+      <function defined="1">g_UDS_LinComp_Reset</function>
+    </functions>
+    <variables>
+      <variable defined="1" stubbed="1">u8g_Lib_Sha256_Hash</variable>
+      <variable defined="1" stubbed="1">lin_tl_rx_queue</variable>
+      <variable defined="1" stubbed="1">u16g_SysDiag_SystemStatus</variable>
+      <variable defined="1" stubbed="1">u16g_SysDiag_BuzzerLevelMax</variable>
+      <variable defined="1" stubbed="1">u8g_SysDiag_MotorOverHeatActiveHold_F</variable>
+      <variable defined="1" stubbed="1">u8g_SysEepromCtrl_SleepMode</variable>
+      <variable defined="1" stubbed="1">u8g_SysEepromCtrl_MotorA1A2Output</variable>
+      <variable defined="1" stubbed="1">u16g_SysOptCtrl_OverOpenDeg</variable>
+      <variable defined="1" stubbed="1">s16g_SysOptCtrl_OverPos</variable>
+      <variable defined="1" stubbed="1">u8g_ApiIn_MotorDirection</variable>
+      <variable defined="1" stubbed="1">u8g_ApiIn_MotorCountSpeed</variable>
+      <variable defined="1" stubbed="1">u8g_ApiIn_MotorRps</variable>
+      <variable defined="1" stubbed="1">u16g_ApiIn_MotorLevel_A1</variable>
+      <variable defined="1" stubbed="1">u16g_ApiIn_MotorLevel_A2</variable>
+      <variable defined="1" stubbed="1">s16g_ApiIn_MotorCurrLvl</variable>
+      <variable defined="1" stubbed="1">u16g_ApiIn_MotorTempLvl</variable>
+      <variable defined="1" stubbed="1">u16g_ApiIn_HallSnsrLevel</variable>
+      <variable defined="1" stubbed="1">u16g_ApiIn_Vsup</variable>
+      <variable defined="1" stubbed="1">u16g_ApiIn_BandGap</variable>
+      <variable defined="1" stubbed="1">s16g_ApiIn_MotorPosition</variable>
+      <variable defined="1" stubbed="1">u8g_ApiOut_DoorAngle</variable>
+      <variable defined="1" stubbed="1">u8g_ApiOut_DoorState</variable>
+      <variable defined="1" stubbed="1">u8g_ApiOut_MotorCurrent</variable>
+      <variable defined="1" stubbed="1">u8g_ApiOut_Vsup</variable>
+      <variable defined="1" stubbed="1">u8g_DoorPreCtrl_MotorOverHeat_F</variable>
+      <variable defined="1">u8g_SysUds_UsDoorCtrl</variable>
+      <variable defined="1">u8g_SysUds_UsAutoOpenEn_F</variable>
+      <variable defined="1">u8g_SysUds_UsDir</variable>
+      <variable defined="1">u8g_SysUds_UsStepMsb</variable>
+      <variable defined="1">u8g_SysUds_UsStepLsb</variable>
+      <variable defined="1">u8g_SysUds_WdbiCmd</variable>
+      <variable defined="1">u8g_SysUds_BuzzerTest_F</variable>
+      <variable defined="1">u8g_SysUds_WriteData</variable>
+      <variable defined="1">u16g_SysUds_UsMotorPwm</variable>
+      <variable defined="1">u16g_SysUds_UsStep</variable>
+    </variables>
+  </unit>
+</definitions>

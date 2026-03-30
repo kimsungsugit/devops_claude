@@ -1,0 +1,8 @@
+mwccs12lisa|Compiler|Warning
+(C:\MDS_work\PSD_ENV\MDS_251103\LAST_UT_251103\SwUT_21_EEPROM\SWUT_21_EEPROM\vcast_c_options.h|59|8|14|1964|14)
+=#define VCAST_NO_FLOAT  
+>macro 'VCAST_NO_FLOAT' redefined
+mwccs12lisa|Compiler|Note
+(C:\MDS_work\PSD_ENV\MDS_251103\LAST_UT_251103\SwUT_21_EEPROM\SWUT_21_EEPROM\(command-line defines)|9|8|14|248|14)
+=#define VCAST_NO_FLOAT 1 
+>    (location of previous definition)

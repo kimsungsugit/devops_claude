@@ -1,0 +1,24 @@
+******************
+*** Link command: linker -M -ViewHidden -WmsgSd1100 -WmsgSd1912   uut_inst.prm
+uut_inst.prm
+Command Line: '-M -ViewHidden -WmsgSd1100 -WmsgSd1912   uut_inst.prm'
+Linking C:\MDS_work\PSD_ENV\MDS_251103\LAST_UT_251103\SwUT_33_Sys_UDS_LinComp_PDS\SWUT_33_SYS_UDS_LINCOMP_PDS\uut_inst.prm
+Reading file 'C:\MDS_work\PSD_ENV\MDS_251103\LAST_UT_251103\SwUT_33_Sys_UDS_LinComp_PDS\SWUT_33_SYS_UDS_LINCOMP_PDS\I0000009.o'
+Reading file 'C:\MDS_work\PSD_ENV\MDS_251103\LAST_UT_251103\SwUT_33_Sys_UDS_LinComp_PDS\SWUT_33_SYS_UDS_LINCOMP_PDS\B0000001.o'
+Reading file 'C:\MDS_work\PSD_ENV\MDS_251103\LAST_UT_251103\SwUT_33_Sys_UDS_LinComp_PDS\SWUT_33_SYS_UDS_LINCOMP_PDS\B0000002.o'
+Reading file 'C:\MDS_work\PSD_ENV\MDS_251103\LAST_UT_251103\SwUT_33_Sys_UDS_LinComp_PDS\SWUT_33_SYS_UDS_LINCOMP_PDS\S0000003.o'
+Reading file 'C:\MDS_work\PSD_ENV\MDS_251103\LAST_UT_251103\SwUT_33_Sys_UDS_LinComp_PDS\SWUT_33_SYS_UDS_LINCOMP_PDS\B0000008.o'
+Reading file 'C:\MDS_work\PSD_ENV\MDS_251103\LAST_UT_251103\SwUT_33_Sys_UDS_LinComp_PDS\SWUT_33_SYS_UDS_LINCOMP_PDS\B0000004.o'
+Reading file 'C:\MDS_work\PSD_ENV\MDS_251103\LAST_UT_251103\SwUT_33_Sys_UDS_LinComp_PDS\SWUT_33_SYS_UDS_LINCOMP_PDS\B0000007.o'
+Reading file 'C:\MDS_work\PSD_ENV\MDS_251103\LAST_UT_251103\SwUT_33_Sys_UDS_LinComp_PDS\SWUT_33_SYS_UDS_LINCOMP_PDS\vcast_stdin_data.o'
+Reading file 'C:\MDS_work\PSD_ENV\MDS_251103\LAST_UT_251103\SwUT_33_Sys_UDS_LinComp_PDS\SWUT_33_SYS_UDS_LINCOMP_PDS\B1_switch.o'
+Reading file 'C:\MDS_work\PSD_ENV\MDS_251103\LAST_UT_251103\SwUT_33_Sys_UDS_LinComp_PDS\SWUT_33_SYS_UDS_LINCOMP_PDS\B4_switch.o'
+Reading file 'C:\MDS_work\PSD_ENV\MDS_251103\LAST_UT_251103\SwUT_33_Sys_UDS_LinComp_PDS\SWUT_33_SYS_UDS_LINCOMP_PDS\S3_switch.o'
+Reading file 'C:\MDS_work\PSD_ENV\MDS_251103\LAST_UT_251103\SwUT_33_Sys_UDS_LinComp_PDS\SWUT_33_SYS_UDS_LINCOMP_PDS\starts12z.o'
+Reading file 'C:/Freescale/CWMCUV~1.7/MCU/S12lisa_Support/s12lisac/lib_medium/ansii.lib'
+Generating Symbol table
+Generating DWARF data version 2.0
+Code Size: 36822
+Generating MAP file 'C:\MDS_work\PSD_ENV\MDS_251103\LAST_UT_251103\SwUT_33_Sys_UDS_LinComp_PDS\SWUT_33_SYS_UDS_LINCOMP_PDS\UUT_INST.map'
+SmartLinker: *** 0 error(s), 0 warning(s), 0 information message(s) ***
+SmartLinker: *** Processing ok ***

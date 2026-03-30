@@ -1,0 +1,257 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE testcase_data>
+<testcase_data xml_testcase_version="2.0">
+  <compound>
+    <name>&lt;&lt;COMPOUND&gt;&gt;</name>
+  </compound>
+  <init>
+    <name>&lt;&lt;INIT&gt;&gt;</name>
+  </init>
+  <unit index="9" coverage_type="Statement+Branch">
+    <name>Lib_sha256</name>
+    <subprogram index="1">
+      <name>g_Lib_u8bit_ArrayClear</name>
+    </subprogram>
+    <subprogram index="2">
+      <name>g_Lib_u16bit_ArrayClear</name>
+    </subprogram>
+    <subprogram index="3">
+      <name>u8g_Lib_u8bit_RangeCheck</name>
+    </subprogram>
+    <subprogram index="4">
+      <name>u8g_Lib_u16bit_RangeCheck</name>
+    </subprogram>
+    <subprogram index="5">
+      <name>u8g_Lib_s16bit_RangeCheck</name>
+    </subprogram>
+    <subprogram index="6">
+      <name>u16g_Conv_AngleToPulse</name>
+    </subprogram>
+    <subprogram index="7">
+      <name>s_safe_rotr</name>
+      <testcase index="1">
+        <name>SwUFn_0121.001</name>
+        <unique_id>24</unique_id>
+      </testcase>
+      <testcase index="2">
+        <name>SwUFn_0121.002</name>
+        <unique_id>25</unique_id>
+      </testcase>
+      <testcase index="3">
+        <name>SwUFn_0121.003</name>
+        <unique_id>26</unique_id>
+      </testcase>
+      <testcase index="4">
+        <name>SwUFn_0121.004</name>
+        <unique_id>27</unique_id>
+      </testcase>
+      <testcase index="5">
+        <name>SwUFn_0121.005</name>
+        <unique_id>28</unique_id>
+      </testcase>
+      <testcase index="6">
+        <name>SwUFn_0121.006</name>
+        <unique_id>29</unique_id>
+      </testcase>
+      <testcase index="7">
+        <name>SwUFn_0121.007</name>
+        <unique_id>30</unique_id>
+      </testcase>
+    </subprogram>
+    <subprogram index="8">
+      <name>s_sha256_transform</name>
+      <testcase index="1">
+        <name>SwUFn_0122.001</name>
+        <unique_id>40</unique_id>
+      </testcase>
+    </subprogram>
+    <subprogram index="9">
+      <name>s_sha256_init</name>
+      <testcase index="1">
+        <name>SwUFn_0123.001</name>
+        <unique_id>39</unique_id>
+      </testcase>
+    </subprogram>
+    <subprogram index="10">
+      <name>s_sha256_update</name>
+      <testcase index="1">
+        <name>SwUFn_0124.001</name>
+        <unique_id>41</unique_id>
+      </testcase>
+      <testcase index="2">
+        <name>SwUFn_0124.002</name>
+        <unique_id>42</unique_id>
+      </testcase>
+      <testcase index="3">
+        <name>SwUFn_0124.003</name>
+        <unique_id>43</unique_id>
+      </testcase>
+      <testcase index="4">
+        <name>SwUFn_0124.004</name>
+        <unique_id>44</unique_id>
+      </testcase>
+      <testcase index="5">
+        <name>SwUFn_0124.005</name>
+        <unique_id>45</unique_id>
+      </testcase>
+      <testcase index="6">
+        <name>SwUFn_0124.006</name>
+        <unique_id>46</unique_id>
+      </testcase>
+      <testcase index="7">
+        <name>SwUFn_0124.007</name>
+        <unique_id>47</unique_id>
+      </testcase>
+      <testcase index="8">
+        <name>SwUFn_0124.009</name>
+        <unique_id>49</unique_id>
+      </testcase>
+      <testcase index="9">
+        <name>SwUFn_0124.010</name>
+        <unique_id>50</unique_id>
+      </testcase>
+    </subprogram>
+    <subprogram index="11">
+      <name>s_sha256_final</name>
+      <testcase index="1">
+        <name>SwUFn_0125.001</name>
+        <unique_id>31</unique_id>
+      </testcase>
+      <testcase index="2">
+        <name>SwUFn_0125.002</name>
+        <unique_id>32</unique_id>
+      </testcase>
+      <testcase index="3">
+        <name>SwUFn_0125.003</name>
+        <unique_id>33</unique_id>
+      </testcase>
+      <testcase index="4">
+        <name>SwUFn_0125.004</name>
+        <unique_id>34</unique_id>
+      </testcase>
+      <testcase index="5">
+        <name>SwUFn_0125.005</name>
+        <unique_id>35</unique_id>
+      </testcase>
+      <testcase index="6">
+        <name>SwUFn_0125.006</name>
+        <unique_id>36</unique_id>
+      </testcase>
+      <testcase index="7">
+        <name>SwUFn_0125.007</name>
+        <unique_id>37</unique_id>
+      </testcase>
+      <testcase index="8">
+        <name>SwUFn_0125.008</name>
+        <unique_id>38</unique_id>
+      </testcase>
+    </subprogram>
+    <subprogram index="12">
+      <name>s_Sha256_Hash_Init</name>
+      <testcase index="1">
+        <name>SwUFn_0126.001</name>
+        <unique_id>23</unique_id>
+      </testcase>
+    </subprogram>
+    <subprogram index="13">
+      <name>g_Lib_Sha256_Nb_Start</name>
+      <testcase index="1">
+        <name>SwUFn_0129.001</name>
+        <unique_id>16</unique_id>
+      </testcase>
+      <testcase index="2">
+        <name>SwUFn_0129.002</name>
+        <unique_id>17</unique_id>
+      </testcase>
+      <testcase index="3">
+        <name>SwUFn_0129.003</name>
+        <unique_id>18</unique_id>
+      </testcase>
+      <testcase index="4">
+        <name>SwUFn_0129.004</name>
+        <unique_id>19</unique_id>
+      </testcase>
+      <testcase index="5">
+        <name>SwUFn_0129.005</name>
+        <unique_id>20</unique_id>
+      </testcase>
+      <testcase index="6">
+        <name>SwUFn_0129.006</name>
+        <unique_id>21</unique_id>
+      </testcase>
+      <testcase index="7">
+        <name>SwUFn_0129.007</name>
+        <unique_id>22</unique_id>
+      </testcase>
+    </subprogram>
+    <subprogram index="14">
+      <name>g_Lib_Sha256_Nb_Process</name>
+      <testcase index="1">
+        <name>SwUFn_0130.001</name>
+        <unique_id>2</unique_id>
+      </testcase>
+      <testcase index="2">
+        <name>SwUFn_0130.002</name>
+        <unique_id>3</unique_id>
+      </testcase>
+      <testcase index="3">
+        <name>SwUFn_0130.003</name>
+        <unique_id>4</unique_id>
+      </testcase>
+      <testcase index="4">
+        <name>SwUFn_0130.004</name>
+        <unique_id>5</unique_id>
+      </testcase>
+      <testcase index="5">
+        <name>SwUFn_0130.005</name>
+        <unique_id>6</unique_id>
+      </testcase>
+      <testcase index="6">
+        <name>SwUFn_0130.006</name>
+        <unique_id>7</unique_id>
+      </testcase>
+      <testcase index="7">
+        <name>SwUFn_0130.007</name>
+        <unique_id>8</unique_id>
+      </testcase>
+      <testcase index="8">
+        <name>SwUFn_0130.008</name>
+        <unique_id>9</unique_id>
+      </testcase>
+      <testcase index="9">
+        <name>SwUFn_0130.009</name>
+        <unique_id>10</unique_id>
+      </testcase>
+      <testcase index="10">
+        <name>SwUFn_0130.010</name>
+        <unique_id>11</unique_id>
+      </testcase>
+      <testcase index="11">
+        <name>SwUFn_0130.011</name>
+        <unique_id>12</unique_id>
+      </testcase>
+      <testcase index="12">
+        <name>SwUFn_0130.012</name>
+        <unique_id>13</unique_id>
+      </testcase>
+      <testcase index="13">
+        <name>SwUFn_0130.013</name>
+        <unique_id>14</unique_id>
+      </testcase>
+    </subprogram>
+    <subprogram index="15">
+      <name>g_Lib_Sha256_Nb_GetState</name>
+      <testcase index="1">
+        <name>SwUFn_0131.001</name>
+        <unique_id>1</unique_id>
+      </testcase>
+    </subprogram>
+    <subprogram index="16">
+      <name>g_Lib_Sha256_Nb_Reset</name>
+      <testcase index="1">
+        <name>SwUFn_0132.001</name>
+        <unique_id>15</unique_id>
+      </testcase>
+    </subprogram>
+  </unit>
+</testcase_data>

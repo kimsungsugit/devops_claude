@@ -1,0 +1,6 @@
+C:\MDS_work\PSD_ENV\UT\SwUT_01_Lib_sha256\SWUT_01_LIB_SHA256>REM t32m12 is name of executable 
+C:\MDS_work\PSD_ENV\UT\SwUT_01_Lib_sha256\SWUT_01_LIB_SHA256>REM MCS12ZVMC256 is name of chip to be simulated 
+C:\MDS_work\PSD_ENV\UT\SwUT_01_Lib_sha256\SWUT_01_LIB_SHA256>REM C:\sim12 is name of the TRACE32 home directory 
+C:\MDS_work\PSD_ENV\UT\SwUT_01_Lib_sha256\SWUT_01_LIB_SHA256>REM c:\MDS_work\PSD_ENV\UT\SwUT_01_Lib_sha256\SWUT_01_LIB_SHA256\UUT_INST.abs is name of the harness (usually passed in by the tool) 
+C:\MDS_work\PSD_ENV\UT\SwUT_01_Lib_sha256\SWUT_01_LIB_SHA256>start /D C:\sim12 /wait t32m12 -c configsim.t32,C:\VCAST\DATA\trace32\simulator.cmm MCS12ZVMC256 c:\MDS_work\PSD_ENV\UT\SwUT_01_Lib_sha256\SWUT_01_LIB_SHA256\UUT_INST.abs C:\MDS_work\PSD_ENV\UT\SwUT_01_Lib_sha256\SWUT_01_LIB_SHA256 
+VCAST is Done!

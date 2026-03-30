@@ -1,0 +1,1632 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rcf version="1.0" name="qac-qacpp-rcma-mta-namecheck">
+  <rulegroup name="Secure C">
+    <rule id="0" active="yes" help="default-en_US\rules\lvl_qac_information.html">
+      <text>Information</text>
+      <enforcement>
+        <rule id="0.1" active="yes" help="default-en_US\rules\info.html">
+          <text>Information Messages</text>
+          <enforcement>
+            <message component="qac" id="0050" mapped="yes"/>
+          </enforcement>
+        </rule>
+        <rule id="0.2" active="yes" help="default-en_US\rules\ant_information.html">
+          <text>Annotations</text>
+          <enforcement>
+            <message component="qac" id="4810" mapped="yes"/>
+            <message component="qac" id="4811" mapped="yes"/>
+            <message component="qac" id="4812" mapped="yes"/>
+            <message component="qac" id="4813" mapped="yes"/>
+            <message component="qac" id="4814" mapped="yes"/>
+            <message component="qac" id="4815" mapped="yes"/>
+            <message component="qac" id="4816" mapped="yes"/>
+            <message component="qac" id="4817" mapped="yes"/>
+            <message component="qac" id="4818" mapped="yes"/>
+            <message component="qac" id="4819" mapped="yes"/>
+            <message component="qac" id="4820" mapped="yes"/>
+            <message component="qac" id="4821" mapped="yes"/>
+            <message component="qac" id="4822" mapped="yes"/>
+            <message component="qac" id="4823" mapped="yes"/>
+            <message component="qac" id="4825" mapped="yes"/>
+            <message component="qac" id="4826" mapped="yes"/>
+            <message component="qac" id="4827" mapped="yes"/>
+            <message component="qac" id="4828" mapped="yes"/>
+            <message component="qac" id="4829" mapped="yes"/>
+            <message component="qac" id="4830" mapped="yes"/>
+            <message component="qac" id="4831" mapped="yes"/>
+            <message component="qac" id="4832" mapped="yes"/>
+            <message component="qac" id="4833" mapped="yes"/>
+            <message component="qac" id="4834" mapped="yes"/>
+            <message component="qac" id="4835" mapped="yes"/>
+          </enforcement>
+        </rule>
+        <rule id="0.3" active="yes" help="default-en_US\rules\cma_information.html">
+          <text>CMA information</text>
+          <enforcement/>
+        </rule>
+        <rule id="0.4" active="yes" help="default-en_US\rules\parser_rec.html">
+          <text>Parsing recovery</text>
+          <enforcement>
+            <message component="qac" id="0901" mapped="yes"/>
+            <message component="qac" id="0902" mapped="yes"/>
+            <message component="qac" id="0903" mapped="yes"/>
+            <message component="qac" id="0908" mapped="yes"/>
+            <message component="qac" id="0911" mapped="yes"/>
+            <message component="qac" id="0913" mapped="yes"/>
+            <message component="qac" id="0920" mapped="yes"/>
+          </enforcement>
+        </rule>
+        <rule id="0.5" active="yes" help="default-en_US\rules\df_recovery.html">
+          <text>Dataflow recovery</text>
+          <enforcement>
+            <message component="qac" id="0097" mapped="yes"/>
+            <message component="qac" id="2750" mapped="yes"/>
+            <message component="qac" id="2751" mapped="yes"/>
+            <message component="qac" id="2752" mapped="yes"/>
+            <message component="qac" id="2753" mapped="yes"/>
+            <message component="qac" id="2754" mapped="yes"/>
+            <message component="qac" id="2755" mapped="yes"/>
+            <message component="dataflow" id="2756" mapped="yes"/>
+            <message component="dataflow" id="2757" mapped="yes"/>
+            <message component="dataflow" id="2758" mapped="yes"/>
+          </enforcement>
+        </rule>
+        <rule id="0.6" active="yes" help="default-en_US\rules\submsg.html">
+          <text>Sub-Messages</text>
+          <enforcement>
+            <message component="qac" id="1564" mapped="yes"/>
+            <message component="qac" id="1565" mapped="yes"/>
+            <message component="qac" id="1566" mapped="yes"/>
+            <message component="qac" id="1568" mapped="yes"/>
+            <message component="qac" id="1569" mapped="yes"/>
+            <message component="qac" id="1570" mapped="yes"/>
+            <message component="qac" id="1571" mapped="yes"/>
+            <message component="qac" id="1572" mapped="yes"/>
+            <message component="qac" id="1573" mapped="yes"/>
+            <message component="qac" id="1574" mapped="yes"/>
+            <message component="qac" id="1575" mapped="yes"/>
+            <message component="qac" id="1576" mapped="yes"/>
+            <message component="qac" id="1577" mapped="yes"/>
+            <message component="qac" id="1578" mapped="yes"/>
+            <message component="qac" id="1579" mapped="yes"/>
+            <message component="qac" id="1580" mapped="yes"/>
+            <message component="qac" id="1581" mapped="yes"/>
+            <message component="qac" id="1582" mapped="yes"/>
+            <message component="qac" id="1585" mapped="yes"/>
+            <message component="qac" id="1586" mapped="yes"/>
+            <message component="qac" id="1590" mapped="yes"/>
+            <message component="qac" id="1592" mapped="yes"/>
+            <message component="qac" id="1593" mapped="yes"/>
+            <message component="qac" id="1594" mapped="yes"/>
+            <message component="qac" id="1598" mapped="yes"/>
+            <message component="qac" id="1599" mapped="yes"/>
+            <message component="qac" id="3390" mapped="yes"/>
+          </enforcement>
+        </rule>
+      </enforcement>
+    </rule>
+    <rule help="" active="yes" id="1">
+      <text>심각도 상</text>
+      <enforcement>
+        <rule help="" active="yes" id="C-DCI-001">
+          <text>지역 변수 주소 반환 및 할당 금지</text>
+          <enforcement>
+            <message mapped="yes" component="qac" id="3217"/>
+            <message mapped="yes" component="qac" id="3225"/>
+            <message mapped="yes" component="qac" id="3230"/>
+            <message mapped="yes" component="qac" id="4140"/>
+          </enforcement>
+        </rule>
+		<rule help="" active="yes" id="C-DCI-011">
+          <text>괄호를 사용한 연산자 우선순위의 명확한 처리 필요 [MCU]</text>
+          <enforcement>
+            <message mapped="yes" component="qac" id="3389"/>
+            <message mapped="yes" component="qac" id="3390"/>
+            <message mapped="yes" component="qac" id="3391"/>
+            <message mapped="yes" component="qac" id="3392"/>
+            <message mapped="yes" component="qac" id="3393"/>
+            <message mapped="yes" component="qac" id="3394"/>
+            <message mapped="yes" component="qac" id="3395"/>
+            <message mapped="yes" component="qac" id="3396"/>
+            <message mapped="yes" component="qac" id="3397"/>
+            <message mapped="yes" component="qac" id="3398"/>
+            <message mapped="yes" component="qac" id="3399"/>
+            <message mapped="yes" component="qac" id="3400"/>
+            <message mapped="yes" component="qac" id="3401"/>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-DCI-012">
+          <text>최소값 검사 없이 수치 범위 비교 금지 [MCU]</text>
+          <enforcement>
+            <message mapped="yes" component="qac" id="2840"/>
+            <message mapped="yes" component="dataflow" id="2841"/>
+            <message mapped="yes" component="dataflow" id="2842"/>
+            <message mapped="yes" component="dataflow" id="2843"/>
+            <message mapped="yes" component="qac" id="2890"/>
+            <message mapped="yes" component="dataflow" id="2891"/>
+            <message mapped="yes" component="dataflow" id="2892"/>
+            <message mapped="yes" component="dataflow" id="2893"/>
+            <message mapped="yes" component="dataflow" id="2930"/>
+            <message mapped="yes" component="dataflow" id="2931"/>
+            <message mapped="yes" component="dataflow" id="2932"/>
+            <message mapped="yes" component="dataflow" id="2933"/>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-INT-002">
+          <text>부호가 없는 숫자 연산이 래핑되지 않도록 보장</text>
+          <enforcement>
+            <message mapped="yes" component="qac" id="2910"/>
+            <message mapped="yes" component="dataflow" id="2911"/>
+            <message mapped="yes" component="dataflow" id="2912"/>
+            <message mapped="yes" component="dataflow" id="2913"/>
+            <message mapped="yes" component="qac" id="3383"/>
+            <message mapped="yes" component="qac" id="3384"/>
+            <message mapped="yes" component="qac" id="3385"/>
+            <message mapped="yes" component="qac" id="3386"/>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-INT-003">
+          <text>정수 형변환 시 값이 잘리거나 변하지 않도록 보장 [AP, MCU]</text>
+          <enforcement>
+            <message mapped="yes" component="qac" id="2850"/>
+            <message mapped="yes" component="dataflow" id="2851"/>
+            <message mapped="yes" component="dataflow" id="2852"/>
+            <message mapped="yes" component="dataflow" id="2853"/>
+            <message mapped="yes" component="qac" id="2855"/>
+            <message mapped="yes" component="dataflow" id="2856"/>
+            <message mapped="yes" component="dataflow" id="2857"/>
+            <message mapped="yes" component="dataflow" id="2858"/>
+            <message mapped="yes" component="qac" id="2890"/>
+            <message mapped="yes" component="dataflow" id="2891"/>
+            <message mapped="yes" component="dataflow" id="2892"/>
+            <message mapped="yes" component="dataflow" id="2893"/>
+            <message mapped="yes" component="qac" id="2895"/>
+            <message mapped="yes" component="dataflow" id="2896"/>
+            <message mapped="yes" component="dataflow" id="2897"/>
+            <message mapped="yes" component="dataflow" id="2898"/>
+            <message mapped="yes" component="qac" id="2900"/>
+            <message mapped="yes" component="dataflow" id="2901"/>
+            <message mapped="yes" component="dataflow" id="2902"/>
+            <message mapped="yes" component="dataflow" id="2903"/>
+            <message mapped="yes" component="qac" id="2905"/>
+            <message mapped="yes" component="dataflow" id="2906"/>
+            <message mapped="yes" component="dataflow" id="2907"/>
+            <message mapped="yes" component="dataflow" id="2908"/>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-INT-004">
+          <text>부호 있는 정수의 연산이 오버플로우 되지 않도록 보장 [AP, MCU]</text>
+          <enforcement>
+            <message mapped="yes" component="qac" id="2800"/>
+            <message mapped="yes" component="dataflow" id="2801"/>
+            <message mapped="yes" component="dataflow" id="2802"/>
+            <message mapped="yes" component="dataflow" id="2803"/>
+            <message mapped="yes" component="qac" id="2860"/>
+            <message mapped="yes" component="dataflow" id="2861"/>
+            <message mapped="yes" component="dataflow" id="2862"/>
+            <message mapped="yes" component="dataflow" id="2863"/>
+          </enforcement>
+        </rule>
+		<rule help="" active="yes" id="C-INT-009">
+          <text>버퍼 또는 자료형 크기 계산에 주의</text>
+          <enforcement>
+            <message mapped="yes" component="qac" id="2840"/>
+            <message mapped="yes" component="dataflow" id="2841"/>
+            <message mapped="yes" component="dataflow" id="2842"/>
+            <message mapped="yes" component="dataflow" id="2843"/>
+            <message mapped="yes" component="dataflow" id="2844"/>
+            <message mapped="yes" component="dataflow" id="2845"/>
+            <message mapped="yes" component="dataflow" id="2846"/>
+            <message mapped="yes" component="dataflow" id="2847"/>
+            <message mapped="yes" component="dataflow" id="2848"/>
+            <message mapped="yes" component="dataflow" id="2849"/>
+            <message mapped="yes" component="dataflow" id="2930"/>
+            <message mapped="yes" component="dataflow" id="2931"/>
+            <message mapped="yes" component="dataflow" id="2932"/>
+            <message mapped="yes" component="dataflow" id="2933"/>
+            <message mapped="yes" component="dataflow" id="2934"/>
+            <message mapped="yes" component="dataflow" id="2935"/>
+            <message mapped="yes" component="dataflow" id="2936"/>
+            <message mapped="yes" component="dataflow" id="2937"/>
+            <message mapped="yes" component="dataflow" id="2938"/>
+            <message mapped="yes" component="dataflow" id="2939"/>
+            <message mapped="yes" component="dataflow" id="2950"/>
+            <message mapped="yes" component="dataflow" id="2951"/>
+            <message mapped="yes" component="dataflow" id="2952"/>
+            <message mapped="yes" component="dataflow" id="2953"/>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-STR-002">
+          <text>문자열 데이터와 널 종료 문자를 담을 충분한 공간 보유 보장</text>
+          <enforcement>
+            <message mapped="yes" component="certccm" id="5009"/>
+            <message mapped="yes" component="certccm" id="5038"/>
+            <message mapped="yes" component="qac" id="2840"/>
+            <message mapped="yes" component="dataflow" id="2841"/>
+            <message mapped="yes" component="dataflow" id="2842"/>
+            <message mapped="yes" component="dataflow" id="2843"/>
+            <message mapped="yes" component="dataflow" id="2845"/>
+            <message mapped="yes" component="dataflow" id="2846"/>
+            <message mapped="yes" component="dataflow" id="2847"/>
+            <message mapped="yes" component="dataflow" id="2848"/>
+            <message mapped="yes" component="dataflow" id="2930"/>
+            <message mapped="yes" component="dataflow" id="2931"/>
+            <message mapped="yes" component="dataflow" id="2932"/>
+            <message mapped="yes" component="dataflow" id="2933"/>
+            <message mapped="yes" component="dataflow" id="2935"/>
+            <message mapped="yes" component="dataflow" id="2936"/>
+            <message mapped="yes" component="dataflow" id="2937"/>
+            <message mapped="yes" component="dataflow" id="2938"/>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-STR-003">
+          <text>널 종료 문자로 끝나지 않은 문자열을 라이브러리 함수 전달 금지</text>
+          <enforcement>
+            <message mapped="yes" component="dataflow" id="2835"/>
+            <message mapped="yes" component="dataflow" id="2836"/>
+            <message mapped="yes" component="dataflow" id="2839"/>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-STR-005">
+          <text>문자열을 다루는 함수에 인수를 전달할 때 narrow 문자열과 wide 문자열을 정확히 구분 필요</text>
+          <enforcement>
+            <message mapped="yes" component="qac" id="0432"/>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-EXP-003">
+          <text>초기화되지 않은 메모리 참조(접근, 읽기) 금지 [AP, MCU]</text>
+          <enforcement>
+            <message mapped="yes" component="dataflow" id="2726"/>
+            <message mapped="yes" component="dataflow" id="2727"/>
+            <message mapped="yes" component="dataflow" id="2728"/>
+            <message mapped="yes" component="dataflow" id="2961"/>
+            <message mapped="yes" component="dataflow" id="2962"/>
+            <message mapped="yes" component="dataflow" id="2963"/>
+            <message mapped="yes" component="dataflow" id="2966"/>
+            <message mapped="yes" component="dataflow" id="2967"/>
+            <message mapped="yes" component="dataflow" id="2968"/>
+            <message mapped="yes" component="dataflow" id="2971"/>
+            <message mapped="yes" component="dataflow" id="2972"/>
+            <message mapped="yes" component="dataflow" id="2973"/>
+            <message mapped="yes" component="dataflow" id="2976"/>
+            <message mapped="yes" component="dataflow" id="2977"/>
+            <message mapped="yes" component="dataflow" id="2978"/>
+          </enforcement>
+        </rule>
+		<rule help="" active="yes" id="C-EXP-007">
+          <text>반복문의 제어 조건에 대하여 확인되지 않은 외부 입력 등에 주의 [MCU]</text>
+          <enforcement>
+            <message mapped="yes" component="dataflow" id="3541"/>
+            <message mapped="yes" component="dataflow" id="3542"/>
+			<message mapped="yes" component="dataflow" id="3543"/>
+			<message mapped="yes" component="dataflow" id="3544"/>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-EXP-009">
+          <text>널 포인터 역참조 금지 [AP, MCU]</text>
+          <enforcement>
+            <message mapped="yes" component="dataflow" id="2810"/>
+            <message mapped="yes" component="dataflow" id="2811"/>
+            <message mapped="yes" component="dataflow" id="2812"/>
+            <message mapped="yes" component="dataflow" id="2813"/>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-ARR-001">
+          <text>배열의 메모리 읽기, 쓰기 작업 시 인덱스가 유효 범위 안에 있음을 보장 [AP, MCU]</text>
+          <enforcement>
+            <message mapped="yes" component="dataflow" id="2820"/>
+            <message mapped="yes" component="dataflow" id="2821"/>
+            <message mapped="yes" component="dataflow" id="2822"/>
+            <message mapped="yes" component="dataflow" id="2823"/>
+            <message mapped="yes" component="qac" id="2840"/>
+            <message mapped="yes" component="dataflow" id="2841"/>
+            <message mapped="yes" component="dataflow" id="2842"/>
+            <message mapped="yes" component="dataflow" id="2930"/>
+            <message mapped="yes" component="dataflow" id="2931"/>
+            <message mapped="yes" component="dataflow" id="2932"/>
+            <message mapped="yes" component="dataflow" id="2933"/>
+            <message mapped="yes" component="dataflow" id="2935"/>
+            <message mapped="yes" component="dataflow" id="2936"/>
+            <message mapped="yes" component="dataflow" id="2937"/>
+            <message mapped="yes" component="dataflow" id="2938"/>
+            <message mapped="yes" component="dataflow" id="2950"/>
+            <message mapped="yes" component="dataflow" id="2951"/>
+            <message mapped="yes" component="dataflow" id="2952"/>
+            <message mapped="yes" component="dataflow" id="2953"/>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-ARR-002">
+          <text>가변 길이 배열의 크기 인수가 유효한 범위 내에 있다는 것을 보장</text>
+          <enforcement>
+            <message mapped="yes" component="qac" id="1051"/>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-ARR-005">
+          <text>라이브러리 함수로부터 무효한 포인터 생성 금지</text>
+          <enforcement>
+            <message mapped="yes" component="qac" id="2840"/>
+            <message mapped="yes" component="dataflow" id="2841"/>
+            <message mapped="yes" component="dataflow" id="2842"/>
+            <message mapped="yes" component="dataflow" id="2843"/>
+            <message mapped="yes" component="dataflow" id="2845"/>
+            <message mapped="yes" component="dataflow" id="2846"/>
+            <message mapped="yes" component="dataflow" id="2847"/>
+            <message mapped="yes" component="dataflow" id="2848"/>
+            <message mapped="yes" component="dataflow" id="2935"/>
+            <message mapped="yes" component="dataflow" id="2936"/>
+            <message mapped="yes" component="dataflow" id="2937"/>
+            <message mapped="yes" component="dataflow" id="2938"/>
+            <message mapped="yes" component="dataflow" id="4880"/>
+            <message mapped="yes" component="dataflow" id="4881"/>
+            <message mapped="yes" component="dataflow" id="4882"/>
+            <message mapped="yes" component="dataflow" id="4883"/>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-ARR-006">
+          <text>포인터에 크기가 자동으로 조정된 정수의 덧셈 및 뺄셈 연산 금지 [AP, MCU]</text>
+          <enforcement>
+            <message mapped="yes" component="dataflow" id="4955"/>
+            <message mapped="yes" component="dataflow" id="4956"/>
+            <message mapped="yes" component="dataflow" id="4957"/>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-ARR-008">
+          <text>버퍼 시작 지점 이전에 쓰기</text>
+          <enforcement>
+            <message mapped="yes" component="qac" id="2840"/>
+            <message mapped="yes" component="dataflow" id="2841"/>
+            <message mapped="yes" component="dataflow" id="2842"/>
+            <message mapped="yes" component="dataflow" id="2843"/>
+            <message mapped="yes" component="dataflow" id="2844"/>
+            <message mapped="yes" component="dataflow" id="2845"/>
+            <message mapped="yes" component="dataflow" id="2846"/>
+            <message mapped="yes" component="dataflow" id="2847"/>
+            <message mapped="yes" component="dataflow" id="2848"/>
+            <message mapped="yes" component="dataflow" id="2849"/>
+            <message mapped="yes" component="dataflow" id="2930"/>
+            <message mapped="yes" component="dataflow" id="2931"/>
+            <message mapped="yes" component="dataflow" id="2932"/>
+            <message mapped="yes" component="dataflow" id="2933"/>
+            <message mapped="yes" component="dataflow" id="2934"/>
+            <message mapped="yes" component="dataflow" id="2935"/>
+            <message mapped="yes" component="dataflow" id="2936"/>
+            <message mapped="yes" component="dataflow" id="2937"/>
+            <message mapped="yes" component="dataflow" id="2938"/>
+            <message mapped="yes" component="dataflow" id="2939"/>
+            <message mapped="yes" component="dataflow" id="2950"/>
+            <message mapped="yes" component="dataflow" id="2951"/>
+            <message mapped="yes" component="dataflow" id="2952"/>
+            <message mapped="yes" component="dataflow" id="2953"/>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-ERR-002">
+          <text>표준 라이브러리 에러 탐지 및 처리 필요</text>
+          <enforcement>
+            <message mapped="yes" component="qac" id="3200"/>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-MEM-001">
+          <text>해제된 메모리 참조 금지</text>
+          <enforcement>
+            <message mapped="yes" component="dataflow" id="4866"/>
+            <message mapped="yes" component="dataflow" id="4867"/>
+            <message mapped="yes" component="dataflow" id="4868"/>
+            <message mapped="yes" component="dataflow" id="4871"/>
+            <message mapped="yes" component="dataflow" id="4872"/>
+            <message mapped="yes" component="dataflow" id="4873"/>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-MEM-004">
+          <text>동적으로 할당된 메모리 해제 필요</text>
+          <enforcement>
+            <message mapped="yes" component="dataflow" id="2721"/>
+            <message mapped="yes" component="dataflow" id="2722"/>
+            <message mapped="yes" component="dataflow" id="2723"/>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-MEM-005">
+          <text>객체에 충분한 메모리 할당 필요</text>
+          <enforcement>
+            <message mapped="yes" component="qac" id="0696"/>
+            <message mapped="yes" component="qac" id="0701"/>
+            <message mapped="yes" component="qac" id="1069"/>
+            <message mapped="yes" component="qac" id="1071"/>
+            <message mapped="yes" component="qac" id="1073"/>
+            <message mapped="yes" component="qac" id="2840"/>
+            <message mapped="yes" component="dataflow" id="2841"/>
+            <message mapped="yes" component="dataflow" id="2842"/>
+            <message mapped="yes" component="dataflow" id="2843"/>
+            <message mapped="yes" component="dataflow" id="2935"/>
+            <message mapped="yes" component="dataflow" id="2936"/>
+            <message mapped="yes" component="dataflow" id="2937"/>
+            <message mapped="yes" component="dataflow" id="2938"/>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-FIO-001">
+          <text>포맷 문자열에서는 사용자의 입력을 배제</text>
+          <enforcement>
+            <message mapped="yes" component="dataflow" id="4916"/>
+            <message mapped="yes" component="dataflow" id="4917"/>
+            <message mapped="yes" component="dataflow" id="4918"/>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-FIO-002">
+          <text>파일에서 읽는 문자와 파일 끝 문자(EOF 혹은 WEOF)를 구별 필요</text>
+          <enforcement>
+            <message mapped="yes" component="qac" id="2676"/>
+            <message mapped="yes" component="qac" id="2678"/>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-FIO-003">
+          <text>fgets() 혹은 fgetws()가 성공 시, 무조건 비어있지 않은 문자열을 반환할 것이라고 가정 금지</text>
+          <enforcement>
+            <message mapped="yes" component="dataflow" id="4911"/>
+            <message mapped="yes" component="dataflow" id="4912"/>
+            <message mapped="yes" component="dataflow" id="4913"/>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-FIO-008">
+          <text>유효한 포맷 문자열 사용 필요</text>
+          <enforcement>
+            <message mapped="yes" component="qac" id="0161"/>
+            <message mapped="yes" component="qac" id="0162"/>
+            <message mapped="yes" component="qac" id="0163"/>
+            <message mapped="yes" component="qac" id="0164"/>
+            <message mapped="yes" component="qac" id="0165"/>
+            <message mapped="yes" component="qac" id="0166"/>
+            <message mapped="yes" component="qac" id="0167"/>
+            <message mapped="yes" component="qac" id="0168"/>
+            <message mapped="yes" component="qac" id="0169"/>
+            <message mapped="yes" component="qac" id="0170"/>
+            <message mapped="yes" component="qac" id="0171"/>
+            <message mapped="yes" component="qac" id="0172"/>
+            <message mapped="yes" component="qac" id="0173"/>
+            <message mapped="yes" component="qac" id="0174"/>
+            <message mapped="yes" component="qac" id="0175"/>
+            <message mapped="yes" component="qac" id="0176"/>
+            <message mapped="yes" component="qac" id="0177"/>
+            <message mapped="yes" component="qac" id="0178"/>
+            <message mapped="yes" component="qac" id="0179"/>
+            <message mapped="yes" component="qac" id="0180"/>
+            <message mapped="yes" component="qac" id="0184"/>
+            <message mapped="yes" component="qac" id="0185"/>
+            <message mapped="yes" component="qac" id="0190"/>
+            <message mapped="yes" component="qac" id="0191"/>
+            <message mapped="yes" component="qac" id="0192"/>
+            <message mapped="yes" component="qac" id="0193"/>
+            <message mapped="yes" component="qac" id="0194"/>
+            <message mapped="yes" component="qac" id="0195"/>
+            <message mapped="yes" component="qac" id="0196"/>
+            <message mapped="yes" component="qac" id="0197"/>
+            <message mapped="yes" component="qac" id="0198"/>
+            <message mapped="yes" component="qac" id="0199"/>
+            <message mapped="yes" component="qac" id="0200"/>
+            <message mapped="yes" component="qac" id="0201"/>
+            <message mapped="yes" component="qac" id="0202"/>
+            <message mapped="yes" component="qac" id="0204"/>
+            <message mapped="yes" component="qac" id="0206"/>
+            <message mapped="yes" component="qac" id="0209"/>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-ENV-004">
+          <text>system() 함수 호출 금지</text>
+          <enforcement>
+            <message mapped="yes" component="certccm" id="5018"/>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-SIG-001">
+          <text>신호 처리기에서 비동기적으로 안전한 함수만 호출 필요</text>
+          <enforcement>
+            <message mapped="yes" component="qac" id="2028"/>
+            <message mapped="yes" component="qac" id="2030"/>
+          </enforcement>
+        </rule>
+		<rule help="" active="yes" id="C-MSC-001">
+          <text>비대칭키 RSA 사용 시 공개키 지수는 가급적 216+1, 즉 65537로 처리 필요</text>
+          <enforcement/>
+        </rule>
+        <rule help="" active="yes" id="C-MSC-002">
+          <text>MAC을 사용할 경우 가급적 최소 8-Byte 이상을 사용 필요</text>
+          <enforcement/>
+        </rule>
+        <rule help="" active="yes" id="C-MSC-005">
+          <text>asctime() 함수 사용 시 부적절한 인자 전달 주의</text>
+          <enforcement>
+            <message mapped="yes" component="certccm" id="5032"/>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-MSC-006">
+          <text>void 반환 타입 이외의 함수들 모두 반환 필요</text>
+          <enforcement>
+            <message mapped="yes" component="dataflow" id="2888"/>
+          </enforcement>
+        </rule>
+	<rule help="" active="yes" id="C-MSC-011">
+          <text>주요 보안 정보 및 차량 정보는 평문의 형태로 제어기 외부에 전송 및 보관 금지 [MCU]</text>
+          <enforcement>
+            <message component="dataflow" id="3556" mapped="yes"/>
+            <message component="dataflow" id="3557" mapped="yes"/>
+            <message component="dataflow" id="3558" mapped="yes"/>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-MSC-012">
+          <text>비밀키는 주기적으로 교체되어야 하며, 업데이트된 키는 반드시 비밀성을 보장 [MCU]</text>
+          <enforcement>
+            <message mapped="yes" component="dataflow" id="3535"/>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-MSC-013">
+          <text>암호 알고리즘이나 해쉬 함수를 사용할 때 일정 수준의 보안 강도 이상 만족 필요</text>
+          <enforcement/>
+        </rule>
+        <rule help="" active="yes" id="C-MSC-014">
+          <text>DES 대칭키 알고리즘, MD5 해시 알고리즘과 같은 보안 취약점이 발견된 알고리즘 사용 금지 [MCU]</text>
+          <enforcement>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-MSC-015">
+          <text>고정된 시드나 예측 가능한 시드 사용 금지 [MCU]</text>
+          <enforcement>
+            <message mapped="yes" component="rcma" id="1705"/>
+			<message mapped="yes" component="qac" id="4082"/>
+			<message mapped="yes" component="qac" id="4083"/>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-MSC-016">
+          <text>무결성 보장을 위한 MAC 생성 시 재사용 공격을 방지하는 메시지 식별값이 반드시 포함되도록 처리 필요 [MCU]</text>
+          <enforcement/>
+        </rule>
+        <rule help="" active="yes" id="C-MSC-017">
+          <text>송신자가 비대칭키 알고리즘을 사용하여 메시지를 전송했을 시 해당 공개키의 인증서와 서명 값을 반드시 검증 필요 [MCU]</text>
+          <enforcement/>
+        </rule>
+        <rule help="" active="yes" id="C-MSC-018">
+          <text>키 값 등의 주요 보안 정보는 안전한 메모리 공간에 저장 필요 [MCU]</text>
+          <enforcement/>
+        </rule>
+        <rule help="" active="yes" id="C-POS-001">
+          <text>readlink() 함수의 올바른 사용 필요</text>
+          <enforcement>
+            <message mapped="yes" component="certccm" id="5033"/>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-POS-003">
+          <text>putenv() 함수에 지역변수를 가리키는 포인터 전달 금지</text>
+          <enforcement>
+            <message mapped="yes" component="certccm" id="5024"/>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-POS-008">
+          <text>POSIX 라이브러리 함수 사용 시 오류 탐지 및 예외 처리 수행 필요</text>
+          <enforcement>
+            <message mapped="yes" component="qac" id="3200"/>
+          </enforcement>
+        </rule>
+		<rule help="" active="yes" id="C-POS-009">
+          <text>자원을 부적절하게 잠그지 않도록 주의</text>
+          <enforcement>
+            <message mapped="yes" component="dataflow" id="3536"/>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-POS-010">
+          <text>디버그 코드를 비롯한 개발자 모드를 남기지 않도록 주의 [MCU]</text>
+          <enforcement>
+          </enforcement>
+        </rule>
+      </enforcement>
+    </rule>
+    <rule help="" active="yes" id="2">
+      <text>심각도 중</text>
+      <enforcement>
+        <rule help="" active="yes" id="C-DCI-002">
+          <text>내외부 연결에 동일한 변수 동시 선언 금지</text>
+          <enforcement>
+            <message mapped="yes" component="qac" id="0625"/>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-DCI-007">
+          <text>switch 문 내에서 첫 번째 case 구문이 시작하기 전 변수 선언 금지</text>
+          <enforcement>
+            <message mapped="yes" component="qac" id="2008"/>
+            <message mapped="yes" component="qac" id="2882"/>
+            <message mapped="yes" component="qac" id="3234"/>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-DCI-008">
+          <text>switch 경쟁 조건</text>
+          <enforcement>
+            <message mapped="yes" component="qac" id="2032"/>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-DCI-009">
+          <text>switch문의 default 케이스 누락 금지</text>
+          <enforcement>
+            <message mapped="yes" component="qac" id="2002"/>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-DCI-010">
+          <text>switch문에서 break 생략 금지</text>
+          <enforcement>
+            <message mapped="yes" component="qac" id="2003"/>
+            <message mapped="yes" component="qac" id="2020"/>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-INT-001">
+          <text>정수 변환 규칙에 주의 (CERT Recommendations)</text>
+          <enforcement>
+            <message mapped="yes" component="qac" id="1250"/>
+            <message mapped="yes" component="qac" id="1251"/>
+            <message mapped="yes" component="qac" id="1252"/>
+            <message mapped="yes" component="qac" id="1253"/>
+            <message mapped="yes" component="qac" id="1256"/>
+            <message mapped="yes" component="qac" id="1257"/>
+            <message mapped="yes" component="qac" id="1260"/>
+            <message mapped="yes" component="qac" id="1263"/>
+            <message mapped="yes" component="qac" id="1266"/>
+            <message mapped="yes" component="qac" id="1274"/>
+            <message mapped="yes" component="qac" id="1290"/>
+            <message mapped="yes" component="qac" id="1291"/>
+            <message mapped="yes" component="qac" id="1292"/>
+            <message mapped="yes" component="qac" id="1293"/>
+            <message mapped="yes" component="qac" id="1294"/>
+            <message mapped="yes" component="qac" id="1295"/>
+            <message mapped="yes" component="qac" id="1296"/>
+            <message mapped="yes" component="qac" id="1297"/>
+            <message mapped="yes" component="qac" id="1298"/>
+            <message mapped="yes" component="qac" id="1299"/>
+            <message mapped="yes" component="qac" id="1800"/>
+            <message mapped="yes" component="qac" id="1802"/>
+            <message mapped="yes" component="qac" id="1803"/>
+            <message mapped="yes" component="qac" id="1804"/>
+            <message mapped="yes" component="qac" id="1810"/>
+            <message mapped="yes" component="qac" id="1811"/>
+            <message mapped="yes" component="qac" id="1812"/>
+            <message mapped="yes" component="qac" id="1813"/>
+            <message mapped="yes" component="qac" id="1820"/>
+            <message mapped="yes" component="qac" id="1821"/>
+            <message mapped="yes" component="qac" id="1822"/>
+            <message mapped="yes" component="qac" id="1823"/>
+            <message mapped="yes" component="qac" id="1824"/>
+            <message mapped="yes" component="qac" id="1830"/>
+            <message mapped="yes" component="qac" id="1831"/>
+            <message mapped="yes" component="qac" id="1832"/>
+            <message mapped="yes" component="qac" id="1833"/>
+            <message mapped="yes" component="qac" id="1834"/>
+            <message mapped="yes" component="qac" id="1840"/>
+            <message mapped="yes" component="qac" id="1841"/>
+            <message mapped="yes" component="qac" id="1842"/>
+            <message mapped="yes" component="qac" id="1843"/>
+            <message mapped="yes" component="qac" id="1844"/>
+            <message mapped="yes" component="qac" id="1850"/>
+            <message mapped="yes" component="qac" id="1851"/>
+            <message mapped="yes" component="qac" id="1852"/>
+            <message mapped="yes" component="qac" id="1853"/>
+            <message mapped="yes" component="qac" id="1854"/>
+            <message mapped="yes" component="qac" id="1860"/>
+            <message mapped="yes" component="qac" id="1861"/>
+            <message mapped="yes" component="qac" id="1862"/>
+            <message mapped="yes" component="qac" id="1863"/>
+            <message mapped="yes" component="qac" id="1864"/>
+            <message mapped="yes" component="qac" id="1880"/>
+            <message mapped="yes" component="qac" id="1881"/>
+            <message mapped="yes" component="qac" id="1882"/>
+            <message mapped="yes" component="qac" id="2100"/>
+            <message mapped="yes" component="qac" id="2101"/>
+            <message mapped="yes" component="qac" id="2102"/>
+            <message mapped="yes" component="qac" id="2103"/>
+            <message mapped="yes" component="qac" id="2104"/>
+            <message mapped="yes" component="qac" id="2105"/>
+            <message mapped="yes" component="qac" id="2106"/>
+            <message mapped="yes" component="qac" id="2107"/>
+            <message mapped="yes" component="qac" id="2109"/>
+            <message mapped="yes" component="qac" id="2110"/>
+            <message mapped="yes" component="qac" id="2111"/>
+            <message mapped="yes" component="qac" id="2112"/>
+            <message mapped="yes" component="qac" id="2113"/>
+            <message mapped="yes" component="qac" id="2114"/>
+            <message mapped="yes" component="qac" id="2115"/>
+            <message mapped="yes" component="qac" id="2116"/>
+            <message mapped="yes" component="qac" id="2117"/>
+            <message mapped="yes" component="qac" id="2118"/>
+            <message mapped="yes" component="qac" id="2119"/>
+            <message mapped="yes" component="qac" id="2120"/>
+            <message mapped="yes" component="qac" id="2122"/>
+            <message mapped="yes" component="qac" id="2124"/>
+            <message mapped="yes" component="qac" id="2130"/>
+            <message mapped="yes" component="qac" id="2132"/>
+            <message mapped="yes" component="qac" id="2134"/>
+            <message mapped="yes" component="qac" id="4401"/>
+            <message mapped="yes" component="qac" id="4402"/>
+            <message mapped="yes" component="qac" id="4403"/>
+            <message mapped="yes" component="qac" id="4404"/>
+            <message mapped="yes" component="qac" id="4405"/>
+            <message mapped="yes" component="qac" id="4410"/>
+            <message mapped="yes" component="qac" id="4412"/>
+            <message mapped="yes" component="qac" id="4413"/>
+            <message mapped="yes" component="qac" id="4414"/>
+            <message mapped="yes" component="qac" id="4415"/>
+            <message mapped="yes" component="qac" id="4420"/>
+            <message mapped="yes" component="qac" id="4421"/>
+            <message mapped="yes" component="qac" id="4422"/>
+            <message mapped="yes" component="qac" id="4423"/>
+            <message mapped="yes" component="qac" id="4424"/>
+            <message mapped="yes" component="qac" id="4425"/>
+            <message mapped="yes" component="qac" id="4430"/>
+            <message mapped="yes" component="qac" id="4431"/>
+            <message mapped="yes" component="qac" id="4432"/>
+            <message mapped="yes" component="qac" id="4434"/>
+            <message mapped="yes" component="qac" id="4435"/>
+            <message mapped="yes" component="qac" id="4436"/>
+            <message mapped="yes" component="qac" id="4437"/>
+            <message mapped="yes" component="qac" id="4440"/>
+            <message mapped="yes" component="qac" id="4441"/>
+            <message mapped="yes" component="qac" id="4442"/>
+            <message mapped="yes" component="qac" id="4443"/>
+            <message mapped="yes" component="qac" id="4445"/>
+            <message mapped="yes" component="qac" id="4446"/>
+            <message mapped="yes" component="qac" id="4447"/>
+            <message mapped="yes" component="qac" id="4460"/>
+            <message mapped="yes" component="qac" id="4461"/>
+            <message mapped="yes" component="qac" id="4463"/>
+            <message mapped="yes" component="qac" id="4464"/>
+            <message mapped="yes" component="qac" id="4470"/>
+            <message mapped="yes" component="qac" id="4471"/>
+            <message mapped="yes" component="qac" id="4480"/>
+            <message mapped="yes" component="qac" id="4481"/>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-EXP-001">
+          <text>함수에 의한 반환 값 무시 금지 (Cert Recommendations) [MCU]</text>
+          <enforcement>
+            <message mapped="yes" component="qac" id="3200"/>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-EXP-002">
+          <text>부수효과(Side Effect)를 발생시키는 계산(평가) 순서에 주의</text>
+          <enforcement>
+            <message mapped="yes" component="qac" id="0400"/>
+            <message mapped="yes" component="qac" id="0401"/>
+            <message mapped="yes" component="qac" id="0402"/>
+            <message mapped="yes" component="qac" id="0403"/>
+            <message mapped="yes" component="qac" id="0404"/>
+            <message mapped="yes" component="qac" id="0405"/>
+          </enforcement>
+        </rule>
+		<rule help="" active="yes" id="C-EXP-004">
+          <text>비정상적인 포인터를 참조하지 않도록 주의 [MCU]</text>
+          <enforcement>
+            <message mapped="yes" component="dataflow" id="2961"/>
+            <message mapped="yes" component="dataflow" id="2962"/>
+            <message mapped="yes" component="dataflow" id="2963"/>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-EXP-006">
+          <text>할당 연산자 대신 비교 연산자를 사용하는 경우에 주의 [MCU]</text>
+          <enforcement>
+            <message mapped="yes" component="qac" id="3112"/>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-EXP-008">
+          <text>재귀적 호출은 가급적 사용하지 않으며 필요시 한정된 수의 재귀 호출만 허용</text>
+          <enforcement>
+            <message mapped="yes" component="rcma" id="1520"/>
+            <message mapped="yes" component="rcma" id="1521"/>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-EXP-011">
+          <text>호환되지 않는 타입의 포인터를 통한 변수 접근 금지</text>
+          <enforcement>
+            <message mapped="yes" component="qac" id="0310"/>
+            <message mapped="yes" component="qac" id="0751"/>
+            <message mapped="yes" component="qac" id="3305"/>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-EXP-013">
+          <text>패딩 데이터 비교 금지</text>
+          <enforcement>
+            <message mapped="yes" component="dataflow" id="4726"/>
+            <message mapped="yes" component="dataflow" id="4727"/>
+            <message mapped="yes" component="dataflow" id="4728"/>
+            <message mapped="yes" component="dataflow" id="4729"/>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-EXP-014">
+          <text>restrict 자격이 있는 포인터 사용 시 정의되지 않은 동작이 발생하지 않도록 주의</text>
+          <enforcement>
+            <message mapped="yes" component="qac" id="1057"/>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-EXP-018">
+          <text>옳지 않은 인수 va_arg에 전달 금지</text>
+          <enforcement>
+            <message mapped="yes" component="dataflow" id="4901"/>
+            <message mapped="yes" component="dataflow" id="4902"/>
+            <message mapped="yes" component="dataflow" id="4903"/>
+            <message mapped="yes" component="dataflow" id="4904"/>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-EXP-019">
+          <text>최대크기 버퍼 없이 경로 조작 기능 사용 금지</text>
+          <enforcement>
+            <message mapped="yes" component="dataflow" id="3546"/>
+			<message mapped="yes" component="dataflow" id="3547"/>
+			<message mapped="yes" component="dataflow" id="3548"/>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-ARR-003">
+          <text>같은 배열을 참조하지 않는 두 개의 포인터 뺄셈 혹은 비교 연산 금지 [AP, MCU]</text>
+          <enforcement>
+            <message mapped="yes" component="qac" id="0487"/>
+            <message mapped="yes" component="qac" id="0513"/>
+            <message mapped="yes" component="dataflow" id="2668"/>
+            <message mapped="yes" component="dataflow" id="2669"/>
+            <message mapped="yes" component="dataflow" id="2761"/>
+            <message mapped="yes" component="dataflow" id="2762"/>
+            <message mapped="yes" component="dataflow" id="2763"/>
+            <message mapped="yes" component="dataflow" id="2766"/>
+            <message mapped="yes" component="dataflow" id="2767"/>
+            <message mapped="yes" component="dataflow" id="2768"/>
+            <message mapped="yes" component="dataflow" id="2771"/>
+            <message mapped="yes" component="dataflow" id="2772"/>
+            <message mapped="yes" component="dataflow" id="2773"/>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-ARR-004">
+          <text>비배열 객체 포인터에 정수 덧셈 혹은 뺄셈 연산 금지 [AP, MCU]</text>
+          <enforcement>
+            <message mapped="yes" component="dataflow" id="2930"/>
+            <message mapped="yes" component="dataflow" id="2931"/>
+            <message mapped="yes" component="dataflow" id="2932"/>
+            <message mapped="yes" component="dataflow" id="2933"/>
+          </enforcement>
+        </rule>
+		<rule help="" active="yes" id="C-ARR-007">
+          <text>for문과 같은 반복문에서 배열 등에 접근 시 길이 매개변수 처리에 주의 [MCU]</text>
+          <enforcement>
+            <message mapped="yes" component="qac" id="2840"/>
+			<message mapped="yes" component="dataflow" id="2841"/>
+			<message mapped="yes" component="dataflow" id="2842"/>
+			<message mapped="yes" component="dataflow" id="2843"/>
+			<message mapped="yes" component="dataflow" id="2844"/>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-ARR-010">
+          <text>함수 호출 시 잘못된 인자가 들어가지 않도록 주의 [MCU]</text>
+          <enforcement>
+            <message mapped="yes" component="qac" id="0179"/>
+            <message mapped="yes" component="qac" id="0184"/>
+            <message mapped="yes" component="qac" id="0185"/>
+            <message mapped="yes" component="qac" id="0186"/>
+            <message mapped="yes" component="qac" id="0206"/>
+            <message mapped="yes" component="qac" id="0429"/>
+            <message mapped="yes" component="qac" id="0430"/>
+            <message mapped="yes" component="qac" id="0431"/>
+            <message mapped="yes" component="qac" id="0432"/>
+            <message mapped="yes" component="qac" id="0541"/>
+            <message mapped="yes" component="qac" id="0752"/>
+            <message mapped="yes" component="qac" id="1331"/>
+            <message mapped="yes" component="qac" id="1332"/>
+            <message mapped="yes" component="qac" id="1333"/>
+            <message mapped="yes" component="qac" id="1401"/>
+            <message mapped="yes" component="qac" id="1411"/>
+            <message mapped="yes" component="qac" id="1421"/>
+            <message mapped="yes" component="qac" id="1431"/>
+            <message mapped="yes" component="qac" id="1441"/>
+            <message mapped="yes" component="qac" id="3320"/>
+            <message mapped="yes" component="qac" id="4413"/>
+            <message mapped="yes" component="qac" id="4414"/>
+          </enforcement>
+        </rule>
+		<rule help="" active="yes" id="C-ARR-011">
+          <text>함수에 의한 반환 값의 잘못된 판단 주의 [MCU]</text>
+          <enforcement>
+            <message mapped="yes" component="qac" id="2505"/>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-ERR-001">
+          <text>errno과 관련한 라이브러리 함수 호출 시 주의 사항</text>
+          <enforcement>
+            <message mapped="yes" component="qac" id="2500"/>
+            <message mapped="yes" component="qac" id="2501"/>
+            <message mapped="yes" component="qac" id="2502"/>
+            <message mapped="yes" component="qac" id="2503"/>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-ERR-003">
+          <text>문자열에서 숫자로 형변환 시 에러 감지 필요</text>
+          <enforcement>
+            <message mapped="yes" component="certccm" id="5030"/>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-MEM-002">
+          <text>더 이상 필요하지 않을 때 동적으로 할당된 메모리 해제 처리 필요</text>
+          <enforcement>
+            <message mapped="yes" component="dataflow" id="2706"/>
+            <message mapped="yes" component="dataflow" id="2707"/>
+            <message mapped="yes" component="dataflow" id="2708"/>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-MEM-007">
+          <text>릴리즈 이전 힙 메모리의 잘못된 삭제('Heap inspection')</text>
+          <enforcement>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-FIO-007">
+          <text>사용이 불필요한 파일 닫기 필요</text>
+          <enforcement>
+            <message mapped="yes" component="dataflow" id="2701"/>
+            <message mapped="yes" component="dataflow" id="2702"/>
+            <message mapped="yes" component="dataflow" id="2703"/>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-ENV-003">
+          <text>모든 종료 처리기는 반드시 정상적으로 반환 필요</text>
+          <enforcement>
+            <message mapped="yes" component="dataflow" id="4856"/>
+            <message mapped="yes" component="dataflow" id="4857"/>
+            <message mapped="yes" component="dataflow" id="4858"/>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-CON-001">
+          <text>할당 후 스레드 저장소 정리 필요</text>
+          <enforcement>
+            <message mapped="yes" component="mta" id="1780"/>
+            <message mapped="yes" component="mta" id="1781"/>
+            <message mapped="yes" component="mta" id="1782"/>
+            <message mapped="yes" component="mta" id="1783"/>
+            <message mapped="yes" component="mta" id="1784"/>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-CON-002">
+          <text>뮤텍스가 잠겨 있을 때 뮤텍스 소멸 금지</text>
+          <enforcement>
+            <message mapped="yes" component="dataflow" id="4961"/>
+            <message mapped="yes" component="dataflow" id="4962"/>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-CON-003">
+          <text>다중 스레드에서 비트 필드에 접근할 때 공유 자원의 경쟁 방지 필요</text>
+          <enforcement>
+            <message mapped="yes" component="mta" id="1774"/>
+            <message mapped="yes" component="mta" id="1775"/>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-CON-004">
+          <text>라이브러리 함수를 사용할 때 경쟁 상태 방지 필요</text>
+          <enforcement>
+            <message mapped="yes" component="certccm" id="5037"/>
+            <message mapped="yes" component="dataflow" id="4976"/>
+            <message mapped="yes" component="dataflow" id="4977"/>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-CON-005">
+          <text>스레드들 사이에 공유하는 객체 선언 필요</text>
+          <enforcement>
+            <message mapped="yes" component="dataflow" id="4926"/>
+            <message mapped="yes" component="dataflow" id="4927"/>
+            <message mapped="yes" component="dataflow" id="4928"/>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-CON-011">
+          <text>표현식에서 atomic 변수 두 번 이상 참조 금지</text>
+          <enforcement>
+            <message mapped="yes" component="qac" id="1114"/>
+            <message mapped="yes" component="qac" id="1115"/>
+            <message mapped="yes" component="qac" id="1116"/>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-MSC-003">
+          <text>PRNG 방식으로 난수 생성 시 rand() 함수 사용 금지</text>
+          <enforcement>
+            <message mapped="yes" component="certccm" id="5022"/>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-MSC-004">
+          <text>PRNG 사용 시 seed를 올바르게 설정 필요</text>
+          <enforcement>
+            <message mapped="yes" component="certccm" id="5031"/>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-MSC-009">
+          <text>컴파일러의 버퍼를 지우는 코드 제거 오류</text>
+          <enforcement>
+            <message mapped="yes" component="dataflow" id="2980"/>
+            <message mapped="yes" component="dataflow" id="2981"/>
+            <message mapped="yes" component="dataflow" id="2982"/>
+            <message mapped="yes" component="dataflow" id="2983"/>
+            <message mapped="yes" component="qac" id="3203"/>
+            <message mapped="yes" component="qac" id="3229"/>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-MSC-010">
+          <text>멀티스레드 어플리케이션에서 getloin 사용 금지</text>
+          <enforcement>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-POS-004">
+          <text>fork와 파일 디스크립터를 사용 시 경쟁 상태 주의</text>
+          <enforcement>
+            <message mapped="yes" component="dataflow" id="4951"/>
+            <message mapped="yes" component="dataflow" id="4952"/>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-POS-005">
+          <text>시스템 간 데이터 통신 시 올바른 바이트 순서 사용 필요</text>
+          <enforcement>
+            <message mapped="yes" component="dataflow" id="4906"/>
+            <message mapped="yes" component="dataflow" id="4907"/>
+            <message mapped="yes" component="dataflow" id="4908"/>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-POS-007">
+          <text>다른 POSIX 스레드가 만든 뮤텍스의 잠금 해제 금지</text>
+          <enforcement>
+            <message mapped="yes" component="dataflow" id="4971"/>
+            <message mapped="yes" component="dataflow" id="4972"/>
+            <message mapped="yes" component="dataflow" id="4981"/>
+            <message mapped="yes" component="dataflow" id="4982"/>
+          </enforcement>
+        </rule>
+		<rule help="" active="yes" id="C-POS-011">
+          <text>문장 구역의 명확한 처리 필요 [MCU]</text>
+          <enforcement>
+            <message mapped="yes" component="qac" id="2212"/>
+            <message mapped="yes" component="qac" id="2214"/>
+            <message mapped="yes" component="qac" id="2218"/>
+            <message mapped="yes" component="qac" id="2219"/>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-POS-012">
+          <text>죽은 코드(‘Dead Code’) 제거 필요 [MCU]</text>
+          <enforcement>
+            <message mapped="yes" component="qac" id="0160"/>
+            <message mapped="yes" component="qac" id="0161"/>
+            <message mapped="yes" component="qac" id="0162"/>
+            <message mapped="yes" component="qac" id="0163"/>
+            <message mapped="yes" component="qac" id="0164"/>
+            <message mapped="yes" component="qac" id="0165"/>
+            <message mapped="yes" component="qac" id="0166"/>
+            <message mapped="yes" component="qac" id="0167"/>
+            <message mapped="yes" component="qac" id="0168"/>
+            <message mapped="yes" component="qac" id="0169"/>
+            <message mapped="yes" component="qac" id="0170"/>
+            <message mapped="yes" component="qac" id="0171"/>
+            <message mapped="yes" component="qac" id="0172"/>
+            <message mapped="yes" component="qac" id="0173"/>
+            <message mapped="yes" component="qac" id="0174"/>
+            <message mapped="yes" component="qac" id="0175"/>
+            <message mapped="yes" component="qac" id="0176"/>
+            <message mapped="yes" component="qac" id="0177"/>
+            <message mapped="yes" component="qac" id="0178"/>
+            <message mapped="yes" component="qac" id="0179"/>
+            <message mapped="yes" component="qac" id="0184"/>
+            <message mapped="yes" component="qac" id="0185"/>
+            <message mapped="yes" component="qac" id="0186"/>
+            <message mapped="yes" component="qac" id="0190"/>
+            <message mapped="yes" component="qac" id="0191"/>
+            <message mapped="yes" component="qac" id="0192"/>
+            <message mapped="yes" component="qac" id="0193"/>
+            <message mapped="yes" component="qac" id="0194"/>
+            <message mapped="yes" component="qac" id="0195"/>
+            <message mapped="yes" component="qac" id="0196"/>
+            <message mapped="yes" component="qac" id="0197"/>
+            <message mapped="yes" component="qac" id="0198"/>
+            <message mapped="yes" component="qac" id="0199"/>
+            <message mapped="yes" component="qac" id="0200"/>
+            <message mapped="yes" component="qac" id="0201"/>
+            <message mapped="yes" component="qac" id="0203"/>
+            <message mapped="yes" component="qac" id="0204"/>
+            <message mapped="yes" component="qac" id="0206"/>
+            <message mapped="yes" component="qac" id="0207"/>
+            <message mapped="yes" component="qac" id="0208"/>
+            <message mapped="yes" component="qac" id="0235"/>
+            <message mapped="yes" component="qac" id="0275"/>
+            <message mapped="yes" component="qac" id="0301"/>
+            <message mapped="yes" component="qac" id="0302"/>
+            <message mapped="yes" component="qac" id="0304"/>
+            <message mapped="yes" component="qac" id="0307"/>
+            <message mapped="yes" component="qac" id="0309"/>
+            <message mapped="yes" component="qac" id="0323"/>
+            <message mapped="yes" component="qac" id="0327"/>
+            <message mapped="yes" component="qac" id="0337"/>
+            <message mapped="yes" component="qac" id="0400"/>
+            <message mapped="yes" component="qac" id="0401"/>
+            <message mapped="yes" component="qac" id="0402"/>
+            <message mapped="yes" component="qac" id="0403"/>
+            <message mapped="yes" component="qac" id="0475"/>
+            <message mapped="yes" component="qac" id="0543"/>
+            <message mapped="yes" component="qac" id="0544"/>
+            <message mapped="yes" component="qac" id="0545"/>
+            <message mapped="yes" component="qac" id="0602"/>
+            <message mapped="yes" component="qac" id="0603"/>
+            <message mapped="yes" component="qac" id="0623"/>
+            <message mapped="yes" component="qac" id="0625"/>
+            <message mapped="yes" component="qac" id="0626"/>
+            <message mapped="yes" component="qac" id="0630"/>
+            <message mapped="yes" component="qac" id="0632"/>
+            <message mapped="yes" component="qac" id="0636"/>
+            <message mapped="yes" component="qac" id="0654"/>
+            <message mapped="yes" component="qac" id="0658"/>
+            <message mapped="yes" component="qac" id="0661"/>
+            <message mapped="yes" component="qac" id="0667"/>
+            <message mapped="yes" component="qac" id="0668"/>
+            <message mapped="yes" component="qac" id="0672"/>
+            <message mapped="yes" component="qac" id="0676"/>
+            <message mapped="yes" component="qac" id="0678"/>
+            <message mapped="yes" component="qac" id="0680"/>
+            <message mapped="yes" component="qac" id="0706"/>
+            <message mapped="yes" component="qac" id="0745"/>
+            <message mapped="yes" component="qac" id="0777"/>
+            <message mapped="yes" component="qac" id="0779"/>
+            <message mapped="yes" component="qac" id="0813"/>
+            <message mapped="yes" component="qac" id="0814"/>
+            <message mapped="yes" component="qac" id="0821"/>
+            <message mapped="yes" component="qac" id="0836"/>
+            <message mapped="yes" component="qac" id="0837"/>
+            <message mapped="yes" component="qac" id="0848"/>
+            <message mapped="yes" component="qac" id="0853"/>
+            <message mapped="yes" component="qac" id="0854"/>
+            <message mapped="yes" component="qac" id="0864"/>
+            <message mapped="yes" component="qac" id="0865"/>
+            <message mapped="yes" component="qac" id="0867"/>
+            <message mapped="yes" component="qac" id="0872"/>
+            <message mapped="yes" component="qac" id="0874"/>
+            <message mapped="yes" component="qac" id="0885"/>
+            <message mapped="yes" component="qac" id="0887"/>
+            <message mapped="yes" component="qac" id="0888"/>
+            <message mapped="yes" component="qac" id="0914"/>
+            <message mapped="yes" component="qac" id="0915"/>
+            <message mapped="yes" component="qac" id="0942"/>
+            <message mapped="yes" component="qac" id="3113"/>
+            <message mapped="yes" component="qac" id="3114"/>
+            <message mapped="yes" component="qac" id="3239"/>
+            <message mapped="yes" component="qac" id="3311"/>
+            <message mapped="yes" component="qac" id="3312"/>
+            <message mapped="yes" component="qac" id="3319"/>
+            <message mapped="yes" component="qac" id="3437"/>
+            <message mapped="yes" component="qac" id="3438"/>
+            <message mapped="yes" component="rcma" id="1509"/>
+            <message mapped="yes" component="rcma" id="1510"/>
+          </enforcement>
+        </rule>
+      </enforcement>
+    </rule>
+    <rule help="" active="yes" id="3">
+      <text>심각도 하</text>
+      <enforcement>
+        <rule help="" active="yes" id="C-PRE-001">
+          <text>문자열 결합을 통한 국제문자세트(UCS)의 문자 이름 생성 금지</text>
+          <enforcement>
+            <message mapped="yes" component="qac" id="0905"/>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-PRE-002">
+          <text>불안전한 매크로에 특정 변수 값 변환 인자 전달 금지</text>
+          <enforcement>
+            <message mapped="yes" component="qac" id="3462"/>
+            <message mapped="yes" component="qac" id="3463"/>
+            <message mapped="yes" component="qac" id="3464"/>
+            <message mapped="yes" component="qac" id="3465"/>
+            <message mapped="yes" component="qac" id="3466"/>
+            <message mapped="yes" component="qac" id="3467"/>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-PRE-003">
+          <text>함수형 매크로 호출 시 전처리 지시자 인수 전달 금지</text>
+          <enforcement>
+            <message mapped="yes" component="qac" id="0853"/>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-DCI-003">
+          <text>예약된 식별자 선언 및 정의 금지</text>
+          <enforcement>
+            <message mapped="yes" component="qac" id="0602"/>
+            <message mapped="yes" component="qac" id="0603"/>
+            <message mapped="yes" component="qac" id="4600"/>
+            <message mapped="yes" component="qac" id="4601"/>
+            <message mapped="yes" component="qac" id="4602"/>
+            <message mapped="yes" component="qac" id="4603"/>
+            <message mapped="yes" component="qac" id="4604"/>
+            <message mapped="yes" component="qac" id="4605"/>
+            <message mapped="yes" component="qac" id="4606"/>
+            <message mapped="yes" component="qac" id="4607"/>
+            <message mapped="yes" component="qac" id="4608"/>
+            <message mapped="yes" component="qac" id="4620"/>
+            <message mapped="yes" component="qac" id="4621"/>
+            <message mapped="yes" component="qac" id="4622"/>
+            <message mapped="yes" component="qac" id="4623"/>
+            <message mapped="yes" component="qac" id="4624"/>
+            <message mapped="yes" component="qac" id="4640"/>
+            <message mapped="yes" component="qac" id="4641"/>
+            <message mapped="yes" component="qac" id="4642"/>
+            <message mapped="yes" component="qac" id="4643"/>
+            <message mapped="yes" component="qac" id="4644"/>
+            <message mapped="yes" component="qac" id="4645"/>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-DCI-004">
+          <text>가변 배열 선언 시 올바른 문법 사용 필요</text>
+          <enforcement>
+            <message mapped="yes" component="qac" id="1037"/>
+            <message mapped="yes" component="qac" id="1039"/>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-DCI-005">
+          <text>신뢰 경계를 통한 구조체 데이터 전달 시 정보 누수 회피 필요</text>
+          <enforcement>
+            <message mapped="yes" component="dataflow" id="4941"/>
+            <message mapped="yes" component="dataflow" id="4942"/>
+            <message mapped="yes" component="dataflow" id="4943"/>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-DCI-006">
+          <text>호환되지 않는 함수 혹은 객체 선언 금지</text>
+          <enforcement>
+            <message mapped="yes" component="qac" id="0776"/>
+            <message mapped="yes" component="qac" id="0778"/>
+            <message mapped="yes" component="qac" id="0779"/>
+            <message mapped="yes" component="qac" id="0789"/>
+            <message mapped="yes" component="rcma" id="1510"/>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-INT-005">
+          <text>나눗셈이나 모듈로 연산에서 ‘0으로 나누기 (Divide by Zero)’에러가 발생하지 않도록 보장 [AP, MCU]</text>
+          <enforcement>
+            <message mapped="yes" component="qac" id="2830"/>
+            <message mapped="yes" component="dataflow" id="2831"/>
+            <message mapped="yes" component="dataflow" id="2832"/>
+            <message mapped="yes" component="dataflow" id="2833"/>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-INT-006">
+          <text>음수 값으로 시프트 또는 피연산자의 비트와 같거나 더 많은 비트로 시프트 금지</text>
+          <enforcement>
+            <message mapped="yes" component="qac" id="0499"/>
+            <message mapped="yes" component="qac" id="2790"/>
+            <message mapped="yes" component="dataflow" id="2791"/>
+            <message mapped="yes" component="dataflow" id="2792"/>
+            <message mapped="yes" component="dataflow" id="2793"/>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-INT-007">
+          <text>정수 타입의 옳은 정밀도 사용 필요</text>
+          <enforcement>
+            <message mapped="yes" component="qac" id="0582"/>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-INT-008">
+          <text>포인터와 정수형과의 형변환 시 주의 [AP, MCU]</text>
+          <enforcement>
+            <message mapped="yes" component="qac" id="0303"/>
+            <message mapped="yes" component="qac" id="0305"/>
+            <message mapped="yes" component="qac" id="0306"/>
+            <message mapped="yes" component="qac" id="0309"/>
+            <message mapped="yes" component="qac" id="0324"/>
+            <message mapped="yes" component="qac" id="0326"/>
+            <message mapped="yes" component="qac" id="0360"/>
+            <message mapped="yes" component="qac" id="0361"/>
+            <message mapped="yes" component="qac" id="0362"/>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-FLP-001">
+          <text>부동 소수점 변수를 반복문의 카운터로 사용 금지</text>
+          <enforcement>
+            <message mapped="yes" component="qac" id="3339"/>
+            <message mapped="yes" component="qac" id="3340"/>
+            <message mapped="yes" component="qac" id="3342"/>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-FLP-002">
+          <text>부동 소수점 타입 형변환이 새로운 타입의 범위 내에서 이루어지도록 보장</text>
+          <enforcement>
+            <message mapped="yes" component="qac" id="4450"/>
+            <message mapped="yes" component="qac" id="4451"/>
+            <message mapped="yes" component="qac" id="4452"/>
+            <message mapped="yes" component="qac" id="4453"/>
+            <message mapped="yes" component="qac" id="4454"/>
+            <message mapped="yes" component="qac" id="4462"/>
+            <message mapped="yes" component="qac" id="4465"/>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-FLP-003">
+          <text>정수형 타입에서 부동 소수점 타입으로 형변환 시 정밀도 보호</text>
+          <enforcement>
+            <message mapped="yes" component="qac" id="1260"/>
+            <message mapped="yes" component="qac" id="1263"/>
+            <message mapped="yes" component="qac" id="1298"/>
+            <message mapped="yes" component="qac" id="1299"/>
+            <message mapped="yes" component="qac" id="1800"/>
+            <message mapped="yes" component="qac" id="1802"/>
+            <message mapped="yes" component="qac" id="1803"/>
+            <message mapped="yes" component="qac" id="1804"/>
+            <message mapped="yes" component="qac" id="4117"/>
+            <message mapped="yes" component="qac" id="4435"/>
+            <message mapped="yes" component="qac" id="4437"/>
+            <message mapped="yes" component="qac" id="4445"/>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-STR-001">
+          <text>문자열 리터럴 수정 금지</text>
+          <enforcement>
+            <message mapped="yes" component="qac" id="0556"/>
+            <message mapped="yes" component="qac" id="0752"/>
+            <message mapped="yes" component="qac" id="0753"/>
+            <message mapped="yes" component="qac" id="0754"/>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-STR-004">
+          <text>문자를 다루는 함수들의 인수를 unsigned char 로 전달 필요</text>
+          <enforcement>
+            <message mapped="yes" component="qac" id="4413"/>
+            <message mapped="yes" component="qac" id="4414"/>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-STR-006">
+          <text>멀티바이트 문자열 길이의 잘못된 계산</text>
+          <enforcement>
+            <message mapped="yes" component="qac" id="0432"/>
+			<message mapped="yes" component="qac" id="0701"/>
+			<message mapped="yes" component="qac" id="0705"/>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-EXP-005">
+          <text>비교 연산자 대신 할당 연산자를 사용하는 경우에 주의 [MCU]</text>
+          <enforcement>
+            <message mapped="yes" component="qac" id="3314"/>
+            <message mapped="yes" component="qac" id="3326"/>
+            <message mapped="yes" component="qac" id="3344"/>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-EXP-010">
+          <text>포인터를 더 엄격하게 정렬되는 포인터 타입으로 캐스팅 금지</text>
+          <enforcement>
+            <message mapped="yes" component="qac" id="0326"/>
+            <message mapped="yes" component="qac" id="3305"/>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-EXP-012">
+          <text>상수 객체 수정 금지</text>
+          <enforcement>
+            <message mapped="yes" component="qac" id="0563"/>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-EXP-015">
+          <text>sizeof, _Alignof, _Generic에 피연산자로 변수의 값을 바꾸는 표현식 전달 금지</text>
+          <enforcement>
+            <message mapped="yes" component="qac" id="3307"/>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-EXP-016">
+          <text>특정 연산자에서 할당 연산 수행 금지</text>
+          <enforcement>
+            <message mapped="yes" component="qac" id="3314"/>
+            <message mapped="yes" component="qac" id="3326"/>
+            <message mapped="yes" component="qac" id="3344"/>
+            <message mapped="yes" component="qac" id="3416"/>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-EXP-017">
+          <text>Boolean 피연산자에 bitwise 연산자 사용 금지</text>
+          <enforcement>
+            <message mapped="yes" component="qac" id="3344"/>
+            <message mapped="yes" component="qac" id="4502"/>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-ARR-009">
+          <text>소스 버퍼 크기를 사용하여 버퍼 접근</text>
+          <enforcement>
+            <message mapped="yes" component="dataflow" id="2845"/>
+            <message mapped="yes" component="dataflow" id="2846"/>
+            <message mapped="yes" component="dataflow" id="2847"/>
+            <message mapped="yes" component="dataflow" id="2848"/>
+            <message mapped="yes" component="dataflow" id="2849"/>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-MEM-003">
+          <text>가변 배열 멤버를 포함하는 구조체는 동적으로 복사 및 할당 필요</text>
+          <enforcement>
+            <message mapped="yes" component="qac" id="1061"/>
+            <message mapped="yes" component="qac" id="1062"/>
+            <message mapped="yes" component="qac" id="1063"/>
+            <message mapped="yes" component="qac" id="1064"/>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-MEM-006">
+          <text>realloc() 함수를 호출하여 객체의 정렬 수정 금지</text>
+          <enforcement>
+            <message mapped="yes" component="certccm" id="5027"/>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-FIO-004">
+          <text>플러쉬 혹은 위치 지정 호출 개입 없이 스트림 교대로 입력 및 출력 금지</text>
+          <enforcement>
+            <message mapped="yes" component="dataflow" id="4711"/>
+            <message mapped="yes" component="dataflow" id="4712"/>
+            <message mapped="yes" component="dataflow" id="4713"/>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-FIO-005">
+          <text>fgets() 혹은 fgetws() 실패 시 문자열 리셋 필요</text>
+          <enforcement>
+            <message mapped="yes" component="dataflow" id="4861"/>
+            <message mapped="yes" component="dataflow" id="4862"/>
+            <message mapped="yes" component="dataflow" id="4863"/>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-FIO-006">
+          <text>변수의 값을 변경하는 문자열 인수를 getc(), putc(), getwc() 혹은 putwc()에 호출 금지</text>
+          <enforcement>
+            <message mapped="yes" component="certccm" id="5036"/>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-FIO-009">
+          <text>부적절한 동기화로 공유 자원을 사용하여 동시 실행(레이스 조건) 금지</text>
+          <enforcement>
+            <message mapped="yes" component="dataflow" id="3536"/>
+            <message mapped="yes" component="dataflow" id="4951"/>
+            <message mapped="yes" component="dataflow" id="4952"/>
+            <message mapped="yes" component="dataflow" id="4976"/>
+            <message mapped="yes" component="dataflow" id="4977"/>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-ENV-001">
+          <text>특정 함수의 반환값이 참조하는 객체 수정 금지</text>
+          <enforcement>
+            <message mapped="yes" component="qac" id="1492"/>
+            <message mapped="yes" component="qac" id="1493"/>
+            <message mapped="yes" component="qac" id="1494"/>
+            <message mapped="yes" component="dataflow" id="4751"/>
+            <message mapped="yes" component="dataflow" id="4752"/>
+            <message mapped="yes" component="dataflow" id="4753"/>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-ENV-002">
+          <text>환경변수 포인터를 무효화시키는 연산이 포함된 함수가 호출된 후 환경변수 포인터 참조 금지</text>
+          <enforcement>
+            <message mapped="yes" component="dataflow" id="4991"/>
+            <message mapped="yes" component="dataflow" id="4992"/>
+            <message mapped="yes" component="dataflow" id="4993"/>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-SIG-002">
+          <text>연산 예외 신호 처리기에서 반환 금지</text>
+          <enforcement>
+            <message mapped="yes" component="dataflow" id="4846"/>
+            <message mapped="yes" component="dataflow" id="4847"/>
+            <message mapped="yes" component="dataflow" id="4848"/>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-CON-006">
+          <text>교착 상태를 피하기 위해 정해진 순서에 따른 잠금 필요</text>
+          <enforcement>
+            <message mapped="yes" component="mta" id="1772"/>
+            <message mapped="yes" component="mta" id="1773"/>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-CON-007">
+          <text>반복문 내에서 거짓으로 깨어날 수 있는 함수의 래핑 필요</text>
+          <enforcement>
+            <message mapped="yes" component="qac" id="2027"/>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-CON-008">
+          <text>멀티스레드 프로그램에서 signal() 함수 호출 금지</text>
+          <enforcement>
+            <message mapped="yes" component="certccm" id="5021"/>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-CON-009">
+          <text>조건 변수 사용 시 스레드의 안전성과 생존성 보호 필요</text>
+          <enforcement>
+            <message mapped="yes" component="mta" id="1778"/>
+            <message mapped="yes" component="mta" id="1779"/>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-CON-010">
+          <text>이전에 결합 또는 분리된 스레드를 재결합이나 분리 금지</text>
+          <enforcement>
+            <message mapped="yes" component="mta" id="1776"/>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-MSC-007">
+          <text>사전 정의된 식별자가 매크로식으로만 정의된 경우 해당 식별자를 객체처럼 접근 금지</text>
+          <enforcement>
+            <message mapped="yes" component="qac" id="3437"/>
+            <message mapped="yes" component="qac" id="3475"/>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-MSC-008">
+          <text>정해지지 않은 값을 가진 va_list에 va_arg() 호출 금지</text>
+          <enforcement>
+            <message mapped="yes" component="qac" id="3497"/>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-POS-002">
+          <text>vfork() 사용 금지</text>
+          <enforcement>
+          </enforcement>
+        </rule>
+        <rule help="" active="yes" id="C-POS-006">
+          <text>신호를 사용하여 스레드 종료 금지</text>
+          <enforcement>
+            <message mapped="yes" component="certccm" id="5034"/>
+          </enforcement>
+        </rule>
+      </enforcement>
+    </rule>
+    <rule help="default-en_US\rules\lvl_qac_errors.html" active="yes" id="6">
+      <text>Errors</text>
+      <enforcement>
+        <rule help="default-en_US\rules\config.html" active="yes" id="6.1">
+          <text>QAC configuration</text>
+          <enforcement>
+            <message mapped="yes" component="qac" id="0010"/>
+            <message mapped="yes" component="qac" id="0040"/>
+            <message mapped="yes" component="qac" id="0041"/>
+            <message mapped="yes" component="qac" id="0042"/>
+            <message mapped="yes" component="qac" id="0159"/>
+            <message mapped="yes" component="qac" id="0473"/>
+            <message mapped="yes" component="qac" id="0808"/>
+            <message mapped="yes" component="qac" id="0818"/>
+            <message mapped="yes" component="qac" id="0819"/>
+            <message mapped="yes" component="qac" id="0822"/>
+            <message mapped="yes" component="qac" id="0869"/>
+            <message mapped="yes" component="qac" id="0970"/>
+          </enforcement>
+        </rule>
+        <rule help="default-en_US\rules\syntax.html" active="yes" id="6.2">
+          <text>Syntax errors</text>
+          <enforcement>
+            <message mapped="yes" component="qac" id="0231"/>
+            <message mapped="yes" component="qac" id="0234"/>
+            <message mapped="yes" component="qac" id="0250"/>
+            <message mapped="yes" component="qac" id="0258"/>
+            <message mapped="yes" component="qac" id="0268"/>
+            <message mapped="yes" component="qac" id="0434"/>
+            <message mapped="yes" component="qac" id="0637"/>
+            <message mapped="yes" component="qac" id="0648"/>
+            <message mapped="yes" component="qac" id="0666"/>
+            <message mapped="yes" component="qac" id="0670"/>
+            <message mapped="yes" component="qac" id="0805"/>
+            <message mapped="yes" component="qac" id="0817"/>
+            <message mapped="yes" component="qac" id="0820"/>
+            <message mapped="yes" component="qac" id="0823"/>
+            <message mapped="yes" component="qac" id="0824"/>
+            <message mapped="yes" component="qac" id="0825"/>
+            <message mapped="yes" component="qac" id="0826"/>
+            <message mapped="yes" component="qac" id="0827"/>
+            <message mapped="yes" component="qac" id="0829"/>
+            <message mapped="yes" component="qac" id="0833"/>
+            <message mapped="yes" component="qac" id="0846"/>
+            <message mapped="yes" component="qac" id="0849"/>
+            <message mapped="yes" component="qac" id="0852"/>
+            <message mapped="yes" component="qac" id="0863"/>
+            <message mapped="yes" component="qac" id="0876"/>
+            <message mapped="yes" component="qac" id="0879"/>
+            <message mapped="yes" component="qac" id="0886"/>
+            <message mapped="yes" component="qac" id="0896"/>
+            <message mapped="yes" component="qac" id="0897"/>
+            <message mapped="yes" component="qac" id="0898"/>
+            <message mapped="yes" component="qac" id="0904"/>
+            <message mapped="yes" component="qac" id="0907"/>
+            <message mapped="yes" component="qac" id="0917"/>
+            <message mapped="yes" component="qac" id="0925"/>
+            <message mapped="yes" component="qac" id="0926"/>
+            <message mapped="yes" component="qac" id="0927"/>
+            <message mapped="yes" component="qac" id="0928"/>
+            <message mapped="yes" component="qac" id="1004"/>
+            <message mapped="yes" component="qac" id="1005"/>
+            <message mapped="yes" component="qac" id="1009"/>
+            <message mapped="yes" component="qac" id="1010"/>
+            <message mapped="yes" component="qac" id="1013"/>
+            <message mapped="yes" component="qac" id="1095"/>
+            <message mapped="yes" component="qac" id="1138"/>
+            <message mapped="yes" component="qac" id="3104"/>
+            <message mapped="yes" component="qac" id="3105"/>
+            <message mapped="yes" component="qac" id="3107"/>
+          </enforcement>
+        </rule>
+      </enforcement>
+    </rule>
+  </rulegroup>
+</rcf>

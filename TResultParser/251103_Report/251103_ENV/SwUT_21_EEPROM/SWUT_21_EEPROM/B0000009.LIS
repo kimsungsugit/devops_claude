@@ -1,0 +1,204 @@
+               #include "C:/workspace/NE1AW_PORTING/Generated_Code/EEPROM.h"
+               typedef   word * EEPROM_TAddress_;  
+               /*vcast_scrub*/
+               /*vcast_scrub*/
+               static word BackupArray[0x02];          
+               static void BackupSector(EEPROM_TAddress_ Addr, word From, word To)
+               {
+                 word i;
+                 word ValidFrom;
+                 word ValidTo;
+1 0     ( )    BackupSector
+1 1              ValidFrom = From;
+1 2     ( )( )   if (ValidFrom > (word)2U) {   
+1 3                ValidFrom = (word)2U;
+                 }
+1 4              ValidTo = To;
+1 5     ( )( )   if (ValidTo > (word)4U) {   
+1 6                ValidTo = (word)4U;
+                 }
+1 7     ( )( )   for (i = ValidFrom; i < ValidTo; i = (word)(i + 2U)) {
+1 8                word index = i/2U;
+1 9                BackupArray[index] = Addr[index];  
+                 }
+               }
+               static byte SetupFCCOB(dword PhraseAddr, word From, word To,  word* Data, word* pIndex);
+               static byte WriteBlock(EEPROM_TAddress_ Addr, word From, word To,  word* Data)
+               {
+2 0     ( )    WriteBlock
+2 1              byte result = 0U;
+2 2              byte err = 0U;
+                 word i;
+                 byte j;
+                 dword PhraseAddr;
+2 3     ( )( )   if(From != To) {
+2 4                i = From;
+2 5                PhraseAddr = (dword)Addr;
+2 6     ( )( )     while((i < To) && (result == (byte)0U)) {
+2 7                  byte setupResult = SetupFCCOB(PhraseAddr, From, To, Data, &i);
+2 8                  _FSTAT . Byte = 0x80U;                      
+2 9     ( )( )       while (_FSTAT . Bits . CCIF == (byte)0U) {
+2 10                   ;  
+                     }
+2 11    ( )( )       if ((_FSTAT . Byte & (byte)0x30U) != (byte)0U) {        
+2 12                   result = 9U;            
+                     } else 
+2 13    ( )( )         if (_FSTAT . MergedBits . grpMGSTAT != (byte)0U) {          
+2 14                     err = 1U;                         
+                     } else {
+                     }
+2 15    ( )( )       if (PhraseAddr <= (0xFFFFFFFFUL - (dword)8U)) {
+2 16                   PhraseAddr += (dword)8U;
+                     } else {
+2 17                   result = 9U;
+                     }
+                   }
+2 18    ( )( )     if((result == (byte)0U) && (err != (byte)0U)) {
+2 19                 result = 3U;                 
+                   }
+                 }
+2 20             return result;
+               }
+               static byte SetupFCCOB(dword PhraseAddr, word From, word To,  word* Data, word* pIndex)
+               {
+                 byte j;
+3 0     ( )    SetupFCCOB
+3 1              word i = *pIndex;
+3 2              _FSTAT . Byte = 0x30U;                      
+3 3              _FCCOBIX . Byte = 5U;                       
+3 4              _FCCOB0 . Overlap_STR . FCCOB0HISTR . Byte = 0x11U;                   
+3 5              _FCCOB0 . Overlap_STR . FCCOB0LOSTR . Byte = (byte)((PhraseAddr >> 16U) & (dword)0xFFU);  
+3 6              _FCCOB1 . Word = (word)(PhraseAddr & (dword)0xFFFFU);          
+3 7     ( )( )   for(j = (byte)0U; j < (byte)4U; j++) {
+3 8                *((volatile word*)&_FCCOB2 . Word + j) = *(( word *)(Data + (i/2U)));  
+3 9     ( )( )     if (i <= (0xFFFFU - 2U)) {
+3 10                 i = (word)(i + 2U);
+                   } else {
+3 11                 i = To;  
+                   }
+3 12    ( )( )     if(i >= To) {
+3 13                 _FCCOBIX . Byte = j + (byte)2U;               
+3 14                 break;
+                   }
+                 }
+3 15             *pIndex = i;
+3 16             return 0U;
+               }
+               static byte EraseSectorInternal(EEPROM_TAddress_ Addr)
+               {
+4 0     ( )    EraseSectorInternal
+4 1              byte result = 0U;
+4 2     ( )( )   if (_FSTAT . Bits . CCIF == (byte)0U) {               
+4 3                result = 8U;                  
+                 } else {
+4 4                _FSTAT . Byte = 0x30U;                      
+4 5                _FCCOBIX . Byte = 1U;                       
+4 6                _FCCOB0 . Overlap_STR . FCCOB0HISTR . Byte = 0x12U;                   
+4 7                _FCCOB0 . Overlap_STR . FCCOB0LOSTR . Byte = (byte)((((dword)Addr) >> 16) & (dword)0xFFU);  
+4 8                _FCCOB1 . Word = (word)(((dword)Addr) & (dword)0xFFFEU);  
+4 9                _FSTAT . Byte = 0x80U;                      
+4 10    ( )( )     while (_FSTAT . Bits . CCIF == (byte)0U) {
+4 11                 ;  
+                   }
+4 12    ( )( )     if ((_FSTAT . Byte & (byte)0x23U) != (byte)0U) {        
+4 13                 result = 9U;            
+                   }
+                 }
+4 14             return result;                        
+               }
+               static byte WriteWord(EEPROM_TAddress_ AddrRow, word Data16)
+               {
+5 0     ( )    WriteWord
+5 1              byte result = 0U;
+5 2     ( )( )   if (_FSTAT . Bits . CCIF == (byte)0U) {               
+5 3                result = 8U;                  
+                 } else {
+5 4                _FSTAT . Byte = 0x30U;                      
+5 5                _FCCOBIX . Byte = 2U;                       
+5 6                _FCCOB0 . Overlap_STR . FCCOB0HISTR . Byte = 0x11U;                   
+5 7                _FCCOB0 . Overlap_STR . FCCOB0LOSTR . Byte = (byte)((((dword)AddrRow) >> 16) & (dword)0xFFU);  
+5 8                _FCCOB1 . Word = (word)(((dword)AddrRow) & (dword)0xFFFFU);    
+5 9                _FCCOB2 . Word = Data16;                    
+5 10               _FSTAT . Byte = 0x80U;                      
+5 11    ( )( )     if ((_FSTAT . Byte & (byte)0x30U) != (byte)0U) {        
+5 12                 result = 9U;            
+                   } else {
+5 13    ( )( )       while (_FSTAT . Bits . CCIF == (byte)0U) {
+5 14                   ;  
+                     }
+5 15    ( )( )       if (_FSTAT . MergedBits . grpMGSTAT != (byte)0U) {               
+5 16                   result = 3U;             
+                     }
+                   }
+                 }
+5 17             return result;                        
+               }
+               byte EEPROM_SetByte(EEPROM_TAddress_Const Addr,byte Data)
+               {
+                 byte result;
+                 byte err;
+                 word Data16;
+                 EEPROM_TAddress_ SecAddr;             
+6 0     ( )    EEPROM_SetByte
+6 1     ( )( )   if(((dword)Addr < (dword)((EEPROM_TAddress)0x00100000UL)) || ((dword)Addr > (dword)((EEPROM_TAddress)0x001003FFUL))) {  
+6 2                result = 2U;                 
+                 } else 
+6 3     ( )( )     if(_FSTAT . Bits . CCIF == (byte)0U) {              
+6 4                  result = 8U;                  
+                 } else {
+6 5                  SecAddr = (EEPROM_TAddress_)((dword)Addr & 0x00FFFFFEUL);  
+6 6     ( )( )       if (*SecAddr == 0xFFFFU) {  
+6 7     ( )( )         if ((((dword)Addr) & (dword)1U) != (dword)0U) {         
+6 8                      result = WriteWord(SecAddr, ((*SecAddr) & 0xFF00U) | Data);
+                     } else {
+6 9                      word tempWord = *Addr;
+6 10                     byte nextByte = (byte)(tempWord & 0xFFU);
+6 11                     result = WriteWord((EEPROM_TAddress_)Addr, ((word)Data << 8) | nextByte);  
+                     }
+                   } else {                            
+6 12                   SecAddr = (EEPROM_TAddress_)((dword)Addr & 0x00FFFFFCUL);  
+6 13                   BackupSector(SecAddr, 0U, 0x04U);  
+6 14                   Data16 = BackupArray[(((dword)Addr) % (dword)0x04U) / (dword)2U];  
+6 15    ( )( )         if ((((dword)Addr) & (dword)1U) != (dword)0U) {         
+6 16                     Data16 = (Data16 & 0xFF00U) | Data;
+                     } else {
+6 17                     Data16 = ((word)Data << 8) | (Data16 & 0xFFU);
+                     }
+6 18                   BackupArray[(((dword)Addr) % (dword)0x04U) / (dword)2U] = Data16;  
+6 19                   err = EraseSectorInternal(Addr);  
+6 20    ( )( )         if(err != (byte)0U) {
+6 21                     result = err;                   
+                     } else {
+6 22                     err = WriteBlock(SecAddr, 0U, 0x04U,BackupArray);  
+6 23                     result = err;
+                     }
+                   }
+                 }
+6 24             return result;                        
+               }
+               byte EEPROM_GetByte(EEPROM_TAddress_Const Addr, byte *Data)
+               {
+7 0     ( )    EEPROM_GetByte
+7 1              byte result = 0U;
+7 2     ( )( )   if(((dword)Addr < (dword)((EEPROM_TAddress)0x00100000UL)) || ((dword)Addr > (dword)((EEPROM_TAddress)0x001003FFUL))) {  
+7 3                result = 2U;                 
+                 } else 
+7 4     ( )( )     if(_FSTAT . Bits . CCIF == (byte)0U) {              
+7 5                  result = 8U;                  
+                 } else {
+7 6     ( )( )       if ((((dword)Addr) & (dword)1U) != (dword)0U) {
+7 7                    EEPROM_TAddress_ alignedAddr = (EEPROM_TAddress_)((dword)Addr & 0xFFFFFFFEUL);
+7 8                    word tempWord = *alignedAddr;
+7 9                    *Data = (byte)(tempWord & 0xFFU);   
+                   } else {
+7 10                   word tempWord = *Addr;
+7 11                   *Data = (byte)((tempWord >> 8) & 0xFFU);   
+                   }
+                 }
+7 12             return result;                        
+               }
+               void EEPROM_Init(void)
+               {
+8 0     ( )    EEPROM_Init
+8 1              _FCLKDIV . Byte = 0x1DU;                      
+               }

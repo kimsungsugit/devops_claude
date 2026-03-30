@@ -1,0 +1,155 @@
+- generic [ref=e3]:
+  - generic [ref=e5]:
+    - button "로컬" [ref=e6] [cursor=pointer]
+    - button "Jenkins" [active] [ref=e7] [cursor=pointer]
+  - generic [ref=e8]:
+    - main [ref=e9]:
+      - generic [ref=e10]:
+        - generic [ref=e11]:
+          - generic [ref=e12]:
+            - generic [ref=e13]:
+              - generic [ref=e14]: Devops/
+              - generic [ref=e890]: Jenkins/
+              - generic [ref=e891]: Dashboard
+            - generic [ref=e17]: Jenkins Dashboard
+            - generic [ref=e18]: Jenkins 프로젝트 선택
+          - generic [ref=e20]: completed
+          - button "다크 모드로 전환" [ref=e22] [cursor=pointer]: 다크 모드
+        - navigation "주 네비게이션" [ref=e23]:
+          - button "대시보드 탭" [ref=e24] [cursor=pointer]: 대시보드
+          - button "워크플로우 탭" [ref=e26] [cursor=pointer]: 워크플로우
+          - button "에디터 탭" [ref=e28] [cursor=pointer]: 에디터
+          - button "Analyzer 탭" [ref=e30] [cursor=pointer]: Analyzer
+          - button "설정 탭" [ref=e32] [cursor=pointer]: 설정
+        - generic [ref=e892]:
+          - heading "Jenkins 프로젝트 대시보드" [level=3] [ref=e893]
+          - generic [ref=e894]:
+            - heading "사용 방법" [level=4] [ref=e895]
+            - list [ref=e896]:
+              - listitem [ref=e897]: 프로젝트 전체 현황을 보는 대시보드입니다.
+              - listitem [ref=e898]: 워크플로우에서 동기화가 완료되면 최신 상태가 반영됩니다.
+          - generic [ref=e899]:
+            - generic [ref=e900]:
+              - heading "리포트 요약" [level=3] [ref=e901]
+              - button "요약 로드" [ref=e902] [cursor=pointer]
+              - generic [ref=e903]: 리포트 요약이 없습니다. "요약 로드" 버튼을 클릭하거나 워크플로우에서 동기화를 실행하세요.
+            - generic [ref=e904]:
+              - button "관리자" [ref=e905] [cursor=pointer]
+              - button "테스터" [ref=e906] [cursor=pointer]
+              - button "개발자" [ref=e907] [cursor=pointer]
+            - generic [ref=e908]:
+              - generic [ref=e909]:
+                - generic [ref=e910]: 빌드 결과
+                - generic [ref=e911]: "-"
+                - generic [ref=e912]: failure -
+              - generic [ref=e913]:
+                - generic [ref=e914]: PRQA 준수율
+                - generic [ref=e915]: "-"
+                - generic [ref=e916]: rule violations -
+              - generic [ref=e917]:
+                - generic [ref=e918]: 리포트 파일
+                - generic [ref=e919]: "-"
+                - generic [ref=e920]: html 0 · xlsx 0
+              - generic [ref=e921]:
+                - generic [ref=e922]:
+                  - generic [ref=e923]: Build
+                  - generic [ref=e924]: "-"
+                - generic [ref=e925]:
+                  - generic [ref=e926]: Result
+                  - generic [ref=e927]: "-"
+                - generic [ref=e928]:
+                  - generic [ref=e929]: Project Index
+                  - generic [ref=e930]: "-"
+                - generic [ref=e931]:
+                  - generic [ref=e932]: Violations
+                  - generic [ref=e933]: "-"
+            - generic [ref=e935]: "소스: -"
+            - generic [ref=e936]:
+              - button "전체" [ref=e937] [cursor=pointer]
+              - button "FAIL" [ref=e938] [cursor=pointer]
+              - button "ERROR" [ref=e939] [cursor=pointer]
+              - button "WARN" [ref=e940] [cursor=pointer]
+            - group [ref=e941]:
+              - generic "Files - FAIL 0 ERROR 0 WARN 0 Total 0" [ref=e942] [cursor=pointer]:
+                - generic [ref=e943]:
+                  - generic [ref=e944]:
+                    - generic [ref=e945]: Files
+                    - generic [ref=e946]: "-"
+                  - generic [ref=e947]:
+                    - generic [ref=e948]: FAIL
+                    - generic [ref=e949]: "0"
+                  - generic [ref=e950]:
+                    - generic [ref=e951]: ERROR
+                    - generic [ref=e952]: "0"
+                  - generic [ref=e953]:
+                    - generic [ref=e954]: WARN
+                    - generic [ref=e955]: "0"
+                  - generic [ref=e956]:
+                    - generic [ref=e957]: Total
+                    - generic [ref=e958]: "0"
+          - generic [ref=e959]:
+            - heading "리포트 스캔" [level=3] [ref=e960]
+            - generic [ref=e961]:
+              - generic [ref=e962]:
+                - generic [ref=e963]: Files
+                - generic [ref=e964]: "-"
+              - generic [ref=e965]:
+                - generic [ref=e966]: HTML
+                - generic [ref=e967]: "0"
+              - generic [ref=e968]:
+                - generic [ref=e969]: XLSX
+                - generic [ref=e970]: "0"
+              - generic [ref=e971]:
+                - generic [ref=e972]: LOG
+                - generic [ref=e973]: "0"
+              - generic [ref=e974]:
+                - generic [ref=e975]: FAIL/ERROR/WARN
+                - generic [ref=e976]: 0 / 0 / 0
+              - generic [ref=e977]:
+                - generic [ref=e978]: 총합 / 스케일
+                - generic [ref=e979]: "0"
+                - generic [ref=e980]: max 1
+            - generic [ref=e981]:
+              - generic [ref=e982]:
+                - generic [ref=e983]: Token
+                - generic [ref=e984]: FAIL
+                - generic [ref=e985]: ERROR
+                - generic [ref=e986]: WARN
+              - generic [ref=e987]:
+                - generic [ref=e988]: Count
+                - generic [ref=e989]: "0"
+                - generic [ref=e990]: "0"
+                - generic [ref=e991]: "0"
+          - group [ref=e992]:
+            - generic "원본 JSON 보기" [ref=e993]
+    - complementary [ref=e37]:
+      - generic [ref=e38]:
+        - heading "분석 도우미" [level=4] [ref=e39]
+        - generic [ref=e40]:
+          - button "내보내기" [ref=e41] [cursor=pointer]
+          - button "초기화" [ref=e42] [cursor=pointer]
+          - button "닫기" [ref=e43] [cursor=pointer]
+      - generic [ref=e44]:
+        - button "현재 상태 요약해줘" [ref=e45] [cursor=pointer]
+        - button "이슈 우선순위 추천해줘" [ref=e46] [cursor=pointer]
+        - button "커버리지 개선 방법" [ref=e47] [cursor=pointer]
+        - button "다음 해야 할 작업은?" [ref=e48] [cursor=pointer]
+        - button "실패 원인 분석해줘" [ref=e49] [cursor=pointer]
+      - generic [ref=e51]:
+        - paragraph [ref=e54]: 대시보드 요약을 해석하거나 다음 단계 추천을 도와드릴게요.
+        - generic [ref=e55]:
+          - generic [ref=e56]: 오후 02:47
+          - button "복사" [ref=e57] [cursor=pointer]
+      - generic [ref=e59]:
+        - textbox "질문을 입력하세요 (Enter 전송, Shift+Enter 줄바꿈)" [ref=e60]
+        - button "전송" [disabled] [ref=e61]
+  - contentinfo [ref=e62]:
+    - generic [ref=e63]:
+      - generic [ref=e64]: Devops
+      - generic [ref=e65]: Jenkins / Dashboard
+      - generic [ref=e66]: "세션: 3d08c4ac"
+      - generic [ref=e67]: "상태: completed"
+    - generic [ref=e68]:
+      - button "상태 새로고침" [ref=e69] [cursor=pointer]
+      - button "로그 새로고침" [ref=e70] [cursor=pointer]
+      - button "테마 전환" [ref=e71] [cursor=pointer]

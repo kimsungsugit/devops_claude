@@ -1,0 +1,1050 @@
+﻿using C1.Win.C1FlexGrid;
+using ClosedXML.Excel;
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.IO;
+using System.Linq;
+using System.Threading;
+using System.Windows.Forms;
+using TResultParser.Lib.Component;
+using TResultParser.Lib.VectorCAST;
+using static TResultParser.Lib.Component.FlexgidLib;
+using static TResultParser.Lib.Component.XlsxManager;
+
+namespace TResultParser.GUI.Controls {
+    public partial class UCTestCaseList : UserControl {
+
+        #region variables
+        public enum UnitTCaseCol {
+            TC_Index = 0,
+            TC_ID,
+            UnitName, 
+            TCGenMethod,
+            Index,
+            Count,
+        }
+
+        public enum InteTCaseCol {
+            TC_Index = 0,
+            TC_ID,
+            Index,
+            Description,
+            TCGenMethod,
+            Count,
+        }
+
+        private const FGridStyle STYLE_USERCODE = FGridStyle.BgOrange;
+        private const string VALUE_EMPTY = "N/A";
+        private const string VALUE_USERCODE = "UC";
+        private const string CAPTION_RELATEDID = "Related ID";
+        private const int XLS_TITLE_COLCOUNT = 14;
+
+        private FlexgidLib m_FlexGridLib;
+        private VCastItemMode m_VCMode;
+
+        public bool SearchbarVisible {
+            get { return tboxSearchTC.Visible; }
+            set { if (this.Visible) { tboxSearchTC.Visible = value; tboxSearchTC.Text = string.Empty; } } }
+
+        private const int DATA_COLWIDTH = 80;
+
+        // property 
+        public bool IsActualDataOnly { get; set; }
+        public bool AutoColSize { get { return m_AutoColSize; } set { m_AutoColSize = value; setAutoSize(m_AutoColSize); } }
+        private bool m_AutoColSize;
+
+        public delegate void addLogEvent(string format, params Object[] args);
+        private addLogEvent addLogFunc;
+
+        private int m_InputCount;
+        private int m_ExpRsltCount;
+        private int m_ActRsltCount;
+        private bool m_UnitMode;
+
+        private Dictionary<GridPosition, TUserCode> m_DicUserCodeResult;
+
+        #endregion
+
+        #region Event 
+        public UCTestCaseList()
+        {
+            InitializeComponent();
+            m_FlexGridLib = new FlexgidLib();
+            IsActualDataOnly = false;
+
+            m_DicUserCodeResult = new Dictionary<GridPosition, TUserCode>();
+        }
+
+        private void UCTestCaseList_Load(object sender, EventArgs e)
+        {
+            init(true);
+        }
+
+        private void tboxSearchTC_TextChanged(object sender, EventArgs e)
+        {
+            fgridTestCase.ApplySearch(tboxSearchTC.Text);
+        }
+
+        private void fgridTestCase_KeyDown(object sender, KeyEventArgs e)
+        {
+            if ((e.Control && e.KeyCode == Keys.C) || e.KeyCode == Keys.F8) {
+                C1FlexGrid fgrid = sender as C1FlexGrid;
+                if (fgrid != null) {
+                    var ht = fgrid.HitTest();
+                    int row = ht.Row;
+                    int col = ht.Column;
+                    if (row >= fgrid.Rows.Count || row < fgrid.Rows.Fixed || col >= fgrid.Cols.Count || col < fgrid.Cols.Fixed) {
+                        return;
+                    }
+
+                    if (fgrid[row, col] != null) {
+                        string data = (string)fgrid[row, col];
+                        Clipboard.SetText(data);
+                    }
+                }
+            }
+        }
+
+        private void fgridTestCase_MouseDown(object sender, MouseEventArgs e)
+        {
+            var ht = fgridTestCase.HitTest();
+            int row = ht.Row;
+            int col = ht.Column;
+
+            if (e.Button == MouseButtons.Right && row >= 0 && col >= 0) {
+                contextMenu.Tag = ht;
+                contextMenu.Show(this, e.X, e.Y);
+            }
+        }
+
+        private void fgridTestCase_MouseDoubleClick(object sender, MouseEventArgs e)
+        {
+            var ht = fgridTestCase.HitTest();
+            int row = ht.Row;
+            int col = ht.Column;
+
+            if (e.Button == MouseButtons.Left && row >= 0 && col >= 0) {
+                GridPosition pos = new GridPosition(row, col);
+                if (m_DicUserCodeResult.ContainsKey(pos)) {
+                    TUserCode usercode = m_DicUserCodeResult[pos];
+                    if (usercode != null && usercode.IsValid) {
+                        addLog(usercode.Message);
+                    }
+                }
+            }
+        }
+
+        // Context Menu
+        private void cmenuHideCols_Click(object sender, EventArgs e)
+        {
+            setColumnsVisible(false);
+        }
+
+        private void cmenuShowCols_Click(object sender, EventArgs e)
+        {
+            setColumnsVisible(true);
+        }
+        #endregion
+
+        #region Public Functions
+        public void setDelegate(addLogEvent addlog)
+        {
+            addLogFunc = addlog;
+        }
+
+        public void setColumnCount(int inputcnt, int exprsltcnt, int actrsltcnt, VCastItemMode mode, bool unitmode)
+        {
+            m_InputCount = inputcnt;
+            m_ExpRsltCount = exprsltcnt;
+            m_ActRsltCount = actrsltcnt;
+            m_UnitMode = unitmode;
+            m_VCMode = mode;
+
+            init(false);
+
+            int colcount = (int)UnitTCaseCol.Count;
+            switch (m_VCMode) {
+                case VCastItemMode.TestCase:
+                    colcount += (inputcnt + exprsltcnt + 1); // Memo
+                    break;
+                case VCastItemMode.TestResult:
+                    colcount += (actrsltcnt + 3);// P/F, Memo
+                    break;
+                case VCastItemMode.TestReport:
+                    colcount += (inputcnt + exprsltcnt + actrsltcnt + 3); // P/F, Memo
+                    break;
+            }
+
+            if (this.InvokeRequired) {
+                this.Invoke(new Action(delegate () {
+                    fgridTestCase.Cols.Count = colcount;
+                    setColumNames(inputcnt, exprsltcnt, actrsltcnt, mode);
+                }));
+            }
+            else {
+                fgridTestCase.Cols.Count = colcount;
+                setColumNames(inputcnt, exprsltcnt, actrsltcnt, mode);
+            }
+        }
+
+        public bool addTCData( TCBank tcbank, TCBank arsltbank, ref int tc_index)
+        {
+            if ((m_VCMode != VCastItemMode.TestResult && (tcbank != null && !tcbank.IsValid)) ||
+                (m_VCMode != VCastItemMode.TestCase && (arsltbank != null && !arsltbank.IsValid))) {
+                return false;
+            }
+
+            if ( m_VCMode == VCastItemMode.None || (m_VCMode == VCastItemMode.TestCase && m_InputCount == 0)) {
+                return false;
+            }
+
+            string tcname = string.Empty;
+            List<string> listinput = null; 
+            List<string> listexpresult = null;
+            List<string> listactpresult = null;
+
+            if (tcbank != null && !tcbank.UnitMode) {
+                listinput = tcbank.ListInputNames;
+                listexpresult = tcbank.ListExpResultNames;
+            }
+
+            if (arsltbank != null && !arsltbank.UnitMode) {
+                listactpresult = arsltbank.ListActResultNames;
+            }
+
+            if (m_VCMode == VCastItemMode.TestCase || m_VCMode == VCastItemMode.TestReport) {
+                int index_data = 0;
+                foreach (var entry in tcbank.DictTestCase) {
+                    if (entry.Value == null) {
+                        continue;
+                    }
+
+                    index_data++;
+                    int index = 0;
+                    bool passed = entry.Value.Passed;
+                    if (tcbank.UnitMode) {
+                        listinput = tcbank.getTotalFielNames(entry.Value, TestCaseItem.TCDataMode.Input);
+                        listexpresult = tcbank.getTotalFielNames(entry.Value, TestCaseItem.TCDataMode.ExpectedRslt);
+                        if (arsltbank != null) {
+                            listactpresult = arsltbank.getTotalFielNames(arsltbank.DictActualRslt[entry.Key], TestCaseItem.TCDataMode.ExpectedRslt);
+                        }
+                    }
+
+                    if (m_VCMode == VCastItemMode.TestReport && arsltbank != null) {
+                        TestItem<TestResultItem> rslt = arsltbank.DictActualRslt[entry.Key];
+                        var failitem = rslt.DicData.Where(item => item.Value.Passed == false);
+                        if (failitem != null && failitem.Count() > 0) {
+                            passed = false;
+                        }
+                    }
+
+                    foreach (var subentry in entry.Value.DicData) {
+                        TestCaseItem tcitem = subentry.Value;
+                        TestResultItem arsltitem = null;
+                        if (m_VCMode == VCastItemMode.TestReport && arsltbank != null && arsltbank.DictActualRslt.ContainsKey(entry.Key)) {
+                            arsltitem = arsltbank.DictActualRslt[entry.Key].getData(subentry.Key);
+                        }
+
+                        if (index == 0) {
+                            if (!addCaption(++tc_index, tcitem, listinput, listexpresult, listactpresult)) {
+                                continue;
+                            }
+                        }
+
+                        addData(tc_index, tcitem, arsltitem, passed, listinput, listexpresult, listactpresult);
+                        index++;
+                    }
+                }
+            }
+            else {  // 
+
+                foreach (var entry in arsltbank.DictActualRslt) {
+                    if (entry.Value == null) {
+                        continue;
+                    }
+
+                    int index = 0;
+                    var failitem = entry.Value.DicData.Where(item => item.Value.Passed == false);
+                    bool totalpass = failitem != null && failitem.Count() == 0;
+
+                    foreach (var subentry in entry.Value.DicData) {
+                        TestResultItem arsltitem = arsltbank.DictActualRslt[entry.Key].getData(subentry.Key);
+                        if (index ==0) { // Caption
+                            if (arsltbank.UnitMode) {
+                                listactpresult = arsltitem.getFieldNameList();
+                            }
+
+                            if (!addCaption(++tc_index, arsltitem, null, null, listactpresult)) {
+                                continue;
+                            }
+                        }
+
+                        addData(tc_index, null, arsltitem, totalpass, null, null, listactpresult);
+                        index++;
+                    }
+                }
+            }
+
+            return true;
+        }
+
+        private int updateStringList(List<string> list, ref List<string> targetlist)
+        {
+            if (list == null) {
+                return 0;
+            }
+
+            if (targetlist == null) {
+                targetlist = new List<string>();
+            }
+
+            int count = 0;
+            foreach (string name in list) {
+                if (targetlist.FindIndex(item => item == name) < 0) {
+                    targetlist.Add(name);
+                    count++;
+                }
+            }
+
+            return count;
+        }
+
+        public void clear()
+        {
+            if (fgridTestCase.Rows.Count > 1) {
+                CellRange cellRng = fgridTestCase.GetCellRange(1, 1, fgridTestCase.Rows.Count - 1, fgridTestCase.Cols.Count - 1);
+                if (cellRng.Style != null) {
+                    cellRng.Style = null;
+                }
+            }
+
+            fgridTestCase.Rows.Count = 1;
+            fgridTestCase.Cols.Count = (int)UnitTCaseCol.Count + 10;
+            m_VCMode = VCastItemMode.None;
+
+            m_InputCount = 0;
+            m_ExpRsltCount = 0;
+            m_UnitMode = true;
+
+            m_DicUserCodeResult.Clear();
+        }
+
+        public bool save(string filepath, bool execute)
+        {
+            if (string.IsNullOrEmpty(filepath)) {
+                return false;
+            }
+
+            if (Path.GetExtension(filepath).ToLower().IndexOf("csv") >= 0) {
+                return saveAsCSV(filepath);
+            }
+            else {
+                return saveAsExcel(filepath, execute);
+            }
+        }
+        #endregion
+
+        #region UI 
+        private bool addCaption(int tc_index, IVCastItem vcitem, List<string> listinput, List<string> listexpresult, List<string> listactresult)
+        {
+            if (vcitem == null || 
+                (m_VCMode == VCastItemMode.TestCase && (m_InputCount == 0|| listinput == null))) {
+                return false;
+            }
+
+            if (this.InvokeRequired) {
+                this.Invoke(new Action(delegate () {
+                    addCaption_direct(tc_index, vcitem, listinput, listexpresult, listactresult);
+                }));
+            }
+            else {
+                addCaption_direct(tc_index, vcitem, listinput, listexpresult, listactresult);
+            }
+            return true;
+        }
+
+        private bool addCaption_direct(int tc_index, IVCastItem vcitem, List<string> listinput, List<string> listexpresult, List<string> listactresult)
+        {
+            int row = fgridTestCase.Rows.Count;
+            fgridTestCase.Rows.Add();
+            fgridTestCase[row, (int)UnitTCaseCol.TC_Index] = tc_index.ToString();
+            fgridTestCase[row, (int)UnitTCaseCol.TC_ID] = vcitem.Header.TCName;
+            if (m_UnitMode) {
+                fgridTestCase[row, (int)UnitTCaseCol.UnitName] = vcitem.Header.UnitName;
+            }
+            else {
+                fgridTestCase[row, (int)InteTCaseCol.Index] = string.Empty;
+                //fgridTestCase[row, (int)InteTCaseCol.Description] = vcitem.Header.Description;
+            }
+
+            bool IsTCMode = m_VCMode == VCastItemMode.TestCase || m_VCMode == VCastItemMode.TestReport;
+            int exprslt_start = (int)UnitTCaseCol.Count + m_InputCount;
+
+            // Style
+            if (IsTCMode) {
+                int lastExpCol = m_VCMode == VCastItemMode.TestReport ? exprslt_start + m_ExpRsltCount - 1 : fgridTestCase.Cols.Count - 1;
+
+                m_FlexGridLib.applyStyle(fgridTestCase, FGridStyle.BgLightBlue, row, (int)UnitTCaseCol.Count, row, exprslt_start - 1);
+                m_FlexGridLib.applyStyle(fgridTestCase, FGridStyle.BgLightPurple, row, exprslt_start, row, lastExpCol);
+                if (m_VCMode == VCastItemMode.TestReport) {
+                    m_FlexGridLib.applyStyle(fgridTestCase, FGridStyle.BgPink, row, exprslt_start + m_ExpRsltCount, row, fgridTestCase.Cols.Count - 1);
+                }
+            }
+            else {
+                m_FlexGridLib.applyStyle(fgridTestCase, FGridStyle.BgPink, row, (int)UnitTCaseCol.Count, row, fgridTestCase.Cols.Count-1);
+            }
+           
+            if ((IsTCMode && (listinput == null || listinput.Count == 0)) && (listexpresult == null || listexpresult.Count == 0)) {
+                return false;
+            }
+
+            if (m_VCMode == VCastItemMode.TestCase || m_VCMode == VCastItemMode.TestReport) {
+                if (listinput != null) {
+                    for (int index = 0; index < listinput.Count; index++) {
+                        fgridTestCase[row, (int)UnitTCaseCol.Count + index] = listinput[index];
+                    }
+                }
+
+                if (listexpresult != null) {
+                    for (int index = 0; index < listexpresult.Count; index++) {
+                        fgridTestCase[row, exprslt_start + index] = listexpresult[index];
+                    }
+                }
+            }
+
+            if (m_VCMode == VCastItemMode.TestResult || m_VCMode == VCastItemMode.TestReport) {
+                int startcol = (int)UnitTCaseCol.Count;
+                if (m_VCMode == VCastItemMode.TestReport) {
+                    startcol += (m_InputCount + m_ExpRsltCount);
+                }
+
+                if (listactresult != null) {
+                    for (int index = 0; index < listactresult.Count; index++) {
+                        fgridTestCase[row, startcol + index] = listactresult[index];
+                    }
+                }
+
+                fgridTestCase[row, startcol + m_ActRsltCount] = "P/F";
+            }
+
+            fgridTestCase.TopRow = row; // scroll
+            return true;
+        }
+
+        private void setAutoSize(bool autosize)
+        {
+            if (autosize) {
+                fgridTestCase.AutoSizeCols((int)UnitTCaseCol.Count, fgridTestCase.Cols.Count - 1, 1);
+            }
+            else {
+
+                for (int col = (int)UnitTCaseCol.Count; col < fgridTestCase.Cols.Count; col++) {
+                    fgridTestCase.Cols[col].Width = DATA_COLWIDTH;
+                }
+            }
+
+            fgridTestCase.AutoSizeRows();
+        }
+
+        public void addTotalResult(int tc_count, int pass_count)
+        {
+            if (m_VCMode == VCastItemMode.TestCase) {
+                return ;
+            }
+
+            if (this.InvokeRequired) {
+                this.Invoke(new Action(delegate () {
+                    addTotalResult_direct(tc_count, pass_count);
+                }));
+            }
+            else {
+                addTotalResult_direct(tc_count, pass_count);
+            }
+        }
+
+        private void addTotalResult_direct(int tc_count, int pass_count)
+        {
+            if (m_VCMode == VCastItemMode.TestCase) {
+                return;
+            }
+
+            string rslt = string.Format("{0}%", Math.Round((double)pass_count * 100 / tc_count, 1));
+            int row = fgridTestCase.Rows.Count;
+            int col_count = fgridTestCase.Cols.Count;
+            fgridTestCase.Rows.Add();
+
+            int col_rslt = m_VCMode == VCastItemMode.TestResult ? col_count - 1 : col_count - 2;
+            fgridTestCase[row, (int)UnitTCaseCol.UnitName] = "Result >>";
+            fgridTestCase[row, (int)UnitTCaseCol.Count] = "Passed :";
+            fgridTestCase[row, (int)UnitTCaseCol.Count+1] = pass_count;
+            fgridTestCase[row, (int)UnitTCaseCol.Count+2] = "Tatal :";
+            fgridTestCase[row, (int)UnitTCaseCol.Count+3] = tc_count;
+            fgridTestCase[row, (int)UnitTCaseCol.Count+4] = "Ratio :";
+            fgridTestCase[row, (int)UnitTCaseCol.Count+5] = rslt;
+
+            m_FlexGridLib.applyStyleOnRow(fgridTestCase, FGridStyle.BgLightGray, row);
+        }
+
+        private bool addData(
+                        int tc_index, TestCaseItem tcitem, TestResultItem aritem, 
+                        bool ttpassed, 
+                        List<string> listinput, List<string> listexpresult, List<string> listactresult)
+        {
+            if (m_VCMode != VCastItemMode.TestResult && (tcitem == null || m_InputCount == 0 || listinput == null)) {
+                return false;
+            }
+
+            if (m_VCMode != VCastItemMode.TestCase && aritem == null) {
+                return false;
+            }
+
+            if (this.InvokeRequired) {
+                this.Invoke(new Action(delegate () {
+                    addData_direct(tc_index, tcitem, aritem, ttpassed, listinput, listexpresult, listactresult);
+                }));
+            }
+            else {
+                addData_direct(tc_index, tcitem, aritem, ttpassed, listinput, listexpresult, listactresult);
+            }
+            return true;
+        }
+
+        private bool addData_direct(
+                        int tc_index, TestCaseItem tcitem, TestResultItem aritem, 
+                        bool ttpassed, 
+                        List<string> listinput, List<string> listexpresult, List<string> listactresult)
+        {
+            bool status = true;
+
+            int row = fgridTestCase.Rows.Count;
+            int col_count = fgridTestCase.Cols.Count;
+            fgridTestCase.Rows.Add();
+
+            VCastHeader header = m_VCMode == VCastItemMode.TestResult ? aritem.Header : tcitem.Header;
+            fgridTestCase[row, (int)UnitTCaseCol.TC_Index] = tc_index.ToString();
+            
+            fgridTestCase[row, (int)UnitTCaseCol.TC_ID] = header.TCName;
+            if (m_UnitMode) {
+                fgridTestCase[row, (int)UnitTCaseCol.UnitName] = header.UnitName;
+                fgridTestCase[row, (int)UnitTCaseCol.TCGenMethod] = "-";
+                fgridTestCase[row, (int)UnitTCaseCol.Index] = header.TCIndex;
+            }
+            else {
+                fgridTestCase[row, (int)InteTCaseCol.Index] = header.TCIndex;
+                fgridTestCase[row, (int)InteTCaseCol.Description] = header.Description;
+                fgridTestCase[row, (int)InteTCaseCol.TCGenMethod] = "-";
+            }
+            
+            // Test case
+            if (m_VCMode == VCastItemMode.TestCase || m_VCMode == VCastItemMode.TestReport) {
+                if (tcitem != null) { 
+                    int exprslt_strcol = (int)UnitTCaseCol.Count + m_InputCount;
+                    for (int index = 0; index < listinput.Count; index++) {
+                        int col = (int)UnitTCaseCol.Count + index;
+                        string data = tcitem.getInputValue(listinput[index]);
+                        if (string.IsNullOrEmpty(data)) {
+                            data = VALUE_EMPTY;
+                            m_FlexGridLib.applyStyle(fgridTestCase, FGridStyle.BgLightGray, row, col);
+                        }
+                        fgridTestCase[row, col] = data;
+                    }
+
+                    for (int index = 0; index < listexpresult.Count; index++) {
+                        int col = exprslt_strcol + index;
+                        ExpectResultItem exprslt = tcitem.getExpectedResultItem(listexpresult[index]);
+                        if (exprslt != null) {
+                            string data = exprslt.IsUserCode ? VALUE_USERCODE : exprslt.Result;
+                            if (exprslt.IsUserCode) {
+                                m_DicUserCodeResult.Add(new GridPosition(row, col), new TUserCode(exprslt.Name, exprslt.UserCodeMsg));
+                                m_FlexGridLib.applyStyle(fgridTestCase, STYLE_USERCODE, row, col);
+                            }
+                            fgridTestCase[row, col] = data;
+                        }
+                        else {
+                            fgridTestCase[row, col] = VALUE_EMPTY;
+                            m_FlexGridLib.applyStyle(fgridTestCase, FGridStyle.BgLightGray, row, col);
+                        }
+                    }
+
+                    fgridTestCase[row, col_count - 1] = tcitem.Header.FileName;
+                }
+                else {
+                    addLog("Null Data");
+                    status = false;
+                }
+            }
+
+            // Actual Report 
+            if(m_VCMode == VCastItemMode.TestResult|| m_VCMode == VCastItemMode.TestReport) {
+                if (aritem != null) {
+                    bool passed = true;
+                    int startcol = (int)UnitTCaseCol.Count;
+                    if (m_VCMode == VCastItemMode.TestReport) {
+                        startcol += (m_InputCount + m_ExpRsltCount);
+                    }
+
+                    for (int index = 0; index < listactresult.Count; index++) {
+                        int col = startcol + index;
+                        string variable = listactresult[index];
+                        TReultValue rslt = aritem.getResultValue(variable);
+                        if (rslt == null) {
+                            TUserCode usercode = aritem.getUserCodeValue(variable);
+                            if (usercode != null) {
+                                string ucrslt = "UC:OK";
+                                if (!usercode.Match) {
+                                    passed = false;
+                                    ucrslt = "UC:NG";
+                                }
+
+                                fgridTestCase[row, col] = ucrslt;
+                                if (m_VCMode == VCastItemMode.TestResult) {
+                                    m_DicUserCodeResult.Add(new GridPosition(row, col), usercode);
+                                }
+                                m_FlexGridLib.applyStyle(fgridTestCase, FGridStyle.BgOrange, row, col);
+                            }
+                            else {
+                                fgridTestCase[row, col] = VALUE_EMPTY;
+                                m_FlexGridLib.applyStyle(fgridTestCase, FGridStyle.BgLightGray, row, col);
+                            }
+                        }
+                        else {
+                            fgridTestCase[row, col] = IsActualDataOnly ? rslt.ActualValue : rslt.ResultText;
+                            if (!rslt.Match) {
+                                m_FlexGridLib.applyStyle(fgridTestCase, FGridStyle.BgPinkFRed, row, col);
+                                passed = false;
+                            }
+                        }
+                    }
+
+                    if (m_VCMode == VCastItemMode.TestResult) {
+                        fgridTestCase[row, col_count - 1] = aritem.Header.FileName;
+                    }
+
+                    int rsltindex = col_count - 3;
+                    fgridTestCase[row, rsltindex] = passed ? "Pass" : "Fail";
+                    if (!passed) {
+                        m_FlexGridLib.applyStyle(fgridTestCase, FGridStyle.FgRed, row, rsltindex);// col_count - 1);
+                    }
+
+                    fgridTestCase[row, rsltindex+1] = ttpassed ? "Pass" : "Fail";
+                    if (!ttpassed) {
+                        m_FlexGridLib.applyStyle(fgridTestCase, FGridStyle.FgRed, row, rsltindex+1);// col_count - 1);
+                    }
+
+                }
+                else {
+                    addLog("Null Data");
+                    status = false;
+                }
+            }
+
+            return status;
+        }
+
+        public void setTextAlign() 
+        {
+            if (this.InvokeRequired) {
+                this.Invoke(new Action(delegate () {
+                    fgridTestCase.AutoSizeRows(1, (int)UnitTCaseCol.Index + 1, fgridTestCase.Rows.Count - 1, fgridTestCase.Cols.Count - 1, 5, AutoSizeFlags.None);
+                    for (int col = (int)UnitTCaseCol.Count; col < fgridTestCase.Cols.Count; col++) {
+                        fgridTestCase.Cols[col].TextAlign = TextAlignEnum.CenterCenter;
+                    }
+                }));
+            }
+            else {
+                fgridTestCase.AutoSizeRows(1, (int)UnitTCaseCol.Index + 1, fgridTestCase.Rows.Count - 1, fgridTestCase.Cols.Count - 1, 5, AutoSizeFlags.None);
+
+                for (int col = (int)UnitTCaseCol.Count; col < fgridTestCase.Cols.Count; col++) {
+                    fgridTestCase.Cols[col].TextAlign = TextAlignEnum.CenterCenter;
+                }
+            }
+        }
+
+        private void setColumNames(int inputcnt, int exprsltcnt, int actrsltcnt, VCastItemMode mode)
+        {
+            int row_caption = 0;
+
+            int col_count = fgridTestCase.Cols.Count;
+            int exprslt_strcol = (int)UnitTCaseCol.Count + m_InputCount;
+            if (mode == VCastItemMode.TestCase || mode == VCastItemMode.TestReport) {
+                for (int index = 0; index < inputcnt; index++) {
+                    int col = (int)UnitTCaseCol.Count + index;
+                    fgridTestCase[row_caption, col] = string.Format("Inpt[{0}]", index);
+                }
+                
+                for (int index = 0; index < exprsltcnt; index++) {
+                    int col = exprslt_strcol + index;
+                    fgridTestCase[row_caption, col] = string.Format("ExpR[{0}]", index);
+                }
+            }
+
+            if (mode == VCastItemMode.TestResult || mode == VCastItemMode.TestReport) {
+                int start = mode == VCastItemMode.TestResult ? (int)UnitTCaseCol.Count : exprslt_strcol + m_ExpRsltCount;
+                for (int index = 0; index < actrsltcnt; index++) {
+                    int col = start + index;
+                    fgridTestCase[row_caption, col] = string.Format("ActR[{0}]", index);
+                }
+            }
+
+            int lastcol = col_count - 1;
+            if (mode == VCastItemMode.TestResult || mode == VCastItemMode.TestReport) { 
+                fgridTestCase[row_caption, lastcol - 2] = "P/F";
+                fgridTestCase[row_caption, lastcol - 1] = "P/F";
+                fgridTestCase.Cols[lastcol-1].AllowMerging = true;
+            }
+            fgridTestCase.Cols[lastcol].Width = 150;
+            fgridTestCase[row_caption, lastcol] = "Log File";
+            fgridTestCase.Cols[lastcol].AllowMerging = true;
+
+            for (int col = (int)UnitTCaseCol.Count; col < col_count-1; col++) {
+                fgridTestCase.Cols[col].Width = DATA_COLWIDTH;
+            }
+        }
+
+        private void init(bool cleardata)
+        {
+            if (cleardata) {
+                clear();
+            }
+
+            if (this.InvokeRequired) {
+                this.Invoke(new Action(delegate () {
+                    fgrid_init();
+                }));
+            }
+            else {
+                fgrid_init();
+            }
+        }
+
+        private void fgrid_init()
+        {
+            tboxSearchTC.Visible = false;
+            m_FlexGridLib.createStyle(fgridTestCase);
+
+            fgridTestCase.ExtendLastCol = true;
+            fgridTestCase.Cols[(int)UnitTCaseCol.TC_Index].AllowMerging = true;
+            fgridTestCase.Cols[(int)UnitTCaseCol.TC_ID].AllowMerging = true;
+            if (m_UnitMode) {
+                fgridTestCase.Cols[(int)UnitTCaseCol.UnitName].AllowMerging = true;
+                string[] captions = new string[] { "Index", "TC_ID", "Unit", "G", " " };
+                int[] widths = new int[] { 60, 100, 150, 20, 20 };
+
+                for (int index = 0; index < captions.Length; index++) {
+                    fgridTestCase[0, index] = captions[index];
+                    fgridTestCase.Cols[index].Width = widths[index];
+                }
+            }
+            else {
+                fgridTestCase.Cols[(int)UnitTCaseCol.UnitName].AllowMerging = true;
+                string[] captions = new string[] { "Index", "TC_ID", " ", "Description", "G" };
+                int[] widths = new int[] { 60, 100, 20, 200, 20, 20 };
+
+                for (int index = 0; index < captions.Length; index++) {
+                    fgridTestCase[0, index] = captions[index];
+                    fgridTestCase.Cols[index].Width = widths[index];
+                }
+            }
+        }
+
+        private void setColumnsVisible(bool col_hide)
+        {
+            var ht = contextMenu.Tag;
+            if (ht == null) {
+                return;
+            }
+
+            CellRange crange = fgridTestCase.Selection;
+            int left = crange.c1;
+            int right = crange.c2;
+            if (left > right) {
+                left = crange.c2;
+                right = crange.c1;
+            }
+
+            for (int col = left; col <= right; col++) {
+                fgridTestCase.Cols[col].Visible = col_hide;
+            }
+        }
+
+        private void addLog(string format, params Object[] args)
+        {
+            if (addLogFunc == null) {
+                return;
+            }
+
+            addLogFunc(format, args);
+
+            string data = string.Empty;
+            if (args.Count() == 0) {
+                data = format;
+            }
+            else {
+                data = string.Format(format, args);
+            }
+
+            if (string.IsNullOrEmpty(data)) {
+                return;
+            }
+
+            data += "\r";
+
+            Debug.Print(data);
+        }
+        #endregion
+
+        #region file 
+        private bool saveAsCSV(string filepath)
+        {
+            int col_count = fgridTestCase.Cols.Count;
+            int row_count = fgridTestCase.Rows.Count;
+
+            using (StreamWriter writer = File.CreateText(filepath)) {
+                for (int row = 0; row < row_count; row++) {
+                    string line = string.Empty;
+                    for (int col = 0; col < col_count; col++) {
+                        string data = fgridTestCase[row, col] == null ? string.Empty : fgridTestCase[row, col].ToString();
+                        if (data.IndexOf(",") >= 0) {
+                            data = "\"" + data + "\"";
+                        }
+
+                        line += (data + ",");
+                    }
+                    writer.WriteLine(line);
+                }
+
+                writer.Close();
+            }
+            System.Diagnostics.Process.Start(filepath);
+            return true;
+        }
+
+        private string fileTitle(VCastItemMode mode)
+        {
+            switch (mode) {
+                case VCastItemMode.TestCase:    return "Test Case";
+                case VCastItemMode.TestResult:  return "Test Result";
+                case VCastItemMode.TestReport:  return "Test Log";
+            }
+            return string.Empty;
+        }
+
+        private bool saveAsExcel(string filepath, bool execute)
+        {
+            XlsxManager excel = new XlsxManager();
+            int col_count = fgridTestCase.Cols.Count;
+            int row_count = fgridTestCase.Rows.Count;
+
+            int col_offset = 2;
+            int row_offset = 6;
+
+            string title = fileTitle(m_VCMode);
+            excel.create(filepath);
+            excel.selectSheet(1, title, true);
+
+            // Title 
+            int tblrow = 1;
+            excel.writeData(tblrow, 1, title);
+            excel.applyStyle(tblrow, 1, tblrow, XLS_TITLE_COLCOUNT, XlsCellStyle.Title);
+
+            tblrow = row_offset;
+            excel.applyStyle(tblrow, col_offset, tblrow, col_count + col_offset - 1, XlsCellStyle.Caption);
+            excel.applyStyle(tblrow+1, col_offset,  row_count+ row_offset-1, col_count + col_offset - 1, XlsCellStyle.General);
+
+            // set Col Width 
+            excel.setRowHeight(1, 40);
+            excel.setColumnWidth(1, 1);
+            for (int col = 0; col < col_count; col++) {
+                excel.setColumnWidth(col + col_offset, (int)(fgridTestCase.Cols[col].Width * 0.2));
+            }
+
+            for (int row = 0; row < row_count; row++) {
+                for (int col = 0; col < col_count; col++) {
+                    // Apply style
+                    CellRange cellRng = fgridTestCase.GetCellRange(row, col, row, col);
+                    if (cellRng.Style != null) {
+                        XlsCellStyle xlsstl = m_FlexGridLib.cvrtToExcelStyle(cellRng.Style.Name);
+                        if (xlsstl != XlsCellStyle.None) {
+                            excel.applyStyle( row + row_offset, col + col_offset, row + row_offset, col + col_offset, xlsstl);
+                        }
+                    }
+
+                    if(m_VCMode == VCastItemMode.TestCase && col == col_count - 1) {
+                        if (row == 0) {
+                            excel.writeData(row + row_offset, col + col_offset, CAPTION_RELATEDID);
+                        }
+                        continue;
+                    }
+
+                    if (fgridTestCase[row, col] == null) {
+                        continue;
+                    }
+
+                    // write data
+                    excel.writeData(row + row_offset, col + col_offset, fgridTestCase[row, col]);
+                    excel.setWrapText(row + row_offset, col + col_offset, row + row_offset, col + col_offset, true);
+
+                    // Inser memo 
+                    GridPosition pos = new GridPosition(row, col);
+                    if (m_DicUserCodeResult.ContainsKey(pos)) {
+                        TUserCode usercode = m_DicUserCodeResult[pos];
+                        if (usercode != null && usercode.IsValid) {
+                            excel.addComment(row + row_offset, col + col_offset, usercode.Message);
+                        }
+                    }
+                }
+                Thread.Sleep(0);
+            }
+
+            setTableFormat(excel, col_offset, row_offset);
+
+            excel.close(true);
+            Thread.Sleep(1000);
+            if (execute) {
+                excel.execute(filepath);
+            }
+            return true;
+        }
+
+        private void setTableFormat(XlsxManager excel, int col_offset, int row_offset)
+        {
+            int col_count = fgridTestCase.Cols.Count;
+            int row_count = fgridTestCase.Rows.Count;
+
+            //-----------------------------------------------------------------------------------------------------
+            // Merged 
+            //-----------------------------------------------------------------------------------------------------
+            // title
+            excel.merge(1, 1, 1, XLS_TITLE_COLCOUNT);
+            // table title 
+            string[] tbltitls = new string[] { "Test Case", "Input", "Expected Result", "Actual Result", "Result"};
+
+            // Test Case 
+            int col = (int)UnitTCaseCol.TC_ID + col_offset;
+            int row = row_offset - 1;
+            excel.writeData(row, (int)UnitTCaseCol.TC_Index + col_offset, tbltitls[0]);
+            if (m_UnitMode){
+                col += (int)UnitTCaseCol.TCGenMethod;
+            }
+            else {
+                col += (int)InteTCaseCol.TCGenMethod;
+            }
+
+            int testcase_col = col - 1;
+            excel.merge(row, col_offset, row, testcase_col);
+            excel.applyStyle(row, col_offset, row, testcase_col, XlsCellStyle.Caption);
+            excel.drawDoubleBorder(row_offset - 1, testcase_col, row_offset - 1 + row_count, testcase_col, BorderEdge.Right, XLColor.Black);
+
+            // Test Result 
+            if (m_VCMode == VCastItemMode.TestResult) {
+                excel.writeData(col, row , tbltitls[3]);
+                int actrslt_col = col + m_ActRsltCount;
+                excel.merge(row, col, row, actrslt_col);
+                excel.applyStyle(row, col, row, actrslt_col, XlsCellStyle.Caption);
+                excel.drawDoubleBorder(row_offset - 1, actrslt_col, row_offset - 1 + row_count, actrslt_col, BorderEdge.Right, XLColor.Black);
+
+                col += (m_ActRsltCount + 1);
+                excel.writeData(row , col, tbltitls[4]);
+                excel.merge(row, col, row, col + 2);
+                excel.applyStyle(row, col, row, col + 2, XlsCellStyle.Caption);
+            }
+            else {
+                // Input
+                excel.writeData(row, col, tbltitls[1]);
+                int input_col = col + m_InputCount;
+                excel.merge(row, col, row, input_col);
+                excel.applyStyle(row, col, row, input_col, XlsCellStyle.Caption);
+                excel.drawDoubleBorder(row_offset - 1, input_col,  row_offset - 1 + row_count, input_col, BorderEdge.Right, XLColor.Black);
+                col += (m_InputCount+1);
+
+                // Expected Result 
+                excel.writeData(row , col, tbltitls[2]);
+                int exprslt_col = col + m_ExpRsltCount - 1;
+                excel.merge(row, col, row, exprslt_col);
+                excel.applyStyle(row, col, row, exprslt_col, XlsCellStyle.Caption);
+                excel.drawDoubleBorder(row_offset - 1, exprslt_col, row_offset - 1 + row_count, exprslt_col, BorderEdge.Right, XLColor.Black);
+                col += m_ExpRsltCount;
+
+                if (m_VCMode == VCastItemMode.TestCase) {
+                    // Related ID 
+                    excel.writeData(row , col, CAPTION_RELATEDID);
+                    excel.merge(row, col, row+1, col);
+                    excel.applyStyle(row, col, row+1, col, XlsCellStyle.Caption);
+                }
+                else {
+                    // Actual Result 
+                    excel.writeData(row , col, tbltitls[3]);
+                    int actrslt_col = col + m_ActRsltCount - 1;
+                    excel.merge(row, col, row, actrslt_col);
+                    excel.applyStyle(row, col, row, actrslt_col, XlsCellStyle.Caption);
+                    excel.drawDoubleBorder(row_offset - 1, actrslt_col, row_offset - 1 + row_count, actrslt_col, BorderEdge.Right, XLColor.Black);
+                    col += m_ActRsltCount;
+
+                    // Pass/Fail  
+                    excel.writeData(row, col, "Pass/Fail");
+                    excel.merge(row, col, row, col + 1);
+                    excel.applyStyle(row, col, row, col + 1, XlsCellStyle.Caption);
+                    col +=2;
+
+                    // LogData 
+                    excel.writeData(row, col, tbltitls[4]);
+                    excel.applyStyle(row, col, row, col, XlsCellStyle.Caption);
+                }
+            }
+
+            // border
+            int col_last = col_offset + col_count - 1;
+            int row_start = row_offset - 1;
+            int row_last = row_offset + row_count - 1;
+            excel.drawThickBorder(row_start, col_offset, row_start, col_last, BorderEdge.Top, XLColor.Black);
+            excel.drawDoubleBorder(row_start+2, col_offset,  row_start+2, col_last, BorderEdge.Top, XLColor.Black);
+            excel.drawDoubleBorder(row_last, col_offset,  row_last, col_last, BorderEdge.Top, XLColor.Black);
+
+            excel.drawThickBorder(row_start, col_offset, row_last, col_offset, BorderEdge.Left, XLColor.Black);
+            excel.drawThickBorder(row_start, col_last, row_last, col_last, BorderEdge.Right, XLColor.Black);
+            excel.drawThickBorder(row_last, col_offset,  row_last, col_last, BorderEdge.Bottom, XLColor.Black);
+
+            List<CellRange> ranges = m_FlexGridLib.getMergedCellsOnColumns(fgridTestCase);
+            foreach (CellRange range in ranges) {
+                excel.merge(range.r1 + row_offset, range.c1 + col_offset,  range.r2 + row_offset, range.c2 + col_offset);
+            }
+        }
+        #endregion
+    }
+    
+    #region GridPosition
+    internal class GridPosition {
+        public int Row { get; set; }
+        public int Col { get; set; }
+
+        public GridPosition(int row, int col)
+        {
+            Row = row;
+            Col = col;
+        }
+
+        public override bool Equals(object obj)
+        {
+            if (obj == null) {
+                return false;
+            }
+
+            GridPosition input = obj as GridPosition;
+            if (input == null) {
+                return false;
+            }
+
+            return Row == input.Row && Col == input.Col;
+        }
+
+        public override int GetHashCode()
+        {
+            int hash = 17;
+            hash = hash * 23 + Row.GetHashCode();
+            hash = hash * 23 + Col.GetHashCode();
+            return hash;
+        }
+    }
+    #endregion
+}

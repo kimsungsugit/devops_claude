@@ -1,0 +1,417 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<coverage_data xml_testcase_version="7">
+  <unit index="9" translation_unit_index="0" coverage_type="STATEMENT_BRANCH" field_width="8">
+    <name>EEPROM</name>
+    <configuration>
+      <empty_statements_coverable>1</empty_statements_coverable>
+      <cover_catch_as_branch>1</cover_catch_as_branch>
+      <cover_logical_operators_in_parameters>1</cover_logical_operators_in_parameters>
+      <handle_ternary_operator>1</handle_ternary_operator>
+      <cover_nested_conditional>1</cover_nested_conditional>
+      <coverage_for_included_c_files>1</coverage_for_included_c_files>
+      <coverage_for_headers>0</coverage_for_headers>
+      <instrument_by_block>0</instrument_by_block>
+      <coverage_for_declarations>1</coverage_for_declarations>
+      <basis_paths_for_constant_branches>1</basis_paths_for_constant_branches>
+      <cover_included_c_files>1</cover_included_c_files>
+      <cover_headers>0</cover_headers>
+      <preprocessed>1</preprocessed>
+      <masking_mcdc>0</masking_mcdc>
+      <cuda_mode>0</cuda_mode>
+      <coverage_for_lambdas>2</coverage_for_lambdas>
+      <pack_instr_storage>1</pack_instr_storage>
+      <global_buffer_opts>0</global_buffer_opts>
+      <coverage_unit_registration>0</coverage_unit_registration>
+      <coverage_for_template_instantiations>0</coverage_for_template_instantiations>
+      <use_optimized_mcdc_instrumentation>1</use_optimized_mcdc_instrumentation>
+    </configuration>
+    <attributes>
+      <has_empty_statements>1</has_empty_statements>
+      <has_catch_statements>0</has_catch_statements>
+      <has_logical_operators_in_parameters>0</has_logical_operators_in_parameters>
+      <has_ternary_operator>0</has_ternary_operator>
+      <has_nested_ternary_operator>0</has_nested_ternary_operator>
+      <has_constant_branch>0</has_constant_branch>
+      <number_ascii_bytes>2316</number_ascii_bytes>
+      <probe_point_after_last_include>11395</probe_point_after_last_include>
+      <probe_point_beginning_of_file>8</probe_point_beginning_of_file>
+      <probe_point_end_of_file>11766</probe_point_end_of_file>
+      <file_timestamp>1758848727</file_timestamp>
+      <file_checksum>4294883129</file_checksum>
+      <translation_unit_checksum>1246627939</translation_unit_checksum>
+    </attributes>
+    <source_files>
+      <source_file index="0" file_index="0" path="c:/workspace/ne1aw_porting/generated_code/eeprom.c" crc_checksum="4294883129" sha_checksum="311e1e43ecb139c12b9fea16e096418c77e73ec2" timestamp="1758848727" lis_file_path="C:\MDS_work\PSD_ENV\UT\SwUT_21_EEPROM\SWUT_21_EEPROM\B0000009.LIS"/>
+    </source_files>
+    <template_function_prototypes/>
+    <subprogram index="1">
+      <name>BackupSector</name>
+      <source_file_index>0</source_file_index>
+      <parameterized>BackupSector(EEPROM_TAddress_,word,word)</parameterized>
+      <mangled>BackupSector</mangled>
+      <source_function_checksum>1762420304</source_function_checksum>
+      <translation_unit_function_checksum>687353074</translation_unit_function_checksum>
+      <lines>
+        <line type="Branch" number="0" conditions="1" condition_value="1" is_function_entry="1" id="1" stmt_id="0" startline="105" startcol="1" endline="105" endcol="1" tustartline="11417" tustartcol="1" tuendline="11417" tuendcol="1" allowed_position="3"/>
+        <line type="Statement" number="1" id="1" stmt_id="2" startline="111" startcol="3" endline="111" endcol="19" tustartline="11423" tustartcol="3" tuendline="11423" tuendcol="19" allowed_position="2"/>
+        <line type="Branch" number="2" conditions="2" id="2" stmt_id="3" startline="112" startcol="3" endline="112" endcol="27" tustartline="11424" tustartcol="3" tuendline="11424" tuendcol="27" allowed_position="0"/>
+        <line type="Statement" number="3" id="2" stmt_id="7" startline="113" startcol="5" endline="113" endcol="25" tustartline="11425" tustartcol="5" tuendline="11425" tuendcol="25" allowed_position="2"/>
+        <line type="Statement" number="4" id="3" stmt_id="9" startline="117" startcol="3" endline="117" endcol="15" tustartline="11429" tustartcol="3" tuendline="11429" tuendcol="15" allowed_position="2"/>
+        <line type="Branch" number="5" conditions="2" id="3" stmt_id="10" startline="118" startcol="3" endline="118" endcol="25" tustartline="11430" tustartcol="3" tuendline="11430" tuendcol="25" allowed_position="0"/>
+        <line type="Statement" number="6" id="4" stmt_id="14" startline="119" startcol="5" endline="119" endcol="23" tustartline="11431" tustartcol="5" tuendline="11431" tuendcol="23" allowed_position="2"/>
+        <line type="Branch" number="7" conditions="2" id="4" stmt_id="15" startline="123" startcol="3" endline="123" endcol="54" tustartline="11435" tustartcol="3" tuendline="11435" tuendcol="54" allowed_position="0"/>
+        <line type="Statement" number="8" id="5" stmt_id="21" startline="124" startcol="5" endline="124" endcol="22" tustartline="11436" tustartcol="5" tuendline="11436" tuendcol="22" allowed_position="2"/>
+        <line type="Statement" number="9" id="6" stmt_id="23" startline="127" startcol="5" endline="127" endcol="37" tustartline="11439" tustartcol="5" tuendline="11439" tuendcol="37" allowed_position="2"/>
+      </lines>
+      <startline>11417</startline>
+      <startcol>1</startcol>
+      <endline>11441</endline>
+      <endcol>1</endcol>
+      <orig_startline>105</orig_startline>
+      <orig_endline>129</orig_endline>
+      <firstexec_startline>11423</firstexec_startline>
+      <firstexec_startcol>3</firstexec_startcol>
+      <firstexec_orig_startline>111</firstexec_orig_startline>
+      <open_brace_tu_line>11417</open_brace_tu_line>
+      <open_brace_tu_col>1</open_brace_tu_col>
+      <open_brace_src_line>105</open_brace_src_line>
+      <metrics>
+        <complexity>4</complexity>
+        <coverage coverage_type="STATEMENT">
+          <total>9</total>
+        </coverage>
+        <coverage coverage_type="BRANCH">
+          <total>7</total>
+        </coverage>
+      </metrics>
+    </subprogram>
+    <subprogram index="2">
+      <name>WriteBlock</name>
+      <source_file_index>0</source_file_index>
+      <parameterized>WriteBlock(EEPROM_TAddress_,word,word,word*)byte</parameterized>
+      <mangled>WriteBlock</mangled>
+      <source_function_checksum>2273111018</source_function_checksum>
+      <translation_unit_function_checksum>3864725225</translation_unit_function_checksum>
+      <lines>
+        <line type="Branch" number="0" conditions="1" condition_value="1" is_function_entry="1" id="5" stmt_id="0" startline="145" startcol="1" endline="145" endcol="1" tustartline="11457" tustartcol="1" tuendline="11457" tuendcol="1" allowed_position="3"/>
+        <line type="Statement" number="1" id="7" stmt_id="1" startline="146" startcol="3" endline="146" endcol="19" tustartline="11458" tustartcol="3" tuendline="11458" tuendcol="19" is_macro="1" allowed_position="2"/>
+        <line type="Statement" number="2" id="8" stmt_id="5" startline="147" startcol="3" endline="147" endcol="16" tustartline="11459" tustartcol="3" tuendline="11459" tuendcol="16" allowed_position="2"/>
+        <line type="Branch" number="3" conditions="2" id="6" stmt_id="12" startline="153" startcol="3" endline="153" endcol="16" tustartline="11465" tustartcol="3" tuendline="11465" tuendcol="16" allowed_position="0"/>
+        <line type="Statement" number="4" id="9" stmt_id="16" startline="154" startcol="5" endline="154" endcol="13" tustartline="11466" tustartcol="5" tuendline="11466" tuendcol="13" allowed_position="2"/>
+        <line type="Statement" number="5" id="10" stmt_id="18" startline="155" startcol="5" endline="155" endcol="29" tustartline="11467" tustartcol="5" tuendline="11467" tuendcol="29" allowed_position="2"/>
+        <line type="Branch" number="6" conditions="2" id="7" stmt_id="19" startline="157" startcol="5" endline="157" endcol="43" tustartline="11469" tustartcol="5" tuendline="11469" tuendcol="43" is_macro="1" allowed_position="0"/>
+        <line type="Statement" number="7" id="11" stmt_id="25" startline="159" startcol="7" endline="159" endcol="68" tustartline="11471" tustartcol="7" tuendline="11471" tuendcol="68" allowed_position="2"/>
+        <line type="Statement" number="8" id="12" stmt_id="27" startline="161" startcol="7" endline="161" endcol="28" tustartline="11473" tustartcol="7" tuendline="11473" tuendcol="28" is_macro="1" allowed_position="2"/>
+        <line type="Branch" number="9" conditions="2" id="8" stmt_id="28" startline="162" startcol="7" endline="162" endcol="46" tustartline="11474" tustartcol="7" tuendline="11474" tuendcol="46" is_macro="1" allowed_position="0"/>
+        <line type="Statement" number="10" id="13" stmt_id="32" startline="163" startcol="9" endline="163" endcol="9" tustartline="11475" tustartcol="9" tuendline="11475" tuendcol="9" allowed_position="2"/>
+        <line type="Branch" number="11" conditions="2" id="9" stmt_id="33" startline="167" startcol="7" endline="167" endcol="52" tustartline="11479" tustartcol="7" tuendline="11479" tuendcol="52" is_macro="1" allowed_position="0"/>
+        <line type="Statement" number="12" id="14" stmt_id="37" startline="168" startcol="9" endline="168" endcol="20" tustartline="11480" tustartcol="9" tuendline="11480" tuendcol="20" is_macro="1" allowed_position="2"/>
+        <line type="Branch" number="13" conditions="2" id="10" stmt_id="38" startline="169" startcol="14" endline="169" endcol="61" tustartline="11481" tustartcol="14" tuendline="11481" tuendcol="61" is_macro="1" allowed_position="0"/>
+        <line type="Statement" number="14" id="15" stmt_id="42" startline="170" startcol="9" endline="170" endcol="17" tustartline="11482" tustartcol="9" tuendline="11482" tuendcol="17" allowed_position="2"/>
+        <line type="Branch" number="15" conditions="2" id="11" stmt_id="45" startline="176" startcol="7" endline="176" endcol="51" tustartline="11488" tustartcol="7" tuendline="11488" tuendcol="51" allowed_position="0"/>
+        <line type="Statement" number="16" id="16" stmt_id="49" startline="177" startcol="9" endline="177" endcol="32" tustartline="11489" tustartcol="9" tuendline="11489" tuendcol="32" allowed_position="2"/>
+        <line type="Statement" number="17" id="17" stmt_id="53" startline="180" startcol="9" endline="180" endcol="20" tustartline="11492" tustartcol="9" tuendline="11492" tuendcol="20" is_macro="1" allowed_position="2"/>
+        <line type="Branch" number="18" conditions="2" id="12" stmt_id="54" startline="185" startcol="5" endline="185" endcol="49" tustartline="11497" tustartcol="5" tuendline="11497" tuendcol="49" is_macro="1" allowed_position="0"/>
+        <line type="Statement" number="19" id="18" stmt_id="58" startline="186" startcol="7" endline="186" endcol="18" tustartline="11498" tustartcol="7" tuendline="11498" tuendcol="18" is_macro="1" allowed_position="2"/>
+        <line type="Statement" number="20" id="19" stmt_id="60" startline="191" startcol="3" endline="191" endcol="16" tustartline="11503" tustartcol="3" tuendline="11503" tuendcol="16" allowed_position="0"/>
+      </lines>
+      <startline>11457</startline>
+      <startcol>1</startcol>
+      <endline>11504</endline>
+      <endcol>1</endcol>
+      <orig_startline>145</orig_startline>
+      <orig_endline>192</orig_endline>
+      <firstexec_startline>11465</firstexec_startline>
+      <firstexec_startcol>3</firstexec_startcol>
+      <firstexec_orig_startline>153</firstexec_orig_startline>
+      <open_brace_tu_line>11457</open_brace_tu_line>
+      <open_brace_tu_col>1</open_brace_tu_col>
+      <open_brace_src_line>145</open_brace_src_line>
+      <metrics>
+        <complexity>8</complexity>
+        <coverage coverage_type="STATEMENT">
+          <total>20</total>
+        </coverage>
+        <coverage coverage_type="BRANCH">
+          <total>15</total>
+        </coverage>
+      </metrics>
+    </subprogram>
+    <subprogram index="3">
+      <name>SetupFCCOB</name>
+      <source_file_index>0</source_file_index>
+      <parameterized>SetupFCCOB(dword,word,word,word*,word*)byte</parameterized>
+      <mangled>SetupFCCOB</mangled>
+      <source_function_checksum>3368591212</source_function_checksum>
+      <translation_unit_function_checksum>1812823762</translation_unit_function_checksum>
+      <lines>
+        <line type="Branch" number="0" conditions="1" condition_value="1" is_function_entry="1" id="13" stmt_id="0" startline="205" startcol="1" endline="205" endcol="1" tustartline="11517" tustartcol="1" tuendline="11517" tuendcol="1" allowed_position="3"/>
+        <line type="Statement" number="1" id="20" stmt_id="1" startline="207" startcol="3" endline="207" endcol="19" tustartline="11519" tustartcol="3" tuendline="11519" tuendcol="19" allowed_position="2"/>
+        <line type="Statement" number="2" id="21" stmt_id="3" startline="210" startcol="3" endline="210" endcol="24" tustartline="11522" tustartcol="3" tuendline="11522" tuendcol="24" is_macro="1" allowed_position="2"/>
+        <line type="Statement" number="3" id="22" stmt_id="5" startline="211" startcol="3" endline="211" endcol="23" tustartline="11523" tustartcol="3" tuendline="11523" tuendcol="23" is_macro="1" allowed_position="2"/>
+        <line type="Statement" number="4" id="23" stmt_id="7" startline="212" startcol="3" endline="212" endcol="53" tustartline="11524" tustartcol="3" tuendline="11524" tuendcol="53" is_macro="1" allowed_position="2"/>
+        <line type="Statement" number="5" id="24" stmt_id="9" startline="213" startcol="3" endline="213" endcol="90" tustartline="11525" tustartcol="3" tuendline="11525" tuendcol="90" is_macro="1" allowed_position="2"/>
+        <line type="Statement" number="6" id="25" stmt_id="11" startline="214" startcol="3" endline="214" endcol="55" tustartline="11526" tustartcol="3" tuendline="11526" tuendcol="55" is_macro="1" allowed_position="2"/>
+        <line type="Branch" number="7" conditions="2" id="14" stmt_id="12" startline="216" startcol="3" endline="216" endcol="38" tustartline="11528" tustartcol="3" tuendline="11528" tuendcol="38" allowed_position="0"/>
+        <line type="Statement" number="8" id="26" stmt_id="16" startline="217" startcol="5" endline="217" endcol="73" tustartline="11529" tustartcol="5" tuendline="11529" tuendcol="73" is_macro="1" allowed_position="2"/>
+        <line type="Branch" number="9" conditions="2" id="15" stmt_id="17" startline="220" startcol="5" endline="220" endcol="28" tustartline="11532" tustartcol="5" tuendline="11532" tuendcol="28" allowed_position="0"/>
+        <line type="Statement" number="10" id="27" stmt_id="21" startline="222" startcol="7" endline="222" endcol="25" tustartline="11534" tustartcol="7" tuendline="11534" tuendcol="25" allowed_position="2"/>
+        <line type="Statement" number="11" id="28" stmt_id="25" startline="225" startcol="7" endline="225" endcol="13" tustartline="11537" tustartcol="7" tuendline="11537" tuendcol="13" allowed_position="2"/>
+        <line type="Branch" number="12" conditions="2" id="16" stmt_id="26" startline="228" startcol="5" endline="228" endcol="15" tustartline="11540" tustartcol="5" tuendline="11540" tuendcol="15" allowed_position="0"/>
+        <line type="Statement" number="13" id="29" stmt_id="30" startline="229" startcol="7" endline="229" endcol="37" tustartline="11541" tustartcol="7" tuendline="11541" tuendcol="37" is_macro="1" allowed_position="2"/>
+        <line type="Statement" number="14" id="30" stmt_id="32" startline="230" startcol="7" endline="230" endcol="12" tustartline="11542" tustartcol="7" tuendline="11542" tuendcol="12" allowed_position="2"/>
+        <line type="Statement" number="15" id="31" stmt_id="36" startline="234" startcol="3" endline="234" endcol="14" tustartline="11546" tustartcol="3" tuendline="11546" tuendcol="14" allowed_position="2"/>
+        <line type="Statement" number="16" id="32" stmt_id="38" startline="235" startcol="3" endline="235" endcol="12" tustartline="11547" tustartcol="3" tuendline="11547" tuendcol="12" is_macro="1" allowed_position="0"/>
+      </lines>
+      <startline>11517</startline>
+      <startcol>1</startcol>
+      <endline>11548</endline>
+      <endcol>1</endcol>
+      <orig_startline>205</orig_startline>
+      <orig_endline>236</orig_endline>
+      <firstexec_startline>11522</firstexec_startline>
+      <firstexec_startcol>3</firstexec_startcol>
+      <firstexec_orig_startline>210</firstexec_orig_startline>
+      <open_brace_tu_line>11517</open_brace_tu_line>
+      <open_brace_tu_col>1</open_brace_tu_col>
+      <open_brace_src_line>205</open_brace_src_line>
+      <metrics>
+        <complexity>4</complexity>
+        <coverage coverage_type="STATEMENT">
+          <total>16</total>
+        </coverage>
+        <coverage coverage_type="BRANCH">
+          <total>7</total>
+        </coverage>
+      </metrics>
+    </subprogram>
+    <subprogram index="4">
+      <name>EraseSectorInternal</name>
+      <source_file_index>0</source_file_index>
+      <parameterized>EraseSectorInternal(EEPROM_TAddress_)byte</parameterized>
+      <mangled>EraseSectorInternal</mangled>
+      <source_function_checksum>4253585109</source_function_checksum>
+      <translation_unit_function_checksum>3839587464</translation_unit_function_checksum>
+      <lines>
+        <line type="Branch" number="0" conditions="1" condition_value="1" is_function_entry="1" id="17" stmt_id="0" startline="248" startcol="1" endline="248" endcol="1" tustartline="11560" tustartcol="1" tuendline="11560" tuendcol="1" allowed_position="3"/>
+        <line type="Statement" number="1" id="33" stmt_id="1" startline="249" startcol="3" endline="249" endcol="19" tustartline="11561" tustartcol="3" tuendline="11561" tuendcol="19" is_macro="1" allowed_position="2"/>
+        <line type="Branch" number="2" conditions="2" id="18" stmt_id="2" startline="251" startcol="3" endline="251" endcol="39" tustartline="11563" tustartcol="3" tuendline="11563" tuendcol="39" is_macro="1" allowed_position="0"/>
+        <line type="Statement" number="3" id="34" stmt_id="6" startline="252" startcol="5" endline="252" endcol="16" tustartline="11564" tustartcol="5" tuendline="11564" tuendcol="16" is_macro="1" allowed_position="2"/>
+        <line type="Statement" number="4" id="35" stmt_id="10" startline="255" startcol="5" endline="255" endcol="26" tustartline="11567" tustartcol="5" tuendline="11567" tuendcol="26" is_macro="1" allowed_position="2"/>
+        <line type="Statement" number="5" id="36" stmt_id="12" startline="256" startcol="5" endline="256" endcol="25" tustartline="11568" tustartcol="5" tuendline="11568" tuendcol="25" is_macro="1" allowed_position="2"/>
+        <line type="Statement" number="6" id="37" stmt_id="14" startline="257" startcol="5" endline="257" endcol="55" tustartline="11569" tustartcol="5" tuendline="11569" tuendcol="55" is_macro="1" allowed_position="2"/>
+        <line type="Statement" number="7" id="38" stmt_id="16" startline="258" startcol="5" endline="258" endcol="94" tustartline="11570" tustartcol="5" tuendline="11570" tuendcol="94" is_macro="1" allowed_position="2"/>
+        <line type="Statement" number="8" id="39" stmt_id="18" startline="259" startcol="5" endline="259" endcol="60" tustartline="11571" tustartcol="5" tuendline="11571" tuendcol="60" is_macro="1" allowed_position="2"/>
+        <line type="Statement" number="9" id="40" stmt_id="20" startline="260" startcol="5" endline="260" endcol="26" tustartline="11572" tustartcol="5" tuendline="11572" tuendcol="26" is_macro="1" allowed_position="2"/>
+        <line type="Branch" number="10" conditions="2" id="19" stmt_id="21" startline="261" startcol="5" endline="261" endcol="44" tustartline="11573" tustartcol="5" tuendline="11573" tuendcol="44" is_macro="1" allowed_position="0"/>
+        <line type="Statement" number="11" id="41" stmt_id="25" startline="262" startcol="7" endline="262" endcol="7" tustartline="11574" tustartcol="7" tuendline="11574" tuendcol="7" allowed_position="2"/>
+        <line type="Branch" number="12" conditions="2" id="20" stmt_id="26" startline="264" startcol="5" endline="264" endcol="50" tustartline="11576" tustartcol="5" tuendline="11576" tuendcol="50" is_macro="1" allowed_position="0"/>
+        <line type="Statement" number="13" id="42" stmt_id="30" startline="265" startcol="7" endline="265" endcol="18" tustartline="11577" tustartcol="7" tuendline="11577" tuendcol="18" is_macro="1" allowed_position="2"/>
+        <line type="Statement" number="14" id="43" stmt_id="32" startline="268" startcol="3" endline="268" endcol="16" tustartline="11580" tustartcol="3" tuendline="11580" tuendcol="16" allowed_position="0"/>
+      </lines>
+      <startline>11560</startline>
+      <startcol>1</startcol>
+      <endline>11581</endline>
+      <endcol>1</endcol>
+      <orig_startline>248</orig_startline>
+      <orig_endline>269</orig_endline>
+      <firstexec_startline>11563</firstexec_startline>
+      <firstexec_startcol>3</firstexec_startcol>
+      <firstexec_orig_startline>251</firstexec_orig_startline>
+      <open_brace_tu_line>11560</open_brace_tu_line>
+      <open_brace_tu_col>1</open_brace_tu_col>
+      <open_brace_src_line>248</open_brace_src_line>
+      <metrics>
+        <complexity>4</complexity>
+        <coverage coverage_type="STATEMENT">
+          <total>14</total>
+        </coverage>
+        <coverage coverage_type="BRANCH">
+          <total>7</total>
+        </coverage>
+      </metrics>
+    </subprogram>
+    <subprogram index="5">
+      <name>WriteWord</name>
+      <source_file_index>0</source_file_index>
+      <parameterized>WriteWord(EEPROM_TAddress_,word)byte</parameterized>
+      <mangled>WriteWord</mangled>
+      <source_function_checksum>1945796981</source_function_checksum>
+      <translation_unit_function_checksum>4028746770</translation_unit_function_checksum>
+      <lines>
+        <line type="Branch" number="0" conditions="1" condition_value="1" is_function_entry="1" id="21" stmt_id="0" startline="280" startcol="1" endline="280" endcol="1" tustartline="11592" tustartcol="1" tuendline="11592" tuendcol="1" allowed_position="3"/>
+        <line type="Statement" number="1" id="44" stmt_id="1" startline="281" startcol="3" endline="281" endcol="19" tustartline="11593" tustartcol="3" tuendline="11593" tuendcol="19" is_macro="1" allowed_position="2"/>
+        <line type="Branch" number="2" conditions="2" id="22" stmt_id="2" startline="283" startcol="3" endline="283" endcol="39" tustartline="11595" tustartcol="3" tuendline="11595" tuendcol="39" is_macro="1" allowed_position="0"/>
+        <line type="Statement" number="3" id="45" stmt_id="6" startline="284" startcol="5" endline="284" endcol="16" tustartline="11596" tustartcol="5" tuendline="11596" tuendcol="16" is_macro="1" allowed_position="2"/>
+        <line type="Statement" number="4" id="46" stmt_id="10" startline="287" startcol="5" endline="287" endcol="26" tustartline="11599" tustartcol="5" tuendline="11599" tuendcol="26" is_macro="1" allowed_position="2"/>
+        <line type="Statement" number="5" id="47" stmt_id="12" startline="288" startcol="5" endline="288" endcol="25" tustartline="11600" tustartcol="5" tuendline="11600" tuendcol="25" is_macro="1" allowed_position="2"/>
+        <line type="Statement" number="6" id="48" stmt_id="14" startline="289" startcol="5" endline="289" endcol="55" tustartline="11601" tustartcol="5" tuendline="11601" tuendcol="55" is_macro="1" allowed_position="2"/>
+        <line type="Statement" number="7" id="49" stmt_id="16" startline="290" startcol="5" endline="290" endcol="97" tustartline="11602" tustartcol="5" tuendline="11602" tuendcol="97" is_macro="1" allowed_position="2"/>
+        <line type="Statement" number="8" id="50" stmt_id="18" startline="291" startcol="5" endline="291" endcol="63" tustartline="11603" tustartcol="5" tuendline="11603" tuendcol="63" is_macro="1" allowed_position="2"/>
+        <line type="Statement" number="9" id="51" stmt_id="20" startline="292" startcol="5" endline="292" endcol="28" tustartline="11604" tustartcol="5" tuendline="11604" tuendcol="28" is_macro="1" allowed_position="2"/>
+        <line type="Statement" number="10" id="52" stmt_id="22" startline="293" startcol="5" endline="293" endcol="26" tustartline="11605" tustartcol="5" tuendline="11605" tuendcol="26" is_macro="1" allowed_position="2"/>
+        <line type="Branch" number="11" conditions="2" id="23" stmt_id="23" startline="294" startcol="5" endline="294" endcol="50" tustartline="11606" tustartcol="5" tuendline="11606" tuendcol="50" is_macro="1" allowed_position="0"/>
+        <line type="Statement" number="12" id="53" stmt_id="27" startline="295" startcol="7" endline="295" endcol="18" tustartline="11607" tustartcol="7" tuendline="11607" tuendcol="18" is_macro="1" allowed_position="2"/>
+        <line type="Branch" number="13" conditions="2" id="24" stmt_id="30" startline="297" startcol="7" endline="297" endcol="46" tustartline="11609" tustartcol="7" tuendline="11609" tuendcol="46" is_macro="1" allowed_position="0"/>
+        <line type="Statement" number="14" id="54" stmt_id="34" startline="298" startcol="9" endline="298" endcol="9" tustartline="11610" tustartcol="9" tuendline="11610" tuendcol="9" allowed_position="2"/>
+        <line type="Branch" number="15" conditions="2" id="25" stmt_id="35" startline="300" startcol="7" endline="300" endcol="54" tustartline="11612" tustartcol="7" tuendline="11612" tuendcol="54" is_macro="1" allowed_position="0"/>
+        <line type="Statement" number="16" id="55" stmt_id="39" startline="301" startcol="9" endline="301" endcol="20" tustartline="11613" tustartcol="9" tuendline="11613" tuendcol="20" is_macro="1" allowed_position="2"/>
+        <line type="Statement" number="17" id="56" stmt_id="41" startline="305" startcol="3" endline="305" endcol="16" tustartline="11617" tustartcol="3" tuendline="11617" tuendcol="16" allowed_position="0"/>
+      </lines>
+      <startline>11592</startline>
+      <startcol>1</startcol>
+      <endline>11618</endline>
+      <endcol>1</endcol>
+      <orig_startline>280</orig_startline>
+      <orig_endline>306</orig_endline>
+      <firstexec_startline>11595</firstexec_startline>
+      <firstexec_startcol>3</firstexec_startcol>
+      <firstexec_orig_startline>283</firstexec_orig_startline>
+      <open_brace_tu_line>11592</open_brace_tu_line>
+      <open_brace_tu_col>1</open_brace_tu_col>
+      <open_brace_src_line>280</open_brace_src_line>
+      <metrics>
+        <complexity>5</complexity>
+        <coverage coverage_type="STATEMENT">
+          <total>17</total>
+        </coverage>
+        <coverage coverage_type="BRANCH">
+          <total>9</total>
+        </coverage>
+      </metrics>
+    </subprogram>
+    <subprogram index="6">
+      <name>EEPROM_SetByte</name>
+      <source_file_index>0</source_file_index>
+      <parameterized>EEPROM_SetByte(EEPROM_TAddress_Const,byte)byte</parameterized>
+      <mangled>EEPROM_SetByte</mangled>
+      <source_function_checksum>3680506639</source_function_checksum>
+      <translation_unit_function_checksum>920729382</translation_unit_function_checksum>
+      <lines>
+        <line type="Branch" number="0" conditions="1" condition_value="1" is_function_entry="1" id="26" stmt_id="0" startline="336" startcol="1" endline="336" endcol="1" tustartline="11648" tustartcol="1" tuendline="11648" tuendcol="1" allowed_position="3"/>
+        <line type="Branch" number="1" conditions="2" id="27" stmt_id="1" startline="342" startcol="3" endline="342" endcol="118" tustartline="11654" tustartcol="3" tuendline="11654" tuendcol="118" is_macro="1" allowed_position="0"/>
+        <line type="Statement" number="2" id="57" stmt_id="5" startline="343" startcol="5" endline="343" endcol="16" tustartline="11655" tustartcol="5" tuendline="11655" tuendcol="16" is_macro="1" allowed_position="2"/>
+        <line type="Branch" number="3" conditions="2" id="28" stmt_id="6" startline="344" startcol="10" endline="344" endcol="45" tustartline="11656" tustartcol="10" tuendline="11656" tuendcol="45" is_macro="1" allowed_position="0"/>
+        <line type="Statement" number="4" id="58" stmt_id="10" startline="345" startcol="5" endline="345" endcol="16" tustartline="11657" tustartcol="5" tuendline="11657" tuendcol="16" is_macro="1" allowed_position="2"/>
+        <line type="Statement" number="5" id="59" stmt_id="14" startline="347" startcol="5" endline="347" endcol="61" tustartline="11659" tustartcol="5" tuendline="11659" tuendcol="61" allowed_position="2"/>
+        <line type="Branch" number="6" conditions="2" id="29" stmt_id="15" startline="348" startcol="5" endline="348" endcol="28" tustartline="11660" tustartcol="5" tuendline="11660" tuendcol="28" allowed_position="0"/>
+        <line type="Branch" number="7" conditions="2" id="30" stmt_id="18" startline="349" startcol="7" endline="349" endcol="51" tustartline="11661" tustartcol="7" tuendline="11661" tuendcol="51" allowed_position="0"/>
+        <line type="Statement" number="8" id="60" stmt_id="22" startline="350" startcol="9" endline="350" endcol="67" tustartline="11662" tustartcol="9" tuendline="11662" tuendcol="67" allowed_position="2"/>
+        <line type="Statement" number="9" id="61" stmt_id="28" startline="353" startcol="9" endline="353" endcol="30" tustartline="11665" tustartcol="9" tuendline="11665" tuendcol="30" allowed_position="2"/>
+        <line type="Statement" number="10" id="62" stmt_id="32" startline="354" startcol="9" endline="354" endcol="49" tustartline="11666" tustartcol="9" tuendline="11666" tuendcol="49" allowed_position="2"/>
+        <line type="Statement" number="11" id="63" stmt_id="34" startline="355" startcol="9" endline="355" endcol="81" tustartline="11667" tustartcol="9" tuendline="11667" tuendcol="81" allowed_position="2"/>
+        <line type="Statement" number="12" id="64" stmt_id="38" startline="358" startcol="7" endline="358" endcol="63" tustartline="11670" tustartcol="7" tuendline="11670" tuendcol="63" allowed_position="2"/>
+        <line type="Statement" number="13" id="65" stmt_id="40" startline="359" startcol="7" endline="359" endcol="39" tustartline="11671" tustartcol="7" tuendline="11671" tuendcol="39" allowed_position="2"/>
+        <line type="Statement" number="14" id="66" stmt_id="42" startline="360" startcol="7" endline="360" endcol="71" tustartline="11672" tustartcol="7" tuendline="11672" tuendcol="71" allowed_position="2"/>
+        <line type="Branch" number="15" conditions="2" id="31" stmt_id="43" startline="361" startcol="7" endline="361" endcol="51" tustartline="11673" tustartcol="7" tuendline="11673" tuendcol="51" allowed_position="0"/>
+        <line type="Statement" number="16" id="67" stmt_id="47" startline="362" startcol="9" endline="362" endcol="43" tustartline="11674" tustartcol="9" tuendline="11674" tuendcol="43" allowed_position="2"/>
+        <line type="Statement" number="17" id="68" stmt_id="51" startline="364" startcol="9" endline="364" endcol="54" tustartline="11676" tustartcol="9" tuendline="11676" tuendcol="54" allowed_position="2"/>
+        <line type="Statement" number="18" id="69" stmt_id="53" startline="366" startcol="7" endline="366" endcol="71" tustartline="11678" tustartcol="7" tuendline="11678" tuendcol="71" allowed_position="2"/>
+        <line type="Statement" number="19" id="70" stmt_id="55" startline="367" startcol="7" endline="367" endcol="38" tustartline="11679" tustartcol="7" tuendline="11679" tuendcol="38" allowed_position="2"/>
+        <line type="Branch" number="20" conditions="2" id="32" stmt_id="56" startline="368" startcol="7" endline="368" endcol="25" tustartline="11680" tustartcol="7" tuendline="11680" tuendcol="25" allowed_position="0"/>
+        <line type="Statement" number="21" id="71" stmt_id="60" startline="369" startcol="9" endline="369" endcol="21" tustartline="11681" tustartcol="9" tuendline="11681" tuendcol="21" allowed_position="2"/>
+        <line type="Statement" number="22" id="72" stmt_id="64" startline="371" startcol="9" endline="371" endcol="57" tustartline="11683" tustartcol="9" tuendline="11683" tuendcol="57" allowed_position="2"/>
+        <line type="Statement" number="23" id="73" stmt_id="66" startline="372" startcol="9" endline="372" endcol="21" tustartline="11684" tustartcol="9" tuendline="11684" tuendcol="21" allowed_position="2"/>
+        <line type="Statement" number="24" id="74" stmt_id="68" startline="376" startcol="3" endline="376" endcol="16" tustartline="11688" tustartcol="3" tuendline="11688" tuendcol="16" allowed_position="0"/>
+      </lines>
+      <startline>11648</startline>
+      <startcol>1</startcol>
+      <endline>11689</endline>
+      <endcol>1</endcol>
+      <orig_startline>336</orig_startline>
+      <orig_endline>377</orig_endline>
+      <firstexec_startline>11654</firstexec_startline>
+      <firstexec_startcol>3</firstexec_startcol>
+      <firstexec_orig_startline>342</firstexec_orig_startline>
+      <open_brace_tu_line>11648</open_brace_tu_line>
+      <open_brace_tu_col>1</open_brace_tu_col>
+      <open_brace_src_line>336</open_brace_src_line>
+      <metrics>
+        <complexity>7</complexity>
+        <coverage coverage_type="STATEMENT">
+          <total>24</total>
+        </coverage>
+        <coverage coverage_type="BRANCH">
+          <total>13</total>
+        </coverage>
+      </metrics>
+    </subprogram>
+    <subprogram index="7">
+      <name>EEPROM_GetByte</name>
+      <source_file_index>0</source_file_index>
+      <parameterized>EEPROM_GetByte(EEPROM_TAddress_Const,byte*)byte</parameterized>
+      <mangled>EEPROM_GetByte</mangled>
+      <source_function_checksum>1267113053</source_function_checksum>
+      <translation_unit_function_checksum>403710700</translation_unit_function_checksum>
+      <lines>
+        <line type="Branch" number="0" conditions="1" condition_value="1" is_function_entry="1" id="33" stmt_id="0" startline="400" startcol="1" endline="400" endcol="1" tustartline="11712" tustartcol="1" tuendline="11712" tuendcol="1" allowed_position="3"/>
+        <line type="Statement" number="1" id="75" stmt_id="1" startline="401" startcol="3" endline="401" endcol="19" tustartline="11713" tustartcol="3" tuendline="11713" tuendcol="19" is_macro="1" allowed_position="2"/>
+        <line type="Branch" number="2" conditions="2" id="34" stmt_id="2" startline="403" startcol="3" endline="403" endcol="118" tustartline="11715" tustartcol="3" tuendline="11715" tuendcol="118" is_macro="1" allowed_position="0"/>
+        <line type="Statement" number="3" id="76" stmt_id="6" startline="404" startcol="5" endline="404" endcol="16" tustartline="11716" tustartcol="5" tuendline="11716" tuendcol="16" is_macro="1" allowed_position="2"/>
+        <line type="Branch" number="4" conditions="2" id="35" stmt_id="7" startline="405" startcol="10" endline="405" endcol="45" tustartline="11717" tustartcol="10" tuendline="11717" tuendcol="45" is_macro="1" allowed_position="0"/>
+        <line type="Statement" number="5" id="77" stmt_id="11" startline="406" startcol="5" endline="406" endcol="16" tustartline="11718" tustartcol="5" tuendline="11718" tuendcol="16" is_macro="1" allowed_position="2"/>
+        <line type="Branch" number="6" conditions="2" id="36" stmt_id="14" startline="409" startcol="5" endline="409" endcol="49" tustartline="11721" tustartcol="5" tuendline="11721" tuendcol="49" allowed_position="0"/>
+        <line type="Statement" number="7" id="78" stmt_id="20" startline="411" startcol="7" endline="411" endcol="84" tustartline="11723" tustartcol="7" tuendline="11723" tuendcol="84" allowed_position="2"/>
+        <line type="Statement" number="8" id="79" stmt_id="24" startline="412" startcol="7" endline="412" endcol="35" tustartline="11724" tustartcol="7" tuendline="11724" tuendcol="35" allowed_position="2"/>
+        <line type="Statement" number="9" id="80" stmt_id="26" startline="413" startcol="7" endline="413" endcol="39" tustartline="11725" tustartcol="7" tuendline="11725" tuendcol="39" allowed_position="2"/>
+        <line type="Statement" number="10" id="81" stmt_id="32" startline="416" startcol="7" endline="416" endcol="28" tustartline="11728" tustartcol="7" tuendline="11728" tuendcol="28" allowed_position="2"/>
+        <line type="Statement" number="11" id="82" stmt_id="34" startline="417" startcol="7" endline="417" endcol="46" tustartline="11729" tustartcol="7" tuendline="11729" tuendcol="46" allowed_position="2"/>
+        <line type="Statement" number="12" id="83" stmt_id="36" startline="420" startcol="3" endline="420" endcol="16" tustartline="11732" tustartcol="3" tuendline="11732" tuendcol="16" allowed_position="0"/>
+      </lines>
+      <startline>11712</startline>
+      <startcol>1</startcol>
+      <endline>11733</endline>
+      <endcol>1</endcol>
+      <orig_startline>400</orig_startline>
+      <orig_endline>421</orig_endline>
+      <firstexec_startline>11715</firstexec_startline>
+      <firstexec_startcol>3</firstexec_startcol>
+      <firstexec_orig_startline>403</firstexec_orig_startline>
+      <open_brace_tu_line>11712</open_brace_tu_line>
+      <open_brace_tu_col>1</open_brace_tu_col>
+      <open_brace_src_line>400</open_brace_src_line>
+      <metrics>
+        <complexity>4</complexity>
+        <coverage coverage_type="STATEMENT">
+          <total>12</total>
+        </coverage>
+        <coverage coverage_type="BRANCH">
+          <total>7</total>
+        </coverage>
+      </metrics>
+    </subprogram>
+    <subprogram index="8">
+      <name>EEPROM_Init</name>
+      <source_file_index>0</source_file_index>
+      <parameterized>EEPROM_Init()</parameterized>
+      <mangled>EEPROM_Init</mangled>
+      <source_function_checksum>2665839662</source_function_checksum>
+      <translation_unit_function_checksum>1749365403</translation_unit_function_checksum>
+      <lines>
+        <line type="Branch" number="0" conditions="1" condition_value="1" is_function_entry="1" id="37" stmt_id="0" startline="435" startcol="1" endline="435" endcol="1" tustartline="11747" tustartcol="1" tuendline="11747" tuendcol="1" allowed_position="3"/>
+        <line type="Statement" number="1" id="84" stmt_id="2" startline="436" startcol="3" endline="436" endcol="26" tustartline="11748" tustartcol="3" tuendline="11748" tuendcol="26" is_macro="1" allowed_position="2"/>
+      </lines>
+      <startline>11747</startline>
+      <startcol>1</startcol>
+      <endline>11749</endline>
+      <endcol>1</endcol>
+      <orig_startline>435</orig_startline>
+      <orig_endline>437</orig_endline>
+      <firstexec_startline>11748</firstexec_startline>
+      <firstexec_startcol>3</firstexec_startcol>
+      <firstexec_orig_startline>436</firstexec_orig_startline>
+      <open_brace_tu_line>11747</open_brace_tu_line>
+      <open_brace_tu_col>1</open_brace_tu_col>
+      <open_brace_src_line>435</open_brace_src_line>
+      <metrics>
+        <complexity>1</complexity>
+        <coverage coverage_type="STATEMENT">
+          <total>1</total>
+        </coverage>
+        <coverage coverage_type="BRANCH">
+          <total>1</total>
+        </coverage>
+      </metrics>
+    </subprogram>
+  </unit>
+</coverage_data>

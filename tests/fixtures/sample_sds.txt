@@ -1,0 +1,30 @@
+Software Design Specification - Sample Module
+==============================================
+
+1. Overview
+   SwCom_Comm: Communication module for LIN gateway data processing.
+
+2. Software Components
+
+   SwCom_Comm_001
+     Description: Communication initialization component
+     Functions: g_comm_init
+     ASIL: ASIL-B
+     Related: REQ-SW-001
+
+   SwCom_Comm_002
+     Description: Frame processing component
+     Functions: g_process_frame
+     ASIL: ASIL-B
+     Related: REQ-SW-002
+
+   SwCom_Comm_003
+     Description: Module reset component
+     Functions: g_comm_reset
+     ASIL: QM
+     Related: REQ-SW-003
+
+3. Module Structure
+   - Interface Functions: g_comm_init, g_process_frame, g_comm_reset
+   - Internal Functions: s_get_counter
+   - Global Data: g_buffer, g_counter

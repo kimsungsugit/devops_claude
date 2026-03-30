@@ -1,0 +1,1493 @@
+총 body 자식 요소 수: 2324
+[4] <p> style='' text='Software Unit Design Specification'
+[5] <p> style='' text='HDPDM01'
+[12] <p> style='' text='㈜ 현보 연구소'
+[13] <p> style='' text='* 사전승인 없이 본 내용의 전부 또는 일부에 대한'
+[14] <p> style='' text='복사, 전재, 배포, 사용을 금합니다'
+[17] <tbl> 4행 | hdr=['', 'Author', 'Reviewer', 'Approver']
+[19] <p> style='af3' text='Revision History'
+[20] <tbl> 21행 | hdr=['Version', 'Date', 'Description', 'Author']
+[27] <p> style='af3' text='Contents'
+[28] <p> style='11' text='1.Introduction10'
+[29] <p> style='20' text='1.1.Purpose10'
+[30] <p> style='20' text='1.2.Scope10'
+[31] <p> style='20' text='1.3.Terms, Abbreviations and Definitions10'
+[32] <p> style='20' text='1.4.Reference10'
+[33] <p> style='11' text='2.Software Unit Design12'
+[34] <p> style='20' text='2.1.Common Macro Definition12'
+[35] <p> style='20' text='2.2.Type Definition13'
+[36] <p> style='20' text='2.3.Parameter Definition14'
+[37] <p> style='20' text='2.4.Version Information15'
+[38] <p> style='20' text='2.5.Software Unit Structure15'
+[39] <p> style='30' text='2.5.1Software Unit Tables15'
+[40] <p> style='20' text='2.6.SwCom_01 (System OS)27'
+[41] <p> style='30' text='2.6.1Unit Structure27'
+[42] <p> style='30' text='2.6.2Global Data27'
+[43] <p> style='30' text='2.6.3Interface Functions28'
+[44] <p> style='30' text='2.6.4Internal Functions30'
+[45] <p> style='20' text='2.7.SwCom_02 (DRV In)40'
+[46] <p> style='30' text='2.7.1Unit Structure40'
+[47] <p> style='30' text='2.7.2Global Data40'
+[48] <p> style='30' text='2.7.3Interface Functions43'
+[49] <p> style='30' text='2.7.4Internal Functions52'
+[50] <p> style='20' text='2.8.SwCom_03 (LIN RX)64'
+[51] <p> style='30' text='2.8.1Unit Structure64'
+[52] <p> style='30' text='2.8.2Global Data64'
+[53] <p> style='30' text='2.8.3Interface Functions70'
+[54] <p> style='30' text='2.8.4Internal Functions82'
+[55] <p> style='20' text='2.9.SwCom_04 (API In)95'
+[56] <p> style='30' text='2.9.1Unit Structure95'
+[57] <p> style='30' text='2.9.2Global Data95'
+[58] <p> style='30' text='2.9.3Interface Functions98'
+[59] <p> style='30' text='2.9.4Internal Functions103'
+[60] <p> style='20' text='2.10.SwCom_05 (AP Main)130'
+[61] <p> style='30' text='2.10.1Unit Structure130'
+[62] <p> style='30' text='2.10.2Global Data130'
+[63] <p> style='30' text='2.10.3Interface Functions131'
+[64] <p> style='30' text='2.10.4Internal Functions134'
+[65] <p> style='20' text='2.11.SwCom_06 (API Out)138'
+[66] <p> style='30' text='2.11.1Unit Structure138'
+[67] <p> style='30' text='2.11.2Global Data138'
+[68] <p> style='30' text='2.11.3Interface Functions141'
+[69] <p> style='30' text='2.11.4Internal Functions144'
+[70] <p> style='20' text='2.12.SwCom_07 (LIN TX)161'
+[71] <p> style='30' text='2.12.1Unit Structure161'
+[72] <p> style='30' text='2.12.2Global Data161'
+[73] <p> style='30' text='2.12.3Interface Functions162'
+[74] <p> style='30' text='2.12.4Internal Functions163'
+[75] <p> style='20' text='2.13.SwCom_08 (DRV Out)170'
+[76] <p> style='30' text='2.13.1Unit Structure170'
+[77] <p> style='30' text='2.13.2Global Data170'
+[78] <p> style='30' text='2.13.3Interface Functions171'
+[79] <p> style='30' text='2.13.4Internal Functions174'
+[80] <p> style='20' text='2.14.SwCom_09 (System Control)182'
+[81] <p> style='30' text='2.14.1Unit Structure182'
+[82] <p> style='30' text='2.14.2Global Data182'
+[83] <p> style='30' text='2.14.3Interface Functions185'
+[84] <p> style='30' text='2.14.4Internal Functions189'
+[85] <p> style='20' text='2.15.SwCom_10(System Sleep)212'
+[86] <p> style='30' text='2.15.1Unit Structure212'
+[87] <p> style='30' text='2.15.2Global Data212'
+[88] <p> style='30' text='2.15.3Interface Functions213'
+[89] <p> style='30' text='2.15.4Internal Functions219'
+[90] <p> style='20' text='2.16.SwCom_11 (System EEPROM)224'
+[91] <p> style='30' text='2.16.1Unit Structure224'
+[92] <p> style='30' text='2.16.2Global Data226'
+[93] <p> style='30' text='2.16.3Interface Functions231'
+[94] <p> style='30' text='2.16.4Internal Functions248'
+[95] <p> style='20' text='2.17.SwCom_12 (System DIAG)286'
+[96] <p> style='30' text='2.17.1Unit Structure286'
+[97] <p> style='30' text='2.17.2Global Data287'
+[98] <p> style='30' text='2.17.3Interface Functions292'
+[99] <p> style='30' text='2.17.4Internal Functions296'
+[100] <p> style='20' text='2.18.SwCom_13 (Door PreControl)325'
+[101] <p> style='30' text='2.18.1Unit Structure325'
+[102] <p> style='30' text='2.18.2Global Data326'
+[103] <p> style='30' text='2.18.3Interface Functions336'
+[104] <p> style='30' text='2.18.4Internal Functions347'
+[105] <p> style='20' text='2.19.SwCom_14 (Door Control)446'
+[106] <p> style='30' text='2.19.1Unit Structure446'
+[107] <p> style='30' text='2.19.2Global Data447'
+[108] <p> style='30' text='2.19.3Interface Functions454'
+[109] <p> style='30' text='2.19.4Internal Functions458'
+[110] <p> style='20' text='2.20.SwCom_15 (Motor Control)541'
+[111] <p> style='30' text='2.20.1Unit Structure541'
+[112] <p> style='30' text='2.20.2Global Data541'
+[113] <p> style='30' text='2.20.3Interface Functions546'
+[114] <p> style='30' text='2.20.4Internal Functions549'
+[115] <p> style='20' text='2.21.SwCom_16 (Buzzer Control)594'
+[116] <p> style='30' text='2.21.1Unit Structure594'
+[117] <p> style='30' text='2.21.2Global Data594'
+[118] <p> style='30' text='2.21.3Interface Functions596'
+[119] <p> style='30' text='2.21.4Internal Functions599'
+[120] <p> style='20' text='2.22.SwCom_17 (CPU)621'
+[121] <p> style='30' text='2.22.1Unit Structure621'
+[122] <p> style='30' text='2.22.2Global Data621'
+[123] <p> style='30' text='2.22.3Interface Functions622'
+[124] <p> style='30' text='2.22.4Internal Functions642'
+[125] <p> style='20' text='2.23.SwCom_18 (EVENT)644'
+[126] <p> style='30' text='2.23.1Unit Structure644'
+[127] <p> style='30' text='2.23.2Global Data644'
+[128] <p> style='30' text='2.23.3Interface Functions645'
+[129] <p> style='30' text='2.23.4Internal Functions656'
+[130] <p> style='20' text='2.24.SwCom_19 (LIN PHY)657'
+[131] <p> style='30' text='2.24.1Unit Structure657'
+[132] <p> style='30' text='2.24.2Global Data657'
+[133] <p> style='30' text='2.24.3Interface Functions658'
+[134] <p> style='30' text='2.24.4Internal Functions659'
+[135] <p> style='20' text='2.25.SwCom_21 (EEPROM)660'
+[136] <p> style='30' text='2.25.1Unit Structure660'
+[137] <p> style='30' text='2.25.2Global Data660'
+[138] <p> style='30' text='2.25.3Interface Functions661'
+[139] <p> style='30' text='2.25.4Internal Functions665'
+[140] <p> style='20' text='2.26.SwCom_22 (ADC)671'
+[141] <p> style='30' text='2.26.1Unit Structure671'
+[142] <p> style='30' text='2.26.2Global Data671'
+[143] <p> style='30' text='2.26.3Interface Functions673'
+[144] <p> style='30' text='2.26.4Internal Functions680'
+[145] <p> style='20' text='2.27.SwCom_23 (PWM_PP0)684'
+[146] <p> style='30' text='2.27.1Unit Structure684'
+[147] <p> style='30' text='2.27.2Global Data685'
+[148] <p> style='30' text='2.27.3Interface Functions685'
+[149] <p> style='30' text='2.27.4Internal Functions688'
+[150] <p> style='20' text='2.28.SwCom_24 (PWM_PP5)690'
+[151] <p> style='30' text='2.28.1Unit Structure690'
+[152] <p> style='30' text='2.28.2Global Data690'
+[153] <p> style='30' text='2.28.3Interface Functions691'
+[154] <p> style='30' text='2.28.4Internal Functions696'
+[155] <p> style='20' text='2.29.SwCom_26 (BAT)699'
+[156] <p> style='30' text='2.29.1Unit Structure699'
+[157] <p> style='30' text='2.29.2Global Data699'
+[158] <p> style='30' text='2.29.3Interface Functions699'
+[159] <p> style='30' text='2.29.4Internal Functions700'
+[160] <p> style='20' text='2.30.SwCom_28 (EINT)701'
+[161] <p> style='30' text='2.30.1Unit Structure701'
+[162] <p> style='30' text='2.30.2Global Data701'
+[163] <p> style='30' text='2.30.3Interface Functions702'
+[164] <p> style='30' text='2.30.4Internal Functions703'
+[165] <p> style='20' text='2.31.SwCom_29 (SCI)705'
+[166] <p> style='30' text='2.31.1Unit Structure705'
+[167] <p> style='30' text='2.31.2Global Data705'
+[168] <p> style='30' text='2.31.3Interface Functions705'
+[169] <p> style='30' text='2.31.4Internal Functions707'
+[170] <p> style='20' text='2.32.SwCom_30 (TIMER)708'
+[171] <p> style='30' text='2.32.1Unit Structure708'
+[172] <p> style='30' text='2.32.2Global Data708'
+[173] <p> style='30' text='2.32.3Interface Functions708'
+[174] <p> style='30' text='2.32.4Internal Functions709'
+[175] <p> style='20' text='2.33.SwCom_31 (CAPTURE)711'
+[176] <p> style='30' text='2.33.1Unit Structure711'
+[177] <p> style='30' text='2.33.2Global Data711'
+[178] <p> style='30' text='2.33.3Interface Functions712'
+[179] <p> style='30' text='2.33.4Internal Functions714'
+[180] <p> style='20' text='2.34.SwCom_32 (VECTOR)715'
+[181] <p> style='30' text='2.34.1Unit Structure (삭제)715'
+[182] <p> style='30' text='2.34.2Global Data715'
+[183] <p> style='30' text='2.34.3Interface Functions715'
+[184] <p> style='30' text='2.34.4Internal Functions715'
+[185] <p> style='20' text='2.35.SwCom_33 (LIN_UDS)717'
+[186] <p> style='30' text='2.35.1Unit Structure717'
+[187] <p> style='30' text='2.35.2Global Data718'
+[188] <p> style='30' text='2.35.3Interface Functions721'
+[189] <p> style='30' text='2.35.4Internal Functions728'
+[190] <p> style='20' text='2.36.SwCom_34 (Option_Control)768'
+[191] <p> style='30' text='2.36.1Unit Structure768'
+[192] <p> style='30' text='2.36.2Global Data768'
+[193] <p> style='30' text='2.36.3Interface Functions770'
+[194] <p> style='30' text='2.36.4Internal Functions772'
+[195] <p> style='20' text='2.37.SwCom_35 (Bootloader)776'
+[196] <p> style='30' text='2.37.1Unit Structure777'
+[197] <p> style='30' text='2.37.2Global Data777'
+[198] <p> style='30' text='2.37.3Interface Functions779'
+[199] <p> style='30' text='2.37.4Internal Functions779'
+[202] <p> style='1' text='Introduction'
+[204] <p> style='2' text='Purpose'
+[205] <p> style='' text='이 문서는 HDPDM01 프로젝트를 위한 소프트웨어 단위 설계를 정의하기 위해 개발되었다. 이 문서는 소프트'
+[207] <p> style='2' text='Scope'
+[208] <p> style='' text='본 소프트웨어 단위 설계 사양서는 BSD 소프트웨어의 단위 설계를 정의하기 위하여 다음과 같은 내용을 제공한'
+[209] <p> style='a9' text='Software Unit Design'
+[210] <p> style='a9' text='Software Unit Dynamic Design'
+[211] <p> style='a9' text='* 펌웨어 별 수정 색'
+[212] <p> style='a9' text='A.10.51 , A.10.51 수정분, A.10.53, A11, 1.00.02'
+[214] <p> style='2' text='Terms, Abbreviations and Definitions'
+[215] <p> style='' text='“HDPDM01 Glossary”를 참조한다.'
+[217] <p> style='2' text='Reference'
+[218] <tbl> 9행 | hdr=['File Name', 'Version', 'Date', 'Note']
+[220] <p> style='1' text='Software Unit Design'
+[221] <p> style='' text='■ 작성 내용- 소프트웨어 아키텍처 설계 명세서에 정의된 소프트웨어 아키텍처를 기반으로 각 컴포넌트 내의 소'
+[223] <p> style='2' text='Common Macro Definition'
+[224] <tbl> 52행 | hdr=['Macro name', 'Type', 'Define', 'Description']
+[226] <p> style='2' text='Type Definition'
+[227] <tbl> 22행 | hdr=['Type', 'Define', 'Range', 'Description']
+[229] <p> style='2' text='Parameter Definition'
+[230] <tbl> 10행 | hdr=['Parameter', 'Type', 'Define', 'Description']
+[231] <p> style='a9' text='s_SystemParamRead 함수 내 parameter 배열로 재 정의 됨.'
+[232] <p> style='2' text='Version Information'
+[234] <p> style='a9' text='EEPROM 기능 개발 전까지 임시 매크로 사용'
+[235] <tbl> 4행 | hdr=['Macro Name', 'Type', 'Define', 'Description']
+[237] <p> style='2' text='Software Unit Structure'
+[238] <p> style='' text='■ 작성 내용- 소프트웨어 아키텍처 설계를 기반으로 유닛 간 인터페이스를 담당할 인터페이스 함수 및 내부 함'
+[240] <p> style='3' text='Software Unit Tables'
+[241] <tbl> 429행 | hdr=['Component', 'Function', 'Comment']
+[245] <p> style='2' text='SwCom_01 (System OS)'
+[246] <p> style='3' text='Unit Structure'
+[249] <p> style='3' text='Global Data'
+[250] <p> style='4' text='Global variables'
+[251] <tbl> 4행 | hdr=['Name', 'Type', 'Value Range', 'Reset Value']
+[253] <p> style='4' text='Static Variables'
+[254] <tbl> 2행 | hdr=['Name', 'Type', 'Value Range', 'Reset Value']
+[256] <p> style='4' text='Macro'
+[257] <tbl> 2행 | hdr=['Name', 'Type', 'Value', 'Description']
+[259] <p> style='4' text='Calibration & Parameter Data'
+[260] <tbl> 2행 | hdr=['Signal', 'Type', 'Value', 'Description']
+[262] <p> style='3' text='Interface Functions'
+[263] <p> style='4' text='SwUFn_0101: main'
+[264] <tbl> 19행 | hdr=['[ Function Informati']
+[266] <p> style='4' text='SwUFn_0102: g_SysOs_WdiCtrl'
+[267] <tbl> 23행 | hdr=['[ Function Informati']
+[269] <p> style='3' text='Internal Functions'
+[270] <p> style='4' text='SwUFn_0103: s_SystemOperation'
+[271] <tbl> 19행 | hdr=['[ Function Informati']
+[273] <p> style='4' text='SwUFn_0104: s_SystemDiagnosis'
+[274] <tbl> 19행 | hdr=['[ Function Informati']
+[276] <p> style='4' text='SwUFn_0105: s_SystemManagement'
+[277] <tbl> 19행 | hdr=['[ Function Informati']
+[279] <p> style='4' text='SwUFn_0106: s_Init_CPU'
+[280] <tbl> 22행 | hdr=['[ Function Informati']
+[282] <p> style='4' text='SwUFn_0107: s_Init_SystemManagementFunc'
+[283] <tbl> 21행 | hdr=['[ Function Informati']
+[285] <p> style='4' text='SwUFn_0108: s_Init_SystemOperationFunc'
+[286] <tbl> 19행 | hdr=['[ Function Informati']
+[289] <p> style='4' text='SwUFn_0109: s_Inti_Lin'
+[290] <tbl> 19행 | hdr=['[ Function Informati']
+[293] <p> style='4' text='SwUFn_0110: s_SysMain_Init'
+[294] <tbl> 20행 | hdr=['[ Function Informati']
+[296] <p> style='2' text='SwCom_02 (DRV In)'
+[297] <p> style='3' text='Unit Structure'
+[300] <p> style='3' text='Global Data'
+[301] <p> style='4' text='Global variables'
+[302] <tbl> 20행 | hdr=['Name', 'Type', 'Value Range', 'Reset Value']
+[304] <p> style='4' text='Static Variables'
+[305] <tbl> 10행 | hdr=['Data Name', 'Data Type', 'Value Range', 'Reset Value']
+[307] <p> style='4' text='Macro'
+[308] <tbl> 20행 | hdr=['Name', 'Type', 'Value', 'Description']
+[310] <p> style='4' text='Calibration & Parameter Data'
+[311] <tbl> 2행 | hdr=['Signal', 'Type', 'Value', 'Description']
+[313] <p> style='3' text='Interface Functions'
+[314] <p> style='4' text='SwUFn_0201: g_DrvIn_Main'
+[315] <tbl> 19행 | hdr=['[ Function Informati']
+[317] <p> style='4' text='SwUFn_0202: g_DrvIn_MotorDirDetect'
+[318] <tbl> 19행 | hdr=['[ Function Informati']
+[320] <p> style='4' text='SwUFn_0203: g_DrvIn_MotorSpeed'
+[321] <tbl> 30행 | hdr=['[ Function Informati']
+[323] <p> style='4' text='SwUFn_0204: g_DrvIn_MotorPosition'
+[324] <tbl> 21행 | hdr=['[ Function Informati']
+[326] <p> style='4' text='SwUFn_0205: g_DrvIn_Main_Reset'
+[327] <tbl> 45행 | hdr=['[ Function Informati']
+[329] <p> style='3' text='Internal Functions'
+[330] <p> style='4' text='SwUFn_0206: s_AdcValidationChk(삭제)'
+[333] <p> style='4' text='SwUFn_0207: s_AdcDataUpdate'
+[334] <tbl> 34행 | hdr=['[ Function Informati']
+[336] <p> style='4' text='SwUFn_0208: s_MotorSpeedMeasure'
+[337] <tbl> 26행 | hdr=['[ Function Informati']
+[339] <p> style='4' text='SwUFn_0209: s16s_MotorSpdRatioMeasure'
+[340] <tbl> 20행 | hdr=['[ Function Informati']
+[342] <p> style='4' text='SwUFn_0210: s_MotorPulseCntClr'
+[343] <tbl> 25행 | hdr=['[ Function Informati']
+[346] <p> style='4' text='SwUFn_0211: s_AdcIndexRolling(New)'
+[347] <tbl> 21행 | hdr=['[ Function Informati']
+[351] <p> style='2' text='SwCom_03 (LIN RX)'
+[352] <p> style='3' text='Unit Structure'
+[355] <p> style='3' text='Global Data'
+[356] <p> style='4' text='Global variables'
+[357] <tbl> 30행 | hdr=['Name', 'Type', 'Value Range', 'Reset Value']
+[359] <p> style='4' text='Static Variables'
+[360] <tbl> 5행 | hdr=['Data Name', 'Type', 'Value Range', 'Reset Value']
+[362] <p> style='4' text='Macro'
+[363] <tbl> 49행 | hdr=['Name', 'Type', 'Value', 'Description']
+[365] <p> style='4' text='Calibration & Parameter Data'
+[366] <tbl> 2행 | hdr=['Signal', 'Type', 'Value', 'Description']
+[368] <p> style='3' text='Interface Functions'
+[369] <p> style='4' text='SwUFn_0301: g_ApiIn_LinRx_ReadData'
+[370] <tbl> 50행 | hdr=['[ Function Informati']
+[372] <p> style='4' text='SwUFn_0302: g_ApiIn_LinRx_ReadData_Reset'
+[373] <tbl> 51행 | hdr=['[ Function Informati']
+[375] <p> style='3' text='Internal Functions'
+[376] <p> style='4' text='SwUFn_0303: s_LinTmOutCheck'
+[377] <tbl> 32행 | hdr=['[ Function Informati']
+[380] <p> style='4' text='SwUFn_0304: s_LinFailCheckTimer'
+[381] <tbl> 21행 | hdr=['[ Function Informati']
+[384] <p> style='4' text='SwUFn_0305: s16s_LongGForce2Slope_Conv'
+[385] <tbl> 19행 | hdr=['[ Function Informati']
+[388] <p> style='4' text='SwUFn_0306: s16s_LatGForce2Slope_Conv'
+[389] <tbl> 19행 | hdr=['[ Function Informati']
+[392] <p> style='4' text='SwUFn_0307: u8s_SbcmMsg_LinTmOutCheck'
+[393] <tbl> 22행 | hdr=['[ Function Informati']
+[396] <p> style='4' text='SwUFn_0308: u8s_SbcmMsg2_LinTmOutCheck'
+[397] <tbl> 22행 | hdr=['[ Function Informati']
+[399] <p> style='4' text='SwUFn_0309: s_LinOCFlagClr'
+[400] <tbl> 19행 | hdr=['[ Function Informati']
+[403] <p> style='2' text='SwCom_04 (API In)'
+[404] <p> style='3' text='Unit Structure'
+[407] <p> style='3' text='Global Data'
+[408] <p> style='4' text='Global variables'
+[409] <tbl> 26행 | hdr=['Name', 'Type', 'Value Range', 'Reset Value']
+[412] <p> style='4' text='Static Variables'
+[413] <tbl> 2행 | hdr=['Name', 'Type', 'Value Range', 'Reset Value']
+[416] <p> style='4' text='Macro'
+[417] <tbl> 44행 | hdr=['Name', 'Type', 'Value', 'Description']
+[419] <p> style='4' text='Calibration & Parameter Data'
+[420] <tbl> 2행 | hdr=['Signal', 'Type', 'Value', 'Description']
+[422] <p> style='3' text='Interface Functions'
+[423] <p> style='4' text='SwUFn_0401: g_ApiIn_Main'
+[424] <tbl> 19행 | hdr=['[ Function Informati']
+[426] <p> style='4' text='SwUFn_0402: g_ApiIn_Main_Reset'
+[427] <tbl> 44행 | hdr=['[ Function Informati']
+[430] <p> style='3' text='Internal Functions'
+[431] <p> style='4' text='SwUFn_0403: s_ApiIn_DataUpdate'
+[432] <tbl> 19행 | hdr=['[ Function Informati']
+[434] <p> style='4' text='SwUFn_0404: s_ApiIn_u8bit_DataUpdate'
+[435] <tbl> 24행 | hdr=['[ Function Informati']
+[437] <p> style='4' text='SwUFn_0405: s_ApiIn_u16bit_DataUpdate_A'
+[438] <tbl> 31행 | hdr=['[ Function Informati']
+[441] <p> style='4' text='SwUFn_0406: s_ApiIn_u16bit_DataUpdate_B'
+[442] <tbl> 27행 | hdr=['[ Function Informati']
+[445] <p> style='4' text='SwUFn_0407: s_ApiIn_s16bit_DataUpdate'
+[446] <tbl> 34행 | hdr=['[ Function Informati']
+[448] <p> style='4' text='SwUFn_0408: u16s_ApiIn_HallSnsrLevel_Conv'
+[449] <tbl> 19행 | hdr=['[ Function Informati']
+[451] <p> style='4' text='SwUFn_0409: u16s_ApiIn_MagnetLevel_Conv'
+[452] <tbl> 19행 | hdr=['[ Function Informati']
+[455] <p> style='4' text='SwUFn_0410: u16s_ApiIn_Vsup_Conv'
+[456] <tbl> 19행 | hdr=['[ Function Informati']
+[459] <p> style='4' text='SwUFn_0411: u16s_ApiIn_BandGap_Conv'
+[460] <tbl> 19행 | hdr=['[ Function Informati']
+[463] <p> style='4' text='SwUFn_0412: u8s_ApiIn_MotorRps_Conv(New)'
+[464] <tbl> 19행 | hdr=['[ Function Informati']
+[466] <p> style='4' text='SwUFn_0413: u16s_ApiIn_MotorTemp_Conv(New)'
+[467] <tbl> 19행 | hdr=['[ Function Informati']
+[469] <p> style='4' text='SwUFn_0414: u16s_ApiIn_OverPos_Conv (New)'
+[470] <tbl> 33행 | hdr=['[ Function Informati']
+[472] <p> style='4' text='SwUFn_0415: u16s_ApiIn_BuzzLvl_Conv'
+[473] <tbl> 20행 | hdr=['[ Function Informati']
+[475] <p> style='4' text='SwUFn_0416: u16s_ApiIn_MotorFB_Conv'
+[476] <tbl> 19행 | hdr=['[ Function Informati']
+[479] <p> style='2' text='SwCom_05 (AP Main)'
+[480] <p> style='3' text='Unit Structure'
+[483] <p> style='3' text='Global Data'
+[484] <p> style='4' text='Global variables'
+[485] <tbl> 4행 | hdr=['Name', 'Type', 'Value Range', 'Reset Value']
+[487] <p> style='4' text='Static Variables'
+[488] <tbl> 2행 | hdr=['Data Name', 'Type', 'Value Range', 'Reset Value']
+[490] <p> style='4' text='Macro'
+[491] <tbl> 2행 | hdr=['Name', 'Type', 'Value', 'Description']
+[493] <p> style='4' text='Calibration & Parameter Data'
+[494] <tbl> 2행 | hdr=['Signal', 'Type', 'Value', 'Description']
+[496] <p> style='3' text='Interface Functions'
+[497] <p> style='4' text='SwUFn_0501: g_Ap_Main'
+[498] <tbl> 19행 | hdr=['[ Function Informati']
+[500] <p> style='4' text='SwUFn_0502: g_Ap_Main_Reset'
+[501] <tbl> 21행 | hdr=['[ Function Informati']
+[503] <p> style='3' text='Internal Functions'
+[504] <p> style='4' text='SwUFn_0503: s_Ap_DataUpdate'
+[505] <tbl> 25행 | hdr=['[ Function Informati']
+[509] <p> style='2' text='SwCom_06 (API Out)'
+[510] <p> style='3' text='Unit Structure'
+[513] <p> style='3' text='Global Data'
+[514] <p> style='4' text='Global variables'
+[515] <tbl> 12행 | hdr=['Name', 'Type', 'Value Range', 'Reset Value']
+[517] <p> style='4' text='Static Variables'
+[518] <tbl> 2행 | hdr=['Data Name', 'Type', 'Value Range', 'Reset Value']
+[520] <p> style='4' text='Macro'
+[521] <tbl> 26행 | hdr=['Name', 'Type', 'Value', 'Description']
+[523] <p> style='4' text='Calibration & Parameter Data'
+[524] <tbl> 2행 | hdr=['Signal', 'Type', 'Value', 'Description']
+[526] <p> style='3' text='Interface Functions'
+[527] <p> style='4' text='SwUFn_0601: g_ApiOut_Main'
+[528] <tbl> 19행 | hdr=['[ Function Informati']
+[530] <p> style='4' text='SwUFn_0602: g_ApiOut_Main_Reset'
+[531] <tbl> 29행 | hdr=['[ Function Informati']
+[533] <p> style='3' text='Internal Functions'
+[534] <p> style='4' text='SwUFn_0603: s_ApiOut_DataUpdate'
+[535] <tbl> 19행 | hdr=['[ Function Informati']
+[538] <p> style='4' text='SwUFn_0604: s_ApiOut_u8bit_DataUpdate_A'
+[539] <tbl> 23행 | hdr=['[ Function Informati']
+[542] <p> style='4' text='SwUFn_0605: s_ApiOut_u8bit_DataUpdate_B'
+[543] <tbl> 27행 | hdr=['[ Function Informati']
+[546] <p> style='4' text='SwUFn_0606: s_ApiOut_u16bit_DataUpdate'
+[547] <tbl> 23행 | hdr=['[ Function Informati']
+[549] <p> style='4' text='SwUFn_0607: u8s_ApiOut_AntiPinchData_Conv'
+[550] <tbl> 19행 | hdr=['[ Function Informati']
+[552] <p> style='4' text='SwUFn_0608: u8s_ApiOut_DoorAngle_Conv'
+[553] <tbl> 21행 | hdr=['[ Function Informati']
+[556] <p> style='4' text='SwUFn_0609: u8s_ApiOut_Vsup_Conv'
+[557] <tbl> 19행 | hdr=['[ Function Informati']
+[559] <p> style='4' text='SwUFn_0610: u8s_ApiOut_MotorCurrent_Conv'
+[560] <tbl> 19행 | hdr=['[ Function Informati']
+[563] <p> style='4' text='SwUFn_0611: u8s_ApiOut_MotorTemp_Conv(New)'
+[564] <tbl> 19행 | hdr=['[ Function Informati']
+[568] <p> style='2' text='SwCom_07 (LIN TX)'
+[569] <p> style='3' text='Unit Structure'
+[572] <p> style='3' text='Global Data'
+[573] <p> style='4' text='Global variables'
+[574] <tbl> 2행 | hdr=['Name', 'Type', 'Value Range', 'Reset Value']
+[576] <p> style='4' text='Static Variables'
+[577] <tbl> 2행 | hdr=['Data Name', 'Type', 'Value Range', 'Reset Value']
+[579] <p> style='4' text='Macro'
+[580] <tbl> 3행 | hdr=['Name', 'Type', 'Value', 'Description']
+[582] <p> style='4' text='Calibration & Parameter Data'
+[583] <tbl> 2행 | hdr=['Signal', 'Type', 'Value', 'Description']
+[585] <p> style='3' text='Interface Functions'
+[586] <p> style='4' text='SwUFn_0701: g_ApiOut_LinTx_DataSend'
+[587] <tbl> 19행 | hdr=['[ Function Informati']
+[589] <p> style='3' text='Internal Functions'
+[590] <p> style='4' text='SwUFn_0702: s_LinTx_General'
+[591] <tbl> 28행 | hdr=['[ Function Informati']
+[593] <p> style='4' text='SwUFn_0703: s_LinTx_DTC'
+[594] <tbl> 23행 | hdr=['[ Function Informati']
+[597] <p> style='2' text='SwCom_08 (DRV Out)'
+[598] <p> style='3' text='Unit Structure'
+[601] <p> style='3' text='Global Data'
+[602] <p> style='4' text='Global variables'
+[603] <tbl> 2행 | hdr=['Name', 'Type', 'Value Range', 'Reset Value']
+[605] <p> style='4' text='Static Variables'
+[606] <tbl> 3행 | hdr=['Data Name', 'Type', 'Value Range', 'Reset Value']
+[608] <p> style='4' text='Macro'
+[609] <tbl> 2행 | hdr=['Name', 'Type', 'Value', 'Description']
+[611] <p> style='4' text='Calibration & Parameter Data'
+[612] <tbl> 2행 | hdr=['Signal', 'Type', 'Value', 'Description']
+[614] <p> style='3' text='Interface Functions'
+[615] <p> style='4' text='SwUFn_0801: g_DrvOut_Main'
+[616] <tbl> 19행 | hdr=['[ Function Informati']
+[618] <p> style='4' text='SwUFn_0802: g_DrvOut_Main_Reset'
+[619] <tbl> 25행 | hdr=['[ Function Informati']
+[621] <p> style='3' text='Internal Functions'
+[622] <p> style='4' text='SwUFn_0803: s_DrvOut_MotorCtrl'
+[623] <tbl> 24행 | hdr=['[ Function Informati']
+[625] <p> style='4' text='SwUFn_0804: s_DrvOut_BuzzerCtrl'
+[626] <tbl> 20행 | hdr=['[ Function Informati']
+[629] <p> style='4' text='SwUFn_0805: s_DrvOut_MotorPwmFreqCtrl'
+[630] <tbl> 22행 | hdr=['[ Function Informati']
+[632] <p> style='4' text='SwUFn_0806: s_DriveICReset'
+[633] <tbl> 27행 | hdr=['[ Function Informati']
+[635] <p> style='2' text='SwCom_09 (System Control)'
+[636] <p> style='3' text='Unit Structure'
+[639] <p> style='3' text='Global Data'
+[640] <p> style='4' text='Global variables'
+[641] <tbl> 13행 | hdr=['Name', 'Type', 'Value Range', 'Reset Value']
+[643] <p> style='4' text='Static Variables'
+[644] <tbl> 2행 | hdr=['Data Name', 'Type', 'Value Range', 'Reset Value']
+[646] <p> style='4' text='Macro'
+[647] <tbl> 21행 | hdr=['Name', 'Type', 'Value', 'Description']
+[649] <p> style='4' text='Calibration & Parameter Data'
+[650] <tbl> 2행 | hdr=['Signal', 'Type', 'Value', 'Description']
+[652] <p> style='3' text='Interface Functions'
+[653] <p> style='4' text='SwUFn_0901: g_SystemStatusCheck'
+[654] <tbl> 19행 | hdr=['[ Function Informati']
+[656] <p> style='4' text='SwUFn_0902: g_SystemStatusCheck_Reset'
+[657] <tbl> 30행 | hdr=['[ Function Informati']
+[659] <p> style='4' text='SwUFn_0903: g_SysCtrl_ErrorProtection'
+[660] <tbl> 19행 | hdr=['[ Function Informati']
+[662] <p> style='3' text='Internal Functions'
+[663] <p> style='4' text='SwUFn_0904: s_DeactivationCheck'
+[664] <tbl> 19행 | hdr=['[ Function Informati']
+[666] <p> style='4' text='SwUFn_0905: u8s_BattLvlCheck'
+[667] <tbl> 19행 | hdr=['[ Function Informati']
+[669] <p> style='4' text='SwUFn_0906: u8s_HighSlopeCheck'
+[670] <tbl> 20행 | hdr=['[ Function Informati']
+[672] <p> style='4' text='SwUFn_0907: u8s_DeactivationCheck_Close'
+[673] <tbl> 23행 | hdr=['[ Function Informati']
+[675] <p> style='4' text='SwUFn_0908: u8s_DeactivationCheck_Open'
+[676] <tbl> 23행 | hdr=['[ Function Informati']
+[678] <p> style='4' text='SwUFn_0909: u8s_VehicleSpeedCheck'
+[679] <tbl> 21행 | hdr=['[ Function Informati']
+[681] <p> style='4' text='SwUFn_0910: s_InlineModeCheck'
+[682] <tbl> 24행 | hdr=['[ Function Informati']
+[685] <p> style='4' text='SwUFn_0911: s_MCUErrorCheck'
+[686] <tbl> 27행 | hdr=['[ Function Informati']
+[688] <p> style='4' text='SwUFn_0912: u8s_RAM_Test'
+[689] <tbl> 19행 | hdr=['[ Function Informati']
+[691] <p> style='4' text='SwUFn_0913: u8s_ROM_Test_Enable'
+[692] <tbl> 20행 | hdr=['[ Function Informati']
+[694] <p> style='4' text='SwUFn_0914: u8s_Register_Test'
+[695] <tbl> 20행 | hdr=['[ Function Informati']
+[697] <p> style='4' text='SwUFn_0915: u8s_EEPROM_Test'
+[698] <tbl> 19행 | hdr=['[ Function Informati']
+[701] <p> style='4' text='SwUFn_0916: u8s_DataValidCheck(New)'
+[702] <tbl> 20행 | hdr=['[ Function Informati']
+[705] <p> style='2' text='SwCom_10(System Sleep)'
+[706] <p> style='3' text='Unit Structure'
+[709] <p> style='3' text='Global Data'
+[710] <p> style='4' text='Global variables'
+[711] <tbl> 2행 | hdr=['Name', 'Type', 'Value Range', 'Reset Value']
+[713] <p> style='4' text='Static Variables'
+[714] <tbl> 2행 | hdr=['Data Name', 'Type', 'Value Range', 'Reset Value']
+[716] <p> style='4' text='Macro'
+[717] <tbl> 2행 | hdr=['Name', 'Type', 'Value', 'Description']
+[719] <p> style='4' text='Calibration & Parameter Data'
+[720] <tbl> 2행 | hdr=['Signal', 'Type', 'Value', 'Description']
+[722] <p> style='3' text='Interface Functions'
+[723] <p> style='4' text='SwUFn_1001: g_SysSleepCtrl'
+[724] <tbl> 24행 | hdr=['[ Function Informati']
+[726] <p> style='4' text='SwUFn_1002: g_SysSleepCtrl_Reset'
+[727] <tbl> 20행 | hdr=['[ Function Informati']
+[729] <p> style='4' text='SwUFn_1005: Wake_Up_Setting (Internal -> Interface 이동)'
+[730] <tbl> 32행 | hdr=['[ Function Informati']
+[732] <p> style='3' text='Internal Functions'
+[733] <p> style='4' text='SwUFn_1003: u8s_LinTimeOutCheck(삭제)'
+[735] <p> style='4' text='SwUFn_1004: Sleep_Mode_Setting'
+[736] <tbl> 32행 | hdr=['[ Function Informati']
+[738] <p> style='4' text='SwUFn_1006: ADC0_Stop_current_workaround'
+[739] <tbl> 28행 | hdr=['[ Function Informati']
+[741] <p> style='4' text='SwUFn_1007: s_RemoteSleepCheckTimer(삭제)'
+[743] <p> style='2' text='SwCom_11 (System EEPROM)'
+[744] <p> style='3' text='Unit Structure'
+[747] <p> style='3' text='Global Data'
+[748] <p> style='4' text='Global variables'
+[749] <tbl> 66행 | hdr=['Name', 'Type', 'Value Range', 'Reset Value']
+[751] <p> style='4' text='Static Variables'
+[752] <tbl> 7행 | hdr=['Data Name', 'Type', 'Value Range', 'Reset Value']
+[754] <p> style='4' text='Macro'
+[755] <tbl> 37행 | hdr=['Name', 'Type', 'Value', 'Description']
+[757] <p> style='4' text='Calibration & Parameter Data'
+[758] <tbl> 2행 | hdr=['Signal', 'Type', 'Value', 'Description']
+[760] <p> style='3' text='Interface Functions'
+[761] <p> style='4' text='SwUFn_1101: g_SysEepromCtrl_WriteData'
+[762] <tbl> 21행 | hdr=['[ Function Informati']
+[764] <p> style='4' text='SwUFn_1102: u8g_SysEepromCtrl_ReadData'
+[765] <tbl> 20행 | hdr=['[ Function Informati']
+[768] <p> style='4' text='SwUFn_1104: g_InlineModeEEPROMClear  InlineModeEEPROMClear'
+[769] <tbl> 19행 | hdr=['[ Function Informati']
+[771] <p> style='4' text='SwUFn_1105: g_InlineModeSpeedChangeFlagEEPROMSet  InlineMode'
+[772] <tbl> 19행 | hdr=['[ Function Informati']
+[774] <p> style='4' text='SwUFn_1111: g_SysEepromCtrl_Reset'
+[775] <tbl> 88행 | hdr=['[ Function Informati']
+[778] <p> style='4' text='SwUFn_1129: g_SysEepromCtrl_Main'
+[779] <tbl> 21행 | hdr=['[ Function Informati']
+[781] <p> style='4' text='SwUFn_1120: g_SysEepromCtrl_Diag(New)'
+[782] <tbl> 21행 | hdr=['[ Function Informati']
+[785] <p> style='3' text='Internal Functions'
+[786] <p> style='4' text='SwUFn_1103: NewPCBCheck(삭제)'
+[788] <p> style='4' text='SwUFn_1106: s_DiagDataSave_OpenFail  DiagDataSave_OpenFail ('
+[789] <tbl> 25행 | hdr=['[ Function Informati']
+[791] <p> style='4' text='SwUFn_1107: s_DiagDataSave_CloseFail  DiagDataSave_CloseFail'
+[792] <tbl> 27행 | hdr=['[ Function Informati']
+[794] <p> style='4' text='SwUFn_1108: s_DiagDataSave_AssistFail  DiagDataSave_AssistFa'
+[795] <tbl> 26행 | hdr=['[ Function Informati']
+[797] <p> style='4' text='SwUFn_1109: s_DiagEepromWrite   DiagEepromWrite (Interface -'
+[798] <tbl> 27행 | hdr=['[ Function Informati']
+[800] <p> style='4' text='SwUFn_1110: s_DiagEepromRead  DiagEepromRead'
+[801] <tbl> 24행 | hdr=['[ Function Informati']
+[804] <p> style='4' text='SwUFn_1112: s_EepromSleepModeRead'
+[805] <tbl> 19행 | hdr=['[ Function Informati']
+[807] <p> style='4' text='SwUFn_1113: s_EepromMotorA1A2OutputRead'
+[808] <tbl> 19행 | hdr=['[ Function Informati']
+[810] <p> style='4' text='SwUFn_1114: s_EepromProdDateRead'
+[811] <tbl> 19행 | hdr=['[ Function Informati']
+[813] <p> style='4' text='SwUFn_1115: s_EepromPartNoRead'
+[814] <tbl> 19행 | hdr=['[ Function Informati']
+[816] <p> style='4' text='SwUFn_1116: s_EepromSwVerRead(삭제)'
+[818] <p> style='4' text='SwUFn_1117: s_EepromHeVerRead'
+[819] <tbl> 19행 | hdr=['[ Function Informati']
+[821] <p> style='4' text='SwUFn_1118: s_EepromDbVerRead'
+[822] <tbl> 19행 | hdr=['[ Function Informati']
+[824] <p> style='4' text='SwUFn_1119: s_EepromSysInfoDataRead  s_EepromSysInfoDataRead'
+[825] <tbl> 19행 | hdr=['[ Function Informati']
+[827] <p> style='4' text='SwUFn_1121: s_Write2Eeprom_ProdDate (New)'
+[828] <tbl> 19행 | hdr=['[ Function Informati']
+[830] <p> style='4' text='SwUFn_1122: s_Write2Eeprom_PartNo (New)'
+[831] <tbl> 19행 | hdr=['[ Function Informati']
+[833] <p> style='4' text='SwUFn_1123: s_Write2Eeprom_SW_Version (New, 삭제)'
+[835] <p> style='4' text='SwUFn_1124: s_Write2Eeprom_HW_Version (New)'
+[836] <tbl> 19행 | hdr=['[ Function Informati']
+[838] <p> style='4' text='SwUFn_1125: s_Write2Eeprom_DB_Version (New)'
+[839] <tbl> 19행 | hdr=['[ Function Informati']
+[841] <p> style='4' text='SwUFn_1126: s_Write2Eeprom_UserOptionRecord (New)'
+[842] <tbl> 19행 | hdr=['[ Function Informati']
+[845] <p> style='4' text='SwUFn_1127: s_Write2Eeprom_Write1Byte (New)'
+[846] <tbl> 19행 | hdr=['[ Function Informati']
+[849] <p> style='4' text='SwUFn_1128: s_Write2Eeprom_ReprogramExcute (New)'
+[850] <tbl> 19행 | hdr=['[ Function Informati']
+[852] <p> style='4' text='SWUFn_1130: s_OverPosWrite (New)'
+[853] <tbl> 20행 | hdr=['[ Function Informati']
+[855] <p> style='4' text='SWUFn_1131: s_SystemParamRead <- g_SysEepromCtrl_SystemParam'
+[856] <tbl> 27행 | hdr=['[ Function Informati']
+[858] <p> style='4' text='SWUFn_1132 s_TunningParamRead <- g_SysEepromCtrl_TunningPara'
+[859] <tbl> 19행 | hdr=['[ Function Informati']
+[862] <p> style='4' text='SWUFn_1133 s_TunningParamRead_8bitData (New)'
+[863] <tbl> 54행 | hdr=['[ Function Informati']
+[865] <p> style='4' text='SWUFn_1134 s_TunningParamRead_16bitData (New)'
+[866] <tbl> 30행 | hdr=['[ Function Informati']
+[868] <p> style='2' text='SwCom_12 (System DIAG)'
+[869] <p> style='3' text='Unit Structure'
+[872] <p> style='3' text='Global Data'
+[873] <p> style='4' text='Global variables'
+[874] <tbl> 5행 | hdr=['Name', 'Type', 'Value Range', 'Reset Value']
+[876] <p> style='4' text='Static Variables'
+[877] <tbl> 23행 | hdr=['Data Name', 'Type', 'Value Range', 'Reset Value']
+[879] <p> style='4' text='Macro'
+[880] <tbl> 49행 | hdr=['Name', 'Type', 'Value', 'Description']
+[882] <p> style='4' text='Calibration & Parameter Data'
+[883] <tbl> 2행 | hdr=['Signal', 'Type', 'Value', 'Description']
+[885] <p> style='3' text='Interface Functions'
+[886] <p> style='4' text='SwUFn_1201: g_DiagCtrlMain'
+[887] <tbl> 19행 | hdr=['[ Function Informati']
+[889] <p> style='4' text='SwUFn_1204: g_DiagCtrlMain_Reset'
+[890] <tbl> 43행 | hdr=['[ Function Informati']
+[892] <p> style='3' text='Internal Functions'
+[893] <p> style='4' text='SwUFn_1202: s_DiagCheck_LB'
+[894] <tbl> 19행 | hdr=['[ Function Informati']
+[896] <p> style='4' text='SwUFn_1203: s_DiagCheck_HB'
+[897] <tbl> 19행 | hdr=['[ Function Informati']
+[900] <p> style='4' text='SwUFn_1205: u16s_BatteryLow_Check'
+[901] <tbl> 25행 | hdr=['[ Function Informati']
+[903] <p> style='4' text='SwUFn_1206: u16s_BatteryHigh_Check'
+[904] <tbl> 23행 | hdr=['[ Function Informati']
+[906] <p> style='4' text='SwUFn_1207: u16_sMotorShortBattA1_Check'
+[907] <tbl> 27행 | hdr=['[ Function Informati']
+[909] <p> style='4' text='SwUFn_1208: u16s_MotorShortBattA2_Check'
+[910] <tbl> 27행 | hdr=['[ Function Informati']
+[912] <p> style='4' text='SwUFn_1209: u16s_MotorShutDown_Check'
+[913] <tbl> 24행 | hdr=['[ Function Informati']
+[915] <p> style='4' text='SwUFn_1210: u16s_MotorOpenCircuit_Check'
+[916] <tbl> 27행 | hdr=['[ Function Informati']
+[918] <p> style='4' text='SwUFn_1211: u16s_MotorShortGnd_Check'
+[919] <tbl> 27행 | hdr=['[ Function Informati']
+[921] <p> style='4' text='SwUFn_1212: u16s_Encoder_Check'
+[922] <tbl> 19행 | hdr=['[ Function Informati']
+[924] <p> style='4' text='SwUFn_1213: u16s_HallPower_Check'
+[925] <tbl> 24행 | hdr=['[ Function Informati']
+[928] <p> style='4' text='SwUFn_1214: u16s_Magnet_Check'
+[929] <tbl> 24행 | hdr=['[ Function Informati']
+[931] <p> style='4' text='SwUFn_1215: u16s_Direction_Check'
+[932] <tbl> 24행 | hdr=['[ Function Informati']
+[934] <p> style='4' text='SwUFn_1216: u16s_Buzzer_Check'
+[935] <tbl> 25행 | hdr=['[ Function Informati']
+[937] <p> style='4' text='SwUFn_1217: u16s_LIN_Check'
+[938] <tbl> 19행 | hdr=['[ Function Informati']
+[940] <p> style='4' text='SwUFn_1218: s_UpdateErrorCode'
+[941] <tbl> 22행 | hdr=['[ Function Informati']
+[943] <p> style='4' text='SwUFn_1219: s_DiagTimerCtrl_1 (삭제)'
+[945] <p> style='4' text='SwUFn_1220: s_DiagTimerCtrl_2(삭제)'
+[948] <p> style='4' text='SwUFn_1221: u16s_LinBattErrChk'
+[949] <tbl> 19행 | hdr=['[ Function Informati']
+[953] <p> style='2' text='SwCom_13 (Door PreControl)'
+[954] <p> style='3' text='Unit Structure'
+[957] <p> style='3' text='Global Data'
+[958] <p> style='4' text='Global variables'
+[959] <tbl> 37행 | hdr=['Name', 'Type', 'Value Range', 'Reset Value']
+[961] <p> style='4' text='Static Variables'
+[962] <tbl> 50행 | hdr=['Name', 'Type', 'Value Range', 'Reset Value']
+[964] <p> style='4' text='Macro'
+[965] <tbl> 111행 | hdr=['Name', 'Type', 'Value', 'Description']
+[967] <p> style='4' text='Calibration & Parameter Data'
+[968] <tbl> 2행 | hdr=['Signal', 'Type', 'Value', 'Description']
+[970] <p> style='3' text='Interface Functions'
+[972] <p> style='4' text='SwUFn_1302: g_Ap_PreviousCtrl_Env'
+[973] <tbl> 19행 | hdr=['[ Function Informati']
+[975] <p> style='4' text='SwUFn_1303: g_Ap_PreviousCtrl_Reset'
+[976] <tbl> 104행 | hdr=['[ Function Informati']
+[977] <p> style='' text='11'
+[978] <p> style='4' text='SwUFn_1304: g_Ap_PreviousCtrl_Perf'
+[979] <tbl> 34행 | hdr=['[ Function Informati']
+[981] <p> style='3' text='Internal Functions'
+[982] <p> style='4' text='SwUFn_1301: g_Ap_Diagnostic'
+[983] <tbl> 19행 | hdr=['[ Function Informati']
+[986] <p> style='4' text='SwUFn_1305: s_FanRecircurationCheck'
+[987] <tbl> 31행 | hdr=['[ Function Informati']
+[989] <p> style='4' text='SwUFn_1306: s_GetSlopeLevel'
+[990] <tbl> 27행 | hdr=['[ Function Informati']
+[992] <p> style='4' text='SwUFn_1307: s_LowBatteryAction_Ign'
+[993] <tbl> 25행 | hdr=['[ Function Informati']
+[995] <p> style='4' text='SwUFn_1309: s_Ap_HighBatteryAction'
+[996] <tbl> 24행 | hdr=['[ Function Informati']
+[998] <p> style='4' text='SwUFn_1310: s_AntipinchDetect_Open'
+[999] <tbl> 33행 | hdr=['[ Function Informati']
+[1002] <p> style='4' text='SwUFn_1311: s_AntipinchDetect_Close'
+[1003] <tbl> 36행 | hdr=['[ Function Informati']
+[1004] <p> style='' text='11'
+[1006] <p> style='4' text='SwUFn_1312: s_AntipinchPopupCheck'
+[1007] <tbl> 23행 | hdr=['[ Function Informati']
+[1010] <p> style='4' text='SwUFn_1313: s_AntipinchFlagCheck'
+[1011] <tbl> 23행 | hdr=['[ Function Informati']
+[1013] <p> style='4' text='SwUFn_1314: s_AntipinchAction'
+[1014] <tbl> 21행 | hdr=['[ Function Informati']
+[1017] <p> style='4' text='SwUFn_1315: s_ManualOperationDetect'
+[1018] <tbl> 19행 | hdr=['[ Function Informati']
+[1020] <p> style='4' text='SwUFn_1316: s_ReverseOperationDetect'
+[1021] <tbl> 29행 | hdr=['[ Function Informati']
+[1023] <p> style='4' text='SwUFn_1317: s_DoorSlipDetect'
+[1024] <tbl> 21행 | hdr=['[ Function Informati']
+[1026] <p> style='4' text='SwUFn_1318: s_DecelerationDetect'
+[1027] <tbl> 32행 | hdr=['[ Function Informati']
+[1029] <p> style='4' text='SwUFn_1319: s_ArrivalDetect'
+[1030] <tbl> 21행 | hdr=['[ Function Informati']
+[1032] <p> style='4' text='SwUFn_1320: s_DampingDetect'
+[1033] <tbl> 33행 | hdr=['[ Function Informati']
+[1035] <p> style='4' text='SwUFn_1321: s_ReboundProtection'
+[1036] <tbl> 34행 | hdr=['[ Function Informati']
+[1038] <p> style='4' text='SwUFn_1322: s_AssistDeactivation'
+[1039] <tbl> 32행 | hdr=['[ Function Informati']
+[1042] <p> style='4' text='SwUFn_1323: s_EncoderFailureJudgment'
+[1043] <tbl> 32행 | hdr=['[ Function Informati']
+[1045] <p> style='4' text='SwUFn_1324: s_PlayProtectReady'
+[1046] <tbl> 24행 | hdr=['[ Function Informati']
+[1048] <p> style='4' text='SwUFn_1325: s_PlayProtectCloseCheck'
+[1049] <tbl> 25행 | hdr=['[ Function Informati']
+[1052] <p> style='4' text='SwUFn_1326: s_PlayProtectOpenCheck'
+[1053] <tbl> 25행 | hdr=['[ Function Informati']
+[1055] <p> style='4' text='SwUFn_1327: s_PlayProtectChk'
+[1056] <tbl> 22행 | hdr=['[ Function Informati']
+[1059] <p> style='4' text='SwUFn_1328: s_IsDoorStop'
+[1060] <tbl> 29행 | hdr=['[ Function Informati']
+[1063] <p> style='4' text='SwUFn_1329: s16s_DoorStopPosition'
+[1064] <tbl> 31행 | hdr=['[ Function Informati']
+[1067] <p> style='4' text='SwUFn_1330: s_IsDoorMoving'
+[1068] <tbl> 27행 | hdr=['[ Function Informati']
+[1071] <p> style='4' text='SwUFn_1331: s_UnfavorableTemperatureCheck'
+[1072] <tbl> 19행 | hdr=['[ Function Informati']
+[1074] <p> style='4' text='SwUFn_1332: s_UnfavorablePressureCheck'
+[1075] <tbl> 30행 | hdr=['[ Function Informati']
+[1077] <p> style='4' text='SwUFn_1333: s_OverCurrentDetect_UserCtrl(NEW)'
+[1078] <tbl> 24행 | hdr=['[ Function Informati']
+[1081] <p> style='4' text='SwUFn_1334: s_AntipinchRunCheck (NEW)'
+[1082] <tbl> 20행 | hdr=['[ Function Informati']
+[1084] <p> style='4' text='SwUFn_1335: s_AstOutCompensate (NEW)'
+[1085] <tbl> 49행 | hdr=['[ Function Informati']
+[1088] <p> style='4' text='SwUFn_1336: s_PreviousCtrl_Env_A(New)'
+[1089] <tbl> 19행 | hdr=['[ Function Informati']
+[1092] <p> style='4' text='SwUFn_1337: s_PreviousCtrl_Env_B(New)'
+[1093] <tbl> 19행 | hdr=['[ Function Informati']
+[1095] <p> style='4' text='SwUFn_1338: s_ReboundProtection_Ready(New)'
+[1096] <tbl> 23행 | hdr=['[ Function Informati']
+[1099] <p> style='4' text='SwUFn_1339: s_ReboundProtection_Return(New)'
+[1100] <tbl> 29행 | hdr=['[ Function Informati']
+[1103] <p> style='4' text='SwUFn_1340: u8s_ReboundDetection (New)'
+[1104] <tbl> 24행 | hdr=['[ Function Informati']
+[1106] <p> style='4' text='SwUFn_1341: s_AssistDeactivation_OpenChk(New)'
+[1107] <tbl> 25행 | hdr=['[ Function Informati']
+[1109] <p> style='4' text='SwUFn_1342 s_AssistDeactivation_CloseChk(New)'
+[1110] <tbl> 24행 | hdr=['[ Function Informati']
+[1113] <p> style='4' text='SwUFn_1343 s_GetTemperature'
+[1114] <tbl> 21행 | hdr=['[ Function Informati']
+[1117] <p> style='4' text='SwUFn_1344 s16s_DoorStopPosition_AssistClose'
+[1118] <tbl> 27행 | hdr=['[ Function Informati']
+[1121] <p> style='4' text='SwUFn_1345 s_IsDoorMoving_FullLatch'
+[1122] <tbl> 30행 | hdr=['[ Function Informati']
+[1126] <p> style='4' text='SwUFn_1346 s_IsDrMov_FullLatch_StopPosChk'
+[1127] <tbl> 21행 | hdr=['[ Function Informati']
+[1130] <p> style='4' text='SwUFn_1347 s_IsDrMov_FullLatch_MoveChk'
+[1131] <tbl> 25행 | hdr=['[ Function Informati']
+[1134] <p> style='4' text='SwUFn_1348 s_IsDrMov_FullLatch_StopChk'
+[1135] <tbl> 28행 | hdr=['[ Function Informati']
+[1137] <p> style='2' text='SwCom_14 (Door Control)'
+[1138] <p> style='3' text='Unit Structure'
+[1141] <p> style='3' text='Global Data'
+[1142] <p> style='4' text='Global variables'
+[1143] <tbl> 21행 | hdr=['Name', 'Type', 'Value Range', 'Reset Value']
+[1145] <p> style='4' text='Static Variables'
+[1146] <tbl> 6행 | hdr=['Name', 'Type', 'Value Range', 'Reset Value']
+[1148] <p> style='4' text='Macro'
+[1149] <tbl> 91행 | hdr=['Name', 'Type', 'Value', 'Description']
+[1151] <p> style='4' text='Calibration & Parameter Data'
+[1152] <tbl> 2행 | hdr=['Signal', 'Type', 'Value', 'Description']
+[1154] <p> style='3' text='Interface Functions'
+[1155] <p> style='4' text='SwUFn_1401: g_Ap_DoorCtrl_Func'
+[1156] <tbl> 20행 | hdr=['[ Function Informati']
+[1158] <p> style='4' text='SwUFn_1402: g_Ap_DoorCtrl_Reset'
+[1159] <tbl> 42행 | hdr=['[ Function Informati']
+[1161] <p> style='3' text='Internal Functions'
+[1162] <p> style='4' text='SwUFn_1403: s_DoorStateCtrl'
+[1163] <tbl> 19행 | hdr=['[ Function Informati']
+[1165] <p> style='4' text='SwUFn_1404: s_DoorState_Iintialization'
+[1166] <tbl> 30행 | hdr=['[ Function Informati']
+[1168] <p> style='4' text='SwUFn_1405: s_DoorState_AutoStop_Check'
+[1169] <tbl> 23행 | hdr=['[ Function Informati']
+[1171] <p> style='4' text='SwUFn_1406: s_DoorState_AutoStop_Count'
+[1172] <tbl> 19행 | hdr=['[ Function Informati']
+[1174] <p> style='4' text='SwUFn_1407: s_DoorState_AutoStop_Detection'
+[1175] <tbl> 36행 | hdr=['[ Function Informati']
+[1178] <p> style='4' text='SwUFn_1408: s_DoorState_AutoStop'
+[1179] <tbl> 34행 | hdr=['[ Function Informati']
+[1182] <p> style='4' text='SwUFn_1409: s_DoorState_FullClose'
+[1183] <tbl> 30행 | hdr=['[ Function Informati']
+[1185] <p> style='4' text='SwUFn_1410: s_DoorState_AutoOpen'
+[1186] <tbl> 33행 | hdr=['[ Function Informati']
+[1188] <p> style='4' text='SwUFn_1411: s_DoorState_AssistOpen'
+[1189] <tbl> 30행 | hdr=['[ Function Informati']
+[1191] <p> style='4' text='SwUFn_1412: s_DoorState_AutoClose'
+[1192] <tbl> 37행 | hdr=['[ Function Informati']
+[1195] <p> style='4' text='SwUFn_1413 s_DoorState_AssistClose'
+[1196] <tbl> 30행 | hdr=['[ Function Informati']
+[1198] <p> style='4' text='SwUFn_1414: s_DoorTimeOutCheckTimer'
+[1199] <tbl> 21행 | hdr=['[ Function Informati']
+[1202] <p> style='4' text='SwUFn_1415: s_UpdateDoorState'
+[1203] <tbl> 22행 | hdr=['[ Function Informati']
+[1206] <p> style='4' text='SwUFn_1416: s_UpdateDoorState_FULL_CLOSE'
+[1207] <tbl> 20행 | hdr=['[ Function Informati']
+[1209] <p> style='4' text='SwUFn_1417: s_UpdateDoorState_AUTO_STOP'
+[1210] <tbl> 21행 | hdr=['[ Function Informati']
+[1212] <p> style='4' text='SwUFn_1418: s_DoorStopCaseCheck'
+[1213] <tbl> 30행 | hdr=['[ Function Informati']
+[1215] <p> style='4' text='SwUFn_1419: s_MoveStartOpen'
+[1216] <tbl> 29행 | hdr=['[ Function Informati']
+[1218] <p> style='4' text='SwUFn_1420: s_MoveStartClose'
+[1219] <tbl> 21행 | hdr=['[ Function Informati']
+[1221] <p> style='4' text='SwUFn_1421: s_MoveStartOpen_GainMeasure  s_MoveStartOpen_Par'
+[1222] <tbl> 26행 | hdr=['[ Function Informati']
+[1225] <p> style='4' text='SwUFn_1422: s_MoveStartClose_GainMeasure  s_MoveStartClose_P'
+[1226] <tbl> 26행 | hdr=['[ Function Informati']
+[1228] <p> style='4' text='SwUFn_1423: s_DoorStateCtrl_UserCtrl (NEW)'
+[1229] <tbl> 19행 | hdr=['[ Function Informati']
+[1232] <p> style='4' text='SwUFn_1424: s_DoorState_TipToRun_Detection(NEW)'
+[1233] <tbl> 24행 | hdr=['[ Function Informati']
+[1235] <p> style='4' text='SwUFn_1425: s_DoorState_UserCtrl_Stop (NEW)'
+[1236] <tbl> 30행 | hdr=['[ Function Informati']
+[1239] <p> style='4' text='SwUFn_1426: s_DoorState_UserCtrl_Open (NEW)'
+[1240] <tbl> 24행 | hdr=['[ Function Informati']
+[1243] <p> style='4' text='SwUFn_1427: s_DoorState_UserCtrl_Close (NEW)'
+[1244] <tbl> 24행 | hdr=['[ Function Informati']
+[1247] <p> style='4' text='SwUFn_1428: s_DoorState_UserCtrl_AutoOpen (NEW)'
+[1248] <tbl> 28행 | hdr=['[ Function Informati']
+[1251] <p> style='4' text='SwUFn_1429: s_DoorState_UserCtrl_AutoClose (NEW)'
+[1252] <tbl> 24행 | hdr=['[ Function Informati']
+[1254] <p> style='4' text='SwUFn_1430: s_UpdateDoorState_USER_CTRL'
+[1255] <tbl> 22행 | hdr=['[ Function Informati']
+[1258] <p> style='4' text='SwUFn_1431: s_MoveStartOpen_FrontParamSet'
+[1259] <tbl> 21행 | hdr=['[ Function Informati']
+[1262] <p> style='4' text='SwUFn_1432: s_MoveStartOpen_RearParamSet'
+[1263] <tbl> 21행 | hdr=['[ Function Informati']
+[1266] <p> style='4' text='SwUFn_1433: s_MoveStartClose_FrontParamSet'
+[1267] <tbl> 21행 | hdr=['[ Function Informati']
+[1270] <p> style='4' text='SwUFn_1434: s_MoveStartClose_RearParamSet'
+[1271] <tbl> 21행 | hdr=['[ Function Informati']
+[1275] <p> style='4' text='SwUFn_1435: u16s_DoorState_Tip2RunDetectSpeed'
+[1276] <tbl> 24행 | hdr=['[ Function Informati']
+[1280] <p> style='4' text='SwUFn_1436: u16s_MoveStartOpen_GainMeasure_AstOpGain'
+[1281] <tbl> 21행 | hdr=['[ Function Informati']
+[1287] <p> style='2' text='SwCom_15 (Motor Control)'
+[1288] <p> style='3' text='Unit Structure'
+[1291] <p> style='3' text='Global Data'
+[1292] <p> style='4' text='Global variables'
+[1293] <tbl> 6행 | hdr=['Name', 'Type', 'Value Range', 'Reset Value']
+[1295] <p> style='4' text='Static Variables'
+[1296] <tbl> 21행 | hdr=['Name', 'Type', 'Value Range', 'Reset Value']
+[1298] <p> style='4' text='Macro'
+[1299] <tbl> 52행 | hdr=['Name', 'Type', 'Value', 'Description']
+[1301] <p> style='4' text='Calibration & Parameter Data'
+[1302] <tbl> 2행 | hdr=['Signal', 'Type', 'Value', 'Description']
+[1304] <p> style='3' text='Interface Functions'
+[1305] <p> style='4' text='SwUFn_1501: g_Ap_MotorCtrl_Func'
+[1306] <tbl> 19행 | hdr=['[ Function Informati']
+[1308] <p> style='4' text='SwUFn_1502: g_Ap_MotorCtrl_Reset'
+[1309] <tbl> 43행 | hdr=['[ Function Informati']
+[1311] <p> style='3' text='Internal Functions'
+[1312] <p> style='4' text='SwUFn_1503: s_MotorStateCtrl'
+[1313] <tbl> 19행 | hdr=['[ Function Informati']
+[1315] <p> style='4' text='SwUFn_1504: s_MotorCtrl'
+[1316] <tbl> 22행 | hdr=['[ Function Informati']
+[1319] <p> style='4' text='SwUFn_1505: s_MotorState_FreeStop'
+[1320] <tbl> 23행 | hdr=['[ Function Informati']
+[1322] <p> style='4' text='SwUFn_1506: s_MotorState_ShortBrake'
+[1323] <tbl> 22행 | hdr=['[ Function Informati']
+[1326] <p> style='4' text='SwUFn_1507: s_MotorState_Open'
+[1327] <tbl> 20행 | hdr=['[ Function Informati']
+[1330] <p> style='4' text='SwUFn_1508: s_MotorState_Close'
+[1331] <tbl> 20행 | hdr=['[ Function Informati']
+[1334] <p> style='4' text='SwUFn_1509: s_MotorSpeedModeSelection'
+[1335] <tbl> 33행 | hdr=['[ Function Informati']
+[1337] <p> style='4' text='SwUFn_1510: s_MotorSpeedCtrl'
+[1338] <tbl> 27행 | hdr=['[ Function Informati']
+[1340] <p> style='4' text='SwUFn_1511: s_MotorSpdCtrl_AutoOpen'
+[1341] <tbl> 34행 | hdr=['[ Function Informati']
+[1343] <p> style='4' text='SwUFn_1512: s_MotorSpdCtrl_AutoClose'
+[1344] <tbl> 39행 | hdr=['[ Function Informati']
+[1347] <p> style='4' text='SwUFn_1513: s_MotorSpdCtrl_AssistOpen'
+[1348] <tbl> 38행 | hdr=['[ Function Informati']
+[1351] <p> style='4' text='SwUFn_1514: s_MotorSpdCtrl_AssistClose'
+[1352] <tbl> 34행 | hdr=['[ Function Informati']
+[1355] <p> style='4' text='SwUFn_1515: s_MotorSpdCtrl_UserCtrlMove (New)'
+[1356] <tbl> 19행 | hdr=['[ Function Informati']
+[1359] <p> style='4' text='SwUFn_1516:  s_MotorSpdCtrl_UserCtrlPositioning (New)'
+[1360] <tbl> 19행 | hdr=['[ Function Informati']
+[1363] <p> style='4' text='SwUFn_1517: s_MotorSpeedModeSelection_FrontSet (New)'
+[1364] <tbl> 29행 | hdr=['[ Function Informati']
+[1367] <p> style='4' text='SwUFn_1518: s_MotorSpeedModeSelection_RearSet (New)'
+[1368] <tbl> 29행 | hdr=['[ Function Informati']
+[1370] <p> style='4' text='SwUFn_1519: s_MotorSpeedCtrl_General(New)'
+[1371] <tbl> 19행 | hdr=['[ Function Informati']
+[1373] <p> style='4' text='SwUFn_1520: s_MotorSpeedCtrl_UserCtrl (New)'
+[1374] <tbl> 20행 | hdr=['']
+[1376] <p> style='4' text='SwUFn_1521: s32s_MotorSpdCtrl_OpenAstVsupRatioCalc (New)'
+[1377] <tbl> 20행 | hdr=['']
+[1380] <p> style='4' text='SwUFn_1522: s32s_MotorSpdCtrl_OpenAstOffsetCalc (New)'
+[1381] <tbl> 21행 | hdr=['']
+[1384] <p> style='4' text='SwUFn_1523: s32s_MotorSpdCtrl_CloseAstVsupRatioCalc (New)'
+[1385] <tbl> 20행 | hdr=['']
+[1387] <p> style='4' text='SwUFn_1524: s_ComSpeedLimit'
+[1388] <tbl> 20행 | hdr=['[ Function Informati']
+[1397] <p> style='2' text='SwCom_16 (Buzzer Control)'
+[1398] <p> style='3' text='Unit Structure'
+[1401] <p> style='3' text='Global Data'
+[1402] <p> style='4' text='Global variables'
+[1403] <tbl> 5행 | hdr=['Name', 'Type', 'Value Range', 'Reset Value']
+[1405] <p> style='4' text='Static Variables'
+[1406] <tbl> 8행 | hdr=['Data Name', 'Type', 'Value Range', 'Reset Value']
+[1408] <p> style='4' text='Macro'
+[1409] <tbl> 8행 | hdr=['Name', 'Type', 'Value', 'Description']
+[1411] <p> style='4' text='Calibration & Parameter Data'
+[1412] <tbl> 2행 | hdr=['Signal', 'Type', 'Value', 'Description']
+[1414] <p> style='3' text='Interface Functions'
+[1415] <p> style='4' text='SwUFn_1601: g_Ap_BuzzerCtrl_Func'
+[1416] <tbl> 19행 | hdr=['[ Function Informati']
+[1418] <p> style='4' text='SwUFn_1602: g_Ap_BuzzerCtrl_Reset'
+[1419] <tbl> 29행 | hdr=['[ Function Informati']
+[1421] <p> style='4' text='SwUFn_1603: u8g_BuzzerStateReturn'
+[1422] <tbl> 19행 | hdr=['[ Function Informati']
+[1424] <p> style='3' text='Internal Functions'
+[1425] <p> style='4' text='SwUFn_1604: s_BuzzerStateCtrl'
+[1426] <tbl> 19행 | hdr=['[ Function Informati']
+[1428] <p> style='4' text='SwUFn_1605: s_BuzzerStateStop'
+[1429] <tbl> 35행 | hdr=['[ Function Informati']
+[1431] <p> style='4' text='SwUFn_1606: s_BuzzerStateFlashing_Twice'
+[1432] <tbl> 38행 | hdr=['[ Function Informati']
+[1434] <p> style='4' text='SwUFn_1607: s_BuzzerStateFlashing_Triple'
+[1435] <tbl> 32행 | hdr=['[ Function Informati']
+[1437] <p> style='4' text='SwUFn_1608: s_BuzzerOnOffCtrl'
+[1438] <tbl> 21행 | hdr=['[ Function Informati']
+[1440] <p> style='4' text='SwUFn_1609: s_BuzzerCtrl_Off'
+[1441] <tbl> 22행 | hdr=['[ Function Informati']
+[1443] <p> style='4' text='SwUFn_1610: s_BuzzerCtrl_On'
+[1444] <tbl> 22행 | hdr=['[ Function Informati']
+[1446] <p> style='4' text='SwUFn_1611: s_BuzzerTimerCtrl'
+[1447] <tbl> 23행 | hdr=['[ Function Informati']
+[1450] <p> style='2' text='SwCom_17 (CPU)'
+[1451] <p> style='3' text='Unit Structure'
+[1454] <p> style='3' text='Global Data'
+[1455] <p> style='4' text='Global variables'
+[1456] <tbl> 3행 | hdr=['Name', 'Type', 'Value Range', 'Reset Value']
+[1458] <p> style='4' text='Static Variables'
+[1459] <tbl> 2행 | hdr=['Data Name', 'Type', 'Value Range', 'Reset Value']
+[1461] <p> style='4' text='Macro'
+[1462] <tbl> 20행 | hdr=['Name', 'Type', 'Value', 'Description']
+[1464] <p> style='4' text='Calibration & Parameter Data'
+[1465] <tbl> 2행 | hdr=['Signal', 'Type', 'Value', 'Description']
+[1467] <p> style='3' text='Interface Functions'
+[1468] <p> style='4' text='SwUFn_1701: Cpu_Interrupt'
+[1469] <tbl> 19행 | hdr=['[ Function Informati']
+[1471] <p> style='4' text='SwUFn_1702: Cpu_IllegalOpcode'
+[1472] <tbl> 19행 | hdr=['[ Function Informati']
+[1475] <p> style='4' text='SwUFn_1703: Cpu_MachineException'
+[1476] <tbl> 19행 | hdr=['[ Function Informati']
+[1478] <p> style='4' text='SwUFn_1704: Cpu_SpareOpcode'
+[1479] <tbl> 19행 | hdr=['[ Function Informati']
+[1481] <p> style='4' text='SwUFn_1705: Cpu_LvdStatusChanged'
+[1482] <tbl> 19행 | hdr=['[ Function Informati']
+[1484] <p> style='4' text='SwUFn_1706: Cpu_PllLockStatusChanged'
+[1485] <tbl> 19행 | hdr=['[ Function Informati']
+[1487] <p> style='4' text='SwUFn_1707: Cpu_OscStatusChanged'
+[1488] <tbl> 19행 | hdr=['[ Function Informati']
+[1491] <p> style='4' text='SwUFn_1708: Cpu_SRAM_ECC'
+[1492] <tbl> 19행 | hdr=['[ Function Informati']
+[1494] <p> style='4' text='SwUFn_1709: Cpu_SpuriousInterrupt'
+[1495] <tbl> 19행 | hdr=['[ Function Informati']
+[1497] <p> style='4' text='SwUFn_1710: EntryPoint'
+[1498] <tbl> 33행 | hdr=['[ Function Informati']
+[1500] <p> style='4' text='SwUFn_1711: PE_low_level_init_1'
+[1501] <tbl> 128행 | hdr=['[ Function Informati']
+[1503] <p> style='4' text='SwUFn_1712: PE_low_level_init_2'
+[1504] <tbl> 21행 | hdr=['[ Function Informati']
+[1507] <p> style='3' text='Internal Functions'
+[1508] <p> style='4' text='SwUFn_1713: Cpu_GetResetSource'
+[1509] <tbl> 19행 | hdr=['[ Function Informati']
+[1512] <p> style='2' text='SwCom_18 (EVENT)'
+[1513] <p> style='3' text='Unit Structure'
+[1516] <p> style='3' text='Global Data'
+[1517] <p> style='4' text='Global variables'
+[1518] <tbl> 2행 | hdr=['Name', 'Type', 'Value Range', 'Reset Value']
+[1520] <p> style='4' text='Static Variables'
+[1521] <tbl> 2행 | hdr=['Data Name', 'Type', 'Value Range', 'Reset Value']
+[1523] <p> style='4' text='Macro'
+[1524] <tbl> 2행 | hdr=['Name', 'Type', 'Value', 'Description']
+[1526] <p> style='4' text='Calibration & Parameter Data'
+[1527] <tbl> 2행 | hdr=['Signal', 'Type', 'Value', 'Description']
+[1529] <p> style='3' text='Interface Functions'
+[1530] <p> style='4' text='SwUFn_1801: SysTickTimer_OnInterrupt'
+[1531] <tbl> 24행 | hdr=['[ Function Informati']
+[1533] <p> style='4' text='SwUFn_1803: PT4_MOTOR_SPEED_OnCapture'
+[1534] <tbl> 25행 | hdr=['[ Function Informati']
+[1536] <p> style='4' text='SwUFn_1804: Cpu_OnReset'
+[1537] <tbl> 19행 | hdr=['[ Function Informati']
+[1539] <p> style='4' text='SwUFn_1805: Cpu_OnMachineException'
+[1540] <tbl> 19행 | hdr=['[ Function Informati']
+[1542] <p> style='4' text='SwUFn_1806: Cpu_OnIllegalOpcode'
+[1543] <tbl> 19행 | hdr=['[ Function Informati']
+[1545] <p> style='4' text='SwUFn_1807: Cpu_OnSpareOpcode'
+[1546] <tbl> 19행 | hdr=['[ Function Informati']
+[1548] <p> style='4' text='SwUFn_1808: Cpu_OnLvdStatusChanged'
+[1549] <tbl> 19행 | hdr=['[ Function Informati']
+[1551] <p> style='4' text='SwUFn_1809: Cpu_OnPllLockStatusChanged'
+[1552] <tbl> 19행 | hdr=['[ Function Informati']
+[1554] <p> style='4' text='SwUFn_1810: Cpu_OnOscStatusChanged'
+[1555] <tbl> 19행 | hdr=['[ Function Informati']
+[1557] <p> style='4' text='SwUFn_1811: Cpu_OnSpuriousInterrupt'
+[1558] <tbl> 19행 | hdr=['[ Function Informati']
+[1560] <p> style='4' text='SwUFn_1812: Cpu_OnSRAM_ECCerror'
+[1561] <tbl> 19행 | hdr=['[ Function Informati']
+[1563] <p> style='3' text='Internal Functions'
+[1564] <p> style='' text='-. 해당 사항 없음.'
+[1566] <p> style='2' text='SwCom_19 (LIN PHY)'
+[1567] <p> style='3' text='Unit Structure'
+[1570] <p> style='3' text='Global Data'
+[1571] <p> style='4' text='Global variables'
+[1572] <tbl> 2행 | hdr=['Name', 'Type', 'Value Range', 'Reset Value']
+[1574] <p> style='4' text='Static Variables'
+[1575] <tbl> 2행 | hdr=['Data Name', 'Type', 'Value Range', 'Reset Value']
+[1577] <p> style='4' text='Macro'
+[1578] <tbl> 2행 | hdr=['Name', 'Type', 'Value', 'Description']
+[1580] <p> style='4' text='Calibration & Parameter Data'
+[1581] <tbl> 2행 | hdr=['Signal', 'Type', 'Value', 'Description']
+[1584] <p> style='3' text='Interface Functions'
+[1585] <p> style='4' text='SwUFn_1901: LINPHY0_Init'
+[1586] <tbl> 25행 | hdr=['[ Function Informati']
+[1588] <p> style='3' text='Internal Functions'
+[1589] <p> style='' text='-. 해당 사항 없음.'
+[1592] <p> style='2' text='SwCom_21 (EEPROM)'
+[1593] <p> style='3' text='Unit Structure'
+[1596] <p> style='3' text='Global Data'
+[1597] <p> style='4' text='Global variables'
+[1598] <tbl> 2행 | hdr=['Name', 'Type', 'Value Range', 'Reset Value']
+[1600] <p> style='4' text='Static Variables'
+[1601] <tbl> 3행 | hdr=['Data Name', 'Type', 'Value Range', 'Reset Value']
+[1604] <p> style='4' text='Macro'
+[1605] <tbl> 13행 | hdr=['Name', 'Type', 'Value', 'Description']
+[1607] <p> style='4' text='Calibration & Parameter Data'
+[1608] <tbl> 2행 | hdr=['Signal', 'Type', 'Value', 'Description']
+[1610] <p> style='3' text='Interface Functions'
+[1611] <p> style='4' text='SwUFn_2101: EEPROM_SetByte'
+[1612] <tbl> 25행 | hdr=['[ Function Informati']
+[1614] <p> style='4' text='SwUFn_2102: EEPROM_GetByte'
+[1615] <tbl> 22행 | hdr=['[ Function Informati']
+[1617] <p> style='4' text='SwUFn_2103: EEPROM_Init'
+[1618] <tbl> 20행 | hdr=['[ Function Informati']
+[1620] <p> style='3' text='Internal Functions'
+[1621] <p> style='4' text='SwUFn_2104: BackupSector'
+[1622] <tbl> 21행 | hdr=['[ Function Informati']
+[1624] <p> style='4' text='SwUFn_2105: WriteBlock'
+[1625] <tbl> 31행 | hdr=['[ Function Informati']
+[1627] <p> style='4' text='SwUFn_2106: EraseSectorInternal'
+[1628] <tbl> 25행 | hdr=['[ Function Informati']
+[1631] <p> style='2' text='SwCom_22 (ADC)'
+[1632] <p> style='3' text='Unit Structure'
+[1635] <p> style='3' text='Global Data'
+[1636] <p> style='4' text='Global variables'
+[1637] <tbl> 2행 | hdr=['Name', 'Type', 'Value Range', 'Reset Value']
+[1639] <p> style='4' text='Static Variables'
+[1640] <tbl> 7행 | hdr=['Data Name', 'Type', 'Value Range', 'Reset Value']
+[1642] <p> style='4' text='Macro'
+[1643] <tbl> 13행 | hdr=['Name', 'Type', 'Value', 'Description']
+[1645] <p> style='4' text='Calibration & Parameter Data'
+[1646] <tbl> 2행 | hdr=['Signal', 'Type', 'Value', 'Description']
+[1648] <p> style='3' text='Interface Functions'
+[1649] <p> style='4' text='SwUFn_2201: Monitor_ADC_Enable'
+[1650] <tbl> 20행 | hdr=['[ Function Informati']
+[1652] <p> style='4' text='SwUFn_2202: Monitor_ADC_Disable'
+[1653] <tbl> 20행 | hdr=['[ Function Informati']
+[1655] <p> style='4' text='SwUFn_2203: Monitor_ADC_Measure'
+[1656] <tbl> 22행 | hdr=['[ Function Informati']
+[1658] <p> style='4' text='SwUFn_2204: Monitor_ADC_GetValue16'
+[1659] <tbl> 22행 | hdr=['[ Function Informati']
+[1661] <p> style='4' text='SwUFn_2206: Monitor_ADC_Init'
+[1662] <tbl> 34행 | hdr=['[ Function Informati']
+[1664] <p> style='3' text='Internal Functions'
+[1665] <p> style='4' text='SwUFn_2205: Monitor_ADC_HWEnDi'
+[1666] <tbl> 24행 | hdr=['[ Function Informati']
+[1669] <p> style='4' text='SwUFn_2207: Monitor_ADC_MainMeasure'
+[1670] <tbl> 28행 | hdr=['[ Function Informati']
+[1672] <p> style='2' text='SwCom_23 (PWM_PP0)'
+[1673] <p> style='3' text='Unit Structure'
+[1676] <p> style='3' text='Global Data'
+[1677] <p> style='4' text='Global variables'
+[1678] <tbl> 2행 | hdr=['Name', 'Type', 'Value Range', 'Reset Value']
+[1680] <p> style='4' text='Static Variables'
+[1681] <tbl> 2행 | hdr=['Data Name', 'Type', 'Value Range', 'Reset Value']
+[1683] <p> style='4' text='Macro'
+[1684] <tbl> 3행 | hdr=['Name', 'Type', 'Value', 'Description']
+[1686] <p> style='4' text='Calibration & Parameter Data'
+[1687] <tbl> 2행 | hdr=['Signal', 'Type', 'Value', 'Description']
+[1689] <p> style='3' text='Interface Functions'
+[1690] <p> style='4' text='SwUFn_2301: PP0_MOTOR_PWM_SetRatio16'
+[1691] <tbl> 20행 | hdr=['[ Function Informati']
+[1693] <p> style='4' text='EnUserSwUFn_2302: PP0_MOTOR_PWM_Init'
+[1694] <tbl> 27행 | hdr=['[ Function Informati']
+[1696] <p> style='3' text='Internal Functions'
+[1697] <p> style='4' text='SwUFn_2303: MotorPwm_SetRatio'
+[1698] <tbl> 20행 | hdr=['[ Function Informati']
+[1701] <p> style='2' text='SwCom_24 (PWM_PP5)'
+[1702] <p> style='3' text='Unit Structure'
+[1705] <p> style='3' text='Global Data'
+[1706] <p> style='4' text='Global variables'
+[1707] <tbl> 2행 | hdr=['Name', 'Type', 'Value Range', 'Reset Value']
+[1709] <p> style='4' text='Static Variables'
+[1710] <tbl> 3행 | hdr=['Data Name', 'Type', 'Value Range', 'Reset Value']
+[1712] <p> style='4' text='Macro'
+[1713] <tbl> 3행 | hdr=['Name', 'Type', 'Value', 'Description']
+[1715] <p> style='4' text='Calibration & Parameter Data'
+[1716] <tbl> 2행 | hdr=['Signal', 'Type', 'Value', 'Description']
+[1718] <p> style='3' text='Interface Functions'
+[1719] <p> style='4' text='SwUFn_2401: PP5_BUZZER_PWM_Enable'
+[1720] <tbl> 20행 | hdr=['[ Function Informati']
+[1722] <p> style='4' text='SwUFn_2402: PP5_BUZZER_PWM_Disable'
+[1723] <tbl> 21행 | hdr=['[ Function Informati']
+[1725] <p> style='4' text='SwUFn_2403: PP5_BUZZER_PWM_SetRatio16'
+[1726] <tbl> 20행 | hdr=['[ Function Informati']
+[1728] <p> style='4' text='SwUFn_2404: PP5_BUZZER_PWM_Init'
+[1729] <tbl> 26행 | hdr=['[ Function Informati']
+[1731] <p> style='3' text='Internal Functions'
+[1732] <p> style='4' text='SwUFn_2405: HWEnDi'
+[1733] <tbl> 20행 | hdr=['[ Function Informati']
+[1735] <p> style='4' text='SwUFn_2406: BuzzerPwm_SetRatio'
+[1736] <tbl> 19행 | hdr=['[ Function Informati']
+[1739] <p> style='' text='//SwCom_25 (PWM_PP7) 삭제'
+[1741] <p> style='2' text='SwCom_26 (BAT)'
+[1742] <p> style='3' text='Unit Structure'
+[1745] <p> style='3' text='Global Data'
+[1746] <p> style='4' text='Global variables'
+[1747] <tbl> 2행 | hdr=['Name', 'Type', 'Value Range', 'Reset Value']
+[1749] <p> style='4' text='Static Variables'
+[1750] <tbl> 2행 | hdr=['Data Name', 'Type', 'Value Range', 'Reset Value']
+[1752] <p> style='4' text='Macro'
+[1753] <tbl> 2행 | hdr=['Name', 'Type', 'Value', 'Description']
+[1755] <p> style='4' text='Calibration & Parameter Data'
+[1756] <tbl> 2행 | hdr=['Signal', 'Type', 'Value', 'Description']
+[1758] <p> style='3' text='Interface Functions'
+[1759] <p> style='4' text='SwUFn_2601: BATS_Init'
+[1760] <tbl> 21행 | hdr=['[ Function Informati']
+[1762] <p> style='3' text='Internal Functions'
+[1763] <p> style='' text='-. 해당 사항 없음.'
+[1765] <p> style='' text='//SwCom_27 (PE_TIMER) 삭제'
+[1767] <p> style='2' text='SwCom_28 (EINT)'
+[1768] <p> style='3' text='Unit Structure'
+[1771] <p> style='3' text='Global Data'
+[1772] <p> style='4' text='Global variables'
+[1773] <tbl> 2행 | hdr=['Name', 'Type', 'Value Range', 'Reset Value']
+[1775] <p> style='4' text='Static Variables'
+[1776] <tbl> 2행 | hdr=['Data Name', 'Type', 'Value Range', 'Reset Value']
+[1778] <p> style='4' text='Macro'
+[1779] <tbl> 2행 | hdr=['Name', 'Type', 'Value', 'Description']
+[1781] <p> style='4' text='Calibration & Parameter Data'
+[1782] <tbl> 2행 | hdr=['Signal', 'Type', 'Value', 'Description']
+[1784] <p> style='3' text='Interface Functions'
+[1785] <p> style='4' text='SwUFn_2801: PL0_WAKE_UP_Enable'
+[1786] <tbl> 20행 | hdr=['[ Function Informati']
+[1788] <p> style='4' text='SwUFn_2802: PL0_WAKE_UP_Interrupt'
+[1789] <tbl> 19행 | hdr=['[ Function Informati']
+[1791] <p> style='3' text='Internal Functions'
+[1792] <p> style='' text='-. 해당 사항 없음.'
+[1795] <p> style='2' text='SwCom_29 (SCI)'
+[1796] <p> style='3' text='Unit Structure'
+[1799] <p> style='3' text='Global Data'
+[1800] <p> style='4' text='Global variables'
+[1801] <tbl> 2행 | hdr=['Name', 'Type', 'Value Range', 'Reset Value']
+[1803] <p> style='4' text='Static Variables'
+[1804] <tbl> 2행 | hdr=['Data Name', 'Type', 'Value Range', 'Reset Value']
+[1806] <p> style='4' text='Macro'
+[1807] <tbl> 2행 | hdr=['Name', 'Type', 'Value', 'Description']
+[1809] <p> style='4' text='Calibration & Parameter Data'
+[1810] <tbl> 2행 | hdr=['Signal', 'Type', 'Value', 'Description']
+[1812] <p> style='3' text='Interface Functions'
+[1813] <p> style='4' text='SwUFn_2901: SCI0_Init'
+[1814] <tbl> 26행 | hdr=['[ Function Informati']
+[1816] <p> style='3' text='Internal Functions'
+[1817] <p> style='' text='-. 해당 사항 없음.'
+[1820] <p> style='2' text='SwCom_30 (TIMER)'
+[1821] <p> style='3' text='Unit Structure'
+[1824] <p> style='3' text='Global Data'
+[1825] <p> style='4' text='Global variables'
+[1826] <tbl> 2행 | hdr=['Name', 'Type', 'Value Range', 'Reset Value']
+[1828] <p> style='4' text='Static Variables'
+[1829] <tbl> 2행 | hdr=['Data Name', 'Type', 'Value Range', 'Reset Value']
+[1831] <p> style='4' text='Macro'
+[1832] <tbl> 2행 | hdr=['Name', 'Type', 'Value', 'Description']
+[1834] <p> style='4' text='Calibration & Parameter Data'
+[1835] <tbl> 2행 | hdr=['Signal', 'Type', 'Value', 'Description']
+[1837] <p> style='3' text='Interface Functions'
+[1838] <p> style='4' text='SwUFn_3001: SysTickTimer_Interrupt'
+[1839] <tbl> 20행 | hdr=['[ Function Informati']
+[1841] <p> style='' text='//SwUFn_3002: Tick_Timer2_Interrupt 삭제'
+[1842] <p> style='3' text='Internal Functions'
+[1843] <p> style='' text='-. 해당 사항 없음.'
+[1845] <p> style='2' text='SwCom_31 (CAPTURE)'
+[1846] <p> style='3' text='Unit Structure'
+[1849] <p> style='3' text='Global Data'
+[1850] <p> style='4' text='Global variables'
+[1851] <tbl> 2행 | hdr=['Name', 'Type', 'Value Range', 'Reset Value']
+[1853] <p> style='4' text='Static Variables'
+[1854] <tbl> 2행 | hdr=['Data Name', 'Type', 'Value Range', 'Reset Value']
+[1856] <p> style='4' text='Macro'
+[1857] <tbl> 2행 | hdr=['Name', 'Type', 'Value', 'Description']
+[1859] <p> style='4' text='Calibration & Parameter Data'
+[1860] <tbl> 2행 | hdr=['Signal', 'Type', 'Value', 'Description']
+[1862] <p> style='3' text='Interface Functions'
+[1863] <p> style='4' text='SwUFn_3101: PT4_MOTOR_SPEED_Init'
+[1864] <tbl> 25행 | hdr=['[ Function Informati']
+[1866] <p> style='4' text='SwUFn_3102: PT4_MOTOR_SPEED_Interrupt'
+[1867] <tbl> 19행 | hdr=['[ Function Informati']
+[1869] <p> style='3' text='Internal Functions'
+[1870] <p> style='' text='-. 해당 사항 없음.'
+[1873] <p> style='2' text='SwCom_32 (VECTOR)'
+[1874] <p> style='3' text='Unit Structure (삭제)'
+[1876] <p> style='3' text='Global Data'
+[1877] <p> style='4' text='Global variables'
+[1878] <tbl> 2행 | hdr=['Name', 'Type', 'Value Range', 'Reset Value']
+[1880] <p> style='4' text='Static Variables'
+[1881] <tbl> 2행 | hdr=['Data Name', 'Type', 'Value Range', 'Reset Value']
+[1883] <p> style='4' text='Macro'
+[1884] <tbl> 2행 | hdr=['Name', 'Type', 'Value', 'Description']
+[1886] <p> style='4' text='Calibration & Parameter Data'
+[1887] <tbl> 2행 | hdr=['Signal', 'Type', 'Value', 'Description']
+[1889] <p> style='3' text='Interface Functions'
+[1890] <p> style='' text='-. 해당 사항 없음'
+[1892] <p> style='3' text='Internal Functions'
+[1893] <p> style='' text='-. 해당 사항 없음'
+[1903] <p> style='2' text='SwCom_33 (LIN_UDS)'
+[1904] <p> style='3' text='Unit Structure'
+[1907] <p> style='3' text='Global Data'
+[1908] <p> style='4' text='Global variables'
+[1909] <tbl> 11행 | hdr=['Name', 'Type', 'Value Range', 'Reset Value']
+[1911] <p> style='4' text='Static Variables'
+[1912] <tbl> 10행 | hdr=['Data Name', 'Type', 'Value Range', 'Reset Value']
+[1914] <p> style='4' text='Macro'
+[1915] <tbl> 57행 | hdr=['Name', 'Type', 'Value', 'Description']
+[1917] <p> style='4' text='Calibration & Parameter Data'
+[1918] <tbl> 2행 | hdr=['Signal', 'Type', 'Value', 'Description']
+[1920] <p> style='3' text='Interface Functions'
+[1921] <p> style='4' text='SwUFn_3301: g_UDS_RDBI_Paser'
+[1922] <tbl> 26행 | hdr=['[ Function Informati']
+[1924] <p> style='4' text='SwUFn_3302: g_UDS_WDBI_Paser'
+[1925] <tbl> 28행 | hdr=['[ Function Informati']
+[1928] <p> style='4' text='SwUFn_3303: g_UDS_LinComp_Reset'
+[1929] <tbl> 37행 | hdr=['[ Function Informati']
+[1934] <p> style='4' text='SwUFn_3331: g_UDS_SessionCtrl (New) (Internal -> Interface 이'
+[1935] <tbl> 22행 | hdr=['[ Function Informati']
+[1937] <p> style='3' text='Internal Functions'
+[1938] <p> style='4' text='SwUFn_3304: s_UDS_RDBI_ProdDate  s_UDS_LinTx_RDBI_ProdDate'
+[1939] <tbl> 21행 | hdr=['[ Function Informati']
+[1942] <p> style='4' text='SwUFn_3305: s_UDS_RDBI_PartNumber   s_UDS_LinTx_RDBI_PartNum'
+[1943] <tbl> 21행 | hdr=['[ Function Informati']
+[1946] <p> style='4' text='SwUFn_3306: s_UDS_RDBI_SW_Version   s_UDS_LinTx_RDBI_SW_Vers'
+[1947] <tbl> 22행 | hdr=['[ Function Informati']
+[1950] <p> style='4' text='SwUFn_3307: s_UDS_RDBI_HW_Version   s_UDS_LinTx_RDBI_HW_Vers'
+[1951] <tbl> 21행 | hdr=['[ Function Informati']
+[1954] <p> style='4' text='SwUFn_3308:  s_UDS_RDBI_DB_Version   s_UDS_LinTx_RDBI_DB_Ver'
+[1955] <tbl> 21행 | hdr=['[ Function Informati']
+[1958] <p> style='4' text='SwUFn_3309: s_UDS_RDBI_StatusCheck2  s_UDS_LinTx_RDBI_Status'
+[1959] <tbl> 21행 | hdr=['[ Function Informati']
+[1961] <p> style='4' text='SwUFn_3310: s_UDS_WDBI_ProdDate'
+[1962] <tbl> 26행 | hdr=['[ Function Informati']
+[1964] <p> style='4' text='SwUFn_3311: s_UDS_WDBI_PartNumber'
+[1965] <tbl> 24행 | hdr=['[ Function Informati']
+[1968] <p> style='4' text='SwUFn_3312: s_UDS_WDBI_SW_Version(삭제)'
+[1970] <p> style='4' text='SwUFn_3313: s_UDS_WDBI_HW_Version'
+[1971] <tbl> 24행 | hdr=['[ Function Informati']
+[1973] <p> style='4' text='SwUFn_3314: s_UDS_WDBI_DB_Version'
+[1974] <tbl> 24행 | hdr=['[ Function Informati']
+[1976] <p> style='4' text='SwUFn_3315: s_UDS_WDBI_UserOption (삭제)'
+[1979] <p> style='4' text='SwUFn_3316: s_UDS_WDBI_US_ReadEeprom'
+[1980] <tbl> 25행 | hdr=['[ Function Informati']
+[1982] <p> style='4' text='SwUFn_3317: s_UDS_WDBI_US_WiteEeprom'
+[1983] <tbl> 28행 | hdr=['[ Function Informati']
+[1986] <p> style='4' text='SwUFn_3318: s_UDS_WDBI_US_ApplyParam'
+[1987] <tbl> 23행 | hdr=['[ Function Informati']
+[1989] <p> style='4' text='SwUFn_3319: s_UDS_WDBI_US_ClearEeprom'
+[1990] <tbl> 23행 | hdr=['[ Function Informati']
+[1992] <p> style='4' text='SwUFn_3320: s_UDS_WDBI_US_ReadSysSts'
+[1993] <tbl> 32행 | hdr=['[ Function Informati']
+[1996] <p> style='4' text='SwUFn_3321: s_UDS_WDBI_US_UserCtrl'
+[1997] <tbl> 36행 | hdr=['[ Function Informati']
+[1999] <p> style='4' text='SwUFn_3322: s_UDS_WDBI_US_Reprogram'
+[2000] <tbl> 19행 | hdr=['[ Function Informati']
+[2002] <p> style='4' text='SwUFn_3323: u16s_Pwm2Spd_Conv'
+[2003] <tbl> 19행 | hdr=['[ Function Informati']
+[2006] <p> style='4' text='SwUFn_3324: s_UDS_RDBI_SW_Unit1_Version(New)'
+[2007] <tbl> 21행 | hdr=['[ Function Informati']
+[2010] <p> style='4' text='SwUFn_3325: s_UDS_RDBI_StatusCheck3(New)'
+[2011] <tbl> 21행 | hdr=['[ Function Informati']
+[2014] <p> style='4' text='SwUFn_3326: s_UDS_WDBI_UserOptRecordId (New)'
+[2015] <tbl> 25행 | hdr=['[ Function Informati']
+[2018] <p> style='4' text='SwUFn_3327: s_UDS_WDBI_UsOptMain (New)'
+[2019] <tbl> 20행 | hdr=['[ Function Informati']
+[2022] <p> style='4' text='SwUFn_3328: s_UDS_WDBI_US_OpDataRead(New)'
+[2023] <tbl> 27행 | hdr=['[ Function Informati']
+[2026] <p> style='4' text='SwUFn_3329: s_UDS_WDBI_US_SysOpt(New)'
+[2027] <tbl> 31행 | hdr=['[ Function Informati']
+[2029] <p> style='4' text='SwUFn_3330: s_UDS_WDBI_US_BuzzTest (New)'
+[2030] <tbl> 24행 | hdr=['[ Function Informati']
+[2032] <p> style='4' text='SwUFn_3332: s_UDS_DSC_ProgSession (New)'
+[2033] <tbl> 19행 | hdr=['[ Function Informati']
+[2035] <p> style='4' text='SwUFn_3333: s_UDS_WDBI_UsOpt_F1G (New)'
+[2036] <tbl> 19행 | hdr=['[ Function Informati']
+[2038] <p> style='4' text='SwUFn_3334: s_UDS_WDBI_UsOpt_E2G_1 (New)'
+[2039] <tbl> 19행 | hdr=['[ Function Informati']
+[2041] <p> style='4' text='SwUFn_3335: s_UDS_WDBI_UsOpt_E2G_2 (New)'
+[2042] <tbl> 19행 | hdr=['[ Function Informati']
+[2049] <p> style='2' text='SwCom_34 (Option_Control)'
+[2050] <p> style='3' text='Unit Structure'
+[2053] <p> style='3' text='Global Data'
+[2054] <p> style='4' text='Global variables'
+[2055] <tbl> 6행 | hdr=['Name', 'Type', 'Value Range', 'Reset Value']
+[2057] <p> style='4' text='Static Variables'
+[2058] <tbl> 2행 | hdr=['Data Name', 'Type', 'Value Range', 'Reset Value']
+[2060] <p> style='4' text='Macro'
+[2061] <tbl> 29행 | hdr=['Name', 'Type', 'Value', 'Description']
+[2063] <p> style='4' text='Calibration & Parameter Data'
+[2064] <tbl> 2행 | hdr=['Signal', 'Type', 'Value', 'Description']
+[2066] <p> style='3' text='Interface Functions'
+[2067] <p> style='4' text='SwUFn_3401: g_SysOptionCtrl'
+[2068] <tbl> 19행 | hdr=['[ Function Informati']
+[2071] <p> style='4' text='SwUFn_3402: g_SysOptionCtrl_Reset'
+[2072] <tbl> 23행 | hdr=['[ Function Informati']
+[2074] <p> style='3' text='Internal Functions'
+[2076] <p> style='4' text='SwUFn_3403: s_DeviceTypeChk'
+[2077] <tbl> 19행 | hdr=['[ Function Informati']
+[2080] <p> style='4' text='SwUFn_3404: s_DeviceOptionSet_DoorAngle'
+[2081] <tbl> 25행 | hdr=['[ Function Informati']
+[2084] <p> style='4' text='SwUFn_3405: s_DeviceOptionSet_AntipinchDetectSpd'
+[2085] <tbl> 19행 | hdr=['[ Function Informati']
+[2088] <p> style='2' text='SwCom_35 (Bootloader)'
+[2089] <p> style='3' text='Unit Structure'
+[2091] <p> style='a9' text='CR_012 : Reprogramming 추가'
+[2092] <p> style='3' text='Global Data'
+[2093] <p> style='4' text='Global variables'
+[2094] <tbl> 2행 | hdr=['Name', 'Type', 'Value Range', 'Reset Value']
+[2096] <p> style='4' text='Static Variables'
+[2097] <tbl> 7행 | hdr=['Data Name', 'Data Type', 'Value Range', 'Reset Value']
+[2099] <p> style='4' text='Macro'
+[2100] <tbl> 24행 | hdr=['Name', 'Type', 'Value', 'Description']
+[2102] <p> style='4' text='Calibration & Parameter Data'
+[2103] <tbl> 2행 | hdr=['Signal', 'Type', 'Value', 'Description']
+[2105] <p> style='3' text='Interface Functions'
+[2106] <p> style='3' text='Internal Functions'
+[2107] <p> style='4' text='SwUFn_3501:  Init_MCU'
+[2108] <tbl> 43행 | hdr=['[ Function Informati']
+[2110] <p> style='4' text='SwUFn_3502:  RTI_Init'
+[2111] <tbl> 24행 | hdr=['[ Function Informati']
+[2113] <p> style='4' text='SwUFn_3503:  RTI_Disable'
+[2114] <tbl> 19행 | hdr=['[ Function Informati']
+[2116] <p> style='4' text='SwUFn_3504:  RTI_Enable'
+[2117] <tbl> 19행 | hdr=['[ Function Informati']
+[2119] <p> style='4' text='SwUFn_3505:  RTI_CheckTimer'
+[2120] <tbl> 19행 | hdr=['[ Function Informati']
+[2122] <p> style='4' text='SwUFn_3506:  FTMRZ_Init'
+[2123] <tbl> 20행 | hdr=['[ Function Informati']
+[2125] <p> style='4' text='SwUFn_3507:  PFLASH_Send_Command'
+[2126] <tbl> 19행 | hdr=['[ Function Informati']
+[2128] <p> style='4' text='SwUFn_3508:  FTMRZ_Erase_Flash'
+[2129] <tbl> 23행 | hdr=['[ Function Informati']
+[2131] <p> style='4' text='SwUFn_3509:  EraseFlashSector'
+[2132] <tbl> 23행 | hdr=['[ Function Informati']
+[2134] <p> style='4' text='SwUFn_3510:  FTMRZ_Prog_Phrase'
+[2135] <tbl> 33행 | hdr=['[ Function Informati']
+[2137] <p> style='4' text='SwUFn_3511:  SCI0_Init'
+[2138] <tbl> 26행 | hdr=['[ Function Informati']
+[2140] <p> style='4' text='SwUFn_3512:  LINPHY0_Init'
+[2141] <tbl> 25행 | hdr=['[ Function Informati']
+[2143] <p> style='4' text='SwUFn_3513:  lin_lld_sci_init'
+[2144] <tbl> 24행 | hdr=['[ Function Informati']
+[2145] <p> style='4' text='SwUFn_3514:  Comms_Reset_Reg'
+[2146] <tbl> 25행 | hdr=['[ Function Informati']
+[2149] <p> style='4' text='SwUFn_3515:  SCI_T_Bytes'
+[2150] <tbl> 21행 | hdr=['[ Function Informati']
+[2152] <p> style='4' text='SwUFn_3516:  EEPROM_SetByte'
+[2153] <tbl> 23행 | hdr=['[ Function Informati']
+[2155] <p> style='4' text='SwUFn_3517:  EEPROM_GetByte'
+[2156] <tbl> 21행 | hdr=['[ Function Informati']
+[2158] <p> style='4' text='SwUFn_3518:  BackupSector'
+[2159] <tbl> 21행 | hdr=['[ Function Informati']
+[2161] <p> style='4' text='SwUFn_3519:  WriteBlock'
+[2162] <tbl> 30행 | hdr=['[ Function Informati']
+[2164] <p> style='4' text='SwUFn_3520:  EraseSectorInternal'
+[2165] <tbl> 25행 | hdr=['[ Function Informati']
+[2167] <p> style='4' text='SwUFn_3521:  WriteWord'
+[2168] <tbl> 28행 | hdr=['[ Function Informati']
+[2170] <p> style='4' text='SwUFn_3522:  LinInit'
+[2171] <tbl> 20행 | hdr=['[ Function Informati']
+[2173] <p> style='4' text='SwUFn_3523:  LinSend'
+[2174] <tbl> 25행 | hdr=['[ Function Informati']
+[2176] <p> style='4' text='SwUFn_3524:  LinRecv'
+[2177] <tbl> 25행 | hdr=['[ Function Informati']
+[2179] <p> style='4' text='SwUFn_3525:  LinSendForProgSession'
+[2180] <tbl> 25행 | hdr=['[ Function Informati']
+[2182] <p> style='4' text='SwUFn_3526:  sf_LinBreakDetectWait'
+[2183] <tbl> 23행 | hdr=['[ Function Informati']
+[2185] <p> style='4' text='SwUFn_3527:  sf_LinHeaderCheck'
+[2186] <tbl> 21행 | hdr=['[ Function Informati']
+[2188] <p> style='4' text='SwUFn_3528:  sf_LinDataPolling'
+[2189] <tbl> 21행 | hdr=['[ Function Informati']
+[2192] <p> style='4' text='SwUFn_3529:  sf_LinCheckSum'
+[2193] <tbl> 20행 | hdr=['[ Function Informati']
+[2196] <p> style='4' text='SwUFn_3530:  LinTpMsgInit'
+[2197] <tbl> 20행 | hdr=['[ Function Informati']
+[2199] <p> style='4' text='2211SwUFn_3531:  LinUdsToTp'
+[2200] <tbl> 25행 | hdr=['[ Function Informati']
+[2202] <p> style='4' text='SwUFn_3532:  LinRawToTp'
+[2203] <tbl> 24행 | hdr=['[ Function Informati']
+[2205] <p> style='4' text='SwUFn_3533:  sf_LinTpParserSF'
+[2206] <tbl> 25행 | hdr=['[ Function Informati']
+[2208] <p> style='4' text='SwUFn_3534:  sf_LinTpParserMF'
+[2209] <tbl> 26행 | hdr=['[ Function Informati']
+[2211] <p> style='4' text='SwUFn_3535:  StdUtilCopyData'
+[2212] <tbl> 21행 | hdr=['[ Function Informati']
+[2214] <p> style='4' text='SwUFn_3536:  StdUtilDataSet'
+[2215] <tbl> 21행 | hdr=['[ Function Informati']
+[2217] <p> style='4' text='SwUFn_3537:  LinUdsInit'
+[2218] <tbl> 24행 | hdr=['[ Function Informati']
+[2220] <p> style='4' text='SwUFn_3538:  LinUdsReProgAndMsgGenerate'
+[2221] <tbl> 20행 | hdr=['[ Function Informati']
+[2223] <p> style='4' text='SwUFn_3539:  sf_LinUdsDiagnosticSessionControl'
+[2224] <tbl> 25행 | hdr=['[ Function Informati']
+[2226] <p> style='4' text='SwUFn_3540:  sf_LinUdsSecurityAccess'
+[2227] <tbl> 28행 | hdr=['[ Function Informati']
+[2229] <p> style='4' text='SwUFn_3541:  sf_LinUdsRoutineControl'
+[2230] <tbl> 23행 | hdr=['[ Function Informati']
+[2231] <p> style='4' text='SwUFn_3542:  sf_LinUdsEraseMemory'
+[2232] <tbl> 31행 | hdr=['[ Function Informati']
+[2233] <p> style='4' text='SwUFn_3543:  sf_LinUdsChkProDepenency'
+[2234] <tbl> 27행 | hdr=['[ Function Informati']
+[2237] <p> style='4' text='SwUFn_3544:  sf_LinUdsRequestDownload'
+[2238] <tbl> 29행 | hdr=['[ Function Informati']
+[2239] <p> style='4' text='SwUFn_3545:  sf_LinUdsTransferData'
+[2240] <tbl> 34행 | hdr=['[ Function Informati']
+[2242] <p> style='4' text='SwUFn_3546:  sf_LinUdsTransferExit'
+[2243] <tbl> 24행 | hdr=['[ Function Informati']
+[2245] <p> style='4' text='SwUFn_3547:  sf_LinUdsECUReset'
+[2246] <tbl> 22행 | hdr=['[ Function Informati']
+[2248] <p> style='4' text='SwUFn_3548:  sf_LinUdsNegativeResponse'
+[2249] <tbl> 23행 | hdr=['[ Function Informati']
+[2250] <p> style='4' text='SwUFn_3549:  sf_LinUdsOutOfRangeResponse'
+[2251] <tbl> 22행 | hdr=['[ Function Informati']
+[2252] <p> style='4' text='SwUFn_3550:  sf_LinUdsIncorMsgLengthResponse'
+[2253] <tbl> 22행 | hdr=['[ Function Informati']
+[2254] <p> style='4' text='SwUFn_3551:  sf_LinUdsSequenceErrorResponse'
+[2255] <tbl> 22행 | hdr=['[ Function Informati']
+[2257] <p> style='4' text='SwUFn_3552:  sf_LinUdsResponsePending'
+[2258] <tbl> 26행 | hdr=['[ Function Informati']
+[2260] <p> style='4' text='SwUFn_3553:  sf_SecurityCheck'
+[2261] <tbl> 22행 | hdr=['[ Function Informati']
+[2264] <p> style='4' text='SwUFn_3554:  sf_SecurityAccessAlgorithm'
+[2265] <tbl> 19행 | hdr=['[ Function Informati']
+[2268] <p> style='4' text='SwUFn_3555:  CheckProgDependencies'
+[2269] <tbl> 19행 | hdr=['[ Function Informati']
+[2271] <p> style='4' text='SwUFn_3556:  sf_EcuReset'
+[2272] <tbl> 19행 | hdr=['[ Function Informati']
+[2274] <p> style='4' text='SwUFn_3557:  sf_Crc32Init'
+[2275] <tbl> 19행 | hdr=['[ Function Informati']
+[2277] <p> style='4' text='SwUFn_3558:  sf_Crc32Cal'
+[2278] <tbl> 22행 | hdr=['[ Function Informati']
+[2280] <p> style='4' text='SwUFn_3559:  main'
+[2281] <tbl> 20행 | hdr=['[ Function Informati']
+[2282] <p> style='4' text='SwUFn_3560:  MainInit'
+[2283] <tbl> 19행 | hdr=['[ Function Informati']
+[2284] <p> style='4' text='SwUFn_3561:  ReprogLinRecvTask'
+[2285] <tbl> 21행 | hdr=['[ Function Informati']
+[2286] <p> style='4' text='SwUFn_3562:  ReprogLinSendTask'
+[2287] <tbl> 22행 | hdr=['[ Function Informati']
+[2289] <p> style='4' text='SwUFn_3563:  ReprogLinMultiFrameTask'
+[2290] <tbl> 24행 | hdr=['[ Function Informati']
+[2292] <p> style='4' text='SwUFn_3564:  ReprogErrorTask'
+[2293] <tbl> 20행 | hdr=['[ Function Informati']
+[2296] <p> style='4' text='SwUFn_3565:  ReProgLinInit'
+[2297] <tbl> 19행 | hdr=['[ Function Informati']
+[2300] <p> style='4' text='SwUFn_3566:  ReProgFlagContol'
+[2301] <tbl> 19행 | hdr=['[ Function Informati']
+[2304] <p> style='4' text='SwUFn_3567:  ChkAppIsValid'
+[2305] <tbl> 19행 | hdr=['[ Function Informati']
+[2307] <p> style='4' text='SwUFn_3568:  Check_MainApp_Jump'
+[2308] <tbl> 19행 | hdr=['[ Function Informati']
+[2310] <p> style='4' text='SwUFn_3569:  Copy_Shadow'
+[2311] <tbl> 19행 | hdr=['[ Function Informati']
+[2313] <p> style='4' text='SwUFn_3570:  Get_RAM_Ptr'
+[2314] <tbl> 19행 | hdr=['[ Function Informati']
+[2317] <p> style='4' text='SwUFn_3571:  Jump_Main_Application'
+[2318] <tbl> 26행 | hdr=['[ Function Informati']
+[2322] <p> style='' text='<End of document>'

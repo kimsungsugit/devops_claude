@@ -1,0 +1,158 @@
+- generic [ref=e3]:
+  - generic [ref=e5]:
+    - button "로컬" [ref=e6] [cursor=pointer]
+    - button "Jenkins" [ref=e7] [cursor=pointer]
+  - generic [ref=e8]:
+    - main [ref=e9]:
+      - generic [ref=e10]:
+        - generic [ref=e11]:
+          - generic [ref=e12]:
+            - generic [ref=e13]:
+              - generic [ref=e14]: Devops/
+              - generic [ref=e15]: Local/
+              - generic [ref=e72]: Analyzer
+            - generic [ref=e17]: Analyzer
+            - generic [ref=e18]: "세션 생성: -"
+          - generic [ref=e20]: READY
+          - button "다크 모드로 전환" [ref=e22] [cursor=pointer]: 다크 모드
+        - navigation "주 네비게이션" [ref=e23]:
+          - button "대시보드 탭" [ref=e24] [cursor=pointer]: 대시보드
+          - button "워크플로우 탭" [ref=e26] [cursor=pointer]: 워크플로우
+          - button "에디터 탭" [ref=e28] [cursor=pointer]: 에디터
+          - button "Analyzer 탭" [ref=e30] [cursor=pointer]: Analyzer
+          - button "설정 탭" [ref=e32] [cursor=pointer]: 설정
+        - generic [ref=e35]: 로컬 모드
+        - generic [ref=e73]:
+          - heading "Analyzer" [level=3] [ref=e74]
+          - generic [ref=e75]: Analyzer now covers UDS, STS, and SUTS generation plus result views for Local and Jenkins modes.
+          - generic [ref=e76]:
+            - generic [ref=e77]:
+              - strong [ref=e78]: QA Checklist
+              - generic [ref=e79]: 4/6 checks
+            - generic [ref=e80]:
+              - generic [ref=e81]:
+                - generic [ref=e82]: Latest Run card shows UDS, STS, and SUTS artifacts.
+                - generic [ref=e83]: CHECK
+              - generic [ref=e84]:
+                - generic [ref=e85]: Latest Run rows can switch to the matching artifact tab.
+                - generic [ref=e86]: CHECK
+              - generic [ref=e87]:
+                - generic [ref=e88]: Latest Run rows have validation actions.
+                - generic [ref=e89]: PASS
+              - generic [ref=e90]:
+                - generic [ref=e91]: Latest Run rows expose summary metrics.
+                - generic [ref=e92]: PASS
+              - generic [ref=e93]:
+                - generic [ref=e94]: Current latest artifacts pass validation.
+                - generic [ref=e95]: PASS
+              - generic [ref=e96]:
+                - generic [ref=e97]: Preview panel is ready for report/preview review.
+                - generic [ref=e98]: PASS
+          - generic [ref=e99]:
+            - button "Impact" [ref=e100] [cursor=pointer]
+            - button "UDS" [ref=e101] [cursor=pointer]
+            - button "STS" [ref=e102] [cursor=pointer]
+            - button "SUTS" [ref=e103] [cursor=pointer]
+          - generic [ref=e294]:
+            - generic [ref=e295]:
+              - button "Current" [ref=e296] [cursor=pointer]
+              - button "Applied" [active] [ref=e297] [cursor=pointer]
+            - combobox [ref=e298]:
+              - option "Local UDS" [selected]
+              - option "Jenkins UDS"
+            - combobox [ref=e345]:
+              - option "SCM Registry" [selected]
+            - textbox "Code Source Root" [ref=e299]
+            - button "Browse" [ref=e300] [cursor=pointer]
+          - generic [ref=e346]:
+            - generic [ref=e347]:
+              - strong [ref=e348]: UDS Applied Change History
+              - generic [ref=e349]: 0 runs
+            - generic [ref=e350]:
+              - generic [ref=e352]: No applied UDS change history.
+              - generic [ref=e353]:
+                - generic [ref=e354]:
+                  - strong [ref=e355]: Applied Diff
+                  - generic [ref=e356]: select run
+                - generic [ref=e357]: Select a run to inspect applied UDS changes.
+          - generic [ref=e301]: "File list error: HTTP 500"
+          - generic [ref=e302]:
+            - generic [ref=e303]:
+              - generic [ref=e304]: Operation
+              - generic [ref=e305]: "File list failed: HTTP 500"
+            - generic [ref=e308]: Operation logs will appear here.
+          - generic [ref=e309]:
+            - heading "UDS Generate" [level=4] [ref=e310]
+            - text: SRS document
+            - button "Choose File" [ref=e311]
+            - text: SDS document
+            - button "Choose File" [ref=e312]
+            - text: Reference UDS
+            - button "Choose File" [ref=e313]
+            - text: UDS template
+            - button "Choose File" [ref=e314]
+            - generic [ref=e315]:
+              - checkbox "Test mode" [ref=e316]
+              - text: Test mode
+            - generic [ref=e317]:
+              - checkbox "Show mapping evidence" [ref=e318]
+              - text: Show mapping evidence
+            - button "Generate UDS" [ref=e320] [cursor=pointer]
+          - generic [ref=e321]:
+            - heading "Analyzer (Local UDS)" [level=4] [ref=e322]
+            - generic [ref=e323]:
+              - button "파일 선택" [ref=e324] [cursor=pointer]
+              - combobox [ref=e325]:
+                - option "파일 선택" [selected]
+              - button "상세 조회" [disabled] [ref=e326]
+            - generic [ref=e327]: HTTP 500
+            - generic [ref=e328]:
+              - generic [ref=e329]:
+                - heading "Analyzer (Local UDS)" [level=4] [ref=e330]
+                - button "새로고침" [ref=e331] [cursor=pointer]
+              - generic "조회 가능한 UDS 결과가 없습니다." [ref=e332]
+          - generic [ref=e333]:
+            - heading "Traceability Analysis" [level=4] [ref=e334]
+            - generic [ref=e335]:
+              - generic [ref=e336]:
+                - text: SRS 문서 경로
+                - generic [ref=e337]:
+                  - textbox "D:\\docs\\SRS.docx" [ref=e338]
+                  - button "찾기" [ref=e339] [cursor=pointer]
+              - generic [ref=e340]:
+                - text: 소스 코드 루트
+                - generic [ref=e341]:
+                  - textbox "소스 코드 경로" [ref=e342]
+                  - button "찾기" [ref=e343] [cursor=pointer]
+            - button "추적성 분석 실행" [ref=e344] [cursor=pointer]
+    - complementary [ref=e37]:
+      - generic [ref=e38]:
+        - heading "분석 도우미" [level=4] [ref=e39]
+        - generic [ref=e40]:
+          - button "내보내기" [ref=e41] [cursor=pointer]
+          - button "초기화" [ref=e42] [cursor=pointer]
+          - button "닫기" [ref=e43] [cursor=pointer]
+      - generic [ref=e44]:
+        - button "현재 상태 요약해줘" [ref=e45] [cursor=pointer]
+        - button "이슈 우선순위 추천해줘" [ref=e46] [cursor=pointer]
+        - button "커버리지 개선 방법" [ref=e47] [cursor=pointer]
+        - button "다음 해야 할 작업은?" [ref=e48] [cursor=pointer]
+        - button "실패 원인 분석해줘" [ref=e49] [cursor=pointer]
+      - generic [ref=e51]:
+        - paragraph [ref=e54]: 대시보드 요약을 해석하거나 다음 단계 추천을 도와드릴게요.
+        - generic [ref=e55]:
+          - generic [ref=e56]: 오후 03:13
+          - button "복사" [ref=e57] [cursor=pointer]
+      - generic [ref=e59]:
+        - textbox "질문을 입력하세요 (Enter 전송, Shift+Enter 줄바꿈)" [ref=e60]
+        - button "전송" [disabled] [ref=e61]
+  - contentinfo [ref=e62]:
+    - generic [ref=e63]:
+      - generic [ref=e64]: Devops
+      - generic [ref=e65]: 로컬 / Analyzer
+      - generic [ref=e66]: "세션: ?몄뀡 ?놁쓬"
+      - generic [ref=e67]: "상태: idle"
+    - generic [ref=e68]:
+      - button "상태 새로고침" [disabled] [ref=e69]
+      - button "로그 새로고침" [disabled] [ref=e70]
+      - button "테마 전환" [ref=e71] [cursor=pointer]

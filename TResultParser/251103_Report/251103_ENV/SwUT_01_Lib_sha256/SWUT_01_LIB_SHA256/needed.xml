@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<env_info>
+  <needed_entities>
+    <unit id="9">
+      <variable id="u8g_Lib_Sha256_Hash" name="u8g_Lib_Sha256_Hash" defined="1" type="compound" file="1"/>
+      <function id="g_Lib_Sha256_Nb_Start" name="g_Lib_Sha256_Nb_Start" defined="1" const="0" file="1" return=""/>
+      <function id="g_Lib_Sha256_Nb_Process" name="g_Lib_Sha256_Nb_Process" defined="1" const="0" file="1" return=""/>
+      <function id="g_Lib_Sha256_Nb_GetState" name="g_Lib_Sha256_Nb_GetState" defined="1" const="0" file="1" return="E_LIB_SHA256_NB_STATE"/>
+      <function id="g_Lib_Sha256_Nb_Reset" name="g_Lib_Sha256_Nb_Reset" defined="1" const="0" file="1" return=""/>
+    </unit>
+  </needed_entities>
+  <files>
+    <file id="1">C:/workspace/NE1AW_PORTING/Lib/Lib_sha256.c</file>
+  </files>
+</env_info>

@@ -1,0 +1,1761 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rcf version="2.3.0" name="m3cm">
+  <rulegroup name="HMG">
+    <rule help="m3cm-2_3_0_rule_help-en_US\m3cm.CMGroup.1.html" active="yes" id="Common Rule">
+      <text></text>
+      <enforcement>
+        <rule help="m3cm-2_3_0_rule_help-en_US\m3cm.CMGroup.1.CMSubGroup.1.html" active="yes" id="Information">
+          <text></text>
+          <enforcement>
+            <rule help="m3cm-2_3_0_rule_help-en_US\CMN-0.1.html" active="yes" id="CMN-0.1">
+              <text>Annotations</text>
+              <enforcement>
+                <message mapped="yes" component="qac" id="4810"/>
+                <message mapped="yes" component="qac" id="4811"/>
+                <message mapped="yes" component="qac" id="4812"/>
+                <message mapped="yes" component="qac" id="4820"/>
+                <message mapped="yes" component="qac" id="4821"/>
+                <message mapped="yes" component="qac" id="4822"/>
+                <message mapped="yes" component="qac" id="4823"/>
+                <message mapped="yes" component="qac" id="4824"/>
+                <message mapped="yes" component="qac" id="4825"/>
+                <message mapped="yes" component="qac" id="4826"/>
+                <message mapped="yes" component="qac" id="4827"/>
+                <message mapped="yes" component="qac" id="4828"/>
+              </enforcement>
+            </rule>
+            <rule help="m3cm-2_3_0_rule_help-en_US\CMN-0.2.html" active="yes" id="CMN-0.2">
+              <text>CMA information</text>
+              <enforcement>
+                <message mapped="yes" component="rcma" id="1540"/>
+              </enforcement>
+            </rule>
+            <rule help="m3cm-2_3_0_rule_help-en_US\CMN-0.3.html" active="yes" id="CMN-0.3">
+              <text>Parsing recovery</text>
+              <enforcement>
+                <message mapped="yes" component="qac" id="0901"/>
+                <message mapped="yes" component="qac" id="0902"/>
+                <message mapped="yes" component="qac" id="0903"/>
+                <message mapped="yes" component="qac" id="0911"/>
+                <message mapped="yes" component="qac" id="0913"/>
+                <message mapped="yes" component="qac" id="0920"/>
+              </enforcement>
+            </rule>
+            <rule help="m3cm-2_3_0_rule_help-en_US\CMN-0.4.html" active="yes" id="CMN-0.4">
+              <text>Dataflow recovery</text>
+              <enforcement>
+                <message mapped="yes" component="qac" id="0097"/>
+                <message mapped="yes" component="qac" id="2750"/>
+                <message mapped="yes" component="qac" id="2751"/>
+                <message mapped="yes" component="qac" id="2752"/>
+                <message mapped="yes" component="qac" id="2753"/>
+                <message mapped="yes" component="qac" id="2754"/>
+                <message mapped="yes" component="qac" id="2755"/>
+                <message mapped="yes" component="qac" id="2756"/>
+                <message mapped="yes" component="qac" id="2757"/>
+                <message mapped="yes" component="qac" id="2758"/>
+              </enforcement>
+            </rule>
+            <rule help="m3cm-2_3_0_rule_help-en_US\CMN-0.5.html" active="yes" id="CMN-0.5">
+              <text>Sub-Messages</text>
+              <enforcement>
+                <message mapped="yes" component="qac" id="1569"/>
+                <message mapped="yes" component="qac" id="1570"/>
+                <message mapped="yes" component="qac" id="1571"/>
+                <message mapped="yes" component="qac" id="1572"/>
+                <message mapped="yes" component="qac" id="1573"/>
+                <message mapped="yes" component="qac" id="1574"/>
+                <message mapped="yes" component="qac" id="1575"/>
+                <message mapped="yes" component="qac" id="1576"/>
+                <message mapped="yes" component="qac" id="1577"/>
+                <message mapped="yes" component="qac" id="1578"/>
+                <message mapped="yes" component="qac" id="1579"/>
+                <message mapped="yes" component="qac" id="1580"/>
+                <message mapped="yes" component="qac" id="1581"/>
+                <message mapped="yes" component="qac" id="1582"/>
+                <message mapped="yes" component="qac" id="1585"/>
+                <message mapped="yes" component="qac" id="1586"/>
+                <message mapped="yes" component="qac" id="1590"/>
+                <message mapped="yes" component="qac" id="1592"/>
+                <message mapped="yes" component="qac" id="1593"/>
+                <message mapped="yes" component="qac" id="1594"/>
+                <message mapped="yes" component="qac" id="1599"/>
+                <message mapped="yes" component="qac" id="3390"/>
+                <message mapped="yes" component="rcma" id="1570"/>
+                <message mapped="yes" component="rcma" id="1571"/>
+                <message mapped="yes" component="rcma" id="1572"/>
+                <message mapped="yes" component="rcma" id="1573"/>
+                <message mapped="yes" component="rcma" id="1574"/>
+                <message mapped="yes" component="rcma" id="1575"/>
+                <message mapped="yes" component="rcma" id="1576"/>
+                <message mapped="yes" component="rcma" id="1577"/>
+                <message mapped="yes" component="rcma" id="1578"/>
+                <message mapped="yes" component="rcma" id="1579"/>
+                <message mapped="yes" component="rcma" id="1580"/>
+                <message mapped="yes" component="rcma" id="1581"/>
+                <message mapped="yes" component="rcma" id="1582"/>
+                <message mapped="yes" component="rcma" id="1585"/>
+                <message mapped="yes" component="rcma" id="1586"/>
+                <message mapped="yes" component="rcma" id="1590"/>
+                <message mapped="yes" component="rcma" id="1592"/>
+                <message mapped="yes" component="rcma" id="1593"/>
+                <message mapped="yes" component="rcma" id="1594"/>
+                <message mapped="yes" component="rcma" id="1599"/>
+              </enforcement>
+            </rule>
+          </enforcement>
+        </rule>
+        <rule help="m3cm-2_3_0_rule_help-en_US\m3cm.CMGroup.1.CMSubGroup.2.html" active="yes" id="Errors">
+          <text></text>
+          <enforcement>
+            <rule help="m3cm-2_3_0_rule_help-en_US\CMN-9.1.html" active="yes" id="CMN-9.1">
+              <text>QAC configuration</text>
+              <enforcement>
+                <message mapped="yes" component="qac" id="0040"/>
+                <message mapped="yes" component="qac" id="0041"/>
+                <message mapped="yes" component="qac" id="0042"/>
+                <message mapped="yes" component="qac" id="0159"/>
+                <message mapped="yes" component="qac" id="0473"/>
+                <message mapped="yes" component="qac" id="0808"/>
+                <message mapped="yes" component="qac" id="0818"/>
+                <message mapped="yes" component="qac" id="0819"/>
+                <message mapped="yes" component="qac" id="0822"/>
+                <message mapped="yes" component="qac" id="0869"/>
+                <message mapped="yes" component="qac" id="0918"/>
+                <message mapped="yes" component="qac" id="0970"/>
+              </enforcement>
+            </rule>
+            <rule help="m3cm-2_3_0_rule_help-en_US\CMN-9.2.html" active="yes" id="CMN-9.2">
+              <text>Syntax errors</text>
+              <enforcement>
+                <message mapped="yes" component="qac" id="0231"/>
+                <message mapped="yes" component="qac" id="0234"/>
+                <message mapped="yes" component="qac" id="0245"/>
+                <message mapped="yes" component="qac" id="0249"/>
+                <message mapped="yes" component="qac" id="0250"/>
+                <message mapped="yes" component="qac" id="0258"/>
+                <message mapped="yes" component="qac" id="0259"/>
+                <message mapped="yes" component="qac" id="0268"/>
+                <message mapped="yes" component="qac" id="0434"/>
+                <message mapped="yes" component="qac" id="0637"/>
+                <message mapped="yes" component="qac" id="0648"/>
+                <message mapped="yes" component="qac" id="0666"/>
+                <message mapped="yes" component="qac" id="0670"/>
+                <message mapped="yes" component="qac" id="0805"/>
+                <message mapped="yes" component="qac" id="0817"/>
+                <message mapped="yes" component="qac" id="0820"/>
+                <message mapped="yes" component="qac" id="0823"/>
+                <message mapped="yes" component="qac" id="0824"/>
+                <message mapped="yes" component="qac" id="0825"/>
+                <message mapped="yes" component="qac" id="0826"/>
+                <message mapped="yes" component="qac" id="0827"/>
+                <message mapped="yes" component="qac" id="0829"/>
+                <message mapped="yes" component="qac" id="0833"/>
+                <message mapped="yes" component="qac" id="0846"/>
+                <message mapped="yes" component="qac" id="0849"/>
+                <message mapped="yes" component="qac" id="0863"/>
+                <message mapped="yes" component="qac" id="0879"/>
+                <message mapped="yes" component="qac" id="0886"/>
+                <message mapped="yes" component="qac" id="0896"/>
+                <message mapped="yes" component="qac" id="0897"/>
+                <message mapped="yes" component="qac" id="0898"/>
+                <message mapped="yes" component="qac" id="0904"/>
+                <message mapped="yes" component="qac" id="0907"/>
+                <message mapped="yes" component="qac" id="0917"/>
+                <message mapped="yes" component="qac" id="0925"/>
+                <message mapped="yes" component="qac" id="0926"/>
+                <message mapped="yes" component="qac" id="0927"/>
+                <message mapped="yes" component="qac" id="0928"/>
+                <message mapped="yes" component="qac" id="1004"/>
+                <message mapped="yes" component="qac" id="1005"/>
+                <message mapped="yes" component="qac" id="1009"/>
+                <message mapped="yes" component="qac" id="1010"/>
+                <message mapped="yes" component="qac" id="1013"/>
+                <message mapped="yes" component="qac" id="3104"/>
+                <message mapped="yes" component="qac" id="3105"/>
+                <message mapped="yes" component="qac" id="3107"/>
+              </enforcement>
+            </rule>
+          </enforcement>
+        </rule>
+      </enforcement>
+    </rule>
+    <rule help="C:\PRQA\PRQA-Framework-2.2.0\config\rcf\m3cm-2_3_0_rule_help-en_US\m3cm.CMGroup.2.html" active="yes" id="Mandatory Rules">
+      <text></text>
+      <enforcement>
+        <rule help="m3cm-2_3_0_rule_help-en_US\Rule-2.1.html" active="yes" id="Rule-2.1">
+          <text>A project shall not contain unreachable code</text>
+          <categories>
+            <category>MISRA Mandatory Rules</category>
+            <category>Mandatory</category>
+            <category>Rule</category>
+            <category>Rules</category>
+            <category>Unused code</category>
+          </categories>
+          <enforcement>
+            <message mapped="yes" component="qac" id="0594"/>
+            <message mapped="yes" component="qac" id="1460"/>
+            <message mapped="yes" component="qac" id="2744"/>
+            <message mapped="yes" component="qac" id="2880"/>
+            <message mapped="yes" component="qac" id="2882"/>
+            <message mapped="yes" component="qac" id="3219"/>
+            <message mapped="yes" component="rcma" id="1503"/>
+          </enforcement>
+        </rule>
+        <rule help="m3cm-2_3_0_rule_help-en_US\Rule-3.1.html" active="yes" id="Rule-3.1">
+          <text>The character sequences /* and // shall not be used within a comment.</text>
+          <categories>
+            <category>MISRA Mandatory Rules</category>
+            <category>Mandatory</category>
+            <category>Rule</category>
+            <category>Rules</category>
+            <category>Comments</category>
+          </categories>
+          <enforcement>
+            <message mapped="yes" component="qac" id="3108"/>
+          </enforcement>
+        </rule>
+        <rule help="m3cm-2_3_0_rule_help-en_US\Rule-4.2.html" active="yes" id="Rule-4.2">
+          <text>Trigraphs should not be used</text>
+          <categories>
+            <category>MISRA Mandatory Rules</category>
+            <category>Mandatory</category>
+            <category>Rule</category>
+            <category>Rules</category>
+            <category>Character sets and lexical conventions</category>
+          </categories>
+          <enforcement>
+            <message mapped="yes" component="qac" id="3601"/>
+          </enforcement>
+        </rule>
+        <rule help="m3cm-2_3_0_rule_help-en_US\Rule-5.1.html" active="yes" id="Rule-5.1">
+          <text>External identifiers shall be distinct</text>
+          <categories>
+            <category>MISRA Mandatory Rules</category>
+            <category>Mandatory</category>
+            <category>Rule</category>
+            <category>Rules</category>
+            <category>Identifiers</category>
+          </categories>
+          <enforcement>
+            <message mapped="yes" component="qac" id="0777"/>
+          </enforcement>
+        </rule>
+        <rule help="m3cm-2_3_0_rule_help-en_US\Rule-5.2.html" active="yes" id="Rule-5.2">
+          <text>Identifiers declared in the same scope and name space shall be distinct</text>
+          <categories>
+            <category>MISRA Mandatory Rules</category>
+            <category>Mandatory</category>
+            <category>Rule</category>
+            <category>Rules</category>
+            <category>Identifiers</category>
+          </categories>
+          <enforcement>
+            <message mapped="yes" component="qac" id="0779"/>
+          </enforcement>
+        </rule>
+        <rule help="m3cm-2_3_0_rule_help-en_US\Rule-5.3.html" active="yes" id="Rule-5.3">
+          <text>An identifier declared in an inner scope shall not hide an identifier declared in an outer scope</text>
+          <categories>
+            <category>MISRA Mandatory Rules</category>
+            <category>Mandatory</category>
+            <category>Rule</category>
+            <category>Rules</category>
+            <category>Identifiers</category>
+          </categories>
+          <enforcement>
+            <message mapped="yes" component="qac" id="0795"/>
+            <message mapped="yes" component="qac" id="2547"/>
+            <message mapped="yes" component="qac" id="3334"/>
+          </enforcement>
+        </rule>
+        <rule help="m3cm-2_3_0_rule_help-en_US\Rule-5.4.html" active="yes" id="Rule-5.4">
+          <text>Macro identifiers shall be distinct</text>
+          <categories>
+            <category>MISRA Mandatory Rules</category>
+            <category>Mandatory</category>
+            <category>Rule</category>
+            <category>Rules</category>
+            <category>Identifiers</category>
+          </categories>
+          <enforcement>
+            <message mapped="yes" component="qac" id="0788"/>
+            <message mapped="yes" component="qac" id="0791"/>
+          </enforcement>
+        </rule>
+        <rule help="m3cm-2_3_0_rule_help-en_US\Rule-5.5.html" active="yes" id="Rule-5.5">
+          <text>Identifiers shall be distinct from macro names</text>
+          <categories>
+            <category>MISRA Mandatory Rules</category>
+            <category>Mandatory</category>
+            <category>Rule</category>
+            <category>Rules</category>
+            <category>Identifiers</category>
+          </categories>
+          <enforcement>
+            <message mapped="yes" component="qac" id="0784"/>
+            <message mapped="yes" component="qac" id="0785"/>
+            <message mapped="yes" component="qac" id="0786"/>
+            <message mapped="yes" component="qac" id="0787"/>
+          </enforcement>
+        </rule>
+        <rule help="m3cm-2_3_0_rule_help-en_US\Rule-5.6.html" active="yes" id="Rule-5.6">
+          <text>A typedef name shall be a unique identifier</text>
+          <categories>
+            <category>MISRA Mandatory Rules</category>
+            <category>Mandatory</category>
+            <category>Rule</category>
+            <category>Rules</category>
+            <category>Identifiers</category>
+          </categories>
+          <enforcement>
+            <message mapped="yes" component="rcma" id="1506"/>
+            <message mapped="yes" component="rcma" id="1507"/>
+            <message mapped="yes" component="rcma" id="1508"/>
+          </enforcement>
+        </rule>
+        <rule help="m3cm-2_3_0_rule_help-en_US\Rule-6.2.html" active="yes" id="Rule-6.2">
+          <text>Single-bit named bit fields shall not be of a signed type</text>
+          <categories>
+            <category>MISRA Mandatory Rules</category>
+            <category>Mandatory</category>
+            <category>Rule</category>
+            <category>Rules</category>
+            <category>Types</category>
+          </categories>
+          <enforcement>
+            <message mapped="yes" component="qac" id="3660"/>
+          </enforcement>
+        </rule>
+        <rule help="m3cm-2_3_0_rule_help-en_US\Rule-7.1.html" active="yes" id="Rule-7.1">
+          <text>Octal constants shall not be used</text>
+          <categories>
+            <category>MISRA Mandatory Rules</category>
+            <category>Mandatory</category>
+            <category>Rule</category>
+            <category>Rules</category>
+            <category>Literals and constants</category>
+          </categories>
+          <enforcement>
+            <message mapped="yes" component="qac" id="0336"/>
+            <message mapped="yes" component="qac" id="0339"/>
+          </enforcement>
+        </rule>
+        <rule help="m3cm-2_3_0_rule_help-en_US\Rule-7.2.html" active="yes" id="Rule-7.2">
+          <text>A "u" or "U" suffix shall be applied to all integer constants that are represented in an unsigned type</text>
+          <categories>
+            <category>MISRA Mandatory Rules</category>
+            <category>Mandatory</category>
+            <category>Rule</category>
+            <category>Rules</category>
+            <category>Literals and constants</category>
+          </categories>
+          <enforcement>
+            <message mapped="yes" component="qac" id="1281"/>
+          </enforcement>
+        </rule>
+        <rule help="m3cm-2_3_0_rule_help-en_US\Rule-8.1.html" active="yes" id="Rule-8.1">
+          <text>Types shall be explicitly specified</text>
+          <categories>
+            <category>MISRA Mandatory Rules</category>
+            <category>Mandatory</category>
+            <category>Rule</category>
+            <category>Rules</category>
+            <category>Declarations and definitions</category>
+          </categories>
+          <enforcement>
+            <message mapped="yes" component="qac" id="2050"/>
+            <message mapped="yes" component="qac" id="2051"/>
+            <message mapped="yes" component="rcma" id="1525"/>
+          </enforcement>
+        </rule>
+        <rule help="m3cm-2_3_0_rule_help-en_US\Rule-8.3.html" active="yes" id="Rule-8.3">
+          <text>All declarations of an object or function shall use the same names and type qualifiers</text>
+          <categories>
+            <category>MISRA Mandatory Rules</category>
+            <category>Mandatory</category>
+            <category>Rule</category>
+            <category>Rules</category>
+            <category>Declarations and definitions</category>
+          </categories>
+          <enforcement>
+            <message mapped="yes" component="qac" id="0624"/>
+            <message mapped="yes" component="qac" id="1330"/>
+            <message mapped="yes" component="qac" id="3675"/>
+          </enforcement>
+        </rule>
+        <rule help="m3cm-2_3_0_rule_help-en_US\Rule-8.6.html" active="yes" id="Rule-8.6">
+          <text>An identifier with external linkage shall have exactly one external definition</text>
+          <categories>
+            <category>MISRA Mandatory Rules</category>
+            <category>Mandatory</category>
+            <category>Rule</category>
+            <category>Rules</category>
+            <category>Declarations and definitions</category>
+          </categories>
+          <enforcement>
+            <message mapped="yes" component="qac" id="0630"/>
+            <message mapped="yes" component="qac" id="3406"/>
+            <message mapped="yes" component="rcma" id="1509"/>
+            <message mapped="yes" component="rcma" id="1752"/>
+            <message mapped="yes" component="rcma" id="1753"/>
+          </enforcement>
+        </rule>
+        <rule help="m3cm-2_3_0_rule_help-en_US\Rule-8.11.html" active="yes" id="Rule-8.11">
+          <text>When an array with external linkage is declared, its size should be explicitly specified</text>
+          <categories>
+            <category>MISRA Mandatory Rules</category>
+            <category>Mandatory</category>
+            <category>Rule</category>
+            <category>Rules</category>
+            <category>Declarations and definitions</category>
+          </categories>
+          <enforcement>
+            <message mapped="yes" component="qac" id="3684"/>
+          </enforcement>
+        </rule>
+        <rule help="C:\PRQA\PRQA-Framework-2.2.0\config\rcf\m3cm-2_3_0_rule_help-en_US\Rule-9.1.html" active="yes" id="Rule-9.1">
+          <text>The value of an object with automatic storage duration shall not be read before it has been set</text>
+          <categories>
+            <category>MISRA Mandatory Rules</category>
+            <category>Mandatory</category>
+            <category>Rule</category>
+            <category>Rules</category>
+            <category>Initialization</category>
+          </categories>
+          <enforcement>
+            <message mapped="yes" component="qac" id="2883"/>
+            <message mapped="yes" component="qac" id="2961"/>
+            <message mapped="yes" component="qac" id="2962"/>
+            <message mapped="yes" component="qac" id="2971"/>
+            <message mapped="yes" component="qac" id="2972"/>
+          </enforcement>
+        </rule>
+        <rule help="m3cm-2_3_0_rule_help-en_US\Rule-9.2.html" active="yes" id="Rule-9.2">
+          <text>The initializer for an aggregate or union shall be enclosed in braces</text>
+          <categories>
+            <category>MISRA Mandatory Rules</category>
+            <category>Mandatory</category>
+            <category>Rule</category>
+            <category>Rules</category>
+            <category>Initialization</category>
+          </categories>
+          <enforcement>
+            <message mapped="yes" component="qac" id="0693"/>
+            <message mapped="yes" component="qac" id="0694"/>
+          </enforcement>
+        </rule>
+        <rule help="m3cm-2_3_0_rule_help-en_US\Rule-9.3.html" active="yes" id="Rule-9.3">
+          <text>Arrays shall not be partially initialized</text>
+          <categories>
+            <category>MISRA Mandatory Rules</category>
+            <category>Mandatory</category>
+            <category>Rule</category>
+            <category>Rules</category>
+            <category>Initialization</category>
+          </categories>
+          <enforcement>
+            <message mapped="yes" component="qac" id="0686"/>
+          </enforcement>
+        </rule>
+        <rule help="m3cm-2_3_0_rule_help-en_US\Rule-10.1.html" active="yes" id="Rule-10.1">
+          <text>Operands shall not be of an inappropriate essential type.</text>
+          <categories>
+            <category>MISRA Mandatory Rules</category>
+            <category>Mandatory</category>
+            <category>Rule</category>
+            <category>Rules</category>
+            <category>The essential type model</category>
+          </categories>
+          <enforcement>
+            <message mapped="yes" component="qac" id="3101"/>
+            <message mapped="yes" component="qac" id="3102"/>
+            <message mapped="yes" component="qac" id="4500"/>
+            <message mapped="yes" component="qac" id="4501"/>
+            <message mapped="yes" component="qac" id="4502"/>
+            <message mapped="yes" component="qac" id="4503"/>
+            <message mapped="yes" component="qac" id="4504"/>
+            <message mapped="yes" component="qac" id="4505"/>
+            <message mapped="yes" component="qac" id="4507"/>
+            <message mapped="yes" component="qac" id="4510"/>
+            <message mapped="yes" component="qac" id="4511"/>
+            <message mapped="yes" component="qac" id="4512"/>
+            <message mapped="yes" component="qac" id="4513"/>
+            <message mapped="yes" component="qac" id="4514"/>
+            <message mapped="yes" component="qac" id="4518"/>
+            <message mapped="yes" component="qac" id="4519"/>
+            <message mapped="yes" component="qac" id="4521"/>
+            <message mapped="yes" component="qac" id="4522"/>
+            <message mapped="yes" component="qac" id="4523"/>
+            <message mapped="yes" component="qac" id="4524"/>
+            <message mapped="yes" component="qac" id="4527"/>
+            <message mapped="yes" component="qac" id="4528"/>
+            <message mapped="yes" component="qac" id="4529"/>
+            <message mapped="yes" component="qac" id="4532"/>
+            <message mapped="yes" component="qac" id="4533"/>
+            <message mapped="yes" component="qac" id="4534"/>
+            <message mapped="yes" component="qac" id="4538"/>
+            <message mapped="yes" component="qac" id="4539"/>
+            <message mapped="yes" component="qac" id="4542"/>
+            <message mapped="yes" component="qac" id="4543"/>
+            <message mapped="yes" component="qac" id="4548"/>
+            <message mapped="yes" component="qac" id="4549"/>
+            <message mapped="yes" component="qac" id="4558"/>
+            <message mapped="yes" component="qac" id="4559"/>
+            <message mapped="yes" component="qac" id="4568"/>
+            <message mapped="yes" component="qac" id="4569"/>
+          </enforcement>
+        </rule>
+        <rule help="m3cm-2_3_0_rule_help-en_US\Rule-10.2.html" active="yes" id="Rule-10.2">
+          <text>Expressions of essentially character type shall not be used inappropriately in addition and subtraction operations</text>
+          <categories>
+            <category>MISRA Mandatory Rules</category>
+            <category>Mandatory</category>
+            <category>Rule</category>
+            <category>Rules</category>
+            <category>The essential type model</category>
+          </categories>
+          <enforcement>
+            <message mapped="yes" component="qac" id="1810"/>
+            <message mapped="yes" component="qac" id="1811"/>
+            <message mapped="yes" component="qac" id="1812"/>
+            <message mapped="yes" component="qac" id="1813"/>
+          </enforcement>
+        </rule>
+        <rule help="m3cm-2_3_0_rule_help-en_US\Rule-10.3.html" active="yes" id="Rule-10.3">
+          <text>The value of an expression shall not be assigned to an object with a narrower essential type or of a different essential type category.</text>
+          <categories>
+            <category>MISRA Mandatory Rules</category>
+            <category>Mandatory</category>
+            <category>Rule</category>
+            <category>Rules</category>
+            <category>The essential type model</category>
+          </categories>
+          <enforcement>
+            <message mapped="yes" component="qac" id="0570"/>
+            <message mapped="yes" component="qac" id="0572"/>
+            <message mapped="yes" component="qac" id="1257"/>
+            <message mapped="yes" component="qac" id="1264"/>
+            <message mapped="yes" component="qac" id="1265"/>
+            <message mapped="yes" component="qac" id="1266"/>
+            <message mapped="yes" component="qac" id="1291"/>
+            <message mapped="yes" component="qac" id="1292"/>
+            <message mapped="yes" component="qac" id="1293"/>
+            <message mapped="yes" component="qac" id="1294"/>
+            <message mapped="yes" component="qac" id="1295"/>
+            <message mapped="yes" component="qac" id="1296"/>
+            <message mapped="yes" component="qac" id="1297"/>
+            <message mapped="yes" component="qac" id="1298"/>
+            <message mapped="yes" component="qac" id="1299"/>
+            <message mapped="yes" component="qac" id="2850"/>
+            <message mapped="yes" component="qac" id="2890"/>
+            <message mapped="yes" component="qac" id="2900"/>
+            <message mapped="yes" component="qac" id="4401"/>
+            <message mapped="yes" component="qac" id="4402"/>
+            <message mapped="yes" component="qac" id="4403"/>
+            <message mapped="yes" component="qac" id="4404"/>
+            <message mapped="yes" component="qac" id="4405"/>
+            <message mapped="yes" component="qac" id="4410"/>
+            <message mapped="yes" component="qac" id="4412"/>
+            <message mapped="yes" component="qac" id="4413"/>
+            <message mapped="yes" component="qac" id="4414"/>
+            <message mapped="yes" component="qac" id="4415"/>
+            <message mapped="yes" component="qac" id="4420"/>
+            <message mapped="yes" component="qac" id="4421"/>
+            <message mapped="yes" component="qac" id="4422"/>
+            <message mapped="yes" component="qac" id="4423"/>
+            <message mapped="yes" component="qac" id="4424"/>
+            <message mapped="yes" component="qac" id="4425"/>
+            <message mapped="yes" component="qac" id="4430"/>
+            <message mapped="yes" component="qac" id="4431"/>
+            <message mapped="yes" component="qac" id="4432"/>
+            <message mapped="yes" component="qac" id="4434"/>
+            <message mapped="yes" component="qac" id="4435"/>
+            <message mapped="yes" component="qac" id="4437"/>
+            <message mapped="yes" component="qac" id="4440"/>
+            <message mapped="yes" component="qac" id="4441"/>
+            <message mapped="yes" component="qac" id="4442"/>
+            <message mapped="yes" component="qac" id="4443"/>
+            <message mapped="yes" component="qac" id="4445"/>
+            <message mapped="yes" component="qac" id="4446"/>
+            <message mapped="yes" component="qac" id="4447"/>
+            <message mapped="yes" component="qac" id="4450"/>
+            <message mapped="yes" component="qac" id="4451"/>
+            <message mapped="yes" component="qac" id="4452"/>
+            <message mapped="yes" component="qac" id="4453"/>
+            <message mapped="yes" component="qac" id="4454"/>
+            <message mapped="yes" component="qac" id="4460"/>
+            <message mapped="yes" component="qac" id="4461"/>
+            <message mapped="yes" component="qac" id="4462"/>
+            <message mapped="yes" component="qac" id="4463"/>
+            <message mapped="yes" component="qac" id="4464"/>
+            <message mapped="yes" component="qac" id="4465"/>
+          </enforcement>
+        </rule>
+        <rule help="m3cm-2_3_0_rule_help-en_US\Rule-10.4.html" active="yes" id="Rule-10.4">
+          <text>Both operands of an operator in which the usual arithmetic conversions are performed shall have the same essential type category</text>
+          <categories>
+            <category>MISRA Mandatory Rules</category>
+            <category>Mandatory</category>
+            <category>Rule</category>
+            <category>Rules</category>
+            <category>The essential type model</category>
+          </categories>
+          <enforcement>
+            <message mapped="yes" component="qac" id="1800"/>
+            <message mapped="yes" component="qac" id="1802"/>
+            <message mapped="yes" component="qac" id="1803"/>
+            <message mapped="yes" component="qac" id="1804"/>
+            <message mapped="yes" component="qac" id="1820"/>
+            <message mapped="yes" component="qac" id="1821"/>
+            <message mapped="yes" component="qac" id="1822"/>
+            <message mapped="yes" component="qac" id="1823"/>
+            <message mapped="yes" component="qac" id="1824"/>
+            <message mapped="yes" component="qac" id="1830"/>
+            <message mapped="yes" component="qac" id="1831"/>
+            <message mapped="yes" component="qac" id="1832"/>
+            <message mapped="yes" component="qac" id="1833"/>
+            <message mapped="yes" component="qac" id="1834"/>
+            <message mapped="yes" component="qac" id="1840"/>
+            <message mapped="yes" component="qac" id="1841"/>
+            <message mapped="yes" component="qac" id="1842"/>
+            <message mapped="yes" component="qac" id="1843"/>
+            <message mapped="yes" component="qac" id="1844"/>
+            <message mapped="yes" component="qac" id="1850"/>
+            <message mapped="yes" component="qac" id="1851"/>
+            <message mapped="yes" component="qac" id="1852"/>
+            <message mapped="yes" component="qac" id="1853"/>
+            <message mapped="yes" component="qac" id="1854"/>
+            <message mapped="yes" component="qac" id="1860"/>
+            <message mapped="yes" component="qac" id="1861"/>
+            <message mapped="yes" component="qac" id="1862"/>
+            <message mapped="yes" component="qac" id="1863"/>
+            <message mapped="yes" component="qac" id="1864"/>
+            <message mapped="yes" component="qac" id="1880"/>
+            <message mapped="yes" component="qac" id="1881"/>
+            <message mapped="yes" component="qac" id="1882"/>
+          </enforcement>
+        </rule>
+        <rule help="m3cm-2_3_0_rule_help-en_US\Rule-10.6.html" active="yes" id="Rule-10.6">
+          <text>The value of a composite expression shall not be assigned to an object with wider essential type</text>
+          <categories>
+            <category>MISRA Mandatory Rules</category>
+            <category>Mandatory</category>
+            <category>Rule</category>
+            <category>Rules</category>
+            <category>The essential type model</category>
+          </categories>
+          <enforcement>
+            <message mapped="yes" component="qac" id="4490"/>
+            <message mapped="yes" component="qac" id="4491"/>
+            <message mapped="yes" component="qac" id="4492"/>
+            <message mapped="yes" component="qac" id="4499"/>
+          </enforcement>
+        </rule>
+        <rule help="m3cm-2_3_0_rule_help-en_US\Rule-10.7.html" active="yes" id="Rule-10.7">
+          <text>If a composite expression is used as one operand of an operator in which the usual arithmetic conversions are performed then the other operand shall not have wider essential type</text>
+          <categories>
+            <category>MISRA Mandatory Rules</category>
+            <category>Mandatory</category>
+            <category>Rule</category>
+            <category>Rules</category>
+            <category>The essential type model</category>
+          </categories>
+          <enforcement>
+            <message mapped="yes" component="qac" id="1890"/>
+            <message mapped="yes" component="qac" id="1891"/>
+            <message mapped="yes" component="qac" id="1892"/>
+            <message mapped="yes" component="qac" id="1893"/>
+            <message mapped="yes" component="qac" id="1894"/>
+            <message mapped="yes" component="qac" id="1895"/>
+          </enforcement>
+        </rule>
+        <rule help="m3cm-2_3_0_rule_help-en_US\Rule-10.8.html" active="yes" id="Rule-10.8">
+          <text>The value of a composite expression shall not be cast to a different essential type category or a wider essential type</text>
+          <categories>
+            <category>MISRA Mandatory Rules</category>
+            <category>Mandatory</category>
+            <category>Rule</category>
+            <category>Rules</category>
+            <category>The essential type model</category>
+          </categories>
+          <enforcement>
+            <message mapped="yes" component="qac" id="4389"/>
+            <message mapped="yes" component="qac" id="4390"/>
+            <message mapped="yes" component="qac" id="4391"/>
+            <message mapped="yes" component="qac" id="4392"/>
+            <message mapped="yes" component="qac" id="4393"/>
+            <message mapped="yes" component="qac" id="4394"/>
+            <message mapped="yes" component="qac" id="4395"/>
+            <message mapped="yes" component="qac" id="4398"/>
+            <message mapped="yes" component="qac" id="4399"/>
+          </enforcement>
+        </rule>
+        <rule help="m3cm-2_3_0_rule_help-en_US\Rule-12.1.html" active="yes" id="Rule-12.1">
+          <text>The precedence of operators within expressions should be made explicit</text>
+          <categories>
+            <category>MISRA Mandatory Rules</category>
+            <category>Mandatory</category>
+            <category>Rule</category>
+            <category>Rules</category>
+            <category>Expressions</category>
+          </categories>
+          <enforcement>
+            <message mapped="yes" component="qac" id="3389"/>
+            <message mapped="yes" component="qac" id="3391"/>
+            <message mapped="yes" component="qac" id="3392"/>
+            <message mapped="yes" component="qac" id="3394"/>
+            <message mapped="yes" component="qac" id="3395"/>
+            <message mapped="yes" component="qac" id="3396"/>
+            <message mapped="yes" component="qac" id="3397"/>
+          </enforcement>
+        </rule>
+        <rule help="m3cm-2_3_0_rule_help-en_US\Rule-12.2.html" active="yes" id="Rule-12.2">
+          <text>The right hand operand of a shift operator shall lie in the range zero to one less than the width in bits of the essential type of the left hand operand</text>
+          <categories>
+            <category>MISRA Mandatory Rules</category>
+            <category>Mandatory</category>
+            <category>Rule</category>
+            <category>Rules</category>
+            <category>Expressions</category>
+          </categories>
+          <enforcement>
+            <message mapped="yes" component="qac" id="0499"/>
+            <message mapped="yes" component="qac" id="2790"/>
+            <message mapped="yes" component="qac" id="2791"/>
+            <message mapped="yes" component="qac" id="2792"/>
+          </enforcement>
+        </rule>
+        <rule help="m3cm-2_3_0_rule_help-en_US\Rule-12.4.html" active="yes" id="Rule-12.4">
+          <text>Evaluation of constant expressions should not lead to unsigned integer wrap-around</text>
+          <categories>
+            <category>MISRA Mandatory Rules</category>
+            <category>Mandatory</category>
+            <category>Rule</category>
+            <category>Rules</category>
+            <category>Expressions</category>
+          </categories>
+          <enforcement>
+            <message mapped="yes" component="qac" id="2910"/>
+          </enforcement>
+        </rule>
+        <rule help="m3cm-2_3_0_rule_help-en_US\Rule-13.2.html" active="yes" id="Rule-13.2">
+          <text>The value of an expression and its persistent side-effects shall be the same under all permitted evaluation orders</text>
+          <categories>
+            <category>MISRA Mandatory Rules</category>
+            <category>Mandatory</category>
+            <category>Rule</category>
+            <category>Rules</category>
+            <category>Side-effects</category>
+          </categories>
+          <enforcement>
+            <message mapped="yes" component="qac" id="0400"/>
+            <message mapped="yes" component="qac" id="0401"/>
+            <message mapped="yes" component="qac" id="0402"/>
+            <message mapped="yes" component="qac" id="0403"/>
+            <message mapped="yes" component="qac" id="0404"/>
+            <message mapped="yes" component="qac" id="0405"/>
+          </enforcement>
+        </rule>
+        <rule help="m3cm-2_3_0_rule_help-en_US\Rule-13.3.html" active="yes" id="Rule-13.3">
+          <text>A full expression containing an increment (++) or decrement (--) operator should have no other potential side effects other than that caused by the increment or decrement operator</text>
+          <categories>
+            <category>MISRA Mandatory Rules</category>
+            <category>Mandatory</category>
+            <category>Rule</category>
+            <category>Rules</category>
+            <category>Side-effects</category>
+          </categories>
+          <enforcement>
+            <message mapped="yes" component="qac" id="3440"/>
+          </enforcement>
+        </rule>
+        <rule help="m3cm-2_3_0_rule_help-en_US\Rule-13.6.html" active="yes" id="Rule-13.6">
+          <text>The operand of the sizeof operator shall not contain any expression which has potential side-effects</text>
+          <categories>
+            <category>MISRA Mandatory Rules</category>
+            <category>Mandatory</category>
+            <category>Rule</category>
+            <category>Rules</category>
+            <category>Side-effects</category>
+          </categories>
+          <enforcement>
+            <message mapped="yes" component="qac" id="0945"/>
+            <message mapped="yes" component="qac" id="3307"/>
+          </enforcement>
+        </rule>
+        <rule help="m3cm-2_3_0_rule_help-en_US\Rule-14.1.html" active="yes" id="Rule-14.1">
+          <text>A loop counter shall not have essentially floating type</text>
+          <categories>
+            <category>MISRA Mandatory Rules</category>
+            <category>Mandatory</category>
+            <category>Rule</category>
+            <category>Rules</category>
+            <category>Control statement expressions</category>
+          </categories>
+          <enforcement>
+            <message mapped="yes" component="qac" id="3339"/>
+            <message mapped="yes" component="qac" id="3340"/>
+            <message mapped="yes" component="qac" id="3342"/>
+          </enforcement>
+        </rule>
+        <rule help="m3cm-2_3_0_rule_help-en_US\Rule-14.2.html" active="yes" id="Rule-14.2">
+          <text>A for loop shall be well-formed</text>
+          <categories>
+            <category>MISRA Mandatory Rules</category>
+            <category>Mandatory</category>
+            <category>Rule</category>
+            <category>Rules</category>
+            <category>Control statement expressions</category>
+          </categories>
+          <enforcement>
+            <message mapped="yes" component="qac" id="2461"/>
+            <message mapped="yes" component="qac" id="2462"/>
+            <message mapped="yes" component="qac" id="2463"/>
+            <message mapped="yes" component="qac" id="2464"/>
+            <message mapped="yes" component="qac" id="2467"/>
+            <message mapped="yes" component="qac" id="2468"/>
+            <message mapped="yes" component="qac" id="2469"/>
+            <message mapped="yes" component="qac" id="2471"/>
+            <message mapped="yes" component="qac" id="2472"/>
+          </enforcement>
+        </rule>
+        <rule help="m3cm-2_3_0_rule_help-en_US\Rule-15.1.html" active="yes" id="Rule-15.1">
+          <text>The goto statement should not be used</text>
+          <categories>
+            <category>MISRA Mandatory Rules</category>
+            <category>Mandatory</category>
+            <category>Rule</category>
+            <category>Rules</category>
+            <category>Control flow</category>
+          </categories>
+          <enforcement>
+            <message mapped="yes" component="qac" id="2001"/>
+          </enforcement>
+        </rule>
+        <rule help="m3cm-2_3_0_rule_help-en_US\Rule-15.2.html" active="yes" id="Rule-15.2">
+          <text>The goto statement shall jump to a label declared later in the same function</text>
+          <categories>
+            <category>MISRA Mandatory Rules</category>
+            <category>Mandatory</category>
+            <category>Rule</category>
+            <category>Rules</category>
+            <category>Control flow</category>
+          </categories>
+          <enforcement>
+            <message mapped="yes" component="qac" id="3310"/>
+          </enforcement>
+        </rule>
+        <rule help="m3cm-2_3_0_rule_help-en_US\Rule-15.3.html" active="yes" id="Rule-15.3">
+          <text>Any label referenced by a goto statement shall be declared in the same block, or in any block enclosing the goto statement</text>
+          <categories>
+            <category>MISRA Mandatory Rules</category>
+            <category>Mandatory</category>
+            <category>Rule</category>
+            <category>Rules</category>
+            <category>Control flow</category>
+          </categories>
+          <enforcement>
+            <message mapped="yes" component="qac" id="3327"/>
+          </enforcement>
+        </rule>
+        <rule help="m3cm-2_3_0_rule_help-en_US\Rule-15.4.html" active="yes" id="Rule-15.4">
+          <text>There should be no more than one break or goto statement used to terminate any iteration statement</text>
+          <categories>
+            <category>MISRA Mandatory Rules</category>
+            <category>Mandatory</category>
+            <category>Rule</category>
+            <category>Rules</category>
+            <category>Control flow</category>
+          </categories>
+          <enforcement>
+            <message mapped="yes" component="qac" id="0771"/>
+          </enforcement>
+        </rule>
+        <rule help="m3cm-2_3_0_rule_help-en_US\Rule-15.5.html" active="yes" id="Rule-15.5">
+          <text>A function should have a single point of exit at the end</text>
+          <categories>
+            <category>MISRA Mandatory Rules</category>
+            <category>Mandatory</category>
+            <category>Rule</category>
+            <category>Rules</category>
+            <category>Control flow</category>
+          </categories>
+          <enforcement>
+            <message mapped="yes" component="qac" id="2889"/>
+          </enforcement>
+        </rule>
+        <rule help="m3cm-2_3_0_rule_help-en_US\Rule-15.6.html" active="yes" id="Rule-15.6">
+          <text>The body of an iteration-statement or a selection-statement shall be a compound-statement</text>
+          <categories>
+            <category>MISRA Mandatory Rules</category>
+            <category>Mandatory</category>
+            <category>Rule</category>
+            <category>Rules</category>
+            <category>Control flow</category>
+          </categories>
+          <enforcement>
+            <message mapped="yes" component="qac" id="2212"/>
+            <message mapped="yes" component="qac" id="2214"/>
+            <message mapped="yes" component="qac" id="2218"/>
+            <message mapped="yes" component="qac" id="2219"/>
+            <message mapped="yes" component="qac" id="3402"/>
+          </enforcement>
+        </rule>
+        <rule help="m3cm-2_3_0_rule_help-en_US\Rule-15.7.html" active="yes" id="Rule-15.7">
+          <text>All if ... else if constructs shall be terminated with an else statement</text>
+          <categories>
+            <category>MISRA Mandatory Rules</category>
+            <category>Mandatory</category>
+            <category>Rule</category>
+            <category>Rules</category>
+            <category>Control flow</category>
+          </categories>
+          <enforcement>
+            <message mapped="yes" component="qac" id="2004"/>
+            <message mapped="yes" component="qac" id="2013"/>
+          </enforcement>
+        </rule>
+        <rule help="m3cm-2_3_0_rule_help-en_US\Rule-16.3.html" active="yes" id="Rule-16.3">
+          <text>An unconditional break statement shall terminate every switch-clause</text>
+          <categories>
+            <category>MISRA Mandatory Rules</category>
+            <category>Mandatory</category>
+            <category>Rule</category>
+            <category>Rules</category>
+            <category>Switch statements</category>
+          </categories>
+          <enforcement>
+            <message mapped="yes" component="qac" id="2003"/>
+            <message mapped="yes" component="qac" id="2020"/>
+          </enforcement>
+        </rule>
+        <rule help="m3cm-2_3_0_rule_help-en_US\Rule-16.4.html" active="yes" id="Rule-16.4">
+          <text>Every switch statement shall have a default label</text>
+          <categories>
+            <category>MISRA Mandatory Rules</category>
+            <category>Mandatory</category>
+            <category>Rule</category>
+            <category>Rules</category>
+            <category>Switch statements</category>
+          </categories>
+          <enforcement>
+            <message mapped="yes" component="qac" id="2002"/>
+            <message mapped="yes" component="qac" id="2016"/>
+          </enforcement>
+        </rule>
+        <rule help="m3cm-2_3_0_rule_help-en_US\Rule-16.5.html" active="yes" id="Rule-16.5">
+          <text>A default label shall appear as either the first or the last switch label of a switch statement</text>
+          <categories>
+            <category>MISRA Mandatory Rules</category>
+            <category>Mandatory</category>
+            <category>Rule</category>
+            <category>Rules</category>
+            <category>Switch statements</category>
+          </categories>
+          <enforcement>
+            <message mapped="yes" component="qac" id="2012"/>
+          </enforcement>
+        </rule>
+        <rule help="m3cm-2_3_0_rule_help-en_US\Rule-16.7.html" active="yes" id="Rule-16.7">
+          <text>A switch-expression shall not have essentially Boolean type</text>
+          <categories>
+            <category>MISRA Mandatory Rules</category>
+            <category>Mandatory</category>
+            <category>Rule</category>
+            <category>Rules</category>
+            <category>Switch statements</category>
+          </categories>
+          <enforcement>
+            <message mapped="yes" component="qac" id="0735"/>
+          </enforcement>
+        </rule>
+        <rule help="m3cm-2_3_0_rule_help-en_US\Rule-17.2.html" active="yes" id="Rule-17.2">
+          <text>Functions shall not call themselves, either directly or indirectly</text>
+          <categories>
+            <category>MISRA Mandatory Rules</category>
+            <category>Mandatory</category>
+            <category>Rule</category>
+            <category>Rules</category>
+            <category>Functions</category>
+          </categories>
+          <enforcement>
+            <message mapped="yes" component="qac" id="3670"/>
+            <message mapped="yes" component="rcma" id="1520"/>
+          </enforcement>
+        </rule>
+        <rule help="m3cm-2_3_0_rule_help-en_US\Rule-17.3.html" active="yes" id="Rule-17.3">
+          <text>A function shall not be declared implicitly</text>
+          <categories>
+            <category>MISRA Mandatory Rules</category>
+            <category>Mandatory</category>
+            <category>Rule</category>
+            <category>Rules</category>
+            <category>Functions</category>
+          </categories>
+          <enforcement>
+            <message mapped="yes" component="qac" id="3335"/>
+          </enforcement>
+        </rule>
+        <rule help="m3cm-2_3_0_rule_help-en_US\Rule-18.6.html" active="yes" id="Rule-18.6">
+          <text>The address of an object with automatic storage shall not be copied to another object that persists after the first object has ceased to exist</text>
+          <categories>
+            <category>MISRA Mandatory Rules</category>
+            <category>Mandatory</category>
+            <category>Rule</category>
+            <category>Rules</category>
+            <category>Pointers and arrays</category>
+          </categories>
+          <enforcement>
+            <message mapped="yes" component="qac" id="3217"/>
+            <message mapped="yes" component="qac" id="3225"/>
+            <message mapped="yes" component="qac" id="3230"/>
+            <message mapped="yes" component="qac" id="4140"/>
+          </enforcement>
+        </rule>
+        <rule help="m3cm-2_3_0_rule_help-en_US\Rule-20.2.html" active="yes" id="Rule-20.2">
+          <text>The ', " or \ characters and the /* or // character sequences shall not occur in a header file name</text>
+          <categories>
+            <category>MISRA Mandatory Rules</category>
+            <category>Mandatory</category>
+            <category>Rule</category>
+            <category>Rules</category>
+            <category>Preprocessing directives</category>
+          </categories>
+          <enforcement>
+            <message mapped="yes" component="qac" id="0813"/>
+            <message mapped="yes" component="qac" id="0814"/>
+            <message mapped="yes" component="qac" id="0831"/>
+          </enforcement>
+        </rule>
+        <rule help="m3cm-2_3_0_rule_help-en_US\Rule-20.7.html" active="yes" id="Rule-20.7">
+          <text>Expressions resulting from the expansion of macro parameters shall be enclosed in parentheses</text>
+          <categories>
+            <category>MISRA Mandatory Rules</category>
+            <category>Mandatory</category>
+            <category>Rule</category>
+            <category>Rules</category>
+            <category>Preprocessing directives</category>
+          </categories>
+          <enforcement>
+            <message mapped="yes" component="qac" id="3430"/>
+            <message mapped="yes" component="qac" id="3432"/>
+          </enforcement>
+        </rule>
+        <rule help="m3cm-2_3_0_rule_help-en_US\Rule-20.9.html" active="yes" id="Rule-20.9">
+          <text>All identifiers used in the controlling expression of #if or #elif preprocessing directives shall be #define'd before evaluation</text>
+          <categories>
+            <category>MISRA Mandatory Rules</category>
+            <category>Mandatory</category>
+            <category>Rule</category>
+            <category>Rules</category>
+            <category>Preprocessing directives</category>
+          </categories>
+          <enforcement>
+            <message mapped="yes" component="qac" id="3332"/>
+          </enforcement>
+        </rule>
+        <rule help="m3cm-2_3_0_rule_help-en_US\Rule-20.14.html" active="yes" id="Rule-20.14">
+          <text>All #else, #elif and #endif preprocessor directives shall reside in the same file as the #if, #ifdef or #ifndef directive to which they are related</text>
+          <categories>
+            <category>MISRA Mandatory Rules</category>
+            <category>Mandatory</category>
+            <category>Rule</category>
+            <category>Rules</category>
+            <category>Preprocessing directives</category>
+          </categories>
+          <enforcement>
+            <message mapped="yes" component="qac" id="3317"/>
+            <message mapped="yes" component="qac" id="3318"/>
+          </enforcement>
+        </rule>
+        <rule help="m3cm-2_3_0_rule_help-en_US\Rule-21.1.html" active="yes" id="Rule-21.1">
+          <text>#define and #undef shall not be used on a reserved identifier or reserved macro name</text>
+          <categories>
+            <category>MISRA Mandatory Rules</category>
+            <category>Mandatory</category>
+            <category>Rule</category>
+            <category>Rules</category>
+            <category>Standard libraries</category>
+          </categories>
+          <enforcement>
+            <message mapped="yes" component="qac" id="0603"/>
+            <message mapped="yes" component="qac" id="0836"/>
+            <message mapped="yes" component="qac" id="0848"/>
+            <message mapped="yes" component="qac" id="0854"/>
+            <message mapped="yes" component="qac" id="4600"/>
+            <message mapped="yes" component="qac" id="4601"/>
+            <message mapped="yes" component="qac" id="4620"/>
+            <message mapped="yes" component="qac" id="4621"/>
+          </enforcement>
+        </rule>
+        <rule help="m3cm-2_3_0_rule_help-en_US\Rule-21.3.html" active="yes" id="Rule-21.3">
+          <text>The memory allocation and deallocation functions of &lt;stdlib.h> shall not be used</text>
+          <categories>
+            <category>MISRA Mandatory Rules</category>
+            <category>Mandatory</category>
+            <category>Rule</category>
+            <category>Rules</category>
+            <category>Standard libraries</category>
+          </categories>
+          <enforcement/>
+        </rule>
+      </enforcement>
+    </rule>
+    <rule help="m3cm-2_3_0_rule_help-en_US\m3cm.CMGroup.3.html" active="yes" id="Required Rules">
+      <text></text>
+      <enforcement>
+        <rule help="m3cm-2_3_0_rule_help-en_US\Rule-2.2.html" active="yes" id="Rule-2.2">
+          <text>There shall be no dead code</text>
+          <categories>
+            <category>MISRA Required Rules</category>
+            <category>Required</category>
+            <category>Rule</category>
+            <category>Rules</category>
+            <category>Unused code</category>
+          </categories>
+          <enforcement>
+            <message mapped="yes" component="qac" id="2980"/>
+            <message mapped="yes" component="qac" id="2981"/>
+            <message mapped="yes" component="qac" id="2982"/>
+            <message mapped="yes" component="qac" id="2983"/>
+            <message mapped="yes" component="qac" id="2985"/>
+            <message mapped="yes" component="qac" id="2986"/>
+            <message mapped="yes" component="qac" id="2987"/>
+            <message mapped="yes" component="qac" id="2995"/>
+            <message mapped="yes" component="qac" id="2996"/>
+            <message mapped="yes" component="qac" id="3110"/>
+            <message mapped="yes" component="qac" id="3112"/>
+            <message mapped="yes" component="qac" id="3404"/>
+            <message mapped="yes" component="qac" id="3422"/>
+            <message mapped="yes" component="qac" id="3423"/>
+            <message mapped="yes" component="qac" id="3424"/>
+            <message mapped="yes" component="qac" id="3425"/>
+            <message mapped="yes" component="qac" id="3426"/>
+            <message mapped="yes" component="qac" id="3427"/>
+          </enforcement>
+        </rule>
+        <rule help="m3cm-2_3_0_rule_help-en_US\Rule-4.1.html" active="yes" id="Rule-4.1">
+          <text>Octal and hexadecimal escape sequences shall be terminated</text>
+          <categories>
+            <category>MISRA Required Rules</category>
+            <category>Required</category>
+            <category>Rule</category>
+            <category>Rules</category>
+            <category>Character sets and lexical conventions</category>
+          </categories>
+          <enforcement>
+            <message mapped="yes" component="qac" id="3636"/>
+            <message mapped="yes" component="qac" id="3637"/>
+          </enforcement>
+        </rule>
+        <rule help="m3cm-2_3_0_rule_help-en_US\Rule-5.7.html" active="yes" id="Rule-5.7">
+          <text>A tag name shall be a unique identifier</text>
+          <categories>
+            <category>MISRA Required Rules</category>
+            <category>Required</category>
+            <category>Rule</category>
+            <category>Rules</category>
+            <category>Identifiers</category>
+          </categories>
+          <enforcement>
+            <message mapped="yes" component="qac" id="2547"/>
+            <message mapped="yes" component="rcma" id="1750"/>
+          </enforcement>
+        </rule>
+        <rule help="m3cm-2_3_0_rule_help-en_US\Rule-5.8.html" active="yes" id="Rule-5.8">
+          <text>Identifiers that define objects or functions with external linkage shall be unique</text>
+          <categories>
+            <category>MISRA Required Rules</category>
+            <category>Required</category>
+            <category>Rule</category>
+            <category>Rules</category>
+            <category>Identifiers</category>
+          </categories>
+          <enforcement>
+            <message mapped="yes" component="rcma" id="1525"/>
+            <message mapped="yes" component="rcma" id="1526"/>
+          </enforcement>
+        </rule>
+        <rule help="m3cm-2_3_0_rule_help-en_US\Rule-5.9.html" active="yes" id="Rule-5.9">
+          <text>Identifiers that define objects or functions with internal linkage should be unique</text>
+          <categories>
+            <category>Advisory</category>
+            <category>Guideline</category>
+            <category>MISRA Advisory Rules</category>
+            <category>Rules</category>
+            <category>Identifiers</category>
+          </categories>
+          <enforcement>
+            <message mapped="yes" component="rcma" id="1525"/>
+            <message mapped="yes" component="rcma" id="1527"/>
+            <message mapped="yes" component="rcma" id="1528"/>
+          </enforcement>
+        </rule>
+        <rule help="m3cm-2_3_0_rule_help-en_US\Rule-7.4.html" active="yes" id="Rule-7.4">
+          <text>A string literal shall not be assigned to an object unless the object's type is "pointer to const-qualified char"</text>
+          <categories>
+            <category>MISRA Required Rules</category>
+            <category>Required</category>
+            <category>Rule</category>
+            <category>Rules</category>
+            <category>Literals and constants</category>
+          </categories>
+          <enforcement>
+            <message mapped="yes" component="qac" id="0752"/>
+            <message mapped="yes" component="qac" id="0753"/>
+          </enforcement>
+        </rule>
+        <rule help="m3cm-2_3_0_rule_help-en_US\Rule-8.2.html" active="yes" id="Rule-8.2">
+          <text>Function types shall be in prototype form with named parameters</text>
+          <categories>
+            <category>MISRA Required Rules</category>
+            <category>Required</category>
+            <category>Rule</category>
+            <category>Rules</category>
+            <category>Declarations and definitions</category>
+          </categories>
+          <enforcement>
+            <message mapped="yes" component="qac" id="1335"/>
+            <message mapped="yes" component="qac" id="1336"/>
+            <message mapped="yes" component="qac" id="3001"/>
+            <message mapped="yes" component="qac" id="3002"/>
+            <message mapped="yes" component="qac" id="3007"/>
+          </enforcement>
+        </rule>
+        <rule help="m3cm-2_3_0_rule_help-en_US\Rule-8.4.html" active="yes" id="Rule-8.4">
+          <text>A compatible declaration shall be visible when an object or function with external linkage is defined</text>
+          <categories>
+            <category>MISRA Required Rules</category>
+            <category>Required</category>
+            <category>Rule</category>
+            <category>Rules</category>
+            <category>Declarations and definitions</category>
+          </categories>
+          <enforcement>
+            <message mapped="yes" component="qac" id="3408"/>
+          </enforcement>
+        </rule>
+        <rule help="m3cm-2_3_0_rule_help-en_US\Rule-8.8.html" active="yes" id="Rule-8.8">
+          <text>The static storage class specifier shall be used in all declarations of objects and functions that have internal linkage</text>
+          <categories>
+            <category>MISRA Required Rules</category>
+            <category>Required</category>
+            <category>Rule</category>
+            <category>Rules</category>
+            <category>Declarations and definitions</category>
+          </categories>
+          <enforcement>
+            <message mapped="yes" component="qac" id="3224"/>
+          </enforcement>
+        </rule>
+        <rule help="m3cm-2_3_0_rule_help-en_US\Rule-8.10.html" active="yes" id="Rule-8.10">
+          <text>An inline function shall be declared with the static storage class</text>
+          <categories>
+            <category>MISRA Required Rules</category>
+            <category>Required</category>
+            <category>Rule</category>
+            <category>Rules</category>
+            <category>Declarations and definitions</category>
+          </categories>
+          <enforcement>
+            <message mapped="yes" component="qac" id="3240"/>
+            <message mapped="yes" component="qac" id="3243"/>
+          </enforcement>
+        </rule>
+        <rule help="m3cm-2_3_0_rule_help-en_US\Rule-8.12.html" active="yes" id="Rule-8.12">
+          <text>Within an enumerator list, the value of an implicitly-specified enumeration constant shall be unique</text>
+          <categories>
+            <category>MISRA Required Rules</category>
+            <category>Required</category>
+            <category>Rule</category>
+            <category>Rules</category>
+            <category>Declarations and definitions</category>
+          </categories>
+          <enforcement>
+            <message mapped="yes" component="qac" id="0724"/>
+          </enforcement>
+        </rule>
+        <rule help="m3cm-2_3_0_rule_help-en_US\Rule-8.13.html" active="yes" id="Rule-8.13">
+          <text>A pointer should point to a const-qualified type whenever possible</text>
+          <categories>
+            <category>Advisory</category>
+            <category>Guideline</category>
+            <category>MISRA Advisory Rules</category>
+            <category>Rules</category>
+            <category>Declarations and definitions</category>
+          </categories>
+          <enforcement>
+            <message mapped="yes" component="qac" id="3673"/>
+          </enforcement>
+        </rule>
+        <rule help="m3cm-2_3_0_rule_help-en_US\Rule-8.14.html" active="yes" id="Rule-8.14">
+          <text>The restrict type qualifier shall not be used</text>
+          <categories>
+            <category>MISRA Required Rules</category>
+            <category>Required</category>
+            <category>Rule</category>
+            <category>Rules</category>
+            <category>Declarations and definitions</category>
+          </categories>
+          <enforcement>
+            <message mapped="yes" component="qac" id="1057"/>
+          </enforcement>
+        </rule>
+        <rule help="m3cm-2_3_0_rule_help-en_US\Rule-9.4.html" active="yes" id="Rule-9.4">
+          <text>An element of an object shall not be initialized more than once</text>
+          <categories>
+            <category>MISRA Required Rules</category>
+            <category>Required</category>
+            <category>Rule</category>
+            <category>Rules</category>
+            <category>Initialization</category>
+          </categories>
+          <enforcement>
+            <message mapped="yes" component="qac" id="1397"/>
+            <message mapped="yes" component="qac" id="1398"/>
+            <message mapped="yes" component="qac" id="1399"/>
+          </enforcement>
+        </rule>
+        <rule help="m3cm-2_3_0_rule_help-en_US\Rule-9.5.html" active="yes" id="Rule-9.5">
+          <text>Where designated initializers are used to initialize an array object the size of the array shall be specified explicitly</text>
+          <categories>
+            <category>MISRA Required Rules</category>
+            <category>Required</category>
+            <category>Rule</category>
+            <category>Rules</category>
+            <category>Initialization</category>
+          </categories>
+          <enforcement>
+            <message mapped="yes" component="qac" id="3676"/>
+          </enforcement>
+        </rule>
+        <rule help="m3cm-2_3_0_rule_help-en_US\Rule-11.1.html" active="yes" id="Rule-11.1">
+          <text>Conversions shall not be performed between a pointer to a function and any other type</text>
+          <categories>
+            <category>MISRA Required Rules</category>
+            <category>Required</category>
+            <category>Rule</category>
+            <category>Rules</category>
+            <category>Pointer type conversions</category>
+          </categories>
+          <enforcement>
+            <message mapped="yes" component="qac" id="0302"/>
+            <message mapped="yes" component="qac" id="0305"/>
+            <message mapped="yes" component="qac" id="0307"/>
+            <message mapped="yes" component="qac" id="0313"/>
+          </enforcement>
+        </rule>
+        <rule help="m3cm-2_3_0_rule_help-en_US\Rule-11.2.html" active="yes" id="Rule-11.2">
+          <text>Conversions shall not be performed between a pointer to an incomplete type and any other type</text>
+          <categories>
+            <category>MISRA Required Rules</category>
+            <category>Required</category>
+            <category>Rule</category>
+            <category>Rules</category>
+            <category>Pointer type conversions</category>
+          </categories>
+          <enforcement>
+            <message mapped="yes" component="qac" id="0308"/>
+            <message mapped="yes" component="qac" id="0323"/>
+            <message mapped="yes" component="qac" id="0324"/>
+            <message mapped="yes" component="qac" id="0325"/>
+          </enforcement>
+        </rule>
+        <rule help="m3cm-2_3_0_rule_help-en_US\Rule-11.3.html" active="yes" id="Rule-11.3">
+          <text>A cast shall not be performed between a pointer to object type and a pointer to a different object type</text>
+          <categories>
+            <category>MISRA Required Rules</category>
+            <category>Required</category>
+            <category>Rule</category>
+            <category>Rules</category>
+            <category>Pointer type conversions</category>
+          </categories>
+          <enforcement>
+            <message mapped="yes" component="qac" id="0310"/>
+            <message mapped="yes" component="qac" id="3305"/>
+          </enforcement>
+        </rule>
+        <rule help="m3cm-2_3_0_rule_help-en_US\Rule-11.5.html" active="yes" id="Rule-11.5">
+          <text>A conversion should not be performed from pointer to void into pointer to object</text>
+          <categories>
+            <category>Advisory</category>
+            <category>Guideline</category>
+            <category>MISRA Advisory Rules</category>
+            <category>Rules</category>
+            <category>Pointer type conversions</category>
+          </categories>
+          <enforcement>
+            <message mapped="yes" component="qac" id="0316"/>
+            <message mapped="yes" component="qac" id="0317"/>
+          </enforcement>
+        </rule>
+        <rule help="m3cm-2_3_0_rule_help-en_US\Rule-11.7.html" active="yes" id="Rule-11.7">
+          <text>A cast shall not be performed between pointer to object and a non-integer arithmetic type</text>
+          <categories>
+            <category>MISRA Required Rules</category>
+            <category>Required</category>
+            <category>Rule</category>
+            <category>Rules</category>
+            <category>Pointer type conversions</category>
+          </categories>
+          <enforcement>
+            <message mapped="yes" component="qac" id="0301"/>
+            <message mapped="yes" component="qac" id="0328"/>
+          </enforcement>
+        </rule>
+        <rule help="m3cm-2_3_0_rule_help-en_US\Rule-11.8.html" active="yes" id="Rule-11.8">
+          <text>A cast shall not remove any const or volatile qualification from the type pointed to by a pointer</text>
+          <categories>
+            <category>MISRA Required Rules</category>
+            <category>Required</category>
+            <category>Rule</category>
+            <category>Rules</category>
+            <category>Pointer type conversions</category>
+          </categories>
+          <enforcement>
+            <message mapped="yes" component="qac" id="0311"/>
+            <message mapped="yes" component="qac" id="0312"/>
+          </enforcement>
+        </rule>
+        <rule help="m3cm-2_3_0_rule_help-en_US\Rule-11.9.html" active="yes" id="Rule-11.9">
+          <text>The macro NULL shall be the only permitted form of integer null pointer constant</text>
+          <categories>
+            <category>MISRA Required Rules</category>
+            <category>Required</category>
+            <category>Rule</category>
+            <category>Rules</category>
+            <category>Pointer type conversions</category>
+          </categories>
+          <enforcement>
+            <message mapped="yes" component="qac" id="3003"/>
+            <message mapped="yes" component="qac" id="3004"/>
+          </enforcement>
+        </rule>
+        <rule help="m3cm-2_3_0_rule_help-en_US\Rule-13.4.html" active="yes" id="Rule-13.4">
+          <text>The result of an assignment operator should not be used</text>
+          <categories>
+            <category>Advisory</category>
+            <category>Guideline</category>
+            <category>MISRA Advisory Rules</category>
+            <category>Rules</category>
+            <category>Side-effects</category>
+          </categories>
+          <enforcement>
+            <message mapped="yes" component="qac" id="3226"/>
+            <message mapped="yes" component="qac" id="3326"/>
+          </enforcement>
+        </rule>
+        <rule help="m3cm-2_3_0_rule_help-en_US\Rule-13.5.html" active="yes" id="Rule-13.5">
+          <text>The right hand operand of a logical &amp;&amp; or || operator shall not contain persistent side effects</text>
+          <categories>
+            <category>MISRA Required Rules</category>
+            <category>Required</category>
+            <category>Rule</category>
+            <category>Rules</category>
+            <category>Side-effects</category>
+          </categories>
+          <enforcement>
+            <message mapped="yes" component="qac" id="3415"/>
+          </enforcement>
+        </rule>
+        <rule help="m3cm-2_3_0_rule_help-en_US\Rule-14.3.html" active="yes" id="Rule-14.3">
+          <text>Controlling expressions shall not be invariant</text>
+          <categories>
+            <category>MISRA Required Rules</category>
+            <category>Required</category>
+            <category>Rule</category>
+            <category>Rules</category>
+            <category>Control statement expressions</category>
+          </categories>
+          <enforcement>
+            <message mapped="yes" component="qac" id="2741"/>
+            <message mapped="yes" component="qac" id="2742"/>
+            <message mapped="yes" component="qac" id="2990"/>
+            <message mapped="yes" component="qac" id="2991"/>
+            <message mapped="yes" component="qac" id="2992"/>
+            <message mapped="yes" component="qac" id="2993"/>
+            <message mapped="yes" component="qac" id="2994"/>
+            <message mapped="yes" component="qac" id="2997"/>
+            <message mapped="yes" component="qac" id="2998"/>
+            <message mapped="yes" component="qac" id="3493"/>
+            <message mapped="yes" component="qac" id="3494"/>
+          </enforcement>
+        </rule>
+        <rule help="m3cm-2_3_0_rule_help-en_US\Rule-14.4.html" active="yes" id="Rule-14.4">
+          <text>The controlling expression of an if-statement and the controlling expression of an iteration-statement shall have essentially Boolean type</text>
+          <categories>
+            <category>MISRA Required Rules</category>
+            <category>Required</category>
+            <category>Rule</category>
+            <category>Rules</category>
+            <category>Control statement expressions</category>
+          </categories>
+          <enforcement>
+            <message mapped="yes" component="qac" id="3344"/>
+          </enforcement>
+        </rule>
+        <rule help="m3cm-2_3_0_rule_help-en_US\Rule-16.2.html" active="yes" id="Rule-16.2">
+          <text>A switch label shall only be used when the most closely-enclosing compound statement is the body of a switch statement</text>
+          <categories>
+            <category>MISRA Required Rules</category>
+            <category>Required</category>
+            <category>Rule</category>
+            <category>Rules</category>
+            <category>Switch statements</category>
+          </categories>
+          <enforcement>
+            <message mapped="yes" component="qac" id="2019"/>
+          </enforcement>
+        </rule>
+        <rule help="m3cm-2_3_0_rule_help-en_US\Rule-16.6.html" active="yes" id="Rule-16.6">
+          <text>Every switch statement shall have at least two switch-clauses</text>
+          <categories>
+            <category>MISRA Required Rules</category>
+            <category>Required</category>
+            <category>Rule</category>
+            <category>Rules</category>
+            <category>Switch statements</category>
+          </categories>
+          <enforcement>
+            <message mapped="yes" component="qac" id="3315"/>
+          </enforcement>
+        </rule>
+        <rule help="m3cm-2_3_0_rule_help-en_US\Rule-17.1.html" active="yes" id="Rule-17.1">
+          <text>The features of &lt;stdarg.h> shall not be used</text>
+          <categories>
+            <category>MISRA Required Rules</category>
+            <category>Required</category>
+            <category>Rule</category>
+            <category>Rules</category>
+            <category>Functions</category>
+          </categories>
+          <enforcement>
+            <message mapped="yes" component="qac" id="1337"/>
+          </enforcement>
+        </rule>
+        <rule help="C:\PRQA\PRQA-Framework-2.2.0\config\rcf\m3cm-2_3_0_rule_help-en_US\Rule-17.4.html" active="yes" id="Rule-17.4">
+          <text>All exit paths from a function with non-void return type shall have an explicit return statement with an expression</text>
+          <categories>
+            <category>MISRA Mandatory Rules</category>
+            <category>Mandatory</category>
+            <category>Rule</category>
+            <category>Rules</category>
+            <category>Functions</category>
+          </categories>
+          <enforcement>
+            <message mapped="yes" component="qac" id="0745"/>
+            <message mapped="yes" component="qac" id="2887"/>
+            <message mapped="yes" component="qac" id="2888"/>
+            <message mapped="yes" component="qac" id="3113"/>
+            <message mapped="yes" component="qac" id="3114"/>
+          </enforcement>
+        </rule>
+        <rule help="m3cm-2_3_0_rule_help-en_US\Rule-18.1.html" active="yes" id="Rule-18.1">
+          <text>A pointer resulting from arithmetic on a pointer operand shall address an element of the same array as that pointer operand</text>
+          <categories>
+            <category>MISRA Required Rules</category>
+            <category>Required</category>
+            <category>Rule</category>
+            <category>Rules</category>
+            <category>Pointers and arrays</category>
+          </categories>
+          <enforcement>
+            <message mapped="yes" component="qac" id="2840"/>
+            <message mapped="yes" component="qac" id="2841"/>
+            <message mapped="yes" component="qac" id="2842"/>
+            <message mapped="yes" component="qac" id="2930"/>
+            <message mapped="yes" component="qac" id="2931"/>
+            <message mapped="yes" component="qac" id="2932"/>
+          </enforcement>
+        </rule>
+        <rule help="m3cm-2_3_0_rule_help-en_US\Rule-18.4.html" active="yes" id="Rule-18.4">
+          <text>The +, -, += and -= operators should not be applied to an expression of pointer type</text>
+          <categories>
+            <category>Advisory</category>
+            <category>Guideline</category>
+            <category>MISRA Advisory Rules</category>
+            <category>Rules</category>
+            <category>Pointers and arrays</category>
+          </categories>
+          <enforcement>
+            <message mapped="yes" component="qac" id="0488"/>
+          </enforcement>
+        </rule>
+        <rule help="m3cm-2_3_0_rule_help-en_US\Rule-18.5.html" active="yes" id="Rule-18.5">
+          <text>Declarations should contain no more than two levels of pointer nesting</text>
+          <categories>
+            <category>Advisory</category>
+            <category>Guideline</category>
+            <category>MISRA Advisory Rules</category>
+            <category>Rules</category>
+            <category>Pointers and arrays</category>
+          </categories>
+          <enforcement>
+            <message mapped="yes" component="qac" id="3260"/>
+            <message mapped="yes" component="qac" id="3261"/>
+            <message mapped="yes" component="qac" id="3262"/>
+            <message mapped="yes" component="qac" id="3263"/>
+          </enforcement>
+        </rule>
+        <rule help="m3cm-2_3_0_rule_help-en_US\Rule-20.3.html" active="yes" id="Rule-20.3">
+          <text>The #include directive shall be followed by either a &lt;filename> or "filename" sequence</text>
+          <categories>
+            <category>MISRA Required Rules</category>
+            <category>Required</category>
+            <category>Rule</category>
+            <category>Rules</category>
+            <category>Preprocessing directives</category>
+          </categories>
+          <enforcement>
+            <message mapped="yes" component="qac" id="0817"/>
+            <message mapped="yes" component="qac" id="0821"/>
+            <message mapped="yes" component="qac" id="0840"/>
+          </enforcement>
+        </rule>
+        <rule help="m3cm-2_3_0_rule_help-en_US\Rule-20.4.html" active="yes" id="Rule-20.4">
+          <text>A macro shall not be defined with the same name as a keyword</text>
+          <categories>
+            <category>MISRA Required Rules</category>
+            <category>Required</category>
+            <category>Rule</category>
+            <category>Rules</category>
+            <category>Preprocessing directives</category>
+          </categories>
+          <enforcement>
+            <message mapped="yes" component="qac" id="3439"/>
+            <message mapped="yes" component="qac" id="3468"/>
+          </enforcement>
+        </rule>
+        <rule help="m3cm-2_3_0_rule_help-en_US\Rule-20.6.html" active="yes" id="Rule-20.6">
+          <text>Tokens that look like a preprocessing directive shall not occur within a macro argument</text>
+          <categories>
+            <category>MISRA Required Rules</category>
+            <category>Required</category>
+            <category>Rule</category>
+            <category>Rules</category>
+            <category>Preprocessing directives</category>
+          </categories>
+          <enforcement>
+            <message mapped="yes" component="qac" id="0853"/>
+          </enforcement>
+        </rule>
+        <rule help="m3cm-2_3_0_rule_help-en_US\Rule-20.10.html" active="yes" id="Rule-20.10">
+          <text>The # and ## preprocessor operators should not be used</text>
+          <categories>
+            <category>Advisory</category>
+            <category>Guideline</category>
+            <category>MISRA Advisory Rules</category>
+            <category>Rules</category>
+            <category>Preprocessing directives</category>
+          </categories>
+          <enforcement>
+            <message mapped="yes" component="qac" id="0341"/>
+            <message mapped="yes" component="qac" id="0342"/>
+          </enforcement>
+        </rule>
+        <rule help="m3cm-2_3_0_rule_help-en_US\Rule-20.11.html" active="yes" id="Rule-20.11">
+          <text>A macro parameter immediately following a # operator shall not immediately be followed by a ## operator</text>
+          <categories>
+            <category>MISRA Required Rules</category>
+            <category>Required</category>
+            <category>Rule</category>
+            <category>Rules</category>
+            <category>Preprocessing directives</category>
+          </categories>
+          <enforcement>
+            <message mapped="yes" component="qac" id="0892"/>
+          </enforcement>
+        </rule>
+        <rule help="m3cm-2_3_0_rule_help-en_US\Rule-20.13.html" active="yes" id="Rule-20.13">
+          <text>A line whose first token is # shall be a valid preprocessing directive</text>
+          <categories>
+            <category>MISRA Required Rules</category>
+            <category>Required</category>
+            <category>Rule</category>
+            <category>Rules</category>
+            <category>Preprocessing directives</category>
+          </categories>
+          <enforcement>
+            <message mapped="yes" component="qac" id="3115"/>
+          </enforcement>
+        </rule>
+        <rule help="m3cm-2_3_0_rule_help-en_US\Rule-21.2.html" active="yes" id="Rule-21.2">
+          <text>A reserved identifier or macro name shall not be declared</text>
+          <categories>
+            <category>MISRA Required Rules</category>
+            <category>Required</category>
+            <category>Rule</category>
+            <category>Rules</category>
+            <category>Standard libraries</category>
+          </categories>
+          <enforcement>
+            <message mapped="yes" component="qac" id="0602"/>
+            <message mapped="yes" component="qac" id="4602"/>
+            <message mapped="yes" component="qac" id="4603"/>
+            <message mapped="yes" component="qac" id="4604"/>
+            <message mapped="yes" component="qac" id="4605"/>
+            <message mapped="yes" component="qac" id="4606"/>
+            <message mapped="yes" component="qac" id="4607"/>
+            <message mapped="yes" component="qac" id="4608"/>
+          </enforcement>
+        </rule>
+        <rule help="m3cm-2_3_0_rule_help-en_US\Rule-21.6.html" active="yes" id="Rule-21.6">
+          <text>The Standard Library input/output functions shall not be used</text>
+          <categories>
+            <category>MISRA Required Rules</category>
+            <category>Required</category>
+            <category>Rule</category>
+            <category>Rules</category>
+            <category>Standard libraries</category>
+          </categories>
+          <enforcement/>
+        </rule>
+        <rule help="m3cm-2_3_0_rule_help-en_US\Rule-21.7.html" active="yes" id="Rule-21.7">
+          <text>The atof, atoi, atol and atoll functions of &lt;stdlib.h> shall not be used</text>
+          <categories>
+            <category>MISRA Required Rules</category>
+            <category>Required</category>
+            <category>Rule</category>
+            <category>Rules</category>
+            <category>Standard libraries</category>
+          </categories>
+          <enforcement/>
+        </rule>
+        <rule help="m3cm-2_3_0_rule_help-en_US\Rule-21.8.html" active="yes" id="Rule-21.8">
+          <text>The library functions abort, exit and system of &lt;stdlib.h> shall not be used</text>
+          <categories>
+            <category>MISRA Required Rules</category>
+            <category>Required</category>
+            <category>Rule</category>
+            <category>Rules</category>
+            <category>Standard libraries</category>
+          </categories>
+          <enforcement/>
+        </rule>
+        <rule help="m3cm-2_3_0_rule_help-en_US\Rule-21.10.html" active="yes" id="Rule-21.10">
+          <text>The Standard Library time and date functions shall not be used</text>
+          <categories>
+            <category>MISRA Required Rules</category>
+            <category>Required</category>
+            <category>Rule</category>
+            <category>Rules</category>
+            <category>Standard libraries</category>
+          </categories>
+          <enforcement/>
+        </rule>
+        <rule help="m3cm-2_3_0_rule_help-en_US\Rule-21.11.html" active="yes" id="Rule-21.11">
+          <text>The standard header file &lt;tgmath.h> shall not be used</text>
+          <categories>
+            <category>MISRA Required Rules</category>
+            <category>Required</category>
+            <category>Rule</category>
+            <category>Rules</category>
+            <category>Standard libraries</category>
+          </categories>
+          <enforcement/>
+        </rule>
+      </enforcement>
+    </rule>
+  </rulegroup>
+</rcf>

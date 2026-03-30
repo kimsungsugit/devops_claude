@@ -1,0 +1,5 @@
+# umbrella requirements
+-r requirements-core.txt
+-r requirements-llm.txt
+-r backend/requirements.txt
+-r requirements-dev.txt

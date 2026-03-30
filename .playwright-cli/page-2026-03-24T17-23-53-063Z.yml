@@ -1,0 +1,248 @@
+- generic [ref=e3]:
+  - generic [ref=e5]:
+    - button "로컬" [ref=e6] [cursor=pointer]
+    - button "Jenkins" [ref=e7] [cursor=pointer]
+  - generic [ref=e8]:
+    - main [ref=e9]:
+      - generic [ref=e10]:
+        - generic [ref=e11]:
+          - generic [ref=e12]:
+            - generic [ref=e13]:
+              - generic [ref=e14]: Devops/
+              - generic [ref=e15]: Local/
+              - generic [ref=e16]: Dashboard
+            - generic [ref=e17]: Information Dashboard
+            - generic [ref=e18]: "세션 생성: 2026-03-11T16:52:08.235494"
+          - generic [ref=e20]: READY
+          - button "다크 모드로 전환" [ref=e22] [cursor=pointer]: 다크 모드
+        - navigation "주요 내비게이션" [ref=e23]:
+          - button "대시보드 탭" [ref=e24] [cursor=pointer]: 대시보드
+          - button "워크플로우 탭" [ref=e26] [cursor=pointer]: 워크플로우
+          - button "에디터 탭" [ref=e28] [cursor=pointer]: 에디터
+          - button "Analyzer 탭" [ref=e30] [cursor=pointer]: Analyzer
+          - button "설정 탭" [ref=e32] [cursor=pointer]: 설정
+        - generic [ref=e35]: 로컬 모드
+        - generic [ref=e36]:
+          - generic [ref=e37]:
+            - generic [ref=e38]:
+              - generic [ref=e39]:
+                - generic [ref=e40] [cursor=pointer]:
+                  - generic [ref=e41]: 상태
+                  - generic [ref=e42]: "-"
+                  - generic [ref=e43]: "-"
+                - generic [ref=e44] [cursor=pointer]:
+                  - generic [ref=e45]: 정적 분석
+                  - generic [ref=e46]: "0"
+                  - generic [ref=e47]: cpp:0 tidy:0 sem:0
+                - generic [ref=e48] [cursor=pointer]:
+                  - generic [ref=e49]: Preflight
+                  - generic [ref=e50]: "-"
+                  - generic [ref=e51]: missing 0
+                - generic [ref=e52] [cursor=pointer]:
+                  - generic [ref=e53]: Change Impact
+                  - generic [ref=e54]: 0 files
+                  - generic [ref=e55]: tests:N config:N build:N
+                - generic [ref=e56] [cursor=pointer]:
+                  - generic [ref=e57]: Report Health
+                  - generic [ref=e58]: "-"
+                  - generic [ref=e59]: missing 0 warn 0
+                - generic [ref=e60] [cursor=pointer]:
+                  - generic [ref=e61]: Build
+                  - generic [ref=e62]: "-"
+                  - generic [ref=e63]: syntax FAIL
+                - generic [ref=e64] [cursor=pointer]:
+                  - generic [ref=e65]: Tests
+                  - generic [ref=e66]: "OFF"
+                  - generic [ref=e67]: coverage -
+                - generic [ref=e68] [cursor=pointer]:
+                  - generic [ref=e69]: Agent
+                  - generic [ref=e70]: "OFF"
+                  - generic [ref=e71]: runs 0
+                - generic [ref=e72] [cursor=pointer]:
+                  - generic [ref=e73]: SCM
+                  - generic [ref=e74]: "-"
+                  - generic [ref=e75]: changed 0
+              - generic [ref=e76]:
+                - generic [ref=e77]: 오류/경고 분포
+                - generic [ref=e78]:
+                  - generic [ref=e79]: Error
+                  - generic [ref=e81]: "0"
+                - generic [ref=e82]:
+                  - generic [ref=e83]: Warn
+                  - generic [ref=e85]: "0"
+                - generic [ref=e86]:
+                  - generic [ref=e87]: Info
+                  - generic [ref=e89]: "0"
+              - generic [ref=e90]:
+                - generic [ref=e91]: 메트릭 요약
+                - generic [ref=e92]:
+                  - button "빌드 없음" [ref=e93] [cursor=pointer]
+                  - button "테스트 없음" [ref=e94] [cursor=pointer]
+                  - button "커버리지 0.0%" [ref=e95] [cursor=pointer]
+                  - button "정적 -" [ref=e96] [cursor=pointer]
+                  - button "복잡도 -" [ref=e97] [cursor=pointer]
+              - generic [ref=e98]:
+                - generic [ref=e99]: Code Quality (정적 분석)
+                - generic [ref=e100]:
+                  - generic [ref=e101]:
+                    - generic [ref=e102]: cppcheck
+                    - generic [ref=e104]:
+                      - 'generic "Errors: 0"'
+                      - 'generic "Warnings: 0"'
+                    - generic [ref=e105]: ✗ 0
+                  - generic [ref=e106]:
+                    - generic [ref=e107]: clangTidy
+                    - generic [ref=e109]:
+                      - 'generic "Errors: 0"'
+                      - 'generic "Warnings: 0"'
+                    - generic [ref=e110]: ✗ 0
+                  - generic [ref=e111]:
+                    - generic [ref=e112]: semgrep
+                    - generic [ref=e114]:
+                      - 'generic "Errors: 0"'
+                      - 'generic "Warnings: 0"'
+                    - generic [ref=e115]: ✗ 0
+            - generic [ref=e116]:
+              - generic [ref=e118]:
+                - generic [ref=e119]:
+                  - button "상태" [ref=e120] [cursor=pointer]
+                  - button "정적 분석" [ref=e121] [cursor=pointer]
+                  - button "Preflight" [ref=e122] [cursor=pointer]
+                  - button "Change Impact" [ref=e123] [cursor=pointer]
+                  - button "Report Health" [ref=e124] [cursor=pointer]
+                  - button "Build & Syntax" [ref=e125] [cursor=pointer]
+                  - button "Tests & Coverage" [ref=e126] [cursor=pointer]
+                  - button "메트릭 상세" [ref=e127] [cursor=pointer]
+                  - button "로컬 리포트" [ref=e128] [cursor=pointer]
+                  - button "Agent" [ref=e129] [cursor=pointer]
+                  - button "SCM" [ref=e130] [cursor=pointer]
+                - generic [ref=e132]:
+                  - heading "상태" [level=4] [ref=e133]
+                  - generic [ref=e134]:
+                    - generic [ref=e135] [cursor=pointer]:
+                      - generic [ref=e136]: 상태
+                      - generic [ref=e137]: "-"
+                    - generic [ref=e138] [cursor=pointer]:
+                      - generic [ref=e139]: 단계
+                      - generic [ref=e140]: "-"
+                    - generic [ref=e141] [cursor=pointer]:
+                      - generic [ref=e142]: 종료 코드
+                      - generic [ref=e143]: "-"
+                  - generic [ref=e144]:
+                    - generic [ref=e145]:
+                      - generic [ref=e146]: 상태
+                      - generic [ref=e147]: "-"
+                    - generic [ref=e148]:
+                      - generic [ref=e149]: 단계
+                      - generic [ref=e150]: "-"
+                    - generic [ref=e151]:
+                      - generic [ref=e152]: 메시지
+                      - generic [ref=e153]: "-"
+                    - generic [ref=e154]:
+                      - generic [ref=e155]: 종료 코드
+                      - generic [ref=e156]: "-"
+                  - group [ref=e157]:
+                    - generic "원본 JSON 보기" [ref=e158]
+              - generic [ref=e159]:
+                - generic [ref=e160]:
+                  - heading "상세 차트" [level=3] [ref=e161]
+                  - generic [ref=e162]: 상세 탭을 선택하세요
+                - generic [ref=e163]:
+                  - generic [ref=e164]:
+                    - heading "복잡도 히트맵 (파일별 최대 CCN)" [level=3] [ref=e165]
+                    - button "새로고침" [ref=e166] [cursor=pointer]
+                  - generic [ref=e167]: 복잡도 데이터 없음
+          - generic [ref=e168]:
+            - generic [ref=e169]:
+              - heading "Top N 요약" [level=3] [ref=e170]
+              - generic [ref=e171]:
+                - generic [ref=e172]:
+                  - generic [ref=e173]: 이슈 그룹
+                  - generic [ref=e174]: 그룹 없음
+                - generic [ref=e175]:
+                  - generic [ref=e176]: 도구 Top
+                  - generic [ref=e177]: 도구 없음
+                - generic [ref=e178]:
+                  - generic [ref=e179]: 최근 로그
+                  - generic [ref=e180]: 로그 없음
+            - generic [ref=e181]:
+              - heading "시간대별 로그/상태 추이" [level=3] [ref=e182]
+              - generic [ref=e183]:
+                - generic [ref=e184]:
+                  - generic [ref=e185]: 로그 이벤트
+                  - generic [ref=e186]:
+                    - generic [ref=e189]: 15:00
+                    - generic [ref=e192]: 16:00
+                    - generic [ref=e195]: 17:00
+                    - generic [ref=e198]: 18:00
+                    - generic [ref=e201]: 19:00
+                    - generic [ref=e204]: 20:00
+                    - generic [ref=e207]: 21:00
+                    - generic [ref=e210]: 22:00
+                    - generic [ref=e213]: 23:00
+                    - generic [ref=e216]: 00:00
+                    - generic [ref=e219]: 01:00
+                    - generic [ref=e222]: 02:00
+                - generic [ref=e223]:
+                  - generic [ref=e224]: 상태 이벤트
+                  - generic [ref=e225]:
+                    - generic [ref=e228]: 15:00
+                    - generic [ref=e231]: 16:00
+                    - generic [ref=e234]: 17:00
+                    - generic [ref=e237]: 18:00
+                    - generic [ref=e240]: 19:00
+                    - generic [ref=e243]: 20:00
+                    - generic [ref=e246]: 21:00
+                    - generic [ref=e249]: 22:00
+                    - generic [ref=e252]: 23:00
+                    - generic [ref=e255]: 00:00
+                    - generic [ref=e258]: 01:00
+                    - generic [ref=e261]: 02:00
+                  - generic [ref=e262]:
+                    - text: running
+                    - text: success
+                    - text: fail
+            - generic [ref=e266]:
+              - heading "히트맵 / 리스크 점수" [level=3] [ref=e267]
+              - group [ref=e268]:
+                - generic "리스크 점수 (클릭하여 상세 보기) Risk 90" [ref=e269] [cursor=pointer]:
+                  - generic [ref=e270]: 리스크 점수 (클릭하여 상세 보기)
+                  - generic [ref=e271]:
+                    - generic [ref=e272]: Risk
+                    - generic [ref=e275]: "90"
+              - generic [ref=e276]:
+                - generic [ref=e277]:
+                  - generic [ref=e278]: Tool
+                  - generic [ref=e279]: misc
+                - generic [ref=e280]: 데이터 없음
+    - complementary [ref=e281]:
+      - generic [ref=e282]:
+        - heading "분석 도우미" [level=4] [ref=e283]
+        - generic [ref=e284]:
+          - button "내보내기" [ref=e285] [cursor=pointer]
+          - button "초기화" [ref=e286] [cursor=pointer]
+          - button "닫기" [ref=e287] [cursor=pointer]
+      - generic [ref=e288]:
+        - button "현재 상태 요약해줘" [ref=e289] [cursor=pointer]
+        - button "이슈 우선순위 추천해줘" [ref=e290] [cursor=pointer]
+        - button "커버리지 개선 방법" [ref=e291] [cursor=pointer]
+        - button "다음 해야 할 작업은?" [ref=e292] [cursor=pointer]
+        - button "실패 원인 분석해줘" [ref=e293] [cursor=pointer]
+      - generic [ref=e295]:
+        - paragraph [ref=e298]: 대시보드 요약을 해석하거나 다음 단계 추천을 도와드릴게요.
+        - generic [ref=e299]:
+          - generic [ref=e300]: 오전 02:23
+          - button "복사" [ref=e301] [cursor=pointer]
+      - generic [ref=e303]:
+        - textbox "질문을 입력하세요 (Enter 전송, Shift+Enter 줄바꿈)" [ref=e304]
+        - button "전송" [disabled] [ref=e305]
+  - contentinfo [ref=e306]:
+    - generic [ref=e307]:
+      - generic [ref=e308]: Devops
+      - generic [ref=e309]: 로컬 / Dashboard
+      - generic [ref=e310]: "세션: test"
+      - generic [ref=e311]: "상태: idle"
+    - generic [ref=e312]:
+      - button "상태 새로고침" [ref=e313] [cursor=pointer]
+      - button "로그 새로고침" [ref=e314] [cursor=pointer]
+      - button "테마 전환" [ref=e315] [cursor=pointer]

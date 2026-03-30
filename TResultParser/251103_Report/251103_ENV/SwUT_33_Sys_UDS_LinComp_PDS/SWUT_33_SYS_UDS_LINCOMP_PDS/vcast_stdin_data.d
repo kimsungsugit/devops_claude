@@ -1,0 +1,1 @@
+vcast_stdin_data.o: C:\MDS_work\PSD_ENV\MDS_251103\LAST_UT_251103\SwUT_33_Sys_UDS_LinComp_PDS\SWUT_33_SYS_UDS_LINCOMP_PDS\vcast_stdin_data.c 

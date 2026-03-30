@@ -1,0 +1,433 @@
+- generic [ref=e3]:
+  - generic [ref=e5]:
+    - button "로컬" [ref=e6] [cursor=pointer]
+    - button "Jenkins" [ref=e7] [cursor=pointer]
+  - generic [ref=e8]:
+    - main [ref=e9]:
+      - generic [ref=e10]:
+        - generic [ref=e11]:
+          - generic [ref=e12]:
+            - generic [ref=e13]:
+              - generic [ref=e14]: Devops/
+              - generic [ref=e15]: Local/
+              - generic [ref=e16]: Dashboard
+            - generic [ref=e17]: Information Dashboard
+            - generic [ref=e18]: "세션 생성: 2026-01-17T02:13:34.725527"
+          - generic [ref=e20]: completed
+          - button "다크 모드로 전환" [ref=e22] [cursor=pointer]: 다크 모드
+        - navigation "주 네비게이션" [ref=e23]:
+          - button "대시보드 탭" [ref=e24] [cursor=pointer]: 대시보드
+          - button "워크플로우 탭" [ref=e26] [cursor=pointer]: 워크플로우
+          - button "에디터 탭" [ref=e28] [cursor=pointer]: 에디터
+          - button "Analyzer 탭" [ref=e30] [cursor=pointer]: Analyzer
+          - button "설정 탭" [ref=e32] [cursor=pointer]: 설정
+        - generic [ref=e34]:
+          - generic [ref=e35]: 로컬 모드
+          - generic [ref=e72]: completed
+        - generic [ref=e73]:
+          - generic [ref=e74]:
+            - generic [ref=e75]:
+              - generic [ref=e76]:
+                - generic [ref=e77] [cursor=pointer]:
+                  - generic [ref=e78]: 상태
+                  - generic [ref=e79]: completed
+                  - generic [ref=e80]: "-"
+                - generic [ref=e81] [cursor=pointer]:
+                  - generic [ref=e82]: 정적 분석 이슈
+                  - generic [ref=e83]: "0"
+                  - generic [ref=e84]: cpp:0 tidy:0 sem:0
+                - generic [ref=e85] [cursor=pointer]:
+                  - generic [ref=e86]: Preflight
+                  - generic [ref=e87]: "-"
+                  - generic [ref=e88]: missing 3
+                - generic [ref=e89] [cursor=pointer]:
+                  - generic [ref=e90]: Change Impact
+                  - generic [ref=e91]: 0 files
+                  - generic [ref=e92]: tests:N config:N build:N
+                - generic [ref=e93] [cursor=pointer]:
+                  - generic [ref=e94]: Report Health
+                  - generic [ref=e95]: "-"
+                  - generic [ref=e96]: missing 0 warn 0
+                - generic [ref=e97] [cursor=pointer]:
+                  - generic [ref=e98]: Build
+                  - generic [ref=e99]: config_fail
+                  - generic [ref=e100]: syntax OK
+                - generic [ref=e101] [cursor=pointer]:
+                  - generic [ref=e102]: Tests
+                  - generic [ref=e103]: "OFF"
+                  - generic [ref=e104]: coverage -
+                - generic [ref=e105] [cursor=pointer]:
+                  - generic [ref=e106]: Agent
+                  - generic [ref=e107]: agent_disabled
+                  - generic [ref=e108]: runs 0
+                - generic [ref=e109] [cursor=pointer]:
+                  - generic [ref=e110]: SCM
+                  - generic [ref=e111]: none
+                  - generic [ref=e112]: changed 0
+              - generic [ref=e113]:
+                - generic [ref=e114]: 오류/경고 분포
+                - generic [ref=e115]:
+                  - generic [ref=e116]: Error
+                  - generic [ref=e118]: "0"
+                - generic [ref=e119]:
+                  - generic [ref=e120]: Warn
+                  - generic [ref=e122]: "0"
+                - generic [ref=e123]:
+                  - generic [ref=e124]: Info
+                  - generic [ref=e126]: "0"
+              - generic [ref=e127]:
+                - generic [ref=e128]: 메트릭 요약
+                - generic [ref=e129]:
+                  - button "빌드 실패" [ref=e130] [cursor=pointer]
+                  - button "테스트 없음" [ref=e131] [cursor=pointer]
+                  - button "커버리지 0.0%" [ref=e132] [cursor=pointer]
+                  - button "정적 3/3" [ref=e133] [cursor=pointer]
+                  - button "복잡도 -" [ref=e134] [cursor=pointer]
+              - generic [ref=e135]:
+                - generic [ref=e136]: Code Quality (정적 분석)
+                - generic [ref=e137]:
+                  - generic [ref=e138]:
+                    - generic [ref=e139]: cppcheck
+                    - generic [ref=e141]:
+                      - 'generic "Errors: 0"'
+                      - 'generic "Warnings: 0"'
+                    - generic [ref=e142]: ✓ 0
+                  - generic [ref=e143]:
+                    - generic [ref=e144]: clangTidy
+                    - generic [ref=e146]:
+                      - 'generic "Errors: 0"'
+                      - 'generic "Warnings: 0"'
+                    - generic [ref=e147]: ✓ 0
+                  - generic [ref=e148]:
+                    - generic [ref=e149]: semgrep
+                    - generic [ref=e151]:
+                      - 'generic "Errors: 0"'
+                      - 'generic "Warnings: 0"'
+                    - generic [ref=e152]: ✓ 0
+              - generic [ref=e153]:
+                - generic [ref=e154]:
+                  - generic [ref=e155]: 지식베이스 (228/228개 항목)
+                  - button "새로고침" [ref=e156] [cursor=pointer]
+                - generic [ref=e157]:
+                  - textbox "검색..." [ref=e158]
+                  - button "전체" [ref=e159] [cursor=pointer]
+                  - button "coverage" [ref=e160] [cursor=pointer]
+                  - button "tests" [ref=e161] [cursor=pointer]
+                  - button "build" [ref=e162] [cursor=pointer]
+                  - button "requirements" [ref=e163] [cursor=pointer]
+                  - button "uds" [ref=e164] [cursor=pointer]
+                - generic [ref=e165]:
+                  - generic [ref=e166]:
+                    - generic [ref=e167]:
+                      - generic [ref=e168]: runtime:coverage
+                      - generic [ref=e169]: coverage
+                    - generic [ref=e170]:
+                      - generic [ref=e171]: coverage
+                      - generic [ref=e172]: runtime
+                    - generic [ref=e173]: 2026. 3. 13. 오전 8:33:14
+                  - generic [ref=e174]:
+                    - generic [ref=e175]:
+                      - generic [ref=e176]: runtime:tests
+                      - generic [ref=e177]: tests
+                    - generic [ref=e178]:
+                      - generic [ref=e179]: tests
+                      - generic [ref=e180]: runtime
+                    - generic [ref=e181]: 2026. 3. 13. 오전 8:33:14
+                  - generic [ref=e182]:
+                    - generic [ref=e183]:
+                      - generic [ref=e184]: runtime:build
+                      - generic [ref=e185]: build
+                    - generic [ref=e186]:
+                      - generic [ref=e187]: build
+                      - generic [ref=e188]: runtime
+                    - generic [ref=e189]: 2026. 3. 13. 오전 8:33:14
+                  - generic [ref=e190]:
+                    - generic [ref=e191]:
+                      - generic [ref=e192]: runtime:coverage
+                      - generic [ref=e193]: coverage
+                    - generic [ref=e194]:
+                      - generic [ref=e195]: coverage
+                      - generic [ref=e196]: runtime
+                    - generic [ref=e197]: 2026. 3. 13. 오전 8:29:58
+                  - generic [ref=e198]:
+                    - generic [ref=e199]:
+                      - generic [ref=e200]: runtime:tests
+                      - generic [ref=e201]: tests
+                    - generic [ref=e202]:
+                      - generic [ref=e203]: tests
+                      - generic [ref=e204]: runtime
+                    - generic [ref=e205]: 2026. 3. 13. 오전 8:29:58
+                  - generic [ref=e206]:
+                    - generic [ref=e207]:
+                      - generic [ref=e208]: runtime:build
+                      - generic [ref=e209]: build
+                    - generic [ref=e210]:
+                      - generic [ref=e211]: build
+                      - generic [ref=e212]: runtime
+                    - generic [ref=e213]: 2026. 3. 13. 오전 8:29:58
+                  - generic [ref=e214]:
+                    - generic [ref=e215]:
+                      - generic [ref=e216]: runtime:coverage
+                      - generic [ref=e217]: coverage
+                    - generic [ref=e218]:
+                      - generic [ref=e219]: coverage
+                      - generic [ref=e220]: runtime
+                    - generic [ref=e221]: 2026. 3. 13. 오전 7:19:23
+                  - generic [ref=e222]:
+                    - generic [ref=e223]:
+                      - generic [ref=e224]: runtime:tests
+                      - generic [ref=e225]: tests
+                    - generic [ref=e226]:
+                      - generic [ref=e227]: tests
+                      - generic [ref=e228]: runtime
+                    - generic [ref=e229]: 2026. 3. 13. 오전 7:19:23
+                  - generic [ref=e230]:
+                    - generic [ref=e231]:
+                      - generic [ref=e232]: runtime:build
+                      - generic [ref=e233]: build
+                    - generic [ref=e234]:
+                      - generic [ref=e235]: build
+                      - generic [ref=e236]: runtime
+                    - generic [ref=e237]: 2026. 3. 13. 오전 7:19:23
+                  - generic [ref=e238]:
+                    - generic [ref=e239]:
+                      - generic [ref=e240]: runtime:coverage
+                      - generic [ref=e241]: coverage
+                    - generic [ref=e242]:
+                      - generic [ref=e243]: coverage
+                      - generic [ref=e244]: runtime
+                    - generic [ref=e245]: 2026. 3. 13. 오전 6:16:59
+                  - generic [ref=e246]:
+                    - generic [ref=e247]:
+                      - generic [ref=e248]: runtime:tests
+                      - generic [ref=e249]: tests
+                    - generic [ref=e250]:
+                      - generic [ref=e251]: tests
+                      - generic [ref=e252]: runtime
+                    - generic [ref=e253]: 2026. 3. 13. 오전 6:16:59
+                  - generic [ref=e254]:
+                    - generic [ref=e255]:
+                      - generic [ref=e256]: runtime:build
+                      - generic [ref=e257]: build
+                    - generic [ref=e258]:
+                      - generic [ref=e259]: build
+                      - generic [ref=e260]: runtime
+                    - generic [ref=e261]: 2026. 3. 13. 오전 6:16:59
+                  - generic [ref=e262]:
+                    - generic [ref=e263]:
+                      - generic [ref=e264]: runtime:coverage
+                      - generic [ref=e265]: coverage
+                    - generic [ref=e266]:
+                      - generic [ref=e267]: coverage
+                      - generic [ref=e268]: runtime
+                    - generic [ref=e269]: 2026. 3. 13. 오전 6:12:36
+                  - generic [ref=e270]:
+                    - generic [ref=e271]:
+                      - generic [ref=e272]: runtime:tests
+                      - generic [ref=e273]: tests
+                    - generic [ref=e274]:
+                      - generic [ref=e275]: tests
+                      - generic [ref=e276]: runtime
+                    - generic [ref=e277]: 2026. 3. 13. 오전 6:12:36
+                  - generic [ref=e278]:
+                    - generic [ref=e279]:
+                      - generic [ref=e280]: runtime:build
+                      - generic [ref=e281]: build
+                    - generic [ref=e282]:
+                      - generic [ref=e283]: build
+                      - generic [ref=e284]: runtime
+                    - generic [ref=e285]: 2026. 3. 13. 오전 6:12:36
+                  - generic [ref=e286]:
+                    - generic [ref=e287]:
+                      - generic [ref=e288]: requirements:(HDPDM01_SDS) Software Architecture Design Specification_v1.04_20230512.docx#12
+                      - generic [ref=e289]: requirements
+                    - generic [ref=e290]:
+                      - generic [ref=e291]: srs
+                      - generic [ref=e292]: sds
+                      - generic [ref=e293]: uds
+                    - generic [ref=e294]: 2026. 2. 6. 오전 6:56:33
+                  - generic [ref=e295]:
+                    - generic [ref=e296]:
+                      - generic [ref=e297]: requirements:(HDPDM01_SDS) Software Architecture Design Specification_v1.04_20230512.docx#11
+                      - generic [ref=e298]: requirements
+                    - generic [ref=e299]:
+                      - generic [ref=e300]: srs
+                      - generic [ref=e301]: sds
+                      - generic [ref=e302]: uds
+                    - generic [ref=e303]: 2026. 2. 6. 오전 6:56:33
+                  - generic [ref=e304]:
+                    - generic [ref=e305]:
+                      - generic [ref=e306]: requirements:(HDPDM01_SDS) Software Architecture Design Specification_v1.04_20230512.docx#10
+                      - generic [ref=e307]: requirements
+                    - generic [ref=e308]:
+                      - generic [ref=e309]: srs
+                      - generic [ref=e310]: sds
+                      - generic [ref=e311]: uds
+                    - generic [ref=e312]: 2026. 2. 6. 오전 6:56:33
+                  - generic [ref=e313]:
+                    - generic [ref=e314]:
+                      - generic [ref=e315]: requirements:(HDPDM01_SDS) Software Architecture Design Specification_v1.04_20230512.docx#9
+                      - generic [ref=e316]: requirements
+                    - generic [ref=e317]:
+                      - generic [ref=e318]: srs
+                      - generic [ref=e319]: sds
+                      - generic [ref=e320]: uds
+                    - generic [ref=e321]: 2026. 2. 6. 오전 6:56:33
+                  - generic [ref=e322]:
+                    - generic [ref=e323]:
+                      - generic [ref=e324]: requirements:(HDPDM01_SDS) Software Architecture Design Specification_v1.04_20230512.docx#8
+                      - generic [ref=e325]: requirements
+                    - generic [ref=e326]:
+                      - generic [ref=e327]: srs
+                      - generic [ref=e328]: sds
+                      - generic [ref=e329]: uds
+                    - generic [ref=e330]: 2026. 2. 6. 오전 6:56:33
+                - generic [ref=e331]: ... 외 208개 항목
+            - generic [ref=e332]:
+              - generic [ref=e334]:
+                - generic [ref=e335]:
+                  - button "상태" [ref=e336] [cursor=pointer]
+                  - button "정적 분석" [ref=e337] [cursor=pointer]
+                  - button "Preflight 3" [ref=e338] [cursor=pointer]:
+                    - text: Preflight
+                    - generic [ref=e339]: "3"
+                  - button "Change Impact" [ref=e340] [cursor=pointer]
+                  - button "Report Health" [ref=e341] [cursor=pointer]
+                  - button "Build & Syntax" [ref=e342] [cursor=pointer]
+                  - button "Tests & Coverage" [ref=e343] [cursor=pointer]
+                  - button "메트릭 상세" [ref=e344] [cursor=pointer]
+                  - button "로컬 리포트" [ref=e345] [cursor=pointer]
+                  - button "Agent 0" [ref=e346] [cursor=pointer]:
+                    - text: Agent
+                    - generic [ref=e347]: "0"
+                  - button "SCM" [ref=e348] [cursor=pointer]
+                - generic [ref=e350]:
+                  - heading "상태" [level=4] [ref=e351]
+                  - generic [ref=e352]:
+                    - generic [ref=e353] [cursor=pointer]:
+                      - generic [ref=e354]: 상태
+                      - generic [ref=e355]: completed
+                    - generic [ref=e356] [cursor=pointer]:
+                      - generic [ref=e357]: 단계
+                      - generic [ref=e358]: "-"
+                    - generic [ref=e359] [cursor=pointer]:
+                      - generic [ref=e360]: 종료 코드
+                      - generic [ref=e361]: "2"
+                  - generic [ref=e362]:
+                    - generic [ref=e363]:
+                      - generic [ref=e364]: 상태
+                      - generic [ref=e365]: completed
+                    - generic [ref=e366]:
+                      - generic [ref=e367]: 단계
+                      - generic [ref=e368]: "-"
+                    - generic [ref=e369]:
+                      - generic [ref=e370]: 메시지
+                      - generic [ref=e371]: "-"
+                    - generic [ref=e372]:
+                      - generic [ref=e373]: 종료 코드
+                      - generic [ref=e374]: "2"
+                  - group [ref=e375]:
+                    - generic "원본 JSON 보기" [ref=e376]
+              - generic [ref=e377]:
+                - generic [ref=e378]:
+                  - heading "상세 차트" [level=3] [ref=e379]
+                  - generic [ref=e380]: 상세 탭을 선택하세요
+                - generic [ref=e381]:
+                  - generic [ref=e382]:
+                    - heading "복잡도 히트맵 (파일별 최대 CCN)" [level=3] [ref=e383]
+                    - button "새로고침" [ref=e384] [cursor=pointer]
+                  - generic [ref=e385]: 복잡도 데이터 없음
+          - generic [ref=e386]:
+            - generic [ref=e387]:
+              - heading "Top N 요약" [level=3] [ref=e388]
+              - generic [ref=e389]:
+                - generic [ref=e390]:
+                  - generic [ref=e391]: 이슈 그룹
+                  - generic [ref=e392]: 그룹 없음
+                - generic [ref=e393]:
+                  - generic [ref=e394]: 도구 Top
+                  - generic [ref=e395]: 도구 없음
+                - generic [ref=e396]:
+                  - generic [ref=e397]: 최근 로그
+                  - generic [ref=e398]: 로그 없음
+            - generic [ref=e399]:
+              - heading "시간대별 로그/상태 추이" [level=3] [ref=e400]
+              - generic [ref=e401]:
+                - generic [ref=e402]:
+                  - generic [ref=e403]: 로그 이벤트
+                  - generic [ref=e404]:
+                    - generic [ref=e407]: 03:00
+                    - generic [ref=e410]: 04:00
+                    - generic [ref=e413]: 05:00
+                    - generic [ref=e416]: 06:00
+                    - generic [ref=e419]: 07:00
+                    - generic [ref=e422]: 08:00
+                    - generic [ref=e425]: 09:00
+                    - generic [ref=e428]: 10:00
+                    - generic [ref=e431]: 11:00
+                    - generic [ref=e434]: 12:00
+                    - generic [ref=e437]: 13:00
+                    - generic [ref=e440]: 14:00
+                - generic [ref=e441]:
+                  - generic [ref=e442]: 상태 이벤트
+                  - generic [ref=e443]:
+                    - generic [ref=e446]: 03:00
+                    - generic [ref=e449]: 04:00
+                    - generic [ref=e452]: 05:00
+                    - generic [ref=e455]: 06:00
+                    - generic [ref=e458]: 07:00
+                    - generic [ref=e461]: 08:00
+                    - generic [ref=e464]: 09:00
+                    - generic [ref=e467]: 10:00
+                    - generic [ref=e470]: 11:00
+                    - generic [ref=e473]: 12:00
+                    - generic [ref=e476]: 13:00
+                    - generic [ref=e479]: 14:00
+                  - generic [ref=e480]:
+                    - text: running
+                    - text: success
+                    - text: fail
+            - generic [ref=e484]:
+              - heading "히트맵 / 리스크 점수" [level=3] [ref=e485]
+              - group [ref=e486]:
+                - generic "리스크 점수 (클릭하여 상세 보기) Risk 70" [ref=e487] [cursor=pointer]:
+                  - generic [ref=e488]: 리스크 점수 (클릭하여 상세 보기)
+                  - generic [ref=e489]:
+                    - generic [ref=e490]: Risk
+                    - generic [ref=e493]: "70"
+              - generic [ref=e494]:
+                - generic [ref=e495]:
+                  - generic [ref=e496]: Tool
+                  - generic [ref=e497]: misc
+                - generic [ref=e498]: 데이터 없음
+    - complementary [ref=e37]:
+      - generic [ref=e38]:
+        - heading "분석 도우미" [level=4] [ref=e39]
+        - generic [ref=e40]:
+          - button "내보내기" [ref=e41] [cursor=pointer]
+          - button "초기화" [ref=e42] [cursor=pointer]
+          - button "닫기" [ref=e43] [cursor=pointer]
+      - generic [ref=e44]:
+        - button "현재 상태 요약해줘" [ref=e45] [cursor=pointer]
+        - button "이슈 우선순위 추천해줘" [ref=e46] [cursor=pointer]
+        - button "커버리지 개선 방법" [ref=e47] [cursor=pointer]
+        - button "다음 해야 할 작업은?" [ref=e48] [cursor=pointer]
+        - button "실패 원인 분석해줘" [ref=e49] [cursor=pointer]
+      - generic [ref=e51]:
+        - paragraph [ref=e54]: 대시보드 요약을 해석하거나 다음 단계 추천을 도와드릴게요.
+        - generic [ref=e55]:
+          - generic [ref=e56]: 오후 02:35
+          - button "복사" [ref=e57] [cursor=pointer]
+      - generic [ref=e59]:
+        - textbox "질문을 입력하세요 (Enter 전송, Shift+Enter 줄바꿈)" [ref=e60]
+        - button "전송" [disabled] [ref=e61]
+  - contentinfo [ref=e62]:
+    - generic [ref=e63]:
+      - generic [ref=e64]: Devops
+      - generic [ref=e65]: 로컬 / Dashboard
+      - generic [ref=e66]: "세션: 3d08c4ac"
+      - generic [ref=e67]: "상태: completed"
+    - generic [ref=e68]:
+      - button "상태 새로고침" [ref=e69] [cursor=pointer]
+      - button "로그 새로고침" [ref=e70] [cursor=pointer]
+      - button "테마 전환" [ref=e71] [cursor=pointer]

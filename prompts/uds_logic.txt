@@ -1,0 +1,2 @@
+Create concise descriptions for logic diagrams.
+Return JSON only: {"logic_diagrams":[{"title":"...","description":"...","evidence":[{source_type, source_file, excerpt, score}]}]}.

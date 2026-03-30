@@ -1,0 +1,158 @@
+{
+  "summary": {
+    "run_at": "20260316_112423",
+    "case_count": 5,
+    "pass_count": 4,
+    "avg_retrieval_ms": 50.9,
+    "avg_answer_ms": 5196.5
+  },
+  "cases": [
+    {
+      "id": "local_build_summary_01",
+      "question": "현재 빌드 상태를 요약해줘",
+      "question_type": "troubleshooting",
+      "report_dir": "D:\\Project\\devops\\260105\\reports\\sample_session",
+      "retrieval_ms": 41.2,
+      "answer_ms": 5686.3,
+      "retrieval_hit_count": 6,
+      "retrieval_domains": {
+        "reports": 1,
+        "docs": 5
+      },
+      "sources": [
+        "summary",
+        "status",
+        "reports:report_summary",
+        "docs:assistant_web_guide.md",
+        "docs:assistant_web_guide.md",
+        "docs:chat_runtime_contracts.md",
+        "docs:HDPDM01_SDS.txt",
+        "docs:HDPDM01_SDS.txt"
+      ],
+      "citations_count": 8,
+      "answer_preview": "현재 LLM 네트워크 연결이 차단되어 리포트 기반 대체 응답으로 전환했습니다. Build status summary: LLM 없이 리포트와 상태 파일만 기준으로 보면",
+      "score": {
+        "topic_hit_count": 2,
+        "topic_expected_count": 2,
+        "citation_ok": true,
+        "preferred_domain_ok": true,
+        "pass": true
+      }
+    },
+    {
+      "id": "local_coverage_01",
+      "question": "현재 커버리지 상태를 설명해줘",
+      "question_type": "coverage",
+      "report_dir": "D:\\Project\\devops\\260105\\reports\\sample_session",
+      "retrieval_ms": 22.9,
+      "answer_ms": 4654.3,
+      "retrieval_hit_count": 6,
+      "retrieval_domains": {
+        "reports": 1,
+        "docs": 5
+      },
+      "sources": [
+        "summary",
+        "status"
+      ],
+      "citations_count": 2,
+      "answer_preview": "현재 LLM 네트워크 연결이 차단되어 리포트 기반 대체 응답으로 전환했습니다. Coverage summary: LLM 없이 리포트 기준으로 보면 coverage 상태는 다음과 같습니다.",
+      "score": {
+        "topic_hit_count": 1,
+        "topic_expected_count": 2,
+        "citation_ok": true,
+        "preferred_domain_ok": true,
+        "pass": true
+      }
+    },
+    {
+      "id": "local_findings_01",
+      "question": "주요 findings를 정리해줘",
+      "question_type": "findings",
+      "report_dir": "D:\\Project\\devops\\260105\\reports\\sample_session",
+      "retrieval_ms": 65.7,
+      "answer_ms": 4581.2,
+      "retrieval_hit_count": 4,
+      "retrieval_domains": {
+        "reports": 1,
+        "docs": 3
+      },
+      "sources": [
+        "summary",
+        "findings"
+      ],
+      "citations_count": 2,
+      "answer_preview": "현재 LLM 네트워크 연결이 차단되어 리포트 기반 대체 응답으로 전환했습니다. LLM 없이 findings 파일만 기준으로 보면 확인된 주요 이슈가 많지 않거나 요약 가능한 항목이 없습니다.",
+      "score": {
+        "topic_hit_count": 1,
+        "topic_expected_count": 2,
+        "citation_ok": true,
+        "preferred_domain_ok": true,
+        "pass": true
+      }
+    },
+    {
+      "id": "docs_jenkins_01",
+      "question": "Jenkins 관련 문서를 설명해줘",
+      "question_type": "docs",
+      "report_dir": "",
+      "retrieval_ms": 10.3,
+      "answer_ms": 4805.2,
+      "retrieval_hit_count": 5,
+      "retrieval_domains": {
+        "docs": 5
+      },
+      "sources": [
+        "docs_search",
+        "docs_excerpt",
+        "docs:assistant_web_guide.md",
+        "docs:assistant_web_guide.md",
+        "docs:assistant_web_guide.md",
+        "docs:assistant_web_guide.md",
+        "docs:chat_current_flow_audit.md"
+      ],
+      "citations_count": 7,
+      "answer_preview": "현재 LLM 네트워크 연결이 차단되어 리포트 기반 대체 응답으로 전환했습니다. LLM 없이 문서 검색 결과만 기준으로 보면 관련 문서는 docs_search, doc:assistant_web_guide.md, assistant_web_guide.md 입니다. 우선 가장 관련도가 높은 문서를 열어 핵심 섹션을 확인하는 것이 좋습니다.",
+      "score": {
+        "topic_hit_count": 1,
+        "topic_expected_count": 2,
+        "citation_ok": true,
+        "preferred_domain_ok": true,
+        "pass": true
+      }
+    },
+    {
+      "id": "code_run_git_01",
+      "question": "function run_git를 설명해줘",
+      "question_type": "code",
+      "report_dir": "",
+      "retrieval_ms": 114.2,
+      "answer_ms": 6255.7,
+      "retrieval_hit_count": 6,
+      "retrieval_domains": {
+        "code": 5,
+        "docs": 1
+      },
+      "sources": [
+        "ui_context",
+        "code_search",
+        "code_excerpt",
+        "code:backend\\services\\assistant_service.py",
+        "code:backend\\services\\assistant_service.py",
+        "code:backend\\services\\call_tree.py",
+        "code:backend\\services\\call_tree.py",
+        "code:backend\\services\\call_tree.py",
+        "docs:(HDPDM01_SUDS) Software Unit Design Specification_v1.07_240213.quality_gate.compare.md"
+      ],
+      "citations_count": 9,
+      "answer_preview": "현재 LLM 네트워크 연결이 차단되어 리포트 기반 대체 응답으로 전환했습니다. Function ui_context appears relevant. LLM 없이 코드 검색 결과만 기준으로 보면 관련 파일은 ui_context, code_search, code:backend\\services\\assistant_service.py 입니다. 우선 가장 먼저 나온 파일과 라인 주변 코드를 확인해 ui_context 동작을 따라가는 것이 좋습니다.",
+      "score": {
+        "topic_hit_count": 0,
+        "topic_expected_count": 2,
+        "citation_ok": true,
+        "preferred_domain_ok": true,
+        "pass": false
+      }
+    }
+  ]
+}

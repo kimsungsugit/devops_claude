@@ -1,0 +1,34 @@
+{
+  "sheets": [
+    "Cover",
+    "History",
+    "1.Introduction",
+    "1.Test Environment",
+    "2.SW Unit Test Spec",
+    "3.Traceability"
+  ],
+  "has_target": true,
+  "total": 433,
+  "related_ok": 433,
+  "io_ok": 408,
+  "samples": [
+    {
+      "tc_id": "SwUTC_SwUFn_0101",
+      "related": "SwUFn_0101",
+      "has_inp": false,
+      "has_out": true
+    },
+    {
+      "tc_id": "SwUTC_SwUFn_0102",
+      "related": "SwUFn_0102",
+      "has_inp": true,
+      "has_out": true
+    },
+    {
+      "tc_id": "SwUTC_SwUFn_0103",
+      "related": "SwUFn_0103",
+      "has_inp": true,
+      "has_out": true
+    }
+  ]
+}

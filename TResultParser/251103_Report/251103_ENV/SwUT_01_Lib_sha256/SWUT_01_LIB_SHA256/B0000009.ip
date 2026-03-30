@@ -1,0 +1,149 @@
+1,0,B    {
+1,1,S    U8 u8t_bits = (U8)(bits % ( U8 )32U);
+1,2,S    U32 u32t_result = value;
+1,3,B    if (u8t_bits != ( U8 )0U)
+1,4,S    u32t_result = (U32)((value >> u8t_bits) | (value << (( U8 )32U - u8t_bits)));
+1,5,S    return u32t_result;
+2,0,B    {
+2,1,B    for (i = ( U32 )0U; i < ( U32 )16U; i++)
+2,2,S    j = i * ( U32 )4U;
+2,3,S    m[i] = ((U32)data[j] << 24U) | ((U32)data[j + 1U] << 16U) | ((U32)data[j + 2U] << 8U) | ((U32)data[j + 3U]);
+2,4,B    for ( ; i < ( U32 )64U; i++)
+2,5,S    m[i] = ((U32)((U32)(((U32)((U32)((s_safe_rotr((U32)(m[i - ( U32 )2U]), (17U)) ^ s_safe_rotr((U32)(m[i - ( U32 )2U]), (19U)) ^ ((U32)(m[i - ( U32 )2U]) >> 10U))) + (U32)(m[i - ( U32 )7U])))) + (U32)(((U32)((U32)((s_safe_rotr((U32)(m[i - ( U32 )15U]), (7U)) ^ s_safe_rotr((U32)(m[i - ( U32 )15U]), (18U)) ^ ((U32)(m[i - ( U32 )15U]) >> 3U))) + (U32)(m[i - ( U32 )16U]))))));
+2,6,S    a = ctx->state[0];
+2,7,S    b = ctx->state[1];
+2,8,S    c = ctx->state[2];
+2,9,S    d = ctx->state[3];
+2,10,S    e = ctx->state[4];
+2,11,S    f = ctx->state[5];
+2,12,S    g = ctx->state[6];
+2,13,S    h = ctx->state[7];
+2,14,B    for (i = ( U32 )0U; i < ( U32 )64U; i++)
+2,15,S    t1 = ((U32)((U32)(((U32)((U32)(((U32)((U32)(((U32)((U32)(h) + (U32)((s_safe_rotr((U32)(e), (6U)) ^ s_safe_rotr((U32)(e), (11U)) ^ s_safe_rotr((U32)(e), (25U))))))) + (U32)((((e) & (f)) ^ (~(e) & (g))))))) + (U32)(k[i])))) + (U32)(m[i])));
+2,16,S    t2 = ((U32)((U32)((s_safe_rotr((U32)(a), (2U)) ^ s_safe_rotr((U32)(a), (13U)) ^ s_safe_rotr((U32)(a), (22U)))) + (U32)((((a) & (b)) ^ ((a) & (c)) ^ ((b) & (c))))));
+2,17,S    h = g;
+2,18,S    g = f;
+2,19,S    f = e;
+2,20,S    e = ((U32)((U32)(d) + (U32)(t1)));
+2,21,S    d = c;
+2,22,S    c = b;
+2,23,S    b = a;
+2,24,S    a = ((U32)((U32)(t1) + (U32)(t2)));
+2,25,S    ctx->state[0] = ((U32)((U32)(ctx->state[0]) + (U32)(a)));
+2,26,S    ctx->state[1] = ((U32)((U32)(ctx->state[1]) + (U32)(b)));
+2,27,S    ctx->state[2] = ((U32)((U32)(ctx->state[2]) + (U32)(c)));
+2,28,S    ctx->state[3] = ((U32)((U32)(ctx->state[3]) + (U32)(d)));
+2,29,S    ctx->state[4] = ((U32)((U32)(ctx->state[4]) + (U32)(e)));
+2,30,S    ctx->state[5] = ((U32)((U32)(ctx->state[5]) + (U32)(f)));
+2,31,S    ctx->state[6] = ((U32)((U32)(ctx->state[6]) + (U32)(g)));
+2,32,S    ctx->state[7] = ((U32)((U32)(ctx->state[7]) + (U32)(h)));
+3,0,B    {
+3,1,S    ctx->bitcount = 0U;
+3,2,S    ctx->state[0] = 0x6a09e667U;
+3,3,S    ctx->state[1] = 0xbb67ae85U;
+3,4,S    ctx->state[2] = 0x3c6ef372U;
+3,5,S    ctx->state[3] = 0xa54ff53aU;
+3,6,S    ctx->state[4] = 0x510e527fU;
+3,7,S    ctx->state[5] = 0x9b05688cU;
+3,8,S    ctx->state[6] = 0x1f83d9abU;
+3,9,S    ctx->state[7] = 0x5be0cd19U;
+4,0,B    {
+4,1,B    if (len != ( U32 )0U)
+4,2,S    buffer_idx = (U32)((ctx->bitcount / 8ULL) % 64ULL);
+4,3,B    for (i = ( U32 )0U; i < len; i++)
+4,4,S    ctx->buffer[buffer_idx] = data[i];
+4,5,S    buffer_idx++;
+4,6,B    if (buffer_idx == ( U32 )64U)
+4,7,S    s_sha256_transform(ctx, ctx->buffer);
+4,8,S    buffer_idx = ( U32 )0U;
+4,9,B    if (((i + ( U32 )1U) & ( U32 )0x1FFFU) == 0U)
+4,10,B    if (s_progress_callback != ((void *)0))
+4,11,S    s_progress_callback();
+4,12,S    ctx->bitcount += ((unsigned long long)len * 8ULL);
+5,0,B    {
+5,1,S    U32 buffer_idx = (U32)((ctx->bitcount / 8ULL) % 64ULL);
+5,2,S    ctx->buffer[buffer_idx] = 0x80U;
+5,3,S    buffer_idx++;
+5,4,B    if (buffer_idx > ( U32 )56U)
+5,5,B    while (buffer_idx < ( U32 )64U)
+5,6,S    ctx->buffer[buffer_idx] = 0x00U;
+5,7,S    buffer_idx++;
+5,8,S    s_sha256_transform(ctx, ctx->buffer);
+5,9,S    buffer_idx = 0U;
+5,10,B    while (buffer_idx < ( U32 )56U)
+5,11,S    ctx->buffer[buffer_idx] = 0x00U;
+5,12,S    buffer_idx++;
+5,13,S    U32 bits = ( U32 )(ctx->bitcount);
+5,14,S    ctx->buffer[56] = 0x00U;
+5,15,S    ctx->buffer[57] = 0x00U;
+5,16,S    ctx->buffer[58] = 0x00U;
+5,17,S    ctx->buffer[59] = 0x00U;
+5,18,S    ctx->buffer[60] = (U8)(bits >> 24U);
+5,19,S    ctx->buffer[61] = (U8)(bits >> 16U);
+5,20,S    ctx->buffer[62] = (U8)(bits >> 8U);
+5,21,S    ctx->buffer[63] = (U8)(bits);
+5,22,S    s_sha256_transform(ctx, ctx->buffer);
+5,23,B    for (i = ( U32 )0U; i < ( U32 )8U; i++)
+5,24,S    j = i * ( U32 )4U;
+5,25,S    hash[j] = (U8)(ctx->state[i] >> 24U);
+5,26,S    hash[j + 1U] = (U8)(ctx->state[i] >> 16U);
+5,27,S    hash[j + 2U] = (U8)(ctx->state[i] >> 8U);
+5,28,S    hash[j + 3U] = (U8)(ctx->state[i]);
+6,0,B    {
+6,1,B    for (u8t_Index = 0U; u8t_Index < ( U8 )32U; u8t_Index++)
+6,2,S    u8g_Lib_Sha256_Hash[u8t_Index] = 0x00U;
+7,0,B    {
+7,1,B    if ((s_nb_state == E_LIB_SHA256_NB_STATE_IDLE) ||
+        (s_nb_state == E_LIB_SHA256_NB_STATE_DONE) ||
+        (s_nb_state == E_LIB_SHA256_NB_STATE_ERROR))
+7,2,S    s_Sha256_Hash_Init();
+7,3,S    s_nb_state = E_LIB_SHA256_NB_STATE_INIT;
+7,4,S    s_nb_process_count = ( U32 )0U;
+8,0,B    {
+8,1,S    s_nb_process_count++;
+8,2,B    if (s_nb_process_count > ( U32 )5000)
+8,3,S    s_nb_state = E_LIB_SHA256_NB_STATE_ERROR;
+8,4,S    E_LIB_SHA256_NB_STATE local_state = s_nb_state;
+8,5,S    switch (local_state)
+8,6,B    case E_LIB_SHA256_NB_STATE_INIT:
+8,7,S    s_sha256_init(&s_nb_ctx);
+8,8,S    s_nb_p_data = ( const U8 *)(void *)(0xFE0000UL);
+8,9,S    s_nb_data_len = (U32)((0xFFA000UL) - (0xFE0000UL));
+8,10,B    if ((s_nb_data_len == 0U) || (s_nb_data_len > 0x100000UL))
+8,11,S    s_nb_state = E_LIB_SHA256_NB_STATE_ERROR;
+8,12,S    break;
+8,13,S    s_nb_processed_len = ( U32 )0U;
+8,14,S    s_nb_state = E_LIB_SHA256_NB_STATE_UPDATE;
+8,15,S    break;
+8,16,B    case E_LIB_SHA256_NB_STATE_UPDATE:
+8,17,S    u16g_Sha256_Hash_Update_Count++;
+8,18,B    if (s_nb_processed_len < s_nb_data_len)
+8,19,S    U32 len_to_process = s_nb_data_len - s_nb_processed_len;
+8,20,B    if (len_to_process > ( U32 )64)
+8,21,S    len_to_process = ( U32 )64;
+8,22,B    if (((s_nb_p_data + s_nb_processed_len) + len_to_process) >
+                        ( const U8 *)(0xFFA000UL))
+8,23,S    s_nb_state = E_LIB_SHA256_NB_STATE_ERROR;
+8,24,S    break;
+8,25,S    s_sha256_update(&s_nb_ctx, &s_nb_p_data[s_nb_processed_len], len_to_process);
+8,26,S    s_nb_processed_len += len_to_process;
+8,27,S    s_nb_state = E_LIB_SHA256_NB_STATE_FINAL;
+8,28,S    break;
+8,29,B    case E_LIB_SHA256_NB_STATE_FINAL:
+8,30,S    s_sha256_final(&s_nb_ctx, ( U8 *)u8g_Lib_Sha256_Hash);
+8,31,S    u16g_Sha256_Hash_Update_Count = ( U16 )0U;
+8,32,S    s_nb_state = E_LIB_SHA256_NB_STATE_DONE;
+8,33,S    break;
+8,34,B    case E_LIB_SHA256_NB_STATE_IDLE:
+8,35,B    case E_LIB_SHA256_NB_STATE_DONE:
+8,36,B    case E_LIB_SHA256_NB_STATE_ERROR:
+8,37,B    default:
+8,38,S    break;
+9,0,B    {
+9,1,S    return s_nb_state;
+10,0,B    {
+10,1,S    s_nb_state = E_LIB_SHA256_NB_STATE_IDLE;
+10,2,S    s_nb_processed_len = ( U32 )0U;
+10,3,S    s_nb_data_len = ( U32 )0;
+10,4,S    s_nb_p_data = ( const U8 *)0;
+10,5,S    s_nb_process_count = ( U32 )0;

@@ -1,0 +1,34 @@
+{
+  "registries": [
+    {
+      "id": "hdpdm01",
+      "name": "HDPDM01 PDS_64_RD",
+      "scm_type": "svn",
+      "scm_url": "svn://192.168.110.33/ADOS/PDS64_RD",
+      "scm_username": "kss1119",
+      "scm_password_env": "",
+      "branch": "",
+      "base_ref": "",
+      "source_root": "D:\\Project\\Ados\\PDS64_RD",
+      "watch_patterns": [
+        "*.c",
+        "*.h"
+      ],
+      "ignore_patterns": [],
+      "webhook_secret_env": "",
+      "linked_docs": {
+        "uds": "D:\\Project\\devops\\260105\\backend\\reports\\uds_local\\uds_spec_generated_expanded_20260326_133526.docx",
+        "sts": "D:\\Project\\devops\\260105\\reports\\sts\\sts_eval_20260319_123007.xlsx",
+        "suts": "D:\\Project\\devops\\260105\\reports\\suts\\suts_impact_20260326_132933.xlsm",
+        "sits": "D:\\Project\\devops\\260105\\reports\\sits\\sits_impact_20260326_132911.xlsm",
+        "srs": "D:\\Project\\devops\\260105\\docs\\(HDPDM01_SRS) Software Requirements Specification_v1.05_20230510.docx",
+        "sds": "D:\\Project\\devops\\260105\\docs\\(HDPDM01_SDS) Software Architecture Design Specification_v1.04_20230512.docx",
+        "hsis": "D:\\Project\\devops\\260105\\docs\\(HDPDM01_HSIS) Hardware Software Interface Specification_v5.00_20221115_B.xlsx"
+      },
+      "created_at": "2026-03-23T14:10:41",
+      "updated_at": "2026-03-26T13:50:56",
+      "last_triggered": "",
+      "last_revision": ""
+    }
+  ]
+}

@@ -1,0 +1,524 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<typefile version="1">
+  <type typeid="100001" typetype="STR_ING" array_type="800002" string_type_type="AR_RAY" typemark="CCAST_8_1" original_type_name="char  [8]">
+    <range_data size="8%%"/>
+  </type>
+  <type typeid="100002" typetype="AR_RAY" array_type="800001" typemark="CCAST_8_2" original_type_name="int  [4]">
+    <range_data size="4%%"/>
+  </type>
+  <type typeid="100003" typetype="UNION" ada_scope="__T381326672" typemark="CCAST_9_3" store_class="1">
+    <field index="1" name="Byte" typeid="900003" const_qualified="0" is_static_field="0"/>
+    <field index="2" name="Bits" typeid="100004" const_qualified="0" is_static_field="0"/>
+    <field index="3" name="MergedBits" typeid="100005" const_qualified="0" is_static_field="0"/>
+  </type>
+  <type typeid="100004" typetype="REC_ORD" ada_scope="__T381326176" typemark="CCAST_9_4" store_class="1">
+    <field index="1" name="FDIV0" typeid="900003" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+    <field index="2" name="FDIV1" typeid="900003" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+    <field index="3" name="FDIV2" typeid="900003" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+    <field index="4" name="FDIV3" typeid="900003" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+    <field index="5" name="FDIV4" typeid="900003" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+    <field index="6" name="FDIV5" typeid="900003" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+    <field index="7" name="FDIVLCK" typeid="900003" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+    <field index="8" name="FDIVLD" typeid="900003" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+  </type>
+  <type typeid="100005" typetype="REC_ORD" ada_scope="__T381326424" typemark="CCAST_9_5" store_class="1">
+    <field index="1" name="grpFDIV" typeid="900003" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="31" max="63"/>
+    </field>
+  </type>
+  <type typeid="100006" typetype="UNION" ada_scope="__T381328904" typemark="CCAST_9_6" store_class="1">
+    <field index="1" name="Byte" typeid="900003" const_qualified="0" is_static_field="0"/>
+    <field index="2" name="Bits" typeid="100007" const_qualified="0" is_static_field="0"/>
+    <field index="3" name="MergedBits" typeid="100008" const_qualified="0" is_static_field="0"/>
+  </type>
+  <type typeid="100007" typetype="REC_ORD" ada_scope="__T381328408" typemark="CCAST_9_7" store_class="1">
+    <field index="1" name="CCOBIX0" typeid="900003" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+    <field index="2" name="CCOBIX1" typeid="900003" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+    <field index="3" name="CCOBIX2" typeid="900003" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+  </type>
+  <type typeid="100008" typetype="REC_ORD" ada_scope="__T381328656" typemark="CCAST_9_8" store_class="1">
+    <field index="1" name="grpCCOBIX" typeid="900003" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="3" max="7"/>
+    </field>
+  </type>
+  <type typeid="100009" typetype="UNION" ada_scope="__T381332376" typemark="CCAST_9_9" store_class="1">
+    <field index="1" name="Byte" typeid="900003" const_qualified="0" is_static_field="0"/>
+    <field index="2" name="Bits" typeid="100010" const_qualified="0" is_static_field="0"/>
+    <field index="3" name="MergedBits" typeid="100011" const_qualified="0" is_static_field="0"/>
+  </type>
+  <type typeid="100010" typetype="REC_ORD" ada_scope="__T381183328" typemark="CCAST_9_10" store_class="1">
+    <field index="1" name="MGSTAT0" typeid="900003" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+    <field index="2" name="MGSTAT1" typeid="900003" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+    <field index="3" name="MGBUSY" typeid="900003" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+    <field index="4" name="FPVIOL" typeid="900003" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+    <field index="5" name="ACCERR" typeid="900003" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+    <field index="6" name="CCIF" typeid="900003" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+  </type>
+  <type typeid="100011" typetype="REC_ORD" ada_scope="__T381183824" typemark="CCAST_9_11" store_class="1">
+    <field index="1" name="grpMGSTAT" typeid="900003" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="1" max="3"/>
+    </field>
+  </type>
+  <type typeid="100012" typetype="UNION" ada_scope="__T381338080" typemark="CCAST_9_12" store_class="1">
+    <field index="1" name="Word" typeid="900010" const_qualified="0" is_static_field="0"/>
+    <field index="2" name="Overlap_STR" typeid="100013" const_qualified="0" is_static_field="0"/>
+    <field index="3" name="Bits" typeid="100018" const_qualified="0" is_static_field="0"/>
+  </type>
+  <type typeid="100013" typetype="REC_ORD" ada_scope="__T381185064" typemark="CCAST_9_13" store_class="1">
+    <field index="1" name="FCCOB0HISTR" typeid="100014" const_qualified="0" is_static_field="0"/>
+    <field index="2" name="FCCOB0LOSTR" typeid="100016" const_qualified="0" is_static_field="0"/>
+  </type>
+  <type typeid="100014" typetype="UNION" ada_scope="__T381185560" typemark="CCAST_9_14" store_class="1">
+    <field index="1" name="Byte" typeid="900003" const_qualified="0" is_static_field="0"/>
+    <field index="2" name="Bits" typeid="100015" const_qualified="0" is_static_field="0"/>
+  </type>
+  <type typeid="100015" typetype="REC_ORD" ada_scope="__T381337336" typemark="CCAST_9_15" store_class="1">
+    <field index="1" name="CCOB8" typeid="900003" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+    <field index="2" name="CCOB9" typeid="900003" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+    <field index="3" name="CCOB10" typeid="900003" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+    <field index="4" name="CCOB11" typeid="900003" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+    <field index="5" name="CCOB12" typeid="900003" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+    <field index="6" name="CCOB13" typeid="900003" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+    <field index="7" name="CCOB14" typeid="900003" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+    <field index="8" name="CCOB15" typeid="900003" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+  </type>
+  <type typeid="100016" typetype="UNION" ada_scope="__T381186056" typemark="CCAST_9_16" store_class="1">
+    <field index="1" name="Byte" typeid="900003" const_qualified="0" is_static_field="0"/>
+    <field index="2" name="Bits" typeid="100017" const_qualified="0" is_static_field="0"/>
+  </type>
+  <type typeid="100017" typetype="REC_ORD" ada_scope="__T381337584" typemark="CCAST_9_17" store_class="1">
+    <field index="1" name="CCOB0" typeid="900003" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+    <field index="2" name="CCOB1" typeid="900003" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+    <field index="3" name="CCOB2" typeid="900003" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+    <field index="4" name="CCOB3" typeid="900003" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+    <field index="5" name="CCOB4" typeid="900003" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+    <field index="6" name="CCOB5" typeid="900003" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+    <field index="7" name="CCOB6" typeid="900003" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+    <field index="8" name="CCOB7" typeid="900003" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+  </type>
+  <type typeid="100018" typetype="REC_ORD" ada_scope="__T381337832" typemark="CCAST_9_18" store_class="1">
+    <field index="1" name="CCOB0" typeid="900010" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+    <field index="2" name="CCOB1" typeid="900010" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+    <field index="3" name="CCOB2" typeid="900010" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+    <field index="4" name="CCOB3" typeid="900010" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+    <field index="5" name="CCOB4" typeid="900010" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+    <field index="6" name="CCOB5" typeid="900010" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+    <field index="7" name="CCOB6" typeid="900010" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+    <field index="8" name="CCOB7" typeid="900010" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+    <field index="9" name="CCOB8" typeid="900010" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+    <field index="10" name="CCOB9" typeid="900010" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+    <field index="11" name="CCOB10" typeid="900010" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+    <field index="12" name="CCOB11" typeid="900010" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+    <field index="13" name="CCOB12" typeid="900010" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+    <field index="14" name="CCOB13" typeid="900010" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+    <field index="15" name="CCOB14" typeid="900010" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+    <field index="16" name="CCOB15" typeid="900010" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+  </type>
+  <type typeid="100019" typetype="UNION" ada_scope="__T381340064" typemark="CCAST_9_19" store_class="1">
+    <field index="1" name="Word" typeid="900010" const_qualified="0" is_static_field="0"/>
+    <field index="2" name="Overlap_STR" typeid="100020" const_qualified="0" is_static_field="0"/>
+    <field index="3" name="Bits" typeid="100025" const_qualified="0" is_static_field="0"/>
+  </type>
+  <type typeid="100020" typetype="REC_ORD" ada_scope="__T381339568" typemark="CCAST_9_20" store_class="1">
+    <field index="1" name="FCCOB1HISTR" typeid="100021" const_qualified="0" is_static_field="0"/>
+    <field index="2" name="FCCOB1LOSTR" typeid="100023" const_qualified="0" is_static_field="0"/>
+  </type>
+  <type typeid="100021" typetype="UNION" ada_scope="__T381338824" typemark="CCAST_9_21" store_class="1">
+    <field index="1" name="Byte" typeid="900003" const_qualified="0" is_static_field="0"/>
+    <field index="2" name="Bits" typeid="100022" const_qualified="0" is_static_field="0"/>
+  </type>
+  <type typeid="100022" typetype="REC_ORD" ada_scope="__T381338576" typemark="CCAST_9_22" store_class="1">
+    <field index="1" name="CCOB8" typeid="900003" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+    <field index="2" name="CCOB9" typeid="900003" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+    <field index="3" name="CCOB10" typeid="900003" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+    <field index="4" name="CCOB11" typeid="900003" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+    <field index="5" name="CCOB12" typeid="900003" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+    <field index="6" name="CCOB13" typeid="900003" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+    <field index="7" name="CCOB14" typeid="900003" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+    <field index="8" name="CCOB15" typeid="900003" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+  </type>
+  <type typeid="100023" typetype="UNION" ada_scope="__T381339320" typemark="CCAST_9_23" store_class="1">
+    <field index="1" name="Byte" typeid="900003" const_qualified="0" is_static_field="0"/>
+    <field index="2" name="Bits" typeid="100024" const_qualified="0" is_static_field="0"/>
+  </type>
+  <type typeid="100024" typetype="REC_ORD" ada_scope="__T381339072" typemark="CCAST_9_24" store_class="1">
+    <field index="1" name="CCOB0" typeid="900003" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+    <field index="2" name="CCOB1" typeid="900003" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+    <field index="3" name="CCOB2" typeid="900003" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+    <field index="4" name="CCOB3" typeid="900003" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+    <field index="5" name="CCOB4" typeid="900003" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+    <field index="6" name="CCOB5" typeid="900003" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+    <field index="7" name="CCOB6" typeid="900003" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+    <field index="8" name="CCOB7" typeid="900003" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+  </type>
+  <type typeid="100025" typetype="REC_ORD" ada_scope="__T381339816" typemark="CCAST_9_25" store_class="1">
+    <field index="1" name="CCOB0" typeid="900010" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+    <field index="2" name="CCOB1" typeid="900010" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+    <field index="3" name="CCOB2" typeid="900010" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+    <field index="4" name="CCOB3" typeid="900010" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+    <field index="5" name="CCOB4" typeid="900010" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+    <field index="6" name="CCOB5" typeid="900010" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+    <field index="7" name="CCOB6" typeid="900010" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+    <field index="8" name="CCOB7" typeid="900010" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+    <field index="9" name="CCOB8" typeid="900010" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+    <field index="10" name="CCOB9" typeid="900010" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+    <field index="11" name="CCOB10" typeid="900010" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+    <field index="12" name="CCOB11" typeid="900010" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+    <field index="13" name="CCOB12" typeid="900010" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+    <field index="14" name="CCOB13" typeid="900010" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+    <field index="15" name="CCOB14" typeid="900010" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+    <field index="16" name="CCOB15" typeid="900010" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+  </type>
+  <type typeid="100026" typetype="UNION" ada_scope="__T381342048" typemark="CCAST_9_26" store_class="1">
+    <field index="1" name="Word" typeid="900010" const_qualified="0" is_static_field="0"/>
+    <field index="2" name="Overlap_STR" typeid="100027" const_qualified="0" is_static_field="0"/>
+    <field index="3" name="Bits" typeid="100032" const_qualified="0" is_static_field="0"/>
+  </type>
+  <type typeid="100027" typetype="REC_ORD" ada_scope="__T381341552" typemark="CCAST_9_27" store_class="1">
+    <field index="1" name="FCCOB2HISTR" typeid="100028" const_qualified="0" is_static_field="0"/>
+    <field index="2" name="FCCOB2LOSTR" typeid="100030" const_qualified="0" is_static_field="0"/>
+  </type>
+  <type typeid="100028" typetype="UNION" ada_scope="__T381340808" typemark="CCAST_9_28" store_class="1">
+    <field index="1" name="Byte" typeid="900003" const_qualified="0" is_static_field="0"/>
+    <field index="2" name="Bits" typeid="100029" const_qualified="0" is_static_field="0"/>
+  </type>
+  <type typeid="100029" typetype="REC_ORD" ada_scope="__T381340560" typemark="CCAST_9_29" store_class="1">
+    <field index="1" name="CCOB8" typeid="900003" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+    <field index="2" name="CCOB9" typeid="900003" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+    <field index="3" name="CCOB10" typeid="900003" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+    <field index="4" name="CCOB11" typeid="900003" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+    <field index="5" name="CCOB12" typeid="900003" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+    <field index="6" name="CCOB13" typeid="900003" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+    <field index="7" name="CCOB14" typeid="900003" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+    <field index="8" name="CCOB15" typeid="900003" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+  </type>
+  <type typeid="100030" typetype="UNION" ada_scope="__T381341304" typemark="CCAST_9_30" store_class="1">
+    <field index="1" name="Byte" typeid="900003" const_qualified="0" is_static_field="0"/>
+    <field index="2" name="Bits" typeid="100031" const_qualified="0" is_static_field="0"/>
+  </type>
+  <type typeid="100031" typetype="REC_ORD" ada_scope="__T381341056" typemark="CCAST_9_31" store_class="1">
+    <field index="1" name="CCOB0" typeid="900003" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+    <field index="2" name="CCOB1" typeid="900003" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+    <field index="3" name="CCOB2" typeid="900003" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+    <field index="4" name="CCOB3" typeid="900003" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+    <field index="5" name="CCOB4" typeid="900003" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+    <field index="6" name="CCOB5" typeid="900003" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+    <field index="7" name="CCOB6" typeid="900003" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+    <field index="8" name="CCOB7" typeid="900003" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+  </type>
+  <type typeid="100032" typetype="REC_ORD" ada_scope="__T381341800" typemark="CCAST_9_32" store_class="1">
+    <field index="1" name="CCOB0" typeid="900010" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+    <field index="2" name="CCOB1" typeid="900010" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+    <field index="3" name="CCOB2" typeid="900010" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+    <field index="4" name="CCOB3" typeid="900010" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+    <field index="5" name="CCOB4" typeid="900010" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+    <field index="6" name="CCOB5" typeid="900010" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+    <field index="7" name="CCOB6" typeid="900010" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+    <field index="8" name="CCOB7" typeid="900010" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+    <field index="9" name="CCOB8" typeid="900010" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+    <field index="10" name="CCOB9" typeid="900010" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+    <field index="11" name="CCOB10" typeid="900010" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+    <field index="12" name="CCOB11" typeid="900010" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+    <field index="13" name="CCOB12" typeid="900010" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+    <field index="14" name="CCOB13" typeid="900010" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+    <field index="15" name="CCOB14" typeid="900010" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+    <field index="16" name="CCOB15" typeid="900010" const_qualified="0" is_bitfield="1" is_static_field="0">
+      <range_data min="0" mid="0" max="1"/>
+    </field>
+  </type>
+  <type typeid="100033" typetype="AR_RAY" array_type="900010" typemark="CCAST_9_33" original_type_name="word  [0x2]">
+    <range_data size="2%%"/>
+  </type>
+  <type typeid="800001" typetype="INT_EGER" typemark="int"/>
+  <type typeid="800002" typetype="CHAR_ACTER" typemark="char"/>
+  <type typeid="900001" typetype="UNION" ada_scope="__T381326672" typemark="volatile FCLKDIVSTR">
+    <field index="1" name="Byte" typeid="900003" const_qualified="0" is_static_field="0"/>
+    <field index="2" name="Bits" typeid="100004" const_qualified="0" is_static_field="0"/>
+    <field index="3" name="MergedBits" typeid="100005" const_qualified="0" is_static_field="0"/>
+  </type>
+  <type typeid="900002" typetype="UNION" ada_scope="__T381326672" typemark="FCLKDIVSTR" store_class="1">
+    <field index="1" name="Byte" typeid="900003" const_qualified="0" is_static_field="0"/>
+    <field index="2" name="Bits" typeid="100004" const_qualified="0" is_static_field="0"/>
+    <field index="3" name="MergedBits" typeid="100005" const_qualified="0" is_static_field="0"/>
+  </type>
+  <type typeid="900003" typetype="UNSIGNED_CHAR" typemark="unsigned char"/>
+  <type typeid="900004" typetype="UNION" ada_scope="__T381328904" typemark="volatile FCCOBIXSTR">
+    <field index="1" name="Byte" typeid="900003" const_qualified="0" is_static_field="0"/>
+    <field index="2" name="Bits" typeid="100007" const_qualified="0" is_static_field="0"/>
+    <field index="3" name="MergedBits" typeid="100008" const_qualified="0" is_static_field="0"/>
+  </type>
+  <type typeid="900005" typetype="UNION" ada_scope="__T381328904" typemark="FCCOBIXSTR" store_class="1">
+    <field index="1" name="Byte" typeid="900003" const_qualified="0" is_static_field="0"/>
+    <field index="2" name="Bits" typeid="100007" const_qualified="0" is_static_field="0"/>
+    <field index="3" name="MergedBits" typeid="100008" const_qualified="0" is_static_field="0"/>
+  </type>
+  <type typeid="900006" typetype="UNION" ada_scope="__T381332376" typemark="volatile FSTATSTR">
+    <field index="1" name="Byte" typeid="900003" const_qualified="0" is_static_field="0"/>
+    <field index="2" name="Bits" typeid="100010" const_qualified="0" is_static_field="0"/>
+    <field index="3" name="MergedBits" typeid="100011" const_qualified="0" is_static_field="0"/>
+  </type>
+  <type typeid="900007" typetype="UNION" ada_scope="__T381332376" typemark="FSTATSTR" store_class="1">
+    <field index="1" name="Byte" typeid="900003" const_qualified="0" is_static_field="0"/>
+    <field index="2" name="Bits" typeid="100010" const_qualified="0" is_static_field="0"/>
+    <field index="3" name="MergedBits" typeid="100011" const_qualified="0" is_static_field="0"/>
+  </type>
+  <type typeid="900008" typetype="UNION" ada_scope="__T381338080" typemark="volatile FCCOB0STR">
+    <field index="1" name="Word" typeid="900010" const_qualified="0" is_static_field="0"/>
+    <field index="2" name="Overlap_STR" typeid="100013" const_qualified="0" is_static_field="0"/>
+    <field index="3" name="Bits" typeid="100018" const_qualified="0" is_static_field="0"/>
+  </type>
+  <type typeid="900009" typetype="UNION" ada_scope="__T381338080" typemark="FCCOB0STR" store_class="1">
+    <field index="1" name="Word" typeid="900010" const_qualified="0" is_static_field="0"/>
+    <field index="2" name="Overlap_STR" typeid="100013" const_qualified="0" is_static_field="0"/>
+    <field index="3" name="Bits" typeid="100018" const_qualified="0" is_static_field="0"/>
+  </type>
+  <type typeid="900010" typetype="UN_SIGNED" typemark="unsigned"/>
+  <type typeid="900011" typetype="UNION" ada_scope="__T381340064" typemark="volatile FCCOB1STR">
+    <field index="1" name="Word" typeid="900010" const_qualified="0" is_static_field="0"/>
+    <field index="2" name="Overlap_STR" typeid="100020" const_qualified="0" is_static_field="0"/>
+    <field index="3" name="Bits" typeid="100025" const_qualified="0" is_static_field="0"/>
+  </type>
+  <type typeid="900012" typetype="UNION" ada_scope="__T381340064" typemark="FCCOB1STR" store_class="1">
+    <field index="1" name="Word" typeid="900010" const_qualified="0" is_static_field="0"/>
+    <field index="2" name="Overlap_STR" typeid="100020" const_qualified="0" is_static_field="0"/>
+    <field index="3" name="Bits" typeid="100025" const_qualified="0" is_static_field="0"/>
+  </type>
+  <type typeid="900013" typetype="UNION" ada_scope="__T381342048" typemark="volatile FCCOB2STR">
+    <field index="1" name="Word" typeid="900010" const_qualified="0" is_static_field="0"/>
+    <field index="2" name="Overlap_STR" typeid="100027" const_qualified="0" is_static_field="0"/>
+    <field index="3" name="Bits" typeid="100032" const_qualified="0" is_static_field="0"/>
+  </type>
+  <type typeid="900014" typetype="UNION" ada_scope="__T381342048" typemark="FCCOB2STR" store_class="1">
+    <field index="1" name="Word" typeid="900010" const_qualified="0" is_static_field="0"/>
+    <field index="2" name="Overlap_STR" typeid="100027" const_qualified="0" is_static_field="0"/>
+    <field index="3" name="Bits" typeid="100032" const_qualified="0" is_static_field="0"/>
+  </type>
+  <type typeid="900015" typetype="NOT_SUPPORTED" unsupported_type_reason="TI_STATUS_VOID_TYPES_ARE_UNTESTABLE" typemark="void"/>
+  <type typeid="900016" typetype="ACCE_SS" pointer_type="900010" typemark="word*"/>
+  <type typeid="900017" typetype="UNSIGNED_LONG" typemark="unsigned long"/>
+  <type typeid="900018" typetype="STR_ING" pointer_type="900003" string_type_type="ACCE_SS" typemark="byte*"/>
+</typefile>

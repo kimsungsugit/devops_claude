@@ -1,0 +1,357 @@
+- generic [ref=e3]:
+  - generic [ref=e5]:
+    - button "로컬" [ref=e6] [cursor=pointer]
+    - button "Jenkins" [ref=e7] [cursor=pointer]
+  - generic [ref=e8]:
+    - main [ref=e9]:
+      - generic [ref=e10]:
+        - generic [ref=e11]:
+          - generic [ref=e12]:
+            - generic [ref=e13]:
+              - generic [ref=e14]: Devops/
+              - generic [ref=e15]: Local/
+              - generic [ref=e72]: Analyzer
+            - generic [ref=e17]: Analyzer
+            - generic [ref=e18]: "세션 생성: -"
+          - generic [ref=e20]: READY
+          - button "다크 모드로 전환" [ref=e22] [cursor=pointer]: 다크 모드
+        - navigation "주 네비게이션" [ref=e23]:
+          - button "대시보드 탭" [ref=e24] [cursor=pointer]: 대시보드
+          - button "워크플로우 탭" [ref=e26] [cursor=pointer]: 워크플로우
+          - button "에디터 탭" [ref=e28] [cursor=pointer]: 에디터
+          - button "Analyzer 탭" [active] [ref=e30] [cursor=pointer]: Analyzer
+          - button "설정 탭" [ref=e32] [cursor=pointer]: 설정
+        - generic [ref=e35]: 로컬 모드
+        - generic [ref=e73]:
+          - heading "Analyzer" [level=3] [ref=e74]
+          - generic [ref=e75]: Analyzer now covers UDS, STS, and SUTS generation plus result views for Local and Jenkins modes.
+          - generic [ref=e76]:
+            - generic [ref=e77]:
+              - generic [ref=e78]:
+                - strong [ref=e79]: Code Change Overview
+                - generic [ref=e80]: 최신 코드 변경이 어떤 문서에 영향을 주는지 한눈에 확인합니다.
+              - generic [ref=e81]:
+                - combobox [ref=e82]:
+                  - option "SCM Registry" [selected]
+                - generic [ref=e83]: NO DATA
+            - generic [ref=e84]:
+              - button "Changed Files 0 →" [ref=e85] [cursor=pointer]:
+                - generic [ref=e86]: Changed Files
+                - generic [ref=e87]: "0"
+                - generic [ref=e88]: →
+              - button "Changed Functions 0 →" [ref=e89] [cursor=pointer]:
+                - generic [ref=e90]: Changed Functions
+                - generic [ref=e91]: "0"
+                - generic [ref=e92]: →
+              - button "UDS 0 →" [ref=e93] [cursor=pointer]:
+                - generic [ref=e94]: UDS
+                - generic [ref=e95]: "0"
+                - generic [ref=e96]: →
+              - button "SUTS 0 →" [ref=e97] [cursor=pointer]:
+                - generic [ref=e98]: SUTS
+                - generic [ref=e99]: "0"
+                - generic [ref=e100]: →
+              - button "STS 0 →" [ref=e101] [cursor=pointer]:
+                - generic [ref=e102]: STS
+                - generic [ref=e103]: "0"
+                - generic [ref=e104]: →
+              - button "SDS 0" [ref=e105] [cursor=pointer]:
+                - generic [ref=e106]: SDS
+                - generic [ref=e107]: "0"
+            - generic [ref=e108]:
+              - generic [ref=e109]:
+                - generic [ref=e110]:
+                  - strong [ref=e111]: Latest Run
+                  - generic [ref=e112]: "-"
+                - generic [ref=e113]: No recent change history.
+                - generic [ref=e114]: Change summary unavailable
+              - generic [ref=e115]:
+                - strong [ref=e116]: Changed Files
+                - generic [ref=e118]: No changed files in the latest recorded run.
+              - generic [ref=e119]:
+                - strong [ref=e120]: Changed Functions
+                - generic [ref=e122]: No changed functions recorded yet.
+          - generic [ref=e123]:
+            - generic [ref=e124]:
+              - generic [ref=e125]:
+                - strong [ref=e126]: Analyzer Global Context
+                - generic [ref=e127]: 공통 문서 경로를 한 번만 불러오고 UDS, STS, SUTS 탭에서 같이 사용합니다.
+              - generic [ref=e128]: LOCAL CONTEXT
+            - generic [ref=e129]:
+              - generic [ref=e130]: Source Root
+              - generic [ref=e131]:
+                - textbox "Common source root" [ref=e132]
+                - button "Browse" [ref=e133] [cursor=pointer]
+              - generic [ref=e134]: SRS
+              - generic [ref=e135]:
+                - textbox "Common SRS path" [ref=e136]
+                - button "Browse" [ref=e137] [cursor=pointer]
+              - generic [ref=e138]: SDS
+              - generic [ref=e139]:
+                - textbox "Common SDS path" [ref=e140]
+                - button "Browse" [ref=e141] [cursor=pointer]
+              - generic [ref=e142]: HSIS
+              - generic [ref=e143]:
+                - textbox "Common HSIS path" [ref=e144]
+                - button "Browse" [ref=e145] [cursor=pointer]
+              - generic [ref=e146]: UDS Reference
+              - generic [ref=e147]:
+                - textbox "Common UDS path" [ref=e148]
+                - button "Browse" [ref=e149] [cursor=pointer]
+          - generic [ref=e150]:
+            - generic [ref=e151]:
+              - strong [ref=e152]: QA Checklist
+              - generic [ref=e153]: 4/6 checks
+            - generic [ref=e154]:
+              - generic [ref=e155]:
+                - generic [ref=e156]: Latest Run card shows UDS, STS, and SUTS artifacts.
+                - generic [ref=e157]: CHECK
+              - generic [ref=e158]:
+                - generic [ref=e159]: Latest Run rows can switch to the matching artifact tab.
+                - generic [ref=e160]: CHECK
+              - generic [ref=e161]:
+                - generic [ref=e162]: Latest Run rows have validation actions.
+                - generic [ref=e163]: PASS
+              - generic [ref=e164]:
+                - generic [ref=e165]: Latest Run rows expose summary metrics.
+                - generic [ref=e166]: PASS
+              - generic [ref=e167]:
+                - generic [ref=e168]: Current latest artifacts pass validation.
+                - generic [ref=e169]: PASS
+              - generic [ref=e170]:
+                - generic [ref=e171]: Preview panel is ready for report/preview review.
+                - generic [ref=e172]: PASS
+          - generic [ref=e173]:
+            - button "Impact" [ref=e174] [cursor=pointer]
+            - button "UDS" [ref=e175] [cursor=pointer]
+            - button "STS" [ref=e176] [cursor=pointer]
+            - button "SUTS" [ref=e177] [cursor=pointer]
+          - generic [ref=e178]:
+            - generic [ref=e179]:
+              - strong [ref=e180]: Impact Workspace (Local)
+              - button "Fullscreen" [ref=e181] [cursor=pointer]
+            - generic [ref=e182]:
+              - generic [ref=e183]:
+                - strong [ref=e184]: "Analyzer Mode: Local Impact"
+                - generic [ref=e185]: LOCAL
+              - generic [ref=e186]: Analyzer 안에서 변경 감지, 영향 분석, AUTO/FLAG 결과 확인, 생성 이후 결과 추적까지 한 흐름으로 처리합니다.
+            - generic [ref=e187]:
+              - generic [ref=e188]:
+                - generic [ref=e189]:
+                  - heading "SCM Impact Console" [level=3] [ref=e190]
+                  - paragraph [ref=e191]: 변경 파일, 영향 함수, 자동 재생성 결과와 검토 필요 문서를 한 화면에서 확인합니다.
+                - generic [ref=e192]:
+                  - button "Registry 새로고침" [ref=e193] [cursor=pointer]
+                  - button "연결 상태 확인" [disabled] [ref=e194]
+              - generic [ref=e195]:
+                - generic [ref=e196]:
+                  - heading "Operations" [level=4] [ref=e197]
+                  - generic [ref=e198]: IDLE
+                - generic [ref=e199]:
+                  - generic [ref=e200]:
+                    - heading "Registry Health" [level=5] [ref=e201]
+                    - generic [ref=e202]:
+                      - generic [ref=e203]:
+                        - generic [ref=e204]: SCM tool
+                        - generic [ref=e205]: missing
+                      - generic [ref=e206]:
+                        - generic [ref=e207]: source_root
+                        - generic [ref=e208]: missing
+                      - generic [ref=e209]:
+                        - generic [ref=e210]: repo
+                        - generic [ref=e211]: not detected
+                      - generic [ref=e212]:
+                        - generic [ref=e213]: linked docs
+                        - generic [ref=e214]: 0 connected
+                  - generic [ref=e215]:
+                    - heading "Active Run" [level=5] [ref=e216]
+                    - generic [ref=e217]: 현재 실행 중인 impact job이 없습니다.
+              - generic [ref=e218]:
+                - generic [ref=e219]:
+                  - heading "Registry Editor" [level=4] [ref=e220]
+                  - generic [ref=e221]: new entry
+                - generic [ref=e222]:
+                  - generic [ref=e223]: ID
+                  - textbox "hdpdm01" [ref=e224]
+                  - generic [ref=e225]: Name
+                  - textbox "HDPDM01 PDS64_RD" [ref=e226]
+                  - generic [ref=e227]: SCM Type
+                  - combobox [ref=e228]:
+                    - option "SVN" [selected]
+                    - option "Git"
+                  - generic [ref=e229]: SCM URL
+                  - textbox "svn://..." [ref=e230]
+                  - generic [ref=e231]: Username
+                  - textbox [ref=e232]
+                  - generic [ref=e233]: Password Env
+                  - textbox "SCM_PASSWORD_HDPDM01" [ref=e234]
+                  - generic [ref=e235]: Base Ref
+                  - textbox "SVN working copy면 비워둘 수 있음" [ref=e236]
+                  - generic [ref=e237]: Source Root
+                  - textbox "D:/Project/Ados/PDS64_RD" [ref=e238]
+                - generic [ref=e239]:
+                  - button "New" [ref=e240] [cursor=pointer]
+                  - button "Register" [ref=e241] [cursor=pointer]
+                  - button "Update" [disabled] [ref=e242]
+                  - button "Delete" [disabled] [ref=e243]
+              - generic [ref=e244]:
+                - generic [ref=e245]:
+                  - generic [ref=e246]:
+                    - heading "Registry / SCM 상태" [level=4] [ref=e247]
+                    - generic [ref=e248]: Pending
+                  - generic [ref=e249]:
+                    - generic [ref=e250]: 등록 항목
+                    - combobox [ref=e251]:
+                      - option "선택하세요" [selected]
+                    - generic [ref=e252]: SCM
+                    - textbox [ref=e253]: git
+                    - generic [ref=e254]: Source Root
+                    - textbox [ref=e255]: .
+                    - generic [ref=e256]: Repo URL
+                    - textbox [ref=e257]
+                    - generic [ref=e258]: Base Ref
+                    - textbox [ref=e259]
+                  - generic [ref=e260]: 등록된 SCM 항목이 없습니다. registry를 먼저 등록해야 dry-run과 실행을 사용할 수 있습니다.
+                - generic [ref=e261]:
+                  - heading "Impact Trigger" [level=4] [ref=e263]
+                  - generic [ref=e264]:
+                    - generic [ref=e265]:
+                      - checkbox "UDS" [checked] [ref=e266]
+                      - text: UDS
+                    - generic [ref=e267]:
+                      - checkbox "SUTS" [checked] [ref=e268]
+                      - text: SUTS
+                    - generic [ref=e269]:
+                      - checkbox "STS" [checked] [ref=e270]
+                      - text: STS
+                    - generic [ref=e271]:
+                      - checkbox "SDS" [checked] [ref=e272]
+                      - text: SDS
+                  - text: 수동 changed files
+                  - textbox "Sources/APP/Ap_BuzzerCtrl_PDS.c Sources/APP/Ap_BuzzerCtrl_it_PDS.h" [ref=e273]:
+                    - /placeholder: "Sources/APP/Ap_BuzzerCtrl_PDS.c\nSources/APP/Ap_BuzzerCtrl_it_PDS.h"
+                  - generic [ref=e274]: SVN working copy가 깨끗하면 여기서 검증용 changed files를 직접 넣을 수 있습니다.
+                  - generic [ref=e275]:
+                    - button "Dry Run" [disabled] [ref=e276]
+                    - button "실행" [disabled] [ref=e277]
+                  - generic [ref=e278]: "다음 추천 액션: 원인 확인 후 다시 시도하세요."
+                  - generic [ref=e279]: "SCM registry 조회 실패: HTTP 500"
+                  - generic [ref=e280]:
+                    - strong [ref=e282]: SCM registry 조회 실패
+                    - generic [ref=e283]: HTTP 500
+                    - generic [ref=e284]: "재시도 가능 · code: registry_load_failed"
+              - generic [ref=e285]:
+                - generic [ref=e286]:
+                  - heading "Dry Run / 실행 결과" [level=4] [ref=e287]
+                  - generic [ref=e288]: Idle
+                - generic [ref=e289]:
+                  - generic [ref=e290]:
+                    - generic [ref=e291]: Changed Files
+                    - generic [ref=e292]: "0"
+                  - generic [ref=e293]:
+                    - generic [ref=e294]: Changed Functions
+                    - generic [ref=e295]: "0"
+                  - generic [ref=e296]:
+                    - generic [ref=e297]: Direct Impact
+                    - generic [ref=e298]: "0"
+                  - generic [ref=e299]:
+                    - generic [ref=e300]: Indirect
+                    - generic [ref=e301]: "0"
+                - generic [ref=e302]:
+                  - generic [ref=e303]:
+                    - generic [ref=e304]:
+                      - strong [ref=e305]: UDS
+                      - generic [ref=e306]: "- / skipped"
+                    - generic [ref=e307]: UDS 영향 없음
+                    - generic [ref=e308]: "대상 함수: 0"
+                  - generic [ref=e309]:
+                    - generic [ref=e310]:
+                      - strong [ref=e311]: SUTS
+                      - generic [ref=e312]: "- / skipped"
+                    - generic [ref=e313]: SUTS 영향 없음
+                    - generic [ref=e314]: "대상 함수: 0"
+                  - generic [ref=e315]:
+                    - generic [ref=e316]:
+                      - strong [ref=e317]: STS
+                      - generic [ref=e318]: "- / skipped"
+                    - generic [ref=e319]: STS 영향 없음
+                    - generic [ref=e320]: "대상 함수: 0"
+                  - generic [ref=e321]:
+                    - generic [ref=e322]:
+                      - strong [ref=e323]: SDS
+                      - generic [ref=e324]: "- / skipped"
+                    - generic [ref=e325]: SDS 영향 없음
+                    - generic [ref=e326]: "대상 함수: 0"
+                - generic [ref=e327]:
+                  - generic [ref=e328]:
+                    - heading "Changed Functions" [level=5] [ref=e329]
+                    - generic [ref=e331]: 변경 함수 정보 없음
+                  - generic [ref=e332]:
+                    - heading "Impact Groups" [level=5] [ref=e333]
+                    - generic [ref=e334]:
+                      - generic [ref=e335]:
+                        - generic [ref=e336]: direct
+                        - generic [ref=e337]: 0 functions
+                      - generic [ref=e338]:
+                        - generic [ref=e339]: indirect_1hop
+                        - generic [ref=e340]: 0 functions
+                      - generic [ref=e341]:
+                        - generic [ref=e342]: indirect_2hop
+                        - generic [ref=e343]: 0 functions
+              - generic [ref=e344]:
+                - generic [ref=e345]:
+                  - heading "Document Change History" [level=4] [ref=e346]
+                  - generic [ref=e347]: 0 items
+                - generic [ref=e348]:
+                  - generic [ref=e351]: 문서 변경 이력이 없습니다.
+                  - generic [ref=e352]:
+                    - heading "Selected Change Detail" [level=5] [ref=e353]
+                    - generic [ref=e354]: 선택한 변경 이력이 없습니다.
+              - generic [ref=e355]:
+                - generic [ref=e356]:
+                  - heading "Document Diff Preview" [level=4] [ref=e357]
+                  - generic [ref=e358]: select change history item
+                - generic [ref=e359]: 먼저 Document Change History에서 실행 이력을 선택하세요.
+              - generic [ref=e360]:
+                - generic [ref=e361]:
+                  - heading "Recent Runs" [level=4] [ref=e362]
+                  - generic [ref=e363]: 0 items
+                - generic [ref=e365]: 최근 실행 이력이 없습니다.
+              - generic [ref=e366]:
+                - heading "Review Artifact Preview" [level=4] [ref=e368]
+                - generic [ref=e369]: STS/SDS review artifact가 생성되면 여기서 바로 확인할 수 있습니다.
+              - group [ref=e370]:
+                - generic "Legacy SCM Commands" [ref=e371]
+                - option "Git" [selected]
+                - option "SVN"
+    - complementary [ref=e37]:
+      - generic [ref=e38]:
+        - heading "분석 도우미" [level=4] [ref=e39]
+        - generic [ref=e40]:
+          - button "내보내기" [ref=e41] [cursor=pointer]
+          - button "초기화" [ref=e42] [cursor=pointer]
+          - button "닫기" [ref=e43] [cursor=pointer]
+      - generic [ref=e44]:
+        - button "현재 상태 요약해줘" [ref=e45] [cursor=pointer]
+        - button "이슈 우선순위 추천해줘" [ref=e46] [cursor=pointer]
+        - button "커버리지 개선 방법" [ref=e47] [cursor=pointer]
+        - button "다음 해야 할 작업은?" [ref=e48] [cursor=pointer]
+        - button "실패 원인 분석해줘" [ref=e49] [cursor=pointer]
+      - generic [ref=e51]:
+        - paragraph [ref=e54]: 대시보드 요약을 해석하거나 다음 단계 추천을 도와드릴게요.
+        - generic [ref=e55]:
+          - generic [ref=e56]: 오후 09:31
+          - button "복사" [ref=e57] [cursor=pointer]
+      - generic [ref=e59]:
+        - textbox "질문을 입력하세요 (Enter 전송, Shift+Enter 줄바꿈)" [ref=e60]
+        - button "전송" [disabled] [ref=e61]
+  - contentinfo [ref=e62]:
+    - generic [ref=e63]:
+      - generic [ref=e64]: Devops
+      - generic [ref=e65]: 로컬 / Analyzer
+      - generic [ref=e66]: "세션: ?몄뀡 ?놁쓬"
+      - generic [ref=e67]: "상태: idle"
+    - generic [ref=e68]:
+      - button "상태 새로고침" [disabled] [ref=e69]
+      - button "로그 새로고침" [disabled] [ref=e70]
+      - button "테마 전환" [ref=e71] [cursor=pointer]

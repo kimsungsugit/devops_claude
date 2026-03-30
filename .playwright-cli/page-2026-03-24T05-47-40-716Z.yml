@@ -1,0 +1,459 @@
+- generic [ref=e3]:
+  - generic [ref=e5]:
+    - button "로컬" [ref=e6] [cursor=pointer]
+    - button "Jenkins" [ref=e7] [cursor=pointer]
+  - generic [ref=e8]:
+    - main [ref=e9]:
+      - generic [ref=e10]:
+        - generic [ref=e11]:
+          - generic [ref=e12]:
+            - generic [ref=e13]:
+              - generic [ref=e14]: Devops/
+              - generic [ref=e15]: Local/
+              - generic [ref=e499]: Analyzer
+            - generic [ref=e17]: Analyzer
+            - generic [ref=e18]: "세션 생성: 2026-01-17T02:13:34.725527"
+          - generic [ref=e20]: completed
+          - button "다크 모드로 전환" [ref=e22] [cursor=pointer]: 다크 모드
+        - navigation "주 네비게이션" [ref=e23]:
+          - button "대시보드 탭" [ref=e24] [cursor=pointer]: 대시보드
+          - button "워크플로우 탭" [ref=e26] [cursor=pointer]: 워크플로우
+          - button "에디터 탭" [ref=e28] [cursor=pointer]: 에디터
+          - button "Analyzer 탭" [active] [ref=e30] [cursor=pointer]: Analyzer
+          - button "설정 탭" [ref=e32] [cursor=pointer]: 설정
+        - generic [ref=e34]:
+          - generic [ref=e35]: 로컬 모드
+          - generic [ref=e72]: completed
+        - generic [ref=e500]:
+          - heading "Analyzer" [level=3] [ref=e501]
+          - generic [ref=e502]: Analyzer now covers UDS, STS, and SUTS generation plus result views for Local and Jenkins modes.
+          - generic [ref=e503]:
+            - generic [ref=e504]:
+              - strong [ref=e505]: Latest Run
+              - generic [ref=e506]: Local latest · 3 artifacts
+            - generic [ref=e507]:
+              - 'button "UDS uds_local_20260318_091326.docx Download PASS Total: 368 | Direct: 366 | Fallback: 2" [ref=e508] [cursor=pointer]':
+                - generic [ref=e509]:
+                  - generic [ref=e510]: UDS
+                  - generic [ref=e511]: uds_local_20260318_091326.docx
+                - generic [ref=e512]:
+                  - link "Download" [ref=e513]:
+                    - /url: /api/local/uds/download/uds_local_20260318_091326.docx?report_dir=reports
+                  - generic [ref=e514]: PASS
+                  - generic [ref=e515]: "Total: 368 | Direct: 366 | Fallback: 2"
+              - 'button "STS sts_eval_20260319_123007.xlsx 2026-03-24T14:47:39 Download Validation PASS Test Cases: 241 | Covered Reqs: 63 | Coverage: 100%" [ref=e516] [cursor=pointer]':
+                - generic [ref=e517]:
+                  - generic [ref=e518]: STS
+                  - generic [ref=e519]: sts_eval_20260319_123007.xlsx
+                  - generic [ref=e520]: 2026-03-24T14:47:39
+                - generic [ref=e521]:
+                  - link "Download" [ref=e522]:
+                    - /url: /api/local/sts/download/sts_eval_20260319_123007.xlsx
+                  - button "Validation" [ref=e523]
+                  - generic [ref=e524]: PASS
+                  - generic [ref=e525]: "Test Cases: 241 | Covered Reqs: 63 | Coverage: 100%"
+              - 'button "SUTS suts_impact_20260324_111833.xlsm 2026-03-24T14:20:07 Download Validation PASS Test Cases: 11 | Sequences: 66 | Avg Seq/TC: 6" [ref=e526] [cursor=pointer]':
+                - generic [ref=e527]:
+                  - generic [ref=e528]: SUTS
+                  - generic [ref=e529]: suts_impact_20260324_111833.xlsm
+                  - generic [ref=e530]: 2026-03-24T14:20:07
+                - generic [ref=e531]:
+                  - link "Download" [ref=e532]:
+                    - /url: /api/local/suts/download/suts_impact_20260324_111833.xlsm
+                  - button "Validation" [ref=e533]
+                  - generic [ref=e534]: PASS
+                  - generic [ref=e535]: "Test Cases: 11 | Sequences: 66 | Avg Seq/TC: 6"
+          - generic [ref=e536]:
+            - generic [ref=e537]:
+              - strong [ref=e538]: QA Checklist
+              - generic [ref=e539]: 5/6 checks
+            - generic [ref=e540]:
+              - generic [ref=e541]:
+                - generic [ref=e542]: Latest Run card shows UDS, STS, and SUTS artifacts.
+                - generic [ref=e543]: PASS
+              - generic [ref=e544]:
+                - generic [ref=e545]: Latest Run rows can switch to the matching artifact tab.
+                - generic [ref=e546]: PASS
+              - generic [ref=e547]:
+                - generic [ref=e548]: Latest Run rows have validation actions.
+                - generic [ref=e549]: CHECK
+              - generic [ref=e550]:
+                - generic [ref=e551]: Latest Run rows expose summary metrics.
+                - generic [ref=e552]: PASS
+              - generic [ref=e553]:
+                - generic [ref=e554]: Current latest artifacts pass validation.
+                - generic [ref=e555]: PASS
+              - generic [ref=e556]:
+                - generic [ref=e557]: Preview panel is ready for report/preview review.
+                - generic [ref=e558]: PASS
+          - generic [ref=e559]:
+            - button "UDS Latest uds_local_20260318_091326.docx Total 368 Direct 366 Fallback 2" [ref=e560] [cursor=pointer]:
+              - generic [ref=e561]:
+                - strong [ref=e562]: UDS
+                - generic [ref=e563]: Latest
+              - generic [ref=e564]: uds_local_20260318_091326.docx
+              - generic [ref=e565]:
+                - generic [ref=e566]:
+                  - generic [ref=e567]: Total
+                  - generic [ref=e568]: "368"
+                - generic [ref=e569]:
+                  - generic [ref=e570]: Direct
+                  - generic [ref=e571]: "366"
+                - generic [ref=e572]:
+                  - generic [ref=e573]: Fallback
+                  - generic [ref=e574]: "2"
+            - button "STS Latest sts_eval_20260319_123007.xlsx Test Cases 241 Covered Reqs 63 Coverage 100%" [ref=e575] [cursor=pointer]:
+              - generic [ref=e576]:
+                - strong [ref=e577]: STS
+                - generic [ref=e578]: Latest
+              - generic [ref=e579]: sts_eval_20260319_123007.xlsx
+              - generic [ref=e580]:
+                - generic [ref=e581]:
+                  - generic [ref=e582]: Test Cases
+                  - generic [ref=e583]: "241"
+                - generic [ref=e584]:
+                  - generic [ref=e585]: Covered Reqs
+                  - generic [ref=e586]: "63"
+                - generic [ref=e587]:
+                  - generic [ref=e588]: Coverage
+                  - generic [ref=e589]: 100%
+            - button "SUTS Latest suts_impact_20260324_111833.xlsm Test Cases 11 Sequences 66 Avg Seq/TC 6" [ref=e590] [cursor=pointer]:
+              - generic [ref=e591]:
+                - strong [ref=e592]: SUTS
+                - generic [ref=e593]: Latest
+              - generic [ref=e594]: suts_impact_20260324_111833.xlsm
+              - generic [ref=e595]:
+                - generic [ref=e596]:
+                  - generic [ref=e597]: Test Cases
+                  - generic [ref=e598]: "11"
+                - generic [ref=e599]:
+                  - generic [ref=e600]: Sequences
+                  - generic [ref=e601]: "66"
+                - generic [ref=e602]:
+                  - generic [ref=e603]: Avg Seq/TC
+                  - generic [ref=e604]: "6"
+          - generic [ref=e605]:
+            - button "Impact" [ref=e606] [cursor=pointer]
+            - button "UDS" [ref=e607] [cursor=pointer]
+            - button "STS" [ref=e608] [cursor=pointer]
+            - button "SUTS" [ref=e609] [cursor=pointer]
+          - generic [ref=e610]:
+            - generic [ref=e611]:
+              - strong [ref=e612]: "Analyzer Mode: Local Impact"
+              - generic [ref=e613]: LOCAL
+            - generic [ref=e614]: Analyzer 안에서 변경 감지, 영향 분석, AUTO/FLAG 결과 확인, 생성 이후 결과 추적까지 한 흐름으로 처리합니다.
+          - generic [ref=e615]:
+            - generic [ref=e616]:
+              - generic [ref=e617]:
+                - heading "SCM Impact Console" [level=3] [ref=e618]
+                - paragraph [ref=e619]: 변경 파일, 영향 함수, 자동 재생성 결과와 검토 필요 문서를 한 화면에서 확인합니다.
+              - generic [ref=e620]:
+                - button "Registry 새로고침" [ref=e621] [cursor=pointer]
+                - button "연결 상태 확인" [ref=e622] [cursor=pointer]
+            - generic [ref=e623]:
+              - generic [ref=e624]:
+                - heading "Operations" [level=4] [ref=e625]
+                - generic [ref=e626]: IDLE
+              - generic [ref=e627]:
+                - generic [ref=e628]:
+                  - heading "Registry Health" [level=5] [ref=e629]
+                  - generic [ref=e630]:
+                    - generic [ref=e631]:
+                      - generic [ref=e632]: SCM tool
+                      - generic [ref=e633]: available
+                    - generic [ref=e634]:
+                      - generic [ref=e635]: source_root
+                      - generic [ref=e636]: ready
+                    - generic [ref=e637]:
+                      - generic [ref=e638]: repo
+                      - generic [ref=e639]: detected
+                    - generic [ref=e640]:
+                      - generic [ref=e641]: linked docs
+                      - generic [ref=e642]: 4 connected
+                - generic [ref=e643]:
+                  - heading "Active Run" [level=5] [ref=e644]
+                  - generic [ref=e645]: 현재 실행 중인 impact job이 없습니다.
+            - generic [ref=e646]:
+              - generic [ref=e647]:
+                - heading "Registry Editor" [level=4] [ref=e648]
+                - generic [ref=e649]: editing hdpdm01
+              - generic [ref=e650]:
+                - generic [ref=e651]: ID
+                - textbox "hdpdm01" [ref=e652]
+                - generic [ref=e653]: Name
+                - textbox "HDPDM01 PDS64_RD" [ref=e654]: HDPDM01 PDS_64_RD
+                - generic [ref=e655]: SCM Type
+                - combobox [ref=e656]:
+                  - option "SVN" [selected]
+                  - option "Git"
+                - generic [ref=e657]: SCM URL
+                - textbox "svn://..." [ref=e658]: svn://192.168.110.33/ADOS/PDS64_RD
+                - generic [ref=e659]: Username
+                - textbox [ref=e660]: kss1119
+                - generic [ref=e661]: Password Env
+                - textbox "SCM_PASSWORD_HDPDM01" [ref=e662]
+                - generic [ref=e663]: Base Ref
+                - textbox "SVN working copy면 비워둘 수 있음" [ref=e664]
+                - generic [ref=e665]: Source Root
+                - textbox "D:/Project/Ados/PDS64_RD" [ref=e666]: D:\Project\Ados\PDS64_RD
+              - generic [ref=e667]:
+                - button "New" [ref=e668] [cursor=pointer]
+                - button "Register" [ref=e669] [cursor=pointer]
+                - button "Update" [ref=e670] [cursor=pointer]
+                - button "Delete" [ref=e671] [cursor=pointer]
+            - generic [ref=e672]:
+              - generic [ref=e673]:
+                - generic [ref=e674]:
+                  - heading "Registry / SCM 상태" [level=4] [ref=e675]
+                  - generic [ref=e676]: Connected
+                - generic [ref=e677]:
+                  - generic [ref=e678]: 등록 항목
+                  - combobox [ref=e679]:
+                    - option "선택하세요"
+                    - option "HDPDM01 PDS_64_RD (svn)" [selected]
+                  - generic [ref=e680]: SCM
+                  - textbox [ref=e681]: svn
+                  - generic [ref=e682]: Source Root
+                  - textbox [ref=e683]: D:\Project\Ados\PDS64_RD
+                  - generic [ref=e684]: Repo URL
+                  - textbox [ref=e685]: svn://192.168.110.33/ADOS/PDS64_RD
+                  - generic [ref=e686]: Base Ref
+                  - textbox [ref=e687]
+                - generic [ref=e688]:
+                  - generic [ref=e689]:
+                    - generic [ref=e690]: Tool
+                    - generic [ref=e691]: Available
+                  - generic [ref=e692]:
+                    - generic [ref=e693]: Working Copy
+                    - generic [ref=e694]: Detected
+                  - generic [ref=e695]:
+                    - generic [ref=e696]: Source Root
+                    - generic [ref=e697]: Exists
+                  - generic [ref=e698]:
+                    - generic [ref=e699]: Password Env
+                    - generic [ref=e700]: Optional/Empty
+                - generic [ref=e701]:
+                  - generic [ref=e702]: Linked Docs
+                  - generic [ref=e703]:
+                    - generic [ref=e704]: UDS
+                    - generic [ref=e705]: uds_spec_generated_expanded_20260324_112120.docx
+                    - button "열기" [ref=e706] [cursor=pointer]
+                    - button "복사" [ref=e707] [cursor=pointer]
+                  - generic [ref=e708]:
+                    - generic [ref=e709]: SUTS
+                    - generic [ref=e710]: suts_impact_20260324_111833.xlsm
+                    - button "열기" [ref=e711] [cursor=pointer]
+                    - button "복사" [ref=e712] [cursor=pointer]
+                  - generic [ref=e713]:
+                    - generic [ref=e714]: STS
+                    - generic [ref=e715]: sts_eval_20260319_123007.xlsx
+                    - button "열기" [ref=e716] [cursor=pointer]
+                    - button "복사" [ref=e717] [cursor=pointer]
+                  - generic [ref=e718]:
+                    - generic [ref=e719]: SDS
+                    - generic [ref=e720]: (HDPDM01_SDS) Software Architecture Design Specification_v1.04_20230512.docx
+                    - button "열기" [ref=e721] [cursor=pointer]
+                    - button "복사" [ref=e722] [cursor=pointer]
+              - generic [ref=e723]:
+                - heading "Impact Trigger" [level=4] [ref=e725]
+                - generic [ref=e726]:
+                  - generic [ref=e727]:
+                    - checkbox "UDS" [checked] [ref=e728]
+                    - text: UDS
+                  - generic [ref=e729]:
+                    - checkbox "SUTS" [checked] [ref=e730]
+                    - text: SUTS
+                  - generic [ref=e731]:
+                    - checkbox "STS" [checked] [ref=e732]
+                    - text: STS
+                  - generic [ref=e733]:
+                    - checkbox "SDS" [checked] [ref=e734]
+                    - text: SDS
+                - text: 수동 changed files
+                - textbox "Sources/APP/Ap_BuzzerCtrl_PDS.c Sources/APP/Ap_BuzzerCtrl_it_PDS.h" [ref=e735]:
+                  - /placeholder: "Sources/APP/Ap_BuzzerCtrl_PDS.c\nSources/APP/Ap_BuzzerCtrl_it_PDS.h"
+                - generic [ref=e736]: SVN working copy가 깨끗하면 여기서 검증용 changed files를 직접 넣을 수 있습니다.
+                - generic [ref=e737]:
+                  - button "Dry Run" [ref=e738] [cursor=pointer]
+                  - button "실행" [ref=e739] [cursor=pointer]
+            - generic [ref=e740]:
+              - generic [ref=e741]:
+                - heading "Dry Run / 실행 결과" [level=4] [ref=e742]
+                - generic [ref=e743]: Idle
+              - generic [ref=e744]:
+                - generic [ref=e745]:
+                  - generic [ref=e746]: Changed Files
+                  - generic [ref=e747]: "0"
+                - generic [ref=e748]:
+                  - generic [ref=e749]: Changed Functions
+                  - generic [ref=e750]: "0"
+                - generic [ref=e751]:
+                  - generic [ref=e752]: Direct Impact
+                  - generic [ref=e753]: "0"
+                - generic [ref=e754]:
+                  - generic [ref=e755]: Indirect
+                  - generic [ref=e756]: "0"
+              - generic [ref=e757]:
+                - generic [ref=e758]:
+                  - generic [ref=e759]:
+                    - strong [ref=e760]: UDS
+                    - generic [ref=e761]: "- / skipped"
+                  - generic [ref=e762]: UDS 영향 없음
+                  - generic [ref=e763]: "대상 함수: 0"
+                - generic [ref=e764]:
+                  - generic [ref=e765]:
+                    - strong [ref=e766]: SUTS
+                    - generic [ref=e767]: "- / skipped"
+                  - generic [ref=e768]: SUTS 영향 없음
+                  - generic [ref=e769]: "대상 함수: 0"
+                - generic [ref=e770]:
+                  - generic [ref=e771]:
+                    - strong [ref=e772]: STS
+                    - generic [ref=e773]: "- / skipped"
+                  - generic [ref=e774]: STS 영향 없음
+                  - generic [ref=e775]: "대상 함수: 0"
+                - generic [ref=e776]:
+                  - generic [ref=e777]:
+                    - strong [ref=e778]: SDS
+                    - generic [ref=e779]: "- / skipped"
+                  - generic [ref=e780]: SDS 영향 없음
+                  - generic [ref=e781]: "대상 함수: 0"
+              - generic [ref=e782]:
+                - generic [ref=e783]:
+                  - heading "Changed Functions" [level=5] [ref=e784]
+                  - generic [ref=e786]: 변경 함수 정보 없음
+                - generic [ref=e787]:
+                  - heading "Impact Groups" [level=5] [ref=e788]
+                  - generic [ref=e789]:
+                    - generic [ref=e790]:
+                      - generic [ref=e791]: direct
+                      - generic [ref=e792]: 0 functions
+                    - generic [ref=e793]:
+                      - generic [ref=e794]: indirect_1hop
+                      - generic [ref=e795]: 0 functions
+                    - generic [ref=e796]:
+                      - generic [ref=e797]: indirect_2hop
+                      - generic [ref=e798]: 0 functions
+            - generic [ref=e799]:
+              - generic [ref=e800]:
+                - heading "Recent Runs" [level=4] [ref=e801]
+                - generic [ref=e802]: 10 items
+              - generic [ref=e803]:
+                - generic [ref=e804]:
+                  - generic [ref=e805]: RUN
+                  - generic [ref=e806]: impact_20260324_112921.json · files 1
+                  - generic [ref=e807]: AUTO 2 / FLAG 1
+                  - generic [ref=e808]:
+                    - button "비교기준" [ref=e809] [cursor=pointer]
+                    - button "요약" [ref=e810] [cursor=pointer]
+                    - button "열기" [ref=e811] [cursor=pointer]
+                - generic [ref=e812]:
+                  - generic [ref=e813]: DRY
+                  - generic [ref=e814]: impact_20260324_093715.json · files 1
+                  - generic [ref=e815]: AUTO 2 / FLAG 1
+                  - generic [ref=e816]:
+                    - button "비교기준" [ref=e817] [cursor=pointer]
+                    - button "요약" [ref=e818] [cursor=pointer]
+                    - button "열기" [ref=e819] [cursor=pointer]
+                - generic [ref=e820]:
+                  - generic [ref=e821]: DRY
+                  - generic [ref=e822]: impact_20260324_084907.json · files 1
+                  - generic [ref=e823]: AUTO 2 / FLAG 1
+                  - generic [ref=e824]:
+                    - button "비교기준" [ref=e825] [cursor=pointer]
+                    - button "요약" [ref=e826] [cursor=pointer]
+                    - button "열기" [ref=e827] [cursor=pointer]
+                - generic [ref=e828]:
+                  - generic [ref=e829]: DRY
+                  - generic [ref=e830]: impact_20260324_084102.json · files 1
+                  - generic [ref=e831]: AUTO 2 / FLAG 1
+                  - generic [ref=e832]:
+                    - button "비교기준" [ref=e833] [cursor=pointer]
+                    - button "요약" [ref=e834] [cursor=pointer]
+                    - button "열기" [ref=e835] [cursor=pointer]
+                - generic [ref=e836]:
+                  - generic [ref=e837]: DRY
+                  - generic [ref=e838]: impact_20260323_174152.json · files 0
+                  - generic [ref=e839]: AUTO 0 / FLAG 0
+                  - generic [ref=e840]:
+                    - button "비교기준" [ref=e841] [cursor=pointer]
+                    - button "요약" [ref=e842] [cursor=pointer]
+                    - button "열기" [ref=e843] [cursor=pointer]
+                - generic [ref=e844]:
+                  - generic [ref=e845]: RUN
+                  - generic [ref=e846]: impact_20260323_163948.json · files 1
+                  - generic [ref=e847]: AUTO 2 / FLAG 1
+                  - generic [ref=e848]:
+                    - button "비교기준" [ref=e849] [cursor=pointer]
+                    - button "요약" [ref=e850] [cursor=pointer]
+                    - button "열기" [ref=e851] [cursor=pointer]
+                - generic [ref=e852]:
+                  - generic [ref=e853]: DRY
+                  - generic [ref=e854]: impact_20260323_160730.json · files 2
+                  - generic [ref=e855]: AUTO 2 / FLAG 2
+                  - generic [ref=e856]:
+                    - button "비교기준" [ref=e857] [cursor=pointer]
+                    - button "요약" [ref=e858] [cursor=pointer]
+                    - button "열기" [ref=e859] [cursor=pointer]
+                - generic [ref=e860]:
+                  - generic [ref=e861]: RUN
+                  - generic [ref=e862]: impact_20260323_152235.json · files 2
+                  - generic [ref=e863]: AUTO 0 / FLAG 2
+                  - generic [ref=e864]:
+                    - button "비교기준" [ref=e865] [cursor=pointer]
+                    - button "요약" [ref=e866] [cursor=pointer]
+                    - button "열기" [ref=e867] [cursor=pointer]
+                - generic [ref=e868]:
+                  - generic [ref=e869]: RUN
+                  - generic [ref=e870]: impact_20260323_145041.json · files 2
+                  - generic [ref=e871]: AUTO 0 / FLAG 2
+                  - generic [ref=e872]:
+                    - button "비교기준" [ref=e873] [cursor=pointer]
+                    - button "요약" [ref=e874] [cursor=pointer]
+                    - button "열기" [ref=e875] [cursor=pointer]
+                - generic [ref=e876]:
+                  - generic [ref=e877]: RUN
+                  - generic [ref=e878]: impact_20260323_144226.json · files 1
+                  - generic [ref=e879]: AUTO 2 / FLAG 1
+                  - generic [ref=e880]:
+                    - button "비교기준" [ref=e881] [cursor=pointer]
+                    - button "요약" [ref=e882] [cursor=pointer]
+                    - button "열기" [ref=e883] [cursor=pointer]
+            - generic [ref=e884]:
+              - heading "Review Artifact Preview" [level=4] [ref=e886]
+              - generic [ref=e887]: STS/SDS review artifact가 생성되면 여기서 바로 확인할 수 있습니다.
+            - group [ref=e888]:
+              - generic "Legacy SCM Commands" [ref=e889]
+              - option "Git"
+              - option "SVN" [selected]
+    - complementary [ref=e37]:
+      - generic [ref=e38]:
+        - heading "분석 도우미" [level=4] [ref=e39]
+        - generic [ref=e40]:
+          - button "내보내기" [ref=e41] [cursor=pointer]
+          - button "초기화" [ref=e42] [cursor=pointer]
+          - button "닫기" [ref=e43] [cursor=pointer]
+      - generic [ref=e44]:
+        - button "현재 상태 요약해줘" [ref=e45] [cursor=pointer]
+        - button "이슈 우선순위 추천해줘" [ref=e46] [cursor=pointer]
+        - button "커버리지 개선 방법" [ref=e47] [cursor=pointer]
+        - button "다음 해야 할 작업은?" [ref=e48] [cursor=pointer]
+        - button "실패 원인 분석해줘" [ref=e49] [cursor=pointer]
+      - generic [ref=e51]:
+        - paragraph [ref=e54]: 대시보드 요약을 해석하거나 다음 단계 추천을 도와드릴게요.
+        - generic [ref=e55]:
+          - generic [ref=e56]: 오후 02:47
+          - button "복사" [ref=e57] [cursor=pointer]
+      - generic [ref=e59]:
+        - textbox "질문을 입력하세요 (Enter 전송, Shift+Enter 줄바꿈)" [ref=e60]
+        - button "전송" [disabled] [ref=e61]
+  - contentinfo [ref=e62]:
+    - generic [ref=e63]:
+      - generic [ref=e64]: Devops
+      - generic [ref=e65]: 로컬 / Analyzer
+      - generic [ref=e66]: "세션: 3d08c4ac"
+      - generic [ref=e67]: "상태: completed"
+    - generic [ref=e68]:
+      - button "상태 새로고침" [ref=e69] [cursor=pointer]
+      - button "로그 새로고침" [ref=e70] [cursor=pointer]
+      - button "테마 전환" [ref=e71] [cursor=pointer]

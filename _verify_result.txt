@@ -1,0 +1,55 @@
+============================================================
+1. STS XLSM - Traceability Column Compatibility
+============================================================
+  Sheets: ['Cover', '1.Introduction', '3.SW Integration Test Spec', '5. Traceability(SwRS)']
+  '3.SW Integration Test Spec' exists: True
+  Total TCs: 63
+  SRS link (col13): 63/63 (100.0%)
+  Safety (col4): 55/63 (87.3%)
+  Methods: {'FIT': 20, 'RVW': 43}
+  VERDICT: PASS
+
+============================================================
+2. SUTS XLSM - Traceability Column Compatibility
+============================================================
+  Sheets: ['Cover', 'History', '1.Introduction', '1.Test Environment', '2.SW Unit Test Spec', '3.Traceability']
+  '2.SW Unit Test Spec' exists: True
+  Total TCs: 433
+  With related_fid (col149): 433/433 (100.0%)
+  With I/O data (col14-148): 408/433 (94.2%)
+    SwUTC_SwUFn_0101: related=SwUFn_0101, inp=0, out=4
+    SwUTC_SwUFn_0102: related=SwUFn_0102, inp=1, out=6
+    SwUTC_SwUFn_0103: related=SwUFn_0103, inp=16, out=1
+  VERDICT: PASS
+
+============================================================
+3. UDS View Endpoint
+============================================================
+  UDS files count: 77
+  Latest: uds_local_20260310_110536.docx
+  Status: 200
+  Keys: ['ok', 'filename', 'docx_path', 'summary', 'functions', 'traceability', 'swcom_summary', 'accuracy_summary', 'quality_gate_summary', 'meta', 'download_url', 'preview_url', 'accuracy_path', 'quality_gate_path']
+  Functions: 50
+  Quality gate pass: false
+    description_fill: 100.0%
+    input_fill: 0.0%
+    output_fill: 0.0%
+    globals_global_fill: 95.7%
+    globals_static_fill: 54.9%
+    called_fill: 100.0%
+    calling_fill: 100.0%
+    asil_non_tbd: 100.0%
+    related_non_tbd: 100.0%
+    traceability_related_called: 100.0%
+  Sample: SwUFn_0101 / g_Ap_BuzzerCtrl_Func
+    inputs: ['[IN] (none)']
+    outputs: ['[OUT] (none)']
+  With inputs: 50/50
+  With outputs: 50/50
+  With logic: 0/50
+  VERDICT: PASS
+
+============================================================
+4. STS/SUTS Preview Endpoints
+============================================================
+  ERROR: HTTPConnectionPool(host='localhost', port=8000): Read timed out. (read timeout=30)

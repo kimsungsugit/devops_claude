@@ -1,0 +1,135 @@
+- generic [ref=e3]:
+  - generic [ref=e5]:
+    - button "로컬" [ref=e6] [cursor=pointer]
+    - button "Jenkins" [ref=e7] [cursor=pointer]
+  - generic [ref=e8]:
+    - main [ref=e9]:
+      - generic [ref=e10]:
+        - generic [ref=e11]:
+          - generic [ref=e12]:
+            - generic [ref=e13]:
+              - generic [ref=e14]: Devops/
+              - generic [ref=e15]: Local/
+              - generic [ref=e320]: Workflow
+            - generic [ref=e17]: Workflow Studio
+            - generic [ref=e18]: "세션 생성: 2026-01-17T02:13:34.725527"
+          - generic [ref=e20]: completed
+          - button "다크 모드로 전환" [ref=e22] [cursor=pointer]: 다크 모드
+        - navigation "주 네비게이션" [ref=e23]:
+          - button "대시보드 탭" [ref=e24] [cursor=pointer]: 대시보드
+          - button "워크플로우 탭" [active] [ref=e26] [cursor=pointer]: 워크플로우
+          - button "에디터 탭" [ref=e28] [cursor=pointer]: 에디터
+          - button "Analyzer 탭" [ref=e30] [cursor=pointer]: Analyzer
+          - button "설정 탭" [ref=e32] [cursor=pointer]: 설정
+        - generic [ref=e34]:
+          - generic [ref=e35]: 로컬 모드
+          - generic [ref=e72]: completed
+        - generic [ref=e321]:
+          - generic [ref=e322]:
+            - heading "Run 준비" [level=3] [ref=e324]
+            - generic [ref=e326]: "소스: D:\\Project\\devops\\260105 쨌 cfg"
+            - generic [ref=e327]:
+              - generic [ref=e328]: 실행 가이드
+              - list [ref=e329]:
+                - listitem [ref=e330]: 설정에서 프로젝트 루트와 리포트 경로를 먼저 확인합니다.
+                - listitem [ref=e331]: 필요하면 테스트 우선순위와 로컬 테스트 경로를 추가합니다.
+                - listitem [ref=e332]: 사전 점검을 실행해서 필수 도구와 누락 항목을 확인합니다.
+                - listitem [ref=e333]: 준비가 끝나면 분석 시작 버튼으로 파이프라인을 실행합니다.
+                - listitem [ref=e334]: 실행 중에는 우측 로그 패널에서 진행 상황을 확인합니다.
+            - generic [ref=e335]:
+              - button "사전 점검" [ref=e336] [cursor=pointer]
+              - button "분석 시작" [ref=e337] [cursor=pointer]
+              - button "실행 중지" [disabled] [ref=e338]
+            - generic [ref=e339]: 준비 완료
+            - generic [ref=e340]: "{ \"tools\": { \"git\": \"git\", \"cmake\": \"cmake\", \"build_tool\": \"ninja\", \"cc\": \"gcc\", \"gcc_syntax\": \"gcc\" }, \"missing\": [], \"warnings\": [] }"
+          - generic [ref=e343]:
+            - generic [ref=e344]:
+              - heading "워크플로우 사용 방법" [level=4] [ref=e345]
+              - list [ref=e346]:
+                - listitem [ref=e347]: 상단 탭으로 결과(품질/테스트/로그/SCM)를 전환합니다.
+                - listitem [ref=e348]: 좌측 패널에서 사전 점검 후 분석을 실행합니다.
+                - listitem [ref=e349]: 좌·우 스플리터로 패널 너비를 조절할 수 있습니다.
+            - generic [ref=e350]:
+              - generic [ref=e351]:
+                - generic [ref=e352]: 📦
+                - generic [ref=e353]: SCM
+              - generic [ref=e355]:
+                - generic [ref=e356]: 🔨
+                - generic [ref=e357]: Build
+              - generic [ref=e359]:
+                - generic [ref=e360]: 🧪
+                - generic [ref=e361]: Test
+              - generic [ref=e363]:
+                - generic [ref=e364]: 📊
+                - generic [ref=e365]: Coverage
+              - generic [ref=e367]:
+                - generic [ref=e368]: 🔍
+                - generic [ref=e369]: Analysis
+              - generic [ref=e371]:
+                - generic [ref=e372]: 🤖
+                - generic [ref=e373]: Agent
+            - tablist "워크플로우 탭" [ref=e374]:
+              - tab "Code Quality" [selected] [ref=e375] [cursor=pointer]
+              - tab "Testing" [ref=e376] [cursor=pointer]
+              - tab "History" [ref=e377] [cursor=pointer]
+              - tab "Logs" [ref=e378] [cursor=pointer]
+              - tab "SCM" [ref=e379] [cursor=pointer]
+              - tab "Knowledge" [ref=e380] [cursor=pointer]
+              - tab "Complexity" [ref=e381] [cursor=pointer]
+              - tab "Docs" [ref=e382] [cursor=pointer]
+              - tab "UDS" [ref=e383] [cursor=pointer]
+              - tab "STS" [ref=e384] [cursor=pointer]
+              - tab "SUTS" [ref=e385] [cursor=pointer]
+            - generic [ref=e386]:
+              - heading "Findings" [level=3] [ref=e387]
+              - generic [ref=e389]:
+                - generic [ref=e390]: 🔍
+                - generic [ref=e391]: 분석 도구 결과가 없습니다
+                - generic [ref=e392]: 워크플로우를 실행하면 정적 분석 결과가 여기에 표시됩니다
+              - generic [ref=e393]:
+                - combobox [ref=e394]:
+                  - option "all" [selected]
+                - textbox "검색어" [ref=e395]
+              - generic [ref=e397]: "필터 결과: 0건"
+              - generic [ref=e398]:
+                - generic [ref=e399]: ✅
+                - generic [ref=e400]: 발견된 이슈가 없습니다
+                - generic [ref=e401]: 필터 조건에 해당하는 이슈가 없거나 분석이 아직 실행되지 않았습니다
+          - generic [ref=e403]:
+            - heading "Run 濡쒓렇" [level=3] [ref=e405]
+            - generic [ref=e407]: "?곹깭: completed"
+            - generic [ref=e408]:
+              - button "濡쒓렇 ?덈줈怨좎묠" [ref=e409] [cursor=pointer]
+              - button "?곹깭 ?덈줈怨좎묠" [ref=e410] [cursor=pointer]
+              - button "?ㅽ뻾 以묒?" [disabled] [ref=e411]
+    - complementary [ref=e37]:
+      - generic [ref=e38]:
+        - heading "분석 도우미" [level=4] [ref=e39]
+        - generic [ref=e40]:
+          - button "내보내기" [ref=e41] [cursor=pointer]
+          - button "초기화" [ref=e42] [cursor=pointer]
+          - button "닫기" [ref=e43] [cursor=pointer]
+      - generic [ref=e44]:
+        - button "현재 상태 요약해줘" [ref=e45] [cursor=pointer]
+        - button "이슈 우선순위 추천해줘" [ref=e46] [cursor=pointer]
+        - button "커버리지 개선 방법" [ref=e47] [cursor=pointer]
+        - button "다음 해야 할 작업은?" [ref=e48] [cursor=pointer]
+        - button "실패 원인 분석해줘" [ref=e49] [cursor=pointer]
+      - generic [ref=e51]:
+        - paragraph [ref=e54]: 대시보드 요약을 해석하거나 다음 단계 추천을 도와드릴게요.
+        - generic [ref=e55]:
+          - generic [ref=e56]: 오전 08:34
+          - button "복사" [ref=e57] [cursor=pointer]
+      - generic [ref=e59]:
+        - textbox "질문을 입력하세요 (Enter 전송, Shift+Enter 줄바꿈)" [ref=e60]
+        - button "전송" [disabled] [ref=e61]
+  - contentinfo [ref=e62]:
+    - generic [ref=e63]:
+      - generic [ref=e64]: Devops
+      - generic [ref=e65]: 로컬 / Workflow
+      - generic [ref=e66]: "세션: 3d08c4ac"
+      - generic [ref=e67]: "상태: completed"
+    - generic [ref=e68]:
+      - button "상태 새로고침" [ref=e69] [cursor=pointer]
+      - button "로그 새로고침" [ref=e70] [cursor=pointer]
+      - button "테마 전환" [ref=e71] [cursor=pointer]

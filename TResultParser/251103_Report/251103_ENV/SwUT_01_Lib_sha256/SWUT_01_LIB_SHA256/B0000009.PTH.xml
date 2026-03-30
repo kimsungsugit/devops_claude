@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<basis_paths xml_basis_paths_version="1.0" basis_paths="FALSE" edg="Y" checksum="2474684245" handle_ternary="Y" handle_nested_ternary="Y" cover_declarations="Y" cover_headers="N" basis_paths_for_constant_branches="Y">
+  <subprogram index="1" name="s_safe_rotr" parameterized="s_safe_rotr(U32,U8)U32" canonical="" mangled="s_safe_rotr" is_virtual_function="0" class_member="FALSE" testable="TRUE">
+    <listing_start>18</listing_start>
+    <listing_end>29</listing_end>
+  </subprogram>
+  <subprogram index="2" name="s_sha256_transform" parameterized="s_sha256_transform(SHA256_CTX*,const U8[])" canonical="" mangled="s_sha256_transform" is_virtual_function="0" class_member="FALSE" testable="TRUE">
+    <listing_start>29</listing_start>
+    <listing_end>71</listing_end>
+  </subprogram>
+  <subprogram index="3" name="s_sha256_init" parameterized="s_sha256_init(SHA256_CTX*)" canonical="" mangled="s_sha256_init" is_virtual_function="0" class_member="FALSE" testable="TRUE">
+    <listing_start>71</listing_start>
+    <listing_end>84</listing_end>
+  </subprogram>
+  <subprogram index="4" name="s_sha256_update" parameterized="s_sha256_update(SHA256_CTX*,const U8*,U32)" canonical="" mangled="s_sha256_update" is_virtual_function="0" class_member="FALSE" testable="TRUE">
+    <listing_start>84</listing_start>
+    <listing_end>107</listing_end>
+  </subprogram>
+  <subprogram index="5" name="s_sha256_final" parameterized="s_sha256_final(SHA256_CTX*,U8*)" canonical="" mangled="s_sha256_final" is_virtual_function="0" class_member="FALSE" testable="TRUE">
+    <listing_start>107</listing_start>
+    <listing_end>144</listing_end>
+  </subprogram>
+  <subprogram index="6" name="s_Sha256_Hash_Init" parameterized="s_Sha256_Hash_Init()" canonical="" mangled="s_Sha256_Hash_Init" is_virtual_function="0" class_member="FALSE" testable="TRUE">
+    <listing_start>144</listing_start>
+    <listing_end>152</listing_end>
+  </subprogram>
+  <subprogram index="7" name="g_Lib_Sha256_Nb_Start" parameterized="g_Lib_Sha256_Nb_Start()" canonical="" mangled="g_Lib_Sha256_Nb_Start" is_virtual_function="0" class_member="FALSE" testable="TRUE">
+    <listing_start>159</listing_start>
+    <listing_end>170</listing_end>
+  </subprogram>
+  <subprogram index="8" name="g_Lib_Sha256_Nb_Process" parameterized="g_Lib_Sha256_Nb_Process()" canonical="" mangled="g_Lib_Sha256_Nb_Process" is_virtual_function="0" class_member="FALSE" testable="TRUE">
+    <listing_start>170</listing_start>
+    <listing_end>223</listing_end>
+  </subprogram>
+  <subprogram index="9" name="g_Lib_Sha256_Nb_GetState" parameterized="g_Lib_Sha256_Nb_GetState()E_LIB_SHA256_NB_STATE" canonical="" mangled="g_Lib_Sha256_Nb_GetState" is_virtual_function="0" class_member="FALSE" testable="TRUE">
+    <listing_start>223</listing_start>
+    <listing_end>228</listing_end>
+  </subprogram>
+  <subprogram index="10" name="g_Lib_Sha256_Nb_Reset" parameterized="g_Lib_Sha256_Nb_Reset()" canonical="" mangled="g_Lib_Sha256_Nb_Reset" is_virtual_function="0" class_member="FALSE" testable="TRUE">
+    <listing_start>228</listing_start>
+    <listing_end>237</listing_end>
+  </subprogram>
+</basis_paths>

@@ -1,0 +1,5 @@
+EEPROM.c.EEPROM_SetByte
+EEPROM.c.BackupSector
+EEPROM.c.EraseSectorInternal
+EEPROM.c.WriteBlock
+EEPROM.c.EEPROM_SetByte

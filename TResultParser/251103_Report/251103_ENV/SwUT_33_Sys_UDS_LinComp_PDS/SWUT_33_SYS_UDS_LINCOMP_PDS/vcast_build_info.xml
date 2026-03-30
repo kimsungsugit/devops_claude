@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<build_info xml_build_info_version=" 1">
+  <directory type="TESTABLE_SOURCE_DIR">$(PROJECT_DIR)\Sources</directory>
+  <directory type="TESTABLE_SOURCE_DIR">$(PROJECT_DIR)\Sources\LIN\LIN_driver</directory>
+  <directory type="TESTABLE_SOURCE_DIR">$(PROJECT_DIR)\Sources\LIN\LIN_driver\bsp\SCI</directory>
+  <directory type="TESTABLE_SOURCE_DIR">$(PROJECT_DIR)\Sources\LIN\LIN_driver\coreapi</directory>
+  <directory type="TESTABLE_SOURCE_DIR">$(PROJECT_DIR)\Sources\LIN\LIN_driver\diagnostic</directory>
+  <directory type="TESTABLE_SOURCE_DIR">$(PROJECT_DIR)\Sources\LIN\LIN_driver\include</directory>
+  <directory type="TESTABLE_SOURCE_DIR">$(PROJECT_DIR)\Sources\LIN\LIN_driver\lowlevel</directory>
+  <directory type="TESTABLE_SOURCE_DIR">$(PROJECT_DIR)\Sources\LIN\LIN_driver\transport</directory>
+  <directory type="TESTABLE_SOURCE_DIR">$(PROJECT_DIR)\Sources\LIN\lin16_cfg</directory>
+  <directory type="TESTABLE_SOURCE_DIR">$(PROJECT_DIR)\Sources\APP</directory>
+  <directory type="TESTABLE_SOURCE_DIR">$(PROJECT_DIR)\Sources\IF</directory>
+  <directory type="TESTABLE_SOURCE_DIR">$(PROJECT_DIR)\Sources\SYSTEM</directory>
+  <directory type="TESTABLE_SOURCE_DIR">$(PROJECT_DIR)\Lib</directory>
+  <directory type="TESTABLE_SOURCE_DIR">$(PROJECT_DIR)\Generated_Code</directory>
+  <directory type="TESTABLE_SOURCE_DIR">$(PROJECT_DIR)\Project_Headers</directory>
+  <directory type="LIBRARY_INCLUDE_DIR">$(VCAST_CW_INSTALL_DIR)\MCU\S12lisa_Support\s12lisac\include</directory>
+  <directory type="LIBRARY_INCLUDE_DIR">$(VCAST_CW_INSTALL_DIR)\MCU\S12lisa_Support\s12lisac\src</directory>
+  <directory type="LIBRARY_INCLUDE_DIR">$(VCAST_CW_INSTALL_DIR)\MCU\S12lisa_Support\s12lisac\lib_large</directory>
+</build_info>

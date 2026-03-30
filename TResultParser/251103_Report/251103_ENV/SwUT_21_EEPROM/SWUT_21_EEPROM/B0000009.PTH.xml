@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<basis_paths xml_basis_paths_version="1.0" basis_paths="FALSE" edg="Y" checksum="1246627939" handle_ternary="Y" handle_nested_ternary="Y" cover_declarations="Y" cover_headers="N" basis_paths_for_constant_branches="Y">
+  <subprogram index="1" name="BackupSector" parameterized="BackupSector(EEPROM_TAddress_,word,word)" canonical="" mangled="BackupSector" is_virtual_function="0" class_member="FALSE" testable="TRUE">
+    <listing_start>6</listing_start>
+    <listing_end>25</listing_end>
+  </subprogram>
+  <subprogram index="2" name="WriteBlock" parameterized="WriteBlock(EEPROM_TAddress_,word,word,word*)byte" canonical="" mangled="WriteBlock" is_virtual_function="0" class_member="FALSE" testable="TRUE">
+    <listing_start>26</listing_start>
+    <listing_end>62</listing_end>
+  </subprogram>
+  <subprogram index="3" name="SetupFCCOB" parameterized="SetupFCCOB(dword,word,word,word*,word*)byte" canonical="" mangled="SetupFCCOB" is_virtual_function="0" class_member="FALSE" testable="TRUE">
+    <listing_start>62</listing_start>
+    <listing_end>87</listing_end>
+  </subprogram>
+  <subprogram index="4" name="EraseSectorInternal" parameterized="EraseSectorInternal(EEPROM_TAddress_)byte" canonical="" mangled="EraseSectorInternal" is_virtual_function="0" class_member="FALSE" testable="TRUE">
+    <listing_start>87</listing_start>
+    <listing_end>109</listing_end>
+  </subprogram>
+  <subprogram index="5" name="WriteWord" parameterized="WriteWord(EEPROM_TAddress_,word)byte" canonical="" mangled="WriteWord" is_virtual_function="0" class_member="FALSE" testable="TRUE">
+    <listing_start>109</listing_start>
+    <listing_end>136</listing_end>
+  </subprogram>
+  <subprogram index="6" name="EEPROM_SetByte" parameterized="EEPROM_SetByte(EEPROM_TAddress_Const,byte)byte" canonical="" mangled="EEPROM_SetByte" is_virtual_function="0" class_member="FALSE" testable="TRUE">
+    <listing_start>136</listing_start>
+    <listing_end>179</listing_end>
+  </subprogram>
+  <subprogram index="7" name="EEPROM_GetByte" parameterized="EEPROM_GetByte(EEPROM_TAddress_Const,byte*)byte" canonical="" mangled="EEPROM_GetByte" is_virtual_function="0" class_member="FALSE" testable="TRUE">
+    <listing_start>179</listing_start>
+    <listing_end>200</listing_end>
+  </subprogram>
+  <subprogram index="8" name="EEPROM_Init" parameterized="EEPROM_Init()" canonical="" mangled="EEPROM_Init" is_virtual_function="0" class_member="FALSE" testable="TRUE">
+    <listing_start>200</listing_start>
+    <listing_end>205</listing_end>
+  </subprogram>
+</basis_paths>

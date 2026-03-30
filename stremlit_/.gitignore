@@ -1,0 +1,73 @@
+##############################
+# Python / 일반 개발 환경
+##############################
+
+# Python bytecode / 캐시
+__pycache__/
+*.py[cod]
+*.pyo
+
+# 가상환경
+.venv/
+venv/
+
+# 편의용 스크립트 결과, 로그
+*.log
+*.tmp
+
+##############################
+# 빌드 / 리포트 / 커버리지
+##############################
+
+# 루트 레벨 reports (옛 결과용, 혹시 남아있을 수 있음)
+reports/
+
+# C 프로젝트(my_lin_gateway) 내부 리포트
+my_lin_gateway/reports/
+
+# 일반 빌드 산출물
+build/
+dist/
+htmlcov/
+coverage/
+*.gcda
+*.gcno
+
+# CMake / Ninja 등 중간 산출물
+CMakeFiles/
+CMakeCache.txt
+*.cmake
+*.ninja
+*.o
+*.obj
+*.a
+*.so
+*.dll
+*.exe
+
+# qemu / 시뮬레이터 로그
+qemu.log
+
+##############################
+# QAC / CodeSonar (옵션)
+##############################
+
+# QAC 결과 (경로는 Jenkinsfile의 REPORT_ROOT 기준으로 잡음)
+my_lin_gateway/reports/qac/
+my_lin_gateway/reports/codesonar/
+
+##############################
+# IDE / 에디터 설정
+##############################
+
+.vscode/
+.idea/
+*.swp
+*.swo
+
+##############################
+# Docker / 기타
+##############################
+
+# Docker 이미지 export 등
+*.tar

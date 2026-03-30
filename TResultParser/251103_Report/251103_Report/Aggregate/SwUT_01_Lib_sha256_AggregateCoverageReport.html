@@ -1,0 +1,760 @@
+<!DOCTYPE html>
+<!-- VectorCAST Report header -->
+<html lang="en">
+  <head>
+    <title>Aggregate Coverage Report</title>
+    <meta charset="utf-8">
+    <style>
+    /*! normalize.css v8.0.0 | MIT License | github.com/necolas/normalize.css */
+html{line-height:1.15;-webkit-text-size-adjust:100%}
+body{margin:0}
+h1{font-size:2em;margin:.67em 0}
+hr{box-sizing:content-box;height:0;overflow:visible}
+pre{font-family:monospace,monospace;font-size:1em}
+a{background-color:transparent}
+abbr[title]{border-bottom:none;text-decoration:underline;text-decoration:underline dotted}
+b,strong{font-weight:bolder}
+code,kbd,samp{font-family:monospace,monospace;font-size:1em}
+small{font-size:80%}
+sub,sup{font-size:75%;line-height:0;position:relative;vertical-align:baseline}
+sub{bottom:-.25em}
+sup{top:-.5em}
+img{border-style:none}
+button,input,optgroup,select,textarea{font-family:inherit;font-size:100%;line-height:1.15;margin:0}
+button,input{overflow:visible}
+button,select{text-transform:none}
+[type=button],[type=reset],[type=submit],button{-webkit-appearance:button}
+[type=button]::-moz-focus-inner,[type=reset]::-moz-focus-inner,[type=submit]::-moz-focus-inner,button::-moz-focus-inner{border-style:none;padding:0}
+[type=button]:-moz-focusring,[type=reset]:-moz-focusring,[type=submit]:-moz-focusring,button:-moz-focusring{outline:1px dotted ButtonText}
+fieldset{padding:.35em .75em .625em}
+legend{box-sizing:border-box;color:inherit;display:table;max-width:100%;padding:0;white-space:normal}
+progress{vertical-align:baseline}
+textarea{overflow:auto}
+[type=checkbox],[type=radio]{box-sizing:border-box;padding:0}
+[type=number]::-webkit-inner-spin-button,[type=number]::-webkit-outer-spin-button{height:auto}
+[type=search]{-webkit-appearance:textfield;outline-offset:-2px}
+[type=search]::-webkit-search-decoration{-webkit-appearance:none}
+::-webkit-file-upload-button{-webkit-appearance:button;font:inherit}
+details{display:block}
+summary{display:list-item}
+template{display:none}
+[hidden]{display:none}
+ html {box-sizing:border-box;position:relative;height:100%;width:100%;}
+*, *:before, *:after {box-sizing:inherit;}
+body {position:relative;height:100%;width:100%;font-size:10pt;font-family:helvetica, Arial, sans-serif;color:#3a3e3f;}
+.alternate-font {font-family:"Arial Unicode MS", Arial, sans-serif;}
+#page {position:relative;width:100%;height:100%;overflow:hidden;}
+#title-bar {position:absolute;top:0px;left:0em;right:0px;height:1.8em;background-color:#b1b6ba;white-space:nowrap;box-shadow:1px 1px 5px black;z-index:100;}
+#report-title {font-size:3em;text-align:center;font-weight:bold;background-color:white;padding:0.5em;margin-bottom:0.75em;border:1px solid #e5e5e5;}
+.contents-block {position:absolute;top:1.8em;left:0em;width:22em;bottom:0em;overflow:auto;background-color:#dadee1;border-right:1px solid silver;padding-left:0.75em;padding-right:0.5em;}
+.testcase .report-block, .testcase .report-block-coverage {padding-bottom:2em;border-bottom:3px double #e5e5e5;}
+.testcase .report-block:last-child, .testcase .report-block-coverage:last-child {border-bottom:0px solid white;}
+.report-body {position:absolute;top:1.8em;left:22em;right:0em;bottom:0em;padding-left:2em;padding-right:2em;overflow:auto;padding-bottom:1.5em;background-color:#dadee1;}
+.report-body.no-toc {left:0em;}
+.report-body > .report-block, .report-body > .report-block-coverage, .report-body > .report-block-scroll, .report-body > .testcase {border:1px solid #e5e5e5;margin-bottom:2em;padding-bottom:1em;padding-right:2em;background-color:white;padding-left:2em;padding-top:0.1em;margin-top:1em;}
+.report-body > .report-block-scroll {overflow-x:visible;background-color:inherit;}
+.title-bar-heading {display:none;position:absolute;text-align:center;width:100%;color:white;font-size:3em;bottom:0px;margin-bottom:0.3em;}
+.title-bar-logo {display:inline-block;height:100%;}
+.title-bar-logo img {width:120px;margin-left:0.5em;margin-top:-16px;}
+.contents-block ul {padding-left:1.5em;list-style-type:none;line-height:1.5;}
+li.collapsible-toc > input ~ ul {display:none;}
+li.collapsible-toc > input:checked ~ ul {display:block;}
+li.collapsible-toc > input {display:none;}
+li.collapsible-toc > label {cursor:pointer;}
+li.collapsible-toc > label.collapse {display:none;}
+li.collapsible-toc > label.expand {display:inline;}
+li.collapsible-toc > input:checked ~ label.expand {display:none;}
+li.collapsible-toc > input:checked ~ label.collapse {display:inline;}
+.contents-block ul.toc-level1 {padding-left:1em;}
+.contents-block ul.toc-level1 > li {margin-top:0.75em;}
+.contents-block li {white-space:nowrap;text-overflow:ellipsis;overflow:hidden;}
+.tc-passed:before, .tc-failed:before, .tc-none:before{display:inline-block;margin-right:0.25em;width:0.5em;text-align:center;}
+.tc-passed:before {content:"✓";color:darkgreen;}
+.tc-failed:before {content:"✗";color:#b70032;}
+.tc-none:before {content:"•";}
+.tc-item {margin-top:0.75em;margin-left:-1em;}
+table {margin-top:0.5em;margin-bottom:1em;border-collapse:collapse;min-width:40em;}
+.expansion_row_icon_minus, .expansion_file_icon_minus, .expansion_all_icon_minus{display:none !important;}
+.sfp-table{margin:0;border-bottom:1px solid gray;min-width:50em;}
+.sfp-table th{padding:0 !important;border-bottom:solid 1px grey;font-size:15px;padding-left:2px !important;padding-right:2px !important;position:sticky;top:0;box-shadow:inset 0 -1px 0 gray;background-color:#f3f4f5;}
+.sfp-table td{padding:0;border-right:solid 1px grey;border-bottom:0;}
+.sfp-table td:last-child {border-right:0;padding-left:5px !important;}
+.sfp-table tr:hover, .highlight:hover{background-color:#f3f4f5;}
+table.table-hover tbody tr:hover {background-color:#dadee1;}
+th, td {text-align:left;padding:0.25em;padding-right:1em;border-bottom:1px solid #e5e5e5;}
+table thead th {border-bottom:2px solid silver;border-top:0;border-left:0;border-right:0;}
+.top-align {vertical-align:top;}
+.pull-right {display:none;}
+h1, h2 {border-bottom:3px solid silver;}
+h1, h2, h3, h4 {margin-top:1em;margin-bottom:0.25em;}
+h1 {font-size:3.5em;}
+h2 {font-size:2.5em;}
+h3 {font-size:2em;}
+h4 {font-size:1.25em;border-bottom:0;margin-bottom:0;}
+h5 {font-size:1em;font-weight:bold;margin-top:0.5em;margin-bottom:0.25em;}
+pre {padding:1em;padding-left:1.5em;border:1px solid #e5e5e5;background-color:#dadee1;min-width:40em;width:auto;clear:both;display:inline-block;margin-top:0.25em;}
+ul.unstyled {list-style-type:none;margin-top:0.25em;padding-left:0px;}
+ul {line-height:1.3;}
+p {margin-top:0.5em;margin-bottom:1em;max-width:50em;}
+pre p {max-width:inherit;}
+a, a:visited {color:inherit;text-decoration:none;}
+a:hover {text-decoration:underline;text-decoration-color:#b70032;-webkit-text-decoration-color:#b70032;-moz-text-decoration-color:#b70032;cursor:pointer;}
+pre.aggregate-coverage {padding-left:0px;padding-right:0px;margin-top:1em;}
+pre.aggregate-coverage span {width:100%;display:inline-block;padding-left:1em;padding-right:1em;line-height:1.3;}
+.sfp-code {padding:0;background-color:transparent;border:0;margin:0;white-space:pre;}
+.sfp-span {width:auto ! important;padding-left:0 ! important;padding-right:0 ! important;}
+.sfp-span-color {width:100% !important;padding-left:1px !important;padding-right:1px !important;}
+.sfp_number {text-align:right;width:1px;white-space:nowrap;padding-right:2px !important;font-family:monospace;}
+.sfp_coverage {text-align:center;white-space:nowrap;width:1em;font-family:monospace;}
+.sfp_color {padding-left:0 !important;padding-right:0 !important;width:1em;min-width:1em;font-family:monospace;}
+.sfp_cursor {cursor:pointer;}
+.sfp_cond {padding-left:3px !important;padding-right:3px !important;text-align:left;}
+.sfp_branch {padding-left:5px !important;padding-right:5px !important;}
+.up_arrow {position:absolute;left:65px;}
+.collapse_icon {float:right;height:24px;width:24px;display:inline-block;color:black;font-size:24px;line-height:24px;text-align:center;border-radius:50%;cursor:pointer;}
+.underline {color:#a0a0a0;}
+.temp_description {font-style:italic;}
+.ips {display:none;}
+.bg-success, .success, span.full-cvg, td.full-cvg {background-color:#c8f0c8;}
+span.ann-cvg, span.annpart-cvg, td.ann-cvg, td.annpart-cvg {background-color:#cacaff;}
+.bg-danger, .danger, span.no-cvg, td.no-cvg {background-color:#facaca;}
+.bg-warning, .warning, span.part-cvg, td.part-cvg {background-color:#f5f5c8;}
+.fit-content {width:max-content;}
+.rel-pos {position:relative;}
+.report-block > .bs-callout.test-timeline, .mcdc-condition {padding-left:0px;}
+.report-block.single-test {padding-left:2em;padding-right:2em;width:100%;height:100%;overflow:auto;}
+.test-action-header + h4.event{margin-top:0.5em;}
+.test-auto-header {background-color:LightGray;}
+.event.bs-callout > .bs-callout, .mcdc-condition {margin-bottom:2em;border-left:2px solid silver;}
+.event.bs-callout {margin-top:1.5em;}
+.bs-callout, .mcdc-condition {padding-left:1.5em;}
+.bs-callout.bs-callout-success {border-left:2px solid green;margin-left:0px;}
+.bs-callout.bs-callout-success .bs-callout.bs-callout-success {border-left:none;margin-left:0px;}
+.bs-callout.bs-callout-danger {border-left:2px solid #b70032;margin-left:0px;}
+.bs-callout.bs-callout-warning {border-left:2px solid wheat;padding-left:1.5em;margin-left:0px;}
+.event.bs-callout .bs-callout.bs-callout-warning {border-left:2px solid wheat;padding-left:1.5em;margin-left:0px;}
+.bs-callout.bs-callout-danger .bs-callout.bs-callout-danger {margin-left:1.5em;border-left:2px solid #b70032;padding-left:1.5em;}
+.bs-callout-info {margin-top:1em;}
+.text-muted {font-size:0.9em;}
+.test-action-header {border-top:3px solid silver;border-bottom:1px solid #e5e5e5;min-width:42em;white-space:nowrap;margin-bottom:0.5em;padding-top:0.25em;padding-bottom:0.25em;margin-top:2em;background-color:#dadee1;margin-left:-1.5em;padding-left:1.5em;}
+.test-action-header h4 {margin-top:0px;}
+.test-action-header:first-child{margin-top:0px;}
+.test-timeline > .event.bs-callout:first-child{margin-top:1em;}
+.event > .bs-callout {margin-left:2px !important;}
+.function-row {font-size:10px;}
+.function-cell {border-bottom:none;}
+.coupling-heading {border-bottom:2px solid silver;}
+.no-hover:hover {background-color:inherit !important;}
+.table-separator {border-bottom:none }
+.coupling-heading-name {font-size:1em;font-weight:bold;}
+.coupling-name {font-size:1em;font-style:italic;}
+.testcase-notes {white-space:pre;overflow-wrap:normal;}
+.mcdc-condition {margin-bottom:3em;}
+.mcdc-table {margin-top:0px;}
+.mcdc-rows-table {margin-top:2em;min-width:auto;}
+.mcdc-rows-table td{border:1px solid #e5e5e5;}
+.mcdc-condition.full-cvg {border-left-color:green;border-left-width:2px;}
+.mcdc-condition.part-cvg {border-left-color:wheat;border-left-width:2px;}
+.mcdc-condition.no-cvg {border-left-color:#b70032;border-left-width:2px;}
+.mcdc-all-pairs {text-align:right;}
+.i0 {padding-left:0.25em;min-width:11em }
+.i1 {padding-left:1.25em;min-width:11em }
+.i2 {padding-left:2.25em;}
+.i3 {padding-left:3.25em;}
+.i4 {padding-left:4.25em;}
+.i5 {padding-left:5.25em;}
+.i6 {padding-left:6.25em;}
+.i7 {padding-left:7.25em;}
+.i8 {padding-left:8.25em;}
+.i9 {padding-left:9.25em;}
+.i10 {padding-left:10.25em;}
+.i11 {padding-left:11.25em;}
+.i12 {padding-left:12.25em;}
+.i13 {padding-left:13.25em;}
+.i14 {padding-left:14.25em;}
+.i15 {padding-left:15.25em;}
+.i16 {padding-left:16.25em;}
+.i17 {padding-left:17.25em;}
+.i18 {padding-left:18.25em;}
+.i19 {padding-left:19.25em;}
+.i20 {padding-left:20.25em;}
+.right {float:right;}
+.req-notes-list {white-space:pre;}
+.uncovered_func_calls-list {white-space:pre;}
+.bold-text {font-weight:bold;}
+.static-cell {}
+.static-cell-right {text-align:right;}
+.static-doc {width:100%;}
+.static-title-bar {height:1.9em;width:100%;font-size:1.7em;border-bottom:1px solid #e5e5e5;margin:0;padding-top:8px;font-weight:bold;}
+.static-id {float:left;width:100px;}
+.static-title {float:left;}
+.static-doctext {width:auto;background-color:#efefef;border:1px solid #e5e5e5;min-width:40em;}
+.static-doctext pre {padding:0;margin:0.2em 0 0.2em 1em;border:none;}
+.static-doctext p {padding:0;margin:0.2em 0 0.2em 1em;}
+.static-doctext h2 {font-size:1.5em;}
+.static-doctext h3 {font-size:1.3em;}
+.missing_control_flow {max-width:40em;}
+.preformatted {font-family:monospace;white-space:pre;}
+.probe_point_notes {font-family:monospace;width:15%;}
+.col_unit {word-break:break-all;width:30%;}
+.col_subprogram {word-break:break-all;width:30%;}
+.col_complexity {white-space:nowrap;}
+.col_metric {white-space:nowrap;}
+.col_nowrap {white-space:nowrap;}
+.col_wrap {word-break:break-all;}
+.subtitle {font-size:1.3em;}
+.row {}
+.col-30 {-webkit-box-flex:0;-ms-flex:0 0 30%;flex:0 0 30%;max-width:30%;}
+.col-70 {-webkit-box-flex:0;-ms-flex:0 0 70%;flex:0 0 70%;max-width:70%;}
+td.linenos .normal {color:inherit;background-color:transparent;padding-left:5px;padding-right:5px;}
+td.linenos .special {color:#000000;background-color:#ffffc0;padding-left:5px;padding-right:5px;}
+span.linenos.special {color:#000000;background-color:#ffffc0;padding-left:5px;padding-right:5px;}
+.hll {background-color:#ffffcc }
+.c {color:#008000 }
+.err {border:1px solid #FF0000 }
+.k {color:#0000ff }
+.ch {color:#008000 }
+.cm {color:#008000 }
+.cp {color:#0000ff }
+.cpf {color:#008000 }
+.c1 {color:#008000 }
+.cs {color:#008000 }
+.ge {font-style:italic }
+.gh {font-weight:bold }
+.gp {font-weight:bold }
+.gs {font-weight:bold }
+.gu {font-weight:bold }
+.kc {color:#0000ff }
+.kd {color:#0000ff }
+.kn {color:#0000ff }
+.kp {color:#0000ff }
+.kr {color:#0000ff }
+.kt {color:#2b91af }
+.s {color:#a31515 }
+.nc {color:#2b91af }
+.ow {color:#0000ff }
+.sa {color:#a31515 }
+.sb {color:#a31515 }
+.sc {color:#a31515 }
+.dl {color:#a31515 }
+.sd {color:#a31515 }
+.s2 {color:#a31515 }
+.se {color:#a31515 }
+.sh {color:#a31515 }
+.si {color:#a31515 }
+.sx {color:#a31515 }
+.sr {color:#a31515 }
+.s1 {color:#a31515 }
+.ss {color:#a31515 }
+.style-select {display:inline-block;height:100%;float:right;padding-top:0.2em;padding-right:2em;}
+.style-select-title {font-size:1.1em;padding-right:0.5em;background-color:#b1b6ba;color:#3a3e3f;}
+.style-select-list {font-size:1.1em;outline:none;margin:0;border:none;background-color:#b1b6ba;color:#3a3e3f;}
+.vcastqt .style-select {display:none;}
+.dark .report-body > .testcase, .dark .report-body > .report-block, .dark #report-title, .dark .report-body > .report-block-coverage {background-color:#3a3f46;color:#dadee1;}
+.dark .contents-block, .dark .report-block {background-color:#3a3f46;color:#dadee1;}
+.dark .test-auto-header, .dark .test-action-header {background-color:#474747;}
+.dark .bs-callout.bs-callout-danger {border-left-width:3px;}
+.dark .bs-callout.bs-callout-success {border-left-width:3px;}
+.dark .bs-callout.bs-callout-warning {border-left-width:3px;}
+.dark .danger {background-color:#950b0b;}
+.dark .success {background-color:#057505;}
+.dark .warning {background-color:#836705;}
+.dark .bg-success, .dark .success, .dark span.full-cvg, .dark td.full-cvg {background-color:#057505;}
+.dark .bg-danger, .dark .danger, .dark span.no-cvg, .dark td.no-cvg {background-color:#950b0b;}
+.dark .bg-warning, .dark .warning, .dark span.part-cvg, .dark td.part-cvg {background-color:#836705;}
+.dark span.ann-cvg, .dark span.annpart-cvg, .dark td.ann-cvg, .dark td.annpart-cvg {background-color:#9966ff;}
+.dark pre {background-color:#6b6b6b;}
+.dark .report-body {background-color:#6b6b6b;}
+.dark th, .dark td {border-bottom:1px solid #6b6b6b;}
+.dark .mcdc-rows-table td {border:1px solid #6b6b6b;}
+.dark table.table-hover tbody tr:hover {background-color:#6b6b6b;}
+.dark .sfp-table tr:hover, .highlight:hover{background-color:#6b6b6b;}
+.dark .tc-passed:before {color:#057505;}
+.dark .tc-failed:before {color:#b70032;}
+.dark .sfp-table th {background-color:#6b6b6b;}
+.dark .sfp-table td{border-bottom:0;}
+.dark .hll {background-color:#ffffcc }
+.dark .err {border:1px solid #FF9999 }
+.dark .c {color:#00ff00 }
+.dark .ch {color:#00ff00 }
+.dark .cm {color:#00ff00 }
+.dark .cpf {color:#00ff00 }
+.dark .c1 {color:#00ff00 }
+.dark .cs {color:#00ff00 }
+.dark .k {color:#9999ff }
+.dark .cp {color:#9999ff }
+.dark .kc {color:#9999ff }
+.dark .kd {color:#9999ff }
+.dark .kn {color:#9999ff }
+.dark .kp {color:#9999ff }
+.dark .kr {color:#9999ff }
+.dark .ow {color:#9999ff }
+.dark .kt {color:#98d4e6 }
+.dark .nc {color:#98d4e6 }
+.dark .s {color:#ed7878 }
+.dark .sa {color:#ed7878 }
+.dark .sb {color:#ed7878 }
+.dark .sc {color:#ed7878 }
+.dark .dl {color:#ed7878 }
+.dark .sd {color:#ed7878 }
+.dark .s2 {color:#ed7878 }
+.dark .se {color:#ed7878 }
+.dark .sh {color:#ed7878 }
+.dark .si {color:#ed7878 }
+.dark .sx {color:#ed7878 }
+.dark .sr {color:#ed7878 }
+.dark .s1 {color:#ed7878 }
+.dark .ss {color:#ed7878 }
+.intense .report-body > .testcase, .intense .report-body > .report-block, .intense #report-title, .intense .report-body > .report-block-coverage {background-color:black;color:white;}
+.intense .contents-block, .intense .report-block {background-color:black;color:white;}
+.intense .test-auto-header, .intense .test-action-header {background-color:#474747;}
+.intense .bs-callout.bs-callout-danger {border-left-width:4px;}
+.intense .bs-callout.bs-callout-success {border-left-width:4px;}
+.intense .bs-callout.bs-callout-warning {border-left-width:4px;}
+.intense .danger {background-color:#8b0000;}
+.intense .success {background-color:#228b22;}
+.intense .warning {background-color:#ffd700;color:#000000;}
+.intense .bg-success, .intense .success, .intense span.full-cvg, .intense td.full-cvg {background-color:#228b22;}
+.intense .bg-danger, .intense .danger, .intense span.no-cvg, .intense td.no-cvg {background-color:#8b0000;}
+.intense .bg-warning, .intense .warning, .intense span.part-cvg, .intense td.part-cvg {background-color:#ffd700;color:#000000;}
+.intense span.ann-cvg, .intense span.annpart-cvg, .intense td.ann-cvg, .intense td.annpart-cvg {background-color:#07ebff;}
+.intense pre {font-weight:bold;background-color:#6b6b6b;}
+.intense .report-body {background-color:#6b6b6b;}
+.intense table.table-hover tbody tr:hover {background-color:#6b6b6b;}
+.intense .sfp-table tr:hover, .highlight:hover{background-color:#6b6b6b;}
+.intense th, .intense td {border-bottom:1px solid #6b6b6b;}
+.intense .mcdc-rows-table td {border:1px solid #6b6b6b;}
+.intense .tc-passed:before {font-weight:bold;color:#228b22;}
+.intense .tc-failed:before {font-weight:bold;color:#b70032;}
+.intense .sfp-table th {background-color:#6b6b6b;}
+.intense .sfp-table td{border-bottom:0;}
+.intense .hll {background-color:#ffffcc }
+.intense .err {border:1px solid #FF9999 }
+.intense .c {color:#00ff00 }
+.intense .ch {color:#00ff00 }
+.intense .cm {color:#00ff00 }
+.intense .cpf {color:#00ff00 }
+.intense .c1 {color:#00ff00 }
+.intense .cs {color:#00ff00 }
+.intense .k {color:#9999ff }
+.intense .cp {color:#9999ff }
+.intense .kc {color:#9999ff }
+.intense .kd {color:#9999ff }
+.intense .kn {color:#9999ff }
+.intense .kp {color:#9999ff }
+.intense .kr {color:#9999ff }
+.intense .ow {color:#9999ff }
+.intense .kt {color:#98d4e6 }
+.intense .nc {color:#98d4e6 }
+.intense .s {color:#ed7878 }
+.intense .sa {color:#ed7878 }
+.intense .sb {color:#ed7878 }
+.intense .sc {color:#ed7878 }
+.intense .dl {color:#ed7878 }
+.intense .sd {color:#ed7878 }
+.intense .s2 {color:#ed7878 }
+.intense .se {color:#ed7878 }
+.intense .sh {color:#ed7878 }
+.intense .si {color:#ed7878 }
+.intense .sx {color:#ed7878 }
+.intense .sr {color:#ed7878 }
+.intense .s1 {color:#ed7878 }
+.intense .ss {color:#ed7878 }
+@media print{html, body {height:auto;overflow:auto;color:black;}
+.contents-block {display:none;}
+#title-bar {position:initial;height:20pt;}
+#main-scroller {background-color:white;margin:0;padding:0;position:initial;left:auto;top:auto;}
+pre {background-color:white;font-size:10pt;border:none;border-left:1px solid #e5e5e5;font-size:9pt;}
+.report-body > .testcase, .report-body > .report-block, .report-body > .report-block-coverage {border:none;padding-bottom:0in;}
+.report-body > .testcase {page-break-before:always }
+#report-title {border:none;font-size:3em;text-align:left;font-weight:bold;padding-bottom:0px;border-bottom:3px solid silver;}
+h1, h2, h3, h4 {padding-top:0;margin-top:0.2in;}
+html, body, .report-body {background-color:white;font-size:1vw;}
+}
+
+    </style>
+    <script>
+     let currentStyleIndex = 0;var style_class = ["", "dark", "intense"];function changeStyle(new_style) {var newStyleIndex = new_style.selectedIndex;if (newStyleIndex != currentStyleIndex) {if (style_class[currentStyleIndex] != "") {document.documentElement.classList.remove(style_class[currentStyleIndex]);}
+if (style_class[newStyleIndex] != "") {document.documentElement.classList.add(style_class[newStyleIndex]);}
+currentStyleIndex = newStyleIndex;}
+}
+
+    </script>
+  </head>
+  <body>
+    <div id='page'>
+<!-- ReportTitle -->
+      <div id="title-bar">
+        <div class="title-bar-logo">
+          <img alt="Vector" src="data:image/svg+xml;base64,PD94bWwgdmVyc2lvbj0iMS4wIiBlbmNvZGluZz0idXRmLTgiPz4NCjwhLS0gR2VuZXJhdG9yOiBBZG9iZSBJbGx1c3RyYXRvciAxNi4wLjAsIFNWRyBFeHBvcnQgUGx1Zy1JbiAuIFNWRyBWZXJzaW9uOiA2LjAwIEJ1aWxkIDApICAtLT4NCjwhRE9DVFlQRSBzdmcgUFVCTElDICItLy9XM0MvL0RURCBTVkcgMS4xLy9FTiIgImh0dHA6Ly93d3cudzMub3JnL0dyYXBoaWNzL1NWRy8xLjEvRFREL3N2ZzExLmR0ZCI+DQo8c3ZnIHZlcnNpb249IjEuMSIgaWQ9IldPUlQtX3gyRl9CSUxETUFSS0Vfc1JHQiIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIiB4bWxuczp4bGluaz0iaHR0cDovL3d3dy53My5vcmcvMTk5OS94bGluayINCgkgeD0iMHB4IiB5PSIwcHgiIHdpZHRoPSI0MTUuMTc5cHgiIGhlaWdodD0iMTk3LjU3MnB4IiB2aWV3Qm94PSIwIDAgNDE1LjE3OSAxOTcuNTcyIiBlbmFibGUtYmFja2dyb3VuZD0ibmV3IDAgMCA0MTUuMTc5IDE5Ny41NzIiDQoJIHhtbDpzcGFjZT0icHJlc2VydmUiPg0KPHBvbHlnb24gaWQ9IkJpbGRtYXJrZV8xODNfeDJGXzBfeDJGXzUwIiBmaWxsPSIjQjcwMDMyIiBwb2ludHM9IjI5Mi4yODgsMTE1LjI1IDI5Mi4yODgsMTMxLjcxNSAzNDkuMzIyLDk4Ljc4NiAyOTIuMjg4LDY1Ljg1NyANCgkyOTIuMjg4LDgyLjMyMSAzMjAuODA1LDk4Ljc4NiAiLz4NCjxwb2x5Z29uIHBvaW50cz0iOTAuNTU0LDg0LjUyOSA5OC43ODcsODQuNTI5IDgyLjMyMiwxMTMuMDQ3IDY1Ljg1Nyw4NC41MjkgNzQuMDg5LDg0LjUyOSA4Mi4zMjIsOTguNzg4ICIvPg0KPHBhdGggZD0iTTIxNy43NTQsODMuODE5Yy04LjI2OSwwLTE0Ljk3Miw2LjcwMy0xNC45NzIsMTQuOTcyYzAsOC4yNjksNi43MDMsMTQuOTcxLDE0Ljk3MiwxNC45NzENCgljOC4yNjksMCwxNC45NzItNi43MDMsMTQuOTcyLTE0Ljk3MUMyMzIuNzI2LDkwLjUyMiwyMjYuMDIzLDgzLjgxOSwyMTcuNzU0LDgzLjgxOXogTTIxNy43NTUsMTA2LjY2OA0KCWMtNC4zNTEsMC03Ljg3OC0zLjUyNy03Ljg3OC03Ljg3OGMwLTQuMzUxLDMuNTI3LTcuODc3LDcuODc4LTcuODc3YzQuMzUxLDAsNy44NzgsMy41MjcsNy44NzgsNy44NzcNCglDMjI1LjYzMywxMDMuMTQyLDIyMi4xMDUsMTA2LjY2OCwyMTcuNzU1LDEwNi42Njh6Ii8+DQo8cGF0aCBkPSJNMTU1LjEyMSwxMDYuNjY4Yy00LjM1MSwwLTcuODc4LTMuNTI3LTcuODc4LTcuODc4YzAtNC4zNTEsMy41MjctNy44NzcsNy44NzgtNy44NzdjMi4xNzQsMCw0LjE0MywwLjg4MSw1LjU2OCwyLjMwNQ0KCWw1LjAxNi01LjAxNmMtMi43MDktMi43MDgtNi40NTEtNC4zODMtMTAuNTg0LTQuMzgzYy04LjI2OSwwLTE0Ljk3Miw2LjcwMy0xNC45NzIsMTQuOTcyYzAsOC4yNjksNi43MDMsMTQuOTcxLDE0Ljk3MiwxNC45NzENCgljNC4xMzYsMCw3Ljg3OS0xLjY3NiwxMC41ODktNC4zODdsLTUuMDE2LTUuMDE2QzE1OS4yNjgsMTA1Ljc4NiwxNTcuMjk3LDEwNi42NjgsMTU1LjEyMSwxMDYuNjY4eiIvPg0KPHBvbHlnb24gcG9pbnRzPSIxNzEuNDQ2LDkwLjk0NiAxODEuMDcxLDkwLjk0NiAxODEuMDcxLDExMy4wNDcgMTg4LjIwMSwxMTMuMDQ3IDE4OC4yMDEsOTAuOTQ2IDE5Ny44MjUsOTAuOTQ2IDE5Ny44MjUsODQuNTI5IA0KCTE3MS40NDYsODQuNTI5ICIvPg0KPHBvbHlnb24gcG9pbnRzPSIxMDguMDY5LDExMy4wNDcgMTMwLjE3LDExMy4wNDcgMTMwLjE3LDEwNi42MyAxMTUuMTk4LDEwNi42MyAxMTUuMTk4LDEwMS42NCAxMjYuODkxLDEwMS42NCAxMjYuODkxLDk1LjM2NiANCgkxMTUuMTk4LDk1LjM2NiAxMTUuMTk4LDkwLjk0NiAxMzAuMTcsOTAuOTQ2IDEzMC4xNyw4NC41MjkgMTA4LjA2OSw4NC41MjkgIi8+DQo8cGF0aCBkPSJNMjcwLjE4Nyw5NC4wNDdjMC01LjI1LTQuMjU1LTkuNTE4LTkuNTA1LTkuNTE4aC0xNy41ODd2MjguNTE4aDcuMTI5di05LjQ4Mmg2LjI0NGw1LjQ4Nyw5LjQ4Mmg4LjIzMWwtNS44OTktMTAuMjMxDQoJQzI2Ny43NDgsMTAxLjM5NSwyNzAuMTg3LDk4LjAyLDI3MC4xODcsOTQuMDQ3eiBNMjYwLjAyMyw5Ny4yMmgtOS43OTh2LTYuMzQ2aDkuNzk2YzEuNjg5LDAuMDc0LDMuMDM3LDEuNDY2LDMuMDM3LDMuMTczDQoJQzI2My4wNTgsOTUuNzUzLDI2MS43MTEsOTcuMTQ1LDI2MC4wMjMsOTcuMjJ6Ii8+DQo8L3N2Zz4NCg==">
+        </div>
+        <div class="style-select">
+          <span class="style-select-title">Style</span>
+          <select id="select-style" class="style-select-list" onchange="changeStyle(this)">
+            <option value="0">Normal</option>
+            <option value="1">Dark</option>
+            <option value="2">High Contrast</option>
+          </select>
+        </div>
+      </div>
+
+<!-- TableOfContents -->
+      <div class='contents-block'>
+        <a id="TableOfContents"></a>
+        <h3 class="toc-title-small">Contents</h3>
+        <ul class="toc-level1">
+          <li class=""><a href="#ConfigurationData">Configuration Data</a></li>
+          <li class=" collapsible-toc" title="Aggregate Coverage">
+            <label for="collapsible-5">Aggregate Coverage</label>
+            <input type="checkbox" id="collapsible-5">
+            <label class="expand" for="collapsible-5">►</label>
+            <label class="collapse" for="collapsible-5">▼</label>
+            <ul>
+              <li class=""><a href="#coverage_for_unit_9">Lib_sha256.c</a></li>
+            </ul>
+          </li>
+          <li class=""><a href="#Metrics">Metrics</a></li>
+        </ul>
+      </div><!-- Report body -->
+      <div class="report-body" id="main-scroller">
+        <div id="report-title">Aggregate Coverage Report</div>
+<!-- ConfigData -->
+        <div class='report-block'>
+          <div class="row">
+            <h2><a id="ConfigurationData"></a>Configuration Data</h2>
+            <div class="return-to-top"><span class="pull-right"><a href="#TableOfContents">Top</a></span></div>
+          </div>
+          <table class='table table-small'>
+            <tr><th>Environment Name</th><td>SWUT_01_LIB_SHA256</td></tr>
+            <tr><th>Date of Report Creation</th><td>04 NOV 2025</td></tr>
+            <tr><th>Time of Report Creation</th><td>4:07:02 PM</td></tr>
+          </table>
+        </div>
+<!-- AggregateCoverage -->
+        <div class='report-block-coverage'>
+          <div class="row">
+            <h2><a id="AggregateCoverage"></a>Aggregate Coverage</h2>
+            <div class="return-to-top"><span class="pull-right"><a href="#TableOfContents">Top</a></span></div>
+          </div>
+          <div class="row">
+            <div><h3><a id="coverage_for_unit_9"></a>Code Coverage for Lib_sha256</h3></div>
+            <div class="return-to-top"><span class="pull-right"><a href="#TableOfContents">Top</a></span></div>
+          </div>
+          <table class='table table-small'>
+            <thead>
+            </thead>
+            <tbody>
+            <tr>
+              <th>Coverage Type</th><td>Statement+Branch</td>
+            </tr>
+            <tr>
+              <th>Unit</th><td>Lib_sha256</td>
+            </tr>
+            <tr>
+              <th>Test Case</th><td>Aggregate</td>
+            </tr>
+            </tbody>
+          </table>
+
+          <pre class="aggregate-coverage"><span class="na-cvg"><strong>      </strong>                #include &#34;C:/WORKSPACE/NE1AW_PORTING/PROJECT_HEADERS/Include_File_Management.h&#34;</span>
+<span class="na-cvg"><strong>      </strong>                static Sha256ProgressCallback_t s_progress_callback = ((void *)0);</span>
+<span class="na-cvg"><strong>      </strong>                static const U32 k[64] = {</span>
+<span class="na-cvg"><strong>      </strong>                	0x428a2f98U, 0x71374491U, 0xb5c0fbcfU, 0xe9b5dba5U, 0x3956c25bU, 0x59f111f1U, 0x923f82a4U, 0xab1c5ed5U,</span>
+<span class="na-cvg"><strong>      </strong>                	0xd807aa98U, 0x12835b01U, 0x243185beU, 0x550c7dc3U, 0x72be5d74U, 0x80deb1feU, 0x9bdc06a7U, 0xc19bf174U,</span>
+<span class="na-cvg"><strong>      </strong>                	0xe49b69c1U, 0xefbe4786U, 0x0fc19dc6U, 0x240ca1ccU, 0x2de92c6fU, 0x4a7484aaU, 0x5cb0a9dcU, 0x76f988daU,</span>
+<span class="na-cvg"><strong>      </strong>                	0x983e5152U, 0xa831c66dU, 0xb00327c8U, 0xbf597fc7U, 0xc6e00bf3U, 0xd5a79147U, 0x06ca6351U, 0x14292967U,</span>
+<span class="na-cvg"><strong>      </strong>                	0x27b70a85U, 0x2e1b2138U, 0x4d2c6dfcU, 0x53380d13U, 0x650a7354U, 0x766a0abbU, 0x81c2c92eU, 0x92722c85U,</span>
+<span class="na-cvg"><strong>      </strong>                	0xa2bfe8a1U, 0xa81a664bU, 0xc24b8b70U, 0xc76c51a3U, 0xd192e819U, 0xd6990624U, 0xf40e3585U, 0x106aa070U,</span>
+<span class="na-cvg"><strong>      </strong>                	0x19a4c116U, 0x1e376c08U, 0x2748774cU, 0x34b0bcb5U, 0x391c0cb3U, 0x4ed8aa4aU, 0x5b9cca4fU, 0x682e6ff3U,</span>
+<span class="na-cvg"><strong>      </strong>                	0x748f82eeU, 0x78a5636fU, 0x84c87814U, 0x8cc70208U, 0x90befffaU, 0xa4506cebU, 0xbef9a3f7U, 0xc67178f2U</span>
+<span class="na-cvg"><strong>      </strong>                };</span>
+<span class="na-cvg"><strong>      </strong>                static void s_sha256_transform(SHA256_CTX *ctx, const U8 data[]);</span>
+<span class="na-cvg"><strong>      </strong>                static void s_sha256_init(SHA256_CTX *ctx);</span>
+<span class="na-cvg"><strong>      </strong>                static void s_sha256_update(SHA256_CTX *ctx,  const U8 *data, U32 len);</span>
+<span class="na-cvg"><strong>      </strong>                static void s_sha256_final(SHA256_CTX *ctx,  U8 *hash);</span>
+<span class="na-cvg"><strong>      </strong>                U8 u8g_Lib_Sha256_Hash[( U8 )32U];</span>
+<span class="na-cvg"><strong>      </strong>                static U32 s_safe_rotr(U32 value, U8 bits)</span>
+<span class="na-cvg"><strong>      </strong>                {</span>
+<span class="full-cvg success-marker"><strong>    41</strong> 1 0     (T)    s_safe_rotr</span>
+<span class="full-cvg success-marker"><strong>    42</strong> 1 1      *       U8 u8t_bits = (U8)(bits % ( U8 )32U);</span>
+<span class="full-cvg success-marker"><strong>    43</strong> 1 2      *       U32 u32t_result = value;</span>
+<span class="full-cvg success-marker"><strong>    44</strong> 1 3     (T)(F)   if (u8t_bits != ( U8 )0U)</span>
+<span class="na-cvg"><strong>      </strong>                    {</span>
+<span class="full-cvg success-marker"><strong>    46</strong> 1 4      *         u32t_result = (U32)((value &gt;&gt; u8t_bits) | (value &lt;&lt; (( U8 )32U - u8t_bits)));</span>
+<span class="na-cvg"><strong>      </strong>                    }</span>
+<span class="full-cvg success-marker"><strong>    48</strong> 1 5      *       return u32t_result;</span>
+<span class="na-cvg"><strong>      </strong>                }</span>
+<span class="na-cvg"><strong>      </strong>                static void s_sha256_transform(SHA256_CTX *ctx, const U8 data[])</span>
+<span class="na-cvg"><strong>      </strong>                {</span>
+<span class="na-cvg"><strong>      </strong>                	U32 a, b, c, d, e, f, g, h, i, j, t1, t2, m[64];</span>
+<span class="full-cvg success-marker"><strong>    54</strong> 2 0     (T)    s_sha256_transform</span>
+<span class="full-cvg success-marker"><strong>    58</strong> 2 1     (T)(F)   for (i = ( U32 )0U; i &lt; ( U32 )16U; i++)</span>
+<span class="na-cvg"><strong>      </strong>                	{</span>
+<span class="full-cvg success-marker"><strong>    60</strong> 2 2      *         j = i * ( U32 )4U;</span>
+<span class="full-cvg success-marker"><strong>    61</strong> 2 3      *         m[i] = ((U32)data[j] &lt;&lt; 24U) | ((U32)data[j + 1U] &lt;&lt; 16U) | ((U32)data[j + 2U] &lt;&lt; 8U) | ((U32)data[j + 3U]);</span>
+<span class="na-cvg"><strong>      </strong>                	}</span>
+<span class="full-cvg success-marker"><strong>    64</strong> 2 4     (T)(F)   for ( ; i &lt; ( U32 )64U; i++)</span>
+<span class="na-cvg"><strong>      </strong>                	{</span>
+<span class="full-cvg success-marker"><strong>    66</strong> 2 5      *         m[i] = ((U32)((U32)(((U32)((U32)((s_safe_rotr((U32)(m[i - ( U32 )2U]), (17U)) ^ s_safe_rotr((U32)(m[i - ( U32 )2U]), (19U)) ^ ((U32)(m[i - ( U32 )2U]) &gt;&gt; 10U))) + (U32)(m[i - ( U32 )7U])))) + (U32)(((U32)((U32)((s_safe_rotr((U32)(m[i - ( U32 )15U]), (7U)) ^ s_safe_rotr((U32)(m[i - ( U32 )15U]), (18U)) ^ ((U32)(m[i - ( U32 )15U]) &gt;&gt; 3U))) + (U32)(m[i - ( U32 )16U]))))));</span>
+<span class="na-cvg"><strong>      </strong>                	}</span>
+<span class="full-cvg success-marker"><strong>    69</strong> 2 6      *       a = ctx-&gt;state[0]; </span>
+<span class="full-cvg success-marker"><strong>    69</strong> 2 7      *       b = ctx-&gt;state[1]; </span>
+<span class="full-cvg success-marker"><strong>    69</strong> 2 8      *       c = ctx-&gt;state[2]; </span>
+<span class="full-cvg success-marker"><strong>    69</strong> 2 9      *       d = ctx-&gt;state[3];</span>
+<span class="full-cvg success-marker"><strong>    70</strong> 2 10     *       e = ctx-&gt;state[4]; </span>
+<span class="full-cvg success-marker"><strong>    70</strong> 2 11     *       f = ctx-&gt;state[5]; </span>
+<span class="full-cvg success-marker"><strong>    70</strong> 2 12     *       g = ctx-&gt;state[6]; </span>
+<span class="full-cvg success-marker"><strong>    70</strong> 2 13     *       h = ctx-&gt;state[7];</span>
+<span class="full-cvg success-marker"><strong>    72</strong> 2 14    (T)(F)   for (i = ( U32 )0U; i &lt; ( U32 )64U; i++) {</span>
+<span class="full-cvg success-marker"><strong>    73</strong> 2 15     *         t1 = ((U32)((U32)(((U32)((U32)(((U32)((U32)(((U32)((U32)(h) + (U32)((s_safe_rotr((U32)(e), (6U)) ^ s_safe_rotr((U32)(e), (11U)) ^ s_safe_rotr((U32)(e), (25U))))))) + (U32)((((e) &amp; (f)) ^ (~(e) &amp; (g))))))) + (U32)(k[i])))) + (U32)(m[i])));</span>
+<span class="full-cvg success-marker"><strong>    74</strong> 2 16     *         t2 = ((U32)((U32)((s_safe_rotr((U32)(a), (2U)) ^ s_safe_rotr((U32)(a), (13U)) ^ s_safe_rotr((U32)(a), (22U)))) + (U32)((((a) &amp; (b)) ^ ((a) &amp; (c)) ^ ((b) &amp; (c))))));</span>
+<span class="full-cvg success-marker"><strong>    75</strong> 2 17     *         h = g; </span>
+<span class="full-cvg success-marker"><strong>    75</strong> 2 18     *         g = f; </span>
+<span class="full-cvg success-marker"><strong>    75</strong> 2 19     *         f = e; </span>
+<span class="full-cvg success-marker"><strong>    75</strong> 2 20     *         e = ((U32)((U32)(d) + (U32)(t1))); </span>
+<span class="full-cvg success-marker"><strong>    75</strong> 2 21     *         d = c; </span>
+<span class="full-cvg success-marker"><strong>    75</strong> 2 22     *         c = b; </span>
+<span class="full-cvg success-marker"><strong>    75</strong> 2 23     *         b = a; </span>
+<span class="full-cvg success-marker"><strong>    75</strong> 2 24     *         a = ((U32)((U32)(t1) + (U32)(t2)));</span>
+<span class="na-cvg"><strong>      </strong>                	}</span>
+<span class="full-cvg success-marker"><strong>    78</strong> 2 25     *       ctx-&gt;state[0] = ((U32)((U32)(ctx-&gt;state[0]) + (U32)(a))); </span>
+<span class="full-cvg success-marker"><strong>    79</strong> 2 26     *       ctx-&gt;state[1] = ((U32)((U32)(ctx-&gt;state[1]) + (U32)(b))); </span>
+<span class="full-cvg success-marker"><strong>    80</strong> 2 27     *       ctx-&gt;state[2] = ((U32)((U32)(ctx-&gt;state[2]) + (U32)(c))); </span>
+<span class="full-cvg success-marker"><strong>    81</strong> 2 28     *       ctx-&gt;state[3] = ((U32)((U32)(ctx-&gt;state[3]) + (U32)(d)));</span>
+<span class="full-cvg success-marker"><strong>    82</strong> 2 29     *       ctx-&gt;state[4] = ((U32)((U32)(ctx-&gt;state[4]) + (U32)(e))); </span>
+<span class="full-cvg success-marker"><strong>    83</strong> 2 30     *       ctx-&gt;state[5] = ((U32)((U32)(ctx-&gt;state[5]) + (U32)(f))); </span>
+<span class="full-cvg success-marker"><strong>    84</strong> 2 31     *       ctx-&gt;state[6] = ((U32)((U32)(ctx-&gt;state[6]) + (U32)(g))); </span>
+<span class="full-cvg success-marker"><strong>    85</strong> 2 32     *       ctx-&gt;state[7] = ((U32)((U32)(ctx-&gt;state[7]) + (U32)(h)));</span>
+<span class="na-cvg"><strong>      </strong>                }</span>
+<span class="na-cvg"><strong>      </strong>                static void s_sha256_init(SHA256_CTX *ctx)</span>
+<span class="na-cvg"><strong>      </strong>                {</span>
+<span class="full-cvg success-marker"><strong>    89</strong> 3 0     (T)    s_sha256_init</span>
+<span class="full-cvg success-marker"><strong>    90</strong> 3 1      *       ctx-&gt;bitcount = 0U;</span>
+<span class="full-cvg success-marker"><strong>    91</strong> 3 2      *       ctx-&gt;state[0] = 0x6a09e667U; </span>
+<span class="full-cvg success-marker"><strong>    91</strong> 3 3      *       ctx-&gt;state[1] = 0xbb67ae85U; </span>
+<span class="full-cvg success-marker"><strong>    91</strong> 3 4      *       ctx-&gt;state[2] = 0x3c6ef372U;</span>
+<span class="full-cvg success-marker"><strong>    92</strong> 3 5      *       ctx-&gt;state[3] = 0xa54ff53aU; </span>
+<span class="full-cvg success-marker"><strong>    92</strong> 3 6      *       ctx-&gt;state[4] = 0x510e527fU; </span>
+<span class="full-cvg success-marker"><strong>    92</strong> 3 7      *       ctx-&gt;state[5] = 0x9b05688cU;</span>
+<span class="full-cvg success-marker"><strong>    93</strong> 3 8      *       ctx-&gt;state[6] = 0x1f83d9abU; </span>
+<span class="full-cvg success-marker"><strong>    93</strong> 3 9      *       ctx-&gt;state[7] = 0x5be0cd19U;</span>
+<span class="na-cvg"><strong>      </strong>                }</span>
+<span class="na-cvg"><strong>      </strong>                static void s_sha256_update(SHA256_CTX *ctx,  const U8 *data, U32 len)</span>
+<span class="na-cvg"><strong>      </strong>                {</span>
+<span class="full-cvg success-marker"><strong>    97</strong> 4 0     (T)    s_sha256_update</span>
+<span class="full-cvg success-marker"><strong>    98</strong> 4 1     (T)(F)   if (len != ( U32 )0U) {</span>
+<span class="na-cvg"><strong>      </strong>                        U32 i;</span>
+<span class="na-cvg"><strong>      </strong>                        U32 buffer_idx;</span>
+<span class="full-cvg success-marker"><strong>   103</strong> 4 2      *         buffer_idx = (U32)((ctx-&gt;bitcount / 8ULL) % 64ULL);</span>
+<span class="full-cvg success-marker"><strong>   105</strong> 4 3     (T)(F)     for (i = ( U32 )0U; i &lt; len; i++) {</span>
+<span class="full-cvg success-marker"><strong>   106</strong> 4 4      *           ctx-&gt;buffer[buffer_idx] = data[i];   </span>
+<span class="full-cvg success-marker"><strong>   107</strong> 4 5      *           buffer_idx++;</span>
+<span class="full-cvg success-marker"><strong>   108</strong> 4 6     (T)(F)       if (buffer_idx == ( U32 )64U) {</span>
+<span class="full-cvg success-marker"><strong>   109</strong> 4 7      *             s_sha256_transform(ctx, ctx-&gt;buffer);</span>
+<span class="full-cvg success-marker"><strong>   110</strong> 4 8      *             buffer_idx = ( U32 )0U;</span>
+<span class="na-cvg"><strong>      </strong>                            }</span>
+<span class="full-cvg success-marker"><strong>   112</strong> 4 9     (T)(F)       if (((i + ( U32 )1U) &amp; ( U32 )0x1FFFU) == 0U) {</span>
+<span class="full-cvg success-marker"><strong>   113</strong> 4 10    (T)(F)         if (s_progress_callback != ((void *)0)) {</span>
+<span class="full-cvg success-marker"><strong>   114</strong> 4 11     *               s_progress_callback();</span>
+<span class="na-cvg"><strong>      </strong>                                }</span>
+<span class="na-cvg"><strong>      </strong>                            }</span>
+<span class="na-cvg"><strong>      </strong>                        }</span>
+<span class="full-cvg success-marker"><strong>   119</strong> 4 12     *         ctx-&gt;bitcount += ((unsigned long long)len * 8ULL);</span>
+<span class="na-cvg"><strong>      </strong>                    }</span>
+<span class="na-cvg"><strong>      </strong>                }</span>
+<span class="na-cvg"><strong>      </strong>                static void s_sha256_final(SHA256_CTX *ctx,  U8 *hash)</span>
+<span class="na-cvg"><strong>      </strong>                {</span>
+<span class="na-cvg"><strong>      </strong>                	U32 i, j;</span>
+<span class="full-cvg success-marker"><strong>   124</strong> 5 0     (T)    s_sha256_final</span>
+<span class="full-cvg success-marker"><strong>   127</strong> 5 1      *       U32 buffer_idx = (U32)((ctx-&gt;bitcount / 8ULL) % 64ULL);</span>
+<span class="full-cvg success-marker"><strong>   129</strong> 5 2      *       ctx-&gt;buffer[buffer_idx] = 0x80U;</span>
+<span class="full-cvg success-marker"><strong>   130</strong> 5 3      *       buffer_idx++;</span>
+<span class="full-cvg success-marker"><strong>   132</strong> 5 4     (T)(F)   if (buffer_idx &gt; ( U32 )56U) {</span>
+<span class="full-cvg success-marker"><strong>   133</strong> 5 5     (T)(F)     while (buffer_idx &lt; ( U32 )64U) { </span>
+<span class="full-cvg success-marker"><strong>   133</strong> 5 6      *           ctx-&gt;buffer[buffer_idx] = 0x00U; </span>
+<span class="full-cvg success-marker"><strong>   133</strong> 5 7      *           buffer_idx++; }</span>
+<span class="full-cvg success-marker"><strong>   134</strong> 5 8      *         s_sha256_transform(ctx, ctx-&gt;buffer);</span>
+<span class="full-cvg success-marker"><strong>   135</strong> 5 9      *         buffer_idx = 0U;</span>
+<span class="na-cvg"><strong>      </strong>                    }</span>
+<span class="full-cvg success-marker"><strong>   138</strong> 5 10    (T)(F)   while (buffer_idx &lt; ( U32 )56U) { </span>
+<span class="full-cvg success-marker"><strong>   138</strong> 5 11     *         ctx-&gt;buffer[buffer_idx] = 0x00U; </span>
+<span class="full-cvg success-marker"><strong>   138</strong> 5 12     *         buffer_idx++; }</span>
+<span class="na-cvg"><strong>      </strong>                	{</span>
+<span class="full-cvg success-marker"><strong>   142</strong> 5 13     *       U32 bits = ( U32 )(ctx-&gt;bitcount);</span>
+<span class="full-cvg success-marker"><strong>   143</strong> 5 14     *       ctx-&gt;buffer[56] = 0x00U;</span>
+<span class="full-cvg success-marker"><strong>   144</strong> 5 15     *       ctx-&gt;buffer[57] = 0x00U;</span>
+<span class="full-cvg success-marker"><strong>   145</strong> 5 16     *       ctx-&gt;buffer[58] = 0x00U;</span>
+<span class="full-cvg success-marker"><strong>   146</strong> 5 17     *       ctx-&gt;buffer[59] = 0x00U;</span>
+<span class="full-cvg success-marker"><strong>   147</strong> 5 18     *       ctx-&gt;buffer[60] = (U8)(bits &gt;&gt; 24U);   </span>
+<span class="full-cvg success-marker"><strong>   148</strong> 5 19     *       ctx-&gt;buffer[61] = (U8)(bits &gt;&gt; 16U);</span>
+<span class="full-cvg success-marker"><strong>   149</strong> 5 20     *       ctx-&gt;buffer[62] = (U8)(bits &gt;&gt; 8U);</span>
+<span class="full-cvg success-marker"><strong>   150</strong> 5 21     *       ctx-&gt;buffer[63] = (U8)(bits);</span>
+<span class="na-cvg"><strong>      </strong>                	}</span>
+<span class="full-cvg success-marker"><strong>   153</strong> 5 22     *       s_sha256_transform(ctx, ctx-&gt;buffer);</span>
+<span class="full-cvg success-marker"><strong>   156</strong> 5 23    (T)(F)   for (i = ( U32 )0U; i &lt; ( U32 )8U; i++) {</span>
+<span class="full-cvg success-marker"><strong>   157</strong> 5 24     *         j = i * ( U32 )4U;</span>
+<span class="full-cvg success-marker"><strong>   158</strong> 5 25     *         hash[j] = (U8)(ctx-&gt;state[i] &gt;&gt; 24U);   </span>
+<span class="full-cvg success-marker"><strong>   159</strong> 5 26     *         hash[j + 1U] = (U8)(ctx-&gt;state[i] &gt;&gt; 16U);</span>
+<span class="full-cvg success-marker"><strong>   160</strong> 5 27     *         hash[j + 2U] = (U8)(ctx-&gt;state[i] &gt;&gt; 8U);</span>
+<span class="full-cvg success-marker"><strong>   161</strong> 5 28     *         hash[j + 3U] = (U8)(ctx-&gt;state[i]);          </span>
+<span class="na-cvg"><strong>      </strong>                    }</span>
+<span class="na-cvg"><strong>      </strong>                }</span>
+<span class="na-cvg"><strong>      </strong>                static void s_Sha256_Hash_Init(void)</span>
+<span class="na-cvg"><strong>      </strong>                {</span>
+<span class="na-cvg"><strong>      </strong>                    U8 u8t_Index;</span>
+<span class="full-cvg success-marker"><strong>   168</strong> 6 0     (T)    s_Sha256_Hash_Init</span>
+<span class="full-cvg success-marker"><strong>   171</strong> 6 1     (T)(F)   for (u8t_Index = 0U; u8t_Index &lt; ( U8 )32U; u8t_Index++) {</span>
+<span class="full-cvg success-marker"><strong>   172</strong> 6 2      *         u8g_Lib_Sha256_Hash[u8t_Index] = 0x00U;</span>
+<span class="na-cvg"><strong>      </strong>                    }</span>
+<span class="na-cvg"><strong>      </strong>                }</span>
+<span class="na-cvg"><strong>      </strong>                static SHA256_CTX s_nb_ctx;</span>
+<span class="na-cvg"><strong>      </strong>                static E_LIB_SHA256_NB_STATE s_nb_state = E_LIB_SHA256_NB_STATE_IDLE;</span>
+<span class="na-cvg"><strong>      </strong>                static  const U8 *s_nb_p_data;</span>
+<span class="na-cvg"><strong>      </strong>                static U32 s_nb_data_len;</span>
+<span class="na-cvg"><strong>      </strong>                static U32 s_nb_processed_len;</span>
+<span class="na-cvg"><strong>      </strong>                static U32 s_nb_process_count;</span>
+<span class="na-cvg"><strong>      </strong>                static U16 u16g_Sha256_Hash_Update_Count = 0U;</span>
+<span class="na-cvg"><strong>      </strong>                void g_Lib_Sha256_Nb_Start(void)</span>
+<span class="na-cvg"><strong>      </strong>                {</span>
+<span class="full-cvg success-marker"><strong>   215</strong> 7 0     (T)    g_Lib_Sha256_Nb_Start</span>
+<span class="full-cvg success-marker"><strong>   217</strong> 7 1     (T)(F)   if ((s_nb_state == E_LIB_SHA256_NB_STATE_IDLE) ||</span>
+<span class="na-cvg"><strong>      </strong>                        (s_nb_state == E_LIB_SHA256_NB_STATE_DONE) ||</span>
+<span class="na-cvg"><strong>      </strong>                        (s_nb_state == E_LIB_SHA256_NB_STATE_ERROR)) {</span>
+<span class="full-cvg success-marker"><strong>   221</strong> 7 2      *         s_Sha256_Hash_Init();</span>
+<span class="full-cvg success-marker"><strong>   223</strong> 7 3      *         s_nb_state = E_LIB_SHA256_NB_STATE_INIT;</span>
+<span class="full-cvg success-marker"><strong>   224</strong> 7 4      *         s_nb_process_count = ( U32 )0U;</span>
+<span class="na-cvg"><strong>      </strong>                    }</span>
+<span class="na-cvg"><strong>      </strong>                }</span>
+<span class="na-cvg"><strong>      </strong>                void g_Lib_Sha256_Nb_Process(void)</span>
+<span class="na-cvg"><strong>      </strong>                {</span>
+<span class="full-cvg success-marker"><strong>   230</strong> 8 0     (T)    g_Lib_Sha256_Nb_Process</span>
+<span class="full-cvg success-marker"><strong>   232</strong> 8 1      *       s_nb_process_count++;</span>
+<span class="full-cvg success-marker"><strong>   233</strong> 8 2     (T)(F)   if (s_nb_process_count &gt; ( U32 )5000) {</span>
+<span class="full-cvg success-marker"><strong>   234</strong> 8 3      *         s_nb_state = E_LIB_SHA256_NB_STATE_ERROR;</span>
+<span class="na-cvg"><strong>      </strong>                    }</span>
+<span class="na-cvg"><strong>      </strong>                    else</span>
+<span class="na-cvg"><strong>      </strong>                    {</span>
+<span class="full-cvg success-marker"><strong>   239</strong> 8 4      *         E_LIB_SHA256_NB_STATE local_state = s_nb_state;</span>
+<span class="full-cvg success-marker"><strong>   241</strong> 8 5      *         switch (local_state) {</span>
+<span class="full-cvg success-marker"><strong>   242</strong> 8 6     (T)          case E_LIB_SHA256_NB_STATE_INIT:</span>
+<span class="full-cvg success-marker"><strong>   243</strong> 8 7      *             s_sha256_init(&amp;s_nb_ctx);</span>
+<span class="full-cvg success-marker"><strong>   246</strong> 8 8      *             s_nb_p_data = ( const U8 *)(void *)(0xFE0000UL);</span>
+<span class="full-cvg success-marker"><strong>   248</strong> 8 9      *             s_nb_data_len = (U32)((0xFFA000UL) - (0xFE0000UL));</span>
+<span class="part-cvg success-marker fail-marker"><strong>   255</strong> 8 10    ( )(F)         if ((s_nb_data_len == 0U) || (s_nb_data_len &gt; 0x100000UL)) {   </span>
+<span class="no-cvg fail-marker"><strong>   256</strong> 8 11                     s_nb_state = E_LIB_SHA256_NB_STATE_ERROR;</span>
+<span class="no-cvg fail-marker"><strong>   257</strong> 8 12                     break;</span>
+<span class="na-cvg"><strong>      </strong>                                }</span>
+<span class="full-cvg success-marker"><strong>   261</strong> 8 13     *             s_nb_processed_len = ( U32 )0U;</span>
+<span class="full-cvg success-marker"><strong>   262</strong> 8 14     *             s_nb_state = E_LIB_SHA256_NB_STATE_UPDATE;</span>
+<span class="full-cvg success-marker"><strong>   263</strong> 8 15     *             break;</span>
+<span class="full-cvg success-marker"><strong>   265</strong> 8 16    (T)          case E_LIB_SHA256_NB_STATE_UPDATE:</span>
+<span class="full-cvg success-marker"><strong>   267</strong> 8 17     *             u16g_Sha256_Hash_Update_Count++;</span>
+<span class="full-cvg success-marker"><strong>   269</strong> 8 18    (T)(F)         if (s_nb_processed_len &lt; s_nb_data_len) {</span>
+<span class="full-cvg success-marker"><strong>   270</strong> 8 19     *               U32 len_to_process = s_nb_data_len - s_nb_processed_len;</span>
+<span class="full-cvg success-marker"><strong>   271</strong> 8 20    (T)(F)           if (len_to_process &gt; ( U32 )64) {</span>
+<span class="full-cvg success-marker"><strong>   272</strong> 8 21     *                 len_to_process = ( U32 )64;</span>
+<span class="na-cvg"><strong>      </strong>                                    }</span>
+<span class="full-cvg success-marker"><strong>   277</strong> 8 22    (T)(F)           if (((s_nb_p_data + s_nb_processed_len) + len_to_process) &gt;</span>
+<span class="na-cvg"><strong>      </strong>                                        ( const U8 *)(0xFFA000UL)) {</span>
+<span class="full-cvg success-marker"><strong>   279</strong> 8 23     *                 s_nb_state = E_LIB_SHA256_NB_STATE_ERROR;</span>
+<span class="full-cvg success-marker"><strong>   280</strong> 8 24     *                 break;</span>
+<span class="na-cvg"><strong>      </strong>                                    }</span>
+<span class="full-cvg success-marker"><strong>   284</strong> 8 25     *               s_sha256_update(&amp;s_nb_ctx, &amp;s_nb_p_data[s_nb_processed_len], len_to_process);</span>
+<span class="full-cvg success-marker"><strong>   285</strong> 8 26     *               s_nb_processed_len += len_to_process;</span>
+<span class="na-cvg"><strong>      </strong>                                } else {</span>
+<span class="full-cvg success-marker"><strong>   287</strong> 8 27     *               s_nb_state = E_LIB_SHA256_NB_STATE_FINAL;</span>
+<span class="na-cvg"><strong>      </strong>                                }</span>
+<span class="full-cvg success-marker"><strong>   289</strong> 8 28     *             break;</span>
+<span class="full-cvg success-marker"><strong>   291</strong> 8 29    (T)          case E_LIB_SHA256_NB_STATE_FINAL:</span>
+<span class="full-cvg success-marker"><strong>   292</strong> 8 30     *             s_sha256_final(&amp;s_nb_ctx, ( U8 *)u8g_Lib_Sha256_Hash);</span>
+<span class="full-cvg success-marker"><strong>   294</strong> 8 31     *             u16g_Sha256_Hash_Update_Count = ( U16 )0U;</span>
+<span class="full-cvg success-marker"><strong>   296</strong> 8 32     *             s_nb_state = E_LIB_SHA256_NB_STATE_DONE;</span>
+<span class="full-cvg success-marker"><strong>   297</strong> 8 33     *             break;</span>
+<span class="full-cvg success-marker"><strong>   299</strong> 8 34    (T)          case E_LIB_SHA256_NB_STATE_IDLE:</span>
+<span class="full-cvg success-marker"><strong>   300</strong> 8 35    (T)          case E_LIB_SHA256_NB_STATE_DONE:</span>
+<span class="full-cvg success-marker"><strong>   301</strong> 8 36    (T)          case E_LIB_SHA256_NB_STATE_ERROR:</span>
+<span class="full-cvg success-marker"><strong>   302</strong> 8 37    (T)          default:</span>
+<span class="full-cvg success-marker"><strong>   304</strong> 8 38     *             break;</span>
+<span class="na-cvg"><strong>      </strong>                        }</span>
+<span class="na-cvg"><strong>      </strong>                    }</span>
+<span class="na-cvg"><strong>      </strong>                }</span>
+<span class="na-cvg"><strong>      </strong>                E_LIB_SHA256_NB_STATE g_Lib_Sha256_Nb_GetState(void)</span>
+<span class="na-cvg"><strong>      </strong>                {</span>
+<span class="full-cvg success-marker"><strong>   310</strong> 9 0     (T)    g_Lib_Sha256_Nb_GetState</span>
+<span class="full-cvg success-marker"><strong>   311</strong> 9 1      *       return s_nb_state;</span>
+<span class="na-cvg"><strong>      </strong>                }</span>
+<span class="na-cvg"><strong>      </strong>                void g_Lib_Sha256_Nb_Reset(void)</span>
+<span class="na-cvg"><strong>      </strong>                {</span>
+<span class="full-cvg success-marker"><strong>   315</strong> 10 0    (T)    g_Lib_Sha256_Nb_Reset</span>
+<span class="full-cvg success-marker"><strong>   316</strong> 10 1     *       s_nb_state = E_LIB_SHA256_NB_STATE_IDLE;</span>
+<span class="full-cvg success-marker"><strong>   317</strong> 10 2     *       s_nb_processed_len = ( U32 )0U;</span>
+<span class="full-cvg success-marker"><strong>   318</strong> 10 3     *       s_nb_data_len = ( U32 )0;</span>
+<span class="full-cvg success-marker"><strong>   319</strong> 10 4     *       s_nb_p_data = ( const U8 *)0;</span>
+<span class="full-cvg success-marker"><strong>   320</strong> 10 5     *       s_nb_process_count = ( U32 )0;</span>
+<span class="na-cvg"><strong>      </strong>                }</span>
+</pre>
+
+          <h4>TEST COVERAGE SUMMARY</h4>
+          <p>
+   134 of 136 Lines Covered ( 98% )</p>
+          <p>
+   56 of 57 Branches Covered ( 98% )</p>
+        </div>
+<!-- Metrics -->
+        <div class='report-block'>
+          <div class="row">
+            <h2><a id="Metrics"></a>Metrics</h2>
+            <div class="return-to-top"><span class="pull-right"><a href="#TableOfContents">Top</a></span></div>
+          </div>
+          <h3 id="coverage_type">Statement+Branch</h3>
+          <table class='table table-small table-hover table-bordered'>
+            <thead class="thead-default">
+              <tr>
+                <th class="col_unit">Unit</th><th class="col_subprogram">Subprogram</th><th class="col_complexity">Complexity</th><th class="col_metric">Statements</th><th class="col_metric">Branches</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td class="col_unit">Lib_sha256</td><td class="col_subprogram">s_safe_rotr</td><td class="col_complexity">2</td><td class="success col_metric">5 / 5 (100%)</td><td class="success col_metric">3 / 3 (100%)</td>
+              </tr>
+              <tr>
+                <td class="col_unit">&nbsp;</td><td class="col_subprogram">s_sha256_transform</td><td class="col_complexity">4</td><td class="success col_metric">32 / 32 (100%)</td><td class="success col_metric">7 / 7 (100%)</td>
+              </tr>
+              <tr>
+                <td class="col_unit">&nbsp;</td><td class="col_subprogram">s_sha256_init</td><td class="col_complexity">1</td><td class="success col_metric">9 / 9 (100%)</td><td class="success col_metric">1 / 1 (100%)</td>
+              </tr>
+              <tr>
+                <td class="col_unit">&nbsp;</td><td class="col_subprogram">s_sha256_update</td><td class="col_complexity">6</td><td class="success col_metric">12 / 12 (100%)</td><td class="success col_metric">11 / 11 (100%)</td>
+              </tr>
+              <tr>
+                <td class="col_unit">&nbsp;</td><td class="col_subprogram">s_sha256_final</td><td class="col_complexity">5</td><td class="success col_metric">28 / 28 (100%)</td><td class="success col_metric">9 / 9 (100%)</td>
+              </tr>
+              <tr>
+                <td class="col_unit">&nbsp;</td><td class="col_subprogram">s_Sha256_Hash_Init</td><td class="col_complexity">2</td><td class="success col_metric">2 / 2 (100%)</td><td class="success col_metric">3 / 3 (100%)</td>
+              </tr>
+              <tr>
+                <td class="col_unit">&nbsp;</td><td class="col_subprogram">g_Lib_Sha256_Nb_Start</td><td class="col_complexity">2</td><td class="success col_metric">4 / 4 (100%)</td><td class="success col_metric">3 / 3 (100%)</td>
+              </tr>
+              <tr>
+                <td class="col_unit">&nbsp;</td><td class="col_subprogram">g_Lib_Sha256_Nb_Process</td><td class="col_complexity">12</td><td class="warning col_metric">36 / 38 (94%)</td><td class="warning col_metric">17 / 18 (94%)</td>
+              </tr>
+              <tr>
+                <td class="col_unit">&nbsp;</td><td class="col_subprogram">g_Lib_Sha256_Nb_GetState</td><td class="col_complexity">1</td><td class="success col_metric">1 / 1 (100%)</td><td class="success col_metric">1 / 1 (100%)</td>
+              </tr>
+              <tr>
+                <td class="col_unit">&nbsp;</td><td class="col_subprogram">g_Lib_Sha256_Nb_Reset</td><td class="col_complexity">1</td><td class="success col_metric">5 / 5 (100%)</td><td class="success col_metric">1 / 1 (100%)</td>
+              </tr>
+              <tr>
+                <th class="col_unit">TOTALS</th><th class="col_subprogram">10</th><th class="col_complexity">36</th><th class="warning col_metric">134 / 136 (98%)</th><th class="warning col_metric">56 / 57 (98%)</th>
+              </tr>
+              <tr>
+                <th class="col_unit">GRAND TOTALS</th><th class="col_subprogram">10</th><th class="col_complexity">36</th><th class="warning col_metric">134 / 136 (98%)</th><th class="warning col_metric">56 / 57 (98%)</th>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+<!-- VectorCAST Report footer -->
+      </div>
+    </div>
+  </body>
+</html>

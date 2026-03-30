@@ -1,0 +1,25 @@
+Software Requirements Specification - Sample Module
+====================================================
+
+1. Introduction
+   The communication module provides data frame processing capabilities
+   for the embedded gateway system.
+
+2. Requirements
+
+   REQ-SW-001: The system shall initialize the communication module
+   with a valid configuration structure.
+   ASIL: ASIL-B
+
+   REQ-SW-002: The system shall process incoming data frames and store
+   them in an internal buffer with a maximum size of 256 bytes.
+   ASIL: ASIL-B
+
+   REQ-SW-003: The system shall provide a reset function to restore
+   the module to its initial state.
+   ASIL: QM
+
+3. Interfaces
+   - g_comm_init: Initialize module
+   - g_process_frame: Process data frame
+   - g_comm_reset: Reset module

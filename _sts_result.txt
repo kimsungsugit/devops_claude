@@ -1,0 +1,9 @@
+Total STS TCs: 63
+With SRS link (col13): 63 (100.0%)
+Safety Related (col4): 55 (87.3%)
+Sample TCs:
+  SwTC_SwEI_01_01 -> srs_id=SwEI_01, safety=X, method=FIT
+  SwTC_SwEI_02_01 -> srs_id=SwEI_02, safety=X, method=FIT
+  SwTC_SwEI_03_01 -> srs_id=SwEI_03, safety=X, method=FIT
+  SwTC_SwEI_04_01 -> srs_id=SwEI_04, safety=X, method=FIT
+  SwTC_SwEI_05_01 -> srs_id=SwEI_05, safety=X, method=FIT

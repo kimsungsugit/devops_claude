@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<typefile version="1">
+  <type typeid="100001" typetype="STR_ING" array_type="800002" string_type_type="AR_RAY" typemark="CCAST_8_1" original_type_name="char  [8]">
+    <range_data size="8%%"/>
+  </type>
+  <type typeid="100002" typetype="AR_RAY" array_type="800001" typemark="CCAST_8_2" original_type_name="int  [4]">
+    <range_data size="4%%"/>
+  </type>
+  <type typeid="100003" typetype="AR_RAY" array_type="900007" typemark="CCAST_9_3" original_type_name="U32  [64]">
+    <range_data size="64%%"/>
+  </type>
+  <type typeid="100004" typetype="STR_ING" array_type="900008" string_type_type="AR_RAY" typemark="CCAST_9_4" original_type_name="U8  [(U8 )32U]">
+    <range_data size="32%%"/>
+  </type>
+  <type typeid="100005" typetype="REC_ORD" ada_scope="__T381389256" typemark="CCAST_9_5" store_class="1">
+    <field index="1" name="state" typeid="100006" const_qualified="0" is_static_field="0"/>
+    <field index="2" name="bitcount" typeid="900010" const_qualified="0" is_static_field="0"/>
+    <field index="3" name="buffer" typeid="100007" const_qualified="0" is_static_field="0"/>
+  </type>
+  <type typeid="100006" typetype="AR_RAY" array_type="900007" typemark="CCAST_9_6" original_type_name="U32  [8]">
+    <range_data size="8%%"/>
+  </type>
+  <type typeid="100007" typetype="STR_ING" array_type="900008" string_type_type="AR_RAY" typemark="CCAST_9_7" original_type_name="U8  [64]">
+    <range_data size="64%%"/>
+  </type>
+  <type typeid="100008" typetype="ENUMERATION" typemark="CCAST_9_8">
+    <range_data min="E_LIB_SHA256_NB_STATE_IDLE" max="E_LIB_SHA256_NB_STATE_ERROR"/>
+    <enum value="E_LIB_SHA256_NB_STATE_IDLE" constant="0"/>
+    <enum value="E_LIB_SHA256_NB_STATE_INIT" constant="1"/>
+    <enum value="E_LIB_SHA256_NB_STATE_UPDATE" constant="2"/>
+    <enum value="E_LIB_SHA256_NB_STATE_FINAL" constant="3"/>
+    <enum value="E_LIB_SHA256_NB_STATE_DONE" constant="4"/>
+    <enum value="E_LIB_SHA256_NB_STATE_ERROR" constant="5"/>
+  </type>
+  <type typeid="800001" typetype="INT_EGER" typemark="int"/>
+  <type typeid="800002" typetype="CHAR_ACTER" typemark="char"/>
+  <type typeid="900001" typetype="STR_ING" pointer_type="900008" string_type_type="ACCE_SS" typemark="U8*"/>
+  <type typeid="900002" typetype="UN_SIGNED" typemark="unsigned"/>
+  <type typeid="900003" typetype="INT_EGER" typemark="signed int"/>
+  <type typeid="900004" typetype="PROCEDURE_POINTER" typemark="void (*)(void)">
+    <function_candidate index="0" name="s_Sha256_Hash_Init"/>
+    <function_candidate index="1" name="g_Lib_Sha256_Nb_Start"/>
+    <function_candidate index="2" name="g_Lib_Sha256_Nb_Process"/>
+    <function_candidate index="3" name="g_Lib_Sha256_Nb_Reset"/>
+  </type>
+  <type typeid="900005" typetype="UNKNOWN" typemark="void (void)"/>
+  <type typeid="900006" typetype="NOT_SUPPORTED" unsupported_type_reason="TI_STATUS_VOID_TYPES_ARE_UNTESTABLE" typemark="void"/>
+  <type typeid="900007" typetype="UNSIGNED_LONG" typemark="unsigned long"/>
+  <type typeid="900008" typetype="UNSIGNED_CHAR" typemark="unsigned char"/>
+  <type typeid="900009" typetype="REC_ORD" ada_scope="__T381389256" typemark="SHA256_CTX" store_class="1">
+    <field index="1" name="state" typeid="100006" const_qualified="0" is_static_field="0"/>
+    <field index="2" name="bitcount" typeid="900010" const_qualified="0" is_static_field="0"/>
+    <field index="3" name="buffer" typeid="100007" const_qualified="0" is_static_field="0"/>
+  </type>
+  <type typeid="900010" typetype="UNSIGNED_LONG_LONG" typemark="unsigned long long"/>
+  <type typeid="900011" typetype="ENUMERATION" typemark="E_LIB_SHA256_NB_STATE">
+    <range_data min="E_LIB_SHA256_NB_STATE_IDLE" max="E_LIB_SHA256_NB_STATE_ERROR"/>
+    <enum value="E_LIB_SHA256_NB_STATE_IDLE" constant="0"/>
+    <enum value="E_LIB_SHA256_NB_STATE_INIT" constant="1"/>
+    <enum value="E_LIB_SHA256_NB_STATE_UPDATE" constant="2"/>
+    <enum value="E_LIB_SHA256_NB_STATE_FINAL" constant="3"/>
+    <enum value="E_LIB_SHA256_NB_STATE_DONE" constant="4"/>
+    <enum value="E_LIB_SHA256_NB_STATE_ERROR" constant="5"/>
+  </type>
+  <type typeid="900012" typetype="ACCE_SS" pointer_type="900002" typemark="U16*"/>
+  <type typeid="900013" typetype="ACCE_SS" pointer_type="900009" typemark="SHA256_CTX*"/>
+</typefile>

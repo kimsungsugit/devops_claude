@@ -1,0 +1,69 @@
+{
+  "srs_parsing": {
+    "txt_available": true,
+    "docx_available": true,
+    "txt_primary_count": 102,
+    "txt_fallback_count": 104,
+    "txt_primary_success": true,
+    "txt_blocks_with_asil": 33,
+    "txt_blocks_with_related_id": 102,
+    "docx_text_length": 72891,
+    "docx_primary_count": 103,
+    "docx_fallback_count": 87,
+    "docx_primary_success": true
+  },
+  "sds_parsing": {
+    "txt_available": true,
+    "docx_available": true,
+    "partition_count": 35,
+    "partitions_with_asil": 35,
+    "partitions_with_related": 3,
+    "txt_swcom_count": 33
+  },
+  "reference_suds": {
+    "available": true,
+    "total_functions": 416,
+    "name_filled": 416,
+    "name_rate": 1.0,
+    "prototype_filled": 416,
+    "prototype_rate": 1.0,
+    "description_filled": 413,
+    "description_rate": 0.9928,
+    "asil_filled": 416,
+    "asil_rate": 1.0,
+    "related_filled": 416,
+    "related_rate": 1.0,
+    "inputs_filled": 300,
+    "inputs_rate": 0.7212,
+    "outputs_filled": 372,
+    "outputs_rate": 0.8942,
+    "globals_global_filled": 395,
+    "globals_global_rate": 0.9495,
+    "globals_static_filled": 41,
+    "globals_static_rate": 0.0986,
+    "called_filled": 416,
+    "called_rate": 1.0,
+    "calling_filled": 416,
+    "calling_rate": 1.0,
+    "precondition_filled": 414,
+    "precondition_rate": 0.9952
+  },
+  "code_analysis": {
+    "source_root_exists": true,
+    "c_files": 48,
+    "h_files": 51,
+    "total_files": 99,
+    "global_var_names": 510,
+    "static_var_names": 611,
+    "interface_functions": 49,
+    "internal_functions": 197,
+    "naming_convention_detected": true
+  },
+  "json_parsing": {
+    "total_samples": 7,
+    "success": 7,
+    "failure": 0,
+    "details": [],
+    "success_rate": 1.0
+  }
+}

@@ -1,0 +1,173 @@
+- generic [ref=e3]:
+  - generic [ref=e5]:
+    - button "로컬" [ref=e6] [cursor=pointer]
+    - button "Jenkins" [ref=e7] [cursor=pointer]
+  - generic [ref=e8]:
+    - main [ref=e9]:
+      - generic [ref=e10]:
+        - generic [ref=e11]:
+          - generic [ref=e12]:
+            - generic [ref=e13]:
+              - generic [ref=e14]: Devops/
+              - generic [ref=e15]: Local/
+              - generic [ref=e72]: Analyzer
+            - generic [ref=e17]: Analyzer
+            - generic [ref=e18]: "세션 생성: -"
+          - generic [ref=e20]: READY
+          - button "다크 모드로 전환" [ref=e22] [cursor=pointer]: 다크 모드
+        - navigation "주 네비게이션" [ref=e23]:
+          - button "대시보드 탭" [ref=e24] [cursor=pointer]: 대시보드
+          - button "워크플로우 탭" [ref=e26] [cursor=pointer]: 워크플로우
+          - button "에디터 탭" [ref=e28] [cursor=pointer]: 에디터
+          - button "Analyzer 탭" [ref=e30] [cursor=pointer]: Analyzer
+          - button "설정 탭" [ref=e32] [cursor=pointer]: 설정
+        - generic [ref=e35]: 로컬 모드
+        - generic [ref=e73]:
+          - heading "Analyzer" [level=3] [ref=e74]
+          - generic [ref=e75]: Analyzer now covers UDS, STS, and SUTS generation plus result views for Local and Jenkins modes.
+          - generic [ref=e76]:
+            - generic [ref=e77]:
+              - strong [ref=e78]: QA Checklist
+              - generic [ref=e79]: 4/6 checks
+            - generic [ref=e80]:
+              - generic [ref=e81]:
+                - generic [ref=e82]: Latest Run card shows UDS, STS, and SUTS artifacts.
+                - generic [ref=e83]: CHECK
+              - generic [ref=e84]:
+                - generic [ref=e85]: Latest Run rows can switch to the matching artifact tab.
+                - generic [ref=e86]: CHECK
+              - generic [ref=e87]:
+                - generic [ref=e88]: Latest Run rows have validation actions.
+                - generic [ref=e89]: PASS
+              - generic [ref=e90]:
+                - generic [ref=e91]: Latest Run rows expose summary metrics.
+                - generic [ref=e92]: PASS
+              - generic [ref=e93]:
+                - generic [ref=e94]: Current latest artifacts pass validation.
+                - generic [ref=e95]: PASS
+              - generic [ref=e96]:
+                - generic [ref=e97]: Preview panel is ready for report/preview review.
+                - generic [ref=e98]: PASS
+          - generic [ref=e99]:
+            - button "Impact" [ref=e100] [cursor=pointer]
+            - button "UDS" [ref=e101] [cursor=pointer]
+            - button "STS" [ref=e102] [cursor=pointer]
+            - button "SUTS" [ref=e103] [cursor=pointer]
+          - generic [ref=e294]:
+            - generic [ref=e295]:
+              - generic [ref=e296]:
+                - button "Current" [ref=e297] [cursor=pointer]
+                - button "Applied" [active] [ref=e298] [cursor=pointer]
+              - combobox [ref=e361]:
+                - option "SCM Registry" [selected]
+            - generic [ref=e362]:
+              - generic [ref=e363]:
+                - strong [ref=e364]: STS Applied Change History
+                - generic [ref=e365]: 0 runs
+              - generic [ref=e366]:
+                - generic [ref=e368]: No applied STS change history.
+                - generic [ref=e369]:
+                  - generic [ref=e370]:
+                    - strong [ref=e371]: Applied Review
+                    - generic [ref=e372]: select run
+                  - generic [ref=e373]: Select a run to inspect applied STS changes.
+            - generic [ref=e299]:
+              - generic [ref=e300]:
+                - generic [ref=e301]:
+                  - heading "STS Generator" [level=3] [ref=e302]
+                  - generic [ref=e303]: Local
+                - generic [ref=e304]:
+                  - generic [ref=e305]:
+                    - text: Source Root
+                    - generic [ref=e306]:
+                      - textbox "Source root" [ref=e307]
+                      - button "Browse" [ref=e308] [cursor=pointer]
+                  - generic [ref=e309]:
+                    - generic [ref=e310]: SRS Path (필수)
+                    - generic [ref=e311]:
+                      - textbox "SRS docx path" [ref=e312]
+                      - button "Browse" [ref=e313] [cursor=pointer]
+                  - generic [ref=e314]:
+                    - generic [ref=e315]: SDS Path (선택 — 설계 컨텍스트)
+                    - generic [ref=e316]:
+                      - textbox "SDS docx path (optional)" [ref=e317]
+                      - button "Browse" [ref=e318] [cursor=pointer]
+                  - generic [ref=e319]:
+                    - generic [ref=e320]: HSIS Path (선택 — HW/SW 인터페이스, auto-discover)
+                    - generic [ref=e321]:
+                      - textbox "HSIS xlsx path (optional, auto-discovered)" [ref=e322]
+                      - button "Browse" [ref=e323] [cursor=pointer]
+                  - generic [ref=e324]:
+                    - generic [ref=e325]: UDS Path (선택 — 함수 설명 재사용)
+                    - generic [ref=e326]:
+                      - textbox "UDS docx/xlsm path (optional)" [ref=e327]
+                      - button "Browse" [ref=e328] [cursor=pointer]
+                  - generic [ref=e329]:
+                    - generic [ref=e330]: STP Path (선택 — 시험 전략)
+                    - generic [ref=e331]:
+                      - textbox "STP docx path (optional)" [ref=e332]
+                      - button "Browse" [ref=e333] [cursor=pointer]
+                  - generic [ref=e334]:
+                    - text: Template Path
+                    - generic [ref=e335]:
+                      - textbox "Optional template path" [ref=e336]
+                      - button "Browse" [ref=e337] [cursor=pointer]
+                  - generic [ref=e338]:
+                    - textbox "Project ID" [ref=e339]: HDPDM01
+                    - textbox "Version" [ref=e340]: v1.00
+                    - combobox [ref=e341]:
+                      - option "N/A"
+                      - option "QM"
+                      - option "ASIL-A"
+                      - option "ASIL-B" [selected]
+                      - option "ASIL-C"
+                      - option "ASIL-D"
+                    - spinbutton [ref=e342]: "5"
+                  - generic [ref=e343]: HTTP 500
+                  - button "Generate STS" [ref=e345] [cursor=pointer]
+              - generic [ref=e347]:
+                - button "목록 새로고침" [ref=e348] [cursor=pointer]
+                - combobox [ref=e349]:
+                  - option "파일 선택" [selected]
+                - button "상세 조회" [disabled] [ref=e350]
+              - generic [ref=e351]:
+                - generic [ref=e352]:
+                  - heading "STS Result Viewer" [level=4] [ref=e353]
+                  - button "Refresh" [ref=e354] [cursor=pointer]
+                - generic [ref=e355]: No result loaded.
+                - generic [ref=e356]:
+                  - generic [ref=e357]:
+                    - heading "History" [level=5] [ref=e358]
+                    - generic [ref=e359]: 0 files
+                  - generic [ref=e360]: No generated files.
+    - complementary [ref=e37]:
+      - generic [ref=e38]:
+        - heading "분석 도우미" [level=4] [ref=e39]
+        - generic [ref=e40]:
+          - button "내보내기" [ref=e41] [cursor=pointer]
+          - button "초기화" [ref=e42] [cursor=pointer]
+          - button "닫기" [ref=e43] [cursor=pointer]
+      - generic [ref=e44]:
+        - button "현재 상태 요약해줘" [ref=e45] [cursor=pointer]
+        - button "이슈 우선순위 추천해줘" [ref=e46] [cursor=pointer]
+        - button "커버리지 개선 방법" [ref=e47] [cursor=pointer]
+        - button "다음 해야 할 작업은?" [ref=e48] [cursor=pointer]
+        - button "실패 원인 분석해줘" [ref=e49] [cursor=pointer]
+      - generic [ref=e51]:
+        - paragraph [ref=e54]: 대시보드 요약을 해석하거나 다음 단계 추천을 도와드릴게요.
+        - generic [ref=e55]:
+          - generic [ref=e56]: 오후 03:13
+          - button "복사" [ref=e57] [cursor=pointer]
+      - generic [ref=e59]:
+        - textbox "질문을 입력하세요 (Enter 전송, Shift+Enter 줄바꿈)" [ref=e60]
+        - button "전송" [disabled] [ref=e61]
+  - contentinfo [ref=e62]:
+    - generic [ref=e63]:
+      - generic [ref=e64]: Devops
+      - generic [ref=e65]: 로컬 / Analyzer
+      - generic [ref=e66]: "세션: ?몄뀡 ?놁쓬"
+      - generic [ref=e67]: "상태: idle"
+    - generic [ref=e68]:
+      - button "상태 새로고침" [disabled] [ref=e69]
+      - button "로그 새로고침" [disabled] [ref=e70]
+      - button "테마 전환" [ref=e71] [cursor=pointer]

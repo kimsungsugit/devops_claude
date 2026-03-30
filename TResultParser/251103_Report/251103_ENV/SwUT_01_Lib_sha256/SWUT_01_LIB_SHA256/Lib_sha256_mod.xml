@@ -1,0 +1,750 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<changeset checksum="2474684245">
+  <modification id="4729">
+    <kind>ADD_TEXT_AFTER</kind>
+    <pos description="FUNCTION_BODY_OPEN" function="g_Lib_u8bit_ArrayClear">
+      <line>161</line>
+      <col>1</col>
+    </pos>
+    <text> /*vcast_internal_start*/
+extern unsigned char  *P_9_1_1;
+extern unsigned char  P_9_1_2;
+extern unsigned char  P_9_1_3;
+extern unsigned char SBF_9_1;
+if(SBF_9_1) {
+  vCAST_USER_CODE_TIMER_STOP();
+#define BEGINNING_OF_STUB_USER_CODE_9_1838297185
+#include "vcast_configure_stub.c"
+#undef BEGINNING_OF_STUB_USER_CODE_9_1838297185
+  if ( vcast_is_in_driver ) {
+    P_9_1_1 = u8t_Data;
+    P_9_1_2 = u8t_DataInit;
+    P_9_1_3 = u8t_MaxCount;
+    vCAST_COMMON_STUB_PROC_9( 9, 1, 4, 0 );
+  } /* vcast_is_in_driver */
+#define END_OF_STUB_USER_CODE_9_1838297185
+#include "vcast_configure_stub.c"
+#undef END_OF_STUB_USER_CODE_9_1838297185
+  vCAST_USER_CODE_TIMER_START();
+  return;
+}
+{ /*vcast_internal_end*/
+</text>
+  </modification>
+  <modification id="4730">
+    <kind>ADD_TEXT_AFTER</kind>
+    <pos description="FUNCTION_BODY_CLOSE" function="g_Lib_u8bit_ArrayClear">
+      <line>167</line>
+      <col>1</col>
+    </pos>
+    <text> /*vcast_internal_start*/}/*vcast_internal_end*/
+</text>
+  </modification>
+  <modification id="4731">
+    <kind>ADD_TEXT_BEFORE</kind>
+    <pos description="UNIT_APPENDIX_START">
+      <line>21328</line>
+      <col>1</col>
+    </pos>
+    <text> /*vcast_internal_start*//*vcast_internal_end*/
+</text>
+  </modification>
+  <modification id="4732">
+    <kind>ADD_TEXT_AFTER</kind>
+    <pos description="FUNCTION_BODY_OPEN" function="g_Lib_u16bit_ArrayClear">
+      <line>170</line>
+      <col>1</col>
+    </pos>
+    <text> /*vcast_internal_start*/
+extern unsigned  *P_9_2_1;
+extern unsigned  P_9_2_2;
+extern unsigned char  P_9_2_3;
+extern unsigned char SBF_9_2;
+if(SBF_9_2) {
+  vCAST_USER_CODE_TIMER_STOP();
+#define BEGINNING_OF_STUB_USER_CODE_9_2116040990
+#include "vcast_configure_stub.c"
+#undef BEGINNING_OF_STUB_USER_CODE_9_2116040990
+  if ( vcast_is_in_driver ) {
+    P_9_2_1 = u16t_Data;
+    P_9_2_2 = u16tDataInit;
+    P_9_2_3 = u8t_MaxCount;
+    vCAST_COMMON_STUB_PROC_9( 9, 2, 4, 0 );
+  } /* vcast_is_in_driver */
+#define END_OF_STUB_USER_CODE_9_2116040990
+#include "vcast_configure_stub.c"
+#undef END_OF_STUB_USER_CODE_9_2116040990
+  vCAST_USER_CODE_TIMER_START();
+  return;
+}
+{ /*vcast_internal_end*/
+</text>
+  </modification>
+  <modification id="4733">
+    <kind>ADD_TEXT_AFTER</kind>
+    <pos description="FUNCTION_BODY_CLOSE" function="g_Lib_u16bit_ArrayClear">
+      <line>176</line>
+      <col>1</col>
+    </pos>
+    <text> /*vcast_internal_start*/}/*vcast_internal_end*/
+</text>
+  </modification>
+  <modification id="4734">
+    <kind>ADD_TEXT_BEFORE</kind>
+    <pos description="UNIT_APPENDIX_START">
+      <line>21328</line>
+      <col>1</col>
+    </pos>
+    <text> /*vcast_internal_start*//*vcast_internal_end*/
+</text>
+  </modification>
+  <modification id="4735">
+    <kind>ADD_TEXT_AFTER</kind>
+    <pos description="FUNCTION_BODY_OPEN" function="u8g_Lib_u8bit_RangeCheck">
+      <line>179</line>
+      <col>1</col>
+    </pos>
+    <text> /*vcast_internal_start*/
+extern unsigned char  P_9_3_1;
+extern unsigned char  P_9_3_2;
+extern unsigned char  P_9_3_3;
+extern unsigned char  R_9_3;
+extern unsigned char SBF_9_3;
+if(SBF_9_3) {
+  vCAST_USER_CODE_TIMER_STOP();
+#define BEGINNING_OF_STUB_USER_CODE_9_2519582765
+#include "vcast_configure_stub.c"
+#undef BEGINNING_OF_STUB_USER_CODE_9_2519582765
+  if ( vcast_is_in_driver ) {
+    P_9_3_1 = u8t_Data;
+    P_9_3_2 = u8t_DataMin;
+    P_9_3_3 = u8t_DataMax;
+    vCAST_COMMON_STUB_PROC_9( 9, 3, 4, 0 );
+  } /* vcast_is_in_driver */
+#define END_OF_STUB_USER_CODE_9_2519582765
+#include "vcast_configure_stub.c"
+#undef END_OF_STUB_USER_CODE_9_2519582765
+  vCAST_USER_CODE_TIMER_START();
+  return R_9_3;
+}
+{ /*vcast_internal_end*/
+</text>
+  </modification>
+  <modification id="4736">
+    <kind>ADD_TEXT_AFTER</kind>
+    <pos description="FUNCTION_BODY_CLOSE" function="u8g_Lib_u8bit_RangeCheck">
+      <line>193</line>
+      <col>1</col>
+    </pos>
+    <text> /*vcast_internal_start*/}/*vcast_internal_end*/
+</text>
+  </modification>
+  <modification id="4737">
+    <kind>ADD_TEXT_BEFORE</kind>
+    <pos description="UNIT_APPENDIX_START">
+      <line>21328</line>
+      <col>1</col>
+    </pos>
+    <text> /*vcast_internal_start*//*vcast_internal_end*/
+</text>
+  </modification>
+  <modification id="4738">
+    <kind>ADD_TEXT_AFTER</kind>
+    <pos description="FUNCTION_BODY_OPEN" function="u8g_Lib_u16bit_RangeCheck">
+      <line>196</line>
+      <col>1</col>
+    </pos>
+    <text> /*vcast_internal_start*/
+extern unsigned  P_9_4_1;
+extern unsigned  P_9_4_2;
+extern unsigned  P_9_4_3;
+extern unsigned char  R_9_4;
+extern unsigned char SBF_9_4;
+if(SBF_9_4) {
+  vCAST_USER_CODE_TIMER_STOP();
+#define BEGINNING_OF_STUB_USER_CODE_9_132533350
+#include "vcast_configure_stub.c"
+#undef BEGINNING_OF_STUB_USER_CODE_9_132533350
+  if ( vcast_is_in_driver ) {
+    P_9_4_1 = u16t_Data;
+    P_9_4_2 = u16t_DataMin;
+    P_9_4_3 = u16t_DataMax;
+    vCAST_COMMON_STUB_PROC_9( 9, 4, 4, 0 );
+  } /* vcast_is_in_driver */
+#define END_OF_STUB_USER_CODE_9_132533350
+#include "vcast_configure_stub.c"
+#undef END_OF_STUB_USER_CODE_9_132533350
+  vCAST_USER_CODE_TIMER_START();
+  return R_9_4;
+}
+{ /*vcast_internal_end*/
+</text>
+  </modification>
+  <modification id="4739">
+    <kind>ADD_TEXT_AFTER</kind>
+    <pos description="FUNCTION_BODY_CLOSE" function="u8g_Lib_u16bit_RangeCheck">
+      <line>210</line>
+      <col>1</col>
+    </pos>
+    <text> /*vcast_internal_start*/}/*vcast_internal_end*/
+</text>
+  </modification>
+  <modification id="4740">
+    <kind>ADD_TEXT_BEFORE</kind>
+    <pos description="UNIT_APPENDIX_START">
+      <line>21328</line>
+      <col>1</col>
+    </pos>
+    <text> /*vcast_internal_start*//*vcast_internal_end*/
+</text>
+  </modification>
+  <modification id="4741">
+    <kind>ADD_TEXT_AFTER</kind>
+    <pos description="FUNCTION_BODY_OPEN" function="u8g_Lib_s16bit_RangeCheck">
+      <line>213</line>
+      <col>1</col>
+    </pos>
+    <text> /*vcast_internal_start*/
+extern signed int  P_9_5_1;
+extern signed int  P_9_5_2;
+extern signed int  P_9_5_3;
+extern unsigned char  R_9_5;
+extern unsigned char SBF_9_5;
+if(SBF_9_5) {
+  vCAST_USER_CODE_TIMER_STOP();
+#define BEGINNING_OF_STUB_USER_CODE_9_2698181486
+#include "vcast_configure_stub.c"
+#undef BEGINNING_OF_STUB_USER_CODE_9_2698181486
+  if ( vcast_is_in_driver ) {
+    P_9_5_1 = s16t_Data;
+    P_9_5_2 = s16t_DataMin;
+    P_9_5_3 = s16t_DataMax;
+    vCAST_COMMON_STUB_PROC_9( 9, 5, 4, 0 );
+  } /* vcast_is_in_driver */
+#define END_OF_STUB_USER_CODE_9_2698181486
+#include "vcast_configure_stub.c"
+#undef END_OF_STUB_USER_CODE_9_2698181486
+  vCAST_USER_CODE_TIMER_START();
+  return R_9_5;
+}
+{ /*vcast_internal_end*/
+</text>
+  </modification>
+  <modification id="4742">
+    <kind>ADD_TEXT_AFTER</kind>
+    <pos description="FUNCTION_BODY_CLOSE" function="u8g_Lib_s16bit_RangeCheck">
+      <line>227</line>
+      <col>1</col>
+    </pos>
+    <text> /*vcast_internal_start*/}/*vcast_internal_end*/
+</text>
+  </modification>
+  <modification id="4743">
+    <kind>ADD_TEXT_BEFORE</kind>
+    <pos description="UNIT_APPENDIX_START">
+      <line>21328</line>
+      <col>1</col>
+    </pos>
+    <text> /*vcast_internal_start*//*vcast_internal_end*/
+</text>
+  </modification>
+  <modification id="4744">
+    <kind>ADD_TEXT_AFTER</kind>
+    <pos description="FUNCTION_BODY_OPEN" function="u16g_Conv_AngleToPulse">
+      <line>20102</line>
+      <col>1</col>
+    </pos>
+    <text> /*vcast_internal_start*/
+extern unsigned  P_9_6_1;
+extern unsigned  R_9_6;
+extern unsigned char SBF_9_6;
+if(SBF_9_6) {
+  vCAST_USER_CODE_TIMER_STOP();
+#define BEGINNING_OF_STUB_USER_CODE_9_3593044624
+#include "vcast_configure_stub.c"
+#undef BEGINNING_OF_STUB_USER_CODE_9_3593044624
+  if ( vcast_is_in_driver ) {
+    P_9_6_1 = u16t_Angle;
+    vCAST_COMMON_STUB_PROC_9( 9, 6, 2, 0 );
+  } /* vcast_is_in_driver */
+#define END_OF_STUB_USER_CODE_9_3593044624
+#include "vcast_configure_stub.c"
+#undef END_OF_STUB_USER_CODE_9_3593044624
+  vCAST_USER_CODE_TIMER_START();
+  return R_9_6;
+}
+{ /*vcast_internal_end*/
+</text>
+  </modification>
+  <modification id="4745">
+    <kind>ADD_TEXT_AFTER</kind>
+    <pos description="FUNCTION_BODY_CLOSE" function="u16g_Conv_AngleToPulse">
+      <line>20117</line>
+      <col>1</col>
+    </pos>
+    <text> /*vcast_internal_start*/}/*vcast_internal_end*/
+</text>
+  </modification>
+  <modification id="4746">
+    <kind>ADD_TEXT_BEFORE</kind>
+    <pos description="UNIT_APPENDIX_START">
+      <line>21328</line>
+      <col>1</col>
+    </pos>
+    <text> /*vcast_internal_start*//*vcast_internal_end*/
+</text>
+  </modification>
+  <modification id="4747">
+    <kind>ADD_TEXT_AFTER</kind>
+    <pos description="FUNCTION_BODY_OPEN" function="s_safe_rotr">
+      <line>21031</line>
+      <col>1</col>
+    </pos>
+    <text> /*vcast_internal_start*/
+extern unsigned long  P_9_7_1;
+extern unsigned char  P_9_7_2;
+extern unsigned long  R_9_7;
+extern unsigned char SBF_9_7;
+if(SBF_9_7) {
+  vCAST_USER_CODE_TIMER_STOP();
+#define BEGINNING_OF_STUB_USER_CODE_9_3972984874
+#include "vcast_configure_stub.c"
+#undef BEGINNING_OF_STUB_USER_CODE_9_3972984874
+  if ( vcast_is_in_driver ) {
+    P_9_7_1 = value;
+    P_9_7_2 = bits;
+    vCAST_COMMON_STUB_PROC_9( 9, 7, 3, 0 );
+  } /* vcast_is_in_driver */
+#define END_OF_STUB_USER_CODE_9_3972984874
+#include "vcast_configure_stub.c"
+#undef END_OF_STUB_USER_CODE_9_3972984874
+  vCAST_USER_CODE_TIMER_START();
+  return R_9_7;
+}
+{ /*vcast_internal_end*/
+</text>
+  </modification>
+  <modification id="4748">
+    <kind>ADD_TEXT_AFTER</kind>
+    <pos description="FUNCTION_BODY_CLOSE" function="s_safe_rotr">
+      <line>21039</line>
+      <col>1</col>
+    </pos>
+    <text> /*vcast_internal_start*/}/*vcast_internal_end*/
+</text>
+  </modification>
+  <modification id="4749">
+    <kind>ADD_TEXT_BEFORE</kind>
+    <pos description="UNIT_APPENDIX_START">
+      <line>21328</line>
+      <col>1</col>
+    </pos>
+    <text> /*vcast_internal_start*//*vcast_internal_end*/
+</text>
+  </modification>
+  <modification id="4750">
+    <kind>ADD_TEXT_AFTER</kind>
+    <pos description="FUNCTION_BODY_OPEN" function="s_sha256_transform">
+      <line>21044</line>
+      <col>1</col>
+    </pos>
+    <text> /*vcast_internal_start*/
+extern SHA256_CTX  *P_9_8_1;
+extern vCAST_boolean P_9_8_2_set;
+extern unsigned char  *P_9_8_2;
+extern unsigned char SBF_9_8;
+if(SBF_9_8) {
+  vCAST_USER_CODE_TIMER_STOP();
+#define BEGINNING_OF_STUB_USER_CODE_9_1350531330
+#include "vcast_configure_stub.c"
+#undef BEGINNING_OF_STUB_USER_CODE_9_1350531330
+  if ( vcast_is_in_driver ) {
+    P_9_8_1 = ctx;
+    P_9_8_2 = ((unsigned char  *)(data));
+    vCAST_COMMON_STUB_PROC_9( 9, 8, 3, 0 );
+  } /* vcast_is_in_driver */
+#define END_OF_STUB_USER_CODE_9_1350531330
+#include "vcast_configure_stub.c"
+#undef END_OF_STUB_USER_CODE_9_1350531330
+  vCAST_USER_CODE_TIMER_START();
+  return;
+}
+{ /*vcast_internal_end*/
+</text>
+  </modification>
+  <modification id="4751">
+    <kind>ADD_TEXT_AFTER</kind>
+    <pos description="FUNCTION_BODY_CLOSE" function="s_sha256_transform">
+      <line>21076</line>
+      <col>1</col>
+    </pos>
+    <text> /*vcast_internal_start*/}/*vcast_internal_end*/
+</text>
+  </modification>
+  <modification id="4752">
+    <kind>ADD_TEXT_BEFORE</kind>
+    <pos description="UNIT_APPENDIX_START">
+      <line>21328</line>
+      <col>1</col>
+    </pos>
+    <text> /*vcast_internal_start*//*vcast_internal_end*/
+</text>
+  </modification>
+  <modification id="4753">
+    <kind>ADD_TEXT_AFTER</kind>
+    <pos description="FUNCTION_BODY_OPEN" function="s_sha256_init">
+      <line>21079</line>
+      <col>1</col>
+    </pos>
+    <text> /*vcast_internal_start*/
+extern SHA256_CTX  *P_9_9_1;
+extern unsigned char SBF_9_9;
+if(SBF_9_9) {
+  vCAST_USER_CODE_TIMER_STOP();
+#define BEGINNING_OF_STUB_USER_CODE_9_447622931
+#include "vcast_configure_stub.c"
+#undef BEGINNING_OF_STUB_USER_CODE_9_447622931
+  if ( vcast_is_in_driver ) {
+    P_9_9_1 = ctx;
+    vCAST_COMMON_STUB_PROC_9( 9, 9, 2, 0 );
+  } /* vcast_is_in_driver */
+#define END_OF_STUB_USER_CODE_9_447622931
+#include "vcast_configure_stub.c"
+#undef END_OF_STUB_USER_CODE_9_447622931
+  vCAST_USER_CODE_TIMER_START();
+  return;
+}
+{ /*vcast_internal_end*/
+</text>
+  </modification>
+  <modification id="4754">
+    <kind>ADD_TEXT_AFTER</kind>
+    <pos description="FUNCTION_BODY_CLOSE" function="s_sha256_init">
+      <line>21084</line>
+      <col>1</col>
+    </pos>
+    <text> /*vcast_internal_start*/}/*vcast_internal_end*/
+</text>
+  </modification>
+  <modification id="4755">
+    <kind>ADD_TEXT_BEFORE</kind>
+    <pos description="UNIT_APPENDIX_START">
+      <line>21328</line>
+      <col>1</col>
+    </pos>
+    <text> /*vcast_internal_start*//*vcast_internal_end*/
+</text>
+  </modification>
+  <modification id="4756">
+    <kind>ADD_TEXT_AFTER</kind>
+    <pos description="FUNCTION_BODY_OPEN" function="s_sha256_update">
+      <line>21087</line>
+      <col>1</col>
+    </pos>
+    <text> /*vcast_internal_start*/
+extern SHA256_CTX  *P_9_10_1;
+extern unsigned char  *P_9_10_2;
+extern unsigned long  P_9_10_3;
+extern unsigned char SBF_9_10;
+if(SBF_9_10) {
+  vCAST_USER_CODE_TIMER_STOP();
+#define BEGINNING_OF_STUB_USER_CODE_9_3190755322
+#include "vcast_configure_stub.c"
+#undef BEGINNING_OF_STUB_USER_CODE_9_3190755322
+  if ( vcast_is_in_driver ) {
+    P_9_10_1 = ctx;
+    P_9_10_2 = ((unsigned char  *)(data));
+    P_9_10_3 = len;
+    vCAST_COMMON_STUB_PROC_9( 9, 10, 4, 0 );
+  } /* vcast_is_in_driver */
+#define END_OF_STUB_USER_CODE_9_3190755322
+#include "vcast_configure_stub.c"
+#undef END_OF_STUB_USER_CODE_9_3190755322
+  vCAST_USER_CODE_TIMER_START();
+  return;
+}
+{ /*vcast_internal_end*/
+</text>
+  </modification>
+  <modification id="4757">
+    <kind>ADD_TEXT_AFTER</kind>
+    <pos description="FUNCTION_BODY_CLOSE" function="s_sha256_update">
+      <line>21111</line>
+      <col>1</col>
+    </pos>
+    <text> /*vcast_internal_start*/}/*vcast_internal_end*/
+</text>
+  </modification>
+  <modification id="4758">
+    <kind>ADD_TEXT_BEFORE</kind>
+    <pos description="UNIT_APPENDIX_START">
+      <line>21328</line>
+      <col>1</col>
+    </pos>
+    <text> /*vcast_internal_start*//*vcast_internal_end*/
+</text>
+  </modification>
+  <modification id="4759">
+    <kind>ADD_TEXT_AFTER</kind>
+    <pos description="FUNCTION_BODY_OPEN" function="s_sha256_final">
+      <line>21114</line>
+      <col>1</col>
+    </pos>
+    <text> /*vcast_internal_start*/
+extern SHA256_CTX  *P_9_11_1;
+extern unsigned char  *P_9_11_2;
+extern unsigned char SBF_9_11;
+if(SBF_9_11) {
+  vCAST_USER_CODE_TIMER_STOP();
+#define BEGINNING_OF_STUB_USER_CODE_9_1071608566
+#include "vcast_configure_stub.c"
+#undef BEGINNING_OF_STUB_USER_CODE_9_1071608566
+  if ( vcast_is_in_driver ) {
+    P_9_11_1 = ctx;
+    P_9_11_2 = hash;
+    vCAST_COMMON_STUB_PROC_9( 9, 11, 3, 0 );
+  } /* vcast_is_in_driver */
+#define END_OF_STUB_USER_CODE_9_1071608566
+#include "vcast_configure_stub.c"
+#undef END_OF_STUB_USER_CODE_9_1071608566
+  vCAST_USER_CODE_TIMER_START();
+  return;
+}
+{ /*vcast_internal_end*/
+</text>
+  </modification>
+  <modification id="4760">
+    <kind>ADD_TEXT_AFTER</kind>
+    <pos description="FUNCTION_BODY_CLOSE" function="s_sha256_final">
+      <line>21153</line>
+      <col>1</col>
+    </pos>
+    <text> /*vcast_internal_start*/}/*vcast_internal_end*/
+</text>
+  </modification>
+  <modification id="4761">
+    <kind>ADD_TEXT_BEFORE</kind>
+    <pos description="UNIT_APPENDIX_START">
+      <line>21328</line>
+      <col>1</col>
+    </pos>
+    <text> /*vcast_internal_start*//*vcast_internal_end*/
+</text>
+  </modification>
+  <modification id="4762">
+    <kind>ADD_TEXT_AFTER</kind>
+    <pos description="FUNCTION_BODY_OPEN" function="s_Sha256_Hash_Init">
+      <line>21158</line>
+      <col>1</col>
+    </pos>
+    <text> /*vcast_internal_start*/
+extern unsigned char SBF_9_12;
+if(SBF_9_12) {
+  vCAST_USER_CODE_TIMER_STOP();
+#define BEGINNING_OF_STUB_USER_CODE_9_1805000075
+#include "vcast_configure_stub.c"
+#undef BEGINNING_OF_STUB_USER_CODE_9_1805000075
+  if ( vcast_is_in_driver ) {
+    vCAST_COMMON_STUB_PROC_9( 9, 12, 1, 0 );
+  } /* vcast_is_in_driver */
+#define END_OF_STUB_USER_CODE_9_1805000075
+#include "vcast_configure_stub.c"
+#undef END_OF_STUB_USER_CODE_9_1805000075
+  vCAST_USER_CODE_TIMER_START();
+  return;
+}
+{ /*vcast_internal_end*/
+</text>
+  </modification>
+  <modification id="4763">
+    <kind>ADD_TEXT_AFTER</kind>
+    <pos description="FUNCTION_BODY_CLOSE" function="s_Sha256_Hash_Init">
+      <line>21164</line>
+      <col>1</col>
+    </pos>
+    <text> /*vcast_internal_start*/}/*vcast_internal_end*/
+</text>
+  </modification>
+  <modification id="4764">
+    <kind>ADD_TEXT_BEFORE</kind>
+    <pos description="UNIT_APPENDIX_START">
+      <line>21328</line>
+      <col>1</col>
+    </pos>
+    <text> /*vcast_internal_start*//*vcast_internal_end*/
+</text>
+  </modification>
+  <modification id="4765">
+    <kind>ADD_TEXT_AFTER</kind>
+    <pos description="FUNCTION_BODY_OPEN" function="g_Lib_Sha256_Nb_Start">
+      <line>21205</line>
+      <col>1</col>
+    </pos>
+    <text> /*vcast_internal_start*/
+extern unsigned char SBF_9_13;
+if(SBF_9_13) {
+  vCAST_USER_CODE_TIMER_STOP();
+#define BEGINNING_OF_STUB_USER_CODE_9_1851294136
+#include "vcast_configure_stub.c"
+#undef BEGINNING_OF_STUB_USER_CODE_9_1851294136
+  if ( vcast_is_in_driver ) {
+    vCAST_COMMON_STUB_PROC_9( 9, 13, 1, 0 );
+  } /* vcast_is_in_driver */
+#define END_OF_STUB_USER_CODE_9_1851294136
+#include "vcast_configure_stub.c"
+#undef END_OF_STUB_USER_CODE_9_1851294136
+  vCAST_USER_CODE_TIMER_START();
+  return;
+}
+{ /*vcast_internal_end*/
+</text>
+  </modification>
+  <modification id="4766">
+    <kind>ADD_TEXT_AFTER</kind>
+    <pos description="FUNCTION_BODY_CLOSE" function="g_Lib_Sha256_Nb_Start">
+      <line>21217</line>
+      <col>1</col>
+    </pos>
+    <text> /*vcast_internal_start*/}/*vcast_internal_end*/
+</text>
+  </modification>
+  <modification id="4767">
+    <kind>ADD_TEXT_BEFORE</kind>
+    <pos description="UNIT_APPENDIX_START">
+      <line>21328</line>
+      <col>1</col>
+    </pos>
+    <text> /*vcast_internal_start*//*vcast_internal_end*/
+</text>
+  </modification>
+  <modification id="4768">
+    <kind>ADD_TEXT_AFTER</kind>
+    <pos description="FUNCTION_BODY_OPEN" function="g_Lib_Sha256_Nb_Process">
+      <line>21220</line>
+      <col>1</col>
+    </pos>
+    <text> /*vcast_internal_start*/
+extern unsigned char SBF_9_14;
+if(SBF_9_14) {
+  vCAST_USER_CODE_TIMER_STOP();
+#define BEGINNING_OF_STUB_USER_CODE_9_2544131918
+#include "vcast_configure_stub.c"
+#undef BEGINNING_OF_STUB_USER_CODE_9_2544131918
+  if ( vcast_is_in_driver ) {
+    vCAST_COMMON_STUB_PROC_9( 9, 14, 1, 0 );
+  } /* vcast_is_in_driver */
+#define END_OF_STUB_USER_CODE_9_2544131918
+#include "vcast_configure_stub.c"
+#undef END_OF_STUB_USER_CODE_9_2544131918
+  vCAST_USER_CODE_TIMER_START();
+  return;
+}
+{ /*vcast_internal_end*/
+</text>
+  </modification>
+  <modification id="4769">
+    <kind>ADD_TEXT_AFTER</kind>
+    <pos description="FUNCTION_BODY_CLOSE" function="g_Lib_Sha256_Nb_Process">
+      <line>21297</line>
+      <col>1</col>
+    </pos>
+    <text> /*vcast_internal_start*/}/*vcast_internal_end*/
+</text>
+  </modification>
+  <modification id="4770">
+    <kind>ADD_TEXT_BEFORE</kind>
+    <pos description="UNIT_APPENDIX_START">
+      <line>21328</line>
+      <col>1</col>
+    </pos>
+    <text> /*vcast_internal_start*//*vcast_internal_end*/
+</text>
+  </modification>
+  <modification id="4771">
+    <kind>ADD_TEXT_AFTER</kind>
+    <pos description="FUNCTION_BODY_OPEN" function="g_Lib_Sha256_Nb_GetState">
+      <line>21300</line>
+      <col>1</col>
+    </pos>
+    <text> /*vcast_internal_start*/
+extern E_LIB_SHA256_NB_STATE  R_9_15;
+extern unsigned char SBF_9_15;
+if(SBF_9_15) {
+  vCAST_USER_CODE_TIMER_STOP();
+#define BEGINNING_OF_STUB_USER_CODE_9_3663246109
+#include "vcast_configure_stub.c"
+#undef BEGINNING_OF_STUB_USER_CODE_9_3663246109
+  if ( vcast_is_in_driver ) {
+    vCAST_COMMON_STUB_PROC_9( 9, 15, 1, 0 );
+  } /* vcast_is_in_driver */
+#define END_OF_STUB_USER_CODE_9_3663246109
+#include "vcast_configure_stub.c"
+#undef END_OF_STUB_USER_CODE_9_3663246109
+  vCAST_USER_CODE_TIMER_START();
+  return R_9_15;
+}
+{ /*vcast_internal_end*/
+</text>
+  </modification>
+  <modification id="4772">
+    <kind>ADD_TEXT_AFTER</kind>
+    <pos description="FUNCTION_BODY_CLOSE" function="g_Lib_Sha256_Nb_GetState">
+      <line>21302</line>
+      <col>1</col>
+    </pos>
+    <text> /*vcast_internal_start*/}/*vcast_internal_end*/
+</text>
+  </modification>
+  <modification id="4773">
+    <kind>ADD_TEXT_BEFORE</kind>
+    <pos description="UNIT_APPENDIX_START">
+      <line>21328</line>
+      <col>1</col>
+    </pos>
+    <text> /*vcast_internal_start*//*vcast_internal_end*/
+</text>
+  </modification>
+  <modification id="4774">
+    <kind>ADD_TEXT_AFTER</kind>
+    <pos description="FUNCTION_BODY_OPEN" function="g_Lib_Sha256_Nb_Reset">
+      <line>21305</line>
+      <col>1</col>
+    </pos>
+    <text> /*vcast_internal_start*/
+extern unsigned char SBF_9_16;
+if(SBF_9_16) {
+  vCAST_USER_CODE_TIMER_STOP();
+#define BEGINNING_OF_STUB_USER_CODE_9_2713480058
+#include "vcast_configure_stub.c"
+#undef BEGINNING_OF_STUB_USER_CODE_9_2713480058
+  if ( vcast_is_in_driver ) {
+    vCAST_COMMON_STUB_PROC_9( 9, 16, 1, 0 );
+  } /* vcast_is_in_driver */
+#define END_OF_STUB_USER_CODE_9_2713480058
+#include "vcast_configure_stub.c"
+#undef END_OF_STUB_USER_CODE_9_2713480058
+  vCAST_USER_CODE_TIMER_START();
+  return;
+}
+{ /*vcast_internal_end*/
+</text>
+  </modification>
+  <modification id="4775">
+    <kind>ADD_TEXT_AFTER</kind>
+    <pos description="FUNCTION_BODY_CLOSE" function="g_Lib_Sha256_Nb_Reset">
+      <line>21311</line>
+      <col>1</col>
+    </pos>
+    <text> /*vcast_internal_start*/}/*vcast_internal_end*/
+</text>
+  </modification>
+  <modification id="4776">
+    <kind>ADD_TEXT_BEFORE</kind>
+    <pos description="UNIT_APPENDIX_START">
+      <line>21328</line>
+      <col>1</col>
+    </pos>
+    <text> /*vcast_internal_start*//*vcast_internal_end*/
+</text>
+  </modification>
+</changeset>

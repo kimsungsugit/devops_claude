@@ -1,0 +1,19 @@
+setuptools
+bitstruct
+gitpython
+numpy
+pandas
+requests
+cantools
+orjson
+lizard
+fpdf2
+xlsxwriter
+gcovr
+reportlab
+openpyxl
+beautifulsoup4
+
+# optional: richer HTML table parsing for pandas.read_html
+# lxml
+# html5lib

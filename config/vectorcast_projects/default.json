@@ -1,0 +1,18 @@
+{
+  "project_id": "",
+  "env_mode": "new_env",
+  "compiler": "CC",
+  "linker": "",
+  "compiler_options": [],
+  "linker_options": [],
+  "include_paths": [],
+  "source_paths": [],
+  "uut_sources": [],
+  "uut_headers": [],
+  "dependency_sources": [],
+  "dependency_libs": [],
+  "dependency_objects": [],
+  "existing_env_file": "",
+  "existing_project_file": "",
+  "regression_command_template": ""
+}

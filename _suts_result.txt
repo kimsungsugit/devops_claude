@@ -1,0 +1,9 @@
+Total SUTS TCs: 433
+With related_fid: 433 (100.0%)
+With I/O: 408 (94.2%)
+Sample TCs:
+  SwUTC_SwUFn_0101 -> related=SwUFn_0101, inp=0, out=4
+  SwUTC_SwUFn_0102 -> related=SwUFn_0102, inp=1, out=6
+  SwUTC_SwUFn_0103 -> related=SwUFn_0103, inp=16, out=1
+  SwUTC_SwUFn_0104 -> related=SwUFn_0104, inp=12, out=7
+  SwUTC_SwUFn_0105 -> related=SwUFn_0105, inp=6, out=6

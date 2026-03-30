@@ -1,0 +1,143 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<env_info>
+  <needed_entities>
+    <unit id="9">
+      <variable id="u8g_Lib_Sha256_Hash" name="u8g_Lib_Sha256_Hash" defined="0" type="compound" file="1"/>
+      <variable id="lin_tl_rx_queue" name="lin_tl_rx_queue" defined="0" type="compound" file="2"/>
+      <variable id="u16g_SysDiag_SystemStatus" name="u16g_SysDiag_SystemStatus" defined="0" type="scalar" file="3"/>
+      <variable id="u16g_SysDiag_BuzzerLevelMax" name="u16g_SysDiag_BuzzerLevelMax" defined="0" type="scalar" file="3"/>
+      <variable id="u8g_SysDiag_MotorOverHeatActiveHold_F" name="u8g_SysDiag_MotorOverHeatActiveHold_F" defined="0" type="scalar" file="3"/>
+      <variable id="u8g_SysEepromCtrl_SleepMode" name="u8g_SysEepromCtrl_SleepMode" defined="0" type="scalar" file="4"/>
+      <variable id="u8g_SysEepromCtrl_MotorA1A2Output" name="u8g_SysEepromCtrl_MotorA1A2Output" defined="0" type="scalar" file="4"/>
+      <variable id="u8g_ApiIn_MotorDirection" name="u8g_ApiIn_MotorDirection" defined="0" type="scalar" file="5"/>
+      <variable id="u8g_ApiIn_MotorCountSpeed" name="u8g_ApiIn_MotorCountSpeed" defined="0" type="scalar" file="5"/>
+      <variable id="u8g_ApiIn_MotorRps" name="u8g_ApiIn_MotorRps" defined="0" type="scalar" file="5"/>
+      <variable id="u16g_ApiIn_MotorLevel_A1" name="u16g_ApiIn_MotorLevel_A1" defined="0" type="scalar" file="5"/>
+      <variable id="u16g_ApiIn_MotorLevel_A2" name="u16g_ApiIn_MotorLevel_A2" defined="0" type="scalar" file="5"/>
+      <variable id="s16g_ApiIn_MotorCurrLvl" name="s16g_ApiIn_MotorCurrLvl" defined="0" type="scalar" file="5"/>
+      <variable id="u16g_ApiIn_MotorTempLvl" name="u16g_ApiIn_MotorTempLvl" defined="0" type="scalar" file="5"/>
+      <variable id="u16g_ApiIn_HallSnsrLevel" name="u16g_ApiIn_HallSnsrLevel" defined="0" type="scalar" file="5"/>
+      <variable id="u16g_ApiIn_Vsup" name="u16g_ApiIn_Vsup" defined="0" type="scalar" file="5"/>
+      <variable id="u16g_ApiIn_BandGap" name="u16g_ApiIn_BandGap" defined="0" type="scalar" file="5"/>
+      <variable id="s16g_ApiIn_MotorPosition" name="s16g_ApiIn_MotorPosition" defined="0" type="scalar" file="5"/>
+      <variable id="u8g_ApiOut_DoorAngle" name="u8g_ApiOut_DoorAngle" defined="0" type="scalar" file="6"/>
+      <variable id="u8g_ApiOut_DoorState" name="u8g_ApiOut_DoorState" defined="0" type="scalar" file="6"/>
+      <variable id="u8g_ApiOut_MotorCurrent" name="u8g_ApiOut_MotorCurrent" defined="0" type="scalar" file="6"/>
+      <variable id="u8g_ApiOut_Vsup" name="u8g_ApiOut_Vsup" defined="0" type="scalar" file="6"/>
+      <variable id="u8g_DoorPreCtrl_MotorOverHeat_F" name="u8g_DoorPreCtrl_MotorOverHeat_F" defined="0" type="scalar" file="7"/>
+      <variable id="u8g_SysUds_UsDoorCtrl" name="u8g_SysUds_UsDoorCtrl" defined="1" type="scalar" file="8"/>
+      <variable id="u8g_SysUds_UsAutoOpenEn_F" name="u8g_SysUds_UsAutoOpenEn_F" defined="1" type="scalar" file="8"/>
+      <variable id="u8g_SysUds_UsDir" name="u8g_SysUds_UsDir" defined="1" type="scalar" file="8"/>
+      <variable id="u8g_SysUds_UsStepMsb" name="u8g_SysUds_UsStepMsb" defined="1" type="scalar" file="8"/>
+      <variable id="u8g_SysUds_UsStepLsb" name="u8g_SysUds_UsStepLsb" defined="1" type="scalar" file="8"/>
+      <variable id="u8g_SysUds_WdbiCmd" name="u8g_SysUds_WdbiCmd" defined="1" type="scalar" file="8"/>
+      <variable id="u8g_SysUds_BuzzerTest_F" name="u8g_SysUds_BuzzerTest_F" defined="1" type="scalar" file="8"/>
+      <variable id="u8g_SysUds_WriteData" name="u8g_SysUds_WriteData" defined="1" type="compound" file="8"/>
+      <variable id="u16g_SysUds_UsMotorPwm" name="u16g_SysUds_UsMotorPwm" defined="1" type="scalar" file="8"/>
+      <variable id="u16g_SysUds_UsStep" name="u16g_SysUds_UsStep" defined="1" type="scalar" file="8"/>
+      <function id="g_Lib_Sha256_Nb_GetState" name="g_Lib_Sha256_Nb_GetState" defined="0" const="0" file="1" return="E_LIB_SHA256_NB_STATE"/>
+      <function id="ld_send_message" name="ld_send_message" defined="0" const="0" file="2" return="">
+        <parameters>
+          <parameter type="l_u16" name="length"/>
+          <parameter type="const l_u8*const" name="data"/>
+        </parameters>
+      </function>
+      <function id="u8g_SysEepromCtrl_ReadInlineData" name="u8g_SysEepromCtrl_ReadInlineData" defined="0" const="0" file="4" return="U8">
+        <parameters>
+          <parameter type="U16" name="u16t_Offset"/>
+        </parameters>
+      </function>
+      <function id="u8g_SysEepromCtrl_ReadDiagData" name="u8g_SysEepromCtrl_ReadDiagData" defined="0" const="0" file="4" return="U8">
+        <parameters>
+          <parameter type="U16" name="u16t_Offset"/>
+        </parameters>
+      </function>
+      <function id="u8g_SysEepromCtrl_ReadProdDate" name="u8g_SysEepromCtrl_ReadProdDate" defined="0" const="0" file="4" return="U8">
+        <parameters>
+          <parameter type="U16" name="u16t_Offset"/>
+        </parameters>
+      </function>
+      <function id="u8g_SysEepromCtrl_ReadPartNo" name="u8g_SysEepromCtrl_ReadPartNo" defined="0" const="0" file="4" return="U8">
+        <parameters>
+          <parameter type="U16" name="u16t_Offset"/>
+        </parameters>
+      </function>
+      <function id="u8g_SysEepromCtrl_ReadHwVer" name="u8g_SysEepromCtrl_ReadHwVer" defined="0" const="0" file="4" return="U8">
+        <parameters>
+          <parameter type="U16" name="u16t_Offset"/>
+        </parameters>
+      </function>
+      <function id="u8g_SysEepromCtrl_ReadDbVer" name="u8g_SysEepromCtrl_ReadDbVer" defined="0" const="0" file="4" return="U8">
+        <parameters>
+          <parameter type="U16" name="u16t_Offset"/>
+        </parameters>
+      </function>
+      <function id="u8g_SysEepromCtrl_ReadCrcByte" name="u8g_SysEepromCtrl_ReadCrcByte" defined="0" const="0" file="4" return="U8">
+        <parameters>
+          <parameter type="U16" name="u16t_Offset"/>
+        </parameters>
+      </function>
+      <function id="u8g_SysEepromCtrl_ReadUdsData" name="u8g_SysEepromCtrl_ReadUdsData" defined="0" const="0" file="4" return="U8">
+        <parameters>
+          <parameter type="U16" name="u16t_Addr1"/>
+          <parameter type="U16" name="u16t_Addr2"/>
+        </parameters>
+      </function>
+      <function id="g_SysEepromCtrl_Reset" name="g_SysEepromCtrl_Reset" defined="0" const="0" file="4" return=""/>
+      <function id="g_SysOptionCtrl" name="g_SysOptionCtrl" defined="0" const="0" file="9" return=""/>
+      <function id="u16s_Pwm2Spd_Conv" name="u16s_Pwm2Spd_Conv" defined="1" const="0" file="8" return="U16">
+        <parameters>
+          <parameter type="U8" name="u8t_PwmData"/>
+        </parameters>
+      </function>
+      <function id="g_UDS_RDBI_Paser" name="g_UDS_RDBI_Paser" defined="1" const="0" file="8" return=""/>
+      <function id="s_UDS_RDBI_ProdDate" name="s_UDS_RDBI_ProdDate" defined="1" const="0" file="8" return=""/>
+      <function id="s_UDS_RDBI_PartNumber" name="s_UDS_RDBI_PartNumber" defined="1" const="0" file="8" return=""/>
+      <function id="s_UDS_RDBI_SW_Version" name="s_UDS_RDBI_SW_Version" defined="1" const="0" file="8" return=""/>
+      <function id="s_UDS_RDBI_HW_Version" name="s_UDS_RDBI_HW_Version" defined="1" const="0" file="8" return=""/>
+      <function id="s_UDS_RDBI_DB_Version" name="s_UDS_RDBI_DB_Version" defined="1" const="0" file="8" return=""/>
+      <function id="s_UDS_RDBI_SW_Unit1_Version" name="s_UDS_RDBI_SW_Unit1_Version" defined="1" const="0" file="8" return=""/>
+      <function id="s_UDS_RDBI_StatusCheck1" name="s_UDS_RDBI_StatusCheck1" defined="1" const="0" file="8" return=""/>
+      <function id="s_UDS_RDBI_StatusCheck2" name="s_UDS_RDBI_StatusCheck2" defined="1" const="0" file="8" return=""/>
+      <function id="s_UDS_RDBI_StatusCheck3" name="s_UDS_RDBI_StatusCheck3" defined="1" const="0" file="8" return=""/>
+      <function id="g_UDS_WDBI_Paser" name="g_UDS_WDBI_Paser" defined="1" const="0" file="8" return=""/>
+      <function id="s_UDS_WDBI_UserOptRecordId" name="s_UDS_WDBI_UserOptRecordId" defined="1" const="0" file="8" return=""/>
+      <function id="s_UDS_WDBI_UsOptMain" name="s_UDS_WDBI_UsOptMain" defined="1" const="0" file="8" return=""/>
+      <function id="s_UDS_WDBI_UsOpt_F1G" name="s_UDS_WDBI_UsOpt_F1G" defined="1" const="0" file="8" return=""/>
+      <function id="s_UDS_WDBI_UsOpt_E2G_1" name="s_UDS_WDBI_UsOpt_E2G_1" defined="1" const="0" file="8" return=""/>
+      <function id="s_UDS_WDBI_UsOpt_E2G_2" name="s_UDS_WDBI_UsOpt_E2G_2" defined="1" const="0" file="8" return=""/>
+      <function id="s_UDS_WDBI_UsOpt_E2G_3" name="s_UDS_WDBI_UsOpt_E2G_3" defined="1" const="0" file="8" return=""/>
+      <function id="s_UDS_WDBI_ProdDate" name="s_UDS_WDBI_ProdDate" defined="1" const="0" file="8" return=""/>
+      <function id="s_UDS_WDBI_PartNumber" name="s_UDS_WDBI_PartNumber" defined="1" const="0" file="8" return=""/>
+      <function id="s_UDS_WDBI_HW_Version" name="s_UDS_WDBI_HW_Version" defined="1" const="0" file="8" return=""/>
+      <function id="s_UDS_WDBI_DB_Version" name="s_UDS_WDBI_DB_Version" defined="1" const="0" file="8" return=""/>
+      <function id="s_UDS_WDBI_US_ReadEeprom" name="s_UDS_WDBI_US_ReadEeprom" defined="1" const="0" file="8" return=""/>
+      <function id="s_UDS_WDBI_US_WiteEeprom" name="s_UDS_WDBI_US_WiteEeprom" defined="1" const="0" file="8" return=""/>
+      <function id="s_UDS_WDBI_US_ApplyParam" name="s_UDS_WDBI_US_ApplyParam" defined="1" const="0" file="8" return=""/>
+      <function id="s_UDS_WDBI_US_ClearEeprom" name="s_UDS_WDBI_US_ClearEeprom" defined="1" const="0" file="8" return=""/>
+      <function id="s_UDS_WDBI_US_ReadSysSts" name="s_UDS_WDBI_US_ReadSysSts" defined="1" const="0" file="8" return=""/>
+      <function id="s_UDS_WDBI_US_UserCtrl" name="s_UDS_WDBI_US_UserCtrl" defined="1" const="0" file="8" return=""/>
+      <function id="s_UDS_WDBI_US_OpDataRead" name="s_UDS_WDBI_US_OpDataRead" defined="1" const="0" file="8" return=""/>
+      <function id="s_UDS_WDBI_US_SysOpt" name="s_UDS_WDBI_US_SysOpt" defined="1" const="0" file="8" return=""/>
+      <function id="s_UDS_WDBI_US_BuzzTest" name="s_UDS_WDBI_US_BuzzTest" defined="1" const="0" file="8" return=""/>
+      <function id="s_UDS_WDBI_US_Reprogram" name="s_UDS_WDBI_US_Reprogram" defined="1" const="0" file="8" return=""/>
+      <function id="s_UDS_WDBI_US_Write_Checksum" name="s_UDS_WDBI_US_Write_Checksum" defined="1" const="0" file="8" return=""/>
+      <function id="s_UDS_WDBI_US_Read_Checksum" name="s_UDS_WDBI_US_Read_Checksum" defined="1" const="0" file="8" return=""/>
+      <function id="g_UDS_SessionCtrl" name="g_UDS_SessionCtrl" defined="1" const="0" file="8" return=""/>
+      <function id="s_UDS_DSC_ProgSession" name="s_UDS_DSC_ProgSession" defined="1" const="0" file="8" return=""/>
+      <function id="s_UDS_SendNRC22_ConditionsNotCorrect" name="s_UDS_SendNRC22_ConditionsNotCorrect" defined="1" const="0" file="8" return=""/>
+      <function id="g_UDS_LinComp_Reset" name="g_UDS_LinComp_Reset" defined="1" const="0" file="8" return=""/>
+    </unit>
+  </needed_entities>
+  <files>
+    <file id="1">C:\WORKSPACE\NE1AW_PORTING\LIB\Lib_sha256_it.h</file>
+    <file id="2">C:\WORKSPACE\NE1AW_PORTING\SOURCES\LIN\LIN_DRIVER\LOWLEVEL\lin.h</file>
+    <file id="3">C:/workspace/NE1AW_PORTING/Sources/SYSTEM/SysDiagCtrl_it_PDS.h</file>
+    <file id="4">C:/workspace/NE1AW_PORTING/Sources/SYSTEM/SysEepromCtrl_it_PDS.h</file>
+    <file id="5">C:\WORKSPACE\NE1AW_PORTING\SOURCES\IF\ApiIn_Main_it_PDS.h</file>
+    <file id="6">C:\WORKSPACE\NE1AW_PORTING\SOURCES\IF\ApiOut_Main_it_PDS.h</file>
+    <file id="7">C:\WORKSPACE\NE1AW_PORTING\SOURCES\APP\Ap_DoorPreCtrl_it_PDS.h</file>
+    <file id="8">C:/workspace/NE1AW_PORTING/Sources/SYSTEM/Sys_UDS_LinComp_PDS.c</file>
+    <file id="9">C:/workspace/NE1AW_PORTING/Sources/SYSTEM/SysOptionCtrl_it_PDS.h</file>
+  </files>
+</env_info>

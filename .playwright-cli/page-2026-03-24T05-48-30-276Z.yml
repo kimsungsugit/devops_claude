@@ -1,0 +1,181 @@
+- generic [ref=e3]:
+  - generic [ref=e5]:
+    - button "로컬" [ref=e6] [cursor=pointer]
+    - button "Jenkins" [ref=e7] [cursor=pointer]
+  - generic [ref=e8]:
+    - main [ref=e9]:
+      - generic [ref=e10]:
+        - generic [ref=e11]:
+          - generic [ref=e12]:
+            - generic [ref=e13]:
+              - generic [ref=e14]: Devops/
+              - generic [ref=e890]: Jenkins/
+              - generic [ref=e994]: Analyzer
+            - generic [ref=e17]: Analyzer
+            - generic [ref=e18]: Jenkins 프로젝트 선택
+          - generic [ref=e20]: completed
+          - button "다크 모드로 전환" [ref=e22] [cursor=pointer]: 다크 모드
+        - navigation "주 네비게이션" [ref=e23]:
+          - button "대시보드 탭" [ref=e24] [cursor=pointer]: 대시보드
+          - button "워크플로우 탭" [ref=e26] [cursor=pointer]: 워크플로우
+          - button "에디터 탭" [ref=e28] [cursor=pointer]: 에디터
+          - button "Analyzer 탭" [active] [ref=e30] [cursor=pointer]: Analyzer
+          - button "설정 탭" [ref=e32] [cursor=pointer]: 설정
+        - generic [ref=e995]:
+          - heading "Analyzer" [level=3] [ref=e996]
+          - generic [ref=e997]: Analyzer now covers UDS, STS, and SUTS generation plus result views for Local and Jenkins modes.
+          - generic [ref=e998]:
+            - generic [ref=e999]:
+              - strong [ref=e1000]: QA Checklist
+              - generic [ref=e1001]: 4/6 checks
+            - generic [ref=e1002]:
+              - generic [ref=e1003]:
+                - generic [ref=e1004]: Latest Run card shows UDS, STS, and SUTS artifacts.
+                - generic [ref=e1005]: CHECK
+              - generic [ref=e1006]:
+                - generic [ref=e1007]: Latest Run rows can switch to the matching artifact tab.
+                - generic [ref=e1008]: CHECK
+              - generic [ref=e1009]:
+                - generic [ref=e1010]: Latest Run rows have validation actions.
+                - generic [ref=e1011]: PASS
+              - generic [ref=e1012]:
+                - generic [ref=e1013]: Latest Run rows expose summary metrics.
+                - generic [ref=e1014]: PASS
+              - generic [ref=e1015]:
+                - generic [ref=e1016]: Current latest artifacts pass validation.
+                - generic [ref=e1017]: PASS
+              - generic [ref=e1018]:
+                - generic [ref=e1019]: Preview panel is ready for report/preview review.
+                - generic [ref=e1020]: PASS
+          - generic [ref=e1021]:
+            - button "Impact" [ref=e1022] [cursor=pointer]
+            - button "UDS" [ref=e1023] [cursor=pointer]
+            - button "STS" [ref=e1024] [cursor=pointer]
+            - button "SUTS" [ref=e1025] [cursor=pointer]
+          - generic [ref=e1026]:
+            - generic [ref=e1027]:
+              - strong [ref=e1028]: "Analyzer Mode: Jenkins Impact"
+              - generic [ref=e1029]: JENKINS
+            - generic [ref=e1030]: Analyzer 안에서 변경 감지, 영향 분석, AUTO/FLAG 결과 확인, 생성 이후 결과 추적까지 한 흐름으로 처리합니다.
+          - generic [ref=e1031]:
+            - generic [ref=e1032]:
+              - strong [ref=e1033]: Analyzer Impact (Jenkins)
+              - button "Refresh Registry" [ref=e1034] [cursor=pointer]
+            - generic [ref=e1035]: Jenkins build context를 기준으로 변경 영향 분석과 문서 갱신을 실행합니다. UDS/STS/SUTS 탭은 같은 Jenkins 컨텍스트를 그대로 재사용합니다.
+            - generic [ref=e1036]:
+              - generic [ref=e1037]: SCM Registry
+              - combobox [ref=e1038]:
+                - option "Select registry"
+                - option "HDPDM01 PDS_64_RD" [selected]
+              - generic [ref=e1039]: Jenkins Job URL
+              - textbox [ref=e1040]
+              - generic [ref=e1041]: Cache Root
+              - textbox [ref=e1042]
+              - generic [ref=e1043]: Build Selector
+              - textbox [ref=e1044]: lastSuccessfulBuild
+              - generic [ref=e1045]: Build Number
+              - textbox "0 = latest context" [ref=e1046]
+              - generic [ref=e1047]: Base Ref
+              - textbox "optional" [ref=e1048]
+            - generic [ref=e1049]:
+              - generic [ref=e1050]:
+                - checkbox "UDS" [checked] [ref=e1051]
+                - text: UDS
+              - generic [ref=e1052]:
+                - checkbox "SUTS" [checked] [ref=e1053]
+                - text: SUTS
+              - generic [ref=e1054]:
+                - checkbox "STS" [checked] [ref=e1055]
+                - text: STS
+              - generic [ref=e1056]:
+                - checkbox "SDS" [checked] [ref=e1057]
+                - text: SDS
+            - generic [ref=e1058]:
+              - button "Dry Run" [ref=e1059] [cursor=pointer]
+              - button "Run Impact" [ref=e1060] [cursor=pointer]
+            - generic [ref=e1061]:
+              - generic [ref=e1062]:
+                - strong [ref=e1063]: Recent Jenkins Impact Runs
+                - generic [ref=e1064]: 10 items
+              - generic [ref=e1065]:
+                - generic [ref=e1066]:
+                  - generic [ref=e1067]:
+                    - strong [ref=e1068]: 20260324_112921
+                    - generic [ref=e1069]: LOCAL
+                  - generic [ref=e1070]: files 1 / direct 0
+                - generic [ref=e1071]:
+                  - generic [ref=e1072]:
+                    - strong [ref=e1073]: 20260324_093715
+                    - generic [ref=e1074]: LOCAL
+                  - generic [ref=e1075]: files 1 / direct 0
+                - generic [ref=e1076]:
+                  - generic [ref=e1077]:
+                    - strong [ref=e1078]: 20260324_084907
+                    - generic [ref=e1079]: LOCAL
+                  - generic [ref=e1080]: files 1 / direct 0
+                - generic [ref=e1081]:
+                  - generic [ref=e1082]:
+                    - strong [ref=e1083]: 20260324_084102
+                    - generic [ref=e1084]: LOCAL
+                  - generic [ref=e1085]: files 1 / direct 0
+                - generic [ref=e1086]:
+                  - generic [ref=e1087]:
+                    - strong [ref=e1088]: 20260323_174152
+                    - generic [ref=e1089]: LOCAL
+                  - generic [ref=e1090]: files 0 / direct 0
+                - generic [ref=e1091]:
+                  - generic [ref=e1092]:
+                    - strong [ref=e1093]: 20260323_163948
+                    - generic [ref=e1094]: LOCAL
+                  - generic [ref=e1095]: files 1 / direct 0
+                - generic [ref=e1096]:
+                  - generic [ref=e1097]:
+                    - strong [ref=e1098]: 20260323_160730
+                    - generic [ref=e1099]: LOCAL
+                  - generic [ref=e1100]: files 2 / direct 0
+                - generic [ref=e1101]:
+                  - generic [ref=e1102]:
+                    - strong [ref=e1103]: 20260323_152235
+                    - generic [ref=e1104]: LOCAL
+                  - generic [ref=e1105]: files 2 / direct 0
+                - generic [ref=e1106]:
+                  - generic [ref=e1107]:
+                    - strong [ref=e1108]: 20260323_145041
+                    - generic [ref=e1109]: LOCAL
+                  - generic [ref=e1110]: files 2 / direct 0
+                - generic [ref=e1111]:
+                  - generic [ref=e1112]:
+                    - strong [ref=e1113]: 20260323_144226
+                    - generic [ref=e1114]: LOCAL
+                  - generic [ref=e1115]: files 1 / direct 0
+    - complementary [ref=e37]:
+      - generic [ref=e38]:
+        - heading "분석 도우미" [level=4] [ref=e39]
+        - generic [ref=e40]:
+          - button "내보내기" [ref=e41] [cursor=pointer]
+          - button "초기화" [ref=e42] [cursor=pointer]
+          - button "닫기" [ref=e43] [cursor=pointer]
+      - generic [ref=e44]:
+        - button "현재 상태 요약해줘" [ref=e45] [cursor=pointer]
+        - button "이슈 우선순위 추천해줘" [ref=e46] [cursor=pointer]
+        - button "커버리지 개선 방법" [ref=e47] [cursor=pointer]
+        - button "다음 해야 할 작업은?" [ref=e48] [cursor=pointer]
+        - button "실패 원인 분석해줘" [ref=e49] [cursor=pointer]
+      - generic [ref=e51]:
+        - paragraph [ref=e54]: 대시보드 요약을 해석하거나 다음 단계 추천을 도와드릴게요.
+        - generic [ref=e55]:
+          - generic [ref=e56]: 오후 02:47
+          - button "복사" [ref=e57] [cursor=pointer]
+      - generic [ref=e59]:
+        - textbox "질문을 입력하세요 (Enter 전송, Shift+Enter 줄바꿈)" [ref=e60]
+        - button "전송" [disabled] [ref=e61]
+  - contentinfo [ref=e62]:
+    - generic [ref=e63]:
+      - generic [ref=e64]: Devops
+      - generic [ref=e65]: Jenkins / Analyzer
+      - generic [ref=e66]: "세션: 3d08c4ac"
+      - generic [ref=e67]: "상태: completed"
+    - generic [ref=e68]:
+      - button "상태 새로고침" [ref=e69] [cursor=pointer]
+      - button "로그 새로고침" [ref=e70] [cursor=pointer]
+      - button "테마 전환" [ref=e71] [cursor=pointer]

@@ -1,0 +1,48 @@
+# 문서 제외
+docs/
+*.doc
+*.docx
+*.docs
+*.xlsx
+
+# 가상환경 / 캐시 / 임시
+.venv/
+venv/
+backend/venv/
+.pytest_cache/
+.tmp_pytest/
+.tmp_pytest_base/
+pytest-cache-files-*/
+__pycache__/
+.coverage
+.codex_tmp/
+.claude/
+.cursor/
+.devops_pro_cache/
+
+# 빌드 / 출력 / 리포트
+build/
+dist/
+output/
+report/
+reports/
+jenkins_reports_*/
+*.log
+
+# 백업 / 복사본
+backup_before_split/
+backup_phase_a/
+my_lin_gateway_251118_bakup/
+*.bak
+
+# 대용량 / 산출 파일
+*.zip
+
+# 개인 설정 / 민감정보 가능 파일
+OAI_CONFIG_LIST
+.env
+
+# 이미지 제외
+*.png
+*.jpg
+*.jpeg

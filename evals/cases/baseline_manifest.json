@@ -1,0 +1,56 @@
+[
+  {
+    "id": "local_build_summary_01",
+    "question": "현재 빌드 상태를 요약해줘",
+    "mode": "local",
+    "report_dir": "reports/sample_session",
+    "expected_topics": ["build", "status"],
+    "preferred_domains": ["reports", "logs"],
+    "must_cite": true,
+    "must_not_hallucinate": true
+  },
+  {
+    "id": "local_coverage_01",
+    "question": "현재 커버리지 상태를 설명해줘",
+    "mode": "local",
+    "report_dir": "reports/sample_session",
+    "expected_topics": ["coverage", "line rate"],
+    "preferred_domains": ["reports", "docs"],
+    "must_cite": true,
+    "must_not_hallucinate": true
+  },
+  {
+    "id": "local_findings_01",
+    "question": "주요 findings를 정리해줘",
+    "mode": "local",
+    "report_dir": "reports/sample_session",
+    "expected_topics": ["findings", "issue"],
+    "preferred_domains": ["reports", "docs"],
+    "must_cite": true,
+    "must_not_hallucinate": true
+  },
+  {
+    "id": "docs_jenkins_01",
+    "question": "Jenkins 관련 문서를 설명해줘",
+    "mode": "local",
+    "report_dir": "",
+    "expected_topics": ["Jenkins", "guide"],
+    "preferred_domains": ["docs"],
+    "must_cite": true,
+    "must_not_hallucinate": true
+  },
+  {
+    "id": "code_run_git_01",
+    "question": "function run_git를 설명해줘",
+    "mode": "local",
+    "report_dir": "",
+    "ui_context": {
+      "project_root": "D:/Project/devops/260105",
+      "workdir_rel": "backend/services"
+    },
+    "expected_topics": ["run_git", "git"],
+    "preferred_domains": ["code", "docs"],
+    "must_cite": true,
+    "must_not_hallucinate": true
+  }
+]

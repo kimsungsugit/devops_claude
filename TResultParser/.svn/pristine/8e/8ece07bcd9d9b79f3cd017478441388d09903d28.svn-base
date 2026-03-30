@@ -1,0 +1,1140 @@
+﻿using System.Collections.Generic;
+using System.Diagnostics;
+using System.IO;
+using System.Linq;
+using System.Text.RegularExpressions;
+using VectorReporter.Lib.VectorCAST;
+
+namespace TResultParser.Lib.VectorCAST {
+    public class TCBank {
+
+        #region enum 
+        public enum VCASTVersion {
+            Ver2021 = 0,
+            Ver2024,
+            Ver2025
+        }
+        private enum ContentsStep {
+            None = 0,
+            Contents_Block,
+            Configuration, // Envirnment
+            TCHeader,
+            TCData,
+            EResult_Header,
+        }
+
+        public enum TCStatus {
+            OK = 0, 
+            FileName_Error,
+            FileType_Error,
+            Header_Error,
+            TestCaseData_Error,
+            ExeResult_Error,
+        }
+
+        private enum TCDataType {
+            UUT = 0, // Class 0
+            UUT_Globals,  // class 1
+            UUT_Subprograms, // class 1
+
+            StubbedSubprograms, //Class 0
+            None,
+        }
+        #endregion
+
+        #region variables
+        private const int TCDATA_ITEM_ROWCOUT = 5;
+
+        private const int LINENO_CONTNETSBLOCK_VER2021 = 193;
+        private const int LINENO_CONTNETSBLOCK_VER2024 = 218;
+        private const int LINENO_CONTNETSBLOCK_VER2025 = 401;
+
+        private ContentsStep m_Step;
+        private VCastItemMode m_VCMode;
+
+        public string Envirnment { get { return m_Envirnment; } }
+        private string m_Envirnment;
+
+        public string ComponentName { get { return m_ComponentName; } }
+        private string m_ComponentName;
+
+        // Test case
+        public int MaxInputCount { get { return UnitMode ? m_MaxInputCount : ListInputNames.Count; } }
+        public int MaxExpResultCount { get { return UnitMode ? m_MaxExpResultCount: ListExpResultNames.Count; } }
+        public int MaxActResultCount { get { return UnitMode ? m_MaxActResultCount : ListActResultNames.Count; } }
+        private int m_MaxInputCount;
+        private int m_MaxExpResultCount;
+        public int m_MaxActResultCount;
+        
+        public bool UnitMode { get; set; }
+
+        public List<string> ListInputNames { get; set; }
+        public List<string> ListExpResultNames { get; set; }
+        public List<string> ListActResultNames { get; set; }
+
+        public Dictionary<string, TestItem<TestCaseItem>> DictTestCase { get; set; }
+        public Dictionary<string, TestItem<TestResultItem>> DictActualRslt { get; set; }
+        
+        public int TestCount { get { return getTotalTCCount(); } }
+        public int PassedCount { get { return getPassedTestCount(); } }
+
+        public bool IsValid { get { return Status == TCStatus.OK; }  }
+        
+        public TCStatus Status { get; set; }
+        private VCASTVersion m_VCastVer;
+        #endregion
+
+        #region public function 
+        public TCBank(VCASTVersion vcastver , string filepath, VCastItemMode mode, bool file_tc, bool unitmode)
+        {
+            m_VCastVer = vcastver;
+
+            ListInputNames = new List<string>();
+            ListExpResultNames = new List<string>();
+            ListActResultNames = new List<string>();
+
+            DictTestCase = new Dictionary<string, TestItem<TestCaseItem>>();
+            DictActualRslt = new Dictionary<string, TestItem<TestResultItem>>();
+
+            UnitMode = unitmode;
+            clear();
+
+            m_VCMode = mode;
+            Status = readTCFile(filepath, file_tc);
+        }
+
+        public void clear()
+        {
+            m_Envirnment = string.Empty;
+            m_ComponentName = string.Empty;
+            m_Step = ContentsStep.None;
+            
+            m_MaxInputCount = 0;
+            m_MaxExpResultCount = 0;
+            m_MaxActResultCount = 0;
+
+            if (ListInputNames != null) {
+                ListInputNames.Clear();
+            }
+
+            if (ListExpResultNames != null) {
+                ListExpResultNames.Clear();
+            }
+
+            if (ListActResultNames != null) {
+                ListActResultNames.Clear();
+            }
+
+            if (DictTestCase != null) {
+                DictTestCase.Clear();
+            }
+
+            if (DictActualRslt != null) {
+                DictActualRslt.Clear();
+            }
+        }
+        #endregion
+
+        #region sort
+        public void sort()
+        {
+            if (DictTestCase.Count != 0) {
+                DictTestCase = DictTestCase.OrderBy(item => item.Key).ToDictionary(x => x.Key, x => x.Value);
+            }
+
+            if (DictActualRslt.Count != 0) {
+                DictActualRslt = DictActualRslt.OrderBy(item => item.Key).ToDictionary(x => x.Key, x => x.Value);
+            }
+        }
+        #endregion
+
+        #region Get Liset 
+        public List<string> getTotalFielNames(TestItem<TestCaseItem> tcitem, TestCaseItem.TCDataMode mode)
+        {
+            if (tcitem == null) {
+                return null;
+            }
+
+            List<string> list = new List<string>();
+            foreach (var entry in tcitem.DicData) {
+                TestCaseItem tcase = entry.Value;
+                List<string>  listinput = tcase.getFieldNameList(mode);
+                if (listinput == null) {
+                    continue;
+                }
+
+                foreach (string name in listinput) {
+                    if (list.FindIndex(item => item == name) < 0) {
+                        list.Add(name);
+                    }
+                }
+            }
+
+            return list;
+        }
+
+        public List<string> getTotalFielNames(TestItem<TestResultItem> tcitem, TestCaseItem.TCDataMode mode)
+        {
+            if (tcitem == null) {
+                return null;
+            }
+
+            List<string> list = new List<string>();
+            foreach (var entry in tcitem.DicData) {
+                TestResultItem tcase = entry.Value;
+                List<string> listinput = tcase.getFieldNameList();
+                if (listinput == null) {
+                    continue;
+                }
+
+                foreach (string name in listinput) {
+                    if (list.FindIndex(item => item == name) < 0) {
+                        list.Add(name);
+                    }
+                }
+            }
+
+            return list;
+        }
+        #endregion
+
+        #region TC File 
+        private int getPassedTestCount()
+        {
+            if (DictActualRslt == null) {
+                return 0;
+            }
+
+            var data = DictActualRslt.Where(X => X.Value.Passed);
+            if (data == null || data.Count() == 0) {
+                return 0;
+            }
+
+            return data.Count();
+        }
+
+        private int getTotalTCCount()
+        {
+            if (m_VCMode == VCastItemMode.TestResult) {
+                return DictActualRslt == null ? 0 : DictActualRslt.Count;
+            }
+            else {
+                return DictTestCase == null ? 0: DictTestCase.Count;
+            }
+        }
+
+        private TCStatus readTCFile(string filepath, bool file_tc)
+        {
+            m_Step = ContentsStep.None;
+            if (string.IsNullOrEmpty(filepath) || !File.Exists(filepath) || m_VCMode == VCastItemMode.None) {
+                Debug.Print("File Name Error!!");
+                return TCStatus.FileName_Error;
+            }
+
+            string filename = Path.GetFileNameWithoutExtension(filepath);
+
+            // Making ReadLines
+            List<string> lines = new List<string>();
+            string line = string.Empty;
+            using (StreamReader reader = new StreamReader(filepath)) {
+                while ((line = reader.ReadLine()) != null) {
+                    lines.Add(line);
+                }
+            }
+
+            IVCastItem vcitem = null;
+            string testname = string.Empty;
+            bool totalPassed = true;
+
+            for (int index = 0; index < lines.Count; index++) {
+                line = lines[index];
+
+                //------------------------------------------------------------------------------
+                //  Mode 
+                //------------------------------------------------------------------------------
+                if (index == 4) {
+                    if (!VIMLib.checkStringExists(line, "<title>")) {
+                        Debug.Print("File is not a VectorCAST Result file");
+                        return TCStatus.FileType_Error;
+                    }
+
+                    if ( (file_tc && !VIMLib.checkStringExists(line, "Test Case Data Report")) || 
+                        (!file_tc && !VIMLib.checkStringExists(line, "Execution Results Report")))  {
+                        Debug.Print("Wrong file");
+                        return TCStatus.FileType_Error;
+                    }
+                }
+
+                //-------------------------------------------------------------------------------
+                // UTS Configuration 
+                //-------------------------------------------------------------------------------
+                if (isContentsBlock(m_VCastVer, index)) {//(m_OldVersion && index == LINENO_CONTNETSBLOCK_VER2021) || (!m_OldVersion && index == LINENO_CONTNETSBLOCK_VER2024)) {
+                    if (!VIMLib.checkStringExists(line, "contents-block")) {
+                        Debug.Print("File is not a VectorCAST Result file");
+                        return TCStatus.FileType_Error;
+                    }
+                    m_Step = ContentsStep.Contents_Block;
+                }
+
+                if (m_Step == ContentsStep.Contents_Block) {
+                    if (VIMLib.checkStringExists(line, "<th>Environment Name</th>")) {
+                        m_Step = ContentsStep.Configuration;
+                        m_Envirnment = VIMLib.EnvironmentName(line);
+                    }
+                }
+
+                //-------------------------------------------------------------------------------
+                // TC Data 
+                //-------------------------------------------------------------------------------
+                // TC Header 
+                if (VIMLib.checkStringExists(line, "<!-- TestcaseSectionsHeader -->")) {
+//                    Debug.Print("TestcaseSectionsHeader : {0}", index);
+                    m_Step = ContentsStep.TCHeader;
+                    int height = getHeaderLineSize(m_VCastVer, file_tc);
+                    if (height < 0) {
+                        return TCStatus.Header_Error;
+                    }
+                    index += height;
+
+                    VCastHeader header = null;
+                    index = readTCHeader(filename, lines, index, file_tc, ref header);
+                    if (index < 0 || header == null) {
+                        Debug.Print("Header_Error");
+                        return TCStatus.Header_Error;
+                    }
+
+                    vcitem = null;
+                    if (file_tc) {
+                        vcitem = new TestCaseItem(header);
+                    }
+                    else {
+                        vcitem = new TestResultItem(header);
+                    }
+                }
+
+                // Test case Data 
+                if (file_tc && VIMLib.checkStringExists(line, "<!-- TestCaseData -->")) {
+//                    Debug.Print("TestCaseData : {0}", index);
+                    m_Step = ContentsStep.TCData;
+                    index += 10;
+                    TestCaseItem tcitem = vcitem as TestCaseItem;
+                    index = readTCData(lines, index, ref tcitem);
+                    if (index < 0 || tcitem == null) {
+                        Debug.Print("TestCaseData_Error");
+                        return TCStatus.TestCaseData_Error;
+                    }
+
+                    updateNames(vcitem);
+                    if (testname != tcitem.Header.TCName || !DictTestCase.ContainsKey(tcitem.Header.TCName)) {
+                        testname = tcitem.Header.TCName;
+                        TestItem<TestCaseItem> tiTestCase = new TestItem<TestCaseItem>(false, testname);
+                        tiTestCase.DicData.Add(tcitem.Header.m_TCIndex, tcitem.Clone() as TestCaseItem);
+                        DictTestCase.Add(testname, tiTestCase);
+                    }
+                    else {
+                        DictTestCase[testname].DicData.Add(tcitem.Header.m_TCIndex, tcitem.Clone() as TestCaseItem);
+                    }
+                    vcitem = null;
+                }
+
+                // Execution Result 
+                if (!file_tc && VIMLib.checkStringExists(line, "<!-- ExecutionResults/testcase_header -->")) {
+//                    Debug.Print("ExecutionResults/testcase_header  : {0}", index);
+                    m_Step = ContentsStep.EResult_Header;
+                    index += 3;
+                    TestResultItem tritem = vcitem as TestResultItem;
+                    index = readExeResult(lines, index, ref tritem);
+                    if (index < 0 || tritem == null) {
+                        Debug.Print("ExeResult_Error");
+                        return TCStatus.ExeResult_Error;
+                    }
+
+                    updateNames(vcitem);
+                    if (!tritem.Passed) {
+                        totalPassed = false;
+                    }
+
+                    if (testname != tritem.Header.TCName || !DictActualRslt.ContainsKey(tritem.Header.TCName)) {
+                        testname = tritem.Header.TCName;
+                        TestItem<TestResultItem> tiTestResult = new TestItem<TestResultItem>(false, testname);
+                        tiTestResult.DicData.Add(tritem.Header.m_TCIndex, tritem.Clone() as TestResultItem);
+                        tiTestResult.Passed = totalPassed;
+                        DictActualRslt.Add(testname, tiTestResult);
+
+                        totalPassed = true; // Init
+                    }
+                    else {
+                        DictActualRslt[testname].DicData.Add(tritem.Header.m_TCIndex, tritem.Clone() as TestResultItem);
+                        DictActualRslt[testname].Passed = totalPassed;
+                    }
+                    vcitem = null;
+                }
+
+            }// for 
+
+            return TCStatus.OK;
+        }
+
+        private bool isContentsBlock(VCASTVersion vcastVer, int index)
+        {
+            if ((vcastVer == VCASTVersion.Ver2021 && index == LINENO_CONTNETSBLOCK_VER2021) ||
+              (vcastVer == VCASTVersion.Ver2024 && index == LINENO_CONTNETSBLOCK_VER2024) ||
+              (vcastVer == VCASTVersion.Ver2025 && index == LINENO_CONTNETSBLOCK_VER2025)) {
+
+                return true;
+            }
+
+            return false;
+        }
+
+        private int getHeaderLineSize(VCASTVersion vcastVer, bool file_tc)
+        {
+            if (vcastVer == VCASTVersion.Ver2021) {
+                return file_tc? 9 : 10;
+            }
+
+            if (vcastVer == VCASTVersion.Ver2024){
+                return file_tc ? 10 : 11;
+            }
+
+            if (vcastVer == VCASTVersion.Ver2025) {
+                return file_tc ? 11 : 12;
+            }
+
+            return -1;
+        }
+
+        #endregion
+
+        #region common function 
+        private void updateNames(IVCastItem vcitem)
+        {
+            if (vcitem.IsTestCaseData) {
+                TestCaseItem tcitem = vcitem as TestCaseItem;
+                if (tcitem == null ) {
+                    return;
+                }
+
+                if (m_MaxInputCount < tcitem.DicInput.Count) {
+                    m_MaxInputCount = tcitem.DicInput.Count;
+                }
+
+                if (m_MaxExpResultCount < tcitem.DicExpRestult.Count) {
+                    m_MaxExpResultCount = tcitem.DicExpRestult.Count;
+                }
+
+                foreach (var entry in tcitem.DicInput) {
+                    if (ListInputNames.Find(X => X == entry.Key) == null) {
+                        ListInputNames.Add(entry.Key);
+                    }
+                }
+
+                foreach (var entry in tcitem.DicExpRestult) {
+                    if (ListExpResultNames.Find(X => X == entry.Key) == null) {
+                        ListExpResultNames.Add(entry.Key);
+                    }
+                }
+            }
+            else {
+                TestResultItem tritem = vcitem as TestResultItem;
+                if (tritem == null) {
+                    return;
+                }
+
+                if (m_MaxActResultCount < tritem.DicResult.Count) {
+                    m_MaxActResultCount = tritem.DicResult.Count;
+                }
+
+                foreach (var entry in tritem.DicResult) {
+                    if (ListActResultNames.Find(X => X == entry.Key) == null) {
+                        ListActResultNames.Add(entry.Key);
+                    }
+                }
+
+                foreach (var entry in tritem.DicUserCode) {
+                    if (ListActResultNames.Find(X => X == entry.Key) == null) {
+                        ListActResultNames.Add(entry.Key);
+                    }
+                }
+            }
+        }
+
+        private int readTCHeader(string filename, List<string> lines, int startindex, bool file_tc, ref VCastHeader tcitem)
+        {
+            string unit_name = string.Empty;
+            string comp_name = string.Empty;
+            string tc_name = string.Empty;
+
+            int index = startindex;
+            string line = lines[index]; 
+            tcitem = null;
+
+            if (!VIMLib.checkStringExists(line, "<th>Unit Under Test</th>")) {
+                return -1;
+            }
+            else {
+                List<string> list = VIMLib.getTableRowDataOnly(line);
+                if (list != null && list.Count >= 2) {
+                    comp_name = list[1];
+                    if (string.IsNullOrEmpty(m_ComponentName)) {
+                        m_ComponentName = comp_name;
+                    }
+                    else if (m_ComponentName != comp_name) {
+                        Debug.Print("Component Name Eror : {0} != {1}", m_ComponentName, comp_name);
+                    }
+
+                    if (file_tc && list.Count == 4) {
+                        unit_name = list[3];
+                    }
+                }
+            }
+
+            if (!file_tc) {
+                index++;
+                line = lines[index];
+                if (!VIMLib.checkStringExists(line, "<th>Subprogram</th>")) {
+                    return -1;
+                }
+                else {
+                    List<string> list = VIMLib.getTableRowDataOnly(line);
+                    if (list != null && list.Count == 2) {
+                        unit_name = list[1];
+                    }
+                }
+            }
+
+            index++;
+            line = lines[index]; // 
+            if (!VIMLib.checkStringExists(line, "<th>Test Case Name</th>")) {
+                return -1;
+            }
+            else {
+                List<string> list = VIMLib.getTableRowDataOnly(line);
+                if (list != null && list.Count > 0) {
+                    tc_name = list[1];
+                    tcitem = new VCastHeader(comp_name, unit_name, tc_name, filename);
+                }
+            }
+
+            return index;
+        }
+
+        private int getClassLevel(string line)
+        {
+            if (!VIMLib.checkStringExists(line, "class=")) {
+                return -1;
+            }
+
+            List<string> list = VIMLib.splitString(line, new char[] { '\'' });
+            if (list.Count != 3) {
+                return -1;
+            }
+
+            string levelstring = list[1].Substring(1, 1);
+            int level = -1;
+            int.TryParse(levelstring, out level);
+            return level;
+        }
+
+        private string getFunctionParams(SortedDictionary<int, string> dicnames, int level, string variable_temp)
+        {
+            if (level < 1) {
+                return string.Empty;
+            }
+
+            if (dicnames.ContainsKey(level)) {
+                dicnames[level] = variable_temp;
+            }
+            else {
+                dicnames.Add(level, variable_temp);
+            }
+
+            if (level == 1) {
+                return variable_temp;
+            }
+
+            string variable = string.Empty;
+            foreach (var entry in dicnames) {
+                if (entry.Key > level) {
+                    break;
+                }
+
+                string data = entry.Value;
+                if (!string.IsNullOrEmpty(variable) && data.IndexOf("[") < 0) {
+                    variable += "() ";
+                }
+                variable += data;
+            }
+
+            return variable;
+        }
+
+        private string getVariableNames(SortedDictionary<int, string> dicnames, int level, string variable_temp)
+        {
+            string var_name = removebrace(variable_temp);
+            if (dicnames.ContainsKey(level)) {
+                dicnames[level] = var_name;
+            }
+            else {
+                dicnames.Add(level, var_name);
+            }
+
+            string variable = string.Empty;
+            foreach(var entry in dicnames) {
+                if (entry.Key > level) {
+                    break;
+                }
+
+                string data = entry.Value;
+                if (!string.IsNullOrEmpty(variable) && data.IndexOf("[") < 0) {
+                    variable += ".";
+                }
+                variable += data;
+            }
+
+            return variable;
+        }
+        #endregion
+
+        #region Test Case Data
+        private int readNote(List<string> lines, int startindex, ref TestCaseItem tcitem)
+        {
+            string line = lines[startindex]; // 
+
+            if (tcitem == null || !VIMLib.checkStringExists(line, "<h4>Requirements/Notes</h4>")) {
+                return -1;
+            }
+
+            string req_note = string.Empty;
+            for (int subindex = startindex + 1; subindex < lines.Count -1; subindex++) {
+                line = lines[subindex];
+
+                req_note += line;
+                if (line.IndexOf("</pre>") >= 0) {
+                    req_note = req_note.Replace("</pre>", "");
+                    req_note = req_note.Replace("<pre>", "");
+
+                    req_note = req_note.Replace("&lt;", "<");
+                    tcitem.Header.Description = req_note.Replace("&gt;", ">");
+                    return subindex;
+                }
+            }
+
+            return -1;
+        }
+
+        private int readTCData(List<string> lines, int startindex, ref TestCaseItem tcitem)
+        {
+            int index = startindex;
+            string line = lines[index]; // 
+
+            if (tcitem == null) {
+                return -1;
+            }
+
+            // Read Note 
+            if (VIMLib.checkStringExists(line, "<h4>Requirements/Notes</h4>")) {
+                int tempidx = readNote(lines, startindex, ref tcitem);
+                if (tempidx < 0) {
+                    return -1;
+                }
+                index = tempidx + 3;
+                line = lines[index];
+            }
+
+            // input Data 
+            if (!VIMLib.checkStringExists(line, "<h4>Input Test Data</h4>")) {
+                return -1;
+            }
+
+            if (line.IndexOf("This test has no") >= 0) {
+                index += 3;
+            }
+            else {
+                index += 4;
+                int endindex = readTestCaseItem(lines, index, true, ref tcitem);
+                if (endindex >= lines.Count || endindex <= index) {
+                    return -1;
+                }
+                index = endindex + TCDATA_ITEM_ROWCOUT;
+            }
+
+            // Expected Result 
+            line = lines[index]; // 
+            if (!VIMLib.checkStringExists(line, "<h4>Expected Test Data</h4>")) {
+                return -1;
+            }
+
+            if (lines[index+1].IndexOf("This test has no") >= 0) {
+                index += 4;
+            }
+            else {
+                index += 4;
+                int endindex = readTestCaseItem(lines, index, false, ref tcitem);
+                if (endindex >= lines.Count || endindex <= index) {
+                    return -1;
+                }
+
+                index = endindex;
+            }
+
+            return index;
+        }
+
+        //-------------------------------------------------------------------------------------------------------
+        // [Class 0 ] UUT : File Name
+        // [Class 1 ] Global : 
+        // [Class 2 ] Variables Name
+        // [Class 3 ] Structure(.) or Buffer Index [0]
+
+        // [Class 1 ] Subprogram : functionname 
+        // [Class 2 ] return or 
+
+        // [Class 0 ] Stubbed Subprograms:
+        // [Class 1 ] Unit: file name 
+        // [Class 2 ] Variables Name
+        // [Class 3 ] return 
+        //-------------------------------------------------------------------------------------------------------
+        private int readTestCaseItem(List<string> lines, int startindex, bool input, ref TestCaseItem tcitem)
+        {
+            int index = startindex;
+            bool hasValue = false;
+
+            TCDataType datatype = TCDataType.None;
+            SortedDictionary<int , string> dicnames = new SortedDictionary<int, string>();
+            SortedDictionary<int, string> dicsubprogram = new SortedDictionary<int, string>();
+
+            string variable = string.Empty;
+            for (int subindex = startindex; subindex < lines.Count; subindex++) {
+                string line = lines[subindex];
+                string valuedata = string.Empty;
+
+                if (VIMLib.checkStringExists(line, "class=") ) {
+                    int classlevel = getClassLevel(line);
+
+                    if (classlevel == 0) {
+                        dicnames.Clear();
+                        dicsubprogram.Clear();
+                        if (VIMLib.checkStringExists(line, "Stubbed Subprograms")) {
+                            datatype = TCDataType.StubbedSubprograms;
+                        }
+                        if (VIMLib.checkStringExists(line, "UUT")) {
+                            datatype = TCDataType.UUT;
+                        }
+                    }
+
+                    if (classlevel == 1) {
+                        if (VIMLib.checkStringExists(line, "Globals")) {
+                            datatype = TCDataType.UUT_Globals;
+                        }
+
+                        if (VIMLib.checkStringExists(line, "Subprogram")) {
+                            datatype = TCDataType.UUT_Subprograms;
+                            variable = VIMLib.substring(VIMLib.getOneTdValue(line), ":", false).Trim();
+                            if (variable == tcitem.Header.UnitName) {
+                                datatype = TCDataType.UUT_Globals;
+                                variable = string.Empty;
+                            }
+                            else {
+                                getFunctionParams(dicsubprogram, classlevel, variable);
+                            }
+                        }
+                    }
+
+                    if (classlevel >= 2) {
+                        string variable_temp = VIMLib.getOneTdValue(line);
+
+                        if (datatype == TCDataType.UUT_Subprograms) { //UUT > Subprogram 
+                            variable = getFunctionParams(dicsubprogram, classlevel, variable_temp);
+                            valuedata = VIMLib.getOneTdValue(lines[subindex + 2]);
+                            if (!string.IsNullOrEmpty(valuedata) && valuedata.IndexOf("&lt;&lt;") >= 0) { // <<malloc
+                                if (valuedata.IndexOf("malloc ") >= 0) {
+                                    valuedata = string.Empty;
+                                }
+                                else {
+                                    valuedata = removebrace(valuedata);
+                                }
+                            }
+
+                            hasValue = !string.IsNullOrEmpty(valuedata);
+                        }
+                        else if (datatype == TCDataType.UUT_Globals) {
+                            if (string.IsNullOrEmpty(variable_temp)) {
+                                return -1;
+                            }
+
+                            // clear 
+                            if (classlevel == 2) {
+                                variable = string.Empty;
+                                dicnames.Clear();
+                            }
+
+                            variable = getVariableNames(dicnames, classlevel, variable_temp);
+                            valuedata = VIMLib.getOneTdValue(lines[subindex + 2]); 
+                            if (!string.IsNullOrEmpty(valuedata) && valuedata.IndexOf("&lt;&lt;") >= 0) { // <<malloc
+                                if (valuedata.IndexOf("malloc ") >= 0) {
+                                    valuedata = string.Empty;
+                                }
+                                else {
+                                    valuedata = removebrace(valuedata);
+                                }
+
+                                string nextitem = lines[subindex + TCDATA_ITEM_ROWCOUT +1];
+                                if (!string.IsNullOrEmpty(nextitem)) {
+                                    nextitem = VIMLib.getOneTdValue(nextitem); // Next Item 
+                                    if (!string.IsNullOrEmpty(nextitem) && nextitem.IndexOf("[") >= 0) {
+                                        valuedata = string.Empty;
+                                    }
+                                }
+                            }
+                            hasValue = !string.IsNullOrEmpty(valuedata);
+                        }
+                        else if(datatype == TCDataType.StubbedSubprograms) {
+                            if (classlevel == 2) {
+                                variable_temp = VIMLib.substring(variable_temp, ":", false).Trim();
+                            }
+
+                            variable = getFunctionParams(dicnames, classlevel, variable_temp);
+                            valuedata = VIMLib.getOneTdValue(lines[subindex + 2]);
+                            hasValue = !string.IsNullOrEmpty(valuedata);
+                        }
+
+                        if (hasValue) {
+                            tcitem.addValue(input, variable, valuedata);
+                        }
+                    }
+                }
+                subindex += TCDATA_ITEM_ROWCOUT; // row count of one data 
+
+                if (VIMLib.checkStringExists(lines[subindex + 1], "</table>")) {
+                    index = subindex;
+                    break;
+                }
+            }
+
+            if (input) {
+                return index;
+            }
+
+            // <h4>Test Case / Parameter Expected User Code</h4>
+            for (int subindex = index; subindex < lines.Count; subindex++) {
+                string line = lines[subindex];
+                if (VIMLib.checkStringExists(line, "<h4>Test Case / Parameter Expected User Code</h4>")) {
+                    parseUserCodeOfTestCase(line, ref tcitem);
+                    break;
+                }
+
+                if (VIMLib.checkStringExists(lines[subindex + 1], "<!-- TestcaseSectionsFooter -->")) {
+                    break;
+                }
+            }
+
+            return index;
+        }
+
+        private bool parseUserCodeOfTestCase(string line, ref TestCaseItem tcitem)
+        {
+            if (string.IsNullOrEmpty(line)) {
+                return false;
+            }
+
+            if (VIMLib.checkStringExists(line, "<p>This test has no expected user code.</p>")) {
+                return true;
+            }
+   
+            string line_temp = replacebrace(line);
+            string pattern = "<p>(.*?)</p>";
+
+            MatchCollection matches = Regex.Matches(line_temp, pattern);
+            if (matches.Count > 0) {
+                if (matches.Count % 2 != 0) {
+                    Debug.Print("test case usercode format error!!!");
+                    return false;
+                }
+
+                for (int idx = 0; idx < matches.Count; idx+=2) {
+                    // NAme
+                    string name = matches[idx].Groups[1].Value.Trim();
+                    if (name.IndexOf("GLOBAL") >= 0) {
+                        int index = name.LastIndexOf(".");
+                        if (index < 0) {
+                            Debug.Print("usercode_error 1");
+                            return false;
+                        }
+                        name = name.Substring(index + 1, name.Length - index -1);
+                    }
+
+                    // Message 
+                    string message = matches[idx+1].Groups[1].Value.Trim();
+                    message = message.Replace('{', ' ');
+                    message = message.Replace('}', ' ');
+
+                    tcitem.addUserCode(name.Trim(), message.Trim());
+                }
+            }
+
+            return true;
+        }
+        #endregion
+
+        #region Execution Result 
+        private int readExeResult(List<string> lines, int startindex, ref TestResultItem tritem)
+        {
+            int index = startindex;
+            string line = lines[index]; // 
+            
+            // Execution Result 
+            if (tritem == null ||!VIMLib.checkStringExists(line, "</a>Execution Results")) {
+                return -1;
+            }
+
+            tritem.Passed = false;
+            if (VIMLib.checkStringExists(line, "(PASS)")) {
+                tritem.Passed = true;
+            }
+            index += 9;
+
+            // Event 
+            if (!VIMLib.checkStringExists(lines[index], "event bs-callout rel-pos")) {
+                return -1;
+            }
+
+            // Search Result Table 
+            bool existtable = false;
+            for (int subindx = index; subindx < lines.Count; subindx++) {
+                line = lines[subindx];
+                if (VIMLib.checkStringExists(line, "table table-small table-hover")) {
+                    index = subindx;
+                    existtable = true;
+                    break;
+                }
+
+                if (VIMLib.checkStringExists(line, "<!-- ExecutionResult/testcase_footer -->")) { // Skip
+                    index = subindx;
+                    break;
+                }
+            }
+
+            if (existtable) {
+                index += 11;
+
+                // Read Result Item 
+                index = readExeResultItem(lines, index, ref tritem);
+                if (index <= 0) {
+                    Debug.Print("ExDebug 2-1, line : {0}", index);
+                    return index;
+                }
+            }
+
+            if (VIMLib.checkStringExists(line, "<!-- ExecutionResult/testcase_footer -->")) {
+                if (m_VCastVer == VCASTVersion.Ver2024 || m_VCastVer == VCASTVersion.Ver2025) {
+                    if (VIMLib.checkStringExists(lines[index + 1], "Number of Events has Exceeded")) {
+                        index++;
+                    }
+                }
+                index += 8;
+                if (!VIMLib.checkStringExists(lines[index], "Result -")) {
+                    Debug.Print("ExDebug 3");
+                    return -1;
+                }
+
+                if (VIMLib.checkStringExists(lines[index + 1], "table table-small testcase-results")) {
+                    index += 6;
+                }
+            }
+
+            return index;
+        }
+
+        private int readExeResultItem(List<string> lines, int startindex, ref TestResultItem tritem)
+        {
+            int index = startindex;
+            SortedDictionary<int, string> dicnames = new SortedDictionary<int, string>();
+            string variable = string.Empty;
+            bool marker = false;
+            bool usercode = false;
+            for (int subindex = index; subindex < lines.Count; subindex++) {
+                string line = lines[subindex];
+
+                if (VIMLib.checkStringExists(line, "<tr")) { // Table row 
+                    marker = false;
+                    if (line.IndexOf("success") >= 0 || line.IndexOf("danger") >= 0) {
+                        marker = true;
+                    }
+
+                    if (line.IndexOf("User Code Expected Values") >= 0) {
+                        usercode = true;
+                        subindex += 3;
+                        line = lines[subindex];
+                    }
+
+                    if (!usercode) {
+                        subindex++;
+                        line = lines[subindex];
+                    }
+
+                    if (VIMLib.checkStringExists(line, "class=")) {
+                        if (usercode) { // User code Result 
+                            TUserCode userrslt = parseUserCodeOfActuralResult(line);
+                            if (userrslt != null) {
+                                tritem.addUserCode(userrslt);
+                            }
+                        }
+                        else { // Result 
+                            int classlevel = getClassLevel(line);
+                            string variable_temp = replacebrace(VIMLib.getOneTdValue(line));
+                            if (variable_temp.IndexOf(":") >= 0) {
+                                dicnames.Clear();
+                            }
+                            else {
+                                variable = getVariableNames(dicnames, classlevel, variable_temp);
+                                string actual_value = replacebrace(VIMLib.getOneTdValue(lines[subindex + 2]));
+                                string line_temp = lines[subindex + 3];
+                                if (!string.IsNullOrEmpty(line_temp) && marker) {
+                                    if (VIMLib.checkStringExists(line_temp, "success-marker")) {
+                                        tritem.addValue(variable, actual_value, actual_value);
+                                    }
+                                    else if (VIMLib.checkStringExists(line_temp, "fail-marker")) {
+                                        string expectedvalue = removebrakets(VIMLib.getOneTdValue(line_temp));
+                                        tritem.addValue(variable, actual_value, expectedvalue.Trim());
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    subindex = getNextRowStartCol(lines, subindex);
+                    if (subindex < 0) {
+                        return subindex;
+                    }
+                }
+
+                bool footer = checkExistsString(lines, "ExecutionResult/testcase_footer", subindex, 8) >= 0;
+                if (subindex < 0 || footer) {
+                    index = subindex;
+                    break;
+                }
+            }
+
+            return index;
+        }
+
+        private TUserCode parseUserCodeOfActuralResult(string line)
+        {
+            // <tr  class="bg-danger"><td>&lt;&lt;Ap_MotorCtrl_PDS.&lt;&lt;GLOBAL&gt;&gt;.s32s_ComSpeed&gt;&gt; == ( 301 - (301/0))</td><td>&nbsp;</td><td class="fail-marker">[fail]</td></tr>
+            if (string.IsNullOrEmpty(line)) {
+                return null;
+            }
+
+            string line_temp = replacebrace(line);
+            string pattern = "<td>(.*?)</td>";
+
+            MatchCollection matches = Regex.Matches(line_temp, pattern);
+            if (matches.Count ==2) {
+                // Name 
+                string firstString = matches[0].Groups[1].Value.Trim();
+                int index = firstString.IndexOf("==");
+                if (index < 0) {
+                    return null;
+                }
+
+                string name = firstString.Substring(0, index);
+                if (name.IndexOf("GLOBAL") >= 0) {
+                    index = name.LastIndexOf(".");
+                    if (index < 0) {
+                        Debug.Print("usercode_error 1");
+                        return null;
+                    }
+                    name = name.Substring(index+1, name.Length - index -4);
+                }
+
+                // result 
+                bool match = false;
+                if (line_temp.IndexOf("[fail]") >= 0) {
+                    firstString += ", NG";
+                }
+                else if(line_temp.IndexOf("<match>") >= 0) {
+                    match = true;
+                    firstString += ", OK";
+                }
+                else{
+                    return null;
+                }
+
+                return new TUserCode(name, match, firstString);
+            }
+            else {
+                Debug.Print("Not enough matches found.");
+                return null;
+            }
+        }
+        #endregion
+
+        #region misc 
+        private int checkExistsString(List<string> lines, string data,  int startindex, int count)
+        {
+            if (startindex < 0) {
+                return startindex;
+            }
+
+            for (int index = startindex; index < startindex +count; index++) {
+                if (index >= lines.Count) {
+                    break;
+                }
+
+                if (VIMLib.checkStringExists(lines[index], data)) {
+                    return index ;
+                }
+            }
+
+            return -1;
+        }
+
+        private int getNextRowStartCol(List<string> lines, int index)
+        {
+            for (int temp = 0; temp < 5; temp++) {
+                string line = lines[index + temp];
+                if (!string.IsNullOrEmpty(line) && line.IndexOf("</tr>") >= 0) {
+                    return index +temp;
+                }
+            }
+
+            return -1;
+        }
+
+        private string replacebrace(string org_data)
+        {
+            try {
+                string data = org_data.Replace("&lt;", "<");
+                return data.Replace("&gt;", ">");
+            }
+            catch {
+                return org_data;
+            }
+        }
+
+        private string removebrace(string org_data)
+        {
+            try {
+                string data = org_data.Replace("&lt;", "");
+                return data.Replace("&gt;", "");
+            }
+            catch {
+                return org_data;
+            }
+        }
+
+        private string removebrakets(string org_data)
+        {
+            try {
+                string data = org_data.Replace("[", "");
+                return data.Replace("]", "");
+            }
+            catch {
+                return org_data;
+            }
+        }
+
+        #endregion
+    }
+}

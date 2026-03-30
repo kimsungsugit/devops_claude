@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64" role="img" aria-label="Devops">
+  <defs>
+    <linearGradient id="devopsBlue" x1="0" x2="1" y1="0" y2="1">
+      <stop offset="0%" stop-color="#3b82f6" />
+      <stop offset="100%" stop-color="#60a5fa" />
+    </linearGradient>
+    <linearGradient id="devopsDeep" x1="0" x2="1" y1="1" y2="0">
+      <stop offset="0%" stop-color="#1d4ed8" />
+      <stop offset="100%" stop-color="#2563eb" />
+    </linearGradient>
+  </defs>
+  <circle cx="32" cy="32" r="28" fill="url(#devopsBlue)" />
+  <path
+    d="M19 33c0-7.18 5.82-13 13-13h10a3 3 0 0 1 0 6H32a7 7 0 1 0 0 14h6a3 3 0 0 1 0 6h-6c-7.18 0-13-5.82-13-13Z"
+    fill="url(#devopsDeep)"
+  />
+  <circle cx="44.5" cy="31.5" r="4.5" fill="#e0f2fe" />
+</svg>

@@ -1,0 +1,4 @@
+TEST.STUB_VAL_USER_CODE:EEPROM.SetupFCCOB.pIndex
+word *temp = <<EEPROM.SetupFCCOB.pIndex>>;
+*temp = 3;
+TEST.END_STUB_VAL_USER_CODE:

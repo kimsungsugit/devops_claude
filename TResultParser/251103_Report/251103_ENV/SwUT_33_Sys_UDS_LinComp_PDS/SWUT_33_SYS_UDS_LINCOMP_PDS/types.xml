@@ -1,0 +1,86 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<typefile version="1">
+  <type typeid="100001" typetype="STR_ING" array_type="800002" string_type_type="AR_RAY" typemark="CCAST_8_1" original_type_name="char  [8]">
+    <range_data size="8%%"/>
+  </type>
+  <type typeid="100002" typetype="AR_RAY" array_type="800001" typemark="CCAST_8_2" original_type_name="int  [4]">
+    <range_data size="4%%"/>
+  </type>
+  <type typeid="100003" typetype="STR_ING" array_type="900001" string_type_type="AR_RAY" typemark="CCAST_9_3" original_type_name="U8  [(U8 )32U]">
+    <range_data size="32%%"/>
+  </type>
+  <type typeid="100004" typetype="REC_ORD" ada_scope="__T381822080" typemark="CCAST_9_4" store_class="1">
+    <field index="1" name="queue_header" typeid="900003" const_qualified="0" is_static_field="0"/>
+    <field index="2" name="queue_tail" typeid="900003" const_qualified="0" is_static_field="0"/>
+    <field index="3" name="queue_status" typeid="900004" const_qualified="0" is_static_field="0"/>
+    <field index="4" name="queue_current_size" typeid="900003" const_qualified="0" is_static_field="0"/>
+    <field index="5" name="queue_max_size" typeid="900003" unsupported_type_reason="TI_STATUS_QUALIFIER_UNSUPPORTED" const_qualified="1" is_static_field="0"/>
+    <field index="6" name="tl_pdu" typeid="900005" const_qualified="0" is_static_field="0"/>
+  </type>
+  <type typeid="100005" typetype="ENUMERATION" typemark="CCAST_9_5">
+    <range_data min="LD_NO_DATA" max="LD_TRANSMIT_ERROR"/>
+    <enum value="LD_NO_DATA" constant="0"/>
+    <enum value="LD_DATA_AVAILABLE" constant="1"/>
+    <enum value="LD_RECEIVE_ERROR" constant="2"/>
+    <enum value="LD_QUEUE_FULL" constant="3"/>
+    <enum value="LD_QUEUE_AVAILABLE" constant="4"/>
+    <enum value="LD_QUEUE_EMPTY" constant="5"/>
+    <enum value="LD_TRANSMIT_ERROR" constant="6"/>
+  </type>
+  <type typeid="100006" typetype="STR_ING" array_type="900001" string_type_type="AR_RAY" typemark="CCAST_9_6" original_type_name="l_u8  [8]">
+    <range_data size="8%%"/>
+  </type>
+  <type typeid="100007" typetype="STR_ING" array_type="900001" string_type_type="AR_RAY" typemark="CCAST_9_7" original_type_name="U8  [10]">
+    <range_data size="10%%"/>
+  </type>
+  <type typeid="100008" typetype="STR_ING" array_type="900001" string_type_type="AR_RAY" typemark="CCAST_9_8" original_type_name="U8  [60]">
+    <range_data size="60%%"/>
+  </type>
+  <type typeid="100009" typetype="ENUMERATION" typemark="CCAST_9_9">
+    <range_data min="E_LIB_SHA256_NB_STATE_IDLE" max="E_LIB_SHA256_NB_STATE_ERROR"/>
+    <enum value="E_LIB_SHA256_NB_STATE_IDLE" constant="0"/>
+    <enum value="E_LIB_SHA256_NB_STATE_INIT" constant="1"/>
+    <enum value="E_LIB_SHA256_NB_STATE_UPDATE" constant="2"/>
+    <enum value="E_LIB_SHA256_NB_STATE_FINAL" constant="3"/>
+    <enum value="E_LIB_SHA256_NB_STATE_DONE" constant="4"/>
+    <enum value="E_LIB_SHA256_NB_STATE_ERROR" constant="5"/>
+  </type>
+  <type typeid="800001" typetype="INT_EGER" typemark="int"/>
+  <type typeid="800002" typetype="CHAR_ACTER" typemark="char"/>
+  <type typeid="900001" typetype="UNSIGNED_CHAR" typemark="unsigned char"/>
+  <type typeid="900002" typetype="REC_ORD" ada_scope="__T381822080" typemark="lin_transport_layer_queue" store_class="1">
+    <field index="1" name="queue_header" typeid="900003" const_qualified="0" is_static_field="0"/>
+    <field index="2" name="queue_tail" typeid="900003" const_qualified="0" is_static_field="0"/>
+    <field index="3" name="queue_status" typeid="900004" const_qualified="0" is_static_field="0"/>
+    <field index="4" name="queue_current_size" typeid="900003" const_qualified="0" is_static_field="0"/>
+    <field index="5" name="queue_max_size" typeid="900003" unsupported_type_reason="TI_STATUS_QUALIFIER_UNSUPPORTED" const_qualified="1" is_static_field="0"/>
+    <field index="6" name="tl_pdu" typeid="900005" const_qualified="0" is_static_field="0"/>
+  </type>
+  <type typeid="900003" typetype="UNSIGNED_SHORT" typemark="unsigned short"/>
+  <type typeid="900004" typetype="ENUMERATION" typemark="ld_queue_status">
+    <range_data min="LD_NO_DATA" max="LD_TRANSMIT_ERROR"/>
+    <enum value="LD_NO_DATA" constant="0"/>
+    <enum value="LD_DATA_AVAILABLE" constant="1"/>
+    <enum value="LD_RECEIVE_ERROR" constant="2"/>
+    <enum value="LD_QUEUE_FULL" constant="3"/>
+    <enum value="LD_QUEUE_AVAILABLE" constant="4"/>
+    <enum value="LD_QUEUE_EMPTY" constant="5"/>
+    <enum value="LD_TRANSMIT_ERROR" constant="6"/>
+  </type>
+  <type typeid="900005" typetype="ACCE_SS" pointer_type="100006" typemark="lin_tl_pdu_data*"/>
+  <type typeid="900006" typetype="UN_SIGNED" typemark="unsigned"/>
+  <type typeid="900007" typetype="INT_EGER" typemark="signed int"/>
+  <type typeid="900008" typetype="NOT_SUPPORTED" unsupported_type_reason="TI_STATUS_VOID_TYPES_ARE_UNTESTABLE" typemark="void"/>
+  <type typeid="900009" typetype="STR_ING" pointer_type="900001" string_type_type="ACCE_SS" typemark="U8*"/>
+  <type typeid="900010" typetype="ACCE_SS" pointer_type="900006" typemark="U16*"/>
+  <type typeid="900011" typetype="ENUMERATION" typemark="E_LIB_SHA256_NB_STATE">
+    <range_data min="E_LIB_SHA256_NB_STATE_IDLE" max="E_LIB_SHA256_NB_STATE_ERROR"/>
+    <enum value="E_LIB_SHA256_NB_STATE_IDLE" constant="0"/>
+    <enum value="E_LIB_SHA256_NB_STATE_INIT" constant="1"/>
+    <enum value="E_LIB_SHA256_NB_STATE_UPDATE" constant="2"/>
+    <enum value="E_LIB_SHA256_NB_STATE_FINAL" constant="3"/>
+    <enum value="E_LIB_SHA256_NB_STATE_DONE" constant="4"/>
+    <enum value="E_LIB_SHA256_NB_STATE_ERROR" constant="5"/>
+  </type>
+  <type typeid="900012" typetype="STR_ING" pointer_type="900001" string_type_type="ACCE_SS" typemark="l_u8*"/>
+</typefile>

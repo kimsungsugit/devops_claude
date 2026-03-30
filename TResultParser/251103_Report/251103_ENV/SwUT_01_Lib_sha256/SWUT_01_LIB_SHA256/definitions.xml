@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<definitions>
+  <unit id="8">
+    <variables>
+      <variable defined="1">VECTORCAST_INT1</variable>
+      <variable defined="1">VECTORCAST_INT2</variable>
+      <variable defined="1">VECTORCAST_INT3</variable>
+      <variable defined="1">VECTORCAST_STR1</variable>
+      <variable defined="1">VECTORCAST_BUFFER</variable>
+    </variables>
+  </unit>
+  <unit id="9">
+    <functions>
+      <function defined="1">g_Lib_Sha256_Nb_Start</function>
+      <function defined="1">g_Lib_Sha256_Nb_Process</function>
+      <function defined="1">g_Lib_Sha256_Nb_GetState</function>
+      <function defined="1">g_Lib_Sha256_Nb_Reset</function>
+    </functions>
+    <variables>
+      <variable defined="1" stubbed="1">u16g_SysOptCtrl_OverOpenDeg</variable>
+      <variable defined="1" stubbed="1">s16g_SysOptCtrl_OverPos</variable>
+      <variable defined="1">u8g_Lib_Sha256_Hash</variable>
+    </variables>
+  </unit>
+</definitions>

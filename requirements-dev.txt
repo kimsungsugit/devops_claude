@@ -1,0 +1,11 @@
+flake8
+pytest
+pytest-cov
+autopep8
+radon
+tree-sitter
+tree-sitter-c
+clang
+libclang
+jsonschema
+networkx

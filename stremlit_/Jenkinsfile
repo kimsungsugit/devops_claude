@@ -1,0 +1,46 @@
+// Jenkinsfile
+pipeline {
+  agent any
+
+  environment {
+    REPORT_DIR = "reports"
+    TARGETS_GLOB = "libs/*.c"
+    // CI 제어 (필요 시 조절)
+    CI_ENABLE_COVERAGE = "1"
+    CI_ENABLE_FUZZ = "0"
+    CI_ENABLE_QEMU = "0"
+    CI_ENABLE_DOMAIN_TESTS = "0"
+    CI_ENABLE_TEST_GEN = "1"
+  }
+
+  stages {
+    stage('Checkout') {
+      steps {
+        checkout scm
+      }
+    }
+
+    stage('Run Pipeline') {
+      steps {
+        sh '''
+          set -e
+          python3 -V
+          mkdir -p ${REPORT_DIR}
+
+          # CI 엔트리 실행 (repo 루트 기준)
+          python3 -m workflow.ci_entry --project-root "$WORKSPACE" --report-dir "${REPORT_DIR}" --targets-glob "${TARGETS_GLOB}"
+        '''
+      }
+    }
+  }
+
+  post {
+    always {
+      // ✅ GUI가 가져갈 수 있는 “아티팩트”로 남기는 구간
+      archiveArtifacts artifacts: 'reports/**,*.html,*.xlsx', fingerprint: true, allowEmptyArchive: true
+
+      // 테스트 리포트가 있다면 (있을 때만)
+      junit testResults: 'reports/**/test*.xml', allowEmptyResults: true
+    }
+  }
+}

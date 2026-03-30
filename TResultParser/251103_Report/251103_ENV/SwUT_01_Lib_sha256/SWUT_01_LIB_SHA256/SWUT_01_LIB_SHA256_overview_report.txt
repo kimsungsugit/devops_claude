@@ -1,0 +1,37 @@
+--------------------------------------------------------------------------------
+Environment Overview
+--------------------------------------------------------------------------------
+
+
+
+
+  Environment Name:    SWUT_01_LIB_SHA256
+  Environment Status:  Normal
+  Environment Version: REVISION_2025_DEFAULT_SFP
+  Environment Build Type: Full
+  Coverage Status:     Statement+Branch (enabled)
+  Language:            C
+  Compiler Name:       CodeWarrior_S12Z_S12ZVMC_Trace32 Simulator_C
+  White Box:           Yes
+  Search List:         $(PROJECT_DIR)\Sources  (testable)
+                       $(PROJECT_DIR)\Sources\LIN\LIN_driver  (testable)
+                       $(PROJECT_DIR)\Sources\LIN\LIN_driver\bsp\SCI  (testable)
+                       $(PROJECT_DIR)\Sources\LIN\LIN_driver\coreapi  (testable)
+                       $(PROJECT_DIR)\Sources\LIN\LIN_driver\diagnostic  (testable)
+                       $(PROJECT_DIR)\Sources\LIN\LIN_driver\include  (testable)
+                       $(PROJECT_DIR)\Sources\LIN\LIN_driver\lowlevel  (testable)
+                       $(PROJECT_DIR)\Sources\LIN\LIN_driver\transport  (testable)
+                       $(PROJECT_DIR)\Sources\LIN\lin16_cfg  (testable)
+                       $(PROJECT_DIR)\Sources\APP  (testable)
+                       $(PROJECT_DIR)\Sources\IF  (testable)
+                       $(PROJECT_DIR)\Sources\SYSTEM  (testable)
+                       $(PROJECT_DIR)\Lib  (testable)
+                       $(PROJECT_DIR)\Generated_Code  (testable)
+                       $(PROJECT_DIR)\Project_Headers  (testable)
+                       $(VCAST_CW_INSTALL_DIR)\MCU\S12lisa_Support\s12lisac\include  (library include)
+                       $(VCAST_CW_INSTALL_DIR)\MCU\S12lisa_Support\s12lisac\src  (library include)
+                       $(VCAST_CW_INSTALL_DIR)\MCU\S12lisa_Support\s12lisac\lib_large  (library include)
+  Units Under Test:    Lib_sha256
+  Stub List:           None
+  Stub None (Source Files): None
+

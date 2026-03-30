@@ -1,0 +1,3 @@
+=== SUDS 함수 테이블 상세 분석 (처음 3개) ===
+=== SUDS Global Data 섹션 테이블들 ===
+=== SUDS Unit Structure 섹션 테이블들 ===

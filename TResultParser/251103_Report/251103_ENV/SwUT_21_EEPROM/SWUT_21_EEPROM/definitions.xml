@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<definitions>
+  <unit id="8">
+    <variables>
+      <variable defined="1">VECTORCAST_INT1</variable>
+      <variable defined="1">VECTORCAST_INT2</variable>
+      <variable defined="1">VECTORCAST_INT3</variable>
+      <variable defined="1">VECTORCAST_STR1</variable>
+      <variable defined="1">VECTORCAST_BUFFER</variable>
+    </variables>
+  </unit>
+  <unit id="9">
+    <functions>
+      <function defined="1">EEPROM_SetByte</function>
+      <function defined="1">EEPROM_GetByte</function>
+      <function defined="1">EEPROM_Init</function>
+    </functions>
+    <variables>
+      <variable defined="1" stubbed="1">_FCLKDIV</variable>
+      <variable defined="1" stubbed="1">_FCCOBIX</variable>
+      <variable defined="1" stubbed="1">_FSTAT</variable>
+      <variable defined="1" stubbed="1">_FCCOB0</variable>
+      <variable defined="1" stubbed="1">_FCCOB1</variable>
+      <variable defined="1" stubbed="1">_FCCOB2</variable>
+    </variables>
+  </unit>
+</definitions>

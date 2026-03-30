@@ -1,0 +1,649 @@
+1,0,B    {
+1,1,B    if( ( U16 )u8t_PwmData >= 100U )
+1,2,S    u16t_Temp = 0x3FFFU;
+1,3,S    u16t_Temp = ( U16 )u8t_PwmData * 163U;
+1,4,S    return( u16t_Temp );
+2,0,B    {
+2,1,S    s_UDS_RDBI_ExtractParams();
+2,2,B    if( ( U16 )u8s_DidMsb == ( U16 )( ( U8 )( 0xF1U ) ) )
+2,3,S    u16t_LocalDidLsb = ( U16 )u8s_DidLsb;
+2,4,S    s_UDS_RDBI_ProcessSystemInfo(u16t_LocalDidLsb);
+2,5,B    if( ( U16 )u8s_DidMsb == ( U16 )( ( U8 )( 0xC2U ) ) )
+2,6,S    u16t_LocalDidLsb = ( U16 )u8s_DidLsb;
+2,7,S    s_UDS_RDBI_ProcessSystemStatus(u16t_LocalDidLsb);
+2,8,S    ;
+2,9,S    return;
+3,0,B    {
+3,1,S    u8s_UdsSid = lin_tl_rx_queue.tl_pdu[lin_tl_rx_queue.queue_header][2];
+3,2,S    u8s_DidMsb = lin_tl_rx_queue.tl_pdu[lin_tl_rx_queue.queue_header][3];
+3,3,S    u8s_DidLsb = lin_tl_rx_queue.tl_pdu[lin_tl_rx_queue.queue_header][4];
+3,4,S    u8s_SwIntVer = lin_tl_rx_queue.tl_pdu[lin_tl_rx_queue.queue_header][5];
+4,0,B    {
+4,1,S    switch( u16t_DidLsb )
+4,2,B    case ( ( U8 )( 0xA2U ) ):
+4,3,S    s_UDS_RDBI_ProdDate( );
+4,4,S    break;
+4,5,B    case ( ( U8 )( 0xA3U ) ):
+4,6,S    s_UDS_RDBI_PartNumber( );
+4,7,S    break;
+4,8,B    default:
+4,9,S    ;
+4,10,S    break;
+5,0,B    {
+5,1,S    switch( u16t_DidLsb )
+5,2,B    case ( ( U8 )( 0xA4U ) ):
+5,3,S    s_UDS_RDBI_SW_Version( );
+5,4,S    break;
+5,5,B    case ( ( U8 )( 0xA5U ) ):
+5,6,S    s_UDS_RDBI_HW_Version( );
+5,7,S    break;
+5,8,B    case ( ( U8 )( 0xA6U ) ):
+5,9,S    s_UDS_RDBI_DB_Version( );
+5,10,S    break;
+5,11,B    case ( ( U8 )( 0xB2U ) ):
+5,12,S    s_UDS_RDBI_SW_Unit1_Version( );
+5,13,S    break;
+5,14,B    case ( ( U8 )( 0xC2U ) ):
+5,15,S    s_UDS_RDBI_SW_Unit1_IVD( );
+5,16,S    break;
+5,17,B    default:
+5,18,S    ;
+5,19,S    break;
+6,0,B    {
+6,1,S    s_UDS_RDBI_ProcessDatePartInfo(u16t_DidLsb);
+6,2,S    s_UDS_RDBI_ProcessVersionInfo(u16t_DidLsb);
+6,3,B    if( ( u16t_DidLsb != ( ( U8 )( 0xA2U ) ) ) && 
+        ( u16t_DidLsb != ( ( U8 )( 0xA3U ) ) ) &&
+        ( u16t_DidLsb != ( ( U8 )( 0xA4U ) ) ) &&
+        ( u16t_DidLsb != ( ( U8 )( 0xA5U ) ) ) &&
+        ( u16t_DidLsb != ( ( U8 )( 0xA6U ) ) ) &&
+        ( u16t_DidLsb != ( ( U8 )( 0xB2U ) ) ) 
+
+        && ( u16t_DidLsb != ( ( U8 )( 0xC2U ) ) )
+
+        )
+6,4,S    u8s_DidLsb = ( ( U8 )( 0x00U ) );
+7,0,B    {
+7,1,S    switch( u16t_DidLsb )
+7,2,B    case ( ( U8 )( 0x10U ) ):
+7,3,S    s_UDS_RDBI_StatusCheck1( );
+7,4,S    break;
+7,5,B    case ( ( U8 )( 0x11U ) ):
+7,6,S    s_UDS_RDBI_StatusCheck2( );
+7,7,S    break;
+7,8,B    case ( ( U8 )( 0x12U ) ):
+7,9,S    s_UDS_RDBI_StatusCheck3( );
+7,10,S    break;
+7,11,B    default:
+7,12,S    u8s_DidLsb = ( ( U8 )( 0x00U ) );
+7,13,S    break;
+8,0,B    {
+8,1,S    U16 u16t_Length = ( U16 )( ( U8 )( 0x04U ) ) + ( U16 )( ( U8 )( 0x03U ) );
+8,2,B    for( u16t_EepromAddrIdx = ( ( U8 )( 0x00U ) ); u16t_EepromAddrIdx < ( ( U8 )( 0x04U ) ); u16t_EepromAddrIdx++ )
+8,3,S    u8t_Array[ u16t_EepromAddrIdx ] = u8g_SysEepromCtrl_ReadProdDate( u16t_EepromAddrIdx );
+8,4,S    u8s_DataBuffer[0] = u8s_UdsSid | ( ( U8 )( 0x40U ) );
+8,5,S    u8s_DataBuffer[1] = u8s_DidMsb;
+8,6,S    u8s_DataBuffer[2] = u8s_DidLsb;
+8,7,B    for( u16t_EepromAddrIdx = ( ( U8 )( 0x00U ) ); u16t_EepromAddrIdx < ( ( U8 )( 0x04U ) ); u16t_EepromAddrIdx++ )
+8,8,S    u8s_DataBuffer[u16t_EepromAddrIdx + ( ( U8 )( 0x03U ) )] = u8t_Array[u16t_EepromAddrIdx];
+8,9,S    ld_send_message( ( l_u16 )u16t_Length, u8s_DataBuffer );
+8,10,S    return;
+9,0,B    {
+9,1,S    U16 u16t_Length = ( ( U8 )( 0x0AU ) ) + ( ( U8 )( 0x03U ) );
+9,2,B    for( u8t_EepromAddrIdx = ( ( U8 )( 0x00U ) ); u8t_EepromAddrIdx < ( ( U8 )( 0x0AU ) ); u8t_EepromAddrIdx++ )
+9,3,S    u8t_Array[ u8t_EepromAddrIdx ] = u8g_SysEepromCtrl_ReadPartNo( (U16)u8t_EepromAddrIdx );
+9,4,S    u8s_DataBuffer[0] = ( u8s_UdsSid | ( ( U8 )( 0x40U ) ) );
+9,5,S    u8s_DataBuffer[1] = u8s_DidMsb;
+9,6,S    u8s_DataBuffer[2] = u8s_DidLsb;
+9,7,B    for( u8t_EepromAddrIdx = ( ( U8 )( 0x00U ) ); u8t_EepromAddrIdx < ( ( U8 )( 0x0AU ) ); u8t_EepromAddrIdx++ )
+9,8,S    u8s_DataBuffer[u8t_EepromAddrIdx + ( ( U8 )( 0x03U ) )] = u8t_Array[u8t_EepromAddrIdx];
+9,9,S    ld_send_message( ( l_u16 )u16t_Length, u8s_DataBuffer );
+9,10,S    return;
+10,0,B    {
+10,1,S    U16 u16t_Length = ( ( ( U8 )( 0x06U ) ) - ( ( U8 )( 0x02U ) ))  + ( ( U8 )( 0x03U ) );
+10,2,S    u8s_DataBuffer[0] = ( u8s_UdsSid | ( ( U8 )( 0x40U ) ) );
+10,3,S    u8s_DataBuffer[1] = u8s_DidMsb;
+10,4,S    u8s_DataBuffer[2] = u8s_DidLsb;
+10,5,S    u8s_DataBuffer[3] = ( ( U8 )( 0x32U ) );
+10,6,S    u8s_DataBuffer[4] = ( ( U8 )( 0x35U ) );
+10,7,S    u8s_DataBuffer[5] = ( ( U8 )( 0x39U ) );
+10,8,S    u8s_DataBuffer[6] = ( ( U8 )( 0x33U ) );
+10,9,B    if( u8s_SwIntVer == ( ( U8 )( 0x88U ) ) )
+10,10,S    u16t_Length = ( ( U8 )( 0x06U ) ) + ( ( U8 )( 0x03U ) );
+10,11,S    u8s_DataBuffer[7] = ( ( U8 )( 0x30U ) );
+10,12,S    u8s_DataBuffer[8] = ( ( U8 )( 0x30U ) );
+10,13,S    ld_send_message( ( l_u16 )u16t_Length, u8s_DataBuffer );
+10,14,S    return;
+11,0,B    {
+11,1,S    U16 u16t_Length = ( ( U8 )( 0x04U ) ) + ( ( U8 )( 0x03U ) );
+11,2,B    for( u8t_EepromAddrIdx = ( ( U8 )( 0x00U ) ); u8t_EepromAddrIdx < ( ( U8 )( 0x04U ) ); u8t_EepromAddrIdx++ )
+11,3,S    u8t_Array[ u8t_EepromAddrIdx ] = u8g_SysEepromCtrl_ReadHwVer( (U16)u8t_EepromAddrIdx );
+11,4,S    u8s_DataBuffer[0] = ( u8s_UdsSid | ( ( U8 )( 0x40U ) ) );
+11,5,S    u8s_DataBuffer[1] = u8s_DidMsb;
+11,6,S    u8s_DataBuffer[2] = u8s_DidLsb;
+11,7,B    for( u8t_EepromAddrIdx = ( ( U8 )( 0x00U ) ); u8t_EepromAddrIdx < ( ( U8 )( 0x04U ) ); u8t_EepromAddrIdx++ )
+11,8,S    u8s_DataBuffer[u8t_EepromAddrIdx + ( ( U8 )( 0x03U ) )] = u8t_Array[u8t_EepromAddrIdx];
+11,9,S    ld_send_message( ( l_u16 )u16t_Length, u8s_DataBuffer );
+11,10,S    return;
+12,0,B    {
+12,1,S    U16 u16t_Length = ( ( U8 )( 0x04U ) ) + ( ( U8 )( 0x03U ) );
+12,2,B    for( u8t_EepromAddrIdx = ( ( U8 )( 0x00U ) ); u8t_EepromAddrIdx < ( ( U8 )( 0x04U ) ); u8t_EepromAddrIdx++ )
+12,3,S    u8t_Array[ u8t_EepromAddrIdx ] = u8g_SysEepromCtrl_ReadDbVer( (U16)u8t_EepromAddrIdx );
+12,4,S    u8s_DataBuffer[0] = ( u8s_UdsSid | ( ( U8 )( 0x40U ) ) );
+12,5,S    u8s_DataBuffer[1] = u8s_DidMsb;
+12,6,S    u8s_DataBuffer[2] = u8s_DidLsb;
+12,7,B    for( u8t_EepromAddrIdx = ( ( U8 )( 0x00U ) ); u8t_EepromAddrIdx < ( ( U8 )( 0x04U ) ); u8t_EepromAddrIdx++ )
+12,8,S    u8s_DataBuffer[u8t_EepromAddrIdx + ( ( U8 )( 0x03U ) )] = u8t_Array[u8t_EepromAddrIdx];
+12,9,S    ld_send_message( ( l_u16 )u16t_Length, u8s_DataBuffer );
+12,10,S    return;
+13,0,B    {
+13,1,S    U16 u16t_Length = ( ( ( U8 )( 0x06U ) ) - ( ( U8 )( 0x02U ) ) ) + ( ( U8 )( 0x03U ) );
+13,2,S    u8s_DataBuffer[0] = ( u8s_UdsSid | ( ( U8 )( 0x40U ) ) );
+13,3,S    u8s_DataBuffer[1] = u8s_DidMsb;
+13,4,S    u8s_DataBuffer[2] = u8s_DidLsb;
+13,5,S    u8s_DataBuffer[3] = ( ( U8 )( 0x32U ) );
+13,6,S    u8s_DataBuffer[4] = ( ( U8 )( 0x35U ) );
+13,7,S    u8s_DataBuffer[5] = ( ( U8 )( 0x39U ) );
+13,8,S    u8s_DataBuffer[6] = ( ( U8 )( 0x33U ) );
+13,9,S    ld_send_message( ( l_u16 )u16t_Length, u8s_DataBuffer );
+13,10,S    return;
+14,0,B    {
+14,1,S    current_state = g_Lib_Sha256_Nb_GetState();
+14,2,S    local_state = current_state;
+14,3,S    switch(local_state)
+14,4,B    case E_LIB_SHA256_NB_STATE_DONE:
+14,5,S    u16t_Length = ( U8 )32U + ( ( U8 )( 0x03U ) );
+14,6,S    u8s_DataBuffer[0] = u8s_UdsSid | ( ( U8 )( 0x40U ) );
+14,7,S    u8s_DataBuffer[1] = u8s_DidMsb;
+14,8,S    u8s_DataBuffer[2] = u8s_DidLsb;
+14,9,B    for (u8t_Index = ( U8 )0U; u8t_Index < ( U8 )32U; u8t_Index++)
+14,10,S    u8s_DataBuffer[u8t_Index + ( U8 )3U] = u8g_Lib_Sha256_Hash[u8t_Index];
+14,11,S    ld_send_message(u16t_Length, u8s_DataBuffer);
+14,12,S    break;
+14,13,B    case E_LIB_SHA256_NB_STATE_IDLE:
+14,14,B    case E_LIB_SHA256_NB_STATE_INIT:
+14,15,B    case E_LIB_SHA256_NB_STATE_UPDATE:
+14,16,B    case E_LIB_SHA256_NB_STATE_FINAL:
+14,17,B    case E_LIB_SHA256_NB_STATE_ERROR:
+14,18,B    default:
+14,19,S    s_UDS_SendNRC22_ConditionsNotCorrect();
+14,20,S    break;
+14,21,S    return;
+15,0,B    {
+15,1,S    U16 u16t_Length = ( ( U8 )( 0x16U ) ) + ( ( U8 )( 0x03U ) );
+15,2,B    U16 u16t_MotorCurrent = ((U16)(((S16)(s16g_ApiIn_MotorCurrLvl) < (S16)0) ? ((U16)(-(S16)(s16g_ApiIn_MotorCurrLvl))) : ((U16)(s16g_ApiIn_MotorCurrLvl))));
+15,3,S    u8s_DataBuffer[0] = u8s_UdsSid | ( ( U8 )( 0x40U ) );
+15,4,S    u8s_DataBuffer[1] = u8s_DidMsb;
+15,5,S    u8s_DataBuffer[2] = u8s_DidLsb;
+15,6,S    u8s_DataBuffer[3] = ( ( U8 )( 0x3FU ) );
+15,7,S    u8s_DataBuffer[4] = ( ( U8 )( 0x00U ) );
+15,8,S    u8s_DataBuffer[5] = ( ( U8 )( 0x00U ) );
+15,9,S    u8s_DataBuffer[6] = ( ( U8 )( 0x00U ) );
+15,10,S    u8s_DataBuffer[7] = u8g_ApiOut_DoorAngle;
+15,11,S    u8s_DataBuffer[8] = u8g_ApiOut_DoorState;
+15,12,S    u8s_DataBuffer[8] |= (U8)(( u16g_SysDiag_SystemStatus & ( ( U16 )( 0x0001 ) ) ) << 4U);
+15,13,S    u8s_DataBuffer[8] |= (U8)(u8g_DoorPreCtrl_MotorOverHeat_F << 5U);
+15,14,S    u8s_DataBuffer[8] |= (U8)(u8g_SysDiag_MotorOverHeatActiveHold_F << 5U);
+15,15,S    u8s_DataBuffer[9] = u8g_ApiOut_Vsup;
+15,16,S    u8s_DataBuffer[10] = ( U8 )( u16t_MotorCurrent / ( U16 )100 );
+15,17,S    u8s_DataBuffer[11] = u8g_ApiIn_MotorRps;
+15,18,S    u8s_DataBuffer[12] = ( U8 )u16g_ApiIn_MotorTempLvl;
+15,19,S    ld_send_message( ( l_u16 )u16t_Length, u8s_DataBuffer );
+15,20,S    return;
+16,0,B    {
+16,1,S    U16 u16t_Length = ( ( U8 )( 0x16U ) ) + ( ( U8 )( 0x03U ) );
+16,2,B    for( u8t_EepromAddrIdx = ( ( U8 )( 0x00U ) ); u8t_EepromAddrIdx < ( ( U8 )( 0x16U ) ); u8t_EepromAddrIdx++ )
+16,3,S    u8t_Array[ u8t_EepromAddrIdx ] = u8g_SysEepromCtrl_ReadDiagData( ( U16 )u8t_EepromAddrIdx );
+16,4,S    u8s_DataBuffer[0] = u8s_UdsSid | ( ( U8 )( 0x40U ) );
+16,5,S    u8s_DataBuffer[1] = u8s_DidMsb;
+16,6,S    u8s_DataBuffer[2] = u8s_DidLsb;
+16,7,S    u8s_DataBuffer[3] = ( ( U8 )( 0xFFU ) );
+16,8,S    u8s_DataBuffer[4] = ( ( U8 )( 0x01U ) );
+16,9,S    u8s_DataBuffer[5] = ( ( U8 )( 0x00U ) );
+16,10,S    u8s_DataBuffer[6] = ( ( U8 )( 0x00U ) );
+16,11,B    for( u8t_EepromAddrIdx = ( ( U8 )( 0x00U ) ); u8t_EepromAddrIdx < ( ( U8 )( 0x16U ) ); u8t_EepromAddrIdx++ )
+16,12,S    u8s_DataBuffer[u8t_EepromAddrIdx + ( ( U8 )( 0x03U ) ) + ( U8 )4U] = u8t_Array[u8t_EepromAddrIdx];
+16,13,S    ld_send_message( ( l_u16 )u16t_Length, u8s_DataBuffer );
+16,14,S    return;
+17,0,B    {
+17,1,S    U16 u16t_Length = ( ( U8 )( 0x16U ) ) + ( ( U8 )( 0x03U ) );
+17,2,S    u8s_DataBuffer[0] = u8s_UdsSid | ( ( U8 )( 0x40U ) );
+17,3,S    u8s_DataBuffer[1] = u8s_DidMsb;
+17,4,S    u8s_DataBuffer[2] = u8s_DidLsb;
+17,5,S    u8s_DataBuffer[3] = ( ( U8 )( 0x01U ) );
+17,6,S    u8s_DataBuffer[4] = ( ( U8 )( 0x00U ) );
+17,7,S    u8s_DataBuffer[5] = ( ( U8 )( 0x00U ) );
+17,8,S    u8s_DataBuffer[6] = ( ( U8 )( 0x00U ) );
+17,9,S    u8s_DataBuffer[7] = u8g_SysEepromCtrl_ReadInlineData( ( ( U16 )( 4U ) ) );
+17,10,S    ld_send_message( ( l_u16 )u16t_Length, u8s_DataBuffer );
+17,11,S    return;
+18,0,B    {
+18,1,S    U8 u8t_PCI = lin_tl_rx_queue.tl_pdu[lin_tl_rx_queue.queue_header][1];
+18,2,S    U8 u8t_FrameType = (u8t_PCI & (U8)0xF0U) >> 4U;
+18,3,B    if( u8t_FrameType == (U8)0x00U )
+18,4,S    u8s_UdsSid = lin_tl_rx_queue.tl_pdu[lin_tl_rx_queue.queue_header][2];
+18,5,S    u8s_DidMsb = lin_tl_rx_queue.tl_pdu[lin_tl_rx_queue.queue_header][3];
+18,6,S    u8s_DidLsb = lin_tl_rx_queue.tl_pdu[lin_tl_rx_queue.queue_header][4];
+18,7,S    u8s_UserServiceIdMsb = lin_tl_rx_queue.tl_pdu[lin_tl_rx_queue.queue_header][5];
+18,8,S    u8s_UserServiceIdLsb = lin_tl_rx_queue.tl_pdu[lin_tl_rx_queue.queue_header][6];
+18,9,S    u8s_UdsSid = lin_tl_rx_queue.tl_pdu[lin_tl_rx_queue.queue_header][3];
+18,10,S    u8s_DidMsb = lin_tl_rx_queue.tl_pdu[lin_tl_rx_queue.queue_header][4];
+18,11,S    u8s_DidLsb = lin_tl_rx_queue.tl_pdu[lin_tl_rx_queue.queue_header][5];
+18,12,S    u8s_UserServiceIdMsb = lin_tl_rx_queue.tl_pdu[lin_tl_rx_queue.queue_header][6];
+18,13,S    u8s_UserServiceIdLsb = lin_tl_rx_queue.tl_pdu[lin_tl_rx_queue.queue_header][7];
+18,14,B    if( u8s_DidMsb == ( ( U8 )( 0xC2U ) ) )
+18,15,S    u8t_LocalDidLsb = u8s_DidLsb;
+18,16,S    switch( u8t_LocalDidLsb )
+18,17,B    case ( ( U8 )( 0x12U ) ):
+18,18,S    s_UDS_WDBI_UserOptRecordId( );
+18,19,S    break;
+18,20,B    case ( ( U8 )( 0xA0U ) ):
+18,21,S    s_UDS_WDBI_UsOptMain( );
+18,22,S    break;
+18,23,B    default:
+18,24,S    u8s_DidLsb = ( ( U8 )( 0x00U ) );
+18,25,S    break;
+18,26,B    if( u8s_DidMsb == (U8)0xF2U )
+18,27,B    if( u8s_DidLsb == (U8)0xF1U )
+18,28,S    ;
+18,29,S    return;
+19,0,B    {
+19,1,S    U16 u16t_Length = ( ( U8 )( 0x03U ) );
+19,2,S    u8t_TempData = ( lin_tl_rx_queue.tl_pdu[0][6] & ( U8 )0x01U );
+19,3,B    if( u8t_TempData == ( ( U8 )( 0x01U ) ) )
+19,4,S    u8g_SysUds_WriteData[0] = lin_tl_rx_queue.tl_pdu[1][4];
+19,5,S    u8g_SysUds_WdbiCmd = ( ( U8 )( 0x12U ) );
+19,6,S    u8s_DataBuffer[0] = ( u8s_UdsSid | ( ( U8 )( 0x40U ) ) );
+19,7,S    u8s_DataBuffer[1] = u8s_DidMsb;
+19,8,S    u8s_DataBuffer[2] = u8s_DidLsb;
+19,9,S    ld_send_message( ( l_u16 )u16t_Length, u8s_DataBuffer );
+19,10,S    return;
+20,0,B    {
+20,1,B    if( u8s_UserServiceIdMsb == ( ( U8 )( 0xF1U ) ) )
+20,2,S    s_UDS_WDBI_UsOpt_F1G( );
+20,3,B    if( ( u8s_UserServiceIdMsb == ( ( U8 )( 0xE2U ) ) )
+         &&  ( ( u8s_UserServiceIdLsb == ( ( U8 )( 0xB1U ) ) )
+           ||  ( u8s_UserServiceIdLsb == ( ( U8 )( 0xB2U ) ) )
+           ||  ( u8s_UserServiceIdLsb == ( ( U8 )( 0xB3U ) ) )
+           ||  ( u8s_UserServiceIdLsb == ( ( U8 )( 0xB4U ) ) ) ) )
+20,4,S    s_UDS_WDBI_UsOpt_E2G_1( );
+20,5,B    if( ( u8s_UserServiceIdMsb == ( ( U8 )( 0xE2U ) ) )
+         &&  ( ( u8s_UserServiceIdLsb == ( ( U8 )( 0xB5U ) ) )
+           ||  ( u8s_UserServiceIdLsb == ( ( U8 )( 0xB6U ) ) )
+           ||  ( u8s_UserServiceIdLsb == ( ( U8 )( 0xB7U ) ) )
+           ||  ( u8s_UserServiceIdLsb == ( ( U8 )( 0xB8U ) ) )
+           ||  ( u8s_UserServiceIdLsb == ( ( U8 )( 0xB9U ) ) )
+           ||  ( u8s_UserServiceIdLsb == ( ( U8 )( 0xBAU ) ) ) ) )
+20,6,S    s_UDS_WDBI_UsOpt_E2G_2( );
+20,7,B    if( ( u8s_UserServiceIdMsb == ( ( U8 )( 0xE2U ) ) )
+         &&  ( ( u8s_UserServiceIdLsb == ( ( U8 )( 0xBBU ) ) )
+           ||  ( u8s_UserServiceIdLsb == ( ( U8 )( 0xBCU ) ) )
+           ||  ( u8s_UserServiceIdLsb == ( ( U8 )( 0xBDU ) ) )
+           ||  ( u8s_UserServiceIdLsb == ( ( U8 )( 0xBEU ) ) )
+           ||  ( u8s_UserServiceIdLsb == ( ( U8 )( 0xBFU ) ) ) ) )
+20,8,S    s_UDS_WDBI_UsOpt_E2G_3( );
+20,9,S    ;
+20,10,S    return;
+21,0,B    {
+21,1,S    u8t_LocalServiceId = u8s_UserServiceIdLsb;
+21,2,S    switch( u8t_LocalServiceId )
+21,3,B    case ( ( U8 )( 0xA2U ) ):
+21,4,S    s_UDS_WDBI_ProdDate( );
+21,5,S    break;
+21,6,B    case ( ( U8 )( 0xA3U ) ):
+21,7,S    s_UDS_WDBI_PartNumber( );
+21,8,S    break;
+21,9,B    case ( ( U8 )( 0xA5U ) ):
+21,10,S    s_UDS_WDBI_HW_Version( );
+21,11,S    break;
+21,12,B    case ( ( U8 )( 0xA6U ) ):
+21,13,S    s_UDS_WDBI_DB_Version( );
+21,14,S    break;
+21,15,B    default:
+21,16,S    u8s_UserServiceIdLsb = ( ( U8 )( 0x00U ) );
+21,17,S    break;
+21,18,S    return;
+22,0,B    {
+22,1,S    u8t_LocalServiceId = u8s_UserServiceIdLsb;
+22,2,S    switch( u8t_LocalServiceId )
+22,3,B    case ( ( U8 )( 0xB1U ) ):
+22,4,S    s_UDS_WDBI_US_ReadEeprom( );
+22,5,S    break;
+22,6,B    case ( ( U8 )( 0xB2U ) ):
+22,7,S    s_UDS_WDBI_US_WiteEeprom( );
+22,8,S    break;
+22,9,B    case ( ( U8 )( 0xB3U ) ):
+22,10,S    s_UDS_WDBI_US_ApplyParam( );
+22,11,S    break;
+22,12,B    case ( ( U8 )( 0xB4U ) ):
+22,13,S    s_UDS_WDBI_US_ClearEeprom( );
+22,14,S    break;
+22,15,B    default:
+22,16,S    u8s_UserServiceIdLsb = ( ( U8 )( 0x00U ) );
+22,17,S    break;
+22,18,S    return;
+23,0,B    {
+23,1,S    u8t_LocalServiceId = u8s_UserServiceIdLsb;
+23,2,B    if( ( u8t_LocalServiceId == ( ( U8 )( 0xB5U ) ) ) ||
+        ( u8t_LocalServiceId == ( ( U8 )( 0xB6U ) ) ) ||
+        ( u8t_LocalServiceId == ( ( U8 )( 0xB7U ) ) ) )
+23,3,S    s_UDS_WDBI_UsOpt_E2G_2_ProcessGroup1(u8t_LocalServiceId);
+23,4,B    if( ( u8t_LocalServiceId == ( ( U8 )( 0xB8U ) ) ) ||
+             ( u8t_LocalServiceId == ( ( U8 )( 0xB9U ) ) ) ||
+             ( u8t_LocalServiceId == ( ( U8 )( 0xBAU ) ) ) )
+23,5,S    s_UDS_WDBI_UsOpt_E2G_2_ProcessGroup2(u8t_LocalServiceId);
+23,6,S    u8s_UserServiceIdLsb = ( ( U8 )( 0x00U ) );
+23,7,S    return;
+24,0,B    {
+24,1,S    switch( u8t_ServiceId )
+24,2,B    case ( ( U8 )( 0xB5U ) ):
+24,3,S    s_UDS_WDBI_US_ReadSysSts( );
+24,4,S    break;
+24,5,B    case ( ( U8 )( 0xB6U ) ):
+24,6,S    s_UDS_WDBI_US_UserCtrl( );
+24,7,S    break;
+24,8,B    case ( ( U8 )( 0xB7U ) ):
+24,9,S    s_UDS_WDBI_US_OpDataRead( );
+24,10,S    break;
+24,11,B    default:
+24,12,S    ;
+24,13,S    break;
+25,0,B    {
+25,1,S    switch( u8t_ServiceId )
+25,2,B    case ( ( U8 )( 0xB8U ) ):
+25,3,S    s_UDS_WDBI_US_SysOpt( );
+25,4,S    break;
+25,5,B    case ( ( U8 )( 0xB9U ) ):
+25,6,S    s_UDS_WDBI_US_BuzzTest( );
+25,7,S    break;
+25,8,B    case ( ( U8 )( 0xBAU ) ):
+25,9,S    s_UDS_WDBI_US_Reprogram( );
+25,10,S    break;
+25,11,B    default:
+25,12,S    ;
+25,13,S    break;
+26,0,B    {
+26,1,S    u8t_LocalServiceId = u8s_UserServiceIdLsb;
+26,2,S    switch( u8t_LocalServiceId )
+26,3,B    case ( ( U8 )( 0xBBU ) ):
+26,4,S    s_UDS_WDBI_US_Write_Checksum( );
+26,5,S    break;
+26,6,B    case ( ( U8 )( 0xBCU ) ):
+26,7,S    s_UDS_WDBI_US_Read_Checksum( );
+26,8,S    break;
+26,9,B    case ( ( U8 )( 0xBDU ) ):
+26,10,S    break;
+26,11,B    case ( ( U8 )( 0xBEU ) ):
+26,12,S    break;
+26,13,B    case ( ( U8 )( 0xBFU ) ):
+26,14,S    break;
+26,15,B    default:
+26,16,S    u8s_UserServiceIdLsb = ( ( U8 )( 0x00U ) );
+26,17,S    break;
+26,18,S    return;
+27,0,B    {
+27,1,S    U16 u16t_Length = 0x05U;
+27,2,B    for( u8t_LinRxDatabuffIdx = ( ( U8 )( 0x00U ) ); u8t_LinRxDatabuffIdx < ( ( U8 )( 0x04U ) ); u8t_LinRxDatabuffIdx++ )
+27,3,S    u8t_FrameCnt = (U8)1U;
+27,4,S    u8g_SysUds_WriteData[u8t_LinRxDatabuffIdx] = lin_tl_rx_queue.tl_pdu[u8t_FrameCnt][u8t_LinRxDatabuffIdx + ( U8 )2U];
+27,5,S    u8g_SysUds_WdbiCmd = ( ( U8 )( 0xA2U ) );
+27,6,S    u8s_DataBuffer[0] = ( u8s_UdsSid | ( ( U8 )( 0x40U ) ) );
+27,7,S    u8s_DataBuffer[1] = u8s_DidMsb;
+27,8,S    u8s_DataBuffer[2] = u8s_DidLsb;
+27,9,S    u8s_DataBuffer[3] = u8s_UserServiceIdMsb;
+27,10,S    u8s_DataBuffer[4] = u8s_UserServiceIdLsb;
+27,11,S    ld_send_message( ( l_u16 )u16t_Length, u8s_DataBuffer );
+27,12,S    return;
+28,0,B    {
+28,1,S    U16 u16t_Length = 0x05U;
+28,2,B    for( u8t_LinRxDatabuffIdx = ( ( U8 )( 0x00U ) ); u8t_LinRxDatabuffIdx < ( ( U8 )( 0x0AU ) ); u8t_LinRxDatabuffIdx++ )
+28,3,B    if( u8t_LinRxDatabuffIdx < ( ( U8 )( 0x06U ) ) )
+28,4,S    u8t_FrameCnt = (U8)1U;
+28,5,S    u8g_SysUds_WriteData[u8t_LinRxDatabuffIdx] = lin_tl_rx_queue.tl_pdu[u8t_FrameCnt][u8t_LinRxDatabuffIdx + ( U8 )2U];
+28,6,S    u8t_FrameCnt = (U8)2U;
+28,7,S    u8g_SysUds_WriteData[u8t_LinRxDatabuffIdx] = lin_tl_rx_queue.tl_pdu[u8t_FrameCnt][u8t_LinRxDatabuffIdx - ( U8 )4U];
+28,8,S    u8g_SysUds_WdbiCmd = ( ( U8 )( 0xA3U ) );
+28,9,S    u8s_DataBuffer[0] = ( u8s_UdsSid | ( ( U8 )( 0x40U ) ) );
+28,10,S    u8s_DataBuffer[1] = u8s_DidMsb;
+28,11,S    u8s_DataBuffer[2] = u8s_DidLsb;
+28,12,S    u8s_DataBuffer[3] = u8s_UserServiceIdMsb;
+28,13,S    u8s_DataBuffer[4] = u8s_UserServiceIdLsb;
+28,14,S    ld_send_message( ( l_u16 )u16t_Length, u8s_DataBuffer );
+28,15,S    return;
+29,0,B    {
+29,1,S    U16 u16t_Length = 0x05U;
+29,2,B    for( u8t_LinRxDatabuffIdx = ( ( U8 )( 0x00U ) ); u8t_LinRxDatabuffIdx < ( ( U8 )( 0x04U ) ); u8t_LinRxDatabuffIdx++ )
+29,3,S    u8t_FrameCnt = (U8)1U;
+29,4,S    u8g_SysUds_WriteData[u8t_LinRxDatabuffIdx] = lin_tl_rx_queue.tl_pdu[u8t_FrameCnt][u8t_LinRxDatabuffIdx + ( U8 )2U];
+29,5,S    u8g_SysUds_WdbiCmd = ( ( U8 )( 0xA5U ) );
+29,6,S    u8s_DataBuffer[0] = ( u8s_UdsSid | ( ( U8 )( 0x40U ) ) );
+29,7,S    u8s_DataBuffer[1] = u8s_DidMsb;
+29,8,S    u8s_DataBuffer[2] = u8s_DidLsb;
+29,9,S    u8s_DataBuffer[3] = u8s_UserServiceIdMsb;
+29,10,S    u8s_DataBuffer[4] = u8s_UserServiceIdLsb;
+29,11,S    ld_send_message( ( l_u16 )u16t_Length, u8s_DataBuffer );
+29,12,S    return;
+30,0,B    {
+30,1,S    U16 u16t_Length = 0x05U;
+30,2,B    for( u8t_LinRxDatabuffIdx = ( ( U8 )( 0x00U ) ); u8t_LinRxDatabuffIdx < ( ( U8 )( 0x04U ) ); u8t_LinRxDatabuffIdx++ )
+30,3,S    u8t_FrameCnt = (U8)1U;
+30,4,S    u8g_SysUds_WriteData[u8t_LinRxDatabuffIdx] = lin_tl_rx_queue.tl_pdu[u8t_FrameCnt][u8t_LinRxDatabuffIdx + ( U8 )2U];
+30,5,S    u8g_SysUds_WdbiCmd = ( ( U8 )( 0xA6U ) );
+30,6,S    u8s_DataBuffer[0] = ( u8s_UdsSid | ( ( U8 )( 0x40U ) ) );
+30,7,S    u8s_DataBuffer[1] = u8s_DidMsb;
+30,8,S    u8s_DataBuffer[2] = u8s_DidLsb;
+30,9,S    u8s_DataBuffer[3] = u8s_UserServiceIdMsb;
+30,10,S    u8s_DataBuffer[4] = u8s_UserServiceIdLsb;
+30,11,S    ld_send_message( ( l_u16 )u16t_Length, u8s_DataBuffer );
+30,12,S    return;
+31,0,B    {
+31,1,S    U16 u16t_Length = ( ( U8 )( 0x05U ) ) + ( ( U8 )( 0x03U ) );
+31,2,S    u8t_AddrMsb = lin_tl_rx_queue.tl_pdu[1][2];
+31,3,S    u16t_AddrMsb_Conv = ( U16 )u8t_AddrMsb * 256U;
+31,4,S    u8t_AddrLsb = lin_tl_rx_queue.tl_pdu[1][3];
+31,5,S    u8t_ReadData = u8g_SysEepromCtrl_ReadUdsData( u16t_AddrMsb_Conv, ( U16 )u8t_AddrLsb );
+31,6,S    u8s_DataBuffer[0] = u8s_UdsSid | ( ( U8 )( 0x40U ) );
+31,7,S    u8s_DataBuffer[1] = u8s_DidMsb;
+31,8,S    u8s_DataBuffer[2] = u8s_DidLsb;
+31,9,S    u8s_DataBuffer[3] = u8s_UserServiceIdMsb;
+31,10,S    u8s_DataBuffer[4] = u8s_UserServiceIdLsb;
+31,11,S    u8s_DataBuffer[5] = u8t_AddrMsb;
+31,12,S    u8s_DataBuffer[6] = u8t_AddrLsb;
+31,13,S    u8s_DataBuffer[7] = u8t_ReadData;
+31,14,S    ld_send_message( ( l_u16 )u16t_Length, u8s_DataBuffer );
+31,15,S    return;
+32,0,B    {
+32,1,S    U16 u16t_Length = ( ( U8 )( 0x02U ) ) + ( ( U8 )( 0x03U ) );
+32,2,S    u8g_SysUds_WriteData[0] = lin_tl_rx_queue.tl_pdu[1][2];
+32,3,S    u8g_SysUds_WriteData[1] = lin_tl_rx_queue.tl_pdu[1][3];
+32,4,S    u8g_SysUds_WriteData[2] = lin_tl_rx_queue.tl_pdu[1][4];
+32,5,S    u8g_SysUds_WdbiCmd = ( ( U8 )( 0xB2U ) );
+32,6,S    u8s_DataBuffer[0] = u8s_UdsSid | ( ( U8 )( 0x40U ) );
+32,7,S    u8s_DataBuffer[1] = u8s_DidMsb;
+32,8,S    u8s_DataBuffer[2] = u8s_DidLsb;
+32,9,S    u8s_DataBuffer[3] = u8s_UserServiceIdMsb;
+32,10,S    u8s_DataBuffer[4] = u8s_UserServiceIdLsb;
+32,11,S    ld_send_message( ( l_u16 )u16t_Length, u8s_DataBuffer );
+32,12,S    return;
+33,0,B    {
+33,1,S    U16 u16t_Length = ( ( U8 )( 0x02U ) ) + ( ( U8 )( 0x03U ) );
+33,2,S    g_SysEepromCtrl_Reset( );
+33,3,S    g_SysOptionCtrl( );
+33,4,S    u8s_DataBuffer[0] = u8s_UdsSid | ( ( U8 )( 0x40U ) );
+33,5,S    u8s_DataBuffer[1] = u8s_DidMsb;
+33,6,S    u8s_DataBuffer[2] = u8s_DidLsb;
+33,7,S    u8s_DataBuffer[3] = u8s_UserServiceIdMsb;
+33,8,S    u8s_DataBuffer[4] = u8s_UserServiceIdLsb;
+33,9,S    ld_send_message( ( l_u16 )u16t_Length, u8s_DataBuffer );
+33,10,S    return;
+34,0,B    {
+34,1,S    U16 u16t_Length = ( ( U8 )( 0x02U ) ) + ( ( U8 )( 0x03U ) );
+34,2,S    u8s_DataBuffer[0] = u8s_UdsSid | ( ( U8 )( 0x40U ) );
+34,3,S    u8s_DataBuffer[1] = u8s_DidMsb;
+34,4,S    u8s_DataBuffer[2] = u8s_DidLsb;
+34,5,S    u8s_DataBuffer[3] = u8s_UserServiceIdMsb;
+34,6,S    u8s_DataBuffer[4] = u8s_UserServiceIdLsb;
+34,7,S    ld_send_message( ( l_u16 )u16t_Length, u8s_DataBuffer );
+34,8,S    return;
+35,0,B    {
+35,1,S    U16 u16t_Length = ( ( U8 )( 0x14U ) ) + ( ( U8 )( 0x03U ) ) ;
+35,2,B    u16t_MotorCurrent = ((U16)(((S16)(s16g_ApiIn_MotorCurrLvl) < (S16)0) ? ((U16)(-(S16)(s16g_ApiIn_MotorCurrLvl))) : ((U16)(s16g_ApiIn_MotorCurrLvl))));
+35,3,S    u8s_DataBuffer[0] = u8s_UdsSid | ( ( U8 )( 0x40U ) );
+35,4,S    u8s_DataBuffer[1] = u8s_DidMsb;
+35,5,S    u8s_DataBuffer[2] = u8s_DidLsb;
+35,6,S    u8s_DataBuffer[3] = u8s_UserServiceIdMsb;
+35,7,S    u8s_DataBuffer[4] = u8s_UserServiceIdLsb;
+35,8,S    u8s_DataBuffer[5] = ( U8 )( u16g_SysDiag_BuzzerLevelMax >> 8U );
+35,9,S    u8s_DataBuffer[6] = ( U8 )u16g_SysDiag_BuzzerLevelMax;
+35,10,S    u8s_DataBuffer[7] = ( U8 )( u16g_ApiIn_MotorLevel_A1 >> 8U );
+35,11,S    u8s_DataBuffer[8] = ( U8 )u16g_ApiIn_MotorLevel_A1;
+35,12,S    u8s_DataBuffer[9] = ( U8 )( u16g_ApiIn_MotorLevel_A2 >> 8U );
+35,13,S    u8s_DataBuffer[10] = ( U8 )u16g_ApiIn_MotorLevel_A2;
+35,14,S    u8s_DataBuffer[11] = ( U8 )( u16t_MotorCurrent >> 8U );
+35,15,S    u8s_DataBuffer[12] = ( U8 )u16t_MotorCurrent;
+35,16,S    u8s_DataBuffer[13] = ( U8 )( u16g_ApiIn_HallSnsrLevel >> 8U );
+35,17,S    u8s_DataBuffer[14] = ( U8 )u16g_ApiIn_HallSnsrLevel;
+35,18,S    u8s_DataBuffer[15] = ( U8 )( u16g_ApiIn_Vsup >> 8U );
+35,19,S    u8s_DataBuffer[16] = ( U8 )u16g_ApiIn_Vsup;
+35,20,S    u8s_DataBuffer[17] = ( U8 ) (( ( U16 )( 0x0000U ) ) >> 8U );
+35,21,S    u8s_DataBuffer[18] = ( U8 )( ( U16 )( 0x0000U ) );
+35,22,S    u8s_DataBuffer[19] = ( U8 )( u16g_ApiIn_BandGap >> 8U );
+35,23,S    u8s_DataBuffer[20] = ( U8 )u16g_ApiIn_BandGap;
+35,24,S    u8s_DataBuffer[21] = ( U8 )( u16g_SysDiag_SystemStatus >> 8U );
+35,25,S    u8s_DataBuffer[22] = ( U8 )u16g_SysDiag_SystemStatus;
+35,26,S    ld_send_message( ( l_u16 )u16t_Length, u8s_DataBuffer );
+35,27,S    return;
+36,0,B    {
+36,1,S    U16 u16t_Length = ( ( U8 )( 0x02U ) ) + ( ( U8 )( 0x03U ) );
+36,2,S    u8g_SysUds_UsDoorCtrl = lin_tl_rx_queue.tl_pdu[1][2];
+36,3,S    u8g_SysUds_UsAutoOpenEn_F = lin_tl_rx_queue.tl_pdu[1][3];
+36,4,S    u8g_SysUds_UsDir = lin_tl_rx_queue.tl_pdu[1][4];
+36,5,S    u8t_TempPwm = lin_tl_rx_queue.tl_pdu[1][5];
+36,6,S    u8g_SysUds_UsStepMsb = lin_tl_rx_queue.tl_pdu[1][6];
+36,7,S    u8g_SysUds_UsStepLsb = lin_tl_rx_queue.tl_pdu[1][7];
+36,8,S    u16t_MSB = ( ( U16 )u8g_SysUds_UsStepMsb ) << 8U;
+36,9,S    u16t_LSB = ( U16 )u8g_SysUds_UsStepLsb;
+36,10,S    u16g_SysUds_UsStep = u16t_MSB |u16t_LSB;
+36,11,S    u16g_SysUds_UsMotorPwm = u16s_Pwm2Spd_Conv( u8t_TempPwm );
+36,12,S    u8s_DataBuffer[0] = u8s_UdsSid | ( ( U8 )( 0x40U ) );
+36,13,S    u8s_DataBuffer[1] = u8s_DidMsb;
+36,14,S    u8s_DataBuffer[2] = u8s_DidLsb;
+36,15,S    u8s_DataBuffer[3] = u8s_UserServiceIdMsb;
+36,16,S    u8s_DataBuffer[4] = u8s_UserServiceIdLsb;
+36,17,S    ld_send_message( ( l_u16 )u16t_Length, u8s_DataBuffer );
+36,18,S    return;
+37,0,B    {
+37,1,S    U16 u16t_Length = ( ( U8 )( 0x08U ) ) + ( ( U8 )( 0x03U ) );
+37,2,B    if( s16g_ApiIn_MotorPosition >= ( ( S16 )( 0x0000 ) ) )
+37,3,S    u16t_Temp = ( U16 )s16g_ApiIn_MotorPosition;
+37,4,S    u16t_AbsValue = ( U16 )( -s16g_ApiIn_MotorPosition );
+37,5,S    u16t_Temp = ( U16 )( ~u16t_AbsValue + 1U ) | ( U16 )0x8000U;
+37,6,S    u8s_DataBuffer[0] = u8s_UdsSid | ( ( U8 )( 0x40U ) );
+37,7,S    u8s_DataBuffer[1] = u8s_DidMsb;
+37,8,S    u8s_DataBuffer[2] = u8s_DidLsb;
+37,9,S    u8s_DataBuffer[3] = u8s_UserServiceIdMsb;
+37,10,S    u8s_DataBuffer[4] = u8s_UserServiceIdLsb;
+37,11,S    u8s_DataBuffer[5] = ( U8 )( ( u16t_Temp >> 8U ) & 0xFFU );
+37,12,S    u8s_DataBuffer[6] = ( U8 )( u16t_Temp & 0x00FFU );
+37,13,S    u8s_DataBuffer[7] = ( ( U8 )( 0x00U ) );
+37,14,S    u8s_DataBuffer[8] = u8g_ApiIn_MotorCountSpeed;
+37,15,S    u8s_DataBuffer[9] = ( U8 )( u8g_ApiOut_MotorCurrent );
+37,16,S    u8s_DataBuffer[10] = ( U8 )( u8g_ApiIn_MotorDirection );
+37,17,S    ld_send_message( ( l_u16 )u16t_Length, u8s_DataBuffer );
+37,18,S    return;
+38,0,B    {
+38,1,S    U16 u16t_Length = ( ( U8 )( 0x02U ) ) + ( ( U8 )( 0x03U ) );
+38,2,S    u8t_Data1 = lin_tl_rx_queue.tl_pdu[1][2];
+38,3,S    u8t_Data2 = lin_tl_rx_queue.tl_pdu[1][3];
+38,4,B    if( ( u8t_Data1 != u8g_SysEepromCtrl_SleepMode )
+    &&  ( u8t_Data1 == ( ( U8 )( 0x00U ) ) ) )
+38,5,S    u8g_SysUds_WriteData[0] = ( U8 )( ( U16 )( 100U ) );
+38,6,S    u8g_SysUds_WriteData[1] = ( U8 )( ( U16 )( 8U ) );
+38,7,S    u8g_SysUds_WriteData[2] = u8t_Data1;
+38,8,S    u8g_SysEepromCtrl_SleepMode = u8t_Data1;
+38,9,B    if( ( u8t_Data2 != u8g_SysEepromCtrl_MotorA1A2Output )
+         &&  ( u8t_Data2 == ( ( U8 )( 0x00U ) ) ) )
+38,10,S    u8g_SysUds_WriteData[0] = ( U8 )( ( U16 )( 100U ) );
+38,11,S    u8g_SysUds_WriteData[1] = ( U8 )( ( U16 )( 9U ) );
+38,12,S    u8g_SysUds_WriteData[2] = u8t_Data2;
+38,13,S    u8g_SysEepromCtrl_MotorA1A2Output = u8t_Data1;
+38,14,S    ;
+38,15,S    u8g_SysUds_WdbiCmd = ( ( U8 )( 0xB2U ) );
+38,16,S    u8s_DataBuffer[0] = u8s_UdsSid | ( ( U8 )( 0x40U ) );
+38,17,S    u8s_DataBuffer[1] = u8s_DidMsb;
+38,18,S    u8s_DataBuffer[2] = u8s_DidLsb;
+38,19,S    u8s_DataBuffer[3] = u8s_UserServiceIdMsb;
+38,20,S    u8s_DataBuffer[4] = u8s_UserServiceIdLsb;
+38,21,S    ld_send_message( ( l_u16 )u16t_Length, u8s_DataBuffer );
+38,22,S    return;
+39,0,B    {
+39,1,S    U16 u16t_Length = ( ( U8 )( 0x02U ) ) + ( ( U8 )( 0x03U ) );
+39,2,S    u8g_SysUds_BuzzerTest_F = ( ( U8 )( 0x01U ) );
+39,3,S    u8s_DataBuffer[0] = u8s_UdsSid | ( ( U8 )( 0x40U ) );
+39,4,S    u8s_DataBuffer[1] = u8s_DidMsb;
+39,5,S    u8s_DataBuffer[2] = u8s_DidLsb;
+39,6,S    u8s_DataBuffer[3] = u8s_UserServiceIdMsb;
+39,7,S    u8s_DataBuffer[4] = u8s_UserServiceIdLsb;
+39,8,S    ld_send_message( ( l_u16 )u16t_Length, u8s_DataBuffer );
+39,9,S    return;
+40,0,B    {
+40,1,S    u8g_SysUds_WdbiCmd = ( ( U8 )( 0x02U ) );
+40,2,S    return;
+41,0,B    {
+41,1,S    u8g_SysUds_WdbiCmd = ( ( U8 )( 0x13U ) );
+42,0,B    {
+42,1,S    U16 u16t_Length = ( U16 )( ( U8 )8U + ( ( U8 )( 0x03U ) ) );
+42,2,S    u8t_ReadData[0] = u8g_SysEepromCtrl_ReadCrcByte(1U);
+42,3,S    u8t_ReadData[1] = u8g_SysEepromCtrl_ReadCrcByte(2U);
+42,4,S    u8t_ReadData[2] = u8g_SysEepromCtrl_ReadCrcByte(3U);
+42,5,S    u8t_ReadData[3] = u8g_SysEepromCtrl_ReadCrcByte(4U);
+42,6,S    u8s_DataBuffer[0] = u8s_UdsSid | ( ( U8 )( 0x40U ) );
+42,7,S    u8s_DataBuffer[1] = u8s_DidMsb;
+42,8,S    u8s_DataBuffer[2] = u8s_DidLsb;
+42,9,S    u8s_DataBuffer[3] = u8s_UserServiceIdMsb;
+42,10,S    u8s_DataBuffer[4] = u8s_UserServiceIdLsb;
+42,11,S    u8s_DataBuffer[5] = u8t_ReadData[0];
+42,12,S    u8s_DataBuffer[6] = u8t_ReadData[1];
+42,13,S    u8s_DataBuffer[7] = u8t_ReadData[2];
+42,14,S    u8s_DataBuffer[8] = u8t_ReadData[3];
+42,15,S    u8s_DataBuffer[9] = ( U8 )0xAA;
+42,16,S    u8s_DataBuffer[10] = ( U8 )0xAA;
+42,17,S    ld_send_message( ( l_u16 )u16t_Length, u8s_DataBuffer );
+42,18,S    return;
+43,0,B    {
+43,1,S    u8s_UdsSid = lin_tl_rx_queue.tl_pdu[lin_tl_rx_queue.queue_header][2];
+43,2,S    u8s_DidMsb = lin_tl_rx_queue.tl_pdu[lin_tl_rx_queue.queue_header][3];
+43,3,B    if( u8s_DidMsb == ( ( U8 )( 0x02U ) ) )
+43,4,S    s_UDS_DSC_ProgSession( );
+43,5,S    ;
+43,6,S    return;
+44,0,B    {
+44,1,S    U16 u16t_Length = ( ( U8 )( 0x02U ) );
+44,2,S    u8g_SysUds_WdbiCmd = ( ( U8 )( 0x02U ) );
+44,3,S    return;
+45,0,B    {
+45,1,S    U16 u16t_Length = ( U16 )3U;
+45,2,S    u8s_DataBuffer[0] = ( U8 )0x7F;
+45,3,S    u8s_DataBuffer[1] = u8s_UdsSid;
+45,4,S    u8s_DataBuffer[2] = ( U8 )0x22;
+45,5,S    ld_send_message( ( l_u16 )u16t_Length, u8s_DataBuffer );
+45,6,S    return;
+46,0,B    {
+46,1,S    u8g_SysUds_UsDoorCtrl = ( ( U8 )( 0x00U ) );
+46,2,S    u8g_SysUds_UsAutoOpenEn_F = ( ( U8 )( 0x00U ) );
+46,3,S    u8g_SysUds_UsDir = ( ( U8 )( 0x00U ) );
+46,4,S    u8g_SysUds_UsStepMsb = ( ( U8 )( 0x00U ) );
+46,5,S    u8g_SysUds_UsStepLsb = ( ( U8 )( 0x00U ) );
+46,6,S    u8g_SysUds_WdbiCmd = ( ( U8 )( 0x00U ) );
+46,7,S    u8g_SysUds_BuzzerTest_F = ( ( U8 )( 0x00U ) );
+46,8,S    g_Lib_u8bit_ArrayClear( u8g_SysUds_WriteData, ( ( U8 )( 0x00U ) ), 10U );
+46,9,S    u16g_SysUds_UsStep = ( ( U16 )( 0x0000U ) );
+46,10,S    u16g_SysUds_UsMotorPwm = ( ( U16 )( 0x0000U ) );
+46,11,S    u8s_UdsSid = ( ( U8 )( 0x00U ) );
+46,12,S    u8s_DidMsb = ( ( U8 )( 0x00U ) );
+46,13,S    u8s_DidLsb = ( ( U8 )( 0x00U ) );
+46,14,S    u8s_SwIntVer = ( ( U8 )( 0x00U ) );
+46,15,S    g_Lib_u8bit_ArrayClear( u8s_DataBuffer, ( ( U8 )( 0x00U ) ), 60U );
+46,16,S    u8s_UserServiceIdMsb = ( ( U8 )( 0x00U ) );
+46,17,S    u8s_UserServiceIdLsb = ( ( U8 )( 0x00U ) );
+46,18,S    return;
