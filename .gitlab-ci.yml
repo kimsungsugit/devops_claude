@@ -42,13 +42,15 @@ unit-tests:
   tags:
     - shared
   before_script:
-    - $env:PYTHONPATH = "$PWD"
+    - '[Environment]::SetEnvironmentVariable("PYTHONPATH", "$PWD", "Process")'
     - python -m pip install --no-build-isolation -r requirements-dev.txt 2>$null; $true
     - python -m pip install --no-build-isolation -r requirements-core.txt 2>$null; $true
   script:
-    - $env:PYTHONPATH = "$PWD"
+    - '[Environment]::SetEnvironmentVariable("PYTHONPATH", "$PWD", "Process")'
     - echo "=== Running Unit Tests ==="
-    - python -m pytest tests/unit/ -x -q --tb=short
+    - echo "PYTHONPATH=$env:PYTHONPATH"
+    - python -c "import sys; print('sys.path:', sys.path)"
+    - python -m pytest tests/unit/ -x -q --tb=short --rootdir="$PWD"
   timeout: 5m
   rules:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
