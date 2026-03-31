@@ -48,9 +48,7 @@ unit-tests:
   script:
     - '[Environment]::SetEnvironmentVariable("PYTHONPATH", "$PWD", "Process")'
     - echo "=== Running Unit Tests ==="
-    - echo "PYTHONPATH=$env:PYTHONPATH"
-    - python -c "import sys; print('sys.path:', sys.path)"
-    - python -m pytest tests/unit/ -x -q --tb=short --rootdir="$PWD"
+    - python -m pytest tests/unit/ -x -q --tb=short
   timeout: 5m
   rules:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'

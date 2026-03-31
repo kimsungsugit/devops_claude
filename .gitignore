@@ -24,7 +24,8 @@ __pycache__/
 build/
 dist/
 output/
-report/
+report/*
+!report/*.py
 reports/
 jenkins_reports_*/
 *.log
