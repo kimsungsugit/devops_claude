@@ -454,31 +454,83 @@ function FileModeSection() {
 }
 
 /* ── 관리자 모드 ─────────────────────────────────────────────────── */
-function AdminSection() {
-  const [admin, setAdmin] = useState(localStorage.getItem('devops_admin_mode') === 'true');
+const _AH = 'a2d1c5b8e4f7'; // obfuscated hash fragment
+function _vp(pw) {
+  // simple hash check (not crypto-grade, but sufficient for UI gate)
+  let h = 0;
+  for (let i = 0; i < pw.length; i++) h = ((h << 5) - h + pw.charCodeAt(i)) | 0;
+  return h === 1974483555;
+}
 
-  const toggle = () => {
-    const next = !admin;
-    localStorage.setItem('devops_admin_mode', String(next));
-    setAdmin(next);
-    // App에서 감지하도록 storage 이벤트 발생
+function AdminSection() {
+  const toast = useToast();
+  const [admin, setAdmin] = useState(localStorage.getItem('devops_admin_mode') === 'true');
+  const [pwInput, setPwInput] = useState('');
+  const [showPwForm, setShowPwForm] = useState(false);
+
+  const activate = () => {
+    if (!_vp(pwInput)) {
+      toast('error', '비밀번호가 올바르지 않습니다.');
+      return;
+    }
+    localStorage.setItem('devops_admin_mode', 'true');
+    setAdmin(true);
+    setPwInput('');
+    setShowPwForm(false);
     window.dispatchEvent(new Event('storage'));
+    toast('success', '관리자 모드가 활성화되었습니다.');
+  };
+
+  const deactivate = () => {
+    localStorage.removeItem('devops_admin_mode');
+    setAdmin(false);
+    window.dispatchEvent(new Event('storage'));
+    toast('info', '관리자 모드가 비활성화되었습니다.');
   };
 
   return (
     <div className="settings-section">
       <div className="settings-section-title">🔒 관리자 모드</div>
-      <div className="field-group">
-        <div className="field">
-          <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
-            <input type="checkbox" checked={admin} onChange={toggle} />
-            <span>관리자 모드 활성화</span>
-          </label>
-          <div className="text-sm text-muted" style={{ marginTop: 4 }}>
-            Quality 대시보드 등 관리자 전용 탭을 표시합니다.
+      {admin ? (
+        <div className="field-group">
+          <div className="field">
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span className="pill pill-success" style={{ fontSize: 11 }}>활성화됨</span>
+              <span className="text-sm">Quality 대시보드 등 관리자 전용 탭이 표시됩니다.</span>
+            </div>
+            <button className="btn-sm" style={{ marginTop: 8 }} onClick={deactivate}>
+              관리자 모드 해제
+            </button>
           </div>
         </div>
-      </div>
+      ) : (
+        <div className="field-group">
+          <div className="field">
+            <div className="text-sm text-muted" style={{ marginBottom: 8 }}>
+              관리자 비밀번호를 입력하여 활성화하세요.
+            </div>
+            {showPwForm ? (
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                <input
+                  type="password"
+                  value={pwInput}
+                  onChange={e => setPwInput(e.target.value)}
+                  onKeyDown={e => e.key === 'Enter' && activate()}
+                  placeholder="비밀번호"
+                  style={{ maxWidth: 200 }}
+                  autoFocus
+                />
+                <button className="btn-primary btn-sm" onClick={activate}>확인</button>
+                <button className="btn-sm" onClick={() => { setShowPwForm(false); setPwInput(''); }}>취소</button>
+              </div>
+            ) : (
+              <button className="btn-sm" onClick={() => setShowPwForm(true)}>
+                관리자 모드 활성화
+              </button>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
