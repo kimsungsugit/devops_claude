@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import { api, post, defaultCacheRoot, getUsername } from '../../api.js';
 import { useJenkinsCfg, useToast } from '../../App.jsx';
 
@@ -292,105 +292,154 @@ export default function DocGenSection({ job, analysisResult }) {
   );
 }
 
-/* ── VectorCAST Export Panel ── */
+/* ── VectorCAST 패키지 관리 (등록 → 목록 → 다운로드) ── */
 function VectorCastExport({ job, analysisResult, cfg, cacheRoot }) {
   const toast = useToast();
-  const [exporting, setExporting] = useState(null);
-  const [exportResult, setExportResult] = useState(null);
+  const [registering, setRegistering] = useState(null);
+  const [packages, setPackages] = useState([]);
+  const [loading, setLoading] = useState(false);
   const scm = analysisResult?.scmList?.[0];
 
-  const exportVcast = useCallback(async (docType) => {
-    setExporting(docType);
-    setExportResult(null);
+  // 패키지 목록 조회
+  const loadPackages = useCallback(async () => {
+    setLoading(true);
+    try {
+      const data = await api(`/api/local/vectorcast/list?report_dir=${encodeURIComponent(cacheRoot)}`);
+      setPackages(data?.packages || []);
+    } catch (_) {
+      setPackages([]);
+    } finally {
+      setLoading(false);
+    }
+  }, [cacheRoot]);
+
+  // 마운트 시 + 등록 후 목록 로드
+  useEffect(() => { loadPackages(); }, [loadPackages]);
+
+  // VectorCAST 패키지 등록 (생성)
+  const registerVcast = useCallback(async (docType) => {
+    setRegistering(docType);
     try {
       const formData = new FormData();
       formData.append('job_url', job?.url || '');
       formData.append('cache_root', cacheRoot);
       formData.append('build_selector', cfg.buildSelector || 'lastSuccessfulBuild');
       if (scm?.source_root) formData.append('source_root', scm.source_root);
-
-      // Find latest generated file
-      const qs = `job_url=${encodeURIComponent(job?.url || '')}&cache_root=${encodeURIComponent(cacheRoot)}`;
       try {
+        const qs = `job_url=${encodeURIComponent(job?.url || '')}&cache_root=${encodeURIComponent(cacheRoot)}`;
         const listData = await api(`/api/jenkins/${docType}/list?${qs}`);
         const items = listData?.items || [];
-        if (items.length > 0) {
-          formData.append('filename', items[0].filename || items[0].name || '');
-        }
+        if (items.length > 0) formData.append('filename', items[0].filename || items[0].name || '');
       } catch (_) {}
-
       const user = getUsername();
       const endpoint = docType === 'sits' ? '/api/local/sits/export-vectorcast' : `/api/jenkins/${docType}/export-vectorcast`;
-      const res = await fetch(endpoint, {
-        method: 'POST', body: formData,
-        headers: user ? { 'X-User': user } : {},
-      });
+      const res = await fetch(endpoint, { method: 'POST', body: formData, headers: user ? { 'X-User': user } : {} });
       if (!res.ok) throw new Error(await res.text() || `HTTP ${res.status}`);
       const data = await res.json();
-      setExportResult({ docType, ...data });
       const summary = data?.manifest?.summary || {};
-      toast('success', `VectorCAST 패키지 생성: ${data.package_name || docType} (${summary.unit_count || 0} units, ${summary.test_case_count || 0} TCs)`);
+      toast('success', `VectorCAST 패키지 등록 완료: ${data.package_name || docType} (${summary.unit_count || 0} units, ${summary.test_case_count || 0} TCs)`);
+      loadPackages(); // 목록 새로고침
     } catch (e) {
-      toast('error', `VectorCAST 내보내기 실패: ${e.message}`);
+      toast('error', `VectorCAST 등록 실패: ${e.message}`);
     } finally {
-      setExporting(null);
+      setRegistering(null);
     }
-  }, [job, cfg, cacheRoot, scm, toast]);
+  }, [job, cfg, cacheRoot, scm, toast, loadPackages]);
+
+  // 패키지 삭제
+  const deletePackage = useCallback(async (pkgPath, pkgName) => {
+    if (!window.confirm(`"${pkgName}" 패키지를 삭제하시겠습니까?`)) return;
+    try {
+      await api(`/api/local/vectorcast/delete?package_path=${encodeURIComponent(pkgPath)}`, { method: 'DELETE' });
+      toast('success', `${pkgName} 삭제됨`);
+      loadPackages();
+    } catch (e) {
+      toast('error', `삭제 실패: ${e.message}`);
+    }
+  }, [toast, loadPackages]);
 
   return (
     <div className="panel" style={{ marginTop: 12 }}>
       <div className="panel-header">
-        <span className="panel-title">VectorCAST 내보내기</span>
+        <span className="panel-title">VectorCAST 패키지 관리</span>
+        <button className="btn-ghost btn-xs" onClick={loadPackages} disabled={loading} title="새로고침">🔄</button>
       </div>
+
+      {/* 등록 버튼 */}
       <div className="text-sm text-muted" style={{ marginBottom: 8 }}>
-        생성된 SUTS/SITS 문서를 VectorCAST .tst/.env 패키지로 변환합니다.
+        SUTS/SITS 문서로 VectorCAST .tst/.env 패키지를 등록합니다.
       </div>
-      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-        <button className="btn-primary btn-sm" onClick={() => exportVcast('suts')} disabled={!!exporting}>
-          {exporting === 'suts' ? '내보내기 중...' : '📙 SUTS → VectorCAST'}
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 12 }}>
+        <button className="btn-primary btn-sm" onClick={() => registerVcast('suts')} disabled={!!registering}>
+          {registering === 'suts' ? '등록 중...' : '📙 SUTS 패키지 등록'}
         </button>
-        <button className="btn-primary btn-sm" onClick={() => exportVcast('sits')} disabled={!!exporting}>
-          {exporting === 'sits' ? '내보내기 중...' : '📕 SITS → VectorCAST'}
+        <button className="btn-primary btn-sm" onClick={() => registerVcast('sits')} disabled={!!registering}>
+          {registering === 'sits' ? '등록 중...' : '📕 SITS 패키지 등록'}
         </button>
       </div>
 
-      {exportResult && (
-        <div style={{ marginTop: 10, padding: 10, background: 'var(--bg)', borderRadius: 6, border: '1px solid var(--border)' }}>
-          <div className="row" style={{ gap: 8, alignItems: 'center', marginBottom: 6 }}>
-            <StatusBadge tone="success">생성 완료</StatusBadge>
-            <span style={{ fontWeight: 600, fontSize: 12 }}>{exportResult.package_name}</span>
-          </div>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8, marginBottom: 8 }}>
-            <div style={{ textAlign: 'center', padding: 6, background: 'var(--panel)', borderRadius: 4 }}>
-              <div style={{ fontSize: 16, fontWeight: 700 }}>{exportResult.manifest?.summary?.unit_count ?? '-'}</div>
-              <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>Units</div>
-            </div>
-            <div style={{ textAlign: 'center', padding: 6, background: 'var(--panel)', borderRadius: 4 }}>
-              <div style={{ fontSize: 16, fontWeight: 700 }}>{exportResult.manifest?.summary?.test_case_count ?? '-'}</div>
-              <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>Test Cases</div>
-            </div>
-            <div style={{ textAlign: 'center', padding: 6, background: 'var(--panel)', borderRadius: 4 }}>
-              <div style={{ fontSize: 16, fontWeight: 700 }}>{exportResult.manifest?.files_count ?? '-'}</div>
-              <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>Files</div>
-            </div>
-          </div>
-          {exportResult.readiness && (
-            <div className="row" style={{ gap: 6, fontSize: 11 }}>
-              <StatusBadge tone={exportResult.readiness.status === 'READY' ? 'success' : exportResult.readiness.status === 'PARTIALLY_READY' ? 'warning' : 'danger'}>
-                {exportResult.readiness.status}
-              </StatusBadge>
-              {exportResult.readiness.checks && exportResult.readiness.checks.filter(c => !c.ok).map((c, i) => (
-                <span key={i} className="pill pill-danger" style={{ fontSize: 9 }}>{c.name}</span>
+      {/* 등록된 패키지 목록 */}
+      {packages.length > 0 && (
+        <div style={{ border: '1px solid var(--border)', borderRadius: 6, overflow: 'hidden' }}>
+          <table style={{ width: '100%', fontSize: 12, borderCollapse: 'collapse' }}>
+            <thead>
+              <tr style={{ background: 'var(--bg-secondary)', textAlign: 'left' }}>
+                <th style={{ padding: '6px 8px' }}>패키지</th>
+                <th style={{ padding: '6px 8px' }}>유형</th>
+                <th style={{ padding: '6px 8px', textAlign: 'center' }}>Units</th>
+                <th style={{ padding: '6px 8px', textAlign: 'center' }}>TCs</th>
+                <th style={{ padding: '6px 8px', textAlign: 'center' }}>파일</th>
+                <th style={{ padding: '6px 8px' }}>등록일</th>
+                <th style={{ padding: '6px 8px', textAlign: 'center' }}>액션</th>
+              </tr>
+            </thead>
+            <tbody>
+              {packages.map((pkg) => (
+                <tr key={pkg.name} style={{ borderTop: '1px solid var(--border)' }}>
+                  <td style={{ padding: '6px 8px', fontWeight: 600 }}>{pkg.name}</td>
+                  <td style={{ padding: '6px 8px' }}>
+                    <span className={`pill pill-${pkg.doc_type === 'sits' ? 'danger' : 'warning'}`} style={{ fontSize: 10 }}>
+                      {pkg.doc_type.toUpperCase()}
+                    </span>
+                  </td>
+                  <td style={{ padding: '6px 8px', textAlign: 'center' }}>{pkg.summary?.unit_count ?? '-'}</td>
+                  <td style={{ padding: '6px 8px', textAlign: 'center' }}>{pkg.summary?.test_case_count ?? '-'}</td>
+                  <td style={{ padding: '6px 8px', textAlign: 'center' }}>{pkg.file_count}</td>
+                  <td style={{ padding: '6px 8px', fontSize: 11, color: 'var(--text-muted)' }}>
+                    {pkg.created ? new Date(pkg.created).toLocaleString('ko-KR') : '-'}
+                  </td>
+                  <td style={{ padding: '6px 8px', textAlign: 'center' }}>
+                    <div style={{ display: 'flex', gap: 4, justifyContent: 'center' }}>
+                      <a
+                        href={`/api/local/vectorcast/download?package_path=${encodeURIComponent(pkg.path)}`}
+                        download
+                        className="btn-sm"
+                        style={{ textDecoration: 'none', color: 'var(--accent)', fontSize: 11, padding: '2px 8px' }}
+                      >
+                        📥 다운로드
+                      </a>
+                      <button
+                        className="btn-ghost btn-xs"
+                        style={{ color: 'var(--danger)', fontSize: 11 }}
+                        onClick={() => deletePackage(pkg.path, pkg.name)}
+                      >
+                        🗑
+                      </button>
+                    </div>
+                  </td>
+                </tr>
               ))}
-            </div>
-          )}
-          {exportResult.download_url && (
-            <a href={exportResult.download_url} download className="btn-sm" style={{ marginTop: 6, display: 'inline-block', textDecoration: 'none', color: 'var(--accent)' }}>
-              다운로드
-            </a>
-          )}
+            </tbody>
+          </table>
         </div>
       )}
+
+      {packages.length === 0 && !loading && (
+        <div className="text-sm text-muted" style={{ padding: 12, textAlign: 'center' }}>
+          등록된 VectorCAST 패키지가 없습니다. 위 버튼으로 등록하세요.
+        </div>
+      )}
+      {loading && <div className="text-sm text-muted" style={{ padding: 8 }}>로딩 중...</div>}
     </div>
   );
 }

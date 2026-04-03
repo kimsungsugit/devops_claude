@@ -3290,6 +3290,74 @@ def local_sits_export_vectorcast(
     )
 
 
+# ── VectorCAST 패키지 목록 / 다운로드 ──
+
+@router.get("/api/local/vectorcast/list")
+def local_vectorcast_list(report_dir: str = "") -> Dict[str, Any]:
+    """등록된 VectorCAST 패키지 목록 조회."""
+    base_dir = _resolve_report_dir(report_dir)
+    vcast_dir = base_dir / "vectorcast"
+    if not vcast_dir.exists():
+        return {"ok": True, "packages": []}
+    packages = []
+    for d in sorted(vcast_dir.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True):
+        if not d.is_dir():
+            continue
+        manifest_file = d / "manifest.json"
+        meta: Dict[str, Any] = {}
+        if manifest_file.exists():
+            try:
+                import json
+                meta = json.loads(manifest_file.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+        files = sorted(p.name for p in d.iterdir() if p.is_file())
+        doc_type = "sits" if "sits" in d.name else "suts"
+        packages.append({
+            "name": d.name,
+            "doc_type": doc_type,
+            "path": str(d),
+            "files": files,
+            "file_count": len(files),
+            "created": datetime.fromtimestamp(d.stat().st_mtime).isoformat(),
+            "summary": meta.get("summary", {}),
+        })
+    return {"ok": True, "packages": packages}
+
+
+@router.get("/api/local/vectorcast/download")
+def local_vectorcast_download(package_path: str = "", filename: str = ""):
+    """VectorCAST 패키지 파일 다운로드."""
+    from fastapi.responses import FileResponse
+    pkg_dir = Path(package_path)
+    if not pkg_dir.exists() or not pkg_dir.is_dir():
+        raise HTTPException(status_code=404, detail="Package not found")
+    if filename:
+        target = pkg_dir / filename
+        if not target.exists():
+            raise HTTPException(status_code=404, detail="File not found")
+        return FileResponse(str(target), filename=filename)
+    # filename 없으면 ZIP으로 전체 패키지 다운로드
+    import zipfile, tempfile
+    tmp = tempfile.NamedTemporaryFile(suffix=".zip", delete=False)
+    with zipfile.ZipFile(tmp.name, "w", zipfile.ZIP_DEFLATED) as zf:
+        for f in pkg_dir.rglob("*"):
+            if f.is_file():
+                zf.write(f, f.relative_to(pkg_dir))
+    return FileResponse(tmp.name, filename=f"{pkg_dir.name}.zip", media_type="application/zip")
+
+
+@router.delete("/api/local/vectorcast/delete")
+def local_vectorcast_delete(package_path: str = "") -> Dict[str, Any]:
+    """VectorCAST 패키지 삭제."""
+    import shutil
+    pkg_dir = Path(package_path)
+    if not pkg_dir.exists() or not pkg_dir.is_dir():
+        raise HTTPException(status_code=404, detail="Package not found")
+    shutil.rmtree(pkg_dir)
+    return {"ok": True, "deleted": str(pkg_dir)}
+
+
 @router.post("/api/local/scm")
 def local_scm(req: ScmRequest) -> Dict[str, Any]:
     if req.mode.lower() == "git":
