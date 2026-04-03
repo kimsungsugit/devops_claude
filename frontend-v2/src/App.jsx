@@ -190,23 +190,37 @@ function StatusFooter() {
 }
 
 /* ── App root ───────────────────────────────────────────────────────── */
-const TABS = [
+const ALL_TABS = [
   { id: 'dashboard', label: '대시보드' },
   { id: 'detail',    label: '세부 데이터' },
-  { id: 'quality',   label: 'Quality' },
+  { id: 'quality',   label: 'Quality', adminOnly: true },
   { id: 'settings',  label: '설정' },
 ];
+
+function isAdminMode() {
+  return localStorage.getItem('devops_admin_mode') === 'true';
+}
 
 export default function App() {
   const [theme, setTheme] = useState(getInitialTheme);
   const [activeTab, setActiveTab] = useState('dashboard');
   const [userName, setUserName] = useState(getUsername);
   const [userInput, setUserInput] = useState('');
+  const [adminMode, setAdminMode] = useState(isAdminMode);
+
+  const TABS = adminMode ? ALL_TABS : ALL_TABS.filter(t => !t.adminOnly);
 
   useEffect(() => {
     document.body.setAttribute('data-theme', theme);
     saveTheme(theme);
   }, [theme]);
+
+  // 관리자 모드 변경 감지 (Settings에서 토글 시)
+  useEffect(() => {
+    const onStorage = () => setAdminMode(isAdminMode());
+    window.addEventListener('storage', onStorage);
+    return () => window.removeEventListener('storage', onStorage);
+  }, []);
 
   const toggleTheme = () => setTheme(t => t === 'light' ? 'dark' : 'light');
 

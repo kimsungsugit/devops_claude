@@ -10,6 +10,7 @@ export default function Settings() {
       <DocInputSection />
       <QualitySection />
       <FileModeSection />
+      <AdminSection />
     </div>
   );
 }
@@ -447,6 +448,36 @@ function FileModeSection() {
             </button>
           </div>
         )}
+      </div>
+    </div>
+  );
+}
+
+/* ── 관리자 모드 ─────────────────────────────────────────────────── */
+function AdminSection() {
+  const [admin, setAdmin] = useState(localStorage.getItem('devops_admin_mode') === 'true');
+
+  const toggle = () => {
+    const next = !admin;
+    localStorage.setItem('devops_admin_mode', String(next));
+    setAdmin(next);
+    // App에서 감지하도록 storage 이벤트 발생
+    window.dispatchEvent(new Event('storage'));
+  };
+
+  return (
+    <div className="settings-section">
+      <div className="settings-section-title">🔒 관리자 모드</div>
+      <div className="field-group">
+        <div className="field">
+          <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
+            <input type="checkbox" checked={admin} onChange={toggle} />
+            <span>관리자 모드 활성화</span>
+          </label>
+          <div className="text-sm text-muted" style={{ marginTop: 4 }}>
+            Quality 대시보드 등 관리자 전용 탭을 표시합니다.
+          </div>
+        </div>
       </div>
     </div>
   );
