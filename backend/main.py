@@ -90,7 +90,7 @@ async def _startup():
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -104,27 +104,7 @@ from backend.user_context import UserContextMiddleware  # noqa: E402
 app.add_middleware(UserContextMiddleware)
 
 
-@app.exception_handler(Exception)
-async def _global_exception_handler(request: Request, exc: Exception):
-    _api_logger.error("Unhandled %s on %s %s: %s",
-                      type(exc).__name__, request.method, request.url.path, exc, exc_info=True)
-    return HTMLResponse(
-        content=json.dumps({"detail": f"Internal error: {type(exc).__name__}: {str(exc)[:300]}"}),
-        status_code=500,
-        media_type="application/json",
-    )
-
-
-@app.exception_handler(HTTPException)
-async def _http_exception_handler(request: Request, exc: HTTPException):
-    _api_logger.warning("HTTP %d on %s %s: %s", exc.status_code, request.method, request.url.path, exc.detail)
-    return HTMLResponse(
-        content=json.dumps({"detail": exc.detail}),
-        status_code=exc.status_code,
-        media_type="application/json",
-    )
-
-# Standardized error handlers (layered on top of legacy handlers above)
+# 표준 에러 핸들러 (error_handler.py에서 단일 관리)
 from backend.error_handler import global_exception_handler, http_exception_handler  # noqa: E402
 app.add_exception_handler(Exception, global_exception_handler)
 app.add_exception_handler(HTTPException, http_exception_handler)

@@ -107,7 +107,12 @@ repo_root = Path(__file__).resolve().parents[2]
 
 router = APIRouter()
 _logger = logging.getLogger("devops_api")
-_api_logger = logging.getLogger("devops_api")
+
+
+async def _run_blocking(func, *args, **kwargs):
+    """blocking 함수를 별도 스레드에서 실행 — async 엔드포인트의 이벤트 루프 hang 방지."""
+    import functools
+    return await asyncio.to_thread(functools.partial(func, *args, **kwargs))
 
 _MAX_PREVIEW_COLS = 20
 
@@ -885,7 +890,7 @@ async def local_uds_generate(
         _uds_ai_cfg = _load_sts_ai_config()
         if _uds_ai_cfg:
             uds_payload["_gen_ai_config"] = _uds_ai_cfg
-        _generate_docx_with_retry(tpl_path, uds_payload, out_path)
+        await _run_blocking(_generate_docx_with_retry, tpl_path, uds_payload, out_path)
     except Exception as docx_exc:
         tb = traceback.format_exc()
         _logger.error("[UDS_GENERATE][%s] DOCX generation error:\n%s", req_id, tb)
