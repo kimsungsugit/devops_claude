@@ -1,49 +1,63 @@
-# 문서 제외
-docs/
-*.doc
-*.docx
-*.docs
-*.xlsx
+# === 레거시/아카이브 ===
+_archive/
 
-# 가상환경 / 캐시 / 임시
+# === 가상환경 / 캐시 ===
 .venv/
 venv/
 backend/venv/
+__pycache__/
 .pytest_cache/
 .tmp_pytest/
 .tmp_pytest_base/
 pytest-cache-files-*/
-__pycache__/
+*.pyc
+*.pyo
 .coverage
+node_modules/
+
+# === IDE / 도구 ===
 .codex_tmp/
-.claude/
 .cursor/
 .devops_pro_cache/
+.idea/
+.vscode/
 
-# 빌드 / 출력 / 리포트
+# === 빌드 / 출력 ===
 build/
 dist/
 output/
+reports/
 report/*
 !report/*.py
-reports/
 jenkins_reports_*/
+evals/
+plans/
+
+# === 문서 산출물 (템플릿 제외) ===
+docs/
+project_docs/
 *.log
 
-# 백업 / 복사본
-backup_before_split/
-backup_phase_a/
-my_lin_gateway_251118_bakup/
-*.bak
-
-# 대용량 / 산출 파일
+# === 대용량 / 바이너리 ===
 *.zip
+*.bak
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
 
-# 개인 설정 / 민감정보 가능 파일
-OAI_CONFIG_LIST
+# === 민감정보 ===
 .env
+OAI_CONFIG_LIST
 
-# 이미지 제외
+# === 이미지 ===
 *.png
 *.jpg
 *.jpeg
+
+# === 문서 파일 (템플릿 디렉토리는 예외) ===
+*.doc
+*.docx
+*.xlsx
+!templates/**/*.docx
+!templates/**/*.xlsx
+!templates/**/*.xlsm

@@ -1,0 +1,39 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(find d:/Project/devops/260105/reports -name *uds* -o -name *UDS*)",
+      "Bash(curl -s http://127.0.0.1:8000/health)",
+      "Bash(curl -s --max-time 3 http://127.0.0.1:8000/health)",
+      "Bash(echo \"exit: $?\")",
+      "Bash(python -c \":*)",
+      "Bash(.venv/Scripts/python.exe -c \"import openpyxl; import docx; print\\(''OK''\\)\")",
+      "Bash(.venv/Scripts/pip install:*)",
+      "Bash(.venv/Scripts/python.exe -m pip install openpyxl python-docx -q)",
+      "Bash(python -c \"import openpyxl; print\\(''openpyxl ok''\\)\")",
+      "Bash(python3 -m pip install openpyxl python-docx -q)",
+      "Bash(PY=\"/c/Users/kss11/AppData/Local/Programs/Python/Python312/python.exe\")",
+      "Bash($PY -c \"import openpyxl, docx; print\\(''all ok''\\)\")",
+      "Bash(/c/Users/kss11/AppData/Local/Programs/Python/Python312/python.exe -c \":*)",
+      "Bash(ls -lh d:/Project/devops/260105/output/*.xlsm)",
+      "Bash(python3 -c \":*)",
+      "Bash(python3:*)",
+      "Bash(\"C:/Users/kss11/AppData/Local/Programs/Python/Python312/python.exe\" \"D:/Project/devops/260105/compare_docs.py\")",
+      "Bash(\"C:/Users/kss11/AppData/Local/Programs/Python/Python312/python.exe\" \"D:/Project/devops/260105/compare_docs2.py\")",
+      "Bash(\"C:/Users/kss11/AppData/Local/Programs/Python/Python312/python.exe\" -c \"import sys; data = sys.stdin.buffer.read\\(\\); print\\(data.decode\\(''''utf-8'''', errors=''''replace''''\\)\\)\")",
+      "Bash(\"C:/Users/kss11/AppData/Local/Programs/Python/Python312/python.exe\" -c \"import sys; sys.stdout.buffer.write\\(sys.stdin.buffer.read\\(\\)\\)\")",
+      "Bash(\"C:/Users/kss11/AppData/Local/Programs/Python/Python312/python.exe\" -c \":*)",
+      "Bash(/c/Users/kss11/AppData/Local/Programs/Python/Python312/python.exe -c \"import ast; ast.parse\\(open\\(''report_gen/docx_builder.py'',''r'',encoding=''utf-8''\\).read\\(\\)\\); print\\(''OK''\\)\")",
+      "Bash(/c/Users/kss11/AppData/Local/Programs/Python/Python312/python.exe tools/generate_uds_local.py)",
+      "Bash(C:/Users/kss11/AppData/Local/Programs/Python/Python312/python.exe -c \":*)",
+      "Bash(grep -l \"suts\\\\|sits\\\\|vectorcast\" d:/Project/devops/260105/tools/*.py)",
+      "Bash(npx --yes acorn --ecma2020 --module src/components/local/LocalScmPanel.jsx)",
+      "Bash(node -e \":*)",
+      "Bash(npm install:*)",
+      "Bash(npx vite:*)",
+      "Bash(find d:ProjectdevopsRelease_claude -type f \\\\\\(-name *plan* -o -name *design* -o -name *DESIGN* -o -name *specification* \\\\\\))",
+      "Bash(curl -s http://localhost:7000/api/health)",
+      "Bash(curl -s http://localhost:7000/)",
+      "Bash(backend/.venv/Scripts/pip.exe list:*)"
+    ]
+  }
+}

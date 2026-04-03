@@ -1,0 +1,331 @@
+SCM to VectorCAST Pipeline Overview
+기준일: 2026-03-24
+프로젝트: HDPDM01 / PDS64_RD
+
+1. 목적
+
+이 문서는 현재 구성된 전체 워크플로우를 정리한다.
+
+범위:
+- SRS / SDS / HSIS / source 입력
+- SCM(SVN) 변경 감지
+- 영향 분석
+- UDS / STS / SUTS 처리
+- Frontend 운영 콘솔
+- VectorCAST 준비물 생성
+- RAG / 검색용 통합 지식 export
+
+핵심 질문:
+- 무엇이 구현되었는가
+- 어디까지 검증되었는가
+- 무엇이 아직 실환경에서 미검증인가
+
+2. 전체 워크플로우
+
+입력:
+- SRS
+- SDS
+- HSIS
+- Source code (SVN working copy)
+
+실행 흐름:
+- SCM registry가 source_root, scm_url, linked_docs를 관리
+- dry-run / real-run trigger가 변경 파일을 감지
+- delta_update가 changed files / changed functions를 분류
+- impact_orchestrator가 영향을 계산
+- 문서별 정책에 따라 처리
+  - UDS: AUTO
+  - SUTS: AUTO
+  - STS: FLAG
+  - SDS: FLAG
+- 결과는 audit trail과 linked_docs에 반영
+- frontend는 async job + polling으로 상태를 표시
+
+후속 흐름:
+- SUTS 결과를 VectorCAST intermediate JSON으로 export
+- intermediate JSON을 VectorCAST import package로 변환
+- UDS/SUTS/source/VectorCAST 데이터를 RAG/search용 knowledge records로 통합
+
+3. 상위 구조
+
+문서/코드 계층:
+- docs/(HDPDM01_SRS)...
+- docs/(HDPDM01_SDS)...
+- docs/(HDPDM01_HSIS)...
+- D:\Project\Ados\PDS64_RD
+
+SCM/Impact 계층:
+- config/scm_registry.json
+- workflow/change_trigger.py
+- workflow/delta_update.py
+- workflow/impact_orchestrator.py
+- workflow/impact_jobs.py
+- workflow/impact_audit.py
+
+문서 생성 계층:
+- tools/generate_uds_local.py
+- generators/suts.py
+- generators/sts.py
+- report_gen/*
+
+프론트 계층:
+- frontend/src/components/local/LocalScmPanel.jsx
+- frontend/src/App.css
+
+VectorCAST 준비 계층:
+- tools/export_suts_vectorcast.py
+- tools/export_vectorcast_script.py
+- reports/vectorcast/*
+
+통합 knowledge 계층:
+- tools/export_function_knowledge.py
+- reports/rag/*
+
+4. 실제 동작 순서
+
+4-1. Dry Run
+- 사용자가 프론트에서 SCM 선택
+- dry-run 실행
+- backend가 async job 생성
+- job이 changed files / changed functions / impact 계산
+- frontend는 polling으로 status/stage/progress를 표시
+- 결과로 AUTO / FLAG / SKIP 판단이 반환됨
+
+4-2. Real Run
+- 사용자가 real-run 실행
+- backend가 async job 생성
+- orchestrator가 문서별 action 실행
+  - UDS regenerate
+  - SUTS regenerate
+  - STS review artifact
+  - SDS review artifact
+- 완료 후 audit 저장
+- linked_docs 갱신
+- frontend에서 output/review preview/recent runs를 확인
+
+5. 문서별 처리 정책
+
+UDS
+- 방식: AUTO regenerate
+- 구현: 완료
+- 검증: 로컬/실행 기준 완료
+
+SUTS
+- 방식: AUTO regenerate
+- 구현: 완료
+- 검증: 로컬/실행 기준 완료
+- 최적화: impact 함수만 처리하도록 보강
+
+STS
+- 방식: review artifact
+- 구현: 완료
+- 검증: artifact 생성/preview 확인
+
+SDS
+- 방식: review artifact
+- 구현: 완료
+- 검증: artifact 생성/preview 확인
+
+VectorCAST
+- 방식: import 직전 package 생성
+- 구현: 완료
+- 검증: package/template 생성 완료
+- 실환경 import/run: 미검증
+
+6. 주요 구현 파일
+
+SCM / API
+- D:\Project\devops\260105\config\scm_registry.json
+- D:\Project\devops\260105\backend\services\scm_registry.py
+- D:\Project\devops\260105\backend\routers\scm.py
+- D:\Project\devops\260105\backend\routers\local.py
+- D:\Project\devops\260105\backend\routers\jenkins.py
+
+Workflow / Orchestrator
+- D:\Project\devops\260105\workflow\change_trigger.py
+- D:\Project\devops\260105\workflow\delta_update.py
+- D:\Project\devops\260105\workflow\impact_orchestrator.py
+- D:\Project\devops\260105\workflow\impact_jobs.py
+- D:\Project\devops\260105\workflow\impact_audit.py
+- D:\Project\devops\260105\workflow\scm_fallback.py
+
+UDS / SUTS / STS
+- D:\Project\devops\260105\tools\generate_uds_local.py
+- D:\Project\devops\260105\generators\suts.py
+- D:\Project\devops\260105\generators\sts.py
+- D:\Project\devops\260105\report_gen\*
+
+Frontend
+- D:\Project\devops\260105\frontend\src\components\local\LocalScmPanel.jsx
+- D:\Project\devops\260105\frontend\src\App.css
+
+VectorCAST / Knowledge Export
+- D:\Project\devops\260105\tools\export_suts_vectorcast.py
+- D:\Project\devops\260105\tools\export_vectorcast_script.py
+- D:\Project\devops\260105\tools\export_function_knowledge.py
+
+7. 구현 완료 범위
+
+7-1. 문서/코드 기반 생성
+- SRS/SDS/HSIS/source 결합
+- UDS 품질 상향
+- STS/SUTS 생성 및 검증
+- traceability / related / asil 정리
+
+7-2. SCM 기반 자동 갱신
+- SCM registry
+- SVN working copy 변경 감지
+- dry-run / real-run
+- async job + polling
+- audit trail
+- linked_docs 갱신
+
+7-3. 프론트 운영 콘솔
+- SCM registry 관리
+- dry-run / real-run
+- AUTO / FLAG 결과 카드
+- review artifact preview
+- recent runs
+- run comparison
+- operations panel
+- failure UX
+
+7-4. VectorCAST 준비
+- SUTS -> intermediate JSON
+- intermediate -> import package
+- cases.csv
+- manifest.json
+- import_instructions.md
+- run_vectorcast_import.cmd
+- vectorcast_tests.template.tst
+- vectorcast_environment.template.env
+
+7-5. RAG / Search 통합
+- UDS -> design_doc
+- source -> source_code
+- VectorCAST/SUTS -> testcase
+- warnings -> supplement
+- JSON / JSONL export
+
+8. 검증 완료 항목
+
+운영 검증:
+- SVN working copy 인식
+- dry-run 실행
+- real-run 실행
+- UDS AUTO 생성
+- SUTS AUTO 생성
+- STS/SDS review artifact 생성
+- frontend에서 상태/결과 확인
+
+성능/운영 보강:
+- async heartbeat
+- target progress
+- stale lock 보정
+- SUTS impact 최적화
+
+VectorCAST 준비 검증:
+- intermediate JSON 생성
+- import package 생성
+- template .tst/.env 생성
+
+Knowledge export 검증:
+- 통합 JSON/JSONL 생성
+- kind별 record 분포 확인
+
+9. 실제 미검증 항목
+
+9-1. Jenkins 실운영 장기 검증
+- 코드/엔드포인트는 존재
+- 실제 서버 운영 흐름은 장기 검증 미완
+
+9-2. Webhook 실운영
+- 구조는 있으나 실서비스 연동 미검증
+
+9-3. VectorCAST 실제 import/run
+- 준비물은 생성됨
+- 동글/라이선스 환경에서 실제 import/run은 아직 안 함
+
+세부 미검증:
+- 실제 environment 생성
+- 실제 script import
+- test case import
+- VectorCAST run
+- coverage/result 확인
+
+9-4. Cold start 성능
+- warm 상태는 개선
+- cold cache 첫 분석은 여전히 무거울 수 있음
+
+10. 현재 생성된 대표 산출물
+
+VectorCAST 준비물:
+- D:\Project\devops\260105\reports\vectorcast\suts_vectorcast_20260324_105139.json
+- D:\Project\devops\260105\reports\vectorcast\package_20260324_105139\manifest.json
+- D:\Project\devops\260105\reports\vectorcast\package_20260324_105139\cases.csv
+- D:\Project\devops\260105\reports\vectorcast\package_20260324_105139\vectorcast_tests.template.tst
+- D:\Project\devops\260105\reports\vectorcast\package_20260324_105139\vectorcast_environment.template.env
+
+Knowledge export:
+- D:\Project\devops\260105\reports\rag\function_knowledge_20260324_120000.json
+- D:\Project\devops\260105\reports\rag\function_knowledge_20260324_120000.jsonl
+
+record 분포:
+- design_doc: 368
+- source_code: 368
+- testcase: 66
+- supplement: 52
+- total: 854
+
+11. TResultParser 반영 내용
+
+활용한 파일:
+- D:\Project\devops\260105\TResultParser\251103_Report\251103_ENV\SwUT_21_EEPROM\SWUT_21_EEPROM.tst
+- D:\Project\devops\260105\TResultParser\251103_Report\251103_ENV\SwUT_21_EEPROM\SWUT_21_EEPROM.env
+- D:\Project\devops\260105\TResultParser\TResultParser\Lib\VectorCAST\TestCaseItem.cs
+- D:\Project\devops\260105\TResultParser\TResultParser\Lib\VectorCAST\VCastHeader.cs
+
+반영 효과:
+- 실제 `.tst` 문법 참고
+- 실제 `.env` 템플릿 구조 참고
+- test name 규칙 반영
+- package를 CSV 중심에서 template 기반으로 보강
+
+12. 현재 운영 판단
+
+완료 수준:
+- SRS/SDS/HSIS/source -> UDS/STS/SUTS
+- SCM -> impact -> docs
+- frontend 운영 흐름
+- VectorCAST 연결 직전 준비
+- RAG/search 통합 export
+
+남은 실제 환경 단계:
+- Jenkins 실운영 장기 검증
+- VectorCAST 동글 환경 import/run 검증
+
+즉, 현재 남은 것은 구현보다 외부 운영 환경 검증 성격이 강하다.
+
+13. 권장 다음 순서
+
+1. VectorCAST 동글 확보
+2. vectorcast_environment.template.env 기반 environment 생성
+3. vectorcast_tests.template.tst 기반 import 시도
+4. object path / stub 차이 보정
+5. actual run / result / coverage 검증
+6. 필요 시 export_vectorcast_script.py를 실제 CLI 명령형으로 고정
+
+14. 최종 결론
+
+현재 워크플로우는 아래 수준까지 도달했다.
+
+- 문서/코드 기반 생성 체계: 완료 수준
+- SCM 기반 자동 갱신 파이프라인: 완료 수준
+- frontend 운영 콘솔: 완료 수준
+- VectorCAST 연결 직전 준비: 완료 수준
+- 검색/RAG용 통합 지식화: 완료 수준
+
+아직 남은 것은 실제 VectorCAST import/run 검증과 일부 외부 운영 환경 검증이다.
+
+한 줄 결론:
+이 시스템은 현재 VectorCAST 실제 import/run 검증만 남긴 상태로, 그 전 단계 워크플로우는 거의 완성됐다.
