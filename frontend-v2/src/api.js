@@ -82,18 +82,28 @@ export const getInitialTheme = () =>
 
 export const saveTheme = (t) => localStorage.setItem('devops_v2_theme', t);
 
-/** Jenkins config stored in localStorage */
+/** Jenkins config — 토큰은 sessionStorage (탭 닫으면 삭제), 나머지는 localStorage */
 const JENKINS_KEY = 'devops_v2_jenkins';
+const JENKINS_TOKEN_KEY = 'devops_v2_jenkins_token';
 
 export function loadJenkinsConfig() {
   try {
     const raw = localStorage.getItem(JENKINS_KEY);
-    return raw ? JSON.parse(raw) : {};
+    const cfg = raw ? JSON.parse(raw) : {};
+    // 토큰은 sessionStorage에서 로드
+    cfg.token = sessionStorage.getItem(JENKINS_TOKEN_KEY) || cfg.token || '';
+    return cfg;
   } catch (_) { return {}; }
 }
 
 export function saveJenkinsConfig(cfg) {
-  localStorage.setItem(JENKINS_KEY, JSON.stringify(cfg));
+  // 토큰은 sessionStorage에만 저장 (탭 닫으면 소멸)
+  if (cfg.token) {
+    sessionStorage.setItem(JENKINS_TOKEN_KEY, cfg.token);
+  }
+  // localStorage에는 토큰 제외하고 저장
+  const { token, ...rest } = cfg;
+  localStorage.setItem(JENKINS_KEY, JSON.stringify(rest));
 }
 
 /** Cache root helper — derived from job_url slug */

@@ -937,6 +937,7 @@ async def local_uds_generate(
             "quick_quality_gate": quick_quality_gate,
             "quality_evaluation": quality_evaluation,
         }
+    # 부가 보고서 (각각 _run_report_with_timeout 내부에서 timeout 관리됨)
     validation_path = out_path.with_suffix(".validation.md")
     ok_validation, _ = _run_report_with_timeout(
         lambda: generate_uds_validation_report(str(out_path), str(validation_path)),
