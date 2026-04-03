@@ -4,6 +4,7 @@ stages:
   - frontend
 
 variables:
+  # TODO: 자체 서명 인증서 CA를 runner에 등록 후 제거 (MITM 위험)
   GIT_SSL_NO_VERIFY: "1"
   PYTHONPATH: "$CI_PROJECT_DIR"
 
@@ -49,7 +50,8 @@ unit-tests:
   script:
     - '[Environment]::SetEnvironmentVariable("PYTHONPATH", "$PWD", "Process")'
     - echo "=== Running Unit Tests ==="
-    - python -m pytest tests/unit/ -q --tb=short
+    - python -m pip install --no-build-isolation pytest-cov 2>$null; $true
+    - python -m pytest tests/unit/ -q --tb=short --cov=backend --cov=workflow --cov=report_gen --cov=generators --cov-report=term --cov-fail-under=25
   timeout: 15m
   rules:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'

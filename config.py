@@ -514,9 +514,9 @@ ENGINE_NAME = "Embedded DevOps Analyzer"
 ENGINE_VERSION = "30.8"
 
 # ---------------- Jenkins Viewer 설정 ----------------
-JENKINS_BASE_URL = os.environ.get("DEVOPS_JENKINS_BASE_URL", "http://<jenkins-host>:<port>")
-JENKINS_USERNAME = os.environ.get("DEVOPS_JENKINS_USERNAME", "<fixed-username>")
-JENKINS_API_TOKEN = os.environ.get("DEVOPS_JENKINS_API_TOKEN", "<fixed-api-token>")
+JENKINS_BASE_URL = os.environ.get("DEVOPS_JENKINS_BASE_URL", "")
+JENKINS_USERNAME = os.environ.get("DEVOPS_JENKINS_USERNAME", "")
+JENKINS_API_TOKEN = os.environ.get("DEVOPS_JENKINS_API_TOKEN", "")
 JENKINS_HIDE_CREDENTIALS = os.environ.get("DEVOPS_JENKINS_HIDE_CREDENTIALS", "1") == "1"
 JENKINS_VERIFY_TLS = os.environ.get("DEVOPS_JENKINS_VERIFY_TLS", "1") == "1"
 

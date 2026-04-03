@@ -55,11 +55,12 @@ if not _api_logger.handlers:
     _api_logger.addHandler(_h)
     _api_logger.setLevel(logging.INFO)
 
-app = FastAPI(title="DevOps Pro API", version="1.0")
+from contextlib import asynccontextmanager
 
 
-@app.on_event("startup")
-async def _startup():
+@asynccontextmanager
+async def _lifespan(app_instance):
+    """서버 시작/종료 이벤트 (FastAPI lifespan 패턴)."""
     import socket
     try:
         hostname = socket.gethostname()
@@ -79,13 +80,18 @@ async def _startup():
     _api_logger.info("  Network: http://%s:8000", ip)
     _api_logger.info("=" * 50)
 
-    # Log file access mode
     from backend.services.file_resolver import get_resolver
     resolver = get_resolver()
     _api_logger.info("  File mode: %s", resolver.mode)
     if resolver.mode == "cloudium":
         cfg = resolver.get_config()
         _api_logger.info("  Allowed paths: %s", cfg.get("allowed_prefixes", []))
+
+    yield  # 서버 실행 중
+    _api_logger.info("DevOps Release Server shutting down")
+
+
+app = FastAPI(title="DevOps Pro API", version="1.0", lifespan=_lifespan)
 
 app.add_middleware(
     CORSMiddleware,
