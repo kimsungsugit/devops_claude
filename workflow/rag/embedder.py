@@ -86,13 +86,12 @@ def _init_gemini_client():
         return None
 
     try:
-        import google.generativeai as genai  # type: ignore
-        genai.configure(api_key=api_key)
-        _gemini_client = genai
-        _logger.info("Gemini embedding client initialized (model: %s)", get_embed_model())
+        from google import genai  # 신 SDK (google-genai)
+        _gemini_client = genai.Client(api_key=api_key)
+        _logger.info("Gemini embedding client initialized (new SDK, model: %s)", get_embed_model())
         return _gemini_client
     except ImportError:
-        _logger.debug("google-generativeai not installed, Gemini embedding unavailable")
+        _logger.debug("google-genai not installed, Gemini embedding unavailable")
         return None
     except Exception as e:
         _logger.warning("Failed to init Gemini client: %s", e)
@@ -107,17 +106,17 @@ def _embed_gemini(text: str) -> Optional[List[float]]:
 
     model = get_embed_model()
     try:
-        result = client.embed_content(
-            model=f"models/{model}",
-            content=text,
-            task_type="retrieval_document",
+        # 신 SDK: client.models.embed_content()
+        response = client.models.embed_content(
+            model=model,
+            contents=text,
+            config={"task_type": "RETRIEVAL_DOCUMENT"},
         )
-        vec = result.get("embedding") if isinstance(result, dict) else getattr(result, "embedding", None)
-        if vec:
-            return [float(v) for v in vec]
-        # Alternative access pattern
-        if hasattr(result, "values"):
-            return [float(v) for v in result.values]
+        emb = getattr(response, "embedding", None)
+        if emb is None and hasattr(response, "embeddings") and response.embeddings:
+            emb = response.embeddings[0]
+        if emb:
+            return [float(v) for v in emb]
         return None
     except Exception as e:
         _logger.warning("Gemini embedding failed: %s", e)
@@ -141,17 +140,19 @@ def _embed_gemini_batch(texts: List[str]) -> Optional[List[List[float]]]:
     for i in range(0, len(texts), batch_size):
         batch = texts[i:i + batch_size]
         try:
-            result = client.embed_content(
-                model=f"models/{model}",
-                content=batch,
-                task_type="retrieval_document",
+            # 신 SDK 배치 임베딩
+            response = client.models.embed_content(
+                model=model,
+                contents=batch,
+                config={"task_type": "RETRIEVAL_DOCUMENT"},
             )
-            embeddings = result.get("embedding") if isinstance(result, dict) else getattr(result, "embedding", None)
-            if embeddings and isinstance(embeddings[0], list):
-                all_vecs.extend([[float(v) for v in vec] for vec in embeddings])
-            elif embeddings:
-                # 단일 결과인 경우
-                all_vecs.append([float(v) for v in embeddings])
+            embeddings = getattr(response, "embeddings", None)
+            if embeddings and len(embeddings) > 0:
+                for emb in embeddings:
+                    vec = emb if isinstance(emb, list) else list(emb)
+                    all_vecs.append([float(v) for v in vec])
+            elif hasattr(response, "embedding") and response.embedding:
+                all_vecs.append([float(v) for v in response.embedding])
             else:
                 return None
         except Exception as e:

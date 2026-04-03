@@ -827,9 +827,12 @@ def llm_call(
         # 1-b) Legacy SDK (google-generativeai, deprecated fallback)
         if genai_legacy is not None:
             last_err = ""
+            # configure를 1회만 실행 (글로벌 상태 변경 최소화)
+            if not getattr(genai_legacy, "_configured", False):
+                genai_legacy.configure(api_key=api_key)  # type: ignore[union-attr]
+                genai_legacy._configured = True  # type: ignore[attr-defined]
             for attempt in range(max(1, retries)):
                 try:
-                    genai_legacy.configure(api_key=api_key)  # type: ignore[union-attr]
 
                     # legacy는 구조화된 role보다 prompt 문자열 전달이 안전
                     if system_instruction:
