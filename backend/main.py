@@ -74,6 +74,13 @@ async def _lifespan(app_instance):
     except Exception as _qe:
         _api_logger.warning("Quality DB init skipped: %s", _qe)
 
+    # Initialize Chat History DB
+    try:
+        from backend.services.chat_history_db import init_db as _init_chat_history_db
+        _init_chat_history_db()
+    except Exception as _che:
+        _api_logger.warning("Chat History DB init skipped: %s", _che)
+
     _api_logger.info("=" * 50)
     _api_logger.info("DevOps Release Server started")
     _api_logger.info("  Local:   http://127.0.0.1:8000")

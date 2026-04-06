@@ -337,6 +337,47 @@ class ChatRequest(BaseModel):
     ui_context: Optional[Dict[str, Any]] = None
     history: List[ChatHistoryItem] = Field(default_factory=list)
     jenkins: Optional[ChatJenkinsConfig] = None
+    thread_id: Optional[str] = None  # 기존 대화 이어하기 (서버 이력 로드)
+    save_history: bool = True  # 서버측 이력 저장 여부
+
+
+class ChatHistoryMessageItem(BaseModel):
+    seq: int
+    role: str
+    text: str
+    request_id: Optional[str] = None
+    llm_model: Optional[str] = None
+    created_at: str = ""
+
+
+class ChatHistoryResponse(BaseModel):
+    thread_id: str
+    session_id: Optional[str] = None
+    mode: str = "local"
+    title: Optional[str] = None
+    created_at: str = ""
+    updated_at: str = ""
+    total_messages: int = 0
+    messages: List[ChatHistoryMessageItem] = Field(default_factory=list)
+
+
+class ChatConversationSummary(BaseModel):
+    thread_id: str
+    session_id: Optional[str] = None
+    mode: str = "local"
+    title: Optional[str] = None
+    message_count: int = 0
+    created_at: str = ""
+    updated_at: str = ""
+
+
+class ChatConversationListResponse(BaseModel):
+    total: int = 0
+    conversations: List[ChatConversationSummary] = Field(default_factory=list)
+
+
+class ChatTitleUpdateRequest(BaseModel):
+    title: str
 
 
 # ── Local ─────────────────────────────────────────────────────────────

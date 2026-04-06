@@ -60,6 +60,11 @@ export default function AiAssistSection({ job, analysisResult }) {
     }
   }, []);
 
+  // 마운트 시 RAG 상태 자동 확인
+  useEffect(() => {
+    loadRagStatus();
+  }, [loadRagStatus]);
+
   const send = useCallback(async () => {
     const q = input.trim();
     if (!q || pending) return;
