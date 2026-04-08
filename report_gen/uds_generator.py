@@ -758,12 +758,18 @@ def generate_uds_source_sections(
                     module_name = str(mapped.get("component"))
                     module_name = _normalize_swcom_label(module_name)
             module_map[name] = module_name
-            if module_name not in module_ids:
-                module_ids[module_name] = next_module_idx
-                next_module_idx += 1
-            mod_idx = module_ids.get(module_name, 0)
+            # SwCom 번호를 module_name에서 직접 추출 (레퍼런스와 동일 체계)
+            _swcom_m = re.search(r"SwCom[_\s-]*(\d+)", module_name, re.I)
+            if _swcom_m:
+                mod_idx = int(_swcom_m.group(1))
+            else:
+                # SwCom이 아닌 모듈 (Library, Project Header 등)
+                if module_name not in module_ids:
+                    module_ids[module_name] = next_module_idx
+                    next_module_idx += 1
+                mod_idx = module_ids.get(module_name, 0)
             counter = sum(1 for r in function_table_rows if r[1] == module_name) + 1
-            fn_id = f"SwUFn_{mod_idx:02d}{counter:02d}" if mod_idx else f"SwUFn_{counter:04d}"
+            fn_id = f"SwUFn_{mod_idx:02d}{counter:02d}" if counter <= 99 else f"SwUFn_{mod_idx:02d}{counter:03d}"
             lname = name.lower()
             if lname.startswith("s_"):
                 fn_type = "Internal"
@@ -773,7 +779,7 @@ def generate_uds_source_sections(
                 fn_type = "Internal" if is_static else "I/F"
             function_table_rows.append(
                 [
-                    f"SwCom_{mod_idx:02d}" if mod_idx else "SwCom_00",
+                    f"SwCom_{mod_idx:02d}",
                     module_name,
                     fn_id,
                     name,
@@ -1011,12 +1017,17 @@ def generate_uds_source_sections(
                         module_name = str(mapped.get("component"))
                         module_name = _normalize_swcom_label(module_name)
                 module_map[name] = module_name
-                if module_name not in module_ids:
-                    module_ids[module_name] = next_module_idx
-                    next_module_idx += 1
-                mod_idx = module_ids.get(module_name, 0)
+                # SwCom 번호를 module_name에서 직접 추출 (레퍼런스와 동일 체계)
+                _swcom_m = re.search(r"SwCom[_\s-]*(\d+)", module_name, re.I)
+                if _swcom_m:
+                    mod_idx = int(_swcom_m.group(1))
+                else:
+                    if module_name not in module_ids:
+                        module_ids[module_name] = next_module_idx
+                        next_module_idx += 1
+                    mod_idx = module_ids.get(module_name, 0)
                 counter = sum(1 for r in function_table_rows if r[1] == module_name) + 1
-                fn_id = f"SwUFn_{mod_idx:02d}{counter:02d}" if mod_idx else f"SwUFn_{counter:04d}"
+                fn_id = f"SwUFn_{mod_idx:02d}{counter:02d}" if counter <= 99 else f"SwUFn_{mod_idx:02d}{counter:03d}"
                 fn_type = "Internal" if is_static else "I/F"
                 if name.lower().startswith("s_"):
                     fn_type = "Internal"
@@ -1024,7 +1035,7 @@ def generate_uds_source_sections(
                     fn_type = "I/F"
                 function_table_rows.append(
                     [
-                        f"SwCom_{mod_idx:02d}" if mod_idx else "SwCom_00",
+                        f"SwCom_{mod_idx:02d}",
                         module_name,
                         fn_id,
                         name,

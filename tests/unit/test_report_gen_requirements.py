@@ -631,8 +631,9 @@ class TestNormalizeVcastRows:
             {"requirement_id": "SwTR_002", "testcase": "TC_03"},
         ]
         result = _normalize_vcast_rows(rows)
-        assert len(result["SwTR_001"]) == 2
-        assert len(result["SwTR_002"]) == 1
+        # _normalize_req_id uppercases keys
+        assert len(result["SWTR_001"]) == 2
+        assert len(result["SWTR_002"]) == 1
 
     def test_skips_invalid(self):
         from report_gen.requirements import _normalize_vcast_rows

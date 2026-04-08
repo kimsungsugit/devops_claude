@@ -605,11 +605,20 @@ def _extract_sds_partition_map(doc_path: str) -> Dict[str, Dict[str, str]]:
 
 
 def _load_component_map() -> Dict[str, Dict[str, str]]:
-    try:
-        path = Path(__file__).resolve().parent / "docs" / "component_map.json"
-    except Exception:
-        return {}
-    if not path.exists():
+    # report_gen/docs/ → 프로젝트 루트 docs/ 순으로 탐색
+    candidates = [
+        Path(__file__).resolve().parent / "docs" / "component_map.json",
+        Path(__file__).resolve().parent.parent / "docs" / "component_map.json",
+    ]
+    path = None
+    for c in candidates:
+        try:
+            if c.exists():
+                path = c
+                break
+        except Exception:
+            continue
+    if not path:
         return {}
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -628,16 +637,23 @@ def _load_component_map() -> Dict[str, Dict[str, str]]:
         if not file_name or not component:
             continue
         component = _normalize_swcom_label(component)
-        mapping[file_name] = {
+        entry = {
             "component": component,
             "verify": verify,
             "structure": structure,
         }
-        mapping[Path(file_name).stem] = {
-            "component": component,
-            "verify": verify,
-            "structure": structure,
-        }
+        mapping[file_name] = entry
+        mapping[Path(file_name).stem] = entry
+        # Fuzzy: _it_PDS ↔ _PDS 변환 매칭 (소스 파일명 규칙 차이 대응)
+        stem = Path(file_name).stem
+        if "_it_" in stem:
+            alt = stem.replace("_it_", "_")
+            mapping[alt] = entry
+            mapping[alt + Path(file_name).suffix] = entry
+        elif "_PDS" in stem:
+            alt = stem.replace("_PDS", "_it_PDS")
+            mapping[alt] = entry
+            mapping[alt + Path(file_name).suffix] = entry
     return mapping
 
 
@@ -1557,21 +1573,39 @@ def generate_uds_traceability_mapping(
     }
 
 
+def _normalize_req_id(rid: str) -> str:
+    """Normalize requirement ID: remove all whitespace, uppercase for consistent matching."""
+    rid = "".join(rid.split())  # remove internal whitespace too (e.g., "SwRS_ 001" → "SWRS_001")
+    if not rid:
+        return rid
+    return rid.upper()
+
+
 def _normalize_vcast_rows(rows: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
     out: Dict[str, List[Dict[str, Any]]] = {}
+    seen_keys: set = set()  # (rid, testcase, source) dedup key
     for row in rows or []:
         if not isinstance(row, dict):
             continue
-        rid = str(row.get("requirement_id") or "").strip()
+        rid = _normalize_req_id(str(row.get("requirement_id") or ""))
         if not rid:
             continue
+        testcase = row.get("testcase") or row.get("subprogram") or ""
+        source = row.get("source") or ""
+        result = row.get("result") or ""
+        # Deduplicate: same requirement + testcase + source = skip
+        dedup_key = (rid, testcase, source)
+        if dedup_key in seen_keys:
+            continue
+        seen_keys.add(dedup_key)
         out.setdefault(rid, []).append(
             {
-                "testcase": row.get("testcase") or row.get("subprogram") or "",
-                "result": row.get("result") or "",
+                "testcase": testcase,
+                "result": result,
                 "unit": row.get("unit") or "",
                 "report": row.get("report") or "",
-                "source": row.get("source") or "",
+                "source": source,
+                "confidence": row.get("confidence") if row.get("confidence") not in (None, "") else ("exact" if source in ("STS", "SUTS", "SITS") else "fuzzy"),
             }
         )
     return out
@@ -1581,14 +1615,29 @@ def generate_uds_traceability_matrix(
     items: List[Dict[str, Any]],
     mapping_pairs: Optional[List[Dict[str, Any]]] = None,
     vcast_rows: Optional[List[Dict[str, Any]]] = None,
+    sds_pairs: Optional[List[Dict[str, Any]]] = None,
+    sits_rows: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
-    req_ids = sorted({str(x.get("id") or "").strip() for x in items if str(x.get("id") or "").strip()})
+    # Build original→normalized ID mapping to preserve display IDs
+    raw_ids = sorted({str(x.get("id") or "").strip() for x in items if str(x.get("id") or "").strip()})
+    logger = logging.getLogger(__name__)
+    norm_to_raw: Dict[str, str] = {}
+    for rid in raw_ids:
+        norm = _normalize_req_id(rid)
+        if norm in norm_to_raw and norm_to_raw[norm] != rid:
+            logger.warning("Duplicate requirement ID after normalization: '%s' and '%s' both normalize to '%s'", norm_to_raw[norm], rid, norm)
+        if norm not in norm_to_raw:
+            norm_to_raw[norm] = rid  # keep first occurrence for display
+
+    req_ids = sorted(norm_to_raw.keys())
+
+    # ── UDS function mapping (requirement → source functions) ──
     mapping_pairs = mapping_pairs or []
     map_lookup: Dict[str, List[str]] = {}
     for row in mapping_pairs:
         if not isinstance(row, dict):
             continue
-        rid = str(row.get("requirement_id") or "").strip()
+        rid = _normalize_req_id(str(row.get("requirement_id") or ""))
         if not rid:
             continue
         srcs = row.get("source_ids") or []
@@ -1598,27 +1647,93 @@ def generate_uds_traceability_matrix(
             srcs = [str(s).strip() for s in srcs if str(s).strip()]
         else:
             srcs = []
-        map_lookup[rid] = srcs
+        existing = map_lookup.get(rid, [])
+        for s in srcs:
+            if s not in existing:
+                existing.append(s)
+        map_lookup[rid] = existing
 
-    vcast_map = _normalize_vcast_rows(vcast_rows or [])
+    # ── SDS component mapping (requirement → design components) ──
+    sds_lookup: Dict[str, List[str]] = {}
+    for row in (sds_pairs or []):
+        if not isinstance(row, dict):
+            continue
+        rid = _normalize_req_id(str(row.get("requirement_id") or ""))
+        if not rid:
+            continue
+        comps = row.get("component_ids") or []
+        if isinstance(comps, str):
+            comps = [c.strip() for c in comps.split(",") if c.strip()]
+        elif isinstance(comps, list):
+            comps = [str(c).strip() for c in comps if str(c).strip()]
+        else:
+            comps = []
+        existing = sds_lookup.get(rid, [])
+        for c in comps:
+            if c not in existing:
+                existing.append(c)
+        sds_lookup[rid] = existing
+
+    # ── Test rows: merge STS/SUTS/VectorCAST + SITS ──
+    all_test_rows = list(vcast_rows or [])
+    for row in (sits_rows or []):
+        if isinstance(row, dict):
+            all_test_rows.append(row)
+    vcast_map = _normalize_vcast_rows(all_test_rows)
 
     matrix: List[Dict[str, Any]] = []
     mapped_source_count = 0
+    mapped_sds_count = 0
     mapped_test_count = 0
+    total_pass = 0
+    total_fail = 0
+    total_tests = 0
+    source_stats: Dict[str, int] = {}  # source → count of mappings
+
     for rid in req_ids:
         tests = vcast_map.get(rid, [])
         test_ids = [t.get("testcase") for t in tests if t.get("testcase")]
-        if map_lookup.get(rid):
+        src_list = map_lookup.get(rid, [])
+        sds_list = sds_lookup.get(rid, [])
+        if src_list:
             mapped_source_count += 1
+        if sds_list:
+            mapped_sds_count += 1
         if test_ids:
             mapped_test_count += 1
+
+        # Per-row test result stats
+        row_pass = sum(1 for t in tests if t.get("result", "").lower() in ("pass", "passed", "true", "1"))
+        row_fail = sum(1 for t in tests if t.get("result", "").lower() in ("fail", "failed", "false", "0"))
+        total_pass += row_pass
+        total_fail += row_fail
+        total_tests += len(tests)
+
+        # Track data sources
+        for t in tests:
+            src = t.get("source") or "unknown"
+            source_stats[src] = source_stats.get(src, 0) + 1
+
+        # Derive confidence: None if no tests, exact if all STS/SUTS/SITS, fuzzy if VectorCAST, mixed
+        row_confidence = None
+        if tests:
+            confidences = [t.get("confidence", "exact") for t in tests]
+            if any(c == "fuzzy" for c in confidences):
+                row_confidence = "mixed" if any(c == "exact" for c in confidences) else "fuzzy"
+            else:
+                row_confidence = "exact"
+
         matrix.append(
             {
-                "requirement_id": rid,
-                "source_ids": map_lookup.get(rid, []),
+                "requirement_id": norm_to_raw.get(rid, rid),
+                "sds_components": sds_list,
+                "source_ids": src_list,
                 "tests": tests,
                 "test_ids": test_ids,
                 "test_count": len(tests),
+                "pass_count": row_pass,
+                "fail_count": row_fail,
+                "confidence": row_confidence,
             }
         )
     return {
@@ -1626,9 +1741,15 @@ def generate_uds_traceability_matrix(
         "rows": matrix,
         "summary": {
             "requirement_count": len(req_ids),
+            "mapped_sds_count": mapped_sds_count,
             "mapped_source_count": mapped_source_count,
             "mapped_test_count": mapped_test_count,
+            "total_tests": total_tests,
+            "total_pass": total_pass,
+            "total_fail": total_fail,
+            "source_stats": source_stats,
         },
+        "has_sds_mapping": any(r.get("sds_components") for r in matrix),
         "has_source_mapping": any(r.get("source_ids") for r in matrix),
         "has_tests": any(r.get("test_count") for r in matrix),
     }
@@ -1638,12 +1759,13 @@ def generate_uds_requirements_compare(
     items: List[Dict[str, Any]],
     source_root: str,
 ) -> Dict[str, Any]:
-    req_ids = sorted({str(x.get("id") or "") for x in items if str(x.get("id") or "")})
-    source_ids = _scan_source_requirement_ids(source_root)
+    req_ids = sorted({_normalize_req_id(str(x.get("id") or "")) for x in items if str(x.get("id") or "").strip()})
+    source_ids = [_normalize_req_id(sid) for sid in _scan_source_requirement_ids(source_root)]
     source_set = set(source_ids)
+    req_set = set(req_ids)
     matched = [rid for rid in req_ids if rid in source_set]
     missing = [rid for rid in req_ids if rid not in source_set]
-    source_only = [rid for rid in source_ids if rid not in set(req_ids)]
+    source_only = [rid for rid in source_ids if rid not in req_set]
     return {
         "total_requirements": len(req_ids),
         "matched": matched,

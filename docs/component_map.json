@@ -1,0 +1,614 @@
+[
+  {
+    "structure": "Lib",
+    "file": "Lib_it.h",
+    "component": "Library",
+    "verify": "O"
+  },
+  {
+    "structure": "Lib",
+    "file": "Lib.c",
+    "component": "Library",
+    "verify": "O"
+  },
+  {
+    "structure": "Project Header",
+    "file": "Common_it_PDS.h",
+    "component": "Project Header",
+    "verify": "O"
+  },
+  {
+    "structure": "Project Header",
+    "file": "Include_file_Management.h",
+    "component": "Project Header",
+    "verify": "O"
+  },
+  {
+    "structure": "Project Header",
+    "file": "MC9S12ZVL64MLF_it_PDS.h",
+    "component": "Project Header",
+    "verify": "O"
+  },
+  {
+    "structure": "Project Header",
+    "file": "MC9S12ZVL64MLF_PDS.c",
+    "component": "Project Header",
+    "verify": "O"
+  },
+  {
+    "structure": "Source/APP",
+    "file": "Ap_BuzzerCtrl_it_PDS.h",
+    "component": "Buzzer Control(SwCom_16)",
+    "verify": "O"
+  },
+  {
+    "structure": "Source/APP",
+    "file": "Ap_BuzzerCtrl_it_PDS.c",
+    "component": "Buzzer Control(SwCom_16)",
+    "verify": "O"
+  },
+  {
+    "structure": "Source/APP",
+    "file": "Ap_DoorCtrl_it_PDS.h",
+    "component": "Door Control(SwCom_14)",
+    "verify": "O"
+  },
+  {
+    "structure": "Source/APP",
+    "file": "Ap_DoorCtrl_PDS.c",
+    "component": "Door Control(SwCom_14)",
+    "verify": "O"
+  },
+  {
+    "structure": "Source/APP",
+    "file": "Ap_DoorPreCtrl_it_PDS.h",
+    "component": "Door PreControl(SwCom_13)",
+    "verify": "O"
+  },
+  {
+    "structure": "Source/APP",
+    "file": "Ap_DoorPreCtrl_PDS.c",
+    "component": "Door PreControl(SwCom_13)",
+    "verify": "O"
+  },
+  {
+    "structure": "Source/APP",
+    "file": "Ap_Main_it_PDS.h",
+    "component": "Ap Main(SwCom_05)",
+    "verify": "O"
+  },
+  {
+    "structure": "Source/APP",
+    "file": "Ap_Main_PDS.c",
+    "component": "Ap Main(SwCom_05)",
+    "verify": "O"
+  },
+  {
+    "structure": "Source/APP",
+    "file": "Ap_MotorCtrl_it_PDS.h",
+    "component": "Motor Control(SwCom_15)",
+    "verify": "O"
+  },
+  {
+    "structure": "Source/APP",
+    "file": "Ap_MotorCtrl_PDS.c",
+    "component": "Motor Control(SwCom_15)",
+    "verify": "O"
+  },
+  {
+    "structure": "Source/FW",
+    "file": "Cpu.c",
+    "component": "CPU(SwCom_17)",
+    "verify": "O"
+  },
+  {
+    "structure": "Source/FW",
+    "file": "Cpu.h",
+    "component": "CPU(SwCom_17)",
+    "verify": "O"
+  },
+  {
+    "structure": "Source/FW",
+    "file": "Events.c",
+    "component": "EVENT(SwCom_18)",
+    "verify": "O"
+  },
+  {
+    "structure": "Source/FW",
+    "file": "Events.h",
+    "component": "EVENT(SwCom_18)",
+    "verify": "O"
+  },
+  {
+    "structure": "Source/FW",
+    "file": "LINPHY0.c",
+    "component": "LIN PHY(SwCom_19)",
+    "verify": "O"
+  },
+  {
+    "structure": "Source/FW",
+    "file": "LINPHY0.h",
+    "component": "LIN PHY(SwCom_19)",
+    "verify": "O"
+  },
+  {
+    "structure": "Source/FW",
+    "file": "EEPROM.c",
+    "component": "EEPROM(SwCom_21)",
+    "verify": "O"
+  },
+  {
+    "structure": "Source/FW",
+    "file": "EEPROM.h",
+    "component": "EEPROM(SwCom_21)",
+    "verify": "O"
+  },
+  {
+    "structure": "Source/FW",
+    "file": "Monitor_ADC.c",
+    "component": "ADC(SwCom_22)",
+    "verify": "O"
+  },
+  {
+    "structure": "Source/FW",
+    "file": "Monitor_ADC.h",
+    "component": "ADC(SwCom_22)",
+    "verify": "O"
+  },
+  {
+    "structure": "Source/FW",
+    "file": "PP0_MOTOR_PWM.c",
+    "component": "PWM_PP0(SwCom_23)",
+    "verify": "O"
+  },
+  {
+    "structure": "Source/FW",
+    "file": "PP0_MOTOR_PWM.h",
+    "component": "PWM_PP0(SwCom_23)",
+    "verify": "O"
+  },
+  {
+    "structure": "Source/FW",
+    "file": "PP5_BUZZER_PWM.c",
+    "component": "PWM_PP5(SwCom_24)",
+    "verify": "O"
+  },
+  {
+    "structure": "Source/FW",
+    "file": "PP5_BUZZER_PWM.h",
+    "component": "PWM_PP5(SwCom_24)",
+    "verify": "O"
+  },
+  {
+    "structure": "Source/FW",
+    "file": "PP7_WDI_PWM.c",
+    "component": "PWM_PP7(SwCom_25)",
+    "verify": "O"
+  },
+  {
+    "structure": "Source/FW",
+    "file": "PP7_WDI_PWM.h",
+    "component": "PWM_PP7(SwCom_25)",
+    "verify": "O"
+  },
+  {
+    "structure": "Source/FW",
+    "file": "BATS.c",
+    "component": "BAT(SwCom_26)",
+    "verify": "O"
+  },
+  {
+    "structure": "Source/FW",
+    "file": "BATS.h",
+    "component": "BAT(SwCom_26)",
+    "verify": "O"
+  },
+  {
+    "structure": "Source/FW",
+    "file": "PE_Error.h",
+    "component": "PE TIMER(Sw_Com_27)",
+    "verify": "O"
+  },
+  {
+    "structure": "Source/FW",
+    "file": "PE_Timer.c",
+    "component": "PE TIMER(Sw_Com_27)",
+    "verify": "O"
+  },
+  {
+    "structure": "Source/FW",
+    "file": "PE_Timer.h",
+    "component": "PE TIMER(Sw_Com_27)",
+    "verify": "O"
+  },
+  {
+    "structure": "Source/FW",
+    "file": "EInt_WakeUp.c",
+    "component": "EINT(SwCom_28)",
+    "verify": "O"
+  },
+  {
+    "structure": "Source/FW",
+    "file": "EInt_WakeUp.h",
+    "component": "EINT(SwCom_28)",
+    "verify": "O"
+  },
+  {
+    "structure": "Source/FW",
+    "file": "SCI0.c",
+    "component": "SCI(SwCom_29)",
+    "verify": "O"
+  },
+  {
+    "structure": "Source/FW",
+    "file": "SCI0.h",
+    "component": "SCI(SwCom_29)",
+    "verify": "O"
+  },
+  {
+    "structure": "Source/FW",
+    "file": "Tick_Timer.c",
+    "component": "TIMER(SwCom_30)",
+    "verify": "O"
+  },
+  {
+    "structure": "Source/FW",
+    "file": "Tick_Timer.h",
+    "component": "TIMER(SwCom_30)",
+    "verify": "O"
+  },
+  {
+    "structure": "Source/FW",
+    "file": "PT4_Motor_speed.c",
+    "component": "CAPTURE(SwCom_31)",
+    "verify": "O"
+  },
+  {
+    "structure": "Source/FW",
+    "file": "PT4_Motor_speed.h",
+    "component": "CAPTURE(SwCom_31)",
+    "verify": "O"
+  },
+  {
+    "structure": "Source/FW",
+    "file": "PT5_Motor_direction.c",
+    "component": "CAPTURE(SwCom_31)",
+    "verify": "O"
+  },
+  {
+    "structure": "Source/FW",
+    "file": "PT5_Motor_direction.h",
+    "component": "CAPTURE(SwCom_31)",
+    "verify": "O"
+  },
+  {
+    "structure": "Source/FW",
+    "file": "Vectors.c",
+    "component": "VECTOR(SwCom_32)",
+    "verify": "O"
+  },
+  {
+    "structure": "Source/IF",
+    "file": "DrvOut_Main_it_PDS.h",
+    "component": "DRV OUT(SwCom_08)",
+    "verify": "O"
+  },
+  {
+    "structure": "Source/IF",
+    "file": "DrvOut_Main_PDS.c",
+    "component": "DRV OUT(SwCom_08)",
+    "verify": "O"
+  },
+  {
+    "structure": "Source/IF",
+    "file": "ApiOut_Main_it_PDS.h",
+    "component": "API OUT(SwCom_06)",
+    "verify": "O"
+  },
+  {
+    "structure": "Source/IF",
+    "file": "ApiOut_Main_PDS.c",
+    "component": "API OUT(SwCom_06)",
+    "verify": "O"
+  },
+  {
+    "structure": "Source/IF",
+    "file": "DrvIn_Main_it_PDS.h",
+    "component": "Drv In(SwCom_02)",
+    "verify": "O"
+  },
+  {
+    "structure": "Source/IF",
+    "file": "DrvIn_Main_PDS.c",
+    "component": "Drv In(SwCom_02)",
+    "verify": "O"
+  },
+  {
+    "structure": "Source/IF",
+    "file": "ApiIn_LinRxComp_it_PDS.h",
+    "component": "LIN RX(SwCom_03)",
+    "verify": "O"
+  },
+  {
+    "structure": "Source/IF",
+    "file": "ApiIn_LinRxComp_PDS.c",
+    "component": "LIN RX(SwCom_03)",
+    "verify": "O"
+  },
+  {
+    "structure": "Source/IF",
+    "file": "ApiIn_Main_it_PDS.h",
+    "component": "API In(SwCom_04)",
+    "verify": "O"
+  },
+  {
+    "structure": "Source/IF",
+    "file": "ApiIn_Main_PDS.c",
+    "component": "API In(SwCom_04)",
+    "verify": "O"
+  },
+  {
+    "structure": "Source/IF",
+    "file": "ApiOut_LinTxComp_it_PDS.h",
+    "component": "LIN TX(SwCom_07)",
+    "verify": "O"
+  },
+  {
+    "structure": "Source/IF",
+    "file": "ApiOut_LinTxComp_PDS.c",
+    "component": "LIN TX(SwCom_07)",
+    "verify": "O"
+  },
+  {
+    "structure": "Source/LIN",
+    "file": "lin_cfg.c",
+    "component": "LIN Stack(SwCom_20)",
+    "verify": "X"
+  },
+  {
+    "structure": "Source/LIN",
+    "file": "lin_cfg.h",
+    "component": "LIN Stack(SwCom_20)",
+    "verify": "X"
+  },
+  {
+    "structure": "Source/LIN",
+    "file": "lin_hw_cfg.h",
+    "component": "LIN Stack(SwCom_20)",
+    "verify": "X"
+  },
+  {
+    "structure": "Source/System",
+    "file": "SysOs_Main.c",
+    "component": "System OS(SwCom_01)",
+    "verify": "O"
+  },
+  {
+    "structure": "Source/System",
+    "file": "SysOs_Main_it_PDS.h",
+    "component": "System OS(SwCom_01)",
+    "verify": "O"
+  },
+  {
+    "structure": "Source/System",
+    "file": "SysCtrl_Main_it_PDS.h",
+    "component": "System Control(SwCom_09)",
+    "verify": "O"
+  },
+  {
+    "structure": "Source/System",
+    "file": "SysCtrl_Main_PDS.c",
+    "component": "System Control(SwCom_09)",
+    "verify": "O"
+  },
+  {
+    "structure": "Source/System",
+    "file": "SysSleepCtrl_Main_it_PDS.h",
+    "component": "System Sleep(SwCom_10)",
+    "verify": "O"
+  },
+  {
+    "structure": "Source/System",
+    "file": "SysSleepCtrl_Main_PDS.c",
+    "component": "System Sleep(SwCom_10)",
+    "verify": "O"
+  },
+  {
+    "structure": "Source/System",
+    "file": "SysEeprom_it_PDS.h",
+    "component": "System EEPROM(SwCom_11)",
+    "verify": "O"
+  },
+  {
+    "structure": "Source/System",
+    "file": "SysEeprom_PDS.c",
+    "component": "System EEPROM(SwCom_11)",
+    "verify": "O"
+  },
+  {
+    "structure": "Source/System",
+    "file": "SysDiag_Main_it_PDS.h",
+    "component": "System DIAG(Swcom_12)",
+    "verify": "O"
+  },
+  {
+    "structure": "Source/System",
+    "file": "SysDiag_Main_PDS.c",
+    "component": "System DIAG(Swcom_12)",
+    "verify": "O"
+  },
+  {
+    "file": "SysSleepCtrl_PDS.c",
+    "component": "System Sleep(SwCom_10)",
+    "structure": "Source/SYSTEM",
+    "verify": "O"
+  },
+  {
+    "file": "SysSleepCtrl_it_PDS.h",
+    "component": "System Sleep(SwCom_10)",
+    "structure": "Source/SYSTEM",
+    "verify": "O"
+  },
+  {
+    "file": "SysDiagCtrl_PDS.c",
+    "component": "System Diagnosis(SwCom_11)",
+    "structure": "Source/SYSTEM",
+    "verify": "O"
+  },
+  {
+    "file": "SysDiagCtrl_it_PDS.h",
+    "component": "System Diagnosis(SwCom_11)",
+    "structure": "Source/SYSTEM",
+    "verify": "O"
+  },
+  {
+    "file": "SysEepromCtrl_PDS.c",
+    "component": "System EEPROM(SwCom_12)",
+    "structure": "Source/SYSTEM",
+    "verify": "O"
+  },
+  {
+    "file": "SysEepromCtrl_it_PDS.h",
+    "component": "System EEPROM(SwCom_12)",
+    "structure": "Source/SYSTEM",
+    "verify": "O"
+  },
+  {
+    "file": "SysOptionCtrl_PDS.c",
+    "component": "Option Control(SwCom_34)",
+    "structure": "Source/SYSTEM",
+    "verify": "O"
+  },
+  {
+    "file": "SysOptionCtrl_it_PDS.h",
+    "component": "Option Control(SwCom_34)",
+    "structure": "Source/SYSTEM",
+    "verify": "O"
+  },
+  {
+    "file": "Sys_UDS_LinComp_PDS.c",
+    "component": "LIN Diagnostic(SwCom_33)",
+    "structure": "Source/SYSTEM",
+    "verify": "O"
+  },
+  {
+    "file": "Sys_UDS_LinComp_it_PDS.h",
+    "component": "LIN Diagnostic(SwCom_33)",
+    "structure": "Source/SYSTEM",
+    "verify": "O"
+  },
+  {
+    "file": "lin_isr.c",
+    "component": "LIN Stack(SwCom_20)",
+    "structure": "Source/LIN",
+    "verify": "O"
+  },
+  {
+    "file": "lin_lld_sci.c",
+    "component": "LIN Stack(SwCom_20)",
+    "structure": "Source/LIN",
+    "verify": "O"
+  },
+  {
+    "file": "lin_lld_sci.h",
+    "component": "LIN Stack(SwCom_20)",
+    "structure": "Source/LIN",
+    "verify": "O"
+  },
+  {
+    "file": "lin_lld_timesrv.c",
+    "component": "LIN Stack(SwCom_20)",
+    "structure": "Source/LIN",
+    "verify": "O"
+  },
+  {
+    "file": "lin_lld_timesrv.h",
+    "component": "LIN Stack(SwCom_20)",
+    "structure": "Source/LIN",
+    "verify": "O"
+  },
+  {
+    "file": "lin_common_api.c",
+    "component": "LIN Stack(SwCom_20)",
+    "structure": "Source/LIN",
+    "verify": "O"
+  },
+  {
+    "file": "lin_common_proto.c",
+    "component": "LIN Stack(SwCom_20)",
+    "structure": "Source/LIN",
+    "verify": "O"
+  },
+  {
+    "file": "lin_lin21_api.c",
+    "component": "LIN Stack(SwCom_20)",
+    "structure": "Source/LIN",
+    "verify": "O"
+  },
+  {
+    "file": "lin_lin21_proto.c",
+    "component": "LIN Stack(SwCom_20)",
+    "structure": "Source/LIN",
+    "verify": "O"
+  },
+  {
+    "file": "lin_diagnostic_service.c",
+    "component": "LIN Stack(SwCom_20)",
+    "structure": "Source/LIN",
+    "verify": "O"
+  },
+  {
+    "file": "lin_commontl_api.c",
+    "component": "LIN Stack(SwCom_20)",
+    "structure": "Source/LIN",
+    "verify": "O"
+  },
+  {
+    "file": "lin_commontl_proto.c",
+    "component": "LIN Stack(SwCom_20)",
+    "structure": "Source/LIN",
+    "verify": "O"
+  },
+  {
+    "file": "lin_lin21tl_api.c",
+    "component": "LIN Stack(SwCom_20)",
+    "structure": "Source/LIN",
+    "verify": "O"
+  },
+  {
+    "file": "lin.c",
+    "component": "LIN Stack(SwCom_20)",
+    "structure": "Source/LIN",
+    "verify": "O"
+  },
+  {
+    "file": "PL0_WAKE_UP.c",
+    "component": "EINT(SwCom_28)",
+    "structure": "Source/FW",
+    "verify": "O"
+  },
+  {
+    "file": "PL0_WAKE_UP.h",
+    "component": "EINT(SwCom_28)",
+    "structure": "Source/FW",
+    "verify": "O"
+  },
+  {
+    "file": "SysTickTimer.c",
+    "component": "System Control(SwCom_09)",
+    "structure": "Source/FW",
+    "verify": "O"
+  },
+  {
+    "file": "SysTickTimer.h",
+    "component": "System Control(SwCom_09)",
+    "structure": "Source/FW",
+    "verify": "O"
+  },
+  {
+    "file": "Ap_BuzzerCtrl_PDS.c",
+    "component": "Buzzer Control(SwCom_16)",
+    "structure": "Source/APP",
+    "verify": "O"
+  }
+]

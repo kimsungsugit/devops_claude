@@ -601,7 +601,7 @@ async def local_uds_generate(
     globals_format_sep: str = Form(""),
     globals_format_with_labels: bool = Form(True),
     call_relation_mode: str = Form("code"),
-    ai_enable: bool = Form(False),
+    ai_enable: bool = Form(True),
     ai_example_path: str = Form(""),
     ai_detailed: bool = Form(True),
     expand: bool = Form(False),
@@ -1047,7 +1047,7 @@ async def local_uds_generate_async(
     globals_format_sep: str = Form(""),
     globals_format_with_labels: bool = Form(True),
     call_relation_mode: str = Form("code"),
-    ai_enable: bool = Form(False),
+    ai_enable: bool = Form(True),
     ai_example_path: str = Form(""),
     ai_detailed: bool = Form(True),
     expand: bool = Form(False),
@@ -1436,6 +1436,7 @@ def local_traceability(
     request: Request,
     source_root: str = Form(""),
     srs_path: str = Form(""),
+    sds_path: str = Form(""),
     report_dir: str = Form(""),
 ) -> Dict[str, Any]:
     """Build full traceability matrix: SRS -> Functions -> Test Cases."""
@@ -1445,6 +1446,7 @@ def local_traceability(
         map_requirements_to_functions,
         generate_traceability_matrix,
     )
+    from report_gen.requirements import _extract_sds_partition_map, _normalize_req_id
     import re as _re
 
     srs_docx: Optional[str] = None
@@ -1452,6 +1454,25 @@ def local_traceability(
         p = Path(srs_path).expanduser().resolve()
         if p.exists() and p.is_file():
             srs_docx = str(p)
+
+    # Parse SDS component mapping (V-Model 설계 계층)
+    sds_req_to_comps: Dict[str, List[str]] = {}
+    if sds_path:
+        sds_p = Path(sds_path).expanduser().resolve()
+        if not is_under_any(sds_p, [repo_root, sds_p.parent.resolve()]):
+            raise HTTPException(status_code=403, detail="SDS 경로 접근이 허용되지 않습니다")
+        if sds_p.exists() and sds_p.is_file():
+            partition_map = _extract_sds_partition_map(str(sds_p))
+            for comp_key, info in partition_map.items():
+                related = info.get("related", "")
+                if not related:
+                    continue
+                raw_ids = _re.findall(r"Sw[A-Za-z]{2,}\s*_\s*\d+|Sy[A-Za-z]{2,}\s*_\s*\d+", related)
+                for rid in raw_ids:
+                    norm = _normalize_req_id(rid)
+                    sds_req_to_comps.setdefault(norm, [])
+                    if comp_key not in sds_req_to_comps[norm]:
+                        sds_req_to_comps[norm].append(comp_key)
 
     # Parse requirements
     reqs: List[Dict[str, Any]] = []
@@ -1516,8 +1537,9 @@ def local_traceability(
                         continue
                     fname = str(info.get("name", "")).lower()
                     if any(k in fname for k in keywords):
-                        if fid not in req_to_fids[rid]:
-                            req_to_fids[rid].append(fid)
+                        fid_list = req_to_fids.setdefault(rid, [])
+                        if fid not in fid_list:
+                            fid_list.append(fid)
 
     # Load STS test cases if available
     sts_test_cases: List[Dict[str, Any]] = []
@@ -1595,7 +1617,12 @@ def local_traceability(
             if isinstance(info, dict):
                 func_names.append(info.get("name", fid))
 
-        sts_tcs = [tc for tc in sts_test_cases if tc.get("srs_id") == rid]
+        # STS TC 매칭: 콤마 분리 + ID 정규화 (BUG-1, BUG-6 수정)
+        norm_rid = _normalize_req_id(rid)
+        sts_tcs = [
+            tc for tc in sts_test_cases
+            if norm_rid in [_normalize_req_id(s.strip()) for s in (tc.get("srs_id") or "").split(",")]
+        ]
         suts_tcs_for_req: List[Dict[str, Any]] = []
         for fid in fids:
             suts_tcs_for_req.extend(fid_to_suts.get(fid, []))
@@ -1604,43 +1631,84 @@ def local_traceability(
         has_sts = len(sts_tcs) > 0
         has_suts = len(suts_tcs_for_req) > 0
 
-        if has_uds and has_sts and has_suts:
-            status = "covered"
-        elif has_uds and (has_sts or has_suts):
-            status = "partial"
-        elif has_uds or has_sts or has_suts:
-            status = "partial"
-        else:
-            status = "uncovered"
+        # SDS 컴포넌트 매핑 (V-Model 아키텍처 설계 계층)
+        sds_comps = sds_req_to_comps.get(norm_rid, [])
+        has_sds = len(sds_comps) > 0
 
+        # tests 배열 통합 (Jenkins generate_uds_traceability_matrix 형식)
+        tests: List[Dict[str, Any]] = []
+        for tc in sts_tcs:
+            tests.append({
+                "requirement_id": rid,
+                "testcase": tc["tc_id"],
+                "result": "mapped",
+                "source": "STS",
+                "confidence": "exact",
+                "unit": "",
+                "report": "",
+            })
+        for tc in suts_tcs_for_req:
+            tests.append({
+                "requirement_id": rid,
+                "testcase": tc["tc_id"],
+                "result": "mapped",
+                "source": "SUTS",
+                "confidence": "exact",
+                "unit": tc.get("related_fid", ""),
+                "report": "",
+            })
+        test_ids = [t["testcase"] for t in tests]
+
+        # Jenkins 경로(generate_uds_traceability_matrix)와 동일한 행 구조
+        # status는 행에 포함하지 않음 — 프론트엔드 deriveStatus()가 단일 판정
         rows.append({
-            "req_id": rid,
+            "requirement_id": rid,
+            "sds_components": sds_comps,
+            "source_ids": func_names[:10],
+            "tests": tests,
+            "test_ids": test_ids,
+            "test_count": len(tests),
+            "pass_count": 0,
+            "fail_count": 0,
+            "confidence": "exact" if tests else None,
+            # Local 전용 추가 필드 (하위 호환)
             "req_name": r.get("name", ""),
             "req_type": r.get("req_type", ""),
             "asil": r.get("asil", ""),
-            "func_count": len(fids),
-            "func_names": func_names[:5],
-            "tc_count": len(sts_tcs),
-            "tc_ids": [tc["tc_id"] for tc in sts_tcs[:5]],
-            "suts_tc_count": len(suts_tcs_for_req),
-            "suts_tc_ids": [tc["tc_id"] for tc in suts_tcs_for_req[:5]],
-            "has_uds": has_uds,
-            "has_sts": has_sts,
-            "has_suts": has_suts,
-            "status": status,
         })
 
-    # Summary
+    # Summary — Jenkins 경로(generate_uds_traceability_matrix)와 동일 키 사용
+    # deriveStatus 동일 로직: 설계(SDS or UDS) + 검증(any test) = covered
+    def _derive(r):
+        has_d = bool(r.get("sds_components")) or bool(r.get("source_ids"))
+        has_t = bool(r.get("test_count"))
+        if has_d and has_t:
+            return "covered"
+        if has_d or has_t:
+            return "partial"
+        return "uncovered"
+
     total = len(rows)
-    covered = sum(1 for r in rows if r["status"] == "covered")
-    partial = sum(1 for r in rows if r["status"] == "partial")
-    uncovered = sum(1 for r in rows if r["status"] == "uncovered")
-    safety_total = sum(1 for r in rows if r["asil"] and r["asil"].upper() not in ("QM", "TBD", ""))
-    safety_covered = sum(1 for r in rows if r["status"] == "covered" and r["asil"] and r["asil"].upper() not in ("QM", "TBD", ""))
+    covered = sum(1 for r in rows if _derive(r) == "covered")
+    partial = sum(1 for r in rows if _derive(r) == "partial")
+    uncovered = sum(1 for r in rows if _derive(r) == "uncovered")
+    safety_total = sum(1 for r in rows if r.get("asil") and r["asil"].upper() not in ("QM", "TBD", ""))
+    safety_covered = sum(1 for r in rows if _derive(r) == "covered" and r.get("asil") and r["asil"].upper() not in ("QM", "TBD", ""))
+    mapped_sds_count = sum(1 for r in rows if r.get("sds_components"))
+    mapped_source_count = sum(1 for r in rows if r.get("source_ids"))
+    mapped_test_count = sum(1 for r in rows if r.get("test_count"))
+    total_tests = sum(r.get("test_count", 0) for r in rows)
+
+    # source별 테스트 건수 (Jenkins source_stats와 동일)
+    source_stats: Dict[str, int] = {}
+    for r in rows:
+        for t in r.get("tests", []):
+            src = t.get("source", "unknown")
+            source_stats[src] = source_stats.get(src, 0) + 1
 
     type_dist: Dict[str, int] = {}
     for r in rows:
-        t = r["req_type"] or "OTHER"
+        t = r.get("req_type") or "OTHER"
         type_dist[t] = type_dist.get(t, 0) + 1
 
     # SUTS-specific coverage
@@ -1649,8 +1717,18 @@ def local_traceability(
 
     return {
         "ok": True,
+        "total_requirements": total,
         "summary": {
-            "total_requirements": total,
+            # Jenkins 호환 키
+            "requirement_count": total,
+            "mapped_sds_count": mapped_sds_count,
+            "mapped_source_count": mapped_source_count,
+            "mapped_test_count": mapped_test_count,
+            "total_tests": total_tests,
+            "total_pass": 0,
+            "total_fail": 0,
+            "source_stats": source_stats,
+            # Local 추가 키
             "covered": covered,
             "partial": partial,
             "uncovered": uncovered,
@@ -1659,6 +1737,7 @@ def local_traceability(
             "safety_total": safety_total,
             "safety_covered": safety_covered,
             "safety_pct": round(safety_covered / max(safety_total, 1) * 100, 1),
+            "total_sds_components": len(sds_req_to_comps),
             "total_functions": len(function_details),
             "total_sts_test_cases": len(sts_test_cases),
             "total_suts_test_cases": total_suts_fns,
@@ -1666,6 +1745,9 @@ def local_traceability(
             "suts_function_coverage_pct": round(fns_with_suts / max(len(function_details), 1) * 100, 1),
             "type_distribution": type_dist,
         },
+        "has_sds_mapping": any(r.get("sds_components") for r in rows),
+        "has_source_mapping": any(r.get("source_ids") for r in rows),
+        "has_tests": any(r.get("test_count") for r in rows),
         "rows": rows,
         "sts_file": sts_file_name,
         "suts_file": suts_file_name,
