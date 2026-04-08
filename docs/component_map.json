@@ -730,5 +730,191 @@
     "component": "Bootloader(SwCom_35)",
     "structure": "FBL/LIN",
     "verify": "O"
+  },
+  {
+    "file": "starts12z.c",
+    "component": "Startup",
+    "structure": "Startup",
+    "verify": "X"
+  },
+  {
+    "file": "Include_File_Management.h",
+    "component": "Project Header",
+    "structure": "Header",
+    "verify": "X"
+  },
+  {
+    "file": "lin_reg.h",
+    "component": "LIN Stack(SwCom_20)",
+    "structure": "LIN",
+    "verify": "X"
+  },
+  {
+    "file": "lin_common_api.h",
+    "component": "LIN Stack(SwCom_20)",
+    "structure": "LIN",
+    "verify": "X"
+  },
+  {
+    "file": "lin_common_proto.h",
+    "component": "LIN Stack(SwCom_20)",
+    "structure": "LIN",
+    "verify": "X"
+  },
+  {
+    "file": "lin_commontl_api.h",
+    "component": "LIN Stack(SwCom_20)",
+    "structure": "LIN",
+    "verify": "X"
+  },
+  {
+    "file": "lin_commontl_proto.h",
+    "component": "LIN Stack(SwCom_20)",
+    "structure": "LIN",
+    "verify": "X"
+  },
+  {
+    "file": "lin_diagnostic_service.h",
+    "component": "LIN Stack(SwCom_20)",
+    "structure": "LIN",
+    "verify": "X"
+  },
+  {
+    "file": "lin_lin21_api.h",
+    "component": "LIN Stack(SwCom_20)",
+    "structure": "LIN",
+    "verify": "X"
+  },
+  {
+    "file": "lin_lin21_proto.h",
+    "component": "LIN Stack(SwCom_20)",
+    "structure": "LIN",
+    "verify": "X"
+  },
+  {
+    "file": "lin_lin21tl_api.h",
+    "component": "LIN Stack(SwCom_20)",
+    "structure": "LIN",
+    "verify": "X"
+  },
+  {
+    "file": "lin.h",
+    "component": "LIN Stack(SwCom_20)",
+    "structure": "LIN",
+    "verify": "X"
+  },
+  {
+    "file": "mainpage.h",
+    "component": "LIN Stack(SwCom_20)",
+    "structure": "LIN",
+    "verify": "X"
+  },
+  {
+    "file": "PDS64_RD_LIN/lin16_cfg/lin_cfg.c",
+    "component": "LIN Stack(SwCom_20)",
+    "structure": "LIN",
+    "verify": "X"
+  },
+  {
+    "file": "PDS64_RD_LIN/LIN_driver/bsp/SCI/lin_isr.c",
+    "component": "LIN Stack(SwCom_20)",
+    "structure": "LIN",
+    "verify": "X"
+  },
+  {
+    "file": "PDS64_RD_LIN/LIN_driver/bsp/SCI/lin_lld_sci.c",
+    "component": "LIN Stack(SwCom_20)",
+    "structure": "LIN",
+    "verify": "X"
+  },
+  {
+    "file": "PDS64_RD_LIN/LIN_driver/bsp/SCI/lin_lld_timesrv.c",
+    "component": "LIN Stack(SwCom_20)",
+    "structure": "LIN",
+    "verify": "X"
+  },
+  {
+    "file": "PDS64_RD_LIN/LIN_driver/coreapi/lin_common_api.c",
+    "component": "LIN Stack(SwCom_20)",
+    "structure": "LIN",
+    "verify": "X"
+  },
+  {
+    "file": "PDS64_RD_LIN/LIN_driver/coreapi/lin_common_proto.c",
+    "component": "LIN Stack(SwCom_20)",
+    "structure": "LIN",
+    "verify": "X"
+  },
+  {
+    "file": "PDS64_RD_LIN/LIN_driver/coreapi/lin_lin21_api.c",
+    "component": "LIN Stack(SwCom_20)",
+    "structure": "LIN",
+    "verify": "X"
+  },
+  {
+    "file": "PDS64_RD_LIN/LIN_driver/coreapi/lin_lin21_proto.c",
+    "component": "LIN Stack(SwCom_20)",
+    "structure": "LIN",
+    "verify": "X"
+  },
+  {
+    "file": "PDS64_RD_LIN/LIN_driver/diagnostic/lin_diagnostic_service.c",
+    "component": "LIN Stack(SwCom_20)",
+    "structure": "LIN",
+    "verify": "X"
+  },
+  {
+    "file": "PDS64_RD_LIN/LIN_driver/lowlevel/lin.c",
+    "component": "LIN Stack(SwCom_20)",
+    "structure": "LIN",
+    "verify": "X"
+  },
+  {
+    "file": "PDS64_RD_LIN/LIN_driver/transport/lin_commontl_api.c",
+    "component": "LIN Stack(SwCom_20)",
+    "structure": "LIN",
+    "verify": "X"
+  },
+  {
+    "file": "PDS64_RD_LIN/LIN_driver/transport/lin_commontl_proto.c",
+    "component": "LIN Stack(SwCom_20)",
+    "structure": "LIN",
+    "verify": "X"
+  },
+  {
+    "file": "PDS64_RD_LIN/LIN_driver/transport/lin_lin21tl_api.c",
+    "component": "LIN Stack(SwCom_20)",
+    "structure": "LIN",
+    "verify": "X"
+  },
+  {
+    "file": "lin_j2602_api.c",
+    "component": "LIN Stack(SwCom_20)",
+    "structure": "LIN",
+    "verify": "X"
+  },
+  {
+    "file": "lin_j2602_proto.c",
+    "component": "LIN Stack(SwCom_20)",
+    "structure": "LIN",
+    "verify": "X"
+  },
+  {
+    "file": "lin_j2602tl_api.c",
+    "component": "LIN Stack(SwCom_20)",
+    "structure": "LIN",
+    "verify": "X"
+  },
+  {
+    "file": "PDS64_FBL/Project_Settings/Startup_Code/starts12z.c",
+    "component": "Startup",
+    "structure": "FBL/Startup",
+    "verify": "X"
+  },
+  {
+    "file": "PDS64_FBL/Lib/mc9s12zvl64.c",
+    "component": "Library",
+    "structure": "FBL/Lib",
+    "verify": "X"
   }
 ]
