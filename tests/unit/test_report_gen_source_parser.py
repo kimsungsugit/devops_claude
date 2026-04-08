@@ -42,7 +42,7 @@ class TestExtractCPrototypes:
         code = "extern void ext_func(void);\n"
         result = _extract_c_prototypes(code)
         assert len(result) >= 1
-        assert result[0][2] is True  # is_extern
+        assert result[0][3] is True  # is_extern (index 3: name, params, ret_type, is_extern)
 
     def test_empty(self):
         from report_gen.source_parser import _extract_c_prototypes
@@ -66,7 +66,7 @@ class TestExtractCDefinitions:
         code = "static void helper(void) { }\n"
         result = _extract_c_definitions(code)
         assert len(result) >= 1
-        assert result[0][2] is True  # is_static
+        assert result[0][3] is True  # is_static (index 3: name, params, ret_type, is_static)
 
     def test_skips_keywords(self):
         from report_gen.source_parser import _extract_c_definitions

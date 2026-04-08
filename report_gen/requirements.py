@@ -654,6 +654,11 @@ def _load_component_map() -> Dict[str, Dict[str, str]]:
             alt = stem.replace("_PDS", "_it_PDS")
             mapping[alt] = entry
             mapping[alt + Path(file_name).suffix] = entry
+        # 경로 기반 엔트리: "PDS64_FBL/Sources/main.c" 같은 상대경로 포함 키
+        if "/" in file_name or "\\" in file_name:
+            # 경로 구분자 통일
+            norm_path = file_name.replace("\\", "/")
+            mapping[norm_path] = entry
     return mapping
 
 

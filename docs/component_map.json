@@ -610,5 +610,125 @@
     "component": "Buzzer Control(SwCom_16)",
     "structure": "Source/APP",
     "verify": "O"
+  },
+  {
+    "file": "CPMU.c",
+    "component": "Bootloader(SwCom_35)",
+    "structure": "FBL/Bootloader",
+    "verify": "O"
+  },
+  {
+    "file": "CPMU.h",
+    "component": "Bootloader(SwCom_35)",
+    "structure": "FBL/Bootloader",
+    "verify": "O"
+  },
+  {
+    "file": "FTMRZ.c",
+    "component": "Bootloader(SwCom_35)",
+    "structure": "FBL/Bootloader",
+    "verify": "O"
+  },
+  {
+    "file": "FTMRZ.h",
+    "component": "Bootloader(SwCom_35)",
+    "structure": "FBL/Bootloader",
+    "verify": "O"
+  },
+  {
+    "file": "Comms.c",
+    "component": "Bootloader(SwCom_35)",
+    "structure": "FBL/Comms",
+    "verify": "O"
+  },
+  {
+    "file": "Comms.h",
+    "component": "Bootloader(SwCom_35)",
+    "structure": "FBL/Comms",
+    "verify": "O"
+  },
+  {
+    "file": "CRC32.c",
+    "component": "Bootloader(SwCom_35)",
+    "structure": "FBL/CRC",
+    "verify": "O"
+  },
+  {
+    "file": "CRC32.h",
+    "component": "Bootloader(SwCom_35)",
+    "structure": "FBL/CRC",
+    "verify": "O"
+  },
+  {
+    "file": "lintp.c",
+    "component": "Bootloader(SwCom_35)",
+    "structure": "FBL/LINTP",
+    "verify": "O"
+  },
+  {
+    "file": "lintp.h",
+    "component": "Bootloader(SwCom_35)",
+    "structure": "FBL/LINTP",
+    "verify": "O"
+  },
+  {
+    "file": "linuds.c",
+    "component": "Bootloader(SwCom_35)",
+    "structure": "FBL/LINUDS",
+    "verify": "O"
+  },
+  {
+    "file": "linuds.h",
+    "component": "Bootloader(SwCom_35)",
+    "structure": "FBL/LINUDS",
+    "verify": "O"
+  },
+  {
+    "file": "std_util.c",
+    "component": "Bootloader(SwCom_35)",
+    "structure": "FBL/LINTP",
+    "verify": "O"
+  },
+  {
+    "file": "std_util.h",
+    "component": "Bootloader(SwCom_35)",
+    "structure": "FBL/LINTP",
+    "verify": "O"
+  },
+  {
+    "file": "mc9s12zvl64.c",
+    "component": "Library",
+    "structure": "FBL/Lib",
+    "verify": "X"
+  },
+  {
+    "file": "PDS64_FBL/Sources/main.c",
+    "component": "Bootloader(SwCom_35)",
+    "structure": "FBL",
+    "verify": "O"
+  },
+  {
+    "file": "PDS64_FBL/Sources/Eeprom/EEPROM.c",
+    "component": "Bootloader(SwCom_35)",
+    "structure": "FBL/Eeprom",
+    "verify": "O"
+  },
+  {
+    "file": "PDS64_FBL/Sources/Eeprom/EEPROM.h",
+    "component": "Bootloader(SwCom_35)",
+    "structure": "FBL/Eeprom",
+    "verify": "O"
+  },
+  {
+    "file": "PDS64_FBL/Sources/SubNetworkReprogram/LIN/lin.c",
+    "component": "Bootloader(SwCom_35)",
+    "structure": "FBL/LIN",
+    "verify": "O"
+  },
+  {
+    "file": "PDS64_FBL/Sources/SubNetworkReprogram/LIN/lin.h",
+    "component": "Bootloader(SwCom_35)",
+    "structure": "FBL/LIN",
+    "verify": "O"
   }
 ]

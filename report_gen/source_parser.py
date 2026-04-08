@@ -238,30 +238,24 @@ def _strip_c_comments(text: str) -> str:
     return text
 
 
-def _extract_c_prototypes(text: str) -> List[Tuple[str, str, bool]]:
-    """헤더에서 함수 프로토타입 추출. Returns [(name, params, is_extern)]."""
+def _extract_c_prototypes(text: str) -> List[Tuple[str, str, str, bool]]:
+    """헤더에서 함수 프로토타입 추출. Returns [(name, params, return_type, is_extern)]."""
     if not text:
         return []
-    results: List[Tuple[str, str, bool]] = []
+    results: List[Tuple[str, str, str, bool]] = []
     for match in re.finditer(
-        r"^[\t ]*(extern\s+)?(__interrupt\s+)?[A-Za-z_][\w\s\*\(\),]*?\s+([A-Za-z_]\w*)\s*\(([^;]*?)\)\s*;",
+        r"^[\t ]*(extern\s+)?(__interrupt\s+)?([A-Za-z_][\w\s\*]*?)\s+([A-Za-z_]\w*)\s*\(([^;]*?)\)\s*;",
         text,
         flags=re.M,
     ):
         is_extern = bool(match.group(1))
-        has_interrupt = bool(match.group(2))
-        name = match.group(3)
-        params = " ".join(match.group(4).replace("\n", " ").split())
-        # __interrupt 키워드가 있으면 prototype에 보존
-        if has_interrupt:
-            # return type 부분에서 __interrupt 추출하여 signature prefix로 사용
-            full_match = match.group(0).strip()
-            ret_part = re.match(r".*?(__interrupt\s+\w+)", full_match)
-            if ret_part:
-                params_str = f"__interrupt {name}({params})"
-                results.append((name, params, is_extern))
-                continue
-        results.append((name, params, is_extern))
+        interrupt_prefix = (match.group(2) or "").strip()
+        ret_type = " ".join((match.group(3) or "").split()).strip()
+        name = match.group(4)
+        params = " ".join(match.group(5).replace("\n", " ").split())
+        if interrupt_prefix:
+            ret_type = f"{interrupt_prefix}{ret_type}"
+        results.append((name, params, ret_type, is_extern))
     return results
 
 
@@ -274,26 +268,27 @@ def _preprocess_isr_macros(text: str) -> str:
     )
 
 
-def _extract_c_definitions(text: str) -> List[Tuple[str, str, bool]]:
-    """소스에서 함수 정의 추출. Returns [(name, params, is_static)]."""
+def _extract_c_definitions(text: str) -> List[Tuple[str, str, str, bool]]:
+    """소스에서 함수 정의 추출. Returns [(name, params, return_type, is_static)]."""
     if not text:
         return []
     # ISR() 매크로 프리프로세싱
     text = _preprocess_isr_macros(text)
     keywords = {"if", "for", "while", "switch", "return", "sizeof"}
-    results: List[Tuple[str, str, bool]] = []
+    results: List[Tuple[str, str, str, bool]] = []
     for match in re.finditer(
-        r"^[\t ]*((?:static|__interrupt)\s+)?[A-Za-z_][\w\s\*\(\),]*?\s+([A-Za-z_]\w*)\s*\(([^;]*?)\)\s*\{",
+        r"^[\t ]*((?:static|__interrupt)\s+)?([A-Za-z_][\w\s\*]*?)\s+([A-Za-z_]\w*)\s*\(([^;]*?)\)\s*\{",
         text,
         flags=re.M,
     ):
         qualifier = (match.group(1) or "").strip()
         is_static = "static" in qualifier
-        name = match.group(2)
+        ret_type = " ".join((match.group(2) or "").split()).strip()
+        name = match.group(3)
         if name in keywords:
             continue
-        params = " ".join(match.group(3).replace("\n", " ").split())
-        results.append((name, params, is_static))
+        params = " ".join(match.group(4).replace("\n", " ").split())
+        results.append((name, params, ret_type, is_static))
     return results
 
 

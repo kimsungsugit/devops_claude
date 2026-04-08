@@ -352,8 +352,8 @@ def generate_uds_source_sections(
                 "desc": str(prev.get("desc") or "").strip(),
             }
         if p.suffix.lower() in {".h", ".hpp"}:
-            for name, params, is_extern in _extract_c_prototypes(text):
-                signature = f"{name}({params})"
+            for name, params, ret_type, is_extern in _extract_c_prototypes(text):
+                signature = f"{ret_type} {name}( {params} )" if ret_type else f"{name}({params})"
                 # Header prototype을 맵에 저장 (source definition보다 우선)
                 if name not in _header_proto_map:
                     _header_proto_map[name] = signature
@@ -370,8 +370,8 @@ def generate_uds_source_sections(
                 macro_defs.append([m_name, "", m_val, ""])
         else:
             body_map = _extract_c_function_bodies(text)
-            for name, params, is_static in _extract_c_definitions(text):
-                signature = f"{name}({params})"
+            for name, params, ret_type, is_static in _extract_c_definitions(text):
+                signature = f"{ret_type} {name}( {params} )" if ret_type else f"{name}({params})"
                 if name.startswith("g_"):
                     interfaces.append(signature)
                 elif name.startswith("s_"):
@@ -799,6 +799,13 @@ def generate_uds_source_sections(
             if component_map and file_path:
                 key = Path(file_path).name
                 mapped = component_map.get(key) or component_map.get(Path(file_path).stem)
+                # 경로 기반 매칭 (동일 파일명 충돌 해결: PDS64_RD/main.c vs PDS64_FBL/main.c)
+                if not mapped or not isinstance(mapped, dict) or not mapped.get("component"):
+                    fp_norm = file_path.replace("\\", "/")
+                    for cm_key in component_map:
+                        if "/" in cm_key and fp_norm.endswith(cm_key):
+                            mapped = component_map[cm_key]
+                            break
                 if isinstance(mapped, dict) and mapped.get("component"):
                     module_name = str(mapped.get("component"))
                     module_name = _normalize_swcom_label(module_name)
@@ -1060,6 +1067,12 @@ def generate_uds_source_sections(
                 if component_map and file_path:
                     key = Path(file_path).name
                     mapped = component_map.get(key) or component_map.get(Path(file_path).stem)
+                    if not mapped or not isinstance(mapped, dict) or not mapped.get("component"):
+                        fp_norm = file_path.replace("\\", "/")
+                        for cm_key in component_map:
+                            if "/" in cm_key and fp_norm.endswith(cm_key):
+                                mapped = component_map[cm_key]
+                                break
                     if isinstance(mapped, dict) and mapped.get("component"):
                         module_name = str(mapped.get("component"))
                         module_name = _normalize_swcom_label(module_name)
