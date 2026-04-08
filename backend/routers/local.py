@@ -700,11 +700,22 @@ async def local_uds_generate(
                 except Exception:
                     pass
 
+    # SDS 파티션 맵 로드 (Related ID + ASIL 전파용)
+    _sds_pmap: Dict[str, Dict[str, str]] = {}
+    if sds_doc_paths:
+        from report_gen.requirements import _extract_sds_partition_map
+        for sp in sds_doc_paths:
+            try:
+                _sds_pmap.update(_extract_sds_partition_map(sp))
+            except Exception:
+                pass
+
     source_sections: Dict[str, str] = {}
     if source_root_path and source_root_path.exists():
         source_sections = generate_uds_source_sections(
             str(source_root_path),
             component_map=component_map if component_map else None,
+            sds_partition_map=_sds_pmap if _sds_pmap else None,
         )
         source_sections, req_doc_paths, sds_doc_paths = _enrich_source_sections_with_docs(
             source_sections,
@@ -1114,9 +1125,19 @@ async def local_uds_generate_async(
                 {"stage": "source_analysis", "percent": 10, "message": "소스 코드 분석 중"},
                 job_id=job_id,
             )
+            # SDS 파티션 맵 로드 (Related ID + ASIL 전파)
+            _async_sds_pmap: Dict[str, Dict[str, str]] = {}
+            for rp in req_paths_list:
+                if rp.lower().endswith(".docx") and "sds" in rp.lower():
+                    try:
+                        from report_gen.requirements import _extract_sds_partition_map
+                        _async_sds_pmap.update(_extract_sds_partition_map(rp))
+                    except Exception:
+                        pass
             source_sections = generate_uds_source_sections(
                 str(source_root_path),
                 component_map=comp_map if comp_map else None,
+                sds_partition_map=_async_sds_pmap if _async_sds_pmap else None,
             ) if source_root_path and source_root_path.exists() else {}
 
             _set_progress(

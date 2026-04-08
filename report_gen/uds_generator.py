@@ -214,6 +214,7 @@ def parse_uds_preview_html(html: str) -> Dict[str, List[str]]:
 def generate_uds_source_sections(
     source_root: str,
     component_map: Optional[Dict[str, Dict[str, str]]] = None,
+    sds_partition_map: Optional[Dict[str, Dict[str, str]]] = None,
 ) -> Dict[str, str]:
     root = Path(source_root).resolve()
     if not root.exists():
@@ -254,6 +255,23 @@ def generate_uds_source_sections(
     source_text_cache: Dict[str, str] = {}
     if component_map is None:
         component_map = _load_component_map()
+    _sds_map = sds_partition_map or {}
+
+    def _lookup_sds_related(func_name: str, module_name: str) -> str:
+        """SDS 파티션 맵에서 함수명/모듈명으로 Related ID를 조회한다."""
+        if not _sds_map:
+            return ""
+        # 1. 함수명으로 직접 조회
+        key = func_name.lower().strip()
+        info = _sds_map.get(key)
+        if info and info.get("related"):
+            return info["related"]
+        # 2. 모듈명(SwCom 라벨)으로 조회
+        mod_key = re.sub(r"[^a-z0-9]+", "", module_name.lower())
+        for k, v in _sds_map.items():
+            if re.sub(r"[^a-z0-9]+", "", k) == mod_key and v.get("related"):
+                return v["related"]
+        return ""
 
     def _upsert_signature(items: List[str], signature: str, display: str) -> None:
         if not signature:
@@ -949,11 +967,11 @@ def generate_uds_source_sections(
                 "name": name,
                 "prototype": signature,
                 "description": desc_text,
-                "asil": comment_asil or "TBD",
-                "related": comment_related or "TBD",
+                "asil": comment_asil or _sds_map.get(name.lower(), {}).get("asil") or "TBD",
+                "related": comment_related or _lookup_sds_related(name, module_name) or "TBD",
                 "description_source": "comment" if comment_desc else "inference",
-                "asil_source": "comment" if comment_asil else "inference",
-                "related_source": "comment" if comment_related else "inference",
+                "asil_source": "comment" if comment_asil else ("sds" if _sds_map.get(name.lower(), {}).get("asil") else "inference"),
+                "related_source": "comment" if comment_related else ("sds" if _lookup_sds_related(name, module_name) else "inference"),
                 "inputs": inputs_list,
                 "outputs": outputs_list,
                 "precondition": inferred_precond,
@@ -1097,11 +1115,11 @@ def generate_uds_source_sections(
                     "name": name,
                     "prototype": signature,
                     "description": desc_text,
-                    "asil": "TBD",
-                    "related": "TBD",
+                    "asil": _sds_map.get(name.lower(), {}).get("asil") or "TBD",
+                    "related": _lookup_sds_related(name, module_name) or "TBD",
                     "description_source": "inference",
-                    "asil_source": "inference",
-                    "related_source": "inference",
+                    "asil_source": "sds" if _sds_map.get(name.lower(), {}).get("asil") else "inference",
+                    "related_source": "sds" if _lookup_sds_related(name, module_name) else "inference",
                     "inputs": inputs_list,
                     "outputs": outputs_list,
                     "precondition": "N/A",
