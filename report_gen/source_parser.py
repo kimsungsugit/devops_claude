@@ -239,32 +239,56 @@ def _strip_c_comments(text: str) -> str:
 
 
 def _extract_c_prototypes(text: str) -> List[Tuple[str, str, bool]]:
+    """헤더에서 함수 프로토타입 추출. Returns [(name, params, is_extern)]."""
     if not text:
         return []
     results: List[Tuple[str, str, bool]] = []
     for match in re.finditer(
-        r"^[\t ]*(extern\s+)?[A-Za-z_][\w\s\*\(\),]*?\s+([A-Za-z_]\w*)\s*\(([^;]*?)\)\s*;",
+        r"^[\t ]*(extern\s+)?(__interrupt\s+)?[A-Za-z_][\w\s\*\(\),]*?\s+([A-Za-z_]\w*)\s*\(([^;]*?)\)\s*;",
         text,
         flags=re.M,
     ):
         is_extern = bool(match.group(1))
-        name = match.group(2)
-        params = " ".join(match.group(3).replace("\n", " ").split())
+        has_interrupt = bool(match.group(2))
+        name = match.group(3)
+        params = " ".join(match.group(4).replace("\n", " ").split())
+        # __interrupt 키워드가 있으면 prototype에 보존
+        if has_interrupt:
+            # return type 부분에서 __interrupt 추출하여 signature prefix로 사용
+            full_match = match.group(0).strip()
+            ret_part = re.match(r".*?(__interrupt\s+\w+)", full_match)
+            if ret_part:
+                params_str = f"__interrupt {name}({params})"
+                results.append((name, params, is_extern))
+                continue
         results.append((name, params, is_extern))
     return results
 
 
+def _preprocess_isr_macros(text: str) -> str:
+    """ISR(name) 매크로를 void name(void) 형태로 변환."""
+    return re.sub(
+        r'\bISR\s*\(\s*([A-Za-z_]\w*)\s*\)',
+        r'void \1(void)',
+        text,
+    )
+
+
 def _extract_c_definitions(text: str) -> List[Tuple[str, str, bool]]:
+    """소스에서 함수 정의 추출. Returns [(name, params, is_static)]."""
     if not text:
         return []
+    # ISR() 매크로 프리프로세싱
+    text = _preprocess_isr_macros(text)
     keywords = {"if", "for", "while", "switch", "return", "sizeof"}
     results: List[Tuple[str, str, bool]] = []
     for match in re.finditer(
-        r"^[\t ]*(static\s+)?[A-Za-z_][\w\s\*\(\),]*?\s+([A-Za-z_]\w*)\s*\(([^;]*?)\)\s*\{",
+        r"^[\t ]*((?:static|__interrupt)\s+)?[A-Za-z_][\w\s\*\(\),]*?\s+([A-Za-z_]\w*)\s*\(([^;]*?)\)\s*\{",
         text,
         flags=re.M,
     ):
-        is_static = bool(match.group(1))
+        qualifier = (match.group(1) or "").strip()
+        is_static = "static" in qualifier
         name = match.group(2)
         if name in keywords:
             continue

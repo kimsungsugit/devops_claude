@@ -1780,7 +1780,7 @@ def generate_uds_docx(
                     str(info.get("called") or ""),
                 ]
             )
-            ids = re.findall(r"\b(Sw(?:TR|TSR|NTR|NTSR|CNF|EI|ST|STR|Fn|TK)_\d+)\b", text_blob)
+            ids = re.findall(r"\b(Sw(?:TR|TSR|NTR|NTSR|CNF|EI|ST|STR|Fn|TK|Com)_\d+)\b", text_blob)
             if ids:
                 seen = set()
                 uniq_ids = []

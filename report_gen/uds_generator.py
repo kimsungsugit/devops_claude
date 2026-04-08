@@ -253,20 +253,38 @@ def generate_uds_source_sections(
     globals_info_map: Dict[str, Dict[str, str]] = {}
     manual_globals_info_map: Dict[str, Dict[str, str]] = {}
     source_text_cache: Dict[str, str] = {}
+    _header_proto_map: Dict[str, str] = {}  # name → header prototype (우선)
     if component_map is None:
         component_map = _load_component_map()
     _sds_map = sds_partition_map or {}
 
     def _lookup_sds_related(func_name: str, module_name: str) -> str:
-        """SDS 파티션 맵에서 함수명/모듈명으로 Related ID를 조회한다."""
+        """SDS 파티션 맵에서 함수명/모듈명으로 Related ID를 조회한다 (퍼지 매칭)."""
         if not _sds_map:
             return ""
-        # 1. 함수명으로 직접 조회
-        key = func_name.lower().strip()
-        info = _sds_map.get(key)
+        fn_lower = func_name.lower().strip()
+        # 1. 함수명 정확 매칭
+        info = _sds_map.get(fn_lower)
         if info and info.get("related"):
             return info["related"]
-        # 2. 모듈명(SwCom 라벨)으로 조회
+        # 2. 함수명 퍼지 매칭: g_DrvIn_Main → drvin, drvinmain 등
+        fn_norm = re.sub(r"^[gs]_", "", fn_lower)  # g_, s_ 접두사 제거
+        fn_tokens = re.sub(r"[^a-z0-9]", "", fn_norm)  # 특수문자 제거
+        best_match = ""
+        best_score = 0
+        for k, v in _sds_map.items():
+            if not v.get("related"):
+                continue
+            k_norm = re.sub(r"[^a-z0-9]", "", k)
+            # 정확 포함 매칭 (함수명이 SDS 키에 포함되거나 반대)
+            if fn_tokens and k_norm and (fn_tokens in k_norm or k_norm in fn_tokens):
+                score = min(len(fn_tokens), len(k_norm)) / max(len(fn_tokens), len(k_norm), 1)
+                if score > best_score:
+                    best_score = score
+                    best_match = v["related"]
+        if best_score >= 0.5:
+            return best_match
+        # 3. 모듈명(SwCom 라벨) 매칭 — 최후 수단
         mod_key = re.sub(r"[^a-z0-9]+", "", module_name.lower())
         for k, v in _sds_map.items():
             if re.sub(r"[^a-z0-9]+", "", k) == mod_key and v.get("related"):
@@ -336,6 +354,9 @@ def generate_uds_source_sections(
         if p.suffix.lower() in {".h", ".hpp"}:
             for name, params, is_extern in _extract_c_prototypes(text):
                 signature = f"{name}({params})"
+                # Header prototype을 맵에 저장 (source definition보다 우선)
+                if name not in _header_proto_map:
+                    _header_proto_map[name] = signature
                 if name.startswith("g_"):
                     interfaces.append(signature)
                 elif name.startswith("s_"):
@@ -729,6 +750,9 @@ def generate_uds_source_sections(
                 continue
             name = str(fn.get("name") or "").strip()
             signature = str(fn.get("signature") or name).strip()
+            # Header prototype 우선 사용 (파라미터명/타입이 더 정확)
+            if name in _header_proto_map:
+                signature = _header_proto_map[name]
             is_static = bool(fn.get("is_static"))
             # static 함수의 시그니처에 static 키워드 보존 (레퍼런스 UDS 형식)
             if is_static and not signature.lstrip().startswith("static "):

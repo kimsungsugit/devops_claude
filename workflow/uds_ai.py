@@ -764,9 +764,11 @@ _FUNC_DESC_BACKOFF_MAX = 120.0
 def _build_func_desc_prompt(batch: List[Dict[str, Any]], *, pass_num: int = 1) -> str:
     if pass_num == 2:
         lines = [
-            "You are an automotive software documentation expert.",
+            "You are an automotive embedded software documentation expert refining ISO 26262 UDS descriptions.",
             "Refine each function's Korean description using the additional context (body snippet, prior description).",
-            "Keep descriptions concise (1-3 sentences). Improve accuracy based on the code body.",
+            "Follow this style: 1) 호출 주기/조건, 2) 수행 동작, 3) 호출하는 하위 함수.",
+            "Example: \"s_SystemOperation함수에 의해 5ms 마다 호출되어, ADC값을 입력받고 속도값을 측정한다.\"",
+            "Keep descriptions concise (1-3 sentences). Use the code body to improve accuracy.",
             "Return ONLY a JSON object mapping function name to refined description string.",
             "",
             "Functions:",
@@ -803,6 +805,10 @@ def _build_func_desc_prompt(batch: List[Dict[str, Any]], *, pass_num: int = 1) -
             lines.append(f"  prototype: {proto}")
         if module:
             lines.append(f"  module: {module}")
+            # SwCom 번호 추출하여 컨텍스트 힌트 제공
+            swcom_m = re.search(r"SwCom[_\s-]*(\d+)", module, re.I)
+            if swcom_m:
+                lines.append(f"  swcom_hint: 이 함수는 SwCom_{swcom_m.group(1)} 모듈에 속함")
         if called:
             lines.append(f"  calls: {called}")
         if globals_g:

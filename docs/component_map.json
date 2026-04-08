@@ -501,85 +501,85 @@
     "file": "lin_isr.c",
     "component": "LIN Stack(SwCom_20)",
     "structure": "Source/LIN",
-    "verify": "O"
+    "verify": "X"
   },
   {
     "file": "lin_lld_sci.c",
     "component": "LIN Stack(SwCom_20)",
     "structure": "Source/LIN",
-    "verify": "O"
+    "verify": "X"
   },
   {
     "file": "lin_lld_sci.h",
     "component": "LIN Stack(SwCom_20)",
     "structure": "Source/LIN",
-    "verify": "O"
+    "verify": "X"
   },
   {
     "file": "lin_lld_timesrv.c",
     "component": "LIN Stack(SwCom_20)",
     "structure": "Source/LIN",
-    "verify": "O"
+    "verify": "X"
   },
   {
     "file": "lin_lld_timesrv.h",
     "component": "LIN Stack(SwCom_20)",
     "structure": "Source/LIN",
-    "verify": "O"
+    "verify": "X"
   },
   {
     "file": "lin_common_api.c",
     "component": "LIN Stack(SwCom_20)",
     "structure": "Source/LIN",
-    "verify": "O"
+    "verify": "X"
   },
   {
     "file": "lin_common_proto.c",
     "component": "LIN Stack(SwCom_20)",
     "structure": "Source/LIN",
-    "verify": "O"
+    "verify": "X"
   },
   {
     "file": "lin_lin21_api.c",
     "component": "LIN Stack(SwCom_20)",
     "structure": "Source/LIN",
-    "verify": "O"
+    "verify": "X"
   },
   {
     "file": "lin_lin21_proto.c",
     "component": "LIN Stack(SwCom_20)",
     "structure": "Source/LIN",
-    "verify": "O"
+    "verify": "X"
   },
   {
     "file": "lin_diagnostic_service.c",
     "component": "LIN Stack(SwCom_20)",
     "structure": "Source/LIN",
-    "verify": "O"
+    "verify": "X"
   },
   {
     "file": "lin_commontl_api.c",
     "component": "LIN Stack(SwCom_20)",
     "structure": "Source/LIN",
-    "verify": "O"
+    "verify": "X"
   },
   {
     "file": "lin_commontl_proto.c",
     "component": "LIN Stack(SwCom_20)",
     "structure": "Source/LIN",
-    "verify": "O"
+    "verify": "X"
   },
   {
     "file": "lin_lin21tl_api.c",
     "component": "LIN Stack(SwCom_20)",
     "structure": "Source/LIN",
-    "verify": "O"
+    "verify": "X"
   },
   {
     "file": "lin.c",
     "component": "LIN Stack(SwCom_20)",
     "structure": "Source/LIN",
-    "verify": "O"
+    "verify": "X"
   },
   {
     "file": "PL0_WAKE_UP.c",
