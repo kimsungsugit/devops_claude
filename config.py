@@ -183,9 +183,9 @@ UDS_QUALITY_WARNING_THRESHOLDS = {
 
 # ---------------- UDS DOCX retry 타임아웃 (초) ----------------
 UDS_DOCX_RETRY_STAGES = [
-    ("full", 0, _safe_int("UDS_DOCX_FULL_TIMEOUT", 2400)),
-    ("degraded_ai_off", 1, _safe_int("UDS_DOCX_DEGRADED_TIMEOUT", 1800)),
-    ("degraded_light", 2, _safe_int("UDS_DOCX_LIGHT_TIMEOUT", 900)),
+    ("full", 0, _safe_int("UDS_DOCX_FULL_TIMEOUT", 7200)),
+    ("degraded_ai_off", 1, _safe_int("UDS_DOCX_DEGRADED_TIMEOUT", 3600)),
+    ("degraded_light", 2, _safe_int("UDS_DOCX_LIGHT_TIMEOUT", 1800)),
 ]
 
 UDS_REPORT_TIMEOUT = _safe_int("UDS_REPORT_TIMEOUT", 120)
