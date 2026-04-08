@@ -2244,6 +2244,8 @@ def jenkins_uds_traceability_matrix(req: UdsTraceabilityMatrixRequest) -> Dict[s
             req.requirement_items or [],
             mapping_pairs=req.mapping_pairs or [],
             vcast_rows=req.vcast_rows or [],
+            sds_pairs=req.sds_pairs or [],
+            sits_rows=req.sits_rows or [],
         )
         return {"ok": True, "matrix": matrix}
     except Exception as exc:
@@ -2394,6 +2396,180 @@ def jenkins_sts_extract_traceability(body: Dict[str, Any]) -> Dict[str, Any]:
         "ok": True,
         "vcast_rows": vcast_rows,
         "total_mappings": len(vcast_rows),
+        "requirements_covered": len(req_set),
+    }
+
+
+@router.post("/api/jenkins/sds/extract-mapping")
+def jenkins_sds_extract_mapping(body: Dict[str, Any]) -> Dict[str, Any]:
+    """SDS 문서에서 SwCom↔요구사항 매핑 추출 (추적성 매트릭스용)"""
+    import re as _re
+    from report_gen.requirements import _extract_sds_partition_map, _normalize_req_id
+
+    sds_path = str(body.get("sds_path", "")).strip()
+    if not sds_path:
+        raise HTTPException(status_code=400, detail="sds_path required")
+    p = Path(sds_path).expanduser().resolve()
+    if not p.exists():
+        raise HTTPException(status_code=400, detail=f"파일을 찾을 수 없습니다: {sds_path}")
+    # Path traversal protection
+    if not is_under_any(p, [repo_root, Path(sds_path).parent.resolve()]):
+        raise HTTPException(status_code=403, detail="접근이 허용되지 않는 경로입니다")
+
+    partition_map = _extract_sds_partition_map(str(p))
+    if not partition_map:
+        return {"ok": True, "sds_pairs": [], "total_components": 0, "total_requirements": 0}
+
+    # Build requirement_id → [component_names] mapping
+    # W3: Apply _normalize_req_id to handle whitespace/case in related IDs
+    req_to_comps: Dict[str, list] = {}
+    comp_set = set()
+    for comp_key, info in partition_map.items():
+        related = info.get("related", "")
+        if not related:
+            continue
+        # Match IDs allowing optional internal whitespace (e.g., "SwRS_ 001")
+        raw_ids = _re.findall(r"Sw[A-Za-z]{2,}\s*_\s*\d+|Sy[A-Za-z]{2,}\s*_\s*\d+", related)
+        req_ids = [_normalize_req_id(rid) for rid in raw_ids]
+        if req_ids:
+            comp_name = comp_key
+            comp_set.add(comp_name)
+            for rid in req_ids:
+                req_to_comps.setdefault(rid, [])
+                if comp_name not in req_to_comps[rid]:
+                    req_to_comps[rid].append(comp_name)
+
+    sds_pairs = [
+        {"requirement_id": rid, "component_ids": comps}
+        for rid, comps in sorted(req_to_comps.items())
+    ]
+
+    return {
+        "ok": True,
+        "sds_pairs": sds_pairs,
+        "total_components": len(comp_set),
+        "total_requirements": len(sds_pairs),
+    }
+
+
+@router.post("/api/jenkins/sits/extract-traceability")
+def jenkins_sits_extract_traceability(body: Dict[str, Any]) -> Dict[str, Any]:
+    """SITS Excel에서 TC ID↔요구사항 매핑 추출"""
+    import re as _re
+
+    file_path = str(body.get("path", "")).strip()
+    if not file_path:
+        raise HTTPException(status_code=400, detail="path required")
+    p = Path(file_path).expanduser().resolve()
+    if not p.exists():
+        raise HTTPException(status_code=400, detail=f"파일을 찾을 수 없습니다: {file_path}")
+    # Path traversal protection
+    if not is_under_any(p, [repo_root, Path(file_path).parent.resolve()]):
+        raise HTTPException(status_code=403, detail="접근이 허용되지 않는 경로입니다")
+
+    try:
+        import openpyxl
+        wb = openpyxl.load_workbook(str(p), data_only=True, read_only=True)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Excel 읽기 실패: {exc}")
+
+    vcast_rows = []
+    _MAX_EMPTY_ROWS = 50  # C3: break after N consecutive empty rows
+
+    # Strategy 1: Look for Traceability sheet (same as STS/SUTS)
+    trace_ws = None
+    for name in wb.sheetnames:
+        if "Traceability" in name or "traceability" in name:
+            trace_ws = wb[name]
+            break
+
+    if trace_ws:
+        empty_streak = 0
+        for r in range(4, (trace_ws.max_row or 0) + 1):
+            tc_id = str(trace_ws.cell(r, 2).value or "").strip()
+            if not tc_id or not _re.match(r"Sw\w+_\d+", tc_id, _re.I):
+                tc_id = str(trace_ws.cell(r, 3).value or "").strip()
+            if not tc_id:
+                empty_streak += 1
+                if empty_streak >= _MAX_EMPTY_ROWS:
+                    break
+                continue
+            empty_streak = 0
+            for col in range(4, min((trace_ws.max_column or 4) + 1, 200)):
+                val = str(trace_ws.cell(r, col).value or "").strip()
+                req_ids = _re.findall(r"Sw[A-Za-z]{2,}_\d+|Sy[A-Za-z]{2,}_\d+", val)
+                for rid in req_ids:
+                    vcast_rows.append({
+                        "requirement_id": rid,
+                        "testcase": tc_id,
+                        "source": "SITS",
+                        "result": "mapped",
+                    })
+    else:
+        # Strategy 2: Parse main test spec sheet — TC ID in col B, Related ID column
+        spec_ws = None
+        for name in wb.sheetnames:
+            if "Integration Test" in name or "SW Integration" in name:
+                spec_ws = wb[name]
+                break
+
+        # W2: Don't blindly use first sheet — return warning instead
+        if not spec_ws:
+            wb.close()
+            return {
+                "ok": True,
+                "vcast_rows": [],
+                "total_mappings": 0,
+                "requirements_covered": 0,
+                "warning": "SITS Traceability 또는 Integration Test 시트를 찾을 수 없습니다.",
+            }
+
+        # Find the Related ID column by scanning headers
+        related_col = -1
+        for c in range(1, min((spec_ws.max_column or 1) + 1, 200)):
+            hdr = str(spec_ws.cell(5, c).value or "").strip().lower()
+            hdr2 = str(spec_ws.cell(6, c).value or "").strip().lower()
+            if "related" in hdr or "related" in hdr2 or "swds" in hdr2:
+                related_col = c
+                break
+        if related_col < 0:
+            related_col = 145  # default SITS layout
+
+        empty_streak = 0
+        for r in range(7, (spec_ws.max_row or 7) + 1):
+            tc_id = str(spec_ws.cell(r, 2).value or "").strip()
+            if not tc_id:
+                empty_streak += 1
+                if empty_streak >= _MAX_EMPTY_ROWS:
+                    break
+                continue
+            empty_streak = 0
+            related_val = str(spec_ws.cell(r, related_col).value or "").strip()
+            req_ids = _re.findall(r"Sw[A-Za-z]{2,}_\d+|Sy[A-Za-z]{2,}_\d+", related_val)
+            for rid in req_ids:
+                vcast_rows.append({
+                    "requirement_id": rid,
+                    "testcase": tc_id,
+                    "source": "SITS",
+                    "result": "mapped",
+                })
+
+    wb.close()
+
+    # Dedup
+    seen = set()
+    deduped = []
+    for row in vcast_rows:
+        key = (row["requirement_id"], row["testcase"])
+        if key not in seen:
+            seen.add(key)
+            deduped.append(row)
+
+    req_set = set(r["requirement_id"] for r in deduped)
+    return {
+        "ok": True,
+        "vcast_rows": deduped,
+        "total_mappings": len(deduped),
         "requirements_covered": len(req_set),
     }
 

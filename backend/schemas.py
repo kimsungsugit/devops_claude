@@ -586,3 +586,5 @@ class UdsTraceabilityMatrixRequest(BaseModel):
     requirement_items: List[Dict[str, Any]] = []
     mapping_pairs: List[Dict[str, Any]] = []
     vcast_rows: List[Dict[str, Any]] = []
+    sds_pairs: List[Dict[str, Any]] = []   # SDS component↔requirement mapping
+    sits_rows: List[Dict[str, Any]] = []   # SITS TC↔requirement mapping
