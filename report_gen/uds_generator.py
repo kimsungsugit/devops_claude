@@ -730,6 +730,9 @@ def generate_uds_source_sections(
             name = str(fn.get("name") or "").strip()
             signature = str(fn.get("signature") or name).strip()
             is_static = bool(fn.get("is_static"))
+            # static 함수의 시그니처에 static 키워드 보존 (레퍼런스 UDS 형식)
+            if is_static and not signature.lstrip().startswith("static "):
+                signature = "static " + signature
             file_path = str(fn.get("file") or "").strip()
             calls = fn.get("calls") or []
             used_globals = fn.get("used_globals") or []
@@ -1000,6 +1003,8 @@ def generate_uds_source_sections(
                 name = str(fn.get("name") or "").strip()
                 signature = str(fn.get("signature") or name).strip()
                 is_static = bool(fn.get("is_static"))
+                if is_static and not signature.lstrip().startswith("static "):
+                    signature = "static " + signature
                 file_path = str(fn.get("file") or "").strip()
                 calls = fn.get("calls") or []
                 if not name:

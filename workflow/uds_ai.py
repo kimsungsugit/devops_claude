@@ -773,12 +773,22 @@ def _build_func_desc_prompt(batch: List[Dict[str, Any]], *, pass_num: int = 1) -
         ]
     else:
         lines = [
-            "You are an automotive software documentation expert.",
-            "For each function below, write a concise Korean description (1-2 sentences) explaining its purpose.",
-            "Base your description ONLY on the provided information (name, prototype, module, called functions, globals).",
-            "Do NOT invent functionality. If insufficient data, describe based on the function name.",
+            "You are an automotive embedded software documentation expert writing ISO 26262 UDS (Unit Design Specification).",
+            "For each function below, write a Korean description (1-3 sentences) explaining:",
+            "1) WHEN the function is called (by whom, at what period/timing)",
+            "2) WHAT it does (main operations, data flow)",
+            "3) KEY sub-functions it calls (if any)",
+            "",
+            "Base your description ONLY on the provided information. Do NOT invent functionality.",
+            "Follow the style of these reference examples from an actual automotive UDS document:",
+            "",
+            "Reference examples:",
+            '{"main": "POR(Power On Reset)이 되면, s_SysMain_Init( ) 함수를 호출하여 시스템을 초기화한다. 초기화 후 Power가 off될 때까지 순차적으로 s_SystemOperation( ), s_SystemDiagnosis( ), s_SystemManagement( ) 함수들을 호출하며 System 동작에 필요한 Task를 수행한다.",',
+            ' "g_SysOs_WdiCtrl": "System Tick Timer에 의하여 1ms 마다 호출되어 System Reset 조건에 해당되지 않는 경우 PTP_PTP7(Watchdog Input)의 값을 Toggle 시켜 WDI(Watchdog Input) 기능을 수행한다.",',
+            ' "g_DrvIn_Main": "s_SystemOperation 함수에 의해 5ms 마다 호출되어, Monitor_ADC_Measure( ), Monitor_ADC_GetValue16( ) 함수로 ADC값을 입력받고, s_MotorSpeedMeasure( )로 속도값을 입력한다.",',
+            ' "g_Ap_DoorCtrl_Func": "s_SystemOperation함수에 의해 5ms 마다 호출되어, 도어 상태에 따른 모터 제어 동작을 결정하고 Door Open/Close 제어를 수행한다."}',
+            "",
             "Return ONLY a JSON object mapping function name to description string.",
-            'Example: {"func_a": "시스템 초기화 후 ADC 변환을 시작한다.", "func_b": "수신된 LIN 프레임의 CRC를 검증한다."}',
             "",
             "Functions:",
         ]
