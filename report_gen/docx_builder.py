@@ -2696,7 +2696,10 @@ def generate_uds_docx(
             logic_flow = info.get("logic_flow") or []
             logic_img_path = Path(out).parent / "logic" / f"{logic_key}.png"
             logic_img = None
-            if logic_flow:
+            # 캐싱: 이미지가 이미 존재하면 재생성 건너뛰기
+            if logic_img_path.exists() and logic_img_path.stat().st_size > 100:
+                logic_img = str(logic_img_path)
+            elif logic_flow:
                 logic_img = _render_logic_flow_diagram(
                     str(info.get("name") or "Function"),
                     logic_flow,
@@ -3248,16 +3251,19 @@ def generate_uds_docx(
         _logic_key = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(_inf2.get("id") or _fn_key or "fn")).strip("_")
         _logic_img_path = Path(out).parent / "logic" / f"{_logic_key}.png"
         _calls_list2 = _callee_names or _extract_call_names(str(_inf2.get("called") or ""))
-        _logic_img = _render_call_graph_image(
-            str(_inf2.get("name") or "Function"),
-            _calls_list2,
-            call_map if isinstance(call_map, dict) else None,
-            _logic_img_path,
-            max_children=int(payload.get("logic_max_children") or LOGIC_MAX_CHILDREN_DEFAULT),
-            max_grandchildren=int(payload.get("logic_max_grandchildren") or LOGIC_MAX_GRANDCHILDREN_DEFAULT),
-            max_depth=int(payload.get("logic_max_depth") or LOGIC_MAX_DEPTH_DEFAULT),
-            module_map=module_map if isinstance(module_map, dict) else None,
-        )
+        # 캐싱: 이미지가 이미 존재하면 재생성 건너뛰기
+        _logic_img = str(_logic_img_path) if _logic_img_path.exists() and _logic_img_path.stat().st_size > 100 else None
+        if not _logic_img:
+            _logic_img = _render_call_graph_image(
+                str(_inf2.get("name") or "Function"),
+                _calls_list2,
+                call_map if isinstance(call_map, dict) else None,
+                _logic_img_path,
+                max_children=int(payload.get("logic_max_children") or LOGIC_MAX_CHILDREN_DEFAULT),
+                max_grandchildren=int(payload.get("logic_max_grandchildren") or LOGIC_MAX_GRANDCHILDREN_DEFAULT),
+                max_depth=int(payload.get("logic_max_depth") or LOGIC_MAX_DEPTH_DEFAULT),
+                module_map=module_map if isinstance(module_map, dict) else None,
+            )
         if _logic_img:
             for _r in _data_rows:
                 if _r and "Logic Diagram" in _r[0]:
