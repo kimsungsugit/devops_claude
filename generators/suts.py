@@ -1798,6 +1798,36 @@ def generate_suts(
 
     _progress(25, f"소스 파싱 완료 - {len(function_details)}개 함수 발견")
 
+    # component_map verify=X 함수 제외 (파일명 + 경로 + component 기반)
+    try:
+        from report_gen.requirements import _load_component_map
+        _cm = _load_component_map()
+        _excluded_names = {k for k, v in _cm.items() if isinstance(v, dict) and str(v.get("verify", "")).upper() == "X"}
+        _excluded_components = {v.get("component", "") for k, v in _cm.items() if isinstance(v, dict) and str(v.get("verify", "")).upper() == "X" and v.get("component")}
+        if _excluded_names:
+            before = len(function_details)
+            def _should_exclude(info):
+                if not isinstance(info, dict):
+                    return True
+                fp = str(info.get("file") or "").replace("\\", "/")
+                fname = fp.rsplit("/", 1)[-1] if "/" in fp else fp
+                fstem = fname.rsplit(".", 1)[0] if "." in fname else fname
+                # 파일명 매칭
+                if fname in _excluded_names or fstem in _excluded_names:
+                    return True
+                # 경로 매칭
+                for ex in _excluded_names:
+                    if "/" in ex and fp.endswith(ex):
+                        return True
+                return False
+            function_details = {
+                fid: info for fid, info in function_details.items()
+                if not _should_exclude(info)
+            }
+            _progress(27, f"verify=X 제외: {before} → {len(function_details)}개")
+    except Exception:
+        pass
+
     _progress(30, "유닛 함수 수집 중")
     units = collect_unit_functions(function_details, globals_info_map)
 
