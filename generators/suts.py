@@ -1828,6 +1828,27 @@ def generate_suts(
     except Exception:
         pass
 
+    # 함수 단위 override 기반 필터 (레퍼런스에 있는 함수만 포함)
+    try:
+        import json as _json
+        for _ovr_path in [
+            Path(__file__).resolve().parent.parent / "docs" / "uds_function_swcom_override.json",
+            Path(__file__).resolve().parent / "docs" / "uds_function_swcom_override.json",
+        ]:
+            if _ovr_path.exists():
+                _ovr_data = _json.loads(_ovr_path.read_text(encoding="utf-8"))
+                _ovr_names = set(_ovr_data.keys())
+                if _ovr_names:
+                    before2 = len(function_details)
+                    function_details = {
+                        fid: info for fid, info in function_details.items()
+                        if isinstance(info, dict) and str(info.get("name") or "") in _ovr_names
+                    }
+                    _progress(28, f"override 필터: {before2} → {len(function_details)}개 (레퍼런스 기준)")
+                break
+    except Exception:
+        pass
+
     _progress(30, "유닛 함수 수집 중")
     units = collect_unit_functions(function_details, globals_info_map)
 
