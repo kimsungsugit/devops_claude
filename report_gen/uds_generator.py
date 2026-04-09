@@ -338,14 +338,16 @@ def generate_uds_source_sections(
                 if ext not in allowed:
                     continue
                 if component_map:
-                    mapped = component_map.get(p.name) or component_map.get(p.stem)
-                    # 경로 기반 매칭
-                    if not mapped or not isinstance(mapped, dict) or not mapped.get("component"):
-                        fp_norm = str(p).replace("\\", "/")
-                        for cm_key in component_map:
-                            if "/" in cm_key and fp_norm.endswith(cm_key):
-                                mapped = component_map[cm_key]
-                                break
+                    # 경로 기반 매칭 우선 (동일 파일명 충돌 해결)
+                    mapped = None
+                    fp_norm = str(p).replace("\\", "/")
+                    for cm_key in component_map:
+                        if "/" in cm_key and fp_norm.endswith(cm_key):
+                            mapped = component_map[cm_key]
+                            break
+                    # 파일명 fallback
+                    if not mapped or not isinstance(mapped, dict):
+                        mapped = component_map.get(p.name) or component_map.get(p.stem)
                     if isinstance(mapped, dict):
                         verify = str(mapped.get("verify") or "").strip().upper()
                         if verify == "X":
@@ -851,15 +853,16 @@ def generate_uds_source_sections(
                 except Exception:
                     module_name = "Module"
             if component_map and file_path:
-                key = Path(file_path).name
-                mapped = component_map.get(key) or component_map.get(Path(file_path).stem)
-                # 경로 기반 매칭 (동일 파일명 충돌 해결: PDS64_RD/main.c vs PDS64_FBL/main.c)
-                if not mapped or not isinstance(mapped, dict) or not mapped.get("component"):
-                    fp_norm = file_path.replace("\\", "/")
-                    for cm_key in component_map:
-                        if "/" in cm_key and fp_norm.endswith(cm_key):
-                            mapped = component_map[cm_key]
-                            break
+                # 경로 기반 매칭 우선 (동일 파일명 충돌 해결)
+                mapped = None
+                fp_norm = file_path.replace("\\", "/")
+                for cm_key in component_map:
+                    if "/" in cm_key and fp_norm.endswith(cm_key):
+                        mapped = component_map[cm_key]
+                        break
+                if not mapped or not isinstance(mapped, dict):
+                    key = Path(file_path).name
+                    mapped = component_map.get(key) or component_map.get(Path(file_path).stem)
                 if isinstance(mapped, dict) and mapped.get("component"):
                     module_name = str(mapped.get("component"))
                     module_name = _normalize_swcom_label(module_name)
