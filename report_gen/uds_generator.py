@@ -271,6 +271,19 @@ def generate_uds_source_sections(
         except Exception:
             pass
 
+    # typedef 정규화 맵 (임베디드 공통 타입)
+    _typedef_map = {
+        r"\bbyte\b": "U8", r"\bword\b": "U16", r"\bdword\b": "U32",
+        r"\bBYTE\b": "U8", r"\bWORD\b": "U16", r"\bDWORD\b": "U32",
+        r"\bEEPROM_TAddress_\b": "EEPROM_TAddress",
+    }
+
+    def _normalize_prototype(sig: str) -> str:
+        """typedef 정규화 적용."""
+        for pattern, replacement in _typedef_map.items():
+            sig = re.sub(pattern, replacement, sig)
+        return sig
+
     def _lookup_sds_related(func_name: str, module_name: str) -> str:
         """SDS 파티션 맵에서 함수명/모듈명으로 Related ID를 조회한다 (퍼지 매칭)."""
         if not _sds_map:
@@ -770,6 +783,8 @@ def generate_uds_source_sections(
             # static 함수의 시그니처에 static 키워드 보존 (레퍼런스 UDS 형식)
             if is_static and not signature.lstrip().startswith("static "):
                 signature = "static " + signature
+            # typedef 정규화 (byte→U8, word→U16 등)
+            signature = _normalize_prototype(signature)
             file_path = str(fn.get("file") or "").strip()
             calls = fn.get("calls") or []
             used_globals = fn.get("used_globals") or []
