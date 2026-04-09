@@ -629,7 +629,9 @@ async def local_uds_generate(
                 raise HTTPException(status_code=400, detail=msg)
             template_warning = msg
             template_bytes = None
-    source_root_path = Path(source_root).resolve() if source_root else None
+    # 콤마 구분 복수 경로 지원: 첫 번째 경로로 검증, 전체를 generate에 전달
+    _first_root = source_root.split(",")[0].strip() if source_root else ""
+    source_root_path = Path(_first_root).resolve() if _first_root else None
     if not source_root_path or not source_root_path.exists() or not source_root_path.is_dir():
         raise HTTPException(status_code=400, detail="source_root(코드 루트)가 필요합니다.")
     req_paths_list = _parse_path_list(req_paths)
@@ -713,7 +715,7 @@ async def local_uds_generate(
     source_sections: Dict[str, str] = {}
     if source_root_path and source_root_path.exists():
         source_sections = generate_uds_source_sections(
-            str(source_root_path),
+            source_root,  # 콤마 구분 복수 경로 그대로 전달
             component_map=component_map if component_map else None,
             sds_partition_map=_sds_pmap if _sds_pmap else None,
         )
@@ -1071,7 +1073,9 @@ async def local_uds_generate_async(
     show_mapping_evidence: bool = Form(False),
 ) -> Dict[str, Any]:
     """Non-blocking local UDS generation. Returns job_id for progress polling."""
-    source_root_path = Path(source_root).resolve() if source_root else None
+    # 콤마 구분 복수 경로 지원: 첫 번째 경로로 검증, 전체를 generate에 전달
+    _first_root = source_root.split(",")[0].strip() if source_root else ""
+    source_root_path = Path(_first_root).resolve() if _first_root else None
     if not source_root_path or not source_root_path.exists() or not source_root_path.is_dir():
         raise HTTPException(status_code=400, detail="source_root(코드 루트)가 필요합니다.")
     req_paths_list = _parse_path_list(req_paths)
@@ -1505,7 +1509,9 @@ def local_traceability(
 
     # Parse source for function details
     function_details: Dict[str, Any] = {}
-    source_root_path = Path(source_root).resolve() if source_root else None
+    # 콤마 구분 복수 경로 지원: 첫 번째 경로로 검증, 전체를 generate에 전달
+    _first_root = source_root.split(",")[0].strip() if source_root else ""
+    source_root_path = Path(_first_root).resolve() if _first_root else None
     if source_root_path and source_root_path.exists() and source_root_path.is_dir():
         try:
             sections = _get_source_sections_cached(str(source_root_path))
@@ -1862,7 +1868,9 @@ async def local_sts_generate(
 
     # Get function_details from source root
     function_details: Dict[str, Any] = {}
-    source_root_path = Path(source_root).resolve() if source_root else None
+    # 콤마 구분 복수 경로 지원: 첫 번째 경로로 검증, 전체를 generate에 전달
+    _first_root = source_root.split(",")[0].strip() if source_root else ""
+    source_root_path = Path(_first_root).resolve() if _first_root else None
     if source_root_path and source_root_path.exists() and source_root_path.is_dir():
         try:
             sections = _get_source_sections_cached(str(source_root_path))
@@ -2037,7 +2045,9 @@ async def local_sts_generate_stream(
         raise HTTPException(status_code=400, detail="SRS 문서를 최소 1개 이상 제공해주세요.")
 
     function_details: Dict[str, Any] = {}
-    source_root_path = Path(source_root).resolve() if source_root else None
+    # 콤마 구분 복수 경로 지원: 첫 번째 경로로 검증, 전체를 generate에 전달
+    _first_root = source_root.split(",")[0].strip() if source_root else ""
+    source_root_path = Path(_first_root).resolve() if _first_root else None
     if source_root_path and source_root_path.exists() and source_root_path.is_dir():
         try:
             sections = _get_source_sections_cached(str(source_root_path))
@@ -2247,7 +2257,9 @@ async def local_sts_generate_async(
     stp_docx_path = _resolve_opt3(stp_path)
     hsis_file_path3 = _resolve_opt3(hsis_path) or _discover_hsis_path()
 
-    source_root_path = Path(source_root).resolve() if source_root else None
+    # 콤마 구분 복수 경로 지원: 첫 번째 경로로 검증, 전체를 generate에 전달
+    _first_root = source_root.split(",")[0].strip() if source_root else ""
+    source_root_path = Path(_first_root).resolve() if _first_root else None
     tpl_path: Optional[str] = None
     if template_path:
         p = Path(template_path).expanduser().resolve()
@@ -2444,7 +2456,9 @@ async def local_suts_generate(
     req_id = (request.headers.get("x-req-id") or "").strip() or f"suts-gen-{int(time.time() * 1000)}"
     print(f"[SUTS_GENERATE][{req_id}] start source_root={source_root}", flush=True)
 
-    source_root_path = Path(source_root).resolve() if source_root else None
+    # 콤마 구분 복수 경로 지원: 첫 번째 경로로 검증, 전체를 generate에 전달
+    _first_root = source_root.split(",")[0].strip() if source_root else ""
+    source_root_path = Path(_first_root).resolve() if _first_root else None
     if not source_root_path or not source_root_path.exists() or not source_root_path.is_dir():
         raise HTTPException(status_code=400, detail="유효한 소스 코드 루트 경로를 제공해주세요.")
 
@@ -2552,7 +2566,9 @@ async def local_suts_generate_stream(
 
     from suts_generator import generate_suts
 
-    source_root_path = Path(source_root).resolve() if source_root else None
+    # 콤마 구분 복수 경로 지원: 첫 번째 경로로 검증, 전체를 generate에 전달
+    _first_root = source_root.split(",")[0].strip() if source_root else ""
+    source_root_path = Path(_first_root).resolve() if _first_root else None
     if not source_root_path or not source_root_path.exists() or not source_root_path.is_dir():
         raise HTTPException(status_code=400, detail="유효한 소스 코드 루트 경로를 제공해주세요.")
 
@@ -2674,7 +2690,9 @@ async def local_suts_generate_async(
     """Non-blocking SUTS generation. Returns job_id for progress polling."""
     from suts_generator import generate_suts
 
-    source_root_path = Path(source_root).resolve() if source_root else None
+    # 콤마 구분 복수 경로 지원: 첫 번째 경로로 검증, 전체를 generate에 전달
+    _first_root = source_root.split(",")[0].strip() if source_root else ""
+    source_root_path = Path(_first_root).resolve() if _first_root else None
     if not source_root_path or not source_root_path.exists() or not source_root_path.is_dir():
         raise HTTPException(status_code=400, detail="유효한 소스 코드 루트 경로를 제공해주세요.")
 
@@ -2874,7 +2892,9 @@ async def local_sits_generate(
     req_id = (request.headers.get("x-req-id") or "").strip() or f"sits-gen-{int(time.time() * 1000)}"
     print(f"[SITS_GENERATE][{req_id}] start source_root={source_root}", flush=True)
 
-    source_root_path = Path(source_root).resolve() if source_root else None
+    # 콤마 구분 복수 경로 지원: 첫 번째 경로로 검증, 전체를 generate에 전달
+    _first_root = source_root.split(",")[0].strip() if source_root else ""
+    source_root_path = Path(_first_root).resolve() if _first_root else None
     if not source_root_path or not source_root_path.exists() or not source_root_path.is_dir():
         raise HTTPException(status_code=400, detail="유효한 소스 코드 루트 경로를 제공해주세요.")
 
@@ -2972,7 +2992,9 @@ async def local_sits_generate_stream(
 
     from sits_generator import generate_sits
 
-    source_root_path = Path(source_root).resolve() if source_root else None
+    # 콤마 구분 복수 경로 지원: 첫 번째 경로로 검증, 전체를 generate에 전달
+    _first_root = source_root.split(",")[0].strip() if source_root else ""
+    source_root_path = Path(_first_root).resolve() if _first_root else None
     if not source_root_path or not source_root_path.exists() or not source_root_path.is_dir():
         raise HTTPException(status_code=400, detail="유효한 소스 코드 루트 경로를 제공해주세요.")
 
@@ -3084,7 +3106,9 @@ async def local_sits_generate_async(
     """Non-blocking SITS generation. Returns job_id for progress polling."""
     from sits_generator import generate_sits
 
-    source_root_path = Path(source_root).resolve() if source_root else None
+    # 콤마 구분 복수 경로 지원: 첫 번째 경로로 검증, 전체를 generate에 전달
+    _first_root = source_root.split(",")[0].strip() if source_root else ""
+    source_root_path = Path(_first_root).resolve() if _first_root else None
     if not source_root_path or not source_root_path.exists() or not source_root_path.is_dir():
         raise HTTPException(status_code=400, detail="유효한 소스 코드 루트 경로를 제공해주세요.")
 

@@ -558,10 +558,12 @@ def _to_swcom_from_fn(info: Dict[str, Any]) -> str:
 
 
 def _get_source_sections_cached(source_root: str, max_files: int = 1200) -> Dict[str, Any]:
-    root = Path(str(source_root or "")).expanduser().resolve()
+    # 콤마 구분 복수 경로 지원: 첫 번째 경로로 검증, 전체를 전달
+    _first = (source_root or "").split(",")[0].strip()
+    root = Path(_first).expanduser().resolve() if _first else Path(".")
     if not root.exists() or not root.is_dir():
         raise HTTPException(status_code=400, detail="source_root not found or not directory")
-    key = str(root)
+    key = source_root  # 캐시 키는 전체 경로
     now = time()
     with _source_sections_cache_lock:
         item = _source_sections_cache.get(key)
@@ -575,7 +577,7 @@ def _get_source_sections_cached(source_root: str, max_files: int = 1200) -> Dict
     _log = _logging.getLogger("uvicorn.error")
     _log.info("[source_sections] Parsing started for %s", key)
     t0 = time()
-    sections = generate_uds_source_sections(str(root))
+    sections = generate_uds_source_sections(source_root)  # 콤마 구분 그대로 전달
     elapsed = time() - t0
     _log.info("[source_sections] Parsing finished in %.1fs for %s", elapsed, key)
     with _source_sections_cache_lock:
