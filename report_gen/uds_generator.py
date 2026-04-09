@@ -216,9 +216,12 @@ def generate_uds_source_sections(
     component_map: Optional[Dict[str, Dict[str, str]]] = None,
     sds_partition_map: Optional[Dict[str, Dict[str, str]]] = None,
 ) -> Dict[str, str]:
-    root = Path(source_root).resolve()
-    if not root.exists():
+    # 콤마/세미콜론 구분 복수 소스 루트 지원
+    _raw_roots = [p.strip() for p in str(source_root).replace(";", ",").split(",") if p.strip()]
+    _roots = [Path(p).resolve() for p in _raw_roots if Path(p).resolve().exists()]
+    if not _roots:
         return {}
+    root = _roots[0]  # 기본 루트 (상대경로 계산 기준)
     allowed = {".c", ".h", ".cpp", ".hpp"}
     try:
         import config as _cfg
@@ -327,25 +330,38 @@ def generate_uds_source_sections(
         items.append(display)
 
     truncated = False
-    for dirpath, _, filenames in os.walk(root):
-        for name in filenames:
-            p = Path(dirpath) / name
-            ext = p.suffix.lower()
-            if ext not in allowed:
-                continue
-            if component_map:
-                mapped = component_map.get(p.name) or component_map.get(p.stem)
-                if isinstance(mapped, dict):
-                    verify = str(mapped.get("verify") or "").strip().upper()
-                    if verify == "X":
-                        continue
-            files.append(p)
-            ext_counts[ext] = ext_counts.get(ext, 0) + 1
-            rel = p.relative_to(root)
-            top = rel.parts[0] if rel.parts else "."
-            top_dirs[top] = top_dirs.get(top, 0) + 1
-            if len(files) >= max_files:
-                truncated = True
+    for _walk_root in _roots:
+        for dirpath, _, filenames in os.walk(_walk_root):
+            for name in filenames:
+                p = Path(dirpath) / name
+                ext = p.suffix.lower()
+                if ext not in allowed:
+                    continue
+                if component_map:
+                    mapped = component_map.get(p.name) or component_map.get(p.stem)
+                    # 경로 기반 매칭
+                    if not mapped or not isinstance(mapped, dict) or not mapped.get("component"):
+                        fp_norm = str(p).replace("\\", "/")
+                        for cm_key in component_map:
+                            if "/" in cm_key and fp_norm.endswith(cm_key):
+                                mapped = component_map[cm_key]
+                                break
+                    if isinstance(mapped, dict):
+                        verify = str(mapped.get("verify") or "").strip().upper()
+                        if verify == "X":
+                            continue
+                files.append(p)
+                ext_counts[ext] = ext_counts.get(ext, 0) + 1
+                try:
+                    rel = p.relative_to(_walk_root)
+                except ValueError:
+                    rel = p
+                top = rel.parts[0] if rel.parts else "."
+                top_dirs[top] = top_dirs.get(top, 0) + 1
+                if len(files) >= max_files:
+                    truncated = True
+                    break
+            if truncated:
                 break
         if truncated:
             break
@@ -459,14 +475,17 @@ def generate_uds_source_sections(
 
     # additional documentation files (txt/md) for structured templates
     doc_files = 0
-    for dirpath, _, filenames in os.walk(root):
-        for name in filenames:
-            ext = Path(name).suffix.lower()
-            if ext not in {".txt", ".md"}:
-                continue
-            p = Path(dirpath) / name
-            doc_texts.append(_read_text_limited(p))
-            doc_files += 1
+    for _walk_root2 in _roots:
+        for dirpath, _, filenames in os.walk(_walk_root2):
+            for name in filenames:
+                ext = Path(name).suffix.lower()
+                if ext not in {".txt", ".md"}:
+                    continue
+                p = Path(dirpath) / name
+                doc_texts.append(_read_text_limited(p))
+                doc_files += 1
+                if doc_files >= 20:
+                    break
             if doc_files >= 20:
                 break
         if doc_files >= 20:
@@ -820,8 +839,15 @@ def generate_uds_source_sections(
             module_name = "Module"
             if file_path:
                 try:
-                    rel = Path(file_path).resolve().relative_to(root)
-                    module_name = rel.parts[0] if rel.parts else "Module"
+                    fp_resolved = Path(file_path).resolve()
+                    rel = None
+                    for _r in _roots:
+                        try:
+                            rel = fp_resolved.relative_to(_r)
+                            break
+                        except ValueError:
+                            continue
+                    module_name = rel.parts[0] if rel and rel.parts else "Module"
                 except Exception:
                     module_name = "Module"
             if component_map and file_path:
