@@ -1,0 +1,1006 @@
+{
+  "main": {
+    "swcom": 1,
+    "related": "SwST_01, SwCom_01, SwSTR_01, SwSTR_02, SwSTR_04, SwSTR_06, SwSTR_09"
+  },
+  "g_SysOs_WdiCtrl": {
+    "swcom": 1,
+    "related": "SwFn_42, SwFn_43"
+  },
+  "s_SystemOperation": {
+    "swcom": 1,
+    "related": "SwCom_01, SwCom_02, SwCom_04, SwCom_05, SwCom_06, SwCom_08, SwTK_02"
+  },
+  "s_SystemDiagnosis": {
+    "swcom": 1,
+    "related": "SwCom_01, SwTK_03"
+  },
+  "s_SystemManagement": {
+    "swcom": 1,
+    "related": "SwST_06, SwST_07, SwCom_01, SwTK_04"
+  },
+  "s_Init_CPU": {
+    "swcom": 1,
+    "related": "SwST_01, SwST_02, SwCom_01"
+  },
+  "s_Init_SystemManagementFunc": {
+    "swcom": 1,
+    "related": "SwST_01, SwST_02, SwCom_01"
+  },
+  "s_SysMain_Init": {
+    "swcom": 1,
+    "related": "SwST_01, SwST_02, SwCom_01"
+  },
+  "g_DrvIn_MotorSpeed": {
+    "swcom": 2,
+    "related": "SwST_03, SwST_04, SwST_05, SwCom_02"
+  },
+  "g_DrvIn_MotorPostion": {
+    "swcom": 2,
+    "related": "SwST_03, SwST_04, SwST_05, SwCom_02"
+  },
+  "g_DrvIn_Main_Reset": {
+    "swcom": 2,
+    "related": "SwCom_02"
+  },
+  "s_AdcDataUpdate": {
+    "swcom": 2,
+    "related": "SwCom_02"
+  },
+  "s_MotorSpeedMeasure": {
+    "swcom": 2,
+    "related": "SwCom_02"
+  },
+  "s16s_MotorSpdRatioMeasure": {
+    "swcom": 2,
+    "related": "SwCom_02"
+  },
+  "s_AdcIndexRolling": {
+    "swcom": 2,
+    "related": "SwCom_02, SwFn_25"
+  },
+  "g_ApiIn_LinRx_ReadData": {
+    "swcom": 3,
+    "related": "SwCom_03, SwFn_10"
+  },
+  "g_ApiIn_LinRx_ReadData_Reset": {
+    "swcom": 3,
+    "related": "SwCom_03"
+  },
+  "s_LinTmOutCheck": {
+    "swcom": 3,
+    "related": "SwCom_03, SwST_07, SwFn_25, SwFn_40"
+  },
+  "g_ApiIn_Main_Reset": {
+    "swcom": 4,
+    "related": "SwCom_04"
+  },
+  "s_ApiIn_u8bit_DataUpdate": {
+    "swcom": 4,
+    "related": "SwCom_04, SwFn_42"
+  },
+  "s_ApiIn_u16bit_DataUpdate_A": {
+    "swcom": 4,
+    "related": "SwCom_04, SwFn_42"
+  },
+  "s_ApiIn_u16bit_DataUpdate_B": {
+    "swcom": 4,
+    "related": "SwCom_04, SwFn_42"
+  },
+  "s_ApiIn_s16bit_DataUpdate": {
+    "swcom": 4,
+    "related": "SwCom_04, SwFn_42"
+  },
+  "u16s_ApiIn_OverPos_Conv": {
+    "swcom": 4,
+    "related": "SwCom_04"
+  },
+  "g_Ap_Main_Reset": {
+    "swcom": 5,
+    "related": "SwCom_05"
+  },
+  "s_Ap_DataUpdate": {
+    "swcom": 5,
+    "related": "SwCom_05"
+  },
+  "g_ApiOut_Main_Reset": {
+    "swcom": 6,
+    "related": "SwCom_06"
+  },
+  "s_ApiOut_u8bit_DataUpdate_A": {
+    "swcom": 6,
+    "related": "SwCom_06, SwFn_42"
+  },
+  "s_ApiOut_u8bit_DataUpdate_B": {
+    "swcom": 6,
+    "related": "SwCom_06, SwFn_42"
+  },
+  "s_ApiOut_u16bit_DataUpdate": {
+    "swcom": 6,
+    "related": "SwCom_06, SwFn_42"
+  },
+  "u8s_ApiOut_AntiPinchData_Conv": {
+    "swcom": 6,
+    "related": "SwCom_13, SwFn_07"
+  },
+  "u8s_ApiOut_DoorAngle_Conv": {
+    "swcom": 6,
+    "related": "SwCom_06, SwFn_09"
+  },
+  "u8s_ApiOut_MotorTemp_Conv": {
+    "swcom": 6,
+    "related": "SwCom_06"
+  },
+  "s_LinTx_General": {
+    "swcom": 7,
+    "related": "SwCom_07"
+  },
+  "s_LinTx_DTC": {
+    "swcom": 7,
+    "related": "SwCom_07"
+  },
+  "g_DrvOut_Main_Reset": {
+    "swcom": 8,
+    "related": "SwCom_08"
+  },
+  "s_DrvOut_MotorCtrl": {
+    "swcom": 8,
+    "related": "SwCom_08, SwCom_27"
+  },
+  "s_DriveICReset": {
+    "swcom": 8,
+    "related": "SwCom_08, SwCom_27"
+  },
+  "g_SystemStatusCheck_Reset": {
+    "swcom": 9,
+    "related": "SwCom_09, SwST_07, SwSTR_16, SwSTR_17, SwSTR_20"
+  },
+  "g_SysCtrl_ErrorProtection": {
+    "swcom": 9,
+    "related": "SwCom_09"
+  },
+  "u8s_HighSlopeCheck": {
+    "swcom": 9,
+    "related": "SwCom_09"
+  },
+  "u8s_DeactivationCheck_Close": {
+    "swcom": 9,
+    "related": "SwCom_09"
+  },
+  "u8s_DeactivationCheck_Open": {
+    "swcom": 9,
+    "related": "SwCom_09"
+  },
+  "u8s_VehicleSpeedCheck": {
+    "swcom": 9,
+    "related": "SwCom_09, SwFn_30"
+  },
+  "s_InlineModeCheck": {
+    "swcom": 9,
+    "related": "SwCom_09"
+  },
+  "s_MCUErrorCheck": {
+    "swcom": 9,
+    "related": "SwCom_09, SwFn_42"
+  },
+  "g_SysSleepCtrl": {
+    "swcom": 10,
+    "related": "SwCom_10, SwCom_20, SwSTR_10, SwFn_47"
+  },
+  "g_SysSleepCtrl_Reset": {
+    "swcom": 10,
+    "related": "SwCom_10, SwFn_47"
+  },
+  "Wake_Up_Setting": {
+    "swcom": 10,
+    "related": "SwCom_10, SwSTR_11, SwFn_47"
+  },
+  "Sleep_Mode_Setting": {
+    "swcom": 10,
+    "related": "SwCom_10, SwSTR_10, SwFn_47"
+  },
+  "ADC0_stop_current_workaround": {
+    "swcom": 10,
+    "related": "SwCom_10, SwFn_47"
+  },
+  "g_InlineModeSpeedChangeFlagEEPROMSet": {
+    "swcom": 11,
+    "related": "SwCom_11"
+  },
+  "g_SysEepromCtrl_Reset": {
+    "swcom": 11,
+    "related": "SwCom_11"
+  },
+  "s_EepromMotorA1A2OutputRead": {
+    "swcom": 11,
+    "related": "SwCom_21, SwCom_11"
+  },
+  "s_EepromProdDateRead": {
+    "swcom": 11,
+    "related": "SwCom_11"
+  },
+  "s_EepromPartNoRead": {
+    "swcom": 11,
+    "related": "SwCom_11"
+  },
+  "s_OverPosWrite": {
+    "swcom": 11,
+    "related": "SwCom_11"
+  },
+  "s_SystemParamRead": {
+    "swcom": 11,
+    "related": "SwCom_11"
+  },
+  "s_TunningParamRead": {
+    "swcom": 11,
+    "related": "SwCom_11"
+  },
+  "s_TunningParamRead_8bitData": {
+    "swcom": 11,
+    "related": "SwCom_11"
+  },
+  "s_TunningParamRead_16bitData": {
+    "swcom": 11,
+    "related": "SwCom_11"
+  },
+  "G_DiagCtrlMain": {
+    "swcom": 12,
+    "related": "SwCom_12, SwFn_25, SwFn_29, SwFn_44, SwFn_45"
+  },
+  "g_DiagCtrlMain_Reset": {
+    "swcom": 12,
+    "related": "SwCom_12"
+  },
+  "u16s_MotorShortBattA1_Check": {
+    "swcom": 12,
+    "related": "SwCom_12, SwFn_46"
+  },
+  "u16s_MotorShortBattA2_Check": {
+    "swcom": 12,
+    "related": "SwCom_12, SwFn_46"
+  },
+  "u16s_MotorShutDown_Check": {
+    "swcom": 12,
+    "related": "SwCom_12, SwFn_46, SwFn_36, SwFn_38"
+  },
+  "u16s_Buzzer_Check": {
+    "swcom": 12,
+    "related": "SwCom_12"
+  },
+  "s_UpdateErrorCode": {
+    "swcom": 12,
+    "related": "SwCom_12"
+  },
+  "g_Ap_PreviousCtrl_Reset": {
+    "swcom": 13,
+    "related": "SwCom_13"
+  },
+  "g_Ap_PreviousCtrl_Perf": {
+    "swcom": 13,
+    "related": "SwCom_13"
+  },
+  "s_FanRecircurationCheck": {
+    "swcom": 13,
+    "related": "SwCom_13"
+  },
+  "s_GetSlopeLevel": {
+    "swcom": 13,
+    "related": "SwCom_13, SwFn_06"
+  },
+  "s_AntipinchDetect_Open": {
+    "swcom": 13,
+    "related": "SwCom_13, SwFn_07, SwFn_41"
+  },
+  "s_AntipinchDetect_Close": {
+    "swcom": 13,
+    "related": "SwCom_13, SwFn_07, SwFn_41"
+  },
+  "s_AntipinchPopupCheck": {
+    "swcom": 13,
+    "related": "SwCom_13, SwFn_07, SwFn_41"
+  },
+  "s_AntipinchFlagCheck": {
+    "swcom": 13,
+    "related": "SwCom_13, SwFn_07, SwFn_41"
+  },
+  "s_ReverseOperationDetect": {
+    "swcom": 13,
+    "related": "SwCom_13"
+  },
+  "s_DoorSlipDetect": {
+    "swcom": 13,
+    "related": "SwCom_13"
+  },
+  "s_DecelerationDetect": {
+    "swcom": 13,
+    "related": "SwCom_13"
+  },
+  "s_ArrivalDetect": {
+    "swcom": 13,
+    "related": "SwCom_13"
+  },
+  "s_DampingDetect": {
+    "swcom": 13,
+    "related": "SwCom_13, SwFn_08"
+  },
+  "s_ReboundProtection": {
+    "swcom": 13,
+    "related": "SwCom_13"
+  },
+  "s_AssistDeactivation": {
+    "swcom": 13,
+    "related": "SwCom_13"
+  },
+  "s_EncoderFailureJudgment": {
+    "swcom": 13,
+    "related": "SwCom_13, SwFn_33, SwFn_39, SwFn_37"
+  },
+  "s_PlayProtectCloseCheck": {
+    "swcom": 13,
+    "related": "SwCom_13"
+  },
+  "s_PlayProtectChk": {
+    "swcom": 13,
+    "related": "SwCom_13"
+  },
+  "s_IsDoorStop": {
+    "swcom": 13,
+    "related": "SwCom_13"
+  },
+  "s16s_DoorStopPosition": {
+    "swcom": 13,
+    "related": "SwCom_13"
+  },
+  "s_UnfavorablePressureCheck": {
+    "swcom": 13,
+    "related": "SwCom_13, SwFn_27, SwFn_28"
+  },
+  "s_OverCurrentDetect_UserCtrl": {
+    "swcom": 13,
+    "related": "SwCom_13"
+  },
+  "s_AntipinchRunCheck": {
+    "swcom": 13,
+    "related": "SwCom_13"
+  },
+  "s_AstOutCompensate": {
+    "swcom": 13,
+    "related": "SwCom_13"
+  },
+  "s_ReboundProtection_Ready": {
+    "swcom": 13,
+    "related": "SwCom_13"
+  },
+  "s_ReboundProtection_Return": {
+    "swcom": 13,
+    "related": "SwCom_13"
+  },
+  "u8s_ReboundDetection": {
+    "swcom": 13,
+    "related": "SwCom_13"
+  },
+  "s_AssistDeactivation_OpenChk": {
+    "swcom": 13,
+    "related": "SwCom_13"
+  },
+  "s_AssistDeactivation_CloseChk": {
+    "swcom": 13,
+    "related": "SwCom_13"
+  },
+  "s_GetTemperature": {
+    "swcom": 13,
+    "related": "SwCom_13"
+  },
+  "s16s_DoorStopPosition_AssistClose": {
+    "swcom": 13,
+    "related": "SwCom_13"
+  },
+  "s_IsDoorMoving_FullLatch": {
+    "swcom": 13,
+    "related": "SwCom_13"
+  },
+  "s_IsDrMov_FullLatch_StopPosChk": {
+    "swcom": 13,
+    "related": "SwCom_13"
+  },
+  "s_IsDrMov_FullLatch_MoveChk": {
+    "swcom": 13,
+    "related": "SwCom_13"
+  },
+  "s_IsDrMov_FullLatch_StopChk": {
+    "swcom": 13,
+    "related": "SwCom_13"
+  },
+  "g_Ap_DoorCtrl_Func": {
+    "swcom": 14,
+    "related": "SwCom_14"
+  },
+  "g_Ap_DoorCtrl_Reset": {
+    "swcom": 14,
+    "related": "SwCom_14"
+  },
+  "s_DoorStateCtrl": {
+    "swcom": 14,
+    "related": "SwCom_14, SwSTR_01, SwSTR_22"
+  },
+  "s_DoorState_Iintialization": {
+    "swcom": 14,
+    "related": "SwCom_14, SwSTR_01, SwSTR_22"
+  },
+  "s_DoorState_AutoStop_Check": {
+    "swcom": 14,
+    "related": "SwCom_14, SwSTR_17, SwFn_05, SwFn_44"
+  },
+  "s_DoorState_AutoStop_Count": {
+    "swcom": 14,
+    "related": "SwCom_14, SwSTR_17, SwFn_05, SwFn_44"
+  },
+  "s_DoorState_AutoStop_Detection": {
+    "swcom": 14,
+    "related": "SwCom_14, SwSTR_17, SwFn_05, SwFn_44"
+  },
+  "s_DoorState_AutoStop": {
+    "swcom": 14,
+    "related": "SwCom_14, SwSTR_17, SwFn_05, SwFn_44"
+  },
+  "s_DoorState_FullClose": {
+    "swcom": 14,
+    "related": "SwCom_14, SwSTR_03, SwSTR_07"
+  },
+  "s_DoorState_AutoOpen": {
+    "swcom": 14,
+    "related": "SwCom_14"
+  },
+  "s_DoorState_AssistOpen": {
+    "swcom": 14,
+    "related": "SwCom_14, SwSTR_08, SwFn_03"
+  },
+  "s_DoorState_AutoClose": {
+    "swcom": 14,
+    "related": "SwCom_14, SwSTR_03, SwSTR_07, SwFn_01"
+  },
+  "s_DoorState_AssistClose": {
+    "swcom": 14,
+    "related": "SwCom_14, SwSTR_05, SwFn_02, SwFn_04"
+  },
+  "s_DoorTimeOutCheckTimer": {
+    "swcom": 14,
+    "related": "SwCom_14, SwFn_12"
+  },
+  "s_UpdateDoorState": {
+    "swcom": 14,
+    "related": "SwCom_14, SwSTR_19, SwSTR_20, SwSTR_21, SwSTR_22"
+  },
+  "s_UpdateDoorState_FULL_CLOSE": {
+    "swcom": 14,
+    "related": "SwCom_14, SwSTR_19, SwSTR_20, SwSTR_21, SwSTR_22"
+  },
+  "s_UpdateDoorState_AUTO_STOP": {
+    "swcom": 14,
+    "related": "SwCom_14, SwSTR_19, SwSTR_20, SwSTR_21, SwSTR_22"
+  },
+  "s_DoorStopCaseCheck": {
+    "swcom": 14,
+    "related": "SwCom_14, SwSTR_18, SwSTR_19"
+  },
+  "s_MoveStartOpen": {
+    "swcom": 14,
+    "related": "SwCom_14, SwSTR_08"
+  },
+  "s_MoveStartClose": {
+    "swcom": 14,
+    "related": "SwCom_14, SwSTR_03, SwSTR_05, SwSTR_07"
+  },
+  "s_MoveStartOpen_GainMeasure": {
+    "swcom": 14,
+    "related": "SwCom_14, SwSTR_03, SwSTR_05, SwSTR_07"
+  },
+  "s_MoveStartClose_GainMeasure": {
+    "swcom": 14,
+    "related": "SwCom_14, SwSTR_03, SwSTR_05, SwSTR_07"
+  },
+  "s_DoorStateCtrl_UserCtrl": {
+    "swcom": 14,
+    "related": "SwCom_14"
+  },
+  "s_DoorState_TipToRun_Detection": {
+    "swcom": 14,
+    "related": "SwCom_14"
+  },
+  "s_DoorState_UserCtrl_Stop": {
+    "swcom": 14,
+    "related": "SwCom_14"
+  },
+  "s_DoorState_UserCtrl_Open": {
+    "swcom": 14,
+    "related": "SwCom_14"
+  },
+  "s_DoorState_UserCtrl_Close": {
+    "swcom": 14,
+    "related": "SwCom_14"
+  },
+  "s_DoorState_UserCtrl_AutoOpen": {
+    "swcom": 14,
+    "related": "SwCom_14"
+  },
+  "s_DoorState_UserCtrl_AutoClose": {
+    "swcom": 14,
+    "related": "SwCom_14"
+  },
+  "s_UpdateDoorState_USER_CTRL": {
+    "swcom": 14,
+    "related": "SwCom_14, SwSTR_19, SwSTR_20, SwSTR_21, SwSTR_22"
+  },
+  "s_MoveStartOpen_FrontParamSet": {
+    "swcom": 14,
+    "related": "SwCom_14"
+  },
+  "s_MoveStartOpen_RearParamSet": {
+    "swcom": 14,
+    "related": "SwCom_14"
+  },
+  "s_MoveStartClose_FrontParamSet": {
+    "swcom": 14,
+    "related": "SwCom_14"
+  },
+  "s_MoveStartClose_RearParamSet": {
+    "swcom": 14,
+    "related": "SwCom_14"
+  },
+  "u16s_DoorState_Tip2RunDetectSpeed": {
+    "swcom": 14,
+    "related": "SwCom_14"
+  },
+  "u16s_MoveStartOpen_GainMeasure_AstOpGain": {
+    "swcom": 14,
+    "related": "SwCom_14"
+  },
+  "g_Ap_MotorCtrl_Func": {
+    "swcom": 15,
+    "related": "SwCom_15, SwFn_11"
+  },
+  "g_Ap_MotorCtrl_Reset": {
+    "swcom": 15,
+    "related": "SwCom_15"
+  },
+  "s_MotorStateCtrl": {
+    "swcom": 15,
+    "related": "SwCom_15"
+  },
+  "s_MotorCtrl": {
+    "swcom": 15,
+    "related": "SwCom_15"
+  },
+  "s_MotorState_FreeStop": {
+    "swcom": 15,
+    "related": "SwCom_15, SwFn_32"
+  },
+  "s_MotorState_ShortBrake": {
+    "swcom": 15,
+    "related": "SwCom_15"
+  },
+  "s_MotorState_Open": {
+    "swcom": 15,
+    "related": "SwCom_15"
+  },
+  "s_MotorState_Close": {
+    "swcom": 15,
+    "related": "SwCom_15"
+  },
+  "s_MotorSpeedModeSelection": {
+    "swcom": 15,
+    "related": "SwCom_15"
+  },
+  "s_MotorSpeedCtrl": {
+    "swcom": 15,
+    "related": "SwCom_15"
+  },
+  "s_MotorSpdCtrl_AutoOpen": {
+    "swcom": 15,
+    "related": "SwCom_15"
+  },
+  "s_MotorSpdCtrl_AutoClose": {
+    "swcom": 15,
+    "related": "SwCom_15"
+  },
+  "s_MotorSpdCtrl_AssistOpen": {
+    "swcom": 15,
+    "related": "SwCom_15"
+  },
+  "s_MotorSpdCtrl_AssistClose": {
+    "swcom": 15,
+    "related": "SwCom_15"
+  },
+  "s_MotorSpdCtrl_UserCtrlMove": {
+    "swcom": 15,
+    "related": "SwCom_15"
+  },
+  "s_MotorSpdCtrl_UserCtrlPositioning": {
+    "swcom": 15,
+    "related": "SwCom_15"
+  },
+  "s_MotorSpeedModeSelection_FrontSet": {
+    "swcom": 15,
+    "related": "SwCom_15"
+  },
+  "s_MotorSpeedModeSelection_RearSet": {
+    "swcom": 15,
+    "related": "SwCom_15"
+  },
+  "s_MotorSpeedCtrl_General": {
+    "swcom": 15,
+    "related": "SwCom_15"
+  },
+  "s_ComSpeedLimit": {
+    "swcom": 15,
+    "related": "SwCom_15"
+  },
+  "g_Ap_BuzzerCtrl_Reset": {
+    "swcom": 16,
+    "related": "SwCom_16"
+  },
+  "s_BuzzerStateStop": {
+    "swcom": 16,
+    "related": "SwCom_16"
+  },
+  "s_BuzzerStateFlashing_Twice": {
+    "swcom": 16,
+    "related": "SwCom_16"
+  },
+  "Cpu_PllLockStatusChanged": {
+    "swcom": 17,
+    "related": "SwCom_17, SwCom_32, SwFn_42"
+  },
+  "PE_low_level_init_1": {
+    "swcom": 17,
+    "related": "SwCom_17, SwFn_42, SwFn_43"
+  },
+  "SysTickTimer_OnInterrupt": {
+    "swcom": 18,
+    "related": "SwCom_18"
+  },
+  "PT4_MOTOR_SPEED_OnCapture": {
+    "swcom": 18,
+    "related": "SwCom_18"
+  },
+  "Cpu_OnReset": {
+    "swcom": 18,
+    "related": "SwCom_18"
+  },
+  "Cpu_OnMachineException": {
+    "swcom": 18,
+    "related": "SwCom_18"
+  },
+  "Cpu_OnPllLockStatusChanged": {
+    "swcom": 18,
+    "related": "SwCom_18, SwFn_42"
+  },
+  "Cpu_OnOscStatusChanged": {
+    "swcom": 18,
+    "related": "SwCom_18, SwFn_42"
+  },
+  "WriteBlock": {
+    "swcom": 21,
+    "related": "SwCom_21"
+  },
+  "EraseSectorInternal": {
+    "swcom": 21,
+    "related": "SwCom_21"
+  },
+  "Monitor_ADC_Enable": {
+    "swcom": 22,
+    "related": "SwCom_22"
+  },
+  "Monitor_ADC_Disable": {
+    "swcom": 22,
+    "related": "SwCom_22"
+  },
+  "Monitor_ADC_Init": {
+    "swcom": 22,
+    "related": "SwCom_22"
+  },
+  "PP0_MOTOR_PWM_Init": {
+    "swcom": 23,
+    "related": "SwCom_23"
+  },
+  "MotorPwm_SetRatio": {
+    "swcom": 23,
+    "related": "SwCom_23"
+  },
+  "PP5_BUZZER_PWM_Init": {
+    "swcom": 24,
+    "related": "SwCom_24"
+  },
+  "HWEnDi": {
+    "swcom": 24,
+    "related": "SwCom_24"
+  },
+  "BuzzerPwm_SetRatio": {
+    "swcom": 24,
+    "related": "SwCom_24"
+  },
+  "SCI0_Init": {
+    "swcom": 29,
+    "related": "SwCom_29"
+  },
+  "PT4_MOTOR_SPEED_Init": {
+    "swcom": 31,
+    "related": "SwCom_31"
+  },
+  "g_UDS_RDBI_Paser": {
+    "swcom": 33,
+    "related": "SwCom_33"
+  },
+  "g_UDS_WDBI_Paser": {
+    "swcom": 33,
+    "related": "SwCom_33"
+  },
+  "g_UDS_LinComp_Reset": {
+    "swcom": 33,
+    "related": "SwCom_33"
+  },
+  "g_UDS_SessionCtrl": {
+    "swcom": 33,
+    "related": "SwCom_33"
+  },
+  "s_UDS_RDBI_ProdDate": {
+    "swcom": 33,
+    "related": "SwCom_33"
+  },
+  "s_UDS_RDBI_PartNumber": {
+    "swcom": 33,
+    "related": "SwCom_33"
+  },
+  "s_UDS_RDBI_SW_Version": {
+    "swcom": 33,
+    "related": "SwCom_33"
+  },
+  "s_UDS_RDBI_HW_Version": {
+    "swcom": 33,
+    "related": "SwCom_33"
+  },
+  "s_UDS_RDBI_DB_Version": {
+    "swcom": 33,
+    "related": "SwCom_33"
+  },
+  "s_UDS_RDBI_StatusCheck2": {
+    "swcom": 33,
+    "related": "SwCom_33"
+  },
+  "s_UDS_WDBI_ProdDate": {
+    "swcom": 33,
+    "related": "SwCom_33"
+  },
+  "s_UDS_WDBI_PartNumber": {
+    "swcom": 33,
+    "related": "SwCom_33"
+  },
+  "s_UDS_WDBI_HW_Version": {
+    "swcom": 33,
+    "related": "SwCom_33"
+  },
+  "s_UDS_WDBI_DB_Version": {
+    "swcom": 33,
+    "related": "SwCom_33"
+  },
+  "s_UDS_WDBI_US_ReadEeprom": {
+    "swcom": 33,
+    "related": "SwCom_33"
+  },
+  "s_UDS_WDBI_US_WiteEeprom": {
+    "swcom": 33,
+    "related": "SwCom_33"
+  },
+  "s_UDS_WDBI_US_ApplyParam": {
+    "swcom": 33,
+    "related": "SwCom_33"
+  },
+  "s_UDS_WDBI_US_ClearEeprom": {
+    "swcom": 33,
+    "related": "SwCom_33"
+  },
+  "s_UDS_WDBI_US_ReadSysSts": {
+    "swcom": 33,
+    "related": "SwCom_33"
+  },
+  "s_UDS_WDBI_US_UserCtrl": {
+    "swcom": 33,
+    "related": "SwCom_33"
+  },
+  "s_UDS_WDBI_US_Reprogram": {
+    "swcom": 33,
+    "related": "SwCom_33"
+  },
+  "s_UDS_RDBI_SW_Unit1_Version": {
+    "swcom": 33,
+    "related": "SwCom_33"
+  },
+  "s_UDS_RDBI_StatusCheck3": {
+    "swcom": 33,
+    "related": "SwCom_33"
+  },
+  "s_UDS_WDBI_UserOptRecordId": {
+    "swcom": 33,
+    "related": "SwCom_33"
+  },
+  "s_UDS_WDBI_UsOptMain": {
+    "swcom": 33,
+    "related": "SwCom_33"
+  },
+  "s_UDS_WDBI_US_OpDataRead": {
+    "swcom": 33,
+    "related": "SwCom_33"
+  },
+  "s_UDS_WDBI_US_SysOpt": {
+    "swcom": 33,
+    "related": "SwCom_33"
+  },
+  "s_UDS_WDBI_US_BuzzTest": {
+    "swcom": 33,
+    "related": "SwCom_33"
+  },
+  "s_UDS_DSC_ProgSession": {
+    "swcom": 33,
+    "related": "SwCom_33"
+  },
+  "s_UDS_WDBI_UsOpt_F1G": {
+    "swcom": 33,
+    "related": "SwCom_33"
+  },
+  "s_UDS_WDBI_UsOpt_E2G_1": {
+    "swcom": 33,
+    "related": "SwCom_33"
+  },
+  "s_UDS_WDBI_UsOpt_E2G_2": {
+    "swcom": 33,
+    "related": "SwCom_33"
+  },
+  "g_SysOptionCtrl_Reset": {
+    "swcom": 34,
+    "related": "SwSTR_01, SwCom_34"
+  },
+  "s_DeviceTypeChk": {
+    "swcom": 34,
+    "related": "SwSTR_01, SwCom_34"
+  },
+  "s_DeviceOptionSet_DoorAngle": {
+    "swcom": 34,
+    "related": "SwSTR_01, SwCom_34"
+  },
+  "s_DeviceOptionSet_AntipinchDetectSpd": {
+    "swcom": 34,
+    "related": "SwSTR_01, SwCom_34"
+  },
+  "Init_MCU": {
+    "swcom": 35,
+    "related": "SwCom_35"
+  },
+  "RTI_CheckTimer": {
+    "swcom": 35,
+    "related": "SwCom_35"
+  },
+  "Comms_Reset_Reg": {
+    "swcom": 35,
+    "related": "SwCom_35"
+  },
+  "EEPROM_SetByte": {
+    "swcom": 35,
+    "related": "SwCom_35"
+  },
+  "BackupSector": {
+    "swcom": 35,
+    "related": "SwCom_35"
+  },
+  "LinSend": {
+    "swcom": 35,
+    "related": "SwCom_35"
+  },
+  "LinSendForProgSession": {
+    "swcom": 35,
+    "related": "SwCom_35"
+  },
+  "sf_LinHeaderCheck": {
+    "swcom": 35,
+    "related": "SwCom_35"
+  },
+  "sf_LinDataPolling": {
+    "swcom": 35,
+    "related": "SwCom_35"
+  },
+  "LinUdsToTp": {
+    "swcom": 35,
+    "related": "SwCom_35"
+  },
+  "LinRawToTp": {
+    "swcom": 35,
+    "related": "SwCom_35"
+  },
+  "sf_LinTpParserSF": {
+    "swcom": 35,
+    "related": "SwCom_35"
+  },
+  "sf_LinTpParserMF": {
+    "swcom": 35,
+    "related": "SwCom_35"
+  },
+  "StdUtilCopyData": {
+    "swcom": 35,
+    "related": "SwCom_35"
+  },
+  "StdUtilDataSet": {
+    "swcom": 35,
+    "related": "SwCom_35"
+  },
+  "LinUdsInit": {
+    "swcom": 35,
+    "related": "SwCom_35, SwFn_14"
+  },
+  "sf_LinUdsDiagnosticSessionControl": {
+    "swcom": 35,
+    "related": "SwCom_35, SwFn_14"
+  },
+  "sf_LinUdsSecurityAccess": {
+    "swcom": 35,
+    "related": "SwCom_35, SwFn_14"
+  },
+  "sf_LinUdsEraseMemory": {
+    "swcom": 35,
+    "related": "SwCom_35, SwFn_14"
+  },
+  "sf_LinUdsChkProDepenency": {
+    "swcom": 35,
+    "related": "SwCom_35, SwFn_14"
+  },
+  "sf_LinUdsRequestDownload": {
+    "swcom": 35,
+    "related": "SwCom_35, SwFn_14"
+  },
+  "sf_LinUdsTransferData": {
+    "swcom": 35,
+    "related": "SwCom_35, SwFn_14"
+  },
+  "sf_LinUdsTransferExit": {
+    "swcom": 35,
+    "related": "SwCom_35, SwFn_14"
+  },
+  "sf_LinUdsECUReset": {
+    "swcom": 35,
+    "related": "SwCom_35, SwFn_14"
+  },
+  "sf_LinUdsNegativeResponse": {
+    "swcom": 35,
+    "related": "SwCom_35, SwFn_14"
+  },
+  "sf_LinUdsOutOfRangeResponse": {
+    "swcom": 35,
+    "related": "SwCom_35, SwFn_14"
+  },
+  "sf_LinUdsIncorMsgLengthResponse": {
+    "swcom": 35,
+    "related": "SwCom_35, SwFn_14"
+  },
+  "sf_LinUdsSequenceErrorResponse": {
+    "swcom": 35,
+    "related": "SwCom_35, SwFn_14"
+  },
+  "sf_LinUdsResponsePending": {
+    "swcom": 35,
+    "related": "SwCom_35, SwFn_14"
+  },
+  "sf_SecurityCheck": {
+    "swcom": 35,
+    "related": "SwCom_35, SwFn_14"
+  },
+  "sf_Crc32Init": {
+    "swcom": 35,
+    "related": "SwCom_35, SwFn_14"
+  },
+  "MainInit": {
+    "swcom": 35,
+    "related": "SwCom_35, SwFn_14"
+  },
+  "ReprogLinMultiFrameTask": {
+    "swcom": 35,
+    "related": "SwCom_35, SwFn_14"
+  }
+}

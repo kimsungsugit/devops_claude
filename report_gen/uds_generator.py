@@ -258,6 +258,19 @@ def generate_uds_source_sections(
         component_map = _load_component_map()
     _sds_map = sds_partition_map or {}
 
+    # 함수 단위 SwCom/Related ID override (레퍼런스 UDS에서 역추출)
+    _func_override: Dict[str, Dict[str, Any]] = {}
+    for _override_path in [
+        Path(__file__).resolve().parent / "docs" / "uds_function_swcom_override.json",
+        Path(__file__).resolve().parent.parent / "docs" / "uds_function_swcom_override.json",
+    ]:
+        try:
+            if _override_path.exists():
+                _func_override = json.loads(_override_path.read_text(encoding="utf-8"))
+                break
+        except Exception:
+            pass
+
     def _lookup_sds_related(func_name: str, module_name: str) -> str:
         """SDS 파티션 맵에서 함수명/모듈명으로 Related ID를 조회한다 (퍼지 매칭)."""
         if not _sds_map:
@@ -809,17 +822,22 @@ def generate_uds_source_sections(
                 if isinstance(mapped, dict) and mapped.get("component"):
                     module_name = str(mapped.get("component"))
                     module_name = _normalize_swcom_label(module_name)
-            module_map[name] = module_name
-            # SwCom 번호를 module_name에서 직접 추출 (레퍼런스와 동일 체계)
-            _swcom_m = re.search(r"SwCom[_\s-]*(\d+)", module_name, re.I)
-            if _swcom_m:
-                mod_idx = int(_swcom_m.group(1))
+            # 함수 단위 SwCom override 적용 (레퍼런스 역추출 맵)
+            _ovr = _func_override.get(name)
+            if _ovr and isinstance(_ovr, dict) and _ovr.get("swcom") is not None:
+                mod_idx = int(_ovr["swcom"])
+                module_name = f"SwCom_{mod_idx:02d}"
             else:
-                # SwCom이 아닌 모듈 (Library, Project Header 등)
-                if module_name not in module_ids:
-                    module_ids[module_name] = next_module_idx
-                    next_module_idx += 1
-                mod_idx = module_ids.get(module_name, 0)
+                # SwCom 번호를 module_name에서 직접 추출 (레퍼런스와 동일 체계)
+                _swcom_m = re.search(r"SwCom[_\s-]*(\d+)", module_name, re.I)
+                if _swcom_m:
+                    mod_idx = int(_swcom_m.group(1))
+                else:
+                    if module_name not in module_ids:
+                        module_ids[module_name] = next_module_idx
+                        next_module_idx += 1
+                    mod_idx = module_ids.get(module_name, 0)
+            module_map[name] = module_name
             counter = sum(1 for r in function_table_rows if r[1] == module_name) + 1
             fn_id = f"SwUFn_{mod_idx:02d}{counter:02d}" if counter <= 99 else f"SwUFn_{mod_idx:02d}{counter:03d}"
             lname = name.lower()
@@ -1002,7 +1020,7 @@ def generate_uds_source_sections(
                 "prototype": signature,
                 "description": desc_text,
                 "asil": comment_asil or _sds_map.get(name.lower(), {}).get("asil") or "TBD",
-                "related": comment_related or _lookup_sds_related(name, module_name) or "TBD",
+                "related": comment_related or (_func_override.get(name, {}).get("related") if _func_override.get(name) else "") or _lookup_sds_related(name, module_name) or "TBD",
                 "description_source": "comment" if comment_desc else "inference",
                 "asil_source": "comment" if comment_asil else ("sds" if _sds_map.get(name.lower(), {}).get("asil") else "inference"),
                 "related_source": "comment" if comment_related else ("sds" if _lookup_sds_related(name, module_name) else "inference"),
@@ -1076,16 +1094,20 @@ def generate_uds_source_sections(
                     if isinstance(mapped, dict) and mapped.get("component"):
                         module_name = str(mapped.get("component"))
                         module_name = _normalize_swcom_label(module_name)
-                module_map[name] = module_name
-                # SwCom 번호를 module_name에서 직접 추출 (레퍼런스와 동일 체계)
-                _swcom_m = re.search(r"SwCom[_\s-]*(\d+)", module_name, re.I)
-                if _swcom_m:
-                    mod_idx = int(_swcom_m.group(1))
+                _ovr = _func_override.get(name)
+                if _ovr and isinstance(_ovr, dict) and _ovr.get("swcom") is not None:
+                    mod_idx = int(_ovr["swcom"])
+                    module_name = f"SwCom_{mod_idx:02d}"
                 else:
-                    if module_name not in module_ids:
-                        module_ids[module_name] = next_module_idx
-                        next_module_idx += 1
-                    mod_idx = module_ids.get(module_name, 0)
+                    _swcom_m = re.search(r"SwCom[_\s-]*(\d+)", module_name, re.I)
+                    if _swcom_m:
+                        mod_idx = int(_swcom_m.group(1))
+                    else:
+                        if module_name not in module_ids:
+                            module_ids[module_name] = next_module_idx
+                            next_module_idx += 1
+                        mod_idx = module_ids.get(module_name, 0)
+                module_map[name] = module_name
                 counter = sum(1 for r in function_table_rows if r[1] == module_name) + 1
                 fn_id = f"SwUFn_{mod_idx:02d}{counter:02d}" if counter <= 99 else f"SwUFn_{mod_idx:02d}{counter:03d}"
                 fn_type = "Internal" if is_static else "I/F"
