@@ -538,7 +538,17 @@ def generate_uds_source_sections(
         parse_c_project = None  # type: ignore
     if parse_c_project is not None:
         try:
-            ast_result = parse_c_project(str(root), max_files=max_files, preprocess=True)
+            # 복수 루트에서 AST 파싱 + 결과 병합
+            ast_result = {"functions": [], "globals": [], "globals_detailed": []}
+            for _parse_root in _roots:
+                try:
+                    _partial = parse_c_project(str(_parse_root), max_files=max_files, preprocess=True)
+                    if isinstance(_partial, dict):
+                        ast_result["functions"].extend(_partial.get("functions") or [])
+                        ast_result["globals"].extend(_partial.get("globals") or [])
+                        ast_result["globals_detailed"].extend(_partial.get("globals_detailed") or [])
+                except Exception:
+                    pass
         except Exception:
             ast_result = {"functions": [], "globals": []}
         module_ids: Dict[str, int] = {}
