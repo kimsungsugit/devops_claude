@@ -658,13 +658,14 @@ function TraceMatrix({ matrix }) {
     return s.includes(',') || s.includes('"') || s.includes('\n') ? `"${s.replace(/"/g, '""')}"` : s;
   };
   const exportCSV = () => {
-    const header = ['요구사항 ID', 'SDS 컴포넌트', 'UDS 함수', '함수 수', 'STS/SUTS TC', 'SITS TC', 'VectorCAST', '테스트 수', 'Pass', 'Fail', '상태', '신뢰도'];
+    const header = ['요구사항 ID', 'SDS 컴포넌트(T1)', 'UDS 함수(T2)', '함수 수', 'STS TC(T3)', 'SUTS TC(T4)', 'SITS TC(T5)', 'VectorCAST', '테스트 수', 'Pass', 'Fail', '상태', '신뢰도'];
     const csvRows = [header.join(',')];
     for (const r of filtered) {
       const status = deriveStatus(r);
       const rawTests = Array.isArray(r.tests) ? r.tests : [];
-      const stsCount = rawTests.filter(t => t.source === 'STS' || t.source === 'SUTS').length;
-      const sitsCount = rawTests.filter(t => t.source === 'SITS').length;
+      const stsCount = (r.sts_tests ?? rawTests.filter(t => t.source === 'STS')).length;
+      const sutsCount = (r.suts_tests ?? rawTests.filter(t => t.source === 'SUTS')).length;
+      const sitsCount = (r.sits_tests ?? rawTests.filter(t => t.source === 'SITS')).length;
       const vcastCount = rawTests.filter(t => t.source === 'VectorCAST').length;
       csvRows.push([
         csvEscape(r.requirement_id ?? ''),
@@ -672,6 +673,7 @@ function TraceMatrix({ matrix }) {
         csvEscape((r.source_ids ?? []).join('; ')),
         (r.source_ids ?? []).length,
         stsCount,
+        sutsCount,
         sitsCount,
         vcastCount,
         r.test_count ?? 0,
@@ -797,23 +799,40 @@ function TraceMatrix({ matrix }) {
       {summary && (
         <details style={{ marginBottom: 12 }}>
           <summary className="text-sm" style={{ cursor: 'pointer', fontWeight: 600 }}>데이터 소스 상세</summary>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8, marginTop: 8 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginTop: 8 }}>
+            {/* 설계 추적 (T1, T2) */}
             {summary.mapped_sds_count != null && (
               <div style={{ padding: 8, background: 'var(--bg)', borderRadius: 6, border: '1px solid var(--border)' }}>
-                <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 4 }}>아키텍처 추적 (SDS)</div>
+                <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 4 }}>T1: SRS → SDS (아키텍처)</div>
                 <div style={{ fontSize: 14, fontWeight: 700 }}>{summary.mapped_sds_count} / {coverage.total}</div>
                 <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>SDS SwCom → 요구사항 매핑</div>
               </div>
             )}
             <div style={{ padding: 8, background: 'var(--bg)', borderRadius: 6, border: '1px solid var(--border)' }}>
-              <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 4 }}>설계 추적 (UDS)</div>
+              <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 4 }}>T2: SDS → UDS (상세 설계)</div>
               <div style={{ fontSize: 14, fontWeight: 700 }}>{summary.mapped_source_count ?? coverage.covered} / {coverage.total}</div>
               <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>UDS 함수 → 요구사항 매핑</div>
             </div>
+            {/* 검증 추적 (T3, T4, T5) */}
             <div style={{ padding: 8, background: 'var(--bg)', borderRadius: 6, border: '1px solid var(--border)' }}>
-              <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 4 }}>테스트 추적 (STS+SITS+VCast)</div>
+              <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 4 }}>T3: SRS → STS (SW 테스트)</div>
+              <div style={{ fontSize: 14, fontWeight: 700 }}>{summary.mapped_sts_count ?? '-'} / {coverage.total}</div>
+              <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>STS TC → 요구사항 매핑</div>
+            </div>
+            <div style={{ padding: 8, background: 'var(--bg)', borderRadius: 6, border: '1px solid var(--border)' }}>
+              <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 4 }}>T4: UDS → SUTS (단위 테스트)</div>
+              <div style={{ fontSize: 14, fontWeight: 700 }}>{summary.mapped_suts_count ?? '-'} / {coverage.total}</div>
+              <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>SUTS TC → 함수 매핑</div>
+            </div>
+            <div style={{ padding: 8, background: 'var(--bg)', borderRadius: 6, border: '1px solid var(--border)' }}>
+              <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 4 }}>T5: SDS → SITS (통합 테스트)</div>
+              <div style={{ fontSize: 14, fontWeight: 700 }}>{summary.mapped_sits_count ?? '-'} / {coverage.total}</div>
+              <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>SITS TC → 컴포넌트 매핑</div>
+            </div>
+            <div style={{ padding: 8, background: 'var(--bg)', borderRadius: 6, border: '1px solid var(--border)' }}>
+              <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 4 }}>전체 테스트 추적</div>
               <div style={{ fontSize: 14, fontWeight: 700 }}>{summary.mapped_test_count ?? (coverage.covered + coverage.partial)} / {coverage.total}</div>
-              <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>STS/SUTS/SITS TC + VectorCAST 매핑</div>
+              <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>STS+SUTS+SITS+VectorCAST 통합</div>
             </div>
           </div>
           {/* Source breakdown */}
@@ -894,10 +913,10 @@ function TraceMatrix({ matrix }) {
               요구사항 ID{sortIcon('req_id')}
             </th>
             <th colSpan={2} style={{ textAlign: 'center', background: '#eff6ff', borderBottom: '1px solid var(--border)', cursor: 'pointer' }} onClick={() => toggleSort('func_count')}>
-              설계{sortIcon('func_count')}
+              설계 (T1,T2){sortIcon('func_count')}
             </th>
-            <th colSpan={3} style={{ textAlign: 'center', background: '#f0fdf4', borderBottom: '1px solid var(--border)', cursor: 'pointer' }} onClick={() => toggleSort('test_count')}>
-              검증{sortIcon('test_count')}
+            <th colSpan={4} style={{ textAlign: 'center', background: '#f0fdf4', borderBottom: '1px solid var(--border)', cursor: 'pointer' }} onClick={() => toggleSort('test_count')}>
+              검증 (T3,T4,T5){sortIcon('test_count')}
             </th>
             <th rowSpan={2} style={{ verticalAlign: 'middle', width: 50, textAlign: 'center' }}>P/F</th>
             <th rowSpan={2} style={{ verticalAlign: 'middle', width: 55, textAlign: 'center' }}>신뢰도</th>
@@ -906,10 +925,11 @@ function TraceMatrix({ matrix }) {
             </th>
           </tr>
           <tr>
-            <th style={{ fontSize: 10, background: '#eff6ff' }}>SDS 컴포넌트</th>
-            <th style={{ fontSize: 10, background: '#eff6ff' }}>UDS 함수</th>
-            <th style={{ fontSize: 10, background: '#f0fdf4' }}>STS/SUTS TC</th>
-            <th style={{ fontSize: 10, background: '#f0fdf4' }}>SITS TC</th>
+            <th style={{ fontSize: 10, background: '#eff6ff' }} title="T1: SRS→SDS">SDS 컴포넌트</th>
+            <th style={{ fontSize: 10, background: '#eff6ff' }} title="T2: SDS→UDS">UDS 함수</th>
+            <th style={{ fontSize: 10, background: '#f0fdf4' }} title="T3: SRS→STS">STS TC</th>
+            <th style={{ fontSize: 10, background: '#f0fdf4' }} title="T4: UDS→SUTS">SUTS TC</th>
+            <th style={{ fontSize: 10, background: '#f0fdf4' }} title="T5: SDS→SITS">SITS TC</th>
             <th style={{ fontSize: 10, background: '#f0fdf4' }}>VectorCAST</th>
           </tr>
         </thead>
@@ -921,11 +941,14 @@ function TraceMatrix({ matrix }) {
             const sdsComps = r.sds_components ?? [];
             const srcFuncs = r.source_ids ?? [];
             const rawTests = Array.isArray(r.tests) ? r.tests : [];
-            const stsTests = rawTests.filter(t => t.source === 'STS' || t.source === 'SUTS');
-            const sitsTests = rawTests.filter(t => t.source === 'SITS');
+            // ISO 26262 추적 관계별 분리: T3(STS), T4(SUTS), T5(SITS)
+            const stsOnlyTests = r.sts_tests ?? rawTests.filter(t => t.source === 'STS');
+            const sutsOnlyTests = r.suts_tests ?? rawTests.filter(t => t.source === 'SUTS');
+            const sitsTests = r.sits_tests ?? rawTests.filter(t => t.source === 'SITS');
             const vcastTests = rawTests.filter(t => t.source === 'VectorCAST');
             const otherTests = rawTests.filter(t => !['STS','SUTS','SITS','VectorCAST'].includes(t.source));
-            const stsCount = stsTests.length;
+            const stsCount = stsOnlyTests.length;
+            const sutsCount = sutsOnlyTests.length;
             const sitsCount = sitsTests.length;
             const vcastCount = vcastTests.length + otherTests.length;
             const passCount = r.pass_count ?? 0;
@@ -954,13 +977,19 @@ function TraceMatrix({ matrix }) {
                       : <span className="text-muted">-</span>
                     }
                   </td>
-                  <td style={{ fontSize: 10, textAlign: 'center' }}>
+                  <td style={{ fontSize: 10, textAlign: 'center' }} title="T3: SRS→STS">
                     {stsCount > 0
                       ? <span style={{ fontSize: 9, padding: '1px 6px', borderRadius: 8, background: SOURCE_COLORS.STS + '20', color: SOURCE_COLORS.STS, fontWeight: 600 }}>{stsCount} TC</span>
                       : <span className="text-muted">-</span>
                     }
                   </td>
-                  <td style={{ fontSize: 10, textAlign: 'center' }}>
+                  <td style={{ fontSize: 10, textAlign: 'center' }} title="T4: UDS→SUTS">
+                    {sutsCount > 0
+                      ? <span style={{ fontSize: 9, padding: '1px 6px', borderRadius: 8, background: SOURCE_COLORS.SUTS + '20', color: SOURCE_COLORS.SUTS, fontWeight: 600 }}>{sutsCount} TC</span>
+                      : <span className="text-muted">-</span>
+                    }
+                  </td>
+                  <td style={{ fontSize: 10, textAlign: 'center' }} title="T5: SDS→SITS">
                     {sitsCount > 0
                       ? <span style={{ fontSize: 9, padding: '1px 6px', borderRadius: 8, background: SOURCE_COLORS.SITS + '20', color: SOURCE_COLORS.SITS, fontWeight: 600 }}>{sitsCount} TC</span>
                       : <span className="text-muted">-</span>

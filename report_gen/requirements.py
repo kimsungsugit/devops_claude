@@ -1728,11 +1728,28 @@ def generate_uds_traceability_matrix(
             else:
                 row_confidence = "exact"
 
+        # ISO 26262 추적성 GAP 해소: 문서 계층별 분류
+        suts_tests = [t for t in tests if t.get("source") == "SUTS"]
+        sits_tests = [t for t in tests if t.get("source") == "SITS"]
+        sts_tests = [t for t in tests if t.get("source") == "STS"]
+
         matrix.append(
             {
                 "requirement_id": norm_to_raw.get(rid, rid),
+                # T1: SRS→SDS (아키텍처 추적)
                 "sds_components": sds_list,
+                # T2: SDS→UDS (상세 설계 추적) — SwCom→함수 직접 매핑
                 "source_ids": src_list,
+                # T3: SRS→STS (SW 테스트 추적)
+                "sts_tests": sts_tests,
+                "sts_count": len(sts_tests),
+                # T4: UDS→SUTS (단위 테스트 추적)
+                "suts_tests": suts_tests,
+                "suts_count": len(suts_tests),
+                # T5: SDS→SITS (통합 테스트 추적)
+                "sits_tests": sits_tests,
+                "sits_count": len(sits_tests),
+                # 기존 호환
                 "tests": tests,
                 "test_ids": test_ids,
                 "test_count": len(tests),
@@ -1753,6 +1770,10 @@ def generate_uds_traceability_matrix(
             "total_pass": total_pass,
             "total_fail": total_fail,
             "source_stats": source_stats,
+            # ISO 26262 추적성 통계
+            "mapped_sts_count": sum(1 for r in matrix if r.get("sts_count")),
+            "mapped_suts_count": sum(1 for r in matrix if r.get("suts_count")),
+            "mapped_sits_count": sum(1 for r in matrix if r.get("sits_count")),
         },
         "has_sds_mapping": any(r.get("sds_components") for r in matrix),
         "has_source_mapping": any(r.get("source_ids") for r in matrix),
