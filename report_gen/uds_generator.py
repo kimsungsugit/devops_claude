@@ -1100,10 +1100,13 @@ def generate_uds_source_sections(
             }
             function_details[fn_id] = detail
             function_details_by_name[name.lower()] = detail
-        # Fallback when AST parser returns no functions (parser unavailable).
-        if (not function_table_rows) and fallback_functions:
+        # Fallback: AST에서 누락된 함수도 병합 (regex 기반 수집분)
+        _ast_names = {r[3] for r in function_table_rows if len(r) >= 4}
+        if fallback_functions:
             for fn in fallback_functions:
                 name = str(fn.get("name") or "").strip()
+                if name in _ast_names:
+                    continue  # AST에서 이미 수집한 함수는 건너뛰기
                 signature = str(fn.get("signature") or name).strip()
                 is_static = bool(fn.get("is_static"))
                 if is_static and not signature.lstrip().startswith("static "):
