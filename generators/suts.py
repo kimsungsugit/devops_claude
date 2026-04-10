@@ -1819,7 +1819,29 @@ def generate_suts(
                             or str(info.get("name") or "").lower() in _ovr_names_lower
                         )
                     }
-                    _progress(28, f"override 필터: {before2} → {len(function_details)}개 (레퍼런스 기준)")
+                    # override에 있지만 파서에 없는 함수를 빈 엔트리로 추가
+                    _existing_names = {str(info.get("name") or "").lower() for info in function_details.values() if isinstance(info, dict)}
+                    _added = 0
+                    for _ovr_name, _ovr_info in _ovr_data.items():
+                        if _ovr_name.lower() not in _existing_names:
+                            _sc = _ovr_info.get("swcom", 0)
+                            _fid = f"SwUFn_{_sc:02d}{99 - _added:02d}"
+                            function_details[_fid] = {
+                                "id": _fid,
+                                "name": _ovr_name,
+                                "prototype": f"void {_ovr_name}(void)",
+                                "description": "",
+                                "asil": _ovr_info.get("asil", "TBD"),
+                                "related": _ovr_info.get("related", "TBD"),
+                                "inputs": [],
+                                "outputs": [],
+                                "logic_flow": [],
+                                "calls_list": [],
+                                "file": "",
+                                "module_name": f"SwCom_{_sc:02d}",
+                            }
+                            _added += 1
+                    _progress(28, f"override 필터: {before2} → {len(function_details)}개 (+{_added} 보충)")
                 break
     except Exception:
         pass
