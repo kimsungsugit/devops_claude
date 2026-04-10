@@ -3421,7 +3421,7 @@ def local_sits_export_vectorcast(
         package_dir=out_dir,
         package_name=package_name,
         manifest=manifest,
-        project_config=cfg,
+        project_config={},
         units=unit_names,
     )
 
