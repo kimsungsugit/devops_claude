@@ -1398,7 +1398,9 @@ def generate_sits(
 
     # ── Stage 5: source parsing ──────────────────────────────────────────────
     _progress(15, "소스 코드 파싱 시작")
-    source_root_path = Path(source_root).resolve() if source_root else None
+    # 콤마 구분 복수 경로 지원: 첫 번째 경로로 검증
+    _first_root = source_root.split(",")[0].strip() if source_root else ""
+    source_root_path = Path(_first_root).resolve() if _first_root else None
     if not source_root_path or not source_root_path.is_dir():
         return {
             "output_path": "",
@@ -1414,10 +1416,10 @@ def generate_sits(
     try:
         try:
             from backend.helpers import _get_source_sections_cached
-            report_data = _get_source_sections_cached(str(source_root_path))
+            report_data = _get_source_sections_cached(source_root)  # 콤마 구분 그대로 전달
         except Exception:
             from report_generator import generate_uds_source_sections
-            report_data = generate_uds_source_sections(str(source_root_path))
+            report_data = generate_uds_source_sections(source_root)  # 콤마 구분 그대로 전달
         function_details = report_data.get("function_details", {})
         total_source_functions = len(function_details)
         if not function_details:
@@ -1426,7 +1428,7 @@ def generate_sits(
         _logger.warning("SITS: full source parse failed, trying lightweight: %s", e)
         try:
             from generators.suts import _lightweight_parse
-            function_details = _lightweight_parse(str(source_root_path))
+            function_details = _lightweight_parse(_first_root)
             total_source_functions = len(function_details)
         except Exception as e2:
             _logger.error("SITS: lightweight parse also failed: %s", e2)
