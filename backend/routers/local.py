@@ -3392,15 +3392,18 @@ def local_sits_export_vectorcast(
     package_name = f"sits_vectorcast_{ts}"
     out_dir = base_dir / "vectorcast" / package_name
 
+    # source_root / compiler 설정
+    _first_root = source_root.split(",")[0].strip() if source_root else ""
+    resolved_source_root = str(Path(_first_root).resolve()) if _first_root else ""
+
     try:
         model = json.loads(intermediate_json.read_text(encoding="utf-8"))
         manifest = export_sits_vectorcast_package(
             str(intermediate_json),
             str(out_dir),
             package_name=package_name,
-            source_root=effective_source_root,
-            compiler=str(cfg.get("compiler") or compiler or "CC"),
-            project_config=cfg,
+            source_root=resolved_source_root,
+            compiler=compiler or "CC",
         )
     except Exception as e:
         traceback.print_exc()
