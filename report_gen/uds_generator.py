@@ -551,6 +551,15 @@ def generate_uds_source_sections(
                     pass
         except Exception:
             ast_result = {"functions": [], "globals": []}
+        # AST 중복 함수 제거 (복수 루트에서 동일 함수명 중복 가능)
+        _seen_ast_names: Set[str] = set()
+        _deduped: List[Dict[str, Any]] = []
+        for _fn in (ast_result.get("functions") or []):
+            _fn_name = str(_fn.get("name") or "").strip() if isinstance(_fn, dict) else ""
+            if _fn_name and _fn_name not in _seen_ast_names:
+                _seen_ast_names.add(_fn_name)
+                _deduped.append(_fn)
+        ast_result["functions"] = _deduped
         module_ids: Dict[str, int] = {}
         module_order = [
             k for k, _ in sorted(top_dirs.items(), key=lambda x: (-x[1], x[0]))
@@ -911,8 +920,7 @@ def generate_uds_source_sections(
                     "",
                 ]
             )
-            if fn_id not in function_details:
-                used_globals_list: List[str] = []
+            used_globals_list: List[str] = []
             inputs_list: List[str] = []
             outputs_list: List[str] = []
             globals_static: List[str] = []
