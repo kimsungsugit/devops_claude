@@ -2503,7 +2503,7 @@ async def local_suts_generate(
 
     try:
         result = generate_suts(
-            source_root=str(source_root_path),
+            source_root=source_root,  # 콤마 구분 복수 경로 그대로 전달
             output_path=str(out_path),
             template_path=tpl_path,
             project_config=project_config,
@@ -2619,7 +2619,7 @@ async def local_suts_generate_stream(
     def _run():
         try:
             result = generate_suts(
-                source_root=str(source_root_path),
+                source_root=source_root,  # 콤마 구분 복수 경로 그대로 전달
                 output_path=str(out_path),
                 template_path=tpl_path,
                 project_config=project_config,
@@ -2747,7 +2747,7 @@ async def local_suts_generate_async(
             )
             _logger.info("[SUTS_ASYNC][%s] calling generate_suts ...", job_id)
             result = generate_suts(
-                source_root=str(source_root_path),
+                source_root=source_root,  # 콤마 구분 복수 경로 그대로 전달
                 output_path=str(out_path),
                 template_path=tpl_path,
                 project_config=project_config,
@@ -2928,7 +2928,7 @@ async def local_sits_generate(
 
     try:
         result = generate_sits(
-            source_root=str(source_root_path),
+            source_root=source_root,  # 콤마 구분 복수 경로 그대로 전달
             output_path=str(out_path),
             template_path=tpl_path,
             project_config=project_config,
@@ -3034,7 +3034,7 @@ async def local_sits_generate_stream(
     def _run():
         try:
             result = generate_sits(
-                source_root=str(source_root_path),
+                source_root=source_root,  # 콤마 구분 복수 경로 그대로 전달
                 output_path=str(out_path),
                 template_path=tpl_path,
                 project_config=project_config,
@@ -3164,7 +3164,7 @@ async def local_sits_generate_async(
             )
             _logger.info("[SITS_ASYNC][%s] calling generate_sits ...", job_id)
             result = generate_sits(
-                source_root=str(source_root_path),
+                source_root=source_root,  # 콤마 구분 복수 경로 그대로 전달
                 output_path=str(out_path),
                 template_path=tpl_path,
                 project_config=project_config,
