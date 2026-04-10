@@ -3584,6 +3584,82 @@ def local_format_c(req: FormatCodeRequest) -> Dict[str, Any]:
     return format_c_code(req.text, req.filename)
 
 
+# ─── Project Setup (component_map / override 자동 생성) ────────────────────
+
+@router.post("/api/local/project-setup/generate-component-map")
+def local_generate_component_map(
+    sds_path: str = Form(""),
+    source_root: str = Form(""),
+    output_dir: str = Form(""),
+) -> Dict[str, Any]:
+    """SDS 문서에서 component_map.json을 자동 생성한다."""
+    if not sds_path:
+        raise HTTPException(status_code=400, detail="sds_path 필요")
+    if not source_root:
+        raise HTTPException(status_code=400, detail="source_root 필요")
+    from report_gen.project_setup import generate_component_map_from_sds
+    out_path = str(Path(output_dir or "docs") / "component_map.json") if output_dir else "docs/component_map.json"
+    result = generate_component_map_from_sds(sds_path, source_root, output_path=out_path)
+    return {"ok": True, **result}
+
+
+@router.post("/api/local/project-setup/generate-override")
+def local_generate_override(
+    uds_path: str = Form(""),
+    output_dir: str = Form(""),
+) -> Dict[str, Any]:
+    """레퍼런스 UDS 문서에서 함수 단위 override 맵을 생성한다."""
+    if not uds_path:
+        raise HTTPException(status_code=400, detail="uds_path (레퍼런스 UDS) 필요")
+    from report_gen.project_setup import generate_override_from_reference_uds
+    out_path = str(Path(output_dir or "docs") / "uds_function_swcom_override.json") if output_dir else "docs/uds_function_swcom_override.json"
+    result = generate_override_from_reference_uds(uds_path, output_path=out_path)
+    return {"ok": True, **result}
+
+
+@router.get("/api/local/project-setup/status")
+def local_project_setup_status() -> Dict[str, Any]:
+    """현재 프로젝트의 setup 파일 상태를 확인한다."""
+    import json as _json
+    docs_dir = repo_root / "docs"
+    cm_path = docs_dir / "component_map.json"
+    ovr_path = docs_dir / "uds_function_swcom_override.json"
+
+    cm_status = {"exists": False, "entries": 0}
+    if cm_path.exists():
+        try:
+            data = _json.loads(cm_path.read_text(encoding="utf-8"))
+            cm_status = {
+                "exists": True,
+                "entries": len(data),
+                "verify_o": sum(1 for r in data if r.get("verify", "").upper() == "O"),
+                "verify_x": sum(1 for r in data if r.get("verify", "").upper() == "X"),
+                "path": str(cm_path),
+            }
+        except Exception:
+            cm_status = {"exists": True, "entries": 0, "error": "parse failed"}
+
+    ovr_status = {"exists": False, "functions": 0}
+    if ovr_path.exists():
+        try:
+            data = _json.loads(ovr_path.read_text(encoding="utf-8"))
+            ovr_status = {
+                "exists": True,
+                "functions": len(data),
+                "with_asil": sum(1 for v in data.values() if v.get("asil")),
+                "swcom_count": len({v.get("swcom") for v in data.values()}),
+                "path": str(ovr_path),
+            }
+        except Exception:
+            ovr_status = {"exists": True, "functions": 0, "error": "parse failed"}
+
+    return {
+        "ok": True,
+        "component_map": cm_status,
+        "override": ovr_status,
+    }
+
+
 @router.post("/api/local/rag/status")
 def local_rag_status(req: RagStatusRequest) -> Dict[str, Any]:
     cfg = req.config or {}

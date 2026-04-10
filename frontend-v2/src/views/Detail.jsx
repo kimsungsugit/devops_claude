@@ -8,11 +8,13 @@ import DocGenSection from '../components/sections/DocGenSection.jsx';
 import AiAssistSection from '../components/sections/AiAssistSection.jsx';
 import ReportGenSection from '../components/sections/ReportGenSection.jsx';
 import ImpactGuideSection from '../components/sections/ImpactGuideSection.jsx';
+import ProjectSetupSection from '../components/sections/ProjectSetupSection.jsx';
 
 const SECTIONS = [
   { id: 'build',   icon: '🔨', label: '빌드 정보',    Component: BuildInfoSection },
   { id: 'scm',     icon: '🌿', label: 'SCM',          Component: ScmSection },
   { id: 'analysis',icon: '📊', label: '프로젝트 분석', Component: AnalysisSection },
+  { id: 'setup',   icon: '⚙️', label: '프로젝트 설정', Component: ProjectSetupSection },
   { id: 'impact',  icon: '🔍', label: '변경 영향 가이드', Component: ImpactGuideSection },
   { id: 'srssds',  icon: '📋', label: 'SRS/SDS 매핑', Component: SrsSdsSection },
   { id: 'docgen',  icon: '📝', label: '문서 생성',     Component: DocGenSection },
