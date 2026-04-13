@@ -353,7 +353,7 @@ def _write_env_template(
     lines = [
         "ENVIRO.NEW",
         f"ENVIRO.NAME: {env_name}",
-        f"ENVIRO.BASE_DIRECTORY: PROJECT_DIR={source_root or 'C:\\\\workspace\\\\REVIEW_REQUIRED'}",
+        f"ENVIRO.BASE_DIRECTORY: PROJECT_DIR={source_root}" if source_root else "-- ENVIRO.BASE_DIRECTORY: PROJECT_DIR=C:\\\\workspace  -- TODO: 실제 소스 경로로 변경 필요",
         "ENVIRO.WHITE_BOX: YES",
         "ENVIRO.VCDB_FILENAME: ",
         "ENVIRO.VCDB_CMD_VERB: ",
