@@ -401,7 +401,7 @@ def _write_env_template(
         lines.append("--   스텁할 함수만 아래 형식으로 추가:")
         lines.append("--   ENVIRO.STUB_BY_FUNCTION: <unit>.<function>")
     else:
-        lines.append("ENVIRO.STUB_BY_FUNCTION: REVIEW_REQUIRED")
+        lines.append("-- ENVIRO.STUB_BY_FUNCTION: REVIEW_REQUIRED  -- 콜체인 정보 없음, 수동 설정 필요")
     lines.append("")
 
     if all_units:

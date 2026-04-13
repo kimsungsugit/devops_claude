@@ -142,14 +142,11 @@ _TYPE_BOUNDARIES: Dict[str, Dict[str, Any]] = {
 _DEFAULT_BOUNDARY = {"min_inv": -1, "min": 0, "mid": 127, "max": 255, "max_inv": 256}
 
 # Known C types where out-of-range input defaults to saturation (no "[검증 필요]")
-# Includes _t suffixes (stripped by normalize), common aliases, and C standard names
+# Unsigned types saturate deterministically; signed overflow is UB in C → excluded.
 _KNOWN_SATURATE_TYPES = frozenset({
     "uint8", "uint16", "uint32", "int8", "int16", "int32",
     "float", "bit", "bool", "byte", "word", "dword",
-    "char", "short", "long", "int", "double",
     "unsignedchar", "unsignedshort", "unsignedlong", "unsignedint",
-    "signedchar", "signedshort", "signedlong", "signedint",
-    "u8", "u16", "u32", "s8", "s16", "s32",
 })
 
 # Strategy labels for boundary-value test sequences (module-level constant)
