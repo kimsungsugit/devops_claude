@@ -253,11 +253,24 @@ def _write_tst_template(model: Dict[str, Any], out_path: Path) -> None:
             if precondition:
                 lines.append(f"-- Precondition: {precondition}")
 
-            # Integration nodes — must NOT be stubbed
+            # ── Stub configuration (두 가지 옵션 모두 제공) ──
+            # VectorCAST 문법: TEST.STUB:Unit.func = 해당 함수를 스텁 처리
+            # 통합 테스트에서는 콜체인 함수를 스텁하면 안 되므로 TEST.STUB에 포함하지 않음
             if integration_nodes:
                 lines.append("-- Integration calls (do NOT stub — real integration required):")
                 for iunit, ifunc in integration_nodes:
                     lines.append(f"--   [INTEGRATION] {iunit}.{ifunc}")
+                lines.append("--")
+                # Option A: 콜체인 외 함수만 스텁 (env에서 ALL_BY_PROTOTYPE로 전체 스텁 후
+                #           콜체인 함수는 TEST.STUB에 넣지 않아 실제 호출되도록 함)
+                lines.append("-- [Option A] .env에서 ENVIRO.STUB: ALL_BY_PROTOTYPE 사용 시")
+                lines.append("--   위 [INTEGRATION] 함수들은 TEST.STUB에 추가하지 마세요.")
+                lines.append("--   VectorCAST가 자동으로 실제 코드를 호출합니다.")
+                lines.append("--")
+                # Option B: 수동으로 스텁할 함수만 지정
+                lines.append("-- [Option B] .env에서 ENVIRO.STUB: NO_STUBS 사용 시")
+                lines.append("--   콜체인 외 의존 함수만 아래처럼 개별 스텁 지정:")
+                lines.append("--   TEST.STUB:<unit_name>.<function_name>")
 
             # Input values
             for param, value in inputs.items():
@@ -341,14 +354,16 @@ def _write_env_template(
         "ENVIRO.NEW",
         f"ENVIRO.NAME: {env_name}",
         f"ENVIRO.BASE_DIRECTORY: PROJECT_DIR={source_root or 'C:\\\\workspace\\\\REVIEW_REQUIRED'}",
-        "ENVIRO.STUB_BY_FUNCTION: REVIEW_REQUIRED",
         "ENVIRO.WHITE_BOX: YES",
         "ENVIRO.VCDB_FILENAME: ",
         "ENVIRO.VCDB_CMD_VERB: ",
         "-- Integration coverage: use Function+Call to capture inter-unit calls",
         "ENVIRO.COVERAGE_TYPE: Function+Call",
         "ENVIRO.LIBRARY_STUBS:  ",
-        "-- IMPORTANT: stub only units NOT in the integration call chains",
+        "",
+        "-- ===== Stub Configuration (두 가지 옵션 중 선택) =====",
+        "",
+        "-- [Option A] 자동 스텁 — 전체 스텁 + 콜체인 함수만 해제",
         "ENVIRO.STUB: ALL_BY_PROTOTYPE",
         f"ENVIRO.COMPILER: {str(cfg.get('compiler') or compiler or 'CC').strip() or 'CC'}",
         "ENVIRO.TYPE_HANDLED_DIRS_ALLOWED: ",
@@ -364,6 +379,30 @@ def _write_env_template(
         lines.append(f"-- Existing Environment File: {cfg.get('existing_env_file')}")
     if cfg.get("existing_project_file"):
         lines.append(f"-- Existing Project File: {cfg.get('existing_project_file')}")
+
+    # Collect all integration nodes (called functions that must NOT be stubbed)
+    integration_funcs: List[Tuple[str, str]] = []
+    for itc in model.get("integrations") or []:
+        chain = str(itc.get("call_chain") or "")
+        for node in _integration_nodes(chain):
+            if node not in integration_funcs:
+                integration_funcs.append(node)
+
+    # VectorCAST 문법: ENVIRO.STUB_BY_FUNCTION: Unit.func = 해당 함수를 스텁 처리
+    # 통합 테스트에서 콜체인 함수는 스텁하면 안 됨 → STUB_BY_FUNCTION에 넣지 않음
+    if integration_funcs:
+        lines.append("-- [Option A] ALL_BY_PROTOTYPE 기본 + 콜체인 함수는 스텁 제외:")
+        lines.append("--   아래 함수들은 ENVIRO.STUB_BY_FUNCTION에 추가하지 마세요:")
+        for iunit, ifunc in integration_funcs:
+            lines.append(f"--   (실제 호출 유지) {iunit}.{ifunc}")
+        lines.append("--")
+        lines.append("-- [Option B] NO_STUBS 기본 + 콜체인 외 함수만 개별 스텁:")
+        lines.append("--   ENVIRO.STUB: ALL_BY_PROTOTYPE → ENVIRO.STUB: NO_STUBS 로 변경 후")
+        lines.append("--   스텁할 함수만 아래 형식으로 추가:")
+        lines.append("--   ENVIRO.STUB_BY_FUNCTION: <unit>.<function>")
+    else:
+        lines.append("ENVIRO.STUB_BY_FUNCTION: REVIEW_REQUIRED")
+    lines.append("")
 
     if all_units:
         lines.append("-- Units under test (from SITS call chains):")
