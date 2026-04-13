@@ -142,7 +142,9 @@ _TYPE_BOUNDARIES: Dict[str, Dict[str, Any]] = {
 _DEFAULT_BOUNDARY = {"min_inv": -1, "min": 0, "mid": 127, "max": 255, "max_inv": 256}
 
 # Known C types where out-of-range input defaults to saturation (no "[검증 필요]")
-# Unsigned types saturate deterministically; signed overflow is UB in C → excluded.
+# Unsigned types: deterministic wrap/saturation.
+# Fixed-width signed (int8/16/32): 임베디드 환경에서 포화 처리 일반적 (컴파일러 -fwrapv 또는 HW saturation).
+# C 표준 signed (char, short, long, int): overflow = UB → "[검증 필요]" 유지.
 _KNOWN_SATURATE_TYPES = frozenset({
     "uint8", "uint16", "uint32", "int8", "int16", "int32",
     "float", "bit", "bool", "byte", "word", "dword",

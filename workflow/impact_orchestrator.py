@@ -889,11 +889,15 @@ def run_impact_update(
                         )
                         _flagged_fns = list(changed_types.keys())
                         _suts_linked = getattr(linked_docs, "suts", "")
+                        _uds_linked = getattr(linked_docs, "uds", "")
+                        _sits_linked = getattr(linked_docs, "sits", "")
                         _ctx = ImpactGuideContext(
                             changed_types=changed_types,
                             impact_groups=impact_groups,
                             by_name=by_name or {},
+                            uds_fn_details=_load_uds_fn_details(_uds_linked, _flagged_fns) if _uds_linked else {},
                             suts_tcs=_load_suts_fn_tcs(_suts_linked, _flagged_fns) if _suts_linked else {},
+                            sits_chains=_load_sits_fn_chains(_sits_linked, _flagged_fns) if _sits_linked else {},
                         )
                         _ai_guide = generate_impact_guide(_ctx)
                     except Exception as _e:

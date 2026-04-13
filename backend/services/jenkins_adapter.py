@@ -793,7 +793,9 @@ def _summarize_vcast_tests(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
         try:
             from backend.services.test_summary_service import classify_failures_bulk
             failure_categories = classify_failures_bulk(rows)
-        except Exception:
+        except Exception as _fc_err:
+            import logging as _fc_log
+            _fc_log.getLogger(__name__).debug("classify_failures_bulk failed: %s", _fc_err)
             failure_categories = {"unknown": failed}
 
     return {

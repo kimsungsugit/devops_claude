@@ -283,7 +283,7 @@ def build_trend_analysis(
 # Requirement-Test linkage
 # ---------------------------------------------------------------------------
 
-_REQ_PATTERN = re.compile(r"(?:SwTR|SwFn|SwUFn|SwTC|SRS)[-_]\w+", re.IGNORECASE)
+_REQ_PATTERN = re.compile(r"(?:SwTR|SwFn|SwUFn|SwTC|SRS)[-_][A-Za-z0-9]+(?:[-_][A-Za-z0-9]+)*", re.IGNORECASE)
 
 
 def build_requirement_test_map(

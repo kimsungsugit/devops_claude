@@ -127,12 +127,9 @@ class TestBuildRequirementTestMap:
             "SwUTC_SwUFn_0102__SEQ_01": [{"description": "Normal test"}],
         }
         req_map = build_requirement_test_map(test_data)
-        assert "SwTR_BR_001" in req_map
-        # TC name itself contains SwUFn pattern (with suffix)
-        matching_keys = [k for k in req_map if k.startswith("SwUFn_0101")]
-        assert len(matching_keys) >= 1
-        matching_keys2 = [k for k in req_map if k.startswith("SwUFn_0102")]
-        assert len(matching_keys2) >= 1
+        assert "SwTR_BR_001" in req_map  # from description
+        assert "SwUFn_0101" in req_map   # exact ID from TC name (not __SEQ suffix)
+        assert "SwUFn_0102" in req_map   # exact ID from TC name
 
 
 class TestGenerateExecutiveSummary:

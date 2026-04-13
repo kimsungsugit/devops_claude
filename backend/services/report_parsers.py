@@ -729,6 +729,7 @@ def build_report_summary(root_dir: Path, project_root: Optional[Path] = None) ->
     }
 
     # Inject test quality gates evaluation
+    summary["quality_gates"] = None  # default so key always exists
     try:
         from backend.services.test_summary_service import evaluate_quality_gates
         from config import TEST_QUALITY_GATES
