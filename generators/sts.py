@@ -1064,40 +1064,60 @@ def _ensure_min_steps(
     return result
 
 
-def _generate_simple_steps(func_info: Dict[str, Any]) -> List[List[Dict[str, str]]]:
+def _generate_simple_steps(
+    func_info: Dict[str, Any],
+    _import_cache: Dict[str, Any] = {},  # noqa: B006 — intentional one-time init
+) -> List[List[Dict[str, str]]]:
     """Fallback: generate 1~3 TCs from function info (no logic_flow).
 
     TC1 (NORMAL):   normal input values → call → verify output
     TC2 (BOUNDARY): boundary input values (min/max) → call → boundary behavior  [if inputs]
     TC3 (ERROR):    invalid input values (min_inv/max_inv) → call → error handling [if inputs]
     """
-    # Lazy import to avoid circular dependency
-    try:
-        from generators.suts import get_boundary_values, infer_variable_type
-    except ImportError:
-        get_boundary_values = None  # type: ignore[assignment]
-        infer_variable_type = None  # type: ignore[assignment]
+    # Lazy import once (shared via mutable default)
+    if "ready" not in _import_cache:
+        try:
+            from generators.suts import get_boundary_values, infer_variable_type
+            _import_cache["get_bv"] = get_boundary_values
+            _import_cache["infer_type"] = infer_variable_type
+        except Exception:
+            _import_cache["get_bv"] = None
+            _import_cache["infer_type"] = None
+        _import_cache["ready"] = True
+
+    get_boundary_values = _import_cache["get_bv"]
+    infer_variable_type = _import_cache["infer_type"]
 
     name = func_info.get("name", "function")
     inputs = func_info.get("inputs") or []
     calls = func_info.get("calls_list") or []
     outputs_hint = func_info.get("output") or ""
-    out_str = f" → 결과: {str(outputs_hint)[:60]}" if outputs_hint and str(outputs_hint).strip() not in ("void", "None", "") else ""
+
+    # Pre-compute boundary values once per variable (reused by TC1/TC2/TC3)
+    var_cache: Dict[str, Dict[str, Any]] = {}  # vname → boundary dict
+    if inputs and get_boundary_values and infer_variable_type:
+        for inp in inputs[:5]:
+            vname = str(inp).split(":")[0].strip()
+            if vname not in var_cache:
+                try:
+                    vtype = infer_variable_type(vname)
+                    var_cache[vname] = get_boundary_values(vtype)
+                except Exception:
+                    var_cache[vname] = {}
 
     # ── TC1: Normal path ──────────────────────────────────────────────────
     tc1: List[Dict[str, str]] = []
-    if inputs and get_boundary_values and infer_variable_type:
+    if inputs and var_cache:
         mid_parts = []
         for inp in inputs[:5]:
             vname = str(inp).split(":")[0].strip()
-            try:
-                vtype = infer_variable_type(vname)
-                bnd = get_boundary_values(vtype)
+            bnd = var_cache.get(vname)
+            if bnd and "mid" in bnd:
                 mid_parts.append(f"{vname}={bnd['mid']}")
-            except Exception:
+            else:
                 mid_parts.append(str(inp))
         in_str = ", ".join(mid_parts)
-        tc1.append({"action": f"입력 설정 (정상값): {in_str}", "expected": "입력 파라미터 정상 설정"})
+        tc1.append({"action": f"입력 설정 (정상값): {in_str}", "expected": "입력 파라미터가 유효 범위 내 정상 설정됨"})
     elif inputs:
         in_str = ", ".join(str(i) for i in inputs[:5])
         tc1.append({"action": f"입력 설정: {in_str}", "expected": "입력 파라미터 정상 설정"})
@@ -1105,9 +1125,12 @@ def _generate_simple_steps(func_info: Dict[str, Any]) -> List[List[Dict[str, str
     if calls:
         call_str = ", ".join(calls[:4])
         tc1.append({"action": f"내부 호출 확인: {call_str}", "expected": "하위 함수 정상 호출"})
-    tc1.append({"action": "반환값 / 출력 확인", "expected": f"기대 결과와 일치{out_str}"})
+    if outputs_hint and str(outputs_hint).strip() not in ("void", "None", ""):
+        tc1.append({"action": "반환값 / 출력 확인", "expected": f"출력: {str(outputs_hint)[:80]} (정상 범위 내 값)"})
+    else:
+        tc1.append({"action": "반환값 / 출력 확인", "expected": f"{name} 정상 완료, 부작용 없음"})
 
-    if not inputs or not get_boundary_values:
+    if not inputs or not var_cache:
         return [tc1]
 
     # ── TC2: Boundary (min/max) ───────────────────────────────────────────
@@ -1116,34 +1139,43 @@ def _generate_simple_steps(func_info: Dict[str, Any]) -> List[List[Dict[str, str
     bnd_parts_max: List[str] = []
     for inp in inputs[:5]:
         vname = str(inp).split(":")[0].strip()
-        try:
-            vtype = infer_variable_type(vname)
-            bnd = get_boundary_values(vtype)
+        bnd = var_cache.get(vname)
+        if bnd and "min" in bnd:
             bnd_parts_min.append(f"{vname}={bnd['min']}")
             bnd_parts_max.append(f"{vname}={bnd['max']}")
-        except Exception:
+        else:
             bnd_parts_min.append(str(inp))
             bnd_parts_max.append(str(inp))
     tc2.append({"action": f"입력 설정 (경계 최솟값): {', '.join(bnd_parts_min)}", "expected": "입력 경계 최솟값 설정"})
     tc2.append({"action": f"{name}() 호출", "expected": f"{name} 경계 최솟값 조건 실행 확인"})
     tc2.append({"action": f"입력 설정 (경계 최댓값): {', '.join(bnd_parts_max)}", "expected": "입력 경계 최댓값 설정"})
     tc2.append({"action": f"{name}() 호출", "expected": f"{name} 경계 최댓값 조건 실행 확인"})
-    tc2.append({"action": "경계값 출력 확인", "expected": "유효 경계 범위 내 정상 처리 확인"})
+    tc2.append({"action": "경계값 출력 확인",
+                "expected": f"최솟값({', '.join(bnd_parts_min)}), 최댓값({', '.join(bnd_parts_max)}) 입력 시 유효 범위 내 정상 처리"})
 
     # ── TC3: Invalid (min_inv/max_inv) ────────────────────────────────────
     tc3: List[Dict[str, str]] = []
     inv_parts: List[str] = []
     for inp in inputs[:5]:
         vname = str(inp).split(":")[0].strip()
-        try:
-            vtype = infer_variable_type(vname)
-            bnd = get_boundary_values(vtype)
+        bnd = var_cache.get(vname)
+        if bnd and "max_inv" in bnd:
             inv_parts.append(f"{vname}={bnd['max_inv']}")
-        except Exception:
+        else:
             inv_parts.append(str(inp))
     tc3.append({"action": f"입력 설정 (유효 범위 초과): {', '.join(inv_parts)}", "expected": "유효 범위 초과 입력 설정"})
-    tc3.append({"action": f"{name}() 호출", "expected": f"{name} 에러 처리 루틴 진입 또는 포화 처리 확인"})
-    tc3.append({"action": "에러 처리 / 포화 출력 확인", "expected": "시스템 안전 상태 유지, 비정상 출력 없음"})
+    tc3.append({"action": f"{name}() 호출", "expected": f"{name} 범위 초과 입력 방어 처리 확인"})
+    # Build concrete saturation expectation from cached boundaries
+    sat_parts = []
+    for inp in inputs[:3]:
+        vname = str(inp).split(":")[0].strip()
+        bnd = var_cache.get(vname)
+        if bnd and "max" in bnd:
+            sat_parts.append(f"{vname} 초과 시 출력 포화={bnd['max']} 또는 하한 클램프={bnd['min']}")
+        else:
+            sat_parts.append(f"{vname} 초과 시 안전값 유지")
+    sat_str = "; ".join(sat_parts) if sat_parts else "출력 포화 또는 에러 플래그 설정"
+    tc3.append({"action": "에러 처리 / 포화 출력 확인", "expected": f"방어 처리 결과: {sat_str}"})
 
     return [tc1, tc2, tc3]
 
@@ -1263,7 +1295,19 @@ def _build_tc_dict(
     test_env: str,
     is_safety: bool,
     func_name: Optional[str] = None,
+    _bv_cache: Dict[str, Any] = {},  # noqa: B006 — intentional mutable default for lazy init
 ) -> Dict[str, Any]:
+    # Lazy-init boundary helpers once (shared across all calls via mutable default)
+    if "ready" not in _bv_cache:
+        try:
+            from generators.suts import get_boundary_values, infer_variable_type
+            _bv_cache["get_bv"] = get_boundary_values
+            _bv_cache["infer_type"] = infer_variable_type
+        except Exception:
+            _bv_cache["get_bv"] = None
+            _bv_cache["infer_type"] = None
+        _bv_cache["ready"] = True
+
     title = req.get("name") or req.get("description", "")[:60] or req["id"]
     if func_name:
         title = f"{title} - {func_name}"
@@ -1293,7 +1337,20 @@ def _build_tc_dict(
                 if vname and len(vname) < 40 and not vname.startswith("("):
                     input_vars.append(vname)
     if input_vars:
-        precond_parts.append("입력: " + ", ".join(f"{v}=초기값" for v in input_vars[:4]))
+        _get_bv = _bv_cache.get("get_bv")
+        _infer_t = _bv_cache.get("infer_type")
+
+        def _resolve_init(vn: str) -> str:
+            if _get_bv and _infer_t:
+                try:
+                    return str(_get_bv(_infer_t(vn))["mid"])
+                except Exception:
+                    pass
+            return "초기값"
+
+        precond_parts.append("입력: " + ", ".join(
+            f"{v}={_resolve_init(v)}" for v in input_vars[:4]
+        ))
 
     precond = ", ".join(precond_parts)
 

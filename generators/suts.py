@@ -141,6 +141,27 @@ _TYPE_BOUNDARIES: Dict[str, Dict[str, Any]] = {
 }
 _DEFAULT_BOUNDARY = {"min_inv": -1, "min": 0, "mid": 127, "max": 255, "max_inv": 256}
 
+# Known C types where out-of-range input defaults to saturation (no "[검증 필요]")
+# Includes _t suffixes (stripped by normalize), common aliases, and C standard names
+_KNOWN_SATURATE_TYPES = frozenset({
+    "uint8", "uint16", "uint32", "int8", "int16", "int32",
+    "float", "bit", "bool", "byte", "word", "dword",
+    "char", "short", "long", "int", "double",
+    "unsignedchar", "unsignedshort", "unsignedlong", "unsignedint",
+    "signedchar", "signedshort", "signedlong", "signedint",
+    "u8", "u16", "u32", "s8", "s16", "s32",
+})
+
+# Strategy labels for boundary-value test sequences (module-level constant)
+_STRAT_LABEL: Dict[str, str] = {
+    "BV_MIN_INV": "유효 하한 초과 (경계-1): 에러/포화 처리 확인",
+    "BV_MIN":     "최솟값 경계 입력: 최솟값에서 정상 처리 확인",
+    "BV_MID":     "정상 중간값 입력: 정상 동작 범위 확인",
+    "BV_MAX":     "최댓값 경계 입력: 최댓값에서 정상 처리 확인",
+    "BV_MAX_INV": "유효 상한 초과 (경계+1): 에러/포화 처리 확인",
+    "MIXED":      "혼합 경계값: 짝수 인수=최솟값, 홀수 인수=최댓값 조합",
+}
+
 # Domain-keyword based float boundaries for physical/engineering signals
 _FLOAT_DOMAIN_BOUNDS: List[Tuple[List[str], Dict[str, Any]]] = [
     (["voltage", "volt", "_v_", "_vbat", "_vcc"],
@@ -569,14 +590,24 @@ def generate_sequences(
         ("MIXED",      None),
     ]
 
-    _STRAT_LABEL: Dict[str, str] = {
-        "BV_MIN_INV": "유효 하한 초과 (경계-1): 에러/포화 처리 확인",
-        "BV_MIN":     "최솟값 경계 입력: 최솟값에서 정상 처리 확인",
-        "BV_MID":     "정상 중간값 입력: 정상 동작 범위 확인",
-        "BV_MAX":     "최댓값 경계 입력: 최댓값에서 정상 처리 확인",
-        "BV_MAX_INV": "유효 상한 초과 (경계+1): 에러/포화 처리 확인",
-        "MIXED":      "혼합 경계값: 짝수 인수=최솟값, 홀수 인수=최댓값 조합",
-    }
+    # Pre-compute clamp/guard analysis once (avoid repeated DFS per strategy)
+    check_vars = output_vars or input_vars
+    _has_any_clamp = any(_flow_has_clamp_pattern(logic_flow, v) for v in check_vars)
+    _has_any_guard = any(_flow_has_guard_clause(logic_flow, v) for v in check_vars)
+
+    def _resolve_inv_label(sname: str) -> str:
+        """Resolve 'error/saturation' ambiguity using pre-computed flow analysis."""
+        if sname not in ("BV_MIN_INV", "BV_MAX_INV"):
+            return _STRAT_LABEL.get(sname, sname)
+        direction = "하한 초과 (경계-1)" if sname == "BV_MIN_INV" else "상한 초과 (경계+1)"
+        if _has_any_clamp and _has_any_guard:
+            return f"유효 {direction}: 포화(clamp) 및 가드 조건 처리 확인"
+        elif _has_any_clamp:
+            return f"유효 {direction}: 포화(saturation) 처리 확인"
+        elif _has_any_guard:
+            return f"유효 {direction}: 가드 조건에 의한 에러 처리 확인"
+        else:
+            return f"유효 {direction}: 방어 처리 확인 (포화 추정)"
 
     sequences: List[Dict[str, Any]] = []
     for idx, (strat_name, bound_key) in enumerate(strategies[:max_seq]):
@@ -607,7 +638,7 @@ def generate_sequences(
                 exp_vals[v] = _format_test_value(raw, out_types.get(v, "uint8_t"))
 
         # Build human-readable description showing actual variable names and values
-        label = _STRAT_LABEL.get(strat_name, strat_name)
+        label = _resolve_inv_label(strat_name)
         inp_parts = [f"{v}={inp_vals[v]}" for v in input_vars if v in inp_vals]
         exp_parts = [f"{v}={exp_vals[v]}" for v in output_vars if v in exp_vals]
         desc_lines = [label]
@@ -670,6 +701,9 @@ def _infer_expected_for_strategy(
     bmin = bounds.get("min", 0)
     bmax = bounds.get("max", 0)
     bmid = bounds.get("mid", 0)
+    # Pre-compute type normalization once (used by min_inv/max_inv fallback)
+    _normalized = typename.lower().replace(" ", "").replace("_t", "")
+    _is_known_type = _normalized in _KNOWN_SATURATE_TYPES
 
     # Enable/disable flag: output toggles between 0/1 on valid input
     if is_enable_flag and strategy_key in ("min", "BV_MIN"):
@@ -695,7 +729,8 @@ def _infer_expected_for_strategy(
             return bmin   # clamped to lower bound
         if has_guard:
             return bmin   # guarded: stays at safe min value
-        # No pattern detected: mark as needs verification
+        if _is_known_type:
+            return bmin   # type-inferred saturation to lower bound
         raw = bounds.get("min_inv", bmin)
         return f"[검증 필요] {raw}"
 
@@ -706,7 +741,8 @@ def _infer_expected_for_strategy(
             return bmax   # clamped to upper bound
         if has_guard:
             return bmax   # guarded: stays at safe max value
-        # No pattern detected: mark as needs verification
+        if _is_known_type:
+            return bmax   # type-inferred saturation to upper bound
         raw = bounds.get("max_inv", bmax)
         return f"[검증 필요] {raw}"
 
