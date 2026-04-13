@@ -71,7 +71,7 @@ class TestAnalyzeCrossDocumentImpact:
         result = analyze_cross_document_impact(changed)
         assert "uds" in result
         assert "suts" in result
-        assert "sds" not in result  # BODY doesn't affect SDS
+        assert "sds" in result  # BODY now affects SDS (design description update)
 
     def test_filtered_targets(self):
         changed = {"func_a": "SIGNATURE"}

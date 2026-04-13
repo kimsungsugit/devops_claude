@@ -18,12 +18,16 @@ from typing import Any, Dict, List, Optional, Tuple
 # ---------------------------------------------------------------------------
 
 _FAILURE_PATTERNS: Dict[str, List[str]] = {
-    "assertion": ["MISMATCH", "EXPECTED", "ASSERT", "!=", "NOT EQUAL"],
+    "assertion": ["MISMATCH", "EXPECTED", "ASSERT", "!=", "NOT EQUAL",
+                  "VALUE MISMATCH", "COMPARISON", "OUT OF RANGE", "BOUNDARY"],
     "timeout": ["TIMEOUT", "TIME_OUT", "TIMED OUT", "DEADLINE"],
     "crash": ["CRASH", "ABORT", "SEGFAULT", "EXCEPTION", "ACCESS VIOLATION",
-              "SIGNAL", "CORE DUMP", "STACK OVERFLOW"],
+              "SIGNAL", "CORE DUMP", "STACK OVERFLOW", "PROTECTION FAULT",
+              "ILLEGAL INSTRUCTION", "BUS ERROR"],
     "environment": ["ENV", "SETUP", "CONFIG", "LICENSE", "CONNECTION",
-                    "FILE NOT FOUND", "MISSING", "INITIALIZATION"],
+                    "FILE NOT FOUND", "MISSING", "INITIALIZATION",
+                    "COMPILE ERROR", "LINK ERROR", "BUILD FAILED",
+                    "INSTRUMENT", "HARNESS"],
 }
 
 
@@ -257,8 +261,8 @@ def build_trend_analysis(
     if not previous:
         return {"available": False, "message": "이전 빌드 데이터 없음"}
 
-    cur_rate = _safe_float(current.get("pass_rate", 0))
-    prev_rate = _safe_float(previous.get("pass_rate", 0))
+    cur_rate = _normalize_pass_rate(_safe_float(current.get("pass_rate", 0)))
+    prev_rate = _normalize_pass_rate(_safe_float(previous.get("pass_rate", 0)))
     cur_total = current.get("total", 0)
     prev_total = previous.get("total", 0)
     cur_failed = current.get("failed", 0)
@@ -438,8 +442,13 @@ def _extract_pct(summary: Dict[str, Any], *keys: str) -> float:
 
 
 def _safe_float(val: Any) -> float:
+    """Convert value to float without auto-normalizing scale."""
     try:
-        v = float(val)
-        return v * 100 if v <= 1.0 else v
+        return float(val)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _normalize_pass_rate(val: float) -> float:
+    """Normalize pass_rate to 0-100 scale."""
+    return val * 100 if 0 < val <= 1.0 else val

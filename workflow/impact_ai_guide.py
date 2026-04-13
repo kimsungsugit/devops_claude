@@ -49,16 +49,22 @@ _DOC_CHANGE_SENSITIVITY: Dict[str, Dict[str, str]] = {
         "BODY": "로직 변경 → 통합 테스트 기대값 재확인",
         "NEW": "신규 함수 → 콜체인에 포함 여부 확인",
         "DELETE": "삭제 → 콜체인 단절 확인",
+        "VARIABLE": "변수 변경 → 통합 테스트 데이터 흐름 재확인",
+        "HEADER": "헤더 변경 → 콜체인 인터페이스 의존성 확인",
     },
     "sts": {
         "SIGNATURE": "인터페이스 변경 → STS 요구사항 검증 방법 재검토",
+        "BODY": "로직 변경 → STS 요구사항 기대 동작 재확인",
         "NEW": "신규 함수 → STS 요구사항 매핑 추가",
         "DELETE": "삭제 → STS 요구사항 커버리지 재확인",
+        "VARIABLE": "변수 변경 → STS 요구사항 입출력 매핑 확인",
     },
     "sds": {
         "SIGNATURE": "아키텍처 인터페이스 변경 → SDS 모듈 인터페이스 업데이트",
+        "BODY": "로직 변경 → SDS 설계 설명 업데이트 필요",
         "NEW": "신규 컴포넌트 → SDS 설계 추가",
         "DELETE": "컴포넌트 삭제 → SDS 설계 제거",
+        "VARIABLE": "변수 변경 → SDS 데이터 흐름/인터페이스 업데이트",
     },
 }
 
@@ -151,7 +157,11 @@ def assess_risk(
     asil_levels: List[str] = []
     safety_funcs: List[str] = []
     for fn in all_impacted:
-        info = by_name.get(fn) or by_name.get(fn.lower()) or {}
+        info = by_name.get(fn)
+        if info is None:
+            info = by_name.get(fn.lower())
+        if info is None:
+            info = {}
         asil = str(info.get("asil") or "QM").strip().upper()
         if asil in _ASIL_RANK:
             asil_levels.append(asil)
@@ -217,7 +227,6 @@ def assess_risk(
 def analyze_cross_document_impact(
     changed_types: Dict[str, str],
     targets: Optional[List[str]] = None,
-    by_name: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> Dict[str, List[str]]:
     """Map changed functions to affected document sections.
 
@@ -322,10 +331,10 @@ def suggest_test_additions(
         if result:
             text = result if isinstance(result, str) else str(result)
             # Extract JSON array from response
-            import re
-            m = re.search(r"\[[\s\S]*?\]", text)
-            if m:
-                return json.loads(m.group(0))
+            start = text.find("[")
+            end = text.rfind("]")
+            if start != -1 and end > start:
+                return json.loads(text[start:end + 1])
     except Exception as e:
         logger.debug("LLM 테스트 제안 실패, 결정론적 폴백 사용: %s", e)
 

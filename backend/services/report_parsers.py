@@ -732,8 +732,13 @@ def build_report_summary(root_dir: Path, project_root: Optional[Path] = None) ->
     try:
         from backend.services.test_summary_service import evaluate_quality_gates
         from config import TEST_QUALITY_GATES
+        _tests_kpi = summary.get("kpis", {}).get("tests", {})
+        _total = _tests_kpi.get("total", 0) or 0
+        _enabled = _tests_kpi.get("enabled", _total) or _total
+        _ok = _tests_kpi.get("ok", 0) or 0
+        _pass_rate = (_ok / _enabled) if _enabled > 0 else 0
         gate_input = {
-            "pass_rate": summary.get("kpis", {}).get("tests", {}).get("pass_rate", 0),
+            "pass_rate": _pass_rate,
             "coverage_line": summary.get("kpis", {}).get("coverage", {}).get("line_rate", 0),
             "coverage_branch": summary.get("kpis", {}).get("coverage", {}).get("branch_rate", 0),
             "new_failures": 0,

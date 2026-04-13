@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 import json
 import re
@@ -17,6 +18,8 @@ from workflow.delta_update import classify_changed_functions
 from workflow.impact_audit import acquire_run_lock, release_run_lock, write_impact_audit
 from workflow.impact_changes import build_change_log, write_change_log
 
+
+logger = logging.getLogger(__name__)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 AUTO_DOCS = {"uds", "suts", "sits"}
@@ -884,17 +887,17 @@ def run_impact_update(
                         from workflow.impact_ai_guide import (
                             generate_impact_guide, ImpactGuideContext,
                         )
-                        _linked = getattr(linked_docs, target, "")
                         _flagged_fns = list(changed_types.keys())
+                        _suts_linked = getattr(linked_docs, "suts", "")
                         _ctx = ImpactGuideContext(
                             changed_types=changed_types,
                             impact_groups=impact_groups,
                             by_name=by_name or {},
-                            suts_tcs=_load_suts_fn_tcs(_linked, _flagged_fns) if target == "suts" else {},
+                            suts_tcs=_load_suts_fn_tcs(_suts_linked, _flagged_fns) if _suts_linked else {},
                         )
                         _ai_guide = generate_impact_guide(_ctx)
-                    except Exception:
-                        pass  # AI guide is optional
+                    except Exception as _e:
+                        logger.debug("AI guide skipped: %s", _e)
 
                     artifact_path = _write_review_artifact(
                         target,
