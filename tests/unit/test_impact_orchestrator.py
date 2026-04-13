@@ -177,7 +177,7 @@ def test_run_impact_update_executes_auto_and_flag_actions(tmp_path, monkeypatch)
     monkeypatch.setattr(
         impact_orchestrator,
         "_write_review_artifact",
-        lambda target, trigger, changed_types, impact_groups, by_name=None, linked_doc="": str(tmp_path / f"{target}_review.md"),
+        lambda target, trigger, changed_types, impact_groups, by_name=None, linked_doc="", ai_guide=None: str(tmp_path / f"{target}_review.md"),
     )
 
     result = impact_orchestrator.run_impact_update(

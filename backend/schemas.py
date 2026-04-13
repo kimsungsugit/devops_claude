@@ -537,6 +537,7 @@ class ImpactAnalyzeRequest(BaseModel):
     source_root: str
     changed_files: List[str] = []
     changed_raw: str = ""
+    include_ai_guide: bool = False
 
 
 class TestGenerateRequest(BaseModel):
@@ -578,6 +579,21 @@ class VCastProcessJenkinsRequest(BaseModel):
     build_selector: str = "lastSuccessfulBuild"
     report_type: str = "TestCaseData"
     version: str = "Ver2025"
+
+
+# ── Test Summary ──────────────────────────────────────────────────────
+
+class TestSummaryRequest(BaseModel):
+    report_dir: str
+    previous_report_dir: Optional[str] = None
+    gates: Optional[Dict[str, float]] = None
+
+
+class QualityGateResult(BaseModel):
+    name: str
+    actual: float
+    threshold: float
+    status: str  # pass, warn, fail
 
 
 # ── UDS Traceability ──────────────────────────────────────────────────

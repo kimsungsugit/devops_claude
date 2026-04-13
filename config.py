@@ -194,6 +194,14 @@ UDS_ACCURACY_REPORT_TIMEOUT = _safe_int("UDS_ACCURACY_TIMEOUT", 300)
 # Source sections cache TTL (seconds)
 UDS_SOURCE_SECTIONS_CACHE_TTL = _safe_int("UDS_SOURCE_CACHE_TTL", 1800)
 
+# ---------------- 테스트 품질 게이트 ----------------
+TEST_QUALITY_GATES = {
+    "pass_rate_min": _safe_float("TEST_PASS_RATE_MIN", 95.0),
+    "coverage_line_min": _safe_float("TEST_COVERAGE_LINE_MIN", 80.0),
+    "coverage_branch_min": _safe_float("TEST_COVERAGE_BRANCH_MIN", 70.0),
+    "max_new_failures": _safe_int("TEST_MAX_NEW_FAILURES", 0),
+}
+
 # ---------------- 커버리지/테스트 임계치 설정 ----------------
 DEFAULT_COVERAGE_THRESHOLD = 0.60
 COVERAGE_THRESHOLD = DEFAULT_COVERAGE_THRESHOLD

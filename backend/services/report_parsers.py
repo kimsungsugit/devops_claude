@@ -727,6 +727,21 @@ def build_report_summary(root_dir: Path, project_root: Optional[Path] = None) ->
         "report_types": report_types,
         "generated_at": datetime.now().isoformat(timespec="seconds"),
     }
+
+    # Inject test quality gates evaluation
+    try:
+        from backend.services.test_summary_service import evaluate_quality_gates
+        from config import TEST_QUALITY_GATES
+        gate_input = {
+            "pass_rate": summary.get("kpis", {}).get("tests", {}).get("pass_rate", 0),
+            "coverage_line": summary.get("kpis", {}).get("coverage", {}).get("line_rate", 0),
+            "coverage_branch": summary.get("kpis", {}).get("coverage", {}).get("branch_rate", 0),
+            "new_failures": 0,
+        }
+        summary["quality_gates"] = evaluate_quality_gates(gate_input, TEST_QUALITY_GATES)
+    except Exception:
+        pass
+
     return summary
 
 

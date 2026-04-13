@@ -202,6 +202,7 @@ def _write_review_artifact(
     impact_groups: Dict[str, List[str]],
     by_name: Dict[str, Dict[str, Any]] | None = None,
     linked_doc: str = "",
+    ai_guide: Any = None,
 ) -> str:
     review_dir = REPO_ROOT / "reports" / "impact_audit"
     review_dir.mkdir(parents=True, exist_ok=True)
@@ -425,6 +426,39 @@ def _write_review_artifact(
                 "- [ ] 아키텍처 파티션 영향이 문서화되었는가?",
             ]
         )
+    # --- AI Guide sections (if available) ---
+    if ai_guide is not None:
+        guide = ai_guide.to_dict() if hasattr(ai_guide, "to_dict") else ai_guide
+        lines.extend(["", "---", "", "## AI Impact Guide"])
+        risk = guide.get("risk") or {}
+        if risk:
+            lines.append(f"**리스크 등급**: {risk.get('grade', '-')} (점수: {risk.get('score', '-')}/100)")
+            lines.append(f"**ASIL 에스컬레이션**: {'예' if risk.get('asil_escalation') else '아니오'}")
+            if risk.get("justification"):
+                lines.append(f"**근거**: {risk['justification']}")
+        summary = guide.get("executive_summary", "")
+        if summary:
+            lines.extend(["", "### Executive Summary", "", summary])
+        cross_doc = guide.get("cross_doc_impacts") or {}
+        if cross_doc:
+            lines.extend(["", "### Cross-Document Impact"])
+            for doc_type, impacts in cross_doc.items():
+                lines.append(f"\n**{doc_type.upper()}**:")
+                for imp in impacts[:5]:
+                    lines.append(f"- {imp}")
+        checklist_ai = guide.get("review_checklist") or []
+        if checklist_ai:
+            lines.extend(["", "### AI Review Checklist"])
+            for item in checklist_ai:
+                lines.append(f"- [{item.get('priority', '-')}] {item.get('item', '')}")
+        test_recs = guide.get("test_recommendations") or []
+        if test_recs:
+            lines.extend(["", "### Test Recommendations"])
+            for rec in test_recs[:10]:
+                lines.append(f"- **{rec.get('function', '?')}** ({rec.get('test_type', '')}): {rec.get('description', '')}")
+        ai_flag = "AI-enriched" if guide.get("ai_enriched") else "deterministic"
+        lines.append(f"\n> Generated: {guide.get('generated_at', '')} ({ai_flag})")
+
     out_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return str(out_path)
 
@@ -844,6 +878,24 @@ def run_impact_update(
                                 "current_index": idx,
                             },
                         )
+                    # Generate AI guide for FLAG targets (best-effort)
+                    _ai_guide = None
+                    try:
+                        from workflow.impact_ai_guide import (
+                            generate_impact_guide, ImpactGuideContext,
+                        )
+                        _linked = getattr(linked_docs, target, "")
+                        _flagged_fns = list(changed_types.keys())
+                        _ctx = ImpactGuideContext(
+                            changed_types=changed_types,
+                            impact_groups=impact_groups,
+                            by_name=by_name or {},
+                            suts_tcs=_load_suts_fn_tcs(_linked, _flagged_fns) if target == "suts" else {},
+                        )
+                        _ai_guide = generate_impact_guide(_ctx)
+                    except Exception:
+                        pass  # AI guide is optional
+
                     artifact_path = _write_review_artifact(
                         target,
                         trigger,
@@ -851,6 +903,7 @@ def run_impact_update(
                         impact_groups,
                         by_name,
                         getattr(linked_docs, target, ""),
+                        ai_guide=_ai_guide,
                     )
                     info["artifact_path"] = artifact_path
         if callable(on_progress):

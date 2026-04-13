@@ -786,6 +786,16 @@ def _summarize_vcast_tests(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
         else:
             unknown += 1
     pass_rate = (float(passed) / float(total)) if total > 0 else 0.0
+
+    # Failure classification
+    failure_categories: Dict[str, int] = {}
+    if failed > 0:
+        try:
+            from backend.services.test_summary_service import classify_failures_bulk
+            failure_categories = classify_failures_bulk(rows)
+        except Exception:
+            failure_categories = {"unknown": failed}
+
     return {
         "total": total,
         "passed": passed,
@@ -793,6 +803,7 @@ def _summarize_vcast_tests(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
         "skipped": skipped,
         "unknown": unknown,
         "pass_rate": pass_rate,
+        "failure_categories": failure_categories,
     }
 
 
