@@ -29,7 +29,7 @@ _RELATED_COL = 149         # C149
 _SEQ_COL = 13              # C13
 
 _MAX_SEQUENCES = 10
-_DEFAULT_SEQ_COUNT = 6
+_DEFAULT_SEQ_COUNT = 12  # 6 BV + up to 4 COND_COMB + up to 6 SWITCH
 
 _GEN_METHODS = {"AEC, ABV", "ABV, AOR", "AOR", "ABV"}
 _DEFAULT_GEN_METHOD = "AEC, ABV"
@@ -160,6 +160,23 @@ _STRAT_LABEL: Dict[str, str] = {
     "BV_MAX_INV": "유효 상한 초과 (경계+1): 에러/포화 처리 확인",
     "MIXED":      "혼합 경계값: 짝수 인수=최솟값, 홀수 인수=최댓값 조합",
 }
+
+def _get_strategy_label(strat_name: str, input_vars: List[str] = [],
+                        switch_cases: List[Tuple[str, Any, str]] = []) -> str:
+    """Get human-readable label for any strategy including COND_COMB and SWITCH."""
+    if strat_name in _STRAT_LABEL:
+        return _STRAT_LABEL[strat_name]
+    if strat_name.startswith("COND_COMB_"):
+        idx = int(strat_name.split("_")[-1])
+        var = input_vars[idx] if idx < len(input_vars) else f"var{idx}"
+        return f"조건 조합: {var}=최솟값, 나머지=중간값 → 분기 커버리지 향상"
+    if strat_name.startswith("SWITCH_"):
+        idx = int(strat_name.split("_")[-1])
+        if idx < len(switch_cases):
+            sw_var, sw_val, sw_label = switch_cases[idx]
+            return f"Switch-case: {sw_var}={sw_val} ({sw_label}) → case 분기 커버"
+        return f"Switch-case: case {idx}"
+    return strat_name
 
 # Domain-keyword based float boundaries for physical/engineering signals
 _FLOAT_DOMAIN_BOUNDS: List[Tuple[List[str], Dict[str, Any]]] = [
@@ -589,6 +606,17 @@ def generate_sequences(
         ("MIXED",      None),
     ]
 
+    # ── Additional strategies for branch coverage ──
+    # GAP 1: Condition combination — toggle each input while others stay at mid
+    if len(input_vars) >= 2:
+        for toggle_idx in range(min(4, len(input_vars))):
+            strategies.append((f"COND_COMB_{toggle_idx}", f"_cond_{toggle_idx}"))
+
+    # GAP 2: Switch-case — generate TC per enum/case value from logic_flow
+    _extra_switch = _extract_switch_cases(logic_flow, input_vars)[:6]
+    for sw_idx in range(len(_extra_switch)):
+        strategies.append((f"SWITCH_{sw_idx}", f"_switch_{sw_idx}"))
+
     # Pre-compute clamp/guard analysis once (avoid repeated DFS per strategy)
     check_vars = output_vars or input_vars
     _has_any_clamp = any(_flow_has_clamp_pattern(logic_flow, v) for v in check_vars)
@@ -614,7 +642,34 @@ def generate_sequences(
         inp_vals: Dict[str, Any] = {}
         exp_vals: Dict[str, Any] = {}
 
-        if bound_key:
+        if bound_key and bound_key.startswith("_cond_"):
+            # Condition combination: toggle one input to min, others stay at mid
+            toggle_idx = int(bound_key.split("_")[-1])
+            for i, v in enumerate(input_vars):
+                bnd = var_bounds.get(v, _DEFAULT_BOUNDARY)
+                if i == toggle_idx:
+                    raw = bnd.get("min", 0)  # toggle this one to boundary
+                else:
+                    raw = bnd.get("mid", 0)  # others at mid
+                inp_vals[v] = _format_test_value(raw, var_types.get(v, "uint8_t"))
+            for v in output_vars:
+                bnd = out_bounds.get(v, _DEFAULT_BOUNDARY)
+                exp_vals[v] = _format_test_value(bnd.get("mid", 0), out_types.get(v, "uint8_t"))
+        elif bound_key and bound_key.startswith("_switch_"):
+            # Switch-case: set target var to specific case value
+            sw_idx = int(bound_key.split("_")[-1])
+            if sw_idx < len(_extra_switch):
+                sw_var, sw_val, _ = _extra_switch[sw_idx]
+                for v in input_vars:
+                    bnd = var_bounds.get(v, _DEFAULT_BOUNDARY)
+                    if v == sw_var:
+                        inp_vals[v] = _format_test_value(sw_val, var_types.get(v, "uint8_t"))
+                    else:
+                        inp_vals[v] = _format_test_value(bnd.get("mid", 0), var_types.get(v, "uint8_t"))
+                for v in output_vars:
+                    bnd = out_bounds.get(v, _DEFAULT_BOUNDARY)
+                    exp_vals[v] = _format_test_value(bnd.get("mid", 0), out_types.get(v, "uint8_t"))
+        elif bound_key:
             for v in input_vars:
                 bnd = var_bounds.get(v, _DEFAULT_BOUNDARY)
                 raw = bnd.get(bound_key, 0)
@@ -637,7 +692,9 @@ def generate_sequences(
                 exp_vals[v] = _format_test_value(raw, out_types.get(v, "uint8_t"))
 
         # Build human-readable description showing actual variable names and values
-        label = _resolve_inv_label(strat_name)
+        label = _resolve_inv_label(strat_name) if strat_name in _STRAT_LABEL or strat_name.startswith("BV_") else (
+            _get_strategy_label(strat_name, input_vars, _extra_switch)
+        )
         inp_parts = [f"{v}={inp_vals[v]}" for v in input_vars if v in inp_vals]
         exp_parts = [f"{v}={exp_vals[v]}" for v in output_vars if v in exp_vals]
         desc_lines = [label]
@@ -778,6 +835,62 @@ def _is_state_machine_var(var_name: str) -> bool:
     keywords = ("state", "_st_", "_sts", "status", "mode", "phase", "stage",
                  "step", "fsm", "_sm_")
     return any(kw in name for kw in keywords)
+
+
+def _extract_switch_cases(
+    logic_flow: List[Dict[str, Any]],
+    input_vars: List[str],
+) -> List[Tuple[str, Any, str]]:
+    """Extract switch-case values from logic_flow for branch coverage.
+
+    Returns list of (variable_name, case_value, case_label) tuples.
+    """
+    cases: List[Tuple[str, Any, str]] = []
+    for node in logic_flow:
+        ntype = str(node.get("type", "")).lower()
+        # switch-case nodes
+        if ntype == "switch":
+            sw_var = str(node.get("variable", "") or node.get("condition", "")).strip()
+            # Match to input_vars
+            matched_var = ""
+            for iv in input_vars:
+                if iv.lower() in sw_var.lower() or sw_var.lower() in iv.lower():
+                    matched_var = iv
+                    break
+            if not matched_var and input_vars:
+                matched_var = input_vars[0]
+            for child in node.get("children", []) or node.get("cases", []):
+                case_val = child.get("value") or child.get("case")
+                case_label = str(child.get("label", "") or child.get("text", "") or f"case_{case_val}")
+                if case_val is not None:
+                    cases.append((matched_var, case_val, case_label))
+        # if-else chains that look like enum comparisons (e.g., "var == ENUM_VAL")
+        elif ntype == "if":
+            cond = str(node.get("condition", "")).strip()
+            for iv in input_vars:
+                if iv.lower() in cond.lower() and "==" in cond:
+                    # Extract the compared value
+                    parts = cond.split("==")
+                    if len(parts) == 2:
+                        val_str = parts[1].strip().strip("() ")
+                        try:
+                            val = int(val_str, 0)  # supports 0x hex
+                            cases.append((iv, val, f"조건 {iv}=={val_str}"))
+                        except ValueError:
+                            # Enum name — use ordinal
+                            cases.append((iv, val_str, f"조건 {iv}=={val_str}"))
+        # Recurse into children
+        for child in node.get("children", []):
+            cases.extend(_extract_switch_cases([child], input_vars))
+    # Deduplicate by (var, val)
+    seen = set()
+    unique: List[Tuple[str, Any, str]] = []
+    for c in cases:
+        key = (c[0], str(c[1]))
+        if key not in seen:
+            seen.add(key)
+            unique.append(c)
+    return unique
 
 
 def _flow_has_guard_clause(logic_flow: List[Dict[str, Any]], var_name: str) -> bool:
