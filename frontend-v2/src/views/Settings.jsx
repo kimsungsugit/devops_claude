@@ -115,6 +115,7 @@ function ScmSection() {
   const [list, setList] = useState([]);
   const [loading, setLoading] = useState(false);
   const [showForm, setShowForm] = useState(false);
+  const [editMode, setEditMode] = useState(null); // null = new, string = editing id
   const [form, setForm] = useState(defaultScmForm());
 
   function defaultScmForm() {
@@ -152,13 +153,24 @@ function ScmSection() {
       return;
     }
     try {
-      await post('/api/scm/register', form);
-      toast('success', 'SCM 등록 완료');
+      if (editMode) {
+        // Update existing
+        await fetch(`/api/scm/update/${editMode}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(form),
+        });
+        toast('success', 'SCM 수정 완료');
+      } else {
+        await post('/api/scm/register', form);
+        toast('success', 'SCM 등록 완료');
+      }
       setShowForm(false);
+      setEditMode(null);
       setForm(defaultScmForm());
       loadList();
     } catch (e) {
-      toast('error', `등록 실패: ${e.message}`);
+      toast('error', `${editMode ? '수정' : '등록'} 실패: ${e.message}`);
     }
   };
 
@@ -185,7 +197,7 @@ function ScmSection() {
       <div className="settings-section-title">
         🌿 SCM 레지스트리
         <div style={{ flex: 1 }} />
-        <button onClick={() => setShowForm(p => !p)}>
+        <button onClick={() => { setShowForm(p => !p); if (showForm) { setEditMode(null); setForm(defaultScmForm()); } }}>
           {showForm ? '취소' : '+ 새 SCM 등록'}
         </button>
         <button onClick={loadList} disabled={loading} style={{ marginLeft: 4 }}>
@@ -232,8 +244,11 @@ function ScmSection() {
               <input value={form.base_ref} onChange={e => setForm(p => ({ ...p, base_ref: e.target.value }))} placeholder="HEAD~1" />
             </div>
             <div className="field span-2">
-              <label>소스 루트 (복수 경로: 콤마 구분)</label>
-              <input value={form.source_root} onChange={e => setForm(p => ({ ...p, source_root: e.target.value }))} placeholder="D:\Sources\APP,D:\Sources\IF,D:\Sources\SYSTEM" />
+              <label>소스 루트 (복수 경로 지원)</label>
+              <SourceRootEditor
+                value={form.source_root}
+                onChange={v => setForm(p => ({ ...p, source_root: v }))}
+              />
             </div>
           </div>
           <div className="settings-section-title" style={{ fontSize: 12, marginBottom: 8, paddingBottom: 8 }}>연결 문서 경로</div>
@@ -245,7 +260,7 @@ function ScmSection() {
               </div>
             ))}
           </div>
-          <button className="btn-primary" onClick={saveScm} style={{ marginTop: 8 }}>저장</button>
+          <button className="btn-primary" onClick={saveScm} style={{ marginTop: 8 }}>{editMode ? '수정 저장' : '등록'}</button>
         </div>
       )}
 
@@ -263,7 +278,10 @@ function ScmSection() {
                 <td>{s.name}</td>
                 <td><span className="pill pill-info">{s.scm_type?.toUpperCase()}</span></td>
                 <td className="text-sm" style={{ maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s.scm_url}</td>
-                <td><button className="btn-sm" style={{ color: 'var(--danger)', borderColor: 'var(--danger)' }} onClick={() => deleteScm(s.id)}>삭제</button></td>
+                <td style={{ display: 'flex', gap: 4 }}>
+                  <button className="btn-sm" onClick={() => { setForm({ ...defaultScmForm(), ...s, linked_docs: { ...defaultScmForm().linked_docs, ...(s.linked_docs || {}) } }); setShowForm(true); setEditMode(s.id); }}>편집</button>
+                  <button className="btn-sm" style={{ color: 'var(--danger)', borderColor: 'var(--danger)' }} onClick={() => deleteScm(s.id)}>삭제</button>
+                </td>
               </tr>
             ))}
           </tbody>
@@ -529,6 +547,70 @@ function AdminSection() {
               </button>
             )}
           </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ── Source Root Editor (복수 경로 지원) ──────────────────────────── */
+function SourceRootEditor({ value, onChange }) {
+  const paths = (value || '').split(',').map(p => p.trim()).filter(Boolean);
+  const [newPath, setNewPath] = useState('');
+
+  const addPath = () => {
+    const p = newPath.trim();
+    if (!p) return;
+    const updated = [...paths, p];
+    onChange(updated.join(','));
+    setNewPath('');
+  };
+
+  const removePath = (idx) => {
+    const updated = paths.filter((_, i) => i !== idx);
+    onChange(updated.join(','));
+  };
+
+  return (
+    <div>
+      {paths.length > 0 && (
+        <div style={{ marginBottom: 6 }}>
+          {paths.map((p, i) => (
+            <div key={i} style={{
+              display: 'flex', alignItems: 'center', gap: 6, padding: '3px 0',
+              borderBottom: '1px solid var(--border-light, var(--border))',
+            }}>
+              <span style={{ fontSize: 11, fontFamily: 'monospace', flex: 1, wordBreak: 'break-all' }}>{p}</span>
+              <button
+                type="button"
+                onClick={() => removePath(i)}
+                style={{
+                  background: 'none', border: 'none', color: 'var(--color-danger, red)',
+                  cursor: 'pointer', fontSize: 14, padding: '0 4px', lineHeight: 1,
+                }}
+                title="경로 제거"
+              >
+                ×
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+      <div style={{ display: 'flex', gap: 6 }}>
+        <input
+          value={newPath}
+          onChange={e => setNewPath(e.target.value)}
+          onKeyDown={e => e.key === 'Enter' && (e.preventDefault(), addPath())}
+          placeholder="D:\Project\Sources\APP"
+          style={{ flex: 1, fontSize: 12 }}
+        />
+        <button type="button" onClick={addPath} className="btn-sm" style={{ whiteSpace: 'nowrap' }}>
+          + 경로 추가
+        </button>
+      </div>
+      {paths.length === 0 && (
+        <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 4 }}>
+          소스 코드 경로를 추가하세요. 부트/어플 분리 프로젝트는 여러 경로를 추가할 수 있습니다.
         </div>
       )}
     </div>

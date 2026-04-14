@@ -23,7 +23,10 @@ from backend.services.chat_approval_store import save_pending_approval
 from backend.services.jenkins_helpers import _detect_reports_dir, _job_slug
 from workflow.ai import agent_call, load_oai_config, load_oai_configs
 from workflow.chat_graph import emit_graph_event, new_chat_graph_state, run_chat_graph
-from workflow.mcp_bridge import get_langchain_mcp_tool_map
+try:
+    from workflow.mcp_bridge import get_langchain_mcp_tool_map
+except ImportError:
+    get_langchain_mcp_tool_map = None  # type: ignore[assignment]
 from workflow.rag import get_kb
 from workflow.retrieval import retrieve_contexts
 
