@@ -464,6 +464,25 @@ def collect_integration_flows(
                 seen_rel.add(r)
                 deduped_related.append(r)
 
+        # Collect indirect (global) vars for GLOBAL strategy
+        indirect_vars_list: List[str] = []
+        for g in globals_g + globals_s:
+            tag = str(g).upper()
+            gn = _clean_var_name(g)
+            if gn and "[INDIRECT]" in tag and gn not in {p[0] for p in input_pairs}:
+                if gn not in indirect_vars_list and len(indirect_vars_list) < 5:
+                    indirect_vars_list.append(gn)
+        # Also collect from callees
+        for callee in cross_calls[:4]:
+            callee_info = name_to_info.get(callee)
+            if callee_info:
+                for g in (callee_info.get("globals_global") or [])[:5]:
+                    tag = str(g).upper()
+                    gn = _clean_var_name(g)
+                    if gn and "[INDIRECT]" in tag and gn not in indirect_vars_list:
+                        if len(indirect_vars_list) < 5:
+                            indirect_vars_list.append(gn)
+
         flows.append({
             "flow_id": fid,
             "entry_fn": fn_name,
@@ -476,6 +495,7 @@ def collect_integration_flows(
             "input_raws": input_raws,   # annotated originals for type inference
             "expected_vars": expected_vars,
             "expected_raws": expected_raws,
+            "indirect_vars": indirect_vars_list,
             "asil": asil,
             "related_ids": deduped_related,
             "logic_flow": info.get("logic_flow") or [],

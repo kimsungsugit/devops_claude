@@ -1127,8 +1127,25 @@ def _generate_simple_steps(
         tc1.append({"action": f"내부 호출 확인: {call_str}", "expected": "하위 함수 정상 호출"})
     if outputs_hint and str(outputs_hint).strip() not in ("void", "None", ""):
         tc1.append({"action": "반환값 / 출력 확인", "expected": f"출력: {str(outputs_hint)[:80]} (정상 범위 내 값)"})
+    elif calls:
+        tc1.append({"action": "반환값 / 출력 확인",
+                     "expected": f"{name} 정상 완료, {', '.join(calls[:3])} 호출 후 글로벌 상태 정상 유지"})
     else:
         tc1.append({"action": "반환값 / 출력 확인", "expected": f"{name} 정상 완료, 부작용 없음"})
+
+    # For void functions with no explicit inputs, add globals-based verification
+    globals_list = func_info.get("globals_global") or func_info.get("globals") or []
+    if not inputs and globals_list:
+        # Extract global variable names for concrete expected
+        gvars = []
+        for g in globals_list[:4]:
+            gn = str(g).split("[")[0].strip().split(":")[-1].strip()
+            if gn and len(gn) > 2:
+                gvars.append(gn)
+        if gvars:
+            gvar_str = ", ".join(gvars[:3])
+            tc1.append({"action": f"글로벌 상태 확인: {gvar_str}",
+                         "expected": f"글로벌 변수 {gvar_str} 값이 함수 실행 전후 예상 범위 내 유지"})
 
     if not inputs or not var_cache:
         return [tc1]
