@@ -29,7 +29,7 @@ _RELATED_COL = 149         # C149
 _SEQ_COL = 13              # C13
 
 _MAX_SEQUENCES = 10
-_DEFAULT_SEQ_COUNT = 12  # 6 BV + up to 4 COND_COMB + up to 6 SWITCH
+_DEFAULT_SEQ_COUNT = 18  # 6 BV + 4 COND_COMB + 6 SWITCH + 3 LOOP + 3 GLOBAL + 1 VOID
 
 _GEN_METHODS = {"AEC, ABV", "ABV, AOR", "AOR", "ABV"}
 _DEFAULT_GEN_METHOD = "AEC, ABV"
@@ -162,8 +162,10 @@ _STRAT_LABEL: Dict[str, str] = {
 }
 
 def _get_strategy_label(strat_name: str, input_vars: List[str] = [],
-                        switch_cases: List[Tuple[str, Any, str]] = []) -> str:
-    """Get human-readable label for any strategy including COND_COMB and SWITCH."""
+                        switch_cases: List[Tuple[str, Any, str]] = [],
+                        loop_var: str = "",
+                        global_vars: List[str] = []) -> str:
+    """Get human-readable label for any strategy including COND_COMB, SWITCH, LOOP, GLOBAL."""
     if strat_name in _STRAT_LABEL:
         return _STRAT_LABEL[strat_name]
     if strat_name.startswith("COND_COMB_"):
@@ -176,6 +178,18 @@ def _get_strategy_label(strat_name: str, input_vars: List[str] = [],
             sw_var, sw_val, sw_label = switch_cases[idx]
             return f"Switch-case: {sw_var}={sw_val} ({sw_label}) → case 분기 커버"
         return f"Switch-case: case {idx}"
+    if strat_name == "LOOP_ZERO":
+        return f"루프 경계: {loop_var or 'counter'}=0 → 루프 미실행 경로 확인"
+    if strat_name == "LOOP_ONE":
+        return f"루프 경계: {loop_var or 'counter'}=1 → 루프 1회 실행 경로"
+    if strat_name == "LOOP_MAX":
+        return f"루프 경계: {loop_var or 'counter'}=최댓값 → 루프 최대 반복 경로"
+    if strat_name.startswith("GLOBAL_"):
+        idx = int(strat_name.split("_")[-1])
+        gv = global_vars[idx] if idx < len(global_vars) else f"global{idx}"
+        return f"글로벌 상태: {gv}=최솟값 → 글로벌 의존 분기 커버"
+    if strat_name == "VOID_SIDE_EFFECT":
+        return "Void 부작용: 입력 경계 초과 → 글로벌 변수 상태 변화 검증"
     return strat_name
 
 # Domain-keyword based float boundaries for physical/engineering signals
@@ -617,6 +631,40 @@ def generate_sequences(
     for sw_idx in range(len(_extra_switch)):
         strategies.append((f"SWITCH_{sw_idx}", f"_switch_{sw_idx}"))
 
+    # GAP 3: Loop boundary — 0/1/max iterations for loop-containing functions
+    _has_loop = any(
+        str(n.get("type", "")).lower() == "loop" for n in logic_flow if isinstance(n, dict)
+    )
+    _loop_var = ""
+    if _has_loop:
+        for n in logic_flow:
+            if str(n.get("type", "")).lower() == "loop":
+                cond = str(n.get("condition", ""))
+                for iv in input_vars:
+                    if iv.lower() in cond.lower():
+                        _loop_var = iv
+                        break
+                break
+        if not _loop_var and input_vars:
+            _loop_var = input_vars[0]
+        if _loop_var:
+            strategies.append(("LOOP_ZERO", "_loop_0"))
+            strategies.append(("LOOP_ONE", "_loop_1"))
+            strategies.append(("LOOP_MAX", "_loop_max"))
+
+    # GAP 4: Global state combination — toggle indirect (global) vars
+    indirect_vars: List[str] = unit.get("indirect_vars") or []
+    _extra_globals: List[str] = []
+    if indirect_vars:
+        for gv in indirect_vars[:3]:
+            _extra_globals.append(gv)
+            strategies.append((f"GLOBAL_{len(_extra_globals)-1}", f"_global_{len(_extra_globals)-1}"))
+
+    # GAP 5: Void side-effect — for functions with inputs but no outputs,
+    # add sequence using indirect_vars as expected outputs
+    if input_vars and not output_vars and indirect_vars:
+        strategies.append(("VOID_SIDE_EFFECT", "_void_se"))
+
     # Pre-compute clamp/guard analysis once (avoid repeated DFS per strategy)
     check_vars = output_vars or input_vars
     _has_any_clamp = any(_flow_has_clamp_pattern(logic_flow, v) for v in check_vars)
@@ -642,7 +690,48 @@ def generate_sequences(
         inp_vals: Dict[str, Any] = {}
         exp_vals: Dict[str, Any] = {}
 
-        if bound_key and bound_key.startswith("_cond_"):
+        if bound_key and bound_key.startswith("_loop_"):
+            # Loop boundary: set loop counter var to 0 / 1 / max
+            loop_key = bound_key.split("_")[-1]
+            for v in input_vars:
+                bnd = var_bounds.get(v, _DEFAULT_BOUNDARY)
+                if v == _loop_var:
+                    if loop_key == "0":
+                        inp_vals[v] = _format_test_value(0, var_types.get(v, "uint8_t"))
+                    elif loop_key == "1":
+                        inp_vals[v] = _format_test_value(1, var_types.get(v, "uint8_t"))
+                    else:  # max
+                        inp_vals[v] = _format_test_value(bnd.get("max", 255), var_types.get(v, "uint8_t"))
+                else:
+                    inp_vals[v] = _format_test_value(bnd.get("mid", 0), var_types.get(v, "uint8_t"))
+            for v in output_vars:
+                bnd = out_bounds.get(v, _DEFAULT_BOUNDARY)
+                exp_vals[v] = _format_test_value(bnd.get("mid", 0), out_types.get(v, "uint8_t"))
+        elif bound_key and bound_key.startswith("_global_"):
+            # Global state: toggle indirect var to min, inputs at mid
+            gv_idx = int(bound_key.split("_")[-1])
+            for v in input_vars:
+                bnd = var_bounds.get(v, _DEFAULT_BOUNDARY)
+                inp_vals[v] = _format_test_value(bnd.get("mid", 0), var_types.get(v, "uint8_t"))
+            # Add the global var as input with boundary value
+            if gv_idx < len(_extra_globals):
+                gv = _extra_globals[gv_idx]
+                gv_type = infer_variable_type(gv)
+                gv_bnd = _get_float_bounds_for_var(gv) if gv_type == "float" else get_boundary_values(gv_type)
+                inp_vals[gv] = _format_test_value(gv_bnd.get("min", 0), var_types.get(gv, gv_type) if gv in var_types else gv_type)
+            for v in output_vars:
+                bnd = out_bounds.get(v, _DEFAULT_BOUNDARY)
+                exp_vals[v] = _format_test_value(bnd.get("mid", 0), out_types.get(v, "uint8_t"))
+        elif bound_key == "_void_se":
+            # Void side-effect: input at boundary, check globals as expected
+            for v in input_vars:
+                bnd = var_bounds.get(v, _DEFAULT_BOUNDARY)
+                inp_vals[v] = _format_test_value(bnd.get("max_inv", bnd.get("max", 255) + 1), var_types.get(v, "uint8_t"))
+            for gv in _extra_globals:
+                gv_type = infer_variable_type(gv)
+                gv_bnd = _get_float_bounds_for_var(gv) if gv_type == "float" else get_boundary_values(gv_type)
+                exp_vals[gv] = _format_test_value(gv_bnd.get("mid", 0), gv_type)
+        elif bound_key and bound_key.startswith("_cond_"):
             # Condition combination: toggle one input to min, others stay at mid
             toggle_idx = int(bound_key.split("_")[-1])
             for i, v in enumerate(input_vars):
@@ -693,7 +782,8 @@ def generate_sequences(
 
         # Build human-readable description showing actual variable names and values
         label = _resolve_inv_label(strat_name) if strat_name in _STRAT_LABEL or strat_name.startswith("BV_") else (
-            _get_strategy_label(strat_name, input_vars, _extra_switch)
+            _get_strategy_label(strat_name, input_vars, _extra_switch,
+                                _loop_var if _has_loop else "", _extra_globals)
         )
         inp_parts = [f"{v}={inp_vals[v]}" for v in input_vars if v in inp_vals]
         exp_parts = [f"{v}={exp_vals[v]}" for v in output_vars if v in exp_vals]
