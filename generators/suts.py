@@ -29,7 +29,7 @@ _RELATED_COL = 149         # C149
 _SEQ_COL = 13              # C13
 
 _MAX_SEQUENCES = 10
-_DEFAULT_SEQ_COUNT = 18  # 6 BV + 4 COND_COMB + 6 SWITCH + 3 LOOP + 3 GLOBAL + 1 VOID
+_DEFAULT_SEQ_COUNT = 18  # Realistic cap: most functions 6-14; max theoretical 23
 
 _GEN_METHODS = {"AEC, ABV", "ABV, AOR", "AOR", "ABV"}
 _DEFAULT_GEN_METHOD = "AEC, ABV"
@@ -161,11 +161,14 @@ _STRAT_LABEL: Dict[str, str] = {
     "MIXED":      "혼합 경계값: 짝수 인수=최솟값, 홀수 인수=최댓값 조합",
 }
 
-def _get_strategy_label(strat_name: str, input_vars: List[str] = [],
-                        switch_cases: List[Tuple[str, Any, str]] = [],
+def _get_strategy_label(strat_name: str, input_vars: Optional[List[str]] = None,
+                        switch_cases: Optional[List[Tuple[str, Any, str]]] = None,
                         loop_var: str = "",
-                        global_vars: List[str] = []) -> str:
+                        global_vars: Optional[List[str]] = None) -> str:
     """Get human-readable label for any strategy including COND_COMB, SWITCH, LOOP, GLOBAL."""
+    input_vars = input_vars or []
+    switch_cases = switch_cases or []
+    global_vars = global_vars or []
     if strat_name in _STRAT_LABEL:
         return _STRAT_LABEL[strat_name]
     if strat_name.startswith("COND_COMB_"):
@@ -701,7 +704,7 @@ def generate_sequences(
                     elif loop_key == "1":
                         inp_vals[v] = _format_test_value(1, var_types.get(v, "uint8_t"))
                     else:  # max
-                        inp_vals[v] = _format_test_value(bnd.get("max", 255), var_types.get(v, "uint8_t"))
+                        inp_vals[v] = _format_test_value(min(bnd.get("max", 255), 255), var_types.get(v, "uint8_t"))
                 else:
                     inp_vals[v] = _format_test_value(bnd.get("mid", 0), var_types.get(v, "uint8_t"))
             for v in output_vars:
@@ -737,7 +740,7 @@ def generate_sequences(
             for i, v in enumerate(input_vars):
                 bnd = var_bounds.get(v, _DEFAULT_BOUNDARY)
                 if i == toggle_idx:
-                    raw = bnd.get("min", 0)  # toggle this one to boundary
+                    raw = bnd.get("min", 0) if toggle_idx % 2 == 0 else bnd.get("max", 0)
                 else:
                     raw = bnd.get("mid", 0)  # others at mid
                 inp_vals[v] = _format_test_value(raw, var_types.get(v, "uint8_t"))
@@ -781,12 +784,16 @@ def generate_sequences(
                 exp_vals[v] = _format_test_value(raw, out_types.get(v, "uint8_t"))
 
         # Build human-readable description showing actual variable names and values
-        label = _resolve_inv_label(strat_name) if strat_name in _STRAT_LABEL or strat_name.startswith("BV_") else (
+        label = _resolve_inv_label(strat_name) if strat_name in _STRAT_LABEL else (
             _get_strategy_label(strat_name, input_vars, _extra_switch,
                                 _loop_var if _has_loop else "", _extra_globals)
         )
         inp_parts = [f"{v}={inp_vals[v]}" for v in input_vars if v in inp_vals]
         exp_parts = [f"{v}={exp_vals[v]}" for v in output_vars if v in exp_vals]
+        # Include extra expected vars (e.g., globals from VOID_SIDE_EFFECT)
+        for v in exp_vals:
+            if v not in output_vars:
+                exp_parts.append(f"{v}={exp_vals[v]}")
         desc_lines = [label]
         if inp_parts:
             desc_lines.append("Input: " + ", ".join(inp_parts))
@@ -950,7 +957,9 @@ def _extract_switch_cases(
             if not matched_var and input_vars:
                 matched_var = input_vars[0]
             for child in node.get("children", []) or node.get("cases", []):
-                case_val = child.get("value") or child.get("case")
+                case_val = child.get("value")
+                if case_val is None:
+                    case_val = child.get("case")
                 case_label = str(child.get("label", "") or child.get("text", "") or f"case_{case_val}")
                 if case_val is not None:
                     cases.append((matched_var, case_val, case_label))
@@ -967,11 +976,11 @@ def _extract_switch_cases(
                             val = int(val_str, 0)  # supports 0x hex
                             cases.append((iv, val, f"조건 {iv}=={val_str}"))
                         except ValueError:
-                            # Enum name — use ordinal
-                            cases.append((iv, val_str, f"조건 {iv}=={val_str}"))
-        # Recurse into children
-        for child in node.get("children", []):
-            cases.extend(_extract_switch_cases([child], input_vars))
+                            pass  # Skip enum names — can't use as numeric test input
+        # Recurse into children (for non-switch nodes only)
+        if ntype != "switch":
+            for child in node.get("children", []):
+                cases.extend(_extract_switch_cases([child], input_vars))
     # Deduplicate by (var, val)
     seen = set()
     unique: List[Tuple[str, Any, str]] = []
