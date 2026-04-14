@@ -193,6 +193,8 @@ def _get_strategy_label(strat_name: str, input_vars: Optional[List[str]] = None,
         return f"글로벌 상태: {gv}=최솟값 → 글로벌 의존 분기 커버"
     if strat_name == "VOID_SIDE_EFFECT":
         return "Void 부작용: 입력 경계 초과 → 글로벌 변수 상태 변화 검증"
+    if strat_name == "MCDC_BASE":
+        return "MC/DC baseline: 모든 조건 True → 결정 True 확인"
     if strat_name.startswith("MCDC_"):
         return f"MC/DC: 개별 조건 토글 → 결정 결과 변화 확인 (ASIL D)"
     return strat_name
@@ -673,6 +675,9 @@ def generate_sequences(
     # GAP 6: MC/DC — Modified Condition/Decision Coverage
     # Extract conditions from logic_flow and generate True/False toggle per condition
     _mcdc_conditions = _extract_mcdc_conditions(logic_flow, input_vars)
+    # Add baseline FIRST (all conditions at true values)
+    if _mcdc_conditions:
+        strategies.append(("MCDC_BASE", "_mcdc_base"))
     for mc_idx in range(len(_mcdc_conditions[:6])):
         strategies.append((f"MCDC_{mc_idx}", f"_mcdc_{mc_idx}"))
 
@@ -701,11 +706,35 @@ def generate_sequences(
         inp_vals: Dict[str, Any] = {}
         exp_vals: Dict[str, Any] = {}
 
-        if bound_key and bound_key.startswith("_mcdc_"):
+        if bound_key == "_mcdc_base":
+            # MC/DC baseline: all conditions at true values
+            for v in input_vars:
+                bnd = var_bounds.get(v, _DEFAULT_BOUNDARY)
+                # Check if this var has an MCDC condition
+                mc_true = None
+                for mc in _mcdc_conditions:
+                    if mc[0] == v:
+                        mc_true = mc[3]  # true_val
+                        break
+                if mc_true is not None:
+                    inp_vals[v] = _format_test_value(mc_true, var_types.get(v, "uint8_t"))
+                else:
+                    inp_vals[v] = _format_test_value(bnd.get("mid", 0), var_types.get(v, "uint8_t"))
+            for v in output_vars:
+                bnd = out_bounds.get(v, _DEFAULT_BOUNDARY)
+                exp_vals[v] = _format_test_value(bnd.get("mid", 0), out_types.get(v, "uint8_t"))
+        elif bound_key and bound_key.startswith("_mcdc_"):
             # MC/DC: toggle one condition to flip the decision outcome
             mc_idx = int(bound_key.split("_")[-1])
             if mc_idx < len(_mcdc_conditions):
-                mc_var, mc_op, mc_threshold, mc_true_val, mc_false_val = _mcdc_conditions[mc_idx]
+                mc_var, _, _, _, mc_false_val = _mcdc_conditions[mc_idx]
+                # Clamp mc_false_val to type boundary to prevent overflow (e.g. 256 for uint8)
+                try:
+                    _mc_type = var_types.get(mc_var, "uint8_t")
+                    _mc_bnd = var_bounds.get(mc_var, _DEFAULT_BOUNDARY)
+                    mc_false_val = max(_mc_bnd.get("min", 0), min(mc_false_val, _mc_bnd.get("max", 255)))
+                except (TypeError, ValueError):
+                    pass
                 for v in input_vars:
                     bnd = var_bounds.get(v, _DEFAULT_BOUNDARY)
                     if v == mc_var:
@@ -964,9 +993,10 @@ def _extract_mcdc_conditions(
     """Extract MC/DC-relevant conditions from logic_flow.
 
     Returns list of (variable, operator, threshold, true_value, false_value) tuples.
-    For 'if (A > 10)': variable=A, op='>', threshold=10, true_val=11, false_val=9
+    For 'if (A > 10)': variable=A, op='>', threshold=10, true_val=11, false_val=10 (boundary value)
     """
     conditions: List[Tuple[str, str, Any, Any, Any]] = []
+    seen_keys: set = set()
     _OPS = {"<": ("<", lambda t: t - 1, lambda t: t),
             ">": (">", lambda t: t + 1, lambda t: t),
             "<=": ("<=", lambda t: t, lambda t: t + 1),
@@ -1003,7 +1033,8 @@ def _extract_mcdc_conditions(
                         true_val = true_fn(threshold)
                         false_val = false_fn(threshold)
                         key = (iv, op_str, threshold)
-                        if key not in [(c[0], c[1], c[2]) for c in conditions]:
+                        if key not in seen_keys:
+                            seen_keys.add(key)
                             conditions.append((iv, op_label, threshold, true_val, false_val))
                     except (ValueError, TypeError):
                         pass

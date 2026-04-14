@@ -680,7 +680,7 @@ def _generate_sub_cases(
                 break
             comb_inputs: Dict[str, Any] = {}
             for vi, vname in enumerate(input_vars):
-                bv = bv_sets[vi]
+                bv = bv_sets[vi] if vi < len(bv_sets) else _infer_boundary_values(vname)
                 if vi == toggle_idx:
                     comb_inputs[vname] = bv[1] if toggle_idx % 2 == 0 else bv[5]  # min or max
                 else:
@@ -715,7 +715,7 @@ def _generate_sub_cases(
             for ev_idx, ev in enumerate(expected_vars):
                 ev_raw = expected_raws[ev_idx] if ev_idx < len(expected_raws) else ev
                 bv_exp = _infer_boundary_values(ev_raw)
-                err_expected[ev] = bv_exp[1] if err_key == "min_inv" else bv_exp[3]
+                err_expected[ev] = bv_exp[1] if err_key == "min_inv" else bv_exp[5]
             direction = "하한 초과" if err_key == "min_inv" else "상한 초과"
             sub_cases.append({
                 "case_num": next_num,
@@ -744,6 +744,7 @@ def _generate_sub_cases(
                 ev_raw = expected_raws[ev_idx] if ev_idx < len(expected_raws) else ev
                 bv_exp = _infer_boundary_values(ev_raw)
                 gstate_expected[ev] = bv_exp[3]
+            gstate_expected[gv] = gv_bv[1]  # expect global stays at min (no change by function)
             sub_cases.append({
                 "case_num": next_num,
                 "case_label": f"GLOBAL_{gv_idx+1} [{gv}=min]",
