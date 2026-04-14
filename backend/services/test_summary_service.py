@@ -168,9 +168,9 @@ class GateResult:
 
 
 DEFAULT_TEST_QUALITY_GATES = {
-    "pass_rate_min": 95.0,
-    "coverage_line_min": 80.0,
-    "coverage_branch_min": 70.0,
+    "pass_rate_min": 99.0,
+    "coverage_line_min": 90.0,
+    "coverage_branch_min": 85.0,
     "max_new_failures": 0,
 }
 

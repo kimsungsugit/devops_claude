@@ -75,7 +75,8 @@ class TestBuildUnitBreakdown:
 
 class TestEvaluateQualityGates:
     def test_all_pass(self):
-        summary = {"pass_rate": 0.98, "coverage_line": 0.85, "coverage_branch": 0.75, "new_failures": 0}
+        # Default gates: 99% pass_rate, 90% line, 85% branch
+        summary = {"pass_rate": 0.995, "coverage_line": 0.92, "coverage_branch": 0.88, "new_failures": 0}
         result = evaluate_quality_gates(summary)
         assert result["overall_pass"] is True
         assert all(g["status"] != "fail" for g in result["gates"])
@@ -88,7 +89,7 @@ class TestEvaluateQualityGates:
         assert rate_gate["status"] == "fail"
 
     def test_fail_new_failures(self):
-        summary = {"pass_rate": 0.99, "coverage_line": 0.90, "coverage_branch": 0.80, "new_failures": 3}
+        summary = {"pass_rate": 0.995, "coverage_line": 0.95, "coverage_branch": 0.90, "new_failures": 3}
         result = evaluate_quality_gates(summary)
         assert result["overall_pass"] is False
 

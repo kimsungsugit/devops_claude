@@ -195,11 +195,21 @@ UDS_ACCURACY_REPORT_TIMEOUT = _safe_int("UDS_ACCURACY_TIMEOUT", 300)
 UDS_SOURCE_SECTIONS_CACHE_TTL = _safe_int("UDS_SOURCE_CACHE_TTL", 1800)
 
 # ---------------- 테스트 품질 게이트 ----------------
+# ISO 26262 ASIL B+ 기준 상향 (환경변수로 오버라이드 가능)
 TEST_QUALITY_GATES = {
-    "pass_rate_min": _safe_float("TEST_PASS_RATE_MIN", 95.0),
-    "coverage_line_min": _safe_float("TEST_COVERAGE_LINE_MIN", 80.0),
-    "coverage_branch_min": _safe_float("TEST_COVERAGE_BRANCH_MIN", 70.0),
+    "pass_rate_min": _safe_float("TEST_PASS_RATE_MIN", 99.0),
+    "coverage_line_min": _safe_float("TEST_COVERAGE_LINE_MIN", 90.0),
+    "coverage_branch_min": _safe_float("TEST_COVERAGE_BRANCH_MIN", 85.0),
     "max_new_failures": _safe_int("TEST_MAX_NEW_FAILURES", 0),
+}
+
+# ASIL별 품질 게이트 프로파일 (evaluate_quality_gates에서 선택 사용)
+TEST_QUALITY_GATES_BY_ASIL = {
+    "QM": {"pass_rate_min": 95.0, "coverage_line_min": 70.0, "coverage_branch_min": 60.0, "max_new_failures": 5},
+    "A":  {"pass_rate_min": 97.0, "coverage_line_min": 80.0, "coverage_branch_min": 70.0, "max_new_failures": 2},
+    "B":  {"pass_rate_min": 99.0, "coverage_line_min": 90.0, "coverage_branch_min": 85.0, "max_new_failures": 0},
+    "C":  {"pass_rate_min": 99.5, "coverage_line_min": 95.0, "coverage_branch_min": 90.0, "max_new_failures": 0},
+    "D":  {"pass_rate_min": 100.0, "coverage_line_min": 100.0, "coverage_branch_min": 95.0, "max_new_failures": 0},
 }
 
 # ---------------- 커버리지/테스트 임계치 설정 ----------------
