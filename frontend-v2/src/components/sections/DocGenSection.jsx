@@ -62,7 +62,15 @@ export default function DocGenSection({ job, analysisResult }) {
 
     try {
       // Get source_root and linked_docs from SCM registry
-      const scm = analysisResult?.scmList?.[0];
+      let scm = analysisResult?.scmList?.[0];
+      // Fallback: fetch from SCM API if not in analysisResult
+      if (!scm?.source_root) {
+        try {
+          const scmData = await api('/api/scm/list');
+          const items = scmData?.items || (Array.isArray(scmData) ? scmData : []);
+          if (items.length > 0) scm = items[0];
+        } catch (_) {}
+      }
       const linkedDocs = scm?.linked_docs || {};
 
       const formData = new FormData();
@@ -153,7 +161,15 @@ export default function DocGenSection({ job, analysisResult }) {
     }
   }, [job, cfg, cacheRoot, docPaths, toast, analysisResult]);
 
-  const scm = analysisResult?.scmList?.[0];
+  const [scm, setScm] = useState(analysisResult?.scmList?.[0] || null);
+  useEffect(() => {
+    if (!scm?.source_root) {
+      api('/api/scm/list').then(d => {
+        const items = d?.items || (Array.isArray(d) ? d : []);
+        if (items.length > 0) setScm(items[0]);
+      }).catch(() => {});
+    }
+  }, [scm]);
   const linkedDocs = scm?.linked_docs || {};
   const localDocPaths = (() => {
     try { return JSON.parse(localStorage.getItem('devops_v2_doc_paths') || '{}'); } catch (_) { return {}; }
@@ -298,7 +314,15 @@ function VectorCastExport({ job, analysisResult, cfg, cacheRoot }) {
   const [registering, setRegistering] = useState(null);
   const [packages, setPackages] = useState([]);
   const [loading, setLoading] = useState(false);
-  const scm = analysisResult?.scmList?.[0];
+  const [scm, setScm] = useState(analysisResult?.scmList?.[0] || null);
+  useEffect(() => {
+    if (!scm?.source_root) {
+      api('/api/scm/list').then(d => {
+        const items = d?.items || (Array.isArray(d) ? d : []);
+        if (items.length > 0) setScm(items[0]);
+      }).catch(() => {});
+    }
+  }, []);
 
   // 패키지 목록 조회
   const loadPackages = useCallback(async () => {
