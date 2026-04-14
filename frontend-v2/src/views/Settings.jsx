@@ -231,9 +231,9 @@ function ScmSection() {
               <label>Base Ref</label>
               <input value={form.base_ref} onChange={e => setForm(p => ({ ...p, base_ref: e.target.value }))} placeholder="HEAD~1" />
             </div>
-            <div className="field">
-              <label>소스 루트</label>
-              <input value={form.source_root} onChange={e => setForm(p => ({ ...p, source_root: e.target.value }))} placeholder="/src" />
+            <div className="field span-2">
+              <label>소스 루트 (복수 경로: 콤마 구분)</label>
+              <input value={form.source_root} onChange={e => setForm(p => ({ ...p, source_root: e.target.value }))} placeholder="D:\Sources\APP,D:\Sources\IF,D:\Sources\SYSTEM" />
             </div>
           </div>
           <div className="settings-section-title" style={{ fontSize: 12, marginBottom: 8, paddingBottom: 8 }}>연결 문서 경로</div>
