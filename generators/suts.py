@@ -373,6 +373,15 @@ def collect_unit_functions(
         if not asil or asil.upper() == "TBD":
             asil = _resolve_unit_asil(info, sds_map) or asil
 
+        # Collect indirect (global) vars for GLOBAL/VOID strategies
+        indirect_vars: List[str] = []
+        for g in globals_g + globals_s:
+            tag = str(g).upper()
+            gn = _clean_global_name(g)
+            if gn and "[INDIRECT]" in tag and gn not in inp_set and gn not in out_set:
+                if gn not in indirect_vars and len(indirect_vars) < 5:
+                    indirect_vars.append(gn)
+
         units.append({
             "fid": fid,
             "name": name,
@@ -380,6 +389,7 @@ def collect_unit_functions(
             "component": component,
             "input_vars": input_vars[:max_inp],
             "output_vars": output_vars[:max_out],
+            "indirect_vars": indirect_vars,
             "logic_flow": info.get("logic_flow") or [],
             "calls_list": info.get("calls_list") or [],
             "description": info.get("description", ""),
@@ -1018,15 +1028,15 @@ def _extract_mcdc_conditions(
                 conditions.extend(_extract_mcdc_conditions([child], input_vars))
             continue
 
-        # Parse simple conditions: "var > 10", "var == 0", etc.
+        # Parse conditions: "var > 10", "var >= other_var", "var == CONST"
         for iv in input_vars:
             for op_str, (op_label, true_fn, false_fn) in _OPS.items():
-                # Match patterns like "var > 10" or "var>=0x0A"
-                pat = re.compile(
+                # Pattern 1: var OP numeric_constant ("var > 10", "var>=0x0A")
+                pat_num = re.compile(
                     rf"(?:^|[^a-zA-Z_]){re.escape(iv)}\s*{re.escape(op_str)}\s*([\-]?(?:0[xX][0-9a-fA-F]+|\d+))",
                     re.IGNORECASE,
                 )
-                m = pat.search(cond)
+                m = pat_num.search(cond)
                 if m:
                     try:
                         threshold = int(m.group(1), 0)
@@ -1038,6 +1048,42 @@ def _extract_mcdc_conditions(
                             conditions.append((iv, op_label, threshold, true_val, false_val))
                     except (ValueError, TypeError):
                         pass
+                    continue
+
+                # Pattern 2: var OP other_variable ("var >= other_var")
+                pat_var = re.compile(
+                    rf"(?:^|[^a-zA-Z_]){re.escape(iv)}\s*{re.escape(op_str)}\s*([a-zA-Z_]\w+)",
+                    re.IGNORECASE,
+                )
+                m2 = pat_var.search(cond)
+                if m2:
+                    rhs_var = m2.group(1)
+                    # Use boundary values of the input variable for MC/DC toggle
+                    iv_type = infer_variable_type(iv)
+                    iv_bnd = (
+                        _get_float_bounds_for_var(iv) if iv_type == "float"
+                        else get_boundary_values(iv_type)
+                    )
+                    mid = iv_bnd.get("mid", 127)
+                    bmin = iv_bnd.get("min", 0)
+                    bmax = iv_bnd.get("max", 255)
+                    # For "var >= other": true when var is high, false when var is low
+                    if op_str in (">", ">="):
+                        true_val = bmax
+                        false_val = bmin
+                    elif op_str in ("<", "<="):
+                        true_val = bmin
+                        false_val = bmax
+                    elif op_str == "==":
+                        true_val = mid
+                        false_val = bmin if mid != bmin else bmax
+                    else:  # !=
+                        true_val = bmin if mid != bmin else bmax
+                        false_val = mid
+                    key = (iv, op_str, rhs_var)
+                    if key not in seen_keys:
+                        seen_keys.add(key)
+                        conditions.append((iv, op_label, rhs_var, true_val, false_val))
 
         # Recurse into children
         for child in node.get("children", []):
