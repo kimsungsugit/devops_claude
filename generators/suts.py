@@ -29,7 +29,7 @@ _RELATED_COL = 149         # C149
 _SEQ_COL = 13              # C13
 
 _MAX_SEQUENCES = 10
-_DEFAULT_SEQ_COUNT = 18  # Realistic cap: most functions 6-14; max theoretical 23
+_DEFAULT_SEQ_COUNT = 24  # 6 BV + 4 COND + 6 SWITCH + 3 LOOP + 3 GLOBAL + 1 VOID + 6 MC/DC
 
 _GEN_METHODS = {"AEC, ABV", "ABV, AOR", "AOR", "ABV"}
 _DEFAULT_GEN_METHOD = "AEC, ABV"
@@ -193,6 +193,8 @@ def _get_strategy_label(strat_name: str, input_vars: Optional[List[str]] = None,
         return f"글로벌 상태: {gv}=최솟값 → 글로벌 의존 분기 커버"
     if strat_name == "VOID_SIDE_EFFECT":
         return "Void 부작용: 입력 경계 초과 → 글로벌 변수 상태 변화 검증"
+    if strat_name.startswith("MCDC_"):
+        return f"MC/DC: 개별 조건 토글 → 결정 결과 변화 확인 (ASIL D)"
     return strat_name
 
 # Domain-keyword based float boundaries for physical/engineering signals
@@ -668,6 +670,12 @@ def generate_sequences(
     if input_vars and not output_vars and indirect_vars:
         strategies.append(("VOID_SIDE_EFFECT", "_void_se"))
 
+    # GAP 6: MC/DC — Modified Condition/Decision Coverage
+    # Extract conditions from logic_flow and generate True/False toggle per condition
+    _mcdc_conditions = _extract_mcdc_conditions(logic_flow, input_vars)
+    for mc_idx in range(len(_mcdc_conditions[:6])):
+        strategies.append((f"MCDC_{mc_idx}", f"_mcdc_{mc_idx}"))
+
     # Pre-compute clamp/guard analysis once (avoid repeated DFS per strategy)
     check_vars = output_vars or input_vars
     _has_any_clamp = any(_flow_has_clamp_pattern(logic_flow, v) for v in check_vars)
@@ -693,7 +701,22 @@ def generate_sequences(
         inp_vals: Dict[str, Any] = {}
         exp_vals: Dict[str, Any] = {}
 
-        if bound_key and bound_key.startswith("_loop_"):
+        if bound_key and bound_key.startswith("_mcdc_"):
+            # MC/DC: toggle one condition to flip the decision outcome
+            mc_idx = int(bound_key.split("_")[-1])
+            if mc_idx < len(_mcdc_conditions):
+                mc_var, mc_op, mc_threshold, mc_true_val, mc_false_val = _mcdc_conditions[mc_idx]
+                for v in input_vars:
+                    bnd = var_bounds.get(v, _DEFAULT_BOUNDARY)
+                    if v == mc_var:
+                        # Set to the false-side value (toggle from baseline true)
+                        inp_vals[v] = _format_test_value(mc_false_val, var_types.get(v, "uint8_t"))
+                    else:
+                        inp_vals[v] = _format_test_value(bnd.get("mid", 0), var_types.get(v, "uint8_t"))
+                for v in output_vars:
+                    bnd = out_bounds.get(v, _DEFAULT_BOUNDARY)
+                    exp_vals[v] = _format_test_value(bnd.get("mid", 0), out_types.get(v, "uint8_t"))
+        elif bound_key and bound_key.startswith("_loop_"):
             # Loop boundary: set loop counter var to 0 / 1 / max
             loop_key = bound_key.split("_")[-1]
             for v in input_vars:
@@ -932,6 +955,64 @@ def _is_state_machine_var(var_name: str) -> bool:
     keywords = ("state", "_st_", "_sts", "status", "mode", "phase", "stage",
                  "step", "fsm", "_sm_")
     return any(kw in name for kw in keywords)
+
+
+def _extract_mcdc_conditions(
+    logic_flow: List[Dict[str, Any]],
+    input_vars: List[str],
+) -> List[Tuple[str, str, Any, Any, Any]]:
+    """Extract MC/DC-relevant conditions from logic_flow.
+
+    Returns list of (variable, operator, threshold, true_value, false_value) tuples.
+    For 'if (A > 10)': variable=A, op='>', threshold=10, true_val=11, false_val=9
+    """
+    conditions: List[Tuple[str, str, Any, Any, Any]] = []
+    _OPS = {"<": ("<", lambda t: t - 1, lambda t: t),
+            ">": (">", lambda t: t + 1, lambda t: t),
+            "<=": ("<=", lambda t: t, lambda t: t + 1),
+            ">=": (">=", lambda t: t, lambda t: t - 1),
+            "==": ("==", lambda t: t, lambda t: t + 1),
+            "!=": ("!=", lambda t: t + 1, lambda t: t)}
+
+    for node in logic_flow:
+        ntype = str(node.get("type", "")).lower()
+        if ntype != "if":
+            # Recurse
+            for child in node.get("children", []):
+                conditions.extend(_extract_mcdc_conditions([child], input_vars))
+            continue
+
+        cond = str(node.get("condition", "")).strip()
+        if not cond:
+            for child in node.get("children", []):
+                conditions.extend(_extract_mcdc_conditions([child], input_vars))
+            continue
+
+        # Parse simple conditions: "var > 10", "var == 0", etc.
+        for iv in input_vars:
+            for op_str, (op_label, true_fn, false_fn) in _OPS.items():
+                # Match patterns like "var > 10" or "var>=0x0A"
+                pat = re.compile(
+                    rf"(?:^|[^a-zA-Z_]){re.escape(iv)}\s*{re.escape(op_str)}\s*([\-]?(?:0[xX][0-9a-fA-F]+|\d+))",
+                    re.IGNORECASE,
+                )
+                m = pat.search(cond)
+                if m:
+                    try:
+                        threshold = int(m.group(1), 0)
+                        true_val = true_fn(threshold)
+                        false_val = false_fn(threshold)
+                        key = (iv, op_str, threshold)
+                        if key not in [(c[0], c[1], c[2]) for c in conditions]:
+                            conditions.append((iv, op_label, threshold, true_val, false_val))
+                    except (ValueError, TypeError):
+                        pass
+
+        # Recurse into children
+        for child in node.get("children", []):
+            conditions.extend(_extract_mcdc_conditions([child], input_vars))
+
+    return conditions
 
 
 def _extract_switch_cases(

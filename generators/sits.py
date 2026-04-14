@@ -35,8 +35,8 @@ _RELATED_COL = 145     # ER — Related ID (SwCom_xx, SwSTR_xx …)
 
 _MAX_INPUT_PARAMS = _INPUT_COL_END - _INPUT_COL_START + 1   # 67
 _MAX_EXP_PARAMS = _EXP_COL_END - _EXP_COL_START + 1        # 70
-_MAX_SUBCASES = 10
-_DEFAULT_SUBCASES = 7
+_MAX_SUBCASES = 16
+_DEFAULT_SUBCASES = 14  # 7 BV + 4 COND_COMB + 2 ERR_PROP + 2 GLOBAL
 
 # Boundary value sets for common C types — 7 values per type:
 #   min_inv | min_valid | low_mid | mid | high_mid | max_valid | max_inv
@@ -669,6 +669,90 @@ def _generate_sub_cases(
             "inputs": inputs,
             "expected": expected,
         })
+
+    # ── Additional strategies for branch coverage ──
+    next_num = len(sub_cases) + 1
+
+    # GAP A: Condition combination — toggle each input while others at mid
+    if len(input_vars) >= 2 and len(sub_cases) < max_cases:
+        for toggle_idx in range(min(4, len(input_vars))):
+            if len(sub_cases) >= max_cases:
+                break
+            comb_inputs: Dict[str, Any] = {}
+            for vi, vname in enumerate(input_vars):
+                bv = bv_sets[vi]
+                if vi == toggle_idx:
+                    comb_inputs[vname] = bv[1] if toggle_idx % 2 == 0 else bv[5]  # min or max
+                else:
+                    comb_inputs[vname] = bv[3]  # mid
+            comb_expected: Dict[str, Any] = {}
+            for ev_idx, ev in enumerate(expected_vars):
+                ev_raw = expected_raws[ev_idx] if ev_idx < len(expected_raws) else ev
+                bv_exp = _infer_boundary_values(ev_raw)
+                comb_expected[ev] = bv_exp[3]  # mid expected
+            toggle_var = input_vars[toggle_idx] if toggle_idx < len(input_vars) else f"var{toggle_idx}"
+            direction = "최솟값" if toggle_idx % 2 == 0 else "최댓값"
+            sub_cases.append({
+                "case_num": next_num,
+                "case_label": f"COND_{toggle_idx+1} [{toggle_var}={direction}]",
+                "call_chain": "",
+                "precondition": f"조건 조합: {toggle_var}={direction}, 나머지=중간값",
+                "inputs": comb_inputs,
+                "expected": comb_expected,
+            })
+            next_num += 1
+
+    # GAP C: Error propagation — inject boundary errors and check chain behavior
+    if input_vars and len(sub_cases) < max_cases:
+        for err_idx, err_key in enumerate(["min_inv", "max_inv"]):
+            if len(sub_cases) >= max_cases:
+                break
+            err_inputs: Dict[str, Any] = {}
+            for vi, vname in enumerate(input_vars):
+                bv = bv_sets[vi]
+                err_inputs[vname] = bv[0] if err_key == "min_inv" else bv[-1]
+            err_expected: Dict[str, Any] = {}
+            for ev_idx, ev in enumerate(expected_vars):
+                ev_raw = expected_raws[ev_idx] if ev_idx < len(expected_raws) else ev
+                bv_exp = _infer_boundary_values(ev_raw)
+                err_expected[ev] = bv_exp[1] if err_key == "min_inv" else bv_exp[3]
+            direction = "하한 초과" if err_key == "min_inv" else "상한 초과"
+            sub_cases.append({
+                "case_num": next_num,
+                "case_label": f"ERR_PROP_{err_idx+1} [{direction}]",
+                "call_chain": "",
+                "precondition": f"에러 전파: 입력 {direction} → 콜체인 방어 처리 확인",
+                "inputs": err_inputs,
+                "expected": err_expected,
+            })
+            next_num += 1
+
+    # GAP D: Global state combination — toggle indirect (global) vars
+    indirect_vars = flow.get("indirect_vars") or []
+    if indirect_vars and input_vars and len(sub_cases) < max_cases:
+        for gv_idx, gv in enumerate(indirect_vars[:2]):
+            if len(sub_cases) >= max_cases:
+                break
+            gstate_inputs: Dict[str, Any] = {}
+            for vi, vname in enumerate(input_vars):
+                bv = bv_sets[vi]
+                gstate_inputs[vname] = bv[3]  # mid
+            gv_bv = _infer_boundary_values(gv)
+            gstate_inputs[gv] = gv_bv[1]  # global at min
+            gstate_expected: Dict[str, Any] = {}
+            for ev_idx, ev in enumerate(expected_vars):
+                ev_raw = expected_raws[ev_idx] if ev_idx < len(expected_raws) else ev
+                bv_exp = _infer_boundary_values(ev_raw)
+                gstate_expected[ev] = bv_exp[3]
+            sub_cases.append({
+                "case_num": next_num,
+                "case_label": f"GLOBAL_{gv_idx+1} [{gv}=min]",
+                "call_chain": "",
+                "precondition": f"글로벌 상태: {gv}=최솟값, 입력=중간값 → 상태 의존 분기 커버",
+                "inputs": gstate_inputs,
+                "expected": gstate_expected,
+            })
+            next_num += 1
 
     return sub_cases
 
