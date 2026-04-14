@@ -583,3 +583,84 @@ def vcast_scan_folder(body: Dict[str, Any]) -> Dict[str, Any]:
         })
     return {"ok": True, "folder": str(p), "items": files, "count": len(files)}
 
+
+@router.post("/api/vcast/test-summary")
+async def vcast_test_summary(req: Request) -> Dict[str, Any]:
+    """VectorCAST 파싱 결과에 대한 테스트 요약 분석.
+
+    Input: parsedData dict (from /api/vcast/parse or /api/vcast/process-jenkins)
+    Returns: failure_categories, quality_gates, unit_breakdown, executive_summary
+    """
+    try:
+        body = await req.json()
+        parsed = body.get("parsed_data") or body
+        previous = body.get("previous_data")
+
+        from backend.services.test_summary_service import (
+            classify_failures_bulk,
+            build_unit_breakdown,
+            evaluate_quality_gates,
+            build_trend_analysis,
+            generate_executive_summary,
+        )
+
+        # Extract test results for unit breakdown
+        test_results = parsed.get("test_results") or parsed.get("data", {}).get("test_results") or {}
+        unit_breakdown = build_unit_breakdown(test_results) if test_results else []
+
+        # Basic counts
+        test_count = parsed.get("test_count") or parsed.get("data", {}).get("test_count") or 0
+        passed_count = parsed.get("passed_count") or parsed.get("data", {}).get("passed_count") or 0
+        failed_count = test_count - passed_count if test_count else 0
+        pass_rate = passed_count / test_count if test_count > 0 else 0.0
+
+        # Fallback from unit_breakdown if test_results were available
+        if unit_breakdown and not test_count:
+            test_count = sum(u["total"] for u in unit_breakdown)
+            passed_count = sum(u["passed"] for u in unit_breakdown)
+            failed_count = sum(u["failed"] for u in unit_breakdown)
+            pass_rate = passed_count / test_count if test_count > 0 else 0.0
+
+        test_summary = {
+            "total": test_count,
+            "passed": passed_count,
+            "failed": failed_count,
+            "skipped": 0,
+            "pass_rate": pass_rate,
+        }
+
+        # Failure classification from raw rows (if available)
+        raw_rows = parsed.get("test_rows") or []
+        failure_categories = classify_failures_bulk(raw_rows) if raw_rows else {}
+
+        # Quality gates
+        coverage_data = parsed.get("statement_data") or parsed.get("data", {}).get("statement_data") or {}
+        gate_input = {
+            "pass_rate": pass_rate,
+            "coverage_line": body.get("coverage_line", 0),
+            "coverage_branch": body.get("coverage_branch", 0),
+            "new_failures": 0,
+        }
+        quality_gates = evaluate_quality_gates(gate_input)
+
+        # Trend
+        trend = build_trend_analysis(test_summary, previous) if previous else {"available": False}
+
+        # Executive summary
+        summary = generate_executive_summary(
+            test_summary, quality_gates, unit_breakdown, failure_categories, trend,
+        )
+
+        return {
+            "ok": True,
+            "test_summary": test_summary,
+            "failure_categories": failure_categories,
+            "quality_gates": quality_gates,
+            "unit_breakdown": unit_breakdown,
+            "trend": trend,
+            "executive_summary": summary,
+        }
+    except Exception as e:
+        _logger.warning("test-summary failed: %s", e)
+        raise HTTPException(500, str(e))
+

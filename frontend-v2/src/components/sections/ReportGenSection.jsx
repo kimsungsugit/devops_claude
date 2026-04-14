@@ -340,6 +340,26 @@ function VCastPanel({ job, analysisResult }) {
   const [scanFolder, setScanFolder] = useState('');
   const [scanFiles, setScanFiles] = useState([]);
   const [scanLoading, setScanLoading] = useState(false);
+  const [testSummary, setTestSummary] = useState(null);
+  const [analyzing, setAnalyzing] = useState(false);
+
+  const analyzeTests = useCallback(async () => {
+    if (!parsedData) return;
+    setAnalyzing(true);
+    try {
+      const data = await post('/api/vcast/test-summary', {
+        parsed_data: parsedData?.data ?? parsedData,
+        coverage_line: analysisResult?.reportData?.tester?.coverage_line ?? 0,
+        coverage_branch: analysisResult?.reportData?.tester?.coverage_branch ?? 0,
+      });
+      setTestSummary(data);
+      toast('success', `테스트 분석 완료 — ${data?.executive_summary?.verdict || 'OK'}`);
+    } catch (e) {
+      toast('error', `테스트 분석 실패: ${e.message}`);
+    } finally {
+      setAnalyzing(false);
+    }
+  }, [parsedData, analysisResult, toast]);
 
   const scanFolderFiles = useCallback(async () => {
     if (!scanFolder.trim()) { toast('warning', '폴더 경로를 입력하세요.'); return; }
@@ -566,6 +586,114 @@ function VCastPanel({ job, analysisResult }) {
               : `${parsedData.data?.test_count ?? parsedData.test_count ?? '?'} test cases`
             }
           </span>
+          <button className="btn-sm" style={{ marginLeft: 8, fontSize: 10 }} onClick={analyzeTests} disabled={analyzing}>
+            {analyzing ? '분석 중...' : '테스트 분석'}
+          </button>
+        </div>
+      )}
+
+      {/* Test Summary Panel */}
+      {testSummary && (
+        <div style={{ marginBottom: 12, padding: 10, background: 'var(--bg)', borderRadius: 6, border: '1px solid var(--border)' }}>
+          <div style={{ fontWeight: 700, fontSize: 12, marginBottom: 8 }}>테스트 분석 결과</div>
+
+          {/* Verdict */}
+          <div style={{ marginBottom: 8 }}>
+            <StatusBadge tone={testSummary.executive_summary?.verdict === 'PASS' ? 'success'
+              : testSummary.executive_summary?.verdict === 'FAIL' ? 'danger' : 'warning'}>
+              {testSummary.executive_summary?.verdict_text || testSummary.executive_summary?.verdict}
+            </StatusBadge>
+          </div>
+
+          {/* Metrics */}
+          <div className="stats-row" style={{ marginBottom: 8 }}>
+            <div className="stat-card">
+              <div className="stat-value">{testSummary.test_summary?.total ?? 0}</div>
+              <div className="stat-label">전체</div>
+            </div>
+            <div className="stat-card">
+              <div className="stat-value" style={{ color: 'var(--color-success)' }}>{testSummary.test_summary?.passed ?? 0}</div>
+              <div className="stat-label">통과</div>
+            </div>
+            <div className="stat-card">
+              <div className="stat-value" style={{ color: testSummary.test_summary?.failed > 0 ? 'var(--color-danger)' : 'var(--color-success)' }}>
+                {testSummary.test_summary?.failed ?? 0}
+              </div>
+              <div className="stat-label">실패</div>
+            </div>
+            <div className="stat-card">
+              <div className="stat-value">{testSummary.executive_summary?.metrics?.pass_rate_pct ?? 0}%</div>
+              <div className="stat-label">통과율</div>
+            </div>
+          </div>
+
+          {/* Quality Gates */}
+          {testSummary.quality_gates?.gates && (
+            <div style={{ marginBottom: 8 }}>
+              <div style={{ fontSize: 11, fontWeight: 600, marginBottom: 4 }}>
+                품질 게이트 {testSummary.quality_gates.overall_pass
+                  ? <StatusBadge tone="success">PASS</StatusBadge>
+                  : <StatusBadge tone="danger">FAIL</StatusBadge>}
+              </div>
+              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                {testSummary.quality_gates.gates.map((g, i) => (
+                  <div key={i} style={{
+                    padding: '4px 8px', borderRadius: 4, fontSize: 10,
+                    border: `1px solid ${g.status === 'pass' ? 'var(--color-success)' : g.status === 'warn' ? 'var(--color-warning)' : 'var(--color-danger)'}`,
+                    background: 'var(--bg-secondary)',
+                  }}>
+                    <span style={{ fontWeight: 600 }}>{g.name}</span>: {g.actual}% / {g.threshold}%
+                    <span style={{ marginLeft: 4 }}>{g.status === 'pass' ? '✓' : g.status === 'warn' ? '⚠' : '✗'}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Failure Categories */}
+          {testSummary.failure_categories && Object.values(testSummary.failure_categories).some(v => v > 0) && (
+            <div style={{ marginBottom: 8 }}>
+              <div style={{ fontSize: 11, fontWeight: 600, marginBottom: 4 }}>실패 분류</div>
+              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                {Object.entries(testSummary.failure_categories).filter(([,v]) => v > 0).map(([cat, cnt]) => (
+                  <span key={cat} className={`pill ${cat === 'crash' ? 'pill-danger' : cat === 'assertion' ? 'pill-warning' : 'pill-info'}`}
+                    style={{ fontSize: 10 }}>
+                    {cat}: {cnt}건
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Unit Breakdown (top 5 worst) */}
+          {testSummary.unit_breakdown?.length > 0 && (
+            <div>
+              <div style={{ fontSize: 11, fontWeight: 600, marginBottom: 4 }}>유닛별 결과 (실패 상위)</div>
+              <table style={{ width: '100%', fontSize: 10, borderCollapse: 'collapse' }}>
+                <thead>
+                  <tr style={{ borderBottom: '1px solid var(--border)' }}>
+                    <th style={{ textAlign: 'left', padding: '3px 6px' }}>유닛</th>
+                    <th style={{ textAlign: 'right', padding: '3px 6px' }}>통과</th>
+                    <th style={{ textAlign: 'right', padding: '3px 6px' }}>실패</th>
+                    <th style={{ textAlign: 'right', padding: '3px 6px' }}>통과율</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {testSummary.unit_breakdown
+                    .sort((a, b) => a.pass_rate - b.pass_rate)
+                    .slice(0, 8)
+                    .map((u, i) => (
+                    <tr key={i} style={{ borderBottom: '1px solid var(--border-light, var(--border))' }}>
+                      <td style={{ padding: '3px 6px', fontFamily: 'monospace' }}>{u.unit_name}</td>
+                      <td style={{ textAlign: 'right', padding: '3px 6px', color: 'var(--color-success)' }}>{u.passed}</td>
+                      <td style={{ textAlign: 'right', padding: '3px 6px', color: u.failed > 0 ? 'var(--color-danger)' : undefined }}>{u.failed}</td>
+                      <td style={{ textAlign: 'right', padding: '3px 6px', fontWeight: 600 }}>{Math.round(u.pass_rate * 100)}%</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
         </div>
       )}
 

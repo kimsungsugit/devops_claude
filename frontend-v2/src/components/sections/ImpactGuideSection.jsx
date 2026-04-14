@@ -19,6 +19,7 @@ export default function ImpactGuideSection({ job, analysisResult }) {
 
   const impact = analysisResult?.impactData;
   const [guide, setGuide] = useState(null);
+  const [aiGuide, setAiGuide] = useState(null);
   const [loading, setLoading] = useState(false);
   const [selectedFn, setSelectedFn] = useState(null);
   const [searchTerm, setSearchTerm] = useState('');
@@ -174,6 +175,16 @@ export default function ImpactGuideSection({ job, analysisResult }) {
           hop2Fns: (impactGroups.indirect_2hop || []).length,
         },
       });
+
+      // Fetch AI risk/cross-doc guide (best-effort)
+      try {
+        const aiData = await post('/api/impact/ai-guide', {
+          changed_types: Object.fromEntries(activeFnEntries),
+          impact_groups: activeImpactGroups,
+        });
+        if (aiData?.ok) setAiGuide(aiData.guide);
+      } catch (_) { /* AI guide is optional */ }
+
       toast('success', '영향도 가이드 생성 완료');
     } catch (e) {
       toast('error', `가이드 생성 실패: ${e.message}`);
@@ -291,6 +302,107 @@ export default function ImpactGuideSection({ job, analysisResult }) {
           );
         })()}
       </div>
+
+      {/* AI Risk & Cross-Document Impact Guide */}
+      {aiGuide && (
+        <div className="panel" style={{ marginBottom: 12 }}>
+          <div className="panel-header">
+            <span className="panel-title">AI 영향도 분석 가이드</span>
+            <span className="text-muted text-sm">{aiGuide.ai_enriched ? 'AI-enriched' : 'deterministic'}</span>
+          </div>
+
+          {/* Risk Assessment */}
+          <div style={{ display: 'flex', gap: 10, marginBottom: 10, alignItems: 'center' }}>
+            <div style={{
+              padding: '8px 16px', borderRadius: 6, fontWeight: 700, fontSize: 14,
+              background: aiGuide.risk?.grade === 'CRITICAL' ? 'var(--color-danger)' :
+                aiGuide.risk?.grade === 'HIGH' ? '#e67e22' :
+                aiGuide.risk?.grade === 'MEDIUM' ? 'var(--color-warning)' : 'var(--color-success)',
+              color: '#fff',
+            }}>
+              {aiGuide.risk?.grade} ({aiGuide.risk?.score}/100)
+            </div>
+            <div style={{ fontSize: 11 }}>
+              <div>ASIL: <strong>{aiGuide.risk?.max_asil}</strong></div>
+              {aiGuide.risk?.asil_escalation && (
+                <StatusBadge tone="danger">ASIL Escalation</StatusBadge>
+              )}
+            </div>
+            <div style={{ flex: 1, fontSize: 10, color: 'var(--text-muted)' }}>
+              {aiGuide.risk?.justification}
+            </div>
+          </div>
+
+          {/* Safety Functions */}
+          {aiGuide.risk?.affected_safety_functions?.length > 0 && (
+            <div style={{ marginBottom: 10, padding: 8, background: 'var(--bg)', borderRadius: 6, borderLeft: '3px solid var(--color-danger)' }}>
+              <div style={{ fontSize: 11, fontWeight: 600, marginBottom: 4 }}>안전 관련 함수</div>
+              <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+                {aiGuide.risk.affected_safety_functions.map((sf, i) => (
+                  <span key={i} className="pill pill-danger" style={{ fontSize: 9 }}>{sf}</span>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Cross-Document Impact */}
+          {aiGuide.cross_doc_impacts && Object.keys(aiGuide.cross_doc_impacts).length > 0 && (
+            <div style={{ marginBottom: 10 }}>
+              <div style={{ fontSize: 11, fontWeight: 600, marginBottom: 6 }}>문서별 변경 영향</div>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(250px, 1fr))', gap: 6 }}>
+                {Object.entries(aiGuide.cross_doc_impacts).map(([doc, impacts]) => (
+                  <div key={doc} style={{ padding: 8, border: '1px solid var(--border)', borderRadius: 6, background: 'var(--bg)' }}>
+                    <div style={{ fontWeight: 700, fontSize: 11, textTransform: 'uppercase', marginBottom: 4, color: 'var(--accent)' }}>{doc}</div>
+                    {impacts.slice(0, 3).map((imp, i) => (
+                      <div key={i} style={{ fontSize: 10, color: 'var(--text-muted)', marginBottom: 2 }}>{imp}</div>
+                    ))}
+                    {impacts.length > 3 && <div style={{ fontSize: 9, color: 'var(--text-muted)' }}>+{impacts.length - 3}건 더</div>}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Review Checklist */}
+          {aiGuide.review_checklist?.length > 0 && (
+            <div style={{ marginBottom: 10 }}>
+              <div style={{ fontSize: 11, fontWeight: 600, marginBottom: 4 }}>리뷰 체크리스트</div>
+              {aiGuide.review_checklist.map((item, i) => (
+                <div key={i} style={{ display: 'flex', gap: 6, alignItems: 'center', padding: '3px 0', fontSize: 11 }}>
+                  <span className={`pill ${item.priority === 'CRITICAL' ? 'pill-danger' : item.priority === 'HIGH' ? 'pill-warning' : 'pill-info'}`}
+                    style={{ fontSize: 9, minWidth: 60, textAlign: 'center' }}>{item.priority}</span>
+                  <span>{item.item}</span>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Test Recommendations */}
+          {aiGuide.test_recommendations?.length > 0 && (
+            <div>
+              <div style={{ fontSize: 11, fontWeight: 600, marginBottom: 4 }}>테스트 추가 제안</div>
+              <table style={{ width: '100%', fontSize: 10, borderCollapse: 'collapse' }}>
+                <thead>
+                  <tr style={{ borderBottom: '1px solid var(--border)' }}>
+                    <th style={{ textAlign: 'left', padding: '3px 6px' }}>함수</th>
+                    <th style={{ textAlign: 'left', padding: '3px 6px' }}>유형</th>
+                    <th style={{ textAlign: 'left', padding: '3px 6px' }}>설명</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {aiGuide.test_recommendations.slice(0, 8).map((rec, i) => (
+                    <tr key={i} style={{ borderBottom: '1px solid var(--border-light, var(--border))' }}>
+                      <td style={{ padding: '3px 6px', fontFamily: 'monospace', fontWeight: 600 }}>{rec.function}</td>
+                      <td style={{ padding: '3px 6px' }}><span className="pill pill-info" style={{ fontSize: 9 }}>{rec.test_type}</span></td>
+                      <td style={{ padding: '3px 6px' }}>{rec.description}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Detailed guide */}
       {guide && (

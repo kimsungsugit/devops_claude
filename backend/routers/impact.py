@@ -62,11 +62,49 @@ def impact_analyze(req: ImpactAnalyzeRequest) -> Dict[str, Any]:
         data = json.loads(out_json.read_text(encoding="utf-8"))
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"impact json parse failed: {exc}")
+    # AI guide enrichment (optional)
+    ai_guide_data = None
+    if req.include_ai_guide:
+        try:
+            from workflow.impact_ai_guide import (
+                generate_impact_guide, ImpactGuideContext,
+            )
+            ctx = ImpactGuideContext(
+                changed_types=data.get("changed_function_types") or {},
+                impact_groups=data.get("impact") or {},
+                by_name=data.get("by_name") or {},
+            )
+            guide = generate_impact_guide(ctx)
+            ai_guide_data = guide.to_dict()
+        except Exception as e:
+            _logger.debug("AI guide generation failed: %s", e)
+
     return {
         "ok": True,
         "result": data,
         "report_path": str(out_md),
         "json_path": str(out_json),
+        "ai_guide": ai_guide_data,
     }
+
+
+@router.post("/api/impact/ai-guide")
+async def impact_ai_guide(req: Request) -> Dict[str, Any]:
+    """Generate AI risk assessment and cross-document impact guide."""
+    try:
+        body = await req.json()
+        from workflow.impact_ai_guide import (
+            generate_impact_guide, ImpactGuideContext,
+        )
+        ctx = ImpactGuideContext(
+            changed_types=body.get("changed_types") or {},
+            impact_groups=body.get("impact_groups") or {},
+            by_name=body.get("by_name") or {},
+        )
+        guide = generate_impact_guide(ctx)
+        return {"ok": True, "guide": guide.to_dict()}
+    except Exception as e:
+        _logger.warning("ai-guide failed: %s", e)
+        return {"ok": False, "error": str(e)}
 
 
