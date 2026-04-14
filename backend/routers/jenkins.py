@@ -1039,7 +1039,8 @@ async def jenkins_uds_generate(
     req_types: str = Form(""),
     show_mapping_evidence: bool = Form(False),
 ) -> Dict[str, Any]:
-    source_root_path = Path(source_root).resolve() if source_root else None
+    _first_root = source_root.split(",")[0].strip() if source_root else ""
+    source_root_path = Path(_first_root).resolve() if _first_root else None
     if not source_root_path or not source_root_path.exists() or not source_root_path.is_dir():
         raise HTTPException(status_code=400, detail="source_root(코드 루트)가 필요합니다.")
     req_paths_list = _parse_path_list(req_paths)
@@ -1359,7 +1360,9 @@ async def jenkins_uds_generate_async(
     rag_top_k: Optional[int] = Form(None),
     rag_categories: str = Form(""),
 ) -> Dict[str, Any]:
-    source_root_path = Path(source_root).resolve() if source_root else None
+    # 콤마 구분 복수 경로 지원: 첫 번째 경로로 검증, 전체를 generate에 전달
+    _first_root = source_root.split(",")[0].strip() if source_root else ""
+    source_root_path = Path(_first_root).resolve() if _first_root else None
     if not source_root_path or not source_root_path.exists() or not source_root_path.is_dir():
         raise HTTPException(status_code=400, detail="source_root(코드 루트)가 필요합니다.")
     job_id = uuid.uuid4().hex
@@ -1754,7 +1757,8 @@ async def jenkins_sts_generate_async(
 ) -> Dict[str, Any]:
     from sts_generator import generate_sts
 
-    source_root_path = Path(source_root).resolve() if source_root else None
+    _first_root = source_root.split(",")[0].strip() if source_root else ""
+    source_root_path = Path(_first_root).resolve() if _first_root else None
     if not source_root_path or not source_root_path.exists() or not source_root_path.is_dir():
         raise HTTPException(status_code=400, detail="source_root is required")
     job_id = uuid.uuid4().hex
@@ -1957,7 +1961,8 @@ async def jenkins_suts_generate_async(
 ) -> Dict[str, Any]:
     from suts_generator import generate_suts
 
-    source_root_path = Path(source_root).resolve() if source_root else None
+    _first_root = source_root.split(",")[0].strip() if source_root else ""
+    source_root_path = Path(_first_root).resolve() if _first_root else None
     if not source_root_path or not source_root_path.exists() or not source_root_path.is_dir():
         raise HTTPException(status_code=400, detail="source_root is required")
     tpl_path: Optional[str] = None
