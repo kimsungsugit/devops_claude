@@ -1029,7 +1029,15 @@ def _extract_mcdc_conditions(
             continue
 
         # Parse conditions: "var > 10", "var >= other_var", "var == CONST"
-        for iv in input_vars:
+        # Also extract condition variables NOT in input_vars (locals, constants)
+        _cond_vars = re.findall(r"[a-zA-Z_]\w+", cond)
+        _all_vars = list(input_vars)
+        for cv in _cond_vars:
+            if cv.lower() not in {v.lower() for v in _all_vars} and len(cv) > 2:
+                if cv.lower() not in ("if", "else", "true", "false", "null", "void", "return"):
+                    _all_vars.append(cv)
+
+        for iv in _all_vars:
             for op_str, (op_label, true_fn, false_fn) in _OPS.items():
                 # Pattern 1: var OP numeric_constant ("var > 10", "var>=0x0A")
                 pat_num = re.compile(
@@ -1051,11 +1059,18 @@ def _extract_mcdc_conditions(
                     continue
 
                 # Pattern 2: var OP other_variable ("var >= other_var")
+                # Also try: other_var OP input_var (reversed operand order)
                 pat_var = re.compile(
                     rf"(?:^|[^a-zA-Z_]){re.escape(iv)}\s*{re.escape(op_str)}\s*([a-zA-Z_]\w+)",
                     re.IGNORECASE,
                 )
-                m2 = pat_var.search(cond)
+                # Also match when input_var is on the RIGHT side: "local_var >= input_var"
+                _reverse_ops = {">": "<", "<": ">", ">=": "<=", "<=": ">=", "==": "==", "!=": "!="}
+                pat_rev = re.compile(
+                    rf"([a-zA-Z_]\w+)\s*{re.escape(op_str)}\s*{re.escape(iv)}(?:[^a-zA-Z_]|$)",
+                    re.IGNORECASE,
+                )
+                m2 = pat_var.search(cond) or pat_rev.search(cond)
                 if m2:
                     rhs_var = m2.group(1)
                     # Use boundary values of the input variable for MC/DC toggle
