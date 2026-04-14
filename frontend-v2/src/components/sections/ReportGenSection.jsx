@@ -642,7 +642,8 @@ function VCastPanel({ job, analysisResult }) {
                     border: `1px solid ${g.status === 'pass' ? 'var(--color-success)' : g.status === 'warn' ? 'var(--color-warning)' : 'var(--color-danger)'}`,
                     background: 'var(--bg-secondary)',
                   }}>
-                    <span style={{ fontWeight: 600 }}>{g.name}</span>: {g.actual}% / {g.threshold}%
+                    <span style={{ fontWeight: 600 }}>{g.name}</span>:{' '}
+                    {g.name.includes('실패') ? `${g.actual}건 / 최대 ${g.threshold}건` : `${g.actual}% / ${g.threshold}%`}
                     <span style={{ marginLeft: 4 }}>{g.status === 'pass' ? '✓' : g.status === 'warn' ? '⚠' : '✗'}</span>
                   </div>
                 ))}

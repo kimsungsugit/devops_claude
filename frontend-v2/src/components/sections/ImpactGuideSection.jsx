@@ -317,7 +317,8 @@ export default function ImpactGuideSection({ job, analysisResult }) {
               padding: '8px 16px', borderRadius: 6, fontWeight: 700, fontSize: 14,
               background: aiGuide.risk?.grade === 'CRITICAL' ? 'var(--color-danger)' :
                 aiGuide.risk?.grade === 'HIGH' ? '#e67e22' :
-                aiGuide.risk?.grade === 'MEDIUM' ? 'var(--color-warning)' : 'var(--color-success)',
+                aiGuide.risk?.grade === 'MEDIUM' ? 'var(--color-warning)' :
+                aiGuide.risk?.grade === 'LOW' ? 'var(--color-success)' : '#888',
               color: '#fff',
             }}>
               {aiGuide.risk?.grade} ({aiGuide.risk?.score}/100)
@@ -350,15 +351,18 @@ export default function ImpactGuideSection({ job, analysisResult }) {
             <div style={{ marginBottom: 10 }}>
               <div style={{ fontSize: 11, fontWeight: 600, marginBottom: 6 }}>문서별 변경 영향</div>
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(250px, 1fr))', gap: 6 }}>
-                {Object.entries(aiGuide.cross_doc_impacts).map(([doc, impacts]) => (
-                  <div key={doc} style={{ padding: 8, border: '1px solid var(--border)', borderRadius: 6, background: 'var(--bg)' }}>
-                    <div style={{ fontWeight: 700, fontSize: 11, textTransform: 'uppercase', marginBottom: 4, color: 'var(--accent)' }}>{doc}</div>
-                    {impacts.slice(0, 3).map((imp, i) => (
-                      <div key={i} style={{ fontSize: 10, color: 'var(--text-muted)', marginBottom: 2 }}>{imp}</div>
-                    ))}
-                    {impacts.length > 3 && <div style={{ fontSize: 9, color: 'var(--text-muted)' }}>+{impacts.length - 3}건 더</div>}
-                  </div>
-                ))}
+                {Object.entries(aiGuide.cross_doc_impacts).map(([doc, impacts]) => {
+                  const items = Array.isArray(impacts) ? impacts : [];
+                  return (
+                    <div key={doc} style={{ padding: 8, border: '1px solid var(--border)', borderRadius: 6, background: 'var(--bg)' }}>
+                      <div style={{ fontWeight: 700, fontSize: 11, textTransform: 'uppercase', marginBottom: 4, color: 'var(--accent)' }}>{doc}</div>
+                      {items.slice(0, 3).map((imp, i) => (
+                        <div key={i} style={{ fontSize: 10, color: 'var(--text-muted)', marginBottom: 2 }}>{imp}</div>
+                      ))}
+                      {items.length > 3 && <div style={{ fontSize: 9, color: 'var(--text-muted)' }}>+{items.length - 3}건 더</div>}
+                    </div>
+                  );
+                })}
               </div>
             </div>
           )}

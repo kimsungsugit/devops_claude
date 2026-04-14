@@ -608,9 +608,12 @@ async def vcast_test_summary(req: Request) -> Dict[str, Any]:
         test_results = parsed.get("test_results") or parsed.get("data", {}).get("test_results") or {}
         unit_breakdown = build_unit_breakdown(test_results) if test_results else []
 
-        # Basic counts
-        test_count = parsed.get("test_count") or parsed.get("data", {}).get("test_count") or 0
-        passed_count = parsed.get("passed_count") or parsed.get("data", {}).get("passed_count") or 0
+        # Basic counts (use 'is not None' to preserve valid 0 values)
+        _data = parsed.get("data") or {}
+        _tc = parsed.get("test_count")
+        test_count = _tc if _tc is not None else (_data.get("test_count") or 0)
+        _pc = parsed.get("passed_count")
+        passed_count = _pc if _pc is not None else (_data.get("passed_count") or 0)
         failed_count = test_count - passed_count if test_count else 0
         pass_rate = passed_count / test_count if test_count > 0 else 0.0
 
@@ -629,12 +632,22 @@ async def vcast_test_summary(req: Request) -> Dict[str, Any]:
             "pass_rate": pass_rate,
         }
 
-        # Failure classification from raw rows (if available)
-        raw_rows = parsed.get("test_rows") or []
-        failure_categories = classify_failures_bulk(raw_rows) if raw_rows else {}
+        # Failure classification: try test_results first, then raw test_rows
+        failure_categories = {}
+        if test_results and failed_count > 0:
+            fail_rows = []
+            for tc_name, items in test_results.items():
+                if not isinstance(items, list):
+                    items = [items]
+                for item in items:
+                    passed = item.get("passed", True) if isinstance(item, dict) else getattr(item, "passed", True)
+                    if not passed:
+                        fail_rows.append({"result": "FAIL", **(item if isinstance(item, dict) else {})})
+            failure_categories = classify_failures_bulk(fail_rows) if fail_rows else {}
+        elif parsed.get("test_rows"):
+            failure_categories = classify_failures_bulk(parsed["test_rows"])
 
         # Quality gates
-        coverage_data = parsed.get("statement_data") or parsed.get("data", {}).get("statement_data") or {}
         gate_input = {
             "pass_rate": pass_rate,
             "coverage_line": body.get("coverage_line", 0),
