@@ -12,7 +12,7 @@ const DOC_TYPES = [
 
 /* ── SVG Bar Chart (no library) ──────────────────────────────────── */
 function TrendChart({ data }) {
-  if (!data || data.length === 0) {
+  if (!Array.isArray(data) || data.length === 0) {
     return (
       <div className="qd-empty">
         <span className="qd-empty-icon">--</span>
