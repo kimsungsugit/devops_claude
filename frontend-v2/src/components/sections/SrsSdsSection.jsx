@@ -534,8 +534,8 @@ function deriveStatus(r) {
 const PAGE_SIZES = [30, 50, 100];
 const SOURCE_ICONS = { STS: 'S', SUTS: 'U', SITS: 'I', VectorCAST: 'V' };
 const SOURCE_COLORS = { STS: '#2563eb', SUTS: '#7c3aed', SITS: '#0891b2', VectorCAST: '#ea580c' };
-const CONFIDENCE_LABELS = { exact: 'Exact', fuzzy: 'Fuzzy', mixed: 'Mixed' };
-const CONFIDENCE_COLORS = { exact: '#16a34a', fuzzy: '#d97706', mixed: '#6366f1' };
+const CONFIDENCE_LABELS = { exact: 'Exact', direct: 'Direct', indirect: 'Indirect', fuzzy: 'Fuzzy', mixed: 'Mixed' };
+const CONFIDENCE_COLORS = { exact: '#16a34a', direct: '#16a34a', indirect: '#d97706', fuzzy: '#9ca3af', mixed: '#2563eb' };
 
 function TraceMatrix({ matrix }) {
   const inner = matrix?.matrix ?? matrix;
@@ -829,42 +829,52 @@ function TraceMatrix({ matrix }) {
       {summary && (
         <details style={{ marginBottom: 12 }}>
           <summary className="text-sm" style={{ cursor: 'pointer', fontWeight: 600 }}>데이터 소스 상세</summary>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginTop: 8 }}>
-            {/* 설계 추적 (T1, T2) */}
-            {summary.mapped_sds_count != null && (
-              <div style={{ padding: 8, background: 'var(--bg)', borderRadius: 6, border: '1px solid var(--border)' }}>
-                <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 4 }}>T1: SRS → SDS (아키텍처)</div>
-                <div style={{ fontSize: 14, fontWeight: 700 }}>{summary.mapped_sds_count} / {coverage.total}</div>
-                <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>SDS SwCom → 요구사항 매핑</div>
-              </div>
-            )}
-            <div style={{ padding: 8, background: 'var(--bg)', borderRadius: 6, border: '1px solid var(--border)' }}>
-              <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 4 }}>T2: SDS → UDS (상세 설계)</div>
-              <div style={{ fontSize: 14, fontWeight: 700 }}>{summary.mapped_source_count ?? coverage.covered} / {coverage.total}</div>
-              <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>UDS 함수 → 요구사항 매핑</div>
-            </div>
-            {/* 검증 추적 (T3, T4, T5) */}
-            <div style={{ padding: 8, background: 'var(--bg)', borderRadius: 6, border: '1px solid var(--border)' }}>
-              <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 4 }}>T3: SRS → STS (SW 테스트)</div>
-              <div style={{ fontSize: 14, fontWeight: 700 }}>{summary.mapped_sts_count ?? '-'} / {coverage.total}</div>
-              <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>STS TC → 요구사항 매핑</div>
-            </div>
-            <div style={{ padding: 8, background: 'var(--bg)', borderRadius: 6, border: '1px solid var(--border)' }}>
-              <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 4 }}>T4: UDS → SUTS (단위 테스트)</div>
-              <div style={{ fontSize: 14, fontWeight: 700 }}>{summary.mapped_suts_count ?? '-'} / {coverage.total}</div>
-              <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>SUTS TC → 함수 매핑</div>
-            </div>
-            <div style={{ padding: 8, background: 'var(--bg)', borderRadius: 6, border: '1px solid var(--border)' }}>
-              <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 4 }}>T5: SDS → SITS (통합 테스트)</div>
-              <div style={{ fontSize: 14, fontWeight: 700 }}>{summary.mapped_sits_count ?? '-'} / {coverage.total}</div>
-              <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>SITS TC → 컴포넌트 매핑</div>
-            </div>
-            <div style={{ padding: 8, background: 'var(--bg)', borderRadius: 6, border: '1px solid var(--border)' }}>
-              <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 4 }}>전체 테스트 추적</div>
-              <div style={{ fontSize: 14, fontWeight: 700 }}>{summary.mapped_test_count ?? (coverage.covered + coverage.partial)} / {coverage.total}</div>
-              <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>STS+SUTS+SITS+VectorCAST 통합</div>
-            </div>
-          </div>
+          {(() => {
+            const total = coverage.total || 1;
+            const traceRows = [
+              { label: 'T1: SRS \u2192 SDS', type: '\uC124\uACC4', count: summary.mapped_sds_count, desc: 'SDS SwCom \uB9E4\uD551' },
+              { label: 'T2: SDS \u2192 UDS', type: '\uC0C1\uC138\uC124\uACC4', count: summary.mapped_source_count ?? coverage.covered, desc: 'UDS \uD568\uC218 \uB9E4\uD551' },
+              { label: 'T3: SRS \u2192 STS', type: '\uC9C1\uC811', count: summary.mapped_sts_count, direct: summary.mapped_sts_direct, desc: 'SW \uD14C\uC2A4\uD2B8' },
+              { label: 'T4: UDS \u2192 SUTS', type: '\uC9C1\uC811+\uACBD\uC720', count: summary.mapped_suts_count, direct: summary.mapped_suts_direct, indirect: summary.mapped_suts_indirect, desc: '\uB2E8\uC704 \uD14C\uC2A4\uD2B8' },
+              { label: 'T5: SDS \u2192 SITS', type: '\uC9C1\uC811+\uACBD\uC720', count: summary.mapped_sits_count, direct: summary.mapped_sits_direct, indirect: summary.mapped_sits_indirect, desc: '\uD1B5\uD569 \uD14C\uC2A4\uD2B8' },
+              { label: '\uC804\uCCB4 \uAC80\uC99D', type: '\uD1B5\uD569', count: summary.mapped_test_count ?? (coverage.covered + coverage.partial), desc: 'STS+SUTS+SITS+VectorCAST' },
+            ];
+            const statusDot = (pct) => {
+              const color = pct > 70 ? '#16a34a' : pct >= 30 ? '#d97706' : '#dc2626';
+              return <span style={{ display: 'inline-block', width: 8, height: 8, borderRadius: '50%', background: color, marginRight: 4 }} />;
+            };
+            return (
+              <table style={{ width: '100%', fontSize: 11, borderCollapse: 'collapse', marginTop: 8 }}>
+                <thead>
+                  <tr style={{ borderBottom: '2px solid var(--border)', background: 'var(--bg)' }}>
+                    <th style={{ textAlign: 'left', padding: '6px 8px' }}>{'\uCD94\uC801 \uAD00\uACC4'}</th>
+                    <th style={{ textAlign: 'center', padding: '6px 8px' }}>{'\uB9E4\uD551 \uC720\uD615'}</th>
+                    <th style={{ textAlign: 'center', padding: '6px 8px' }}>{'\uCEE4\uBC84\uB41C \uC694\uAD6C\uC0AC\uD56D'}</th>
+                    <th style={{ textAlign: 'center', padding: '6px 8px' }}>{'\uBE44\uC728'}</th>
+                    <th style={{ textAlign: 'center', padding: '6px 8px' }}>{'\uC0C1\uD0DC'}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {traceRows.map((tr, i) => {
+                    const cnt = tr.count ?? 0;
+                    const pct = Math.round((cnt / total) * 100);
+                    const typeDetail = tr.indirect != null
+                      ? `${tr.type} (${tr.direct ?? 0}\uC9C1\uC811 + ${tr.indirect ?? 0}\uACBD\uC720)`
+                      : tr.direct != null ? `${tr.type} (${tr.direct}\uC9C1\uC811)` : tr.type;
+                    return (
+                      <tr key={i} style={{ borderBottom: '1px solid var(--border)', background: i === traceRows.length - 1 ? 'var(--bg)' : undefined }}>
+                        <td style={{ padding: '5px 8px', fontWeight: i === traceRows.length - 1 ? 700 : 400 }}>{tr.label}</td>
+                        <td style={{ padding: '5px 8px', textAlign: 'center', fontSize: 10 }}>{typeDetail}</td>
+                        <td style={{ padding: '5px 8px', textAlign: 'center', fontWeight: 600 }}>{cnt} / {total}</td>
+                        <td style={{ padding: '5px 8px', textAlign: 'center', fontWeight: 600 }}>{pct}%</td>
+                        <td style={{ padding: '5px 8px', textAlign: 'center' }}>{statusDot(pct)}{pct > 70 ? 'Good' : pct >= 30 ? 'Warn' : 'Low'}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            );
+          })()}
           {/* Source breakdown */}
           {summary?.source_stats && typeof summary.source_stats === 'object' && Object.keys(summary.source_stats).length > 0 && (
             <div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
@@ -1016,13 +1026,19 @@ function TraceMatrix({ matrix }) {
                   </td>
                   <td style={{ fontSize: 10, textAlign: 'center' }} title="T4: UDS→SUTS">
                     {sutsCount > 0
-                      ? <span style={{ fontSize: 9, padding: '1px 6px', borderRadius: 8, background: SOURCE_COLORS.SUTS + '20', color: SOURCE_COLORS.SUTS, fontWeight: 600 }}>{sutsCount} TC</span>
+                      ? <span style={{ fontSize: 9, padding: '1px 6px', borderRadius: 8, background: SOURCE_COLORS.SUTS + '20', color: SOURCE_COLORS.SUTS, fontWeight: 600 }} title={`\uC9C1\uC811: ${r.suts_direct || 0}, \uACBD\uC720: ${r.suts_indirect || 0}`}>
+                          {sutsCount} TC
+                          {r.suts_indirect > 0 && <span style={{ fontSize: 8, color: 'var(--text-muted)' }}> ({r.suts_direct || 0}+{r.suts_indirect || 0})</span>}
+                        </span>
                       : <span className="text-muted">-</span>
                     }
                   </td>
                   <td style={{ fontSize: 10, textAlign: 'center' }} title="T5: SDS→SITS">
                     {sitsCount > 0
-                      ? <span style={{ fontSize: 9, padding: '1px 6px', borderRadius: 8, background: SOURCE_COLORS.SITS + '20', color: SOURCE_COLORS.SITS, fontWeight: 600 }}>{sitsCount} TC</span>
+                      ? <span style={{ fontSize: 9, padding: '1px 6px', borderRadius: 8, background: SOURCE_COLORS.SITS + '20', color: SOURCE_COLORS.SITS, fontWeight: 600 }} title={`\uC9C1\uC811: ${r.sits_direct || 0}, \uACBD\uC720: ${r.sits_indirect || 0}`}>
+                          {sitsCount} TC
+                          {r.sits_indirect > 0 && <span style={{ fontSize: 8, color: 'var(--text-muted)' }}> ({r.sits_direct || 0}+{r.sits_indirect || 0})</span>}
+                        </span>
                       : <span className="text-muted">-</span>
                     }
                   </td>
@@ -1093,6 +1109,7 @@ function TraceMatrix({ matrix }) {
                                     <th style={{ padding: '3px 6px', textAlign: 'left' }}>TC</th>
                                     <th style={{ padding: '3px 6px', textAlign: 'center', width: 45 }}>결과</th>
                                     <th style={{ padding: '3px 6px', textAlign: 'center', width: 55 }}>소스</th>
+                                    <th style={{ padding: '3px 6px', textAlign: 'center', width: 45 }}>추적</th>
                                     <th style={{ padding: '3px 6px', textAlign: 'center', width: 45 }}>신뢰</th>
                                   </tr>
                                 </thead>
@@ -1115,6 +1132,10 @@ function TraceMatrix({ matrix }) {
                                           </span>
                                         </td>
                                         <td style={{ padding: '3px 6px', textAlign: 'center', fontSize: 9,
+                                          color: t.trace_type === 'direct' ? '#16a34a' : t.trace_type === 'indirect' ? '#d97706' : '#6b7280' }}>
+                                          {t.trace_type === 'direct' ? '\uC9C1\uC811' : t.trace_type === 'indirect' ? '\uACBD\uC720' : '-'}
+                                        </td>
+                                        <td style={{ padding: '3px 6px', textAlign: 'center', fontSize: 9,
                                           color: CONFIDENCE_COLORS[t.confidence] || '#6b7280' }}>
                                           {t.confidence || '-'}
                                         </td>
@@ -1125,6 +1146,13 @@ function TraceMatrix({ matrix }) {
                               </table>
                             </div>
                           ) : <div className="text-muted text-sm">매핑된 테스트 없음</div>}
+                        </div>
+                      </div>
+                      {/* V-Model trace path summary */}
+                      <div style={{ marginTop: 10, padding: 8, background: 'var(--bg)', borderRadius: 6, borderLeft: '3px solid var(--accent)' }}>
+                        <div style={{ fontSize: 11, fontWeight: 700, marginBottom: 4 }}>V-Model {'\uCD94\uC801 \uACBD\uB85C'}</div>
+                        <div style={{ fontSize: 10 }}>
+                          T1: SDS → {sdsComps.length}{'\uAC1C \uCEF4\uD3EC\uB10C\uD2B8'} | T2: UDS → {srcFuncs.length}{'\uAC1C \uD568\uC218'} | T3: STS → {stsCount} TC ({'\uC9C1\uC811'}) | T4: SUTS → {r.suts_direct || 0} {'\uC9C1\uC811'} + {r.suts_indirect || 0} {'\uACBD\uC720'} | T5: SITS → {r.sits_direct || 0} {'\uC9C1\uC811'} + {r.sits_indirect || 0} {'\uACBD\uC720'}
                         </div>
                       </div>
                     </td>

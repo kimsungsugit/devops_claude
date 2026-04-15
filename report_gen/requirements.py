@@ -1610,6 +1610,7 @@ def _normalize_vcast_rows(rows: List[Dict[str, Any]]) -> Dict[str, List[Dict[str
                 "unit": row.get("unit") or "",
                 "report": row.get("report") or "",
                 "source": source,
+                "trace_type": row.get("trace_type") or "direct",
                 "confidence": row.get("confidence") if row.get("confidence") not in (None, "") else ("exact" if source in ("STS", "SUTS", "SITS") else "fuzzy"),
             }
         )
@@ -1709,7 +1710,8 @@ def generate_uds_traceability_matrix(
     for row in all_test_rows:
         if not isinstance(row, dict):
             continue
-        enriched_rows.append(row)
+        # Mark original rows as direct trace
+        enriched_rows.append({**row, "trace_type": "direct"})
         unit = str(row.get("unit") or "").strip().lower()
         source = row.get("source", "")
         if unit and source in ("SUTS", "SITS"):
@@ -1717,7 +1719,8 @@ def generate_uds_traceability_matrix(
             orig_rid = _normalize_req_id(str(row.get("requirement_id") or ""))
             for mrid in mapped_rids:
                 if mrid != orig_rid:
-                    enriched_rows.append({**row, "requirement_id": mrid})
+                    # Indirect: mapped via UDS function
+                    enriched_rows.append({**row, "requirement_id": mrid, "trace_type": "indirect"})
 
     vcast_map = _normalize_vcast_rows(enriched_rows)
 
@@ -1754,36 +1757,54 @@ def generate_uds_traceability_matrix(
             src = t.get("source") or "unknown"
             source_stats[src] = source_stats.get(src, 0) + 1
 
-        # Derive confidence: None if no tests, exact if all STS/SUTS/SITS, fuzzy if VectorCAST, mixed
-        row_confidence = None
-        if tests:
-            confidences = [t.get("confidence", "exact") for t in tests]
-            if any(c == "fuzzy" for c in confidences):
-                row_confidence = "mixed" if any(c == "exact" for c in confidences) else "fuzzy"
-            else:
-                row_confidence = "exact"
-
-        # ISO 26262 추적성 GAP 해소: 문서 계층별 분류
+        # ISO 26262 추적성: 문서 계층별 분류 + 직접/간접 구분
+        sts_tests = [t for t in tests if t.get("source") == "STS"]
         suts_tests = [t for t in tests if t.get("source") == "SUTS"]
         sits_tests = [t for t in tests if t.get("source") == "SITS"]
-        sts_tests = [t for t in tests if t.get("source") == "STS"]
+
+        # Direct vs Indirect trace counts
+        sts_direct = [t for t in sts_tests if t.get("trace_type") != "indirect"]
+        suts_direct = [t for t in suts_tests if t.get("trace_type") != "indirect"]
+        suts_indirect = [t for t in suts_tests if t.get("trace_type") == "indirect"]
+        sits_direct = [t for t in sits_tests if t.get("trace_type") != "indirect"]
+        sits_indirect = [t for t in sits_tests if t.get("trace_type") == "indirect"]
+
+        # Derive confidence with ISO 26262 semantics
+        has_direct = len(sts_direct) > 0 or len(suts_direct) > 0 or len(sits_direct) > 0
+        has_indirect = len(suts_indirect) > 0 or len(sits_indirect) > 0
+        has_fuzzy = any(t.get("confidence") == "fuzzy" or t.get("source") == "VectorCAST" for t in tests)
+        row_confidence = None
+        if tests:
+            if has_direct and not has_fuzzy:
+                row_confidence = "direct"
+            elif has_indirect and not has_direct and not has_fuzzy:
+                row_confidence = "indirect"
+            elif has_fuzzy and not has_direct and not has_indirect:
+                row_confidence = "fuzzy"
+            else:
+                row_confidence = "mixed"
 
         matrix.append(
             {
                 "requirement_id": norm_to_raw.get(rid, rid),
                 # T1: SRS→SDS (아키텍처 추적)
                 "sds_components": sds_list,
-                # T2: SDS→UDS (상세 설계 추적) — SwCom→함수 직접 매핑
+                # T2: SDS→UDS (상세 설계 추적)
                 "source_ids": src_list,
                 # T3: SRS→STS (SW 테스트 추적)
                 "sts_tests": sts_tests,
                 "sts_count": len(sts_tests),
+                "sts_direct": len(sts_direct),
                 # T4: UDS→SUTS (단위 테스트 추적)
                 "suts_tests": suts_tests,
                 "suts_count": len(suts_tests),
+                "suts_direct": len(suts_direct),
+                "suts_indirect": len(suts_indirect),
                 # T5: SDS→SITS (통합 테스트 추적)
                 "sits_tests": sits_tests,
                 "sits_count": len(sits_tests),
+                "sits_direct": len(sits_direct),
+                "sits_indirect": len(sits_indirect),
                 # 기존 호환
                 "tests": tests,
                 "test_ids": test_ids,
@@ -1805,10 +1826,15 @@ def generate_uds_traceability_matrix(
             "total_pass": total_pass,
             "total_fail": total_fail,
             "source_stats": source_stats,
-            # ISO 26262 추적성 통계
+            # ISO 26262 V-Model 추적성 통계
             "mapped_sts_count": sum(1 for r in matrix if r.get("sts_count")),
             "mapped_suts_count": sum(1 for r in matrix if r.get("suts_count")),
             "mapped_sits_count": sum(1 for r in matrix if r.get("sits_count")),
+            "mapped_sts_direct": sum(1 for r in matrix if r.get("sts_direct")),
+            "mapped_suts_direct": sum(1 for r in matrix if r.get("suts_direct")),
+            "mapped_suts_indirect": sum(1 for r in matrix if r.get("suts_indirect")),
+            "mapped_sits_direct": sum(1 for r in matrix if r.get("sits_direct")),
+            "mapped_sits_indirect": sum(1 for r in matrix if r.get("sits_indirect")),
         },
         "has_sds_mapping": any(r.get("sds_components") for r in matrix),
         "has_source_mapping": any(r.get("source_ids") for r in matrix),
