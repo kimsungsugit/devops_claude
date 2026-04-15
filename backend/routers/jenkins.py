@@ -2578,12 +2578,34 @@ def jenkins_sits_extract_traceability(body: Dict[str, Any]) -> Dict[str, Any]:
                     break
                 continue
             empty_streak = 0
+
+            # Extract entry function name from description ("Verify integration: FuncName → ...")
+            desc = str(spec_ws.cell(r, 3).value or "").strip()
+            entry_fn = ""
+            if "integration:" in desc.lower():
+                parts = desc.split(":", 1)
+                if len(parts) > 1:
+                    fn_part = parts[1].strip().split("→")[0].split("->")[0].strip()
+                    if fn_part and not fn_part.startswith("("):
+                        entry_fn = fn_part
+
             related_val = str(spec_ws.cell(r, related_col).value or "").strip()
             req_ids = _re.findall(r"Sw[A-Za-z]{2,}_\d+|Sy[A-Za-z]{2,}_\d+", related_val)
             for rid in req_ids:
                 vcast_rows.append({
                     "requirement_id": _normalize_req_id(rid),
                     "testcase": tc_id,
+                    "unit": entry_fn,
+                    "source": "SITS",
+                    "result": "mapped",
+                })
+            # If no Sw* req IDs found but we have entry_fn, still add row
+            # so function-based reverse mapping can work
+            if not req_ids and entry_fn:
+                vcast_rows.append({
+                    "requirement_id": "",
+                    "testcase": tc_id,
+                    "unit": entry_fn,
                     "source": "SITS",
                     "result": "mapped",
                 })
