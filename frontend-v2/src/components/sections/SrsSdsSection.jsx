@@ -40,8 +40,21 @@ export default function SrsSdsSection({ job, analysisResult }) {
   }, []);
 
   const loadMatrix = useCallback(async (forceRefresh = false) => {
+    // Ensure linkedDocs is loaded from SCM before proceeding
+    let activeDocs = linkedDocs;
+    if (!activeDocs.sts && !activeDocs.suts) {
+      try {
+        const scmData = await api('/api/scm/list');
+        const items = scmData?.items || (Array.isArray(scmData) ? scmData : []);
+        if (items.length > 0 && items[0].linked_docs) {
+          activeDocs = items[0].linked_docs;
+          setLinkedDocs(activeDocs);
+        }
+      } catch (_) {}
+    }
+
     // Cache check: skip API calls if inputs haven't changed
-    const cacheKey = JSON.stringify({ srs: docPaths.srs, sds: docPaths.sds, jobUrl: job?.url, sts: linkedDocs.sts, suts: linkedDocs.suts, sits: linkedDocs.sits });
+    const cacheKey = JSON.stringify({ srs: docPaths.srs, sds: docPaths.sds, jobUrl: job?.url, sts: activeDocs.sts, suts: activeDocs.suts, sits: activeDocs.sits });
     if (!forceRefresh && matrixCacheRef.current?.key === cacheKey && matrixCacheRef.current?.data) {
       setMatrix(matrixCacheRef.current.data);
       toast('info', '캐시된 매트릭스를 사용합니다. 새로고침하려면 버튼을 다시 클릭하세요.');
@@ -82,10 +95,10 @@ export default function SrsSdsSection({ job, analysisResult }) {
 
       // Step 2a: Extract func→req mapping from UDS document
       setLoadProgress('UDS 함수 매핑 추출 중...');
-      if (mappingPairs.length === 0 && linkedDocs.uds) {
+      if (mappingPairs.length === 0 && activeDocs.uds) {
         try {
           const udsMapping = await post('/api/jenkins/uds/extract-mapping', {
-            uds_path: linkedDocs.uds,
+            uds_path: activeDocs.uds,
           });
           mappingPairs = udsMapping?.mapping_pairs || [];
           if (mappingPairs.length > 0) {
@@ -98,11 +111,11 @@ export default function SrsSdsSection({ job, analysisResult }) {
 
       // Step 2b: Extract SDS component→requirement mapping
       let sdsPairs = [];
-      if (docPaths.sds || linkedDocs.sds) {
+      if (docPaths.sds || activeDocs.sds) {
         setLoadProgress('SDS 컴포넌트 매핑 추출 중...');
         try {
           const sdsData = await post('/api/jenkins/sds/extract-mapping', {
-            sds_path: docPaths.sds || linkedDocs.sds,
+            sds_path: docPaths.sds || activeDocs.sds,
           });
           sdsPairs = sdsData?.sds_pairs || [];
           if (sdsPairs.length > 0) {
@@ -121,10 +134,10 @@ export default function SrsSdsSection({ job, analysisResult }) {
       const stsSutsCoveredReqs = new Set(); // only STS+SUTS covered (for VectorCAST filter)
 
       // 3a. STS traceability (요구사항↔TC 직접 매핑 — 가장 정확, confidence=exact)
-      if (linkedDocs.sts) {
+      if (activeDocs.sts) {
         setLoadProgress('STS 추적성 추출 중...');
         try {
-          const stsData = await post('/api/jenkins/sts/extract-traceability', { path: linkedDocs.sts, doc_type: 'sts' });
+          const stsData = await post('/api/jenkins/sts/extract-traceability', { path: activeDocs.sts, doc_type: 'sts' });
           if (stsData?.vcast_rows?.length) {
             for (const row of stsData.vcast_rows) {
               vcastRows.push({ ...row, source: row.source || 'STS', confidence: 'exact' });
@@ -141,10 +154,10 @@ export default function SrsSdsSection({ job, analysisResult }) {
       }
 
       // 3b. SUTS traceability (confidence=exact)
-      if (linkedDocs.suts) {
+      if (activeDocs.suts) {
         setLoadProgress('SUTS 추적성 추출 중...');
         try {
-          const sutsData = await post('/api/jenkins/sts/extract-traceability', { path: linkedDocs.suts, doc_type: 'suts' });
+          const sutsData = await post('/api/jenkins/sts/extract-traceability', { path: activeDocs.suts, doc_type: 'suts' });
           if (sutsData?.vcast_rows?.length) {
             for (const row of sutsData.vcast_rows) {
               vcastRows.push({ ...row, source: row.source || 'SUTS', confidence: 'exact' });
@@ -161,10 +174,10 @@ export default function SrsSdsSection({ job, analysisResult }) {
       }
 
       // 3c. SITS traceability (통합 테스트, confidence=exact)
-      if (linkedDocs.sits) {
+      if (activeDocs.sits) {
         setLoadProgress('SITS 추적성 추출 중...');
         try {
-          const sitsData = await post('/api/jenkins/sits/extract-traceability', { path: linkedDocs.sits });
+          const sitsData = await post('/api/jenkins/sits/extract-traceability', { path: activeDocs.sits });
           if (sitsData?.vcast_rows?.length) {
             sitsRows = sitsData.vcast_rows.map(r => ({ ...r, source: r.source || 'SITS', confidence: 'exact' }));
             for (const row of sitsRows) {
