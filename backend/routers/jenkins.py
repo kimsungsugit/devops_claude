@@ -2326,11 +2326,15 @@ def jenkins_uds_extract_mapping(body: Dict[str, Any]) -> Dict[str, Any]:
 def jenkins_sts_extract_traceability(body: Dict[str, Any]) -> Dict[str, Any]:
     """STS/SUTS Excel에서 Traceability 시트의 요구사항↔TC 매핑 추출"""
     file_path = str(body.get("path", "")).strip()
+    doc_type = str(body.get("doc_type", "")).strip().lower()  # "sts" or "suts"
     if not file_path:
         raise HTTPException(status_code=400, detail="path required")
     p = Path(file_path).expanduser().resolve()
     if not p.exists():
         raise HTTPException(status_code=400, detail=f"파일을 찾을 수 없습니다: {file_path}")
+    # Path traversal protection (same as SITS endpoint)
+    if not is_under_any(p, [repo_root, Path(file_path).parent.resolve()]):
+        raise HTTPException(status_code=403, detail="접근이 허용되지 않는 경로입니다")
 
     try:
         import openpyxl
@@ -2353,7 +2357,9 @@ def jenkins_sts_extract_traceability(body: Dict[str, Any]) -> Dict[str, Any]:
 
     vcast_rows = []
 
+    # Determine source label from doc_type or auto-detect from sheet structure
     if trace_type == "matrix":
+        source_label = doc_type.upper() if doc_type in ("sts", "suts") else "STS"
         # STS format: row 4 has req IDs as column headers, rows 5+ have TC IDs with markers
         req_cols = []
         for c in range(3, trace_ws.max_column + 1):
@@ -2371,10 +2377,11 @@ def jenkins_sts_extract_traceability(body: Dict[str, Any]) -> Dict[str, Any]:
                     vcast_rows.append({
                         "requirement_id": rid,
                         "testcase": tc_id,
-                        "source": "STS",
+                        "source": source_label,
                         "result": "mapped",
                     })
     else:
+        source_label = doc_type.upper() if doc_type in ("sts", "suts") else "SUTS"
         # SUTS format: columns — TC ID (5), SRS Req ID (6)
         for r in range(4, trace_ws.max_row + 1):
             tc_id = str(trace_ws.cell(r, 5).value or "").strip()
@@ -2389,7 +2396,7 @@ def jenkins_sts_extract_traceability(body: Dict[str, Any]) -> Dict[str, Any]:
                     "requirement_id": rid,
                     "testcase": tc_id,
                     "unit": func_name,
-                    "source": "SUTS",
+                    "source": source_label,
                     "result": "mapped",
                 })
 

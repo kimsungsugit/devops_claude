@@ -109,17 +109,21 @@ export default function SrsSdsSection({ job, analysisResult }) {
       // STS/SUTS/SITS are exact matches; VectorCAST is fuzzy (function-name based)
       let vcastRows = [];
       let sitsRows = [];
-      const exactCoveredReqs = new Set();  // req IDs with STS/SUTS/SITS mapping
+      const exactCoveredReqs = new Set();  // all exact-covered reqs (for display)
+      const stsSutsCoveredReqs = new Set(); // only STS+SUTS covered (for VectorCAST filter)
 
       // 3a. STS traceability (요구사항↔TC 직접 매핑 — 가장 정확, confidence=exact)
       if (linkedDocs.sts) {
         setLoadProgress('STS 추적성 추출 중...');
         try {
-          const stsData = await post('/api/jenkins/sts/extract-traceability', { path: linkedDocs.sts });
+          const stsData = await post('/api/jenkins/sts/extract-traceability', { path: linkedDocs.sts, doc_type: 'sts' });
           if (stsData?.vcast_rows?.length) {
             for (const row of stsData.vcast_rows) {
-              vcastRows.push({ ...row, source: 'STS', confidence: 'exact' });
-              if (row.requirement_id) exactCoveredReqs.add(row.requirement_id.toUpperCase());
+              vcastRows.push({ ...row, source: row.source || 'STS', confidence: 'exact' });
+              if (row.requirement_id) {
+                exactCoveredReqs.add(row.requirement_id.toUpperCase());
+                stsSutsCoveredReqs.add(row.requirement_id.toUpperCase());
+              }
             }
             dataSources.push(`STS: ${stsData.vcast_rows.length}건`);
           }
@@ -132,11 +136,14 @@ export default function SrsSdsSection({ job, analysisResult }) {
       if (linkedDocs.suts) {
         setLoadProgress('SUTS 추적성 추출 중...');
         try {
-          const sutsData = await post('/api/jenkins/sts/extract-traceability', { path: linkedDocs.suts });
+          const sutsData = await post('/api/jenkins/sts/extract-traceability', { path: linkedDocs.suts, doc_type: 'suts' });
           if (sutsData?.vcast_rows?.length) {
             for (const row of sutsData.vcast_rows) {
-              vcastRows.push({ ...row, source: 'SUTS', confidence: 'exact' });
-              if (row.requirement_id) exactCoveredReqs.add(row.requirement_id.toUpperCase());
+              vcastRows.push({ ...row, source: row.source || 'SUTS', confidence: 'exact' });
+              if (row.requirement_id) {
+                exactCoveredReqs.add(row.requirement_id.toUpperCase());
+                stsSutsCoveredReqs.add(row.requirement_id.toUpperCase());
+              }
             }
             dataSources.push(`SUTS: ${sutsData.vcast_rows.length}건`);
           }
@@ -151,7 +158,7 @@ export default function SrsSdsSection({ job, analysisResult }) {
         try {
           const sitsData = await post('/api/jenkins/sits/extract-traceability', { path: linkedDocs.sits });
           if (sitsData?.vcast_rows?.length) {
-            sitsRows = sitsData.vcast_rows.map(r => ({ ...r, source: 'SITS', confidence: 'exact' }));
+            sitsRows = sitsData.vcast_rows.map(r => ({ ...r, source: r.source || 'SITS', confidence: 'exact' }));
             for (const row of sitsRows) {
               if (row.requirement_id) exactCoveredReqs.add(row.requirement_id.toUpperCase());
             }
@@ -186,7 +193,7 @@ export default function SrsSdsSection({ job, analysisResult }) {
           const fn = row.subprogram || '';
           const reqs = funcToReqs[fn] || [];
           for (const rid of reqs) {
-            if (exactCoveredReqs.has((rid || '').toUpperCase())) continue;
+            if (stsSutsCoveredReqs.has((rid || '').toUpperCase())) continue;
             vcastRows.push({ ...row, requirement_id: rid, testcase: fn, source: 'VectorCAST', confidence: 'fuzzy' });
             vcastAdded++;
           }
@@ -953,7 +960,8 @@ function TraceMatrix({ matrix }) {
             const vcastCount = vcastTests.length + otherTests.length;
             const passCount = r.pass_count ?? 0;
             const failCount = r.fail_count ?? 0;
-            const confidence = r.confidence ?? (stsCount > 0 && vcastCount === 0 ? 'exact' : vcastCount > 0 && stsCount === 0 ? 'fuzzy' : stsCount > 0 ? 'mixed' : null);
+            const hasExact = stsCount > 0 || sutsCount > 0 || sitsCount > 0;
+            const confidence = r.confidence ?? (hasExact && vcastCount === 0 ? 'exact' : vcastCount > 0 && !hasExact ? 'fuzzy' : hasExact ? 'mixed' : null);
             const isExpanded = expandedReqId === reqId;
 
             return (
