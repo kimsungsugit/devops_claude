@@ -53,6 +53,8 @@ export default function SrsSdsSection({ job, analysisResult }) {
       } catch (_) {}
     }
 
+    // Debug: log activeDocs state
+
     // Cache check: skip API calls if inputs haven't changed
     const cacheKey = JSON.stringify({ srs: docPaths.srs, sds: docPaths.sds, jobUrl: job?.url, sts: activeDocs.sts, suts: activeDocs.suts, sits: activeDocs.sits });
     if (!forceRefresh && matrixCacheRef.current?.key === cacheKey && matrixCacheRef.current?.data) {

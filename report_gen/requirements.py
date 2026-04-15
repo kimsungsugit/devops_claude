@@ -1684,7 +1684,42 @@ def generate_uds_traceability_matrix(
     for row in (sits_rows or []):
         if isinstance(row, dict):
             all_test_rows.append(row)
-    vcast_map = _normalize_vcast_rows(all_test_rows)
+
+    # Build function→requirement reverse mapping from UDS mapping_pairs
+    # This allows SUTS/SITS TCs (which have unit/function name) to be mapped
+    # to requirements even when their requirement_id doesn't match directly.
+    func_to_reqs: Dict[str, List[str]] = {}
+    for mp in mapping_pairs:
+        if not isinstance(mp, dict):
+            continue
+        mp_rid = _normalize_req_id(str(mp.get("requirement_id") or ""))
+        if not mp_rid:
+            continue
+        for fn in (mp.get("source_ids") or []):
+            fn_lower = str(fn).strip().lower()
+            if fn_lower and fn_lower not in func_to_reqs:
+                func_to_reqs[fn_lower] = []
+            if fn_lower and mp_rid not in func_to_reqs[fn_lower]:
+                func_to_reqs[fn_lower].append(mp_rid)
+
+    # Enrich SUTS/SITS rows: if a row has 'unit' (function name) but its
+    # requirement_id doesn't match any matrix requirement, add duplicate rows
+    # for each requirement mapped to that function via UDS.
+    enriched_rows: List[Dict[str, Any]] = []
+    for row in all_test_rows:
+        if not isinstance(row, dict):
+            continue
+        enriched_rows.append(row)
+        unit = str(row.get("unit") or "").strip().lower()
+        source = row.get("source", "")
+        if unit and source in ("SUTS", "SITS"):
+            mapped_rids = func_to_reqs.get(unit, [])
+            orig_rid = _normalize_req_id(str(row.get("requirement_id") or ""))
+            for mrid in mapped_rids:
+                if mrid != orig_rid:
+                    enriched_rows.append({**row, "requirement_id": mrid})
+
+    vcast_map = _normalize_vcast_rows(enriched_rows)
 
     matrix: List[Dict[str, Any]] = []
     mapped_source_count = 0
