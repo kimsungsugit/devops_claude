@@ -866,7 +866,7 @@ function TraceMatrix({ matrix }) {
             </div>
           </div>
           {/* Source breakdown */}
-          {summary.source_stats && Object.keys(summary.source_stats).length > 0 && (
+          {summary?.source_stats && typeof summary.source_stats === 'object' && Object.keys(summary.source_stats).length > 0 && (
             <div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
               {Object.entries(summary.source_stats).map(([src, cnt]) => (
                 <div key={src} style={{ padding: '4px 10px', borderRadius: 12, fontSize: 11, fontWeight: 600,
@@ -972,9 +972,9 @@ function TraceMatrix({ matrix }) {
             const srcFuncs = r.source_ids ?? [];
             const rawTests = Array.isArray(r.tests) ? r.tests : [];
             // ISO 26262 추적 관계별 분리: T3(STS), T4(SUTS), T5(SITS)
-            const stsOnlyTests = r.sts_tests ?? rawTests.filter(t => t.source === 'STS');
-            const sutsOnlyTests = r.suts_tests ?? rawTests.filter(t => t.source === 'SUTS');
-            const sitsTests = r.sits_tests ?? rawTests.filter(t => t.source === 'SITS');
+            const stsOnlyTests = Array.isArray(r.sts_tests) ? r.sts_tests : rawTests.filter(t => t.source === 'STS');
+            const sutsOnlyTests = Array.isArray(r.suts_tests) ? r.suts_tests : rawTests.filter(t => t.source === 'SUTS');
+            const sitsTests = Array.isArray(r.sits_tests) ? r.sits_tests : rawTests.filter(t => t.source === 'SITS');
             const vcastTests = rawTests.filter(t => t.source === 'VectorCAST');
             const otherTests = rawTests.filter(t => !['STS','SUTS','SITS','VectorCAST'].includes(t.source));
             const stsCount = stsOnlyTests.length;
