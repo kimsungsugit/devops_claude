@@ -118,7 +118,7 @@ export default function SrsSdsSection({ job, analysisResult }) {
           const stsData = await post('/api/jenkins/sts/extract-traceability', { path: linkedDocs.sts });
           if (stsData?.vcast_rows?.length) {
             for (const row of stsData.vcast_rows) {
-              vcastRows.push({ ...row, confidence: 'exact' });
+              vcastRows.push({ ...row, source: 'STS', confidence: 'exact' });
               if (row.requirement_id) exactCoveredReqs.add(row.requirement_id.toUpperCase());
             }
             dataSources.push(`STS: ${stsData.vcast_rows.length}건`);
@@ -135,7 +135,7 @@ export default function SrsSdsSection({ job, analysisResult }) {
           const sutsData = await post('/api/jenkins/sts/extract-traceability', { path: linkedDocs.suts });
           if (sutsData?.vcast_rows?.length) {
             for (const row of sutsData.vcast_rows) {
-              vcastRows.push({ ...row, confidence: 'exact' });
+              vcastRows.push({ ...row, source: 'SUTS', confidence: 'exact' });
               if (row.requirement_id) exactCoveredReqs.add(row.requirement_id.toUpperCase());
             }
             dataSources.push(`SUTS: ${sutsData.vcast_rows.length}건`);
@@ -151,7 +151,7 @@ export default function SrsSdsSection({ job, analysisResult }) {
         try {
           const sitsData = await post('/api/jenkins/sits/extract-traceability', { path: linkedDocs.sits });
           if (sitsData?.vcast_rows?.length) {
-            sitsRows = sitsData.vcast_rows.map(r => ({ ...r, confidence: 'exact' }));
+            sitsRows = sitsData.vcast_rows.map(r => ({ ...r, source: 'SITS', confidence: 'exact' }));
             for (const row of sitsRows) {
               if (row.requirement_id) exactCoveredReqs.add(row.requirement_id.toUpperCase());
             }
