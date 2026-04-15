@@ -2322,6 +2322,22 @@ def jenkins_uds_extract_mapping(body: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _normalize_req_id(rid: str) -> str:
+    """Normalize system-level (Sy*) requirement IDs to software-level (Sw*).
+
+    Mapping: SyTR → SwTR, SyEIF → SwEI, SyTSR → SwTSR, SyNTR → SwNTR
+    """
+    import re as _re
+    if rid.startswith("Sy"):
+        rid = _re.sub(r"^SyEIF_", "SwEI_", rid)
+        rid = _re.sub(r"^SyTR_", "SwTR_", rid)
+        rid = _re.sub(r"^SyTSR_", "SwTSR_", rid)
+        rid = _re.sub(r"^SyNTR_", "SwNTR_", rid)
+        rid = _re.sub(r"^SyNTSR_", "SwNTSR_", rid)
+        rid = _re.sub(r"^SyCNF_", "SwCNF_", rid)
+    return rid
+
+
 @router.post("/api/jenkins/sts/extract-traceability")
 def jenkins_sts_extract_traceability(body: Dict[str, Any]) -> Dict[str, Any]:
     """STS/SUTS Excel에서 Traceability 시트의 요구사항↔TC 매핑 추출"""
@@ -2393,7 +2409,7 @@ def jenkins_sts_extract_traceability(body: Dict[str, Any]) -> Dict[str, Any]:
             req_ids = _re.findall(r"Sw[A-Z]{2,}_\d+|Sy[A-Z]{2,}_\d+", req_raw)
             for rid in req_ids:
                 vcast_rows.append({
-                    "requirement_id": rid,
+                    "requirement_id": _normalize_req_id(rid),
                     "testcase": tc_id,
                     "unit": func_name,
                     "source": source_label,
@@ -2512,7 +2528,7 @@ def jenkins_sits_extract_traceability(body: Dict[str, Any]) -> Dict[str, Any]:
                 req_ids = _re.findall(r"Sw[A-Za-z]{2,}_\d+|Sy[A-Za-z]{2,}_\d+", val)
                 for rid in req_ids:
                     vcast_rows.append({
-                        "requirement_id": rid,
+                        "requirement_id": _normalize_req_id(rid),
                         "testcase": tc_id,
                         "source": "SITS",
                         "result": "mapped",
@@ -2521,9 +2537,15 @@ def jenkins_sits_extract_traceability(body: Dict[str, Any]) -> Dict[str, Any]:
         # Strategy 2: Parse main test spec sheet — TC ID in col B, Related ID column
         spec_ws = None
         for name in wb.sheetnames:
-            if "Integration Test" in name or "SW Integration" in name:
+            if "Integration Test" in name or "Test Spec" in name:
                 spec_ws = wb[name]
                 break
+        # Fallback: look for sheet with most rows (likely the test spec)
+        if not spec_ws:
+            for name in wb.sheetnames:
+                if "SW Integration" in name and "Strategy" not in name:
+                    spec_ws = wb[name]
+                    break
 
         # W2: Don't blindly use first sheet — return warning instead
         if not spec_ws:
@@ -2560,7 +2582,7 @@ def jenkins_sits_extract_traceability(body: Dict[str, Any]) -> Dict[str, Any]:
             req_ids = _re.findall(r"Sw[A-Za-z]{2,}_\d+|Sy[A-Za-z]{2,}_\d+", related_val)
             for rid in req_ids:
                 vcast_rows.append({
-                    "requirement_id": rid,
+                    "requirement_id": _normalize_req_id(rid),
                     "testcase": tc_id,
                     "source": "SITS",
                     "result": "mapped",
