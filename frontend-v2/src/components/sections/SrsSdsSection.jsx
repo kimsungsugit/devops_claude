@@ -1,5 +1,5 @@
 import React, { useState, useCallback, useEffect, useMemo, useRef } from 'react';
-import { post, getUsername } from '../../api.js';
+import { api, post, getUsername } from '../../api.js';
 import { useJenkinsCfg, useToast } from '../../App.jsx';
 import StatusBadge from '../StatusBadge.jsx';
 import { defaultCacheRoot } from '../../api.js';
@@ -29,7 +29,15 @@ export default function SrsSdsSection({ job, analysisResult }) {
   }), [localDocPaths, scmLinked.srs, scmLinked.sds, scmLinked.hsis, scmLinked.stp]);
 
   // SCM linked docs (for loadMatrix + UI)
-  const linkedDocs = useMemo(() => analysisResult?.scmList?.[0]?.linked_docs || {}, [analysisResult]);
+  const [linkedDocs, setLinkedDocs] = useState(analysisResult?.scmList?.[0]?.linked_docs || {});
+  useEffect(() => {
+    if (!linkedDocs.sts && !linkedDocs.suts) {
+      api('/api/scm/list').then(d => {
+        const items = d?.items || (Array.isArray(d) ? d : []);
+        if (items.length > 0 && items[0].linked_docs) setLinkedDocs(items[0].linked_docs);
+      }).catch(() => {});
+    }
+  }, []);
 
   const loadMatrix = useCallback(async (forceRefresh = false) => {
     // Cache check: skip API calls if inputs haven't changed
