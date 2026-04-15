@@ -198,8 +198,9 @@ export default function QualityDashboard() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const qs = docType ? `?limit=20&doc_type=${docType}` : '?limit=20';
-      const trendQs = docType ? `?doc_type=${docType}&last_n=20` : '?last_n=20';
+      const dt = docType || 'uds';
+      const qs = `?limit=20&doc_type=${dt}`;
+      const trendQs = `?doc_type=${dt}&last_n=20`;
       const [runsData, trendData] = await Promise.all([
         api(`/api/quality/runs${qs}`),
         api(`/api/quality/trend${trendQs}`),
