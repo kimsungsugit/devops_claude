@@ -46,8 +46,9 @@ export default function DocGenSection({ job, analysisResult }) {
   const cacheRoot = analysisResult?.cacheRoot || defaultCacheRoot(job?.url) || cfg.cacheRoot;
 
   const [generating, setGenerating] = useState(null);
-  const [genLog, setGenLog] = useState('');
-  const [genProgress, setGenProgress] = useState(null);
+  const [genStage, setGenStage] = useState('');     // current stage text
+  const [genProgress, setGenProgress] = useState(0); // 0-100
+  const [genResult, setGenResult] = useState(null);  // {success, error, path}
 
   const docPaths = (() => {
     try { return JSON.parse(localStorage.getItem('devops_v2_doc_paths') || '{}'); } catch (_) { return {}; }
@@ -57,8 +58,9 @@ export default function DocGenSection({ job, analysisResult }) {
     if (!job?.url) { toast('warning', '프로젝트를 먼저 선택하세요.'); return; }
     const label = DOC_TYPES.find(d => d.key === docType)?.label || docType.toUpperCase();
     setGenerating(docType);
-    setGenLog(`${label} 생성 시작...\n`);
-    setGenProgress(null);
+    setGenStage(`${label} 생성 준비 중...`);
+    setGenProgress(5);
+    setGenResult(null);
 
     try {
       // Get source_root and linked_docs from SCM registry
@@ -124,38 +126,57 @@ export default function DocGenSection({ job, analysisResult }) {
       const data = await res.json();
       if (!data?.job_id) throw new Error(`${label} job_id를 받지 못했습니다.`);
 
-      setGenLog(prev => prev + `Job ID: ${data.job_id}\n`);
+      setGenStage(`${label} 생성 진행 중...`);
+      setGenProgress(10);
+
+      // Stage-to-progress mapping
+      const stageMap = {
+        'start': 5, 'source_analysis': 15, '소스 코드 분석': 15,
+        'requirements': 25, '요구사항': 25, '요구사항 문서 파싱': 25, '요구사항 정리': 30,
+        'payload': 40, 'UDS 페이로드': 40, 'UDS 페이로드 생성': 45,
+        'docx': 55, 'docx_generation': 55, 'DOCX 생성': 60,
+        'quality': 80, 'validation': 85, 'report': 90,
+        'done': 100, 'completed': 100, 'success': 100,
+      };
+      const resolveProgress = (msg) => {
+        const m = msg?.match(/(\d+)%/);
+        if (m) return Number(m[1]);
+        for (const [key, pct] of Object.entries(stageMap)) {
+          if (msg?.toLowerCase().includes(key.toLowerCase())) return pct;
+        }
+        return null;
+      };
 
       let progress;
+      const onProgress = (msg) => {
+        if (!msg) return;
+        // Update stage text (only last message, no scrolling log)
+        setGenStage(msg.replace(/\n/g, ' ').trim());
+        const pct = resolveProgress(msg);
+        if (pct != null) setGenProgress(prev => Math.max(prev, pct));
+      };
+
       if (docType === 'uds') {
         progress = await pollProgress(job.url, cfg.buildSelector || 'lastSuccessfulBuild', data.job_id, 'uds', {
-          onMsg: msg => {
-            setGenLog(prev => prev + msg + '\n');
-            const match = msg.match(/(\d+)%/);
-            if (match) setGenProgress(Number(match[1]));
-          },
-          signal: null,
+          onMsg: onProgress, signal: null,
         });
       } else {
         const pollPrefix = docType === 'sits' ? '/api/local' : '/api/jenkins';
         progress = await pollStsProgress(data.job_id, docType, job.url, {
-          onMsg: msg => {
-            setGenLog(prev => prev + msg + '\n');
-            const match = msg.match(/(\d+)%/);
-            if (match) setGenProgress(Number(match[1]));
-          },
-          signal: null,
-          prefix: pollPrefix,
+          onMsg: onProgress, signal: null, prefix: pollPrefix,
         });
       }
 
       if (progress?.error) throw new Error(progress.error);
 
+      setGenProgress(100);
+      setGenStage(`${label} 생성 완료`);
+      setGenResult({ success: true, path: progress?.output_path || progress?.xlsm_path || '' });
       toast('success', `${label} 생성 완료`);
-      setGenLog(prev => prev + `✓ ${label} 생성 완료\n`);
     } catch (e) {
       toast('error', `${label} 생성 실패: ${e.message}`);
-      setGenLog(prev => prev + `✕ 오류: ${e.message}\n`);
+      setGenStage(`오류: ${e.message}`);
+      setGenResult({ success: false, error: e.message });
     } finally {
       setGenerating(null);
     }
@@ -285,18 +306,40 @@ export default function DocGenSection({ job, analysisResult }) {
           ))}
         </div>
 
-        {/* Progress */}
-        {generating && (
-          <div style={{ marginBottom: 12 }}>
-            {genProgress != null && (
-              <div className="row" style={{ marginBottom: 6 }}>
-                <span className="text-sm" style={{ fontWeight: 600 }}>{genProgress}%</span>
-                <div className="progress-bar" style={{ flex: 1 }}>
-                  <div className="progress-fill" style={{ width: `${genProgress}%`, transition: 'width 0.3s' }} />
-                </div>
+        {/* Progress bar + status */}
+        {(generating || genResult) && (
+          <div style={{ marginBottom: 12, padding: 12, background: 'var(--bg)', borderRadius: 8, border: '1px solid var(--border)' }}>
+            {/* Progress bar */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8 }}>
+              <div style={{ flex: 1, height: 8, background: 'var(--border)', borderRadius: 4, overflow: 'hidden' }}>
+                <div style={{
+                  height: '100%', borderRadius: 4, transition: 'width 0.5s ease',
+                  width: `${genProgress}%`,
+                  background: genResult?.success ? 'var(--color-success)' :
+                    genResult?.error ? 'var(--color-danger)' : 'var(--accent)',
+                }} />
+              </div>
+              <span style={{ fontSize: 12, fontWeight: 700, minWidth: 40, textAlign: 'right' }}>
+                {genProgress}%
+              </span>
+            </div>
+
+            {/* Status text */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              {generating && <span className="spinner" style={{ width: 14, height: 14 }} />}
+              {genResult?.success && <span style={{ color: 'var(--color-success)', fontSize: 16 }}>✓</span>}
+              {genResult?.error && <span style={{ color: 'var(--color-danger)', fontSize: 16 }}>✕</span>}
+              <span style={{ fontSize: 12, color: genResult?.error ? 'var(--color-danger)' : 'var(--text)' }}>
+                {genStage}
+              </span>
+            </div>
+
+            {/* Result path */}
+            {genResult?.success && genResult.path && (
+              <div style={{ marginTop: 6, fontSize: 10, color: 'var(--text-muted)', fontFamily: 'monospace', wordBreak: 'break-all' }}>
+                {genResult.path}
               </div>
             )}
-            <div className="log-box" style={{ maxHeight: 180, fontSize: 11 }}>{genLog}</div>
           </div>
         )}
       </div>
