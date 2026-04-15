@@ -337,6 +337,7 @@ export default function Dashboard({ onGoDetail }) {
           placeholder="Job 이름 필터..."
           value={filter}
           onChange={e => setFilter(e.target.value)}
+          autoComplete="off"
           style={{ width: 200 }}
         />
         <div className="toolbar-spacer" />
