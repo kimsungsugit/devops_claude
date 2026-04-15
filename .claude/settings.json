@@ -7,21 +7,124 @@
       "Glob",
       "Grep",
       "Agent",
-      "Bash",
+      "Bash(git *)",
+      "Bash(python *)",
+      "Bash(python3 *)",
+      "Bash(pip *)",
+      "Bash(pip3 *)",
+      "Bash(npm *)",
+      "Bash(npx *)",
+      "Bash(node *)",
+      "Bash(cd *)",
+      "Bash(ls *)",
+      "Bash(cat *)",
+      "Bash(head *)",
+      "Bash(tail *)",
+      "Bash(mkdir *)",
+      "Bash(cp *)",
+      "Bash(mv *)",
+      "Bash(curl *)",
+      "Bash(uvicorn *)",
+      "Bash(pytest *)",
+      "Bash(python -m *)",
+      "Bash(python3 -m *)",
+      "Bash(ruff *)",
       "WebFetch",
       "WebSearch",
-      "NotebookEdit"
+      "NotebookEdit",
+      "TaskCreate",
+      "TaskUpdate",
+      "TaskList",
+      "Monitor",
+      "mcp__devops-release__*",
+      "mcp__playwright__*"
     ],
-    "deny": []
+    "deny": [
+      "Bash(rm -rf /)",
+      "Bash(rm -rf ~)",
+      "Bash(git push --force *)",
+      "Bash(git reset --hard *)",
+      "Bash(drop database *)",
+      "Bash(DROP TABLE *)"
+    ]
   },
   "hooks": {
-    "PostToolUse": [
+    "SessionStart": [
       {
-        "matcher": "Write",
         "hooks": [
           {
             "type": "command",
-            "command": "python -m py_compile \"$CLAUDE_FILE_PATH\" 2>/dev/null && echo '[ok] syntax valid' || true"
+            "command": "[ -f .env ] || ([ -f .env.example ] && cp .env.example .env && echo '{\"systemMessage\":\".env created from .env.example\"}') || true",
+            "timeout": 5,
+            "statusMessage": "Checking .env..."
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python -c \"import sys,json; d=json.load(sys.stdin); f=d.get('tool_input',{}).get('file_path') or d.get('tool_response',{}).get('filePath',''); exec('import py_compile; py_compile.compile(f, doraise=True); print(json.dumps({\\\"hookSpecificOutput\\\":{\\\"hookEventName\\\":\\\"PostToolUse\\\",\\\"additionalContext\\\":\\\"Python syntax OK: \\\"+f}}))') if f.endswith('.py') else None\" 2>/dev/null || true",
+            "timeout": 10,
+            "statusMessage": "Python syntax check..."
+          },
+          {
+            "type": "command",
+            "command": "python -c \"import sys,json,subprocess; d=json.load(sys.stdin); f=d.get('tool_input',{}).get('file_path') or d.get('tool_response',{}).get('filePath',''); r=subprocess.run([sys.executable,'-m','ruff','check','--fix',f],capture_output=True,text=True) if f.endswith('.py') else None; print(json.dumps({'hookSpecificOutput':{'hookEventName':'PostToolUse','additionalContext':'ruff: '+((r.stdout.strip() or 'clean') if r else 'skipped')}})) if f.endswith('.py') else None\" 2>/dev/null || true",
+            "timeout": 10,
+            "statusMessage": "Ruff lint..."
+          },
+          {
+            "type": "command",
+            "command": "python -c \"import sys,json,subprocess; d=json.load(sys.stdin); f=d.get('tool_input',{}).get('file_path') or d.get('tool_response',{}).get('filePath',''); exts=('.jsx','.tsx','.ts','.js'); proc=subprocess.run(['npx','eslint','--fix','--no-error-on-unmatched-pattern',f],capture_output=True,text=True,cwd='frontend-v2') if any(f.endswith(e) for e in exts) and 'frontend-v2' in f else None; print(json.dumps({'hookSpecificOutput':{'hookEventName':'PostToolUse','additionalContext':'eslint: '+((proc.stdout.strip() or 'clean') if proc else 'skipped')}})) if proc is not None else None\" 2>/dev/null || true",
+            "timeout": 15,
+            "statusMessage": "ESLint check..."
+          },
+          {
+            "type": "command",
+            "command": "python -c \"import sys,json,subprocess; d=json.load(sys.stdin); f=d.get('tool_input',{}).get('tool_input',{}).get('file_path','') or d.get('tool_input',{}).get('file_path',''); f=f.replace('\\\\\\\\','/').replace('\\\\','/'); tests=None; tests='tests/unit/' if '/workflow/' in f and f.endswith('.py') else tests; tests='tests/unit/test_report_gen.py' if '/report_gen/' in f and f.endswith('.py') else tests; proc=subprocess.run(['python','-m','pytest',tests,'-x','-q','--tb=line','--no-header'],capture_output=True,text=True,timeout=30) if tests else None; print(json.dumps({'hookSpecificOutput':{'hookEventName':'PostToolUse','additionalContext':'auto-test: '+((proc.stdout.strip()[-200:] or 'pass') if proc else 'skipped')}})) if proc is not None else None\" 2>/dev/null || true",
+            "timeout": 35,
+            "statusMessage": "Auto-testing related modules..."
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python -c \"import sys,json,re; d=json.load(sys.stdin); f=d.get('tool_input',{}).get('file_path',''); warn=''; exts=('.c','.h'); do_check=any(f.endswith(e) for e in exts); content=open(f,'r',encoding='utf-8',errors='ignore').read() if do_check and __import__('os').path.isfile(f) else ''; asil=re.search(r'@asil\\s+(C|D)',content,re.IGNORECASE) if content else None; warn=f'WARNING: ASIL {asil.group(1)} file — reviewer approval required before modifying: {f}' if asil else ''; print(json.dumps({'hookSpecificOutput':{'hookEventName':'PreToolUse','additionalContext':warn}})) if warn else None\" 2>/dev/null || true",
+            "timeout": 5,
+            "statusMessage": "ASIL safety check..."
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python scripts/stop_check.py 2>/dev/null || true",
+            "timeout": 90,
+            "statusMessage": "Running stop checks..."
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "matcher": "auto|manual",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python -c \"import sys,json,subprocess,os; status=subprocess.run(['git','status','--porcelain'],capture_output=True,text=True).stdout[:500]; diff_stat=subprocess.run(['git','diff','--stat'],capture_output=True,text=True).stdout[:500]; os.makedirs('.codex_tmp',exist_ok=True); open('.codex_tmp/precompact_context.json','w').write(json.dumps({'git_status':status,'git_diff_stat':diff_stat},ensure_ascii=False)); print(json.dumps({'hookSpecificOutput':{'hookEventName':'PreCompact','additionalContext':'Preserved: git status + diff stat. Changed: '+status[:150]}}))\" 2>/dev/null || echo '{\"hookSpecificOutput\":{\"hookEventName\":\"PreCompact\",\"additionalContext\":\"Preserve: task progress, file paths, error context, test results, MCP patterns\"}}'",
+            "statusMessage": "Preserving context to file..."
           }
         ]
       }
@@ -30,6 +133,9 @@
   "env": {
     "PYTHONPATH": ".",
     "PYTHONDONTWRITEBYTECODE": "1",
-    "PYTHONUTF8": "1"
-  }
+    "PYTHONUTF8": "1",
+    "NODE_ENV": "development"
+  },
+  "enableAllProjectMcpServers": true,
+  "language": "korean"
 }

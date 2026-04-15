@@ -57,7 +57,7 @@ AutoDoc 시스템을 활용하여 다양한 형태의 문서를 자동 생성합
 ## 실행
 ```bash
 # 테스트
-cd /d/Project/Program/AutoDoc
+cd "${AUTODOC_DIR:-.}"
 pytest tests/ -v
 
 # PPT 생성 예시
@@ -65,8 +65,8 @@ python -c "from autodoc import generate_pptx; generate_pptx('input.md', 'output.
 ```
 
 ## 핵심 파일
-- `D:/Project/Program/AutoDoc/tests/test_ppt_generation.py` - PPT 생성 테스트
-- `D:/Project/Program/AutoDoc/tests/test_html_slides.py` - HTML 슬라이드 테스트
-- `D:/Project/Program/AutoDoc/tests/test_project_portal.py` - 포털 생성 테스트
-- `D:/Project/Program/AutoDoc/tests/test_multi_lang.py` - 다국어 분석 테스트
-- `D:/Project/Program/AutoDoc/tests/test_web_search.py` - RAG/검색 테스트
+- `${AUTODOC_DIR}/tests/test_ppt_generation.py` - PPT 생성 테스트
+- `${AUTODOC_DIR}/tests/test_html_slides.py` - HTML 슬라이드 테스트
+- `${AUTODOC_DIR}/tests/test_project_portal.py` - 포털 생성 테스트
+- `${AUTODOC_DIR}/tests/test_multi_lang.py` - 다국어 분석 테스트
+- `${AUTODOC_DIR}/tests/test_web_search.py` - RAG/검색 테스트

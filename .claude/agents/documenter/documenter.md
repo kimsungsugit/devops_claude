@@ -7,6 +7,7 @@ tools:
   - Write
   - Glob
   - Grep
+  - Bash
   - WebSearch
 ---
 
@@ -49,6 +50,61 @@ tools:
 ---
 [본문]
 ```
+
+## 문서 유형별 템플릿
+
+### 보고서 (일일/주간)
+```markdown
+# [기간] 보고서
+- 작성일: YYYY-MM-DD
+- 작성자: Claude Code (documenter)
+
+## 1. 주요 성과
+| 항목 | 상태 | 비고 |
+|------|------|------|
+
+## 2. 진행 현황
+## 3. 이슈/장애
+## 4. 다음 계획
+```
+
+### 기술 설계서
+```markdown
+# [기능명] 설계서
+- 작성일: YYYY-MM-DD
+
+## 1. 개요 및 배경
+## 2. 아키텍처 (모듈 구조도)
+## 3. 인터페이스 정의
+## 4. 데이터 모델
+## 5. 안전 영향도 (ISO 26262)
+| 항목 | 평가 | 비고 |
+|------|------|------|
+| ASIL 등급 | QM/A/B/C/D | |
+| 추적성 매트릭스 | 영향 여부 | |
+```
+
+### CHANGELOG
+```markdown
+## [vX.Y.Z] - YYYY-MM-DD
+### Added
+### Changed
+### Fixed
+### Removed
+```
+
+## DOCX 빌드 연동
+
+DOCX 파일 생성이 필요할 때는 `report_gen/docx_builder.py` 활용:
+```bash
+python -c "
+from report_gen.docx_builder import build_docx
+build_docx(template='templates/uds_template.docx', data=payload, output='exports/result.docx')
+"
+```
+- `template`: Optional. None이면 기본 템플릿 사용
+- `data`: UDS 페이로드 딕셔너리
+- `output`: 출력 DOCX 경로
 
 ## 원칙
 - 코드를 직접 수정하지 않는다

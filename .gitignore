@@ -49,6 +49,9 @@ project_docs/
 .env
 OAI_CONFIG_LIST
 
+# === Claude Code 로컬 설정 ===
+.claude/settings.local.json
+
 # === 이미지 ===
 *.png
 *.jpg

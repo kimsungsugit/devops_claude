@@ -26,7 +26,19 @@ def _safe_float(value: Any) -> Optional[float]:
         return None
 
 
+import time as _time
+
+
 class ReportMCPServer:
+    _bundle_cache: Dict[str, tuple[float, Dict[str, Any]]] = {}
+    _CACHE_TTL = 60  # seconds
+
+    def clear_cache(self, report_dir: str | None = None) -> None:
+        if report_dir:
+            self._bundle_cache.pop(str(Path(report_dir).resolve()), None)
+        else:
+            self._bundle_cache.clear()
+
     def list_tools(self) -> List[Dict[str, Any]]:
         return [
             {"name": "get_report_summary", "type": "read"},
@@ -55,6 +67,18 @@ class ReportMCPServer:
 
     def read_bundle(self, report_dir: Path) -> Dict[str, Any]:
         report_dir = Path(report_dir).resolve()
+        cache_key = str(report_dir)
+        try:
+            mtime = max(
+                (report_dir / f).stat().st_mtime
+                for f in ("analysis_summary.json", "run_status.json")
+                if (report_dir / f).exists()
+            ) if report_dir.exists() else 0.0
+        except (ValueError, OSError):
+            mtime = 0.0
+        cached = self._bundle_cache.get(cache_key)
+        if cached and cached[0] == mtime and (_time.time() - cached[0]) < self._CACHE_TTL:
+            return cached[1]
         summary = _read_json(report_dir / "analysis_summary.json", default={})
         findings = _read_json(report_dir / "findings_flat.json", default=[])
         history = _read_json(report_dir / "history.json", default=[])
@@ -77,7 +101,7 @@ class ReportMCPServer:
                 coverage["source"] = parsed.get("path")
                 summary["coverage"] = coverage
 
-        return {
+        bundle = {
             "report_dir": str(report_dir),
             "summary": summary,
             "findings": findings,
@@ -85,8 +109,10 @@ class ReportMCPServer:
             "status": status,
             "jenkins_scan": jenkins_scan,
         }
+        self._bundle_cache[cache_key] = (mtime, bundle)
+        return bundle
 
-    def call_tool(self, tool_name: str, *, report_dir: Path, **kwargs: Any) -> Dict[str, Any]:
+    def call_tool(self, tool_name: str, *, report_dir: str | Path, **kwargs: Any) -> Dict[str, Any]:
         report_dir = Path(report_dir).resolve()
         bundle = self.read_bundle(report_dir)
 

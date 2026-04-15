@@ -814,10 +814,12 @@ class TestQualityRouter:
         # Returns error field (not HTTP 404) when run not found
         assert "error" in data or "id" in data
 
-    def test_trend_requires_doc_type(self):
-        """GET /api/quality/trend without doc_type returns 422."""
+    def test_trend_default_doc_type(self):
+        """GET /api/quality/trend without doc_type defaults to uds."""
         r = client.get("/api/quality/trend")
-        assert r.status_code == 422
+        assert r.status_code == 200
+        data = r.json()
+        assert "trend" in data
 
     def test_trend_with_doc_type(self):
         """GET /api/quality/trend?doc_type=uds returns trend."""

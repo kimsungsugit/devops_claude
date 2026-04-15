@@ -1687,8 +1687,6 @@ def generate_uds_traceability_matrix(
             all_test_rows.append(row)
 
     # Build function→requirement reverse mapping from UDS mapping_pairs
-    # This allows SUTS/SITS TCs (which have unit/function name) to be mapped
-    # to requirements even when their requirement_id doesn't match directly.
     func_to_reqs: Dict[str, List[str]] = {}
     for mp in mapping_pairs:
         if not isinstance(mp, dict):
@@ -1696,30 +1694,59 @@ def generate_uds_traceability_matrix(
         mp_rid = _normalize_req_id(str(mp.get("requirement_id") or ""))
         if not mp_rid:
             continue
-        for fn in (mp.get("source_ids") or []):
+        srcs = mp.get("source_ids") or []
+        if isinstance(srcs, str):
+            srcs = [s.strip() for s in srcs.split(",") if s.strip()]
+        for fn in srcs:
             fn_lower = str(fn).strip().lower()
             if fn_lower and fn_lower not in func_to_reqs:
                 func_to_reqs[fn_lower] = []
             if fn_lower and mp_rid not in func_to_reqs[fn_lower]:
                 func_to_reqs[fn_lower].append(mp_rid)
 
-    # Enrich SUTS/SITS rows: if a row has 'unit' (function name) but its
-    # requirement_id doesn't match any matrix requirement, add duplicate rows
-    # for each requirement mapped to that function via UDS.
+    # Build SDS component→requirement reverse mapping
+    # SITS TCs reference SwCom_XX (SDS components), not SwTR_XXXX directly.
+    # ISO 26262 T5: SRS → SDS(SwCom) → SITS TC
+    comp_to_reqs: Dict[str, List[str]] = {}
+    for rid, comps in sds_lookup.items():
+        for comp in comps:
+            comp_norm = _normalize_req_id(comp)
+            if comp_norm not in comp_to_reqs:
+                comp_to_reqs[comp_norm] = []
+            if rid not in comp_to_reqs[comp_norm]:
+                comp_to_reqs[comp_norm].append(rid)
+
+    req_id_set = set(req_ids)
+
+    # Enrich SUTS/SITS rows with reverse mappings
     enriched_rows: List[Dict[str, Any]] = []
     for row in all_test_rows:
         if not isinstance(row, dict):
             continue
-        # Mark original rows as direct trace
-        enriched_rows.append({**row, "trace_type": "direct"})
-        unit = str(row.get("unit") or "").strip().lower()
+        orig_rid = _normalize_req_id(str(row.get("requirement_id") or ""))
         source = row.get("source", "")
+        unit = str(row.get("unit") or "").strip().lower()
+
+        # Skip rows with no useful data
+        if not orig_rid and not unit:
+            continue
+
+        # Keep original row only if its requirement_id is a valid matrix requirement
+        if orig_rid in req_id_set:
+            enriched_rows.append({**row, "trace_type": "direct"})
+        # else: non-matching ID (e.g. SwCom_XX) ��� skip original, only add via reverse mapping
+
+        # SDS component reverse mapping: SwCom_XX → [SwTR_XXXX, ...]
+        if orig_rid and orig_rid not in req_id_set and source in ("SITS",):
+            comp_mapped = comp_to_reqs.get(orig_rid, [])
+            for mrid in comp_mapped:
+                enriched_rows.append({**row, "requirement_id": mrid, "trace_type": "indirect"})
+
+        # Function name reverse mapping: unit → [SwTR_XXXX, ...]
         if unit and source in ("SUTS", "SITS"):
             mapped_rids = func_to_reqs.get(unit, [])
-            orig_rid = _normalize_req_id(str(row.get("requirement_id") or ""))
             for mrid in mapped_rids:
                 if mrid != orig_rid:
-                    # Indirect: mapped via UDS function
                     enriched_rows.append({**row, "requirement_id": mrid, "trace_type": "indirect"})
 
     vcast_map = _normalize_vcast_rows(enriched_rows)

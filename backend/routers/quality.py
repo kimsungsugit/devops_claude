@@ -102,7 +102,7 @@ def get_run(run_id: int) -> Dict[str, Any]:
 
 @router.get("/trend")
 def get_trend(
-    doc_type: str = Query(..., description="uds|sts|suts"),
+    doc_type: str = Query("uds", description="uds|sts|suts"),
     project_root: Optional[str] = Query(None),
     target_function: Optional[str] = Query(None),
     last_n: int = Query(20, le=100),

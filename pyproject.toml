@@ -13,3 +13,14 @@ omit = ["tests/*", "*/migrations/*", "*/__pycache__/*"]
 [tool.coverage.report]
 show_missing = true
 fail_under = 40
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+ignore = ["E501"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["backend", "workflow", "report_gen", "generators"]

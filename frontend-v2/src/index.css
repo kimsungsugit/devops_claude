@@ -431,7 +431,9 @@ label {
   grid-template-columns: 1fr 1fr;
   gap: var(--sp-3);
   margin-bottom: var(--sp-3);
+  min-width: 0;
 }
+.field-group > * { min-width: 0; }
 
 .field-group.cols-1 { grid-template-columns: 1fr; }
 .field-group.cols-3 { grid-template-columns: 1fr 1fr 1fr; }

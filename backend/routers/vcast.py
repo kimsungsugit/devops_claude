@@ -232,6 +232,8 @@ async def vcast_parse(
             except Exception:
                 pass
     
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Parse error: {str(e)}")
 

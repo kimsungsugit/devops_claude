@@ -29,15 +29,20 @@ export default function SrsSdsSection({ job, analysisResult }) {
   }), [localDocPaths, scmLinked.srs, scmLinked.sds, scmLinked.hsis, scmLinked.stp]);
 
   // SCM linked docs (for loadMatrix + UI)
-  const [linkedDocs, setLinkedDocs] = useState(analysisResult?.scmList?.[0]?.linked_docs || {});
+  // Use stable key (scm id or job url) to avoid infinite re-renders from object reference changes
+  const scmLinkedDocs = analysisResult?.scmList?.[0]?.linked_docs;
+  const scmId = analysisResult?.scmList?.[0]?.id || '';
+  const [linkedDocs, setLinkedDocs] = useState(scmLinkedDocs || {});
   useEffect(() => {
-    if (!linkedDocs.sts && !linkedDocs.suts) {
-      api('/api/scm/list').then(d => {
-        const items = d?.items || (Array.isArray(d) ? d : []);
-        if (items.length > 0 && items[0].linked_docs) setLinkedDocs(items[0].linked_docs);
-      }).catch(() => {});
+    if (scmLinkedDocs && (scmLinkedDocs.sts || scmLinkedDocs.suts || scmLinkedDocs.sits)) {
+      setLinkedDocs(scmLinkedDocs);
+      return;
     }
-  }, []);
+    api('/api/scm/list').then(d => {
+      const items = d?.items || (Array.isArray(d) ? d : []);
+      if (items.length > 0 && items[0].linked_docs) setLinkedDocs(items[0].linked_docs);
+    }).catch(() => {});
+  }, [scmId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const loadMatrix = useCallback(async (forceRefresh = false) => {
     // Ensure linkedDocs is loaded from SCM before proceeding
@@ -229,6 +234,11 @@ export default function SrsSdsSection({ job, analysisResult }) {
       // Warn if no data sources contributed
       if (reqItems.length === 0) {
         stepWarnings.push('SRS에서 요구사항을 추출하지 못했습니다. SRS 경로를 확인하세요.');
+        toast('warning', 'SRS 요구사항이 없어 매트릭스를 생성할 수 없습니다.');
+        setWarnings(stepWarnings);
+        setLoading(false);
+        setLoadProgress('');
+        return;
       }
       if (vcastRows.length === 0 && sitsRows.length === 0 && mappingPairs.length === 0 && sdsPairs.length === 0) {
         stepWarnings.push('설계/테스트 매핑 데이터가 없습니다. SDS/UDS/STS/SUTS/SITS/VectorCAST 연결을 확인하세요.');
@@ -284,11 +294,11 @@ export default function SrsSdsSection({ job, analysisResult }) {
             { label: 'HSIS', path: docPaths.hsis, fromScm: !localDocPaths.hsis && !!scmLinked.hsis },
             { label: 'STP', path: docPaths.stp, fromScm: !localDocPaths.stp && !!scmLinked.stp },
           ].map(({ label, path, fromScm }) => (
-            <div key={label} className="artifact-item" style={{ background: 'var(--bg)' }}>
-              <span className="pill pill-purple" style={{ minWidth: 40, textAlign: 'center' }}>{label}</span>
+            <div key={label} className="artifact-item" style={{ background: 'var(--bg)', overflow: 'hidden' }}>
+              <span className="pill pill-purple" style={{ minWidth: 40, textAlign: 'center', flexShrink: 0 }}>{label}</span>
               {path ? (
                 <>
-                  <span className="artifact-name" title={path}>
+                  <span className="artifact-name" title={path} style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                     {path.split(/[\\/]/).pop()}
                   </span>
                   {fromScm && <span className="pill pill-info" style={{ fontSize: 9 }}>SCM</span>}
@@ -319,13 +329,12 @@ export default function SrsSdsSection({ job, analysisResult }) {
                 : docPath?.name ?? String(docPath);
               const fullPath = typeof docPath === 'string' ? docPath : docPath?.path ?? String(docPath);
               return (
-                <div key={docType} className="artifact-item" style={{ background: 'var(--bg)' }}>
-                  <span className="pill pill-purple" style={{ minWidth: 44, textAlign: 'center' }}>
+                <div key={docType} className="artifact-item" style={{ background: 'var(--bg)', overflow: 'hidden' }}>
+                  <span className="pill pill-purple" style={{ minWidth: 44, textAlign: 'center', flexShrink: 0 }}>
                     {docType.toUpperCase()}
                   </span>
-                  <span className="artifact-name" title={fullPath}>{fileName}</span>
-                  <span className="text-muted text-sm" style={{ marginLeft: 'auto', flexShrink: 0 }}>
-                    {fullPath}
+                  <span className="artifact-name" title={fullPath} style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {fileName}
                   </span>
                 </div>
               );
@@ -368,11 +377,11 @@ export default function SrsSdsSection({ job, analysisResult }) {
                   const path = typeof f === 'string' ? f : f.path;
                   const action = typeof f === 'object' ? f.action : undefined;
                   return (
-                    <div key={i} className="artifact-item">
-                      <span style={{ fontSize: 11, marginRight: 4 }}>
+                    <div key={i} className="artifact-item" style={{ overflow: 'hidden' }}>
+                      <span style={{ fontSize: 11, marginRight: 4, flexShrink: 0 }}>
                         {action === 'A' ? '🟢' : action === 'D' ? '🔴' : '🟡'}
                       </span>
-                      <span className="artifact-name" style={{ fontFamily: 'monospace', fontSize: 11 }}>{path}</span>
+                      <span className="artifact-name" style={{ fontFamily: 'monospace', fontSize: 11, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{path}</span>
                       {action && <span className="pill pill-neutral">{action}</span>}
                     </div>
                   );
@@ -500,7 +509,7 @@ function CoverageBar({ covered, partial, total, onFilter }) {
   if (!total) return null;
   const covPct = Math.round((covered / total) * 100);
   const partPct = Math.round((partial / total) * 100);
-  const uncovPct = 100 - covPct - partPct;
+  const uncovPct = Math.max(0, 100 - covPct - partPct);
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 4, minWidth: 200 }}>
       <div style={{ display: 'flex', height: 12, borderRadius: 4, overflow: 'hidden', background: '#e5e7eb', cursor: 'pointer' }}>
@@ -598,7 +607,7 @@ function TraceMatrix({ matrix }) {
     const total = rows.length;
     // SW 구현 대상: 설계가 존재하는 요구사항 (covered + partial with design)
     const designTotal = covered + partialWithDesign;
-    return { covered, partial, uncovered, total, partialWithDesign, designTotal, pct: Math.round((covered / total) * 100) };
+    return { covered, partial, uncovered, total, partialWithDesign, designTotal, pct: total > 0 ? Math.round((covered / total) * 100) : 0 };
   }, [rows]);
 
   // Filter + sort
@@ -772,7 +781,7 @@ function TraceMatrix({ matrix }) {
                     Partial (테스트만 존재)
                   </td>
                   <td style={{ padding: '6px 12px', textAlign: 'center', fontWeight: 700, fontSize: 14, color: COVERAGE_COLORS.partial.fg }}>{coverage.partial}</td>
-                  <td style={{ padding: '6px 12px', textAlign: 'center', fontWeight: 600, color: COVERAGE_COLORS.partial.fg }}>{Math.round(coverage.partial / coverage.total * 100)}%</td>
+                  <td style={{ padding: '6px 12px', textAlign: 'center', fontWeight: 600, color: COVERAGE_COLORS.partial.fg }}>{coverage.total > 0 ? Math.round(coverage.partial / coverage.total * 100) : 0}%</td>
                   <td style={{ padding: '6px 12px', fontSize: 11 }}>STS 테스트 매핑 있으나 UDS 소스 매핑 없음 (비기능/HW/시스템 레벨 요구사항)</td>
                 </tr>
               )}
@@ -782,7 +791,7 @@ function TraceMatrix({ matrix }) {
                     Uncovered (미추적)
                   </td>
                   <td style={{ padding: '6px 12px', textAlign: 'center', fontWeight: 700, fontSize: 14, color: COVERAGE_COLORS.uncovered.fg }}>{coverage.uncovered}</td>
-                  <td style={{ padding: '6px 12px', textAlign: 'center', fontWeight: 600, color: COVERAGE_COLORS.uncovered.fg }}>{Math.round(coverage.uncovered / coverage.total * 100)}%</td>
+                  <td style={{ padding: '6px 12px', textAlign: 'center', fontWeight: 600, color: COVERAGE_COLORS.uncovered.fg }}>{coverage.total > 0 ? Math.round(coverage.uncovered / coverage.total * 100) : 0}%</td>
                   <td style={{ padding: '6px 12px', fontSize: 11 }}>설계 및 테스트 매핑 모두 없음</td>
                 </tr>
               )}
@@ -809,7 +818,7 @@ function TraceMatrix({ matrix }) {
                   {Math.round(((summary?.mapped_test_count ?? (coverage.covered + coverage.partial)) / coverage.total) * 100)}%
                 </td>
                 <td style={{ padding: '8px 12px', fontSize: 11, color: 'var(--text-muted)' }}>
-                  STS/SUTS/VectorCAST 테스트 매핑 기준
+                  STS/SUTS/SITS/VectorCAST 테스트 매핑 기준
                 </td>
               </tr>
             </tfoot>
@@ -826,7 +835,7 @@ function TraceMatrix({ matrix }) {
       )}
 
       {/* Data sources */}
-      {summary && (
+      {summary && coverage && (
         <details style={{ marginBottom: 12 }}>
           <summary className="text-sm" style={{ cursor: 'pointer', fontWeight: 600 }}>데이터 소스 상세</summary>
           {(() => {
@@ -1074,7 +1083,7 @@ function TraceMatrix({ matrix }) {
                 {/* Expanded detail row — drilldown */}
                 {isExpanded && (
                   <tr style={{ background: '#f8fafc' }}>
-                    <td colSpan={9} style={{ padding: '10px 16px' }}>
+                    <td colSpan={10} style={{ padding: '10px 16px' }}>
                       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 2fr', gap: 12 }}>
                         {/* SDS components */}
                         <div>

@@ -17,17 +17,17 @@
       "ignore_patterns": [],
       "webhook_secret_env": "",
       "linked_docs": {
-        "uds": "D:/Project/devops/260105/backend/reports/uds_local/uds_spec_generated_expanded_20260326_133526.docx",
-        "sts": "D:/Project/devops/260105/reports/sts/sts_eval_20260319_123007.xlsx",
-        "suts": "D:/Project/devops/260105/reports/suts/suts_impact_20260326_132933.xlsm",
-        "sits": "D:/Project/devops/260105/reports/sits/sits_impact_20260326_132911.xlsm",
+        "uds": "D:/Project/devops/260105/backend/reports/uds_local/uds_spec_generated_expanded_20260415_093352.docx",
+        "sts": "D:/Project/devops/Release_claude/reports/sts/sts_local_20260415_100805_230a.xlsx",
+        "suts": "D:/Project/devops/Release_claude/reports/suts/suts_local_20260415_101559_3b99.xlsx",
+        "sits": "D:/Project/devops/Release_claude/reports/sits/sits_local_20260415_095342_02a7.xlsx",
         "srs": "D:/Project/devops/260105/docs/(HDPDM01_SRS) Software Requirements Specification_v1.05_20230510.docx",
         "sds": "D:/Project/devops/260105/docs/(HDPDM01_SDS) Software Architecture Design Specification_v1.04_20230512.docx",
         "hsis": "D:/Project/devops/260105/docs/(HDPDM01_HSIS) Hardware Software Interface Specification_v5.00_20221115_B.xlsx",
         "stp": "D:/Project/devops/Release_claude/docs/STP_TEMP.txt"
       },
       "created_at": "2026-03-23T14:10:41",
-      "updated_at": "2026-04-14T16:00:06",
+      "updated_at": "2026-04-15T10:16:52",
       "last_triggered": "",
       "last_revision": ""
     }

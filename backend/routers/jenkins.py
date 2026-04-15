@@ -2323,19 +2323,21 @@ def jenkins_uds_extract_mapping(body: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _normalize_req_id(rid: str) -> str:
-    """Normalize system-level (Sy*) requirement IDs to software-level (Sw*).
+    """Normalize system-level (Sy*) requirement IDs to software-level (Sw*)
+    and ensure consistent casing for matching with report_gen.requirements.
 
     Mapping: SyTR → SwTR, SyEIF → SwEI, SyTSR → SwTSR, SyNTR → SwNTR
     """
     import re as _re
-    if rid.startswith("Sy"):
-        rid = _re.sub(r"^SyEIF_", "SwEI_", rid)
-        rid = _re.sub(r"^SyTR_", "SwTR_", rid)
-        rid = _re.sub(r"^SyTSR_", "SwTSR_", rid)
-        rid = _re.sub(r"^SyNTR_", "SwNTR_", rid)
-        rid = _re.sub(r"^SyNTSR_", "SwNTSR_", rid)
-        rid = _re.sub(r"^SyCNF_", "SwCNF_", rid)
-    return rid
+    rid = "".join(rid.split())  # remove whitespace
+    if rid.upper().startswith("SY"):
+        rid = _re.sub(r"(?i)^SyEIF_", "SwEI_", rid)
+        rid = _re.sub(r"(?i)^SyTR_", "SwTR_", rid)
+        rid = _re.sub(r"(?i)^SyTSR_", "SwTSR_", rid)
+        rid = _re.sub(r"(?i)^SyNTR_", "SwNTR_", rid)
+        rid = _re.sub(r"(?i)^SyNTSR_", "SwNTSR_", rid)
+        rid = _re.sub(r"(?i)^SyCNF_", "SwCNF_", rid)
+    return rid.upper() if rid else rid
 
 
 @router.post("/api/jenkins/sts/extract-traceability")
@@ -2380,8 +2382,8 @@ def jenkins_sts_extract_traceability(body: Dict[str, Any]) -> Dict[str, Any]:
         req_cols = []
         for c in range(3, trace_ws.max_column + 1):
             v = trace_ws.cell(4, c).value
-            if v and "Sw" in str(v):
-                req_cols.append((c, str(v).strip()))
+            if v and ("Sw" in str(v) or "SW" in str(v).upper() or "Sy" in str(v)):
+                req_cols.append((c, _normalize_req_id(str(v).strip())))
 
         for r in range(5, trace_ws.max_row + 1):
             tc_id = str(trace_ws.cell(r, 3).value or "").strip()
@@ -2507,7 +2509,7 @@ def jenkins_sits_extract_traceability(body: Dict[str, Any]) -> Dict[str, Any]:
     # Strategy 1: Look for Traceability sheet (same as STS/SUTS)
     trace_ws = None
     for name in wb.sheetnames:
-        if "Traceability" in name or "traceability" in name:
+        if "traceability" in name.lower():
             trace_ws = wb[name]
             break
 
@@ -2616,7 +2618,7 @@ def jenkins_sits_extract_traceability(body: Dict[str, Any]) -> Dict[str, Any]:
     seen = set()
     deduped = []
     for row in vcast_rows:
-        key = (row["requirement_id"], row["testcase"])
+        key = (row["requirement_id"], row["testcase"], row.get("unit", ""))
         if key not in seen:
             seen.add(key)
             deduped.append(row)

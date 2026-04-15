@@ -1,7 +1,7 @@
 ---
 name: architect
 description: 소프트웨어 구조 설계, 모듈 분리, 인터페이스 정의, 아키텍처 의사결정을 담당하는 설계 에이전트
-model: sonnet
+model: opus
 tools:
   - Read
   - Glob
@@ -25,6 +25,9 @@ tools:
 - **Frontend**: View → Component → Context 패턴
 - **Report Gen**: Parser → Analyzer → Generator → Builder 파이프라인
 - **C Target**: MISRA-C 준수, 함수 단위 모듈화
+  - 전처리기 설계: `#ifdef`/`#if defined()` 조건부 컴파일은 빌드 구성(config.h)에 집중, 함수 본문 내 조건부 블록 최소화
+  - 매크로 설계: 함수형 매크로 대신 `static inline` 함수 권장 (디버깅/추적성 향상)
+  - `report_gen/source_parser.py`는 정규식 기반 → 복잡 선언(함수 포인터, 다중 배열)은 파싱 한계 인지. Tree-sitter(`workflow/code_parser/c_parser.py`)와 병용 설계
 
 ## 출력 형식
 ```markdown

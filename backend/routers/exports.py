@@ -62,6 +62,8 @@ def convert_to_pdf(req: PdfConvertRequest) -> Dict[str, Any]:
             )
     except FileNotFoundError as exc:
         raise APIError(status_code=404, message=str(exc), code="FILE_NOT_FOUND")
+    except APIError:
+        raise
     except RuntimeError as exc:
         raise APIError(status_code=500, message=str(exc), code="CONVERSION_ERROR")
     except Exception:

@@ -24,7 +24,6 @@ CI/CD 파이프라인과 전체 테스트 스위트를 실행/검증합니다.
 ### 1. 로컬 테스트
 ```bash
 # 전체 단위 테스트
-cd /d/Project/devops/Release_claude
 pytest tests/unit/ -v --tb=short --timeout=60 2>&1 | tail -30
 
 # 특정 모듈
