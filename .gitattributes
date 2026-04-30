@@ -1,0 +1,30 @@
+# Default: text auto-detection, normalize LF on commit
+* text=auto
+
+# Shell scripts and git hooks must keep LF on all platforms — bash on Windows
+# (msys2 / git-bash) refuses to execute scripts with CRLF line endings.
+*.sh        text eol=lf
+.githooks/* text eol=lf
+
+# Python: keep LF for cross-platform consistency (PEP 8, ruff/black expectation)
+*.py text eol=lf
+
+# Frontend source: LF (vite, eslint default)
+*.js  text eol=lf
+*.jsx text eol=lf
+*.ts  text eol=lf
+*.tsx text eol=lf
+*.json text eol=lf
+*.css text eol=lf
+*.html text eol=lf
+*.md  text eol=lf
+
+# Binary
+*.png  binary
+*.jpg  binary
+*.gif  binary
+*.ico  binary
+*.docx binary
+*.xlsx binary
+*.pdf  binary
+*.zip  binary

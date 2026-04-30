@@ -20,7 +20,24 @@ fi
 git config core.hooksPath .githooks
 chmod +x .githooks/* 2>/dev/null || true
 
+# Remove legacy .git/hooks/* that share names with .githooks/* — they would
+# silently take over if someone later runs `git config --unset core.hooksPath`,
+# leading to two divergent copies of the same hook on different machines.
+LEGACY_REMOVED=0
+for f in .githooks/*; do
+    name="$(basename "$f")"
+    legacy=".git/hooks/$name"
+    if [ -f "$legacy" ]; then
+        rm -f "$legacy"
+        LEGACY_REMOVED=$((LEGACY_REMOVED + 1))
+        echo "  removed legacy $legacy (now tracked in .githooks/$name)"
+    fi
+done
+
 echo "✅ git hooks installed via core.hooksPath=.githooks"
+if [ "$LEGACY_REMOVED" -gt 0 ]; then
+    echo "   ($LEGACY_REMOVED legacy .git/hooks/* removed to avoid divergence)"
+fi
 echo ""
 echo "Active hooks:"
 ls -1 .githooks/
