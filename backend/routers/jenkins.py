@@ -880,6 +880,9 @@ def jenkins_source_root_download(req: JenkinsSourceDownloadRequest) -> Dict[str,
         client=client,
         build_selector=req.build_selector,
         progress_cb=None,
+        scm_username=req.scm_username,
+        scm_id=req.scm_id,
+        force=req.force,
     )
     def _dir_has_entries(path: Path) -> bool:
         try:

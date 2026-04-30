@@ -407,7 +407,7 @@ export default function Dashboard({ onGoDetail }) {
     } finally {
       setRunning(false);
     }
-  }, [selectedJob, cfg, toast, setAnalysisResult]);
+  }, [selectedJob, cfg, toast, setAnalysisResult, manualScmId]);
 
   autoRunRef.current = runAnalysis;
 

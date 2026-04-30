@@ -1003,7 +1003,7 @@ function TraceMatrix({ matrix }) {
         </thead>
         <tbody>
           {displayedRows.map((r, idx) => {
-            const reqId = r.requirement_id ?? r.req_id ?? r.id ?? `row-${idx}`;
+            const reqId = _rowReqId(r) || `row-${idx}`;
             const status = deriveStatus(r);
             const colors = COVERAGE_COLORS[status] || {};
             const sdsComps = r.sds_components ?? [];
