@@ -1,12 +1,15 @@
 @echo off
-title DevOps Release Server
+title ARIA Backend Server
 cd /d "%~dp0\.."
 echo ============================================
-echo  DevOps Release Server
+echo  ARIA Backend Server
+echo  Automated Review and Intelligence Analyzer
 echo ============================================
 echo.
-echo Starting on http://0.0.0.0:8000 ...
+echo Backend: http://0.0.0.0:9000
+echo Frontend: http://localhost:5174 (run scripts\start_frontend.bat separately)
+echo.
 echo Press Ctrl+C to stop.
 echo.
-backend\.venv\Scripts\python.exe -m uvicorn backend.main:app --host 0.0.0.0 --port 8000
+backend\.venv\Scripts\python.exe -m uvicorn backend.main:app --host 0.0.0.0 --port 9000
 pause

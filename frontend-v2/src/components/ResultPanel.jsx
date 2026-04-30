@@ -1,6 +1,6 @@
-import { useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import StatusBadge from './StatusBadge.jsx';
-import { buildTone } from '../api.js';
+import { buildTone, post } from '../api.js';
 
 /* ── Constants ── */
 const _CHANGE_TYPE_KO = {
@@ -20,11 +20,22 @@ const _DOC_STATUS = {
 };
 
 const DOC_ORDER = ['uds', 'suts', 'sits', 'sts', 'sds'];
-const DOC_LABEL = { uds: 'UDS', suts: 'SUTS', sits: 'SITS', sts: 'STS', sds: 'SDS', srs: 'SRS', hsis: 'HSIS' };
+
+/* ── Quality Gate thresholds ──────────────────────────────────────────
+ * ISO 26262 권장 범위에 맞춘 커버리지 기준 (단위 %).
+ * Hard-coded for now — 추후 설정 탭에서 프로젝트별 오버라이드를 노출할 수 있다. */
+const GATE_PASS = 80;
+const GATE_WARN = 50;
+
+export function classifyGate(pct) {
+  if (pct >= GATE_PASS) return 'pass';
+  if (pct >= GATE_WARN) return 'warn';
+  return 'fail';
+}
 
 /* ── ResultPanel ── */
-export default function ResultPanel({ result, onGoDetail }) {
-  const { artifacts, reportData, impactData, scmList } = result;
+export default function ResultPanel({ result }) {
+  const { artifacts, reportData, impactData } = result;
   const kpis = reportData?.kpis || {};
   const build = kpis.build || {};
   const cov = kpis.coverage || {};
@@ -32,76 +43,109 @@ export default function ResultPanel({ result, onGoDetail }) {
   const scan = kpis.scan || {};
   const fileTypes = kpis.files || {};
   const prqa = kpis.prqa || {};
-  const linkedDocs = impactData?._linked_docs || scmList?.[0]?.linked_docs || {};
-  const linkedCount = Object.values(linkedDocs).filter(Boolean).length;
+  const triggerFiles = Array.isArray(impactData?.changed_files) ? impactData.changed_files
+    : Array.isArray(impactData?.trigger?.changed_files) ? impactData.trigger.changed_files : [];
+
+  /* Traceability summary (cached, fetched lazily per jobUrl) */
+  const [traceSummary, setTraceSummary] = useState(null);
+  const [traceLoading, setTraceLoading] = useState(false);
+  const [traceRefreshKey, setTraceRefreshKey] = useState(0);
+
+  const refreshTraceSummary = useCallback(() => {
+    setTraceRefreshKey(k => k + 1);
+  }, []);
+
+  useEffect(() => {
+    const jobUrl = result?.jobUrl;
+    if (!jobUrl) {
+      setTraceSummary(null);
+      return;
+    }
+    let cancelled = false;
+    setTraceLoading(true);
+    post('/api/jenkins/uds/trace-summary', {
+      job_url: jobUrl,
+      cache_root: result?.cacheRoot || '.devops_pro_cache',
+    })
+      .then((data) => { if (!cancelled) setTraceSummary(data || null); })
+      .catch(() => { if (!cancelled) setTraceSummary(null); })
+      .finally(() => { if (!cancelled) setTraceLoading(false); });
+    return () => { cancelled = true; };
+  }, [result?.jobUrl, result?.cacheRoot, traceRefreshKey]);
+
+  /* Re-fetch when dashboard tab becomes visible again (e.g., after generating matrix in SRS section) */
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState === 'visible' && result?.jobUrl) {
+        refreshTraceSummary();
+      }
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    window.addEventListener('focus', onVisible);
+    return () => {
+      document.removeEventListener('visibilitychange', onVisible);
+      window.removeEventListener('focus', onVisible);
+    };
+  }, [result?.jobUrl, refreshTraceSummary]);
 
   return (
     <div>
       <div className="divider" />
 
-      {/* KPI Cards */}
-      <div className="stats-row" style={{ marginBottom: 16 }}>
-        {/* Build */}
-        <div className="stat-card">
-          <div className="stat-value">
-            <StatusBadge tone={buildTone(build.result || reportData?.result)}>
-              #{build.build_number || reportData?.build_number || '?'} {build.result || reportData?.result || '-'}
-            </StatusBadge>
-          </div>
-          <div className="stat-label">빌드 결과</div>
-        </div>
-        {/* Coverage */}
-        {cov.line_rate != null && (
-          <div className="stat-card">
-            <div className="stat-value" style={{ color: cov.ok ? 'var(--color-success)' : 'var(--color-danger)' }}>
-              {Math.round(cov.line_rate * 100)}%
-            </div>
-            <div className="stat-label">Line Coverage</div>
-          </div>
-        )}
-        {cov.branch_rate != null && (
-          <div className="stat-card">
-            <div className="stat-value" style={{ color: cov.ok ? 'var(--color-success)' : 'var(--color-danger)' }}>
-              {Math.round(cov.branch_rate * 100)}%
-            </div>
-            <div className="stat-label">Branch Coverage</div>
-          </div>
-        )}
-        {/* Tests */}
-        <div className="stat-card">
-          <div className="stat-value" style={{ color: tests.ok ? 'var(--color-success)' : 'var(--color-danger)' }}>
-            {tests.ok ? 'PASS' : (tests.ok === false ? 'FAIL' : '-')}
-          </div>
-          <div className="stat-label">테스트</div>
-        </div>
-        {/* File count */}
-        <div className="stat-card">
-          <div className="stat-value">{scan.files_total ?? artifacts.length ?? 0}</div>
-          <div className="stat-label">아티팩트</div>
-        </div>
-        {/* Linked docs */}
-        <div className="stat-card">
-          <div className="stat-value">{linkedCount}</div>
-          <div className="stat-label">연결 문서</div>
-        </div>
-      </div>
-
-      <div className="result-grid">
-        {/* Left: Build & Artifact Summary */}
+      <div className="result-grid" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))' }}>
+        {/* Build & Artifact Summary */}
         <div className="panel" style={{ boxShadow: 'none', background: 'var(--bg)' }}>
           <div className="panel-header">
             <span className="panel-title">빌드 & 아티팩트 요약</span>
           </div>
 
-          {/* Build timestamp */}
-          {build.timestamp && (
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12, padding: '6px 10px', background: 'var(--card-bg, var(--surface))', borderRadius: 6, border: '1px solid var(--border)' }}>
-              <div>
-                <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>빌드 일시</div>
-                <div style={{ fontSize: 13, fontWeight: 600 }}>{new Date(build.timestamp).toLocaleString('ko-KR')}</div>
+          {/* Compact KPI row — integrated from top stats */}
+          <div style={{ display: 'flex', gap: 'var(--sp-2)', marginBottom: 'var(--sp-3)', flexWrap: 'wrap' }}>
+            <div style={{ flex: '1 1 auto', minWidth: 110, padding: '6px 10px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--card-bg, var(--surface))' }}>
+              <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 2 }}>빌드 결과</div>
+              <StatusBadge tone={buildTone(build.result || reportData?.result)}>
+                #{build.build_number || reportData?.build_number || '?'} {build.result || reportData?.result || '-'}
+              </StatusBadge>
+            </div>
+            {cov.line_rate != null && (
+              <div style={{ flex: '1 1 auto', minWidth: 80, padding: '6px 10px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--card-bg, var(--surface))' }}>
+                <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 2 }}>Line Cov</div>
+                <div style={{ fontSize: 16, fontWeight: 700, color: cov.ok ? 'var(--color-success)' : 'var(--color-danger)' }}>
+                  {Math.round(cov.line_rate * 100)}%
+                </div>
+              </div>
+            )}
+            {cov.branch_rate != null && (
+              <div style={{ flex: '1 1 auto', minWidth: 80, padding: '6px 10px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--card-bg, var(--surface))' }}>
+                <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 2 }}>Branch Cov</div>
+                <div style={{ fontSize: 16, fontWeight: 700, color: cov.ok ? 'var(--color-success)' : 'var(--color-danger)' }}>
+                  {Math.round(cov.branch_rate * 100)}%
+                </div>
+              </div>
+            )}
+            <div style={{ flex: '1 1 auto', minWidth: 70, padding: '6px 10px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--card-bg, var(--surface))' }}>
+              <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 2 }}>테스트</div>
+              <div style={{ fontSize: 16, fontWeight: 700, color: tests.ok ? 'var(--color-success)' : 'var(--color-danger)' }}>
+                {tests.ok ? 'PASS' : (tests.ok === false ? 'FAIL' : '-')}
               </div>
             </div>
-          )}
+            <div style={{ flex: '1 1 auto', minWidth: 70, padding: '6px 10px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--card-bg, var(--surface))' }}>
+              <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 2 }}>아티팩트</div>
+              <div style={{ fontSize: 16, fontWeight: 700 }}>{scan.files_total ?? artifacts.length ?? 0}</div>
+            </div>
+            {triggerFiles.length > 0 && (
+              <div style={{ flex: '1 1 auto', minWidth: 80, padding: '6px 10px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--card-bg, var(--surface))' }}>
+                <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 2 }}>변경 파일</div>
+                <div style={{ fontSize: 16, fontWeight: 700 }}>{triggerFiles.length}</div>
+              </div>
+            )}
+            {build.timestamp && (
+              <div style={{ flex: '2 1 auto', minWidth: 160, padding: '6px 10px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--card-bg, var(--surface))' }}>
+                <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 2 }}>빌드 일시</div>
+                <div style={{ fontSize: 12, fontWeight: 600 }}>{new Date(build.timestamp).toLocaleString('ko-KR')}</div>
+              </div>
+            )}
+          </div>
 
           {/* File type bar chart */}
           <FileTypeChart fileTypes={fileTypes} />
@@ -147,7 +191,10 @@ export default function ResultPanel({ result, onGoDetail }) {
           </div>
         </div>
 
-        {/* Right: Document & Impact Summary */}
+        {/* Traceability Summary — between 빌드 & 문서 */}
+        <TraceSummaryCard summary={traceSummary} loading={traceLoading} onRefresh={refreshTraceSummary} />
+
+        {/* Document & Impact Summary */}
         <div className="panel" style={{ boxShadow: 'none', background: 'var(--bg)' }}>
           <div className="panel-header">
             <span className="panel-title">문서 & 영향도 요약</span>
@@ -156,13 +203,166 @@ export default function ResultPanel({ result, onGoDetail }) {
         </div>
       </div>
 
-      <div className="row mt-3" style={{ justifyContent: 'flex-end' }}>
-        <button onClick={() => onGoDetail()}>세부 데이터 보기 →</button>
-        {(result?.impactData?.changed_function_types && Object.keys(result.impactData.changed_function_types).length > 0) && (
-          <button onClick={() => onGoDetail('impact')} style={{ marginLeft: 6 }}>영향 가이드 →</button>
-        )}
+      {/* Navigation buttons removed — use tabs to access detail/impact views */}
+    </div>
+  );
+}
+
+/* ── TraceSummaryCard ── */
+function TraceSummaryCard({ summary, loading, onRefresh }) {
+  const refreshBtn = onRefresh ? (
+    <button
+      onClick={onRefresh}
+      title="추적성 매트릭스 요약 새로고침"
+      style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 14, color: 'var(--text-muted)', padding: '0 4px' }}
+      aria-label="새로고침"
+    >
+      ↻
+    </button>
+  ) : null;
+
+  if (loading) {
+    return (
+      <div className="panel" style={{ boxShadow: 'none', background: 'var(--bg)', padding: 'var(--sp-3)' }}>
+        <div style={{ fontSize: 'var(--text-sm)', color: 'var(--text-muted)' }}>
+          추적성 요약 로딩 중...
+        </div>
+      </div>
+    );
+  }
+  if (!summary || !summary.has_data) {
+    const reason = summary?.reason;
+    return (
+      <div className="panel" style={{ boxShadow: 'none', background: 'var(--bg)', padding: 'var(--sp-3)' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+          <span className="panel-title">추적성 매트릭스 요약</span>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>
+              {reason || 'SRS & SDS 섹션에서 매트릭스를 먼저 생성하면 요약이 여기 표시됩니다'}
+            </span>
+            {refreshBtn}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  const total = summary.total_requirements || 0;
+  const covered = summary.covered || 0;
+  const partial = summary.partial || 0;
+  const uncovered = summary.uncovered || 0;
+  const pct = summary.coverage_pct || 0;
+  const generatedAt = summary.generated_at ? new Date(summary.generated_at).toLocaleString('ko-KR') : '';
+
+  return (
+    <div className="panel" style={{ boxShadow: 'none', background: 'var(--bg)' }}>
+      <div className="panel-header">
+        <span className="panel-title">추적성 매트릭스 요약</span>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <QualityGateBadge pct={pct} />
+          <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>{generatedAt}</span>
+          {refreshBtn}
+        </div>
+      </div>
+      <div style={{ display: 'flex', gap: 'var(--sp-2)', alignItems: 'stretch', flexWrap: 'wrap' }}>
+        <CoverageDonut covered={covered} partial={partial} uncovered={uncovered} pct={pct} />
+        <div style={{ flex: '1 1 300px', display: 'flex', gap: 'var(--sp-2)', flexWrap: 'wrap' }}>
+          <div style={{ flex: '1 1 auto', minWidth: 100, padding: '6px 10px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--card-bg, var(--surface))' }}>
+            <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>전체 요구사항</div>
+            <div style={{ fontSize: 18, fontWeight: 700 }}>{total.toLocaleString()}</div>
+          </div>
+          <div style={{ flex: '1 1 auto', minWidth: 100, padding: '6px 10px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--card-bg, var(--surface))' }}>
+            <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>Covered</div>
+            <div style={{ fontSize: 18, fontWeight: 700, color: 'var(--color-success)' }}>{covered}</div>
+          </div>
+          <div style={{ flex: '1 1 auto', minWidth: 100, padding: '6px 10px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--card-bg, var(--surface))' }}>
+            <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>Partial</div>
+            <div style={{ fontSize: 18, fontWeight: 700, color: 'var(--color-warning)' }}>{partial}</div>
+          </div>
+          <div style={{ flex: '1 1 auto', minWidth: 100, padding: '6px 10px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--card-bg, var(--surface))' }}>
+            <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>Uncovered</div>
+            <div style={{ fontSize: 18, fontWeight: 700, color: 'var(--color-danger)' }}>{uncovered}</div>
+          </div>
+        </div>
       </div>
     </div>
+  );
+}
+
+/* ── CoverageDonut ── */
+export function CoverageDonut({ covered, partial, uncovered, pct }) {
+  const total = covered + partial + uncovered;
+  if (total <= 0) return null;
+  // SVG donut: r=40, circumference 251.3. Each slice gets a proportional arc.
+  const R = 40;
+  const C = 2 * Math.PI * R;
+  const segCov = (covered / total) * C;
+  const segPar = (partial / total) * C;
+  const segUnc = (uncovered / total) * C;
+  const pctColor =
+    pct >= GATE_PASS ? 'var(--color-success)' :
+    pct >= GATE_WARN ? 'var(--color-warning)' :
+    'var(--color-danger)';
+  return (
+    <div
+      role="img"
+      aria-label={`커버리지 ${pct}% (Covered ${covered}, Partial ${partial}, Uncovered ${uncovered})`}
+      style={{ flex: '0 0 110px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+    >
+      <svg width="96" height="96" viewBox="0 0 96 96">
+        {/* Track */}
+        <circle cx="48" cy="48" r={R} fill="none" stroke="var(--border, #e5e7eb)" strokeWidth="12" />
+        {/* Slices — drawn clockwise from 12 o'clock via rotate(-90) */}
+        <g transform="rotate(-90 48 48)">
+          {covered > 0 && (
+            <circle cx="48" cy="48" r={R} fill="none"
+              stroke="var(--color-success)" strokeWidth="12"
+              strokeDasharray={`${segCov} ${C - segCov}`} strokeDashoffset="0" />
+          )}
+          {partial > 0 && (
+            <circle cx="48" cy="48" r={R} fill="none"
+              stroke="var(--color-warning)" strokeWidth="12"
+              strokeDasharray={`${segPar} ${C - segPar}`} strokeDashoffset={-segCov} />
+          )}
+          {uncovered > 0 && (
+            <circle cx="48" cy="48" r={R} fill="none"
+              stroke="var(--color-danger)" strokeWidth="12"
+              strokeDasharray={`${segUnc} ${C - segUnc}`} strokeDashoffset={-(segCov + segPar)} />
+          )}
+        </g>
+        <text x="48" y="52" textAnchor="middle" fontSize="18" fontWeight="700" fill={pctColor}>
+          {pct}%
+        </text>
+      </svg>
+    </div>
+  );
+}
+
+/* ── QualityGateBadge ── */
+export function QualityGateBadge({ pct }) {
+  const gate = classifyGate(pct);
+  const config = {
+    pass: { label: '✓ PASS', bg: '#dcfce7', fg: '#166534', border: '#86efac' },
+    warn: { label: '⚠ WARN', bg: '#fef9c3', fg: '#854d0e', border: '#fde047' },
+    fail: { label: '✗ FAIL', bg: '#fee2e2', fg: '#991b1b', border: '#fca5a5' },
+  }[gate];
+  return (
+    <span
+      title={`Quality Gate: ≥${GATE_PASS}% PASS / ≥${GATE_WARN}% WARN`}
+      aria-label={`Quality Gate ${gate.toUpperCase()}`}
+      style={{
+        fontSize: 11,
+        fontWeight: 700,
+        padding: '2px 8px',
+        borderRadius: 10,
+        background: config.bg,
+        color: config.fg,
+        border: `1px solid ${config.border}`,
+        whiteSpace: 'nowrap',
+      }}
+    >
+      {config.label}
+    </span>
   );
 }
 
@@ -299,7 +499,6 @@ function ImpactPanel({ impactData }) {
   const rawDocs = impactData.documents ?? impactData.actions ?? {};
   const docs = typeof rawDocs === 'object' ? rawDocs : {};
   const warnings = Array.isArray(impactData.warnings) ? impactData.warnings : [];
-  const linkedDocs = impactData._linked_docs || {};
   const scmName = impactData._scm_name || '';
 
   return (
@@ -366,35 +565,9 @@ function ImpactPanel({ impactData }) {
             />
           ) : null)}
         </div>
-      ) : changedFiles.length === 0 && changedFnEntries.length === 0 && Object.keys(linkedDocs).length === 0 ? (
+      ) : changedFiles.length === 0 && changedFnEntries.length === 0 ? (
         <div className="text-muted text-sm">영향받는 항목 없음</div>
       ) : null}
-
-      {/* Linked documents from SCM */}
-      {Object.keys(linkedDocs).length > 0 && (
-        <div style={{ marginTop: 10, border: '1px solid var(--border)', borderRadius: 6, overflow: 'hidden' }}>
-          <div style={{ padding: '6px 8px', background: 'var(--bg)', fontSize: 12, fontWeight: 600, color: 'var(--text-muted)', borderBottom: '1px solid var(--border)' }}>
-            연결된 문서 ({Object.keys(linkedDocs).length})
-          </div>
-          {Object.entries(linkedDocs).map(([key, path]) => {
-            if (!path) return null;
-            const filename = String(path).split(/[\\/]/).pop();
-            return (
-              <div key={key} className="row" style={{ padding: '5px 8px', gap: 8, borderBottom: '1px solid var(--border)', alignItems: 'center' }}>
-                <span style={{ fontWeight: 700, width: 44, textTransform: 'uppercase', fontSize: 12, color: 'var(--accent)' }}>
-                  {DOC_LABEL[key] || key.toUpperCase()}
-                </span>
-                <span style={{ fontSize: 11, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={path}>
-                  {filename}
-                </span>
-                <span className="pill pill-neutral" style={{ fontSize: 9 }}>
-                  {filename.split('.').pop()?.toUpperCase()}
-                </span>
-              </div>
-            );
-          })}
-        </div>
-      )}
 
       {/* Warnings */}
       {warnings.length > 0 && (

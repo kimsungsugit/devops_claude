@@ -4,10 +4,9 @@
  * 요구사항 추적: SRS-UI-RESULTPANEL
  * - 분석 결과(KPI, 빌드 정보, 아티팩트 수) 표시
  * - impactData 없을 때 안내 메시지 표시
- * - 세부 데이터 보기 버튼 동작
+ * - impactData 유무에 따른 변경 파일 카드 표시
  */
 import { render, screen } from '@testing-library/react';
-import userEvent from '@testing-library/user-event';
 import { describe, it, expect, vi } from 'vitest';
 
 // api.js 의존성 mock
@@ -50,7 +49,7 @@ describe('ResultPanel', () => {
     const result = makeResult();
 
     // Act
-    render(<ResultPanel result={result} onGoDetail={vi.fn()} />);
+    render(<ResultPanel result={result}  />);
 
     // Assert
     expect(screen.getByText('빌드 결과')).toBeInTheDocument();
@@ -66,7 +65,7 @@ describe('ResultPanel', () => {
     });
 
     // Act
-    render(<ResultPanel result={result} onGoDetail={vi.fn()} />);
+    render(<ResultPanel result={result}  />);
 
     // Assert
     expect(screen.getByText('아티팩트')).toBeInTheDocument();
@@ -78,7 +77,7 @@ describe('ResultPanel', () => {
     const result = makeResult();
 
     // Act
-    render(<ResultPanel result={result} onGoDetail={vi.fn()} />);
+    render(<ResultPanel result={result}  />);
 
     // Assert
     expect(screen.getByText('PASS')).toBeInTheDocument();
@@ -97,7 +96,7 @@ describe('ResultPanel', () => {
     });
 
     // Act
-    render(<ResultPanel result={result} onGoDetail={vi.fn()} />);
+    render(<ResultPanel result={result}  />);
 
     // Assert
     expect(screen.getByText('FAIL')).toBeInTheDocument();
@@ -116,10 +115,10 @@ describe('ResultPanel', () => {
     });
 
     // Act
-    render(<ResultPanel result={result} onGoDetail={vi.fn()} />);
+    render(<ResultPanel result={result}  />);
 
     // Assert
-    expect(screen.getByText('Line Coverage')).toBeInTheDocument();
+    expect(screen.getByText('Line Cov')).toBeInTheDocument();
     expect(screen.getByText('85%')).toBeInTheDocument();
   });
 
@@ -130,36 +129,21 @@ describe('ResultPanel', () => {
     const result = makeResult({ impactData: null, scmList: [] });
 
     // Act
-    render(<ResultPanel result={result} onGoDetail={vi.fn()} />);
+    render(<ResultPanel result={result}  />);
 
     // Assert
     expect(screen.getByText(/SCM이 등록되어 있지 않거나/)).toBeInTheDocument();
   });
 
-  it('연결 문서 수를 0으로 표시한다 (scmList 비어있을 때)', () => {
+  it('impactData 없으면 변경 파일 카드를 표시하지 않는다', () => {
     // Arrange
     const result = makeResult({ impactData: null, scmList: [] });
 
     // Act
-    render(<ResultPanel result={result} onGoDetail={vi.fn()} />);
+    render(<ResultPanel result={result}  />);
 
     // Assert
-    expect(screen.getByText('연결 문서')).toBeInTheDocument();
+    expect(screen.queryByText('변경 파일')).not.toBeInTheDocument();
   });
 
-  // ── 버튼 동작 ─────────────────────────────────────────────────────
-
-  it('세부 데이터 보기 버튼 클릭 시 onGoDetail을 호출한다', async () => {
-    // Arrange
-    const user = userEvent.setup();
-    const onGoDetail = vi.fn();
-    const result = makeResult();
-
-    // Act
-    render(<ResultPanel result={result} onGoDetail={onGoDetail} />);
-    await user.click(screen.getByText('세부 데이터 보기 →'));
-
-    // Assert
-    expect(onGoDetail).toHaveBeenCalledTimes(1);
-  });
 });

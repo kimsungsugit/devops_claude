@@ -22,6 +22,19 @@ node_modules/
 .idea/
 .vscode/
 
+# === 런타임 시크릿 (서버별 설정, 토큰 포함) ===
+config/jenkins_server_config.json
+config/uds_template_server_config.json
+config/uds_template_server_config.json.bak
+config/allowed_users.json
+config/admins.json
+
+# === 관리자가 업로드한 UDS 템플릿 (프로젝트별 고객 문서 포함 가능) ===
+docs/uds_templates/
+
+# === UDS 템플릿 토큰 치환 검증 스크립트 결과물 ===
+docs/_uds_token_verify_sample.docx
+
 # === 빌드 / 출력 ===
 build/
 dist/

@@ -32,7 +32,10 @@ export default function ImpactGuideSection({ job, analysisResult }) {
   const changedFunctions = impact?.changed_function_types ?? {};
   const changedFnEntries = Object.entries(changedFunctions);
   const actions = impact?.actions ?? impact?.documents ?? {};
-  const linkedDocs = impact?._linked_docs ?? analysisResult?.scmList?.[0]?.linked_docs ?? {};
+  const linkedDocs = impact?._linked_docs
+    ?? analysisResult?.matchedScm?.linked_docs
+    ?? analysisResult?.scmList?.[0]?.linked_docs
+    ?? {};
   const impactGroups = impact?.impact ?? {};
 
   // Demo data for testing — simulates real .c file changes

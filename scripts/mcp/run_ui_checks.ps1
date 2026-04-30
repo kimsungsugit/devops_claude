@@ -1,6 +1,6 @@
 Param(
   [string]$UiUrl = "http://localhost:5173",
-  [string]$ApiUrl = "http://127.0.0.1:8000"
+  [string]$ApiUrl = "http://127.0.0.1:9000"
 )
 
 $now = Get-Date -Format "yyyyMMdd_HHmmss"

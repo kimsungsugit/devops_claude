@@ -454,11 +454,30 @@ label {
   margin-top: var(--sp-3);
 }
 
+.job-scroll {
+  display: flex;
+  gap: var(--sp-2);
+  overflow-x: auto;
+  padding: var(--sp-2) 0;
+  margin-top: var(--sp-2);
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+  -webkit-overflow-scrolling: touch;
+}
+.job-scroll::-webkit-scrollbar { height: 6px; }
+.job-scroll::-webkit-scrollbar-track { background: transparent; }
+.job-scroll::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+.job-scroll .job-card {
+  min-width: 220px;
+  max-width: 260px;
+  flex-shrink: 0;
+}
+
 .job-card {
   background: var(--panel);
   border: 1.5px solid var(--border);
   border-radius: var(--radius-lg);
-  padding: var(--sp-4);
+  padding: var(--sp-3);
   cursor: pointer;
   transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
 }
@@ -1056,3 +1075,61 @@ label {
   .qd-table th:nth-child(5),
   .qd-table td:nth-child(5) { display: none; }
 }
+
+/* ── Sync progress bar (horizontal 4-segment) ── */
+.sync-progress {
+  display: flex;
+  gap: 2px;
+  margin: var(--sp-3) 0;
+  height: 32px;
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+.sync-segment {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-1);
+  font-size: var(--text-sm);
+  font-weight: 500;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  transition: all var(--transition-fast);
+  position: relative;
+  white-space: nowrap;
+  overflow: hidden;
+}
+.sync-segment.seg-done {
+  background: var(--color-success-soft);
+  border-color: var(--color-success);
+  color: var(--color-success);
+}
+.sync-segment.seg-active {
+  background: var(--color-info-soft);
+  border-color: var(--color-info);
+  color: var(--color-info);
+}
+.sync-segment.seg-error {
+  background: var(--color-danger-soft);
+  border-color: var(--color-danger);
+  color: var(--color-danger);
+}
+.sync-segment .seg-icon { font-size: 12px; }
+.sync-segment .seg-label { font-size: var(--text-xs); }
+
+/* ── Favorite button ── */
+.btn-fav {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 16px;
+  color: var(--text-muted);
+  padding: 0 var(--sp-1);
+  line-height: 1;
+  transition: color var(--transition-fast);
+  flex-shrink: 0;
+}
+.btn-fav:hover { color: var(--color-warning); }
+.job-card .btn-fav.fav-active { color: var(--color-warning); }

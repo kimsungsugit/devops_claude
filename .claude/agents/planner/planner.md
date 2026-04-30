@@ -6,6 +6,7 @@ tools:
   - Read
   - Glob
   - Grep
+  - Bash
   - WebSearch
   - WebFetch
   - TaskCreate

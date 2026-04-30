@@ -9,6 +9,7 @@ from fastapi import APIRouter, HTTPException
 
 from backend.schemas import ScmLinkedDocs, ScmRegisterRequest, ScmUpdateRequest
 from backend.services.scm_registry import (
+    ScmValidationError,
     delete_entry,
     get_registry_entry,
     list_registry_entries,
@@ -77,7 +78,10 @@ def _svn_status(entry: Any) -> Dict[str, Any]:
 def scm_register(req: ScmRegisterRequest) -> Dict[str, Any]:
     try:
         entry = register_entry(req)
+    except ScmValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     except ValueError as exc:
+        # Remaining ValueError path = "id already exists" → conflict.
         raise HTTPException(status_code=409, detail=str(exc))
     return {"ok": True, "item": entry.model_dump(mode="json")}
 
@@ -94,6 +98,8 @@ def scm_update(entry_id: str, req: ScmUpdateRequest) -> Dict[str, Any]:
         entry = update_entry(entry_id, req)
     except KeyError:
         raise HTTPException(status_code=404, detail="registry entry not found")
+    except ScmValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     return {"ok": True, "item": entry.model_dump(mode="json")}
 
 

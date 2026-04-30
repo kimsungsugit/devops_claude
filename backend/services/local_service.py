@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import shutil
 import subprocess
 from pathlib import Path
@@ -11,15 +12,31 @@ import config
 from .paths import safe_resolve_under
 
 
-def _run_cmd(args: List[str], cwd: Path, timeout_sec: int = 900) -> Tuple[int, str]:
+_logger = logging.getLogger(__name__)
+
+
+def _run_cmd(
+    args: List[str],
+    cwd: Path,
+    timeout_sec: int = 900,
+    stdin_input: Optional[str] = None,
+) -> Tuple[int, str]:
     try:
         p = subprocess.run(
             args,
             cwd=str(cwd),
             capture_output=True,
             text=True,
+            # Force UTF-8 decoding and replace undecodable bytes. Without this,
+            # text=True falls back to the OS default (e.g. CP949 on Korean
+            # Windows) and svn output containing localized error messages
+            # raises UnicodeDecodeError inside subprocess — masking the real
+            # return code.
+            encoding="utf-8",
+            errors="replace",
             timeout=timeout_sec,
             check=False,
+            input=stdin_input,
         )
         out = (p.stdout or "") + ("\n" + p.stderr if p.stderr else "")
         return int(p.returncode), out.strip()
@@ -27,6 +44,64 @@ def _run_cmd(args: List[str], cwd: Path, timeout_sec: int = 900) -> Tuple[int, s
         return 124, "timeout expired"
     except Exception as exc:
         return 1, f"exception: {exc}"
+
+
+# ── SVN feature detection ─────────────────────────────────────────────
+# `svn --password-from-stdin` (Subversion 1.12+) lets us pipe the password
+# via stdin instead of putting it on argv, where it would be visible via
+# `ps`/Task Manager/audit logs. We cache the result per-process because
+# `svn help checkout` is not free to run on every request.
+_SVN_STDIN_SUPPORT_CACHE: Optional[bool] = None
+
+
+def _svn_supports_password_stdin() -> bool:
+    global _SVN_STDIN_SUPPORT_CACHE
+    if _SVN_STDIN_SUPPORT_CACHE is not None:
+        return _SVN_STDIN_SUPPORT_CACHE
+    try:
+        p = subprocess.run(
+            ["svn", "help", "checkout"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        merged = (p.stdout or "") + "\n" + (p.stderr or "")
+        support = "--password-from-stdin" in merged
+    except FileNotFoundError:
+        _logger.warning("svn binary not found on PATH; SCM checkout will fail")
+        support = False
+    except Exception as exc:
+        _logger.warning("svn feature detection failed: %s", exc)
+        support = False
+
+    _SVN_STDIN_SUPPORT_CACHE = support
+    if not support:
+        _logger.warning(
+            "subversion client does not support --password-from-stdin; "
+            "passwords will be passed via argv and may be visible to other "
+            "processes on this host. Upgrade subversion to >= 1.12 to suppress."
+        )
+    return support
+
+
+def _sanitize_password(raw: str) -> Tuple[Optional[str], Optional[str]]:
+    """Return (clean_password, error).
+
+    Strip outer whitespace/newlines so the argv and stdin paths behave the
+    same way. An embedded newline inside the value is treated as an error —
+    svn's `--password-from-stdin` contract is "a single line", and most
+    password embeddings are either the result of a pasted EOL by mistake or
+    a deliberate injection attempt.
+    """
+    if raw is None:
+        return "", None
+    cleaned = str(raw).strip()
+    if not cleaned:
+        return "", None
+    if "\n" in cleaned or "\r" in cleaned:
+        return None, "password contains embedded newline — rejected"
+    return cleaned, None
 
 
 def run_git(
@@ -87,17 +162,26 @@ def run_svn(
     if action == "checkout":
         if not repo_url:
             return {"rc": 1, "output": "repo_url required"}
+        clean_pw, pw_error = _sanitize_password(password)
+        if pw_error:
+            return {"rc": 1, "output": pw_error}
         args += ["checkout"]
         if revision.strip():
             args += ["-r", revision.strip()]
         if username.strip():
             args += ["--username", username.strip()]
-        if password.strip():
-            args += ["--password", password.strip()]
-        if username.strip() or password.strip():
+        stdin_input: Optional[str] = None
+        if clean_pw:
+            if _svn_supports_password_stdin():
+                # Prefer stdin so the password never lands in argv.
+                args += ["--password-from-stdin"]
+                stdin_input = clean_pw
+            else:
+                args += ["--password", clean_pw]
+        if username.strip() or clean_pw:
             args += ["--non-interactive"]
         args += [repo_url.strip(), str(workdir)]
-        rc, out = _run_cmd(args, cwd=root, timeout_sec=timeout_sec)
+        rc, out = _run_cmd(args, cwd=root, timeout_sec=timeout_sec, stdin_input=stdin_input)
         return {"rc": rc, "output": out, "dest": str(workdir)}
     if action == "update":
         args += ["update"]
@@ -118,14 +202,22 @@ def svn_info_url(
 ) -> Dict[str, Any]:
     if not repo_url:
         return {"rc": 1, "output": "repo_url required"}
+    clean_pw, pw_error = _sanitize_password(password)
+    if pw_error:
+        return {"rc": 1, "output": pw_error, "revision": ""}
     args: List[str] = ["svn", "info", repo_url.strip()]
     if username.strip():
         args += ["--username", username.strip()]
-    if password.strip():
-        args += ["--password", password.strip()]
-    if username.strip() or password.strip():
+    stdin_input: Optional[str] = None
+    if clean_pw:
+        if _svn_supports_password_stdin():
+            args += ["--password-from-stdin"]
+            stdin_input = clean_pw
+        else:
+            args += ["--password", clean_pw]
+    if username.strip() or clean_pw:
         args += ["--non-interactive"]
-    rc, out = _run_cmd(args, cwd=Path("."), timeout_sec=timeout_sec)
+    rc, out = _run_cmd(args, cwd=Path("."), timeout_sec=timeout_sec, stdin_input=stdin_input)
     revision = ""
     if rc == 0:
         for line in out.splitlines():

@@ -63,8 +63,10 @@ export default function DocGenSection({ job, analysisResult }) {
     setGenResult(null);
 
     try {
-      // Get source_root and linked_docs from SCM registry
-      let scm = analysisResult?.scmList?.[0];
+      // Prefer the Dashboard-matched SCM entry (driven by pickScmForJob /
+      // manual dropdown override). Falling back to scmList[0] would silently
+      // generate docs against the wrong project's source_root and linked_docs.
+      let scm = analysisResult?.matchedScm || analysisResult?.scmList?.[0];
       // Fallback: fetch from SCM API if not in analysisResult
       if (!scm?.source_root) {
         try {
@@ -182,7 +184,9 @@ export default function DocGenSection({ job, analysisResult }) {
     }
   }, [job, cfg, cacheRoot, docPaths, toast, analysisResult]);
 
-  const [scm, setScm] = useState(analysisResult?.scmList?.[0] || null);
+  const [scm, setScm] = useState(
+    analysisResult?.matchedScm || analysisResult?.scmList?.[0] || null,
+  );
   useEffect(() => {
     if (!scm?.source_root) {
       api('/api/scm/list').then(d => {
@@ -357,7 +361,9 @@ function VectorCastExport({ job, analysisResult, cfg, cacheRoot }) {
   const [registering, setRegistering] = useState(null);
   const [packages, setPackages] = useState([]);
   const [loading, setLoading] = useState(false);
-  const [scm, setScm] = useState(analysisResult?.scmList?.[0] || null);
+  const [scm, setScm] = useState(
+    analysisResult?.matchedScm || analysisResult?.scmList?.[0] || null,
+  );
   useEffect(() => {
     if (!scm?.source_root) {
       api('/api/scm/list').then(d => {

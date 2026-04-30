@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect, createContext, useContext } from 'react';
-import { getInitialTheme, saveTheme, loadJenkinsConfig, saveJenkinsConfig, getUsername, setUsername } from './api.js';
+import { getInitialTheme, saveTheme, loadJenkinsConfig, saveJenkinsConfig, getUsername, setUsername, fetchServerJenkinsConfig } from './api.js';
 import Dashboard from './views/Dashboard.jsx';
 import Detail from './views/Detail.jsx';
 import Settings from './views/Settings.jsx';
@@ -63,6 +63,20 @@ function JenkinsCfgProvider({ children }) {
       ...saved,
     };
   });
+
+  /* On mount: fetch server-managed config (shared across users). Overrides localStorage. */
+  useEffect(() => {
+    let cancelled = false;
+    fetchServerJenkinsConfig().then((serverCfg) => {
+      if (cancelled || !serverCfg) return;
+      // Only override if server has a non-empty baseUrl
+      if (serverCfg.baseUrl) {
+        setCfg(prev => ({ ...prev, ...serverCfg }));
+        saveJenkinsConfig({ ...serverCfg });
+      }
+    });
+    return () => { cancelled = true; };
+  }, []);
 
   const update = useCallback((patch) => {
     setCfg(prev => {
@@ -194,7 +208,7 @@ const ALL_TABS = [
   { id: 'dashboard', label: '대시보드' },
   { id: 'detail',    label: '세부 데이터' },
   { id: 'quality',   label: 'Quality', adminOnly: true },
-  { id: 'settings',  label: '설정' },
+  { id: 'settings',  label: '설정', adminOnly: true },
 ];
 
 function isAdminMode() {
@@ -222,6 +236,41 @@ export default function App() {
     return () => window.removeEventListener('storage', onStorage);
   }, []);
 
+  // 관리자 모드 키보드 토글 (Ctrl+Shift+A)
+  useEffect(() => {
+    const onKey = (e) => {
+      if (e.ctrlKey && e.shiftKey && (e.key === 'A' || e.key === 'a')) {
+        e.preventDefault();
+        const current = localStorage.getItem('devops_admin_mode') === 'true';
+        const next = !current;
+        localStorage.setItem('devops_admin_mode', String(next));
+        setAdminMode(next);
+
+        // 시각 피드백 (우측 상단에 일시적 배지)
+        const indicator = document.createElement('div');
+        indicator.textContent = next ? '✓ 관리자 모드 ON' : '✕ 관리자 모드 OFF';
+        indicator.style.cssText = [
+          'position:fixed', 'top:20px', 'right:20px',
+          `background:${next ? 'var(--color-success, #22c55e)' : 'var(--text-muted, #6b7280)'}`,
+          'color:white', 'padding:10px 18px',
+          'border-radius:8px', 'z-index:9999',
+          'font-weight:600', 'font-size:14px',
+          'box-shadow:0 4px 12px rgba(0,0,0,0.25)',
+          'transition:opacity 0.3s, transform 0.3s',
+          'transform:translateY(0)',
+        ].join(';');
+        document.body.appendChild(indicator);
+        setTimeout(() => {
+          indicator.style.opacity = '0';
+          indicator.style.transform = 'translateY(-10px)';
+        }, 1800);
+        setTimeout(() => { indicator.remove(); }, 2200);
+      }
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, []);
+
   const toggleTheme = () => setTheme(t => t === 'light' ? 'dark' : 'light');
 
   // Show username prompt if not set
@@ -229,8 +278,8 @@ export default function App() {
     return (
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100vh', background: 'var(--bg, #f5f5f5)' }}>
         <div style={{ background: 'var(--panel, #fff)', border: '1px solid var(--border, #e0e0e0)', borderRadius: 8, padding: 32, width: 360, textAlign: 'center' }}>
-          <div style={{ fontSize: 28, marginBottom: 8 }}>DevOps Release</div>
-          <div style={{ fontSize: 13, color: '#666', marginBottom: 20 }}>사용자 이름을 입력하세요 (내부망 식별용)</div>
+          <div style={{ fontSize: 28, marginBottom: 8 }}>ARIA</div>
+          <div style={{ fontSize: 13, color: 'var(--text-muted, #666)', marginBottom: 20 }}>사용자 이름을 입력하세요 (내부망 식별용)</div>
           <input
             type="text"
             value={userInput}
@@ -243,7 +292,7 @@ export default function App() {
             }}
             placeholder="예: hong_gildong"
             autoFocus
-            style={{ width: '100%', padding: '10px 12px', fontSize: 14, border: '1px solid #ccc', borderRadius: 6, marginBottom: 12, boxSizing: 'border-box' }}
+            style={{ width: '100%', padding: '10px 12px', fontSize: 14, border: '1px solid var(--border, #ccc)', borderRadius: 6, marginBottom: 12, boxSizing: 'border-box' }}
           />
           <button
             onClick={() => {
@@ -253,7 +302,7 @@ export default function App() {
               }
             }}
             disabled={!userInput.trim()}
-            style={{ width: '100%', padding: '10px 0', fontSize: 14, fontWeight: 600, background: '#0052CC', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer' }}
+            style={{ width: '100%', padding: '10px 0', fontSize: 14, fontWeight: 600, background: 'var(--accent, #0052CC)', color: 'var(--panel, #fff)', border: 'none', borderRadius: 6, cursor: 'pointer' }}
           >
             시작하기
           </button>
@@ -270,7 +319,7 @@ export default function App() {
             <header className="app-header">
               <span className="app-brand">
                 <span className="brand-icon" />
-                DevOps Release
+                ARIA
               </span>
               <div className="header-spacer" />
               <div className="header-actions">

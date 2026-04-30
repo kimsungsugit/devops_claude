@@ -81,6 +81,101 @@ def _add_docx_text_block(doc, text: str, max_lines: int = 8000) -> None:
         doc.add_paragraph(line)
 
 
+def _build_uds_reference_lines(payload: Dict[str, Any]) -> List[str]:
+    """Compose the Reference-section list from payload metadata.
+
+    Priority:
+      1. ``payload['reference_docs']`` — list of {title|file, version?} dicts
+         (or bare strings). Most explicit; wins when callers curate references.
+      2. ``payload['source_docs']`` — list of paths injected by the UDS
+         pipeline (SRS files routed through ``req_file_paths`` / ``req_paths``).
+      3. Legacy single-keys: srs_path / sds_path / hsis_path / stp_path.
+
+    Returns a list of display lines (no trailing newlines). Empty list ⇒
+    caller should substitute 'N/A'.
+    """
+    refs = payload.get("reference_docs") or []
+    lines: List[str] = []
+    if isinstance(refs, list) and refs:
+        for i, r in enumerate(refs, 1):
+            if isinstance(r, dict):
+                title = str(r.get("title") or r.get("file") or r.get("name") or "").strip()
+                if title:
+                    ver = str(r.get("version") or "").strip()
+                    lines.append(f"[{i}] {title}" + (f" (v{ver})" if ver else ""))
+            elif isinstance(r, str):
+                t = r.strip()
+                if t:
+                    lines.append(f"[{i}] {t}")
+    if not lines:
+        seen: set = set()
+        src_docs = payload.get("source_docs") or []
+        if isinstance(src_docs, list):
+            for p in src_docs:
+                s = str(p or "").strip()
+                if not s or s in seen:
+                    continue
+                seen.add(s)
+                lines.append(f"[{len(lines)+1}] {Path(s).name}")
+        for key in ("srs_path", "sds_path", "hsis_path", "stp_path"):
+            p = str(payload.get(key) or "").strip()
+            if p and p not in seen:
+                seen.add(p)
+                lines.append(f"[{len(lines)+1}] {Path(p).name}")
+    return lines
+
+
+def _build_uds_reference_text(payload: Dict[str, Any]) -> str:
+    """Backwards-compatible newline-joined form (used only as a display fallback)."""
+    lines = _build_uds_reference_lines(payload)
+    return "\n".join(lines) if lines else "N/A"
+
+
+def _replace_reference_table_paragraph(doc, lines: List[str]) -> bool:
+    """Replace ``{{REFERENCE_TABLE}}`` with a soft-wrapped list of references.
+
+    Finds the paragraph whose text contains the token, removes its existing
+    runs, and appends a single fresh ``<w:r>`` whose children alternate
+    ``<w:t>`` / ``<w:br>`` so Word renders each entry on its own line. The
+    OxmlElement path is used because ``Run.text = value`` strips every
+    inline element (including ``<w:br>``) and would undo the break.
+
+    Returns True when the token was found and replaced; False otherwise
+    (caller can still fall back to flat-text substitution).
+    """
+    try:
+        from docx.oxml import OxmlElement  # type: ignore
+        from docx.oxml.ns import qn  # type: ignore
+    except Exception:  # pragma: no cover — python-docx not importable
+        return False
+
+    token = "{{REFERENCE_TABLE}}"
+    display = lines if lines else ["N/A"]
+
+    for para in doc.paragraphs:
+        if token not in (para.text or ""):
+            continue
+        # Remove every existing run element — keeps the paragraph's pPr
+        # (numbering/style) intact.
+        for run in list(para.runs):
+            run._element.getparent().remove(run._element)
+
+        r = OxmlElement("w:r")
+        t = OxmlElement("w:t")
+        t.set(qn("xml:space"), "preserve")
+        t.text = display[0]
+        r.append(t)
+        for extra in display[1:]:
+            r.append(OxmlElement("w:br"))
+            t2 = OxmlElement("w:t")
+            t2.set(qn("xml:space"), "preserve")
+            t2.text = extra
+            r.append(t2)
+        para._element.append(r)
+        return True
+    return False
+
+
 def _replace_docx_text(doc, replacements: Dict[str, str]) -> None:
     def _replace_in_paragraph(paragraph):
         full = paragraph.text
@@ -1378,6 +1473,75 @@ def _extract_template_blocks(doc) -> List[Tuple[str, Any]]:
     return blocks
 
 
+def _extract_template_section_block_map(doc) -> Dict[str, List[Dict[str, str]]]:
+    """Like _extract_template_section_map but preserves per-paragraph style.
+
+    Returned dict: heading_title_lower -> list of {"text", "style"}.
+    Used by the rebuild path (1장) to keep List Paragraph / bullet styles
+    from the tokenized template instead of flattening to Normal.
+    """
+    section_map: Dict[str, List[Dict[str, str]]] = {}
+    current_title = ""
+    current_entries: List[Dict[str, str]] = []
+    for p in doc.paragraphs:
+        text = (p.text or "").strip()
+        style_name = str(getattr(p.style, "name", "") or "")
+        level = 0
+        if text and style_name.startswith("Heading"):
+            parts = re.findall(r"\d+", style_name)
+            try:
+                level = max(1, int(parts[0])) if parts else 1
+            except Exception:
+                level = 1
+        if level > 0:
+            if current_title:
+                while (
+                    len(current_entries) >= 2
+                    and not current_entries[-1]["text"]
+                    and not current_entries[-2]["text"]
+                ):
+                    current_entries.pop()
+                section_map[current_title.lower()] = list(current_entries)
+            current_title = text
+            current_entries = []
+            continue
+        if not current_title:
+            continue
+        if not text and not current_entries:
+            continue
+        if not text and current_entries and not current_entries[-1]["text"]:
+            continue
+        current_entries.append({"text": text, "style": style_name})
+    if current_title and current_title.lower() not in section_map:
+        while (
+            len(current_entries) >= 2
+            and not current_entries[-1]["text"]
+            and not current_entries[-2]["text"]
+        ):
+            current_entries.pop()
+        section_map[current_title.lower()] = list(current_entries)
+    return section_map
+
+
+def _add_docx_section_paragraphs(doc, entries: List[Dict[str, str]]) -> None:
+    has_text = any(str(e.get("text") or "") for e in entries)
+    if not entries or not has_text:
+        doc.add_paragraph("N/A")
+        return
+    for entry in entries:
+        text = str(entry.get("text") or "")
+        style = str(entry.get("style") or "").strip()
+        try:
+            if text and style:
+                doc.add_paragraph(text, style=style)
+            elif text:
+                doc.add_paragraph(text)
+            else:
+                doc.add_paragraph("")
+        except Exception:
+            doc.add_paragraph(text)
+
+
 def _extract_template_section_map(doc) -> Dict[str, str]:
     section_map: Dict[str, str] = {}
     current_title = ""
@@ -2127,10 +2291,34 @@ def generate_uds_docx(
     if tbd_asil > 0 or tbd_related > 0:
         _logger.warning("UDS TBD residual: asil_tbd=%d/%d, related_tbd=%d/%d", tbd_asil, total_fn, tbd_related, total_fn)
 
+    if not template_path:
+        # Delegate to config.resolve_uds_template_path() so the admin API
+        # and the generator always agree on the effective template path.
+        try:
+            from config import resolve_uds_template_path
+            resolved = resolve_uds_template_path()
+            if resolved:
+                template_path = resolved
+        except Exception as exc:
+            _logger.debug("UDS template fallback resolution failed: %s", exc)
+
     if template_path:
         template_path = str(template_path)
+        module_name = (
+            payload.get("module_name")
+            or payload.get("module")
+            or summary.get("module_name")
+            or summary.get("module")
+            or str(project)
+        )
+        reference_lines = _build_uds_reference_lines(payload)
         replacements = {
             "{{project_name}}": str(project),
+            "{{PROJECT_NAME}}": str(project),
+            "{{MODULE_NAME}}": str(module_name),
+            # Flat-text fallback only: used if the reference-table paragraph
+            # wasn't found (e.g. custom template without the token).
+            "{{REFERENCE_TABLE}}": "\n".join(reference_lines) if reference_lines else "N/A",
             "{{job_url}}": str(payload.get("job_url") or ""),
             "{{build_number}}": str(payload.get("build_number") or ""),
             "{{generated_at}}": str(generated_at),
@@ -2141,13 +2329,21 @@ def generate_uds_docx(
             "{{notes}}": notes,
         }
         doc = docx.Document(template_path)
+        # 1) First, expand the reference-table token into a paragraph with
+        #    real soft line breaks (w:br) so Word renders each entry on its
+        #    own line. Consumes the token in-place.
+        _replace_reference_table_paragraph(doc, reference_lines)
+        # 2) Then run the generic flat-text substitution for the remaining
+        #    single-line tokens (and as a fallback for any stray
+        #    {{REFERENCE_TABLE}} paragraph we didn't catch above).
+        _replace_docx_text(doc, replacements)
         if _template_has_placeholders(doc):
-            _replace_docx_text(doc, replacements)
             doc.save(str(out))
             return str(out)
         # 템플릿에 치환 키가 없으면, 구조만 복제하고 콘텐츠는 새로 작성
         blocks = _extract_template_blocks(doc)
         template_section_map = _extract_template_section_map(doc)
+        template_section_block_map = _extract_template_section_block_map(doc)
         _clear_docx_body(doc)
         first_heading = ""
         for kind, payload_block in blocks:
@@ -2770,9 +2966,16 @@ def generate_uds_docx(
                     "terms, abbreviations and definitions",
                     "reference",
                 }:
-                    template_text = template_section_map.get(key, "")
-                    if template_text:
-                        _add_docx_lines(doc, template_text)
+                    # Preserve per-paragraph style (e.g. "List Paragraph")
+                    # from the tokenized template so Scope bullets survive
+                    # the rebuild path.
+                    entries = template_section_block_map.get(key, [])
+                    if entries:
+                        _add_docx_section_paragraphs(doc, entries)
+                    else:
+                        template_text = template_section_map.get(key, "")
+                        if template_text:
+                            _add_docx_lines(doc, template_text)
                 elif key == "requirements":
                     _add_docx_bullets(doc, requirements)
                 elif key == "interfaces":

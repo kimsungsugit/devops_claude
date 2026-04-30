@@ -23,8 +23,17 @@ export default function ScmSection({ job, analysisResult }) {
   }, [analysisResult]);
 
   useEffect(() => {
-    if (scmList.length > 0 && !selectedId) setSelectedId(scmList[0].id);
-  }, [scmList]);
+    // Prefer the registry entry that Dashboard matched to this job; fall back
+    // to the first entry only when no match was recorded (multi-registry
+    // setups would otherwise silently show data for the wrong project).
+    if (scmList.length > 0 && !selectedId) {
+      const matched = analysisResult?.matchedScm;
+      const preferId = matched?.id && scmList.some(s => s.id === matched.id)
+        ? matched.id
+        : scmList[0].id;
+      setSelectedId(preferId);
+    }
+  }, [scmList, analysisResult, selectedId]);
 
   /* --- Load SCM info via POST /api/jenkins/scm-info --- */
   const loadScmInfo = useCallback(async () => {

@@ -222,6 +222,40 @@ def _dedupe_paths(paths: Optional[List[str]]) -> List[str]:
     return items
 
 
+_GENERIC_SOURCE_DIR_NAMES = {
+    "sources",
+    "source",
+    "src",
+    "srcs",
+    "code",
+    "codes",
+    "app",
+    "application",
+    "firmware",
+    "fw",
+    "project",
+}
+
+
+def _derive_project_module_names(root: Optional[Path]) -> Tuple[str, str]:
+    """Pick sensible (project_name, module_name) from a source root.
+
+    If the leaf directory looks like a generic source folder ("Sources",
+    "src" etc.), the parent directory is used as project_name and the leaf
+    becomes the module_name. Otherwise the leaf is used for both.
+    """
+    if not root:
+        return "", ""
+    try:
+        leaf = root.name or ""
+        parent = root.parent.name if root.parent else ""
+    except Exception:
+        return "", ""
+    if leaf and leaf.lower() in _GENERIC_SOURCE_DIR_NAMES and parent:
+        return parent, leaf
+    return leaf, leaf
+
+
 def _resolve_req_doc_sets(
     req_doc_paths: Optional[List[str]] = None,
     sds_doc_paths: Optional[List[str]] = None,
@@ -738,10 +772,12 @@ async def local_uds_generate(
         for x in re.split(r"[,\|;]+", globals_format_order or "")
         if x.strip()
     ]
+    _project_name_val, _module_name_val = _derive_project_module_names(source_root_path)
     uds_payload = {
         "job_url": "local",
         "build_number": "",
-        "project_name": source_root_path.name if source_root_path else "",
+        "project_name": _project_name_val,
+        "module_name": _module_name_val,
         "summary": {},
         "overview": source_sections.get("overview", ""),
         "requirements": req_combined,
@@ -1203,10 +1239,19 @@ async def local_uds_generate_async(
             req_combined = "\n".join([req_from_docs.strip(), req_source.strip()]).strip() if req_from_docs and req_source else (req_from_docs or req_source)
 
             globals_order_list = [x.strip() for x in re.split(r"[,\|;]+", globals_format_order or "") if x.strip()]
+            _project_name_val, _module_name_val = _derive_project_module_names(source_root_path)
+            _source_docs: List[str] = []
+            for _p in req_doc_paths:
+                try:
+                    _source_docs.append(Path(_p).name)
+                except Exception:
+                    continue
             uds_payload = {
                 "job_url": "local",
                 "build_number": "",
-                "project_name": source_root_path.name if source_root_path else "",
+                "project_name": _project_name_val,
+                "module_name": _module_name_val,
+                "source_docs": _source_docs,
                 "summary": {},
                 "overview": source_sections.get("overview", ""),
                 "requirements": req_combined,

@@ -1,7 +1,12 @@
 ---
 name: start-work
 description: 모든 개발 작업의 진입점. 계획→설계→구현→테스트→리뷰→문서화를 강제하며, 변경 영역에 따라 적절한 에이전트를 자동 라우팅합니다.
-trigger: 기능 추가, 버그 수정, 리팩토링, 개선, 구현, 개발, 만들어줘, 수정해줘, 고쳐줘, 변경해줘 등 코드 변경을 수반하는 모든 요청
+trigger: |
+  코드 변경을 수반하는 모든 요청. 신규 작업과 후속 지시 모두 포함:
+  - 신규: 기능 추가, 버그 수정, 리팩토링, 개선, 구현, 개발, 만들어줘, 수정해줘, 고쳐줘, 변경해줘
+  - 후속/연속: 다 고쳐, 다 수정, 이어서, 이어서 진행, 추가로, 다음 진행, 후속 처리, 계속 진행, 마저 해줘, 나머지도, 다른것도
+  - 리뷰 후속: "1번부터 진행", "❶부터 고쳐", "Critical 수정해줘" 같이 직전 검토 결과를 기반으로 한 수정 지시
+  단, 단순 정보 조회·설명·계획 논의만 요청한 경우는 제외 (예: "어떻게 동작해?", "왜 이렇게 됐어?", "계획만 보여줘")
 ---
 
 # /start-work (필수 진입점)
@@ -88,13 +93,96 @@ with get_session() as s:
 - 최대 재시도 횟수: 1회 (무한 루프 방지)
 - 재시도 후에도 gate_pass=False면 결과와 함께 보고
 
-### Gate 5: 리뷰
-9. **reviewer** 에이전트에 위임
-   - 보안/성능/예외처리 점검
-   - ISO 26262: MISRA-C 준수, ASIL 일관성, 추적성 검증
+### Gate 5: 리뷰 + 문제점 검토 (적응형 검증 루프)
+
+#### Gate 5 진입 전: review_depth 결정
+
+review_depth (meta / light / standard / deep) 정의·키워드 트리거·ASIL 자동 판정·변경 통계 측정 시점은 모두 **`.claude/agents/reviewer/reviewer.md` `## 검토 깊이 자동 판정`** 단일 출처를 따른다.
+
+Gate 5에서의 동작:
+- **meta** → Gate 5 생략, 메인 에이전트가 X4/X5/X6 정책 일관성만 직접 점검
+- **light** → Gate 5 생략 가능, 단 CLAUDE.md `### 작업 종료 직전 비판적 자체 검토`의 미니 체크리스트(10개) 점검 의무
+- **standard** → reviewer **단일 호출** (S/P/Q/R/F + X1~X8 전체). Critical 0이면 Gate 6, 있으면 1회 fix 후 재검토 1회만
+- **deep** → 아래 **적응형 3~5회 루프** 발동
+
+#### deep depth: 적응형 검증 루프 (deep에서만 발동)
+
+**아래 루프는 deep depth에서만 작동한다.** standard/light/meta는 위 절차로 종료. 기본 3회 루프, 진행 있으면 +1회씩 연장 (최대 5회 하드 제한).
+각 라운드마다 Critical 수를 비교해 **감소 → 연장**, **정체 → 중단 보고**.
+
+#### 루프 진행 방식
+```
+prev_critical = None
+round = 1
+MIN_ROUNDS = 3
+MAX_ROUNDS = 5  # hard cap to prevent infinite loop
+
+while round <= MAX_ROUNDS:
+    1. **deep-reviewer** 에이전트에 변경사항 리뷰 위임 (deep depth 전용 opus 모델)
+       - 보안/성능/예외처리 (S1~S5, P1~P4, Q1~Q4)
+       - 프론트엔드 코드 패턴 (R1~R7)
+       - ISO 26262 (F1~F8): MISRA-C, ASIL, 추적성
+       - X1~X8 비정형 비판 — **시나리오 / timeline / 트리** 의무 (deep-reviewer.md 참조)
+       - deep-reviewer 호출 실패(403 등) 시 sonnet reviewer로 폴백, 그래도 실패하면 메인 에이전트 미니 체크리스트 10개
+    
+    2. 종합 품질 검사 실행:
+       python scripts/quality_check.py --round {round} --json
+       → JSON에서 counts.critical 읽기
+    
+    3. 이슈 분류 및 수정:
+       - Critical: coder에게 수정 위임 → 다음 라운드 진입
+       - Warning/Info (이번 작업 범위): 수정
+    
+    4. 진행/정체 판정:
+       current_critical = result["counts"]["critical"]
+       
+       if current_critical == 0:
+           if round >= MIN_ROUNDS:
+               break  # 정상 종료 → Gate 6 진행
+           # MIN_ROUNDS 미만이면 계속 (플레이키 탐지)
+       
+       elif prev_critical is not None:
+           if current_critical < prev_critical:
+               # 진행 있음: round < MAX_ROUNDS면 계속
+               pass
+           elif round >= MIN_ROUNDS:
+               # 정체 또는 증가: 중단
+               break
+           # MIN_ROUNDS 미만이면 계속 시도
+       
+       prev_critical = current_critical
+       round += 1
+```
+
+#### 라운드별 집중 영역 (권장)
+- **Round 1**: 기능 정확성 (테스트 실패, 빌드 오류, 문법)
+- **Round 2**: 코드 품질 (null guard, 예외 처리, 명명)
+- **Round 3**: 엣지 케이스, 리그레션
+- **Round 4~5 (연장)**: Critical 잔존 항목 집중 수정
+
+#### 종료 조건
+- **정상**: Critical 0건 + 최소 3회 완료 → Gate 6
+- **연장**: Critical > 0 & 감소 중 → 다음 라운드 (최대 5회)
+- **중단**: Critical 정체/증가 (3회 이상 시) → 사용자에게 보고
+- **하드 캡**: 5회 도달 → 즉시 보고 (무한 루프 방지)
+- **ASIL C/D**: 루프 안에서도 reviewer LGTM 필수
+
+#### 판정 예시
+```
+Round 1: Critical 5 → 수정
+Round 2: Critical 3 (감소) → 계속
+Round 3: Critical 1 (감소) → 계속 (MIN_ROUNDS 도달)
+Round 4: Critical 0 → 종료 ✓
+
+vs.
+
+Round 1: Critical 5 → 수정
+Round 2: Critical 5 (정체) → 아직 MIN_ROUNDS 미만, 계속
+Round 3: Critical 5 (정체) → 중단, 사용자 보고 ✗
+```
 
 ### Gate 6: 문서화
-10. 변경내역 기록, 필요시 **documenter** 에이전트에 위임
+11. 변경내역 기록, 필요시 **documenter** 에이전트에 위임
 
 ## 게이트 생략 조건
 

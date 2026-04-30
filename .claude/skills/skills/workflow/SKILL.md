@@ -93,14 +93,55 @@ safety_tests: {asil_tests_passed: true|false}
 
 ---
 
-### STEP 4: 셀프 리뷰 (reviewer 에이전트)
-- `git diff`로 전체 변경사항 확인
-- 체크리스트 자동 적용:
-  - 보안 취약점 없음 (하드코딩 비밀값, injection 등)
-  - 에러 처리 적절
-  - 불필요한 코드 없음
-  - 기존 기능 깨지지 않음
-- 문제 발견 시 **직접 수정** (묻지 않음)
+### STEP 4: 셀프 리뷰 + 적응형 검증 루프 (reviewer 에이전트)
+
+#### STEP 4 진입 전: review_depth 결정
+
+review_depth 정의(meta/light/standard/deep), 키워드 트리거, ASIL 자동 판정, 변경 통계 측정 시점은 모두 **`.claude/agents/reviewer/reviewer.md` `## 검토 깊이 자동 판정`** 단일 출처를 따른다.
+
+STEP 4에서의 동작:
+- **meta** → STEP 4 생략, 메인이 정책 일관성(X4/X5/X6)만 점검
+- **light** → STEP 4 생략 가능, CLAUDE.md 미니 체크리스트(10개) 의무 점검
+- **standard** → reviewer 단일 호출 (S/P/Q/R/F + X1~X8 전체) → Critical 0이면 통과
+- **deep** → 아래 적응형 3~5회 루프
+
+#### deep depth: 적응형 검증 루프 (deep에서만 발동)
+
+**아래 루프는 deep depth에서만 작동한다.** standard/light/meta는 위 절차로 종료. 기본 3회 루프, 진행 있으면 +1회씩 연장 (최대 5회 하드 제한).
+
+```
+prev_critical = None
+round = 1
+MIN_ROUNDS = 3
+MAX_ROUNDS = 5
+
+while round <= MAX_ROUNDS:
+  (a) **deep-reviewer** 에이전트로 git diff 리뷰 (deep 전용 opus)
+      - 보안 (S1~S5), 성능 (P1~P4), 품질 (Q1~Q4)
+      - 프론트엔드 (R1~R7), ISO 26262 (F1~F8)
+      - X1~X8 시나리오/timeline/트리 의무 (deep-reviewer.md)
+      - 호출 실패 시 sonnet reviewer → 메인 미니 체크리스트 폴백
+
+  (b) python scripts/quality_check.py --round {round} --json
+      → counts.critical 읽기
+
+  (c) Critical 있으면 coder에게 수정 위임
+
+  (d) 진행/정체 판정:
+      if current == 0 and round >= MIN_ROUNDS: break  # 정상
+      if round >= MIN_ROUNDS and prev is not None:
+          if current < prev: 계속  # 감소 = 진행
+          else: break  # 정체/증가 = 중단 보고
+      prev = current
+      round += 1
+```
+
+**종료 조건**:
+- **정상**: Critical 0 + 최소 3회 완료 → STEP 5
+- **연장**: Critical 감소 중 → 다음 라운드 (최대 5회)
+- **중단**: Critical 정체/증가 (3회 이상 시) → 사용자 보고
+- **하드 캡**: 5회 도달 → 즉시 보고
+- ASIL C/D 변경은 루프 중 reviewer LGTM 필수
 
 ---
 

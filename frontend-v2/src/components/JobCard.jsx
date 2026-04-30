@@ -1,7 +1,7 @@
 import StatusBadge from './StatusBadge.jsx';
 import { colorTone } from '../api.js';
 
-export default function JobCard({ job, selected, onClick }) {
+export default function JobCard({ job, selected, onClick, isFavorite, onToggleFavorite }) {
   const tone = colorTone(job.color);
   const lb = job.lastBuild;
   const lsb = job.lastSuccessfulBuild;
@@ -17,9 +17,19 @@ export default function JobCard({ job, selected, onClick }) {
       role="button"
       tabIndex={0}
       aria-label={`Job: ${job.name || job.fullName}`}
-      onKeyDown={e => e.key === 'Enter' && onClick()}
+      onKeyDown={e => (e.key === 'Enter' || e.key === ' ') && (e.preventDefault(), onClick())}
     >
       <div className="job-card-header">
+        {onToggleFavorite && (
+          <button
+            className={`btn-fav${isFavorite ? ' fav-active' : ''}`}
+            onClick={onToggleFavorite}
+            aria-label={isFavorite ? '즐겨찾기 해제' : '즐겨찾기 추가'}
+            title={isFavorite ? '즐겨찾기 해제' : '즐겨찾기 추가'}
+          >
+            {isFavorite ? '★' : '☆'}
+          </button>
+        )}
         <span className="job-card-name">{job.name || job.fullName}</span>
         <StatusBadge tone={tone}>{label}</StatusBadge>
       </div>

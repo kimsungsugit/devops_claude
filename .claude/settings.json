@@ -29,6 +29,27 @@
       "Bash(python -m *)",
       "Bash(python3 -m *)",
       "Bash(ruff *)",
+      "Bash(pip install *)",
+      "Bash(pip3 install *)",
+      "Bash(npm install *)",
+      "Bash(npm i *)",
+      "Bash(npx playwright *)",
+      "Bash(pip uninstall *)",
+      "Bash(taskkill *)",
+      "Bash(pkill *)",
+      "Bash(where *)",
+      "Bash(choco *)",
+      "Bash(winget *)",
+      "Bash(docker *)",
+      "Bash(docker-compose *)",
+      "Bash(uvicorn backend.main:app *)",
+      "Bash(python scripts/*)",
+      "Bash(svn info *)",
+      "Bash(svn ls *)",
+      "Bash(svn log *)",
+      "Bash(svn diff *)",
+      "Bash(svn status *)",
+      "Bash(schtasks //query *)",
       "WebFetch",
       "WebSearch",
       "NotebookEdit",
@@ -88,6 +109,12 @@
             "command": "python -c \"import sys,json,subprocess; d=json.load(sys.stdin); f=d.get('tool_input',{}).get('tool_input',{}).get('file_path','') or d.get('tool_input',{}).get('file_path',''); f=f.replace('\\\\\\\\','/').replace('\\\\','/'); tests=None; tests='tests/unit/' if '/workflow/' in f and f.endswith('.py') else tests; tests='tests/unit/test_report_gen.py' if '/report_gen/' in f and f.endswith('.py') else tests; proc=subprocess.run(['python','-m','pytest',tests,'-x','-q','--tb=line','--no-header'],capture_output=True,text=True,timeout=30) if tests else None; print(json.dumps({'hookSpecificOutput':{'hookEventName':'PostToolUse','additionalContext':'auto-test: '+((proc.stdout.strip()[-200:] or 'pass') if proc else 'skipped')}})) if proc is not None else None\" 2>/dev/null || true",
             "timeout": 35,
             "statusMessage": "Auto-testing related modules..."
+          },
+          {
+            "type": "command",
+            "command": "python scripts/markdown_lint_hook.py 2>/dev/null || true",
+            "timeout": 5,
+            "statusMessage": "Markdown lint check..."
           }
         ]
       }
@@ -110,9 +137,9 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python scripts/stop_check.py 2>/dev/null || true",
-            "timeout": 90,
-            "statusMessage": "Running stop checks..."
+            "command": "python scripts/quality_check.py 2>/dev/null || python scripts/stop_check.py 2>/dev/null || true",
+            "timeout": 180,
+            "statusMessage": "Quality check (tests + lint + patterns)..."
           }
         ]
       }

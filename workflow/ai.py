@@ -281,7 +281,7 @@ def load_oai_config(path: Optional[str]) -> Optional[Dict[str, Any]]:
 
             # 선호 모델 힌트(기본: config.DEFAULT_LLM_MODEL)
             preferred = str(getattr(config, "DEFAULT_LLM_MODEL", "") or "").lower()
-            preferred_sub = str(getattr(config, "LLM_GEMINI_PREFERRED_SUBSTRING", "gemini-3") or "gemini-3").lower()
+            preferred_sub = str(getattr(config, "LLM_GEMINI_PREFERRED_SUBSTRING", "gemini-3.1-flash-lite") or "gemini-3.1-flash-lite").lower()
 
             def _is_gemini_cfg(item: Any) -> bool:
                 try:
@@ -727,7 +727,7 @@ def llm_call(
             fallback_model = (
                 cfg.get("fallback_model")
                 or os.environ.get("LLM_FALLBACK_MODEL")
-                or ("gemini-2.5-flash" if "gemini-3" in str(model).lower() else "")
+                or ("gemini-2.5-flash" if ("gemini-3" in str(model).lower() or "gemini-3.1" in str(model).lower()) else "")
             )
 
             def _try_gemini(model_name: str, max_tokens: int) -> Tuple[Optional[str], Optional[Any]]:

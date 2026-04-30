@@ -19,8 +19,11 @@ export default function SrsSdsSection({ job, analysisResult }) {
     try { return JSON.parse(localStorage.getItem('devops_v2_doc_paths') || '{}'); } catch (_) { return {}; }
   }, []);
 
+  // Prefer the registry entry matched by Dashboard for THIS job; fall back to
+  // scmList[0] only when no match was recorded (single-project setups).
+  const activeScm = analysisResult?.matchedScm || analysisResult?.scmList?.[0];
   // Merge: SCM linked_docs takes priority, then localStorage
-  const scmLinked = analysisResult?.scmList?.[0]?.linked_docs || {};
+  const scmLinked = activeScm?.linked_docs || {};
   const docPaths = useMemo(() => ({
     srs: localDocPaths.srs || scmLinked.srs || '',
     sds: localDocPaths.sds || scmLinked.sds || '',
@@ -30,8 +33,8 @@ export default function SrsSdsSection({ job, analysisResult }) {
 
   // SCM linked docs (for loadMatrix + UI)
   // Use stable key (scm id or job url) to avoid infinite re-renders from object reference changes
-  const scmLinkedDocs = analysisResult?.scmList?.[0]?.linked_docs;
-  const scmId = analysisResult?.scmList?.[0]?.id || '';
+  const scmLinkedDocs = activeScm?.linked_docs;
+  const scmId = activeScm?.id || '';
   const [linkedDocs, setLinkedDocs] = useState(scmLinkedDocs || {});
   useEffect(() => {
     if (scmLinkedDocs && (scmLinkedDocs.sts || scmLinkedDocs.suts || scmLinkedDocs.sits)) {
@@ -40,7 +43,11 @@ export default function SrsSdsSection({ job, analysisResult }) {
     }
     api('/api/scm/list').then(d => {
       const items = d?.items || (Array.isArray(d) ? d : []);
-      if (items.length > 0 && items[0].linked_docs) setLinkedDocs(items[0].linked_docs);
+      // Match the SAME registry entry the Dashboard selected for this job.
+      // Falling back to items[0] would silently pull another project's docs
+      // in multi-SCM environments.
+      const matched = scmId ? items.find(it => it.id === scmId) : items[0];
+      if (matched?.linked_docs) setLinkedDocs(matched.linked_docs);
     }).catch(() => {});
   }, [scmId]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -51,8 +58,9 @@ export default function SrsSdsSection({ job, analysisResult }) {
       try {
         const scmData = await api('/api/scm/list');
         const items = scmData?.items || (Array.isArray(scmData) ? scmData : []);
-        if (items.length > 0 && items[0].linked_docs) {
-          activeDocs = items[0].linked_docs;
+        const matched = scmId ? items.find(it => it.id === scmId) : items[0];
+        if (matched?.linked_docs) {
+          activeDocs = matched.linked_docs;
           setLinkedDocs(activeDocs);
         }
       } catch (_) {}
@@ -78,8 +86,7 @@ export default function SrsSdsSection({ job, analysisResult }) {
       setLoadProgress('요구사항 추출 중...');
       const form = new FormData();
       if (docPaths.srs) form.append('req_paths', docPaths.srs);
-      const scm = analysisResult?.scmList?.[0];
-      if (scm?.source_root) form.append('source_root', scm.source_root);
+      if (activeScm?.source_root) form.append('source_root', activeScm.source_root);
 
       let reqItems = [];
       let mappingPairs = [];
@@ -252,6 +259,10 @@ export default function SrsSdsSection({ job, analysisResult }) {
         vcast_rows: vcastRows,
         sds_pairs: sdsPairs,
         sits_rows: sitsRows,
+        // Required for server-side summary cache (dashboard TraceSummaryCard)
+        job_url: job?.url || '',
+        cache_root: cacheRoot || '.devops_pro_cache',
+        build_selector: cfg?.buildSelector || 'lastSuccessfulBuild',
       });
       // Attach metadata
       data._dataSources = dataSources;
@@ -267,18 +278,12 @@ export default function SrsSdsSection({ job, analysisResult }) {
       setLoadProgress('');
       if (stepWarnings.length > 0) setWarnings(stepWarnings);
     }
-  }, [job, cfg, cacheRoot, docPaths, linkedDocs, toast]);
+  }, [job, cfg, cacheRoot, docPaths, linkedDocs, scmId, toast]);
 
   const impactData = analysisResult?.impactData;
   const impacts = impactData?.impacts ?? impactData?.impact_items ?? [];
   const changedFiles = impactData?.changed_files ?? [];
   const impactedDocs = impactData?.impacted_docs ?? impactData?.impacted_documents ?? [];
-
-  // Linked doc entries for display
-  const linkedDocEntries = useMemo(() => {
-    if (!linkedDocs || typeof linkedDocs !== 'object') return [];
-    return Object.entries(linkedDocs).filter(([, v]) => v);
-  }, [linkedDocs]);
 
   return (
     <div>
@@ -314,34 +319,6 @@ export default function SrsSdsSection({ job, analysisResult }) {
           ))}
         </div>
       </div>
-
-      {/* Linked docs from SCM registry */}
-      {linkedDocEntries.length > 0 && (
-        <div className="panel mt-3">
-          <div className="panel-header">
-            <span className="panel-title">SCM 연결 문서</span>
-            <StatusBadge tone="info">{linkedDocEntries.length}건</StatusBadge>
-          </div>
-          <div className="field-group">
-            {linkedDocEntries.map(([docType, docPath]) => {
-              const fileName = typeof docPath === 'string'
-                ? docPath.split('/').pop().split('\\').pop()
-                : docPath?.name ?? String(docPath);
-              const fullPath = typeof docPath === 'string' ? docPath : docPath?.path ?? String(docPath);
-              return (
-                <div key={docType} className="artifact-item" style={{ background: 'var(--bg)', overflow: 'hidden' }}>
-                  <span className="pill pill-purple" style={{ minWidth: 44, textAlign: 'center', flexShrink: 0 }}>
-                    {docType.toUpperCase()}
-                  </span>
-                  <span className="artifact-name" title={fullPath} style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                    {fileName}
-                  </span>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      )}
 
       {/* Impact data: changed files and impacted documents */}
       {impactData && (changedFiles.length > 0 || impactedDocs.length > 0) && (
@@ -512,7 +489,7 @@ function CoverageBar({ covered, partial, total, onFilter }) {
   const uncovPct = Math.max(0, 100 - covPct - partPct);
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 4, minWidth: 200 }}>
-      <div style={{ display: 'flex', height: 12, borderRadius: 4, overflow: 'hidden', background: '#e5e7eb', cursor: 'pointer' }}>
+      <div style={{ display: 'flex', height: 12, borderRadius: 4, overflow: 'hidden', background: 'var(--border, #e5e7eb)', cursor: 'pointer' }}>
         {covPct > 0 && <div onClick={() => onFilter?.('covered')} title="Covered만 보기" style={{ width: `${covPct}%`, background: COVERAGE_COLORS.covered.border }} />}
         {partPct > 0 && <div onClick={() => onFilter?.('partial')} title="Partial만 보기" style={{ width: `${partPct}%`, background: COVERAGE_COLORS.partial.border }} />}
         {uncovPct > 0 && <div onClick={() => onFilter?.('uncovered')} title="Uncovered만 보기" style={{ width: `${uncovPct}%`, background: COVERAGE_COLORS.uncovered.border }} />}
@@ -527,15 +504,44 @@ function CoverageBar({ covered, partial, total, onFilter }) {
   );
 }
 
+// Truthy check mirroring Python's bool() on collections — non-empty array,
+// non-empty object, or non-falsy scalar. Arrays that exist but are empty do
+// NOT count as "has data". This has to match backend _cache_trace_summary so
+// the dashboard Quality Gate and the UncoveredTopList agree on the same
+// uncovered set.
+function _hasData(v) {
+  if (v == null) return false;
+  if (Array.isArray(v)) return v.length > 0;
+  if (typeof v === 'object') return Object.keys(v).length > 0;
+  return Boolean(v);
+}
+
+// Field lists aligned with backend _cache_trace_summary (jenkins.py L2385~2400).
+// Any divergence here will cause the Dashboard trace summary card to disagree
+// with the Matrix / UncoveredTopList counts — keep the two in lockstep.
+const DESIGN_FIELDS = [
+  'source_ids', 'sds_components', 'functions', 'mapping', 'sds', 'source_mapping',
+];
+const TEST_FIELDS = [
+  'tests', 'sts_tests', 'suts_tests', 'sits_tests', 'vcast_tests', 'test_ids',
+];
+
+function hasDesignData(r) {
+  return DESIGN_FIELDS.some(f => _hasData(r[f]));
+}
+
+function hasTestData(r) {
+  return TEST_FIELDS.some(f => _hasData(r[f]));
+}
+
 // Derive coverage status from row data (pure function, shared across useMemo/filters)
-function deriveStatus(r) {
-  const hasSds = (r.sds_components ?? []).length > 0;
-  const hasSrc = (r.source_ids ?? []).length > 0;
-  const hasTest = (r.test_ids ?? r.tests ?? []).length > 0;
-  // Full: design (SDS or UDS) + test
-  if ((hasSds || hasSrc) && hasTest) return 'covered';
+export function deriveStatus(r) {
+  const hasDesign = hasDesignData(r);
+  const hasTest = hasTestData(r);
+  // Full: design (any of 6 field kinds) + test (any of 6 field kinds)
+  if (hasDesign && hasTest) return 'covered';
   // Partial: any one layer present
-  if (hasSds || hasSrc || hasTest) return 'partial';
+  if (hasDesign || hasTest) return 'partial';
   if (r.status && r.status !== 'uncovered') return r.status;
   return 'uncovered';
 }
@@ -566,6 +572,16 @@ function TraceMatrix({ matrix }) {
   // Reset page when rows change (e.g., new matrix data)
   useEffect(() => { setCurrentPage(0); setExpandedReqId(null); }, [rows]);
 
+  // Drill-down: jump the matrix straight to the uncovered row the user clicked
+  // in the Top-N list. Uses the existing filter+search+expand state so the UX
+  // mirrors a manual click; no scrollIntoView gymnastics needed.
+  const handlePickUncovered = useCallback((reqId) => {
+    setStatusFilter('uncovered');
+    setSearchTerm(reqId);
+    setCurrentPage(0);
+    setExpandedReqId(reqId);
+  }, []);
+
   // Extract unique requirement types (SwRS, SwTR, SyRS, etc.)
   const reqTypes = useMemo(() => {
     const types = new Set();
@@ -592,15 +608,13 @@ function TraceMatrix({ matrix }) {
   const coverage = useMemo(() => {
     if (!rows.length) return null;
     let covered = 0, partial = 0, uncovered = 0;
-    let partialWithDesign = 0; // partial 중 설계(SDS/UDS)가 있는 것
+    let partialWithDesign = 0; // partial 중 설계 데이터가 있는 것
     for (const r of rows) {
       const st = deriveStatus(r);
       if (st === 'covered') covered++;
       else if (st === 'partial') {
         partial++;
-        const hasSds = (r.sds_components ?? []).length > 0;
-        const hasSrc = (r.source_ids ?? []).length > 0;
-        if (hasSds || hasSrc) partialWithDesign++;
+        if (hasDesignData(r)) partialWithDesign++;
       }
       else uncovered++;
     }
@@ -904,6 +918,11 @@ function TraceMatrix({ matrix }) {
         </details>
       )}
 
+      {/* Uncovered drill-down — shows the first N missing requirements with
+         a reason. Clicking a row pins the matrix filter/search to that ID so
+         the user lands on it without manual scrolling. */}
+      <UncoveredTopList rows={rows} onPick={handlePickUncovered} />
+
       {/* Search and filter bar */}
       <div style={{ display: 'flex', gap: 8, marginBottom: 10, flexWrap: 'wrap', alignItems: 'center' }}>
         <input
@@ -1198,6 +1217,157 @@ function TraceMatrix({ matrix }) {
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+/* ── UncoveredTopList ──────────────────────────────────────────────────
+ * Surfaces the first N missing requirements (derived via deriveStatus) so
+ * reviewers can act on gaps without scrolling through the full matrix.
+ * Clicking an item calls onPick(reqId) — the parent wires that to the
+ * existing statusFilter + searchTerm state so the matrix snaps to it. */
+const TOP_N = 10;
+
+function reasonForUncovered(r) {
+  // Must use the same detectors as deriveStatus; otherwise a row that
+  // deriveStatus flagged as uncovered could show "설계·테스트 없음" while
+  // deriveStatus thought one side was present (or vice versa).
+  const hasDesign = hasDesignData(r);
+  const hasTest = hasTestData(r);
+  if (!hasDesign && !hasTest) return '설계·테스트 없음';
+  if (!hasDesign) return '설계 누락';
+  if (!hasTest) return '테스트 누락';
+  return '미커버';
+}
+
+// Pull a stable identifier from a matrix row. Returns '' when nothing
+// usable is present — those rows must NOT be exposed in the drill-down,
+// because the matrix search/filter has no key to seek to and the click
+// would silently do nothing. Accepts numeric ids too — a backend that
+// returns `id: 42` must not be silently dropped from ASIL traceability.
+function _rowReqId(r) {
+  const id = r?.requirement_id ?? r?.req_id ?? r?.id;
+  if (id == null) return '';
+  return String(id).trim();
+}
+
+export function UncoveredTopList({ rows, onPick }) {
+  const uncovered = useMemo(() => {
+    const out = [];
+    let droppedAnonymous = 0;
+    for (const r of rows || []) {
+      if (deriveStatus(r) !== 'uncovered') continue;
+      // Skip rows without a stable requirement identifier — clicking such an
+      // entry could not steer the matrix to it, so surfacing it would just
+      // produce dead clicks.
+      if (!_rowReqId(r)) {
+        droppedAnonymous++;
+        continue;
+      }
+      out.push(r);
+    }
+    out._anonymousCount = droppedAnonymous;
+    return out;
+  }, [rows]);
+
+  if (!uncovered.length) return null;
+
+  const shown = uncovered.slice(0, TOP_N);
+  const more = uncovered.length - shown.length;
+  const anonymousNote = uncovered._anonymousCount > 0
+    ? ` (식별자 없는 ${uncovered._anonymousCount}건은 매트릭스에서 직접 확인)`
+    : '';
+
+  return (
+    <div
+      style={{
+        marginBottom: 12,
+        border: `1px solid ${COVERAGE_COLORS.uncovered.border}`,
+        borderRadius: 8,
+        background: COVERAGE_COLORS.uncovered.bg + '30',
+        overflow: 'hidden',
+      }}
+    >
+      <div
+        style={{
+          padding: '8px 12px',
+          background: COVERAGE_COLORS.uncovered.bg,
+          borderBottom: `1px solid ${COVERAGE_COLORS.uncovered.border}`,
+          fontSize: 12,
+          fontWeight: 700,
+          color: COVERAGE_COLORS.uncovered.fg,
+          display: 'flex',
+          justifyContent: 'space-between',
+        }}
+      >
+        <span>미커버 요구사항 (Top {shown.length})</span>
+        <span style={{ fontWeight: 400, fontSize: 11 }}>
+          총 {uncovered.length}건{anonymousNote}
+        </span>
+      </div>
+      <ul style={{ listStyle: 'none', margin: 0, padding: 0 }}>
+        {shown.map((r, i) => {
+          // _rowReqId is guaranteed non-empty here — anonymous rows were
+          // filtered out in the `uncovered` memo above.
+          const reqId = _rowReqId(r);
+          const reason = reasonForUncovered(r);
+          return (
+            <li key={reqId}>
+              <button
+                type="button"
+                onClick={() => onPick?.(reqId)}
+                aria-label={`미커버 요구사항 ${reqId}로 이동`}
+                style={{
+                  width: '100%',
+                  textAlign: 'left',
+                  padding: '6px 12px',
+                  background: 'transparent',
+                  border: 'none',
+                  borderBottom: i < shown.length - 1 ? '1px solid var(--border)' : 'none',
+                  cursor: 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 10,
+                  fontSize: 12,
+                }}
+                onMouseEnter={e => { e.currentTarget.style.background = COVERAGE_COLORS.uncovered.bg + '60'; }}
+                onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; }}
+              >
+                <span style={{ fontFamily: 'monospace', fontWeight: 600, minWidth: 120 }}>{reqId}</span>
+                <span
+                  style={{
+                    fontSize: 10,
+                    padding: '1px 6px',
+                    borderRadius: 8,
+                    background: COVERAGE_COLORS.uncovered.border,
+                    color: COVERAGE_COLORS.uncovered.fg,
+                    fontWeight: 600,
+                    whiteSpace: 'nowrap',
+                  }}
+                >
+                  {reason}
+                </span>
+                <span style={{ color: 'var(--text-muted)', marginLeft: 'auto', fontSize: 11 }}>
+                  매트릭스로 이동 →
+                </span>
+              </button>
+            </li>
+          );
+        })}
+      </ul>
+      {more > 0 && (
+        <div
+          style={{
+            padding: '6px 12px',
+            borderTop: `1px solid ${COVERAGE_COLORS.uncovered.border}`,
+            fontSize: 11,
+            color: 'var(--text-muted)',
+            textAlign: 'center',
+          }}
+        >
+          + {more}개 더 — 아래 매트릭스에서 Uncovered 필터로 전체 확인
+        </div>
+      )}
     </div>
   );
 }

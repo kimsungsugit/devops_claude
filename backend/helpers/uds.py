@@ -1429,10 +1429,43 @@ def _uds_generate_from_paths(
         for x in re.split(r"[,\|;]+", globals_format_order or "")
         if x.strip()
     ]
+    # Gather source document paths for the Reference (1.4) section of the
+    # generated UDS docx. Currently only SRS comes through req_file_paths /
+    # req_paths; callers who also supply SDS/HSIS/STP should set
+    # ``uds_payload["reference_docs"]`` explicitly (see _build_uds_reference_lines).
+    _source_docs: List[str] = []
+    for _p in (req_file_paths or []):
+        try:
+            s = str(_p).strip()
+            if s and s not in _source_docs:
+                _source_docs.append(s)
+        except Exception:
+            continue
+    for _p in (req_paths or []):
+        s = str(_p or "").strip()
+        if s and s not in _source_docs:
+            _source_docs.append(s)
+
+    _project_name_val = summary.get("project") if isinstance(summary, dict) else ""
+    # Heuristic for {{MODULE_NAME}} in the docx template:
+    #   1) first path's leaf directory from `source_root` (comma-separated supported)
+    #   2) project_name as fallback
+    _module_name_val = ""
+    try:
+        _first_src = (source_root or "").split(",")[0].strip()
+        if _first_src:
+            _module_name_val = Path(_first_src).name
+    except Exception:
+        _module_name_val = ""
+    if not _module_name_val:
+        _module_name_val = str(_project_name_val or "")
+
     uds_payload = {
         "job_url": job_url,
         "build_number": jenkins_meta.get("build_number"),
-        "project_name": summary.get("project") if isinstance(summary, dict) else "",
+        "project_name": _project_name_val,
+        "module_name": _module_name_val,
+        "source_docs": _source_docs,
         "summary": summary,
         "overview": summary_text or source_sections.get("overview", ""),
         "requirements": req_combined,

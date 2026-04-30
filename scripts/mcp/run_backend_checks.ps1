@@ -1,5 +1,5 @@
 Param(
-  [string]$BaseUrl = "http://127.0.0.1:8000",
+  [string]$BaseUrl = "http://127.0.0.1:9000",
   [switch]$EnableTestGen,
   [switch]$EnableAll,
   [string]$TestGenExclude = ""

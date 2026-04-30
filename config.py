@@ -231,7 +231,7 @@ TEST_CODE_MAX_TOKENS = 16384
 # ---------------- LLM / 에이전트 설정 ----------------
 # [TIP] 70b 모델이 너무 느리면 "llama3:8b" 또는 "phi3" 등으로 변경 고려
 # 기본 모델을 제미나이로 변경하고 싶으면 아래를 수정하세요.
-DEFAULT_LLM_MODEL = "gemini-2.5-flash"
+DEFAULT_LLM_MODEL = "gemini-3.1-flash-lite-preview"
 DEFAULT_LLM_BASE_URL_ENV = "OLLAMA_BASE_URL"
 _DEFAULT_OAI_CONFIG = _REPO_ROOT / "OAI_CONFIG_LIST"
 if _DEFAULT_OAI_CONFIG.exists():
@@ -274,6 +274,22 @@ LLM_WARN_INPUT_TOKENS = 200000
 # Model-specific policies (auto caps, temperature, margins)
 # Keys are matched by substring (case-insensitive) against model name.
 LLM_MODEL_POLICIES = {
+    "gemini-3.1-flash-lite": {
+        "max_input_tokens": 1000000,
+        "max_output_tokens": 65536,
+        "max_input_tokens_by_stage": {
+            "build_fix": 200000,
+            "syntax_fix": 200000,
+            "static": 200000,
+            "domain_tests": 200000,
+            "plan_repair": 200000,
+            "test_plan": 200000,
+            "test_code": 200000,
+        },
+        "token_estimate_margin": 1.25,
+        "warn_input_tokens": 200000,
+        "temperature_default": 1.0,
+    },
     "gemini-3": {
         "max_input_tokens": 1000000,
         "max_output_tokens": 65536,
@@ -338,7 +354,7 @@ def apply_runtime_env() -> None:
 # Gemini-only 강제 사용(요청: gemini3만 사용)
 # - OAI_CONFIG_LIST가 여러 모델을 포함해도, workflow는 Gemini만 선택
 LLM_GEMINI_ONLY = os.environ.get("LLM_GEMINI_ONLY", "1").strip().lower() in ("1", "true", "yes")
-LLM_GEMINI_PREFERRED_SUBSTRING = os.environ.get("LLM_GEMINI_PREFERRED_SUBSTRING", "gemini-2.5").strip().lower()
+LLM_GEMINI_PREFERRED_SUBSTRING = os.environ.get("LLM_GEMINI_PREFERRED_SUBSTRING", "gemini-3.1-flash-lite").strip().lower()
 
 # [MODIFIED] 기본 출력 토큰 수 최대치로 상향 (65536)
 # Gemini 3 Pro Preview 스펙에 맞춤
@@ -451,7 +467,7 @@ CHAT_LOG_LINES = 40
 CHAT_SUMMARY_MAX_CHARS = 1600
 CHAT_ENABLE_SUMMARY = True
 CHAT_LONG_QUERY_CHARS = 800
-CHAT_MODEL_FAST = "gemini-2.0-flash"
+CHAT_MODEL_FAST = "gemini-3.1-flash-lite-preview"
 CHAT_SUMMARY_KEEP_DAYS = 7
 CHAT_SUMMARY_LOAD_FROM_FILE = True
 CHAT_SUMMARY_FILE_MAX_CHARS = 1200
@@ -493,6 +509,50 @@ UDS_REF_SUDS_PATH = os.environ.get(
     "UDS_REF_SUDS_PATH",
     str(Path(__file__).resolve().parent / "docs" / "(HDPDM01_SUDS) Software Unit Design Specification_v1.07_240213.docx"),
 )
+
+# Server-side default UDS docx template used when the frontend request
+# omits template_path. Points to the tokenized template so 1.1~1.4 are
+# populated from payload (project_name / module_name / reference_docs).
+UDS_TEMPLATE_PATH = os.environ.get(
+    "UDS_TEMPLATE_PATH",
+    str(Path(__file__).resolve().parent / "docs" / "(HDPDM01_SUDS)_template_tokenized.docx"),
+)
+
+# Server-managed override file (admin UI writes here). Schema:
+#   {"template_path": "...", "_last_saved_at": "...", "_last_saved_by": "..."}
+UDS_TEMPLATE_SERVER_CONFIG_PATH = (
+    Path(__file__).resolve().parent / "config" / "uds_template_server_config.json"
+)
+
+
+def resolve_uds_template_path() -> str:
+    """Return the UDS docx template path actually used for generation.
+
+    Resolution order:
+      1. Admin-saved server config file (``uds_template_server_config.json``)
+      2. ``UDS_TEMPLATE_PATH`` env/default (this module constant)
+      3. Empty string (caller uses no template)
+
+    Keeping this logic in one place ensures the ``/api/config/uds-template``
+    GET response and ``report_gen.docx_builder`` fallback always agree.
+    """
+    import json as _json
+    import logging as _logging
+
+    _log = _logging.getLogger("devops_api")
+    srv_cfg = UDS_TEMPLATE_SERVER_CONFIG_PATH
+    if srv_cfg.exists():
+        try:
+            data = _json.loads(srv_cfg.read_text(encoding="utf-8"))
+            saved = str((data or {}).get("template_path") or "").strip()
+            if saved and Path(saved).exists():
+                return saved
+        except Exception as exc:
+            _log.debug("UDS template server config unreadable (%s): %s", srv_cfg, exc)
+    env_path = UDS_TEMPLATE_PATH
+    if env_path and Path(env_path).exists():
+        return env_path
+    return ""
 
 CODE_RAG_GLOBS = [
     "**/*.c",

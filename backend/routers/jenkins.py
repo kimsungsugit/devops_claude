@@ -481,6 +481,15 @@ def jenkins_sync(req: JenkinsSyncRequest) -> Dict[str, Any]:
             progress_cb=_progress_cb,
             scan_mode=req.scan_mode,
             scan_max_files=req.scan_max_files,
+            scm_username=req.scm_username,
+            scm_id=req.scm_id,
+            force=req.force,
+        )
+        checkout = build_info.get("checkout", {}) if isinstance(build_info, dict) else {}
+        checkout_ok = bool(checkout.get("ok"))
+        checkout_err = str(checkout.get("error") or "")
+        done_message = "동기화 완료" if checkout_ok else (
+            f"동기화 완료 (SCM 체크아웃 실패: {checkout_err or 'unknown'})"
         )
         _set_progress(
             "sync",
@@ -489,8 +498,10 @@ def jenkins_sync(req: JenkinsSyncRequest) -> Dict[str, Any]:
             {
                 "stage": "done",
                 "percent": 100,
-                "message": "동기화 완료",
+                "message": done_message,
                 "done": True,
+                "checkout_ok": checkout_ok,
+                "checkout_error": checkout_err,
             },
         )
         return {
@@ -503,6 +514,11 @@ def jenkins_sync(req: JenkinsSyncRequest) -> Dict[str, Any]:
         }
     except Exception as exc:
         tb = traceback.format_exc()
+        # Log full traceback to server console for debugging
+        _api_logger.error("[sync] %s failed: %s\n%s", job_url, exc, tb)
+        # Include last 2 frames of traceback in error for frontend visibility
+        tb_lines = [ln for ln in tb.splitlines() if ln.strip()]
+        tail = " | ".join(tb_lines[-4:]) if len(tb_lines) > 2 else str(exc)
         _set_progress(
             "sync",
             job_url,
@@ -512,7 +528,7 @@ def jenkins_sync(req: JenkinsSyncRequest) -> Dict[str, Any]:
                 "percent": 100,
                 "message": "동기화 실패",
                 "done": True,
-                "error": str(exc),
+                "error": f"{exc} [at: {tail}]",
                 "error_detail": tb,
             },
         )
@@ -600,7 +616,7 @@ def jenkins_sync_async(req: JenkinsSyncRequest) -> Dict[str, Any]:
 
     def _run_sync() -> None:
         try:
-            sync_jenkins_artifacts(
+            build_info, _br, _rd, _dl, _arts = sync_jenkins_artifacts(
                 job_url=req.job_url,
                 username=req.username,
                 api_token=req.api_token,
@@ -611,6 +627,15 @@ def jenkins_sync_async(req: JenkinsSyncRequest) -> Dict[str, Any]:
                 progress_cb=_progress_cb,
                 scan_mode=req.scan_mode,
                 scan_max_files=req.scan_max_files,
+                scm_username=req.scm_username,
+                scm_id=req.scm_id,
+                force=req.force,
+            )
+            checkout = build_info.get("checkout", {}) if isinstance(build_info, dict) else {}
+            checkout_ok = bool(checkout.get("ok"))
+            checkout_err = str(checkout.get("error") or "")
+            done_message = "동기화 완료" if checkout_ok else (
+                f"동기화 완료 (SCM 체크아웃 실패: {checkout_err})"
             )
             _set_progress(
                 "sync",
@@ -619,13 +644,20 @@ def jenkins_sync_async(req: JenkinsSyncRequest) -> Dict[str, Any]:
                 {
                     "stage": "done",
                     "percent": 100,
-                    "message": "동기화 완료",
+                    "message": done_message,
                     "done": True,
+                    "checkout_ok": checkout_ok,
+                    "checkout_error": checkout_err,
                 },
                 job_id=job_id,
             )
         except Exception as exc:
             tb = traceback.format_exc()
+            # Log full traceback to server console for debugging
+            _api_logger.error("[sync-async] %s failed: %s\n%s", job_url, exc, tb)
+            # Include last traceback frames in error message for frontend visibility
+            tb_lines = [ln for ln in tb.splitlines() if ln.strip()]
+            tail = " | ".join(tb_lines[-4:]) if len(tb_lines) > 2 else str(exc)
             _set_progress(
                 "sync",
                 job_url,
@@ -635,7 +667,7 @@ def jenkins_sync_async(req: JenkinsSyncRequest) -> Dict[str, Any]:
                     "percent": 100,
                     "message": "동기화 실패",
                     "done": True,
-                    "error": str(exc),
+                    "error": f"{exc} [at: {tail}]",
                     "error_detail": tb,
                 },
                 job_id=job_id,
@@ -867,14 +899,20 @@ def jenkins_source_root_download(req: JenkinsSourceDownloadRequest) -> Dict[str,
     if req.scm_url:
         scm_type = (req.scm_type or "svn").lower()
         if scm_type == "svn":
+            from backend.services.scm_registry import resolve_scm_credentials
+            alt_user, alt_pass, _ = resolve_scm_credentials(
+                repo_url=req.scm_url,
+                scm_id=getattr(req, "scm_id", "") or "",
+                override_username=req.scm_username or "",
+            )
             alt = run_svn(
                 project_root=str(build_root),
                 workdir_rel="source",
                 action="checkout",
                 repo_url=req.scm_url,
                 revision=req.scm_revision or "",
-                username=req.scm_username or "",
-                password=req.scm_password or "",
+                username=alt_user,
+                password=alt_pass,
             )
             if alt.get("rc") == 0 and _dir_has_entries(source_dir):
                 return {
@@ -946,10 +984,15 @@ def jenkins_scm_info(req: JenkinsScmInfoRequest) -> Dict[str, Any]:
         raise HTTPException(status_code=400, detail="scm_url required")
     scm_type = (req.scm_type or "svn").lower()
     if scm_type == "svn":
+        from backend.services.scm_registry import resolve_scm_credentials
+        info_user, info_pass, _ = resolve_scm_credentials(
+            repo_url=req.scm_url,
+            override_username=req.scm_username or "",
+        )
         info = svn_info_url(
             repo_url=req.scm_url,
-            username=req.scm_username or "",
-            password=req.scm_password or "",
+            username=info_user,
+            password=info_pass,
         )
         if info.get("rc") != 0:
             raise HTTPException(status_code=500, detail=info.get("output") or "svn info failed")
@@ -2242,6 +2285,149 @@ def jenkins_uds_diff(req: UdsDiffRequest) -> Dict[str, Any]:
     return {"ok": True, "diff": diff}
 
 
+def _resolve_job_build_root(job_url: str, cache_root: str) -> Optional[Path]:
+    """Locate the latest cached build directory for ``job_url``.
+
+    Args:
+        job_url: Jenkins job URL used to derive the cache slug.
+        cache_root: Base cache directory (frontend-provided or default).
+
+    Returns:
+        Path to the newest ``build_*`` directory for the job, or ``None``
+        if no cached build exists. Mirrors the lookup used by
+        ``aggregate_stats``.
+    """
+    if not job_url:
+        return None
+    try:
+        from backend.user_context import get_current_user
+    except Exception:
+        return None
+
+    base = _normalize_jenkins_cache_root(cache_root)
+    slug = _job_slug(job_url)
+    current_user = get_current_user()
+
+    user_base = base / current_user if (base / current_user).exists() else None
+    candidates: List[Path] = []
+    if user_base:
+        candidates.append(user_base / "jenkins" / slug)
+    candidates.append(base / "jenkins" / slug)
+    if user_base:
+        candidates.extend(
+            d / "jenkins" / slug
+            for d in user_base.iterdir()
+            if d.is_dir() and d.name != "jenkins"
+        )
+    else:
+        candidates.extend(
+            d / "jenkins" / slug
+            for d in base.iterdir()
+            if d.is_dir() and d.name not in ("jenkins", "exports")
+        )
+
+    job_root = next(
+        (c for c in candidates if c.exists() and list(c.glob("build_*"))),
+        None,
+    )
+    if not job_root:
+        return None
+
+    build_dirs = sorted(job_root.glob("build_*"), reverse=True)
+    return build_dirs[0] if build_dirs else None
+
+
+def _cache_trace_summary(matrix: Dict[str, Any], req: UdsTraceabilityMatrixRequest) -> None:
+    """Persist a compact traceability summary for dashboard quick-load.
+
+    Writes ``report/trace_matrix_summary.json`` under the latest cached
+    build directory so the dashboard can render a coverage overview
+    without re-running the matrix generation.
+    """
+    job_url = (req.job_url or "").strip()
+    if not job_url:
+        return
+
+    cache_root = req.cache_root or ".devops_pro_cache"
+    build_root = _resolve_job_build_root(job_url, cache_root)
+    if build_root is None:
+        return
+
+    report_dir = build_root / "report"
+    report_dir.mkdir(parents=True, exist_ok=True)
+
+    # generate_uds_traceability_matrix() returns rows/summary/total_requirements at top-level.
+    # Some older callers wrap it as {"matrix": {...}} — accept both.
+    if isinstance(matrix, dict) and "rows" in matrix:
+        inner = matrix
+    elif isinstance(matrix, dict) and isinstance(matrix.get("matrix"), dict):
+        inner = matrix["matrix"]
+    else:
+        inner = matrix if isinstance(matrix, dict) else {}
+
+    rows = inner.get("rows") if isinstance(inner, dict) else None
+    rows = rows if isinstance(rows, list) else []
+    summary_data = inner.get("summary") if isinstance(inner, dict) else None
+    summary_data = summary_data if isinstance(summary_data, dict) else {}
+    declared_total = inner.get("total_requirements") if isinstance(inner, dict) else None
+
+    # Classification aligned with the detail view (SrsSdsSection deriveStatus):
+    #   covered   : design (SDS or UDS source) AND tests both present
+    #   partial   : exactly one of {design, tests} present
+    #   uncovered : neither present
+    covered = 0
+    partial = 0
+    uncovered = 0
+    for row in rows:
+        if not isinstance(row, dict):
+            uncovered += 1
+            continue
+        has_tests = bool(
+            row.get("tests")
+            or row.get("sts_tests")
+            or row.get("suts_tests")
+            or row.get("sits_tests")
+            or row.get("vcast_tests")
+            or row.get("test_ids")
+        )
+        has_design = bool(
+            row.get("source_ids")
+            or row.get("sds_components")
+            or row.get("functions")
+            or row.get("mapping")
+            or row.get("sds")
+            or row.get("source_mapping")
+        )
+        if has_design and has_tests:
+            covered += 1
+        elif has_design or has_tests:
+            partial += 1
+        else:
+            uncovered += 1
+
+    # Prefer matrix-declared total; fall back to row count
+    total = int(declared_total) if isinstance(declared_total, int) and declared_total > 0 else len(rows)
+    # Normalize: if declared_total > len(rows), unclassified extras are "uncovered"
+    if total > covered + partial + uncovered:
+        uncovered += total - (covered + partial + uncovered)
+    coverage_pct = round(covered / total * 100, 1) if total > 0 else 0.0
+
+    cache_payload = {
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "total_requirements": total,
+        "covered": covered,
+        "partial": partial,
+        "uncovered": uncovered,
+        "coverage_pct": coverage_pct,
+        "summary_raw": summary_data,
+    }
+
+    (report_dir / "trace_matrix_summary.json").write_text(
+        json.dumps(cache_payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
 @router.post("/api/jenkins/uds/traceability-matrix")
 def jenkins_uds_traceability_matrix(req: UdsTraceabilityMatrixRequest) -> Dict[str, Any]:
     try:
@@ -2252,9 +2438,53 @@ def jenkins_uds_traceability_matrix(req: UdsTraceabilityMatrixRequest) -> Dict[s
             sds_pairs=req.sds_pairs or [],
             sits_rows=req.sits_rows or [],
         )
+        # Cache compact summary for dashboard quick-load (best-effort)
+        try:
+            _cache_trace_summary(matrix, req)
+        except Exception as cache_exc:
+            _api_logger.debug("Trace summary cache skipped: %s", cache_exc)
         return {"ok": True, "matrix": matrix}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.post("/api/jenkins/uds/trace-summary")
+def jenkins_trace_summary(req: dict) -> Dict[str, Any]:
+    """Fast lookup of the cached traceability matrix summary for a single job.
+
+    Args:
+        req: Dict with ``job_url`` (required) and optional ``cache_root``
+            (defaults to ``.devops_pro_cache``).
+
+    Returns:
+        Cached summary payload with ``has_data=True`` when available,
+        otherwise ``{"has_data": False, "reason": ...}``.
+    """
+    job_url = str(req.get("job_url", "")).strip()
+    cache_root = str(req.get("cache_root", ".devops_pro_cache") or ".devops_pro_cache")
+
+    if not job_url:
+        return {"has_data": False, "reason": "job_url required"}
+
+    build_root = _resolve_job_build_root(job_url, cache_root)
+    if build_root is None:
+        return {"has_data": False, "reason": "no cached build"}
+
+    summary_path = build_root / "report" / "trace_matrix_summary.json"
+    if not summary_path.exists():
+        return {
+            "has_data": False,
+            "reason": "no cached summary — SRS & SDS 섹션에서 추적성 매트릭스를 먼저 생성하세요",
+        }
+
+    try:
+        data = json.loads(summary_path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            return {"has_data": False, "reason": "invalid cache payload"}
+        data["has_data"] = True
+        return data
+    except Exception as exc:
+        return {"has_data": False, "reason": f"cache read failed: {exc}"}
 
 
 @router.post("/api/jenkins/uds/extract-mapping")
@@ -2364,9 +2594,9 @@ def jenkins_sts_extract_traceability(body: Dict[str, Any]) -> Dict[str, Any]:
     trace_ws = None
     trace_type = None
     for name in wb.sheetnames:
-        if "Traceability" in name or "traceability" in name:
+        if "traceability" in name.lower():
             trace_ws = wb[name]
-            trace_type = "matrix" if "SwRS" in name else "list"
+            trace_type = "matrix" if "SwRS" in name or "swrs" in name.lower() else "list"
             break
 
     if not trace_ws:
@@ -2989,3 +3219,227 @@ def jenkins_report_publish_async(req: JenkinsPublishRequest) -> Dict[str, Any]:
     t = threading.Thread(target=wrap_with_user(_run_publish), daemon=True)
     t.start()
     return {"ok": True, "job_id": job_id}
+
+
+# ──────────────────────────────────────────────────────────────────
+# Aggregate stats across multiple projects
+# ──────────────────────────────────────────────────────────────────
+
+@router.post("/api/jenkins/aggregate-stats")
+def aggregate_stats(req: dict) -> Dict[str, Any]:
+    """Aggregate analysis_summary.json from latest builds of multiple jobs.
+
+    Args:
+        req: Dict with ``job_urls`` (list of Jenkins job URLs) and
+             optional ``cache_root`` (defaults to .devops_pro_cache).
+
+    Returns:
+        Aggregated coverage, test, PRQA, and code metric statistics.
+    """
+    job_urls: List[str] = req.get("job_urls") or []
+    cache_root: str = req.get("cache_root", ".devops_pro_cache")
+
+    base = _normalize_jenkins_cache_root(cache_root)
+
+    projects: List[Dict[str, Any]] = []
+
+    # Accumulators
+    cov_line_rates: List[float] = []
+    cov_branch_rates: List[float] = []
+    total_covered = 0
+    total_lines = 0
+
+    total_ut_cases = 0
+    passed_ut_cases = 0
+    total_it_cases = 0
+    passed_it_cases = 0
+    all_pass = True
+
+    total_files = 0
+    total_functions = 0
+    total_nloc = 0
+
+    total_diagnostics = 0
+    total_loc = 0
+    total_files_analyzed = 0
+
+    # Get current user for multi-user cache isolation
+    from backend.user_context import get_current_user
+    current_user = get_current_user()
+
+    for job_url in job_urls:
+        slug = _job_slug(job_url)
+
+        # Cache path patterns (user-isolated, in priority order):
+        # 1. {base}/{user}/jenkins/{slug}/build_*            (current frontend defaultCacheRoot)
+        # 2. {base}/jenkins/{slug}/build_*                    (legacy direct / shared)
+        # 3. {base}/{user}/{fe_slug}/jenkins/{slug}/build_*  (legacy frontend with job-slug subdir)
+        # 4. {base}/{fe_slug}/jenkins/{slug}/build_*          (legacy frontend w/o user)
+        user_base = base / current_user if (base / current_user).exists() else None
+        candidates: List[Path] = []
+        if user_base:
+            candidates.append(user_base / "jenkins" / slug)
+        candidates.append(base / "jenkins" / slug)
+        if user_base:
+            # Legacy: job-slug subdirectories under the user's folder
+            candidates.extend(
+                d / "jenkins" / slug
+                for d in user_base.iterdir()
+                if d.is_dir() and d.name != "jenkins"
+            )
+        else:
+            # Fallback: legacy structure without user directory
+            candidates.extend(
+                d / "jenkins" / slug
+                for d in base.iterdir()
+                if d.is_dir() and d.name not in ("jenkins", "exports")
+            )
+
+        job_root = None
+        for candidate in candidates:
+            if candidate.exists() and list(candidate.glob("build_*")):
+                job_root = candidate
+                break
+        if not job_root:
+            continue
+
+        # Find latest build directory (highest build_N number)
+        build_dirs = sorted(job_root.glob("build_*"), reverse=True)
+        if not build_dirs:
+            continue
+
+        summary_path = build_dirs[0] / "report" / "analysis_summary.json"
+        if not summary_path.exists():
+            # Also check reports/ subdirectory
+            summary_path = build_dirs[0] / "reports" / "analysis_summary.json"
+        if not summary_path.exists():
+            continue
+
+        try:
+            data = json.loads(summary_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+
+        def _safe_int(val: Any, default: int = 0) -> int:
+            try:
+                return int(val) if val is not None else default
+            except (TypeError, ValueError):
+                return default
+
+        def _safe_float(val: Any) -> float | None:
+            try:
+                return float(val) if val is not None else None
+            except (TypeError, ValueError):
+                return None
+
+        # Coverage
+        cov = data.get("coverage") or {}
+        lr = _safe_float(cov.get("line_rate"))
+        br = _safe_float(cov.get("branch_rate"))
+        if lr is not None:
+            cov_line_rates.append(lr)
+        if br is not None:
+            cov_branch_rates.append(br)
+        total_covered += _safe_int(cov.get("covered"))
+        total_lines += _safe_int(cov.get("total"))
+
+        # Tests
+        tests = data.get("tests") or {}
+        details = tests.get("details") or {}
+        ut = details.get("ut") or {}
+        it = details.get("it") or {}
+        ut_tc = ut.get("testcases") or {}
+        it_tc = it.get("testcases") or {}
+        total_ut_cases += _safe_int(ut_tc.get("total"))
+        passed_ut_cases += _safe_int(ut_tc.get("ok"))
+        total_it_cases += _safe_int(it_tc.get("total"))
+        passed_it_cases += _safe_int(it_tc.get("ok"))
+        if not tests.get("ok", True):
+            all_pass = False
+
+        # Code metrics
+        cm = data.get("code_metrics") or {}
+        total_files += _safe_int(cm.get("code_files"))
+        total_functions += _safe_int(cm.get("functions"))
+        total_nloc += _safe_int(cm.get("nloc"))
+
+        # PRQA
+        prqa = data.get("prqa") or {}
+        crr = prqa.get("crr") or {}
+        total_diagnostics += _safe_int(crr.get("diagnostic_count"))
+        total_loc += _safe_int(crr.get("loc_source"))
+        total_files_analyzed += _safe_int(crr.get("number_of_files"))
+
+        # Jenkins info
+        jenkins = data.get("jenkins") or {}
+        ut_total = _safe_int(ut_tc.get("total"))
+
+        # PRQA RCR summary for compliance metrics
+        rcr = prqa.get("rcr") or {}
+        rcr_summary = rcr.get("summary") or {}
+
+        def _parse_fraction_first(val: Any) -> int:
+            """Extract first number from 'N/M' string or return int."""
+            if isinstance(val, (int, float)):
+                return int(val)
+            if isinstance(val, str):
+                parts = val.split("/")
+                try:
+                    return int(parts[0].strip())
+                except (ValueError, IndexError):
+                    return 0
+            return 0
+
+        projects.append({
+            "job_url": job_url,
+            "name": job_url.rstrip("/").split("/")[-1],
+            "build_number": jenkins.get("build_number"),
+            "result": jenkins.get("result"),
+            "line_rate": lr,
+            "branch_rate": br,
+            "ut_pass_rate": (
+                round(_safe_int(ut_tc.get("ok")) / ut_total, 4)
+                if ut_total > 0 else None
+            ),
+            "ut_total": _safe_int(ut_tc.get("total")),
+            "it_total": _safe_int(it_tc.get("total")),
+            "diagnostics": _safe_int(crr.get("diagnostic_count")),
+            "loc": _safe_int(cm.get("nloc")),
+            "functions": _safe_int(cm.get("functions")),
+            "rcr_violated_rules": _parse_fraction_first(rcr_summary.get("Violated Rules", 0)),
+            "rcr_compliance_index": _parse_fraction_first(rcr_summary.get("Project Compliance Index", 0)),
+        })
+
+    return {
+        "project_count": len(projects),
+        "coverage": {
+            "avg_line_rate": (
+                round(sum(cov_line_rates) / len(cov_line_rates), 4)
+                if cov_line_rates else None
+            ),
+            "avg_branch_rate": (
+                round(sum(cov_branch_rates) / len(cov_branch_rates), 4)
+                if cov_branch_rates else None
+            ),
+            "total_covered": total_covered,
+            "total_lines": total_lines,
+        },
+        "tests": {
+            "total_ut_cases": total_ut_cases,
+            "passed_ut_cases": passed_ut_cases,
+            "total_it_cases": total_it_cases,
+            "passed_it_cases": passed_it_cases,
+            "all_pass": all_pass,
+        },
+        "code_metrics": {
+            "total_files": total_files,
+            "total_functions": total_functions,
+            "total_nloc": total_nloc,
+        },
+        "prqa": {
+            "total_diagnostics": total_diagnostics,
+            "total_loc": total_loc,
+            "total_files_analyzed": total_files_analyzed,
+        },
+        "projects": projects,
+    }

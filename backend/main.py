@@ -4,8 +4,8 @@ All endpoint logic lives in backend/routers/.
 Shared helper functions live in backend/helpers/ package.
 
 Deployment notes:
-  Development : uvicorn backend.main:app --host 127.0.0.1 --port 8000 --reload
-  Production  : uvicorn backend.main:app --host 0.0.0.0 --port 8000 --workers 2
+  Development : uvicorn backend.main:app --host 127.0.0.1 --port 9000 --reload
+  Production  : uvicorn backend.main:app --host 0.0.0.0 --port 9000 --workers 2
 
   With --workers > 1, in-memory progress state (backend/state.py) is NOT shared
   across worker processes. Long-running jobs (UDS/STS/SUTS) use generate-async +
@@ -83,8 +83,8 @@ async def _lifespan(app_instance):
 
     _api_logger.info("=" * 50)
     _api_logger.info("DevOps Release Server started")
-    _api_logger.info("  Local:   http://127.0.0.1:8000")
-    _api_logger.info("  Network: http://%s:8000", ip)
+    _api_logger.info("  Local:   http://127.0.0.1:9000")
+    _api_logger.info("  Network: http://%s:9000", ip)
     _api_logger.info("=" * 50)
 
     from backend.services.file_resolver import get_resolver
@@ -98,7 +98,7 @@ async def _lifespan(app_instance):
     _api_logger.info("DevOps Release Server shutting down")
 
 
-app = FastAPI(title="DevOps Pro API", version="1.0", lifespan=_lifespan)
+app = FastAPI(title="ARIA API", version="1.0", lifespan=_lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -184,14 +184,12 @@ if (_frontend_dist / "index.html").exists():
             return FileResponse(str(p), media_type="image/svg+xml")
         raise HTTPException(status_code=404)
 
-    # Explicit 404 for unmatched API routes (prevents SPA fallback masking)
-    @app.get("/api/{api_path:path}")
-    async def _api_not_found(api_path: str):
-        raise HTTPException(status_code=404, detail=f"API endpoint not found: /api/{api_path}")
-
     # SPA catch-all: return index.html for any non-API unmatched route
+    # API paths that don't match a router endpoint get a proper 404 instead of index.html
     @app.get("/{full_path:path}")
     async def _spa_fallback(full_path: str):
+        if full_path.startswith("api/"):
+            raise HTTPException(status_code=404, detail=f"API endpoint not found: /{full_path}")
         return FileResponse(str(_frontend_dist / "index.html"))
 
     _api_logger.info("Frontend-v2 production build served from %s", _frontend_dist)

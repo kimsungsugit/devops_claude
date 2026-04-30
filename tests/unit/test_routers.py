@@ -46,6 +46,13 @@ _mw.RATE_LIMIT = 999999
 from backend.main import app  # noqa: E402
 
 client = TestClient(app, raise_server_exceptions=False)
+# UserContextMiddleware blocks any /api/* request that lacks an X-User header
+# with 401. Inject a default header here so the router contract tests below
+# exercise their actual paths instead of the auth gate. allowed_users.json is
+# empty (unrestricted), so any non-empty value satisfies the middleware.
+# If you ever add a test that asserts 401 behaviour, override the header on
+# that specific request: `client.get(url, headers={"X-User": ""})`.
+client.headers["X-User"] = "test"
 
 
 # ═══════════════════════════════════════════════════════════════════

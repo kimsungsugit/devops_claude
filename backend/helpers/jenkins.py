@@ -82,10 +82,25 @@ def _save_uds_meta(out_dir: Path, job_slug: str, meta: Dict[str, Any]) -> None:
     _write_json(_uds_meta_path(out_dir, job_slug), meta)
 
 
-def _normalize_jenkins_cache_root(cache_root: str) -> Path:
+def _normalize_jenkins_cache_root(cache_root: str, username: str = "") -> Path:
+    """Normalize cache root path and ensure the directory exists.
+
+    Args:
+        cache_root: Explicit cache root path (from frontend).
+        username: Reserved for future per-user override. Currently unused
+                  because the frontend already embeds the username in the path.
+    """
     if cache_root:
-        return Path(cache_root).expanduser().resolve()
-    return (Path.home() / ".devops_pro_cache").resolve()
+        base = Path(cache_root).expanduser().resolve()
+    else:
+        base = (Path.home() / ".devops_pro_cache").resolve()
+    # Ensure the cache directory tree exists — first-time sync for a new project
+    # was failing because parents didn't exist yet.
+    try:
+        base.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+    return base
 
 
 def _resolve_cached_build_root(job_url: str, cache_root: str, build_selector: str) -> Optional[Path]:

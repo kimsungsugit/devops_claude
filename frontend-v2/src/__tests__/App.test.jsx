@@ -10,6 +10,8 @@ vi.mock('../api.js', () => ({
   saveJenkinsConfig: vi.fn(),
   getUsername: () => 'testuser',
   setUsername: vi.fn(),
+  fetchServerJenkinsConfig: () => Promise.resolve(null),
+  saveServerJenkinsConfig: vi.fn(() => Promise.resolve({ ok: true })),
 }));
 
 // Mock child views to keep tests focused
@@ -39,14 +41,15 @@ describe('App', () => {
 
   it('renders header with brand name', () => {
     render(<App />);
-    expect(screen.getByText('DevOps Release')).toBeInTheDocument();
+    expect(screen.getByText('ARIA')).toBeInTheDocument();
   });
 
   it('renders all tab buttons', () => {
     render(<App />);
     expect(screen.getByText('대시보드')).toBeInTheDocument();
     expect(screen.getByText('세부 데이터')).toBeInTheDocument();
-    expect(screen.getByText('설정')).toBeInTheDocument();
+    // '설정' 탭은 관리자 전용 — 기본(비관리자)에서는 숨김
+    expect(screen.queryByText('설정')).not.toBeInTheDocument();
   });
 
   it('shows dashboard tab as active by default', () => {
@@ -59,8 +62,9 @@ describe('App', () => {
     const user = userEvent.setup();
     render(<App />);
 
-    await user.click(screen.getByText('설정'));
-    expect(screen.getByText('설정')).toHaveClass('active');
+    // '설정'은 admin-only라 기본 탭 집합에 없음 → '세부 데이터'로 대체
+    await user.click(screen.getByText('세부 데이터'));
+    expect(screen.getByText('세부 데이터')).toHaveClass('active');
     expect(screen.getByText('대시보드')).not.toHaveClass('active');
   });
 

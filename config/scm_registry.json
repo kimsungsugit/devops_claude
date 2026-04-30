@@ -30,6 +30,37 @@
       "updated_at": "2026-04-15T10:16:52",
       "last_triggered": "",
       "last_revision": ""
+    },
+    {
+      "id": "kjpds02",
+      "name": "KJPDS02 NE1AW PORTING ToolDev",
+      "scm_type": "svn",
+      "scm_url": "svn://192.168.110.33/ADOS/NE1AW_PORTING",
+      "scm_username": "kss1119",
+      "scm_password_env": "",
+      "branch": "",
+      "base_ref": "",
+      "source_root": "D:/Project/Ados/NE1AW_PORTING",
+      "watch_patterns": [
+        "*.c",
+        "*.h"
+      ],
+      "ignore_patterns": [],
+      "webhook_secret_env": "",
+      "linked_docs": {
+        "uds": "",
+        "sts": "",
+        "suts": "",
+        "sits": "",
+        "srs": "",
+        "sds": "",
+        "hsis": "",
+        "stp": ""
+      },
+      "created_at": "2026-04-21T15:02:58",
+      "updated_at": "2026-04-21T15:04:11",
+      "last_triggered": "",
+      "last_revision": ""
     }
   ]
 }

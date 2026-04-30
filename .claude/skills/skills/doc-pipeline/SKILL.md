@@ -26,11 +26,11 @@ $ARGUMENTS 에 생성 옵션이 들어옵니다:
 ### STEP 1: 환경 확인 및 자동 구성
 - 백엔드 상태 확인:
   ```bash
-  curl -s ${BACKEND_URL:-http://127.0.0.1:8000}/api/health
+  curl -s ${BACKEND_URL:-http://127.0.0.1:9000}/api/health
   ```
 - 서버 미실행 시 **자동 시작**:
   ```bash
-  cd backend && uvicorn main:app --port ${BACKEND_PORT:-8000} &
+  cd backend && uvicorn main:app --port ${BACKEND_PORT:-9000} &
   ```
   5초 대기 후 재확인
 - 필수 경로 확인 (source_root, SRS, SDS)
@@ -48,10 +48,10 @@ $ARGUMENTS 에 생성 옵션이 들어옵니다:
 
 순서대로 자동 실행 (이전 문서 결과를 다음에서 참조):
 
-1. **UDS** --> `POST ${BACKEND_URL:-http://127.0.0.1:8000}/api/jenkins/uds/generate-async` --> 진행률 폴링
-2. **STS** --> `POST ${BACKEND_URL:-http://127.0.0.1:8000}/api/jenkins/sts/generate-async` --> 진행률 폴링
-3. **SUTS** --> `POST ${BACKEND_URL:-http://127.0.0.1:8000}/api/jenkins/suts/generate-async` --> 진행률 폴링
-4. **SITS** --> `POST ${BACKEND_URL:-http://127.0.0.1:8000}/api/local/sits/generate-async` --> 진행률 폴링
+1. **UDS** --> `POST ${BACKEND_URL:-http://127.0.0.1:9000}/api/jenkins/uds/generate-async` --> 진행률 폴링
+2. **STS** --> `POST ${BACKEND_URL:-http://127.0.0.1:9000}/api/jenkins/sts/generate-async` --> 진행률 폴링
+3. **SUTS** --> `POST ${BACKEND_URL:-http://127.0.0.1:9000}/api/jenkins/suts/generate-async` --> 진행률 폴링
+4. **SITS** --> `POST ${BACKEND_URL:-http://127.0.0.1:9000}/api/local/sits/generate-async` --> 진행률 폴링
    (SITS는 Jenkins 없이 로컬 직접 생성하므로 /api/local/ 엔드포인트 사용)
 
 각 단계 보고: `[1/4] UDS 생성 완료 -- path/to/file.docx`

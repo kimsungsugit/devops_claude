@@ -68,6 +68,14 @@ class JenkinsSyncRequest(BaseModel):
     verify_tls: bool = True
     scan_mode: Optional[str] = None
     scan_max_files: Optional[int] = None
+    # Optional SCM override — password is resolved via env (DEVOPS_SCM_PASSWORD
+    # or scm_registry entry's scm_password_env), never accepted as plaintext.
+    scm_username: str = ""
+    scm_id: str = ""
+    # Force a fresh SCM checkout even if the source cache is complete.
+    # Useful when the remote revision changed but the Jenkins build number
+    # has not, or when a previous partial checkout must be discarded.
+    force: bool = False
 
 
 class JenkinsSourceDownloadRequest(JenkinsSyncRequest):
@@ -604,3 +612,7 @@ class UdsTraceabilityMatrixRequest(BaseModel):
     vcast_rows: List[Dict[str, Any]] = []
     sds_pairs: List[Dict[str, Any]] = []   # SDS component↔requirement mapping
     sits_rows: List[Dict[str, Any]] = []   # SITS TC↔requirement mapping
+    # Optional cache-persist hints (for dashboard summary quick-load)
+    job_url: Optional[str] = None
+    cache_root: Optional[str] = None
+    build_selector: Optional[str] = None

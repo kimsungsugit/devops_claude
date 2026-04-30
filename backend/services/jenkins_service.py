@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Callable
@@ -10,6 +11,9 @@ from backend.services.jenkins_client import JenkinsClient, JenkinsServerClient
 from backend.services.jenkins_adapter import ensure_frontend_summary
 from backend.services.local_service import run_git, run_svn
 from backend.services.jenkins_helpers import _detect_reports_dir, _job_slug, _norm_job_url, _safe_artifact_path
+
+
+_logger = logging.getLogger("devops_api.jenkins_service")
 
 
 def list_jobs(
@@ -72,15 +76,125 @@ def _dir_has_entries(path: Path) -> bool:
         return False
 
 
+# Sentinel file written after a successful checkout. Cached re-use is only
+# allowed when this marker exists — presence of an arbitrary non-empty folder
+# (e.g. a partial checkout left over from an interrupted sync) is not enough.
+_SOURCE_SENTINEL_NAME = ".source_complete"
+
+
+def _source_sentinel(source_dir: Path) -> Path:
+    return source_dir / _SOURCE_SENTINEL_NAME
+
+
+def _source_is_complete(source_dir: Path) -> bool:
+    return source_dir.is_dir() and _source_sentinel(source_dir).exists()
+
+
+def _robust_rmtree(path: Path) -> None:
+    """Remove a directory tree, coping with read-only files that Subversion
+    leaves behind on Windows (e.g. `.svn/pristine/**`). A plain `shutil.rmtree`
+    there fails with PermissionError and leaves debris that confuses the next
+    `svn checkout`."""
+    import os
+    import stat
+    import shutil
+
+    def _on_error(func, target, exc_info):
+        try:
+            os.chmod(target, stat.S_IWRITE)
+            func(target)
+        except Exception:
+            pass
+
+    if path.exists():
+        shutil.rmtree(path, onerror=_on_error)
+
+
+def _build_root_lock(build_root: Path):
+    """Return a file-based lock scoped to the given build_root.
+
+    When `filelock` is available we use a real file lock so multiple processes
+    (e.g. forked workers) are serialised. Otherwise we fall back to a
+    threading.Lock keyed by path — still protects against concurrent threads
+    in the same process, which is the common case for sync-async.
+    """
+    try:
+        from filelock import FileLock  # type: ignore
+    except Exception:
+        FileLock = None
+    build_root = Path(build_root)
+    build_root.mkdir(parents=True, exist_ok=True)
+    lock_path = build_root / ".checkout.lock"
+    if FileLock is not None:
+        return FileLock(str(lock_path), timeout=1800)
+    # Fallback: per-path threading lock (process-local only)
+    import threading
+    key = str(lock_path.resolve())
+    cache = getattr(_build_root_lock, "_cache", None)
+    if cache is None:
+        cache = {}
+        _build_root_lock._cache = cache  # type: ignore[attr-defined]
+        _build_root_lock._guard = threading.Lock()  # type: ignore[attr-defined]
+    with _build_root_lock._guard:  # type: ignore[attr-defined]
+        lock = cache.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            cache[key] = lock
+    return lock
+
+
 def ensure_source_checkout(
     *,
     build_root: Path,
     client: JenkinsClient,
     build_selector: str,
     progress_cb: Optional[Callable[[str, Dict[str, Any]], None]] = None,
+    scm_username: str = "",
+    scm_id: str = "",
+    force: bool = False,
 ) -> Dict[str, Any]:
+    import shutil
     source_dir = Path(build_root) / "source"
-    if source_dir.exists() and _dir_has_entries(source_dir):
+
+    # Serialize concurrent checkouts against the same build_root. Two rapid
+    # sync requests for the same build must not both enter the run_svn path
+    # simultaneously — that causes .svn lock collisions and half-written dirs.
+    with _build_root_lock(build_root):
+        return _ensure_source_checkout_inner(
+            build_root=build_root,
+            source_dir=source_dir,
+            client=client,
+            build_selector=build_selector,
+            progress_cb=progress_cb,
+            scm_username=scm_username,
+            scm_id=scm_id,
+            force=force,
+            shutil=shutil,
+        )
+
+
+def _ensure_source_checkout_inner(
+    *,
+    build_root: Path,
+    source_dir: Path,
+    client: JenkinsClient,
+    build_selector: str,
+    progress_cb: Optional[Callable[[str, Dict[str, Any]], None]],
+    scm_username: str,
+    scm_id: str,
+    force: bool,
+    shutil,
+) -> Dict[str, Any]:
+    if force and source_dir.exists():
+        # Caller requested a fresh checkout. Remove any previous artefacts so
+        # the sentinel/cache logic below behaves as if this were a first sync.
+        if progress_cb:
+            try:
+                progress_cb("scm_reset", {"path": str(source_dir)})
+            except Exception:
+                pass
+        _robust_rmtree(source_dir)
+    if _source_is_complete(source_dir):
         if progress_cb:
             try:
                 progress_cb("scm_done", {"path": str(source_dir), "skipped": True})
@@ -91,23 +205,89 @@ def ensure_source_checkout(
         meta = client.get_scm_meta(build_selector=build_selector or "lastSuccessfulBuild")
     except Exception:
         meta = {}
-    repo_urls = meta.get("repo_urls") if isinstance(meta, dict) else None
-    if not repo_urls:
+    meta = meta if isinstance(meta, dict) else {}
+    meta_repo_urls = meta.get("repo_urls") or []
+    jenkins_repo_url = str(meta_repo_urls[0]) if meta_repo_urls else ""
+    jenkins_scm = str(meta.get("scm") or meta.get("scm_type") or "").lower()
+    jenkins_branch = str(meta.get("git_branch") or meta.get("scm_branch") or "").strip()
+    jenkins_revision = str(
+        meta.get("scm_revision") or meta.get("git_commit") or meta.get("svn_revision") or ""
+    ).strip()
+
+    from backend.services.scm_registry import resolve_scm_credentials
+    resolved_username, resolved_password, registry_entry = resolve_scm_credentials(
+        repo_url=jenkins_repo_url,
+        scm_id=scm_id,
+        override_username=scm_username,
+    )
+
+    # Registry is source of truth when an explicit mapping exists: the user has
+    # already told us which SVN/Git source this Jenkins job corresponds to.
+    # Jenkins-reported repo_url can be a mirror URL (e.g. git mirror of an SVN
+    # tree) or missing altogether when SCM plugin data is incomplete, so the
+    # registry always wins when present.
+    override_from_registry = False
+    if registry_entry and (registry_entry.scm_url or "").strip():
+        repo_url = registry_entry.scm_url.strip()
+        scm = (registry_entry.scm_type or jenkins_scm or "svn").lower()
+        branch = (registry_entry.branch or "").strip() or jenkins_branch
+        # If Jenkins didn't report a repo_url (partial SCM metadata), we have
+        # no way to confirm its revision applies to the registry URL we're
+        # about to check out — treat that as an override so jenkins_revision
+        # is discarded below and we fetch HEAD instead of a foreign revision.
+        override_from_registry = (not jenkins_repo_url) or (jenkins_repo_url != repo_url)
+        # Revision is only safe when (a) SCM types match AND (b) we are
+        # actually checking out the URL Jenkins reported. If the registry
+        # rerouted us to a different repo URL — even of the same type —
+        # Jenkins' revision is an identifier from a foreign tree (e.g. the
+        # mirror) and would either fail (svn: revision out of range) or
+        # silently fetch the wrong commit. In that case do a HEAD checkout.
+        if not jenkins_scm or jenkins_scm != scm or override_from_registry:
+            revision = ""
+        else:
+            revision = jenkins_revision
+    else:
+        repo_url = jenkins_repo_url
+        scm = jenkins_scm or "git"
+        branch = jenkins_branch
+        revision = jenkins_revision
+
+    if not repo_url:
+        _logger.warning(
+            "[ensure_source_checkout] repo_url_missing build_root=%s meta=%r scm_id=%s",
+            build_root, meta, scm_id or "-",
+        )
         if progress_cb:
             try:
                 progress_cb("scm_failed", {"reason": "repo_url_missing"})
             except Exception:
                 pass
         return {"ok": False, "error": "repo_url_missing", "meta": meta}
-    repo_url = str(repo_urls[0])
-    scm = str(meta.get("scm") or meta.get("scm_type") or "git").lower()
-    branch = str(meta.get("git_branch") or meta.get("scm_branch") or "").strip()
-    revision = str(meta.get("scm_revision") or meta.get("git_commit") or meta.get("svn_revision") or "").strip()
+
+    if override_from_registry and registry_entry is not None:
+        _logger.info(
+            "[ensure_source_checkout] registry_override jenkins_url=%s → registry_url=%s registry=%s",
+            jenkins_repo_url, repo_url, registry_entry.id,
+        )
+    _logger.info(
+        "[ensure_source_checkout] repo_url=%s scm=%s rev=%s branch=%s user=%s registry=%s has_pw=%s",
+        repo_url, scm, revision or "-", branch or "-",
+        resolved_username or "-",
+        (registry_entry.id if registry_entry else "-"),
+        bool(resolved_password),
+    )
+
     if progress_cb:
         try:
             progress_cb(
                 "scm_clone",
-                {"repo_url": repo_url, "branch": branch, "scm": scm},
+                {
+                    "repo_url": repo_url,
+                    "branch": branch,
+                    "scm": scm,
+                    "user": resolved_username or "",
+                    "registry_id": (registry_entry.id if registry_entry else ""),
+                },
             )
         except Exception:
             pass
@@ -118,6 +298,8 @@ def ensure_source_checkout(
             action="checkout",
             repo_url=repo_url,
             revision=revision,
+            username=resolved_username,
+            password=resolved_password,
         )
     else:
         result = run_git(
@@ -129,6 +311,12 @@ def ensure_source_checkout(
             depth=0,
         )
     if result.get("rc") != 0:
+        _logger.warning(
+            "[ensure_source_checkout] checkout_failed scm=%s rc=%s repo_url=%s user=%s has_pw=%s output=%s",
+            scm, result.get("rc"), repo_url, resolved_username or "-",
+            bool(resolved_password),
+            (result.get("output") or "")[:800],
+        )
         if progress_cb:
             try:
                 progress_cb(
@@ -146,6 +334,17 @@ def ensure_source_checkout(
             "revision": revision,
             "output": result.get("output", ""),
         }
+    # Write the completion sentinel so subsequent sync calls can safely treat
+    # this directory as cached. Best-effort — a failed write only means we'll
+    # re-checkout on the next sync, which is still correct behaviour.
+    try:
+        source_dir.mkdir(parents=True, exist_ok=True)
+        _source_sentinel(source_dir).write_text(
+            f"scm={scm}\nrevision={revision}\nbranch={branch}\n",
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
     if progress_cb:
         try:
             progress_cb("scm_done", {"path": str(source_dir)})
@@ -183,7 +382,12 @@ def get_build_info(
     }
 
 
-def sync_local_reports(*, job_url: str, local_reports_dir: Path) -> Tuple[Dict[str, Any], Path, Path, List[str], List[Dict[str, Any]]]:
+def sync_local_reports(
+    *,
+    job_url: str,
+    local_reports_dir: Path,
+    progress_cb: Optional[Callable[[str, Dict[str, Any]], None]] = None,
+) -> Tuple[Dict[str, Any], Path, Path, List[str], List[Dict[str, Any]]]:
     reports_dir = Path(local_reports_dir).resolve()
     build_root = reports_dir.parent
     build_info: Dict[str, Any] = {
@@ -214,6 +418,9 @@ def sync_jenkins_artifacts(
     progress_cb: Optional[Callable[[str, Dict[str, Any]], None]] = None,
     scan_mode: Optional[str] = None,
     scan_max_files: Optional[int] = None,
+    scm_username: str = "",
+    scm_id: str = "",
+    force: bool = False,
 ) -> Tuple[Dict[str, Any], Path, Path, List[str], List[Dict[str, Any]]]:
     client = JenkinsClient(
         job_url=_norm_job_url(job_url),
@@ -231,6 +438,10 @@ def sync_jenkins_artifacts(
             pass
     if getattr(build, "number", -1) < 0:
         raise RuntimeError("빌드 정보 조회 실패")
+
+    # Ensure the full cache directory tree exists — first-time sync for new projects
+    Path(cache_root).mkdir(parents=True, exist_ok=True)
+    (Path(cache_root) / "jenkins").mkdir(parents=True, exist_ok=True)
 
     job_slug = _job_slug(job_url)
     build_root = (Path(cache_root) / "jenkins" / job_slug / f"build_{build.number}").resolve()
@@ -288,11 +499,14 @@ def sync_jenkins_artifacts(
     except Exception:
         pass
 
-    ensure_source_checkout(
+    checkout_result = ensure_source_checkout(
         build_root=build_root,
         client=client,
         build_selector=build_selector,
         progress_cb=progress_cb,
+        scm_username=scm_username,
+        scm_id=scm_id,
+        force=force,
     )
 
     reports_dir = _detect_reports_dir(build_root)
@@ -304,6 +518,17 @@ def sync_jenkins_artifacts(
         "timestamp": getattr(build, "timestamp", None),
         "url": getattr(build, "url", None),
         "job_url": job_url,
+        # Surface SCM checkout outcome so callers can detect a partial sync
+        # (artifacts downloaded, but source_dir empty) without having to scan
+        # the filesystem. Empty `error` = success.
+        "checkout": {
+            "ok": bool(checkout_result.get("ok")),
+            "scm": checkout_result.get("scm", ""),
+            "error": checkout_result.get("error", ""),
+            "path": checkout_result.get("path", ""),
+            "revision": checkout_result.get("revision", ""),
+            "branch": checkout_result.get("branch", ""),
+        },
     }
 
     if progress_cb:

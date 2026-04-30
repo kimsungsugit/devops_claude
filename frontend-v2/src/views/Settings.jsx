@@ -1,6 +1,9 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useJenkinsCfg, useToast } from '../App.jsx';
-import { post, api } from '../api.js';
+import {
+  post, api, saveServerJenkinsConfig,
+  fetchServerUdsTemplate, saveServerUdsTemplate, uploadServerUdsTemplate,
+} from '../api.js';
 
 export default function Settings() {
   return (
@@ -20,6 +23,7 @@ function JenkinsSection() {
   const { cfg, update } = useJenkinsCfg();
   const toast = useToast();
   const [testing, setTesting] = useState(false);
+  const [savingServer, setSavingServer] = useState(false);
 
   const testConnection = async () => {
     if (!cfg.baseUrl || !cfg.username || !cfg.token) {
@@ -41,6 +45,25 @@ function JenkinsSection() {
       toast('error', `연결 실패: ${e.message}`);
     } finally {
       setTesting(false);
+    }
+  };
+
+  const saveToServer = async () => {
+    if (!cfg.baseUrl || !cfg.username || !cfg.token) {
+      toast('warning', '저장할 값을 모두 입력하세요 (URL, 사용자명, 토큰).');
+      return;
+    }
+    if (!window.confirm('현재 Jenkins 설정을 서버에 저장하시겠습니까?\n모든 사용자가 이 설정을 사용하게 됩니다.')) {
+      return;
+    }
+    setSavingServer(true);
+    try {
+      await saveServerJenkinsConfig(cfg);
+      toast('success', '서버에 저장됐습니다. 모든 사용자가 이 설정을 사용합니다.');
+    } catch (e) {
+      toast('error', `서버 저장 실패: ${e.message}`);
+    } finally {
+      setSavingServer(false);
     }
   };
 
@@ -102,9 +125,14 @@ function JenkinsSection() {
           />
         </div>
       </div>
-      <button onClick={testConnection} disabled={testing}>
-        {testing ? <><span className="spinner" /> 연결 테스트 중...</> : '연결 테스트'}
-      </button>
+      <div style={{ display: 'flex', gap: 'var(--sp-2)', flexWrap: 'wrap', marginTop: 'var(--sp-2)' }}>
+        <button onClick={testConnection} disabled={testing}>
+          {testing ? <><span className="spinner" /> 연결 테스트 중...</> : '연결 테스트'}
+        </button>
+        <button className="btn-primary" onClick={saveToServer} disabled={savingServer} title="모든 사용자가 공유할 Jenkins 설정을 서버에 저장합니다">
+          {savingServer ? <><span className="spinner" /> 저장 중...</> : '서버에 저장 (모든 사용자 공유)'}
+        </button>
+      </div>
     </div>
   );
 }
@@ -520,6 +548,7 @@ function AdminSection() {
               관리자 모드 해제
             </button>
           </div>
+          <UdsTemplateAdminBlock />
         </div>
       ) : (
         <div className="field-group">
@@ -549,6 +578,120 @@ function AdminSection() {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+/* ── UDS 템플릿 서버 설정 (관리자 전용) ──────────────────────────── */
+function UdsTemplateAdminBlock() {
+  const toast = useToast();
+  const [info, setInfo] = useState(null);
+  const [pathInput, setPathInput] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [uploading, setUploading] = useState(false);
+
+  const reload = useCallback(async () => {
+    const data = await fetchServerUdsTemplate();
+    setInfo(data);
+    setPathInput(data?.template_path || '');
+  }, []);
+
+  useEffect(() => { reload(); }, [reload]);
+
+  const savePath = async () => {
+    setSaving(true);
+    try {
+      const res = await saveServerUdsTemplate(pathInput.trim());
+      toast('success', `저장됨: ${res.effective_path || '(기본값)'}`);
+      await reload();
+    } catch (e) {
+      toast('error', `저장 실패: ${e.message}`);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const clearPath = async () => {
+    if (!window.confirm('서버 저장 경로를 지워 환경변수 기본값으로 되돌립니다. 진행할까요?')) return;
+    setSaving(true);
+    try {
+      await saveServerUdsTemplate('');
+      setPathInput('');
+      toast('info', '경로가 초기화되어 환경 기본값을 사용합니다.');
+      await reload();
+    } catch (e) {
+      toast('error', `초기화 실패: ${e.message}`);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const onUpload = async (ev) => {
+    const file = ev.target.files?.[0];
+    ev.target.value = '';
+    if (!file) return;
+    if (!file.name.toLowerCase().endsWith('.docx')) {
+      toast('warning', '.docx 파일만 업로드할 수 있습니다.');
+      return;
+    }
+    setUploading(true);
+    try {
+      const res = await uploadServerUdsTemplate(file);
+      toast('success', `업로드 완료: ${res.template_path}`);
+      await reload();
+    } catch (e) {
+      toast('error', `업로드 실패: ${e.message}`);
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  const effective = info?.effective_path || '';
+  const saved = info?.template_path || '';
+  const fallback = info?.default_path || '';
+
+  return (
+    <div className="field" style={{ marginTop: 12, borderTop: '1px solid var(--border)', paddingTop: 12 }}>
+      <div style={{ fontWeight: 600, marginBottom: 6 }}>📄 UDS docx 템플릿 (서버 공통)</div>
+      <div className="text-sm text-muted" style={{ marginBottom: 8 }}>
+        UDS 생성 시 사용할 기본 템플릿입니다. 프론트엔드에서 요청할 때 별도 경로를 지정하지 않으면 이 값이 사용됩니다.
+      </div>
+      <div style={{ display: 'grid', gap: 4, fontSize: 12, marginBottom: 10 }}>
+        <div>현재 사용 경로: <code>{effective || '(없음)'}</code> {info?.exists ? <span className="pill pill-success" style={{ fontSize: 10 }}>OK</span> : <span className="pill pill-warning" style={{ fontSize: 10 }}>파일 없음</span>}</div>
+        <div>서버 저장 경로: <code>{saved || '(비어있음 → 환경변수 사용)'}</code></div>
+        <div>환경 기본값: <code>{fallback || '(미설정)'}</code></div>
+        {info?.last_saved_at && (
+          <div className="text-muted">마지막 변경: {info.last_saved_at} — {info.last_saved_by || 'unknown'}</div>
+        )}
+      </div>
+
+      <div className="text-sm" style={{ marginBottom: 4 }}>경로 지정 (서버 내 절대경로 또는 repo 상대경로)</div>
+      <div style={{ display: 'flex', gap: 6, marginBottom: 10 }}>
+        <input
+          type="text"
+          value={pathInput}
+          onChange={(e) => setPathInput(e.target.value)}
+          placeholder="docs/(HDPDM01_SUDS)_template_tokenized.docx"
+          style={{ flex: 1, minWidth: 0 }}
+        />
+        <button className="btn-primary btn-sm" onClick={savePath} disabled={saving}>
+          {saving ? '저장 중…' : '저장'}
+        </button>
+        <button className="btn-sm" onClick={clearPath} disabled={saving} title="서버 경로 지움 → 환경 기본값 사용">
+          초기화
+        </button>
+      </div>
+
+      <div className="text-sm" style={{ marginBottom: 4 }}>또는 docx 파일 업로드</div>
+      <div className="text-sm text-muted" style={{ marginBottom: 6 }}>
+        ⚠ 업로드 즉시 서버 공통 기본 템플릿으로 적용됩니다. 동일한 파일명이 이미 있으면 덮어쓰기됩니다.
+      </div>
+      <div>
+        <label className="btn-sm" style={{ cursor: uploading ? 'wait' : 'pointer', display: 'inline-block' }}>
+          {uploading ? '업로드 중…' : '파일 선택 (.docx)'}
+          <input type="file" accept=".docx" onChange={onUpload} disabled={uploading} style={{ display: 'none' }} />
+        </label>
+      </div>
     </div>
   );
 }

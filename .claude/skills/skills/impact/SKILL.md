@@ -17,14 +17,14 @@ $ARGUMENTS 에 분석 대상(SCM ID, 빌드번호, 리비전 등)이 들어옵�
 
 2. **Impact 분석 트리거**
    ```bash
-   curl -s -X POST ${BACKEND_URL:-http://127.0.0.1:8000}/api/jenkins/impact/trigger-async \
+   curl -s -X POST ${BACKEND_URL:-http://127.0.0.1:9000}/api/jenkins/impact/trigger-async \
      -H "Content-Type: application/json" \
      -d '{"scm_id":"<id>","build_number":<n>,"targets":["uds","suts","sits","sts","sds"]}'
    ```
 
 3. **진행률 모니터링**
    ```bash
-   curl -s "${BACKEND_URL:-http://127.0.0.1:8000}/api/scm/impact-job/<job_id>"
+   curl -s "${BACKEND_URL:-http://127.0.0.1:9000}/api/scm/impact-job/<job_id>"
    ```
 
 4. **결과 분석**
