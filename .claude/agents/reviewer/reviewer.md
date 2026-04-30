@@ -174,7 +174,7 @@ git diff --stat HEAD~1
 # 코드 리뷰 결과
 
 ## 요약
-- review_depth: light / standard / deep
+- review_depth: meta / light / standard / deep
 - 심각도: Critical / Warning / Info 개수
 - ISO 26262 관련: 해당 / 비해당
 - ASIL 등급 영향: 해당 등급 또는 N/A
