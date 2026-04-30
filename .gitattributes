@@ -32,9 +32,9 @@ Dockerfile*    text eol=lf
 .dockerignore  text eol=lf
 .gitignore     text eol=lf
 
-# Test / data fixtures
-*.csv text
-*.tsv text
+# Test / data fixtures — LF for cross-platform diff stability
+*.csv text eol=lf
+*.tsv text eol=lf
 
 # Windows scripts must keep CRLF — cmd.exe and some PowerShell hosts
 # choke on LF-only line endings.

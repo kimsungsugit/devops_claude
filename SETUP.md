@@ -25,8 +25,13 @@ cd Release_claude
 py -3.12 -m venv .venv      # Windows
 # python3.12 -m venv .venv  # Linux/Mac
 
+# Windows
 .venv/Scripts/python.exe -m pip install --upgrade pip
 .venv/Scripts/python.exe -m pip install -r requirements.txt -r backend/requirements.txt
+
+# Linux/Mac
+# .venv/bin/python -m pip install --upgrade pip
+# .venv/bin/python -m pip install -r requirements.txt -r backend/requirements.txt
 ```
 
 ## 3. Frontend deps
@@ -64,15 +69,16 @@ cd frontend-v2 && npm run dev   # http://localhost:5174
 ## 검증
 
 ```bash
-# Backend pytest
+# Backend pytest (Windows; Linux/Mac은 .venv/bin/python)
 .venv/Scripts/python.exe -m pytest tests/unit/ -q     # 1379 tests
 
 # Frontend vitest
 cd frontend-v2 && npx vitest run                       # 186 tests
 
-# Pre-commit hook 검증 (드라이 런)
-echo "noop" >> README.md && git add README.md && git commit -m "test"   # hook이 pytest 자동 실행
-git reset --soft HEAD~1 && git restore --staged README.md                # 롤백
+# Pre-commit hook 검증 (안전 — empty commit 사용)
+git commit --allow-empty -m "test hook"
+# hook이 통과하면 커밋이 생성됨. 검증 후 즉시 롤백:
+git reset --hard HEAD~1
 ```
 
 ## 자주 발생하는 문제

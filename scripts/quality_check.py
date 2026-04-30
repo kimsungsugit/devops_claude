@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import py_compile
 import shutil
 import subprocess
 import sys
@@ -88,7 +89,6 @@ for f in py_files:
     if not fp.exists():
         continue
     try:
-        import py_compile
         py_compile.compile(str(fp), doraise=True)
     except py_compile.PyCompileError as e:
         _add("Critical", "syntax", f, str(e))
@@ -241,8 +241,22 @@ else:
 
     msg = " | ".join(result_lines[:2])
     detail = "\n".join(result_lines)
+
+    # Active self-review reminder (CLAUDE.md L106 능동 보고 필수).
+    # Triggered when there are pending changes (we already early-exit when none).
+    # The model sees this as a system reminder and must include the 4-section
+    # active report (변경 요약 / X1~X8 mini-checklist / 잠재 문제 / 결론) in the
+    # NEXT user-facing response covering this change set.
+    reminder = (
+        "⚠️ 능동 보고 필수 (CLAUDE.md L106): 다음 응답에 (1) 변경 요약 표 "
+        "(2) X1~X8 mini-checklist 표 (3) 잠재 문제 표 (있을 때) "
+        "(4) 결론 1줄을 자동 포함하라. 변경 파일 수: "
+        f"{summary.get('changed_files','?')} (py {summary.get('changed_py','?')}, "
+        f"jsx {summary.get('changed_jsx','?')})."
+    )
+
     print(json.dumps({
-        "systemMessage": f"[Quality Check] {msg}",
+        "systemMessage": f"[Quality Check] {msg}\n{reminder}",
         "detail": detail,
         "structured": structured,
     }, ensure_ascii=False))
