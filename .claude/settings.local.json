@@ -34,7 +34,9 @@
       "Bash(svn checkout *)",
       "Bash(ps -W)",
       "Bash(findstr \"9000\")",
-      "Bash(C:/msys64/mingw64/bin/python.exe *)"
+      "Bash(C:/msys64/mingw64/bin/python.exe *)",
+      "Bash(mkdir -p D:/Project/devops/Release_claude/.githooks D:/Project/devops/Release_claude/scripts)",
+      "Bash(cp D:/Project/devops/Release_claude/.git/hooks/pre-commit D:/Project/devops/Release_claude/.githooks/pre-commit)"
     ]
   }
 }

@@ -6,6 +6,9 @@
 *.sh        text eol=lf
 .githooks/* text eol=lf
 
+# This file itself must be LF — git reads it before applying eol=lf to others.
+.gitattributes text eol=lf
+
 # Python: keep LF for cross-platform consistency (PEP 8, ruff/black expectation)
 *.py text eol=lf
 
@@ -18,6 +21,16 @@
 *.css text eol=lf
 *.html text eol=lf
 *.md  text eol=lf
+
+# Config / IaC files (workflows, Dockerfile, etc.)
+*.toml text eol=lf
+*.yml  text eol=lf
+*.yaml text eol=lf
+*.cfg  text eol=lf
+*.ini  text eol=lf
+Dockerfile  text eol=lf
+.dockerignore text eol=lf
+.gitignore    text eol=lf
 
 # Binary
 *.png  binary
