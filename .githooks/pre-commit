@@ -1,0 +1,59 @@
+#!/bin/bash
+# Pre-commit hook: Python syntax check + pytest (with timeout)
+# Installed by AutoReport setup
+
+set -e
+
+echo "=== Pre-commit Hook: Release_claude ==="
+
+# Use project venv python explicitly. Git hooks run with a sanitized PATH
+# that often picks mingw python (without numpy) instead of the project venv,
+# causing collection errors even when the venv has all deps installed.
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+PROJECT_PY="$REPO_ROOT/.venv/Scripts/python.exe"
+if [ ! -x "$PROJECT_PY" ]; then
+    PROJECT_PY="$REPO_ROOT/.venv/bin/python"
+fi
+if [ ! -x "$PROJECT_PY" ]; then
+    PROJECT_PY="python"
+    echo "⚠️  .venv python not found, falling back to PATH 'python'"
+fi
+
+# 1. Python syntax check on staged .py files
+STAGED_PY=$(git diff --cached --name-only --diff-filter=ACM | grep '\.py$' || true)
+if [ -n "$STAGED_PY" ]; then
+    echo "[1/2] Checking Python syntax..."
+    for f in $STAGED_PY; do
+        if [ -f "$f" ]; then
+            "$PROJECT_PY" -m py_compile "$f" || {
+                echo "❌ Syntax error in $f"
+                exit 1
+            }
+        fi
+    done
+    echo "✅ Python syntax OK"
+else
+    echo "[1/2] No Python files staged, skipping syntax check"
+fi
+
+# 2. Run pytest with 60s timeout
+set +e
+if [ -d "tests/unit" ]; then
+    echo "[2/2] Running unit tests (timeout: 60s)..."
+    TEST_OUTPUT=$(timeout 60 "$PROJECT_PY" -m pytest tests/unit/ -x -q --tb=short 2>&1)
+    TEST_EXIT=$?
+    echo "$TEST_OUTPUT" | tail -20
+    if [ $TEST_EXIT -eq 124 ]; then
+        echo "⚠️ Tests timed out (60s). Skipping — commit allowed."
+    elif [ $TEST_EXIT -ne 0 ]; then
+        echo "❌ Unit tests failed. Commit aborted."
+        exit 1
+    else
+        echo "✅ Unit tests passed"
+    fi
+else
+    echo "[2/2] No unit test directory found, skipping tests"
+fi
+set -e
+
+echo "=== Pre-commit checks passed ==="

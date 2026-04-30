@@ -14,6 +14,9 @@
  */
 import { render, screen } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { resolve, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 // ── Context mock ──────────────────────────────────────────────────────
 const mockToast = vi.fn();
@@ -144,5 +147,37 @@ describe('Dashboard', () => {
 
     // Assert
     expect(screen.getByText(/선택된 프로젝트: test-job/)).toBeInTheDocument();
+  });
+});
+
+/* D1 회귀 방지 (정적 검증)
+ * runAnalysis 는 useCallback이고 본문에서 manualScmId를 참조한다.
+ * deps 배열에서 manualScmId가 빠지면 stale closure 발생 → 사용자가 SCM 드롭다운에서
+ * manual 선택해도 첫 mount 시점의 값으로 고정됨 (ASIL D source 매칭 영향).
+ *
+ * useCallback의 deps를 런타임에 외부에서 inspect할 방법이 없으므로 (React가
+ * 노출하지 않음) 소스 파일 자체를 정적으로 grep해서 회귀를 막는다. ESLint
+ * react-hooks/exhaustive-deps 룰을 도입하면 이 테스트는 대체 가능. */
+describe('Dashboard (정적 회귀 방지)', () => {
+  const __filename = fileURLToPath(import.meta.url);
+  const __dirname = dirname(__filename);
+  const dashboardSrc = readFileSync(
+    resolve(__dirname, '../views/Dashboard.jsx'),
+    'utf8',
+  );
+
+  it('runAnalysis useCallback deps에 manualScmId가 포함되어 있다 (D1)', () => {
+    const m = dashboardSrc.match(
+      /const runAnalysis = useCallback\(async [\s\S]*?\n\s*\}, \[([^\]]*)\]\);/,
+    );
+    expect(m, 'runAnalysis useCallback 블록을 찾지 못함').not.toBeNull();
+    const deps = m[1];
+    expect(deps, `runAnalysis deps에 manualScmId 누락 — D1 stale closure 회귀 위험. 현재 deps: [${deps}]`).toMatch(/\bmanualScmId\b/);
+  });
+
+  it('runAnalysis 본문에서 manualScmId를 참조한다 (sanity check)', () => {
+    /* deps 검증이 의미를 가지려면 본문이 실제로 manualScmId를 사용해야 한다.
+     * 본문에서 사라졌는데 deps에만 남아있는 dead reference는 별개 문제. */
+    expect(dashboardSrc).toMatch(/const runAnalysis = useCallback[\s\S]*?\bmanualScmId\b[\s\S]*?\}, \[/);
   });
 });

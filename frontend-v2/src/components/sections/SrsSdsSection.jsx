@@ -583,10 +583,12 @@ function TraceMatrix({ matrix }) {
   }, []);
 
   // Extract unique requirement types (SwRS, SwTR, SyRS, etc.)
+  // _rowReqId returns String(id).trim() — protects against numeric ids (e.g. r.id=42)
+  // that would crash on .match/.toUpperCase if used directly.
   const reqTypes = useMemo(() => {
     const types = new Set();
     for (const r of rows) {
-      const id = r.requirement_id ?? r.req_id ?? r.id ?? '';
+      const id = _rowReqId(r);
       const m = id.match(/^(Sw[A-Z]{1,4}|Sy[A-Z]{1,4})/i);
       if (m) types.add(m[1].toUpperCase());
     }
@@ -643,7 +645,7 @@ function TraceMatrix({ matrix }) {
     // Requirement type filter
     if (reqTypeFilter !== 'all') {
       result = result.filter(r => {
-        const id = (r.requirement_id ?? r.req_id ?? r.id ?? '').toUpperCase();
+        const id = _rowReqId(r).toUpperCase();
         return id.startsWith(reqTypeFilter);
       });
     }
@@ -661,7 +663,7 @@ function TraceMatrix({ matrix }) {
     if (searchTerm.trim()) {
       const q = searchTerm.trim().toLowerCase();
       result = result.filter(r =>
-        (r.requirement_id ?? r.req_id ?? r.id ?? '').toLowerCase().includes(q) ||
+        _rowReqId(r).toLowerCase().includes(q) ||
         (r.source_ids ?? []).join(' ').toLowerCase().includes(q) ||
         (r.test_ids ?? []).join(' ').toLowerCase().includes(q)
       );
@@ -672,8 +674,8 @@ function TraceMatrix({ matrix }) {
       result = [...result].sort((a, b) => {
         let va, vb;
         if (sortKey === 'req_id') {
-          va = a.requirement_id ?? a.req_id ?? a.id ?? '';
-          vb = b.requirement_id ?? b.req_id ?? b.id ?? '';
+          va = _rowReqId(a);
+          vb = _rowReqId(b);
           return sortAsc ? va.localeCompare(vb) : vb.localeCompare(va);
         }
         if (sortKey === 'func_count') {
