@@ -78,6 +78,12 @@
             "command": "[ -f .env ] || ([ -f .env.example ] && cp .env.example .env && echo '{\"systemMessage\":\".env created from .env.example\"}') || true",
             "timeout": 5,
             "statusMessage": "Checking .env..."
+          },
+          {
+            "type": "command",
+            "command": "[ \"$(git config core.hooksPath 2>/dev/null)\" = \".githooks\" ] || ([ -f scripts/install_git_hooks.sh ] && bash scripts/install_git_hooks.sh >/dev/null 2>&1 && echo '{\"systemMessage\":\"git hooks activated via scripts/install_git_hooks.sh\"}') || true",
+            "timeout": 10,
+            "statusMessage": "Checking git hooks..."
           }
         ]
       }

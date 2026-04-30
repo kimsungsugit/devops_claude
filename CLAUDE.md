@@ -101,6 +101,7 @@ ASIL 등급은 다음 순서로 판별한다:
 - 발견된 Critical / Warning / Info를 표로 즉시 보고
 - X1~X8 점검 결과는 매 reviewer 호출의 출력에 표 형태로 **반드시** 포함
 - Critical은 사용자 확인 후 자동 수정 시도, Warning/Info는 보고만
+- **능동 보고 (필수)**: 사용자가 "문제점은 없니?"를 묻기 전에 **매 commit 직전** 응답에 (1) 변경 요약 표, (2) X1~X8 mini-checklist 표, (3) 잠재 문제점 표(있으면), (4) 결론 1줄을 자동 포함한다. 이 패턴은 `feedback_critical_review_style.md`의 사용자 합의 사항.
 - 검토 결과 "이상 없음"이면 한 줄로 표시 후 마무리
 
 **reviewer 호출 실패 (403 등) 시 또는 light depth 시 메인 에이전트 미니 체크리스트**:
