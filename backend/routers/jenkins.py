@@ -13,6 +13,7 @@ import time
 import asyncio
 import uuid
 from pathlib import Path
+from urllib.parse import urlparse, unquote
 
 from backend.user_context import wrap_with_user
 
@@ -48,6 +49,7 @@ from backend.services.jenkins_client import JenkinsClient
 from backend.services.jenkins_service import (
     get_build_info,
     list_builds,
+    list_cached_builds,
     list_jobs,
     ensure_source_checkout,
     sync_jenkins_artifacts,
@@ -60,10 +62,17 @@ from backend.services.report_parsers import (
     write_report_index,
     build_report_comparisons,
 )
-from backend.services.paths import is_under_any
+from backend.services.paths import is_under_any, safe_resolve_under
+from backend.services.assistant_service import read_report_bundle
+from backend.services.files import tail_text, read_csv_rows, list_log_candidates
+from backend.services.local_service import run_svn, svn_info_url
 from report_generator import (
     _build_req_map_from_doc_paths,
     enrich_function_details_with_docs,
+    generate_called_calling_accuracy_report,
+    generate_swcom_context_report,
+    generate_swcom_context_diff_report,
+    generate_asil_related_confidence_report,
     generate_uds_source_sections,
     generate_uds_requirements_from_docs,
     generate_uds_validation_report,

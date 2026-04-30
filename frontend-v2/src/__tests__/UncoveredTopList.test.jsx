@@ -60,6 +60,40 @@ describe('UncoveredTopList', () => {
     expect(onPick).toHaveBeenCalledWith('REQ-42');
   });
 
+  /* D3 회귀 방지: backend가 numeric id (예: r.id = 42)를 반환할 때
+   * _rowReqId가 String 변환을 거쳐야 matrix table reqId(L1006)와 타입 일치.
+   * 통일 안 되면 expandedReqId('42') === reqId(42)가 false → drill-down dead click.
+   * ASIL D 추적성에 직접 영향. */
+  it('numeric id row를 String으로 변환하여 표시·전달한다', () => {
+    const onPick = vi.fn();
+    const rows = [{
+      id: 42,
+      sds_components: [],
+      source_ids: [],
+      tests: [],
+    }];
+    render(<UncoveredTopList rows={rows} onPick={onPick} />);
+    expect(screen.getByText('42')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /42/ }));
+    expect(onPick).toHaveBeenCalledWith('42');
+    expect(typeof onPick.mock.calls[0][0]).toBe('string');
+  });
+
+  it('빈 requirement_id이지만 유효한 id가 있을 때 표시 가능 여부', () => {
+    const rows = [{
+      requirement_id: '',
+      id: 'REQ-77',
+      sds_components: [],
+      source_ids: [],
+      tests: [],
+    }];
+    render(<UncoveredTopList rows={rows} onPick={() => {}} />);
+    /* 현재 _rowReqId 구현은 nullish coalescing(`??`)이라 빈 string은 falsy이지만
+     * nullish 아님 → 빈 requirement_id가 우선되어 anonymous 처리됨.
+     * 이 동작이 의도라면 "anonymous" 카운트로만 보여야 함. */
+    expect(screen.queryByText('REQ-77')).toBeNull();
+  });
+
   it('누락 사유를 배지에 표시한다', () => {
     const rows = [
       mkRow('R_NONE'),                     // 설계·테스트 없음
