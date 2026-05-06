@@ -5,12 +5,14 @@ Shared helper functions live in backend/helpers/ package.
 
 Deployment notes:
   Development : uvicorn backend.main:app --host 127.0.0.1 --port 9000 --reload
-  Production  : uvicorn backend.main:app --host 0.0.0.0 --port 9000 --workers 2
+  Production  : uvicorn backend.main:app --host 0.0.0.0 --port 9000 --workers 1
 
-  With --workers > 1, in-memory progress state (backend/state.py) is NOT shared
-  across worker processes. Long-running jobs (UDS/STS/SUTS) use generate-async +
-  progress polling endpoints that run work in daemon threads, so a single worker
-  is sufficient as long as these async endpoints are used instead of the sync ones.
+  IMPORTANT: --workers MUST be 1.
+  In-memory state (backend/state.py, file_resolver _resolver / _gate_cache,
+  rate limiter _rate_store) is NOT shared across worker processes. Cloudium
+  모드에서는 worker A=cloudium / worker B=local 같은 split-brain이 발생해
+  read-only 보장이 깨진다. Long-running jobs도 generate-async + progress
+  polling이 daemon thread로 처리되므로 단일 worker로 충분.
 """
 from __future__ import annotations
 
@@ -93,6 +95,18 @@ async def _lifespan(app_instance):
     if resolver.mode == "cloudium":
         cfg = resolver.get_config()
         _api_logger.info("  Allowed paths: %s", cfg.get("allowed_prefixes", []))
+        # D2: multi-worker 사용 시 _resolver/_gate_cache 모듈 글로벌 비공유로
+        # split-brain 발생 가능 — 시작 시 명시 경고.
+        try:
+            workers_env = int(os.environ.get("WEB_CONCURRENCY", "1"))
+        except ValueError:
+            workers_env = 1
+        if workers_env > 1:
+            _api_logger.error(
+                "  ⚠️  Cloudium 모드 + WEB_CONCURRENCY=%d (>1) 감지: "
+                "worker 간 _resolver/_gate_cache 비공유로 read-only 보장이 "
+                "깨질 수 있음. --workers 1 사용을 강력 권장.", workers_env,
+            )
 
     yield  # 서버 실행 중
     _api_logger.info("DevOps Release Server shutting down")
@@ -108,10 +122,19 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-from backend.middleware import RateLimitMiddleware, RequestLoggingMiddleware, SecurityHeadersMiddleware  # noqa: E402
+from backend.middleware import (  # noqa: E402
+    CloudiumGateMiddleware,
+    RateLimitMiddleware,
+    RequestLoggingMiddleware,
+    SecurityHeadersMiddleware,
+)
 app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(RequestLoggingMiddleware)
 app.add_middleware(RateLimitMiddleware)
+# CloudiumGateMiddleware는 라우터 진입 직전에 path 검사 — UserContext보다 안쪽
+# (즉, add 순서상 마지막에 추가하면 dispatch 가장 바깥으로 옴; 본 미들웨어는
+# 사용자 식별 후 path 검사하므로 UserContext와 함께 inner layer 배치).
+app.add_middleware(CloudiumGateMiddleware)
 
 from backend.user_context import UserContextMiddleware  # noqa: E402
 app.add_middleware(UserContextMiddleware)
@@ -121,6 +144,14 @@ app.add_middleware(UserContextMiddleware)
 from backend.error_handler import global_exception_handler, http_exception_handler  # noqa: E402
 app.add_exception_handler(Exception, global_exception_handler)
 app.add_exception_handler(HTTPException, http_exception_handler)
+
+# **W-N1 fix**: cloudium 정책 위반 응답을 미들웨어와 동일 shape로 통일
+from backend.middleware import CloudiumBlockedException, _cloudium_blocked_response  # noqa: E402
+
+async def _cloudium_blocked_exception_handler(request, exc: CloudiumBlockedException):
+    return _cloudium_blocked_response(exc.detail)
+
+app.add_exception_handler(CloudiumBlockedException, _cloudium_blocked_exception_handler)
 
 
 # ---------------------------------------------------------------------------
