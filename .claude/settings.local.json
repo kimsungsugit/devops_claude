@@ -34,7 +34,27 @@
       "Bash(svn checkout *)",
       "Bash(ps -W)",
       "Bash(findstr \"9000\")",
-      "Bash(C:/msys64/mingw64/bin/python.exe *)"
+      "Bash(C:/msys64/mingw64/bin/python.exe *)",
+      "Bash(.venv/Scripts/python.exe -m pytest tests/unit/test_file_resolver_cloudium.py -v --tb=short)",
+      "Bash(.venv/Scripts/python.exe -m pytest tests/unit/test_routers.py -v --tb=short -k \"cloudium or file_mode or file-mode\")",
+      "Bash(.venv/Scripts/python.exe -m pytest tests/unit/ -q --tb=line --no-header -x)",
+      "Bash(.venv/Scripts/python.exe -m pytest tests/unit/ -q --tb=line --no-header)",
+      "Bash(.venv/Scripts/python.exe -m uvicorn backend.main:app --host 127.0.0.1 --port 9000 --workers 1)",
+      "Bash(findstr \"5174\")",
+      "Bash(mkdir cloudium_worker)",
+      "Bash(ls -la cloudium_worker/)",
+      "Bash(.venv/Scripts/python.exe -m pip show pyinstaller)",
+      "Bash(.venv/Scripts/python.exe -m pip install pyinstaller)",
+      "Bash(.venv/Scripts/python.exe -m PyInstaller --onefile --name excel_rename_gui_v2 --distpath dist --workpath build/pyinstaller --specpath build/pyinstaller --console --clean cloudium_worker/dummy.py)",
+      "Bash(dist/excel_rename_gui_v2.exe --pid)",
+      "Bash(dist/excel_rename_gui_v2.exe)",
+      "Bash(.venv/Scripts/python.exe -m PyInstaller --onefile --name excel_rename_gui_v2 --distpath dist --workpath build/pyinstaller --specpath build/pyinstaller --console --clean --noconfirm cloudium_worker/dummy.py)",
+      "Bash(.venv/Scripts/python.exe -c ' *)",
+      "Bash(.venv/Scripts/python.exe -m PyInstaller --onefile --name excel_rename_gui_v2 --distpath dist --workpath build/pyinstaller --specpath build/pyinstaller --noconsole --clean --noconfirm cloudium_worker/dummy.py)",
+      "Bash(.venv/Scripts/python.exe -m PyInstaller --onefile --name excel_rename_gui_v2 --distpath dist --workpath build/pyinstaller --specpath build/pyinstaller --noconsole --clean --noconfirm cloudium_worker/worker.py)",
+      "Bash(.venv/Scripts/python.exe -m pytest tests/unit/test_file_resolver_cloudium.py -q --tb=line)",
+      "Bash(findstr \"8765\")",
+      "Bash(.venv/Scripts/python.exe -m pytest tests/unit/test_file_resolver_cloudium.py -q --tb=line --no-header)"
     ]
   }
 }

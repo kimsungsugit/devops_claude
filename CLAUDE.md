@@ -102,6 +102,7 @@ ASIL 등급은 다음 순서로 판별한다:
 - X1~X8 점검 결과는 매 reviewer 호출의 출력에 표 형태로 **반드시** 포함
 - Critical은 사용자 확인 후 자동 수정 시도, Warning/Info는 보고만
 - **능동 보고 (필수)**: 사용자가 "문제점은 없니?"를 묻기 전에 **매 commit 직전** 응답에 (1) 변경 요약 표, (2) X1~X8 mini-checklist 표, (3) 잠재 문제점 표(있으면), (4) 결론 1줄을 자동 포함한다. 이 패턴은 `feedback_critical_review_style.md`의 사용자 합의 사항.
+- **입력 표면 매트릭스 (보안 경계 변경 시 필수)**: 권한 layer / 미들웨어 / handler / resolver 변경 또는 사용자 입력 endpoint 5개+ 추가 시 능동 보고에 (5) **입력 표면 매트릭스**를 추가한다. 행=입력 채널(JSON 단일/JSON list/JSON nested/Query/Form string/multi-path string/UploadFile/SSE/WebSocket/Cookie/Header), 열=검사 layer(미들웨어/endpoint/resolver), 셀=검사됨/우회/N/A. 빈 셀 또는 "우회"는 즉시 결함. fix 후 매 라운드 메타-점검: "이 fix가 같은 패턴의 다른 입구를 노출시키는가?" → whack-a-mole 방지. 상세는 `feedback_input_surface_matrix.md`.
 - 검토 결과 "이상 없음"이면 한 줄로 표시 후 마무리
 
 **reviewer 호출 실패 (403 등) 시 또는 light depth 시 메인 에이전트 미니 체크리스트**:
