@@ -647,6 +647,8 @@ async def local_uds_generate(
     req_types: str = Form(""),
     show_mapping_evidence: bool = Form(False),
 ) -> Dict[str, Any]:
+    from backend.services.resolver_helpers import reject_upload_in_cloudium
+    reject_upload_in_cloudium(*(req_files or []), template_file, component_list)
     req_id = (request.headers.get("x-req-id") or "").strip() or f"uds-gen-{int(time.time() * 1000)}"
     _logger.info("[UDS_GENERATE][%s] start source_root=%s test_mode=%s", req_id, source_root, bool(test_mode))
     template_bytes: Optional[bytes] = None
@@ -1109,6 +1111,8 @@ async def local_uds_generate_async(
     show_mapping_evidence: bool = Form(False),
 ) -> Dict[str, Any]:
     """Non-blocking local UDS generation. Returns job_id for progress polling."""
+    from backend.services.resolver_helpers import reject_upload_in_cloudium
+    reject_upload_in_cloudium(*(req_files or []), template_file, component_list)
     # 콤마 구분 복수 경로 지원: 첫 번째 경로로 검증, 전체를 generate에 전달
     _first_root = source_root.split(",")[0].strip() if source_root else ""
     source_root_path = Path(_first_root).resolve() if _first_root else None
@@ -1846,6 +1850,8 @@ async def local_sts_generate(
 ) -> Dict[str, Any]:
     """Generate STS (Software Test Specification) Excel from SRS + source code."""
     from sts_generator import generate_sts, parse_srs_docx_tables
+    from backend.services.resolver_helpers import reject_upload_in_cloudium
+    reject_upload_in_cloudium(*(req_files or []))
 
     req_id = (request.headers.get("x-req-id") or "").strip() or f"sts-gen-{int(time.time() * 1000)}"
     _logger.info("[STS_GENERATE][%s] start source_root=%s", req_id, source_root)
@@ -2039,6 +2045,8 @@ async def local_sts_generate_stream(
     import threading
 
     from sts_generator import generate_sts
+    from backend.services.resolver_helpers import reject_upload_in_cloudium
+    reject_upload_in_cloudium(*(req_files or []))
 
     srs_docx_path: Optional[str] = None
     if srs_path:
@@ -2218,6 +2226,8 @@ async def local_sts_generate_async(
 ) -> Dict[str, Any]:
     """Non-blocking STS generation. Returns job_id for progress polling."""
     from sts_generator import generate_sts
+    from backend.services.resolver_helpers import reject_upload_in_cloudium
+    reject_upload_in_cloudium(*(req_files or []))
 
     srs_docx_path: Optional[str] = None
     if srs_path:
@@ -3773,6 +3783,8 @@ async def local_rag_ingest_files(
     chunk_overlap: Optional[int] = Form(None),
     max_chunks: Optional[int] = Form(None),
 ) -> Dict[str, Any]:
+    from backend.services.resolver_helpers import reject_upload_in_cloudium
+    reject_upload_in_cloudium(*(files or []))
     report_dir = str(report_dir or getattr(config, "DEFAULT_REPORT_DIR", "reports"))
     report_path = (repo_root / report_dir).resolve()
     report_path.mkdir(parents=True, exist_ok=True)

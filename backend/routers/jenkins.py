@@ -1059,6 +1059,8 @@ async def jenkins_uds_template_upload(
     cache_root: str = Form(""),
     build_selector: str = Form("lastSuccessfulBuild"),
 ) -> Dict[str, Any]:
+    from backend.services.resolver_helpers import reject_upload_in_cloudium
+    reject_upload_in_cloudium(file)
     if not file.filename:
         raise HTTPException(status_code=400, detail="template filename required")
     job_slug = _job_slug(job_url)
@@ -1094,6 +1096,8 @@ async def jenkins_uds_generate(
     req_types: str = Form(""),
     show_mapping_evidence: bool = Form(False),
 ) -> Dict[str, Any]:
+    from backend.services.resolver_helpers import reject_upload_in_cloudium
+    reject_upload_in_cloudium(*(req_files or []), *(logic_files or []), *(files or []), component_list)
     _first_root = source_root.split(",")[0].strip() if source_root else ""
     source_root_path = Path(_first_root).resolve() if _first_root else None
     if not source_root_path or not source_root_path.exists() or not source_root_path.is_dir():
@@ -1415,6 +1419,11 @@ async def jenkins_uds_generate_async(
     rag_top_k: Optional[int] = Form(None),
     rag_categories: str = Form(""),
 ) -> Dict[str, Any]:
+    from backend.services.resolver_helpers import reject_upload_in_cloudium
+    reject_upload_in_cloudium(
+        *(req_files or []), *(logic_files or []), *(files or []),
+        component_list, ai_example_file,
+    )
     # 콤마 구분 복수 경로 지원: 첫 번째 경로로 검증, 전체를 generate에 전달
     _first_root = source_root.split(",")[0].strip() if source_root else ""
     source_root_path = Path(_first_root).resolve() if _first_root else None
@@ -1811,6 +1820,8 @@ async def jenkins_sts_generate_async(
     max_tc_per_req: int = Form(5),
 ) -> Dict[str, Any]:
     from sts_generator import generate_sts
+    from backend.services.resolver_helpers import reject_upload_in_cloudium
+    reject_upload_in_cloudium(*(req_files or []))
 
     _first_root = source_root.split(",")[0].strip() if source_root else ""
     source_root_path = Path(_first_root).resolve() if _first_root else None
@@ -2217,6 +2228,8 @@ async def jenkins_uds_requirements_preview(
     req_paths: str = Form(""),
     source_root: str = Form(""),
 ) -> Dict[str, Any]:
+    from backend.services.resolver_helpers import reject_upload_in_cloudium
+    reject_upload_in_cloudium(*(req_files or []))
     req_texts: List[str] = []
     for f in req_files:
         if not f or not f.filename:
@@ -2502,17 +2515,27 @@ def jenkins_trace_summary(req: dict) -> Dict[str, Any]:
 @router.post("/api/jenkins/uds/extract-mapping")
 def jenkins_uds_extract_mapping(body: Dict[str, Any]) -> Dict[str, Any]:
     """UDS 문서에서 함수↔요구사항 매핑을 추출"""
+    import io
     import re as _re
+    from backend.services.file_resolver import get_resolver
+    from backend.services.resolver_helpers import enforce_resolver_access
     uds_path = str(body.get("uds_path", "")).strip()
     if not uds_path:
         raise HTTPException(status_code=400, detail="uds_path required")
-    p = Path(uds_path).expanduser().resolve()
-    if not p.exists():
-        raise HTTPException(status_code=400, detail=f"UDS 파일을 찾을 수 없습니다: {uds_path}")
+    enforce_resolver_access(uds_path)  # C3: health.py와 일관된 방어심층
+    resolver = get_resolver()
+    try:
+        if not resolver.exists(uds_path):
+            raise HTTPException(status_code=400, detail=f"UDS 파일을 찾을 수 없습니다: {uds_path}")
+    except (PermissionError, OSError) as exc:
+        raise HTTPException(status_code=403, detail=f"파일 접근 거부: {exc}")
 
     try:
         import docx as _docx
-        doc = _docx.Document(str(p))
+        data = resolver.read_bytes(uds_path)
+        doc = _docx.Document(io.BytesIO(data))
+    except (PermissionError, OSError) as exc:
+        raise HTTPException(status_code=403, detail=f"파일 접근 거부: {exc}")
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"UDS 파싱 실패: {exc}")
 
@@ -2585,20 +2608,28 @@ def _normalize_req_id(rid: str) -> str:
 @router.post("/api/jenkins/sts/extract-traceability")
 def jenkins_sts_extract_traceability(body: Dict[str, Any]) -> Dict[str, Any]:
     """STS/SUTS Excel에서 Traceability 시트의 요구사항↔TC 매핑 추출"""
+    import io
+    from backend.services.file_resolver import get_resolver
+    from backend.services.resolver_helpers import enforce_resolver_access
     file_path = str(body.get("path", "")).strip()
     doc_type = str(body.get("doc_type", "")).strip().lower()  # "sts" or "suts"
     if not file_path:
         raise HTTPException(status_code=400, detail="path required")
-    p = Path(file_path).expanduser().resolve()
-    if not p.exists():
-        raise HTTPException(status_code=400, detail=f"파일을 찾을 수 없습니다: {file_path}")
-    # Path traversal protection (same as SITS endpoint)
-    if not is_under_any(p, [repo_root, Path(file_path).parent.resolve()]):
-        raise HTTPException(status_code=403, detail="접근이 허용되지 않는 경로입니다")
+    enforce_resolver_access(file_path)  # C3: 명시 endpoint-local 검증
+    resolver = get_resolver()
+    try:
+        if not resolver.exists(file_path):
+            raise HTTPException(status_code=400, detail=f"파일을 찾을 수 없습니다: {file_path}")
+    except (PermissionError, OSError) as exc:
+        raise HTTPException(status_code=403, detail=f"파일 접근 거부: {exc}")
+    p = Path(file_path).expanduser()
 
     try:
         import openpyxl
-        wb = openpyxl.load_workbook(str(p), data_only=True)
+        data = resolver.read_bytes(file_path)
+        wb = openpyxl.load_workbook(io.BytesIO(data), data_only=True)
+    except (PermissionError, OSError) as exc:
+        raise HTTPException(status_code=403, detail=f"파일 접근 거부: {exc}")
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Excel 읽기 실패: {exc}")
 
@@ -2676,19 +2707,38 @@ def jenkins_sts_extract_traceability(body: Dict[str, Any]) -> Dict[str, Any]:
 def jenkins_sds_extract_mapping(body: Dict[str, Any]) -> Dict[str, Any]:
     """SDS 문서에서 SwCom↔요구사항 매핑 추출 (추적성 매트릭스용)"""
     import re as _re
+    import tempfile
     from report_gen.requirements import _extract_sds_partition_map, _normalize_req_id
+    from backend.services.file_resolver import get_resolver
+    from backend.services.resolver_helpers import enforce_resolver_access
 
     sds_path = str(body.get("sds_path", "")).strip()
     if not sds_path:
         raise HTTPException(status_code=400, detail="sds_path required")
-    p = Path(sds_path).expanduser().resolve()
-    if not p.exists():
-        raise HTTPException(status_code=400, detail=f"파일을 찾을 수 없습니다: {sds_path}")
-    # Path traversal protection
-    if not is_under_any(p, [repo_root, Path(sds_path).parent.resolve()]):
-        raise HTTPException(status_code=403, detail="접근이 허용되지 않는 경로입니다")
+    enforce_resolver_access(sds_path)  # C3
+    resolver = get_resolver()
+    try:
+        if not resolver.exists(sds_path):
+            raise HTTPException(status_code=400, detail=f"파일을 찾을 수 없습니다: {sds_path}")
+    except (PermissionError, OSError) as exc:
+        raise HTTPException(status_code=403, detail=f"파일 접근 거부: {exc}")
 
-    partition_map = _extract_sds_partition_map(str(p))
+    # _extract_sds_partition_map은 file path를 받음 — cloudium에서 backend가 직접 open하면
+    # 권한 없음. 임시 파일에 IPC bytes를 저장 후 helper가 그 임시 path를 사용.
+    try:
+        data = resolver.read_bytes(sds_path)
+    except (PermissionError, OSError) as exc:
+        raise HTTPException(status_code=403, detail=f"파일 접근 거부: {exc}")
+    with tempfile.NamedTemporaryFile(suffix=".docx", delete=False) as tmp:
+        tmp.write(data)
+        tmp_path = tmp.name
+    try:
+        partition_map = _extract_sds_partition_map(tmp_path)
+    finally:
+        try:
+            Path(tmp_path).unlink()
+        except OSError:
+            pass
     if not partition_map:
         return {"ok": True, "sds_pairs": [], "total_components": 0, "total_requirements": 0}
 
@@ -2727,21 +2777,28 @@ def jenkins_sds_extract_mapping(body: Dict[str, Any]) -> Dict[str, Any]:
 @router.post("/api/jenkins/sits/extract-traceability")
 def jenkins_sits_extract_traceability(body: Dict[str, Any]) -> Dict[str, Any]:
     """SITS Excel에서 TC ID↔요구사항 매핑 추출"""
+    import io
     import re as _re
+    from backend.services.file_resolver import get_resolver
+    from backend.services.resolver_helpers import enforce_resolver_access
 
     file_path = str(body.get("path", "")).strip()
     if not file_path:
         raise HTTPException(status_code=400, detail="path required")
-    p = Path(file_path).expanduser().resolve()
-    if not p.exists():
-        raise HTTPException(status_code=400, detail=f"파일을 찾을 수 없습니다: {file_path}")
-    # Path traversal protection
-    if not is_under_any(p, [repo_root, Path(file_path).parent.resolve()]):
-        raise HTTPException(status_code=403, detail="접근이 허용되지 않는 경로입니다")
+    enforce_resolver_access(file_path)  # C3: cloudium 게이트 + 화이트리스트 검증
+    resolver = get_resolver()
+    try:
+        if not resolver.exists(file_path):
+            raise HTTPException(status_code=400, detail=f"파일을 찾을 수 없습니다: {file_path}")
+    except (PermissionError, OSError) as exc:
+        raise HTTPException(status_code=403, detail=f"파일 접근 거부: {exc}")
 
     try:
         import openpyxl
-        wb = openpyxl.load_workbook(str(p), data_only=True, read_only=True)
+        data = resolver.read_bytes(file_path)
+        wb = openpyxl.load_workbook(io.BytesIO(data), data_only=True, read_only=True)
+    except (PermissionError, OSError) as exc:
+        raise HTTPException(status_code=403, detail=f"파일 접근 거부: {exc}")
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Excel 읽기 실패: {exc}")
 
