@@ -397,8 +397,12 @@ function FileModeSection() {
   const toast = useToast();
   const [config, setConfig] = useState(null);
   const [loading, setLoading] = useState(false);
+  const [picking, setPicking] = useState(false);
+  const [gateStatus, setGateStatus] = useState(null);
+  const [pickedResult, setPickedResult] = useState(null);
   const [cloudiumCfg, setCloudiumCfg] = useState({
     allowed_prefixes: '',
+    gate_process: '',
   });
 
   const loadConfig = useCallback(async () => {
@@ -408,7 +412,14 @@ function FileModeSection() {
       if (data.mode === 'cloudium') {
         setCloudiumCfg({
           allowed_prefixes: (data.allowed_prefixes || []).join(', '),
+          gate_process: data.gate_process || '',
         });
+        setGateStatus({
+          gate_process: data.gate_process || '',
+          gate_running: !!data.gate_running,
+        });
+      } else {
+        setGateStatus(null);
       }
     } catch (e) {
       console.warn('File mode config load failed:', e.message);
@@ -416,6 +427,29 @@ function FileModeSection() {
   }, []);
 
   useEffect(() => { loadConfig(); }, [loadConfig]);
+
+  // cloudium 모드일 때 게이트 프로세스 실행 상태 5초 폴링
+  useEffect(() => {
+    if (config?.mode !== 'cloudium') return;
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const data = await post('/api/file-mode/check-access', {});
+        if (cancelled) return;
+        if (typeof data?.gate_running === 'boolean') {
+          setGateStatus({
+            gate_process: data.gate_process || '',
+            gate_running: data.gate_running,
+          });
+        }
+      } catch {
+        // 무시 (다음 틱 재시도)
+      }
+    };
+    poll();
+    const id = setInterval(poll, 5000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, [config?.mode]);
 
   const switchMode = async (mode) => {
     setLoading(true);
@@ -428,6 +462,60 @@ function FileModeSection() {
       toast('error', `모드 전환 실패: ${e.message}`);
     } finally {
       setLoading(false);
+    }
+  };
+
+  // 클라우디움 모드용 — worker IPC를 통해 다이얼로그를 띄움 (worker가 권한 보유)
+  // → 클라우디움 폴더가 다이얼로그에 보임. local 모드면 backend 자체 tkinter fallback.
+  const pickAndPreview = async () => {
+    setPicking(true);
+    setPickedResult(null);
+    try {
+      // 1. cloudium이면 worker IPC, local이면 backend tkinter — 통합 진입점
+      const picked = await post('/api/file-mode/browse-file', {
+        title: 'Cloudium에서 파일 선택',
+        kind: 'file',
+      });
+      if (!picked.ok || !picked.path) {
+        if (picked.error === 'cancelled') {
+          toast('info', '파일 선택 취소됨');
+        } else {
+          toast('error', `다이얼로그 실패: ${picked.error || 'unknown'}`);
+        }
+        return;
+      }
+      const filePath = picked.path;
+
+      // 2. 부모 디렉토리 자동으로 allowed_prefixes에 추가
+      const lastSlash = Math.max(filePath.lastIndexOf('/'), filePath.lastIndexOf('\\'));
+      const parent = lastSlash >= 0 ? filePath.slice(0, lastSlash) : filePath;
+      const existing = (cloudiumCfg.allowed_prefixes || '')
+        .split(',').map(s => s.trim()).filter(Boolean);
+      let newPrefixes = cloudiumCfg.allowed_prefixes;
+      if (!existing.some(p => parent === p || parent.startsWith(p + '/') || parent.startsWith(p + '\\'))) {
+        const merged = [...existing, parent];
+        newPrefixes = merged.join(', ');
+        setCloudiumCfg(prev => ({ ...prev, allowed_prefixes: newPrefixes }));
+        await post('/api/file-mode', {
+          mode: 'cloudium',
+          allowed_prefixes: newPrefixes,
+          gate_process: cloudiumCfg.gate_process || 'excel_rename_gui_v2.exe',
+        });
+      }
+
+      // 3. preview-excel 호출 (파일 형식별 자동 판별 — 같은 endpoint가 xlsx/csv/txt 모두 처리)
+      try {
+        const data = await post('/api/preview-excel', { path: filePath, page: 0, page_size: 5 });
+        setPickedResult({ ok: true, path: filePath, parent, data });
+        toast('success', `읽기 성공: 시트 ${data.sheet_names?.length || 0}개`);
+      } catch (readErr) {
+        setPickedResult({ ok: false, path: filePath, parent, error: readErr.message });
+        toast('error', `읽기 실패: ${readErr.message.slice(0, 100)}`);
+      }
+    } catch (e) {
+      toast('error', `처리 실패: ${e.message}`);
+    } finally {
+      setPicking(false);
     }
   };
 
@@ -472,26 +560,116 @@ function FileModeSection() {
         {config?.mode === 'cloudium' && (
           <div style={{ padding: 8, background: 'var(--bg)', borderRadius: 6 }}>
             <div className="text-sm" style={{ marginBottom: 8, color: 'var(--text-muted)' }}>
-              클라우디움 모드에서는 허용된 경로만 접근 가능합니다.
+              클라우디움 모드는 <b>읽기 전용</b>이며, 게이트 프로세스가 실행 중일 때만 파일을 로드할 수 있습니다.
               로컬 경로(C:/, D:/ 등)는 차단됩니다.
             </div>
-            <div className="field">
-              <label>허용 경로 (콤마로 구분)</label>
-              <input
-                type="text"
-                value={cloudiumCfg.allowed_prefixes}
-                onChange={e => setCloudiumCfg({ allowed_prefixes: e.target.value })}
-                placeholder="//cloudium-server/project, Z:/shared"
-              />
+
+            {gateStatus && (
+              <div
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 8,
+                  padding: 8, marginBottom: 8, borderRadius: 6,
+                  background: gateStatus.gate_running ? 'rgba(34,197,94,0.12)' : 'rgba(239,68,68,0.12)',
+                  border: `1px solid ${gateStatus.gate_running ? 'rgba(34,197,94,0.4)' : 'rgba(239,68,68,0.4)'}`,
+                }}
+              >
+                <span
+                  style={{
+                    width: 10, height: 10, borderRadius: '50%',
+                    background: gateStatus.gate_running ? '#22c55e' : '#ef4444',
+                    boxShadow: gateStatus.gate_running ? '0 0 6px #22c55e' : 'none',
+                  }}
+                />
+                <div className="text-sm" style={{ flex: 1 }}>
+                  {gateStatus.gate_running ? (
+                    <>
+                      <b>게이트 실행 중</b> — <code>{gateStatus.gate_process}</code> 권한으로 파일 로드 가능
+                    </>
+                  ) : (
+                    <>
+                      <b>게이트 미실행</b> — <code>{gateStatus.gate_process || 'excel_rename_gui_v2.exe'}</code> 를 실행해야 파일을 로드할 수 있습니다
+                    </>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* 파일 찾기 — OS 다이얼로그로 선택 후 자동 prefix 등록 + read 테스트 */}
+            <div style={{
+              padding: 12, marginBottom: 8, borderRadius: 6,
+              background: 'var(--bg-elevated, rgba(59,130,246,0.06))',
+              border: '1px dashed rgba(59,130,246,0.4)',
+            }}>
+              <div className="text-sm" style={{ marginBottom: 8 }}>
+                📁 <b>클라우디움 파일 검증</b> — 다이얼로그에서 파일을 선택하면 부모 폴더가 자동으로 허용 경로에 추가되고, 읽기를 시도합니다.
+              </div>
+              <button
+                className="btn-primary"
+                onClick={pickAndPreview}
+                disabled={picking || loading}
+                style={{ width: '100%' }}
+              >
+                {picking ? '⏳ 처리 중...' : '📂 파일 찾기 + 자동 읽기 테스트'}
+              </button>
+
+              {pickedResult && (
+                <div style={{
+                  marginTop: 8, padding: 8, borderRadius: 6,
+                  background: pickedResult.ok ? 'rgba(34,197,94,0.08)' : 'rgba(239,68,68,0.08)',
+                  border: `1px solid ${pickedResult.ok ? 'rgba(34,197,94,0.4)' : 'rgba(239,68,68,0.4)'}`,
+                }}>
+                  <div className="text-sm" style={{ wordBreak: 'break-all', marginBottom: 4 }}>
+                    <b>선택 경로:</b> <code style={{ fontSize: 11 }}>{pickedResult.path}</code>
+                  </div>
+                  <div className="text-sm" style={{ wordBreak: 'break-all', marginBottom: 4, color: 'var(--text-muted)' }}>
+                    <b>등록된 부모:</b> <code style={{ fontSize: 11 }}>{pickedResult.parent}</code>
+                  </div>
+                  {pickedResult.ok ? (
+                    <div className="text-sm">
+                      ✅ <b>읽기 성공</b> — 시트 <code>{pickedResult.data?.sheet_names?.join(', ') || '(없음)'}</code> ({pickedResult.data?.sheets?.length || 0}개)
+                    </div>
+                  ) : (
+                    <div className="text-sm" style={{ color: '#dc2626' }}>
+                      ❌ <b>읽기 실패</b>: {pickedResult.error}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
-            <button
-              className="btn-primary btn-sm"
-              onClick={() => switchMode('cloudium')}
-              disabled={loading}
-              style={{ marginTop: 8 }}
-            >
-              {loading ? '저장 중...' : '저장'}
-            </button>
+
+            <details style={{ marginTop: 8 }}>
+              <summary className="text-sm" style={{ cursor: 'pointer', color: 'var(--text-muted)' }}>
+                고급 설정 (게이트 프로세스명 / 허용 경로 직접 편집)
+              </summary>
+              <div style={{ marginTop: 8 }}>
+                <div className="field">
+                  <label>게이트 프로세스명</label>
+                  <input
+                    type="text"
+                    value={cloudiumCfg.gate_process}
+                    onChange={e => setCloudiumCfg({ ...cloudiumCfg, gate_process: e.target.value })}
+                    placeholder="excel_rename_gui_v2.exe"
+                  />
+                </div>
+                <div className="field">
+                  <label>허용 경로 (콤마로 구분)</label>
+                  <input
+                    type="text"
+                    value={cloudiumCfg.allowed_prefixes}
+                    onChange={e => setCloudiumCfg({ ...cloudiumCfg, allowed_prefixes: e.target.value })}
+                    placeholder="//cloudium-server/project, Z:/shared"
+                  />
+                </div>
+                <button
+                  className="btn-primary btn-sm"
+                  onClick={() => switchMode('cloudium')}
+                  disabled={loading}
+                  style={{ marginTop: 8 }}
+                >
+                  {loading ? '저장 중...' : '수동 저장'}
+                </button>
+              </div>
+            </details>
           </div>
         )}
       </div>
