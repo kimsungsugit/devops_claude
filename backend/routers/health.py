@@ -4,14 +4,19 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 import config
 from backend.error_handler import APIError
+# C3: 공유 헬퍼로 이동 — health.py / jenkins.py 등이 동일 검증 사용 (방어 비대칭 해소)
+from backend.services.resolver_helpers import enforce_resolver_access as _enforce_resolver_access
+
+_GATE_PROCESS_PATTERN = re.compile(r"^[A-Za-z0-9_\-\.]+\.exe$")
 
 try:
     import psutil
@@ -23,6 +28,20 @@ class FileModeRequest(BaseModel):
     mode: str = "local"
     base_url: Optional[str] = None
     source_root: Optional[str] = None
+    allowed_prefixes: Optional[str] = None
+    gate_process: Optional[str] = None
+
+    @field_validator("gate_process")
+    @classmethod
+    def _validate_gate_process(cls, v: Optional[str]) -> Optional[str]:
+        if v is None or v == "":
+            return v
+        if not _GATE_PROCESS_PATTERN.match(v):
+            raise ValueError(
+                "gate_process must match ^[A-Za-z0-9_\\-\\.]+\\.exe$ "
+                "(e.g. 'excel_rename_gui_v2.exe')"
+            )
+        return v
 
 
 class PreviewExcelRequest(BaseModel):
@@ -33,6 +52,12 @@ class PreviewExcelRequest(BaseModel):
 
 class CheckAccessRequest(BaseModel):
     path: str = ""
+
+
+class BrowseFileRequest(BaseModel):
+    title: str = ""
+    initialdir: str = ""
+    kind: str = "file"  # "file" or "directory"
 
 router = APIRouter(prefix="/api", tags=["health"])
 
@@ -65,14 +90,30 @@ async def set_file_mode(body: FileModeRequest):
 
 @router.post("/preview-excel")
 async def preview_excel_file(body: PreviewExcelRequest):
-    """범용 문서 미리보기 — 로컬 경로에서 시트별 데이터 반환"""
+    """범용 문서 미리보기 — Cloudium 모드에서는 worker IPC로 read 위임.
+
+    Cloudium 모드에서는 backend python.exe가 OS open 권한이 없으므로
+    resolver.read_bytes(IPC) → BytesIO로 메모리에서 처리한다. backend가
+    직접 file system을 stat/open하면 WinError 5 (액세스 거부)가 발생.
+    """
+    import io
+    from backend.services.file_resolver import get_resolver
+
     file_path = body.path.strip()
     page = body.page
     page_size = body.page_size
     if not file_path:
         raise APIError(status_code=400, message="path required", code="MISSING_PATH")
-    p = Path(file_path).expanduser().resolve()
-    if not p.exists():
+    _enforce_resolver_access(file_path)
+
+    resolver = get_resolver()
+    # path 정규화만 (OS 호출 없음). resolver를 거쳐 stat — local은 직접, cloudium은 IPC
+    p = Path(file_path).expanduser()
+    try:
+        exists = resolver.exists(file_path)
+    except (PermissionError, OSError) as exc:
+        raise HTTPException(status_code=403, detail=f"파일 접근 거부: {exc}")
+    if not exists:
         raise HTTPException(status_code=404, detail=f"파일 없음: {file_path}")
     row_start = page * page_size
     row_end = row_start + page_size
@@ -82,7 +123,8 @@ async def preview_excel_file(body: PreviewExcelRequest):
     try:
         if ext in ('.xlsx', '.xls', '.xlsm'):
             import openpyxl
-            wb = openpyxl.load_workbook(str(p), read_only=True, data_only=True)
+            data = resolver.read_bytes(file_path)
+            wb = openpyxl.load_workbook(io.BytesIO(data), read_only=True, data_only=True)
             sheets = []
 
             for name in wb.sheetnames:
@@ -137,7 +179,8 @@ async def preview_excel_file(body: PreviewExcelRequest):
         elif ext == '.docx':
             import docx as _docx
             import re as _re
-            doc = _docx.Document(str(p))
+            data = resolver.read_bytes(file_path)
+            doc = _docx.Document(io.BytesIO(data))
 
             # Detect structured tables (UDS Function Info / SDS Component Info)
             func_tables = []
@@ -292,7 +335,7 @@ async def preview_excel_file(body: PreviewExcelRequest):
             return {"ok": True, "filename": p.name, "sheets": useful if useful else sheets[:3], "sheet_names": [s["name"] for s in (useful if useful else sheets[:3])]}
 
         elif ext == '.txt':
-            text = p.read_text(encoding='utf-8', errors='replace')
+            text = resolver.read_text(file_path, encoding='utf-8')
             lines = text.splitlines()[:200]
             return {"ok": True, "filename": p.name, "sheets": [{
                 "name": "Content",
@@ -301,6 +344,27 @@ async def preview_excel_file(body: PreviewExcelRequest):
                 "total_rows": len(lines),
                 "total_cols": 1,
             }], "sheet_names": ["Content"]}
+
+        elif ext in ('.csv', '.tsv'):
+            import csv
+            data = resolver.read_bytes(file_path)
+            # 인코딩 자동 감지 — utf-8(BOM 포함) 우선, 실패 시 cp949
+            try:
+                text = data.decode('utf-8-sig')
+            except UnicodeDecodeError:
+                text = data.decode('cp949', errors='replace')
+            delim = '\t' if ext == '.tsv' else ','
+            reader = csv.reader(io.StringIO(text), delimiter=delim)
+            all_rows = list(reader)
+            headers = all_rows[0] if all_rows else []
+            data_rows = all_rows[1 + row_start:1 + row_end]
+            return {"ok": True, "filename": p.name, "sheets": [{
+                "name": "Sheet1",
+                "headers": headers,
+                "rows": data_rows[:100],
+                "total_rows": max(0, len(all_rows) - 1),
+                "total_cols": len(headers),
+            }], "sheet_names": ["Sheet1"]}
 
         else:
             raise HTTPException(status_code=400, detail=f"지원하지 않는 형식: {ext}")
@@ -313,14 +377,26 @@ async def preview_excel_file(body: PreviewExcelRequest):
 
 @router.get("/preview-image")
 async def preview_image(path: str, image_id: str):
-    """docx 문서에서 이미지 추출 반환"""
+    """docx 문서에서 이미지 추출 반환.
+
+    Cloudium 모드에서는 worker IPC로 read 위임 (backend 직접 open 시
+    WinError 5 발생).
+    """
+    import io
     from fastapi.responses import Response
-    p = Path(path).expanduser().resolve()
-    if not p.exists():
-        raise HTTPException(status_code=404)
+    from backend.services.file_resolver import get_resolver
+    _enforce_resolver_access(path)
+
+    resolver = get_resolver()
+    try:
+        if not resolver.exists(path):
+            raise HTTPException(status_code=404)
+    except (PermissionError, OSError) as exc:
+        raise HTTPException(status_code=403, detail=f"파일 접근 거부: {exc}")
     try:
         import docx as _docx
-        doc = _docx.Document(str(p))
+        data = resolver.read_bytes(path)
+        doc = _docx.Document(io.BytesIO(data))
         rel = doc.part.rels.get(image_id)
         if not rel or 'image' not in rel.reltype:
             raise HTTPException(status_code=404, detail="image not found")
@@ -333,20 +409,82 @@ async def preview_image(path: str, image_id: str):
         raise HTTPException(status_code=500, detail=str(exc))
 
 
+@router.post("/file-mode/browse-file")
+async def browse_file(body: BrowseFileRequest = BrowseFileRequest()):
+    """OS 파일 선택 다이얼로그.
+
+    - cloudium 모드: worker IPC로 위임 (worker GUI에서 다이얼로그 → 클라우디움 폴더 보임)
+    - local 모드: backend 자체 tkinter (local_service.pick_file)
+    """
+    from backend.services.file_resolver import CloudiumFileResolver, get_resolver
+    resolver = get_resolver()
+
+    if isinstance(resolver, CloudiumFileResolver):
+        # worker가 권한 보유 — worker GUI에서 다이얼로그
+        try:
+            if body.kind == "directory":
+                path = resolver.browse_directory(body.title, body.initialdir)
+            else:
+                path = resolver.browse_file(body.title, body.initialdir)
+        except PermissionError as e:
+            raise HTTPException(status_code=403, detail=str(e))
+        except OSError as e:
+            raise HTTPException(status_code=502, detail=f"worker IPC 실패: {e}")
+        return {
+            "ok": bool(path),
+            "path": path or "",
+            "via": "cloudium_worker",
+            "error": None if path else "cancelled",
+        }
+
+    # LOCAL 모드 — backend 자체 tkinter
+    from backend.services.local_service import pick_directory, pick_file
+    if body.kind == "directory":
+        path, error = pick_directory(body.title or "폴더 선택")
+    else:
+        path, error = pick_file(body.title or "파일 선택")
+    return {
+        "ok": bool(path),
+        "path": path,
+        "via": "local",
+        "error": error or None,
+    }
+
+
 @router.post("/file-mode/check-access")
 async def check_cloudium_access(body: CheckAccessRequest = CheckAccessRequest()):
-    """경로 접근 가능 여부 확인."""
-    from backend.services.file_resolver import get_resolver
+    """경로 접근 가능 여부 확인.
+
+    cloudium 모드는 게이트 프로세스(excel_rename_gui_v2.exe) 실행 여부도 함께 검사.
+    """
+    from backend.services.file_resolver import (
+        CloudiumFileResolver,
+        get_resolver,
+        is_gate_running,
+    )
     resolver = get_resolver()
+    cfg = resolver.get_config()
+    gate = {}
+    if isinstance(resolver, CloudiumFileResolver):
+        # **W7 fix**: force=True 제거. TTL 캐시 사용으로 다중 사용자 5초 polling
+        # 환경에서 worker 부하 절감. 1초 stale은 사용자 인지 불가.
+        gate = {
+            "gate_process": resolver.gate_process,
+            "gate_running": is_gate_running(resolver.gate_process),
+        }
     test_path = body.path
     if test_path:
         try:
-            resolver._check_allowed(test_path) if hasattr(resolver, '_check_allowed') else None
+            if isinstance(resolver, CloudiumFileResolver):
+                resolver._ensure_gate()
+                resolver._check_allowed(test_path)
             accessible = Path(test_path).exists()
-            return {"ok": True, "accessible": accessible, "path": test_path, "mode": resolver.mode}
+            return {"ok": True, "accessible": accessible, "path": test_path,
+                    "mode": resolver.mode, **gate}
         except PermissionError as e:
-            return {"ok": False, "accessible": False, "error": str(e), "mode": resolver.mode}
-    return {"ok": True, "mode": resolver.mode, **resolver.get_config()}
+            return {"ok": False, "accessible": False, "error": str(e),
+                    "mode": resolver.mode, **gate}
+    return {"ok": True, "mode": resolver.mode, **cfg, **gate}
 
 
 @router.get("/metrics")
