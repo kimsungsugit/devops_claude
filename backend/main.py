@@ -108,6 +108,10 @@ async def _lifespan(app_instance):
                 "깨질 수 있음. --workers 1 사용을 강력 권장.", workers_env,
             )
 
+        # cloudium worker 자동 시작 (헬퍼 위임)
+        from backend.services.cloudium_worker_launcher import ensure_cloudium_worker_running
+        _api_logger.info("  Cloudium worker auto-start: %s", ensure_cloudium_worker_running())
+
     yield  # 서버 실행 중
     _api_logger.info("DevOps Release Server shutting down")
 

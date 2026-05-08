@@ -85,6 +85,10 @@ async def set_file_mode(body: FileModeRequest):
     from backend.services.file_resolver import switch_mode
     kwargs = body.model_dump(exclude={"mode"}, exclude_none=True)
     resolver = switch_mode(body.mode, **kwargs)
+    # cloudium 모드 전환 시 worker 자동 시작 시도 (이미 떠 있으면 skip)
+    if body.mode == "cloudium":
+        from backend.services.cloudium_worker_launcher import ensure_cloudium_worker_running
+        ensure_cloudium_worker_running()
     return {"ok": True, **resolver.get_config()}
 
 
