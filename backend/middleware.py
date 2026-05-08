@@ -134,8 +134,20 @@ _CLOUDIUM_EXEMPT_PATHS = frozenset({
 
 
 def _is_exempt(path: str) -> bool:
-    """D1: trailing slash 차이까지 정확 매치. 미지의 /api/file-mode/* 는 미들웨어 통과."""
-    return path in _CLOUDIUM_EXEMPT_PATHS or path.rstrip("/") in _CLOUDIUM_EXEMPT_PATHS
+    """D1: trailing slash 차이까지 정확 매치. 미지의 /api/file-mode/* 는 미들웨어 통과.
+
+    **N9 fix (A)**: /api/scm/ 하위 endpoint는 메타데이터 관리만(register/update/
+    delete/test/audit/impact-jobs/change-history/link-docs) 수행하고 사용자 path를
+    실제 read하지 않으므로 PATH_KEYS scan 면제. 사용자가 cloudium 모드에서
+    외부 source_root를 가진 SCM을 등록 시도할 때 등록 자체가 차단되던 이슈 해결.
+    후속 sync/impact/doc-gen endpoint는 그대로 PATH_KEYS scan + endpoint
+    enforce_resolver_access + resolver _gate_then_allow 3중 검증 유지.
+    """
+    if path in _CLOUDIUM_EXEMPT_PATHS or path.rstrip("/") in _CLOUDIUM_EXEMPT_PATHS:
+        return True
+    if path.startswith("/api/scm/"):
+        return True
+    return False
 
 
 def _cloudium_blocked_response(message: str) -> JSONResponse:

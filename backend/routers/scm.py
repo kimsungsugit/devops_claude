@@ -26,6 +26,75 @@ from workflow.impact_jobs import list_jobs, load_job
 router = APIRouter()
 
 
+def _merge_paths_to_cloudium_prefixes(entry: Any) -> None:
+    """N9 fix (C): cloudium 모드에서 SCM 등록/수정 시 entry의 source_root 및
+    linked_docs 부모 디렉토리를 allowed_prefixes에 자동 merge.
+
+    사용자가 SCM 등록 후 별도로 cloudium allowed_prefixes를 갱신하지 않아도
+    sync/impact/doc-gen이 곧바로 통과하도록 단일 출처에서 처리.
+    local 모드면 no-op. backend 자체 작업 디렉토리(workspace)는 _check_allowed의
+    bypass로 별도 처리되므로 여기서는 외부 path만 의미가 있다.
+    """
+    import os
+    from backend.services.file_resolver import (
+        CloudiumFileResolver,
+        get_resolver,
+        switch_mode,
+    )
+    from backend.helpers.common import _parse_path_list
+
+    resolver = get_resolver()
+    if not isinstance(resolver, CloudiumFileResolver):
+        return
+
+    candidates: set[str] = set()
+    # source_root는 multi-path string (콤마/세미콜론/뉴라인 구분) 일 수 있음
+    src = (getattr(entry, "source_root", "") or "").strip()
+    if src:
+        for p in _parse_path_list(src):
+            parent = os.path.dirname(p.rstrip("/\\")) or p
+            if parent:
+                candidates.add(parent)
+
+    linked = getattr(entry, "linked_docs", None)
+    if linked is not None:
+        try:
+            doc_paths = linked.model_dump().values()
+        except AttributeError:
+            doc_paths = (linked.get(k, "") for k in ("srs", "sds", "uds", "sts", "suts", "sits", "hsis", "stp"))
+        for v in doc_paths:
+            v = (v or "").strip()
+            if v:
+                parent = os.path.dirname(v.rstrip("/\\")) or v
+                candidates.add(parent)
+
+    if not candidates:
+        return
+
+    existing = list(resolver.allowed_prefixes or [])
+    existing_norm = {CloudiumFileResolver._normalize_for_compare(p).rstrip("/") for p in existing}
+    new_paths: list[str] = []
+    for p in candidates:
+        np = CloudiumFileResolver._normalize_for_compare(p).rstrip("/")
+        if np in existing_norm:
+            continue
+        # 이미 존재하는 prefix의 하위 디렉토리면 추가 불필요
+        if any(np == ep or np.startswith(ep + "/") for ep in existing_norm):
+            continue
+        new_paths.append(p)
+        existing_norm.add(np)
+
+    if not new_paths:
+        return
+
+    merged = ",".join(existing + new_paths)
+    switch_mode(
+        "cloudium",
+        allowed_prefixes=merged,
+        gate_process=resolver.gate_process,
+    )
+
+
 def _git_status(entry: Any) -> Dict[str, Any]:
     source_root = Path(str(entry.source_root or "")).expanduser()
     git_ok = shutil.which("git") is not None
@@ -83,6 +152,7 @@ def scm_register(req: ScmRegisterRequest) -> Dict[str, Any]:
     except ValueError as exc:
         # Remaining ValueError path = "id already exists" → conflict.
         raise HTTPException(status_code=409, detail=str(exc))
+    _merge_paths_to_cloudium_prefixes(entry)
     return {"ok": True, "item": entry.model_dump(mode="json")}
 
 
@@ -100,6 +170,7 @@ def scm_update(entry_id: str, req: ScmUpdateRequest) -> Dict[str, Any]:
         raise HTTPException(status_code=404, detail="registry entry not found")
     except ScmValidationError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+    _merge_paths_to_cloudium_prefixes(entry)
     return {"ok": True, "item": entry.model_dump(mode="json")}
 
 

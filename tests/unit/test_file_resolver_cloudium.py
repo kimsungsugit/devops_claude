@@ -235,6 +235,22 @@ def test_cloudium_workspace_bypass_does_not_leak_outside(monkeypatch, tmp_path):
         r._check_allowed(str(outside / "secret.txt"))
 
 
+# ── N9 fix (A): /api/scm/* exempt 검증 ─────────────────────────────────────
+
+
+def test_middleware_exempts_scm_register_in_cloudium_mode():
+    """N9 fix (A): cloudium 모드에서 외부 source_root로 SCM 등록 시 미들웨어가 차단하면 안 됨."""
+    from backend.middleware import _is_exempt
+    assert _is_exempt("/api/scm/register") is True
+    assert _is_exempt("/api/scm/update/my-id") is True
+    assert _is_exempt("/api/scm/delete/my-id") is True
+    assert _is_exempt("/api/scm/my-id/link-docs") is True
+    assert _is_exempt("/api/scm/list") is True
+    # 일반 경로는 여전히 검사
+    assert _is_exempt("/api/jenkins/uds/generate-async") is False
+    assert _is_exempt("/api/local/sits/generate-async") is False
+
+
 def test_cloudium_blocks_path_outside_allowed_prefixes(monkeypatch, tmp_path):
     monkeypatch.setattr(file_resolver, "is_gate_running", lambda *_a, **_k: True)
     allowed = tmp_path / "allowed"
