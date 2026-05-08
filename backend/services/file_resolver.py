@@ -441,12 +441,21 @@ class CloudiumFileResolver(LocalFileResolver):
     # buffer/메모리 부담 적은 sweet spot.
     _CHUNK_SIZE = 4 * 1024 * 1024
 
+    # silent truncation 위험 임계값 — 옛 worker 응답 size가 이보다 크면
+    # 4MB chunk 경계에서 잘렸을 수 있어 차단. 일반 docx/xlsx(<3.5MB)는 통과.
+    _LEGACY_SAFE_SIZE = 3 * 1024 * 1024 + 512 * 1024  # 3.5MB
+
     def read_bytes(self, path: str) -> bytes:
         """worker IPC로 파일 read. 큰 파일은 4MB chunk로 누적 read하여 OOM 방지.
 
         **W5 수정**: 옛 worker가 plain base64 string을 반환하던 backward-compat은
         4MB 이후 silent truncation 위험이 있어 차단. dict가 아닌 응답은 명시
         PermissionError raise해 사용자에게 worker 재시작을 안내.
+
+        **N19 fix (backward-compat 부분 활성)**: 옛 worker(chunking 미지원)도
+        파일 size가 안전 임계값(_LEGACY_SAFE_SIZE=3.5MB) 미만이면 통과.
+        4MB 경계 silent truncation 위험은 큰 파일에서만 발생 — 일반 .docx/.xlsx
+        는 무해. 큰 파일은 여전히 PermissionError로 worker 재빌드 안내.
         """
         self._gate_then_allow(path)
         offset = 0
@@ -456,10 +465,31 @@ class CloudiumFileResolver(LocalFileResolver):
                                   {"path": path, "offset": offset,
                                    "length": self._CHUNK_SIZE},
                                   timeout=60.0)
+            # N19: 옛 worker(chunking 미지원) backward-compat — string 응답 처리
+            if isinstance(resp, str):
+                if offset > 0:
+                    raise PermissionError(
+                        "Cloudium worker가 chunking 인자를 무시하고 전체 파일을 반복 반환. "
+                        "최신 worker(excel_rename_gui_v2.exe)로 재빌드 필요."
+                    )
+                try:
+                    decoded = base64.b64decode(resp) if resp else b""
+                except Exception as e:
+                    raise PermissionError(f"Cloudium worker 응답 base64 디코드 실패: {e}")
+                if len(decoded) >= self._LEGACY_SAFE_SIZE:
+                    raise PermissionError(
+                        f"Cloudium worker(chunking 미지원)가 큰 파일({len(decoded)} bytes) 반환 — "
+                        "4MB 경계에서 silent truncation 위험. 최신 worker 재빌드 후 재시도하세요."
+                    )
+                _logger.warning(
+                    "[cloudium-read] 옛 worker(chunking 미지원) backward-compat read. "
+                    "path=%s size=%d (worker 재빌드 권장)", path, len(decoded),
+                )
+                return decoded
             if not isinstance(resp, dict):
                 raise PermissionError(
-                    "Cloudium worker가 chunking protocol(v2)을 지원하지 않습니다. "
-                    "최신 worker(excel_rename_gui_v2.exe)를 재시작하세요."
+                    f"Cloudium worker IPC 응답 형식 비정상 (type={type(resp).__name__}). "
+                    "최신 worker로 재빌드/재시작하세요."
                 )
             data_b64 = resp.get("data", "") or ""
             chunk = base64.b64decode(data_b64) if data_b64 else b""

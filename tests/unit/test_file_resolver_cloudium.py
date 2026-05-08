@@ -1305,7 +1305,7 @@ def test_read_bytes_raises_when_worker_returns_legacy_string(monkeypatch, tmp_pa
     monkeypatch.setattr(file_resolver, "is_gate_running", lambda *_a, **_k: True)
     handlers = {
         "ping": lambda args: "pong",
-        # legacy: read_bytes가 string 반환
+        # legacy small file: <3.5MB → N19 backward-compat 통과
         "read_bytes": lambda args: base64.b64encode(b"old protocol bytes").decode("ascii"),
     }
     w = _MockWorker(handlers)
@@ -1313,12 +1313,36 @@ def test_read_bytes_raises_when_worker_returns_legacy_string(monkeypatch, tmp_pa
         r = CloudiumFileResolver(
             allowed_prefixes=str(tmp_path), host=w.host, port=w.port,
         )
-        # ContextVar 마킹으로 ping/whitelist skip 후 read_bytes 진입
         from backend.services.file_resolver import mark_path_validated, reset_path_validated
         token = mark_path_validated([str(tmp_path / "x.bin")])
         try:
-            with pytest.raises(PermissionError, match="chunking protocol"):
-                r.read_bytes(str(tmp_path / "x.bin"))
+            # N19: 작은 파일은 backward-compat 통과 (warning log만)
+            assert r.read_bytes(str(tmp_path / "x.bin")) == b"old protocol bytes"
+        finally:
+            reset_path_validated(token)
+    finally:
+        w.close()
+
+
+def test_read_bytes_blocks_legacy_string_when_size_exceeds_threshold(monkeypatch, tmp_path):
+    """N19: 옛 worker가 큰 파일(>=3.5MB) string으로 반환 시 PermissionError —
+    4MB chunk 경계 silent truncation 위험 차단."""
+    monkeypatch.setattr(file_resolver, "is_gate_running", lambda *_a, **_k: True)
+    big_payload = b"x" * (4 * 1024 * 1024)  # 4MB → 임계값 초과
+    handlers = {
+        "ping": lambda args: "pong",
+        "read_bytes": lambda args: base64.b64encode(big_payload).decode("ascii"),
+    }
+    w = _MockWorker(handlers)
+    try:
+        r = CloudiumFileResolver(
+            allowed_prefixes=str(tmp_path), host=w.host, port=w.port,
+        )
+        from backend.services.file_resolver import mark_path_validated, reset_path_validated
+        token = mark_path_validated([str(tmp_path / "big.bin")])
+        try:
+            with pytest.raises(PermissionError, match="silent truncation|재빌드"):
+                r.read_bytes(str(tmp_path / "big.bin"))
         finally:
             reset_path_validated(token)
     finally:
