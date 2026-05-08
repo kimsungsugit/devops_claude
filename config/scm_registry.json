@@ -17,17 +17,17 @@
       "ignore_patterns": [],
       "webhook_secret_env": "",
       "linked_docs": {
-        "uds": "D:/Project/devops/260105/backend/reports/uds_local/uds_spec_generated_expanded_20260415_093352.docx",
-        "sts": "D:/Project/devops/Release_claude/reports/sts/sts_local_20260415_100805_230a.xlsx",
-        "suts": "D:/Project/devops/Release_claude/reports/suts/suts_local_20260415_101559_3b99.xlsx",
-        "sits": "D:/Project/devops/Release_claude/reports/sits/sits_local_20260415_095342_02a7.xlsx",
-        "srs": "D:/Project/devops/260105/docs/(HDPDM01_SRS) Software Requirements Specification_v1.05_20230510.docx",
-        "sds": "D:/Project/devops/260105/docs/(HDPDM01_SDS) Software Architecture Design Specification_v1.04_20230512.docx",
-        "hsis": "D:/Project/devops/260105/docs/(HDPDM01_HSIS) Hardware Software Interface Specification_v5.00_20221115_B.xlsx",
-        "stp": "D:/Project/devops/Release_claude/docs/STP_TEMP.txt"
+        "uds": "U:/연구소/1000 프로젝트/1200 자동차/0002 A Cappella/02 ADOS/03 NE_GN7/08.Software/04.SW 단위설계/01.SUDS/(HDPDM01_SUDS) Software Unit Design Specification_v1.07_240213.docx",
+        "sts": "U:/연구소/1000 프로젝트/1200 자동차/0002 A Cappella/02 ADOS/03 NE_GN7/08.Software/07.SW 테스트/03.Test Specification/01.STS/(HDPDM01_STS) Software Test Specification_v1.02_230116.xlsm",
+        "suts": "U:/연구소/1000 프로젝트/1200 자동차/0002 A Cappella/02 ADOS/03 NE_GN7/08.Software/10.SW 단위테스트/02.Test Specification/01.SUTS/(HDPDM01_SUTS) Software Unit Test Specification_v3.01_240221_R.xlsm",
+        "sits": "U:/연구소/1000 프로젝트/1200 자동차/0002 A Cappella/02 ADOS/03 NE_GN7/08.Software/08.SW 통합테스트/02.Test Specification/01.SITS/(HDPDM01_SITS) Software Integration Test Specification_v2.02_240219.xlsm",
+        "srs": "U:/연구소/1000 프로젝트/1200 자동차/0002 A Cappella/02 ADOS/03 NE_GN7/08.Software/01.SW 요구사항/01.SRS/(HDPDM01_SRS) Software Requirements Specification_v1.05_20230510.docx",
+        "sds": "U:/연구소/1000 프로젝트/1200 자동차/0002 A Cappella/02 ADOS/03 NE_GN7/08.Software/03.SW 아키텍처 설계/02.SDS/(HDPDM01_SDS) Software Architecture Design Specification_v1.04_20230512.docx",
+        "hsis": "U:/연구소/1000 프로젝트/1200 자동차/0002 A Cappella/02 ADOS/03 NE_GN7/05.System/02.시스템 아키텍처 설계/03.HSIS/(HDPDM01_HSIS) Hardware Software Interface Specification_v5.00_20221115_B.xlsx",
+        "stp": "U:/연구소/1000 프로젝트/1200 자동차/0002 A Cappella/02 ADOS/03 NE_GN7/08.Software/07.SW 테스트/02.Test Plan/01.STP/(HDPDM01_STP) Software Test Plan_v1.01_20230113_B.docx"
       },
       "created_at": "2026-03-23T14:10:41",
-      "updated_at": "2026-04-15T10:16:52",
+      "updated_at": "2026-05-08T14:13:06",
       "last_triggered": "",
       "last_revision": ""
     },
