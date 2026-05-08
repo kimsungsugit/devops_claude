@@ -182,10 +182,10 @@ function ScmSection() {
     }
     try {
       if (editMode) {
-        // Update existing
-        await fetch(`/api/scm/update/${editMode}`, {
+        // api() 헬퍼 사용 — X-User 헤더 자동 추가 + res.ok 검사 + 에러 throw.
+        // 이전 raw fetch는 X-User 누락으로 401 silent failure 발생.
+        await api(`/api/scm/update/${editMode}`, {
           method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(form),
         });
         toast('success', 'SCM 수정 완료');
@@ -205,11 +205,9 @@ function ScmSection() {
   const deleteScm = async (id) => {
     if (!confirm(`SCM '${id}'를 삭제하시겠습니까?`)) return;
     try {
-      const res = await fetch(`/api/scm/${id}`, { method: 'DELETE' });
-      if (!res.ok) {
-        const text = await res.text();
-        throw new Error(text || `HTTP ${res.status}`);
-      }
+      // 실제 backend endpoint는 /api/scm/delete/{id} (이전 raw fetch는 잘못된
+      // 경로로 호출 + X-User 누락 — api 헬퍼로 전환하여 둘 다 해결).
+      await api(`/api/scm/delete/${id}`, { method: 'DELETE' });
       toast('success', '삭제 완료');
       loadList();
     } catch (e) {
