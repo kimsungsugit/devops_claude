@@ -235,6 +235,38 @@ def test_cloudium_workspace_bypass_does_not_leak_outside(monkeypatch, tmp_path):
         r._check_allowed(str(outside / "secret.txt"))
 
 
+def test_cloudium_user_home_bypass(monkeypatch, tmp_path):
+    """N17 fix: 사용자 home 하위 path는 자동 통과 — cache_root가 보통
+    ~/.devops_v2_cache 같은 사용자 home 안 디렉토리이므로 cloudium 검사 면제."""
+    monkeypatch.setattr(file_resolver, "is_gate_running", lambda *_a, **_k: True)
+    fake_home = tmp_path / "fake_home"
+    fake_home.mkdir()
+    monkeypatch.setattr(file_resolver, "_USER_HOME", fake_home)
+    # workspace는 다른 위치로 격리
+    monkeypatch.setattr(file_resolver, "_PROJECT_ROOT", tmp_path / "_isolated")
+
+    r = CloudiumFileResolver(allowed_prefixes="")
+    # home 안 path들 모두 통과
+    r._check_allowed(str(fake_home / ".devops_v2_cache" / "jobs.json"))
+    r._check_allowed(str(fake_home / "devops_v2_cache" / "build_42"))
+    r._check_allowed(str(fake_home))
+
+
+def test_cloudium_user_home_bypass_does_not_leak_outside(monkeypatch, tmp_path):
+    """home bypass가 home 외부 path를 통과시키면 안 됨."""
+    monkeypatch.setattr(file_resolver, "is_gate_running", lambda *_a, **_k: True)
+    fake_home = tmp_path / "fake_home"
+    outside = tmp_path / "outside"
+    fake_home.mkdir()
+    outside.mkdir()
+    monkeypatch.setattr(file_resolver, "_USER_HOME", fake_home)
+    monkeypatch.setattr(file_resolver, "_PROJECT_ROOT", tmp_path / "_isolated")
+
+    r = CloudiumFileResolver(allowed_prefixes="")
+    with pytest.raises(PermissionError, match="workspace/home 외부|허용되지 않은"):
+        r._check_allowed(str(outside / "secret.txt"))
+
+
 def test_cloudium_workspace_bypass_resolves_relative_paths(monkeypatch, tmp_path):
     """N16 fix: relative path(.devops_pro_cache 등)는 cwd 기준 abs 변환 후
     workspace bypass 적용. frontend가 cache_root="." 같은 relative 보내는 시나리오 회귀."""

@@ -43,6 +43,14 @@ from typing import Any, Dict, List, Optional
 # backend/services/file_resolver.py → parents[2] = repo root.
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
+# 사용자 home bypass — frontend cache_root가 보통 ~/.devops_v2_cache 등
+# 사용자 home 안에 위치. backend python.exe는 사용자 home 자체 read/write
+# 권한 보유(cloudium 권한 무관). N17 fix.
+try:
+    _USER_HOME = Path.home().resolve()
+except Exception:
+    _USER_HOME = None
+
 # W1: request-local set — 미들웨어가 path들을 이미 검증했으면 read 메서드의
 # 중복 검사를 skip할 수 있게 한다. 미들웨어 layer 통과 → ContextVar set →
 # read 메서드는 _check_allowed/_ensure_gate 생략.
@@ -351,9 +359,16 @@ class CloudiumFileResolver(LocalFileResolver):
                 or normalized_path.startswith(project_root + "/")):
             return
 
+        # N17: 사용자 home bypass — cache_root 등 사용자 home 안 디렉토리 자동 통과
+        if _USER_HOME is not None:
+            user_home_n = self._normalize_for_compare(str(_USER_HOME)).rstrip("/")
+            if (normalized_path == user_home_n
+                    or normalized_path.startswith(user_home_n + "/")):
+                return
+
         if not self.allowed_prefixes:
             raise PermissionError(
-                "Cloudium 모드: allowed_prefixes 미설정 — workspace 외부 경로 차단됨. "
+                f"Cloudium 모드: allowed_prefixes 미설정 — workspace/home 외부 경로 차단됨: {path}. "
                 "CLOUDIUM_ALLOWED_PREFIXES 환경변수 또는 /api/file-mode "
                 "POST body에 allowed_prefixes를 명시해야 합니다."
             )
@@ -363,7 +378,7 @@ class CloudiumFileResolver(LocalFileResolver):
                     or normalized_path.startswith(normalized_prefix + "/")):
                 return
         raise PermissionError(
-            "Cloudium 모드: 허용되지 않은 경로 접근 차단됨."
+            f"Cloudium 모드: 허용되지 않은 경로 접근 차단됨: {path}"
         )
 
     @staticmethod
