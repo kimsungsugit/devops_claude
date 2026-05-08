@@ -157,7 +157,7 @@ function ScmSection() {
       branch: '',
       base_ref: 'HEAD~1',
       source_root: '',
-      linked_docs: { srs: '', sds: '', uds: '', sts: '', suts: '', sits: '' },
+      linked_docs: { srs: '', sds: '', uds: '', sts: '', suts: '', sits: '', hsis: '', stp: '' },
     };
   }
 
@@ -220,6 +220,51 @@ function ScmSection() {
   const setLinked = (key, val) =>
     setForm(p => ({ ...p, linked_docs: { ...p.linked_docs, [key]: val } }));
 
+  // path 정규화 — 슬래시 방향 통일 + 끝의 슬래시 제거 (W3 fix)
+  const normalizePath = (p) => (p || '').replace(/\\/g, '/').replace(/\/+$/, '');
+
+  // 클라우디움 모드일 때 선택한 파일의 부모 디렉토리를 allowed_prefixes에 자동 추가
+  const ensureCloudiumPrefix = async (filePath) => {
+    try {
+      const cfg = await api('/api/file-mode');
+      if (cfg.mode !== 'cloudium') return;
+      const lastSlash = Math.max(filePath.lastIndexOf('/'), filePath.lastIndexOf('\\'));
+      const parent = lastSlash >= 0 ? filePath.slice(0, lastSlash) : filePath;
+      const parentNorm = normalizePath(parent);
+      const existing = Array.isArray(cfg.allowed_prefixes) ? cfg.allowed_prefixes : [];
+      const existingNorm = existing.map(normalizePath);
+      if (existingNorm.some(p => parentNorm === p || parentNorm.startsWith(p + '/'))) return;
+      await post('/api/file-mode', {
+        mode: 'cloudium',
+        allowed_prefixes: [...existing, parent].join(', '),
+        gate_process: cfg.gate_process || 'excel_rename_gui_v2.exe',
+      });
+      toast('info', `클라우디움 허용 디렉토리에 추가: ${parent}`);
+    } catch (e) {
+      console.warn('allowed_prefixes 자동 갱신 실패:', e.message);
+      toast('warning', `자동 권한 갱신 실패 — 수동으로 "허용 prefix"에 추가하세요. (${e.message})`);
+    }
+  };
+
+  const pickLinkedDoc = async (key) => {
+    try {
+      const picked = await post('/api/file-mode/browse-file', {
+        title: `${key.toUpperCase()} 문서 선택`,
+        kind: 'file',
+      });
+      if (!picked || !picked.ok || !picked.path) {
+        if (picked?.error === 'cancelled') return;
+        toast('error', `다이얼로그 실패: ${picked?.error || picked?.detail || 'unknown'}`);
+        return;
+      }
+      setLinked(key, picked.path);
+      await ensureCloudiumPrefix(picked.path);
+      toast('success', `${key.toUpperCase()} 경로 선택됨`);
+    } catch (e) {
+      toast('error', `다이얼로그 실패: ${e.message}`);
+    }
+  };
+
   return (
     <div className="settings-section">
       <div className="settings-section-title">
@@ -281,10 +326,23 @@ function ScmSection() {
           </div>
           <div className="settings-section-title" style={{ fontSize: 12, marginBottom: 8, paddingBottom: 8 }}>연결 문서 경로</div>
           <div className="field-group cols-3">
-            {['srs', 'sds', 'uds', 'sts', 'suts', 'sits'].map(k => (
+            {['srs', 'sds', 'uds', 'sts', 'suts', 'sits', 'hsis', 'stp'].map(k => (
               <div className="field" key={k}>
                 <label>{k.toUpperCase()} 경로</label>
-                <input value={form.linked_docs[k]} onChange={e => setLinked(k, e.target.value)} placeholder={`/docs/${k}.docx`} />
+                <div style={{ display: 'flex', gap: 4 }}>
+                  <input
+                    style={{ flex: 1 }}
+                    value={form.linked_docs[k] || ''}
+                    onChange={e => setLinked(k, e.target.value)}
+                    placeholder={`/docs/${k}.docx`}
+                  />
+                  <button
+                    type="button"
+                    className="btn-sm"
+                    title="파일 찾기 (클라우디움 모드면 worker IPC, 로컬이면 backend tkinter)"
+                    onClick={() => pickLinkedDoc(k)}
+                  >📂</button>
+                </div>
               </div>
             ))}
           </div>
