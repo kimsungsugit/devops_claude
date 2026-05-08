@@ -130,22 +130,45 @@ _CLOUDIUM_EXEMPT_PATHS = frozenset({
     "/api/health",
     "/api/metrics",
     "/api/cache/clear",
+    "/api/scm/register",
+    "/api/scm/list",
 })
+
+# **N14 fix**: SCM 관리 endpoint 명시 prefix 화이트리스트 (정확 prefix만).
+# `/api/scm/` 전체 exempt는 미래 신규 endpoint(/api/scm/sync 등)를 자동 우회시켜
+# D1 fix(deny-by-default)를 약화시키므로 명시 patterns로 좁힘.
+# 동적 path parameter용 — `path == prefix` 또는 `path.startswith(prefix + "/")` 매칭.
+_CLOUDIUM_EXEMPT_SCM_PREFIXES = (
+    "/api/scm/update/",
+    "/api/scm/delete/",
+    "/api/scm/test/",
+    "/api/scm/audit/",
+    "/api/scm/status/",
+    "/api/scm/impact-jobs/",
+    "/api/scm/change-history/",
+)
 
 
 def _is_exempt(path: str) -> bool:
     """D1: trailing slash 차이까지 정확 매치. 미지의 /api/file-mode/* 는 미들웨어 통과.
 
-    **N9 fix (A)**: /api/scm/ 하위 endpoint는 메타데이터 관리만(register/update/
-    delete/test/audit/impact-jobs/change-history/link-docs) 수행하고 사용자 path를
-    실제 read하지 않으므로 PATH_KEYS scan 면제. 사용자가 cloudium 모드에서
-    외부 source_root를 가진 SCM을 등록 시도할 때 등록 자체가 차단되던 이슈 해결.
-    후속 sync/impact/doc-gen endpoint는 그대로 PATH_KEYS scan + endpoint
-    enforce_resolver_access + resolver _gate_then_allow 3중 검증 유지.
+    **N9 fix (A)**: SCM 관리 endpoint(register/update/delete/test/audit/status/
+    impact-jobs/change-history/link-docs)는 메타데이터 관리만 수행하고 사용자 path를
+    실제 read하지 않으므로 PATH_KEYS scan 면제. 후속 sync/impact/doc-gen endpoint는
+    그대로 PATH_KEYS scan + endpoint enforce_resolver_access + resolver
+    _gate_then_allow 3중 검증 유지.
+
+    **N14 fix**: 과거 `/api/scm/` 전체 startswith는 신규 endpoint 자동 우회 위험.
+    명시 prefix 화이트리스트(_CLOUDIUM_EXEMPT_SCM_PREFIXES)로 좁힘.
     """
     if path in _CLOUDIUM_EXEMPT_PATHS or path.rstrip("/") in _CLOUDIUM_EXEMPT_PATHS:
         return True
-    if path.startswith("/api/scm/"):
+    # 동적 path parameter exempt (/api/scm/update/{id} 등)
+    for prefix in _CLOUDIUM_EXEMPT_SCM_PREFIXES:
+        if path == prefix.rstrip("/") or path.startswith(prefix):
+            return True
+    # /api/scm/{id}/link-docs — id가 가운데에 있는 동적 path
+    if path.startswith("/api/scm/") and path.endswith("/link-docs"):
         return True
     return False
 

@@ -241,14 +241,35 @@ def test_cloudium_workspace_bypass_does_not_leak_outside(monkeypatch, tmp_path):
 def test_middleware_exempts_scm_register_in_cloudium_mode():
     """N9 fix (A): cloudium 모드에서 외부 source_root로 SCM 등록 시 미들웨어가 차단하면 안 됨."""
     from backend.middleware import _is_exempt
+    # 명시 화이트리스트
     assert _is_exempt("/api/scm/register") is True
     assert _is_exempt("/api/scm/update/my-id") is True
     assert _is_exempt("/api/scm/delete/my-id") is True
+    assert _is_exempt("/api/scm/test/my-id") is True
+    assert _is_exempt("/api/scm/audit/my-id") is True
+    assert _is_exempt("/api/scm/status/my-id") is True
+    assert _is_exempt("/api/scm/impact-jobs/my-id") is True
+    assert _is_exempt("/api/scm/change-history/my-id") is True
     assert _is_exempt("/api/scm/my-id/link-docs") is True
     assert _is_exempt("/api/scm/list") is True
     # 일반 경로는 여전히 검사
     assert _is_exempt("/api/jenkins/uds/generate-async") is False
     assert _is_exempt("/api/local/sits/generate-async") is False
+
+
+def test_middleware_does_not_blanket_exempt_all_scm_paths():
+    """N14 fix: /api/scm/ 전체 startswith 우회 차단 — 미지의 신규 endpoint는 exempt 안 됨.
+
+    명시 화이트리스트가 아닌 경로(/api/scm/sync, /api/scm/foo 등)는 PATH_KEYS scan
+    대상이어야. D1 fix(deny-by-default) 정책 일관 유지.
+    """
+    from backend.middleware import _is_exempt
+    # 미지의 SCM 신규 endpoint — 명시 추가되지 않으면 exempt 안 됨
+    assert _is_exempt("/api/scm/sync") is False
+    assert _is_exempt("/api/scm/refresh") is False
+    assert _is_exempt("/api/scm/some-future-endpoint") is False
+    # link-docs와 매칭하는 패턴이지만 정확히 일치 — 통과
+    assert _is_exempt("/api/scm/x/link-docs-extra") is False  # link-docs로 끝나야 함
 
 
 def test_cloudium_blocks_path_outside_allowed_prefixes(monkeypatch, tmp_path):

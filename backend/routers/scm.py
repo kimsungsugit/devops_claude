@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import threading
 from pathlib import Path
 from typing import Any, Dict
 
@@ -26,6 +27,13 @@ from workflow.impact_jobs import list_jobs, load_job
 router = APIRouter()
 
 
+# **N15 fix**: _merge_paths가 read-resolver-state → switch_mode write 패턴이라
+# 두 SCM 등록 동시 호출 시 last-writer-wins로 한 쪽 prefix 누락 가능.
+# Lock으로 read+modify+write 원자성 보장. 단일 사용자 환경이지만 frontend가
+# 여러 SCM 등록을 연속 POST하는 케이스 안전성 확보.
+_MERGE_LOCK = threading.Lock()
+
+
 def _merge_paths_to_cloudium_prefixes(entry: Any) -> None:
     """N9 fix (C): cloudium 모드에서 SCM 등록/수정 시 entry의 source_root 및
     linked_docs 부모 디렉토리를 allowed_prefixes에 자동 merge.
@@ -34,6 +42,8 @@ def _merge_paths_to_cloudium_prefixes(entry: Any) -> None:
     sync/impact/doc-gen이 곧바로 통과하도록 단일 출처에서 처리.
     local 모드면 no-op. backend 자체 작업 디렉토리(workspace)는 _check_allowed의
     bypass로 별도 처리되므로 여기서는 외부 path만 의미가 있다.
+
+    N15: _MERGE_LOCK으로 read-modify-write race 차단.
     """
     import os
     from backend.services.file_resolver import (
@@ -43,56 +53,57 @@ def _merge_paths_to_cloudium_prefixes(entry: Any) -> None:
     )
     from backend.helpers.common import _parse_path_list
 
-    resolver = get_resolver()
-    if not isinstance(resolver, CloudiumFileResolver):
-        return
+    with _MERGE_LOCK:
+        resolver = get_resolver()
+        if not isinstance(resolver, CloudiumFileResolver):
+            return
 
-    candidates: set[str] = set()
-    # source_root는 multi-path string (콤마/세미콜론/뉴라인 구분) 일 수 있음
-    src = (getattr(entry, "source_root", "") or "").strip()
-    if src:
-        for p in _parse_path_list(src):
-            parent = os.path.dirname(p.rstrip("/\\")) or p
-            if parent:
-                candidates.add(parent)
+        candidates: set[str] = set()
+        # source_root는 multi-path string (콤마/세미콜론/뉴라인 구분) 일 수 있음
+        src = (getattr(entry, "source_root", "") or "").strip()
+        if src:
+            for p in _parse_path_list(src):
+                parent = os.path.dirname(p.rstrip("/\\")) or p
+                if parent:
+                    candidates.add(parent)
 
-    linked = getattr(entry, "linked_docs", None)
-    if linked is not None:
-        try:
-            doc_paths = linked.model_dump().values()
-        except AttributeError:
-            doc_paths = (linked.get(k, "") for k in ("srs", "sds", "uds", "sts", "suts", "sits", "hsis", "stp"))
-        for v in doc_paths:
-            v = (v or "").strip()
-            if v:
-                parent = os.path.dirname(v.rstrip("/\\")) or v
-                candidates.add(parent)
+        linked = getattr(entry, "linked_docs", None)
+        if linked is not None:
+            try:
+                doc_paths = linked.model_dump().values()
+            except AttributeError:
+                doc_paths = (linked.get(k, "") for k in ("srs", "sds", "uds", "sts", "suts", "sits", "hsis", "stp"))
+            for v in doc_paths:
+                v = (v or "").strip()
+                if v:
+                    parent = os.path.dirname(v.rstrip("/\\")) or v
+                    candidates.add(parent)
 
-    if not candidates:
-        return
+        if not candidates:
+            return
 
-    existing = list(resolver.allowed_prefixes or [])
-    existing_norm = {CloudiumFileResolver._normalize_for_compare(p).rstrip("/") for p in existing}
-    new_paths: list[str] = []
-    for p in candidates:
-        np = CloudiumFileResolver._normalize_for_compare(p).rstrip("/")
-        if np in existing_norm:
-            continue
-        # 이미 존재하는 prefix의 하위 디렉토리면 추가 불필요
-        if any(np == ep or np.startswith(ep + "/") for ep in existing_norm):
-            continue
-        new_paths.append(p)
-        existing_norm.add(np)
+        existing = list(resolver.allowed_prefixes or [])
+        existing_norm = {CloudiumFileResolver._normalize_for_compare(p).rstrip("/") for p in existing}
+        new_paths: list[str] = []
+        for p in candidates:
+            np = CloudiumFileResolver._normalize_for_compare(p).rstrip("/")
+            if np in existing_norm:
+                continue
+            # 이미 존재하는 prefix의 하위 디렉토리면 추가 불필요
+            if any(np == ep or np.startswith(ep + "/") for ep in existing_norm):
+                continue
+            new_paths.append(p)
+            existing_norm.add(np)
 
-    if not new_paths:
-        return
+        if not new_paths:
+            return
 
-    merged = ",".join(existing + new_paths)
-    switch_mode(
-        "cloudium",
-        allowed_prefixes=merged,
-        gate_process=resolver.gate_process,
-    )
+        merged = ",".join(existing + new_paths)
+        switch_mode(
+            "cloudium",
+            allowed_prefixes=merged,
+            gate_process=resolver.gate_process,
+        )
 
 
 def _git_status(entry: Any) -> Dict[str, Any]:
