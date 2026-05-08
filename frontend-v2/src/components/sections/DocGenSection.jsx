@@ -196,9 +196,64 @@ export default function DocGenSection({ job, analysisResult }) {
     }
   }, [scm]);
   const linkedDocs = scm?.linked_docs || {};
-  const localDocPaths = (() => {
+  const [localDocPaths, setLocalDocPaths] = useState(() => {
     try { return JSON.parse(localStorage.getItem('devops_v2_doc_paths') || '{}'); } catch (_) { return {}; }
-  })();
+  });
+
+  // path 정규화 — 슬래시 방향 통일
+  const _normPath = (p) => (p || '').replace(/\\/g, '/').replace(/\/+$/, '');
+
+  // cloudium 모드일 때 선택한 파일의 부모를 allowed_prefixes에 자동 추가
+  const ensureCloudiumPrefix = async (filePath) => {
+    try {
+      const cfg = await api('/api/file-mode');
+      if (cfg.mode !== 'cloudium') return;
+      const lastSlash = Math.max(filePath.lastIndexOf('/'), filePath.lastIndexOf('\\'));
+      const parent = lastSlash >= 0 ? filePath.slice(0, lastSlash) : filePath;
+      const parentNorm = _normPath(parent);
+      const existing = Array.isArray(cfg.allowed_prefixes) ? cfg.allowed_prefixes : [];
+      if (existing.map(_normPath).some(p => parentNorm === p || parentNorm.startsWith(p + '/'))) return;
+      await post('/api/file-mode', {
+        mode: 'cloudium',
+        allowed_prefixes: [...existing, parent].join(', '),
+        gate_process: cfg.gate_process || 'excel_rename_gui_v2.exe',
+      });
+      toast('info', `클라우디움 허용 디렉토리에 추가: ${parent}`);
+    } catch (e) {
+      console.warn('allowed_prefixes 자동 갱신 실패:', e.message);
+    }
+  };
+
+  // 다이얼로그로 doc path 선택 — worker IPC(cloudium) 또는 backend tkinter(local)
+  const pickDocPath = async (key, label) => {
+    try {
+      const picked = await post('/api/file-mode/browse-file', {
+        title: `${label} 문서 선택`,
+        kind: 'file',
+      });
+      if (!picked || !picked.ok || !picked.path) {
+        if (picked?.error === 'cancelled') return;
+        toast('error', `다이얼로그 실패: ${picked?.error || picked?.detail || 'unknown'}`);
+        return;
+      }
+      const next = { ...localDocPaths, [key]: picked.path };
+      setLocalDocPaths(next);
+      try { localStorage.setItem('devops_v2_doc_paths', JSON.stringify(next)); } catch (_) {}
+      await ensureCloudiumPrefix(picked.path);
+      toast('success', `${label} 경로: ${picked.path.split(/[\\/]/).pop()}`);
+    } catch (e) {
+      toast('error', `다이얼로그 실패: ${e.message}`);
+    }
+  };
+
+  // 임시 변경 초기화 (linked_docs로 폴백)
+  const clearDocPath = (key, label) => {
+    const next = { ...localDocPaths };
+    delete next[key];
+    setLocalDocPaths(next);
+    try { localStorage.setItem('devops_v2_doc_paths', JSON.stringify(next)); } catch (_) {}
+    toast('info', `${label} 임시 경로 초기화 → SCM 등록 경로 사용`);
+  };
 
   // Merge input docs: SCM linked_docs + localStorage
   const inputDocs = [
@@ -220,11 +275,14 @@ export default function DocGenSection({ job, analysisResult }) {
   const [fullscreen, setFullscreen] = useState(false);
 
   const allDocs = [
+    { key: 'srs', label: 'SRS', type: 'input', path: localDocPaths.srs || linkedDocs.srs || '' },
     { key: 'sds', label: 'SDS', type: 'input', path: localDocPaths.sds || linkedDocs.sds || '' },
-    { key: 'uds', label: 'UDS', type: 'output', path: linkedDocs.uds || '' },
-    { key: 'sts', label: 'STS', type: 'output', path: linkedDocs.sts || '' },
-    { key: 'suts', label: 'SUTS', type: 'output', path: linkedDocs.suts || '' },
-    { key: 'sits', label: 'SITS', type: 'output', path: linkedDocs.sits || '' },
+    { key: 'hsis', label: 'HSIS', type: 'input', path: localDocPaths.hsis || linkedDocs.hsis || '' },
+    { key: 'stp', label: 'STP', type: 'input', path: localDocPaths.stp || linkedDocs.stp || '' },
+    { key: 'uds', label: 'UDS', type: 'output', path: localDocPaths.uds || linkedDocs.uds || '' },
+    { key: 'sts', label: 'STS', type: 'output', path: localDocPaths.sts || linkedDocs.sts || '' },
+    { key: 'suts', label: 'SUTS', type: 'output', path: localDocPaths.suts || linkedDocs.suts || '' },
+    { key: 'sits', label: 'SITS', type: 'output', path: localDocPaths.sits || linkedDocs.sits || '' },
   ];
 
   const loadDocPreview = useCallback(async (docKey, path) => {
@@ -253,26 +311,36 @@ export default function DocGenSection({ job, analysisResult }) {
         </div>
         <table className="impact-table" style={{ fontSize: 11 }}>
           <thead>
-            <tr><th style={{ width: 55 }}>문서</th><th>파일명</th><th style={{ width: 60 }}>상태</th><th style={{ width: 60 }}></th></tr>
+            <tr><th style={{ width: 55 }}>문서</th><th>파일명</th><th style={{ width: 60 }}>상태</th><th style={{ width: 130 }}>경로</th></tr>
           </thead>
           <tbody>
-            {allDocs.map(d => (
+            {allDocs.map(d => {
+              const isOverride = !!localDocPaths[d.key];
+              return (
               <tr key={d.key} style={{ cursor: d.path ? 'pointer' : 'default' }}
                   onClick={() => d.path && loadDocPreview(d.key, d.path)}>
                 <td><span className={`pill ${d.type === 'input' ? 'pill-info' : 'pill-purple'}`} style={{ fontSize: 9 }}>{d.label}</span></td>
                 <td style={{ fontFamily: 'monospace', fontSize: 10 }} title={d.path}>
                   {d.path ? d.path.split(/[\\/]/).pop() : <span className="text-muted">미등록</span>}
+                  {isOverride && <span className="pill pill-warning" style={{ fontSize: 8, marginLeft: 4 }}>임시</span>}
                 </td>
                 <td style={{ textAlign: 'center' }}>
                   {d.path ? <span className="pill pill-success" style={{ fontSize: 9 }}>등록됨</span> : <span className="pill pill-neutral" style={{ fontSize: 9 }}>-</span>}
                 </td>
-                <td style={{ textAlign: 'center' }}>
+                <td style={{ textAlign: 'center', display: 'flex', gap: 2, justifyContent: 'center' }} onClick={e => e.stopPropagation()}>
                   {d.path && <button className="btn-sm" style={{ fontSize: 9, padding: '1px 6px' }}
-                    onClick={e => { e.stopPropagation(); loadDocPreview(d.key, d.path); }}
+                    onClick={() => loadDocPreview(d.key, d.path)}
                     disabled={previewLoading}>보기</button>}
+                  <button type="button" className="btn-sm" style={{ fontSize: 9, padding: '1px 6px' }}
+                    title="다이얼로그로 파일 선택 (cloudium 모드면 worker IPC)"
+                    onClick={() => pickDocPath(d.key, d.label)}>📂</button>
+                  {isOverride && <button type="button" className="btn-sm" style={{ fontSize: 9, padding: '1px 6px' }}
+                    title="임시 경로 초기화 (SCM 등록 경로로 폴백)"
+                    onClick={() => clearDocPath(d.key, d.label)}>↺</button>}
                 </td>
               </tr>
-            ))}
+              );
+            })}
           </tbody>
         </table>
       </div>
