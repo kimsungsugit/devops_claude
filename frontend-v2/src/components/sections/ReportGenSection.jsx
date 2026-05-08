@@ -104,7 +104,11 @@ function QACPanel({ job, analysisResult }) {
         });
       } else {
         const qs = `job_url=${encodeURIComponent(job?.url ?? '')}&cache_root=${encodeURIComponent(cacheRoot)}&rel_path=${encodeURIComponent(artifactPath)}`;
-        res = await fetch(`/api/qac/jenkins-excel?${qs}`);
+        // X-User 명시 추가 (UserContextMiddleware 401 silent failure 차단).
+        const user2 = getUsername();
+        res = await fetch(`/api/qac/jenkins-excel?${qs}`, {
+          headers: user2 ? { 'X-User': user2 } : {},
+        });
       }
       if (!res.ok) {
         const text = await res.text();

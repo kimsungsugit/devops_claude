@@ -1,7 +1,15 @@
 import React, { useState, useEffect, useCallback } from 'react';
+import { api, getUsername } from '../../api.js';
 
+// FormData(multipart) POST — api() 헬퍼는 JSON 전용이라 raw fetch 유지하되
+// X-User 헤더는 명시 추가 (UserContextMiddleware 401 silent failure 차단).
 const post = async (url, body) => {
-  const res = await fetch(url, { method: 'POST', body });
+  const user = getUsername();
+  const res = await fetch(url, {
+    method: 'POST',
+    body,
+    headers: user ? { 'X-User': user } : {},
+  });
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
   return res.json();
 };
@@ -15,9 +23,10 @@ export default function ProjectSetupSection({ toast }) {
 
   const loadStatus = useCallback(async () => {
     try {
-      const res = await fetch('/api/local/project-setup/status');
-      if (res.ok) setStatus(await res.json());
-    } catch { /* ignore */ }
+      // api() 헬퍼 — X-User 자동 + res.ok 검사. 이전 raw fetch는 401 silent fail.
+      const data = await api('/api/local/project-setup/status');
+      setStatus(data);
+    } catch { /* ignore — status 로드 실패는 비치명 */ }
   }, []);
 
   useEffect(() => { loadStatus(); }, [loadStatus]);

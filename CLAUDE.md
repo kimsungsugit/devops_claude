@@ -96,7 +96,7 @@ ASIL 등급은 다음 순서로 판별한다:
 
 **호출 정책 (review_depth 별)**:
 - **meta** (정책/문서만 변경) → reviewer 생략, 메인 에이전트가 X4/X5/X6만 직접 점검
-- **light** → reviewer 생략 가능, 단 미니 체크리스트(아래) 10개 항목은 메인이 직접 점검
+- **light** → reviewer 생략 가능, 단 미니 체크리스트(아래) 11개 항목은 메인이 직접 점검
 - **standard** → reviewer **1회 호출** (S/P/Q/R/F + X1~X8 전체)
 - **deep** → reviewer 적응형 3~5회 루프 (start-work Gate 5와 동일)
 - **혼합형** (코드 + 문서 동시 변경) → reviewer.md `## 검토 깊이 자동 판정` `#### 혼합형` 규칙 적용 — 코드/문서 그룹 분리 후 max(depth) 채택, 출력에 정책 일관성 섹션 별도 보고
@@ -129,6 +129,7 @@ ASIL 등급은 다음 순서로 판별한다:
 | 8 | X4 (회귀) | 변경 함수의 호출자 1-hop 호환성 (`grep -rn 함수명`) |
 | 9 | X6 (데이터 일관성) | 캐시 키/sentinel/메모이즈 무효화가 변경된 데이터 흐름과 동기인지 |
 | 10 | X7 (fallback) | 빈 배열/null/undefined 분기에서 `items[0]` 같은 silent wrong-pick 없는지 |
+| 11 | X9 (raw fetch silent failure) | frontend 변경 시 `await fetch(` 호출이 (a) `api.js`의 `api/post/postSse` 헬퍼 안 쓰고 raw 호출 + (b) `X-User` 헤더 누락 + (c) `res.ok` 검사 누락 — 3 조건 충족 시 401/403/500을 silent로 삼키고 success 토스트로 위장. **점검 명령**: `grep -rnE "await fetch\(\|= fetch\(" frontend-v2/src --include="*.jsx" --include="*.js" \| grep -v "api.js:"` 후 각 호출의 헤더/검사 패턴 검증. JSON body는 `api()` 헬퍼로 변환, FormData(multipart) 사용 시 raw fetch 정당하지만 X-User + res.ok는 명시 필수. 상세: `feedback_raw_fetch_silent_failure.md` |
 
 ## Team Agents (에이전트 협업 구조)
 
