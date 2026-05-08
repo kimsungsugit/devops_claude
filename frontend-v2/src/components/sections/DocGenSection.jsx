@@ -197,7 +197,10 @@ export default function DocGenSection({ job, analysisResult }) {
   }, [scm]);
   const linkedDocs = scm?.linked_docs || {};
   const [localDocPaths, setLocalDocPaths] = useState(() => {
-    try { return JSON.parse(localStorage.getItem('devops_v2_doc_paths') || '{}'); } catch (_) { return {}; }
+    try {
+      const raw = JSON.parse(localStorage.getItem('devops_v2_doc_paths') || '{}');
+      return (raw && typeof raw === 'object' && !Array.isArray(raw)) ? raw : {};
+    } catch (_) { return {}; }
   });
 
   // path 정규화 — 슬래시 방향 통일
