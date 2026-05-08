@@ -19,14 +19,20 @@ from backend.services.file_resolver import (
 
 
 @pytest.fixture(autouse=True)
-def _reset_resolver_and_gate_cache():
+def _reset_resolver_and_gate_cache(monkeypatch, tmp_path):
     """Ensure each test starts with a clean LOCAL resolver and gate cache.
 
     이전엔 캐시만 reset했지만 일부 테스트가 set_resolver(...) finally를 빠뜨리면
     다음 테스트로 누설됨. autouse로 두 가지 모두 reset해 누설 차단.
+
+    추가: workspace bypass 회귀 차단 — pytest tmp_path가 workspace 안 .codex_tmp/에
+    생성되어 자동 통과되는 케이스 회피. 테스트용으로 _PROJECT_ROOT를 isolate된
+    fake로 가짜 변경. workspace bypass 자체 검증은 개별 테스트에서 monkeypatch
+    원복.
     """
     file_resolver.invalidate_gate_cache()
     file_resolver.set_resolver(file_resolver.LocalFileResolver())
+    monkeypatch.setattr(file_resolver, "_PROJECT_ROOT", tmp_path / "_isolated_fake_root")
     yield
     file_resolver.invalidate_gate_cache()
     file_resolver.set_resolver(file_resolver.LocalFileResolver())
@@ -193,6 +199,40 @@ def test_cloudium_allows_read_when_worker_alive(mock_worker, tmp_path):
     assert r.read_text(str(f)) == "mocked content"
     assert r.exists(str(f)) is True
     assert r.is_file(str(f)) is True
+
+
+def test_cloudium_workspace_bypass_allows_project_root_paths(monkeypatch, tmp_path):
+    """workspace bypass: backend project_root 하위는 allowed_prefixes 없이도 통과.
+
+    회귀 차단 시나리오: 사용자가 cloudium 모드로 전환 후 Job 목록 / 분석 시
+    backend가 reports/jobs/, .devops_pro_cache/, config/scm_registry.json 같은
+    workspace 자체 파일을 read하는데 cloudium 차단됨 → 잘못된 false positive.
+    """
+    monkeypatch.setattr(file_resolver, "is_gate_running", lambda *_a, **_k: True)
+    fake_workspace = tmp_path / "fake_workspace"
+    fake_workspace.mkdir()
+    # 실제 workspace로 _PROJECT_ROOT를 가리키게 (autouse fixture 원복)
+    monkeypatch.setattr(file_resolver, "_PROJECT_ROOT", fake_workspace)
+
+    r = CloudiumFileResolver(allowed_prefixes="")  # 비어있어도 workspace는 통과
+    # 통과 (예외 없음)
+    r._check_allowed(str(fake_workspace / "reports" / "jobs.json"))
+    r._check_allowed(str(fake_workspace / ".devops_pro_cache" / "x.bin"))
+    r._check_allowed(str(fake_workspace))  # 자기 자신
+
+
+def test_cloudium_workspace_bypass_does_not_leak_outside(monkeypatch, tmp_path):
+    """workspace bypass가 workspace 외부 path까지 통과시키면 안 됨."""
+    monkeypatch.setattr(file_resolver, "is_gate_running", lambda *_a, **_k: True)
+    fake_workspace = tmp_path / "fake_workspace"
+    outside = tmp_path / "outside_share"
+    fake_workspace.mkdir()
+    outside.mkdir()
+    monkeypatch.setattr(file_resolver, "_PROJECT_ROOT", fake_workspace)
+
+    r = CloudiumFileResolver(allowed_prefixes="")
+    with pytest.raises(PermissionError, match="workspace 외부|미설정"):
+        r._check_allowed(str(outside / "secret.txt"))
 
 
 def test_cloudium_blocks_path_outside_allowed_prefixes(monkeypatch, tmp_path):

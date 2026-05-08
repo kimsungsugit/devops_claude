@@ -38,6 +38,11 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+# Backend project root — workspace bypass용 (workspace 자체 디렉토리는
+# cloudium 권한 검사 면제. 예: reports/, .devops_pro_cache/, config/).
+# backend/services/file_resolver.py → parents[2] = repo root.
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
 # W1: request-local set — 미들웨어가 path들을 이미 검증했으면 read 메서드의
 # 중복 검사를 skip할 수 있게 한다. 미들웨어 layer 통과 → ContextVar set →
 # read 메서드는 _check_allowed/_ensure_gate 생략.
@@ -315,6 +320,11 @@ class CloudiumFileResolver(LocalFileResolver):
 
         deny-by-default: allowed_prefixes가 비어 있으면 전부 차단.
 
+        **workspace bypass**: backend project_root 하위 path는 자동 통과.
+        backend가 자기 workspace(reports/, .devops_pro_cache/, config/)를
+        read하는 건 cloudium 권한과 무관 — Job 목록 / 분석 결과 / scm_registry
+        등이 사용자 시나리오에서 차단되는 false positive 방지.
+
         **C1 수정 (Phase 4)**: backend python.exe는 cloudium 권한 없으므로
         `Path.resolve()`를 호출하지 않는다. UNC unreachable 또는 권한 부재
         경로에서 silent fail / OSError 위험을 회피하기 위해 string 정규화만
@@ -323,13 +333,20 @@ class CloudiumFileResolver(LocalFileResolver):
         **W3 수정**: lowercase 비교는 Windows에서만 적용. case-sensitive FS
         (Linux mount SMB 등)에서 잘못된 prefix 매칭 방지.
         """
+        normalized_path = self._normalize_for_compare(path)
+
+        # workspace bypass: project_root 하위는 cloudium 검사 면제
+        project_root = self._normalize_for_compare(str(_PROJECT_ROOT)).rstrip("/")
+        if (normalized_path == project_root
+                or normalized_path.startswith(project_root + "/")):
+            return
+
         if not self.allowed_prefixes:
             raise PermissionError(
-                "Cloudium 모드: allowed_prefixes 미설정 — 모든 경로 차단됨. "
+                "Cloudium 모드: allowed_prefixes 미설정 — workspace 외부 경로 차단됨. "
                 "CLOUDIUM_ALLOWED_PREFIXES 환경변수 또는 /api/file-mode "
                 "POST body에 allowed_prefixes를 명시해야 합니다."
             )
-        normalized_path = self._normalize_for_compare(path)
         for prefix in self.allowed_prefixes:
             normalized_prefix = self._normalize_for_compare(prefix).rstrip("/")
             if (normalized_path == normalized_prefix
