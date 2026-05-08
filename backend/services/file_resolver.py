@@ -325,6 +325,11 @@ class CloudiumFileResolver(LocalFileResolver):
         read하는 건 cloudium 권한과 무관 — Job 목록 / 분석 결과 / scm_registry
         등이 사용자 시나리오에서 차단되는 false positive 방지.
 
+        **N16 fix**: relative path(예: `.devops_pro_cache`, `reports/jobs.json`)는
+        cwd 기준으로 abs 변환 후 비교. UNC/권한 무관(os.path.abspath는 단순 join).
+        사용자가 frontend body에서 relative path 보내면 workspace bypass에 누락
+        되어 차단되던 N16 회귀 차단.
+
         **C1 수정 (Phase 4)**: backend python.exe는 cloudium 권한 없으므로
         `Path.resolve()`를 호출하지 않는다. UNC unreachable 또는 권한 부재
         경로에서 silent fail / OSError 위험을 회피하기 위해 string 정규화만
@@ -333,6 +338,11 @@ class CloudiumFileResolver(LocalFileResolver):
         **W3 수정**: lowercase 비교는 Windows에서만 적용. case-sensitive FS
         (Linux mount SMB 등)에서 잘못된 prefix 매칭 방지.
         """
+        # N16: relative path는 cwd(보통 backend 실행 디렉토리=workspace) 기준
+        # abs 변환. abspath는 stat 호출 없이 string join만이라 권한 영향 0.
+        if not os.path.isabs(path):
+            path = os.path.abspath(path)
+
         normalized_path = self._normalize_for_compare(path)
 
         # workspace bypass: project_root 하위는 cloudium 검사 면제

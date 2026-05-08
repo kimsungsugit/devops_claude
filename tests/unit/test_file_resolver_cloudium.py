@@ -235,6 +235,24 @@ def test_cloudium_workspace_bypass_does_not_leak_outside(monkeypatch, tmp_path):
         r._check_allowed(str(outside / "secret.txt"))
 
 
+def test_cloudium_workspace_bypass_resolves_relative_paths(monkeypatch, tmp_path):
+    """N16 fix: relative path(.devops_pro_cache 등)는 cwd 기준 abs 변환 후
+    workspace bypass 적용. frontend가 cache_root="." 같은 relative 보내는 시나리오 회귀."""
+    import os
+    monkeypatch.setattr(file_resolver, "is_gate_running", lambda *_a, **_k: True)
+    # cwd를 fake_workspace로 변경 — relative path가 그 안의 abs path가 됨
+    fake_workspace = tmp_path / "fake_workspace"
+    fake_workspace.mkdir()
+    monkeypatch.setattr(file_resolver, "_PROJECT_ROOT", fake_workspace)
+    monkeypatch.chdir(fake_workspace)
+
+    r = CloudiumFileResolver(allowed_prefixes="")
+    # relative path들 — cwd=fake_workspace 기준으로 abs 변환되어 bypass 통과
+    r._check_allowed(".devops_pro_cache")
+    r._check_allowed("reports/jobs.json")
+    r._check_allowed(".")
+
+
 # ── N9 fix (A): /api/scm/* exempt 검증 ─────────────────────────────────────
 
 
