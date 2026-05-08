@@ -173,8 +173,15 @@ def _is_exempt(path: str) -> bool:
     return False
 
 
-def _cloudium_blocked_response(message: str) -> JSONResponse:
-    """미들웨어 차단 응답 — frontend api.js의 detail 매칭과 일관성 유지."""
+def _cloudium_blocked_response(message: str, request_path: str = "") -> JSONResponse:
+    """미들웨어 차단 응답 — frontend api.js의 detail 매칭과 일관성 유지.
+
+    차단 메시지를 backend log에도 warning 출력하여 어떤 path가 어느 endpoint에서
+    막혔는지 즉시 진단 가능 (사용자 보고 시점에 backend log만 봐도 원인 파악).
+    """
+    import logging
+    _log = logging.getLogger("devops_api")
+    _log.warning("[cloudium-blocked] endpoint=%s detail=%s", request_path or "?", message)
     return JSONResponse(
         {
             "ok": False,
@@ -285,7 +292,7 @@ class CloudiumGateMiddleware(BaseHTTPMiddleware):
             for key, value in request.query_params.multi_items():
                 _check_path_value(key, value, resolver, validated)
         except PermissionError as e:
-            return _cloudium_blocked_response(str(e))
+            return _cloudium_blocked_response(str(e), request.url.path)
 
         # Body 검사 — JSON / multipart / urlencoded 모두 처리
         if request.method in ("POST", "PUT", "PATCH"):
@@ -310,7 +317,7 @@ class CloudiumGateMiddleware(BaseHTTPMiddleware):
                     for key, value in form.multi_items():
                         _check_path_value(key, value, resolver, validated)
             except PermissionError as e:
-                return _cloudium_blocked_response(str(e))
+                return _cloudium_blocked_response(str(e), request.url.path)
 
             # body 재구성 — endpoint가 다시 읽을 수 있도록
             async def _receive():
