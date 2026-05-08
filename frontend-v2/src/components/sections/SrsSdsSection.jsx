@@ -161,6 +161,8 @@ export default function SrsSdsSection({ job, analysisResult }) {
               }
             }
             dataSources.push(`STS: ${stsData.vcast_rows.length}건`);
+          } else if (Array.isArray(stsData?.available_sheets)) {
+            stepWarnings.push(`STS: ${stsData.error || '시트 미인식'}. 사용 가능한 시트: ${stsData.available_sheets.join(', ')}`);
           }
         } catch (e) {
           stepWarnings.push(`STS 추출 실패: ${e.message}`);
@@ -181,6 +183,8 @@ export default function SrsSdsSection({ job, analysisResult }) {
               }
             }
             dataSources.push(`SUTS: ${sutsData.vcast_rows.length}건`);
+          } else if (Array.isArray(sutsData?.available_sheets)) {
+            stepWarnings.push(`SUTS: ${sutsData.error || '시트 미인식'}. 사용 가능한 시트: ${sutsData.available_sheets.join(', ')}`);
           }
         } catch (e) {
           stepWarnings.push(`SUTS 추출 실패: ${e.message}`);
@@ -198,6 +202,8 @@ export default function SrsSdsSection({ job, analysisResult }) {
               if (row.requirement_id) exactCoveredReqs.add(row.requirement_id.toUpperCase());
             }
             dataSources.push(`SITS: ${sitsData.vcast_rows.length}건`);
+          } else if (Array.isArray(sitsData?.available_sheets)) {
+            stepWarnings.push(`SITS: ${sitsData.warning || sitsData.error || '시트 미인식'}. 사용 가능한 시트: ${sitsData.available_sheets.join(', ')}`);
           }
         } catch (e) {
           stepWarnings.push(`SITS 추출 실패: ${e.message}`);

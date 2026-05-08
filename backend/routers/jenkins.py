@@ -2656,18 +2656,34 @@ def jenkins_sts_extract_traceability(body: Dict[str, Any]) -> Dict[str, Any]:
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Excel 읽기 실패: {exc}")
 
-    # Find traceability sheet
+    # Find traceability sheet — 우선순위:
+    # 1) body의 sheet_name이 명시되면 그 시트 사용 (외부 도구 생성 파일 대응)
+    # 2) "traceability" / "trace" / "tc" / "test case" / "test spec" / "사양" / "트레이스" 등 자동 탐색
+    # 3) 미발견 시 available_sheets와 함께 안내 — frontend가 사용자에게 시트 선택 노출 가능
     trace_ws = None
     trace_type = None
-    for name in wb.sheetnames:
-        if "traceability" in name.lower():
-            trace_ws = wb[name]
-            trace_type = "matrix" if "SwRS" in name or "swrs" in name.lower() else "list"
-            break
+    sheet_name_arg = str(body.get("sheet_name", "")).strip()
+    if sheet_name_arg and sheet_name_arg in wb.sheetnames:
+        trace_ws = wb[sheet_name_arg]
+        trace_type = "matrix" if "swrs" in sheet_name_arg.lower() else "list"
+    else:
+        _trace_keywords = ("traceability", "trace", " tc", "test case", "testcase", "test spec", "사양", "트레이스")
+        for name in wb.sheetnames:
+            nl = name.lower()
+            if any(kw in nl for kw in _trace_keywords) or nl.strip() == "tc":
+                trace_ws = wb[name]
+                trace_type = "matrix" if "swrs" in nl else "list"
+                break
 
     if not trace_ws:
+        all_sheets = list(wb.sheetnames)
         wb.close()
-        return {"ok": False, "error": "Traceability 시트를 찾을 수 없습니다.", "vcast_rows": []}
+        return {
+            "ok": False,
+            "error": "Traceability 시트를 찾을 수 없습니다. sheet_name 인자로 명시하세요.",
+            "available_sheets": all_sheets,
+            "vcast_rows": [],
+        }
 
     vcast_rows = []
 
@@ -2828,12 +2844,19 @@ def jenkins_sits_extract_traceability(body: Dict[str, Any]) -> Dict[str, Any]:
     vcast_rows = []
     _MAX_EMPTY_ROWS = 50  # C3: break after N consecutive empty rows
 
-    # Strategy 1: Look for Traceability sheet (same as STS/SUTS)
+    # Strategy 1: Look for Traceability sheet — sheet_name 명시 + 자동 탐색 keyword 확장
+    # (외부 도구 생성 SITS 파일 대응 — N20 follow-up)
     trace_ws = None
-    for name in wb.sheetnames:
-        if "traceability" in name.lower():
-            trace_ws = wb[name]
-            break
+    sheet_name_arg = str(body.get("sheet_name", "")).strip()
+    if sheet_name_arg and sheet_name_arg in wb.sheetnames:
+        trace_ws = wb[sheet_name_arg]
+    else:
+        _trace_keywords = ("traceability", "trace", "test case", "testcase", "test spec", "사양", "트레이스")
+        for name in wb.sheetnames:
+            nl = name.lower()
+            if any(kw in nl for kw in _trace_keywords) or nl.strip() == "tc":
+                trace_ws = wb[name]
+                break
 
     if trace_ws:
         empty_streak = 0
@@ -2879,7 +2902,8 @@ def jenkins_sits_extract_traceability(body: Dict[str, Any]) -> Dict[str, Any]:
                 "vcast_rows": [],
                 "total_mappings": 0,
                 "requirements_covered": 0,
-                "warning": "SITS Traceability 또는 Integration Test 시트를 찾을 수 없습니다.",
+                "warning": "SITS Traceability 또는 Integration Test 시트를 찾을 수 없습니다. sheet_name 인자로 명시하세요.",
+                "available_sheets": list(wb.sheetnames),
             }
 
         # Find the Related ID column by scanning headers
