@@ -85,11 +85,13 @@ async def set_file_mode(body: FileModeRequest):
     from backend.services.file_resolver import switch_mode
     kwargs = body.model_dump(exclude={"mode"}, exclude_none=True)
     resolver = switch_mode(body.mode, **kwargs)
-    # cloudium 모드 전환 시 worker 자동 시작 시도 (이미 떠 있으면 skip)
+    # cloudium 모드 전환 시 worker 자동 시작 시도 (이미 떠 있으면 skip).
+    # 결과를 응답에 포함하여 frontend가 즉시 인지 가능 (W4).
+    worker_action: dict = {"action": "skipped_local_mode"}
     if body.mode == "cloudium":
         from backend.services.cloudium_worker_launcher import ensure_cloudium_worker_running
-        ensure_cloudium_worker_running()
-    return {"ok": True, **resolver.get_config()}
+        worker_action = ensure_cloudium_worker_running()
+    return {"ok": True, "cloudium_worker": worker_action, **resolver.get_config()}
 
 
 @router.post("/preview-excel")
