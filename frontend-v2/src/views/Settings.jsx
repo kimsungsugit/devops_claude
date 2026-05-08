@@ -456,6 +456,35 @@ function FileModeSection() {
   const [picking, setPicking] = useState(false);
   const [gateStatus, setGateStatus] = useState(null);
   const [pickedResult, setPickedResult] = useState(null);
+  const [autoTargetDoc, setAutoTargetDoc] = useState('srs');
+
+  // N25: 다이얼로그로 선택한 클라우디움 파일 경로를 자동화 입력으로 영속화.
+  // localStorage devops_v2_doc_paths(DocGenSection이 자동 활용하는 키)에 저장 →
+  // 문서 생성/추적성 매트릭스 화면에서 즉시 사용 가능.
+  const saveAsAutomationInput = () => {
+    if (!pickedResult?.path) {
+      toast('warning', '먼저 다이얼로그로 파일을 선택하세요.');
+      return;
+    }
+    try {
+      const existing = JSON.parse(localStorage.getItem('devops_v2_doc_paths') || '{}');
+      existing[autoTargetDoc] = pickedResult.path;
+      localStorage.setItem('devops_v2_doc_paths', JSON.stringify(existing));
+      toast('success', `${autoTargetDoc.toUpperCase()} 경로 저장됨 — 문서 생성/추적성 화면에서 자동 활용`);
+    } catch (e) {
+      toast('error', `저장 실패: ${e.message}`);
+    }
+  };
+
+  const copyPathToClipboard = async () => {
+    if (!pickedResult?.path) return;
+    try {
+      await navigator.clipboard.writeText(pickedResult.path);
+      toast('success', '경로 클립보드에 복사됨');
+    } catch (e) {
+      toast('error', `복사 실패: ${e.message}`);
+    }
+  };
   const [cloudiumCfg, setCloudiumCfg] = useState({
     allowed_prefixes: '',
     gate_process: '',
@@ -687,6 +716,40 @@ function FileModeSection() {
                   ) : (
                     <div className="text-sm" style={{ color: '#dc2626' }}>
                       ❌ <b>읽기 실패</b>: {pickedResult.error}
+                    </div>
+                  )}
+                  {pickedResult.ok && (
+                    <div style={{
+                      marginTop: 8, paddingTop: 8, borderTop: '1px solid var(--border)',
+                      display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center',
+                    }}>
+                      <span className="text-sm" style={{ marginRight: 4 }}>🤖 자동화 입력으로 저장:</span>
+                      <select
+                        value={autoTargetDoc}
+                        onChange={e => setAutoTargetDoc(e.target.value)}
+                        style={{ fontSize: 12 }}
+                      >
+                        <option value="srs">SRS (요구사항)</option>
+                        <option value="sds">SDS (아키텍처 설계)</option>
+                        <option value="hsis">HSIS (HW/SW 인터페이스)</option>
+                        <option value="stp">STP (테스트 계획)</option>
+                        <option value="uds">UDS (단위 설계)</option>
+                        <option value="sts">STS (테스트 사양)</option>
+                        <option value="suts">SUTS (단위테스트 사양)</option>
+                        <option value="sits">SITS (통합테스트 사양)</option>
+                      </select>
+                      <button
+                        type="button"
+                        className="btn-primary btn-sm"
+                        onClick={saveAsAutomationInput}
+                        title="이 경로를 선택한 doc 타입으로 영속화 (문서 생성/추적성 화면 자동 활용)"
+                      >저장</button>
+                      <button
+                        type="button"
+                        className="btn-sm"
+                        onClick={copyPathToClipboard}
+                        title="경로를 클립보드에 복사"
+                      >📋 복사</button>
                     </div>
                   )}
                 </div>
