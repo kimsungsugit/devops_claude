@@ -2667,7 +2667,10 @@ def jenkins_sts_extract_traceability(body: Dict[str, Any]) -> Dict[str, Any]:
         trace_ws = wb[sheet_name_arg]
         trace_type = "matrix" if "swrs" in sheet_name_arg.lower() else "list"
     else:
-        _trace_keywords = ("traceability", "trace", " tc", "test case", "testcase", "test spec", "사양", "트레이스")
+        # N23: keyword 좁힘 — "사양" 단독은 "기능 사양" 등 false positive 위험.
+        # "테스트 사양" / "test 사양" 처럼 test 컨텍스트 결합한 패턴만 매칭.
+        _trace_keywords = ("traceability", "trace", "test case", "testcase", "test spec",
+                            "테스트 사양", "테스트사양", "트레이스")
         for name in wb.sheetnames:
             nl = name.lower()
             if any(kw in nl for kw in _trace_keywords) or nl.strip() == "tc":
@@ -2851,7 +2854,9 @@ def jenkins_sits_extract_traceability(body: Dict[str, Any]) -> Dict[str, Any]:
     if sheet_name_arg and sheet_name_arg in wb.sheetnames:
         trace_ws = wb[sheet_name_arg]
     else:
-        _trace_keywords = ("traceability", "trace", "test case", "testcase", "test spec", "사양", "트레이스")
+        # N23: keyword 좁힘 — "사양" 단독은 false positive 위험. test 컨텍스트 결합만 매칭.
+        _trace_keywords = ("traceability", "trace", "test case", "testcase", "test spec",
+                            "테스트 사양", "테스트사양", "트레이스")
         for name in wb.sheetnames:
             nl = name.lower()
             if any(kw in nl for kw in _trace_keywords) or nl.strip() == "tc":

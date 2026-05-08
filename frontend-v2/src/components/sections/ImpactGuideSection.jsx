@@ -98,8 +98,12 @@ export default function ImpactGuideSection({ job, analysisResult }) {
       let stsTCs = [];
       if (linkedDocs.sts) {
         try {
-          const d = await post('/api/jenkins/sts/extract-traceability', { path: linkedDocs.sts });
+          const d = await post('/api/jenkins/sts/extract-traceability', { path: linkedDocs.sts, doc_type: 'sts' });
           stsTCs = d?.vcast_rows ?? [];
+          // N21: 외부 형식 SUTS/STS — 시트 미인식 시 사용자에게 명확 안내
+          if (!stsTCs.length && Array.isArray(d?.available_sheets) && typeof toast === 'function') {
+            toast('warning', `STS 시트 미인식. 사용 가능한 시트: ${d.available_sheets.join(', ')}`);
+          }
         } catch (_) {}
       }
 
@@ -107,8 +111,11 @@ export default function ImpactGuideSection({ job, analysisResult }) {
       let sutsTCs = [];
       if (linkedDocs.suts) {
         try {
-          const d = await post('/api/jenkins/sts/extract-traceability', { path: linkedDocs.suts });
+          const d = await post('/api/jenkins/sts/extract-traceability', { path: linkedDocs.suts, doc_type: 'suts' });
           sutsTCs = d?.vcast_rows ?? [];
+          if (!sutsTCs.length && Array.isArray(d?.available_sheets) && typeof toast === 'function') {
+            toast('warning', `SUTS 시트 미인식. 사용 가능한 시트: ${d.available_sheets.join(', ')}`);
+          }
         } catch (_) {}
       }
 
