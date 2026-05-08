@@ -35,10 +35,13 @@ def _emit(msg: str) -> None:
     }))
 
 
-def main() -> None:
-    try:
-        payload = json.load(sys.stdin)
-    except Exception:
+def main(payload: dict | None = None) -> None:
+    if payload is None:
+        try:
+            payload = json.load(sys.stdin)
+        except Exception:
+            return
+    if not isinstance(payload, dict):
         return
     fpath = _payload_file(payload)
     if not fpath or not fpath.endswith(".md"):

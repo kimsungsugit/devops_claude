@@ -54,6 +54,7 @@ project_docs/
 # === 대용량 / 바이너리 ===
 *.zip
 *.bak
+*.bak.*
 *.sqlite
 *.sqlite-wal
 *.sqlite-shm

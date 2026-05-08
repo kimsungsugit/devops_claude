@@ -67,9 +67,17 @@ ASIL 등급은 다음 순서로 판별한다:
 **Playwright MCP**: UI 검증이 필요하면 자동으로 브라우저 열어서 확인.
 **RAG/Knowledge Base**: 문서 생성 시 기존 지식베이스 자동 참조.
 
-### Settings/Hooks 변경 시 update-config 스킬 의무 사용
+### Settings/Hooks 변경 시 절차 (update-config 스킬 부재 정정)
 
-`.claude/settings.json` / `.claude/settings.local.json` / hooks / permissions / env 변경 시 직접 Edit 대신 `update-config` 스킬을 호출한다. 스킬이 schema 검증과 안전성 점검을 내장하고 있어 잘못된 hook JSON으로 세션 손상되는 것을 막아준다. **예외**: 단순 `permissions.allow` 항목 한두 개 추가는 직접 Edit 허용.
+`.claude/settings.json` / `.claude/settings.local.json` / hooks / permissions / env 변경 시 다음 절차 의무:
+
+1. **백업**: `cp .claude/settings.json .claude/settings.json.bak.YYYYMMDD` (롤백 안전망)
+2. **변경 후 parse 검증**: `python -c "import json; json.load(open('.claude/settings.json'))"` — 0 exit 아니면 즉시 백업 복원
+3. **hook 변경 시 스모크 테스트**: `echo '{}' | python scripts/<hook>.py` 빈 입력으로 silent 종료 확인
+
+**예외**: 단순 `permissions.allow` 항목 한두 개 추가는 직접 Edit 허용 (parse 검증만).
+
+> 이전 버전은 `update-config` 스킬 호출을 의무화했으나 해당 스킬이 `.claude/skills/`에 부재 (2026-05-08 정비 시 정정). 스킬 신규 작성은 별도 작업으로 예정.
 
 ### TaskCreate 선제화
 
