@@ -112,6 +112,13 @@ async def _lifespan(app_instance):
         from backend.services.cloudium_worker_launcher import ensure_cloudium_worker_running
         _api_logger.info("  Cloudium worker auto-start: %s", ensure_cloudium_worker_running())
 
+        # N18: 등록된 모든 SCM의 source_root/linked_docs를 allowed_prefixes에 자동 merge
+        try:
+            from backend.routers.scm import merge_all_scm_paths_to_cloudium
+            _api_logger.info("  SCM allowed_prefixes auto-merge: %s", merge_all_scm_paths_to_cloudium())
+        except Exception as _me:
+            _api_logger.warning("  SCM allowed_prefixes auto-merge 실패: %s", _me)
+
     yield  # 서버 실행 중
     _api_logger.info("DevOps Release Server shutting down")
 

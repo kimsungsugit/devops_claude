@@ -88,10 +88,25 @@ async def set_file_mode(body: FileModeRequest):
     # cloudium 모드 전환 시 worker 자동 시작 시도 (이미 떠 있으면 skip).
     # 결과를 응답에 포함하여 frontend가 즉시 인지 가능 (W4).
     worker_action: dict = {"action": "skipped_local_mode"}
+    scm_merge: dict = {"mode": "skipped_local"}
     if body.mode == "cloudium":
         from backend.services.cloudium_worker_launcher import ensure_cloudium_worker_running
         worker_action = ensure_cloudium_worker_running()
-    return {"ok": True, "cloudium_worker": worker_action, **resolver.get_config()}
+        # N18: 등록된 모든 SCM의 path를 allowed_prefixes에 자동 merge.
+        # 사용자가 SCM 수정 저장 안 해도 추적성/분석 통과.
+        try:
+            from backend.routers.scm import merge_all_scm_paths_to_cloudium
+            scm_merge = merge_all_scm_paths_to_cloudium()
+        except Exception as e:
+            scm_merge = {"merged_entries": 0, "mode": "error", "error": str(e)}
+    # 갱신된 resolver 상태로 응답 (merge 결과 반영)
+    from backend.services.file_resolver import get_resolver
+    return {
+        "ok": True,
+        "cloudium_worker": worker_action,
+        "scm_auto_merge": scm_merge,
+        **get_resolver().get_config(),
+    }
 
 
 @router.post("/preview-excel")

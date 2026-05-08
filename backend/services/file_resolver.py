@@ -367,6 +367,10 @@ class CloudiumFileResolver(LocalFileResolver):
                 return
 
         if not self.allowed_prefixes:
+            _logger.warning(
+                "[cloudium-check] BLOCKED (no allowed_prefixes) path=%s normalized=%s",
+                path, normalized_path,
+            )
             raise PermissionError(
                 f"Cloudium 모드: allowed_prefixes 미설정 — workspace/home 외부 경로 차단됨: {path}. "
                 "CLOUDIUM_ALLOWED_PREFIXES 환경변수 또는 /api/file-mode "
@@ -377,6 +381,10 @@ class CloudiumFileResolver(LocalFileResolver):
             if (normalized_path == normalized_prefix
                     or normalized_path.startswith(normalized_prefix + "/")):
                 return
+        _logger.warning(
+            "[cloudium-check] BLOCKED (no prefix match) path=%s normalized=%s allowed=%s",
+            path, normalized_path, self.allowed_prefixes,
+        )
         raise PermissionError(
             f"Cloudium 모드: 허용되지 않은 경로 접근 차단됨: {path}"
         )

@@ -34,6 +34,35 @@ router = APIRouter()
 _MERGE_LOCK = threading.Lock()
 
 
+def merge_all_scm_paths_to_cloudium() -> dict:
+    """N18 fix: 등록된 모든 SCM entry의 path를 cloudium allowed_prefixes에 일괄 merge.
+
+    backend startup + cloudium 모드 전환 시 호출. 사용자가 SCM 등록 후
+    backend 재시작 또는 처음 cloudium 전환 시 자동으로 모든 path 권한 복원 →
+    사용자가 SCM 수정 저장 안 해도 추적성/분석 endpoint 통과.
+
+    Returns: {"merged_entries": int, "mode": "cloudium" | "skipped_local"}
+    """
+    from backend.services.file_resolver import CloudiumFileResolver, get_resolver
+    from backend.services.scm_registry import list_registry_entries
+
+    if not isinstance(get_resolver(), CloudiumFileResolver):
+        return {"merged_entries": 0, "mode": "skipped_local"}
+
+    count = 0
+    for entry in list_registry_entries():
+        try:
+            _merge_paths_to_cloudium_prefixes(entry)
+            count += 1
+        except Exception as e:
+            import logging
+            logging.getLogger("devops_api").warning(
+                "SCM entry %s allowed_prefixes merge 실패: %s",
+                getattr(entry, "id", "?"), e,
+            )
+    return {"merged_entries": count, "mode": "cloudium"}
+
+
 def _merge_paths_to_cloudium_prefixes(entry: Any) -> None:
     """N9 fix (C): cloudium 모드에서 SCM 등록/수정 시 entry의 source_root 및
     linked_docs 부모 디렉토리를 allowed_prefixes에 자동 merge.
