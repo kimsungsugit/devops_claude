@@ -1324,11 +1324,12 @@ def test_read_bytes_raises_when_worker_returns_legacy_string(monkeypatch, tmp_pa
         w.close()
 
 
-def test_read_bytes_blocks_legacy_string_when_size_exceeds_threshold(monkeypatch, tmp_path):
-    """N19: 옛 worker가 큰 파일(>=3.5MB) string으로 반환 시 PermissionError —
-    4MB chunk 경계 silent truncation 위험 차단."""
+def test_read_bytes_legacy_string_passes_for_large_files(monkeypatch, tmp_path):
+    """N19 (revised): 옛 worker가 chunking 무시하고 큰 파일을 통째 string으로
+    반환하면 통과. 사용자 SUDS docx(38MB) 같은 실제 시나리오 — worker가 통째
+    반환이면 truncation 자체가 발생 안 함."""
     monkeypatch.setattr(file_resolver, "is_gate_running", lambda *_a, **_k: True)
-    big_payload = b"x" * (4 * 1024 * 1024)  # 4MB → 임계값 초과
+    big_payload = b"x" * (4 * 1024 * 1024)  # 4MB
     handlers = {
         "ping": lambda args: "pong",
         "read_bytes": lambda args: base64.b64encode(big_payload).decode("ascii"),
@@ -1341,8 +1342,7 @@ def test_read_bytes_blocks_legacy_string_when_size_exceeds_threshold(monkeypatch
         from backend.services.file_resolver import mark_path_validated, reset_path_validated
         token = mark_path_validated([str(tmp_path / "big.bin")])
         try:
-            with pytest.raises(PermissionError, match="silent truncation|재빌드"):
-                r.read_bytes(str(tmp_path / "big.bin"))
+            assert r.read_bytes(str(tmp_path / "big.bin")) == big_payload
         finally:
             reset_path_validated(token)
     finally:

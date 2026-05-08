@@ -441,10 +441,6 @@ class CloudiumFileResolver(LocalFileResolver):
     # buffer/메모리 부담 적은 sweet spot.
     _CHUNK_SIZE = 4 * 1024 * 1024
 
-    # silent truncation 위험 임계값 — 옛 worker 응답 size가 이보다 크면
-    # 4MB chunk 경계에서 잘렸을 수 있어 차단. 일반 docx/xlsx(<3.5MB)는 통과.
-    _LEGACY_SAFE_SIZE = 3 * 1024 * 1024 + 512 * 1024  # 3.5MB
-
     def read_bytes(self, path: str) -> bytes:
         """worker IPC로 파일 read. 큰 파일은 4MB chunk로 누적 read하여 OOM 방지.
 
@@ -465,7 +461,12 @@ class CloudiumFileResolver(LocalFileResolver):
                                   {"path": path, "offset": offset,
                                    "length": self._CHUNK_SIZE},
                                   timeout=60.0)
-            # N19: 옛 worker(chunking 미지원) backward-compat — string 응답 처리
+            # N19 (revised): 옛 worker(chunking 미지원) backward-compat — string 응답
+            # offset > 0인 상태에서 string 응답 = chunking 인자를 받았는데도 매번
+            # 전체 파일을 반환하는 broken state → 차단. offset == 0의 첫 응답은
+            # 통째로 반환됐으면 truncation 자체가 발생 안 한 것이므로 통과
+            # (W5 fix의 본래 의도였던 "silent 잘림"은 chunking 인자를 따라 잘려서
+            # 응답한 케이스만 해당. 옛 worker는 통째 반환이라 별개 시나리오).
             if isinstance(resp, str):
                 if offset > 0:
                     raise PermissionError(
@@ -476,14 +477,10 @@ class CloudiumFileResolver(LocalFileResolver):
                     decoded = base64.b64decode(resp) if resp else b""
                 except Exception as e:
                     raise PermissionError(f"Cloudium worker 응답 base64 디코드 실패: {e}")
-                if len(decoded) >= self._LEGACY_SAFE_SIZE:
-                    raise PermissionError(
-                        f"Cloudium worker(chunking 미지원)가 큰 파일({len(decoded)} bytes) 반환 — "
-                        "4MB 경계에서 silent truncation 위험. 최신 worker 재빌드 후 재시도하세요."
-                    )
                 _logger.warning(
                     "[cloudium-read] 옛 worker(chunking 미지원) backward-compat read. "
-                    "path=%s size=%d (worker 재빌드 권장)", path, len(decoded),
+                    "path=%s size=%d (worker 재빌드 권장 — 매우 큰 파일에서 메모리 부담)",
+                    path, len(decoded),
                 )
                 return decoded
             if not isinstance(resp, dict):
