@@ -2244,14 +2244,37 @@ async def jenkins_uds_requirements_preview(
             text = ""
         if text:
             req_texts.append(text.strip())
+    # N20 fix: cloudium 모드에서 backend python.exe는 클라우디움 폴더 권한 없음
+    # → Path.exists() / _read_text_from_file의 직접 read 모두 실패. resolver를
+    # 통해 worker IPC로 read 후 임시 파일에 저장 → _read_text_from_file 호출.
+    # local 모드에서는 resolver.read_bytes도 직접 read이라 동일 동작.
+    from backend.services.file_resolver import get_resolver
+    from backend.services.resolver_helpers import enforce_resolver_access
+    _resolver = get_resolver()
     for path_str in _parse_path_list(req_paths):
+        text = ""
         try:
-            p = Path(path_str).expanduser().resolve()
-            if not p.exists() or not p.is_file():
+            enforce_resolver_access(path_str)  # cloudium 게이트 + 화이트리스트
+            if not _resolver.exists(path_str):
                 continue
-            if not _is_allowed_req_doc(p):
+            suffix = Path(path_str).suffix or ".txt"
+            if not _is_allowed_req_doc(Path(path_str)):
                 continue
-            text = _read_text_from_file(p)
+            data = _resolver.read_bytes(path_str)
+            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+                tmp.write(data)
+                tmp_p = Path(tmp.name)
+            try:
+                text = _read_text_from_file(tmp_p)
+            except Exception:
+                text = ""
+            finally:
+                try:
+                    tmp_p.unlink()
+                except Exception:
+                    pass
+        except (PermissionError, OSError):
+            text = ""
         except Exception:
             text = ""
         if text:
