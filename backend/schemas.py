@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 # ── Session ───────────────────────────────────────────────────────────
@@ -616,3 +616,47 @@ class UdsTraceabilityMatrixRequest(BaseModel):
     job_url: Optional[str] = None
     cache_root: Optional[str] = None
     build_selector: Optional[str] = None
+
+
+# ── SwUT Builder (8차 라운드) ─────────────────────────────────────────
+
+class SwUTBuildRequest(BaseModel):
+    """SwUT Coverage Report / SUTR 빌드 공통 request body.
+
+    입력 표면 매트릭스 ✗ 4개 (deep-reviewer X3) endpoint 단에서 차단:
+      - release_sw_version: regex \\d+\\.\\d+(\\.\\d+)? 필수
+      - test_engineer / reviewer / approver: maxlen 100, 줄바꿈 금지
+      - doc_id_sequence: digit only
+      - test_date: yyyy-mm-dd / yyyy/mm/dd
+    """
+    # 필수
+    project_id: str = Field(..., min_length=1, max_length=50)
+    release_sw_version: str = Field(..., pattern=r"^\d+\.\d+(\.\d+)?$")
+    test_date: str = Field(..., pattern=r"^\d{2,4}[-/]\d{1,2}[-/]\d{1,2}")
+
+    # 선택 (default 또는 config fallback)
+    test_engineer: str = Field("", max_length=100)
+    doc_id_sequence: str = Field("", pattern=r"^\d*$")
+    hw_version: str = Field("1.00", max_length=20)
+    asil_level: str = Field("ASIL A", max_length=20)
+
+    # 입력 소스 (Jenkins 우선, log_folder fallback)
+    jenkins_build_number: Optional[int] = None
+    cache_root: str = ""
+    log_folder: Optional[str] = None
+    template_path: str = ""  # cloudium/local 경로 또는 빈 string (config default 사용)
+
+    # 인사 메타 (선택)
+    reviewer_override: str = Field("", max_length=100)
+    approver_override: str = Field("", max_length=100)
+    validation_date: str = ""
+
+    # Deviation cases (선택, swut_deviation_generator 사전 호출 결과 주입 가능)
+    deviation_cases: List[Dict[str, Any]] = []
+
+    @field_validator("test_engineer", "reviewer_override", "approver_override")
+    @classmethod
+    def _no_newline(cls, v: str) -> str:
+        if "\n" in v or "\r" in v:
+            raise ValueError("줄바꿈 문자 금지 — 단일 라인 필요")
+        return v

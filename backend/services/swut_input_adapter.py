@@ -443,20 +443,161 @@ def collect_from_log_folder(
 # ---------------------------------------------------------------------------
 
 def collect_from_jenkins_cache(
+    resolver: Any,
     project_id: str,
+    cache_root: str,
     build_number: int | None = None,
     parse_warnings: list[str] | None = None,
+    allowed_roots: list[str] | None = None,
 ) -> SwUTSession | None:
-    """Jenkins build cache에서 SWTE 출력 수집.
+    """Jenkins build cache에서 SWTE 출력 수집 (T140 — 8차 라운드).
 
-    현재 라운드: 인터페이스만 정의. 실제 구현은 ``backend/services/jenkins_adapter.py``
-    의 ``scan_jenkins_build_root`` 와 통합 작업으로 다음 라운드 예정.
+    ``backend/services/jenkins_adapter.scan_jenkins_build_root`` 로 build root를
+    스캔하면 html_files list가 반환된다. 본 함수는 그 결과를 SWTE 환경
+    (TestCaseData/ExecutionResult/AggregateCoverage 3 파일) 으로 그룹핑해
+    ``log_folder`` 흐름과 동일한 변환 layer로 SwUTSession 을 구성한다.
+
+    Args:
+        resolver: file_resolver — 일반적으로 local (Jenkins cache는 local 디렉토리).
+        project_id: 예) "HDPDM01".
+        cache_root: Jenkins build cache root (예: ``.devops_pro_cache/jenkins``).
+        build_number: Jenkins build 번호. None이면 ``latest`` 폴더 시도.
+        parse_warnings: 호출자 전달 — 빈 환경 / scan 실패 사유 누적.
+        allowed_roots: path traversal 방어 (endpoint 노출 시 의무).
+
+    Returns:
+        ``SwUTSession`` (환경 정상 수집) 또는 ``None`` (cache root 미발견 등).
     """
+    import os
+    import re
+    from pathlib import Path as _P
+
     warnings = parse_warnings if parse_warnings is not None else []
-    warnings.append(
-        "Jenkins cache fetcher는 아직 미구현 — log_folder fallback 사용 필요"
+
+    # T140 path traversal 방어
+    if allowed_roots is not None:
+        abs_cache = str(_P(cache_root).resolve()).replace("\\", "/").lower()
+        ok = False
+        for root in allowed_roots:
+            abs_root = str(_P(root).resolve()).replace("\\", "/").lower()
+            if abs_cache.startswith(abs_root.rstrip("/") + "/") or abs_cache == abs_root:
+                ok = True
+                break
+        if not ok:
+            raise ValueError(
+                f"cache_root '{cache_root}' is not within allowed_roots {allowed_roots}"
+            )
+
+    if not os.path.isdir(cache_root):
+        warnings.append(f"Jenkins cache_root 미발견: {cache_root}")
+        return None
+
+    # build_root 결정 — <cache_root>/<project_id>/<build_number>
+    project_dir = os.path.join(cache_root, project_id)
+    if not os.path.isdir(project_dir):
+        warnings.append(f"Jenkins project_dir 미발견: {project_dir}")
+        return None
+
+    if build_number is not None:
+        build_root = os.path.join(project_dir, str(build_number))
+    else:
+        # latest: 숫자 폴더 중 가장 큰 번호
+        candidates = [
+            d for d in os.listdir(project_dir)
+            if d.isdigit() and os.path.isdir(os.path.join(project_dir, d))
+        ]
+        if not candidates:
+            warnings.append(f"Jenkins build 폴더 0개 in {project_dir}")
+            return None
+        build_root = os.path.join(project_dir, max(candidates, key=int))
+
+    if not os.path.isdir(build_root):
+        warnings.append(f"Jenkins build_root 미발견: {build_root}")
+        return None
+
+    # jenkins_adapter.scan_jenkins_build_root — html 파일 enumerate
+    try:
+        from backend.services.jenkins_adapter import scan_jenkins_build_root
+        scan = scan_jenkins_build_root(_P(build_root))
+    except Exception as e:
+        warnings.append(f"scan_jenkins_build_root 실패: {type(e).__name__}: {e}")
+        return None
+
+    html_files = scan.get("html_files") or []
+    # SWTE_xx_* 파일만 추출 + 3 타입별 분류
+    swte_re = re.compile(r"SWTE_\d+")
+    env_groups: dict[str, dict[str, str]] = {}
+    for f in html_files:
+        name = _P(f).name
+        m = swte_re.match(name)
+        if not m:
+            continue
+        env = m.group(0)
+        if "test_case_data" in name:
+            kind = "tc"
+        elif "execution_results" in name:
+            kind = "exec"
+        elif "aggregate_coverage" in name:
+            kind = "cov"
+        else:
+            continue
+        env_groups.setdefault(env, {})[kind] = f
+
+    if not env_groups:
+        warnings.append(
+            f"Jenkins build_root에서 SWTE_xx html 파일 0건: {build_root}"
+        )
+        return None
+
+    session = SwUTSession(
+        project_id=project_id,
+        version=f"jenkins-build-{build_number}" if build_number else "jenkins-latest",
+        source_kind="jenkins_cache",
+        source_path=build_root,
+        parse_warnings=warnings,
     )
-    return None
+
+    # 각 환경마다 3 파일 변환 — log_folder 흐름과 동일 layer 사용
+    for env_name, kinds in sorted(env_groups.items()):
+        env_data = EnvironmentData(env_name=env_name)
+
+        # TestCaseData
+        tc_path = kinds.get("tc")
+        if tc_path:
+            try:
+                tcbank = _parse_testcase_data_via_temp(resolver, tc_path)
+                env_data.component_name = getattr(tcbank, "component_name", "")
+                env_data.environment_name = getattr(tcbank, "environment", "")
+                env_data.test_cases = dict(getattr(tcbank, "test_cases", {}) or {})
+                parse_err = getattr(tcbank, "parse_error", None)
+                if parse_err:
+                    env_data.parse_errors.append(f"TestCaseData: {parse_err}")
+            except Exception as e:
+                env_data.parse_errors.append(f"TestCaseData: {type(e).__name__}: {e}")
+
+        # ExecutionResult
+        exec_path = kinds.get("exec")
+        if exec_path:
+            try:
+                with open(exec_path, "rb") as fh:
+                    env_data.test_results = extract_execution_results(fh.read())
+            except Exception as e:
+                env_data.parse_errors.append(f"ExecutionResult: {type(e).__name__}: {e}")
+
+        # AggregateCoverage
+        cov_path = kinds.get("cov")
+        if cov_path:
+            try:
+                with open(cov_path, "rb") as fh:
+                    funcs, total = extract_aggregate_coverage(fh.read())
+                env_data.function_coverage = funcs
+                env_data.grand_total = total
+            except Exception as e:
+                env_data.parse_errors.append(f"AggregateCoverage: {type(e).__name__}: {e}")
+
+        session.environments.append(env_data)
+
+    return session
 
 
 # ---------------------------------------------------------------------------
@@ -468,6 +609,7 @@ def collect_swut_session(
     project_id: str,
     *,
     jenkins_build_number: int | None = None,
+    cache_root: str = "",
     log_folder: str | None = None,
     allowed_roots: list[str] | None = None,
 ) -> SwUTSession:
@@ -487,10 +629,12 @@ def collect_swut_session(
     """
     warnings: list[str] = []
 
-    # 1) Jenkins 시도
-    if jenkins_build_number is not None:
+    # 1) Jenkins 시도 (cache_root 제공 시)
+    if jenkins_build_number is not None and cache_root:
         session = collect_from_jenkins_cache(
-            project_id, jenkins_build_number, parse_warnings=warnings,
+            resolver, project_id, cache_root,
+            build_number=jenkins_build_number,
+            parse_warnings=warnings, allowed_roots=allowed_roots,
         )
         if session is not None and session.environments:
             session.parse_warnings = warnings
