@@ -18,6 +18,7 @@ ASIL A 한정 draft. B/C/D는 manual review 의무.
 """
 from __future__ import annotations
 
+import hashlib
 import io
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -34,6 +35,7 @@ from backend.services.excel_template_utils import (
     has_vba_macros,
     safe_write,
     short_date,
+    truncate_cell_text,
     validate_build_meta,
     validate_xlsx_template_bytes,
     write_value_after_label,
@@ -133,6 +135,9 @@ def _write_cover(ws, meta: SutrBuildMeta) -> None:
     if meta.doc_id_sequence:
         write_value_after_label(ws, "Doc. ID", f"{meta.doc_id_base}-{meta.doc_id_sequence}")
     write_value_after_label(ws, "Version", f"v{meta.release_sw_version}")
+    # 5차 L1 (ISO F3 추적성): Build Timestamp 라벨 — 라벨이 없으면 silent skip OK,
+    # 회사 v3.01 template은 이 라벨이 없을 수도 있어 함수 반환값은 무시.
+    write_value_after_label(ws, "Build Timestamp", meta.build_timestamp)
 
 
 def _write_test_summary(ws, meta: SutrBuildMeta, agg: dict[str, Any]) -> None:
@@ -158,24 +163,23 @@ def _write_test_summary(ws, meta: SutrBuildMeta, agg: dict[str, Any]) -> None:
 def _deviation_case_fields(case: Any) -> tuple[str, str, str, str] | None:
     """case → (tc_id, tc_no, issue_text, auto_rationale).
 
-    deep-reviewer W6/X7: dict/DeviationCase 외 shape는 명시적 거부 (silent skip 차단).
-    None 반환 시 호출자가 skip + warning.
+    deep-reviewer W6/X7: dict/DeviationCase 외 shape는 명시적 거부.
+    5차 H3 Critical: issue_text/auto_rationale은 xlsx 셀 한도 방어용 truncate.
     """
     if isinstance(case, dict):
         tc_id_v = str(case.get("tc_id", "") or "")
         tc_no_v = str(case.get("tc_no", "") or "")
         if not tc_id_v:
             return None
-        return (tc_id_v, tc_no_v,
-                str(case.get("issue_text", "") or ""),
-                str(case.get("auto_rationale", "") or ""))
-    # dataclass / 객체 — getattr 기반 통일
+        issue, _ = truncate_cell_text(case.get("issue_text", ""))
+        rationale, _ = truncate_cell_text(case.get("auto_rationale", ""))
+        return (tc_id_v, tc_no_v, issue, rationale)
     tc_id = getattr(case, "tc_id", None)
     if not tc_id:
         return None
-    return (str(tc_id), str(getattr(case, "tc_no", "") or ""),
-            str(getattr(case, "issue_text", "") or ""),
-            str(getattr(case, "auto_rationale", "") or ""))
+    issue, _ = truncate_cell_text(getattr(case, "issue_text", ""))
+    rationale, _ = truncate_cell_text(getattr(case, "auto_rationale", ""))
+    return (str(tc_id), str(getattr(case, "tc_no", "") or ""), issue, rationale)
 
 
 def _write_deviation(ws, deviation_cases: list[Any], out_warnings: list[str] | None = None) -> int:
@@ -267,10 +271,20 @@ def build_sutr(
     if openpyxl is None:
         raise RuntimeError("openpyxl is required for SwUT SUTR builder")
 
-    # deep-reviewer X3: 입력 메타 검증.
-    validate_build_meta(meta.release_sw_version, meta.test_date)
+    # deep-reviewer X3 + 5차 H1/H2: 입력 메타 종합 검증.
+    validate_build_meta(
+        meta.release_sw_version, meta.test_date,
+        doc_id_sequence=meta.doc_id_sequence,
+        test_engineer=meta.test_engineer,
+        author=meta.default_author,
+        approver=meta.default_approver or meta.approver_override,
+        reviewer=meta.default_reviewer or meta.reviewer_override,
+    )
     # Critical (reviewer S): ZIP bomb / magic byte 검증.
     validate_xlsx_template_bytes(template_bytes, label="SUTR template")
+
+    # 5차 L1 (ISO F3 추적성): 입력 template hash — audit 시 입력 동일성 검증용.
+    template_sha256_12 = hashlib.sha256(template_bytes).hexdigest()[:12]
 
     warnings: list[str] = []
     # deep-reviewer W2: VBA 매크로 ZIP entry 존재 여부 사전 측정.
@@ -338,6 +352,8 @@ def build_sutr(
         f"v{meta.release_sw_version}_{short_date(meta.test_date)}_R.xlsm"
     )
 
+    summary["template_sha256_12"] = template_sha256_12
+    summary["build_timestamp"] = meta.build_timestamp
     return SutrBuildResult(
         ok=True,
         xlsm_bytes=xlsm_bytes,

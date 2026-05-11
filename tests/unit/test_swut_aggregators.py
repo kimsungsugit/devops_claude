@@ -252,6 +252,16 @@ class TestBuildCoverageReport:
         with pytest.raises(BuildMetaValidationError, match="release_sw_version"):
             build_coverage_report(session, meta, _build_coverage_template())
 
+    def test_audit_meta_in_summary(self):
+        """5차 L1 ISO F3: build_timestamp + template_sha256_12 audit 추적성."""
+        session = _make_session()
+        meta = CoverageBuildMeta(release_sw_version="1.01.05", test_date="2024-02-19")
+        result = build_coverage_report(session, meta, _build_coverage_template())
+        assert "template_sha256_12" in result.summary
+        assert len(result.summary["template_sha256_12"]) == 12
+        assert "build_timestamp" in result.summary
+        assert result.summary["build_timestamp"]  # 빈 string 아님
+
 
 # ---------------------------------------------------------------------------
 # SUTR aggregator

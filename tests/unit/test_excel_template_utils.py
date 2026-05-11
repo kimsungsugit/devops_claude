@@ -152,6 +152,48 @@ class TestValidateBuildMeta:
         with pytest.raises(BuildMetaValidationError, match="형식 미충족"):
             validate_build_meta("1.01.05", "Feb 19 2024")
 
+    def test_test_engineer_with_newline_rejected(self):
+        """5차 H1 Critical: 줄바꿈 포함 이름 거부 (xlsx 셀 깨짐 방지)."""
+        with pytest.raises(BuildMetaValidationError, match="줄바꿈"):
+            validate_build_meta("1.0.0", "2024-02-19", test_engineer="X\nY")
+
+    def test_test_engineer_too_long_rejected(self):
+        with pytest.raises(BuildMetaValidationError, match="길이"):
+            validate_build_meta("1.0.0", "2024-02-19", test_engineer="A" * 101)
+
+    def test_doc_id_sequence_non_digit_rejected(self):
+        """5차 H2 Warning: doc_id_sequence digit만 허용."""
+        with pytest.raises(BuildMetaValidationError, match="doc_id_sequence"):
+            validate_build_meta("1.0.0", "2024-02-19", doc_id_sequence="abc")
+
+    def test_doc_id_sequence_empty_ok(self):
+        validate_build_meta("1.0.0", "2024-02-19", doc_id_sequence="")
+        validate_build_meta("1.0.0", "2024-02-19", doc_id_sequence="851")
+
+
+class TestTruncateCellText:
+    """5차 H3 Critical: xlsx 셀 한도 방어 truncate."""
+
+    def test_short_text_unchanged(self):
+        from backend.services.excel_template_utils import truncate_cell_text
+        s, truncated = truncate_cell_text("hello")
+        assert s == "hello"
+        assert truncated is False
+
+    def test_long_text_truncated(self):
+        from backend.services.excel_template_utils import truncate_cell_text
+        long = "A" * 5000
+        s, truncated = truncate_cell_text(long)
+        assert truncated is True
+        assert len(s) <= 2050  # 2000 + " …(truncated)" 마진
+        assert s.endswith("…(truncated)")
+
+    def test_none_returns_empty(self):
+        from backend.services.excel_template_utils import truncate_cell_text
+        s, truncated = truncate_cell_text(None)
+        assert s == ""
+        assert truncated is False
+
 
 class TestSheetIsBlankPlaceholder:
     """deep-reviewer 시나리오 A: placeholder 시트 감지."""

@@ -22,6 +22,7 @@
 """
 from __future__ import annotations
 
+import hashlib
 import io
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -154,6 +155,8 @@ def _write_cover_sheet(ws, meta: CoverageBuildMeta) -> None:
     if meta.doc_id_sequence:
         doc_id = f"{meta.doc_id_base}-{meta.doc_id_sequence}"
         write_value_after_label(ws, "Doc. ID", doc_id)
+    # 5차 L1 (ISO F3): Build Timestamp 라벨 — 회사 template에 없으면 silent skip OK.
+    write_value_after_label(ws, "Build Timestamp", meta.build_timestamp)
 
 
 def _write_test_summary_sheet(ws, meta: CoverageBuildMeta, agg: dict[str, Any]) -> None:
@@ -254,10 +257,20 @@ def build_coverage_report(
     if openpyxl is None:
         raise RuntimeError("openpyxl is required for SwUT Coverage Report builder")
 
-    # deep-reviewer X3: 입력 메타 검증 (빈 string / 형식 미충족 거부).
-    validate_build_meta(meta.release_sw_version, meta.test_date)
+    # deep-reviewer X3 + 5차 H1/H2: 입력 메타 종합 검증.
+    validate_build_meta(
+        meta.release_sw_version, meta.test_date,
+        doc_id_sequence=meta.doc_id_sequence,
+        test_engineer=meta.test_engineer,
+        author=meta.default_author,
+        approver=meta.default_approver or meta.approver_override,
+        reviewer=meta.default_reviewer or meta.reviewer_override,
+    )
     # Critical (reviewer S): ZIP bomb / magic byte 검증.
     validate_xlsx_template_bytes(template_bytes, label="Coverage Report template")
+
+    # 5차 L1: 입력 template hash — audit 추적성.
+    template_sha256_12 = hashlib.sha256(template_bytes).hexdigest()[:12]
 
     warnings: list[str] = []
     wb: Workbook = openpyxl.load_workbook(io.BytesIO(template_bytes), data_only=False)
@@ -324,6 +337,8 @@ def build_coverage_report(
         f"v{meta.release_sw_version}_{short_date(meta.test_date)}_R.xlsx"
     )
 
+    summary["template_sha256_12"] = template_sha256_12
+    summary["build_timestamp"] = meta.build_timestamp
     return CoverageBuildResult(
         ok=True,
         xlsx_bytes=xlsx_bytes,

@@ -40,8 +40,50 @@ _RELEASE_VERSION_RE = re.compile(r"^\d+\.\d+(\.\d+)?$")
 _TEST_DATE_RE = re.compile(r"^\d{2,4}[-/]\d{1,2}[-/]\d{1,2}")
 
 
-def validate_build_meta(release_sw_version: str, test_date: str) -> None:
-    """빌더 진입에서 필수 입력 검증 (deep-reviewer X3, 입력 표면 매트릭스 ✗ 차단).
+_MAX_NAME_LEN = 100   # 사람 이름 / Test Engineer / Author 등 최대 길이
+_MAX_ISSUE_TEXT_LEN = 2000  # deviation issue_text 셀 한도 (xlsx 32767 한도보다 훨씬 작게)
+_DOC_ID_SEQ_RE = re.compile(r"^\d+$")
+
+
+def _safe_repr(v: str, limit: int = 40) -> str:
+    """reviewer X8: 에러 메시지에 사용자 입력 그대로 노출 안 되도록 truncate + repr."""
+    return repr(v)[:limit]
+
+
+def validate_name_field(value: str, field_name: str, *, allow_empty: bool = True) -> None:
+    """test_engineer/author/approver/reviewer 등 사람 이름 필드 검증 (H1 Critical).
+
+    - 길이 100자 이내
+    - 줄바꿈(`\\n`/`\\r`) 금지 — xlsx 셀 깨짐 방지
+
+    Raises:
+        BuildMetaValidationError
+    """
+    if not value:
+        if allow_empty:
+            return
+        raise BuildMetaValidationError(f"{field_name} is empty")
+    if len(value) > _MAX_NAME_LEN:
+        raise BuildMetaValidationError(
+            f"{field_name} 길이 {len(value)} > {_MAX_NAME_LEN} 한도"
+        )
+    if "\n" in value or "\r" in value:
+        raise BuildMetaValidationError(
+            f"{field_name}에 줄바꿈 문자 포함 — 단일 라인 필요 (값={_safe_repr(value)})"
+        )
+
+
+def validate_build_meta(
+    release_sw_version: str,
+    test_date: str,
+    *,
+    doc_id_sequence: str = "",
+    test_engineer: str = "",
+    author: str = "",
+    approver: str = "",
+    reviewer: str = "",
+) -> None:
+    """빌더 진입에서 필수 입력 검증 (deep-reviewer X3 + 5차 H1/H2).
 
     Raises:
         BuildMetaValidationError: 빈 string / 형식 미충족 시.
@@ -52,14 +94,37 @@ def validate_build_meta(release_sw_version: str, test_date: str) -> None:
         )
     if not _RELEASE_VERSION_RE.match(release_sw_version.strip()):
         raise BuildMetaValidationError(
-            f"release_sw_version '{release_sw_version}' 형식 미충족 — '\\d+.\\d+(.\\d+)?' 필요"
+            f"release_sw_version {_safe_repr(release_sw_version)} 형식 미충족 — "
+            "'\\d+.\\d+(.\\d+)?' 필요"
         )
     if not test_date or not test_date.strip():
         raise BuildMetaValidationError("test_date is empty")
     if not _TEST_DATE_RE.match(test_date.strip()):
         raise BuildMetaValidationError(
-            f"test_date '{test_date}' 형식 미충족 — yyyy-mm-dd / yyyy/mm/dd 필요"
+            f"test_date {_safe_repr(test_date)} 형식 미충족 — yyyy-mm-dd / yyyy/mm/dd 필요"
         )
+    # H2: doc_id_sequence는 digit만 허용 (빈 string OK)
+    if doc_id_sequence and not _DOC_ID_SEQ_RE.match(doc_id_sequence):
+        raise BuildMetaValidationError(
+            f"doc_id_sequence {_safe_repr(doc_id_sequence)} 비-digit — Doc ID 체계 위반"
+        )
+    # H1: 사람 이름 필드 4개 검증
+    validate_name_field(test_engineer, "test_engineer")
+    validate_name_field(author, "author")
+    validate_name_field(approver, "approver")
+    validate_name_field(reviewer, "reviewer")
+
+
+def truncate_cell_text(value: Any, max_len: int = _MAX_ISSUE_TEXT_LEN) -> tuple[str, bool]:
+    """xlsx 셀 한도(32,767자) 훨씬 이내로 truncate (H3 — uncaught IllegalCharacterError 방어).
+
+    Returns:
+        (truncated_value, was_truncated)
+    """
+    s = str(value) if value is not None else ""
+    if len(s) <= max_len:
+        return (s, False)
+    return (s[:max_len] + " …(truncated)", True)
 
 
 def validate_xlsx_template_bytes(data: bytes, *, label: str = "template") -> None:
