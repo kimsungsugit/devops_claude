@@ -34,10 +34,11 @@ from backend.services.excel_template_utils import (
     has_vba_macros,
     safe_write,
     short_date,
+    validate_build_meta,
     validate_xlsx_template_bytes,
     write_value_after_label,
 )
-from backend.services.swut_input_adapter import SwUTSession
+from backend.services.swut_input_adapter import SwUTSession, aggregate_session
 
 
 @dataclass
@@ -115,33 +116,7 @@ class SutrBuildResult:
 # helper 함수는 backend/services/excel_template_utils.py 로 통합 (reviewer 권고 X5).
 
 
-def _aggregate(session: SwUTSession) -> dict[str, Any]:
-    total = 0
-    tested = 0
-    passed = 0
-    failed = 0
-    failed_tcs: list[tuple[str, str]] = []  # (env, tc_name)
-
-    for env in session.environments:
-        for tc_name, tc_list in env.test_cases.items():
-            total += len(tc_list) if tc_list else 1
-        for tc_name, r in env.test_results.items():
-            tested += 1
-            if r.passed:
-                passed += 1
-            else:
-                failed += 1
-                failed_tcs.append((env.env_name, tc_name))
-
-    return {
-        "total": total,
-        "tested": tested,
-        "passed": passed,
-        "failed": failed,
-        "failed_tcs": failed_tcs,
-        "deviated": 0,  # 본 라운드 미연결 (deviation_generator)
-        "not_executed": max(total - tested, 0),
-    }
+# _aggregate 는 swut_input_adapter.aggregate_session 으로 통합 (deep-reviewer W3).
 
 
 # ---------------------------------------------------------------------------
@@ -218,7 +193,7 @@ def _write_deviation(ws, deviation_cases: list[Any], out_warnings: list[str] | N
     start_row = pos[0] + 1
     written = 0
     skipped = 0
-    for i, case in enumerate(deviation_cases):
+    for case in deviation_cases:
         fields = _deviation_case_fields(case)
         if fields is None:
             skipped += 1
@@ -292,6 +267,8 @@ def build_sutr(
     if openpyxl is None:
         raise RuntimeError("openpyxl is required for SwUT SUTR builder")
 
+    # deep-reviewer X3: 입력 메타 검증.
+    validate_build_meta(meta.release_sw_version, meta.test_date)
     # Critical (reviewer S): ZIP bomb / magic byte 검증.
     validate_xlsx_template_bytes(template_bytes, label="SUTR template")
 
@@ -310,7 +287,7 @@ def build_sutr(
     )
     sheet_names = wb.sheetnames
 
-    agg = _aggregate(session)
+    agg = aggregate_session(session)
     summary = {
         "environments": len(session.environments),
         "total": agg["total"],

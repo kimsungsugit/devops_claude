@@ -30,6 +30,38 @@ class TemplateValidationError(ValueError):
     """xlsx/xlsm bytes 입력이 유효하지 않을 때 — ZIP bomb 방어용."""
 
 
+class BuildMetaValidationError(ValueError):
+    """빌더 입력 메타가 유효하지 않을 때 — endpoint 노출 전 입력 신뢰 경계 (deep-reviewer X3)."""
+
+
+# Hyundai/Mobis 표준 release 버전 형식. 미충족 시 파일명 깨짐(`_v__240219_R.xlsx`).
+_RELEASE_VERSION_RE = re.compile(r"^\d+\.\d+(\.\d+)?$")
+# yyyy-mm-dd 또는 yyyy/mm/dd 또는 yy-mm-dd
+_TEST_DATE_RE = re.compile(r"^\d{2,4}[-/]\d{1,2}[-/]\d{1,2}")
+
+
+def validate_build_meta(release_sw_version: str, test_date: str) -> None:
+    """빌더 진입에서 필수 입력 검증 (deep-reviewer X3, 입력 표면 매트릭스 ✗ 차단).
+
+    Raises:
+        BuildMetaValidationError: 빈 string / 형식 미충족 시.
+    """
+    if not release_sw_version or not release_sw_version.strip():
+        raise BuildMetaValidationError(
+            "release_sw_version is empty — 빈 string은 파일명 `_v__...` 깨짐"
+        )
+    if not _RELEASE_VERSION_RE.match(release_sw_version.strip()):
+        raise BuildMetaValidationError(
+            f"release_sw_version '{release_sw_version}' 형식 미충족 — '\\d+.\\d+(.\\d+)?' 필요"
+        )
+    if not test_date or not test_date.strip():
+        raise BuildMetaValidationError("test_date is empty")
+    if not _TEST_DATE_RE.match(test_date.strip()):
+        raise BuildMetaValidationError(
+            f"test_date '{test_date}' 형식 미충족 — yyyy-mm-dd / yyyy/mm/dd 필요"
+        )
+
+
 def validate_xlsx_template_bytes(data: bytes, *, label: str = "template") -> None:
     """xlsx/xlsm template bytes 검증 (Critical S — ZIP bomb / 헤더 위조 방어).
 
@@ -78,6 +110,35 @@ def validate_xlsx_template_bytes(data: bytes, *, label: str = "template") -> Non
     finally:
         # I3 (deep-reviewer): infolist 한도 초과로 raise 시에도 zf 명시적 close.
         zf.close()
+
+
+# 빌더가 placeholder 시트 (예: 1.Traceability TC×Function 매트릭스 미구현) 셀에 부착하는
+# 명시적 마커. consistency_checker / audit 도구가 같은 string으로 감지해서 evidence로
+# 잘못 분류하지 않도록 한다 (시나리오 A self-validation false positive 방어).
+BLANK_MARKUP = (
+    "BLANK — auto-generated placeholder (TC×Function matrix pending). "
+    "ISO 26262 evidence 사용 전 수동 작성 필수."
+)
+
+
+def sheet_is_blank_placeholder(ws: Any) -> bool:
+    """시트 anchor 영역(A1~A3, B1~B3)에 BLANK_MARKUP이 있는지 확인.
+
+    Returns:
+        True면 빌더가 작성한 placeholder 시트 — consistency_checker는 해당 시트의
+        데이터 추출을 skip하고 parse_warnings에 등록해야 함.
+    """
+    if ws is None:
+        return False
+    for r in range(1, 4):
+        for c in range(1, 4):
+            try:
+                v = ws.cell(row=r, column=c).value
+            except (AttributeError, IndexError):
+                continue
+            if v and isinstance(v, str) and v.startswith("BLANK"):
+                return True
+    return False
 
 
 def has_vba_macros(data: bytes) -> bool:

@@ -17,7 +17,7 @@ from backend.services.swut_input_adapter import (  # noqa: E402
     EnvironmentData,
     FunctionCoverage,
     SwUTSession,
-    TestExecution,
+    ExecutionRow,
     _extract_env_from_filename,
     _parse_metric_cell,
     collect_swut_session,
@@ -267,6 +267,31 @@ class TestCollectFromLogFolder:
         # 하위 폴더 미발견 + 환경 0건 warning 둘 다
         assert len(session.parse_warnings) >= 2
 
+    def test_allowed_roots_blocks_outside_path(self, tmp_path):
+        """deep-reviewer 시나리오 B: log_folder가 allowed_roots 밖이면 거부."""
+        from backend.services.swut_input_adapter import collect_from_log_folder
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        allowed = tmp_path / "allowed"
+        allowed.mkdir()
+        resolver = _FakeResolver({}, {str(outside)})
+        with pytest.raises(ValueError, match="not within allowed_roots"):
+            collect_from_log_folder(
+                resolver, str(outside), project_id="HDPDM01",
+                allowed_roots=[str(allowed)],
+            )
+
+    def test_allowed_roots_accepts_subdirectory(self, tmp_path):
+        from backend.services.swut_input_adapter import collect_from_log_folder
+        sub = tmp_path / "project" / "log"
+        sub.mkdir(parents=True)
+        resolver = _FakeResolver({}, {str(sub)})
+        session = collect_from_log_folder(
+            resolver, str(sub), project_id="HDPDM01",
+            allowed_roots=[str(tmp_path / "project")],
+        )
+        assert session.project_id == "HDPDM01"
+
 
 # ---------------------------------------------------------------------------
 # Dataclass shapes (regression — frontend 호환성)
@@ -282,7 +307,7 @@ class TestDataclassFields:
         assert e.parse_errors == []
 
     def test_test_execution_defaults(self):
-        te = TestExecution(tc_name="X.001")
+        te = ExecutionRow(tc_name="X.001")
         assert te.tc_name == "X.001"
         assert te.passed is False
         assert te.events == []

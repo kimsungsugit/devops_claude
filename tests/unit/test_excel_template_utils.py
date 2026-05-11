@@ -12,11 +12,15 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from backend.services.excel_template_utils import (  # noqa: E402
+    BLANK_MARKUP,
+    BuildMetaValidationError,
     TemplateValidationError,
     find_kv_row,
     resolve_merge_anchor,
     safe_write,
+    sheet_is_blank_placeholder,
     short_date,
+    validate_build_meta,
     validate_xlsx_template_bytes,
     write_value_after_label,
 )
@@ -119,3 +123,50 @@ class TestMergedCellHandling:
         # B1(머지된 non-anchor)에 쓰기 시도 → anchor로 보정되어 성공
         assert safe_write(ws, 1, 2, "X") is True
         assert ws["A1"].value == "X"  # anchor가 덮어쓰여짐
+
+
+class TestValidateBuildMeta:
+    """deep-reviewer X3: 빌더 입력 메타 검증."""
+
+    def test_valid_meta_passes(self):
+        validate_build_meta("1.01.05", "2024-02-19")
+        validate_build_meta("2.02", "2024/02/19")
+
+    def test_empty_release_rejected(self):
+        with pytest.raises(BuildMetaValidationError, match="release_sw_version is empty"):
+            validate_build_meta("", "2024-02-19")
+        with pytest.raises(BuildMetaValidationError, match="release_sw_version is empty"):
+            validate_build_meta("   ", "2024-02-19")
+
+    def test_invalid_release_format_rejected(self):
+        with pytest.raises(BuildMetaValidationError, match="형식 미충족"):
+            validate_build_meta("v1.01.05", "2024-02-19")
+        with pytest.raises(BuildMetaValidationError, match="형식 미충족"):
+            validate_build_meta("1.x.05", "2024-02-19")
+
+    def test_empty_date_rejected(self):
+        with pytest.raises(BuildMetaValidationError, match="test_date is empty"):
+            validate_build_meta("1.01.05", "")
+
+    def test_invalid_date_format_rejected(self):
+        with pytest.raises(BuildMetaValidationError, match="형식 미충족"):
+            validate_build_meta("1.01.05", "Feb 19 2024")
+
+
+class TestSheetIsBlankPlaceholder:
+    """deep-reviewer 시나리오 A: placeholder 시트 감지."""
+
+    def test_detects_blank_markup_in_a1(self):
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws["A1"] = BLANK_MARKUP
+        assert sheet_is_blank_placeholder(ws) is True
+
+    def test_no_blank_markup_returns_false(self):
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws["A1"] = "Normal data here"
+        assert sheet_is_blank_placeholder(ws) is False
+
+    def test_none_sheet_returns_false(self):
+        assert sheet_is_blank_placeholder(None) is False

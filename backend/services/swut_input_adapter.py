@@ -78,8 +78,13 @@ class FunctionCoverage:
 
 
 @dataclass
-class TestExecution:
-    """TC별 실행 결과 — SUTR Test Log 시트의 행."""
+class ExecutionRow:
+    """TC별 실행 결과 — SUTR Test Log 시트의 행.
+
+    이름이 ``TestExecution`` 이었으나 pytest의 ``Test`` prefix와 충돌해
+    collection warning이 매 라운드 누적되어 ``ExecutionRow`` 로 rename
+    (deep-reviewer X5).
+    """
     tc_name: str = ""             # 예: SwUFn_0101.001
     component: str = ""           # 예: SysOs_Main
     subprogram: str = ""          # 예: main
@@ -94,7 +99,7 @@ class EnvironmentData:
     component_name: str = ""      # 예: SysOs_Main
     environment_name: str = ""    # VectorCAST internal env name
     test_cases: dict[str, Any] = field(default_factory=dict)  # tc_name -> TestCaseItem (TCBank.test_cases)
-    test_results: dict[str, TestExecution] = field(default_factory=dict)
+    test_results: dict[str, ExecutionRow] = field(default_factory=dict)
     function_coverage: list[FunctionCoverage] = field(default_factory=list)
     grand_total: FunctionCoverage = field(default_factory=FunctionCoverage)
     parse_errors: list[str] = field(default_factory=list)
@@ -109,6 +114,60 @@ class SwUTSession:
     source_path: str = ""
     environments: list[EnvironmentData] = field(default_factory=list)
     parse_warnings: list[str] = field(default_factory=list)
+
+
+def aggregate_session(session: SwUTSession) -> dict[str, Any]:
+    """SwUTSession 의 통합 집계 (Coverage + SUTR 빌더 공통, deep-reviewer W3).
+
+    Keys:
+        total/total_tcs (alias) — test_cases 합
+        tested — test_results 합
+        passed/failed — execution pass 결과
+        failed_tcs — (env_name, tc_name) 페어
+        not_executed/not_executed_tcs — test_cases - test_results 차집합
+        function_count/function_rows — function_coverage 평탄화
+        tc_to_components — tc_name → set(component_name)
+        deviated — 0 (deviation_generator 결과는 빌더가 별도 주입)
+    """
+    total = 0
+    passed = 0
+    failed = 0
+    failed_tcs: list[tuple[str, str]] = []
+    not_executed_tcs: list[str] = []
+    all_functions: list[FunctionCoverage] = []
+    tc_to_components: dict[str, set[str]] = {}
+
+    for env in session.environments:
+        all_functions.extend(env.function_coverage)
+        for tc_name, tc_list in env.test_cases.items():
+            total += len(tc_list) if tc_list else 1
+            tc_to_components.setdefault(tc_name, set()).add(env.component_name)
+        for tc_name, r in env.test_results.items():
+            if r.passed:
+                passed += 1
+            else:
+                failed += 1
+                failed_tcs.append((env.env_name, tc_name))
+        # test_cases 키 - test_results 키 차집합 (실측 미실행)
+        tc_keys = set(env.test_cases.keys())
+        exec_keys = set(env.test_results.keys())
+        not_executed_tcs.extend(sorted(tc_keys - exec_keys))
+
+    tested = passed + failed
+    return {
+        "total": total,
+        "total_tcs": total,  # alias for backward compat
+        "tested": tested,
+        "passed": passed,
+        "failed": failed,
+        "failed_tcs": failed_tcs,
+        "not_executed_tcs": not_executed_tcs,
+        "not_executed": len(not_executed_tcs),
+        "function_count": len(all_functions),
+        "function_rows": all_functions,
+        "tc_to_components": tc_to_components,
+        "deviated": 0,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -197,7 +256,7 @@ def extract_aggregate_coverage(html_bytes: bytes) -> tuple[list[FunctionCoverage
     return (functions, grand_total)
 
 
-def extract_execution_results(html_bytes: bytes) -> dict[str, TestExecution]:
+def extract_execution_results(html_bytes: bytes) -> dict[str, ExecutionRow]:
     """SWTE ExecutionResult HTML → TC별 pass/fail + 이벤트 로그.
 
     `<h4 class="test-start-header">Start of SwUFn_0101.001</h4>` 같은 패턴
@@ -207,7 +266,7 @@ def extract_execution_results(html_bytes: bytes) -> dict[str, TestExecution]:
         raise RuntimeError("beautifulsoup4 is required for SWTE extractors")
     soup = BeautifulSoup(html_bytes, "html.parser")
 
-    results: dict[str, TestExecution] = {}
+    results: dict[str, ExecutionRow] = {}
 
     # 패턴 1: <h3 title="Execution Results">...Execution Results (PASS)</h3>
     # 각 testcase 섹션마다 1개씩
@@ -224,7 +283,7 @@ def extract_execution_results(html_bytes: bytes) -> dict[str, TestExecution]:
                 tc_name = m.group(1)
                 break
         if tc_name and tc_name not in results:
-            results[tc_name] = TestExecution(tc_name=tc_name, passed=passed)
+            results[tc_name] = ExecutionRow(tc_name=tc_name, passed=passed)
     return results
 
 
@@ -273,6 +332,7 @@ def collect_from_log_folder(
     project_id: str = "",
     version: str | None = None,
     parse_warnings: list[str] | None = None,
+    allowed_roots: list[str] | None = None,
 ) -> SwUTSession:
     """Log 폴더(`.../v<VER>_<DATE>/`)에서 모든 SWTE 환경 데이터 수집.
 
@@ -282,10 +342,31 @@ def collect_from_log_folder(
         project_id: HDPDM01 등.
         version: log_folder 끝 폴더명 (예: "v2.02_240219"). None이면 path에서 추출.
         parse_warnings: 호출자 전달 list — extract 실패 시 사유 append.
+        allowed_roots: 신뢰 가능한 root prefix 화이트리스트 — endpoint 노출 시점에
+            의무 주입 (deep-reviewer 시나리오 B / path traversal 방어).
+            ``None`` 이면 검증 skip (CLI/내부 호출 가정).
+
+    Raises:
+        ValueError: allowed_roots 지정 시 log_folder가 prefix에 속하지 않으면 거부.
 
     Returns:
         SwUTSession (environments 채워짐, parse_warnings 누적).
     """
+    # deep-reviewer 시나리오 B: path traversal 방어 — endpoint 노출 시 의무.
+    if allowed_roots is not None:
+        from pathlib import Path as _P
+        abs_log = str(_P(log_folder).resolve()).replace("\\", "/").lower()
+        ok = False
+        for root in allowed_roots:
+            abs_root = str(_P(root).resolve()).replace("\\", "/").lower()
+            if abs_log.startswith(abs_root.rstrip("/") + "/") or abs_log == abs_root:
+                ok = True
+                break
+        if not ok:
+            raise ValueError(
+                f"log_folder '{log_folder}' is not within allowed_roots {allowed_roots}"
+            )
+
     warnings = parse_warnings if parse_warnings is not None else []
     session = SwUTSession(
         project_id=project_id,
@@ -388,6 +469,7 @@ def collect_swut_session(
     *,
     jenkins_build_number: int | None = None,
     log_folder: str | None = None,
+    allowed_roots: list[str] | None = None,
 ) -> SwUTSession:
     """Jenkins 캐시 우선, 없으면 log_folder fallback.
 
@@ -418,7 +500,8 @@ def collect_swut_session(
     # 2) log_folder fallback
     if log_folder:
         return collect_from_log_folder(
-            resolver, log_folder, project_id=project_id, parse_warnings=warnings,
+            resolver, log_folder, project_id=project_id,
+            parse_warnings=warnings, allowed_roots=allowed_roots,
         )
 
     raise ValueError(

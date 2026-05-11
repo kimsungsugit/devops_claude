@@ -23,7 +23,7 @@ from backend.services.swut_input_adapter import (  # noqa: E402
     EnvironmentData,
     FunctionCoverage,
     SwUTSession,
-    TestExecution,
+    ExecutionRow,
 )
 from backend.services.swut_sutr_aggregator import (  # noqa: E402
     SutrBuildMeta,
@@ -119,8 +119,8 @@ def _make_session() -> SwUTSession:
         component_name="SysOs_Main",
         test_cases={"SwUFn_0101.001": [object()], "SwUFn_0103.001": [object()]},
         test_results={
-            "SwUFn_0101.001": TestExecution(tc_name="SwUFn_0101.001", passed=True),
-            "SwUFn_0103.001": TestExecution(tc_name="SwUFn_0103.001", passed=False),
+            "SwUFn_0101.001": ExecutionRow(tc_name="SwUFn_0101.001", passed=True),
+            "SwUFn_0103.001": ExecutionRow(tc_name="SwUFn_0103.001", passed=False),
         },
         function_coverage=[
             FunctionCoverage(
@@ -243,6 +243,14 @@ class TestBuildCoverageReport:
         meta = CoverageBuildMeta(release_sw_version="1.0.0", test_date="2024-02-19")
         with pytest.raises(TemplateValidationError):
             build_coverage_report(session, meta, b"NOT_AN_XLSX")
+
+    def test_invalid_meta_rejected(self):
+        """deep-reviewer X3: 빈 release_sw_version 거부."""
+        from backend.services.excel_template_utils import BuildMetaValidationError
+        session = _make_session()
+        meta = CoverageBuildMeta(release_sw_version="", test_date="2024-02-19")
+        with pytest.raises(BuildMetaValidationError, match="release_sw_version"):
+            build_coverage_report(session, meta, _build_coverage_template())
 
 
 # ---------------------------------------------------------------------------

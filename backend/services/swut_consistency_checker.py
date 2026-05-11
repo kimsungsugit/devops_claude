@@ -47,6 +47,8 @@ try:
 except ImportError:  # pragma: no cover - hook fail-safe
     openpyxl = None  # type: ignore[assignment]
 
+from backend.services.excel_template_utils import sheet_is_blank_placeholder
+
 
 # ---------------------------------------------------------------------------
 # Data classes
@@ -127,8 +129,12 @@ def _row_contains(pairs: list[tuple[int, str]], substr: str) -> bool:
     return any(substr in v for _, v in pairs)
 
 
-def _extract_coverage_summary(wb: Any) -> dict[str, Any]:
-    """Coverage Report 워크북에서 핵심 지표 추출."""
+def _extract_coverage_summary(wb: Any, out_warnings: list[str] | None = None) -> dict[str, Any]:
+    """Coverage Report 워크북에서 핵심 지표 추출.
+
+    시나리오 A 방어: 우리 빌더가 작성한 placeholder 시트(`BLANK_MARKUP`)면 데이터
+    추출 skip + out_warnings에 등록 — self-validation false positive 차단.
+    """
     summary: dict[str, Any] = {
         "total_tcs": 0,
         "total_functions": 0,
@@ -136,6 +142,7 @@ def _extract_coverage_summary(wb: Any) -> dict[str, Any]:
         "exception_statement": 0,
         "exception_branch": 0,
         "final_result": "",
+        "trace_sheet_is_placeholder": False,
     }
 
     # 1.Traceability 시트: TC × Function 매트릭스
@@ -144,6 +151,16 @@ def _extract_coverage_summary(wb: Any) -> dict[str, Any]:
         if "traceability" in name.lower():
             trace_sheet = wb[name]
             break
+
+    # placeholder 감지 (시나리오 A) — BLANK_MARKUP 있으면 데이터 추출 skip
+    if trace_sheet is not None and sheet_is_blank_placeholder(trace_sheet):
+        summary["trace_sheet_is_placeholder"] = True
+        if out_warnings is not None:
+            out_warnings.append(
+                "1.Traceability 시트가 자동 생성 placeholder — TC×Function 매트릭스 미작성, "
+                "데이터 추출 skip"
+            )
+        trace_sheet = None
 
     if trace_sheet is not None:
         rows = list(trace_sheet.iter_rows(values_only=True))
@@ -366,7 +383,7 @@ def check_swut_consistency(coverage_source: Any, sutr_source: Any) -> Consistenc
                for n in sutr_sheet_names_lower):
         parse_warnings.append("SUTR에 'Test Summary' 시트 없음")
 
-    cov = _extract_coverage_summary(cov_wb)
+    cov = _extract_coverage_summary(cov_wb, out_warnings=parse_warnings)
     sutr = _extract_sutr_summary(sutr_wb)
 
     issues: list[ConsistencyIssue] = []

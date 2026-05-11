@@ -14,6 +14,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from backend.services.excel_template_utils import BLANK_MARKUP  # noqa: E402
 from backend.services.swut_consistency_checker import (  # noqa: E402
     _compact_row,
     _find_value_after_label,
@@ -325,6 +326,29 @@ class TestParseWarnings:
         assert "tool_qualification" in rd
         assert rd["tool_qualification"]["evidence_class"] == "auto-generated draft"
         assert "단독 evidence" in rd["tool_qualification"]["asil_b_c_d_usage"]
+
+
+class TestBlankPlaceholderDetection:
+    """시나리오 A (deep-reviewer): 빌더 출력의 placeholder 시트를 self-validation에서 인식."""
+
+    def test_trace_sheet_with_blank_markup_is_skipped(self):
+        # placeholder Traceability 시트 (BLANK_MARKUP) + 정상 Test Summary
+        wb = openpyxl.Workbook()
+        wb.remove(wb.active)
+        ts = wb.create_sheet("Test Summary")
+        ts.cell(row=1, column=2, value="Final Test Result")
+        ts.cell(row=1, column=3, value="PASS")
+        trace = wb.create_sheet("1.Traceability")
+        trace.cell(row=1, column=1, value=BLANK_MARKUP)
+        cov_bytes = _wb_to_bytes(wb)
+        sutr_bytes = _build_sutr_wb(final_result="OK")
+        report = check_swut_consistency(cov_bytes, sutr_bytes)
+        rd = report.to_dict()
+        # parse_warnings에 명시 + cov_summary placeholder flag
+        assert any("placeholder" in w for w in rd["parse_warnings"])
+        assert rd["coverage_summary"]["trace_sheet_is_placeholder"] is True
+        assert rd["coverage_summary"]["total_functions"] == 0
+        assert rd["ok"] is False  # parse_warnings 존재로 ok=False
 
 
 class TestFinalResultMismatch:

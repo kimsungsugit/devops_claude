@@ -34,8 +34,10 @@ except ImportError:  # pragma: no cover
     openpyxl = None  # type: ignore[assignment]
 
 from backend.services.excel_template_utils import (
+    BLANK_MARKUP,
     safe_write,
     short_date,
+    validate_build_meta,
     validate_xlsx_template_bytes,
     write_value_after_label,
 )
@@ -43,6 +45,7 @@ from backend.services.swut_input_adapter import (
     EnvironmentData,
     FunctionCoverage,
     SwUTSession,
+    aggregate_session,
 )
 
 
@@ -132,41 +135,7 @@ class CoverageBuildResult:
 # 두 빌더(Coverage / SUTR)가 동일 helper를 공유. 단일 출처로 유지보수.
 
 
-def _aggregate_session(session: SwUTSession) -> dict[str, Any]:
-    """SwUTSession에서 Test Summary 통계 + 함수 집합 산출."""
-    total_tcs = 0
-    passed = 0
-    failed = 0
-    not_executed_tcs: list[str] = []
-
-    # 모든 TC 리스트 + per-function coverage 집계
-    all_functions: list[FunctionCoverage] = []
-    tc_to_functions: dict[str, set[str]] = {}  # tc_name -> {SwUFn_xxxx, ...}
-
-    for env in session.environments:
-        all_functions.extend(env.function_coverage)
-        for tc_name, tc_list in env.test_cases.items():
-            total_tcs += len(tc_list) if tc_list else 1
-            tc_to_functions.setdefault(tc_name, set()).add(env.component_name)
-        for tc_name, r in env.test_results.items():
-            if r.passed:
-                passed += 1
-            else:
-                failed += 1
-        # reviewer X6: not_executed = test_cases 키 - test_results 키 차집합 (실측)
-        tc_keys = set(env.test_cases.keys())
-        exec_keys = set(env.test_results.keys())
-        not_executed_tcs.extend(sorted(tc_keys - exec_keys))
-
-    return {
-        "total_tcs": total_tcs,
-        "passed": passed,
-        "failed": failed,
-        "not_executed": len(not_executed_tcs),
-        "function_count": len(all_functions),
-        "function_rows": all_functions,
-        "tc_to_functions": tc_to_functions,
-    }
+# _aggregate_session 은 swut_input_adapter.aggregate_session 으로 통합 (deep-reviewer W3).
 
 
 def _write_cover_sheet(ws, meta: CoverageBuildMeta) -> None:
@@ -245,24 +214,21 @@ def _write_coverage_sheet(ws, agg: dict[str, Any]) -> int:
     return written
 
 
-_BLANK_MARKUP = (
-    "BLANK — auto-generated placeholder (TC×Function matrix pending). "
-    "ISO 26262 evidence 사용 전 수동 작성 필수."
-)
+# BLANK_MARKUP은 excel_template_utils에서 import (단일 출처).
 
 
 def _write_traceability_sheet(ws, agg: dict[str, Any]) -> int:
     """1.Traceability 시트 — TC × Function 매트릭스 (본 라운드 placeholder).
 
     deep-reviewer W5/ISO F3: 빈 시트가 audit에 제출되는 위험 차단 위해 시트
-    상단 anchor에 ``_BLANK_MARKUP`` 명시. 채워진 row 수는 0 (호출자가
+    상단 anchor에 ``BLANK_MARKUP`` 명시. 채워진 row 수는 0 (호출자가
     ``CoverageBuildResult.incomplete_sheets`` 에 시트명 등록).
     """
     if not ws:
         return 0
     # 시트 첫 빈 영역에 명시적 BLANK 마커 — audit 시 자동 생성 placeholder 명확.
-    # A1 머지셀이면 anchor 보정 거쳐 _BLANK_MARKUP 기재.
-    safe_write(ws, 1, 1, _BLANK_MARKUP)
+    # A1 머지셀이면 anchor 보정 거쳐 BLANK_MARKUP 기재.
+    safe_write(ws, 1, 1, BLANK_MARKUP)
     return 0
 
 
@@ -288,6 +254,8 @@ def build_coverage_report(
     if openpyxl is None:
         raise RuntimeError("openpyxl is required for SwUT Coverage Report builder")
 
+    # deep-reviewer X3: 입력 메타 검증 (빈 string / 형식 미충족 거부).
+    validate_build_meta(meta.release_sw_version, meta.test_date)
     # Critical (reviewer S): ZIP bomb / magic byte 검증.
     validate_xlsx_template_bytes(template_bytes, label="Coverage Report template")
 
@@ -295,7 +263,7 @@ def build_coverage_report(
     wb: Workbook = openpyxl.load_workbook(io.BytesIO(template_bytes), data_only=False)
     sheet_names = wb.sheetnames
 
-    agg = _aggregate_session(session)
+    agg = aggregate_session(session)
     summary = {
         "environments": len(session.environments),
         "total_tcs": agg["total_tcs"],
@@ -341,7 +309,7 @@ def build_coverage_report(
     # 2.Consistency — placeholder + BLANK markup
     cons_ws = next((wb[n] for n in sheet_names if "consistency" in n.lower()), None)
     if cons_ws is not None:
-        safe_write(cons_ws, 1, 1, _BLANK_MARKUP)
+        safe_write(cons_ws, 1, 1, BLANK_MARKUP)
     warnings.append("2.Consistency 시트는 본 라운드 placeholder — SwUDS↔SwUTS 비교 다음 라운드")
     incomplete_sheets.append("2.Consistency")
 
