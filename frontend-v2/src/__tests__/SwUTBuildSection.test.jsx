@@ -119,6 +119,67 @@ describe('SwUTBuildSection', () => {
     await waitFor(() => {
       expect(toastSpy).toHaveBeenCalledWith('error', expect.stringMatching(/release_sw_version/));
     });
+    // 11차 W1: loc에서 'body' 제거되고 msg 표시 — 명확한 형식
+    const errorCall = toastSpy.mock.calls.find(c => c[0] === 'error');
+    expect(errorCall[1]).toContain('release_sw_version: String should match pattern');
+    expect(errorCall[1]).not.toContain('body.');
+  });
+
+  it('falls back to d.type when Pydantic detail item has no msg (W1)', async () => {
+    vi.spyOn(global, 'fetch').mockResolvedValue({
+      ok: false,
+      status: 422,
+      headers: new Headers(),
+      json: async () => ({
+        detail: [{ loc: ['body', 'doc_id_sequence'], type: 'string_pattern_mismatch' }],
+      }),
+    });
+
+    render(<SwUTBuildSection />);
+    fireEvent.change(screen.getByLabelText(/Release SW Version/), { target: { value: '2.02' } });
+    fireEvent.change(screen.getByLabelText(/Log Folder/), {
+      target: { value: 'C:/fake/log' },
+    });
+    fireEvent.click(screen.getByText(/Coverage Report 빌드/));
+
+    await waitFor(() => {
+      expect(toastSpy).toHaveBeenCalledWith('error', expect.stringMatching(/doc_id_sequence/));
+    });
+    const errorCall = toastSpy.mock.calls.find(c => c[0] === 'error');
+    expect(errorCall[1]).toContain('string_pattern_mismatch');
+  });
+
+  it('inputs have anti-autocomplete attributes (W2)', () => {
+    render(<SwUTBuildSection />);
+    const engineerInput = screen.getByLabelText(/Test Engineer/);
+    expect(engineerInput.getAttribute('autocomplete')).toBe('off');
+    expect(engineerInput.getAttribute('autocorrect')).toBe('off');
+    expect(engineerInput.getAttribute('autocapitalize')).toBe('off');
+    expect(engineerInput.getAttribute('spellcheck')).toBe('false');
+    expect(engineerInput.getAttribute('data-form-type')).toBe('other');
+    expect(engineerInput.getAttribute('data-lpignore')).toBe('true');
+  });
+
+  it('fetch is called with AbortSignal (W3 — unmount safety)', async () => {
+    const fetchSpy = vi.spyOn(global, 'fetch').mockResolvedValue({
+      ok: true,
+      headers: new Headers({ 'Content-Disposition': 'attachment; filename="x.xlsx"' }),
+      blob: async () => new Blob([new Uint8Array([0x50, 0x4b, 0x03, 0x04])]),
+    });
+
+    render(<SwUTBuildSection />);
+    fireEvent.change(screen.getByLabelText(/Release SW Version/), { target: { value: '2.02' } });
+    fireEvent.change(screen.getByLabelText(/Log Folder/), {
+      target: { value: 'C:/fake/log' },
+    });
+    fireEvent.click(screen.getByText(/Coverage Report 빌드/));
+
+    await waitFor(() => {
+      expect(fetchSpy).toHaveBeenCalled();
+    });
+    const opts = fetchSpy.mock.calls[0][1];
+    expect(opts.signal).toBeDefined();
+    expect(opts.signal.constructor.name).toBe('AbortSignal');
   });
 
   it('sends X-User header in fetch (raw fetch silent failure 회피)', async () => {
