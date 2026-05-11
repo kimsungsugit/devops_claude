@@ -474,50 +474,65 @@ class VectorCASTParser:
         return tcbank
 
     def _read_tc_header(self, filename: str, start_idx: int, is_testcase: bool) -> Optional[VCastHeader]:
-        """테스트 케이스 헤더 읽기"""
+        """테스트 케이스 헤더 읽기.
+
+        VectorCAST 버전(Ver2021/2024/2025)별 header_offset이 다르지만, 일부
+        SWTE/RTRT 변종은 라인 수가 Ver2025지만 헤더 구조는 Ver2021 offset 사용.
+        본 메서드는 우선 기대 offset부터 좁게 검색하고, 실패 시 marker 이후
+        넓은 범위(최대 30 라인)에서 동적으로 `<th>Unit Under Test</th>` 라벨을
+        찾아 헤더 시작점을 자동 보정한다.
+        """
         idx = start_idx
         header_offset = 9 if self.version == VCASTVersion.Ver2021 else (10 if self.version == VCASTVersion.Ver2024 else 11)
         if not is_testcase:
             header_offset += 1
-        
+
         idx += header_offset
-        
+
         if idx >= len(self.lines):
             return None
-        
+
         unit_name = ""
         comp_name = ""
         tc_name = ""
-        
-        # Unit Under Test 찾기
-        for i in range(idx, min(idx + 10, len(self.lines))):
-            line = self.lines[i]
-            if "<th>Unit Under Test</th>" in line:
-                data = VIMLib.get_table_row_data_only(line)
-                if data and len(data) >= 2:
-                    comp_name = data[1]
-                    if is_testcase and len(data) >= 4:
-                        unit_name = data[3]
-                break
-        
+
+        def _find_label(label: str, search_start: int, search_end: int) -> int:
+            for i in range(search_start, min(search_end, len(self.lines))):
+                if label in self.lines[i]:
+                    return i
+            return -1
+
+        # Unit Under Test — 좁은 범위 우선 (기대 offset), 실패 시 marker+0~30 전체 탐색.
+        uut_idx = _find_label("<th>Unit Under Test</th>", idx, idx + 10)
+        if uut_idx < 0:
+            uut_idx = _find_label("<th>Unit Under Test</th>", start_idx, start_idx + 30)
+            if uut_idx >= 0:
+                # 보정: 다음 라벨 검색 시 동적 헤더 시작점 기준 사용
+                idx = uut_idx
+        if uut_idx >= 0:
+            data = VIMLib.get_table_row_data_only(self.lines[uut_idx])
+            if data and len(data) >= 2:
+                comp_name = data[1]
+                if is_testcase and len(data) >= 4:
+                    unit_name = data[3]
+
         if not is_testcase:
-            # Subprogram 찾기
-            for i in range(idx, min(idx + 10, len(self.lines))):
-                line = self.lines[i]
-                if "<th>Subprogram</th>" in line:
-                    data = VIMLib.get_table_row_data_only(line)
-                    if data and len(data) >= 2:
-                        unit_name = data[1]
-                    break
-        
-        # Test Case Name 찾기
-        for i in range(idx, min(idx + 10, len(self.lines))):
-            line = self.lines[i]
-            if "<th>Test Case Name</th>" in line:
-                data = VIMLib.get_table_row_data_only(line)
+            sp_idx = _find_label("<th>Subprogram</th>", idx, idx + 10)
+            if sp_idx < 0:
+                sp_idx = _find_label("<th>Subprogram</th>", start_idx, start_idx + 30)
+            if sp_idx >= 0:
+                data = VIMLib.get_table_row_data_only(self.lines[sp_idx])
                 if data and len(data) >= 2:
-                    tc_name = data[1]
-                break
+                    unit_name = data[1]
+
+        # Test Case Name — 동일 동적 탐색
+        tc_idx = _find_label("<th>Test Case Name</th>", idx, idx + 10)
+        if tc_idx < 0:
+            tc_idx = _find_label("<th>Test Case Name</th>", start_idx, start_idx + 30)
+        if tc_idx >= 0:
+            data = VIMLib.get_table_row_data_only(self.lines[tc_idx])
+            if data and len(data) >= 2:
+                tc_name = data[1]
         
         if not comp_name or not tc_name:
             return None
