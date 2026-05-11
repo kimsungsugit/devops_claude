@@ -8,7 +8,8 @@
       "Bash(disown)",
       "Bash(ps -W)",
       "Bash(where rg *)",
-      "Bash(findstr *)"
+      "Bash(findstr *)",
+      "Bash(bash scripts/install_git_hooks.sh)"
     ]
   }
 }

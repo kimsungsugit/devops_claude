@@ -231,11 +231,12 @@ python -m pytest tests/ -v --cov=backend --cov=workflow --cov=report_gen --cov-r
 - Prompts: `triage_build_failure`, `summarize_change_risk`, `review_coverage_gap`
 
 ## Hooks (자동 품질 게이트)
-- **SessionStart**: `.env` 자동 생성 (.env.example → .env)
+- **SessionStart**: `.env` 자동 생성 (.env.example → .env) + settings 변경 정책 reminder
 - **PreToolUse**: C/H 파일 수정 시 ASIL C/D 태그 감지 → 경고
-- **PostToolUse**: Python → syntax check + ruff lint, JSX/TS → ESLint, workflow/report_gen 수정 시 → 관련 pytest 자동 실행
-- **Stop**: 변경된 파일 유형에 따라 pytest / vite build 자동 실행
-- **PreCompact**: git status + diff stat을 `.codex_tmp/precompact_context.json`에 실제 저장
+- **PostToolUse**: 단일 dispatcher (`scripts/posttool_dispatch.py`) — Python syntax+ruff, JSX/TS ESLint, .md broken-link/heading-jump, workflow/report_gen 변경 시 관련 pytest
+- **PostToolBatch** (신규, 2026-05-11): 병렬 Write/Edit 일괄 종료 시 `scripts/posttoolbatch_report.py` — 변경 파일 집계 + CLAUDE.md L106 능동 보고 X1~X8 trigger 메시지를 메인 응답에 push. **단일 파일 turn은 silent** (PostToolUse가 이미 파일별 보고), 단 ASIL C/H는 단독이어도 hint 출력. ASIL 파일은 list 앞으로 정렬되어 truncation 시에도 누락되지 않음. 출력은 `ensure_ascii=False`로 한글 가독성 유지. **메인 에이전트의 능동 보고 의무는 그대로 유지** (hook은 보조 알림이며 대체 아님)
+- **Stop**: `scripts/quality_check.py` 단일 호출 (이전 `stop_check.py` fallback 사슬 제거됨)
+- **PreCompact**: git status + diff stat을 `.codex_tmp/precompact_context.json`에 저장 (출력은 schema 정합 `systemMessage` 형식)
 
 ## Gate 간 데이터 전달 프로토콜
 `/workflow` 실행 시 각 Gate에서 TaskCreate description에 구조화된 데이터를 포함:

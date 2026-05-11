@@ -121,6 +121,18 @@
         ]
       }
     ],
+    "PostToolBatch": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python scripts/posttoolbatch_report.py 2>/dev/null || true",
+            "timeout": 10,
+            "statusMessage": "Batch report (X1~X8 trigger)..."
+          }
+        ]
+      }
+    ],
     "PreToolUse": [
       {
         "matcher": "Write|Edit",
@@ -152,7 +164,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python -c \"import sys,json,subprocess,os; status=subprocess.run(['git','status','--porcelain'],capture_output=True,text=True).stdout[:500]; diff_stat=subprocess.run(['git','diff','--stat'],capture_output=True,text=True).stdout[:500]; os.makedirs('.codex_tmp',exist_ok=True); open('.codex_tmp/precompact_context.json','w').write(json.dumps({'git_status':status,'git_diff_stat':diff_stat},ensure_ascii=False)); print(json.dumps({'hookSpecificOutput':{'hookEventName':'PreCompact','additionalContext':'Preserved: git status + diff stat. Changed: '+status[:150]}}))\" 2>/dev/null || echo '{\"hookSpecificOutput\":{\"hookEventName\":\"PreCompact\",\"additionalContext\":\"Preserve: task progress, file paths, error context, test results, MCP patterns\"}}'",
+            "command": "python -c \"import sys,json,subprocess,os; status=subprocess.run(['git','status','--porcelain'],capture_output=True,text=True).stdout[:500]; diff_stat=subprocess.run(['git','diff','--stat'],capture_output=True,text=True).stdout[:500]; os.makedirs('.codex_tmp',exist_ok=True); open('.codex_tmp/precompact_context.json','w').write(json.dumps({'git_status':status,'git_diff_stat':diff_stat},ensure_ascii=False)); print(json.dumps({'systemMessage':'PreCompact: preserved git status + diff stat to .codex_tmp/precompact_context.json. Changed: '+status[:150]}))\" 2>/dev/null || echo '{\"systemMessage\":\"PreCompact: preserve task progress, file paths, error context, test results, MCP patterns\"}'",
             "statusMessage": "Preserving context to file..."
           }
         ]
