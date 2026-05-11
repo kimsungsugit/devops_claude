@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -36,6 +37,7 @@ except ImportError:  # pragma: no cover
 
 from backend.services.excel_template_utils import (
     BLANK_MARKUP,
+    collect_git_history,
     safe_write,
     short_date,
     validate_build_meta,
@@ -139,36 +141,48 @@ class CoverageBuildResult:
 # _aggregate_session 은 swut_input_adapter.aggregate_session 으로 통합 (deep-reviewer W3).
 
 
-def _write_cover_sheet(ws, meta: CoverageBuildMeta) -> None:
+_OPTIONAL_LABELS = {"Build Timestamp", "Reviewer", "Doc. ID"}
+
+
+def _write_label(ws, label: str, value: Any, out_warnings: list[str] | None) -> None:
+    """K1: 라벨 미발견 시 warnings 누적 (optional 라벨은 silent OK)."""
+    ok = write_value_after_label(ws, label, value)
+    if not ok and label not in _OPTIONAL_LABELS and out_warnings is not None:
+        out_warnings.append(f"라벨 '{label}' 미발견 — 셀 쓰기 skip")
+
+
+def _write_cover_sheet(
+    ws, meta: CoverageBuildMeta, out_warnings: list[str] | None = None,
+) -> None:
     """Cover 시트 — Doc ID/Project/ASIL/Author/Approver 등."""
     if not ws:
         return
-    write_value_after_label(ws, "Project", meta.project_full_name)
-    write_value_after_label(ws, "ASIL Level", meta.asil_level)
-    # reviewer ISO F3: 자동 생성물은 사람 승인 없이 Approved 기재 금지.
-    write_value_after_label(ws, "Status", "DRAFT — PENDING REVIEW")
-    write_value_after_label(ws, "Validation Date", meta.validation_date)
-    write_value_after_label(ws, "Author", meta.author)
-    # deep-reviewer W4: reviewer property 호출 — 미사용 dead code 정리.
-    write_value_after_label(ws, "Reviewer", meta.reviewer)
-    write_value_after_label(ws, "Approver", meta.approver)
+    _write_label(ws, "Project", meta.project_full_name, out_warnings)
+    _write_label(ws, "ASIL Level", meta.asil_level, out_warnings)
+    _write_label(ws, "Status", "DRAFT — PENDING REVIEW", out_warnings)
+    _write_label(ws, "Validation Date", meta.validation_date, out_warnings)
+    _write_label(ws, "Author", meta.author, out_warnings)
+    _write_label(ws, "Reviewer", meta.reviewer, out_warnings)
+    _write_label(ws, "Approver", meta.approver, out_warnings)
     if meta.doc_id_sequence:
-        doc_id = f"{meta.doc_id_base}-{meta.doc_id_sequence}"
-        write_value_after_label(ws, "Doc. ID", doc_id)
-    # 5차 L1 (ISO F3): Build Timestamp 라벨 — 회사 template에 없으면 silent skip OK.
-    write_value_after_label(ws, "Build Timestamp", meta.build_timestamp)
+        _write_label(ws, "Doc. ID",
+                     f"{meta.doc_id_base}-{meta.doc_id_sequence}", out_warnings)
+    _write_label(ws, "Build Timestamp", meta.build_timestamp, out_warnings)
 
 
-def _write_test_summary_sheet(ws, meta: CoverageBuildMeta, agg: dict[str, Any]) -> None:
+def _write_test_summary_sheet(
+    ws, meta: CoverageBuildMeta, agg: dict[str, Any],
+    out_warnings: list[str] | None = None,
+) -> None:
     """Test Summary 시트 — 핵심 메트릭 표."""
     if not ws:
         return
-    write_value_after_label(ws, "Project Name", meta.project_full_name)
-    write_value_after_label(ws, "Release Name(SW)", meta.release_sw_version)
-    write_value_after_label(ws, "Test Target Version(HW)", meta.hw_version)
-    write_value_after_label(ws, "Test Date", meta.test_date)
-    write_value_after_label(ws, "Test Engineer", meta.test_engineer)
-    write_value_after_label(ws, "Final Test Result", meta.final_test_result)
+    _write_label(ws, "Project Name", meta.project_full_name, out_warnings)
+    _write_label(ws, "Release Name(SW)", meta.release_sw_version, out_warnings)
+    _write_label(ws, "Test Target Version(HW)", meta.hw_version, out_warnings)
+    _write_label(ws, "Test Date", meta.test_date, out_warnings)
+    _write_label(ws, "Test Engineer", meta.test_engineer, out_warnings)
+    _write_label(ws, "Final Test Result", meta.final_test_result, out_warnings)
 
 
 def _write_coverage_sheet(ws, agg: dict[str, Any]) -> int:
@@ -220,19 +234,138 @@ def _write_coverage_sheet(ws, agg: dict[str, Any]) -> int:
 # BLANK_MARKUP은 excel_template_utils에서 import (단일 출처).
 
 
-def _write_traceability_sheet(ws, agg: dict[str, Any]) -> int:
-    """1.Traceability 시트 — TC × Function 매트릭스 (본 라운드 placeholder).
+_TC_FN_RE = re.compile(r"(SwUFn_\d+)")
 
-    deep-reviewer W5/ISO F3: 빈 시트가 audit에 제출되는 위험 차단 위해 시트
-    상단 anchor에 ``BLANK_MARKUP`` 명시. 채워진 row 수는 0 (호출자가
-    ``CoverageBuildResult.incomplete_sheets`` 에 시트명 등록).
+
+def _write_history_sheet(
+    ws, history_rows: list[dict[str, str]], out_warnings: list[str] | None = None,
+) -> int:
+    """History 시트 — git log 자동 채움 (T134).
+
+    회사 표준 History layout: Version / Date / Description / Author / Reviewer / Approver.
+    헤더 행 다음부터 git log 결과를 row 단위로 작성.
+
+    Returns:
+        쓰여진 row 수.
+    """
+    if not ws or not history_rows:
+        return 0
+    # 헤더 행 찾기 — "Version" 라벨 위치
+    header_pos = None
+    for row in ws.iter_rows(min_row=1, max_row=10, values_only=False):
+        for cell in row:
+            if isinstance(cell.value, str) and cell.value.strip() == "Version":
+                header_pos = (row[0].row, cell.column)
+                break
+        if header_pos:
+            break
+    if header_pos is None:
+        if out_warnings is not None:
+            out_warnings.append("History 시트 'Version' 헤더 미발견 — git log 작성 skip")
+        return 0
+
+    start_row = header_pos[0] + 1
+    col = header_pos[1]
+    written = 0
+    for i, h in enumerate(history_rows):
+        r = start_row + i
+        safe_write(ws, r, col, h.get("version", ""))
+        safe_write(ws, r, col + 1, h.get("date", ""))
+        safe_write(ws, r, col + 2, h.get("description", ""))
+        safe_write(ws, r, col + 3, h.get("author", ""))
+        safe_write(ws, r, col + 4, h.get("reviewer", ""))
+        safe_write(ws, r, col + 5, h.get("approver", ""))
+        written += 1
+    return written
+
+
+def _collect_tc_to_function(session: SwUTSession) -> dict[str, str]:
+    """TC name → 함수 ID (`SwUFn_NNNN`).
+
+    TC name 예: `SwUFn_0101.001` → function `SwUFn_0101`.
+    """
+    out: dict[str, str] = {}
+    for env in session.environments:
+        for tc_name in env.test_cases:
+            m = _TC_FN_RE.match(tc_name)
+            if m:
+                out[tc_name] = m.group(1)
+    return out
+
+
+def _write_traceability_sheet(
+    ws, session: SwUTSession, out_warnings: list[str] | None = None,
+) -> int:
+    """1.Traceability 시트 — TC × Function 매트릭스 본격 작성 (T133).
+
+    시트 헤더 행에서 `SwUFn_NNNN` 컬럼 위치 lookup → 각 TC 행에 'O' 표시.
+    헤더 미발견 시 BLANK_MARKUP 유지.
+
+    Returns:
+        쓰여진 'O' 셀 수. 0이면 매트릭스 미작성.
     """
     if not ws:
         return 0
-    # 시트 첫 빈 영역에 명시적 BLANK 마커 — audit 시 자동 생성 placeholder 명확.
-    # A1 머지셀이면 anchor 보정 거쳐 BLANK_MARKUP 기재.
-    safe_write(ws, 1, 1, BLANK_MARKUP)
-    return 0
+
+    # 1) 헤더 행 찾기 — SwUFn_xxxx 컬럼이 50개+ 등장하는 행
+    header_row_idx = None
+    header_cols: dict[str, int] = {}
+    for row in ws.iter_rows(min_row=1, max_row=20, values_only=False):
+        cols: dict[str, int] = {}
+        for cell in row:
+            v = cell.value
+            if isinstance(v, str) and _TC_FN_RE.fullmatch(v.strip()):
+                cols[v.strip()] = cell.column
+        if len(cols) >= 50:
+            header_row_idx = row[0].row
+            header_cols = cols
+            break
+
+    if header_row_idx is None:
+        if out_warnings is not None:
+            out_warnings.append(
+                "1.Traceability 헤더(SwUFn_xxxx 행) 미발견 — placeholder 유지"
+            )
+        safe_write(ws, 1, 1, BLANK_MARKUP)
+        return 0
+
+    # 2) 기존 TC 행 위치 인덱싱 — SwUTC_SwUFn_xxxx.NNN 또는 SwUFn_xxxx.NNN
+    data_start = header_row_idx + 1
+    tc_row_index: dict[str, int] = {}
+    for row in ws.iter_rows(
+        min_row=data_start, max_row=data_start + 600, values_only=False,
+    ):
+        for cell in row[:5]:
+            v = cell.value
+            if isinstance(v, str):
+                stripped = v.strip()
+                if stripped.startswith(("SwUTC_SwUFn_", "SwUFn_")):
+                    tc_row_index[stripped] = row[0].row
+                    break
+
+    # 3) 우리 session TC name → 함수 매핑 + 'O' 표시
+    tc_to_fn = _collect_tc_to_function(session)
+    written = 0
+    for tc_name, fn_id in tc_to_fn.items():
+        col = header_cols.get(fn_id)
+        if col is None:
+            continue
+        row_idx = (
+            tc_row_index.get(f"SwUTC_{tc_name}")
+            or tc_row_index.get(tc_name)
+        )
+        if row_idx is None:
+            continue
+        if safe_write(ws, row_idx, col, "O"):
+            written += 1
+
+    if written == 0:
+        if out_warnings is not None:
+            out_warnings.append(
+                "1.Traceability — 헤더는 발견했으나 TC 매칭 0건 (회사 시트 row 명명 차이)"
+            )
+        safe_write(ws, 1, 1, BLANK_MARKUP)
+    return written
 
 
 # ---------------------------------------------------------------------------
@@ -290,14 +423,14 @@ def build_coverage_report(
     if cover_ws is None:
         warnings.append("Cover 시트 미발견 — Doc ID/Author 등 미기록")
     else:
-        _write_cover_sheet(cover_ws, meta)
+        _write_cover_sheet(cover_ws, meta, out_warnings=warnings)
 
     # Test Summary
     ts_ws = next((wb[n] for n in sheet_names if n.lower() == "test summary"), None)
     if ts_ws is None:
         warnings.append("Test Summary 시트 미발견")
     else:
-        _write_test_summary_sheet(ts_ws, meta, agg)
+        _write_test_summary_sheet(ts_ws, meta, agg, out_warnings=warnings)
 
     # 3. Coverage
     cov_ws = next((wb[n] for n in sheet_names
@@ -309,15 +442,16 @@ def build_coverage_report(
         n_written = _write_coverage_sheet(cov_ws, agg)
         summary["coverage_rows_written"] = n_written
 
-    # 1.Traceability — placeholder + BLANK markup (deep-reviewer W5/ISO F3)
+    # 1.Traceability — T133 본격 작성 (TC×Function 매트릭스)
     incomplete_sheets: list[str] = []
     trace_ws = next((wb[n] for n in sheet_names if "traceability" in n.lower()), None)
     if trace_ws is None:
         warnings.append("1.Traceability 시트 미발견")
     else:
-        _write_traceability_sheet(trace_ws, agg)
-        warnings.append("1.Traceability 매트릭스는 본 라운드 placeholder — TC×Function 채우기 다음 라운드")
-        incomplete_sheets.append("1.Traceability")
+        n_o = _write_traceability_sheet(trace_ws, session, out_warnings=warnings)
+        summary["traceability_o_cells"] = n_o
+        if n_o == 0:
+            incomplete_sheets.append("1.Traceability")
 
     # 2.Consistency — placeholder + BLANK markup
     cons_ws = next((wb[n] for n in sheet_names if "consistency" in n.lower()), None)
@@ -325,6 +459,19 @@ def build_coverage_report(
         safe_write(cons_ws, 1, 1, BLANK_MARKUP)
     warnings.append("2.Consistency 시트는 본 라운드 placeholder — SwUDS↔SwUTS 비교 다음 라운드")
     incomplete_sheets.append("2.Consistency")
+
+    # History — T134 git log 자동 채움
+    hist_ws = next((wb[n] for n in sheet_names if n.lower() == "history"), None)
+    if hist_ws is not None:
+        git_rows = collect_git_history(limit=10)
+        if git_rows:
+            n_h = _write_history_sheet(hist_ws, git_rows, out_warnings=warnings)
+            summary["history_rows_written"] = n_h
+            if n_h == 0:
+                incomplete_sheets.append("History")
+        else:
+            warnings.append("git log 가져오기 실패 — History 시트 placeholder")
+            incomplete_sheets.append("History")
 
     # 빌드 → bytes
     out = io.BytesIO()

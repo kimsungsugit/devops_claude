@@ -31,8 +31,10 @@ except ImportError:  # pragma: no cover
     openpyxl = None  # type: ignore[assignment]
 
 from backend.services.excel_template_utils import (
+    collect_git_history,
     find_kv_row,
     has_vba_macros,
+    inspect_vba_refs,
     safe_write,
     short_date,
     truncate_cell_text,
@@ -125,39 +127,47 @@ class SutrBuildResult:
 # Sheet writers
 # ---------------------------------------------------------------------------
 
-def _write_cover(ws, meta: SutrBuildMeta) -> None:
-    write_value_after_label(ws, "Project", meta.project_full_name)
-    write_value_after_label(ws, "ASIL Level", meta.asil_level)
-    write_value_after_label(ws, "Status", "DRAFT — PENDING REVIEW")
-    write_value_after_label(ws, "Validation Date", meta.validation_date)
-    write_value_after_label(ws, "Author", meta.author)
-    write_value_after_label(ws, "Approver", meta.approver)
+_OPTIONAL_LABELS = {"Build Timestamp", "Reviewer", "Doc. ID"}
+
+
+def _write_label(ws, label: str, value: Any, out_warnings: list[str] | None) -> None:
+    """K1 (reviewer): 라벨 미발견 시 warnings 누적 — 단 optional 라벨은 silent OK."""
+    ok = write_value_after_label(ws, label, value)
+    if not ok and label not in _OPTIONAL_LABELS and out_warnings is not None:
+        out_warnings.append(f"라벨 '{label}' 미발견 — 셀 쓰기 skip")
+
+
+def _write_cover(ws, meta: SutrBuildMeta, out_warnings: list[str] | None = None) -> None:
+    _write_label(ws, "Project", meta.project_full_name, out_warnings)
+    _write_label(ws, "ASIL Level", meta.asil_level, out_warnings)
+    _write_label(ws, "Status", "DRAFT — PENDING REVIEW", out_warnings)
+    _write_label(ws, "Validation Date", meta.validation_date, out_warnings)
+    _write_label(ws, "Author", meta.author, out_warnings)
+    _write_label(ws, "Approver", meta.approver, out_warnings)
     if meta.doc_id_sequence:
-        write_value_after_label(ws, "Doc. ID", f"{meta.doc_id_base}-{meta.doc_id_sequence}")
-    write_value_after_label(ws, "Version", f"v{meta.release_sw_version}")
-    # 5차 L1 (ISO F3 추적성): Build Timestamp 라벨 — 라벨이 없으면 silent skip OK,
-    # 회사 v3.01 template은 이 라벨이 없을 수도 있어 함수 반환값은 무시.
-    write_value_after_label(ws, "Build Timestamp", meta.build_timestamp)
+        _write_label(ws, "Doc. ID", f"{meta.doc_id_base}-{meta.doc_id_sequence}", out_warnings)
+    _write_label(ws, "Version", f"v{meta.release_sw_version}", out_warnings)
+    # optional — 회사 v3.01 template에 라벨이 없을 수 있어 silent skip 허용.
+    _write_label(ws, "Build Timestamp", meta.build_timestamp, out_warnings)
 
 
-def _write_test_summary(ws, meta: SutrBuildMeta, agg: dict[str, Any]) -> None:
-    write_value_after_label(ws, "Project Name", meta.project_full_name)
-    write_value_after_label(ws, "Release Name(SW)", meta.release_sw_version)
-    write_value_after_label(ws, "Test Target Version(HW)", meta.hw_version)
-    write_value_after_label(ws, "Test Date", meta.test_date)
-    write_value_after_label(ws, "Test Engineer", meta.test_engineer)
-    write_value_after_label(ws, "Target Coverage", meta.target_coverage)
+def _write_test_summary(
+    ws, meta: SutrBuildMeta, agg: dict[str, Any],
+    out_warnings: list[str] | None = None,
+) -> None:
+    _write_label(ws, "Project Name", meta.project_full_name, out_warnings)
+    _write_label(ws, "Release Name(SW)", meta.release_sw_version, out_warnings)
+    _write_label(ws, "Test Target Version(HW)", meta.hw_version, out_warnings)
+    _write_label(ws, "Test Date", meta.test_date, out_warnings)
+    _write_label(ws, "Test Engineer", meta.test_engineer, out_warnings)
+    _write_label(ws, "Target Coverage", meta.target_coverage, out_warnings)
     # deep-reviewer X7: 0/N의 silent wrong-pick 회피 — N=0이면 "N/A" 명시.
-    if agg["total"] > 0:
-        write_value_after_label(ws, "Actual Coverage", agg["tested"] / agg["total"])
-    else:
-        write_value_after_label(ws, "Actual Coverage", "N/A")
-    write_value_after_label(ws, "Target Pass ratio", meta.target_pass_ratio)
-    if agg["tested"] > 0:
-        write_value_after_label(ws, "Actual Pass ratio", agg["passed"] / agg["tested"])
-    else:
-        write_value_after_label(ws, "Actual Pass ratio", "N/A")
-    write_value_after_label(ws, "Final Test Result", meta.final_test_result)
+    actual_cov = agg["tested"] / agg["total"] if agg["total"] > 0 else "N/A"
+    _write_label(ws, "Actual Coverage", actual_cov, out_warnings)
+    _write_label(ws, "Target Pass ratio", meta.target_pass_ratio, out_warnings)
+    actual_pass = agg["passed"] / agg["tested"] if agg["tested"] > 0 else "N/A"
+    _write_label(ws, "Actual Pass ratio", actual_pass, out_warnings)
+    _write_label(ws, "Final Test Result", meta.final_test_result, out_warnings)
 
 
 def _deviation_case_fields(case: Any) -> tuple[str, str, str, str] | None:
@@ -289,11 +299,19 @@ def build_sutr(
     warnings: list[str] = []
     # deep-reviewer W2: VBA 매크로 ZIP entry 존재 여부 사전 측정.
     template_has_vba = has_vba_macros(template_bytes)
+    vba_refs_found: list[str] = []
     if template_has_vba:
         warnings.append(
             "VBA macro execution NOT verified — open output xlsm in Excel and verify "
             "macros before submitting as evidence (ZIP entry preserved but stale ref 위험)"
         )
+        # 5차 reviewer I1: VBA stale ref 의심 패턴 grep.
+        vba_refs_found = inspect_vba_refs(template_bytes)
+        if vba_refs_found:
+            warnings.append(
+                f"VBA stale ref 위험 패턴 발견 — {vba_refs_found} 패턴이 vbaProject.bin에 "
+                "존재하며 셀/시트 이동 시 매크로 깨질 위험 (수동 검증 의무)"
+            )
 
     # keep_vba=True — .xlsm 매크로 보존
     wb: Workbook = openpyxl.load_workbook(
@@ -316,13 +334,13 @@ def build_sutr(
     if cover_ws is None:
         warnings.append("Cover 시트 미발견")
     else:
-        _write_cover(cover_ws, meta)
+        _write_cover(cover_ws, meta, out_warnings=warnings)
 
     ts_ws = next((wb[n] for n in sheet_names if n.lower() == "test summary"), None)
     if ts_ws is None:
         warnings.append("Test Summary 시트 미발견")
     else:
-        _write_test_summary(ts_ws, meta, agg)
+        _write_test_summary(ts_ws, meta, agg, out_warnings=warnings)
 
     dev_ws = next((wb[n] for n in sheet_names if n.lower() == "deviation"), None)
     if dev_ws is None:
@@ -339,8 +357,19 @@ def build_sutr(
         summary["test_log_rows_written"] = n
 
     incomplete_sheets: list[str] = []
-    warnings.append("History 시트는 본 라운드 placeholder — git log 자동 연동 다음 라운드")
-    incomplete_sheets.append("History")
+    # T134: History 시트 git log 자동
+    hist_ws = next((wb[n] for n in sheet_names if n.lower() == "history"), None)
+    if hist_ws is not None:
+        from backend.services.swut_coverage_aggregator import _write_history_sheet
+        git_rows = collect_git_history(limit=10)
+        if git_rows:
+            n_h = _write_history_sheet(hist_ws, git_rows, out_warnings=warnings)
+            summary["history_rows_written"] = n_h
+            if n_h == 0:
+                incomplete_sheets.append("History")
+        else:
+            warnings.append("git log 가져오기 실패 — History 시트 placeholder")
+            incomplete_sheets.append("History")
 
     out = io.BytesIO()
     wb.save(out)

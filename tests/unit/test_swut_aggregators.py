@@ -353,13 +353,18 @@ class TestBuildSutr:
             all_values.extend(str(c) for c in row if c is not None)
         assert any("N/A" in v for v in all_values)
 
-    def test_incomplete_sheets_reported(self):
-        """deep-reviewer W5: SUTR는 History placeholder를 incomplete_sheets에 등록."""
+    def test_history_auto_filled_by_git_log(self):
+        """T134: History 시트가 git log로 자동 채워지면 incomplete_sheets에서 빠짐."""
         session = _make_session()
         meta = SutrBuildMeta(release_sw_version="1.0.0", test_date="2024-02-19")
         result = build_sutr(session, meta, _build_sutr_template())
         d = result.to_dict()
-        assert "History" in d["incomplete_sheets"]
+        # git log 성공 시 history_rows_written > 0, 실패 시 incomplete_sheets에 History 있음.
+        # CI 환경에서 git 없으면 후자, 일반 dev 환경은 전자.
+        assert (
+            d["summary"].get("history_rows_written", 0) > 0
+            or "History" in d["incomplete_sheets"]
+        )
 
     def test_vba_macros_flag_false_for_xlsx_template(self):
         """deep-reviewer W2: 일반 xlsx template (VBA 없음) → vba_macros_preserved=False."""

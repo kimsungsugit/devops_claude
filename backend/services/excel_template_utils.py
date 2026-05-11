@@ -220,6 +220,96 @@ def has_vba_macros(data: bytes) -> bool:
         return False
 
 
+_VBA_REF_PATTERNS = (
+    re.compile(rb"Cells\s*\(", re.IGNORECASE),
+    re.compile(rb"Sheets\s*\(", re.IGNORECASE),
+    re.compile(rb"Names\s*\(", re.IGNORECASE),
+    re.compile(rb"Range\s*\(", re.IGNORECASE),
+)
+
+
+def collect_git_history(
+    repo_root: str | None = None,
+    *,
+    limit: int = 10,
+) -> list[dict[str, str]]:
+    """git log → History 시트 자동 채움용 row list (T134).
+
+    Returns:
+        list[{version, date, description, author, reviewer, approver}].
+        git 명령 실패 시 빈 list.
+    """
+    import os
+    import subprocess
+    cwd = repo_root or os.getcwd()
+    try:
+        result = subprocess.run(
+            ["git", "log", f"--max-count={limit}",
+             "--pretty=format:%h\x1f%ai\x1f%an\x1f%s"],
+            cwd=cwd, capture_output=True, text=True, encoding="utf-8",
+            timeout=10,
+        )
+    except (subprocess.SubprocessError, OSError, FileNotFoundError):
+        return []
+    if result.returncode != 0:
+        return []
+
+    out: list[dict[str, str]] = []
+    for line in result.stdout.splitlines():
+        parts = line.split("\x1f")
+        if len(parts) < 4:
+            continue
+        sha, iso_date, author, subject = parts[0], parts[1], parts[2], parts[3]
+        # iso_date "2024-02-19 10:44:13 +0900" → "24.02.19"
+        date_short = ""
+        if len(iso_date) >= 10:
+            yy = iso_date[2:4]
+            mm = iso_date[5:7]
+            dd = iso_date[8:10]
+            date_short = f"{yy}.{mm}.{dd}"
+        out.append({
+            "version": f"v{sha[:7]}",
+            "date": date_short,
+            "description": subject[:200],
+            "author": author[:50],
+            "reviewer": "",
+            "approver": "",
+        })
+    return out
+
+
+def inspect_vba_refs(data: bytes) -> list[str]:
+    """VBA 매크로의 stale ref 위험 패턴 감지 (5차 reviewer I1).
+
+    ``vbaProject.bin`` 안 raw bytes에서 ``Cells(`` / ``Sheets(`` / ``Names(`` / ``Range(``
+    같은 cell/sheet 참조 호출을 grep. 발견되면 빌더의 셀 변경으로 stale ref가 될 수 있어
+    warning 권장.
+
+    Returns:
+        발견된 패턴 이름 list (예: ``["Cells(", "Sheets("]``). 빈 list면 의심 패턴 없음.
+        VBA entry 없거나 읽기 실패 시도 빈 list.
+    """
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as zf:
+            if "xl/vbaProject.bin" not in zf.namelist():
+                return []
+            vba_bytes = zf.read("xl/vbaProject.bin")
+    except (zipfile.BadZipFile, OSError, KeyError):
+        return []
+
+    found: list[str] = []
+    for pat in _VBA_REF_PATTERNS:
+        if pat.search(vba_bytes):
+            # 패턴 source에서 시각화용 이름만 추출 (예: ``rb"Cells\s*\("`` → ``"Cells("``).
+            label = (
+                pat.pattern.decode("ascii", errors="replace")
+                .replace("\\s*", "")
+                .replace("\\(", "(")
+            )
+            found.append(label)
+    return found
+
+
 # ---------------------------------------------------------------------------
 # Sheet helpers (머지셀 보정)
 # ---------------------------------------------------------------------------
