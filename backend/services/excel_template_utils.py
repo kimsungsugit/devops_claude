@@ -48,32 +48,50 @@ def validate_xlsx_template_bytes(data: bytes, *, label: str = "template") -> Non
     except zipfile.BadZipFile as e:
         raise TemplateValidationError(f"{label} not a valid ZIP: {e}")
 
-    # xlsx/xlsm 필수 마커 (Open Office XML 구조) 확인
-    namelist = zf.namelist()
-    if not any(n.startswith("xl/") or n == "[Content_Types].xml" for n in namelist):
-        raise TemplateValidationError(
-            f"{label} Open Office XML 구조 미발견 — xl/ 또는 [Content_Types].xml 없음"
-        )
+    try:
+        # xlsx/xlsm 필수 마커 (Open Office XML 구조) 확인
+        namelist = zf.namelist()
+        if not any(n.startswith("xl/") or n == "[Content_Types].xml" for n in namelist):
+            raise TemplateValidationError(
+                f"{label} Open Office XML 구조 미발견 — xl/ 또는 [Content_Types].xml 없음"
+            )
 
-    # ZIP bomb 검증: 압축비 + 총 크기 + 단일 파일 크기
-    total_decompressed = 0
-    for info in zf.infolist():
-        if info.file_size > _MAX_SINGLE_FILE_SIZE:
-            raise TemplateValidationError(
-                f"{label} 단일 entry 크기 초과: {info.filename} = "
-                f"{info.file_size:,} bytes (한도 {_MAX_SINGLE_FILE_SIZE:,})"
-            )
-        if info.compress_size > 0:
-            ratio = info.file_size / info.compress_size
-            if ratio > _MAX_COMPRESSION_RATIO:
+        # ZIP bomb 검증: 압축비 + 총 크기 + 단일 파일 크기
+        total_decompressed = 0
+        for info in zf.infolist():
+            if info.file_size > _MAX_SINGLE_FILE_SIZE:
                 raise TemplateValidationError(
-                    f"{label} 압축비 ZIP bomb 의심: {info.filename} ratio={ratio:.0f}"
+                    f"{label} 단일 entry 크기 초과: {info.filename} = "
+                    f"{info.file_size:,} bytes (한도 {_MAX_SINGLE_FILE_SIZE:,})"
                 )
-        total_decompressed += info.file_size
-        if total_decompressed > _MAX_DECOMPRESSED_SIZE:
-            raise TemplateValidationError(
-                f"{label} 총 압축 해제 크기 초과: {total_decompressed:,} bytes"
-            )
+            if info.compress_size > 0:
+                ratio = info.file_size / info.compress_size
+                if ratio > _MAX_COMPRESSION_RATIO:
+                    raise TemplateValidationError(
+                        f"{label} 압축비 ZIP bomb 의심: {info.filename} ratio={ratio:.0f}"
+                    )
+            total_decompressed += info.file_size
+            if total_decompressed > _MAX_DECOMPRESSED_SIZE:
+                raise TemplateValidationError(
+                    f"{label} 총 압축 해제 크기 초과: {total_decompressed:,} bytes"
+                )
+    finally:
+        # I3 (deep-reviewer): infolist 한도 초과로 raise 시에도 zf 명시적 close.
+        zf.close()
+
+
+def has_vba_macros(data: bytes) -> bool:
+    """xlsx/xlsm 안에 ``xl/vbaProject.bin`` entry 존재 여부.
+
+    ``True``면 SUTR 빌더 출력 시 매크로가 ZIP entry로 보존됨. 단, **매크로 실행 가능성을
+    보장하지는 않음** — VBA 코드가 시트 ref / Defined Name을 가리키는 경우 빌더의 셀
+    변경으로 stale ref 깨질 위험 (deep-reviewer W2).
+    """
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as zf:
+            return "xl/vbaProject.bin" in zf.namelist()
+    except (zipfile.BadZipFile, OSError):
+        return False
 
 
 # ---------------------------------------------------------------------------

@@ -19,7 +19,6 @@ ASIL A 한정 draft. B/C/D는 manual review 의무.
 from __future__ import annotations
 
 import io
-import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -32,7 +31,7 @@ except ImportError:  # pragma: no cover
 
 from backend.services.excel_template_utils import (
     find_kv_row,
-    resolve_merge_anchor,
+    has_vba_macros,
     safe_write,
     short_date,
     validate_xlsx_template_bytes,
@@ -85,6 +84,9 @@ class SutrBuildResult:
     filename: str = ""
     warnings: list[str] = field(default_factory=list)
     summary: dict[str, Any] = field(default_factory=dict)
+    incomplete_sheets: list[str] = field(default_factory=list)
+    # VBA 매크로 ZIP entry 존재 여부 (deep-reviewer W2) — 실제 실행 검증은 사용자 의무.
+    vba_macros_preserved: bool = False
     tool_qualification: dict[str, Any] = field(
         default_factory=lambda: {
             "evidence_class": "auto-generated draft",
@@ -97,8 +99,10 @@ class SutrBuildResult:
         return {
             "ok": self.ok,
             "filename": self.filename,
-            "xlsm_size_bytes": len(self.xlsm_bytes),
+            "result_size_bytes": len(self.xlsm_bytes),
             "warnings": self.warnings,
+            "incomplete_sheets": self.incomplete_sheets,
+            "vba_macros_preserved": self.vba_macros_preserved,
             "summary": self.summary,
             "tool_qualification": self.tool_qualification,
         }
@@ -163,44 +167,74 @@ def _write_test_summary(ws, meta: SutrBuildMeta, agg: dict[str, Any]) -> None:
     write_value_after_label(ws, "Test Date", meta.test_date)
     write_value_after_label(ws, "Test Engineer", meta.test_engineer)
     write_value_after_label(ws, "Target Coverage", meta.target_coverage)
-    write_value_after_label(ws, "Actual Coverage", agg["tested"] / max(agg["total"], 1))
+    # deep-reviewer X7: 0/N의 silent wrong-pick 회피 — N=0이면 "N/A" 명시.
+    if agg["total"] > 0:
+        write_value_after_label(ws, "Actual Coverage", agg["tested"] / agg["total"])
+    else:
+        write_value_after_label(ws, "Actual Coverage", "N/A")
     write_value_after_label(ws, "Target Pass ratio", meta.target_pass_ratio)
-    write_value_after_label(ws, "Actual Pass ratio", agg["passed"] / max(agg["tested"], 1))
+    if agg["tested"] > 0:
+        write_value_after_label(ws, "Actual Pass ratio", agg["passed"] / agg["tested"])
+    else:
+        write_value_after_label(ws, "Actual Pass ratio", "N/A")
     write_value_after_label(ws, "Final Test Result", meta.final_test_result)
 
 
-def _write_deviation(ws, deviation_cases: list[Any]) -> int:
+def _deviation_case_fields(case: Any) -> tuple[str, str, str, str] | None:
+    """case → (tc_id, tc_no, issue_text, auto_rationale).
+
+    deep-reviewer W6/X7: dict/DeviationCase 외 shape는 명시적 거부 (silent skip 차단).
+    None 반환 시 호출자가 skip + warning.
+    """
+    if isinstance(case, dict):
+        tc_id_v = str(case.get("tc_id", "") or "")
+        tc_no_v = str(case.get("tc_no", "") or "")
+        if not tc_id_v:
+            return None
+        return (tc_id_v, tc_no_v,
+                str(case.get("issue_text", "") or ""),
+                str(case.get("auto_rationale", "") or ""))
+    # dataclass / 객체 — getattr 기반 통일
+    tc_id = getattr(case, "tc_id", None)
+    if not tc_id:
+        return None
+    return (str(tc_id), str(getattr(case, "tc_no", "") or ""),
+            str(getattr(case, "issue_text", "") or ""),
+            str(getattr(case, "auto_rationale", "") or ""))
+
+
+def _write_deviation(ws, deviation_cases: list[Any], out_warnings: list[str] | None = None) -> int:
     """Deviation 시트 — swut_deviation_generator 결과 기록.
 
     Returns: 쓰여진 행 수.
     """
     if not deviation_cases:
         return 0
-    # 헤더 위치
     pos = find_kv_row(ws, "Test Case ID", max_row=10)
     if pos is None:
+        if out_warnings is not None:
+            out_warnings.append("Deviation 시트 'Test Case ID' 헤더 미발견 — skip")
         return 0
     start_row = pos[0] + 1
     written = 0
+    skipped = 0
     for i, case in enumerate(deviation_cases):
-        r = start_row + i
-        # case는 DeviationCase dataclass (또는 dict)
-        if isinstance(case, dict):
-            tc_id_v = case.get("tc_id", "")
-            tc_no_v = case.get("tc_no", "")
-            tc_label = f"{tc_id_v} ({tc_no_v})" if tc_no_v else tc_id_v
-            issue = case.get("issue_text", "")
-            rationale = case.get("auto_rationale", "")
-        else:
-            tc_label = f"{case.tc_id} ({case.tc_no})" if case.tc_no else case.tc_id
-            issue = case.issue_text
-            rationale = case.auto_rationale or ""
-        status = "Auto-Generated"
+        fields = _deviation_case_fields(case)
+        if fields is None:
+            skipped += 1
+            continue
+        tc_id_v, tc_no_v, issue, rationale = fields
+        tc_label = f"{tc_id_v} ({tc_no_v})" if tc_no_v else tc_id_v
+        r = start_row + written
         safe_write(ws, r, pos[1], tc_label)
         safe_write(ws, r, pos[1] + 1, issue)
         safe_write(ws, r, pos[1] + 2, rationale)
-        safe_write(ws, r, pos[1] + 3, status)
+        safe_write(ws, r, pos[1] + 3, "Auto-Generated")
         written += 1
+    if skipped and out_warnings is not None:
+        out_warnings.append(
+            f"Deviation case shape 검증 실패 — {skipped}건 skip (dict 또는 DeviationCase 필요)"
+        )
     return written
 
 
@@ -262,6 +296,14 @@ def build_sutr(
     validate_xlsx_template_bytes(template_bytes, label="SUTR template")
 
     warnings: list[str] = []
+    # deep-reviewer W2: VBA 매크로 ZIP entry 존재 여부 사전 측정.
+    template_has_vba = has_vba_macros(template_bytes)
+    if template_has_vba:
+        warnings.append(
+            "VBA macro execution NOT verified — open output xlsm in Excel and verify "
+            "macros before submitting as evidence (ZIP entry preserved but stale ref 위험)"
+        )
+
     # keep_vba=True — .xlsm 매크로 보존
     wb: Workbook = openpyxl.load_workbook(
         io.BytesIO(template_bytes), keep_vba=True, data_only=False,
@@ -295,7 +337,7 @@ def build_sutr(
     if dev_ws is None:
         warnings.append("Deviation 시트 미발견")
     elif deviation_cases:
-        n = _write_deviation(dev_ws, deviation_cases)
+        n = _write_deviation(dev_ws, deviation_cases, out_warnings=warnings)
         summary["deviation_cases_written"] = n
 
     log_ws = next((wb[n] for n in sheet_names if n.lower() == "test log"), None)
@@ -305,7 +347,9 @@ def build_sutr(
         n = _write_test_log(log_ws, session)
         summary["test_log_rows_written"] = n
 
+    incomplete_sheets: list[str] = []
     warnings.append("History 시트는 본 라운드 placeholder — git log 자동 연동 다음 라운드")
+    incomplete_sheets.append("History")
 
     out = io.BytesIO()
     wb.save(out)
@@ -322,15 +366,10 @@ def build_sutr(
         xlsm_bytes=xlsm_bytes,
         filename=filename,
         warnings=warnings,
+        incomplete_sheets=incomplete_sheets,
+        vba_macros_preserved=template_has_vba,
         summary=summary,
     )
 
 
-def short_date(s: str) -> str:
-    if not s:
-        return ""
-    m = re.match(r"(\d{2,4})[-/](\d{1,2})[-/](\d{1,2})", s)
-    if not m:
-        return s.replace("-", "").replace("/", "")[:6]
-    yy = m.group(1)[-2:]
-    return f"{yy}{int(m.group(2)):02d}{int(m.group(3)):02d}"
+# `short_date`는 excel_template_utils에서 import — 모듈 하단 중복 정의 제거 (deep-reviewer C1).

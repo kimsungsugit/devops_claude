@@ -23,7 +23,6 @@
 from __future__ import annotations
 
 import io
-import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -35,7 +34,6 @@ except ImportError:  # pragma: no cover
     openpyxl = None  # type: ignore[assignment]
 
 from backend.services.excel_template_utils import (
-    resolve_merge_anchor,
     safe_write,
     short_date,
     validate_xlsx_template_bytes,
@@ -104,6 +102,8 @@ class CoverageBuildResult:
     filename: str = ""
     warnings: list[str] = field(default_factory=list)
     summary: dict[str, Any] = field(default_factory=dict)
+    # ISO 26262 audit hole 표시 (deep-reviewer W5/F3) — placeholder 시트 명시.
+    incomplete_sheets: list[str] = field(default_factory=list)
     tool_qualification: dict[str, Any] = field(
         default_factory=lambda: {
             "evidence_class": "auto-generated draft",
@@ -116,8 +116,9 @@ class CoverageBuildResult:
         return {
             "ok": self.ok,
             "filename": self.filename,
-            "xlsx_size_bytes": len(self.xlsx_bytes),
+            "result_size_bytes": len(self.xlsx_bytes),
             "warnings": self.warnings,
+            "incomplete_sheets": self.incomplete_sheets,
             "summary": self.summary,
             "tool_qualification": self.tool_qualification,
         }
@@ -178,6 +179,8 @@ def _write_cover_sheet(ws, meta: CoverageBuildMeta) -> None:
     write_value_after_label(ws, "Status", "DRAFT — PENDING REVIEW")
     write_value_after_label(ws, "Validation Date", meta.validation_date)
     write_value_after_label(ws, "Author", meta.author)
+    # deep-reviewer W4: reviewer property 호출 — 미사용 dead code 정리.
+    write_value_after_label(ws, "Reviewer", meta.reviewer)
     write_value_after_label(ws, "Approver", meta.approver)
     if meta.doc_id_sequence:
         doc_id = f"{meta.doc_id_base}-{meta.doc_id_sequence}"
@@ -242,17 +245,24 @@ def _write_coverage_sheet(ws, agg: dict[str, Any]) -> int:
     return written
 
 
-def _write_traceability_sheet(ws, agg: dict[str, Any]) -> int:
-    """1.Traceability 시트 — TC × Function 매트릭스.
+_BLANK_MARKUP = (
+    "BLANK — auto-generated placeholder (TC×Function matrix pending). "
+    "ISO 26262 evidence 사용 전 수동 작성 필수."
+)
 
-    회사 포맷이 TC 행 / Function 열 매트릭스(420x420). 본 빌더는 lightweight
-    구현 — 기존 template의 hierarchy 그대로 유지하고 cell만 채우려 시도.
-    매트릭스가 너무 크고 template 의존이라 본 라운드는 **로우 카운트만** 기록.
+
+def _write_traceability_sheet(ws, agg: dict[str, Any]) -> int:
+    """1.Traceability 시트 — TC × Function 매트릭스 (본 라운드 placeholder).
+
+    deep-reviewer W5/ISO F3: 빈 시트가 audit에 제출되는 위험 차단 위해 시트
+    상단 anchor에 ``_BLANK_MARKUP`` 명시. 채워진 row 수는 0 (호출자가
+    ``CoverageBuildResult.incomplete_sheets`` 에 시트명 등록).
     """
     if not ws:
         return 0
-    # TODO(다음 라운드): per-env 단위로 TC → Function 매핑 작성
-    # 본 라운드: agg 통계만 기록 (Cell A1 위쪽 빈 셀에)
+    # 시트 첫 빈 영역에 명시적 BLANK 마커 — audit 시 자동 생성 placeholder 명확.
+    # A1 머지셀이면 anchor 보정 거쳐 _BLANK_MARKUP 기재.
+    safe_write(ws, 1, 1, _BLANK_MARKUP)
     return 0
 
 
@@ -318,16 +328,22 @@ def build_coverage_report(
         n_written = _write_coverage_sheet(cov_ws, agg)
         summary["coverage_rows_written"] = n_written
 
-    # 1.Traceability
+    # 1.Traceability — placeholder + BLANK markup (deep-reviewer W5/ISO F3)
+    incomplete_sheets: list[str] = []
     trace_ws = next((wb[n] for n in sheet_names if "traceability" in n.lower()), None)
     if trace_ws is None:
         warnings.append("1.Traceability 시트 미발견")
     else:
         _write_traceability_sheet(trace_ws, agg)
-        warnings.append("1.Traceability 매트릭스는 본 라운드 placeholder — TC×Function 채우기는 다음 라운드")
+        warnings.append("1.Traceability 매트릭스는 본 라운드 placeholder — TC×Function 채우기 다음 라운드")
+        incomplete_sheets.append("1.Traceability")
 
-    # 2.Consistency — 본 라운드 placeholder (SwUDS docx 파싱 미연결)
+    # 2.Consistency — placeholder + BLANK markup
+    cons_ws = next((wb[n] for n in sheet_names if "consistency" in n.lower()), None)
+    if cons_ws is not None:
+        safe_write(cons_ws, 1, 1, _BLANK_MARKUP)
     warnings.append("2.Consistency 시트는 본 라운드 placeholder — SwUDS↔SwUTS 비교 다음 라운드")
+    incomplete_sheets.append("2.Consistency")
 
     # 빌드 → bytes
     out = io.BytesIO()
@@ -345,16 +361,9 @@ def build_coverage_report(
         xlsx_bytes=xlsx_bytes,
         filename=filename,
         warnings=warnings,
+        incomplete_sheets=incomplete_sheets,
         summary=summary,
     )
 
 
-def short_date(s: str) -> str:
-    """`2024-02-19` → `240219`."""
-    if not s:
-        return ""
-    m = re.match(r"(\d{2,4})[-/](\d{1,2})[-/](\d{1,2})", s)
-    if not m:
-        return s.replace("-", "").replace("/", "")[:6]
-    yy = m.group(1)[-2:]
-    return f"{yy}{int(m.group(2)):02d}{int(m.group(3)):02d}"
+# `short_date`는 excel_template_utils에서 import — 모듈 하단 중복 정의 제거 (deep-reviewer C1).

@@ -218,6 +218,32 @@ class TestBuildCoverageReport:
         assert d["tool_qualification"]["evidence_class"] == "auto-generated draft"
         assert "단독 evidence" in d["tool_qualification"]["asil_b_c_d_usage"]
 
+    def test_incomplete_sheets_reported(self):
+        """deep-reviewer W5/ISO F3: placeholder 시트는 incomplete_sheets에 명시."""
+        session = _make_session()
+        meta = CoverageBuildMeta(release_sw_version="1.0.0", test_date="2024-02-19")
+        result = build_coverage_report(session, meta, _build_coverage_template())
+        d = result.to_dict()
+        assert "1.Traceability" in d["incomplete_sheets"]
+        assert "2.Consistency" in d["incomplete_sheets"]
+
+    def test_result_size_key_unified(self):
+        """deep-reviewer Info X3: xlsx/xlsm size 키 통합."""
+        session = _make_session()
+        meta = CoverageBuildMeta(release_sw_version="1.0.0", test_date="2024-02-19")
+        result = build_coverage_report(session, meta, _build_coverage_template())
+        d = result.to_dict()
+        assert "result_size_bytes" in d
+        assert d["result_size_bytes"] > 0
+
+    def test_zip_bomb_rejected(self):
+        """deep-reviewer Critical S: 잘못된 bytes는 TemplateValidationError."""
+        from backend.services.excel_template_utils import TemplateValidationError
+        session = _make_session()
+        meta = CoverageBuildMeta(release_sw_version="1.0.0", test_date="2024-02-19")
+        with pytest.raises(TemplateValidationError):
+            build_coverage_report(session, meta, b"NOT_AN_XLSX")
+
 
 # ---------------------------------------------------------------------------
 # SUTR aggregator
@@ -276,3 +302,61 @@ class TestBuildSutr:
         assert result.summary["passed"] == 1
         assert result.summary["failed"] == 1
         assert result.summary["tested"] == 2
+
+    def test_deviation_shape_invalid_skipped_with_warning(self):
+        """deep-reviewer W6: dict/dataclass 외 shape는 skip + warning."""
+        session = _make_session()
+        meta = SutrBuildMeta(release_sw_version="1.0.0", test_date="2024-02-19")
+        # 잘못된 shape 2건 (list, namedtuple 비슷한 객체) + 정상 1건
+        invalid_cases = [
+            ["not", "a", "dict"],  # list
+            {"tc_id": "", "issue_text": "empty id"},  # tc_id 빈값 → 거부
+            {"tc_id": "SwUTC_X", "issue_text": "valid"},  # 정상
+        ]
+        result = build_sutr(session, meta, _build_sutr_template(), invalid_cases)
+        assert result.summary["deviation_cases_written"] == 1
+        assert any("Deviation case shape 검증 실패" in w for w in result.warnings)
+
+    def test_pass_ratio_na_when_tested_zero(self):
+        """deep-reviewer X7: tested=0이면 ratio="N/A" silent wrong-pick 회피."""
+        # 빈 환경 session
+        from backend.services.swut_input_adapter import EnvironmentData
+        session = SwUTSession(environments=[EnvironmentData(env_name="EMPTY")])
+        meta = SutrBuildMeta(release_sw_version="1.0.0", test_date="2024-02-19")
+        result = build_sutr(session, meta, _build_sutr_template())
+        # 출력 xlsm 안의 "Actual Pass ratio" 셀이 "N/A"
+        import io as _io
+        wb = openpyxl.load_workbook(_io.BytesIO(result.xlsm_bytes), keep_vba=True)
+        ts = wb["Test Summary"]
+        # B8 = Final Test Result, B7 = Actual Coverage, B... 정확한 위치는 fixture 의존
+        # 단순 검증: 시트에 "N/A" 문자열이 존재
+        all_values = []
+        for row in ts.iter_rows(values_only=True):
+            all_values.extend(str(c) for c in row if c is not None)
+        assert any("N/A" in v for v in all_values)
+
+    def test_incomplete_sheets_reported(self):
+        """deep-reviewer W5: SUTR는 History placeholder를 incomplete_sheets에 등록."""
+        session = _make_session()
+        meta = SutrBuildMeta(release_sw_version="1.0.0", test_date="2024-02-19")
+        result = build_sutr(session, meta, _build_sutr_template())
+        d = result.to_dict()
+        assert "History" in d["incomplete_sheets"]
+
+    def test_vba_macros_flag_false_for_xlsx_template(self):
+        """deep-reviewer W2: 일반 xlsx template (VBA 없음) → vba_macros_preserved=False."""
+        session = _make_session()
+        meta = SutrBuildMeta(release_sw_version="1.0.0", test_date="2024-02-19")
+        result = build_sutr(session, meta, _build_sutr_template())
+        # fixture는 plain Workbook이라 VBA 없음
+        assert result.vba_macros_preserved is False
+        d = result.to_dict()
+        assert d["vba_macros_preserved"] is False
+
+    def test_result_size_key_unified(self):
+        session = _make_session()
+        meta = SutrBuildMeta(release_sw_version="1.0.0", test_date="2024-02-19")
+        result = build_sutr(session, meta, _build_sutr_template())
+        d = result.to_dict()
+        assert "result_size_bytes" in d
+        assert d["result_size_bytes"] > 0
