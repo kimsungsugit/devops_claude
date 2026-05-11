@@ -148,17 +148,18 @@ export default function SwUTBuildSection() {
       </div>
 
       <div className="form-grid" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: '12px', marginTop: '16px' }}>
-        <Field label="Project ID *" value={form.project_id} onChange={v => setField('project_id', v)} placeholder="HDPDM01" />
-        <Field label="Release SW Version * (예: 2.02 또는 1.01.05)" value={form.release_sw_version} onChange={v => setField('release_sw_version', v)} placeholder="2.02" />
-        <Field label="Test Date * (yyyy-mm-dd)" value={form.test_date} onChange={v => setField('test_date', v)} type="date" />
-        <Field label="Test Engineer" value={form.test_engineer} onChange={v => setField('test_engineer', v)} placeholder="JK Kim" />
-        <Field label="Doc ID Sequence (digit)" value={form.doc_id_sequence} onChange={v => setField('doc_id_sequence', v)} placeholder="852" />
-        <Field label="HW Version" value={form.hw_version} onChange={v => setField('hw_version', v)} />
-        <Field label="ASIL Level" value={form.asil_level} onChange={v => setField('asil_level', v)} />
+        <Field name="project_id" label="Project ID *" value={form.project_id} onChange={v => setField('project_id', v)} placeholder="HDPDM01" />
+        <Field name="release_sw_version" label="Release SW Version * (예: 2.02 또는 1.01.05)" value={form.release_sw_version} onChange={v => setField('release_sw_version', v)} placeholder="2.02" />
+        <Field name="test_date" label="Test Date * (yyyy-mm-dd)" value={form.test_date} onChange={v => setField('test_date', v)} type="date" />
+        <Field name="test_engineer" label="Test Engineer" value={form.test_engineer} onChange={v => setField('test_engineer', v)} placeholder="JK Kim" />
+        <Field name="doc_id_sequence" label="Doc ID Sequence (digit)" value={form.doc_id_sequence} onChange={v => setField('doc_id_sequence', v)} placeholder="852" />
+        <Field name="hw_version" label="HW Version" value={form.hw_version} onChange={v => setField('hw_version', v)} />
+        <Field name="asil_level" label="ASIL Level" value={form.asil_level} onChange={v => setField('asil_level', v)} />
       </div>
 
       <div style={{ marginTop: '16px' }}>
         <Field
+          name="log_folder"
           label="Log Folder (Jenkins 미사용 시 fallback)"
           value={form.log_folder}
           onChange={v => setField('log_folder', v)}
@@ -166,6 +167,7 @@ export default function SwUTBuildSection() {
           fullWidth
         />
         <Field
+          name="template_path"
           label="Template Path (xlsx/xlsm — config default 사용 시 빈 string)"
           value={form.template_path}
           onChange={v => setField('template_path', v)}
@@ -214,13 +216,16 @@ export default function SwUTBuildSection() {
   );
 }
 
-function Field({ label, value, onChange, placeholder = '', type = 'text', fullWidth = false }) {
+function Field({ name, label, value, onChange, placeholder = '', type = 'text', fullWidth = false }) {
+  const id = `swut-${name}`;
   return (
     <div style={{ gridColumn: fullWidth ? '1 / -1' : undefined }}>
-      <label style={{ display: 'block', fontSize: '12px', color: 'var(--muted)', marginBottom: '4px' }}>
+      <label htmlFor={id} style={{ display: 'block', fontSize: '12px', color: 'var(--muted)', marginBottom: '4px' }}>
         {label}
       </label>
       <input
+        id={id}
+        name={name}
         type={type}
         value={value}
         onChange={e => onChange(e.target.value)}

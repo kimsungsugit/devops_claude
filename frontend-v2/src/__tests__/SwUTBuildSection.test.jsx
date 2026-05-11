@@ -1,0 +1,145 @@
+/**
+ * SwUTBuildSection 단위 테스트 (10차 라운드 T148).
+ *
+ * 핵심 검증:
+ * - Form 입력 필드 렌더링
+ * - 필수 필드 누락 시 toast warning + fetch 호출 안 함
+ * - 빌드 성공 시 blob 다운로드 trigger + summary/warnings 표시
+ * - 빌드 실패 시 (HTTP 422 Pydantic detail) 명시적 에러 toast
+ * - raw fetch silent failure 회피 — X-User 헤더 명시 + res.ok 검사
+ */
+import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+
+// localStorage / fetch mock
+const toastSpy = vi.fn();
+vi.mock('../App.jsx', () => ({
+  useToast: () => toastSpy,
+}));
+
+vi.mock('../api.js', () => ({
+  getUsername: () => 'tester',
+}));
+
+const { default: SwUTBuildSection } = await import('../components/sections/SwUTBuildSection.jsx');
+
+
+describe('SwUTBuildSection', () => {
+  beforeEach(() => {
+    toastSpy.mockReset();
+    localStorage.clear();
+    // URL.createObjectURL mock (jsdom 미지원)
+    global.URL.createObjectURL = vi.fn(() => 'blob://mock');
+    global.URL.revokeObjectURL = vi.fn();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('renders core form fields and build buttons', () => {
+    render(<SwUTBuildSection />);
+    expect(screen.getByLabelText(/Project ID/)).toBeTruthy();
+    expect(screen.getByLabelText(/Release SW Version/)).toBeTruthy();
+    expect(screen.getByText(/Coverage Report 빌드/)).toBeTruthy();
+    expect(screen.getByText(/SUTR 빌드/)).toBeTruthy();
+  });
+
+  it('rejects missing release_sw_version with toast warning (no fetch)', async () => {
+    const fetchSpy = vi.spyOn(global, 'fetch');
+    render(<SwUTBuildSection />);
+    // release_sw_version 빈 채로 클릭
+    fireEvent.click(screen.getByText(/Coverage Report 빌드/));
+    await waitFor(() => {
+      expect(toastSpy).toHaveBeenCalledWith('warning', expect.stringMatching(/release/));
+    });
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('rejects missing log_folder + template_path with toast warning', async () => {
+    const fetchSpy = vi.spyOn(global, 'fetch');
+    render(<SwUTBuildSection />);
+    // 필수 필드 채우되 log_folder / template_path 둘 다 비움
+    fireEvent.change(screen.getByLabelText(/Release SW Version/), { target: { value: '2.02' } });
+    fireEvent.click(screen.getByText(/Coverage Report 빌드/));
+    await waitFor(() => {
+      expect(toastSpy).toHaveBeenCalledWith('warning', expect.stringMatching(/log_folder.*template/));
+    });
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('downloads xlsx blob on success + shows summary', async () => {
+    const blobContent = new Uint8Array([0x50, 0x4b, 0x03, 0x04]); // ZIP magic
+    const mockBlob = new Blob([blobContent], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+
+    vi.spyOn(global, 'fetch').mockResolvedValue({
+      ok: true,
+      headers: new Headers({
+        'Content-Disposition': 'attachment; filename="(HDPDM01)Cov_v2.02.xlsx"',
+        'X-SwUT-Summary': JSON.stringify({ environments: 30, total_tcs: 1941 }),
+        'X-SwUT-Warnings': JSON.stringify(['placeholder sheet']),
+      }),
+      blob: async () => mockBlob,
+    });
+
+    render(<SwUTBuildSection />);
+    fireEvent.change(screen.getByLabelText(/Release SW Version/), { target: { value: '2.02' } });
+    fireEvent.change(screen.getByLabelText(/Log Folder/), {
+      target: { value: 'C:/fake/log' },
+    });
+    fireEvent.click(screen.getByText(/Coverage Report 빌드/));
+
+    await waitFor(() => {
+      expect(toastSpy).toHaveBeenCalledWith('success', expect.stringMatching(/다운로드/));
+    });
+    // summary 렌더링
+    expect(screen.getByText(/environments/)).toBeTruthy();
+    expect(global.URL.createObjectURL).toHaveBeenCalled();
+  });
+
+  it('propagates Pydantic 422 detail array as toast error', async () => {
+    vi.spyOn(global, 'fetch').mockResolvedValue({
+      ok: false,
+      status: 422,
+      headers: new Headers(),
+      json: async () => ({
+        detail: [
+          { loc: ['body', 'release_sw_version'], msg: 'String should match pattern', type: 'string_pattern_mismatch' },
+        ],
+      }),
+    });
+
+    render(<SwUTBuildSection />);
+    fireEvent.change(screen.getByLabelText(/Release SW Version/), { target: { value: '2.02' } });
+    fireEvent.change(screen.getByLabelText(/Log Folder/), {
+      target: { value: 'C:/fake/log' },
+    });
+    fireEvent.click(screen.getByText(/Coverage Report 빌드/));
+
+    await waitFor(() => {
+      expect(toastSpy).toHaveBeenCalledWith('error', expect.stringMatching(/release_sw_version/));
+    });
+  });
+
+  it('sends X-User header in fetch (raw fetch silent failure 회피)', async () => {
+    const fetchSpy = vi.spyOn(global, 'fetch').mockResolvedValue({
+      ok: true,
+      headers: new Headers({ 'Content-Disposition': 'attachment; filename="x.xlsx"' }),
+      blob: async () => new Blob([new Uint8Array([0x50, 0x4b, 0x03, 0x04])]),
+    });
+
+    render(<SwUTBuildSection />);
+    fireEvent.change(screen.getByLabelText(/Release SW Version/), { target: { value: '2.02' } });
+    fireEvent.change(screen.getByLabelText(/Log Folder/), {
+      target: { value: 'C:/fake/log' },
+    });
+    fireEvent.click(screen.getByText(/Coverage Report 빌드/));
+
+    await waitFor(() => {
+      expect(fetchSpy).toHaveBeenCalled();
+    });
+    const opts = fetchSpy.mock.calls[0][1];
+    expect(opts.headers['X-User']).toBe('tester');
+    expect(opts.method).toBe('POST');
+  });
+});

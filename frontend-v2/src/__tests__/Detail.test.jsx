@@ -54,6 +54,9 @@ vi.mock('../components/sections/ImpactGuideSection.jsx', () => ({
 vi.mock('../components/sections/ProjectSetupSection.jsx', () => ({
   default: () => <div data-testid="section-setup">ProjectSetup</div>,
 }));
+vi.mock('../components/sections/SwUTBuildSection.jsx', () => ({
+  default: () => <div data-testid="section-swut">SwUTBuild</div>,
+}));
 
 const { default: Detail } = await import('../views/Detail.jsx');
 
