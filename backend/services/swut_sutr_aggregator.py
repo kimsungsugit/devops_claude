@@ -21,7 +21,6 @@ from __future__ import annotations
 import hashlib
 import io
 from dataclasses import dataclass, field
-from datetime import datetime
 from typing import Any
 
 try:
@@ -43,43 +42,19 @@ from backend.services.excel_template_utils import (
     write_value_after_label,
 )
 from backend.services.swut_input_adapter import SwUTSession, aggregate_session
+from backend.services.swut_meta import BuildMetaBase
 
 
 @dataclass
-class SutrBuildMeta:
-    """SUTR 빌드 메타."""
-    project_id: str = "HDPDM01"
-    project_full_name: str = "HDPDM01"
-    asil_level: str = "ASIL A"
+class SutrBuildMeta(BuildMetaBase):
+    """SUTR 빌드 메타 — base에 SUTR 전용 2 필드 + final_test_result default override.
+
+    T137 (W3 fix): `CoverageBuildMeta` 와 17 공통 필드를 `BuildMetaBase` 단일 출처로.
+    """
     doc_id_base: str = "HDPDM01-SUTR"
-    doc_id_sequence: str = ""
-    default_author: str = ""
-    default_reviewer: str = ""
-    default_approver: str = ""
-
-    release_sw_version: str = ""
-    hw_version: str = "1.00"
-    test_date: str = ""
-    test_engineer: str = ""
-    validation_date: str = ""
-    reviewer_override: str = ""
-    approver_override: str = ""
-
     target_coverage: float = 1.0
     target_pass_ratio: float = 1.0
-    final_test_result: str = "OK"
-
-    build_timestamp: str = field(
-        default_factory=lambda: datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    )
-
-    @property
-    def author(self) -> str:
-        return self.test_engineer or self.default_author
-
-    @property
-    def approver(self) -> str:
-        return self.approver_override or self.default_approver
+    final_test_result: str = "OK"  # Coverage는 "PASS", SUTR은 "OK"
 
 
 @dataclass

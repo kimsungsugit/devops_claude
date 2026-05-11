@@ -262,6 +262,83 @@ class TestBuildCoverageReport:
         assert "build_timestamp" in result.summary
         assert result.summary["build_timestamp"]  # 빈 string 아님
 
+    def test_traceability_matches_company_format(self):
+        """T136: 회사 row label `SwUTC_<fn_id>` (인덱스 없음) 매칭 검증."""
+        import io as _io
+
+        import openpyxl
+        from backend.services.swut_input_adapter import (
+            EnvironmentData,
+            ExecutionRow,
+            FunctionCoverage,
+            SwUTSession,
+        )
+
+        # session: SwUFn_0001 함수, TC name = SwUFn_0001.001
+        env = EnvironmentData(
+            env_name="SWTE_X",
+            component_name="X",
+            test_cases={"SwUFn_0001.001": [object()]},
+            test_results={"SwUFn_0001.001": ExecutionRow(tc_name="SwUFn_0001.001", passed=True)},
+            function_coverage=[FunctionCoverage(unit_id="SwUFn_0001", name="X")],
+        )
+        session = SwUTSession(environments=[env])
+
+        # 회사 v3.01 형식 fixture — header row 12, 데이터 row 14 (B열: SwUTC_SwUFn_0001)
+        wb = openpyxl.Workbook()
+        wb.remove(wb.active)
+        wb.create_sheet("Cover")
+        wb.create_sheet("Test Summary")
+        # 1.Traceability — minimal: header row 1, 50개 SwUFn 컬럼 + 데이터 row 2~6
+        trace = wb.create_sheet("1.Traceability")
+        for i in range(50):
+            trace.cell(row=1, column=4 + i, value=f"SwUFn_{i+1:04d}")
+        # 회사 row format: 인덱스 없는 `SwUTC_SwUFn_0001`
+        trace.cell(row=2, column=2, value="SwUTC_SwUFn_0001")
+        wb.create_sheet("2.Consistency")
+        wb.create_sheet("3. Coverage").cell(row=1, column=1, value="Statement Coverage")
+        wb["3. Coverage"].cell(row=6, column=1, value="Unit ID")
+        wb.create_sheet("History").cell(row=1, column=1, value="■ Revision History")
+        buf = _io.BytesIO()
+        wb.save(buf)
+        template = buf.getvalue()
+
+        meta = CoverageBuildMeta(release_sw_version="1.0.0", test_date="2024-02-19")
+        result = build_coverage_report(session, meta, template)
+        # T136 fix: traceability_o_cells > 0
+        assert result.summary["traceability_o_cells"] >= 1
+        # incomplete_sheets에서 1.Traceability 제거됨
+        assert "1.Traceability" not in result.incomplete_sheets
+
+    def test_build_meta_base_default_factory(self):
+        """T137: BuildMetaBase 기본 생성 + 3 property 동작."""
+        from backend.services.swut_meta import BuildMetaBase
+        m = BuildMetaBase()
+        assert m.project_id == "HDPDM01"
+        assert m.final_test_result == "PASS"
+        assert m.build_timestamp  # 빈 string 아님
+        # property: override 없으면 default 반환
+        assert m.author == ""
+        m2 = BuildMetaBase(default_author="JK", test_engineer="JE")
+        assert m2.author == "JE"  # test_engineer 우선
+        m3 = BuildMetaBase(default_approver="A", approver_override="B")
+        assert m3.approver == "B"  # override 우선
+
+    def test_subclass_inheritance_preserves_signature(self):
+        """T137: CoverageBuildMeta / SutrBuildMeta가 BuildMetaBase 상속 후도 기존 인자 호환."""
+        cov = CoverageBuildMeta(
+            release_sw_version="1.01.05", test_date="2024-02-19",
+            project_id="HDPDM01", asil_level="ASIL A",
+        )
+        assert cov.final_test_result == "PASS"  # base default
+        sutr = SutrBuildMeta(
+            release_sw_version="1.01.05", test_date="2024-02-19",
+        )
+        assert sutr.final_test_result == "OK"  # subclass override
+        assert sutr.target_coverage == 1.0
+        assert sutr.target_pass_ratio == 1.0
+        assert sutr.doc_id_base == "HDPDM01-SUTR"  # subclass override
+
 
 # ---------------------------------------------------------------------------
 # SUTR aggregator

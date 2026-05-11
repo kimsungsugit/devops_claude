@@ -26,7 +26,6 @@ import hashlib
 import io
 import re
 from dataclasses import dataclass, field
-from datetime import datetime
 from typing import Any
 
 try:
@@ -44,6 +43,7 @@ from backend.services.excel_template_utils import (
     validate_xlsx_template_bytes,
     write_value_after_label,
 )
+from backend.services.swut_meta import BuildMetaBase
 from backend.services.swut_input_adapter import (
     EnvironmentData,
     FunctionCoverage,
@@ -57,48 +57,12 @@ from backend.services.swut_input_adapter import (
 # ---------------------------------------------------------------------------
 
 @dataclass
-class CoverageBuildMeta:
-    """Coverage Report 빌드에 필요한 메타.
+class CoverageBuildMeta(BuildMetaBase):
+    """Coverage Report 빌드 메타 — `BuildMetaBase` 17 공통 필드 그대로 사용.
 
-    fixed 항목은 ``config/swut_meta.json`` 에서 로드되고, dialog 항목은
-    매 빌드 frontend에서 받는다.
+    Coverage Report는 base 외 추가 필드 없음. T137 (W3) BuildMetaBase 통합.
     """
-    # fixed
-    project_id: str = "HDPDM01"
-    project_full_name: str = "HDPDM01"
-    asil_level: str = "ASIL A"
-    doc_id_base: str = ""
-    default_author: str = ""
-    default_reviewer: str = ""
-    default_approver: str = ""
-
-    # dialog
-    release_sw_version: str = ""   # 예: 1.01.05
-    hw_version: str = "1.00"
-    test_date: str = ""            # ISO 8601 또는 yyyy-mm-dd
-    test_engineer: str = ""
-    validation_date: str = ""
-    reviewer_override: str = ""
-    approver_override: str = ""
-    doc_id_sequence: str = ""
-
-    # auto
-    final_test_result: str = "PASS"
-    build_timestamp: str = field(
-        default_factory=lambda: datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    )
-
-    @property
-    def author(self) -> str:
-        return self.test_engineer or self.default_author
-
-    @property
-    def reviewer(self) -> str:
-        return self.reviewer_override or self.default_reviewer
-
-    @property
-    def approver(self) -> str:
-        return self.approver_override or self.default_approver
+    pass
 
 
 @dataclass
@@ -343,21 +307,29 @@ def _write_traceability_sheet(
                     tc_row_index[stripped] = row[0].row
                     break
 
-    # 3) 우리 session TC name → 함수 매핑 + 'O' 표시
+    # 3) 우리 session TC name → 함수 매핑 + 'O' 표시.
+    # T136: 회사 v3.01 row label은 `SwUTC_<fn_id>` (인덱스 `.NNN` 없음).
+    # `SwUTC_<tc_name>` (인덱스 포함) 과 `<tc_name>` 도 fallback 시도.
     tc_to_fn = _collect_tc_to_function(session)
     written = 0
+    matched_fn: set[str] = set()
     for tc_name, fn_id in tc_to_fn.items():
         col = header_cols.get(fn_id)
         if col is None:
             continue
         row_idx = (
-            tc_row_index.get(f"SwUTC_{tc_name}")
-            or tc_row_index.get(tc_name)
+            tc_row_index.get(f"SwUTC_{fn_id}")          # 회사 표준 (인덱스 없음)
+            or tc_row_index.get(f"SwUTC_{tc_name}")     # 인덱스 포함 형식
+            or tc_row_index.get(tc_name)                # 우리 빌더 native
         )
         if row_idx is None:
             continue
+        # 같은 fn_id 가 여러 TC index를 가질 때 첫 매칭만 — 회사 시트 row 1개당 'O' 1개로 충분.
+        if fn_id in matched_fn:
+            continue
         if safe_write(ws, row_idx, col, "O"):
             written += 1
+            matched_fn.add(fn_id)
 
     if written == 0:
         if out_warnings is not None:
