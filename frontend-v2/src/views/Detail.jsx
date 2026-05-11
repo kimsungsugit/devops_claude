@@ -9,6 +9,7 @@ import AiAssistSection from '../components/sections/AiAssistSection.jsx';
 import ReportGenSection from '../components/sections/ReportGenSection.jsx';
 import ImpactGuideSection from '../components/sections/ImpactGuideSection.jsx';
 import ProjectSetupSection from '../components/sections/ProjectSetupSection.jsx';
+import SwUTBuildSection from '../components/sections/SwUTBuildSection.jsx';
 
 const SECTIONS = [
   { id: 'build',   icon: '🔨', label: '빌드 정보',    Component: BuildInfoSection },
@@ -19,6 +20,7 @@ const SECTIONS = [
   { id: 'srssds',  icon: '📋', label: 'SRS/SDS 매핑', Component: SrsSdsSection },
   { id: 'docgen',  icon: '📝', label: '문서 생성',     Component: DocGenSection },
   { id: 'reports', icon: '📈', label: '리포트 생성',   Component: ReportGenSection },
+  { id: 'swut',    icon: '🧪', label: 'SwUT 빌드',     Component: SwUTBuildSection },
   { id: 'ai',      icon: '🤖', label: 'AI 어시스턴트', Component: AiAssistSection },
 ];
 
