@@ -341,14 +341,14 @@ class TestJenkinsFetcherMock:
 # ---------------------------------------------------------------------------
 
 class TestSemaphore:
-    def test_semaphore_capacity_is_2(self):
-        """Semaphore 인스턴스 capacity 검증 — 동시 2건 한도."""
+    def test_semaphore_capacity_is_3(self):
+        """17차 T173: Semaphore(2) → (3) 상향. 14차 메모리 1배 절감 활용."""
         from backend.routers.swut import _BUILD_SEMAPHORE
-        assert _BUILD_SEMAPHORE._value == 2
+        assert _BUILD_SEMAPHORE._value == 3
 
-    def test_semaphore_serializes_3rd_request(self):
-        """3건 동시 호출 시 1건은 대기. asyncio.run sync wrapper로 검증."""
-        sem = asyncio.Semaphore(2)
+    def test_semaphore_serializes_4th_request(self):
+        """17차 T173: 4건 동시 호출 시 1건은 대기. capacity=3."""
+        sem = asyncio.Semaphore(3)
         order: list[int] = []
 
         async def _hold(i: int):
@@ -357,10 +357,10 @@ class TestSemaphore:
                 await asyncio.sleep(0.02)
 
         async def _main():
-            await asyncio.gather(_hold(0), _hold(1), _hold(2))
+            await asyncio.gather(_hold(0), _hold(1), _hold(2), _hold(3))
 
         asyncio.run(_main())
-        assert len(order) == 3  # 모두 완료, Semaphore가 deadlock 안 됨
+        assert len(order) == 4  # 모두 완료, Semaphore가 deadlock 안 됨
 
 
 # ---------------------------------------------------------------------------
@@ -570,3 +570,48 @@ class TestStreamingResponse14:
         assert len(chunks) == 4
         assert sum(len(c) for c in chunks) == len(data)
         assert b"".join(chunks) == data
+
+
+class TestSutrSwudsIntegration17:
+    """17차 T172: SUTR endpoint도 swuds_docx_path 처리."""
+
+    def test_sutr_endpoint_calls_resolve_swuds(self):
+        """SUTR endpoint가 _resolve_swuds_function_ids를 호출 + build_sutr에 인자 전달."""
+        # mock으로 SwUDS 함수 ID set 강제 + build_sutr 호출 검증
+        with patch(
+            "backend.routers.swut.collect_swut_session", return_value=_make_session(),
+        ), patch(
+            "backend.routers.swut._read_template_bytes",
+            return_value=_minimal_xlsx_template_bytes(),
+        ), patch(
+            "backend.routers.swut._resolve_swuds_function_ids",
+            return_value={"SwUFn_0001", "SwUFn_0002"},
+        ) as resolve_mock, patch(
+            "backend.routers.swut.build_sutr",
+        ) as build_mock:
+            # build_sutr mock — io.BytesIO 결과 반환
+            import io as _io
+            from backend.services.swut_sutr_aggregator import SutrBuildResult
+            build_mock.return_value = SutrBuildResult(
+                ok=True, xlsm_io=_io.BytesIO(b"PK\x03\x04test"),
+                filename="x.xlsm", warnings=[],
+                incomplete_sheets=[], vba_macros_preserved=False, summary={},
+            )
+
+            client.post(
+                "/api/swut/sutr/build",
+                json={
+                    "project_id": "HDPDM01",
+                    "release_sw_version": "1.0.0",
+                    "test_date": "2024-02-19",
+                    "log_folder": "C:/fake/log",
+                    "swuds_docx_path": "U:/docs/SwUDS_v3.docx",
+                },
+                headers={"X-User": "tester"},
+            )
+
+            assert resolve_mock.called
+            # build_sutr이 swuds_function_ids 인자 받았는지
+            assert build_mock.called
+            call_kwargs = build_mock.call_args.kwargs
+            assert call_kwargs.get("swuds_function_ids") == {"SwUFn_0001", "SwUFn_0002"}

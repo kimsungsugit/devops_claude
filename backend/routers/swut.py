@@ -47,7 +47,9 @@ _logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/swut", tags=["swut"])
 
-_BUILD_SEMAPHORE = asyncio.Semaphore(2)
+# 17차 T173: Semaphore(2) → (3) 상향. 14차 W1 메모리 1배 절감 (BytesIO/StreamingResponse)
+# 으로 worst-case 1.8MB × 3 = 5.4MB — 운영 안전 한도. 동시 처리량 1.5x 증가.
+_BUILD_SEMAPHORE = asyncio.Semaphore(3)
 
 _META_CONFIG_PATH = "config/swut_meta.json"
 
@@ -292,7 +294,13 @@ def _do_sutr_build(req: SwUTBuildRequest) -> Response:
     )
     template_bytes = _read_template_bytes(req.template_path, req.project_id, "sutr")
     meta = _build_sutr_meta(req)
-    result = build_sutr(session, meta, template_bytes, deviation_cases=req.deviation_cases)
+    # 17차 T172: SwUDS docx 처리 — Coverage builder와 대칭.
+    swuds_fn_ids = _resolve_swuds_function_ids(req)
+    result = build_sutr(
+        session, meta, template_bytes,
+        deviation_cases=req.deviation_cases,
+        swuds_function_ids=swuds_fn_ids,
+    )
     if not result.ok:
         raise HTTPException(status_code=500, detail="빌드 실패 (ok=False)")
     return _build_result_to_response(

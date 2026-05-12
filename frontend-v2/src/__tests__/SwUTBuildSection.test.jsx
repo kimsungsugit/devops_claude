@@ -204,6 +204,37 @@ describe('SwUTBuildSection', () => {
     expect(opts.method).toBe('POST');
   });
 
+  it('renders swuds_docx_path input field (17차 T174)', () => {
+    render(<SwUTBuildSection />);
+    const swudsInput = screen.getByLabelText(/SwUDS Docx Path/);
+    expect(swudsInput).toBeTruthy();
+    expect(swudsInput.getAttribute('name')).toBe('swuds_docx_path');
+    // 자동완성 차단 속성 (11차 패턴 그대로)
+    expect(swudsInput.getAttribute('autocomplete')).toBe('off');
+  });
+
+  it('includes swuds_docx_path in POST body when provided (17차)', async () => {
+    const fetchSpy = vi.spyOn(global, 'fetch').mockResolvedValue({
+      ok: true,
+      headers: new Headers({ 'Content-Disposition': 'attachment; filename="x.xlsx"' }),
+      blob: async () => new Blob([new Uint8Array([0x50, 0x4b, 0x03, 0x04])]),
+    });
+
+    render(<SwUTBuildSection />);
+    fireEvent.change(screen.getByLabelText(/Release SW Version/), { target: { value: '2.02' } });
+    fireEvent.change(screen.getByLabelText(/Log Folder/), { target: { value: 'C:/fake/log' } });
+    fireEvent.change(screen.getByLabelText(/SwUDS Docx Path/), {
+      target: { value: 'U:/docs/SwUDS_v3.docx' },
+    });
+    fireEvent.click(screen.getByText(/Coverage Report 빌드/));
+
+    await waitFor(() => {
+      expect(fetchSpy).toHaveBeenCalled();
+    });
+    const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
+    expect(body.swuds_docx_path).toBe('U:/docs/SwUDS_v3.docx');
+  });
+
   it('revokes object URL immediately on unmount (F5 — 13차)', async () => {
     vi.spyOn(global, 'fetch').mockResolvedValue({
       ok: true,

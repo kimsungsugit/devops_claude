@@ -22,6 +22,7 @@ const DEFAULT_FORM = {
   asil_level: 'ASIL A',
   log_folder: '',
   template_path: '',
+  swuds_docx_path: '',
 };
 
 function loadSavedForm() {
@@ -223,6 +224,16 @@ export default function SwUTBuildSection() {
           value={form.template_path}
           onChange={v => setField('template_path', v)}
           placeholder="U:\...\(HDPDM01)SwUT Coverage Report_v3.01_240221_R.xlsx"
+          fullWidth
+        />
+      </div>
+      <div className="swut-form-row">
+        <Field
+          name="swuds_docx_path"
+          label="SwUDS Docx Path (선택 — 2.Consistency SwUDS↔SwUTS 매핑 자동화)"
+          value={form.swuds_docx_path}
+          onChange={v => setField('swuds_docx_path', v)}
+          placeholder="U:\...\(HDPDM01)SwUDS_v3.docx"
           fullWidth
         />
       </div>

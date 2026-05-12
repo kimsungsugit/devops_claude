@@ -105,6 +105,9 @@ def _build_sutr_template() -> bytes:
     log["D1"] = "Method"
     log["E1"] = "Pass/Fail"
 
+    # 17차 T171: 2.Consistency 시트 (Coverage 대칭)
+    wb.create_sheet("2.Consistency")
+
     hist = wb.create_sheet("History")
     hist["A1"] = "■ Revision History"
 
@@ -535,3 +538,59 @@ class TestBuildSutr:
         d = result.to_dict()
         assert "result_size_bytes" in d
         assert d["result_size_bytes"] > 0
+
+    # ── 17차 T171: SUTR 2.Consistency 시트 ─────────────────────────────────
+
+    def test_sutr_consistency_writes_4_rows_without_swuds(self):
+        """T171: SUTR 빌드도 Coverage와 같은 자체 일관성 4 row 작성."""
+        session = _make_session()
+        meta = SutrBuildMeta(release_sw_version="1.0.0", test_date="2024-02-19")
+        result = build_sutr(session, meta, _build_sutr_template())
+
+        wb = openpyxl.load_workbook(io.BytesIO(result.xlsm_bytes), keep_vba=True)
+        cons = wb["2.Consistency"]
+        # 헤더 (row 3) + 4 data row (4-7)
+        assert cons.cell(3, 1).value == "Item"
+        items = [cons.cell(r, 1).value for r in range(4, 8)]
+        assert all(items), f"row 4-7 모두 채워져야 함: {items}"
+        results = [cons.cell(r, 4).value for r in range(4, 8)]
+        assert all(r in ("PASS", "FAIL") for r in results)
+
+    def test_sutr_consistency_writes_5_rows_with_swuds(self):
+        """T171: swuds_function_ids 제공 시 row 5 (SwUDS↔SwUTS) 추가."""
+        session = _make_session()
+        meta = SutrBuildMeta(release_sw_version="1.0.0", test_date="2024-02-19")
+        # session의 function_coverage에 SwUFn_0101, SwUFn_0103 있음 (위 _make_session 참조)
+        result = build_sutr(
+            session, meta, _build_sutr_template(),
+            swuds_function_ids={"SwUFn_0101", "SwUFn_0103"},
+        )
+
+        wb = openpyxl.load_workbook(io.BytesIO(result.xlsm_bytes), keep_vba=True)
+        cons = wb["2.Consistency"]
+        items = [str(cons.cell(r, 1).value or "") for r in range(4, 10)]
+        swuds_rows = [item for item in items if "SwUDS" in item]
+        assert swuds_rows, f"SwUDS 매핑 row 없음: {items}"
+
+    def test_sutr_summary_includes_consistency_keys(self):
+        """T171: summary에 17차 신규 키 2개 포함."""
+        session = _make_session()
+        meta = SutrBuildMeta(release_sw_version="1.0.0", test_date="2024-02-19")
+        # 1) swuds 미제공
+        r1 = build_sutr(session, meta, _build_sutr_template())
+        assert r1.summary.get("consistency_self_check_rows") == 4
+        assert r1.summary.get("consistency_swuds_compared") is False
+        # 2) swuds 제공
+        r2 = build_sutr(
+            session, meta, _build_sutr_template(),
+            swuds_function_ids={"SwUFn_0101", "SwUFn_0103"},
+        )
+        assert r2.summary.get("consistency_self_check_rows") == 5
+        assert r2.summary.get("consistency_swuds_compared") is True
+
+    def test_sutr_consistency_partial_label_kept_without_swuds(self):
+        """T171: swuds 미제공 시 incomplete_sheets에 partial 라벨 유지."""
+        session = _make_session()
+        meta = SutrBuildMeta(release_sw_version="1.0.0", test_date="2024-02-19")
+        result = build_sutr(session, meta, _build_sutr_template())
+        assert any("partial" in s for s in result.incomplete_sheets)

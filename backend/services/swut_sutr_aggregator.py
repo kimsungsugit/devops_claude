@@ -267,6 +267,7 @@ def build_sutr(
     meta: SutrBuildMeta,
     template_bytes: bytes,
     deviation_cases: list[Any] | None = None,
+    swuds_function_ids: set[str] | None = None,
 ) -> SutrBuildResult:
     """SUTR v3.01 xlsm 생성.
 
@@ -275,6 +276,8 @@ def build_sutr(
         meta: 빌드 메타.
         template_bytes: 기존 v3.01 xlsm 파일 bytes.
         deviation_cases: swut_deviation_generator 결과 (None이면 빈 Deviation 시트).
+        swuds_function_ids: 17차 — SwUDS 함수 ID set (옵션). 제공되면 2.Consistency에
+            SwUDS↔SwUTS 매핑 row 추가. Coverage builder와 대칭.
     """
     if openpyxl is None:
         raise RuntimeError("openpyxl is required for SwUT SUTR builder")
@@ -368,6 +371,23 @@ def build_sutr(
         else:
             warnings.append("git log 가져오기 실패 — History 시트 placeholder")
             incomplete_sheets.append("History")
+
+    # 17차 T171: 2.Consistency 시트 — Coverage builder와 대칭.
+    # SUTR 템플릿에 시트가 없으면 silent skip (Hyundai 양식 변형 안전).
+    cons_ws = next((wb[n] for n in sheet_names if "consistency" in n.lower()), None)
+    if cons_ws is not None:
+        from backend.services.swut_coverage_aggregator import _write_consistency_sheet
+        n_cons = _write_consistency_sheet(
+            cons_ws, session,
+            swuds_function_ids=swuds_function_ids,
+            out_warnings=warnings,
+        )
+        summary["consistency_self_check_rows"] = n_cons
+        if swuds_function_ids is not None:
+            summary["consistency_swuds_compared"] = True
+        else:
+            summary["consistency_swuds_compared"] = False
+            incomplete_sheets.append("2.Consistency (SwUDS 비교 partial — v3.02)")
 
     # 14차 W1: BytesIO 그대로 result에 저장 — getvalue() copy 회피.
     out = io.BytesIO()
