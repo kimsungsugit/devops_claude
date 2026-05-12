@@ -59,8 +59,13 @@ class SutrBuildMeta(BuildMetaBase):
 
 @dataclass
 class SutrBuildResult:
+    """SUTR 빌드 결과.
+
+    14차 W1: 메모리 절약 — ``xlsm_io: BytesIO`` 가 주 저장소. ``xlsm_bytes`` 는
+    backward compat property — 호출 시점에 ``getvalue()`` (1회 copy).
+    """
     ok: bool
-    xlsm_bytes: bytes = b""
+    xlsm_io: io.BytesIO = field(default_factory=io.BytesIO)
     filename: str = ""
     warnings: list[str] = field(default_factory=list)
     summary: dict[str, Any] = field(default_factory=dict)
@@ -75,11 +80,29 @@ class SutrBuildResult:
         }
     )
 
+    @property
+    def xlsm_bytes(self) -> bytes:
+        """Backward compat — BytesIO 전체를 bytes로 복사 (테스트/감사용)."""
+        pos = self.xlsm_io.tell()
+        self.xlsm_io.seek(0)
+        try:
+            return self.xlsm_io.read()
+        finally:
+            self.xlsm_io.seek(pos)
+
+    @property
+    def result_size_bytes(self) -> int:
+        pos = self.xlsm_io.tell()
+        self.xlsm_io.seek(0, 2)
+        size = self.xlsm_io.tell()
+        self.xlsm_io.seek(pos)
+        return size
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "ok": self.ok,
             "filename": self.filename,
-            "result_size_bytes": len(self.xlsm_bytes),
+            "result_size_bytes": self.result_size_bytes,
             "warnings": self.warnings,
             "incomplete_sheets": self.incomplete_sheets,
             "vba_macros_preserved": self.vba_macros_preserved,
@@ -346,9 +369,10 @@ def build_sutr(
             warnings.append("git log 가져오기 실패 — History 시트 placeholder")
             incomplete_sheets.append("History")
 
+    # 14차 W1: BytesIO 그대로 result에 저장 — getvalue() copy 회피.
     out = io.BytesIO()
     wb.save(out)
-    xlsm_bytes = out.getvalue()
+    out.seek(0)
     wb.close()
 
     filename = (
@@ -360,7 +384,7 @@ def build_sutr(
     summary["build_timestamp"] = meta.build_timestamp
     return SutrBuildResult(
         ok=True,
-        xlsm_bytes=xlsm_bytes,
+        xlsm_io=out,
         filename=filename,
         warnings=warnings,
         incomplete_sheets=incomplete_sheets,

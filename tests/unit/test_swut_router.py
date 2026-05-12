@@ -495,3 +495,78 @@ class TestAsyncMigration:
         assert "asyncio.to_thread" in src
         assert "asyncio.get_event_loop()" not in src
         assert "loop.run_in_executor" not in src
+
+
+class TestStreamingResponse14:
+    """14차 W1: StreamingResponse + BytesIO 직접 stream."""
+
+    def test_response_includes_content_length(self):
+        """W1b: Content-Length 헤더가 명시되어 chunked 모드 아니어도 정확한 크기 통보."""
+        with patch(
+            "backend.routers.swut.collect_swut_session", return_value=_make_session(),
+        ), patch(
+            "backend.routers.swut._read_template_bytes",
+            return_value=_minimal_xlsx_template_bytes(),
+        ):
+            r = client.post(
+                "/api/swut/coverage/build",
+                json={
+                    "project_id": "HDPDM01",
+                    "release_sw_version": "1.0.0",
+                    "test_date": "2024-02-19",
+                    "log_folder": "C:/fake/log",
+                },
+                headers={"X-User": "tester"},
+            )
+        assert r.status_code == 200
+        content_length = r.headers.get("content-length")
+        assert content_length is not None
+        assert int(content_length) == len(r.content)
+        # PK ZIP magic 보존 — stream chunk 손상 없음
+        assert r.content[:4] == b"PK\x03\x04"
+
+    def test_streaming_response_used_not_plain_response(self):
+        """W1a: source code에 StreamingResponse 사용 확인."""
+        import inspect
+        from backend.routers import swut as swut_mod
+
+        src = inspect.getsource(swut_mod)
+        assert "StreamingResponse" in src
+        assert "_iter_bytesio" in src
+        # plain Response(content=bytes) 사용 회피 확인 — bytes 그대로 전송하지 않음
+        assert "Response(content=content" not in src
+
+    def test_builder_result_xlsx_io_is_bytesio(self):
+        """W1a: builder result.xlsx_io가 BytesIO 인스턴스 + backward compat property."""
+        from backend.routers.swut import _build_coverage_meta
+        from backend.schemas import SwUTBuildRequest
+        from backend.services.swut_coverage_aggregator import build_coverage_report
+
+        req = SwUTBuildRequest(
+            project_id="HDPDM01",
+            release_sw_version="1.0.0",
+            test_date="2024-02-19",
+            log_folder="C:/fake/log",
+        )
+        session = _make_session()
+        meta = _build_coverage_meta(req)
+        result = build_coverage_report(session, meta, _minimal_xlsx_template_bytes())
+        assert isinstance(result.xlsx_io, io.BytesIO)
+        # backward compat property 동작
+        assert result.xlsx_bytes[:4] == b"PK\x03\x04"
+        # result_size_bytes는 BytesIO copy 없이 측정
+        assert result.result_size_bytes == len(result.xlsx_bytes)
+        # property 호출 후에도 BytesIO position이 보존되어 stream 가능 (idempotent)
+        assert result.xlsx_io.tell() == 0
+
+    def test_iter_bytesio_yields_chunks(self):
+        """W1: _iter_bytesio가 chunk별 yield + 빈 data 시 종료."""
+        from backend.routers.swut import _iter_bytesio
+        import io as _io
+
+        data = b"x" * (200 * 1024)  # 200KB → 64KB chunk 4개
+        buf = _io.BytesIO(data)
+        chunks = list(_iter_bytesio(buf, chunk_size=64 * 1024))
+        assert len(chunks) == 4
+        assert sum(len(c) for c in chunks) == len(data)
+        assert b"".join(chunks) == data

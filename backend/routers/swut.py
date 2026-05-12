@@ -23,12 +23,14 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import io
 import json
 import logging
 import os
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Response
+from fastapi.responses import StreamingResponse
 
 from backend.schemas import SwUTBuildRequest
 from backend.services.file_resolver import get_resolver
@@ -137,16 +139,31 @@ def _read_template_bytes(template_path: str, project_id: str, kind: str) -> byte
     return resolver.read_bytes(tpath)
 
 
+_CHUNK_SIZE = 64 * 1024  # 64KB — starlette 기본 chunk와 일치
+
+
+def _iter_bytesio(buf: "io.BytesIO", chunk_size: int = _CHUNK_SIZE):
+    """BytesIO를 chunk로 yield — StreamingResponse 용. 14차 W1."""
+    buf.seek(0)
+    while True:
+        chunk = buf.read(chunk_size)
+        if not chunk:
+            break
+        yield chunk
+
+
 def _build_result_to_response(
-    *, content: bytes, filename: str, summary: dict[str, Any],
+    *, content_io: "io.BytesIO", filename: str, summary: dict[str, Any],
     warnings: list[str], incomplete_sheets: list[str],
     media_type: str,
 ) -> Response:
-    """xlsx/xlsm bytes를 attachment Response로 변환.
+    """xlsx/xlsm BytesIO를 attachment StreamingResponse로 변환 (14차 W1).
 
     summary / warnings / incomplete_sheets는 X-* 헤더로 노출. HTTP 헤더는 latin-1만
     허용하므로 한글 등 비-ASCII는 ``ensure_ascii=True`` 로 ``\\uXXXX`` escape 후 송신.
     Frontend는 ``JSON.parse`` 로 decode 가능. filename도 RFC 5987 ``filename*=UTF-8`` 사용.
+
+    StreamingResponse는 ``Content-Length`` 를 자동 설정하지 않으므로 헤더에 명시.
     """
     from urllib.parse import quote
 
@@ -155,18 +172,30 @@ def _build_result_to_response(
         .decode("ascii")
         .replace('"', "_")
     )
+
+    # 14차 W1: BytesIO 크기 측정 (full copy 회피).
+    pos = content_io.tell()
+    content_io.seek(0, 2)
+    size = content_io.tell()
+    content_io.seek(pos)
+
     headers = {
         "Content-Disposition": (
             f'attachment; filename="{ascii_filename}"; '
             f"filename*=UTF-8''{quote(filename)}"
         ),
+        "Content-Length": str(size),
         "X-SwUT-Summary": json.dumps(summary, ensure_ascii=True)[:1024],
         "X-SwUT-Warnings": json.dumps(warnings, ensure_ascii=True)[:1024],
         "X-SwUT-Incomplete-Sheets": ",".join(incomplete_sheets).encode(
             "ascii", errors="replace",
         ).decode("ascii")[:512],
     }
-    return Response(content=content, media_type=media_type, headers=headers)
+    return StreamingResponse(
+        _iter_bytesio(content_io),
+        media_type=media_type,
+        headers=headers,
+    )
 
 
 def _run_build_safely(kind: str, fn: Any, req: SwUTBuildRequest) -> Response:
@@ -179,8 +208,10 @@ def _run_build_safely(kind: str, fn: Any, req: SwUTBuildRequest) -> Response:
                  kind, req.project_id, req.release_sw_version, user)
     try:
         resp = fn(req)
-        _logger.info("swut.%s.build done: project_id=%s bytes=%d",
-                     kind, req.project_id, len(resp.body) if hasattr(resp, "body") else -1)
+        # 14차 W1: StreamingResponse는 .body 없음 — Content-Length 헤더로 크기 보고.
+        size = resp.headers.get("content-length", "?") if hasattr(resp, "headers") else "?"
+        _logger.info("swut.%s.build done: project_id=%s bytes=%s",
+                     kind, req.project_id, size)
         return resp
     except HTTPException:
         raise  # 의도된 client error는 그대로
@@ -216,7 +247,7 @@ def _do_coverage_build(req: SwUTBuildRequest) -> Response:
     if not result.ok:
         raise HTTPException(status_code=500, detail="빌드 실패 (ok=False)")
     return _build_result_to_response(
-        content=result.xlsx_bytes,
+        content_io=result.xlsx_io,
         filename=result.filename,
         summary=result.summary,
         warnings=result.warnings,
@@ -241,7 +272,7 @@ def _do_sutr_build(req: SwUTBuildRequest) -> Response:
     if not result.ok:
         raise HTTPException(status_code=500, detail="빌드 실패 (ok=False)")
     return _build_result_to_response(
-        content=result.xlsm_bytes,
+        content_io=result.xlsm_io,
         filename=result.filename,
         summary=result.summary,
         warnings=result.warnings,

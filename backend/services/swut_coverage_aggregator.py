@@ -67,8 +67,14 @@ class CoverageBuildMeta(BuildMetaBase):
 
 @dataclass
 class CoverageBuildResult:
+    """Coverage Report 빌드 결과.
+
+    14차 W1: 메모리 절약 — ``xlsx_io: BytesIO`` 가 주 저장소. ``xlsx_bytes`` 는
+    backward compat property — 호출 시점에 ``getvalue()`` (1회 copy). router는
+    ``xlsx_io`` 를 StreamingResponse로 직접 stream → bytes copy 회피 + chunk 전송.
+    """
     ok: bool
-    xlsx_bytes: bytes = b""
+    xlsx_io: io.BytesIO = field(default_factory=io.BytesIO)
     filename: str = ""
     warnings: list[str] = field(default_factory=list)
     summary: dict[str, Any] = field(default_factory=dict)
@@ -82,11 +88,30 @@ class CoverageBuildResult:
         }
     )
 
+    @property
+    def xlsx_bytes(self) -> bytes:
+        """Backward compat — BytesIO 전체를 bytes로 복사 (테스트/감사용)."""
+        pos = self.xlsx_io.tell()
+        self.xlsx_io.seek(0)
+        try:
+            return self.xlsx_io.read()
+        finally:
+            self.xlsx_io.seek(pos)
+
+    @property
+    def result_size_bytes(self) -> int:
+        """BytesIO 크기 — len(xlsx_bytes) 회피 (full copy 없이 size만)."""
+        pos = self.xlsx_io.tell()
+        self.xlsx_io.seek(0, 2)  # SEEK_END
+        size = self.xlsx_io.tell()
+        self.xlsx_io.seek(pos)
+        return size
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "ok": self.ok,
             "filename": self.filename,
-            "result_size_bytes": len(self.xlsx_bytes),
+            "result_size_bytes": self.result_size_bytes,
             "warnings": self.warnings,
             "incomplete_sheets": self.incomplete_sheets,
             "summary": self.summary,
@@ -445,10 +470,10 @@ def build_coverage_report(
             warnings.append("git log 가져오기 실패 — History 시트 placeholder")
             incomplete_sheets.append("History")
 
-    # 빌드 → bytes
+    # 14차 W1: BytesIO 그대로 result에 저장 — getvalue() copy 회피.
     out = io.BytesIO()
     wb.save(out)
-    xlsx_bytes = out.getvalue()
+    out.seek(0)  # router StreamingResponse가 처음부터 read
     wb.close()
 
     filename = (
@@ -460,7 +485,7 @@ def build_coverage_report(
     summary["build_timestamp"] = meta.build_timestamp
     return CoverageBuildResult(
         ok=True,
-        xlsx_bytes=xlsx_bytes,
+        xlsx_io=out,
         filename=filename,
         warnings=warnings,
         incomplete_sheets=incomplete_sheets,
