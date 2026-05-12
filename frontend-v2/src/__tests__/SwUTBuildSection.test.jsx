@@ -257,4 +257,83 @@ describe('SwUTBuildSection', () => {
     unmount();
     expect(global.URL.revokeObjectURL).toHaveBeenCalledWith('blob://mock');
   });
+
+  // ── 19차 — Consistency Check UI ──────────────────────────────────────
+
+  it('renders consistency check section + 일관성 검증 button (19차)', () => {
+    render(<SwUTBuildSection />);
+    expect(screen.getByText(/Coverage ↔ SUTR 일관성 검증/)).toBeTruthy();
+    expect(screen.getByLabelText(/Coverage Report Path/)).toBeTruthy();
+    expect(screen.getByLabelText(/SUTR Path/)).toBeTruthy();
+    expect(screen.getByText(/일관성 검증 실행/)).toBeTruthy();
+  });
+
+  it('rejects missing coverage_path with toast warning (19차)', async () => {
+    const fetchSpy = vi.spyOn(global, 'fetch');
+    render(<SwUTBuildSection />);
+    fireEvent.click(screen.getByText(/일관성 검증 실행/));
+    await waitFor(() => {
+      expect(toastSpy).toHaveBeenCalledWith('warning', expect.stringMatching(/coverage_path/));
+    });
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('renders issues from consistency response with severity classes (19차)', async () => {
+    vi.spyOn(global, 'fetch').mockResolvedValue({
+      ok: true,
+      headers: new Headers(),
+      json: async () => ({
+        ok: false,
+        issues: [
+          { severity: 'warning', category: 'uncovered_mismatch', message: 'SwUFn_0001 mismatch' },
+          { severity: 'critical', category: 'total_tc', message: 'TC count mismatch' },
+        ],
+        parse_warnings: [],
+      }),
+    });
+
+    render(<SwUTBuildSection />);
+    fireEvent.change(screen.getByLabelText(/Coverage Report Path/), {
+      target: { value: 'C:/cov.xlsx' },
+    });
+    fireEvent.change(screen.getByLabelText(/SUTR Path/), {
+      target: { value: 'C:/sutr.xlsm' },
+    });
+    fireEvent.click(screen.getByText(/일관성 검증 실행/));
+
+    await waitFor(() => {
+      expect(screen.getByText(/SwUFn_0001 mismatch/)).toBeTruthy();
+    });
+    expect(screen.getByText(/TC count mismatch/)).toBeTruthy();
+    expect(screen.getByText(/issue 2건/)).toBeTruthy();
+  });
+
+  it('sends X-User header + AbortSignal in consistency fetch (19차)', async () => {
+    const fetchSpy = vi.spyOn(global, 'fetch').mockResolvedValue({
+      ok: true,
+      headers: new Headers(),
+      json: async () => ({ ok: true, issues: [], parse_warnings: [] }),
+    });
+
+    render(<SwUTBuildSection />);
+    fireEvent.change(screen.getByLabelText(/Coverage Report Path/), {
+      target: { value: 'C:/cov.xlsx' },
+    });
+    fireEvent.change(screen.getByLabelText(/SUTR Path/), {
+      target: { value: 'C:/sutr.xlsm' },
+    });
+    fireEvent.click(screen.getByText(/일관성 검증 실행/));
+
+    await waitFor(() => {
+      expect(fetchSpy).toHaveBeenCalled();
+    });
+    // 첫 번째 호출 (이전 테스트 빌드 trigger 없으므로 calls[0])
+    const consistencyCall = fetchSpy.mock.calls.find(c => c[0].includes('/consistency/check'));
+    expect(consistencyCall).toBeTruthy();
+    const opts = consistencyCall[1];
+    expect(opts.headers['X-User']).toBe('tester');
+    expect(opts.method).toBe('POST');
+    expect(opts.signal).toBeDefined();
+    expect(opts.signal.constructor.name).toBe('AbortSignal');
+  });
 });

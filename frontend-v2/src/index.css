@@ -1249,3 +1249,73 @@ label {
 
 .swut-warnings-list li { margin-bottom: 2px; }
 
+/* ── 19차: Coverage ↔ SUTR Consistency Check 섹션 ── */
+.swut-consistency-section {
+  margin-top: var(--sp-4);
+  padding-top: var(--sp-4);
+  border-top: 1px solid var(--border);
+}
+
+.swut-consistency-title {
+  margin: 0 0 var(--sp-1) 0;
+  font-size: var(--text-md);
+  font-weight: 700;
+  color: var(--text);
+}
+
+.swut-consistency-desc {
+  margin: 0 0 var(--sp-2) 0;
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+
+.swut-consistency-result {
+  margin-top: var(--sp-3);
+  padding: var(--sp-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--panel);
+}
+
+.swut-consistency-status {
+  font-weight: 600;
+  margin-bottom: var(--sp-2);
+  color: var(--text);
+}
+
+.swut-issues-list {
+  margin: 0;
+  padding-left: var(--sp-4);
+  font-size: var(--text-sm);
+  list-style: none;
+}
+
+.swut-issue {
+  padding: 6px 10px;
+  margin-bottom: 6px;
+  border-radius: var(--radius-sm);
+  border-left: 3px solid var(--border);
+  background: var(--bg);
+}
+
+.swut-issue-cat {
+  font-family: ui-monospace, SFMono-Regular, "Cascadia Mono", Menlo, monospace;
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+  margin-right: 6px;
+}
+
+.swut-issue-critical {
+  border-left-color: var(--color-danger);
+  background: var(--color-danger-soft);
+}
+.swut-issue-warning {
+  border-left-color: var(--color-warning);
+  background: var(--color-warning-soft);
+}
+.swut-issue-info {
+  border-left-color: var(--color-info);
+  background: var(--color-info-soft);
+}
+

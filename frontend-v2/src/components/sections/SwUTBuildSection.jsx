@@ -59,8 +59,13 @@ export default function SwUTBuildSection() {
   const [lastSummary, setLastSummary] = useState(null);
   const [lastWarnings, setLastWarnings] = useState([]);
   const [form, setForm] = useState(loadSavedForm);
+  // 19차: 일관성 검증 state
+  const [consistencyForm, setConsistencyForm] = useState({ coverage_path: '', sutr_path: '' });
+  const [consistencyChecking, setConsistencyChecking] = useState(false);
+  const [consistencyReport, setConsistencyReport] = useState(null);
 
   const abortRef = useRef(null);
+  const consistencyAbortRef = useRef(null);
   const mountedRef = useRef(true);
   // F5: 활성 blob URL + timer 추적 — unmount 시 즉시 revoke + clearTimeout.
   const downloadCleanupRef = useRef([]);
@@ -72,6 +77,10 @@ export default function SwUTBuildSection() {
       if (abortRef.current) {
         abortRef.current.abort();
         abortRef.current = null;
+      }
+      if (consistencyAbortRef.current) {
+        consistencyAbortRef.current.abort();
+        consistencyAbortRef.current = null;
       }
       // F5: 보류 중인 revoke timer를 정리하고, blob URL을 즉시 revoke
       downloadCleanupRef.current.forEach(({ timerId, url }) => {
@@ -187,6 +196,61 @@ export default function SwUTBuildSection() {
     }
   }, [form, toast]);
 
+  // 19차: Coverage ↔ SUTR cross-validation 호출.
+  const runConsistencyCheck = useCallback(async () => {
+    if (!consistencyForm.coverage_path) {
+      toast('warning', 'coverage_path 필수'); return;
+    }
+    if (!consistencyForm.sutr_path) {
+      toast('warning', 'sutr_path 필수'); return;
+    }
+    const user = getUsername();
+    if (!user) { toast('warning', '사용자 이름이 설정되지 않음 — Settings 확인'); return; }
+
+    setConsistencyChecking(true);
+    setConsistencyReport(null);
+    const controller = new AbortController();
+    consistencyAbortRef.current = controller;
+
+    try {
+      const res = await fetch(buildUrl('/api/swut/consistency/check'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-User': user },
+        body: JSON.stringify(consistencyForm),
+        signal: controller.signal,
+      });
+
+      if (!res.ok) {
+        let msg = `HTTP ${res.status}`;
+        try {
+          const j = await res.json();
+          if (Array.isArray(j?.detail)) msg = formatDetailMessage(j.detail);
+          else if (typeof j?.detail === 'string') msg = j.detail;
+          else if (j?.error?.message) msg = j.error.message;
+          else if (j?.message) msg = j.message;
+        } catch (e) { /* non-JSON body */ }
+        if (mountedRef.current) toast('error', `일관성 검증 실패: ${msg}`);
+        return;
+      }
+
+      const report = await res.json();
+      if (!mountedRef.current) return;
+      setConsistencyReport(report);
+      const issues = report?.issues || [];
+      if (issues.length === 0) {
+        toast('success', '일관성 검증 통과 — issue 0건');
+      } else {
+        toast('warning', `일관성 검증: issue ${issues.length}건 — 카드 확인`);
+      }
+    } catch (e) {
+      if (e?.name === 'AbortError') return;
+      if (mountedRef.current) toast('error', `일관성 검증 실패: ${e?.message || e}`);
+    } finally {
+      if (mountedRef.current) setConsistencyChecking(false);
+      if (consistencyAbortRef.current === controller) consistencyAbortRef.current = null;
+    }
+  }, [consistencyForm, toast]);
+
   return (
     <div className="swut-section">
       <div className="swut-section-header">
@@ -270,6 +334,72 @@ export default function SwUTBuildSection() {
           </ul>
         </div>
       )}
+
+      {/* 19차: Coverage ↔ SUTR cross-validation 섹션 */}
+      <div className="swut-consistency-section">
+        <h3 className="swut-consistency-title">🔍 Coverage ↔ SUTR 일관성 검증</h3>
+        <p className="swut-consistency-desc">
+          빌드한 Coverage Report (xlsx) / SUTR (xlsm) 두 산출물의 path를 입력하면
+          4가지 cross-validation (미커버 ↔ 미실행 / Exception ↔ Deviation / Total TC /
+          Final Result) 결과 반환. ISO 26262 audit evidence.
+        </p>
+        <div className="swut-form-row">
+          <Field
+            name="coverage_path"
+            label="Coverage Report Path (xlsx)"
+            value={consistencyForm.coverage_path}
+            onChange={v => setConsistencyForm(f => ({ ...f, coverage_path: v }))}
+            placeholder="U:\...\(HDPDM01)SwUT Coverage Report_v3.01_240221_R.xlsx"
+            fullWidth
+          />
+        </div>
+        <div className="swut-form-row">
+          <Field
+            name="sutr_path"
+            label="SUTR Path (xlsm)"
+            value={consistencyForm.sutr_path}
+            onChange={v => setConsistencyForm(f => ({ ...f, sutr_path: v }))}
+            placeholder="U:\...\(HDPDM01_SUTR) Software Unit Test Result_v3.01_240221_R.xlsm"
+            fullWidth
+          />
+        </div>
+        <div className="swut-actions">
+          <button
+            className="btn-primary"
+            disabled={consistencyChecking}
+            onClick={runConsistencyCheck}
+          >
+            {consistencyChecking ? '검증 중...' : '🔍 일관성 검증 실행'}
+          </button>
+        </div>
+
+        {consistencyReport && (
+          <div className="swut-consistency-result">
+            <div className="swut-consistency-status">
+              결과: <strong>{consistencyReport.ok ? '✅ PASS' : '⚠️ FAIL'}</strong>
+              {' '}— issue {(consistencyReport.issues || []).length}건,
+              warning {(consistencyReport.parse_warnings || []).length}건
+            </div>
+            {(consistencyReport.issues || []).length > 0 && (
+              <ul className="swut-issues-list">
+                {consistencyReport.issues.map((iss, i) => (
+                  <li key={i} className={`swut-issue swut-issue-${iss.severity || 'info'}`}>
+                    <span className="swut-issue-cat">[{iss.category}]</span>{' '}
+                    {iss.message}
+                  </li>
+                ))}
+              </ul>
+            )}
+            {(consistencyReport.parse_warnings || []).length > 0 && (
+              <ul className="swut-warnings-list">
+                {consistencyReport.parse_warnings.map((w, i) => (
+                  <li key={i}>{w}</li>
+                ))}
+              </ul>
+            )}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
