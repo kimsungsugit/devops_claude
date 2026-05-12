@@ -229,3 +229,137 @@ class TestSemaphore:
 
         asyncio.run(_main())
         assert len(order) == 3  # 모두 완료, Semaphore가 deadlock 안 됨
+
+
+# ---------------------------------------------------------------------------
+# 12차 라운드 — code health 개선 검증
+# ---------------------------------------------------------------------------
+
+class TestConfigCache:
+    """C2: _load_meta_from_config mtime 기반 cache."""
+
+    def test_lru_cache_hits_with_same_mtime(self, tmp_path, monkeypatch):
+        from backend.routers import swut as swut_mod
+
+        cfg_path = tmp_path / "swut_meta.json"
+        cfg_path.write_text('{"projects":{"HDPDM01":{"asil_level":"ASIL A"}}}', encoding="utf-8")
+        monkeypatch.setattr(swut_mod, "_META_CONFIG_PATH", str(cfg_path))
+
+        swut_mod._read_meta_config_raw.cache_clear()
+
+        for _ in range(5):
+            cfg = swut_mod._load_meta_from_config("HDPDM01")
+            assert cfg.get("asil_level") == "ASIL A"
+
+        info = swut_mod._read_meta_config_raw.cache_info()
+        # 5회 호출 중 1회 miss, 4회 hit
+        assert info.misses == 1
+        assert info.hits == 4
+
+    def test_lru_cache_invalidates_on_mtime_change(self, tmp_path, monkeypatch):
+        """mtime이 변하면 cache miss → reload."""
+        import time
+        from backend.routers import swut as swut_mod
+
+        cfg_path = tmp_path / "swut_meta.json"
+        cfg_path.write_text('{"projects":{"HDPDM01":{"asil_level":"ASIL A"}}}', encoding="utf-8")
+        monkeypatch.setattr(swut_mod, "_META_CONFIG_PATH", str(cfg_path))
+        swut_mod._read_meta_config_raw.cache_clear()
+
+        cfg1 = swut_mod._load_meta_from_config("HDPDM01")
+        assert cfg1.get("asil_level") == "ASIL A"
+
+        # 파일 변경 + mtime 강제 진행
+        time.sleep(0.02)
+        cfg_path.write_text('{"projects":{"HDPDM01":{"asil_level":"ASIL D"}}}', encoding="utf-8")
+        new_mtime = cfg_path.stat().st_mtime + 1.0
+        import os
+        os.utime(str(cfg_path), (new_mtime, new_mtime))
+
+        cfg2 = swut_mod._load_meta_from_config("HDPDM01")
+        assert cfg2.get("asil_level") == "ASIL D"  # cache invalidated
+
+
+class TestExceptionSanitization:
+    """W4: builder exception sanitize — internal detail leak 차단."""
+
+    def test_filenotfound_returns_404_sanitized(self):
+        """template_path 존재 안 함 → FileNotFoundError → 404 + sanitized detail."""
+        with patch(
+            "backend.routers.swut._do_coverage_build",
+            side_effect=FileNotFoundError("/secret/internal/path"),
+        ):
+            r = client.post(
+                "/api/swut/coverage/build",
+                json={
+                    "project_id": "HDPDM01",
+                    "release_sw_version": "1.0.0",
+                    "test_date": "2024-02-19",
+                    "log_folder": "C:/fake/log",
+                },
+                headers={"X-User": "tester"},
+            )
+        assert r.status_code == 404
+        body = r.json()
+        # 응답 형식: {"ok": False, "error": {"code": "HTTP_404", "message": "..."}}
+        message = body.get("error", {}).get("message") or body.get("detail", "")
+        # 내부 path는 leak되지 않음 — type name만 표시
+        assert "/secret/internal/path" not in message
+        assert "FileNotFoundError" in message
+
+    def test_value_error_returns_400_with_message(self):
+        """ValueError는 사용자 입력 관련이므로 message 표시."""
+        with patch(
+            "backend.routers.swut._do_coverage_build",
+            side_effect=ValueError("ASIL level 'XYZ' 미지원"),
+        ):
+            r = client.post(
+                "/api/swut/coverage/build",
+                json={
+                    "project_id": "HDPDM01",
+                    "release_sw_version": "1.0.0",
+                    "test_date": "2024-02-19",
+                    "log_folder": "C:/fake/log",
+                },
+                headers={"X-User": "tester"},
+            )
+        assert r.status_code == 400
+        body = r.json()
+        message = body.get("error", {}).get("message") or body.get("detail", "")
+        assert "ASIL level" in message
+
+    def test_unexpected_returns_500_no_message_leak(self):
+        """예상 못 한 exception은 message 본문 미노출 — type name만."""
+        with patch(
+            "backend.routers.swut._do_coverage_build",
+            side_effect=RuntimeError("DB password=hunter2 leaked"),
+        ):
+            r = client.post(
+                "/api/swut/coverage/build",
+                json={
+                    "project_id": "HDPDM01",
+                    "release_sw_version": "1.0.0",
+                    "test_date": "2024-02-19",
+                    "log_folder": "C:/fake/log",
+                },
+                headers={"X-User": "tester"},
+            )
+        assert r.status_code == 500
+        body = r.json()
+        message = body.get("error", {}).get("message") or body.get("detail", "")
+        assert "hunter2" not in message
+        assert "RuntimeError" in message
+
+
+class TestAsyncMigration:
+    """W5: asyncio.to_thread 마이그레이션 검증 — 기존 endpoint가 to_thread로 동작."""
+
+    def test_endpoint_uses_to_thread(self):
+        """source code에 asyncio.to_thread 사용 + get_event_loop 미사용 검증."""
+        import inspect
+        from backend.routers import swut as swut_mod
+
+        src = inspect.getsource(swut_mod)
+        assert "asyncio.to_thread" in src
+        assert "asyncio.get_event_loop()" not in src
+        assert "loop.run_in_executor" not in src

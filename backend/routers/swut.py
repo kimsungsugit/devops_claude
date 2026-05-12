@@ -1,4 +1,4 @@
-"""SwUT (Software Unit Test) 빌더 endpoint (8차 라운드 T141).
+"""SwUT (Software Unit Test) 빌더 endpoint (8차/12차 라운드).
 
 Coverage Report / SUTR xlsx 파일을 frontend / curl에서 호출 가능하도록 노출.
 
@@ -6,20 +6,29 @@ Coverage Report / SUTR xlsx 파일을 frontend / curl에서 호출 가능하도�
 - **동기 호출 + Semaphore(2)** (사용자 의사결정): 빌드 시간 ~5초 (template-only) ~ 60초 (실데이터),
   메모리 4x 폭증 위험으로 동시 호출 2건 제한.
 - **응답**: xlsx 파일 bytes (Content-Disposition attachment). summary/warnings는 X-* 헤더로 분리.
-- **인증**: `X-User` 헤더 필수 (UserContextMiddleware 외 빌더 단에서도 검증).
+- **인증**: ``UserContextMiddleware`` 가 ``X-User`` 검증 후 ``request.state`` 에 user 주입.
+  endpoint에서는 ``get_current_user()`` 로 가져와 logging 용.
 
 ## Endpoint
 - ``POST /api/swut/coverage/build`` — Coverage Report v3.01 xlsx
 - ``POST /api/swut/sutr/build`` — SUTR v3.01 xlsm
+
+## 12차 라운드 개선
+- C2: ``_load_meta_from_config`` lru_cache + mtime 기반 invalidate
+- W4: builder exception try/except — sanitize + ``logger.exception`` traceback 보존
+- W5: ``asyncio.to_thread`` 마이그레이션 (deprecated ``get_event_loop`` 제거)
+- W6: ``_ensure_x_user`` dead code 제거 — middleware가 이미 401
 """
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import logging
+import os
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi import APIRouter, HTTPException, Response
 
 from backend.schemas import SwUTBuildRequest
 from backend.services.file_resolver import get_resolver
@@ -29,49 +38,56 @@ from backend.services.swut_coverage_aggregator import (
 )
 from backend.services.swut_input_adapter import collect_swut_session
 from backend.services.swut_sutr_aggregator import SutrBuildMeta, build_sutr
+from backend.user_context import get_current_user
 
 _logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/swut", tags=["swut"])
 
-# T142: Semaphore(2) — 동시 호출 2건 제한 (메모리 4x × 2 = 안전 한도).
-# 운영 후 메모리 모니터링 보고 조정. asyncio.Semaphore는 동일 event loop 내에서만 작동.
 _BUILD_SEMAPHORE = asyncio.Semaphore(2)
 
-
-def _ensure_x_user(request: Request) -> str:
-    user = request.headers.get("X-User", "").strip()
-    if not user:
-        raise HTTPException(status_code=400, detail="X-User header required")
-    return user
+_META_CONFIG_PATH = "config/swut_meta.json"
 
 
-def _load_meta_from_config(project_id: str) -> dict[str, Any]:
-    """config/swut_meta.json 에서 project별 fixed 메타 로드."""
-    import os
-    cfg_path = "config/swut_meta.json"
-    if not os.path.isfile(cfg_path):
+@functools.lru_cache(maxsize=1)
+def _read_meta_config_raw(mtime: float) -> dict[str, Any]:  # noqa: ARG001
+    """lru_cache key = mtime. config 파일 수정 시 자동 cache miss → reload.
+
+    ``mtime`` 인자는 본문에서 사용하지 않지만 ``functools.lru_cache`` 의 hash key 역할.
+    호출자가 ``os.path.getmtime()`` 으로 전달하면 파일 수정 시 자동 invalidate.
+    """
+    if not os.path.isfile(_META_CONFIG_PATH):
         return {}
     try:
-        with open(cfg_path, encoding="utf-8") as f:
-            cfg = json.load(f)
-        return cfg.get("projects", {}).get(project_id, {}) or {}
+        with open(_META_CONFIG_PATH, encoding="utf-8") as f:
+            return json.load(f) or {}
     except (OSError, json.JSONDecodeError) as e:
         _logger.warning("swut_meta.json load failed: %s", e)
         return {}
 
 
+def _load_meta_from_config(project_id: str) -> dict[str, Any]:
+    """config/swut_meta.json 에서 project별 fixed 메타 로드 — mtime 기반 캐시."""
+    try:
+        mtime = os.path.getmtime(_META_CONFIG_PATH)
+    except OSError:
+        return {}
+    cfg = _read_meta_config_raw(mtime)
+    return cfg.get("projects", {}).get(project_id, {}) or {}
+
+
 def _build_coverage_meta(req: SwUTBuildRequest) -> CoverageBuildMeta:
     cfg = _load_meta_from_config(req.project_id)
+    approvers = cfg.get("approvers", {}) or {}
     return CoverageBuildMeta(
         project_id=req.project_id,
         project_full_name=cfg.get("project_full_name", req.project_id),
         asil_level=cfg.get("asil_level", req.asil_level),
         doc_id_base=cfg.get("doc_id_base", ""),
         doc_id_sequence=req.doc_id_sequence,
-        default_author=cfg.get("approvers", {}).get("default_author", ""),
-        default_reviewer=cfg.get("approvers", {}).get("default_reviewer", ""),
-        default_approver=cfg.get("approvers", {}).get("default_approver", ""),
+        default_author=approvers.get("default_author", ""),
+        default_reviewer=approvers.get("default_reviewer", ""),
+        default_approver=approvers.get("default_approver", ""),
         release_sw_version=req.release_sw_version,
         hw_version=req.hw_version,
         test_date=req.test_date,
@@ -84,15 +100,16 @@ def _build_coverage_meta(req: SwUTBuildRequest) -> CoverageBuildMeta:
 
 def _build_sutr_meta(req: SwUTBuildRequest) -> SutrBuildMeta:
     cfg = _load_meta_from_config(req.project_id)
+    approvers = cfg.get("approvers", {}) or {}
     return SutrBuildMeta(
         project_id=req.project_id,
         project_full_name=cfg.get("project_full_name", req.project_id),
         asil_level=cfg.get("asil_level", req.asil_level),
         doc_id_base=cfg.get("doc_id_base", "HDPDM01-SUTR"),
         doc_id_sequence=req.doc_id_sequence,
-        default_author=cfg.get("approvers", {}).get("default_author", ""),
-        default_reviewer=cfg.get("approvers", {}).get("default_reviewer", ""),
-        default_approver=cfg.get("approvers", {}).get("default_approver", ""),
+        default_author=approvers.get("default_author", ""),
+        default_reviewer=approvers.get("default_reviewer", ""),
+        default_approver=approvers.get("default_approver", ""),
         release_sw_version=req.release_sw_version,
         hw_version=req.hw_version,
         test_date=req.test_date,
@@ -133,8 +150,11 @@ def _build_result_to_response(
     """
     from urllib.parse import quote
 
-    # 파일명은 latin-1 안전 ASCII fallback + UTF-8 quoted variant (RFC 5987).
-    ascii_filename = filename.encode("ascii", errors="replace").decode("ascii")
+    ascii_filename = (
+        filename.encode("ascii", errors="replace")
+        .decode("ascii")
+        .replace('"', "_")
+    )
     headers = {
         "Content-Disposition": (
             f'attachment; filename="{ascii_filename}"; '
@@ -147,6 +167,39 @@ def _build_result_to_response(
         ).decode("ascii")[:512],
     }
     return Response(content=content, media_type=media_type, headers=headers)
+
+
+def _run_build_safely(kind: str, fn: Any, req: SwUTBuildRequest) -> Response:
+    """W4: builder exception 통합 처리 — sanitize + logger.exception traceback 보존.
+
+    detail은 외부에 leak 가능하므로 client-safe 메시지로 변환.
+    """
+    user = get_current_user()
+    _logger.info("swut.%s.build start: project_id=%s release=%s user=%s",
+                 kind, req.project_id, req.release_sw_version, user)
+    try:
+        resp = fn(req)
+        _logger.info("swut.%s.build done: project_id=%s bytes=%d",
+                     kind, req.project_id, len(resp.body) if hasattr(resp, "body") else -1)
+        return resp
+    except HTTPException:
+        raise  # 의도된 client error는 그대로
+    except (FileNotFoundError, PermissionError) as e:
+        _logger.exception("swut.%s.build I/O error", kind)
+        raise HTTPException(
+            status_code=404 if isinstance(e, FileNotFoundError) else 403,
+            detail=f"파일 접근 실패: {type(e).__name__}",
+        ) from e
+    except ValueError as e:
+        _logger.exception("swut.%s.build value error", kind)
+        # ValueError detail은 builder 내부 메시지 — 사용자 입력 관련 메시지만 leak
+        raise HTTPException(status_code=400, detail=f"입력 검증 실패: {e}") from e
+    except Exception as e:
+        _logger.exception("swut.%s.build unexpected error", kind)
+        raise HTTPException(
+            status_code=500,
+            detail=f"빌드 실패 ({type(e).__name__})",  # 메시지 본문 미노출
+        ) from e
 
 
 def _do_coverage_build(req: SwUTBuildRequest) -> Response:
@@ -198,18 +251,14 @@ def _do_sutr_build(req: SwUTBuildRequest) -> Response:
 
 
 @router.post("/coverage/build")
-async def build_coverage(req: SwUTBuildRequest, request: Request) -> Response:
+async def build_coverage(req: SwUTBuildRequest) -> Response:
     """Coverage Report v3.01 xlsx 빌드. Semaphore(2)로 동시 호출 제한."""
-    _ensure_x_user(request)
     async with _BUILD_SEMAPHORE:
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(None, _do_coverage_build, req)
+        return await asyncio.to_thread(_run_build_safely, "coverage", _do_coverage_build, req)
 
 
 @router.post("/sutr/build")
-async def build_sutr_endpoint(req: SwUTBuildRequest, request: Request) -> Response:
+async def build_sutr_endpoint(req: SwUTBuildRequest) -> Response:
     """SUTR v3.01 xlsm 빌드 (keep_vba=True). Semaphore(2)로 동시 호출 제한."""
-    _ensure_x_user(request)
     async with _BUILD_SEMAPHORE:
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(None, _do_sutr_build, req)
+        return await asyncio.to_thread(_run_build_safely, "sutr", _do_sutr_build, req)
