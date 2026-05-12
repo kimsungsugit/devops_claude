@@ -282,11 +282,13 @@ def _collect_tc_to_function(session: SwUTSession) -> dict[str, str]:
     return out
 
 
-def _compute_self_consistency(session: SwUTSession) -> list[dict[str, Any]]:
-    """15차: SwUTS 내부 자체 일관성 4가지 검증.
+def _compute_self_consistency(
+    session: SwUTSession,
+    swuds_function_ids: set[str] | None = None,
+) -> list[dict[str, Any]]:
+    """15차/16차: SwUTS 자체 일관성 4가지 + SwUDS↔SwUTS 매핑 (옵션) 검증.
 
-    SwUDS↔SwUTS 비교는 별도 SwUDS docx parser 필요 (v3.02). 본 라운드는
-    SwUTS 자체 일관성만 검증해서 audit-readiness 부분 확보.
+    16차: ``swuds_function_ids`` 가 제공되면 row 5 'SwUDS↔SwUTS 함수 ID 매핑' 추가.
 
     Returns:
         list of {item, expected, actual, result, note}. result ∈ {PASS, FAIL}.
@@ -342,17 +344,51 @@ def _compute_self_consistency(session: SwUTSession) -> list[dict[str, Any]]:
         "note": "aggregate_session 무결성",
     })
 
+    # 5. SwUDS ↔ SwUTS 함수 ID 매핑 (16차) — swuds_function_ids 제공 시만.
+    if swuds_function_ids is not None:
+        swuts_fn_ids: set[str] = set()
+        for env in session.environments:
+            for fc in env.function_coverage:
+                swuts_fn_ids.add(fc.unit_id)
+        missing_in_swuts = swuds_function_ids - swuts_fn_ids  # SwUDS에 있고 SwUTS에 없음
+        extra_in_swuts = swuts_fn_ids - swuds_function_ids   # SwUTS에 있고 SwUDS에 없음
+        ok = not missing_in_swuts and not extra_in_swuts
+        note_parts: list[str] = []
+        if missing_in_swuts:
+            note_parts.append(
+                f"SwUDS 정의 미테스트: {sorted(missing_in_swuts)[:5]}"
+                + (f" +{len(missing_in_swuts) - 5} more" if len(missing_in_swuts) > 5 else "")
+            )
+        if extra_in_swuts:
+            note_parts.append(
+                f"SwUTS 추가 (SwUDS 미정의): {sorted(extra_in_swuts)[:5]}"
+                + (f" +{len(extra_in_swuts) - 5} more" if len(extra_in_swuts) > 5 else "")
+            )
+        if not note_parts:
+            note_parts.append("함수 ID 1:1 매칭")
+        rows.append({
+            "item": "SwUDS ↔ SwUTS 함수 ID 매핑",
+            "expected": f"{len(swuds_function_ids)} 함수 (SwUDS)",
+            "actual": f"{len(swuts_fn_ids)} 함수 (SwUTS)",
+            "result": "PASS" if ok else "FAIL",
+            "note": "; ".join(note_parts),
+        })
+
     return rows
 
 
 def _write_consistency_sheet(
-    ws, session: SwUTSession, out_warnings: list[str] | None = None,
+    ws,
+    session: SwUTSession,
+    swuds_function_ids: set[str] | None = None,
+    out_warnings: list[str] | None = None,
 ) -> int:
-    """2.Consistency 시트 — SwUTS 자체 일관성 4 row 작성 (15차).
+    """2.Consistency 시트 — SwUTS 자체 일관성 + SwUDS↔SwUTS 매핑 (16차).
 
-    SwUDS↔SwUTS 비교는 v3.02 — 본 라운드는 자체 일관성만 작성.
+    Args:
+        swuds_function_ids: SwUDS docx에서 추출된 함수 ID set. 제공되면 row 5 추가.
 
-    Layout: A1 = 자동 생성 안내, row 3 = 헤더, row 4-7 = 결과 4 row.
+    Layout: A1 = 안내, row 3 = 헤더, row 4부터 결과 row (4 또는 5개).
 
     Returns:
         쓰여진 결과 row 수 (헤더 제외).
@@ -360,13 +396,20 @@ def _write_consistency_sheet(
     if not ws:
         return 0
 
-    rows = _compute_self_consistency(session)
+    rows = _compute_self_consistency(session, swuds_function_ids=swuds_function_ids)
 
     # 안내문 + 헤더 + data
-    safe_write(ws, 1, 1,
-        "본 시트는 SwUTS 내부 자체 일관성 4 항목 자동 검증 결과. "
-        "SwUDS↔SwUTS 함수 ID 매핑 비교는 v3.02 도구에서 자동화 예정 — "
-        "현재는 reviewer manual 점검 필요.")
+    if swuds_function_ids is not None:
+        intro = (
+            "본 시트는 SwUTS 내부 자체 일관성 + SwUDS↔SwUTS 함수 ID 매핑 자동 검증 결과 (16차 v3.02). "
+            "FAIL 행은 reviewer 검토 + audit evidence 보강 필요."
+        )
+    else:
+        intro = (
+            "본 시트는 SwUTS 내부 자체 일관성 4 항목 자동 검증 결과. "
+            "SwUDS↔SwUTS 함수 ID 매핑 비교는 swuds_docx_path 옵션 제공 시 자동 활성화 (16차)."
+        )
+    safe_write(ws, 1, 1, intro)
     safe_write(ws, 3, 1, "Item")
     safe_write(ws, 3, 2, "Expected")
     safe_write(ws, 3, 3, "Actual")
@@ -483,6 +526,7 @@ def build_coverage_report(
     session: SwUTSession,
     meta: CoverageBuildMeta,
     template_bytes: bytes,
+    swuds_function_ids: set[str] | None = None,
 ) -> CoverageBuildResult:
     """Coverage Report v3.01 xlsx 생성.
 
@@ -490,9 +534,11 @@ def build_coverage_report(
         session: SwUT 데이터 (input_adapter 출력).
         meta: 빌드 메타 (Project/ASIL/Author 등).
         template_bytes: 기존 v3.01 xlsx 파일 bytes (template).
+        swuds_function_ids: 16차 — SwUDS 함수 ID set (옵션). 제공되면 2.Consistency에
+            'SwUDS↔SwUTS 함수 ID 매핑' row 5 추가 + incomplete_sheets에서 partial 라벨 제거.
 
     Returns:
-        CoverageBuildResult — xlsx_bytes 채워짐.
+        CoverageBuildResult — xlsx_io 채워짐.
     """
     if openpyxl is None:
         raise RuntimeError("openpyxl is required for SwUT Coverage Report builder")
@@ -560,14 +606,21 @@ def build_coverage_report(
         if n_o == 0:
             incomplete_sheets.append("1.Traceability")
 
-    # 2.Consistency — 15차: SwUTS 자체 일관성 4 row 자동 채움.
-    # SwUDS↔SwUTS 함수 ID 매핑 비교는 별도 SwUDS docx parser 필요 (v3.02).
+    # 2.Consistency — 15차: SwUTS 자체 일관성 4 row + 16차: SwUDS↔SwUTS 매핑 row (옵션).
     cons_ws = next((wb[n] for n in sheet_names if "consistency" in n.lower()), None)
     if cons_ws is not None:
-        n_cons = _write_consistency_sheet(cons_ws, session, out_warnings=warnings)
+        n_cons = _write_consistency_sheet(
+            cons_ws, session,
+            swuds_function_ids=swuds_function_ids,
+            out_warnings=warnings,
+        )
         summary["consistency_self_check_rows"] = n_cons
-        # SwUDS 비교 미연결이므로 partial 완료로 audit-trail 표시.
-        incomplete_sheets.append("2.Consistency (SwUDS 비교 partial — v3.02)")
+        if swuds_function_ids is not None:
+            summary["consistency_swuds_compared"] = True
+            # SwUDS 매핑까지 자동 완료 — incomplete 표시 제거.
+        else:
+            summary["consistency_swuds_compared"] = False
+            incomplete_sheets.append("2.Consistency (SwUDS 비교 partial — v3.02)")
     else:
         warnings.append("2.Consistency 시트 미발견")
         incomplete_sheets.append("2.Consistency")

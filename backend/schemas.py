@@ -651,6 +651,8 @@ class SwUTBuildRequest(BaseModel):
     cache_root: str = Field("", max_length=500)
     log_folder: Optional[str] = Field(None, max_length=500)
     template_path: str = Field("", max_length=500)
+    # 16차: SwUDS docx (옵션) — 제공 시 2.Consistency에 SwUDS↔SwUTS 매핑 row 추가
+    swuds_docx_path: str = Field("", max_length=500)
 
     # 인사 메타 (선택)
     reviewer_override: str = Field("", max_length=100)
@@ -663,7 +665,7 @@ class SwUTBuildRequest(BaseModel):
     deviation_cases: List[Dict[str, Any]] = Field(default_factory=list, max_length=200)
 
     @field_validator("test_engineer", "reviewer_override", "approver_override",
-                     "cache_root", "log_folder", "template_path")
+                     "cache_root", "log_folder", "template_path", "swuds_docx_path")
     @classmethod
     def _no_newline(cls, v):
         if v is None:

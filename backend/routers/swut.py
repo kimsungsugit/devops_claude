@@ -40,6 +40,7 @@ from backend.services.swut_coverage_aggregator import (
 )
 from backend.services.swut_input_adapter import collect_swut_session
 from backend.services.swut_sutr_aggregator import SutrBuildMeta, build_sutr
+from backend.services.swut_swuds_parser import parse_swuds_docx
 from backend.user_context import get_current_user
 
 _logger = logging.getLogger(__name__)
@@ -233,6 +234,27 @@ def _run_build_safely(kind: str, fn: Any, req: SwUTBuildRequest) -> Response:
         ) from e
 
 
+def _resolve_swuds_function_ids(req: SwUTBuildRequest) -> set[str] | None:
+    """16차: req.swuds_docx_path가 있으면 docx 파싱 → 함수 ID set 반환.
+
+    실패 시 None 반환 — caller는 SwUDS 비교 skip + warnings에 사유 누적.
+    """
+    if not req.swuds_docx_path:
+        return None
+    try:
+        resolver = get_resolver()
+        docx_bytes = resolver.read_bytes(req.swuds_docx_path)
+        parse_warnings: list[str] = []
+        result = parse_swuds_docx(docx_bytes, parse_warnings=parse_warnings)
+        if not result.ok:
+            _logger.warning("SwUDS parse failed: %s", parse_warnings)
+            return None
+        return result.function_ids
+    except (FileNotFoundError, PermissionError) as e:
+        _logger.warning("SwUDS docx read failed: %s", e)
+        return None
+
+
 def _do_coverage_build(req: SwUTBuildRequest) -> Response:
     resolver = get_resolver()
     session = collect_swut_session(
@@ -243,7 +265,9 @@ def _do_coverage_build(req: SwUTBuildRequest) -> Response:
     )
     template_bytes = _read_template_bytes(req.template_path, req.project_id, "coverage")
     meta = _build_coverage_meta(req)
-    result = build_coverage_report(session, meta, template_bytes)
+    swuds_fn_ids = _resolve_swuds_function_ids(req)
+    result = build_coverage_report(session, meta, template_bytes,
+                                    swuds_function_ids=swuds_fn_ids)
     if not result.ok:
         raise HTTPException(status_code=500, detail="빌드 실패 (ok=False)")
     return _build_result_to_response(
