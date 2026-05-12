@@ -615,3 +615,95 @@ class TestSutrSwudsIntegration17:
             assert build_mock.called
             call_kwargs = build_mock.call_args.kwargs
             assert call_kwargs.get("swuds_function_ids") == {"SwUFn_0001", "SwUFn_0002"}
+
+
+# ---------------------------------------------------------------------------
+# 18차 T177: /api/swut/consistency/check endpoint
+# ---------------------------------------------------------------------------
+
+class TestConsistencyCheckEndpoint18:
+    """Coverage↔SUTR cross-validation endpoint."""
+
+    def test_schema_requires_both_paths(self):
+        """422: coverage_path / sutr_path 둘 다 필수."""
+        r = client.post(
+            "/api/swut/consistency/check",
+            json={"coverage_path": "C:/cov.xlsx"},  # sutr_path 누락
+            headers={"X-User": "tester"},
+        )
+        assert r.status_code == 422
+
+    def test_schema_rejects_path_with_newline(self):
+        """422: path 줄바꿈 차단 (헤더 인젝션 안전)."""
+        r = client.post(
+            "/api/swut/consistency/check",
+            json={
+                "coverage_path": "C:/cov.xlsx\r\nX-Injected: evil",
+                "sutr_path": "C:/sutr.xlsm",
+            },
+            headers={"X-User": "tester"},
+        )
+        assert r.status_code == 422
+
+    def test_schema_rejects_oversize_path(self):
+        """422: path maxlen 500."""
+        r = client.post(
+            "/api/swut/consistency/check",
+            json={
+                "coverage_path": "C:/" + "a" * 600,
+                "sutr_path": "C:/sutr.xlsm",
+            },
+            headers={"X-User": "tester"},
+        )
+        assert r.status_code == 422
+
+    def test_endpoint_returns_consistency_report_json(self):
+        """200: 정상 호출 시 ConsistencyReport.to_dict() 형식."""
+        from unittest.mock import MagicMock
+        from backend.services.swut_consistency_checker import ConsistencyReport
+
+        mock_report = ConsistencyReport(ok=True, issues=[], parse_warnings=[])
+        with patch(
+            "backend.routers.swut.get_resolver",
+        ) as mock_resolver, patch(
+            "backend.routers.swut.check_swut_consistency",
+            return_value=mock_report,
+        ):
+            mock_resolver.return_value = MagicMock(read_bytes=lambda p: b"PK\x03\x04mock")
+            r = client.post(
+                "/api/swut/consistency/check",
+                json={"coverage_path": "C:/cov.xlsx", "sutr_path": "C:/sutr.xlsm"},
+                headers={"X-User": "tester"},
+            )
+        assert r.status_code == 200
+        body = r.json()
+        assert body["ok"] is True
+        assert "issues" in body
+        assert "tool_qualification" in body  # ConsistencyReport.to_dict() 보장 필드
+
+    def test_endpoint_sanitizes_filenotfound(self):
+        """404: 파일 미존재 시 internal path leak 없이 type name만."""
+        from unittest.mock import MagicMock
+
+        def _raise_fnf(p):
+            raise FileNotFoundError("/secret/internal/cov.xlsx")
+
+        with patch("backend.routers.swut.get_resolver") as mock_resolver:
+            mock_resolver.return_value = MagicMock(read_bytes=_raise_fnf)
+            r = client.post(
+                "/api/swut/consistency/check",
+                json={"coverage_path": "C:/cov.xlsx", "sutr_path": "C:/sutr.xlsm"},
+                headers={"X-User": "tester"},
+            )
+        assert r.status_code == 404
+        body = r.json()
+        message = body.get("error", {}).get("message") or body.get("detail", "")
+        assert "/secret/internal" not in message
+        assert "FileNotFoundError" in message
+
+    def test_endpoint_missing_x_user_header_rejected(self):
+        r = client.post(
+            "/api/swut/consistency/check",
+            json={"coverage_path": "C:/cov.xlsx", "sutr_path": "C:/sutr.xlsm"},
+        )
+        assert r.status_code in (400, 401, 403)

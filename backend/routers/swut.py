@@ -32,8 +32,9 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Response
 from fastapi.responses import StreamingResponse
 
-from backend.schemas import SwUTBuildRequest
+from backend.schemas import SwUTBuildRequest, SwUTConsistencyCheckRequest
 from backend.services.file_resolver import get_resolver
+from backend.services.swut_consistency_checker import check_swut_consistency
 from backend.services.swut_coverage_aggregator import (
     CoverageBuildMeta,
     build_coverage_report,
@@ -325,3 +326,58 @@ async def build_sutr_endpoint(req: SwUTBuildRequest) -> Response:
     """SUTR v3.01 xlsm 빌드 (keep_vba=True). Semaphore(2)로 동시 호출 제한."""
     async with _BUILD_SEMAPHORE:
         return await asyncio.to_thread(_run_build_safely, "sutr", _do_sutr_build, req)
+
+
+# ── 18차 T177: Coverage ↔ SUTR cross-validation endpoint ──────────────
+
+def _do_consistency_check(req: SwUTConsistencyCheckRequest) -> dict[str, Any]:
+    """파일 resolver로 두 산출물 bytes 읽기 + check_swut_consistency 호출.
+
+    실패 type별 sanitize는 호출자(_run_consistency_safely)가 처리.
+    """
+    resolver = get_resolver()
+    cov_bytes = resolver.read_bytes(req.coverage_path)
+    sutr_bytes = resolver.read_bytes(req.sutr_path)
+    report = check_swut_consistency(cov_bytes, sutr_bytes)
+    return report.to_dict()
+
+
+def _run_consistency_safely(req: SwUTConsistencyCheckRequest) -> dict[str, Any]:
+    """W4 패턴 재사용 — exception sanitize + logger.exception traceback 보존."""
+    user = get_current_user()
+    _logger.info("swut.consistency.check start: coverage=%s sutr=%s user=%s",
+                 req.coverage_path[:80], req.sutr_path[:80], user)
+    try:
+        result = _do_consistency_check(req)
+        ok = result.get("ok")
+        n_issues = len(result.get("issues") or [])
+        _logger.info("swut.consistency.check done: ok=%s issues=%d", ok, n_issues)
+        return result
+    except HTTPException:
+        raise
+    except (FileNotFoundError, PermissionError) as e:
+        _logger.exception("swut.consistency.check I/O error")
+        raise HTTPException(
+            status_code=404 if isinstance(e, FileNotFoundError) else 403,
+            detail=f"파일 접근 실패: {type(e).__name__}",
+        ) from e
+    except ValueError as e:
+        _logger.exception("swut.consistency.check value error")
+        raise HTTPException(status_code=400, detail=f"입력 검증 실패: {e}") from e
+    except Exception as e:
+        _logger.exception("swut.consistency.check unexpected error")
+        raise HTTPException(
+            status_code=500,
+            detail=f"일관성 검증 실패 ({type(e).__name__})",
+        ) from e
+
+
+@router.post("/consistency/check")
+async def consistency_check(req: SwUTConsistencyCheckRequest) -> dict[str, Any]:
+    """Coverage Report ↔ SUTR cross-validation (18차).
+
+    swut_consistency_checker.py의 4가지 검증 (uncovered_mismatch /
+    exception_deviation / total_tc / final_result) 결과를 JSON으로 반환.
+    빌드 endpoint와 달리 Semaphore 미적용 (read-only, 메모리 풋프린트 작음).
+    """
+    return await asyncio.to_thread(_run_consistency_safely, req)

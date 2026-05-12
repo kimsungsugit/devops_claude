@@ -699,3 +699,26 @@ class SwUTBuildRequest(BaseModel):
                 f"deviation_cases 합산 크기 {total_bytes:,} bytes — 256KB 한도 초과"
             )
         return v
+
+
+# ── SwUT Consistency Check (18차 라운드) ──────────────────────────────
+
+class SwUTConsistencyCheckRequest(BaseModel):
+    """Coverage Report ↔ SUTR cross-validation 요청 body (18차 T176).
+
+    두 산출물 path를 받아 ``swut_consistency_checker.check_swut_consistency`` 호출.
+    file_resolver로 cloudium / local 모두 해결.
+
+    입력 표면 매트릭스:
+      - coverage_path / sutr_path: maxlen 500, 줄바꿈 금지 (헤더 인젝션 안전)
+      - 두 path 모두 필수 (min_length=1)
+    """
+    coverage_path: str = Field(..., min_length=1, max_length=500)
+    sutr_path: str = Field(..., min_length=1, max_length=500)
+
+    @field_validator("coverage_path", "sutr_path")
+    @classmethod
+    def _no_newline_paths(cls, v: str) -> str:
+        if "\n" in v or "\r" in v:
+            raise ValueError("줄바꿈 문자 금지 — 단일 라인 path 필요")
+        return v
