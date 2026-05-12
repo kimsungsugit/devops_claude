@@ -315,6 +315,16 @@ describe('SwUTBuildSection', () => {
     expect(browseButtons.length).toBe(5);
   });
 
+  it('renders hint text for path fields (25차)', () => {
+    render(<SwUTBuildSection />);
+    // log_folder + template_path + swuds_docx_path 각각 hint 표시
+    expect(screen.getByText(/VectorCAST html report/)).toBeTruthy();
+    expect(screen.getByText(/회사 v3.01 양식 template/)).toBeTruthy();
+    expect(screen.getByText(/SwUDS↔SwUTS 함수 ID 매핑 row 자동 추가/)).toBeTruthy();
+    // 메타 hint 일부
+    expect(screen.getByText(/노란 강조 표시/)).toBeTruthy();
+  });
+
   it('opens picker dialog when Browse clicked (21차)', async () => {
     vi.spyOn(global, 'fetch').mockResolvedValue({
       ok: true,

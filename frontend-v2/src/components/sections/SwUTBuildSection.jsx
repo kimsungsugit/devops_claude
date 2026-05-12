@@ -277,13 +277,20 @@ export default function SwUTBuildSection() {
       </div>
 
       <div className="swut-form-grid">
-        <Field name="project_id" label="Project ID *" value={form.project_id} onChange={v => setField('project_id', v)} placeholder="HDPDM01" />
-        <Field name="release_sw_version" label="Release SW Version * (예: 2.02 또는 1.01.05)" value={form.release_sw_version} onChange={v => setField('release_sw_version', v)} placeholder="2.02" />
-        <Field name="test_date" label="Test Date * (yyyy-mm-dd)" value={form.test_date} onChange={v => setField('test_date', v)} type="date" />
-        <Field name="test_engineer" label="Test Engineer" value={form.test_engineer} onChange={v => setField('test_engineer', v)} placeholder="JK Kim" />
-        <Field name="doc_id_sequence" label="Doc ID Sequence (digit)" value={form.doc_id_sequence} onChange={v => setField('doc_id_sequence', v)} placeholder="852" />
-        <Field name="hw_version" label="HW Version" value={form.hw_version} onChange={v => setField('hw_version', v)} />
-        <Field name="asil_level" label="ASIL Level" value={form.asil_level} onChange={v => setField('asil_level', v)} />
+        <Field name="project_id" label="Project ID *" value={form.project_id} onChange={v => setField('project_id', v)} placeholder="HDPDM01"
+               hint="config/swut_meta.json에 등록된 project_id" />
+        <Field name="release_sw_version" label="Release SW Version *" value={form.release_sw_version} onChange={v => setField('release_sw_version', v)} placeholder="2.02"
+               hint="형식: N.N 또는 N.N.N (예: 2.02, 1.01.05)" />
+        <Field name="test_date" label="Test Date *" value={form.test_date} onChange={v => setField('test_date', v)} type="date"
+               hint="yyyy-mm-dd 형식 — Test Summary 시트에 기록" />
+        <Field name="test_engineer" label="Test Engineer" value={form.test_engineer} onChange={v => setField('test_engineer', v)} placeholder="JK Kim"
+               hint="비우면 산출물 Cover/Test Summary에 노란 강조 표시" />
+        <Field name="doc_id_sequence" label="Doc ID Sequence" value={form.doc_id_sequence} onChange={v => setField('doc_id_sequence', v)} placeholder="852"
+               hint="숫자만 (예: 852). config의 doc_id_base와 결합" />
+        <Field name="hw_version" label="HW Version" value={form.hw_version} onChange={v => setField('hw_version', v)}
+               hint="default 1.00" />
+        <Field name="asil_level" label="ASIL Level" value={form.asil_level} onChange={v => setField('asil_level', v)}
+               hint="default ASIL A (config override 가능)" />
       </div>
 
       <div className="swut-form-row swut-field-with-browse">
@@ -293,6 +300,7 @@ export default function SwUTBuildSection() {
           value={form.log_folder}
           onChange={v => setField('log_folder', v)}
           placeholder="U:\연구소\...\01.Log\v2.02_240219"
+          hint="VectorCAST html report (.html) 보유 디렉토리. Jenkins build_number 제공 시 자동 우선"
           fullWidth
         />
         <button
@@ -304,10 +312,11 @@ export default function SwUTBuildSection() {
       <div className="swut-form-row swut-field-with-browse">
         <Field
           name="template_path"
-          label="Template Path (xlsx/xlsm — config default 사용 시 빈 string)"
+          label="Template Path (xlsx/xlsm)"
           value={form.template_path}
           onChange={v => setField('template_path', v)}
           placeholder="U:\...\(HDPDM01)SwUT Coverage Report_v3.01_240221_R.xlsx"
+          hint="회사 v3.01 양식 template — 비우면 config의 template_paths 사용"
           fullWidth
         />
         <button
@@ -319,10 +328,11 @@ export default function SwUTBuildSection() {
       <div className="swut-form-row swut-field-with-browse">
         <Field
           name="swuds_docx_path"
-          label="SwUDS Docx Path (선택 — 2.Consistency SwUDS↔SwUTS 매핑 자동화)"
+          label="SwUDS Docx Path (선택)"
           value={form.swuds_docx_path}
           onChange={v => setField('swuds_docx_path', v)}
           placeholder="U:\...\(HDPDM01)SwUDS_v3.docx"
+          hint="제공 시 2.Consistency 시트에 SwUDS↔SwUTS 함수 ID 매핑 row 자동 추가"
           fullWidth
         />
         <button
@@ -380,6 +390,7 @@ export default function SwUTBuildSection() {
             value={consistencyForm.coverage_path}
             onChange={v => setConsistencyForm(f => ({ ...f, coverage_path: v }))}
             placeholder="U:\...\(HDPDM01)SwUT Coverage Report_v3.01_240221_R.xlsx"
+            hint="위에서 빌드한 xlsx 또는 기존 회사 산출물 path"
             fullWidth
           />
           <button
@@ -395,6 +406,7 @@ export default function SwUTBuildSection() {
             value={consistencyForm.sutr_path}
             onChange={v => setConsistencyForm(f => ({ ...f, sutr_path: v }))}
             placeholder="U:\...\(HDPDM01_SUTR) Software Unit Test Result_v3.01_240221_R.xlsm"
+            hint="동일 release_sw_version의 SUTR xlsm — cross-validation 4 항목 비교"
             fullWidth
           />
           <button
@@ -455,7 +467,10 @@ export default function SwUTBuildSection() {
   );
 }
 
-function Field({ name, label, value, onChange, placeholder = '', type = 'text', fullWidth = false }) {
+function Field({
+  name, label, value, onChange, placeholder = '', type = 'text',
+  fullWidth = false, hint = '',
+}) {
   const id = `swut-${name}`;
   return (
     <div className={`swut-field${fullWidth ? ' swut-field-full' : ''}`}>
@@ -475,6 +490,7 @@ function Field({ name, label, value, onChange, placeholder = '', type = 'text', 
         data-form-type="other"
         data-lpignore="true"
       />
+      {hint && <div className="swut-field-hint">{hint}</div>}
     </div>
   );
 }

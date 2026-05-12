@@ -1197,6 +1197,13 @@ label {
   font-size: var(--text-base);
 }
 
+.swut-field-hint {
+  margin-top: 4px;
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+  line-height: 1.4;
+}
+
 .swut-actions {
   margin-top: var(--sp-4);
   display: flex;
