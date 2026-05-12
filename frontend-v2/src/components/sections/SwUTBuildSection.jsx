@@ -61,6 +61,8 @@ export default function SwUTBuildSection() {
 
   const abortRef = useRef(null);
   const mountedRef = useRef(true);
+  // F5: 활성 blob URL + timer 추적 — unmount 시 즉시 revoke + clearTimeout.
+  const downloadCleanupRef = useRef([]);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -70,6 +72,12 @@ export default function SwUTBuildSection() {
         abortRef.current.abort();
         abortRef.current = null;
       }
+      // F5: 보류 중인 revoke timer를 정리하고, blob URL을 즉시 revoke
+      downloadCleanupRef.current.forEach(({ timerId, url }) => {
+        clearTimeout(timerId);
+        try { URL.revokeObjectURL(url); } catch (e) { /* ignore */ }
+      });
+      downloadCleanupRef.current = [];
     };
   }, []);
 
@@ -91,7 +99,14 @@ export default function SwUTBuildSection() {
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
-    setTimeout(() => URL.revokeObjectURL(url), 5000);
+    // F5: timer + url을 ref에 저장 — unmount 시 cleanup
+    const timerId = setTimeout(() => {
+      try { URL.revokeObjectURL(url); } catch (e) { /* ignore */ }
+      downloadCleanupRef.current = downloadCleanupRef.current.filter(
+        item => item.timerId !== timerId,
+      );
+    }, 5000);
+    downloadCleanupRef.current.push({ timerId, url });
   };
 
   const buildXlsx = useCallback(async (kind) => {

@@ -203,4 +203,27 @@ describe('SwUTBuildSection', () => {
     expect(opts.headers['X-User']).toBe('tester');
     expect(opts.method).toBe('POST');
   });
+
+  it('revokes object URL immediately on unmount (F5 — 13차)', async () => {
+    vi.spyOn(global, 'fetch').mockResolvedValue({
+      ok: true,
+      headers: new Headers({ 'Content-Disposition': 'attachment; filename="x.xlsx"' }),
+      blob: async () => new Blob([new Uint8Array([0x50, 0x4b, 0x03, 0x04])]),
+    });
+
+    const { unmount } = render(<SwUTBuildSection />);
+    fireEvent.change(screen.getByLabelText(/Release SW Version/), { target: { value: '2.02' } });
+    fireEvent.change(screen.getByLabelText(/Log Folder/), {
+      target: { value: 'C:/fake/log' },
+    });
+    fireEvent.click(screen.getByText(/Coverage Report 빌드/));
+
+    await waitFor(() => {
+      expect(global.URL.createObjectURL).toHaveBeenCalled();
+    });
+
+    // 컴포넌트 unmount — useEffect cleanup이 revokeObjectURL 즉시 호출해야 함
+    unmount();
+    expect(global.URL.revokeObjectURL).toHaveBeenCalledWith('blob://mock');
+  });
 });

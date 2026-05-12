@@ -106,6 +106,138 @@ class TestPydanticValidation:
         assert r.status_code == 422
 
 
+class TestInputSurface13:
+    """13차 라운드 — 입력 표면 강화 (C3/W7/W8/W9)."""
+
+    def _base_body(self) -> dict:
+        return {
+            "project_id": "HDPDM01",
+            "release_sw_version": "1.0.0",
+            "test_date": "2024-02-19",
+        }
+
+    def test_w7_test_date_with_suffix_rejected(self):
+        """W7: test_date $ anchor — garbage suffix 차단."""
+        body = self._base_body()
+        body["test_date"] = "2024-02-19; DROP TABLE users"
+        r = client.post(
+            "/api/swut/coverage/build", json=body,
+            headers={"X-User": "tester"},
+        )
+        assert r.status_code == 422
+
+    def test_w7_validation_date_with_garbage_rejected(self):
+        """W7: validation_date pattern — 빈 string OK, garbage 차단."""
+        body = self._base_body()
+        body["validation_date"] = "not a date"
+        r = client.post(
+            "/api/swut/coverage/build", json=body,
+            headers={"X-User": "tester"},
+        )
+        assert r.status_code == 422
+
+    def test_w7_validation_date_empty_allowed(self):
+        """W7: validation_date 빈 string은 통과 — schema validate 만 통과 검증."""
+        from backend.schemas import SwUTBuildRequest
+        # Pydantic validate 단독 검증 (endpoint mock 부담 없이)
+        req = SwUTBuildRequest(
+            project_id="HDPDM01",
+            release_sw_version="1.0.0",
+            test_date="2024-02-19",
+            validation_date="",
+        )
+        assert req.validation_date == ""
+
+    def test_w8_log_folder_with_newline_rejected(self):
+        """W8: log_folder 줄바꿈 금지 (헤더 인젝션 안전)."""
+        body = self._base_body()
+        body["log_folder"] = "C:/fake/log\r\nX-Injected: evil"
+        r = client.post(
+            "/api/swut/coverage/build", json=body,
+            headers={"X-User": "tester"},
+        )
+        assert r.status_code == 422
+
+    def test_w8_template_path_maxlen_rejected(self):
+        """W8: template_path 500자 초과 차단."""
+        body = self._base_body()
+        body["template_path"] = "C:/" + "a" * 600
+        r = client.post(
+            "/api/swut/coverage/build", json=body,
+            headers={"X-User": "tester"},
+        )
+        assert r.status_code == 422
+
+    def test_w9_jenkins_build_number_negative_rejected(self):
+        """W9: jenkins_build_number 음수 차단."""
+        body = self._base_body()
+        body["jenkins_build_number"] = -1
+        r = client.post(
+            "/api/swut/coverage/build", json=body,
+            headers={"X-User": "tester"},
+        )
+        assert r.status_code == 422
+
+    def test_w9_jenkins_build_number_too_large_rejected(self):
+        """W9: jenkins_build_number 99999 초과 차단."""
+        body = self._base_body()
+        body["jenkins_build_number"] = 100000
+        r = client.post(
+            "/api/swut/coverage/build", json=body,
+            headers={"X-User": "tester"},
+        )
+        assert r.status_code == 422
+
+    def test_c3_deviation_cases_max_length_rejected(self):
+        """C3: deviation_cases 201개 차단 (max_length=200)."""
+        body = self._base_body()
+        body["deviation_cases"] = [{"tc_id": f"T{i}"} for i in range(201)]
+        r = client.post(
+            "/api/swut/sutr/build", json=body,
+            headers={"X-User": "tester"},
+        )
+        assert r.status_code == 422
+
+    def test_c3_deviation_cases_size_limit_rejected(self):
+        """C3: 합산 256KB 초과 차단 (50개 × 6KB = 300KB)."""
+        body = self._base_body()
+        body["deviation_cases"] = [
+            {"tc_id": f"T{i}", "rationale": "x" * 6000} for i in range(50)
+        ]
+        r = client.post(
+            "/api/swut/sutr/build", json=body,
+            headers={"X-User": "tester"},
+        )
+        assert r.status_code == 422
+
+    def test_c3_deviation_cases_key_count_rejected(self):
+        """C3: 단일 item key 수 21개 차단."""
+        body = self._base_body()
+        item = {f"k{i}": "v" for i in range(21)}
+        body["deviation_cases"] = [item]
+        r = client.post(
+            "/api/swut/sutr/build", json=body,
+            headers={"X-User": "tester"},
+        )
+        assert r.status_code == 422
+
+    def test_c3_deviation_cases_within_limits_accepted_by_schema(self):
+        """C3: 정상 case는 schema 통과."""
+        from backend.schemas import SwUTBuildRequest
+        req = SwUTBuildRequest(
+            project_id="HDPDM01",
+            release_sw_version="1.0.0",
+            test_date="2024-02-19",
+            deviation_cases=[
+                {"tc_id": "TC1", "tc_no": "TC1", "issue_text": "div by zero",
+                 "auto_rationale": "[AUTO] checked"},
+                {"tc_id": "TC2", "tc_no": "TC2", "issue_text": "stack overflow",
+                 "auto_rationale": "[AUTO] checked"},
+            ],
+        )
+        assert len(req.deviation_cases) == 2
+
+
 class TestXUserHeader:
     def test_missing_x_user_header_rejected(self):
         r = client.post(

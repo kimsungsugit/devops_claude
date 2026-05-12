@@ -623,16 +623,20 @@ class UdsTraceabilityMatrixRequest(BaseModel):
 class SwUTBuildRequest(BaseModel):
     """SwUT Coverage Report / SUTR 빌드 공통 request body.
 
-    입력 표면 매트릭스 ✗ 4개 (deep-reviewer X3) endpoint 단에서 차단:
-      - release_sw_version: regex \\d+\\.\\d+(\\.\\d+)? 필수
+    입력 표면 매트릭스 (deep-reviewer X3) endpoint 단에서 차단:
+      - release_sw_version: regex ^\\d+\\.\\d+(\\.\\d+)?$ 필수
       - test_engineer / reviewer / approver: maxlen 100, 줄바꿈 금지
       - doc_id_sequence: digit only
-      - test_date: yyyy-mm-dd / yyyy/mm/dd
+      - test_date / validation_date: yyyy-mm-dd / yyyy/mm/dd ($ anchor)
+      - cache_root / log_folder / template_path: maxlen 500, 줄바꿈 금지
+      - jenkins_build_number: 1 ≤ n ≤ 99999 (Jenkins 운영 한도)
+      - deviation_cases: 최대 200 items, 합산 256KB (13차 C3 — DoS 차단)
     """
     # 필수
     project_id: str = Field(..., min_length=1, max_length=50)
     release_sw_version: str = Field(..., pattern=r"^\d+\.\d+(\.\d+)?$")
-    test_date: str = Field(..., pattern=r"^\d{2,4}[-/]\d{1,2}[-/]\d{1,2}")
+    # 13차 W7: $ anchor 추가 — garbage suffix 차단
+    test_date: str = Field(..., pattern=r"^\d{2,4}[-/]\d{1,2}[-/]\d{1,2}$")
 
     # 선택 (default 또는 config fallback)
     test_engineer: str = Field("", max_length=100)
@@ -641,22 +645,55 @@ class SwUTBuildRequest(BaseModel):
     asil_level: str = Field("ASIL A", max_length=20)
 
     # 입력 소스 (Jenkins 우선, log_folder fallback)
-    jenkins_build_number: Optional[int] = None
-    cache_root: str = ""
-    log_folder: Optional[str] = None
-    template_path: str = ""  # cloudium/local 경로 또는 빈 string (config default 사용)
+    # 13차 W9: build number 범위 1..99999 (Jenkins 운영 한도)
+    jenkins_build_number: Optional[int] = Field(None, ge=1, le=99999)
+    # 13차 W8: path maxlen 500 + 줄바꿈 금지 (validator)
+    cache_root: str = Field("", max_length=500)
+    log_folder: Optional[str] = Field(None, max_length=500)
+    template_path: str = Field("", max_length=500)
 
     # 인사 메타 (선택)
     reviewer_override: str = Field("", max_length=100)
     approver_override: str = Field("", max_length=100)
-    validation_date: str = ""
+    # 13차 W7: validation_date pattern 추가 (빈 string 허용)
+    validation_date: str = Field("", pattern=r"^$|^\d{2,4}[-/]\d{1,2}[-/]\d{1,2}$")
 
     # Deviation cases (선택, swut_deviation_generator 사전 호출 결과 주입 가능)
-    deviation_cases: List[Dict[str, Any]] = []
+    # 13차 C3: list 길이 + 합산 byte 제한 (DoS)
+    deviation_cases: List[Dict[str, Any]] = Field(default_factory=list, max_length=200)
 
-    @field_validator("test_engineer", "reviewer_override", "approver_override")
+    @field_validator("test_engineer", "reviewer_override", "approver_override",
+                     "cache_root", "log_folder", "template_path")
     @classmethod
-    def _no_newline(cls, v: str) -> str:
+    def _no_newline(cls, v):
+        if v is None:
+            return v
         if "\n" in v or "\r" in v:
             raise ValueError("줄바꿈 문자 금지 — 단일 라인 필요")
+        return v
+
+    @field_validator("deviation_cases")
+    @classmethod
+    def _validate_deviation_cases(cls, v: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """13차 C3: deviation_cases 합산 byte ≤ 256KB, 각 item key ≤ 20개.
+
+        max_length=200은 Pydantic이 처리. 본 validator는 item 내부 크기.
+        """
+        if not v:
+            return v
+        import json as _json
+        total_bytes = 0
+        for i, item in enumerate(v):
+            if not isinstance(item, dict):
+                raise ValueError(f"deviation_cases[{i}]: dict 필요")
+            if len(item) > 20:
+                raise ValueError(f"deviation_cases[{i}]: key 수 ≤ 20 필요 (got {len(item)})")
+            try:
+                total_bytes += len(_json.dumps(item, ensure_ascii=False).encode("utf-8"))
+            except (TypeError, ValueError) as e:
+                raise ValueError(f"deviation_cases[{i}]: JSON 직렬화 불가 — {e}") from e
+        if total_bytes > 256 * 1024:
+            raise ValueError(
+                f"deviation_cases 합산 크기 {total_bytes:,} bytes — 256KB 한도 초과"
+            )
         return v
