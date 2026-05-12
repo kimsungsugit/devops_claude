@@ -29,6 +29,26 @@ import logging
 import os
 from typing import Any
 
+try:
+    import psutil  # type: ignore
+    _HAS_PSUTIL = True
+except ImportError:  # pragma: no cover
+    psutil = None  # type: ignore[assignment]
+    _HAS_PSUTIL = False
+
+
+def _get_process_memory_mb() -> float | None:
+    """20차 T182: 현재 프로세스 RSS 메모리 (MB). psutil 미설치 시 None.
+
+    Semaphore(3) 운영 안전 측정용 — _run_build_safely 시작/종료에서 로깅.
+    """
+    if not _HAS_PSUTIL:
+        return None
+    try:
+        return psutil.Process(os.getpid()).memory_info().rss / (1024 * 1024)
+    except Exception:  # pragma: no cover — psutil error fail-safe
+        return None
+
 from fastapi import APIRouter, HTTPException, Response
 from fastapi.responses import StreamingResponse
 
@@ -208,14 +228,21 @@ def _run_build_safely(kind: str, fn: Any, req: SwUTBuildRequest) -> Response:
     detail은 외부에 leak 가능하므로 client-safe 메시지로 변환.
     """
     user = get_current_user()
-    _logger.info("swut.%s.build start: project_id=%s release=%s user=%s",
-                 kind, req.project_id, req.release_sw_version, user)
+    mem_before = _get_process_memory_mb()
+    _logger.info("swut.%s.build start: project_id=%s release=%s user=%s mem_mb=%s",
+                 kind, req.project_id, req.release_sw_version, user,
+                 f"{mem_before:.1f}" if mem_before is not None else "n/a")
     try:
         resp = fn(req)
         # 14차 W1: StreamingResponse는 .body 없음 — Content-Length 헤더로 크기 보고.
         size = resp.headers.get("content-length", "?") if hasattr(resp, "headers") else "?"
-        _logger.info("swut.%s.build done: project_id=%s bytes=%s",
-                     kind, req.project_id, size)
+        mem_after = _get_process_memory_mb()
+        delta = (f"{mem_after - mem_before:+.1f}"
+                 if (mem_before is not None and mem_after is not None) else "n/a")
+        _logger.info("swut.%s.build done: project_id=%s bytes=%s mem_mb=%s delta=%s",
+                     kind, req.project_id, size,
+                     f"{mem_after:.1f}" if mem_after is not None else "n/a",
+                     delta)
         return resp
     except HTTPException:
         raise  # 의도된 client error는 그대로
@@ -345,13 +372,18 @@ def _do_consistency_check(req: SwUTConsistencyCheckRequest) -> dict[str, Any]:
 def _run_consistency_safely(req: SwUTConsistencyCheckRequest) -> dict[str, Any]:
     """W4 패턴 재사용 — exception sanitize + logger.exception traceback 보존."""
     user = get_current_user()
-    _logger.info("swut.consistency.check start: coverage=%s sutr=%s user=%s",
-                 req.coverage_path[:80], req.sutr_path[:80], user)
+    mem_before = _get_process_memory_mb()
+    _logger.info("swut.consistency.check start: coverage=%s sutr=%s user=%s mem_mb=%s",
+                 req.coverage_path[:80], req.sutr_path[:80], user,
+                 f"{mem_before:.1f}" if mem_before is not None else "n/a")
     try:
         result = _do_consistency_check(req)
         ok = result.get("ok")
         n_issues = len(result.get("issues") or [])
-        _logger.info("swut.consistency.check done: ok=%s issues=%d", ok, n_issues)
+        mem_after = _get_process_memory_mb()
+        _logger.info("swut.consistency.check done: ok=%s issues=%d mem_mb=%s",
+                     ok, n_issues,
+                     f"{mem_after:.1f}" if mem_after is not None else "n/a")
         return result
     except HTTPException:
         raise

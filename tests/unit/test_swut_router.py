@@ -707,3 +707,42 @@ class TestConsistencyCheckEndpoint18:
             json={"coverage_path": "C:/cov.xlsx", "sutr_path": "C:/sutr.xlsm"},
         )
         assert r.status_code in (400, 401, 403)
+
+
+# ---------------------------------------------------------------------------
+# 20차 T182: 메모리 모니터링 헬퍼
+# ---------------------------------------------------------------------------
+
+class TestMemoryMonitor20:
+    """_get_process_memory_mb 헬퍼 — psutil 유무 fail-safe."""
+
+    def test_returns_float_when_psutil_available(self):
+        """psutil 설치된 환경에서는 양수 float 반환."""
+        from backend.routers.swut import _get_process_memory_mb, _HAS_PSUTIL
+        result = _get_process_memory_mb()
+        if _HAS_PSUTIL:
+            assert isinstance(result, float)
+            assert result > 0  # 어떤 프로세스도 0 MB 일 수 없음
+        else:
+            assert result is None
+
+    def test_returns_none_when_psutil_missing(self):
+        """psutil ImportError 시뮬레이션 — None 반환."""
+        from backend.routers import swut as swut_mod
+        # _HAS_PSUTIL=False 강제 + 함수 호출
+        original = swut_mod._HAS_PSUTIL
+        try:
+            swut_mod._HAS_PSUTIL = False
+            assert swut_mod._get_process_memory_mb() is None
+        finally:
+            swut_mod._HAS_PSUTIL = original
+
+    def test_returns_none_on_psutil_error(self):
+        """psutil.Process가 예외 던지면 silent None."""
+        from unittest.mock import patch as _patch
+        from backend.routers import swut as swut_mod
+        if not swut_mod._HAS_PSUTIL:
+            return  # psutil 미설치 환경 skip
+        with _patch("backend.routers.swut.psutil.Process",
+                    side_effect=Exception("mock error")):
+            assert swut_mod._get_process_memory_mb() is None

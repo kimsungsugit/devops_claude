@@ -194,6 +194,67 @@ python -m pytest tests/ -v --cov=backend --cov=workflow --cov=report_gen --cov-r
 - `POST /api/local/sits/generate-async` — SITS 생성
 - `POST /api/jenkins/impact/trigger-async` — Impact 분석
 - `GET /api/jenkins/progress` — 진행률 조회
+- **`POST /api/swut/coverage/build`** — SwUT Coverage Report v3.01 xlsx 빌드 (16~17차)
+- **`POST /api/swut/sutr/build`** — SUTR v3.01 xlsm 빌드 (keep_vba=True, 17차 대칭)
+- **`POST /api/swut/consistency/check`** — Coverage↔SUTR cross-validation (18차)
+
+## SwUT Builder (Software Unit Test, 8~20차 라운드)
+
+ISO 26262 ASIL A 단위테스트 산출물 자동 생성 + cross-validation 플랫폼.
+
+### audit 자동화 현황 (Coverage Report v3.01 6시트, SUTR v3.01 5시트)
+| 시트 | Coverage | SUTR |
+|------|---------|------|
+| Cover / Test Summary | ✓ meta 자동 | ✓ meta 자동 |
+| 1.Traceability (TC×Function 매트릭스) | ✓ (7차) | N/A |
+| **2.Consistency** (자체 일관성 + SwUDS 매핑) | **✓ 4 row + 옵션 5번째 (15~16차)** | **✓ 17차 대칭** |
+| 3.Coverage | ✓ | N/A |
+| Deviation / Test Log | N/A | ✓ |
+| History (git log) | ✓ (6차) | ✓ |
+
+### 입력 데이터 흐름
+1. **Jenkins build cache 우선** — `collect_from_jenkins_cache(scan_jenkins_build_root)`
+2. **log_folder fallback** — VectorCAST 결과 디렉토리 직접 파싱
+3. **template** — 회사 v3.01 xlsx/xlsm template-copy 전략 (스타일/머지셀/매크로 보존)
+4. **swuds_docx_path (옵션, 16차)** — python-docx로 SwUFn_NNNN heading 추출
+
+### Cross-validation (18차, `swut_consistency_checker.py`)
+- **uncovered_mismatch**: 미커버 Function ↔ 미실행 TC 일치성
+- **exception_deviation**: Coverage Exception 합 ≥ SUTR Deviation TC 수
+- **total_tc**: Coverage Traceability TC 수 == SUTR Total
+- **final_result**: 'PASS' / 'OK' 표기 통일
+
+### 메모리 / 동시성 (14차/17차/20차)
+- 14차 W1: `xlsx_io: BytesIO` lazy + StreamingResponse 64KB chunk → 메모리 1배 절감
+- 17차: Semaphore(2) → (3) 상향 (worst 1.8MB×3=5.4MB)
+- 20차: psutil 기반 메모리 모니터링 로그 (`mem_mb=...,delta=...`)
+
+### ISO 26262 Tool Qualification
+모든 builder result에 `tool_qualification` 메타 포함:
+- `evidence_class: "auto-generated draft"`
+- `asil_a_usage: "reviewer 검토 후 evidence 사용 가능"`
+- `asil_b_c_d_usage: "단독 evidence 사용 금지 — manual review 의무"`
+
+### Frontend UI
+- `SwUTBuildSection.jsx` (Detail.jsx 탭 `🧪 SwUT 빌드`)
+- Form 입력 (project/release/date/log_folder/template/swuds) → Coverage/SUTR 빌드 → blob 다운로드
+- 동일 페이지 하단 Consistency Check 섹션 (19차) — issues 카드 severity별 색상
+
+### 입력 표면 매트릭스 (Pydantic, 13차)
+| 필드 | 검증 |
+|------|------|
+| release_sw_version | regex `^\d+\.\d+(\.\d+)?$` |
+| test_date / validation_date | regex `^\d{2,4}[-/]\d{1,2}[-/]\d{1,2}$` |
+| test_engineer / reviewer / approver | maxlen 100 + 줄바꿈 금지 |
+| doc_id_sequence | digit only |
+| jenkins_build_number | ge=1 le=99999 |
+| cache_root / log_folder / template_path / swuds_docx_path | maxlen 500 + 줄바꿈 금지 |
+| deviation_cases | max_length=200 + 합산 256KB + item key ≤20 |
+
+### Workflow & Tests
+- Backend SwUT 전체 회귀: ~240개 (test_swut_*.py + test_excel_template_utils.py)
+- Frontend SwUTBuildSection: 16개 (vitest)
+- Cloudium worker는 read-only — 절대 cloudium 파일 생성/수정 금지 (사용자 의사결정)
 
 ## Workflows (워크플로우 — 자동 연결)
 - `/workflow [기능설명]` — **전체 개발 흐름**: 기획→코드→테스트→리뷰→커밋 자동 실행
