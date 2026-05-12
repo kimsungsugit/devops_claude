@@ -252,9 +252,33 @@ ISO 26262 ASIL A 단위테스트 산출물 자동 생성 + cross-validation 플�
 | deviation_cases | max_length=200 + 합산 256KB + item key ≤20 |
 
 ### Workflow & Tests
-- Backend SwUT 전체 회귀: ~240개 (test_swut_*.py + test_excel_template_utils.py)
-- Frontend SwUTBuildSection: 16개 (vitest)
+- Backend SwUT 전체 회귀: ~260개 (test_swut_*.py + test_excel_template_utils.py)
+- Frontend SwUTBuildSection: 20개 (vitest)
 - Cloudium worker는 read-only — 절대 cloudium 파일 생성/수정 금지 (사용자 의사결정)
+
+### Backend Reload 절차 (26차 C6 명시)
+
+backend 코드 변경 (`backend/services/`, `backend/routers/`, `backend/schemas.py` 등)
+후에는 **반드시 backend 재시작 필요** — uvicorn에 `--reload` 옵션이 없으면 stale
+코드가 호출되어 PoC / endpoint 결과가 신규 변경 반영 안 됨.
+
+#### 절차
+1. **재시작 방식 (권장)**: 기존 backend 종료 (Ctrl+C 또는 작업 관리자) →
+   `cd backend && uvicorn main:app --reload --port 9000` (개발 모드 `--reload` 권장)
+2. **포트 충돌 시**: `netstat -ano | findstr 9000` → PID 확인 → 종료
+3. **Cloudium 모드 stuck 방지**: PoC 종료 시 항상 `_restore_local_mode()` finally
+   (22차 T188 패턴). cloudium 모드 + worker 미실행 시 모든 read 403
+
+#### 변경 영향 매트릭스
+| 변경 영역 | reload 필요? |
+|----------|-------------|
+| `backend/services/*.py` | ✅ 필수 |
+| `backend/routers/*.py` | ✅ 필수 |
+| `backend/schemas.py` | ✅ 필수 (Pydantic schema cache) |
+| `backend/main.py` | ✅ 필수 |
+| `config/swut_meta.json` | 12차 lru_cache + mtime invalidate — **자동** |
+| `frontend-v2/src/*` | ❌ Vite HMR (자동) |
+| `.codex_tmp/poc_*.py` | ❌ 매 실행 새 process |
 
 ## Workflows (워크플로우 — 자동 연결)
 - `/workflow [기능설명]` — **전체 개발 흐름**: 기획→코드→테스트→리뷰→커밋 자동 실행

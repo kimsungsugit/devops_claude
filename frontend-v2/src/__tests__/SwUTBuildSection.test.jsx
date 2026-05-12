@@ -315,6 +315,39 @@ describe('SwUTBuildSection', () => {
     expect(browseButtons.length).toBe(5);
   });
 
+  it('renders reviewer/approver/validation_date input fields (26차 W16)', () => {
+    render(<SwUTBuildSection />);
+    expect(screen.getByLabelText(/^Reviewer$/)).toBeTruthy();
+    expect(screen.getByLabelText(/^Approver$/)).toBeTruthy();
+    expect(screen.getByLabelText(/^Validation Date$/)).toBeTruthy();
+    // hint 가이드 (각 필드 빈 상태면 산출물 노란 강조 안내)
+    expect(screen.getAllByText(/노란 강조/).length).toBeGreaterThanOrEqual(3);
+  });
+
+  it('includes reviewer_override/approver_override/validation_date in POST body (26차)', async () => {
+    const fetchSpy = vi.spyOn(global, 'fetch').mockResolvedValue({
+      ok: true,
+      headers: new Headers({ 'Content-Disposition': 'attachment; filename="x.xlsx"' }),
+      blob: async () => new Blob([new Uint8Array([0x50, 0x4b, 0x03, 0x04])]),
+    });
+
+    render(<SwUTBuildSection />);
+    fireEvent.change(screen.getByLabelText(/Release SW Version/), { target: { value: '2.02' } });
+    fireEvent.change(screen.getByLabelText(/Log Folder/), { target: { value: 'C:/log' } });
+    fireEvent.change(screen.getByLabelText(/^Reviewer$/), { target: { value: 'KH Park' } });
+    fireEvent.change(screen.getByLabelText(/^Approver$/), { target: { value: 'CH In' } });
+    fireEvent.change(screen.getByLabelText(/^Validation Date$/), { target: { value: '2024-02-25' } });
+    fireEvent.click(screen.getByText(/Coverage Report 빌드/));
+
+    await waitFor(() => {
+      expect(fetchSpy).toHaveBeenCalled();
+    });
+    const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
+    expect(body.reviewer_override).toBe('KH Park');
+    expect(body.approver_override).toBe('CH In');
+    expect(body.validation_date).toBe('2024-02-25');
+  });
+
   it('renders hint text for path fields (25차)', () => {
     render(<SwUTBuildSection />);
     // log_folder + template_path + swuds_docx_path 각각 hint 표시

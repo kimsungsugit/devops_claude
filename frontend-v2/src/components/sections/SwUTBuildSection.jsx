@@ -24,6 +24,10 @@ const DEFAULT_FORM = {
   log_folder: '',
   template_path: '',
   swuds_docx_path: '',
+  // 26차 W16: backend schema에 이미 있던 3 옵션 필드를 frontend에서도 입력
+  reviewer_override: '',
+  approver_override: '',
+  validation_date: '',
 };
 
 function loadSavedForm() {
@@ -282,7 +286,7 @@ export default function SwUTBuildSection() {
         <Field name="release_sw_version" label="Release SW Version *" value={form.release_sw_version} onChange={v => setField('release_sw_version', v)} placeholder="2.02"
                hint="형식: N.N 또는 N.N.N (예: 2.02, 1.01.05)" />
         <Field name="test_date" label="Test Date *" value={form.test_date} onChange={v => setField('test_date', v)} type="date"
-               hint="yyyy-mm-dd 형식 — Test Summary 시트에 기록" />
+               hint="yyyy-mm-dd 또는 yyyy/mm/dd — Test Summary 시트에 기록" />
         <Field name="test_engineer" label="Test Engineer" value={form.test_engineer} onChange={v => setField('test_engineer', v)} placeholder="JK Kim"
                hint="비우면 산출물 Cover/Test Summary에 노란 강조 표시" />
         <Field name="doc_id_sequence" label="Doc ID Sequence" value={form.doc_id_sequence} onChange={v => setField('doc_id_sequence', v)} placeholder="852"
@@ -291,6 +295,13 @@ export default function SwUTBuildSection() {
                hint="default 1.00" />
         <Field name="asil_level" label="ASIL Level" value={form.asil_level} onChange={v => setField('asil_level', v)}
                hint="default ASIL A (config override 가능)" />
+        {/* 26차 W16: Cover/Test Summary에 자동 채움 가능한 옵션 메타 (빈 상태면 산출물 노란 강조) */}
+        <Field name="reviewer_override" label="Reviewer" value={form.reviewer_override} onChange={v => setField('reviewer_override', v)} placeholder="검토자 이름"
+               hint="빈 상태면 산출물 Cover에 노란 강조 — config의 default_reviewer 우선 활용" />
+        <Field name="approver_override" label="Approver" value={form.approver_override} onChange={v => setField('approver_override', v)} placeholder="승인자 이름"
+               hint="빈 상태면 산출물 Cover에 노란 강조 — config의 default_approver 우선 활용 (audit 필수)" />
+        <Field name="validation_date" label="Validation Date" value={form.validation_date} onChange={v => setField('validation_date', v)} type="date"
+               hint="yyyy-mm-dd 또는 yyyy/mm/dd — 빈 상태면 노란 강조" />
       </div>
 
       <div className="swut-form-row swut-field-with-browse">
