@@ -701,6 +701,28 @@ class SwUTBuildRequest(BaseModel):
         return v
 
 
+# ── SwUT Browse (21차 라운드) ─────────────────────────────────────────
+
+class SwUTBrowseRequest(BaseModel):
+    """Path picker dialog용 디렉토리 list 요청 (21차 T185).
+
+    file_resolver.list_dir로 cloudium / local 통합 navigate. 파일/디렉토리 분리 반환.
+
+    입력 표면:
+      - path: maxlen 500, 줄바꿈 금지, 빈 string은 사용자 home 또는 일반 root
+      - pattern: maxlen 50, glob pattern (예: '*.xlsx', '*.xlsm,*.docx')
+    """
+    path: str = Field("", max_length=500)
+    pattern: str = Field("*", max_length=50)
+
+    @field_validator("path", "pattern")
+    @classmethod
+    def _no_newline_browse(cls, v: str) -> str:
+        if "\n" in v or "\r" in v:
+            raise ValueError("줄바꿈 문자 금지")
+        return v
+
+
 # ── SwUT Consistency Check (18차 라운드) ──────────────────────────────
 
 class SwUTConsistencyCheckRequest(BaseModel):

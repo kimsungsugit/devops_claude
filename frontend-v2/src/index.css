@@ -1319,3 +1319,131 @@ label {
   background: var(--color-info-soft);
 }
 
+/* ── 21차: PathPickerDialog 모달 ── */
+.picker-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.picker-dialog {
+  width: min(720px, 90vw);
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
+}
+
+.picker-header {
+  display: flex;
+  align-items: center;
+  padding: var(--sp-3);
+  border-bottom: 1px solid var(--border);
+}
+
+.picker-title {
+  margin: 0;
+  flex: 1;
+  font-size: var(--text-md);
+  font-weight: 700;
+  color: var(--text);
+}
+
+.picker-close {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 16px;
+}
+
+.picker-toolbar {
+  display: flex;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  border-bottom: 1px solid var(--border);
+}
+
+.picker-path {
+  flex: 1;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: var(--text-sm);
+}
+
+.picker-up, .picker-go {
+  flex-shrink: 0;
+}
+
+.picker-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--sp-2);
+}
+
+.picker-loading, .picker-empty, .picker-error, .picker-truncated {
+  padding: var(--sp-3);
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+}
+
+.picker-error {
+  color: var(--color-danger);
+}
+
+.picker-truncated {
+  color: var(--color-warning);
+  border-top: 1px solid var(--border);
+  margin-top: var(--sp-2);
+}
+
+.picker-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.picker-entry {
+  width: 100%;
+  text-align: left;
+  padding: 6px 10px;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  cursor: pointer;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: var(--text-sm);
+}
+
+.picker-entry:hover {
+  background: var(--hover);
+}
+
+.picker-entry-dir {
+  font-weight: 600;
+}
+
+/* ── SwUT Browse button ── */
+.swut-field-with-browse {
+  display: flex;
+  gap: var(--sp-1);
+  align-items: flex-end;
+}
+
+.swut-field-with-browse > .swut-field {
+  flex: 1;
+}
+
+.swut-browse-btn {
+  flex-shrink: 0;
+  padding: 6px 10px;
+  font-size: var(--text-sm);
+}
+

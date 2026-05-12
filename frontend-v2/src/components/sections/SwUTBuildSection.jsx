@@ -1,6 +1,7 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
 import { getUsername } from '../../api.js';
 import { useToast } from '../../App.jsx';
+import PathPickerDialog from '../PathPickerDialog.jsx';
 
 const API_BASE = (typeof window !== 'undefined' && window.__ARIA_API_BASE__)
   || import.meta.env?.VITE_API_BASE_URL || '';
@@ -63,6 +64,20 @@ export default function SwUTBuildSection() {
   const [consistencyForm, setConsistencyForm] = useState({ coverage_path: '', sutr_path: '' });
   const [consistencyChecking, setConsistencyChecking] = useState(false);
   const [consistencyReport, setConsistencyReport] = useState(null);
+  // 21차: PathPickerDialog state
+  const [picker, setPicker] = useState(null);  // { target, pattern, title, onSelect }
+
+  const openPicker = (target, pattern, title) => {
+    let onSelect;
+    if (target === 'consistency.coverage_path') {
+      onSelect = v => setConsistencyForm(f => ({ ...f, coverage_path: v }));
+    } else if (target === 'consistency.sutr_path') {
+      onSelect = v => setConsistencyForm(f => ({ ...f, sutr_path: v }));
+    } else {
+      onSelect = v => setField(target, v);
+    }
+    setPicker({ target, pattern, title, onSelect });
+  };
 
   const abortRef = useRef(null);
   const consistencyAbortRef = useRef(null);
@@ -271,7 +286,7 @@ export default function SwUTBuildSection() {
         <Field name="asil_level" label="ASIL Level" value={form.asil_level} onChange={v => setField('asil_level', v)} />
       </div>
 
-      <div className="swut-form-row">
+      <div className="swut-form-row swut-field-with-browse">
         <Field
           name="log_folder"
           label="Log Folder (Jenkins 미사용 시 fallback)"
@@ -280,8 +295,13 @@ export default function SwUTBuildSection() {
           placeholder="U:\연구소\...\01.Log\v2.02_240219"
           fullWidth
         />
+        <button
+          className="swut-browse-btn"
+          type="button"
+          onClick={() => openPicker('log_folder', '*', 'Log 디렉토리 선택')}
+        >📂 Browse</button>
       </div>
-      <div className="swut-form-row">
+      <div className="swut-form-row swut-field-with-browse">
         <Field
           name="template_path"
           label="Template Path (xlsx/xlsm — config default 사용 시 빈 string)"
@@ -290,8 +310,13 @@ export default function SwUTBuildSection() {
           placeholder="U:\...\(HDPDM01)SwUT Coverage Report_v3.01_240221_R.xlsx"
           fullWidth
         />
+        <button
+          className="swut-browse-btn"
+          type="button"
+          onClick={() => openPicker('template_path', '*.xlsx,*.xlsm', 'Template 파일 선택')}
+        >📂 Browse</button>
       </div>
-      <div className="swut-form-row">
+      <div className="swut-form-row swut-field-with-browse">
         <Field
           name="swuds_docx_path"
           label="SwUDS Docx Path (선택 — 2.Consistency SwUDS↔SwUTS 매핑 자동화)"
@@ -300,6 +325,11 @@ export default function SwUTBuildSection() {
           placeholder="U:\...\(HDPDM01)SwUDS_v3.docx"
           fullWidth
         />
+        <button
+          className="swut-browse-btn"
+          type="button"
+          onClick={() => openPicker('swuds_docx_path', '*.docx', 'SwUDS docx 선택')}
+        >📂 Browse</button>
       </div>
 
       <div className="swut-actions">
@@ -343,7 +373,7 @@ export default function SwUTBuildSection() {
           4가지 cross-validation (미커버 ↔ 미실행 / Exception ↔ Deviation / Total TC /
           Final Result) 결과 반환. ISO 26262 audit evidence.
         </p>
-        <div className="swut-form-row">
+        <div className="swut-form-row swut-field-with-browse">
           <Field
             name="coverage_path"
             label="Coverage Report Path (xlsx)"
@@ -352,8 +382,13 @@ export default function SwUTBuildSection() {
             placeholder="U:\...\(HDPDM01)SwUT Coverage Report_v3.01_240221_R.xlsx"
             fullWidth
           />
+          <button
+            className="swut-browse-btn"
+            type="button"
+            onClick={() => openPicker('consistency.coverage_path', '*.xlsx', 'Coverage Report 선택')}
+          >📂 Browse</button>
         </div>
-        <div className="swut-form-row">
+        <div className="swut-form-row swut-field-with-browse">
           <Field
             name="sutr_path"
             label="SUTR Path (xlsm)"
@@ -362,6 +397,11 @@ export default function SwUTBuildSection() {
             placeholder="U:\...\(HDPDM01_SUTR) Software Unit Test Result_v3.01_240221_R.xlsm"
             fullWidth
           />
+          <button
+            className="swut-browse-btn"
+            type="button"
+            onClick={() => openPicker('consistency.sutr_path', '*.xlsm', 'SUTR 선택')}
+          >📂 Browse</button>
         </div>
         <div className="swut-actions">
           <button
@@ -372,6 +412,17 @@ export default function SwUTBuildSection() {
             {consistencyChecking ? '검증 중...' : '🔍 일관성 검증 실행'}
           </button>
         </div>
+
+        <PathPickerDialog
+          open={!!picker}
+          initialPath={picker?.target === 'consistency.coverage_path' ? consistencyForm.coverage_path
+            : picker?.target === 'consistency.sutr_path' ? consistencyForm.sutr_path
+            : picker ? form[picker.target] : ''}
+          pattern={picker?.pattern || '*'}
+          title={picker?.title || '경로 선택'}
+          onSelect={picker?.onSelect}
+          onClose={() => setPicker(null)}
+        />
 
         {consistencyReport && (
           <div className="swut-consistency-result">

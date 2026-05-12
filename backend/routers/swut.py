@@ -52,7 +52,7 @@ def _get_process_memory_mb() -> float | None:
 from fastapi import APIRouter, HTTPException, Response
 from fastapi.responses import StreamingResponse
 
-from backend.schemas import SwUTBuildRequest, SwUTConsistencyCheckRequest
+from backend.schemas import SwUTBrowseRequest, SwUTBuildRequest, SwUTConsistencyCheckRequest
 from backend.services.file_resolver import get_resolver
 from backend.services.swut_consistency_checker import check_swut_consistency
 from backend.services.swut_coverage_aggregator import (
@@ -413,3 +413,101 @@ async def consistency_check(req: SwUTConsistencyCheckRequest) -> dict[str, Any]:
     빌드 endpoint와 달리 Semaphore 미적용 (read-only, 메모리 풋프린트 작음).
     """
     return await asyncio.to_thread(_run_consistency_safely, req)
+
+
+# ── 21차 T185: Path picker dialog용 browse endpoint ──────────────────
+
+# 디렉토리 listing 한도 — 2000건 초과 시 truncate (DoS 차단).
+_BROWSE_MAX_ITEMS = 2000
+
+
+def _do_browse(req: SwUTBrowseRequest) -> dict[str, Any]:
+    """file_resolver.list_dir 활용 — cloudium / local 통합 navigate.
+
+    Returns:
+        {"current": str, "parent": str, "dirs": [str], "files": [str], "truncated": bool}
+    """
+    import os as _os
+    from pathlib import Path as _Path
+
+    resolver = get_resolver()
+    raw_path = (req.path or "").strip() or _os.getcwd()
+    # 정규화 (단, resolver.resolve()는 cloudium 모드에서 worker 호출이라 비용 큼 — Path 정규화만)
+    try:
+        current = str(_Path(raw_path))
+        parent = str(_Path(raw_path).parent) if _Path(raw_path).parent != _Path(raw_path) else ""
+    except (OSError, ValueError):
+        current = raw_path
+        parent = ""
+
+    patterns = [p.strip() for p in req.pattern.split(",") if p.strip()] or ["*"]
+    all_files: list[str] = []
+    for pat in patterns:
+        # file_resolver.list_dir는 파일만 반환 (디렉토리 제외) — 그대로 활용.
+        items = resolver.list_dir(raw_path, pattern=pat, recursive=False)
+        all_files.extend(items)
+
+    # 디렉토리는 file_resolver 인터페이스 외부 — Path.iterdir로 별도 수집.
+    all_dirs: list[str] = []
+    try:
+        for entry in _Path(raw_path).iterdir():
+            if entry.is_dir():
+                all_dirs.append(str(entry))
+    except (FileNotFoundError, NotADirectoryError, PermissionError):
+        # raw_path가 파일 / 권한 부족 / 부재 — caller(_run_browse_safely)가 sanitize
+        raise
+    except OSError:
+        # cloudium 모드 또는 기타 OSError — 디렉토리 list 불가, files만 반환
+        pass
+
+    dirs = sorted(set(all_dirs))
+    files = sorted(set(all_files))
+    truncated = False
+    if len(dirs) + len(files) > _BROWSE_MAX_ITEMS:
+        # files 우선 truncate (디렉토리는 navigate에 필수)
+        budget = _BROWSE_MAX_ITEMS - len(dirs)
+        files = files[: max(0, budget)]
+        truncated = True
+
+    return {
+        "ok": True,
+        "current": current,
+        "parent": parent,
+        "dirs": dirs,
+        "files": files,
+        "truncated": truncated,
+    }
+
+
+def _run_browse_safely(req: SwUTBrowseRequest) -> dict[str, Any]:
+    user = get_current_user()
+    _logger.info("swut.browse: path=%s pattern=%s user=%s",
+                 req.path[:80], req.pattern, user)
+    try:
+        return _do_browse(req)
+    except HTTPException:
+        raise
+    except (FileNotFoundError, NotADirectoryError) as e:
+        _logger.exception("swut.browse not found")
+        raise HTTPException(
+            status_code=404,
+            detail=f"경로 접근 실패: {type(e).__name__}",
+        ) from e
+    except PermissionError as e:
+        _logger.exception("swut.browse permission")
+        raise HTTPException(status_code=403, detail=f"권한 부족: {type(e).__name__}") from e
+    except Exception as e:
+        _logger.exception("swut.browse unexpected error")
+        raise HTTPException(
+            status_code=500, detail=f"browse 실패 ({type(e).__name__})",
+        ) from e
+
+
+@router.post("/browse")
+async def browse_path(req: SwUTBrowseRequest) -> dict[str, Any]:
+    """디렉토리 탐색 — frontend PathPickerDialog 용 (21차).
+
+    file_resolver 통합 (cloudium 모드면 worker 위임, local 모드면 직접).
+    Read-only — Semaphore 미적용.
+    """
+    return await asyncio.to_thread(_run_browse_safely, req)

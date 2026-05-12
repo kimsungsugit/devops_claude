@@ -746,3 +746,82 @@ class TestMemoryMonitor20:
         with _patch("backend.routers.swut.psutil.Process",
                     side_effect=Exception("mock error")):
             assert swut_mod._get_process_memory_mb() is None
+
+
+# ---------------------------------------------------------------------------
+# 21차 T185: /api/swut/browse path picker endpoint
+# ---------------------------------------------------------------------------
+
+class TestBrowseEndpoint21:
+    """Path picker dialog용 browse endpoint."""
+
+    def test_schema_rejects_path_with_newline(self):
+        r = client.post(
+            "/api/swut/browse",
+            json={"path": "C:/fake\r\nX-Injected: evil"},
+            headers={"X-User": "tester"},
+        )
+        assert r.status_code == 422
+
+    def test_schema_rejects_oversize_path(self):
+        r = client.post(
+            "/api/swut/browse",
+            json={"path": "C:/" + "a" * 600},
+            headers={"X-User": "tester"},
+        )
+        assert r.status_code == 422
+
+    def test_browse_returns_dirs_and_files(self, tmp_path):
+        """tmp_path 안 디렉토리 + 파일 모두 분리 반환."""
+        sub = tmp_path / "subdir"
+        sub.mkdir()
+        (tmp_path / "a.xlsx").write_bytes(b"PK")
+        (tmp_path / "b.txt").write_bytes(b"text")
+
+        r = client.post(
+            "/api/swut/browse",
+            json={"path": str(tmp_path), "pattern": "*"},
+            headers={"X-User": "tester"},
+        )
+        assert r.status_code == 200
+        body = r.json()
+        assert body["ok"] is True
+        assert any("subdir" in d for d in body["dirs"])
+        assert any("a.xlsx" in f for f in body["files"])
+        assert body["truncated"] is False
+
+    def test_browse_pattern_filters_files(self, tmp_path):
+        """*.xlsx pattern은 xlsx만 반환 (dirs는 별도 list)."""
+        (tmp_path / "a.xlsx").write_bytes(b"PK")
+        (tmp_path / "b.txt").write_bytes(b"text")
+        (tmp_path / "c.xlsm").write_bytes(b"PK")
+
+        r = client.post(
+            "/api/swut/browse",
+            json={"path": str(tmp_path), "pattern": "*.xlsx"},
+            headers={"X-User": "tester"},
+        )
+        body = r.json()
+        # *.xlsx만 매칭 + b.txt / c.xlsm 제외
+        assert any("a.xlsx" in f for f in body["files"])
+        assert not any("b.txt" in f for f in body["files"])
+        assert not any("c.xlsm" in f for f in body["files"])
+
+    def test_browse_parent_path_provided(self, tmp_path):
+        """현재 + parent 경로 모두 반환 — navigate up 가능."""
+        sub = tmp_path / "subdir"
+        sub.mkdir()
+        r = client.post(
+            "/api/swut/browse",
+            json={"path": str(sub)},
+            headers={"X-User": "tester"},
+        )
+        body = r.json()
+        assert "current" in body
+        assert "parent" in body
+        # parent가 tmp_path여야 함 (또는 그 부모)
+        assert str(tmp_path) in body["parent"] or body["parent"] == str(tmp_path)
+
+    def test_browse_missing_x_user_rejected(self, tmp_path):
+        r = client.post("/api/swut/browse", json={"path": str(tmp_path)})
+        assert r.status_code in (400, 401, 403)

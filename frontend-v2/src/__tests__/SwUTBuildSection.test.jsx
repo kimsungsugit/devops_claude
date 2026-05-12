@@ -308,6 +308,34 @@ describe('SwUTBuildSection', () => {
     expect(screen.getByText(/issue 2건/)).toBeTruthy();
   });
 
+  it('renders Browse buttons for path fields (21차)', () => {
+    render(<SwUTBuildSection />);
+    // 5개 path 필드 (log_folder / template_path / swuds_docx_path / coverage_path / sutr_path)
+    const browseButtons = screen.getAllByText(/📂 Browse/);
+    expect(browseButtons.length).toBe(5);
+  });
+
+  it('opens picker dialog when Browse clicked (21차)', async () => {
+    vi.spyOn(global, 'fetch').mockResolvedValue({
+      ok: true,
+      headers: new Headers(),
+      json: async () => ({
+        ok: true, current: '', parent: '',
+        dirs: ['C:/folder1'], files: ['C:/file1.xlsx'],
+        truncated: false,
+      }),
+    });
+
+    render(<SwUTBuildSection />);
+    const browseButtons = screen.getAllByText(/📂 Browse/);
+    // Log folder Browse 버튼 클릭
+    fireEvent.click(browseButtons[0]);
+    await waitFor(() => {
+      expect(screen.getByText(/Log 디렉토리 선택/)).toBeTruthy();
+    });
+    expect(screen.getByText(/folder1/)).toBeTruthy();
+  });
+
   it('sends X-User header + AbortSignal in consistency fetch (19차)', async () => {
     const fetchSpy = vi.spyOn(global, 'fetch').mockResolvedValue({
       ok: true,
