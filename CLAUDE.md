@@ -240,21 +240,37 @@ ISO 26262 ASIL A 단위테스트 산출물 자동 생성 + cross-validation 플�
 - Form 입력 (project/release/date/log_folder/template/swuds) → Coverage/SUTR 빌드 → blob 다운로드
 - 동일 페이지 하단 Consistency Check 섹션 (19차) — issues 카드 severity별 색상
 
-### 입력 표면 매트릭스 (Pydantic, 13차)
-| 필드 | 검증 |
-|------|------|
-| release_sw_version | regex `^\d+\.\d+(\.\d+)?$` |
-| test_date / validation_date | regex `^\d{2,4}[-/]\d{1,2}[-/]\d{1,2}$` |
-| test_engineer / reviewer / approver | maxlen 100 + 줄바꿈 금지 |
-| doc_id_sequence | digit only |
-| jenkins_build_number | ge=1 le=99999 |
-| cache_root / log_folder / template_path / swuds_docx_path | maxlen 500 + 줄바꿈 금지 |
-| deviation_cases | max_length=200 + 합산 256KB + item key ≤20 |
+### 입력 표면 매트릭스 (Pydantic, 13차+26차)
+| 필드 | 검증 | Frontend Form (26차) |
+|------|------|---------------------|
+| release_sw_version | regex `^\d+\.\d+(\.\d+)?$` | ✓ 필수 |
+| test_date / validation_date | regex `^\d{2,4}[-/]\d{1,2}[-/]\d{1,2}$` | ✓ (validation_date 26차 추가) |
+| test_engineer | maxlen 100 + 줄바꿈 금지 | ✓ |
+| reviewer_override / approver_override | maxlen 100 + 줄바꿈 금지 | **✓ 26차 W16 추가** |
+| doc_id_sequence | digit only | ✓ |
+| jenkins_build_number | ge=1 le=99999 | (옵션) |
+| cache_root / log_folder / template_path / swuds_docx_path | maxlen 500 + 줄바꿈 금지 | ✓ (PathPickerDialog 21차) |
+| deviation_cases | max_length=200 + 합산 256KB + item key ≤20 | (programmatic) |
 
-### Workflow & Tests
+### 시각 강조 정책 (23/24차)
+
+산출물 cell에 audit reviewer 친화 표시:
+
+| 색상 RGB | 용도 | 헬퍼 |
+|----------|------|------|
+| 🟡 노란 `FFFFEB9C` | 사용자 입력 필요 (Validation Date / Reviewer / Approver / Test Engineer 빈 시, SUTR Actual Coverage/Pass ratio 데이터 부재 시) | `mark_user_input_required` / `write_value_or_mark` |
+| 🔴 빨간 `FFFFC7CE` | 2.Consistency FAIL row Result 셀 | `mark_fail_cell` |
+| 기본 (없음) | 자동 채움 (config/meta 정상) | `safe_write` / `_write_label` |
+
+24차 silent "N/A" 제거 — Actual Coverage/Pass ratio가 data 부재 시 `▶ 사용자 입력 필요 — VectorCAST 데이터 부재 — log_folder 재확인` 명시 (deep-reviewer X7 강화).
+
+### Workflow & Tests (27차 갱신)
 - Backend SwUT 전체 회귀: ~260개 (test_swut_*.py + test_excel_template_utils.py)
-- Frontend SwUTBuildSection: 20개 (vitest)
+- Backend 전체: **1701개** (timeout 없이 통과)
+- Frontend SwUTBuildSection: **21개** (vitest)
+- Frontend 전체: **216개**
 - Cloudium worker는 read-only — 절대 cloudium 파일 생성/수정 금지 (사용자 의사결정)
+- 라이브 검증 PoC: `.codex_tmp/poc_live_full_verification.py` (maintained, 사용자 환경에서 직접 호출)
 
 ### Backend Reload 절차 (26차 C6 명시)
 
