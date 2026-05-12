@@ -490,23 +490,33 @@ class TestBuildSutr:
         assert result.summary["deviation_cases_written"] == 1
         assert any("Deviation case shape 검증 실패" in w for w in result.warnings)
 
-    def test_pass_ratio_na_when_tested_zero(self):
-        """deep-reviewer X7: tested=0이면 ratio="N/A" silent wrong-pick 회피."""
-        # 빈 환경 session
+    def test_pass_ratio_marked_user_input_when_tested_zero(self):
+        """deep-reviewer X7 + 24차: tested=0이면 ratio 셀에 노란 강조 + 안내 텍스트.
+
+        24차 이전: silent "N/A" 텍스트
+        24차 이후: "▶ 사용자 입력 필요 — 실행된 TC 없음..." + 노란 fill
+        audit reviewer가 데이터 부재를 즉시 인지.
+        """
         from backend.services.swut_input_adapter import EnvironmentData
         session = SwUTSession(environments=[EnvironmentData(env_name="EMPTY")])
         meta = SutrBuildMeta(release_sw_version="1.0.0", test_date="2024-02-19")
         result = build_sutr(session, meta, _build_sutr_template())
-        # 출력 xlsm 안의 "Actual Pass ratio" 셀이 "N/A"
         import io as _io
         wb = openpyxl.load_workbook(_io.BytesIO(result.xlsm_bytes), keep_vba=True)
         ts = wb["Test Summary"]
-        # B8 = Final Test Result, B7 = Actual Coverage, B... 정확한 위치는 fixture 의존
-        # 단순 검증: 시트에 "N/A" 문자열이 존재
-        all_values = []
-        for row in ts.iter_rows(values_only=True):
-            all_values.extend(str(c) for c in row if c is not None)
-        assert any("N/A" in v for v in all_values)
+        # "▶ 사용자 입력 필요" 텍스트 + 노란 fill 셀 발견
+        marked_cells = []
+        for row in ts.iter_rows():
+            for c in row:
+                if c.value and "사용자 입력 필요" in str(c.value):
+                    fg = str(getattr(c.fill.fgColor, "rgb", "") or "").upper()
+                    marked_cells.append((c.coordinate, c.value, fg))
+        assert len(marked_cells) >= 2, f"Actual Coverage / Actual Pass ratio 양쪽 강조: {marked_cells}"
+        # 모두 노란 fill (FFEB9C)
+        assert all("FFEB9C" in fg for _, _, fg in marked_cells)
+        # 안내 텍스트
+        all_text = " ".join(str(v) for _, v, _ in marked_cells)
+        assert "TC 없음" in all_text or "VectorCAST" in all_text
 
     def test_history_auto_filled_by_git_log(self):
         """T134: History 시트가 git log로 자동 채워지면 incomplete_sheets에서 빠짐."""

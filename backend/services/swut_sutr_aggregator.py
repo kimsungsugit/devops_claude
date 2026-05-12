@@ -174,14 +174,23 @@ def _write_test_summary(
     _write_label(ws, "Release Name(SW)", meta.release_sw_version, out_warnings)
     _write_label(ws, "Test Target Version(HW)", meta.hw_version, out_warnings)
     _write_label(ws, "Test Date", meta.test_date, out_warnings)
-    _write_label(ws, "Test Engineer", meta.test_engineer, out_warnings)
+    # 24차: Test Engineer 빈 시 노란 강조 (Coverage와 대칭)
+    _write_label_or_mark(ws, "Test Engineer", meta.test_engineer,
+                         "테스트 엔지니어 이름", out_warnings)
     _write_label(ws, "Target Coverage", meta.target_coverage, out_warnings)
     # deep-reviewer X7: 0/N의 silent wrong-pick 회피 — N=0이면 "N/A" 명시.
-    actual_cov = agg["tested"] / agg["total"] if agg["total"] > 0 else "N/A"
-    _write_label(ws, "Actual Coverage", actual_cov, out_warnings)
+    # 24차: agg.total == 0 → N/A는 input 데이터 부재 의미, 노란 강조로 reviewer 가시화.
+    if agg["total"] > 0:
+        _write_label(ws, "Actual Coverage", agg["tested"] / agg["total"], out_warnings)
+    else:
+        _write_label_or_mark(ws, "Actual Coverage", "",
+                             "VectorCAST 데이터 부재 — log_folder 재확인", out_warnings)
     _write_label(ws, "Target Pass ratio", meta.target_pass_ratio, out_warnings)
-    actual_pass = agg["passed"] / agg["tested"] if agg["tested"] > 0 else "N/A"
-    _write_label(ws, "Actual Pass ratio", actual_pass, out_warnings)
+    if agg["tested"] > 0:
+        _write_label(ws, "Actual Pass ratio", agg["passed"] / agg["tested"], out_warnings)
+    else:
+        _write_label_or_mark(ws, "Actual Pass ratio", "",
+                             "실행된 TC 없음 — log 또는 deviation 확인", out_warnings)
     _write_label(ws, "Final Test Result", meta.final_test_result, out_warnings)
 
 

@@ -189,7 +189,9 @@ def _write_test_summary_sheet(
     _write_label(ws, "Release Name(SW)", meta.release_sw_version, out_warnings)
     _write_label(ws, "Test Target Version(HW)", meta.hw_version, out_warnings)
     _write_label(ws, "Test Date", meta.test_date, out_warnings)
-    _write_label(ws, "Test Engineer", meta.test_engineer, out_warnings)
+    # 24차: Test Engineer 빈 시 노란 강조 (사용자 입력 필요)
+    _write_label_or_mark(ws, "Test Engineer", meta.test_engineer,
+                         "테스트 엔지니어 이름", out_warnings)
     _write_label(ws, "Final Test Result", meta.final_test_result, out_warnings)
 
 
