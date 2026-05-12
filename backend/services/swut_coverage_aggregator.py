@@ -282,6 +282,116 @@ def _collect_tc_to_function(session: SwUTSession) -> dict[str, str]:
     return out
 
 
+def _compute_self_consistency(session: SwUTSession) -> list[dict[str, Any]]:
+    """15차: SwUTS 내부 자체 일관성 4가지 검증.
+
+    SwUDS↔SwUTS 비교는 별도 SwUDS docx parser 필요 (v3.02). 본 라운드는
+    SwUTS 자체 일관성만 검증해서 audit-readiness 부분 확보.
+
+    Returns:
+        list of {item, expected, actual, result, note}. result ∈ {PASS, FAIL}.
+    """
+    rows: list[dict[str, Any]] = []
+
+    # 1. Function ID 일관성 — 모든 환경의 function_coverage가 비어있지 않음
+    envs_with_fn = sum(1 for e in session.environments if e.function_coverage)
+    total_envs = len(session.environments)
+    rows.append({
+        "item": "Function coverage data 완전성",
+        "expected": f"{total_envs} 환경 모두 function_coverage 보유",
+        "actual": f"{envs_with_fn}/{total_envs} 환경",
+        "result": "PASS" if envs_with_fn == total_envs else "FAIL",
+        "note": "비-zero function_coverage 환경 비율",
+    })
+
+    # 2. TC ↔ Function 매핑 — TC name이 SwUFn_NNNN.MMM 패턴 따름
+    tc_to_fn = _collect_tc_to_function(session)
+    all_tcs: set[str] = set()
+    for env in session.environments:
+        all_tcs.update(env.test_cases.keys())
+    matched_pct = (len(tc_to_fn) / len(all_tcs) * 100) if all_tcs else 100.0
+    rows.append({
+        "item": "TC ↔ Function ID 패턴 일치",
+        "expected": "100% TCs match SwUFn_NNNN.MMM",
+        "actual": f"{len(tc_to_fn)}/{len(all_tcs)} ({matched_pct:.1f}%)",
+        "result": "PASS" if len(tc_to_fn) == len(all_tcs) else "FAIL",
+        "note": "패턴 불일치 시 trace 누락 위험",
+    })
+
+    # 3. TC execution coverage — test_results가 test_cases 전체를 cover
+    tcs_with_result: set[str] = set()
+    for env in session.environments:
+        tcs_with_result.update(env.test_results.keys())
+    missing = all_tcs - tcs_with_result
+    rows.append({
+        "item": "TC 실행 결과 완전성",
+        "expected": f"{len(all_tcs)} TCs 모두 실행 결과 보유",
+        "actual": f"{len(tcs_with_result)}/{len(all_tcs)} ({len(missing)} 누락)",
+        "result": "PASS" if not missing else "FAIL",
+        "note": "누락 TC는 SUTR Deviation 필요",
+    })
+
+    # 4. 환경별 TC 수 합 ↔ agg.total_tcs
+    agg = aggregate_session(session)
+    env_tc_sum = sum(len(e.test_cases) for e in session.environments)
+    rows.append({
+        "item": "TC 카운트 일관성 (env 합 ↔ aggregate)",
+        "expected": str(env_tc_sum),
+        "actual": str(agg["total_tcs"]),
+        "result": "PASS" if env_tc_sum == agg["total_tcs"] else "FAIL",
+        "note": "aggregate_session 무결성",
+    })
+
+    return rows
+
+
+def _write_consistency_sheet(
+    ws, session: SwUTSession, out_warnings: list[str] | None = None,
+) -> int:
+    """2.Consistency 시트 — SwUTS 자체 일관성 4 row 작성 (15차).
+
+    SwUDS↔SwUTS 비교는 v3.02 — 본 라운드는 자체 일관성만 작성.
+
+    Layout: A1 = 자동 생성 안내, row 3 = 헤더, row 4-7 = 결과 4 row.
+
+    Returns:
+        쓰여진 결과 row 수 (헤더 제외).
+    """
+    if not ws:
+        return 0
+
+    rows = _compute_self_consistency(session)
+
+    # 안내문 + 헤더 + data
+    safe_write(ws, 1, 1,
+        "본 시트는 SwUTS 내부 자체 일관성 4 항목 자동 검증 결과. "
+        "SwUDS↔SwUTS 함수 ID 매핑 비교는 v3.02 도구에서 자동화 예정 — "
+        "현재는 reviewer manual 점검 필요.")
+    safe_write(ws, 3, 1, "Item")
+    safe_write(ws, 3, 2, "Expected")
+    safe_write(ws, 3, 3, "Actual")
+    safe_write(ws, 3, 4, "Result")
+    safe_write(ws, 3, 5, "Note")
+
+    written = 0
+    for i, r in enumerate(rows):
+        row_idx = 4 + i
+        safe_write(ws, row_idx, 1, r["item"])
+        safe_write(ws, row_idx, 2, r["expected"])
+        safe_write(ws, row_idx, 3, r["actual"])
+        safe_write(ws, row_idx, 4, r["result"])
+        safe_write(ws, row_idx, 5, r["note"])
+        written += 1
+
+    failed = [r["item"] for r in rows if r["result"] == "FAIL"]
+    if failed and out_warnings is not None:
+        out_warnings.append(
+            f"2.Consistency 자체 일관성 FAIL {len(failed)}건: {', '.join(failed)}"
+        )
+
+    return written
+
+
 def _write_traceability_sheet(
     ws, session: SwUTSession, out_warnings: list[str] | None = None,
 ) -> int:
@@ -450,12 +560,17 @@ def build_coverage_report(
         if n_o == 0:
             incomplete_sheets.append("1.Traceability")
 
-    # 2.Consistency — placeholder + BLANK markup
+    # 2.Consistency — 15차: SwUTS 자체 일관성 4 row 자동 채움.
+    # SwUDS↔SwUTS 함수 ID 매핑 비교는 별도 SwUDS docx parser 필요 (v3.02).
     cons_ws = next((wb[n] for n in sheet_names if "consistency" in n.lower()), None)
     if cons_ws is not None:
-        safe_write(cons_ws, 1, 1, BLANK_MARKUP)
-    warnings.append("2.Consistency 시트는 본 라운드 placeholder — SwUDS↔SwUTS 비교 다음 라운드")
-    incomplete_sheets.append("2.Consistency")
+        n_cons = _write_consistency_sheet(cons_ws, session, out_warnings=warnings)
+        summary["consistency_self_check_rows"] = n_cons
+        # SwUDS 비교 미연결이므로 partial 완료로 audit-trail 표시.
+        incomplete_sheets.append("2.Consistency (SwUDS 비교 partial — v3.02)")
+    else:
+        warnings.append("2.Consistency 시트 미발견")
+        incomplete_sheets.append("2.Consistency")
 
     # History — T134 git log 자동 채움
     hist_ws = next((wb[n] for n in sheet_names if n.lower() == "history"), None)

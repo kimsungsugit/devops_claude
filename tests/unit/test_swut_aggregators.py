@@ -219,13 +219,88 @@ class TestBuildCoverageReport:
         assert "단독 evidence" in d["tool_qualification"]["asil_b_c_d_usage"]
 
     def test_incomplete_sheets_reported(self):
-        """deep-reviewer W5/ISO F3: placeholder 시트는 incomplete_sheets에 명시."""
+        """deep-reviewer W5/ISO F3: placeholder 시트는 incomplete_sheets에 명시.
+
+        15차: 2.Consistency는 자체 일관성 4 row 완료, SwUDS↔SwUTS 비교만 미완 →
+        라벨이 ``2.Consistency (SwUDS 비교 partial — v3.02)`` 로 변경.
+        """
         session = _make_session()
         meta = CoverageBuildMeta(release_sw_version="1.0.0", test_date="2024-02-19")
         result = build_coverage_report(session, meta, _build_coverage_template())
         d = result.to_dict()
         assert "1.Traceability" in d["incomplete_sheets"]
-        assert "2.Consistency" in d["incomplete_sheets"]
+        assert any("2.Consistency" in s for s in d["incomplete_sheets"])
+        # 15차: 자체 일관성 4 row 작성됨
+        assert d["summary"].get("consistency_self_check_rows") == 4
+
+    # ── 15차 — 2.Consistency 자체 일관성 ─────────────────────────────────
+
+    def test_consistency_self_check_writes_4_rows(self):
+        """15차: 2.Consistency 시트에 4개 일관성 row 작성."""
+        import openpyxl
+        session = _make_session()
+        meta = CoverageBuildMeta(release_sw_version="1.0.0", test_date="2024-02-19")
+        result = build_coverage_report(session, meta, _build_coverage_template())
+
+        wb = openpyxl.load_workbook(io.BytesIO(result.xlsx_bytes))
+        cons = wb["2.Consistency"]
+        # 헤더 (row 3) + 4 data row = 4-7
+        assert cons.cell(3, 1).value == "Item"
+        assert cons.cell(3, 4).value == "Result"
+        items = [cons.cell(r, 1).value for r in range(4, 8)]
+        assert all(items), f"row 4-7 모두 채워져야 함: {items}"
+        # 4 result 값이 PASS 또는 FAIL
+        results = [cons.cell(r, 4).value for r in range(4, 8)]
+        assert all(r in ("PASS", "FAIL") for r in results), f"result {results}"
+
+    def test_consistency_passes_for_well_formed_session(self):
+        """15차: _make_session()의 정상 데이터는 4 row 모두 PASS."""
+        import openpyxl
+        session = _make_session()
+        meta = CoverageBuildMeta(release_sw_version="1.0.0", test_date="2024-02-19")
+        result = build_coverage_report(session, meta, _build_coverage_template())
+
+        wb = openpyxl.load_workbook(io.BytesIO(result.xlsx_bytes))
+        cons = wb["2.Consistency"]
+        results = [cons.cell(r, 4).value for r in range(4, 8)]
+        assert all(r == "PASS" for r in results), f"all PASS expected, got {results}"
+
+    def test_consistency_fails_for_missing_test_results(self):
+        """15차: TC가 test_results에 없으면 'TC 실행 결과 완전성' FAIL."""
+        from backend.services.swut_input_adapter import (
+            EnvironmentData, ExecutionRow, FunctionCoverage, SwUTSession,
+        )
+        # 환경: test_cases는 2개 TC지만 test_results는 1개만 → 누락
+        env = EnvironmentData(
+            env_name="SWTE_01",
+            component_name="X",
+            test_cases={"SwUFn_0001.001": [object()], "SwUFn_0001.002": [object()]},
+            test_results={"SwUFn_0001.001": ExecutionRow(tc_name="SwUFn_0001.001", passed=True)},
+            function_coverage=[FunctionCoverage(unit_id="SwUFn_0001", name="X")],
+        )
+        session = SwUTSession(environments=[env])
+        meta = CoverageBuildMeta(release_sw_version="1.0.0", test_date="2024-02-19")
+        result = build_coverage_report(session, meta, _build_coverage_template())
+
+        import openpyxl
+        wb = openpyxl.load_workbook(io.BytesIO(result.xlsx_bytes))
+        cons = wb["2.Consistency"]
+        # row 6 = "TC 실행 결과 완전성"
+        for r in range(4, 8):
+            item = str(cons.cell(r, 1).value or "")
+            if "실행" in item:
+                assert cons.cell(r, 4).value == "FAIL", \
+                    f"누락된 test_result로 FAIL이어야 함: {cons.cell(r, 4).value}"
+                break
+        # warnings에 FAIL 보고
+        assert any("FAIL" in w for w in result.warnings)
+
+    def test_consistency_summary_includes_row_count(self):
+        """15차: summary에 consistency_self_check_rows=4 포함."""
+        session = _make_session()
+        meta = CoverageBuildMeta(release_sw_version="1.0.0", test_date="2024-02-19")
+        result = build_coverage_report(session, meta, _build_coverage_template())
+        assert result.summary.get("consistency_self_check_rows") == 4
 
     def test_result_size_key_unified(self):
         """deep-reviewer Info X3: xlsx/xlsm size 키 통합."""
