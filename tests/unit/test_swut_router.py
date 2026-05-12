@@ -825,3 +825,63 @@ class TestBrowseEndpoint21:
     def test_browse_missing_x_user_rejected(self, tmp_path):
         r = client.post("/api/swut/browse", json={"path": str(tmp_path)})
         assert r.status_code in (400, 401, 403)
+
+    def test_browse_response_includes_file_mode(self, tmp_path):
+        """22차 T190: 응답에 file_mode 필드 포함 (local/cloudium 구분)."""
+        r = client.post(
+            "/api/swut/browse",
+            json={"path": str(tmp_path)},
+            headers={"X-User": "tester"},
+        )
+        assert r.status_code == 200
+        body = r.json()
+        assert "file_mode" in body
+        assert body["file_mode"] in ("local", "cloudium")
+        # local 모드 + 디렉토리 정상 list → cloudium_hint는 빈 string
+        assert body.get("cloudium_hint", "") == ""
+
+    def test_browse_cloudium_hint_when_iterdir_permission_error(self):
+        """22차 T190: cloudium 모드 + iterdir PermissionError → 200 + cloudium_hint 메시지."""
+        from unittest.mock import MagicMock
+
+        mock_resolver = MagicMock(mode="cloudium")
+        mock_resolver.list_dir.return_value = ["U:/cloud/a.xlsx"]
+
+        # iterdir이 PermissionError 던지도록 mock — cloudium에서 backend 권한 부족 시뮬레이션
+        with patch("backend.routers.swut.get_resolver", return_value=mock_resolver), \
+             patch("pathlib.Path.iterdir",
+                   side_effect=PermissionError("no cloudium access")):
+            r = client.post(
+                "/api/swut/browse",
+                json={"path": "U:/cloud"},
+                headers={"X-User": "tester"},
+            )
+        # 22차: PermissionError silent → 200 + cloudium_hint + dirs=[] + files=[1]
+        assert r.status_code == 200
+        body = r.json()
+        assert body["file_mode"] == "cloudium"
+        assert body["dirs"] == []
+        assert len(body["files"]) == 1
+        assert "Cloudium 모드" in body["cloudium_hint"]
+        assert "디렉토리" in body["cloudium_hint"]
+
+    def test_browse_local_hint_when_iterdir_permission_error(self):
+        """22차 T190: local 모드 + iterdir PermissionError → 200 + 일반 hint."""
+        from unittest.mock import MagicMock
+
+        mock_resolver = MagicMock(mode="local")
+        mock_resolver.list_dir.return_value = []
+
+        with patch("backend.routers.swut.get_resolver", return_value=mock_resolver), \
+             patch("pathlib.Path.iterdir",
+                   side_effect=PermissionError("no access")):
+            r = client.post(
+                "/api/swut/browse",
+                json={"path": "/restricted"},
+                headers={"X-User": "tester"},
+            )
+        assert r.status_code == 200
+        body = r.json()
+        assert body["file_mode"] == "local"
+        assert "권한 부족" in body["cloudium_hint"]
+        assert "Cloudium" not in body["cloudium_hint"]

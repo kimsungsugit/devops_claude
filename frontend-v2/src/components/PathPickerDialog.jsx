@@ -29,7 +29,10 @@ export default function PathPickerDialog({
   onClose,
 }) {
   const [currentPath, setCurrentPath] = useState(initialPath);
-  const [data, setData] = useState({ dirs: [], files: [], parent: '', truncated: false });
+  const [data, setData] = useState({
+    dirs: [], files: [], parent: '', truncated: false,
+    file_mode: 'local', cloudium_hint: '',
+  });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
 
@@ -62,6 +65,8 @@ export default function PathPickerDialog({
         files: body.files || [],
         parent: body.parent || '',
         truncated: body.truncated || false,
+        file_mode: body.file_mode || 'local',
+        cloudium_hint: body.cloudium_hint || '',
       });
       setCurrentPath(body.current || path);
     } catch (e) {
@@ -111,7 +116,11 @@ export default function PathPickerDialog({
             onKeyDown={e => { if (e.key === 'Enter') fetchPath(currentPath); }}
             placeholder="경로 직접 입력 + Enter"
             autoComplete="off"
+            autoCorrect="off"
+            autoCapitalize="off"
             spellCheck="false"
+            data-form-type="other"
+            data-lpignore="true"
           />
           <button
             className="picker-go"
@@ -126,6 +135,9 @@ export default function PathPickerDialog({
           {error && <div className="picker-error">⚠️ {error}</div>}
           {!loading && !error && (
             <>
+              {data.cloudium_hint && (
+                <div className="picker-cloudium-hint">ℹ️ {data.cloudium_hint}</div>
+              )}
               {data.dirs.length === 0 && data.files.length === 0 && (
                 <div className="picker-empty">(비어있음)</div>
               )}

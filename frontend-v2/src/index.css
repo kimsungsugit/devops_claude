@@ -1403,6 +1403,16 @@ label {
   margin-top: var(--sp-2);
 }
 
+.picker-cloudium-hint {
+  padding: var(--sp-2);
+  margin-bottom: var(--sp-2);
+  font-size: var(--text-sm);
+  color: var(--color-info);
+  background: var(--color-info-soft);
+  border-radius: var(--radius-sm);
+  border-left: 3px solid var(--color-info);
+}
+
 .picker-list {
   margin: 0;
   padding: 0;

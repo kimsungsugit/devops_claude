@@ -112,6 +112,40 @@ describe('PathPickerDialog', () => {
     });
   });
 
+  it('displays cloudium_hint when backend returns it (22차 T190)', async () => {
+    vi.spyOn(global, 'fetch').mockResolvedValue({
+      ok: true,
+      headers: new Headers(),
+      json: async () => ({
+        ok: true,
+        current: 'U:/cloud',
+        parent: 'U:/',
+        dirs: [],
+        files: ['U:/cloud/a.xlsx'],
+        truncated: false,
+        file_mode: 'cloudium',
+        cloudium_hint: 'Cloudium 모드 — backend python이 디렉토리 navigate 권한 없음.',
+      }),
+    });
+    render(<PathPickerDialog open={true} initialPath="U:/cloud" onClose={() => {}} />);
+    await waitFor(() => {
+      expect(screen.getByText(/Cloudium 모드/)).toBeTruthy();
+    });
+    expect(screen.getByText(/디렉토리 navigate 권한 없음/)).toBeTruthy();
+  });
+
+  it('has full 6-attribute autocomplete disabling on path input (22차 T189)', () => {
+    render(<PathPickerDialog open={true} initialPath="C:/" onClose={() => {}} />);
+    const input = document.querySelector('.picker-path');
+    expect(input).toBeTruthy();
+    expect(input.getAttribute('autocomplete')).toBe('off');
+    expect(input.getAttribute('autocorrect')).toBe('off');
+    expect(input.getAttribute('autocapitalize')).toBe('off');
+    expect(input.getAttribute('spellcheck')).toBe('false');
+    expect(input.getAttribute('data-form-type')).toBe('other');
+    expect(input.getAttribute('data-lpignore')).toBe('true');
+  });
+
   it('displays truncated warning when backend reports >2000 items', async () => {
     vi.spyOn(global, 'fetch').mockResolvedValue({
       ok: true,

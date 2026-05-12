@@ -448,17 +448,20 @@ def _do_browse(req: SwUTBrowseRequest) -> dict[str, Any]:
         all_files.extend(items)
 
     # 디렉토리는 file_resolver 인터페이스 외부 — Path.iterdir로 별도 수집.
+    # 22차 T190: cloudium 모드에서 backend python은 권한 없으므로 PermissionError
+    # 발생 가능. 그 경우 silent pass + cloudium_hint 응답 → 사용자가 path 직접 입력.
     all_dirs: list[str] = []
+    iterdir_failed = False
     try:
         for entry in _Path(raw_path).iterdir():
             if entry.is_dir():
                 all_dirs.append(str(entry))
-    except (FileNotFoundError, NotADirectoryError, PermissionError):
-        # raw_path가 파일 / 권한 부족 / 부재 — caller(_run_browse_safely)가 sanitize
+    except (FileNotFoundError, NotADirectoryError):
+        # local 모드 + 경로 부재 — caller(_run_browse_safely)가 sanitize → 404
         raise
-    except OSError:
-        # cloudium 모드 또는 기타 OSError — 디렉토리 list 불가, files만 반환
-        pass
+    except (PermissionError, OSError):
+        # cloudium 모드 또는 OS 권한 부족 — silent + hint로 안내
+        iterdir_failed = True
 
     dirs = sorted(set(all_dirs))
     files = sorted(set(all_files))
@@ -469,6 +472,20 @@ def _do_browse(req: SwUTBrowseRequest) -> dict[str, Any]:
         files = files[: max(0, budget)]
         truncated = True
 
+    # 22차 T190: cloudium 모드 hint — backend python은 cloudium 권한 없어서
+    # iterdir()가 PermissionError. silent pass 후 사유를 frontend에 안내.
+    file_mode = getattr(resolver, "mode", "local")
+    cloudium_hint = ""
+    if iterdir_failed:
+        if file_mode == "cloudium":
+            cloudium_hint = (
+                "Cloudium 모드 — backend python이 디렉토리 navigate 권한 없음. "
+                "파일 list는 worker IPC로 받지만 디렉토리 list는 미지원. "
+                "상위 경로를 직접 입력해서 이동하세요."
+            )
+        else:
+            cloudium_hint = "디렉토리 list 권한 부족 — 상위 경로를 직접 입력하세요."
+
     return {
         "ok": True,
         "current": current,
@@ -476,6 +493,8 @@ def _do_browse(req: SwUTBrowseRequest) -> dict[str, Any]:
         "dirs": dirs,
         "files": files,
         "truncated": truncated,
+        "file_mode": file_mode,
+        "cloudium_hint": cloudium_hint,
     }
 
 
