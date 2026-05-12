@@ -37,10 +37,12 @@ except ImportError:  # pragma: no cover
 from backend.services.excel_template_utils import (
     BLANK_MARKUP,
     collect_git_history,
+    mark_fail_cell,
     safe_write,
     short_date,
     validate_build_meta,
     validate_xlsx_template_bytes,
+    write_label_or_mark,
     write_value_after_label,
 )
 from backend.services.swut_meta import BuildMetaBase
@@ -140,6 +142,18 @@ def _write_label(ws, label: str, value: Any, out_warnings: list[str] | None) -> 
         out_warnings.append(f"라벨 '{label}' 미발견 — 셀 쓰기 skip")
 
 
+def _write_label_or_mark(
+    ws, label: str, value: Any, hint: str,
+    out_warnings: list[str] | None,
+) -> None:
+    """23차 T192/W12: excel_template_utils.write_label_or_mark 래퍼 — _OPTIONAL_LABELS 주입."""
+    write_label_or_mark(
+        ws, label, value, hint=hint,
+        optional_labels=_OPTIONAL_LABELS,
+        out_warnings=out_warnings,
+    )
+
+
 def _write_cover_sheet(
     ws, meta: CoverageBuildMeta, out_warnings: list[str] | None = None,
 ) -> None:
@@ -149,10 +163,15 @@ def _write_cover_sheet(
     _write_label(ws, "Project", meta.project_full_name, out_warnings)
     _write_label(ws, "ASIL Level", meta.asil_level, out_warnings)
     _write_label(ws, "Status", "DRAFT — PENDING REVIEW", out_warnings)
-    _write_label(ws, "Validation Date", meta.validation_date, out_warnings)
-    _write_label(ws, "Author", meta.author, out_warnings)
-    _write_label(ws, "Reviewer", meta.reviewer, out_warnings)
-    _write_label(ws, "Approver", meta.approver, out_warnings)
+    # 23차 T192: validation_date / reviewer / approver 비어있으면 노란 강조
+    _write_label_or_mark(ws, "Validation Date", meta.validation_date,
+                         "yyyy-mm-dd 형식 검증 완료일", out_warnings)
+    _write_label_or_mark(ws, "Author", meta.author,
+                         "test_engineer 또는 default_author", out_warnings)
+    _write_label_or_mark(ws, "Reviewer", meta.reviewer,
+                         "검토자 이름", out_warnings)
+    _write_label_or_mark(ws, "Approver", meta.approver,
+                         "승인자 이름 (필수)", out_warnings)
     if meta.doc_id_sequence:
         _write_label(ws, "Doc. ID",
                      f"{meta.doc_id_base}-{meta.doc_id_sequence}", out_warnings)
@@ -424,6 +443,9 @@ def _write_consistency_sheet(
         safe_write(ws, row_idx, 3, r["actual"])
         safe_write(ws, row_idx, 4, r["result"])
         safe_write(ws, row_idx, 5, r["note"])
+        # 23차 T192: FAIL row의 Result 셀 빨간 강조 — audit reviewer 가시성.
+        if r["result"] == "FAIL":
+            mark_fail_cell(ws, row_idx, 4)
         written += 1
 
     failed = [r["item"] for r in rows if r["result"] == "FAIL"]

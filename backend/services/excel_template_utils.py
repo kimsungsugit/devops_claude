@@ -15,6 +15,13 @@ import re
 import zipfile
 from typing import Any
 
+try:
+    from openpyxl.styles import PatternFill  # type: ignore
+    _HAS_PATTERN_FILL = True
+except ImportError:  # pragma: no cover - openpyxl 미설치 fail-safe
+    PatternFill = None  # type: ignore[assignment]
+    _HAS_PATTERN_FILL = False
+
 # ZIP bomb 한계 — 압축 해제 후 100MB 초과 시 거부. 일반 xlsx/xlsm은 수 MB.
 _MAX_DECOMPRESSED_SIZE = 100 * 1024 * 1024
 # 단일 파일이 의심스러울 정도로 큰 경우 — 보통 sharedStrings.xml도 수 MB 이내
@@ -339,6 +346,102 @@ def safe_write(ws: Any, row: int, col: int, value: Any) -> bool:
         return True
     except AttributeError:
         return False
+
+
+# 23차 T192: 시각 표시 — 사용자 입력 필요 / FAIL 강조용 fill 색상.
+_USER_INPUT_FILL_RGB = "FFFFEB9C"  # 연한 노랑 (audit reviewer 친화)
+_FAIL_FILL_RGB = "FFFFC7CE"        # 연한 빨강
+
+USER_INPUT_PLACEHOLDER = "▶ 사용자 입력 필요"
+
+
+def _apply_fill(ws: Any, row: int, col: int, rgb: str) -> bool:
+    """openpyxl PatternFill 적용 — openpyxl 미설치 / 머지셀 비-anchor면 silent False."""
+    if not _HAS_PATTERN_FILL:
+        return False
+    anchor_row, anchor_col = resolve_merge_anchor(ws, row, col)
+    try:
+        ws.cell(row=anchor_row, column=anchor_col).fill = PatternFill(  # type: ignore[misc]
+            start_color=rgb, end_color=rgb, fill_type="solid",
+        )
+        return True
+    except AttributeError:
+        return False
+
+
+def mark_user_input_required(
+    ws: Any, row: int, col: int, hint: str = "",
+) -> bool:
+    """23차 T192: 사용자 입력 필요 셀에 노란 배경 + placeholder 텍스트.
+
+    Args:
+        hint: 텍스트 뒤에 추가할 안내 (예: "Approver 이름").
+
+    Returns:
+        쓰기 + 색칠 모두 성공 시 True.
+    """
+    label = USER_INPUT_PLACEHOLDER + (f" — {hint}" if hint else "")
+    wrote = safe_write(ws, row, col, label)
+    filled = _apply_fill(ws, row, col, _USER_INPUT_FILL_RGB)
+    return wrote and filled
+
+
+def write_value_or_mark(
+    ws: Any, row: int, col: int, value: Any, hint: str = "",
+) -> bool:
+    """23차 T192: value 있으면 그대로 쓰고, 빈 string/None이면 사용자 입력 표시.
+
+    Returns:
+        True if value written; False if marked as user-input-required.
+    """
+    if value:
+        return safe_write(ws, row, col, value)
+    mark_user_input_required(ws, row, col, hint=hint)
+    return False
+
+
+def mark_fail_cell(ws: Any, row: int, col: int) -> bool:
+    """23차 T192: 2.Consistency FAIL row 등 강조용 빨간 배경."""
+    return _apply_fill(ws, row, col, _FAIL_FILL_RGB)
+
+
+def write_label_or_mark(
+    ws: Any,
+    label: str,
+    value: Any,
+    hint: str = "",
+    optional_labels: set[str] | None = None,
+    out_warnings: list[str] | None = None,
+    max_row: int = 50,
+) -> bool:
+    """23차 T192/W12: 라벨 옆 셀에 value 쓰기 — value 빈 경우 노란 placeholder.
+
+    Coverage / SUTR builder 양쪽에서 공유 (이전 ``_write_label_or_mark`` 중복 제거).
+
+    동작:
+      1. ``find_kv_row``로 라벨 위치 찾기
+      2. 머지 영역 보정 후 target_col 결정
+      3. value 있으면 ``safe_write``, 없으면 ``mark_user_input_required`` (노란 강조)
+
+    Args:
+        optional_labels: 라벨 미발견 시 warnings 누적 skip 대상 (예: {"Reviewer"}).
+        out_warnings: 미발견 라벨 사유 누적용.
+
+    Returns:
+        value가 실제로 쓰였으면 True (mark는 False).
+    """
+    pos = find_kv_row(ws, label, max_row)
+    if not pos:
+        if (optional_labels is None or label not in optional_labels) and out_warnings is not None:
+            out_warnings.append(f"라벨 '{label}' 미발견 — 셀 쓰기 skip")
+        return False
+    row, col = pos
+    target_col = col + 1
+    for mr in ws.merged_cells.ranges:
+        if mr.min_row <= row <= mr.max_row and mr.min_col <= col <= mr.max_col:
+            target_col = mr.max_col + 1
+            break
+    return write_value_or_mark(ws, row, target_col, value, hint=hint)
 
 
 def write_value_after_label(ws: Any, label: str, value: Any, max_row: int = 50) -> bool:

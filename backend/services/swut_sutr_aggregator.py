@@ -39,6 +39,7 @@ from backend.services.excel_template_utils import (
     truncate_cell_text,
     validate_build_meta,
     validate_xlsx_template_bytes,
+    write_label_or_mark,
     write_value_after_label,
 )
 from backend.services.swut_input_adapter import SwUTSession, aggregate_session
@@ -135,13 +136,29 @@ def _write_label(ws, label: str, value: Any, out_warnings: list[str] | None) -> 
         out_warnings.append(f"라벨 '{label}' 미발견 — 셀 쓰기 skip")
 
 
+def _write_label_or_mark(
+    ws, label: str, value: Any, hint: str,
+    out_warnings: list[str] | None,
+) -> None:
+    """23차 T192/W12: excel_template_utils.write_label_or_mark 래퍼 — _OPTIONAL_LABELS 주입."""
+    write_label_or_mark(
+        ws, label, value, hint=hint,
+        optional_labels=_OPTIONAL_LABELS,
+        out_warnings=out_warnings,
+    )
+
+
 def _write_cover(ws, meta: SutrBuildMeta, out_warnings: list[str] | None = None) -> None:
     _write_label(ws, "Project", meta.project_full_name, out_warnings)
     _write_label(ws, "ASIL Level", meta.asil_level, out_warnings)
     _write_label(ws, "Status", "DRAFT — PENDING REVIEW", out_warnings)
-    _write_label(ws, "Validation Date", meta.validation_date, out_warnings)
-    _write_label(ws, "Author", meta.author, out_warnings)
-    _write_label(ws, "Approver", meta.approver, out_warnings)
+    # 23차 T192: 비어있으면 노란 강조 (audit reviewer 가시성)
+    _write_label_or_mark(ws, "Validation Date", meta.validation_date,
+                         "yyyy-mm-dd 형식 검증 완료일", out_warnings)
+    _write_label_or_mark(ws, "Author", meta.author,
+                         "test_engineer 또는 default_author", out_warnings)
+    _write_label_or_mark(ws, "Approver", meta.approver,
+                         "승인자 이름 (필수)", out_warnings)
     if meta.doc_id_sequence:
         _write_label(ws, "Doc. ID", f"{meta.doc_id_base}-{meta.doc_id_sequence}", out_warnings)
     _write_label(ws, "Version", f"v{meta.release_sw_version}", out_warnings)

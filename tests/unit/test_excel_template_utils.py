@@ -212,3 +212,123 @@ class TestSheetIsBlankPlaceholder:
 
     def test_none_sheet_returns_false(self):
         assert sheet_is_blank_placeholder(None) is False
+
+
+# ---------------------------------------------------------------------------
+# 23차 T192/T194: 시각 강조 헬퍼 회귀
+# ---------------------------------------------------------------------------
+
+class TestVisualMarkers23:
+    """사용자 입력 필요 (노란) / FAIL (빨강) 시각 강조 회귀."""
+
+    def test_mark_user_input_required_writes_placeholder_and_fill(self):
+        from backend.services.excel_template_utils import (
+            mark_user_input_required, USER_INPUT_PLACEHOLDER,
+        )
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        result = mark_user_input_required(ws, 2, 3, hint="Approver 이름")
+        assert result is True
+        cell = ws.cell(2, 3)
+        assert cell.value.startswith(USER_INPUT_PLACEHOLDER)
+        assert "Approver 이름" in cell.value
+        assert cell.fill.fill_type == "solid"
+        assert "FFEB9C" in str(cell.fill.fgColor.rgb).upper()
+
+    def test_mark_user_input_required_no_hint(self):
+        from backend.services.excel_template_utils import mark_user_input_required
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        mark_user_input_required(ws, 1, 1)
+        assert "▶ 사용자 입력 필요" in ws.cell(1, 1).value
+        assert "—" not in ws.cell(1, 1).value  # hint 없을 때 separator 없음
+
+    def test_write_value_or_mark_writes_when_value_present(self):
+        from backend.services.excel_template_utils import write_value_or_mark
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        result = write_value_or_mark(ws, 1, 1, "JK Kim", hint="ignored")
+        assert result is True
+        assert ws.cell(1, 1).value == "JK Kim"
+
+    def test_write_value_or_mark_marks_when_value_empty(self):
+        from backend.services.excel_template_utils import write_value_or_mark
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        result = write_value_or_mark(ws, 1, 1, "", hint="hint here")
+        assert result is False  # marked, not written
+        assert "▶ 사용자 입력 필요" in ws.cell(1, 1).value
+        assert "FFEB9C" in str(ws.cell(1, 1).fill.fgColor.rgb).upper()
+
+    def test_mark_fail_cell_applies_red_fill_and_preserves_value(self):
+        from backend.services.excel_template_utils import mark_fail_cell
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.cell(1, 1).value = "FAIL"
+        result = mark_fail_cell(ws, 1, 1)
+        assert result is True
+        assert "FFC7CE" in str(ws.cell(1, 1).fill.fgColor.rgb).upper()
+        # value 보존 — 색칠이 텍스트 reset 하지 않음
+        assert ws.cell(1, 1).value == "FAIL"
+
+    def test_write_label_or_mark_finds_label_and_marks_empty(self):
+        from backend.services.excel_template_utils import write_label_or_mark
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws["A4"] = "Validation Date"
+        ws["B4"] = "(placeholder)"
+        out_warnings: list[str] = []
+        result = write_label_or_mark(
+            ws, "Validation Date", value="", hint="yyyy-mm-dd",
+            optional_labels={"Reviewer"}, out_warnings=out_warnings,
+        )
+        assert result is False  # 빈 value → 노란 mark
+        assert "▶ 사용자 입력 필요" in ws.cell(4, 2).value
+        assert "yyyy-mm-dd" in ws.cell(4, 2).value
+        assert "FFEB9C" in str(ws.cell(4, 2).fill.fgColor.rgb).upper()
+
+    def test_write_label_or_mark_writes_when_value_present(self):
+        from backend.services.excel_template_utils import write_label_or_mark
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws["A1"] = "Author"
+        out_warnings: list[str] = []
+        result = write_label_or_mark(
+            ws, "Author", value="JK Kim", hint="이름",
+            optional_labels=None, out_warnings=out_warnings,
+        )
+        assert result is True  # value 있음
+        assert ws.cell(1, 2).value == "JK Kim"
+        assert out_warnings == []
+
+    def test_write_label_or_mark_skips_optional_label_warning(self):
+        from backend.services.excel_template_utils import write_label_or_mark
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        out_warnings: list[str] = []
+        write_label_or_mark(
+            ws, "Reviewer", value="someone", hint="",
+            optional_labels={"Reviewer"}, out_warnings=out_warnings,
+        )
+        assert out_warnings == []  # optional 라벨이라 미발견 silent
+
+    def test_write_label_or_mark_warns_non_optional_label_missing(self):
+        from backend.services.excel_template_utils import write_label_or_mark
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        out_warnings: list[str] = []
+        write_label_or_mark(
+            ws, "Validation Date", value="2024-02-19", hint="",
+            optional_labels={"Reviewer"}, out_warnings=out_warnings,
+        )
+        assert any("Validation Date" in w for w in out_warnings)
+
+    def test_mark_handles_merged_cell_anchor(self):
+        """머지셀 비-anchor 위치 호출 → anchor 셀에 mark."""
+        from backend.services.excel_template_utils import mark_user_input_required
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.merge_cells("B2:D2")
+        mark_user_input_required(ws, 2, 4, hint="merged")  # D2 → anchor B2
+        assert ws.cell(2, 2).value is not None
+        assert "▶ 사용자 입력 필요" in ws.cell(2, 2).value
