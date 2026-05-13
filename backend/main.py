@@ -203,6 +203,9 @@ from backend.routers.quality import router as _quality_router  # noqa: E402
 app.include_router(_quality_router)
 from backend.routers.swut import router as _swut_router  # noqa: E402
 app.include_router(_swut_router)
+# 33차 라운드 — SwIT (Software Integration Test) Coverage Report v2.02
+from backend.routers.swit import router as _swit_router  # noqa: E402
+app.include_router(_swit_router)
 
 # ---------------------------------------------------------------------------
 # Serve frontend-v2 production build (static files + SPA fallback)

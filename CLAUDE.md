@@ -197,6 +197,7 @@ python -m pytest tests/ -v --cov=backend --cov=workflow --cov=report_gen --cov-r
 - **`POST /api/swut/coverage/build`** — SwUT Coverage Report v3.01 xlsx 빌드 (16~17차)
 - **`POST /api/swut/sutr/build`** — SUTR v3.01 xlsm 빌드 (keep_vba=True, 17차 대칭)
 - **`POST /api/swut/consistency/check`** — Coverage↔SUTR cross-validation (18차)
+- **`POST /api/swit/coverage/build`** — SwIT Coverage Report v2.02 xlsx 빌드 (33차)
 
 ## SwUT Builder (Software Unit Test, 8~20차 라운드)
 
@@ -325,11 +326,11 @@ ISO 26262 ASIL A 단위테스트 산출물 자동 생성 + cross-validation 플�
 
 > **Backward 호환 (W22, 28차 명시)**: 24차 이전 빌드 결과물은 동일 셀에 string `"N/A"` 보유. 회사 audit reviewer가 두 형식 모두 인지하도록 산출물에 라운드(24차+) 표기를 Cover 시트 doc_id_sequence에 포함 권장. 자동 변환/마이그레이션 스크립트는 제공 안 함 — 이전 산출물은 그대로 둘 것. 신규 빌드부터 노란 마킹 적용.
 
-### Workflow & Tests (32차 갱신 — 실측)
-- Backend SwUT 전체 회귀: **~301개** (31-fix +5 D10/D14/policy / 32차 W28 +5 TestSwUDSAsilExtraction32 + +3 TestSwudsAsilFallback32)
-- 회귀 파일: 기존 + `test_swut_asil_resolver.py` (30차 신규)
-- Backend 전체: **1784개** (.venv Python 3.12.6 / 122.00s, timeout 없이 통과)
-- Frontend SwUTBuildSection: **26개** (31-fix +1 D14 UNKNOWN-only / 32차는 hint string 변경 무영향)
+### Workflow & Tests (33차 갱신 — 실측)
+- Backend SwUT 전체 회귀: **~301개** (31-fix +5 / 32차 W28 +8)
+- Backend SwIT 회귀: **25개** (33차 신규 — TestBuildSwitCoverage 5 + TestSwitMissingSheetFallback 3 + TestSwitAsilDistribution33 1 + TestSwitSwudsFunctionIds 1 + TestSwitMetaValidation 2 + TestSwitResultDataclass 2 + TestSwitFilenameSafeDate 1 + TestSwitPydanticValidation 5 + TestSwitXUserHeader 1 + TestSwitEndpointRegistration 2 + TestSwitMetaBuilder 2)
+- Backend 전체: **~1809개** (.venv Python 3.12.6, timeout 없이 통과)
+- Frontend SwUTBuildSection: **26개**
 - Frontend 전체: **220개** (23 test files)
 
 ### 30차 W21 deep-reviewer Critical/Warning fix (commit 진행 의무)
@@ -370,6 +371,37 @@ backend 코드 변경 (`backend/services/`, `backend/routers/`, `backend/schemas
 | `config/swut_meta.json` | 12차 lru_cache + mtime invalidate — **자동** |
 | `frontend-v2/src/*` | ❌ Vite HMR (자동) |
 | `.codex_tmp/poc_*.py` | ❌ 매 실행 새 process |
+
+## SwIT Builder (Software Integration Test, 33차 라운드~)
+
+ISO 26262 ASIL B+ 통합 테스트 산출물 자동 생성. SwUT 30~32차 인프라 **81% 재활용**.
+
+### 33차 — Coverage Report v2.02 (xlsx) 완성
+
+- 회사 v2.02 양식 (HDPDM01 NE_GN7). 시트 구조: Cover / Test Summary / 1.Traceability / 2.Consistency / 3.Coverage / History (SwUT v3.01과 동일)
+- 입력: VectorCAST log (`U:\...\08.SW 통합테스트\03.Test Result\01.Log\v<VER>_<DATE>\`)
+- ASIL source: c_source_root + swuds_docx_path (SwUT 32차 W28 정책 동일 — c_source 우선)
+- 파일명: `(HDPDM01)SwIT Coverage Report_v<VER>_<DATE>_R.xlsx`
+
+### 재활용 자산 (Phase 1 분석 81%)
+
+| 자산 | 활용 |
+|------|------|
+| `swut_input_adapter` SwUTSession / EnvironmentData / aggregate_session | `swit_input_adapter.collect_swit_session` thin wrapper |
+| `swut_coverage_aggregator._compute_asil_distribution` / `_compute_self_consistency` / 6개 시트 writer | `swit_coverage_aggregator`에서 import 재활용 |
+| `excel_template_utils` (safe_write / mark_asil_* / RGB) | 일반 목적 |
+| `swut_asil_resolver` + `swut_swuds_parser` | ASIL 매핑 동일 |
+| `swut.py` Semaphore / StreamingResponse / X-* 헤더 패턴 | `routers/swit.py` 차용 |
+
+### SwIT 도구별 차이 (SwUT 대비)
+- 신규 `swit_meta.SwitCoverageBuildMeta` (`doc_id_base="HDPDM01-SwIT"`, default `asil_level="ASIL B"`)
+- 신규 `SwITBuildRequest` Pydantic (SwUT 17 필드 동일 + ASIL B default)
+- 신규 `/api/swit/coverage/build` endpoint + Semaphore(**2**) (SwUT 3 — SwIT 신규라 보수적)
+- X-SwIT-Summary / X-SwIT-Warnings 헤더 (SwUT와 분리)
+
+### 비-목표 (34/35차)
+- **34차** — `swit_sitr_aggregator.py` (xlsm, keep_vba=True) + `/api/swit/sitr/build`
+- **35차** — `swit_consistency_checker.py` (Coverage↔SITR cross-validation) + frontend `SwITBuildSection.jsx`
 
 ## Workflows (워크플로우 — 자동 연결)
 - `/workflow [기능설명]` — **전체 개발 흐름**: 기획→코드→테스트→리뷰→커밋 자동 실행
