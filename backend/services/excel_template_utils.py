@@ -16,6 +16,7 @@ import zipfile
 from typing import Any
 
 from .design_tokens import (
+    ASIL_D_FILL_RGB as _ASIL_D_FILL_RGB,
     FAIL_FILL_RGB as _FAIL_FILL_RGB,
     USER_INPUT_FILL_RGB as _USER_INPUT_FILL_RGB,
     USER_INPUT_PLACEHOLDER,
@@ -406,6 +407,19 @@ def write_value_or_mark(
 def mark_fail_cell(ws: Any, row: int, col: int) -> bool:
     """23차 T192: 2.Consistency FAIL row 등 강조용 빨간 배경."""
     return _apply_fill(ws, row, col, _FAIL_FILL_RGB)
+
+
+def mark_asil_d_function(ws: Any, row: int, col: int) -> bool:
+    """30차 W21: 3.Coverage 시트의 ASIL D 함수 row 강조용 빨간 배경.
+
+    색상 RGB는 ``mark_fail_cell`` 과 동일하나 호출 의미를 분리.
+    - ``mark_fail_cell``: TC 실행 결과 FAIL 표시
+    - ``mark_asil_d_function``: audit 검토 우선순위 (MC/DC 커버리지 필수) 표시
+
+    동일 셀에 두 의미가 겹치면 호출 순서 보장으로 마지막 호출이 우선.
+    빌더는 ASIL 강조를 FAIL 강조보다 나중에 호출 권장.
+    """
+    return _apply_fill(ws, row, col, _ASIL_D_FILL_RGB)
 
 
 def write_label_or_mark(

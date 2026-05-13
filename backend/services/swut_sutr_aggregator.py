@@ -347,6 +347,14 @@ def build_sutr(
     sheet_names = wb.sheetnames
 
     agg = aggregate_session(session)
+
+    # 30차 W21: ASIL 분포 — Coverage builder와 동일 키 (대칭).
+    from backend.services.swut_coverage_aggregator import _compute_asil_distribution
+    asil_distribution, asil_d_function_ids = _compute_asil_distribution(
+        agg.get("function_rows") or [],
+        agg.get("function_asil_map") or {},
+    )
+
     summary = {
         "environments": len(session.environments),
         "total": agg["total"],
@@ -355,6 +363,9 @@ def build_sutr(
         "failed": agg["failed"],
         "deviation_cases_written": 0,
         "test_log_rows_written": 0,
+        # 30차 W21: Coverage builder와 동일 키 — UI 노출 통일.
+        "asil_distribution": asil_distribution,
+        "asil_d_function_ids": asil_d_function_ids,
     }
 
     cover_ws = next((wb[n] for n in sheet_names if n.lower() == "cover"), None)

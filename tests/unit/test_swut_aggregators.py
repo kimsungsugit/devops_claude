@@ -419,6 +419,69 @@ class TestBuildCoverageReport:
 
 
 # ---------------------------------------------------------------------------
+# 30차 W21 — ASIL distribution + 시각 강조
+# ---------------------------------------------------------------------------
+
+class TestAsilDistribution21:
+    """30차 W21 T221 — _compute_asil_distribution + build_coverage_report summary."""
+
+    def test_distribution_counts_per_asil(self):
+        from backend.services.swut_coverage_aggregator import _compute_asil_distribution
+        from backend.services.swut_input_adapter import FunctionCoverage
+        rows = [
+            FunctionCoverage(unit_id="SwUFn_0101", name="x"),
+            FunctionCoverage(unit_id="SwUFn_0102", name="y"),
+            FunctionCoverage(unit_id="SwUFn_0103", name="z"),
+            FunctionCoverage(unit_id="SwUFn_0104", name="w"),
+            FunctionCoverage(unit_id="SwUFn_0105", name="u"),  # 매핑 없음 → UNKNOWN
+        ]
+        asil_map = {
+            "SwUFn_0101": "A",
+            "SwUFn_0102": "B",
+            "SwUFn_0103": "D",
+            "SwUFn_0104": "D",
+        }
+        dist, d_ids = _compute_asil_distribution(rows, asil_map)
+        assert dist == {"ASIL_A": 1, "ASIL_B": 1, "ASIL_D": 2, "UNKNOWN": 1}
+        assert d_ids == ["SwUFn_0103", "SwUFn_0104"]
+
+    def test_distribution_empty_when_no_function_rows(self):
+        from backend.services.swut_coverage_aggregator import _compute_asil_distribution
+        dist, d_ids = _compute_asil_distribution([], {})
+        assert dist == {}
+        assert d_ids == []
+
+    def test_distribution_all_unknown_when_no_asil_map(self):
+        from backend.services.swut_coverage_aggregator import _compute_asil_distribution
+        from backend.services.swut_input_adapter import FunctionCoverage
+        rows = [FunctionCoverage(unit_id=f"SwUFn_010{i}") for i in range(3)]
+        dist, d_ids = _compute_asil_distribution(rows, {})
+        assert dist == {"UNKNOWN": 3}
+        assert d_ids == []
+
+    def test_build_coverage_includes_asil_distribution_in_summary(self):
+        """build_coverage_report summary에 asil_distribution / asil_d_function_ids 키 존재."""
+        session = _make_session()
+        # session.environments[0]에 function_asil_map 주입
+        session.environments[0].function_asil_map = {
+            session.environments[0].function_coverage[0].unit_id: "D",
+        } if session.environments[0].function_coverage else {}
+        meta = CoverageBuildMeta(
+            release_sw_version="1.01.05",
+            test_date="2024-02-19",
+            test_engineer="JK Kim",
+            doc_id_sequence="851",
+        )
+        template = _build_coverage_template()
+        result = build_coverage_report(session, meta, template)
+        assert result.ok
+        assert "asil_distribution" in result.summary
+        assert "asil_d_function_ids" in result.summary
+        # 매핑된 함수만큼 ASIL_D 카운트, 나머지는 UNKNOWN
+        assert sum(result.summary["asil_distribution"].values()) == result.summary["function_rows"]
+
+
+# ---------------------------------------------------------------------------
 # SUTR aggregator
 # ---------------------------------------------------------------------------
 

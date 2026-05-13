@@ -32,6 +32,11 @@ USER_INPUT_FILL_RGB: Final[str] = "FFFFEB9C"
 # 연한 빨강 (warm pastel red, #FFC7CE). FAIL row Result 셀 배경.
 FAIL_FILL_RGB: Final[str] = "FFFFC7CE"
 
+# 30차 W21: ASIL D 함수 row 강조 — FAIL과 RGB 동일하나 의미 분리.
+# "FAIL"은 TC 실행 결과 실패, "ASIL D"는 audit 검토 우선순위 표시.
+# 동일 셀 두 의미 겹치면 ASIL D 우선 (호출 순서 보장).
+ASIL_D_FILL_RGB: Final[str] = "FFFFC7CE"
+
 
 # ---- 사용자 입력 placeholder 문자열 (셀에 쓰이는 안내) ----
 
@@ -42,5 +47,6 @@ USER_INPUT_PLACEHOLDER: Final[str] = "▶ 사용자 입력 필요"
 __all__ = [
     "USER_INPUT_FILL_RGB",
     "FAIL_FILL_RGB",
+    "ASIL_D_FILL_RGB",
     "USER_INPUT_PLACEHOLDER",
 ]

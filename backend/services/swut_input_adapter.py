@@ -103,6 +103,9 @@ class EnvironmentData:
     function_coverage: list[FunctionCoverage] = field(default_factory=list)
     grand_total: FunctionCoverage = field(default_factory=FunctionCoverage)
     parse_errors: list[str] = field(default_factory=list)
+    # 30차 W21: function_id (SwUFn_NNNN) → ASIL 등급 (A/B/C/D/QM) 매핑.
+    # router에서 swut_asil_resolver를 호출해 채워 넣음 (default 빈 dict).
+    function_asil_map: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -136,6 +139,7 @@ def aggregate_session(session: SwUTSession) -> dict[str, Any]:
     not_executed_tcs: list[str] = []
     all_functions: list[FunctionCoverage] = []
     tc_to_components: dict[str, set[str]] = {}
+    function_asil_map: dict[str, str] = {}  # 30차 W21
 
     for env in session.environments:
         all_functions.extend(env.function_coverage)
@@ -152,6 +156,10 @@ def aggregate_session(session: SwUTSession) -> dict[str, Any]:
         tc_keys = set(env.test_cases.keys())
         exec_keys = set(env.test_results.keys())
         not_executed_tcs.extend(sorted(tc_keys - exec_keys))
+        # 30차 W21: 환경별 function_asil_map 통합. 동일 function_id가 여러 env에
+        # 다르게 매핑된 경우 마지막 값 우선 (실 운영에서는 동일 함수가 다른 ASIL로
+        # 등록될 가능성 0 — Hyundai 컨벤션은 함수 ID 글로벌 unique).
+        function_asil_map.update(env.function_asil_map)
 
     tested = passed + failed
     return {
@@ -166,6 +174,7 @@ def aggregate_session(session: SwUTSession) -> dict[str, Any]:
         "function_count": len(all_functions),
         "function_rows": all_functions,
         "tc_to_components": tc_to_components,
+        "function_asil_map": function_asil_map,  # 30차 W21
         "deviated": 0,
     }
 

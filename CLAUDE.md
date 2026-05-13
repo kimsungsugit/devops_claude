@@ -250,23 +250,33 @@ ISO 26262 ASIL A 단위테스트 산출물 자동 생성 + cross-validation 플�
 | doc_id_sequence | digit only | ✓ |
 | jenkins_build_number | ge=1 le=99999 | (옵션) |
 | cache_root / log_folder / template_path / swuds_docx_path | maxlen 500 + 줄바꿈 금지 | ✓ (PathPickerDialog 21차) |
+| **c_source_root** | maxlen 500 + 줄바꿈 금지 | **✓ 30차 W21 추가 (PathPickerDialog + Doxygen @asil 추출)** |
 | deviation_cases | max_length=200 + 합산 256KB + item key ≤20 | (programmatic) |
 
-### 함수별 ASIL 등급 (W21, 28차 분석 노트 — 미구현)
+### 함수별 ASIL 등급 (W21, 30차 완료 — 사용자 결정 A2)
 
-**현황**: `SwUTBuildRequest.asil_level`은 **빌드 메타 단일값** (A/B/C/D/QM). 산출물의 모든 함수가 이 값으로 동일하게 태깅됨.
+**구현 완료 (30차 commit)**:
+- `backend/services/swut_asil_resolver.py` 신규 — C 소스 → `function_id → ASIL` 매핑
+- 기존 자산 재활용: `workflow/code_parser/c_parser.py::parse_c_project` (Doxygen `@asil` 추출 기존 보유)
+- `SwUTBuildRequest.c_source_root` 신규 옵션 필드 + `PathPickerDialog` 연동
+- Coverage / SUTR builder `summary.asil_distribution` + `asil_d_function_ids` 동일 키 (대칭)
+- 3.Coverage 시트 ASIL D 함수 row 빨간 강조 (`mark_asil_d_function` — `mark_fail_cell`과 RGB 동일하나 호출 의미 분리)
+- Frontend `.swut-asil-distribution-panel` + `--audit-asil-d-soft/-text` token
 
-**문제**: C 소스 Doxygen 주석 `@asil C|D` 태그 또는 SRS/SDS 매핑(SCM registry)으로부터 **함수별 ASIL 등급 추출 미구현**. ISO 26262 audit 관점에서 ASIL D 함수는 MC/DC 커버리지 + 완전한 추적성 + 코드 리뷰 필수인데, 모든 함수가 단일 ASIL로 표시되어 audit reviewer가 어느 함수에 어떤 검토 깊이를 적용해야 할지 산출물만으로 판단 불가.
+**사용자 결정 (A2)**: 1.Traceability 시트 자체 변경 없음 (회사 v3.01 양식 호환 100%). ASIL 정보는 summary + UI + 3.Coverage 시트 강조로 표현.
 
-**잠재 작업** (별도 큰 라운드):
-1. `backend/services/swut_input_adapter.py` 에 함수별 ASIL 파서 추가 (Doxygen 주석 → `function_id → asil` 맵)
-2. Coverage `1.Traceability` 시트에 함수별 ASIL 컬럼 추가 (현재 함수명/파일만)
-3. ASIL D 함수에 시각 강조 (🟠 주황? 또는 row 굵게) — audit reviewer가 한눈에 식별
-4. `SwUTBuildRequest.asil_level`을 빌드 default 또는 우선순위 fallback으로 재정의
+**ISO 26262 적용**:
+- ASIL D 함수 식별 → audit reviewer 즉시 인지 (MC/DC 커버리지 필수 안내)
+- c_source_root 미제공 시 graceful skip + parse_warnings 명시 (이전 운영 호환)
+- evidence_class "auto-generated draft" 정책 유지 — manual review 의무 동일
 
-**How to apply**: 사용자가 다음 SwUT 시리즈 재개 시 `/plan` 요청 우선. 본 작업 미수행 상태로 ASIL B 이상 audit evidence 단독 제출은 위험 — manual review에서 ASIL 일관성 명시 의무.
+**비-목표 (31차+)**:
+- 1.Traceability 시트 자체에 ASIL 컬럼 (양식 영향)
+- SUTR Test Log에 함수 ID/ASIL 컬럼
+- SwUDS docx에서 ASIL 추출 (현재 C 소스 단일 출처)
+- ASIL B/C 함수 시각 강조 (본 라운드는 D만)
 
-### 시각 강조 정책 (23/24/29차)
+### 시각 강조 정책 (23/24/29/30차)
 
 산출물 cell에 audit reviewer 친화 표시:
 
@@ -274,7 +284,10 @@ ISO 26262 ASIL A 단위테스트 산출물 자동 생성 + cross-validation 플�
 |----------|------|------|
 | 🟡 노란 `FFFFEB9C` | 사용자 입력 필요 (Validation Date / Reviewer / Approver / Test Engineer 빈 시, SUTR Actual Coverage/Pass ratio 데이터 부재 시) | `mark_user_input_required` / `write_value_or_mark` |
 | 🔴 빨간 `FFFFC7CE` | 2.Consistency FAIL row Result 셀 | `mark_fail_cell` |
+| 🔴 빨간 `FFFFC7CE` (동일 RGB, **30차 W21 의미 분리**) | 3.Coverage 시트 ASIL D 함수 row — audit MC/DC 우선순위 표시 | `mark_asil_d_function` |
 | 기본 (없음) | 자동 채움 (config/meta 정상) | `safe_write` / `_write_label` |
+
+> **30차 W21 의미 분리**: `mark_fail_cell` ↔ `mark_asil_d_function` 색상 RGB 동일 (`FFFFC7CE`)이나 호출 의미 다름. FAIL = TC 실행 실패, ASIL D = audit 검토 우선순위. 동일 셀 겹치면 ASIL D 우선 (호출 순서 보장). audit reviewer에게 정책 사전 통보 권장.
 
 24차 silent "N/A" 제거 — Actual Coverage/Pass ratio가 data 부재 시 `▶ 사용자 입력 필요 — VectorCAST 데이터 부재 — log_folder 재확인` 명시 (deep-reviewer X7 강화).
 
@@ -282,7 +295,8 @@ ISO 26262 ASIL A 단위테스트 산출물 자동 생성 + cross-validation 플�
 
 **Backend RGB / placeholder 단일 출처**: `backend/services/design_tokens.py`
 - `USER_INPUT_FILL_RGB = "FFFFEB9C"` — Excel 셀 노란 배경
-- `FAIL_FILL_RGB = "FFFFC7CE"` — Excel 셀 빨간 배경
+- `FAIL_FILL_RGB = "FFFFC7CE"` — Excel 셀 빨간 배경 (TC 실행 실패)
+- `ASIL_D_FILL_RGB = "FFFFC7CE"` — **30차 W21 동일 값 / 의미 분리 (audit MC/DC 우선순위)**
 - `USER_INPUT_PLACEHOLDER = "▶ 사용자 입력 필요"` — 24차 silent "N/A" 대체 안내
 
 `excel_template_utils.py`가 위 모듈에서 import — 이전 (23~28차) module-level hardcoded 제거. 신규 backend Excel builder는 반드시 `design_tokens`에서 import.
@@ -291,8 +305,9 @@ ISO 26262 ASIL A 단위테스트 산출물 자동 생성 + cross-validation 플�
 
 | 컨텍스트 | 출처 | 용도 |
 |----------|------|------|
-| Backend Excel 셀 배경 | `design_tokens.py` `USER_INPUT_FILL_RGB`/`FAIL_FILL_RGB` (warm pastel — `#FFEB9C`/`#FFC7CE`) | audit reviewer 친화 부드러운 hint |
+| Backend Excel 셀 배경 | `design_tokens.py` `USER_INPUT_FILL_RGB`/`FAIL_FILL_RGB`/`ASIL_D_FILL_RGB` (warm pastel — `#FFEB9C`/`#FFC7CE`) | audit reviewer 친화 부드러운 hint |
 | Frontend UI 텍스트/badge | `frontend-v2/src/index.css` `--color-warning`/`--color-danger` (Tailwind amber-500/red-500) | UI 시인성 — 명도/대비 강함 |
+| **Frontend ASIL D audit (30차 W21)** | `--audit-asil-d-soft` (`#ffe3e8`) / `--audit-asil-d-text` (`#b3261e`) | ASIL 분포 패널에서 ASIL D 항목 강조 — Excel 빨강과 의미 매칭하되 UI 시인성 조정 |
 
 **중요**: 두 컨텍스트는 **단일 RGB로 통합하지 말 것**. Excel 셀 배경(부드러운 톤)과 React UI 텍스트(시인성)는 다른 색상 요구. design tokens는 같은 audit 의미를 가지지만 시각적 구현은 컨텍스트마다 적합한 톤 사용.
 
@@ -300,12 +315,17 @@ ISO 26262 ASIL A 단위테스트 산출물 자동 생성 + cross-validation 플�
 
 > **Backward 호환 (W22, 28차 명시)**: 24차 이전 빌드 결과물은 동일 셀에 string `"N/A"` 보유. 회사 audit reviewer가 두 형식 모두 인지하도록 산출물에 라운드(24차+) 표기를 Cover 시트 doc_id_sequence에 포함 권장. 자동 변환/마이그레이션 스크립트는 제공 안 함 — 이전 산출물은 그대로 둘 것. 신규 빌드부터 노란 마킹 적용.
 
-### Workflow & Tests (30차 prep 갱신 — 실측)
-- Backend SwUT 전체 회귀: **221개** (모두 통과 — 29차 W17 +1, 30차 prep W25 fake_resolver normalize fix로 msys64 mingw Python 환경도 통과)
-- 회귀 파일: `test_swut_aggregators.py` + `test_swut_router.py` + `test_swut_consistency_checker.py` + `test_swut_deviation_generator.py` + `test_swut_input_adapter.py` + `test_swut_swuds_parser.py` + `test_excel_template_utils.py`
-- Backend 전체: **1702개** (.venv Python 3.12.6 / 93.83s, timeout 없이 통과)
-- Frontend SwUTBuildSection: **21개** (vitest)
-- Frontend 전체: **216개** (23 test files)
+### Workflow & Tests (30차 갱신 — 실측 + deep-reviewer 권고 fix 후)
+- Backend SwUT 전체 회귀: **277개** (30차 W21 신규 +56 — `test_swut_asil_resolver.py` 35건 + `TestAsilDistribution21` 4건 + `TestCSourceRoot21` 3건 + `TestSummaryHeaderTruncation21` 2건 + `TestSystemDirBlacklist` 9건 + `TestAsilDMarker21` 3건)
+- 회귀 파일: 기존 7파일 + **`test_swut_asil_resolver.py` 신규** (30차 W21)
+- Backend 전체: **1758개** (.venv Python 3.12.6 / 54.50s, timeout 없이 통과)
+- Frontend SwUTBuildSection: **24개** (30차 W21 신규 +3)
+- Frontend 전체: **219개** (23 test files)
+
+### 30차 W21 deep-reviewer Critical/Warning fix (commit 진행 의무)
+- **Critical (X5/S3 path traversal)**: `swut_asil_resolver` 에 시스템 디렉토리 blacklist (Windows: `C:/Windows`, `Program Files`, POSIX: `/etc`, `/root`, `/sys`, `/proc` 등) 추가 — `allowed_roots` 미지정해도 backstop으로 거부. ISO 26262 audit 도구 보안 경계.
+- **Warning (X3 헤더 truncate)**: `_build_result_to_response`에서 `X-SwUT-Summary` 1024B 초과 시 `asil_d_function_ids` list를 길이 sentinel string으로 축약 + JSON valid 보장 fallback. frontend silent 미표시 회피.
+- **Info (색상 충돌)**: `mark_asil_d_function` ↔ `mark_fail_cell` 동일 RGB이나 시트 분리 (3.Coverage = ASIL D 전용, 2.Consistency = FAIL 전용) — docstring + 본 CLAUDE.md 정책에 명시. 동일 시트 두 강조 동시 시 fix.
 - Cloudium worker는 read-only — 절대 cloudium 파일 생성/수정 금지 (사용자 의사결정)
 - 라이브 검증 PoC: `.codex_tmp/poc_live_full_verification.py` (maintained, 사용자 환경에서 직접 호출)
 

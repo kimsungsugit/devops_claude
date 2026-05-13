@@ -37,6 +37,7 @@ except ImportError:  # pragma: no cover
 from backend.services.excel_template_utils import (
     BLANK_MARKUP,
     collect_git_history,
+    mark_asil_d_function,
     mark_fail_cell,
     safe_write,
     short_date,
@@ -195,8 +196,56 @@ def _write_test_summary_sheet(
     _write_label(ws, "Final Test Result", meta.final_test_result, out_warnings)
 
 
+def _compute_asil_distribution(
+    function_rows: list[FunctionCoverage],
+    function_asil_map: dict[str, str],
+) -> tuple[dict[str, int], list[str]]:
+    """30차 W21: function 별 ASIL 등급 분포 계산.
+
+    Args:
+        function_rows: 집계된 함수 list (``FunctionCoverage``).
+        function_asil_map: ``swut_asil_resolver`` 결과 (``{SwUFn_NNNN: "A"/"B"/...}``).
+
+    Returns:
+        ``(distribution, asil_d_function_ids)``
+        - distribution: 등급별 개수 (예: ``{"ASIL_A": 15, "ASIL_D": 2, "UNKNOWN": 5}``)
+        - asil_d_function_ids: ASIL D 함수 ID list (정렬됨).
+    """
+    distribution: dict[str, int] = {}
+    asil_d_ids: list[str] = []
+
+    for fc in function_rows:
+        # function_id 결정 — fc.unit_id 또는 fc.name에서 SwUFn_NNNN 추출.
+        candidate_keys = [fc.unit_id or "", fc.name or ""]
+        asil = ""
+        matched_id = ""
+        for key in candidate_keys:
+            if not key:
+                continue
+            if key in function_asil_map:
+                asil = function_asil_map[key]
+                matched_id = key
+                break
+            m = _TC_FN_RE.search(key)
+            if m and m.group(1) in function_asil_map:
+                asil = function_asil_map[m.group(1)]
+                matched_id = m.group(1)
+                break
+
+        bucket = f"ASIL_{asil}" if asil else "UNKNOWN"
+        distribution[bucket] = distribution.get(bucket, 0) + 1
+        if asil == "D" and matched_id:
+            asil_d_ids.append(matched_id)
+
+    return distribution, sorted(set(asil_d_ids))
+
+
 def _write_coverage_sheet(ws, agg: dict[str, Any]) -> int:
     """3. Coverage 시트 — per-function Statement/Branch/Exception 표.
+
+    30차 W21: ``agg["function_asil_map"]`` 에 ASIL D 매핑된 함수는 row 전체에
+    빨간 강조 (``mark_asil_d_function``). 색상은 FAIL과 동일 RGB이나 호출
+    의미 분리.
 
     Returns:
         쓰여진 행 수.
@@ -223,6 +272,9 @@ def _write_coverage_sheet(ws, agg: dict[str, Any]) -> int:
     # 데이터 행 시작은 헤더 + 1 또는 + 2 (회사 포맷에 따라 hierarchical header)
     data_start = header_row + 2
 
+    # 30차 W21: 함수별 ASIL 매핑 + ASIL D 식별.
+    function_asil_map: dict[str, str] = agg.get("function_asil_map") or {}
+
     # 기존 데이터 행을 덮어쓴다 (template이 기존 sample 데이터 가질 수 있음).
     # 머지셀 head-only 쓰기 — _safe_write 사용 (실패 시 silent skip).
     written = 0
@@ -237,6 +289,19 @@ def _write_coverage_sheet(ws, agg: dict[str, Any]) -> int:
         safe_write(ws, r, 7, fc.branch.total)
         safe_write(ws, r, 8, fc.branch.covered)
         safe_write(ws, r, 9, "O" if fc.branch.passed else "X")
+
+        # 30차 W21: ASIL D 함수면 row의 핵심 컬럼 (Unit ID + Function Name) 강조.
+        # fc.unit_id 가 SwUFn_NNNN 패턴일 수 있고 또는 다른 ID. 둘 다 매칭 시도.
+        asil = function_asil_map.get(fc.unit_id) or function_asil_map.get(fc.name)
+        if not asil:
+            # fc.name / fc.unit_id 에 SwUFn_NNNN 정규식 추출 fallback.
+            m = _TC_FN_RE.search(fc.unit_id or "") or _TC_FN_RE.search(fc.name or "")
+            if m:
+                asil = function_asil_map.get(m.group(1))
+        if asil == "D":
+            for col in (2, 3):  # Unit ID + Function Name 컬럼
+                mark_asil_d_function(ws, r, col)
+
         written += 1
     return written
 
@@ -587,12 +652,22 @@ def build_coverage_report(
     sheet_names = wb.sheetnames
 
     agg = aggregate_session(session)
+
+    # 30차 W21: 함수별 ASIL 분포 계산 — function_asil_map과 function_rows 매칭.
+    asil_distribution, asil_d_function_ids = _compute_asil_distribution(
+        agg.get("function_rows") or [],
+        agg.get("function_asil_map") or {},
+    )
+
     summary = {
         "environments": len(session.environments),
         "total_tcs": agg["total_tcs"],
         "passed": agg["passed"],
         "failed": agg["failed"],
         "function_rows": agg["function_count"],
+        # 30차 W21: ASIL 등급 분포 — UI 노출 + audit reviewer 검토 우선순위.
+        "asil_distribution": asil_distribution,
+        "asil_d_function_ids": asil_d_function_ids,
     }
 
     # Cover

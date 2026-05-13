@@ -203,14 +203,43 @@ def _build_result_to_response(
     size = content_io.tell()
     content_io.seek(pos)
 
+    # 30차 W21 deep-reviewer fix: truncate 시 frontend JSON.parse 실패 방지.
+    # asil_d_function_ids 같은 list가 1024B 초과 시 string 중간 잘림 → invalid JSON.
+    # 대안: 잘림 감지 시 sentinel summary로 교체 + 사용자에게 안내.
+    _summary_str = json.dumps(summary, ensure_ascii=True)
+    if len(_summary_str) > 1024:
+        # asil_d_function_ids 만 list 길이로 축약 (정확 함수 ID 알고 싶으면 산출물 열어 확인).
+        _safe = dict(summary)
+        if "asil_d_function_ids" in _safe and isinstance(_safe["asil_d_function_ids"], list):
+            _safe["asil_d_function_ids"] = (
+                f"[{len(_safe['asil_d_function_ids'])} ids — 헤더 한도 초과로 생략, "
+                "산출물 1.Traceability 시트 / 3.Coverage 시트 확인]"
+            )
+        _summary_str = json.dumps(_safe, ensure_ascii=True)[:1024]
+        # 그래도 초과 시 안전 fallback (절단 후 valid JSON 강제 — sentinel object).
+        try:
+            json.loads(_summary_str)
+        except json.JSONDecodeError:
+            _summary_str = json.dumps(
+                {"_truncated": True, "_reason": "summary > 1024B"},
+                ensure_ascii=True,
+            )
+
+    _warnings_str = json.dumps(warnings, ensure_ascii=True)
+    if len(_warnings_str) > 1024:
+        _warnings_str = json.dumps(
+            [f"({len(warnings)} warnings — 헤더 한도 초과로 생략, 산출물 확인)"],
+            ensure_ascii=True,
+        )
+
     headers = {
         "Content-Disposition": (
             f'attachment; filename="{ascii_filename}"; '
             f"filename*=UTF-8''{quote(filename)}"
         ),
         "Content-Length": str(size),
-        "X-SwUT-Summary": json.dumps(summary, ensure_ascii=True)[:1024],
-        "X-SwUT-Warnings": json.dumps(warnings, ensure_ascii=True)[:1024],
+        "X-SwUT-Summary": _summary_str,
+        "X-SwUT-Warnings": _warnings_str,
         "X-SwUT-Incomplete-Sheets": ",".join(incomplete_sheets).encode(
             "ascii", errors="replace",
         ).decode("ascii")[:512],
@@ -285,6 +314,31 @@ def _resolve_swuds_function_ids(req: SwUTBuildRequest) -> set[str] | None:
         return None
 
 
+def _apply_function_asil_map(req: SwUTBuildRequest, session) -> None:
+    """30차 W21: req.c_source_root → Doxygen @asil 추출 → session env에 주입.
+
+    - c_source_root 빈 string이면 silent skip (옵션 필드).
+    - 추출 결과는 session.environments[0]에만 주입 (aggregate_session이 모든
+      env의 map을 통합 — 단일 env에만 주입해도 결과 동일).
+    - 실패 시 session.parse_warnings에 누적. 빌드 자체는 진행 (graceful).
+    """
+    if not req.c_source_root:
+        return
+    try:
+        from backend.services.swut_asil_resolver import resolve_function_asil_map
+        result = resolve_function_asil_map(req.c_source_root)
+        # warnings는 session에 누적 — UI에 노출되도록.
+        if result.warnings:
+            session.parse_warnings.extend(result.warnings)
+        if result.function_asil_map and session.environments:
+            session.environments[0].function_asil_map = dict(result.function_asil_map)
+    except Exception as e:  # pragma: no cover — top-level safety net
+        _logger.warning("function_asil_map resolve failed: %s", e)
+        session.parse_warnings.append(
+            f"function_asil_map resolve 실패 — {type(e).__name__}"
+        )
+
+
 def _do_coverage_build(req: SwUTBuildRequest) -> Response:
     resolver = get_resolver()
     session = collect_swut_session(
@@ -293,6 +347,8 @@ def _do_coverage_build(req: SwUTBuildRequest) -> Response:
         cache_root=req.cache_root,
         log_folder=req.log_folder,
     )
+    # 30차 W21: function 별 ASIL 매핑 (옵션 c_source_root).
+    _apply_function_asil_map(req, session)
     template_bytes = _read_template_bytes(req.template_path, req.project_id, "coverage")
     meta = _build_coverage_meta(req)
     swuds_fn_ids = _resolve_swuds_function_ids(req)
@@ -320,6 +376,8 @@ def _do_sutr_build(req: SwUTBuildRequest) -> Response:
         cache_root=req.cache_root,
         log_folder=req.log_folder,
     )
+    # 30차 W21: function 별 ASIL 매핑 — Coverage builder와 대칭.
+    _apply_function_asil_map(req, session)
     template_bytes = _read_template_bytes(req.template_path, req.project_id, "sutr")
     meta = _build_sutr_meta(req)
     # 17차 T172: SwUDS docx 처리 — Coverage builder와 대칭.

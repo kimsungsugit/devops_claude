@@ -238,6 +238,104 @@ class TestInputSurface13:
         assert len(req.deviation_cases) == 2
 
 
+class TestCSourceRoot21:
+    """30차 W21 T220 — c_source_root 입력 표면 (maxlen 500 + 줄바꿈 금지)."""
+
+    def _base_body(self) -> dict:
+        return {
+            "project_id": "HDPDM01",
+            "release_sw_version": "1.0.0",
+            "test_date": "2024-02-19",
+        }
+
+    def test_c_source_root_empty_accepted(self):
+        """기본값 빈 string은 통과 — c_source_root는 옵션."""
+        from backend.schemas import SwUTBuildRequest
+        req = SwUTBuildRequest(
+            project_id="HDPDM01",
+            release_sw_version="1.0.0",
+            test_date="2024-02-19",
+        )
+        assert req.c_source_root == ""
+
+    def test_c_source_root_with_newline_rejected(self):
+        """줄바꿈 금지 (헤더 인젝션 안전 — log_folder와 동일 정책)."""
+        body = self._base_body()
+        body["c_source_root"] = "D:/Project/src\r\nX-Injected: evil"
+        r = client.post(
+            "/api/swut/coverage/build", json=body,
+            headers={"X-User": "tester"},
+        )
+        assert r.status_code == 422
+
+    def test_c_source_root_maxlen_rejected(self):
+        """500자 초과 차단 (다른 path 필드와 동일)."""
+        body = self._base_body()
+        body["c_source_root"] = "D:/" + "a" * 600
+        r = client.post(
+            "/api/swut/coverage/build", json=body,
+            headers={"X-User": "tester"},
+        )
+        assert r.status_code == 422
+
+
+class TestSummaryHeaderTruncation21:
+    """30차 W21 deep-reviewer Warning fix — X-SwUT-Summary 1024B 한도에서
+    asil_d_function_ids list가 잘려도 frontend JSON.parse가 실패하지 않도록
+    valid JSON sentinel 보장."""
+
+    def test_large_asil_d_list_truncated_to_valid_json(self):
+        """ASIL D 함수 100개 → 헤더 1024B 초과 → list 길이로 축약된 valid JSON."""
+        import json
+        from backend.routers.swut import _build_result_to_response
+
+        # 큰 asil_d_function_ids list (100 개 × 13B ≈ 1500B)
+        summary = {
+            "function_rows": 200,
+            "asil_distribution": {"ASIL_A": 100, "ASIL_D": 100},
+            "asil_d_function_ids": [f"SwUFn_{i:04d}" for i in range(100)],
+        }
+        from io import BytesIO
+        res = _build_result_to_response(
+            content_io=BytesIO(b"x"),
+            filename="cov.xlsx",
+            summary=summary,
+            warnings=[],
+            incomplete_sheets=[],
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+        header = res.headers.get("X-SwUT-Summary")
+        assert header
+        # valid JSON parse 가능해야 함 — string 중간 잘림 회피
+        parsed = json.loads(header)
+        # asil_d_function_ids는 list 길이로 축약된 string (sentinel)
+        assert isinstance(parsed.get("asil_d_function_ids"), str)
+        assert "100 ids" in parsed["asil_d_function_ids"]
+
+    def test_small_summary_passes_through_unchanged(self):
+        """1024B 이하 summary는 그대로 전달."""
+        import json
+        from io import BytesIO
+        from backend.routers.swut import _build_result_to_response
+
+        summary = {
+            "function_rows": 5,
+            "asil_distribution": {"ASIL_A": 3, "ASIL_D": 2},
+            "asil_d_function_ids": ["SwUFn_0001", "SwUFn_0002"],
+        }
+        res = _build_result_to_response(
+            content_io=BytesIO(b"x"),
+            filename="cov.xlsx",
+            summary=summary,
+            warnings=[],
+            incomplete_sheets=[],
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+        parsed = json.loads(res.headers.get("X-SwUT-Summary"))
+        # 작은 list는 그대로 (list 보존)
+        assert parsed["asil_d_function_ids"] == ["SwUFn_0001", "SwUFn_0002"]
+
+
 class TestXUserHeader:
     def test_missing_x_user_header_rejected(self):
         r = client.post(

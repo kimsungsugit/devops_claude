@@ -40,6 +40,12 @@ html, body {
   --color-purple: #6366f1;
   --color-purple-soft: rgba(99, 102, 241, 0.10);
 
+  /* 30차 W21: SwUT audit 시각 강조 (ASIL D만 본 라운드 도입 — 29차 lock-in 이행).
+   * backend/services/design_tokens.py ASIL_D_FILL_RGB (#FFC7CE)와 의미 매칭하되
+   * UI 시인성 위해 light 변종 (텍스트 색은 진한 빨강으로 가독성). */
+  --audit-asil-d-soft: #ffe3e8;
+  --audit-asil-d-text: #b3261e;
+
   --sp-1: 4px; --sp-2: 8px; --sp-3: 12px; --sp-4: 16px;
   --sp-5: 20px; --sp-6: 24px; --sp-8: 32px;
 
@@ -87,6 +93,9 @@ body[data-theme='dark'] {
   --color-info-soft: rgba(96, 165, 250, 0.10);
   --color-purple: #a78bfa;
   --color-purple-soft: rgba(167, 139, 250, 0.12);
+  /* 30차 W21 SwUT audit ASIL D — dark variant (명도/대비 조정). */
+  --audit-asil-d-soft: #4a1f23;
+  --audit-asil-d-text: #ff8a8a;
   --shadow-sm: 0 1px 2px rgba(0,0,0,0.20);
   --shadow-md: 0 2px 8px rgba(0,0,0,0.28);
   --shadow-lg: 0 8px 24px rgba(0,0,0,0.36);
@@ -1324,6 +1333,59 @@ label {
 .swut-issue-info {
   border-left-color: var(--color-info);
   background: var(--color-info-soft);
+}
+
+/* ── 30차 W21: SwUT ASIL 분포 패널 (function-level ASIL audit) ── */
+.swut-asil-distribution-panel {
+  margin-top: var(--sp-3);
+  padding: var(--sp-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--panel);
+}
+.swut-asil-distribution-title {
+  font-weight: 600;
+  margin-bottom: var(--sp-2);
+  font-size: var(--text-md);
+}
+.swut-asil-distribution-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+}
+.swut-asil-distribution-list > li {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  padding: 4px 10px;
+  border-radius: var(--radius-sm);
+  font-size: var(--text-sm);
+  background: var(--hover);
+  border: 1px solid var(--border);
+}
+.swut-asil-distribution-list > li.swut-asil-d {
+  background: var(--audit-asil-d-soft);
+  color: var(--audit-asil-d-text);
+  border-color: var(--audit-asil-d-text);
+  font-weight: 600;
+}
+.swut-asil-label { font-family: ui-monospace, monospace; }
+.swut-asil-count {
+  font-weight: 700;
+  font-size: var(--text-md);
+}
+.swut-asil-d-warning {
+  font-size: var(--text-xs);
+  margin-left: var(--sp-1);
+}
+.swut-asil-d-functions {
+  margin-top: var(--sp-2);
+  font-size: var(--text-sm);
+  color: var(--audit-asil-d-text);
+  word-break: break-all;
 }
 
 /* ── 21차: PathPickerDialog 모달 ── */

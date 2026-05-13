@@ -24,6 +24,8 @@ const DEFAULT_FORM = {
   log_folder: '',
   template_path: '',
   swuds_docx_path: '',
+  // 30차 W21: C 소스 디렉토리 (옵션) — Doxygen @asil 태그에서 함수별 ASIL 추출.
+  c_source_root: '',
   // 26차 W16: backend schema에 이미 있던 3 옵션 필드를 frontend에서도 입력
   reviewer_override: '',
   approver_override: '',
@@ -352,6 +354,22 @@ export default function SwUTBuildSection() {
           onClick={() => openPicker('swuds_docx_path', '*.docx', 'SwUDS docx 선택')}
         >📂 Browse</button>
       </div>
+      <div className="swut-form-row swut-field-with-browse">
+        <Field
+          name="c_source_root"
+          label="C Source Root (선택, 30차 W21)"
+          value={form.c_source_root}
+          onChange={v => setField('c_source_root', v)}
+          placeholder="U:\...\HDPDM01\src\"
+          hint="제공 시 Doxygen @asil 태그에서 함수별 ASIL 추출 — ASIL D 함수는 Excel 빨강 강조 + UI 분포 패널"
+          fullWidth
+        />
+        <button
+          className="swut-browse-btn"
+          type="button"
+          onClick={() => openPicker('c_source_root', '*', 'C 소스 디렉토리 선택')}
+        >📂 Browse</button>
+      </div>
 
       <div className="swut-actions">
         <button
@@ -369,6 +387,42 @@ export default function SwUTBuildSection() {
           {building === 'sutr' ? '빌드 중...' : '📝 SUTR 빌드 (xlsm)'}
         </button>
       </div>
+
+      {/* 30차 W21: ASIL 분포 패널 — c_source_root 제공 시 함수별 ASIL 노출 */}
+      {lastSummary?.asil_distribution &&
+       Object.keys(lastSummary.asil_distribution).length > 0 && (
+        <div className="swut-asil-distribution-panel" data-testid="swut-asil-distribution">
+          <div className="swut-asil-distribution-title">
+            🛡️ ASIL 분포 (ISO 26262 audit reviewer 검토 우선순위)
+          </div>
+          <ul className="swut-asil-distribution-list">
+            {Object.entries(lastSummary.asil_distribution).map(([key, count]) => {
+              const isAsilD = key === 'ASIL_D' && count > 0;
+              return (
+                <li
+                  key={key}
+                  className={isAsilD ? 'swut-asil-d' : 'swut-asil-other'}
+                  data-asil-bucket={key}
+                >
+                  <span className="swut-asil-label">{key}</span>
+                  <span className="swut-asil-count">{count}</span>
+                  {isAsilD && (
+                    <span className="swut-asil-d-warning">
+                      ⚠️ MC/DC 커버리지 필수 — Excel 빨강 강조 매칭
+                    </span>
+                  )}
+                </li>
+              );
+            })}
+          </ul>
+          {(lastSummary.asil_d_function_ids?.length ?? 0) > 0 && (
+            <div className="swut-asil-d-functions">
+              <strong>ASIL D 함수 ID:</strong>{' '}
+              {lastSummary.asil_d_function_ids.join(', ')}
+            </div>
+          )}
+        </div>
+      )}
 
       {lastSummary && (
         <div className="swut-summary-card">

@@ -653,6 +653,9 @@ class SwUTBuildRequest(BaseModel):
     template_path: str = Field("", max_length=500)
     # 16차: SwUDS docx (옵션) — 제공 시 2.Consistency에 SwUDS↔SwUTS 매핑 row 추가
     swuds_docx_path: str = Field("", max_length=500)
+    # 30차 W21: C 소스 디렉토리 (옵션) — 제공 시 Doxygen @asil 태그에서 함수별
+    # ASIL 등급 추출 → summary.asil_distribution + 3.Coverage 시트 ASIL D row 강조.
+    c_source_root: str = Field("", max_length=500)
 
     # 인사 메타 (선택)
     reviewer_override: str = Field("", max_length=100)
@@ -665,7 +668,8 @@ class SwUTBuildRequest(BaseModel):
     deviation_cases: List[Dict[str, Any]] = Field(default_factory=list, max_length=200)
 
     @field_validator("test_engineer", "reviewer_override", "approver_override",
-                     "cache_root", "log_folder", "template_path", "swuds_docx_path")
+                     "cache_root", "log_folder", "template_path", "swuds_docx_path",
+                     "c_source_root")
     @classmethod
     def _no_newline(cls, v):
         if v is None:

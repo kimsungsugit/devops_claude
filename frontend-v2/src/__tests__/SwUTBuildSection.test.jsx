@@ -308,11 +308,12 @@ describe('SwUTBuildSection', () => {
     expect(screen.getByText(/issue 2건/)).toBeTruthy();
   });
 
-  it('renders Browse buttons for path fields (21차)', () => {
+  it('renders Browse buttons for path fields (21차 + 30차 W21)', () => {
     render(<SwUTBuildSection />);
-    // 5개 path 필드 (log_folder / template_path / swuds_docx_path / coverage_path / sutr_path)
+    // 6개 path 필드 (log_folder / template_path / swuds_docx_path /
+    //                c_source_root [30차] / coverage_path / sutr_path)
     const browseButtons = screen.getAllByText(/📂 Browse/);
-    expect(browseButtons.length).toBe(5);
+    expect(browseButtons.length).toBe(6);
   });
 
   it('renders reviewer/approver/validation_date input fields (26차 W16)', () => {
@@ -406,5 +407,71 @@ describe('SwUTBuildSection', () => {
     expect(opts.method).toBe('POST');
     expect(opts.signal).toBeDefined();
     expect(opts.signal.constructor.name).toBe('AbortSignal');
+  });
+
+  // ── 30차 W21 — c_source_root Field + ASIL 분포 패널 + ASIL D 강조 ──
+
+  it('renders c_source_root Field with hint about Doxygen @asil tag', () => {
+    render(<SwUTBuildSection />);
+    const field = screen.getByLabelText(/C Source Root/);
+    expect(field).toBeTruthy();
+    // hint 텍스트가 ASIL 추출 + Excel 강조 + UI 분포 패널을 모두 안내
+    expect(screen.getByText(/@asil 태그.*ASIL D 함수는 Excel 빨강/)).toBeTruthy();
+  });
+
+  it('hides ASIL distribution panel when summary has no asil_distribution', async () => {
+    // 빌드 trigger 없으면 lastSummary === null → 패널 미렌더
+    render(<SwUTBuildSection />);
+    expect(screen.queryByTestId('swut-asil-distribution')).toBeNull();
+  });
+
+  it('renders ASIL distribution panel with ASIL D highlighted when summary contains data', async () => {
+    // mock fetch 응답에 X-SwUT-Summary 헤더 + asil_distribution + asil_d_function_ids 포함
+    const fakeBlob = new Blob(['x'], { type: 'application/octet-stream' });
+    const fakeSummary = {
+      function_rows: 5,
+      asil_distribution: { ASIL_A: 2, ASIL_B: 1, ASIL_D: 2, UNKNOWN: 0 },
+      asil_d_function_ids: ['SwUFn_0103', 'SwUFn_0107'],
+    };
+    const fakeHeaders = new Headers({
+      'X-SwUT-Summary': JSON.stringify(fakeSummary),
+      'X-SwUT-Warnings': JSON.stringify([]),
+      'X-SwUT-Filename': 'cov.xlsx',
+    });
+    const fetchSpy = vi.spyOn(global, 'fetch').mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: fakeHeaders,
+      blob: () => Promise.resolve(fakeBlob),
+      json: () => Promise.resolve({}),
+      text: () => Promise.resolve(''),
+    });
+
+    render(<SwUTBuildSection />);
+    fireEvent.change(screen.getByLabelText(/Release SW Version/), {
+      target: { value: '1.0.0' },
+    });
+    // log_folder 또는 template_path 중 하나 필수 (client validation 통과용)
+    fireEvent.change(screen.getByLabelText(/Log Folder/), {
+      target: { value: 'C:/fake/log' },
+    });
+    fireEvent.click(screen.getByText(/Coverage Report 빌드/));
+
+    // 1) fetch 호출 확인 (build trigger 도달)
+    await waitFor(() => {
+      expect(fetchSpy).toHaveBeenCalled();
+    });
+    // 2) state update 후 패널 렌더
+    const panel = await screen.findByTestId('swut-asil-distribution');
+    expect(panel).toBeTruthy();
+    // 3) ASIL D 항목 강조 — 클래스 'swut-asil-d' 부착
+    const asilDItem = panel.querySelector('li[data-asil-bucket="ASIL_D"]');
+    expect(asilDItem).toBeTruthy();
+    expect(asilDItem.className).toContain('swut-asil-d');
+    // 4) ASIL D 함수 ID 노출 — 패널 내부 .swut-asil-d-functions에 한정
+    const functionsBox = panel.querySelector('.swut-asil-d-functions');
+    expect(functionsBox).toBeTruthy();
+    expect(functionsBox.textContent).toContain('SwUFn_0103');
+    expect(functionsBox.textContent).toContain('SwUFn_0107');
   });
 });

@@ -351,3 +351,38 @@ class TestVisualMarkers23:
         assert _USER_INPUT_FILL_RGB == "FFFFEB9C"
         assert _FAIL_FILL_RGB == "FFFFC7CE"
         assert USER_INPUT_PLACEHOLDER == "▶ 사용자 입력 필요"
+
+
+class TestAsilDMarker21:
+    """30차 W21: mark_asil_d_function — ASIL D 함수 row 빨간 강조."""
+
+    def test_mark_asil_d_applies_red_fill(self):
+        from backend.services.excel_template_utils import mark_asil_d_function
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.cell(1, 1).value = "SwUFn_0103"
+        result = mark_asil_d_function(ws, 1, 1)
+        assert result is True
+        # RGB는 ASIL_D_FILL_RGB (= FAIL_FILL_RGB와 동일 값)
+        assert "FFC7CE" in str(ws.cell(1, 1).fill.fgColor.rgb).upper()
+        # value 보존 — 색칠이 함수 ID reset 하지 않음
+        assert ws.cell(1, 1).value == "SwUFn_0103"
+
+    def test_asil_d_and_fail_share_same_rgb(self):
+        """30차 W21: ASIL D / FAIL은 동일 RGB이나 의미 분리.
+
+        design_tokens에서 두 상수가 같은 값을 가리키는지 검증 — 변경 시
+        본 테스트가 실패해야 정책 동기 의무 인지.
+        """
+        from backend.services import design_tokens
+        assert design_tokens.ASIL_D_FILL_RGB == design_tokens.FAIL_FILL_RGB
+
+    def test_mark_asil_d_handles_merged_cell_anchor(self):
+        """머지셀 비-anchor 위치 호출 → anchor 셀에 fill."""
+        from backend.services.excel_template_utils import mark_asil_d_function
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.merge_cells("C3:E3")
+        result = mark_asil_d_function(ws, 3, 5)  # E3 → anchor C3
+        assert result is True
+        assert "FFC7CE" in str(ws.cell(3, 3).fill.fgColor.rgb).upper()
