@@ -705,6 +705,56 @@ class SwUTBuildRequest(BaseModel):
         return v
 
 
+# ── SwIT Coverage Report (33차 라운드) ─────────────────────────────────
+# SwUTBuildRequest와 동일 17 필드 + 입력 표면 정책 (maxlen 500 + _no_newline +
+# regex anchors + deviation_cases DoS 한도). 본 schema는 SwITBuildRequest로
+# 신규 정의 — SwUTBuildRequest를 그대로 alias 하지 않고 별도 class로 분리해
+# 향후 Integration test 도구별 필드 추가 (HiL/MiL 환경 등) 시 단방향 변경.
+
+class SwITBuildRequest(BaseModel):
+    """SwIT Coverage Report 빌드 요청 (33차 라운드).
+
+    SwUTBuildRequest 패턴 동일 — 17 공통 필드 + validator. SwIT 도구별
+    필드는 향후 33-fix 또는 34차에서 추가.
+    """
+    # 필수
+    project_id: str = Field(..., min_length=1, max_length=50)
+    release_sw_version: str = Field(..., pattern=r"^\d+\.\d+(\.\d+)?$")
+    test_date: str = Field(..., pattern=r"^\d{2,4}[-/]\d{1,2}[-/]\d{1,2}$")
+
+    # 선택 (default 또는 config fallback)
+    test_engineer: str = Field("", max_length=100)
+    doc_id_sequence: str = Field("", pattern=r"^\d*$")
+    hw_version: str = Field("1.00", max_length=20)
+    asil_level: str = Field("ASIL B", max_length=20)  # SwIT는 Integration — ASIL B 일반
+
+    # 입력 소스 (Jenkins 우선, log_folder fallback)
+    jenkins_build_number: Optional[int] = Field(None, ge=1, le=99999)
+    cache_root: str = Field("", max_length=500)
+    log_folder: Optional[str] = Field(None, max_length=500)
+    template_path: str = Field("", max_length=500)
+    # SwUDS docx (옵션) — 2.Consistency 매핑 + 32차 W28 ASIL 추출
+    swuds_docx_path: str = Field("", max_length=500)
+    # 30차 W21 + 32차 W28: C 소스 디렉토리 (옵션) — Doxygen @asil 추출
+    c_source_root: str = Field("", max_length=500)
+
+    # 인사 메타 (선택)
+    reviewer_override: str = Field("", max_length=100)
+    approver_override: str = Field("", max_length=100)
+    validation_date: str = Field("", pattern=r"^$|^\d{2,4}[-/]\d{1,2}[-/]\d{1,2}$")
+
+    @field_validator("test_engineer", "reviewer_override", "approver_override",
+                     "cache_root", "log_folder", "template_path", "swuds_docx_path",
+                     "c_source_root")
+    @classmethod
+    def _no_newline(cls, v):
+        if v is None:
+            return v
+        if "\n" in v or "\r" in v:
+            raise ValueError("줄바꿈 문자 금지 — 단일 라인 필요")
+        return v
+
+
 # ── SwUT Browse (21차 라운드) ─────────────────────────────────────────
 
 class SwUTBrowseRequest(BaseModel):
