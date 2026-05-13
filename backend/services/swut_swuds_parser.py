@@ -55,6 +55,9 @@ class SwUDSEntry:
     function_id: str       # 'SwUFn_0101'
     heading_text: str      # 원본 heading (예: 'SwUFn_0101 — DrvIn_Main')
     description: str = ""  # 첫 table의 description 셀 (있으면)
+    # 32차 W28: 함수별 ASIL 등급 — heading 다음 표의 'ASIL' 라벨 옆 셀에서 추출.
+    # 단일 문자 ("A"/"B"/"C"/"D"/"QM") 또는 빈 string (라벨 없음/잘못된 값).
+    asil: str = ""
 
 
 @dataclass
@@ -69,12 +72,20 @@ class SwUDSParseResult:
         """function_id 만 set으로 — SwUTS 비교용."""
         return {e.function_id for e in self.entries}
 
+    @property
+    def function_asil_map(self) -> dict[str, str]:
+        """32차 W28: function_id → ASIL 등급 dict — c_source 부재 시 fallback.
+
+        ASIL 비어있는 entry는 제외. 매핑 0건이면 빈 dict.
+        """
+        return {e.function_id: e.asil for e in self.entries if e.asil}
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "ok": self.ok,
             "entries": [
                 {"function_id": e.function_id, "heading_text": e.heading_text,
-                 "description": e.description[:200]}
+                 "description": e.description[:200], "asil": e.asil}
                 for e in self.entries
             ],
             "parse_warnings": self.parse_warnings,
@@ -112,6 +123,40 @@ def _extract_description_from_table(tbl: Any) -> str:
                         return cells[i + 1][:500]
     except Exception:  # pragma: no cover — 양식 다양성 fail-safe
         pass
+    return ""
+
+
+# 32차 W28: SwUDS table에서 ASIL 라벨 후보 — 영문 / 한글 / 변종 커버.
+_ASIL_LABEL_CANDIDATES = (
+    "asil", "safety level", "safety", "안전등급", "안전 등급",
+    "안전성 등급", "안전성", "asil level",
+)
+
+
+def _extract_asil_from_table(tbl: Any) -> str:
+    """32차 W28: 함수 table에서 ASIL 라벨 옆 셀 추출 → 단일 문자 정규화.
+
+    Description 패턴과 동일한 첫 5행 스캔 + 라벨 매칭. 라벨 옆 셀 텍스트를
+    ``swut_asil_resolver._normalize_asil`` 호출하여 "A"/"B"/"C"/"D"/"QM"
+    또는 빈 string 반환. 라벨 미발견 / 잘못된 값 → 빈 string (fail-safe).
+
+    32차 reviewer W1: silent except → logger.debug로 파싱 에러 진단 가능.
+    """
+    try:
+        from backend.services.swut_asil_resolver import _normalize_asil
+        rows = tbl.rows
+        for row in rows[:5]:
+            cells = [c.text.strip() for c in row.cells]
+            for i, c in enumerate(cells):
+                if c.lower() in _ASIL_LABEL_CANDIDATES:
+                    if i + 1 < len(cells):
+                        return _normalize_asil(cells[i + 1])
+    except Exception as e:  # pragma: no cover — 양식 다양성 fail-safe
+        import logging
+        logging.getLogger(__name__).debug(
+            "_extract_asil_from_table 파싱 예외 (양식 변종 추정): %s: %s",
+            type(e).__name__, e,
+        )
     return ""
 
 
@@ -172,13 +217,16 @@ def parse_swuds_docx(
                 last_fn_id = f"SwUFn_{m.group(1)}"
                 pending_table = None
         elif kind == "tbl" and last_fn_id and not pending_table:
-            # heading 직후 첫 table만 description 출처로 활용
+            # heading 직후 첫 table만 description / ASIL 출처로 활용
             pending_table = node
             description = _extract_description_from_table(node)
+            # 32차 W28: 동일 table에서 ASIL 추출 — Description 패턴 차용.
+            asil = _extract_asil_from_table(node)
             entries.append(SwUDSEntry(
                 function_id=last_fn_id,
                 heading_text=last_heading or "",
                 description=description,
+                asil=asil,
             ))
             # 같은 heading 아래 다른 entry 추가 안 함 (중복 방지)
             last_fn_id = None

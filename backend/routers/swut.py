@@ -319,29 +319,92 @@ def _resolve_swuds_function_ids(req: SwUTBuildRequest) -> set[str] | None:
         return None
 
 
-def _apply_function_asil_map(req: SwUTBuildRequest, session) -> None:
-    """30차 W21: req.c_source_root → Doxygen @asil 추출 → session env에 주입.
+def _resolve_swuds_function_asil_map(req: SwUTBuildRequest) -> dict[str, str]:
+    """32차 W28: swuds_docx_path → SwUDS table 'ASIL' 라벨 → function_asil_map.
 
-    - c_source_root 빈 string이면 silent skip (옵션 필드).
-    - 추출 결과는 session.environments[0]에만 주입 (aggregate_session이 모든
-      env의 map을 통합 — 단일 env에만 주입해도 결과 동일).
-    - 실패 시 session.parse_warnings에 누적. 빌드 자체는 진행 (graceful).
+    실패 시 빈 dict (caller 측 c_source fallback 또는 panel 미표시).
     """
-    if not req.c_source_root:
-        return
+    if not req.swuds_docx_path:
+        return {}
     try:
-        from backend.services.swut_asil_resolver import resolve_function_asil_map
-        result = resolve_function_asil_map(req.c_source_root)
-        # warnings는 session에 누적 — UI에 노출되도록.
-        if result.warnings:
-            session.parse_warnings.extend(result.warnings)
-        if result.function_asil_map and session.environments:
-            session.environments[0].function_asil_map = dict(result.function_asil_map)
-    except Exception as e:  # pragma: no cover — top-level safety net
-        _logger.warning("function_asil_map resolve failed: %s", e)
+        resolver = get_resolver()
+        docx_bytes = resolver.read_bytes(req.swuds_docx_path)
+        parse_warnings: list[str] = []
+        result = parse_swuds_docx(docx_bytes, parse_warnings=parse_warnings)
+        if not result.ok:
+            _logger.warning("SwUDS ASIL parse failed: %s", parse_warnings)
+            return {}
+        return dict(result.function_asil_map)
+    except (FileNotFoundError, PermissionError) as e:
+        _logger.warning("SwUDS docx read for ASIL failed: %s", e)
+        return {}
+
+
+def _apply_function_asil_map(req: SwUTBuildRequest, session) -> None:
+    """30차 W21 + 32차 W28: function_asil_map 주입 — c_source 우선 + SwUDS fallback.
+
+    Policy (32차 W28): c_source_root (Doxygen @asil — implementation truth) >
+    swuds_docx_path (설계 문서). 충돌 시 c_source 우선 + parse_warnings 누적.
+    merge 순서 역전 금지 — implementation truth 정책 위반.
+
+    - c_source_root 결과를 base로 + SwUDS 결과로 c_source에 없는 키만 채움
+    - 둘 다 부재면 빈 dict (panel 미표시)
+    - 충돌 (같은 fn_id가 다른 ASIL) 시 parse_warnings에 사유 누적
+
+    추출 결과는 session.environments[0]에 주입 (aggregate_session이 통합).
+    실패 시 session.parse_warnings에 누적 — 빌드 자체는 진행 (graceful).
+    """
+    if not (req.c_source_root or req.swuds_docx_path):
+        return
+
+    c_source_map: dict[str, str] = {}
+    if req.c_source_root:
+        try:
+            from backend.services.swut_asil_resolver import resolve_function_asil_map
+            result = resolve_function_asil_map(req.c_source_root)
+            if result.warnings:
+                session.parse_warnings.extend(result.warnings)
+            c_source_map = dict(result.function_asil_map)
+        except Exception as e:  # pragma: no cover — top-level safety net
+            _logger.warning("c_source function_asil_map resolve failed: %s", e)
+            session.parse_warnings.append(
+                f"c_source ASIL resolve 실패 — {type(e).__name__}"
+            )
+
+    # 32차 W28: SwUDS docx에서 2차 source.
+    swuds_map = _resolve_swuds_function_asil_map(req)
+
+    # Merge — c_source 우선 (swuds는 c_source 없는 키만 채움)
+    merged = dict(swuds_map)
+    conflicts = [
+        (fid, swuds_map[fid], c_source_map[fid])
+        for fid in c_source_map
+        if fid in swuds_map and swuds_map[fid] != c_source_map[fid]
+    ]
+    merged.update(c_source_map)
+
+    # 32차 reviewer W2 fix: source 통계 warning은 사용자가 실제 path 제공한 경우만.
+    # c_source만 제공된 정상 경로에서 "SwUDS 0건" 표시는 사용자 혼동 야기 → 조건부 출력.
+    sources_used = []
+    if req.c_source_root:
+        sources_used.append(f"c_source {len(c_source_map)}건")
+    if req.swuds_docx_path:
+        sources_used.append(f"SwUDS {len(swuds_map)}건")
+    if sources_used:
         session.parse_warnings.append(
-            f"function_asil_map resolve 실패 — {type(e).__name__}"
+            "function_asil_map source — "
+            + ", ".join(sources_used)
+            + f", merged {len(merged)}건"
         )
+
+    for fid, swuds_val, c_val in conflicts:
+        session.parse_warnings.append(
+            f"ASIL 충돌 '{fid}': SwUDS={swuds_val} vs c_source={c_val} "
+            "— c_source 우선 채택"
+        )
+
+    if merged and session.environments:
+        session.environments[0].function_asil_map = merged
 
 
 def _do_coverage_build(req: SwUTBuildRequest) -> Response:

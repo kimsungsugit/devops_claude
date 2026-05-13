@@ -250,21 +250,24 @@ ISO 26262 ASIL A 단위테스트 산출물 자동 생성 + cross-validation 플�
 | reviewer_override / approver_override | maxlen 100 + 줄바꿈 금지 | **✓ 26차 W16 추가** |
 | doc_id_sequence | digit only | ✓ |
 | jenkins_build_number | ge=1 le=99999 | (옵션) |
-| cache_root / log_folder / template_path / swuds_docx_path | maxlen 500 + 줄바꿈 금지 | ✓ (PathPickerDialog 21차) |
-| **c_source_root** | maxlen 500 + 줄바꿈 금지 | **✓ 30차 W21 추가 (PathPickerDialog + Doxygen @asil 추출)** |
+| cache_root / log_folder / template_path / swuds_docx_path | maxlen 500 + 줄바꿈 금지 | ✓ (PathPickerDialog 21차, **swuds_docx_path는 32차 W28 ASIL 2차 source 추가**) |
+| **c_source_root** | maxlen 500 + 줄바꿈 금지 | **✓ 30차 W21 추가 (PathPickerDialog + Doxygen @asil 추출 — 1차 ASIL source)** |
 | deviation_cases | max_length=200 + 합산 256KB + item key ≤20 | (programmatic) |
 
-### 함수별 ASIL 등급 (W21, 30차 완료 — 사용자 결정 A2)
+### 함수별 ASIL 등급 (W21+W29+W28, 30~32차 완료)
 
-**구현 완료 (30차 commit)**:
-- `backend/services/swut_asil_resolver.py` 신규 — C 소스 → `function_id → ASIL` 매핑
-- 기존 자산 재활용: `workflow/code_parser/c_parser.py::parse_c_project` (Doxygen `@asil` 추출 기존 보유)
-- `SwUTBuildRequest.c_source_root` 신규 옵션 필드 + `PathPickerDialog` 연동
-- Coverage / SUTR builder `summary.asil_distribution` + `asil_d_function_ids` 동일 키 (대칭)
-- 3.Coverage 시트 ASIL D 함수 row 빨간 강조 (`mark_asil_d_function` — `mark_fail_cell`과 RGB 동일하나 호출 의미 분리)
-- Frontend `.swut-asil-distribution-panel` + `--audit-asil-d-soft/-text` token
+**구현 완료 (30/31/32차 commit)**:
+- `backend/services/swut_asil_resolver.py` (30차) — C 소스 → `function_id → ASIL` 매핑 (1차 source)
+- `backend/services/swut_swuds_parser.py` (32차) — SwUDS docx 'ASIL' 라벨 → `function_asil_map` property (2차 source)
+- 기존 자산: `workflow/code_parser/c_parser.py::parse_c_project` (Doxygen `@asil`) + `_extract_description_from_table` 패턴 재활용
+- `SwUTBuildRequest.c_source_root` (30차) + `swuds_docx_path` (16차+32차) — PathPickerDialog 연동
+- Coverage / SUTR builder `summary.asil_distribution` + `asil_b/c/d_function_ids` + `asil_highlight_policy` (대칭)
+- 3.Coverage / SUTR Test Log 시트 ASIL B(파랑)/C(주황)/D(빨강) row 시각 강조 (31차 W29)
+- Frontend `.swut-asil-distribution-panel` + B/C/D 강조 클래스 + audit 정책 공지 카드
 
-**사용자 결정 (A2)**: 1.Traceability 시트 자체 변경 없음 (회사 v3.01 양식 호환 100%). ASIL 정보는 summary + UI + 3.Coverage 시트 강조로 표현.
+**ASIL Source 우선순위 (32차 W28)**: `c_source_root` > `swuds_docx_path` > 없음. 충돌 시 c_source 우선 + parse_warnings에 사유 누적. 구현 truth (C 소스 @asil)가 설계 문서(SwUDS)보다 정확하다는 가정.
+
+**사용자 결정 (A2, 30차)**: 1.Traceability 시트 자체 변경 없음 (회사 v3.01 양식 호환 100%). ASIL 정보는 summary + UI + 3.Coverage / SUTR Test Log 시트 강조로 표현.
 
 **ISO 26262 적용**:
 - ASIL D 함수 식별 → audit reviewer 즉시 인지 (MC/DC 커버리지 필수 안내)
@@ -322,12 +325,12 @@ ISO 26262 ASIL A 단위테스트 산출물 자동 생성 + cross-validation 플�
 
 > **Backward 호환 (W22, 28차 명시)**: 24차 이전 빌드 결과물은 동일 셀에 string `"N/A"` 보유. 회사 audit reviewer가 두 형식 모두 인지하도록 산출물에 라운드(24차+) 표기를 Cover 시트 doc_id_sequence에 포함 권장. 자동 변환/마이그레이션 스크립트는 제공 안 함 — 이전 산출물은 그대로 둘 것. 신규 빌드부터 노란 마킹 적용.
 
-### Workflow & Tests (31차 갱신 — 실측)
-- Backend SwUT 전체 회귀: **289개** (31차 W29 +6 ASIL B/C marker + W29 +3 distribution + W27 +3 SUTR test_log = +12)
+### Workflow & Tests (32차 갱신 — 실측)
+- Backend SwUT 전체 회귀: **~301개** (31-fix +5 D10/D14/policy / 32차 W28 +5 TestSwUDSAsilExtraction32 + +3 TestSwudsAsilFallback32)
 - 회귀 파일: 기존 + `test_swut_asil_resolver.py` (30차 신규)
-- Backend 전체: **1774개** (.venv Python 3.12.6 / 66.85s, timeout 없이 통과)
-- Frontend SwUTBuildSection: **24개**
-- Frontend 전체: **219개** (23 test files)
+- Backend 전체: **1784개** (.venv Python 3.12.6 / 122.00s, timeout 없이 통과)
+- Frontend SwUTBuildSection: **26개** (31-fix +1 D14 UNKNOWN-only / 32차는 hint string 변경 무영향)
+- Frontend 전체: **220개** (23 test files)
 
 ### 30차 W21 deep-reviewer Critical/Warning fix (commit 진행 의무)
 - **Critical (X5/S3 path traversal)**: `swut_asil_resolver` 에 시스템 디렉토리 blacklist (Windows: `C:/Windows`, `Program Files`, POSIX: `/etc`, `/root`, `/sys`, `/proc` 등) 추가 — `allowed_roots` 미지정해도 backstop으로 거부. ISO 26262 audit 도구 보안 경계.

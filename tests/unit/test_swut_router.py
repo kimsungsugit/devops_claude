@@ -279,6 +279,86 @@ class TestCSourceRoot21:
         assert r.status_code == 422
 
 
+class TestSwudsAsilFallback32:
+    """32차 W28: SwUDS docx → function_asil_map fallback + c_source 우선 merge."""
+
+    def _make_session_for_apply(self):
+        """_apply_function_asil_map 호출용 minimal session."""
+        from backend.services.swut_input_adapter import EnvironmentData, SwUTSession
+        return SwUTSession(
+            project_id="HDPDM01", version="v0.01",
+            source_kind="log_folder", source_path="",
+            environments=[EnvironmentData(env_name="SWTE_01")],
+        )
+
+    def test_c_source_priority_over_swuds(self, monkeypatch):
+        """c_source + swuds 둘 다 같은 fn_id 매핑 → c_source 값 우선."""
+        from backend.routers import swut as swut_router
+
+        # c_source resolver mock: SwUFn_0101 → "B"
+        class FakeAsilResult:
+            warnings: list[str] = []
+            function_asil_map = {"SwUFn_0101": "B"}
+
+        def fake_resolve(*_a, **_k):
+            return FakeAsilResult()
+
+        import backend.services.swut_asil_resolver as resolver_mod
+        monkeypatch.setattr(resolver_mod, "resolve_function_asil_map", fake_resolve)
+
+        # SwUDS resolver mock: SwUFn_0101 → "D" (충돌), SwUFn_0102 → "C"
+        monkeypatch.setattr(
+            swut_router, "_resolve_swuds_function_asil_map",
+            lambda req: {"SwUFn_0101": "D", "SwUFn_0102": "C"},
+        )
+
+        from backend.schemas import SwUTBuildRequest
+        req = SwUTBuildRequest(
+            project_id="HDPDM01", release_sw_version="1.0.0",
+            test_date="2024-02-19",
+            c_source_root="C:/src", swuds_docx_path="C:/swuds.docx",
+        )
+        session = self._make_session_for_apply()
+        swut_router._apply_function_asil_map(req, session)
+        merged = session.environments[0].function_asil_map
+        # SwUFn_0101은 c_source 우선 (B), SwUFn_0102는 SwUDS만 (C)
+        assert merged["SwUFn_0101"] == "B"
+        assert merged["SwUFn_0102"] == "C"
+        # 충돌 warning 누적
+        assert any("ASIL 충돌" in w for w in session.parse_warnings)
+
+    def test_swuds_only_fallback_when_no_c_source(self, monkeypatch):
+        """c_source 없고 swuds만 → SwUDS 결과 사용."""
+        from backend.routers import swut as swut_router
+        monkeypatch.setattr(
+            swut_router, "_resolve_swuds_function_asil_map",
+            lambda req: {"SwUFn_0103": "D"},
+        )
+        from backend.schemas import SwUTBuildRequest
+        req = SwUTBuildRequest(
+            project_id="HDPDM01", release_sw_version="1.0.0",
+            test_date="2024-02-19",
+            swuds_docx_path="C:/swuds.docx",  # c_source_root 빈 string
+        )
+        session = self._make_session_for_apply()
+        swut_router._apply_function_asil_map(req, session)
+        merged = session.environments[0].function_asil_map
+        assert merged == {"SwUFn_0103": "D"}
+
+    def test_both_empty_results_no_apply(self, monkeypatch):
+        """둘 다 부재 / 매핑 0 → environments[0].function_asil_map 빈 dict (default 유지)."""
+        from backend.routers import swut as swut_router
+        from backend.schemas import SwUTBuildRequest
+        req = SwUTBuildRequest(
+            project_id="HDPDM01", release_sw_version="1.0.0",
+            test_date="2024-02-19",
+        )  # 둘 다 빈 string
+        session = self._make_session_for_apply()
+        swut_router._apply_function_asil_map(req, session)
+        # 빌드는 진행 (silent), function_asil_map은 default 빈 dict
+        assert session.environments[0].function_asil_map == {}
+
+
 class TestSummaryHeaderTruncation21:
     """30차 W21 deep-reviewer Warning fix — X-SwUT-Summary 1024B 한도에서
     asil_d_function_ids list가 잘려도 frontend JSON.parse가 실패하지 않도록

@@ -345,7 +345,7 @@ export default function SwUTBuildSection() {
           value={form.swuds_docx_path}
           onChange={v => setField('swuds_docx_path', v)}
           placeholder="U:\...\(HDPDM01)SwUDS_v3.docx"
-          hint="제공 시 2.Consistency 시트에 SwUDS↔SwUTS 함수 ID 매핑 row 자동 추가"
+          hint="제공 시 2.Consistency 시트에 SwUDS↔SwUTS 함수 ID 매핑 row 자동 추가 + (c_source 미제공 시) 표 'ASIL' 라벨에서 함수별 ASIL 추출"
           fullWidth
         />
         <button

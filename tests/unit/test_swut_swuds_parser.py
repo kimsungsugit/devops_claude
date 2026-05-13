@@ -291,3 +291,70 @@ class TestSwUDSSchemaIntegration:
                 test_date="2024-02-19",
                 swuds_docx_path="U:/" + "a" * 600,
             )
+
+
+def _build_swuds_docx_with_asil(
+    function_id: str, asil_raw: str | None, asil_label: str = "ASIL",
+) -> bytes:
+    """32차 W28: 합성 SwUDS docx — heading 다음 표에 ASIL 라벨/값 row 포함.
+
+    asil_raw=None이면 ASIL row 생략 (라벨 미발견 fail-safe 시뮬레이션).
+    """
+    from docx import Document  # type: ignore
+    doc = Document()
+    doc.add_paragraph(f"{function_id} — Sample Heading")
+    rows = 3 if asil_raw is not None else 2
+    tbl = doc.add_table(rows=rows, cols=2)
+    tbl.cell(0, 0).text = "Description"
+    tbl.cell(0, 1).text = "Sample fn"
+    tbl.cell(1, 0).text = "Interface"
+    tbl.cell(1, 1).text = "void"
+    if asil_raw is not None:
+        tbl.cell(2, 0).text = asil_label
+        tbl.cell(2, 1).text = asil_raw
+    buf = io.BytesIO()
+    doc.save(buf)
+    return buf.getvalue()
+
+
+class TestSwUDSAsilExtraction32:
+    """32차 W28: SwUDS docx 함수별 ASIL 추출 (heading 다음 표 'ASIL' 라벨)."""
+
+    def test_extracts_asil_from_english_label(self):
+        """영문 'ASIL' 라벨 옆 'ASIL-B' → 'B'."""
+        bytes_ = _build_swuds_docx_with_asil("SwUFn_0101", "ASIL-B")
+        result = parse_swuds_docx(bytes_)
+        assert result.ok
+        assert result.entries[0].asil == "B"
+        assert result.function_asil_map == {"SwUFn_0101": "B"}
+
+    def test_extracts_asil_from_korean_label(self):
+        """한글 '안전등급' 라벨도 매칭."""
+        bytes_ = _build_swuds_docx_with_asil(
+            "SwUFn_0102", "ASIL-D", asil_label="안전등급",
+        )
+        result = parse_swuds_docx(bytes_)
+        assert result.ok
+        assert result.entries[0].asil == "D"
+
+    def test_extracts_asil_letter_only_value(self):
+        """라벨 옆 셀이 'B' 단일 letter — c_parser fallback 패턴 정규화."""
+        bytes_ = _build_swuds_docx_with_asil("SwUFn_0103", "B")
+        result = parse_swuds_docx(bytes_)
+        assert result.ok
+        assert result.entries[0].asil == "B"
+
+    def test_no_asil_label_means_blank(self):
+        """ASIL row 없는 docx → entry.asil = '' + function_asil_map 빈 dict."""
+        bytes_ = _build_swuds_docx_with_asil("SwUFn_0104", None)
+        result = parse_swuds_docx(bytes_)
+        assert result.ok
+        assert result.entries[0].asil == ""
+        assert result.function_asil_map == {}
+
+    def test_invalid_asil_value_returns_blank(self):
+        """라벨은 있으나 값이 'High'/'Medium' 같은 비표준 — 빈 string."""
+        bytes_ = _build_swuds_docx_with_asil("SwUFn_0105", "High")
+        result = parse_swuds_docx(bytes_)
+        assert result.ok
+        assert result.entries[0].asil == ""
