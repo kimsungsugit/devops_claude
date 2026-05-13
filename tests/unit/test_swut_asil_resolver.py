@@ -193,14 +193,21 @@ class TestSystemDirBlacklist:
     @pytest.mark.parametrize(
         "blocked_path",
         [
+            # Windows
             "C:/Windows",
             "C:/Windows/System32",
             "c:/program files",
+            # Linux
             "/etc",
             "/etc/passwd_backup",
             "/root",
             "/sys/class",
             "/proc/1",
+            # macOS (31차 prep D7 추가)
+            "/Applications",
+            "/Library/Preferences",
+            "/System/Library",
+            "/private/etc",
         ],
     )
     def test_system_directory_rejected_without_allowed_roots(

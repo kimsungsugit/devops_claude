@@ -140,12 +140,17 @@ def resolve_function_asil_map(
     abs_root_norm = str(root_path.resolve()).replace("\\", "/").lower()
 
     # 2a) 시스템 디렉토리 blacklist — allowed_roots 부재 시 backstop.
-    # Windows + POSIX 모두 커버. ISO 26262 audit 도구가 임의 디렉토리 scan
-    # 못하도록 명시적 거부.
+    # Windows + POSIX(Linux) + macOS 모두 커버. ISO 26262 audit 도구가 임의
+    # 디렉토리 scan 못하도록 명시적 거부. 31차 prep D7: macOS 추가.
     _BLACKLIST = (
+        # Windows
         "c:/windows", "c:/program files", "c:/programdata",
+        # Linux
         "/etc", "/root", "/sys", "/proc", "/dev", "/boot",
-        "/var/log", "/usr/bin", "/usr/sbin",
+        "/var/log", "/usr/bin", "/usr/sbin", "/usr/lib",
+        # macOS (31차 prep D7 추가)
+        "/applications", "/library", "/system", "/private",
+        "/usr/local/bin", "/usr/local/sbin",
     )
     for bad in _BLACKLIST:
         if abs_root_norm == bad or abs_root_norm.startswith(bad + "/"):

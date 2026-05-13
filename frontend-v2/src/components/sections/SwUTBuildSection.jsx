@@ -361,7 +361,7 @@ export default function SwUTBuildSection() {
           value={form.c_source_root}
           onChange={v => setField('c_source_root', v)}
           placeholder="U:\...\HDPDM01\src\"
-          hint="제공 시 Doxygen @asil 태그에서 함수별 ASIL 추출 — ASIL D 함수는 Excel 빨강 강조 + UI 분포 패널"
+          hint="제공 시 Doxygen @asil 태그에서 함수별 ASIL 추출 — ASIL D 함수는 Excel 빨강 강조 + UI 분포 패널. ⚠️ Hyundai SwUFn_NNNN 함수명 컨벤션 전용 (다른 컨벤션은 매칭 0건 → 패널 미표시)"
           fullWidth
         />
         <button
