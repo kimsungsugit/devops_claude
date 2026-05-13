@@ -262,6 +262,7 @@ def _write_test_log(
     ws,
     session: SwUTSession,
     function_asil_map: dict[str, str] | None = None,
+    out_warnings: list[str] | None = None,
 ) -> int:
     """Test Log 시트 — TC별 input/expected/actual/pass.
 
@@ -284,20 +285,23 @@ def _write_test_log(
     col = pos[1]
     asil_map = function_asil_map or {}
 
-    # 31차 W27 reviewer W3: col+4/5 빈 영역 가정 검증.
+    # 31차 W27 reviewer W3 + 31-fix D10: col+4/5 빈 영역 가정 검증.
     # 헤더 row의 col+4/5 셀이 비어있는지 확인 — 회사 v3.01 양식 업그레이드 시
-    # 데이터 덮어쓰기 위험 가시화.
+    # 데이터 덮어쓰기 위험 가시화. logger.warning은 backend 로그 전용 → 사용자
+    # UI에 표시 안 됨. out_warnings에도 누적해서 X-SwUT-Warnings 헤더 통해
+    # frontend "Warnings" 패널에 노출.
     header_col4 = ws.cell(pos[0], col + 4).value
     header_col5 = ws.cell(pos[0], col + 5).value
     if header_col4 or header_col5:
-        # 빈 영역 가정 위반 — 양식이 col+4/5 이미 사용 중. 로그만 남기고 진행.
-        # (silent skip 보다 reviewer 가시화 우선)
-        import logging
-        logging.getLogger(__name__).warning(
-            "SUTR Test Log col+4/5 not empty (col+4=%r, col+5=%r) — "
-            "회사 양식 업그레이드 가능성, ASIL 컬럼 덮어쓰기 진행",
-            header_col4, header_col5,
+        msg = (
+            f"SUTR Test Log col+4/5 not empty (col+4={header_col4!r}, "
+            f"col+5={header_col5!r}) — 회사 양식 업그레이드 가능성, ASIL "
+            "컬럼 덮어쓰기 진행. audit reviewer 확인 권장"
         )
+        import logging
+        logging.getLogger(__name__).warning(msg)
+        if out_warnings is not None:
+            out_warnings.append(msg)
 
     written = 0
     for env in session.environments:
@@ -415,6 +419,11 @@ def build_sutr(
         "asil_b_function_ids": ids_by_asil.get("B", []),
         "asil_c_function_ids": ids_by_asil.get("C", []),
         "asil_d_function_ids": ids_by_asil.get("D", []),
+        # 31-fix D15: audit 공지 메타 — Coverage builder와 대칭.
+        "asil_highlight_policy": (
+            "B=파랑(#E2F0FF) / C=주황(#FFE5CC) / D=빨강(#FFC7CE) — "
+            "31차 비표준 audit 확장 (회사 v3.01 양식은 빨강만 사용)"
+        ),
     }
 
     cover_ws = next((wb[n] for n in sheet_names if n.lower() == "cover"), None)
@@ -443,6 +452,7 @@ def build_sutr(
         n = _write_test_log(
             log_ws, session,
             function_asil_map=agg.get("function_asil_map"),
+            out_warnings=warnings,
         )
         summary["test_log_rows_written"] = n
 

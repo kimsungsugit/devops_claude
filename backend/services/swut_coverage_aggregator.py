@@ -683,6 +683,11 @@ def build_coverage_report(
         "asil_b_function_ids": ids_by_asil.get("B", []),
         "asil_c_function_ids": ids_by_asil.get("C", []),
         "asil_d_function_ids": ids_by_asil.get("D", []),
+        # 31-fix D15: audit reviewer 공지 메타 — 회사 v3.01 표준 외 색상 확장 명시.
+        "asil_highlight_policy": (
+            "B=파랑(#E2F0FF) / C=주황(#FFE5CC) / D=빨강(#FFC7CE) — "
+            "31차 비표준 audit 확장 (회사 v3.01 양식은 빨강만 사용)"
+        ),
     }
 
     # Cover

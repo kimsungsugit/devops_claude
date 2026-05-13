@@ -388,13 +388,19 @@ export default function SwUTBuildSection() {
         </button>
       </div>
 
-      {/* 30차 W21: ASIL 분포 패널 — c_source_root 제공 시 함수별 ASIL 노출 */}
+      {/* 30차 W21 + 31-fix D14: UNKNOWN만 있을 때 panel 숨김 — 사용자에게 의미 부재 */}
       {lastSummary?.asil_distribution &&
-       Object.keys(lastSummary.asil_distribution).length > 0 && (
+       Object.keys(lastSummary.asil_distribution).some(k => k !== 'UNKNOWN') && (
         <div className="swut-asil-distribution-panel" data-testid="swut-asil-distribution">
           <div className="swut-asil-distribution-title">
             🛡️ ASIL 분포 (ISO 26262 audit reviewer 검토 우선순위)
           </div>
+          {/* 31-fix D15: audit 정책 공지 노트 — 회사 v3.01 양식 외 색상 확장 명시 */}
+          {lastSummary.asil_highlight_policy && (
+            <div className="swut-asil-policy-note" data-testid="swut-asil-policy-note">
+              ℹ️ {lastSummary.asil_highlight_policy}
+            </div>
+          )}
           <ul className="swut-asil-distribution-list">
             {Object.entries(lastSummary.asil_distribution).map(([key, count]) => {
               const bucket = (count > 0 && {

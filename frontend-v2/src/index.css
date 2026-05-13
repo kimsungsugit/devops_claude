@@ -1356,6 +1356,15 @@ label {
   margin-bottom: var(--sp-2);
   font-size: var(--text-md);
 }
+.swut-asil-policy-note {
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+  margin-bottom: var(--sp-2);
+  padding: 4px 8px;
+  background: var(--hover);
+  border-radius: var(--radius-sm);
+  font-style: italic;
+}
 .swut-asil-distribution-list {
   list-style: none;
   padding: 0;

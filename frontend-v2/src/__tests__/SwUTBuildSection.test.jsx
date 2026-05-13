@@ -425,6 +425,40 @@ describe('SwUTBuildSection', () => {
     expect(screen.queryByTestId('swut-asil-distribution')).toBeNull();
   });
 
+  it('hides ASIL distribution panel when only UNKNOWN bucket present (31-fix D14)', async () => {
+    // c_source_root 미제공 / 매칭 0 시 asil_distribution = {UNKNOWN: N} 만 — panel 무의미
+    const fakeBlob = new Blob(['x'], { type: 'application/octet-stream' });
+    const fakeSummary = {
+      function_rows: 5,
+      asil_distribution: { UNKNOWN: 5 },
+      asil_b_function_ids: [],
+      asil_c_function_ids: [],
+      asil_d_function_ids: [],
+    };
+    const fakeHeaders = new Headers({
+      'X-SwUT-Summary': JSON.stringify(fakeSummary),
+      'X-SwUT-Warnings': JSON.stringify([]),
+      'X-SwUT-Filename': 'cov.xlsx',
+    });
+    const fetchSpy = vi.spyOn(global, 'fetch').mockResolvedValue({
+      ok: true, status: 200, headers: fakeHeaders,
+      blob: () => Promise.resolve(fakeBlob),
+      json: () => Promise.resolve({}),
+      text: () => Promise.resolve(''),
+    });
+
+    render(<SwUTBuildSection />);
+    fireEvent.change(screen.getByLabelText(/Release SW Version/), { target: { value: '1.0.0' } });
+    fireEvent.change(screen.getByLabelText(/Log Folder/), { target: { value: 'C:/fake/log' } });
+    fireEvent.click(screen.getByText(/Coverage Report 빌드/));
+
+    await waitFor(() => { expect(fetchSpy).toHaveBeenCalled(); });
+    // 빌드 완료 후에도 패널 미표시
+    await waitFor(() => {
+      expect(screen.queryByTestId('swut-asil-distribution')).toBeNull();
+    });
+  });
+
   it('renders ASIL distribution panel with ASIL D highlighted when summary contains data', async () => {
     // mock fetch 응답에 X-SwUT-Summary 헤더 + asil_distribution + asil_d_function_ids 포함
     const fakeBlob = new Blob(['x'], { type: 'application/octet-stream' });
@@ -432,6 +466,8 @@ describe('SwUTBuildSection', () => {
       function_rows: 5,
       asil_distribution: { ASIL_A: 2, ASIL_B: 1, ASIL_D: 2, UNKNOWN: 0 },
       asil_d_function_ids: ['SwUFn_0103', 'SwUFn_0107'],
+      // 31-fix D15: audit 정책 공지 메타
+      asil_highlight_policy: 'B=파랑 / C=주황 / D=빨강 — 31차 비표준 audit 확장',
     };
     const fakeHeaders = new Headers({
       'X-SwUT-Summary': JSON.stringify(fakeSummary),
@@ -473,5 +509,9 @@ describe('SwUTBuildSection', () => {
     expect(functionsBox).toBeTruthy();
     expect(functionsBox.textContent).toContain('SwUFn_0103');
     expect(functionsBox.textContent).toContain('SwUFn_0107');
+    // 5) 31-fix D15: audit 정책 공지 노트
+    const policyNote = panel.querySelector('[data-testid="swut-asil-policy-note"]');
+    expect(policyNote).toBeTruthy();
+    expect(policyNote.textContent).toContain('31차 비표준 audit 확장');
   });
 });

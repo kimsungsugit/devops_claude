@@ -597,6 +597,54 @@ class TestSutrTestLogAsil31:
         assert ws.cell(2, 5).value == "SwUFn_0103"
         assert ws.cell(2, 6).value == ""
 
+    def test_test_log_col4_5_non_empty_emits_warning_to_session(self):
+        """31-fix D10: col+4/5 영역에 기존 데이터 있으면 out_warnings 누적."""
+        import openpyxl
+        from backend.services.swut_sutr_aggregator import _write_test_log
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.cell(1, 1).value = "Test Case ID"
+        # col+4/5 (5, 6)에 양식 사용 중 시뮬레이션
+        ws.cell(1, 5).value = "Tester"   # 회사가 col+4를 Tester로 사용
+        ws.cell(1, 6).value = "Date"     # col+5를 Date로 사용
+
+        session = _make_session()
+        env = session.environments[0]
+        env.test_cases = {"SwUTC_SwUFn_0103.001": "..."}
+        env.test_results = {}
+
+        warnings: list[str] = []
+        _write_test_log(
+            ws, session,
+            function_asil_map={"SwUFn_0103": "D"},
+            out_warnings=warnings,
+        )
+        # logger.warning + out_warnings 둘 다 — sufficient evidence
+        assert any("col+4/5 not empty" in w for w in warnings)
+        assert any("audit reviewer 확인" in w for w in warnings)
+
+    def test_test_log_col4_5_empty_no_warning(self):
+        """31-fix D10: col+4/5 빈 영역이면 warning 0."""
+        import openpyxl
+        from backend.services.swut_sutr_aggregator import _write_test_log
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.cell(1, 1).value = "Test Case ID"
+        # col+4/5 빈 상태 (default)
+
+        session = _make_session()
+        env = session.environments[0]
+        env.test_cases = {"SwUTC_SwUFn_0103.001": "..."}
+        env.test_results = {}
+
+        warnings: list[str] = []
+        _write_test_log(
+            ws, session,
+            function_asil_map={"SwUFn_0103": "D"},
+            out_warnings=warnings,
+        )
+        assert not any("col+4/5" in w for w in warnings)
+
 
 # ---------------------------------------------------------------------------
 # SUTR aggregator
