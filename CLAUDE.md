@@ -266,7 +266,7 @@ ISO 26262 ASIL A 단위테스트 산출물 자동 생성 + cross-validation 플�
 
 **How to apply**: 사용자가 다음 SwUT 시리즈 재개 시 `/plan` 요청 우선. 본 작업 미수행 상태로 ASIL B 이상 audit evidence 단독 제출은 위험 — manual review에서 ASIL 일관성 명시 의무.
 
-### 시각 강조 정책 (23/24차)
+### 시각 강조 정책 (23/24/29차)
 
 산출물 cell에 audit reviewer 친화 표시:
 
@@ -278,10 +278,32 @@ ISO 26262 ASIL A 단위테스트 산출물 자동 생성 + cross-validation 플�
 
 24차 silent "N/A" 제거 — Actual Coverage/Pass ratio가 data 부재 시 `▶ 사용자 입력 필요 — VectorCAST 데이터 부재 — log_folder 재확인` 명시 (deep-reviewer X7 강화).
 
+### Design Token 단일 출처 (29차 W17)
+
+**Backend RGB / placeholder 단일 출처**: `backend/services/design_tokens.py`
+- `USER_INPUT_FILL_RGB = "FFFFEB9C"` — Excel 셀 노란 배경
+- `FAIL_FILL_RGB = "FFFFC7CE"` — Excel 셀 빨간 배경
+- `USER_INPUT_PLACEHOLDER = "▶ 사용자 입력 필요"` — 24차 silent "N/A" 대체 안내
+
+`excel_template_utils.py`가 위 모듈에서 import — 이전 (23~28차) module-level hardcoded 제거. 신규 backend Excel builder는 반드시 `design_tokens`에서 import.
+
+**Backend ↔ Frontend 색상 컨텍스트 매트릭스 (의도된 분리)**:
+
+| 컨텍스트 | 출처 | 용도 |
+|----------|------|------|
+| Backend Excel 셀 배경 | `design_tokens.py` `USER_INPUT_FILL_RGB`/`FAIL_FILL_RGB` (warm pastel — `#FFEB9C`/`#FFC7CE`) | audit reviewer 친화 부드러운 hint |
+| Frontend UI 텍스트/badge | `frontend-v2/src/index.css` `--color-warning`/`--color-danger` (Tailwind amber-500/red-500) | UI 시인성 — 명도/대비 강함 |
+
+**중요**: 두 컨텍스트는 **단일 RGB로 통합하지 말 것**. Excel 셀 배경(부드러운 톤)과 React UI 텍스트(시인성)는 다른 색상 요구. design tokens는 같은 audit 의미를 가지지만 시각적 구현은 컨텍스트마다 적합한 톤 사용.
+
+**변경 시 동기 정책**: backend `design_tokens.py` RGB 변경 시 본 CLAUDE.md 섹션 + audit reviewer 통보 의무 (산출물 시인성 정책 영향).
+
 > **Backward 호환 (W22, 28차 명시)**: 24차 이전 빌드 결과물은 동일 셀에 string `"N/A"` 보유. 회사 audit reviewer가 두 형식 모두 인지하도록 산출물에 라운드(24차+) 표기를 Cover 시트 doc_id_sequence에 포함 권장. 자동 변환/마이그레이션 스크립트는 제공 안 함 — 이전 산출물은 그대로 둘 것. 신규 빌드부터 노란 마킹 적용.
 
-### Workflow & Tests (28차 갱신 — 실측)
-- Backend SwUT 전체 회귀: **220개** (`test_swut_aggregators.py` + `test_swut_router.py` + `test_swut_consistency_checker.py` + `test_swut_deviation_generator.py` + `test_swut_input_adapter.py` + `test_swut_swuds_parser.py` + `test_excel_template_utils.py`)
+### Workflow & Tests (29차 갱신 — 실측)
+- Backend SwUT 전체 회귀: **221개** (29차 W17 design_tokens 회귀 +1)
+- 단, `test_swut_input_adapter.py::TestCollectFromLogFolder::test_collects_one_environment` **1건** msys64 mingw Python (`os.sep='/'` quirk) 환경에서만 실패 — Windows native Python에서는 통과 추정. fake_resolver와 `os.path.join` 결과 mismatch (path separator). **30차+ 환경 호환 fix 예정**.
+- 회귀 파일: `test_swut_aggregators.py` + `test_swut_router.py` + `test_swut_consistency_checker.py` + `test_swut_deviation_generator.py` + `test_swut_input_adapter.py` + `test_swut_swuds_parser.py` + `test_excel_template_utils.py`
 - Backend 전체: **1701개** (timeout 없이 통과)
 - Frontend SwUTBuildSection: **21개** (vitest)
 - Frontend 전체: **216개** (23 test files)

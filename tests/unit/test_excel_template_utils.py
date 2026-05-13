@@ -332,3 +332,22 @@ class TestVisualMarkers23:
         mark_user_input_required(ws, 2, 4, hint="merged")  # D2 → anchor B2
         assert ws.cell(2, 2).value is not None
         assert "▶ 사용자 입력 필요" in ws.cell(2, 2).value
+
+    def test_design_tokens_single_source_29w17(self):
+        """29차 W17: excel_template_utils가 design_tokens에서 RGB를 import."""
+        from backend.services import design_tokens
+        from backend.services.excel_template_utils import (
+            _FAIL_FILL_RGB,
+            _USER_INPUT_FILL_RGB,
+            USER_INPUT_PLACEHOLDER,
+        )
+
+        # 동일 객체(=Final 상수)를 가리키는지 확인 — 단일 출처 보장
+        assert _USER_INPUT_FILL_RGB == design_tokens.USER_INPUT_FILL_RGB
+        assert _FAIL_FILL_RGB == design_tokens.FAIL_FILL_RGB
+        assert USER_INPUT_PLACEHOLDER == design_tokens.USER_INPUT_PLACEHOLDER
+
+        # 값 자체도 회귀 — audit 정책 RGB 변경 시 본 테스트가 실패해야 함
+        assert _USER_INPUT_FILL_RGB == "FFFFEB9C"
+        assert _FAIL_FILL_RGB == "FFFFC7CE"
+        assert USER_INPUT_PLACEHOLDER == "▶ 사용자 입력 필요"

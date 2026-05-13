@@ -15,6 +15,12 @@ import re
 import zipfile
 from typing import Any
 
+from .design_tokens import (
+    FAIL_FILL_RGB as _FAIL_FILL_RGB,
+    USER_INPUT_FILL_RGB as _USER_INPUT_FILL_RGB,
+    USER_INPUT_PLACEHOLDER,
+)
+
 try:
     from openpyxl.styles import PatternFill  # type: ignore
     _HAS_PATTERN_FILL = True
@@ -348,11 +354,8 @@ def safe_write(ws: Any, row: int, col: int, value: Any) -> bool:
         return False
 
 
-# 23차 T192: 시각 표시 — 사용자 입력 필요 / FAIL 강조용 fill 색상.
-_USER_INPUT_FILL_RGB = "FFFFEB9C"  # 연한 노랑 (audit reviewer 친화)
-_FAIL_FILL_RGB = "FFFFC7CE"        # 연한 빨강
-
-USER_INPUT_PLACEHOLDER = "▶ 사용자 입력 필요"
+# 23차 T192 / 29차 W17: 시각 강조 RGB + placeholder 텍스트는
+# ``design_tokens`` 단일 출처에서 import (위 import 블록 참조).
 
 
 def _apply_fill(ws: Any, row: int, col: int, rgb: str) -> bool:

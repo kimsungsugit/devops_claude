@@ -1,0 +1,46 @@
+"""SwUT audit 시각 강조 디자인 토큰 (29차 W17, 단일 출처).
+
+회사 v3.01 xlsx/xlsm 산출물의 cell fill 색상 및 안내 문구 표준.
+audit reviewer가 한눈에 "사용자 입력 필요" vs "자동 채움" vs "FAIL"을
+구분 가능하도록 23/24차에 도입된 정책의 단일 출처 모듈.
+
+배경:
+    이전 (23~28차) excel_template_utils.py module-level 상수에 RGB hex가
+    hardcoded됐고, frontend tokens.css는 별도 Tailwind palette를 사용.
+    두 컨텍스트는 의도적으로 다른 색상을 쓰지만 (Excel 셀 배경 vs UI 텍스트
+    시인성), audit 정책의 RGB 단일 출처는 backend에만 존재해야 안전.
+
+design vs runtime:
+    이 모듈은 정적 상수만 export — Pydantic schema도 아님, lazy import도
+    아님. 모든 backend 코드는 import 시점에 즉시 값 확정.
+
+ISO 26262 ASIL A audit 영향:
+    cell fill 색상이 변경되면 audit reviewer에게 통보 (산출물 시인성 영향).
+    본 모듈 변경 = 정책 변경 = CLAUDE.md `## 시각 강조 정책` 섹션 동기 갱신
+    의무.
+"""
+from __future__ import annotations
+
+from typing import Final
+
+
+# ---- Excel cell fill 색상 (openpyxl PatternFill start_color/end_color) ----
+
+# 연한 노란 (warm pastel yellow, #FFEB9C). 사용자 입력 필요 셀 배경.
+USER_INPUT_FILL_RGB: Final[str] = "FFFFEB9C"
+
+# 연한 빨강 (warm pastel red, #FFC7CE). FAIL row Result 셀 배경.
+FAIL_FILL_RGB: Final[str] = "FFFFC7CE"
+
+
+# ---- 사용자 입력 placeholder 문자열 (셀에 쓰이는 안내) ----
+
+# 24차 silent "N/A" 제거 정책에 따라 명시적 안내. 뒤에 hint를 " — "로 이어 붙임.
+USER_INPUT_PLACEHOLDER: Final[str] = "▶ 사용자 입력 필요"
+
+
+__all__ = [
+    "USER_INPUT_FILL_RGB",
+    "FAIL_FILL_RGB",
+    "USER_INPUT_PLACEHOLDER",
+]
