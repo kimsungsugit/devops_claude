@@ -37,6 +37,12 @@ FAIL_FILL_RGB: Final[str] = "FFFFC7CE"
 # 동일 셀 두 의미 겹치면 ASIL D 우선 (호출 순서 보장).
 ASIL_D_FILL_RGB: Final[str] = "FFFFC7CE"
 
+# 31차 W29: ASIL B (분기 커버리지 필수) / ASIL C (MC/DC 권장) 함수 row 강조.
+# 노란 (FFFFEB9C 사용자 입력) / 빨간 (FFFFC7CE FAIL/ASIL D) 과 명확히 구분되는
+# pastel color 사용. audit reviewer가 한눈에 ASIL 등급 차이 인지.
+ASIL_B_FILL_RGB: Final[str] = "FFE2F0FF"   # 연한 파랑 (분기 커버리지 필수)
+ASIL_C_FILL_RGB: Final[str] = "FFFFE5CC"   # 연한 주황 (MC/DC 커버리지 권장)
+
 
 # ---- 사용자 입력 placeholder 문자열 (셀에 쓰이는 안내) ----
 
@@ -47,6 +53,8 @@ USER_INPUT_PLACEHOLDER: Final[str] = "▶ 사용자 입력 필요"
 __all__ = [
     "USER_INPUT_FILL_RGB",
     "FAIL_FILL_RGB",
+    "ASIL_B_FILL_RGB",
+    "ASIL_C_FILL_RGB",
     "ASIL_D_FILL_RGB",
     "USER_INPUT_PLACEHOLDER",
 ]

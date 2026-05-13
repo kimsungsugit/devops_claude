@@ -16,6 +16,8 @@ import zipfile
 from typing import Any
 
 from .design_tokens import (
+    ASIL_B_FILL_RGB as _ASIL_B_FILL_RGB,
+    ASIL_C_FILL_RGB as _ASIL_C_FILL_RGB,
     ASIL_D_FILL_RGB as _ASIL_D_FILL_RGB,
     FAIL_FILL_RGB as _FAIL_FILL_RGB,
     USER_INPUT_FILL_RGB as _USER_INPUT_FILL_RGB,
@@ -420,6 +422,24 @@ def mark_asil_d_function(ws: Any, row: int, col: int) -> bool:
     빌더는 ASIL 강조를 FAIL 강조보다 나중에 호출 권장.
     """
     return _apply_fill(ws, row, col, _ASIL_D_FILL_RGB)
+
+
+def mark_asil_b_function(ws: Any, row: int, col: int) -> bool:
+    """31차 W29: 3.Coverage 시트의 ASIL B 함수 row 강조 — 연한 파랑.
+
+    audit 검토 우선순위: 분기 커버리지 필수. ASIL D (빨간)보다 낮은 시인성
+    으로 단계 구분.
+    """
+    return _apply_fill(ws, row, col, _ASIL_B_FILL_RGB)
+
+
+def mark_asil_c_function(ws: Any, row: int, col: int) -> bool:
+    """31차 W29: 3.Coverage 시트의 ASIL C 함수 row 강조 — 연한 주황.
+
+    audit 검토 우선순위: MC/DC 커버리지 권장. ASIL D (빨간)과 ASIL B (파랑)
+    사이 단계 — 색상으로 시각적 등급 차이 명시.
+    """
+    return _apply_fill(ws, row, col, _ASIL_C_FILL_RGB)
 
 
 def write_label_or_mark(

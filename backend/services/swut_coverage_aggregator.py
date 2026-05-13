@@ -37,6 +37,8 @@ except ImportError:  # pragma: no cover
 from backend.services.excel_template_utils import (
     BLANK_MARKUP,
     collect_git_history,
+    mark_asil_b_function,
+    mark_asil_c_function,
     mark_asil_d_function,
     mark_fail_cell,
     safe_write,
@@ -199,20 +201,21 @@ def _write_test_summary_sheet(
 def _compute_asil_distribution(
     function_rows: list[FunctionCoverage],
     function_asil_map: dict[str, str],
-) -> tuple[dict[str, int], list[str]]:
-    """30차 W21: function 별 ASIL 등급 분포 계산.
+) -> tuple[dict[str, int], dict[str, list[str]]]:
+    """30차 W21 + 31차 W29: function 별 ASIL 등급 분포 계산.
 
     Args:
         function_rows: 집계된 함수 list (``FunctionCoverage``).
         function_asil_map: ``swut_asil_resolver`` 결과 (``{SwUFn_NNNN: "A"/"B"/...}``).
 
     Returns:
-        ``(distribution, asil_d_function_ids)``
+        ``(distribution, function_ids_by_asil)``
         - distribution: 등급별 개수 (예: ``{"ASIL_A": 15, "ASIL_D": 2, "UNKNOWN": 5}``)
-        - asil_d_function_ids: ASIL D 함수 ID list (정렬됨).
+        - function_ids_by_asil: 등급별 함수 ID list dict — keys: "B"/"C"/"D"
+          (A/QM/UNKNOWN은 audit 강조 대상 아니므로 누적 안 함). 정렬됨.
     """
     distribution: dict[str, int] = {}
-    asil_d_ids: list[str] = []
+    ids_by_asil: dict[str, list[str]] = {"B": [], "C": [], "D": []}
 
     for fc in function_rows:
         # function_id 결정 — fc.unit_id 또는 fc.name에서 SwUFn_NNNN 추출.
@@ -234,10 +237,14 @@ def _compute_asil_distribution(
 
         bucket = f"ASIL_{asil}" if asil else "UNKNOWN"
         distribution[bucket] = distribution.get(bucket, 0) + 1
-        if asil == "D" and matched_id:
-            asil_d_ids.append(matched_id)
+        # 31차 W29: B/C/D 모두 누적 (이전 30차는 D만)
+        if asil in ("B", "C", "D") and matched_id:
+            ids_by_asil[asil].append(matched_id)
 
-    return distribution, sorted(set(asil_d_ids))
+    return (
+        distribution,
+        {k: sorted(set(v)) for k, v in ids_by_asil.items()},
+    )
 
 
 def _write_coverage_sheet(ws, agg: dict[str, Any]) -> int:
@@ -290,7 +297,7 @@ def _write_coverage_sheet(ws, agg: dict[str, Any]) -> int:
         safe_write(ws, r, 8, fc.branch.covered)
         safe_write(ws, r, 9, "O" if fc.branch.passed else "X")
 
-        # 30차 W21: ASIL D 함수면 row의 핵심 컬럼 (Unit ID + Function Name) 강조.
+        # 30차 W21 + 31차 W29: ASIL B/C/D 함수면 row의 핵심 컬럼 강조.
         # fc.unit_id 가 SwUFn_NNNN 패턴일 수 있고 또는 다른 ID. 둘 다 매칭 시도.
         asil = function_asil_map.get(fc.unit_id) or function_asil_map.get(fc.name)
         if not asil:
@@ -298,9 +305,15 @@ def _write_coverage_sheet(ws, agg: dict[str, Any]) -> int:
             m = _TC_FN_RE.search(fc.unit_id or "") or _TC_FN_RE.search(fc.name or "")
             if m:
                 asil = function_asil_map.get(m.group(1))
-        if asil == "D":
+        # ASIL 등급별 시각 강조 — D(빨강) > C(주황) > B(파랑) 단계
+        _marker = {
+            "B": mark_asil_b_function,
+            "C": mark_asil_c_function,
+            "D": mark_asil_d_function,
+        }.get(asil or "")
+        if _marker:
             for col in (2, 3):  # Unit ID + Function Name 컬럼
-                mark_asil_d_function(ws, r, col)
+                _marker(ws, r, col)
 
         written += 1
     return written
@@ -653,8 +666,8 @@ def build_coverage_report(
 
     agg = aggregate_session(session)
 
-    # 30차 W21: 함수별 ASIL 분포 계산 — function_asil_map과 function_rows 매칭.
-    asil_distribution, asil_d_function_ids = _compute_asil_distribution(
+    # 30차 W21 + 31차 W29: 함수별 ASIL 분포 + B/C/D 별 함수 ID 그룹.
+    asil_distribution, ids_by_asil = _compute_asil_distribution(
         agg.get("function_rows") or [],
         agg.get("function_asil_map") or {},
     )
@@ -665,9 +678,11 @@ def build_coverage_report(
         "passed": agg["passed"],
         "failed": agg["failed"],
         "function_rows": agg["function_count"],
-        # 30차 W21: ASIL 등급 분포 — UI 노출 + audit reviewer 검토 우선순위.
+        # 30차 W21 + 31차 W29: ASIL 등급 분포 + 등급별 함수 ID.
         "asil_distribution": asil_distribution,
-        "asil_d_function_ids": asil_d_function_ids,
+        "asil_b_function_ids": ids_by_asil.get("B", []),
+        "asil_c_function_ids": ids_by_asil.get("C", []),
+        "asil_d_function_ids": ids_by_asil.get("D", []),
     }
 
     # Cover

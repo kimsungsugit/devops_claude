@@ -426,6 +426,7 @@ class TestAsilDistribution21:
     """30차 W21 T221 — _compute_asil_distribution + build_coverage_report summary."""
 
     def test_distribution_counts_per_asil(self):
+        """30차 W21 + 31차 W29: return (dist, ids_by_asil dict {B,C,D})."""
         from backend.services.swut_coverage_aggregator import _compute_asil_distribution
         from backend.services.swut_input_adapter import FunctionCoverage
         rows = [
@@ -441,26 +442,28 @@ class TestAsilDistribution21:
             "SwUFn_0103": "D",
             "SwUFn_0104": "D",
         }
-        dist, d_ids = _compute_asil_distribution(rows, asil_map)
+        dist, ids_by_asil = _compute_asil_distribution(rows, asil_map)
         assert dist == {"ASIL_A": 1, "ASIL_B": 1, "ASIL_D": 2, "UNKNOWN": 1}
-        assert d_ids == ["SwUFn_0103", "SwUFn_0104"]
+        assert ids_by_asil["D"] == ["SwUFn_0103", "SwUFn_0104"]
+        assert ids_by_asil["B"] == ["SwUFn_0102"]
+        assert ids_by_asil["C"] == []
 
     def test_distribution_empty_when_no_function_rows(self):
         from backend.services.swut_coverage_aggregator import _compute_asil_distribution
-        dist, d_ids = _compute_asil_distribution([], {})
+        dist, ids_by_asil = _compute_asil_distribution([], {})
         assert dist == {}
-        assert d_ids == []
+        assert ids_by_asil == {"B": [], "C": [], "D": []}
 
     def test_distribution_all_unknown_when_no_asil_map(self):
         from backend.services.swut_coverage_aggregator import _compute_asil_distribution
         from backend.services.swut_input_adapter import FunctionCoverage
         rows = [FunctionCoverage(unit_id=f"SwUFn_010{i}") for i in range(3)]
-        dist, d_ids = _compute_asil_distribution(rows, {})
+        dist, ids_by_asil = _compute_asil_distribution(rows, {})
         assert dist == {"UNKNOWN": 3}
-        assert d_ids == []
+        assert ids_by_asil == {"B": [], "C": [], "D": []}
 
     def test_build_coverage_includes_asil_distribution_in_summary(self):
-        """build_coverage_report summary에 asil_distribution / asil_d_function_ids 키 존재."""
+        """build_coverage_report summary에 asil_distribution + B/C/D 키 존재."""
         session = _make_session()
         # session.environments[0]에 function_asil_map 주입
         session.environments[0].function_asil_map = {
@@ -476,9 +479,123 @@ class TestAsilDistribution21:
         result = build_coverage_report(session, meta, template)
         assert result.ok
         assert "asil_distribution" in result.summary
+        # 31차 W29: B/C/D 모두 노출
+        assert "asil_b_function_ids" in result.summary
+        assert "asil_c_function_ids" in result.summary
         assert "asil_d_function_ids" in result.summary
-        # 매핑된 함수만큼 ASIL_D 카운트, 나머지는 UNKNOWN
+        # 매핑된 함수만큼 카운트 + 나머지 UNKNOWN
         assert sum(result.summary["asil_distribution"].values()) == result.summary["function_rows"]
+
+
+class TestAsilBCDistribution31:
+    """31차 W29: ASIL B/C도 함수 ID 별도 노출 + summary 키."""
+
+    def test_summary_includes_asil_b_function_ids(self):
+        session = _make_session()
+        if session.environments[0].function_coverage:
+            fid = session.environments[0].function_coverage[0].unit_id
+            session.environments[0].function_asil_map = {fid: "B"}
+        meta = CoverageBuildMeta(
+            release_sw_version="1.01.05", test_date="2024-02-19",
+            test_engineer="JK Kim", doc_id_sequence="851",
+        )
+        result = build_coverage_report(session, meta, _build_coverage_template())
+        assert result.ok
+        if session.environments[0].function_coverage:
+            assert len(result.summary["asil_b_function_ids"]) >= 1
+
+    def test_summary_includes_asil_c_function_ids(self):
+        session = _make_session()
+        if session.environments[0].function_coverage:
+            fid = session.environments[0].function_coverage[0].unit_id
+            session.environments[0].function_asil_map = {fid: "C"}
+        meta = CoverageBuildMeta(
+            release_sw_version="1.01.05", test_date="2024-02-19",
+            test_engineer="JK Kim", doc_id_sequence="851",
+        )
+        result = build_coverage_report(session, meta, _build_coverage_template())
+        assert result.ok
+        if session.environments[0].function_coverage:
+            assert len(result.summary["asil_c_function_ids"]) >= 1
+
+    def test_sutr_summary_includes_b_c_d_function_ids(self):
+        """SUTR builder도 Coverage와 대칭 — B/C/D 키 노출."""
+        session = _make_session()
+        if session.environments[0].function_coverage:
+            fid = session.environments[0].function_coverage[0].unit_id
+            session.environments[0].function_asil_map = {fid: "B"}
+        meta = SutrBuildMeta(
+            release_sw_version="1.01.05", test_date="2024-02-19",
+            test_engineer="JK Kim", doc_id_sequence="851",
+        )
+        result = build_sutr(session, meta, _build_sutr_template())
+        assert result.ok
+        assert "asil_b_function_ids" in result.summary
+        assert "asil_c_function_ids" in result.summary
+        assert "asil_d_function_ids" in result.summary
+
+
+class TestSutrTestLogAsil31:
+    """31차 W27: SUTR Test Log 시트 col+4 Function ID + col+5 ASIL 컬럼."""
+
+    def test_test_log_writes_function_id_column(self):
+        """TC name에서 SwUFn_NNNN 추출되어 col+4에 기록."""
+        import openpyxl
+        from backend.services.swut_sutr_aggregator import _write_test_log
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.cell(1, 1).value = "Test Case ID"
+
+        session = _make_session()
+        # session.environments[0].test_cases 에 SwUFn 포함 TC name 보장
+        env = session.environments[0]
+        env.test_cases = {"SwUTC_SwUFn_0103.001": "...", "non_swufn_tc": "..."}
+        env.test_results = {}
+
+        n = _write_test_log(ws, session, function_asil_map={"SwUFn_0103": "D"})
+        assert n >= 1
+        # row 2 (start_row = pos[0] + 1) — SwUTC_SwUFn_0103 또는 non_swufn_tc 중
+        # 정렬상 'SwUTC_SwUFn_0103.001'이 먼저 (S < n in ASCII)
+        # col+4에 함수 ID
+        col4_values = [ws.cell(r, 5).value for r in (2, 3)]
+        assert "SwUFn_0103" in col4_values
+
+    def test_test_log_writes_asil_column_with_d_highlight(self):
+        """ASIL D 함수 row의 col+5 셀에 빨간 강조."""
+        import openpyxl
+        from backend.services.swut_sutr_aggregator import _write_test_log
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.cell(1, 1).value = "Test Case ID"
+
+        session = _make_session()
+        env = session.environments[0]
+        env.test_cases = {"SwUTC_SwUFn_0103.001": "..."}
+        env.test_results = {}
+
+        _write_test_log(ws, session, function_asil_map={"SwUFn_0103": "D"})
+        # ASIL D row의 col+5 (col=1, col+5=6) — fill 적용
+        cell = ws.cell(2, 6)
+        assert cell.value == "ASIL D"
+        assert "FFC7CE" in str(cell.fill.fgColor.rgb).upper()
+
+    def test_test_log_empty_function_asil_map_writes_blank_asil_column(self):
+        """function_asil_map None 또는 빈 dict면 ASIL 컬럼은 빈 값."""
+        import openpyxl
+        from backend.services.swut_sutr_aggregator import _write_test_log
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.cell(1, 1).value = "Test Case ID"
+
+        session = _make_session()
+        env = session.environments[0]
+        env.test_cases = {"SwUTC_SwUFn_0103.001": "..."}
+        env.test_results = {}
+
+        _write_test_log(ws, session, function_asil_map=None)
+        # function_id는 추출되나 ASIL은 빈 string
+        assert ws.cell(2, 5).value == "SwUFn_0103"
+        assert ws.cell(2, 6).value == ""
 
 
 # ---------------------------------------------------------------------------

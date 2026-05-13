@@ -69,7 +69,12 @@ _logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/swut", tags=["swut"])
 
 # 17차 T173: Semaphore(2) → (3) 상향. 14차 W1 메모리 1배 절감 (BytesIO/StreamingResponse)
-# 으로 worst-case 1.8MB × 3 = 5.4MB — 운영 안전 한도. 동시 처리량 1.5x 증가.
+# 으로 빌드 자체 worst-case 1.8MB × 3 = 5.4MB.
+# 31차 W31: 30차 W21 c_source_root 도입 후 parse_c_project 동시 호출시 추가 메모리.
+#   - tree-sitter Parser instance per call + os.walk 트리 + read_bytes
+#   - max_files=300 × 평균 8KB = 2.4MB × 3 = 7.2MB 추가 worst-case
+#   - 총 worst-case = 5.4MB (빌드) + 7.2MB (c_parser) ≈ 12.6MB. 운영 안전 한도 내.
+# 향후 worst-case 갱신 시 본 docstring + CLAUDE.md "메모리 / 동시성" 섹션 동기 갱신.
 _BUILD_SEMAPHORE = asyncio.Semaphore(3)
 
 _META_CONFIG_PATH = "config/swut_meta.json"

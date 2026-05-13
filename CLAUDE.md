@@ -224,10 +224,11 @@ ISO 26262 ASIL A 단위테스트 산출물 자동 생성 + cross-validation 플�
 - **total_tc**: Coverage Traceability TC 수 == SUTR Total
 - **final_result**: 'PASS' / 'OK' 표기 통일
 
-### 메모리 / 동시성 (14차/17차/20차)
+### 메모리 / 동시성 (14차/17차/20차/31차)
 - 14차 W1: `xlsx_io: BytesIO` lazy + StreamingResponse 64KB chunk → 메모리 1배 절감
 - 17차: Semaphore(2) → (3) 상향 (worst 1.8MB×3=5.4MB)
 - 20차: psutil 기반 메모리 모니터링 로그 (`mem_mb=...,delta=...`)
+- **31차 W31**: 30차 c_source_root 도입 후 worst-case 갱신 — `parse_c_project` 동시 3건 추가 2.4MB×3=7.2MB. 총 worst-case ≈ **12.6MB** (5.4MB 빌드 + 7.2MB c_parser). 운영 안전 한도 내
 
 ### ISO 26262 Tool Qualification
 모든 builder result에 `tool_qualification` 메타 포함:
@@ -276,16 +277,20 @@ ISO 26262 ASIL A 단위테스트 산출물 자동 생성 + cross-validation 플�
 - SwUDS docx에서 ASIL 추출 (현재 C 소스 단일 출처)
 - ASIL B/C 함수 시각 강조 (본 라운드는 D만)
 
-### 시각 강조 정책 (23/24/29/30차)
+### 시각 강조 정책 (23/24/29/30/31차)
 
 산출물 cell에 audit reviewer 친화 표시:
 
 | 색상 RGB | 용도 | 헬퍼 |
 |----------|------|------|
-| 🟡 노란 `FFFFEB9C` | 사용자 입력 필요 (Validation Date / Reviewer / Approver / Test Engineer 빈 시, SUTR Actual Coverage/Pass ratio 데이터 부재 시) | `mark_user_input_required` / `write_value_or_mark` |
+| 🟡 노란 `FFFFEB9C` | 사용자 입력 필요 | `mark_user_input_required` / `write_value_or_mark` |
+| 🟦 파랑 `FFE2F0FF` (**31차 W29**) | 3.Coverage / SUTR Test Log — ASIL B 함수 row (분기 커버리지 필수) | `mark_asil_b_function` |
+| 🟧 주황 `FFFFE5CC` (**31차 W29**) | 3.Coverage / SUTR Test Log — ASIL C 함수 row (MC/DC 권장) | `mark_asil_c_function` |
 | 🔴 빨간 `FFFFC7CE` | 2.Consistency FAIL row Result 셀 | `mark_fail_cell` |
-| 🔴 빨간 `FFFFC7CE` (동일 RGB, **30차 W21 의미 분리**) | 3.Coverage 시트 ASIL D 함수 row — audit MC/DC 우선순위 표시 | `mark_asil_d_function` |
+| 🔴 빨간 `FFFFC7CE` (동일 RGB, **30차 W21 의미 분리**) | 3.Coverage / SUTR Test Log — ASIL D 함수 row (MC/DC 필수) | `mark_asil_d_function` |
 | 기본 (없음) | 자동 채움 (config/meta 정상) | `safe_write` / `_write_label` |
+
+> **31차 W29 의미**: ASIL D > C > B 단계 색상으로 audit reviewer가 한눈에 검토 깊이 차이 인지. ASIL A/QM은 강조 없음 (구문 커버리지로 충분).
 
 > **30차 W21 의미 분리**: `mark_fail_cell` ↔ `mark_asil_d_function` 색상 RGB 동일 (`FFFFC7CE`)이나 호출 의미 다름. FAIL = TC 실행 실패, ASIL D = audit 검토 우선순위. 동일 셀 겹치면 ASIL D 우선 (호출 순서 보장). audit reviewer에게 정책 사전 통보 권장.
 
@@ -297,6 +302,8 @@ ISO 26262 ASIL A 단위테스트 산출물 자동 생성 + cross-validation 플�
 - `USER_INPUT_FILL_RGB = "FFFFEB9C"` — Excel 셀 노란 배경
 - `FAIL_FILL_RGB = "FFFFC7CE"` — Excel 셀 빨간 배경 (TC 실행 실패)
 - `ASIL_D_FILL_RGB = "FFFFC7CE"` — **30차 W21 동일 값 / 의미 분리 (audit MC/DC 우선순위)**
+- `ASIL_C_FILL_RGB = "FFFFE5CC"` — **31차 W29 연한 주황 (MC/DC 권장)**
+- `ASIL_B_FILL_RGB = "FFE2F0FF"` — **31차 W29 연한 파랑 (분기 커버리지 필수)**
 - `USER_INPUT_PLACEHOLDER = "▶ 사용자 입력 필요"` — 24차 silent "N/A" 대체 안내
 
 `excel_template_utils.py`가 위 모듈에서 import — 이전 (23~28차) module-level hardcoded 제거. 신규 backend Excel builder는 반드시 `design_tokens`에서 import.
@@ -315,11 +322,11 @@ ISO 26262 ASIL A 단위테스트 산출물 자동 생성 + cross-validation 플�
 
 > **Backward 호환 (W22, 28차 명시)**: 24차 이전 빌드 결과물은 동일 셀에 string `"N/A"` 보유. 회사 audit reviewer가 두 형식 모두 인지하도록 산출물에 라운드(24차+) 표기를 Cover 시트 doc_id_sequence에 포함 권장. 자동 변환/마이그레이션 스크립트는 제공 안 함 — 이전 산출물은 그대로 둘 것. 신규 빌드부터 노란 마킹 적용.
 
-### Workflow & Tests (30차 갱신 — 실측 + deep-reviewer 권고 fix 후)
-- Backend SwUT 전체 회귀: **277개** (30차 W21 신규 +56 — `test_swut_asil_resolver.py` 35건 + `TestAsilDistribution21` 4건 + `TestCSourceRoot21` 3건 + `TestSummaryHeaderTruncation21` 2건 + `TestSystemDirBlacklist` 9건 + `TestAsilDMarker21` 3건)
-- 회귀 파일: 기존 7파일 + **`test_swut_asil_resolver.py` 신규** (30차 W21)
-- Backend 전체: **1758개** (.venv Python 3.12.6 / 54.50s, timeout 없이 통과)
-- Frontend SwUTBuildSection: **24개** (30차 W21 신규 +3)
+### Workflow & Tests (31차 갱신 — 실측)
+- Backend SwUT 전체 회귀: **289개** (31차 W29 +6 ASIL B/C marker + W29 +3 distribution + W27 +3 SUTR test_log = +12)
+- 회귀 파일: 기존 + `test_swut_asil_resolver.py` (30차 신규)
+- Backend 전체: **1774개** (.venv Python 3.12.6 / 66.85s, timeout 없이 통과)
+- Frontend SwUTBuildSection: **24개**
 - Frontend 전체: **219개** (23 test files)
 
 ### 30차 W21 deep-reviewer Critical/Warning fix (commit 진행 의무)

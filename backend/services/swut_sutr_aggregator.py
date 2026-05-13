@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -34,6 +35,9 @@ from backend.services.excel_template_utils import (
     find_kv_row,
     has_vba_macros,
     inspect_vba_refs,
+    mark_asil_b_function,
+    mark_asil_c_function,
+    mark_asil_d_function,
     safe_write,
     short_date,
     truncate_cell_text,
@@ -42,6 +46,9 @@ from backend.services.excel_template_utils import (
     write_label_or_mark,
     write_value_after_label,
 )
+
+# 31차 W27: TC name에서 SwUFn_NNNN 함수 ID 추출 (Coverage builder와 동일 패턴).
+_TC_FN_RE = re.compile(r"(SwUFn_\d+)")
 from backend.services.swut_input_adapter import SwUTSession, aggregate_session
 from backend.services.swut_meta import BuildMetaBase
 
@@ -251,11 +258,19 @@ def _write_deviation(ws, deviation_cases: list[Any], out_warnings: list[str] | N
     return written
 
 
-def _write_test_log(ws, session: SwUTSession) -> int:
+def _write_test_log(
+    ws,
+    session: SwUTSession,
+    function_asil_map: dict[str, str] | None = None,
+) -> int:
     """Test Log 시트 — TC별 input/expected/actual/pass.
 
     회사 표준 layout (TC ID / Title / Method / Unit / Total + pass/fail) 단순화:
     각 환경 / 각 TC 단위 한 행씩.
+
+    31차 W27: col+4 Function ID + col+5 ASIL 컬럼 추가 (function_asil_map 제공 시).
+    회사 양식 col+3까지만 사용 — col+4/5는 빈 영역 활용. ASIL D row는
+    mark_asil_d_function 적용 (audit 검토 우선순위 시각).
     """
     if not ws:
         return 0
@@ -267,6 +282,22 @@ def _write_test_log(ws, session: SwUTSession) -> int:
         return 0
     start_row = pos[0] + 1
     col = pos[1]
+    asil_map = function_asil_map or {}
+
+    # 31차 W27 reviewer W3: col+4/5 빈 영역 가정 검증.
+    # 헤더 row의 col+4/5 셀이 비어있는지 확인 — 회사 v3.01 양식 업그레이드 시
+    # 데이터 덮어쓰기 위험 가시화.
+    header_col4 = ws.cell(pos[0], col + 4).value
+    header_col5 = ws.cell(pos[0], col + 5).value
+    if header_col4 or header_col5:
+        # 빈 영역 가정 위반 — 양식이 col+4/5 이미 사용 중. 로그만 남기고 진행.
+        # (silent skip 보다 reviewer 가시화 우선)
+        import logging
+        logging.getLogger(__name__).warning(
+            "SUTR Test Log col+4/5 not empty (col+4=%r, col+5=%r) — "
+            "회사 양식 업그레이드 가능성, ASIL 컬럼 덮어쓰기 진행",
+            header_col4, header_col5,
+        )
 
     written = 0
     for env in session.environments:
@@ -280,6 +311,22 @@ def _write_test_log(ws, session: SwUTSession) -> int:
                 ws, r, col + 3,
                 "Pass" if exec_r and exec_r.passed else "Fail" if exec_r else "N/A",
             )
+
+            # 31차 W27: TC name에서 SwUFn_NNNN 추출 → Function ID + ASIL 컬럼.
+            fn_match = _TC_FN_RE.search(tc_name or "")
+            fn_id = fn_match.group(1) if fn_match else ""
+            asil = asil_map.get(fn_id, "") if fn_id else ""
+            safe_write(ws, r, col + 4, fn_id)
+            safe_write(ws, r, col + 5, f"ASIL {asil}" if asil else "")
+            # ASIL B/C/D 시각 강조 — 30차 W21 + 31차 W29 정책.
+            _asil_marker = {
+                "B": mark_asil_b_function,
+                "C": mark_asil_c_function,
+                "D": mark_asil_d_function,
+            }.get(asil)
+            if _asil_marker:
+                _asil_marker(ws, r, col + 5)
+
             written += 1
     return written
 
@@ -348,9 +395,9 @@ def build_sutr(
 
     agg = aggregate_session(session)
 
-    # 30차 W21: ASIL 분포 — Coverage builder와 동일 키 (대칭).
+    # 30차 W21 + 31차 W29: ASIL 분포 — Coverage builder와 동일 키 (대칭).
     from backend.services.swut_coverage_aggregator import _compute_asil_distribution
-    asil_distribution, asil_d_function_ids = _compute_asil_distribution(
+    asil_distribution, ids_by_asil = _compute_asil_distribution(
         agg.get("function_rows") or [],
         agg.get("function_asil_map") or {},
     )
@@ -363,9 +410,11 @@ def build_sutr(
         "failed": agg["failed"],
         "deviation_cases_written": 0,
         "test_log_rows_written": 0,
-        # 30차 W21: Coverage builder와 동일 키 — UI 노출 통일.
+        # 30차 W21 + 31차 W29: Coverage builder와 동일 키 — UI 노출 통일.
         "asil_distribution": asil_distribution,
-        "asil_d_function_ids": asil_d_function_ids,
+        "asil_b_function_ids": ids_by_asil.get("B", []),
+        "asil_c_function_ids": ids_by_asil.get("C", []),
+        "asil_d_function_ids": ids_by_asil.get("D", []),
     }
 
     cover_ws = next((wb[n] for n in sheet_names if n.lower() == "cover"), None)
@@ -391,7 +440,10 @@ def build_sutr(
     if log_ws is None:
         warnings.append("Test Log 시트 미발견")
     else:
-        n = _write_test_log(log_ws, session)
+        n = _write_test_log(
+            log_ws, session,
+            function_asil_map=agg.get("function_asil_map"),
+        )
         summary["test_log_rows_written"] = n
 
     incomplete_sheets: list[str] = []

@@ -40,11 +40,15 @@ html, body {
   --color-purple: #6366f1;
   --color-purple-soft: rgba(99, 102, 241, 0.10);
 
-  /* 30차 W21: SwUT audit 시각 강조 (ASIL D만 본 라운드 도입 — 29차 lock-in 이행).
-   * backend/services/design_tokens.py ASIL_D_FILL_RGB (#FFC7CE)와 의미 매칭하되
-   * UI 시인성 위해 light 변종 (텍스트 색은 진한 빨강으로 가독성). */
-  --audit-asil-d-soft: #ffe3e8;
+  /* 30차 W21 + 31차 W29: SwUT audit 시각 강조 (ASIL B/C/D 3등급).
+   * backend/services/design_tokens.py 의 ASIL_B/C/D_FILL_RGB와 의미 매칭하되
+   * UI 시인성 위해 light 변종. ASIL D가 가장 강조, B가 가장 약함. */
+  --audit-asil-d-soft: #ffe3e8;    /* 연한 빨강 — MC/DC 필수 */
   --audit-asil-d-text: #b3261e;
+  --audit-asil-c-soft: #ffe5cc;    /* 연한 주황 — MC/DC 권장 (design_tokens.ASIL_C_FILL_RGB 일치) */
+  --audit-asil-c-text: #8a4a00;
+  --audit-asil-b-soft: #e2f0ff;    /* 연한 파랑 — 분기 커버리지 필수 */
+  --audit-asil-b-text: #1d4e89;
 
   --sp-1: 4px; --sp-2: 8px; --sp-3: 12px; --sp-4: 16px;
   --sp-5: 20px; --sp-6: 24px; --sp-8: 32px;
@@ -93,9 +97,13 @@ body[data-theme='dark'] {
   --color-info-soft: rgba(96, 165, 250, 0.10);
   --color-purple: #a78bfa;
   --color-purple-soft: rgba(167, 139, 250, 0.12);
-  /* 30차 W21 SwUT audit ASIL D — dark variant (명도/대비 조정). */
+  /* 30차 W21 + 31차 W29 SwUT audit ASIL B/C/D — dark variant. */
   --audit-asil-d-soft: #4a1f23;
   --audit-asil-d-text: #ff8a8a;
+  --audit-asil-c-soft: #3d2a14;
+  --audit-asil-c-text: #ffb878;
+  --audit-asil-b-soft: #1a2e44;
+  --audit-asil-b-text: #7eb0d8;
   --shadow-sm: 0 1px 2px rgba(0,0,0,0.20);
   --shadow-md: 0 2px 8px rgba(0,0,0,0.28);
   --shadow-lg: 0 8px 24px rgba(0,0,0,0.36);
@@ -1371,6 +1379,18 @@ label {
   color: var(--audit-asil-d-text);
   border-color: var(--audit-asil-d-text);
   font-weight: 600;
+}
+.swut-asil-distribution-list > li.swut-asil-c {
+  background: var(--audit-asil-c-soft);
+  color: var(--audit-asil-c-text);
+  border-color: var(--audit-asil-c-text);
+  font-weight: 500;
+}
+.swut-asil-distribution-list > li.swut-asil-b {
+  background: var(--audit-asil-b-soft);
+  color: var(--audit-asil-b-text);
+  border-color: var(--audit-asil-b-text);
+  font-weight: 500;
 }
 .swut-asil-label { font-family: ui-monospace, monospace; }
 .swut-asil-count {

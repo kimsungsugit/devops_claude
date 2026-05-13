@@ -386,3 +386,69 @@ class TestAsilDMarker21:
         result = mark_asil_d_function(ws, 3, 5)  # E3 → anchor C3
         assert result is True
         assert "FFC7CE" in str(ws.cell(3, 3).fill.fgColor.rgb).upper()
+
+
+class TestAsilBCMarker31:
+    """31차 W29: mark_asil_b_function / mark_asil_c_function — ASIL B/C 강조."""
+
+    def test_mark_asil_b_applies_blue_fill(self):
+        from backend.services.excel_template_utils import mark_asil_b_function
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.cell(1, 1).value = "SwUFn_0201"
+        result = mark_asil_b_function(ws, 1, 1)
+        assert result is True
+        # ASIL_B_FILL_RGB = "FFE2F0FF" 연한 파랑
+        assert "E2F0FF" in str(ws.cell(1, 1).fill.fgColor.rgb).upper()
+        assert ws.cell(1, 1).value == "SwUFn_0201"
+
+    def test_mark_asil_c_applies_orange_fill(self):
+        from backend.services.excel_template_utils import mark_asil_c_function
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.cell(2, 1).value = "SwUFn_0301"
+        result = mark_asil_c_function(ws, 2, 1)
+        assert result is True
+        # ASIL_C_FILL_RGB = "FFFFE5CC" 연한 주황
+        assert "FFE5CC" in str(ws.cell(2, 1).fill.fgColor.rgb).upper()
+        assert ws.cell(2, 1).value == "SwUFn_0301"
+
+    def test_asil_b_c_d_rgbs_are_all_distinct(self):
+        """ASIL B/C/D RGB가 모두 다른 색 — audit reviewer 등급 구분 가능."""
+        from backend.services import design_tokens
+        rgbs = {
+            design_tokens.ASIL_B_FILL_RGB,
+            design_tokens.ASIL_C_FILL_RGB,
+            design_tokens.ASIL_D_FILL_RGB,
+        }
+        assert len(rgbs) == 3, f"중복된 RGB 발견: {rgbs}"
+
+    def test_asil_b_c_distinct_from_user_input_and_fail(self):
+        """ASIL B/C가 USER_INPUT(노랑)/FAIL(빨강)와도 다른 색."""
+        from backend.services import design_tokens
+        assert design_tokens.ASIL_B_FILL_RGB not in (
+            design_tokens.USER_INPUT_FILL_RGB,
+            design_tokens.FAIL_FILL_RGB,
+        )
+        assert design_tokens.ASIL_C_FILL_RGB not in (
+            design_tokens.USER_INPUT_FILL_RGB,
+            design_tokens.FAIL_FILL_RGB,
+        )
+
+    def test_mark_asil_b_handles_merged_cell_anchor(self):
+        from backend.services.excel_template_utils import mark_asil_b_function
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.merge_cells("B2:D2")
+        result = mark_asil_b_function(ws, 2, 4)  # D2 → anchor B2
+        assert result is True
+        assert "E2F0FF" in str(ws.cell(2, 2).fill.fgColor.rgb).upper()
+
+    def test_mark_asil_c_handles_merged_cell_anchor(self):
+        from backend.services.excel_template_utils import mark_asil_c_function
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.merge_cells("E5:G5")
+        result = mark_asil_c_function(ws, 5, 7)  # G5 → anchor E5
+        assert result is True
+        assert "FFE5CC" in str(ws.cell(5, 5).fill.fgColor.rgb).upper()

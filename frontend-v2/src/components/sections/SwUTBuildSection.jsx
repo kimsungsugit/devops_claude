@@ -397,30 +397,36 @@ export default function SwUTBuildSection() {
           </div>
           <ul className="swut-asil-distribution-list">
             {Object.entries(lastSummary.asil_distribution).map(([key, count]) => {
-              const isAsilD = key === 'ASIL_D' && count > 0;
+              const bucket = (count > 0 && {
+                ASIL_D: 'swut-asil-d',
+                ASIL_C: 'swut-asil-c',
+                ASIL_B: 'swut-asil-b',
+              }[key]) || 'swut-asil-other';
+              const warn = (count > 0 && {
+                ASIL_D: '⚠️ MC/DC 커버리지 필수',
+                ASIL_C: 'ℹ️ MC/DC 커버리지 권장',
+                ASIL_B: 'ℹ️ 분기 커버리지 필수',
+              }[key]) || '';
               return (
-                <li
-                  key={key}
-                  className={isAsilD ? 'swut-asil-d' : 'swut-asil-other'}
-                  data-asil-bucket={key}
-                >
+                <li key={key} className={bucket} data-asil-bucket={key}>
                   <span className="swut-asil-label">{key}</span>
                   <span className="swut-asil-count">{count}</span>
-                  {isAsilD && (
-                    <span className="swut-asil-d-warning">
-                      ⚠️ MC/DC 커버리지 필수 — Excel 빨강 강조 매칭
-                    </span>
-                  )}
+                  {warn && <span className="swut-asil-d-warning">{warn}</span>}
                 </li>
               );
             })}
           </ul>
-          {(lastSummary.asil_d_function_ids?.length ?? 0) > 0 && (
-            <div className="swut-asil-d-functions">
-              <strong>ASIL D 함수 ID:</strong>{' '}
-              {lastSummary.asil_d_function_ids.join(', ')}
-            </div>
-          )}
+          {/* 31차 W29: B/C/D 각 등급 함수 ID 노출 — null guard 통일 (?? for 30차 캐시 호환) */}
+          {['d', 'c', 'b'].map(grade => {
+            const ids = lastSummary[`asil_${grade}_function_ids`] ?? [];
+            if (ids.length === 0) return null;
+            return (
+              <div key={grade} className="swut-asil-d-functions" data-asil-grade={grade}>
+                <strong>ASIL {grade.toUpperCase()} 함수 ID:</strong>{' '}
+                {ids.join(', ')}
+              </div>
+            );
+          })}
         </div>
       )}
 
