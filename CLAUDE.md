@@ -252,6 +252,20 @@ ISO 26262 ASIL A 단위테스트 산출물 자동 생성 + cross-validation 플�
 | cache_root / log_folder / template_path / swuds_docx_path | maxlen 500 + 줄바꿈 금지 | ✓ (PathPickerDialog 21차) |
 | deviation_cases | max_length=200 + 합산 256KB + item key ≤20 | (programmatic) |
 
+### 함수별 ASIL 등급 (W21, 28차 분석 노트 — 미구현)
+
+**현황**: `SwUTBuildRequest.asil_level`은 **빌드 메타 단일값** (A/B/C/D/QM). 산출물의 모든 함수가 이 값으로 동일하게 태깅됨.
+
+**문제**: C 소스 Doxygen 주석 `@asil C|D` 태그 또는 SRS/SDS 매핑(SCM registry)으로부터 **함수별 ASIL 등급 추출 미구현**. ISO 26262 audit 관점에서 ASIL D 함수는 MC/DC 커버리지 + 완전한 추적성 + 코드 리뷰 필수인데, 모든 함수가 단일 ASIL로 표시되어 audit reviewer가 어느 함수에 어떤 검토 깊이를 적용해야 할지 산출물만으로 판단 불가.
+
+**잠재 작업** (별도 큰 라운드):
+1. `backend/services/swut_input_adapter.py` 에 함수별 ASIL 파서 추가 (Doxygen 주석 → `function_id → asil` 맵)
+2. Coverage `1.Traceability` 시트에 함수별 ASIL 컬럼 추가 (현재 함수명/파일만)
+3. ASIL D 함수에 시각 강조 (🟠 주황? 또는 row 굵게) — audit reviewer가 한눈에 식별
+4. `SwUTBuildRequest.asil_level`을 빌드 default 또는 우선순위 fallback으로 재정의
+
+**How to apply**: 사용자가 다음 SwUT 시리즈 재개 시 `/plan` 요청 우선. 본 작업 미수행 상태로 ASIL B 이상 audit evidence 단독 제출은 위험 — manual review에서 ASIL 일관성 명시 의무.
+
 ### 시각 강조 정책 (23/24차)
 
 산출물 cell에 audit reviewer 친화 표시:
@@ -264,13 +278,22 @@ ISO 26262 ASIL A 단위테스트 산출물 자동 생성 + cross-validation 플�
 
 24차 silent "N/A" 제거 — Actual Coverage/Pass ratio가 data 부재 시 `▶ 사용자 입력 필요 — VectorCAST 데이터 부재 — log_folder 재확인` 명시 (deep-reviewer X7 강화).
 
-### Workflow & Tests (27차 갱신)
-- Backend SwUT 전체 회귀: ~260개 (test_swut_*.py + test_excel_template_utils.py)
+> **Backward 호환 (W22, 28차 명시)**: 24차 이전 빌드 결과물은 동일 셀에 string `"N/A"` 보유. 회사 audit reviewer가 두 형식 모두 인지하도록 산출물에 라운드(24차+) 표기를 Cover 시트 doc_id_sequence에 포함 권장. 자동 변환/마이그레이션 스크립트는 제공 안 함 — 이전 산출물은 그대로 둘 것. 신규 빌드부터 노란 마킹 적용.
+
+### Workflow & Tests (28차 갱신 — 실측)
+- Backend SwUT 전체 회귀: **220개** (`test_swut_aggregators.py` + `test_swut_router.py` + `test_swut_consistency_checker.py` + `test_swut_deviation_generator.py` + `test_swut_input_adapter.py` + `test_swut_swuds_parser.py` + `test_excel_template_utils.py`)
 - Backend 전체: **1701개** (timeout 없이 통과)
 - Frontend SwUTBuildSection: **21개** (vitest)
-- Frontend 전체: **216개**
+- Frontend 전체: **216개** (23 test files)
 - Cloudium worker는 read-only — 절대 cloudium 파일 생성/수정 금지 (사용자 의사결정)
 - 라이브 검증 PoC: `.codex_tmp/poc_live_full_verification.py` (maintained, 사용자 환경에서 직접 호출)
+
+> **회귀 카운트 측정 명령** (정확치 재확인 시):
+> ```bash
+> python -m pytest tests/unit/test_swut_*.py tests/unit/test_excel_template_utils.py --collect-only -q | tail -3
+> cd frontend-v2 && npx vitest run src/__tests__/SwUTBuildSection.test.jsx --reporter=basic
+> ```
+> 27차까지 "~260개" 표기는 부정확. 28차 실측 220개로 정정.
 
 ### Backend Reload 절차 (26차 C6 명시)
 
@@ -351,6 +374,17 @@ backend 코드 변경 (`backend/services/`, `backend/routers/`, `backend/schemas
 - 소스코드: `D:/Project/Ados/PDS64_RD/`
 - 캐시: `.devops_pro_cache/`
 - 환경설정: `.env` (절대 커밋 금지)
+
+### SwUT 관련 path (사용자 환경 의존 — W23, 28차 추가)
+- VectorCAST log 디렉토리 (`log_folder`): 예) `U:/연구소/.../HDPDM01/.../vectorcast/results/` — Cloudium worker(read-only)로 접근
+- 회사 v3.01 template (`template_path`): 예) `U:/연구소/.../양식/(HDPDM01)Coverage_Report_v3.01.xlsx`, `(HDPDM01)SUTR_v3.01.xlsm`
+- SwUDS docx (`swuds_docx_path`, 옵션): 예) `U:/연구소/.../(HDPDM01)SwUDS_v3.docx`
+- SwUT meta config: `config/swut_meta.json` (lru_cache + mtime invalidate, 12차)
+- 산출물 임시 디렉토리 (PoC 산출물 검수용): `.codex_tmp/live_full_2026_05_12/` (gitignore)
+- localStorage form 보존 key: `devops_v2_swut_form` (frontend)
+- localStorage 사용자 식별: `devops_v2_user` (USER_KEY)
+
+> 실 경로는 라이센스/보안상 사용자 환경에서만 유효 — 위 예시는 표기 패턴이며 git에 commit 금지.
 
 ## SCM Credential Resolution (Jenkins sync)
 - **절대 HTTP body로 password를 받지 않음** — env 또는 registry에서만 해결
