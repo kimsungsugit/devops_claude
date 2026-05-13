@@ -166,32 +166,43 @@ class TestExtractExecutionResults:
 # ---------------------------------------------------------------------------
 
 class _FakeResolver:
-    """In-memory resolver — tests/unit/test_swut_input_adapter.py 전용."""
+    """In-memory resolver — tests/unit/test_swut_input_adapter.py 전용.
+
+    29차 W25: msys64 mingw Python의 ``os.sep='/'`` quirk로 ``os.path.join``이
+    forward slash로 합쳐지면 등록된 backslash dirs/files와 mismatch — 양 형식
+    동시 등록 + 조회 시 normalize.
+    """
+
+    @staticmethod
+    def _normalize(path: str) -> str:
+        # Windows 드라이브 문자 + 경로 — backslash로 통일.
+        return path.replace("/", "\\")
 
     def __init__(self, files: dict[str, bytes], dirs: set[str]):
-        self.files = files
-        self.dirs = dirs
+        self.files = {self._normalize(k): v for k, v in files.items()}
+        self.dirs = {self._normalize(d) for d in dirs}
 
     def exists(self, path: str) -> bool:
-        return path in self.files or path in self.dirs
+        n = self._normalize(path)
+        return n in self.files or n in self.dirs
 
     def is_file(self, path: str) -> bool:
-        return path in self.files
+        return self._normalize(path) in self.files
 
     def is_dir(self, path: str) -> bool:
-        return path in self.dirs
+        return self._normalize(path) in self.dirs
 
     def read_bytes(self, path: str) -> bytes:
-        return self.files[path]
+        return self.files[self._normalize(path)]
 
     def list_dir(self, path: str, pattern: str = "*", recursive: bool = False) -> list[str]:
         import fnmatch
-        sep = "\\" if "\\" in path else "/"
+        n = self._normalize(path)
         out = []
         for fp in self.files:
-            if fp.startswith(path + sep):
-                tail = fp[len(path) + 1:]
-                if sep not in tail and fnmatch.fnmatch(tail, pattern):
+            if fp.startswith(n + "\\"):
+                tail = fp[len(n) + 1:]
+                if "\\" not in tail and fnmatch.fnmatch(tail, pattern):
                     out.append(fp)
         return out
 

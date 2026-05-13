@@ -300,11 +300,10 @@ ISO 26262 ASIL A 단위테스트 산출물 자동 생성 + cross-validation 플�
 
 > **Backward 호환 (W22, 28차 명시)**: 24차 이전 빌드 결과물은 동일 셀에 string `"N/A"` 보유. 회사 audit reviewer가 두 형식 모두 인지하도록 산출물에 라운드(24차+) 표기를 Cover 시트 doc_id_sequence에 포함 권장. 자동 변환/마이그레이션 스크립트는 제공 안 함 — 이전 산출물은 그대로 둘 것. 신규 빌드부터 노란 마킹 적용.
 
-### Workflow & Tests (29차 갱신 — 실측)
-- Backend SwUT 전체 회귀: **221개** (29차 W17 design_tokens 회귀 +1)
-- 단, `test_swut_input_adapter.py::TestCollectFromLogFolder::test_collects_one_environment` **1건** msys64 mingw Python (`os.sep='/'` quirk) 환경에서만 실패 — Windows native Python에서는 통과 추정. fake_resolver와 `os.path.join` 결과 mismatch (path separator). **30차+ 환경 호환 fix 예정**.
+### Workflow & Tests (30차 prep 갱신 — 실측)
+- Backend SwUT 전체 회귀: **221개** (모두 통과 — 29차 W17 +1, 30차 prep W25 fake_resolver normalize fix로 msys64 mingw Python 환경도 통과)
 - 회귀 파일: `test_swut_aggregators.py` + `test_swut_router.py` + `test_swut_consistency_checker.py` + `test_swut_deviation_generator.py` + `test_swut_input_adapter.py` + `test_swut_swuds_parser.py` + `test_excel_template_utils.py`
-- Backend 전체: **1701개** (timeout 없이 통과)
+- Backend 전체: **1702개** (.venv Python 3.12.6 / 93.83s, timeout 없이 통과)
 - Frontend SwUTBuildSection: **21개** (vitest)
 - Frontend 전체: **216개** (23 test files)
 - Cloudium worker는 read-only — 절대 cloudium 파일 생성/수정 금지 (사용자 의사결정)
@@ -312,10 +311,11 @@ ISO 26262 ASIL A 단위테스트 산출물 자동 생성 + cross-validation 플�
 
 > **회귀 카운트 측정 명령** (정확치 재확인 시):
 > ```bash
-> python -m pytest tests/unit/test_swut_*.py tests/unit/test_excel_template_utils.py --collect-only -q | tail -3
+> # .venv Python 3.12 권장 (운영 환경 동일). msys64 mingw Python은 os.sep='/' quirk 주의.
+> .venv/Scripts/python.exe -m pytest tests/unit/test_swut_*.py tests/unit/test_excel_template_utils.py --collect-only -q | tail -3
 > cd frontend-v2 && npx vitest run src/__tests__/SwUTBuildSection.test.jsx --reporter=basic
 > ```
-> 27차까지 "~260개" 표기는 부정확. 28차 실측 220개로 정정.
+> 27차까지 "~260개" 표기는 부정확 — 28차 실측 220개, 29차 design_tokens 회귀 +1, 30차 prep W25 fix로 환경 무관 221개.
 
 ### Backend Reload 절차 (26차 C6 명시)
 
