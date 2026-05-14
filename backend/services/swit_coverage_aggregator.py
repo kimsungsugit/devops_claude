@@ -139,7 +139,9 @@ def build_swit_coverage_report(
     validate_xlsx_template_bytes(template_bytes, label="SwIT Coverage Report template")
 
     template_sha256_12 = hashlib.sha256(template_bytes).hexdigest()[:12]
-    warnings: list[str] = []
+    # 37차 fix: input_adapter 단계 parse_warnings (env_prefix mismatch / auto-resolved
+    # release / sub-folder missing 등)를 응답 warnings에 합쳐 X-SwIT-Warnings로 노출.
+    warnings: list[str] = list(session.parse_warnings or [])
     wb: Workbook = openpyxl.load_workbook(io.BytesIO(template_bytes), data_only=False)
     sheet_names = wb.sheetnames
 

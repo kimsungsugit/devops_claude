@@ -374,7 +374,9 @@ def build_sutr(
     # 5차 L1 (ISO F3 추적성): 입력 template hash — audit 시 입력 동일성 검증용.
     template_sha256_12 = hashlib.sha256(template_bytes).hexdigest()[:12]
 
-    warnings: list[str] = []
+    # 37차 fix: input_adapter 단계 parse_warnings (env_prefix / auto-resolved release
+    # / sub-folder missing 등)를 응답 warnings에 합쳐 X-SwUT-Warnings로 노출.
+    warnings: list[str] = list(session.parse_warnings or [])
     # deep-reviewer W2: VBA 매크로 ZIP entry 존재 여부 사전 측정.
     template_has_vba = has_vba_macros(template_bytes)
     vba_refs_found: list[str] = []

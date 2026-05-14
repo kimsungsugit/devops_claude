@@ -329,6 +329,117 @@ def _parse_testcase_data_via_temp(resolver: Any, html_path: str) -> Any:
         tmp.unlink(missing_ok=True)
 
 
+# 37차: log_folder 자동 latest release 선택 — `v<버전>_<YYMMDD>` 패턴.
+# 사용자가 `01.Log/` 상위 폴더만 지정해도 그 안의 최신 release 폴더 자동 선택.
+_RELEASE_FOLDER_RE = re.compile(r"^v[\d.]+_(\d{6,8})(?:[_-].+)?$")
+
+
+def _resolve_latest_release_folder(
+    resolver: Any,
+    log_folder: str,
+    out_warnings: list[str] | None = None,
+) -> str:
+    """log_folder 안에 `01.TestCaseDataReport` 가 없으면 `v<버전>_<날짜>` 후보 중
+    날짜 suffix 최대값을 가진 디렉토리로 자동 재할당.
+
+    예:
+        log_folder = `U:\\...\\01.Log\\`  (사용자가 상위 폴더만 지정)
+        → 그 안의 `v2.02_240219 / v2.03_240315 / v2.10_241201` 중 `v2.10_241201` 선택
+
+    동작:
+        1. `<log_folder>/01.TestCaseDataReport` exists? → True면 그대로 반환 (case A)
+        2. False면 sub 디렉토리 enumerate 시도 — Local resolver는 `os.scandir`
+           직접 호출, Cloudium은 list_dir이 파일만 반환하니 지원 안 함 (graceful warning)
+        3. 후보 디렉토리 중 `v<버전>_<YYMMDD>` 패턴 매칭 → 날짜 suffix 최대값 선택
+        4. 후보 0건 또는 cloudium 한계 시 원본 path 유지 (graceful)
+
+    Args:
+        resolver: file_resolver — mode 확인용 (local만 자동 탐색 지원)
+        log_folder: 사용자가 입력한 path
+        out_warnings: 자동 재할당 사유 누적용
+
+    Returns:
+        실제 사용할 log_folder path (자동 선택되면 변경, 아니면 원본)
+    """
+    # Case A 빠른 경로: sub-folder 이미 존재 → 그대로 사용
+    sub_tc = os.path.join(log_folder, "01.TestCaseDataReport")
+    try:
+        if resolver.exists(sub_tc):
+            return log_folder
+    except Exception as e:
+        # 37차 reviewer W2: resolver.exists 실패 원인을 silent로 삼키지 말 것.
+        # cloudium 게이트 OFF / IPC 통신 실패 / path 형식 오류 등을 사용자가 인지하도록
+        # warning 누적 후 원본 path 유지 (기존 흐름에 위임).
+        if out_warnings is not None:
+            out_warnings.append(
+                f"resolver.exists() 예외 ({type(e).__name__}: {e}) — "
+                "자동 latest 탐색 skip, 원본 경로 유지"
+            )
+        return log_folder
+
+    # Case B: sub-folder 미존재 → log_folder가 상위 (예: `01.Log/`) 가정.
+    # 자동 latest 탐색 시도.
+    resolver_mode = getattr(resolver, "mode", "local")
+    if resolver_mode != "local":
+        # Cloudium은 list_dir이 파일만 반환 — 디렉토리 enum 불가. 사용자에게 명시.
+        if out_warnings is not None:
+            out_warnings.append(
+                f"log_folder '{log_folder}'에 01.TestCaseDataReport 없음 — "
+                f"cloudium 모드는 자동 latest 미지원. v<버전>_<날짜> 폴더를 직접 지정 필요"
+            )
+        return log_folder
+
+    # Local 모드: os.scandir 직접 사용 (list_dir은 파일만 반환하므로 우회)
+    try:
+        candidates: list[tuple[str, str]] = []  # (날짜suffix, path)
+        with os.scandir(log_folder) as it:
+            for entry in it:
+                if not entry.is_dir():
+                    continue
+                m = _RELEASE_FOLDER_RE.match(entry.name)
+                if not m:
+                    continue
+                # 추가 검증: 후보 디렉토리에 `01.TestCaseDataReport` 존재해야 진짜 release
+                if not os.path.isdir(os.path.join(entry.path, "01.TestCaseDataReport")):
+                    continue
+                date_suffix = m.group(1)
+                candidates.append((date_suffix, entry.path))
+
+        if not candidates:
+            if out_warnings is not None:
+                out_warnings.append(
+                    f"log_folder '{log_folder}'에 01.TestCaseDataReport 없음 — "
+                    f"v<버전>_<YYMMDD> 패턴 sub 폴더도 미발견. 사용자 입력 경로 확인 필요"
+                )
+            return log_folder
+
+        # 37차 reviewer W1: 날짜 suffix lexical 정렬은 **동일 자리수 끼리만** 날짜
+        # 순서와 일치. YYMMDD (6자리) 끼리 또는 YYYYMMDD (8자리) 끼리는 정확하나
+        # 6/8 혼재 시 lexical 정렬 부정확 — 실 환경은 6자리 통일 가정. 혼재 감지 시
+        # 사용자에게 명시 warning.
+        suffix_lengths = {len(s) for s, _ in candidates}
+        if len(suffix_lengths) > 1 and out_warnings is not None:
+            out_warnings.append(
+                f"날짜 suffix 자리수 혼재 감지 ({sorted(suffix_lengths)}) — "
+                "lexical 정렬이 날짜 순서와 불일치 가능. 실 환경 폴더 명명 통일 권장"
+            )
+        candidates.sort(key=lambda x: x[0], reverse=True)
+        latest_path = candidates[0][1]
+        latest_name = os.path.basename(latest_path)
+        if out_warnings is not None:
+            out_warnings.append(
+                f"log_folder auto-resolved: '{latest_name}' (날짜 suffix 최대값 / "
+                f"{len(candidates)}개 후보 중 latest)"
+            )
+        return latest_path
+    except (OSError, PermissionError) as e:
+        if out_warnings is not None:
+            out_warnings.append(
+                f"log_folder 자동 탐색 실패 ({type(e).__name__}): {e} — 원본 경로 유지"
+            )
+        return log_folder
+
+
 def _extract_env_from_filename(name: str, *, env_prefix: str = "SWTE") -> str:
     """`<env_prefix>_NN_test_case_data_report.html` → `<env_prefix>_NN`.
 
@@ -390,6 +501,12 @@ def collect_from_log_folder(
             )
 
     warnings = parse_warnings if parse_warnings is not None else []
+
+    # 37차: log_folder가 `01.Log/` 같은 상위 폴더면 자동으로 latest release 디렉토리
+    # (`v<버전>_<YYMMDD>` 패턴 중 날짜 suffix 최대값) 선택. Case A (사용자가 release
+    # 폴더 직접 지정)면 그대로 통과 — backward compat.
+    log_folder = _resolve_latest_release_folder(resolver, log_folder, out_warnings=warnings)
+
     session = SwUTSession(
         project_id=project_id,
         version=version or Path(log_folder).name,

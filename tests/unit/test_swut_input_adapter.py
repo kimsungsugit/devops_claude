@@ -127,6 +127,119 @@ class TestExtractEnvFromFilename:
         assert _extract_env_from_filename(name, env_prefix="SwITC") == expected
 
 
+# 37차: _resolve_latest_release_folder — 01.Log 상위 폴더 → latest release 자동 선택
+class TestResolveLatestReleaseFolder:
+    """37차: 사용자가 release 폴더 직접 지정 안 해도 자동으로 latest 선택."""
+
+    def _make_release(self, root, name: str) -> None:
+        """release 디렉토리 + 01.TestCaseDataReport sub-folder 생성."""
+        rel = root / name
+        (rel / "01.TestCaseDataReport").mkdir(parents=True, exist_ok=True)
+
+    def test_case_a_direct_release_folder_returns_as_is(self, tmp_path):
+        """release 폴더 직접 지정 (01.TestCaseDataReport 존재) → 그대로 반환."""
+        from backend.services.file_resolver import LocalFileResolver
+        from backend.services.swut_input_adapter import _resolve_latest_release_folder
+        self._make_release(tmp_path, "v2.02_240219")
+        direct = tmp_path / "v2.02_240219"
+        warns: list[str] = []
+        result = _resolve_latest_release_folder(
+            LocalFileResolver(), str(direct), out_warnings=warns,
+        )
+        assert result == str(direct)
+        assert not warns, "case A는 warning 없어야 함"
+
+    def test_case_b_log_parent_picks_latest_by_date_suffix(self, tmp_path):
+        """01.Log 상위 폴더 → 날짜 suffix 최대값 자동 선택."""
+        from backend.services.file_resolver import LocalFileResolver
+        from backend.services.swut_input_adapter import _resolve_latest_release_folder
+        # 3 release 생성 — 날짜 suffix 정렬: 240219 < 240315 < 241201
+        for name in ("v2.02_240219", "v2.03_240315", "v2.10_241201"):
+            self._make_release(tmp_path, name)
+        warns: list[str] = []
+        result = _resolve_latest_release_folder(
+            LocalFileResolver(), str(tmp_path), out_warnings=warns,
+        )
+        assert result == str(tmp_path / "v2.10_241201")
+        assert any("auto-resolved" in w for w in warns)
+        assert any("v2.10_241201" in w for w in warns)
+
+    def test_case_c_empty_folder_returns_original_with_warning(self, tmp_path):
+        """후보 0건 → 원본 path 유지 + warning."""
+        from backend.services.file_resolver import LocalFileResolver
+        from backend.services.swut_input_adapter import _resolve_latest_release_folder
+        warns: list[str] = []
+        result = _resolve_latest_release_folder(
+            LocalFileResolver(), str(tmp_path), out_warnings=warns,
+        )
+        assert result == str(tmp_path)
+        assert any("미발견" in w for w in warns)
+
+    def test_case_b_skips_non_release_pattern_dirs(self, tmp_path):
+        """v<버전>_<날짜> 패턴 아닌 디렉토리는 후보에서 제외."""
+        from backend.services.file_resolver import LocalFileResolver
+        from backend.services.swut_input_adapter import _resolve_latest_release_folder
+        # release 1개 + 무관 디렉토리 2개
+        self._make_release(tmp_path, "v2.02_240219")
+        (tmp_path / "backup").mkdir()
+        (tmp_path / "tmp_2024").mkdir()
+        warns: list[str] = []
+        result = _resolve_latest_release_folder(
+            LocalFileResolver(), str(tmp_path), out_warnings=warns,
+        )
+        # 1 후보만 매칭 → 그게 latest
+        assert result == str(tmp_path / "v2.02_240219")
+
+    def test_case_b_skips_release_pattern_without_subfolder(self, tmp_path):
+        """v<버전>_<날짜> 패턴이지만 01.TestCaseDataReport 없으면 후보 제외 (검증)."""
+        from backend.services.file_resolver import LocalFileResolver
+        from backend.services.swut_input_adapter import _resolve_latest_release_folder
+        # 'v2.10_241201'은 빈 디렉토리 (01.TestCaseDataReport 없음) → 후보 거부
+        # 'v2.02_240219'만 실제 release → 선택
+        (tmp_path / "v2.10_241201").mkdir()
+        self._make_release(tmp_path, "v2.02_240219")
+        warns: list[str] = []
+        result = _resolve_latest_release_folder(
+            LocalFileResolver(), str(tmp_path), out_warnings=warns,
+        )
+        assert result == str(tmp_path / "v2.02_240219")
+
+    def test_w1_mixed_suffix_lengths_emit_warning(self, tmp_path):
+        """37차 reviewer W1: YYMMDD (6) + YYYYMMDD (8) 혼재 감지 시 명시 warning."""
+        from backend.services.file_resolver import LocalFileResolver
+        from backend.services.swut_input_adapter import _resolve_latest_release_folder
+        # 6자리 240219 vs 8자리 20240219 — lexical 비교: '20240219' > '240219'
+        # → 8자리가 latest로 선택되지만 실제 날짜는 동일 → 사용자에게 혼재 명시
+        self._make_release(tmp_path, "v2.02_240219")     # 6자리
+        self._make_release(tmp_path, "v2.03_20240219")   # 8자리 (실제로 같은 날짜)
+        warns: list[str] = []
+        _resolve_latest_release_folder(
+            LocalFileResolver(), str(tmp_path), out_warnings=warns,
+        )
+        assert any("자리수 혼재" in w for w in warns), (
+            f"혼재 감지 warning 미발생: {warns}"
+        )
+
+    def test_w2_resolver_exists_failure_emits_warning_not_silent(self, tmp_path):
+        """37차 reviewer W2: resolver.exists() 예외 시 silent 아닌 warning 누적."""
+        from backend.services.swut_input_adapter import _resolve_latest_release_folder
+
+        class _ExplodingResolver:
+            mode = "local"
+            def exists(self, path: str) -> bool:
+                raise PermissionError("test: gate OFF simulation")
+
+        warns: list[str] = []
+        result = _resolve_latest_release_folder(
+            _ExplodingResolver(), str(tmp_path), out_warnings=warns,
+        )
+        # 원본 path 유지 + warning 누적 (silent 아님)
+        assert result == str(tmp_path)
+        assert any("resolver.exists() 예외" in w for w in warns), (
+            f"W2 silent fallback fix 미적용: {warns}"
+        )
+
+
 class TestCoverageStats:
     def test_passed_when_full(self):
         assert CoverageStats(8, 8, 1.0).passed is True

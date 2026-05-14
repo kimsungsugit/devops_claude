@@ -330,8 +330,9 @@ ISO 26262 ASIL A 단위테스트 산출물 자동 생성 + cross-validation 플�
 
 ### Workflow & Tests (33차 갱신 — 실측)
 - Backend SwUT 전체 회귀: **~301개** (31-fix +5 / 32차 W28 +8)
-- Backend SwIT 회귀: **58개** (33차 25 + 34차 +28 + 35차 +5 — TestSwitConsistencyApi 2 + TestSwitPrefixMatching 2 + TestSwitReportToolQualification 1)
-- Backend 전체: **1842개** (.venv Python 3.12.6 / 83s — 1837 → 1842 +5)
+- Backend SwIT 회귀: **65개** (33차 25 + 34차 28 + 35차 5 + 36-fix 7 — `_extract_env_from_filename` SwIT prefix)
+- Backend 37차 신규: **+7** (`TestResolveLatestReleaseFolder`: Case A/B/C + non-release skip + missing-subfolder skip + W1 mixed suffix + W2 silent fallback)
+- Backend 전체: **1854개** (.venv Python 3.12.6 / 53s — 1837 → 1849 (+12 36-fix) → 1854 (+5 37차))
 - Frontend SwITBuildSection: **8개** (35차 신규)
 - Frontend 전체: **228개** (220 → 228 +8)
 - Frontend SwUTBuildSection: **26개**
@@ -430,10 +431,29 @@ ISO 26262 ASIL B+ 통합 테스트 산출물 자동 생성. SwUT 30~32차 인프
 - **C3 (Critical X6)**: SwIT v2.02 양식 ASIL 시각 강조 사전 통보 — 31차 W29 색상 정책 (B 파랑 #E2F0FF / C 주황 #FFE5CC / D 빨강 #FFC7CE)이 SwIT 산출물에도 적용됨. **회사 v2.02 SITR 양식이 빨강만 표준이라 추가 색상은 비표준 audit 확장**. 라이브 PoC 검증 시 회사 audit reviewer에 사전 통보 의무
 - **W2 (Warning X4)**: SwIT SITR이 `_write_cover` / `_write_test_summary` / `_write_deviation` / `_write_test_log` private 함수 강결합. 향후 SwUT SUTR signature 변경 시 SwIT 회귀에서 자동 감지 위해 `__all__` 명시 또는 public alias 추가는 35차+ 정비 후보
 
-### 비-목표 (36차+)
-- 36차+ — 라이브 검증 결과 fix (시트 위치 조정 / VBA 보존 확인 / 사용자 환경 path 정합성)
-- 36차+ — SwIT 시리즈 SwUDS↔SwIT 매핑 audit 정책 사전 통보 (회사 양식 빨강만 표준)
-- 별도 — `swit_meta.json` config 파일 도입 (현재는 req 명시 입력만, SwUT는 config 있음)
+### 36-fix — SwIT log filename SwITC_ prefix 지원 (Critical)
+- 35차 PoC 자체 평가 중 발견: `_extract_env_from_filename` regex가 `SWTE_\d+` 하드코딩
+  → 사용자 실 환경 `SwITC_21_*.html` 거부 → environments 0건
+- Fix: `env_prefix` kwarg 도입 (`_extract_env_from_filename`, `collect_from_log_folder`,
+  `collect_from_jenkins_cache`, `collect_swut_session`). SwIT는 "SwITC" 명시 전달
+- 회귀: SwUT 4 + SwIT 7 = 11건 통과 (1842 → 1849)
+
+### 37차 — log_folder 자동 latest release 선택
+- `01.Log/` 상위 폴더만 줘도 `v<버전>_<YYMMDD>` 패턴 중 날짜 suffix 최대값 자동 선택
+- `_resolve_latest_release_folder` helper: Case A (release 폴더 직접 지정 → 그대로) /
+  Case B (`01.Log/` 상위 → 자동 latest) / cloudium 모드 graceful warning
+- 빌더 4개 (`swut_coverage`/`swut_sutr`/`swit_coverage`/`swit_sitr`) — `session.parse_warnings`를
+  응답 warnings에 통합 (X-SwUT-Warnings / X-SwIT-Warnings 헤더 노출) — input_adapter 단계
+  메시지가 frontend Warnings 패널에 표시
+- reviewer W1/W2 fix: 날짜 자리수 혼재 감지 warning + resolver.exists() 예외 silent 차단
+- 회귀: 5 (basic) + 1 (W1) + 1 (W2) = 7건 통과 (1849 → 1854)
+
+### 비-목표 (38차+)
+- 라이브 검증 결과 fix (실 양식 시트 위치 / VBA 보존 / 사용자 환경 path 인코딩)
+- SwIT 시리즈 SwUDS↔SwIT 매핑 audit 정책 사전 통보 (회사 양식 빨강만 표준)
+- `swit_meta.json` config 파일 도입 (현재는 req 명시 입력만, SwUT는 config 있음)
+- Cloudium 모드 자동 latest 선택 지원 (현재는 local 전용 — list_dir이 파일만 반환 한계)
+- reviewer W3: 라우터 `allowed_roots` 명시 주입 (현재 None — Pydantic + path traversal blacklist로 2차 방어)
 
 ## Workflows (워크플로우 — 자동 연결)
 - `/workflow [기능설명]` — **전체 개발 흐름**: 기획→코드→테스트→리뷰→커밋 자동 실행

@@ -680,7 +680,9 @@ def build_coverage_report(
     # 5차 L1: 입력 template hash — audit 추적성.
     template_sha256_12 = hashlib.sha256(template_bytes).hexdigest()[:12]
 
-    warnings: list[str] = []
+    # 37차 fix: input_adapter 단계 parse_warnings (env_prefix / auto-resolved release
+    # / sub-folder missing 등)를 응답 warnings에 합쳐 X-SwUT-Warnings로 노출.
+    warnings: list[str] = list(session.parse_warnings or [])
     wb: Workbook = openpyxl.load_workbook(io.BytesIO(template_bytes), data_only=False)
     sheet_names = wb.sheetnames
 
