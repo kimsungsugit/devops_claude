@@ -42,6 +42,7 @@ from backend.services.excel_template_utils import (
     validate_xlsx_template_bytes,
 )
 from backend.services.swit_meta import SwitCoverageBuildMeta
+from backend.services.swut_builder_helpers import extract_warnings_from_session
 from backend.services.swut_coverage_aggregator import (
     _compute_asil_distribution,
     _write_consistency_sheet,
@@ -139,9 +140,8 @@ def build_swit_coverage_report(
     validate_xlsx_template_bytes(template_bytes, label="SwIT Coverage Report template")
 
     template_sha256_12 = hashlib.sha256(template_bytes).hexdigest()[:12]
-    # 37차 fix: input_adapter 단계 parse_warnings (env_prefix mismatch / auto-resolved
-    # release / sub-folder missing 등)를 응답 warnings에 합쳐 X-SwIT-Warnings로 노출.
-    warnings: list[str] = list(session.parse_warnings or [])
+    # 37차 fix → 38차 W1 DRY: extract_warnings_from_session helper로 추출.
+    warnings: list[str] = extract_warnings_from_session(session)
     wb: Workbook = openpyxl.load_workbook(io.BytesIO(template_bytes), data_only=False)
     sheet_names = wb.sheetnames
 

@@ -440,6 +440,70 @@ def _resolve_latest_release_folder(
         return log_folder
 
 
+def preview_release_candidates(
+    resolver: Any,
+    log_folder: str,
+) -> dict[str, Any]:
+    """38차 W4 — frontend dry-run preview용.
+
+    `_resolve_latest_release_folder`를 호출하되 빌드 안 하고 후보 list + 선택 결과만
+    반환. 사용자가 빌드 전에 어떤 release가 자동 선택될지 확인 가능.
+
+    Args:
+        resolver: file_resolver.
+        log_folder: 사용자 입력 path.
+
+    Returns:
+        {
+          "input_log_folder": str,
+          "resolved_log_folder": str,
+          "auto_resolved": bool,
+          "candidates": [{"name": str, "date_suffix": str, "is_latest": bool}, ...],
+          "warnings": [str, ...],
+        }
+    """
+    warnings: list[str] = []
+    resolved = _resolve_latest_release_folder(resolver, log_folder, out_warnings=warnings)
+    auto_resolved = resolved != log_folder
+
+    # 후보 list 재수집 — _resolve가 latest_path만 반환하므로 enum 재실행
+    candidates: list[dict[str, Any]] = []
+    resolver_mode = getattr(resolver, "mode", "local")
+    if resolver_mode == "local":
+        # Case B (auto-resolve 수행) 또는 Case A (no candidates)
+        try:
+            scan_root = log_folder if auto_resolved else os.path.dirname(resolved) or log_folder
+            if os.path.isdir(scan_root):
+                with os.scandir(scan_root) as it:
+                    raw: list[tuple[str, str]] = []
+                    for entry in it:
+                        if not entry.is_dir():
+                            continue
+                        m = _RELEASE_FOLDER_RE.match(entry.name)
+                        if not m:
+                            continue
+                        if not os.path.isdir(os.path.join(entry.path, "01.TestCaseDataReport")):
+                            continue
+                        raw.append((m.group(1), entry.name))
+                    raw.sort(key=lambda x: x[0], reverse=True)
+                    for i, (date_suffix, name) in enumerate(raw):
+                        candidates.append({
+                            "name": name,
+                            "date_suffix": date_suffix,
+                            "is_latest": i == 0,
+                        })
+        except (OSError, PermissionError) as e:
+            warnings.append(f"preview 후보 enum 실패 ({type(e).__name__}): {e}")
+
+    return {
+        "input_log_folder": log_folder,
+        "resolved_log_folder": resolved,
+        "auto_resolved": auto_resolved,
+        "candidates": candidates,
+        "warnings": warnings,
+    }
+
+
 def _extract_env_from_filename(name: str, *, env_prefix: str = "SWTE") -> str:
     """`<env_prefix>_NN_test_case_data_report.html` → `<env_prefix>_NN`.
 

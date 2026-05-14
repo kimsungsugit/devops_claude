@@ -45,6 +45,7 @@ from backend.services.excel_template_utils import (
     validate_xlsx_template_bytes,
 )
 from backend.services.swit_meta import SwitSitrBuildMeta
+from backend.services.swut_builder_helpers import extract_warnings_from_session
 from backend.services.swut_coverage_aggregator import (
     _compute_asil_distribution,
     _write_consistency_sheet,
@@ -152,9 +153,8 @@ def build_swit_sitr_report(
     validate_xlsx_template_bytes(template_bytes, label="SwIT SITR template")
 
     template_sha256_12 = hashlib.sha256(template_bytes).hexdigest()[:12]
-    # 37차 fix: input_adapter 단계 parse_warnings (env_prefix / auto-resolved release
-    # / sub-folder missing)를 응답 warnings에 합쳐 X-SwIT-Warnings로 노출.
-    warnings: list[str] = list(session.parse_warnings or [])
+    # 37차 fix → 38차 W1 DRY: extract_warnings_from_session helper로 추출.
+    warnings: list[str] = extract_warnings_from_session(session)
 
     # deep-reviewer W2: VBA 매크로 ZIP entry 존재 여부 사전 측정.
     template_has_vba = has_vba_macros(template_bytes)

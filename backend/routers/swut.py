@@ -29,30 +29,19 @@ import logging
 import os
 from typing import Any
 
-try:
-    import psutil  # type: ignore
-    _HAS_PSUTIL = True
-except ImportError:  # pragma: no cover
-    psutil = None  # type: ignore[assignment]
-    _HAS_PSUTIL = False
-
-
-def _get_process_memory_mb() -> float | None:
-    """20차 T182: 현재 프로세스 RSS 메모리 (MB). psutil 미설치 시 None.
-
-    Semaphore(3) 운영 안전 측정용 — _run_build_safely 시작/종료에서 로깅.
-    """
-    if not _HAS_PSUTIL:
-        return None
-    try:
-        return psutil.Process(os.getpid()).memory_info().rss / (1024 * 1024)
-    except Exception:  # pragma: no cover — psutil error fail-safe
-        return None
+# 38차 I2: psutil / _get_process_memory_mb / _run_*_safely 함수 제거.
+# backend/routers/_safety.run_build_safely / run_consistency_safely 내부 처리.
 
 from fastapi import APIRouter, HTTPException, Response
 from fastapi.responses import StreamingResponse
 
-from backend.schemas import SwUTBrowseRequest, SwUTBuildRequest, SwUTConsistencyCheckRequest
+from backend.routers._safety import run_build_safely, run_consistency_safely
+from backend.schemas import (
+    LogFolderPreviewRequest,
+    SwUTBrowseRequest,
+    SwUTBuildRequest,
+    SwUTConsistencyCheckRequest,
+)
 from backend.services.file_resolver import get_resolver
 from backend.services.swut_consistency_checker import check_swut_consistency
 from backend.services.swut_coverage_aggregator import (
@@ -256,46 +245,8 @@ def _build_result_to_response(
     )
 
 
-def _run_build_safely(kind: str, fn: Any, req: SwUTBuildRequest) -> Response:
-    """W4: builder exception 통합 처리 — sanitize + logger.exception traceback 보존.
-
-    detail은 외부에 leak 가능하므로 client-safe 메시지로 변환.
-    """
-    user = get_current_user()
-    mem_before = _get_process_memory_mb()
-    _logger.info("swut.%s.build start: project_id=%s release=%s user=%s mem_mb=%s",
-                 kind, req.project_id, req.release_sw_version, user,
-                 f"{mem_before:.1f}" if mem_before is not None else "n/a")
-    try:
-        resp = fn(req)
-        # 14차 W1: StreamingResponse는 .body 없음 — Content-Length 헤더로 크기 보고.
-        size = resp.headers.get("content-length", "?") if hasattr(resp, "headers") else "?"
-        mem_after = _get_process_memory_mb()
-        delta = (f"{mem_after - mem_before:+.1f}"
-                 if (mem_before is not None and mem_after is not None) else "n/a")
-        _logger.info("swut.%s.build done: project_id=%s bytes=%s mem_mb=%s delta=%s",
-                     kind, req.project_id, size,
-                     f"{mem_after:.1f}" if mem_after is not None else "n/a",
-                     delta)
-        return resp
-    except HTTPException:
-        raise  # 의도된 client error는 그대로
-    except (FileNotFoundError, PermissionError) as e:
-        _logger.exception("swut.%s.build I/O error", kind)
-        raise HTTPException(
-            status_code=404 if isinstance(e, FileNotFoundError) else 403,
-            detail=f"파일 접근 실패: {type(e).__name__}",
-        ) from e
-    except ValueError as e:
-        _logger.exception("swut.%s.build value error", kind)
-        # ValueError detail은 builder 내부 메시지 — 사용자 입력 관련 메시지만 leak
-        raise HTTPException(status_code=400, detail=f"입력 검증 실패: {e}") from e
-    except Exception as e:
-        _logger.exception("swut.%s.build unexpected error", kind)
-        raise HTTPException(
-            status_code=500,
-            detail=f"빌드 실패 ({type(e).__name__})",  # 메시지 본문 미노출
-        ) from e
+# 38차 I2: _run_build_safely 함수 제거 → backend/routers/_safety.run_build_safely
+# 사용. 호출 사이트는 endpoint에서 직접 키워드 인자로 전달.
 
 
 def _resolve_swuds_function_ids(req: SwUTBuildRequest) -> set[str] | None:
@@ -471,14 +422,20 @@ def _do_sutr_build(req: SwUTBuildRequest) -> Response:
 async def build_coverage(req: SwUTBuildRequest) -> Response:
     """Coverage Report v3.01 xlsx 빌드. Semaphore(2)로 동시 호출 제한."""
     async with _BUILD_SEMAPHORE:
-        return await asyncio.to_thread(_run_build_safely, "coverage", _do_coverage_build, req)
+        return await asyncio.to_thread(
+            run_build_safely, series="swut", kind="coverage",
+            build_fn=_do_coverage_build, req=req, logger=_logger,
+        )
 
 
 @router.post("/sutr/build")
 async def build_sutr_endpoint(req: SwUTBuildRequest) -> Response:
     """SUTR v3.01 xlsm 빌드 (keep_vba=True). Semaphore(2)로 동시 호출 제한."""
     async with _BUILD_SEMAPHORE:
-        return await asyncio.to_thread(_run_build_safely, "sutr", _do_sutr_build, req)
+        return await asyncio.to_thread(
+            run_build_safely, series="swut", kind="sutr",
+            build_fn=_do_sutr_build, req=req, logger=_logger,
+        )
 
 
 # ── 18차 T177: Coverage ↔ SUTR cross-validation endpoint ──────────────
@@ -495,39 +452,7 @@ def _do_consistency_check(req: SwUTConsistencyCheckRequest) -> dict[str, Any]:
     return report.to_dict()
 
 
-def _run_consistency_safely(req: SwUTConsistencyCheckRequest) -> dict[str, Any]:
-    """W4 패턴 재사용 — exception sanitize + logger.exception traceback 보존."""
-    user = get_current_user()
-    mem_before = _get_process_memory_mb()
-    _logger.info("swut.consistency.check start: coverage=%s sutr=%s user=%s mem_mb=%s",
-                 req.coverage_path[:80], req.sutr_path[:80], user,
-                 f"{mem_before:.1f}" if mem_before is not None else "n/a")
-    try:
-        result = _do_consistency_check(req)
-        ok = result.get("ok")
-        n_issues = len(result.get("issues") or [])
-        mem_after = _get_process_memory_mb()
-        _logger.info("swut.consistency.check done: ok=%s issues=%d mem_mb=%s",
-                     ok, n_issues,
-                     f"{mem_after:.1f}" if mem_after is not None else "n/a")
-        return result
-    except HTTPException:
-        raise
-    except (FileNotFoundError, PermissionError) as e:
-        _logger.exception("swut.consistency.check I/O error")
-        raise HTTPException(
-            status_code=404 if isinstance(e, FileNotFoundError) else 403,
-            detail=f"파일 접근 실패: {type(e).__name__}",
-        ) from e
-    except ValueError as e:
-        _logger.exception("swut.consistency.check value error")
-        raise HTTPException(status_code=400, detail=f"입력 검증 실패: {e}") from e
-    except Exception as e:
-        _logger.exception("swut.consistency.check unexpected error")
-        raise HTTPException(
-            status_code=500,
-            detail=f"일관성 검증 실패 ({type(e).__name__})",
-        ) from e
+# 38차 I2: _run_consistency_safely 함수 제거 → backend/routers/_safety.run_consistency_safely
 
 
 @router.post("/consistency/check")
@@ -538,7 +463,30 @@ async def consistency_check(req: SwUTConsistencyCheckRequest) -> dict[str, Any]:
     exception_deviation / total_tc / final_result) 결과를 JSON으로 반환.
     빌드 endpoint와 달리 Semaphore 미적용 (read-only, 메모리 풋프린트 작음).
     """
-    return await asyncio.to_thread(_run_consistency_safely, req)
+    return await asyncio.to_thread(
+        run_consistency_safely, series="swut",
+        check_fn=_do_consistency_check, req=req, logger=_logger,
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────
+# 38차 W4 — log_folder dry-run preview (SwUT용)
+# ─────────────────────────────────────────────────────────────────────
+
+def _do_swut_log_folder_preview(req: LogFolderPreviewRequest) -> dict[str, Any]:
+    """SwUT용 preview — default env_prefix='SWTE'."""
+    from backend.services.swut_input_adapter import preview_release_candidates
+    resolver = get_resolver()
+    return preview_release_candidates(resolver, req.log_folder)
+
+
+@router.post("/log-folder/preview")
+async def swut_log_folder_preview(req: LogFolderPreviewRequest) -> dict[str, Any]:
+    """38차 W4: 빌드 전 release 후보 list + 자동 선택될 latest 미리보기 (SwUT)."""
+    return await asyncio.to_thread(
+        run_consistency_safely, series="swut",
+        check_fn=_do_swut_log_folder_preview, req=req, logger=_logger,
+    )
 
 
 # ── 21차 T185: Path picker dialog용 browse endpoint ──────────────────

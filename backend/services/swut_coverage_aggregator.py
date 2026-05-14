@@ -48,6 +48,7 @@ from backend.services.excel_template_utils import (
     write_label_or_mark,
     write_value_after_label,
 )
+from backend.services.swut_builder_helpers import extract_warnings_from_session
 from backend.services.swut_meta import BuildMetaBase
 from backend.services.swut_input_adapter import (
     EnvironmentData,
@@ -680,9 +681,8 @@ def build_coverage_report(
     # 5차 L1: 입력 template hash — audit 추적성.
     template_sha256_12 = hashlib.sha256(template_bytes).hexdigest()[:12]
 
-    # 37차 fix: input_adapter 단계 parse_warnings (env_prefix / auto-resolved release
-    # / sub-folder missing 등)를 응답 warnings에 합쳐 X-SwUT-Warnings로 노출.
-    warnings: list[str] = list(session.parse_warnings or [])
+    # 37차 fix → 38차 W1 DRY: extract_warnings_from_session helper로 추출.
+    warnings: list[str] = extract_warnings_from_session(session)
     wb: Workbook = openpyxl.load_workbook(io.BytesIO(template_bytes), data_only=False)
     sheet_names = wb.sheetnames
 
@@ -803,3 +803,23 @@ def build_coverage_report(
 
 
 # `short_date`는 excel_template_utils에서 import — 모듈 하단 중복 정의 제거 (deep-reviewer C1).
+
+
+# 38차 W2 — public API 명시. SwIT aggregator가 본 모듈의 _write_*_sheet private
+# 함수들을 직접 import 중 (강결합 보류 — 35차 SwIT 라운드 채택). 본 __all__로
+# 강결합 경계를 명시화: signature 변경 시 SwIT 회귀(test_swit_*_aggregator.py)
+# 동시 검증 의무. 향후 W2 정리 시 public alias로 분리 권장.
+__all__ = [
+    # Public API
+    "CoverageBuildMeta",
+    "CoverageBuildResult",
+    "build_coverage_report",
+    # Private 함수 — SwIT가 import 중. 명시로 강결합 가시화.
+    "_compute_asil_distribution",
+    "_write_consistency_sheet",
+    "_write_cover_sheet",
+    "_write_coverage_sheet",
+    "_write_history_sheet",
+    "_write_test_summary_sheet",
+    "_write_traceability_sheet",
+]

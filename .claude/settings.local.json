@@ -9,7 +9,9 @@
       "Bash(ps -W)",
       "Bash(where rg *)",
       "Bash(findstr *)",
-      "Bash(bash scripts/install_git_hooks.sh)"
+      "Bash(bash scripts/install_git_hooks.sh)",
+      "Bash(Get-ChildItem -Path \"D:\\\\Project\\\\devops\\\\Release_claude\\\\backend\\\\services\" -Filter \"swit_*.py\")",
+      "Bash(Select-Object -ExpandProperty Name)"
     ]
   }
 }

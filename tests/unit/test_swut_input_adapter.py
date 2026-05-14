@@ -5,6 +5,7 @@ collect_from_log_folder 통합 동작을 검증.
 """
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -219,6 +220,50 @@ class TestResolveLatestReleaseFolder:
         assert any("자리수 혼재" in w for w in warns), (
             f"혼재 감지 warning 미발생: {warns}"
         )
+
+    def test_w6_large_candidate_count_performance(self, tmp_path):
+        """38차 W6: 100개 후보 디렉토리 → 1초 미만 처리 (성능)."""
+        import time
+        from backend.services.file_resolver import LocalFileResolver
+        from backend.services.swut_input_adapter import _resolve_latest_release_folder
+        # 100 release 후보 + 01.TestCaseDataReport 각각
+        for i in range(100):
+            yymmdd = f"24{i // 30 + 1:02d}{(i % 28) + 1:02d}"  # YYMMDD
+            ver_minor = i % 100
+            self._make_release(tmp_path, f"v2.{ver_minor:02d}_{yymmdd}")
+        warns: list[str] = []
+        t0 = time.perf_counter()
+        result = _resolve_latest_release_folder(
+            LocalFileResolver(), str(tmp_path), out_warnings=warns,
+        )
+        elapsed = time.perf_counter() - t0
+        assert elapsed < 1.0, f"100 후보 처리 1초 초과: {elapsed:.3f}s"
+        assert "v2." in os.path.basename(result)
+        assert any("100개 후보" in w for w in warns)
+
+    def test_w6_symlink_release_folder_recognized(self, tmp_path):
+        """38차 W6: symlink로 가리킨 release 폴더도 정상 후보로 인정 (POSIX 한정).
+
+        Windows에서는 symlink 권한 제약으로 skip — 환경 검증.
+        """
+        import platform
+        from backend.services.file_resolver import LocalFileResolver
+        from backend.services.swut_input_adapter import _resolve_latest_release_folder
+        # 실 release 생성 후 symlink 추가
+        real = tmp_path / "real_v2.02_240219"
+        (real / "01.TestCaseDataReport").mkdir(parents=True)
+        link = tmp_path / "v2.10_241201"
+        try:
+            os.symlink(str(real), str(link), target_is_directory=True)
+        except (OSError, NotImplementedError, AttributeError):
+            import pytest as _pytest
+            _pytest.skip(f"symlink unsupported ({platform.system()})")
+        warns: list[str] = []
+        result = _resolve_latest_release_folder(
+            LocalFileResolver(), str(tmp_path), out_warnings=warns,
+        )
+        # symlink target은 v2.10_241201 이름 — 후보 인정되면 selected
+        assert "v2.10_241201" in result
 
     def test_w2_resolver_exists_failure_emits_warning_not_silent(self, tmp_path):
         """37차 reviewer W2: resolver.exists() 예외 시 silent 아닌 warning 누적."""

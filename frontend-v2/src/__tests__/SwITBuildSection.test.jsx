@@ -178,6 +178,51 @@ describe('SwITBuildSection', () => {
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
+  // 38차 W4: log_folder dry-run preview button + panel
+  it('preview button calls /api/swit/log-folder/preview and renders candidates panel', async () => {
+    const fetchSpy = vi.spyOn(global, 'fetch').mockResolvedValue({
+      ok: true,
+      headers: new Headers({ 'Content-Type': 'application/json' }),
+      json: async () => ({
+        input_log_folder: 'C:/fake/01.Log',
+        resolved_log_folder: 'C:/fake/01.Log/v2.10_241201',
+        auto_resolved: true,
+        candidates: [
+          { name: 'v2.10_241201', date_suffix: '241201', is_latest: true },
+          { name: 'v2.02_240219', date_suffix: '240219', is_latest: false },
+        ],
+        warnings: ["log_folder auto-resolved: 'v2.10_241201' (2개 후보)"],
+      }),
+    });
+
+    render(<SwITBuildSection />);
+    fireEvent.change(screen.getByLabelText(/Log Folder/), {
+      target: { value: 'C:/fake/01.Log' },
+    });
+    fireEvent.click(screen.getByTestId('swit-preview-button'));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('swit-preview-panel')).toBeTruthy();
+    });
+    const [url, init] = fetchSpy.mock.calls[0];
+    expect(url).toContain('/api/swit/log-folder/preview');
+    expect(init.headers['X-User']).toBe('tester');
+    // 후보 + 자동 선택 표시 렌더 (resolved_log_folder + candidates 모두 v2.10 포함 — getAllByText)
+    expect(screen.getAllByText(/v2.10_241201/).length).toBeGreaterThanOrEqual(2);
+    expect(screen.getByText(/v2.02_240219/)).toBeTruthy();
+    expect(screen.getByText(/이 release 자동 선택/)).toBeTruthy();
+  });
+
+  it('preview rejects empty log_folder with toast warning', async () => {
+    const fetchSpy = vi.spyOn(global, 'fetch');
+    render(<SwITBuildSection />);
+    fireEvent.click(screen.getByTestId('swit-preview-button'));
+    await waitFor(() => {
+      expect(toastSpy).toHaveBeenCalledWith('warning', expect.stringMatching(/log_folder/));
+    });
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
   it('localStorage key separation — devops_v2_swit_form (SwUT의 swut_form과 분리)', () => {
     render(<SwITBuildSection />);
     fireEvent.change(screen.getByLabelText(/Release SW Version/), {

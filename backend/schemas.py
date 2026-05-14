@@ -840,6 +840,22 @@ class SwUTConsistencyCheckRequest(BaseModel):
 
 # ── SwIT Consistency Check (35차 라운드) ──────────────────────────────
 
+class LogFolderPreviewRequest(BaseModel):
+    """38차 W4 — log_folder dry-run preview 요청 body.
+
+    사용자가 빌드 전에 자동 선택될 release release를 확인 가능.
+    SwUT/SwIT 공통 — env_prefix kwarg로 분기 (default "SWTE").
+    """
+    log_folder: str = Field(..., min_length=1, max_length=500)
+
+    @field_validator("log_folder")
+    @classmethod
+    def _no_newline_preview(cls, v: str) -> str:
+        if "\n" in v or "\r" in v:
+            raise ValueError("줄바꿈 문자 금지 — 단일 라인 path 필요")
+        return v
+
+
 class SwITConsistencyCheckRequest(BaseModel):
     """SwIT Coverage Report ↔ SITR cross-validation 요청 body (35차).
 

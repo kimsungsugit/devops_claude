@@ -892,12 +892,16 @@ class TestConsistencyCheckEndpoint18:
 # ---------------------------------------------------------------------------
 
 class TestMemoryMonitor20:
-    """_get_process_memory_mb 헬퍼 — psutil 유무 fail-safe."""
+    """get_process_memory_mb 헬퍼 — psutil 유무 fail-safe.
+
+    38차 I2: backend.routers.swut에서 backend.routers._safety로 이전.
+    회귀는 새 위치를 검증 — 기존 _get_process_memory_mb 이름은 _safety.get_process_memory_mb.
+    """
 
     def test_returns_float_when_psutil_available(self):
         """psutil 설치된 환경에서는 양수 float 반환."""
-        from backend.routers.swut import _get_process_memory_mb, _HAS_PSUTIL
-        result = _get_process_memory_mb()
+        from backend.routers._safety import get_process_memory_mb, _HAS_PSUTIL
+        result = get_process_memory_mb()
         if _HAS_PSUTIL:
             assert isinstance(result, float)
             assert result > 0  # 어떤 프로세스도 0 MB 일 수 없음
@@ -906,24 +910,23 @@ class TestMemoryMonitor20:
 
     def test_returns_none_when_psutil_missing(self):
         """psutil ImportError 시뮬레이션 — None 반환."""
-        from backend.routers import swut as swut_mod
-        # _HAS_PSUTIL=False 강제 + 함수 호출
-        original = swut_mod._HAS_PSUTIL
+        from backend.routers import _safety as safety_mod
+        original = safety_mod._HAS_PSUTIL
         try:
-            swut_mod._HAS_PSUTIL = False
-            assert swut_mod._get_process_memory_mb() is None
+            safety_mod._HAS_PSUTIL = False
+            assert safety_mod.get_process_memory_mb() is None
         finally:
-            swut_mod._HAS_PSUTIL = original
+            safety_mod._HAS_PSUTIL = original
 
     def test_returns_none_on_psutil_error(self):
         """psutil.Process가 예외 던지면 silent None."""
         from unittest.mock import patch as _patch
-        from backend.routers import swut as swut_mod
-        if not swut_mod._HAS_PSUTIL:
+        from backend.routers import _safety as safety_mod
+        if not safety_mod._HAS_PSUTIL:
             return  # psutil 미설치 환경 skip
-        with _patch("backend.routers.swut.psutil.Process",
+        with _patch("backend.routers._safety.psutil.Process",
                     side_effect=Exception("mock error")):
-            assert swut_mod._get_process_memory_mb() is None
+            assert safety_mod.get_process_memory_mb() is None
 
 
 # ---------------------------------------------------------------------------

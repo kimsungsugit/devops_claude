@@ -68,6 +68,9 @@ export default function SwITBuildSection() {
   const [consistencyChecking, setConsistencyChecking] = useState(false);
   const [consistencyReport, setConsistencyReport] = useState(null);
   const [picker, setPicker] = useState(null);
+  // 38차 W4: log_folder dry-run preview state
+  const [previewChecking, setPreviewChecking] = useState(false);
+  const [previewResult, setPreviewResult] = useState(null);
 
   const openPicker = (target, pattern, title) => {
     let onSelect;
@@ -209,6 +212,51 @@ export default function SwITBuildSection() {
     }
   }, [form, toast]);
 
+  // 38차 W4: log_folder dry-run preview — 빌드 전 release 후보 + 자동 선택 미리보기
+  const runLogFolderPreview = useCallback(async () => {
+    if (!form.log_folder) {
+      toast('warning', 'log_folder 입력 필요'); return;
+    }
+    const user = getUsername();
+    if (!user) { toast('warning', '사용자 이름 미설정 — Settings 확인'); return; }
+
+    setPreviewChecking(true);
+    setPreviewResult(null);
+    try {
+      const res = await fetch(buildUrl('/api/swit/log-folder/preview'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-User': user },
+        body: JSON.stringify({ log_folder: form.log_folder }),
+      });
+      if (!res.ok) {
+        let msg = `HTTP ${res.status}`;
+        try {
+          const j = await res.json();
+          if (Array.isArray(j?.detail)) msg = formatDetailMessage(j.detail);
+          else if (typeof j?.detail === 'string') msg = j.detail;
+        } catch (e) { /* non-JSON */ }
+        if (mountedRef.current) toast('error', `미리보기 실패: ${msg}`);
+        return;
+      }
+      const data = await res.json();
+      if (!mountedRef.current) return;
+      setPreviewResult(data);
+      const n = (data.candidates || []).length;
+      if (data.auto_resolved) {
+        const latest = (data.candidates || []).find(c => c.is_latest);
+        toast('success', `자동 선택: ${latest?.name || '?'} (${n}개 후보 중 latest)`);
+      } else if (n === 0) {
+        toast('warning', '후보 0건 — log_folder 확인');
+      } else {
+        toast('info', `정상 release 폴더 (${n}개 후보)`);
+      }
+    } catch (e) {
+      if (mountedRef.current) toast('error', `미리보기 실패: ${e?.message || e}`);
+    } finally {
+      if (mountedRef.current) setPreviewChecking(false);
+    }
+  }, [form.log_folder, toast]);
+
   const runConsistencyCheck = useCallback(async () => {
     if (!consistencyForm.coverage_path) {
       toast('warning', 'coverage_path 필수'); return;
@@ -320,7 +368,50 @@ export default function SwITBuildSection() {
                 onClick={() => openPicker('log_folder', '*', 'Log 디렉토리 선택')}>
           📂 Browse
         </button>
+        {/* 38차 W4: log_folder dry-run preview 버튼 */}
+        <button
+          className="swut-browse-btn"
+          type="button"
+          disabled={previewChecking}
+          data-testid="swit-preview-button"
+          onClick={runLogFolderPreview}
+          title="빌드 전 release 후보 + 자동 선택될 latest 미리보기 (38차)"
+        >
+          {previewChecking ? '...' : '🔎 미리보기'}
+        </button>
       </div>
+      {/* 38차 W4: preview 결과 inline panel */}
+      {previewResult && (
+        <div className="swut-preview-panel" data-testid="swit-preview-panel">
+          <div className="swut-preview-title">
+            🔎 log_folder 미리보기 ({previewResult.candidates?.length || 0}개 후보)
+            {previewResult.auto_resolved && (
+              <span className="swut-preview-badge"> 자동 선택</span>
+            )}
+          </div>
+          <div className="swut-preview-meta">
+            <strong>입력</strong>: {previewResult.input_log_folder}<br />
+            <strong>실제 사용</strong>: {previewResult.resolved_log_folder}
+          </div>
+          {(previewResult.candidates || []).length > 0 && (
+            <ul className="swut-preview-candidates">
+              {previewResult.candidates.map((c) => (
+                <li key={c.name} className={c.is_latest ? 'swut-preview-latest' : ''}>
+                  {c.is_latest && '🎯 '}
+                  <strong>{c.name}</strong>
+                  {' '}<span className="swut-preview-date">({c.date_suffix})</span>
+                  {c.is_latest && <em> ← 빌드 시 이 release 자동 선택</em>}
+                </li>
+              ))}
+            </ul>
+          )}
+          {(previewResult.warnings || []).length > 0 && (
+            <ul className="swut-preview-warnings">
+              {previewResult.warnings.map((w, i) => (<li key={i}>{w}</li>))}
+            </ul>
+          )}
+        </div>
+      )}
       <div className="swut-form-row swut-field-with-browse">
         <Field
           name="template_path"

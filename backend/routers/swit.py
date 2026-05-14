@@ -24,20 +24,14 @@ import asyncio
 import io
 import json
 import logging
-import os
 from typing import Any
-
-try:
-    import psutil  # type: ignore
-    _HAS_PSUTIL = True
-except ImportError:  # pragma: no cover
-    psutil = None  # type: ignore[assignment]
-    _HAS_PSUTIL = False
 
 from fastapi import APIRouter, HTTPException, Response
 from fastapi.responses import StreamingResponse
 
+from backend.routers._safety import run_build_safely, run_consistency_safely
 from backend.schemas import (
+    LogFolderPreviewRequest,
     SwITBuildRequest,
     SwITConsistencyCheckRequest,
     SwITSitrBuildRequest,
@@ -55,7 +49,6 @@ from backend.services.swit_sitr_aggregator import (
     build_swit_sitr_report,
 )
 from backend.services.swut_swuds_parser import parse_swuds_docx
-from backend.user_context import get_current_user
 
 _logger = logging.getLogger(__name__)
 
@@ -65,15 +58,8 @@ router = APIRouter(prefix="/api/swit", tags=["swit"])
 # 메모리 운영 측정 후 31차 W31 패턴으로 worst-case 산정 docstring 갱신 권장.
 _BUILD_SEMAPHORE = asyncio.Semaphore(2)
 
-
-def _get_process_memory_mb() -> float | None:
-    """SwUT 패턴 그대로 — RSS 메모리 측정 (psutil 미설치 시 None)."""
-    if not _HAS_PSUTIL:
-        return None
-    try:
-        return psutil.Process(os.getpid()).memory_info().rss / (1024 * 1024)
-    except Exception:  # pragma: no cover
-        return None
+# 38차 I2: get_process_memory_mb / get_current_user / _run_*_safely 함수들 제거.
+# backend/routers/_safety.run_build_safely / run_consistency_safely 가 내부 처리.
 
 
 def _build_swit_coverage_meta(req: SwITBuildRequest) -> SwitCoverageBuildMeta:
@@ -215,44 +201,7 @@ def _build_result_to_response(
     )
 
 
-def _run_build_safely(kind: str, fn: Any, req: SwITBuildRequest) -> Response:
-    """SwUT `_run_build_safely` 패턴 — 예외 sanitize + memory log.
-
-    SwIT 도구별 명명만 변경 ("swit.{kind}.build" log prefix).
-    """
-    user = get_current_user()
-    mem_before = _get_process_memory_mb()
-    _logger.info("swit.%s.build start: project_id=%s release=%s user=%s mem_mb=%s",
-                 kind, req.project_id, req.release_sw_version, user,
-                 f"{mem_before:.1f}" if mem_before is not None else "n/a")
-    try:
-        resp = fn(req)
-        size = resp.headers.get("content-length", "?") if hasattr(resp, "headers") else "?"
-        mem_after = _get_process_memory_mb()
-        delta = (f"{mem_after - mem_before:+.1f}"
-                 if (mem_before is not None and mem_after is not None) else "n/a")
-        _logger.info("swit.%s.build done: project_id=%s bytes=%s mem_mb=%s delta=%s",
-                     kind, req.project_id, size,
-                     f"{mem_after:.1f}" if mem_after is not None else "n/a",
-                     delta)
-        return resp
-    except HTTPException:
-        raise
-    except (FileNotFoundError, PermissionError) as e:
-        _logger.exception("swit.%s.build I/O error", kind)
-        raise HTTPException(
-            status_code=404 if isinstance(e, FileNotFoundError) else 403,
-            detail=f"파일 접근 실패: {type(e).__name__}",
-        ) from e
-    except ValueError as e:
-        _logger.exception("swit.%s.build value error", kind)
-        raise HTTPException(status_code=400, detail=f"입력 검증 실패: {e}") from e
-    except Exception as e:
-        _logger.exception("swit.%s.build unexpected error", kind)
-        raise HTTPException(
-            status_code=500,
-            detail=f"빌드 실패 ({type(e).__name__})",
-        ) from e
+# 38차 I2: _run_build_safely 함수 제거 → backend/routers/_safety.run_build_safely 사용.
 
 
 def _resolve_swuds_function_ids(req: SwITBuildRequest) -> set[str] | None:
@@ -370,7 +319,8 @@ async def build_swit_coverage(req: SwITBuildRequest) -> Response:
     """SwIT Coverage Report v2.02 xlsx 빌드. Semaphore(2)로 동시 호출 제한."""
     async with _BUILD_SEMAPHORE:
         return await asyncio.to_thread(
-            _run_build_safely, "coverage", _do_swit_coverage_build, req,
+            run_build_safely, series="swit", kind="coverage",
+            build_fn=_do_swit_coverage_build, req=req, logger=_logger,
         )
 
 
@@ -413,7 +363,8 @@ async def build_swit_sitr(req: SwITSitrBuildRequest) -> Response:
     """SwIT SITR v2.02 xlsm 빌드 (34차). Coverage와 Semaphore(2) 공유."""
     async with _BUILD_SEMAPHORE:
         return await asyncio.to_thread(
-            _run_build_safely, "sitr", _do_swit_sitr_build, req,
+            run_build_safely, series="swit", kind="sitr",
+            build_fn=_do_swit_sitr_build, req=req, logger=_logger,
         )
 
 
@@ -433,43 +384,7 @@ def _do_swit_consistency_check(req: SwITConsistencyCheckRequest) -> dict[str, An
     return report.to_dict()
 
 
-def _run_swit_consistency_safely(req: SwITConsistencyCheckRequest) -> dict[str, Any]:
-    """SwUT _run_consistency_safely 패턴 — exception sanitize + memory log."""
-    user = get_current_user()
-    mem_before = _get_process_memory_mb()
-    _logger.info(
-        "swit.consistency.check start: coverage=%s sitr=%s user=%s mem_mb=%s",
-        req.coverage_path[:80], req.sitr_path[:80], user,
-        f"{mem_before:.1f}" if mem_before is not None else "n/a",
-    )
-    try:
-        result = _do_swit_consistency_check(req)
-        ok = result.get("ok")
-        n_issues = len(result.get("issues") or [])
-        mem_after = _get_process_memory_mb()
-        _logger.info(
-            "swit.consistency.check done: ok=%s issues=%d mem_mb=%s",
-            ok, n_issues,
-            f"{mem_after:.1f}" if mem_after is not None else "n/a",
-        )
-        return result
-    except HTTPException:
-        raise
-    except (FileNotFoundError, PermissionError) as e:
-        _logger.exception("swit.consistency.check I/O error")
-        raise HTTPException(
-            status_code=404 if isinstance(e, FileNotFoundError) else 403,
-            detail=f"파일 접근 실패: {type(e).__name__}",
-        ) from e
-    except ValueError as e:
-        _logger.exception("swit.consistency.check value error")
-        raise HTTPException(status_code=400, detail=f"입력 검증 실패: {e}") from e
-    except Exception as e:
-        _logger.exception("swit.consistency.check unexpected error")
-        raise HTTPException(
-            status_code=500,
-            detail=f"일관성 검증 실패 ({type(e).__name__})",
-        ) from e
+# 38차 I2: _run_swit_consistency_safely 함수 제거 → backend/routers/_safety.run_consistency_safely
 
 
 @router.post("/consistency/check")
@@ -480,4 +395,34 @@ async def swit_consistency_check(req: SwITConsistencyCheckRequest) -> dict[str, 
     exception_deviation / total_tc / final_result) 결과를 JSON으로 반환.
     빌드 endpoint와 달리 Semaphore 미적용 (read-only, 메모리 풋프린트 작음).
     """
-    return await asyncio.to_thread(_run_swit_consistency_safely, req)
+    return await asyncio.to_thread(
+        run_consistency_safely, series="swit",
+        check_fn=_do_swit_consistency_check, req=req, logger=_logger,
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────
+# 38차 W4 — log_folder dry-run preview (frontend pre-build UX)
+# ─────────────────────────────────────────────────────────────────────
+
+def _do_swit_log_folder_preview(req: LogFolderPreviewRequest) -> dict[str, Any]:
+    """36-fix env_prefix='SwITC' + 37차 auto-resolved 의 미리보기.
+
+    빌드 없이 후보 list + 자동 선택될 release만 반환.
+    """
+    from backend.services.swut_input_adapter import preview_release_candidates
+    resolver = get_resolver()
+    return preview_release_candidates(resolver, req.log_folder)
+
+
+@router.post("/log-folder/preview")
+async def swit_log_folder_preview(req: LogFolderPreviewRequest) -> dict[str, Any]:
+    """38차 W4: 빌드 전 release 후보 list + 자동 선택될 latest 미리보기.
+
+    사용자가 `01.Log/` 상위 폴더만 입력해도 어떤 release가 선택될지 사전 확인 가능.
+    실 빌드는 따로 호출 (Coverage/SITR endpoint).
+    """
+    return await asyncio.to_thread(
+        run_consistency_safely, series="swit",
+        check_fn=_do_swit_log_folder_preview, req=req, logger=_logger,
+    )

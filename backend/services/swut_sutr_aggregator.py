@@ -49,6 +49,7 @@ from backend.services.excel_template_utils import (
 
 # 31차 W27: TC name에서 SwUFn_NNNN 함수 ID 추출 (Coverage builder와 동일 패턴).
 _TC_FN_RE = re.compile(r"(SwUFn_\d+)")
+from backend.services.swut_builder_helpers import extract_warnings_from_session
 from backend.services.swut_input_adapter import SwUTSession, aggregate_session
 from backend.services.swut_meta import BuildMetaBase
 
@@ -374,9 +375,8 @@ def build_sutr(
     # 5차 L1 (ISO F3 추적성): 입력 template hash — audit 시 입력 동일성 검증용.
     template_sha256_12 = hashlib.sha256(template_bytes).hexdigest()[:12]
 
-    # 37차 fix: input_adapter 단계 parse_warnings (env_prefix / auto-resolved release
-    # / sub-folder missing 등)를 응답 warnings에 합쳐 X-SwUT-Warnings로 노출.
-    warnings: list[str] = list(session.parse_warnings or [])
+    # 37차 fix → 38차 W1 DRY: extract_warnings_from_session helper로 추출.
+    warnings: list[str] = extract_warnings_from_session(session)
     # deep-reviewer W2: VBA 매크로 ZIP entry 존재 여부 사전 측정.
     template_has_vba = has_vba_macros(template_bytes)
     vba_refs_found: list[str] = []
@@ -515,3 +515,20 @@ def build_sutr(
 
 
 # `short_date`는 excel_template_utils에서 import — 모듈 하단 중복 정의 제거 (deep-reviewer C1).
+
+
+# 38차 W2 — public API 명시. SwIT SITR aggregator가 본 모듈의 _write_cover /
+# _write_test_summary / _write_deviation / _write_test_log private 함수들을 직접
+# import 중 (35차 SwIT 라운드 강결합 보류). 본 __all__로 강결합 경계를 명시화:
+# signature 변경 시 SwIT 회귀(test_swit_sitr_aggregator.py) 동시 검증 의무.
+__all__ = [
+    # Public API
+    "SutrBuildMeta",
+    "SutrBuildResult",
+    "build_sutr",
+    # Private 함수 — SwIT SITR이 import 중. 명시로 강결합 가시화.
+    "_write_cover",
+    "_write_deviation",
+    "_write_test_log",
+    "_write_test_summary",
+]

@@ -258,6 +258,64 @@ class TestSwitSitrXUserHeader:
         assert r.status_code in (401, 403, 400)
 
 
+# ---------------------------------------------------------------------------
+# 38차 W4 — log_folder preview endpoint
+# ---------------------------------------------------------------------------
+
+class TestSwitLogFolderPreview38:
+    """38차 W4: /api/swit/log-folder/preview — 빌드 전 release 후보 list."""
+
+    def test_minimal_returns_200_with_empty_candidates(self):
+        """존재하는 빈 디렉토리 → candidates 0건 + warnings."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            r = client.post(
+                "/api/swit/log-folder/preview",
+                json={"log_folder": tmp},
+                headers={"X-User": "tester"},
+            )
+            assert r.status_code == 200
+            data = r.json()
+            assert data["candidates"] == []
+            assert data["auto_resolved"] is False
+            assert data["input_log_folder"] == tmp
+            assert any("미발견" in w for w in (data.get("warnings") or []))
+
+    def test_pydantic_422_on_newline(self):
+        r = client.post(
+            "/api/swit/log-folder/preview",
+            json={"log_folder": "C:/fake\r\nX-Injected: evil"},
+            headers={"X-User": "tester"},
+        )
+        assert r.status_code == 422
+
+    def test_pydantic_422_on_maxlen(self):
+        r = client.post(
+            "/api/swit/log-folder/preview",
+            json={"log_folder": "C:/" + "a" * 600},
+            headers={"X-User": "tester"},
+        )
+        assert r.status_code == 422
+
+    def test_release_candidates_enumerated_with_latest_marked(self, tmp_path):
+        """3 release 디렉토리 → 후보 list + is_latest=True 1건."""
+        for name in ("v2.02_240219", "v2.03_240315", "v2.10_241201"):
+            (tmp_path / name / "01.TestCaseDataReport").mkdir(parents=True)
+        r = client.post(
+            "/api/swit/log-folder/preview",
+            json={"log_folder": str(tmp_path)},
+            headers={"X-User": "tester"},
+        )
+        assert r.status_code == 200
+        data = r.json()
+        assert len(data["candidates"]) == 3
+        latest = [c for c in data["candidates"] if c.get("is_latest")]
+        assert len(latest) == 1
+        assert latest[0]["name"] == "v2.10_241201"
+        assert data["auto_resolved"] is True
+        assert any("auto-resolved" in w for w in data["warnings"])
+
+
 class TestSwitSitrMetaBuilder:
     """_build_swit_sitr_meta — SwITSitrBuildRequest → SwitSitrBuildMeta."""
 
