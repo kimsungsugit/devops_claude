@@ -102,7 +102,8 @@ class ConsistencyReport:
 # ---------------------------------------------------------------------------
 
 _RE_SWUFN = re.compile(r"^SwUFn_\d+$")
-_RE_SWUTC = re.compile(r"^SwUTC_SwUFn_\d+$")
+# 35차: _RE_SWUTC를 module-level 고정에서 함수-local 동적 compile로 변경. tc_prefix
+# kwarg (SwUT="SwUTC" default, SwIT="SwITC")로 SwUT/SwIT 양쪽 호환.
 
 
 def _compact_row(row: tuple) -> list[tuple[int, str]]:
@@ -129,7 +130,12 @@ def _row_contains(pairs: list[tuple[int, str]], substr: str) -> bool:
     return any(substr in v for _, v in pairs)
 
 
-def _extract_coverage_summary(wb: Any, out_warnings: list[str] | None = None) -> dict[str, Any]:
+def _extract_coverage_summary(
+    wb: Any,
+    out_warnings: list[str] | None = None,
+    *,
+    tc_prefix: str = "SwUTC",
+) -> dict[str, Any]:
     """Coverage Report 워크북에서 핵심 지표 추출.
 
     시나리오 A 방어: 우리 빌더가 작성한 placeholder 시트(`BLANK_MARKUP`)면 데이터
@@ -186,9 +192,11 @@ def _extract_coverage_summary(wb: Any, out_warnings: list[str] | None = None) ->
             o_count_per_func: dict[str, int] = dict.fromkeys(func_cols.values(), 0)
             tc_count = 0
 
+            # 35차: tc_prefix를 동적으로 적용 — SwUT는 "SwUTC", SwIT는 "SwITC"
+            _tc_re = re.compile(rf"^{re.escape(tc_prefix)}_SwUFn_\d+$")
             for r in rows[header_idx + 1:]:
                 tc_id = next(
-                    (c for c in r[:5] if isinstance(c, str) and _RE_SWUTC.match(c)),
+                    (c for c in r[:5] if isinstance(c, str) and _tc_re.match(c)),
                     None,
                 )
                 if not tc_id:
@@ -251,7 +259,7 @@ def _extract_coverage_summary(wb: Any, out_warnings: list[str] | None = None) ->
     return summary
 
 
-def _extract_sutr_summary(wb: Any) -> dict[str, Any]:
+def _extract_sutr_summary(wb: Any, *, tc_prefix: str = "SwUTC") -> dict[str, Any]:
     """SUTR 워크북에서 핵심 지표 추출."""
     summary: dict[str, Any] = {
         "total_tcs": 0,
@@ -277,6 +285,10 @@ def _extract_sutr_summary(wb: Any) -> dict[str, Any]:
     if summary_sheet is not None:
         rows = list(summary_sheet.iter_rows(values_only=True))
         section = None
+        # 35차 reviewer W1: 루프 진입 전 한 번만 compile — _extract_coverage_summary
+        # 패턴과 일관성. 수천 행 SITR에서 매 반복 compile 회피 (개선).
+        _tc_prefix_with_underscore = f"{tc_prefix}_"
+        _deviation_re = re.compile(rf"^{re.escape(tc_prefix)}_SwUFn_\d+")
         for idx, r in enumerate(rows):
             pairs = _compact_row(r)
             if not pairs:
@@ -314,10 +326,11 @@ def _extract_sutr_summary(wb: Any) -> dict[str, Any]:
                             pass
 
             # Section content: TC ID로 시작하는 행
-            if section == "not_executed" and first.startswith("SwUTC_"):
+            # 35차: SwUT는 "SwUTC_" prefix, SwIT는 "SwITC_" — 위 루프 진입 전 한 번 compile.
+            if section == "not_executed" and first.startswith(_tc_prefix_with_underscore):
                 summary["not_executed_tcs"].append(first)
-            elif section == "deviation" and first.startswith("SwUTC_"):
-                if re.match(r"^SwUTC_SwUFn_\d+", first):
+            elif section == "deviation" and first.startswith(_tc_prefix_with_underscore):
+                if _deviation_re.match(first):
                     summary["deviation_tcs"].append(first)
 
         summary["not_executed_tcs"] = list(dict.fromkeys(summary["not_executed_tcs"]))
@@ -349,12 +362,19 @@ def _load_workbook(source: Any) -> Any:
     return source
 
 
-def check_swut_consistency(coverage_source: Any, sutr_source: Any) -> ConsistencyReport:
-    """Coverage Report ↔ SUTR 일관성 검증.
+def check_swut_consistency(
+    coverage_source: Any,
+    sutr_source: Any,
+    *,
+    tc_prefix: str = "SwUTC",
+) -> ConsistencyReport:
+    """Coverage Report ↔ SUTR(SITR) 일관성 검증.
 
     Args:
         coverage_source: Coverage Report xlsx (path / bytes / Workbook).
-        sutr_source: SUTR xlsx (path / bytes / Workbook).
+        sutr_source: SUTR (SwUT) 또는 SITR (SwIT) xlsm (path / bytes / Workbook).
+        tc_prefix: TC name prefix — SwUT="SwUTC" (default), SwIT="SwITC" (35차).
+            미실행 TC name에서 함수 ID 추출 시 regex `^{tc_prefix}_(SwUFn_\\d+)` 사용.
 
     Returns:
         ConsistencyReport — issues 비어 있으면 ok=True. 파싱 실패는 parse_warnings에 기록.
@@ -383,8 +403,10 @@ def check_swut_consistency(coverage_source: Any, sutr_source: Any) -> Consistenc
                for n in sutr_sheet_names_lower):
         parse_warnings.append("SUTR에 'Test Summary' 시트 없음")
 
-    cov = _extract_coverage_summary(cov_wb, out_warnings=parse_warnings)
-    sutr = _extract_sutr_summary(sutr_wb)
+    cov = _extract_coverage_summary(
+        cov_wb, out_warnings=parse_warnings, tc_prefix=tc_prefix,
+    )
+    sutr = _extract_sutr_summary(sutr_wb, tc_prefix=tc_prefix)
 
     issues: list[ConsistencyIssue] = []
 
@@ -393,8 +415,10 @@ def check_swut_consistency(coverage_source: Any, sutr_source: Any) -> Consistenc
     cov_uncov = set(cov.get("uncovered_functions") or [])
     sutr_ne = sutr.get("not_executed_tcs") or []
     sutr_ne_func: set[str] = set()
+    # 35차: tc_prefix를 동적으로 적용 — SwUT는 "SwUTC", SwIT는 "SwITC"
+    _tc_fn_re = re.compile(rf"^{re.escape(tc_prefix)}_(SwUFn_\d+)")
     for tc in sutr_ne:
-        m = re.match(r"^SwUTC_(SwUFn_\d+)", tc)
+        m = _tc_fn_re.match(tc)
         if m:
             sutr_ne_func.add(m.group(1))
 

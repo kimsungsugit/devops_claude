@@ -37,8 +37,13 @@ except ImportError:  # pragma: no cover
 from fastapi import APIRouter, HTTPException, Response
 from fastapi.responses import StreamingResponse
 
-from backend.schemas import SwITBuildRequest, SwITSitrBuildRequest
+from backend.schemas import (
+    SwITBuildRequest,
+    SwITConsistencyCheckRequest,
+    SwITSitrBuildRequest,
+)
 from backend.services.file_resolver import get_resolver
+from backend.services.swit_consistency_checker import check_swit_consistency
 from backend.services.swit_coverage_aggregator import (
     SwitCoverageBuildResult,
     build_swit_coverage_report,
@@ -410,3 +415,69 @@ async def build_swit_sitr(req: SwITSitrBuildRequest) -> Response:
         return await asyncio.to_thread(
             _run_build_safely, "sitr", _do_swit_sitr_build, req,
         )
+
+
+# ─────────────────────────────────────────────────────────────────────
+# 35차 — SwIT Coverage ↔ SITR cross-validation
+# ─────────────────────────────────────────────────────────────────────
+
+def _do_swit_consistency_check(req: SwITConsistencyCheckRequest) -> dict[str, Any]:
+    """파일 resolver로 Coverage xlsx + SITR xlsm bytes 읽기 + check_swit_consistency 호출.
+
+    실패 type별 sanitize는 호출자(_run_swit_consistency_safely)가 처리.
+    """
+    resolver = get_resolver()
+    cov_bytes = resolver.read_bytes(req.coverage_path)
+    sitr_bytes = resolver.read_bytes(req.sitr_path)
+    report = check_swit_consistency(cov_bytes, sitr_bytes)
+    return report.to_dict()
+
+
+def _run_swit_consistency_safely(req: SwITConsistencyCheckRequest) -> dict[str, Any]:
+    """SwUT _run_consistency_safely 패턴 — exception sanitize + memory log."""
+    user = get_current_user()
+    mem_before = _get_process_memory_mb()
+    _logger.info(
+        "swit.consistency.check start: coverage=%s sitr=%s user=%s mem_mb=%s",
+        req.coverage_path[:80], req.sitr_path[:80], user,
+        f"{mem_before:.1f}" if mem_before is not None else "n/a",
+    )
+    try:
+        result = _do_swit_consistency_check(req)
+        ok = result.get("ok")
+        n_issues = len(result.get("issues") or [])
+        mem_after = _get_process_memory_mb()
+        _logger.info(
+            "swit.consistency.check done: ok=%s issues=%d mem_mb=%s",
+            ok, n_issues,
+            f"{mem_after:.1f}" if mem_after is not None else "n/a",
+        )
+        return result
+    except HTTPException:
+        raise
+    except (FileNotFoundError, PermissionError) as e:
+        _logger.exception("swit.consistency.check I/O error")
+        raise HTTPException(
+            status_code=404 if isinstance(e, FileNotFoundError) else 403,
+            detail=f"파일 접근 실패: {type(e).__name__}",
+        ) from e
+    except ValueError as e:
+        _logger.exception("swit.consistency.check value error")
+        raise HTTPException(status_code=400, detail=f"입력 검증 실패: {e}") from e
+    except Exception as e:
+        _logger.exception("swit.consistency.check unexpected error")
+        raise HTTPException(
+            status_code=500,
+            detail=f"일관성 검증 실패 ({type(e).__name__})",
+        ) from e
+
+
+@router.post("/consistency/check")
+async def swit_consistency_check(req: SwITConsistencyCheckRequest) -> dict[str, Any]:
+    """SwIT Coverage Report ↔ SITR cross-validation (35차).
+
+    swit_consistency_checker.py 4가지 검증 (uncovered_mismatch /
+    exception_deviation / total_tc / final_result) 결과를 JSON으로 반환.
+    빌드 endpoint와 달리 Semaphore 미적용 (read-only, 메모리 풋프린트 작음).
+    """
+    return await asyncio.to_thread(_run_swit_consistency_safely, req)

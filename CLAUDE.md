@@ -199,6 +199,7 @@ python -m pytest tests/ -v --cov=backend --cov=workflow --cov=report_gen --cov-r
 - **`POST /api/swut/consistency/check`** — Coverage↔SUTR cross-validation (18차)
 - **`POST /api/swit/coverage/build`** — SwIT Coverage Report v2.02 xlsx 빌드 (33차)
 - **`POST /api/swit/sitr/build`** — SwIT SITR v2.02 xlsm 빌드 (keep_vba=True, 34차 대칭)
+- **`POST /api/swit/consistency/check`** — SwIT Coverage↔SITR cross-validation (35차)
 
 ## SwUT Builder (Software Unit Test, 8~20차 라운드)
 
@@ -329,8 +330,10 @@ ISO 26262 ASIL A 단위테스트 산출물 자동 생성 + cross-validation 플�
 
 ### Workflow & Tests (33차 갱신 — 실측)
 - Backend SwUT 전체 회귀: **~301개** (31-fix +5 / 32차 W28 +8)
-- Backend SwIT 회귀: **53개** (33차 25 + 34차 +28 — TestBuildSwitSitr 5 + TestSitrTestLogAsil 2 + TestSwitSitrMetaValidation 2 + TestSwitSitrResultDataclass 2 + TestSwitSitrMissingSheet 2 + TestKeepVbaPreserved 2 + TestSwitSitrFilename 1 + TestSwitSitrPydantic 3 + TestSwitSitrEndpointRegistration 2 + TestSwitSitrMediaType 1 + TestSwitSitrXUserHeader 1 + TestSwitSitrMetaBuilder 1 + TestDeepReviewerC1Fix 2 + TestDeepReviewerC2Fix 2)
-- Backend 전체: **1837개** (.venv Python 3.12.6 / 111s — 1809 → 1837 +28)
+- Backend SwIT 회귀: **58개** (33차 25 + 34차 +28 + 35차 +5 — TestSwitConsistencyApi 2 + TestSwitPrefixMatching 2 + TestSwitReportToolQualification 1)
+- Backend 전체: **1842개** (.venv Python 3.12.6 / 83s — 1837 → 1842 +5)
+- Frontend SwITBuildSection: **8개** (35차 신규)
+- Frontend 전체: **228개** (220 → 228 +8)
 - Frontend SwUTBuildSection: **26개**
 - Frontend 전체: **220개** (23 test files)
 
@@ -373,7 +376,7 @@ backend 코드 변경 (`backend/services/`, `backend/routers/`, `backend/schemas
 | `frontend-v2/src/*` | ❌ Vite HMR (자동) |
 | `.codex_tmp/poc_*.py` | ❌ 매 실행 새 process |
 
-## SwIT Builder (Software Integration Test, 33~34차 라운드~)
+## SwIT Builder (Software Integration Test, 33~35차 라운드~)
 
 ISO 26262 ASIL B+ 통합 테스트 산출물 자동 생성. SwUT 30~32차 인프라 **81% 재활용**.
 
@@ -413,15 +416,24 @@ ISO 26262 ASIL B+ 통합 테스트 산출물 자동 생성. SwUT 30~32차 인프
   - Semaphore(**2**) 공유 (SwUT 3 — SwIT 신규라 보수적)
 - X-SwIT-Summary / X-SwIT-Warnings 헤더 (SwUT와 분리)
 
+### 35차 — Consistency Checker + Frontend SwITBuildSection
+- **Backend** `backend/services/swit_consistency_checker.py` — SwUT `check_swut_consistency` thin wrapper. `tc_prefix="SwITC"` 전달로 SwUT 18차 인프라 재활용
+- **Backend** `swut_consistency_checker.py`에 `tc_prefix` kwarg 도입 (default "SwUTC", SwIT는 "SwITC"). `_extract_coverage_summary` / `_extract_sutr_summary` / `_collect_tc_to_function` 3 곳 동적 regex로 변경. SwUT 회귀 영향 없음
+- **Backend** `/api/swit/consistency/check` endpoint — SwUT `_run_consistency_safely` 패턴 차용, Semaphore 미적용 (read-only)
+- **Frontend** `frontend-v2/src/components/sections/SwITBuildSection.jsx` (신규, ~430 lines) — SwUTBuildSection 패턴 차용. 3 섹션: Coverage 빌드 / SITR 빌드 / Coverage↔SITR consistency 검증. localStorage 키 `devops_v2_swit_form` (SwUT와 분리). X-SwIT-Summary/Warnings 헤더
+- **Frontend** Detail.jsx에 SwIT 빌드 탭 추가 (icon 🧩, id 'swit')
+- 회귀: backend +5 / frontend +8
+
 ### 34차 deep-reviewer C1/C2/C3 fix (commit 포함)
 - **C1 (Critical X3)**: `_collect_tc_to_function` `.match` → `.search`로 변경 (SwIT TC prefix `SwITC_` 호환 — 이전 항상 FAIL → 정상 매칭). `swut_coverage_aggregator.py:378`
 - **C2 (Critical X3)**: `_compute_self_consistency` + `_write_consistency_sheet`에 `test_kind: str = "SwUTS"` kwarg 추가. SwIT 호출 시 `test_kind="SwIT"` 전달 — intro 텍스트 + row 5 item label 동적 치환 (이전: SwUTS 하드코딩이 SwIT 산출물에 그대로 기록되어 audit reviewer 혼동)
 - **C3 (Critical X6)**: SwIT v2.02 양식 ASIL 시각 강조 사전 통보 — 31차 W29 색상 정책 (B 파랑 #E2F0FF / C 주황 #FFE5CC / D 빨강 #FFC7CE)이 SwIT 산출물에도 적용됨. **회사 v2.02 SITR 양식이 빨강만 표준이라 추가 색상은 비표준 audit 확장**. 라이브 PoC 검증 시 회사 audit reviewer에 사전 통보 의무
 - **W2 (Warning X4)**: SwIT SITR이 `_write_cover` / `_write_test_summary` / `_write_deviation` / `_write_test_log` private 함수 강결합. 향후 SwUT SUTR signature 변경 시 SwIT 회귀에서 자동 감지 위해 `__all__` 명시 또는 public alias 추가는 35차+ 정비 후보
 
-### 비-목표 (35차+)
-- **35차** — `swit_consistency_checker.py` (Coverage↔SITR cross-validation) + frontend `SwITBuildSection.jsx` + Detail.jsx 탭 신규
+### 비-목표 (36차+)
 - 36차+ — 라이브 검증 결과 fix (시트 위치 조정 / VBA 보존 확인 / 사용자 환경 path 정합성)
+- 36차+ — SwIT 시리즈 SwUDS↔SwIT 매핑 audit 정책 사전 통보 (회사 양식 빨강만 표준)
+- 별도 — `swit_meta.json` config 파일 도입 (현재는 req 명시 입력만, SwUT는 config 있음)
 
 ## Workflows (워크플로우 — 자동 연결)
 - `/workflow [기능설명]` — **전체 개발 흐름**: 기획→코드→테스트→리뷰→커밋 자동 실행

@@ -836,3 +836,25 @@ class SwUTConsistencyCheckRequest(BaseModel):
         if "\n" in v or "\r" in v:
             raise ValueError("줄바꿈 문자 금지 — 단일 라인 path 필요")
         return v
+
+
+# ── SwIT Consistency Check (35차 라운드) ──────────────────────────────
+
+class SwITConsistencyCheckRequest(BaseModel):
+    """SwIT Coverage Report ↔ SITR cross-validation 요청 body (35차).
+
+    SwUT 18차 ConsistencyCheckRequest와 동일 패턴 — coverage_path + sitr_path.
+
+    입력 표면 매트릭스:
+      - coverage_path / sitr_path: maxlen 500, 줄바꿈 금지 (헤더 인젝션 안전)
+      - 두 path 모두 필수 (min_length=1)
+    """
+    coverage_path: str = Field(..., min_length=1, max_length=500)
+    sitr_path: str = Field(..., min_length=1, max_length=500)
+
+    @field_validator("coverage_path", "sitr_path")
+    @classmethod
+    def _no_newline_swit_paths(cls, v: str) -> str:
+        if "\n" in v or "\r" in v:
+            raise ValueError("줄바꿈 문자 금지 — 단일 라인 path 필요")
+        return v
