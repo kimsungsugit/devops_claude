@@ -1,21 +1,22 @@
-"""SwIT (Software Integration Test) Coverage Report 빌더 endpoint (33차 라운드).
+"""SwIT (Software Integration Test) 빌더 endpoint (33~34차 라운드).
 
-SwUT (Unit Test) router 패턴 차용 — 81% 인프라 재활용. 33차 본 라운드는
-Coverage Report만 (xlsx). SITR (xlsm) + Consistency check는 34/35차에.
-
-## 설계
-- Semaphore(2) — SwUT는 3이지만 SwIT는 신규 endpoint이라 보수적 시작 (메모리
-  운영 측정 후 31차 W31 패턴으로 갱신)
-- StreamingResponse + X-SwIT-Summary / X-SwIT-Warnings 헤더 (SwUT와 분리)
-- ASIL 인프라 (c_source_root + swuds_docx_path) SwUT와 동일 — `_apply_function_asil_map`
-  를 SwUT 모듈에서 import 재활용 (단, req 타입은 SwITBuildRequest)
+SwUT (Unit Test) router 패턴 차용 — 81% 인프라 재활용.
 
 ## Endpoint
-- ``POST /api/swit/coverage/build`` — SwIT Coverage Report v2.02 xlsx
+- ``POST /api/swit/coverage/build`` — SwIT Coverage Report v2.02 xlsx (33차)
+- ``POST /api/swit/sitr/build`` — SwIT SITR v2.02 xlsm (keep_vba=True, 34차)
+
+## 설계
+- Semaphore(2) — Coverage / SITR 공유. SwUT(3)보다 보수적 시작 — 메모리 측정 후
+  31차 W31 패턴으로 worst-case 갱신 권장.
+- StreamingResponse + X-SwIT-* 헤더 (Coverage / SITR 명명 분리)
+- ASIL 인프라 (c_source_root + swuds_docx_path) SwUT와 동일 — `_apply_function_asil_map`
+  Coverage / SITR 공유
 
 ## ISO 26262
 - SwIT는 ASIL B+ 이상에서 의무 (분기 커버리지 + 인터페이스 테스트)
 - evidence_class "auto-generated draft" — manual review 의무
+- SITR Deviation은 audit reviewer가 직접 검토 — 자동 reviewer 평가 금지
 """
 from __future__ import annotations
 
@@ -36,14 +37,18 @@ except ImportError:  # pragma: no cover
 from fastapi import APIRouter, HTTPException, Response
 from fastapi.responses import StreamingResponse
 
-from backend.schemas import SwITBuildRequest
+from backend.schemas import SwITBuildRequest, SwITSitrBuildRequest
 from backend.services.file_resolver import get_resolver
 from backend.services.swit_coverage_aggregator import (
     SwitCoverageBuildResult,
     build_swit_coverage_report,
 )
 from backend.services.swit_input_adapter import collect_swit_session
-from backend.services.swit_meta import SwitCoverageBuildMeta
+from backend.services.swit_meta import SwitCoverageBuildMeta, SwitSitrBuildMeta
+from backend.services.swit_sitr_aggregator import (
+    SwitSitrBuildResult,
+    build_swit_sitr_report,
+)
 from backend.services.swut_swuds_parser import parse_swuds_docx
 from backend.user_context import get_current_user
 
@@ -75,6 +80,32 @@ def _build_swit_coverage_meta(req: SwITBuildRequest) -> SwitCoverageBuildMeta:
         project_full_name=req.project_id,
         asil_level=req.asil_level,
         doc_id_base=f"{req.project_id}-SwIT",
+        doc_id_sequence=req.doc_id_sequence,
+        default_author="",
+        default_reviewer="",
+        default_approver="",
+        release_sw_version=req.release_sw_version,
+        hw_version=req.hw_version,
+        test_date=req.test_date,
+        test_engineer=req.test_engineer,
+        validation_date=req.validation_date,
+        reviewer_override=req.reviewer_override,
+        approver_override=req.approver_override,
+    )
+
+
+def _build_swit_sitr_meta(req: SwITSitrBuildRequest) -> SwitSitrBuildMeta:
+    """SwITSitrBuildRequest → SwitSitrBuildMeta (34차).
+
+    doc_id_base는 SITR로 고정 ("{project_id}-SITR"). final_test_result는 SUTR
+    대칭 "OK" default — 사용자가 req에서 override하지 않는 한 SwitSitrBuildMeta
+    default 사용.
+    """
+    return SwitSitrBuildMeta(
+        project_id=req.project_id,
+        project_full_name=req.project_id,
+        asil_level=req.asil_level,
+        doc_id_base=f"{req.project_id}-SITR",
         doc_id_sequence=req.doc_id_sequence,
         default_author="",
         default_reviewer="",
@@ -335,4 +366,47 @@ async def build_swit_coverage(req: SwITBuildRequest) -> Response:
     async with _BUILD_SEMAPHORE:
         return await asyncio.to_thread(
             _run_build_safely, "coverage", _do_swit_coverage_build, req,
+        )
+
+
+def _do_swit_sitr_build(req: SwITSitrBuildRequest) -> Response:
+    """SwIT SITR v2.02 xlsm 빌드 entry (34차).
+
+    Coverage와 동일 입력 source / ASIL map 정책. xlsm 출력 — media_type
+    "application/vnd.ms-excel.sheet.macroenabled.12".
+    """
+    resolver = get_resolver()
+    session = collect_swit_session(
+        resolver, req.project_id,
+        jenkins_build_number=req.jenkins_build_number,
+        cache_root=req.cache_root,
+        log_folder=req.log_folder,
+    )
+    _apply_function_asil_map(req, session)
+    template_bytes = _read_template_bytes(req.template_path)
+    meta = _build_swit_sitr_meta(req)
+    swuds_fn_ids = _resolve_swuds_function_ids(req)
+    result: SwitSitrBuildResult = build_swit_sitr_report(
+        session, meta, template_bytes,
+        deviation_cases=req.deviation_cases,
+        swuds_function_ids=swuds_fn_ids,
+    )
+    if not result.ok:
+        raise HTTPException(status_code=500, detail="SwIT SITR 빌드 실패 (ok=False)")
+    return _build_result_to_response(
+        content_io=result.xlsm_io,
+        filename=result.filename,
+        summary=result.summary,
+        warnings=result.warnings,
+        incomplete_sheets=result.incomplete_sheets,
+        media_type="application/vnd.ms-excel.sheet.macroenabled.12",
+    )
+
+
+@router.post("/sitr/build")
+async def build_swit_sitr(req: SwITSitrBuildRequest) -> Response:
+    """SwIT SITR v2.02 xlsm 빌드 (34차). Coverage와 Semaphore(2) 공유."""
+    async with _BUILD_SEMAPHORE:
+        return await asyncio.to_thread(
+            _run_build_safely, "sitr", _do_swit_sitr_build, req,
         )

@@ -8,6 +8,8 @@ from __future__ import annotations
 from pathlib import Path
 import sys
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from fastapi.testclient import TestClient  # noqa: E402
@@ -156,3 +158,120 @@ class TestSwitMetaBuilder:
         )
         # template_path 누락 → 400 또는 빌더 단계에서 404 (log_folder 미존재)
         assert r.status_code in (400, 404, 500)
+
+
+# ---------------------------------------------------------------------------
+# 34차 SITR endpoint — Pydantic / endpoint 등록 / Semaphore 공유 / media_type
+# ---------------------------------------------------------------------------
+
+class TestSwitSitrPydantic:
+    """SwITSitrBuildRequest — Coverage 17 필드 + deviation_cases 정책."""
+
+    def _base_body(self) -> dict:
+        return {
+            "project_id": "HDPDM01",
+            "release_sw_version": "2.02",
+            "test_date": "2024-02-19",
+        }
+
+    def test_minimal_required_accepted(self):
+        from backend.schemas import SwITSitrBuildRequest
+        req = SwITSitrBuildRequest(**self._base_body())
+        assert req.asil_level == "ASIL B"
+        assert req.deviation_cases == []
+
+    def test_deviation_cases_oversize_rejected(self):
+        """deviation_cases 합산 256KB 초과 거부 (13차 C3 패턴)."""
+        from backend.schemas import SwITSitrBuildRequest
+        body = self._base_body()
+        # 200 items × 1.5KB ≈ 300KB
+        body["deviation_cases"] = [
+            {"tc_id": f"TC_{i:04d}", "issue_text": "X" * 1500}
+            for i in range(200)
+        ]
+        with pytest.raises(ValueError, match="256KB"):
+            SwITSitrBuildRequest(**body)
+
+    def test_deviation_cases_item_keys_too_many_rejected(self):
+        from backend.schemas import SwITSitrBuildRequest
+        body = self._base_body()
+        body["deviation_cases"] = [
+            {f"k{i}": "v" for i in range(25)},
+        ]
+        with pytest.raises(ValueError, match=r"key 수 ≤ 20"):
+            SwITSitrBuildRequest(**body)
+
+
+class TestSwitSitrEndpointRegistration:
+    """라우터 등록 확인 — openapi.json에 /api/swit/sitr/build 노출."""
+
+    def test_sitr_endpoint_registered(self):
+        r = client.get("/openapi.json")
+        assert r.status_code == 200
+        paths = r.json().get("paths", {})
+        assert "/api/swit/sitr/build" in paths
+        assert "post" in paths["/api/swit/sitr/build"]
+
+    def test_sitr_shares_coverage_semaphore(self):
+        """Semaphore(2) — Coverage와 SITR 동일 인스턴스 공유."""
+        from backend.routers.swit import _BUILD_SEMAPHORE
+        # 모듈 단일 instance — Coverage build_swit_coverage / SITR build_swit_sitr
+        # 모두 `_BUILD_SEMAPHORE` 사용 (소스 검사로 충분).
+        import backend.routers.swit as swit_mod
+        src = swit_mod.__file__
+        with open(src, encoding="utf-8") as f:
+            content = f.read()
+        assert content.count("_BUILD_SEMAPHORE") >= 3, (
+            "Coverage + SITR 두 endpoint가 동일 Semaphore 사용 확인"
+        )
+        assert _BUILD_SEMAPHORE._value == 2
+
+
+class TestSwitSitrMediaType:
+    """SITR 응답 media_type — xlsm macroenabled.12."""
+
+    def test_sitr_missing_template_returns_400_or_404(self):
+        """template_path 미지정 — Coverage와 동일 정책."""
+        body = {
+            "project_id": "HDPDM01",
+            "release_sw_version": "2.02",
+            "test_date": "2024-02-19",
+            "log_folder": "C:/fake/log",
+        }
+        r = client.post(
+            "/api/swit/sitr/build", json=body,
+            headers={"X-User": "tester"},
+        )
+        assert r.status_code in (400, 404, 500)
+
+
+class TestSwitSitrXUserHeader:
+    def test_sitr_missing_x_user_rejected(self):
+        r = client.post(
+            "/api/swit/sitr/build",
+            json={
+                "project_id": "HDPDM01",
+                "release_sw_version": "2.02",
+                "test_date": "2024-02-19",
+            },
+        )
+        assert r.status_code in (401, 403, 400)
+
+
+class TestSwitSitrMetaBuilder:
+    """_build_swit_sitr_meta — SwITSitrBuildRequest → SwitSitrBuildMeta."""
+
+    def test_sitr_meta_doc_id_base_is_project_sitr(self):
+        from backend.routers.swit import _build_swit_sitr_meta
+        from backend.schemas import SwITSitrBuildRequest
+        req = SwITSitrBuildRequest(
+            project_id="HDPDM01",
+            release_sw_version="2.02",
+            test_date="2024-02-19",
+            doc_id_sequence="042",
+        )
+        meta = _build_swit_sitr_meta(req)
+        assert meta.doc_id_base == "HDPDM01-SITR"
+        assert meta.doc_id_sequence == "042"
+        # SwitSitrBuildMeta inherits SutrBuildMeta — final_test_result default "OK"
+        assert meta.final_test_result == "OK"

@@ -370,12 +370,19 @@ def _write_history_sheet(
 def _collect_tc_to_function(session: SwUTSession) -> dict[str, str]:
     """TC name → 함수 ID (`SwUFn_NNNN`).
 
-    TC name 예: `SwUFn_0101.001` → function `SwUFn_0101`.
+    TC name 예:
+      - SwUT: `SwUFn_0101.001` → `SwUFn_0101`
+      - SwIT: `SwITC_SwUFn_0101.001` → `SwUFn_0101` (34차 deep-reviewer C1)
+
+    34차 deep-reviewer C1 fix: `re.match`(^anchor)이 SwIT TC prefix `SwITC_`를
+    거부해서 2.Consistency 시트 row 2가 항상 FAIL 반환 → 잘못된 audit evidence.
+    `re.search`로 변경해 SwUT/SwIT TC 명명 모두 호환. SwUT TC도 prefix 없이
+    시작하므로 search로 시작 위치 매칭 정상 (회귀 영향 없음).
     """
     out: dict[str, str] = {}
     for env in session.environments:
         for tc_name in env.test_cases:
-            m = _TC_FN_RE.match(tc_name)
+            m = _TC_FN_RE.search(tc_name)
             if m:
                 out[tc_name] = m.group(1)
     return out
@@ -384,10 +391,16 @@ def _collect_tc_to_function(session: SwUTSession) -> dict[str, str]:
 def _compute_self_consistency(
     session: SwUTSession,
     swuds_function_ids: set[str] | None = None,
+    *,
+    test_kind: str = "SwUTS",
 ) -> list[dict[str, Any]]:
-    """15차/16차: SwUTS 자체 일관성 4가지 + SwUDS↔SwUTS 매핑 (옵션) 검증.
+    """15차/16차: 자체 일관성 4가지 + SwUDS↔{test_kind} 매핑 (옵션) 검증.
 
-    16차: ``swuds_function_ids`` 가 제공되면 row 5 'SwUDS↔SwUTS 함수 ID 매핑' 추가.
+    16차: ``swuds_function_ids`` 가 제공되면 row 5 'SwUDS↔{test_kind} 함수 ID 매핑' 추가.
+
+    Args:
+        test_kind: audit 라벨 — SwUT는 "SwUTS" (default), SwIT는 "SwIT" (34차 C2).
+            row 5 item label과 _write_consistency_sheet intro 텍스트에 반영.
 
     Returns:
         list of {item, expected, actual, result, note}. result ∈ {PASS, FAIL}.
@@ -443,14 +456,14 @@ def _compute_self_consistency(
         "note": "aggregate_session 무결성",
     })
 
-    # 5. SwUDS ↔ SwUTS 함수 ID 매핑 (16차) — swuds_function_ids 제공 시만.
+    # 5. SwUDS ↔ {test_kind} 함수 ID 매핑 (16차) — swuds_function_ids 제공 시만.
     if swuds_function_ids is not None:
         swuts_fn_ids: set[str] = set()
         for env in session.environments:
             for fc in env.function_coverage:
                 swuts_fn_ids.add(fc.unit_id)
-        missing_in_swuts = swuds_function_ids - swuts_fn_ids  # SwUDS에 있고 SwUTS에 없음
-        extra_in_swuts = swuts_fn_ids - swuds_function_ids   # SwUTS에 있고 SwUDS에 없음
+        missing_in_swuts = swuds_function_ids - swuts_fn_ids  # SwUDS에 있고 {test_kind}에 없음
+        extra_in_swuts = swuts_fn_ids - swuds_function_ids   # {test_kind}에 있고 SwUDS에 없음
         ok = not missing_in_swuts and not extra_in_swuts
         note_parts: list[str] = []
         if missing_in_swuts:
@@ -460,15 +473,15 @@ def _compute_self_consistency(
             )
         if extra_in_swuts:
             note_parts.append(
-                f"SwUTS 추가 (SwUDS 미정의): {sorted(extra_in_swuts)[:5]}"
+                f"{test_kind} 추가 (SwUDS 미정의): {sorted(extra_in_swuts)[:5]}"
                 + (f" +{len(extra_in_swuts) - 5} more" if len(extra_in_swuts) > 5 else "")
             )
         if not note_parts:
             note_parts.append("함수 ID 1:1 매칭")
         rows.append({
-            "item": "SwUDS ↔ SwUTS 함수 ID 매핑",
+            "item": f"SwUDS ↔ {test_kind} 함수 ID 매핑",
             "expected": f"{len(swuds_function_ids)} 함수 (SwUDS)",
-            "actual": f"{len(swuts_fn_ids)} 함수 (SwUTS)",
+            "actual": f"{len(swuts_fn_ids)} 함수 ({test_kind})",
             "result": "PASS" if ok else "FAIL",
             "note": "; ".join(note_parts),
         })
@@ -481,11 +494,15 @@ def _write_consistency_sheet(
     session: SwUTSession,
     swuds_function_ids: set[str] | None = None,
     out_warnings: list[str] | None = None,
+    *,
+    test_kind: str = "SwUTS",
 ) -> int:
-    """2.Consistency 시트 — SwUTS 자체 일관성 + SwUDS↔SwUTS 매핑 (16차).
+    """2.Consistency 시트 — {test_kind} 자체 일관성 + SwUDS↔{test_kind} 매핑 (16차).
 
     Args:
         swuds_function_ids: SwUDS docx에서 추출된 함수 ID set. 제공되면 row 5 추가.
+        test_kind: audit 라벨 — SwUT는 "SwUTS" (default), SwIT는 "SwIT" (34차 C2 fix).
+            intro 텍스트 + row 5 item label 동적 치환.
 
     Layout: A1 = 안내, row 3 = 헤더, row 4부터 결과 row (4 또는 5개).
 
@@ -495,18 +512,21 @@ def _write_consistency_sheet(
     if not ws:
         return 0
 
-    rows = _compute_self_consistency(session, swuds_function_ids=swuds_function_ids)
+    rows = _compute_self_consistency(
+        session, swuds_function_ids=swuds_function_ids, test_kind=test_kind,
+    )
 
     # 안내문 + 헤더 + data
     if swuds_function_ids is not None:
         intro = (
-            "본 시트는 SwUTS 내부 자체 일관성 + SwUDS↔SwUTS 함수 ID 매핑 자동 검증 결과 (16차 v3.02). "
-            "FAIL 행은 reviewer 검토 + audit evidence 보강 필요."
+            f"본 시트는 {test_kind} 내부 자체 일관성 + SwUDS↔{test_kind} 함수 ID 매핑 "
+            "자동 검증 결과 (16차 v3.02). FAIL 행은 reviewer 검토 + audit evidence 보강 필요."
         )
     else:
         intro = (
-            "본 시트는 SwUTS 내부 자체 일관성 4 항목 자동 검증 결과. "
-            "SwUDS↔SwUTS 함수 ID 매핑 비교는 swuds_docx_path 옵션 제공 시 자동 활성화 (16차)."
+            f"본 시트는 {test_kind} 내부 자체 일관성 4 항목 자동 검증 결과. "
+            f"SwUDS↔{test_kind} 함수 ID 매핑 비교는 swuds_docx_path 옵션 제공 시 "
+            "자동 활성화 (16차)."
         )
     safe_write(ws, 1, 1, intro)
     safe_write(ws, 3, 1, "Item")

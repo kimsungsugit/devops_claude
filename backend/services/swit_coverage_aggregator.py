@@ -206,13 +206,14 @@ def build_swit_coverage_report(
         if n_o == 0:
             incomplete_sheets.append("1.Traceability")
 
-    # 2.Consistency
+    # 2.Consistency — 34차 C2 fix: test_kind="SwIT" (intro/row 5 item 라벨 치환)
     cons_ws = next((wb[n] for n in sheet_names if "consistency" in n.lower()), None)
     if cons_ws is not None:
         n_cons = _write_consistency_sheet(
             cons_ws, session,
             swuds_function_ids=swuds_function_ids,
             out_warnings=warnings,
+            test_kind="SwIT",
         )
         summary["consistency_self_check_rows"] = n_cons
         if swuds_function_ids is not None:

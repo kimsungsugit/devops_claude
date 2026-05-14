@@ -755,6 +755,44 @@ class SwITBuildRequest(BaseModel):
         return v
 
 
+# ── SwIT SITR Build (34차 라운드) ─────────────────────────────────────
+# SwITBuildRequest 17 필드 + deviation_cases (SwUTBuildRequest._validate_deviation_cases
+# 패턴 동일 — 256KB / item key ≤ 20 / DoS 한도). xlsm 산출물 (keep_vba=True).
+
+class SwITSitrBuildRequest(SwITBuildRequest):
+    """SwIT SITR (Software Integration Test Result) 빌드 요청 (34차).
+
+    SwITBuildRequest 17 필드를 그대로 상속 + deviation_cases 추가.
+    SwUTBuildRequest의 deviation_cases 정책 (max 200 / 256KB / item key ≤ 20)
+    재활용.
+
+    ISO 26262: ASIL B+ Integration test evidence — Deviation 항목은 audit
+    reviewer가 직접 검토 (자동 reviewer 평가 금지).
+    """
+    deviation_cases: List[Dict[str, Any]] = Field(default_factory=list, max_length=200)
+
+    @field_validator("deviation_cases")
+    @classmethod
+    def _validate_deviation_cases_sitr(cls, v: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """SwUTBuildRequest._validate_deviation_cases 정책 차용 (13차 C3)."""
+        import json as _json
+        total_bytes = 0
+        for i, item in enumerate(v):
+            if not isinstance(item, dict):
+                raise ValueError(f"deviation_cases[{i}]: dict 필요")
+            if len(item) > 20:
+                raise ValueError(f"deviation_cases[{i}]: key 수 ≤ 20 필요 (got {len(item)})")
+            try:
+                total_bytes += len(_json.dumps(item, ensure_ascii=False).encode("utf-8"))
+            except (TypeError, ValueError) as e:
+                raise ValueError(f"deviation_cases[{i}]: JSON 직렬화 불가 — {e}") from e
+        if total_bytes > 256 * 1024:
+            raise ValueError(
+                f"deviation_cases 합산 크기 {total_bytes:,} bytes — 256KB 한도 초과"
+            )
+        return v
+
+
 # ── SwUT Browse (21차 라운드) ─────────────────────────────────────────
 
 class SwUTBrowseRequest(BaseModel):
