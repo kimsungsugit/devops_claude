@@ -112,6 +112,20 @@ class TestExtractEnvFromFilename:
     def test_extract(self, name, expected):
         assert _extract_env_from_filename(name) == expected
 
+    @pytest.mark.parametrize("name,expected", [
+        # 36-fix: SwIT 실 환경 파일명 (사용자 환경 NE_GN7)
+        ("SwITC_21_test_case_data_report.html", "SwITC_21"),
+        ("SwITC_21_execution_results_report.html", "SwITC_21"),
+        ("SwITC_21_aggregate_coverage_report.html", "SwITC_21"),
+        ("SwITC_5_test_case_data_report.html", "SwITC_5"),
+        ("SwITC_100_test_case_data_report.html", "SwITC_100"),
+        ("SWTE_01_test_case_data_report.html", ""),  # SwUT 파일은 거부 (도메인 분리)
+        ("random_file.html", ""),
+    ])
+    def test_extract_swit_prefix(self, name, expected):
+        """36-fix: env_prefix="SwITC" 지원 — 사용자 실 환경 SwIT log 파일명 매칭."""
+        assert _extract_env_from_filename(name, env_prefix="SwITC") == expected
+
 
 class TestCoverageStats:
     def test_passed_when_full(self):

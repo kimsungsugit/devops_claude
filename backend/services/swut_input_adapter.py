@@ -329,9 +329,18 @@ def _parse_testcase_data_via_temp(resolver: Any, html_path: str) -> Any:
         tmp.unlink(missing_ok=True)
 
 
-def _extract_env_from_filename(name: str) -> str:
-    """`SWTE_01_test_case_data_report.html` → `SWTE_01`."""
-    m = re.match(r"(SWTE_\d+)", name)
+def _extract_env_from_filename(name: str, *, env_prefix: str = "SWTE") -> str:
+    """`<env_prefix>_NN_test_case_data_report.html` → `<env_prefix>_NN`.
+
+    Args:
+        env_prefix: SwUT="SWTE" (VectorCAST 환경 명명) / SwIT="SwITC" (Integration TC).
+            기본값은 SwUT 명명 — backward compat.
+
+    예:
+        SwUT: `SWTE_01_test_case_data_report.html` → `SWTE_01`
+        SwIT: `SwITC_21_test_case_data_report.html` → `SwITC_21` (36-fix)
+    """
+    m = re.match(rf"({re.escape(env_prefix)}_\d+)", name)
     return m.group(1) if m else ""
 
 
@@ -342,18 +351,22 @@ def collect_from_log_folder(
     version: str | None = None,
     parse_warnings: list[str] | None = None,
     allowed_roots: list[str] | None = None,
+    *,
+    env_prefix: str = "SWTE",
 ) -> SwUTSession:
-    """Log 폴더(`.../v<VER>_<DATE>/`)에서 모든 SWTE 환경 데이터 수집.
+    """Log 폴더(`.../v<VER>_<DATE>/`)에서 모든 환경 데이터 수집.
 
     Args:
         resolver: file_resolver (LocalFileResolver 또는 CloudiumResolver).
-        log_folder: SWTE 출력 root (xlsm + 01/02/03 sub-folder 보유).
+        log_folder: 출력 root (xlsm + 01/02/03 sub-folder 보유).
         project_id: HDPDM01 등.
         version: log_folder 끝 폴더명 (예: "v2.02_240219"). None이면 path에서 추출.
         parse_warnings: 호출자 전달 list — extract 실패 시 사유 append.
         allowed_roots: 신뢰 가능한 root prefix 화이트리스트 — endpoint 노출 시점에
             의무 주입 (deep-reviewer 시나리오 B / path traversal 방어).
             ``None`` 이면 검증 skip (CLI/내부 호출 가정).
+        env_prefix: 환경 명명 prefix — SwUT="SWTE" (default), SwIT="SwITC" (36-fix).
+            html 파일명 `<env_prefix>_NN_*.html` 매칭에 사용.
 
     Raises:
         ValueError: allowed_roots 지정 시 log_folder가 prefix에 속하지 않으면 거부.
@@ -400,9 +413,11 @@ def collect_from_log_folder(
 
     # 2) TestCaseDataReport의 .html 파일들로 env 목록 빌드
     tc_files = _list_dir_via_resolver(resolver, sub_tc, pattern="*.html")
-    env_names = sorted({_extract_env_from_filename(Path(f).name)
-                        for f in tc_files
-                        if _extract_env_from_filename(Path(f).name)})
+    env_names = sorted({
+        _extract_env_from_filename(Path(f).name, env_prefix=env_prefix)
+        for f in tc_files
+        if _extract_env_from_filename(Path(f).name, env_prefix=env_prefix)
+    })
 
     # 3) 각 env마다 3 파일 추출
     for env in env_names:
@@ -442,7 +457,9 @@ def collect_from_log_folder(
         session.environments.append(env_data)
 
     if not session.environments:
-        warnings.append(f"환경(SWTE_xx) 0건 — '{sub_tc}' 폴더 listing 검증 필요")
+        warnings.append(
+            f"환경({env_prefix}_xx) 0건 — '{sub_tc}' 폴더 listing 검증 필요"
+        )
 
     return session
 
@@ -458,6 +475,8 @@ def collect_from_jenkins_cache(
     build_number: int | None = None,
     parse_warnings: list[str] | None = None,
     allowed_roots: list[str] | None = None,
+    *,
+    env_prefix: str = "SWTE",
 ) -> SwUTSession | None:
     """Jenkins build cache에서 SWTE 출력 수집 (T140 — 8차 라운드).
 
@@ -533,12 +552,12 @@ def collect_from_jenkins_cache(
         return None
 
     html_files = scan.get("html_files") or []
-    # SWTE_xx_* 파일만 추출 + 3 타입별 분류
-    swte_re = re.compile(r"SWTE_\d+")
+    # 36-fix: env_prefix kwarg 동적 — SwUT="SWTE", SwIT="SwITC"
+    env_re = re.compile(rf"{re.escape(env_prefix)}_\d+")
     env_groups: dict[str, dict[str, str]] = {}
     for f in html_files:
         name = _P(f).name
-        m = swte_re.match(name)
+        m = env_re.match(name)
         if not m:
             continue
         env = m.group(0)
@@ -554,7 +573,7 @@ def collect_from_jenkins_cache(
 
     if not env_groups:
         warnings.append(
-            f"Jenkins build_root에서 SWTE_xx html 파일 0건: {build_root}"
+            f"Jenkins build_root에서 {env_prefix}_xx html 파일 0건: {build_root}"
         )
         return None
 
@@ -621,6 +640,7 @@ def collect_swut_session(
     cache_root: str = "",
     log_folder: str | None = None,
     allowed_roots: list[str] | None = None,
+    env_prefix: str = "SWTE",
 ) -> SwUTSession:
     """Jenkins 캐시 우선, 없으면 log_folder fallback.
 
@@ -629,6 +649,9 @@ def collect_swut_session(
         project_id: 예) "HDPDM01".
         jenkins_build_number: Jenkins build 번호. None이면 latest.
         log_folder: fallback path (`U:\\...\\01.Log\\v<VER>_<DATE>`).
+        env_prefix: 환경 명명 prefix — SwUT="SWTE" (default), SwIT="SwITC" (36-fix).
+            html 파일명 `<env_prefix>_NN_*.html` 매칭에 사용. SwIT는
+            `swit_input_adapter.collect_swit_session`에서 "SwITC" 전달.
 
     Returns:
         SwUTSession — environments 채워짐. session.parse_warnings 확인 의무.
@@ -644,6 +667,7 @@ def collect_swut_session(
             resolver, project_id, cache_root,
             build_number=jenkins_build_number,
             parse_warnings=warnings, allowed_roots=allowed_roots,
+            env_prefix=env_prefix,
         )
         if session is not None and session.environments:
             session.parse_warnings = warnings
@@ -655,6 +679,7 @@ def collect_swut_session(
         return collect_from_log_folder(
             resolver, log_folder, project_id=project_id,
             parse_warnings=warnings, allowed_roots=allowed_roots,
+            env_prefix=env_prefix,
         )
 
     raise ValueError(
