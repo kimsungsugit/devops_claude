@@ -29,7 +29,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Response
 from fastapi.responses import StreamingResponse
 
-from backend.routers._safety import run_build_safely, run_consistency_safely
+from backend.routers._safety import run_build_safely, run_consistency_safely, run_preview_safely
 from backend.schemas import (
     LogFolderPreviewRequest,
     SwITBuildRequest,
@@ -421,8 +421,10 @@ async def swit_log_folder_preview(req: LogFolderPreviewRequest) -> dict[str, Any
 
     사용자가 `01.Log/` 상위 폴더만 입력해도 어떤 release가 선택될지 사전 확인 가능.
     실 빌드는 따로 호출 (Coverage/SITR endpoint).
+
+    38차 reviewer W2 fix: run_preview_safely 사용 (consistency 재사용 → preview 분리).
     """
     return await asyncio.to_thread(
-        run_consistency_safely, series="swit",
+        run_preview_safely, series="swit",
         check_fn=_do_swit_log_folder_preview, req=req, logger=_logger,
     )

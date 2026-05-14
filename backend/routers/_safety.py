@@ -201,8 +201,75 @@ def run_consistency_safely(
         ) from e
 
 
+def run_preview_safely(
+    *,
+    series: str,
+    check_fn: Callable[..., Any],
+    req: Any,
+    logger: logging.Logger,
+) -> Any:
+    """38차 reviewer W2 fix — preview endpoint 전용 wrapper.
+
+    `run_consistency_safely`를 재사용하면 log prefix가 'consistency.check'로
+    찍혀 운영 로그 검색 시 혼동. 별도 wrapper로 'preview' prefix 명시.
+
+    Args:
+        series: "swut" or "swit".
+        check_fn: preview_release_candidates 호출 entry.
+        req: LogFolderPreviewRequest.
+        logger: 호출자 모듈의 logger.
+
+    Returns:
+        check_fn 결과 dict.
+
+    Raises:
+        HTTPException — sanitize.
+    """
+    user = get_current_user()
+    log_folder_short = getattr(req, "log_folder", "?")[:80]
+    logger.info(
+        "%s.log-folder.preview start: log_folder=%s user=%s",
+        series, log_folder_short, user,
+    )
+    try:
+        result = check_fn(req)
+        n_candidates = (
+            len(result.get("candidates") or [])
+            if isinstance(result, dict) else 0
+        )
+        auto = (
+            result.get("auto_resolved")
+            if isinstance(result, dict) else None
+        )
+        logger.info(
+            "%s.log-folder.preview done: candidates=%d auto_resolved=%s",
+            series, n_candidates, auto,
+        )
+        return result
+    except HTTPException:
+        raise
+    except (FileNotFoundError, PermissionError) as e:
+        logger.exception("%s.log-folder.preview I/O error", series)
+        raise HTTPException(
+            status_code=404 if isinstance(e, FileNotFoundError) else 403,
+            detail=f"파일 접근 실패: {type(e).__name__}",
+        ) from e
+    except ValueError as e:
+        logger.exception("%s.log-folder.preview value error", series)
+        raise HTTPException(
+            status_code=400, detail=f"입력 검증 실패: {e}",
+        ) from e
+    except Exception as e:
+        logger.exception("%s.log-folder.preview unexpected error", series)
+        raise HTTPException(
+            status_code=500,
+            detail=f"미리보기 실패 ({type(e).__name__})",
+        ) from e
+
+
 __all__ = [
     "get_process_memory_mb",
     "run_build_safely",
     "run_consistency_safely",
+    "run_preview_safely",
 ]

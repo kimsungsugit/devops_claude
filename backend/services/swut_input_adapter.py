@@ -381,13 +381,54 @@ def _resolve_latest_release_folder(
     # 자동 latest 탐색 시도.
     resolver_mode = getattr(resolver, "mode", "local")
     if resolver_mode != "local":
-        # Cloudium은 list_dir이 파일만 반환 — 디렉토리 enum 불가. 사용자에게 명시.
+        # 38차 C2: Cloudium 모드 fallback. list_dir이 파일만 반환하는 한계 회피 —
+        # 알려진 패턴(`v*_*`)을 resolver.exists로 brute-force 검사하지 않고,
+        # list_dir 결과에 디렉토리가 포함됐는지 시도 (worker 버전이 디렉토리 반환하면 동작).
+        # 못 찾으면 graceful warning 유지 (기존 동작).
+        try:
+            entries = resolver.list_dir(log_folder, pattern="*", recursive=False)
+        except Exception as e:  # noqa: BLE001
+            if out_warnings is not None:
+                out_warnings.append(
+                    f"cloudium list_dir 실패 ({type(e).__name__}) — "
+                    "자동 latest 탐색 skip, 원본 경로 유지"
+                )
+            return log_folder
+
+        # entries는 절대 경로 list. 각 entry에 대해 `<entry>/01.TestCaseDataReport`
+        # 존재 + 이름이 v<버전>_<날짜> 패턴이면 후보.
+        candidates_c: list[tuple[str, str]] = []
+        for entry_path in entries:
+            name = os.path.basename(entry_path.rstrip("/\\"))
+            m = _RELEASE_FOLDER_RE.match(name)
+            if not m:
+                continue
+            sub_check = os.path.join(entry_path, "01.TestCaseDataReport")
+            try:
+                if not resolver.exists(sub_check):
+                    continue
+            except Exception:  # noqa: BLE001
+                continue
+            candidates_c.append((m.group(1), entry_path))
+
+        if not candidates_c:
+            if out_warnings is not None:
+                out_warnings.append(
+                    f"log_folder '{log_folder}'에 01.TestCaseDataReport 없음 — "
+                    "cloudium worker가 디렉토리 enum 미지원 또는 v<버전>_<YYMMDD> "
+                    "후보 0건. release 폴더 직접 지정 권장"
+                )
+            return log_folder
+
+        candidates_c.sort(key=lambda x: x[0], reverse=True)
+        latest_path = candidates_c[0][1]
         if out_warnings is not None:
             out_warnings.append(
-                f"log_folder '{log_folder}'에 01.TestCaseDataReport 없음 — "
-                f"cloudium 모드는 자동 latest 미지원. v<버전>_<날짜> 폴더를 직접 지정 필요"
+                f"log_folder auto-resolved (cloudium): "
+                f"'{os.path.basename(latest_path)}' (날짜 suffix 최대값 / "
+                f"{len(candidates_c)}개 후보 중 latest)"
             )
-        return log_folder
+        return latest_path
 
     # Local 모드: os.scandir 직접 사용 (list_dir은 파일만 반환하므로 우회)
     try:
@@ -466,13 +507,15 @@ def preview_release_candidates(
     resolved = _resolve_latest_release_folder(resolver, log_folder, out_warnings=warnings)
     auto_resolved = resolved != log_folder
 
-    # 후보 list 재수집 — _resolve가 latest_path만 반환하므로 enum 재실행
+    # 후보 list 재수집 — 38차 reviewer W3 fix: Case A에서는 부모 dir scan하지 않음
+    # (release 폴더 직접 지정한 사용자에게 형제 release들이 후보로 노출되면 혼란).
+    # Case A는 candidates 비움 — auto_resolved=False 의미가 "release 폴더 그대로 사용".
     candidates: list[dict[str, Any]] = []
     resolver_mode = getattr(resolver, "mode", "local")
-    if resolver_mode == "local":
-        # Case B (auto-resolve 수행) 또는 Case A (no candidates)
+    if resolver_mode == "local" and auto_resolved:
+        # Case B만 — log_folder가 상위 폴더이고 안에 release 후보 있음을 의미
         try:
-            scan_root = log_folder if auto_resolved else os.path.dirname(resolved) or log_folder
+            scan_root = log_folder
             if os.path.isdir(scan_root):
                 with os.scandir(scan_root) as it:
                     raw: list[tuple[str, str]] = []

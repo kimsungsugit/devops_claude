@@ -200,6 +200,8 @@ python -m pytest tests/ -v --cov=backend --cov=workflow --cov=report_gen --cov-r
 - **`POST /api/swit/coverage/build`** — SwIT Coverage Report v2.02 xlsx 빌드 (33차)
 - **`POST /api/swit/sitr/build`** — SwIT SITR v2.02 xlsm 빌드 (keep_vba=True, 34차 대칭)
 - **`POST /api/swit/consistency/check`** — SwIT Coverage↔SITR cross-validation (35차)
+- **`POST /api/swut/log-folder/preview`** — SwUT log_folder dry-run preview (38차)
+- **`POST /api/swit/log-folder/preview`** — SwIT log_folder dry-run preview (38차)
 
 ## SwUT Builder (Software Unit Test, 8~20차 라운드)
 
@@ -332,9 +334,10 @@ ISO 26262 ASIL A 단위테스트 산출물 자동 생성 + cross-validation 플�
 - Backend SwUT 전체 회귀: **~301개** (31-fix +5 / 32차 W28 +8)
 - Backend SwIT 회귀: **65개** (33차 25 + 34차 28 + 35차 5 + 36-fix 7 — `_extract_env_from_filename` SwIT prefix)
 - Backend 37차 신규: **+7** (`TestResolveLatestReleaseFolder`: Case A/B/C + non-release skip + missing-subfolder skip + W1 mixed suffix + W2 silent fallback)
-- Backend 전체: **1854개** (.venv Python 3.12.6 / 53s — 1837 → 1849 (+12 36-fix) → 1854 (+5 37차))
-- Frontend SwITBuildSection: **8개** (35차 신규)
-- Frontend 전체: **228개** (220 → 228 +8)
+- Backend 38차 신규: **+21** (helpers 3 + safety 9 + preview 4 + edge case 3 (1 skip) + C2 cloudium 2)
+- Backend 전체: **1875개** (.venv Python 3.12.6 / 48s — 1854 → 1875 +21)
+- Frontend SwITBuildSection: **10개** (35차 8 + 38차 +2 preview UI)
+- Frontend 전체: **230개** (228 → 230 +2)
 - Frontend SwUTBuildSection: **26개**
 - Frontend 전체: **220개** (23 test files)
 
@@ -437,6 +440,22 @@ ISO 26262 ASIL B+ 통합 테스트 산출물 자동 생성. SwUT 30~32차 인프
 - Fix: `env_prefix` kwarg 도입 (`_extract_env_from_filename`, `collect_from_log_folder`,
   `collect_from_jenkins_cache`, `collect_swut_session`). SwIT는 "SwITC" 명시 전달
 - 회귀: SwUT 4 + SwIT 7 = 11건 통과 (1842 → 1849)
+
+### 38차 — 35차 비판 평가 발견 결함 해결 (DRY/__all__/dry-run preview/_safety)
+- **W1 DRY**: `backend/services/swut_builder_helpers.py` 신규 — `extract_warnings_from_session(session)` helper. 빌더 4개 (swut_coverage/swut_sutr/swit_coverage/swit_sitr)에서 `warnings: list[str] = list(session.parse_warnings or [])` → helper 호출로 통합
+- **W2 강결합**: SwUT `swut_coverage_aggregator.py` + `swut_sutr_aggregator.py`에 `__all__` 명시. SwIT가 import 중인 private 함수도 포함하여 signature 변경 시 SwIT 회귀 동시 검증 의무 가시화
+- **I2 _safety decorator**: `backend/routers/_safety.py` 신규 — `run_build_safely` + `run_consistency_safely` + `get_process_memory_mb`. SwUT/SwIT 라우터의 `_run_*_safely` 4개 함수 통합. 100+ lines 중복 제거
+- **W4 dry-run preview**: `POST /api/swut/log-folder/preview` + `POST /api/swit/log-folder/preview` endpoint 신규. 사용자가 빌드 전 자동 선택될 release를 미리 확인. `LogFolderPreviewRequest` Pydantic + `preview_release_candidates(resolver, log_folder)` helper. frontend SwITBuildSection에 "🔎 미리보기" 버튼 + inline panel (`is_latest=true` row 강조)
+- **W6 edge case 회귀**: 100 후보 성능 (1초 미만) / 심볼릭 링크 (POSIX 한정 skip) / W2 silent failure (mock resolver)
+- **C2 cloudium fallback (부분)**: cloudium 모드에서 `resolver.list_dir`이 디렉토리 반환할 경우 자동 latest 시도. worker 빌드/배포 시점에 활성화 가능. 미지원 worker는 기존 graceful warning 유지
+- **C3 PoC headers fix**: `.codex_tmp/poc_swit_round38_live.py`에서 `dict(r.headers).get("X-SwIT-Summary")` → `{k.lower(): v}` lowercase dict 변환. urllib HTTPMessage case-insensitive 보장
+- 회귀: backend +21 / frontend +2 (1854 → 1875 / 228 → 230)
+
+### 비-목표 (39차+ — 사용자 의무)
+- **C1 실 환경 라이브 검증**: Cloudium worker(`dist/excel_rename_gui_v2.exe`) 실행 후 실 `U:\연구소\...` path + 회사 xlsx/xlsm + 실 VectorCAST html → vcast_parser 데이터 추출 검증
+- **W3 VBA 실 보존**: 회사 v2.02 xlsm template (vbaProject.bin 포함)으로 SITR 빌드 후 Excel에서 macro 실행 확인
+- **W5 Backend 인스턴스 정리**: 9000~9004 다수 — Windows task manager 또는 `Stop-Process -Id <PID>`
+- **Cloudium worker IPC 확장**: 본 repo에 worker 소스 없음. 별도 빌드 라운드 필요
 
 ### 37차 — log_folder 자동 latest release 선택
 - `01.Log/` 상위 폴더만 줘도 `v<버전>_<YYMMDD>` 패턴 중 날짜 suffix 최대값 자동 선택

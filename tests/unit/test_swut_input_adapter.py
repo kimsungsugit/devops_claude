@@ -265,6 +265,49 @@ class TestResolveLatestReleaseFolder:
         # symlink target은 v2.10_241201 이름 — 후보 인정되면 selected
         assert "v2.10_241201" in result
 
+    def test_c2_cloudium_list_dir_returns_directories(self, tmp_path):
+        """38차 C2: cloudium 모드 fallback — list_dir이 디렉토리 반환 시 자동 latest."""
+        from backend.services.swut_input_adapter import _resolve_latest_release_folder
+        # Create 2 release folders
+        self._make_release(tmp_path, "v2.02_240219")
+        self._make_release(tmp_path, "v2.10_241201")
+
+        class _CloudiumLike:
+            mode = "cloudium"
+            def exists(self, path: str) -> bool:
+                return os.path.exists(path)
+            def list_dir(self, path: str, pattern: str = "*", recursive: bool = False) -> list[str]:
+                # cloudium worker처럼 디렉토리 포함 반환 (디렉토리 enum 가능 가정)
+                return [os.path.join(path, n) for n in os.listdir(path)]
+
+        warns: list[str] = []
+        result = _resolve_latest_release_folder(
+            _CloudiumLike(), str(tmp_path), out_warnings=warns,
+        )
+        # v2.10_241201이 선택됨
+        assert os.path.basename(result) == "v2.10_241201"
+        assert any("auto-resolved (cloudium)" in w for w in warns)
+
+    def test_c2_cloudium_list_dir_files_only_graceful(self, tmp_path):
+        """38차 C2: cloudium worker가 파일만 반환 시 graceful warning + 원본 유지."""
+        from backend.services.swut_input_adapter import _resolve_latest_release_folder
+        self._make_release(tmp_path, "v2.02_240219")
+
+        class _FilesOnlyCloudium:
+            mode = "cloudium"
+            def exists(self, path: str) -> bool:
+                return os.path.exists(path)
+            def list_dir(self, path: str, pattern: str = "*", recursive: bool = False) -> list[str]:
+                # 파일만 반환 (디렉토리 무시) — 일부 worker 버전 시뮬레이션
+                return []
+
+        warns: list[str] = []
+        result = _resolve_latest_release_folder(
+            _FilesOnlyCloudium(), str(tmp_path), out_warnings=warns,
+        )
+        assert result == str(tmp_path)  # 원본 유지
+        assert any("cloudium worker" in w for w in warns)
+
     def test_w2_resolver_exists_failure_emits_warning_not_silent(self, tmp_path):
         """37차 reviewer W2: resolver.exists() 예외 시 silent 아닌 warning 누적."""
         from backend.services.swut_input_adapter import _resolve_latest_release_folder

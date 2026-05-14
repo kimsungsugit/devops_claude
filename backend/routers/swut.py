@@ -35,7 +35,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Response
 from fastapi.responses import StreamingResponse
 
-from backend.routers._safety import run_build_safely, run_consistency_safely
+from backend.routers._safety import run_build_safely, run_consistency_safely, run_preview_safely
 from backend.schemas import (
     LogFolderPreviewRequest,
     SwUTBrowseRequest,
@@ -482,9 +482,13 @@ def _do_swut_log_folder_preview(req: LogFolderPreviewRequest) -> dict[str, Any]:
 
 @router.post("/log-folder/preview")
 async def swut_log_folder_preview(req: LogFolderPreviewRequest) -> dict[str, Any]:
-    """38차 W4: 빌드 전 release 후보 list + 자동 선택될 latest 미리보기 (SwUT)."""
+    """38차 W4: 빌드 전 release 후보 list + 자동 선택될 latest 미리보기 (SwUT).
+
+    38차 reviewer W2 fix: run_preview_safely 사용 — log prefix 'log-folder.preview'.
+    이전 run_consistency_safely 재사용은 'consistency.check'로 오기록.
+    """
     return await asyncio.to_thread(
-        run_consistency_safely, series="swut",
+        run_preview_safely, series="swut",
         check_fn=_do_swut_log_folder_preview, req=req, logger=_logger,
     )
 
