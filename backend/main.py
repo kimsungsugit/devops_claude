@@ -119,6 +119,19 @@ async def _lifespan(app_instance):
         except Exception as _me:
             _api_logger.warning("  SCM allowed_prefixes auto-merge 실패: %s", _me)
 
+        # 39차: 사용자 추가 cloudium prefixes (config/cloudium_extra_prefixes.json) 자동 merge
+        try:
+            from backend.services.cloudium_extra_prefixes import load_extra_prefixes
+            from backend.routers.health import _apply_extra_prefixes_to_resolver
+            _extra = load_extra_prefixes()
+            if _extra:
+                _apply_extra_prefixes_to_resolver(_extra)
+                _api_logger.info(
+                    "  Cloudium extra prefixes auto-merge: %d entries", len(_extra),
+                )
+        except Exception as _xe:
+            _api_logger.warning("  Cloudium extra prefixes auto-merge 실패: %s", _xe)
+
     yield  # 서버 실행 중
     _api_logger.info("DevOps Release Server shutting down")
 

@@ -99,13 +99,170 @@ async def set_file_mode(body: FileModeRequest):
             scm_merge = merge_all_scm_paths_to_cloudium()
         except Exception as e:
             scm_merge = {"merged_entries": 0, "mode": "error", "error": str(e)}
+    # 39차: cloudium 전환 시 사용자 추가 prefixes (영구 저장소) 자동 merge
+    extra_merge: dict = {"merged_entries": 0, "mode": "skipped_local"}
+    if body.mode == "cloudium":
+        try:
+            from backend.services.cloudium_extra_prefixes import load_extra_prefixes
+            _extra = load_extra_prefixes()
+            if _extra:
+                _apply_extra_prefixes_to_resolver(_extra)
+                extra_merge = {"merged_entries": len(_extra), "mode": "cloudium"}
+            else:
+                extra_merge = {"merged_entries": 0, "mode": "cloudium"}
+        except Exception as e:  # noqa: BLE001
+            extra_merge = {"merged_entries": 0, "mode": "error", "error": str(e)}
+
     # 갱신된 resolver 상태로 응답 (merge 결과 반영)
     from backend.services.file_resolver import get_resolver
     return {
         "ok": True,
         "cloudium_worker": worker_action,
         "scm_auto_merge": scm_merge,
+        "extra_prefixes_merge": extra_merge,
         **get_resolver().get_config(),
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────
+# 39차 — 동적 allowed_prefixes 관리 (Cloudium 전용)
+# ─────────────────────────────────────────────────────────────────────
+
+def _apply_extra_prefix_to_resolver(prefix: str) -> dict:
+    """현재 cloudium resolver에 prefix 즉시 추가 (switch_mode 재호출).
+
+    Returns: 갱신된 resolver config.
+    """
+    from backend.services.file_resolver import (
+        CloudiumFileResolver, get_resolver, switch_mode,
+    )
+    resolver = get_resolver()
+    if not isinstance(resolver, CloudiumFileResolver):
+        return get_resolver().get_config()
+    existing = list(resolver.allowed_prefixes or [])
+    if prefix not in existing:
+        existing.append(prefix)
+    merged = ",".join(existing)
+    switch_mode("cloudium", allowed_prefixes=merged)
+    return get_resolver().get_config()
+
+
+def _apply_extra_prefixes_to_resolver(prefixes: list[str]) -> dict:
+    """여러 prefix 일괄 적용 (startup auto-merge에서 사용)."""
+    from backend.services.file_resolver import (
+        CloudiumFileResolver, get_resolver, switch_mode,
+    )
+    resolver = get_resolver()
+    if not isinstance(resolver, CloudiumFileResolver):
+        return get_resolver().get_config()
+    existing = list(resolver.allowed_prefixes or [])
+    for p in prefixes:
+        if p and p not in existing:
+            existing.append(p)
+    merged = ",".join(existing)
+    switch_mode("cloudium", allowed_prefixes=merged)
+    return get_resolver().get_config()
+
+
+@router.get("/file-mode/extra-prefixes")
+async def list_extra_prefixes():
+    """39차: 사용자 추가 cloudium prefixes 목록 (영구 저장).
+
+    GET — read-only. Local 모드에서도 조회 가능 (영구 저장 검토용).
+    """
+    from backend.services.cloudium_extra_prefixes import load_extra_prefixes
+    return {"prefixes": load_extra_prefixes()}
+
+
+class _AddPrefixBody(BaseModel):
+    """39차 add-allowed-prefix request — schemas.AddAllowedPrefixRequest 별칭.
+
+    health.py 모듈 안 import 순환 회피용 inline 정의. 검증 로직은 동일.
+    """
+    prefix: str
+
+    @field_validator("prefix")
+    @classmethod
+    def _validate(cls, v: str) -> str:
+        if not v or len(v.strip()) == 0:
+            raise ValueError("prefix 비어있음")
+        if len(v) > 500:
+            raise ValueError("prefix 길이 500 초과")
+        if "\n" in v or "\r" in v:
+            raise ValueError("줄바꿈 문자 금지")
+        return v.strip()
+
+
+@router.post("/file-mode/add-allowed-prefix")
+async def add_allowed_prefix(body: _AddPrefixBody):
+    """39차: cloudium allowed_prefixes에 사용자 path 동적 추가 + 영구 저장.
+
+    Cloudium 모드 전용 — local 모드는 400.
+    영구 저장: config/cloudium_extra_prefixes.json (backend 재기동 후에도 유지).
+    즉시 적용: 현재 resolver에 switch_mode 재호출로 반영.
+    """
+    from backend.services.cloudium_extra_prefixes import add_prefix
+    from backend.services.file_resolver import CloudiumFileResolver, get_resolver
+
+    if not isinstance(get_resolver(), CloudiumFileResolver):
+        raise HTTPException(
+            status_code=400,
+            detail="cloudium 모드만 지원 — /api/file-mode 로 cloudium 모드 전환 후 사용",
+        )
+
+    try:
+        result = add_prefix(body.prefix)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+    # 영구 저장 후 즉시 resolver에 반영 (added=True일 때만)
+    if result["added"]:
+        resolver_config = _apply_extra_prefix_to_resolver(body.prefix)
+    else:
+        resolver_config = get_resolver().get_config()
+
+    return {
+        "ok": True,
+        "added": result["added"],
+        "prefix": result["prefix"],
+        "extra_prefixes": result["prefixes"],
+        **resolver_config,
+    }
+
+
+class _RemovePrefixBody(BaseModel):
+    prefix: str
+
+    @field_validator("prefix")
+    @classmethod
+    def _validate(cls, v: str) -> str:
+        if not v or len(v.strip()) == 0:
+            raise ValueError("prefix 비어있음")
+        if len(v) > 500:
+            raise ValueError("prefix 길이 500 초과")
+        if "\n" in v or "\r" in v:
+            raise ValueError("줄바꿈 문자 금지")
+        return v.strip()
+
+
+@router.post("/file-mode/remove-allowed-prefix")
+async def remove_allowed_prefix(body: _RemovePrefixBody):
+    """39차: cloudium allowed_prefixes에서 사용자 path 제거 + 영구 저장.
+
+    영구 저장소만 갱신 — 현재 resolver는 다음 switch_mode 또는 backend 재기동 시 반영.
+    즉시 메모리에서 제거하려면 별도 set_file_mode 호출 또는 backend 재기동 권장.
+    """
+    from backend.services.cloudium_extra_prefixes import remove_prefix
+    try:
+        result = remove_prefix(body.prefix)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+    return {
+        "ok": True,
+        "removed": result["removed"],
+        "prefix": result["prefix"],
+        "extra_prefixes": result["prefixes"],
     }
 
 

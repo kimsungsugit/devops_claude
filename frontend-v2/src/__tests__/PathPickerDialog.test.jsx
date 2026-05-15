@@ -129,7 +129,8 @@ describe('PathPickerDialog', () => {
     });
     render(<PathPickerDialog open={true} initialPath="U:/cloud" onClose={() => {}} />);
     await waitFor(() => {
-      expect(screen.getByText(/Cloudium 모드/)).toBeTruthy();
+      // 39차 prominent 경고 + 22차 inline hint 둘 다 표시 — getAllByText
+      expect(screen.getAllByText(/Cloudium 모드/).length).toBeGreaterThanOrEqual(1);
     });
     expect(screen.getByText(/디렉토리 navigate 권한 없음/)).toBeTruthy();
   });
@@ -163,5 +164,120 @@ describe('PathPickerDialog', () => {
     await waitFor(() => {
       expect(screen.getByText(/2000건 초과/)).toBeTruthy();
     });
+  });
+
+  // 39차: cloudium UX 강화 + bookmark + 403 자동 add
+  it('renders prominent cloudium 경고 카드 when file_mode=cloudium (39차)', async () => {
+    vi.spyOn(global, 'fetch').mockResolvedValue({
+      ok: true,
+      headers: new Headers(),
+      json: async () => ({
+        ok: true,
+        current: 'U:/cloud',
+        parent: 'U:/',
+        dirs: [],
+        files: [],
+        truncated: false,
+        file_mode: 'cloudium',
+        cloudium_hint: '',
+      }),
+    });
+    render(<PathPickerDialog open={true} initialPath="U:/cloud" onClose={() => {}} />);
+    await waitFor(() => {
+      expect(screen.getByTestId('picker-cloudium-warning')).toBeTruthy();
+    });
+    expect(screen.getByText(/디렉토리 navigate를 지원하지 않습니다/)).toBeTruthy();
+  });
+
+  it('shows 403 auto-add prompt when backend returns CLOUDIUM_BLOCKED (39차)', async () => {
+    vi.spyOn(global, 'fetch').mockResolvedValue({
+      ok: false,
+      status: 403,
+      headers: new Headers(),
+      json: async () => ({
+        ok: false,
+        error: {
+          code: 'CLOUDIUM_BLOCKED',
+          message: 'Cloudium 모드: 허용되지 않은 경로 접근 차단됨: U:/forbidden',
+        },
+      }),
+    });
+    render(<PathPickerDialog open={true} initialPath="U:/forbidden" onClose={() => {}} />);
+    await waitFor(() => {
+      expect(screen.getByTestId('picker-add-prompt')).toBeTruthy();
+    });
+    expect(screen.getByText(/추가 후 재시도/)).toBeTruthy();
+  });
+
+  it('calls add-allowed-prefix endpoint when user confirms 403 prompt (39차)', async () => {
+    let callCount = 0;
+    vi.spyOn(global, 'fetch').mockImplementation(async (url, opts) => {
+      callCount++;
+      // 첫 호출: browse 403, 두번째: add-prefix 200, 세번째: browse 200
+      if (callCount === 1) {
+        return {
+          ok: false, status: 403,
+          headers: new Headers(),
+          json: async () => ({
+            ok: false,
+            error: { code: 'CLOUDIUM_BLOCKED', message: 'Cloudium 차단' },
+          }),
+        };
+      }
+      if (url.includes('/api/file-mode/add-allowed-prefix')) {
+        return {
+          ok: true, status: 200,
+          headers: new Headers(),
+          json: async () => ({
+            ok: true, added: true, prefix: 'U:/forbidden',
+            extra_prefixes: ['U:/forbidden'],
+          }),
+        };
+      }
+      // 재시도 browse
+      return {
+        ok: true, status: 200,
+        headers: new Headers(),
+        json: async () => ({
+          ok: true,
+          current: 'U:/forbidden',
+          parent: 'U:/',
+          dirs: [],
+          files: ['U:/forbidden/file.xlsx'],
+          truncated: false,
+          file_mode: 'cloudium',
+        }),
+      };
+    });
+
+    render(<PathPickerDialog open={true} initialPath="U:/forbidden" onClose={() => {}} />);
+    await waitFor(() => expect(screen.getByTestId('picker-add-prompt')).toBeTruthy());
+
+    fireEvent.click(screen.getByText(/추가 후 재시도/));
+
+    await waitFor(() => {
+      // add-allowed-prefix 호출됐는지
+      const urls = vi.mocked(global.fetch).mock.calls.map(c => c[0]);
+      expect(urls.some(u => u.includes('/api/file-mode/add-allowed-prefix'))).toBe(true);
+    });
+  });
+
+  it('saves bookmark on file select and shows bookmark dropdown (39차)', async () => {
+    // 사전: localStorage clear + bookmark 1건 미리 저장
+    localStorage.clear();
+    localStorage.setItem(
+      'devops_v2_cloudium_path_bookmarks',
+      JSON.stringify(['U:/preset1', 'U:/preset2']),
+    );
+    render(<PathPickerDialog open={true} initialPath="C:/test" onClose={() => {}} />);
+    await waitFor(() => {
+      expect(screen.getByTestId('picker-bookmarks-toggle')).toBeTruthy();
+    });
+    fireEvent.click(screen.getByTestId('picker-bookmarks-toggle'));
+    await waitFor(() => {
+      expect(screen.getByTestId('picker-bookmarks-panel')).toBeTruthy();
+    });
+    expect(screen.getByText(/U:\/preset1/)).toBeTruthy();
+    expect(screen.getByText(/U:\/preset2/)).toBeTruthy();
   });
 });

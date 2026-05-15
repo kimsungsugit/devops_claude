@@ -202,6 +202,9 @@ python -m pytest tests/ -v --cov=backend --cov=workflow --cov=report_gen --cov-r
 - **`POST /api/swit/consistency/check`** — SwIT Coverage↔SITR cross-validation (35차)
 - **`POST /api/swut/log-folder/preview`** — SwUT log_folder dry-run preview (38차)
 - **`POST /api/swit/log-folder/preview`** — SwIT log_folder dry-run preview (38차)
+- **`POST /api/file-mode/add-allowed-prefix`** — Cloudium allowed_prefixes 동적 추가 (39차)
+- **`POST /api/file-mode/remove-allowed-prefix`** — 동적 제거 (39차)
+- **`GET /api/file-mode/extra-prefixes`** — 영구 저장 prefixes 조회 (39차)
 
 ## SwUT Builder (Software Unit Test, 8~20차 라운드)
 
@@ -335,9 +338,10 @@ ISO 26262 ASIL A 단위테스트 산출물 자동 생성 + cross-validation 플�
 - Backend SwIT 회귀: **65개** (33차 25 + 34차 28 + 35차 5 + 36-fix 7 — `_extract_env_from_filename` SwIT prefix)
 - Backend 37차 신규: **+7** (`TestResolveLatestReleaseFolder`: Case A/B/C + non-release skip + missing-subfolder skip + W1 mixed suffix + W2 silent fallback)
 - Backend 38차 신규: **+21** (helpers 3 + safety 9 + preview 4 + edge case 3 (1 skip) + C2 cloudium 2)
-- Backend 전체: **1875개** (.venv Python 3.12.6 / 48s — 1854 → 1875 +21)
-- Frontend SwITBuildSection: **10개** (35차 8 + 38차 +2 preview UI)
-- Frontend 전체: **230개** (228 → 230 +2)
+- Backend 39차 신규: **+20** (cloudium_extra_prefixes 11 + file_mode_router 9 — add/remove/list × cloudium-only/normal/duplicate/422)
+- Backend 전체: **1895개** (.venv Python 3.12.6 / 45s — 1875 → 1895 +20)
+- Frontend PathPickerDialog: **13개** (22차 9 + 39차 +4 cloudium UX / 403 add / bookmark)
+- Frontend 전체: **234개** (230 → 234 +4)
 - Frontend SwUTBuildSection: **26개**
 - Frontend 전체: **220개** (23 test files)
 
@@ -440,6 +444,27 @@ ISO 26262 ASIL B+ 통합 테스트 산출물 자동 생성. SwUT 30~32차 인프
 - Fix: `env_prefix` kwarg 도입 (`_extract_env_from_filename`, `collect_from_log_folder`,
   `collect_from_jenkins_cache`, `collect_swut_session`). SwIT는 "SwITC" 명시 전달
 - 회귀: SwUT 4 + SwIT 7 = 11건 통과 (1842 → 1849)
+
+### 39차 — Cloudium 동적 allowed_prefixes + PathPickerDialog UX (A+B+C 통합)
+- 38차 commit 후 사용자 SwIT/SwUT Browse cloudium 동작 안 됨 보고 → 두 차단 식별:
+  - 차단1: `allowed_prefixes`에 SwIT/SwUT Test Result 경로 미포함 → 403 CLOUDIUM_BLOCKED
+  - 차단2: Cloudium worker IPC `list_dir`이 파일만 반환 — backend 디렉토리 navigate 불가
+- **A (동적 add-allowed-prefix endpoint)**:
+  - `backend/services/cloudium_extra_prefixes.py` 신규 — CRUD (load/save/add/remove) + atomic write
+  - `config/cloudium_extra_prefixes.json` 영구 저장소 (scm_registry와 분리 — SCM은 추적성, extra는 빌드 input)
+  - `POST /api/file-mode/add-allowed-prefix` + `remove-allowed-prefix` + `GET extra-prefixes` 3 endpoint
+  - Pydantic AddAllowedPrefixRequest / RemoveAllowedPrefixRequest (maxlen 500 + `_no_newline`)
+  - cloudium 모드 전용 — local 모드 시 400 거부
+- **B (startup auto-merge hook)**:
+  - `backend/main.py` lifespan + `health.set_file_mode`에서 `load_extra_prefixes()` 자동 호출
+  - backend 재기동 후에도 사용자 추가 path 유지
+- **C (PathPickerDialog UX 강화)**:
+  - cloudium 모드 시 prominent 경고 카드 (`picker-cloudium-warning`) — "worker가 디렉토리 navigate 미지원, path 직접 입력 권장"
+  - bookmark dropdown (localStorage `devops_v2_cloudium_path_bookmarks`, LRU 20건) — 자주 쓰는 경로 빠른 접근
+  - 403 자동 add 제안 — CLOUDIUM_BLOCKED 응답 시 "이 경로를 추가하시겠습니까?" prompt → 확인 시 add-allowed-prefix 호출 + 자동 재시도
+- **D (worker exe `list_dirs` op 신규)** — 본 라운드 비-목표 (별도 빌드 라운드, worker 소스 외부 repo)
+- 회귀: backend 1875 → 1895 (+20) / frontend 230 → 234 (+4)
+- 라이브 PoC 검증 (port 9005): SwIT Test Result path 동적 추가 → 차단1 해제 ✓ (status 200) → 파일 4건 list 반환, 디렉토리는 cloudium_hint로 안내 (차단2 UX 우회 ✓)
 
 ### 38차 — 35차 비판 평가 발견 결함 해결 (DRY/__all__/dry-run preview/_safety)
 - **W1 DRY**: `backend/services/swut_builder_helpers.py` 신규 — `extract_warnings_from_session(session)` helper. 빌더 4개 (swut_coverage/swut_sutr/swit_coverage/swit_sitr)에서 `warnings: list[str] = list(session.parse_warnings or [])` → helper 호출로 통합

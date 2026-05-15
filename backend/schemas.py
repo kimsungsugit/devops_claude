@@ -840,6 +840,34 @@ class SwUTConsistencyCheckRequest(BaseModel):
 
 # ── SwIT Consistency Check (35차 라운드) ──────────────────────────────
 
+class AddAllowedPrefixRequest(BaseModel):
+    """39차 — Cloudium allowed_prefixes 동적 추가 요청.
+
+    영구 저장 (config/cloudium_extra_prefixes.json) + 즉시 file_resolver 갱신.
+    cloudium 모드 전용 — local 모드는 endpoint에서 400.
+    """
+    prefix: str = Field(..., min_length=1, max_length=500)
+
+    @field_validator("prefix")
+    @classmethod
+    def _no_newline_add_prefix(cls, v: str) -> str:
+        if "\n" in v or "\r" in v:
+            raise ValueError("줄바꿈 문자 금지 — 단일 라인 path 필요")
+        return v
+
+
+class RemoveAllowedPrefixRequest(BaseModel):
+    """39차 — Cloudium allowed_prefixes 제거 요청."""
+    prefix: str = Field(..., min_length=1, max_length=500)
+
+    @field_validator("prefix")
+    @classmethod
+    def _no_newline_remove_prefix(cls, v: str) -> str:
+        if "\n" in v or "\r" in v:
+            raise ValueError("줄바꿈 문자 금지 — 단일 라인 path 필요")
+        return v
+
+
 class LogFolderPreviewRequest(BaseModel):
     """38차 W4 — log_folder dry-run preview 요청 body.
 
