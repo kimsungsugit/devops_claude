@@ -11,7 +11,7 @@ import logging
 
 from fastapi import HTTPException
 
-from backend.services.admin_users import is_admin
+from backend.services.admin_users import _mask_user, is_admin
 from backend.user_context import get_current_user
 
 _logger = logging.getLogger(__name__)
@@ -38,7 +38,8 @@ def require_admin() -> str:
             },
         )
     if not is_admin(user):
-        _logger.warning("admin gate: user=%s is not admin", user)
+        # 42차 W11: log에 user 마스킹 (admin user 평문 누출 방지 — bootstrap log와 일관)
+        _logger.warning("admin gate: user=%s is not admin", _mask_user(user))
         raise HTTPException(
             status_code=403,
             detail={

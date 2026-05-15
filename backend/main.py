@@ -84,10 +84,17 @@ async def _lifespan(app_instance):
         _api_logger.warning("Chat History DB init skipped: %s", _che)
 
     # 41차 W2: 빈 admin_users.json + BOOTSTRAP_ADMIN_USERS env면 자동 등록 (lockout 회복).
+    # 42차 W7: admin user 이름은 로그에 마스킹 표시 (added_masked) — 평문 누출 차단.
     try:
         from backend.services.admin_users import bootstrap_from_env
         _bootstrap_result = bootstrap_from_env()
-        _api_logger.info("Admin bootstrap: %s", _bootstrap_result)
+        # 42차 W7+W18: 평문 user 노출 안 함 — count + masked만
+        _safe_log = {
+            "action": _bootstrap_result.get("action"),
+            "added_count": _bootstrap_result.get("added_count", 0),
+            "added_masked": _bootstrap_result.get("added_masked", []),
+        }
+        _api_logger.info("Admin bootstrap: %s", _safe_log)
     except Exception as _be:
         _api_logger.warning("Admin bootstrap 실패: %s", _be)
 
@@ -191,6 +198,10 @@ app.add_exception_handler(CloudiumBlockedException, _cloudium_blocked_exception_
 # ---------------------------------------------------------------------------
 from backend.routers.health import router as _health_router  # noqa: E402
 app.include_router(_health_router)
+
+# 42차 W2: health의 admin only sub-router (file-mode add/remove/list/browse-file).
+from backend.routers.health import admin_router as _health_admin_router  # noqa: E402
+app.include_router(_health_admin_router)
 
 # 40차: 인증/권한 endpoint (GET /api/auth/me + /api/auth/admins)
 from backend.routers.auth import router as _auth_router  # noqa: E402

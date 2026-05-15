@@ -116,6 +116,64 @@ describe('AdminContext', () => {
     await waitFor(() => expect(screen.getByTestId('isAdmin').textContent).toBe('true'));
   });
 
+  it('W5 debounce: refresh() within 5s without force is skipped (42차)', async () => {
+    let callCount = 0;
+    vi.spyOn(global, 'fetch').mockImplementation(async () => {
+      callCount++;
+      return {
+        ok: true,
+        json: async () => ({ username: 'tester', is_admin: false, authenticated: true }),
+      };
+    });
+    let providerRefresh;
+    function Spy() {
+      const ctx = useAdminMode();
+      providerRefresh = ctx.refresh;
+      return null;
+    }
+    render(
+      <AdminProvider>
+        <Spy />
+      </AdminProvider>
+    );
+    await waitFor(() => expect(callCount).toBeGreaterThan(0));
+    const before = callCount;
+    // force=false manual refresh — 5초 내 skip
+    await act(async () => {
+      await providerRefresh({ force: false });
+      await providerRefresh();  // default force=false
+    });
+    expect(callCount).toBe(before);  // debounce 적용 — fetch 횟수 그대로
+  });
+
+  it('W4 retry: fetch failure schedules 30s retry (42차)', async () => {
+    vi.useFakeTimers();
+    let callCount = 0;
+    vi.spyOn(global, 'fetch').mockImplementation(async () => {
+      callCount++;
+      if (callCount === 1) throw new Error('Network down');
+      return {
+        ok: true,
+        json: async () => ({ username: 'tester', is_admin: true, authenticated: true }),
+      };
+    });
+
+    render(
+      <AdminProvider>
+        <TestConsumer />
+      </AdminProvider>
+    );
+    await vi.waitFor(() => expect(callCount).toBeGreaterThan(0));
+    // 첫 fetch 실패 — 30초 retry timer 예약
+    expect(callCount).toBe(1);
+
+    await act(async () => {
+      vi.advanceTimersByTime(30_000);
+    });
+    vi.useRealTimers();
+    await waitFor(() => expect(callCount).toBeGreaterThanOrEqual(2));
+  });
+
   it('custom event "admin-mode-changed" triggers refresh (same-tab C3 fix)', async () => {
     let callCount = 0;
     const responses = [

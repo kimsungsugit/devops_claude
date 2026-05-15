@@ -74,9 +74,24 @@ async def global_exception_handler(request: Request, exc: Exception) -> JSONResp
 
 
 async def http_exception_handler(request: Request, exc: HTTPException) -> JSONResponse:
-    """FastAPI HTTP exception handler with consistent format."""
+    """FastAPI HTTP exception handler with consistent format.
+
+    42차 W6 fix: detail이 dict({code, message, ...})면 그 구조를 유지 — 이중 wrapping 회피.
+    require_admin 등 dependency가 `HTTPException(detail={"code": ..., "message": ...})`
+    형태로 raise할 때 사용자가 raw dict 문자열을 보게 되는 문제 해결.
+    """
+    detail = exc.detail
+    if isinstance(detail, dict):
+        # 구조화된 detail — code/message를 직접 사용
+        code = detail.get("code") or f"HTTP_{exc.status_code}"
+        message = detail.get("message") or str(detail)
+        extra = {k: v for k, v in detail.items() if k not in ("code", "message")}
+        return error_response(
+            exc.status_code, message, code=code,
+            detail=extra if extra else None,
+        )
     return error_response(
         exc.status_code,
-        str(exc.detail),
+        str(detail),
         code=f"HTTP_{exc.status_code}",
     )

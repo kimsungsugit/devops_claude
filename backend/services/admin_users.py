@@ -159,6 +159,19 @@ def remove_admin(user: str) -> dict[str, Any]:
     return {"removed": True, "user": u, "admins": sorted(current)}
 
 
+def _mask_user(user: str) -> str:
+    """42차 W7 — admin user 이름 log 마스킹 (예: 'hbrnd2' → 'hb***2').
+
+    backend log 또는 외부 노출 시 admin 사용자 보호.
+    """
+    u = (user or "").strip()
+    if len(u) <= 2:
+        return "*" * len(u)
+    if len(u) <= 4:
+        return u[0] + "*" * (len(u) - 1)
+    return u[:2] + "*" * (len(u) - 3) + u[-1]
+
+
 def bootstrap_from_env() -> dict[str, Any]:
     """41차 W2 — env BOOTSTRAP_ADMIN_USERS 콤마 list로 admin 자동 초기화.
 
@@ -183,7 +196,12 @@ def bootstrap_from_env() -> dict[str, Any]:
     if not new_users:
         return {"action": "skipped_no_env", "added": []}
     save_admins(new_users)
-    return {"action": "bootstrapped", "added": new_users}
+    # 42차 W7+W18: 응답에 평문 user 포함 안 함 — count + masked만 노출. log/audit 안전.
+    return {
+        "action": "bootstrapped",
+        "added_count": len(new_users),
+        "added_masked": [_mask_user(u) for u in new_users],
+    }
 
 
 __all__ = [

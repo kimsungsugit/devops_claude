@@ -48,7 +48,10 @@ class TestBootstrapFromEnv:
         monkeypatch.setenv("BOOTSTRAP_ADMIN_USERS", "hbrnd2")
         result = au.bootstrap_from_env()
         assert result["action"] == "bootstrapped"
-        assert "hbrnd2" in result["added"]
+        # 42차 W18: 응답에 평문 added 제거 — count + masked만
+        assert result["added_count"] == 1
+        assert "added_masked" in result
+        assert "added" not in result  # 평문 제거 확인
         # admin list 등록 확인
         assert au.is_admin("hbrnd2") is True
 
@@ -68,7 +71,18 @@ class TestBootstrapFromEnv:
         monkeypatch.setenv("BOOTSTRAP_ADMIN_USERS", " alice , bob , , charlie ")
         result = au.bootstrap_from_env()
         assert result["action"] == "bootstrapped"
-        assert set(result["added"]) == {"alice", "bob", "charlie"}
+        # 42차 W18: 평문 added 제거 — count + masked만
+        assert result["added_count"] == 3
+        assert len(result["added_masked"]) == 3
         assert au.is_admin("alice") is True
         assert au.is_admin("bob") is True
         assert au.is_admin("charlie") is True
+
+    def test_w7_mask_user_format(self):
+        """42차 W7: _mask_user 동작 — 평문 유출 방지."""
+        assert au._mask_user("a") == "*"
+        assert au._mask_user("ab") == "**"
+        assert au._mask_user("abc") == "a**"
+        assert au._mask_user("abcd") == "a***"
+        assert au._mask_user("hbrnd2") == "hb***2"  # 일반 케이스
+        assert au._mask_user("") == ""

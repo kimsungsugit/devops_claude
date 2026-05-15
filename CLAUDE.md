@@ -343,9 +343,10 @@ ISO 26262 ASIL A 단위테스트 산출물 자동 생성 + cross-validation 플�
 - Backend 39차 신규: **+20** (cloudium_extra_prefixes 11 + file_mode_router 9 — add/remove/list × cloudium-only/normal/duplicate/422)
 - Backend 40차 신규: **+57** (admin_users 12 + auth_router 6 + admin_gate 39 parametrize 13 endpoint × 3)
 - Backend 41차 신규: **+4** (bootstrap_from_env env handling 4 시나리오)
-- Backend 전체: **1956개** (.venv Python 3.12.6 / 78s — 1952 → 1956 +4)
-- Frontend AdminContext: **5개** (40차 4 + 41차 +1 visibility refresh)
-- Frontend 전체: **240개** (239 → 240 +1)
+- Backend 42차 신규: **+9** (bootstrap +1 _mask_user + error_handler_nested 7 + admin_gate +0)
+- Backend 전체: **1965~1968개** (.venv Python 3.12.6 — 1956 → ~1968 +9~12, 회귀 진행 중)
+- Frontend AdminContext: **7개** (40차 4 + 41차 1 + 42차 +2 debounce/retry)
+- Frontend 전체: **242개** (240 → 242 +2)
 - Frontend SwUTBuildSection: **26개**
 - Frontend 전체: **220개** (23 test files)
 
@@ -448,6 +449,19 @@ ISO 26262 ASIL B+ 통합 테스트 산출물 자동 생성. SwUT 30~32차 인프
 - Fix: `env_prefix` kwarg 도입 (`_extract_env_from_filename`, `collect_from_log_folder`,
   `collect_from_jenkins_cache`, `collect_swut_session`). SwIT는 "SwITC" 명시 전달
 - 회귀: SwUT 4 + SwIT 7 = 11건 통과 (1842 → 1849)
+
+### 42차 — 41차 자체 평가 발견 문제 통합 fix (W2/W4/W5/W6/W7/W10/W11/W17/W18/C2/C3)
+- 41차 자체 평가에서 발견한 9건 fix + 추가 4건 (C3/W11/W17/W18) 즉시 처리. C1 JWT는 43차+ 별도.
+- **W2 health admin sub-router**: `admin_router = APIRouter(prefix="/api", dependencies=[Depends(require_admin)])` — 4 file-mode endpoint 분리 (DRY)
+- **W4 AdminContext retry**: fetch 실패 시 30초 후 1회 자동 재시도 (timer cleanup on unmount)
+- **W5 debounce**: 외부 manual `refresh({force: false})` 호출 시 5초 내 중복 차단. visibility/storage/custom event는 force=true (즉시 반영)
+- **W6 error_handler nested dict**: `HTTPException(detail=dict)`을 standard wrapper에 unpack — code/message 직접 추출 + extra 필드 detail에 보존 (이전 이중 wrapping `"{'code': ...}"` 문자열 노출 차단)
+- **W7+W11 admin user 마스킹**: backend log에 user 평문 누출 차단 — `_mask_user(user)` helper (예: `hb***2`). startup bootstrap + runtime require_admin 거부 시 모두 적용
+- **W18 bootstrap 응답 평문 제거**: `bootstrap_from_env()`가 `added` (평문 list) 대신 `added_count` + `added_masked`만 반환
+- **W10 frontend dist rebuild**: 41차+42차 변경 모두 반영
+- **C2 PoC 강화**: local 모드 fixture로 admin 빌드 status=200 + 실 산출물 8,515 bytes + environments=1 검증 (41차 cloudium 권한 영향 0 bytes 해결)
+- **C3 error_handler 회귀 신규**: 7건 (str detail / dict detail / extra fields / missing code / empty dict)
+- 회귀: backend 1956 → ~1968 (+12 — bootstrap +1 _mask_user / error_handler +7 / file_mode_router 영향 +0) / frontend 240 → 242 (+2 debounce + retry)
 
 ### 41차 — Bootstrap admin + APIRouter deps + AdminContext visibility refresh
 - 40차 자체 평가 발견 문제 (C2/W2/W3/W4/W8/W9) 개선. C1 (JWT)은 42차+ 별도.

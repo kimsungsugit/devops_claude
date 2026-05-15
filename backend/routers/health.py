@@ -63,6 +63,15 @@ class BrowseFileRequest(BaseModel):
 
 router = APIRouter(prefix="/api", tags=["health"])
 
+# 42차 W2: file-mode 관리 endpoint (add/remove/list extra-prefixes + browse-file) 전용
+# admin 라우터 — 라우터 레벨 dependency로 DRY 통합 (endpoint별 _admin 파라미터 제거).
+# health/preview-excel 등은 admin 무관이므로 메인 router에 유지.
+admin_router = APIRouter(
+    prefix="/api",
+    tags=["health-admin"],
+    dependencies=[Depends(require_admin)],
+)
+
 
 @router.get("/health")
 async def health_check():
@@ -166,8 +175,8 @@ def _apply_extra_prefixes_to_resolver(prefixes: list[str]) -> dict:
     return get_resolver().get_config()
 
 
-@router.get("/file-mode/extra-prefixes")
-async def list_extra_prefixes(_admin: str = Depends(require_admin)):
+@admin_router.get("/file-mode/extra-prefixes")
+async def list_extra_prefixes():
     """39차: 사용자 추가 cloudium prefixes 목록 (영구 저장).
 
     GET — read-only. Local 모드에서도 조회 가능 (영구 저장 검토용).
@@ -195,11 +204,8 @@ class _AddPrefixBody(BaseModel):
         return v.strip()
 
 
-@router.post("/file-mode/add-allowed-prefix")
-async def add_allowed_prefix(
-    body: _AddPrefixBody,
-    _admin: str = Depends(require_admin),
-):
+@admin_router.post("/file-mode/add-allowed-prefix")
+async def add_allowed_prefix(body: _AddPrefixBody):
     """39차: cloudium allowed_prefixes에 사용자 path 동적 추가 + 영구 저장.
 
     Cloudium 모드 전용 — local 모드는 400.
@@ -250,11 +256,8 @@ class _RemovePrefixBody(BaseModel):
         return v.strip()
 
 
-@router.post("/file-mode/remove-allowed-prefix")
-async def remove_allowed_prefix(
-    body: _RemovePrefixBody,
-    _admin: str = Depends(require_admin),
-):
+@admin_router.post("/file-mode/remove-allowed-prefix")
+async def remove_allowed_prefix(body: _RemovePrefixBody):
     """39차: cloudium allowed_prefixes에서 사용자 path 제거 + 영구 저장.
 
     영구 저장소만 갱신 — 현재 resolver는 다음 switch_mode 또는 backend 재기동 시 반영.
@@ -595,11 +598,8 @@ async def preview_image(path: str, image_id: str):
         raise HTTPException(status_code=500, detail=str(exc))
 
 
-@router.post("/file-mode/browse-file")
-async def browse_file(
-    body: BrowseFileRequest = BrowseFileRequest(),
-    _admin: str = Depends(require_admin),
-):
+@admin_router.post("/file-mode/browse-file")
+async def browse_file(body: BrowseFileRequest = BrowseFileRequest()):
     """OS 파일 선택 다이얼로그.
 
     - cloudium 모드: worker IPC로 위임 (worker GUI에서 다이얼로그 → 클라우디움 폴더 보임)
