@@ -1,5 +1,6 @@
 import { useState, useCallback, useEffect } from 'react';
 import { getUsername } from '../api.js';
+import { useAdminMode } from '../contexts/AdminContext.jsx';
 
 const API_BASE = (typeof window !== 'undefined' && window.__ARIA_API_BASE__)
   || import.meta.env?.VITE_API_BASE_URL || '';
@@ -23,14 +24,8 @@ function loadBookmarks() {
   }
 }
 
-// 39-fix-2: admin 모드 감지 — App.jsx의 isAdminMode와 동일 (localStorage devops_admin_mode === 'true').
-function isAdminMode() {
-  try {
-    return localStorage.getItem('devops_admin_mode') === 'true';
-  } catch (e) {
-    return false;
-  }
-}
+// 40차: isAdminMode 로컬 helper 제거 → AdminContext.useAdminMode() 사용.
+// localStorage 신뢰 제거, backend GET /api/auth/me 응답 기반.
 
 function saveBookmark(path) {
   if (!path || typeof path !== 'string') return;
@@ -78,7 +73,8 @@ export default function PathPickerDialog({
   const [addPrefixLoading, setAddPrefixLoading] = useState(false);
   // 39-fix-2: worker tkinter 다이얼로그 호출 상태
   const [workerBrowseLoading, setWorkerBrowseLoading] = useState(false);
-  const [isAdmin] = useState(() => isAdminMode());
+  // 40차: AdminContext 기반 — localStorage 신뢰 제거, backend role 검증
+  const { isAdmin } = useAdminMode();
 
   const fetchPath = useCallback(async (path) => {
     const user = getUsername();
@@ -259,6 +255,27 @@ export default function PathPickerDialog({
   }, [open, initialPath, fetchPath]);
 
   if (!open) return null;
+
+  // 40차 W2 fix: PathPickerDialog 자체 admin 가드 — 외부 trigger 우회 차단.
+  // Browse 버튼이 disabled여도 PathPickerDialog가 강제 open되면 non-admin이 path
+  // 직접 입력 + worker dialog 호출 가능 — 모달 진입 자체 차단.
+  if (!isAdmin) {
+    return (
+      <div className="picker-overlay" role="dialog" aria-label="권한 부족">
+        <div className="picker-dialog" style={{ maxWidth: 480 }}>
+          <div className="picker-header">
+            <h3 className="picker-title">🔒 관리자 권한 필요</h3>
+            <button className="picker-close" onClick={onClose} aria-label="닫기">✕</button>
+          </div>
+          <div className="picker-body" style={{ padding: 20 }}>
+            경로 탐색은 관리자 전용입니다.<br />
+            <strong>Ctrl+Shift+A</strong>로 관리자 모드 활성화 후 다시 시도하거나,
+            관리자에게 <code>config/admin_users.json</code> 등록을 요청하세요.
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   const handleSelect = (filePath) => {
     // 39차: 파일 선택 시 부모 디렉토리를 bookmark에 저장 (재방문 편의)

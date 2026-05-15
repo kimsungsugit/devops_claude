@@ -245,6 +245,8 @@ export default function App() {
         const next = !current;
         localStorage.setItem('devops_admin_mode', String(next));
         setAdminMode(next);
+        // 40차 C3 fix: same-tab AdminContext 즉시 반영 — custom event dispatch
+        window.dispatchEvent(new Event('admin-mode-changed'));
 
         // 시각 피드백 (우측 상단에 일시적 배지)
         const indicator = document.createElement('div');

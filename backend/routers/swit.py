@@ -26,7 +26,9 @@ import json
 import logging
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Response
+from fastapi import APIRouter, Depends, HTTPException, Response
+
+from backend.dependencies.admin import require_admin
 from fastapi.responses import StreamingResponse
 
 from backend.routers._safety import run_build_safely, run_consistency_safely, run_preview_safely
@@ -315,7 +317,10 @@ def _do_swit_coverage_build(req: SwITBuildRequest) -> Response:
 
 
 @router.post("/coverage/build")
-async def build_swit_coverage(req: SwITBuildRequest) -> Response:
+async def build_swit_coverage(
+    req: SwITBuildRequest,
+    _admin: str = Depends(require_admin),
+) -> Response:
     """SwIT Coverage Report v2.02 xlsx 빌드. Semaphore(2)로 동시 호출 제한."""
     async with _BUILD_SEMAPHORE:
         return await asyncio.to_thread(
@@ -359,7 +364,10 @@ def _do_swit_sitr_build(req: SwITSitrBuildRequest) -> Response:
 
 
 @router.post("/sitr/build")
-async def build_swit_sitr(req: SwITSitrBuildRequest) -> Response:
+async def build_swit_sitr(
+    req: SwITSitrBuildRequest,
+    _admin: str = Depends(require_admin),
+) -> Response:
     """SwIT SITR v2.02 xlsm 빌드 (34차). Coverage와 Semaphore(2) 공유."""
     async with _BUILD_SEMAPHORE:
         return await asyncio.to_thread(
@@ -388,7 +396,10 @@ def _do_swit_consistency_check(req: SwITConsistencyCheckRequest) -> dict[str, An
 
 
 @router.post("/consistency/check")
-async def swit_consistency_check(req: SwITConsistencyCheckRequest) -> dict[str, Any]:
+async def swit_consistency_check(
+    req: SwITConsistencyCheckRequest,
+    _admin: str = Depends(require_admin),
+) -> dict[str, Any]:
     """SwIT Coverage Report ↔ SITR cross-validation (35차).
 
     swit_consistency_checker.py 4가지 검증 (uncovered_mismatch /
@@ -416,7 +427,10 @@ def _do_swit_log_folder_preview(req: LogFolderPreviewRequest) -> dict[str, Any]:
 
 
 @router.post("/log-folder/preview")
-async def swit_log_folder_preview(req: LogFolderPreviewRequest) -> dict[str, Any]:
+async def swit_log_folder_preview(
+    req: LogFolderPreviewRequest,
+    _admin: str = Depends(require_admin),
+) -> dict[str, Any]:
     """38차 W4: 빌드 전 release 후보 list + 자동 선택될 latest 미리보기.
 
     사용자가 `01.Log/` 상위 폴더만 입력해도 어떤 release가 선택될지 사전 확인 가능.

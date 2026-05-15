@@ -1,6 +1,7 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
 import { getUsername } from '../../api.js';
 import { useToast } from '../../App.jsx';
+import { useAdminMode } from '../../contexts/AdminContext.jsx';
 import PathPickerDialog from '../PathPickerDialog.jsx';
 
 const API_BASE = (typeof window !== 'undefined' && window.__ARIA_API_BASE__)
@@ -30,14 +31,8 @@ const DEFAULT_FORM = {
   validation_date: '',
 };
 
-// 39-fix-2: Browse 버튼은 admin 전용 (worker GUI 다이얼로그 호출 가능 — Cloudium 권한).
-function isAdminMode() {
-  try {
-    return localStorage.getItem('devops_admin_mode') === 'true';
-  } catch (e) {
-    return false;
-  }
-}
+// 40차: 로컬 isAdminMode helper 제거 — AdminContext.useAdminMode() 사용.
+// localStorage 신뢰 제거, backend GET /api/auth/me 응답 기반.
 
 function loadSavedForm() {
   try {
@@ -80,13 +75,9 @@ export default function SwITBuildSection() {
   // 38차 W4: log_folder dry-run preview state
   const [previewChecking, setPreviewChecking] = useState(false);
   const [previewResult, setPreviewResult] = useState(null);
-  // 39-fix-2: admin 감지 + storage event로 변경 추적
-  const [isAdmin, setIsAdmin] = useState(() => isAdminMode());
-  useEffect(() => {
-    const onStorage = () => setIsAdmin(isAdminMode());
-    window.addEventListener('storage', onStorage);
-    return () => window.removeEventListener('storage', onStorage);
-  }, []);
+  // 40차: AdminContext 기반 — localStorage 신뢰 제거, backend role 검증.
+  // C3 fix (same-tab 토글): AdminProvider가 custom event 'admin-mode-changed' listen.
+  const { isAdmin } = useAdminMode();
   const browseDisabledTitle = '관리자 전용 — Ctrl+Shift+A로 admin 모드 활성화';
 
   const openPicker = (target, pattern, title) => {
@@ -391,7 +382,7 @@ export default function SwITBuildSection() {
         <button
           className="swut-browse-btn"
           type="button"
-          disabled={previewChecking}
+          disabled={previewChecking || !isAdmin}
           data-testid="swit-preview-button"
           onClick={runLogFolderPreview}
           title="빌드 전 release 후보 + 자동 선택될 latest 미리보기 (38차)"
@@ -484,11 +475,11 @@ export default function SwITBuildSection() {
       </div>
 
       <div className="swut-actions">
-        <button className="btn-primary" disabled={!!building}
+        <button className="btn-primary" disabled={!!building || !isAdmin} title={isAdmin ? undefined : browseDisabledTitle}
                 onClick={() => buildXlsx('coverage')}>
           {building === 'coverage' ? '빌드 중...' : '📊 Coverage Report 빌드 (xlsx)'}
         </button>
-        <button className="btn-primary" disabled={!!building}
+        <button className="btn-primary" disabled={!!building || !isAdmin} title={isAdmin ? undefined : browseDisabledTitle}
                 onClick={() => buildXlsx('sitr')}>
           {building === 'sitr' ? '빌드 중...' : '📝 SITR 빌드 (xlsm, keep_vba)'}
         </button>
@@ -601,7 +592,7 @@ export default function SwITBuildSection() {
           </button>
         </div>
         <div className="swut-actions">
-          <button className="btn-primary" disabled={consistencyChecking}
+          <button className="btn-primary" disabled={consistencyChecking || !isAdmin} title={isAdmin ? undefined : browseDisabledTitle}
                   onClick={runConsistencyCheck}>
             {consistencyChecking ? '검증 중...' : '🔍 일관성 검증 실행'}
           </button>

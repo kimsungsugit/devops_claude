@@ -8,7 +8,9 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
+
+from backend.dependencies.admin import require_admin
 from pydantic import BaseModel, field_validator
 
 import config
@@ -165,7 +167,7 @@ def _apply_extra_prefixes_to_resolver(prefixes: list[str]) -> dict:
 
 
 @router.get("/file-mode/extra-prefixes")
-async def list_extra_prefixes():
+async def list_extra_prefixes(_admin: str = Depends(require_admin)):
     """39차: 사용자 추가 cloudium prefixes 목록 (영구 저장).
 
     GET — read-only. Local 모드에서도 조회 가능 (영구 저장 검토용).
@@ -194,7 +196,10 @@ class _AddPrefixBody(BaseModel):
 
 
 @router.post("/file-mode/add-allowed-prefix")
-async def add_allowed_prefix(body: _AddPrefixBody):
+async def add_allowed_prefix(
+    body: _AddPrefixBody,
+    _admin: str = Depends(require_admin),
+):
     """39차: cloudium allowed_prefixes에 사용자 path 동적 추가 + 영구 저장.
 
     Cloudium 모드 전용 — local 모드는 400.
@@ -246,7 +251,10 @@ class _RemovePrefixBody(BaseModel):
 
 
 @router.post("/file-mode/remove-allowed-prefix")
-async def remove_allowed_prefix(body: _RemovePrefixBody):
+async def remove_allowed_prefix(
+    body: _RemovePrefixBody,
+    _admin: str = Depends(require_admin),
+):
     """39차: cloudium allowed_prefixes에서 사용자 path 제거 + 영구 저장.
 
     영구 저장소만 갱신 — 현재 resolver는 다음 switch_mode 또는 backend 재기동 시 반영.
@@ -588,7 +596,10 @@ async def preview_image(path: str, image_id: str):
 
 
 @router.post("/file-mode/browse-file")
-async def browse_file(body: BrowseFileRequest = BrowseFileRequest()):
+async def browse_file(
+    body: BrowseFileRequest = BrowseFileRequest(),
+    _admin: str = Depends(require_admin),
+):
     """OS 파일 선택 다이얼로그.
 
     - cloudium 모드: worker IPC로 위임 (worker GUI에서 다이얼로그 → 클라우디움 폴더 보임)

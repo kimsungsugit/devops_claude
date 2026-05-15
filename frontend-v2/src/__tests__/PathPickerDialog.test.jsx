@@ -15,6 +15,12 @@ vi.mock('../api.js', () => ({
   getUsername: () => 'tester',
 }));
 
+// 40차: AdminContext mock — 회귀 기본 admin (Browse 활성)
+vi.mock('../contexts/AdminContext.jsx', () => ({
+  useAdminMode: () => ({ isAdmin: true, username: 'tester', authenticated: true, loading: false }),
+  AdminProvider: ({ children }) => children,
+}));
+
 const { default: PathPickerDialog } = await import('../components/PathPickerDialog.jsx');
 
 describe('PathPickerDialog', () => {

@@ -1,6 +1,7 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
 import { getUsername } from '../../api.js';
 import { useToast } from '../../App.jsx';
+import { useAdminMode } from '../../contexts/AdminContext.jsx';
 import PathPickerDialog from '../PathPickerDialog.jsx';
 
 const API_BASE = (typeof window !== 'undefined' && window.__ARIA_API_BASE__)
@@ -32,14 +33,7 @@ const DEFAULT_FORM = {
   validation_date: '',
 };
 
-// 39-fix-2: Browse 버튼 admin 전용 (worker GUI 다이얼로그 호출 가능 — Cloudium 권한).
-function isAdminMode() {
-  try {
-    return localStorage.getItem('devops_admin_mode') === 'true';
-  } catch (e) {
-    return false;
-  }
-}
+// 40차: 로컬 isAdminMode helper 제거 — AdminContext.useAdminMode() 사용.
 
 function loadSavedForm() {
   try {
@@ -81,13 +75,8 @@ export default function SwUTBuildSection() {
   const [consistencyReport, setConsistencyReport] = useState(null);
   // 21차: PathPickerDialog state
   const [picker, setPicker] = useState(null);  // { target, pattern, title, onSelect }
-  // 39-fix-2: admin 감지 + storage event 추적
-  const [isAdmin, setIsAdmin] = useState(() => isAdminMode());
-  useEffect(() => {
-    const onStorage = () => setIsAdmin(isAdminMode());
-    window.addEventListener('storage', onStorage);
-    return () => window.removeEventListener('storage', onStorage);
-  }, []);
+  // 40차: AdminContext 기반.
+  const { isAdmin } = useAdminMode();
   const browseDisabledTitle = '관리자 전용 — Ctrl+Shift+A로 admin 모드 활성화';
 
   const openPicker = (target, pattern, title) => {
@@ -399,14 +388,16 @@ export default function SwUTBuildSection() {
       <div className="swut-actions">
         <button
           className="btn-primary"
-          disabled={!!building}
+          disabled={!!building || !isAdmin}
+          title={isAdmin ? undefined : browseDisabledTitle}
           onClick={() => buildXlsx('coverage')}
         >
           {building === 'coverage' ? '빌드 중...' : '📊 Coverage Report 빌드 (xlsx)'}
         </button>
         <button
           className="btn-primary"
-          disabled={!!building}
+          disabled={!!building || !isAdmin}
+          title={isAdmin ? undefined : browseDisabledTitle}
           onClick={() => buildXlsx('sutr')}
         >
           {building === 'sutr' ? '빌드 중...' : '📝 SUTR 빌드 (xlsm)'}
@@ -524,7 +515,8 @@ export default function SwUTBuildSection() {
         <div className="swut-actions">
           <button
             className="btn-primary"
-            disabled={consistencyChecking}
+            disabled={consistencyChecking || !isAdmin}
+            title={isAdmin ? undefined : browseDisabledTitle}
             onClick={runConsistencyCheck}
           >
             {consistencyChecking ? '검증 중...' : '🔍 일관성 검증 실행'}

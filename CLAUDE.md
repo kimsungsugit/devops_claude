@@ -202,9 +202,11 @@ python -m pytest tests/ -v --cov=backend --cov=workflow --cov=report_gen --cov-r
 - **`POST /api/swit/consistency/check`** — SwIT Coverage↔SITR cross-validation (35차)
 - **`POST /api/swut/log-folder/preview`** — SwUT log_folder dry-run preview (38차)
 - **`POST /api/swit/log-folder/preview`** — SwIT log_folder dry-run preview (38차)
-- **`POST /api/file-mode/add-allowed-prefix`** — Cloudium allowed_prefixes 동적 추가 (39차)
-- **`POST /api/file-mode/remove-allowed-prefix`** — 동적 제거 (39차)
-- **`GET /api/file-mode/extra-prefixes`** — 영구 저장 prefixes 조회 (39차)
+- **`POST /api/file-mode/add-allowed-prefix`** — Cloudium allowed_prefixes 동적 추가 (39차, admin only 40차)
+- **`POST /api/file-mode/remove-allowed-prefix`** — 동적 제거 (39차, admin only 40차)
+- **`GET /api/file-mode/extra-prefixes`** — 영구 저장 prefixes 조회 (39차, admin only 40차)
+- **`GET /api/auth/me`** — 현재 사용자 + is_admin (40차 신규, 공개)
+- **`GET /api/auth/admins`** — admin list 조회 (40차 신규, admin only)
 
 ## SwUT Builder (Software Unit Test, 8~20차 라운드)
 
@@ -339,9 +341,10 @@ ISO 26262 ASIL A 단위테스트 산출물 자동 생성 + cross-validation 플�
 - Backend 37차 신규: **+7** (`TestResolveLatestReleaseFolder`: Case A/B/C + non-release skip + missing-subfolder skip + W1 mixed suffix + W2 silent fallback)
 - Backend 38차 신규: **+21** (helpers 3 + safety 9 + preview 4 + edge case 3 (1 skip) + C2 cloudium 2)
 - Backend 39차 신규: **+20** (cloudium_extra_prefixes 11 + file_mode_router 9 — add/remove/list × cloudium-only/normal/duplicate/422)
-- Backend 전체: **1895개** (.venv Python 3.12.6 / 45s — 1875 → 1895 +20)
-- Frontend PathPickerDialog: **13개** (22차 9 + 39차 +4 cloudium UX / 403 add / bookmark)
-- Frontend 전체: **234개** (230 → 234 +4)
+- Backend 40차 신규: **+57** (admin_users 12 + auth_router 6 + admin_gate 39 parametrize 13 endpoint × 3)
+- Backend 전체: **1952개** (.venv Python 3.12.6 / 134s — 1895 → 1952 +57)
+- Frontend AdminContext: **4개** (40차 신규)
+- Frontend 전체: **239개** (235 → 239 +4)
 - Frontend SwUTBuildSection: **26개**
 - Frontend 전체: **220개** (23 test files)
 
@@ -444,6 +447,27 @@ ISO 26262 ASIL B+ 통합 테스트 산출물 자동 생성. SwUT 30~32차 인프
 - Fix: `env_prefix` kwarg 도입 (`_extract_env_from_filename`, `collect_from_log_folder`,
   `collect_from_jenkins_cache`, `collect_swut_session`). SwIT는 "SwITC" 명시 전달
 - 회귀: SwUT 4 + SwIT 7 = 11건 통과 (1842 → 1849)
+
+### 40차 — Backend Admin Role 시스템 (A안: 전체 admin only) — 보안 강화
+- 39-fix-2 자체 평가에서 발견한 C1+C2+C3+W7 4건을 통합 fix
+- 사용자 결정 (AskUserQuestion): A안 — 진짜 admin 보안 + 전체 SwIT/SwUT endpoint admin only + GET /api/auth/me + React Context
+- **신규**:
+  - `config/admin_users.json` — admin 사용자 list 영구 저장 (X-User 헤더값 매칭)
+  - `backend/services/admin_users.py` — CRUD (load/add/remove/is_admin) + FileLock + atomic write + lru_cache + mtime invalidate
+  - `backend/dependencies/admin.py::require_admin()` — FastAPI Depends, 401 AUTH_REQUIRED / 403 ADMIN_REQUIRED
+  - `backend/routers/auth.py` — `GET /api/auth/me` (공개) + `GET /api/auth/admins` (admin only)
+  - `frontend-v2/src/contexts/AdminContext.jsx` — AdminProvider + useAdminMode hook, `/api/auth/me` 호출 + custom event listener
+- **13 endpoint admin only 가드** (`Depends(require_admin)` 추가):
+  - SwIT 4 (coverage/sitr build + consistency + preview)
+  - SwUT 5 (coverage/sutr build + consistency + preview + browse)
+  - file-mode 4 (add/remove/list extra-prefixes + browse-file)
+  - 예외: `GET /api/file-mode` (mode 조회), `GET /api/auth/me` 공개 유지
+- **C1 fix**: localStorage 신뢰 제거 → backend `config/admin_users.json` 정식 권한 검증
+- **C2 fix**: 빌드 endpoint도 admin only (frontend 빌드 버튼도 disabled)
+- **C3 fix**: same-tab admin 토글 — App.jsx Ctrl+Shift+A에 custom event 'admin-mode-changed' dispatch → AdminProvider 즉시 refresh
+- **W2 fix**: PathPickerDialog 자체 admin 가드 — non-admin이면 모달 자체에 "🔒 관리자 권한 필요" 표시
+- **W7 fix**: backend admin role 회귀 +57건 (admin_users 12 + auth 6 + admin_gate 39)
+- 회귀: backend 1895 → 1952 (+57) / frontend 235 → 239 (+4 AdminContext)
 
 ### 39차 — Cloudium 동적 allowed_prefixes + PathPickerDialog UX (A+B+C 통합)
 - 38차 commit 후 사용자 SwIT/SwUT Browse cloudium 동작 안 됨 보고 → 두 차단 식별:

@@ -32,7 +32,9 @@ from typing import Any
 # 38차 I2: psutil / _get_process_memory_mb / _run_*_safely 함수 제거.
 # backend/routers/_safety.run_build_safely / run_consistency_safely 내부 처리.
 
-from fastapi import APIRouter, HTTPException, Response
+from fastapi import APIRouter, Depends, HTTPException, Response
+
+from backend.dependencies.admin import require_admin
 from fastapi.responses import StreamingResponse
 
 from backend.routers._safety import run_build_safely, run_consistency_safely, run_preview_safely
@@ -419,7 +421,10 @@ def _do_sutr_build(req: SwUTBuildRequest) -> Response:
 
 
 @router.post("/coverage/build")
-async def build_coverage(req: SwUTBuildRequest) -> Response:
+async def build_coverage(
+    req: SwUTBuildRequest,
+    _admin: str = Depends(require_admin),
+) -> Response:
     """Coverage Report v3.01 xlsx 빌드. Semaphore(2)로 동시 호출 제한."""
     async with _BUILD_SEMAPHORE:
         return await asyncio.to_thread(
@@ -429,7 +434,10 @@ async def build_coverage(req: SwUTBuildRequest) -> Response:
 
 
 @router.post("/sutr/build")
-async def build_sutr_endpoint(req: SwUTBuildRequest) -> Response:
+async def build_sutr_endpoint(
+    req: SwUTBuildRequest,
+    _admin: str = Depends(require_admin),
+) -> Response:
     """SUTR v3.01 xlsm 빌드 (keep_vba=True). Semaphore(2)로 동시 호출 제한."""
     async with _BUILD_SEMAPHORE:
         return await asyncio.to_thread(
@@ -456,7 +464,10 @@ def _do_consistency_check(req: SwUTConsistencyCheckRequest) -> dict[str, Any]:
 
 
 @router.post("/consistency/check")
-async def consistency_check(req: SwUTConsistencyCheckRequest) -> dict[str, Any]:
+async def consistency_check(
+    req: SwUTConsistencyCheckRequest,
+    _admin: str = Depends(require_admin),
+) -> dict[str, Any]:
     """Coverage Report ↔ SUTR cross-validation (18차).
 
     swut_consistency_checker.py의 4가지 검증 (uncovered_mismatch /
@@ -481,7 +492,10 @@ def _do_swut_log_folder_preview(req: LogFolderPreviewRequest) -> dict[str, Any]:
 
 
 @router.post("/log-folder/preview")
-async def swut_log_folder_preview(req: LogFolderPreviewRequest) -> dict[str, Any]:
+async def swut_log_folder_preview(
+    req: LogFolderPreviewRequest,
+    _admin: str = Depends(require_admin),
+) -> dict[str, Any]:
     """38차 W4: 빌드 전 release 후보 list + 자동 선택될 latest 미리보기 (SwUT).
 
     38차 reviewer W2 fix: run_preview_safely 사용 — log prefix 'log-folder.preview'.
@@ -601,7 +615,10 @@ def _run_browse_safely(req: SwUTBrowseRequest) -> dict[str, Any]:
 
 
 @router.post("/browse")
-async def browse_path(req: SwUTBrowseRequest) -> dict[str, Any]:
+async def browse_path(
+    req: SwUTBrowseRequest,
+    _admin: str = Depends(require_admin),
+) -> dict[str, Any]:
     """디렉토리 탐색 — frontend PathPickerDialog 용 (21차).
 
     file_resolver 통합 (cloudium 모드면 worker 위임, local 모드면 직접).

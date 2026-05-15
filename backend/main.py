@@ -184,6 +184,10 @@ app.add_exception_handler(CloudiumBlockedException, _cloudium_blocked_exception_
 from backend.routers.health import router as _health_router  # noqa: E402
 app.include_router(_health_router)
 
+# 40차: 인증/권한 endpoint (GET /api/auth/me + /api/auth/admins)
+from backend.routers.auth import router as _auth_router  # noqa: E402
+app.include_router(_auth_router)
+
 from backend.routers.chat import router as _chat_router  # noqa: E402
 app.include_router(_chat_router)
 from backend.routers.code import router as _code_router  # noqa: E402
