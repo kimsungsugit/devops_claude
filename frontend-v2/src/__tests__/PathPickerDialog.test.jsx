@@ -19,6 +19,8 @@ const { default: PathPickerDialog } = await import('../components/PathPickerDial
 
 describe('PathPickerDialog', () => {
   beforeEach(() => {
+    // 39-fix-2: 일부 버튼 (register/worker browse)이 admin 전용 — 기본 admin ON
+    localStorage.setItem('devops_admin_mode', 'true');
     vi.spyOn(global, 'fetch').mockResolvedValue({
       ok: true,
       headers: new Headers(),

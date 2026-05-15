@@ -28,6 +28,8 @@ describe('SwUTBuildSection', () => {
   beforeEach(() => {
     toastSpy.mockReset();
     localStorage.clear();
+    // 39-fix-2: Browse 버튼 admin 가드 — 기존 회귀 통과 위해 admin 모드 활성화
+    localStorage.setItem('devops_admin_mode', 'true');
     // URL.createObjectURL mock (jsdom 미지원)
     global.URL.createObjectURL = vi.fn(() => 'blob://mock');
     global.URL.revokeObjectURL = vi.fn();

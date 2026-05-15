@@ -32,6 +32,15 @@ const DEFAULT_FORM = {
   validation_date: '',
 };
 
+// 39-fix-2: Browse 버튼 admin 전용 (worker GUI 다이얼로그 호출 가능 — Cloudium 권한).
+function isAdminMode() {
+  try {
+    return localStorage.getItem('devops_admin_mode') === 'true';
+  } catch (e) {
+    return false;
+  }
+}
+
 function loadSavedForm() {
   try {
     const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
@@ -72,6 +81,14 @@ export default function SwUTBuildSection() {
   const [consistencyReport, setConsistencyReport] = useState(null);
   // 21차: PathPickerDialog state
   const [picker, setPicker] = useState(null);  // { target, pattern, title, onSelect }
+  // 39-fix-2: admin 감지 + storage event 추적
+  const [isAdmin, setIsAdmin] = useState(() => isAdminMode());
+  useEffect(() => {
+    const onStorage = () => setIsAdmin(isAdminMode());
+    window.addEventListener('storage', onStorage);
+    return () => window.removeEventListener('storage', onStorage);
+  }, []);
+  const browseDisabledTitle = '관리자 전용 — Ctrl+Shift+A로 admin 모드 활성화';
 
   const openPicker = (target, pattern, title) => {
     let onSelect;
@@ -319,6 +336,8 @@ export default function SwUTBuildSection() {
         <button
           className="swut-browse-btn"
           type="button"
+          disabled={!isAdmin}
+          title={isAdmin ? undefined : browseDisabledTitle}
           onClick={() => openPicker('log_folder', '*', 'Log 디렉토리 선택')}
         >📂 Browse</button>
       </div>
@@ -335,6 +354,8 @@ export default function SwUTBuildSection() {
         <button
           className="swut-browse-btn"
           type="button"
+          disabled={!isAdmin}
+          title={isAdmin ? undefined : browseDisabledTitle}
           onClick={() => openPicker('template_path', '*.xlsx,*.xlsm', 'Template 파일 선택')}
         >📂 Browse</button>
       </div>
@@ -351,6 +372,8 @@ export default function SwUTBuildSection() {
         <button
           className="swut-browse-btn"
           type="button"
+          disabled={!isAdmin}
+          title={isAdmin ? undefined : browseDisabledTitle}
           onClick={() => openPicker('swuds_docx_path', '*.docx', 'SwUDS docx 선택')}
         >📂 Browse</button>
       </div>
@@ -367,6 +390,8 @@ export default function SwUTBuildSection() {
         <button
           className="swut-browse-btn"
           type="button"
+          disabled={!isAdmin}
+          title={isAdmin ? undefined : browseDisabledTitle}
           onClick={() => openPicker('c_source_root', '*', 'C 소스 디렉토리 선택')}
         >📂 Browse</button>
       </div>
@@ -473,6 +498,8 @@ export default function SwUTBuildSection() {
           <button
             className="swut-browse-btn"
             type="button"
+            disabled={!isAdmin}
+            title={isAdmin ? undefined : browseDisabledTitle}
             onClick={() => openPicker('consistency.coverage_path', '*.xlsx', 'Coverage Report 선택')}
           >📂 Browse</button>
         </div>
@@ -489,6 +516,8 @@ export default function SwUTBuildSection() {
           <button
             className="swut-browse-btn"
             type="button"
+            disabled={!isAdmin}
+            title={isAdmin ? undefined : browseDisabledTitle}
             onClick={() => openPicker('consistency.sutr_path', '*.xlsm', 'SUTR 선택')}
           >📂 Browse</button>
         </div>

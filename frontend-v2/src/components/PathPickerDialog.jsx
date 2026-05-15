@@ -23,6 +23,15 @@ function loadBookmarks() {
   }
 }
 
+// 39-fix-2: admin 모드 감지 — App.jsx의 isAdminMode와 동일 (localStorage devops_admin_mode === 'true').
+function isAdminMode() {
+  try {
+    return localStorage.getItem('devops_admin_mode') === 'true';
+  } catch (e) {
+    return false;
+  }
+}
+
 function saveBookmark(path) {
   if (!path || typeof path !== 'string') return;
   try {
@@ -67,6 +76,9 @@ export default function PathPickerDialog({
   const [showBookmarks, setShowBookmarks] = useState(false);
   const [pendingAddPath, setPendingAddPath] = useState(null);  // 403 시 사용자 확인 대기
   const [addPrefixLoading, setAddPrefixLoading] = useState(false);
+  // 39-fix-2: worker tkinter 다이얼로그 호출 상태
+  const [workerBrowseLoading, setWorkerBrowseLoading] = useState(false);
+  const [isAdmin] = useState(() => isAdminMode());
 
   const fetchPath = useCallback(async (path) => {
     const user = getUsername();
@@ -114,6 +126,50 @@ export default function PathPickerDialog({
       setLoading(false);
     }
   }, [pattern]);
+
+  // 39-fix-2: worker tkinter native 다이얼로그로 파일/폴더 선택 (admin only).
+  // pattern='*'이면 directory, 그 외는 file.
+  const openWorkerDialog = useCallback(async () => {
+    const user = getUsername();
+    if (!user) {
+      setError('사용자 이름이 설정되지 않음');
+      return;
+    }
+    const kind = (pattern === '*' || !pattern) ? 'directory' : 'file';
+    setWorkerBrowseLoading(true);
+    setError(null);
+    try {
+      const res = await fetch(buildUrl('/api/file-mode/browse-file'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-User': user },
+        body: JSON.stringify({
+          kind,
+          title: title || (kind === 'directory' ? '폴더 선택' : '파일 선택'),
+          initialdir: currentPath || '',
+        }),
+      });
+      if (!res.ok) {
+        let msg = `HTTP ${res.status}`;
+        try {
+          const j = await res.json();
+          msg = j?.error?.message || j?.detail || msg;
+        } catch (e) { /* non-JSON */ }
+        setError(`Worker 다이얼로그 실패: ${msg}`);
+        return;
+      }
+      const data = await res.json();
+      if (!data?.ok || !data?.path) {
+        // 사용자가 취소 — silent (toast 없이)
+        return;
+      }
+      // 선택된 path를 onSelect → 닫기 (handleSelect 호출하면 bookmark도 자동 저장)
+      handleSelect(data.path);
+    } catch (e) {
+      setError(`Worker 다이얼로그 실패: ${e?.message || e}`);
+    } finally {
+      setWorkerBrowseLoading(false);
+    }
+  }, [pattern, title, currentPath]);
 
   // 39차 후속: currentPath를 사전 등록 (admin이 미리 등록 — 403 안 만나도 가능)
   const registerCurrentPath = useCallback(async () => {
@@ -290,23 +346,43 @@ export default function PathPickerDialog({
             </ul>
           </div>
         )}
-        {/* 39차: Cloudium 모드 경고 카드 (worker 디렉토리 navigate 한계) +
-            상시 "+ 경로 등록" 버튼 — admin이 미리 등록 가능 */}
+        {/* 39차+39-fix-2: Cloudium 모드 경고 + admin 전용 버튼 (worker 다이얼로그 + 경로 등록) */}
         {data.file_mode === 'cloudium' && (
           <div className="picker-cloudium-warning" data-testid="picker-cloudium-warning">
             <div className="picker-cloudium-warning-text">
               ⚠️ Cloudium 모드: worker가 디렉토리 navigate를 지원하지 않습니다.
-              경로를 <strong>직접 입력</strong>하거나 자주 쓰는 경로(⭐)를 활용하세요.
+              {isAdmin ? (
+                <> 아래 <strong>🎯 Worker 다이얼로그</strong> (admin only)로 GUI에서 선택하거나
+                  경로를 <strong>직접 입력</strong>, 자주 쓰는 경로(⭐)를 활용하세요.</>
+              ) : (
+                <> 경로를 <strong>직접 입력</strong>하거나 자주 쓰는 경로(⭐)를 활용하세요.
+                  Browse는 admin 전용입니다.</>
+              )}
             </div>
-            <button
-              className="picker-register-prefix"
-              data-testid="picker-register-prefix"
-              disabled={addPrefixLoading || !currentPath || !currentPath.trim()}
-              onClick={registerCurrentPath}
-              title="현재 path 입력 필드의 경로를 allowed_prefixes에 등록 (admin)"
-            >
-              {addPrefixLoading ? '등록 중...' : '+ 현재 경로 등록'}
-            </button>
+            {/* 39-fix-2: admin only — worker tkinter native dialog */}
+            {isAdmin && (
+              <button
+                className="picker-worker-browse"
+                data-testid="picker-worker-browse"
+                disabled={workerBrowseLoading}
+                onClick={openWorkerDialog}
+                title="worker GUI 다이얼로그로 파일/폴더 선택 — Cloudium 권한 활용 (admin only)"
+              >
+                {workerBrowseLoading ? '🎯 Worker 호출 중...' : '🎯 Worker 다이얼로그로 선택'}
+              </button>
+            )}
+            {/* admin only — 현재 경로 사전 등록 */}
+            {isAdmin && (
+              <button
+                className="picker-register-prefix"
+                data-testid="picker-register-prefix"
+                disabled={addPrefixLoading || !currentPath || !currentPath.trim()}
+                onClick={registerCurrentPath}
+                title="현재 path 입력 필드의 경로를 allowed_prefixes에 등록 (admin)"
+              >
+                {addPrefixLoading ? '등록 중...' : '+ 현재 경로 등록'}
+              </button>
+            )}
           </div>
         )}
         {/* 39차: 403 자동 add 제안 */}
