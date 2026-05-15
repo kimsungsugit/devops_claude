@@ -115,6 +115,51 @@ export default function PathPickerDialog({
     }
   }, [pattern]);
 
+  // 39차 후속: currentPath를 사전 등록 (admin이 미리 등록 — 403 안 만나도 가능)
+  const registerCurrentPath = useCallback(async () => {
+    const target = (currentPath || '').trim();
+    if (!target) {
+      setError('등록할 경로를 입력하세요 (path input 필드).');
+      return;
+    }
+    const user = getUsername();
+    if (!user) {
+      setError('사용자 이름이 설정되지 않음');
+      return;
+    }
+    setAddPrefixLoading(true);
+    setError(null);
+    try {
+      const res = await fetch(buildUrl('/api/file-mode/add-allowed-prefix'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-User': user },
+        body: JSON.stringify({ prefix: target }),
+      });
+      if (!res.ok) {
+        let msg = `HTTP ${res.status}`;
+        try {
+          const j = await res.json();
+          msg = j?.error?.message || j?.detail || msg;
+        } catch (e) { /* non-JSON */ }
+        setError(`경로 등록 실패: ${msg}`);
+        return;
+      }
+      const data = await res.json();
+      if (data?.added === false) {
+        setError(`이미 등록된 경로: ${target}`);
+      } else {
+        // 성공 → bookmark에도 자동 추가 + 자동 이동
+        saveBookmark(target);
+        setBookmarks(loadBookmarks());
+        await fetchPath(target);
+      }
+    } catch (e) {
+      setError(`경로 등록 실패: ${e?.message || e}`);
+    } finally {
+      setAddPrefixLoading(false);
+    }
+  }, [currentPath, fetchPath]);
+
   // 39차: pendingAddPath를 allowed_prefixes에 추가 + 재시도
   const confirmAddPrefix = useCallback(async () => {
     if (!pendingAddPath) return;
@@ -245,11 +290,23 @@ export default function PathPickerDialog({
             </ul>
           </div>
         )}
-        {/* 39차: Cloudium 모드 경고 카드 (worker 디렉토리 navigate 한계) */}
+        {/* 39차: Cloudium 모드 경고 카드 (worker 디렉토리 navigate 한계) +
+            상시 "+ 경로 등록" 버튼 — admin이 미리 등록 가능 */}
         {data.file_mode === 'cloudium' && (
           <div className="picker-cloudium-warning" data-testid="picker-cloudium-warning">
-            ⚠️ Cloudium 모드: worker가 디렉토리 navigate를 지원하지 않습니다.
-            경로를 <strong>직접 입력</strong>하거나 자주 쓰는 경로(⭐)를 활용하세요.
+            <div className="picker-cloudium-warning-text">
+              ⚠️ Cloudium 모드: worker가 디렉토리 navigate를 지원하지 않습니다.
+              경로를 <strong>직접 입력</strong>하거나 자주 쓰는 경로(⭐)를 활용하세요.
+            </div>
+            <button
+              className="picker-register-prefix"
+              data-testid="picker-register-prefix"
+              disabled={addPrefixLoading || !currentPath || !currentPath.trim()}
+              onClick={registerCurrentPath}
+              title="현재 path 입력 필드의 경로를 allowed_prefixes에 등록 (admin)"
+            >
+              {addPrefixLoading ? '등록 중...' : '+ 현재 경로 등록'}
+            </button>
           </div>
         )}
         {/* 39차: 403 자동 add 제안 */}

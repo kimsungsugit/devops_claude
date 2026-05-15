@@ -262,6 +262,54 @@ describe('PathPickerDialog', () => {
     });
   });
 
+  it('register button calls add-allowed-prefix with current path (39차 후속 — admin pre-register)', async () => {
+    let callCount = 0;
+    const fetchSpy = vi.spyOn(global, 'fetch').mockImplementation(async (url) => {
+      callCount++;
+      if (callCount === 1) {
+        // 첫 browse — cloudium 모드 응답
+        return {
+          ok: true, status: 200,
+          headers: new Headers(),
+          json: async () => ({
+            ok: true, current: 'U:/admin/pre', parent: 'U:/',
+            dirs: [], files: [], truncated: false,
+            file_mode: 'cloudium', cloudium_hint: '',
+          }),
+        };
+      }
+      if (url.includes('/api/file-mode/add-allowed-prefix')) {
+        return {
+          ok: true, status: 200,
+          headers: new Headers(),
+          json: async () => ({
+            ok: true, added: true, prefix: 'U:/admin/pre',
+            extra_prefixes: ['U:/admin/pre'],
+          }),
+        };
+      }
+      return {
+        ok: true, status: 200,
+        headers: new Headers(),
+        json: async () => ({
+          ok: true, current: 'U:/admin/pre', parent: 'U:/',
+          dirs: [], files: ['U:/admin/pre/x.xlsx'], truncated: false,
+          file_mode: 'cloudium',
+        }),
+      };
+    });
+
+    render(<PathPickerDialog open={true} initialPath="U:/admin/pre" onClose={() => {}} />);
+    await waitFor(() => expect(screen.getByTestId('picker-register-prefix')).toBeTruthy());
+
+    fireEvent.click(screen.getByTestId('picker-register-prefix'));
+
+    await waitFor(() => {
+      const urls = fetchSpy.mock.calls.map(c => c[0]);
+      expect(urls.some(u => u.includes('/api/file-mode/add-allowed-prefix'))).toBe(true);
+    });
+  });
+
   it('saves bookmark on file select and shows bookmark dropdown (39차)', async () => {
     // 사전: localStorage clear + bookmark 1건 미리 저장
     localStorage.clear();
