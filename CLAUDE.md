@@ -342,9 +342,10 @@ ISO 26262 ASIL A 단위테스트 산출물 자동 생성 + cross-validation 플�
 - Backend 38차 신규: **+21** (helpers 3 + safety 9 + preview 4 + edge case 3 (1 skip) + C2 cloudium 2)
 - Backend 39차 신규: **+20** (cloudium_extra_prefixes 11 + file_mode_router 9 — add/remove/list × cloudium-only/normal/duplicate/422)
 - Backend 40차 신규: **+57** (admin_users 12 + auth_router 6 + admin_gate 39 parametrize 13 endpoint × 3)
-- Backend 전체: **1952개** (.venv Python 3.12.6 / 134s — 1895 → 1952 +57)
-- Frontend AdminContext: **4개** (40차 신규)
-- Frontend 전체: **239개** (235 → 239 +4)
+- Backend 41차 신규: **+4** (bootstrap_from_env env handling 4 시나리오)
+- Backend 전체: **1956개** (.venv Python 3.12.6 / 78s — 1952 → 1956 +4)
+- Frontend AdminContext: **5개** (40차 4 + 41차 +1 visibility refresh)
+- Frontend 전체: **240개** (239 → 240 +1)
 - Frontend SwUTBuildSection: **26개**
 - Frontend 전체: **220개** (23 test files)
 
@@ -447,6 +448,28 @@ ISO 26262 ASIL B+ 통합 테스트 산출물 자동 생성. SwUT 30~32차 인프
 - Fix: `env_prefix` kwarg 도입 (`_extract_env_from_filename`, `collect_from_log_folder`,
   `collect_from_jenkins_cache`, `collect_swut_session`). SwIT는 "SwITC" 명시 전달
 - 회귀: SwUT 4 + SwIT 7 = 11건 통과 (1842 → 1849)
+
+### 41차 — Bootstrap admin + APIRouter deps + AdminContext visibility refresh
+- 40차 자체 평가 발견 문제 (C2/W2/W3/W4/W8/W9) 개선. C1 (JWT)은 42차+ 별도.
+- **W2 Bootstrap admin**: `BOOTSTRAP_ADMIN_USERS` env → backend startup 시 빈 admin_users.json에 자동 등록 (lockout 회복용). `bootstrap_from_env()` 4 action: bootstrapped / skipped_has_admins / skipped_no_env / error
+- **W3 APIRouter dependency**: SwIT/SwUT 라우터 전체에 `dependencies=[Depends(require_admin)]` — 9 endpoint signature에서 `_admin` 파라미터 제거 (코드 정리)
+- **W4 AdminContext visibility refresh**: `document.visibilitychange` listener 추가 — 탭 visible 시 `/api/auth/me` 자동 refresh (backend 회복 / 다른 클라이언트 admin 변경 자동 반영)
+- **W8 Admin 운영 가이드** (아래 별도 섹션 참고)
+- **W9 Cloudium admin role**: 라이브 PoC port 9008에서 cloudium 모드 전환 후 admin/non-admin 분기 정상 (mode 무관 admin gate 동작)
+- **C2 PoC 강화**: admin 빌드 정상 경로 (status=200) 명시 검증 — 이전 40차 PoC는 400만 확인
+- 회귀: backend 1952 → 1956 (+4 bootstrap) / frontend 239 → 240 (+1 visibility)
+
+## Admin 운영 가이드 (40~41차)
+
+| 시나리오 | 방법 |
+|---------|------|
+| 첫 admin 등록 | `.env`에 `BOOTSTRAP_ADMIN_USERS=user1,user2` 추가 → backend 가동 시 자동 |
+| admin 추가 | admin이 `config/admin_users.json` 직접 편집 (mtime invalidate로 자동 반영) |
+| admin 제거 | 동일 — json 편집 |
+| Lockout 회복 | `config/admin_users.json` 수동 편집 + `.env` `BOOTSTRAP_ADMIN_USERS` 설정 + backend 재기동 |
+| Frontend admin 모드 표시 | `Ctrl+Shift+A` 키보드 토글 또는 Settings 페이지 AdminSection |
+| 권한 동기화 | AdminContext가 `/api/auth/me` 호출 — 탭 visible 시 자동 refresh (41차) |
+| 13 endpoint 보호 | SwIT 4 + SwUT 5 + file-mode 4 — 라우터 또는 endpoint dependency로 admin only |
 
 ### 40차 — Backend Admin Role 시스템 (A안: 전체 admin only) — 보안 강화
 - 39-fix-2 자체 평가에서 발견한 C1+C2+C3+W7 4건을 통합 fix

@@ -159,6 +159,33 @@ def remove_admin(user: str) -> dict[str, Any]:
     return {"removed": True, "user": u, "admins": sorted(current)}
 
 
+def bootstrap_from_env() -> dict[str, Any]:
+    """41차 W2 — env BOOTSTRAP_ADMIN_USERS 콤마 list로 admin 자동 초기화.
+
+    backend startup 시 main.py lifespan에서 1회 호출. 빈 admin_users.json 시
+    lockout 회복용 + 첫 사용자 등록 편의.
+
+    동작:
+        - env 변수 없음/공백 → action="skipped_no_env"
+        - 이미 admin 있음 → action="skipped_has_admins" (env 변경해도 영향 없음)
+        - 빈 admin + env 있음 → action="bootstrapped" + added list
+
+    Returns:
+        {"action": str, "added": list[str]}
+    """
+    env_val = os.environ.get("BOOTSTRAP_ADMIN_USERS", "").strip()
+    if not env_val:
+        return {"action": "skipped_no_env", "added": []}
+    current = _read_admins_raw()
+    if current:
+        return {"action": "skipped_has_admins", "added": []}
+    new_users = [u.strip() for u in env_val.split(",") if u.strip()]
+    if not new_users:
+        return {"action": "skipped_no_env", "added": []}
+    save_admins(new_users)
+    return {"action": "bootstrapped", "added": new_users}
+
+
 __all__ = [
     "ADMIN_USERS_PATH",
     "load_admins",
@@ -166,4 +193,5 @@ __all__ = [
     "save_admins",
     "add_admin",
     "remove_admin",
+    "bootstrap_from_env",
 ]

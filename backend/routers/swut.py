@@ -57,7 +57,12 @@ from backend.user_context import get_current_user
 
 _logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/swut", tags=["swut"])
+# 41차 W3: 라우터 전체 admin only — 5 endpoint 모두 require_admin 적용 (40차 통합).
+router = APIRouter(
+    prefix="/api/swut",
+    tags=["swut"],
+    dependencies=[Depends(require_admin)],
+)
 
 # 17차 T173: Semaphore(2) → (3) 상향. 14차 W1 메모리 1배 절감 (BytesIO/StreamingResponse)
 # 으로 빌드 자체 worst-case 1.8MB × 3 = 5.4MB.
@@ -423,7 +428,6 @@ def _do_sutr_build(req: SwUTBuildRequest) -> Response:
 @router.post("/coverage/build")
 async def build_coverage(
     req: SwUTBuildRequest,
-    _admin: str = Depends(require_admin),
 ) -> Response:
     """Coverage Report v3.01 xlsx 빌드. Semaphore(2)로 동시 호출 제한."""
     async with _BUILD_SEMAPHORE:
@@ -436,7 +440,6 @@ async def build_coverage(
 @router.post("/sutr/build")
 async def build_sutr_endpoint(
     req: SwUTBuildRequest,
-    _admin: str = Depends(require_admin),
 ) -> Response:
     """SUTR v3.01 xlsm 빌드 (keep_vba=True). Semaphore(2)로 동시 호출 제한."""
     async with _BUILD_SEMAPHORE:
@@ -466,7 +469,6 @@ def _do_consistency_check(req: SwUTConsistencyCheckRequest) -> dict[str, Any]:
 @router.post("/consistency/check")
 async def consistency_check(
     req: SwUTConsistencyCheckRequest,
-    _admin: str = Depends(require_admin),
 ) -> dict[str, Any]:
     """Coverage Report ↔ SUTR cross-validation (18차).
 
@@ -494,7 +496,6 @@ def _do_swut_log_folder_preview(req: LogFolderPreviewRequest) -> dict[str, Any]:
 @router.post("/log-folder/preview")
 async def swut_log_folder_preview(
     req: LogFolderPreviewRequest,
-    _admin: str = Depends(require_admin),
 ) -> dict[str, Any]:
     """38차 W4: 빌드 전 release 후보 list + 자동 선택될 latest 미리보기 (SwUT).
 
@@ -617,7 +618,6 @@ def _run_browse_safely(req: SwUTBrowseRequest) -> dict[str, Any]:
 @router.post("/browse")
 async def browse_path(
     req: SwUTBrowseRequest,
-    _admin: str = Depends(require_admin),
 ) -> dict[str, Any]:
     """디렉토리 탐색 — frontend PathPickerDialog 용 (21차).
 

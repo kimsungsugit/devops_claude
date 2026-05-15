@@ -86,6 +86,36 @@ describe('AdminContext', () => {
     expect(screen.getByTestId('isAdmin').textContent).toBe('false');
   });
 
+  it('visibilitychange (visible) triggers refresh (41차 W4)', async () => {
+    let callCount = 0;
+    const responses = [
+      { username: 'guest', is_admin: false, authenticated: true },
+      { username: 'guest', is_admin: true, authenticated: true },  // admin 추가 후 재방문
+    ];
+    vi.spyOn(global, 'fetch').mockImplementation(async () => ({
+      ok: true,
+      json: async () => responses[callCount++] || responses[1],
+    }));
+
+    render(
+      <AdminProvider>
+        <TestConsumer />
+      </AdminProvider>
+    );
+    await waitFor(() => expect(screen.getByTestId('isAdmin').textContent).toBe('false'));
+
+    // 탭 visible 이벤트 발화 — refresh 재호출 → 2번째 응답 반영
+    await act(async () => {
+      Object.defineProperty(document, 'visibilityState', {
+        value: 'visible',
+        configurable: true,
+      });
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+
+    await waitFor(() => expect(screen.getByTestId('isAdmin').textContent).toBe('true'));
+  });
+
   it('custom event "admin-mode-changed" triggers refresh (same-tab C3 fix)', async () => {
     let callCount = 0;
     const responses = [

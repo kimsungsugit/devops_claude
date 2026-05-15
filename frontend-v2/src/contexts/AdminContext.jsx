@@ -78,9 +78,15 @@ export function AdminProvider({ children }) {
     const onChange = () => refresh();
     window.addEventListener('admin-mode-changed', onChange);
     window.addEventListener('storage', onChange);
+    // 41차 W4: 탭 visible 시 refresh — backend down 후 회복 / 다른 클라이언트의 admin 변경 자동 반영
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') refresh();
+    };
+    document.addEventListener('visibilitychange', onVisibility);
     return () => {
       window.removeEventListener('admin-mode-changed', onChange);
       window.removeEventListener('storage', onChange);
+      document.removeEventListener('visibilitychange', onVisibility);
     };
   }, [refresh]);
 

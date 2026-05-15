@@ -54,7 +54,13 @@ from backend.services.swut_swuds_parser import parse_swuds_docx
 
 _logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/swit", tags=["swit"])
+# 41차 W3: 라우터 전체 admin only — 4 endpoint 모두 require_admin 적용 (40차 통합).
+# endpoint signature에서 `_admin: str = Depends(require_admin)` 중복 제거.
+router = APIRouter(
+    prefix="/api/swit",
+    tags=["swit"],
+    dependencies=[Depends(require_admin)],
+)
 
 # 33차: SwIT는 신규 endpoint — SwUT (Semaphore 3, worst-case 12.6MB)보다 보수적 시작.
 # 메모리 운영 측정 후 31차 W31 패턴으로 worst-case 산정 docstring 갱신 권장.
@@ -319,7 +325,6 @@ def _do_swit_coverage_build(req: SwITBuildRequest) -> Response:
 @router.post("/coverage/build")
 async def build_swit_coverage(
     req: SwITBuildRequest,
-    _admin: str = Depends(require_admin),
 ) -> Response:
     """SwIT Coverage Report v2.02 xlsx 빌드. Semaphore(2)로 동시 호출 제한."""
     async with _BUILD_SEMAPHORE:
@@ -366,7 +371,6 @@ def _do_swit_sitr_build(req: SwITSitrBuildRequest) -> Response:
 @router.post("/sitr/build")
 async def build_swit_sitr(
     req: SwITSitrBuildRequest,
-    _admin: str = Depends(require_admin),
 ) -> Response:
     """SwIT SITR v2.02 xlsm 빌드 (34차). Coverage와 Semaphore(2) 공유."""
     async with _BUILD_SEMAPHORE:
@@ -398,7 +402,6 @@ def _do_swit_consistency_check(req: SwITConsistencyCheckRequest) -> dict[str, An
 @router.post("/consistency/check")
 async def swit_consistency_check(
     req: SwITConsistencyCheckRequest,
-    _admin: str = Depends(require_admin),
 ) -> dict[str, Any]:
     """SwIT Coverage Report ↔ SITR cross-validation (35차).
 
@@ -429,7 +432,6 @@ def _do_swit_log_folder_preview(req: LogFolderPreviewRequest) -> dict[str, Any]:
 @router.post("/log-folder/preview")
 async def swit_log_folder_preview(
     req: LogFolderPreviewRequest,
-    _admin: str = Depends(require_admin),
 ) -> dict[str, Any]:
     """38차 W4: 빌드 전 release 후보 list + 자동 선택될 latest 미리보기.
 
