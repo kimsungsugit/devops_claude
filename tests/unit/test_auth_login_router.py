@@ -202,6 +202,118 @@ class TestChangePassword:
 class TestLogout:
     def test_logout_basic(self, _isolated):
         r = client.post("/api/auth/logout")
-        # logout은 인증 우회 안 함 — auth_router에 exempt 등록 안 함. 본 라운드는 stateless.
-        # 401 또는 200 둘 다 동작 정상 (서버 state 없음)
+        # 미인증 logout — no-op + 200
         assert r.status_code in (200, 401)
+
+    def test_logout_authenticated_revokes_token(self, _isolated):
+        """47차 W35: 인증된 사용자 logout → token_version 증가 → 기존 토큰 거부."""
+        # 1. login
+        r = client.post("/api/auth/login", json={
+            "username": "alice",
+            "password": "secret_password_12",
+        })
+        tokens = r.json()
+        headers = {"Authorization": f"Bearer {tokens['access_token']}"}
+
+        # 2. logout (인증)
+        r2 = client.post("/api/auth/logout", headers=headers)
+        assert r2.status_code == 200
+        body = r2.json()
+        assert body["revoked"] is True
+        assert body["username"] == "alice"
+
+        # 3. 기존 access로 다른 endpoint 호출 → TOKEN_REVOKED
+        r3 = client.get("/api/auth/admins", headers=headers)
+        assert r3.status_code == 401
+        err = r3.json().get("error", {})
+        assert err.get("code") == "TOKEN_REVOKED"
+
+        # 4. 기존 refresh로 갱신 → TOKEN_REVOKED
+        r4 = client.post("/api/auth/refresh", json={
+            "refresh_token": tokens["refresh_token"],
+        })
+        assert r4.status_code == 401
+        assert r4.json()["error"]["code"] == "TOKEN_REVOKED"
+
+
+class TestW35TokenRevocation:
+    """47차 W35: token_version 기반 revocation 시나리오."""
+
+    def test_change_password_returns_new_tokens(self, _isolated):
+        """PW 변경 응답에 새 access + refresh 포함 (재로그인 부담 회피)."""
+        r = client.post("/api/auth/login", json={
+            "username": "alice",
+            "password": "secret_password_12",
+        })
+        old_tokens = r.json()
+        old_access = old_tokens["access_token"]
+        headers = {"Authorization": f"Bearer {old_access}"}
+
+        r2 = client.post(
+            "/api/auth/change-password",
+            json={"new_password": "new_secret_345"},
+            headers=headers,
+        )
+        assert r2.status_code == 200
+        body = r2.json()
+        assert "access_token" in body
+        assert "refresh_token" in body
+        assert body["access_token"] != old_access  # 새 token
+
+    def test_old_token_revoked_after_password_change(self, _isolated):
+        """PW 변경 후 기존 access 토큰 → TOKEN_REVOKED."""
+        r = client.post("/api/auth/login", json={
+            "username": "alice",
+            "password": "secret_password_12",
+        })
+        old_tokens = r.json()
+        old_headers = {"Authorization": f"Bearer {old_tokens['access_token']}"}
+
+        # PW 변경
+        client.post(
+            "/api/auth/change-password",
+            json={"new_password": "new_secret_345"},
+            headers=old_headers,
+        )
+
+        # 기존 access로 다른 endpoint 호출 → TOKEN_REVOKED
+        r2 = client.get("/api/auth/admins", headers=old_headers)
+        assert r2.status_code == 401
+        assert r2.json()["error"]["code"] == "TOKEN_REVOKED"
+
+    def test_new_tokens_after_password_change_work(self, _isolated):
+        """PW 변경 응답의 새 access는 정상 동작."""
+        r = client.post("/api/auth/login", json={
+            "username": "alice",
+            "password": "secret_password_12",
+        })
+        old_access = r.json()["access_token"]
+
+        r2 = client.post(
+            "/api/auth/change-password",
+            json={"new_password": "new_secret_345"},
+            headers={"Authorization": f"Bearer {old_access}"},
+        )
+        new_access = r2.json()["access_token"]
+
+        # 새 access로 호출 → 정상
+        r3 = client.get("/api/auth/admins", headers={"Authorization": f"Bearer {new_access}"})
+        assert r3.status_code == 200
+
+    def test_user_deleted_token_revoked(self, _isolated):
+        """user 삭제 후 access/refresh 모두 USER_REVOKED."""
+        from backend.services import users as us
+        r = client.post("/api/auth/login", json={
+            "username": "alice",
+            "password": "secret_password_12",
+        })
+        tokens = r.json()
+        headers = {"Authorization": f"Bearer {tokens['access_token']}"}
+
+        # 사용자 삭제
+        us.remove_user("alice")
+
+        # 기존 access → USER_REVOKED
+        r2 = client.get("/api/auth/admins", headers=headers)
+        assert r2.status_code == 401
+        assert r2.json()["error"]["code"] == "USER_REVOKED"

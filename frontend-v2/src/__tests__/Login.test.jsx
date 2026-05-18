@@ -30,7 +30,8 @@ describe('Login + PasswordHint (46차 W33)', () => {
   it('renders login form with hint', () => {
     render(<Login />);
     expect(screen.getByText('ARIA 로그인')).toBeInTheDocument();
-    expect(screen.getByText(/한국어 최대 24자 \/ 영문 72자/)).toBeInTheDocument();
+    // 47차 I7: 다국어 hint (영문 72자 / 한국어·일본어 24자 / 이모지 18자)
+    expect(screen.getByText(/영문 72자 \/ 한국어/)).toBeInTheDocument();
   });
 
   it('shows byte count for English password', () => {

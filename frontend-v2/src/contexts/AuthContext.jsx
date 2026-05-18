@@ -166,8 +166,15 @@ export function AuthProvider({ children }) {
   useEffect(() => {
     isMountedRef.current = true;
     validateSession();
+    // 47차 I5: api.js의 refresh 실패 시 'auth-logout' event → AuthContext logout
+    const onAuthLogout = () => {
+      if (!isMountedRef.current) return;
+      setState({ authenticated: false, loading: false, username: null, mustChangePassword: false });
+    };
+    window.addEventListener('auth-logout', onAuthLogout);
     return () => {
       isMountedRef.current = false;
+      window.removeEventListener('auth-logout', onAuthLogout);
     };
   }, [validateSession]);
 

@@ -90,28 +90,42 @@ def verify_password(plain: str, hashed: str) -> bool:
         return False
 
 
-def create_access_token(username: str, *, extra_claims: dict[str, Any] | None = None) -> str:
-    """Access token 발급 — 60분 default expire."""
+def create_access_token(
+    username: str,
+    *,
+    token_version: int = 0,
+    extra_claims: dict[str, Any] | None = None,
+) -> str:
+    """Access token 발급 — 60분 default expire.
+
+    47차 W35: `tv` claim에 user.token_version 포함. logout/change-password 시
+    user.token_version 증가 → 기존 토큰 검증 실패 (TOKEN_REVOKED).
+    """
     now = datetime.now(timezone.utc)
     payload: dict[str, Any] = {
         "sub": username,
         "iat": int(now.timestamp()),
         "exp": int((now + timedelta(minutes=_get_access_expire_minutes())).timestamp()),
         "type": "access",
+        "tv": int(token_version),
     }
     if extra_claims:
         payload.update(extra_claims)
     return jwt.encode(payload, _get_secret(), algorithm=_get_algorithm())
 
 
-def create_refresh_token(username: str) -> str:
-    """Refresh token 발급 — 7일 default expire."""
+def create_refresh_token(username: str, *, token_version: int = 0) -> str:
+    """Refresh token 발급 — 7일 default expire.
+
+    47차 W35: `tv` claim 포함 (access와 동일). user 단위 revocation.
+    """
     now = datetime.now(timezone.utc)
     payload: dict[str, Any] = {
         "sub": username,
         "iat": int(now.timestamp()),
         "exp": int((now + timedelta(days=_get_refresh_expire_days())).timestamp()),
         "type": "refresh",
+        "tv": int(token_version),
     }
     return jwt.encode(payload, _get_secret(), algorithm=_get_algorithm())
 

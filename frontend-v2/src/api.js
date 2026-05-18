@@ -33,6 +33,61 @@ function _authHeaders() {
 }
 
 /**
+ * 47차 I5 — 자동 token refresh queue (single-flight).
+ *
+ * 동작:
+ *   1. fetch 응답이 401 + (TOKEN_EXPIRED|TOKEN_INVALID) → refreshAccess() 호출
+ *   2. 동시 다발 401 → 같은 _refreshingPromise 대기 (single-flight)
+ *   3. refresh 성공 → 원 요청 재시도 1회
+ *   4. refresh 실패 또는 refresh 없음 → clearTokens + 'auth-logout' event dispatch
+ *
+ * 미적용:
+ *   - TOKEN_REVOKED (W35) — server-side revoke, refresh도 거부됨 → logout
+ *   - USER_REVOKED — 사용자 삭제 → logout
+ *   - AUTH_REQUIRED — 토큰 자체 없음 → logout
+ */
+let _refreshingPromise = null;
+
+async function _refreshAccessToken() {
+  const refresh = getRefreshToken();
+  if (!refresh) return false;
+  try {
+    const res = await fetch(buildUrl('/api/auth/refresh'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ refresh_token: refresh }),
+    });
+    if (!res.ok) return false;
+    const data = await res.json();
+    setTokens({ access: data.access_token });
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+async function _refreshAccessTokenSingleFlight() {
+  if (_refreshingPromise) return _refreshingPromise;
+  _refreshingPromise = _refreshAccessToken().finally(() => {
+    _refreshingPromise = null;
+  });
+  return _refreshingPromise;
+}
+
+/** 401 응답이 refresh 가능한 경우 (TOKEN_EXPIRED / TOKEN_INVALID) 여부. */
+function _isRefreshableError(status, code) {
+  if (status !== 401) return false;
+  return code === 'TOKEN_EXPIRED' || code === 'TOKEN_INVALID' || code === 'AUTH_HEADER_MALFORMED';
+}
+
+function _dispatchLogout() {
+  clearTokens();
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new Event('auth-logout'));
+  }
+}
+
+/**
  * API base URL resolution (priority):
  * 1. window.__ARIA_API_BASE__ (runtime injected, e.g. by config.js)
  * 2. VITE_API_BASE_URL build-time env
@@ -46,39 +101,60 @@ function buildUrl(path) {
   return API_BASE.replace(/\/$/, '') + path;
 }
 
+/** 응답을 파싱해 throw할 Error 생성 (code/message 정규화). */
+async function _toError(res) {
+  const text = await res.text();
+  let msg = text || `HTTP ${res.status}`;
+  let code = `HTTP_${res.status}`;
+  try {
+    const j = JSON.parse(text);
+    if (j?.error?.message) {
+      msg = j.error.message;
+      code = j.error.code || code;
+    } else if (typeof j.detail === 'string') {
+      msg = j.detail;
+    } else if (typeof j.message === 'string') {
+      msg = j.message;
+    } else if (j?.error?.code) {
+      code = j.error.code;
+    }
+  } catch (_) {}
+  const err = new Error(msg);
+  err.status = res.status;
+  err.code = code;
+  return err;
+}
+
 /** Generic JSON fetch helper.
  *
- * 45차 C1: Authorization Bearer + X-User 헤더 자동 부착. 401 시 caller가 catch하여
- * AuthContext.logout() 호출 (자동 refresh 큐는 별도 라운드).
+ * 45차 C1: Authorization Bearer + X-User 헤더 자동 부착.
+ * 47차 I5: 401 + (TOKEN_EXPIRED|TOKEN_INVALID) 시 refresh + 재시도 1회. TOKEN_REVOKED /
+ * USER_REVOKED는 즉시 logout event dispatch.
  */
-export async function api(path, options = {}) {
+export async function api(path, options = {}, _retried = false) {
   const res = await fetch(buildUrl(path), {
     cache: 'no-store',
     headers: { 'Content-Type': 'application/json', ..._authHeaders(), ...(options.headers || {}) },
     ...options,
   });
-  if (!res.ok) {
-    const text = await res.text();
-    let msg = text || `HTTP ${res.status}`;
-    let code = `HTTP_${res.status}`;
-    try {
-      const j = JSON.parse(text);
-      // 새 표준 응답: {ok: false, error: {code, message}}
-      if (j?.error?.message) {
-        msg = j.error.message;
-        code = j.error.code || code;
-      } else if (typeof j.detail === 'string') {
-        msg = j.detail;
-      } else if (typeof j.message === 'string') {
-        msg = j.message;
-      }
-    } catch (_) {}
-    const err = new Error(msg);
-    err.status = res.status;
-    err.code = code;
-    throw err;
+  if (res.ok) return res.json();
+
+  const err = await _toError(res);
+
+  // 47차 I5: 401 refresh-able + 아직 재시도 안 함 → single-flight refresh + 1회 재시도
+  if (_isRefreshableError(err.status, err.code) && !_retried) {
+    const ok = await _refreshAccessTokenSingleFlight();
+    if (ok) {
+      return api(path, options, true);  // 재시도 1회 (recursion 차단)
+    }
+    // refresh 실패 — logout 신호
+    _dispatchLogout();
+  } else if (err.status === 401 && (err.code === 'TOKEN_REVOKED' || err.code === 'USER_REVOKED')) {
+    // server-side revocation — refresh 시도 무의미
+    _dispatchLogout();
   }
-  return res.json();
+
+  throw err;
 }
 
 /** POST with JSON body */

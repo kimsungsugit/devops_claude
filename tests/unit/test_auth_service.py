@@ -104,6 +104,28 @@ class TestJWTToken:
             decode_token(token)
         assert exc_info.value.code == "TOKEN_EXPIRED"
 
+    def test_token_includes_tv_claim(self):
+        """47차 W35: access/refresh token에 tv (token_version) claim 포함."""
+        from backend.services.auth_service import (
+            create_access_token,
+            create_refresh_token,
+            decode_token,
+        )
+        access = create_access_token("alice", token_version=5)
+        access_payload = decode_token(access, expected_type="access")
+        assert access_payload.get("tv") == 5
+
+        refresh = create_refresh_token("bob", token_version=3)
+        refresh_payload = decode_token(refresh, expected_type="refresh")
+        assert refresh_payload.get("tv") == 3
+
+    def test_token_default_tv_zero(self):
+        """token_version 미지정 시 default 0."""
+        from backend.services.auth_service import create_access_token, decode_token
+        access = create_access_token("alice")
+        payload = decode_token(access)
+        assert payload.get("tv") == 0
+
     def test_secret_mismatch_raises(self, monkeypatch):
         from backend.services.auth_service import (
             TokenError,

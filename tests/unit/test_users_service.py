@@ -94,12 +94,15 @@ class TestChangePassword:
         us.add_user("alice", "password123")
         result = us.change_password("alice", "new_password456")
         assert result["changed"] is True
+        # 47차 W35: token_version 증가 결과 응답에 포함
+        assert result["new_token_version"] == 1
         # 새 PW로만 verify 가능
         assert us.verify_credentials("alice", "new_password456") is not None
         assert us.verify_credentials("alice", "password123") is None
         # must_change_password 초기화
         record = us.get_user("alice")
         assert record["must_change_password"] is False
+        assert record["token_version"] == 1
 
     def test_change_password_unknown_user_raises(self, _isolated_users):
         from backend.services import users as us
@@ -173,6 +176,43 @@ class TestTimingSafetyW32:
         assert 0.3 <= ratio <= 3.0, (
             f"timing leak 가능성: unknown={unknown_dur:.3f}s wrong={wrong_dur:.3f}s ratio={ratio:.2f}"
         )
+
+
+class TestW35TokenVersion:
+    """47차 W35 — increment_token_version + change_password tv 증가."""
+
+    def test_new_user_starts_at_tv_zero(self, _isolated_users):
+        from backend.services import users as us
+        us.add_user("alice", "password123")
+        record = us.get_user("alice")
+        assert record["token_version"] == 0
+
+    def test_increment_token_version(self, _isolated_users):
+        from backend.services import users as us
+        us.add_user("alice", "password123")
+        r = us.increment_token_version("alice")
+        assert r["new_token_version"] == 1
+        assert us.get_user("alice")["token_version"] == 1
+        # 두 번째 증가
+        r2 = us.increment_token_version("alice")
+        assert r2["new_token_version"] == 2
+
+    def test_increment_unknown_user_raises(self, _isolated_users):
+        from backend.services import users as us
+        with pytest.raises(ValueError, match="없음"):
+            us.increment_token_version("nobody")
+
+    def test_increment_empty_username_raises(self, _isolated_users):
+        from backend.services import users as us
+        with pytest.raises(ValueError, match="비어"):
+            us.increment_token_version("")
+
+    def test_change_password_increments_tv(self, _isolated_users):
+        from backend.services import users as us
+        us.add_user("alice", "password123")
+        assert us.get_user("alice")["token_version"] == 0
+        us.change_password("alice", "new_password456")
+        assert us.get_user("alice")["token_version"] == 1
 
 
 class TestRemoveUser:

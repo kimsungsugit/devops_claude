@@ -126,6 +126,8 @@ def _read_users_raw() -> dict[str, dict[str, Any]]:
             "password_hash": u.get("password_hash") or "",
             "must_change_password": bool(u.get("must_change_password", False)),
             "created_at": u.get("created_at") or "",
+            # 47차 W35: token_version — logout/change-password 시 ++. JWT tv claim 비교용.
+            "token_version": int(u.get("token_version", 0)),
         }
     return result
 
@@ -215,6 +217,7 @@ def add_user(
             "password_hash": hash_password(password),
             "must_change_password": must_change_password,
             "created_at": datetime.now(timezone.utc).isoformat(),
+            "token_version": 0,  # 47차 W35: 신규 사용자 default 0
         }
         _atomic_write(
             USERS_PATH,
@@ -231,8 +234,11 @@ def add_user(
 def change_password(username: str, new_password: str) -> dict[str, Any]:
     """사용자 본인이 PW 변경 — 임시 PW 후 첫 로그인 시 호출.
 
+    47차 W35: PW 변경 시 token_version 자동 증가 → 기존 access/refresh 토큰 모두
+    무효. 다음 호출에서 TOKEN_REVOKED 응답 (도난 토큰 차단).
+
     Returns:
-        {"changed": True} 또는 raises if user 미존재.
+        {"changed": True, "new_token_version": int} 또는 raises if user 미존재.
     """
     name = (username or "").strip()
     if not name:
@@ -246,6 +252,8 @@ def change_password(username: str, new_password: str) -> dict[str, Any]:
             raise ValueError(f"사용자 '{name}' 없음")
         current[key]["password_hash"] = hash_password(new_password)
         current[key]["must_change_password"] = False
+        current[key]["token_version"] = int(current[key].get("token_version", 0)) + 1
+        new_tv = current[key]["token_version"]
         _atomic_write(
             USERS_PATH,
             {
@@ -255,7 +263,37 @@ def change_password(username: str, new_password: str) -> dict[str, Any]:
         )
     with _CACHE_LOCK:
         _cache["mtime"] = 0.0
-    return {"changed": True}
+    return {"changed": True, "new_token_version": new_tv}
+
+
+def increment_token_version(username: str) -> dict[str, Any]:
+    """47차 W35 — user.token_version 증가. logout / admin revoke 시 호출.
+
+    기존 access + refresh 토큰 모두 즉시 무효. 새 로그인 필요.
+
+    Returns:
+        {"username": str, "new_token_version": int} 또는 raises if user 미존재.
+    """
+    name = (username or "").strip()
+    if not name:
+        raise ValueError("username이 비어있음")
+    key = name.lower()
+    with _LOCK:
+        current = _read_users_raw()
+        if key not in current:
+            raise ValueError(f"사용자 '{name}' 없음")
+        current[key]["token_version"] = int(current[key].get("token_version", 0)) + 1
+        new_tv = current[key]["token_version"]
+        _atomic_write(
+            USERS_PATH,
+            {
+                "users": sorted(current.values(), key=lambda u: u["username"].lower()),
+                "schema_version": 1,
+            },
+        )
+    with _CACHE_LOCK:
+        _cache["mtime"] = 0.0
+    return {"username": name, "new_token_version": new_tv}
 
 
 def remove_user(username: str) -> dict[str, Any]:
@@ -323,4 +361,6 @@ __all__ = [
     "remove_user",
     "list_users",
     "bootstrap_admin_user_from_env",
+    "warmup_dummy_hash",  # 46차 W32
+    "increment_token_version",  # 47차 W35
 ]

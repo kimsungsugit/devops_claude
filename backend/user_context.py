@@ -73,6 +73,9 @@ _AUTH_BEST_EFFORT_PATHS = frozenset({
 def _extract_user_from_authorization(request: Request) -> tuple[str | None, str | None]:
     """Authorization 헤더에서 사용자 추출.
 
+    47차 W35: token_version 검증 — user record의 token_version과 token tv claim
+    일치 확인. 불일치 시 TOKEN_REVOKED (logout/change-password 후 도난 토큰 차단).
+
     Returns:
         (username, error_code) — 성공 시 (username, None), 실패 시 (None, error_code).
         헤더 자체가 없으면 (None, None) — fallback 가능성 표시.
@@ -90,7 +93,22 @@ def _extract_user_from_authorization(request: Request) -> tuple[str | None, str 
         payload = decode_token(token, expected_type="access")
     except TokenError as e:
         return (None, e.code)
-    return (payload["sub"], None)
+    username = payload["sub"]
+    # 47차 W35: token_version 검증 — DB read (cache hit 빠름).
+    # 미존재 user는 USER_REVOKED, tv 불일치는 TOKEN_REVOKED.
+    try:
+        from backend.services.users import get_user as _get_user
+        record = _get_user(username)
+    except Exception:
+        record = None
+    if record is None:
+        # 사용자 삭제됨 — 도난 토큰 차단
+        return (None, "USER_REVOKED")
+    expected_tv = int(record.get("token_version", 0))
+    token_tv = int(payload.get("tv", 0))
+    if token_tv != expected_tv:
+        return (None, "TOKEN_REVOKED")
+    return (username, None)
 
 
 class UserContextMiddleware(BaseHTTPMiddleware):

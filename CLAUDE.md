@@ -457,6 +457,16 @@ ISO 26262 ASIL B+ 통합 테스트 산출물 자동 생성. SwUT 30~32차 인프
 | 41차 | Bootstrap admin + APIRouter deps + visibility refresh | 1952 → 1956 (+4) |
 | 42차 | error_handler nested + mask_user + retry + debounce | 1956 → 1968 (+12) |
 
+### 47차 — 46차 자체 평가 발견 W34/W35/W36/I5/I7 통합 fix (남은 결함 일괄 해소)
+- 46차 commit `a1b9be9` 자체 비판 평가에서 발견한 남은 결함 5건 일괄 처리. 사용자 명시: "남은 결함 해결".
+- **W35 refresh token revocation**: `users.json` user record에 `token_version: int` 필드 추가. access/refresh JWT에 `tv` claim 포함 (`auth_service.create_access_token` / `create_refresh_token`에 `token_version` 파라미터). `decode_token` + middleware (`_extract_user_from_authorization`)가 DB read하여 user.token_version과 일치 확인 → 불일치 시 `TOKEN_REVOKED` / 미존재 user는 `USER_REVOKED`. `logout` endpoint 인증 필요로 변경 + `increment_token_version()` 호출 → 기존 access/refresh 모두 즉시 무효. `change_password()`도 자동 tv 증가 + 새 access/refresh 발급 (재로그인 부담 회피). 도난된 refresh 7일간 유효 문제 해결.
+- **I5 자동 token refresh queue**: `api.js`의 `api()` wrapper에 401 + (TOKEN_EXPIRED|TOKEN_INVALID|AUTH_HEADER_MALFORMED) 시 single-flight refresh (`_refreshingPromise` module variable) + 재시도 1회 (recursion guard `_retried`). 동시 다발 401에도 refresh 1회만 호출 (`_refreshAccessTokenSingleFlight`). TOKEN_REVOKED / USER_REVOKED는 즉시 `auth-logout` event dispatch + `clearTokens()` (refresh 시도 무의미). AuthContext가 event listener로 state 갱신.
+- **W34 JWT 운영 매뉴얼**: `docs/rounds/auth_operations.md` 신규 (200+ lines) — JWT_SECRET 생성 (openssl rand) + 환경 설정 + 첫 admin 등록 (BOOTSTRAP env) + JWT_SECRET 변경 (긴급) + timing attack 검증 + refresh revocation 검증 cURL 예시 + 트러블슈팅 + Admin lockout 회복 + 모니터링 권장. CLAUDE.md 본문 link 추가 (비대화 방지).
+- **W36 dummy verify latency 안내**: auth_operations.md에 "미존재 사용자 로그인은 정상적으로 ~250ms 소요. dummy bcrypt verify로 인한 의도된 지연" 명시.
+- **I7 PasswordHint 다국어 안내**: Login.jsx PasswordHint에 hover tooltip 추가 — "영문/숫자 1바이트 / 한국어·일본어·중국어 3바이트 / 이모지 4바이트". 빈 입력 안내 메시지에 "영문 72자 / 한국어·일본어 24자 / 이모지 18자 이하 권장" 표기.
+- **운영 환경 fix (부수)**: `start.bat`이 사용하는 `backend\.venv\`에 PyJWT/bcrypt 미설치 발견 → 즉시 `pip install` 실행. root `.venv\`와 별개 venv 운영 발견. 향후 단일 venv 일원화는 별도 라운드.
+- 회귀: backend 2016 → 2028 (+12 — W35: auth_service +2 tv claim / users_service +5 token_version + change_password tv / auth_login_router +5 logout_authenticated + change_password new tokens + old token revoked + new token works + user_deleted revoked) / frontend 255 → 260 (+5 I5 — api_refresh.test.jsx single-flight + token_expired retry + token_revoked logout + user_revoked logout + refresh_failure logout)
+
 ### 46차 — 45차 자체 평가 발견 W32/W33 fix (timing attack + PW UX)
 - 45차 commit `934d6bc` 자체 비판 평가에서 발견한 보안/UX 결함 2건. 사용자 결정: Recommended (W32+W33 묶음).
 - **W32 timing attack 차단** (user enumeration): `verify_credentials` unknown user / 손상 hash path에서도 dummy bcrypt verify 호출하여 응답 시간 동등화. module-level `_DUMMY_HASH` cache + `warmup_dummy_hash()` startup hook (`main.py` lifespan에서 호출 — 첫 로그인 latency 회피). 회귀 +3 (`test_unknown_user_calls_dummy_verify` + `test_warmup_dummy_hash_caches` + `test_unknown_vs_wrong_password_similar_duration` ratio 0.3~3.0).
@@ -513,7 +523,9 @@ ISO 26262 ASIL B+ 통합 테스트 산출물 자동 생성. SwUT 30~32차 인프
 - **W24 error_handler 빈 dict fallback**: `HTTPException(detail={})` 또는 code만 있고 message 누락 시 `str(detail)` (= "{}") 노출되어 사용자 혼란 → status-aware fallback `HTTP <status> error` 사용. 회귀 +1 (`test_dict_with_only_code_no_message`).
 - 회귀: backend 1968 → 1970 (+1 W24 dict_with_only_code + empty_dict 갱신 +1 mask_user alias 검증 보강) / frontend 242 → 243 (+1 W20 StrictMode race) / backend admin gate 57건 무회귀
 
-## Admin 운영 가이드 (40~41차)
+## Admin 운영 가이드 (40~47차)
+
+> 상세 JWT 운영 (생성/회복/검증): [`docs/rounds/auth_operations.md`](docs/rounds/auth_operations.md)
 
 | 시나리오 | 방법 |
 |---------|------|

@@ -27,10 +27,20 @@ function utf8ByteLength(s) {
 
 function PasswordHint({ password }) {
   const bytes = utf8ByteLength(password);
+  // 47차 I7: 다국어 byte 가이드 tooltip — 입력 안 됐을 때만 노출
   if (!password) {
     return (
-      <small className="login-hint-detail">
-        한국어 최대 24자 / 영문 72자 이하 권장 (bcrypt 정책)
+      <small
+        className="login-hint-detail"
+        title={
+          'UTF-8 바이트 기준:\n' +
+          '  영문/숫자/기호: 1바이트\n' +
+          '  한국어/일본어/중국어: 3바이트\n' +
+          '  이모지(😀): 4바이트\n' +
+          'bcrypt는 72바이트 초과 시 truncate'
+        }
+      >
+        영문 72자 / 한국어·일본어 24자 / 이모지 18자 이하 권장 (bcrypt 정책)
       </small>
     );
   }
