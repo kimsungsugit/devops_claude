@@ -42,6 +42,32 @@ except ImportError:  # pragma: no cover
 
 from backend.services.auth_service import hash_password, verify_password
 
+# 46차 W32 — timing attack 차단용 dummy hash.
+# unknown user verify 시에도 동일한 bcrypt round 호출하여 응답 시간 동등화 → user enumeration 차단.
+# module load 시 1회 계산 (~250ms, startup 1회 비용). 매 호출 새 hash 생성은 비용 과다.
+_DUMMY_HASH: str | None = None
+
+
+def _get_dummy_hash() -> str:
+    """timing-safe verify용 dummy hash. lazy initialization (첫 unknown user verify 시).
+
+    한 번 계산 후 module-level cache. ~250ms 1회 비용은 호출자 view에서 첫 호출 시
+    추가 latency. startup 시 미리 호출하면 첫 호출 latency 없음 — main.py에서 호출 가능.
+    """
+    global _DUMMY_HASH
+    if _DUMMY_HASH is None:
+        _DUMMY_HASH = hash_password("__dummy_password_for_timing_safety__")
+    return _DUMMY_HASH
+
+
+def warmup_dummy_hash() -> None:
+    """46차 W32 — startup 시 dummy hash 미리 계산. 첫 로그인 latency 회피.
+
+    main.py lifespan에서 호출 권장 — 첫 unknown user 로그인이 dummy hash 계산
+    ~250ms latency 추가되는 것 차단.
+    """
+    _get_dummy_hash()
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 USERS_PATH = REPO_ROOT / "config" / "users.json"
 _LOCK = (
@@ -149,10 +175,14 @@ def get_user(username: str) -> dict[str, Any] | None:
 def verify_credentials(username: str, password: str) -> dict[str, Any] | None:
     """username + password 검증 — 성공 시 user record, 실패 시 None.
 
-    timing-safe verify (bcrypt). 미존재 user도 더미 verify로 timing 동등화는 별도 라운드.
+    46차 W32 timing-safe: unknown user / password_hash 없음 경우에도 dummy bcrypt
+    verify 호출하여 응답 시간 동등화 → user enumeration 차단. 모든 fail path가
+    동일한 bcrypt round (~250ms) 비용 소비.
     """
     user = get_user(username)
     if not user or not user.get("password_hash"):
+        # unknown user / 손상 hash — dummy verify로 시간 균등화
+        verify_password(password, _get_dummy_hash())
         return None
     if not verify_password(password, user["password_hash"]):
         return None

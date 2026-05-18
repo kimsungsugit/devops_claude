@@ -100,7 +100,10 @@ async def _lifespan(app_instance):
     # 45차 C1: 빈 users.json + BOOTSTRAP_ADMIN_USER/PASSWORD env면 첫 사용자 자동 등록.
     # 첫 로그인 시 must_change_password=True로 PW 변경 강제.
     try:
-        from backend.services.users import bootstrap_admin_user_from_env as _bootstrap_user
+        from backend.services.users import (
+            bootstrap_admin_user_from_env as _bootstrap_user,
+            warmup_dummy_hash as _warmup_dummy_hash,
+        )
         from backend.services.admin_users import mask_user as _mask
         _user_result = _bootstrap_user()
         _safe_user_log = {
@@ -108,6 +111,9 @@ async def _lifespan(app_instance):
             "username": _mask(_user_result["username"]) if _user_result.get("username") else None,
         }
         _api_logger.info("User bootstrap: %s", _safe_user_log)
+        # 46차 W32: dummy hash 미리 계산 — 첫 unknown user 로그인 latency 회피.
+        _warmup_dummy_hash()
+        _api_logger.info("Timing-safe dummy hash warmed up (46차 W32).")
     except Exception as _ue:
         _api_logger.warning("User bootstrap 실패: %s", _ue)
 

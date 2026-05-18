@@ -113,6 +113,68 @@ class TestChangePassword:
             us.change_password("alice", "short")
 
 
+class TestTimingSafetyW32:
+    """46차 W32 — unknown user verify도 dummy bcrypt verify 호출 → timing 동등화.
+
+    검증 방식 (logic-level — timing은 flaky하므로):
+      1. unknown user verify_credentials 호출 시 verify_password가 호출됨을 mock으로 확인
+      2. unknown user 응답 시간이 known wrong password 응답 시간과 같은 자릿수 (loose check)
+      3. warmup_dummy_hash가 _DUMMY_HASH 캐시
+    """
+
+    def test_unknown_user_calls_dummy_verify(self, _isolated_users, monkeypatch):
+        from backend.services import users as us
+        from backend.services import auth_service as svc
+        call_count = {"verify": 0}
+        orig_verify = svc.verify_password
+
+        def counting_verify(plain, hashed):
+            call_count["verify"] += 1
+            return orig_verify(plain, hashed)
+
+        monkeypatch.setattr(us, "verify_password", counting_verify)
+        # unknown user 호출 → dummy verify 1회
+        result = us.verify_credentials("nobody_unknown", "wrong_pw_12345")
+        assert result is None
+        assert call_count["verify"] >= 1, "unknown user에도 verify_password가 호출되어야 함 (timing 균등화)"
+
+    def test_warmup_dummy_hash_caches(self, _isolated_users):
+        from backend.services import users as us
+        # warmup 호출 — _DUMMY_HASH cache
+        us.warmup_dummy_hash()
+        assert us._DUMMY_HASH is not None
+        first = us._DUMMY_HASH
+        # 두 번째 호출 — 동일 cache 사용 (재계산 안 함)
+        us.warmup_dummy_hash()
+        assert us._DUMMY_HASH is first
+
+    def test_unknown_vs_wrong_password_similar_duration(self, _isolated_users):
+        """timing 균등화 — loose check (ratio 0.3 ~ 3.0 범위)."""
+        import time
+        from backend.services import users as us
+        # warmup으로 dummy hash 첫 계산 비용 제거
+        us.warmup_dummy_hash()
+        us.add_user("alice", "password123")
+
+        # unknown user 측정
+        t0 = time.perf_counter()
+        for _ in range(3):
+            us.verify_credentials("nobody", "wrong_pw")
+        unknown_dur = time.perf_counter() - t0
+
+        # known wrong password 측정
+        t0 = time.perf_counter()
+        for _ in range(3):
+            us.verify_credentials("alice", "wrong_pw")
+        wrong_dur = time.perf_counter() - t0
+
+        # ratio 0.3 ~ 3.0 (3배 이내) — bcrypt round 동일하므로 큰 차이 없어야
+        ratio = unknown_dur / wrong_dur if wrong_dur > 0 else 1.0
+        assert 0.3 <= ratio <= 3.0, (
+            f"timing leak 가능성: unknown={unknown_dur:.3f}s wrong={wrong_dur:.3f}s ratio={ratio:.2f}"
+        )
+
+
 class TestRemoveUser:
     def test_remove_user(self, _isolated_users):
         from backend.services import users as us

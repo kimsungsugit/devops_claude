@@ -457,6 +457,12 @@ ISO 26262 ASIL B+ 통합 테스트 산출물 자동 생성. SwUT 30~32차 인프
 | 41차 | Bootstrap admin + APIRouter deps + visibility refresh | 1952 → 1956 (+4) |
 | 42차 | error_handler nested + mask_user + retry + debounce | 1956 → 1968 (+12) |
 
+### 46차 — 45차 자체 평가 발견 W32/W33 fix (timing attack + PW UX)
+- 45차 commit `934d6bc` 자체 비판 평가에서 발견한 보안/UX 결함 2건. 사용자 결정: Recommended (W32+W33 묶음).
+- **W32 timing attack 차단** (user enumeration): `verify_credentials` unknown user / 손상 hash path에서도 dummy bcrypt verify 호출하여 응답 시간 동등화. module-level `_DUMMY_HASH` cache + `warmup_dummy_hash()` startup hook (`main.py` lifespan에서 호출 — 첫 로그인 latency 회피). 회귀 +3 (`test_unknown_user_calls_dummy_verify` + `test_warmup_dummy_hash_caches` + `test_unknown_vs_wrong_password_similar_duration` ratio 0.3~3.0).
+- **W33 PW UX 안내** (72-byte limit): Login.jsx에 `PasswordHint` 컴포넌트 — UTF-8 바이트 수 실시간 표시 + 72바이트 초과 시 빨간 경고 (`처음 72바이트만 인식`). 영문/한국어 입력 시 정확한 바이트 수 (TextEncoder fallback Blob). PW 변경 화면 + 로그인 화면 모두 적용. `login-hint-detail` / `login-hint-warn` CSS 추가. maxLength 200 → 100으로 정책 강화.
+- 회귀: backend 2013 → 2016 (+3 W32) / frontend 250 → 255 (+5 W33 — Login.test.jsx 신규)
+
 ### 45차 — C1 JWT/세션 인증 도입 (X-User spoofing 차단)
 - 40~44차 X-User 헤더 신뢰 모델 → JWT bearer token으로 교체. ISO 26262 audit 추적성 — 진짜 사용자 식별 보장.
 - **사용자 결정** (AskUserQuestion 4건 모두 Recommended): localStorage 저장 / admin이 사용자 등록 + 임시 PW / 개발 모드 X-User backward-compat / Access 60분 + Refresh 7일.

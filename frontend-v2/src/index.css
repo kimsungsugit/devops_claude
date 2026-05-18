@@ -1657,3 +1657,18 @@ label {
   color: var(--color-text-muted, #6e6e73);
   text-align: center;
 }
+
+/* 46차 W33: PW UX hint */
+.login-hint-detail {
+  display: block;
+  margin-top: 4px;
+  font-size: 0.75rem;
+  color: var(--color-text-muted, #6e6e73);
+}
+.login-hint-warn {
+  display: block;
+  margin-top: 4px;
+  font-size: 0.75rem;
+  color: #d70015;
+  font-weight: 500;
+}

@@ -8,6 +8,46 @@
 import { useState } from 'react';
 import { useAuth } from '../contexts/AuthContext.jsx';
 
+// 46차 W33: bcrypt 72-byte limit 정책 — 한국어 24자 / 영문 72자.
+// 입력 UTF-8 바이트 수 계산하여 hint 표시 + 경고.
+const BCRYPT_BYTE_LIMIT = 72;
+
+function utf8ByteLength(s) {
+  // TextEncoder가 jsdom + 모든 모던 브라우저에서 지원
+  if (typeof TextEncoder !== 'undefined') {
+    return new TextEncoder().encode(s).length;
+  }
+  // fallback (구형 브라우저): blob 측정
+  try {
+    return new Blob([s]).size;
+  } catch (_) {
+    return s.length;  // 추정 (한국어 underestimate)
+  }
+}
+
+function PasswordHint({ password }) {
+  const bytes = utf8ByteLength(password);
+  if (!password) {
+    return (
+      <small className="login-hint-detail">
+        한국어 최대 24자 / 영문 72자 이하 권장 (bcrypt 정책)
+      </small>
+    );
+  }
+  if (bytes > BCRYPT_BYTE_LIMIT) {
+    return (
+      <small className="login-hint-warn" role="alert">
+        ⚠ {bytes}바이트 입력 — 처음 {BCRYPT_BYTE_LIMIT}바이트만 인식됩니다
+      </small>
+    );
+  }
+  return (
+    <small className="login-hint-detail">
+      {bytes} / {BCRYPT_BYTE_LIMIT}바이트
+    </small>
+  );
+}
+
 export default function Login() {
   const { login, mustChangePassword, authenticated, changePassword } = useAuth();
   const [username, setUsername] = useState('');
@@ -51,10 +91,12 @@ export default function Login() {
                 value={newPassword}
                 onChange={(e) => setNewPassword(e.target.value)}
                 minLength={8}
+                maxLength={100}
                 required
                 autoFocus
                 autoComplete="new-password"
               />
+              <PasswordHint password={newPassword} />
             </label>
             <label>
               <span>비밀번호 확인</span>
@@ -63,6 +105,7 @@ export default function Login() {
                 value={confirmPassword}
                 onChange={(e) => setConfirmPassword(e.target.value)}
                 minLength={8}
+                maxLength={100}
                 required
                 autoComplete="new-password"
               />
@@ -121,8 +164,9 @@ export default function Login() {
               onChange={(e) => setPassword(e.target.value)}
               required
               autoComplete="current-password"
-              maxLength={200}
+              maxLength={100}
             />
+            <PasswordHint password={password} />
           </label>
           {error && <div className="login-error" role="alert">{error}</div>}
           <button type="submit" disabled={submitting}>
