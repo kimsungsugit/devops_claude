@@ -39,6 +39,9 @@ export function AdminProvider({ children }) {
   // 42차 W4/W5: retry timer + debounce 추적
   const lastFetchAt = useRef(0);
   const retryTimerRef = useRef(null);
+  // 43차 W20: StrictMode 대응 — 첫 mount의 fetch가 두 번째 mount 후 setState 호출하면 race.
+  // isMounted=false 시 setState/timer schedule skip하여 메모리 누수 + warning 차단.
+  const isMountedRef = useRef(true);
 
   const refresh = useCallback(async (opts = {}) => {
     const force = !!opts.force;
@@ -55,6 +58,8 @@ export function AdminProvider({ children }) {
         cache: 'no-store',
         headers: user ? { 'X-User': user } : {},
       });
+      // 43차 W20: fetch 동안 unmount 시 무시
+      if (!isMountedRef.current) return;
       if (!res.ok) {
         setState({
           isAdmin: false,
@@ -64,10 +69,14 @@ export function AdminProvider({ children }) {
         });
         // W4 retry: 401/5xx 후 30초 뒤 1회 재시도
         if (retryTimerRef.current) clearTimeout(retryTimerRef.current);
-        retryTimerRef.current = setTimeout(() => refresh({ force: true }), 30_000);
+        retryTimerRef.current = setTimeout(() => {
+          // 43차 W20: timer fire 시점 unmount 상태면 skip
+          if (isMountedRef.current) refresh({ force: true });
+        }, 30_000);
         return;
       }
       const data = await res.json();
+      if (!isMountedRef.current) return;
       setState({
         isAdmin: !!data.is_admin,
         username: data.username || null,
@@ -81,6 +90,7 @@ export function AdminProvider({ children }) {
       }
     } catch (e) {
       // 네트워크 오류 — graceful + W4 retry 예약
+      if (!isMountedRef.current) return;
       setState({
         isAdmin: false,
         username: user || null,
@@ -88,14 +98,20 @@ export function AdminProvider({ children }) {
         loading: false,
       });
       if (retryTimerRef.current) clearTimeout(retryTimerRef.current);
-      retryTimerRef.current = setTimeout(() => refresh({ force: true }), 30_000);
+      retryTimerRef.current = setTimeout(() => {
+        if (isMountedRef.current) refresh({ force: true });
+      }, 30_000);
     }
   }, []);
 
   useEffect(() => {
+    // 43차 W20: 매 mount마다 isMounted reset (StrictMode 두 번째 mount 시 첫 unmount가
+    // false로 설정한 후 두 번째 mount가 다시 true로 복원).
+    isMountedRef.current = true;
     refresh({ force: true });
-    // unmount 시 retry timer cleanup (42차 W4)
+    // unmount 시 retry timer cleanup + isMounted 플래그 off (42차 W4 + 43차 W20)
     return () => {
+      isMountedRef.current = false;
       if (retryTimerRef.current) {
         clearTimeout(retryTimerRef.current);
         retryTimerRef.current = null;

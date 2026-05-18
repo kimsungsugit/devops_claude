@@ -111,10 +111,28 @@ class TestDictDetail:
         assert body["error"]["message"] == "only message"
 
     def test_empty_dict_detail(self):
-        """빈 dict — fallback code + message."""
+        """빈 dict — fallback code + message.
+
+        43차 W24 fix: 이전 `str({})` = "{}" 출력 → 사용자 혼란.
+        status-aware fallback (`HTTP <status> error`) 사용.
+        """
         exc = HTTPException(status_code=500, detail={})
         status, body = _call(exc)
         assert status == 500
         assert body["error"]["code"] == "HTTP_500"
-        # str({}) 또는 empty — 빈 string 또는 "{}"
-        assert isinstance(body["error"]["message"], str)
+        # 43차 W24: "{}" repr 차단 — status-aware message
+        assert body["error"]["message"] == "HTTP 500 error"
+        # extra detail 없음
+        assert "detail" not in body["error"]
+
+    def test_dict_with_only_code_no_message(self):
+        """43차 W24: code만 있고 message 없는 dict — fallback message.
+
+        '{'code': 'SOMETHING'}' raw repr이 frontend에 노출되지 않도록.
+        """
+        exc = HTTPException(status_code=422, detail={"code": "BAD_INPUT"})
+        status, body = _call(exc)
+        assert status == 422
+        assert body["error"]["code"] == "BAD_INPUT"
+        # message가 "{'code': 'BAD_INPUT'}"가 아니라 fallback
+        assert body["error"]["message"] == "HTTP 422 error"

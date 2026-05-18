@@ -159,10 +159,12 @@ def remove_admin(user: str) -> dict[str, Any]:
     return {"removed": True, "user": u, "admins": sorted(current)}
 
 
-def _mask_user(user: str) -> str:
-    """42차 W7 — admin user 이름 log 마스킹 (예: 'hbrnd2' → 'hb***2').
+def mask_user(user: str) -> str:
+    """43차 W19 — admin user 이름 log 마스킹 (예: 'hbrnd2' → 'hb***2').
 
-    backend log 또는 외부 노출 시 admin 사용자 보호.
+    backend log 또는 외부 노출 시 admin 사용자 보호. 42차에 `_mask_user` (private)로
+    도입했으나 `dependencies/admin.py`가 underscore private 함수를 import하는
+    convention 위반 → 43차에 public name으로 승격. backward-compat alias 유지.
     """
     u = (user or "").strip()
     if len(u) <= 2:
@@ -170,6 +172,11 @@ def _mask_user(user: str) -> str:
     if len(u) <= 4:
         return u[0] + "*" * (len(u) - 1)
     return u[:2] + "*" * (len(u) - 3) + u[-1]
+
+
+# 43차 W19 — 42차 import path backward-compat (기존 tests / 외부 코드).
+# 차후 라운드(44차+)에서 deprecation warning + 완전 제거 검토.
+_mask_user = mask_user
 
 
 def bootstrap_from_env() -> dict[str, Any]:
@@ -197,10 +204,11 @@ def bootstrap_from_env() -> dict[str, Any]:
         return {"action": "skipped_no_env", "added": []}
     save_admins(new_users)
     # 42차 W7+W18: 응답에 평문 user 포함 안 함 — count + masked만 노출. log/audit 안전.
+    # 43차 W19: public name `mask_user` 사용 (underscore private 사용 회피).
     return {
         "action": "bootstrapped",
         "added_count": len(new_users),
-        "added_masked": [_mask_user(u) for u in new_users],
+        "added_masked": [mask_user(u) for u in new_users],
     }
 
 
@@ -212,4 +220,5 @@ __all__ = [
     "add_admin",
     "remove_admin",
     "bootstrap_from_env",
+    "mask_user",  # 43차 W19 — public API
 ]

@@ -82,9 +82,19 @@ async def http_exception_handler(request: Request, exc: HTTPException) -> JSONRe
     """
     detail = exc.detail
     if isinstance(detail, dict):
-        # 구조화된 detail — code/message를 직접 사용
+        # 구조화된 detail — code/message를 직접 사용.
+        # 43차 W24 fix: 빈 dict({}) 시 `str({})` = "{}"가 frontend에 노출되어 사용자
+        # 혼란 발생. 빈 dict이거나 message 키가 없으면 status-aware fallback 사용.
         code = detail.get("code") or f"HTTP_{exc.status_code}"
-        message = detail.get("message") or str(detail)
+        raw_message = detail.get("message")
+        if raw_message:
+            message = raw_message
+        elif detail:
+            # message 키 없지만 다른 키는 있음 — repr 대신 fallback + extra에 raw 보존.
+            message = f"HTTP {exc.status_code} error"
+        else:
+            # 빈 dict — status-aware fallback.
+            message = f"HTTP {exc.status_code} error"
         extra = {k: v for k, v in detail.items() if k not in ("code", "message")}
         return error_response(
             exc.status_code, message, code=code,

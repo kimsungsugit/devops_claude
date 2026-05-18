@@ -174,6 +174,44 @@ describe('AdminContext', () => {
     await waitFor(() => expect(callCount).toBeGreaterThanOrEqual(2));
   });
 
+  it('W20 unmount during retry timer skips setState (StrictMode safe, 43차)', async () => {
+    // unmount 후 retry timer fire 시 setState 호출 안 되는지 검증.
+    // 이전 (42차): timer fire → refresh() → setState → "Can't perform state update on unmounted" warning.
+    // 43차 W20 fix: isMountedRef로 setState skip.
+    vi.useFakeTimers();
+    let callCount = 0;
+    let postUnmountSetState = false;
+    vi.spyOn(global, 'fetch').mockImplementation(async () => {
+      callCount++;
+      throw new Error('Network down');  // 항상 실패 → retry 예약
+    });
+    // React state update 추적 — unmount 후 setState 호출이 발생하면 콘솔 에러 잡음
+    const origError = console.error;
+    console.error = (msg) => {
+      if (typeof msg === 'string' && msg.includes('unmounted')) {
+        postUnmountSetState = true;
+      }
+      origError(msg);
+    };
+
+    const { unmount } = render(
+      <AdminProvider>
+        <TestConsumer />
+      </AdminProvider>
+    );
+    await vi.waitFor(() => expect(callCount).toBeGreaterThan(0));
+    // unmount — retry timer 살아있음
+    unmount();
+    // 30초 후 timer fire 시뮬레이션
+    await act(async () => {
+      vi.advanceTimersByTime(30_000);
+    });
+    vi.useRealTimers();
+    console.error = origError;
+    // unmount 후 setState 호출 0건 (isMountedRef=false로 skip)
+    expect(postUnmountSetState).toBe(false);
+  });
+
   it('custom event "admin-mode-changed" triggers refresh (same-tab C3 fix)', async () => {
     let callCount = 0;
     const responses = [

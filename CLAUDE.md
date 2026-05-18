@@ -450,6 +450,14 @@ ISO 26262 ASIL B+ 통합 테스트 산출물 자동 생성. SwUT 30~32차 인프
   `collect_from_jenkins_cache`, `collect_swut_session`). SwIT는 "SwITC" 명시 전달
 - 회귀: SwUT 4 + SwIT 7 = 11건 통과 (1842 → 1849)
 
+### 43차 — 42차 자체 평가 발견 결함 4건 통합 fix (W19/W20/W23/W24)
+- 42차 commit `1fa4692` 자체 비판 평가에서 발견한 자체 해결 가능 4건. C1 JWT는 44차+ 별도 큰 라운드.
+- **W19 mask_user public 승격**: `_mask_user` (private, 42차) → `mask_user` (public, `__all__` 등록). `dependencies/admin.py`가 underscore private 함수 import하는 convention 위반 해결. `_mask_user = mask_user` alias로 backward-compat 유지.
+- **W20 StrictMode safe**: AdminContext.jsx에 `isMountedRef` 도입 — fetch 응답/retry timer fire가 unmount 후 setState 호출 시 React warning. 모든 setState 직전 `isMountedRef.current` 확인 + 매 mount마다 `true` 복원 (StrictMode 두 번째 mount 대응). 회귀에서 unmount 후 timer fire 시 "unmounted" warning 발생 안 함 검증.
+- **W23 frontend 회귀 실행 검증**: 42차에 미실행한 vitest 전체 회귀 실 실행 (242 → 243 +1 W20). backend admin/auth 57건 통과 (W19 mask_user 영향 회귀).
+- **W24 error_handler 빈 dict fallback**: `HTTPException(detail={})` 또는 code만 있고 message 누락 시 `str(detail)` (= "{}") 노출되어 사용자 혼란 → status-aware fallback `HTTP <status> error` 사용. 회귀 +1 (`test_dict_with_only_code_no_message`).
+- 회귀: backend 1968 → 1970 (+1 W24 dict_with_only_code + empty_dict 갱신 +1 mask_user alias 검증 보강) / frontend 242 → 243 (+1 W20 StrictMode race) / backend admin gate 57건 무회귀
+
 ### 42차 — 41차 자체 평가 발견 문제 통합 fix (W2/W4/W5/W6/W7/W10/W11/W17/W18/C2/C3)
 - 41차 자체 평가에서 발견한 9건 fix + 추가 4건 (C3/W11/W17/W18) 즉시 처리. C1 JWT는 43차+ 별도.
 - **W2 health admin sub-router**: `admin_router = APIRouter(prefix="/api", dependencies=[Depends(require_admin)])` — 4 file-mode endpoint 분리 (DRY)

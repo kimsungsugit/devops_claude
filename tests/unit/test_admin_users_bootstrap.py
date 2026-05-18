@@ -79,10 +79,18 @@ class TestBootstrapFromEnv:
         assert au.is_admin("charlie") is True
 
     def test_w7_mask_user_format(self):
-        """42차 W7: _mask_user 동작 — 평문 유출 방지."""
-        assert au._mask_user("a") == "*"
-        assert au._mask_user("ab") == "**"
-        assert au._mask_user("abc") == "a**"
-        assert au._mask_user("abcd") == "a***"
-        assert au._mask_user("hbrnd2") == "hb***2"  # 일반 케이스
-        assert au._mask_user("") == ""
+        """42차 W7: mask_user 동작 — 평문 유출 방지.
+
+        43차 W19: `_mask_user` (private) → `mask_user` (public) 승격.
+        backward-compat alias `_mask_user`도 동일 동작 검증.
+        """
+        # public name (43차 W19)
+        assert au.mask_user("a") == "*"
+        assert au.mask_user("ab") == "**"
+        assert au.mask_user("abc") == "a**"
+        assert au.mask_user("abcd") == "a***"
+        assert au.mask_user("hbrnd2") == "hb***2"  # 일반 케이스
+        assert au.mask_user("") == ""
+        # backward-compat alias
+        assert au._mask_user is au.mask_user
+        assert au._mask_user("hbrnd2") == "hb***2"
