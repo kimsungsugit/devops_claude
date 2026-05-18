@@ -137,7 +137,12 @@ export function AuthProvider({ children }) {
     window.dispatchEvent(new Event('admin-mode-changed'));
   }, []);
 
-  /** PW 변경 (must_change_password 후 또는 사용자 자발). */
+  /** PW 변경 (must_change_password 후 또는 사용자 자발).
+   *
+   * 48차 C6 fix: backend가 응답에 새 access/refresh 토큰 보냄 (47차 W35 — change_password
+   * 시 token_version 증가로 기존 토큰 무효화). frontend가 즉시 새 토큰으로 갱신해야 다음
+   * 호출이 401 → 잘못된 refresh queue 발화 회피.
+   */
   const changePassword = useCallback(async (newPassword) => {
     const access = getAccessToken();
     if (!access) return { ok: false, error: '인증 필요' };
@@ -153,6 +158,13 @@ export function AuthProvider({ children }) {
       const data = await res.json();
       if (!res.ok) {
         return { ok: false, error: data?.error?.message || 'PW 변경 실패' };
+      }
+      // 48차 C6: 응답의 새 access + refresh로 즉시 갱신 (구 token 무효화됨)
+      if (data.access_token || data.refresh_token) {
+        setTokens({
+          access: data.access_token || undefined,
+          refresh: data.refresh_token || undefined,
+        });
       }
       if (isMountedRef.current) {
         setState((s) => ({ ...s, mustChangePassword: false }));

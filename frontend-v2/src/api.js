@@ -166,7 +166,11 @@ export function post(path, body) {
  * POST SSE streaming — calls onEvent(type, data) for each server-sent event.
  * Resolves when the stream ends.
  */
-export async function postSse(path, body, { onEvent, signal } = {}) {
+export async function postSse(path, body, opts = {}) {
+  return _postSseInternal(path, body, opts, false);
+}
+
+async function _postSseInternal(path, body, { onEvent, signal } = {}, _retried = false) {
   const res = await fetch(buildUrl(path), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream', ..._authHeaders() },
@@ -174,8 +178,16 @@ export async function postSse(path, body, { onEvent, signal } = {}) {
     signal,
   });
   if (!res.ok) {
-    const text = await res.text();
-    throw new Error(text || `HTTP ${res.status}`);
+    // 48차 C7: postSse도 single-flight refresh + 재시도 1회 적용 (api()와 동일).
+    const err = await _toError(res);
+    if (_isRefreshableError(err.status, err.code) && !_retried) {
+      const ok = await _refreshAccessTokenSingleFlight();
+      if (ok) return _postSseInternal(path, body, { onEvent, signal }, true);
+      _dispatchLogout();
+    } else if (err.status === 401 && (err.code === 'TOKEN_REVOKED' || err.code === 'USER_REVOKED')) {
+      _dispatchLogout();
+    }
+    throw err;
   }
   if (!res.body) throw new Error('스트리밍 응답을 받을 수 없습니다.');
 

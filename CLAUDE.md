@@ -457,6 +457,16 @@ ISO 26262 ASIL B+ 통합 테스트 산출물 자동 생성. SwUT 30~32차 인프
 | 41차 | Bootstrap admin + APIRouter deps + visibility refresh | 1952 → 1956 (+4) |
 | 42차 | error_handler nested + mask_user + retry + debounce | 1956 → 1968 (+12) |
 
+### 48차 — 47차 자체 평가 발견 C5/C6/C7 + W43/W44/W45 통합 fix
+- 47차 commit `93f6828` 자체 비판 평가에서 발견한 Critical 3건 + Warning 3건 일괄 처리.
+- **C5 logout DEV_MODE bypass 차단** (보안): DEV_MODE_X_USER_FALLBACK=1 환경에서 admin이 `X-User: other_user` 헤더만으로 `/api/auth/logout` 또는 `/change-password` 호출 시 middleware가 other_user 식별 → endpoint가 other_user에 destructive 작업 수행 가능했던 spoofing. 신규 `backend/dependencies/auth.py::require_jwt_user` Depends — Authorization Bearer 헤더 존재 강제 (X-User fallback 거부). `logout` + `change-password` 두 endpoint에 적용.
+- **C6 change_password 후 frontend token 갱신**: backend가 47차 W35 응답에 새 access/refresh 포함하는데 AuthContext.changePassword가 응답을 무시 → 다음 호출이 구 token (server에서 TOKEN_REVOKED) → I5 refresh queue 우회 발화 + 잘못된 refresh 시도 + UX 지연. `setTokens({access, refresh})`로 즉시 갱신.
+- **C7 postSse refresh queue 적용**: I5가 `api()`에만 적용 → `postSse`가 401 받으면 throw — SSE stream 만료 시 사용자 경험 깨짐. `_postSseInternal(_retried)` recursion guard + single-flight refresh + 재시도 1회. TOKEN_REVOKED/USER_REVOKED는 즉시 logout dispatch.
+- **W43 dead code 제거**: `users.py` `_save_users` 함수 미참조 + `__all__` 누락 → 제거.
+- **W44 mask_user 중복 제거**: `auth_router._mask` 함수가 `admin_users.mask_user`와 동일 로직 → `mask_user` import 사용으로 통합 (44차 W19 동일 패턴 재발 방지).
+- **W45 lazy import → top-level**: `user_context.py` middleware의 `from backend.services.users import get_user` 함수 내부 import → top-level. 매 요청 dict 조회 비용 절감 + circular safety 검증 완료 (users.py → user_context 미참조).
+- 회귀: backend 105 → 107 (+2: logout 인증 거부 + DEV_MODE X-User 거부) / frontend 18 → 19 (+1 AuthContext C6 token 갱신 회귀).
+
 ### 47차 — 46차 자체 평가 발견 W34/W35/W36/I5/I7 통합 fix (남은 결함 일괄 해소)
 - 46차 commit `a1b9be9` 자체 비판 평가에서 발견한 남은 결함 5건 일괄 처리. 사용자 명시: "남은 결함 해결".
 - **W35 refresh token revocation**: `users.json` user record에 `token_version: int` 필드 추가. access/refresh JWT에 `tv` claim 포함 (`auth_service.create_access_token` / `create_refresh_token`에 `token_version` 파라미터). `decode_token` + middleware (`_extract_user_from_authorization`)가 DB read하여 user.token_version과 일치 확인 → 불일치 시 `TOKEN_REVOKED` / 미존재 user는 `USER_REVOKED`. `logout` endpoint 인증 필요로 변경 + `increment_token_version()` 호출 → 기존 access/refresh 모두 즉시 무효. `change_password()`도 자동 tv 증가 + 새 access/refresh 발급 (재로그인 부담 회피). 도난된 refresh 7일간 유효 문제 해결.

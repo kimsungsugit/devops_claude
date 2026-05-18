@@ -147,17 +147,6 @@ def _load_users() -> dict[str, dict[str, Any]]:
         return dict(users)
 
 
-def _save_users(users_map: dict[str, dict[str, Any]]) -> None:
-    payload = {
-        "users": sorted(users_map.values(), key=lambda u: u["username"].lower()),
-        "schema_version": 1,
-    }
-    with _LOCK:
-        _atomic_write(USERS_PATH, payload)
-    with _CACHE_LOCK:
-        _cache["mtime"] = 0.0
-
-
 def user_exists(username: str) -> bool:
     """username 등록 여부 (case-insensitive)."""
     u = (username or "").strip().lower()

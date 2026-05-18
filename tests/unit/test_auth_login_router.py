@@ -49,11 +49,12 @@ def _isolated(tmp_path, monkeypatch):
     us._cache["mtime"] = 0.0
     us._cache["users"] = {}
 
-    # JWT secret + dev mode disabled (JWT 검증 강제)
+    # JWT secret + dev mode disabled (JWT 검증 강제 — 본 회귀는 JWT-only 시나리오)
     monkeypatch.setenv("JWT_SECRET", "test_secret_minimum_32bytes_xxxxxxxxxxxxxxxx")
     monkeypatch.setenv("JWT_ALGORITHM", "HS256")
     monkeypatch.setenv("JWT_ACCESS_EXPIRE_MINUTES", "60")
     monkeypatch.setenv("JWT_REFRESH_EXPIRE_DAYS", "7")
+    # 48차 C5: 본 회귀는 prod 모드 (DEV_MODE 비활성). conftest autouse가 set한 값 제거.
     monkeypatch.delenv("DEV_MODE_X_USER_FALLBACK", raising=False)
 
     # alice 사용자 등록 (admin)
@@ -195,15 +196,47 @@ class TestChangePassword:
             "/api/auth/change-password",
             json={"new_password": "new_secret_345"},
         )
-        # UserContextMiddleware 단계에서 401 AUTH_REQUIRED
+        # 48차 C5: prod 모드 → middleware AUTH_REQUIRED 또는 require_jwt_user JWT_REQUIRED
         assert r.status_code == 401
+        assert r.json()["error"]["code"] in ("AUTH_REQUIRED", "JWT_REQUIRED")
+
+    def test_change_password_with_only_x_user_rejected_in_dev_mode(
+        self, _isolated, monkeypatch
+    ):
+        """48차 C5: DEV_MODE 활성 + X-User만 → 401 JWT_REQUIRED (다른 user PW 변경 차단)."""
+        monkeypatch.setenv("DEV_MODE_X_USER_FALLBACK", "1")
+        r = client.post(
+            "/api/auth/change-password",
+            json={"new_password": "new_secret_345"},
+            headers={"X-User": "alice"},
+        )
+        assert r.status_code == 401
+        assert r.json()["error"]["code"] == "JWT_REQUIRED"
 
 
 class TestLogout:
-    def test_logout_basic(self, _isolated):
+    def test_logout_without_auth_rejected(self, _isolated):
+        """48차 C5: 인증 없이 logout → 401 (prod 모드 — middleware AUTH_REQUIRED).
+
+        이전 (47차): no-op 200. 48차에 require_jwt_user 강제.
+        """
         r = client.post("/api/auth/logout")
-        # 미인증 logout — no-op + 200
-        assert r.status_code in (200, 401)
+        assert r.status_code == 401
+        # prod 모드 (DEV_MODE off): middleware 단계 AUTH_REQUIRED
+        assert r.json()["error"]["code"] in ("AUTH_REQUIRED", "JWT_REQUIRED")
+
+    def test_logout_with_only_x_user_rejected_in_dev_mode(self, _isolated, monkeypatch):
+        """48차 C5 핵심: DEV_MODE 활성 시에도 X-User만으로 logout 거부.
+
+        47차 잠재 결함: DEV_MODE_X_USER_FALLBACK=1 환경에서 admin이 X-User='other'로
+        호출 → middleware fallback → other_user logout 가능했던 spoofing.
+        48차 require_jwt_user가 Authorization Bearer 강제로 차단.
+        """
+        monkeypatch.setenv("DEV_MODE_X_USER_FALLBACK", "1")
+        r = client.post("/api/auth/logout", headers={"X-User": "alice"})
+        assert r.status_code == 401
+        # DEV_MODE 활성 + X-User만: middleware 통과 → require_jwt_user 단계 JWT_REQUIRED
+        assert r.json()["error"]["code"] == "JWT_REQUIRED"
 
     def test_logout_authenticated_revokes_token(self, _isolated):
         """47차 W35: 인증된 사용자 logout → token_version 증가 → 기존 토큰 거부."""

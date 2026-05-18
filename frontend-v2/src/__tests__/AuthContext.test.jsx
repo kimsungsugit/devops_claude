@@ -174,6 +174,49 @@ describe('AuthContext', () => {
     expect(screen.getByTestId('mustChange').textContent).toBe('true');
   });
 
+  it('changePassword response updates tokens (48차 C6)', async () => {
+    apiMock.setTokens({ access: 'old-access', refresh: 'old-refresh' });
+    vi.spyOn(global, 'fetch').mockImplementation(async (url) => {
+      if (String(url).includes('/api/auth/me')) {
+        return {
+          ok: true,
+          json: async () => ({
+            authenticated: true,
+            username: 'alice',
+            is_admin: false,
+            must_change_password: true,
+          }),
+        };
+      }
+      if (String(url).includes('/api/auth/change-password')) {
+        return {
+          ok: true,
+          json: async () => ({
+            changed: true,
+            username: 'alice',
+            access_token: 'new-access',
+            refresh_token: 'new-refresh',
+            token_type: 'bearer',
+          }),
+        };
+      }
+      return { ok: false, status: 404, json: async () => ({}) };
+    });
+
+    await act(async () => {
+      render(<AuthProvider><TestConsumer /></AuthProvider>);
+    });
+    await waitFor(() => expect(screen.getByTestId('mustChange').textContent).toBe('true'));
+
+    await act(async () => {
+      screen.getByTestId('changepw-btn').click();
+    });
+    // 48차 C6: 응답 token 자동 갱신
+    expect(apiMock.getAccessToken()).toBe('new-access');
+    expect(apiMock.getRefreshToken()).toBe('new-refresh');
+    await waitFor(() => expect(screen.getByTestId('mustChange').textContent).toBe('false'));
+  });
+
   it('401 on /me with no refresh → logout', async () => {
     apiMock.setTokens({ access: 'expired.token' });  // no refresh
     vi.spyOn(global, 'fetch').mockResolvedValue({

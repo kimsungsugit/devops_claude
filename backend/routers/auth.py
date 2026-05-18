@@ -18,7 +18,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, field_validator
 
 from backend.dependencies.admin import require_admin
-from backend.services.admin_users import is_admin, load_admins
+from backend.dependencies.auth import require_jwt_user
+from backend.services.admin_users import is_admin, load_admins, mask_user
 from backend.services.auth_service import (
     TokenError,
     create_access_token,
@@ -96,7 +97,7 @@ async def login(body: LoginRequest) -> dict:
     """
     record = verify_credentials(body.username, body.password)
     if not record:
-        _logger.warning("Login failed: user=%s", _mask(body.username))
+        _logger.warning("Login failed: user=%s", mask_user(body.username))
         raise HTTPException(
             status_code=401,
             detail={"code": "INVALID_CREDENTIALS", "message": "사용자명 또는 비밀번호 불일치"},
@@ -106,7 +107,7 @@ async def login(body: LoginRequest) -> dict:
     tv = int(record.get("token_version", 0))
     access = create_access_token(actual_username, token_version=tv)
     refresh = create_refresh_token(actual_username, token_version=tv)
-    _logger.info("Login OK: user=%s", _mask(actual_username))
+    _logger.info("Login OK: user=%s", mask_user(actual_username))
     return {
         "access_token": access,
         "refresh_token": refresh,
@@ -160,17 +161,15 @@ async def refresh(body: RefreshRequest) -> dict:
 
 
 @router.post("/change-password")
-async def change_password_endpoint(body: ChangePasswordRequest) -> dict:
+async def change_password_endpoint(
+    body: ChangePasswordRequest,
+    user: str = Depends(require_jwt_user),
+) -> dict:
     """본인 PW 변경 — 임시 PW 후 첫 로그인 시 호출.
 
-    JWT 인증 필요 (UserContext에서 사용자 식별). must_change_password 초기화.
+    48차 C5: JWT-only 인증 강제 (DEV_MODE X-User fallback 거부) — 다른 사용자
+    PW 변경 spoofing 차단. require_jwt_user Depends.
     """
-    user = get_current_user()
-    if not user or user == "default":
-        raise HTTPException(
-            status_code=401,
-            detail={"code": "AUTH_REQUIRED", "message": "인증 필요"},
-        )
     try:
         result = _change_password(user, body.new_password)
     except ValueError as e:
@@ -183,7 +182,7 @@ async def change_password_endpoint(body: ChangePasswordRequest) -> dict:
     new_tv = int(result.get("new_token_version", 0))
     access = create_access_token(user, token_version=new_tv)
     refresh = create_refresh_token(user, token_version=new_tv)
-    _logger.info("Password changed: user=%s new_tv=%d", _mask(user), new_tv)
+    _logger.info("Password changed: user=%s new_tv=%d", mask_user(user), new_tv)
     return {
         "changed": True,
         "username": user,
@@ -194,30 +193,21 @@ async def change_password_endpoint(body: ChangePasswordRequest) -> dict:
 
 
 @router.post("/logout")
-async def logout() -> dict:
+async def logout(user: str = Depends(require_jwt_user)) -> dict:
     """47차 W35 — 인증된 사용자의 token_version 증가 → 기존 토큰 모두 즉시 무효화.
 
     이전 (45차): stateless. 도난된 refresh 7일간 유효.
     47차: server-side revocation. logout 직후 모든 access/refresh 거부 (TOKEN_REVOKED).
+    48차 C5: JWT-only 강제 (X-User fallback 거부) — 다른 사용자 강제 logout spoofing 차단.
     """
-    user = get_current_user()
-    if not user or user == "default":
-        # 미인증 logout — no-op (client측 토큰 정리만)
-        return {"ok": True, "message": "client 측 토큰 삭제"}
     try:
         result = increment_token_version(user)
-        _logger.info("Logout OK: user=%s new_tv=%d", _mask(user), result["new_token_version"])
+        _logger.info("Logout OK: user=%s new_tv=%d", mask_user(user), result["new_token_version"])
         return {"ok": True, "username": user, "revoked": True}
     except ValueError:
         # 사용자 삭제됨 — 그래도 OK 응답 (client 측 정리)
         return {"ok": True, "message": "client 측 토큰 삭제 (server 측 사용자 없음)"}
 
 
-def _mask(user: str) -> str:
-    """log용 마스킹 — admin_users.mask_user 패턴."""
-    u = (user or "").strip()
-    if len(u) <= 2:
-        return "*" * len(u)
-    if len(u) <= 4:
-        return u[0] + "*" * (len(u) - 1)
-    return u[:2] + "*" * (len(u) - 3) + u[-1]
+# 48차 W44: `_mask` 중복 제거 — `admin_users.mask_user` 단일 출처 사용.
+# 이전 (45차): auth_router 내부에 자체 _mask 함수 정의. W19와 동일 패턴 재발.

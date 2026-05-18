@@ -18,6 +18,9 @@ from backend.services.auth_service import (
     decode_token,
     is_dev_mode_x_user_fallback_enabled,
 )
+# 48차 W45: users.get_user를 top-level import (이전 47차 W35: lazy import).
+# circular 안전 — users.py가 user_context 미참조.
+from backend.services.users import get_user as _users_get_user
 
 _logger = logging.getLogger(__name__)
 
@@ -94,11 +97,11 @@ def _extract_user_from_authorization(request: Request) -> tuple[str | None, str 
     except TokenError as e:
         return (None, e.code)
     username = payload["sub"]
-    # 47차 W35: token_version 검증 — DB read (cache hit 빠름).
+    # 47차 W35 + 48차 W45: token_version 검증 — DB read (lru_cache + mtime invalidate).
     # 미존재 user는 USER_REVOKED, tv 불일치는 TOKEN_REVOKED.
+    # 48차 W45: lazy import 제거 — top-level import로 매 요청 dict 조회 비용 절감.
     try:
-        from backend.services.users import get_user as _get_user
-        record = _get_user(username)
+        record = _users_get_user(username)
     except Exception:
         record = None
     if record is None:
