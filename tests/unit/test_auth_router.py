@@ -23,7 +23,11 @@ client = TestClient(app)
 
 @pytest.fixture(autouse=True)
 def _isolated_admins(tmp_path, monkeypatch):
-    """각 test 격리된 admin_users.json + 'tester'를 admin으로 기본 등록."""
+    """각 test 격리된 admin_users.json + 'tester'를 admin으로 기본 등록.
+
+    45차 C1: DEV_MODE_X_USER_FALLBACK=1로 X-User 헤더 신뢰 모델 유지 (기존 회귀 호환).
+    JWT 회귀는 별도 test_auth_login_router.py에서 검증.
+    """
     p = tmp_path / "admin_users.json"
     p.write_text('{"admins": ["tester"], "schema_version": 1}', encoding="utf-8")
     monkeypatch.setattr(au, "ADMIN_USERS_PATH", p)
@@ -34,6 +38,8 @@ def _isolated_admins(tmp_path, monkeypatch):
         monkeypatch.setattr(au, "_LOCK", threading.Lock())
     au._cache["mtime"] = 0.0
     au._cache["admins"] = set()
+    # 45차 C1: X-User backward-compat 모드 활성
+    monkeypatch.setenv("DEV_MODE_X_USER_FALLBACK", "1")
     return p
 
 

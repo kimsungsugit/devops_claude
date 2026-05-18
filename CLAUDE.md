@@ -457,6 +457,40 @@ ISO 26262 ASIL B+ 통합 테스트 산출물 자동 생성. SwUT 30~32차 인프
 | 41차 | Bootstrap admin + APIRouter deps + visibility refresh | 1952 → 1956 (+4) |
 | 42차 | error_handler nested + mask_user + retry + debounce | 1956 → 1968 (+12) |
 
+### 45차 — C1 JWT/세션 인증 도입 (X-User spoofing 차단)
+- 40~44차 X-User 헤더 신뢰 모델 → JWT bearer token으로 교체. ISO 26262 audit 추적성 — 진짜 사용자 식별 보장.
+- **사용자 결정** (AskUserQuestion 4건 모두 Recommended): localStorage 저장 / admin이 사용자 등록 + 임시 PW / 개발 모드 X-User backward-compat / Access 60분 + Refresh 7일.
+- **Backend 신규**:
+  - `backend/services/auth_service.py` — JWT encode/decode (PyJWT HS256) + bcrypt hash/verify. 72-byte limit 명시. dev fallback secret + DEV_MODE_X_USER_FALLBACK env.
+  - `backend/services/users.py` — `config/users.json` CRUD (FileLock + atomic write + lru_cache + mtime invalidate). add/change_password/remove/list_users + bootstrap_admin_user_from_env.
+  - `backend/routers/auth.py` 확장 — POST `/api/auth/login` + `/refresh` + `/change-password` + `/logout`. Pydantic LoginRequest/RefreshRequest/ChangePasswordRequest.
+  - `backend/user_context.py` 재작성 — JWT Authorization Bearer 우선 → DEV_MODE 활성 시 X-User fallback. `/api/auth/me`는 best-effort (실패해도 401 raise 안 함, authenticated=False 응답).
+  - `backend/main.py` lifespan — `bootstrap_admin_user_from_env()` startup hook.
+- **Frontend 신규**:
+  - `frontend-v2/src/contexts/AuthContext.jsx` — login/logout state + access/refresh token localStorage. /me 401 시 refresh 자동 시도 → 실패 시 logout. StrictMode safe (`isMountedRef`).
+  - `frontend-v2/src/views/Login.jsx` — 로그인 UI + must_change_password 강제 PW 변경 화면.
+  - `frontend-v2/src/components/AuthGate.jsx` — authenticated=false 또는 mustChangePassword=true 시 `<Login>` 렌더, true면 children.
+  - `frontend-v2/src/api.js` — `getAccessToken`/`getRefreshToken`/`setTokens`/`clearTokens` + `_authHeaders()` helper. `api()`/`postSse()`/`uploadServerUdsTemplate()` 모두 Authorization 자동 부착.
+  - `frontend-v2/src/main.jsx` — AuthProvider > AdminProvider > AuthGate > App 순서.
+- **Backward compat**:
+  - `DEV_MODE_X_USER_FALLBACK=1`: 개발 (`uvicorn --reload`) 환경에서 X-User 헤더만으로 호출 허용. 100+ 기존 회귀가 X-User 신뢰 모델 사용 — 깨지지 않도록 `tests/unit/conftest.py`에 autouse fixture로 자동 enable.
+  - 프로덕션 (`DEV_MODE_X_USER_FALLBACK=0` 또는 미설정): JWT 강제. X-User 헤더 무시. X-User spoofing 차단.
+- **회귀**:
+  - 신규 backend: +51 (auth_service 13 + users_service 19 + auth_login_router 13 + auth_router 기존 6 무회귀)
+  - 신규 frontend: +7 AuthContext (no token / valid token / login success / login fail / logout / mustChangePassword / 401 graceful)
+  - 광범위 backend 영향: admin_gate 39 + admin_users 12 + bootstrap 6 + error_handler 10 = 67건 무회귀
+- **신규 endpoint** (5):
+  - `POST /api/auth/login` (공개)
+  - `POST /api/auth/refresh` (공개)
+  - `POST /api/auth/change-password` (인증)
+  - `POST /api/auth/logout` (인증)
+  - `GET /api/auth/me` 확장 — must_change_password 응답 필드 추가
+- **CLAUDE.md** 입력 표면 매트릭스 갱신:
+  - JWT Authorization: middleware 검증 (전체 endpoint)
+  - X-User: DEV_MODE only fallback
+  - login/refresh: 공개 (인증 우회) — Pydantic + rate limit 의존
+- 패키지 추가: `PyJWT` + `bcrypt` (`pip install` 자동). passlib는 bcrypt 5.x 호환성으로 제외 (bcrypt 직접 사용).
+
 ### 44차 — 43차 자체 평가 발견 결함 4건 통합 fix (W21/W25/W28/I3)
 - 43차 commit `c577aa0` 자체 비판 평가에서 발견한 자체 해결 가능 4건. C1 JWT는 45차+ 별도 큰 라운드.
 - **W21 CLAUDE.md archive 분리**: 본문 1500+ → ~550 lines 압축. 36-fix~42차 상세 노트를 [`docs/rounds/sw_test_round_history.md`](docs/rounds/sw_test_round_history.md)로 분리. 본문에는 라운드 summary table + archive 링크. 33-35차 핵심 정책 + 43차/44차 (최신) 본문 유지.

@@ -88,7 +88,6 @@ async def _lifespan(app_instance):
     try:
         from backend.services.admin_users import bootstrap_from_env
         _bootstrap_result = bootstrap_from_env()
-        # 42차 W7+W18: 평문 user 노출 안 함 — count + masked만
         _safe_log = {
             "action": _bootstrap_result.get("action"),
             "added_count": _bootstrap_result.get("added_count", 0),
@@ -97,6 +96,20 @@ async def _lifespan(app_instance):
         _api_logger.info("Admin bootstrap: %s", _safe_log)
     except Exception as _be:
         _api_logger.warning("Admin bootstrap 실패: %s", _be)
+
+    # 45차 C1: 빈 users.json + BOOTSTRAP_ADMIN_USER/PASSWORD env면 첫 사용자 자동 등록.
+    # 첫 로그인 시 must_change_password=True로 PW 변경 강제.
+    try:
+        from backend.services.users import bootstrap_admin_user_from_env as _bootstrap_user
+        from backend.services.admin_users import mask_user as _mask
+        _user_result = _bootstrap_user()
+        _safe_user_log = {
+            "action": _user_result.get("action"),
+            "username": _mask(_user_result["username"]) if _user_result.get("username") else None,
+        }
+        _api_logger.info("User bootstrap: %s", _safe_user_log)
+    except Exception as _ue:
+        _api_logger.warning("User bootstrap 실패: %s", _ue)
 
     _api_logger.info("=" * 50)
     _api_logger.info("DevOps Release Server started")

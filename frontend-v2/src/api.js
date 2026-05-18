@@ -4,6 +4,35 @@ export function getUsername() { return localStorage.getItem(USER_KEY) || ''; }
 export function setUsername(name) { localStorage.setItem(USER_KEY, (name || '').trim()); }
 
 /**
+ * 45차 C1 — JWT 토큰 저장 (사용자 결정: localStorage).
+ * Access token: 60분 만료. Refresh token: 7일 만료. logout 시 모두 삭제.
+ * XSS 노출 위험은 internal network 환경 + CSP로 차단. 외부 노출 시 httpOnly cookie 검토.
+ */
+const ACCESS_TOKEN_KEY = 'devops_v2_access_token';
+const REFRESH_TOKEN_KEY = 'devops_v2_refresh_token';
+
+export function getAccessToken() { return localStorage.getItem(ACCESS_TOKEN_KEY) || ''; }
+export function getRefreshToken() { return localStorage.getItem(REFRESH_TOKEN_KEY) || ''; }
+export function setTokens({ access, refresh }) {
+  if (access) localStorage.setItem(ACCESS_TOKEN_KEY, access);
+  if (refresh) localStorage.setItem(REFRESH_TOKEN_KEY, refresh);
+}
+export function clearTokens() {
+  localStorage.removeItem(ACCESS_TOKEN_KEY);
+  localStorage.removeItem(REFRESH_TOKEN_KEY);
+}
+
+/** 45차 C1 — auth 헤더 빌더. Authorization Bearer 우선 + X-User fallback (DEV 모드 backend). */
+function _authHeaders() {
+  const headers = {};
+  const access = getAccessToken();
+  if (access) headers.Authorization = `Bearer ${access}`;
+  const user = getUsername();
+  if (user) headers['X-User'] = user;
+  return headers;
+}
+
+/**
  * API base URL resolution (priority):
  * 1. window.__ARIA_API_BASE__ (runtime injected, e.g. by config.js)
  * 2. VITE_API_BASE_URL build-time env
@@ -17,23 +46,37 @@ function buildUrl(path) {
   return API_BASE.replace(/\/$/, '') + path;
 }
 
-/** Generic JSON fetch helper */
+/** Generic JSON fetch helper.
+ *
+ * 45차 C1: Authorization Bearer + X-User 헤더 자동 부착. 401 시 caller가 catch하여
+ * AuthContext.logout() 호출 (자동 refresh 큐는 별도 라운드).
+ */
 export async function api(path, options = {}) {
-  const user = getUsername();
   const res = await fetch(buildUrl(path), {
-    cache: 'no-store',   // bypass browser HTTP cache — API responses must be fresh
-    headers: { 'Content-Type': 'application/json', ...(user ? { 'X-User': user } : {}) },
+    cache: 'no-store',
+    headers: { 'Content-Type': 'application/json', ..._authHeaders(), ...(options.headers || {}) },
     ...options,
   });
   if (!res.ok) {
     const text = await res.text();
     let msg = text || `HTTP ${res.status}`;
+    let code = `HTTP_${res.status}`;
     try {
       const j = JSON.parse(text);
-      if (j && typeof j.detail === 'string') msg = j.detail;
-      else if (j && typeof j.message === 'string') msg = j.message;
+      // 새 표준 응답: {ok: false, error: {code, message}}
+      if (j?.error?.message) {
+        msg = j.error.message;
+        code = j.error.code || code;
+      } else if (typeof j.detail === 'string') {
+        msg = j.detail;
+      } else if (typeof j.message === 'string') {
+        msg = j.message;
+      }
     } catch (_) {}
-    throw new Error(msg);
+    const err = new Error(msg);
+    err.status = res.status;
+    err.code = code;
+    throw err;
   }
   return res.json();
 }
@@ -48,10 +91,9 @@ export function post(path, body) {
  * Resolves when the stream ends.
  */
 export async function postSse(path, body, { onEvent, signal } = {}) {
-  const user = getUsername();
   const res = await fetch(buildUrl(path), {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream', ...(user ? { 'X-User': user } : {}) },
+    headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream', ..._authHeaders() },
     body: JSON.stringify(body),
     signal,
   });
@@ -161,12 +203,11 @@ export async function saveServerUdsTemplate(templatePath) {
 
 /** Upload a .docx template file and set it as the active server template. */
 export async function uploadServerUdsTemplate(file) {
-  const user = getUsername();
   const form = new FormData();
   form.append('file', file);
   const res = await fetch(buildUrl('/api/config/uds-template/upload'), {
     method: 'POST',
-    headers: user ? { 'X-User': user } : {},
+    headers: _authHeaders(),
     body: form,
   });
   if (!res.ok) {

@@ -12,6 +12,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 vi.mock('../api.js', () => ({
   getUsername: () => 'tester',
+  getAccessToken: () => '',  // 45차 C1: AdminContext가 JWT 없이도 X-User fallback 동작
 }));
 
 const { AdminProvider, useAdminMode } = await import('../contexts/AdminContext.jsx');

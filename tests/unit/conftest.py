@@ -43,3 +43,21 @@ def _default_admin_users(tmp_path_factory, monkeypatch, request):
     # cache invalidate — 다음 load_admins에서 disk read
     au._cache["mtime"] = 0.0
     au._cache["admins"] = set()
+
+
+@pytest.fixture(autouse=True)
+def _default_jwt_env(monkeypatch):
+    """45차 C1 — 기존 X-User 신뢰 회귀 호환.
+
+    DEV_MODE_X_USER_FALLBACK=1로 backward-compat 모드 활성. 단, JWT 전용 회귀
+    (test_auth_login_router.py, test_auth_service.py)는 본인 fixture에서 명시적으로
+    `monkeypatch.delenv("DEV_MODE_X_USER_FALLBACK", raising=False)` 호출하여 비활성.
+
+    JWT secret도 기본 secret 설정 — 100+ 회귀가 JWT decoder import만 해도 동작.
+    """
+    monkeypatch.setenv("DEV_MODE_X_USER_FALLBACK", "1")
+    if not (monkeypatch.delenv("JWT_SECRET", raising=False) or False):
+        monkeypatch.setenv(
+            "JWT_SECRET",
+            "default_test_secret_minimum_32bytes_xxxxxxxxxxxxxxxx",
+        )

@@ -8,7 +8,7 @@
  * C3 fix (same-tab 미반영): storage event + 동일 탭 custom event 둘 다 listen.
  */
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
-import { getUsername } from '../api.js';
+import { getAccessToken, getUsername } from '../api.js';
 
 // 42차 W5: refresh debounce — 같은 탭에서 visibility/storage event 빠르게 연쇄 시 fetch 1회만
 const REFRESH_DEBOUNCE_MS = 5000;
@@ -53,10 +53,15 @@ export function AdminProvider({ children }) {
     lastFetchAt.current = now;
 
     const user = getUsername();
+    // 45차 C1: JWT Authorization 우선 부착, X-User는 backward-compat (DEV 모드 backend).
+    const access = getAccessToken();
+    const headers = {};
+    if (access) headers.Authorization = `Bearer ${access}`;
+    if (user) headers['X-User'] = user;
     try {
       const res = await fetch(buildUrl('/api/auth/me'), {
         cache: 'no-store',
-        headers: user ? { 'X-User': user } : {},
+        headers,
       });
       // 43차 W20: fetch 동안 unmount 시 무시
       if (!isMountedRef.current) return;
