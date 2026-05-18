@@ -175,8 +175,16 @@ def mask_user(user: str) -> str:
 
 
 # 43차 W19 — 42차 import path backward-compat (기존 tests / 외부 코드).
-# 차후 라운드(44차+)에서 deprecation warning + 완전 제거 검토.
-_mask_user = mask_user
+# 44차 I3 — DeprecationWarning + alias 유지. 45차+ 완전 제거 검토.
+def _mask_user(user: str) -> str:  # noqa: D401 — alias docstring 불필요
+    """Deprecated — use `mask_user` instead (44차 I3)."""
+    import warnings as _warnings
+    _warnings.warn(
+        "admin_users._mask_user is deprecated; use mask_user (44차 I3).",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    return mask_user(user)
 
 
 def bootstrap_from_env() -> dict[str, Any]:

@@ -136,3 +136,29 @@ class TestDictDetail:
         assert body["error"]["code"] == "BAD_INPUT"
         # message가 "{'code': 'BAD_INPUT'}"가 아니라 fallback
         assert body["error"]["message"] == "HTTP 422 error"
+
+    def test_dict_with_empty_string_message(self):
+        """44차 W28: message 키는 있지만 빈 string — fallback 사용.
+
+        의도적 빈 message는 사용자 혼란 방지 정책. 호출 측은 명시적 message 제공 필요.
+        """
+        exc = HTTPException(
+            status_code=403,
+            detail={"code": "FORBIDDEN", "message": ""},
+        )
+        status, body = _call(exc)
+        assert status == 403
+        assert body["error"]["code"] == "FORBIDDEN"
+        # 빈 string이 그대로 노출되지 않고 status-aware fallback 사용
+        assert body["error"]["message"] == "HTTP 403 error"
+
+    def test_dict_with_none_message(self):
+        """44차 W28: message 키 None — fallback 사용 (raise 측 누락 간주)."""
+        exc = HTTPException(
+            status_code=500,
+            detail={"code": "INTERNAL_ERROR", "message": None},
+        )
+        status, body = _call(exc)
+        assert status == 500
+        assert body["error"]["code"] == "INTERNAL_ERROR"
+        assert body["error"]["message"] == "HTTP 500 error"

@@ -85,16 +85,16 @@ async def http_exception_handler(request: Request, exc: HTTPException) -> JSONRe
         # 구조화된 detail — code/message를 직접 사용.
         # 43차 W24 fix: 빈 dict({}) 시 `str({})` = "{}"가 frontend에 노출되어 사용자
         # 혼란 발생. 빈 dict이거나 message 키가 없으면 status-aware fallback 사용.
+        # 44차 W28 정밀화: `message` 값 falsy일 때 모두 status-aware fallback 사용.
+        # 분류:
+        #   - key 없음 → fallback ("HTTP <N> error")
+        #   - key 있고 None → fallback (raise 측 누락 간주)
+        #   - key 있고 빈 string ("") → fallback (의도적 빈 message는 사용자 혼란 야기)
+        #   - 그 외 truthy → 그대로 사용
+        # `dict.get("message")`는 미존재 시 None — falsy 한 줄 처리로 통합.
         code = detail.get("code") or f"HTTP_{exc.status_code}"
-        raw_message = detail.get("message")
-        if raw_message:
-            message = raw_message
-        elif detail:
-            # message 키 없지만 다른 키는 있음 — repr 대신 fallback + extra에 raw 보존.
-            message = f"HTTP {exc.status_code} error"
-        else:
-            # 빈 dict — status-aware fallback.
-            message = f"HTTP {exc.status_code} error"
+        raw_msg = detail.get("message")
+        message = raw_msg if raw_msg else f"HTTP {exc.status_code} error"
         extra = {k: v for k, v in detail.items() if k not in ("code", "message")}
         return error_response(
             exc.status_code, message, code=code,

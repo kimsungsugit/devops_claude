@@ -91,6 +91,19 @@ class TestBootstrapFromEnv:
         assert au.mask_user("abcd") == "a***"
         assert au.mask_user("hbrnd2") == "hb***2"  # 일반 케이스
         assert au.mask_user("") == ""
-        # backward-compat alias
-        assert au._mask_user is au.mask_user
-        assert au._mask_user("hbrnd2") == "hb***2"
+
+    def test_44_i3_mask_user_deprecation_alias(self):
+        """44차 I3: `_mask_user` alias는 DeprecationWarning 발화 + 동작 동등."""
+        import warnings as _w
+        with _w.catch_warnings(record=True) as caught:
+            _w.simplefilter("always")
+            # alias 호출 — 결과는 mask_user와 동일
+            result = au._mask_user("hbrnd2")
+            assert result == "hb***2"
+            assert result == au.mask_user("hbrnd2")
+            # DeprecationWarning 1건 발화 확인
+            deprecation_warnings = [
+                item for item in caught if issubclass(item.category, DeprecationWarning)
+            ]
+            assert len(deprecation_warnings) >= 1
+            assert "mask_user" in str(deprecation_warnings[0].message)

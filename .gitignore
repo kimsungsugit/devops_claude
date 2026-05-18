@@ -46,8 +46,9 @@ jenkins_reports_*/
 evals/
 plans/
 
-# === 문서 산출물 (템플릿 제외) ===
-docs/
+# === 문서 산출물 (템플릿 제외, docs/rounds/ 메타 노트는 commit) ===
+docs/*
+!docs/rounds/
 project_docs/
 *.log
 

@@ -147,6 +147,7 @@ describe('AdminContext', () => {
   });
 
   it('W4 retry: fetch failure schedules 30s retry (42차)', async () => {
+    // 44차 W25: render + 첫 fetch resolve를 act 안에서 처리 — act warning 차단
     vi.useFakeTimers();
     let callCount = 0;
     vi.spyOn(global, 'fetch').mockImplementation(async () => {
@@ -158,12 +159,16 @@ describe('AdminContext', () => {
       };
     });
 
-    render(
-      <AdminProvider>
-        <TestConsumer />
-      </AdminProvider>
-    );
-    await vi.waitFor(() => expect(callCount).toBeGreaterThan(0));
+    await act(async () => {
+      render(
+        <AdminProvider>
+          <TestConsumer />
+        </AdminProvider>
+      );
+    });
+    await act(async () => {
+      await vi.waitFor(() => expect(callCount).toBeGreaterThan(0));
+    });
     // 첫 fetch 실패 — 30초 retry timer 예약
     expect(callCount).toBe(1);
 
@@ -178,6 +183,7 @@ describe('AdminContext', () => {
     // unmount 후 retry timer fire 시 setState 호출 안 되는지 검증.
     // 이전 (42차): timer fire → refresh() → setState → "Can't perform state update on unmounted" warning.
     // 43차 W20 fix: isMountedRef로 setState skip.
+    // 44차 W25: render + fetch resolve를 act 안에서 처리 — act warning 차단.
     vi.useFakeTimers();
     let callCount = 0;
     let postUnmountSetState = false;
@@ -194,12 +200,18 @@ describe('AdminContext', () => {
       origError(msg);
     };
 
-    const { unmount } = render(
-      <AdminProvider>
-        <TestConsumer />
-      </AdminProvider>
-    );
-    await vi.waitFor(() => expect(callCount).toBeGreaterThan(0));
+    let unmount;
+    await act(async () => {
+      const result = render(
+        <AdminProvider>
+          <TestConsumer />
+        </AdminProvider>
+      );
+      unmount = result.unmount;
+    });
+    await act(async () => {
+      await vi.waitFor(() => expect(callCount).toBeGreaterThan(0));
+    });
     // unmount — retry timer 살아있음
     unmount();
     // 30초 후 timer fire 시뮬레이션
