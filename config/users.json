@@ -1,4 +1,12 @@
 {
-  "users": [],
+  "users": [
+    {
+      "username": "hbrnd2",
+      "password_hash": "$2b$12$PTPLoB9HUX2L2LSIyfww/.W43pcGKEJO4sZ0V.PZxiioHessSoIN.",
+      "must_change_password": false,
+      "created_at": "2026-05-18T06:26:12.717375+00:00",
+      "token_version": 1
+    }
+  ],
   "schema_version": 1
 }

@@ -11,7 +11,17 @@
       "Bash(findstr *)",
       "Bash(bash scripts/install_git_hooks.sh)",
       "Bash(Get-ChildItem -Path \"D:\\\\Project\\\\devops\\\\Release_claude\\\\backend\\\\services\" -Filter \"swit_*.py\")",
-      "Bash(Select-Object -ExpandProperty Name)"
+      "Bash(Select-Object -ExpandProperty Name)",
+      "Bash(cd *)",
+      "Bash(backend/.venv/Scripts/python.exe -c \"import jwt; import bcrypt; print\\('backend venv: PyJWT', jwt.__version__, '/ bcrypt', bcrypt.__version__\\)\")",
+      "Bash(backend/.venv/Scripts/python.exe -m pip install PyJWT bcrypt)",
+      "Bash(backend/.venv/Scripts/python.exe -c \"from backend.services.auth_service import create_access_token, decode_token; t = create_access_token\\('test', token_version=1\\); p = decode_token\\(t\\); print\\('backend venv smoke OK:', p['sub'], 'tv=', p['tv']\\)\")",
+      "Bash(backend/.venv/Scripts/python.exe -m uvicorn backend.main:app --host 0.0.0.0 --port 9000 --reload)",
+      "Bash(backend/.venv/Scripts/python.exe -c \"import dotenv; print\\('dotenv ok', dotenv.__version__\\)\")",
+      "Bash(backend/.venv/Scripts/python.exe -m pip install python-dotenv)",
+      "Bash(backend/.venv/Scripts/python.exe -c \"from dotenv import load_dotenv; print\\('dotenv OK'\\)\")",
+      "Bash(taskkill /PID 17468 /F /T)",
+      "Bash(cmd //c \"taskkill /PID 17468 /F /T\")"
     ]
   }
 }

@@ -31,6 +31,14 @@ if str(repo_root) not in sys.path:
 
 import os
 
+# 49차 — .env 자동 로드 (JWT_SECRET / BOOTSTRAP_ADMIN_USER 등). uvicorn은 .env 자동 로드
+# 안 함 — 사용자가 매번 env 수동 설정하지 않도록 backend startup 시 1회 로드.
+try:
+    from dotenv import load_dotenv as _load_dotenv  # type: ignore
+    _load_dotenv(repo_root / ".env", override=False)  # 기존 환경 변수 우선
+except ImportError:
+    pass  # python-dotenv 미설치 시 graceful
+
 
 class JSONFormatter(logging.Formatter):
     """Structured JSON log formatter — activate via LOG_FORMAT=json env var."""

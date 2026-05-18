@@ -340,6 +340,13 @@ def _do_swit_sitr_build(req: SwITSitrBuildRequest) -> Response:
     Coverage와 동일 입력 source / ASIL map 정책. xlsm 출력 — media_type
     "application/vnd.ms-excel.sheet.macroenabled.12".
     """
+    # 임시 디버그 (debug 400) — 사용자가 frontend에서 log_folder 입력했는데 ValueError
+    # 발생하는 원인 추적. 받은 payload 핵심 필드 dump.
+    _logger.warning(
+        "DEBUG sitr payload: project_id=%r release=%r log_folder=%r template=%r jenkins=%r",
+        req.project_id, req.release_sw_version,
+        req.log_folder, req.template_path, req.jenkins_build_number,
+    )
     resolver = get_resolver()
     session = collect_swit_session(
         resolver, req.project_id,
