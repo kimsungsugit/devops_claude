@@ -21,7 +21,8 @@
       "Bash(backend/.venv/Scripts/python.exe -m pip install python-dotenv)",
       "Bash(backend/.venv/Scripts/python.exe -c \"from dotenv import load_dotenv; print\\('dotenv OK'\\)\")",
       "Bash(taskkill /PID 17468 /F /T)",
-      "Bash(cmd //c \"taskkill /PID 17468 /F /T\")"
+      "Bash(cmd //c \"taskkill /PID 17468 /F /T\")",
+      "Bash(cmd //c \"taskkill /PID 1448 /F /T\")"
     ]
   }
 }
