@@ -22,7 +22,28 @@
       "Bash(backend/.venv/Scripts/python.exe -c \"from dotenv import load_dotenv; print\\('dotenv OK'\\)\")",
       "Bash(taskkill /PID 17468 /F /T)",
       "Bash(cmd //c \"taskkill /PID 17468 /F /T\")",
-      "Bash(cmd //c \"taskkill /PID 1448 /F /T\")"
+      "Bash(cmd //c \"taskkill /PID 1448 /F /T\")",
+      "Bash(cd /d D:\\\\Project\\\\devops\\\\Release_claude)",
+      "Bash(.venv\\\\Scripts\\\\python.exe -m uvicorn backend.main:app --port 9000 --reload)",
+      "Bash(./.venv/Scripts/python.exe -m uvicorn backend.main:app --port 9000 --reload)",
+      "Bash(start *)",
+      "Bash(taskkill /F /PID 7112 /T)",
+      "Bash(powershell *)",
+      "Bash(./.venv/Scripts/python.exe -m pytest tests/unit/test_swut_router.py tests/unit/test_swit_router.py -q --tb=short)",
+      "Bash(./.venv/Scripts/python.exe -m pytest tests/unit/ -q --tb=line)",
+      "Bash(./.venv/Scripts/python.exe -m pytest tests/unit/test_swut_router.py::TestSwutConfigFallback50 tests/unit/test_swit_router.py::TestSwitConfigFallback50 -q --tb=short)",
+      "Bash(./.venv/Scripts/python.exe -m pytest tests/unit/test_swut_router.py tests/unit/test_swit_router.py -q --tb=line)",
+      "Bash(./.venv/Scripts/python.exe -m pytest tests/unit/test_swit_router.py::TestSwitConfigFallback50 -q --tb=short)",
+      "Bash(./.venv/Scripts/python.exe -c ' *)",
+      "Bash(powershell.exe -Command \"Stop-Process -Id 2156 -Force\")",
+      "Bash(powershell.exe -Command \"Get-Process python -ErrorAction SilentlyContinue | Select-Object Id, StartTime | Sort-Object StartTime | Format-Table -AutoSize\")",
+      "Bash(powershell.exe -Command \"Stop-Process -Id 26740 -Force -ErrorAction SilentlyContinue; Stop-Process -Id 16676 -Force -ErrorAction SilentlyContinue; Start-Sleep -Seconds 2; netstat -ano | Select-String ':9000.*LISTENING'\")",
+      "Bash(powershell.exe -Command \"Stop-Process -Id 29348 -Force\")",
+      "Bash(powershell.exe *)",
+      "Bash(./.venv/Scripts/python.exe -m pytest tests/unit/test_users_service.py::TestVerifyCredentials::test_verify_case_insensitive_username -q --tb=short)",
+      "Bash(./.venv/Scripts/python.exe -m pytest tests/unit/test_swit_router.py tests/unit/test_swit_coverage_aggregator.py tests/unit/test_swit_sitr_aggregator.py -q --tb=line)",
+      "Bash(./.venv/Scripts/python.exe -m pytest tests/unit/test_cloudium_extra_prefixes.py tests/unit/test_swit_router.py::TestExtraForbid53fix tests/unit/test_swit_router.py::TestSheetNameSubstring53fix -q --tb=short)",
+      "Bash(./.venv/Scripts/python.exe -m pytest tests/unit/test_cloudium_extra_prefixes.py tests/unit/test_swit_router.py tests/unit/test_swut_router.py -q --tb=line)"
     ]
   }
 }
