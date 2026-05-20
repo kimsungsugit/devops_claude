@@ -260,7 +260,7 @@ ISO 26262 ASIL A 단위테스트 산출물 자동 생성 + cross-validation 플�
 | reviewer_override / approver_override | maxlen 100 + 줄바꿈 금지 | **✓ 26차 W16 추가** |
 | doc_id_sequence | digit only | ✓ |
 | jenkins_build_number | ge=1 le=99999 | (옵션) |
-| cache_root / log_folder / template_path / swuds_docx_path | maxlen 500 + 줄바꿈 금지 | ✓ (PathPickerDialog 21차, **swuds_docx_path는 32차 W28 ASIL 2차 source 추가**) |
+| cache_root / log_folder / **coverage_template_path / sutr_template_path (51차 분리)** / swuds_docx_path | maxlen 500 + 줄바꿈 금지 | ✓ (PathPickerDialog 21차, **swuds_docx_path는 32차 W28 ASIL 2차 source 추가, 51차에 양식 path는 Coverage/SUTR 별도 Browse**) |
 | **c_source_root** | maxlen 500 + 줄바꿈 금지 | **✓ 30차 W21 추가 (PathPickerDialog + Doxygen @asil 추출 — 1차 ASIL source)** |
 | deviation_cases | max_length=200 + 합산 256KB + item key ≤20 | (programmatic) |
 
@@ -443,9 +443,9 @@ ISO 26262 ASIL B+ 통합 테스트 산출물 자동 생성. SwUT 30~32차 인프
 - **C3 (Critical X6)**: SwIT v2.02 양식 ASIL 시각 강조 사전 통보 — 31차 W29 색상 정책 (B 파랑 #E2F0FF / C 주황 #FFE5CC / D 빨강 #FFC7CE)이 SwIT 산출물에도 적용됨. **회사 v2.02 SITR 양식이 빨강만 표준이라 추가 색상은 비표준 audit 확장**. 라이브 PoC 검증 시 회사 audit reviewer에 사전 통보 의무
 - **W2 (Warning X4)**: SwIT SITR이 `_write_cover` / `_write_test_summary` / `_write_deviation` / `_write_test_log` private 함수 강결합. 향후 SwUT SUTR signature 변경 시 SwIT 회귀에서 자동 감지 위해 `__all__` 명시 또는 public alias 추가는 35차+ 정비 후보
 
-### 라운드 archive (36-fix ~ 42차)
+### 라운드 archive (36-fix ~ 42차, 49~50차)
 
-> **44차 W21**: 36-fix ~ 42차 상세 노트는 [`docs/rounds/sw_test_round_history.md`](docs/rounds/sw_test_round_history.md) 분리 (본문 비대화 해소).
+> **44차 W21**: 36-fix ~ 42차 상세 노트는 [`docs/rounds/sw_test_round_history.md`](docs/rounds/sw_test_round_history.md) 분리 (본문 비대화 해소). 49~50차도 같은 파일에 누적.
 
 | 라운드 | 주제 | 회귀 (backend) |
 |--------|------|---------------|
@@ -456,6 +456,11 @@ ISO 26262 ASIL B+ 통합 테스트 산출물 자동 생성. SwUT 30~32차 인프
 | 40차 | Backend Admin Role 시스템 (A안: 전체 admin only) — 보안 강화 | 1895 → 1952 (+57) |
 | 41차 | Bootstrap admin + APIRouter deps + visibility refresh | 1952 → 1956 (+4) |
 | 42차 | error_handler nested + mask_user + retry + debounce | 1956 → 1968 (+12) |
+| 49차 | swut_meta.json fallback (c_source_root/swuds_docx_path/swit template) | 2030 → 2030 (변경 0, 50차 fallback 회귀로 +9) |
+| 50차 | 403 raw fetch fix (X9) + C1/C2 fallback 회귀 + W4/W5 source origin 시각화 + SwIT meta config approvers | 2030 → 2042 (+12) |
+| 51차 | Template 2-field 분리 (Coverage/SUTR/SITR) + schema + router + frontend UI | 2042 → 2042 (회귀 갱신, +sutr maxlen 1) |
+| 52차 | 51차 자체 평가 fix — localStorage legacy 마이그레이션 + endpoint별 정확한 field 사용 검증 (+4) + cloudium Test Result prefix 추가 | 2042 → 2046 (+4) |
+| 53차 | deep-reviewer 발견 Critical 2 + Warning 회귀 3 — Pydantic extra=forbid + cloudium add_prefix blacklist + SwIT req priority/localStorage migration/source origin parse_warnings 회귀 | 2046 → 2048 (+2 backend, frontend +2 SwUT/SwIT migration) |
 
 ### 48차 — 47차 자체 평가 발견 C5/C6/C7 + W43/W44/W45 통합 fix
 - 47차 commit `93f6828` 자체 비판 평가에서 발견한 Critical 3건 + Warning 3건 일괄 처리.

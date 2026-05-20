@@ -51,6 +51,10 @@ from backend.services.swit_sitr_aggregator import (
     build_swit_sitr_report,
 )
 from backend.services.swut_swuds_parser import parse_swuds_docx
+# 49차 — SwIT는 별도 config 없이 swut_meta.json HDPDM01 슬롯 재활용.
+# c_source_root + swuds_docx_path 공유, template_paths는 swit_coverage_template /
+# swit_sitr_template 별도 키 (v2.02 양식이 SwUT v3.01과 다름).
+from backend.routers.swut import _load_meta_from_config
 
 _logger = logging.getLogger(__name__)
 
@@ -71,18 +75,20 @@ _BUILD_SEMAPHORE = asyncio.Semaphore(2)
 
 
 def _build_swit_coverage_meta(req: SwITBuildRequest) -> SwitCoverageBuildMeta:
-    """SwITBuildRequest → SwitCoverageBuildMeta. config는 SwUT와 분리 — 본 라운드는
-    project_id 기반 default 없이 req 값 우선 (config/swit_meta.json 별도 만들지 않음).
+    """SwITBuildRequest → SwitCoverageBuildMeta. 50차 — SwUT와 동일하게 config의
+    approvers + project_full_name fallback 적용. doc_id_base는 SwIT 고유 ("{project_id}-SwIT").
     """
+    cfg = _load_meta_from_config(req.project_id)
+    approvers = cfg.get("approvers", {}) or {}
     return SwitCoverageBuildMeta(
         project_id=req.project_id,
-        project_full_name=req.project_id,
-        asil_level=req.asil_level,
+        project_full_name=cfg.get("project_full_name", req.project_id),
+        asil_level=req.asil_level,  # SwIT default "ASIL B" (req) — config asil_level은 SwUT용 (ASIL A) 무시
         doc_id_base=f"{req.project_id}-SwIT",
         doc_id_sequence=req.doc_id_sequence,
-        default_author="",
-        default_reviewer="",
-        default_approver="",
+        default_author=approvers.get("default_author", ""),
+        default_reviewer=approvers.get("default_reviewer", ""),
+        default_approver=approvers.get("default_approver", ""),
         release_sw_version=req.release_sw_version,
         hw_version=req.hw_version,
         test_date=req.test_date,
@@ -94,21 +100,23 @@ def _build_swit_coverage_meta(req: SwITBuildRequest) -> SwitCoverageBuildMeta:
 
 
 def _build_swit_sitr_meta(req: SwITSitrBuildRequest) -> SwitSitrBuildMeta:
-    """SwITSitrBuildRequest → SwitSitrBuildMeta (34차).
+    """SwITSitrBuildRequest → SwitSitrBuildMeta (34차). 50차 — config approvers + project_full_name fallback.
 
     doc_id_base는 SITR로 고정 ("{project_id}-SITR"). final_test_result는 SUTR
     대칭 "OK" default — 사용자가 req에서 override하지 않는 한 SwitSitrBuildMeta
     default 사용.
     """
+    cfg = _load_meta_from_config(req.project_id)
+    approvers = cfg.get("approvers", {}) or {}
     return SwitSitrBuildMeta(
         project_id=req.project_id,
-        project_full_name=req.project_id,
+        project_full_name=cfg.get("project_full_name", req.project_id),
         asil_level=req.asil_level,
         doc_id_base=f"{req.project_id}-SITR",
         doc_id_sequence=req.doc_id_sequence,
-        default_author="",
-        default_reviewer="",
-        default_approver="",
+        default_author=approvers.get("default_author", ""),
+        default_reviewer=approvers.get("default_reviewer", ""),
+        default_approver=approvers.get("default_approver", ""),
         release_sw_version=req.release_sw_version,
         hw_version=req.hw_version,
         test_date=req.test_date,
@@ -119,15 +127,40 @@ def _build_swit_sitr_meta(req: SwITSitrBuildRequest) -> SwitSitrBuildMeta:
     )
 
 
-def _read_template_bytes(template_path: str) -> bytes:
-    """template_path 명시 필수 (config 별도 없음 33차)."""
-    if not template_path:
+def _read_template_bytes(template_path: str, project_id: str, kind: str) -> bytes:
+    """template_path 명시되면 그 path에서, 아니면 config의 swit_*_template fallback (49차).
+
+    kind: "coverage" → swit_coverage_template / "sitr" → swit_sitr_template.
+    """
+    resolver = get_resolver()
+    if template_path:
+        return resolver.read_bytes(template_path)
+    cfg = _load_meta_from_config(project_id)
+    tmpl_cfg = cfg.get("template_paths", {})
+    key = "swit_coverage_template" if kind == "coverage" else "swit_sitr_template"
+    tpath = (tmpl_cfg.get(key) or "").strip()
+    if not tpath:
         raise HTTPException(
             status_code=400,
-            detail="template_path 미지정 — SwIT는 33차에 config 미지원, 명시 입력 필수",
+            detail=f"template_path 미지정 + config/swut_meta.json에 '{key}' 없음 ({project_id})",
         )
-    resolver = get_resolver()
-    return resolver.read_bytes(template_path)
+    return resolver.read_bytes(tpath)
+
+
+def _resolve_swit_swuds_path(req: "SwITBuildRequest | SwITSitrBuildRequest") -> str:
+    """49차 — req.swuds_docx_path 우선, 비면 config의 project별 값 fallback. 50차 W1 type hint."""
+    if req.swuds_docx_path:
+        return req.swuds_docx_path
+    cfg = _load_meta_from_config(req.project_id)
+    return (cfg.get("swuds_docx_path") or "").strip()
+
+
+def _resolve_swit_c_source_root(req: "SwITBuildRequest | SwITSitrBuildRequest") -> str:
+    """49차 — req.c_source_root 우선, 비면 config의 project별 값 fallback. 50차 W1 type hint."""
+    if req.c_source_root:
+        return req.c_source_root
+    cfg = _load_meta_from_config(req.project_id)
+    return (cfg.get("c_source_root") or "").strip()
 
 
 _CHUNK_SIZE = 64 * 1024
@@ -213,12 +246,13 @@ def _build_result_to_response(
 
 
 def _resolve_swuds_function_ids(req: SwITBuildRequest) -> set[str] | None:
-    """SwUT 32차 동일 — SwUDS docx → function_ids set."""
-    if not req.swuds_docx_path:
+    """SwUT 32차 동일 — SwUDS docx → function_ids set. 49차: config fallback."""
+    swuds_path = _resolve_swit_swuds_path(req)
+    if not swuds_path:
         return None
     try:
         resolver = get_resolver()
-        docx_bytes = resolver.read_bytes(req.swuds_docx_path)
+        docx_bytes = resolver.read_bytes(swuds_path)
         parse_warnings: list[str] = []
         result = parse_swuds_docx(docx_bytes, parse_warnings=parse_warnings)
         if not result.ok:
@@ -234,15 +268,18 @@ def _apply_function_asil_map(req: SwITBuildRequest, session) -> None:
     """SwIT용 thin wrapper — SwUT `_apply_function_asil_map` 정책 그대로 차용.
 
     Policy: c_source_root > swuds_docx_path. 충돌 시 c_source 우선.
+    49차: req 비면 config fallback.
     """
-    if not (req.c_source_root or req.swuds_docx_path):
+    c_source_root = _resolve_swit_c_source_root(req)
+    swuds_path = _resolve_swit_swuds_path(req)
+    if not (c_source_root or swuds_path):
         return
 
     c_source_map: dict[str, str] = {}
-    if req.c_source_root:
+    if c_source_root:
         try:
             from backend.services.swut_asil_resolver import resolve_function_asil_map
-            result = resolve_function_asil_map(req.c_source_root)
+            result = resolve_function_asil_map(c_source_root)
             if result.warnings:
                 session.parse_warnings.extend(result.warnings)
             c_source_map = dict(result.function_asil_map)
@@ -253,10 +290,10 @@ def _apply_function_asil_map(req: SwITBuildRequest, session) -> None:
             )
 
     swuds_map: dict[str, str] = {}
-    if req.swuds_docx_path:
+    if swuds_path:
         try:
             resolver = get_resolver()
-            docx_bytes = resolver.read_bytes(req.swuds_docx_path)
+            docx_bytes = resolver.read_bytes(swuds_path)
             result = parse_swuds_docx(docx_bytes)
             if result.ok:
                 swuds_map = dict(result.function_asil_map)
@@ -271,11 +308,14 @@ def _apply_function_asil_map(req: SwITBuildRequest, session) -> None:
     ]
     merged.update(c_source_map)
 
+    # 50차 W4/W5 — config fallback 사용 여부 시각 표기 (silent path 사용 차단).
     sources_used = []
-    if req.c_source_root:
-        sources_used.append(f"c_source {len(c_source_map)}건")
-    if req.swuds_docx_path:
-        sources_used.append(f"SwUDS {len(swuds_map)}건")
+    if c_source_root:
+        origin = "req" if req.c_source_root else "config fallback"
+        sources_used.append(f"c_source {len(c_source_map)}건 ({origin})")
+    if swuds_path:
+        origin = "req" if req.swuds_docx_path else "config fallback"
+        sources_used.append(f"SwUDS {len(swuds_map)}건 ({origin})")
     if sources_used:
         session.parse_warnings.append(
             "function_asil_map source — "
@@ -302,7 +342,8 @@ def _do_swit_coverage_build(req: SwITBuildRequest) -> Response:
         log_folder=req.log_folder,
     )
     _apply_function_asil_map(req, session)
-    template_bytes = _read_template_bytes(req.template_path)
+    # 51차 — Coverage 양식 전용 path 사용 (config fallback: swit_coverage_template).
+    template_bytes = _read_template_bytes(req.coverage_template_path, req.project_id, "coverage")
     meta = _build_swit_coverage_meta(req)
     swuds_fn_ids = _resolve_swuds_function_ids(req)
     result: SwitCoverageBuildResult = build_swit_coverage_report(
@@ -340,13 +381,6 @@ def _do_swit_sitr_build(req: SwITSitrBuildRequest) -> Response:
     Coverage와 동일 입력 source / ASIL map 정책. xlsm 출력 — media_type
     "application/vnd.ms-excel.sheet.macroenabled.12".
     """
-    # 임시 디버그 (debug 400) — 사용자가 frontend에서 log_folder 입력했는데 ValueError
-    # 발생하는 원인 추적. 받은 payload 핵심 필드 dump.
-    _logger.warning(
-        "DEBUG sitr payload: project_id=%r release=%r log_folder=%r template=%r jenkins=%r",
-        req.project_id, req.release_sw_version,
-        req.log_folder, req.template_path, req.jenkins_build_number,
-    )
     resolver = get_resolver()
     session = collect_swit_session(
         resolver, req.project_id,
@@ -355,7 +389,8 @@ def _do_swit_sitr_build(req: SwITSitrBuildRequest) -> Response:
         log_folder=req.log_folder,
     )
     _apply_function_asil_map(req, session)
-    template_bytes = _read_template_bytes(req.template_path)
+    # 51차 — SITR 양식 전용 path 사용 (config fallback: swit_sitr_template).
+    template_bytes = _read_template_bytes(req.sitr_template_path, req.project_id, "sitr")
     meta = _build_swit_sitr_meta(req)
     swuds_fn_ids = _resolve_swuds_function_ids(req)
     result: SwitSitrBuildResult = build_swit_sitr_report(

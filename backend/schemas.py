@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 # ── Session ───────────────────────────────────────────────────────────
@@ -628,10 +628,15 @@ class SwUTBuildRequest(BaseModel):
       - test_engineer / reviewer / approver: maxlen 100, 줄바꿈 금지
       - doc_id_sequence: digit only
       - test_date / validation_date: yyyy-mm-dd / yyyy/mm/dd ($ anchor)
-      - cache_root / log_folder / template_path: maxlen 500, 줄바꿈 금지
+      - cache_root / log_folder / coverage_template_path / sutr_template_path: maxlen 500, 줄바꿈 금지 (51차 분리)
       - jenkins_build_number: 1 ≤ n ≤ 99999 (Jenkins 운영 한도)
       - deviation_cases: 최대 200 items, 합산 256KB (13차 C3 — DoS 차단)
+
+    53차 C1 — extra='forbid': 외부 호출자가 51차 이전 schema의 `template_path` 등 unknown
+    필드 보내면 422 raise. silent wrong-pick (config fallback 양식 사용) 차단.
     """
+    model_config = ConfigDict(extra="forbid")
+
     # 필수
     project_id: str = Field(..., min_length=1, max_length=50)
     release_sw_version: str = Field(..., pattern=r"^\d+\.\d+(\.\d+)?$")
@@ -650,7 +655,9 @@ class SwUTBuildRequest(BaseModel):
     # 13차 W8: path maxlen 500 + 줄바꿈 금지 (validator)
     cache_root: str = Field("", max_length=500)
     log_folder: Optional[str] = Field(None, max_length=500)
-    template_path: str = Field("", max_length=500)
+    # 51차 — Coverage / SUTR 양식 분리 (이전 단일 template_path). 둘 다 비면 config fallback.
+    coverage_template_path: str = Field("", max_length=500)
+    sutr_template_path: str = Field("", max_length=500)
     # 16차: SwUDS docx (옵션) — 제공 시 2.Consistency에 SwUDS↔SwUTS 매핑 row 추가
     swuds_docx_path: str = Field("", max_length=500)
     # 30차 W21: C 소스 디렉토리 (옵션) — 제공 시 Doxygen @asil 태그에서 함수별
@@ -668,8 +675,8 @@ class SwUTBuildRequest(BaseModel):
     deviation_cases: List[Dict[str, Any]] = Field(default_factory=list, max_length=200)
 
     @field_validator("test_engineer", "reviewer_override", "approver_override",
-                     "cache_root", "log_folder", "template_path", "swuds_docx_path",
-                     "c_source_root")
+                     "cache_root", "log_folder", "coverage_template_path", "sutr_template_path",
+                     "swuds_docx_path", "c_source_root")
     @classmethod
     def _no_newline(cls, v):
         if v is None:
@@ -716,7 +723,11 @@ class SwITBuildRequest(BaseModel):
 
     SwUTBuildRequest 패턴 동일 — 17 공통 필드 + validator. SwIT 도구별
     필드는 향후 33-fix 또는 34차에서 추가.
+
+    53차 C1 — extra='forbid': legacy template_path 등 unknown 키 422 차단.
     """
+    model_config = ConfigDict(extra="forbid")
+
     # 필수
     project_id: str = Field(..., min_length=1, max_length=50)
     release_sw_version: str = Field(..., pattern=r"^\d+\.\d+(\.\d+)?$")
@@ -732,7 +743,9 @@ class SwITBuildRequest(BaseModel):
     jenkins_build_number: Optional[int] = Field(None, ge=1, le=99999)
     cache_root: str = Field("", max_length=500)
     log_folder: Optional[str] = Field(None, max_length=500)
-    template_path: str = Field("", max_length=500)
+    # 51차 — Coverage / SITR 양식 분리 (이전 단일 template_path). 둘 다 비면 config fallback.
+    coverage_template_path: str = Field("", max_length=500)
+    sitr_template_path: str = Field("", max_length=500)
     # SwUDS docx (옵션) — 2.Consistency 매핑 + 32차 W28 ASIL 추출
     swuds_docx_path: str = Field("", max_length=500)
     # 30차 W21 + 32차 W28: C 소스 디렉토리 (옵션) — Doxygen @asil 추출
@@ -744,8 +757,8 @@ class SwITBuildRequest(BaseModel):
     validation_date: str = Field("", pattern=r"^$|^\d{2,4}[-/]\d{1,2}[-/]\d{1,2}$")
 
     @field_validator("test_engineer", "reviewer_override", "approver_override",
-                     "cache_root", "log_folder", "template_path", "swuds_docx_path",
-                     "c_source_root")
+                     "cache_root", "log_folder", "coverage_template_path", "sitr_template_path",
+                     "swuds_docx_path", "c_source_root")
     @classmethod
     def _no_newline(cls, v):
         if v is None:

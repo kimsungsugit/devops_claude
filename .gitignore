@@ -76,6 +76,7 @@ OAI_CONFIG_LIST
 *.doc
 *.docx
 *.xlsx
+*.xlsm
 !templates/**/*.docx
 !templates/**/*.xlsx
 !templates/**/*.xlsm

@@ -211,23 +211,23 @@ def build_swit_sitr_report(
     else:
         _write_cover(cover_ws, meta, out_warnings=warnings)
 
-    # Test Summary
-    ts_ws = next((wb[n] for n in sheet_names if n.lower() == "test summary"), None)
+    # Test Summary — 53차 fix: SwIT v2.02 양식의 "1.Test Summary" 등 prefix 호환 substring 매칭.
+    ts_ws = next((wb[n] for n in sheet_names if "test summary" in n.lower()), None)
     if ts_ws is None:
         warnings.append("Test Summary 시트 미발견")
     else:
         _write_test_summary(ts_ws, meta, agg, out_warnings=warnings)
 
-    # Deviation
-    dev_ws = next((wb[n] for n in sheet_names if n.lower() == "deviation"), None)
+    # Deviation — 53차 fix: substring 매칭
+    dev_ws = next((wb[n] for n in sheet_names if "deviation" in n.lower()), None)
     if dev_ws is None:
         warnings.append("Deviation 시트 미발견")
     elif deviation_cases:
         n = _write_deviation(dev_ws, deviation_cases, out_warnings=warnings)
         summary["deviation_cases_written"] = n
 
-    # Test Log (31차 W27 ASIL col+4/5 — _write_test_log 내부에서 자동 처리)
-    log_ws = next((wb[n] for n in sheet_names if n.lower() == "test log"), None)
+    # Test Log — 53차 fix: substring 매칭 (31차 W27 ASIL col+4/5 — _write_test_log 내부 자동 처리)
+    log_ws = next((wb[n] for n in sheet_names if "test log" in n.lower()), None)
     if log_ws is None:
         warnings.append("Test Log 시트 미발견")
     else:

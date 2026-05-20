@@ -32,6 +32,11 @@ function _authHeaders() {
   return headers;
 }
 
+/** 50차 — raw fetch가 필요한 component (binary blob 응답)에서도 동일 auth 헤더 사용. */
+export function authHeaders() {
+  return _authHeaders();
+}
+
 /**
  * 47차 I5 — 자동 token refresh queue (single-flight).
  *

@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
-import { getUsername } from '../../api.js';
+import { getUsername, authHeaders } from '../../api.js';
 import { useToast } from '../../App.jsx';
 import { useAdminMode } from '../../contexts/AdminContext.jsx';
 import PathPickerDialog from '../PathPickerDialog.jsx';
@@ -23,7 +23,9 @@ const DEFAULT_FORM = {
   hw_version: '1.00',
   asil_level: 'ASIL A',
   log_folder: '',
-  template_path: '',
+  // 51차 — Coverage / SUTR 양식 분리 (이전 단일 template_path)
+  coverage_template_path: '',
+  sutr_template_path: '',
   swuds_docx_path: '',
   // 30차 W21: C 소스 디렉토리 (옵션) — Doxygen @asil 태그에서 함수별 ASIL 추출.
   c_source_root: '',
@@ -38,6 +40,13 @@ const DEFAULT_FORM = {
 function loadSavedForm() {
   try {
     const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
+    // 52차 C1 — legacy template_path key 마이그레이션: 51차 schema 분리 시 이전 key
+    // 그대로 보내면 backend 무시. 신규 양식 field가 비어있고 legacy template_path만
+    // 있으면 coverage_template_path로 일단 채워서 사용자가 다시 입력하지 않도록 함.
+    if (saved.template_path && !saved.coverage_template_path && !saved.sutr_template_path) {
+      saved.coverage_template_path = saved.template_path;
+    }
+    delete saved.template_path;  // 신규 schema에 없는 key 제거
     return {
       ...DEFAULT_FORM,
       test_date: new Date().toISOString().slice(0, 10),
@@ -150,8 +159,12 @@ export default function SwUTBuildSection() {
     if (!form.project_id) { toast('warning', 'project_id 필수'); return; }
     if (!form.release_sw_version) { toast('warning', 'release_sw_version 필수'); return; }
     if (!form.test_date) { toast('warning', 'test_date 필수'); return; }
-    if (!form.log_folder && !form.template_path) {
-      toast('warning', 'log_folder 또는 template_path 중 하나는 필수'); return;
+    // 51차 — kind별 필수 template_path 분리. 둘 다 비면 config fallback 시도 (backend가 400 raise).
+    const kindTemplate = kind === 'coverage'
+      ? form.coverage_template_path
+      : form.sutr_template_path;
+    if (!form.log_folder && !kindTemplate) {
+      toast('warning', `log_folder 또는 ${kind === 'coverage' ? 'Coverage' : 'SUTR'} Template Path 중 하나는 필수`); return;
     }
 
     const user = getUsername();
@@ -169,7 +182,7 @@ export default function SwUTBuildSection() {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'X-User': user,
+          ...authHeaders(),
         },
         body: JSON.stringify(form),
         signal: controller.signal,
@@ -242,7 +255,7 @@ export default function SwUTBuildSection() {
     try {
       const res = await fetch(buildUrl('/api/swut/consistency/check'), {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-User': user },
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
         body: JSON.stringify(consistencyForm),
         signal: controller.signal,
       });
@@ -332,12 +345,12 @@ export default function SwUTBuildSection() {
       </div>
       <div className="swut-form-row swut-field-with-browse">
         <Field
-          name="template_path"
-          label="Template Path (xlsx/xlsm)"
-          value={form.template_path}
-          onChange={v => setField('template_path', v)}
+          name="coverage_template_path"
+          label="Coverage Template Path (xlsx)"
+          value={form.coverage_template_path}
+          onChange={v => setField('coverage_template_path', v)}
           placeholder="U:\...\(HDPDM01)SwUT Coverage Report_v3.01_240221_R.xlsx"
-          hint="회사 v3.01 양식 template — 비우면 config의 template_paths 사용"
+          hint="Coverage 빌드 전용 — 비우면 config/swut_meta.json의 coverage_report_template 사용"
           fullWidth
         />
         <button
@@ -345,17 +358,17 @@ export default function SwUTBuildSection() {
           type="button"
           disabled={!isAdmin}
           title={isAdmin ? undefined : browseDisabledTitle}
-          onClick={() => openPicker('template_path', '*.xlsx,*.xlsm', 'Template 파일 선택')}
+          onClick={() => openPicker('coverage_template_path', '*.xlsx', 'Coverage Template 파일 선택')}
         >📂 Browse</button>
       </div>
       <div className="swut-form-row swut-field-with-browse">
         <Field
-          name="swuds_docx_path"
-          label="SwUDS Docx Path (선택)"
-          value={form.swuds_docx_path}
-          onChange={v => setField('swuds_docx_path', v)}
-          placeholder="U:\...\(HDPDM01)SwUDS_v3.docx"
-          hint="제공 시 2.Consistency 시트에 SwUDS↔SwUTS 함수 ID 매핑 row 자동 추가 + (c_source 미제공 시) 표 'ASIL' 라벨에서 함수별 ASIL 추출"
+          name="sutr_template_path"
+          label="SUTR Template Path (xlsm)"
+          value={form.sutr_template_path}
+          onChange={v => setField('sutr_template_path', v)}
+          placeholder="U:\...\(HDPDM01_SUTR) Software Unit Test Result_v3.01_240221_R.xlsm"
+          hint="SUTR 빌드 전용 — 비우면 config/swut_meta.json의 sutr_template 사용"
           fullWidth
         />
         <button
@@ -363,27 +376,51 @@ export default function SwUTBuildSection() {
           type="button"
           disabled={!isAdmin}
           title={isAdmin ? undefined : browseDisabledTitle}
-          onClick={() => openPicker('swuds_docx_path', '*.docx', 'SwUDS docx 선택')}
+          onClick={() => openPicker('sutr_template_path', '*.xlsm', 'SUTR Template 파일 선택')}
         >📂 Browse</button>
       </div>
-      <div className="swut-form-row swut-field-with-browse">
-        <Field
-          name="c_source_root"
-          label="C Source Root (선택, 30차 W21)"
-          value={form.c_source_root}
-          onChange={v => setField('c_source_root', v)}
-          placeholder="U:\...\HDPDM01\src\"
-          hint="제공 시 Doxygen @asil 태그에서 함수별 ASIL 추출 — ASIL D 함수는 Excel 빨강 강조 + UI 분포 패널. ⚠️ Hyundai SwUFn_NNNN 함수명 컨벤션 전용 (다른 컨벤션은 매칭 0건 → 패널 미표시)"
-          fullWidth
-        />
-        <button
-          className="swut-browse-btn"
-          type="button"
-          disabled={!isAdmin}
-          title={isAdmin ? undefined : browseDisabledTitle}
-          onClick={() => openPicker('c_source_root', '*', 'C 소스 디렉토리 선택')}
-        >📂 Browse</button>
-      </div>
+      {/* 52차 — config 자동 사용 정책. SwUDS / C Source는 config의 swuds_docx_path / c_source_root에 등록되면 자동 사용. 사용자 override 필요 시만 펼침. */}
+      <details className="swut-advanced-section" style={{ marginTop: 12 }}>
+        <summary style={{ cursor: 'pointer', padding: '8px 0', fontSize: '0.92em', color: 'var(--text-muted, #888)' }}>
+          ▶ 고급 설정 (config 자동 사용 — override 필요 시만)
+        </summary>
+        <div className="swut-form-row swut-field-with-browse">
+          <Field
+            name="swuds_docx_path"
+            label="SwUDS Docx Path (선택)"
+            value={form.swuds_docx_path}
+            onChange={v => setField('swuds_docx_path', v)}
+            placeholder="U:\...\(HDPDM01)SwUDS_v3.docx"
+            hint="비우면 config/swut_meta.json의 swuds_docx_path 자동 사용. 제공 시 2.Consistency 시트에 SwUDS↔SwUTS 매핑 row + ASIL 추출"
+            fullWidth
+          />
+          <button
+            className="swut-browse-btn"
+            type="button"
+            disabled={!isAdmin}
+            title={isAdmin ? undefined : browseDisabledTitle}
+            onClick={() => openPicker('swuds_docx_path', '*.docx', 'SwUDS docx 선택')}
+          >📂 Browse</button>
+        </div>
+        <div className="swut-form-row swut-field-with-browse">
+          <Field
+            name="c_source_root"
+            label="C Source Root (선택)"
+            value={form.c_source_root}
+            onChange={v => setField('c_source_root', v)}
+            placeholder="U:\...\HDPDM01\src\"
+            hint="비우면 config/swut_meta.json의 c_source_root 자동 사용. 제공 시 Doxygen @asil 추출 — ASIL D 빨강 강조"
+            fullWidth
+          />
+          <button
+            className="swut-browse-btn"
+            type="button"
+            disabled={!isAdmin}
+            title={isAdmin ? undefined : browseDisabledTitle}
+            onClick={() => openPicker('c_source_root', '*', 'C 소스 디렉토리 선택')}
+          >📂 Browse</button>
+        </div>
+      </details>
 
       <div className="swut-actions">
         <button

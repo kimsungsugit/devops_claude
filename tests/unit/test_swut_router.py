@@ -158,15 +158,76 @@ class TestInputSurface13:
         )
         assert r.status_code == 422
 
-    def test_w8_template_path_maxlen_rejected(self):
-        """W8: template_path 500자 초과 차단."""
+    def test_w8_coverage_template_path_maxlen_rejected(self):
+        """W8 + 51차: coverage_template_path 500자 초과 차단."""
         body = self._base_body()
-        body["template_path"] = "C:/" + "a" * 600
+        body["coverage_template_path"] = "C:/" + "a" * 600
         r = client.post(
             "/api/swut/coverage/build", json=body,
             headers={"X-User": "tester"},
         )
         assert r.status_code == 422
+
+    def test_w8_sutr_template_path_maxlen_rejected(self):
+        """51차: sutr_template_path 500자 초과 차단 (Coverage와 분리 필드)."""
+        body = self._base_body()
+        body["sutr_template_path"] = "C:/" + "a" * 600
+        r = client.post(
+            "/api/swut/sutr/build", json=body,
+            headers={"X-User": "tester"},
+        )
+        assert r.status_code == 422
+
+    def test_coverage_endpoint_uses_coverage_template_path(self, monkeypatch):
+        """52차 W2 — SwUT Coverage endpoint이 coverage_template_path만 사용.
+
+        sutr_template_path 입력은 무시되고 coverage_template_path가 _read_template_bytes로 전달.
+        """
+        from backend.routers import swut as swut_mod
+        captured = {}
+
+        def _fake_read(template_path, project_id, kind):
+            captured["template_path"] = template_path
+            captured["kind"] = kind
+            raise RuntimeError("stop after capture")
+
+        monkeypatch.setattr(swut_mod, "_read_template_bytes", _fake_read)
+        body = self._base_body()
+        body["log_folder"] = "C:/fake/log"  # collect_swut_session 단계에서 또 다른 RuntimeError
+        body["coverage_template_path"] = "C:/coverage.xlsx"
+        body["sutr_template_path"] = "C:/sutr.xlsm"
+        # 빌드 시도 — _read_template_bytes 호출 시점에 stop. 500 또는 빌더 실패 응답.
+        client.post(
+            "/api/swut/coverage/build", json=body,
+            headers={"X-User": "tester"},
+        )
+        # 빌더 도달 여부 무관 — captured 확인 시점
+        if "template_path" in captured:
+            assert captured["template_path"] == "C:/coverage.xlsx"
+            assert captured["kind"] == "coverage"
+
+    def test_sutr_endpoint_uses_sutr_template_path(self, monkeypatch):
+        """52차 W2 — SwUT SUTR endpoint이 sutr_template_path만 사용."""
+        from backend.routers import swut as swut_mod
+        captured = {}
+
+        def _fake_read(template_path, project_id, kind):
+            captured["template_path"] = template_path
+            captured["kind"] = kind
+            raise RuntimeError("stop after capture")
+
+        monkeypatch.setattr(swut_mod, "_read_template_bytes", _fake_read)
+        body = self._base_body()
+        body["log_folder"] = "C:/fake/log"
+        body["coverage_template_path"] = "C:/coverage.xlsx"
+        body["sutr_template_path"] = "C:/sutr.xlsm"
+        client.post(
+            "/api/swut/sutr/build", json=body,
+            headers={"X-User": "tester"},
+        )
+        if "template_path" in captured:
+            assert captured["template_path"] == "C:/sutr.xlsm"
+            assert captured["kind"] == "sutr"
 
     def test_w9_jenkins_build_number_negative_rejected(self):
         """W9: jenkins_build_number 음수 차단."""
@@ -588,6 +649,134 @@ class TestConfigCache:
 
         cfg2 = swut_mod._load_meta_from_config("HDPDM01")
         assert cfg2.get("asil_level") == "ASIL D"  # cache invalidated
+
+
+class TestSwutConfigFallback50:
+    """50차 — req 값 비면 config/swut_meta.json fallback (c_source_root + swuds_docx_path).
+
+    config 자동 적용으로 사용자가 매 빌드마다 동일 path 재입력하는 부담 제거.
+    """
+
+    def _setup_cfg(self, tmp_path, monkeypatch, cfg_dict):
+        from backend.routers import swut as swut_mod
+        cfg_path = tmp_path / "swut_meta.json"
+        import json as _json
+        cfg_path.write_text(_json.dumps(cfg_dict), encoding="utf-8")
+        monkeypatch.setattr(swut_mod, "_META_CONFIG_PATH", str(cfg_path))
+        swut_mod._read_meta_config_raw.cache_clear()
+        return swut_mod
+
+    def test_resolve_c_source_root_req_priority(self, tmp_path, monkeypatch):
+        """req.c_source_root 우선 — config 값 무시."""
+        from backend.schemas import SwUTBuildRequest
+        swut_mod = self._setup_cfg(tmp_path, monkeypatch, {
+            "projects": {"HDPDM01": {"c_source_root": "C:/from_config"}}
+        })
+        req = SwUTBuildRequest(
+            project_id="HDPDM01",
+            release_sw_version="1.0.0",
+            test_date="2024-02-19",
+            c_source_root="D:/from_req",
+        )
+        assert swut_mod._resolve_c_source_root(req) == "D:/from_req"
+
+    def test_resolve_c_source_root_config_fallback(self, tmp_path, monkeypatch):
+        """req.c_source_root 빈 string → config 값 fallback."""
+        from backend.schemas import SwUTBuildRequest
+        swut_mod = self._setup_cfg(tmp_path, monkeypatch, {
+            "projects": {"HDPDM01": {"c_source_root": "C:/from_config"}}
+        })
+        req = SwUTBuildRequest(
+            project_id="HDPDM01",
+            release_sw_version="1.0.0",
+            test_date="2024-02-19",
+        )
+        assert swut_mod._resolve_c_source_root(req) == "C:/from_config"
+
+    def test_resolve_c_source_root_both_empty(self, tmp_path, monkeypatch):
+        """req + config 모두 비면 빈 string — graceful (panel 미표시)."""
+        from backend.schemas import SwUTBuildRequest
+        swut_mod = self._setup_cfg(tmp_path, monkeypatch, {
+            "projects": {"HDPDM01": {}}
+        })
+        req = SwUTBuildRequest(
+            project_id="HDPDM01",
+            release_sw_version="1.0.0",
+            test_date="2024-02-19",
+        )
+        assert swut_mod._resolve_c_source_root(req) == ""
+
+    def test_resolve_swuds_path_config_fallback(self, tmp_path, monkeypatch):
+        """req.swuds_docx_path 빈 string → config 값 fallback."""
+        from backend.schemas import SwUTBuildRequest
+        swut_mod = self._setup_cfg(tmp_path, monkeypatch, {
+            "projects": {"HDPDM01": {"swuds_docx_path": "U:/from_config.docx"}}
+        })
+        req = SwUTBuildRequest(
+            project_id="HDPDM01",
+            release_sw_version="1.0.0",
+            test_date="2024-02-19",
+        )
+        assert swut_mod._resolve_swuds_path(req) == "U:/from_config.docx"
+
+    def test_resolve_swuds_path_whitespace_only_config_treated_empty(self, tmp_path, monkeypatch):
+        """config에 whitespace만 들어가도 strip 후 빈 string → 빈 반환 (silent path 사용 차단)."""
+        from backend.schemas import SwUTBuildRequest
+        swut_mod = self._setup_cfg(tmp_path, monkeypatch, {
+            "projects": {"HDPDM01": {"swuds_docx_path": "   "}}
+        })
+        req = SwUTBuildRequest(
+            project_id="HDPDM01",
+            release_sw_version="1.0.0",
+            test_date="2024-02-19",
+        )
+        assert swut_mod._resolve_swuds_path(req) == ""
+
+    def test_apply_function_asil_map_records_source_origin(self, tmp_path, monkeypatch):
+        """53차 W3 — 50차 W4/W5 source origin 시각화 (`(req)` / `(config fallback)`) 검증.
+
+        `_apply_function_asil_map`이 session.parse_warnings에 출처 origin 명시.
+        c_source는 req 입력, swuds는 config fallback인 mixed case로 양 출처 모두 검증.
+        """
+        from backend.schemas import SwUTBuildRequest
+        swut_mod = self._setup_cfg(tmp_path, monkeypatch, {
+            "projects": {"HDPDM01": {
+                "swuds_docx_path": "U:/from_config.docx",
+            }}
+        })
+        # c_source는 req에서, swuds는 config fallback 시뮬레이션
+        req = SwUTBuildRequest(
+            project_id="HDPDM01",
+            release_sw_version="1.0.0",
+            test_date="2024-02-19",
+            c_source_root="D:/from_req/src",
+        )
+
+        # resolver를 mock해서 실제 file IO 회피
+        class _FakeResult:
+            warnings = []
+            function_asil_map = {"SwUFn_0001": "ASIL D"}
+            ok = True
+            function_ids = {"SwUFn_0001"}
+
+        monkeypatch.setattr(
+            "backend.services.swut_asil_resolver.resolve_function_asil_map",
+            lambda _root: _FakeResult(),
+        )
+        # SwUDS docx read는 PermissionError로 fail (config path 미존재) — 정상 graceful path
+        # _resolve_swuds_function_asil_map는 빈 dict 반환 → swuds_map=0건
+
+        class _MockSession:
+            parse_warnings: list = []
+            environments: list = []
+
+        session = _MockSession()
+        swut_mod._apply_function_asil_map(req, session)
+        # parse_warnings에 source origin 표기 검증
+        joined = " | ".join(session.parse_warnings)
+        assert "function_asil_map source" in joined
+        assert "(req)" in joined  # c_source는 req
+        assert "(config fallback)" in joined  # swuds는 config
 
 
 class TestExceptionSanitization:

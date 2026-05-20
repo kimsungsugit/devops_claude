@@ -177,8 +177,9 @@ def build_swit_coverage_report(
     else:
         _write_cover_sheet(cover_ws, meta, out_warnings=warnings)
 
-    # Test Summary
-    ts_ws = next((wb[n] for n in sheet_names if n.lower() == "test summary"), None)
+    # Test Summary — 53차 fix: SwIT v2.02 양식은 "1.Test Summary"라 substring 매칭으로 변경.
+    # SwUT v3.01의 "Test Summary"도 substring으로 포함되어 호환 유지.
+    ts_ws = next((wb[n] for n in sheet_names if "test summary" in n.lower()), None)
     if ts_ws is None:
         warnings.append("Test Summary 시트 미발견")
     else:

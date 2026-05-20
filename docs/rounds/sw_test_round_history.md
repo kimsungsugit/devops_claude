@@ -107,3 +107,60 @@
 - **C2 PoC 강화**: local 모드 fixture로 admin 빌드 status=200 + 실 산출물 8,515 bytes + environments=1 검증 (41차 cloudium 권한 영향 0 bytes 해결)
 - **C3 error_handler 회귀 신규**: 7건 (str detail / dict detail / extra fields / missing code / empty dict)
 - 회귀: backend 1956 → ~1968 (+12 — bootstrap +1 _mask_user / error_handler +7 / file_mode_router 영향 +0) / frontend 240 → 242 (+2 debounce + retry)
+
+## 49차 — swut_meta.json fallback (SwUT/SwIT path 매번 입력 불필요)
+- 사용자 지적: SwUDS Docx Path / C Source Root는 프로젝트 config에 등록된 값을 자동 사용해야 함
+- **config 확장**: `config/swut_meta.json` HDPDM01 프로젝트에 `swuds_docx_path` + `template_paths.swit_coverage_template` + `template_paths.swit_sitr_template` 슬롯 추가 (빈 값으로 — 사용자가 환경별 path 채우기)
+- **SwUT router fallback**: `_resolve_swuds_path` + `_resolve_c_source_root` helper 신규. `_resolve_swuds_function_ids` + `_resolve_swuds_function_asil_map` + `_apply_function_asil_map`에서 req 비면 config 값 사용
+- **SwIT router fallback**: SwUT의 `_load_meta_from_config` import. `_read_template_bytes` 시그니처 `(template_path, project_id, kind)` — kind="coverage"/"sitr"로 swit_coverage_template / swit_sitr_template 키 사용. `_resolve_swit_swuds_path` + `_resolve_swit_c_source_root` 신규. 동일 ASIL fallback. 임시 DEBUG sitr/coverage log 제거
+- **Frontend hint**: SwUT/SwIT BuildSection의 hint에 "비우면 config/swut_meta.json 사용" 안내 추가 (사용자 명시)
+- 회귀: backend 79건 통과 (SwUT/SwIT router 회귀 무영향) — 빈 fallback 시나리오 회귀는 50차 추가
+- **운영**: 사용자가 `config/swut_meta.json` 편집 → mtime invalidate 자동 → backend 재시작 불필요 (lru_cache + mtime key)
+
+## 50차 — 49차 자체 평가 결함 일괄 fix + 403 raw fetch 노출
+- 49차 commit 직전 평가에서 발견한 C1/C2/W1/W3/W4/W5/I1 일괄 처리 + 사용자 403 console 에러 진단
+- **403 fix (mini-checklist X9)**: SwITBuildSection / SwUTBuildSection / PathPickerDialog가 raw fetch + X-User 단일 헤더만 부착 → JWT Authorization 미부착 → backend가 X-User 식별 사용자가 admin 아니면 403. `api.js`에 `authHeaders()` public export 추가 → 5곳 (SwIT 3 + SwUT 2 + PathPickerDialog 4 호출처) `'X-User': user` → `...authHeaders()` 변경. 3 테스트의 `vi.mock('../api.js')`에 `authHeaders` mock 추가 (49건 통과)
+- **C1/C2 회귀**: `TestSwutConfigFallback50` (5건) + `TestSwitConfigFallback50` (4건) — req priority / config fallback / 둘 다 빈 / whitespace strip / SwIT template 빈 → 400 (coverage + sitr 키 분기 검증)
+- **W1 type hint**: `_resolve_swit_swuds_path` + `_resolve_swit_c_source_root`에 `req: SwITBuildRequest | SwITSitrBuildRequest` annotation 추가
+- **W3 hint 정리**: Frontend hint에서 "(49차)" 라운드 표기 제거 — 동작 설명만 유지
+- **W4/W5 fallback 시각화**: `_apply_function_asil_map`이 `session.parse_warnings`에 source origin 명시 — `c_source 12건 (req)` 또는 `SwUDS 8건 (config fallback)` 형태. silent path 사용 차단 + audit reviewer가 X-SwUT-Warnings / X-SwIT-Warnings 헤더에서 확인 가능
+- **W6 SwIT meta builder config fallback**: 49차에 누락 — `_build_swit_coverage_meta` + `_build_swit_sitr_meta`가 config를 전혀 읽지 않아 `default_author/reviewer/approver` 빈 string, `project_full_name`도 project_id 그대로. SwUT 패턴 (`_build_coverage_meta`)과 동일하게 `_load_meta_from_config` 호출 + `approvers.get(...)` + `project_full_name` fallback 적용. doc_id_base는 SwIT 고유 (`{project_id}-SwIT/SITR`) 유지. asil_level은 SwUT용 (ASIL A)이라 req의 ASIL B 사용 정책 유지
+- 회귀: backend ~2030 → +12 fallback (~2042) / frontend 261 통과 (test mock 갱신만)
+
+## 51차 — Template 2-field 분리 (Coverage / SUTR / SITR 양식별)
+- 사용자 요청: SwUT은 Coverage Report (xlsx) + SUTR (xlsm) 양식이 다르고, SwIT도 Coverage (xlsx) + SITR (xlsm) 양식이 다른데 단일 `template_path` form 필드 → 매 빌드마다 변경 부담
+- **Backend schema** (`backend/schemas.py`):
+  - `SwUTBuildRequest`: `template_path` 제거 + `coverage_template_path` + `sutr_template_path` 신규 (각 maxlen 500 + `_no_newline` validator)
+  - `SwITBuildRequest`: `template_path` 제거 + `coverage_template_path` + `sitr_template_path` 신규
+  - `SwITSitrBuildRequest`: SwITBuildRequest 상속 (자동 반영)
+- **Backend router**: `_do_coverage_build`/`_do_sutr_build`/`_do_swit_coverage_build`/`_do_swit_sitr_build` 각 endpoint가 kind별 적절한 필드 사용 + `_read_template_bytes(req.<kind>_template_path, req.project_id, kind)`로 호출. 빈 시 config의 `coverage_report_template`/`sutr_template`/`swit_coverage_template`/`swit_sitr_template` fallback (49차 인프라 그대로)
+- **Frontend** (`SwUTBuildSection.jsx`/`SwITBuildSection.jsx`):
+  - DEFAULT_FORM에서 `template_path` 제거 + 양 필드 추가
+  - UI row 1개 → 2개 분리 (각각 별도 Browse 버튼 + label "Coverage Template Path (xlsx)" / "SUTR Template Path (xlsm)" 또는 "SITR Template Path (xlsm)")
+  - `buildXlsx` client validation: kind별 적절한 필드 검증 (`kind === 'coverage' ? coverage_template_path : sutr_template_path`)
+- **Browse 다이얼로그 파일 필터**: Coverage = `*.xlsx`, SUTR/SITR = `*.xlsm` (이전 통합 `*.xlsx,*.xlsm`)
+- **회귀 갱신**:
+  - backend: `test_w8_template_path_maxlen_rejected` → `test_w8_coverage_template_path_maxlen_rejected` + 신규 `test_w8_sutr_template_path_maxlen_rejected` (+1)
+  - frontend: `getByText(/SUTR 빌드/)` matcher가 신규 "SUTR Template Path" 라벨과 multiple match → `/📝 SUTR 빌드/` 정확 매칭으로 변경. Browse 버튼 수 6 → 7. hint matcher "회사 v3.01 양식 template" → "Coverage 빌드 전용" + "SUTR 빌드 전용" 분리
+- 회귀: backend 2042 → 2042 (회귀 갱신, +sutr maxlen 1 추가 후 정리) / frontend 261 통과
+- **운영**: 사용자가 `config/swut_meta.json` 4 키 (`coverage_report_template`/`sutr_template`/`swit_coverage_template`/`swit_sitr_template`)에 한 번 박아두면, 빌드 form은 release_sw_version / test_date / log_folder만 매번 입력 + nothing else. mtime invalidate로 backend 재시작 불필요
+
+## 52차 — 51차 자체 평가 발견 결함 통합 fix (C1/W2/W3 + cloudium prefix)
+- 51차 commit 직전 자체 비판 평가에서 발견한 결함:
+  - **C1 localStorage 마이그레이션 누락** — 51차 `template_path` 제거 후 이전 사용자가 form에 `template_path` 키 저장되어 있으면 backend로 그대로 보내져 무시 (Pydantic ignore) → 사용자 재입력 부담. `loadSavedForm`에서 legacy key 감지 → `coverage_template_path`로 자동 이동 + `delete saved.template_path`. SwUT/SwIT 양쪽 적용
+  - **W2 endpoint별 정확한 field 사용 검증 누락** — Coverage endpoint이 `coverage_template_path` 사용, SUTR endpoint이 `sutr_template_path` 사용, SwIT 동일 — 회귀 부재. `_read_template_bytes` monkeypatch + capture 패턴으로 4건 추가 (SwUT 2 + SwIT 2). `kind` 인자도 함께 검증
+  - **W3 docstring 갱신** — `SwUTBuildRequest` docstring에 `template_path` 언급 → `coverage_template_path / sutr_template_path` 갱신 (51차 분리 명시)
+- **운영 환경 fix (사용자 환경 의존, 별도 라운드 영향 없음)**: cloudium 모드에서 SwIT 빌드 시 log_folder가 allowed_prefixes 미등록으로 403 → admin endpoint `POST /api/file-mode/add-allowed-prefix`로 3 prefix 추가 (`08.SW 통합테스트/03.Test Result/01.Log` + `08.SW 통합테스트/03.Test Result` 상위 + `10.SW 단위테스트/03.Test Result`). `config/cloudium_extra_prefixes.json`에 영구 저장
+- 회귀: backend 2042 → 2046 (+4 endpoint field 사용 검증 / Coverage / SUTR / SwIT Coverage / SwIT SITR)
+
+## 53차 — deep-reviewer 발견 Critical 2 + Warning 회귀 3 통합 fix
+- 49~52차 누적 변경 (~480 lines / 8 파일 / audit evidence 도구) deep-reviewer (opus) 호출 결과: Critical 2 / Warning 7 / Info 5 발견. 사용자 결정: Critical + 회귀 누락 3건 우선 처리.
+- **C1 (Critical X3+X7) Pydantic `extra='forbid'`**: `SwUTBuildRequest` + `SwITBuildRequest` 둘 다 `model_config = ConfigDict(extra="forbid")` 추가. `SwITSitrBuildRequest`는 상속으로 자동 적용. 외부 호출자 (Jenkins curl, 외부 script)가 51차 이전 `template_path` 키 보내면 silent ignore 대신 **422 raise + 명시적 마이그레이션 강제**. ISO 26262 audit evidence 도구의 silent wrong-pick (config fallback 양식 사용) 차단. `from pydantic import ConfigDict` 추가
+- **C2 (Critical X5) cloudium `add_prefix` system blacklist**: `backend/services/cloudium_extra_prefixes.py`에 `_SYSTEM_BLACKLIST` tuple (Windows: `C:/Windows`, `C:/Program Files`, `C:/ProgramData`, `C:/Program Files (x86)` / POSIX: `/etc`, `/root`, `/sys`, `/proc`, `/bin`, `/sbin`, `/usr/bin`, `/usr/sbin`) + 단일 drive root (`C:/`, `D:/`, `/`) + `_is_blacklisted(prefix)` helper 추가. `add_prefix(prefix)`이 ValueError raise → endpoint 400. admin이 실수로 `C:/` 등 등록하여 cloudium worker가 시스템 전체 read하는 보안 약화 차단. 30차 W21 `swut_asil_resolver` 백스탑 패턴 차용
+- **W1 (Warning X8) SwIT c_source_root req priority 회귀**: 50차에 SwUT은 `test_resolve_c_source_root_req_priority` 회귀 있으나 SwIT은 config fallback만 있음. 향후 SwIT helper의 분기 순서 silent 뒤집기 위험. `test_resolve_swit_c_source_root_req_priority` 추가 — req 값 우선 + config 무시 검증
+- **W2 (Warning X8) localStorage 마이그레이션 frontend 회귀**: 52차 C1 `loadSavedForm` 마이그레이션 (`saved.template_path` → `coverage_template_path` 자동 이동 + delete)이 SwUT/SwIT 양쪽에 있는데 회귀 부재. `SwUTBuildSection.test.jsx` + `SwITBuildSection.test.jsx`에 1건씩 추가 — localStorage setItem legacy form → render → coverage_template_path input value 검증
+- **W3 (Warning X8) source origin parse_warnings 회귀**: 50차 W4/W5의 `function_asil_map source — c_source N건 (req)` 또는 `(config fallback)` 시각화가 audit reviewer가 ASIL 출처 인지하는 핵심인데 회귀 부재. `test_apply_function_asil_map_records_source_origin` 추가 — c_source req + swuds config fallback mixed case로 양 origin string 모두 검증. `swut_asil_resolver.resolve_function_asil_map`은 monkeypatch로 mock
+- **잔여 Warning** (W4/W5/W6/W7/W8 + I*): DRY 위반 (`_apply_function_asil_map` ~70줄 복제) + endpoint별 schema 분리 등은 별도 라운드 (54차+) 후보. ISO 26262 ASIL 정책 silent divergence 위험은 인지하나 본 라운드는 안전성 핵심 결함 우선 처리
+- **운영 fix (부수)**: backend uvicorn `--reload`가 swit.py 변경 detect 못 한 케이스 발견 → backend 강제 kill + 재시작. 51차+52차 schema 메모리 로드 보장. 사용자가 SwIT 빌드 시도 시 422 또는 400 정확한 에러 응답
+- 회귀: backend 2046 → 2048 (+2: SwIT c_source req priority + source origin) / frontend 261 → 263 (+2: SwUT/SwIT localStorage 마이그레이션)
+- **운영**: cloudium `add_prefix` 호출 시 system 디렉토리 prefix는 400 응답 + ValueError detail. admin이 등록 가능한 prefix는 사용자 작업 path (`U:/연구소/...`, `D:/Project/...`)만

@@ -19,6 +19,7 @@ vi.mock('../App.jsx', () => ({
 
 vi.mock('../api.js', () => ({
   getUsername: () => 'tester',
+  authHeaders: () => ({ 'X-User': 'tester' }),
 }));
 
 // 40차: AdminContext mock — 회귀 기본 admin
@@ -50,7 +51,24 @@ describe('SwUTBuildSection', () => {
     expect(screen.getByLabelText(/Project ID/)).toBeTruthy();
     expect(screen.getByLabelText(/Release SW Version/)).toBeTruthy();
     expect(screen.getByText(/Coverage Report 빌드/)).toBeTruthy();
-    expect(screen.getByText(/SUTR 빌드/)).toBeTruthy();
+    // 51차 — SUTR Template Path label과 구별 위해 "📝 SUTR 빌드" 정확 매칭
+    expect(screen.getByText(/📝 SUTR 빌드/)).toBeTruthy();
+  });
+
+  it('53차 W2 — legacy localStorage template_path → coverage_template_path 마이그레이션', () => {
+    // 52차 C1 fix 검증: 51차 이전 사용자가 form에 template_path 키 저장되어 있으면
+    // loadSavedForm이 coverage_template_path로 자동 이동 + 원 키 제거.
+    localStorage.setItem('devops_v2_swut_form', JSON.stringify({
+      template_path: 'U:/legacy/old.xlsx',
+      release_sw_version: '2.02',
+    }));
+    render(<SwUTBuildSection />);
+    // 마이그레이션된 값은 coverage_template_path input에 표시
+    const coverageInput = screen.getByLabelText(/Coverage Template Path/);
+    expect(coverageInput.value).toBe('U:/legacy/old.xlsx');
+    // SUTR field는 비어있음 (마이그레이션이 Coverage로만 이동)
+    const sutrInput = screen.getByLabelText(/SUTR Template Path/);
+    expect(sutrInput.value).toBe('');
   });
 
   it('rejects missing release_sw_version with toast warning (no fetch)', async () => {
@@ -64,14 +82,14 @@ describe('SwUTBuildSection', () => {
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
-  it('rejects missing log_folder + template_path with toast warning', async () => {
+  it('rejects missing log_folder + Coverage template path with toast warning (51차 분리)', async () => {
     const fetchSpy = vi.spyOn(global, 'fetch');
     render(<SwUTBuildSection />);
-    // 필수 필드 채우되 log_folder / template_path 둘 다 비움
+    // 필수 필드 채우되 log_folder / coverage_template_path 둘 다 비움
     fireEvent.change(screen.getByLabelText(/Release SW Version/), { target: { value: '2.02' } });
     fireEvent.click(screen.getByText(/Coverage Report 빌드/));
     await waitFor(() => {
-      expect(toastSpy).toHaveBeenCalledWith('warning', expect.stringMatching(/log_folder.*template/));
+      expect(toastSpy).toHaveBeenCalledWith('warning', expect.stringMatching(/log_folder.*Coverage/));
     });
     expect(fetchSpy).not.toHaveBeenCalled();
   });
@@ -316,12 +334,12 @@ describe('SwUTBuildSection', () => {
     expect(screen.getByText(/issue 2건/)).toBeTruthy();
   });
 
-  it('renders Browse buttons for path fields (21차 + 30차 W21)', () => {
+  it('renders Browse buttons for path fields (21차 + 30차 W21 + 51차 template 분리)', () => {
     render(<SwUTBuildSection />);
-    // 6개 path 필드 (log_folder / template_path / swuds_docx_path /
-    //                c_source_root [30차] / coverage_path / sutr_path)
+    // 7개 path 필드 (log_folder / coverage_template_path [51차] / sutr_template_path [51차] /
+    //                swuds_docx_path / c_source_root [30차] / coverage_path / sutr_path)
     const browseButtons = screen.getAllByText(/📂 Browse/);
-    expect(browseButtons.length).toBe(6);
+    expect(browseButtons.length).toBe(7);
   });
 
   it('renders reviewer/approver/validation_date input fields (26차 W16)', () => {
@@ -357,12 +375,15 @@ describe('SwUTBuildSection', () => {
     expect(body.validation_date).toBe('2024-02-25');
   });
 
-  it('renders hint text for path fields (25차)', () => {
+  it('renders hint text for path fields (25차 + 51차 template 분리)', () => {
     render(<SwUTBuildSection />);
-    // log_folder + template_path + swuds_docx_path 각각 hint 표시
+    // log_folder + Coverage Template + SUTR Template + swuds_docx_path 각각 hint
     expect(screen.getByText(/VectorCAST html report/)).toBeTruthy();
-    expect(screen.getByText(/회사 v3.01 양식 template/)).toBeTruthy();
-    expect(screen.getByText(/SwUDS↔SwUTS 함수 ID 매핑 row 자동 추가/)).toBeTruthy();
+    // 51차 — Coverage / SUTR 각각의 hint
+    expect(screen.getByText(/Coverage 빌드 전용/)).toBeTruthy();
+    expect(screen.getByText(/SUTR 빌드 전용/)).toBeTruthy();
+    // 52차 collapsible 후 hint 단축
+    expect(screen.getByText(/SwUDS↔SwUTS 매핑 row \+ ASIL 추출/)).toBeTruthy();
     // 메타 hint 일부
     expect(screen.getByText(/노란 강조 표시/)).toBeTruthy();
   });
@@ -424,7 +445,8 @@ describe('SwUTBuildSection', () => {
     const field = screen.getByLabelText(/C Source Root/);
     expect(field).toBeTruthy();
     // hint 텍스트가 ASIL 추출 + Excel 강조 + UI 분포 패널을 모두 안내
-    expect(screen.getByText(/@asil 태그.*ASIL D 함수는 Excel 빨강/)).toBeTruthy();
+    // 52차 collapsible 후 hint 단축
+    expect(screen.getByText(/Doxygen @asil 추출 — ASIL D 빨강/)).toBeTruthy();
   });
 
   it('hides ASIL distribution panel when summary has no asil_distribution', async () => {

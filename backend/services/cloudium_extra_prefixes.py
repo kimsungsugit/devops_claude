@@ -87,6 +87,53 @@ def save_extra_prefixes(prefixes: list[str]) -> None:
         _atomic_write(PREFIXES_PATH, payload)
 
 
+_SYSTEM_BLACKLIST = (
+    # Windows 시스템 디렉토리 (대소문자 무관 prefix-match)
+    "c:/windows",
+    "c:\\windows",
+    "c:/program files",
+    "c:\\program files",
+    "c:/program files (x86)",
+    "c:\\program files (x86)",
+    "c:/programdata",
+    "c:\\programdata",
+    # POSIX 시스템 root
+    "/etc",
+    "/root",
+    "/sys",
+    "/proc",
+    "/bin",
+    "/sbin",
+    "/usr/bin",
+    "/usr/sbin",
+)
+
+
+def _is_blacklisted(prefix: str) -> bool:
+    """53차 C2 — system 디렉토리 prefix 등록 차단.
+
+    admin이 실수로 `C:/` 또는 `C:/Windows` 같은 시스템 prefix를 cloudium allowed_prefixes
+    에 등록하면 worker가 시스템 전체 read 가능 → audit 도구 보안 경계 약화. blacklist는
+    30차 W21 swut_asil_resolver 패턴 차용 (deep-reviewer C2 권장).
+
+    Returns:
+        True if prefix가 system 디렉토리거나 root drive (`C:/`, `/` 등).
+    """
+    norm = prefix.strip().lower().replace("\\", "/")
+    # 단일 drive root (C:/, D:/ 등) 차단
+    if len(norm) <= 3 and norm.endswith(":/"):
+        return True
+    # POSIX root 단독
+    if norm == "/":
+        return True
+    # blacklist prefix-match
+    for bad in _SYSTEM_BLACKLIST:
+        bad_norm = bad.replace("\\", "/")
+        if norm == bad_norm or norm.startswith(bad_norm + "/"):
+            return True
+    return False
+
+
 def add_prefix(prefix: str) -> dict[str, Any]:
     """새 prefix 추가.
 
@@ -98,11 +145,17 @@ def add_prefix(prefix: str) -> dict[str, Any]:
         - added=False면 이미 존재 (중복) — 기존 list 그대로 반환.
 
     Raises:
-        ValueError: prefix 빈 string.
+        ValueError: prefix 빈 string 또는 system 디렉토리 (53차 C2).
     """
     p = (prefix or "").strip()
     if not p:
         raise ValueError("prefix가 비어있음 — 경로 입력 필요")
+    # 53차 C2 — system 디렉토리 등록 차단 (admin 실수 보호)
+    if _is_blacklisted(p):
+        raise ValueError(
+            f"시스템 디렉토리는 cloudium allowed_prefixes에 등록 불가: {p} "
+            "(Windows: C:/Windows, Program Files 등 / POSIX: /etc, /root 등 차단)"
+        )
     with _LOCK:
         current = load_extra_prefixes()
         # 정규화 비교 (case-insensitive on Windows) — file_resolver 패턴 재사용

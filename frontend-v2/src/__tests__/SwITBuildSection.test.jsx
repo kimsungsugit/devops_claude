@@ -15,6 +15,7 @@ vi.mock('../App.jsx', () => ({
 
 vi.mock('../api.js', () => ({
   getUsername: () => 'tester',
+  authHeaders: () => ({ 'X-User': 'tester' }),
 }));
 
 // 40차: AdminContext mock — 회귀 기본 admin
@@ -49,6 +50,19 @@ describe('SwITBuildSection', () => {
     expect(screen.getByText(/Coverage Report 빌드/)).toBeTruthy();
     expect(screen.getByText(/📝 SITR 빌드/)).toBeTruthy();
     expect(screen.getByText(/일관성 검증 실행/)).toBeTruthy();
+  });
+
+  it('53차 W2 — legacy localStorage template_path → coverage_template_path 마이그레이션', () => {
+    // SwIT 52차 C1 fix 검증: 51차 이전 사용자 form 그대로 보존
+    localStorage.setItem('devops_v2_swit_form', JSON.stringify({
+      template_path: 'U:/legacy/old.xlsx',
+      release_sw_version: '2.02',
+    }));
+    render(<SwITBuildSection />);
+    const coverageInput = screen.getByLabelText(/Coverage Template Path/);
+    expect(coverageInput.value).toBe('U:/legacy/old.xlsx');
+    const sitrInput = screen.getByLabelText(/SITR Template Path/);
+    expect(sitrInput.value).toBe('');
   });
 
   it('default asil_level is "ASIL B" (SwIT Integration test convention)', () => {

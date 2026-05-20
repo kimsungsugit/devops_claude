@@ -256,16 +256,34 @@ def _build_result_to_response(
 # 사용. 호출 사이트는 endpoint에서 직접 키워드 인자로 전달.
 
 
-def _resolve_swuds_function_ids(req: SwUTBuildRequest) -> set[str] | None:
-    """16차: req.swuds_docx_path가 있으면 docx 파싱 → 함수 ID set 반환.
+def _resolve_swuds_path(req: SwUTBuildRequest) -> str:
+    """49차 — req.swuds_docx_path 우선, 비면 config/swut_meta.json의 project별 값 fallback."""
+    if req.swuds_docx_path:
+        return req.swuds_docx_path
+    cfg = _load_meta_from_config(req.project_id)
+    return (cfg.get("swuds_docx_path") or "").strip()
 
+
+def _resolve_c_source_root(req: SwUTBuildRequest) -> str:
+    """49차 — req.c_source_root 우선, 비면 config의 project별 값 fallback."""
+    if req.c_source_root:
+        return req.c_source_root
+    cfg = _load_meta_from_config(req.project_id)
+    return (cfg.get("c_source_root") or "").strip()
+
+
+def _resolve_swuds_function_ids(req: SwUTBuildRequest) -> set[str] | None:
+    """16차: swuds_docx_path가 있으면 docx 파싱 → 함수 ID set 반환.
+
+    49차: req 비면 config fallback.
     실패 시 None 반환 — caller는 SwUDS 비교 skip + warnings에 사유 누적.
     """
-    if not req.swuds_docx_path:
+    swuds_path = _resolve_swuds_path(req)
+    if not swuds_path:
         return None
     try:
         resolver = get_resolver()
-        docx_bytes = resolver.read_bytes(req.swuds_docx_path)
+        docx_bytes = resolver.read_bytes(swuds_path)
         parse_warnings: list[str] = []
         result = parse_swuds_docx(docx_bytes, parse_warnings=parse_warnings)
         if not result.ok:
@@ -280,13 +298,15 @@ def _resolve_swuds_function_ids(req: SwUTBuildRequest) -> set[str] | None:
 def _resolve_swuds_function_asil_map(req: SwUTBuildRequest) -> dict[str, str]:
     """32차 W28: swuds_docx_path → SwUDS table 'ASIL' 라벨 → function_asil_map.
 
+    49차: req 비면 config fallback.
     실패 시 빈 dict (caller 측 c_source fallback 또는 panel 미표시).
     """
-    if not req.swuds_docx_path:
+    swuds_path = _resolve_swuds_path(req)
+    if not swuds_path:
         return {}
     try:
         resolver = get_resolver()
-        docx_bytes = resolver.read_bytes(req.swuds_docx_path)
+        docx_bytes = resolver.read_bytes(swuds_path)
         parse_warnings: list[str] = []
         result = parse_swuds_docx(docx_bytes, parse_warnings=parse_warnings)
         if not result.ok:
@@ -312,14 +332,17 @@ def _apply_function_asil_map(req: SwUTBuildRequest, session) -> None:
     추출 결과는 session.environments[0]에 주입 (aggregate_session이 통합).
     실패 시 session.parse_warnings에 누적 — 빌드 자체는 진행 (graceful).
     """
-    if not (req.c_source_root or req.swuds_docx_path):
+    # 49차 — req 우선 + config fallback
+    c_source_root = _resolve_c_source_root(req)
+    swuds_path = _resolve_swuds_path(req)
+    if not (c_source_root or swuds_path):
         return
 
     c_source_map: dict[str, str] = {}
-    if req.c_source_root:
+    if c_source_root:
         try:
             from backend.services.swut_asil_resolver import resolve_function_asil_map
-            result = resolve_function_asil_map(req.c_source_root)
+            result = resolve_function_asil_map(c_source_root)
             if result.warnings:
                 session.parse_warnings.extend(result.warnings)
             c_source_map = dict(result.function_asil_map)
@@ -329,7 +352,7 @@ def _apply_function_asil_map(req: SwUTBuildRequest, session) -> None:
                 f"c_source ASIL resolve 실패 — {type(e).__name__}"
             )
 
-    # 32차 W28: SwUDS docx에서 2차 source.
+    # 32차 W28: SwUDS docx에서 2차 source. (49차 config fallback _resolve_swuds_function_asil_map 내부)
     swuds_map = _resolve_swuds_function_asil_map(req)
 
     # Merge — c_source 우선 (swuds는 c_source 없는 키만 채움)
@@ -341,13 +364,15 @@ def _apply_function_asil_map(req: SwUTBuildRequest, session) -> None:
     ]
     merged.update(c_source_map)
 
-    # 32차 reviewer W2 fix: source 통계 warning은 사용자가 실제 path 제공한 경우만.
-    # c_source만 제공된 정상 경로에서 "SwUDS 0건" 표시는 사용자 혼동 야기 → 조건부 출력.
+    # 32차 reviewer W2 fix + 50차 W4/W5: source 통계에 config fallback 사용 여부 명시.
+    # 사용자가 잘못된 config path 박았어도 시각적으로 인지 가능.
     sources_used = []
-    if req.c_source_root:
-        sources_used.append(f"c_source {len(c_source_map)}건")
-    if req.swuds_docx_path:
-        sources_used.append(f"SwUDS {len(swuds_map)}건")
+    if c_source_root:
+        origin = "req" if req.c_source_root else "config fallback"
+        sources_used.append(f"c_source {len(c_source_map)}건 ({origin})")
+    if swuds_path:
+        origin = "req" if req.swuds_docx_path else "config fallback"
+        sources_used.append(f"SwUDS {len(swuds_map)}건 ({origin})")
     if sources_used:
         session.parse_warnings.append(
             "function_asil_map source — "
@@ -375,7 +400,8 @@ def _do_coverage_build(req: SwUTBuildRequest) -> Response:
     )
     # 30차 W21: function 별 ASIL 매핑 (옵션 c_source_root).
     _apply_function_asil_map(req, session)
-    template_bytes = _read_template_bytes(req.template_path, req.project_id, "coverage")
+    # 51차 — Coverage 양식 전용 path 사용 (config fallback: coverage_report_template).
+    template_bytes = _read_template_bytes(req.coverage_template_path, req.project_id, "coverage")
     meta = _build_coverage_meta(req)
     swuds_fn_ids = _resolve_swuds_function_ids(req)
     result = build_coverage_report(session, meta, template_bytes,
@@ -404,7 +430,8 @@ def _do_sutr_build(req: SwUTBuildRequest) -> Response:
     )
     # 30차 W21: function 별 ASIL 매핑 — Coverage builder와 대칭.
     _apply_function_asil_map(req, session)
-    template_bytes = _read_template_bytes(req.template_path, req.project_id, "sutr")
+    # 51차 — SUTR 양식 전용 path 사용 (config fallback: sutr_template).
+    template_bytes = _read_template_bytes(req.sutr_template_path, req.project_id, "sutr")
     meta = _build_sutr_meta(req)
     # 17차 T172: SwUDS docx 처리 — Coverage builder와 대칭.
     swuds_fn_ids = _resolve_swuds_function_ids(req)

@@ -316,6 +316,194 @@ class TestSwitLogFolderPreview38:
         assert any("auto-resolved" in w for w in data["warnings"])
 
 
+class TestSwitConfigFallback50:
+    """50차 — SwIT가 swut_meta.json 재활용 (config fallback).
+
+    HDPDM01은 SwUT/SwIT 동일 프로젝트 — c_source_root + swuds_docx_path 공유.
+    SwIT template은 swit_coverage_template / swit_sitr_template 별도 키 (v2.02).
+    """
+
+    def _setup_cfg(self, tmp_path, monkeypatch, cfg_dict):
+        from backend.routers import swut as swut_mod
+        cfg_path = tmp_path / "swut_meta.json"
+        import json as _json
+        cfg_path.write_text(_json.dumps(cfg_dict), encoding="utf-8")
+        monkeypatch.setattr(swut_mod, "_META_CONFIG_PATH", str(cfg_path))
+        swut_mod._read_meta_config_raw.cache_clear()
+
+    def test_resolve_swit_c_source_root_config_fallback(self, tmp_path, monkeypatch):
+        from backend.routers.swit import _resolve_swit_c_source_root
+        from backend.schemas import SwITBuildRequest
+        self._setup_cfg(tmp_path, monkeypatch, {
+            "projects": {"HDPDM01": {"c_source_root": "D:/from_config_swit"}}
+        })
+        req = SwITBuildRequest(
+            project_id="HDPDM01",
+            release_sw_version="2.02",
+            test_date="2024-02-19",
+        )
+        assert _resolve_swit_c_source_root(req) == "D:/from_config_swit"
+
+    def test_resolve_swit_c_source_root_req_priority(self, tmp_path, monkeypatch):
+        """53차 W1 — req.c_source_root 우선 (config 값 무시). SwUT 대칭."""
+        from backend.routers.swit import _resolve_swit_c_source_root
+        from backend.schemas import SwITBuildRequest
+        self._setup_cfg(tmp_path, monkeypatch, {
+            "projects": {"HDPDM01": {"c_source_root": "D:/from_config_swit"}}
+        })
+        req = SwITBuildRequest(
+            project_id="HDPDM01",
+            release_sw_version="2.02",
+            test_date="2024-02-19",
+            c_source_root="D:/from_req_swit",
+        )
+        # req 우선 — config 무시
+        assert _resolve_swit_c_source_root(req) == "D:/from_req_swit"
+
+    def test_resolve_swit_swuds_path_req_priority(self, tmp_path, monkeypatch):
+        from backend.routers.swit import _resolve_swit_swuds_path
+        from backend.schemas import SwITBuildRequest
+        self._setup_cfg(tmp_path, monkeypatch, {
+            "projects": {"HDPDM01": {"swuds_docx_path": "U:/config_swuds.docx"}}
+        })
+        req = SwITBuildRequest(
+            project_id="HDPDM01",
+            release_sw_version="2.02",
+            test_date="2024-02-19",
+            swuds_docx_path="U:/req_swuds.docx",
+        )
+        assert _resolve_swit_swuds_path(req) == "U:/req_swuds.docx"
+
+    def test_read_template_bytes_empty_both_returns_400(self, tmp_path, monkeypatch):
+        """req.template_path 빈 + config의 swit_coverage_template 빈 슬롯 → 400 raise (사용자가 swut_meta.json 미설정 시 명시 에러)."""
+        from backend.routers.swit import _read_template_bytes
+        from fastapi import HTTPException
+        self._setup_cfg(tmp_path, monkeypatch, {
+            "projects": {"HDPDM01": {"template_paths": {"swit_coverage_template": ""}}}
+        })
+        with pytest.raises(HTTPException) as exc_info:
+            _read_template_bytes("", "HDPDM01", "coverage")
+        assert exc_info.value.status_code == 400
+        assert "swit_coverage_template" in str(exc_info.value.detail)
+
+    def test_read_template_bytes_sitr_kind_uses_swit_sitr_key(self, tmp_path, monkeypatch):
+        """kind='sitr' → swit_sitr_template config 키 사용."""
+        from backend.routers.swit import _read_template_bytes
+        from fastapi import HTTPException
+        self._setup_cfg(tmp_path, monkeypatch, {
+            "projects": {"HDPDM01": {"template_paths": {"swit_sitr_template": ""}}}
+        })
+        with pytest.raises(HTTPException) as exc_info:
+            _read_template_bytes("", "HDPDM01", "sitr")
+        assert exc_info.value.status_code == 400
+        assert "swit_sitr_template" in str(exc_info.value.detail)
+
+    def test_coverage_endpoint_uses_coverage_template_path(self, monkeypatch):
+        """52차 W2 — SwIT Coverage endpoint이 coverage_template_path만 사용.
+
+        sitr_template_path 입력은 무시되고 coverage_template_path가 _read_template_bytes로 전달.
+        """
+        from backend.routers import swit as swit_mod
+        captured = {}
+
+        def _fake_read(template_path, project_id, kind):
+            captured["template_path"] = template_path
+            captured["kind"] = kind
+            raise RuntimeError("stop after capture")
+
+        monkeypatch.setattr(swit_mod, "_read_template_bytes", _fake_read)
+        body = {
+            "project_id": "HDPDM01",
+            "release_sw_version": "2.02",
+            "test_date": "2024-02-19",
+            "log_folder": "C:/fake/log",
+            "coverage_template_path": "C:/coverage.xlsx",
+            "sitr_template_path": "C:/sitr.xlsm",
+        }
+        client.post(
+            "/api/swit/coverage/build", json=body,
+            headers={"X-User": "tester"},
+        )
+        if "template_path" in captured:
+            assert captured["template_path"] == "C:/coverage.xlsx"
+            assert captured["kind"] == "coverage"
+
+    def test_sitr_endpoint_uses_sitr_template_path(self, monkeypatch):
+        """52차 W2 — SwIT SITR endpoint이 sitr_template_path만 사용."""
+        from backend.routers import swit as swit_mod
+        captured = {}
+
+        def _fake_read(template_path, project_id, kind):
+            captured["template_path"] = template_path
+            captured["kind"] = kind
+            raise RuntimeError("stop after capture")
+
+        monkeypatch.setattr(swit_mod, "_read_template_bytes", _fake_read)
+        body = {
+            "project_id": "HDPDM01",
+            "release_sw_version": "2.02",
+            "test_date": "2024-02-19",
+            "log_folder": "C:/fake/log",
+            "coverage_template_path": "C:/coverage.xlsx",
+            "sitr_template_path": "C:/sitr.xlsm",
+        }
+        client.post(
+            "/api/swit/sitr/build", json=body,
+            headers={"X-User": "tester"},
+        )
+        if "template_path" in captured:
+            assert captured["template_path"] == "C:/sitr.xlsm"
+            assert captured["kind"] == "sitr"
+
+    def test_coverage_meta_pulls_config_approvers(self, tmp_path, monkeypatch):
+        """50차 — SwIT Coverage meta가 config의 approvers + project_full_name 자동 적용."""
+        from backend.routers.swit import _build_swit_coverage_meta
+        from backend.schemas import SwITBuildRequest
+        self._setup_cfg(tmp_path, monkeypatch, {
+            "projects": {"HDPDM01": {
+                "project_full_name": "HDPDM01 Full Project Name",
+                "approvers": {
+                    "default_author": "JK Kim",
+                    "default_reviewer": "Reviewer X",
+                    "default_approver": "CH In",
+                }
+            }}
+        })
+        req = SwITBuildRequest(
+            project_id="HDPDM01",
+            release_sw_version="2.02",
+            test_date="2024-02-19",
+        )
+        meta = _build_swit_coverage_meta(req)
+        assert meta.project_full_name == "HDPDM01 Full Project Name"
+        assert meta.default_author == "JK Kim"
+        assert meta.default_reviewer == "Reviewer X"
+        assert meta.default_approver == "CH In"
+        # author override는 test_engineer (빈) — default_author 사용
+        assert meta.author == "JK Kim"
+        # doc_id_base는 SwIT 고유 — config 영향 안 받음
+        assert meta.doc_id_base == "HDPDM01-SwIT"
+
+    def test_sitr_meta_pulls_config_approvers(self, tmp_path, monkeypatch):
+        """50차 — SwIT SITR meta도 config approvers fallback."""
+        from backend.routers.swit import _build_swit_sitr_meta
+        from backend.schemas import SwITSitrBuildRequest
+        self._setup_cfg(tmp_path, monkeypatch, {
+            "projects": {"HDPDM01": {
+                "approvers": {"default_author": "AlphaUser", "default_approver": "ChIn"}
+            }}
+        })
+        req = SwITSitrBuildRequest(
+            project_id="HDPDM01",
+            release_sw_version="2.02",
+            test_date="2024-02-19",
+        )
+        meta = _build_swit_sitr_meta(req)
+        assert meta.default_author == "AlphaUser"
+        assert meta.default_approver == "ChIn"
+        assert meta.doc_id_base == "HDPDM01-SITR"  # SwIT 고유 — config 무영향
+
+
 class TestSwitSitrMetaBuilder:
     """_build_swit_sitr_meta — SwITSitrBuildRequest → SwitSitrBuildMeta."""
 

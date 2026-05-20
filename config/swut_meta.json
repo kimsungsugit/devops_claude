@@ -10,15 +10,18 @@
       "doc_id_sequence_start": 851,
       "vectorcast_project_config": "config/vectorcast_projects/hdpdm01.json",
       "c_source_root": "D:\\Project\\Ados\\PDS64_RD",
+      "swuds_docx_path": "",
       "approvers": {
         "default_author": "JK Kim",
         "default_reviewer": "",
         "default_approver": "CH In"
       },
       "template_paths": {
-        "_comment": "기존 v3.01 xlsx 파일을 그대로 템플릿으로 사용. 빌더는 BytesIO에 로드 → 셀 치환 → 저장.",
+        "_comment": "기존 v3.01 xlsx 파일을 그대로 템플릿으로 사용. 빌더는 BytesIO에 로드 → 셀 치환 → 저장. SwIT는 v2.02 별도.",
         "coverage_report_template": "U:\\연구소\\1000 프로젝트\\1200 자동차\\0002 A Cappella\\02 ADOS\\03 NE_GN7\\08.Software\\10.SW 단위테스트\\03.Test Result\\02.Result Report\\(HDPDM01)SwUT Coverage Report_v3.01_240221_R.xlsx",
-        "sutr_template": "U:\\연구소\\1000 프로젝트\\1200 자동차\\0002 A Cappella\\02 ADOS\\03 NE_GN7\\08.Software\\10.SW 단위테스트\\03.Test Result\\02.Result Report\\(HDPDM01_SUTR) Software Unit Test Result_v3.01_240221_R.xlsm"
+        "sutr_template": "U:\\연구소\\1000 프로젝트\\1200 자동차\\0002 A Cappella\\02 ADOS\\03 NE_GN7\\08.Software\\10.SW 단위테스트\\03.Test Result\\02.Result Report\\(HDPDM01_SUTR) Software Unit Test Result_v3.01_240221_R.xlsm",
+        "swit_coverage_template": "",
+        "swit_sitr_template": ""
       },
       "output_filename_pattern": {
         "_comment": "{ver}=Release Name SW, {date}=YYMMDD",

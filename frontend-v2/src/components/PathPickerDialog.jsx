@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect } from 'react';
-import { getUsername } from '../api.js';
+import { getUsername, authHeaders } from '../api.js';
 import { useAdminMode } from '../contexts/AdminContext.jsx';
 
 const API_BASE = (typeof window !== 'undefined' && window.__ARIA_API_BASE__)
@@ -88,7 +88,7 @@ export default function PathPickerDialog({
     try {
       const res = await fetch(buildUrl('/api/swut/browse'), {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-User': user },
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
         body: JSON.stringify({ path, pattern }),
       });
       if (!res.ok) {
@@ -137,7 +137,7 @@ export default function PathPickerDialog({
     try {
       const res = await fetch(buildUrl('/api/file-mode/browse-file'), {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-User': user },
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
         body: JSON.stringify({
           kind,
           title: title || (kind === 'directory' ? '폴더 선택' : '파일 선택'),
@@ -184,7 +184,7 @@ export default function PathPickerDialog({
     try {
       const res = await fetch(buildUrl('/api/file-mode/add-allowed-prefix'), {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-User': user },
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
         body: JSON.stringify({ prefix: target }),
       });
       if (!res.ok) {
@@ -224,7 +224,7 @@ export default function PathPickerDialog({
     try {
       const res = await fetch(buildUrl('/api/file-mode/add-allowed-prefix'), {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-User': user },
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
         body: JSON.stringify({ prefix: pendingAddPath }),
       });
       if (!res.ok) {

@@ -13,6 +13,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 vi.mock('../api.js', () => ({
   getUsername: () => 'tester',
+  authHeaders: () => ({ 'X-User': 'tester' }),
 }));
 
 // 40차: AdminContext mock — 회귀 기본 admin (Browse 활성)

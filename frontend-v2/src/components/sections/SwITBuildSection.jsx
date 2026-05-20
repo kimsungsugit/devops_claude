@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
-import { getUsername } from '../../api.js';
+import { getUsername, authHeaders } from '../../api.js';
 import { useToast } from '../../App.jsx';
 import { useAdminMode } from '../../contexts/AdminContext.jsx';
 import PathPickerDialog from '../PathPickerDialog.jsx';
@@ -23,7 +23,9 @@ const DEFAULT_FORM = {
   hw_version: '1.00',
   asil_level: 'ASIL B',  // SwIT 통합테스트 default
   log_folder: '',
-  template_path: '',
+  // 51차 — Coverage / SITR 양식 분리 (이전 단일 template_path)
+  coverage_template_path: '',
+  sitr_template_path: '',
   swuds_docx_path: '',
   c_source_root: '',
   reviewer_override: '',
@@ -37,6 +39,12 @@ const DEFAULT_FORM = {
 function loadSavedForm() {
   try {
     const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
+    // 52차 C1 — legacy template_path key 마이그레이션: 51차 분리 시 이전 key를
+    // coverage_template_path로 옮겨 사용자 재입력 부담 회피. delete로 무효 key 제거.
+    if (saved.template_path && !saved.coverage_template_path && !saved.sitr_template_path) {
+      saved.coverage_template_path = saved.template_path;
+    }
+    delete saved.template_path;
     return {
       ...DEFAULT_FORM,
       test_date: new Date().toISOString().slice(0, 10),
@@ -148,8 +156,12 @@ export default function SwITBuildSection() {
     if (!form.project_id) { toast('warning', 'project_id 필수'); return; }
     if (!form.release_sw_version) { toast('warning', 'release_sw_version 필수'); return; }
     if (!form.test_date) { toast('warning', 'test_date 필수'); return; }
-    if (!form.log_folder && !form.template_path) {
-      toast('warning', 'log_folder 또는 template_path 중 하나는 필수'); return;
+    // 51차 — kind별 필수 template_path 분리.
+    const kindTemplate = kind === 'coverage'
+      ? form.coverage_template_path
+      : form.sitr_template_path;
+    if (!form.log_folder && !kindTemplate) {
+      toast('warning', `log_folder 또는 ${kind === 'coverage' ? 'Coverage' : 'SITR'} Template Path 중 하나는 필수`); return;
     }
 
     const user = getUsername();
@@ -167,7 +179,7 @@ export default function SwITBuildSection() {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'X-User': user,
+          ...authHeaders(),
         },
         body: JSON.stringify(form),
         signal: controller.signal,
@@ -233,7 +245,7 @@ export default function SwITBuildSection() {
     try {
       const res = await fetch(buildUrl('/api/swit/log-folder/preview'), {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-User': user },
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
         body: JSON.stringify({ log_folder: form.log_folder }),
       });
       if (!res.ok) {
@@ -283,7 +295,7 @@ export default function SwITBuildSection() {
     try {
       const res = await fetch(buildUrl('/api/swit/consistency/check'), {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-User': user },
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
         body: JSON.stringify(consistencyForm),
         signal: controller.signal,
       });
@@ -424,55 +436,78 @@ export default function SwITBuildSection() {
       )}
       <div className="swut-form-row swut-field-with-browse">
         <Field
-          name="template_path"
-          label="Template Path (xlsx for Coverage / xlsm for SITR)"
-          value={form.template_path}
-          onChange={v => setField('template_path', v)}
-          placeholder="U:\...\(HDPDM01)SwIT Coverage Report_v2.02_240219.xlsx 또는 (HDPDM01_SITR) Software Integration Test Result_v2.02_240219.xlsm"
-          hint="회사 v2.02 양식 — Coverage / SITR 빌드 시 각각 알맞은 파일 선택"
+          name="coverage_template_path"
+          label="Coverage Template Path (xlsx)"
+          value={form.coverage_template_path}
+          onChange={v => setField('coverage_template_path', v)}
+          placeholder="U:\...\(HDPDM01)SwIT Coverage Report_v2.02_240219.xlsx"
+          hint="Coverage 빌드 전용 — 비우면 config/swut_meta.json의 swit_coverage_template 사용"
           fullWidth
         />
         <button className="swut-browse-btn" type="button"
                 disabled={!isAdmin}
                 title={isAdmin ? undefined : browseDisabledTitle}
-                onClick={() => openPicker('template_path', '*.xlsx,*.xlsm', 'Template 파일 선택')}>
+                onClick={() => openPicker('coverage_template_path', '*.xlsx', 'Coverage Template 파일 선택')}>
           📂 Browse
         </button>
       </div>
       <div className="swut-form-row swut-field-with-browse">
         <Field
-          name="swuds_docx_path"
-          label="SwUDS Docx Path (선택)"
-          value={form.swuds_docx_path}
-          onChange={v => setField('swuds_docx_path', v)}
-          placeholder="U:\...\(HDPDM01)SwUDS_v3.docx"
-          hint="제공 시 2.Consistency에 SwUDS↔SwIT 매핑 row 추가 + (c_source 미제공 시) ASIL 추출"
+          name="sitr_template_path"
+          label="SITR Template Path (xlsm)"
+          value={form.sitr_template_path}
+          onChange={v => setField('sitr_template_path', v)}
+          placeholder="U:\...\(HDPDM01_SITR) Software Integration Test Result_v2.02_240219.xlsm"
+          hint="SITR 빌드 전용 — 비우면 config/swut_meta.json의 swit_sitr_template 사용"
           fullWidth
         />
         <button className="swut-browse-btn" type="button"
                 disabled={!isAdmin}
                 title={isAdmin ? undefined : browseDisabledTitle}
-                onClick={() => openPicker('swuds_docx_path', '*.docx', 'SwUDS docx 선택')}>
+                onClick={() => openPicker('sitr_template_path', '*.xlsm', 'SITR Template 파일 선택')}>
           📂 Browse
         </button>
       </div>
-      <div className="swut-form-row swut-field-with-browse">
-        <Field
-          name="c_source_root"
-          label="C Source Root (선택)"
-          value={form.c_source_root}
-          onChange={v => setField('c_source_root', v)}
-          placeholder="U:\...\HDPDM01\src\"
-          hint="제공 시 Doxygen @asil에서 함수별 ASIL 추출. Hyundai SwUFn_NNNN 컨벤션 전용"
-          fullWidth
-        />
-        <button className="swut-browse-btn" type="button"
-                disabled={!isAdmin}
-                title={isAdmin ? undefined : browseDisabledTitle}
-                onClick={() => openPicker('c_source_root', '*', 'C 소스 디렉토리 선택')}>
-          📂 Browse
-        </button>
-      </div>
+      {/* 52차 — config 자동 사용 정책. override 필요 시만 펼침 */}
+      <details className="swut-advanced-section" style={{ marginTop: 12 }}>
+        <summary style={{ cursor: 'pointer', padding: '8px 0', fontSize: '0.92em', color: 'var(--text-muted, #888)' }}>
+          ▶ 고급 설정 (config 자동 사용 — override 필요 시만)
+        </summary>
+        <div className="swut-form-row swut-field-with-browse">
+          <Field
+            name="swuds_docx_path"
+            label="SwUDS Docx Path (선택)"
+            value={form.swuds_docx_path}
+            onChange={v => setField('swuds_docx_path', v)}
+            placeholder="U:\...\(HDPDM01)SwUDS_v3.docx"
+            hint="비우면 config/swut_meta.json의 swuds_docx_path 자동 사용. 제공 시 2.Consistency에 SwUDS↔SwIT 매핑 + ASIL 추출"
+            fullWidth
+          />
+          <button className="swut-browse-btn" type="button"
+                  disabled={!isAdmin}
+                  title={isAdmin ? undefined : browseDisabledTitle}
+                  onClick={() => openPicker('swuds_docx_path', '*.docx', 'SwUDS docx 선택')}>
+            📂 Browse
+          </button>
+        </div>
+        <div className="swut-form-row swut-field-with-browse">
+          <Field
+            name="c_source_root"
+            label="C Source Root (선택)"
+            value={form.c_source_root}
+            onChange={v => setField('c_source_root', v)}
+            placeholder="U:\...\HDPDM01\src\"
+            hint="비우면 config/swut_meta.json의 c_source_root 자동 사용. 제공 시 Doxygen @asil 추출 (SwUFn_NNNN 컨벤션)"
+            fullWidth
+          />
+          <button className="swut-browse-btn" type="button"
+                  disabled={!isAdmin}
+                  title={isAdmin ? undefined : browseDisabledTitle}
+                  onClick={() => openPicker('c_source_root', '*', 'C 소스 디렉토리 선택')}>
+            📂 Browse
+          </button>
+        </div>
+      </details>
 
       <div className="swut-actions">
         <button className="btn-primary" disabled={!!building || !isAdmin} title={isAdmin ? undefined : browseDisabledTitle}
