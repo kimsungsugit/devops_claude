@@ -97,7 +97,7 @@ _SYSTEM_BLACKLIST = (
     "c:\\program files (x86)",
     "c:/programdata",
     "c:\\programdata",
-    # POSIX 시스템 root
+    # POSIX 시스템 root (53-fix W1: /var, /boot, /lib, /lib64 추가)
     "/etc",
     "/root",
     "/sys",
@@ -106,6 +106,10 @@ _SYSTEM_BLACKLIST = (
     "/sbin",
     "/usr/bin",
     "/usr/sbin",
+    "/var",
+    "/boot",
+    "/lib",
+    "/lib64",
 )
 
 

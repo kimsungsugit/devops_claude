@@ -360,6 +360,7 @@ class TestSwitConfigFallback50:
         # req 우선 — config 무시
         assert _resolve_swit_c_source_root(req) == "D:/from_req_swit"
 
+
     def test_resolve_swit_swuds_path_req_priority(self, tmp_path, monkeypatch):
         from backend.routers.swit import _resolve_swit_swuds_path
         from backend.schemas import SwITBuildRequest
@@ -521,3 +522,88 @@ class TestSwitSitrMetaBuilder:
         assert meta.doc_id_sequence == "042"
         # SwitSitrBuildMeta inherits SutrBuildMeta — final_test_result default "OK"
         assert meta.final_test_result == "OK"
+
+
+class TestExtraForbid53fix:
+    """53차 C1 + 53-fix C2 — Pydantic extra='forbid' 422 회귀.
+
+    외부 호출자가 51차 이전 schema의 unknown 키 (예: template_path) 보내면
+    silent ignore 대신 422 + extra_forbidden 응답.
+    """
+
+    def test_swit_coverage_unknown_template_path_returns_422(self):
+        """legacy template_path 키 (51차 제거됨) → extra_forbidden 422."""
+        r = client.post(
+            "/api/swit/coverage/build",
+            json={
+                "project_id": "HDPDM01",
+                "release_sw_version": "2.02",
+                "test_date": "2024-02-19",
+                "template_path": "U:/legacy.xlsx",
+            },
+            headers={"X-User": "tester"},
+        )
+        assert r.status_code == 422
+        detail = r.json()["detail"]
+        assert any(
+            d.get("type") == "extra_forbidden" and "template_path" in d.get("loc", [])
+            for d in detail
+        ), detail
+
+    def test_swit_sitr_unknown_template_path_returns_422(self):
+        """SITR endpoint도 동일 — SwITSitrBuildRequest는 SwITBuildRequest 상속으로 extra=forbid 자동."""
+        r = client.post(
+            "/api/swit/sitr/build",
+            json={
+                "project_id": "HDPDM01",
+                "release_sw_version": "2.02",
+                "test_date": "2024-02-19",
+                "template_path": "U:/legacy.xlsm",
+            },
+            headers={"X-User": "tester"},
+        )
+        assert r.status_code == 422
+
+    def test_swit_coverage_unknown_random_key_returns_422(self):
+        """알 수 없는 임의 키도 차단 — silent ignore 안 됨."""
+        r = client.post(
+            "/api/swit/coverage/build",
+            json={
+                "project_id": "HDPDM01",
+                "release_sw_version": "2.02",
+                "test_date": "2024-02-19",
+                "random_garbage_key": "value",
+            },
+            headers={"X-User": "tester"},
+        )
+        assert r.status_code == 422
+
+
+class TestSheetNameSubstring53fix:
+    """53차 + 53-fix C1 — SwIT v2.02 양식 시트명 substring 매칭 회귀.
+
+    33차에 SwIT가 SwUT 인프라 81% 재활용으로 만들어졌으나 SwIT v2.02 양식은
+    시트명 prefix가 다름 (`1.Test Summary`, `2.Test Log` 등). 53차에 substring
+    매칭으로 변경. 향후 누군가 exact 매칭으로 되돌리면 silent regression 위험 →
+    회귀로 매칭 동작 검증.
+    """
+
+    def test_swit_coverage_aggregator_matches_swit_v202_sheet_names(self):
+        """SwIT v2.02 양식의 '1.Test Summary' 시트가 substring 매칭으로 발견됨."""
+        from backend.services import swit_coverage_aggregator as mod
+        import inspect
+        src = inspect.getsource(mod)
+        assert '"test summary" in n.lower()' in src or "'test summary' in n.lower()" in src, (
+            "swit_coverage_aggregator가 'test summary' substring 매칭 안 함 — 53차 fix 누락"
+        )
+
+    def test_swit_sitr_aggregator_matches_swit_v202_sheet_names(self):
+        """SITR도 동일 — Test Summary + Deviation + Test Log substring 매칭."""
+        from backend.services import swit_sitr_aggregator as mod
+        import inspect
+        src = inspect.getsource(mod)
+        for keyword in ("test summary", "deviation", "test log"):
+            assert (f'"{keyword}" in n.lower()' in src
+                    or f"'{keyword}' in n.lower()" in src), (
+                f"swit_sitr_aggregator가 '{keyword}' substring 매칭 안 함 — 53차 fix 누락"
+            )

@@ -164,3 +164,12 @@
 - **운영 fix (부수)**: backend uvicorn `--reload`가 swit.py 변경 detect 못 한 케이스 발견 → backend 강제 kill + 재시작. 51차+52차 schema 메모리 로드 보장. 사용자가 SwIT 빌드 시도 시 422 또는 400 정확한 에러 응답
 - 회귀: backend 2046 → 2048 (+2: SwIT c_source req priority + source origin) / frontend 261 → 263 (+2: SwUT/SwIT localStorage 마이그레이션)
 - **운영**: cloudium `add_prefix` 호출 시 system 디렉토리 prefix는 400 응답 + ValueError detail. admin이 등록 가능한 prefix는 사용자 작업 path (`U:/연구소/...`, `D:/Project/...`)만
+
+## 53-fix — 53차 자체 평가 발견 결함 통합 fix
+- 53차 commit `9ab7e7f` 직전 자체 비판 평가에서 발견한 결함:
+  - **C1 시트명 substring 매칭 회귀 부재** — 53차에 swit_coverage_aggregator + swit_sitr_aggregator의 `n.lower() == "test summary"` → `"test summary" in n.lower()`로 변경. 향후 누군가 exact 매칭으로 되돌리면 silent regression. `TestSheetNameSubstring53fix` 신규 클래스 2건: swit_coverage / swit_sitr aggregator 모듈 source에 substring pattern 명시 검증 (inspect.getsource로 코드 검사)
+  - **C2 extra='forbid' 422 응답 회귀 부재** — 53차 ConfigDict 적용 검증 누락. `TestExtraForbid53fix` 신규 클래스 3건: legacy `template_path` 키 → 422 + extra_forbidden detail / SwIT SITR endpoint 동일 / 임의 random key 거부
+  - **W1 `_SYSTEM_BLACKLIST` 누락** — POSIX 시스템 디렉토리 `/var`, `/boot`, `/lib`, `/lib64` 미포함. 추가하여 cloudium add_prefix 차단 범위 확장
+  - **W2 `_is_blacklisted` unit 회귀 부재** — sanity check만 했고 직접 unit test 부재. `TestSystemBlacklist53` 신규 클래스: blacklist 19건 parametrize (drive root + Windows 시스템 + POSIX 8건) + valid path 5건 parametrize + `_is_blacklisted` 직접 helper 검증
+- 회귀: backend 2048 → ~2060 (+12: cloudium +24건 parametrize + extra=forbid 3 + sheetname substring 2 = ~29 신규 unique). 142 passed (cloudium + SwIT + SwUT 회귀 한꺼번에 실행)
+- 53차 자체 평가에서 발견한 W3 (시트명 substring 비표준 양식 오매칭 가능성) 및 I1 (SwIT v2.02 양식 layout 본격 호환)은 54차+ 별도 라운드 후보

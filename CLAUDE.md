@@ -461,6 +461,7 @@ ISO 26262 ASIL B+ 통합 테스트 산출물 자동 생성. SwUT 30~32차 인프
 | 51차 | Template 2-field 분리 (Coverage/SUTR/SITR) + schema + router + frontend UI | 2042 → 2042 (회귀 갱신, +sutr maxlen 1) |
 | 52차 | 51차 자체 평가 fix — localStorage legacy 마이그레이션 + endpoint별 정확한 field 사용 검증 (+4) + cloudium Test Result prefix 추가 | 2042 → 2046 (+4) |
 | 53차 | deep-reviewer 발견 Critical 2 + Warning 회귀 3 — Pydantic extra=forbid + cloudium add_prefix blacklist + SwIT req priority/localStorage migration/source origin parse_warnings 회귀 | 2046 → 2048 (+2 backend, frontend +2 SwUT/SwIT migration) |
+| 53-fix | 53차 자체 평가 fix — 시트명 substring/extra=forbid 회귀 + blacklist 확장 (/var, /boot, /lib, /lib64) + `_is_blacklisted` 단위 회귀 | 2048 → ~2060 (+12: cloudium parametrize 24 + extra=forbid 3 + sheetname 2) |
 
 ### 48차 — 47차 자체 평가 발견 C5/C6/C7 + W43/W44/W45 통합 fix
 - 47차 commit `93f6828` 자체 비판 평가에서 발견한 Critical 3건 + Warning 3건 일괄 처리.

@@ -96,6 +96,46 @@ class TestAddPrefix:
             cep.add_prefix("   ")
 
 
+class TestSystemBlacklist53:
+    """53차 C2 — system 디렉토리 prefix 등록 차단 + 53-fix W2 직접 회귀."""
+
+    @pytest.mark.parametrize("path", [
+        "C:/", "c:/", "D:/", "/",  # drive root
+        "C:/Windows", "c:\\Windows", "C:/Windows/System32",  # Windows
+        "C:/Program Files", "C:/Program Files (x86)", "C:/ProgramData",
+        "/etc", "/etc/passwd", "/root", "/sys", "/proc",
+        "/bin", "/sbin", "/usr/bin", "/usr/sbin",
+        "/var", "/boot", "/lib", "/lib64",  # 53-fix W1 추가
+    ])
+    def test_blacklisted_paths_rejected(self, _isolated_path, path):
+        with pytest.raises(ValueError, match="시스템 디렉토리"):
+            cep.add_prefix(path)
+
+    @pytest.mark.parametrize("path", [
+        "U:/연구소/projects",
+        "D:/Project/Ados",
+        "C:/Users/username/Documents",  # user home은 통과
+        "/home/user/work",
+        "/opt/myapp",
+    ])
+    def test_valid_paths_pass(self, _isolated_path, path):
+        result = cep.add_prefix(path)
+        assert result["added"] is True
+
+    def test_is_blacklisted_helper_direct(self):
+        """_is_blacklisted helper 직접 검증 — add_prefix 우회한 단위 테스트."""
+        assert cep._is_blacklisted("C:/Windows") is True
+        assert cep._is_blacklisted("c:\\windows\\system32") is True
+        assert cep._is_blacklisted("/etc/shadow") is True
+        assert cep._is_blacklisted("/") is True
+        assert cep._is_blacklisted("C:/") is True
+        # 정상 path
+        assert cep._is_blacklisted("U:/연구소") is False
+        assert cep._is_blacklisted("D:/Project") is False
+        # 시스템 디렉토리 prefix 닮은 정상 path (windows-related는 windows 아님)
+        assert cep._is_blacklisted("C:/Windows-related/folder") is False
+
+
 class TestRemovePrefix:
     def test_remove_existing(self, _isolated_path):
         cep.add_prefix("U:/a")
