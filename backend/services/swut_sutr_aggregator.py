@@ -31,7 +31,7 @@ except ImportError:  # pragma: no cover
     openpyxl = None  # type: ignore[assignment]
 
 from backend.services.excel_template_utils import (
-    collect_git_history,
+    build_release_history_row,
     find_kv_row,
     has_vba_macros,
     inspect_vba_refs,
@@ -546,18 +546,14 @@ def build_sutr(
         summary["test_log_rows_written"] = n
 
     incomplete_sheets: list[str] = []
-    # T134: History 시트 git log 자동
+    # History — 55-fix: 사용자 결정 B (single-row release entry).
     hist_ws = next((wb[n] for n in sheet_names if n.lower() == "history"), None)
     if hist_ws is not None:
         from backend.services.swut_coverage_aggregator import _write_history_sheet
-        git_rows = collect_git_history(limit=10)
-        if git_rows:
-            n_h = _write_history_sheet(hist_ws, git_rows, out_warnings=warnings)
-            summary["history_rows_written"] = n_h
-            if n_h == 0:
-                incomplete_sheets.append("History")
-        else:
-            warnings.append("git log 가져오기 실패 — History 시트 placeholder")
+        release_rows = build_release_history_row(meta, doc_kind="SUTR")
+        n_h = _write_history_sheet(hist_ws, release_rows, out_warnings=warnings)
+        summary["history_rows_written"] = n_h
+        if n_h == 0:
             incomplete_sheets.append("History")
 
     # 17차 T171: 2.Consistency 시트 — Coverage builder와 대칭.

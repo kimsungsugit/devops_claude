@@ -244,12 +244,66 @@ _VBA_REF_PATTERNS = (
 )
 
 
+def build_release_history_row(
+    meta: Any, *, doc_kind: str = "",
+) -> list[dict[str, str]]:
+    """55-fix — 산출물별 release entry single row (사용자 결정 B).
+
+    이전: `collect_git_history`로 git log 10건 채워서 audit reviewer 혼동
+        (commit hash + 자동 commit + 매일 snapshot이 산출물 history로 보임).
+    현재: 산출물의 release_sw_version + test_date + author 1 row만.
+        reviewer/approver는 audit 입력으로 빈칸 둠.
+
+    Args:
+        meta: BuildMetaBase 또는 sub class (release_sw_version, test_date, author 속성).
+        doc_kind: 옵션 — "Coverage Report" / "SUTR" / "SwIT Coverage" 등 description 보강.
+
+    Returns:
+        list[1 row dict]. _write_history_sheet에 전달.
+    """
+    release = (getattr(meta, "release_sw_version", "") or "").strip()
+    test_date = (getattr(meta, "test_date", "") or "").strip()
+    author = getattr(meta, "author", "") or ""
+
+    # date format: yyyy-mm-dd → yy.mm.dd (collect_git_history와 동일)
+    date_short = ""
+    if len(test_date) >= 10:
+        # "2026-05-14" → "26.05.14"
+        try:
+            normalized = test_date.replace("/", "-")
+            parts = normalized.split("-")
+            if len(parts) >= 3:
+                yy = parts[0][-2:]
+                mm = f"{int(parts[1]):02d}"
+                dd = f"{int(parts[2][:2]):02d}"
+                date_short = f"{yy}.{mm}.{dd}"
+        except (ValueError, IndexError):
+            date_short = test_date[:8]
+
+    description = f"Initial release v{release}" if release else "Initial release"
+    if doc_kind:
+        description = f"{description} ({doc_kind})"
+
+    return [{
+        "version": f"v{release}" if release else "",
+        "date": date_short,
+        "description": description,
+        "author": str(author)[:50],
+        "reviewer": "",
+        "approver": "",
+    }]
+
+
 def collect_git_history(
     repo_root: str | None = None,
     *,
     limit: int = 10,
 ) -> list[dict[str, str]]:
     """git log → History 시트 자동 채움용 row list (T134).
+
+    55-fix 이후 SwUT/SwIT 빌더는 `build_release_history_row` 사용. git log 전체 표기는
+    audit reviewer가 산출물 history로 혼동했음 (commit hash + 자동 commit + snapshot).
+    본 함수는 유지 (backward compat) — 별도 호출처 또는 테스트 회귀에서 사용.
 
     Returns:
         list[{version, date, description, author, reviewer, approver}].

@@ -36,7 +36,7 @@ except ImportError:  # pragma: no cover
 
 from backend.services.excel_template_utils import (
     BLANK_MARKUP,
-    collect_git_history,
+    build_release_history_row,
     mark_asil_b_function,
     mark_asil_c_function,
     mark_asil_d_function,
@@ -846,17 +846,14 @@ def build_coverage_report(
         warnings.append("2.Consistency 시트 미발견")
         incomplete_sheets.append("2.Consistency")
 
-    # History — T134 git log 자동 채움
+    # History — 55-fix: 사용자 결정 B (single-row release entry).
+    # 이전 git log 10건 → 산출물 release_sw_version + test_date 1 row만.
     hist_ws = next((wb[n] for n in sheet_names if n.lower() == "history"), None)
     if hist_ws is not None:
-        git_rows = collect_git_history(limit=10)
-        if git_rows:
-            n_h = _write_history_sheet(hist_ws, git_rows, out_warnings=warnings)
-            summary["history_rows_written"] = n_h
-            if n_h == 0:
-                incomplete_sheets.append("History")
-        else:
-            warnings.append("git log 가져오기 실패 — History 시트 placeholder")
+        release_rows = build_release_history_row(meta, doc_kind="Coverage Report")
+        n_h = _write_history_sheet(hist_ws, release_rows, out_warnings=warnings)
+        summary["history_rows_written"] = n_h
+        if n_h == 0:
             incomplete_sheets.append("History")
 
     # 14차 W1: BytesIO 그대로 result에 저장 — getvalue() copy 회피.

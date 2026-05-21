@@ -304,3 +304,46 @@
 - excel_layout_resolver candidate-tuple config-driven (`swut_meta.json`에 label override — 사용자 라이브 검증 결과 따라)
 - 라우터 `_META_CONFIG_PATH` 단방향 sync 패턴 정리 (alias 제거 + 회귀 setup_cfg 통일)
 - 사용자 실 환경 v2.02 라이브 검증 (사용자 의무 / 별도 PoC)
+
+## 55-fix — 라이브 산출물 검증 발견 결함 통합 (사용자 보고)
+
+사용자가 55차 commit `3a16b68` 후 실 환경에서 v2.02 양식으로 빌드한 산출물 2개를 검사하여 보고:
+- `(HDPDM01)SwIT Coverage Report_v2.02_260514_R (1).xlsx`
+- `(HDPDM01_SITR) Software Integration Test Result_v2.02_260514_R (1).xlsm`
+
+산출물 inspect 결과 두 가지 핵심 문제 발견.
+
+### T303 — History 시트 single-row 정책 (사용자 결정 B)
+- **문제**: `collect_git_history(limit=10)`이 git log 10건 (`vf129dc0`, `v132a97c` 등 commit hash 버전)으로 History 시트 row 5~14 채움 → audit reviewer가 산출물 history로 혼동 + 매일 snapshot/auto-commit이 표기되어 구조적 의미 약화
+- **사용자 결정**: (B) 오늘 날짜로 한 row만 — 산출물별 release 1건
+- **Fix**:
+  - `backend/services/excel_template_utils.py` 신규 helper `build_release_history_row(meta, doc_kind)` — `release_sw_version` + `test_date` (yy.mm.dd) + `description="Initial release v{version} ({doc_kind})"` + `author=meta.author` 1 row
+  - 4 aggregator (`swut_coverage` / `swut_sutr` / `swit_coverage` / `swit_sitr`) 모두 `collect_git_history(limit=10)` → `build_release_history_row(meta, doc_kind=...)` 교체
+  - `collect_git_history`는 backward compat로 유지 (별도 호출처 / 회귀)
+
+### T304 — TC stats candidate 확장 + fill row 보정 (Critical)
+- **문제 1**: 회사 v2.02 SITR 양식의 TC stats 라벨은 **`'Total Number of TCs'`** (B17~F17 가로 5컬럼) — 우리 candidate (`'Total TC', 'Test Case Count', 'TC Count'`)에 미등록 → label 검출 실패 → TC stats fill skip
+- **문제 2**: 회사 양식은 row 17이 헤더, row 18이 data row — 우리 `_scan_tc_stats_row`가 label_row를 그대로 반환 → writer가 라벨 row를 덮어쓰기 시도 → 머지셀 anchor 실패로 silent skip
+- **Fix**:
+  - `_TC_STATS_LABELS`에 `'Total Number of TCs'` 추가 (55-fix 사용자 보고)
+  - `_scan_tc_stats_row` 반환을 `(label_row + 1, label_col)` 로 변경 — data row 반환. col_start도 label_col (가로 배치라 첫 라벨 col부터 데이터)
+- **Requirements row 정책**:
+  - 회사 v2.02 SITR 양식은 row 22에 이미 `'SwITS'` default 채워져 있음 + F22 formula `=IFERROR(D22/C22,"")`
+  - candidate에 `'■  Requirements/Design Coverage'` (prefix 양식) 추가하면 우리 코드가 row 20 (라벨 row)에 SwITS 덮어쓰기 위험 → **추가 금지** 주석 명시
+  - 즉 Requirements row는 회사 default 그대로 유지 (audit reviewer 수동 입력)
+
+### Cover 시트 fill 분석 (변경 없음)
+- 회사 v2.02 Cover 시트는 horizontal 배치 (`I2='Author' J2='JK Kim' K2='Approver' L2='김진경'`) + row 10 title만 — Project / ASIL Level / Doc. ID / Validation Date 등 label 부재
+- 우리 코드 `find_kv_row`는 Author/Approver 정확히 매칭하여 fill 성공 ✅
+- 회사 양식이 그 정보를 받지 않는 단순 title sheet — fix 불필요
+
+### 회귀 갱신
+- `test_swit_coverage_aggregator.py::test_tc_stats_row_filled`: 검증 row 17 → 18, col B~E → A~E (label A17 → data A18)
+- `test_swit_sitr_aggregator.py::test_tc_stats_row_filled`: 검증 row 17 → 18, col B~E → A~E
+- 회귀: backend ~2082 → ~2082 (회귀 row 보정만, 신규 회귀 추가 없음)
+- backend SwUT/SwIT batch **439 통과**
+
+### 비-목표 (56차+)
+- Consistency 시트 회사 v2.02 양식 3컬럼 구조 (`Item / Actual / Note`) 대응 (현재 우리 코드 5컬럼 가정 — 일부 row만 fill)
+- 4.Coverage 시트 회사 formula `=IF(H11=I11, "O", "X")`와 우리 데이터 fill 충돌 정리
+- 사용자 추가 라이브 검증 결과 따른 candidate 확장

@@ -350,20 +350,19 @@ class TestSwitV202LayoutCompat:
         assert ts["C3"].value == "1.00"
 
     def test_tc_stats_row_filled(self):
-        """B17-F17 TC 통계 row 자동 채움."""
+        """55-fix: 라벨 row=17이 헤더 (가로 배치), data는 row=18에 채움."""
         template = _build_v202_template()
         result = build_swit_coverage_report(
             _make_swit_session(), _make_swit_meta(), template,
         )
         wb = openpyxl.load_workbook(io.BytesIO(result.xlsx_bytes))
         ts = wb["1.Test Summary"]
-        # "Total TC" 라벨이 A17에 있고 col+1=B17부터 값 채움 (label col=1, col_start=2)
-        # total_tcs=1 (session에 SwITC_SwUFn_0101.001 1건)
-        assert ts["B17"].value == 1   # Total
-        assert ts["C17"].value == 1   # Tested
-        assert ts["D17"].value == 1   # Passed
-        assert ts["E17"].value == 0   # Failed
-        assert ts["F17"].value == 0   # Blocked (inferred)
+        # 55-fix: "Total TC" 라벨 A17에 위치 → tc_stats_row=18 (data), col_start=1 (A)
+        assert ts["A18"].value == 1   # Total
+        assert ts["B18"].value == 1   # Tested
+        assert ts["C18"].value == 1   # Passed
+        assert ts["D18"].value == 0   # Failed
+        assert ts["E18"].value == 0   # Blocked (inferred)
         assert result.summary.get("tc_stats_blocked_inferred") is True
 
     def test_requirements_row_filled_with_swits(self):

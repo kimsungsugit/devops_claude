@@ -514,6 +514,7 @@ class TestSwitSitrV202LayoutCompat:
         assert ts["C3"].value == "1.00"
 
     def test_tc_stats_row_filled(self):
+        """55-fix: 라벨 row=17이 헤더 (가로 배치), data는 row=18에 채움."""
         result = build_swit_sitr_report(
             _make_swit_sitr_session(),
             _make_swit_sitr_meta(),
@@ -521,11 +522,12 @@ class TestSwitSitrV202LayoutCompat:
         )
         wb = openpyxl.load_workbook(io.BytesIO(result.xlsm_bytes), keep_vba=True)
         ts = wb["1.Test Summary"]
+        # 55-fix: "Total TC" 라벨 A17 → data row=18, col_start=1 (A)
         # 2 TC (one pass, one fail)
-        assert ts["B17"].value == 2   # Total
-        assert ts["C17"].value == 2   # Tested
-        assert ts["D17"].value == 1   # Passed (one passed=True)
-        assert ts["E17"].value == 1   # Failed (one passed=False)
+        assert ts["A18"].value == 2   # Total
+        assert ts["B18"].value == 2   # Tested
+        assert ts["C18"].value == 1   # Passed (one passed=True)
+        assert ts["D18"].value == 1   # Failed (one passed=False)
         assert result.summary.get("tc_stats_blocked_inferred") is True
 
     def test_test_log_al_column_marker(self):

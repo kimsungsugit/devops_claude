@@ -122,9 +122,12 @@ _TEST_SUMMARY_CANDIDATES: dict[str, tuple[str, ...]] = {
     "actual_pass_ratio": ("Actual Pass ratio", "Actual Pass Ratio", "실측 Pass 비율"),
 }
 
-# v2.02 양식 신규 row label 후보
+# v2.02 양식 신규 row label 후보 — 55-fix: 사용자 실 산출물 보고로 'Total Number of TCs'
+# 추가. 회사 v2.02 SITR 양식의 실 라벨이 candidate-tuple에 없어 row 검출 실패했음.
 _TC_STATS_LABELS: tuple[str, ...] = (
-    "Total TC", "Test Case Count", "TC Count", "전체 TC", "TC 수",
+    "Total Number of TCs",  # v2.02 SITR 실 양식 (55-fix 사용자 보고)
+    "Total TC", "Test Case Count", "TC Count",
+    "전체 TC", "TC 수",
 )
 _REQUIREMENTS_LABELS: tuple[str, ...] = (
     "Requirements/Design Coverage",
@@ -132,6 +135,10 @@ _REQUIREMENTS_LABELS: tuple[str, ...] = (
     "Design Coverage",
     "요구사항/설계 커버리지",
 )
+# 55-fix 주의: 회사 v2.02 SITR 양식은 row 20에 '■  Requirements/Design Coverage'
+# 헤더 + row 22에 이미 'SwITS' default 채워져 있음. ■ prefix 후보를 추가하면
+# requirements_row=20이 검출되어 우리 writer가 라벨 row를 덮어씀. 따라서 추가 금지.
+# 만약 향후 회사 양식이 SwITS default 안 갖는 양식 도입 시 별도 검토.
 _TEST_LOG_MARKER_LABELS: tuple[str, ...] = (
     "Marker", "Pass/Fail Marker", "검수 표시", "통과 표시",
 )
@@ -218,17 +225,22 @@ def _detect_version_from_labels(
 
 
 def _scan_tc_stats_row(ws) -> tuple[Optional[int], Optional[int]]:
-    """Test Summary 시트에서 TC stats row 위치 탐색.
+    """Test Summary 시트에서 TC stats data row 위치 탐색.
 
-    candidate label 매칭 후 row 반환. col_start는 label_col + 1 (자동 보정).
+    55-fix: 회사 v2.02 SITR 양식은 라벨 row가 헤더 (B17~F17 가로 배치)이고
+    data는 label_row + 1 (B18~F18)에 위치. label_row를 그대로 반환하면 writer가
+    label을 덮어씀. 본 함수는 **data row** 반환.
+
+    또한 col_start = label_col (라벨이 가로 배치라 첫 라벨 col부터 데이터 시작).
 
     Returns:
-        (tc_stats_row, tc_stats_col_start) — 둘 다 None이면 v3.01 (없음).
+        (tc_stats_data_row, tc_stats_col_start) — 둘 다 None이면 v3.01 (없음).
     """
     cell_ref, _ = _scan_label_cell(ws, _TC_STATS_LABELS, max_row=60)
     if cell_ref is None:
         return (None, None)
-    return (cell_ref.row, cell_ref.col + 1)
+    # data row = 라벨 row + 1, 데이터 시작 col = 라벨 col (가로 배치)
+    return (cell_ref.row + 1, cell_ref.col)
 
 
 def _scan_requirements_row(ws) -> Optional[int]:
