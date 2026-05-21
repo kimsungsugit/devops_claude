@@ -544,4 +544,68 @@ describe('SwUTBuildSection', () => {
     expect(policyNote).toBeTruthy();
     expect(policyNote.textContent).toContain('31차 비표준 audit 확장');
   });
+
+  it('55차 — renders blocked_inferred warning panel when summary flag is true (SwUT v2.02 잘못 입력)', async () => {
+    const mockBlob = new Blob([new Uint8Array([0x50, 0x4b])], {
+      type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    });
+    vi.spyOn(global, 'fetch').mockResolvedValue({
+      ok: true,
+      headers: new Headers({
+        'Content-Disposition': 'attachment; filename="(HDPDM01)Coverage.xlsx"',
+        'X-SwUT-Summary': JSON.stringify({
+          environments: 1,
+          total_tcs: 2,
+          tc_stats_blocked_inferred: true,
+        }),
+        'X-SwUT-Warnings': JSON.stringify([]),
+      }),
+      blob: async () => mockBlob,
+    });
+
+    render(<SwUTBuildSection />);
+    fireEvent.change(screen.getByLabelText(/Release SW Version/), {
+      target: { value: '1.0.0' },
+    });
+    fireEvent.change(screen.getByLabelText(/Log Folder/), {
+      target: { value: 'C:/fake/log' },
+    });
+    fireEvent.click(screen.getByText(/Coverage Report 빌드/));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('swut-blocked-inferred-warning')).toBeTruthy();
+    });
+    const panel = screen.getByRole('alert');
+    expect(panel.textContent).toMatch(/Blocked = 0 \(inferred\)/);
+  });
+
+  it('55차 — does not render blocked_inferred panel when flag absent (SwUT v3.01 정상)', async () => {
+    const mockBlob = new Blob([new Uint8Array([0x50, 0x4b])], {
+      type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    });
+    vi.spyOn(global, 'fetch').mockResolvedValue({
+      ok: true,
+      headers: new Headers({
+        'Content-Disposition': 'attachment; filename="(HDPDM01)Coverage.xlsx"',
+        // tc_stats_blocked_inferred 키 부재 (v3.01)
+        'X-SwUT-Summary': JSON.stringify({ environments: 1, total_tcs: 2 }),
+        'X-SwUT-Warnings': JSON.stringify([]),
+      }),
+      blob: async () => mockBlob,
+    });
+
+    render(<SwUTBuildSection />);
+    fireEvent.change(screen.getByLabelText(/Release SW Version/), {
+      target: { value: '1.0.0' },
+    });
+    fireEvent.change(screen.getByLabelText(/Log Folder/), {
+      target: { value: 'C:/fake/log' },
+    });
+    fireEvent.click(screen.getByText(/Coverage Report 빌드/));
+
+    await waitFor(() => {
+      expect(toastSpy).toHaveBeenCalledWith('success', expect.stringMatching(/다운로드/));
+    });
+    expect(screen.queryByTestId('swut-blocked-inferred-warning')).toBeNull();
+  });
 });

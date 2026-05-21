@@ -268,5 +268,39 @@
 
 ### 비-목표 (55차+ Info)
 - I1 SwitLayout → ExcelTemplateLayout rename (회귀 다수 import — 별도 정비 라운드)
-- I2 docstring kind 인자 plan vs 구현 divergence 명시 (이미 docstring 일부 표기, 명확화 필요)
-- frontend SwITBuildSection summary panel에 `tc_stats_blocked_inferred` 표시 (UI 별도 라운드)
+- ~~I2 docstring kind 인자 명시~~ — **55차에서 완료**
+- ~~frontend SwITBuildSection summary panel에 tc_stats_blocked_inferred 표시~~ — **55차에서 완료**
+
+## 55차 — frontend blocked_inferred UI 경고 + swut_meta_resolver docstring 명확화
+
+54-fix W4에서 backend는 산출물 B17 col+5 노란 강조 + `summary["tc_stats_blocked_inferred"] = True` set 했으나 frontend가 raw JSON `<pre>` dump로만 노출 → audit reviewer가 download 전 inferred 데이터 인지 불가. cross-stack 표시 누락 fix.
+
+### T298+T299 — frontend 경고 panel (SwIT + SwUT 대칭)
+- `SwITBuildSection.jsx` + `SwUTBuildSection.jsx` `lastSummary` 영역에 conditional render
+- `lastSummary?.tc_stats_blocked_inferred === true` 시 `role="alert"` panel — "TC Stats Blocked = 0 (inferred). VectorCAST blocked 미지원, B17 row F열 0 채움, G열 노란 강조로 audit reviewer 명시 입력 안내"
+- CSS `.swut-blocked-inferred-warning` 추가 — 좌측 4px amber border + `--color-warning-soft` 배경 (Excel 노란 강조 시각 매칭). design tokens 무영향
+
+### T300 — frontend 회귀 +4건
+- SwITBuildSection.test.jsx +2: mock fetch `tc_stats_blocked_inferred: true` 응답 → 경고 panel 렌더 / key 부재 → 미렌더
+- SwUTBuildSection.test.jsx +2: SwUT v2.02 잘못 입력 시나리오 (54-fix C1 cross-stack) — 동일 패턴
+
+### T301 — swut_meta_resolver 5 함수 docstring 보강 (I2)
+- `resolve_swuds_path` / `resolve_c_source_root` / `resolve_swuds_function_ids` / `resolve_swuds_function_asil_map` / `apply_function_asil_map` 모두 docstring에 "plan vs 구현 divergence (54-fix I2 / 55차)" 섹션 추가
+- 명시: plan의 `kind: Literal["swut", "swit"]` 인자는 req 객체의 동일 속성명(swuds_docx_path / c_source_root)으로 덕 타이핑 흡수. SwUT/SwIT 동일 함수 호환. 향후 분기 필요 시 kind 도입 검토 안내
+- `load_meta_from_config(project_id)`는 req 인자 없음 → 무영향
+
+### 회귀
+- frontend 263 → 267 (+4: SwIT 2 + SwUT 2)
+- backend swut_meta_resolver 9건 무변경 (docstring만)
+- frontend 변경 영역 41/41 통과 (SwIT 13 + SwUT 28)
+
+### ISO 26262 영향
+- audit reviewer가 download 전 inferred 데이터 명시 인지 → 추적성 강화 (W4 cross-stack 완료)
+- evidence_class 정책 무변경 — UI 경고는 reviewer 행동 유도, evidence 자체 변경 없음
+- Backend RGB / Frontend CSS 색상 컨텍스트 분리 정책 유지 (`--color-warning-soft` 기존 토큰 재사용)
+
+### 비-목표 (56차+)
+- I1 SwitLayout → ExcelTemplateLayout rename (회귀 import 7 파일 / 17 문자열 — 별도 정비 라운드)
+- excel_layout_resolver candidate-tuple config-driven (`swut_meta.json`에 label override — 사용자 라이브 검증 결과 따라)
+- 라우터 `_META_CONFIG_PATH` 단방향 sync 패턴 정리 (alias 제거 + 회귀 setup_cfg 통일)
+- 사용자 실 환경 v2.02 라이브 검증 (사용자 의무 / 별도 PoC)

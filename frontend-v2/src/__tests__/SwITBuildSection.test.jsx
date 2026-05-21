@@ -257,4 +257,69 @@ describe('SwITBuildSection', () => {
     // SwUT 키와 분리
     expect(localStorage.getItem('devops_v2_swut_form')).toBeNull();
   });
+
+  it('55차 — renders blocked_inferred warning panel when summary flag is true', async () => {
+    const mockBlob = new Blob([new Uint8Array([0x50, 0x4b])], {
+      type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    });
+    vi.spyOn(global, 'fetch').mockResolvedValue({
+      ok: true,
+      headers: new Headers({
+        'Content-Disposition': 'attachment; filename="(HDPDM01)SwIT_v202.xlsx"',
+        'X-SwIT-Summary': JSON.stringify({
+          environments: 1,
+          total_tcs: 2,
+          tc_stats_blocked_inferred: true,
+        }),
+        'X-SwIT-Warnings': JSON.stringify([]),
+      }),
+      blob: async () => mockBlob,
+    });
+
+    render(<SwITBuildSection />);
+    fireEvent.change(screen.getByLabelText(/Release SW Version/), {
+      target: { value: '2.02' },
+    });
+    fireEvent.change(screen.getByLabelText(/Log Folder/), {
+      target: { value: 'C:/fake/log' },
+    });
+    fireEvent.click(screen.getByText(/Coverage Report 빌드/));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('swit-blocked-inferred-warning')).toBeTruthy();
+    });
+    const panel = screen.getByRole('alert');
+    expect(panel.textContent).toMatch(/Blocked = 0 \(inferred\)/);
+  });
+
+  it('55차 — does not render blocked_inferred panel when flag is false or absent', async () => {
+    const mockBlob = new Blob([new Uint8Array([0x50, 0x4b])], {
+      type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    });
+    vi.spyOn(global, 'fetch').mockResolvedValue({
+      ok: true,
+      headers: new Headers({
+        'Content-Disposition': 'attachment; filename="(HDPDM01)SwIT_v301.xlsx"',
+        // tc_stats_blocked_inferred 키 부재 (v3.01 양식)
+        'X-SwIT-Summary': JSON.stringify({ environments: 1, total_tcs: 2 }),
+        'X-SwIT-Warnings': JSON.stringify([]),
+      }),
+      blob: async () => mockBlob,
+    });
+
+    render(<SwITBuildSection />);
+    fireEvent.change(screen.getByLabelText(/Release SW Version/), {
+      target: { value: '2.02' },
+    });
+    fireEvent.change(screen.getByLabelText(/Log Folder/), {
+      target: { value: 'C:/fake/log' },
+    });
+    fireEvent.click(screen.getByText(/Coverage Report 빌드/));
+
+    await waitFor(() => {
+      expect(toastSpy).toHaveBeenCalledWith('success', expect.stringMatching(/다운로드/));
+    });
+    // 빌드 success 후에도 inferred panel 미렌더
+    expect(screen.queryByTestId('swit-blocked-inferred-warning')).toBeNull();
+  });
 });

@@ -565,6 +565,24 @@ export default function SwITBuildSection() {
         </div>
       )}
 
+      {lastSummary?.tc_stats_blocked_inferred === true && (
+        <div
+          className="swut-blocked-inferred-warning"
+          data-testid="swit-blocked-inferred-warning"
+          role="alert"
+        >
+          <span className="swut-blocked-inferred-icon" aria-hidden="true">⚠️</span>
+          <div className="swut-blocked-inferred-content">
+            <strong>TC Stats Blocked = 0 (inferred)</strong>
+            <p>
+              VectorCAST가 blocked TC 수를 직접 보고하지 않아 0으로 채워졌습니다 (B17 row F열).
+              산출물 G열 (col+5)에 노란 강조로 안내 표시되어 있습니다 —
+              실측 blocked TC 수가 있다면 audit reviewer가 명시적으로 채워야 합니다.
+            </p>
+          </div>
+        </div>
+      )}
+
       {lastSummary && (
         <div className="swut-summary-card">
           <div className="swut-summary-title">마지막 빌드 결과</div>

@@ -61,9 +61,16 @@ def load_meta_from_config(project_id: str) -> dict[str, Any]:
 def resolve_swuds_path(req: Any, project_id: str) -> str:
     """49차 — req.swuds_docx_path 우선, 비면 config의 project별 값 fallback.
 
+    plan vs 구현 divergence (54-fix I2 / 55차):
+        54차 plan에서 `kind: Literal["swut", "swit"]` 인자 명시했으나 실제 구현은
+        req 객체의 `swuds_docx_path` 속성만 사용. SwUT/SwIT BuildRequest 모두
+        동일한 속성명을 가지므로 덕 타이핑으로 흡수. 향후 SwUT/SwIT 라우터별
+        동작이 분기 필요해질 때 kind 인자 도입 검토.
+
     Args:
-        req: SwUTBuildRequest 또는 SwITBuildRequest (덕 타이핑 — swuds_docx_path 속성).
-        project_id: req.project_id (caller 명시).
+        req: SwUTBuildRequest 또는 SwITBuildRequest (덕 타이핑 — `swuds_docx_path`
+            속성 + `project_id` 속성 polymorphic 지원).
+        project_id: req.project_id (caller 명시 — 검색 path와 분리하여 명시성 확보).
 
     Returns:
         절대/상대 path string. 둘 다 비면 빈 string.
@@ -76,7 +83,16 @@ def resolve_swuds_path(req: Any, project_id: str) -> str:
 
 
 def resolve_c_source_root(req: Any, project_id: str) -> str:
-    """49차 — req.c_source_root 우선, 비면 config의 project별 값 fallback."""
+    """49차 — req.c_source_root 우선, 비면 config의 project별 값 fallback.
+
+    plan vs 구현 divergence (54-fix I2 / 55차):
+        plan의 `kind` 인자는 req 객체의 `c_source_root` 속성으로 흡수 (덕 타이핑).
+        SwUT/SwIT 라우터 모두 동일 속성명. 자세히는 `resolve_swuds_path` docstring 참조.
+
+    Args:
+        req: SwUTBuildRequest 또는 SwITBuildRequest (덕 타이핑).
+        project_id: req.project_id.
+    """
     req_value = getattr(req, "c_source_root", "") or ""
     if req_value:
         return req_value
@@ -86,6 +102,10 @@ def resolve_c_source_root(req: Any, project_id: str) -> str:
 
 def resolve_swuds_function_ids(req: Any, project_id: str) -> set[str] | None:
     """16차 + 49차 — swuds_docx_path가 있으면 docx → function ID set 반환.
+
+    plan vs 구현 divergence (54-fix I2 / 55차):
+        plan의 `kind` 인자는 req 객체 속성으로 흡수 (덕 타이핑). 자세히는
+        `resolve_swuds_path` docstring 참조.
 
     실패 시 None — caller는 SwUDS 비교 skip + warnings에 사유 누적.
     """
@@ -111,6 +131,9 @@ def resolve_swuds_function_ids(req: Any, project_id: str) -> set[str] | None:
 
 def resolve_swuds_function_asil_map(req: Any, project_id: str) -> dict[str, str]:
     """32차 W28 + 49차 — swuds_docx_path → SwUDS 'ASIL' 라벨 → function_asil_map.
+
+    plan vs 구현 divergence (54-fix I2 / 55차):
+        plan의 `kind` 인자는 req 객체 속성으로 흡수. 자세히는 `resolve_swuds_path`.
 
     Returns:
         {fn_id: "A"/"B"/"C"/"D"/"QM"} — 실패 시 빈 dict.
@@ -143,8 +166,13 @@ def apply_function_asil_map(req: Any, session: Any, project_id: str) -> None:
         - 충돌 시 c_source 우선 + parse_warnings 누적
         - source origin 명시 ("req" vs "config fallback")
 
+    plan vs 구현 divergence (54-fix I2 / 55차):
+        plan의 `kind: Literal["swut", "swit"]` 인자는 req 객체의 `c_source_root` /
+        `swuds_docx_path` 속성 polymorphic으로 흡수 (덕 타이핑). SwUT/SwIT 동일
+        속성명이라 동일 함수가 두 라우터 모두 호환. 향후 분기 필요 시 kind 도입 검토.
+
     Args:
-        req: SwUT/SwIT BuildRequest (c_source_root + swuds_docx_path 속성).
+        req: SwUT/SwIT BuildRequest (덕 타이핑 — c_source_root + swuds_docx_path 속성).
         session: SwUTSession 또는 호환 객체 (environments + parse_warnings 속성).
         project_id: req.project_id 명시.
 
