@@ -156,50 +156,95 @@ def _write_label_or_mark(
     )
 
 
-def _write_cover(ws, meta: SutrBuildMeta, out_warnings: list[str] | None = None) -> None:
-    _write_label(ws, "Project", meta.project_full_name, out_warnings)
-    _write_label(ws, "ASIL Level", meta.asil_level, out_warnings)
-    _write_label(ws, "Status", "DRAFT — PENDING REVIEW", out_warnings)
+def _write_cover(
+    ws, meta: SutrBuildMeta, out_warnings: list[str] | None = None,
+    *, layout: Any = None,
+) -> None:
+    """54차 T282: layout 제공 시 cover_labels 매핑으로 v2.02 양식 동적 호환."""
+    labels = layout.cover_labels if layout else {}
+    _write_label(ws, labels.get("project_full_name", "Project"),
+                 meta.project_full_name, out_warnings)
+    _write_label(ws, labels.get("asil_level", "ASIL Level"),
+                 meta.asil_level, out_warnings)
+    _write_label(ws, labels.get("status", "Status"),
+                 "DRAFT — PENDING REVIEW", out_warnings)
     # 23차 T192: 비어있으면 노란 강조 (audit reviewer 가시성)
-    _write_label_or_mark(ws, "Validation Date", meta.validation_date,
+    _write_label_or_mark(ws, labels.get("validation_date", "Validation Date"),
+                         meta.validation_date,
                          "yyyy-mm-dd 형식 검증 완료일", out_warnings)
-    _write_label_or_mark(ws, "Author", meta.author,
+    _write_label_or_mark(ws, labels.get("author", "Author"), meta.author,
                          "test_engineer 또는 default_author", out_warnings)
-    _write_label_or_mark(ws, "Approver", meta.approver,
+    _write_label_or_mark(ws, labels.get("approver", "Approver"), meta.approver,
                          "승인자 이름 (필수)", out_warnings)
     if meta.doc_id_sequence:
-        _write_label(ws, "Doc. ID", f"{meta.doc_id_base}-{meta.doc_id_sequence}", out_warnings)
-    _write_label(ws, "Version", f"v{meta.release_sw_version}", out_warnings)
+        _write_label(ws, labels.get("doc_id", "Doc. ID"),
+                     f"{meta.doc_id_base}-{meta.doc_id_sequence}", out_warnings)
+    _write_label(ws, labels.get("version", "Version"),
+                 f"v{meta.release_sw_version}", out_warnings)
     # optional — 회사 v3.01 template에 라벨이 없을 수 있어 silent skip 허용.
-    _write_label(ws, "Build Timestamp", meta.build_timestamp, out_warnings)
+    _write_label(ws, labels.get("build_timestamp", "Build Timestamp"),
+                 meta.build_timestamp, out_warnings)
 
 
 def _write_test_summary(
     ws, meta: SutrBuildMeta, agg: dict[str, Any],
     out_warnings: list[str] | None = None,
+    *, layout: Any = None, summary: dict[str, Any] | None = None,
 ) -> None:
-    _write_label(ws, "Project Name", meta.project_full_name, out_warnings)
-    _write_label(ws, "Release Name(SW)", meta.release_sw_version, out_warnings)
-    _write_label(ws, "Test Target Version(HW)", meta.hw_version, out_warnings)
-    _write_label(ws, "Test Date", meta.test_date, out_warnings)
+    """54차 T282/T283: layout 제공 시 v2.02 양식 동적 호환."""
+    labels = layout.test_summary_labels if layout else {}
+    _write_label(ws, labels.get("project_full_name", "Project Name"),
+                 meta.project_full_name, out_warnings)
+    _write_label(ws, labels.get("release_sw_version", "Release Name(SW)"),
+                 meta.release_sw_version, out_warnings)
+    _write_label(ws, labels.get("hw_version", "Test Target Version(HW)"),
+                 meta.hw_version, out_warnings)
+    _write_label(ws, labels.get("test_date", "Test Date"),
+                 meta.test_date, out_warnings)
     # 24차: Test Engineer 빈 시 노란 강조 (Coverage와 대칭)
-    _write_label_or_mark(ws, "Test Engineer", meta.test_engineer,
+    _write_label_or_mark(ws, labels.get("test_engineer", "Test Engineer"),
+                         meta.test_engineer,
                          "테스트 엔지니어 이름", out_warnings)
-    _write_label(ws, "Target Coverage", meta.target_coverage, out_warnings)
+    _write_label(ws, labels.get("target_coverage", "Target Coverage"),
+                 meta.target_coverage, out_warnings)
     # deep-reviewer X7: 0/N의 silent wrong-pick 회피 — N=0이면 "N/A" 명시.
     # 24차: agg.total == 0 → N/A는 input 데이터 부재 의미, 노란 강조로 reviewer 가시화.
     if agg["total"] > 0:
-        _write_label(ws, "Actual Coverage", agg["tested"] / agg["total"], out_warnings)
+        _write_label(ws, labels.get("actual_coverage", "Actual Coverage"),
+                     agg["tested"] / agg["total"], out_warnings)
     else:
-        _write_label_or_mark(ws, "Actual Coverage", "",
+        _write_label_or_mark(ws, labels.get("actual_coverage", "Actual Coverage"), "",
                              "VectorCAST 데이터 부재 — log_folder 재확인", out_warnings)
-    _write_label(ws, "Target Pass ratio", meta.target_pass_ratio, out_warnings)
+    _write_label(ws, labels.get("target_pass_ratio", "Target Pass ratio"),
+                 meta.target_pass_ratio, out_warnings)
     if agg["tested"] > 0:
-        _write_label(ws, "Actual Pass ratio", agg["passed"] / agg["tested"], out_warnings)
+        _write_label(ws, labels.get("actual_pass_ratio", "Actual Pass ratio"),
+                     agg["passed"] / agg["tested"], out_warnings)
     else:
-        _write_label_or_mark(ws, "Actual Pass ratio", "",
+        _write_label_or_mark(ws, labels.get("actual_pass_ratio", "Actual Pass ratio"), "",
                              "실행된 TC 없음 — log 또는 deviation 확인", out_warnings)
-    _write_label(ws, "Final Test Result", meta.final_test_result, out_warnings)
+    _write_label(ws, labels.get("final_test_result", "Final Test Result"),
+                 meta.final_test_result, out_warnings)
+
+    # 54차 T283: v2.02 양식 신규 row (TC stats + Requirements)
+    if layout is None:
+        return
+    if layout.tc_stats_row is not None:
+        row = layout.tc_stats_row
+        col = layout.tc_stats_col_start or 2
+        total = agg.get("total", 0) or 0
+        tested = agg.get("tested", 0) or 0
+        passed = agg.get("passed", 0) or 0
+        failed = agg.get("failed", 0) or 0
+        safe_write(ws, row, col, total)
+        safe_write(ws, row, col + 1, tested)
+        safe_write(ws, row, col + 2, passed)
+        safe_write(ws, row, col + 3, failed)
+        safe_write(ws, row, col + 4, 0)
+        if summary is not None:
+            summary["tc_stats_blocked_inferred"] = True
+    if layout.requirements_row is not None:
+        safe_write(ws, layout.requirements_row, 2, "SwITS")
 
 
 def _deviation_case_fields(case: Any) -> tuple[str, str, str, str] | None:
@@ -264,6 +309,8 @@ def _write_test_log(
     session: SwUTSession,
     function_asil_map: dict[str, str] | None = None,
     out_warnings: list[str] | None = None,
+    *,
+    layout: Any = None,
 ) -> int:
     """Test Log 시트 — TC별 input/expected/actual/pass.
 
@@ -331,6 +378,15 @@ def _write_test_log(
             }.get(asil)
             if _asil_marker:
                 _asil_marker(ws, r, col + 5)
+
+            # 54차 T283: v2.02 양식 AL column marker (layout 제공 시).
+            if layout is not None and layout.test_log_extra_marker_col is not None:
+                al_col = layout.test_log_extra_marker_col
+                # Pass면 "✓", Fail이면 "✗", 미실행이면 빈 string.
+                marker = ""
+                if exec_r is not None:
+                    marker = "✓" if exec_r.passed else "✗"
+                safe_write(ws, r, al_col, marker)
 
             written += 1
     return written

@@ -160,43 +160,102 @@ def _write_label_or_mark(
 
 def _write_cover_sheet(
     ws, meta: CoverageBuildMeta, out_warnings: list[str] | None = None,
+    *, layout: Any = None,
 ) -> None:
-    """Cover 시트 — Doc ID/Project/ASIL/Author/Approver 등."""
+    """Cover 시트 — Doc ID/Project/ASIL/Author/Approver 등.
+
+    54차 T282: layout 제공 시 cover_labels 매핑으로 v2.02 양식 동적 호환.
+    layout=None이면 v3.01 hardcode label 사용 (SwUT backward compat).
+    """
     if not ws:
         return
-    _write_label(ws, "Project", meta.project_full_name, out_warnings)
-    _write_label(ws, "ASIL Level", meta.asil_level, out_warnings)
-    _write_label(ws, "Status", "DRAFT — PENDING REVIEW", out_warnings)
+    labels = layout.cover_labels if layout else {}
+    _write_label(ws, labels.get("project_full_name", "Project"),
+                 meta.project_full_name, out_warnings)
+    _write_label(ws, labels.get("asil_level", "ASIL Level"),
+                 meta.asil_level, out_warnings)
+    _write_label(ws, labels.get("status", "Status"),
+                 "DRAFT — PENDING REVIEW", out_warnings)
     # 23차 T192: validation_date / reviewer / approver 비어있으면 노란 강조
-    _write_label_or_mark(ws, "Validation Date", meta.validation_date,
+    _write_label_or_mark(ws, labels.get("validation_date", "Validation Date"),
+                         meta.validation_date,
                          "yyyy-mm-dd 형식 검증 완료일", out_warnings)
-    _write_label_or_mark(ws, "Author", meta.author,
+    _write_label_or_mark(ws, labels.get("author", "Author"), meta.author,
                          "test_engineer 또는 default_author", out_warnings)
-    _write_label_or_mark(ws, "Reviewer", meta.reviewer,
+    _write_label_or_mark(ws, labels.get("reviewer", "Reviewer"), meta.reviewer,
                          "검토자 이름", out_warnings)
-    _write_label_or_mark(ws, "Approver", meta.approver,
+    _write_label_or_mark(ws, labels.get("approver", "Approver"), meta.approver,
                          "승인자 이름 (필수)", out_warnings)
     if meta.doc_id_sequence:
-        _write_label(ws, "Doc. ID",
+        _write_label(ws, labels.get("doc_id", "Doc. ID"),
                      f"{meta.doc_id_base}-{meta.doc_id_sequence}", out_warnings)
-    _write_label(ws, "Build Timestamp", meta.build_timestamp, out_warnings)
+    _write_label(ws, labels.get("build_timestamp", "Build Timestamp"),
+                 meta.build_timestamp, out_warnings)
 
 
 def _write_test_summary_sheet(
     ws, meta: CoverageBuildMeta, agg: dict[str, Any],
     out_warnings: list[str] | None = None,
+    *, layout: Any = None, summary: dict[str, Any] | None = None,
 ) -> None:
-    """Test Summary 시트 — 핵심 메트릭 표."""
+    """Test Summary 시트 — 핵심 메트릭 표.
+
+    54차 T282/T283: layout 제공 시 v2.02 양식 동적 호환:
+        - test_summary_labels (SW Version / HW Version 등)
+        - tc_stats_row B17-F17 (Total/Tested/Passed/Failed/Blocked)
+        - requirements_row B22 SwITS 표기
+    layout=None이면 v3.01 hardcode label 사용 (SwUT backward compat).
+    """
     if not ws:
         return
-    _write_label(ws, "Project Name", meta.project_full_name, out_warnings)
-    _write_label(ws, "Release Name(SW)", meta.release_sw_version, out_warnings)
-    _write_label(ws, "Test Target Version(HW)", meta.hw_version, out_warnings)
-    _write_label(ws, "Test Date", meta.test_date, out_warnings)
+    labels = layout.test_summary_labels if layout else {}
+    _write_label(ws, labels.get("project_full_name", "Project Name"),
+                 meta.project_full_name, out_warnings)
+    _write_label(ws, labels.get("release_sw_version", "Release Name(SW)"),
+                 meta.release_sw_version, out_warnings)
+    _write_label(ws, labels.get("hw_version", "Test Target Version(HW)"),
+                 meta.hw_version, out_warnings)
+    _write_label(ws, labels.get("test_date", "Test Date"),
+                 meta.test_date, out_warnings)
     # 24차: Test Engineer 빈 시 노란 강조 (사용자 입력 필요)
-    _write_label_or_mark(ws, "Test Engineer", meta.test_engineer,
+    _write_label_or_mark(ws, labels.get("test_engineer", "Test Engineer"),
+                         meta.test_engineer,
                          "테스트 엔지니어 이름", out_warnings)
-    _write_label(ws, "Final Test Result", meta.final_test_result, out_warnings)
+    _write_label(ws, labels.get("final_test_result", "Final Test Result"),
+                 meta.final_test_result, out_warnings)
+
+    # 54차 T283: v2.02 양식 신규 row — TC stats / Requirements
+    _write_v202_extra_rows(ws, agg, layout, summary)
+
+
+def _write_v202_extra_rows(
+    ws, agg: dict[str, Any], layout: Any, summary: dict[str, Any] | None,
+) -> None:
+    """54차 T283 — v2.02 양식 신규 row fill (B17-F17 TC stats + B22 Requirements).
+
+    layout이 None 또는 해당 row가 None (v3.01)이면 silent skip — SwUT 회귀 영향 zero.
+    """
+    if layout is None:
+        return
+    # B17-F17 TC stats row (v2.02)
+    if layout.tc_stats_row is not None:
+        row = layout.tc_stats_row
+        col = layout.tc_stats_col_start or 2  # B17 (column B = 2)
+        total = agg.get("total_tcs", agg.get("total", 0)) or 0
+        tested = agg.get("tested", 0) or 0
+        passed = agg.get("passed", 0) or 0
+        failed = agg.get("failed", 0) or 0
+        # blocked는 모호 — 0 채움 + summary inferred 표시
+        safe_write(ws, row, col, total)
+        safe_write(ws, row, col + 1, tested)
+        safe_write(ws, row, col + 2, passed)
+        safe_write(ws, row, col + 3, failed)
+        safe_write(ws, row, col + 4, 0)
+        if summary is not None:
+            summary["tc_stats_blocked_inferred"] = True
+    # B22 Requirements/Design Coverage row (v2.02)
+    if layout.requirements_row is not None:
+        safe_write(ws, layout.requirements_row, 2, "SwITS")
 
 
 def _compute_asil_distribution(

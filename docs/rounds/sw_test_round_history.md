@@ -173,3 +173,51 @@
   - **W2 `_is_blacklisted` unit 회귀 부재** — sanity check만 했고 직접 unit test 부재. `TestSystemBlacklist53` 신규 클래스: blacklist 19건 parametrize (drive root + Windows 시스템 + POSIX 8건) + valid path 5건 parametrize + `_is_blacklisted` 직접 helper 검증
 - 회귀: backend 2048 → ~2060 (+12: cloudium +24건 parametrize + extra=forbid 3 + sheetname substring 2 = ~29 신규 unique). 142 passed (cloudium + SwIT + SwUT 회귀 한꺼번에 실행)
 - 53차 자체 평가에서 발견한 W3 (시트명 substring 비표준 양식 오매칭 가능성) 및 I1 (SwIT v2.02 양식 layout 본격 호환)은 54차+ 별도 라운드 후보
+
+## 54차 — SwIT v2.02 양식 본격 호환 + DRY 통합
+
+53차/53-fix 누적 후 사용자가 SwIT v2.02 빌드 산출물에 빈 셀 다수 보고. 원인: backend writer가 SwUT v3.01 hardcode label (`Release Name(SW)`, `Test Target Version(HW)`)을 검색했는데 SwIT v2.02 양식은 `SW Version`, `HW Version` 사용 → label 미발견 → fill 미실행. 추가로 v2.02 B17-F17 TC 통계 row + B22 Requirements/Design Coverage SwITS + Test Log AL column marker가 v3.01에 없는 신규 row/col.
+
+### T280 — Layout resolver 모듈 (excel_layout_resolver.py 신규)
+- 회사 양식 (v2.02 / v3.01) template bytes를 openpyxl로 inspect하여 label↔cell 매핑 + 신규 row 위치를 자동 추출. `SwitLayout` dataclass: `detected_version` / `cover_labels` / `test_summary_labels` / `tc_stats_row` / `tc_stats_col_start` / `requirements_row` / `test_log_header_cell` / `test_log_extra_marker_col` / `warnings`
+- candidate label 매칭 우선순위 (v2.02 → v3.01 fallback): `release_sw_version`은 `("SW Version", "SW 버전", "Release Name(SW)")` 순. v2.02 라벨 우선 매칭, 못 찾으면 v3.01 fallback
+- v2.02 신규 row 후보: `Total TC` / `Test Case Count` / `TC Count` 등 (`tc_stats_row`) + `Requirements/Design Coverage` 등 (`requirements_row`). v3.01 template에는 부재 → None 반환
+- SITR-only inspect: Test Log 시트 header row에서 `Marker` / `Pass/Fail Marker` 라벨로 AL column index 추출
+- sha256 keying + 자체 구현 LRU cache(maxsize=4). 동일 template 반복 빌드 시 `load_workbook` 1회만
+- openpyxl 미설치 / 손상 bytes / 시트 미발견 graceful — `fallback_to_v301=True` + warnings 누적, raise 안 함
+- 회귀 10건 (`test_excel_layout_resolver.py`): v2.02 coverage / v2.02 sitr / v3.01 fallback / sha256 cache hit / LRU evict / graceful missing / kind coverage skip test_log / kind sitr include AL col
+
+### T281 — DRY 통합 (swut_meta_resolver.py 신규)
+- 50차 W4/W5에서 도입된 `_resolve_swuds_path`, `_resolve_c_source_root`, `_apply_function_asil_map` (~70줄)이 SwUT/SwIT 라우터에 중복 → audit 추적성 약화. 본 라운드에서 `backend/services/swut_meta_resolver.py`로 통합
+- public API: `load_meta_from_config(project_id)` / `resolve_swuds_path(req, project_id)` / `resolve_c_source_root(req, project_id)` / `resolve_swuds_function_ids(req, project_id)` / `resolve_swuds_function_asil_map(req, project_id)` / `apply_function_asil_map(req, session, project_id)`. 32차 W28 c_source 우선 정책 + 50차 W4/W5 source origin 시각화 유지
+- 라우터 layer (`swut.py` / `swit.py`)는 thin wrapper만 유지: `def _apply_function_asil_map(req, session): _resolver_apply_function_asil_map(req, session, req.project_id)`. monkeypatch 의존 회귀 import 경로 무영향
+- backward compat: `swut._META_CONFIG_PATH` + `swut._read_meta_config_raw` alias 유지. `_load_meta_from_config` thin wrapper에서 monkeypatch한 path를 resolver 모듈로 동기화
+- 회귀 9건 (`test_swut_meta_resolver.py`): swuds path req 우선 / config fallback / 둘 다 비면 빈 / c_source 동일 / apply source origin req / apply source origin config fallback / ASIL 충돌 warning + c_source 우선 / 둘 다 비면 skip
+- 기존 회귀 호환 (307건 무영향): `test_swut_router.py` + `test_swit_router.py`의 `_setup_cfg` 헬퍼만 monkeypatch 대상 `resolver_mod._META_CONFIG_PATH`로 redirect
+
+### T282 — SwIT v2.02 writer 분기 (layout kwarg)
+- `_write_cover_sheet` / `_write_test_summary_sheet` (swut_coverage_aggregator.py) + `_write_cover` / `_write_test_summary` / `_write_test_log` (swut_sutr_aggregator.py) 모두 `layout: SwitLayout | None = None` keyword-only kwarg 추가
+- 내부: `labels = layout.cover_labels if layout else {}` 후 `labels.get("project_full_name", "Project")` 패턴. v2.02 layout 제공 시 동적 label 매핑, layout=None이면 v3.01 hardcode label (SwUT 회귀 zero 영향)
+- SwIT aggregator (swit_coverage_aggregator.py / swit_sitr_aggregator.py): build 함수 진입 직후 `layout = inspect_swit_layout(template_bytes, "coverage"|"sitr")` 호출 → 6 writer 호출에 layout 전달
+
+### T283 — TC stats / B22 / AL marker fill
+- `_write_test_summary_sheet` (Coverage) 추가: layout.tc_stats_row != None이면 B17 col부터 Total/Tested/Passed/Failed/Blocked(0) 채움. `summary["tc_stats_blocked_inferred"]=True` 표기 (audit reviewer가 명시적으로 채움 안내)
+- layout.requirements_row != None이면 B22(col 2)에 `"SwITS"` 표기 (SwIT artifact 식별)
+- `_write_test_log` (SUTR): layout.test_log_extra_marker_col != None이면 각 row의 AL col에 `✓`(Pass) / `✗`(Fail) marker fill
+- 9 신규 회귀 (`TestSwitV202LayoutCompat` 5건 + `TestSwitSitrV202LayoutCompat` 4건): v2.02 fixture template으로 빌드 후 산출물 셀 값 검증 + v3.01 backward compat 검증
+
+### 회귀 통계
+- backend ~2060 → ~2078 (+18: layout_resolver 10 + meta_resolver 9 + writer v2.02 9 - 기존 monkeypatch 회귀 무영향 0)
+- frontend 263 → 263 (response shape 무변경)
+- pre-commit hook 180s 한도 내
+
+### 리스크 완화
+- writer signature 변경은 모두 `layout=None` default kwarg → SwUT 기존 호출 사이트 무영향 (회귀 batch 검증)
+- v2.02 template label이 실 양식과 다를 수 있어 candidate-tuple에 한글/영문 변형 모두 등록. 미발견 시 `fallback_to_v301=True` + warnings에 누락 label 누적 (audit reviewer 인지 가능)
+- TC stats "blocked" 필드 모호 → 0 채움 + `tc_stats_blocked_inferred` summary 표시. 사용자가 명시적으로 fill 책임
+
+### 비-목표 (55차+)
+- SwIT 시트명 substring → regex 패턴 (`r"^\d*\.?\s*test summary"`) — 53차 substring으로 호환 100%
+- SwUT v3.01 양식의 layout_resolver 통합 (현재 v3.01은 hardcode label 충분)
+- 사용자 실 환경 v2.02 라이브 검증 (사용자 의무)
+- swit_meta.py SwIT 전용 default (현재 hbrnd2 환경은 SwUT/SwIT 공통)

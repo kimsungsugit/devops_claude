@@ -364,13 +364,14 @@ class TestSwudsAsilFallback32:
         def fake_resolve(*_a, **_k):
             return FakeAsilResult()
 
-        import backend.services.swut_asil_resolver as resolver_mod
-        monkeypatch.setattr(resolver_mod, "resolve_function_asil_map", fake_resolve)
+        import backend.services.swut_asil_resolver as asil_resolver_mod
+        monkeypatch.setattr(asil_resolver_mod, "resolve_function_asil_map", fake_resolve)
 
-        # SwUDS resolver mock: SwUFn_0101 → "D" (충돌), SwUFn_0102 → "C"
+        # 54차 T281 — SwUDS resolver mock은 swut_meta_resolver로 redirect
+        from backend.services import swut_meta_resolver as meta_resolver_mod
         monkeypatch.setattr(
-            swut_router, "_resolve_swuds_function_asil_map",
-            lambda req: {"SwUFn_0101": "D", "SwUFn_0102": "C"},
+            meta_resolver_mod, "resolve_swuds_function_asil_map",
+            lambda req, project_id: {"SwUFn_0101": "D", "SwUFn_0102": "C"},
         )
 
         from backend.schemas import SwUTBuildRequest
@@ -391,9 +392,11 @@ class TestSwudsAsilFallback32:
     def test_swuds_only_fallback_when_no_c_source(self, monkeypatch):
         """c_source 없고 swuds만 → SwUDS 결과 사용."""
         from backend.routers import swut as swut_router
+        # 54차 T281 — swut_meta_resolver로 redirect
+        from backend.services import swut_meta_resolver as meta_resolver_mod
         monkeypatch.setattr(
-            swut_router, "_resolve_swuds_function_asil_map",
-            lambda req: {"SwUFn_0103": "D"},
+            meta_resolver_mod, "resolve_swuds_function_asil_map",
+            lambda req, project_id: {"SwUFn_0103": "D"},
         )
         from backend.schemas import SwUTBuildRequest
         req = SwUTBuildRequest(
@@ -611,18 +614,21 @@ class TestConfigCache:
 
     def test_lru_cache_hits_with_same_mtime(self, tmp_path, monkeypatch):
         from backend.routers import swut as swut_mod
+        from backend.services import swut_meta_resolver as resolver_mod
 
         cfg_path = tmp_path / "swut_meta.json"
         cfg_path.write_text('{"projects":{"HDPDM01":{"asil_level":"ASIL A"}}}', encoding="utf-8")
+        # 54차 T281 — resolver 모듈 path patch
+        monkeypatch.setattr(resolver_mod, "_META_CONFIG_PATH", str(cfg_path))
         monkeypatch.setattr(swut_mod, "_META_CONFIG_PATH", str(cfg_path))
 
-        swut_mod._read_meta_config_raw.cache_clear()
+        resolver_mod._read_meta_config_raw.cache_clear()
 
         for _ in range(5):
             cfg = swut_mod._load_meta_from_config("HDPDM01")
             assert cfg.get("asil_level") == "ASIL A"
 
-        info = swut_mod._read_meta_config_raw.cache_info()
+        info = resolver_mod._read_meta_config_raw.cache_info()
         # 5회 호출 중 1회 miss, 4회 hit
         assert info.misses == 1
         assert info.hits == 4
@@ -631,11 +637,13 @@ class TestConfigCache:
         """mtime이 변하면 cache miss → reload."""
         import time
         from backend.routers import swut as swut_mod
+        from backend.services import swut_meta_resolver as resolver_mod
 
         cfg_path = tmp_path / "swut_meta.json"
         cfg_path.write_text('{"projects":{"HDPDM01":{"asil_level":"ASIL A"}}}', encoding="utf-8")
+        monkeypatch.setattr(resolver_mod, "_META_CONFIG_PATH", str(cfg_path))
         monkeypatch.setattr(swut_mod, "_META_CONFIG_PATH", str(cfg_path))
-        swut_mod._read_meta_config_raw.cache_clear()
+        resolver_mod._read_meta_config_raw.cache_clear()
 
         cfg1 = swut_mod._load_meta_from_config("HDPDM01")
         assert cfg1.get("asil_level") == "ASIL A"
@@ -659,11 +667,14 @@ class TestSwutConfigFallback50:
 
     def _setup_cfg(self, tmp_path, monkeypatch, cfg_dict):
         from backend.routers import swut as swut_mod
+        from backend.services import swut_meta_resolver as resolver_mod
         cfg_path = tmp_path / "swut_meta.json"
         import json as _json
         cfg_path.write_text(_json.dumps(cfg_dict), encoding="utf-8")
+        # 54차 T281 — DRY 통합 후 resolver 모듈의 path를 patch (swut_mod alias도 동기)
+        monkeypatch.setattr(resolver_mod, "_META_CONFIG_PATH", str(cfg_path))
         monkeypatch.setattr(swut_mod, "_META_CONFIG_PATH", str(cfg_path))
-        swut_mod._read_meta_config_raw.cache_clear()
+        resolver_mod._read_meta_config_raw.cache_clear()
         return swut_mod
 
     def test_resolve_c_source_root_req_priority(self, tmp_path, monkeypatch):

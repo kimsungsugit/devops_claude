@@ -22,11 +22,9 @@ Coverage Report / SUTR xlsx 파일을 frontend / curl에서 호출 가능하도�
 from __future__ import annotations
 
 import asyncio
-import functools
 import io
 import json
 import logging
-import os
 from typing import Any
 
 # 38차 I2: psutil / _get_process_memory_mb / _run_*_safely 함수 제거.
@@ -52,7 +50,6 @@ from backend.services.swut_coverage_aggregator import (
 )
 from backend.services.swut_input_adapter import collect_swut_session
 from backend.services.swut_sutr_aggregator import SutrBuildMeta, build_sutr
-from backend.services.swut_swuds_parser import parse_swuds_docx
 from backend.user_context import get_current_user
 
 _logger = logging.getLogger(__name__)
@@ -73,34 +70,32 @@ router = APIRouter(
 # 향후 worst-case 갱신 시 본 docstring + CLAUDE.md "메모리 / 동시성" 섹션 동기 갱신.
 _BUILD_SEMAPHORE = asyncio.Semaphore(3)
 
-_META_CONFIG_PATH = "config/swut_meta.json"
+# 54차 T281 — DRY 통합. _load_meta_from_config 본체는 swut_meta_resolver로 이동.
+# 라우터 layer에는 monkeypatch 호환을 위한 thin wrapper만 유지.
+from backend.services import swut_meta_resolver as _resolver_mod  # noqa: E402
+from backend.services.swut_meta_resolver import (  # noqa: E402
+    apply_function_asil_map as _resolver_apply_function_asil_map,
+    resolve_c_source_root as _resolver_resolve_c_source_root,
+    resolve_swuds_function_asil_map as _resolver_resolve_swuds_function_asil_map,
+    resolve_swuds_function_ids as _resolver_resolve_swuds_function_ids,
+    resolve_swuds_path as _resolver_resolve_swuds_path,
+)
 
-
-@functools.lru_cache(maxsize=1)
-def _read_meta_config_raw(mtime: float) -> dict[str, Any]:  # noqa: ARG001
-    """lru_cache key = mtime. config 파일 수정 시 자동 cache miss → reload.
-
-    ``mtime`` 인자는 본문에서 사용하지 않지만 ``functools.lru_cache`` 의 hash key 역할.
-    호출자가 ``os.path.getmtime()`` 으로 전달하면 파일 수정 시 자동 invalidate.
-    """
-    if not os.path.isfile(_META_CONFIG_PATH):
-        return {}
-    try:
-        with open(_META_CONFIG_PATH, encoding="utf-8") as f:
-            return json.load(f) or {}
-    except (OSError, json.JSONDecodeError) as e:
-        _logger.warning("swut_meta.json load failed: %s", e)
-        return {}
+# Backward compat alias — 기존 회귀가 `monkeypatch.setattr(swut, '_META_CONFIG_PATH', ...)`
+# 또는 `swut._read_meta_config_raw.cache_clear()`로 의존. 본 모듈에서 변수만 patch해도
+# resolver 모듈로 자동 sync (_load_meta_from_config thin wrapper에서 동기화).
+_META_CONFIG_PATH = _resolver_mod._META_CONFIG_PATH
+_read_meta_config_raw = _resolver_mod._read_meta_config_raw  # lru_cache alias
 
 
 def _load_meta_from_config(project_id: str) -> dict[str, Any]:
-    """config/swut_meta.json 에서 project별 fixed 메타 로드 — mtime 기반 캐시."""
-    try:
-        mtime = os.path.getmtime(_META_CONFIG_PATH)
-    except OSError:
-        return {}
-    cfg = _read_meta_config_raw(mtime)
-    return cfg.get("projects", {}).get(project_id, {}) or {}
+    """Thin wrapper — 54차 DRY 통합 (swut_meta_resolver로 이전).
+
+    monkeypatch이 본 모듈의 `_META_CONFIG_PATH`를 변경했으면 resolver 모듈로 동기.
+    """
+    if _resolver_mod._META_CONFIG_PATH != _META_CONFIG_PATH:
+        _resolver_mod._META_CONFIG_PATH = _META_CONFIG_PATH
+    return _resolver_mod.load_meta_from_config(project_id)
 
 
 def _build_coverage_meta(req: SwUTBuildRequest) -> CoverageBuildMeta:
@@ -256,138 +251,33 @@ def _build_result_to_response(
 # 사용. 호출 사이트는 endpoint에서 직접 키워드 인자로 전달.
 
 
+# 54차 T281 — 본체는 backend.services.swut_meta_resolver로 이전.
+# 라우터 layer thin wrapper — monkeypatch 의존 회귀 호환 (`mocker.patch(
+# 'backend.routers.swut._apply_function_asil_map')` 등 import 경로 무영향).
+
 def _resolve_swuds_path(req: SwUTBuildRequest) -> str:
-    """49차 — req.swuds_docx_path 우선, 비면 config/swut_meta.json의 project별 값 fallback."""
-    if req.swuds_docx_path:
-        return req.swuds_docx_path
-    cfg = _load_meta_from_config(req.project_id)
-    return (cfg.get("swuds_docx_path") or "").strip()
+    """Thin wrapper — 49차 정책 동일."""
+    return _resolver_resolve_swuds_path(req, req.project_id)
 
 
 def _resolve_c_source_root(req: SwUTBuildRequest) -> str:
-    """49차 — req.c_source_root 우선, 비면 config의 project별 값 fallback."""
-    if req.c_source_root:
-        return req.c_source_root
-    cfg = _load_meta_from_config(req.project_id)
-    return (cfg.get("c_source_root") or "").strip()
+    """Thin wrapper — 49차 정책 동일."""
+    return _resolver_resolve_c_source_root(req, req.project_id)
 
 
 def _resolve_swuds_function_ids(req: SwUTBuildRequest) -> set[str] | None:
-    """16차: swuds_docx_path가 있으면 docx 파싱 → 함수 ID set 반환.
-
-    49차: req 비면 config fallback.
-    실패 시 None 반환 — caller는 SwUDS 비교 skip + warnings에 사유 누적.
-    """
-    swuds_path = _resolve_swuds_path(req)
-    if not swuds_path:
-        return None
-    try:
-        resolver = get_resolver()
-        docx_bytes = resolver.read_bytes(swuds_path)
-        parse_warnings: list[str] = []
-        result = parse_swuds_docx(docx_bytes, parse_warnings=parse_warnings)
-        if not result.ok:
-            _logger.warning("SwUDS parse failed: %s", parse_warnings)
-            return None
-        return result.function_ids
-    except (FileNotFoundError, PermissionError) as e:
-        _logger.warning("SwUDS docx read failed: %s", e)
-        return None
+    """Thin wrapper — 16차/49차 정책 동일."""
+    return _resolver_resolve_swuds_function_ids(req, req.project_id)
 
 
 def _resolve_swuds_function_asil_map(req: SwUTBuildRequest) -> dict[str, str]:
-    """32차 W28: swuds_docx_path → SwUDS table 'ASIL' 라벨 → function_asil_map.
-
-    49차: req 비면 config fallback.
-    실패 시 빈 dict (caller 측 c_source fallback 또는 panel 미표시).
-    """
-    swuds_path = _resolve_swuds_path(req)
-    if not swuds_path:
-        return {}
-    try:
-        resolver = get_resolver()
-        docx_bytes = resolver.read_bytes(swuds_path)
-        parse_warnings: list[str] = []
-        result = parse_swuds_docx(docx_bytes, parse_warnings=parse_warnings)
-        if not result.ok:
-            _logger.warning("SwUDS ASIL parse failed: %s", parse_warnings)
-            return {}
-        return dict(result.function_asil_map)
-    except (FileNotFoundError, PermissionError) as e:
-        _logger.warning("SwUDS docx read for ASIL failed: %s", e)
-        return {}
+    """Thin wrapper — 32차 W28 + 49차 정책 동일."""
+    return _resolver_resolve_swuds_function_asil_map(req, req.project_id)
 
 
 def _apply_function_asil_map(req: SwUTBuildRequest, session) -> None:
-    """30차 W21 + 32차 W28: function_asil_map 주입 — c_source 우선 + SwUDS fallback.
-
-    Policy (32차 W28): c_source_root (Doxygen @asil — implementation truth) >
-    swuds_docx_path (설계 문서). 충돌 시 c_source 우선 + parse_warnings 누적.
-    merge 순서 역전 금지 — implementation truth 정책 위반.
-
-    - c_source_root 결과를 base로 + SwUDS 결과로 c_source에 없는 키만 채움
-    - 둘 다 부재면 빈 dict (panel 미표시)
-    - 충돌 (같은 fn_id가 다른 ASIL) 시 parse_warnings에 사유 누적
-
-    추출 결과는 session.environments[0]에 주입 (aggregate_session이 통합).
-    실패 시 session.parse_warnings에 누적 — 빌드 자체는 진행 (graceful).
-    """
-    # 49차 — req 우선 + config fallback
-    c_source_root = _resolve_c_source_root(req)
-    swuds_path = _resolve_swuds_path(req)
-    if not (c_source_root or swuds_path):
-        return
-
-    c_source_map: dict[str, str] = {}
-    if c_source_root:
-        try:
-            from backend.services.swut_asil_resolver import resolve_function_asil_map
-            result = resolve_function_asil_map(c_source_root)
-            if result.warnings:
-                session.parse_warnings.extend(result.warnings)
-            c_source_map = dict(result.function_asil_map)
-        except Exception as e:  # pragma: no cover — top-level safety net
-            _logger.warning("c_source function_asil_map resolve failed: %s", e)
-            session.parse_warnings.append(
-                f"c_source ASIL resolve 실패 — {type(e).__name__}"
-            )
-
-    # 32차 W28: SwUDS docx에서 2차 source. (49차 config fallback _resolve_swuds_function_asil_map 내부)
-    swuds_map = _resolve_swuds_function_asil_map(req)
-
-    # Merge — c_source 우선 (swuds는 c_source 없는 키만 채움)
-    merged = dict(swuds_map)
-    conflicts = [
-        (fid, swuds_map[fid], c_source_map[fid])
-        for fid in c_source_map
-        if fid in swuds_map and swuds_map[fid] != c_source_map[fid]
-    ]
-    merged.update(c_source_map)
-
-    # 32차 reviewer W2 fix + 50차 W4/W5: source 통계에 config fallback 사용 여부 명시.
-    # 사용자가 잘못된 config path 박았어도 시각적으로 인지 가능.
-    sources_used = []
-    if c_source_root:
-        origin = "req" if req.c_source_root else "config fallback"
-        sources_used.append(f"c_source {len(c_source_map)}건 ({origin})")
-    if swuds_path:
-        origin = "req" if req.swuds_docx_path else "config fallback"
-        sources_used.append(f"SwUDS {len(swuds_map)}건 ({origin})")
-    if sources_used:
-        session.parse_warnings.append(
-            "function_asil_map source — "
-            + ", ".join(sources_used)
-            + f", merged {len(merged)}건"
-        )
-
-    for fid, swuds_val, c_val in conflicts:
-        session.parse_warnings.append(
-            f"ASIL 충돌 '{fid}': SwUDS={swuds_val} vs c_source={c_val} "
-            "— c_source 우선 채택"
-        )
-
-    if merged and session.environments:
-        session.environments[0].function_asil_map = merged
+    """Thin wrapper — 30차 W21 + 32차 W28 + 50차 W4/W5 정책 동일."""
+    _resolver_apply_function_asil_map(req, session, req.project_id)
 
 
 def _do_coverage_build(req: SwUTBuildRequest) -> Response:

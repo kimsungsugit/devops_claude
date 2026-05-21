@@ -281,3 +281,109 @@ class TestSwitFilenameSafeDate:
         )
         # short_date(2024-02-19) → 240219
         assert "240219" in result.filename
+
+
+# ---------------------------------------------------------------------------
+# 54차 T282/T283 — v2.02 양식 호환 회귀
+# ---------------------------------------------------------------------------
+
+def _build_v202_template() -> bytes:
+    """SwIT v2.02 양식 mimic — "SW Version" / "HW Version" / B17 TC stats / B22 Requirements."""
+    wb = openpyxl.Workbook()
+    wb.remove(wb.active)
+    cover = wb.create_sheet("Cover")
+    cover["B1"] = "Project"
+    cover["B2"] = "ASIL Level"
+    cover["B3"] = "Author"
+    cover["B4"] = "Approver"
+
+    # v2.02 양식: "1.Test Summary" + SW Version/HW Version + TC stats row + Requirements row
+    ts = wb.create_sheet("1.Test Summary")
+    ts["B1"] = "Project Name"
+    ts["B2"] = "SW Version"      # v2.02 라벨
+    ts["B3"] = "HW Version"      # v2.02 라벨
+    ts["B4"] = "Test Date"
+    ts["B5"] = "Test Engineer"
+    ts["B6"] = "Final Test Result"
+    # 신규 row — TC stats (Total/Tested/Passed/Failed/Blocked)
+    ts["A17"] = "Total TC"
+    # 신규 row — Requirements/Design Coverage
+    ts["A22"] = "Requirements/Design Coverage"
+
+    wb.create_sheet("1.Traceability")
+    wb.create_sheet("2.Consistency")
+    cov = wb.create_sheet("3.Coverage")
+    cov["A6"] = "Unit ID"
+    cov["B6"] = "Name"
+    cov["C6"] = "Count"
+    cov["D6"] = "Total"
+    cov["E6"] = "Pass"
+    wb.create_sheet("History")
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+class TestSwitV202LayoutCompat:
+    """54차 T282/T283 — v2.02 양식 label 매칭 + TC stats + B22 fill."""
+
+    def test_sw_version_label_filled(self):
+        """v2.02 'SW Version' 라벨 옆 셀에 release_sw_version 채움."""
+        template = _build_v202_template()
+        result = build_swit_coverage_report(
+            _make_swit_session(), _make_swit_meta(), template,
+        )
+        wb = openpyxl.load_workbook(io.BytesIO(result.xlsx_bytes))
+        ts = wb["1.Test Summary"]
+        # "SW Version" label은 B2 → value는 C2 (col+1)
+        assert ts["C2"].value == "2.02"
+
+    def test_hw_version_label_filled(self):
+        """v2.02 'HW Version' 라벨 옆 셀에 hw_version 채움."""
+        template = _build_v202_template()
+        result = build_swit_coverage_report(
+            _make_swit_session(), _make_swit_meta(), template,
+        )
+        wb = openpyxl.load_workbook(io.BytesIO(result.xlsx_bytes))
+        ts = wb["1.Test Summary"]
+        # HW Version 라벨 B3 → value C3 (col+1). default "1.00"
+        assert ts["C3"].value == "1.00"
+
+    def test_tc_stats_row_filled(self):
+        """B17-F17 TC 통계 row 자동 채움."""
+        template = _build_v202_template()
+        result = build_swit_coverage_report(
+            _make_swit_session(), _make_swit_meta(), template,
+        )
+        wb = openpyxl.load_workbook(io.BytesIO(result.xlsx_bytes))
+        ts = wb["1.Test Summary"]
+        # "Total TC" 라벨이 A17에 있고 col+1=B17부터 값 채움 (label col=1, col_start=2)
+        # total_tcs=1 (session에 SwITC_SwUFn_0101.001 1건)
+        assert ts["B17"].value == 1   # Total
+        assert ts["C17"].value == 1   # Tested
+        assert ts["D17"].value == 1   # Passed
+        assert ts["E17"].value == 0   # Failed
+        assert ts["F17"].value == 0   # Blocked (inferred)
+        assert result.summary.get("tc_stats_blocked_inferred") is True
+
+    def test_requirements_row_filled_with_swits(self):
+        """B22 Requirements/Design Coverage row에 SwITS 표기."""
+        template = _build_v202_template()
+        result = build_swit_coverage_report(
+            _make_swit_session(), _make_swit_meta(), template,
+        )
+        wb = openpyxl.load_workbook(io.BytesIO(result.xlsx_bytes))
+        ts = wb["1.Test Summary"]
+        # Requirements/Design Coverage row=22, B22(col 2)에 "SwITS"
+        assert ts["B22"].value == "SwITS"
+
+    def test_v301_backward_compat(self):
+        """v3.01 양식 (Release Name(SW) 라벨)도 정상 채움 — backward compat."""
+        # 기존 _build_swit_template은 Release Name(SW) 라벨 사용 (v3.01 호환)
+        template = _build_swit_template()
+        result = build_swit_coverage_report(
+            _make_swit_session(), _make_swit_meta(), template,
+        )
+        # v3.01 호환 — fill 성공 + tc_stats_blocked_inferred 없음 (v2.02 row 없음)
+        assert result.ok
+        assert "tc_stats_blocked_inferred" not in result.summary

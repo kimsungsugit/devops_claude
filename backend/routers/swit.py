@@ -50,11 +50,22 @@ from backend.services.swit_sitr_aggregator import (
     SwitSitrBuildResult,
     build_swit_sitr_report,
 )
-from backend.services.swut_swuds_parser import parse_swuds_docx
 # 49차 — SwIT는 별도 config 없이 swut_meta.json HDPDM01 슬롯 재활용.
 # c_source_root + swuds_docx_path 공유, template_paths는 swit_coverage_template /
 # swit_sitr_template 별도 키 (v2.02 양식이 SwUT v3.01과 다름).
-from backend.routers.swut import _load_meta_from_config
+# 54차 T281 — DRY 통합. swut_meta_resolver로 path/ASIL 로직 이전.
+from backend.services.swut_meta_resolver import (
+    apply_function_asil_map as _resolver_apply_function_asil_map,
+    load_meta_from_config as _resolver_load_meta_from_config,
+    resolve_c_source_root as _resolver_resolve_c_source_root,
+    resolve_swuds_function_ids as _resolver_resolve_swuds_function_ids,
+    resolve_swuds_path as _resolver_resolve_swuds_path,
+)
+
+
+def _load_meta_from_config(project_id: str) -> dict[str, Any]:
+    """Thin wrapper — 54차 DRY 통합 (swut_meta_resolver로 이전)."""
+    return _resolver_load_meta_from_config(project_id)
 
 _logger = logging.getLogger(__name__)
 
@@ -148,19 +159,13 @@ def _read_template_bytes(template_path: str, project_id: str, kind: str) -> byte
 
 
 def _resolve_swit_swuds_path(req: "SwITBuildRequest | SwITSitrBuildRequest") -> str:
-    """49차 — req.swuds_docx_path 우선, 비면 config의 project별 값 fallback. 50차 W1 type hint."""
-    if req.swuds_docx_path:
-        return req.swuds_docx_path
-    cfg = _load_meta_from_config(req.project_id)
-    return (cfg.get("swuds_docx_path") or "").strip()
+    """Thin wrapper — 49차 정책 동일 (54차 DRY 통합 → swut_meta_resolver)."""
+    return _resolver_resolve_swuds_path(req, req.project_id)
 
 
 def _resolve_swit_c_source_root(req: "SwITBuildRequest | SwITSitrBuildRequest") -> str:
-    """49차 — req.c_source_root 우선, 비면 config의 project별 값 fallback. 50차 W1 type hint."""
-    if req.c_source_root:
-        return req.c_source_root
-    cfg = _load_meta_from_config(req.project_id)
-    return (cfg.get("c_source_root") or "").strip()
+    """Thin wrapper — 49차 정책 동일 (54차 DRY 통합)."""
+    return _resolver_resolve_c_source_root(req, req.project_id)
 
 
 _CHUNK_SIZE = 64 * 1024
@@ -246,91 +251,13 @@ def _build_result_to_response(
 
 
 def _resolve_swuds_function_ids(req: SwITBuildRequest) -> set[str] | None:
-    """SwUT 32차 동일 — SwUDS docx → function_ids set. 49차: config fallback."""
-    swuds_path = _resolve_swit_swuds_path(req)
-    if not swuds_path:
-        return None
-    try:
-        resolver = get_resolver()
-        docx_bytes = resolver.read_bytes(swuds_path)
-        parse_warnings: list[str] = []
-        result = parse_swuds_docx(docx_bytes, parse_warnings=parse_warnings)
-        if not result.ok:
-            _logger.warning("SwIT SwUDS parse failed: %s", parse_warnings)
-            return None
-        return result.function_ids
-    except (FileNotFoundError, PermissionError) as e:
-        _logger.warning("SwIT SwUDS docx read failed: %s", e)
-        return None
+    """Thin wrapper — SwUT 32차 + 49차 정책 동일 (54차 DRY 통합)."""
+    return _resolver_resolve_swuds_function_ids(req, req.project_id)
 
 
 def _apply_function_asil_map(req: SwITBuildRequest, session) -> None:
-    """SwIT용 thin wrapper — SwUT `_apply_function_asil_map` 정책 그대로 차용.
-
-    Policy: c_source_root > swuds_docx_path. 충돌 시 c_source 우선.
-    49차: req 비면 config fallback.
-    """
-    c_source_root = _resolve_swit_c_source_root(req)
-    swuds_path = _resolve_swit_swuds_path(req)
-    if not (c_source_root or swuds_path):
-        return
-
-    c_source_map: dict[str, str] = {}
-    if c_source_root:
-        try:
-            from backend.services.swut_asil_resolver import resolve_function_asil_map
-            result = resolve_function_asil_map(c_source_root)
-            if result.warnings:
-                session.parse_warnings.extend(result.warnings)
-            c_source_map = dict(result.function_asil_map)
-        except Exception as e:  # pragma: no cover
-            _logger.warning("c_source function_asil_map resolve failed: %s", e)
-            session.parse_warnings.append(
-                f"c_source ASIL resolve 실패 — {type(e).__name__}"
-            )
-
-    swuds_map: dict[str, str] = {}
-    if swuds_path:
-        try:
-            resolver = get_resolver()
-            docx_bytes = resolver.read_bytes(swuds_path)
-            result = parse_swuds_docx(docx_bytes)
-            if result.ok:
-                swuds_map = dict(result.function_asil_map)
-        except (FileNotFoundError, PermissionError) as e:
-            _logger.warning("SwIT SwUDS ASIL read failed: %s", e)
-
-    merged = dict(swuds_map)
-    conflicts = [
-        (fid, swuds_map[fid], c_source_map[fid])
-        for fid in c_source_map
-        if fid in swuds_map and swuds_map[fid] != c_source_map[fid]
-    ]
-    merged.update(c_source_map)
-
-    # 50차 W4/W5 — config fallback 사용 여부 시각 표기 (silent path 사용 차단).
-    sources_used = []
-    if c_source_root:
-        origin = "req" if req.c_source_root else "config fallback"
-        sources_used.append(f"c_source {len(c_source_map)}건 ({origin})")
-    if swuds_path:
-        origin = "req" if req.swuds_docx_path else "config fallback"
-        sources_used.append(f"SwUDS {len(swuds_map)}건 ({origin})")
-    if sources_used:
-        session.parse_warnings.append(
-            "function_asil_map source — "
-            + ", ".join(sources_used)
-            + f", merged {len(merged)}건"
-        )
-
-    for fid, swuds_val, c_val in conflicts:
-        session.parse_warnings.append(
-            f"ASIL 충돌 '{fid}': SwUDS={swuds_val} vs c_source={c_val} "
-            "— c_source 우선 채택"
-        )
-
-    if merged and session.environments:
-        session.environments[0].function_asil_map = merged
+    """Thin wrapper — c_source_root > swuds_docx_path 정책 (54차 DRY 통합)."""
+    _resolver_apply_function_asil_map(req, session, req.project_id)
 
 
 def _do_swit_coverage_build(req: SwITBuildRequest) -> Response:

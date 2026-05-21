@@ -449,3 +449,109 @@ class TestDeepReviewerC2Fix:
         # default test_kind="SwUTS" — row 5 item에 SwUTS
         last_item = rows[-1]["item"]
         assert "SwUTS" in last_item, f"SwUTS default 라벨 미발견: {last_item}"
+
+
+# ---------------------------------------------------------------------------
+# 54차 T282/T283 — v2.02 양식 호환 회귀 (SITR)
+# ---------------------------------------------------------------------------
+
+
+def _build_v202_sitr_template() -> bytes:
+    """SwIT v2.02 SITR mimic — SW Version + TC stats + Test Log AL marker."""
+    wb = openpyxl.Workbook()
+    wb.remove(wb.active)
+    cover = wb.create_sheet("Cover")
+    cover["B1"] = "Project"
+    cover["B2"] = "ASIL Level"
+    cover["B3"] = "Author"
+    cover["B4"] = "Version"
+
+    ts = wb.create_sheet("1.Test Summary")
+    ts["B1"] = "Project Name"
+    ts["B2"] = "SW Version"
+    ts["B3"] = "HW Version"
+    ts["B4"] = "Test Date"
+    ts["B5"] = "Test Engineer"
+    ts["B6"] = "Target Coverage"
+    ts["B7"] = "Actual Coverage"
+    ts["B8"] = "Final Test Result"
+    ts["A17"] = "Total TC"
+    ts["A22"] = "Requirements/Design Coverage"
+
+    dev = wb.create_sheet("Deviation")
+    dev["B1"] = "Test Case ID"
+    dev["C1"] = "Issue"
+    dev["D1"] = "Deviation"
+    dev["E1"] = "Status"
+
+    log = wb.create_sheet("Test Log")
+    log["B1"] = "Test Case ID"
+    log["C1"] = "Component"
+    log["D1"] = "Method"
+    log["E1"] = "Pass/Fail"
+    # AL column = 38, header row에 "Marker" 라벨
+    log.cell(row=1, column=38, value="Marker")
+
+    wb.create_sheet("2.Consistency")
+    wb.create_sheet("History")
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+class TestSwitSitrV202LayoutCompat:
+    """54차 T282/T283 — SITR v2.02 SW Version label + TC stats + AL marker."""
+
+    def test_sw_version_label_filled(self):
+        result = build_swit_sitr_report(
+            _make_swit_sitr_session(),
+            _make_swit_sitr_meta(),
+            _build_v202_sitr_template(),
+        )
+        wb = openpyxl.load_workbook(io.BytesIO(result.xlsm_bytes), keep_vba=True)
+        ts = wb["1.Test Summary"]
+        assert ts["C2"].value == "2.02"
+        assert ts["C3"].value == "1.00"
+
+    def test_tc_stats_row_filled(self):
+        result = build_swit_sitr_report(
+            _make_swit_sitr_session(),
+            _make_swit_sitr_meta(),
+            _build_v202_sitr_template(),
+        )
+        wb = openpyxl.load_workbook(io.BytesIO(result.xlsm_bytes), keep_vba=True)
+        ts = wb["1.Test Summary"]
+        # 2 TC (one pass, one fail)
+        assert ts["B17"].value == 2   # Total
+        assert ts["C17"].value == 2   # Tested
+        assert ts["D17"].value == 1   # Passed (one passed=True)
+        assert ts["E17"].value == 1   # Failed (one passed=False)
+        assert result.summary.get("tc_stats_blocked_inferred") is True
+
+    def test_test_log_al_column_marker(self):
+        """v2.02 양식 AL column에 ✓/✗ marker fill."""
+        result = build_swit_sitr_report(
+            _make_swit_sitr_session(),
+            _make_swit_sitr_meta(),
+            _build_v202_sitr_template(),
+        )
+        wb = openpyxl.load_workbook(io.BytesIO(result.xlsm_bytes), keep_vba=True)
+        log = wb["Test Log"]
+        # header row=1, data row=2 onwards. AL col=38
+        # session에는 SwITC_SwUFn_0101.001 (Pass) + 0103.001 (Fail) — 2 rows
+        row2 = log.cell(row=2, column=38).value
+        row3 = log.cell(row=3, column=38).value
+        # one pass + one fail — ✓ and ✗ 발견
+        markers = {row2, row3}
+        assert "✓" in markers, f"Pass marker 미발견 — markers: {markers}"
+        assert "✗" in markers, f"Fail marker 미발견 — markers: {markers}"
+
+    def test_v301_backward_compat_no_al_fill(self):
+        """v3.01 양식 (AL col 없음)에서 marker skip — backward compat."""
+        result = build_swit_sitr_report(
+            _make_swit_sitr_session(),
+            _make_swit_sitr_meta(),
+            _build_swit_sitr_template(),
+        )
+        assert result.ok
+        assert "tc_stats_blocked_inferred" not in result.summary

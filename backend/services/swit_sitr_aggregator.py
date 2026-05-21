@@ -36,6 +36,7 @@ try:
 except ImportError:  # pragma: no cover
     openpyxl = None  # type: ignore[assignment]
 
+from backend.services.excel_layout_resolver import inspect_swit_layout
 from backend.services.excel_template_utils import (
     collect_git_history,
     has_vba_macros,
@@ -156,6 +157,11 @@ def build_swit_sitr_report(
     # 37차 fix → 38차 W1 DRY: extract_warnings_from_session helper로 추출.
     warnings: list[str] = extract_warnings_from_session(session)
 
+    # 54차 T280 — v2.02 양식 layout 자동 추출 (sha256 keying + LRU).
+    layout = inspect_swit_layout(template_bytes, "sitr")
+    if layout.warnings:
+        warnings.extend([f"[layout] {w}" for w in layout.warnings])
+
     # deep-reviewer W2: VBA 매크로 ZIP entry 존재 여부 사전 측정.
     template_has_vba = has_vba_macros(template_bytes)
     if template_has_vba:
@@ -209,14 +215,19 @@ def build_swit_sitr_report(
     if cover_ws is None:
         warnings.append("Cover 시트 미발견")
     else:
-        _write_cover(cover_ws, meta, out_warnings=warnings)
+        # 54차 T282: layout 전달
+        _write_cover(cover_ws, meta, out_warnings=warnings, layout=layout)
 
     # Test Summary — 53차 fix: SwIT v2.02 양식의 "1.Test Summary" 등 prefix 호환 substring 매칭.
     ts_ws = next((wb[n] for n in sheet_names if "test summary" in n.lower()), None)
     if ts_ws is None:
         warnings.append("Test Summary 시트 미발견")
     else:
-        _write_test_summary(ts_ws, meta, agg, out_warnings=warnings)
+        # 54차 T282/T283: layout + summary → v2.02 label + B17 TC stats + B22
+        _write_test_summary(
+            ts_ws, meta, agg, out_warnings=warnings,
+            layout=layout, summary=summary,
+        )
 
     # Deviation — 53차 fix: substring 매칭
     dev_ws = next((wb[n] for n in sheet_names if "deviation" in n.lower()), None)
@@ -231,10 +242,12 @@ def build_swit_sitr_report(
     if log_ws is None:
         warnings.append("Test Log 시트 미발견")
     else:
+        # 54차 T283: layout 전달 — v2.02 AL column marker fill
         n = _write_test_log(
             log_ws, session,
             function_asil_map=agg.get("function_asil_map"),
             out_warnings=warnings,
+            layout=layout,
         )
         summary["test_log_rows_written"] = n
 

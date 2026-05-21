@@ -35,6 +35,7 @@ try:
 except ImportError:  # pragma: no cover
     openpyxl = None  # type: ignore[assignment]
 
+from backend.services.excel_layout_resolver import inspect_swit_layout
 from backend.services.excel_template_utils import (
     collect_git_history,
     short_date,
@@ -142,6 +143,12 @@ def build_swit_coverage_report(
     template_sha256_12 = hashlib.sha256(template_bytes).hexdigest()[:12]
     # 37차 fix → 38차 W1 DRY: extract_warnings_from_session helper로 추출.
     warnings: list[str] = extract_warnings_from_session(session)
+
+    # 54차 T280 — v2.02 양식 layout 자동 추출 (sha256 keying + LRU)
+    layout = inspect_swit_layout(template_bytes, "coverage")
+    if layout.warnings:
+        warnings.extend([f"[layout] {w}" for w in layout.warnings])
+
     wb: Workbook = openpyxl.load_workbook(io.BytesIO(template_bytes), data_only=False)
     sheet_names = wb.sheetnames
 
@@ -175,7 +182,8 @@ def build_swit_coverage_report(
     if cover_ws is None:
         warnings.append("Cover 시트 미발견 — Doc ID/Author 등 미기록")
     else:
-        _write_cover_sheet(cover_ws, meta, out_warnings=warnings)
+        # 54차 T282: layout 전달 — v2.02 cover_labels 동적 매칭.
+        _write_cover_sheet(cover_ws, meta, out_warnings=warnings, layout=layout)
 
     # Test Summary — 53차 fix: SwIT v2.02 양식은 "1.Test Summary"라 substring 매칭으로 변경.
     # SwUT v3.01의 "Test Summary"도 substring으로 포함되어 호환 유지.
@@ -183,7 +191,11 @@ def build_swit_coverage_report(
     if ts_ws is None:
         warnings.append("Test Summary 시트 미발견")
     else:
-        _write_test_summary_sheet(ts_ws, meta, agg, out_warnings=warnings)
+        # 54차 T282/T283: layout + summary 전달 — v2.02 label + B17 TC stats + B22.
+        _write_test_summary_sheet(
+            ts_ws, meta, agg, out_warnings=warnings,
+            layout=layout, summary=summary,
+        )
 
     # 3.Coverage
     incomplete_sheets: list[str] = []
