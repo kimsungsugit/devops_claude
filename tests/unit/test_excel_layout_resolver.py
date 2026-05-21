@@ -202,14 +202,14 @@ class TestCaching:
         assert layout1 is not layout2
 
     def test_lru_evict_when_max_exceeded(self):
-        """4개 초과 시 oldest entry 제거."""
+        """maxsize 초과 시 oldest entry 제거 (54-fix W3: 4 → 8)."""
         elr.clear_layout_cache()
-        # 5개 서로 다른 template
-        for i in range(5):
+        # 9개 서로 다른 template
+        for i in range(9):
             t = _make_xlsx({"Sheet": [[f"v{i}"]]})
             elr.inspect_swit_layout(t, "coverage")
-        # _MAX_CACHE_SIZE = 4 이므로 5번째에 oldest evict됨
-        assert elr.cache_size() == 4
+        # _MAX_CACHE_SIZE = 8 이므로 9번째에 oldest evict됨
+        assert elr.cache_size() == 8
 
 
 class TestGraceful:
@@ -221,8 +221,24 @@ class TestGraceful:
         assert layout.test_summary_labels == {}
         assert any("Test Summary" in w for w in layout.warnings)
 
+    def test_inspect_rejects_zip_bomb_magic_bytes(self):
+        """54-fix C2 — ZIP bomb / magic byte 위조 거부."""
+        # ZIP magic bytes (PK\x03\x04)이지만 후속 ZIP 구조 부재
+        fake_zip = b"PK\x03\x04" + b"\x00" * 100
+        layout = elr.inspect_swit_layout(fake_zip, "coverage")
+        assert layout.fallback_to_v301 is True
+        # validate_xlsx_template_bytes가 거부 (Open Office XML 구조 미발견 등)
+        assert any(
+            "template 입력 검증 실패" in w or "Open Office XML" in w or "not a valid ZIP" in w
+            for w in layout.warnings
+        )
+
     def test_corrupted_bytes_graceful(self):
-        """invalid bytes → fallback=True + warnings."""
+        """invalid bytes → fallback=True + warnings (54-fix C2: ZIP bomb 사전 검증)."""
         layout = elr.inspect_swit_layout(b"not a real xlsx", "coverage")
         assert layout.fallback_to_v301 is True
-        assert any("template load 실패" in w or "load 실패" in w for w in layout.warnings)
+        # C2 fix 후: validate_xlsx_template_bytes가 거부 → "template 입력 검증 실패" 메시지
+        assert any(
+            "template 입력 검증 실패" in w or "template load 실패" in w or "load 실패" in w
+            for w in layout.warnings
+        )

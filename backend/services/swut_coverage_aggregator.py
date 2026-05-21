@@ -41,6 +41,7 @@ from backend.services.excel_template_utils import (
     mark_asil_c_function,
     mark_asil_d_function,
     mark_fail_cell,
+    mark_user_input_required,
     safe_write,
     short_date,
     validate_build_meta,
@@ -251,6 +252,12 @@ def _write_v202_extra_rows(
         safe_write(ws, row, col + 2, passed)
         safe_write(ws, row, col + 3, failed)
         safe_write(ws, row, col + 4, 0)
+        # 54-fix W4: blocked=0이 inferred임을 audit reviewer가 산출물에서 인지하도록
+        # col+5에 노란 강조 안내 텍스트. summary에도 inferred=True (frontend 노출).
+        mark_user_input_required(
+            ws, row, col + 5,
+            hint="Blocked TC 수 inferred=0 — VectorCAST blocked 데이터 미지원, 명시적 입력 필요",
+        )
         if summary is not None:
             summary["tc_stats_blocked_inferred"] = True
     # B22 Requirements/Design Coverage row (v2.02)
@@ -742,6 +749,15 @@ def build_coverage_report(
 
     # 37차 fix → 38차 W1 DRY: extract_warnings_from_session helper로 추출.
     warnings: list[str] = extract_warnings_from_session(session)
+
+    # 54-fix C1: SwUT 라우터에 v2.02 template 잘못 입력되더라도 silent 빈 셀 차단.
+    # v3.01 양식은 fallback_to_v301=True로 기존 hardcode 동작과 동등 (회귀 zero 영향).
+    # v2.02 양식 (사용자 실수 또는 의도된 mixed)이면 SW Version 등 v2.02 라벨 매핑.
+    from backend.services.excel_layout_resolver import inspect_swit_layout
+    layout = inspect_swit_layout(template_bytes, "coverage")
+    if layout.warnings:
+        warnings.extend([f"[layout] {w}" for w in layout.warnings])
+
     wb: Workbook = openpyxl.load_workbook(io.BytesIO(template_bytes), data_only=False)
     sheet_names = wb.sheetnames
 
@@ -771,19 +787,24 @@ def build_coverage_report(
         ),
     }
 
-    # Cover
+    # Cover (Cover는 v2.02도 동일 시트명 "Cover" 사용 — 정확 매칭 유지)
     cover_ws = next((wb[n] for n in sheet_names if n.lower() == "cover"), None)
     if cover_ws is None:
         warnings.append("Cover 시트 미발견 — Doc ID/Author 등 미기록")
     else:
-        _write_cover_sheet(cover_ws, meta, out_warnings=warnings)
+        # 54-fix C1: layout 전달 — v2.02 라벨 자동 매핑 + v3.01 fallback
+        _write_cover_sheet(cover_ws, meta, out_warnings=warnings, layout=layout)
 
-    # Test Summary
-    ts_ws = next((wb[n] for n in sheet_names if n.lower() == "test summary"), None)
+    # Test Summary — 54-fix C1: SwIT 53차 patern과 대칭. v2.02 "1.Test Summary" 호환.
+    ts_ws = next((wb[n] for n in sheet_names if "test summary" in n.lower()), None)
     if ts_ws is None:
         warnings.append("Test Summary 시트 미발견")
     else:
-        _write_test_summary_sheet(ts_ws, meta, agg, out_warnings=warnings)
+        # 54-fix C1: layout + summary 전달
+        _write_test_summary_sheet(
+            ts_ws, meta, agg, out_warnings=warnings,
+            layout=layout, summary=summary,
+        )
 
     # 3. Coverage
     cov_ws = next((wb[n] for n in sheet_names

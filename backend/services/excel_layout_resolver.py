@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import threading
 from dataclasses import dataclass, field
 from typing import Literal, Optional
 
@@ -42,6 +43,12 @@ try:
     import openpyxl  # type: ignore
 except ImportError:  # pragma: no cover
     openpyxl = None  # type: ignore[assignment]
+
+# 54-fix C2: ZIP bomb 방어 backstop — caller에 의존하지 않고 본 모듈에서도 검증.
+from backend.services.excel_template_utils import (
+    TemplateValidationError,
+    validate_xlsx_template_bytes,
+)
 
 
 @dataclass(frozen=True)
@@ -249,6 +256,10 @@ def _inspect_internal(
 ) -> SwitLayout:
     """openpyxl load_workbook → 시트별 inspect → SwitLayout 반환.
 
+    54-fix C2: ZIP bomb 방어 — 외부에서 validate_xlsx_template_bytes 호출하지 않고
+    바로 inspect 호출 시도 거부. 압축비 / 단일 파일 크기 / 총 크기 한도는
+    excel_template_utils 정책 동일.
+
     openpyxl 미설치 또는 load 실패 시 fallback_to_v301=True + warnings 누적하여 반환.
     """
     if openpyxl is None:
@@ -256,6 +267,15 @@ def _inspect_internal(
             detected_version="unknown",
             fallback_to_v301=True,
             warnings=["openpyxl 미설치 — layout inspect 불가, v3.01 fallback"],
+        )
+    # 54-fix C2: ZIP bomb / magic byte 사전 검증.
+    try:
+        validate_xlsx_template_bytes(template_bytes, label=f"layout inspect ({kind})")
+    except TemplateValidationError as e:
+        return SwitLayout(
+            detected_version="unknown",
+            fallback_to_v301=True,
+            warnings=[f"template 입력 검증 실패 — {e!s:.150}"],
         )
     try:
         # SITR도 xlsm이라 keep_vba=True (data_only=False 기본).
@@ -362,8 +382,12 @@ def _inspect_internal(
 # Public API + LRU cache
 # ---------------------------------------------------------------------------
 
+# 54-fix W1/W3: cache stampede + StopIteration 방어 + maxsize 4→8 (thrashing 여유).
+# 자체 LRU dict → threading.Lock 보호. Semaphore(3) SwUT + Semaphore(2) SwIT 동시
+# 빌드 + 향후 C1 fix로 SwUT도 layout 호출 시 5건 동시 thread 가능.
 _LAYOUT_CACHE: dict[tuple[str, str], SwitLayout] = {}
-_MAX_CACHE_SIZE = 4  # 회사 양식 4개 (SwUT Cov/SUTR + SwIT Cov/SITR) 범위
+_MAX_CACHE_SIZE = 8  # W3 — 회사 양식 4개 + 시험용/향후 추가 여유
+_CACHE_LOCK = threading.Lock()
 
 
 def inspect_swit_layout(
@@ -375,6 +399,9 @@ def inspect_swit_layout(
     sha256(template_bytes) + kind 키로 LRU 캐시. 동일 template 반복 빌드 시
     openpyxl load_workbook 1회만 호출.
 
+    54-fix W1: cache stampede 방어 — _CACHE_LOCK으로 hit/miss + insertion 직렬화.
+    동일 key 동시 miss 시 두 번째 thread는 첫 번째의 결과를 cache hit으로 받음.
+
     Args:
         template_bytes: 회사 양식 xlsx (coverage) 또는 xlsm (sitr) bytes.
         kind: "coverage" 또는 "sitr".
@@ -385,27 +412,41 @@ def inspect_swit_layout(
     """
     sha = hashlib.sha256(template_bytes).hexdigest()
     key = (sha, kind)
-    cached = _LAYOUT_CACHE.get(key)
-    if cached is not None:
-        return cached
+    # Fast path — lock 밖 확인
+    with _CACHE_LOCK:
+        cached = _LAYOUT_CACHE.get(key)
+        if cached is not None:
+            return cached
+    # Miss path — inspect (load_workbook 비용 ~수십 ms, lock 밖)
     layout = _inspect_internal(template_bytes, kind)
-    # LRU evict (insertion order)
-    if len(_LAYOUT_CACHE) >= _MAX_CACHE_SIZE:
-        # 가장 오래된 entry 제거 (dict의 insertion order 활용 — Python 3.7+)
-        oldest = next(iter(_LAYOUT_CACHE))
-        del _LAYOUT_CACHE[oldest]
-    _LAYOUT_CACHE[key] = layout
-    return layout
+    # Insertion + LRU evict — lock 안 (stampede 시 dup work 가능하나 결과 동일)
+    with _CACHE_LOCK:
+        # Stampede 검사 — 다른 thread가 먼저 set 했으면 그 값을 반환 (메모리 일관성)
+        existing = _LAYOUT_CACHE.get(key)
+        if existing is not None:
+            return existing
+        if len(_LAYOUT_CACHE) >= _MAX_CACHE_SIZE:
+            # 가장 오래된 entry 제거 (dict insertion order, Python 3.7+).
+            # 빈 dict 진입 방어 (W1 StopIteration) — len check가 보장
+            try:
+                oldest = next(iter(_LAYOUT_CACHE))
+                del _LAYOUT_CACHE[oldest]
+            except (StopIteration, KeyError):  # pragma: no cover — race-safe guard
+                pass
+        _LAYOUT_CACHE[key] = layout
+        return layout
 
 
 def clear_layout_cache() -> None:
     """테스트/관리 용 — 캐시 초기화."""
-    _LAYOUT_CACHE.clear()
+    with _CACHE_LOCK:
+        _LAYOUT_CACHE.clear()
 
 
 def cache_size() -> int:
     """테스트 용 — 현재 캐시 entry 수."""
-    return len(_LAYOUT_CACHE)
+    with _CACHE_LOCK:
+        return len(_LAYOUT_CACHE)
 
 
 __all__ = [

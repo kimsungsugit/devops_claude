@@ -324,14 +324,17 @@ class TestSwitConfigFallback50:
     """
 
     def _setup_cfg(self, tmp_path, monkeypatch, cfg_dict):
+        from backend.routers import swit as swit_mod
         from backend.routers import swut as swut_mod
         from backend.services import swut_meta_resolver as resolver_mod
         cfg_path = tmp_path / "swut_meta.json"
         import json as _json
         cfg_path.write_text(_json.dumps(cfg_dict), encoding="utf-8")
-        # 54차 T281 — DRY 통합 후 resolver 모듈 path patch
+        # 54차 T281 + 54-fix W2 — resolver + swut + swit 세 모듈 모두 patch
+        # (swit.py도 backward compat alias로 _META_CONFIG_PATH 갖게 됨)
         monkeypatch.setattr(resolver_mod, "_META_CONFIG_PATH", str(cfg_path))
         monkeypatch.setattr(swut_mod, "_META_CONFIG_PATH", str(cfg_path))
+        monkeypatch.setattr(swit_mod, "_META_CONFIG_PATH", str(cfg_path))
         resolver_mod._read_meta_config_raw.cache_clear()
 
     def test_resolve_swit_c_source_root_config_fallback(self, tmp_path, monkeypatch):

@@ -38,6 +38,7 @@ from backend.services.excel_template_utils import (
     mark_asil_b_function,
     mark_asil_c_function,
     mark_asil_d_function,
+    mark_user_input_required,
     safe_write,
     short_date,
     truncate_cell_text,
@@ -241,6 +242,11 @@ def _write_test_summary(
         safe_write(ws, row, col + 2, passed)
         safe_write(ws, row, col + 3, failed)
         safe_write(ws, row, col + 4, 0)
+        # 54-fix W4: blocked=0 inferred 시각 안내 (Coverage와 대칭)
+        mark_user_input_required(
+            ws, row, col + 5,
+            hint="Blocked TC 수 inferred=0 — VectorCAST blocked 미지원, 명시적 입력 필요",
+        )
         if summary is not None:
             summary["tc_stats_blocked_inferred"] = True
     if layout.requirements_row is not None:
@@ -379,13 +385,20 @@ def _write_test_log(
             if _asil_marker:
                 _asil_marker(ws, r, col + 5)
 
-            # 54차 T283: v2.02 양식 AL column marker (layout 제공 시).
+            # 54차 T283 + 54-fix W4: v2.02 양식 AL column marker.
+            # exec_r 없음 → "" (미실행). exec_r.passed=True → "✓".
+            # exec_r.passed=False → "✗". exec_r.passed=None (결과 unset) → "—"
+            # (silent wrong-pick 방지 — Fail로 표기 안 함).
             if layout is not None and layout.test_log_extra_marker_col is not None:
                 al_col = layout.test_log_extra_marker_col
-                # Pass면 "✓", Fail이면 "✗", 미실행이면 빈 string.
                 marker = ""
                 if exec_r is not None:
-                    marker = "✓" if exec_r.passed else "✗"
+                    if exec_r.passed is True:
+                        marker = "✓"
+                    elif exec_r.passed is False:
+                        marker = "✗"
+                    else:
+                        marker = "—"  # passed=None unset case
                 safe_write(ws, r, al_col, marker)
 
             written += 1
@@ -433,6 +446,14 @@ def build_sutr(
 
     # 37차 fix → 38차 W1 DRY: extract_warnings_from_session helper로 추출.
     warnings: list[str] = extract_warnings_from_session(session)
+
+    # 54-fix C1: SwUT 라우터에 v2.02 template 잘못 입력 시 silent 빈 셀 차단.
+    # v3.01 SUTR 양식은 fallback_to_v301=True로 hardcode 동작과 동등.
+    from backend.services.excel_layout_resolver import inspect_swit_layout
+    layout = inspect_swit_layout(template_bytes, "sitr")
+    if layout.warnings:
+        warnings.extend([f"[layout] {w}" for w in layout.warnings])
+
     # deep-reviewer W2: VBA 매크로 ZIP entry 존재 여부 사전 측정.
     template_has_vba = has_vba_macros(template_bytes)
     vba_refs_found: list[str] = []
@@ -488,29 +509,39 @@ def build_sutr(
     if cover_ws is None:
         warnings.append("Cover 시트 미발견")
     else:
-        _write_cover(cover_ws, meta, out_warnings=warnings)
+        # 54-fix C1: layout 전달
+        _write_cover(cover_ws, meta, out_warnings=warnings, layout=layout)
 
-    ts_ws = next((wb[n] for n in sheet_names if n.lower() == "test summary"), None)
+    # 54-fix C1: 53차 SwIT 패턴과 대칭 — v2.02 "1.Test Summary" 등 prefix 호환 substring.
+    ts_ws = next((wb[n] for n in sheet_names if "test summary" in n.lower()), None)
     if ts_ws is None:
         warnings.append("Test Summary 시트 미발견")
     else:
-        _write_test_summary(ts_ws, meta, agg, out_warnings=warnings)
+        # 54-fix C1: layout + summary 전달
+        _write_test_summary(
+            ts_ws, meta, agg, out_warnings=warnings,
+            layout=layout, summary=summary,
+        )
 
-    dev_ws = next((wb[n] for n in sheet_names if n.lower() == "deviation"), None)
+    # 54-fix C1: substring 대칭
+    dev_ws = next((wb[n] for n in sheet_names if "deviation" in n.lower()), None)
     if dev_ws is None:
         warnings.append("Deviation 시트 미발견")
     elif deviation_cases:
         n = _write_deviation(dev_ws, deviation_cases, out_warnings=warnings)
         summary["deviation_cases_written"] = n
 
-    log_ws = next((wb[n] for n in sheet_names if n.lower() == "test log"), None)
+    # 54-fix C1: substring 대칭
+    log_ws = next((wb[n] for n in sheet_names if "test log" in n.lower()), None)
     if log_ws is None:
         warnings.append("Test Log 시트 미발견")
     else:
+        # 54-fix C1: layout 전달 — AL marker
         n = _write_test_log(
             log_ws, session,
             function_asil_map=agg.get("function_asil_map"),
             out_warnings=warnings,
+            layout=layout,
         )
         summary["test_log_rows_written"] = n
 

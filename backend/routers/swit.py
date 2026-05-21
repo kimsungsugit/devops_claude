@@ -54,18 +54,29 @@ from backend.services.swit_sitr_aggregator import (
 # c_source_root + swuds_docx_path 공유, template_paths는 swit_coverage_template /
 # swit_sitr_template 별도 키 (v2.02 양식이 SwUT v3.01과 다름).
 # 54차 T281 — DRY 통합. swut_meta_resolver로 path/ASIL 로직 이전.
+from backend.services import swut_meta_resolver as _resolver_mod
 from backend.services.swut_meta_resolver import (
     apply_function_asil_map as _resolver_apply_function_asil_map,
-    load_meta_from_config as _resolver_load_meta_from_config,
     resolve_c_source_root as _resolver_resolve_c_source_root,
     resolve_swuds_function_ids as _resolver_resolve_swuds_function_ids,
     resolve_swuds_path as _resolver_resolve_swuds_path,
 )
 
+# 54-fix W2: swut.py와 동일 backward compat alias — 회귀가 swit_mod._META_CONFIG_PATH
+# 만 patch해도 정상 동작. swut.py의 단방향 동기화 패턴 (resolver_mod._META_CONFIG_PATH
+# 가 alias와 불일치 시 강제 sync)을 대칭으로 swit.py에도 적용.
+_META_CONFIG_PATH = _resolver_mod._META_CONFIG_PATH
+_read_meta_config_raw = _resolver_mod._read_meta_config_raw  # lru_cache alias
+
 
 def _load_meta_from_config(project_id: str) -> dict[str, Any]:
-    """Thin wrapper — 54차 DRY 통합 (swut_meta_resolver로 이전)."""
-    return _resolver_load_meta_from_config(project_id)
+    """Thin wrapper — 54차 DRY 통합 (swut_meta_resolver로 이전).
+
+    monkeypatch이 본 모듈의 `_META_CONFIG_PATH`를 변경했으면 resolver로 동기.
+    """
+    if _resolver_mod._META_CONFIG_PATH != _META_CONFIG_PATH:
+        _resolver_mod._META_CONFIG_PATH = _META_CONFIG_PATH
+    return _resolver_mod.load_meta_from_config(project_id)
 
 _logger = logging.getLogger(__name__)
 

@@ -387,3 +387,54 @@ class TestSwitV202LayoutCompat:
         # v3.01 호환 — fill 성공 + tc_stats_blocked_inferred 없음 (v2.02 row 없음)
         assert result.ok
         assert "tc_stats_blocked_inferred" not in result.summary
+
+
+class TestSwutBuilderV202InspectFix54:
+    """54-fix C1 — SwUT Coverage 빌더가 v2.02 template 잘못 입력 받아도 silent 빈 셀 차단.
+
+    SwUT 라우터에 사용자가 SwIT v2.02 양식 path를 잘못 지정 시:
+    - 이전: hardcode "Release Name(SW)" 라벨 미발견 → silent 빈 셀
+    - 54-fix: inspect_swit_layout → v2.02 라벨 매핑 → SW Version 옆 자동 채움
+    """
+
+    def test_swut_coverage_with_v202_template_fills_sw_version(self):
+        """SwUT 빌더에 v2.02 template 입력 → SW Version cell 자동 채움."""
+        from backend.services.swut_coverage_aggregator import (
+            CoverageBuildMeta, build_coverage_report,
+        )
+        meta = CoverageBuildMeta(
+            project_id="HDPDM01",
+            release_sw_version="1.0.5",
+            test_date="2024-02-19",
+            test_engineer="JK Kim",
+            doc_id_sequence="001",
+        )
+        result = build_coverage_report(
+            _make_swit_session(), meta, _build_v202_template(),
+        )
+        assert result.ok
+        wb = openpyxl.load_workbook(io.BytesIO(result.xlsx_bytes))
+        # v2.02 "1.Test Summary" 시트의 SW Version 옆 셀
+        ts = wb["1.Test Summary"]
+        # SW Version 라벨 B2 → value C2 (col+1)
+        assert ts["C2"].value == "1.0.5"
+
+    def test_swut_coverage_with_v301_template_backward_compat(self):
+        """SwUT 기존 v3.01 양식도 정상 채움 — fallback_to_v301."""
+        from backend.services.swut_coverage_aggregator import (
+            CoverageBuildMeta, build_coverage_report,
+        )
+        meta = CoverageBuildMeta(
+            project_id="HDPDM01",
+            release_sw_version="1.0.5",
+            test_date="2024-02-19",
+            test_engineer="JK Kim",
+            doc_id_sequence="001",
+        )
+        # 기존 v3.01 호환 template (Release Name(SW) 라벨)
+        result = build_coverage_report(
+            _make_swit_session(), meta, _build_swit_template(),
+        )
+        assert result.ok
+        # v3.01 → fallback_to_v301=True, tc_stats_blocked_inferred 부재
+        assert "tc_stats_blocked_inferred" not in result.summary

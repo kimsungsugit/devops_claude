@@ -218,6 +218,55 @@
 
 ### 비-목표 (55차+)
 - SwIT 시트명 substring → regex 패턴 (`r"^\d*\.?\s*test summary"`) — 53차 substring으로 호환 100%
-- SwUT v3.01 양식의 layout_resolver 통합 (현재 v3.01은 hardcode label 충분)
+- ~~SwUT v3.01 양식의 layout_resolver 통합~~ — **54-fix C1으로 완료** (silent 빈 셀 차단)
 - 사용자 실 환경 v2.02 라이브 검증 (사용자 의무)
 - swit_meta.py SwIT 전용 default (현재 hbrnd2 환경은 SwUT/SwIT 공통)
+
+## 54-fix — 54차 자체 평가 발견 결함 통합 (deep-reviewer C1/C2 + W1~W4)
+
+54차 commit `132a97c` 후 deep-reviewer (opus) 시나리오 기반 비판 검토에서 Critical 2 + Warning 4 + Info 2 발견. Info 2건은 별도 라운드 (SwitLayout rename + docstring 명시), Critical + Warning 6건 본 fix.
+
+### C1 — SwUT 라우터가 v2.02 template 잘못 입력 시 silent 빈 셀 차단 (Critical X3)
+- **시나리오**: 사용자가 SwIT v2.02 path를 SwUT 라우터 `coverage_template_path`에 실수로 입력 → SwUT aggregator는 layout 미호출 → "Release Name(SW)" find_kv_row 미발견 → 빈 셀 산출물 → ISO 26262 audit evidence가 빈 채로 reviewer 제출
+- **Fix**:
+  - `swut_coverage_aggregator.py` + `swut_sutr_aggregator.py` build 함수 진입 직후 `inspect_swit_layout(template_bytes, "coverage"|"sitr")` 호출 (SwIT aggregator와 대칭)
+  - 모든 writer 호출에 `layout=layout, summary=summary` 전달
+  - 시트명 매칭을 53차 SwIT 패턴 대칭으로 substring 변경 (`"test summary" in n.lower()` 등) — v2.02 "1.Test Summary" 호환 + v3.01 backward compat 유지
+- **회귀**: `TestSwutBuilderV202InspectFix54` 2건 (v2.02 SW Version 자동 fill + v3.01 backward compat)
+
+### C2 — excel_layout_resolver ZIP bomb 방어 부재 (Critical X5)
+- **시나리오**: `inspect_swit_layout`이 `__all__`에 public export → 향후 직접 호출 시 `validate_xlsx_template_bytes` 우회 가능 → 압축비 1000:1 또는 4GB decompressed ZIP에 메모리 폭증
+- **Fix**: `_inspect_internal` 진입에 `validate_xlsx_template_bytes(template_bytes, label=f"layout inspect ({kind})")` 추가. `TemplateValidationError` catch하여 fallback_to_v301=True + warnings 누적 (graceful, raise 안 함)
+- **회귀**: `test_inspect_rejects_zip_bomb_magic_bytes` (PK\x03\x04 magic + 빈 ZIP 구조 → 거부)
+- **회귀 갱신**: `test_corrupted_bytes_graceful` 메시지 매칭에 "template 입력 검증 실패" 추가
+
+### W1 — `_LAYOUT_CACHE` race / StopIteration 방어 (Warning X1)
+- **시나리오**: Semaphore(3) SwUT + Semaphore(2) SwIT + 54-fix C1로 SwUT도 layout 호출 → 최대 5건 동시 thread. dict iter + del 복합 연산 비-atomic → cache stampede + LRU thrashing + 빈 dict에서 StopIteration 가능
+- **Fix**: `threading.Lock` 추가. `inspect_swit_layout`이 fast path/miss path/insertion 모두 lock 내. stampede 검사 (다른 thread가 먼저 set 했으면 그 값 반환) + `try/except StopIteration` race-safe guard
+
+### W2 — swit.py _META_CONFIG_PATH alias 통일 (Warning X4)
+- **시나리오**: swut.py는 backward compat alias + 단방향 sync wrapper 있는데 swit.py는 없음. 회귀 setup_cfg가 swut만 patch하고 swit를 호출하면 stale path 사용 위험. 비대칭 패턴이 향후 cross-test contamination 또는 회귀 작성자 혼란
+- **Fix**:
+  - swit.py에도 swut.py 동일 패턴 — `_META_CONFIG_PATH = _resolver_mod._META_CONFIG_PATH` alias + `_read_meta_config_raw` alias + `_load_meta_from_config` thin wrapper에 단방향 sync 로직
+  - `tests/unit/test_swit_router.py` `_setup_cfg`에 `monkeypatch.setattr(swit_mod, "_META_CONFIG_PATH", str(cfg_path))` 추가 (3개 모듈 모두 patch)
+
+### W3 — cache maxsize 4 → 8 thrashing 방지 (Warning X6)
+- **시나리오**: 회사 양식 정확히 4개라 한계. 시험용/추가 template 진입 시 thrashing. 현재 SwUT는 layout 호출 안 했으나 C1 fix로 호출 추가됨 — 양식 4개 모두 사용 시점에 새 template 진입하면 evict
+- **Fix**: `_MAX_CACHE_SIZE = 8` (4 → 8). 회귀 `test_lru_evict_when_max_exceeded` 9개 진입 시 8개 유지로 갱신
+
+### W4 — blocked_inferred 산출물 표기 + AL marker None 처리 (Warning X7)
+- **시나리오 1 (blocked inferred)**: `summary["tc_stats_blocked_inferred"] = True`만 set하고 산출물 셀에는 "0"만 fill → audit reviewer가 "VectorCAST가 blocked TC 0건 실제 보고"로 오해 → 잘못된 evidence
+- **시나리오 2 (AL marker None)**: `marker = "✓" if exec_r.passed else "✗"` → exec_r.passed=None (결과 unset)도 ✗로 표기 (silent wrong-pick)
+- **Fix**:
+  - `_write_v202_extra_rows` (Coverage) + SUTR `_write_test_summary` 둘 다 B17 col+5 cell에 `mark_user_input_required` 노란 강조 + hint "Blocked TC 수 inferred=0 — VectorCAST blocked 미지원, 명시적 입력 필요"
+  - AL marker: `exec_r.passed is True` → ✓ / `is False` → ✗ / `is None` → "—" (silent wrong-pick 방지)
+
+### 회귀 통계
+- backend ~2078 → ~2082 (+4: C2 zip_bomb_magic_bytes + C1 v202_fills + C1 v301_backward + corrupted_bytes 메시지 갱신 / lru_evict 9 entry 갱신은 net 0)
+- backend SwUT/SwIT batch 439 통과 (54차 436 → +3)
+- frontend 263 무변경
+
+### 비-목표 (55차+ Info)
+- I1 SwitLayout → ExcelTemplateLayout rename (회귀 다수 import — 별도 정비 라운드)
+- I2 docstring kind 인자 plan vs 구현 divergence 명시 (이미 docstring 일부 표기, 명확화 필요)
+- frontend SwITBuildSection summary panel에 `tc_stats_blocked_inferred` 표시 (UI 별도 라운드)
