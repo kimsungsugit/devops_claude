@@ -227,46 +227,15 @@ def _write_test_summary(
     _write_label(ws, labels.get("final_test_result", "Final Test Result"),
                  meta.final_test_result, out_warnings)
 
-    # 54차 T283: v2.02 양식 신규 row (TC stats + Requirements)
-    if layout is None:
-        return
-    if layout.tc_stats_row is not None:
-        row = layout.tc_stats_row
-        col = layout.tc_stats_col_start or 2
-        # 55-fix-2 W4: data row 비어있음 검증 — silent overwrite 방어
-        existing = ws.cell(row, col).value
-        if existing is not None and existing != "":
-            msg = (
-                f"TC stats data row (row={row}, col={col}) already has value "
-                f"{existing!r} — 회사 양식 변형 가능성, fill skip"
-            )
-            if out_warnings is not None:
-                out_warnings.append(msg)
-            if summary is not None:
-                summary["tc_stats_skipped_reason"] = msg
-        else:
-            total = agg.get("total", 0) or 0
-            tested = agg.get("tested", 0) or 0
-            passed = agg.get("passed", 0) or 0
-            failed = agg.get("failed", 0) or 0
-            safe_write(ws, row, col, total)
-            safe_write(ws, row, col + 1, tested)
-            safe_write(ws, row, col + 2, passed)
-            safe_write(ws, row, col + 3, failed)
-            safe_write(ws, row, col + 4, 0)
-            # 54-fix W4: blocked=0 inferred 시각 안내 (Coverage와 대칭)
-            mark_user_input_required(
-                ws, row, col + 5,
-                hint="Blocked TC 수 inferred=0 — VectorCAST blocked 미지원, 명시적 입력 필요",
-            )
-            if summary is not None:
-                summary["tc_stats_blocked_inferred"] = True
-    # 55-fix-2 W5: Requirements row 가드 — 헤더 row 매칭 시 skip
-    if layout.requirements_row is not None:
-        row = layout.requirements_row
-        existing = ws.cell(row, 2).value
-        if existing is None or existing == "" or existing == "SwITS":
-            safe_write(ws, row, 2, "SwITS")
+    # 55-fix-3 W10: helper 추출 — swut_coverage와 단일 source. inline 중복 제거.
+    from backend.services.swut_coverage_aggregator import (
+        _write_v202_requirements_row,
+        _write_v202_tc_stats_row,
+    )
+    _write_v202_tc_stats_row(
+        ws, agg, layout, summary, out_warnings, total_key="total",
+    )
+    _write_v202_requirements_row(ws, layout, summary, out_warnings)
 
 
 def _deviation_case_fields(case: Any) -> tuple[str, str, str, str] | None:

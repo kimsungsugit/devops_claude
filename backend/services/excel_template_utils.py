@@ -272,16 +272,24 @@ def build_release_history_row(
     test_date = (getattr(meta, "test_date", "") or "").strip()
     author = getattr(meta, "author", "") or ""
 
-    # 55-fix-2 W6: 빈 입력 audit 추적성 — silent fill 차단.
+    # 55-fix-2 W6 + 55-fix-3 W9: 빈 입력 audit 추적성 — silent fill 차단.
+    # ISO 26262 audit 책임자 식별 필수 — author 누락도 검증.
     if out_warnings is not None:
+        ctx = f" [{doc_kind}]" if doc_kind else ""  # I6: doc_kind context 부착
         if not release:
             out_warnings.append(
-                "History row release_sw_version 빈 string — meta.release_sw_version 누락 "
-                "(audit reviewer가 산출물에서 빈 version cell을 데이터 누락으로 오해 가능)"
+                f"History row release_sw_version 빈 string — meta.release_sw_version 누락 "
+                f"(audit reviewer가 산출물에서 빈 version cell을 데이터 누락으로 오해 가능){ctx}"
             )
         if not test_date:
             out_warnings.append(
-                "History row test_date 빈 string — meta.test_date 누락"
+                f"History row test_date 빈 string — meta.test_date 누락{ctx}"
+            )
+        # 55-fix-3 W9: author 누락 — ISO 26262 audit 책임자 식별 필수
+        if not author:
+            out_warnings.append(
+                f"History row author 빈 string — meta.author 누락 "
+                f"(audit reviewer 책임자 식별 불가){ctx}"
             )
 
     # date format: yyyy-mm-dd → yy.mm.dd (collect_git_history와 동일)

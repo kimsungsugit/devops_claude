@@ -841,3 +841,84 @@ class TestBuildSutr:
         meta = SutrBuildMeta(release_sw_version="1.0.0", test_date="2024-02-19")
         result = build_sutr(session, meta, _build_sutr_template())
         assert any("partial" in s for s in result.incomplete_sheets)
+
+
+# ---------------------------------------------------------------------------
+# 55-fix-3 W7 — SUTR W4 가드 회귀 (deep-reviewer 발견 회귀 비대칭)
+# ---------------------------------------------------------------------------
+
+
+class TestSutrTcStatsDataRowGuard55fix3:
+    """55-fix-3 W7 — SwUT SUTR W4/W8 가드 회귀.
+
+    이전 회귀: TestTcStatsDataRowGuard55fix2 (SwIT Coverage만). SUTR inline 가드는
+    회귀 부재 → silent 회귀 위험. 55-fix-3 W10 helper 추출 후 동일 helper 호출 보장.
+    """
+
+    def _v202_sutr_template(self) -> bytes:
+        """v2.02 SUTR mimic — Total TC label A17 + data row 18에 미리 채움."""
+        wb = openpyxl.Workbook()
+        wb.remove(wb.active)
+        cover = wb.create_sheet("Cover")
+        cover["B1"] = "Project"
+        cover["B2"] = "ASIL Level"
+        cover["B3"] = "Author"
+        cover["B4"] = "Approver"
+        cover["B5"] = "Version"
+        ts = wb.create_sheet("1.Test Summary")
+        ts["B1"] = "Project Name"
+        ts["B2"] = "SW Version"
+        ts["B3"] = "HW Version"
+        ts["B4"] = "Test Date"
+        ts["B5"] = "Test Engineer"
+        ts["B6"] = "Target Coverage"
+        ts["B7"] = "Actual Coverage"
+        ts["B8"] = "Final Test Result"
+        ts["A17"] = "Total TC"  # 라벨 row
+        ts["A18"] = "SUTR_ALREADY_FILLED"  # data row 사전 채움 → skip
+        dev = wb.create_sheet("Deviation")
+        dev["B1"] = "Test Case ID"
+        log = wb.create_sheet("Test Log")
+        log["B1"] = "Test Case ID"
+        wb.create_sheet("2.Consistency")
+        hist = wb.create_sheet("History")
+        hist["A1"] = "■ Revision History"
+        hist["B2"] = "Version"
+        hist["C2"] = "Date"
+        hist["D2"] = "Description"
+        hist["E2"] = "Author"
+        hist["F2"] = "Reviewer"
+        hist["G2"] = "Approver"
+        buf = io.BytesIO()
+        wb.save(buf)
+        return buf.getvalue()
+
+    def test_sutr_skip_when_data_row_already_has_value(self):
+        """SUTR도 SwIT Coverage와 동일 helper 사용 — data row 비어있지 않으면 skip."""
+        session = _make_session()
+        meta = SutrBuildMeta(release_sw_version="1.0.0", test_date="2024-02-19")
+        result = build_sutr(session, meta, self._v202_sutr_template())
+        d = result.to_dict()
+        # 55-fix-3 W10: helper 통합 후 SUTR도 skip + reason 누적
+        assert "tc_stats_skipped_reason" in d["summary"]
+        assert "SUTR_ALREADY_FILLED" in d["summary"]["tc_stats_skipped_reason"]
+        # blocked_inferred는 set 안 됨 (fill skip)
+        assert "tc_stats_blocked_inferred" not in d["summary"]
+
+    def test_sutr_normal_fill_when_data_row_empty(self):
+        """SUTR data row 빈 → 정상 fill + blocked_inferred=True."""
+        # _build_sutr_template은 row 17/18 미설정 → tc_stats_row=None → skip
+        # 그러므로 본 회귀는 _v202_sutr_template에서 A18 제거한 변형 사용
+        wb = openpyxl.load_workbook(io.BytesIO(self._v202_sutr_template()))
+        ts = wb["1.Test Summary"]
+        ts["A18"] = None  # data row 비움
+        buf = io.BytesIO()
+        wb.save(buf)
+
+        session = _make_session()
+        meta = SutrBuildMeta(release_sw_version="1.0.0", test_date="2024-02-19")
+        result = build_sutr(session, meta, buf.getvalue())
+        d = result.to_dict()
+        # 정상 fill — blocked_inferred=True
+        assert d["summary"].get("tc_stats_blocked_inferred") is True
+        assert "tc_stats_skipped_reason" not in d["summary"]

@@ -229,61 +229,113 @@ def _write_test_summary_sheet(
     _write_v202_extra_rows(ws, agg, layout, summary, out_warnings)
 
 
+def _write_v202_tc_stats_row(
+    ws, agg: dict[str, Any], layout: Any,
+    summary: dict[str, Any] | None,
+    out_warnings: list[str] | None = None,
+    *,
+    total_key: str = "total",
+) -> None:
+    """55-fix-3 W10 — TC stats data row fill helper (DRY 통합).
+
+    swut_coverage `_write_v202_extra_rows` + swut_sutr `_write_test_summary` inline
+    두 곳에서 동일 로직 ~35 lines 중복. 본 helper로 단일 진리 source 확보.
+
+    Args:
+        total_key: agg에서 total 값을 가져올 키. Coverage = "total_tcs" (없으면 "total"),
+            SUTR = "total" — caller가 명시.
+    """
+    if layout is None or layout.tc_stats_row is None:
+        return
+    row = layout.tc_stats_row
+    col = layout.tc_stats_col_start or 2
+
+    # 55-fix-2 W4 + 55-fix-3 W8: data row 비어있음 검증.
+    # skip 시 산출물 cell에 노란 강조 + hint 추가 (audit silent 차단).
+    existing = ws.cell(row, col).value
+    if existing is not None and existing != "":
+        msg = (
+            f"TC stats data row (row={row}, col={col}) already has value "
+            f"{existing!r} — 회사 양식 변형 가능성, fill skip (audit reviewer 확인 권장)"
+        )
+        if out_warnings is not None:
+            out_warnings.append(msg)
+        if summary is not None:
+            summary["tc_stats_skipped_reason"] = msg
+        # 55-fix-3 W8: 산출물 셀에 노란 강조 hint (audit reviewer가 X-* 헤더 안 봐도 인지)
+        # 단 row 자체에 이미 값이 있어 col+5 (다음 col)에 hint
+        mark_user_input_required(
+            ws, row, col + 5,
+            hint=(
+                f"TC stats data row 변형 감지 — 회사 양식이 row {row}에 다른 값. "
+                f"audit reviewer가 직접 검토 + 수동 입력 필요"
+            ),
+        )
+        return
+
+    # blocked는 모호 — 0 채움 + summary inferred 표시
+    if total_key == "total_tcs":
+        total = agg.get("total_tcs", agg.get("total", 0)) or 0
+    else:
+        total = agg.get(total_key, 0) or 0
+    tested = agg.get("tested", 0) or 0
+    passed = agg.get("passed", 0) or 0
+    failed = agg.get("failed", 0) or 0
+    safe_write(ws, row, col, total)
+    safe_write(ws, row, col + 1, tested)
+    safe_write(ws, row, col + 2, passed)
+    safe_write(ws, row, col + 3, failed)
+    safe_write(ws, row, col + 4, 0)
+    # 54-fix W4: blocked=0 inferred 시각 안내
+    mark_user_input_required(
+        ws, row, col + 5,
+        hint="Blocked TC 수 inferred=0 — VectorCAST blocked 데이터 미지원, 명시적 입력 필요",
+    )
+    if summary is not None:
+        summary["tc_stats_blocked_inferred"] = True
+
+
+def _write_v202_requirements_row(
+    ws, layout: Any,
+    summary: dict[str, Any] | None = None,
+    out_warnings: list[str] | None = None,
+) -> None:
+    """55-fix-3 W10 — Requirements row fill helper (DRY 통합).
+
+    55-fix-2 W5 가드: B 셀이 빈/'SwITS'면 fill, 다른 값 ('■' 헤더 등)이면 skip.
+    55-fix-3 (deep-reviewer I5): skip 시 warning + summary reason 누적 (W4와 정책 통일).
+    """
+    if layout is None or layout.requirements_row is None:
+        return
+    row = layout.requirements_row
+    existing = ws.cell(row, 2).value
+    if existing is None or existing == "" or existing == "SwITS":
+        safe_write(ws, row, 2, "SwITS")
+    else:
+        # I5 deferred fix — W5 skip 시 warning + summary reason 누적
+        msg = (
+            f"Requirements row (row={row}, col=B) already has value "
+            f"{existing!r} — 회사 양식 변형 가능성, SwITS fill skip"
+        )
+        if out_warnings is not None:
+            out_warnings.append(msg)
+        if summary is not None:
+            summary["requirements_row_skipped_reason"] = msg
+
+
 def _write_v202_extra_rows(
     ws, agg: dict[str, Any], layout: Any, summary: dict[str, Any] | None,
     out_warnings: list[str] | None = None,
 ) -> None:
     """54차 T283 — v2.02 양식 신규 row fill (B17-F17 TC stats + B22 Requirements).
 
+    55-fix-3 W10: helper로 DRY 통합. swut_sutr inline도 동일 helper 호출.
     layout이 None 또는 해당 row가 None (v3.01)이면 silent skip — SwUT 회귀 영향 zero.
     """
-    if layout is None:
-        return
-    # B17-F17 TC stats row (v2.02)
-    if layout.tc_stats_row is not None:
-        row = layout.tc_stats_row
-        col = layout.tc_stats_col_start or 2  # B17 (column B = 2)
-        total = agg.get("total_tcs", agg.get("total", 0)) or 0
-        tested = agg.get("tested", 0) or 0
-        passed = agg.get("passed", 0) or 0
-        failed = agg.get("failed", 0) or 0
-
-        # 55-fix-2 W4: data row 비어있음 검증 — 회사 양식 변형 시 silent overwrite 방어.
-        # row가 이미 데이터/라벨 갖고 있으면 다른 섹션이라 판단, fill skip + warning.
-        existing = ws.cell(row, col).value
-        if existing is not None and existing != "":
-            msg = (
-                f"TC stats data row (row={row}, col={col}) already has value "
-                f"{existing!r} — 회사 양식 변형 가능성, fill skip (audit reviewer 확인 권장)"
-            )
-            if out_warnings is not None:
-                out_warnings.append(msg)
-            if summary is not None:
-                summary["tc_stats_skipped_reason"] = msg
-        else:
-            # blocked는 모호 — 0 채움 + summary inferred 표시
-            safe_write(ws, row, col, total)
-            safe_write(ws, row, col + 1, tested)
-            safe_write(ws, row, col + 2, passed)
-            safe_write(ws, row, col + 3, failed)
-            safe_write(ws, row, col + 4, 0)
-            # 54-fix W4: blocked=0이 inferred임을 audit reviewer가 산출물에서 인지하도록
-            # col+5에 노란 강조 안내 텍스트. summary에도 inferred=True (frontend 노출).
-            mark_user_input_required(
-                ws, row, col + 5,
-                hint="Blocked TC 수 inferred=0 — VectorCAST blocked 데이터 미지원, 명시적 입력 필요",
-            )
-            if summary is not None:
-                summary["tc_stats_blocked_inferred"] = True
-    # B22 Requirements/Design Coverage row (v2.02)
-    # 55-fix-2 W5: row 20 (헤더 row) 매칭 시 가드 — '■' 또는 'Requirements' 로 시작하는
-    # 라벨이 이미 있으면 헤더 row라 판단, fill skip (audit 추적성 보호).
-    if layout.requirements_row is not None:
-        row = layout.requirements_row
-        existing = ws.cell(row, 2).value
-        # B22 빈 또는 'SwITS'면 fill OK. 다른 값 (■ 헤더 등)이면 skip
-        if existing is None or existing == "" or existing == "SwITS":
-            safe_write(ws, row, 2, "SwITS")
+    _write_v202_tc_stats_row(
+        ws, agg, layout, summary, out_warnings, total_key="total_tcs",
+    )
+    _write_v202_requirements_row(ws, layout, summary, out_warnings)
 
 
 def _compute_asil_distribution(

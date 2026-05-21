@@ -405,3 +405,46 @@
 - I3 `doc_kind` Literal 타입 강제 (typo 차단)
 - `tc_stats_data_row` field rename (semantic clarity, 영향 큰 변경)
 - 사용자 추가 라이브 검증 후속
+
+## 55-fix-3 — 55-fix-2 자체 평가 발견 Warning 4건 (W7~W10)
+
+55-fix-2 commit `35ce967` 후 deep-reviewer 자체 평가: Critical 0 / Warning 4 / Info 3. 사용자 결정: All Warning (W7~W10). Info (I4~I6) 별도 라운드.
+
+### T314 W10 — v2.02 helper 추출 (DRY 통합)
+- swut_coverage `_write_v202_extra_rows` + swut_sutr inline 두 곳에 ~35 lines 중복 — helper로 단일 진리 source 확보
+- `_write_v202_tc_stats_row(ws, agg, layout, summary, out_warnings, *, total_key)` 신규 — `total_key="total_tcs"` (Coverage) / `"total"` (SUTR) 분기만 caller가 명시
+- `_write_v202_requirements_row(ws, layout, summary, out_warnings)` 신규 — Requirements row 가드 + skip 시 warning/summary 누적 (I5 deferred fix)
+- swut_sutr가 swut_coverage에서 import — 향후 helper 변경 시 자동 동기
+
+### T315 W8 — W4 skip 시 산출물 노란 강조
+- 이전: `summary["tc_stats_skipped_reason"]` + warning만 누적 → audit reviewer가 X-* 헤더 안 보고 산출물만 열면 silent
+- 현재: `mark_user_input_required(ws, row, col+5, hint="TC stats data row 변형 감지 — audit reviewer 직접 검토 + 수동 입력 필요")` 추가
+- 24차 silent "N/A" 제거 정책과 정합 — 산출물 자체에서 노란 표시
+
+### T316 W9 — `build_release_history_row` author 빈 warning + doc_kind context (I6)
+- author 빈 시 warning 누적 — ISO 26262 audit 책임자 식별 필수
+- doc_kind context 부착 — warning string에 `[{doc_kind}]` suffix (I6 deferred fix 동시 처리)
+- "History row release_sw_version 빈 ... (audit reviewer가 빈 cell을 데이터 누락 오해 가능) [SwUT Coverage Report]" 같은 형식
+
+### T317 W7 — SwUT SUTR W4 가드 회귀 추가
+- 이전: `TestTcStatsDataRowGuard55fix2` (SwIT Coverage만, swut_coverage 경로는 SwIT 호출로 자동 커버)
+- SUTR inline은 회귀 부재 → silent 회귀 위험. W10 helper 추출 후 동일 helper 사용으로 안전 보장됐지만 회귀로 명시 검증
+- `TestSutrTcStatsDataRowGuard55fix3` 신규: data row 사전 채움 → skip + reason / data row 빈 → 정상 fill + blocked_inferred=True 2건
+
+### 회귀
+- backend SwUT/SwIT batch **446 통과** (55-fix-2 444 → +2: W7 SUTR 회귀 2건)
+- W10 helper 통합 후 swut_coverage `_write_v202_extra_rows`가 helper 호출로 단순화 (코드 ~35 → ~10 lines)
+- pre-commit hook 180s 한도 내 (변경 영역 narrow batch 49s)
+
+### ISO 26262 audit evidence 영향
+- W8: 산출물 자체 노란 강조로 audit reviewer 인지 가능 (X-* 헤더 의존 제거)
+- W9: author 누락 audit context 책임자 식별 가능
+- W10: DRY 통합으로 향후 가드 변경 시 한쪽만 fix되는 silent 회귀 위험 차단
+- W7: 회귀 명시로 helper 호출 contract 보장
+- evidence_class 정책 무변경
+
+### 비-목표 (56차+ Info)
+- I4 invalid date format silent (`"2024-99-99"` → `"24.99.99"`) — Pydantic regex가 router 1차 방어
+- I5 Requirements row skip warning — 55-fix-3 W10 helper 통합 시 이미 동일 패턴으로 처리됨 (완료)
+- I6 doc_kind context — 55-fix-3 W9에서 동시 처리됨 (완료)
+- I1/I2/I3 (55-fix-2에서 deferred) 유지
