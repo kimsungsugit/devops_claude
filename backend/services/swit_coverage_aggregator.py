@@ -243,7 +243,11 @@ def build_swit_coverage_report(
     # History — 55-fix: single-row release entry (사용자 결정 B)
     hist_ws = next((wb[n] for n in sheet_names if n.lower() == "history"), None)
     if hist_ws is not None:
-        release_rows = build_release_history_row(meta, doc_kind="SwIT Coverage")
+        # 55-fix-2 W2: 4 aggregator 명명 통일 ("Coverage Report" 풀네임)
+        # 55-fix-2 W6: out_warnings 전달
+        release_rows = build_release_history_row(
+            meta, doc_kind="SwIT Coverage Report", out_warnings=warnings,
+        )
         n_h = _write_history_sheet(hist_ws, release_rows, out_warnings=warnings)
         summary["history_rows_written"] = n_h
         if n_h == 0:

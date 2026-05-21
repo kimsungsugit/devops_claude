@@ -110,6 +110,13 @@ def _build_sutr_template() -> bytes:
 
     hist = wb.create_sheet("History")
     hist["A1"] = "■ Revision History"
+    # 55-fix-2 W3: _write_history_sheet이 'Version' 라벨로 헤더 위치 찾음
+    hist["B2"] = "Version"
+    hist["C2"] = "Date"
+    hist["D2"] = "Description"
+    hist["E2"] = "Author"
+    hist["F2"] = "Reviewer"
+    hist["G2"] = "Approver"
 
     buf = io.BytesIO()
     wb.save(buf)
@@ -746,18 +753,20 @@ class TestBuildSutr:
         all_text = " ".join(str(v) for _, v, _ in marked_cells)
         assert "TC 없음" in all_text or "VectorCAST" in all_text
 
-    def test_history_auto_filled_by_git_log(self):
-        """T134: History 시트가 git log로 자동 채워지면 incomplete_sheets에서 빠짐."""
+    def test_history_release_single_row_55fix(self):
+        """55-fix W3 (55-fix-2 W3 갱신): History 시트는 release entry 1 row만.
+
+        T134 git log 10건 → 55-fix build_release_history_row 변경. audit reviewer
+        혼동 회피 (사용자 결정 B).
+        """
         session = _make_session()
         meta = SutrBuildMeta(release_sw_version="1.0.0", test_date="2024-02-19")
         result = build_sutr(session, meta, _build_sutr_template())
         d = result.to_dict()
-        # git log 성공 시 history_rows_written > 0, 실패 시 incomplete_sheets에 History 있음.
-        # CI 환경에서 git 없으면 후자, 일반 dev 환경은 전자.
-        assert (
-            d["summary"].get("history_rows_written", 0) > 0
-            or "History" in d["incomplete_sheets"]
-        )
+        # 55-fix-2 W3: 항상 history_rows_written == 1 (single-row 정책)
+        assert d["summary"].get("history_rows_written") == 1
+        # History 시트 incomplete가 아님 (single row 채움 성공)
+        assert "History" not in d["incomplete_sheets"]
 
     def test_vba_macros_flag_false_for_xlsx_template(self):
         """deep-reviewer W2: 일반 xlsx template (VBA 없음) → vba_macros_preserved=False."""

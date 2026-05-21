@@ -452,3 +452,67 @@ class TestAsilBCMarker31:
         result = mark_asil_c_function(ws, 5, 7)  # G5 → anchor E5
         assert result is True
         assert "FFE5CC" in str(ws.cell(5, 5).fill.fgColor.rgb).upper()
+
+
+# ---------------------------------------------------------------------------
+# 55-fix-2 W6 — build_release_history_row 빈 입력 warning 누적
+# ---------------------------------------------------------------------------
+
+
+class TestBuildReleaseHistoryRow55fix2:
+    """build_release_history_row helper 회귀 (55-fix + 55-fix-2)."""
+
+    def _meta(self, **kwargs):
+        """SimpleNamespace mock meta — release_sw_version / test_date / author."""
+        from types import SimpleNamespace
+        defaults = {
+            "release_sw_version": "1.0.0",
+            "test_date": "2024-02-19",
+            "author": "JK Kim",
+        }
+        defaults.update(kwargs)
+        return SimpleNamespace(**defaults)
+
+    def test_normal_release_row(self):
+        """정상 meta → 1 row + doc_kind description."""
+        from backend.services.excel_template_utils import build_release_history_row
+        rows = build_release_history_row(self._meta(), doc_kind="SwIT Coverage Report")
+        assert len(rows) == 1
+        assert rows[0]["version"] == "v1.0.0"
+        assert rows[0]["date"] == "24.02.19"
+        assert rows[0]["author"] == "JK Kim"
+        assert "SwIT Coverage Report" in rows[0]["description"]
+
+    def test_empty_release_version_accumulates_warning(self):
+        """55-fix-2 W6: release_sw_version 빈 시 warning 누적 + version cell 빈 string."""
+        from backend.services.excel_template_utils import build_release_history_row
+        warnings = []
+        rows = build_release_history_row(
+            self._meta(release_sw_version=""),
+            doc_kind="SwUT Coverage Report",
+            out_warnings=warnings,
+        )
+        assert rows[0]["version"] == ""
+        assert any("release_sw_version 빈" in w for w in warnings)
+
+    def test_empty_test_date_accumulates_warning(self):
+        """55-fix-2 W6: test_date 빈 시 warning 누적."""
+        from backend.services.excel_template_utils import build_release_history_row
+        warnings = []
+        rows = build_release_history_row(
+            self._meta(test_date=""),
+            doc_kind="SwUT SUTR",
+            out_warnings=warnings,
+        )
+        assert rows[0]["date"] == ""
+        assert any("test_date 빈" in w for w in warnings)
+
+    def test_out_warnings_none_no_error(self):
+        """out_warnings=None (default) — 빈 입력에도 raise 없음."""
+        from backend.services.excel_template_utils import build_release_history_row
+        rows = build_release_history_row(
+            self._meta(release_sw_version="", test_date=""),
+        )
+        assert len(rows) == 1
+        assert rows[0]["version"] == ""
+        assert rows[0]["date"] == ""

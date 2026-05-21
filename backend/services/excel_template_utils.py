@@ -246,6 +246,7 @@ _VBA_REF_PATTERNS = (
 
 def build_release_history_row(
     meta: Any, *, doc_kind: str = "",
+    out_warnings: list[str] | None = None,
 ) -> list[dict[str, str]]:
     """55-fix — 산출물별 release entry single row (사용자 결정 B).
 
@@ -254,9 +255,15 @@ def build_release_history_row(
     현재: 산출물의 release_sw_version + test_date + author 1 row만.
         reviewer/approver는 audit 입력으로 빈칸 둠.
 
+    55-fix-2 W6: release_sw_version 또는 test_date 빈 시 warning 누적 +
+        빈 cell silent fill 방지. router는 Pydantic으로 검증되지만 내부 호출
+        (회귀, PoC, dataclass default)에서 빈 값 위험 — audit 추적성 보호.
+
     Args:
         meta: BuildMetaBase 또는 sub class (release_sw_version, test_date, author 속성).
-        doc_kind: 옵션 — "Coverage Report" / "SUTR" / "SwIT Coverage" 등 description 보강.
+        doc_kind: 옵션 — "SwUT Coverage Report" / "SwUT SUTR" / "SwIT Coverage Report"
+            / "SwIT SITR" — description 식별 (W2 표준화).
+        out_warnings: 옵션 — warning 누적 list. 빈 입력 사유 추가 (W6).
 
     Returns:
         list[1 row dict]. _write_history_sheet에 전달.
@@ -264,6 +271,18 @@ def build_release_history_row(
     release = (getattr(meta, "release_sw_version", "") or "").strip()
     test_date = (getattr(meta, "test_date", "") or "").strip()
     author = getattr(meta, "author", "") or ""
+
+    # 55-fix-2 W6: 빈 입력 audit 추적성 — silent fill 차단.
+    if out_warnings is not None:
+        if not release:
+            out_warnings.append(
+                "History row release_sw_version 빈 string — meta.release_sw_version 누락 "
+                "(audit reviewer가 산출물에서 빈 version cell을 데이터 누락으로 오해 가능)"
+            )
+        if not test_date:
+            out_warnings.append(
+                "History row test_date 빈 string — meta.test_date 누락"
+            )
 
     # date format: yyyy-mm-dd → yy.mm.dd (collect_git_history와 동일)
     date_short = ""

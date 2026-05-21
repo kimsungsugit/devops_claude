@@ -437,3 +437,46 @@ class TestSwutBuilderV202InspectFix54:
         assert result.ok
         # v3.01 → fallback_to_v301=True, tc_stats_blocked_inferred 부재
         assert "tc_stats_blocked_inferred" not in result.summary
+
+
+class TestTcStatsDataRowGuard55fix2:
+    """55-fix-2 W4 — TC stats data row 비어있지 않을 때 silent overwrite 방어."""
+
+    def test_skip_when_data_row_already_has_value(self):
+        """data row에 이미 값이 있으면 fill skip + summary에 reason 누적."""
+        # v2.02 template + data row 18에 사용자 값 미리 채움 (회사 양식 변형 시뮬레이션)
+        import io
+        wb = openpyxl.Workbook()
+        wb.remove(wb.active)
+        cover = wb.create_sheet("Cover")
+        cover["B1"] = "Project"
+        cover["B2"] = "ASIL Level"
+        cover["B3"] = "Author"
+        cover["B4"] = "Approver"
+        ts = wb.create_sheet("1.Test Summary")
+        ts["B1"] = "Project Name"
+        ts["B2"] = "SW Version"
+        ts["B3"] = "HW Version"
+        ts["B4"] = "Test Date"
+        ts["B5"] = "Test Engineer"
+        ts["B6"] = "Final Test Result"
+        ts["A17"] = "Total TC"  # 라벨
+        ts["A18"] = "ALREADY_FILLED"  # data row에 이미 값 → 우리 코드 skip
+        wb.create_sheet("1.Traceability")
+        wb.create_sheet("2.Consistency")
+        cov = wb.create_sheet("3.Coverage")
+        cov["A6"] = "Unit ID"
+        wb.create_sheet("History").cell(1, 1, "■ Revision History")
+        buf = io.BytesIO()
+        wb.save(buf)
+        template = buf.getvalue()
+
+        result = build_swit_coverage_report(
+            _make_swit_session(), _make_swit_meta(), template,
+        )
+        assert result.ok
+        # 55-fix-2 W4: data row 이미 값 있으면 fill skip + reason 누적
+        assert "tc_stats_skipped_reason" in result.summary
+        assert "ALREADY_FILLED" in result.summary["tc_stats_skipped_reason"]
+        # blocked_inferred는 set 안 됨 (fill 자체 skip)
+        assert "tc_stats_blocked_inferred" not in result.summary

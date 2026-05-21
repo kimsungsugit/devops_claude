@@ -466,6 +466,7 @@ ISO 26262 ASIL B+ 통합 테스트 산출물 자동 생성. SwUT 30~32차 인프
 | 54-fix | deep-reviewer 발견 C1 SwUT layout inspect (silent 빈 셀 차단) + C2 ZIP bomb 방어 + W1 Lock + W2 swit alias 통일 + W3 maxsize 8 + W4 blocked_inferred 시각 안내 + AL marker None | ~2078 → ~2082 (+4: C1 v202 fill 2 + C2 zip_bomb 1 + corrupted_bytes 갱신) |
 | 55차 | frontend blocked_inferred UI 경고 panel (54-fix W4 cross-stack 완성) + swut_meta_resolver 5 함수 docstring 보강 (I2 plan vs 구현 divergence 명시) | backend 무변경 / frontend 263 → 267 (+4: SwIT 2 + SwUT 2 panel 렌더/미렌더) |
 | 55-fix | 사용자 라이브 산출물 검증 보고 fix — History 시트 single-row (사용자 결정 B, release_sw_version + test_date 1 row) + TC stats 'Total Number of TCs' candidate 추가 + label_row + 1 (data row) 보정 | 회귀 row 보정만 (439 SwUT/SwIT batch 통과) |
+| 55-fix-2 | deep-reviewer 발견 Warning 6건 통합 — W1 SwitLayout docstring + W2 doc_kind 표준화 (SwUT/SwIT prefix) + W3 stale 회귀 갱신 + W4 data row 검증 (silent overwrite 방어) + W5 Requirements row 가드 + W6 빈 입력 warning 누적 | 439 → 444 (+5: W4 1 + W6 4 + W3 갱신) |
 
 ### 48차 — 47차 자체 평가 발견 C5/C6/C7 + W43/W44/W45 통합 fix
 - 47차 commit `93f6828` 자체 비판 평가에서 발견한 Critical 3건 + Warning 3건 일괄 처리.

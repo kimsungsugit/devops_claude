@@ -226,11 +226,12 @@ def _write_test_summary_sheet(
                  meta.final_test_result, out_warnings)
 
     # 54차 T283: v2.02 양식 신규 row — TC stats / Requirements
-    _write_v202_extra_rows(ws, agg, layout, summary)
+    _write_v202_extra_rows(ws, agg, layout, summary, out_warnings)
 
 
 def _write_v202_extra_rows(
     ws, agg: dict[str, Any], layout: Any, summary: dict[str, Any] | None,
+    out_warnings: list[str] | None = None,
 ) -> None:
     """54차 T283 — v2.02 양식 신규 row fill (B17-F17 TC stats + B22 Requirements).
 
@@ -246,23 +247,43 @@ def _write_v202_extra_rows(
         tested = agg.get("tested", 0) or 0
         passed = agg.get("passed", 0) or 0
         failed = agg.get("failed", 0) or 0
-        # blocked는 모호 — 0 채움 + summary inferred 표시
-        safe_write(ws, row, col, total)
-        safe_write(ws, row, col + 1, tested)
-        safe_write(ws, row, col + 2, passed)
-        safe_write(ws, row, col + 3, failed)
-        safe_write(ws, row, col + 4, 0)
-        # 54-fix W4: blocked=0이 inferred임을 audit reviewer가 산출물에서 인지하도록
-        # col+5에 노란 강조 안내 텍스트. summary에도 inferred=True (frontend 노출).
-        mark_user_input_required(
-            ws, row, col + 5,
-            hint="Blocked TC 수 inferred=0 — VectorCAST blocked 데이터 미지원, 명시적 입력 필요",
-        )
-        if summary is not None:
-            summary["tc_stats_blocked_inferred"] = True
+
+        # 55-fix-2 W4: data row 비어있음 검증 — 회사 양식 변형 시 silent overwrite 방어.
+        # row가 이미 데이터/라벨 갖고 있으면 다른 섹션이라 판단, fill skip + warning.
+        existing = ws.cell(row, col).value
+        if existing is not None and existing != "":
+            msg = (
+                f"TC stats data row (row={row}, col={col}) already has value "
+                f"{existing!r} — 회사 양식 변형 가능성, fill skip (audit reviewer 확인 권장)"
+            )
+            if out_warnings is not None:
+                out_warnings.append(msg)
+            if summary is not None:
+                summary["tc_stats_skipped_reason"] = msg
+        else:
+            # blocked는 모호 — 0 채움 + summary inferred 표시
+            safe_write(ws, row, col, total)
+            safe_write(ws, row, col + 1, tested)
+            safe_write(ws, row, col + 2, passed)
+            safe_write(ws, row, col + 3, failed)
+            safe_write(ws, row, col + 4, 0)
+            # 54-fix W4: blocked=0이 inferred임을 audit reviewer가 산출물에서 인지하도록
+            # col+5에 노란 강조 안내 텍스트. summary에도 inferred=True (frontend 노출).
+            mark_user_input_required(
+                ws, row, col + 5,
+                hint="Blocked TC 수 inferred=0 — VectorCAST blocked 데이터 미지원, 명시적 입력 필요",
+            )
+            if summary is not None:
+                summary["tc_stats_blocked_inferred"] = True
     # B22 Requirements/Design Coverage row (v2.02)
+    # 55-fix-2 W5: row 20 (헤더 row) 매칭 시 가드 — '■' 또는 'Requirements' 로 시작하는
+    # 라벨이 이미 있으면 헤더 row라 판단, fill skip (audit 추적성 보호).
     if layout.requirements_row is not None:
-        safe_write(ws, layout.requirements_row, 2, "SwITS")
+        row = layout.requirements_row
+        existing = ws.cell(row, 2).value
+        # B22 빈 또는 'SwITS'면 fill OK. 다른 값 (■ 헤더 등)이면 skip
+        if existing is None or existing == "" or existing == "SwITS":
+            safe_write(ws, row, 2, "SwITS")
 
 
 def _compute_asil_distribution(
@@ -850,7 +871,11 @@ def build_coverage_report(
     # 이전 git log 10건 → 산출물 release_sw_version + test_date 1 row만.
     hist_ws = next((wb[n] for n in sheet_names if n.lower() == "history"), None)
     if hist_ws is not None:
-        release_rows = build_release_history_row(meta, doc_kind="Coverage Report")
+        # 55-fix-2 W2: SwUT prefix 명시 — audit reviewer가 산출물 식별 가능 (vs SwIT)
+        # 55-fix-2 W6: out_warnings 전달 — release_sw_version/test_date 빈 시 누적
+        release_rows = build_release_history_row(
+            meta, doc_kind="SwUT Coverage Report", out_warnings=warnings,
+        )
         n_h = _write_history_sheet(hist_ws, release_rows, out_warnings=warnings)
         summary["history_rows_written"] = n_h
         if n_h == 0:

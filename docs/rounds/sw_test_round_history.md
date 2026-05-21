@@ -347,3 +347,61 @@
 - Consistency 시트 회사 v2.02 양식 3컬럼 구조 (`Item / Actual / Note`) 대응 (현재 우리 코드 5컬럼 가정 — 일부 row만 fill)
 - 4.Coverage 시트 회사 formula `=IF(H11=I11, "O", "X")`와 우리 데이터 fill 충돌 정리
 - 사용자 추가 라이브 검증 결과 따른 candidate 확장
+
+## 55-fix-2 — 55-fix 자체 평가 발견 Warning 통합 (deep-reviewer W1~W6)
+
+55-fix commit `4923405` 후 opus deep-reviewer 비판 검토 결과: **Critical 0 / Warning 6 / Info 3**. 사용자 결정: All Warning (W1~W6). Info 3건 (collect_git_history deprecation / __all__ / doc_kind Literal)은 별도 라운드.
+
+### T307 W1 — SwitLayout dataclass docstring 갱신
+- `tc_stats_row` / `tc_stats_col_start` 의미 변경 (label_row → data row + label_col → label_col) docstring에 명시
+- Requirements row 가드 주석 (`'■  ' prefix` 후보 추가 금지 사유) 명시
+- field rename `tc_stats_data_row`는 영향 크다 별도 라운드 검토 (semantic clarity는 docstring으로 충분)
+
+### T308 W2 — doc_kind 표준화 (SwUT prefix 명시)
+- 4 aggregator 호출 비대칭 해소:
+  - swut_coverage: `"Coverage Report"` → `"SwUT Coverage Report"`
+  - swut_sutr: `"SUTR"` → `"SwUT SUTR"`
+  - swit_coverage: `"SwIT Coverage"` → `"SwIT Coverage Report"`
+  - swit_sitr: `"SwIT SITR"` 유지
+- audit reviewer가 산출물 History description 셀에서 SwUT/SwIT 식별 명확
+
+### T309 W3 — `test_history_auto_filled_by_git_log` stale 회귀 갱신
+- 이전 OR 조건 (`history_rows_written > 0 OR "History" in incomplete_sheets`) → false negative 위험
+- 신규 회귀명 `test_history_release_single_row_55fix`: `history_rows_written == 1` 명시 검증 + History incomplete 아님 검증
+- fixture에 'Version' / 'Date' / 'Description' / 'Author' / 'Reviewer' / 'Approver' 헤더 row 추가 (B2~G2) — `_write_history_sheet`이 'Version' 라벨로 헤더 위치 찾음
+
+### T310 W4 — TC stats data row 비어있음 검증 (silent overwrite 방어)
+- `_write_v202_extra_rows` (swut_coverage) + `_write_test_summary` (swut_sutr) inline 코드 두 곳:
+  - data row에 이미 값이 있으면 fill skip + `summary["tc_stats_skipped_reason"]` 누적 + `out_warnings` 추가
+  - 회사 양식 변형 (data row가 row 18 외 위치) 시 다른 섹션 헤더/데이터 덮어쓰기 방어
+- 회귀: `TestTcStatsDataRowGuard55fix2::test_skip_when_data_row_already_has_value` 1건
+
+### T311 W5 — Requirements row 가드 (invariant 보호)
+- `_write_v202_extra_rows` + SUTR `_write_test_summary`: row 22 B 셀이 빈 또는 'SwITS'면 fill, 다른 값 ('■' 헤더 등)이면 skip
+- 누군가 candidate에 `'■  Requirements/Design Coverage'` 추가하더라도 헤더 row 20 덮어쓰기 차단
+
+### T312 W6 — `build_release_history_row` 빈 입력 warning 누적
+- `out_warnings: list[str] | None = None` 인자 추가
+- release_sw_version 빈 시: "History row release_sw_version 빈 string — meta.release_sw_version 누락 (audit reviewer가 산출물에서 빈 version cell을 데이터 누락으로 오해 가능)"
+- test_date 빈 시: 동일 패턴
+- 4 aggregator 호출에 `out_warnings=warnings` 전달 → X-SwUT-Warnings / X-SwIT-Warnings 헤더로 frontend 노출
+- 회귀 +4건 (`TestBuildReleaseHistoryRow55fix2`): normal / empty release / empty test_date / out_warnings=None 안전
+
+### 회귀
+- backend SwUT/SwIT batch **444 통과** (55-fix 439 → +5: W4 1 + W6 4 + W3 회귀 갱신)
+- 신규 회귀 5건 + 기존 회귀 row 보정 1건
+- pre-commit hook 180s 한도 내 (변경 영역 narrow batch 27s)
+
+### ISO 26262 audit evidence 영향
+- W4: data row 검증으로 회사 양식 변형 시 silent overwrite 차단 → audit 추적성 강화
+- W5: Requirements row 가드로 미래 candidate 추가 회귀 방어
+- W6: 빈 입력 warning으로 audit reviewer가 빈 cell을 "데이터 누락"으로 오해 차단
+- W2: doc_kind 표준화로 audit description 식별성 향상
+- evidence_class "auto-generated draft" 정책 무변경
+
+### 비-목표 (56차+ Info)
+- I1 `collect_git_history` deprecation warning 또는 제거 (현재 dead code, 본 repo 호출처 0건)
+- I2 `__all__` 명시 (ad-hoc public export 정리)
+- I3 `doc_kind` Literal 타입 강제 (typo 차단)
+- `tc_stats_data_row` field rename (semantic clarity, 영향 큰 변경)
+- 사용자 추가 라이브 검증 후속

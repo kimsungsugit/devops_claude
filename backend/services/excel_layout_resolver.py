@@ -68,9 +68,16 @@ class SwitLayout:
         cover_labels: {"project_full_name": "Project", "asil_level": "ASIL Level", ...}.
             값은 template에서 실제 매칭된 label text — writer 함수가 이 라벨로 find_kv_row.
         test_summary_labels: 동일 패턴. v2.02면 "SW Version", v3.01이면 "Release Name(SW)".
-        tc_stats_row: v2.02 양식의 TC 통계 row index (1-based). None이면 v3.01 (해당 row 없음).
-        tc_stats_col_start: TC stats row의 첫 값 셀 col. None이면 자동 (label_col + 1) 사용.
+        tc_stats_row: **55-fix 이후 의미 = data row** (label_row + 1). 회사 v2.02 SITR
+            양식은 라벨이 row 17 가로 배치 (B17~F17), 데이터는 row 18에 위치. writer가
+            본 row에 직접 fill. None이면 v3.01 (해당 row 없음). 이전 (55-fix 이전)
+            의미는 "label row"였음 — semantic breaking change. 55-fix-2 W1 docstring 갱신.
+        tc_stats_col_start: TC stats row의 첫 데이터 셀 col. **55-fix 이후 = label_col**
+            (가로 배치라 라벨 col부터 데이터 시작). 이전 = label_col + 1.
         requirements_row: v2.02의 Requirements/Design Coverage row index. None이면 v3.01.
+            **주의**: 회사 v2.02 SITR 양식은 row 22에 default 'SwITS' 채워져 있어
+            우리 코드가 추가 fill 필요 없음. `'■  Requirements/Design Coverage'` 후보
+            추가 시 row 20 (헤더) 매칭되어 덮어쓰기 위험 — 추가 금지 (W5).
         deviation_header_cell: SITR Deviation 시트 헤더 위치 (참고용, 현재 미사용).
         test_log_header_cell: SITR Test Log 시트 헤더 위치 (참고용).
         test_log_extra_marker_col: v2.02의 추가 marker col (예: AL col). None이면 미적용.
