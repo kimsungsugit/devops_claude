@@ -210,10 +210,10 @@ def _build_result_to_response(
         .replace('"', "_")
     )
 
-    pos = content_io.tell()
-    content_io.seek(0, 2)
-    size = content_io.tell()
-    content_io.seek(pos)
+    # 56차 T312: BytesIO 전체 bytes 추출 (StreamingResponse + Content-Length 명시
+    # 조합이 T307 ASGI 리팩토링 후 h11 LocalProtocolError 발생 → Response 전환).
+    content_io.seek(0)
+    body_bytes = content_io.read()
 
     _summary_str = json.dumps(summary, ensure_ascii=True)
     if len(_summary_str) > 1024:
@@ -245,15 +245,15 @@ def _build_result_to_response(
             f'attachment; filename="{ascii_filename}"; '
             f"filename*=UTF-8''{quote(filename)}"
         ),
-        "Content-Length": str(size),
+        # Content-Length는 Response가 body_bytes로 자동 계산 (h11 일치 보장)
         "X-SwIT-Summary": _summary_str,
         "X-SwIT-Warnings": _warnings_str,
         "X-SwIT-Incomplete-Sheets": ",".join(incomplete_sheets).encode(
             "ascii", errors="replace",
         ).decode("ascii")[:512],
     }
-    return StreamingResponse(
-        _iter_bytesio(content_io),
+    return Response(
+        content=body_bytes,
         media_type=media_type,
         headers=headers,
     )

@@ -178,13 +178,16 @@ def _build_result_to_response(
     warnings: list[str], incomplete_sheets: list[str],
     media_type: str,
 ) -> Response:
-    """xlsx/xlsm BytesIO를 attachment StreamingResponse로 변환 (14차 W1).
+    """xlsx/xlsm BytesIO를 attachment Response로 변환.
 
     summary / warnings / incomplete_sheets는 X-* 헤더로 노출. HTTP 헤더는 latin-1만
     허용하므로 한글 등 비-ASCII는 ``ensure_ascii=True`` 로 ``\\uXXXX`` escape 후 송신.
     Frontend는 ``JSON.parse`` 로 decode 가능. filename도 RFC 5987 ``filename*=UTF-8`` 사용.
 
-    StreamingResponse는 ``Content-Length`` 를 자동 설정하지 않으므로 헤더에 명시.
+    56차 T312: StreamingResponse + 명시 Content-Length 조합이 T307 ASGI 리팩토링 후
+    h11 LocalProtocolError("Too little data for declared Content-Length") 발생 → 단순
+    Response(bytes 직접)로 변경. h11이 Content-Length 자동 계산 + 100% 일치 보장.
+    14차 W1 메모리 절감 일부 반납 (worst ~5.4MB → 7.2MB) 대신 안정성 확보.
     """
     from urllib.parse import quote
 
@@ -194,11 +197,10 @@ def _build_result_to_response(
         .replace('"', "_")
     )
 
-    # 14차 W1: BytesIO 크기 측정 (full copy 회피).
-    pos = content_io.tell()
-    content_io.seek(0, 2)
-    size = content_io.tell()
-    content_io.seek(pos)
+    # 56차 T312: BytesIO 전체 bytes 추출 — Content-Length 명시 + chunk yield 조합이
+    # h11 LocalProtocolError 발생. Response가 bytes content로 받으면 자동 일치.
+    content_io.seek(0)
+    body_bytes = content_io.read()
 
     # 30차 W21 deep-reviewer fix: truncate 시 frontend JSON.parse 실패 방지.
     # asil_d_function_ids 같은 list가 1024B 초과 시 string 중간 잘림 → invalid JSON.
@@ -234,15 +236,15 @@ def _build_result_to_response(
             f'attachment; filename="{ascii_filename}"; '
             f"filename*=UTF-8''{quote(filename)}"
         ),
-        "Content-Length": str(size),
+        # Content-Length는 Response가 body_bytes로 자동 계산 (h11 일치 보장)
         "X-SwUT-Summary": _summary_str,
         "X-SwUT-Warnings": _warnings_str,
         "X-SwUT-Incomplete-Sheets": ",".join(incomplete_sheets).encode(
             "ascii", errors="replace",
         ).decode("ascii")[:512],
     }
-    return StreamingResponse(
-        _iter_bytesio(content_io),
+    return Response(
+        content=body_bytes,
         media_type=media_type,
         headers=headers,
     )

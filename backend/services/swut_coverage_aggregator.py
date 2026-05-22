@@ -190,6 +190,10 @@ def _write_cover_sheet(
     if meta.doc_id_sequence:
         _write_label(ws, labels.get("doc_id", "Doc. ID"),
                      f"{meta.doc_id_base}-{meta.doc_id_sequence}", out_warnings)
+    # 56차 T313: Version fill 추가 — SUTR `_write_cover`와 대칭 (이전 SUTR만 v2.02
+    # G27 'Version'에 'v2.02' 기록, Coverage는 누락되어 template default 'v0.10' 유지)
+    _write_label(ws, labels.get("version", "Version"),
+                 f"v{meta.release_sw_version}", out_warnings)
     _write_label(ws, labels.get("build_timestamp", "Build Timestamp"),
                  meta.build_timestamp, out_warnings)
 
