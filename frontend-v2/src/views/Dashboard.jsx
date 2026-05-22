@@ -94,6 +94,7 @@ export default function Dashboard({ onGoDetail }) {
   const [aggStats, setAggStats] = useState(null);
   const [aggLoading, setAggLoading] = useState(false);
   const [filter, setFilter] = useState('');
+  const filterInputName = useRef(`job-filter-${Math.random().toString(36).slice(2, 10)}`).current;
   const [favorites, setFavorites] = useState(() => {
     try { return JSON.parse(localStorage.getItem('devops_fav_jobs') || '[]'); } catch { return []; }
   });
@@ -490,8 +491,9 @@ export default function Dashboard({ onGoDetail }) {
       <div className="toolbar">
         <span className="toolbar-title">Jenkins 프로젝트</span>
         <input
-          type="search"
-          name="job-filter-search"
+          type="text"
+          name={filterInputName}
+          id={filterInputName}
           placeholder="Job 이름 필터..."
           value={filter}
           onChange={e => setFilter(e.target.value)}
@@ -502,7 +504,7 @@ export default function Dashboard({ onGoDetail }) {
           data-form-type="other"
           data-lpignore="true"
           data-1p-ignore="true"
-          role="searchbox"
+          aria-label="Job 이름 필터"
           style={{ width: 200 }}
         />
         {favorites.length > 0 && (
