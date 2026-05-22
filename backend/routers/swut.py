@@ -43,6 +43,7 @@ from backend.schemas import (
     SwUTConsistencyCheckRequest,
 )
 from backend.services.file_resolver import get_resolver
+from backend.services.path_mode_check import check_log_folder_mode_compat
 from backend.services.swut_consistency_checker import check_swut_consistency
 from backend.services.swut_coverage_aggregator import (
     CoverageBuildMeta,
@@ -282,6 +283,8 @@ def _apply_function_asil_map(req: SwUTBuildRequest, session) -> None:
 
 def _do_coverage_build(req: SwUTBuildRequest) -> Response:
     resolver = get_resolver()
+    # 56차 T308 — log_folder UNC + Local 모드 pre-flight check
+    check_log_folder_mode_compat(req.log_folder, resolver)
     session = collect_swut_session(
         resolver, req.project_id,
         jenkins_build_number=req.jenkins_build_number,
@@ -312,6 +315,8 @@ def _do_coverage_build(req: SwUTBuildRequest) -> Response:
 
 def _do_sutr_build(req: SwUTBuildRequest) -> Response:
     resolver = get_resolver()
+    # 56차 T308 — log_folder UNC + Local 모드 pre-flight check
+    check_log_folder_mode_compat(req.log_folder, resolver)
     session = collect_swut_session(
         resolver, req.project_id,
         jenkins_build_number=req.jenkins_build_number,

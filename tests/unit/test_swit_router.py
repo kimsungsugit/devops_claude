@@ -613,3 +613,58 @@ class TestSheetNameSubstring53fix:
                     or f"'{keyword}' in n.lower()" in src), (
                 f"swit_sitr_aggregator가 '{keyword}' substring 매칭 안 함 — 53차 fix 누락"
             )
+
+
+class TestPathModeMismatch56:
+    """56차 T308 — log_folder UNC + Local 모드 → 400 + PATH_MODE_MISMATCH."""
+
+    def test_swit_coverage_unc_local_mode_returns_400(self):
+        """Local 모드에서 log_folder=U:/... → 400 + suggested_mode=cloudium.
+
+        error_handler가 dict detail의 code/message를 top-level로 분해 + 나머지는
+        detail dict에 유지. 그래서 body['code']=PATH_MODE_MISMATCH, body['message']에
+        안내 메시지, body['detail']['suggested_mode']=cloudium 구조.
+        """
+        from backend.services.file_resolver import LocalFileResolver, set_resolver
+        set_resolver(LocalFileResolver())
+        try:
+            r = client.post(
+                "/api/swit/coverage/build",
+                json={
+                    "project_id": "HDPDM01",
+                    "release_sw_version": "2.02",
+                    "test_date": "2024-02-19",
+                    "log_folder": "U:/연구소/test/v2.02",  # mapped network drive
+                },
+                headers={"X-User": "tester"},
+            )
+            assert r.status_code == 400, f"expected 400 got {r.status_code}: {r.text[:200]}"
+            body = r.json()
+            # error_response shape: {ok: false, error: {code, message, detail}}
+            err = body.get("error", {})
+            assert err.get("code") == "PATH_MODE_MISMATCH", f"body={body}"
+            assert "Cloudium" in err.get("message", ""), f"body={body}"
+            extra = err.get("detail", {})
+            if isinstance(extra, dict):
+                assert extra.get("suggested_mode") == "cloudium"
+        finally:
+            set_resolver(LocalFileResolver())
+
+    def test_swit_sitr_unc_local_mode_returns_400(self):
+        """SITR endpoint도 동일 — Local + UNC → 400."""
+        from backend.services.file_resolver import LocalFileResolver, set_resolver
+        set_resolver(LocalFileResolver())
+        try:
+            r = client.post(
+                "/api/swit/sitr/build",
+                json={
+                    "project_id": "HDPDM01",
+                    "release_sw_version": "2.02",
+                    "test_date": "2024-02-19",
+                    "log_folder": r"\\corp\share\test",  # UNC
+                },
+                headers={"X-User": "tester"},
+            )
+            assert r.status_code == 400, f"expected 400 got {r.status_code}: {r.text[:200]}"
+        finally:
+            set_resolver(LocalFileResolver())

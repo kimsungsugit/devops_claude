@@ -448,3 +448,93 @@
 - I5 Requirements row skip warning — 55-fix-3 W10 helper 통합 시 이미 동일 패턴으로 처리됨 (완료)
 - I6 doc_kind context — 55-fix-3 W9에서 동시 처리됨 (완료)
 - I1/I2/I3 (55-fix-2에서 deferred) 유지
+
+## 56차 — 사용자 라이브 환경 backend 에러 2건 + Coverage 시트 fill 누락 통합 fix
+
+사용자 라이브 환경에서 `/api/swit/coverage/build` 호출 후 산출물 검증 중 3가지 결함 보고. 사용자 결정 모두 Recommended.
+
+### T306 — Coverage Report v2.02 fill 누락 fix (시트 14 cell silent skip 차단)
+
+**증상**: 사용자가 backend로 생성한 `(HDPDM01)SwIT Coverage Report_v2.02_260514_R (1).xlsx`의 `1.Test Summary` 시트에서 B17:F17 TC stats 헤더 + B18:F18 데이터 + B20~B22 Requirements section 14개 cell 완전히 빈 상태. 동일 양식 SITR 산출물은 정상 채움.
+
+**원인**: 회사 Coverage Report v2.02 양식이 row 17 (TC stats) + row 20 (Requirements)을 **사용자 수동 입력 영역**으로 두어 template에 label 부재. SITR은 label 존재. `excel_layout_resolver._scan_tc_stats_row`가 label 매칭으로만 row 찾음 → Coverage는 None 반환 → `swut_coverage_aggregator._write_v202_extra_rows`가 `layout.tc_stats_row is None`에서 silent skip.
+
+**수정**:
+- `backend/services/excel_layout_resolver.py`:
+  - `SwitLayout` dataclass에 `tc_stats_label_missing: bool = False`, `requirements_label_missing: bool = False` 필드 추가
+  - `_inspect_internal`에 v2.02 detect + label 미발견 + 해당 cell 빈 경우 fallback path 추가 — `tc_stats_row=18`, `tc_stats_col_start=2`, `tc_stats_label_missing=True` 설정 (Requirements도 동일 `requirements_row=20`)
+- `backend/services/swut_coverage_aggregator.py`:
+  - `_write_v202_tc_stats_row`: `layout.tc_stats_label_missing` 검사 후 label_row에 5개 라벨 stamp (Total Number of TCs / Tested / Passed / Failed / not executed)
+  - `_write_v202_requirements_row`: row 20 헤더 `■  Requirements/Design Coverage`, row 21 `Source`, row 22 `SwITS` stamp
+  - 라벨 cell이 비어있을 때만 stamp — 회사 양식 mixed case (일부 라벨 있는 경우) 방어
+  - `summary["tc_stats_fallback_used"] = True` + `summary["requirements_fallback_used"] = True` 표시
+- 회귀 +5 (resolver +3, aggregator +2)
+
+### T307 — CloudiumGateMiddleware ASGI 리팩토링 (starlette known issue #1438 차단)
+
+**증상**: backend log 매 빌드마다 ~150줄 traceback `RuntimeError: Unexpected message received: http.request`. 응답 자체는 200 OK 정상이지만 cleanup phase에서 unhandled exception.
+
+**원인**: `CloudiumGateMiddleware`가 `BaseHTTPMiddleware` 상속 + `await request.body()` 후 `request._receive = _receive` 재정의. 다중 BaseHTTPMiddleware 스택 + StreamingResponse chunk yield와 충돌.
+
+**수정** `backend/middleware.py`:
+- `class CloudiumGateMiddleware(BaseHTTPMiddleware)` → `class CloudiumGateMiddleware` (순수 ASGI middleware)
+- `async def dispatch(self, request, call_next)` → `async def __call__(self, scope, receive, send)`
+- `__init__(self, app)` 추가
+- `request._receive` 재정의 패턴 완전 제거 → `replay_receive` closure로 message list 캐싱 후 다운스트림 전달
+- Query string은 `parse_qsl(scope["query_string"].decode())` 직접 파싱
+- urlencoded는 `parse_qsl(body.decode())` (starlette 의존 X)
+- multipart는 starlette Request `_cached_receive` closure로 wrapping (PermissionError 외부 raise)
+- `_send_cloudium_blocked(send, message, path)` ASGI helper 추가 — JSONResponse를 send callable로 송신
+- `app.add_middleware(CloudiumGateMiddleware)` 호출 그대로 유지
+
+**회귀 +2**:
+- `test_asgi_middleware_replay_allows_endpoint_to_read_body`
+- `test_asgi_middleware_no_unexpected_message_error_on_streaming_response`
+
+**기존 회귀 116건 영향 0** — TestClient 기반이라 BaseHTTPMiddleware API 의존 X.
+
+### T308 — log_folder Pre-flight UNC check (UX 진단)
+
+**증상**: 사용자가 Settings에서 cloudium 모드 전환 잊고 log_folder=U:/... 입력 빌드 시도 → `PermissionError [WinError 5]` → 403. 모드 진단 부재.
+
+**수정** 신규 `backend/services/path_mode_check.py` (~85 lines):
+- `is_network_path(path)`: UNC prefix `\\\\` + 회사 mapped letters U/V/W/X/Y/Z
+- `check_log_folder_mode_compat(log_folder, resolver)`:
+  - 빈 string 통과
+  - Cloudium 모드 통과
+  - Local 모드 + UNC → `HTTPException 400` + `code=PATH_MODE_MISMATCH` + `suggested_mode=cloudium`
+
+**4 endpoint 적용** (swit/swut router):
+- `_do_swit_coverage_build` / `_do_swit_sitr_build` / `_do_coverage_build` / `_do_sutr_build` 각 1줄 추가:
+  `check_log_folder_mode_compat(req.log_folder, resolver)`
+
+**회귀 +13**: `test_path_mode_check.py` 9건 + router test 4건 (Coverage + SITR + SUTR + Coverage)
+
+### 회귀 카운트 변화
+
+이전 (55-fix-3): backend ~2082
+56차: backend **2139** (+57) — T306 +5 + T307 +2 + T308 +13 + 기존 회귀 갱신
+
+### 라이브 검증 (T311)
+
+`.codex_tmp/round_56_local_build/build_all_4_artifacts.py` 재실행으로:
+- SwIT Coverage 산출물 B17:F17 라벨 stamp + B18:F18 데이터 fill
+- B20~B22 Requirements 헤더+라벨+SwITS stamp
+- summary fallback_used flag True
+- 라이브 빌드 시 backend log에 "Unexpected message received" 0건 (T307 효과)
+- UNC + Local 모드 시 400 + PATH_MODE_MISMATCH 응답 (T308)
+
+### ISO 26262 audit evidence 영향
+
+- T306: Coverage 산출물 데이터 누락 차단 — silent failure 해소. evidence_class "auto-generated draft" 유지. `tc_stats_fallback_used` flag로 audit reviewer 사전 통보
+- T307: backend stability + log 오염 차단. audit 추적성 영향 없음
+- T308: ASIL B+ 산출물 입력 단계 진단 강화
+
+### 비-목표 (57차+ Info)
+
+- I7 frontend mode mismatch UI (T308 응답 받아 mode 전환 버튼 강조)
+- I8 multipart form path 검사 starlette 직접 의존 → python-multipart raw parser
+- I9 회사 환경 mapped letter U-Z 외 확장 case
+- SwitLayout → ExcelTemplateLayout rename (55차+ deferred)
+- `tc_stats_data_row` field rename (semantic clarity)
+- `collect_git_history` deprecation

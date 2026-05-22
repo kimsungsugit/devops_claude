@@ -169,6 +169,73 @@ class TestV301Fallback:
         # v3.01 라벨이 검출돼야 함
         assert layout.test_summary_labels.get("release_sw_version") == "Release Name(SW)"
 
+    def test_v301_does_not_trigger_v202_fallback(self):
+        """56차 T306 회귀 — v3.01 양식은 v2.02 label-missing fallback 미발동.
+
+        SwUT v3.01 Coverage는 TC stats row 자체가 없는 양식 → fallback path가
+        잘못 발동되면 v3.01 회귀 깨짐. detected_version='v3.01'이면 fallback skip 보장.
+        """
+        layout = elr.inspect_swit_layout(_v301_coverage_template(), "coverage")
+        assert layout.tc_stats_label_missing is False
+        assert layout.requirements_label_missing is False
+        assert layout.tc_stats_row is None
+        assert layout.requirements_row is None
+
+
+class TestV202CoverageLabelMissingFallback:
+    """56차 T306 — 회사 Coverage Report v2.02 양식은 row 17 (TC stats) + row 20
+    (Requirements) 이 사용자 수동 입력 영역으로 비어있음. label 매칭 실패 시 default
+    position fallback + writer가 라벨 stamp.
+    """
+
+    def _v202_coverage_label_missing_template(self) -> bytes:
+        """SW Version / HW Version 라벨은 있어 v2.02 detect되지만 TC stats +
+        Requirements row label은 부재한 회사 Coverage v2.02 양식 mimicry."""
+        return _make_xlsx({
+            "Cover": [["Project", ""]],
+            "1.Test Summary": [
+                ["", ""],
+                ["Project Name", ""],
+                ["SW Version", ""],
+                ["HW Version", ""],
+                ["Test Date", ""],
+                ["Test Engineer", ""],
+                ["Final Test Result", ""],
+                # row 8~16 빈 row
+                [""], [""], [""], [""], [""], [""], [""], [""], [""],
+                # row 17 — 라벨 부재 (회사 양식 사용자 수동 입력 영역)
+                [""],
+                [""],  # row 18
+                [""], [""],  # row 19, 20 — Requirements row도 라벨 부재
+            ],
+            "History": [["Version"]],
+        })
+
+    def test_v202_coverage_label_missing_triggers_fallback(self):
+        """row 17 B열 빈 cell → tc_stats_label_missing=True + default position 사용."""
+        layout = elr.inspect_swit_layout(
+            self._v202_coverage_label_missing_template(), "coverage",
+        )
+        assert layout.detected_version == "v2.02"
+        # fallback 적용 — data row=18, col=B(=2), label_missing=True
+        assert layout.tc_stats_row == 18
+        assert layout.tc_stats_col_start == 2
+        assert layout.tc_stats_label_missing is True
+        # Requirements도 동일 fallback (row 20 빈 cell)
+        assert layout.requirements_row == 20
+        assert layout.requirements_label_missing is True
+        # warnings에 fallback 명시
+        assert any("TC stats row label 미발견" in w and "fallback" in w for w in layout.warnings)
+        assert any("Requirements row label 미발견" in w and "fallback" in w for w in layout.warnings)
+
+    def test_v202_sitr_with_labels_no_fallback(self):
+        """SITR 양식은 label 있어 fallback 미발동 (회귀 유지)."""
+        # _v202_coverage_template에 TC stats 'Total TC' + Requirements 라벨 있음
+        layout = elr.inspect_swit_layout(_v202_coverage_template(), "coverage")
+        assert layout.detected_version == "v2.02"
+        assert layout.tc_stats_label_missing is False
+        assert layout.requirements_label_missing is False
+
 
 class TestCaching:
     def test_lru_cache_sha256_keying(self, monkeypatch):

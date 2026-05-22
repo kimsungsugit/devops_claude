@@ -439,6 +439,65 @@ class TestSwutBuilderV202InspectFix54:
         assert "tc_stats_blocked_inferred" not in result.summary
 
 
+class TestV202CoverageLabelMissingFallback56:
+    """56차 T306 — 회사 Coverage Report v2.02는 row 17 (TC stats) + row 20
+    (Requirements) 라벨이 부재한 사용자 수동 입력 영역. 빈 row 감지 → builder가
+    라벨+데이터 모두 stamp. SITR과 audit 완성도 대칭.
+    """
+
+    def _v202_label_missing_template(self) -> bytes:
+        """SW Version/HW Version 라벨은 있지만 TC stats + Requirements row 라벨 부재."""
+        import io
+        wb = openpyxl.Workbook()
+        wb.remove(wb.active)
+        cover = wb.create_sheet("Cover")
+        cover["B1"] = "Project"
+        cover["B2"] = "ASIL Level"
+        cover["B3"] = "Author"
+        cover["B4"] = "Approver"
+        ts = wb.create_sheet("1.Test Summary")
+        ts["B1"] = "Project Name"
+        ts["B2"] = "SW Version"
+        ts["B3"] = "HW Version"
+        ts["B4"] = "Test Date"
+        ts["B5"] = "Test Engineer"
+        ts["B6"] = "Final Test Result"
+        # row 17 (TC stats) + row 20~22 (Requirements) 모두 빈 row — 라벨 부재
+        wb.create_sheet("1.Traceability")
+        wb.create_sheet("2.Consistency")
+        cov = wb.create_sheet("3.Coverage")
+        cov["A6"] = "Unit ID"
+        wb.create_sheet("History").cell(1, 1, "■ Revision History")
+        buf = io.BytesIO()
+        wb.save(buf)
+        return buf.getvalue()
+
+    def test_builder_stamps_labels_when_template_has_empty_row_17(self):
+        """row 17 빈 cell → builder가 label 5개 stamp + data 5개 fill + summary flag."""
+        template = self._v202_label_missing_template()
+        result = build_swit_coverage_report(
+            _make_swit_session(), _make_swit_meta(), template,
+        )
+        assert result.ok
+        # summary에 fallback_used flag set
+        assert result.summary.get("tc_stats_fallback_used") is True
+        assert result.summary.get("requirements_fallback_used") is True
+        # 산출물 검증 — row 17에 라벨 5개 stamp
+        wb = openpyxl.load_workbook(io.BytesIO(result.xlsx_bytes))
+        ts = wb["1.Test Summary"]
+        assert ts.cell(17, 2).value == "Total Number of TCs"
+        assert ts.cell(17, 3).value == "Number of TCs Tested"
+        assert ts.cell(17, 4).value == "Number of TCs Passed"
+        assert ts.cell(17, 5).value == "Number of TCs Failed"
+        assert ts.cell(17, 6).value == "Number of TCs not executed"
+        # row 18에 데이터 fill (session: TC 5건)
+        assert ts.cell(18, 2).value is not None  # total
+        # Requirements row 20~22 fill
+        assert ts.cell(20, 2).value == "■  Requirements/Design Coverage"
+        assert ts.cell(21, 2).value == "Source"
+        assert ts.cell(22, 2).value == "SwITS"
+
+
 class TestTcStatsDataRowGuard55fix2:
     """55-fix-2 W4 — TC stats data row 비어있지 않을 때 silent overwrite 방어."""
 

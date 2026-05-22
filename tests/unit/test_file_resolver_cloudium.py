@@ -1456,3 +1456,67 @@ def test_reject_upload_in_cloudium_response_shape_matches_middleware(monkeypatch
         assert "Cloudium" in body["detail"]
     finally:
         set_resolver(LocalFileResolver())
+
+
+# ---------------------------------------------------------------------------
+# 56차 T307 — CloudiumGateMiddleware ASGI 리팩토링 회귀
+# ---------------------------------------------------------------------------
+def test_asgi_middleware_replay_allows_endpoint_to_read_body(monkeypatch, tmp_path):
+    """ASGI message replay — 미들웨어가 body 소비 후에도 endpoint가 body 재읽기 가능.
+
+    56차 T307 회귀: BaseHTTPMiddleware → 순수 ASGI middleware 리팩토링 후 다운스트림
+    endpoint가 await request.body() / json() / form() 호출 시 동일 body 받음.
+    """
+    from backend.services.file_resolver import set_resolver, LocalFileResolver, CloudiumFileResolver
+    from starlette.testclient import TestClient
+    from backend.main import app
+
+    monkeypatch.setattr(file_resolver, "is_gate_running", lambda *_a, **_k: False)
+    set_resolver(CloudiumFileResolver(allowed_prefixes=str(tmp_path)))
+    try:
+        c = TestClient(app, raise_server_exceptions=False)
+        c.headers["X-User"] = "test"
+        # exempt path지만 POST body 정상 파싱 검증
+        r = c.post(
+            "/api/file-mode/check-access",
+            json={"path": str(tmp_path), "operation": "read"},
+        )
+        assert r.status_code != 500, f"unexpected 500: {r.text[:200]}"
+        try:
+            r.json()
+        except ValueError:
+            pytest.fail(f"endpoint가 body 읽기 실패 (non-JSON 응답): {r.text[:200]}")
+    finally:
+        set_resolver(LocalFileResolver())
+
+
+def test_asgi_middleware_no_unexpected_message_error_on_streaming_response(
+    monkeypatch, tmp_path, caplog,
+):
+    """starlette known issue #1438 차단 — StreamingResponse 응답 후 RuntimeError 미발생.
+
+    56차 T307 핵심 회귀: BaseHTTPMiddleware 시절 `request._receive = _receive`
+    재정의가 다음 요청의 message receive 체인과 충돌하여
+    `RuntimeError: Unexpected message received: http.request` 발생.
+    ASGI 리팩토링 후 동일 시나리오에서 로그에 "Unexpected message" 미발생.
+    """
+    from backend.services.file_resolver import set_resolver, LocalFileResolver
+    from starlette.testclient import TestClient
+    from backend.main import app
+
+    set_resolver(LocalFileResolver())
+    c = TestClient(app, raise_server_exceptions=False)
+    c.headers["X-User"] = "test"
+
+    with caplog.at_level(logging.WARNING, logger="devops_api"):
+        for _ in range(3):
+            r = c.post(
+                "/api/file-mode/check-access",
+                json={"path": str(tmp_path), "operation": "read"},
+            )
+            assert r.status_code != 500, f"500 error: {r.text[:200]}"
+
+    log_text = " ".join(rec.getMessage() for rec in caplog.records)
+    assert "Unexpected message received" not in log_text, (
+        f"starlette known issue #1438 재발 — 로그에 Unexpected message: {log_text[:300]}"
+    )

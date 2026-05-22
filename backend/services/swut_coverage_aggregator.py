@@ -250,6 +250,33 @@ def _write_v202_tc_stats_row(
     row = layout.tc_stats_row
     col = layout.tc_stats_col_start or 2
 
+    # 56차 T306 — v2.02 Coverage 양식 label-missing fallback path: layout이 row 17이
+    # 빈 row임을 감지 (tc_stats_label_missing=True)했으면 builder가 라벨도 stamp.
+    # 회사 Coverage v2.02는 row 17이 사용자 수동 입력 영역으로 비어있음. SITR은
+    # label 존재 → 본 branch 미실행 (기존 path 유지).
+    if getattr(layout, "tc_stats_label_missing", False):
+        label_row = row - 1  # data row 위 라인 = label row
+        tc_stats_labels = (
+            "Total Number of TCs",
+            "Number of TCs Tested",
+            "Number of TCs Passed",
+            "Number of TCs Failed",
+            "Number of TCs not executed",
+        )
+        for i, lbl in enumerate(tc_stats_labels):
+            # label row가 비어있을 때만 stamp — 회사 양식이 일부 라벨만 있는
+            # mixed case 방어 (다른 값 있으면 덮어쓰지 않음)
+            existing_lbl = ws.cell(label_row, col + i).value
+            if existing_lbl is None or (isinstance(existing_lbl, str) and existing_lbl.strip() == ""):
+                safe_write(ws, label_row, col + i, lbl)
+        if summary is not None:
+            summary["tc_stats_fallback_used"] = True
+        if out_warnings is not None:
+            out_warnings.append(
+                f"v2.02 Coverage fallback: TC stats label stamp row={label_row} "
+                f"(56차 T306) — audit reviewer에 자동 라벨 채움 사전 통보 권장"
+            )
+
     # 55-fix-2 W4 + 55-fix-3 W8: data row 비어있음 검증.
     # skip 시 산출물 cell에 노란 강조 + hint 추가 (audit silent 차단).
     existing = ws.cell(row, col).value
@@ -308,6 +335,36 @@ def _write_v202_requirements_row(
     if layout is None or layout.requirements_row is None:
         return
     row = layout.requirements_row
+
+    # 56차 T306 — v2.02 Coverage 양식 label-missing fallback: layout이 row 20이
+    # 빈 row임을 감지(requirements_label_missing=True)했으면 builder가 헤더+라벨 stamp.
+    # SITR은 label/SwITS default 존재 → 본 branch 미실행 (기존 path 유지).
+    if getattr(layout, "requirements_label_missing", False):
+        # row 20 = 헤더, row 21 = "Source" 라벨, row 22 = "SwITS" 데이터
+        header_existing = ws.cell(row, 2).value
+        if header_existing is None or (
+            isinstance(header_existing, str) and header_existing.strip() == ""
+        ):
+            safe_write(ws, row, 2, "■  Requirements/Design Coverage")
+        source_existing = ws.cell(row + 1, 2).value
+        if source_existing is None or (
+            isinstance(source_existing, str) and source_existing.strip() == ""
+        ):
+            safe_write(ws, row + 1, 2, "Source")
+        swits_existing = ws.cell(row + 2, 2).value
+        if swits_existing is None or (
+            isinstance(swits_existing, str) and swits_existing.strip() == ""
+        ):
+            safe_write(ws, row + 2, 2, "SwITS")
+        if summary is not None:
+            summary["requirements_fallback_used"] = True
+        if out_warnings is not None:
+            out_warnings.append(
+                f"v2.02 Coverage fallback: Requirements 헤더+라벨 stamp row={row}~{row+2} "
+                f"(56차 T306) — audit reviewer에 자동 채움 사전 통보 권장"
+            )
+        return
+
     existing = ws.cell(row, 2).value
     if existing is None or existing == "" or existing == "SwITS":
         safe_write(ws, row, 2, "SwITS")

@@ -39,6 +39,7 @@ from backend.schemas import (
     SwITSitrBuildRequest,
 )
 from backend.services.file_resolver import get_resolver
+from backend.services.path_mode_check import check_log_folder_mode_compat
 from backend.services.swit_consistency_checker import check_swit_consistency
 from backend.services.swit_coverage_aggregator import (
     SwitCoverageBuildResult,
@@ -273,6 +274,8 @@ def _apply_function_asil_map(req: SwITBuildRequest, session) -> None:
 
 def _do_swit_coverage_build(req: SwITBuildRequest) -> Response:
     resolver = get_resolver()
+    # 56차 T308 — log_folder UNC + Local 모드 pre-flight check
+    check_log_folder_mode_compat(req.log_folder, resolver)
     session = collect_swit_session(
         resolver, req.project_id,
         jenkins_build_number=req.jenkins_build_number,
@@ -320,6 +323,8 @@ def _do_swit_sitr_build(req: SwITSitrBuildRequest) -> Response:
     "application/vnd.ms-excel.sheet.macroenabled.12".
     """
     resolver = get_resolver()
+    # 56차 T308 — log_folder UNC + Local 모드 pre-flight check
+    check_log_folder_mode_compat(req.log_folder, resolver)
     session = collect_swit_session(
         resolver, req.project_id,
         jenkins_build_number=req.jenkins_build_number,

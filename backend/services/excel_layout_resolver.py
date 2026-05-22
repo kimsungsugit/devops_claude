@@ -81,6 +81,11 @@ class SwitLayout:
         deviation_header_cell: SITR Deviation 시트 헤더 위치 (참고용, 현재 미사용).
         test_log_header_cell: SITR Test Log 시트 헤더 위치 (참고용).
         test_log_extra_marker_col: v2.02의 추가 marker col (예: AL col). None이면 미적용.
+        tc_stats_label_missing: **56차 신규** — v2.02 Coverage 양식 fallback 감지. 회사
+            Coverage Report v2.02 양식은 row 17이 빈 row (사용자 수동 입력 영역)라
+            label 매칭 실패. 본 flag True면 writer가 라벨도 함께 stamp. SITR은 label
+            존재 → 항상 False (기존 path 유지).
+        requirements_label_missing: 동일 패턴. v2.02 Coverage가 B20에 헤더 부재 시 True.
         warnings: inspect 중 누락 라벨 / 시트 미발견 등 메시지.
     """
     detected_version: Literal["v2.02", "v3.01", "unknown"] = "unknown"
@@ -93,6 +98,8 @@ class SwitLayout:
     deviation_header_cell: Optional[CellRef] = None
     test_log_header_cell: Optional[CellRef] = None
     test_log_extra_marker_col: Optional[int] = None
+    tc_stats_label_missing: bool = False
+    requirements_label_missing: bool = False
     warnings: list[str] = field(default_factory=list)
 
 
@@ -369,16 +376,52 @@ def _inspect_internal(
             detected_version == "unknown" and v202_label_count == 0
         )
 
-        if detected_version == "v2.02" and tc_stats_row is None:
-            warnings.append(
-                "v2.02 양식 추정되나 TC stats row label 미발견 — "
-                f"후보 {_TC_STATS_LABELS}"
-            )
-        if detected_version == "v2.02" and requirements_row is None:
-            warnings.append(
-                "v2.02 양식 추정되나 Requirements/Design Coverage row label 미발견 — "
-                f"후보 {_REQUIREMENTS_LABELS}"
-            )
+        # 56차 T306 — v2.02 Coverage 양식 label-missing fallback.
+        # 회사 Coverage Report v2.02는 row 17 (TC stats) + row 20 (Requirements)을
+        # 사용자 수동 입력 영역으로 두어 template에 라벨 부재 → label 매칭 실패 →
+        # 기존엔 silent skip. fallback path: B17/B20 cell이 None이면 default position
+        # 사용 + label_missing=True 표시 → writer가 라벨도 함께 stamp.
+        tc_stats_label_missing = False
+        requirements_label_missing = False
+        if detected_version == "v2.02" and ts_ws is not None:
+            if tc_stats_row is None:
+                # row 17 B열이 빈 cell이면 fallback 활성
+                try:
+                    b17 = ts_ws.cell(17, 2).value  # type: ignore[attr-defined]
+                except Exception:  # pragma: no cover — openpyxl edge case
+                    b17 = "_"
+                if b17 is None or (isinstance(b17, str) and b17.strip() == ""):
+                    tc_stats_row = 18  # data row = label row + 1
+                    tc_stats_col_start = 2  # B 열
+                    tc_stats_label_missing = True
+                    warnings.append(
+                        "v2.02 양식 Coverage: TC stats row label 미발견 → "
+                        "default position (row=17 label / row=18 data, col=B) fallback. "
+                        "writer가 라벨도 stamp (56차 T306)."
+                    )
+                else:
+                    warnings.append(
+                        "v2.02 양식 추정되나 TC stats row label 미발견 + B17 비어있지 않음 — "
+                        f"fallback 미적용. 후보 {_TC_STATS_LABELS}"
+                    )
+            if requirements_row is None:
+                try:
+                    b20 = ts_ws.cell(20, 2).value  # type: ignore[attr-defined]
+                except Exception:  # pragma: no cover
+                    b20 = "_"
+                if b20 is None or (isinstance(b20, str) and b20.strip() == ""):
+                    requirements_row = 20
+                    requirements_label_missing = True
+                    warnings.append(
+                        "v2.02 양식 Coverage: Requirements row label 미발견 → "
+                        "default position (row=20, col=B) fallback. writer가 헤더+"
+                        "라벨도 stamp (56차 T306)."
+                    )
+                else:
+                    warnings.append(
+                        "v2.02 양식 추정되나 Requirements row label 미발견 + B20 비어있지 않음 — "
+                        f"fallback 미적용. 후보 {_REQUIREMENTS_LABELS}"
+                    )
 
         return SwitLayout(
             detected_version=detected_version,
@@ -391,6 +434,8 @@ def _inspect_internal(
             deviation_header_cell=deviation_header_cell,
             test_log_header_cell=test_log_header_cell,
             test_log_extra_marker_col=test_log_extra_marker_col,
+            tc_stats_label_missing=tc_stats_label_missing,
+            requirements_label_missing=requirements_label_missing,
             warnings=warnings,
         )
     finally:

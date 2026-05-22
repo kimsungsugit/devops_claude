@@ -259,21 +259,32 @@ def _scan_dict_for_paths(data, resolver, validated: list, parent_key: str = ""):
                 _check_path_value(parent_key, item, resolver, validated)
 
 
-class CloudiumGateMiddleware(BaseHTTPMiddleware):
+class CloudiumGateMiddleware:
     """Cloudium 모드일 때 요청 body/query의 path 키를 자동 게이트 검사.
 
     - LOCAL 모드면 통과
     - cloudium 모드면 PATH_KEYS 매칭 키 값에 resolver.check_access() 호출
     - 게이트 미실행 또는 화이트리스트 미통과 시 403 (detail 키로 사용자 메시지)
-    - JSON, multipart/form-data, urlencoded 모두 검사 (multipart 우회 방지)
-    - body는 receive 재구성으로 endpoint가 재읽기 가능하게 유지
+    - JSON, multipart/form-data, urlencoded 검사 (multipart 우회 방지)
+    - body는 message replay 패턴으로 endpoint가 재읽기 가능
+
+    56차 T307 — BaseHTTPMiddleware → 순수 ASGI middleware 리팩토링.
+    `request._receive = ...` 재정의 제거 → starlette receive chain 충돌 (known
+    issue #1438 "RuntimeError: Unexpected message received: http.request") 차단.
+    다중 미들웨어 스택 + StreamingResponse 응답과 호환.
     """
 
-    async def dispatch(self, request: Request, call_next):
-        # exempt: file-mode 관리 endpoint는 본 미들웨어가 막으면 안 됨 (D1 fix: 정확 매칭)
-        path = request.url.path
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        # ASGI lifespan / websocket 등 비-HTTP는 그대로 통과
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+
+        path: str = scope.get("path", "")
         if _is_exempt(path):
-            return await call_next(request)
+            return await self.app(scope, receive, send)
 
         from backend.services.file_resolver import (
             CloudiumFileResolver,
@@ -283,21 +294,39 @@ class CloudiumGateMiddleware(BaseHTTPMiddleware):
         )
         resolver = get_resolver()
         if not isinstance(resolver, CloudiumFileResolver):
-            return await call_next(request)
+            return await self.app(scope, receive, send)
 
         validated: list = []
 
-        # Query params 검사 (multi-path 키 포함)
+        # Query params 검사 — scope["query_string"] 파싱
+        from urllib.parse import parse_qsl
+        qs = scope.get("query_string", b"").decode("latin-1")
         try:
-            for key, value in request.query_params.multi_items():
+            for key, value in parse_qsl(qs, keep_blank_values=True):
                 _check_path_value(key, value, resolver, validated)
         except PermissionError as e:
-            return _cloudium_blocked_response(str(e), request.url.path)
+            await _send_cloudium_blocked(send, str(e), path)
+            return
 
-        # Body 검사 — JSON / multipart / urlencoded 모두 처리
-        if request.method in ("POST", "PUT", "PATCH"):
-            ct = (request.headers.get("content-type") or "").lower()
-            body = await request.body()
+        method: str = scope.get("method", "GET")
+
+        # Body 검사 — POST/PUT/PATCH만
+        if method in ("POST", "PUT", "PATCH"):
+            # receive를 한 번에 모두 소비 (body 재현용 캐싱)
+            body = b""
+            messages: list = []
+            more_body = True
+            while more_body:
+                msg = await receive()
+                messages.append(msg)
+                if msg.get("type") == "http.request":
+                    body += msg.get("body", b"")
+                    more_body = msg.get("more_body", False)
+                else:
+                    # http.disconnect 등 비정상 종료
+                    more_body = False
+
+            ct = _header_value(scope, b"content-type").lower()
 
             try:
                 if "application/json" in ct and body:
@@ -307,28 +336,94 @@ class CloudiumGateMiddleware(BaseHTTPMiddleware):
                         data = None
                     if data is not None:
                         _scan_dict_for_paths(data, resolver, validated)
-                elif ("multipart/form-data" in ct or
-                      "application/x-www-form-urlencoded" in ct):
-                    # Form 필드의 PATH_KEYS / MULTI_PATH_KEYS 검사 — multipart 우회 방지.
-                    # request.form()은 body를 소비하지만, 우리가 이미 await했으니
-                    # starlette가 _body 캐시 사용하도록 유도.
-                    request._body = body  # type: ignore[attr-defined]
-                    form = await request.form()
-                    for key, value in form.multi_items():
-                        _check_path_value(key, value, resolver, validated)
+                elif "application/x-www-form-urlencoded" in ct and body:
+                    # urlencoded — parse_qsl로 직접 처리 (starlette 의존 X)
+                    try:
+                        for key, value in parse_qsl(
+                            body.decode("utf-8"), keep_blank_values=True,
+                        ):
+                            _check_path_value(key, value, resolver, validated)
+                    except UnicodeDecodeError:
+                        pass
+                elif "multipart/form-data" in ct and body:
+                    # multipart — Starlette Request wrapping (cached receive로
+                    # body 재읽기 가능). `python-multipart`는 FastAPI 의존성이라
+                    # 이미 설치됨.
+                    from starlette.requests import Request as _StarletteRequest
+
+                    async def _cached_receive():
+                        return {
+                            "type": "http.request",
+                            "body": body,
+                            "more_body": False,
+                        }
+
+                    form_req = _StarletteRequest(scope, _cached_receive)
+                    try:
+                        form_data = await form_req.form()
+                        for key, value in form_data.multi_items():
+                            _check_path_value(key, value, resolver, validated)
+                    except PermissionError:
+                        # cloudium 정책 위반은 외부 handler로 위임 (raise)
+                        raise
+                    except Exception:
+                        # multipart parse 실패만 silent — endpoint 단계
+                        # deny-by-default (resolver 검증)로 안전망 유지
+                        pass
             except PermissionError as e:
-                return _cloudium_blocked_response(str(e), request.url.path)
+                await _send_cloudium_blocked(send, str(e), path)
+                return
 
-            # body 재구성 — endpoint가 다시 읽을 수 있도록
-            async def _receive():
-                return {"type": "http.request", "body": body, "more_body": False}
-            request._receive = _receive  # type: ignore[attr-defined]
+            # message replay — 다운스트림 endpoint가 다시 body 읽기 가능
+            sent_count = 0
 
-        # W1: 검증된 path 집합 마킹 — read 메서드의 중복 검사 회피.
-        # **W4 fix**: 과거 첫 번째 path만 마킹 → 모든 검증 path를 frozenset으로 마킹.
-        # multi-path endpoint에서도 ContextVar W1 perf 효과 누적.
+            async def replay_receive():
+                nonlocal sent_count
+                if sent_count < len(messages):
+                    msg = messages[sent_count]
+                    sent_count += 1
+                    return msg
+                # 모든 캐싱된 message 소비 후 → 원본 receive (disconnect 등)
+                return await receive()
+
+            token = mark_path_validated(validated)
+            try:
+                await self.app(scope, replay_receive, send)
+                return
+            finally:
+                reset_path_validated(token)
+
+        # GET/HEAD/OPTIONS 등 body 없음 — 원본 receive 그대로 전달
         token = mark_path_validated(validated)
         try:
-            return await call_next(request)
+            await self.app(scope, receive, send)
         finally:
             reset_path_validated(token)
+
+
+def _header_value(scope, name: bytes) -> str:
+    """ASGI scope의 headers list에서 특정 헤더 값 추출 (소문자 비교).
+
+    headers는 [(b"name", b"value"), ...] 형식. 없으면 빈 string.
+    """
+    name_lower = name.lower()
+    for k, v in scope.get("headers", []):
+        if k.lower() == name_lower:
+            try:
+                return v.decode("latin-1")
+            except UnicodeDecodeError:
+                return ""
+    return ""
+
+
+async def _send_cloudium_blocked(send, message: str, request_path: str) -> None:
+    """ASGI send callable로 403 차단 응답 직접 송신.
+
+    BaseHTTPMiddleware 시절 _cloudium_blocked_response가 반환한 JSONResponse를
+    그대로 사용. JSONResponse는 ASGI response callable이라 await 호출 가능.
+    """
+    response = _cloudium_blocked_response(message, request_path)
+    # 빈 receive — JSONResponse는 disconnect 감지 안 함 (단순 응답)
+    async def _noop_receive():
+        return {"type": "http.disconnect"}
+    await response({"type": "http", "method": "POST", "path": request_path}, _noop_receive, send)

@@ -1266,3 +1266,49 @@ class TestBrowseEndpoint21:
         assert body["file_mode"] == "local"
         assert "권한 부족" in body["cloudium_hint"]
         assert "Cloudium" not in body["cloudium_hint"]
+
+
+class TestPathModeMismatch56:
+    """56차 T308 — SwUT log_folder UNC + Local 모드 → 400 + PATH_MODE_MISMATCH."""
+
+    def test_swut_coverage_unc_local_mode_returns_400(self):
+        """Local 모드 + log_folder=U:/... → 400 + PATH_MODE_MISMATCH."""
+        from backend.services.file_resolver import LocalFileResolver, set_resolver
+        set_resolver(LocalFileResolver())
+        try:
+            r = client.post(
+                "/api/swut/coverage/build",
+                json={
+                    "project_id": "HDPDM01",
+                    "release_sw_version": "1.0.0",
+                    "test_date": "2024-02-19",
+                    "log_folder": "U:/연구소/test/v1.0",
+                },
+                headers={"X-User": "tester"},
+            )
+            assert r.status_code == 400, f"expected 400 got {r.status_code}: {r.text[:200]}"
+            body = r.json()
+            assert body.get("error", {}).get("code") == "PATH_MODE_MISMATCH", f"body={body}"
+        finally:
+            set_resolver(LocalFileResolver())
+
+    def test_swut_sutr_unc_local_mode_returns_400(self):
+        """SUTR endpoint도 동일."""
+        from backend.services.file_resolver import LocalFileResolver, set_resolver
+        set_resolver(LocalFileResolver())
+        try:
+            r = client.post(
+                "/api/swut/sutr/build",
+                json={
+                    "project_id": "HDPDM01",
+                    "release_sw_version": "1.0.0",
+                    "test_date": "2024-02-19",
+                    "log_folder": r"\\corp\share\test",
+                },
+                headers={"X-User": "tester"},
+            )
+            assert r.status_code == 400, f"expected 400 got {r.status_code}: {r.text[:200]}"
+            body = r.json()
+            assert body.get("error", {}).get("code") == "PATH_MODE_MISMATCH", f"body={body}"
+        finally:
+            set_resolver(LocalFileResolver())
