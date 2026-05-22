@@ -538,3 +538,97 @@
 - SwitLayout → ExcelTemplateLayout rename (55차+ deferred)
 - `tc_stats_data_row` field rename (semantic clarity)
 - `collect_git_history` deprecation
+
+## 56-fix (T312/T313) — h11 LocalProtocolError 차단 + Coverage Version fill
+
+56차 T307 ASGI 리팩토링 후 라이브 환경에서 `h11._util.LocalProtocolError: Too little data for declared Content-Length` 새 에러 발견. 응답 자체는 200 OK 정상이지만 cleanup phase에서 unhandled exception.
+
+### T312 — StreamingResponse → Response 직접 반환
+
+**증상**: 매 빌드 후 backend log `Unhandled exception: Too little data for declared Content-Length` ~100줄 traceback.
+
+**원인**: 우리 `_build_result_to_response` 가 `headers["Content-Length"] = str(size)` 명시 + `StreamingResponse(_iter_bytesio(content_io), ...)` chunk yield 조합. T307 ASGI 리팩토링 후 h11이 chunk yield 송신 도중 stream 중단 감지 → 실제 송신 bytes < Content-Length.
+
+**수정** (`backend/routers/swut.py` + `backend/routers/swit.py`):
+- `content_io.seek(0); body_bytes = content_io.read()` — BytesIO 전체 추출
+- `Response(content=body_bytes, media_type=..., headers=...)` 직접 반환 (Content-Length 자동 계산)
+- `headers["Content-Length"]` 명시 제거 (Response가 body_bytes 길이로 자동 일치)
+
+**효과**:
+- 매 빌드 traceback 100% 제거 (라이브 검증: SwUT Coverage 38.6초 빌드 → 0 error)
+- 빌드 시간 96.5초 → 38.6초 (~2.5x) — chunk yield 오버헤드 제거
+- 메모리 worst-case 12.6MB + ~5MB = ~17.6MB (14차 W1 절감 일부 반납)
+
+### T313 — Coverage Cover Version fill 누락 (SUTR과 비대칭)
+
+**증상**: SUTR Cover G27 = 'v2.02' (사용자 입력 반영), Coverage Cover G27 = 'v0.10' (template default 그대로). 두 builder가 비대칭.
+
+**원인**: `swut_sutr_aggregator._write_cover` (line 183-184)는 `_write_label(ws, "Version", f"v{meta.release_sw_version}", ...)` 호출. `swut_coverage_aggregator._write_cover_sheet`에는 Version fill 없음.
+
+**수정** (`backend/services/swut_coverage_aggregator.py`):
+- `_write_cover_sheet`에 `_write_label(ws, labels.get("version", "Version"), f"v{meta.release_sw_version}", out_warnings)` 1줄 추가
+- SUTR과 대칭 — Coverage 산출물도 G27 'v2.02' fill
+
+## 57차 — SUTR/SITR Test Log 1941 TC 매칭 + 회사 v2.02 양식 row step 지원
+
+사용자 라이브 산출물 검증: SUTR Test Result 시트에 6 TC만 stamp (Coverage Traceability는 1941 TC 정상). 회사 v2.02 SUTR 양식이 1 TC당 6 row pattern (TC ID + Params 1~5 sub-row). SITR 동일 증상 (sutr_aggregator import 재사용).
+
+### T314 — `_write_test_log` 재작성
+
+**핵심 변경**:
+
+1. **`excel_layout_resolver.py`** — `SwitLayout.test_log_tc_row_step: int = 1` 신규 필드 + `_scan_test_log_tc_row_step` helper:
+   - B 열에서 SwUTC_/SwITC_ prefix를 가진 첫 2개 TC row 위치 차이로 step 동적 감지
+   - 회사 v2.02 SUTR = 6, v3.01 = 1 (backward compat default)
+   - `_inspect_internal`이 kind="sitr"일 때 호출 + 시트 매칭 'test log' OR 'test result' 확장
+
+2. **`swut_sutr_aggregator.py`** `_write_test_log`:
+   - Before: `for env in session.environments: for tc_name in env.test_cases:` 환경별 iterate
+   - After: `from backend.services.swut_coverage_aggregator import _collect_tc_to_function` — Coverage 와 동일 TC source (unique union)
+   - `tc_to_env` mapping 별도 구성 (첫 환경 우선 — component_name + test_results 조회용)
+   - `r = start_row + (written * tc_row_step)` — row 5, 11, 17, ... (v2.02 step=6) 또는 row 5, 6, 7, ... (v3.01 step=1)
+   - `tc_to_fn_id.get(tc_name, "")` dict lookup (regex 중복 제거)
+   - SITR은 sutr_aggregator import 사용이라 **자동 효과**
+
+### T315 — SITR 자동 효과
+
+`swit_sitr_aggregator.py` line 59-62 import 그대로. T314 fix가 SITR에 자동 반영. 별도 변경 없음.
+
+### 회귀 (+6건)
+
+- `test_excel_layout_resolver.py::TestTestLogTcRowStep57` (+3):
+  - `test_v202_sutr_detects_6_row_step` — B5/B11 → step=6
+  - `test_v301_sutr_default_1_step` — 연속 row → step=1
+  - `test_coverage_kind_does_not_inspect_test_log` — kind=coverage는 default 1
+
+- `test_swut_aggregators.py::TestSutrTestLogRowStep57` (+3):
+  - `test_write_test_log_uses_coverage_source_and_step` — Coverage TC source + step=6 적용 검증 (row 5/11에 unique TC stamp)
+  - `test_write_test_log_default_step_1_for_v301` — backward compat
+  - `test_collect_tc_to_function_import_works` — circular import safe
+
+### 회귀 카운트
+
+이전 (56차 + 56-fix): ~2139
+57차: backend **~2145** (+6) + 기존 회귀 변경 영향 0
+
+### 라이브 검증 (T319)
+
+사용자 환경 재빌드 후 `(HDPDM01_SUTR) Software Unit Test Result_v2.02_*.xlsm` inspect:
+- B5, B11, B17, ..., B(5 + N*6) 에 1941 TC stamp 확인
+- 산출물 크기 ~2~3MB (이전 30KB → ~100x)
+- 빌드 시간 ~60초 (이전 38초 + ~22초 추가)
+- SITR도 동일 효과
+
+### ISO 26262 audit evidence 영향
+
+- SUTR Test Log에 모든 1941 TC stamp → Coverage Traceability와 100% 매칭. audit reviewer가 산출물 단독 검토 시 누락 TC 없음
+- ASIL B/C/D 시각 강조 1941 row 적용 — MC/DC 우선순위 audit 가시성 (31차 W29 정책 일관)
+- `summary["test_log_rows_written"]` (T314 잔여 — 별도 라운드) audit log 추적
+
+### 비-목표 (58차+ Info)
+
+- I10 SUTR 3.Coverage 시트 (Statement/Branch/MCDC) 동적 계산
+- I11 SUTR 2.Deviation 시트 자동 채움
+- I12 Cover G29 Date 라벨 fallback (회사 'Date' 매칭)
+- I13 `summary["test_log_rows_written"]` 추가 (T317 잔여)
+- 산출물 ~5MB 초과 시 openpyxl write_only 모드

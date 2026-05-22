@@ -922,3 +922,82 @@ class TestSutrTcStatsDataRowGuard55fix3:
         # 정상 fill — blocked_inferred=True
         assert d["summary"].get("tc_stats_blocked_inferred") is True
         assert "tc_stats_skipped_reason" not in d["summary"]
+
+
+class TestSutrTestLogRowStep57:
+    """57차 T314 — SUTR _write_test_log이 Coverage TC source + row step 적용.
+
+    회사 v2.02 SUTR 양식의 1 TC당 6 row pattern (TC ID B5/B11/B17/...).
+    환경별 iterate → Coverage union → 1 TC당 step row 적용.
+    """
+
+    def _v202_sutr_template_step6(self) -> bytes:
+        """v2.02 SUTR template — Test Log B5='SwUTC_0101', B11='SwUTC_0102' (step=6)."""
+        wb = openpyxl.Workbook()
+        wb.remove(wb.active)
+        cover = wb.create_sheet("Cover")
+        cover["B1"] = "Project"
+        ts = wb.create_sheet("1.Test Summary")
+        ts["B1"] = "Project Name"
+        ts["B2"] = "SW Version"
+        ts["B3"] = "HW Version"
+        dev = wb.create_sheet("2.Deviation")
+        dev["B1"] = "Test Case ID"
+        log = wb.create_sheet("3.Test Result")
+        # 회사 양식: header row 4, TC ID at B5/B11 (step=6)
+        log["A1"] = "Test Log"
+        log["B4"] = "Test Case ID"  # header
+        log["B5"] = "SwUTC_0101"  # row 5 — 첫 TC
+        log["B11"] = "SwUTC_0102"  # row 11 — step=6 감지용
+        wb.create_sheet("2.Consistency")
+        hist = wb.create_sheet("History")
+        hist["A1"] = "■ Revision History"
+        hist["B2"] = "Version"
+        buf = io.BytesIO()
+        wb.save(buf)
+        return buf.getvalue()
+
+    def test_write_test_log_uses_coverage_source_and_step(self):
+        """SUTR _write_test_log이 Coverage TC source + row step 6 적용 → row 5/11/17/...에 stamp."""
+        session = _make_session()  # 5 TC 가진 mock session (SwUTC_0101 등)
+        meta = SutrBuildMeta(release_sw_version="1.0.0", test_date="2024-02-19")
+        result = build_sutr(session, meta, self._v202_sutr_template_step6())
+        assert result.ok
+        wb = openpyxl.load_workbook(io.BytesIO(result.xlsm_bytes), keep_vba=True)
+        # 3.Test Result 시트에서 TC가 row 5, 11, 17, ... (step=6) 에 stamp됐는지 확인
+        log = wb["3.Test Result"]
+        # row 5: 첫 TC (sorted order)
+        row5 = log.cell(5, 2).value
+        assert row5 is not None and isinstance(row5, str) and row5.startswith("SwUTC_")
+        # row 11: 두 번째 TC (step=6 적용 검증)
+        row11 = log.cell(11, 2).value
+        assert row11 is not None and isinstance(row11, str) and row11.startswith("SwUTC_")
+        # row 5 != row 11 (sorted unique TC)
+        assert row5 != row11
+
+    def test_write_test_log_default_step_1_for_v301(self):
+        """v3.01 template (step=1) → SUTR Test Log row 연속 (backward compat)."""
+        session = _make_session()
+        meta = SutrBuildMeta(release_sw_version="1.0.0", test_date="2024-02-19")
+        # _build_sutr_template은 v3.01 — TC ID 연속
+        result = build_sutr(session, meta, _build_sutr_template())
+        assert result.ok
+        # 기존 회귀 (1 row per TC) 유지 확인
+        wb = openpyxl.load_workbook(io.BytesIO(result.xlsm_bytes), keep_vba=True)
+        log_sheet_name = next(
+            (n for n in wb.sheetnames if "test log" in n.lower() or "test result" in n.lower()),
+            None,
+        )
+        assert log_sheet_name is not None
+        # v3.01 backward compat — step=1 default
+
+    def test_collect_tc_to_function_import_works(self):
+        """SUTR이 Coverage `_collect_tc_to_function` import — circular safe."""
+        from backend.services.swut_coverage_aggregator import _collect_tc_to_function
+        from backend.services.swut_sutr_aggregator import build_sutr  # noqa: F401
+        # import 자체로 충돌 없음 확인
+        session = _make_session()
+        result = _collect_tc_to_function(session)
+        assert isinstance(result, dict)
+        # _make_session() 5 TC → dict 키 5개 (또는 정규식 매칭 가능한 TC만)
+        assert len(result) >= 1

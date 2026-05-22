@@ -342,51 +342,70 @@ def _write_test_log(
         if out_warnings is not None:
             out_warnings.append(msg)
 
-    written = 0
+    # 57차 T314 — Coverage Traceability와 동일 TC source 사용 (환경 union → unique TC).
+    # 환경별 iterate 대신 1941 unique TC name을 한 번에 stamp + 회사 v2.02 양식의
+    # 1 TC당 6 row step 자동 적용. SITR도 동일 함수 import로 동시 효과.
+    from backend.services.swut_coverage_aggregator import _collect_tc_to_function
+    tc_to_fn_id = _collect_tc_to_function(session)  # {tc_name: fn_id}
+
+    # tc_name → 첫 매칭 env (component_name + test_results 조회용).
+    # 환경별 동일 TC가 중복 정의되면 첫 환경 우선 (Coverage source semantic 일치).
+    tc_to_env: dict[str, Any] = {}
     for env in session.environments:
-        for tc_name, _tc_list in sorted(env.test_cases.items()):
-            r = start_row + written
-            safe_write(ws, r, col, tc_name)
-            safe_write(ws, r, col + 1, env.component_name)
-            safe_write(ws, r, col + 2, "AEC, ABV")
-            exec_r = env.test_results.get(tc_name)
-            safe_write(
-                ws, r, col + 3,
-                "Pass" if exec_r and exec_r.passed else "Fail" if exec_r else "N/A",
-            )
+        for tc_name in env.test_cases:
+            if tc_name not in tc_to_env:
+                tc_to_env[tc_name] = env
 
-            # 31차 W27: TC name에서 SwUFn_NNNN 추출 → Function ID + ASIL 컬럼.
-            fn_match = _TC_FN_RE.search(tc_name or "")
-            fn_id = fn_match.group(1) if fn_match else ""
-            asil = asil_map.get(fn_id, "") if fn_id else ""
-            safe_write(ws, r, col + 4, fn_id)
-            safe_write(ws, r, col + 5, f"ASIL {asil}" if asil else "")
-            # ASIL B/C/D 시각 강조 — 30차 W21 + 31차 W29 정책.
-            _asil_marker = {
-                "B": mark_asil_b_function,
-                "C": mark_asil_c_function,
-                "D": mark_asil_d_function,
-            }.get(asil)
-            if _asil_marker:
-                _asil_marker(ws, r, col + 5)
+    tc_row_step = (
+        getattr(layout, "test_log_tc_row_step", 1) if layout is not None else 1
+    )
 
-            # 54차 T283 + 54-fix W4: v2.02 양식 AL column marker.
-            # exec_r 없음 → "" (미실행). exec_r.passed=True → "✓".
-            # exec_r.passed=False → "✗". exec_r.passed=None (결과 unset) → "—"
-            # (silent wrong-pick 방지 — Fail로 표기 안 함).
-            if layout is not None and layout.test_log_extra_marker_col is not None:
-                al_col = layout.test_log_extra_marker_col
-                marker = ""
-                if exec_r is not None:
-                    if exec_r.passed is True:
-                        marker = "✓"
-                    elif exec_r.passed is False:
-                        marker = "✗"
-                    else:
-                        marker = "—"  # passed=None unset case
-                safe_write(ws, r, al_col, marker)
+    written = 0
+    for tc_name in sorted(tc_to_fn_id.keys()):
+        r = start_row + (written * tc_row_step)
+        env = tc_to_env.get(tc_name)
+        component_name = env.component_name if env is not None else ""
+        exec_r = env.test_results.get(tc_name) if env is not None else None
+        safe_write(ws, r, col, tc_name)
+        safe_write(ws, r, col + 1, component_name)
+        safe_write(ws, r, col + 2, "AEC, ABV")
+        safe_write(
+            ws, r, col + 3,
+            "Pass" if exec_r and exec_r.passed else "Fail" if exec_r else "N/A",
+        )
 
-            written += 1
+        # 31차 W27: TC name에서 SwUFn_NNNN 추출 → Function ID + ASIL 컬럼.
+        # T314: tc_to_fn_id에 이미 추출돼 있어 dict lookup 사용 (regex 중복 제거).
+        fn_id = tc_to_fn_id.get(tc_name, "")
+        asil = asil_map.get(fn_id, "") if fn_id else ""
+        safe_write(ws, r, col + 4, fn_id)
+        safe_write(ws, r, col + 5, f"ASIL {asil}" if asil else "")
+        # ASIL B/C/D 시각 강조 — 30차 W21 + 31차 W29 정책.
+        _asil_marker = {
+            "B": mark_asil_b_function,
+            "C": mark_asil_c_function,
+            "D": mark_asil_d_function,
+        }.get(asil)
+        if _asil_marker:
+            _asil_marker(ws, r, col + 5)
+
+        # 54차 T283 + 54-fix W4: v2.02 양식 AL column marker.
+        # exec_r 없음 → "" (미실행). exec_r.passed=True → "✓".
+        # exec_r.passed=False → "✗". exec_r.passed=None (결과 unset) → "—"
+        # (silent wrong-pick 방지 — Fail로 표기 안 함).
+        if layout is not None and layout.test_log_extra_marker_col is not None:
+            al_col = layout.test_log_extra_marker_col
+            marker = ""
+            if exec_r is not None:
+                if exec_r.passed is True:
+                    marker = "✓"
+                elif exec_r.passed is False:
+                    marker = "✗"
+                else:
+                    marker = "—"  # passed=None unset case
+            safe_write(ws, r, al_col, marker)
+
+        written += 1
     return written
 
 

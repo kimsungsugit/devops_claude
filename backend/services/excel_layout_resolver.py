@@ -86,6 +86,11 @@ class SwitLayout:
             label 매칭 실패. 본 flag True면 writer가 라벨도 함께 stamp. SITR은 label
             존재 → 항상 False (기존 path 유지).
         requirements_label_missing: 동일 패턴. v2.02 Coverage가 B20에 헤더 부재 시 True.
+        test_log_tc_row_step: **57차 T314 신규** — Test Log/Test Result 시트의 1 TC당
+            row 수. 회사 v2.02 SUTR/SITR 양식은 6 (TC ID + Params 1~5 sub-row).
+            v3.01 또는 기본은 1. inspect 시 template의 TC ID 열 (B)에서 첫 2개 TC
+            row 위치 차이로 동적 감지. SUTR/SITR _write_test_log가 이 step 적용해
+            row 5, 11, 17, ... 에 TC ID stamp.
         warnings: inspect 중 누락 라벨 / 시트 미발견 등 메시지.
     """
     detected_version: Literal["v2.02", "v3.01", "unknown"] = "unknown"
@@ -100,6 +105,7 @@ class SwitLayout:
     test_log_extra_marker_col: Optional[int] = None
     tc_stats_label_missing: bool = False
     requirements_label_missing: bool = False
+    test_log_tc_row_step: int = 1
     warnings: list[str] = field(default_factory=list)
 
 
@@ -273,6 +279,34 @@ def _scan_test_log_marker_col(ws) -> Optional[int]:
     return cell_ref.col if cell_ref else None
 
 
+def _scan_test_log_tc_row_step(ws) -> int:
+    """57차 T314 — Test Log/Test Result 시트의 1 TC당 row step 동적 감지.
+
+    회사 v2.02 SUTR/SITR 양식은 TC ID + Params 1~5 sub-row pattern (6 row step).
+    B 열에서 SwUTC_ / SwITC_ prefix를 가진 첫 2개 TC row 위치 차이를 반환.
+
+    Returns:
+        int: row step (회사 v2.02 = 6, v3.01 또는 미발견 = 1).
+    """
+    if ws is None:
+        return 1
+    tc_rows: list[int] = []
+    max_row = min(ws.max_row + 1, 60) if ws.max_row else 60
+    for r in range(1, max_row):
+        v = ws.cell(r, 2).value
+        if isinstance(v, str):
+            s = v.strip()
+            if s.startswith("SwUTC_") or s.startswith("SwITC_"):
+                tc_rows.append(r)
+                if len(tc_rows) >= 2:
+                    break
+    if len(tc_rows) >= 2:
+        step = tc_rows[1] - tc_rows[0]
+        if step > 0:
+            return step
+    return 1
+
+
 # ---------------------------------------------------------------------------
 # Internal inspect (캐시 entry)
 # ---------------------------------------------------------------------------
@@ -347,8 +381,9 @@ def _inspect_internal(
         test_log_extra_marker_col: Optional[int] = None
         test_log_header_cell: Optional[CellRef] = None
         deviation_header_cell: Optional[CellRef] = None
+        test_log_tc_row_step = 1
         if kind == "sitr":
-            log_ws = _find_sheet(wb, lambda n: "test log" in n.lower())
+            log_ws = _find_sheet(wb, lambda n: "test log" in n.lower() or "test result" in n.lower())
             if log_ws is not None:
                 test_log_extra_marker_col = _scan_test_log_marker_col(log_ws)
                 # header cell 위치 참고 (writer가 직접 find_kv_row 사용하지만 inspect 결과 참고용)
@@ -356,6 +391,8 @@ def _inspect_internal(
                     log_ws, ("Test Case ID", "TC ID", "TC name"), max_row=10,
                 )
                 test_log_header_cell = tc_header
+                # 57차 T314 — 1 TC당 row step 동적 감지 (회사 v2.02 = 6)
+                test_log_tc_row_step = _scan_test_log_tc_row_step(log_ws)
             dev_ws = _find_sheet(wb, lambda n: "deviation" in n.lower())
             if dev_ws is not None:
                 dev_header, _ = _scan_label_cell(
@@ -436,6 +473,7 @@ def _inspect_internal(
             test_log_extra_marker_col=test_log_extra_marker_col,
             tc_stats_label_missing=tc_stats_label_missing,
             requirements_label_missing=requirements_label_missing,
+            test_log_tc_row_step=test_log_tc_row_step,
             warnings=warnings,
         )
     finally:

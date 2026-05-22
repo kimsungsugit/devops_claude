@@ -237,6 +237,72 @@ class TestV202CoverageLabelMissingFallback:
         assert layout.requirements_label_missing is False
 
 
+class TestTestLogTcRowStep57:
+    """57차 T314 — Test Log/Test Result 시트의 1 TC당 row step 동적 감지."""
+
+    def _v202_sutr_template_with_6row_step(self) -> bytes:
+        """회사 v2.02 SUTR 양식 mimic — TC ID at B5/B11/B17 (6 row step)."""
+        return _make_xlsx({
+            "Cover": [["Project", ""]],
+            "1.Test Summary": [
+                ["", ""],
+                ["SW Version", ""],
+                ["HW Version", ""],
+            ],
+            "2.Deviation": [["Test Case ID", "Issue"]],
+            "3.Test Result": [
+                ["Test Log"],                                       # row 1
+                [""],                                               # row 2
+                ["", "Test Case ", "", "", "", "", "Input"],        # row 3
+                ["", "TC ID", "Title", "Test Case Generation Method", "", "", "Param 1"],  # row 4 header
+                ["", "SwUTC_0101"],                                 # row 5 col B
+                ["", "", "", "", 1],                                # row 6 sub-row
+                ["", "", "", "", 2],
+                ["", "", "", "", 3],
+                ["", "", "", "", 4],
+                ["", "", "", "", 5],
+                ["", "SwUTC_0102"],                                 # row 11 col B — step = 6
+            ],
+            "History": [["Version"]],
+        })
+
+    def _v301_sutr_template_with_1row_step(self) -> bytes:
+        """v3.01 양식 mimic — TC ID 연속 (1 row step backward compat)."""
+        return _make_xlsx({
+            "Cover": [["Project", ""]],
+            "Test Summary": [
+                ["Project Name", ""],
+                ["Release Name(SW)", ""],
+            ],
+            "Deviation": [["Test Case ID"]],
+            "Test Log": [
+                ["", "Test Case ID", "Component", "Method", "Result"],  # row 1 header (col B label)
+                ["", "SwUTC_0001"],  # row 2 col B
+                ["", "SwUTC_0002"],  # row 3 col B — step = 1
+            ],
+            "History": [["Version"]],
+        })
+
+    def test_v202_sutr_detects_6_row_step(self):
+        """B5='SwUTC_0101', B11='SwUTC_0102' → step = 6 감지."""
+        layout = elr.inspect_swit_layout(
+            self._v202_sutr_template_with_6row_step(), "sitr",
+        )
+        assert layout.test_log_tc_row_step == 6
+
+    def test_v301_sutr_default_1_step(self):
+        """v3.01 TC ID 연속 → step = 1 (backward compat)."""
+        layout = elr.inspect_swit_layout(
+            self._v301_sutr_template_with_1row_step(), "sitr",
+        )
+        assert layout.test_log_tc_row_step == 1
+
+    def test_coverage_kind_does_not_inspect_test_log(self):
+        """kind='coverage'는 Test Log 시트 inspect 안 함 → step default 1."""
+        layout = elr.inspect_swit_layout(_v202_coverage_template(), "coverage")
+        assert layout.test_log_tc_row_step == 1
+
+
 class TestCaching:
     def test_lru_cache_sha256_keying(self, monkeypatch):
         """같은 bytes 두 번 inspect → _inspect_internal 1회만 호출."""
