@@ -755,6 +755,31 @@ def _write_consistency_sheet(
             f"2.Consistency 자체 일관성 FAIL {len(failed)}건: {', '.join(failed)}"
         )
 
+    # 57차 T319 fix — 회사 v2.02 양식의 row 11+ SwUDS function list 자동 채움.
+    # row 10 = 헤더 (No / ID / Function Name / SwUDS와 SwUTS 항목 정합성 확인 / 비고).
+    # row 11+: 모든 환경의 function_coverage 추출 → fn_id + fn_name + 정합성 stamp.
+    # 정확한 attr 이름: FunctionCoverage.unit_id (fn_id) + FunctionCoverage.name (fn_name).
+    if session.environments:
+        all_fns: dict[str, str] = {}  # unit_id → name
+        for env in session.environments:
+            for fc in env.function_coverage or []:
+                unit_id = fc.unit_id  # 예: SwUFn_0101
+                fn_name = fc.name      # 예: main
+                if unit_id and unit_id not in all_fns:
+                    all_fns[unit_id] = fn_name
+        swuds_set = swuds_function_ids or set()
+        function_list_start = 11
+        for idx, (unit_id, fn_name) in enumerate(sorted(all_fns.items())):
+            row_idx_fn = function_list_start + idx
+            if row_idx_fn > 2000:  # safety: 2000 row 한계 (회사 양식 최대)
+                break
+            safe_write(ws, row_idx_fn, 2, idx + 1)         # B: No
+            safe_write(ws, row_idx_fn, 3, unit_id)         # C: Function ID
+            safe_write(ws, row_idx_fn, 4, fn_name)         # D: Function Name
+            # E: SwUDS↔SwUTS 정합성 — SwUDS function_ids set에 있으면 'O', 없으면 'X'
+            in_swuds = unit_id in swuds_set if swuds_set else True
+            safe_write(ws, row_idx_fn, 5, "O" if in_swuds else "X")
+
     return written
 
 

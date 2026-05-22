@@ -287,11 +287,22 @@ def _do_coverage_build(req: SwUTBuildRequest) -> Response:
     resolver = get_resolver()
     # 56차 T308 — log_folder UNC + Local 모드 pre-flight check
     check_log_folder_mode_compat(req.log_folder, resolver)
+    # 57차 T319 diag — Coverage build session params (SUTR과 비교용)
+    import logging as _logging
+    _logging.getLogger(__name__).info(
+        f"Coverage build req: project_id={req.project_id!r}, jenkins_build_number="
+        f"{req.jenkins_build_number!r}, cache_root={req.cache_root!r}, "
+        f"log_folder={req.log_folder!r}, coverage_template_path={req.coverage_template_path!r}"
+    )
     session = collect_swut_session(
         resolver, req.project_id,
         jenkins_build_number=req.jenkins_build_number,
         cache_root=req.cache_root,
         log_folder=req.log_folder,
+    )
+    _logging.getLogger(__name__).info(
+        f"Coverage build session collected: environments={len(session.environments)}, "
+        f"total_tcs={sum(len(env.test_cases) for env in session.environments)}"
     )
     # 30차 W21: function 별 ASIL 매핑 (옵션 c_source_root).
     _apply_function_asil_map(req, session)
@@ -319,11 +330,22 @@ def _do_sutr_build(req: SwUTBuildRequest) -> Response:
     resolver = get_resolver()
     # 56차 T308 — log_folder UNC + Local 모드 pre-flight check
     check_log_folder_mode_compat(req.log_folder, resolver)
+    # 57차 T319 diag — SUTR build session params 확인 (Coverage와 비교용)
+    import logging as _logging
+    _logging.getLogger(__name__).info(
+        f"SUTR build req: project_id={req.project_id!r}, jenkins_build_number="
+        f"{req.jenkins_build_number!r}, cache_root={req.cache_root!r}, "
+        f"log_folder={req.log_folder!r}, sutr_template_path={req.sutr_template_path!r}"
+    )
     session = collect_swut_session(
         resolver, req.project_id,
         jenkins_build_number=req.jenkins_build_number,
         cache_root=req.cache_root,
         log_folder=req.log_folder,
+    )
+    _logging.getLogger(__name__).info(
+        f"SUTR build session collected: environments={len(session.environments)}, "
+        f"total_tcs={sum(len(env.test_cases) for env in session.environments)}"
     )
     # 30차 W21: function 별 ASIL 매핑 — Coverage builder와 대칭.
     _apply_function_asil_map(req, session)

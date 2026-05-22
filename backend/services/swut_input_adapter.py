@@ -395,6 +395,14 @@ def _resolve_latest_release_folder(
                 )
             return log_folder
 
+        # 57차 T319 diag — cloudium list_dir 결과 확인
+        import logging as _logging
+        _diag_logger = _logging.getLogger(__name__)
+        _diag_logger.info(
+            f"_resolve_latest_release_folder cloudium: log_folder={log_folder!r}, "
+            f"list_dir entries={len(entries)}: {entries[:10]}"
+        )
+
         # entries는 절대 경로 list. 각 entry에 대해 `<entry>/01.TestCaseDataReport`
         # 존재 + 이름이 v<버전>_<날짜> 패턴이면 후보.
         candidates_c: list[tuple[str, str]] = []
@@ -402,14 +410,27 @@ def _resolve_latest_release_folder(
             name = os.path.basename(entry_path.rstrip("/\\"))
             m = _RELEASE_FOLDER_RE.match(name)
             if not m:
+                _diag_logger.debug(
+                    f"  entry skip (no pattern match): name={name!r}"
+                )
                 continue
             sub_check = os.path.join(entry_path, "01.TestCaseDataReport")
             try:
                 if not resolver.exists(sub_check):
+                    _diag_logger.debug(
+                        f"  entry skip (sub-dir미발견): {sub_check!r}"
+                    )
                     continue
-            except Exception:  # noqa: BLE001
+            except Exception as e:  # noqa: BLE001
+                _diag_logger.debug(
+                    f"  entry skip (exists 예외 {type(e).__name__}): {sub_check!r}"
+                )
                 continue
             candidates_c.append((m.group(1), entry_path))
+        _diag_logger.info(
+            f"  candidates_c ({len(candidates_c)}): "
+            f"{[(d, os.path.basename(p)) for d, p in candidates_c[:5]]}"
+        )
 
         if not candidates_c:
             if out_warnings is not None:
@@ -612,7 +633,16 @@ def collect_from_log_folder(
     # 37차: log_folder가 `01.Log/` 같은 상위 폴더면 자동으로 latest release 디렉토리
     # (`v<버전>_<YYMMDD>` 패턴 중 날짜 suffix 최대값) 선택. Case A (사용자가 release
     # 폴더 직접 지정)면 그대로 통과 — backward compat.
+    input_log_folder = log_folder
     log_folder = _resolve_latest_release_folder(resolver, log_folder, out_warnings=warnings)
+
+    # 57차 T319 diag — release folder 자동 선택 결과 + sub-folder 존재 여부
+    import logging as _logging
+    _diag_logger = _logging.getLogger(__name__)
+    _diag_logger.info(
+        f"collect_from_log_folder diag: input={input_log_folder!r}, "
+        f"resolved_release={log_folder!r}, env_prefix={env_prefix!r}"
+    )
 
     session = SwUTSession(
         project_id=project_id,
@@ -634,14 +664,24 @@ def collect_from_log_folder(
     ]:
         if not resolver.exists(sub_path):
             warnings.append(f"하위 폴더 미발견: {label}")
+            _diag_logger.warning(f"collect_from_log_folder: 하위 폴더 미발견 {sub_path!r}")
+        else:
+            _diag_logger.info(f"collect_from_log_folder: 하위 폴더 존재 {sub_path!r}")
 
     # 2) TestCaseDataReport의 .html 파일들로 env 목록 빌드
     tc_files = _list_dir_via_resolver(resolver, sub_tc, pattern="*.html")
+    _diag_logger.info(
+        f"collect_from_log_folder: list_dir({sub_tc!r}, *.html) → "
+        f"{len(tc_files)} files: {tc_files[:5]}"
+    )
     env_names = sorted({
         _extract_env_from_filename(Path(f).name, env_prefix=env_prefix)
         for f in tc_files
         if _extract_env_from_filename(Path(f).name, env_prefix=env_prefix)
     })
+    _diag_logger.info(
+        f"collect_from_log_folder: env_names ({len(env_names)}) = {env_names[:10]}"
+    )
 
     # 3) 각 env마다 3 파일 추출
     for env in env_names:

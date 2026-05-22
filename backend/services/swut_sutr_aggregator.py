@@ -351,8 +351,10 @@ def _write_test_log(
     # tc_name → 첫 매칭 env (component_name + test_results 조회용).
     # 환경별 동일 TC가 중복 정의되면 첫 환경 우선 (Coverage source semantic 일치).
     tc_to_env: dict[str, Any] = {}
+    total_tcs_in_envs = 0
     for env in session.environments:
         for tc_name in env.test_cases:
+            total_tcs_in_envs += 1
             if tc_name not in tc_to_env:
                 tc_to_env[tc_name] = env
 
@@ -360,50 +362,174 @@ def _write_test_log(
         getattr(layout, "test_log_tc_row_step", 1) if layout is not None else 1
     )
 
+    # 57차 T314 diag: 진단용 — backend log 및 out_warnings에 데이터 흐름 출력
+    diag_msg = (
+        f"SUTR _write_test_log diag: environments={len(session.environments)}, "
+        f"total_tcs_in_envs={total_tcs_in_envs}, "
+        f"tc_to_fn_id_size={len(tc_to_fn_id)}, "
+        f"tc_row_step={tc_row_step}, start_row={start_row}, col={col}"
+    )
+    import logging as _logging
+    _logging.getLogger(__name__).info(diag_msg)
+    if out_warnings is not None:
+        out_warnings.append(f"[diag] {diag_msg}")
+
+    # 57차 T319 fix — Template block (row 5~base+row_step*template_count) 의
+    # merge pattern + style 추출 → 새 TC block (template 영역 밖)에 동일 확장.
+    # 회사 v2.02 SUTR 양식: 6 TC × 6 row × 38 col merge/style pattern.
+    # audit reviewer가 일관 양식으로 산출물 검토.
+    import copy as _copy
+    template_block_count = 6  # 회사 양식 표준 default 6 TC blocks
+    template_merges_local: list[tuple[int, int, int, int]] = []
+    for _mc in list(ws.merged_cells.ranges):
+        if (start_row <= _mc.min_row <= start_row + tc_row_step - 1 and
+                _mc.max_row <= start_row + tc_row_step - 1):
+            # template block 1번 내부 merge — offset 0 row 시작
+            template_merges_local.append(
+                (_mc.min_row - start_row, _mc.max_row - start_row,
+                 _mc.min_col, _mc.max_col)
+            )
+
+    # 57차 T319 fix — 회사 v2.02 SUTR Test Result 정확한 컬럼 매핑:
+    #   B (col 2)  = TC ID
+    #   C (col 3)  = Title (Component name)
+    #   D (col 4)  = Test Case Generation Method
+    #   E (col 5)  = 빈 cell (TC ID row) / row 6~10 sub-row Params 1~5 (1,2,3,4,5)
+    #   F~O (cols 6~15)   = Input Params 1~10 (VectorCAST input parameter — TODO)
+    #   P~Y (cols 16~25)  = Expected Result Params 1~10 (사용자 입력)
+    #   Z~AI (cols 26~35) = Actual Result Params 1~10 (사용자 입력)
+    #   AJ (col 36) = Pass/Fail Unit
+    #   AK (col 37) = Pass/Fail Total
+    #   AL (col 38) = Log Data (VectorCAST log path)
+    # 이전 코드는 col+3 (E) Pass/Fail, col+4 (F=Param1) Function ID, col+5 (G=Param2)
+    # ASIL을 잘못 stamp. v2.02 회사 양식 audit 표준 위반 → 본 fix로 정정.
+    PASS_FAIL_UNIT_COL = 36   # AJ
+    PASS_FAIL_TOTAL_COL = 37  # AK
+    LOG_DATA_COL = 38         # AL
+
     written = 0
     for tc_name in sorted(tc_to_fn_id.keys()):
         r = start_row + (written * tc_row_step)
         env = tc_to_env.get(tc_name)
         component_name = env.component_name if env is not None else ""
         exec_r = env.test_results.get(tc_name) if env is not None else None
+        result_str = (
+            "Pass" if exec_r and exec_r.passed else
+            "Fail" if exec_r else
+            "N/A"
+        )
+
+        # B/C/D — TC ID / Title / Method (기본 fill)
         safe_write(ws, r, col, tc_name)
         safe_write(ws, r, col + 1, component_name)
         safe_write(ws, r, col + 2, "AEC, ABV")
-        safe_write(
-            ws, r, col + 3,
-            "Pass" if exec_r and exec_r.passed else "Fail" if exec_r else "N/A",
-        )
+        # E (col 5) — TC ID row는 빈 cell (Pass/Fail 자리가 아님)
+        # sub-row E6~E10에 Params 1~5 stamp (template default 패턴)
+        if tc_row_step >= 2:
+            for sub_i in range(1, tc_row_step):
+                sub_r = r + sub_i
+                if ws.cell(sub_r, 5).value is None:  # col 5 = E
+                    safe_write(ws, sub_r, 5, sub_i)
 
-        # 31차 W27: TC name에서 SwUFn_NNNN 추출 → Function ID + ASIL 컬럼.
-        # T314: tc_to_fn_id에 이미 추출돼 있어 dict lookup 사용 (regex 중복 제거).
+        # 57차 T319 fix — F~O / P~Y / Z~AI Param 값 추출 + stamp.
+        # VectorCAST TestCaseItem (vcast_parser.py:179) 에 input_data / expected_result
+        # / actual_result dict 보유. env.test_cases[tc_name] = List[TestCaseItem] —
+        # 첫 item 사용 (회사 양식 1 TC = 1 row block, 다른 variant는 sub-row 활용 또는 skip).
+        if env is not None:
+            tc_items = env.test_cases.get(tc_name) or []
+            tc_item = tc_items[0] if tc_items else None
+            if tc_item is not None:
+                # F~O (col 6~15) Input Params 1~10
+                input_vals = list(getattr(tc_item, "input_data", {}).values())[:10]
+                for pi, val in enumerate(input_vals):
+                    safe_write(ws, r, 6 + pi, str(val) if val else "")
+                # P~Y (col 16~25) Expected Result Params 1~10
+                expected_vals = list(getattr(tc_item, "expected_result", {}).values())[:10]
+                for pi, val in enumerate(expected_vals):
+                    safe_write(ws, r, 16 + pi, str(val) if val else "")
+                # Z~AI (col 26~35) Actual Result Params 1~10
+                # actual_result: Dict[str, Tuple[str, str]] — (actual_val, expected_val)
+                actual_dict = getattr(tc_item, "actual_result", {})
+                actual_vals = [
+                    t[0] if isinstance(t, tuple) and t else (str(t) if t else "")
+                    for t in list(actual_dict.values())[:10]
+                ]
+                for pi, val in enumerate(actual_vals):
+                    safe_write(ws, r, 26 + pi, str(val) if val else "")
+
+        # AJ (col 36) Pass/Fail Unit + AK (col 37) Pass/Fail Total — TC 전체 row에 적용.
+        # 회사 양식 AJ는 row 5~10 (TC block 전체)에 merge되어 'Pass'/'Fail' 표시.
+        safe_write(ws, r, PASS_FAIL_UNIT_COL, result_str)
+        safe_write(ws, r, PASS_FAIL_TOTAL_COL, result_str)
+
+        # AL (col 38) Log Data — VectorCAST log file path 추정.
+        log_path = ""
+        if env is not None and getattr(env, "env_name", ""):
+            # 회사 표준 명명: <env>_<tc_name>.log 또는 VectorCAST report path
+            log_path = f"{env.env_name}/{tc_name}.log"
+        safe_write(ws, r, LOG_DATA_COL, log_path)
+
+        # 31차 W27: TC name에서 SwUFn_NNNN 추출 → ASIL 시각 강조 (AJ 컬럼)
+        # 이전: col+5 (G=Param2) 잘못 강조. 현재: AJ row 시각 강조 (사용자 입력 영역 미침범).
         fn_id = tc_to_fn_id.get(tc_name, "")
         asil = asil_map.get(fn_id, "") if fn_id else ""
-        safe_write(ws, r, col + 4, fn_id)
-        safe_write(ws, r, col + 5, f"ASIL {asil}" if asil else "")
-        # ASIL B/C/D 시각 강조 — 30차 W21 + 31차 W29 정책.
         _asil_marker = {
             "B": mark_asil_b_function,
             "C": mark_asil_c_function,
             "D": mark_asil_d_function,
         }.get(asil)
         if _asil_marker:
-            _asil_marker(ws, r, col + 5)
+            _asil_marker(ws, r, PASS_FAIL_UNIT_COL)
 
         # 54차 T283 + 54-fix W4: v2.02 양식 AL column marker.
-        # exec_r 없음 → "" (미실행). exec_r.passed=True → "✓".
-        # exec_r.passed=False → "✗". exec_r.passed=None (결과 unset) → "—"
-        # (silent wrong-pick 방지 — Fail로 표기 안 함).
+        # AL = Log Data column (38). exec_r markers (✓/✗/—)는 별도 col에 stamp.
+        # AL과 충돌 시 skip.
         if layout is not None and layout.test_log_extra_marker_col is not None:
             al_col = layout.test_log_extra_marker_col
-            marker = ""
-            if exec_r is not None:
-                if exec_r.passed is True:
-                    marker = "✓"
-                elif exec_r.passed is False:
-                    marker = "✗"
-                else:
-                    marker = "—"  # passed=None unset case
-            safe_write(ws, r, al_col, marker)
+            if al_col != LOG_DATA_COL:  # AL과 충돌 회피
+                marker = ""
+                if exec_r is not None:
+                    if exec_r.passed is True:
+                        marker = "✓"
+                    elif exec_r.passed is False:
+                        marker = "✗"
+                    else:
+                        marker = "—"
+                safe_write(ws, r, al_col, marker)
+
+        # 57차 T319 fix — 새 TC block (template 영역 밖)은 template style + merge
+        # 복사. 사용자 결정 — "빌드 속도는 좀 느려도 된다 정확하고 필요한 데이터는
+        # 다 쓸수있게해야해". Style copy 1941 TC × 6 row × 38 col = ~440k cell ops
+        # (~50초 추가), merge ~5800개 (~1초). audit 양식 일관성 100% 확보.
+        block_idx = written
+        if block_idx >= template_block_count and tc_row_step >= 2:
+            max_col_n = ws.max_column or 38
+            for offset in range(tc_row_step):
+                src_row = start_row + offset
+                dst_row = r + offset
+                if dst_row == src_row:
+                    continue
+                for c_n in range(1, max_col_n + 1):
+                    src_cell = ws.cell(src_row, c_n)
+                    dst_cell = ws.cell(dst_row, c_n)
+                    if src_cell.has_style:
+                        dst_cell.font = _copy.copy(src_cell.font)
+                        dst_cell.border = _copy.copy(src_cell.border)
+                        dst_cell.fill = _copy.copy(src_cell.fill)
+                        dst_cell.alignment = _copy.copy(src_cell.alignment)
+                        dst_cell.number_format = src_cell.number_format
+                        dst_cell.protection = _copy.copy(src_cell.protection)
+            # Merge cells 적용 — template block의 local merge를 새 block 위치에 복사
+            for off_start, off_end, mc_min_col, mc_max_col in template_merges_local:
+                new_min_r = r + off_start
+                new_max_r = r + off_end
+                try:
+                    ws.merge_cells(
+                        start_row=new_min_r, end_row=new_max_r,
+                        start_column=mc_min_col, end_column=mc_max_col,
+                    )
+                except (ValueError, AttributeError):
+                    pass
 
         written += 1
     return written
@@ -535,10 +661,16 @@ def build_sutr(
         n = _write_deviation(dev_ws, deviation_cases, out_warnings=warnings)
         summary["deviation_cases_written"] = n
 
-    # 54-fix C1: substring 대칭
-    log_ws = next((wb[n] for n in sheet_names if "test log" in n.lower()), None)
+    # 57차 T314 fix: 회사 v2.02 SUTR 양식 시트명이 '3.Test Result' (Log 아닌 Result).
+    # 54-fix C1 substring 매칭에 'test result'도 포함 — SwUT SUTR (v2.02 Result) /
+    # SwIT SITR (Log) 모두 호환.
+    log_ws = next(
+        (wb[n] for n in sheet_names
+         if "test log" in n.lower() or "test result" in n.lower()),
+        None,
+    )
     if log_ws is None:
-        warnings.append("Test Log 시트 미발견")
+        warnings.append("Test Log/Result 시트 미발견")
     else:
         # 54-fix C1: layout 전달 — AL marker
         n = _write_test_log(

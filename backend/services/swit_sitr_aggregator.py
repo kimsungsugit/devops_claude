@@ -237,10 +237,15 @@ def build_swit_sitr_report(
         n = _write_deviation(dev_ws, deviation_cases, out_warnings=warnings)
         summary["deviation_cases_written"] = n
 
-    # Test Log — 53차 fix: substring 매칭 (31차 W27 ASIL col+4/5 — _write_test_log 내부 자동 처리)
-    log_ws = next((wb[n] for n in sheet_names if "test log" in n.lower()), None)
+    # Test Log — 53차 fix: substring 매칭. 57차 T314: 'test result'도 포함 (v2.02
+    # SUTR/SITR 회사 양식 시트명 'Test Result' 호환).
+    log_ws = next(
+        (wb[n] for n in sheet_names
+         if "test log" in n.lower() or "test result" in n.lower()),
+        None,
+    )
     if log_ws is None:
-        warnings.append("Test Log 시트 미발견")
+        warnings.append("Test Log/Result 시트 미발견")
     else:
         # 54차 T283: layout 전달 — v2.02 AL column marker fill
         n = _write_test_log(
