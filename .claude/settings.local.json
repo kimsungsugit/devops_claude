@@ -43,7 +43,9 @@
       "Bash(./.venv/Scripts/python.exe -m pytest tests/unit/test_users_service.py::TestVerifyCredentials::test_verify_case_insensitive_username -q --tb=short)",
       "Bash(./.venv/Scripts/python.exe -m pytest tests/unit/test_swit_router.py tests/unit/test_swit_coverage_aggregator.py tests/unit/test_swit_sitr_aggregator.py -q --tb=line)",
       "Bash(./.venv/Scripts/python.exe -m pytest tests/unit/test_cloudium_extra_prefixes.py tests/unit/test_swit_router.py::TestExtraForbid53fix tests/unit/test_swit_router.py::TestSheetNameSubstring53fix -q --tb=short)",
-      "Bash(./.venv/Scripts/python.exe -m pytest tests/unit/test_cloudium_extra_prefixes.py tests/unit/test_swit_router.py tests/unit/test_swut_router.py -q --tb=line)"
+      "Bash(./.venv/Scripts/python.exe -m pytest tests/unit/test_cloudium_extra_prefixes.py tests/unit/test_swit_router.py tests/unit/test_swut_router.py -q --tb=line)",
+      "Bash(Get-ChildItem -Path \"D:\\\\Project\\\\devops\\\\Release_claude\" -Filter \"*ExecutionResult*.html\" -Recurse)",
+      "Bash(Select-Object FullName)"
     ]
   }
 }
