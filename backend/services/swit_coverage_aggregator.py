@@ -216,7 +216,7 @@ def build_swit_coverage_report(
     if trace_ws is None:
         warnings.append("1.Traceability 시트 미발견")
     else:
-        n_o = _write_traceability_sheet(trace_ws, session, out_warnings=warnings)
+        n_o = _write_traceability_sheet(trace_ws, session, out_warnings=warnings, layout=layout)
         summary["traceability_o_cells"] = n_o
         if n_o == 0:
             incomplete_sheets.append("1.Traceability")

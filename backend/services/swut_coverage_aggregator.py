@@ -785,11 +785,22 @@ def _write_consistency_sheet(
 
 def _write_traceability_sheet(
     ws, session: SwUTSession, out_warnings: list[str] | None = None,
+    *, layout: Any = None,
 ) -> int:
     """1.Traceability 시트 — TC × Function 매트릭스 본격 작성 (T133).
 
     시트 헤더 행에서 `SwUFn_NNNN` 컬럼 위치 lookup → 각 TC 행에 'O' 표시.
     헤더 미발견 시 BLANK_MARKUP 유지.
+
+    58차 F2: SwIT v2.02 양식은 헤더 row 위치가 v3.01 (1~10)보다 아래쪽 (20~25)에
+    있을 수 있고 SwUFn_ 컬럼 개수도 더 작음. layout.traceability_header_row 제공
+    시 그 row를 헤더로 강제. fallback 시 max_row=30 확장 + SwUFn_ 임계 50→5로 완화.
+
+    Args:
+        ws: 1.Traceability 시트.
+        session: SwUTSession.
+        out_warnings: 누락/실패 메시지 누적.
+        layout: Optional[SwitLayout] — traceability_header_row 보유 시 우선.
 
     Returns:
         쓰여진 'O' 셀 수. 0이면 매트릭스 미작성.
@@ -797,19 +808,39 @@ def _write_traceability_sheet(
     if not ws:
         return 0
 
-    # 1) 헤더 행 찾기 — SwUFn_xxxx 컬럼이 50개+ 등장하는 행
+    # 58차 F2: layout 제공 시 traceability_header_row 강제. fallback은 자동 탐색.
     header_row_idx = None
     header_cols: dict[str, int] = {}
-    for row in ws.iter_rows(min_row=1, max_row=20, values_only=False):
-        cols: dict[str, int] = {}
-        for cell in row:
+    layout_header_row = (
+        getattr(layout, "traceability_header_row", None) if layout is not None else None
+    )
+    if layout_header_row is not None:
+        # 강제 헤더 row — 그 row에서 SwUFn_/SwUTC_/SwITC_ prefix col 수집
+        for cell in next(
+            ws.iter_rows(min_row=layout_header_row, max_row=layout_header_row,
+                         values_only=False),
+            [],
+        ):
             v = cell.value
-            if isinstance(v, str) and _TC_FN_RE.fullmatch(v.strip()):
-                cols[v.strip()] = cell.column
-        if len(cols) >= 50:
-            header_row_idx = row[0].row
-            header_cols = cols
-            break
+            if isinstance(v, str):
+                s = v.strip()
+                if _TC_FN_RE.fullmatch(s) or s.startswith(("SwUTC_", "SwITC_", "SwUFn_")):
+                    header_cols[s] = cell.column
+        if header_cols:
+            header_row_idx = layout_header_row
+
+    if header_row_idx is None:
+        # 자동 탐색 — max_row 20 → 30 확장, SwUFn_ 임계 50 → 5 완화 (SwIT v2.02 대응).
+        for row in ws.iter_rows(min_row=1, max_row=30, values_only=False):
+            cols: dict[str, int] = {}
+            for cell in row:
+                v = cell.value
+                if isinstance(v, str) and _TC_FN_RE.fullmatch(v.strip()):
+                    cols[v.strip()] = cell.column
+            if len(cols) >= 5:
+                header_row_idx = row[0].row
+                header_cols = cols
+                break
 
     if header_row_idx is None:
         if out_warnings is not None:
@@ -981,7 +1012,7 @@ def build_coverage_report(
     if trace_ws is None:
         warnings.append("1.Traceability 시트 미발견")
     else:
-        n_o = _write_traceability_sheet(trace_ws, session, out_warnings=warnings)
+        n_o = _write_traceability_sheet(trace_ws, session, out_warnings=warnings, layout=layout)
         summary["traceability_o_cells"] = n_o
         if n_o == 0:
             incomplete_sheets.append("1.Traceability")

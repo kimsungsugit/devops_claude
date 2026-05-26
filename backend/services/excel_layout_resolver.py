@@ -91,6 +91,20 @@ class SwitLayout:
             v3.01 또는 기본은 1. inspect 시 template의 TC ID 열 (B)에서 첫 2개 TC
             row 위치 차이로 동적 감지. SUTR/SITR _write_test_log가 이 step 적용해
             row 5, 11, 17, ... 에 TC ID stamp.
+        test_log_input_col: **58차 F3 신규** — Test Log 'Input' / 'Input Parameters'
+            라벨 col. SwIT SITR v2.02 = 8 (H), SwUT SUTR v3.01 = 6 (F). None이면
+            v3.01 hardcode fallback (6).
+        test_log_expected_col: 'Expected Result' col. v2.02 = 18 (R), v3.01 = 16 (P).
+        test_log_actual_col: 'Actual Result' col. v2.02 = 28 (AB), v3.01 = 26 (Z).
+        test_log_pass_fail_col: 'Pass/Fail' / 'Pass/Fail Unit' col. v2.02 SITR = 38
+            (AL), v3.01 SUTR = 36 (AJ).
+        test_log_pass_fail_total_col: 'Pass/Fail Total' col. v3.01 SUTR only = 37 (AK).
+            v2.02 SITR은 단일 'Pass/Fail' col만 사용 → None.
+        test_log_log_data_col: 'Log Data' / 'Log' col. v2.02 SITR = 40 (AN), v3.01 SUTR
+            = 38 (AL).
+        traceability_header_row: **58차 F2 신규** — 1.Traceability 시트 헤더 row
+            (SwUFn_ 또는 SwUTC_ prefix 컬럼이 다수 수평 배열된 row). SwIT v2.02 양식
+            은 v3.01보다 더 아래쪽 (row 20~25) 위치. None이면 writer가 자동 탐색.
         warnings: inspect 중 누락 라벨 / 시트 미발견 등 메시지.
     """
     detected_version: Literal["v2.02", "v3.01", "unknown"] = "unknown"
@@ -106,6 +120,15 @@ class SwitLayout:
     tc_stats_label_missing: bool = False
     requirements_label_missing: bool = False
     test_log_tc_row_step: int = 1
+    # 58차 F3 — Test Log 시트 column 위치 (None이면 v3.01 hardcode fallback)
+    test_log_input_col: Optional[int] = None
+    test_log_expected_col: Optional[int] = None
+    test_log_actual_col: Optional[int] = None
+    test_log_pass_fail_col: Optional[int] = None
+    test_log_pass_fail_total_col: Optional[int] = None
+    test_log_log_data_col: Optional[int] = None
+    # 58차 F2 — Coverage 1.Traceability 시트 헤더 row 위치
+    traceability_header_row: Optional[int] = None
     warnings: list[str] = field(default_factory=list)
 
 
@@ -279,6 +302,95 @@ def _scan_test_log_marker_col(ws) -> Optional[int]:
     return cell_ref.col if cell_ref else None
 
 
+def _scan_test_log_columns(ws) -> dict[str, Optional[int]]:
+    """58차 F3 — Test Log 시트 헤더 row에서 column 위치 라벨 매칭.
+
+    회사 v2.02 SITR 양식 헤더 (row 1~10 범위):
+        B='Test Case', H='Input', R='Expected Result', AB='Actual Result',
+        AL='Pass/Fail', AN='Log Data'
+    회사 v3.01 SUTR 양식 헤더:
+        B='Test Case ID', F='Input', P='Expected Result', Z='Actual Result',
+        AJ='Pass/Fail Unit', AK='Pass/Fail Total', AL='Log Data'
+
+    탐색 범위 max_row=12, max_col=50. 같은 라벨 여러 cell 매칭 시 첫 cell 우선.
+
+    Returns:
+        dict[label_key, Optional[int]]:
+            - input_col / expected_col / actual_col / pass_fail_col /
+              pass_fail_total_col / log_data_col
+            미발견은 None. 모두 None이면 v3.01 hardcode fallback.
+    """
+    result: dict[str, Optional[int]] = {
+        "input_col": None, "expected_col": None, "actual_col": None,
+        "pass_fail_col": None, "pass_fail_total_col": None, "log_data_col": None,
+    }
+    if ws is None:
+        return result
+    max_row = min(ws.max_row + 1, 12) if ws.max_row else 12
+    max_col = min(ws.max_column + 1, 50) if ws.max_column else 50
+    for r in range(1, max_row):
+        for c in range(1, max_col):
+            v = ws.cell(r, c).value
+            if not isinstance(v, str):
+                continue
+            s = v.strip().lower()
+            if not s:
+                continue
+            if result["input_col"] is None and s in (
+                "input", "input parameters", "input parameter",
+            ):
+                result["input_col"] = c
+            elif result["expected_col"] is None and s in (
+                "expected result", "expected", "expected results",
+            ):
+                result["expected_col"] = c
+            elif result["actual_col"] is None and s in (
+                "actual result", "actual", "actual results",
+            ):
+                result["actual_col"] = c
+            elif result["pass_fail_total_col"] is None and s in (
+                "pass/fail total", "pass fail total",
+            ):
+                # 'Pass/Fail Total'은 'Pass/Fail'보다 longer match — 먼저 검사.
+                result["pass_fail_total_col"] = c
+            elif result["pass_fail_col"] is None and s in (
+                "pass/fail", "pass/fail unit", "pass fail", "pass/fail (unit)",
+            ):
+                result["pass_fail_col"] = c
+            elif result["log_data_col"] is None and s in (
+                "log data", "log", "log file",
+            ):
+                result["log_data_col"] = c
+    return result
+
+
+def _scan_traceability_header(ws) -> Optional[int]:
+    """58차 F2 — 1.Traceability 시트 헤더 row 동적 감지.
+
+    헤더 row 정의: SwUFn_ 또는 SwUTC_ prefix 컬럼이 다수 (>=5개) 수평 배열된 row.
+    SwIT v2.02 양식은 헤더가 row 20~25 부근에 있을 수 있고 SwUT v3.01은 더 위
+    (row 3~10) 가능. max_row=30 스캔, max_col=500 (1941 TC × 30 환경).
+
+    Returns:
+        헤더 row (1-indexed) 또는 None (미발견).
+    """
+    if ws is None:
+        return None
+    max_row = min(ws.max_row + 1, 35) if ws.max_row else 35
+    max_col = min(ws.max_column + 1, 500) if ws.max_column else 500
+    for r in range(1, max_row):
+        swufn_count = 0
+        for c in range(1, max_col):
+            v = ws.cell(r, c).value
+            if isinstance(v, str) and (
+                v.startswith("SwUFn_") or v.startswith("SwUTC_") or v.startswith("SwITC_")
+            ):
+                swufn_count += 1
+                if swufn_count >= 5:
+                    return r
+    return None
+
+
 def _scan_test_log_tc_row_step(ws) -> int:
     """57차 T314 — Test Log/Test Result 시트의 1 TC당 row step 동적 감지.
 
@@ -382,6 +494,13 @@ def _inspect_internal(
         test_log_header_cell: Optional[CellRef] = None
         deviation_header_cell: Optional[CellRef] = None
         test_log_tc_row_step = 1
+        # 58차 F3 — Test Log column 위치 (None이면 v3.01 hardcode fallback)
+        test_log_input_col: Optional[int] = None
+        test_log_expected_col: Optional[int] = None
+        test_log_actual_col: Optional[int] = None
+        test_log_pass_fail_col: Optional[int] = None
+        test_log_pass_fail_total_col: Optional[int] = None
+        test_log_log_data_col: Optional[int] = None
         if kind == "sitr":
             log_ws = _find_sheet(wb, lambda n: "test log" in n.lower() or "test result" in n.lower())
             if log_ws is not None:
@@ -393,12 +512,29 @@ def _inspect_internal(
                 test_log_header_cell = tc_header
                 # 57차 T314 — 1 TC당 row step 동적 감지 (회사 v2.02 = 6)
                 test_log_tc_row_step = _scan_test_log_tc_row_step(log_ws)
+                # 58차 F3 — column 위치 자동 감지
+                _cols = _scan_test_log_columns(log_ws)
+                test_log_input_col = _cols.get("input_col")
+                test_log_expected_col = _cols.get("expected_col")
+                test_log_actual_col = _cols.get("actual_col")
+                test_log_pass_fail_col = _cols.get("pass_fail_col")
+                test_log_pass_fail_total_col = _cols.get("pass_fail_total_col")
+                test_log_log_data_col = _cols.get("log_data_col")
             dev_ws = _find_sheet(wb, lambda n: "deviation" in n.lower())
             if dev_ws is not None:
                 dev_header, _ = _scan_label_cell(
                     dev_ws, ("Test Case ID", "TC ID"), max_row=10,
                 )
                 deviation_header_cell = dev_header
+
+        # 58차 F2 — Coverage Traceability 시트 헤더 row dynamic 감지
+        traceability_header_row: Optional[int] = None
+        if kind == "coverage":
+            trace_ws = _find_sheet(
+                wb, lambda n: "traceability" in n.lower(),
+            )
+            if trace_ws is not None:
+                traceability_header_row = _scan_traceability_header(trace_ws)
 
         # 양식 버전 추정
         detected_version = _detect_version_from_labels(test_summary_labels)
@@ -474,6 +610,15 @@ def _inspect_internal(
             tc_stats_label_missing=tc_stats_label_missing,
             requirements_label_missing=requirements_label_missing,
             test_log_tc_row_step=test_log_tc_row_step,
+            # 58차 F3 — Test Log column 위치
+            test_log_input_col=test_log_input_col,
+            test_log_expected_col=test_log_expected_col,
+            test_log_actual_col=test_log_actual_col,
+            test_log_pass_fail_col=test_log_pass_fail_col,
+            test_log_pass_fail_total_col=test_log_pass_fail_total_col,
+            test_log_log_data_col=test_log_log_data_col,
+            # 58차 F2 — Coverage Traceability 헤더 row
+            traceability_header_row=traceability_header_row,
             warnings=warnings,
         )
     finally:

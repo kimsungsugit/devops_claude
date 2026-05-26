@@ -632,3 +632,85 @@
 - I12 Cover G29 Date 라벨 fallback (회사 'Date' 매칭)
 - I13 `summary["test_log_rows_written"]` 추가 (T317 잔여)
 - 산출물 ~5MB 초과 시 openpyxl write_only 모드
+
+
+## 58차 — F1/F2/F3 통합 fix (SwIT v2.02 layout + Coverage Traceability + SUTR Actual stamp)
+
+57차 commit `5bf7d47` 후 4 산출물 (SwUT Coverage / SUTR + SwIT Coverage / SITR) 라이브 검증에서 3건의 독립 결함 발견. 사용자 결정 모두 Recommended.
+
+### F3 — SwIT SITR Column Layout-aware Writer (T323)
+
+**결함**: SwIT SITR v2.02 양식 헤더 B/H/R/AB/AL/AN (col 2/8/18/28/38/40) — 우리 hardcoded는 SwUT SUTR v3.01 기준 B/C/D/F/P/Z/AJ/AK/AL (col 2/3/4/6/16/26/36/37/38). 잘못된 col에 stamp.
+
+**Fix**:
+- `excel_layout_resolver.SwitLayout` 6 신규 field: `test_log_input_col`, `test_log_expected_col`, `test_log_actual_col`, `test_log_pass_fail_col`, `test_log_pass_fail_total_col`, `test_log_log_data_col` — 모두 `Optional[int] = None` default (v3.01 hardcode fallback)
+- `_scan_test_log_columns(ws)` helper — 헤더 row (max_row=12, max_col=50) 라벨 매칭으로 column 자동 감지
+- `_inspect_internal` SITR 분기에서 helper 호출 + SwitLayout에 전달
+- `swut_sutr_aggregator._write_test_log` — layout 6 col 중 1개라도 있으면 layout-aware 분기, 모두 None이면 v3.01 hardcode fallback
+
+**회귀**: 31차 W27 col+4/+5 매핑 폐기 (v2.02 양식 Input Params 영역 침범) — 회귀 3건 update + 신규 4건 (column scan v202/v301/no-headers/None ws) + 신규 3건 (SwIT SITR Test Log no Function ID col, no ASIL stamp at col G, AL marker)
+
+### F2 — SwIT Coverage Traceability Dynamic Header Row (T324)
+
+**결함**: SwIT v2.02 Coverage 1.Traceability 헤더 row가 v3.01보다 아래쪽 (row 20+) — 기존 `_write_traceability_sheet` 탐색 max_row=20 임계 + SwUFn_ 컬럼 50개+ 임계로 매칭 실패 → 1941 TC stamp 0건 → 49KB incomplete 산출물.
+
+**Fix**:
+- `SwitLayout.traceability_header_row: Optional[int] = None` 신규
+- `_scan_traceability_header(ws)` helper — SwUFn_/SwUTC_/SwITC_ prefix 5개+ 행 row (max_row=30 확장) 반환
+- `_inspect_internal` coverage 분기에서 helper 호출
+- `_write_traceability_sheet(ws, session, ..., *, layout=None)` 시그니처 확장 — layout 제공 시 traceability_header_row 강제, fallback은 자동 탐색 (max_row 20→30, SwUFn_ 임계 50→5)
+- `build_swit_coverage_report` / `build_coverage_report` 모두 layout 전달
+
+**회귀**: 신규 4건 (scan v202 SwIT row 20 / v301 row 3 / no SwUFn_ None / None ws) + 신규 1건 (TestTraceabilityV202LayoutF2 — layout 제공 시 row 26 col 3에 'O' stamp 검증)
+
+### F1 — SwUT SUTR Actual Stamp via BeautifulSoup (T325)
+
+**결함**: TestCaseItem (vcast_parser) 에 actual_result 필드 없음 (TestResultItem에만 있음). 57차 carry forward fix 적용했으나 vcast_parser `parse_execution_result` 자체 결함 (line 451-454 nested loop self-marker + `_read_tc_header(is_testcase=False)` offset mismatch) — marker 29개 있는데 `test_results count: 0` 반환.
+
+**사용자 결정**: 별도 BeautifulSoup parser (vcast_parser 우회 — uds_pipeline 등 다른 호출처 회귀 위험 회피).
+
+**Fix**:
+- `ExecutionRow.actual_result: dict[str, tuple[str, str]] = field(default_factory=dict)` 신규 필드
+- `extract_execution_results_with_actual(html_bytes)` 신규 함수 — VectorCAST 2025 실 HTML 구조 (`<h4>Start of <tc>` + `<h3>Execution Results (PASS|FAIL)` + `<tr class="success/danger">` 안 `<td class='i\d+'>variable</td>...`) 자동 추출
+- `_extract_var_rows_between(anchor, end_anchor)` helper — 다음 h4 'Start of' 도달 전까지 variable row 추출. success-marker 시 actual=expected, fail-marker 시 별도
+- `_collect_from_log_folder` 2곳 (line 707, 1032)에서 `extract_execution_results` → `extract_execution_results_with_actual` 교체
+- `_write_test_log` actual source 변경 — TestCaseItem.actual_result fallback → ExecutionRow.actual_result 우선
+
+**라이브 검증 결과** (사용자 환경 `v2.02_240219` SWTE_01~30, 1941 TC):
+- 이전: Actual (Z~AI) stamp **0/1941 (0.0%)**
+- 신규 (58차 F1): Actual **1918/1941 (98.8%)** — VectorCAST 실측 actual 값 stamp ✓
+- sample row 11 SwUFn_0102.001: `{'Z': '255', 'AC': '0x1', 'AE': '0x1', 'AF': '255'}` — 4 variables actual + expected 추출
+
+**회귀**: 신규 4건 (extract_execution_results_with_actual — pass/fail distinction + empty graceful + multiple TCs) + 1건 update (`_EXEC_HTML_TEMPLATE` 변형 A — h3 → h4 순서)
+
+### 회귀 통합 결과
+
+backend 전체 SwUT/SwIT 회귀: 189 passed + 1 skipped (이전 ~190).
+- test_excel_layout_resolver.py: +10 (column scan 4 + traceability header 4 + inspect_sitr 2)
+- test_swit_sitr_aggregator.py: +3 신규 / -3 폐기 (31차 W27 매핑 폐기)
+- test_swit_coverage_aggregator.py: +1 (TestTraceabilityV202LayoutF2)
+- test_swut_input_adapter.py: +4 (TestExtractExecutionResultsWithActual)
+- test_swut_aggregators.py: 기존 48 통과 (v3.01 backward-compat)
+
+### 라이브 PoC 결과 (.codex_tmp/round_58_local_build/)
+
+| 산출물 | 크기 | 핵심 stamp |
+|--------|------|----------|
+| SwUT Coverage | 431099 bytes | Traceability 433 row, Consistency 31 functions ✓ |
+| SwUT SUTR | **1344463 bytes** (+30KB from 57차) | 1941 TC × 6 row, Input 98.5% / Expected 92.7% / **Actual 98.8% ✓ (이전 0.0%)** |
+| SwIT Coverage | 49352 bytes | Traceability **O stamp 335 ✓ (이전 0)** — 작은 양식 자체 limit |
+| SwIT SITR | **1432933 bytes** (+30KB) | 헤더 B/H/R/AB/AL/AN 정확 ✓, Actual 122/142 (85.9%) |
+
+### ISO 26262 audit evidence 영향
+
+- F1: SUTR Test Result에 VectorCAST 실측 actual_result stamp → audit reviewer가 산출물 단독 검토 시 expected/actual 비교 가능. ASIL D 함수 MC/DC 검증 깊이 향상
+- F2: SwIT Coverage 1.Traceability stamp 동작 → 함수↔TC 추적성 audit 가능
+- F3: SwIT SITR 양식 표준 column 위치 stamp → 회사 v2.02 양식 표준 audit reviewer 검토 호환
+- evidence_class "auto-generated draft" 정책 동일 — manual review 의무 유지
+
+### 비-목표 (59차+ Info)
+
+- I14 vcast_parser `parse_execution_result` 직접 fix (line 451-454 nested loop 결함) — uds_pipeline 등 다른 모듈 영향 분석 필요
+- I15 SwIT v2.02 Coverage Traceability 양식의 수직 SwUFn_ 배열 인식 (현재 49KB 양식 limit) — 별도 데이터 source 필요 시
+- I16 ExecutionRow.actual_result 외 추가 VectorCAST 메타 (Coverage Hit Count, Branch Result 등)
+- I17 v2.02 외 회사 양식 (v2.10, v3.10 등) layout 확장

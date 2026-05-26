@@ -375,3 +375,153 @@ class TestGraceful:
             "template 입력 검증 실패" in w or "template load 실패" in w or "load 실패" in w
             for w in layout.warnings
         )
+
+
+# ---------------------------------------------------------------------------
+# 58차 F3 — Test Log column 자동 감지 (v2.02 SITR layout)
+# ---------------------------------------------------------------------------
+
+
+class TestScanTestLogColumnsV202:
+    """`_scan_test_log_columns` — 헤더 row에서 'Input', 'Expected Result', 'Actual
+    Result', 'Pass/Fail', 'Log Data' 라벨을 매칭하여 column 위치 반환.
+    """
+
+    def test_scan_test_log_columns_v202_sitr_mock(self):
+        """v2.02 SITR mock — B/H/R/AB/AL/AN 라벨이 col 2/8/18/28/38/40."""
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.cell(1, 2).value = "Test Case"
+        ws.cell(1, 8).value = "Input"
+        ws.cell(1, 18).value = "Expected Result"
+        ws.cell(1, 28).value = "Actual Result"
+        ws.cell(1, 38).value = "Pass/Fail"
+        ws.cell(1, 40).value = "Log Data"
+        cols = elr._scan_test_log_columns(ws)
+        assert cols["input_col"] == 8
+        assert cols["expected_col"] == 18
+        assert cols["actual_col"] == 28
+        assert cols["pass_fail_col"] == 38
+        assert cols["log_data_col"] == 40
+        assert cols["pass_fail_total_col"] is None
+
+    def test_scan_test_log_columns_v301_sutr_mock(self):
+        """v3.01 SUTR mock — F/P/Z/AJ/AK/AL 라벨 col 6/16/26/36/37/38."""
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.cell(1, 6).value = "Input"
+        ws.cell(1, 16).value = "Expected Result"
+        ws.cell(1, 26).value = "Actual Result"
+        ws.cell(1, 36).value = "Pass/Fail Unit"
+        ws.cell(1, 37).value = "Pass/Fail Total"
+        ws.cell(1, 38).value = "Log Data"
+        cols = elr._scan_test_log_columns(ws)
+        assert cols["input_col"] == 6
+        assert cols["expected_col"] == 16
+        assert cols["actual_col"] == 26
+        assert cols["pass_fail_col"] == 36
+        assert cols["pass_fail_total_col"] == 37
+        assert cols["log_data_col"] == 38
+
+    def test_scan_test_log_columns_no_headers_all_none(self):
+        """헤더 라벨 없으면 모두 None (v3.01 hardcode fallback)."""
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.cell(1, 2).value = "Random Header"
+        cols = elr._scan_test_log_columns(ws)
+        assert all(v is None for v in cols.values())
+
+    def test_scan_test_log_columns_handles_none_ws(self):
+        """None ws → 모두 None graceful."""
+        cols = elr._scan_test_log_columns(None)
+        assert all(v is None for v in cols.values())
+
+
+# ---------------------------------------------------------------------------
+# 58차 F2 — Traceability 헤더 row 자동 감지
+# ---------------------------------------------------------------------------
+
+
+class TestScanTraceabilityHeader:
+    """`_scan_traceability_header` — SwUFn_/SwUTC_/SwITC_ prefix 5개+ 행 row 반환."""
+
+    def test_scan_traceability_header_v202_swit_at_row_20(self):
+        """SwIT v2.02 양식 mock — 헤더 row 20에 SwUFn_ prefix 5개+."""
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        for i in range(5):
+            ws.cell(20, 3 + i).value = f"SwUFn_{i:04d}"
+        header_row = elr._scan_traceability_header(ws)
+        assert header_row == 20
+
+    def test_scan_traceability_header_v301_at_row_3(self):
+        """SwUT v3.01 양식 mock — 헤더 row 3에 SwUFn_ prefix."""
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        for i in range(6):
+            ws.cell(3, 3 + i).value = f"SwUFn_{i:04d}"
+        header_row = elr._scan_traceability_header(ws)
+        assert header_row == 3
+
+    def test_scan_traceability_header_returns_none_when_no_swufn(self):
+        """SwUFn_/SwUTC_/SwITC_ prefix 5개 미만 → None."""
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.cell(1, 1).value = "Header"
+        # SwUFn 2개만
+        ws.cell(2, 2).value = "SwUFn_0001"
+        ws.cell(2, 3).value = "SwUFn_0002"
+        header_row = elr._scan_traceability_header(ws)
+        assert header_row is None
+
+    def test_scan_traceability_header_handles_none_ws(self):
+        """None ws → None graceful."""
+        assert elr._scan_traceability_header(None) is None
+
+
+# ---------------------------------------------------------------------------
+# 58차 F3 — SwitLayout inspect SITR 분기에 column 자동 반영
+# ---------------------------------------------------------------------------
+
+
+class TestInspectSitrColumnDetection:
+    """inspect_swit_layout(kind='sitr') 호출 시 layout.test_log_*_col 자동 채움."""
+
+    def test_inspect_sitr_v202_layout_has_input_col(self):
+        """v2.02 SITR mock template inspect → test_log_input_col=8."""
+        template = _make_xlsx({
+            "Cover": [["Project"]],
+            "1.Test Summary": [
+                ["Project Name"], ["SW Version"], ["HW Version"],
+                ["Test Date"], ["Test Engineer"], ["Target Coverage"],
+                ["Actual Coverage"], ["Final Test Result"],
+            ],
+            "Test Log": [
+                # row 1: 헤더 — col 2/8/18/28/38/40
+                [None, "Test Case", None, None, None, None, None, "Input"]
+                + [None] * 9
+                + ["Expected Result"]
+                + [None] * 9
+                + ["Actual Result"]
+                + [None] * 9
+                + ["Pass/Fail", None, "Log Data"],
+            ],
+            "Deviation": [["Test Case ID"]],
+        })
+        layout = elr.inspect_swit_layout(template, "sitr")
+        assert layout.test_log_input_col == 8
+        assert layout.test_log_expected_col == 18
+        assert layout.test_log_actual_col == 28
+        assert layout.test_log_pass_fail_col == 38
+        assert layout.test_log_log_data_col == 40
+
+    def test_inspect_coverage_no_test_log_columns_set(self):
+        """kind='coverage'에는 test_log_*_col 모두 None."""
+        template = _make_xlsx({
+            "Cover": [["Project"]],
+            "1.Test Summary": [["Project Name"]],
+        })
+        layout = elr.inspect_swit_layout(template, "coverage")
+        assert layout.test_log_input_col is None
+        assert layout.test_log_expected_col is None
+        assert layout.test_log_actual_col is None

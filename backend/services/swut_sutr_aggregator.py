@@ -390,22 +390,37 @@ def _write_test_log(
                  _mc.min_col, _mc.max_col)
             )
 
-    # 57차 T319 fix — 회사 v2.02 SUTR Test Result 정확한 컬럼 매핑:
-    #   B (col 2)  = TC ID
-    #   C (col 3)  = Title (Component name)
-    #   D (col 4)  = Test Case Generation Method
-    #   E (col 5)  = 빈 cell (TC ID row) / row 6~10 sub-row Params 1~5 (1,2,3,4,5)
-    #   F~O (cols 6~15)   = Input Params 1~10 (VectorCAST input parameter — TODO)
-    #   P~Y (cols 16~25)  = Expected Result Params 1~10 (사용자 입력)
-    #   Z~AI (cols 26~35) = Actual Result Params 1~10 (사용자 입력)
-    #   AJ (col 36) = Pass/Fail Unit
-    #   AK (col 37) = Pass/Fail Total
-    #   AL (col 38) = Log Data (VectorCAST log path)
-    # 이전 코드는 col+3 (E) Pass/Fail, col+4 (F=Param1) Function ID, col+5 (G=Param2)
-    # ASIL을 잘못 stamp. v2.02 회사 양식 audit 표준 위반 → 본 fix로 정정.
-    PASS_FAIL_UNIT_COL = 36   # AJ
-    PASS_FAIL_TOTAL_COL = 37  # AK
-    LOG_DATA_COL = 38         # AL
+    # 58차 F3 — column 매핑 layout-aware (layout 제공 시 동적, None이면 v3.01 hardcode):
+    #   회사 v3.01 SUTR (SwUT): F=Input, P=Expected, Z=Actual, AJ=Pass/Fail Unit,
+    #       AK=Pass/Fail Total, AL=Log Data
+    #   회사 v2.02 SITR (SwIT): H=Input, R=Expected, AB=Actual, AL=Pass/Fail,
+    #       AN=Log Data (Pass/Fail Total 없음)
+    # SwitLayout.test_log_input_col 등 6 field 우선 사용 → None이면 v3.01 hardcode.
+    # 57차 T319 fix: 이전 col+3/+4/+5 잘못 stamp 정정 후 hardcode 36/37/38.
+    # layout이 6개 column 중 1개라도 보유하면 layout-aware (v2.02). 모두 None이면 v3.01 hardcode.
+    _layout_has_col = layout is not None and any(
+        getattr(layout, attr, None)
+        for attr in (
+            "test_log_input_col", "test_log_expected_col", "test_log_actual_col",
+            "test_log_pass_fail_col", "test_log_log_data_col",
+        )
+    )
+    if _layout_has_col:
+        # v3.01 hardcode default을 fallback으로 사용 (각 col이 None이면 적용).
+        INPUT_COL = layout.test_log_input_col or 6
+        EXPECTED_COL = layout.test_log_expected_col or 16
+        ACTUAL_COL = layout.test_log_actual_col or 26
+        PASS_FAIL_UNIT_COL = layout.test_log_pass_fail_col or 36
+        PASS_FAIL_TOTAL_COL = layout.test_log_pass_fail_total_col or 0  # 0 = skip stamp
+        LOG_DATA_COL = layout.test_log_log_data_col or 38
+    else:
+        # v3.01 backward-compat hardcode (SwUT SUTR 양식)
+        INPUT_COL = 6     # F
+        EXPECTED_COL = 16  # P
+        ACTUAL_COL = 26    # Z
+        PASS_FAIL_UNIT_COL = 36   # AJ
+        PASS_FAIL_TOTAL_COL = 37  # AK
+        LOG_DATA_COL = 38         # AL
 
     written = 0
     for tc_name in sorted(tc_to_fn_id.keys()):
@@ -439,33 +454,43 @@ def _write_test_log(
             tc_items = env.test_cases.get(tc_name) or []
             tc_item = tc_items[0] if tc_items else None
             if tc_item is not None:
-                # F~O (col 6~15) Input Params 1~10
+                # Input Params 1~10 (10 cols)
                 input_vals = list(getattr(tc_item, "input_data", {}).values())[:10]
                 for pi, val in enumerate(input_vals):
-                    safe_write(ws, r, 6 + pi, str(val) if val else "")
-                # P~Y (col 16~25) Expected Result Params 1~10
+                    safe_write(ws, r, INPUT_COL + pi, str(val) if val else "")
+                # Expected Result Params 1~10
                 expected_vals = list(getattr(tc_item, "expected_result", {}).values())[:10]
                 for pi, val in enumerate(expected_vals):
-                    safe_write(ws, r, 16 + pi, str(val) if val else "")
-                # Z~AI (col 26~35) Actual Result Params 1~10
-                # actual_result: Dict[str, Tuple[str, str]] — (actual_val, expected_val)
-                actual_dict = getattr(tc_item, "actual_result", {})
-                actual_vals = [
-                    t[0] if isinstance(t, tuple) and t else (str(t) if t else "")
-                    for t in list(actual_dict.values())[:10]
-                ]
-                for pi, val in enumerate(actual_vals):
-                    safe_write(ws, r, 26 + pi, str(val) if val else "")
+                    safe_write(ws, r, EXPECTED_COL + pi, str(val) if val else "")
+                # Actual Result Params 1~10
+                # 58차 F1: ExecutionRow.actual_result 우선 (BeautifulSoup 추출),
+                # 57차 T321 fallback: env.tc_result_items (vcast_parser TestResultItem).
+                # actual_result: Dict[str, Tuple[str, str]] — (actual_val, expected_val) tuple.
+                actual_dict: dict = {}
+                exec_r2 = env.test_results.get(tc_name) if env is not None else None
+                if exec_r2 is not None:
+                    actual_dict = getattr(exec_r2, "actual_result", {}) or {}
+                if not actual_dict:
+                    tr_items = getattr(env, "tc_result_items", {}).get(tc_name, [])
+                    tr_item = tr_items[0] if tr_items else None
+                    if tr_item is not None:
+                        actual_dict = getattr(tr_item, "actual_result", {}) or {}
+                if actual_dict:
+                    actual_vals = [
+                        t[0] if isinstance(t, tuple) and t else (str(t) if t else "")
+                        for t in list(actual_dict.values())[:10]
+                    ]
+                    for pi, val in enumerate(actual_vals):
+                        safe_write(ws, r, ACTUAL_COL + pi, str(val) if val else "")
 
-        # AJ (col 36) Pass/Fail Unit + AK (col 37) Pass/Fail Total — TC 전체 row에 적용.
-        # 회사 양식 AJ는 row 5~10 (TC block 전체)에 merge되어 'Pass'/'Fail' 표시.
+        # Pass/Fail stamp — Unit (필수) + Total (v3.01만, v2.02는 PASS_FAIL_TOTAL_COL=0이라 skip).
         safe_write(ws, r, PASS_FAIL_UNIT_COL, result_str)
-        safe_write(ws, r, PASS_FAIL_TOTAL_COL, result_str)
+        if PASS_FAIL_TOTAL_COL > 0:
+            safe_write(ws, r, PASS_FAIL_TOTAL_COL, result_str)
 
-        # AL (col 38) Log Data — VectorCAST log file path 추정.
+        # Log Data — VectorCAST log file path 추정.
         log_path = ""
         if env is not None and getattr(env, "env_name", ""):
-            # 회사 표준 명명: <env>_<tc_name>.log 또는 VectorCAST report path
             log_path = f"{env.env_name}/{tc_name}.log"
         safe_write(ws, r, LOG_DATA_COL, log_path)
 

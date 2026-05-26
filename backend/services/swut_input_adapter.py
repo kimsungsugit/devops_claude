@@ -84,12 +84,20 @@ class ExecutionRow:
     이름이 ``TestExecution`` 이었으나 pytest의 ``Test`` prefix와 충돌해
     collection warning이 매 라운드 누적되어 ``ExecutionRow`` 로 rename
     (deep-reviewer X5).
+
+    58차 F1: `actual_result` 신규 필드 — VectorCAST ExecutionResult.html에서
+    BeautifulSoup으로 직접 추출한 variable → (actual, expected) Dict. SUTR Test
+    Log Z~AI 컬럼 stamp source. `vcast_parser.parse_execution_result` 자체 결함
+    (line 451-454 nested loop self-marker) 우회.
     """
     tc_name: str = ""             # 예: SwUFn_0101.001
     component: str = ""           # 예: SysOs_Main
     subprogram: str = ""          # 예: main
     passed: bool = False
     events: list[str] = field(default_factory=list)
+    # 58차 F1 신규 — VectorCAST 실측 actual + expected pairs.
+    # key=variable name, value=(actual_value, expected_value).
+    actual_result: dict[str, tuple[str, str]] = field(default_factory=dict)
 
 
 @dataclass
@@ -100,6 +108,10 @@ class EnvironmentData:
     environment_name: str = ""    # VectorCAST internal env name
     test_cases: dict[str, Any] = field(default_factory=dict)  # tc_name -> TestCaseItem (TCBank.test_cases)
     test_results: dict[str, ExecutionRow] = field(default_factory=dict)
+    # 57차 T321 — vcast_parser TCBank.test_results carry forward (actual_result 포함).
+    # SUTR Test Log Z~AI 컬럼 Actual stamp용 — extract_execution_results는 pass/fail만
+    # 추출하므로 별도 source 필요.
+    tc_result_items: dict[str, list] = field(default_factory=dict)  # tc_name -> List[TestResultItem]
     function_coverage: list[FunctionCoverage] = field(default_factory=list)
     grand_total: FunctionCoverage = field(default_factory=FunctionCoverage)
     parse_errors: list[str] = field(default_factory=list)
@@ -296,6 +308,212 @@ def extract_execution_results(html_bytes: bytes) -> dict[str, ExecutionRow]:
     return results
 
 
+def extract_execution_results_with_actual(html_bytes: bytes) -> dict[str, ExecutionRow]:
+    """58차 F1 — SWTE ExecutionResult HTML → pass/fail + actual_result Dict.
+
+    `extract_execution_results` 확장 (기존 h3 순회 + 다음 h4 찾기 패턴 차용).
+    VectorCAST 2025 ExecutionResult.html에서 variable + (actual, expected) 추출.
+
+    VectorCAST report format 변형 (관측):
+        (변형 A) <h3>...PASS...</h3> 직후 <h4>Start of SwUFn_...</h4>
+        (변형 B) <h4>Start of SwUFn_...</h4> 직후 <h3>...PASS...</h3>
+    본 함수는 두 변형 모두 지원하기 위해 기존 `extract_execution_results`와 동일한
+    h3 순회 + find_all_next h4 매칭 패턴 사용. actual_result는 td 'EXPECTED:'/
+    'ACTUAL:' label 추출 (가능한 만큼만 — graceful 0건도 정상).
+
+    Returns:
+        dict[tc_name, ExecutionRow]: actual_result는 variable → (actual, expected).
+    """
+    if BeautifulSoup is None:
+        raise RuntimeError("beautifulsoup4 is required for SWTE extractors")
+    soup = BeautifulSoup(html_bytes, "html.parser")
+    results: dict[str, ExecutionRow] = {}
+
+    # 통합 패턴 — h4 'Start of <tc_name>' 순회 (모든 변형 통일):
+    #   각 TC 섹션은 h4 Start of <tc> 부터 다음 h4 Start of (또는 문서 끝) 까지.
+    #   passed 판별은 가장 가까운 h3 'Execution Results (PASS|FAIL)' (h4 이전 또는 이후 무관).
+    #   actual_result는 그 섹션 안의 tr.success/danger variable rows에서 추출.
+    all_h4_starts: list = []
+    for h4 in soup.find_all("h4"):
+        h4_text = h4.get_text(strip=True)
+        m = re.match(r"Start of\s+(\S+)", h4_text)
+        if m:
+            all_h4_starts.append((m.group(1), h4))
+
+    for idx, (tc_name, h4) in enumerate(all_h4_starts):
+        if tc_name in results:
+            continue
+        # 다음 h4 Start of marker — 섹션 종료점
+        next_h4 = all_h4_starts[idx + 1][1] if idx + 1 < len(all_h4_starts) else None
+        # passed 판별 — 가장 가까운 h3 'Execution Results' (이전 또는 이후)
+        passed = False
+        h3_prev = h4.find_previous("h3", title=re.compile("Execution Results", re.I))
+        h3_next = h4.find_next("h3", title=re.compile("Execution Results", re.I))
+        # next_h4 이전인 h3만 검토
+        for h3 in (h3_prev, h3_next):
+            if h3 is None:
+                continue
+            h3_line = getattr(h3, "sourceline", 0) or 0
+            h4_line = getattr(h4, "sourceline", 0) or 0
+            next_h4_line = getattr(next_h4, "sourceline", 10**9) if next_h4 else 10**9
+            # 이전 h3은 직전 TC 종료점 이후 (즉 h4 직전), 다음 h3은 next_h4 이전이어야 매칭
+            if (h3 is h3_prev and h3_line >= h4_line - 20) or (
+                h3 is h3_next and h3_line < (next_h4_line or 10**9)
+            ):
+                txt = h3.get_text(" ", strip=True)
+                passed = "(PASS)" in txt or ("PASS" in txt and "FAIL" not in txt)
+                break
+        actual_result = _extract_var_rows_between(h4, next_h4)
+        results[tc_name] = ExecutionRow(
+            tc_name=tc_name, passed=passed, actual_result=actual_result,
+        )
+
+    return results
+
+
+def _extract_var_rows_between(anchor, end_anchor) -> dict[str, tuple[str, str]]:
+    """58차 F1 (수정) — anchor와 end_anchor 사이의 tr.success/danger variable row 추출.
+
+    variable row 식별: 첫 td의 class가 'i1', 'i2', 'i3', ... 패턴. tr.success는 match,
+    tr.danger는 fail (actual vs expected 차이).
+    """
+    actual_result: dict[str, tuple[str, str]] = {}
+    if anchor is None:
+        return actual_result
+    end_line = getattr(end_anchor, "sourceline", None) if end_anchor else None
+    for tr in anchor.find_all_next("tr", limit=2000):
+        tr_line = getattr(tr, "sourceline", None)
+        if end_line is not None and tr_line is not None and tr_line >= end_line:
+            break
+        tds = tr.find_all("td", recursive=False)
+        if not tds:
+            tds = tr.find_all("td")
+        if len(tds) < 3:
+            continue
+        first_td = tds[0]
+        td_classes = first_td.get("class") or []
+        if not any(isinstance(c, str) and re.match(r"^i\d+$", c) for c in td_classes):
+            continue
+        # 'i0' (UNIT label) / 'i1' (Globals label) 등은 variable row 아님 — 값이 변수명만
+        # 보유. 실제 variable row는 td 3+ 보유 + 값/match 컬럼 있음.
+        var_name = first_td.get_text(strip=True)
+        if not var_name or var_name in actual_result:
+            continue
+        # 'UNIT:' / 'Globals:' / 'Locals:' 등 label row skip
+        if any(var_name.startswith(prefix) for prefix in (
+            "UNIT:", "Globals:", "Locals:", "Parameters:", "Return Value:",
+        )):
+            continue
+        # 마지막 td class가 success-marker → actual == expected (match)
+        last_td_classes = tds[-1].get("class") or []
+        is_match = any(
+            isinstance(c, str) and "success-marker" in c for c in last_td_classes
+        )
+        is_fail = any(
+            isinstance(c, str) and ("fail-marker" in c or "danger" in c)
+            for c in last_td_classes
+        )
+        actual_val = tds[2].get_text(strip=True) if len(tds) > 2 else ""
+        if is_match:
+            expected_val = actual_val
+        elif is_fail and len(tds) > 3:
+            expected_val = tds[3].get_text(strip=True)
+        else:
+            expected_val = tds[3].get_text(strip=True) if len(tds) > 3 else actual_val
+        actual_result[var_name] = (actual_val, expected_val)
+    return actual_result
+
+
+def _extract_actual_from_node(anchor) -> dict[str, tuple[str, str]]:
+    """58차 F1 — anchor element 이후 다음 TC 섹션 도달 전까지 variable row 추출.
+
+    VectorCAST 2025 실 HTML 구조 (관측):
+        <tr class="success">           <!-- pass 변수 row -->
+          <td class='i2'>variable_name</td>
+          <td>type</td>
+          <td>value</td>                <!-- actual == expected (success match) -->
+          <td class='success-marker'>&lt;match&gt;</td>
+        </tr>
+        <tr class="danger">            <!-- fail 변수 row -->
+          <td class='i2'>variable_name</td>
+          <td>type</td>
+          <td>actual_value</td>
+          <td>expected_value</td>      <!-- or class='fail-marker' -->
+        </tr>
+
+    variable row 식별: 첫 td의 class가 'i1', 'i2', 'i3', ... pattern. 다음 anchor
+    (h3/h4 Start of 또는 Execution Results) 도달 전까지 수집.
+
+    Args:
+        anchor: BeautifulSoup element — h3 또는 h4 시작점.
+
+    Returns:
+        dict[var_name, (actual, expected)]: 빈 dict면 graceful (stamp skip).
+    """
+    actual_result: dict[str, tuple[str, str]] = {}
+    if anchor is None:
+        return actual_result
+
+    # 다음 TC 섹션 marker (h3 Execution Results 또는 h4 Start of) sourceline
+    next_anchor_line = None
+    for cand in anchor.find_all_next(["h3", "h4"]):
+        cand_text = cand.get_text(strip=True)
+        is_marker = False
+        if cand.name == "h3" and re.search(
+            r"Execution Results", cand_text, re.I,
+        ):
+            is_marker = True
+        elif cand.name == "h4" and re.match(r"Start of\s+\S+", cand_text):
+            is_marker = True
+        if is_marker:
+            next_anchor_line = getattr(cand, "sourceline", None)
+            break
+
+    # tr 순회 — variable row만 추출
+    for tr in anchor.find_all_next("tr", limit=500):
+        tr_line = getattr(tr, "sourceline", None)
+        # 다음 anchor 도달했으면 stop
+        if (next_anchor_line is not None and tr_line is not None
+                and tr_line >= next_anchor_line):
+            break
+        tds = tr.find_all("td", recursive=False)
+        if not tds:
+            tds = tr.find_all("td")
+        if len(tds) < 3:
+            continue
+        first_td = tds[0]
+        td_classes = first_td.get("class") or []
+        # variable row 식별 — 첫 td class가 i1, i2, i3, ...
+        if not any(isinstance(c, str) and re.match(r"^i\d+$", c) for c in td_classes):
+            continue
+        var_name = first_td.get_text(strip=True)
+        if not var_name or var_name in actual_result:
+            continue
+
+        # success-marker → actual == expected (둘 다 tds[2])
+        # fail/danger → actual=tds[2], expected=tds[3]
+        last_td_classes = tds[-1].get("class") or []
+        is_match = any(
+            isinstance(c, str) and "success-marker" in c for c in last_td_classes
+        )
+        actual_val = tds[2].get_text(strip=True) if len(tds) > 2 else ""
+        if is_match:
+            expected_val = actual_val
+        else:
+            expected_val = tds[3].get_text(strip=True) if len(tds) > 3 else ""
+        actual_result[var_name] = (actual_val, expected_val)
+    return actual_result
+
+
+def _is_before(elem_a, elem_b) -> bool:
+    """BeautifulSoup element a가 b보다 문서 상 앞에 있는지 (sourceline 비교 + 안전 fallback)."""
+    la = getattr(elem_a, "sourceline", None)
+    lb = getattr(elem_b, "sourceline", None)
+    if la is None or lb is None:
+        return True  # 알 수 없으면 conservative True (포함)
+    return la < lb
+
+
 # ---------------------------------------------------------------------------
 # Path-based input
 # ---------------------------------------------------------------------------
@@ -325,6 +543,28 @@ def _parse_testcase_data_via_temp(resolver: Any, html_path: str) -> Any:
         tmp = Path(tf.name)
     try:
         return parse_vcast_report(tmp, ReportType.TestCaseData, VCASTVersion.Ver2025)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def _parse_execution_result_via_temp(resolver: Any, html_path: str) -> Any:
+    """57차 T321 — vcast_parser.parse_execution_result 호출 (actual_result 포함).
+
+    extract_execution_results는 pass/fail만 추출하지만 vcast_parser는
+    TestResultItem.actual_result (Dict[str, Tuple[str, str]] — (actual, expected))
+    까지 추출. SUTR Test Log Z~AI 컬럼 Actual stamp용 source.
+    """
+    from backend.services.vcast_parser import (
+        ReportType,
+        VCASTVersion,
+        parse_vcast_report,
+    )
+    data = _read_via_resolver(resolver, html_path)
+    with tempfile.NamedTemporaryFile(suffix=".html", delete=False) as tf:
+        tf.write(data)
+        tmp = Path(tf.name)
+    try:
+        return parse_vcast_report(tmp, ReportType.ExecutionResult, VCASTVersion.Ver2025)
     finally:
         tmp.unlink(missing_ok=True)
 
@@ -694,6 +934,8 @@ def collect_from_log_folder(
             env_data.component_name = getattr(tcbank, "component_name", "")
             env_data.environment_name = getattr(tcbank, "environment", "")
             env_data.test_cases = dict(getattr(tcbank, "test_cases", {}) or {})
+            # 57차 T321 — TCBank.test_results carry forward (actual_result 포함)
+            env_data.tc_result_items = dict(getattr(tcbank, "test_results", {}) or {})
             parse_err = getattr(tcbank, "parse_error", None)
             if parse_err:
                 env_data.parse_errors.append(f"TestCaseData: {parse_err}")
@@ -704,7 +946,22 @@ def collect_from_log_folder(
         exec_path = os.path.join(sub_exec, f"{env}_execution_results_report.html")
         try:
             data = _read_via_resolver(resolver, exec_path)
-            env_data.test_results = extract_execution_results(data)
+            # 58차 F1 — actual_result Dict까지 추출 (extract_execution_results_with_actual)
+            env_data.test_results = extract_execution_results_with_actual(data)
+            # 57차 T321 — vcast_parser ExecutionResult parsing 추가 (actual_result 포함).
+            # extract_execution_results는 pass/fail만 추출 → 별도 source 필요.
+            try:
+                tcbank_exec = _parse_execution_result_via_temp(resolver, exec_path)
+                exec_test_results = getattr(tcbank_exec, "test_results", {}) or {}
+                if exec_test_results:
+                    # tc_result_items merge — TestCaseData parse 결과와 union.
+                    # 동일 tc_name에 양쪽 다 있으면 ExecutionResult 우선 (actual_result 보유).
+                    for tc_name, items in exec_test_results.items():
+                        env_data.tc_result_items[tc_name] = items
+            except Exception as e_inner:
+                env_data.parse_errors.append(
+                    f"ExecutionResult vcast parse: {type(e_inner).__name__}: {e_inner}"
+                )
         except Exception as e:
             env_data.parse_errors.append(f"ExecutionResult: {type(e).__name__}: {e}")
 
@@ -861,6 +1118,8 @@ def collect_from_jenkins_cache(
                 env_data.component_name = getattr(tcbank, "component_name", "")
                 env_data.environment_name = getattr(tcbank, "environment", "")
                 env_data.test_cases = dict(getattr(tcbank, "test_cases", {}) or {})
+                # 57차 T321 — TCBank.test_results carry forward
+                env_data.tc_result_items = dict(getattr(tcbank, "test_results", {}) or {})
                 parse_err = getattr(tcbank, "parse_error", None)
                 if parse_err:
                     env_data.parse_errors.append(f"TestCaseData: {parse_err}")
@@ -872,7 +1131,8 @@ def collect_from_jenkins_cache(
         if exec_path:
             try:
                 with open(exec_path, "rb") as fh:
-                    env_data.test_results = extract_execution_results(fh.read())
+                    # 58차 F1 — actual_result Dict까지 추출
+                    env_data.test_results = extract_execution_results_with_actual(fh.read())
             except Exception as e:
                 env_data.parse_errors.append(f"ExecutionResult: {type(e).__name__}: {e}")
 

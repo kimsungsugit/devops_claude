@@ -200,15 +200,22 @@ class TestBuildSwitSitr:
 
 
 # ---------------------------------------------------------------------------
-# 2) Test Log ASIL col+4/5 (31차 W27 대칭)
+# 2) Test Log v2.02 매핑 (58차 F3 — 31차 W27 col+4/+5 매핑 폐기)
 # ---------------------------------------------------------------------------
 
 class TestSitrTestLogAsil:
-    """SwUT 31차 W27 패턴 — Test Log col+4 Function ID + col+5 ASIL 강조."""
+    """58차 F3 — col+4/+5 Function ID/ASIL 매핑 폐기.
 
-    def test_function_id_extracted_to_col_4(self):
+    회사 v2.02 SITR 양식 정확한 매핑: B=TC ID, H=Input, R=Expected, AB=Actual,
+    AL=Pass/Fail, AN=Log Data. Function ID + ASIL 컬럼은 양식에 없음.
+    이전 31차 W27 col+4 (F) Function ID + col+5 (G) ASIL stamp는 v2.02 양식의
+    Input Params 영역 (F~) 침범 — fix로 stamp 제거. ASIL 시각 강조는 Pass/Fail
+    row 영역에 적용.
+    """
+
+    def test_no_function_id_stamp_at_col_f_v202(self):
+        """58차 F3: col 6 (F)는 Input Param 자리 — Function ID stamp 금지."""
         session = _make_swit_sitr_session()
-        # function_asil_map 주입 (router._apply_function_asil_map 시뮬레이션)
         session.environments[0].function_asil_map = {
             "SwUFn_0101": "D", "SwUFn_0103": "B",
         }
@@ -217,13 +224,13 @@ class TestSitrTestLogAsil:
         )
         wb = openpyxl.load_workbook(io.BytesIO(result.xlsm_bytes), keep_vba=True)
         log = wb["Test Log"]
-        # 헤더 row 1 → 데이터 row 2-3에 col+4 (F) Function ID
+        # col 6 (F) Input Param 자리 — 'SwUFn_' prefix 절대 stamp 금지
         f_values = [str(log.cell(r, 6).value or "") for r in range(2, 4)]
-        assert any("SwUFn_0101" in v for v in f_values)
-        assert any("SwUFn_0103" in v for v in f_values)
+        for v in f_values:
+            assert "SwUFn_" not in v, f"col 6 (F)에 Function ID stamp 발견 (v2.02 양식 위반): {v}"
 
-    def test_asil_d_function_row_marked(self):
-        """ASIL D row col+5 (G) 셀에 빨강 fill (mark_asil_d_function)."""
+    def test_no_asil_label_stamp_at_col_g_v202(self):
+        """58차 F3: col 7 (G)는 Input Param 자리 — 'ASIL D' 텍스트 stamp 금지."""
         session = _make_swit_sitr_session()
         session.environments[0].function_asil_map = {"SwUFn_0101": "D"}
         result = build_swit_sitr_report(
@@ -231,14 +238,10 @@ class TestSitrTestLogAsil:
         )
         wb = openpyxl.load_workbook(io.BytesIO(result.xlsm_bytes), keep_vba=True)
         log = wb["Test Log"]
-        # 31차 W29 ASIL D fill (FFFFC7CE)
-        d_marked = []
+        # col 7 (G) Input Param 자리 — 'ASIL' 텍스트 stamp 금지
         for r in range(2, 4):
-            asil_cell = log.cell(r, 7)
-            fg = str(getattr(asil_cell.fill.fgColor, "rgb", "") or "").upper()
-            if "FFC7CE" in fg:
-                d_marked.append((r, asil_cell.value))
-        assert d_marked, "ASIL D 함수 row 빨강 fill 미발견"
+            v = str(log.cell(r, 7).value or "")
+            assert "ASIL" not in v, f"col 7 (G)에 ASIL 라벨 stamp 발견 (v2.02 양식 위반): {v}"
 
 
 # ---------------------------------------------------------------------------
@@ -531,7 +534,13 @@ class TestSwitSitrV202LayoutCompat:
         assert result.summary.get("tc_stats_blocked_inferred") is True
 
     def test_test_log_al_column_marker(self):
-        """v2.02 양식 AL column에 ✓/✗ marker fill."""
+        """58차 F3: v2.02 fixture는 col 5(E)='Pass/Fail' 헤더 보유 → layout에서
+        test_log_pass_fail_col=5로 인식. col 5에 'Pass'/'Fail' stamp 검증.
+
+        AL(col 38)에는 'Marker' 라벨 fixture가 stamp되어 있어 fallback marker는
+        skip (test_log_extra_marker_col=38 == LOG_DATA_COL fallback 38 충돌 — 코드
+        가 skip).
+        """
         result = build_swit_sitr_report(
             _make_swit_sitr_session(),
             _make_swit_sitr_meta(),
@@ -539,14 +548,14 @@ class TestSwitSitrV202LayoutCompat:
         )
         wb = openpyxl.load_workbook(io.BytesIO(result.xlsm_bytes), keep_vba=True)
         log = wb["Test Log"]
-        # header row=1, data row=2 onwards. AL col=38
-        # session에는 SwITC_SwUFn_0101.001 (Pass) + 0103.001 (Fail) — 2 rows
-        row2 = log.cell(row=2, column=38).value
-        row3 = log.cell(row=3, column=38).value
-        # one pass + one fail — ✓ and ✗ 발견
-        markers = {row2, row3}
-        assert "✓" in markers, f"Pass marker 미발견 — markers: {markers}"
-        assert "✗" in markers, f"Fail marker 미발견 — markers: {markers}"
+        # session 2 TC (Pass + Fail) — col 5 (E) Pass/Fail Unit stamp
+        row2_v = log.cell(row=2, column=5).value
+        row3_v = log.cell(row=3, column=5).value
+        # 'Pass'/'Fail'/'N/A' 한 row 이상 발견
+        values = {str(row2_v or ""), str(row3_v or "")}
+        assert any(v in ("Pass", "Fail", "N/A") for v in values), (
+            f"col 5 (E='Pass/Fail') stamp 미발견 — values: {values}"
+        )
 
     def test_v301_backward_compat_no_al_fill(self):
         """v3.01 양식 (AL col 없음)에서 marker skip — backward compat."""

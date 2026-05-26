@@ -547,3 +547,67 @@ class TestDataclassFields:
         s = SwUTSession()
         assert s.environments == []
         assert s.parse_warnings == []
+
+
+# ---------------------------------------------------------------------------
+# 58차 F1 — extract_execution_results_with_actual (BeautifulSoup actual 추출)
+# ---------------------------------------------------------------------------
+
+
+class TestExtractExecutionResultsWithActual:
+    """F1: VectorCAST ExecutionResult.html → ExecutionRow.actual_result Dict."""
+
+    def test_pass_distinction(self):
+        """`<h3>Execution Results (PASS)</h3>` → ExecutionRow.passed=True."""
+        from backend.services.swut_input_adapter import (
+            extract_execution_results_with_actual,
+        )
+        html = b"""<html><body>
+        <h4>Start of SwUFn_0101.001</h4>
+        <h3 title="Execution Results">Execution Results (PASS)</h3>
+        </body></html>"""
+        results = extract_execution_results_with_actual(html)
+        assert "SwUFn_0101.001" in results
+        row = results["SwUFn_0101.001"]
+        assert row.passed is True
+
+    def test_fail_distinction(self):
+        """`(FAIL)` → passed=False."""
+        from backend.services.swut_input_adapter import (
+            extract_execution_results_with_actual,
+        )
+        html = b"""<html><body>
+        <h4>Start of SwUFn_0103.001</h4>
+        <h3 title="Execution Results">Execution Results (FAIL)</h3>
+        </body></html>"""
+        results = extract_execution_results_with_actual(html)
+        assert results["SwUFn_0103.001"].passed is False
+
+    def test_empty_actual_graceful(self):
+        """actual_result HTML 패턴 없으면 빈 dict — graceful (예외 없음)."""
+        from backend.services.swut_input_adapter import (
+            extract_execution_results_with_actual,
+        )
+        html = b"""<html><body>
+        <h4>Start of SwUFn_0101.001</h4>
+        <h3 title="Execution Results">Execution Results (PASS)</h3>
+        </body></html>"""
+        results = extract_execution_results_with_actual(html)
+        assert results["SwUFn_0101.001"].actual_result == {}
+
+    def test_multiple_tcs(self):
+        """h3 → h4 변형 A (실 VectorCAST format) — 2개 ExecutionRow 추출."""
+        from backend.services.swut_input_adapter import (
+            extract_execution_results_with_actual,
+        )
+        html = b"""<html><body>
+        <h3 title="Execution Results">Execution Results (PASS)</h3>
+        <h4>Start of SwUFn_0101.001</h4>
+        <h3 title="Execution Results">Execution Results (FAIL)</h3>
+        <h4>Start of SwUFn_0102.001</h4>
+        </body></html>"""
+        results = extract_execution_results_with_actual(html)
+        assert "SwUFn_0101.001" in results
+        assert "SwUFn_0102.001" in results
+        assert results["SwUFn_0101.001"].passed is True
+        assert results["SwUFn_0102.001"].passed is False

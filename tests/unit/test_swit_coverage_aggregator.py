@@ -98,6 +98,81 @@ def _make_swit_meta() -> SwitCoverageBuildMeta:
     )
 
 
+def _build_swit_template_v202_traceability_row_20() -> bytes:
+    """58차 F2 — v2.02 SwIT 양식 mock: 1.Traceability 헤더 row 20에 SwUFn_ prefix."""
+    wb = openpyxl.Workbook()
+    wb.remove(wb.active)
+    cover = wb.create_sheet("Cover")
+    cover["B1"] = "Project"
+
+    ts = wb.create_sheet("1.Test Summary")
+    ts["B1"] = "Project Name"
+    ts["B2"] = "SW Version"
+    ts["B3"] = "HW Version"
+    ts["B4"] = "Test Date"
+    ts["B5"] = "Test Engineer"
+    ts["B6"] = "Target Coverage"
+    ts["B7"] = "Actual Coverage"
+    ts["B8"] = "Final Test Result"
+
+    trace = wb.create_sheet("1.Traceability")
+    # 헤더 row 20에 SwUFn_ prefix 5개 (v2.02 양식 위치 — 자동 탐색 max_row=20 으로는 발견 못함)
+    for i in range(5):
+        trace.cell(25, 3 + i).value = f"SwUFn_{i:04d}"
+    # data row 26에 SwUTC_SwUFn_0001
+    trace.cell(26, 2).value = "SwUTC_SwUFn_0000"
+
+    wb.create_sheet("2.Consistency")
+    wb.create_sheet("3. Coverage")
+    wb.create_sheet("History")
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def _make_swit_session_with_fn_0000() -> SwUTSession:
+    """traceability stamp 검증용 — TC 1건 + function 1건 mock."""
+    env = EnvironmentData(env_name="SWTE_01", component_name="SysOs_Main")
+    env.test_cases = {"SwITC_SwUFn_0000.001": []}
+    env.test_results = {
+        "SwITC_SwUFn_0000.001": ExecutionRow(
+            tc_name="SwITC_SwUFn_0000.001",
+            component="SysOs_Main", passed=True,
+        ),
+    }
+    env.function_coverage = [
+        FunctionCoverage(unit_id="SwUFn_0000", name="SysOs_Main.init"),
+    ]
+    return SwUTSession(
+        project_id="HDPDM01", version="v2.02_240219",
+        source_kind="log_folder", source_path="/tmp/fake/v2.02_240219",
+        environments=[env],
+    )
+
+
+class TestTraceabilityV202LayoutF2:
+    """58차 F2 — SwIT v2.02 양식 Traceability 헤더 row 자동 감지 + layout 강제."""
+
+    def test_traceability_stamps_with_v202_header_at_row_25(self):
+        """헤더 row 25 (v2.02 양식 위치) — 자동 탐색 max_row=30 확장 효과로 발견."""
+        result = build_swit_coverage_report(
+            _make_swit_session_with_fn_0000(),
+            _make_swit_meta(),
+            _build_swit_template_v202_traceability_row_20(),
+        )
+        assert result.ok
+        wb = openpyxl.load_workbook(io.BytesIO(result.xlsx_bytes))
+        trace = wb["1.Traceability"]
+        # row 26 (data) col 3 (header에서 SwUFn_0000 위치) — 'O' stamp 검증
+        # SwUFn_0000은 trace.cell(25,3) 위치 → data row=26, col=3
+        assert trace.cell(26, 3).value == "O", (
+            f"Traceability 'O' stamp 미발견 — row 26 col 3 value: {trace.cell(26, 3).value!r}, "
+            f"summary traceability_o_cells: {result.summary.get('traceability_o_cells')}"
+        )
+        # summary에 stamp 수 1 이상
+        assert result.summary.get("traceability_o_cells", 0) >= 1
+
+
 class TestBuildSwitCoverage:
     """SwIT Coverage Report builder smoke + structure."""
 

@@ -543,10 +543,17 @@ class TestAsilBCDistribution31:
 
 
 class TestSutrTestLogAsil31:
-    """31차 W27: SUTR Test Log 시트 col+4 Function ID + col+5 ASIL 컬럼."""
+    """31차 W27 → 57차 T319 fix: col+4/+5 매핑 폐기 — v2.02 SwIT/SwUT 양식은 F~O Input Params 영역.
 
-    def test_test_log_writes_function_id_column(self):
-        """TC name에서 SwUFn_NNNN 추출되어 col+4에 기록."""
+    회사 v2.02 양식 정확한 매핑 (T319):
+        B=TC ID, C=Title, D=Method, E=빈(TC ID row)/Params idx(sub-row),
+        F~O=Input Params, P~Y=Expected, Z~AI=Actual, AJ=Pass/Fail Unit,
+        AK=Pass/Fail Total, AL=Log Data.
+    Function ID + ASIL 컬럼은 회사 v2.02 양식에 별도 컬럼 없음 — AJ row 시각 강조로 대체.
+    """
+
+    def test_test_log_pass_fail_at_aj_ak_col_v202(self):
+        """57차 T319: Pass/Fail은 AJ(col 36) + AK(col 37)에 stamp."""
         import openpyxl
         from backend.services.swut_sutr_aggregator import _write_test_log
         wb = openpyxl.Workbook()
@@ -554,21 +561,40 @@ class TestSutrTestLogAsil31:
         ws.cell(1, 1).value = "Test Case ID"
 
         session = _make_session()
-        # session.environments[0].test_cases 에 SwUFn 포함 TC name 보장
         env = session.environments[0]
-        env.test_cases = {"SwUTC_SwUFn_0103.001": "...", "non_swufn_tc": "..."}
+        env.test_cases = {"SwUTC_SwUFn_0103.001": "..."}
         env.test_results = {}
 
-        n = _write_test_log(ws, session, function_asil_map={"SwUFn_0103": "D"})
+        n = _write_test_log(ws, session)
         assert n >= 1
-        # row 2 (start_row = pos[0] + 1) — SwUTC_SwUFn_0103 또는 non_swufn_tc 중
-        # 정렬상 'SwUTC_SwUFn_0103.001'이 먼저 (S < n in ASCII)
-        # col+4에 함수 ID
-        col4_values = [ws.cell(r, 5).value for r in (2, 3)]
-        assert "SwUFn_0103" in col4_values
+        # AJ (col 36) + AK (col 37) Pass/Fail Unit / Total
+        # exec_r 없음 → "N/A"
+        assert ws.cell(2, 36).value == "N/A"
+        assert ws.cell(2, 37).value == "N/A"
 
-    def test_test_log_writes_asil_column_with_d_highlight(self):
-        """ASIL D 함수 row의 col+5 셀에 빨간 강조."""
+    def test_test_log_log_data_col_al_v202(self):
+        """57차 T319: Log Data는 AL(col 38)에 stamp (env_name/tc_name.log)."""
+        import openpyxl
+        from backend.services.swut_sutr_aggregator import _write_test_log
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.cell(1, 1).value = "Test Case ID"
+
+        session = _make_session()
+        env = session.environments[0]
+        env.env_name = "SWTE_01"
+        env.test_cases = {"SwUTC_SwUFn_0103.001": "..."}
+        env.test_results = {}
+
+        _write_test_log(ws, session)
+        # AL (col 38) Log Data
+        al_val = ws.cell(2, 38).value
+        assert al_val is not None
+        assert "SwUTC_SwUFn_0103.001" in al_val
+        assert "SWTE_01" in al_val
+
+    def test_test_log_no_asil_col_overwrite_v202(self):
+        """57차 T319: function_asil_map이 col+5에 'ASIL D'를 stamp하지 않음 (v2.02 F열은 Input Params)."""
         import openpyxl
         from backend.services.swut_sutr_aggregator import _write_test_log
         wb = openpyxl.Workbook()
@@ -581,28 +607,10 @@ class TestSutrTestLogAsil31:
         env.test_results = {}
 
         _write_test_log(ws, session, function_asil_map={"SwUFn_0103": "D"})
-        # ASIL D row의 col+5 (col=1, col+5=6) — fill 적용
-        cell = ws.cell(2, 6)
-        assert cell.value == "ASIL D"
-        assert "FFC7CE" in str(cell.fill.fgColor.rgb).upper()
-
-    def test_test_log_empty_function_asil_map_writes_blank_asil_column(self):
-        """function_asil_map None 또는 빈 dict면 ASIL 컬럼은 빈 값."""
-        import openpyxl
-        from backend.services.swut_sutr_aggregator import _write_test_log
-        wb = openpyxl.Workbook()
-        ws = wb.active
-        ws.cell(1, 1).value = "Test Case ID"
-
-        session = _make_session()
-        env = session.environments[0]
-        env.test_cases = {"SwUTC_SwUFn_0103.001": "..."}
-        env.test_results = {}
-
-        _write_test_log(ws, session, function_asil_map=None)
-        # function_id는 추출되나 ASIL은 빈 string
-        assert ws.cell(2, 5).value == "SwUFn_0103"
-        assert ws.cell(2, 6).value == ""
+        # col+5 (col=6 = F) Input Param 1 자리 — ASIL D 침범 금지
+        f_val = ws.cell(2, 6).value
+        # input_data 없으면 None 또는 빈 — "ASIL D" 텍스트는 절대 없음
+        assert f_val != "ASIL D"
 
     def test_test_log_col4_5_non_empty_emits_warning_to_session(self):
         """31-fix D10: col+4/5 영역에 기존 데이터 있으면 out_warnings 누적."""
