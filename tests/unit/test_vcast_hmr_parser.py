@@ -180,3 +180,31 @@ class TestVcastHmrParserAmbiguous:
         )
         # ambiguous_count도 0
         assert result.to_dict()["ambiguous_count"] == 0
+
+    def test_dedup_metric_mismatch_emits_warning_round4_nw5(self):
+        """Round 4 NW5 fix: 같은 (unit_file, function_name) 중복 row의 metric
+        값 불일치 시 parse_warnings emit (silent drop 차단).
+
+        vcast가 부분 실행 + 최종 실행 결과 양쪽 보고 quirk 시 첫 row만 보존되어
+        audit reviewer가 어떤 값이 산출물에 stamp되었는지 알 수 없는 silent
+        wrong-pick 방지.
+        """
+        html_bytes = _build_hmr_html([
+            ("bats.c", "Init", "1", "1/1 (100%)", "5/10 (50%)"),
+            ("bats.c", "Init", "1", "1/1 (100%)", "8/10 (80%)"),  # 같은 file 다른 metric
+        ])
+        result = parse_hmr_html(html_bytes)
+        assert result.ok is True
+        # dedup으로 길이 1 유지 + 첫 row 보존
+        assert len(result.metrics_by_name["Init"]) == 1
+        assert result.metrics_by_name["Init"][0].covered_calls == 5
+        # NW5: parse_warnings에 metric 불일치 사유 누적
+        mismatch_warnings = [
+            w for w in result.parse_warnings
+            if "HMR dedup" in w and "값 불일치" in w
+        ]
+        assert len(mismatch_warnings) == 1, (
+            f"NW5 회귀: metric 불일치 warning 누락. parse_warnings: {result.parse_warnings}"
+        )
+        assert "Init" in mismatch_warnings[0]
+        assert "bats.c" in mismatch_warnings[0]

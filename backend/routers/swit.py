@@ -237,12 +237,17 @@ def _build_result_to_response(
 
     _warnings_str = json.dumps(warnings, ensure_ascii=True)
     if len(_warnings_str) > 1024:
-        # F6 Round 3 NC1 partial: 카테고리별 카운트 breakdown 추가 (SwUT 대칭).
+        # F6 Round 3 NC1 partial + Round 4 NW7/NW8 fix (SwUT 대칭).
+        _known_prefixes = ("[hmr]", "[swuts]", "[layout]")
         _breakdown = {
-            "ambiguous": sum(1 for w in warnings if "ambiguous" in w),
+            "ambiguous": sum(1 for w in warnings if w.startswith("[hmr] ambiguous")),
             "hmr": sum(1 for w in warnings if w.startswith("[hmr]")),
             "swuts": sum(1 for w in warnings if w.startswith("[swuts]")),
             "layout": sum(1 for w in warnings if w.startswith("[layout]")),
+            "other": sum(
+                1 for w in warnings
+                if not any(w.startswith(p) for p in _known_prefixes)
+            ),
         }
         _summary_parts = [f"{k}={v}" for k, v in _breakdown.items() if v]
         _summary_label = ", ".join(_summary_parts) or "uncategorized"

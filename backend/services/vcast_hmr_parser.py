@@ -247,9 +247,22 @@ def parse_hmr_html(
         # metrics는 backward-compat (첫 매칭). metrics_by_name이 caller 권장 API.
         # Round 2 W6 fix: 같은 (unit_file, function_name) 중복 row (vcast quirk) 시
         # dedup — false ambiguous → false negative stamp skip 방지.
+        # Round 4 NW5 fix: dedup 시 metric value 불일치 발견 → parse_warnings emit.
+        # vcast가 부분 실행 + 최종 실행 결과 양쪽 보고 시 첫 값 silent 보존 위험 차단.
         bucket = metrics_by_name.setdefault(function_name, [])
-        if not any(m.unit_file == unit_file for m in bucket):
+        _existing = next((m for m in bucket if m.unit_file == unit_file), None)
+        if _existing is None:
             bucket.append(metric_obj)
+        elif (
+            _existing.covered_calls != metric_obj.covered_calls
+            or _existing.total_calls != metric_obj.total_calls
+        ):
+            warnings.append(
+                f"HMR dedup '{function_name}' ({unit_file}) — 동일 함수의 metric "
+                f"값 불일치: 보존={_existing.covered_calls}/{_existing.total_calls} "
+                f"vs 신규={metric_obj.covered_calls}/{metric_obj.total_calls} "
+                "(첫 row 보존, 신규 row drop)"
+            )
         if function_name not in metrics:
             metrics[function_name] = metric_obj
 
