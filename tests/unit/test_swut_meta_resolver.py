@@ -219,3 +219,39 @@ class TestResolveSwutsTestSpecsWarnings:
         assert len(warnings) == 1
         assert "[swuts] read 실패" in warnings[0]
         assert "PermissionError" in warnings[0]
+
+
+class TestSwudsOSErrorRound3NC2:
+    """F6 Round 3 NC2: resolve_swuds_function_ids/asil_map OSError catch 확대."""
+
+    def test_swuds_function_ids_catches_oserror(self, monkeypatch, cfg_setup):
+        """resolve_swuds_function_ids — OSError (예: ConnectionError) graceful."""
+        cfg_setup({"projects": {"HDPDM01": {}}})
+
+        class _FakeResolver:
+            def read_bytes(self, path):
+                raise ConnectionError(f"Cloudium worker 연결 실패: {path}")
+
+        import backend.services.file_resolver as fr_mod
+        monkeypatch.setattr(fr_mod, "get_resolver", lambda: _FakeResolver())
+
+        req = SimpleNamespace(swuds_docx_path="U:/swuds.docx", project_id="HDPDM01")
+        # 이전: ConnectionError → unhandled → 500. NC2 fix 후: graceful None.
+        result = resolver.resolve_swuds_function_ids(req, "HDPDM01")
+        assert result is None
+
+    def test_swuds_function_asil_map_catches_oserror(self, monkeypatch, cfg_setup):
+        """resolve_swuds_function_asil_map — OSError graceful (빈 dict)."""
+        cfg_setup({"projects": {"HDPDM01": {}}})
+
+        class _FakeResolver:
+            def read_bytes(self, path):
+                raise IsADirectoryError(f"디렉토리: {path}")
+
+        import backend.services.file_resolver as fr_mod
+        monkeypatch.setattr(fr_mod, "get_resolver", lambda: _FakeResolver())
+
+        req = SimpleNamespace(swuds_docx_path="U:/dir", project_id="HDPDM01")
+        # 이전: IsADirectoryError → unhandled → 500. NC2 fix 후: graceful 빈 dict.
+        result = resolver.resolve_swuds_function_asil_map(req, "HDPDM01")
+        assert result == {}

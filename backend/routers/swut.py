@@ -228,8 +228,22 @@ def _build_result_to_response(
 
     _warnings_str = json.dumps(warnings, ensure_ascii=True)
     if len(_warnings_str) > 1024:
+        # F6 Round 3 NC1 partial: sentinel에 카테고리별 카운트 breakdown 추가.
+        # 산출물(xlsx)에 audit log 시트 추가는 큰 변경(별도 라운드) — 최소조치로
+        # 0정보(`N warnings`) → 1차 분류 정보(ambiguous/[hmr]/[swuts]/[layout] 카운트) 제공.
+        _breakdown = {
+            "ambiguous": sum(1 for w in warnings if "ambiguous" in w),
+            "hmr": sum(1 for w in warnings if w.startswith("[hmr]")),
+            "swuts": sum(1 for w in warnings if w.startswith("[swuts]")),
+            "layout": sum(1 for w in warnings if w.startswith("[layout]")),
+        }
+        _summary_parts = [f"{k}={v}" for k, v in _breakdown.items() if v]
+        _summary_label = ", ".join(_summary_parts) or "uncategorized"
         _warnings_str = json.dumps(
-            [f"({len(warnings)} warnings — 헤더 한도 초과로 생략, 산출물 확인)"],
+            [
+                f"({len(warnings)} warnings — 헤더 한도 초과로 생략, "
+                f"breakdown: {_summary_label})"
+            ],
             ensure_ascii=True,
         )
 

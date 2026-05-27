@@ -237,8 +237,20 @@ def _build_result_to_response(
 
     _warnings_str = json.dumps(warnings, ensure_ascii=True)
     if len(_warnings_str) > 1024:
+        # F6 Round 3 NC1 partial: 카테고리별 카운트 breakdown 추가 (SwUT 대칭).
+        _breakdown = {
+            "ambiguous": sum(1 for w in warnings if "ambiguous" in w),
+            "hmr": sum(1 for w in warnings if w.startswith("[hmr]")),
+            "swuts": sum(1 for w in warnings if w.startswith("[swuts]")),
+            "layout": sum(1 for w in warnings if w.startswith("[layout]")),
+        }
+        _summary_parts = [f"{k}={v}" for k, v in _breakdown.items() if v]
+        _summary_label = ", ".join(_summary_parts) or "uncategorized"
         _warnings_str = json.dumps(
-            [f"({len(warnings)} warnings — 헤더 한도 초과로 생략, 산출물 확인)"],
+            [
+                f"({len(warnings)} warnings — 헤더 한도 초과로 생략, "
+                f"breakdown: {_summary_label})"
+            ],
             ensure_ascii=True,
         )
 

@@ -480,6 +480,43 @@ class TestSummaryHeaderTruncation21:
         assert parsed["asil_d_function_ids"] == ["SwUFn_0001", "SwUFn_0002"]
 
 
+class TestWarningsSentinelBreakdownRound3NC1:
+    """F6 Round 3 NC1 partial: warnings 1024B 초과 시 sentinel에 카테고리별
+    카운트 breakdown 노출. 산출물 audit log 시트는 별도 라운드."""
+
+    def test_warnings_truncated_with_category_breakdown(self):
+        import json
+        from io import BytesIO
+        from backend.routers.swut import _build_result_to_response
+
+        # 50개 warnings (각 ~40B = 2000B+) — 1024B 초과 보장
+        warnings = (
+            ["[hmr] ambiguous function 'Init' — 다중 unit_file (a.c, b.c)"] * 20
+            + ["[hmr] Function Calls metric stamped — 50/100 functions matched"]
+            + ["[swuts] parse 실패 — spec stamp skip, 하드코딩 fallback"] * 10
+            + ["[layout] precondition col missing"] * 5
+            + ["기타 일반 warning"] * 14
+        )
+        res = _build_result_to_response(
+            content_io=BytesIO(b"x"),
+            filename="cov.xlsx",
+            summary={"function_rows": 100},
+            warnings=warnings,
+            incomplete_sheets=[],
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+        parsed = json.loads(res.headers.get("X-SwUT-Warnings"))
+        assert isinstance(parsed, list) and len(parsed) == 1
+        msg = parsed[0]
+        # breakdown 라벨에 카테고리별 카운트 포함 — 0정보 → 1차 분류
+        assert "breakdown:" in msg
+        assert "ambiguous=20" in msg
+        assert "hmr=21" in msg  # ambiguous 20 + stamped 1 (둘 다 [hmr] prefix)
+        assert "swuts=10" in msg
+        assert "layout=5" in msg
+        assert f"{len(warnings)} warnings" in msg
+
+
 class TestXUserHeader:
     def test_missing_x_user_header_rejected(self):
         r = client.post(

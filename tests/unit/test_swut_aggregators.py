@@ -1553,6 +1553,18 @@ class TestSutrTestLogSwUTSStampF6A:
             f"N3 회귀: 1번째 build의 HMR stamp가 session으로 leak. "
             f"실제 function_calls_coverage: {post_fc.function_calls_coverage}"
         )
+        # Round 3 NW2 보강: 모든 nested CoverageStats 필드 mutation 차단 검증.
+        # 미래 writer가 fc.statement / fc.branch / fc.mcdc mutate 시 silent regression
+        # 방지. _make_session의 main 함수는 statement(8,8,1.0)/branch(2,2,1.0)/mcdc(0,0,0)
+        assert post_fc.statement == CoverageStats(8, 8, 1.0), (
+            f"NW2 회귀: statement 필드 mutate됨. 실제: {post_fc.statement}"
+        )
+        assert post_fc.branch == CoverageStats(2, 2, 1.0), (
+            f"NW2 회귀: branch 필드 mutate됨. 실제: {post_fc.branch}"
+        )
+        assert post_fc.mcdc == CoverageStats(0, 0, 0.0), (
+            f"NW2 회귀: mcdc 필드 mutate됨. 실제: {post_fc.mcdc}"
+        )
 
     def test_hmr_does_not_mutate_session_function_coverage_f6_round1_w2(self):
         """F6 Round 1 W2 fix: HMR stamp가 session.environments[].function_coverage

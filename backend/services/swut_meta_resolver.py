@@ -250,7 +250,8 @@ def resolve_swuds_function_ids(req: Any, project_id: str) -> set[str] | None:
             _logger.warning("SwUDS parse failed: %s", parse_warnings)
             return None
         return result.function_ids
-    except (FileNotFoundError, PermissionError) as e:
+    except (FileNotFoundError, PermissionError, OSError) as e:
+        # F6 Round 3 NC2: OSError 확대 정책 일관성 — swuts/hmr 함수와 대칭.
         _logger.warning("SwUDS docx read failed: %s", e)
         return None
 
@@ -278,7 +279,8 @@ def resolve_swuds_function_asil_map(req: Any, project_id: str) -> dict[str, str]
             _logger.warning("SwUDS ASIL parse failed: %s", parse_warnings)
             return {}
         return dict(result.function_asil_map)
-    except (FileNotFoundError, PermissionError) as e:
+    except (FileNotFoundError, PermissionError, OSError) as e:
+        # F6 Round 3 NC2: OSError 확대 — swuts/hmr 함수와 대칭.
         _logger.warning("SwUDS docx read for ASIL failed: %s", e)
         return {}
 
