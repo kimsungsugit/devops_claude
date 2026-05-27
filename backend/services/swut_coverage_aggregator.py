@@ -828,10 +828,14 @@ def _write_traceability_sheet(
     if not ws:
         return 0
 
-    # 59차 F4-C — KJPDS02 v1.01 양식 matrix kind 분기.
-    # "switc_x_swst" 양식은 row = SwITC ID, col = SwST/SwSTR (SwITS docx에서
-    # col header 추출 필요). 현재는 SwITS docx parser 미구현 → skip + warning.
-    # 향후 라운드(F5+)에서 parse_swits_docx 신규 + matrix kind 정상 처리.
+    # 59차 F4-C → 60차 F6-B 갱신 — KJPDS02 v1.01 양식 matrix kind 분기.
+    # "switc_x_swst" 양식은 row = SwITC ID, col = SwST/SwSTR.
+    # F6-B 라이브 분석 (T411) 결과: 검증된 양식 (KJPDS02 SwITS v1.01 + HDPDM01
+    # SITS v2.02) 모두 'Integration Strategy' 시트가 SwST matrix가 아닌
+    # **call graph (depth 1~14 tree)** 양식. SwITC×SwST traceability matrix 자체
+    # 가 시방서에 존재하지 않음 — F4-C skip이 양식 설계상 정답.
+    # 본 메시지는 audit reviewer가 'matrix 미stamp' 정상 동작임을 인지하도록 명시.
+    # 다른 회사 양식 도입 시 재검증 필요.
     matrix_kind = (
         getattr(layout, "traceability_matrix_kind", "swufn_x_env") if layout is not None
         else "swufn_x_env"
@@ -839,9 +843,10 @@ def _write_traceability_sheet(
     if matrix_kind == "switc_x_swst":
         if out_warnings is not None:
             out_warnings.append(
-                "1.Traceability matrix kind 'switc_x_swst' (KJPDS02 v1.01 양식) — "
-                "SwITS docx parser 미구현으로 매트릭스 stamp skip. SwITS path "
-                "제공 + parse_swits_docx 구현 시 별도 라운드에서 지원."
+                "1.Traceability matrix kind 'switc_x_swst' (KJPDS02 v1.01 / "
+                "HDPDM01 v2.02 양식) — 검증된 양식에 SwITC×SwST matrix 시트 자체가 "
+                "부재 (Strategy 시트는 call graph 양식). audit 정상 동작 — "
+                "matrix stamp skip. 다른 회사 양식 도입 시 재검증 필요."
             )
         return 0
 

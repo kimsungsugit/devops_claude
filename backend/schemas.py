@@ -754,6 +754,10 @@ class SwITBuildRequest(BaseModel):
     swuds_docx_path: str = Field("", max_length=500)
     # 30차 W21 + 32차 W28: C 소스 디렉토리 (옵션) — Doxygen @asil 추출
     c_source_root: str = Field("", max_length=500)
+    # 60차 F6-B: SwITS spec 파일 (xlsm/docx 허용). 제공 시 SITR Test Log의
+    # TC_ID/Description/Precondition/Test Method/Generation Method 컬럼에 spec stamp.
+    # field 명은 swuts_docx_path로 통일 (SwUT와 대칭 — resolver `getattr` 호환).
+    swuts_docx_path: str = Field("", max_length=500)
 
     # 인사 메타 (선택)
     reviewer_override: str = Field("", max_length=100)
@@ -762,7 +766,7 @@ class SwITBuildRequest(BaseModel):
 
     @field_validator("test_engineer", "reviewer_override", "approver_override",
                      "cache_root", "log_folder", "coverage_template_path", "sitr_template_path",
-                     "swuds_docx_path", "c_source_root")
+                     "swuds_docx_path", "c_source_root", "swuts_docx_path")
     @classmethod
     def _no_newline(cls, v):
         if v is None:

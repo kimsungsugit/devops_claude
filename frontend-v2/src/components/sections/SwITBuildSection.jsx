@@ -27,6 +27,9 @@ const DEFAULT_FORM = {
   coverage_template_path: '',
   sitr_template_path: '',
   swuds_docx_path: '',
+  // 60차 F6-B: SwITS spec 파일 (xlsm/docx 허용). 제공 시 SITR Test Log의
+  // TC_ID/Description/Precondition/Test Method/Generation Method 컬럼에 spec stamp.
+  swuts_docx_path: '',
   c_source_root: '',
   reviewer_override: '',
   approver_override: '',
@@ -487,6 +490,23 @@ export default function SwITBuildSection() {
                   disabled={!isAdmin}
                   title={isAdmin ? undefined : browseDisabledTitle}
                   onClick={() => openPicker('swuds_docx_path', '*.docx', 'SwUDS docx 선택')}>
+            📂 Browse
+          </button>
+        </div>
+        <div className="swut-form-row swut-field-with-browse">
+          <Field
+            name="swuts_docx_path"
+            label="SwITS Spec Path (선택, 60차 F6-B)"
+            value={form.swuts_docx_path}
+            onChange={v => setField('swuts_docx_path', v)}
+            placeholder="U:\...\(KJPDS02_SwITS) ... .xlsm"
+            hint="비우면 config/swut_meta.json의 swuts_docx_path 자동 사용. 제공 시 SITR Test Log B/C/D + Precondition spec stamp (xlsm/docx 자동 감지)"
+            fullWidth
+          />
+          <button className="swut-browse-btn" type="button"
+                  disabled={!isAdmin}
+                  title={isAdmin ? undefined : browseDisabledTitle}
+                  onClick={() => openPicker('swuts_docx_path', '*.xlsm;*.xlsx;*.docx', 'SwITS spec 파일 선택')}>
             📂 Browse
           </button>
         </div>

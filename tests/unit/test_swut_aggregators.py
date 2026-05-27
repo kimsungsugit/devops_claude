@@ -1369,7 +1369,11 @@ class TestTraceabilityMatrixKindF4C:
     """`_write_traceability_sheet` — switc_x_swst matrix는 skip + warning."""
 
     def test_switc_x_swst_matrix_skipped_with_warning(self):
-        """layout.traceability_matrix_kind='switc_x_swst' → 0 반환 + parse_warnings."""
+        """layout.traceability_matrix_kind='switc_x_swst' → 0 반환 + parse_warnings.
+
+        60차 F6-B 갱신 — 메시지가 'SwITS docx parser 미구현' → 'matrix 시트 자체가
+        부재'로 정확화 (라이브 분석 T411 결과: Strategy 시트는 call graph 양식).
+        """
         from backend.services.swut_coverage_aggregator import _write_traceability_sheet
         from backend.services.excel_layout_resolver import SwitLayout
 
@@ -1384,9 +1388,9 @@ class TestTraceabilityMatrixKindF4C:
         warnings: list[str] = []
         session = _make_session()
         n = _write_traceability_sheet(ws, session, out_warnings=warnings, layout=layout)
-        assert n == 0  # SwITS docx parser 미구현 → skip
+        assert n == 0  # 60차 F6-B — 양식에 matrix 시트 자체 부재로 정당 skip
         assert any(
-            "switc_x_swst" in w and "SwITS docx parser 미구현" in w
+            "switc_x_swst" in w and "matrix 시트 자체가" in w
             for w in warnings
         )
 
@@ -1465,6 +1469,36 @@ class TestSutrTestLogSwUTSStampF6A:
 
         # 첫 data row의 col 3 (method) = 하드코딩 fallback
         assert ws.cell(2, 3).value == "AEC, ABV"
+
+    def test_function_id_fallback_chain_kjpds02_pattern(self):
+        """60차 F6-B — VectorCAST 'SwUFn_NNNN.NNN' → swuts_map 'SwUTC_NNNN' fallback.
+
+        KJPDS02 SwUTS 패턴 — TC 메타 row에 SwUTC_0103 / function_id="SwUFn_0103".
+        VectorCAST는 SwUFn_0103.001 형식으로 TC 이름 사용. fallback chain으로 매칭.
+        """
+        import openpyxl
+        from backend.services.swut_sutr_aggregator import _write_test_log
+        from backend.services.swuts_excel_parser import SwUTSEntry
+
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.cell(1, 1).value = "Test Case ID"
+
+        session = _make_session()  # SwUFn_0101.001 + SwUFn_0103.001
+        swuts_map = {
+            "SwUTC_0103": SwUTSEntry(
+                tc_id="SwUTC_0103",
+                description="System Operation",
+                test_method="REQ",
+                generation_method="ABV",
+                function_id="SwUFn_0103",
+            ),
+        }
+        _write_test_log(ws, session, swuts_map=swuts_map)
+
+        # SwUFn_0103.001 → fallback chain → swuts_map[SwUTC_0103] 매칭
+        b_values = [ws.cell(r, 1).value for r in range(2, 10)]
+        assert "SwUTC_0103" in b_values
 
     def test_precondition_stamps_when_layout_provides_col(self):
         """layout.test_log_precondition_col 제공 + swuts_entry.precondition → stamp."""
