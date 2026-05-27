@@ -1500,6 +1500,60 @@ class TestSutrTestLogSwUTSStampF6A:
         b_values = [ws.cell(r, 1).value for r in range(2, 10)]
         assert "SwUTC_0103" in b_values
 
+    def test_hmr_two_builds_same_session_no_leakage_round2_n3(self):
+        """Round 2 N3: 같은 session으로 2회 build_coverage_report 호출 시 두번째
+        호출이 첫번째의 stamped 결과를 보지 않음 (caching 시나리오 시뮬레이션).
+
+        W2 fix가 session caching 도입 시 silent regression 방지 확인.
+        """
+        from backend.services.swut_coverage_aggregator import (
+            build_coverage_report, CoverageBuildMeta,
+        )
+        from backend.services.swut_input_adapter import CoverageStats
+        import openpyxl as _opx
+        import io as _io
+
+        # HMR HTML
+        hmr_html = (
+            b"<html><body><table><thead>"
+            b"<tr><th>Unit</th><th>Subprogram</th><th>Complexity</th>"
+            b"<th>Functions</th><th>Function Calls</th></tr></thead>"
+            b"<tbody>"
+            b"<tr><td>main.c</td><td>main</td><td>3</td>"
+            b"<td>1/1 (100%)</td><td>15/15 (100%)</td></tr>"
+            b"</tbody></table></body></html>"
+        )
+
+        wb = _opx.Workbook()
+        for name in ["Cover", "Test Summary", "1.Traceability",
+                     "2.Consistency", "3. Coverage", "History"]:
+            wb.create_sheet(name)
+        wb.remove(wb["Sheet"])
+        buf = _io.BytesIO()
+        wb.save(buf)
+        template_bytes = buf.getvalue()
+
+        session = _make_session()
+        meta = CoverageBuildMeta(
+            project_id="HDPDM01", release_sw_version="1.01.05",
+            test_date="2024-02-19", test_engineer="김진경",
+        )
+
+        # 1번째 build — HMR 제공 (stamp 발생)
+        build_coverage_report(session, meta, template_bytes, hmr_html_bytes=hmr_html)
+
+        # 2번째 build — HMR 미제공. session 객체가 mutate 안 되었으므로 빈 default 유지.
+        result2 = build_coverage_report(session, meta, template_bytes, hmr_html_bytes=None)
+        assert result2.ok is True
+
+        # session.environments[0].function_coverage[0].function_calls_coverage가
+        # 빈 default여야 함 — 1번째 build의 stamped 값 leak되면 안 됨
+        post_fc = session.environments[0].function_coverage[0]
+        assert post_fc.function_calls_coverage == CoverageStats(0, 0, 0.0), (
+            f"N3 회귀: 1번째 build의 HMR stamp가 session으로 leak. "
+            f"실제 function_calls_coverage: {post_fc.function_calls_coverage}"
+        )
+
     def test_hmr_does_not_mutate_session_function_coverage_f6_round1_w2(self):
         """F6 Round 1 W2 fix: HMR stamp가 session.environments[].function_coverage
         본체를 mutate하지 않음 (dataclasses.replace + 새 list).

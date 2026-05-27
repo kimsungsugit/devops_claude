@@ -572,9 +572,10 @@ def _write_test_log(
                         # HDPDM01 'SwUTC_SwUFn_NNNN' 형식 시도
                         swuts_entry = swuts_map.get(f"SwUTC_{_fn_id}")
                     if swuts_entry is None:
-                        # SwIT KJPDS02 'SwITC_NN' 형식: function_id 4자리 → SwITC 2자리
-                        # 매핑이 spec에 따라 다르므로 by_function_id로 lookup.
-                        # 단, by_function_id는 list[SwUTSEntry] — 첫 entry 사용.
+                        # SwIT spec key는 'SwITC_NNNN' (function_id 4자리 그대로) 형식
+                        # 가능성 시도. KJPDS02 SwITS의 2자리 (`SwITC_NN`) 매핑은 본
+                        # 시도로 매칭 안 됨 — by_function_id 기반 lookup이 필요한 케이스는
+                        # 별도 라운드에서 처리 (Round 2 N1).
                         swuts_entry = swuts_map.get(f"SwITC_{_fn_match.group(1)}")
 
         # B/C/D — TC ID / Title / Method (SwUTS spec 우선, 없으면 기존 fallback)

@@ -165,6 +165,14 @@ def aggregate_session(session: SwUTSession) -> dict[str, Any]:
         반영**. 매 build마다 fresh session을 만들면 영향 없음 (현재 router 패턴).
         향후 session caching/재사용 도입 시 silent regression 위험 — caller에서
         `dataclasses.replace(fc, ...)` + 새 list 구성 패턴 필요.
+
+    F6 자체평가 Round 2 W8 주의 (nested mutation):
+        `dataclasses.replace(fc, ...)`로 새 FunctionCoverage를 만들어도, nested
+        CoverageStats (`statement`/`branch`/`mcdc`/`function_calls_coverage`)는
+        명시적으로 교체된 필드 외에는 **동일 reference 복사**. 따라서 downstream
+        writer가 nested CoverageStats 객체를 mutate하면 session으로 leak.
+        현재 모든 writer는 read-only (cell에 값 stamp만) — 안전. 향후 변경 시
+        반드시 nested 객체도 `dataclasses.replace` 적용 의무.
     """
     total = 0
     passed = 0

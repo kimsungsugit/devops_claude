@@ -159,3 +159,24 @@ class TestVcastHmrParserAmbiguous:
         result = parse_hmr_html(html_bytes)
         d = result.to_dict()
         assert d["ambiguous_count"] == 1  # Init만 중복
+
+    def test_same_unit_file_same_function_dedup_round2_w6(self):
+        """Round 2 W6 fix: 같은 (unit_file, function_name) 중복 row dedup.
+
+        VectorCAST aggregate metrics report가 같은 함수를 2번 reporting하는
+        quirk가 있을 때 false ambiguous → false negative stamp skip 방지.
+        같은 unit_file의 동일 함수명 row 2개는 1건만 보존.
+        """
+        html_bytes = _build_hmr_html([
+            ("bats.c", "Init", "1", "1/1 (100%)", "5/5 (100%)"),
+            ("bats.c", "Init", "1", "1/1 (100%)", "5/5 (100%)"),  # 같은 unit_file 중복
+        ])
+        result = parse_hmr_html(html_bytes)
+        assert result.ok is True
+        # metrics_by_name['Init'] 길이는 1 (dedup) — ambiguous 아님
+        candidates = result.metrics_by_name["Init"]
+        assert len(candidates) == 1, (
+            f"같은 unit_file 중복 row가 dedup 안 됨: {[(c.unit_file, c.function_name) for c in candidates]}"
+        )
+        # ambiguous_count도 0
+        assert result.to_dict()["ambiguous_count"] == 0

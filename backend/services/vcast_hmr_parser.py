@@ -245,7 +245,11 @@ def parse_hmr_html(
         )
         # F6 자체평가 Round 1 C2: 함수명별 모든 매칭 누적 (audit silent wrong-pick 차단).
         # metrics는 backward-compat (첫 매칭). metrics_by_name이 caller 권장 API.
-        metrics_by_name.setdefault(function_name, []).append(metric_obj)
+        # Round 2 W6 fix: 같은 (unit_file, function_name) 중복 row (vcast quirk) 시
+        # dedup — false ambiguous → false negative stamp skip 방지.
+        bucket = metrics_by_name.setdefault(function_name, [])
+        if not any(m.unit_file == unit_file for m in bucket):
+            bucket.append(metric_obj)
         if function_name not in metrics:
             metrics[function_name] = metric_obj
 
