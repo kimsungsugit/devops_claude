@@ -448,12 +448,19 @@ def _compute_asil_distribution(
     )
 
 
-def _write_coverage_sheet(ws, agg: dict[str, Any]) -> int:
+def _write_coverage_sheet(
+    ws, agg: dict[str, Any], *, layout: Any = None,
+    out_warnings: list[str] | None = None,
+) -> int:
     """3. Coverage 시트 — per-function Statement/Branch/Exception 표.
 
     30차 W21: ``agg["function_asil_map"]`` 에 ASIL D 매핑된 함수는 row 전체에
     빨간 강조 (``mark_asil_d_function``). 색상은 FAIL과 동일 RGB이나 호출
     의미 분리.
+
+    59차 F4-C: ``layout.coverage_metric_kind == "function_and_calls"`` 시
+    KJPDS02 v1.01 양식 호환 — 추가 col에 Function Calls metric stamp
+    (``FunctionCoverage.function_calls_coverage``). v2.02/v3.01은 단일 metric.
 
     Returns:
         쓰여진 행 수.
@@ -497,6 +504,19 @@ def _write_coverage_sheet(ws, agg: dict[str, Any]) -> int:
         safe_write(ws, r, 7, fc.branch.total)
         safe_write(ws, r, 8, fc.branch.covered)
         safe_write(ws, r, 9, "O" if fc.branch.passed else "X")
+
+        # 59차 F4-C — KJPDS02 v1.01 양식: Function Calls metric 별도 col stamp.
+        # layout.coverage_metric_kind == "function_and_calls" + fc.function_calls_coverage
+        # 채워진 경우만. v2.02/v3.01 → skip.
+        if (
+            layout is not None
+            and getattr(layout, "coverage_metric_kind", "single") == "function_and_calls"
+        ):
+            fcc = getattr(fc, "function_calls_coverage", None)
+            if fcc is not None and fcc.total > 0:
+                safe_write(ws, r, 10, fcc.total)
+                safe_write(ws, r, 11, fcc.covered)
+                safe_write(ws, r, 12, "O" if fcc.passed else "X")
 
         # 30차 W21 + 31차 W29: ASIL B/C/D 함수면 row의 핵심 컬럼 강조.
         # fc.unit_id 가 SwUFn_NNNN 패턴일 수 있고 또는 다른 ID. 둘 다 매칭 시도.
@@ -806,6 +826,23 @@ def _write_traceability_sheet(
         쓰여진 'O' 셀 수. 0이면 매트릭스 미작성.
     """
     if not ws:
+        return 0
+
+    # 59차 F4-C — KJPDS02 v1.01 양식 matrix kind 분기.
+    # "switc_x_swst" 양식은 row = SwITC ID, col = SwST/SwSTR (SwITS docx에서
+    # col header 추출 필요). 현재는 SwITS docx parser 미구현 → skip + warning.
+    # 향후 라운드(F5+)에서 parse_swits_docx 신규 + matrix kind 정상 처리.
+    matrix_kind = (
+        getattr(layout, "traceability_matrix_kind", "swufn_x_env") if layout is not None
+        else "swufn_x_env"
+    )
+    if matrix_kind == "switc_x_swst":
+        if out_warnings is not None:
+            out_warnings.append(
+                "1.Traceability matrix kind 'switc_x_swst' (KJPDS02 v1.01 양식) — "
+                "SwITS docx parser 미구현으로 매트릭스 stamp skip. SwITS path "
+                "제공 + parse_swits_docx 구현 시 별도 라운드에서 지원."
+            )
         return 0
 
     # 58차 F2: layout 제공 시 traceability_header_row 강제. fallback은 자동 탐색.

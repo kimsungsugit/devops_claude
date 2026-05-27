@@ -68,13 +68,23 @@ class CoverageStats:
 
 @dataclass
 class FunctionCoverage:
-    """단위 함수(SwUFn_xxxx)별 커버리지 — Coverage Report 3.Coverage 시트의 한 행."""
+    """단위 함수(SwUFn_xxxx)별 커버리지 — Coverage Report 3.Coverage 시트의 한 행.
+
+    59차 F4-C 신규: ``function_calls_coverage`` — KJPDS02 v1.01 양식의 row 6
+    'Function Calls' 별도 metric. v1.01 양식은 Functions / Function Calls 2개
+    coverage를 분리해 표시 (row 5 Functions Total/Fail/Exception/Coverage +
+    row 6 Function Calls 동일 4 metric). v2.02/v3.01 양식은 단일 Coverage라
+    빈 CoverageStats default → backward-compat.
+    """
     unit_id: str = ""  # 예: SwUFn_0101
     name: str = ""      # 예: main
     statement: CoverageStats = field(default_factory=CoverageStats)
     branch: CoverageStats = field(default_factory=CoverageStats)
     mcdc: CoverageStats = field(default_factory=CoverageStats)
     complexity: int = 0
+    # 59차 F4-C 신규 — KJPDS02 v1.01 양식 row 6 'Function Calls' coverage.
+    # v2.02/v3.01 양식에서는 빈 CoverageStats (default) — writer가 skip.
+    function_calls_coverage: CoverageStats = field(default_factory=CoverageStats)
 
 
 @dataclass

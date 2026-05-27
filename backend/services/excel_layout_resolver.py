@@ -108,7 +108,7 @@ class SwitLayout:
             은 v3.01보다 더 아래쪽 (row 20~25) 위치. None이면 writer가 자동 탐색.
         warnings: inspect 중 누락 라벨 / 시트 미발견 등 메시지.
     """
-    detected_version: Literal["v2.02", "v3.01", "unknown"] = "unknown"
+    detected_version: Literal["v1.01", "v2.02", "v3.01", "unknown"] = "unknown"
     fallback_to_v301: bool = False
     cover_labels: dict[str, str] = field(default_factory=dict)
     test_summary_labels: dict[str, str] = field(default_factory=dict)
@@ -146,6 +146,24 @@ class SwitLayout:
     # "single_row":   v3.01 양식 — TC당 1 row (tc_row_step == 1)
     # _inspect_internal에서 tc_row_step 값에 따라 자동 결정.
     test_log_step_layout: str = "single_row"
+    # 59차 F4-C — KJPDS02 v1.01 양식 시트 구성 분기 (Deviation/Traceability matrix/
+    # Coverage metric 다른 양식 패밀리). 모든 default는 v2.02/v3.01 backward-compat.
+    sitr_sheet_count: int = 5
+    """SITR (xlsm) 시트 수. v1.01=4 (Deviation 시트 없음), v2.02/v3.01=5."""
+    coverage_sheet_count: int = 4
+    """Coverage (xlsx) 시트 수. v1.01=6 (Cover/History/1.Test Summary/2.Traceability/
+    3.Consistency/4.Coverage), v2.02/v3.01=4."""
+    traceability_matrix_kind: Literal["swufn_x_env", "switc_x_swst"] = "swufn_x_env"
+    """Traceability matrix 차원. v1.01=switc_x_swst (SwITC ID × SwST/SwSTR 항목),
+    v2.02/v3.01=swufn_x_env (SwUFn × 환경 매트릭스)."""
+    coverage_metric_kind: Literal["single", "function_and_calls"] = "single"
+    """Coverage metric 분리. v1.01=function_and_calls (Functions row 5 / Function Calls
+    row 6 별도), v2.02/v3.01=single (단일 Coverage row)."""
+    deviation_sheet_present: bool = True
+    """SUTR/SITR Deviation 시트 존재 여부. v1.01=False (Test Log만), v2.02/v3.01=True."""
+    test_summary_coverage_breakdown: int = 1
+    """1.Test Summary의 Coverage breakdown count. v1.01=4 (추적성/정합성/Function/
+    FunctionCalls 4가지 별도 표시), v2.02/v3.01=1 (단일 Coverage)."""
     warnings: list[str] = field(default_factory=list)
 
 
@@ -689,6 +707,35 @@ def _inspect_internal(
         # 양식 버전 추정
         detected_version = _detect_version_from_labels(test_summary_labels)
 
+        # 59차 F4-C — KJPDS02 v1.01 양식 자동 감지 (시트 구성 패턴).
+        # v1.01 SITR 시트: Cover/History/1.Test Summary/2.Test Log (4 시트, Deviation 없음)
+        # v1.01 Coverage 시트: Cover/History/1.Test Summary/2.Traceability/3.Consistency/
+        #                      4.Coverage (6 시트)
+        # v2.02/v3.01 SITR: Cover/History/1.Test Summary/Deviation/Test Log/...
+        # v2.02/v3.01 Coverage: Cover/History/Test Summary/1.Traceability/2.Consistency/
+        #                      3.Coverage
+        sheet_names_lower = [s.lower() for s in wb.sheetnames]
+        sitr_sheet_count_actual = len(wb.sheetnames)
+        coverage_sheet_count_actual = len(wb.sheetnames)
+        # v1.01 signature: "4.coverage" 시트명 (3.Coverage가 아닌 4.Coverage)
+        has_4_coverage = any("4.coverage" in n for n in sheet_names_lower)
+        has_3_consistency = any("3.consistency" in n for n in sheet_names_lower)
+        has_2_traceability = any("2.traceability" in n for n in sheet_names_lower)
+        v101_signals = sum([has_4_coverage, has_3_consistency, has_2_traceability])
+        if v101_signals >= 2:
+            # v1.01 양식 감지 — detected_version override (test_summary_labels 보존)
+            detected_version = "v1.01"
+        deviation_sheet_present_v = any(
+            "deviation" in n for n in sheet_names_lower
+        )
+        traceability_matrix_kind_v: Literal["swufn_x_env", "switc_x_swst"] = (
+            "switc_x_swst" if detected_version == "v1.01" else "swufn_x_env"
+        )
+        coverage_metric_kind_v: Literal["single", "function_and_calls"] = (
+            "function_and_calls" if detected_version == "v1.01" else "single"
+        )
+        test_summary_coverage_breakdown_v = 4 if detected_version == "v1.01" else 1
+
         # fallback 판정: v2.02 신규 row가 모두 없고 v3.01 라벨 매칭이 다수면 v3.01
         # → fallback_to_v301 False (정상 v3.01 양식). v2.02 라벨 매칭 0이면 fallback.
         v202_label_count = sum(
@@ -775,6 +822,13 @@ def _inspect_internal(
             test_log_expected_max_count=test_log_expected_max_count,
             test_log_actual_max_count=test_log_actual_max_count,
             test_log_step_layout=test_log_step_layout,
+            # 59차 F4-C — KJPDS02 v1.01 양식 시트 구성 분기
+            sitr_sheet_count=sitr_sheet_count_actual,
+            coverage_sheet_count=coverage_sheet_count_actual,
+            traceability_matrix_kind=traceability_matrix_kind_v,
+            coverage_metric_kind=coverage_metric_kind_v,
+            deviation_sheet_present=deviation_sheet_present_v,
+            test_summary_coverage_breakdown=test_summary_coverage_breakdown_v,
             warnings=warnings,
         )
     finally:

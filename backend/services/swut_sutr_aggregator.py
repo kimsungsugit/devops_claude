@@ -903,9 +903,19 @@ def build_sutr(
         )
 
     # 54-fix C1: substring 대칭
+    # 59차 F4-C: KJPDS02 v1.01 양식은 Deviation 시트 없음 — layout.deviation_sheet_present
+    # False면 시트 미발견을 정상으로 처리 + parse_warnings 안내 메시지 변경.
     dev_ws = next((wb[n] for n in sheet_names if "deviation" in n.lower()), None)
+    deviation_required = (
+        layout is None or getattr(layout, "deviation_sheet_present", True)
+    )
     if dev_ws is None:
-        warnings.append("Deviation 시트 미발견")
+        if deviation_required:
+            warnings.append("Deviation 시트 미발견")
+        else:
+            warnings.append(
+                "Deviation 시트 미발견 — v1.01 양식 (정상, layout.deviation_sheet_present=False)"
+            )
     elif deviation_cases:
         n = _write_deviation(dev_ws, deviation_cases, out_warnings=warnings)
         summary["deviation_cases_written"] = n

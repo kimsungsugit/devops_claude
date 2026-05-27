@@ -670,3 +670,66 @@ class TestInspectSitrV4AStepLayout:
         layout = elr.inspect_swit_layout(template, "sitr")
         assert layout.test_log_tc_row_step == 1
         assert layout.test_log_step_layout == "single_row"
+
+
+# ---------------------------------------------------------------------------
+# 59차 F4-C — KJPDS02 v1.01 양식 시트 구성 자동 감지
+# ---------------------------------------------------------------------------
+
+
+class TestInspectV101SheetConfig:
+    """`_inspect_internal` 양식 분류 — 시트 이름 패턴으로 v1.01 / v2.02 / v3.01 구분."""
+
+    def test_v101_coverage_signature_detected(self):
+        """2.Traceability + 3.Consistency + 4.Coverage 시트 → detected_version=v1.01."""
+        template = _make_xlsx({
+            "Cover": [["Project"]],
+            "1.Test Summary": [["Project Name"]],
+            "2.Traceability": [["Matrix"]],
+            "3.Consistency": [["Item"]],
+            "4.Coverage": [["Function"]],
+            "History": [["Version"]],
+        })
+        layout = elr.inspect_swit_layout(template, "coverage")
+        assert layout.detected_version == "v1.01"
+        assert layout.traceability_matrix_kind == "switc_x_swst"
+        assert layout.coverage_metric_kind == "function_and_calls"
+        assert layout.test_summary_coverage_breakdown == 4
+
+    def test_v202_no_v101_signature(self):
+        """1.Traceability + 2.Consistency + 3.Coverage → v1.01 신호 부족 → 기본 유지."""
+        template = _make_xlsx({
+            "Cover": [["Project"]],
+            "1.Test Summary": [["SW Version"]],
+            "1.Traceability": [["Matrix"]],
+            "2.Consistency": [["Item"]],
+            "3.Coverage": [["Function"]],
+        })
+        layout = elr.inspect_swit_layout(template, "coverage")
+        # v1.01 시그널 < 2 (2.Traceability/3.Consistency/4.Coverage 모두 부재)
+        assert layout.detected_version != "v1.01"
+        assert layout.traceability_matrix_kind == "swufn_x_env"
+        assert layout.coverage_metric_kind == "single"
+        assert layout.test_summary_coverage_breakdown == 1
+
+    def test_v101_sitr_no_deviation_sheet(self):
+        """v1.01 SITR 시트 (Deviation 없음) → deviation_sheet_present=False."""
+        template = _make_xlsx({
+            "Cover": [["Project"]],
+            "1.Test Summary": [["Project Name"]],
+            "2.Test Log": [["Test Case ID"]],
+            "History": [["Version"]],
+        })
+        layout = elr.inspect_swit_layout(template, "sitr")
+        assert layout.deviation_sheet_present is False
+
+    def test_v202_sitr_with_deviation_sheet(self):
+        """v2.02 SITR (Deviation 시트 보유) → deviation_sheet_present=True."""
+        template = _make_xlsx({
+            "Cover": [["Project"]],
+            "1.Test Summary": [["SW Version"]],
+            "Deviation": [["Test Case ID"]],
+            "Test Log": [["Test Case ID"]],
+        })
+        layout = elr.inspect_swit_layout(template, "sitr")
+        assert layout.deviation_sheet_present is True

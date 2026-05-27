@@ -1280,3 +1280,133 @@ class TestWriteTestLogTruncateF4A:
         if not any_stamped_at_11_plus:
             pytest.skip("환경별 dict.values() 순서 — col 11+ stamp 미검증 (회귀는 함수 호출 자체만 검증)")
         assert any_stamped_at_11_plus, "input_max=15로 col 11+ stamp 기대"
+
+
+# ---------------------------------------------------------------------------
+# 59차 F4-C — Coverage Function/FunctionCalls 분리 + Traceability matrix kind skip
+# ---------------------------------------------------------------------------
+
+
+class TestCoverageMetricKindF4C:
+    """`_write_coverage_sheet` — coverage_metric_kind='function_and_calls' 시
+    function_calls_coverage 별도 col stamp."""
+
+    def test_function_calls_coverage_stamped_at_col_10_v101(self):
+        """v1.01 layout + fc.function_calls_coverage 채워짐 → col 10/11/12 stamp.
+
+        CoverageStats signature: CoverageStats(covered, total, coverage_pct).
+        """
+        from backend.services.swut_coverage_aggregator import _write_coverage_sheet
+        from backend.services.excel_layout_resolver import SwitLayout
+
+        wb = openpyxl.Workbook()
+        wb.remove(wb.active)
+        ws = wb.create_sheet("3.Coverage")
+        ws["B2"] = "Unit ID"  # header row 2
+        fc = FunctionCoverage(
+            unit_id="SwUFn_0101", name="main",
+            statement=CoverageStats(8, 8, 1.0),
+            branch=CoverageStats(2, 2, 1.0),
+            # covered=2, total=3 → not passed (X)
+            function_calls_coverage=CoverageStats(2, 3, 0.667),
+        )
+        agg = {"function_rows": [fc], "function_asil_map": {}}
+        layout = SwitLayout(
+            detected_version="v1.01",
+            coverage_metric_kind="function_and_calls",
+        )
+        _write_coverage_sheet(ws, agg, layout=layout)
+        # header_row=2, data_start=4. row 4의 col 10/11/12 채워짐
+        assert ws.cell(4, 10).value == 3       # function_calls total
+        assert ws.cell(4, 11).value == 2       # function_calls covered
+        assert ws.cell(4, 12).value == "X"     # 2/3 → not passed (X)
+
+    def test_single_metric_no_function_calls_stamp(self):
+        """v2.02/v3.01 layout (single) → function_calls_coverage skip."""
+        from backend.services.swut_coverage_aggregator import _write_coverage_sheet
+        from backend.services.excel_layout_resolver import SwitLayout
+
+        wb = openpyxl.Workbook()
+        wb.remove(wb.active)
+        ws = wb.create_sheet("3.Coverage")
+        ws["B2"] = "Unit ID"
+        fc = FunctionCoverage(
+            unit_id="SwUFn_0101", name="main",
+            statement=CoverageStats(8, 8, 1.0),
+            branch=CoverageStats(2, 2, 1.0),
+            function_calls_coverage=CoverageStats(3, 2, 0.667),
+        )
+        agg = {"function_rows": [fc], "function_asil_map": {}}
+        layout = SwitLayout(
+            detected_version="v2.02",
+            coverage_metric_kind="single",  # default
+        )
+        _write_coverage_sheet(ws, agg, layout=layout)
+        # col 10/11/12은 stamp 안 됨 (single metric 양식)
+        assert ws.cell(4, 10).value is None
+        assert ws.cell(4, 11).value is None
+
+    def test_layout_none_backward_compat_no_function_calls(self):
+        """layout=None → single metric (backward-compat) — function_calls col skip."""
+        from backend.services.swut_coverage_aggregator import _write_coverage_sheet
+
+        wb = openpyxl.Workbook()
+        wb.remove(wb.active)
+        ws = wb.create_sheet("3.Coverage")
+        ws["B2"] = "Unit ID"
+        fc = FunctionCoverage(
+            unit_id="SwUFn_0101", name="main",
+            statement=CoverageStats(8, 8, 1.0),
+            branch=CoverageStats(2, 2, 1.0),
+            function_calls_coverage=CoverageStats(3, 2, 0.667),
+        )
+        agg = {"function_rows": [fc], "function_asil_map": {}}
+        _write_coverage_sheet(ws, agg)  # layout 미전달
+        assert ws.cell(4, 10).value is None
+
+
+class TestTraceabilityMatrixKindF4C:
+    """`_write_traceability_sheet` — switc_x_swst matrix는 skip + warning."""
+
+    def test_switc_x_swst_matrix_skipped_with_warning(self):
+        """layout.traceability_matrix_kind='switc_x_swst' → 0 반환 + parse_warnings."""
+        from backend.services.swut_coverage_aggregator import _write_traceability_sheet
+        from backend.services.excel_layout_resolver import SwitLayout
+
+        wb = openpyxl.Workbook()
+        wb.remove(wb.active)
+        ws = wb.create_sheet("2.Traceability")
+        ws["A1"] = "Matrix"
+        layout = SwitLayout(
+            detected_version="v1.01",
+            traceability_matrix_kind="switc_x_swst",
+        )
+        warnings: list[str] = []
+        session = _make_session()
+        n = _write_traceability_sheet(ws, session, out_warnings=warnings, layout=layout)
+        assert n == 0  # SwITS docx parser 미구현 → skip
+        assert any(
+            "switc_x_swst" in w and "SwITS docx parser 미구현" in w
+            for w in warnings
+        )
+
+    def test_swufn_x_env_matrix_writes_as_before(self):
+        """layout.traceability_matrix_kind='swufn_x_env' (default) → 기존 동작 유지."""
+        from backend.services.swut_coverage_aggregator import _write_traceability_sheet
+        from backend.services.excel_layout_resolver import SwitLayout
+
+        wb = openpyxl.Workbook()
+        wb.remove(wb.active)
+        ws = wb.create_sheet("1.Traceability")
+        # mock 헤더 row 2 — SwUFn_0101 col 3
+        ws.cell(2, 3).value = "SwUFn_0101"
+        layout = SwitLayout(traceability_matrix_kind="swufn_x_env")
+        session = _make_session()
+        # _write_traceability_sheet은 자동 탐색 또는 layout.traceability_header_row 사용.
+        # 본 회귀는 swufn_x_env 경로가 skip 안 함을 확인 (n >= 0).
+        warnings: list[str] = []
+        n = _write_traceability_sheet(ws, session, out_warnings=warnings, layout=layout)
+        # skip warning 미포함 확인 (switc_x_swst만 skip)
+        assert not any("switc_x_swst" in w for w in warnings)
+        # n은 환경/매칭에 따라 다름 — 0 이상이면 OK
+        assert n >= 0
