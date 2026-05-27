@@ -1,0 +1,120 @@
+"""VectorCAST aggregate metrics report (HMR) parser 단위 테스트 (60차 F6-C).
+
+합성 HTML로 양식 시뮬레이션 + parse_hmr_html 검증. 라이브 검증은
+``.codex_tmp/round_60_local_build/inspect_hmr_format.py``에서 별도 수행
+(Jenkins_PDSM_UT/IT_metrics_report.html 실제 파일).
+"""
+from __future__ import annotations
+
+from pathlib import Path
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from backend.services.vcast_hmr_parser import (  # noqa: E402
+    HTML_MAX_BYTES,
+    parse_hmr_html,
+)
+
+
+def _build_hmr_html(rows: list[tuple[str, str, str, str, str]]) -> bytes:
+    """합성 HMR HTML — VectorCAST aggregate metrics report 양식 시뮬레이션.
+
+    Args:
+        rows: (unit_file, function_name, complexity, functions_metric, calls_metric) 튜플 list.
+            metric format: 'X / Y (Z%)' 또는 '' (빈 cell = leaf function).
+    """
+    body_rows = []
+    for unit, fn, complexity, fns, calls in rows:
+        body_rows.append(
+            f"<tr>"
+            f"<td class='col_unit'>{unit}</td>"
+            f"<td class='col_subprogram'>{fn}</td>"
+            f"<td class='col_complexity'>{complexity}</td>"
+            f"<td class='col_metric'>{fns}</td>"
+            f"<td class='col_metric'>{calls}</td>"
+            f"</tr>"
+        )
+    body = "\n".join(body_rows)
+    html = (
+        "<html><body><table>"
+        "<thead><tr>"
+        "<th class='col_unit'>Unit</th>"
+        "<th class='col_subprogram'>Subprogram</th>"
+        "<th class='col_complexity'>Complexity</th>"
+        "<th class='col_metric'>Functions</th>"
+        "<th class='col_metric'>Function Calls</th>"
+        "</tr></thead>"
+        f"<tbody>{body}</tbody>"
+        "</table></body></html>"
+    )
+    return html.encode("utf-8")
+
+
+class TestVcastHmrParser:
+    def test_empty_bytes_returns_ok_false(self):
+        """T424-1: 빈 bytes는 ok=False + warning emit."""
+        result = parse_hmr_html(b"")
+        assert result.ok is False
+        assert any("비어있음" in w for w in result.parse_warnings)
+        assert result.metrics == {}
+
+    def test_oversize_rejected(self):
+        """T424-2: HTML_MAX_BYTES 초과 시 DoS 방지 — ok=False."""
+        big = b"<html>" + (b"x" * (HTML_MAX_BYTES + 1)) + b"</html>"
+        result = parse_hmr_html(big)
+        assert result.ok is False
+        assert any("DoS 방지" in w for w in result.parse_warnings)
+
+    def test_basic_function_calls_extraction(self):
+        """T424-3: 정상 양식 — Function Calls metric 정확 추출."""
+        html_bytes = _build_hmr_html([
+            ("bats.c", "BATS_Init", "1", "1 / 1 (100%)", "5 / 10 (50%)"),
+            ("bats.c", "BATS_Update", "2", "1 / 1 (100%)", "8 / 8 (100%)"),
+            ("vehicle.c", "g_SystemStatusCheck", "3", "1 / 1 (100%)", "3 / 7 (42%)"),
+        ])
+        result = parse_hmr_html(html_bytes)
+        assert result.ok is True
+        assert len(result.metrics) == 3
+        # BATS_Init
+        m = result.metrics["BATS_Init"]
+        assert m.covered_calls == 5
+        assert m.total_calls == 10
+        assert m.coverage_pct == 50.0
+        assert m.unit_file == "bats.c"
+        # g_SystemStatusCheck
+        m2 = result.metrics["g_SystemStatusCheck"]
+        assert m2.covered_calls == 3
+        assert m2.total_calls == 7
+        assert m2.unit_file == "vehicle.c"
+
+    def test_leaf_function_empty_calls_cell_skipped(self):
+        """T424-4: 빈 Function Calls cell (leaf) + 빈 Functions cell 동시 → row skip."""
+        html_bytes = _build_hmr_html([
+            ("util.c", "util_helper", "1", "", ""),  # 둘 다 비어있음 → skip
+            ("util.c", "util_main", "2", "1 / 1 (100%)", "3 / 3 (100%)"),
+        ])
+        result = parse_hmr_html(html_bytes)
+        assert result.ok is True
+        # leaf row는 skip — util_main만 추출
+        assert "util_helper" not in result.metrics
+        assert "util_main" in result.metrics
+
+    def test_unit_file_inheritance(self):
+        """T424-5: 같은 파일 내 row의 unit_file이 비어있으면 직전 row 값 상속."""
+        html_bytes = _build_hmr_html([
+            ("main.c", "main", "5", "1 / 1 (100%)", "10 / 10 (100%)"),
+            ("", "main_helper", "2", "1 / 1 (100%)", "4 / 4 (100%)"),  # unit 빈 → main.c 상속
+            ("", "main_init", "1", "1 / 1 (100%)", "2 / 2 (100%)"),
+        ])
+        result = parse_hmr_html(html_bytes)
+        assert result.ok is True
+        assert result.metrics["main_helper"].unit_file == "main.c"
+        assert result.metrics["main_init"].unit_file == "main.c"
+
+    def test_no_metric_table_returns_ok_false(self):
+        """T424-6: col_metric 없는 HTML → metric 0건 + ok=False."""
+        html_bytes = b"<html><body><p>No table here</p></body></html>"
+        result = parse_hmr_html(html_bytes)
+        assert result.ok is False
+        assert any("metric 0건" in w for w in result.parse_warnings)

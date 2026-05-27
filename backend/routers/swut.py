@@ -81,6 +81,7 @@ from backend.services.swut_meta_resolver import (  # noqa: E402
     resolve_swuds_function_ids as _resolver_resolve_swuds_function_ids,
     resolve_swuds_path as _resolver_resolve_swuds_path,
     resolve_swuts_test_specs as _resolver_resolve_swuts_test_specs,
+    resolve_hmr_html_bytes as _resolver_resolve_hmr_html_bytes,
 )
 
 # Backward compat alias — 기존 회귀가 `monkeypatch.setattr(swut, '_META_CONFIG_PATH', ...)`
@@ -311,8 +312,12 @@ def _do_coverage_build(req: SwUTBuildRequest) -> Response:
     template_bytes = _read_template_bytes(req.coverage_template_path, req.project_id, "coverage")
     meta = _build_coverage_meta(req)
     swuds_fn_ids = _resolve_swuds_function_ids(req)
+    # 60차 F6-C: HMR HTML 옵션 — VectorCAST aggregate metrics report에서 함수별
+    # Function Calls coverage 추출 → 3.Coverage 시트 row 6 stamp (KJPDS02 v1.01).
+    hmr_html_bytes = _resolver_resolve_hmr_html_bytes(req, req.project_id)
     result = build_coverage_report(session, meta, template_bytes,
-                                    swuds_function_ids=swuds_fn_ids)
+                                    swuds_function_ids=swuds_fn_ids,
+                                    hmr_html_bytes=hmr_html_bytes)
     if not result.ok:
         raise HTTPException(status_code=500, detail="빌드 실패 (ok=False)")
     return _build_result_to_response(

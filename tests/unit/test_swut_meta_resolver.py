@@ -153,3 +153,25 @@ class TestApplyFunctionAsilMap:
         resolver.apply_function_asil_map(req, session, "HDPDM01")
         # function_asil_map default 빈 dict 유지
         assert session.environments[0].function_asil_map == {}
+
+
+class TestResolveHmrHtmlPath:
+    """60차 F6-C — HMR HTML path resolver 회귀."""
+
+    def test_req_priority(self, cfg_setup):
+        """req.hmr_html_path 우선."""
+        cfg_setup({"projects": {"HDPDM01": {"hmr_html_path": "U:/config_hmr.html"}}})
+        req = SimpleNamespace(hmr_html_path="D:/from_req_hmr.html", project_id="HDPDM01")
+        assert resolver.resolve_hmr_html_path(req, "HDPDM01") == "D:/from_req_hmr.html"
+
+    def test_config_fallback(self, cfg_setup):
+        """req 비면 config fallback."""
+        cfg_setup({"projects": {"HDPDM01": {"hmr_html_path": "U:/config_hmr.html"}}})
+        req = SimpleNamespace(hmr_html_path="", project_id="HDPDM01")
+        assert resolver.resolve_hmr_html_path(req, "HDPDM01") == "U:/config_hmr.html"
+
+    def test_both_empty_returns_none_bytes(self, cfg_setup):
+        """req + config 모두 비면 resolve_hmr_html_bytes는 None."""
+        cfg_setup({"projects": {"HDPDM01": {}}})
+        req = SimpleNamespace(hmr_html_path="", project_id="HDPDM01")
+        assert resolver.resolve_hmr_html_bytes(req, "HDPDM01") is None

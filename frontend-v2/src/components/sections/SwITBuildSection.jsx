@@ -30,6 +30,9 @@ const DEFAULT_FORM = {
   // 60차 F6-B: SwITS spec 파일 (xlsm/docx 허용). 제공 시 SITR Test Log의
   // TC_ID/Description/Precondition/Test Method/Generation Method 컬럼에 spec stamp.
   swuts_docx_path: '',
+  // 60차 F6-C: HMR (VectorCAST aggregate metrics report) HTML 경로 (옵션).
+  // 제공 시 SwIT Coverage Report 3.Coverage 함수별 Function Calls metric stamp.
+  hmr_html_path: '',
   c_source_root: '',
   reviewer_override: '',
   approver_override: '',
@@ -507,6 +510,23 @@ export default function SwITBuildSection() {
                   disabled={!isAdmin}
                   title={isAdmin ? undefined : browseDisabledTitle}
                   onClick={() => openPicker('swuts_docx_path', '*.xlsm;*.xlsx;*.docx', 'SwITS spec 파일 선택')}>
+            📂 Browse
+          </button>
+        </div>
+        <div className="swut-form-row swut-field-with-browse">
+          <Field
+            name="hmr_html_path"
+            label="HMR HTML Path (선택, 60차 F6-C)"
+            value={form.hmr_html_path}
+            onChange={v => setField('hmr_html_path', v)}
+            placeholder="U:\...\Jenkins_PDSM_IT_metrics_report.html"
+            hint="비우면 config의 hmr_html_path 자동 사용. 제공 시 SwIT Coverage Report 3.Coverage 함수별 Function Calls metric stamp (VectorCAST aggregate metrics report)"
+            fullWidth
+          />
+          <button className="swut-browse-btn" type="button"
+                  disabled={!isAdmin}
+                  title={isAdmin ? undefined : browseDisabledTitle}
+                  onClick={() => openPicker('hmr_html_path', '*.html;*.htm', 'HMR HTML 파일 선택')}>
             📂 Browse
           </button>
         </div>

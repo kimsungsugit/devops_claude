@@ -113,6 +113,7 @@ def build_swit_coverage_report(
     meta: SwitCoverageBuildMeta,
     template_bytes: bytes,
     swuds_function_ids: set[str] | None = None,
+    hmr_html_bytes: bytes | None = None,
 ) -> SwitCoverageBuildResult:
     """SwIT Coverage Report v2.02 xlsx 생성.
 
@@ -122,6 +123,10 @@ def build_swit_coverage_report(
         template_bytes: v2.02 빈 xlsx 템플릿 bytes.
         swuds_function_ids: 옵션 — SwUDS 함수 ID set. 제공 시 2.Consistency에
             SwUDS↔SwIT 매핑 row 추가.
+        hmr_html_bytes: 60차 F6-C — VectorCAST aggregate metrics report HTML
+            (옵션, Jenkins_PDSM_IT_metrics_report.html 양식). 제공 시 함수별
+            Function Calls coverage를 추출하여 fc.function_calls_coverage 채움.
+            None이면 기존 빈 CoverageStats default 유지 (backward-compat).
 
     Returns:
         SwitCoverageBuildResult — xlsx_io 채워짐.
@@ -153,6 +158,33 @@ def build_swit_coverage_report(
     sheet_names = wb.sheetnames
 
     agg = aggregate_session(session)
+
+    # 60차 F6-C — HMR HTML 제공 시 함수별 Function Calls coverage 채움 (SwUT 대칭).
+    if hmr_html_bytes:
+        from backend.services.swut_input_adapter import CoverageStats, FunctionCoverage
+        from backend.services.vcast_hmr_parser import parse_hmr_html
+        hmr_parse_warnings: list[str] = []
+        hmr_result = parse_hmr_html(
+            hmr_html_bytes, parse_warnings=hmr_parse_warnings,
+        )
+        if hmr_parse_warnings:
+            warnings.extend([f"[hmr] {w}" for w in hmr_parse_warnings])
+        if hmr_result.ok:
+            function_rows: list[FunctionCoverage] = agg.get("function_rows") or []
+            stamped = 0
+            for fc in function_rows:
+                m = hmr_result.metrics.get(fc.name) or hmr_result.metrics.get(fc.unit_id)
+                if m and m.total_calls > 0:
+                    fc.function_calls_coverage = CoverageStats(
+                        covered=m.covered_calls,
+                        total=m.total_calls,
+                        coverage_pct=m.coverage_pct / 100.0,
+                    )
+                    stamped += 1
+            warnings.append(
+                f"[hmr] Function Calls metric stamped — {stamped}/{len(function_rows)} "
+                f"functions matched (HMR metric count: {len(hmr_result.metrics)})"
+            )
 
     # 30차 W21 + 31차 W29: 함수별 ASIL 분포 (SwUT 함수 재활용).
     asil_distribution, ids_by_asil = _compute_asil_distribution(

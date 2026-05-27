@@ -156,6 +156,47 @@ def resolve_swuts_test_specs(
         return None
 
 
+def resolve_hmr_html_path(req: Any, project_id: str) -> str:
+    """60차 F6-C — req.hmr_html_path 우선, 비면 config의 project별 값 fallback.
+
+    VectorCAST aggregate metrics report (Jenkins_PDSM_UT/IT_metrics_report.html)
+    경로. Coverage Report 함수별 Function Calls metric stamp source.
+
+    Args:
+        req: SwUTBuildRequest 또는 SwITBuildRequest (덕 타이핑 — `hmr_html_path` 속성).
+        project_id: req.project_id.
+
+    Returns:
+        path string. req와 config 모두 비면 빈 string.
+    """
+    req_value = getattr(req, "hmr_html_path", "") or ""
+    if req_value:
+        return req_value
+    cfg = load_meta_from_config(project_id)
+    return (cfg.get("hmr_html_path") or "").strip()
+
+
+def resolve_hmr_html_bytes(req: Any, project_id: str) -> bytes | None:
+    """60차 F6-C — hmr_html_path → HTML bytes.
+
+    Coverage Report builder의 `hmr_html_bytes` 인자에 직접 전달. None이면 stamp
+    skip (backward-compat, 기존 v2.02/v3.01 빈 cell default 유지).
+
+    Returns:
+        bytes 또는 None (path 비었거나 read 실패).
+    """
+    hmr_path = resolve_hmr_html_path(req, project_id)
+    if not hmr_path:
+        return None
+    from backend.services.file_resolver import get_resolver
+    try:
+        resolver = get_resolver()
+        return resolver.read_bytes(hmr_path)
+    except (FileNotFoundError, PermissionError) as e:
+        _logger.warning("HMR HTML read failed: %s", e)
+        return None
+
+
 def resolve_swuds_function_ids(req: Any, project_id: str) -> set[str] | None:
     """16차 + 49차 — swuds_docx_path가 있으면 docx → function ID set 반환.
 
@@ -301,4 +342,6 @@ __all__ = [
     "apply_function_asil_map",
     "resolve_swuts_path",
     "resolve_swuts_test_specs",
+    "resolve_hmr_html_path",
+    "resolve_hmr_html_bytes",
 ]
