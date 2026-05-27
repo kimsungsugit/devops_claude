@@ -1104,6 +1104,69 @@ def collect_from_log_folder(
             f"환경({env_prefix}_xx) 0건 — '{sub_tc}' 폴더 listing 검증 필요"
         )
 
+    # 59차 F5 W4 — 추출 누락 summary parse_warnings emit (silent skip 차단).
+    # audit reviewer가 산출물에 어떤 데이터가 누락됐는지 즉시 인지 가능.
+    # ISO 26262 평가: 추출 실패가 silent skip되면 evidence_class 무관 거짓 PASS 위험.
+    _summary_missing_input = 0
+    _summary_missing_expected = 0
+    _summary_missing_actual = 0
+    _missing_input_by_env: dict[str, int] = {}
+    _missing_expected_by_env: dict[str, int] = {}
+    _missing_actual_by_env: dict[str, int] = {}
+    _total_tcs = 0
+
+    for env_data in session.environments:
+        for tc_name, tc_items in env_data.test_cases.items():
+            _total_tcs += 1
+            items = tc_items if isinstance(tc_items, list) else [tc_items]
+            first = items[0] if items else None
+            if first is not None:
+                if not (getattr(first, "input_data", None) or {}):
+                    _summary_missing_input += 1
+                    _missing_input_by_env[env_data.env_name] = (
+                        _missing_input_by_env.get(env_data.env_name, 0) + 1
+                    )
+                if not (getattr(first, "expected_result", None) or {}):
+                    _summary_missing_expected += 1
+                    _missing_expected_by_env[env_data.env_name] = (
+                        _missing_expected_by_env.get(env_data.env_name, 0) + 1
+                    )
+            # actual_result 확인 — ExecutionRow 또는 TestResultItem
+            exec_r = env_data.test_results.get(tc_name)
+            actual_via_exec = bool(getattr(exec_r, "actual_result", None) or {}) if exec_r else False
+            tr_items_for_tc = env_data.tc_result_items.get(tc_name, [])
+            tr_first = tr_items_for_tc[0] if tr_items_for_tc else None
+            actual_via_tr = bool(getattr(tr_first, "actual_result", None) or {}) if tr_first else False
+            if not (actual_via_exec or actual_via_tr):
+                _summary_missing_actual += 1
+                _missing_actual_by_env[env_data.env_name] = (
+                    _missing_actual_by_env.get(env_data.env_name, 0) + 1
+                )
+
+    if _total_tcs > 0 and (
+        _summary_missing_input or _summary_missing_expected or _summary_missing_actual
+    ):
+        warnings.append(
+            f"[추출 누락 summary] 총 {_total_tcs} TC 중 input 누락 "
+            f"{_summary_missing_input}건 ({100*_summary_missing_input/_total_tcs:.1f}%), "
+            f"expected 누락 {_summary_missing_expected}건 "
+            f"({100*_summary_missing_expected/_total_tcs:.1f}%), actual 누락 "
+            f"{_summary_missing_actual}건 ({100*_summary_missing_actual/_total_tcs:.1f}%) "
+            "— audit evidence 진단 필요 (silent skip 차단 W4)"
+        )
+        # env별 분포는 top 5건만 — warnings 너무 많아지지 않게.
+        for label, dist in [
+            ("input", _missing_input_by_env),
+            ("expected", _missing_expected_by_env),
+            ("actual", _missing_actual_by_env),
+        ]:
+            if dist:
+                top = sorted(dist.items(), key=lambda x: -x[1])[:5]
+                warnings.append(
+                    f"[추출 누락 env top5 {label}] "
+                    + ", ".join(f"{env}={cnt}" for env, cnt in top)
+                )
+
     return session
 
 
