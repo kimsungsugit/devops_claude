@@ -440,6 +440,13 @@ def parse_swuts_xlsm(
                     # TC_ID 없음 — sub-TC row. 직전 entry로 merge (빈 field만 채움).
                     if current_entry is not None:
                         _merge_subrow_into_entry(current_entry, entry)
+                    else:
+                        # F6 Round 5 NF1 fix: 첫 data row가 TC_ID 없는 sub-TC면
+                        # 직전 메타 row 없어 silent drop. 양식 변종 가능성 — warning emit.
+                        warnings.append(
+                            f"시트 {sheet_name!r} row {row_idx}: TC_ID 없는 sub-TC "
+                            "row지만 직전 메타 row 없음 — sub-TC 정보 drop"
+                        )
 
             if entries_this_sheet == 0:
                 warnings.append(

@@ -228,29 +228,14 @@ def _build_result_to_response(
 
     _warnings_str = json.dumps(warnings, ensure_ascii=True)
     if len(_warnings_str) > 1024:
-        # F6 Round 3 NC1 partial + Round 4 NW7/NW8 fix:
-        # - NW7: "ambiguous" substring 매칭은 stamp summary 메시지의 "ambiguous
-        #   skipped: N" substring을 false +1 카운트 → startswith("[hmr] ambiguous")
-        #   로 정밀화 (실제 ambiguous warning만).
-        # - NW8: 비-category warning (예: c_source / asil prefix 또는 prefix 없는
-        #   warning) 누락 → "other" 카테고리로 audit reviewer에게 노출.
-        _known_prefixes = ("[hmr]", "[swuts]", "[layout]")
-        _breakdown = {
-            "ambiguous": sum(1 for w in warnings if w.startswith("[hmr] ambiguous")),
-            "hmr": sum(1 for w in warnings if w.startswith("[hmr]")),
-            "swuts": sum(1 for w in warnings if w.startswith("[swuts]")),
-            "layout": sum(1 for w in warnings if w.startswith("[layout]")),
-            "other": sum(
-                1 for w in warnings
-                if not any(w.startswith(p) for p in _known_prefixes)
-            ),
-        }
-        _summary_parts = [f"{k}={v}" for k, v in _breakdown.items() if v]
-        _summary_label = ", ".join(_summary_parts) or "uncategorized"
+        # F6 Round 5 NF3 fix: breakdown 카테고리 단일 출처
+        # (`backend.services.warning_categories`) 사용 — SwUT/SwIT prefix 동시 변경
+        # 누락 방지. Round 3 NC1 partial + Round 4 NW7/NW8 fix는 그 모듈에 통합.
+        from backend.services.warning_categories import format_breakdown_label
         _warnings_str = json.dumps(
             [
                 f"({len(warnings)} warnings — 헤더 한도 초과로 생략, "
-                f"breakdown: {_summary_label})"
+                f"breakdown: {format_breakdown_label(warnings)})"
             ],
             ensure_ascii=True,
         )

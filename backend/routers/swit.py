@@ -237,24 +237,12 @@ def _build_result_to_response(
 
     _warnings_str = json.dumps(warnings, ensure_ascii=True)
     if len(_warnings_str) > 1024:
-        # F6 Round 3 NC1 partial + Round 4 NW7/NW8 fix (SwUT 대칭).
-        _known_prefixes = ("[hmr]", "[swuts]", "[layout]")
-        _breakdown = {
-            "ambiguous": sum(1 for w in warnings if w.startswith("[hmr] ambiguous")),
-            "hmr": sum(1 for w in warnings if w.startswith("[hmr]")),
-            "swuts": sum(1 for w in warnings if w.startswith("[swuts]")),
-            "layout": sum(1 for w in warnings if w.startswith("[layout]")),
-            "other": sum(
-                1 for w in warnings
-                if not any(w.startswith(p) for p in _known_prefixes)
-            ),
-        }
-        _summary_parts = [f"{k}={v}" for k, v in _breakdown.items() if v]
-        _summary_label = ", ".join(_summary_parts) or "uncategorized"
+        # F6 Round 5 NF3 fix: SwUT와 동일 `warning_categories` 단일 출처 사용.
+        from backend.services.warning_categories import format_breakdown_label
         _warnings_str = json.dumps(
             [
                 f"({len(warnings)} warnings — 헤더 한도 초과로 생략, "
-                f"breakdown: {_summary_label})"
+                f"breakdown: {format_breakdown_label(warnings)})"
             ],
             ensure_ascii=True,
         )

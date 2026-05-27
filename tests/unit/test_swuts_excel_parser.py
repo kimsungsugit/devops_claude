@@ -153,3 +153,33 @@ class TestSwUTSExcelParser:
         e = result.by_tc_id["SwUTC_0001"]
         assert e.description == "test description"
         assert e.precondition == "test pre"
+
+    def test_first_row_sub_tc_emits_warning_round5_nf1(self):
+        """F6 Round 5 NF1 fix: 양식 변종에서 첫 data row가 TC_ID 없는 sub-TC면
+        직전 메타 row 없어 silent drop. parse_warnings emit으로 audit reviewer
+        인지 가능 (silent → audible 전환).
+        """
+        from backend.services.swuts_excel_parser import parse_swuts_xlsm
+
+        # header row (3+ 라벨 매칭 필요) + 첫 data row TC_ID 없음 + 두번째 TC_ID 있음
+        xlsm_bytes = _build_swuts_xlsm(
+            headers=["TC ID", "Description", "Test Method", "Generation Method"],
+            data_rows=[
+                ["", "desc-orphan", "method-orphan", "gen-orphan"],  # TC_ID 없음 — orphan
+                ["SwUTC_0001", "desc-1", "method-1", "gen-1"],
+            ],
+        )
+        result = parse_swuts_xlsm(xlsm_bytes)
+        assert result.ok is True, f"parse 실패: {result.parse_warnings}"
+        # 정상 entry는 1건 (SwUTC_0001)
+        assert len(result.entries) == 1
+        assert result.entries[0].tc_id == "SwUTC_0001"
+        # NF1: orphan sub-TC row drop 사유가 parse_warnings에 누적
+        drop_warnings = [
+            w for w in result.parse_warnings
+            if "TC_ID 없는 sub-TC" in w and "직전 메타 row 없음" in w
+        ]
+        assert len(drop_warnings) == 1, (
+            f"NF1 회귀: orphan sub-TC row silent drop — warning 누락. "
+            f"parse_warnings: {result.parse_warnings}"
+        )
