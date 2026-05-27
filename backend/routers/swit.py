@@ -290,11 +290,17 @@ def _do_swit_coverage_build(req: SwITBuildRequest) -> Response:
     meta = _build_swit_coverage_meta(req)
     swuds_fn_ids = _resolve_swuds_function_ids(req)
     # 60차 F6-C: HMR HTML 옵션 — VectorCAST aggregate metrics report 매핑.
-    hmr_html_bytes = _resolver_resolve_hmr_html_bytes(req, req.project_id)
+    # F6 Round 1 W1: hmr 실패 사유 누적 (silent 차단).
+    _hmr_warnings: list[str] = []
+    hmr_html_bytes = _resolver_resolve_hmr_html_bytes(
+        req, req.project_id, out_warnings=_hmr_warnings,
+    )
     result: SwitCoverageBuildResult = build_swit_coverage_report(
         session, meta, template_bytes, swuds_function_ids=swuds_fn_ids,
         hmr_html_bytes=hmr_html_bytes,
     )
+    if _hmr_warnings:
+        result.warnings.extend(_hmr_warnings)
     if not result.ok:
         raise HTTPException(status_code=500, detail="SwIT 빌드 실패 (ok=False)")
     return _build_result_to_response(
@@ -342,13 +348,19 @@ def _do_swit_sitr_build(req: SwITSitrBuildRequest) -> Response:
     meta = _build_swit_sitr_meta(req)
     swuds_fn_ids = _resolve_swuds_function_ids(req)
     # 60차 F6-A: SwITS xlsm/docx → spec data dict (Test Log B/C/D + Precondition stamp).
-    swuts_map = _resolver_resolve_swuts_test_specs(req, req.project_id)
+    # F6 Round 1 W1: spec 실패 사유 누적 (silent 차단).
+    _swuts_warnings: list[str] = []
+    swuts_map = _resolver_resolve_swuts_test_specs(
+        req, req.project_id, out_warnings=_swuts_warnings,
+    )
     result: SwitSitrBuildResult = build_swit_sitr_report(
         session, meta, template_bytes,
         deviation_cases=req.deviation_cases,
         swuds_function_ids=swuds_fn_ids,
         swuts_map=swuts_map,
     )
+    if _swuts_warnings:
+        result.warnings.extend(_swuts_warnings)
     if not result.ok:
         raise HTTPException(status_code=500, detail="SwIT SITR 빌드 실패 (ok=False)")
     return _build_result_to_response(

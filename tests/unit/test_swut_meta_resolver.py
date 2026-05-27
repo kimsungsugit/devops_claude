@@ -175,3 +175,47 @@ class TestResolveHmrHtmlPath:
         cfg_setup({"projects": {"HDPDM01": {}}})
         req = SimpleNamespace(hmr_html_path="", project_id="HDPDM01")
         assert resolver.resolve_hmr_html_bytes(req, "HDPDM01") is None
+
+    def test_out_warnings_on_read_failure_f6_round1_w1(self, monkeypatch, cfg_setup):
+        """F6 Round 1 W1 fix: read 실패 시 out_warnings에 사유 누적 (silent 차단).
+
+        사용자/audit reviewer가 산출물 헤더 X-SwUT-Warnings에서 read 실패 인지 가능.
+        """
+        cfg_setup({"projects": {"HDPDM01": {}}})
+
+        class _FakeResolver:
+            def read_bytes(self, path):
+                raise FileNotFoundError(f"HMR 파일 없음: {path}")
+
+        import backend.services.file_resolver as fr_mod
+        monkeypatch.setattr(fr_mod, "get_resolver", lambda: _FakeResolver())
+
+        req = SimpleNamespace(hmr_html_path="U:/missing.html", project_id="HDPDM01")
+        warnings: list[str] = []
+        result = resolver.resolve_hmr_html_bytes(req, "HDPDM01", out_warnings=warnings)
+        assert result is None
+        assert len(warnings) == 1
+        assert "[hmr] read 실패" in warnings[0]
+        assert "FileNotFoundError" in warnings[0]
+
+
+class TestResolveSwutsTestSpecsWarnings:
+    """F6 Round 1 W1: resolve_swuts_test_specs out_warnings 누적."""
+
+    def test_out_warnings_on_read_failure(self, monkeypatch, cfg_setup):
+        cfg_setup({"projects": {"HDPDM01": {}}})
+
+        class _FakeResolver:
+            def read_bytes(self, path):
+                raise PermissionError(f"권한 거부: {path}")
+
+        import backend.services.file_resolver as fr_mod
+        monkeypatch.setattr(fr_mod, "get_resolver", lambda: _FakeResolver())
+
+        req = SimpleNamespace(swuts_docx_path="U:/x.xlsm", project_id="HDPDM01")
+        warnings: list[str] = []
+        result = resolver.resolve_swuts_test_specs(req, "HDPDM01", out_warnings=warnings)
+        assert result is None
+        assert len(warnings) == 1
+        assert "[swuts] read 실패" in warnings[0]
+        assert "PermissionError" in warnings[0]

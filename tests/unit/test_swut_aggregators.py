@@ -1500,6 +1500,183 @@ class TestSutrTestLogSwUTSStampF6A:
         b_values = [ws.cell(r, 1).value for r in range(2, 10)]
         assert "SwUTC_0103" in b_values
 
+    def test_hmr_does_not_mutate_session_function_coverage_f6_round1_w2(self):
+        """F6 Round 1 W2 fix: HMR stamp가 session.environments[].function_coverage
+        본체를 mutate하지 않음 (dataclasses.replace + 새 list).
+
+        같은 session으로 2회 build_coverage_report 호출 시, HMR 없는 두번째 호출이
+        첫번째 호출의 stamped 값을 보면 안 됨. 향후 session caching 도입 시 silent
+        regression 방지.
+        """
+        from backend.services.swut_coverage_aggregator import (
+            build_coverage_report, CoverageBuildMeta,
+        )
+        from backend.services.swut_input_adapter import CoverageStats
+        import openpyxl as _opx
+        import io as _io
+
+        # HMR HTML — main 함수 매칭
+        hmr_html = (
+            b"<html><body><table><thead>"
+            b"<tr><th>Unit</th><th>Subprogram</th><th>Complexity</th>"
+            b"<th>Functions</th><th>Function Calls</th></tr></thead>"
+            b"<tbody>"
+            b"<tr><td>main.c</td><td>main</td><td>3</td>"
+            b"<td>1/1 (100%)</td><td>15/15 (100%)</td></tr>"
+            b"</tbody></table></body></html>"
+        )
+
+        wb = _opx.Workbook()
+        for name in ["Cover", "Test Summary", "1.Traceability",
+                     "2.Consistency", "3. Coverage", "History"]:
+            wb.create_sheet(name)
+        wb.remove(wb["Sheet"])
+        buf = _io.BytesIO()
+        wb.save(buf)
+        template_bytes = buf.getvalue()
+
+        session = _make_session()
+        # Pre-condition: function_coverage[0] (main)의 function_calls_coverage는 빈 default
+        pre_fc = session.environments[0].function_coverage[0]
+        assert pre_fc.name == "main"
+        assert pre_fc.function_calls_coverage == CoverageStats(0, 0, 0.0), (
+            "pre-condition: session의 function_calls_coverage가 비어있어야 함"
+        )
+
+        meta = CoverageBuildMeta(
+            project_id="HDPDM01", release_sw_version="1.01.05",
+            test_date="2024-02-19", test_engineer="김진경",
+        )
+        # 1번째 build — HMR stamp
+        build_coverage_report(session, meta, template_bytes, hmr_html_bytes=hmr_html)
+
+        # W2 검증: 1번째 build 후에도 session 객체는 mutate 안 됨
+        post_fc = session.environments[0].function_coverage[0]
+        assert post_fc.function_calls_coverage == CoverageStats(0, 0, 0.0), (
+            f"W2 회귀: session.function_coverage가 mutate됨. "
+            f"실제: {post_fc.function_calls_coverage}"
+        )
+        # 또한 fc 객체 ID도 동일 (replace는 새 객체 만들지만 session list는 unchanged)
+        assert session.environments[0].function_coverage[0] is pre_fc
+
+    def test_hmr_ambiguous_function_skip_warning_f6_round1_c2(self):
+        """F6 Round 1 C2 fix: HMR 함수명 중복 시 silent wrong-pick 차단 + warning.
+
+        같은 함수명 (`main`) 다른 unit_file 2건 시 aggregator는 stamp skip하고
+        warnings에 ambiguous 명시. 이전 코드는 첫 매칭 metric을 wrong unit_file row에 stamp.
+        """
+        from backend.services.swut_coverage_aggregator import (
+            build_coverage_report, CoverageBuildMeta,
+        )
+        import openpyxl as _opx
+        import io as _io
+
+        # 합성 HMR HTML — main 함수가 2개 unit_file에 존재
+        hmr_html = (
+            b"<html><body><table><thead>"
+            b"<tr><th>Unit</th><th>Subprogram</th><th>Complexity</th>"
+            b"<th>Functions</th><th>Function Calls</th></tr></thead>"
+            b"<tbody>"
+            b"<tr><td>a.c</td><td>main</td><td>1</td>"
+            b"<td>1/1 (100%)</td><td>10/10 (100%)</td></tr>"
+            b"<tr><td>b.c</td><td>main</td><td>1</td>"
+            b"<td>1/1 (100%)</td><td>2/8 (25%)</td></tr>"
+            b"</tbody></table></body></html>"
+        )
+
+        # 최소 template — Cover/Test Summary/1.Traceability/2.Consistency/3.Coverage/History
+        wb = _opx.Workbook()
+        for name in ["Cover", "Test Summary", "1.Traceability",
+                     "2.Consistency", "3. Coverage", "History"]:
+            wb.create_sheet(name)
+        default = wb["Sheet"]
+        wb.remove(default)
+        buf = _io.BytesIO()
+        wb.save(buf)
+        template_bytes = buf.getvalue()
+
+        session = _make_session()
+        meta = CoverageBuildMeta(
+            project_id="HDPDM01", release_sw_version="1.01.05",
+            test_date="2024-02-19", test_engineer="김진경",
+        )
+        result = build_coverage_report(
+            session, meta, template_bytes,
+            hmr_html_bytes=hmr_html,
+        )
+        assert result.ok is True
+        # Warning에 ambiguous 명시 + stamp skip count 0
+        ambiguous_warnings = [
+            w for w in result.warnings if "ambiguous" in w and "main" in w
+        ]
+        assert len(ambiguous_warnings) >= 1, (
+            f"ambiguous warning 누락: {result.warnings}"
+        )
+        # stamp count message에 "ambiguous skipped: 1" 포함
+        stamp_summary = [w for w in result.warnings if "ambiguous skipped" in w]
+        assert any("ambiguous skipped: 1" in w for w in stamp_summary), (
+            f"ambiguous count 누락: {stamp_summary}"
+        )
+
+    def test_swit_tc_name_prefix_matches_swuts_map_f6_round1_c1(self):
+        """F6 Round 1 C1 fix: SwIT TC name 'SwITC_SwUFn_0103.001' fallback.
+
+        re.match는 ^anchor라 'SwITC_' prefix 거부 → None. re.search로 변경되어
+        SwUT/SwIT TC name 모두 매칭. 34차 deep-reviewer C1과 동일 회귀.
+        """
+        import openpyxl
+        from backend.services.swut_sutr_aggregator import _write_test_log
+        from backend.services.swuts_excel_parser import SwUTSEntry
+        from backend.services.swut_input_adapter import (
+            EnvironmentData, ExecutionRow, FunctionCoverage,
+            CoverageStats, SwUTSession,
+        )
+
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.cell(1, 1).value = "Test Case ID"
+
+        # SwIT 형식 TC name (SwITC_SwUFn_0103.001) — VectorCAST SwIT 표준
+        env = EnvironmentData(
+            env_name="SWITE_01", component_name="SysIntegration",
+            test_cases={"SwITC_SwUFn_0103.001": [object()]},
+            test_results={
+                "SwITC_SwUFn_0103.001": ExecutionRow(
+                    tc_name="SwITC_SwUFn_0103.001", passed=True,
+                ),
+            },
+            function_coverage=[
+                FunctionCoverage(
+                    unit_id="SwUFn_0103", name="s_SystemOperation",
+                    statement=CoverageStats(8, 8, 1.0),
+                    branch=CoverageStats(3, 3, 1.0),
+                    complexity=2,
+                ),
+            ],
+            grand_total=FunctionCoverage(unit_id="GRAND TOTALS"),
+        )
+        session = SwUTSession(
+            project_id="KJPDS02", version="v1.01_251205",
+            source_kind="log_folder", environments=[env],
+        )
+        swuts_map = {
+            "SwITC_0103": SwUTSEntry(
+                tc_id="SwITC_0103",
+                description="Integration: System Operation",
+                test_method="IFT",
+                generation_method="REQ",
+                function_id="SwUFn_0103",
+            ),
+        }
+        _write_test_log(ws, session, swuts_map=swuts_map)
+
+        # SwITC_SwUFn_0103.001 → re.search 매칭 → swuts_map[SwITC_0103] override
+        b_values = [ws.cell(r, 1).value for r in range(2, 10)]
+        assert "SwITC_0103" in b_values, (
+            f"SwIT TC name fallback 실패 — B col에 SwITC_0103 없음: {b_values}. "
+            "C1 회귀 — re.match (^anchor)로 SwITC_ prefix 거부됨"
+        )
+
     def test_precondition_stamps_when_layout_provides_col(self):
         """layout.test_log_precondition_col 제공 + swuts_entry.precondition → stamp."""
         import openpyxl

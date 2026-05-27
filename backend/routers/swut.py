@@ -314,10 +314,16 @@ def _do_coverage_build(req: SwUTBuildRequest) -> Response:
     swuds_fn_ids = _resolve_swuds_function_ids(req)
     # 60차 F6-C: HMR HTML 옵션 — VectorCAST aggregate metrics report에서 함수별
     # Function Calls coverage 추출 → 3.Coverage 시트 row 6 stamp (KJPDS02 v1.01).
-    hmr_html_bytes = _resolver_resolve_hmr_html_bytes(req, req.project_id)
+    # F6 Round 1 W1: hmr read 실패 시 result.warnings에 사유 push (silent 차단).
+    _hmr_warnings: list[str] = []
+    hmr_html_bytes = _resolver_resolve_hmr_html_bytes(
+        req, req.project_id, out_warnings=_hmr_warnings,
+    )
     result = build_coverage_report(session, meta, template_bytes,
                                     swuds_function_ids=swuds_fn_ids,
                                     hmr_html_bytes=hmr_html_bytes)
+    if _hmr_warnings:
+        result.warnings.extend(_hmr_warnings)
     if not result.ok:
         raise HTTPException(status_code=500, detail="빌드 실패 (ok=False)")
     return _build_result_to_response(
@@ -362,13 +368,19 @@ def _do_sutr_build(req: SwUTBuildRequest) -> Response:
     swuds_fn_ids = _resolve_swuds_function_ids(req)
     # 60차 F6-A: SwUTS xlsm/docx → spec data dict (Test Log B/C/D + Precondition stamp).
     # None이면 build_sutr 내부에서 기존 하드코딩 fallback (backward-compat).
-    swuts_map = _resolver_resolve_swuts_test_specs(req, req.project_id)
+    # F6 Round 1 W1: parse/read 실패 사유는 result.warnings에 push (silent 차단).
+    _swuts_warnings: list[str] = []
+    swuts_map = _resolver_resolve_swuts_test_specs(
+        req, req.project_id, out_warnings=_swuts_warnings,
+    )
     result = build_sutr(
         session, meta, template_bytes,
         deviation_cases=req.deviation_cases,
         swuds_function_ids=swuds_fn_ids,
         swuts_map=swuts_map,
     )
+    if _swuts_warnings:
+        result.warnings.extend(_swuts_warnings)
     if not result.ok:
         raise HTTPException(status_code=500, detail="빌드 실패 (ok=False)")
     return _build_result_to_response(

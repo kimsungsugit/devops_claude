@@ -552,13 +552,16 @@ def _write_test_log(
         # 1순위: tc_name 직접 매칭 (예: 'SwUTC_0121' 또는 'SwUFn_0121')
         # 2순위: tc_name에서 SwUFn_NNNN 추출 → by_function_id 첫 entry
         # 3순위: 없음 → 기존 하드코딩 fallback
+        # F6 자체평가 Round 1 C1 (re-fix): SwIT TC name 'SwITC_SwUFn_0121.001' 호환
+        # — re.match (^anchor) → re.search. 34차 deep-reviewer C1과 동일 회귀.
         swuts_entry = None
         if swuts_map:
             swuts_entry = swuts_map.get(tc_name)
             if swuts_entry is None:
                 # function_id fallback — VectorCAST 'SwUFn_0121.001' / spec 'SwUTC_0121'
                 # 두 형식 모두 SwUFn_0121 substring 가짐. swuts_map은 by_tc_id 형식.
-                _fn_match = re.match(r"SwUFn_(\d+)", tc_name)
+                # re.search로 SwUT 'SwUFn_0121.001' + SwIT 'SwITC_SwUFn_0121.001' 모두 매칭.
+                _fn_match = re.search(r"SwUFn_(\d+)", tc_name)
                 if _fn_match:
                     _fn_id = _fn_match.group(0)
                     # by_tc_id에서 ``SwUTC_<digits>`` 형식이 ``SwUFn_<digits>`` 와
@@ -568,6 +571,11 @@ def _write_test_log(
                     if swuts_entry is None:
                         # HDPDM01 'SwUTC_SwUFn_NNNN' 형식 시도
                         swuts_entry = swuts_map.get(f"SwUTC_{_fn_id}")
+                    if swuts_entry is None:
+                        # SwIT KJPDS02 'SwITC_NN' 형식: function_id 4자리 → SwITC 2자리
+                        # 매핑이 spec에 따라 다르므로 by_function_id로 lookup.
+                        # 단, by_function_id는 list[SwUTSEntry] — 첫 entry 사용.
+                        swuts_entry = swuts_map.get(f"SwITC_{_fn_match.group(1)}")
 
         # B/C/D — TC ID / Title / Method (SwUTS spec 우선, 없으면 기존 fallback)
         if swuts_entry is not None:

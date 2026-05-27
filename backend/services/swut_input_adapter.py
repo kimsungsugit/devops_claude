@@ -157,6 +157,14 @@ def aggregate_session(session: SwUTSession) -> dict[str, Any]:
         function_count/function_rows — function_coverage 평탄화
         tc_to_components — tc_name → set(component_name)
         deviated — 0 (deviation_generator 결과는 빌더가 별도 주입)
+
+    F6 자체평가 Round 1 W2 주의 (caller 계약):
+        반환 dict의 `function_rows` list는 **session.environments[*].function_coverage
+        의 reference** (extend로 평탄화만, copy 안 함). caller가 fc 객체를 mutate
+        하면 (예: F6-C `fc.function_calls_coverage = ...`) **session 객체 본체에
+        반영**. 매 build마다 fresh session을 만들면 영향 없음 (현재 router 패턴).
+        향후 session caching/재사용 도입 시 silent regression 위험 — caller에서
+        `dataclasses.replace(fc, ...)` + 새 list 구성 패턴 필요.
     """
     total = 0
     passed = 0

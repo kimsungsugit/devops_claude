@@ -75,16 +75,25 @@ class FunctionCallsMetric:
 
 @dataclass
 class HmrParseResult:
-    """HMR HTML 파싱 결과."""
+    """HMR HTML 파싱 결과.
+
+    F6 자체평가 Round 1 C2: `metrics_by_name`은 함수명 → 모든 매칭 list. 같은
+    함수명이 다른 unit_file에 존재 (예: bats.c::Init + vehicle.c::Init) 시
+    caller가 ambiguous 판단 + silent wrong-pick 차단. `metrics`는 backward-compat
+    하지만 첫 매칭만 보존 (audit 신뢰성 위해 caller는 `metrics_by_name` 사용 권장).
+    """
     ok: bool
     metrics: dict[str, FunctionCallsMetric] = field(default_factory=dict)
+    metrics_by_name: dict[str, list[FunctionCallsMetric]] = field(default_factory=dict)
     parse_warnings: list[str] = field(default_factory=list)
     total_rows_scanned: int = 0
 
     def to_dict(self) -> dict[str, Any]:
+        ambiguous = sum(1 for ms in self.metrics_by_name.values() if len(ms) > 1)
         return {
             "ok": self.ok,
             "metric_count": len(self.metrics),
+            "ambiguous_count": ambiguous,
             "rows_scanned": self.total_rows_scanned,
             "sample": [
                 {
@@ -175,6 +184,7 @@ def parse_hmr_html(
         )
 
     metrics: dict[str, FunctionCallsMetric] = {}
+    metrics_by_name: dict[str, list[FunctionCallsMetric]] = {}
     rows_scanned = 0
     last_unit_file = ""
 
@@ -223,11 +233,7 @@ def parse_hmr_html(
             (functions_parsed[0], functions_parsed[1]) if functions_parsed else (0, 0)
         )
 
-        # 같은 함수명 중복 시 첫 매칭 우선 (TOTALS row는 td 아닌 th라 자동 skip)
-        if function_name in metrics:
-            continue
-
-        metrics[function_name] = FunctionCallsMetric(
+        metric_obj = FunctionCallsMetric(
             function_name=function_name,
             unit_file=unit_file,
             covered_calls=covered_calls,
@@ -237,6 +243,11 @@ def parse_hmr_html(
             functions_covered=functions_covered,
             functions_total=functions_total,
         )
+        # F6 자체평가 Round 1 C2: 함수명별 모든 매칭 누적 (audit silent wrong-pick 차단).
+        # metrics는 backward-compat (첫 매칭). metrics_by_name이 caller 권장 API.
+        metrics_by_name.setdefault(function_name, []).append(metric_obj)
+        if function_name not in metrics:
+            metrics[function_name] = metric_obj
 
     if not metrics:
         return HmrParseResult(
@@ -251,6 +262,7 @@ def parse_hmr_html(
     return HmrParseResult(
         ok=True,
         metrics=metrics,
+        metrics_by_name=metrics_by_name,
         parse_warnings=warnings,
         total_rows_scanned=rows_scanned,
     )

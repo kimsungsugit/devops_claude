@@ -1015,22 +1015,48 @@ def build_coverage_report(
         if hmr_parse_warnings:
             warnings.extend([f"[hmr] {w}" for w in hmr_parse_warnings])
         if hmr_result.ok:
-            function_rows: list[FunctionCoverage] = agg.get("function_rows") or []
+            # F6 자체평가 Round 1 W2 fix: dataclasses.replace + 새 list로 session
+            # 객체 mutation 차단 (향후 session caching 도입 시 silent regression 방지).
+            from dataclasses import replace as _dc_replace
+            original_rows: list[FunctionCoverage] = agg.get("function_rows") or []
+            new_function_rows: list[FunctionCoverage] = []
             stamped = 0
-            for fc in function_rows:
-                # 매칭 fallback chain: fc.name (실제 함수명) → fc.unit_id 우선.
-                m = hmr_result.metrics.get(fc.name) or hmr_result.metrics.get(fc.unit_id)
-                if m and m.total_calls > 0:
-                    fc.function_calls_coverage = CoverageStats(
-                        covered=m.covered_calls,
-                        total=m.total_calls,
-                        coverage_pct=m.coverage_pct / 100.0,
+            ambiguous = 0
+            for fc in original_rows:
+                # F6 Round 1 C2 + W3 fix: metrics_by_name 사용 — 함수명 중복 시
+                # ambiguous skip + warning. fc.unit_id dead fallback 제거 (HMR key는
+                # 실제 C 함수명, fc.unit_id는 SwUFn_NNNN — 본질적으로 불일치).
+                candidates = hmr_result.metrics_by_name.get(fc.name, [])
+                if len(candidates) > 1:
+                    ambiguous += 1
+                    _files = ", ".join(sorted({c.unit_file for c in candidates}))
+                    warnings.append(
+                        f"[hmr] ambiguous function '{fc.name}' — 다중 unit_file "
+                        f"({_files}) 매칭. silent wrong-pick 방지 위해 stamp skip"
                     )
+                    new_function_rows.append(fc)
+                    continue
+                m = candidates[0] if candidates else None
+                if m and m.total_calls > 0:
+                    new_function_rows.append(_dc_replace(
+                        fc,
+                        function_calls_coverage=CoverageStats(
+                            covered=m.covered_calls,
+                            total=m.total_calls,
+                            coverage_pct=m.coverage_pct / 100.0,
+                        ),
+                    ))
                     stamped += 1
+                else:
+                    new_function_rows.append(fc)
             warnings.append(
-                f"[hmr] Function Calls metric stamped — {stamped}/{len(function_rows)} "
-                f"functions matched (HMR metric count: {len(hmr_result.metrics)})"
+                f"[hmr] Function Calls metric stamped — {stamped}/{len(original_rows)} "
+                f"functions matched (HMR metric count: {len(hmr_result.metrics)}, "
+                f"ambiguous skipped: {ambiguous})"
             )
+            # 새 list로 교체 — 이후 3.Coverage sheet writer가 stamped 값 사용,
+            # session.environments[].function_coverage는 unchanged (W2 격리).
+            agg["function_rows"] = new_function_rows
 
     # 30차 W21 + 31차 W29: 함수별 ASIL 분포 + B/C/D 별 함수 ID 그룹.
     asil_distribution, ids_by_asil = _compute_asil_distribution(

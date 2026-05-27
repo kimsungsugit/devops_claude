@@ -123,19 +123,26 @@ def resolve_swuts_path(req: Any, project_id: str) -> str:
 
 def resolve_swuts_test_specs(
     req: Any, project_id: str,
+    *,
+    out_warnings: list[str] | None = None,
 ) -> dict[str, Any] | None:
     """60차 F6-A — swuts_docx_path xlsm → {tc_id: SwUTSEntry} dict.
 
     SUTR Test Log stamp 시 caller가 tc_name (예: 'SwUTC_0121')으로 lookup하여
     description / precondition / test_method / generation_method 추출.
 
+    F6 자체평가 Round 1 W1 + W4 fix:
+        - `out_warnings` 옵션 — 사용자/audit reviewer가 spec stamp 실패 인지하도록
+          parse_warnings / read 실패 사유 누적. None이면 기존 silent 동작 (backward-compat).
+        - `OSError` catch 확대 — Cloudium worker 통신 오류, BadZipFile 등 견고화.
+
     Args:
         req: SwUT/SwIT BuildRequest (덕 타이핑).
         project_id: req.project_id.
+        out_warnings: list[str] (mutable) — 실패 사유 push 받음.
 
     Returns:
         {tc_id: SwUTSEntry} dict 또는 None (path 비었거나 parse 실패).
-        실패 시 _logger.warning만 emit (caller는 None 받고 graceful skip).
     """
     swuts_path = resolve_swuts_path(req, project_id)
     if not swuts_path:
@@ -149,10 +156,19 @@ def resolve_swuts_test_specs(
         result = parse_swuts_xlsm(xlsm_bytes, parse_warnings=parse_warnings)
         if not result.ok:
             _logger.warning("SwUTS parse failed: %s", parse_warnings)
+            if out_warnings is not None:
+                out_warnings.append(
+                    f"[swuts] parse 실패 — spec stamp skip, 하드코딩 fallback 적용. "
+                    f"사유: {'; '.join(parse_warnings) or 'unknown'}"
+                )
             return None
         return result.by_tc_id
-    except (FileNotFoundError, PermissionError) as e:
+    except (FileNotFoundError, PermissionError, OSError) as e:
         _logger.warning("SwUTS xlsm read failed: %s", e)
+        if out_warnings is not None:
+            out_warnings.append(
+                f"[swuts] read 실패 — spec stamp skip. {type(e).__name__}: {e}"
+            )
         return None
 
 
@@ -176,11 +192,19 @@ def resolve_hmr_html_path(req: Any, project_id: str) -> str:
     return (cfg.get("hmr_html_path") or "").strip()
 
 
-def resolve_hmr_html_bytes(req: Any, project_id: str) -> bytes | None:
+def resolve_hmr_html_bytes(
+    req: Any, project_id: str,
+    *,
+    out_warnings: list[str] | None = None,
+) -> bytes | None:
     """60차 F6-C — hmr_html_path → HTML bytes.
 
     Coverage Report builder의 `hmr_html_bytes` 인자에 직접 전달. None이면 stamp
     skip (backward-compat, 기존 v2.02/v3.01 빈 cell default 유지).
+
+    F6 자체평가 Round 1 W1 + W4 fix:
+        - `out_warnings` 옵션 — read 실패 사유 누적.
+        - `OSError` catch 확대.
 
     Returns:
         bytes 또는 None (path 비었거나 read 실패).
@@ -192,8 +216,13 @@ def resolve_hmr_html_bytes(req: Any, project_id: str) -> bytes | None:
     try:
         resolver = get_resolver()
         return resolver.read_bytes(hmr_path)
-    except (FileNotFoundError, PermissionError) as e:
+    except (FileNotFoundError, PermissionError, OSError) as e:
         _logger.warning("HMR HTML read failed: %s", e)
+        if out_warnings is not None:
+            out_warnings.append(
+                f"[hmr] read 실패 — Function Calls metric stamp skip. "
+                f"{type(e).__name__}: {e}"
+            )
         return None
 
 

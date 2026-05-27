@@ -170,21 +170,43 @@ def build_swit_coverage_report(
         if hmr_parse_warnings:
             warnings.extend([f"[hmr] {w}" for w in hmr_parse_warnings])
         if hmr_result.ok:
-            function_rows: list[FunctionCoverage] = agg.get("function_rows") or []
+            # F6 자체평가 Round 1 W2 fix: dataclasses.replace + 새 list (SwUT 대칭).
+            from dataclasses import replace as _dc_replace
+            original_rows: list[FunctionCoverage] = agg.get("function_rows") or []
+            new_function_rows: list[FunctionCoverage] = []
             stamped = 0
-            for fc in function_rows:
-                m = hmr_result.metrics.get(fc.name) or hmr_result.metrics.get(fc.unit_id)
-                if m and m.total_calls > 0:
-                    fc.function_calls_coverage = CoverageStats(
-                        covered=m.covered_calls,
-                        total=m.total_calls,
-                        coverage_pct=m.coverage_pct / 100.0,
+            ambiguous = 0
+            for fc in original_rows:
+                # F6 Round 1 C2 + W3 fix: metrics_by_name + fc.unit_id 제거.
+                candidates = hmr_result.metrics_by_name.get(fc.name, [])
+                if len(candidates) > 1:
+                    ambiguous += 1
+                    _files = ", ".join(sorted({c.unit_file for c in candidates}))
+                    warnings.append(
+                        f"[hmr] ambiguous function '{fc.name}' — 다중 unit_file "
+                        f"({_files}) 매칭. silent wrong-pick 방지 위해 stamp skip"
                     )
+                    new_function_rows.append(fc)
+                    continue
+                m = candidates[0] if candidates else None
+                if m and m.total_calls > 0:
+                    new_function_rows.append(_dc_replace(
+                        fc,
+                        function_calls_coverage=CoverageStats(
+                            covered=m.covered_calls,
+                            total=m.total_calls,
+                            coverage_pct=m.coverage_pct / 100.0,
+                        ),
+                    ))
                     stamped += 1
+                else:
+                    new_function_rows.append(fc)
             warnings.append(
-                f"[hmr] Function Calls metric stamped — {stamped}/{len(function_rows)} "
-                f"functions matched (HMR metric count: {len(hmr_result.metrics)})"
+                f"[hmr] Function Calls metric stamped — {stamped}/{len(original_rows)} "
+                f"functions matched (HMR metric count: {len(hmr_result.metrics)}, "
+                f"ambiguous skipped: {ambiguous})"
             )
+            agg["function_rows"] = new_function_rows
 
     # 30차 W21 + 31차 W29: 함수별 ASIL 분포 (SwUT 함수 재활용).
     asil_distribution, ids_by_asil = _compute_asil_distribution(

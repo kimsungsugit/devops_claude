@@ -118,3 +118,44 @@ class TestVcastHmrParser:
         result = parse_hmr_html(html_bytes)
         assert result.ok is False
         assert any("metric 0건" in w for w in result.parse_warnings)
+
+
+class TestVcastHmrParserAmbiguous:
+    """F6 자체평가 Round 1 C2: 함수명 중복 silent wrong-pick 차단."""
+
+    def test_duplicate_function_name_collected_in_by_name(self):
+        """C2-1: 같은 함수명 다른 unit_file 2건 — metrics_by_name에 2 entry 보존."""
+        html_bytes = _build_hmr_html([
+            ("bats.c", "Init", "1", "1 / 1 (100%)", "10 / 10 (100%)"),
+            ("vehicle.c", "Init", "1", "1 / 1 (100%)", "2 / 8 (25%)"),
+        ])
+        result = parse_hmr_html(html_bytes)
+        assert result.ok is True
+        # metrics는 backward-compat (첫 매칭만)
+        assert "Init" in result.metrics
+        assert result.metrics["Init"].unit_file == "bats.c"
+        # metrics_by_name은 caller 권장 API — 모든 매칭 보존
+        candidates = result.metrics_by_name["Init"]
+        assert len(candidates) == 2
+        unit_files = {c.unit_file for c in candidates}
+        assert unit_files == {"bats.c", "vehicle.c"}
+
+    def test_unique_function_name_single_entry_in_by_name(self):
+        """C2-2: 함수명 unique 시 metrics_by_name list 길이 1."""
+        html_bytes = _build_hmr_html([
+            ("util.c", "util_func", "2", "1 / 1 (100%)", "5 / 5 (100%)"),
+        ])
+        result = parse_hmr_html(html_bytes)
+        assert result.ok is True
+        assert len(result.metrics_by_name["util_func"]) == 1
+
+    def test_to_dict_reports_ambiguous_count(self):
+        """C2-3: to_dict() 응답에 ambiguous_count 포함."""
+        html_bytes = _build_hmr_html([
+            ("a.c", "Init", "1", "1/1 (100%)", "1/1 (100%)"),
+            ("b.c", "Init", "1", "1/1 (100%)", "1/1 (100%)"),
+            ("c.c", "Update", "1", "1/1 (100%)", "1/1 (100%)"),
+        ])
+        result = parse_hmr_html(html_bytes)
+        d = result.to_dict()
+        assert d["ambiguous_count"] == 1  # Init만 중복
