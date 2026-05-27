@@ -611,3 +611,75 @@ class TestExtractExecutionResultsWithActual:
         assert "SwUFn_0102.001" in results
         assert results["SwUFn_0101.001"].passed is True
         assert results["SwUFn_0102.001"].passed is False
+
+
+# ---------------------------------------------------------------------------
+# 59차 F4-B — extract_step_iterations (Iteration anchor 추출 인프라)
+# ---------------------------------------------------------------------------
+
+
+class TestExtractStepIterationsF4B:
+    """F4-B: VectorCAST HTML → step별 input dict list. KJPDS02 v1.01 호환 인프라.
+
+    HDPDM01 NE_GN7 v2.02 fixture에는 Iteration 라벨 0건 (라이브 검증 결과) — 본
+    인프라는 미래 KJPDS02 환경 호환 보장.
+    """
+
+    def test_no_iteration_label_returns_empty_list_per_tc(self):
+        """HDPDM01 fixture 패턴 — Iteration 라벨 없음 → 모든 TC empty list."""
+        from backend.services.swut_input_adapter import extract_step_iterations
+        html = b"""<html><body>
+        <h4>Start of SwUFn_0101.001</h4>
+        <h3 title="Execution Results">Execution Results (PASS)</h3>
+        <h4>Start of SwUFn_0102.001</h4>
+        </body></html>"""
+        results = extract_step_iterations(html)
+        assert "SwUFn_0101.001" in results
+        assert results["SwUFn_0101.001"] == []
+        assert results["SwUFn_0102.001"] == []
+
+    def test_iteration_label_extracts_step_dicts(self):
+        """Iteration N anchor + INPUT VALUE 라벨 → step별 dict list."""
+        from backend.services.swut_input_adapter import extract_step_iterations
+        html = b"""<html><body>
+        <h4>Start of SwITC_0101_01</h4>
+        <h5>Iteration 1</h5>
+        <table><tr>
+            <td>INPUT VALUE</td><td>u16_var_a</td><td>1</td>
+        </tr><tr>
+            <td>INPUT VALUE</td><td>u16_var_b</td><td>0</td>
+        </tr></table>
+        <h5>Iteration 2</h5>
+        <table><tr>
+            <td>INPUT VALUE</td><td>u16_var_a</td><td>2</td>
+        </tr><tr>
+            <td>INPUT VALUE</td><td>u16_var_b</td><td>5</td>
+        </tr></table>
+        <h4>Start of SwITC_0101_02</h4>
+        </body></html>"""
+        results = extract_step_iterations(html)
+        assert "SwITC_0101_01" in results
+        steps = results["SwITC_0101_01"]
+        assert len(steps) == 2
+        assert steps[0] == {"u16_var_a": "1", "u16_var_b": "0"}
+        assert steps[1] == {"u16_var_a": "2", "u16_var_b": "5"}
+
+    def test_test_step_label_also_recognized(self):
+        """`Test Step N`, `Step N`, `Sequence Step N` 변형도 인식 (대소문자 무시)."""
+        from backend.services.swut_input_adapter import extract_step_iterations
+        html = b"""<html><body>
+        <h4>Start of SwITC_0001</h4>
+        <h5>Test Step 1</h5>
+        <table><tr>
+            <td>INPUT VALUE</td><td>var1</td><td>10</td>
+        </tr></table>
+        <h5>Test Step 2</h5>
+        <table><tr>
+            <td>INPUT VALUE</td><td>var1</td><td>20</td>
+        </tr></table>
+        </body></html>"""
+        results = extract_step_iterations(html)
+        steps = results["SwITC_0001"]
+        assert len(steps) == 2
+        assert steps[0]["var1"] == "10"
+        assert steps[1]["var1"] == "20"

@@ -98,6 +98,10 @@ class ExecutionRow:
     # 58차 F1 신규 — VectorCAST 실측 actual + expected pairs.
     # key=variable name, value=(actual_value, expected_value).
     actual_result: dict[str, tuple[str, str]] = field(default_factory=dict)
+    # 59차 F4-B 신규 — step별 actual/expected dict list. 회사 v1.01 KJPDS02 양식
+    # 호환 인프라. VectorCAST HTML이 ``Iteration N`` 라벨로 step 분리하면 채움.
+    # HDPDM01 fixture에는 미존재 → empty (TC suffix .001/.002/...로 step 효과).
+    actual_result_steps: list[dict[str, tuple[str, str]]] = field(default_factory=list)
 
 
 @dataclass
@@ -367,6 +371,114 @@ def extract_execution_results_with_actual(html_bytes: bytes) -> dict[str, Execut
         results[tc_name] = ExecutionRow(
             tc_name=tc_name, passed=passed, actual_result=actual_result,
         )
+
+    return results
+
+
+def extract_step_iterations(
+    html_bytes: bytes,
+) -> dict[str, list[dict[str, str]]]:
+    """59차 F4-B — VectorCAST HTML에서 TC당 step별 input dict 추출.
+
+    회사 v1.01 (KJPDS02) 양식은 1 TC = 6 row step (step 1~6의 다른 input 변수 값
+    조합). VectorCAST HTML이 step 분리 anchor (``Iteration N`` / ``Test Step N`` /
+    ``Step N``) 를 가지면 그 anchor 사이 INPUT VALUE 라벨을 추출하여 step별 dict
+    list로 반환.
+
+    HDPDM01 NE_GN7 v2.02 양식 fixture (29 TC 라이브 검증, 2026-05-27) 에서는
+    ``Iteration`` / ``Test Step`` 라벨 0건 — 모든 TC empty list (step 분리는 TC
+    suffix ``.001/.002/...`` 로 처리됨). 본 함수는 미래 KJPDS02 환경 또는
+    VectorCAST 다른 버전 호환을 위한 인프라.
+
+    Args:
+        html_bytes: VectorCAST ExecutionResult.html bytes (또는 TestCaseDataReport).
+
+    Returns:
+        ``{tc_name: [step1_input_dict, step2_input_dict, ...]}`` — step 분리 라벨이
+        없는 TC는 empty list. caller (``_write_test_log``) 가 본 list가 비어 있으면
+        기존 fallback (TC suffix 다중화) 동작.
+    """
+    if BeautifulSoup is None:
+        raise RuntimeError("beautifulsoup4 is required for step iteration extractor")
+    soup = BeautifulSoup(html_bytes, "html.parser")
+    results: dict[str, list[dict[str, str]]] = {}
+
+    # step anchor regex — h3/h4/h5 텍스트 매칭.
+    step_anchor_re = re.compile(
+        r"^\s*(Iteration|Test Step|Step|Sequence Step)\s+(\d+)\s*$",
+        re.IGNORECASE,
+    )
+
+    # TC 섹션 anchor 모음 (extract_execution_results_with_actual와 동일 패턴).
+    all_h4_starts: list = []
+    for h4 in soup.find_all("h4"):
+        h4_text = h4.get_text(strip=True)
+        m = re.match(r"Start of\s+(\S+)", h4_text)
+        if m:
+            all_h4_starts.append((m.group(1), h4))
+
+    for idx, (tc_name, h4) in enumerate(all_h4_starts):
+        if tc_name in results:
+            continue
+        next_h4 = all_h4_starts[idx + 1][1] if idx + 1 < len(all_h4_starts) else None
+        next_line = (
+            getattr(next_h4, "sourceline", 10**9) if next_h4 is not None else 10**9
+        )
+
+        # 본 TC 섹션 안의 step anchor 찾기 (h3/h4/h5 모두 후보)
+        step_anchors: list = []
+        for tag_name in ("h3", "h4", "h5"):
+            for el in h4.find_all_next(tag_name, limit=200):
+                el_line = getattr(el, "sourceline", 10**9) or 10**9
+                if el_line >= next_line:
+                    break
+                if el is h4:
+                    continue
+                txt = el.get_text(strip=True)
+                if step_anchor_re.match(txt):
+                    step_anchors.append(el)
+        # sourceline 순 정렬 (h3/h4/h5 섞일 수 있음)
+        step_anchors.sort(key=lambda x: getattr(x, "sourceline", 0) or 0)
+
+        if not step_anchors:
+            results[tc_name] = []
+            continue
+
+        steps: list[dict[str, str]] = []
+        for s_idx, anchor in enumerate(step_anchors):
+            end_anchor = (
+                step_anchors[s_idx + 1] if s_idx + 1 < len(step_anchors) else next_h4
+            )
+            end_line = (
+                getattr(end_anchor, "sourceline", 10**9) if end_anchor else 10**9
+            )
+
+            # anchor ~ end_anchor 사이의 INPUT VALUE 라벨 추출.
+            # VectorCAST HTML 패턴: <td>INPUT VALUE</td> <td>var_name</td> <td>value</td>
+            #   또는 'INPUT VALUE = var = value' 인라인 텍스트.
+            step_dict: dict[str, str] = {}
+            for tr in anchor.find_all_next("tr", limit=500):
+                tr_line = getattr(tr, "sourceline", 10**9) or 10**9
+                if tr_line >= end_line:
+                    break
+                tds = tr.find_all("td")
+                # 'INPUT VALUE' label 찾기 (정확 매칭 또는 startswith)
+                if len(tds) >= 3:
+                    label = tds[0].get_text(strip=True).upper()
+                    if "INPUT" in label and "VALUE" in label:
+                        var_name = tds[1].get_text(strip=True)
+                        var_value = tds[2].get_text(strip=True)
+                        if var_name:
+                            step_dict[var_name] = var_value
+                # 인라인 'INPUT VALUE = var = value' 패턴
+                txt = tr.get_text(" ", strip=True)
+                inline_m = re.search(
+                    r"INPUT\s+VALUE\s*=\s*(\S+)\s*=\s*(\S+)", txt, re.IGNORECASE,
+                )
+                if inline_m and inline_m.group(1) not in step_dict:
+                    step_dict[inline_m.group(1)] = inline_m.group(2)
+            steps.append(step_dict)
+        results[tc_name] = steps
 
     return results
 

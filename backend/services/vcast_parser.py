@@ -177,21 +177,41 @@ class VCastHeader:
 
 @dataclass
 class TestCaseItem:
-    """테스트 케이스 데이터"""
+    """테스트 케이스 데이터.
+
+    59차 F4-B 신규: ``input_data_steps`` / ``expected_result_steps`` — step별
+    list. 회사 v1.01 KJPDS02 양식은 1 TC = 6 row step 패턴 (각 row마다 다른
+    input 변수 값 조합). VectorCAST HTML이 ``Iteration N`` 또는 ``Test Step N``
+    라벨로 step 분리하면 그 list가 채워짐 (BeautifulSoup ``extract_step_iterations``
+    함수). HDPDM01 NE_GN7 양식은 step 분리 라벨 미존재 — TC suffix (.001/.002/...)
+    로 step 효과 처리 → input_data_steps 빈 list, _write_test_log가 fallback
+    동작.
+    """
     header: VCastHeader
     input_data: Dict[str, str] = field(default_factory=dict)
     expected_result: Dict[str, str] = field(default_factory=dict)
     user_code: Dict[str, str] = field(default_factory=dict)
     description: str = ""
+    # 59차 F4-B 신규 — step별 input/expected dict list. empty = step 분리 없음.
+    input_data_steps: List[Dict[str, str]] = field(default_factory=list)
+    expected_result_steps: List[Dict[str, str]] = field(default_factory=list)
 
 
 @dataclass
 class TestResultItem:
-    """실행 결과 데이터"""
+    """실행 결과 데이터.
+
+    59차 F4-B 신규: ``actual_result_steps`` — step별 actual/expected dict list.
+    HDPDM01 fixture에는 step 라벨 미존재로 empty. 회사 v1.01 KJPDS02 양식 호환
+    위한 인프라 — _write_test_log가 layout.step_layout=step_in_rows + 본 list
+    존재 시 sub-row 분배 stamp.
+    """
     header: VCastHeader
     passed: bool = False
     actual_result: Dict[str, Tuple[str, str]] = field(default_factory=dict)  # (actual, expected)
     user_code: List[Dict[str, Any]] = field(default_factory=list)
+    # 59차 F4-B 신규 — step별 actual/expected list. empty = step 분리 없음.
+    actual_result_steps: List[Dict[str, Tuple[str, str]]] = field(default_factory=list)
 
 
 @dataclass

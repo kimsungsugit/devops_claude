@@ -555,6 +555,16 @@ def _write_test_log(
                 if ws.cell(sub_r, 5).value is None:  # col 5 = E
                     safe_write(ws, sub_r, 5, sub_i)
 
+        # 59차 F4-B — step 분배: input_data_steps 있으면 sub-row에 step별 input stamp.
+        # layout.test_log_step_layout=='step_in_rows' (v2.02 6 row pattern) + tc_item에
+        # input_data_steps 보유 시. HDPDM01 fixture는 input_data_steps 빈 list →
+        # 기존 동작 (TC ID row에만 stamp). KJPDS02 v1.01 호환 인프라.
+        _step_in_rows = (
+            layout is not None
+            and getattr(layout, "test_log_step_layout", "single_row") == "step_in_rows"
+            and tc_row_step >= 2
+        )
+
         # 57차 T319 fix → 59차 F4-A 일반화 — Input/Expected/Actual stamp.
         # VectorCAST TestCaseItem (vcast_parser.py:179) 에 input_data / expected_result
         # / actual_result dict 보유. env.test_cases[tc_name] = List[TestCaseItem] —
@@ -613,6 +623,89 @@ def _write_test_log(
                         ]
                         for pi, val in enumerate(actual_vals):
                             safe_write(ws, r, ACTUAL_COL + pi, str(val) if val else "")
+
+                # 59차 F4-B — step 분배 stamp.
+                # input_data_steps / expected_result_steps / actual_result_steps가
+                # 채워져 있을 때 sub-row (step 2~N) 에 각 step의 input 값 stamp.
+                # TC ID row (r) = step 1, sub_r = r + step_idx = step 1 + step_idx.
+                # HDPDM01 fixture는 steps 빈 list → skip (backward-compat).
+                if _step_in_rows:
+                    input_steps = (
+                        getattr(tc_item, "input_data_steps", []) or []
+                    )
+                    expected_steps = (
+                        getattr(tc_item, "expected_result_steps", []) or []
+                    )
+                    actual_steps: list = []
+                    if exec_r2 is not None:
+                        actual_steps = (
+                            getattr(exec_r2, "actual_result_steps", []) or []
+                        )
+                    # max iteration step count (각 list 길이 최댓값)
+                    max_step_count = max(
+                        len(input_steps), len(expected_steps), len(actual_steps),
+                    )
+                    for step_idx in range(1, min(tc_row_step, max_step_count)):
+                        sub_r = r + step_idx
+                        # input
+                        if step_idx < len(input_steps):
+                            sd = input_steps[step_idx]
+                            if input_var_list:
+                                for pi, var_name in enumerate(input_var_list):
+                                    val = sd.get(var_name, "")
+                                    safe_write(
+                                        ws, sub_r, INPUT_COL + pi,
+                                        str(val) if val else "",
+                                    )
+                            else:
+                                vals = list(sd.values())[:input_max]
+                                for pi, val in enumerate(vals):
+                                    safe_write(
+                                        ws, sub_r, INPUT_COL + pi,
+                                        str(val) if val else "",
+                                    )
+                        # expected
+                        if step_idx < len(expected_steps):
+                            sd = expected_steps[step_idx]
+                            if expected_var_list:
+                                for pi, var_name in enumerate(expected_var_list):
+                                    val = sd.get(var_name, "")
+                                    safe_write(
+                                        ws, sub_r, EXPECTED_COL + pi,
+                                        str(val) if val else "",
+                                    )
+                            else:
+                                vals = list(sd.values())[:expected_max]
+                                for pi, val in enumerate(vals):
+                                    safe_write(
+                                        ws, sub_r, EXPECTED_COL + pi,
+                                        str(val) if val else "",
+                                    )
+                        # actual (tuple — t[0] 사용)
+                        if step_idx < len(actual_steps):
+                            sd = actual_steps[step_idx]
+                            if actual_var_list:
+                                for pi, var_name in enumerate(actual_var_list):
+                                    t = sd.get(var_name, "")
+                                    val = (
+                                        t[0] if isinstance(t, tuple) and t
+                                        else (str(t) if t else "")
+                                    )
+                                    safe_write(
+                                        ws, sub_r, ACTUAL_COL + pi,
+                                        str(val) if val else "",
+                                    )
+                            else:
+                                vals = [
+                                    t[0] if isinstance(t, tuple) and t
+                                    else (str(t) if t else "")
+                                    for t in list(sd.values())[:actual_max]
+                                ]
+                                for pi, val in enumerate(vals):
+                                    safe_write(
+                                        ws, sub_r, ACTUAL_COL + pi,
+                                        str(val) if val else "",
+                                    )
 
         # Pass/Fail stamp — Unit (필수) + Total (v3.01만, v2.02는 PASS_FAIL_TOTAL_COL=0이라 skip).
         safe_write(ws, r, PASS_FAIL_UNIT_COL, result_str)
