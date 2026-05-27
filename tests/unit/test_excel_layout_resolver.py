@@ -436,6 +436,32 @@ class TestScanTestLogColumnsV202:
         cols = elr._scan_test_log_columns(None)
         assert all(v is None for v in cols.values())
 
+    def test_scan_precondition_col_swits_kjpds02_pattern_f6a(self):
+        """60차 F6-A — 'Precondition' 라벨 → precondition_col 자동 감지.
+
+        KJPDS02 SwITS v1.01 양식 = col 9, HDPDM01 SUTS v3.01 = col 10,
+        SITS v2.02 = col 6.
+        """
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.cell(1, 9).value = "Precondition"
+        ws.cell(1, 10).value = "Sequence"
+        cols = elr._scan_test_log_columns(ws)
+        assert cols["precondition_col"] == 9
+
+    def test_scan_precondition_col_none_when_label_missing_f6a(self):
+        """60차 F6-A — 'Precondition' 라벨 미존재 → precondition_col=None.
+
+        KJPDS02 SwUTS v1.01 양식이 Precondition col 없는 케이스. _write_test_log
+        에서 stamp skip하여 backward-compat 유지.
+        """
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.cell(1, 2).value = "TC_ID"
+        ws.cell(1, 5).value = "Test Method"  # Precondition 라벨 없음
+        cols = elr._scan_test_log_columns(ws)
+        assert cols["precondition_col"] is None
+
 
 # ---------------------------------------------------------------------------
 # 58차 F2 — Traceability 헤더 row 자동 감지

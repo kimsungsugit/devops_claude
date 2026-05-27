@@ -128,6 +128,11 @@ class SwitLayout:
     test_log_pass_fail_col: Optional[int] = None
     test_log_pass_fail_total_col: Optional[int] = None
     test_log_log_data_col: Optional[int] = None
+    # 60차 F6-A — Test Log Precondition 컬럼 위치 (SwUTS/SwITS spec stamp용).
+    # KJPDS02 SwITS v1.01 = col 9, HDPDM01 SUTS v3.01 = col 10, SITS v2.02 = col 6.
+    # KJPDS02 SwUTS v1.01 양식은 precondition col 없음 → None.
+    # None이면 _write_test_log에서 Precondition stamp skip (backward-compat).
+    test_log_precondition_col: Optional[int] = None
     # 58차 F2 — Coverage 1.Traceability 시트 헤더 row 위치
     traceability_header_row: Optional[int] = None
     # 59차 F4-A — Test Log 변수명 헤더 row (KJPDS02 v1.01 = row 5).
@@ -358,6 +363,8 @@ def _scan_test_log_columns(ws) -> dict[str, Optional[int]]:
     result: dict[str, Optional[int]] = {
         "input_col": None, "expected_col": None, "actual_col": None,
         "pass_fail_col": None, "pass_fail_total_col": None, "log_data_col": None,
+        # 60차 F6-A — SwUTS/SwITS spec Precondition stamp col 감지.
+        "precondition_col": None,
     }
     if ws is None:
         return result
@@ -398,6 +405,11 @@ def _scan_test_log_columns(ws) -> dict[str, Optional[int]]:
                 "log data", "log", "log file",
             ):
                 result["log_data_col"] = c
+            elif result["precondition_col"] is None and s in (
+                "precondition", "pre-condition", "전제 조건", "전제조건",
+            ):
+                # 60차 F6-A — SwUTS/SwITS Precondition stamp col
+                result["precondition_col"] = c
     return result
 
 
@@ -648,6 +660,8 @@ def _inspect_internal(
         test_log_pass_fail_col: Optional[int] = None
         test_log_pass_fail_total_col: Optional[int] = None
         test_log_log_data_col: Optional[int] = None
+        # 60차 F6-A — SwUTS/SwITS spec Precondition stamp col
+        test_log_precondition_col: Optional[int] = None
         # 59차 F4-A — 변수명 헤더 row + Input/Expected/Actual 각 block max count.
         test_log_variable_header_row: Optional[int] = None
         test_log_input_max_count = 10
@@ -673,6 +687,7 @@ def _inspect_internal(
                 test_log_pass_fail_col = _cols.get("pass_fail_col")
                 test_log_pass_fail_total_col = _cols.get("pass_fail_total_col")
                 test_log_log_data_col = _cols.get("log_data_col")
+                test_log_precondition_col = _cols.get("precondition_col")
                 # 59차 F4-A — 변수명 헤더 row + block max counts + step layout.
                 test_log_variable_header_row = _scan_test_log_variable_header_row(
                     log_ws,
@@ -814,6 +829,8 @@ def _inspect_internal(
             test_log_pass_fail_col=test_log_pass_fail_col,
             test_log_pass_fail_total_col=test_log_pass_fail_total_col,
             test_log_log_data_col=test_log_log_data_col,
+            # 60차 F6-A — Test Log Precondition col (SwUTS/SwITS spec stamp)
+            test_log_precondition_col=test_log_precondition_col,
             # 58차 F2 — Coverage Traceability 헤더 row
             traceability_header_row=traceability_header_row,
             # 59차 F4-A — Test Log 변수명 헤더 row + block max counts + step layout

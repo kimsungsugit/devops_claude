@@ -384,6 +384,7 @@ def _write_test_log(
     out_warnings: list[str] | None = None,
     *,
     layout: Any = None,
+    swuts_map: dict[str, Any] | None = None,
 ) -> int:
     """Test Log 시트 — TC별 input/expected/actual/pass.
 
@@ -393,6 +394,10 @@ def _write_test_log(
     31차 W27: col+4 Function ID + col+5 ASIL 컬럼 추가 (function_asil_map 제공 시).
     회사 양식 col+3까지만 사용 — col+4/5는 빈 영역 활용. ASIL D row는
     mark_asil_d_function 적용 (audit 검토 우선순위 시각).
+
+    60차 F6-A: swuts_map 제공 시 (SwUTS xlsm parser 결과) col B/C/D + Precondition
+    col에 spec docx 데이터 stamp. 매핑 fallback chain — 직접 tc_name 매칭 →
+    function_id (SwUFn_NNNN) 매칭 → 없으면 기존 하드코딩 ("AEC, ABV").
     """
     if not ws:
         return 0
@@ -543,10 +548,60 @@ def _write_test_log(
             "N/A"
         )
 
-        # B/C/D — TC ID / Title / Method (기본 fill)
-        safe_write(ws, r, col, tc_name)
-        safe_write(ws, r, col + 1, component_name)
-        safe_write(ws, r, col + 2, "AEC, ABV")
+        # 60차 F6-A — SwUTS spec lookup (fallback chain).
+        # 1순위: tc_name 직접 매칭 (예: 'SwUTC_0121' 또는 'SwUFn_0121')
+        # 2순위: tc_name에서 SwUFn_NNNN 추출 → by_function_id 첫 entry
+        # 3순위: 없음 → 기존 하드코딩 fallback
+        swuts_entry = None
+        if swuts_map:
+            swuts_entry = swuts_map.get(tc_name)
+            if swuts_entry is None:
+                # function_id fallback — VectorCAST 'SwUFn_0121.001' / spec 'SwUTC_0121'
+                # 두 형식 모두 SwUFn_0121 substring 가짐. swuts_map은 by_tc_id 형식.
+                _fn_match = re.match(r"SwUFn_(\d+)", tc_name)
+                if _fn_match:
+                    _fn_id = _fn_match.group(0)
+                    # by_tc_id에서 ``SwUTC_<digits>`` 형식이 ``SwUFn_<digits>`` 와
+                    # 1:1 대응되는 SwUTC 찾기 (KJPDS02 SwUTS 패턴)
+                    _candidate_tc = f"SwUTC_{_fn_match.group(1)}"
+                    swuts_entry = swuts_map.get(_candidate_tc)
+                    if swuts_entry is None:
+                        # HDPDM01 'SwUTC_SwUFn_NNNN' 형식 시도
+                        swuts_entry = swuts_map.get(f"SwUTC_{_fn_id}")
+
+        # B/C/D — TC ID / Title / Method (SwUTS spec 우선, 없으면 기존 fallback)
+        if swuts_entry is not None:
+            _display_tc_id = getattr(swuts_entry, "tc_id", "") or tc_name
+            _display_description = (
+                getattr(swuts_entry, "description", "")
+                or getattr(swuts_entry, "unit_name", "")
+                or component_name
+            )
+            _method = getattr(swuts_entry, "test_method", "")
+            _gen_method = getattr(swuts_entry, "generation_method", "")
+            if _method and _gen_method:
+                _display_method = f"{_method}, {_gen_method}"
+            elif _method:
+                _display_method = _method
+            elif _gen_method:
+                _display_method = _gen_method
+            else:
+                _display_method = "AEC, ABV"
+            safe_write(ws, r, col, _display_tc_id)
+            safe_write(ws, r, col + 1, _display_description)
+            safe_write(ws, r, col + 2, _display_method)
+            # Precondition stamp (layout 제공 시) — 회사 양식에 별도 col 존재할 때만.
+            _precondition_col = (
+                getattr(layout, "test_log_precondition_col", None)
+                if layout is not None else None
+            )
+            _precondition = getattr(swuts_entry, "precondition", "")
+            if _precondition_col and _precondition:
+                safe_write(ws, r, _precondition_col, _precondition)
+        else:
+            safe_write(ws, r, col, tc_name)
+            safe_write(ws, r, col + 1, component_name)
+            safe_write(ws, r, col + 2, "AEC, ABV")
         # E (col 5) — TC ID row는 빈 cell (Pass/Fail 자리가 아님)
         # sub-row E6~E10에 Params 1~5 stamp (template default 패턴)
         if tc_row_step >= 2:
@@ -794,6 +849,7 @@ def build_sutr(
     template_bytes: bytes,
     deviation_cases: list[Any] | None = None,
     swuds_function_ids: set[str] | None = None,
+    swuts_map: dict[str, Any] | None = None,
 ) -> SutrBuildResult:
     """SUTR v3.01 xlsm 생성.
 
@@ -804,6 +860,9 @@ def build_sutr(
         deviation_cases: swut_deviation_generator 결과 (None이면 빈 Deviation 시트).
         swuds_function_ids: 17차 — SwUDS 함수 ID set (옵션). 제공되면 2.Consistency에
             SwUDS↔SwUTS 매핑 row 추가. Coverage builder와 대칭.
+        swuts_map: 60차 F6-A — SwUTS xlsm parser 결과 (옵션). 제공되면 Test Log의
+            col B/C/D + Precondition col에 spec docx 데이터 stamp. None이면 기존
+            하드코딩 ("AEC, ABV") fallback (backward-compat).
     """
     if openpyxl is None:
         raise RuntimeError("openpyxl is required for SwUT SUTR builder")
@@ -937,6 +996,7 @@ def build_sutr(
             function_asil_map=agg.get("function_asil_map"),
             out_warnings=warnings,
             layout=layout,
+            swuts_map=swuts_map,
         )
         summary["test_log_rows_written"] = n
 

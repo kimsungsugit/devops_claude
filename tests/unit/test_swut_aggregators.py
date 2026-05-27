@@ -1410,3 +1410,100 @@ class TestTraceabilityMatrixKindF4C:
         assert not any("switc_x_swst" in w for w in warnings)
         # n은 환경/매칭에 따라 다름 — 0 이상이면 OK
         assert n >= 0
+
+
+class TestSutrTestLogSwUTSStampF6A:
+    """60차 F6-A — swuts_map 제공 시 SUTR Test Log B/C/D + Precondition stamp."""
+
+    def test_swuts_map_overrides_tc_id_and_description_and_method(self):
+        """KJPDS02 SwUTS pattern: SwUFn_0101.001 → swuts_map['SwUTC_0101'] 매칭."""
+        import openpyxl
+        from backend.services.swut_sutr_aggregator import _write_test_log
+        from backend.services.swuts_excel_parser import SwUTSEntry
+
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.cell(1, 1).value = "Test Case ID"
+
+        session = _make_session()
+        # session에는 SwUFn_0101.001 / SwUFn_0103.001 두 TC 있음
+        swuts_map = {
+            "SwUTC_0101": SwUTSEntry(
+                tc_id="SwUTC_0101",
+                unit_name="main",
+                description="Interface : main entry",
+                test_method="REQ",
+                generation_method="ABV",
+                function_id="SwUFn_0101",
+            ),
+        }
+        _write_test_log(ws, session, swuts_map=swuts_map)
+
+        # col 1 (B 역할) = TC ID, col 2 = description, col 3 = method
+        # SwUFn_0101 매칭 row 찾기 (TC ID 정확하면 'SwUTC_0101' override)
+        b_values = [ws.cell(r, 1).value for r in range(2, 10)]
+        assert "SwUTC_0101" in b_values, f"B col에 SwUTC_0101 stamp 누락: {b_values}"
+
+        # 해당 row의 col 2, 3 검증
+        target_row = next(
+            r for r in range(2, 10) if ws.cell(r, 1).value == "SwUTC_0101"
+        )
+        assert ws.cell(target_row, 2).value == "Interface : main entry"
+        assert ws.cell(target_row, 3).value == "REQ, ABV"
+
+    def test_no_swuts_map_keeps_legacy_hardcoded_method(self):
+        """swuts_map=None (backward-compat) → 기존 'AEC, ABV' 하드코딩 유지."""
+        import openpyxl
+        from backend.services.swut_sutr_aggregator import _write_test_log
+
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.cell(1, 1).value = "Test Case ID"
+
+        session = _make_session()
+        _write_test_log(ws, session, swuts_map=None)
+
+        # 첫 data row의 col 3 (method) = 하드코딩 fallback
+        assert ws.cell(2, 3).value == "AEC, ABV"
+
+    def test_precondition_stamps_when_layout_provides_col(self):
+        """layout.test_log_precondition_col 제공 + swuts_entry.precondition → stamp."""
+        import openpyxl
+        from backend.services.swut_sutr_aggregator import _write_test_log
+        from backend.services.swuts_excel_parser import SwUTSEntry
+
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.cell(1, 1).value = "Test Case ID"
+
+        # mock layout — test_log_precondition_col=9 (KJPDS02 SwITS 패턴)
+        class MockLayout:
+            test_log_precondition_col = 9
+            test_log_input_col = None
+            test_log_expected_col = None
+            test_log_actual_col = None
+            test_log_pass_fail_col = None
+            test_log_pass_fail_total_col = None
+            test_log_log_data_col = None
+            test_log_tc_row_step = 1
+            test_log_variable_header_row = None
+            test_log_input_max_count = 10
+            test_log_expected_max_count = 10
+            test_log_actual_max_count = 10
+            test_log_step_layout = "single_row"
+            test_log_extra_marker_col = None
+
+        session = _make_session()
+        swuts_map = {
+            "SwUTC_0101": SwUTSEntry(
+                tc_id="SwUTC_0101",
+                precondition="System initialized",
+                function_id="SwUFn_0101",
+            ),
+        }
+        _write_test_log(ws, session, swuts_map=swuts_map, layout=MockLayout())
+
+        target_row = next(
+            r for r in range(2, 10) if ws.cell(r, 1).value == "SwUTC_0101"
+        )
+        assert ws.cell(target_row, 9).value == "System initialized"

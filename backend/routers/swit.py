@@ -61,6 +61,7 @@ from backend.services.swut_meta_resolver import (
     resolve_c_source_root as _resolver_resolve_c_source_root,
     resolve_swuds_function_ids as _resolver_resolve_swuds_function_ids,
     resolve_swuds_path as _resolver_resolve_swuds_path,
+    resolve_swuts_test_specs as _resolver_resolve_swuts_test_specs,
 )
 
 # 54-fix W2: swut.py와 동일 backward compat alias — 회귀가 swit_mod._META_CONFIG_PATH
@@ -336,10 +337,13 @@ def _do_swit_sitr_build(req: SwITSitrBuildRequest) -> Response:
     template_bytes = _read_template_bytes(req.sitr_template_path, req.project_id, "sitr")
     meta = _build_swit_sitr_meta(req)
     swuds_fn_ids = _resolve_swuds_function_ids(req)
+    # 60차 F6-A: SwITS xlsm/docx → spec data dict (Test Log B/C/D + Precondition stamp).
+    swuts_map = _resolver_resolve_swuts_test_specs(req, req.project_id)
     result: SwitSitrBuildResult = build_swit_sitr_report(
         session, meta, template_bytes,
         deviation_cases=req.deviation_cases,
         swuds_function_ids=swuds_fn_ids,
+        swuts_map=swuts_map,
     )
     if not result.ok:
         raise HTTPException(status_code=500, detail="SwIT SITR 빌드 실패 (ok=False)")

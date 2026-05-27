@@ -123,6 +123,7 @@ def build_swit_sitr_report(
     template_bytes: bytes,
     deviation_cases: list[Any] | None = None,
     swuds_function_ids: set[str] | None = None,
+    swuts_map: dict[str, Any] | None = None,
 ) -> SwitSitrBuildResult:
     """SwIT SITR v2.02 xlsm 생성.
 
@@ -133,6 +134,8 @@ def build_swit_sitr_report(
         deviation_cases: deviation 결과 (None이면 빈 Deviation 시트).
         swuds_function_ids: 옵션 — SwUDS 함수 ID set. 제공 시 2.Consistency에
             SwUDS↔SwIT 매핑 row 추가 (시트 존재 시).
+        swuts_map: 60차 F6-A — SwITS xlsm parser 결과 (옵션, SwUT swuts_map 인자명 재사용).
+            제공 시 Test Log B/C/D + Precondition col에 spec 데이터 stamp.
 
     Returns:
         SwitSitrBuildResult — xlsm_io 채워짐. 매크로 ZIP entry는 보존되나
@@ -253,6 +256,7 @@ def build_swit_sitr_report(
             function_asil_map=agg.get("function_asil_map"),
             out_warnings=warnings,
             layout=layout,
+            swuts_map=swuts_map,
         )
         summary["test_log_rows_written"] = n
 

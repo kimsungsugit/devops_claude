@@ -663,6 +663,10 @@ class SwUTBuildRequest(BaseModel):
     # 30차 W21: C 소스 디렉토리 (옵션) — 제공 시 Doxygen @asil 태그에서 함수별
     # ASIL 등급 추출 → summary.asil_distribution + 3.Coverage 시트 ASIL D row 강조.
     c_source_root: str = Field("", max_length=500)
+    # 60차 F6-A: SwUTS spec 파일 (옵션, xlsm/docx 허용). 제공 시 SUTR Test Log의
+    # TC_ID / Description / Precondition / Test Method / Generation Method 컬럼에
+    # spec 데이터 stamp. 양식 자동 감지 (KJPDS02 SwUTS v1.01 / HDPDM01 SUTS v3.01).
+    swuts_docx_path: str = Field("", max_length=500)
 
     # 인사 메타 (선택)
     reviewer_override: str = Field("", max_length=100)
@@ -676,7 +680,7 @@ class SwUTBuildRequest(BaseModel):
 
     @field_validator("test_engineer", "reviewer_override", "approver_override",
                      "cache_root", "log_folder", "coverage_template_path", "sutr_template_path",
-                     "swuds_docx_path", "c_source_root")
+                     "swuds_docx_path", "c_source_root", "swuts_docx_path")
     @classmethod
     def _no_newline(cls, v):
         if v is None:

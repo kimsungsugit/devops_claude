@@ -80,6 +80,7 @@ from backend.services.swut_meta_resolver import (  # noqa: E402
     resolve_swuds_function_asil_map as _resolver_resolve_swuds_function_asil_map,
     resolve_swuds_function_ids as _resolver_resolve_swuds_function_ids,
     resolve_swuds_path as _resolver_resolve_swuds_path,
+    resolve_swuts_test_specs as _resolver_resolve_swuts_test_specs,
 )
 
 # Backward compat alias — 기존 회귀가 `monkeypatch.setattr(swut, '_META_CONFIG_PATH', ...)`
@@ -354,10 +355,14 @@ def _do_sutr_build(req: SwUTBuildRequest) -> Response:
     meta = _build_sutr_meta(req)
     # 17차 T172: SwUDS docx 처리 — Coverage builder와 대칭.
     swuds_fn_ids = _resolve_swuds_function_ids(req)
+    # 60차 F6-A: SwUTS xlsm/docx → spec data dict (Test Log B/C/D + Precondition stamp).
+    # None이면 build_sutr 내부에서 기존 하드코딩 fallback (backward-compat).
+    swuts_map = _resolver_resolve_swuts_test_specs(req, req.project_id)
     result = build_sutr(
         session, meta, template_bytes,
         deviation_cases=req.deviation_cases,
         swuds_function_ids=swuds_fn_ids,
+        swuts_map=swuts_map,
     )
     if not result.ok:
         raise HTTPException(status_code=500, detail="빌드 실패 (ok=False)")

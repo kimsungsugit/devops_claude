@@ -100,6 +100,62 @@ def resolve_c_source_root(req: Any, project_id: str) -> str:
     return (cfg.get("c_source_root") or "").strip()
 
 
+def resolve_swuts_path(req: Any, project_id: str) -> str:
+    """60차 F6-A — req.swuts_docx_path 우선, 비면 config의 project별 값 fallback.
+
+    field 명은 ``swuts_docx_path`` 로 유지 (사용자 mental model + 49차 swuds와
+    네이밍 일관성). 실제 파일은 xlsm/docx 모두 허용 — parser가 자동 분기.
+
+    Args:
+        req: SwUTBuildRequest 또는 SwITBuildRequest (덕 타이핑 — `swuts_docx_path`
+            속성).
+        project_id: req.project_id.
+
+    Returns:
+        path string. req와 config 모두 비면 빈 string.
+    """
+    req_value = getattr(req, "swuts_docx_path", "") or ""
+    if req_value:
+        return req_value
+    cfg = load_meta_from_config(project_id)
+    return (cfg.get("swuts_docx_path") or "").strip()
+
+
+def resolve_swuts_test_specs(
+    req: Any, project_id: str,
+) -> dict[str, Any] | None:
+    """60차 F6-A — swuts_docx_path xlsm → {tc_id: SwUTSEntry} dict.
+
+    SUTR Test Log stamp 시 caller가 tc_name (예: 'SwUTC_0121')으로 lookup하여
+    description / precondition / test_method / generation_method 추출.
+
+    Args:
+        req: SwUT/SwIT BuildRequest (덕 타이핑).
+        project_id: req.project_id.
+
+    Returns:
+        {tc_id: SwUTSEntry} dict 또는 None (path 비었거나 parse 실패).
+        실패 시 _logger.warning만 emit (caller는 None 받고 graceful skip).
+    """
+    swuts_path = resolve_swuts_path(req, project_id)
+    if not swuts_path:
+        return None
+    from backend.services.file_resolver import get_resolver
+    from backend.services.swuts_excel_parser import parse_swuts_xlsm
+    try:
+        resolver = get_resolver()
+        xlsm_bytes = resolver.read_bytes(swuts_path)
+        parse_warnings: list[str] = []
+        result = parse_swuts_xlsm(xlsm_bytes, parse_warnings=parse_warnings)
+        if not result.ok:
+            _logger.warning("SwUTS parse failed: %s", parse_warnings)
+            return None
+        return result.by_tc_id
+    except (FileNotFoundError, PermissionError) as e:
+        _logger.warning("SwUTS xlsm read failed: %s", e)
+        return None
+
+
 def resolve_swuds_function_ids(req: Any, project_id: str) -> set[str] | None:
     """16차 + 49차 — swuds_docx_path가 있으면 docx → function ID set 반환.
 
@@ -243,4 +299,6 @@ __all__ = [
     "resolve_swuds_function_ids",
     "resolve_swuds_function_asil_map",
     "apply_function_asil_map",
+    "resolve_swuts_path",
+    "resolve_swuts_test_specs",
 ]
