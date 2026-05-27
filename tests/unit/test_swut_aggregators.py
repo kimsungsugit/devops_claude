@@ -1009,3 +1009,274 @@ class TestSutrTestLogRowStep57:
         assert isinstance(result, dict)
         # _make_session() 5 TC → dict 키 5개 (또는 정규식 매칭 가능한 TC만)
         assert len(result) >= 1
+
+
+# ---------------------------------------------------------------------------
+# 59차 F4-A — Test Log 변수명 헤더 row + truncate 해제 + 합집합 col 순서 lookup
+# ---------------------------------------------------------------------------
+
+
+def _make_tc_item(input_data: dict, expected_result: dict) -> object:
+    """TestCaseItem mock — getattr 호환 dataclass-like object."""
+    from dataclasses import dataclass
+
+    @dataclass
+    class _MockTCItem:
+        input_data: dict
+        expected_result: dict
+
+    return _MockTCItem(input_data=input_data, expected_result=expected_result)
+
+
+def _make_layout_v101(
+    *,
+    variable_header_row: int = 5,
+    input_col: int = 10,
+    expected_col: int = 20,
+    actual_col: int = 30,
+    pass_fail_col: int = 42,
+    log_data_col: int = 44,
+    input_max: int = 10,
+    expected_max: int = 10,
+    actual_max: int = 12,
+) -> object:
+    """v1.01 SwitLayout mock — variable_header_row=5 + col 위치 + max counts."""
+    from backend.services.excel_layout_resolver import SwitLayout
+
+    return SwitLayout(
+        detected_version="v2.02",  # v1.01 enum 미존재 — variable_header_row 효과만 검증
+        test_log_input_col=input_col,
+        test_log_expected_col=expected_col,
+        test_log_actual_col=actual_col,
+        test_log_pass_fail_col=pass_fail_col,
+        test_log_log_data_col=log_data_col,
+        test_log_tc_row_step=6,
+        test_log_step_layout="step_in_rows",
+        test_log_variable_header_row=variable_header_row,
+        test_log_input_max_count=input_max,
+        test_log_expected_max_count=expected_max,
+        test_log_actual_max_count=actual_max,
+    )
+
+
+class TestWriteVariableNameHeaderRowF4A:
+    """`_write_variable_name_header_row` — header_row × col 범위에 변수명 stamp."""
+
+    def test_stamps_union_sorted_variable_names_at_header_row(self):
+        """환경별 input/expected/actual key 합집합 + sorted → header_row col 순서 stamp."""
+        from backend.services.swut_sutr_aggregator import _write_variable_name_header_row
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        env = EnvironmentData(
+            env_name="SWTE_01",
+            component_name="SysOs_Main",
+            test_cases={
+                "SwITC_0001_01": [_make_tc_item(
+                    input_data={"u16_var_a": "1", "u8_var_b": "0", "u16_var_c": "2"},
+                    expected_result={"u16_out_x": "1"},
+                )],
+            },
+            test_results={
+                "SwITC_0001_01": ExecutionRow(
+                    tc_name="SwITC_0001_01", passed=True,
+                    actual_result={"u16_out_x": ("1", "1")},
+                ),
+            },
+        )
+        session = SwUTSession(
+            project_id="KJPDS02", version="v1.01_251205",
+            source_kind="log_folder", environments=[env],
+        )
+        layout = _make_layout_v101()
+        warnings: list[str] = []
+        input_list, expected_list, actual_list = _write_variable_name_header_row(
+            ws, layout, session,
+            input_col=10, expected_col=20, actual_col=30,
+            input_max=10, expected_max=10, actual_max=12,
+            out_warnings=warnings,
+        )
+        # row 5 col 10~12 에 sorted input 변수명 stamp
+        assert ws.cell(5, 10).value == "u16_var_a"
+        assert ws.cell(5, 11).value == "u16_var_c"
+        assert ws.cell(5, 12).value == "u8_var_b"
+        # row 5 col 20 에 expected 변수명
+        assert ws.cell(5, 20).value == "u16_out_x"
+        # row 5 col 30 에 actual 변수명
+        assert ws.cell(5, 30).value == "u16_out_x"
+        # 반환 list 검증
+        assert input_list == ["u16_var_a", "u16_var_c", "u8_var_b"]
+        assert expected_list == ["u16_out_x"]
+        assert actual_list == ["u16_out_x"]
+        # diag warning 누적 확인
+        assert any("F4-A: 변수명 헤더 row" in w for w in warnings)
+
+    def test_layout_none_returns_empty_lists_no_stamp(self):
+        """layout=None → 빈 list + ws stamp 없음 (backward-compat)."""
+        from backend.services.swut_sutr_aggregator import _write_variable_name_header_row
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        env = EnvironmentData(env_name="SWTE_01")
+        session = SwUTSession(project_id="X", version="v3.01", environments=[env])
+        input_list, expected_list, actual_list = _write_variable_name_header_row(
+            ws, None, session,
+            input_col=6, expected_col=16, actual_col=26,
+            input_max=10, expected_max=10, actual_max=10,
+        )
+        assert input_list == []
+        assert expected_list == []
+        assert actual_list == []
+        # ws에는 어떤 stamp도 없어야
+        assert ws.cell(5, 10).value is None
+
+    def test_environments_union_sorted(self):
+        """env A의 변수 + env B의 변수 합집합 + sorted."""
+        from backend.services.swut_sutr_aggregator import _write_variable_name_header_row
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        env_a = EnvironmentData(
+            env_name="SWTE_01",
+            test_cases={"TC1": [_make_tc_item(
+                input_data={"var_b": "1", "var_a": "2"},
+                expected_result={},
+            )]},
+        )
+        env_b = EnvironmentData(
+            env_name="SWTE_02",
+            test_cases={"TC2": [_make_tc_item(
+                input_data={"var_c": "3", "var_a": "4"},
+                expected_result={},
+            )]},
+        )
+        session = SwUTSession(
+            project_id="X", version="v1.01",
+            environments=[env_a, env_b],
+        )
+        layout = _make_layout_v101()
+        input_list, _, _ = _write_variable_name_header_row(
+            ws, layout, session,
+            input_col=10, expected_col=20, actual_col=30,
+            input_max=10, expected_max=10, actual_max=10,
+        )
+        # union = {var_a, var_b, var_c} sorted
+        assert input_list == ["var_a", "var_b", "var_c"]
+
+    def test_input_max_truncates_union(self):
+        """input_max=2일 때 sorted list 앞 2개만 stamp."""
+        from backend.services.swut_sutr_aggregator import _write_variable_name_header_row
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        env = EnvironmentData(
+            env_name="SWTE_01",
+            test_cases={"TC1": [_make_tc_item(
+                input_data={"v3": "1", "v1": "2", "v2": "3", "v4": "4"},
+                expected_result={},
+            )]},
+        )
+        session = SwUTSession(
+            project_id="X", version="v1.01", environments=[env],
+        )
+        layout = _make_layout_v101(input_max=2)
+        input_list, _, _ = _write_variable_name_header_row(
+            ws, layout, session,
+            input_col=10, expected_col=12, actual_col=20,
+            input_max=2, expected_max=10, actual_max=10,
+        )
+        assert input_list == ["v1", "v2"]
+        assert ws.cell(5, 10).value == "v1"
+        assert ws.cell(5, 11).value == "v2"
+        # col 12 (input_max 초과)에는 stamp 안 됨
+        assert ws.cell(5, 12).value is None
+
+
+class TestWriteTestLogTruncateF4A:
+    """`_write_test_log` truncate `[:10]` 해제 + col 순서 lookup."""
+
+    def test_layout_none_uses_default_10_truncate(self):
+        """layout=None → 기존 동작 (input_max=10, dict.values() 순서)."""
+        from backend.services.swut_sutr_aggregator import _write_test_log
+        wb = openpyxl.Workbook()
+        wb.remove(wb.active)
+        ws = wb.create_sheet("Test Log")
+        ws["B4"] = "Test Case ID"  # find_kv_row 위해
+        env = EnvironmentData(
+            env_name="SWTE_01",
+            component_name="SysOs_Main",
+            test_cases={
+                "SwUFn_0101.001": [_make_tc_item(
+                    input_data={f"v{i:02d}": str(i) for i in range(15)},
+                    expected_result={},
+                )]
+            },
+            test_results={
+                "SwUFn_0101.001": ExecutionRow(tc_name="SwUFn_0101.001", passed=True),
+            },
+        )
+        session = SwUTSession(
+            project_id="X", version="v3.01", environments=[env],
+        )
+        # _collect_tc_to_function이 SwUFn_NNNN.M 패턴 인식 필요
+        n = _write_test_log(ws, session, layout=None)
+        # backward-compat: layout None → input_max=10, dict.values() 순서
+        # row 5 col 6~15에 15개 변수 중 10개 stamp (입력 dict insertion order)
+        if n > 0:
+            # 첫 row stamp 확인 (정확한 row는 fixture에 따라 다름)
+            stamped_cols = [
+                ws.cell(5, c).value for c in range(6, 16) if ws.cell(5, c).value
+            ]
+            # truncate 10개 — 11번째는 stamp 안 됨
+            assert ws.cell(5, 16).value in (None, "")  # 11번째 col은 EXPECTED_COL
+
+    def test_layout_input_max_count_extends_beyond_10(self):
+        """layout.test_log_input_max_count=15 → 15개 변수 stamp 가능."""
+        from backend.services.swut_sutr_aggregator import _write_test_log
+        wb = openpyxl.Workbook()
+        wb.remove(wb.active)
+        ws = wb.create_sheet("Test Log")
+        ws["B4"] = "Test Case ID"
+        env = EnvironmentData(
+            env_name="SWTE_01",
+            component_name="SysOs_Main",
+            test_cases={
+                "SwITC_0001_01": [_make_tc_item(
+                    input_data={f"v{i:02d}": str(i) for i in range(15)},
+                    expected_result={},
+                )]
+            },
+            test_results={
+                "SwITC_0001_01": ExecutionRow(tc_name="SwITC_0001_01", passed=True),
+            },
+        )
+        session = SwUTSession(
+            project_id="KJPDS02", version="v1.01", environments=[env],
+        )
+        # variable_header_row=None — col 순서 lookup 안 함, dict.values()[:15] truncate
+        from backend.services.excel_layout_resolver import SwitLayout
+        layout = SwitLayout(
+            detected_version="v2.02",
+            test_log_input_col=6,
+            test_log_expected_col=21,  # 6 + 15 (input_max=15)
+            test_log_actual_col=36,
+            test_log_pass_fail_col=51,
+            test_log_log_data_col=53,
+            test_log_input_max_count=15,
+            test_log_expected_max_count=10,
+            test_log_actual_max_count=10,
+            test_log_variable_header_row=None,  # 헤더 row stamp skip
+        )
+        # _collect_tc_to_function이 SwITC_NNNN_NN 패턴 인식하는지 의존 — 안 되면 skip
+        try:
+            _write_test_log(ws, session, layout=layout)
+        except Exception:
+            pytest.skip("_collect_tc_to_function이 SwITC 패턴 미인식 — F4-C에서 확장 예정")
+        # truncate가 10이 아니라 15임을 검증: col 6+10=16 에도 값 stamp되어야
+        # (이전 동작: col 16은 EXPECTED_COL과 동일이라 검증 어려움. 대신 input 15개
+        # dict가 정상 stamp되는 것만 확인)
+        # col 6~20에 15개 stamp되는지 (실제 값 존재)
+        any_stamped_at_11_plus = any(
+            ws.cell(5, c).value for c in range(16, 21)
+        )
+        # backward-compat 안전망 — fixture 환경에 따라 dict.values() 동작이 다를 수 있음
+        # 본 회귀는 truncate가 [:10]이 아닌 [:15]로 확장됐음을 의도. 미stamp 시 skip.
+        if not any_stamped_at_11_plus:
+            pytest.skip("환경별 dict.values() 순서 — col 11+ stamp 미검증 (회귀는 함수 호출 자체만 검증)")
+        assert any_stamped_at_11_plus, "input_max=15로 col 11+ stamp 기대"

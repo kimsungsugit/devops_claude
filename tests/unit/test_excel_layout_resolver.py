@@ -525,3 +525,148 @@ class TestInspectSitrColumnDetection:
         assert layout.test_log_input_col is None
         assert layout.test_log_expected_col is None
         assert layout.test_log_actual_col is None
+
+
+# ---------------------------------------------------------------------------
+# 59차 F4-A — 변수명 헤더 row + Input/Expected/Actual block max counts
+# ---------------------------------------------------------------------------
+
+
+class TestScanTestLogVariableHeaderRow:
+    """`_scan_test_log_variable_header_row` — input_col~expected_col 범위에서
+    영문 식별자 또는 Inpt[N] 3+ 연속 row 자동 감지 (KJPDS02 v1.01 = row 5).
+    """
+
+    def test_scan_variable_header_v101_kjpds02_row_5(self):
+        """KJPDS02 v1.01 양식 mimicry — row 5 col 10~ 에 영문 변수 식별자 3+."""
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.cell(5, 10).value = "u16g_SysDiag_SystemStatus"
+        ws.cell(5, 11).value = "u8g_SysEepromCtrl_InLineMod_F"
+        ws.cell(5, 12).value = "u16g_SysEepromCtrl_OpLimitVehi"
+        ws.cell(5, 13).value = "s_System_I"
+        # input_col=10, expected_col=20 → 10~19 scan
+        header_row = elr._scan_test_log_variable_header_row(
+            ws, input_col=10, expected_col=20,
+        )
+        assert header_row == 5
+
+    def test_scan_variable_header_inpt_label_pattern(self):
+        """`Inpt[0]`, `Inpt[1]`, ... 패턴도 헤더 row로 인식."""
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.cell(4, 6).value = "Inpt[0]"
+        ws.cell(4, 7).value = "Inpt[1]"
+        ws.cell(4, 8).value = "Inpt[2]"
+        ws.cell(4, 9).value = "Inpt[3]"
+        header_row = elr._scan_test_log_variable_header_row(
+            ws, input_col=6, expected_col=16,
+        )
+        assert header_row == 4
+
+    def test_scan_variable_header_returns_none_when_no_match(self):
+        """영문 식별자 0개 → None (변수명 헤더 stamp skip)."""
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.cell(3, 6).value = "한글헤더"
+        ws.cell(3, 7).value = "공백 들어간 라벨"
+        ws.cell(3, 8).value = "12-34"
+        header_row = elr._scan_test_log_variable_header_row(
+            ws, input_col=6, expected_col=16,
+        )
+        assert header_row is None
+
+    def test_scan_variable_header_handles_none_input_col(self):
+        """input_col=None (column 자동 감지 실패) → None graceful."""
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.cell(5, 10).value = "u16g_var"
+        header_row = elr._scan_test_log_variable_header_row(
+            ws, input_col=None, expected_col=None,
+        )
+        assert header_row is None
+
+
+class TestScanTestLogMaxCounts:
+    """`_scan_test_log_max_counts` — 인접 col 차이로 block 크기 산출."""
+
+    def test_max_counts_v101_kjpds02(self):
+        """KJPDS02 v1.01: input=10, expected=20, actual=30, pass_fail=42 →
+        max_counts = (10, 10, 12)."""
+        cols = {
+            "input_col": 10, "expected_col": 20, "actual_col": 30,
+            "pass_fail_col": 42, "pass_fail_total_col": None, "log_data_col": None,
+        }
+        result = elr._scan_test_log_max_counts(cols)
+        assert result["input_max_count"] == 10
+        assert result["expected_max_count"] == 10
+        assert result["actual_max_count"] == 12
+
+    def test_max_counts_all_none_uses_default(self):
+        """모든 col None → default 10."""
+        cols = {
+            "input_col": None, "expected_col": None, "actual_col": None,
+            "pass_fail_col": None, "pass_fail_total_col": None, "log_data_col": None,
+        }
+        result = elr._scan_test_log_max_counts(cols)
+        assert result["input_max_count"] == 10
+        assert result["expected_max_count"] == 10
+        assert result["actual_max_count"] == 10
+
+    def test_max_counts_uses_ws_max_col_for_actual(self):
+        """pass_fail_col 부재 시 ws_max_col로 actual_max 산출."""
+        cols = {
+            "input_col": 6, "expected_col": 16, "actual_col": 26,
+            "pass_fail_col": None, "pass_fail_total_col": None, "log_data_col": None,
+        }
+        result = elr._scan_test_log_max_counts(cols, ws_max_col=50)
+        assert result["input_max_count"] == 10
+        assert result["expected_max_count"] == 10
+        # ws_max_col=50, actual_col=26 → diff = 50+1-26 = 25
+        assert result["actual_max_count"] == 25
+
+
+class TestInspectSitrV4AStepLayout:
+    """`_inspect_internal` SITR 분기에서 test_log_step_layout 결정."""
+
+    def test_v202_tc_row_step_gt_1_step_in_rows(self):
+        """v2.02 양식 SwUTC_/SwITC_ prefix 2개 row 차이로 tc_row_step=6 →
+        test_log_step_layout='step_in_rows'."""
+        template = _make_xlsx({
+            "Cover": [["Project"]],
+            "1.Test Summary": [["SW Version"]],
+            "Test Log": [
+                ["Test Case ID", None, None, None, None, "Input"]
+                + [None] * 9
+                + ["Expected Result"]
+                + [None] * 9
+                + ["Actual Result"]
+                + [None] * 9
+                + ["Pass/Fail", None, "Log Data"],
+                # row 2: SwUTC_0001 (1번째 TC)
+                [None, "SwUTC_0001"],
+                # row 3~7: sub-rows (5개)
+                [None, None], [None, None], [None, None], [None, None], [None, None],
+                # row 8: SwUTC_0002 (2번째 TC) — 차이 6
+                [None, "SwUTC_0002"],
+            ],
+            "Deviation": [["Test Case ID"]],
+        })
+        layout = elr.inspect_swit_layout(template, "sitr")
+        assert layout.test_log_tc_row_step == 6
+        assert layout.test_log_step_layout == "step_in_rows"
+
+    def test_v301_tc_row_step_1_single_row(self):
+        """v3.01 hardcode default — tc_row_step=1 → 'single_row'."""
+        template = _make_xlsx({
+            "Cover": [["Project"]],
+            "1.Test Summary": [["Release Name(SW)"]],
+            "Test Log": [
+                ["Test Case ID"],
+                [None, "SwUTC_0001"],
+                [None, "SwUTC_0002"],  # 차이 1
+            ],
+        })
+        layout = elr.inspect_swit_layout(template, "sitr")
+        assert layout.test_log_tc_row_step == 1
+        assert layout.test_log_step_layout == "single_row"

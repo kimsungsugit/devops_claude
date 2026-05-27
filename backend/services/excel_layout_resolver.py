@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import re
 import threading
 from dataclasses import dataclass, field
 from typing import Literal, Optional
@@ -129,6 +130,22 @@ class SwitLayout:
     test_log_log_data_col: Optional[int] = None
     # 58차 F2 — Coverage 1.Traceability 시트 헤더 row 위치
     traceability_header_row: Optional[int] = None
+    # 59차 F4-A — Test Log 변수명 헤더 row (KJPDS02 v1.01 = row 5).
+    # 매 row col block에 input/expected/actual 변수명을 stamp하는 row 위치.
+    # None이면 양식이 변수명 헤더를 요구하지 않음 — v2.02/v3.01 기본 동작 유지 (skip).
+    test_log_variable_header_row: Optional[int] = None
+    # 59차 F4-A — Input/Expected/Actual 각 column block 최대 변수 수.
+    # _write_test_log truncate [:10] 대신 layout 기반 동적 사용. _scan_test_log_max_counts
+    # 가 expected_col - input_col 등으로 산출. v3.01 기본 10. KJPDS02 v1.01은 양식
+    # max_col=378 으로 ~80~100 변수 stamp 가능.
+    test_log_input_max_count: int = 10
+    test_log_expected_max_count: int = 10
+    test_log_actual_max_count: int = 10
+    # 59차 F4-A — Test Log step 배치 형태.
+    # "step_in_rows": v2.02/v1.01 양식 — TC당 N row 분배 (tc_row_step > 1)
+    # "single_row":   v3.01 양식 — TC당 1 row (tc_row_step == 1)
+    # _inspect_internal에서 tc_row_step 값에 따라 자동 결정.
+    test_log_step_layout: str = "single_row"
     warnings: list[str] = field(default_factory=list)
 
 
@@ -327,7 +344,9 @@ def _scan_test_log_columns(ws) -> dict[str, Optional[int]]:
     if ws is None:
         return result
     max_row = min(ws.max_row + 1, 12) if ws.max_row else 12
-    max_col = min(ws.max_column + 1, 50) if ws.max_column else 50
+    # 59차 F4-A — KJPDS02 v1.01 양식 max_col=378 호환. v2.02/v3.01 양식의 라벨은
+    # col 50 안에 있지만 v1.01은 더 넓은 범위 가능 — 500 확장 (수십 ms 비용).
+    max_col = min(ws.max_column + 1, 500) if ws.max_column else 500
     for r in range(1, max_row):
         for c in range(1, max_col):
             v = ws.cell(r, c).value
@@ -362,6 +381,116 @@ def _scan_test_log_columns(ws) -> dict[str, Optional[int]]:
             ):
                 result["log_data_col"] = c
     return result
+
+
+# 59차 F4-A — 변수명 헤더 row 감지용 regex.
+# 일반 영문 변수 식별자 (예: u16g_SysDiag_SystemStatus, s_System_I) 또는
+# 양식 라벨 패턴 (예: Inpt[0], Inpt[1], ...).
+_VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.]*$")
+_INPT_LABEL_RE = re.compile(r"^Inpt\[\d+\]$")
+
+
+def _scan_test_log_variable_header_row(
+    ws,
+    *,
+    input_col: Optional[int],
+    expected_col: Optional[int],
+    max_row_limit: int = 16,
+) -> Optional[int]:
+    """59차 F4-A — Test Log 변수명 헤더 row 자동 감지.
+
+    KJPDS02 v1.01 양식은 row 5의 col 10~ 영역에
+    ``u16g_SysDiag_SystemStatus``, ``u8g_SysEepromCtrl_InLineMod_F``, ...
+    같은 변수명을 stamp한다. _write_test_log가 이 row에 환경별 input/expected/
+    actual 변수의 합집합 + sorted 결과를 stamp하려면 row 위치가 필요.
+
+    헤더 row 정의: ``input_col`` ~ ``expected_col-1`` 범위에서 영문 식별자
+    (``_VAR_NAME_RE``) 또는 ``Inpt[N]`` 패턴(``_INPT_LABEL_RE``)이 3개 이상
+    연속 발견되는 row.
+
+    Args:
+        ws: openpyxl worksheet (Test Log 시트).
+        input_col: ``_scan_test_log_columns`` 결과 input_col (None이면 scan skip).
+        expected_col: 동일. 없으면 ``input_col + 30`` 까지 scan.
+        max_row_limit: 헤더 스캔 최대 row (default 16 — KJPDS02 row 5 / v2.02
+            row 4~5 / 여유분 포함).
+
+    Returns:
+        헤더 row (1-indexed) 또는 None (미발견). None일 때 _write_test_log는
+        변수명 헤더 stamp skip (backward-compat v2.02/v3.01 동작 유지).
+    """
+    if ws is None or input_col is None:
+        return None
+    end_col = expected_col if expected_col else input_col + 30
+    if end_col <= input_col:
+        return None
+    max_row_attr = getattr(ws, "max_row", 0) or 0
+    max_row = min(max_row_attr + 1, max_row_limit) if max_row_attr else max_row_limit
+    for r in range(1, max_row):
+        match_count = 0
+        for c in range(input_col, end_col):
+            v = ws.cell(r, c).value
+            if not isinstance(v, str):
+                continue
+            s = v.strip()
+            if not s:
+                continue
+            if _VAR_NAME_RE.match(s) or _INPT_LABEL_RE.match(s):
+                match_count += 1
+                if match_count >= 3:
+                    return r
+    return None
+
+
+def _scan_test_log_max_counts(
+    cols: dict[str, Optional[int]],
+    *,
+    ws_max_col: int = 0,
+) -> dict[str, int]:
+    """59차 F4-A — Test Log Input/Expected/Actual 각 column block 최대 변수 수 산출.
+
+    ``_scan_test_log_columns`` 결과로 input_col / expected_col / actual_col /
+    pass_fail_col 위치를 받아, 인접 col 차이로 block 크기를 결정한다.
+
+    block 종단:
+        - input_max  = expected_col - input_col
+        - expected_max = actual_col - expected_col
+        - actual_max = pass_fail_col - actual_col (없으면 ws_max_col - actual_col,
+          그도 없으면 default 10)
+
+    Args:
+        cols: ``_scan_test_log_columns`` 반환 dict.
+        ws_max_col: ws.max_column — pass_fail_col 부재 시 fallback. 0 또는
+            음수면 default 10.
+
+    Returns:
+        ``{"input_max_count": int, "expected_max_count": int, "actual_max_count": int}``
+        — 모든 값 ``max(1, diff)`` 보장. 미산출 시 default 10 유지 (backward-compat).
+    """
+    input_col = cols.get("input_col")
+    expected_col = cols.get("expected_col")
+    actual_col = cols.get("actual_col")
+    pass_fail_col = cols.get("pass_fail_col")
+
+    def _safe_diff(a: Optional[int], b: Optional[int], default: int = 10) -> int:
+        if a is None or b is None:
+            return default
+        diff = b - a
+        return max(1, diff)
+
+    actual_end: Optional[int]
+    if pass_fail_col is not None:
+        actual_end = pass_fail_col
+    elif ws_max_col > 0 and actual_col is not None and ws_max_col > actual_col:
+        actual_end = ws_max_col + 1
+    else:
+        actual_end = None
+
+    return {
+        "input_max_count": _safe_diff(input_col, expected_col, 10),
+        "expected_max_count": _safe_diff(expected_col, actual_col, 10),
+        "actual_max_count": _safe_diff(actual_col, actual_end, 10),
+    }
 
 
 def _scan_traceability_header(ws) -> Optional[int]:
@@ -501,6 +630,12 @@ def _inspect_internal(
         test_log_pass_fail_col: Optional[int] = None
         test_log_pass_fail_total_col: Optional[int] = None
         test_log_log_data_col: Optional[int] = None
+        # 59차 F4-A — 변수명 헤더 row + Input/Expected/Actual 각 block max count.
+        test_log_variable_header_row: Optional[int] = None
+        test_log_input_max_count = 10
+        test_log_expected_max_count = 10
+        test_log_actual_max_count = 10
+        test_log_step_layout = "single_row"
         if kind == "sitr":
             log_ws = _find_sheet(wb, lambda n: "test log" in n.lower() or "test result" in n.lower())
             if log_ws is not None:
@@ -520,6 +655,21 @@ def _inspect_internal(
                 test_log_pass_fail_col = _cols.get("pass_fail_col")
                 test_log_pass_fail_total_col = _cols.get("pass_fail_total_col")
                 test_log_log_data_col = _cols.get("log_data_col")
+                # 59차 F4-A — 변수명 헤더 row + block max counts + step layout.
+                test_log_variable_header_row = _scan_test_log_variable_header_row(
+                    log_ws,
+                    input_col=test_log_input_col,
+                    expected_col=test_log_expected_col,
+                )
+                ws_max_col = getattr(log_ws, "max_column", 0) or 0
+                _max_counts = _scan_test_log_max_counts(_cols, ws_max_col=ws_max_col)
+                test_log_input_max_count = _max_counts["input_max_count"]
+                test_log_expected_max_count = _max_counts["expected_max_count"]
+                test_log_actual_max_count = _max_counts["actual_max_count"]
+                # tc_row_step > 1 → step_in_rows (v2.02 6 row 분배), else single_row (v3.01).
+                test_log_step_layout = (
+                    "step_in_rows" if test_log_tc_row_step > 1 else "single_row"
+                )
             dev_ws = _find_sheet(wb, lambda n: "deviation" in n.lower())
             if dev_ws is not None:
                 dev_header, _ = _scan_label_cell(
@@ -619,6 +769,12 @@ def _inspect_internal(
             test_log_log_data_col=test_log_log_data_col,
             # 58차 F2 — Coverage Traceability 헤더 row
             traceability_header_row=traceability_header_row,
+            # 59차 F4-A — Test Log 변수명 헤더 row + block max counts + step layout
+            test_log_variable_header_row=test_log_variable_header_row,
+            test_log_input_max_count=test_log_input_max_count,
+            test_log_expected_max_count=test_log_expected_max_count,
+            test_log_actual_max_count=test_log_actual_max_count,
+            test_log_step_layout=test_log_step_layout,
             warnings=warnings,
         )
     finally:

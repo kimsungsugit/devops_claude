@@ -295,6 +295,88 @@ def _write_deviation(ws, deviation_cases: list[Any], out_warnings: list[str] | N
     return written
 
 
+def _write_variable_name_header_row(
+    ws,
+    layout: Any,
+    session: SwUTSession,
+    *,
+    input_col: int,
+    expected_col: int,
+    actual_col: int,
+    input_max: int,
+    expected_max: int,
+    actual_max: int,
+    out_warnings: list[str] | None = None,
+) -> tuple[list[str], list[str], list[str]]:
+    """59차 F4-A — Test Log 변수명 헤더 row stamp + 환경 합집합 sorted list 반환.
+
+    KJPDS02 v1.01 양식은 row 5 col 10~ 에 변수명 (예: u16g_SysDiag_SystemStatus)
+    stamp 후 row 6~ 에 값. 우리 추출은 환경별 dict[변수명, 값] 보유 — env가 여러
+    개일 때 같은 변수가 일부 env에만 있을 수 있어 **전체 환경 합집합 + sorted**
+    를 헤더로 stamp하고 TC stamp는 그 col 순서대로 lookup.
+
+    Args:
+        ws: openpyxl worksheet.
+        layout: SwitLayout — test_log_variable_header_row None이면 skip.
+        session: SwUTSession — environments 순회.
+        input_col / expected_col / actual_col: column 시작 위치.
+        input_max / expected_max / actual_max: block 최대 stamp 수.
+        out_warnings: diag 누적용.
+
+    Returns:
+        (input_var_names, expected_var_names, actual_var_names) — sorted union list,
+        max_count 적용 후. empty 3-tuple이면 backward-compat (caller가 dict.values()
+        순서 사용).
+    """
+    if layout is None or getattr(layout, "test_log_variable_header_row", None) is None:
+        return [], [], []
+
+    header_row = layout.test_log_variable_header_row
+
+    input_keys: set[str] = set()
+    expected_keys: set[str] = set()
+    actual_keys: set[str] = set()
+
+    for env in session.environments:
+        # TestCaseItem.input_data / expected_result 추출 — env.test_cases는
+        # dict[str, List[TestCaseItem]] (TCBank.test_cases carry forward 패턴).
+        for tc_items in env.test_cases.values():
+            items = tc_items if isinstance(tc_items, list) else [tc_items]
+            for tc_item in items:
+                input_keys.update(getattr(tc_item, "input_data", {}) or {})
+                expected_keys.update(getattr(tc_item, "expected_result", {}) or {})
+        # ExecutionRow.actual_result (58차 F1 BeautifulSoup 추출) 우선
+        for exec_r in env.test_results.values():
+            actual_keys.update(getattr(exec_r, "actual_result", {}) or {})
+        # TestResultItem.actual_result (vcast_parser TestResultItem) fallback
+        for tr_items in getattr(env, "tc_result_items", {}).values():
+            items = tr_items if isinstance(tr_items, list) else [tr_items]
+            for tr_item in items:
+                actual_keys.update(getattr(tr_item, "actual_result", {}) or {})
+
+    input_list = sorted(input_keys)[: max(0, input_max)]
+    expected_list = sorted(expected_keys)[: max(0, expected_max)]
+    actual_list = sorted(actual_keys)[: max(0, actual_max)]
+
+    for i, name in enumerate(input_list):
+        safe_write(ws, header_row, input_col + i, name)
+    for i, name in enumerate(expected_list):
+        safe_write(ws, header_row, expected_col + i, name)
+    for i, name in enumerate(actual_list):
+        safe_write(ws, header_row, actual_col + i, name)
+
+    if out_warnings is not None:
+        msg = (
+            f"F4-A: 변수명 헤더 row {header_row} stamp — "
+            f"input/expected/actual = "
+            f"{len(input_list)}/{len(expected_list)}/{len(actual_list)} variables "
+            f"(union sorted, max {input_max}/{expected_max}/{actual_max})"
+        )
+        out_warnings.append(f"[diag] {msg}")
+
+    return input_list, expected_list, actual_list
+
+
 def _write_test_log(
     ws,
     session: SwUTSession,
@@ -422,6 +504,33 @@ def _write_test_log(
         PASS_FAIL_TOTAL_COL = 37  # AK
         LOG_DATA_COL = 38         # AL
 
+    # 59차 F4-A — block max counts (layout 기반 동적). layout None backward-compat 10.
+    input_max = (
+        getattr(layout, "test_log_input_max_count", 10) if layout is not None else 10
+    )
+    expected_max = (
+        getattr(layout, "test_log_expected_max_count", 10) if layout is not None else 10
+    )
+    actual_max = (
+        getattr(layout, "test_log_actual_max_count", 10) if layout is not None else 10
+    )
+
+    # 59차 F4-A — 변수명 헤더 row stamp + 환경 합집합 sorted list 산출.
+    # KJPDS02 v1.01 양식: row 5에 변수명 stamp 후 TC 값은 col 순서대로 lookup.
+    # layout.test_log_variable_header_row None이면 빈 list 반환 (v2.02/v3.01 동작).
+    input_var_list, expected_var_list, actual_var_list = _write_variable_name_header_row(
+        ws,
+        layout,
+        session,
+        input_col=INPUT_COL,
+        expected_col=EXPECTED_COL,
+        actual_col=ACTUAL_COL,
+        input_max=input_max,
+        expected_max=expected_max,
+        actual_max=actual_max,
+        out_warnings=out_warnings,
+    )
+
     written = 0
     for tc_name in sorted(tc_to_fn_id.keys()):
         r = start_row + (written * tc_row_step)
@@ -446,23 +555,36 @@ def _write_test_log(
                 if ws.cell(sub_r, 5).value is None:  # col 5 = E
                     safe_write(ws, sub_r, 5, sub_i)
 
-        # 57차 T319 fix — F~O / P~Y / Z~AI Param 값 추출 + stamp.
+        # 57차 T319 fix → 59차 F4-A 일반화 — Input/Expected/Actual stamp.
         # VectorCAST TestCaseItem (vcast_parser.py:179) 에 input_data / expected_result
         # / actual_result dict 보유. env.test_cases[tc_name] = List[TestCaseItem] —
-        # 첫 item 사용 (회사 양식 1 TC = 1 row block, 다른 variant는 sub-row 활용 또는 skip).
+        # 첫 item 사용. F4-A: input_var_list (합집합 sorted) 있으면 그 col 순서 lookup,
+        # 없으면 backward-compat dict.values()[:input_max].
         if env is not None:
             tc_items = env.test_cases.get(tc_name) or []
             tc_item = tc_items[0] if tc_items else None
             if tc_item is not None:
-                # Input Params 1~10 (10 cols)
-                input_vals = list(getattr(tc_item, "input_data", {}).values())[:10]
-                for pi, val in enumerate(input_vals):
-                    safe_write(ws, r, INPUT_COL + pi, str(val) if val else "")
-                # Expected Result Params 1~10
-                expected_vals = list(getattr(tc_item, "expected_result", {}).values())[:10]
-                for pi, val in enumerate(expected_vals):
-                    safe_write(ws, r, EXPECTED_COL + pi, str(val) if val else "")
-                # Actual Result Params 1~10
+                input_data = getattr(tc_item, "input_data", {}) or {}
+                expected_data = getattr(tc_item, "expected_result", {}) or {}
+                # Input Params — col 순서 lookup 또는 dict.values()
+                if input_var_list:
+                    for pi, var_name in enumerate(input_var_list):
+                        val = input_data.get(var_name, "")
+                        safe_write(ws, r, INPUT_COL + pi, str(val) if val else "")
+                else:
+                    input_vals = list(input_data.values())[:input_max]
+                    for pi, val in enumerate(input_vals):
+                        safe_write(ws, r, INPUT_COL + pi, str(val) if val else "")
+                # Expected Result Params
+                if expected_var_list:
+                    for pi, var_name in enumerate(expected_var_list):
+                        val = expected_data.get(var_name, "")
+                        safe_write(ws, r, EXPECTED_COL + pi, str(val) if val else "")
+                else:
+                    expected_vals = list(expected_data.values())[:expected_max]
+                    for pi, val in enumerate(expected_vals):
+                        safe_write(ws, r, EXPECTED_COL + pi, str(val) if val else "")
+                # Actual Result Params
                 # 58차 F1: ExecutionRow.actual_result 우선 (BeautifulSoup 추출),
                 # 57차 T321 fallback: env.tc_result_items (vcast_parser TestResultItem).
                 # actual_result: Dict[str, Tuple[str, str]] — (actual_val, expected_val) tuple.
@@ -476,12 +598,21 @@ def _write_test_log(
                     if tr_item is not None:
                         actual_dict = getattr(tr_item, "actual_result", {}) or {}
                 if actual_dict:
-                    actual_vals = [
-                        t[0] if isinstance(t, tuple) and t else (str(t) if t else "")
-                        for t in list(actual_dict.values())[:10]
-                    ]
-                    for pi, val in enumerate(actual_vals):
-                        safe_write(ws, r, ACTUAL_COL + pi, str(val) if val else "")
+                    if actual_var_list:
+                        for pi, var_name in enumerate(actual_var_list):
+                            t = actual_dict.get(var_name, "")
+                            val = (
+                                t[0] if isinstance(t, tuple) and t
+                                else (str(t) if t else "")
+                            )
+                            safe_write(ws, r, ACTUAL_COL + pi, str(val) if val else "")
+                    else:
+                        actual_vals = [
+                            t[0] if isinstance(t, tuple) and t else (str(t) if t else "")
+                            for t in list(actual_dict.values())[:actual_max]
+                        ]
+                        for pi, val in enumerate(actual_vals):
+                            safe_write(ws, r, ACTUAL_COL + pi, str(val) if val else "")
 
         # Pass/Fail stamp — Unit (필수) + Total (v3.01만, v2.02는 PASS_FAIL_TOTAL_COL=0이라 skip).
         safe_write(ws, r, PASS_FAIL_UNIT_COL, result_str)
