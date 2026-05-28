@@ -65,6 +65,17 @@ describe('SwITBuildSection', () => {
     expect(sitrInput.value).toBe('');
   });
 
+  it('renders Browse buttons for path fields (51차 template 분리 + 60차 F6-A/F6-C)', () => {
+    render(<SwITBuildSection />);
+    // 9개 path 필드 (log_folder / coverage_template_path / sitr_template_path /
+    //                swuds_docx_path / swuts_docx_path [60차 F6-B] /
+    //                hmr_html_path [60차 F6-C] / c_source_root + 2 path)
+    // F6 Round 7 NF7 fix: SwUT 회귀(SwUTBuildSection.test.jsx)와 대칭 — SwIT도
+    // 신규 path field 추가 시 Browse 카운트로 회귀 lock.
+    const browseButtons = screen.getAllByText(/📂 Browse/);
+    expect(browseButtons.length).toBe(9);
+  });
+
   it('default asil_level is "ASIL B" (SwIT Integration test convention)', () => {
     render(<SwITBuildSection />);
     const input = screen.getByLabelText(/ASIL Level/);

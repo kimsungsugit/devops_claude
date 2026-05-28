@@ -40,13 +40,24 @@ def categorize_warnings(warnings: list[str]) -> dict[str, int]:
 def format_breakdown_label(warnings: list[str]) -> str:
     """warning list → breakdown 라벨 string (sentinel 메시지에 포함).
 
+    F6 Round 7 NW11 fix: 라벨에 hierarchical 관계 명시. `ambiguous`는 `hmr`의
+    subset (`[hmr] ambiguous` startswith로 정의) — audit reviewer가 단순 합산
+    (1+2=3)으로 오해하지 않도록 라벨 앞에 `[ambiguous⊂hmr]` 힌트 prefix 부착.
+    카운트 0이면 hint 생략.
+
     Returns:
-        예) "ambiguous=5, hmr=6, swuts=3, other=2" — 0 카운트는 자동 제거.
-        모두 0이면 "uncategorized".
+        예) "[ambiguous⊂hmr] ambiguous=5, hmr=6, swuts=3, other=2"
+        — 0 카운트는 자동 제거. 모두 0이면 "uncategorized".
     """
     breakdown = categorize_warnings(warnings)
     parts = [f"{k}={v}" for k, v in breakdown.items() if v]
-    return ", ".join(parts) or "uncategorized"
+    if not parts:
+        return "uncategorized"
+    label = ", ".join(parts)
+    # ambiguous가 hmr의 subset임을 명시 (둘 다 카운트 > 0일 때만 hint)
+    if breakdown["ambiguous"] > 0 and breakdown["hmr"] > 0:
+        return f"[ambiguous⊂hmr] {label}"
+    return label
 
 
 __all__ = [

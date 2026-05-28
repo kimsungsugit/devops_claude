@@ -75,3 +75,24 @@ class TestFormatBreakdownLabel:
     def test_known_prefixes_constant(self):
         """NF3 단일 출처 — KNOWN_WARNING_PREFIXES tuple."""
         assert KNOWN_WARNING_PREFIXES == ("[hmr]", "[swuts]", "[layout]")
+
+    def test_hierarchical_hint_when_ambiguous_and_hmr_both_present_round7_nw11(self):
+        """Round 7 NW11 fix: ambiguous + hmr 둘 다 > 0 시 hint prefix 부착.
+
+        audit reviewer가 'ambiguous=5, hmr=6'을 단순 합산 (11)으로 오해하지 않도록
+        ambiguous가 hmr의 subset임을 라벨에 명시 (`[ambiguous⊂hmr]`).
+        """
+        warnings = ["[hmr] ambiguous func"] * 5 + ["[hmr] stamped"] * 1
+        label = format_breakdown_label(warnings)
+        assert label.startswith("[ambiguous⊂hmr]"), f"NW11 hint 누락: {label}"
+        assert "ambiguous=5" in label
+        assert "hmr=6" in label
+
+    def test_no_hint_when_only_hmr_no_ambiguous_round7_nw11(self):
+        """ambiguous=0이면 hint 부착 안 함 (라벨 noise 회피)."""
+        warnings = ["[hmr] Function Calls metric stamped — 5/10"]
+        label = format_breakdown_label(warnings)
+        assert not label.startswith("[ambiguous⊂hmr]"), (
+            f"ambiguous 0 시 hint 부착 안 됨: {label}"
+        )
+        assert "hmr=1" in label
