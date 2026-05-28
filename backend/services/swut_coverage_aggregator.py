@@ -902,19 +902,99 @@ def _write_traceability_sheet(
         else "swufn_x_env"
     )
     if matrix_kind == "switc_x_swst":
-        if out_warnings is not None:
-            # 라운드 F7 D2 갱신: 회사 표준 SwITCV (★개발템플릿 V3)는 SwITC×SwST
-            # matrix 실재 (2.Traceability R11 SwST_01~SwSTR_NN header + R13~ SwITC row).
-            # F4-C에서 "양식 부재" 잘못 판단했던 것을 정정. matrix stamp 미구현 —
-            # T705 별도 라운드에서 구현 (SwITS spec parser와 통합 필요).
-            ws_title = getattr(ws, "title", "Traceability")
-            out_warnings.append(
-                f"{ws_title} matrix kind 'switc_x_swst' (회사 표준 SwITCV / "
-                "KJPDS02 v1.01) — SwITC×SwST matrix 실재하나 stamp 미구현 "
-                "(T705 별도 라운드). 현재 stamp skip — audit reviewer manual "
-                "확인 의무."
+        # 라운드 F7 stage 8 T705 부분 구현: SwITCV 2.Traceability 양식 default
+        # SwITC row + 'O' 마킹 clear (false audit 차단) + 신규 session의 SwITC TC
+        # 를 row stamp + count='1'. SwST × SwITC 'O' stamp는 SwITS spec 미제공
+        # → skip + 명확한 warning (사용자에게 "T705 partial — SwST 매핑 부재" 안내).
+        ws_title = getattr(ws, "title", "Traceability").strip()
+
+        # 1) header row 찾기 — R11 SwST_01~SwSTR_NN header
+        header_row_idx = None
+        for row in ws.iter_rows(min_row=1, max_row=20, values_only=False):
+            swst_cols = sum(
+                1 for c in row
+                if isinstance(c.value, str)
+                and (str(c.value).strip().startswith(("SwST_", "SwSTR_")))
             )
-        return 0
+            if swst_cols >= 3:
+                header_row_idx = row[0].row
+                break
+        if header_row_idx is None:
+            if out_warnings is not None:
+                out_warnings.append(
+                    f"{ws_title} switc_x_swst header (SwST_/SwSTR_) 미발견 — skip"
+                )
+            return 0
+
+        # 2) data start = header + 2 (R12 count + R13~ SwITC row)
+        data_start = header_row_idx + 2
+        # session에서 unique SwITC ID 추출
+        tc_to_fn = _collect_tc_to_function(session)
+        # SwITC TC name 패턴 'SwITC_NN' 또는 'SwITC_SwUFn_NNNN.NNN' → SwITC ID prefix 추출
+        import re as _re
+        # 패턴 우선순위 (F7 stage 8 T705):
+        # 1) SwITC_NN / SwITC_NN_NN (KJPDS02 회사 표준)
+        # 2) SwITC_SwUFn_NNNN.NNN (VectorCAST SwIT — SwUFn 부분 NNNN 추출 → SwITC_NNNN)
+        # 3) SwUFn_NNNN.NNN (SwUT session — SwITC_NNNN 변환, F6-A 패턴)
+        _SWITC_DIRECT = _re.compile(r"^(SwITC_\d+(?:_\d+)?)$")
+        _SWITC_WITH_FN = _re.compile(r"^SwITC_SwUFn_(\d+)")
+        _SWUFN_ONLY = _re.compile(r"^SwUFn_(\d+)")
+        switc_ids: list[str] = []
+        seen: set[str] = set()
+        for tc_name in tc_to_fn.keys():
+            # SwITC_NN_NN 형식 sub-index 제거 후 prefix만 — 'SwITC_05_01' / 'SwITC_05_02'
+            # 같은 sub TC는 'SwITC_05' 1건으로 통합
+            sid = None
+            m = _re.match(r"^(SwITC_\d+)", tc_name)
+            if m:
+                sid = m.group(1)
+            else:
+                fm = _SWITC_WITH_FN.match(tc_name)
+                if fm:
+                    sid = f"SwITC_{fm.group(1)}"
+                else:
+                    um = _SWUFN_ONLY.match(tc_name)
+                    if um:
+                        sid = f"SwITC_{um.group(1)}"
+            if sid and sid not in seen:
+                seen.add(sid)
+                switc_ids.append(sid)
+        switc_ids.sort()
+
+        # 3) 양식 default clear (data_start ~ max_row, col 1~5: No/ID/Count + O 마킹 일부)
+        try:
+            from backend.services.excel_template_utils import clear_data_range
+            cleared = clear_data_range(
+                ws,
+                start_row=data_start, end_row=ws.max_row,
+                start_col=1, end_col=ws.max_column or 50,
+                preserve_formula=True, preserve_merged_anchor=True,
+                sentinel_patterns=["End of Document", "Appendix", "TOTALS"],
+            )
+            if out_warnings is not None and cleared > 0:
+                out_warnings.append(
+                    f"[clear] {ws_title} (SwITC×SwST matrix) 양식 default "
+                    f"{cleared} cell clear — 신규 session SwITC {len(switc_ids)}건 stamp"
+                )
+        except ImportError:
+            pass
+
+        # 4) 신규 session의 SwITC row stamp (C2=No, C3=ID, C4=Count)
+        # 회사 표준 SwITCV R13~: C2='SwITC_01' (ID), C3='3' (count)
+        for i, sid in enumerate(switc_ids):
+            r = data_start + i
+            safe_write(ws, r, 1, i + 1)        # No
+            safe_write(ws, r, 2, sid)          # SwITC ID
+            safe_write(ws, r, 3, 1)            # Count (각 SwITC당 1)
+
+        if out_warnings is not None:
+            out_warnings.append(
+                f"{ws_title} matrix kind 'switc_x_swst' partial stamp — SwITC "
+                f"{len(switc_ids)}건 row stamp. SwST × SwITC 'O' 마킹은 SwITS "
+                "spec 미제공으로 skip (T705 full — SwITS xlsm parser 통합 필요). "
+                "audit reviewer는 SwST 매핑 manual 확인 의무."
+            )
+        return len(switc_ids)
 
     # 58차 F2: layout 제공 시 traceability_header_row 강제. fallback은 자동 탐색.
     header_row_idx = None

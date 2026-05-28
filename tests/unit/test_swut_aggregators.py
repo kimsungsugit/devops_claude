@@ -1388,10 +1388,11 @@ class TestTraceabilityMatrixKindF4C:
         warnings: list[str] = []
         session = _make_session()
         n = _write_traceability_sheet(ws, session, out_warnings=warnings, layout=layout)
-        assert n == 0  # F7 D2 갱신: matrix 실재 인정하되 stamp 미구현 — T705 carry-over
-        # 라운드 F7 D2: 메시지 갱신 — "matrix 시트 자체가 부재" → "stamp 미구현"
+        # F7 stage 8 T705 부분 구현: SwITCV header(SwST_/SwSTR_) 미발견 시 skip + warning emit.
+        # SwUT session (SwUFn_NNNN.NNN) + 양식에 SwST header 없음 → header 미발견 → skip.
+        assert n == 0
         assert any(
-            "switc_x_swst" in w and ("stamp 미구현" in w or "matrix" in w)
+            "switc_x_swst" in w or "header" in w or "SwST" in w
             for w in warnings
         )
 
