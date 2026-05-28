@@ -336,10 +336,11 @@ describe('SwUTBuildSection', () => {
 
   it('renders Browse buttons for path fields (21차 + 30차 W21 + 51차 template 분리)', () => {
     render(<SwUTBuildSection />);
-    // 7개 path 필드 (log_folder / coverage_template_path [51차] / sutr_template_path [51차] /
-    //                swuds_docx_path / c_source_root [30차] / coverage_path / sutr_path)
+    // 9개 path 필드 (log_folder / coverage_template_path [51차] / sutr_template_path [51차] /
+    //                swuds_docx_path / swuts_docx_path [60차 F6-A] / hmr_html_path [60차 F6-C] /
+    //                c_source_root [30차] / coverage_path / sutr_path)
     const browseButtons = screen.getAllByText(/📂 Browse/);
-    expect(browseButtons.length).toBe(7);
+    expect(browseButtons.length).toBe(9);
   });
 
   it('renders reviewer/approver/validation_date input fields (26차 W16)', () => {
