@@ -1189,7 +1189,7 @@ def build_coverage_report(
         n_o = _write_traceability_sheet(trace_ws, session, out_warnings=warnings, layout=layout)
         summary["traceability_o_cells"] = n_o
         if n_o == 0:
-            incomplete_sheets.append(trace_ws.title)
+            incomplete_sheets.append(trace_ws.title.strip())
 
     # 2.Consistency — 15차: SwUTS 자체 일관성 4 row + 16차: SwUDS↔SwUTS 매핑 row (옵션).
     cons_ws = next((wb[n] for n in sheet_names if "consistency" in n.lower()), None)
@@ -1206,7 +1206,9 @@ def build_coverage_report(
         else:
             summary["consistency_swuds_compared"] = False
             # 라운드 F7 D1 fix: ws.title 사용 (회사 표준 '3.Consistency')
-            incomplete_sheets.append(f"{cons_ws.title} (SwUDS 비교 partial — v3.02)")
+            incomplete_sheets.append(
+                f"{cons_ws.title.strip()} (SwUDS 비교 partial — v3.02)"
+            )
     else:
         warnings.append("Consistency 시트 미발견")
         incomplete_sheets.append("Consistency")

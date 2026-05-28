@@ -592,3 +592,32 @@ class TestClearDataRange:
             ws, start_row=10, end_row=5, start_col=1, end_col=4,
         )
         assert cleared == 0
+
+    def test_sentinel_patterns_preserves_end_marker_round_f7_r1(self):
+        """F7 자체평가 R1 C1/C3 fix: sentinel_patterns 발견 시 그 row 직전까지 clear.
+        양식 끝 마커 ('< End of Document >', '■ Appendix') 보존."""
+        ws = self._make_ws()
+        # R8 C2에 sentinel 추가
+        ws.cell(8, 2).value = "< End of Document >"
+        cleared = clear_data_range(
+            ws, start_row=5, end_row=10, start_col=1, end_col=4,
+            sentinel_patterns=["End of Document", "Appendix"],
+        )
+        # R5~R7만 clear (R8~ sentinel 보존)
+        # R5/R6/R7 × C1~C4 = 12개 cell
+        assert cleared == 12
+        # sentinel row R8 보존
+        assert ws.cell(8, 2).value == "< End of Document >"
+        # R9/R10 보존 (sentinel 뒤)
+        assert ws.cell(9, 1).value == "default_R9C1"
+        assert ws.cell(10, 4).value == "default_R10C4"
+
+    def test_sentinel_patterns_no_match_clears_all(self):
+        """sentinel 미발견 → 전체 clear."""
+        ws = self._make_ws()
+        cleared = clear_data_range(
+            ws, start_row=5, end_row=10, start_col=1, end_col=4,
+            sentinel_patterns=["nonexistent_sentinel"],
+        )
+        # 전체 24 cell clear
+        assert cleared == 24

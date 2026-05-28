@@ -274,7 +274,7 @@ def build_swit_coverage_report(
         n_o = _write_traceability_sheet(trace_ws, session, out_warnings=warnings, layout=layout)
         summary["traceability_o_cells"] = n_o
         if n_o == 0:
-            incomplete_sheets.append(trace_ws.title)
+            incomplete_sheets.append(trace_ws.title.strip())
 
     # 2.Consistency — 34차 C2 fix: test_kind="SwIT" (intro/row 5 item 라벨 치환)
     cons_ws = next((wb[n] for n in sheet_names if "consistency" in n.lower()), None)
@@ -290,7 +290,9 @@ def build_swit_coverage_report(
             summary["consistency_swuds_compared"] = True
         else:
             summary["consistency_swuds_compared"] = False
-            incomplete_sheets.append(f"{cons_ws.title} (SwUDS 비교 partial)")
+            incomplete_sheets.append(
+                f"{cons_ws.title.strip()} (SwUDS 비교 partial)"
+            )
     else:
         warnings.append("Consistency 시트 미발견")
         incomplete_sheets.append("Consistency")

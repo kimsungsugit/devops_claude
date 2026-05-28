@@ -769,8 +769,12 @@ def _inspect_internal(
                                 swufn_count += 1
                 except (AttributeError, ValueError):
                     pass
-                # SwST 5건 이상 + SwUFn 비례 적으면 SwITC×SwST matrix
-                if swst_count >= 5 and swst_count > swufn_count:
+                # F7 자체평가 R1 W4 fix: 임계값 보강 — SwST 3건 이상 또는 SwST 1건+ +
+                # SwUFn 0건이면 switc_x_swst. 회사 표준 SwITCV (14 SwST/SwSTR) +
+                # MVP/소규모 SwITCV (3 SwST) + Edge case (SwST 1건 + SwUFn 0건) 대응.
+                if (swst_count >= 3 and swst_count > swufn_count) or (
+                    swst_count > 0 and swufn_count == 0
+                ):
                     traceability_matrix_kind_v = "switc_x_swst"
         coverage_metric_kind_v: Literal["single", "function_and_calls"] = (
             "function_and_calls" if detected_version == "v1.01" else "single"
