@@ -523,33 +523,56 @@ def _write_coverage_sheet(
     # 30차 W21: 함수별 ASIL 매핑 + ASIL D 식별.
     function_asil_map: dict[str, str] = agg.get("function_asil_map") or {}
 
+    # F7 stage 8 T706 fix — SwITCV (회사 표준) layout 분기:
+    # layout.coverage_metric_kind == "function_and_calls" → SwIT 양식
+    #   회사 표준 SwITCV 4.Coverage R9 header: No(C2)/Component(C3)/Unit(C4-C5)/
+    #     Functions(C6 — 단일 'O'/'X' Pass)/Exception(C7)/Function Called(C8 Count, C9 Total, C10 Pass)
+    #   → Statement/Branch는 SwITCV에 없는 metric. Functions Pass + Function Calls만 stamp
+    # default → SwUT 양식 (Statement + Branch + 옵션 Function Calls)
+    is_swit_metric_layout = (
+        layout is not None
+        and getattr(layout, "coverage_metric_kind", "single") == "function_and_calls"
+        and has_component_col
+    )
+
     # 기존 데이터 행을 덮어쓴다 (template이 기존 sample 데이터 가질 수 있음).
-    # 머지셀 head-only 쓰기 — _safe_write 사용 (실패 시 silent skip).
     written = 0
     for i, fc in enumerate(function_rows):
         r = data_start + i
         safe_write(ws, r, no_col, i + 1)
         safe_write(ws, r, unit_id_col, fc.unit_id)
         safe_write(ws, r, unit_id_col + 1, fc.name)
-        safe_write(ws, r, stmt_count_col, fc.statement.total)
-        safe_write(ws, r, stmt_count_col + 1, fc.statement.covered)
-        safe_write(ws, r, stmt_count_col + 2, "O" if fc.statement.passed else "X")
-        safe_write(ws, r, branch_count_col, fc.branch.total)
-        safe_write(ws, r, branch_count_col + 1, fc.branch.covered)
-        safe_write(ws, r, branch_count_col + 2, "O" if fc.branch.passed else "X")
 
-        # 59차 F4-C — KJPDS02 v1.01 양식: Function Calls metric 별도 col stamp.
-        # layout.coverage_metric_kind == "function_and_calls" + fc.function_calls_coverage
-        # 채워진 경우만. v2.02/v3.01 → skip.
-        if (
-            layout is not None
-            and getattr(layout, "coverage_metric_kind", "single") == "function_and_calls"
-        ):
+        if is_swit_metric_layout:
+            # SwITCV — Functions Pass (C6) + Function Called metric (C8/C9/C10)
+            # Functions Pass: function 매핑 여부 — 신규 session에 unit_id 있으면 'O'
+            functions_pass_col = no_col + 4
+            fcalls_count_col = no_col + 6
+            safe_write(ws, r, functions_pass_col, "O")
             fcc = getattr(fc, "function_calls_coverage", None)
             if fcc is not None and fcc.total > 0:
-                safe_write(ws, r, 10, fcc.total)
-                safe_write(ws, r, 11, fcc.covered)
-                safe_write(ws, r, 12, "O" if fcc.passed else "X")
+                safe_write(ws, r, fcalls_count_col, fcc.covered)
+                safe_write(ws, r, fcalls_count_col + 1, fcc.total)
+                safe_write(ws, r, fcalls_count_col + 2, "O" if fcc.passed else "X")
+        else:
+            # SwUTCV / HDPDM01 — Statement + Branch metric
+            safe_write(ws, r, stmt_count_col, fc.statement.total)
+            safe_write(ws, r, stmt_count_col + 1, fc.statement.covered)
+            safe_write(ws, r, stmt_count_col + 2, "O" if fc.statement.passed else "X")
+            safe_write(ws, r, branch_count_col, fc.branch.total)
+            safe_write(ws, r, branch_count_col + 1, fc.branch.covered)
+            safe_write(ws, r, branch_count_col + 2, "O" if fc.branch.passed else "X")
+
+            # 59차 F4-C — KJPDS02 v1.01 양식 (HDPDM01과 별도): Function Calls metric col stamp.
+            if (
+                layout is not None
+                and getattr(layout, "coverage_metric_kind", "single") == "function_and_calls"
+            ):
+                fcc = getattr(fc, "function_calls_coverage", None)
+                if fcc is not None and fcc.total > 0:
+                    safe_write(ws, r, 10, fcc.total)
+                    safe_write(ws, r, 11, fcc.covered)
+                    safe_write(ws, r, 12, "O" if fcc.passed else "X")
 
         # 30차 W21 + 31차 W29: ASIL B/C/D 함수면 row의 핵심 컬럼 강조.
         # fc.unit_id 가 SwUFn_NNNN 패턴일 수 있고 또는 다른 ID. 둘 다 매칭 시도.
