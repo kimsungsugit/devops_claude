@@ -17,6 +17,8 @@ from workflow.uds_ai import (
     _validate_sections,
     _repair_missing_sections,
     _build_section_prompt,
+    _dynamic_max_retries,
+    _collect_function_set,
 )
 
 
@@ -258,3 +260,174 @@ class TestRepairMissingSections:
         user_content = json.loads(captured_messages[1]["content"])
         assert "already_generated" in user_content
         assert "overview" in user_content["already_generated"]
+
+
+class TestDynamicRetry:
+    """라운드 C T512: _dynamic_max_retries 회귀."""
+
+    def test_very_low_confidence_3_retries(self):
+        assert _dynamic_max_retries(0.0) == 3
+        assert _dynamic_max_retries(0.2) == 3
+        assert _dynamic_max_retries(0.29) == 3
+
+    def test_mid_confidence_2_retries(self):
+        assert _dynamic_max_retries(0.3) == 2
+        assert _dynamic_max_retries(0.5) == 2
+        assert _dynamic_max_retries(0.59) == 2
+
+    def test_high_confidence_1_retry(self):
+        assert _dynamic_max_retries(0.6) == 1
+        assert _dynamic_max_retries(0.79) == 1
+
+    def test_very_high_confidence_0_retries(self):
+        assert _dynamic_max_retries(0.8) == 0
+        assert _dynamic_max_retries(0.95) == 0
+        assert _dynamic_max_retries(1.0) == 0
+
+    def test_invalid_confidence_fallback_to_legacy_default(self):
+        """nonsense confidence → fallback 2 (legacy max_retries)."""
+        assert _dynamic_max_retries(None) == 2  # type: ignore[arg-type]
+        assert _dynamic_max_retries("abc") == 2  # type: ignore[arg-type]
+
+
+class TestCollectFunctionSet:
+    """라운드 C T502: _collect_function_set source_sections 추출."""
+
+    def test_empty_source_sections_returns_empty_frozenset(self):
+        result = _collect_function_set({})
+        assert result == frozenset()
+        assert isinstance(result, frozenset)
+
+    def test_extracts_function_call_patterns(self):
+        source_sections = {
+            "interfaces": "void main(void) { s_Init(); g_DataUpdate(arg); }",
+        }
+        result = _collect_function_set(source_sections)
+        # 3자리 이상 함수만 (정규식 \w{2,})
+        assert "main" in result
+        assert "s_Init" in result
+        assert "g_DataUpdate" in result
+
+    def test_ignores_non_string_values(self):
+        """source_sections에 None 또는 dict 값 있으면 graceful skip."""
+        source_sections = {
+            "interfaces": None,
+            "uds_frames": {"nested": "dict"},
+            "overview": "g_GoodFunc()",
+        }
+        result = _collect_function_set(source_sections)
+        # str 값만 처리 — g_GoodFunc 추출
+        assert "g_GoodFunc" in result
+
+
+class TestJudgeEscalation:
+    """라운드 C T512: call_judge JSON parse + verdict 회귀."""
+
+    def test_call_judge_valid_response(self):
+        """call_judge mock — agent_call이 valid JSON 반환 시 정확 parse."""
+        from workflow.ai import call_judge
+
+        with patch("workflow.ai.agent_call") as mock_agent:
+            mock_agent.return_value = {
+                "ok": True,
+                "output": '{"confidence": 0.85, "verdict": "trust", "rationale": "all checks passed"}',
+            }
+            result = call_judge(
+                cfg={},
+                payload={"overview": {}},
+                semantic_findings=[],
+                reviewer_decision={"decision": "accept", "reason": ""},
+                judge_prompt="judge prompt text",
+            )
+            assert result["verdict"] == "trust"
+            assert result["confidence"] == 0.85
+            assert "passed" in result["rationale"]
+
+    def test_call_judge_invalid_json_fallback(self):
+        """call_judge — invalid JSON 응답 시 fallback {retry, 0.5, parse_failed}."""
+        from workflow.ai import call_judge
+
+        with patch("workflow.ai.agent_call") as mock_agent:
+            mock_agent.return_value = {
+                "ok": True,
+                "output": "not a json at all",
+            }
+            result = call_judge(
+                cfg={}, payload={}, semantic_findings=[],
+                reviewer_decision={"decision": "reject", "reason": "x"},
+                judge_prompt="p",
+            )
+            assert result["verdict"] == "retry"
+            assert result["confidence"] == 0.5
+            assert "parse_failed" in result["rationale"]
+
+    def test_call_judge_invalid_verdict_fallback(self):
+        """verdict가 trust/retry/abort 아니면 fallback."""
+        from workflow.ai import call_judge
+
+        with patch("workflow.ai.agent_call") as mock_agent:
+            mock_agent.return_value = {
+                "ok": True,
+                "output": '{"confidence": 0.7, "verdict": "MAYBE", "rationale": "wat"}',
+            }
+            result = call_judge(
+                cfg={}, payload={}, semantic_findings=[],
+                reviewer_decision={"decision": "accept", "reason": ""},
+                judge_prompt="p",
+            )
+            assert result["verdict"] == "retry"
+            assert "parse_failed" in result["rationale"]
+
+    def test_call_judge_clamps_confidence_to_unit_interval(self):
+        """confidence > 1.0 또는 < 0.0 → clamp."""
+        from workflow.ai import call_judge
+
+        with patch("workflow.ai.agent_call") as mock_agent:
+            mock_agent.return_value = {
+                "ok": True,
+                "output": '{"confidence": 1.5, "verdict": "trust", "rationale": "x"}',
+            }
+            result = call_judge(
+                cfg={}, payload={}, semantic_findings=[],
+                reviewer_decision={"decision": "accept", "reason": ""},
+                judge_prompt="p",
+            )
+            assert result["confidence"] == 1.0
+
+    def test_call_judge_no_output_fallback(self):
+        """agent_call이 output 없을 시 fallback."""
+        from workflow.ai import call_judge
+
+        with patch("workflow.ai.agent_call") as mock_agent:
+            mock_agent.return_value = {"ok": False, "output": None, "reason": "run_mode_off"}
+            result = call_judge(
+                cfg={}, payload={}, semantic_findings=[],
+                reviewer_decision={"decision": "accept", "reason": ""},
+                judge_prompt="p",
+            )
+            assert result["verdict"] == "retry"
+            assert result["confidence"] == 0.5
+
+
+class TestQualityWarningsSemanticJudge:
+    """라운드 C T513: warning_categories에 [semantic]/[judge] prefix 통합 검증."""
+
+    def test_semantic_prefix_warning_categorized(self):
+        from backend.services.warning_categories import categorize_warnings
+        warnings = [
+            "[semantic] source_file: missing.c 미존재",
+            "[semantic] score=0.5 (passed=False)",
+            "[hmr] stamp",
+        ]
+        result = categorize_warnings(warnings)
+        assert result["semantic"] == 2
+        assert result["hmr"] == 1
+        assert result["other"] == 0
+
+    def test_judge_prefix_warning_categorized(self):
+        from backend.services.warning_categories import categorize_warnings
+        warnings = [
+            "[judge] verdict=retry, confidence=0.45",
+        ]
+        result = categorize_warnings(warnings)
+        assert result["judge"] == 1

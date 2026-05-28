@@ -7,9 +7,31 @@ import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from workflow.ai import agent_call, load_oai_config, load_oai_configs
+from workflow.ai import agent_call, call_judge, load_oai_config, load_oai_configs
+from workflow.llm_semantic_validator import SemanticReport, validate_evidence
 import config
 from utils.log import get_logger
+
+
+def _dynamic_max_retries(confidence: float) -> int:
+    """라운드 C T506: confidence 기반 동적 retry 횟수.
+
+    0.0-0.3 → 3 (저신뢰 — 더 많이 시도)
+    0.3-0.6 → 2 (기존 max_retries 하드코딩 유지)
+    0.6-0.8 → 1 (중신뢰 — 한 번만)
+    else (≥0.8) → 0 (고신뢰 — retry 없음)
+    """
+    try:
+        c = float(confidence)
+    except (TypeError, ValueError):
+        return 2  # fallback to legacy default
+    if c < 0.3:
+        return 3
+    if c < 0.6:
+        return 2
+    if c < 0.8:
+        return 1
+    return 0
 
 logger = get_logger(__name__)
 
@@ -463,6 +485,28 @@ def _parallel_sections(
     return out
 
 
+def _collect_function_set(source_sections: Dict[str, str]) -> "frozenset[str]":
+    """라운드 C T502: source_sections 텍스트에서 함수 호출 패턴 추출 (best-effort).
+
+    caller가 c_parser.parse_c_project 결과를 명시 전달하지 않을 때 fallback.
+    `\\b([a-zA-Z_]\\w{2,})\\s*\\(` 패턴 매칭 → frozenset 반환. 가짜 매칭(키워드/
+    typedef/매크로)은 llm_semantic_validator._check_function_match가 stdlib + C
+    keyword 필터링.
+
+    반환 frozenset이 비어있으면 semantic 검증 시 함수명 매칭 skip 효과.
+    """
+    if not source_sections:
+        return frozenset()
+    pattern = re.compile(r"\b([a-zA-Z_][a-zA-Z0-9_]{2,})\s*\(")
+    names: set[str] = set()
+    for _key, text in source_sections.items():
+        if not isinstance(text, str) or not text:
+            continue
+        for m in pattern.finditer(text):
+            names.add(m.group(1))
+    return frozenset(names)
+
+
 def generate_uds_ai_sections(
     *,
     requirements_text: str,
@@ -472,6 +516,8 @@ def generate_uds_ai_sections(
     example_text: str = "",
     detailed: bool = True,
     rag_snippets: Optional[List[Dict[str, Any]]] = None,
+    function_set: Optional["frozenset[str]"] = None,
+    file_resolver: Optional[Any] = None,
 ) -> Optional[Dict[str, Any]]:
     cfg = load_oai_config(None)
     if not cfg:
@@ -665,25 +711,120 @@ def generate_uds_ai_sections(
         analysis_payload=analysis_payload,
     )
 
+    # ─── 라운드 C T505: Stage 4 review loop 재작성 ───
+    # 기존 reviewer/auditor + 신규 semantic_validator + LLM-as-a-Judge +
+    # confidence-based dynamic retry. backward-compat: function_set/file_resolver
+    # None이면 semantic 검증 skip — 동작 동일 (confidence=base만 사용).
     review_prompt = _load_prompt("uds_reviewer")
-    review_messages = [
-        {"role": "system", "content": review_prompt},
-        {"role": "user", "content": json.dumps(raw, ensure_ascii=False, indent=2)},
-    ]
-    review_res = _call_role(cfg, role="reviewer", stage="uds_review", messages=review_messages, temperature=0.1)
-    review_reply = review_res.get("output") if isinstance(review_res, dict) else None
-    decision, reason = _parse_decision(review_reply)
-    if decision == "accept":
-        auditor_prompt = _load_prompt("uds_auditor")
-        audit_messages = [
-            {"role": "system", "content": auditor_prompt},
-            {"role": "user", "content": json.dumps(raw, ensure_ascii=False, indent=2)},
-        ]
-        audit_res = _call_role(cfg, role="auditor", stage="uds_audit", messages=audit_messages, temperature=0.1)
-        audit_reply = audit_res.get("output") if isinstance(audit_res, dict) else None
-        decision, reason = _parse_decision(audit_reply)
+    semantic_validation_enabled = bool(
+        getattr(config, "UDS_SEMANTIC_VALIDATION_ENABLED", True)
+    )
+    judge_enabled = bool(getattr(config, "UDS_JUDGE_ENABLED", True))
+    judge_threshold = float(getattr(config, "UDS_JUDGE_THRESHOLD", 0.7))
+    # function_set fallback: caller가 None 전달 시 source_sections에서 best-effort 추출
+    effective_function_set = function_set
+    if effective_function_set is None and semantic_validation_enabled:
+        effective_function_set = _collect_function_set(source_sections)
 
-    max_retries = 2
+    def _gather_evidence(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+        flat: List[Dict[str, Any]] = []
+        if not isinstance(payload, dict):
+            return flat
+        for k in ("overview", "requirements", "interfaces", "uds_frames", "notes"):
+            sec = payload.get(k)
+            if isinstance(sec, dict):
+                ev = sec.get("evidence") or []
+                if isinstance(ev, list):
+                    flat.extend(x for x in ev if isinstance(x, dict))
+        ld = payload.get("logic_diagrams") or []
+        if isinstance(ld, list):
+            for item in ld:
+                if isinstance(item, dict):
+                    ev = item.get("evidence") or []
+                    if isinstance(ev, list):
+                        flat.extend(x for x in ev if isinstance(x, dict))
+        return flat
+
+    def _evaluate(payload: Dict[str, Any]) -> Tuple[str, str, float, SemanticReport, Dict[str, str], Dict[str, str]]:
+        """reviewer + auditor + semantic + judge 통합 평가.
+        반환: (decision, reason, confidence, semantic_report, reviewer_dec, auditor_dec)
+        """
+        review_messages_local = [
+            {"role": "system", "content": review_prompt},
+            {"role": "user", "content": json.dumps(payload, ensure_ascii=False, indent=2)},
+        ]
+        r_res = _call_role(cfg, role="reviewer", stage="uds_review", messages=review_messages_local, temperature=0.1)
+        r_reply = r_res.get("output") if isinstance(r_res, dict) else None
+        r_decision, r_reason = _parse_decision(r_reply)
+        reviewer_dec = {"decision": r_decision, "reason": r_reason}
+        auditor_dec: Dict[str, str] = {}
+        decision_local = r_decision
+        reason_local = r_reason
+        if r_decision == "accept":
+            auditor_prompt = _load_prompt("uds_auditor")
+            a_messages = [
+                {"role": "system", "content": auditor_prompt},
+                {"role": "user", "content": json.dumps(payload, ensure_ascii=False, indent=2)},
+            ]
+            a_res = _call_role(cfg, role="auditor", stage="uds_audit", messages=a_messages, temperature=0.1)
+            a_reply = a_res.get("output") if isinstance(a_res, dict) else None
+            a_decision, a_reason = _parse_decision(a_reply)
+            auditor_dec = {"decision": a_decision, "reason": a_reason}
+            decision_local, reason_local = a_decision, a_reason
+
+        # semantic 검증 (function_set/file_resolver 둘 다 있을 때만 의미 있음)
+        if semantic_validation_enabled:
+            sem_report = validate_evidence(
+                _gather_evidence(payload),
+                function_set=effective_function_set,
+                file_resolver=file_resolver,
+            )
+        else:
+            sem_report = SemanticReport()
+
+        # confidence 계산: base × semantic_factor
+        base = 1.0 if (decision_local == "accept" and (not auditor_dec or auditor_dec.get("decision") == "accept")) else 0.5
+        semantic_factor = 1.0 if sem_report.passed and sem_report.score >= 0.8 else (
+            0.8 if sem_report.score >= 0.6 else 0.6
+        )
+        confidence_local = base * semantic_factor
+
+        # judge escalation (low confidence 시에만)
+        if judge_enabled and confidence_local < judge_threshold:
+            try:
+                judge_prompt_text = _load_prompt("uds_judge")
+                judge_res = call_judge(
+                    cfg,
+                    payload=payload,
+                    semantic_findings=[f.to_dict() for f in sem_report.findings[:30]],
+                    reviewer_decision=reviewer_dec,
+                    auditor_decision=auditor_dec or None,
+                    confidence_base=confidence_local,
+                    judge_prompt=judge_prompt_text,
+                )
+                j_verdict = judge_res.get("verdict")
+                j_confidence = float(judge_res.get("confidence", confidence_local))
+                j_rationale = str(judge_res.get("rationale") or "")
+                # judge verdict로 decision 교체
+                if j_verdict == "abort":
+                    decision_local = "reject"
+                    reason_local = f"judge_abort: {j_rationale}"
+                elif j_verdict == "retry":
+                    decision_local = "retry"
+                    reason_local = f"judge_retry: {j_rationale}"
+                else:  # trust
+                    decision_local = "accept"
+                    reason_local = f"judge_trust: {j_rationale}"
+                confidence_local = j_confidence
+            except (FileNotFoundError, OSError) as exc:
+                # judge prompt 누락 등 — graceful skip
+                logger.warning("judge call failed: %s", exc)
+
+        return decision_local, reason_local, confidence_local, sem_report, reviewer_dec, auditor_dec
+
+    decision, reason, confidence, semantic_report, _, _ = _evaluate(raw)
+
+    max_retries = _dynamic_max_retries(confidence)
     retry_count = 0
     best_raw = raw
     while decision in ("retry", "reject") and retry_count < max_retries:
@@ -691,7 +832,7 @@ def generate_uds_ai_sections(
         writer_messages.append(
             {
                 "role": "user",
-                "content": f"Reviewer/Auditor feedback (attempt {retry_count}): {reason}. Fix the output to comply.",
+                "content": f"Reviewer/Auditor/Judge feedback (attempt {retry_count}): {reason}. Fix the output to comply.",
             }
         )
         result = _call_role(
@@ -707,12 +848,11 @@ def generate_uds_ai_sections(
             break
         raw = retry_raw
         best_raw = raw
-        review_messages_r = [
-            {"role": "system", "content": review_prompt},
-            {"role": "user", "content": json.dumps(raw, ensure_ascii=False, indent=2)},
-        ]
-        review_res_r = _call_role(cfg, role="reviewer", stage=f"uds_review_retry_{retry_count}", messages=review_messages_r, temperature=0.1)
-        decision, reason = _parse_decision(review_res_r.get("output") if isinstance(review_res_r, dict) else None)
+        decision, reason, confidence, semantic_report, _, _ = _evaluate(raw)
+        # 동적 max_retries 갱신 — confidence가 올라가면 retry 조기 종료
+        new_max = _dynamic_max_retries(confidence)
+        if retry_count >= new_max:
+            break
     if best_raw is None:
         return None
     raw = best_raw
@@ -747,6 +887,12 @@ def generate_uds_ai_sections(
     if detailed:
         sections["document"] = str(raw.get("document") or "").strip()
     sections["quality_warnings"] = _quality_warnings(sections)
+    # ─── 라운드 C T505: confidence / semantic_validated 메타 + semantic warning ───
+    sections["confidence"] = round(float(confidence), 3)
+    sections["semantic_validated"] = bool(semantic_report.passed)
+    sections["semantic_report"] = semantic_report.to_dict()
+    # quality_warnings에 [semantic] prefix 추가 — warning_categories breakdown 통합
+    sections["quality_warnings"].extend(semantic_report.warning_messages)
     return sections
 
 

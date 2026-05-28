@@ -181,6 +181,22 @@ UDS_QUALITY_WARNING_THRESHOLDS = {
     "related_trusted_warn": 35.0,
 }
 
+# ---------------- UDS Hallucination 검출 (라운드 C T509) ----------------
+# llm_semantic_validator + LLM-as-a-Judge + confidence-based dynamic retry.
+# 환경 변수로 운영 시 opt-out 가능 (예: UDS_JUDGE_ENABLED=0).
+UDS_SEMANTIC_VALIDATION_ENABLED = (
+    os.environ.get("UDS_SEMANTIC_VALIDATION_ENABLED", "1").strip().lower()
+    not in ("0", "false", "off", "no")
+)
+UDS_JUDGE_ENABLED = (
+    os.environ.get("UDS_JUDGE_ENABLED", "1").strip().lower()
+    not in ("0", "false", "off", "no")
+)
+UDS_JUDGE_THRESHOLD = _safe_float("UDS_JUDGE_THRESHOLD", 0.7)
+UDS_JUDGE_MODEL_SUBSTRING = os.environ.get(
+    "UDS_JUDGE_MODEL_SUBSTRING", "gemini-2.5-flash"
+)
+
 # ---------------- UDS DOCX retry 타임아웃 (초) ----------------
 UDS_DOCX_RETRY_STAGES = [
     ("full", 0, _safe_int("UDS_DOCX_FULL_TIMEOUT", 7200)),

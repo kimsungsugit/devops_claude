@@ -19,8 +19,10 @@ from backend.services.warning_categories import (  # noqa: E402
 class TestCategorizeWarnings:
     def test_empty_list_zero_counts(self):
         result = categorize_warnings([])
+        # 라운드 C: semantic/judge prefix 추가 (LLM hallucination 검증)
         assert result == {
-            "ambiguous": 0, "hmr": 0, "swuts": 0, "layout": 0, "other": 0,
+            "ambiguous": 0, "hmr": 0, "swuts": 0, "layout": 0,
+            "semantic": 0, "judge": 0, "other": 0,
         }
 
     def test_nw7_ambiguous_precise_not_substring(self):
@@ -73,8 +75,11 @@ class TestFormatBreakdownLabel:
         assert "other" not in label
 
     def test_known_prefixes_constant(self):
-        """NF3 단일 출처 — KNOWN_WARNING_PREFIXES tuple."""
-        assert KNOWN_WARNING_PREFIXES == ("[hmr]", "[swuts]", "[layout]")
+        """NF3 단일 출처 — KNOWN_WARNING_PREFIXES tuple.
+        라운드 C: [semantic]/[judge] 추가 (LLM hallucination 검증)."""
+        assert KNOWN_WARNING_PREFIXES == (
+            "[hmr]", "[swuts]", "[layout]", "[semantic]", "[judge]",
+        )
 
     def test_hierarchical_hint_when_ambiguous_and_hmr_both_present_round7_nw11(self):
         """Round 7 NW11 fix: ambiguous + hmr 둘 다 > 0 시 hint prefix 부착.
@@ -96,3 +101,19 @@ class TestFormatBreakdownLabel:
             f"ambiguous 0 시 hint 부착 안 됨: {label}"
         )
         assert "hmr=1" in label
+
+    def test_semantic_judge_prefix_counted_round_c(self):
+        """라운드 C: [semantic]/[judge] prefix 정확 카운트."""
+        warnings = [
+            "[semantic] source_file: missing.c 미존재",
+            "[semantic] function: g_Unknown 매칭 실패",
+            "[judge] verdict=retry, confidence=0.5",
+            "[hmr] stamp summary",
+            "기타 일반",
+        ]
+        from backend.services.warning_categories import categorize_warnings
+        result = categorize_warnings(warnings)
+        assert result["semantic"] == 2
+        assert result["judge"] == 1
+        assert result["hmr"] == 1
+        assert result["other"] == 1  # 기타 — known prefix 아님

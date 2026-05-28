@@ -10,7 +10,11 @@ from __future__ import annotations
 
 # 알려진 warning prefix — known_prefixes에 매칭 안 되면 'other' 카테고리로 분류.
 # F6 Round 4 NW7/NW8 fix에서 정의. NF3에서 단일 출처로 추출.
-KNOWN_WARNING_PREFIXES: tuple[str, ...] = ("[hmr]", "[swuts]", "[layout]")
+# 라운드 C 추가: [semantic] (llm_semantic_validator) + [judge] (LLM-as-a-Judge).
+# F6 Round 5 NF3 단일 출처 패턴 — SwUT/SwIT routers의 sentinel breakdown에 자동 통합.
+KNOWN_WARNING_PREFIXES: tuple[str, ...] = (
+    "[hmr]", "[swuts]", "[layout]", "[semantic]", "[judge]",
+)
 
 
 def categorize_warnings(warnings: list[str]) -> dict[str, int]:
@@ -20,6 +24,7 @@ def categorize_warnings(warnings: list[str]) -> dict[str, int]:
         - `ambiguous`: `[hmr] ambiguous` 시작 (F6 Round 4 NW7 정밀 매칭).
             stamp summary 메시지의 'ambiguous skipped: N' substring 오분류 방지.
         - `hmr` / `swuts` / `layout`: 각 prefix로 시작
+        - `semantic` / `judge`: 라운드 C 신규 — LLM hallucination 검증 결과
         - `other`: 위 prefix 어디에도 매칭 안 됨 (NF8 비-category 노출)
 
     Returns:
@@ -30,6 +35,8 @@ def categorize_warnings(warnings: list[str]) -> dict[str, int]:
         "hmr": sum(1 for w in warnings if w.startswith("[hmr]")),
         "swuts": sum(1 for w in warnings if w.startswith("[swuts]")),
         "layout": sum(1 for w in warnings if w.startswith("[layout]")),
+        "semantic": sum(1 for w in warnings if w.startswith("[semantic]")),
+        "judge": sum(1 for w in warnings if w.startswith("[judge]")),
         "other": sum(
             1 for w in warnings
             if not any(w.startswith(p) for p in KNOWN_WARNING_PREFIXES)

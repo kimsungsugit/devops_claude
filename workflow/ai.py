@@ -1319,6 +1319,91 @@ def agent_call(
     return result
 
 
+def call_judge(
+    cfg: Dict[str, Any],
+    *,
+    payload: Dict[str, Any],
+    semantic_findings: List[Dict[str, Any]],
+    reviewer_decision: Dict[str, str],
+    auditor_decision: Optional[Dict[str, str]] = None,
+    confidence_base: float = 0.5,
+    judge_prompt: str = "",
+    log_dir: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """LLM-as-a-Judge 호출 (라운드 C T504).
+
+    UDS 파이프라인의 reviewer/auditor + semantic_validator 결과를 종합해 final
+    verdict (trust/retry/abort) + confidence 계산.
+
+    cfg는 caller가 준비 — judge 모델로 변경하려면 `cfg["model"]` override 후 전달.
+    plan §11 R5 fallback: JSON parse 실패 시 `{"confidence": 0.5, "verdict":
+    "retry", "rationale": "parse_failed"}` 반환.
+
+    Args:
+        cfg: LLM config dict (model/api_type/api_key). caller가 judge 모델 override 가능.
+        payload: UDS sections JSON (writer 출력 그대로).
+        semantic_findings: SemanticReport.findings to_dict() list.
+        reviewer_decision: {"decision": "accept|retry|reject", "reason": "..."}.
+        auditor_decision: 옵션 (reviewer accept 시에만 호출됨).
+        confidence_base: 0.0~1.0, pipeline 계산 결과.
+        judge_prompt: uds_judge.txt 내용 (caller가 _load_prompt로 로드 후 전달).
+        log_dir: agent_call 로그 디렉토리.
+
+    Returns:
+        {"confidence": float, "verdict": "trust"|"retry"|"abort", "rationale": str}
+    """
+    user_payload = {
+        "payload": payload,
+        "reviewer_decision": reviewer_decision,
+        "auditor_decision": auditor_decision,
+        "semantic_findings": semantic_findings[:50],  # cap
+        "confidence_base": round(float(confidence_base), 3),
+    }
+    messages = [
+        {"role": "system", "content": judge_prompt},
+        {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False, indent=2)},
+    ]
+    try:
+        result = agent_call(
+            cfg, messages, log_dir=log_dir,
+            role="judge", stage="uds_judge",
+            settings={"temperature": 0.1},
+        )
+        output = result.get("output") if isinstance(result, dict) else None
+        if not output:
+            return {"confidence": 0.5, "verdict": "retry", "rationale": "parse_failed: no output"}
+        # JSON parse (markdown code fence strip)
+        text = str(output).strip()
+        text = re.sub(r"^```(?:json)?\s*\n?", "", text)
+        text = re.sub(r"\n?```\s*$", "", text)
+        parsed = json.loads(text)
+        if not isinstance(parsed, dict):
+            return {"confidence": 0.5, "verdict": "retry", "rationale": "parse_failed: not dict"}
+        # required keys
+        confidence = parsed.get("confidence")
+        verdict = parsed.get("verdict")
+        rationale = parsed.get("rationale") or ""
+        try:
+            confidence = float(confidence)
+        except (TypeError, ValueError):
+            return {"confidence": 0.5, "verdict": "retry", "rationale": "parse_failed: invalid confidence"}
+        if verdict not in ("trust", "retry", "abort"):
+            return {"confidence": 0.5, "verdict": "retry", "rationale": "parse_failed: invalid verdict"}
+        # clamp confidence to [0.0, 1.0]
+        confidence = max(0.0, min(1.0, confidence))
+        return {
+            "confidence": confidence,
+            "verdict": verdict,
+            "rationale": str(rationale)[:500],
+        }
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+        return {
+            "confidence": 0.5,
+            "verdict": "retry",
+            "rationale": f"parse_failed: {type(exc).__name__}",
+        }
+
+
 def agent_call_text(
     cfg: Dict[str, Any],
     messages: List[Dict[str, str]],

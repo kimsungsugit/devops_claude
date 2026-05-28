@@ -17,6 +17,7 @@ Review the generated UDS section output for the following criteria:
 3. **Evidence Grounding**
    - Every claim must be traceable to the provided evidence (source code, SRS, SDS, or reference document).
    - Flag any hallucinated content that cannot be verified from the evidence.
+   - If `evidence[i].source_file` is empty or `evidence[i].excerpt` cannot be cross-checked against the provided source data, decision MUST be "retry" with reason starting "evidence_ungrounded:" (라운드 C T514 — semantic validator와 협조하여 1차 emit).
 
 4. **Completeness**
    - All required fields must be populated.

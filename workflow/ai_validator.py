@@ -142,6 +142,55 @@ def validate_test_case(test_json: str, source_context: str = "") -> ValidationRe
     return result
 
 
+def validate_evidence_grounding(
+    text: str,
+    evidence: List[Dict[str, Any]],
+    *,
+    function_set: Optional[Any] = None,  # set / frozenset / None
+    file_resolver: Optional[Any] = None,
+) -> ValidationResult:
+    """라운드 C T507: evidence grounding facade — llm_semantic_validator wrapping.
+
+    `workflow.llm_semantic_validator.validate_evidence`를 ai_validator의
+    `ValidationResult` 형식으로 변환. uds_ai.py + ai_validator.py 양쪽에서
+    호출 가능. `[semantic]` prefix warning을 ValidationResult.warnings로 push —
+    `warning_categories` breakdown 자동 통합.
+
+    function_set None이면 함수명 매칭 skip (회귀 fixture 환경 호환).
+    file_resolver None이면 source_file 존재 검증 skip.
+
+    Args:
+        text: LLM 응답 텍스트 (현재는 사용 안 함, 향후 evidence와 text 일치성
+            검증 확장용).
+        evidence: ``[{source_type, source_file, excerpt, score}, ...]``.
+        function_set: c_parser parse_c_project 결과의 function 이름 set.
+        file_resolver: backend.services.file_resolver.get_resolver() 반환 객체.
+
+    Returns:
+        ValidationResult — valid=True (semantic warning만이라 reject 안 함),
+        warnings에 [semantic] prefix 메시지 push.
+    """
+    result = ValidationResult()
+    result.cleaned_text = text or ""
+    if not evidence:
+        return result  # evidence 없으면 _quality_warnings가 별도 처리
+    try:
+        from workflow.llm_semantic_validator import validate_evidence as _sem_validate
+    except ImportError:
+        result.add_warning("[semantic] validator 미설치 — 검증 skip")
+        return result
+    sem_report = _sem_validate(
+        evidence, function_set=function_set, file_resolver=file_resolver,
+    )
+    for msg in sem_report.warning_messages:
+        result.add_warning(msg)
+    if not sem_report.passed:
+        result.add_warning(
+            f"[semantic] score={sem_report.score:.2f} (passed=False)"
+        )
+    return result
+
+
 def retry_with_validation(
     llm_fn: Callable[..., Optional[str]],
     validator: Callable[[str], ValidationResult],

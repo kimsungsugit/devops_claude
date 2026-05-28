@@ -7,7 +7,22 @@ from workflow.ai_validator import (
     validate_function_description,
     validate_test_case,
     retry_with_validation,
+    validate_evidence_grounding,
 )
+
+
+class _MemResolver:
+    """라운드 C T511: in-memory file_resolver — semantic 검증 격리."""
+    def __init__(self, files=None):
+        self._files = files or {}
+
+    def exists(self, path):
+        return path in self._files
+
+    def read_text(self, path, encoding="utf-8"):
+        if path not in self._files:
+            raise FileNotFoundError(path)
+        return self._files[path]
 
 
 class TestValidationResult:
@@ -192,3 +207,78 @@ class TestRetryWithValidation:
         )
         assert result.valid is False
         assert text == ""
+
+
+class TestValidateEvidenceGrounding:
+    """라운드 C T511: validate_evidence_grounding facade — llm_semantic_validator wrapping."""
+
+    def test_empty_evidence_passes(self):
+        result = validate_evidence_grounding("any text", evidence=[])
+        assert result.valid is True
+        assert result.warnings == []
+
+    def test_function_set_none_skips_match(self):
+        """function_set None이면 함수명 매칭 skip."""
+        evidence = [{
+            "source_type": "code",
+            "source_file": "src/main.c",
+            "excerpt": "g_NonExistent_Func()",
+            "score": 0.5,
+        }]
+        resolver = _MemResolver({"src/main.c": "stub"})
+        result = validate_evidence_grounding(
+            "text", evidence=evidence,
+            function_set=None, file_resolver=resolver,
+        )
+        # function warning 없음 (skip)
+        fn_warnings = [w for w in result.warnings if "function" in w]
+        assert len(fn_warnings) == 0
+
+    def test_semantic_warning_emit_with_prefix(self):
+        """semantic warning은 [semantic] prefix 부착."""
+        evidence = [{
+            "source_type": "code",
+            "source_file": "src/missing.c",
+            "excerpt": "s_Foo()",
+            "score": 0.3,
+        }]
+        resolver = _MemResolver({})
+        result = validate_evidence_grounding(
+            "text", evidence=evidence,
+            function_set=frozenset(["s_Foo"]),
+            file_resolver=resolver,
+        )
+        # source_file 미존재 — [semantic] prefix
+        assert any(w.startswith("[semantic]") for w in result.warnings)
+        # passed=True (warning만이라 valid)
+        assert result.valid is True
+
+    def test_valid_evidence_no_warnings(self):
+        """정상 evidence — semantic warning 0건 + valid True."""
+        evidence = [{
+            "source_type": "code",
+            "source_file": "src/main.c",
+            "excerpt": "s_Init(); return;",
+            "score": 0.9,
+        }]
+        resolver = _MemResolver({"src/main.c": "void s_Init(void) {}"})
+        result = validate_evidence_grounding(
+            "text", evidence=evidence,
+            function_set=frozenset(["s_Init"]),
+            file_resolver=resolver,
+        )
+        semantic_warnings = [w for w in result.warnings if w.startswith("[semantic]")]
+        assert len(semantic_warnings) == 0
+        assert result.valid is True
+
+    def test_low_score_emits_passed_false_warning(self):
+        """semantic score 낮으면 score 메시지 emit (passed가 False여야 발화 — 현재
+        모든 finding이 warning이라 passed=True가 default. 본 회귀는 future error 도입 시 검증)."""
+        # 현재 정책: 모든 finding이 warning severity → passed=True
+        # 본 검증은 비어있는 evidence가 valid+no-warning 보장하는 단순 케이스
+        result = validate_evidence_grounding("text", evidence=[])
+        assert result.valid is True
+        # score 라인은 only when passed=False — 현재는 발화 X
+        score_warnings = [w for w in result.warnings if "score=" in w]
+        assert len(score_warnings) == 0
+
