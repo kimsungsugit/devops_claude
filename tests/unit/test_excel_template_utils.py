@@ -15,6 +15,7 @@ from backend.services.excel_template_utils import (  # noqa: E402
     BLANK_MARKUP,
     BuildMetaValidationError,
     TemplateValidationError,
+    clear_data_range,
     find_kv_row,
     resolve_merge_anchor,
     safe_write,
@@ -516,3 +517,78 @@ class TestBuildReleaseHistoryRow55fix2:
         assert len(rows) == 1
         assert rows[0]["version"] == ""
         assert rows[0]["date"] == ""
+
+
+class TestClearDataRange:
+    """라운드 D T611: clear_data_range — partial overwrite 결함 fix 회귀."""
+
+    def _make_ws(self):
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        # 양식 default 데이터 시뮬레이션 — R5~R10 × C1~C4
+        for r in range(5, 11):
+            for c in range(1, 5):
+                ws.cell(r, c).value = f"default_R{r}C{c}"
+        return ws
+
+    def test_clears_data_rows_within_range(self):
+        ws = self._make_ws()
+        cleared = clear_data_range(
+            ws, start_row=5, end_row=10, start_col=1, end_col=4,
+        )
+        assert cleared == 24
+        for r in range(5, 11):
+            for c in range(1, 5):
+                assert ws.cell(r, c).value is None
+
+    def test_preserves_formula_cells(self):
+        """preserve_formula=True (default)면 = 시작 cell은 clear 안 함."""
+        ws = self._make_ws()
+        ws.cell(6, 2).value = "='Other Sheet'!A1"
+        cleared = clear_data_range(
+            ws, start_row=5, end_row=10, start_col=1, end_col=4,
+        )
+        # 수식 1개 보존 → 24 - 1 = 23
+        assert cleared == 23
+        assert ws.cell(6, 2).value == "='Other Sheet'!A1"
+
+    def test_preserve_formula_false_clears_formula(self):
+        ws = self._make_ws()
+        ws.cell(7, 3).value = "=SUM(A1:A10)"
+        cleared = clear_data_range(
+            ws, start_row=5, end_row=10, start_col=1, end_col=4,
+            preserve_formula=False,
+        )
+        assert cleared == 24  # 수식까지 clear
+        assert ws.cell(7, 3).value is None
+
+    def test_skips_none_cells(self):
+        ws = openpyxl.Workbook().active
+        # 빈 시트 → clear 대상 0
+        cleared = clear_data_range(
+            ws, start_row=1, end_row=10, start_col=1, end_col=5,
+        )
+        assert cleared == 0
+
+    def test_preserves_merged_non_anchor(self):
+        """머지 영역의 비-anchor cell은 보존 (anchor만 clear)."""
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.cell(5, 1).value = "merged_anchor"
+        ws.merge_cells(start_row=5, end_row=5, start_column=1, end_column=3)
+        ws.cell(5, 4).value = "non_merged"
+        cleared = clear_data_range(
+            ws, start_row=5, end_row=5, start_col=1, end_col=4,
+        )
+        # anchor(5,1) + non_merged(5,4) 2개만 clear (merged 비-anchor는 보존)
+        assert cleared == 2
+        assert ws.cell(5, 1).value is None
+        assert ws.cell(5, 4).value is None
+
+    def test_invalid_range_returns_zero(self):
+        ws = self._make_ws()
+        # start_row > end_row → 즉시 0
+        cleared = clear_data_range(
+            ws, start_row=10, end_row=5, start_col=1, end_col=4,
+        )
+        assert cleared == 0

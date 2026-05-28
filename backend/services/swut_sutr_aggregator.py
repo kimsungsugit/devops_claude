@@ -135,7 +135,12 @@ class SutrBuildResult:
 # Sheet writers
 # ---------------------------------------------------------------------------
 
-_OPTIONAL_LABELS = {"Build Timestamp", "Reviewer", "Doc. ID"}
+_OPTIONAL_LABELS = {
+    "Build Timestamp", "Reviewer", "Doc. ID",
+    # 라운드 F7 D11 fix: 회사 표준 양식 (★개발템플릿 V3) Cover에 부재 — 1.Test
+    # Summary로 이동 완료. silent OK (warning emit X).
+    "Project", "ASIL Level", "Validation Date", "Status", "Version",
+}
 
 
 def _write_label(ws, label: str, value: Any, out_warnings: list[str] | None) -> None:
@@ -263,10 +268,11 @@ def _deviation_case_fields(case: Any) -> tuple[str, str, str, str] | None:
 def _write_deviation(ws, deviation_cases: list[Any], out_warnings: list[str] | None = None) -> int:
     """Deviation 시트 — swut_deviation_generator 결과 기록.
 
+    라운드 F7 T707: clear policy — deviation_cases 빈 list 또는 신규 stamp 후
+    양식 default deviation 데이터 clear (Appendix sentinel 보존).
+
     Returns: 쓰여진 행 수.
     """
-    if not deviation_cases:
-        return 0
     pos = find_kv_row(ws, "Test Case ID", max_row=10)
     if pos is None:
         if out_warnings is not None:
@@ -275,7 +281,7 @@ def _write_deviation(ws, deviation_cases: list[Any], out_warnings: list[str] | N
     start_row = pos[0] + 1
     written = 0
     skipped = 0
-    for case in deviation_cases:
+    for case in deviation_cases or []:
         fields = _deviation_case_fields(case)
         if fields is None:
             skipped += 1
@@ -292,6 +298,37 @@ def _write_deviation(ws, deviation_cases: list[Any], out_warnings: list[str] | N
         out_warnings.append(
             f"Deviation case shape 검증 실패 — {skipped}건 skip (dict 또는 DeviationCase 필요)"
         )
+
+    # 라운드 F7 T707: clear policy — 신규 stamp 후 다음 row부터 양식 default clear.
+    # 'Appendix' sentinel ('■ Appendix' 등)을 만나면 그 직전까지만 clear. 양식의
+    # 기존 deviation 4건 default (다른 release 데이터)가 신규 빌드에 보존되는
+    # partial overwrite 결함 차단.
+    try:
+        from backend.services.excel_template_utils import clear_data_range
+        clear_start = start_row + written
+        clear_end = ws.max_row
+        # Appendix sentinel 위치 탐지 — 그 직전까지 clear
+        appendix_row = None
+        for r in range(clear_start, min(clear_end + 1, clear_start + 100)):
+            cell_value = ws.cell(r, 2).value
+            if isinstance(cell_value, str) and "Appendix" in cell_value:
+                appendix_row = r
+                break
+        actual_end = (appendix_row - 1) if appendix_row else min(clear_end, clear_start + 50)
+        if actual_end >= clear_start:
+            cleared = clear_data_range(
+                ws,
+                start_row=clear_start, end_row=actual_end,
+                start_col=pos[1], end_col=pos[1] + 4,
+                preserve_formula=True, preserve_merged_anchor=True,
+            )
+            if out_warnings is not None and cleared > 0:
+                out_warnings.append(
+                    f"[clear] Deviation row {clear_start}~{actual_end} 양식 default "
+                    f"{cleared} cell clear (partial overwrite 차단)"
+                )
+    except ImportError:
+        pass
     return written
 
 
@@ -845,6 +882,32 @@ def _write_test_log(
                     pass
 
         written += 1
+
+    # 라운드 F7 T707: clear policy — 신규 stamp 후 다음 row부터 양식 default clear.
+    # SwUTR/SwITR 회사 표준 양식이 R5/R7에 SwUTC_0101 default 데이터 보유 →
+    # 신규 session TC 2건 stamp 후 R17~ default 보존되어 partial overwrite 결함.
+    # clear_data_range로 stamp 끝 다음 row부터 ws.max_row까지 cell 비움.
+    if written > 0:
+        try:
+            from backend.services.excel_template_utils import clear_data_range
+            clear_start = start_row + (written * tc_row_step)
+            clear_end = ws.max_row
+            if clear_end >= clear_start:
+                # data row range — col 1~20 (TC ID/Method/Input/Expected/Actual etc.)
+                # 양식 default '< End of Document >' 같은 sentinel 보존 위해 max_col 20 제한
+                cleared = clear_data_range(
+                    ws,
+                    start_row=clear_start, end_row=clear_end,
+                    start_col=1, end_col=20,
+                    preserve_formula=True, preserve_merged_anchor=True,
+                )
+                if out_warnings is not None and cleared > 0:
+                    out_warnings.append(
+                        f"[clear] Test Log/Result row {clear_start}~{clear_end} "
+                        f"양식 default {cleared} cell clear (partial overwrite 차단)"
+                    )
+        except ImportError:
+            pass
     return written
 
 

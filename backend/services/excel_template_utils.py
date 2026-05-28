@@ -438,6 +438,62 @@ def safe_write(ws: Any, row: int, col: int, value: Any) -> bool:
         return False
 
 
+def clear_data_range(
+    ws: Any,
+    *,
+    start_row: int,
+    end_row: int,
+    start_col: int,
+    end_col: int,
+    preserve_formula: bool = True,
+    preserve_merged_anchor: bool = True,
+) -> int:
+    """라운드 D T601: 시트의 data row 영역 clear (template-copy partial overwrite 결함 fix).
+
+    SwUT/SwIT builder가 template-copy 전략 사용 시 양식의 default 데이터
+    (예: 이전 release의 419 함수, 4 deviation 등)를 clear하지 않고 신규 데이터를
+    일부만 덮어쓰기 → audit 신뢰성 무너짐. 본 helper로 builder가 stamp 전에
+    data row 영역을 명시 clear.
+
+    Args:
+        ws: openpyxl Worksheet.
+        start_row / end_row: clear 대상 row range (inclusive, 1-based).
+        start_col / end_col: clear 대상 col range (inclusive, 1-based).
+        preserve_formula: True면 `=` 시작 cell (수식) 보존 — Test Summary 같은
+            cross-sheet reference 수식 보호.
+        preserve_merged_anchor: True면 머지 영역의 비-anchor cell은 건드리지 않음
+            (anchor만 clear) — 머지 깨짐 방지.
+
+    Returns:
+        cleared cell count.
+    """
+    if start_row > end_row or start_col > end_col:
+        return 0
+    cleared = 0
+    for r in range(start_row, end_row + 1):
+        for c in range(start_col, end_col + 1):
+            try:
+                cell = ws.cell(row=r, column=c)
+            except (AttributeError, IndexError):
+                continue
+            if cell.value is None:
+                continue
+            # 수식 보존
+            if preserve_formula and isinstance(cell.value, str) and cell.value.startswith("="):
+                continue
+            # 머지 영역 비-anchor 보존
+            if preserve_merged_anchor:
+                anchor_r, anchor_c = resolve_merge_anchor(ws, r, c)
+                if (anchor_r, anchor_c) != (r, c):
+                    continue
+            try:
+                cell.value = None
+                cleared += 1
+            except AttributeError:
+                continue
+    return cleared
+
+
 # 23차 T192 / 29차 W17: 시각 강조 RGB + placeholder 텍스트는
 # ``design_tokens`` 단일 출처에서 import (위 import 블록 참조).
 

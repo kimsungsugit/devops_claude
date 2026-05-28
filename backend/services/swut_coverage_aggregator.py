@@ -137,7 +137,13 @@ class CoverageBuildResult:
 # _aggregate_session 은 swut_input_adapter.aggregate_session 으로 통합 (deep-reviewer W3).
 
 
-_OPTIONAL_LABELS = {"Build Timestamp", "Reviewer", "Doc. ID"}
+_OPTIONAL_LABELS = {
+    "Build Timestamp", "Reviewer", "Doc. ID",
+    # 라운드 F7 D11 fix: 회사 표준 양식 (★개발템플릿 V3)은 Cover에 이 라벨 부재.
+    # 'Project Name'/'SW Version' 등은 1.Test Summary 시트로 이동 — Cover에 미발견
+    # 시 silent OK (warning emit X).
+    "Project", "ASIL Level", "Validation Date", "Status", "Version",
+}
 
 
 def _write_label(ws, label: str, value: Any, out_warnings: list[str] | None) -> None:
@@ -487,6 +493,33 @@ def _write_coverage_sheet(
     # 데이터 행 시작은 헤더 + 1 또는 + 2 (회사 포맷에 따라 hierarchical header)
     data_start = header_row + 2
 
+    # 라운드 F7 D5 fix: 회사 표준 양식은 C2부터 'No' col 시작 (HDPDM01 release
+    # 산출물은 C1부터). header row scan으로 'No' col 동적 감지 → 그 col부터 stamp.
+    # 미발견 시 기존 hardcoded C1 fallback (backward-compat).
+    no_col = 1  # fallback
+    component_col_offset = 1  # No 다음 col이 Component (회사 표준) 또는 unit_id (HDPDM01)
+    has_component_col = False
+    for row in ws.iter_rows(min_row=max(1, header_row - 1),
+                             max_row=header_row, values_only=False):
+        for cell in row:
+            v = str(cell.value or "").strip()
+            if v == "No":
+                no_col = cell.column
+            elif v == "Component":
+                has_component_col = True
+    # 회사 표준: No=C2, Component=C3, Unit ID=C4, Name=C5, Statement Count=C6 ...
+    # HDPDM01 release: No=C1, unit_id=C2, name=C3, Statement total=C4 ...
+    if has_component_col:
+        unit_id_col = no_col + 2  # skip No + Component
+        # Statement: Count=+4, Total=+5, Pass=+6 (header에서 'Count'/'Total'/'Pass' 위치 그대로)
+        stmt_count_col = no_col + 4
+        # Branch: Count=+8 (Statement+Exception 사이 gap), Total=+9, Pass=+10
+        branch_count_col = no_col + 8
+    else:
+        unit_id_col = no_col + 1
+        stmt_count_col = no_col + 3
+        branch_count_col = no_col + 6
+
     # 30차 W21: 함수별 ASIL 매핑 + ASIL D 식별.
     function_asil_map: dict[str, str] = agg.get("function_asil_map") or {}
 
@@ -495,15 +528,15 @@ def _write_coverage_sheet(
     written = 0
     for i, fc in enumerate(function_rows):
         r = data_start + i
-        safe_write(ws, r, 1, i + 1)
-        safe_write(ws, r, 2, fc.unit_id)
-        safe_write(ws, r, 3, fc.name)
-        safe_write(ws, r, 4, fc.statement.total)
-        safe_write(ws, r, 5, fc.statement.covered)
-        safe_write(ws, r, 6, "O" if fc.statement.passed else "X")
-        safe_write(ws, r, 7, fc.branch.total)
-        safe_write(ws, r, 8, fc.branch.covered)
-        safe_write(ws, r, 9, "O" if fc.branch.passed else "X")
+        safe_write(ws, r, no_col, i + 1)
+        safe_write(ws, r, unit_id_col, fc.unit_id)
+        safe_write(ws, r, unit_id_col + 1, fc.name)
+        safe_write(ws, r, stmt_count_col, fc.statement.total)
+        safe_write(ws, r, stmt_count_col + 1, fc.statement.covered)
+        safe_write(ws, r, stmt_count_col + 2, "O" if fc.statement.passed else "X")
+        safe_write(ws, r, branch_count_col, fc.branch.total)
+        safe_write(ws, r, branch_count_col + 1, fc.branch.covered)
+        safe_write(ws, r, branch_count_col + 2, "O" if fc.branch.passed else "X")
 
         # 59차 F4-C — KJPDS02 v1.01 양식: Function Calls metric 별도 col stamp.
         # layout.coverage_metric_kind == "function_and_calls" + fc.function_calls_coverage

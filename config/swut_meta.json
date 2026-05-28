@@ -17,11 +17,13 @@
         "default_approver": "CH In"
       },
       "template_paths": {
-        "_comment": "기존 v3.01 xlsx 파일을 그대로 템플릿으로 사용. 빌더는 BytesIO에 로드 → 셀 치환 → 저장. SwIT는 v2.02 별도.",
-        "coverage_report_template": "U:\\연구소\\1000 프로젝트\\1200 자동차\\0002 A Cappella\\02 ADOS\\03 NE_GN7\\08.Software\\10.SW 단위테스트\\03.Test Result\\02.Result Report\\(HDPDM01)SwUT Coverage Report_v3.01_240221_R.xlsx",
-        "sutr_template": "U:\\연구소\\1000 프로젝트\\1200 자동차\\0002 A Cappella\\02 ADOS\\03 NE_GN7\\08.Software\\10.SW 단위테스트\\03.Test Result\\02.Result Report\\(HDPDM01_SUTR) Software Unit Test Result_v3.01_240221_R.xlsm",
-        "swit_coverage_template": "",
-        "swit_sitr_template": ""
+        "_comment": "라운드 F7 — 회사 표준 양식 (★개발템플릿 Version3) 사용. project_id별 release 산출물 대신 표준 base template로 변경 (XXXX placeholder 그대로 유지 — 빌더가 출력 파일명만 project_id 치환). 기존 HDPDM01 release path는 legacy_* 키로 보존.",
+        "coverage_report_template": "U:\\연구소\\2000 연구소 공용\\2200 개발 사양\\2220 개발표준 Template\\★개발템플릿 Version3\\02.설계(연구소)\\01.설계 및 검증\\08.소프트웨어\\09.SW 단위 테스트\\02.Test Result\\02.Result Report\\(XXXX_SwUTCV) Software Unit Test Coverage Result_v0.10_2XXXXX.xlsx",
+        "sutr_template": "U:\\연구소\\2000 연구소 공용\\2200 개발 사양\\2220 개발표준 Template\\★개발템플릿 Version3\\02.설계(연구소)\\01.설계 및 검증\\08.소프트웨어\\09.SW 단위 테스트\\02.Test Result\\02.Result Report\\(XXXX_SwUTR) Software Unit Test Result_v0.10_2XXXXX.xlsm",
+        "swit_coverage_template": "U:\\연구소\\2000 연구소 공용\\2200 개발 사양\\2220 개발표준 Template\\★개발템플릿 Version3\\02.설계(연구소)\\01.설계 및 검증\\08.소프트웨어\\10.SW 통합 테스트\\02.Test Result\\02.Result Report\\(XXXX_SwITCV) Software Integration Test Coverage Result_v0.10_2XXXXX.xlsx",
+        "swit_sitr_template": "U:\\연구소\\2000 연구소 공용\\2200 개발 사양\\2220 개발표준 Template\\★개발템플릿 Version3\\02.설계(연구소)\\01.설계 및 검증\\08.소프트웨어\\10.SW 통합 테스트\\02.Test Result\\02.Result Report\\(XXXX_SwITR) Software Integration Test Result_v0.10_2XXXXX.xlsm",
+        "legacy_coverage_report_template": "U:\\연구소\\1000 프로젝트\\1200 자동차\\0002 A Cappella\\02 ADOS\\03 NE_GN7\\08.Software\\10.SW 단위테스트\\03.Test Result\\02.Result Report\\(HDPDM01)SwUT Coverage Report_v3.01_240221_R.xlsx",
+        "legacy_sutr_template": "U:\\연구소\\1000 프로젝트\\1200 자동차\\0002 A Cappella\\02 ADOS\\03 NE_GN7\\08.Software\\10.SW 단위테스트\\03.Test Result\\02.Result Report\\(HDPDM01_SUTR) Software Unit Test Result_v3.01_240221_R.xlsm"
       },
       "output_filename_pattern": {
         "_comment": "{ver}=Release Name SW, {date}=YYMMDD",
