@@ -707,11 +707,20 @@ class TestInspectV101SheetConfig:
     """`_inspect_internal` 양식 분류 — 시트 이름 패턴으로 v1.01 / v2.02 / v3.01 구분."""
 
     def test_v101_coverage_signature_detected(self):
-        """2.Traceability + 3.Consistency + 4.Coverage 시트 → detected_version=v1.01."""
+        """2.Traceability + 3.Consistency + 4.Coverage 시트 → detected_version=v1.01.
+
+        라운드 F7 D2: traceability_matrix_kind는 시트 header 내용 inspect로 결정
+        (시트명 prefix만이 아닌). SwITCV 양식 (SwST_NN header 다수)이어야 switc_x_swst.
+        """
+        # SwITCV 회사 표준 시뮬레이션 — 2.Traceability R11에 SwST/SwSTR header 다수
         template = _make_xlsx({
             "Cover": [["Project"]],
             "1.Test Summary": [["Project Name"]],
-            "2.Traceability": [["Matrix"]],
+            "2.Traceability": [
+                ["Matrix"], [], [], [], [], [], [], [], [], [],
+                ["ID", "101", "SwST_01", "SwST_02", "SwST_03", "SwST_04",
+                 "SwST_05", "SwSTR_01", "SwSTR_02"],
+            ],
             "3.Consistency": [["Item"]],
             "4.Coverage": [["Function"]],
             "History": [["Version"]],
@@ -721,6 +730,29 @@ class TestInspectV101SheetConfig:
         assert layout.traceability_matrix_kind == "switc_x_swst"
         assert layout.coverage_metric_kind == "function_and_calls"
         assert layout.test_summary_coverage_breakdown == 4
+
+    def test_v101_swutcv_swufn_header_not_classified_as_switc_round_f7_d2(self):
+        """라운드 F7 D2: 회사 표준 SwUTCV는 v1.01 signature지만 SwUFn matrix.
+        2.Traceability header에 SwUFn_NNNN 다수 → swufn_x_env 유지 (switc_x_swst X).
+        """
+        template = _make_xlsx({
+            "Cover": [["Project"]],
+            "1.Test Summary": [["Project Name"]],
+            "2.Traceability": [
+                ["Matrix"], [], [], [], [], [], [], [], [], [], [],
+                ["ID", "419", "SwUFn_0101", "SwUFn_0102", "SwUFn_0103",
+                 "SwUFn_0104", "SwUFn_0105"],
+            ],
+            "3.Consistency": [["Item"]],
+            "4.Coverage": [["Function"]],
+            "History": [["Version"]],
+        })
+        layout = elr.inspect_swit_layout(template, "coverage")
+        assert layout.detected_version == "v1.01"
+        assert layout.traceability_matrix_kind == "swufn_x_env", (
+            f"D2 회귀: SwUTCV (SwUFn header) → swufn_x_env 유지해야 하나 "
+            f"{layout.traceability_matrix_kind}"
+        )
 
     def test_v202_no_v101_signature(self):
         """1.Traceability + 2.Consistency + 3.Coverage → v1.01 신호 부족 → 기본 유지."""

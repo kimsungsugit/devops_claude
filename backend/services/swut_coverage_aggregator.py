@@ -875,11 +875,16 @@ def _write_traceability_sheet(
     )
     if matrix_kind == "switc_x_swst":
         if out_warnings is not None:
+            # 라운드 F7 D2 갱신: 회사 표준 SwITCV (★개발템플릿 V3)는 SwITC×SwST
+            # matrix 실재 (2.Traceability R11 SwST_01~SwSTR_NN header + R13~ SwITC row).
+            # F4-C에서 "양식 부재" 잘못 판단했던 것을 정정. matrix stamp 미구현 —
+            # T705 별도 라운드에서 구현 (SwITS spec parser와 통합 필요).
+            ws_title = getattr(ws, "title", "Traceability")
             out_warnings.append(
-                "1.Traceability matrix kind 'switc_x_swst' (KJPDS02 v1.01 / "
-                "HDPDM01 v2.02 양식) — 검증된 양식에 SwITC×SwST matrix 시트 자체가 "
-                "부재 (Strategy 시트는 call graph 양식). audit 정상 동작 — "
-                "matrix stamp skip. 다른 회사 양식 도입 시 재검증 필요."
+                f"{ws_title} matrix kind 'switc_x_swst' (회사 표준 SwITCV / "
+                "KJPDS02 v1.01) — SwITC×SwST matrix 실재하나 stamp 미구현 "
+                "(T705 별도 라운드). 현재 stamp skip — audit reviewer manual "
+                "확인 의무."
             )
         return 0
 

@@ -743,9 +743,35 @@ def _inspect_internal(
         deviation_sheet_present_v = any(
             "deviation" in n for n in sheet_names_lower
         )
-        traceability_matrix_kind_v: Literal["swufn_x_env", "switc_x_swst"] = (
-            "switc_x_swst" if detected_version == "v1.01" else "swufn_x_env"
-        )
+        # 라운드 F7 D2 fix: 시트명 prefix만으로 판단하지 않고 traceability 시트의
+        # 실제 header row 내용 inspect. 회사 표준 SwUTCV는 v1.01 signature
+        # (4.coverage / 3.consistency / 2.traceability) 갖지만 R12 header는
+        # SwUFn_01xx (SwUFn matrix) — switc_x_swst 아님. SwST_01 / SwSTR_NN 등이
+        # 다수 발견되면 switc_x_swst matrix로 분류 (SwITCV 양식).
+        traceability_matrix_kind_v: Literal["swufn_x_env", "switc_x_swst"] = "swufn_x_env"
+        if kind == "coverage":
+            trace_ws_for_kind = _find_sheet(wb, lambda n: "traceability" in n.lower())
+            if trace_ws_for_kind is not None:
+                swst_count = 0
+                swufn_count = 0
+                # 첫 15 row × 30 col scan — header row 위치 fixed 아님
+                try:
+                    for row in trace_ws_for_kind.iter_rows(
+                        min_row=1, max_row=15, max_col=30, values_only=True,
+                    ):
+                        for cell in row:
+                            if not isinstance(cell, str):
+                                continue
+                            s = cell.strip()
+                            if s.startswith(("SwST_", "SwSTR_")):
+                                swst_count += 1
+                            elif s.startswith("SwUFn_"):
+                                swufn_count += 1
+                except (AttributeError, ValueError):
+                    pass
+                # SwST 5건 이상 + SwUFn 비례 적으면 SwITC×SwST matrix
+                if swst_count >= 5 and swst_count > swufn_count:
+                    traceability_matrix_kind_v = "switc_x_swst"
         coverage_metric_kind_v: Literal["single", "function_and_calls"] = (
             "function_and_calls" if detected_version == "v1.01" else "single"
         )
