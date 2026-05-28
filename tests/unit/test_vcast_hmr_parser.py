@@ -181,30 +181,84 @@ class TestVcastHmrParserAmbiguous:
         # ambiguous_count도 0
         assert result.to_dict()["ambiguous_count"] == 0
 
-    def test_dedup_metric_mismatch_emits_warning_round4_nw5(self):
-        """Round 4 NW5 fix: 같은 (unit_file, function_name) 중복 row의 metric
-        값 불일치 시 parse_warnings emit (silent drop 차단).
+    def test_multi_env_unit_file_suffix_normalized_round_live_nw13(self):
+        """라이브 검증 NW13 fix: Jenkins SwIT HMR multi-env unit_file 'NN suffix
+        정규화 — 같은 source 파일이 다른 env에서 측정될 때 ambiguous false
+        positive 차단.
 
-        vcast가 부분 실행 + 최종 실행 결과 양쪽 보고 quirk 시 첫 row만 보존되어
-        audit reviewer가 어떤 값이 산출물에 stamp되었는지 알 수 없는 silent
-        wrong-pick 방지.
+        실측: SwIT 양식에서 ambiguous 341건 → 0건 (정규화 효과).
         """
         html_bytes = _build_hmr_html([
-            ("bats.c", "Init", "1", "1/1 (100%)", "5/10 (50%)"),
-            ("bats.c", "Init", "1", "1/1 (100%)", "8/10 (80%)"),  # 같은 file 다른 metric
+            # 같은 source 'sysctrl_main_pds.c'의 multi-env reporting
+            ("sysctrl_main_pds.c'1", "g_SystemCheck", "5", "1/1 (100%)", "3/3 (100%)"),
+            ("sysctrl_main_pds.c'2", "g_SystemCheck", "5", "1/1 (100%)", "3/3 (100%)"),
+            ("sysctrl_main_pds.c'3", "g_SystemCheck", "5", "1/1 (100%)", "3/3 (100%)"),
         ])
         result = parse_hmr_html(html_bytes)
         assert result.ok is True
-        # dedup으로 길이 1 유지 + 첫 row 보존
-        assert len(result.metrics_by_name["Init"]) == 1
-        assert result.metrics_by_name["Init"][0].covered_calls == 5
-        # NW5: parse_warnings에 metric 불일치 사유 누적
-        mismatch_warnings = [
-            w for w in result.parse_warnings
-            if "HMR dedup" in w and "값 불일치" in w
-        ]
-        assert len(mismatch_warnings) == 1, (
-            f"NW5 회귀: metric 불일치 warning 누락. parse_warnings: {result.parse_warnings}"
+        # 모든 row의 unit_file이 'sysctrl_main_pds.c'로 정규화됨
+        assert result.metrics["g_SystemCheck"].unit_file == "sysctrl_main_pds.c"
+        # ambiguous 0 (single source) — multi-env env suffix 무시
+        assert len(result.metrics_by_name["g_SystemCheck"]) == 1
+        assert result.to_dict()["ambiguous_count"] == 0
+
+    def test_prqa_his_format_emits_clear_warning_round_live_nw14(self):
+        """라이브 검증 NW14 fix: 회사 표준 HMR (PRQA HIS / Helix QAC HIS Metrics
+        Report) 감지 시 silent failure 대신 명확한 미지원 메시지.
+        """
+        html_bytes = (
+            b"<html><body>"
+            b'<h2>PRQA HIS Metrics Report</h2>'
+            b'<table class="metricstable"><tr>'
+            b'<td class="lightheader">Metric</td>'
+            b'<td class="lightheader">CALLS (STCAL)</td>'
+            b'</tr></table>'
+            b"</body></html>"
         )
-        assert "Init" in mismatch_warnings[0]
-        assert "bats.c" in mismatch_warnings[0]
+        result = parse_hmr_html(html_bytes)
+        assert result.ok is False
+        # NW14: PRQA HIS 감지 명시
+        assert any("PRQA HIS" in w for w in result.parse_warnings)
+        assert any("Jenkins col_metric" in w for w in result.parse_warnings)
+
+    def test_dedup_max_coverage_policy_round_live_nf2(self):
+        """라이브 검증 NF2 정책 결정 (사용자 결정 — MAX coverage 보존):
+        같은 (unit_file, function_name) 중복 row metric 값 불일치 시 MAX
+        coverage_pct row 보존. vcast multi-env가 다른 coverage 값으로 reporting
+        시 best-effort aggregate evidence 제공.
+        """
+        # 첫 row가 partial (50%), 두번째가 complete (80%) — 두번째로 교체 예상
+        html_bytes = _build_hmr_html([
+            ("bats.c", "Init", "1", "1/1 (100%)", "5/10 (50%)"),
+            ("bats.c", "Init", "1", "1/1 (100%)", "8/10 (80%)"),
+        ])
+        result = parse_hmr_html(html_bytes)
+        assert result.ok is True
+        # MAX coverage 정책 — 두번째 row (8/10, 80%) 보존
+        assert len(result.metrics_by_name["Init"]) == 1
+        assert result.metrics_by_name["Init"][0].covered_calls == 8
+        assert result.metrics_by_name["Init"][0].coverage_pct == 80.0
+        # 교체 사유 warning emit
+        replace_warnings = [
+            w for w in result.parse_warnings
+            if "[hmr] multi-env aggregate" in w and "교체" in w
+        ]
+        assert len(replace_warnings) == 1
+        assert "MAX coverage" in replace_warnings[0]
+
+    def test_dedup_keeps_first_when_higher_coverage_round_live_nf2(self):
+        """NF2 정책: 첫 row가 더 높은 coverage면 보존 (교체 안 함) + warning emit."""
+        html_bytes = _build_hmr_html([
+            ("bats.c", "Init", "1", "1/1 (100%)", "10/10 (100%)"),
+            ("bats.c", "Init", "1", "1/1 (100%)", "3/10 (30%)"),  # 낮음 — 보존
+        ])
+        result = parse_hmr_html(html_bytes)
+        assert result.ok is True
+        # 첫 row 보존 (100% > 30%)
+        assert result.metrics_by_name["Init"][0].covered_calls == 10
+        # 보존 사유 warning emit
+        keep_warnings = [
+            w for w in result.parse_warnings
+            if "[hmr] multi-env aggregate" in w and "보존" in w
+        ]
+        assert len(keep_warnings) == 1

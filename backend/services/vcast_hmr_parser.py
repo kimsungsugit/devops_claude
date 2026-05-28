@@ -57,6 +57,15 @@ HTML_MAX_BYTES = 8 * 1024 * 1024  # 8MB — HMR 보통 600KB 이하
 _METRIC_RE = re.compile(
     r"(\d+)\s*/\s*(\d+)\s*\((\d+(?:\.\d+)?)\s*%\)"
 )
+# F6 라이브 검증 NW13 fix: Jenkins SwIT HMR에서 같은 source 파일이 multi-env로
+# 실행되면 unit_file에 `'\d+` env suffix 부착 (예: `sysctrl_main_pds.c'1`,
+# `'2`, `'3`...). suffix를 strip해 정규화 — 같은 source는 동일 unit_file로 dedup.
+_UNIT_FILE_ENV_SUFFIX_RE = re.compile(r"'\d+$")
+
+
+def _normalize_unit_file(s: str) -> str:
+    """vcast multi-env unit_file suffix (`'NN`) 제거 — 같은 source 통합 식별."""
+    return _UNIT_FILE_ENV_SUFFIX_RE.sub("", s)
 
 
 @dataclass
@@ -211,7 +220,8 @@ def parse_hmr_html(
         unit_clean = unit_cell.replace("\xa0", "").strip()
         if unit_clean:
             last_unit_file = unit_clean
-        unit_file = last_unit_file
+        # F6 라이브 NW13 fix: vcast multi-env `'NN` suffix 정규화 (SwIT 영향 큼).
+        unit_file = _normalize_unit_file(last_unit_file)
 
         # function_name 비면 skip
         function_name = subprogram_cell.strip()
@@ -244,35 +254,76 @@ def parse_hmr_html(
             functions_total=functions_total,
         )
         # F6 자체평가 Round 1 C2: 함수명별 모든 매칭 누적 (audit silent wrong-pick 차단).
-        # metrics는 backward-compat (첫 매칭). metrics_by_name이 caller 권장 API.
-        # Round 2 W6 fix: 같은 (unit_file, function_name) 중복 row (vcast quirk) 시
-        # dedup — false ambiguous → false negative stamp skip 방지.
-        # Round 4 NW5 fix: dedup 시 metric value 불일치 발견 → parse_warnings emit.
-        # vcast가 부분 실행 + 최종 실행 결과 양쪽 보고 시 첫 값 silent 보존 위험 차단.
+        # metrics는 backward-compat. metrics_by_name이 caller 권장 API.
+        # Round 2 W6 fix: 같은 (unit_file, function_name) 중복 row dedup.
+        # F6 라이브 검증 NF2 정책 결정 (사용자 결정 — MAX coverage 보존):
+        #   vcast multi-env가 같은 함수를 다른 coverage 값으로 reporting 시
+        #   (첫 env partial, 다른 env complete 등 패턴 일관성 없음) MAX coverage_pct
+        #   row 보존 — audit reviewer에게 best-effort multi-env aggregate evidence.
+        #   교체 발생 시 parse_warnings emit (silent 차단).
         bucket = metrics_by_name.setdefault(function_name, [])
-        _existing = next((m for m in bucket if m.unit_file == unit_file), None)
-        if _existing is None:
+        _existing_idx = next(
+            (i for i, m in enumerate(bucket) if m.unit_file == unit_file),
+            None,
+        )
+        if _existing_idx is None:
             bucket.append(metric_obj)
-        elif (
-            _existing.covered_calls != metric_obj.covered_calls
-            or _existing.total_calls != metric_obj.total_calls
-        ):
-            warnings.append(
-                f"HMR dedup '{function_name}' ({unit_file}) — 동일 함수의 metric "
-                f"값 불일치: 보존={_existing.covered_calls}/{_existing.total_calls} "
-                f"vs 신규={metric_obj.covered_calls}/{metric_obj.total_calls} "
-                "(첫 row 보존, 신규 row drop)"
-            )
+        else:
+            _existing = bucket[_existing_idx]
+            if (
+                _existing.covered_calls != metric_obj.covered_calls
+                or _existing.total_calls != metric_obj.total_calls
+            ):
+                # MAX coverage_pct 정책 — 더 높은 coverage row로 교체
+                if metric_obj.coverage_pct > _existing.coverage_pct:
+                    warnings.append(
+                        f"[hmr] multi-env aggregate '{function_name}' ({unit_file}) "
+                        f"— 교체: {_existing.covered_calls}/{_existing.total_calls} "
+                        f"({_existing.coverage_pct:.1f}%) → "
+                        f"{metric_obj.covered_calls}/{metric_obj.total_calls} "
+                        f"({metric_obj.coverage_pct:.1f}%) (MAX coverage 정책)"
+                    )
+                    bucket[_existing_idx] = metric_obj
+                else:
+                    warnings.append(
+                        f"[hmr] multi-env aggregate '{function_name}' ({unit_file}) "
+                        f"— 보존: {_existing.covered_calls}/{_existing.total_calls} "
+                        f"({_existing.coverage_pct:.1f}%) (>= 신규 "
+                        f"{metric_obj.coverage_pct:.1f}%, MAX coverage 정책)"
+                    )
         if function_name not in metrics:
+            metrics[function_name] = metric_obj
+        elif (
+            function_name in metrics
+            and metric_obj.unit_file == metrics[function_name].unit_file
+            and metric_obj.coverage_pct > metrics[function_name].coverage_pct
+        ):
+            # metrics (backward-compat) 도 MAX로 갱신 (같은 unit_file일 때만)
             metrics[function_name] = metric_obj
 
     if not metrics:
-        return HmrParseResult(
-            ok=False,
-            parse_warnings=warnings + [
+        # F6 라이브 검증 NW14 fix: PRQA HIS / Helix QAC HIS Metrics Report 양식
+        # 감지 시 명확한 메시지 (현재 parser는 Jenkins col_metric class 양식만 지원).
+        is_prqa_his = (
+            b'class="metricstable"' in html_bytes
+            or b"PRQA HIS Metrics Report" in html_bytes
+            or b"Helix QAC HIS Metrics Report" in html_bytes
+        )
+        if is_prqa_his:
+            warning = (
+                "HMR 양식 미지원 — PRQA HIS / Helix QAC HIS Metrics Report 감지. "
+                "현재 parser는 Jenkins col_metric class 양식 "
+                "(Jenkins_PDSM_UT/IT_metrics_report.html)만 지원. "
+                "회사 표준 HMR 사용 시 별도 양식 dispatch 필요 (F6-D 후보)"
+            )
+        else:
+            warning = (
                 "HMR metric 0건 추출 — 양식 불일치 추정 "
                 "(col_metric class table 없음 또는 row 구조 변경)"
-            ],
+            )
+        return HmrParseResult(
+            ok=False,
+            parse_warnings=warnings + [warning],
             total_rows_scanned=rows_scanned,
         )
 
