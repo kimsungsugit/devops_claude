@@ -154,6 +154,51 @@ class TestSwUTSExcelParser:
         assert e.description == "test description"
         assert e.precondition == "test pre"
 
+    def test_description_digit_fallback_to_next_col_round_live_nw15(self):
+        """F6 라이브 검증 NW15 fix: HDPDM01 SITS v2.02 양식 layout 결함 대응.
+        sub-TC row의 description col이 단순 digit (sub-index)이면 인접 col에서
+        진짜 description 텍스트 fallback. 사용자 결정 (자동 감지 fallback).
+        """
+        from backend.services.swuts_excel_parser import parse_swuts_xlsm
+
+        # HDPDM01 SITS 양식 시뮬레이션 — description col(C3) 다음 C4가 진짜 텍스트
+        # header: TC ID(C2) / Description(C3) / (C4 unmapped) / Test Method(C5)
+        xlsm_bytes = _build_swuts_xlsm(
+            headers=["", "TC ID", "Description", "", "Test Method"],
+            data_rows=[
+                ["", "SwITC_01", "1", "main -> Init -> System", "AEC, ABV"],
+                ["", "SwITC_02", "2", "main -> SystemCheck -> Update", "AEC, ABV"],
+            ],
+        )
+        result = parse_swuts_xlsm(xlsm_bytes)
+        assert result.ok is True
+        # description이 sub-index "1","2"가 아닌 실제 텍스트로 stamp
+        entries_by_tc = {e.tc_id: e for e in result.entries}
+        assert "SwITC_01" in entries_by_tc
+        assert entries_by_tc["SwITC_01"].description == "main -> Init -> System", (
+            f"NW15 회귀: description fallback 실패 — "
+            f"실제 stamp: {entries_by_tc['SwITC_01'].description!r}"
+        )
+        assert entries_by_tc["SwITC_01"].sub_index == "1"
+        assert entries_by_tc["SwITC_02"].description == "main -> SystemCheck -> Update"
+        assert entries_by_tc["SwITC_02"].sub_index == "2"
+
+    def test_description_text_not_affected_by_nw15_fix(self):
+        """NW15 fix는 KJPDS02 SwITS처럼 description이 텍스트인 양식에 영향 없음."""
+        from backend.services.swuts_excel_parser import parse_swuts_xlsm
+
+        xlsm_bytes = _build_swuts_xlsm(
+            headers=["", "TC ID", "Description", "", "Test Method"],
+            data_rows=[
+                ["", "SwITC_01", "Interface : main -> System -> Init", "", "REQ, IFT"],
+            ],
+        )
+        result = parse_swuts_xlsm(xlsm_bytes)
+        assert result.ok is True
+        entry = result.entries[0]
+        assert entry.description == "Interface : main -> System -> Init"
+        assert entry.sub_index == ""  # description은 digit 아니므로 sub-index 분리 안 함
+
     def test_first_row_sub_tc_emits_warning_round5_nf1(self):
         """F6 Round 5 NF1 fix: 양식 변종에서 첫 data row가 TC_ID 없는 sub-TC면
         직전 메타 row 없어 silent drop. parse_warnings emit으로 audit reviewer

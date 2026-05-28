@@ -281,6 +281,28 @@ def _build_entry_from_row(
     generation_method = _get_cell("generation_method")
     sub_index = _get_cell("sub_index")
 
+    # F6 라이브 검증 NW15 fix: HDPDM01 SITS v2.02 양식 layout 결함 대응 (사용자 결정).
+    # 양식 header가 'Description=C3'이나 실제 sub-TC row의 C3=sub-index, C4=description.
+    # description이 단순 digit (1자리)이면 sub-index로 분리하고 인접 col을 description
+    # fallback. KJPDS02 SwITS는 description이 'Interface : ...' 텍스트라 영향 없음.
+    if description.isdigit() and len(description) <= 2:
+        if not sub_index:
+            sub_index = description
+        # 다음 col에서 의미 있는 텍스트 fallback (description col 다음 col)
+        desc_cols = col_map.get("description") or []
+        if desc_cols:
+            primary_desc_col = desc_cols[0]
+            next_col = primary_desc_col + 1
+            if 0 < next_col <= len(row):
+                v = row[next_col - 1]
+                if v is not None:
+                    fallback_text = str(v).strip()
+                    # fallback도 digit이거나 빈 string이면 description 유지 (기존)
+                    if fallback_text and not (
+                        fallback_text.isdigit() and len(fallback_text) <= 2
+                    ):
+                        description = fallback_text
+
     # 모든 의미 있는 field 비어있으면 skip
     has_content = any([
         tc_id, description, test_method, generation_method,
