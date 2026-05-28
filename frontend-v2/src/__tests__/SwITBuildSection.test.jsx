@@ -76,6 +76,22 @@ describe('SwITBuildSection', () => {
     expect(browseButtons.length).toBe(9);
   });
 
+  it('Browse 버튼이 JSX duplicate attribute warning을 발화하지 않음 (F6 Round 9 NW12)', () => {
+    // F6 Round 8 deep-reviewer 발견: SwITBuildSection.jsx 659-685 두 곳에서
+    // disabled / title 속성이 4줄 중복 → silent inconsistency 위험. Round 9
+    // fix로 중복 제거. console.warn capture로 회귀 lock.
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    render(<SwITBuildSection />);
+    const dupMessages = [
+      ...warnSpy.mock.calls.flat(),
+      ...errorSpy.mock.calls.flat(),
+    ].filter(m => typeof m === 'string' && /Duplicate.*attribute/i.test(m));
+    expect(dupMessages).toEqual([]);
+    warnSpy.mockRestore();
+    errorSpy.mockRestore();
+  });
+
   it('default asil_level is "ASIL B" (SwIT Integration test convention)', () => {
     render(<SwITBuildSection />);
     const input = screen.getByLabelText(/ASIL Level/);

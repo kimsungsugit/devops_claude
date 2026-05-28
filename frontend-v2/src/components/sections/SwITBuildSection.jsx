@@ -659,8 +659,6 @@ export default function SwITBuildSection() {
           <button className="swut-browse-btn" type="button"
                   disabled={!isAdmin}
                   title={isAdmin ? undefined : browseDisabledTitle}
-                disabled={!isAdmin}
-                title={isAdmin ? undefined : browseDisabledTitle}
                   onClick={() => openPicker('consistency.coverage_path', '*.xlsx', 'Coverage Report 선택')}>
             📂 Browse
           </button>
@@ -678,8 +676,6 @@ export default function SwITBuildSection() {
           <button className="swut-browse-btn" type="button"
                   disabled={!isAdmin}
                   title={isAdmin ? undefined : browseDisabledTitle}
-                disabled={!isAdmin}
-                title={isAdmin ? undefined : browseDisabledTitle}
                   onClick={() => openPicker('consistency.sitr_path', '*.xlsm', 'SITR 선택')}>
             📂 Browse
           </button>
