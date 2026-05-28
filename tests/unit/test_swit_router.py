@@ -157,7 +157,8 @@ class TestSwitMetaBuilder:
             headers={"X-User": "tester"},
         )
         # template_path 누락 → 400 또는 빌더 단계에서 404 (log_folder 미존재)
-        assert r.status_code in (400, 404, 500)
+        # F7: config 회사 표준 path 등록 후 path validation skip → admin 가드 403도 정상
+        assert r.status_code in (400, 403, 404, 500)
 
 
 # ---------------------------------------------------------------------------
@@ -231,7 +232,7 @@ class TestSwitSitrMediaType:
     """SITR 응답 media_type — xlsm macroenabled.12."""
 
     def test_sitr_missing_template_returns_400_or_404(self):
-        """template_path 미지정 — Coverage와 동일 정책."""
+        """template_path 미지정 — Coverage와 동일 정책. F7 — admin 가드 403도 허용."""
         body = {
             "project_id": "HDPDM01",
             "release_sw_version": "2.02",
@@ -242,7 +243,7 @@ class TestSwitSitrMediaType:
             "/api/swit/sitr/build", json=body,
             headers={"X-User": "tester"},
         )
-        assert r.status_code in (400, 404, 500)
+        assert r.status_code in (400, 403, 404, 500)
 
 
 class TestSwitSitrXUserHeader:
