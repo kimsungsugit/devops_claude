@@ -893,13 +893,18 @@ def _write_test_log(
             clear_start = start_row + (written * tc_row_step)
             clear_end = ws.max_row
             if clear_end >= clear_start:
-                # data row range — col 1~20 (TC ID/Method/Input/Expected/Actual etc.)
-                # 양식 default '< End of Document >' 같은 sentinel 보존 위해 max_col 20 제한
+                # F7 자체평가 R1 C1/C3 fix: col range 1~20 → 1~40 확장 (양식 default
+                # 'Pass' 텍스트가 col 36/37에 prefill되어 잔존). sentinel_patterns로
+                # '< End of Document >' / '■ Appendix' 같은 양식 끝 마커 보존.
                 cleared = clear_data_range(
                     ws,
                     start_row=clear_start, end_row=clear_end,
-                    start_col=1, end_col=20,
+                    start_col=1, end_col=40,
                     preserve_formula=True, preserve_merged_anchor=True,
+                    sentinel_patterns=[
+                        "End of Document", "< End", "■ Appendix",
+                        "Appendix", "※",
+                    ],
                 )
                 if out_warnings is not None and cleared > 0:
                     out_warnings.append(

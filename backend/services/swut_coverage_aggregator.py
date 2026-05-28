@@ -570,6 +570,34 @@ def _write_coverage_sheet(
                 _marker(ws, r, col)
 
         written += 1
+
+    # F7 자체평가 R1 C2 fix: clear policy — 신규 stamp 후 양식 default 함수 row
+    # (Fun_B/Fun_C/Fun_D 등) clear. 회사 표준 SwUTCV 4.Coverage 양식이 R12+에
+    # 5+ default 함수 보유 → 신규 session 2 함수만 R10/R11 stamp + R12+ default 잔존
+    # → R25 `=SUM(F10:F24)` 수식이 default까지 sum하여 false coverage 산출.
+    if written > 0:
+        try:
+            from backend.services.excel_template_utils import clear_data_range
+            clear_start = data_start + written
+            clear_end = ws.max_row
+            if clear_end >= clear_start:
+                cleared = clear_data_range(
+                    ws,
+                    start_row=clear_start, end_row=clear_end,
+                    start_col=no_col, end_col=branch_count_col + 6,
+                    preserve_formula=True, preserve_merged_anchor=True,
+                    sentinel_patterns=[
+                        "End of Document", "< End", "■ Appendix",
+                        "Appendix", "※", "TOTALS", "GRAND TOTALS",
+                    ],
+                )
+                if out_warnings is not None and cleared > 0:
+                    out_warnings.append(
+                        f"[clear] Coverage 시트 row {clear_start}~{clear_end} "
+                        f"양식 default 함수 row {cleared} cell clear (false coverage 차단)"
+                    )
+        except ImportError:
+            pass
     return written
 
 

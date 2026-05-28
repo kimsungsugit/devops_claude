@@ -447,6 +447,7 @@ def clear_data_range(
     end_col: int,
     preserve_formula: bool = True,
     preserve_merged_anchor: bool = True,
+    sentinel_patterns: list[str] | None = None,
 ) -> int:
     """라운드 D T601: 시트의 data row 영역 clear (template-copy partial overwrite 결함 fix).
 
@@ -463,12 +464,37 @@ def clear_data_range(
             cross-sheet reference 수식 보호.
         preserve_merged_anchor: True면 머지 영역의 비-anchor cell은 건드리지 않음
             (anchor만 clear) — 머지 깨짐 방지.
+        sentinel_patterns: 이 substring 중 하나를 포함한 cell 발견 시 그 row
+            직전까지만 clear. 예: ['End of Document', '< End', '■ Appendix']
+            — 양식의 끝 마커/Appendix 보호 (F7 자체평가 Round 1 C1/C3 fix).
 
     Returns:
         cleared cell count.
     """
     if start_row > end_row or start_col > end_col:
         return 0
+    # F7 자체평가 R1 C1/C3: sentinel 사전 탐지 — end_row 조기 종료.
+    if sentinel_patterns:
+        actual_end = end_row
+        for r in range(start_row, end_row + 1):
+            for c in range(start_col, end_col + 1):
+                try:
+                    v = ws.cell(row=r, column=c).value
+                except (AttributeError, IndexError):
+                    continue
+                if not isinstance(v, str):
+                    continue
+                for pat in sentinel_patterns:
+                    if pat in v:
+                        actual_end = r - 1
+                        break
+                if actual_end != end_row:
+                    break
+            if actual_end != end_row:
+                break
+        end_row = actual_end
+        if start_row > end_row:
+            return 0
     cleared = 0
     for r in range(start_row, end_row + 1):
         for c in range(start_col, end_col + 1):
