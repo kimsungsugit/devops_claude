@@ -263,7 +263,9 @@ class TestSwitMissingSheetFallback:
             _make_swit_session(), _make_swit_meta(), buf.getvalue(),
         )
         assert result.ok
-        assert any("1.Traceability" in w for w in result.warnings)
+        # 라운드 F7 D1 fix: 'Traceability 시트 미발견' (prefix '1.' 제거 — 회사 표준
+        # SwITCV는 '2.Traceability'이지만 본 fixture는 시트 자체 부재)
+        assert any("Traceability" in w and "미발견" in w for w in result.warnings)
 
     def test_consistency_partial_when_swuds_not_provided(self):
         """SwUDS function_ids 미제공 → incomplete_sheets에 partial 표시."""

@@ -267,13 +267,14 @@ def build_swit_coverage_report(
 
     # 1.Traceability
     trace_ws = next((wb[n] for n in sheet_names if "traceability" in n.lower()), None)
+    # 라운드 F7 D1 fix: 실제 시트 이름 보고 (회사 표준 SwITCV는 '2.Traceability')
     if trace_ws is None:
-        warnings.append("1.Traceability 시트 미발견")
+        warnings.append("Traceability 시트 미발견")
     else:
         n_o = _write_traceability_sheet(trace_ws, session, out_warnings=warnings, layout=layout)
         summary["traceability_o_cells"] = n_o
         if n_o == 0:
-            incomplete_sheets.append("1.Traceability")
+            incomplete_sheets.append(trace_ws.title)
 
     # 2.Consistency — 34차 C2 fix: test_kind="SwIT" (intro/row 5 item 라벨 치환)
     cons_ws = next((wb[n] for n in sheet_names if "consistency" in n.lower()), None)
@@ -289,10 +290,10 @@ def build_swit_coverage_report(
             summary["consistency_swuds_compared"] = True
         else:
             summary["consistency_swuds_compared"] = False
-            incomplete_sheets.append("2.Consistency (SwUDS 비교 partial)")
+            incomplete_sheets.append(f"{cons_ws.title} (SwUDS 비교 partial)")
     else:
-        warnings.append("2.Consistency 시트 미발견")
-        incomplete_sheets.append("2.Consistency")
+        warnings.append("Consistency 시트 미발견")
+        incomplete_sheets.append("Consistency")
 
     # History — 55-fix: single-row release entry (사용자 결정 B)
     hist_ws = next((wb[n] for n in sheet_names if n.lower() == "history"), None)

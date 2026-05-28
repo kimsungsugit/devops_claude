@@ -1145,15 +1145,18 @@ def build_coverage_report(
         summary["coverage_rows_written"] = n_written
 
     # 1.Traceability — T133 본격 작성 (TC×Function 매트릭스)
+    # 라운드 F7 D1 fix: incomplete_sheets에 실제 시트 이름 보고 — 회사 표준은
+    # '2.Traceability' (prefix 2.), HDPDM01 release는 '1.Traceability'. 시트 발견
+    # 시 ws.title 사용.
     incomplete_sheets: list[str] = []
     trace_ws = next((wb[n] for n in sheet_names if "traceability" in n.lower()), None)
     if trace_ws is None:
-        warnings.append("1.Traceability 시트 미발견")
+        warnings.append("Traceability 시트 미발견")
     else:
         n_o = _write_traceability_sheet(trace_ws, session, out_warnings=warnings, layout=layout)
         summary["traceability_o_cells"] = n_o
         if n_o == 0:
-            incomplete_sheets.append("1.Traceability")
+            incomplete_sheets.append(trace_ws.title)
 
     # 2.Consistency — 15차: SwUTS 자체 일관성 4 row + 16차: SwUDS↔SwUTS 매핑 row (옵션).
     cons_ws = next((wb[n] for n in sheet_names if "consistency" in n.lower()), None)
@@ -1169,10 +1172,11 @@ def build_coverage_report(
             # SwUDS 매핑까지 자동 완료 — incomplete 표시 제거.
         else:
             summary["consistency_swuds_compared"] = False
-            incomplete_sheets.append("2.Consistency (SwUDS 비교 partial — v3.02)")
+            # 라운드 F7 D1 fix: ws.title 사용 (회사 표준 '3.Consistency')
+            incomplete_sheets.append(f"{cons_ws.title} (SwUDS 비교 partial — v3.02)")
     else:
-        warnings.append("2.Consistency 시트 미발견")
-        incomplete_sheets.append("2.Consistency")
+        warnings.append("Consistency 시트 미발견")
+        incomplete_sheets.append("Consistency")
 
     # History — 55-fix: 사용자 결정 B (single-row release entry).
     # 이전 git log 10건 → 산출물 release_sw_version + test_date 1 row만.
