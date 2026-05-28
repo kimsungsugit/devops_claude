@@ -1172,9 +1172,13 @@ def build_coverage_report(
                    if "coverage" in n.lower() and "traceability" not in n.lower()
                    and "consistency" not in n.lower()), None)
     if cov_ws is None:
-        warnings.append("3.Coverage 시트 미발견")
+        warnings.append("Coverage 시트 미발견")
     else:
-        n_written = _write_coverage_sheet(cov_ws, agg)
+        # F7 자체평가 R2 N3 fix: layout + out_warnings 전달 — clear warning이
+        # X-SwUT-Warnings 헤더로 propagate (이전 누락).
+        n_written = _write_coverage_sheet(
+            cov_ws, agg, layout=layout, out_warnings=warnings,
+        )
         summary["coverage_rows_written"] = n_written
 
     # 1.Traceability — T133 본격 작성 (TC×Function 매트릭스)

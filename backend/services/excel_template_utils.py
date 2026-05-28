@@ -473,7 +473,12 @@ def clear_data_range(
     """
     if start_row > end_row or start_col > end_col:
         return 0
-    # F7 자체평가 R1 C1/C3: sentinel 사전 탐지 — end_row 조기 종료.
+    # F7 자체평가 R1 C1/C3 + R2 N2: sentinel 사전 탐지 — end_row 조기 종료.
+    # N2 fix: substring 매칭 (`pat in v`)이 false positive — 함수명 'AppendixHelper'
+    # 등이 'Appendix' substring 매칭하여 잘못 clear 무력화. strict 매칭으로 변경:
+    # - 양식 끝 마커는 '<', '■', '※' prefix (예: '< End of Document >', '■ Appendix')
+    # - 또는 strip 후 pat과 exact / startswith 매칭
+    # - 'TOTALS' / 'GRAND TOTALS' 단독 cell만 매칭 (포함 부분 매칭 X)
     if sentinel_patterns:
         actual_end = end_row
         for r in range(start_row, end_row + 1):
@@ -484,8 +489,14 @@ def clear_data_range(
                     continue
                 if not isinstance(v, str):
                     continue
+                v_stripped = v.strip()
                 for pat in sentinel_patterns:
-                    if pat in v:
+                    # 양식 마커는 보통 cell 단독으로 존재 (다른 텍스트 미혼합)
+                    # strict 매칭 3가지: exact / startswith '<'/'■'/'※' + pat / pat이 단독 단어
+                    if v_stripped == pat:
+                        actual_end = r - 1
+                        break
+                    if v_stripped.startswith(("<", "■", "※")) and pat in v_stripped:
                         actual_end = r - 1
                         break
                 if actual_end != end_row:

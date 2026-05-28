@@ -809,9 +809,21 @@ def _write_test_log(
                                     )
 
         # Pass/Fail stamp — Unit (필수) + Total (v3.01만, v2.02는 PASS_FAIL_TOTAL_COL=0이라 skip).
+        # F7 자체평가 R2 N1 fix: anchor row만 stamp가 양식 default 'Pass' 잔존
+        # (step row R+1~R+step-1) → 'Fail' anchor인데 step rows 'Pass' 표시되어
+        # audit reviewer false success. 모든 step row에 동일 result 동기 + log_path
+        # 도 첫 row만, step row는 None clear (default 'Pass' 차단).
         safe_write(ws, r, PASS_FAIL_UNIT_COL, result_str)
         if PASS_FAIL_TOTAL_COL > 0:
             safe_write(ws, r, PASS_FAIL_TOTAL_COL, result_str)
+        # step row Pass/Fail clear — 양식 default 'Pass' 잔존 차단 (N1)
+        if tc_row_step > 1:
+            for sub_offset in range(1, tc_row_step):
+                sub_r = r + sub_offset
+                if PASS_FAIL_UNIT_COL > 0:
+                    safe_write(ws, sub_r, PASS_FAIL_UNIT_COL, None)
+                if PASS_FAIL_TOTAL_COL > 0:
+                    safe_write(ws, sub_r, PASS_FAIL_TOTAL_COL, None)
 
         # Log Data — VectorCAST log file path 추정.
         log_path = ""

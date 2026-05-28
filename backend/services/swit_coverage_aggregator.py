@@ -260,9 +260,12 @@ def build_swit_coverage_report(
         None,
     )
     if cov_ws is None:
-        warnings.append("3.Coverage 시트 미발견")
+        warnings.append("Coverage 시트 미발견")
     else:
-        n_written = _write_coverage_sheet(cov_ws, agg)
+        # F7 자체평가 R2 N3 fix: layout + out_warnings 전달 (SwUT 대칭)
+        n_written = _write_coverage_sheet(
+            cov_ws, agg, layout=layout, out_warnings=warnings,
+        )
         summary["coverage_rows_written"] = n_written
 
     # 1.Traceability

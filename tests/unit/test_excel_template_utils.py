@@ -621,3 +621,31 @@ class TestClearDataRange:
         )
         # 전체 24 cell clear
         assert cleared == 24
+
+    def test_sentinel_substring_false_positive_strict_match_round_f7_r2_n2(self):
+        """F7 R2 N2 fix: 함수명 'AppendixHelper' substring 'Appendix' false positive
+        차단. strict 매칭으로 양식 끝 마커 prefix ('<', '■', '※') 또는 exact만 인정."""
+        ws = self._make_ws()
+        # R7 C2에 함수명 'AppendixHelper' (sentinel false positive 후보)
+        ws.cell(7, 2).value = "AppendixHelper"
+        cleared = clear_data_range(
+            ws, start_row=5, end_row=10, start_col=1, end_col=4,
+            sentinel_patterns=["Appendix"],
+        )
+        # strict 매칭 — '< ' prefix 없으므로 sentinel 인식 안 함 → 전체 clear
+        # R5/R6 + R7 (AppendixHelper도 clear됨) + R8~R10 × C1~C4 = 24
+        assert cleared == 24
+
+    def test_sentinel_strict_match_prefix_round_f7_r2_n2(self):
+        """F7 R2 N2 fix: '■ Appendix' / '< End of Document >' 같은 양식 마커
+        prefix만 sentinel로 인식."""
+        ws = self._make_ws()
+        ws.cell(7, 2).value = "■ Appendix - 발생 가능 값"  # 양식 마커
+        cleared = clear_data_range(
+            ws, start_row=5, end_row=10, start_col=1, end_col=4,
+            sentinel_patterns=["Appendix"],
+        )
+        # R5/R6만 clear (R7 sentinel + R8~R10 보존)
+        assert cleared == 8
+        assert ws.cell(7, 2).value == "■ Appendix - 발생 가능 값"
+        assert ws.cell(8, 1).value == "default_R8C1"
