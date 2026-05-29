@@ -372,6 +372,14 @@ def _scan_test_log_columns(ws) -> dict[str, Optional[int]]:
     # 59차 F4-A — KJPDS02 v1.01 양식 max_col=378 호환. v2.02/v3.01 양식의 라벨은
     # col 50 안에 있지만 v1.01은 더 넓은 범위 가능 — 500 확장 (수십 ms 비용).
     max_col = min(ws.max_column + 1, 500) if ws.max_column else 500
+    # 라운드 74 T904 — KJPDS02 v1.01 양식 column 헤더 패턴 추가.
+    # 회사 KJPDS02 SwITR v1.01 Test Log row 3에 `Input` 라벨이 cell column 10에 있고,
+    # row 4에 `Inpt[0] / Inpt[1] / ...` 변수명 stamp. 비슷하게 Exp[N]/Act[N]도 가능.
+    # 첫 `Inpt[0]` cell column을 input_col로 인식 (별도 'Input' 라벨이 인접 cell에 없을 때).
+    _inpt_re = _INPT_LABEL_RE
+    _exp_re = re.compile(r"^Exp\[\d+\]$")
+    _act_re = re.compile(r"^Act\[\d+\]$")
+
     for r in range(1, max_row):
         for c in range(1, max_col):
             v = ws.cell(r, c).value
@@ -379,6 +387,17 @@ def _scan_test_log_columns(ws) -> dict[str, Optional[int]]:
                 continue
             s = v.strip().lower()
             if not s:
+                continue
+            # 라운드 74 T904 — Inpt[0]/Exp[0]/Act[0] 첫 인덱스 매칭 (v1.01 양식)
+            raw = v.strip()
+            if result["input_col"] is None and _inpt_re.match(raw) and raw.endswith("[0]"):
+                result["input_col"] = c
+                continue
+            if result["expected_col"] is None and _exp_re.match(raw) and raw.endswith("[0]"):
+                result["expected_col"] = c
+                continue
+            if result["actual_col"] is None and _act_re.match(raw) and raw.endswith("[0]"):
+                result["actual_col"] = c
                 continue
             if result["input_col"] is None and s in (
                 "input", "input parameters", "input parameter",

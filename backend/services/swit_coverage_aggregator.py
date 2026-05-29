@@ -188,19 +188,41 @@ def build_swit_coverage_report(
             new_function_rows: list[FunctionCoverage] = []
             stamped = 0
             ambiguous = 0
+            disambiguated = 0
+            # 라운드 74 T908 — c_function_map 활용 2-arg lookup. ambiguous 함수도
+            # c_parser file 정보로 disambiguate (`(name, unit_file)` 2-tuple 매칭).
+            c_fn_map_local = getattr(session, "c_function_map", None) or {}
+
+            def _basename(path: str) -> str:
+                """unit_file path → basename (slash/backslash 정규화)."""
+                if not path:
+                    return ""
+                return path.replace("\\", "/").rsplit("/", 1)[-1].lower()
+
             for fc in original_rows:
-                # F6 Round 1 C2 + W3 fix: metrics_by_name + fc.unit_id 제거.
                 candidates = hmr_result.metrics_by_name.get(fc.name, [])
+                m = None
                 if len(candidates) > 1:
-                    ambiguous += 1
-                    _files = ", ".join(sorted({c.unit_file for c in candidates}))
-                    warnings.append(
-                        f"[hmr] ambiguous function '{fc.name}' — 다중 unit_file "
-                        f"({_files}) 매칭. silent wrong-pick 방지 위해 stamp skip"
-                    )
-                    new_function_rows.append(fc)
-                    continue
-                m = candidates[0] if candidates else None
+                    # 라운드 74 T908 — c_parser file 매칭으로 disambiguate 시도.
+                    c_entry = c_fn_map_local.get(fc.name) or c_fn_map_local.get(fc.unit_id)
+                    c_file_base = _basename(c_entry.get("file", "") if c_entry else "")
+                    if c_file_base:
+                        for cand in candidates:
+                            if _basename(cand.unit_file) == c_file_base:
+                                m = cand
+                                disambiguated += 1
+                                break
+                    if m is None:
+                        ambiguous += 1
+                        _files = ", ".join(sorted({c.unit_file for c in candidates}))
+                        warnings.append(
+                            f"[hmr] ambiguous function '{fc.name}' — 다중 unit_file "
+                            f"({_files}) 매칭. c_parser file 정보 없음 → stamp skip"
+                        )
+                        new_function_rows.append(fc)
+                        continue
+                else:
+                    m = candidates[0] if candidates else None
                 if m and m.total_calls > 0:
                     new_function_rows.append(_dc_replace(
                         fc,
@@ -213,6 +235,11 @@ def build_swit_coverage_report(
                     stamped += 1
                 else:
                     new_function_rows.append(fc)
+            if disambiguated > 0:
+                warnings.append(
+                    f"[hmr] c_parser file disambiguation: {disambiguated} ambiguous 함수가 "
+                    "c_parser 파일 매칭으로 정확 stamp됨"
+                )
             warnings.append(
                 f"[hmr] Function Calls metric stamped — {stamped}/{len(original_rows)} "
                 f"functions matched (HMR metric count: {len(hmr_result.metrics)}, "
@@ -276,6 +303,7 @@ def build_swit_coverage_report(
     else:
         # F7 R2 N3 + Stage 10 G3 fix: layout + out_warnings + is_swit_caller=True
         # SwITCV는 SwIT 분기 (Functions Pass + Function Called metric)
+        # 라운드 74 T906 → 자체평가 롤백: SwUTCV 대칭 — c_function_map 미전달.
         n_written = _write_coverage_sheet(
             cov_ws, agg, layout=layout, out_warnings=warnings,
             is_swit_caller=True,

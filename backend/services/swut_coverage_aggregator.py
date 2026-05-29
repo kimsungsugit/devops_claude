@@ -458,6 +458,7 @@ def _write_coverage_sheet(
     ws, agg: dict[str, Any], *, layout: Any = None,
     out_warnings: list[str] | None = None,
     is_swit_caller: bool = False,
+    c_function_map: dict[str, dict[str, Any]] | None = None,
 ) -> int:
     """3. Coverage 시트 — per-function Statement/Branch/Exception 표.
 
@@ -469,12 +470,24 @@ def _write_coverage_sheet(
     KJPDS02 v1.01 양식 호환 — 추가 col에 Function Calls metric stamp
     (``FunctionCoverage.function_calls_coverage``). v2.02/v3.01은 단일 metric.
 
+    라운드 74 T906: c_function_map 제공 시 vcast function_rows + c_parser 함수
+    union dedup. c_parser only row는 빈 CoverageStats + 노란 마킹 + Note column에
+    "[c_parser] coverage 미실측" 안내. 회사 KJPDS02 v1.01 양식 570 함수 row stamp
+    대비 격차 해소 (HDPDM01은 60 vcast + 257 c_parser only ≈ 317).
+
     Returns:
         쓰여진 행 수.
     """
     if not ws:
         return 0
-    function_rows: list[FunctionCoverage] = agg.get("function_rows", [])
+    # 라운드 74 T906 — c_parser merge (provided이면 union list 사용)
+    if c_function_map:
+        from backend.services.swut_input_adapter import merge_function_rows_with_c_parser
+        function_rows = merge_function_rows_with_c_parser(
+            agg, c_function_map, out_warnings=out_warnings,
+        )
+    else:
+        function_rows = list(agg.get("function_rows") or [])
     if not function_rows:
         return 0
 
@@ -569,25 +582,51 @@ def _write_coverage_sheet(
         safe_write(ws, r, unit_id_col, fc.unit_id)
         safe_write(ws, r, unit_id_col + 1, fc.name)
 
+        # 라운드 74 T906 — c_parser only row 식별 (unit_id `SwUFn_C_<idx>` prefix).
+        # 빈 CoverageStats → coverage 미실측 — Statement/Branch cell 노란 마킹 +
+        # Note column 안내. audit reviewer가 한눈에 실측 vs c_parser only 구분.
+        is_c_parser_only = bool(fc.unit_id and fc.unit_id.startswith("SwUFn_C_"))
+
         if is_swit_metric_layout:
             # SwITCV — Functions Pass (C6) + Function Called metric (C8/C9/C10)
             # Functions Pass: function 매핑 여부 — 신규 session에 unit_id 있으면 'O'
             functions_pass_col = no_col + 4
             fcalls_count_col = no_col + 6
-            safe_write(ws, r, functions_pass_col, "O")
-            fcc = getattr(fc, "function_calls_coverage", None)
-            if fcc is not None and fcc.total > 0:
-                safe_write(ws, r, fcalls_count_col, fcc.covered)
-                safe_write(ws, r, fcalls_count_col + 1, fcc.total)
-                safe_write(ws, r, fcalls_count_col + 2, "O" if fcc.passed else "X")
+            if is_c_parser_only:
+                # 라운드 74 T906 — c_parser only Functions Pass cell에 '[c_parser]' 안내.
+                # mark_user_input_required는 텍스트를 placeholder로 덮어쓰니 _apply_fill 직접 호출.
+                from backend.services.excel_template_utils import _apply_fill
+                from backend.services.design_tokens import USER_INPUT_FILL_RGB
+                safe_write(ws, r, functions_pass_col, "[c_parser]")
+                _apply_fill(ws, r, functions_pass_col, USER_INPUT_FILL_RGB)
+            else:
+                safe_write(ws, r, functions_pass_col, "O")
+                fcc = getattr(fc, "function_calls_coverage", None)
+                if fcc is not None and fcc.total > 0:
+                    safe_write(ws, r, fcalls_count_col, fcc.covered)
+                    safe_write(ws, r, fcalls_count_col + 1, fcc.total)
+                    safe_write(ws, r, fcalls_count_col + 2, "O" if fcc.passed else "X")
         else:
             # SwUTCV / HDPDM01 — Statement + Branch metric
-            safe_write(ws, r, stmt_count_col, fc.statement.total)
-            safe_write(ws, r, stmt_count_col + 1, fc.statement.covered)
-            safe_write(ws, r, stmt_count_col + 2, "O" if fc.statement.passed else "X")
-            safe_write(ws, r, branch_count_col, fc.branch.total)
-            safe_write(ws, r, branch_count_col + 1, fc.branch.covered)
-            safe_write(ws, r, branch_count_col + 2, "O" if fc.branch.passed else "X")
+            if is_c_parser_only:
+                # 라운드 74 T906 — c_parser only row: Statement/Branch에 '[c_parser]' 안내 + 노란 fill.
+                from backend.services.excel_template_utils import _apply_fill
+                from backend.services.design_tokens import USER_INPUT_FILL_RGB
+                safe_write(ws, r, stmt_count_col, "[c_parser]")
+                safe_write(ws, r, stmt_count_col + 1, "-")
+                safe_write(ws, r, stmt_count_col + 2, "-")
+                safe_write(ws, r, branch_count_col, "-")
+                safe_write(ws, r, branch_count_col + 1, "-")
+                safe_write(ws, r, branch_count_col + 2, "-")
+                _apply_fill(ws, r, stmt_count_col, USER_INPUT_FILL_RGB)
+                _apply_fill(ws, r, branch_count_col, USER_INPUT_FILL_RGB)
+            else:
+                safe_write(ws, r, stmt_count_col, fc.statement.total)
+                safe_write(ws, r, stmt_count_col + 1, fc.statement.covered)
+                safe_write(ws, r, stmt_count_col + 2, "O" if fc.statement.passed else "X")
+                safe_write(ws, r, branch_count_col, fc.branch.total)
+                safe_write(ws, r, branch_count_col + 1, fc.branch.covered)
+                safe_write(ws, r, branch_count_col + 2, "O" if fc.branch.passed else "X")
 
             # 59차 F4-C — KJPDS02 v1.01 양식 (HDPDM01과 별도): Function Calls metric col stamp.
             if (
@@ -653,11 +692,14 @@ def _write_coverage_sheet(
 # BLANK_MARKUP은 excel_template_utils에서 import (단일 출처).
 
 
-_TC_FN_RE = re.compile(r"(SwUFn_\d+|SwITC_\d+)")
-# 라운드 73 P1 fix: SwIT TC name 'SwITC_NNNN' / 'SwITC_NNNN.NNN' 형식 매칭 추가.
-# 이전 `(SwUFn_\d+)`만은 회사 KJPDS02 SwIT TC name (예: 'SwITC_0101')에 매칭 못해
-# `_collect_tc_to_function` 결과 빈 dict → SITR Test Log stamp 0 TC (12 TC 누락).
-# SwUFn_ alternative가 우선 매칭 (SwIT의 'SwITC_SwUFn_0101.001' 호환 유지).
+_TC_FN_RE = re.compile(r"(SwUFn_\d+|SwITC_\d+(?:_\d+)?)")
+# 라운드 73 P1 fix: SwIT TC name 'SwITC_NNNN' / 'SwITC_NNNN.NNN' 형식 매칭.
+# 라운드 74 T901 fix: SwITC_NN_NN sub-index 보존 (`SwITC_3301_02` 형식). 회사
+# KJPDS02 v1.01 SwITCV 2.Traceability가 sub-index 별 row stamp (R58 SwITC_3301_02 /
+# R59 SwITC_3301_03 등 60 row × 110 col matrix). 이전 prefix 통합으로 12 row만 stamp
+# → audit reviewer 검수에서 'sub-index 손실' 결함 발견.
+# backward-compat: sub-index `_\d+` 선택 캡처. 'SwITC_01.001'은 그대로 SwITC_01,
+# 'SwITC_01_02'는 SwITC_01_02로 sub-index 보존. SwUFn_ alternative는 그대로.
 
 
 def _write_history_sheet(
@@ -893,6 +935,11 @@ def _write_consistency_sheet(
     # row 10 = 헤더 (No / ID / Function Name / SwUDS와 SwUTS 항목 정합성 확인 / 비고).
     # row 11+: 모든 환경의 function_coverage 추출 → fn_id + fn_name + 정합성 stamp.
     # 정확한 attr 이름: FunctionCoverage.unit_id (fn_id) + FunctionCoverage.name (fn_name).
+    #
+    # 라운드 74 T907 → 자체평가 롤백: c_function_map 자동 추가 비활성. vcast가
+    # component 단위 평탄화이고 c_parser는 함수 단위라 dedup 매칭 0건 → row 폭증
+    # (41 → 358) + 양식 cross-ref formula 깨짐. 라운드 75에서 vcast 함수 단위 분해
+    # 후 다시 활성화 검토. function_list source는 vcast function_coverage만 사용 (기존).
     if session.environments:
         all_fns: dict[str, str] = {}  # unit_id → name
         for env in session.environments:
@@ -929,14 +976,15 @@ def _write_consistency_sheet(
         c_fn_map = getattr(session, "c_function_map", None) or {}
         swuds_fn_map = getattr(session, "swuds_function_map", None) or {}
 
-        # 헤더 row (4)에 신규 column 라벨 stamp.
-        # F = Function Signature (C source), G = Description (C comment_desc),
-        # H = SwUDS Heading, I = SwUDS Description (truncated 100자)
+        # 라운드 74 자체평가 fix — 헤더 stamp row 4 → 10 (양식 default function list
+        # header row). 이전 R4 stamp는 자체 일관성 row 첫 번째 row와 섞여서 사용자
+        # 검수에서 '헤더가 잘못된 row에 박혔다' 인지. R10이 'No/ID/Function Name/
+        # SwUDS와 SwUTS 항목 정합성 확인/비고' 양식 header.
         if c_fn_map or swuds_fn_map:
-            safe_write(ws, 4, 6, "Function Signature")  # F
-            safe_write(ws, 4, 7, "C source desc")       # G
-            safe_write(ws, 4, 8, "SwUDS heading")        # H
-            safe_write(ws, 4, 9, "SwUDS desc")           # I
+            safe_write(ws, 10, 6, "Function Signature")  # F
+            safe_write(ws, 10, 7, "C source desc")       # G
+            safe_write(ws, 10, 8, "SwUDS heading")        # H
+            safe_write(ws, 10, 9, "SwUDS desc")           # I
 
         for idx, (unit_id, fn_name) in enumerate(sorted_fns):
             row_idx_fn = function_list_start + idx
@@ -1058,10 +1106,13 @@ def _write_traceability_sheet(
         switc_ids: list[str] = []
         seen: set[str] = set()
         for tc_name in tc_to_fn.keys():
-            # SwITC_NN_NN 형식 sub-index 제거 후 prefix만 — 'SwITC_05_01' / 'SwITC_05_02'
-            # 같은 sub TC는 'SwITC_05' 1건으로 통합
+            # 라운드 74 T902 — SwITC_NN_NN sub-index 보존. 회사 KJPDS02 v1.01 SwITCV
+            # 2.Traceability는 sub-index별 row stamp (R58 'SwITC_3301_02' / R59
+            # 'SwITC_3301_03' 등 unique row). 이전 prefix만 추출 (`SwITC_05_01` →
+            # `SwITC_05`)은 다수 sub-index가 1 row로 합쳐져 60 row가 12로 줄어드는
+            # 사용자 검수 결함.
             sid = None
-            m = _re.match(r"^(SwITC_\d+)", tc_name)
+            m = _re.match(r"^(SwITC_\d+(?:_\d+)?)", tc_name)
             if m:
                 sid = m.group(1)
             else:
@@ -1101,9 +1152,9 @@ def _write_traceability_sheet(
         spec_only_sids: list[str] = []
         if swits_tc_ids:
             for swits_tc in swits_tc_ids:
-                # SwITS xlsm의 tc_id가 'SwITC_NN' 또는 'SwITC_SwUFn_NNNN' 같은 패턴.
-                # session sid 형식과 동일 형식만 비교.
-                m_swits = _re.match(r"^(SwITC_\d+)", swits_tc)
+                # SwITS xlsm의 tc_id가 'SwITC_NN' / 'SwITC_NN_NN' / 'SwITC_SwUFn_NNNN' 패턴.
+                # 라운드 74 T902 — sub-index 보존 (`SwITC_3301_02` 형식).
+                m_swits = _re.match(r"^(SwITC_\d+(?:_\d+)?)", swits_tc)
                 if m_swits:
                     sid_norm = m_swits.group(1)
                 else:
@@ -1471,6 +1522,11 @@ def build_coverage_report(
     else:
         # F7 자체평가 R2 N3 fix: layout + out_warnings 전달 — clear warning이
         # X-SwUT-Warnings 헤더로 propagate (이전 누락).
+        # 라운드 74 T906 → 자체평가 롤백: c_function_map 전달 비활성. vcast가 component
+        # 단위로 평탄화 (60 component)되고 c_parser는 진짜 함수 단위 (317)라 dedup
+        # 매칭 0건 → row 폭증 + 양식 cross-ref formula 깨짐. vcast 추출을 함수 단위로
+        # 분해하는 별도 라운드(75 후보) 후 다시 활성화 검토. 인프라는 helper/_write에
+        # 유지 (option opt-in).
         n_written = _write_coverage_sheet(
             cov_ws, agg, layout=layout, out_warnings=warnings,
         )

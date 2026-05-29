@@ -243,7 +243,20 @@ def build_swit_sitr_report(
     # Deviation — 53차 fix: substring 매칭
     dev_ws = next((wb[n] for n in sheet_names if "deviation" in n.lower()), None)
     if dev_ws is None:
-        warnings.append("Deviation 시트 미발견")
+        # 라운드 74 T903 — Deviation 시트 fallback warning 톤 분리.
+        # 회사 KJPDS02 v1.01 양식은 SwITR 4 시트만 (Cover/History/1.Test Summary/2.Test Log)
+        # → Deviation 시트 미정의가 정상. WARN 톤 → INFO 톤으로 분리 (audit reviewer 혼동 해소).
+        # layout.deviation_sheet_present=False는 inspect_swit_layout이 v1.01 양식 인식한 결과.
+        if getattr(layout, "deviation_sheet_present", True) is False:
+            warnings.append(
+                "[양식정상] Deviation 시트 미발견 — 회사 v1.01 양식 표준 (4 시트). "
+                "audit reviewer는 deviation 발생 시 별도 첨부 필요."
+            )
+        else:
+            warnings.append(
+                "[양식손상] Deviation 시트 미발견 — v2.02/v3.01 양식은 Deviation 시트 정의 필수. "
+                "template 손상 가능성 — 입력 template 확인 의무."
+            )
     elif deviation_cases:
         n = _write_deviation(dev_ws, deviation_cases, out_warnings=warnings)
         summary["deviation_cases_written"] = n

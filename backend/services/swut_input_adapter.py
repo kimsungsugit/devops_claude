@@ -230,6 +230,85 @@ def aggregate_session(session: SwUTSession) -> dict[str, Any]:
     }
 
 
+def merge_function_rows_with_c_parser(
+    agg: dict[str, Any],
+    c_function_map: dict[str, dict[str, Any]] | None,
+    *,
+    out_warnings: list[str] | None = None,
+) -> list[FunctionCoverage]:
+    """라운드 74 T905 — c_parser primary 함수 분해.
+
+    vcast function_rows (HDPDM01 ~60 함수)와 c_parser CFunction map (~317 함수)을
+    union dedup. dedup key는 ``(name, file)`` 2-tuple — 동명 함수가 다른 file에 있으면
+    별도 entry. vcast에 없는 c_parser only 함수는 빈 CoverageStats + 표시 flag로
+    추가.
+
+    Args:
+        agg: aggregate_session 결과 dict.
+        c_function_map: session.c_function_map (None이면 vcast row 그대로 반환).
+        out_warnings: 매칭 충돌 / merge 통계 누적.
+
+    Returns:
+        merged list[FunctionCoverage] — vcast rows 먼저, c_parser only 뒤. 추가된
+        c_parser only row는 `unit_id`에 ``SwUFn_C_<index>`` 자동 생성 prefix (vcast
+        unit_id와 명시적 구분 — audit reviewer 식별 가능).
+
+    audit policy:
+        - vcast row는 그대로 (실측 coverage 100% 유지).
+        - c_parser only row는 statement/branch CoverageStats(0, 0, 0.0) 빈 셀 +
+          comment_asil 우선 매핑 (function_asil_map에 자동 등록).
+
+    backward-compat:
+        c_function_map None / empty → 빈 list union 결과로 vcast rows 그대로 반환.
+    """
+    existing_rows: list[FunctionCoverage] = list(agg.get("function_rows") or [])
+    if not c_function_map:
+        return existing_rows
+
+    # vcast rows의 (name, file) set 구축 — file은 c_parser에만 있어 vcast는 'unknown'
+    existing_keys: set[tuple[str, str]] = set()
+    for fc in existing_rows:
+        # vcast unit_id가 SwUFn_NNNN 또는 component_name 형식. name으로만 매칭 시도.
+        existing_keys.add((fc.name or fc.unit_id, ""))
+        existing_keys.add((fc.name or fc.unit_id, fc.name or ""))  # fallback
+
+    merged = list(existing_rows)
+    c_parser_only_count = 0
+    next_idx = 9000  # vcast SwUFn_0101 등과 명시적 구분 (9000번대)
+    for c_name, c_fn in c_function_map.items():
+        c_file = c_fn.get("file") or ""
+        key_a = (c_name, c_file)
+        key_b = (c_name, "")
+        if key_a in existing_keys or key_b in existing_keys:
+            continue
+        # c_parser only — 빈 CoverageStats + SwUFn_C_<index> unit_id 자동 생성
+        fc = FunctionCoverage(
+            unit_id=f"SwUFn_C_{next_idx}",
+            name=c_name,
+            statement=CoverageStats(0, 0, 0.0),
+            branch=CoverageStats(0, 0, 0.0),
+            mcdc=CoverageStats(0, 0, 0.0),
+            complexity=0,
+        )
+        merged.append(fc)
+        existing_keys.add(key_a)
+        next_idx += 1
+        c_parser_only_count += 1
+
+        # R1 mitigation — c_parser comment_asil를 function_asil_map에 자동 등록.
+        c_asil = (c_fn.get("comment_asil") or "").strip().upper()
+        if c_asil in {"A", "B", "C", "D", "QM"}:
+            agg.setdefault("function_asil_map", {})[fc.unit_id] = c_asil
+
+    if out_warnings is not None and c_parser_only_count > 0:
+        out_warnings.append(
+            f"[merge] c_parser only 함수 {c_parser_only_count}개 추가 stamp "
+            f"(SwUFn_C_9000~ unit_id). coverage 미실측 — audit reviewer 수동 확인 의무."
+        )
+
+    return merged
+
+
 # ---------------------------------------------------------------------------
 # Lightweight HTML extractors (SWTE 변종 전용)
 # ---------------------------------------------------------------------------
@@ -1043,6 +1122,11 @@ def collect_from_log_folder(
     sub_tc = os.path.join(log_folder, "01.TestCaseDataReport")
     sub_exec = os.path.join(log_folder, "02.ExecutionResultReport")
     sub_cov = os.path.join(log_folder, "03.AggregateCoverageReport")
+    # 라운드 74 T909/T910 — 04.MetricsReport (옵션) 동적 탐지. 존재 시 함수별 추가 metric.
+    sub_metrics = os.path.join(log_folder, "04.MetricsReport")
+    has_metrics_folder = resolver.exists(sub_metrics)
+    if has_metrics_folder:
+        _diag_logger.info(f"collect_from_log_folder: 하위 폴더 존재 {sub_metrics!r}")
 
     for sub_path, label in [
         (sub_tc, "01.TestCaseDataReport"),
@@ -1121,6 +1205,47 @@ def collect_from_log_folder(
             env_data.grand_total = total
         except Exception as e:
             env_data.parse_errors.append(f"AggregateCoverage: {type(e).__name__}: {e}")
+
+        # 라운드 74 T910 — 04.MetricsReport HTML (옵션). 존재 시 vcast_hmr_parser
+        # 재활용 → 환경별 함수별 metric 추출 후 function_coverage에 union (dedup by name).
+        # HDPDM01 NE_GN7은 미존재 — silent skip (backward-compat). KJPDS02 같은 다른
+        # 양식에 04.MetricsReport이 있으면 자동 활용.
+        if has_metrics_folder:
+            metrics_path = os.path.join(sub_metrics, f"{env}_metrics_report.html")
+            try:
+                if resolver.exists(metrics_path):
+                    metrics_data = _read_via_resolver(resolver, metrics_path)
+                    from backend.services.vcast_hmr_parser import parse_hmr_html
+                    _w: list[str] = []
+                    hmr = parse_hmr_html(metrics_data, parse_warnings=_w)
+                    if hmr.ok and hmr.metrics:
+                        existing_names = {fc.name for fc in env_data.function_coverage}
+                        added = 0
+                        for m in hmr.metrics:
+                            if m.function_name in existing_names:
+                                continue
+                            new_fc = FunctionCoverage(
+                                unit_id=m.function_name,
+                                name=m.function_name,
+                                statement=CoverageStats(0, 0, 0.0),
+                                branch=CoverageStats(0, 0, 0.0),
+                                function_calls_coverage=CoverageStats(
+                                    covered=m.covered_calls,
+                                    total=m.total_calls,
+                                    coverage_pct=(m.coverage_pct or 0) / 100.0,
+                                ),
+                                complexity=m.complexity or 0,
+                            )
+                            env_data.function_coverage.append(new_fc)
+                            existing_names.add(m.function_name)
+                            added += 1
+                        if added > 0:
+                            _diag_logger.info(
+                                f"collect_from_log_folder: {env} 04.MetricsReport "
+                                f"merge — {added} function metric 추가"
+                            )
+            except Exception as e:
+                env_data.parse_errors.append(f"MetricsReport: {type(e).__name__}: {e}")
 
         session.environments.append(env_data)
 
