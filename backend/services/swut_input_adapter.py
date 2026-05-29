@@ -85,6 +85,11 @@ class FunctionCoverage:
     # 59차 F4-C 신규 — KJPDS02 v1.01 양식 row 6 'Function Calls' coverage.
     # v2.02/v3.01 양식에서는 빈 CoverageStats (default) — writer가 skip.
     function_calls_coverage: CoverageStats = field(default_factory=CoverageStats)
+    # 라운드 76 T1103 신규 — c_parser file basename (예: "bats.c").
+    # vcast 추출은 component 단위 (component_name만)이라 file 정보 없음. c_parser
+    # merge dedup key `(name, file)` 정확성 향상용. enhance_function_coverage_with_file
+    # helper가 c_function_map 매칭으로 주입. 빈 string이면 dedup file=""로 fallback.
+    file: str = ""
 
 
 @dataclass
@@ -228,6 +233,42 @@ def aggregate_session(session: SwUTSession) -> dict[str, Any]:
         "function_asil_map": function_asil_map,  # 30차 W21
         "deviated": 0,
     }
+
+
+def enhance_function_coverage_with_file(
+    function_rows: list[FunctionCoverage],
+    c_function_map: dict[str, dict[str, Any]] | None,
+) -> int:
+    """라운드 76 T1103: vcast FunctionCoverage에 c_parser file 정보 주입.
+
+    vcast `function_rows`는 `file` 정보가 빈 string (vcast HTML이 component 단위
+    추출이라 component_name만 보유). `merge_function_rows_with_c_parser`의 dedup
+    key `(name, file)` 2-tuple이 vcast 측에서 file=""라 모든 c_parser 함수가
+    c_parser-only로 추가되는 결함 (라운드 74 롤백 사유). 본 helper로 vcast
+    function의 name이 c_function_map에 매칭되면 c_entry.file을 fc.file에 주입 →
+    dedup 정확 매칭.
+
+    Args:
+        function_rows: vcast FunctionCoverage list (mutate).
+        c_function_map: c_parser 결과 dict (name → CFunction dict).
+
+    Returns:
+        file 주입된 row 수.
+
+    backward-compat:
+        c_function_map None/empty → 변경 0 (vcast 그대로).
+    """
+    if not c_function_map:
+        return 0
+    enhanced = 0
+    for fc in function_rows:
+        if fc.file:
+            continue  # 이미 file 정보 있음
+        c_entry = c_function_map.get(fc.name) or c_function_map.get(fc.unit_id)
+        if c_entry and c_entry.get("file"):
+            fc.file = c_entry["file"]
+            enhanced += 1
+    return enhanced
 
 
 def merge_function_rows_with_c_parser(

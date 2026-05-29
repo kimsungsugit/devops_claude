@@ -738,6 +738,67 @@ def push_sentinel_to_last_row(
         return found_row
 
 
+def update_cross_refs_after_row_expansion(
+    ws: Any,
+    *,
+    old_totals_row: int,
+    new_totals_row: int,
+    scan_max_row: int = 30,
+    scan_max_col: int = 30,
+) -> int:
+    """라운드 76 T1101: 양식 cross-ref formula의 hardcoded row reference 동적 갱신.
+
+    회사 ★개발템플릿 V3 SwUTCV 4.Coverage R5 `=E25` / R6 `=L25` 같은 hardcoded row
+    reference가 양식 default 가정 TOTALS row (예: 25 — 15 함수 slot용). c_parser
+    primary merge 활성 시 row 폭증 (60→377) 후 R25는 c_parser 함수 row가 되어
+    cross-ref formula 의미 깨짐. 본 helper로 `=E25` → `=E{new_totals_row}` 자동 갱신.
+
+    Args:
+        ws: openpyxl Worksheet.
+        old_totals_row: 양식 default TOTALS row (보통 25).
+        new_totals_row: row 폭증 후 실제 TOTALS row 위치.
+        scan_max_row: cross-ref formula 탐색 row 한계 (보통 양식 헤더 30 row 안).
+        scan_max_col: cross-ref formula 탐색 col 한계.
+
+    Returns:
+        갱신된 cell 수.
+
+    Policy:
+        - regex `=([A-Z]+){old_totals_row}\\b` (단어 경계) 매칭 — `=E25` ✓, `=E250` ✗
+        - cross-sheet ref (`'2.Traceability'!H9` 등 `!` 포함)는 변경 안 함
+        - calculated formula (`=(E5-F5)/E5` 같은 R{old}가 아닌 R5/R6) 영향 없음
+        - merge anchor 보정 후 safe_write
+        - idempotent: 이미 new_totals_row 참조하는 cell은 변경 안 함 (regex 매칭 0)
+
+    backward-compat:
+        old_totals_row == new_totals_row 시 변경 0 (auto_expand 미가동 케이스).
+    """
+    if openpyxl is None or old_totals_row == new_totals_row:
+        return 0
+    pattern = re.compile(rf"=([A-Z]+){old_totals_row}\b")
+    updated = 0
+    max_r = min(ws.max_row, scan_max_row)
+    max_c = min(ws.max_column, scan_max_col)
+    for r in range(1, max_r + 1):
+        for c in range(1, max_c + 1):
+            try:
+                v = ws.cell(row=r, column=c).value
+            except (AttributeError, IndexError):
+                continue
+            if not isinstance(v, str) or not v.startswith("="):
+                continue
+            # cross-sheet ref skip — `'시트명'!cell` 또는 `시트명!cell` 모두
+            if "!" in v:
+                continue
+            # `\g<1>` 명시 — Python re가 `\1396`을 group 139로 잘못 해석하는 것 방지.
+            new_v = pattern.sub(rf"=\g<1>{new_totals_row}", v)
+            if new_v == v:
+                continue
+            if safe_write(ws, r, c, new_v):
+                updated += 1
+    return updated
+
+
 # 23차 T192 / 29차 W17: 시각 강조 RGB + placeholder 텍스트는
 # ``design_tokens`` 단일 출처에서 import (위 import 블록 참조).
 

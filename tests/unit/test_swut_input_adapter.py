@@ -750,3 +750,54 @@ class TestFlattenSubFunctions:
     def test_metrics_bank_none_returns_empty(self):
         from backend.services.swut_input_adapter import flatten_sub_functions
         assert flatten_sub_functions(None) == []
+
+
+# ---------------------------------------------------------------------------
+# 라운드 76 — enhance_function_coverage_with_file helper (T1104)
+# ---------------------------------------------------------------------------
+
+class TestEnhanceFunctionCoverageWithFile:
+    """vcast FunctionCoverage에 c_parser file 정보 주입."""
+
+    def test_normal_matching_injects_file(self):
+        from backend.services.swut_input_adapter import (
+            enhance_function_coverage_with_file, FunctionCoverage,
+        )
+        function_rows = [
+            FunctionCoverage(unit_id="SwUFn_0101", name="main", file=""),
+            FunctionCoverage(unit_id="SwUFn_0102", name="fn_other", file=""),
+        ]
+        c_map = {
+            "main": {"file": "main.c"},
+            "fn_other": {"file": "other.c"},
+        }
+        n = enhance_function_coverage_with_file(function_rows, c_map)
+        assert n == 2
+        assert function_rows[0].file == "main.c"
+        assert function_rows[1].file == "other.c"
+
+    def test_no_matching_keeps_empty(self):
+        from backend.services.swut_input_adapter import (
+            enhance_function_coverage_with_file, FunctionCoverage,
+        )
+        function_rows = [
+            FunctionCoverage(unit_id="SwUFn_0101", name="vcast_only", file=""),
+        ]
+        c_map = {"different_fn": {"file": "different.c"}}
+        n = enhance_function_coverage_with_file(function_rows, c_map)
+        assert n == 0
+        assert function_rows[0].file == ""
+
+    def test_partial_matching_only_inject_matched(self):
+        from backend.services.swut_input_adapter import (
+            enhance_function_coverage_with_file, FunctionCoverage,
+        )
+        function_rows = [
+            FunctionCoverage(unit_id="SwUFn_0101", name="main", file=""),
+            FunctionCoverage(unit_id="SwUFn_0102", name="vcast_only", file=""),
+        ]
+        c_map = {"main": {"file": "main.c"}}
+        n = enhance_function_coverage_with_file(function_rows, c_map)
+        assert n == 1
+        assert function_rows[0].file == "main.c"
+        assert function_rows[1].file == ""

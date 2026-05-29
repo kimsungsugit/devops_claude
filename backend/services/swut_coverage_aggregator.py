@@ -481,8 +481,15 @@ def _write_coverage_sheet(
     if not ws:
         return 0
     # 라운드 74 T906 — c_parser merge (provided이면 union list 사용)
+    # 라운드 76 T1107 — file 정보 사전 주입으로 dedup 정확성 향상.
     if c_function_map:
-        from backend.services.swut_input_adapter import merge_function_rows_with_c_parser
+        from backend.services.swut_input_adapter import (
+            enhance_function_coverage_with_file, merge_function_rows_with_c_parser,
+        )
+        # vcast function_rows에 c_parser file 정보 주입 → dedup key (name, file) 정확
+        vcast_rows = list(agg.get("function_rows") or [])
+        enhance_function_coverage_with_file(vcast_rows, c_function_map)
+        agg["function_rows"] = vcast_rows
         function_rows = merge_function_rows_with_c_parser(
             agg, c_function_map, out_warnings=out_warnings,
         )
@@ -558,7 +565,32 @@ def _write_coverage_sheet(
     # insert_rows + style/merge/dimension 복제.
     needed_last_row = data_start + len(function_rows) - 1
     if needed_last_row > ws.max_row:
-        from backend.services.excel_template_utils import auto_expand_row_block
+        from backend.services.excel_template_utils import (
+            auto_expand_row_block, push_sentinel_to_last_row,
+            update_cross_refs_after_row_expansion,
+        )
+        # 라운드 76 자체평가 fix — old_totals_row를 ws.max_row가 아닌 양식 R5/R6
+        # cross-ref formula에서 자동 detect. ws.max_row=69 (양식 sample slot 끝)와
+        # cross-ref formula `=E25` (양식이 가정한 TOTALS row)가 일치하지 않을 때
+        # 갱신 누락 방지. R5/R6 col 5~8 (E/F/G/H) 스캔 → `=<col>{row}` 패턴 첫 row.
+        old_totals_row = ws.max_row
+        for _r in (5, 6):
+            for _c in range(5, 9):
+                try:
+                    _v = ws.cell(_r, _c).value
+                except (AttributeError, IndexError):
+                    continue
+                if not isinstance(_v, str) or not _v.startswith("=") or "!" in _v:
+                    continue
+                _m = re.search(r"=([A-Z]+)(\d+)\b", _v)
+                if _m:
+                    _detected = int(_m.group(2))
+                    # cell 자기 자신 ref(=E5 같은) 또는 calculated(R5/R6) 제외
+                    if _detected > 10:  # 양식 TOTALS row는 보통 R20+
+                        old_totals_row = _detected
+                        break
+            if old_totals_row != ws.max_row:
+                break
         shortage = needed_last_row - ws.max_row
         # data_start + 1 위치에 신규 row 추가 → 기존 sentinel/footer 자동 downshift.
         inserted = auto_expand_row_block(
@@ -573,6 +605,25 @@ def _write_coverage_sheet(
                 f"[row_expand] Coverage 시트 row 부족 ({shortage}개 필요, {inserted}개 확장) — "
                 "신규 stamp 일부 누락 가능"
             )
+        # 라운드 76 T1107 — sentinel push + cross-ref formula 동적 갱신.
+        # 양식 default `=E25` / `=H25` / `=I25` / `=L25` / `=M25` cross-ref가
+        # row 폭증 후 R25 → R{new_totals_row} 자동 갱신. 안 하면 R25가 c_parser
+        # 함수 row가 되어 Statement Total 같은 cross-ref formula 의미 깨짐.
+        try:
+            push_sentinel_to_last_row(ws)
+            new_totals_row = data_start + len(function_rows)
+            updated = update_cross_refs_after_row_expansion(
+                ws,
+                old_totals_row=old_totals_row,
+                new_totals_row=new_totals_row,
+            )
+            if updated > 0 and out_warnings is not None:
+                out_warnings.append(
+                    f"[cross_ref] 양식 cross-ref formula {updated}건 동적 갱신 "
+                    f"(R{old_totals_row} → R{new_totals_row}). audit reviewer 통보 의무."
+                )
+        except ImportError:
+            pass
 
     # 기존 데이터 행을 덮어쓴다 (template이 기존 sample 데이터 가질 수 있음).
     written = 0
@@ -1522,13 +1573,14 @@ def build_coverage_report(
     else:
         # F7 자체평가 R2 N3 fix: layout + out_warnings 전달 — clear warning이
         # X-SwUT-Warnings 헤더로 propagate (이전 누락).
-        # 라운드 74 T906 → 자체평가 롤백: c_function_map 전달 비활성. vcast가 component
-        # 단위로 평탄화 (60 component)되고 c_parser는 진짜 함수 단위 (317)라 dedup
-        # 매칭 0건 → row 폭증 + 양식 cross-ref formula 깨짐. vcast 추출을 함수 단위로
-        # 분해하는 별도 라운드(75 후보) 후 다시 활성화 검토. 인프라는 helper/_write에
-        # 유지 (option opt-in).
+        # 라운드 76 T1105 — c_function_map 재활성. 라운드 74 롤백 사유 (row 폭증 +
+        # 양식 cross-ref formula 깨짐)는 라운드 76 인프라로 해소:
+        # (a) enhance_function_coverage_with_file로 dedup key 정확성 향상
+        # (b) update_cross_refs_after_row_expansion으로 cross-ref formula 동적 갱신
+        # (c) auto_expand_row_block + push_sentinel_to_last_row로 양식 row 확장 + sentinel push
         n_written = _write_coverage_sheet(
             cov_ws, agg, layout=layout, out_warnings=warnings,
+            c_function_map=session.c_function_map or None,
         )
         summary["coverage_rows_written"] = n_written
 

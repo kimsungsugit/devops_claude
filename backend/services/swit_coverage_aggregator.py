@@ -303,10 +303,11 @@ def build_swit_coverage_report(
     else:
         # F7 R2 N3 + Stage 10 G3 fix: layout + out_warnings + is_swit_caller=True
         # SwITCV는 SwIT 분기 (Functions Pass + Function Called metric)
-        # 라운드 74 T906 → 자체평가 롤백: SwUTCV 대칭 — c_function_map 미전달.
+        # 라운드 76 T1106 — c_function_map 재활성 (SwUTCV 대칭).
         n_written = _write_coverage_sheet(
             cov_ws, agg, layout=layout, out_warnings=warnings,
             is_swit_caller=True,
+            c_function_map=session.c_function_map or None,
         )
         summary["coverage_rows_written"] = n_written
 

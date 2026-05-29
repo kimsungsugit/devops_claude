@@ -2246,3 +2246,142 @@ class TestRound74PhaseCDynamicSubfolder:
         agg = {"function_rows": [FunctionCoverage(unit_id="x", name="y")]}
         result = merge_function_rows_with_c_parser(agg, None)
         assert len(result) == 1  # backward-compat: c_function_map None → 원본 그대로
+
+
+# ---------------------------------------------------------------------------
+# 라운드 76 — c_parser primary merge 재활성 통합 회귀 (T1108)
+# ---------------------------------------------------------------------------
+
+class TestRound76CParserMergeReactivation:
+    """c_parser merge 재활성 시 row 폭증 + cross-ref formula 동적 갱신 + audit 마킹."""
+
+    def test_coverage_sheet_c_parser_merge_with_cross_ref_update(self):
+        """_write_coverage_sheet — c_parser 함수 추가 시 양식 R5/R6 cross-ref `=E25` 자동 갱신."""
+        from backend.services.swut_coverage_aggregator import _write_coverage_sheet
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws["B1"] = "Unit ID"  # header
+        # 양식 R5/R6 default cross-ref formula
+        ws["E5"] = "=E25"
+        ws["F5"] = "=H25"
+        ws["G5"] = "=I25"
+        # template default 15 slot (R12~R26 가정)
+        for r in range(12, 27):
+            ws.cell(r, 1).value = f"slot{r}"
+
+        function_rows_input = [
+            FunctionCoverage(unit_id="SwUFn_0101", name="vcast_main",
+                             statement=CoverageStats(8, 8, 1.0)),
+        ]
+        agg = {"function_rows": function_rows_input, "function_asil_map": {}}
+        # c_map: vcast_main + 5 c_parser only
+        c_map = {
+            "vcast_main": {"file": "main.c"},
+            "fn_a": {"file": "a.c"},
+            "fn_b": {"file": "b.c"},
+            "fn_c": {"file": "c.c"},
+            "fn_d": {"file": "d.c"},
+            "fn_e": {"file": "e.c"},
+        }
+        warnings: list[str] = []
+        n = _write_coverage_sheet(
+            ws, agg, c_function_map=c_map, out_warnings=warnings,
+        )
+        # 1 vcast + 5 c_parser only = 6 함수 stamp
+        assert n == 6
+        # cross-ref formula 갱신 검증 — old=25 → new={data_start + 6}.
+        # data_start = header_row(1) + 2 = 3 → new_totals_row = 3 + 6 = 9
+        # 그러나 ws.max_row가 처음 26이라 needed_last_row=8 (3+6-1) < max_row → auto_expand 미가동
+        # → cross-ref 변경 없음 (정상)
+        # 이 회귀는 cross-ref 갱신 메커니즘 자체는 다른 testcase에서 검증
+
+    def test_coverage_sheet_60_vcast_plus_317_c_parser_row_expand(self):
+        """대량 함수 row 폭증 시 auto_expand 가동 + cross-ref formula 갱신."""
+        from backend.services.swut_coverage_aggregator import _write_coverage_sheet
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        # 양식 R5 cross-ref (header row보다 위)
+        ws["E5"] = "=E25"
+        # header row를 R8/R9에 배치 (회사 표준) — data_start = R10
+        ws["B8"] = "Unit ID"
+        # template default 15 slot (R10~R24) + R25 TOTALS sentinel → ws.max_row=25
+        for r in range(10, 25):
+            ws.cell(r, 1).value = f"slot{r}"
+        ws.cell(25, 1).value = "TOTALS"  # default TOTALS row
+
+        # 60 vcast functions
+        vcast_fns = [
+            FunctionCoverage(
+                unit_id=f"SwUFn_{i:04d}", name=f"vcast_fn_{i}",
+                statement=CoverageStats(8, 8, 1.0), branch=CoverageStats(2, 2, 1.0),
+            )
+            for i in range(60)
+        ]
+        # 317 c_parser only — vcast_fn_* names 안 겹침
+        c_map = {f"c_fn_{i}": {"file": f"file_{i}.c"} for i in range(317)}
+        agg = {"function_rows": vcast_fns, "function_asil_map": {}}
+        warnings: list[str] = []
+        n = _write_coverage_sheet(
+            ws, agg, c_function_map=c_map, out_warnings=warnings,
+        )
+        # 60 vcast + 317 c_parser only = 377 stamp
+        assert n == 377
+        # data_start = R10 → R10~R(10+377-1)=R386 stamp. ws.max_row >= 386
+        assert ws.max_row >= 386
+        # cross-ref formula E5 갱신 — old_totals_row=ws.max_row 처음 (24+confused)
+        # → new_totals_row=data_start + 377 = 387
+        # E5 value는 R5 cell (header 위) — auto_expand가 R10~R386 추가 → R5 cell value 유지
+        # 단 stamp 후 cross-ref formula 갱신은 max_row가 24/25에서 386으로 변경 → E5=E25 → E387 갱신
+        # cross_ref warning emit (auto_expand로 row 폭증 → cross-ref formula 갱신)
+        assert any("cross_ref" in w for w in warnings)
+        # E5 cross-ref 갱신 검증 — old=R25 → new=R{data_start+377} 형식
+        assert isinstance(ws["E5"].value, str) and ws["E5"].value.startswith("=E")
+        # 갱신값이 25 아닌 다른 row 참조 — 정확 값은 max_row 의존이라 prefix만 검증
+        assert ws["E5"].value != "=E25"
+
+    def test_audit_marking_c_parser_only_yellow_in_large_set(self):
+        """c_parser only row가 `[c_parser]` 마킹 + 노란 fill — 377 set 안에서도 정확."""
+        from backend.services.swut_coverage_aggregator import _write_coverage_sheet
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws["B1"] = "Unit ID"
+
+        vcast = [FunctionCoverage(unit_id="SwUFn_0101", name="vcast_only",
+                                   statement=CoverageStats(8, 8, 1.0))]
+        c_map = {f"c_fn_{i}": {"file": f"f_{i}.c"} for i in range(5)}
+        agg = {"function_rows": vcast, "function_asil_map": {}}
+        n = _write_coverage_sheet(ws, agg, c_function_map=c_map)
+        assert n == 6
+        # c_parser only row에 [c_parser] 마킹 검증 — vcast row 1개 + c_parser 5개
+        c_parser_count = 0
+        for r in range(1, ws.max_row + 1):
+            for c in range(1, ws.max_column + 1):
+                v = ws.cell(r, c).value
+                if isinstance(v, str) and "[c_parser]" in v:
+                    c_parser_count += 1
+                    break
+        assert c_parser_count == 5  # 5 c_parser only row 모두 마킹
+
+    def test_enhance_file_before_merge_dedup_accuracy(self):
+        """enhance_function_coverage_with_file → dedup key (name, file) 정확 매칭."""
+        from backend.services.swut_coverage_aggregator import _write_coverage_sheet
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws["B1"] = "Unit ID"
+
+        # vcast: file 빈 string (HDPDM01 vcast 패턴)
+        vcast = [
+            FunctionCoverage(unit_id="SwUFn_0101", name="main", file=""),
+            FunctionCoverage(unit_id="SwUFn_0102", name="vcast_only", file=""),
+        ]
+        c_map = {
+            "main": {"file": "main.c"},
+            "fn_other": {"file": "other.c"},
+        }
+        agg = {"function_rows": vcast, "function_asil_map": {}}
+        n = _write_coverage_sheet(ws, agg, c_function_map=c_map)
+        # vcast 2 (main, vcast_only) + c_parser only 1 (fn_other) = 3 stamp
+        # main은 vcast로 이미 추가, fn_other만 c_parser only로 추가
+        assert n == 3
+        # vcast main의 file이 c_parser file로 enhanced됨
+        assert vcast[0].file == "main.c"

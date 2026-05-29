@@ -23,6 +23,7 @@ from backend.services.excel_template_utils import (  # noqa: E402
     safe_write,
     sheet_is_blank_placeholder,
     short_date,
+    update_cross_refs_after_row_expansion,
     validate_build_meta,
     validate_xlsx_template_bytes,
     write_value_after_label,
@@ -799,3 +800,83 @@ class TestPushSentinelToLastRow:
         ws = wb.active
         ws.cell(1, 1).value = "data1"
         assert push_sentinel_to_last_row(ws) is None
+
+
+# ---------------------------------------------------------------------------
+# update_cross_refs_after_row_expansion — 라운드 76 T1101
+# ---------------------------------------------------------------------------
+
+class TestUpdateCrossRefs:
+    """양식 cross-ref formula `=E25` → `=E{new}` 동적 갱신."""
+
+    def test_simple_update(self):
+        """=E25 → =E396 (단순 갱신)."""
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws["E5"] = "=E25"
+        ws["F5"] = "=H25"
+        n = update_cross_refs_after_row_expansion(
+            ws, old_totals_row=25, new_totals_row=396,
+        )
+        assert n == 2
+        assert ws["E5"].value == "=E396"
+        assert ws["F5"].value == "=H396"
+
+    def test_multiple_cols_in_row(self):
+        """=B25, =E25, =H25, =I25, =L25, =M25 한 row에 다중 col."""
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws["B5"] = "=B25"
+        ws["E5"] = "=E25"
+        ws["H5"] = "=H25"
+        ws["I5"] = "=I25"
+        ws["L5"] = "=L25"
+        ws["M5"] = "=M25"
+        n = update_cross_refs_after_row_expansion(
+            ws, old_totals_row=25, new_totals_row=100,
+        )
+        assert n == 6
+        assert ws["B5"].value == "=B100"
+        assert ws["M5"].value == "=M100"
+
+    def test_cross_sheet_ref_skipped(self):
+        """`'2.Traceability'!H9` cross-sheet ref은 변경 안 함."""
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws["E5"] = "='2.Traceability'!H25"
+        ws["F5"] = "=H25"  # 같은 시트 cell — 갱신 대상
+        n = update_cross_refs_after_row_expansion(
+            ws, old_totals_row=25, new_totals_row=396,
+        )
+        assert n == 1
+        assert ws["E5"].value == "='2.Traceability'!H25"  # 변경 없음
+        assert ws["F5"].value == "=H396"  # 변경
+
+    def test_calculated_formula_unaffected(self):
+        """`=(E5-F5)/E5` 같은 calculated formula는 영향 없음 (R{old} 패턴 미매칭)."""
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws["G5"] = "=(E5-F5)/E5"
+        ws["E5"] = "=E25"
+        n = update_cross_refs_after_row_expansion(
+            ws, old_totals_row=25, new_totals_row=396,
+        )
+        assert n == 1
+        assert ws["G5"].value == "=(E5-F5)/E5"  # 영향 없음
+        assert ws["E5"].value == "=E396"
+
+    def test_idempotent_re_invocation(self):
+        """이미 new_totals_row 참조하는 cell은 2번째 호출 시 변경 0 (idempotent)."""
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws["E5"] = "=E25"
+        n1 = update_cross_refs_after_row_expansion(
+            ws, old_totals_row=25, new_totals_row=396,
+        )
+        assert n1 == 1
+        # 2번째 호출 — old_totals_row=25는 이제 없으므로 변경 0
+        n2 = update_cross_refs_after_row_expansion(
+            ws, old_totals_row=25, new_totals_row=500,
+        )
+        assert n2 == 0
+        assert ws["E5"].value == "=E396"  # 첫 갱신값 유지
