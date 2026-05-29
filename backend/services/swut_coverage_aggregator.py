@@ -457,6 +457,7 @@ def _compute_asil_distribution(
 def _write_coverage_sheet(
     ws, agg: dict[str, Any], *, layout: Any = None,
     out_warnings: list[str] | None = None,
+    is_swit_caller: bool = False,
 ) -> int:
     """3. Coverage 시트 — per-function Statement/Branch/Exception 표.
 
@@ -529,7 +530,10 @@ def _write_coverage_sheet(
     #     Functions(C6 — 단일 'O'/'X' Pass)/Exception(C7)/Function Called(C8 Count, C9 Total, C10 Pass)
     #   → Statement/Branch는 SwITCV에 없는 metric. Functions Pass + Function Calls만 stamp
     # default → SwUT 양식 (Statement + Branch + 옵션 Function Calls)
-    is_swit_metric_layout = (
+    # F7 stage 10 G3 fix: is_swit_caller 명시 — SwUT 호출 (build_coverage_report)는
+    # SwUTCV (회사 표준 v1.01 layout)도 Statement/Branch 매핑. SwIT 호출
+    # (build_swit_coverage_report)만 SwIT 분기 (Functions Pass + Function Called).
+    is_swit_metric_layout = is_swit_caller and (
         layout is not None
         and getattr(layout, "coverage_metric_kind", "single") == "function_and_calls"
         and has_component_col

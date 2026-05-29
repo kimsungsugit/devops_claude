@@ -262,9 +262,11 @@ def build_swit_coverage_report(
     if cov_ws is None:
         warnings.append("Coverage 시트 미발견")
     else:
-        # F7 자체평가 R2 N3 fix: layout + out_warnings 전달 (SwUT 대칭)
+        # F7 R2 N3 + Stage 10 G3 fix: layout + out_warnings + is_swit_caller=True
+        # SwITCV는 SwIT 분기 (Functions Pass + Function Called metric)
         n_written = _write_coverage_sheet(
             cov_ws, agg, layout=layout, out_warnings=warnings,
+            is_swit_caller=True,
         )
         summary["coverage_rows_written"] = n_written
 
