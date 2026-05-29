@@ -645,7 +645,15 @@ def _write_test_log(
             if _precondition_col and _precondition:
                 safe_write(ws, r, _precondition_col, _precondition)
         else:
-            safe_write(ws, r, col, tc_name)
+            # F8 N8 fix: VectorCAST 'SwITC_SwUFn_NNNN.NNN' → 회사 표준 'SwITC_NNNN'
+            # 변환 (SwITCV 2.Traceability T705 stamp와 일관성). sub-index는 step row
+            # C3에 1~5 stamp되므로 anchor row는 SwITC ID prefix만.
+            # SwUT 형식 'SwUFn_NNNN.NNN' 또는 다른 prefix는 그대로 유지.
+            _display_tc_id = tc_name
+            _switc_fn = re.match(r"^SwITC_SwUFn_(\d+)", tc_name)
+            if _switc_fn:
+                _display_tc_id = f"SwITC_{_switc_fn.group(1)}"
+            safe_write(ws, r, col, _display_tc_id)
             safe_write(ws, r, col + 1, component_name)
             safe_write(ws, r, col + 2, "AEC, ABV")
         # E (col 5) — TC ID row는 빈 cell (Pass/Fail 자리가 아님)
