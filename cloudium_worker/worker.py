@@ -123,15 +123,33 @@ def _op_is_dir(args: Dict[str, Any]) -> bool:
 
 
 def _op_list_dir(args: Dict[str, Any]) -> list:
+    """list_dir — 파일/디렉토리 반환.
+
+    Args:
+        path: 대상 디렉토리
+        pattern: glob 패턴 (default "*")
+        recursive: True면 rglob (모든 하위 트리), False면 즉시 자식만
+        include_dirs: True면 디렉토리도 결과에 포함 (default False — backward compat)
+
+    이전(72차 이전): file만 반환 → 호출자(file_resolver inspect_real_logs_recursive 등)가
+    `is_dir()` 추가 검사로 디렉토리 enumerate 시도해도 항상 0개. FileReName 프로그램이
+    `os.walk` 패턴으로 하위 트리 전체를 자유 탐색하는 것과 일관성 부재.
+
+    72차 fix: include_dirs=True 명시 시 디렉토리도 함께 반환. 기존 호출자(default
+    False)는 영향 0. 자동 latest release 탐색 (swut_input_adapter.py 38차 C2 주석에서
+    "worker 버전이 디렉토리 반환하면 동작" 명시) + 사용자 inspect/탐색 시나리오 충족.
+    """
     path = args["path"]
     pattern = args.get("pattern", "*")
     recursive = bool(args.get("recursive", False))
+    include_dirs = bool(args.get("include_dirs", False))
     p = Path(path)
     if not p.is_dir():
         return []
-    if recursive:
-        return [str(f) for f in p.rglob(pattern) if f.is_file()]
-    return [str(f) for f in p.glob(pattern) if f.is_file()]
+    iterator = p.rglob(pattern) if recursive else p.glob(pattern)
+    if include_dirs:
+        return [str(f) for f in iterator]
+    return [str(f) for f in iterator if f.is_file()]
 
 
 # Dialog ops dispatch to the GUI thread via the dialog queue (tkinter is

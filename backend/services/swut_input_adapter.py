@@ -143,6 +143,15 @@ class SwUTSession:
     source_path: str = ""
     environments: list[EnvironmentData] = field(default_factory=list)
     parse_warnings: list[str] = field(default_factory=list)
+    # 라운드 73 T812/T814 — C source parse 결과 (옵션). router/poc가 parse_c_project
+    # 결과를 unit_id → dict 형태로 채워 넣음. _write_consistency_sheet가 signature /
+    # comment_desc / file 등 stamp용으로 활용.
+    # value dict 필드: name, signature, file, comment_desc, comment_asil, comment_params,
+    #                   comment_return, calls (list), used_globals (list)
+    c_function_map: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # 라운드 73 T815 — SwUDS docx parse 결과 (옵션). function_id → dict 형태.
+    # value dict 필드: heading_text, description, asil
+    swuds_function_map: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
 def aggregate_session(session: SwUTSession) -> dict[str, Any]:

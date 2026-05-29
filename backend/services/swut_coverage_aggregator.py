@@ -539,6 +539,28 @@ def _write_coverage_sheet(
         and has_component_col
     )
 
+    # 라운드 73 T803 — row 자동 확장 (1회 batch insert로 O(N²) 회피).
+    # template은 고정 slot (회사 v3.01 SwUTCV 4.Coverage 15 slot / SwITCV 5 slot) —
+    # 데이터(60+ 함수)가 slot 초과 시 stamp 잘림. 부족분을 사전 계산 후 단일
+    # insert_rows + style/merge/dimension 복제.
+    needed_last_row = data_start + len(function_rows) - 1
+    if needed_last_row > ws.max_row:
+        from backend.services.excel_template_utils import auto_expand_row_block
+        shortage = needed_last_row - ws.max_row
+        # data_start + 1 위치에 신규 row 추가 → 기존 sentinel/footer 자동 downshift.
+        inserted = auto_expand_row_block(
+            ws,
+            insert_at_row=data_start + 1,
+            amount=shortage,
+            template_row_idx=data_start,
+            copy_style=True, copy_merge=True, copy_dimension=True,
+        )
+        if inserted < shortage and out_warnings is not None:
+            out_warnings.append(
+                f"[row_expand] Coverage 시트 row 부족 ({shortage}개 필요, {inserted}개 확장) — "
+                "신규 stamp 일부 누락 가능"
+            )
+
     # 기존 데이터 행을 덮어쓴다 (template이 기존 sample 데이터 가질 수 있음).
     written = 0
     for i, fc in enumerate(function_rows):
@@ -631,7 +653,11 @@ def _write_coverage_sheet(
 # BLANK_MARKUP은 excel_template_utils에서 import (단일 출처).
 
 
-_TC_FN_RE = re.compile(r"(SwUFn_\d+)")
+_TC_FN_RE = re.compile(r"(SwUFn_\d+|SwITC_\d+)")
+# 라운드 73 P1 fix: SwIT TC name 'SwITC_NNNN' / 'SwITC_NNNN.NNN' 형식 매칭 추가.
+# 이전 `(SwUFn_\d+)`만은 회사 KJPDS02 SwIT TC name (예: 'SwITC_0101')에 매칭 못해
+# `_collect_tc_to_function` 결과 빈 dict → SITR Test Log stamp 0 TC (12 TC 누락).
+# SwUFn_ alternative가 우선 매칭 (SwIT의 'SwITC_SwUFn_0101.001' 호환 유지).
 
 
 def _write_history_sheet(
@@ -877,10 +903,43 @@ def _write_consistency_sheet(
                     all_fns[unit_id] = fn_name
         swuds_set = swuds_function_ids or set()
         function_list_start = 11
-        for idx, (unit_id, fn_name) in enumerate(sorted(all_fns.items())):
+
+        # 라운드 73 T802 — 2000 row hard limit 제거. auto_expand_row_block로 1회 batch.
+        # 이전: `if row_idx_fn > 2000: break` 가 60+ 함수 silent truncate.
+        sorted_fns = sorted(all_fns.items())
+        needed_last_row = function_list_start + len(sorted_fns) - 1
+        if needed_last_row > ws.max_row:
+            from backend.services.excel_template_utils import auto_expand_row_block
+            shortage = needed_last_row - ws.max_row
+            inserted = auto_expand_row_block(
+                ws,
+                insert_at_row=function_list_start + 1,
+                amount=shortage,
+                template_row_idx=function_list_start,
+                copy_style=True, copy_merge=True, copy_dimension=True,
+            )
+            if inserted < shortage and out_warnings is not None:
+                out_warnings.append(
+                    f"[row_expand] Consistency 시트 function list row 부족 "
+                    f"({shortage}개 필요, {inserted}개 확장) — 누락 가능"
+                )
+
+        # 라운드 73 T812~T815 — 입력 자산 활용 stamp.
+        # session에서 c_function_map / swuds_function_map 추출 (옵션).
+        c_fn_map = getattr(session, "c_function_map", None) or {}
+        swuds_fn_map = getattr(session, "swuds_function_map", None) or {}
+
+        # 헤더 row (4)에 신규 column 라벨 stamp.
+        # F = Function Signature (C source), G = Description (C comment_desc),
+        # H = SwUDS Heading, I = SwUDS Description (truncated 100자)
+        if c_fn_map or swuds_fn_map:
+            safe_write(ws, 4, 6, "Function Signature")  # F
+            safe_write(ws, 4, 7, "C source desc")       # G
+            safe_write(ws, 4, 8, "SwUDS heading")        # H
+            safe_write(ws, 4, 9, "SwUDS desc")           # I
+
+        for idx, (unit_id, fn_name) in enumerate(sorted_fns):
             row_idx_fn = function_list_start + idx
-            if row_idx_fn > 2000:  # safety: 2000 row 한계 (회사 양식 최대)
-                break
             safe_write(ws, row_idx_fn, 2, idx + 1)         # B: No
             safe_write(ws, row_idx_fn, 3, unit_id)         # C: Function ID
             safe_write(ws, row_idx_fn, 4, fn_name)         # D: Function Name
@@ -888,12 +947,37 @@ def _write_consistency_sheet(
             in_swuds = unit_id in swuds_set if swuds_set else True
             safe_write(ws, row_idx_fn, 5, "O" if in_swuds else "X")
 
+            # 라운드 73 T812 — C source signature stamp (F열).
+            # unit_id 매칭 우선, fn_name fallback.
+            c_fn = c_fn_map.get(unit_id) or c_fn_map.get(fn_name)
+            if c_fn:
+                sig = c_fn.get("signature") or ""
+                if sig:
+                    safe_write(ws, row_idx_fn, 6, sig[:200])  # F
+                # 라운드 73 T814 — C comment_desc stamp (G열, 100자 truncate).
+                desc = c_fn.get("comment_desc") or ""
+                if desc:
+                    safe_write(ws, row_idx_fn, 7, desc[:100] + ("..." if len(desc) > 100 else ""))
+
+            # 라운드 73 T813/T815 — SwUDS heading + description stamp (H/I열).
+            swuds_entry = swuds_fn_map.get(unit_id) or swuds_fn_map.get(fn_name)
+            if swuds_entry:
+                heading = swuds_entry.get("heading_text") or ""
+                if heading:
+                    safe_write(ws, row_idx_fn, 8, heading[:100])  # H
+                swuds_desc = swuds_entry.get("description") or ""
+                if swuds_desc:
+                    safe_write(
+                        ws, row_idx_fn, 9,
+                        swuds_desc[:100] + ("..." if len(swuds_desc) > 100 else ""),
+                    )  # I
+
     return written
 
 
 def _write_traceability_sheet(
     ws, session: SwUTSession, out_warnings: list[str] | None = None,
-    *, layout: Any = None,
+    *, layout: Any = None, swits_tc_ids: list[str] | None = None,
 ) -> int:
     """1.Traceability 시트 — TC × Function 매트릭스 본격 작성 (T133).
 
@@ -909,6 +993,11 @@ def _write_traceability_sheet(
         session: SwUTSession.
         out_warnings: 누락/실패 메시지 누적.
         layout: Optional[SwitLayout] — traceability_header_row 보유 시 우선.
+        swits_tc_ids: 라운드 73 T807 — SwITCV switc_x_swst 분기 시 SwITS spec의
+            TC ID list (예: 77 entries) 제공 시 session 12 TC만이 아닌 spec 전체
+            stamp + Note column에 audit 안내. session에 없는 SwITS entry는
+            'audit reviewer 수동 확인 — SwITS spec entry, vcast log 결과 미생성'
+            메시지 stamp. None이면 session 기반 stamp만 (기존 동작).
 
     Returns:
         쓰여진 'O' 셀 수. 0이면 매트릭스 미작성.
@@ -1006,6 +1095,44 @@ def _write_traceability_sheet(
         except ImportError:
             pass
 
+        # 라운드 73 T807 — SwITS spec entries 활용 확장.
+        # session에 미생성된 SwITS spec TC도 row stamp + Note column 안내.
+        session_sid_set = set(switc_ids)
+        spec_only_sids: list[str] = []
+        if swits_tc_ids:
+            for swits_tc in swits_tc_ids:
+                # SwITS xlsm의 tc_id가 'SwITC_NN' 또는 'SwITC_SwUFn_NNNN' 같은 패턴.
+                # session sid 형식과 동일 형식만 비교.
+                m_swits = _re.match(r"^(SwITC_\d+)", swits_tc)
+                if m_swits:
+                    sid_norm = m_swits.group(1)
+                else:
+                    fm = _SWITC_WITH_FN.match(swits_tc)
+                    sid_norm = f"SwITC_{fm.group(1)}" if fm else swits_tc
+                if sid_norm not in session_sid_set and sid_norm not in spec_only_sids:
+                    spec_only_sids.append(sid_norm)
+            spec_only_sids.sort()
+
+        all_sids = switc_ids + spec_only_sids
+        # row 자동 확장 — session + spec 합산이 ws.max_row 초과 시 신규 row.
+        needed_last_row = data_start + len(all_sids) - 1
+        if needed_last_row > ws.max_row:
+            try:
+                from backend.services.excel_template_utils import (
+                    auto_expand_row_block, push_sentinel_to_last_row,
+                )
+                shortage = needed_last_row - ws.max_row
+                auto_expand_row_block(
+                    ws,
+                    insert_at_row=data_start + 1,
+                    amount=shortage,
+                    template_row_idx=data_start,
+                    copy_style=True, copy_merge=True, copy_dimension=True,
+                )
+                push_sentinel_to_last_row(ws)
+            except ImportError:
+                pass
+
         # 4) 신규 session의 SwITC row stamp (C2=No, C3=ID, C4=Count)
         # 회사 표준 SwITCV R13~: C2='SwITC_01' (ID), C3='3' (count)
         for i, sid in enumerate(switc_ids):
@@ -1014,14 +1141,27 @@ def _write_traceability_sheet(
             safe_write(ws, r, 2, sid)          # SwITC ID
             safe_write(ws, r, 3, 1)            # Count (각 SwITC당 1)
 
-        if out_warnings is not None:
-            out_warnings.append(
-                f"{ws_title} matrix kind 'switc_x_swst' partial stamp — SwITC "
-                f"{len(switc_ids)}건 row stamp. SwST × SwITC 'O' 마킹은 SwITS "
-                "spec 미제공으로 skip (T705 full — SwITS xlsm parser 통합 필요). "
-                "audit reviewer는 SwST 매핑 manual 확인 의무."
+        # 라운드 73 T807 — spec-only row (session 미생성) stamp + Note 안내.
+        for i, sid in enumerate(spec_only_sids):
+            r = data_start + len(switc_ids) + i
+            safe_write(ws, r, 1, len(switc_ids) + i + 1)  # No 이어서
+            safe_write(ws, r, 2, sid)                      # SwITC ID
+            safe_write(ws, r, 3, 0)                        # Count = 0 (session 미실행)
+            safe_write(
+                ws, r, 4,
+                "▶ audit reviewer 수동 확인 — SwITS spec entry, vcast log 결과 미생성",
             )
-        return len(switc_ids)
+
+        if out_warnings is not None:
+            note = (
+                f"{ws_title} matrix kind 'switc_x_swst' partial stamp — session SwITC "
+                f"{len(switc_ids)}건 + SwITS spec-only {len(spec_only_sids)}건 row stamp. "
+                "SwST × SwITC 'O' 마킹은 SwITS spec에 SwST 매핑 부재 (T705 full — 회사 "
+                "양식 SwITS spec에 SwST 컬럼 정의 부재). audit reviewer는 SwST 매핑 manual "
+                "확인 의무. spec-only row는 vcast log 미생성 — 결과 누락 진단 필요."
+            )
+            out_warnings.append(note)
+        return len(all_sids)
 
     # 58차 F2: layout 제공 시 traceability_header_row 강제. fallback은 자동 탐색.
     header_row_idx = None
@@ -1066,10 +1206,11 @@ def _write_traceability_sheet(
         return 0
 
     # 2) 기존 TC 행 위치 인덱싱 — SwUTC_SwUFn_xxxx.NNN 또는 SwUFn_xxxx.NNN
+    # 라운드 73 T804 — scan 한계 제거: data_start + 600 → ws.max_row.
     data_start = header_row_idx + 1
     tc_row_index: dict[str, int] = {}
     for row in ws.iter_rows(
-        min_row=data_start, max_row=data_start + 600, values_only=False,
+        min_row=data_start, max_row=ws.max_row, values_only=False,
     ):
         for cell in row[:5]:
             v = cell.value
@@ -1083,6 +1224,46 @@ def _write_traceability_sheet(
     # T136: 회사 v3.01 row label은 `SwUTC_<fn_id>` (인덱스 `.NNN` 없음).
     # `SwUTC_<tc_name>` (인덱스 포함) 과 `<tc_name>` 도 fallback 시도.
     tc_to_fn = _collect_tc_to_function(session)
+
+    # 라운드 73 T804 — header_cols에 매칭되는 fn_id 보유 신규 TC row 확장.
+    # 양식에 미리 정의되지 않은 TC는 row insert + label stamp → 'O' 매트릭스 stamp 가능.
+    missing_tcs_with_col: list[tuple[str, str]] = []  # [(tc_name, fn_id)]
+    for tc_name, fn_id in tc_to_fn.items():
+        if header_cols.get(fn_id) is None:
+            continue
+        # 기존 tc_row_index에 fn_id가 있는지 확인 (회사 표준 / 인덱스 포함 / native)
+        if (f"SwUTC_{fn_id}" in tc_row_index
+                or f"SwUTC_{tc_name}" in tc_row_index
+                or tc_name in tc_row_index):
+            continue
+        missing_tcs_with_col.append((tc_name, fn_id))
+
+    if missing_tcs_with_col:
+        try:
+            from backend.services.excel_template_utils import (
+                auto_expand_row_block, push_sentinel_to_last_row,
+            )
+            last_existing_row = max(tc_row_index.values()) if tc_row_index else data_start
+            inserted = auto_expand_row_block(
+                ws,
+                insert_at_row=last_existing_row + 1,
+                amount=len(missing_tcs_with_col),
+                template_row_idx=last_existing_row,
+                copy_style=True, copy_merge=True, copy_dimension=True,
+            )
+            for i, (tc_name, fn_id) in enumerate(missing_tcs_with_col):
+                new_row = last_existing_row + 1 + i
+                if safe_write(ws, new_row, 2, f"SwUTC_{fn_id}"):
+                    tc_row_index[f"SwUTC_{fn_id}"] = new_row
+            # End-of-Document sentinel 마지막 row로 push
+            push_sentinel_to_last_row(ws)
+            if out_warnings is not None:
+                out_warnings.append(
+                    f"[row_expand] Traceability 신규 TC {inserted}개 row 추가 + label stamp"
+                )
+        except ImportError:
+            pass
+
     written = 0
     matched_fn: set[str] = set()
     for tc_name, fn_id in tc_to_fn.items():
@@ -1160,6 +1341,13 @@ def build_coverage_report(
 
     # 37차 fix → 38차 W1 DRY: extract_warnings_from_session helper로 추출.
     warnings: list[str] = extract_warnings_from_session(session)
+
+    # 라운드 73 T816 — 입력 자산 활용도 진단 (c_function_map / swuds_function_map은 SwUTSession에서 추출).
+    from backend.services.swut_builder_helpers import diagnose_asset_usage
+    warnings.extend(diagnose_asset_usage(
+        c_function_map=session.c_function_map or None,
+        swuds_function_map=session.swuds_function_map or None,
+    ))
 
     # 54-fix C1: SwUT 라우터에 v2.02 template 잘못 입력되더라도 silent 빈 셀 차단.
     # v3.01 양식은 fallback_to_v301=True로 기존 hardcode 동작과 동등 (회귀 zero 영향).

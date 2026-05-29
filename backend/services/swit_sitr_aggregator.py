@@ -160,6 +160,14 @@ def build_swit_sitr_report(
     # 37차 fix → 38차 W1 DRY: extract_warnings_from_session helper로 추출.
     warnings: list[str] = extract_warnings_from_session(session)
 
+    # 라운드 73 T816 — 입력 자산 활용도 진단.
+    from backend.services.swut_builder_helpers import diagnose_asset_usage
+    warnings.extend(diagnose_asset_usage(
+        swits_map=swuts_map,  # SITR는 swuts_map kwarg로 SwITS 받음
+        c_function_map=session.c_function_map or None,
+        swuds_function_map=session.swuds_function_map or None,
+    ))
+
     # 54차 T280 — v2.02 양식 layout 자동 추출 (sha256 keying + LRU).
     layout = inspect_swit_layout(template_bytes, "sitr")
     if layout.warnings:

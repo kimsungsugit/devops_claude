@@ -25,9 +25,11 @@ from .design_tokens import (
 )
 
 try:
+    import openpyxl  # type: ignore
     from openpyxl.styles import PatternFill  # type: ignore
     _HAS_PATTERN_FILL = True
 except ImportError:  # pragma: no cover - openpyxl 미설치 fail-safe
+    openpyxl = None  # type: ignore[assignment]
     PatternFill = None  # type: ignore[assignment]
     _HAS_PATTERN_FILL = False
 
@@ -529,6 +531,211 @@ def clear_data_range(
             except AttributeError:
                 continue
     return cleared
+
+
+def auto_expand_row_block(
+    ws: Any,
+    *,
+    insert_at_row: int,
+    amount: int,
+    template_row_idx: int,
+    copy_style: bool = True,
+    copy_merge: bool = True,
+    copy_dimension: bool = True,
+    max_col_scan: int | None = None,
+) -> int:
+    """라운드 73 T801: row 자동 확장 — template row의 style/merge/dimension 복제.
+
+    회사 v3.01/v2.02 양식은 고정 sample slot (Coverage 5~15 row, Consistency 30 row 등).
+    실데이터(1941 TC × 60 fn / 5000+ TC 미래)가 slot 초과 시 stamp 잘림 → 본 helper로
+    insert_rows + template 단일 row의 style/merge/dimension 복제하여 양식 일관성 유지.
+
+    Args:
+        ws: openpyxl Worksheet.
+        insert_at_row: 신규 row가 들어갈 위치 (1-based). 기존 이 row는 amount만큼 downshift.
+        amount: 삽입할 row 수.
+        template_row_idx: style/merge/dimension 복제할 template row (1-based).
+            ⚠️ template_row_idx >= insert_at_row면 insert 후 template_row_idx += amount.
+            본 함수는 insert 전에 style을 capture하므로 호출자가 인지 필요.
+        copy_style: cell._style (font/fill/border/number_format/alignment 등) 복제.
+        copy_merge: template row의 single-row merge range를 신규 row마다 동일 col span으로 추가.
+            multi-row merge는 skip (복잡도 차단).
+        copy_dimension: row_dimensions.height 복제.
+        max_col_scan: style 복제 시 최대 col (None이면 ws.max_column).
+
+    Returns:
+        실제 삽입된 row 수 (실패 시 0).
+
+    Side effects:
+        - ws.merged_cells.ranges가 openpyxl 내부에서 자동 offset 보정 (insert_rows 표준 동작).
+        - End-of-Document sentinel ('< End of Document >')는 insert_at_row 이상이면 자동 downshift.
+
+    Raises:
+        없음. 실패 시 silent 0 반환 + 호출자가 warning 누적.
+
+    Performance:
+        single-row insert가 N회 호출되면 O(N²) cost (openpyxl insert_rows는 매번
+        전체 cell shift). 대량 row 필요 시 amount를 N으로 묶어 1회 호출 권장
+        (raw insert_rows 1회 + 그 후 style replication N회 = O(N) cost).
+    """
+    if openpyxl is None or amount <= 0 or insert_at_row < 1 or template_row_idx < 1:
+        return 0
+
+    # 1) Capture template state BEFORE insert (template_row_idx 위치가 shift되기 전)
+    template_merges: list[tuple[int, int]] = []  # single-row (row, col_min, col_max)
+    template_multi_row_merges: list[tuple[int, int, int, int]] = []  # (row_offset, height, col_min, col_max)
+    if copy_merge:
+        # template_row_idx가 multi-row merge의 첫 row 또는 안쪽일 때 그 블록 전체 capture.
+        # 회사 v3.01 SUTR Test Result는 1 TC당 6-row 단위 block merge (B17:B22 등).
+        # auto_expand이 6-row block 단위로 호출되면 block 전체 multi-row merge 복제.
+        for mr in list(ws.merged_cells.ranges):
+            if mr.min_row == template_row_idx and mr.max_row == template_row_idx:
+                template_merges.append((mr.min_col, mr.max_col))
+            elif mr.min_row == template_row_idx and mr.max_row > template_row_idx:
+                # multi-row merge — template_row를 첫 row로 한 block.
+                height = mr.max_row - mr.min_row + 1
+                template_multi_row_merges.append((0, height, mr.min_col, mr.max_col))
+
+    template_height: float | None = None
+    if copy_dimension:
+        rd = ws.row_dimensions.get(template_row_idx)
+        if rd is not None:
+            template_height = getattr(rd, "height", None)
+
+    max_c = max_col_scan or ws.max_column
+    template_styles: list[tuple[int, Any]] = []
+    if copy_style:
+        import copy as _copy
+        for c in range(1, max_c + 1):
+            try:
+                src_cell = ws.cell(row=template_row_idx, column=c)
+                if getattr(src_cell, "has_style", False):
+                    template_styles.append((c, _copy.copy(src_cell._style)))
+            except (AttributeError, IndexError):
+                continue
+
+    # 2) Insert rows — openpyxl 내장 merged_cells offset 보정 적용
+    try:
+        ws.insert_rows(insert_at_row, amount=amount)
+    except (AttributeError, ValueError, TypeError):
+        return 0
+
+    # 3) Apply captured style/merge/dimension to each new row
+    import copy as _copy
+    try:
+        from openpyxl.utils import get_column_letter  # type: ignore
+    except ImportError:
+        get_column_letter = None  # type: ignore[assignment]
+
+    for offset in range(amount):
+        new_row = insert_at_row + offset
+
+        if copy_style:
+            for col_idx, style in template_styles:
+                try:
+                    ws.cell(row=new_row, column=col_idx)._style = _copy.copy(style)
+                except (AttributeError, IndexError):
+                    continue
+
+        if copy_dimension and template_height is not None:
+            try:
+                ws.row_dimensions[new_row].height = template_height
+            except (AttributeError, KeyError):
+                pass
+
+        if copy_merge and get_column_letter is not None:
+            for min_col, max_col in template_merges:
+                try:
+                    start_ref = f"{get_column_letter(min_col)}{new_row}"
+                    end_ref = f"{get_column_letter(max_col)}{new_row}"
+                    ws.merge_cells(f"{start_ref}:{end_ref}")
+                except (AttributeError, ValueError):
+                    continue
+
+    # multi-row merge 복제 (block 단위) — caller가 block size N의 정확한 배수로 amount 지정 시.
+    # 회사 v3.01 SUTR Test Result는 6-row block (B17:B22 → B23:B28 → ...). amount % height == 0 시
+    # 신규 row 전체에 동일 col span으로 multi-row merge 적용.
+    if copy_merge and get_column_letter is not None and template_multi_row_merges:
+        for _row_off, height, min_col, max_col in template_multi_row_merges:
+            if height <= 1 or amount % height != 0:
+                continue
+            blocks = amount // height
+            for b in range(blocks):
+                block_start = insert_at_row + b * height
+                block_end = block_start + height - 1
+                try:
+                    start_ref = f"{get_column_letter(min_col)}{block_start}"
+                    end_ref = f"{get_column_letter(max_col)}{block_end}"
+                    ws.merge_cells(f"{start_ref}:{end_ref}")
+                except (AttributeError, ValueError):
+                    continue
+
+    return amount
+
+
+def push_sentinel_to_last_row(
+    ws: Any,
+    *,
+    sentinel_text: str = "< End of Document >",
+    search_max_row: int | None = None,
+) -> int | None:
+    """라운드 73 T804 helper: '< End of Document >' sentinel이 데이터 row 중간에 있으면
+    실제 마지막 데이터 row 뒤로 이동.
+
+    insert_rows 사용 시 sentinel이 row 중간에 박힐 수 있어 audit 시각 깨짐 — 본 helper로
+    sentinel을 ws.max_row 위치로 push.
+
+    Args:
+        ws: Worksheet.
+        sentinel_text: 찾을 sentinel text (exact match, strip 후).
+        search_max_row: scan 한계 (None이면 ws.max_row).
+
+    Returns:
+        sentinel이 이동된 새 row 번호 (None이면 sentinel 미발견).
+    """
+    if openpyxl is None:
+        return None
+
+    scan_end = search_max_row or ws.max_row
+    found_row: int | None = None
+    found_col: int | None = None
+    for r in range(1, scan_end + 1):
+        for c in range(1, ws.max_column + 1):
+            try:
+                v = ws.cell(row=r, column=c).value
+            except (AttributeError, IndexError):
+                continue
+            if isinstance(v, str) and v.strip() == sentinel_text:
+                found_row, found_col = r, c
+                break
+        if found_row is not None:
+            break
+
+    if found_row is None:
+        return None
+
+    # 실제 데이터 last row 찾기 (sentinel 위치 제외, 그 위에서 마지막 non-empty)
+    last_data_row = found_row
+    for r in range(found_row + 1, scan_end + 1):
+        for c in range(1, ws.max_column + 1):
+            try:
+                v = ws.cell(row=r, column=c).value
+            except (AttributeError, IndexError):
+                continue
+            if v is not None and (not isinstance(v, str) or v.strip()):
+                last_data_row = r
+                break
+
+    if last_data_row == found_row:
+        return found_row  # 이미 마지막
+
+    # sentinel을 last_data_row + 1로 이동
+    try:
+        ws.cell(row=found_row, column=found_col).value = None
+        ws.cell(row=last_data_row + 1, column=found_col).value = sentinel_text
+        return last_data_row + 1
+    except (AttributeError, IndexError):
+        return found_row
 
 
 # 23차 T192 / 29차 W17: 시각 강조 RGB + placeholder 텍스트는

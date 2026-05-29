@@ -202,7 +202,8 @@ class FileResolver(ABC):
     @abstractmethod
     def read_text(self, path: str, encoding: str = "utf-8") -> str: ...
     @abstractmethod
-    def list_dir(self, path: str, pattern: str = "*", recursive: bool = False) -> List[str]: ...
+    def list_dir(self, path: str, pattern: str = "*", recursive: bool = False,
+                 include_dirs: bool = False) -> List[str]: ...
     @abstractmethod
     def resolve(self, path: str) -> str: ...
 
@@ -232,13 +233,15 @@ class LocalFileResolver(FileResolver):
     def read_text(self, path: str, encoding: str = "utf-8") -> str:
         return Path(path).read_text(encoding=encoding, errors="replace")
 
-    def list_dir(self, path: str, pattern: str = "*", recursive: bool = False) -> List[str]:
+    def list_dir(self, path: str, pattern: str = "*", recursive: bool = False,
+                 include_dirs: bool = False) -> List[str]:
         p = Path(path)
         if not p.is_dir():
             return []
-        if recursive:
-            return [str(f) for f in p.rglob(pattern) if f.is_file()]
-        return [str(f) for f in p.glob(pattern) if f.is_file()]
+        iterator = p.rglob(pattern) if recursive else p.glob(pattern)
+        if include_dirs:
+            return [str(f) for f in iterator]
+        return [str(f) for f in iterator if f.is_file()]
 
     def resolve(self, path: str) -> str:
         return str(Path(path).resolve())
@@ -501,10 +504,12 @@ class CloudiumFileResolver(LocalFileResolver):
         result = self._ipc_call("read_text", {"path": path, "encoding": encoding})
         return result if isinstance(result, str) else ""
 
-    def list_dir(self, path: str, pattern: str = "*", recursive: bool = False) -> List[str]:
+    def list_dir(self, path: str, pattern: str = "*", recursive: bool = False,
+                 include_dirs: bool = False) -> List[str]:
         self._gate_then_allow(path)
         result = self._ipc_call("list_dir",
-                                {"path": path, "pattern": pattern, "recursive": recursive})
+                                {"path": path, "pattern": pattern,
+                                 "recursive": recursive, "include_dirs": include_dirs})
         return list(result) if isinstance(result, list) else []
 
     # X5: read-only invariant — 명시적 write 차단 메서드.

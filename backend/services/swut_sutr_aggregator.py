@@ -573,8 +573,37 @@ def _write_test_log(
         out_warnings=out_warnings,
     )
 
+    # 라운드 73 T806 — SwIT Test Log row 자동 확장. SwIT SITR v2.02 양식 max_row=31
+    # 인데 12 TC × 6 step = 72 row 필요 → 4 TC만 stamp되던 결함. SwUT SUTR도 5000+ TC
+    # 미래에 대비.
+    sorted_tc_names = sorted(tc_to_fn_id.keys())
+    if sorted_tc_names:
+        needed_last_row = start_row + (len(sorted_tc_names) - 1) * tc_row_step + (tc_row_step - 1)
+        if needed_last_row > ws.max_row:
+            try:
+                from backend.services.excel_template_utils import (
+                    auto_expand_row_block, push_sentinel_to_last_row,
+                )
+                shortage = needed_last_row - ws.max_row
+                # template block 1번 (start_row ~ start_row + tc_row_step - 1) 다음에 row 확장.
+                inserted = auto_expand_row_block(
+                    ws,
+                    insert_at_row=start_row + tc_row_step,
+                    amount=shortage,
+                    template_row_idx=start_row,
+                    copy_style=True, copy_merge=True, copy_dimension=True,
+                )
+                push_sentinel_to_last_row(ws)
+                if inserted < shortage and out_warnings is not None:
+                    out_warnings.append(
+                        f"[row_expand] Test Log row 부족 ({shortage}개 필요, "
+                        f"{inserted}개 확장) — stamp 일부 누락 가능"
+                    )
+            except ImportError:
+                pass
+
     written = 0
-    for tc_name in sorted(tc_to_fn_id.keys()):
+    for tc_name in sorted_tc_names:
         r = start_row + (written * tc_row_step)
         env = tc_to_env.get(tc_name)
         component_name = env.component_name if env is not None else ""
@@ -981,6 +1010,14 @@ def build_sutr(
 
     # 37차 fix → 38차 W1 DRY: extract_warnings_from_session helper로 추출.
     warnings: list[str] = extract_warnings_from_session(session)
+
+    # 라운드 73 T816 — 입력 자산 활용도 진단.
+    from backend.services.swut_builder_helpers import diagnose_asset_usage
+    warnings.extend(diagnose_asset_usage(
+        swuts_map=swuts_map,
+        c_function_map=session.c_function_map or None,
+        swuds_function_map=session.swuds_function_map or None,
+    ))
 
     # 54-fix C1: SwUT 라우터에 v2.02 template 잘못 입력 시 silent 빈 셀 차단.
     # v3.01 SUTR 양식은 fallback_to_v301=True로 hardcode 동작과 동등.

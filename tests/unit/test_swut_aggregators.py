@@ -1786,3 +1786,210 @@ class TestSutrTestLogSwUTSStampF6A:
             r for r in range(2, 10) if ws.cell(r, 1).value == "SwUTC_0101"
         )
         assert ws.cell(target_row, 9).value == "System initialized"
+
+
+# ---------------------------------------------------------------------------
+# 라운드 73 — row 자동 확장 / 자산 풀활용 / 2000 limit 제거 회귀
+# ---------------------------------------------------------------------------
+
+class TestRound73CoverageRowExpansion:
+    """T803 — Coverage 시트 60+ 함수 stamp 시 row 자동 확장."""
+
+    def test_coverage_60_functions_overflow_template_15_slots(self):
+        from backend.services.swut_coverage_aggregator import _write_coverage_sheet
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        # template: header 1 row + 15 slot (R10/R11 헤더 + R12 데이터 시작 + 13 slot까지)
+        ws["B1"] = "Unit ID"  # header label
+        for r in range(12, 27):  # R12~R26 = 15 slot
+            ws.cell(r, 1).value = f"slot{r}"
+        # 60 함수 — slot 15 초과
+        function_rows = [
+            FunctionCoverage(
+                unit_id=f"SwUFn_{100 + i:04d}",
+                name=f"fn_{i}",
+                statement=CoverageStats(8, 8, 1.0),
+                branch=CoverageStats(2, 2, 1.0),
+            )
+            for i in range(60)
+        ]
+        agg = {"function_rows": function_rows, "function_asil_map": {}}
+        warnings: list[str] = []
+        n = _write_coverage_sheet(ws, agg, out_warnings=warnings)
+        # 60 함수 모두 stamp 되어야 함 (row 한계 제거 + auto_expand 통합)
+        assert n == 60
+
+
+class TestRound73ConsistencyRowExpansion:
+    """T802 — 2000 row hard limit 제거 회귀."""
+
+    def test_consistency_3000_functions_no_silent_truncate(self):
+        """이전: `if row_idx_fn > 2000: break` → 2000 이상 silent truncate.
+        라운드 73: row 자동 확장으로 3000개 모두 stamp."""
+        from backend.services.swut_coverage_aggregator import _write_consistency_sheet
+        wb = openpyxl.Workbook()
+        ws = wb.active
+
+        env = EnvironmentData(
+            env_name="E1",
+            component_name="C1",
+            function_coverage=[
+                FunctionCoverage(unit_id=f"SwUFn_{i:05d}", name=f"fn_{i}")
+                for i in range(3000)
+            ],
+        )
+        session = SwUTSession(
+            project_id="HDPDM01",
+            version="0.10.99",
+            source_kind="log_folder",
+            source_path="",
+            environments=[env],
+        )
+        warnings: list[str] = []
+        _write_consistency_sheet(
+            ws, session, swuds_function_ids=set(), out_warnings=warnings,
+        )
+        # function_list_start=11이므로 3000개 함수면 R11~R3010 stamp
+        # row 자동 확장으로 last function row stamp
+        last_fn_row = 11 + 3000 - 1  # 3010
+        # 3000번째 함수 stamp 확인
+        assert ws.cell(last_fn_row, 3).value == "SwUFn_02999"  # C: function ID
+
+
+class TestRound73AssetStampingDiagnostics:
+    """T816 — diagnose_asset_usage helper 회귀."""
+
+    def test_diagnose_swuts_entries_counted(self):
+        from backend.services.swut_builder_helpers import diagnose_asset_usage
+
+        class _Entry:
+            def __init__(self, **kw):
+                for k, v in kw.items():
+                    setattr(self, k, v)
+
+        swuts_map = {
+            "SwUTC_0101": _Entry(precondition="init", test_method="REQ", generation_method=""),
+            "SwUTC_0102": _Entry(precondition="", test_method="REQ", generation_method="ABV"),
+        }
+        diag = diagnose_asset_usage(swuts_map=swuts_map)
+        assert len(diag) == 1
+        assert "SwUTS spec 활용: 2 TC entries" in diag[0]
+        assert "precondition 1" in diag[0]
+        assert "test_method 2" in diag[0]
+        assert "generation_method 1" in diag[0]
+
+    def test_diagnose_c_function_map(self):
+        from backend.services.swut_builder_helpers import diagnose_asset_usage
+        c_map = {
+            "SwUFn_0101": {"signature": "void main(void)", "comment_desc": "entry"},
+            "SwUFn_0102": {"signature": "", "comment_desc": ""},
+        }
+        diag = diagnose_asset_usage(c_function_map=c_map)
+        assert "C source 활용: 2 functions (signature 1, comment_desc 1)" in diag[0]
+
+    def test_diagnose_hmr_match_pct(self):
+        from backend.services.swut_builder_helpers import diagnose_asset_usage
+        diag = diagnose_asset_usage(hmr_metric_count=100, hmr_matched_count=30)
+        assert "HMR 활용: 100 metrics, 30 matched (30.0%)" in diag[0]
+
+    def test_diagnose_none_assets_skip(self):
+        from backend.services.swut_builder_helpers import diagnose_asset_usage
+        diag = diagnose_asset_usage()
+        assert diag == []
+
+
+class TestRound73ConsistencySheetAssetStamps:
+    """T812~T815 — 3.Consistency 시트에 c_function_map / swuds_function_map 활용 stamp."""
+
+    def test_c_function_map_stamps_signature_and_desc(self):
+        from backend.services.swut_coverage_aggregator import _write_consistency_sheet
+        wb = openpyxl.Workbook()
+        ws = wb.active
+
+        env = EnvironmentData(
+            env_name="E1",
+            component_name="C1",
+            function_coverage=[
+                FunctionCoverage(unit_id="SwUFn_0101", name="main"),
+                FunctionCoverage(unit_id="SwUFn_0102", name="fn_a"),
+            ],
+        )
+        session = SwUTSession(
+            project_id="HDPDM01",
+            version="0.10.99",
+            source_kind="log_folder", source_path="",
+            environments=[env],
+            c_function_map={
+                "SwUFn_0101": {
+                    "signature": "void main(void)",
+                    "comment_desc": "Entry point of the program",
+                },
+                "main": {  # fallback by name
+                    "signature": "void main(void)",
+                    "comment_desc": "Entry point of the program",
+                },
+            },
+            swuds_function_map={
+                "SwUFn_0101": {"heading_text": "Main Function", "description": "Top-level entry"},
+            },
+        )
+        _write_consistency_sheet(ws, session, swuds_function_ids=set())
+        # F11 = signature stamp
+        assert ws.cell(11, 6).value == "void main(void)"
+        # G11 = comment_desc stamp
+        assert "Entry point" in (ws.cell(11, 7).value or "")
+        # H11 = SwUDS heading
+        assert ws.cell(11, 8).value == "Main Function"
+        # I11 = SwUDS description
+        assert "Top-level entry" in (ws.cell(11, 9).value or "")
+
+
+class TestRound73SwITCVTraceabilitySpecExpansion:
+    """T807 — SwITS spec entries 활용 (session 12 TC + spec 77 entries 전체 stamp)."""
+
+    def test_spec_only_swits_entries_stamped_with_note(self):
+        """SwITCV switc_x_swst 분기에서 session에 없는 SwITS spec TC도 row stamp + Note 안내."""
+        from backend.services.swut_coverage_aggregator import _write_traceability_sheet
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        # SwITCV header — SwST_/SwSTR_ prefix 3 col 이상 필요 (header detection 임계)
+        ws.cell(11, 4).value = "SwST_01"
+        ws.cell(11, 5).value = "SwST_02"
+        ws.cell(11, 6).value = "SwST_03"
+
+        env = EnvironmentData(
+            env_name="E1",
+            component_name="C1",
+            test_cases={"SwITC_01.001": [object()], "SwITC_02.001": [object()]},
+            test_results={
+                "SwITC_01.001": ExecutionRow(tc_name="SwITC_01.001", passed=True),
+                "SwITC_02.001": ExecutionRow(tc_name="SwITC_02.001", passed=True),
+            },
+            function_coverage=[],
+        )
+        session = SwUTSession(
+            project_id="HDPDM01", version="0.10.99",
+            source_kind="log_folder", source_path="",
+            environments=[env],
+        )
+
+        class _Layout:
+            traceability_matrix_kind = "switc_x_swst"
+            traceability_header_row = None
+
+        warnings: list[str] = []
+        # spec entries 5건 — 2건은 session 이미 있음, 3건은 spec-only
+        swits_tc_ids = ["SwITC_01", "SwITC_02", "SwITC_03", "SwITC_04", "SwITC_05"]
+        _write_traceability_sheet(
+            ws, session, out_warnings=warnings, layout=_Layout(),
+            swits_tc_ids=swits_tc_ids,
+        )
+        # data_start = 13. R13~R14 = session, R15~R17 = spec-only.
+        # spec-only row는 col 4에 audit 안내 메시지 stamp
+        spec_only_rows = [15, 16, 17]
+        for r in spec_only_rows:
+            assert "audit reviewer 수동 확인" in (ws.cell(r, 4).value or ""), (
+                f"R{r} C4 not stamped"
+            )
+        # warning에 spec-only 메시지 포함
+        assert any("spec-only" in w for w in warnings)

@@ -15,8 +15,10 @@ from backend.services.excel_template_utils import (  # noqa: E402
     BLANK_MARKUP,
     BuildMetaValidationError,
     TemplateValidationError,
+    auto_expand_row_block,
     clear_data_range,
     find_kv_row,
+    push_sentinel_to_last_row,
     resolve_merge_anchor,
     safe_write,
     sheet_is_blank_placeholder,
@@ -649,3 +651,151 @@ class TestClearDataRange:
         assert cleared == 8
         assert ws.cell(7, 2).value == "■ Appendix - 발생 가능 값"
         assert ws.cell(8, 1).value == "default_R8C1"
+
+
+# ---------------------------------------------------------------------------
+# auto_expand_row_block — 라운드 73 T801
+# ---------------------------------------------------------------------------
+
+class TestAutoExpandRowBlock:
+    def _make_ws(self, rows: int = 10, cols: int = 5):
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        for r in range(1, rows + 1):
+            for c in range(1, cols + 1):
+                ws.cell(row=r, column=c).value = f"R{r}C{c}"
+        return wb, ws
+
+    def test_basic_insert_shifts_existing_rows(self):
+        """row 5에 2 row 삽입 → 기존 R5~R10은 R7~R12로 shift."""
+        wb, ws = self._make_ws(rows=10, cols=3)
+        inserted = auto_expand_row_block(
+            ws,
+            insert_at_row=5,
+            amount=2,
+            template_row_idx=4,
+            copy_style=False,
+            copy_merge=False,
+            copy_dimension=False,
+        )
+        assert inserted == 2
+        # 기존 R5 -> R7로 shift
+        assert ws.cell(7, 1).value == "R5C1"
+        # 신규 R5/R6는 빈 셀
+        assert ws.cell(5, 1).value is None
+        assert ws.cell(6, 1).value is None
+        # max_row 확장
+        assert ws.max_row >= 12
+
+    def test_style_copy_from_template_row(self):
+        """template row의 cell._style 복제 — font/fill 모두 보존."""
+        from openpyxl.styles import Font, PatternFill
+        wb, ws = self._make_ws(rows=10, cols=3)
+        # template row 4에 bold + yellow fill
+        for c in range(1, 4):
+            cell = ws.cell(row=4, column=c)
+            cell.font = Font(bold=True)
+            cell.fill = PatternFill(start_color="FFFFEB9C", end_color="FFFFEB9C", fill_type="solid")
+        inserted = auto_expand_row_block(
+            ws,
+            insert_at_row=5,
+            amount=1,
+            template_row_idx=4,
+            copy_style=True,
+            copy_merge=False,
+            copy_dimension=False,
+        )
+        assert inserted == 1
+        # 신규 row 5의 cell이 bold + yellow fill 가져야 함
+        new_cell = ws.cell(row=5, column=1)
+        assert new_cell.font.bold is True
+        assert new_cell.fill.start_color.rgb == "FFFFEB9C"
+
+    def test_merge_copy_single_row(self):
+        """template row의 single-row merge가 신규 row마다 동일 col span으로 복제."""
+        wb, ws = self._make_ws(rows=10, cols=5)
+        # template row 4 col 2~4 merge
+        ws.merge_cells("B4:D4")
+        inserted = auto_expand_row_block(
+            ws,
+            insert_at_row=5,
+            amount=2,
+            template_row_idx=4,
+            copy_style=False,
+            copy_merge=True,
+            copy_dimension=False,
+        )
+        assert inserted == 2
+        merge_strs = {str(mr) for mr in ws.merged_cells.ranges}
+        # 신규 R5/R6에 동일 merge가 추가되어야 함
+        assert "B5:D5" in merge_strs
+        assert "B6:D6" in merge_strs
+
+    def test_zero_or_negative_amount_returns_zero(self):
+        """amount<=0 시 silent 0 + ws 변경 없음."""
+        wb, ws = self._make_ws(rows=10, cols=3)
+        original_max_row = ws.max_row
+        assert auto_expand_row_block(ws, insert_at_row=5, amount=0, template_row_idx=4) == 0
+        assert auto_expand_row_block(ws, insert_at_row=5, amount=-3, template_row_idx=4) == 0
+        assert ws.max_row == original_max_row
+
+    def test_multi_row_merge_block_replicated(self):
+        """라운드 73 P3 fix: template row가 multi-row merge의 첫 row일 때 block 단위 복제.
+
+        회사 v3.01 SUTR Test Result 1 TC당 6-row block merge (B17:B22) 패턴. amount=12
+        (=block 2개)이면 B17:B22 + B23:B28 (신규 row) 동일 col span 복제 확인.
+        """
+        wb, ws = self._make_ws(rows=30, cols=5)
+        # template_row=10 ~ 15 (6-row block) col 2 merge
+        ws.merge_cells("B10:B15")
+        # amount=6, template_row_idx=10 → block 1개 복제 (B16:B21)
+        inserted = auto_expand_row_block(
+            ws,
+            insert_at_row=16,
+            amount=6,
+            template_row_idx=10,
+            copy_style=False,
+            copy_merge=True,
+            copy_dimension=False,
+        )
+        assert inserted == 6
+        merge_strs = {str(mr) for mr in ws.merged_cells.ranges}
+        assert "B10:B15" in merge_strs  # 기존 보존
+        assert "B16:B21" in merge_strs  # 신규 block 복제
+
+
+# ---------------------------------------------------------------------------
+# push_sentinel_to_last_row — 라운드 73 T804 helper
+# ---------------------------------------------------------------------------
+
+class TestPushSentinelToLastRow:
+    def test_sentinel_at_end_returns_same_row(self):
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.cell(1, 1).value = "data1"
+        ws.cell(2, 1).value = "data2"
+        ws.cell(3, 1).value = "< End of Document >"
+        result = push_sentinel_to_last_row(ws)
+        assert result == 3
+        assert ws.cell(3, 1).value == "< End of Document >"
+
+    def test_sentinel_in_middle_pushed_to_end(self):
+        """sentinel이 R3에 있고 R4~R6에 데이터 → sentinel을 R7로 이동."""
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.cell(1, 1).value = "data1"
+        ws.cell(2, 1).value = "data2"
+        ws.cell(3, 1).value = "< End of Document >"
+        ws.cell(4, 1).value = "data4"
+        ws.cell(5, 1).value = "data5"
+        ws.cell(6, 1).value = "data6"
+        result = push_sentinel_to_last_row(ws)
+        assert result == 7
+        assert ws.cell(7, 1).value == "< End of Document >"
+        assert ws.cell(3, 1).value is None
+
+    def test_no_sentinel_returns_none(self):
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.cell(1, 1).value = "data1"
+        assert push_sentinel_to_last_row(ws) is None

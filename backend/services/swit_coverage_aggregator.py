@@ -114,6 +114,7 @@ def build_swit_coverage_report(
     template_bytes: bytes,
     swuds_function_ids: set[str] | None = None,
     hmr_html_bytes: bytes | None = None,
+    swits_map: dict[str, Any] | None = None,
 ) -> SwitCoverageBuildResult:
     """SwIT Coverage Report v2.02 xlsx 생성.
 
@@ -127,6 +128,9 @@ def build_swit_coverage_report(
             (옵션, Jenkins_PDSM_IT_metrics_report.html 양식). 제공 시 함수별
             Function Calls coverage를 추출하여 fc.function_calls_coverage 채움.
             None이면 기존 빈 CoverageStats default 유지 (backward-compat).
+        swits_map: 라운드 73 T807 — SwITS xlsm spec parse 결과 (`parse_swuts_xlsm.by_tc_id`).
+            제공 시 2.Traceability switc_x_swst 분기에서 session 12 TC만이 아닌
+            spec 전체 (예: 77 entries) row stamp + Note column에 audit 안내.
 
     Returns:
         SwitCoverageBuildResult — xlsx_io 채워짐.
@@ -148,6 +152,14 @@ def build_swit_coverage_report(
     template_sha256_12 = hashlib.sha256(template_bytes).hexdigest()[:12]
     # 37차 fix → 38차 W1 DRY: extract_warnings_from_session helper로 추출.
     warnings: list[str] = extract_warnings_from_session(session)
+
+    # 라운드 73 T816 — 입력 자산 활용도 진단.
+    from backend.services.swut_builder_helpers import diagnose_asset_usage
+    warnings.extend(diagnose_asset_usage(
+        swits_map=swits_map,
+        c_function_map=session.c_function_map or None,
+        swuds_function_map=session.swuds_function_map or None,
+    ))
 
     # 54차 T280 — v2.02 양식 layout 자동 추출 (sha256 keying + LRU)
     layout = inspect_swit_layout(template_bytes, "coverage")
@@ -276,7 +288,12 @@ def build_swit_coverage_report(
     if trace_ws is None:
         warnings.append("Traceability 시트 미발견")
     else:
-        n_o = _write_traceability_sheet(trace_ws, session, out_warnings=warnings, layout=layout)
+        # 라운드 73 T807 — swits_tc_ids 전달 (SwITS spec 77 entries 활용).
+        swits_tc_ids_list = list(swits_map.keys()) if swits_map else None
+        n_o = _write_traceability_sheet(
+            trace_ws, session, out_warnings=warnings, layout=layout,
+            swits_tc_ids=swits_tc_ids_list,
+        )
         summary["traceability_o_cells"] = n_o
         if n_o == 0:
             incomplete_sheets.append(trace_ws.title.strip())
