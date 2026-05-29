@@ -626,17 +626,36 @@ def _write_coverage_sheet(
             pass
 
     # 기존 데이터 행을 덮어쓴다 (template이 기존 sample 데이터 가질 수 있음).
+    # 라운드 76 자체평가 fix — has_component_col=True 시 C3 'Component' col에 stamp.
+    # 회사 v3.01 SwUTCV 4.Coverage 양식 R8: C3='Component', C4='Unit', C5='Name'.
+    # 이전: C3 미stamp (양식 default `SwCom_01: XXXX` 잔존 또는 빈). audit reviewer가
+    # 함수의 소속 component (vcast component_name 또는 c_parser file) 인지 어려움.
     written = 0
     for i, fc in enumerate(function_rows):
         r = data_start + i
         safe_write(ws, r, no_col, i + 1)
-        safe_write(ws, r, unit_id_col, fc.unit_id)
-        safe_write(ws, r, unit_id_col + 1, fc.name)
 
         # 라운드 74 T906 — c_parser only row 식별 (unit_id `SwUFn_C_<idx>` prefix).
-        # 빈 CoverageStats → coverage 미실측 — Statement/Branch cell 노란 마킹 +
-        # Note column 안내. audit reviewer가 한눈에 실측 vs c_parser only 구분.
         is_c_parser_only = bool(fc.unit_id and fc.unit_id.startswith("SwUFn_C_"))
+
+        # 라운드 76 자체평가 fix — C3 'Component' stamp.
+        # - vcast row: fc.name (component_name 자체, 예: 'SysOs_Main')
+        # - c_parser only row: fc.file basename에서 '.c' 제외 (예: 'Cpu.c' → 'Cpu')
+        if has_component_col:
+            comp_col = no_col + 1  # No 다음 col
+            if is_c_parser_only:
+                from pathlib import Path as _PathLocal2
+                comp_name = ""
+                if fc.file:
+                    comp_name = _PathLocal2(fc.file).stem  # 'Cpu.c' → 'Cpu'
+                if comp_name:
+                    safe_write(ws, r, comp_col, comp_name)
+            else:
+                # vcast row — component_name = fc.name (현재 component 단위 추출이라)
+                safe_write(ws, r, comp_col, fc.name)
+
+        safe_write(ws, r, unit_id_col, fc.unit_id)
+        safe_write(ws, r, unit_id_col + 1, fc.name)
 
         if is_swit_metric_layout:
             # SwITCV — Functions Pass (C6) + Function Called metric (C8/C9/C10)
