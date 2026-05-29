@@ -690,6 +690,14 @@ def _write_coverage_sheet(
                     safe_write(ws, r, 11, fcc.covered)
                     safe_write(ws, r, 12, "O" if fcc.passed else "X")
 
+        # 라운드 76 자체평가 fix — File col (회사 v3.01 양식 R8 C14 'File' header)에
+        # fc.file stamp. vcast row + c_parser only row 모두 audit reviewer가 함수의
+        # 출처 파일을 한눈에 인지 가능. file 빈 string이면 stamp 안 함 (silent skip).
+        file_col = 14  # 회사 v3.01 SwUTCV 4.Coverage R8 C14 'File' col 가정
+        if fc.file:
+            from pathlib import Path as _PathLocal
+            safe_write(ws, r, file_col, _PathLocal(fc.file).name)
+
         # 30차 W21 + 31차 W29: ASIL B/C/D 함수면 row의 핵심 컬럼 강조.
         # fc.unit_id 가 SwUFn_NNNN 패턴일 수 있고 또는 다른 ID. 둘 다 매칭 시도.
         asil = function_asil_map.get(fc.unit_id) or function_asil_map.get(fc.name)
@@ -987,10 +995,12 @@ def _write_consistency_sheet(
     # row 11+: 모든 환경의 function_coverage 추출 → fn_id + fn_name + 정합성 stamp.
     # 정확한 attr 이름: FunctionCoverage.unit_id (fn_id) + FunctionCoverage.name (fn_name).
     #
-    # 라운드 74 T907 → 자체평가 롤백: c_function_map 자동 추가 비활성. vcast가
-    # component 단위 평탄화이고 c_parser는 함수 단위라 dedup 매칭 0건 → row 폭증
-    # (41 → 358) + 양식 cross-ref formula 깨짐. 라운드 75에서 vcast 함수 단위 분해
-    # 후 다시 활성화 검토. function_list source는 vcast function_coverage만 사용 (기존).
+    # 라운드 76 자체평가 fix — 사용자 검수: "정합성 탭은 함수가 다 입력이 안 되어 있고".
+    # 라운드 74 T907 롤백 후 4.Coverage만 c_parser merge 활성하고 3.Consistency
+    # function list는 vcast 30 컴포넌트만 stamp. 회사 KJPDS02 v1.01 R578~R580 패턴
+    # (`SwUTC_SwUFn_NNNN / s_FunctionName / O`)에 맞춰 ~377 함수 단위로 변경.
+    # 라운드 76 enhance_function_coverage_with_file로 dedup key 정확성 향상 +
+    # auto_expand + cross-ref formula 동적 갱신으로 양식 호환 유지.
     if session.environments:
         all_fns: dict[str, str] = {}  # unit_id → name
         for env in session.environments:
@@ -999,6 +1009,21 @@ def _write_consistency_sheet(
                 fn_name = fc.name      # 예: main
                 if unit_id and unit_id not in all_fns:
                     all_fns[unit_id] = fn_name
+        # 라운드 76 자체평가 fix — c_function_map 함수 자동 union (vcast에 없는 함수만).
+        # SwUFn_C_<idx> synthetic unit_id 생성 (4.Coverage와 동일 패턴).
+        c_fn_map_for_list = getattr(session, "c_function_map", None) or {}
+        c_parser_added = 0
+        if c_fn_map_for_list:
+            next_idx = 9000
+            existing_names = set(all_fns.values())
+            for c_name in sorted(c_fn_map_for_list.keys()):
+                if c_name in existing_names:
+                    continue
+                synthetic_uid = f"SwUFn_C_{next_idx}"
+                all_fns[synthetic_uid] = c_name
+                existing_names.add(c_name)
+                next_idx += 1
+                c_parser_added += 1
         swuds_set = swuds_function_ids or set()
         function_list_start = 11
 
@@ -1006,8 +1031,30 @@ def _write_consistency_sheet(
         # 이전: `if row_idx_fn > 2000: break` 가 60+ 함수 silent truncate.
         sorted_fns = sorted(all_fns.items())
         needed_last_row = function_list_start + len(sorted_fns) - 1
+        # 라운드 76 자체평가 fix — cross-ref formula 동적 갱신용 old_totals_row detect.
+        old_totals_row_consistency = ws.max_row
+        for _r in (4, 5, 6, 7):
+            for _c in range(2, 8):
+                try:
+                    _v = ws.cell(_r, _c).value
+                except (AttributeError, IndexError):
+                    continue
+                if not isinstance(_v, str) or not _v.startswith("=") or "!" in _v:
+                    continue
+                _m = re.search(r"=([A-Z]+)(\d+)\b", _v)
+                if _m:
+                    _detected = int(_m.group(2))
+                    if _detected > 10:
+                        old_totals_row_consistency = _detected
+                        break
+            if old_totals_row_consistency != ws.max_row:
+                break
+
         if needed_last_row > ws.max_row:
-            from backend.services.excel_template_utils import auto_expand_row_block
+            from backend.services.excel_template_utils import (
+                auto_expand_row_block, push_sentinel_to_last_row,
+                update_cross_refs_after_row_expansion,
+            )
             shortage = needed_last_row - ws.max_row
             inserted = auto_expand_row_block(
                 ws,
@@ -1021,6 +1068,28 @@ def _write_consistency_sheet(
                     f"[row_expand] Consistency 시트 function list row 부족 "
                     f"({shortage}개 필요, {inserted}개 확장) — 누락 가능"
                 )
+            # 라운드 76 자체평가 fix — cross-ref formula 동적 갱신 (3.Consistency도 동일).
+            try:
+                push_sentinel_to_last_row(ws)
+                new_totals_row = function_list_start + len(sorted_fns)
+                cr_updated = update_cross_refs_after_row_expansion(
+                    ws,
+                    old_totals_row=old_totals_row_consistency,
+                    new_totals_row=new_totals_row,
+                )
+                if cr_updated > 0 and out_warnings is not None:
+                    out_warnings.append(
+                        f"[cross_ref] Consistency 시트 cross-ref formula {cr_updated}건 "
+                        f"동적 갱신 (R{old_totals_row_consistency} → R{new_totals_row})."
+                    )
+            except ImportError:
+                pass
+
+        if c_parser_added > 0 and out_warnings is not None:
+            out_warnings.append(
+                f"[merge] 3.Consistency function list — c_parser only {c_parser_added}개 "
+                "함수 추가 (SwUFn_C_9000~). coverage 미실측 — audit reviewer 확인 의무."
+            )
 
         # 라운드 73 T812~T815 — 입력 자산 활용 stamp.
         # session에서 c_function_map / swuds_function_map 추출 (옵션).

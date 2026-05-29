@@ -323,9 +323,11 @@ def merge_function_rows_with_c_parser(
         if key_a in existing_keys or key_b in existing_keys:
             continue
         # c_parser only — 빈 CoverageStats + SwUFn_C_<index> unit_id 자동 생성
+        # 라운드 76 자체평가 fix — file 정보 주입 (audit reviewer 시인성).
         fc = FunctionCoverage(
             unit_id=f"SwUFn_C_{next_idx}",
             name=c_name,
+            file=c_file,
             statement=CoverageStats(0, 0, 0.0),
             branch=CoverageStats(0, 0, 0.0),
             mcdc=CoverageStats(0, 0, 0.0),

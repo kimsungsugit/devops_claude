@@ -2201,10 +2201,11 @@ class TestRound74PhaseBCParserMerge:
                 break
         assert found_c_parser_label
 
-    def test_consistency_sheet_c_function_signature_stamp_only(self):
-        """_write_consistency_sheet — vcast function의 c_function_map 매칭 함수만 signature stamp.
-        라운드 74 T907 자체평가 롤백: function list에 c_parser only 함수 자동 추가 비활성.
-        (vcast component 단위 평탄화 + c_parser 함수 단위 mismatch → row 폭증 차단)."""
+    def test_consistency_sheet_c_function_added_with_signature(self):
+        """_write_consistency_sheet — 라운드 76 자체평가 fix: c_parser only 함수도
+        function list에 자동 추가 + signature stamp. 사용자 검수 "정합성 탭은 함수가
+        다 입력이 안 되어있다"라 라운드 74 롤백 해소. 라운드 76 enhance_function_
+        coverage_with_file로 dedup 정확성 향상 + auto_expand로 row 폭증 처리."""
         from backend.services.swut_coverage_aggregator import _write_consistency_sheet
         wb = openpyxl.Workbook()
         ws = wb.active
@@ -2218,16 +2219,16 @@ class TestRound74PhaseBCParserMerge:
             environments=[env],
             c_function_map={
                 "vcast_main": {"signature": "void vcast_main(void)"},  # vcast 매칭 → F열 stamp
-                "extra_fn": {"signature": "void extra_fn(void)"},      # c_parser only — 추가 안 함
+                "extra_fn": {"signature": "void extra_fn(void)"},      # c_parser only — 추가 stamp
             },
         )
         _write_consistency_sheet(ws, session, swuds_function_ids=set())
-        # vcast function vcast_main만 R11 stamp + 그 row F열에 signature
+        # vcast function vcast_main R11 stamp + F열 signature
         assert ws.cell(11, 4).value == "vcast_main"
         assert ws.cell(11, 6).value == "void vcast_main(void)"
-        # extra_fn은 function list에 추가 안 됨 (row 폭증 차단)
+        # 라운드 76 자체평가 fix — extra_fn (c_parser only) 추가 stamp
         names_in_d = [ws.cell(r, 4).value for r in range(11, 30)]
-        assert "extra_fn" not in names_in_d
+        assert "extra_fn" in names_in_d
 
 
 class TestRound74PhaseCDynamicSubfolder:
