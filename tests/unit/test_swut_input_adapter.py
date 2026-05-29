@@ -683,3 +683,70 @@ class TestExtractStepIterationsF4B:
         assert len(steps) == 2
         assert steps[0]["var1"] == "10"
         assert steps[1]["var1"] == "20"
+
+
+# ---------------------------------------------------------------------------
+# 라운드 75 — flatten_sub_functions helper (T1007)
+# ---------------------------------------------------------------------------
+
+class TestFlattenSubFunctions:
+    """vcast_parser.MetricsBank.sub_functions 평탄화."""
+
+    def _make_bank(self, sub_functions):
+        from backend.services.swut_input_adapter import flatten_sub_functions  # noqa: F401
+        from backend.services.vcast_parser import MetricsBank, SubFunctionExecution
+        mb = MetricsBank(environment="SWTE_01")
+        for module_name, items in sub_functions.items():
+            mb.sub_functions[module_name] = [
+                SubFunctionExecution(order=str(i + 1), name=name, executed=executed)
+                for i, (name, executed) in enumerate(items)
+            ]
+        return mb
+
+    def test_normal_flatten_unit_id_auto_generation(self):
+        from backend.services.swut_input_adapter import flatten_sub_functions
+        bank = self._make_bank({
+            "ModA": [("fnA_1", True), ("fnA_2", False)],
+            "ModB": [("fnB_1", True)],
+        })
+        result = flatten_sub_functions(bank, component_name="SysOs_Main")
+        assert len(result) == 3
+        names = {fc.name for fc in result}
+        assert names == {"fnA_1", "fnA_2", "fnB_1"}
+        # unit_id 자동 생성 — SwUFn_<component>_<module_idx>_<suborder>
+        unit_ids = {fc.unit_id for fc in result}
+        for uid in unit_ids:
+            assert uid.startswith("SwUFn_SysOs_Main_")
+
+    def test_empty_sub_functions_returns_empty(self):
+        from backend.services.swut_input_adapter import flatten_sub_functions
+        bank = self._make_bank({})
+        assert flatten_sub_functions(bank) == []
+
+    def test_executed_false_yields_zero_coverage(self):
+        from backend.services.swut_input_adapter import flatten_sub_functions
+        bank = self._make_bank({"Mod": [("fn_unexec", False), ("fn_exec", True)]})
+        result = flatten_sub_functions(bank, component_name="C1")
+        unexec = next(fc for fc in result if fc.name == "fn_unexec")
+        exec_fc = next(fc for fc in result if fc.name == "fn_exec")
+        assert unexec.statement.covered == 0
+        assert unexec.statement.total == 1
+        assert exec_fc.statement.covered == 1
+        assert exec_fc.statement.total == 1
+
+    def test_name_dedup_conflict_warning(self):
+        from backend.services.swut_input_adapter import flatten_sub_functions
+        bank = self._make_bank({
+            "ModA": [("fn_same", True)],
+            "ModB": [("fn_same", False)],  # 동일 name — 첫 entry 보존
+        })
+        warnings: list[str] = []
+        result = flatten_sub_functions(bank, out_warnings=warnings)
+        assert len(result) == 1
+        assert result[0].name == "fn_same"
+        assert result[0].statement.covered == 1  # ModA의 첫 entry executed=True 보존
+        assert any("dedup 충돌" in w for w in warnings)
+
+    def test_metrics_bank_none_returns_empty(self):
+        from backend.services.swut_input_adapter import flatten_sub_functions
+        assert flatten_sub_functions(None) == []

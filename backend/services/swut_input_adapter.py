@@ -395,6 +395,99 @@ def extract_aggregate_coverage(html_bytes: bytes) -> tuple[list[FunctionCoverage
     return (functions, grand_total)
 
 
+def _parse_aggregate_coverage_via_temp(
+    resolver: Any, html_path: str,
+) -> Any:
+    """라운드 75 T1001 helper: vcast_parser.parse_aggregate_coverage 호출 wrapper.
+
+    parser가 Path 인자만 받으므로 worker bytes를 임시 파일로 dump → parse → unlink.
+    `MetricsBank.sub_functions` 네스트 구조 반환 — `flatten_sub_functions`에 전달.
+    """
+    from backend.services.vcast_parser import (
+        ReportType, VCASTVersion, parse_vcast_report,
+    )
+    data = _read_via_resolver(resolver, html_path)
+    with tempfile.NamedTemporaryFile(suffix=".html", delete=False) as tf:
+        tf.write(data)
+        tmp = Path(tf.name)
+    try:
+        return parse_vcast_report(tmp, ReportType.AggregateCoverage, VCASTVersion.Ver2025)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def flatten_sub_functions(
+    metrics_bank: Any,
+    *,
+    component_name: str = "",
+    out_warnings: list[str] | None = None,
+) -> list[FunctionCoverage]:
+    """라운드 75 T1001: vcast_parser MetricsBank.sub_functions → FunctionCoverage list.
+
+    회사 KJPDS02 v1.01 SwUTCV 4.Coverage 570 함수 row 패턴 대비 우리 HDPDM01
+    NE_GN7 추출이 환경당 2 함수 (60/30 env) 한계. `extract_aggregate_coverage`가
+    HTML `<table>` 요약(unique 함수명)만 파싱하나 vcast_parser는 같은 HTML의
+    `<pre class="aggregate-coverage">` marker에서 module_order/suborder/name 3-필드
+    추출 → 네스트 `sub_functions` 보유 (~5~10 sub-fn ÷ 환경). 본 helper로 평탄화.
+
+    Args:
+        metrics_bank: vcast_parser.parse_aggregate_coverage 결과 (`MetricsBank` 객체).
+            `sub_functions: Dict[module_name, List[SubFunctionExecution(order, name, executed)]]`.
+        component_name: 환경의 component name (audit 추적성). unit_id 생성 시 prefix.
+        out_warnings: dedup 충돌 / 빈 결과 / 예외 누적.
+
+    Returns:
+        FunctionCoverage list — vcast HTML sub-function 단위. unit_id:
+        ``SwUFn_<component>_<module_order>_<suborder>`` (audit 추적성).
+        executed=False 함수도 포함 (CoverageStats(0,1,0.0)). executed=True는
+        CoverageStats(1,1,1.0).
+
+    Empty/invalid 시 빈 list 반환 (backward-compat fallback).
+    """
+    if metrics_bank is None:
+        return []
+    sub_funcs = getattr(metrics_bank, "sub_functions", None) or {}
+    if not sub_funcs:
+        return []
+
+    safe_comp = (component_name or "X").replace(" ", "_").replace(".", "_")[:20]
+    seen_names: set[str] = set()
+    out: list[FunctionCoverage] = []
+    conflict_count = 0
+    for mod_idx, (module_name, sub_list) in enumerate(sorted(sub_funcs.items()), start=1):
+        if not sub_list:
+            continue
+        for sub_exec in sub_list:
+            name = (getattr(sub_exec, "name", "") or "").strip()
+            order = getattr(sub_exec, "order", "")
+            executed = bool(getattr(sub_exec, "executed", False))
+            if not name:
+                continue
+            if name in seen_names:
+                conflict_count += 1
+                continue
+            seen_names.add(name)
+            unit_id = f"SwUFn_{safe_comp}_{mod_idx}_{order}"
+            stats = CoverageStats(
+                covered=1 if executed else 0,
+                total=1,
+                coverage_pct=1.0 if executed else 0.0,
+            )
+            out.append(FunctionCoverage(
+                unit_id=unit_id,
+                name=name,
+                statement=stats,
+                branch=CoverageStats(0, 0, 0.0),
+                mcdc=CoverageStats(0, 0, 0.0),
+                complexity=0,
+            ))
+    if conflict_count > 0 and out_warnings is not None:
+        out_warnings.append(
+            f"[sub_functions] dedup 충돌 {conflict_count}건 (동일 name 첫 entry 보존)"
+        )
+    return out
+
+
 def extract_execution_results(html_bytes: bytes) -> dict[str, ExecutionRow]:
     """SWTE ExecutionResult HTML → TC별 pass/fail + 이벤트 로그.
 
@@ -1205,6 +1298,49 @@ def collect_from_log_folder(
             env_data.grand_total = total
         except Exception as e:
             env_data.parse_errors.append(f"AggregateCoverage: {type(e).__name__}: {e}")
+
+        # 라운드 75 T1002~T1004 — vcast_parser sub_functions 평탄화 통합.
+        # extract_aggregate_coverage가 HTML `<table>` 요약(unique 함수명만)만 추출
+        # 하나, 같은 HTML의 `<pre class="aggregate-coverage">` marker는 module/sub-fn
+        # 3-필드(module_order/suborder/name) 보유 → vcast_parser가 이미 추출 + 네스트
+        # 구조 (MetricsBank.sub_functions) 보유. 본 통합으로 환경당 함수 수 2 → 5~10
+        # 추정 (~120~210 total stamp 가능).
+        try:
+            mb = _parse_aggregate_coverage_via_temp(resolver, cov_path)
+            extra_fns = flatten_sub_functions(
+                mb,
+                component_name=env_data.component_name,
+                out_warnings=env_data.parse_errors,
+            )
+            if extra_fns:
+                existing_names = {fc.name for fc in env_data.function_coverage}
+                # 라운드 73 c_function_map ASIL 매핑 자동 등록 (T1003)
+                c_fn_map_local = getattr(session, "c_function_map", None) or {}
+                added = 0
+                asil_mapped = 0
+                for new_fc in extra_fns:
+                    if new_fc.name in existing_names:
+                        continue
+                    env_data.function_coverage.append(new_fc)
+                    existing_names.add(new_fc.name)
+                    added += 1
+                    # ASIL 매핑 — c_function_map에 매칭되면 env.function_asil_map 등록
+                    c_entry = c_fn_map_local.get(new_fc.name)
+                    if c_entry:
+                        asil = (c_entry.get("comment_asil") or "").strip().upper()
+                        if asil in {"A", "B", "C", "D", "QM"}:
+                            env_data.function_asil_map[new_fc.unit_id] = asil
+                            asil_mapped += 1
+                if added > 0:
+                    _diag_logger.info(
+                        f"collect_from_log_folder: {env} sub_functions 평탄화 → "
+                        f"{added} 함수 추가 ({asil_mapped} ASIL 매핑)"
+                    )
+        except Exception as e:
+            # T1004 backward-compat — vcast_parser 실패 시 silent fallback (기존 60 row 유지)
+            env_data.parse_errors.append(
+                f"[sub_functions] vcast_parser 실패 (skip): {type(e).__name__}: {str(e)[:80]}"
+            )
 
         # 라운드 74 T910 — 04.MetricsReport HTML (옵션). 존재 시 vcast_hmr_parser
         # 재활용 → 환경별 함수별 metric 추출 후 function_coverage에 union (dedup by name).
