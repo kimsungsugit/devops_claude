@@ -664,11 +664,13 @@ def _write_coverage_sheet(
             fcalls_count_col = no_col + 6
             if is_c_parser_only:
                 # 라운드 74 T906 — c_parser only Functions Pass cell에 '[c_parser]' 안내.
-                # mark_user_input_required는 텍스트를 placeholder로 덮어쓰니 _apply_fill 직접 호출.
+                # 라운드 76 자체평가 fix — 안내 메시지 보강 + Name col에도 마킹.
                 from backend.services.excel_template_utils import _apply_fill
                 from backend.services.design_tokens import USER_INPUT_FILL_RGB
-                safe_write(ws, r, functions_pass_col, "[c_parser]")
+                safe_write(ws, r, functions_pass_col, "[c_parser only — 미실측]")
                 _apply_fill(ws, r, functions_pass_col, USER_INPUT_FILL_RGB)
+                # Name col(C5)도 [c_parser] suffix로 audit 마킹
+                _apply_fill(ws, r, unit_id_col + 1, USER_INPUT_FILL_RGB)
             else:
                 safe_write(ws, r, functions_pass_col, "O")
                 fcc = getattr(fc, "function_calls_coverage", None)
@@ -679,10 +681,10 @@ def _write_coverage_sheet(
         else:
             # SwUTCV / HDPDM01 — Statement + Branch metric
             if is_c_parser_only:
-                # 라운드 74 T906 — c_parser only row: Statement/Branch에 '[c_parser]' 안내 + 노란 fill.
+                # 라운드 76 자체평가 fix — c_parser only 안내 메시지 보강 + Name col 마킹.
                 from backend.services.excel_template_utils import _apply_fill
                 from backend.services.design_tokens import USER_INPUT_FILL_RGB
-                safe_write(ws, r, stmt_count_col, "[c_parser]")
+                safe_write(ws, r, stmt_count_col, "[c_parser only — 미실측]")
                 safe_write(ws, r, stmt_count_col + 1, "-")
                 safe_write(ws, r, stmt_count_col + 2, "-")
                 safe_write(ws, r, branch_count_col, "-")
@@ -690,6 +692,7 @@ def _write_coverage_sheet(
                 safe_write(ws, r, branch_count_col + 2, "-")
                 _apply_fill(ws, r, stmt_count_col, USER_INPUT_FILL_RGB)
                 _apply_fill(ws, r, branch_count_col, USER_INPUT_FILL_RGB)
+                _apply_fill(ws, r, unit_id_col + 1, USER_INPUT_FILL_RGB)  # Name col
             else:
                 safe_write(ws, r, stmt_count_col, fc.statement.total)
                 safe_write(ws, r, stmt_count_col + 1, fc.statement.covered)
@@ -709,10 +712,25 @@ def _write_coverage_sheet(
                     safe_write(ws, r, 11, fcc.covered)
                     safe_write(ws, r, 12, "O" if fcc.passed else "X")
 
-        # 라운드 76 자체평가 fix — File col (회사 v3.01 양식 R8 C14 'File' header)에
-        # fc.file stamp. vcast row + c_parser only row 모두 audit reviewer가 함수의
-        # 출처 파일을 한눈에 인지 가능. file 빈 string이면 stamp 안 함 (silent skip).
-        file_col = 14  # 회사 v3.01 SwUTCV 4.Coverage R8 C14 'File' col 가정
+        # 라운드 76 자체평가 fix — File col stamp.
+        # SwUTCV v3.01: R8 C14 'File' / SwITCV v2.02: R9 C12 'File' — 양식별 mismatch.
+        # 자동 detect: header row 8~10 scan으로 'File' label 위치 찾음. 미발견 시
+        # caller 기준 fallback (SwIT=12, SwUT=14).
+        if not hasattr(ws, "_file_col_cached"):
+            _file_col_detected = None
+            for _hr in range(max(1, header_row - 1), header_row + 2):
+                for _hc in range(1, min(ws.max_column + 1, 20)):
+                    try:
+                        _hv = ws.cell(_hr, _hc).value
+                    except (AttributeError, IndexError):
+                        continue
+                    if isinstance(_hv, str) and _hv.strip().lower() == "file":
+                        _file_col_detected = _hc
+                        break
+                if _file_col_detected:
+                    break
+            ws._file_col_cached = _file_col_detected or (12 if is_swit_caller else 14)
+        file_col = ws._file_col_cached
         if fc.file:
             from pathlib import Path as _PathLocal
             safe_write(ws, r, file_col, _PathLocal(fc.file).name)

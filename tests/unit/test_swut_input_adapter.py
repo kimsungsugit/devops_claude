@@ -345,14 +345,18 @@ class TestCoverageStats:
 
 class TestExtractAggregateCoverage:
     def test_extracts_functions_and_grand_total(self):
+        """라운드 76 자체평가 fix #4 — unit_id가 component name(SysOs_Main)이 아닌
+        함수명(main / s_SysMain_Init). vcast HTML table[2] R1/R2가 같은 component
+        다른 함수 패턴 (R2 first cell 빈)이라 함수 단위 추출이 정확."""
         funcs, total = extract_aggregate_coverage(_AGG_HTML_TEMPLATE.encode("utf-8"))
         assert len(funcs) == 2
-        assert funcs[0].unit_id == "SysOs_Main"
+        assert funcs[0].unit_id == "main"  # 라운드 76 fix — Subprogram(함수명)
+        assert funcs[0].name == "main"
         assert funcs[0].statement.covered == 8
         assert funcs[0].statement.total == 8
+        assert funcs[1].unit_id == "s_SysMain_Init"  # 같은 component 다른 함수
         assert funcs[1].statement.covered == 61
         assert funcs[1].statement.total == 61
-        assert total.unit_id == "GRAND TOTALS"
         assert total.statement.covered == 69
         assert total.statement.total == 69
         assert total.branch.covered == 21

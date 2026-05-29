@@ -2194,7 +2194,7 @@ class TestRound74PhaseBCParserMerge:
         for r in range(1, ws.max_row + 1):
             for c in range(1, ws.max_column + 1):
                 v = ws.cell(r, c).value
-                if isinstance(v, str) and "[c_parser]" in v:
+                if isinstance(v, str) and "[c_parser" in v:
                     found_c_parser_label = True
                     break
             if found_c_parser_label:
@@ -2358,7 +2358,7 @@ class TestRound76CParserMergeReactivation:
         for r in range(1, ws.max_row + 1):
             for c in range(1, ws.max_column + 1):
                 v = ws.cell(r, c).value
-                if isinstance(v, str) and "[c_parser]" in v:
+                if isinstance(v, str) and "[c_parser" in v:
                     c_parser_count += 1
                     break
         assert c_parser_count == 5  # 5 c_parser only row 모두 마킹

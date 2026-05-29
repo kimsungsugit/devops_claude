@@ -400,22 +400,53 @@ def extract_aggregate_coverage(html_bytes: bytes) -> tuple[list[FunctionCoverage
     functions: list[FunctionCoverage] = []
     grand_total = FunctionCoverage(unit_id="GRAND_TOTALS", name="GRAND TOTALS")
 
+    # 라운드 76 자체평가 fix #4 — vcast HTML table 구조:
+    #   R0: header (Unit/Subprogram/Complexity/Statements/Branches)
+    #   R1: 'SysEepromCtrl_PDS' / 'g_SysEepromCtrl_Main' / '9' / '29/29 (100%)' / '11/11 (100%)'
+    #   R2: ''                  / 'g_SysEepromCtrl_Diag' / '6' / '20/20 (100%)' / '8/8 (100%)'
+    #   ... (R2~Rn: 첫 cell 빈 — 같은 component 안 다른 함수)
+    # 이전 코드는 `if not first: continue`로 빈 first cell row 모두 skip → 30 함수 중 1개만 추출.
+    # fix: 빈 first cell이면 이전 component_name 유지 + second cell (Subprogram)이 함수명.
     rows = table.find_all("tr")
+    current_component = ""
     for row in rows:
         cells = row.find_all(["th", "td"])
         if len(cells) < 4:
             continue
         first = cells[0].get_text(strip=True)
-        if not first or first in ("Unit", "Subprogram", "Complexity"):
+        second = cells[1].get_text(strip=True) if len(cells) > 1 else ""
+
+        # 헤더 row skip (회사 vcast 양식 column 라벨)
+        if first in ("Unit", "Subprogram", "Complexity"):
             continue
 
-        # 셀 위치는 VectorCAST 표준: Unit/Subprogram/Complexity/Statement+Branch/MC|DC
-        # 그러나 SWTE는 두 컬럼만 metric일 수 있어 동적 매핑.
-        # 마지막 % 패턴이 있는 모든 셀을 추출하고, 첫 셀은 unit_id 가정.
+        # vcast HTML: 새 component 시작이면 first에 component name, 같은 component 내
+        # 다른 함수면 first 빈 + second(Subprogram)에 함수명.
+        if first:
+            # 새 component 그룹 시작 또는 GRAND TOTALS
+            if "TOTAL" in first.upper():
+                # GRAND TOTALS / TOTALS row — current_component 갱신 안 함
+                function_name = first
+                component_name = current_component or first
+            else:
+                current_component = first
+                function_name = second or first  # second 없으면 first가 함수
+                component_name = first
+        else:
+            # 같은 component 안 다른 함수
+            function_name = second
+            component_name = current_component
+
+        if not function_name:
+            continue
+
         metric_cells = [c.get_text(" ", strip=True) for c in cells]
         metrics = [_parse_metric_cell(t) for t in metric_cells if _RE_PCT.search(t)]
 
-        fc = FunctionCoverage(unit_id=first, name=first)
+        fc = FunctionCoverage(
+            unit_id=function_name,
+            name=function_name,
+        )
         # Complexity 추출
         try:
             cplx = next(int(t) for t in metric_cells[1:4]
@@ -430,7 +461,7 @@ def extract_aggregate_coverage(html_bytes: bytes) -> tuple[list[FunctionCoverage
         if len(metrics) >= 3:
             fc.mcdc = metrics[2]
 
-        if "GRAND TOTAL" in first.upper():
+        if "GRAND TOTAL" in function_name.upper() or "TOTAL" in function_name.upper():
             grand_total = fc
         else:
             functions.append(fc)
