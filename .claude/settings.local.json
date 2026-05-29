@@ -47,7 +47,9 @@
       "Bash(Get-ChildItem -Path \"D:\\\\Project\\\\devops\\\\Release_claude\" -Filter \"*ExecutionResult*.html\" -Recurse)",
       "Bash(Select-Object FullName)",
       "Bash(.venv\\\\Scripts\\\\python.exe -m pytest tests/unit/test_swut_router.py tests/unit/test_vcast_hmr_parser.py tests/unit/test_swuts_excel_parser.py tests/unit/test_swut_aggregators.py -q --tb=line)",
-      "Bash(D:/Project/devops/Release_claude/.venv/Scripts/python.exe -m pytest tests/unit/test_swut_router.py tests/unit/test_vcast_hmr_parser.py tests/unit/test_swuts_excel_parser.py -q --tb=line)"
+      "Bash(D:/Project/devops/Release_claude/.venv/Scripts/python.exe -m pytest tests/unit/test_swut_router.py tests/unit/test_vcast_hmr_parser.py tests/unit/test_swuts_excel_parser.py -q --tb=line)",
+      "Bash(dir *)",
+      "Bash(taskkill /F /PID 25400)"
     ]
   }
 }
