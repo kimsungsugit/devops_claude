@@ -676,6 +676,60 @@ class TestF7StageR3N7IsSwitCallerBranch:
         # Statement/Branch col (C7) — SwIT 분기는 stamp 안 함 (양식 default 잔존 가능)
         # SwIT 분기 정상 진입 확인
 
+    def test_coverage_sheet_clear_form_default_function_rows_round_f8(self):
+        """F7 R2 N5 carry-over — C2 Coverage clear 단위 회귀.
+        SwIT layout (회사 표준 SwITCV)에서 신규 stamp 후 양식 default 함수 row clear
+        + 수식 cell preserve_formula + sentinel 보존."""
+        from openpyxl import load_workbook
+        wb = openpyxl.Workbook()
+        wb.remove(wb.active)
+        wb.create_sheet("Cover")
+        ts = wb.create_sheet("1.Test Summary")
+        ts["B1"] = "Project Name"
+        ts["B2"] = "SW Version"  # v1.01 signature
+        trace = wb.create_sheet("2.Traceability")
+        for i in range(5):
+            trace.cell(11, 4 + i).value = f"SwST_{i+1:02d}"
+        cons = wb.create_sheet("3.Consistency")
+        cons["A1"] = "Item"
+        cov = wb.create_sheet("4.Coverage")
+        cov["B8"] = "No"
+        cov["C8"] = "Component"
+        cov["D8"] = "Unit"
+        cov["D9"] = "ID"
+        cov["E9"] = "Name"
+        # 양식 default 함수 row R12~R14 (신규 session엔 없는 양식 default)
+        cov.cell(12, 4).value = "SwUFn_9999"
+        cov.cell(12, 5).value = "form_default_func"
+        cov.cell(12, 6).value = "O"
+        cov.cell(13, 4).value = "SwUFn_9998"
+        cov.cell(13, 5).value = "Fun_B"
+        # sentinel — clear 차단
+        cov.cell(20, 2).value = "< End of Document >"
+        # 수식 — preserve_formula
+        cov.cell(14, 8).value = "=IF(F14=G14, \"O\", \"X\")"
+        wb.create_sheet("History")
+
+        buf = io.BytesIO()
+        wb.save(buf)
+        result = build_swit_coverage_report(
+            _make_swit_session(), _make_swit_meta(), buf.getvalue(),
+        )
+        assert result.ok
+        wb_out = load_workbook(io.BytesIO(result.xlsx_io.getvalue()))
+        cov_out = wb_out["4.Coverage"]
+        # 신규 session 1 function → R10 stamp. R12~ default clear, sentinel/formula 보존
+        assert cov_out.cell(12, 4).value is None  # default 함수 clear
+        assert cov_out.cell(12, 5).value is None
+        assert cov_out.cell(12, 6).value is None
+        assert cov_out.cell(13, 4).value is None
+        # sentinel 보존
+        assert cov_out.cell(20, 2).value == "< End of Document >"
+        # 수식 preserve_formula
+        assert cov_out.cell(14, 8).value == "=IF(F14=G14, \"O\", \"X\")"
+        # clear warning emit
+        assert any("Coverage 시트" in w and "clear" in w for w in result.warnings)
+
     def test_swit_caller_default_false_swut_branch_in_unit_call(self):
         """build_coverage_report (SwUT) default is_swit_caller=False → SwUT 분기.
         회사 표준 v1.01 양식 (coverage_metric_kind=function_and_calls + has_component_col)

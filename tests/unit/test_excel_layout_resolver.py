@@ -754,6 +754,65 @@ class TestInspectV101SheetConfig:
             f"{layout.traceability_matrix_kind}"
         )
 
+    def test_matrix_kind_boundary_3_swst_threshold_round_f8(self):
+        """F7 R2 carry-over N4 — matrix_kind 임계값 boundary 회귀.
+        Round 5 W4 fix로 임계값 'swst_count >= 3 OR (swst_count > 0 AND swufn==0)'.
+        소규모 SwITCV 양식 (3 SwST + 0 SwUFn) → switc_x_swst 정상 분류.
+        """
+        template = _make_xlsx({
+            "Cover": [["Project"]],
+            "1.Test Summary": [["Project Name"]],
+            "2.Traceability": [
+                ["Matrix"], [], [], [], [], [], [], [], [], [], [],
+                ["ID", "5", "SwST_01", "SwST_02", "SwST_03"],  # 3 SwST + 0 SwUFn
+            ],
+            "3.Consistency": [["Item"]],
+            "4.Coverage": [["Function"]],
+            "History": [["Version"]],
+        })
+        layout = elr.inspect_swit_layout(template, "coverage")
+        assert layout.traceability_matrix_kind == "switc_x_swst", (
+            f"N4 boundary: 3 SwST + 0 SwUFn → switc_x_swst (got "
+            f"{layout.traceability_matrix_kind})"
+        )
+
+    def test_matrix_kind_boundary_1_swst_edge_case_round_f8(self):
+        """N4 edge case — 1 SwST + 0 SwUFn → switc_x_swst (extreme MVP)."""
+        template = _make_xlsx({
+            "Cover": [["Project"]],
+            "1.Test Summary": [["Project Name"]],
+            "2.Traceability": [
+                ["Matrix"], [], [], [], [], [], [], [], [], [], [],
+                ["ID", "1", "SwST_01"],  # 1 SwST 단독
+            ],
+            "3.Consistency": [["Item"]],
+            "4.Coverage": [["Function"]],
+            "History": [["Version"]],
+        })
+        layout = elr.inspect_swit_layout(template, "coverage")
+        assert layout.traceability_matrix_kind == "switc_x_swst"
+
+    def test_matrix_kind_boundary_2_swst_1_swufn_falls_to_swufn_round_f8(self):
+        """N4 ambiguous — 2 SwST + 1 SwUFn → (3 미만 + SwUFn>0) → swufn_x_env default.
+        Round 5 W4 임계값이 의도적으로 보수적: 2 SwST는 1 SwUFn과 함께 있으면 SwUT 양식
+        오판 가능성 — default 안전."""
+        template = _make_xlsx({
+            "Cover": [["Project"]],
+            "1.Test Summary": [["Project Name"]],
+            "2.Traceability": [
+                ["Matrix"], [], [], [], [], [], [], [], [], [], [],
+                ["ID", "3", "SwST_01", "SwST_02", "SwUFn_0001"],
+            ],
+            "3.Consistency": [["Item"]],
+            "4.Coverage": [["Function"]],
+            "History": [["Version"]],
+        })
+        layout = elr.inspect_swit_layout(template, "coverage")
+        assert layout.traceability_matrix_kind == "swufn_x_env", (
+            f"N4 ambiguous boundary: 2 SwST + 1 SwUFn → default swufn (got "
+            f"{layout.traceability_matrix_kind})"
+        )
+
     def test_v202_no_v101_signature(self):
         """1.Traceability + 2.Consistency + 3.Coverage → v1.01 신호 부족 → 기본 유지."""
         template = _make_xlsx({
