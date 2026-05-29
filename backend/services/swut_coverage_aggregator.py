@@ -960,10 +960,10 @@ def _write_traceability_sheet(
         # SwITC TC name 패턴 'SwITC_NN' 또는 'SwITC_SwUFn_NNNN.NNN' → SwITC ID prefix 추출
         import re as _re
         # 패턴 우선순위 (F7 stage 8 T705):
-        # 1) SwITC_NN / SwITC_NN_NN (KJPDS02 회사 표준)
+        # 1) SwITC_NN / SwITC_NN_NN (KJPDS02 회사 표준) — L975 inline regex 사용
         # 2) SwITC_SwUFn_NNNN.NNN (VectorCAST SwIT — SwUFn 부분 NNNN 추출 → SwITC_NNNN)
         # 3) SwUFn_NNNN.NNN (SwUT session — SwITC_NNNN 변환, F6-A 패턴)
-        _SWITC_DIRECT = _re.compile(r"^(SwITC_\d+(?:_\d+)?)$")
+        # F7 Round 3 N6 fix: dead code `_SWITC_DIRECT` 제거 (L975 inline 사용).
         _SWITC_WITH_FN = _re.compile(r"^SwITC_SwUFn_(\d+)")
         _SWUFN_ONLY = _re.compile(r"^SwUFn_(\d+)")
         switc_ids: list[str] = []

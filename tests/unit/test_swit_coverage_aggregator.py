@@ -616,3 +616,93 @@ class TestTcStatsDataRowGuard55fix2:
         assert "ALREADY_FILLED" in result.summary["tc_stats_skipped_reason"]
         # blocked_inferred는 set 안 됨 (fill 자체 skip)
         assert "tc_stats_blocked_inferred" not in result.summary
+
+
+class TestF7StageR3N7IsSwitCallerBranch:
+    """F7 Round 3 N7 fix — is_swit_caller kwarg 분기 회귀.
+
+    SwUT 호출 (build_coverage_report) default False → SwUT 분기 (Statement+Branch).
+    SwIT 호출 (build_swit_coverage_report) True 명시 → SwIT 분기 (Functions Pass +
+    Function Called). 향후 신규 호출처 추가 시 silent SwUT 분기 silent 결함 검출.
+    """
+
+    def _build_company_standard_swit_layout_template(self) -> bytes:
+        """회사 표준 SwITCV layout — coverage_metric_kind='function_and_calls'
+        + has_component_col=True. SwIT 분기 진입 조건 모두 만족."""
+        wb = openpyxl.Workbook()
+        wb.remove(wb.active)
+        wb.create_sheet("Cover")
+        ts = wb.create_sheet("1.Test Summary")
+        ts["B1"] = "Project Name"
+        ts["B2"] = "SW Version"  # v1.01 signature
+        # 회사 표준 v1.01 시트 signature
+        trace = wb.create_sheet("2.Traceability")
+        # SwST header (≥3) → matrix_kind='switc_x_swst' (detected_version='v1.01')
+        for i in range(5):
+            trace.cell(11, 4 + i).value = f"SwST_{i+1:02d}"
+        cons = wb.create_sheet("3.Consistency")
+        cons["A1"] = "Item"
+        # 회사 표준 4.Coverage header (No/Component/Unit ID/Name) + Function Called layout
+        cov = wb.create_sheet("4.Coverage")
+        cov["B8"] = "No"
+        cov["C8"] = "Component"
+        cov["D8"] = "Unit"
+        cov["F8"] = "Functions"
+        cov["D9"] = "ID"
+        cov["E9"] = "Name"
+        cov["F9"] = "Count"
+        wb.create_sheet("History")
+        buf = io.BytesIO()
+        wb.save(buf)
+        return buf.getvalue()
+
+    def test_swit_caller_uses_function_called_layout(self):
+        """build_swit_coverage_report → is_swit_caller=True → SwIT 분기.
+        Functions Pass (C6='O') + Function Called metric stamp."""
+        from openpyxl import load_workbook
+        template = self._build_company_standard_swit_layout_template()
+        result = build_swit_coverage_report(
+            _make_swit_session(), _make_swit_meta(), template,
+        )
+        assert result.ok
+        wb = load_workbook(io.BytesIO(result.xlsx_io.getvalue()))
+        cov = wb["4.Coverage"]
+        # data_start = header_row(8) + 2 = 10. R10 stamp 검증
+        # SwIT layout: C6=Functions Pass 'O', C8/C9/C10 = Function Called
+        # synthetic session function_calls_coverage 빈 default → C8~C10 skip
+        assert cov.cell(10, 6).value == "O", (
+            f"SwIT 분기 Functions Pass 미stamp — C6={cov.cell(10, 6).value!r}"
+        )
+        # Statement/Branch col (C7) — SwIT 분기는 stamp 안 함 (양식 default 잔존 가능)
+        # SwIT 분기 정상 진입 확인
+
+    def test_swit_caller_default_false_swut_branch_in_unit_call(self):
+        """build_coverage_report (SwUT) default is_swit_caller=False → SwUT 분기.
+        회사 표준 v1.01 양식 (coverage_metric_kind=function_and_calls + has_component_col)
+        에서도 SwUT은 Statement+Branch stamp."""
+        from backend.services.swut_coverage_aggregator import (
+            build_coverage_report, CoverageBuildMeta,
+        )
+        from openpyxl import load_workbook
+        template = self._build_company_standard_swit_layout_template()
+        meta = CoverageBuildMeta(
+            project_id="HDPDM01", release_sw_version="2.02",
+            test_date="2024-02-19", test_engineer="JK Kim",
+            doc_id_sequence="001",
+        )
+        result = build_coverage_report(
+            _make_swit_session(), meta, template,
+        )
+        assert result.ok
+        wb = load_workbook(io.BytesIO(result.xlsx_io.getvalue()))
+        cov = wb["4.Coverage"]
+        # SwUT 분기 stamp: stmt_count_col = no_col(2) + 4 = 6
+        # session function_coverage: statement=CoverageStats() (default 0/0/0.0)
+        # → C6=0 (total), C7=0 (covered), C8='X' (passed=False, total=0)
+        # SwIT 분기와 달리 Statement metric stamp 시도 (값이 0이지만 col 위치 정확)
+        # 핵심 — C6에 'O' (SwIT branch) 아닌 정수 0 (SwUT stmt.total)
+        c6 = cov.cell(10, 6).value
+        assert c6 != "O" or c6 == 0, (
+            f"SwUT 분기인데 SwIT 분기 진입 — C6={c6!r} (의도: int/None)"
+        )
+
