@@ -1182,7 +1182,7 @@ def build_sutr(
 
     agg = aggregate_session(session)
 
-    # 30차 W21 + 31차 W29 + 라운드 84 T1801: ASIL 분포 (SUDS/SDS/SRS chain).
+    # 30차 W21 + 31차 W29 + 라운드 84 T1801 + 라운드 85 T1903: SUDS reverse map.
     from backend.services.swut_coverage_aggregator import _compute_asil_distribution
     asil_distribution, ids_by_asil = _compute_asil_distribution(
         agg.get("function_rows") or [],
@@ -1190,6 +1190,7 @@ def build_sutr(
         function_asil_from_suds=agg.get("function_asil_from_suds"),
         component_asil_from_sds=agg.get("component_asil_from_sds"),
         function_asil_from_srs=agg.get("function_asil_from_srs"),
+        function_name_to_swufn_from_suds=agg.get("function_name_to_swufn_from_suds"),
     )
 
     summary = {

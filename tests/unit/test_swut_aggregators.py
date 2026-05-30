@@ -2688,6 +2688,28 @@ class TestRound84AsilDistributionChain:
         assert dist.get("ASIL_C") == 1
         assert "SwUFn_0201" in ids["C"]
 
+    def test_distribution_suds_reverse_map_round85(self):
+        """라운드 85 T1903: fc.unit_id 함수명 → SUDS reverse map → SwUFn → ASIL."""
+        from backend.services.swut_coverage_aggregator import _compute_asil_distribution
+        fns = [
+            FunctionCoverage(unit_id="main", name="main"),
+            FunctionCoverage(unit_id="g_DrvIn_Main", name="g_DrvIn_Main"),
+            FunctionCoverage(unit_id="orphan_fn", name="orphan_fn"),
+        ]
+        dist, ids = _compute_asil_distribution(
+            fns, {},
+            function_asil_from_suds={"SwUFn_0101": "A", "SwUFn_0201": "D"},
+            function_name_to_swufn_from_suds={
+                "main": "SwUFn_0101",
+                "g_DrvIn_Main": "SwUFn_0201",
+            },
+        )
+        assert dist.get("ASIL_A") == 1
+        assert dist.get("ASIL_D") == 1
+        # orphan_fn: reverse map 부재 → UNKNOWN
+        assert dist.get("UNKNOWN") == 1
+        assert "SwUFn_0201" in ids["D"]
+
     def test_distribution_unknown_when_all_sources_miss(self):
         """모든 source miss → UNKNOWN 등록."""
         from backend.services.swut_coverage_aggregator import _compute_asil_distribution

@@ -9,6 +9,7 @@ from docx import Document  # type: ignore
 from backend.services.iso26262_doc_asil_extractor import (
     extract_component_asil_from_sds,
     extract_function_asil_from_suds,
+    extract_function_name_to_swufn_from_suds,
     extract_supplementary_asil_from_srs,
 )
 
@@ -117,6 +118,28 @@ class TestSrsExtractor:
         result = extract_supplementary_asil_from_srs(_make_docx_with_text(text), warns)
         assert result == {}
         assert any("0건" in w for w in warns)
+
+
+class TestRound85SudsReverseMap:
+    """라운드 85 T1901: SUDS docx 함수명 ↔ SwUFn reverse map 추출."""
+
+    def test_basic_function_name_to_swufn_extraction(self):
+        """`SwUFn_NNNN: 함수명` 패턴 인식 — 함수명 keyed reverse map."""
+        text = "SwUFn_0101: main\nSwUFn_0201: g_DrvIn_Main\nSwUFn_0301: s_SystemOp"
+        result = extract_function_name_to_swufn_from_suds(_make_docx_with_text(text))
+        assert result.get("main") == "SwUFn_0101"
+        assert result.get("g_DrvIn_Main") == "SwUFn_0201"
+        assert result.get("s_SystemOp") == "SwUFn_0301"
+
+    def test_duplicate_function_name_first_match_wins(self):
+        """동일 함수명 다중 매핑 — 첫 매칭 우선 + parse_warning 누적."""
+        text = "SwUFn_0101: main\nSwUFn_0902: main"
+        warns: list[str] = []
+        result = extract_function_name_to_swufn_from_suds(_make_docx_with_text(text), warns)
+        # 첫 매칭 우선
+        assert result.get("main") == "SwUFn_0101"
+        # warning 누적
+        assert any("중복 매핑" in w for w in warns)
 
 
 class TestDocxBoundaries:

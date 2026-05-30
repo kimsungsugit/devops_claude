@@ -414,6 +414,7 @@ def _compute_asil_distribution(
     function_asil_from_suds: dict[str, str] | None = None,
     component_asil_from_sds: dict[str, str] | None = None,
     function_asil_from_srs: dict[str, str] | None = None,
+    function_name_to_swufn_from_suds: dict[str, str] | None = None,
 ) -> tuple[dict[str, int], dict[str, list[str]]]:
     """30차 W21 + 31차 W29 + 라운드 84 T1801: function 별 ASIL 등급 분포 계산.
 
@@ -444,6 +445,7 @@ def _compute_asil_distribution(
     suds_map = function_asil_from_suds or {}
     sds_map = component_asil_from_sds or {}
     srs_map = function_asil_from_srs or {}
+    name_to_swufn = function_name_to_swufn_from_suds or {}
 
     for fc in function_rows:
         candidate_keys = [fc.unit_id or "", fc.name or ""]
@@ -474,6 +476,18 @@ def _compute_asil_distribution(
                         asil = suds_map[sw_fn_id]
                         matched_id = sw_fn_id
                         break
+        # 라운드 85 T1903: 2b) SUDS reverse map (함수명 → SwUFn → ASIL).
+        # fc.unit_id/name이 'main' 같은 함수명이면 reverse map으로 SwUFn 변환 후
+        # SUDS ASIL lookup. 라이브 v1.07 unique 440건 매핑 — HDPDM01 UNKNOWN 98.3% 해소.
+        if not asil and name_to_swufn and suds_map:
+            for key in candidate_keys:
+                if not key:
+                    continue
+                sw_fn_id = name_to_swufn.get(key)
+                if sw_fn_id and sw_fn_id in suds_map:
+                    asil = suds_map[sw_fn_id]
+                    matched_id = sw_fn_id
+                    break
         # 3) SDS component 매핑 (fc.component_name)
         if not asil and sds_map and getattr(fc, "component_name", ""):
             comp_raw = fc.component_name
@@ -1950,13 +1964,14 @@ def build_coverage_report(
             # session.environments[].function_coverage는 unchanged (W2 격리).
             agg["function_rows"] = new_function_rows
 
-    # 30차 W21 + 31차 W29 + 라운드 84 T1801: 함수별 ASIL 분포 (SUDS/SDS/SRS chain).
+    # 30차 W21 + 31차 W29 + 라운드 84 T1801 + 라운드 85 T1903: SUDS reverse map.
     asil_distribution, ids_by_asil = _compute_asil_distribution(
         agg.get("function_rows") or [],
         agg.get("function_asil_map") or {},
         function_asil_from_suds=agg.get("function_asil_from_suds"),
         component_asil_from_sds=agg.get("component_asil_from_sds"),
         function_asil_from_srs=agg.get("function_asil_from_srs"),
+        function_name_to_swufn_from_suds=agg.get("function_name_to_swufn_from_suds"),
     )
 
     summary = {

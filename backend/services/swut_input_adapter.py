@@ -169,6 +169,9 @@ class SwUTSession:
     function_asil_from_suds: dict[str, str] = field(default_factory=dict)   # 'SwUFn_0101' → 'A'
     component_asil_from_sds: dict[str, str] = field(default_factory=dict)   # 'SwCom_01' / 'System OS' → 'A'
     function_asil_from_srs: dict[str, str] = field(default_factory=dict)    # 'g_DoorState' → 'A' (보조)
+    # 라운드 85 T1902 — SUDS docx 함수명↔SwUFn reverse map (fc.unit_id 함수명 ↔
+    # SUDS SwUFn ASIL chain 완성용). 라이브 v1.07 진단 unique 440건.
+    function_name_to_swufn_from_suds: dict[str, str] = field(default_factory=dict)  # 'main' → 'SwUFn_0101'
 
 
 def aggregate_session(session: SwUTSession) -> dict[str, Any]:
@@ -247,6 +250,8 @@ def aggregate_session(session: SwUTSession) -> dict[str, Any]:
         "function_asil_from_suds": dict(getattr(session, "function_asil_from_suds", {}) or {}),
         "component_asil_from_sds": dict(getattr(session, "component_asil_from_sds", {}) or {}),
         "function_asil_from_srs": dict(getattr(session, "function_asil_from_srs", {}) or {}),
+        # 라운드 85 T1902 — SUDS reverse map (함수명→SwUFn).
+        "function_name_to_swufn_from_suds": dict(getattr(session, "function_name_to_swufn_from_suds", {}) or {}),
         "deviated": 0,
     }
 

@@ -267,8 +267,67 @@ def extract_function_asil_from_suds(
     return result
 
 
+_REGEX_SWUFN_TO_NAME = re.compile(r"(SwUFn_\d+)[:\s]+([a-zA-Z_]\w+)")
+
+
+def extract_function_name_to_swufn_from_suds(
+    docx_bytes: bytes, warnings: list[str] | None = None,
+) -> dict[str, str]:
+    """라운드 85 T1901: SUDS docx에서 함수명 ↔ SwUFn_NNNN reverse map 추출.
+
+    SUDS 본문 'SwUFn_0101: main', 'SwUFn_0201: g_DrvIn_Main' 형식 (Hyundai/Mobis
+    양식). 라이브 진단 v1.07 = 1706건 pair (unique 440).
+
+    Args:
+        docx_bytes: SUDS docx raw bytes.
+        warnings: 외부 누적 list.
+
+    Returns:
+        ``{"main": "SwUFn_0101", "g_DrvIn_Main": "SwUFn_0201", ...}``
+        함수명 keyed reverse map. 첫 매칭 우선 (중복 시 후속 entry는 parse_warnings).
+        매칭 0건 시 빈 dict.
+
+    카드: vcast 추출 fc.unit_id/fc.name (함수명) → 본 map → SwUFn_NNNN →
+    function_asil_from_suds (ASIL 등급) chain 완성.
+    """
+    warns = warnings if warnings is not None else []
+    doc = _load_doc(docx_bytes, warns)
+    if doc is None:
+        return {}
+
+    parts: list[str] = []
+    for p in doc.paragraphs:
+        parts.append(p.text or "")
+    for tbl in doc.tables:
+        for row in tbl.rows:
+            for cell in row.cells:
+                parts.append(cell.text or "")
+    corpus = "\n".join(parts)
+
+    result: dict[str, str] = {}
+    duplicates: list[str] = []
+    for m in _REGEX_SWUFN_TO_NAME.finditer(corpus):
+        sw_fn_id = m.group(1)
+        fn_name = m.group(2)
+        if fn_name in result:
+            if result[fn_name] != sw_fn_id and len(duplicates) < 10:
+                duplicates.append(f"{fn_name}: {result[fn_name]} vs {sw_fn_id}")
+            continue
+        result[fn_name] = sw_fn_id
+
+    if duplicates:
+        warns.append(
+            f"SUDS 함수명↔SwUFn 중복 매핑 {len(duplicates)}건 (첫 매칭 우선): "
+            f"{', '.join(duplicates[:5])}"
+        )
+    if not result:
+        warns.append("SUDS docx 함수명↔SwUFn reverse map 0건")
+    return result
+
+
 __all__ = [
     "extract_function_asil_from_suds",
+    "extract_function_name_to_swufn_from_suds",
     "extract_component_asil_from_sds",
     "extract_supplementary_asil_from_srs",
     "DOCX_MAX_BYTES",
