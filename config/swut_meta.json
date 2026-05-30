@@ -35,6 +35,31 @@
         "statement_required": true,
         "branch_required": true,
         "mcdc_required": false
+      },
+      "iso26262_docs": {
+        "_comment": "라운드 80 — ISO 26262 추적성 체인 6 문서 path. ASIL 등급 자동 추출용. SUDS 함수 단위 매핑, SDS 컴포넌트 단위, SRS 보조.",
+        "srs_docx_path": "U:\\연구소\\1000 프로젝트\\1200 자동차\\0002 A Cappella\\02 ADOS\\03 NE_GN7\\08.Software\\01.SW 요구사항\\01.SRS\\(HDPDM01_SRS) Software Requirements Specification_v1.05_20230510.docx",
+        "sds_docx_path": "U:\\연구소\\1000 프로젝트\\1200 자동차\\0002 A Cappella\\02 ADOS\\03 NE_GN7\\08.Software\\03.SW 아키텍처 설계\\02.SDS\\(HDPDM01_SDS) Software Architecture Design Specification_v1.04_20230512.docx",
+        "suds_docx_path": "U:\\연구소\\1000 프로젝트\\1200 자동차\\0002 A Cappella\\02 ADOS\\03 NE_GN7\\08.Software\\04.SW 단위설계\\01.SUDS\\(HDPDM01_SUDS) Software Unit Design Specification_v1.07_240213.docx",
+        "suts_xlsm_path": "U:\\연구소\\1000 프로젝트\\1200 자동차\\0002 A Cappella\\02 ADOS\\03 NE_GN7\\08.Software\\10.SW 단위테스트\\02.Test Specification\\01.SUTS\\(HDPDM01_SUTS) Software Unit Test Specification_v3.01_240221_R.xlsm",
+        "sits_xlsm_path": "U:\\연구소\\1000 프로젝트\\1200 자동차\\0002 A Cappella\\02 ADOS\\03 NE_GN7\\08.Software\\08.SW 통합테스트\\02.Test Specification\\01.SITS\\(HDPDM01_SITS) Software Integration Test Specification_v2.02_240219.xlsm"
+      }
+    },
+    "KJPDS02": {
+      "_comment": "라운드 80 — KJPDS02 project 신규. 본 라운드는 path 등록만, 양식 본격 호환은 carry-over.",
+      "project_id": "KJPDS02",
+      "project_full_name": "KJPDS02",
+      "asil_level": "ASIL A",
+      "doc_id_base": "KJPDS02-SUTR",
+      "doc_id_sequence_start": 1,
+      "approvers": {
+        "default_author": "JK Kim",
+        "default_reviewer": "",
+        "default_approver": "CH In"
+      },
+      "iso26262_docs": {
+        "swuts_xlsm_path": "U:\\연구소\\1000 프로젝트\\1200 자동차\\0002 A Cappella\\02 ADOS\\04 KJPDS02\\02.설계(연구소)\\01.설계 및 검증\\08.소프트웨어\\09.SW 단위 테스트\\01.Test Specification\\01.SwUTS\\(KJPDS02_SwUTS) Software Unit Test Specification_v1.01_251205_R.xlsm",
+        "swits_xlsm_path": "U:\\연구소\\1000 프로젝트\\1200 자동차\\0002 A Cappella\\02 ADOS\\04 KJPDS02\\02.설계(연구소)\\01.설계 및 검증\\08.소프트웨어\\10.SW 통합 테스트\\01.Test Specification\\01.SwITS\\(KJPDS02_SwITS) Software Integration Test Specification_v1.01_251205_R.xlsm"
       }
     }
   },

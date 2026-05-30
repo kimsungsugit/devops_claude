@@ -414,6 +414,62 @@ def _write_variable_name_header_row(
     return input_list, expected_list, actual_list
 
 
+def _build_fn_id_to_component_map(session: SwUTSession) -> dict[str, str]:
+    """라운드 80 T1407: 세션 단위 fn_id → component_name 캐시.
+
+    환경별 function_coverage iterate 1회로 ``SwUFn_NNNN`` → ``SwCom_NN`` (또는
+    별칭) 매핑 dict 구축. SDS 컴포넌트 ASIL fallback에서 사용.
+
+    component_name 값에 ``"SwCom_01\\n(System OS)"`` 같은 multi-line 양식 가능 —
+    첫 줄 (SwCom_NN 부분) 우선, 다음 줄 (별칭) 둘 다 등록.
+    """
+    cache: dict[str, str] = {}
+    for env in session.environments:
+        for fc in env.function_coverage:
+            fn_id = getattr(fc, "unit_id", "") or getattr(fc, "function_id", "")
+            comp_raw = getattr(fc, "component_name", "") or ""
+            if not fn_id or not comp_raw:
+                continue
+            # SwUFn_NNNN 부분 추출
+            import re as _re_fn
+            m = _re_fn.search(r"SwUFn_\d+", fn_id)
+            if m:
+                cache.setdefault(m.group(0), comp_raw)
+    return cache
+
+
+def _resolve_component_asil(
+    fn_id: str,
+    fn_to_comp: dict[str, str],
+    sds_map: dict[str, str],
+) -> str:
+    """라운드 80 T1407: fn_id → component_name → SDS ASIL lookup.
+
+    component_name 양식이 ``"SwCom_01\\n(System OS)"`` 다양 — 후보 키 여러 개
+    시도 (SwCom_NN / strip / 별칭). 매칭 0 시 빈 string.
+    """
+    if not fn_id or not sds_map:
+        return ""
+    comp_raw = fn_to_comp.get(fn_id, "")
+    if not comp_raw:
+        return ""
+    # 후보 키들 — SwCom_NN, 첫 줄, 전체 strip
+    import re as _re_cn
+    candidates = []
+    m_swcom = _re_cn.search(r"SwCom_\d+", comp_raw)
+    if m_swcom:
+        candidates.append(m_swcom.group(0))
+    for line in comp_raw.splitlines():
+        stripped = line.strip().strip("()").strip()
+        if stripped and stripped not in candidates:
+            candidates.append(stripped)
+    candidates.append(comp_raw.strip())
+    for k in candidates:
+        if k in sds_map:
+            return sds_map[k]
+    return ""
+
+
 def _write_test_log(
     ws,
     session: SwUTSession,
@@ -472,6 +528,9 @@ def _write_test_log(
     # 1 TC당 6 row step 자동 적용. SITR도 동일 함수 import로 동시 효과.
     from backend.services.swut_coverage_aggregator import _collect_tc_to_function
     tc_to_fn_id = _collect_tc_to_function(session)  # {tc_name: fn_id}
+
+    # 라운드 80 T1407: 세션 단위 fn_id → component_name cache (SDS ASIL fallback용).
+    _fn_to_comp_cache = _build_fn_id_to_component_map(session)
 
     # tc_name → 첫 매칭 env (component_name + test_results 조회용).
     # 환경별 동일 TC가 중복 정의되면 첫 환경 우선 (Coverage source semantic 일치).
@@ -905,6 +964,41 @@ def _write_test_log(
                     _ca = (_c_entry.get("comment_asil") or "").strip().upper()
                     if _ca in {"A", "B", "C", "D", "QM"}:
                         asil = _ca
+
+        # 라운드 80 T1407 — ISO 26262 추적성 체인 fallback chain.
+        # 우선순위: c_source(위) → SUDS function 직접 → SDS component → SRS 보조.
+        if not asil and fn_id:
+            # 1) SUDS function ASIL (fn_id 직접 매칭 — 라이브 409건 검증)
+            _suds_map = getattr(session, "function_asil_from_suds", {}) or {}
+            _sasil = _suds_map.get(fn_id)
+            if _sasil:
+                asil = _sasil
+        if not asil and fn_id:
+            # 2) SDS component ASIL (fn_id → component_name → SwCom/별칭 lookup)
+            _sds_map = getattr(session, "component_asil_from_sds", {}) or {}
+            if _sds_map:
+                _casil = _resolve_component_asil(fn_id, _fn_to_comp_cache, _sds_map)
+                if _casil:
+                    asil = _casil
+        if not asil:
+            # 3) SRS function ASIL 보조 (함수명 매칭)
+            _srs_map = getattr(session, "function_asil_from_srs", {}) or {}
+            _srs_key = ""
+            if _srs_map:
+                # _cand_name이 c_function_map fallback에서 추출됐으면 활용
+                _srs_key = locals().get("_cand_name", "") or ""
+                if not _srs_key and swuts_map:
+                    _entry_x = swuts_map.get(tc_name)
+                    if _entry_x:
+                        _sig_x = getattr(_entry_x, "unit_name", "") or ""
+                        import re as _re_srs
+                        _m_srs = _re_srs.search(r"(\w+)\s*\(", _sig_x)
+                        if _m_srs:
+                            _srs_key = _m_srs.group(1)
+                if _srs_key:
+                    _rasil = _srs_map.get(_srs_key)
+                    if _rasil:
+                        asil = _rasil
         _asil_marker = {
             "B": mark_asil_b_function,
             "C": mark_asil_c_function,

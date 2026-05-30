@@ -2467,3 +2467,116 @@ class TestRound76CParserMergeReactivation:
         assert n == 3
         # vcast main의 file이 c_parser file로 enhanced됨
         assert vcast[0].file == "main.c"
+
+
+class TestRound80AsilFallbackChain:
+    """라운드 80 T1407+T1408 — ISO 26262 추적성 체인 fallback chain (SUDS/SDS/SRS).
+
+    라운드 78에서 c_function_map fallback 추가, 라운드 80에서 SUDS function 직접 /
+    SDS component / SRS 보조 chain 확장.
+    """
+
+    def test_coverage_sheet_suds_function_asil_fallback(self):
+        """function_asil_from_suds (agg) → fc.unit_id SwUFn_NNNN 매칭 시 ASIL stamp."""
+        from backend.services.swut_coverage_aggregator import _write_coverage_sheet
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws["B1"] = "Unit ID"
+        vcast = [
+            FunctionCoverage(unit_id="SwUFn_0101", name="main",
+                             statement=CoverageStats(8, 8, 1.0)),
+        ]
+        agg = {
+            "function_rows": vcast,
+            "function_asil_map": {},  # primary 비어있음
+            "function_asil_from_suds": {"SwUFn_0101": "D"},  # SUDS 매핑
+            "component_asil_from_sds": {},
+            "function_asil_from_srs": {},
+        }
+        n = _write_coverage_sheet(ws, agg)
+        assert n == 1
+        # ASIL D row → mark_asil_d_function (FAIL_FILL_RGB 동일 빨강)
+        # B/C 컬럼 fill 적용 — design_tokens.ASIL_D_FILL_RGB 검증
+        from backend.services.design_tokens import ASIL_D_FILL_RGB
+        # data_start row 검색 — fill이 적용된 row 찾기
+        found_rgb = None
+        for rr in range(2, ws.max_row + 1):
+            cell = ws.cell(rr, 2)
+            if cell.fill and cell.fill.start_color:
+                _rgb = getattr(cell.fill.start_color, "rgb", "")
+                if isinstance(_rgb, str) and _rgb not in ("", "00000000", "FFFFFFFF"):
+                    found_rgb = _rgb
+                    break
+        rgb = found_rgb or ""
+        assert isinstance(rgb, str) and rgb == ASIL_D_FILL_RGB
+
+    def test_coverage_sheet_sds_component_asil_fallback(self):
+        """component_asil_from_sds → fc.component_name 매칭 시 ASIL stamp."""
+        from backend.services.swut_coverage_aggregator import _write_coverage_sheet
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws["B1"] = "Unit ID"
+        vcast = [
+            FunctionCoverage(
+                unit_id="SwUFn_0201", name="g_DrvIn_Main",
+                component_name="SwCom_02\n(DRV In)",
+                statement=CoverageStats(8, 8, 1.0),
+            ),
+        ]
+        agg = {
+            "function_rows": vcast,
+            "function_asil_map": {},
+            "function_asil_from_suds": {},  # SUDS 매핑 없음
+            "component_asil_from_sds": {"SwCom_02": "C"},  # SDS 매핑
+            "function_asil_from_srs": {},
+        }
+        n = _write_coverage_sheet(ws, agg)
+        assert n == 1
+        from backend.services.design_tokens import ASIL_C_FILL_RGB
+        # data_start row 검색 — fill이 적용된 row 찾기
+        found_rgb = None
+        for rr in range(2, ws.max_row + 1):
+            cell = ws.cell(rr, 2)
+            if cell.fill and cell.fill.start_color:
+                _rgb = getattr(cell.fill.start_color, "rgb", "")
+                if isinstance(_rgb, str) and _rgb not in ("", "00000000", "FFFFFFFF"):
+                    found_rgb = _rgb
+                    break
+        rgb = found_rgb or ""
+        assert isinstance(rgb, str) and rgb == ASIL_C_FILL_RGB
+
+    def test_coverage_sheet_chain_priority_suds_over_sds(self):
+        """SUDS와 SDS 동시 매칭 시 SUDS 우선 (priority chain)."""
+        from backend.services.swut_coverage_aggregator import _write_coverage_sheet
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws["B1"] = "Unit ID"
+        vcast = [
+            FunctionCoverage(
+                unit_id="SwUFn_0101", name="main",
+                component_name="SwCom_01",
+                statement=CoverageStats(8, 8, 1.0),
+            ),
+        ]
+        agg = {
+            "function_rows": vcast,
+            "function_asil_map": {},
+            "function_asil_from_suds": {"SwUFn_0101": "B"},  # SUDS = B
+            "component_asil_from_sds": {"SwCom_01": "D"},    # SDS = D
+            "function_asil_from_srs": {},
+        }
+        n = _write_coverage_sheet(ws, agg)
+        assert n == 1
+        from backend.services.design_tokens import ASIL_B_FILL_RGB
+        # data_start row 검색 — fill이 적용된 row 찾기
+        found_rgb = None
+        for rr in range(2, ws.max_row + 1):
+            cell = ws.cell(rr, 2)
+            if cell.fill and cell.fill.start_color:
+                _rgb = getattr(cell.fill.start_color, "rgb", "")
+                if isinstance(_rgb, str) and _rgb not in ("", "00000000", "FFFFFFFF"):
+                    found_rgb = _rgb
+                    break
+        rgb = found_rgb or ""
+        # SUDS 우선 → ASIL B (파랑)
+        assert isinstance(rgb, str) and rgb == ASIL_B_FILL_RGB

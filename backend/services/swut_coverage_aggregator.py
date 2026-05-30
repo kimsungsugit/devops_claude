@@ -763,6 +763,43 @@ def _write_coverage_sheet(
                 _ca = (c_entry.get("comment_asil") or "").strip().upper()
                 if _ca in {"A", "B", "C", "D", "QM"}:
                     asil = _ca
+        # 라운드 80 T1408 — ISO 26262 추적성 체인 fallback chain (SUDS → SDS → SRS).
+        # agg에 주입된 ASIL maps 활용 (build_coverage_report가 session에서 복사).
+        _sw_fn_id = fc.unit_id if (fc.unit_id or "").startswith("SwUFn_") else ""
+        if not _sw_fn_id:
+            _m_swufn = _TC_FN_RE.search(fc.unit_id or "") or _TC_FN_RE.search(fc.name or "")
+            if _m_swufn:
+                _sw_fn_id = _m_swufn.group(1)
+                if not _sw_fn_id.startswith("SwUFn_"):
+                    _sw_fn_id = f"SwUFn_{_sw_fn_id}" if _sw_fn_id.isdigit() else _sw_fn_id
+        if not asil and _sw_fn_id:
+            _suds_map = agg.get("function_asil_from_suds") or {}
+            _sasil = _suds_map.get(_sw_fn_id)
+            if _sasil:
+                asil = _sasil
+        if not asil:
+            _sds_map = agg.get("component_asil_from_sds") or {}
+            if _sds_map and fc.component_name:
+                import re as _re_sds
+                _candidates = []
+                _m_swcom = _re_sds.search(r"SwCom_\d+", fc.component_name)
+                if _m_swcom:
+                    _candidates.append(_m_swcom.group(0))
+                for _line in fc.component_name.splitlines():
+                    _stripped = _line.strip().strip("()").strip()
+                    if _stripped and _stripped not in _candidates:
+                        _candidates.append(_stripped)
+                _candidates.append(fc.component_name.strip())
+                for _k in _candidates:
+                    if _k in _sds_map:
+                        asil = _sds_map[_k]
+                        break
+        if not asil:
+            _srs_map = agg.get("function_asil_from_srs") or {}
+            if _srs_map:
+                _rasil = _srs_map.get(fc.name)
+                if _rasil:
+                    asil = _rasil
         # ASIL 등급별 시각 강조 — D(빨강) > C(주황) > B(파랑) 단계
         _marker = {
             "B": mark_asil_b_function,

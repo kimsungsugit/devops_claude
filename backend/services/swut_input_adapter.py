@@ -164,6 +164,11 @@ class SwUTSession:
     # 라운드 73 T815 — SwUDS docx parse 결과 (옵션). function_id → dict 형태.
     # value dict 필드: heading_text, description, asil
     swuds_function_map: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # 라운드 80 T1406 — ISO 26262 추적성 체인 (SRS/SDS/SUDS) ASIL 매핑 (옵션).
+    # iso26262_doc_asil_extractor로 채워짐. _write_test_log fallback chain에서 사용.
+    function_asil_from_suds: dict[str, str] = field(default_factory=dict)   # 'SwUFn_0101' → 'A'
+    component_asil_from_sds: dict[str, str] = field(default_factory=dict)   # 'SwCom_01' / 'System OS' → 'A'
+    function_asil_from_srs: dict[str, str] = field(default_factory=dict)    # 'g_DoorState' → 'A' (보조)
 
 
 def aggregate_session(session: SwUTSession) -> dict[str, Any]:
@@ -238,6 +243,10 @@ def aggregate_session(session: SwUTSession) -> dict[str, Any]:
         "function_rows": all_functions,
         "tc_to_components": tc_to_components,
         "function_asil_map": function_asil_map,  # 30차 W21
+        # 라운드 80 T1408 — ISO 26262 추적성 체인 ASIL maps (Coverage 시트 fallback용).
+        "function_asil_from_suds": dict(getattr(session, "function_asil_from_suds", {}) or {}),
+        "component_asil_from_sds": dict(getattr(session, "component_asil_from_sds", {}) or {}),
+        "function_asil_from_srs": dict(getattr(session, "function_asil_from_srs", {}) or {}),
         "deviated": 0,
     }
 

@@ -246,4 +246,69 @@ def parse_swuds_docx(
         )
         return SwUDSParseResult(ok=False, parse_warnings=warnings)
 
+    # 라운드 80 T1405-1: heading+table 가정으로 ASIL 추출 0건이면 regex fallback.
+    # SUDS v1.07 양식은 표 ASIL header 없고 본문 "SwUFn_NNNN ... ASIL X" 형식으로
+    # 함수 옆에 ASIL 등급 명시 — regex로 직접 추출 가능 (실 환경 203건 검증).
+    asil_count = sum(1 for e in entries if e.asil)
+    if asil_count == 0 and entries:
+        _apply_regex_asil_fallback(doc, entries, warnings)
+
     return SwUDSParseResult(ok=True, entries=entries, parse_warnings=warnings)
+
+
+# 라운드 80 T1405-1: regex fallback corpus 길이 — 100자 보수적 (false positive 방지).
+_ASIL_REGEX_PROXIMITY = 100
+_REGEX_PAIR_SWUFN = re.compile(
+    r"(SwUFn_\d+)[\s\S]{{0,{n}}}?ASIL[\s_-]*([ABCD]|QM)\b".format(n=_ASIL_REGEX_PROXIMITY),
+    re.IGNORECASE,
+)
+
+
+def _apply_regex_asil_fallback(
+    doc: Any, entries: list[SwUDSEntry], warnings: list[str],
+) -> None:
+    """라운드 80 T1405-1: heading+table 양식 변종 시 regex로 ASIL fallback.
+
+    문서 전체 paragraph + table cell text를 통합 corpus로 만들어 ``SwUFn_NNNN``
+    ↔ ``ASIL [A-D|QM]`` pair 추출. 같은 fn_id에 여러 pair 발견 시 첫 매칭 채택
+    (보수적). 32차 W28의 ``_normalize_asil`` 호출해 단일 문자 정규화.
+    """
+    try:
+        from backend.services.swut_asil_resolver import _normalize_asil
+        # 전체 corpus 구축
+        parts: list[str] = []
+        for kind, node in _iter_blocks(doc):
+            if kind == "p":
+                parts.append(node.text or "")
+            elif kind == "tbl":
+                for row in node.rows:
+                    for cell in row.cells:
+                        parts.append(cell.text or "")
+        corpus = "\n".join(parts)
+        # SwUFn → ASIL 매핑 (첫 발견 우선)
+        fn_to_asil: dict[str, str] = {}
+        for m in _REGEX_PAIR_SWUFN.finditer(corpus):
+            fn_id = f"SwUFn_{m.group(1).split('_')[-1]}" if "_" in m.group(1) else m.group(1)
+            normalized = _normalize_asil(m.group(2))
+            if not normalized or fn_id in fn_to_asil:
+                continue
+            fn_to_asil[fn_id] = normalized
+        # entries에 적용
+        applied = 0
+        for e in entries:
+            if e.asil:
+                continue
+            asil = fn_to_asil.get(e.function_id)
+            if asil:
+                e.asil = asil
+                applied += 1
+        if applied > 0:
+            warnings.append(
+                f"SwUDS regex fallback 적용: {applied}/{len(entries)} 함수 ASIL 매핑 "
+                f"(heading+table 양식 변종 추정)"
+            )
+    except Exception as e:  # pragma: no cover — fail-safe
+        import logging
+        logging.getLogger(__name__).debug(
+            "SwUDS regex fallback 실패 (silent): %s: %s", type(e).__name__, e,
+        )
