@@ -638,23 +638,33 @@ def _write_coverage_sheet(
         # 라운드 74 T906 — c_parser only row 식별 (unit_id `SwUFn_C_<idx>` prefix).
         is_c_parser_only = bool(fc.unit_id and fc.unit_id.startswith("SwUFn_C_"))
 
-        # 라운드 76 자체평가 fix — C3 'Component' stamp.
-        # - vcast row: fc.name (component_name 자체, 예: 'SysOs_Main')
-        # - c_parser only row: fc.file basename에서 '.c' 제외 (예: 'Cpu.c' → 'Cpu')
+        # 라운드 77 자체평가 fix — C4 'Unit ID' 회사 양식 호환 sequential SwUFn_NNNN.
+        # 라운드 76 fix #4 후 vcast fc.unit_id가 함수명(`main`)으로 변경 → 회사 양식
+        # 의도 (`SwUFn_0101` 형식 함수 식별자)와 mismatch. 사용자 검수: "ID가 함수이름이
+        # 들어가 있네". vcast 함수 (unit_id == name인 경우)는 글로벌 sequential
+        # `SwUFn_<i+1:04d>` 부여. sub_functions/c_parser only는 기존 unit_id 유지.
+        if (fc.unit_id == fc.name and fc.unit_id
+                and not fc.unit_id.startswith("SwUFn_")):
+            display_unit_id = f"SwUFn_{i + 1:04d}"
+        else:
+            display_unit_id = fc.unit_id
+
+        # 라운드 77 T1204 — C3 'Component' stamp 정확화.
+        # 라운드 76 fix #2 (b8eefea)에서 C3=fc.name이라 vcast row의 C3=C4=C5 중복 +
+        # R10 anomaly. 라운드 77 T1201로 fc.component_name 신규 필드 — vcast row는
+        # component name 추적, c_parser only는 file basename으로 주입 완료.
         if has_component_col:
             comp_col = no_col + 1  # No 다음 col
-            if is_c_parser_only:
+            # 우선순위: fc.component_name (vcast/sub_function/c_parser only 모두 주입됨)
+            # → fc.file.stem fallback (component_name 빈 string인 backward-compat)
+            comp_name = fc.component_name
+            if not comp_name and fc.file:
                 from pathlib import Path as _PathLocal2
-                comp_name = ""
-                if fc.file:
-                    comp_name = _PathLocal2(fc.file).stem  # 'Cpu.c' → 'Cpu'
-                if comp_name:
-                    safe_write(ws, r, comp_col, comp_name)
-            else:
-                # vcast row — component_name = fc.name (현재 component 단위 추출이라)
-                safe_write(ws, r, comp_col, fc.name)
+                comp_name = _PathLocal2(fc.file).stem
+            if comp_name:
+                safe_write(ws, r, comp_col, comp_name)
 
-        safe_write(ws, r, unit_id_col, fc.unit_id)
+        safe_write(ws, r, unit_id_col, display_unit_id)
         safe_write(ws, r, unit_id_col + 1, fc.name)
 
         if is_swit_metric_layout:
@@ -743,6 +753,16 @@ def _write_coverage_sheet(
             m = _TC_FN_RE.search(fc.unit_id or "") or _TC_FN_RE.search(fc.name or "")
             if m:
                 asil = function_asil_map.get(m.group(1))
+        # 라운드 77 T1206 — c_function_map.comment_asil 직접 fallback.
+        # 라운드 76 fix #4 후 vcast row unit_id가 함수명(`main`)으로 변경 → 기존
+        # function_asil_map (SwUFn_NNNN key)로 매칭 안 됨 → ASIL 강조 누락. c_parser
+        # comment_asil은 함수명 단위라 정확 매칭.
+        if not asil and c_function_map:
+            c_entry = c_function_map.get(fc.name)
+            if c_entry:
+                _ca = (c_entry.get("comment_asil") or "").strip().upper()
+                if _ca in {"A", "B", "C", "D", "QM"}:
+                    asil = _ca
         # ASIL 등급별 시각 강조 — D(빨강) > C(주황) > B(파랑) 단계
         _marker = {
             "B": mark_asil_b_function,

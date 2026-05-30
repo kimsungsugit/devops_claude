@@ -90,6 +90,13 @@ class FunctionCoverage:
     # merge dedup key `(name, file)` 정확성 향상용. enhance_function_coverage_with_file
     # helper가 c_function_map 매칭으로 주입. 빈 string이면 dedup file=""로 fallback.
     file: str = ""
+    # 라운드 77 T1201 신규 — vcast 함수의 소속 component name 추적.
+    # 라운드 76 fix #4 후 extract_aggregate_coverage가 current_component 추적하나
+    # FunctionCoverage에 저장 안 함 → 4.Coverage C3 'Component' stamp 부정확
+    # (R10 C3='g_SysOs_WdiCtrl' anomaly). vcast row: HTML table의 component name
+    # (예: 'SysOs_Main'). sub_functions: parent module name. c_parser only: 빈 string
+    # (fc.file basename로 대체). backward-compat default `""`.
+    component_name: str = ""
 
 
 @dataclass
@@ -324,10 +331,15 @@ def merge_function_rows_with_c_parser(
             continue
         # c_parser only — 빈 CoverageStats + SwUFn_C_<index> unit_id 자동 생성
         # 라운드 76 자체평가 fix — file 정보 주입 (audit reviewer 시인성).
+        # 라운드 77 T1203 — component_name = file basename(.c 제외) — vcast component
+        # 와 동일 의미 매칭. 'Cpu.c' → 'Cpu'.
+        from pathlib import Path as _PathHere
+        c_comp = _PathHere(c_file).stem if c_file else ""
         fc = FunctionCoverage(
             unit_id=f"SwUFn_C_{next_idx}",
             name=c_name,
             file=c_file,
+            component_name=c_comp,
             statement=CoverageStats(0, 0, 0.0),
             branch=CoverageStats(0, 0, 0.0),
             mcdc=CoverageStats(0, 0, 0.0),
@@ -443,9 +455,11 @@ def extract_aggregate_coverage(html_bytes: bytes) -> tuple[list[FunctionCoverage
         metric_cells = [c.get_text(" ", strip=True) for c in cells]
         metrics = [_parse_metric_cell(t) for t in metric_cells if _RE_PCT.search(t)]
 
+        # 라운드 77 T1202 — component_name 명시 주입 (R10 C3 anomaly fix).
         fc = FunctionCoverage(
             unit_id=function_name,
             name=function_name,
+            component_name=component_name,
         )
         # Complexity 추출
         try:
@@ -554,6 +568,8 @@ def flatten_sub_functions(
                 branch=CoverageStats(0, 0, 0.0),
                 mcdc=CoverageStats(0, 0, 0.0),
                 complexity=0,
+                # 라운드 77 T1203 — sub_function의 parent module = component_name
+                component_name=module_name,
             ))
     if conflict_count > 0 and out_warnings is not None:
         out_warnings.append(

@@ -362,6 +362,55 @@ class TestExtractAggregateCoverage:
         assert total.branch.covered == 21
         assert total.branch.total == 21
 
+
+class TestRound77ComponentName:
+    """라운드 77 T1201/T1202 — FunctionCoverage.component_name 필드 + extract 명시 주입."""
+
+    def test_extract_assigns_component_name(self):
+        """extract_aggregate_coverage가 vcast row의 component name을 fc.component_name에 주입."""
+        funcs, total = extract_aggregate_coverage(_AGG_HTML_TEMPLATE.encode("utf-8"))
+        assert len(funcs) == 2
+        # 두 함수 모두 같은 component (SysOs_Main) — extract가 current_component 추적
+        assert funcs[0].component_name == "SysOs_Main"
+        assert funcs[1].component_name == "SysOs_Main"
+
+    def test_function_coverage_default_component_name_empty(self):
+        """FunctionCoverage 신규 필드 default `""` — backward-compat."""
+        from backend.services.swut_input_adapter import FunctionCoverage
+        fc = FunctionCoverage(unit_id="SwUFn_0101", name="main")
+        assert fc.component_name == ""  # default
+
+    def test_flatten_sub_functions_assigns_module_as_component(self):
+        """flatten_sub_functions가 module_name을 component_name에 주입."""
+        from backend.services.swut_input_adapter import flatten_sub_functions
+        from backend.services.vcast_parser import MetricsBank, SubFunctionExecution
+        mb = MetricsBank(environment="SWTE_01")
+        mb.sub_functions["ModA"] = [
+            SubFunctionExecution(order="1", name="fn_a", executed=True),
+            SubFunctionExecution(order="2", name="fn_b", executed=False),
+        ]
+        result = flatten_sub_functions(mb, component_name="comp_test")
+        assert len(result) == 2
+        # sub_functions의 parent module = component_name
+        assert result[0].component_name == "ModA"
+        assert result[1].component_name == "ModA"
+
+    def test_merge_c_parser_assigns_file_stem_as_component(self):
+        """merge_function_rows_with_c_parser가 c_parser only row의 file.stem을 component_name 주입."""
+        from backend.services.swut_input_adapter import (
+            merge_function_rows_with_c_parser, FunctionCoverage,
+        )
+        agg = {"function_rows": [], "function_asil_map": {}}
+        c_map = {
+            "fn_alpha": {"file": "Cpu.c"},
+            "fn_beta": {"file": "Ap_DoorCtrl_PDS.c"},
+        }
+        merged = merge_function_rows_with_c_parser(agg, c_map)
+        assert len(merged) == 2
+        names = {fc.name: fc for fc in merged}
+        assert names["fn_alpha"].component_name == "Cpu"
+        assert names["fn_beta"].component_name == "Ap_DoorCtrl_PDS"
+
     def test_empty_html_returns_empty(self):
         funcs, total = extract_aggregate_coverage(b"<html><body></body></html>")
         assert funcs == []
