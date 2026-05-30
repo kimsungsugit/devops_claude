@@ -228,3 +228,79 @@ class TestSwUTSExcelParser:
             f"NF1 회귀: orphan sub-TC row silent drop — warning 누락. "
             f"parse_warnings: {result.parse_warnings}"
         )
+
+
+class TestRound82Kjpds02FormatCompat:
+    """라운드 82 — KJPDS02 양식 (v1.01) 호환 검증 회귀.
+
+    라이브 진단 결과 swuts_excel_parser가 KJPDS02 양식 자동 호환:
+    - SwUTS sheet '2.SW Unit Test Spec' (HDPDM01과 동일) — 285 entries
+    - SwITS sheet '3. SW Integration Test Spec ' (공백 포함) — 47 entries
+    - TC ID 'SwUTC_NNNN' (SwUFn_ prefix 부재) → function_id fallback `SwUFn_NNNN`
+    - Header row 4 / col 4 'Unit' (HDPDM01은 row 6 / col 4 'Name') 자동 detect
+    - Test Method col 5 / Generation Method col 6 / Inpt[N] col 7~ 변종 layout
+    """
+
+    def test_kjpds02_swits_sheet_with_trailing_space(self):
+        """KJPDS02 SwITS 시트명 '3. SW Integration Test Spec ' (trailing space) 자동 detect."""
+        from backend.services.swuts_excel_parser import parse_swuts_xlsm
+
+        xlsm_bytes = _build_swuts_xlsm(
+            sheet_name="3. SW Integration Test Spec ",  # 끝에 공백
+            header_row=6,
+            headers=[
+                "Index", "대응 환경명", "Test Method", "TestCase Generation Method",
+                "TC_ID", " ", "Description", "Precondition",
+            ],
+            data_rows=[
+                ["1", "SWIT_SWUFN_0101_DEPTH4_FILE12", "REQ,IFT", "AOR,ABV",
+                 "SwITC_0101_01", "1", "Interface : main -> Init", None],
+            ],
+        )
+        result = parse_swuts_xlsm(xlsm_bytes)
+        assert result.ok, result.parse_warnings
+        # 시트명 trailing space에도 TC entry 추출 성공
+        assert "SwITC_0101_01" in result.by_tc_id
+
+    def test_kjpds02_unit_col_name_distinct_from_hdpdm01(self):
+        """KJPDS02 col 4 = 'Unit' (함수명) vs HDPDM01 col 4 = 'Name' (TC title) 양식 변종.
+
+        둘 다 unit_name 필드로 매핑 가능 — header label 'Unit' 호환 확인.
+        """
+        from backend.services.swuts_excel_parser import parse_swuts_xlsm
+
+        xlsm_bytes = _build_swuts_xlsm(
+            sheet_name="2.SW Unit Test Spec",
+            header_row=4,
+            headers=["Index", "TC_ID", "Unit", "Test Method", "Test Case Generation Method"],
+            data_rows=[
+                ["1", "SwUTC_0121", "s_safe_rotr", None, None],
+                ["1", None, "s_safe_rotr", "REQ", "ABV"],
+            ],
+        )
+        result = parse_swuts_xlsm(xlsm_bytes)
+        assert result.ok, result.parse_warnings
+        e = result.by_tc_id["SwUTC_0121"]
+        # 'Unit' col이 unit_name으로 매핑 (Name과 등가)
+        assert e.unit_name == "s_safe_rotr"
+        # function_id fallback (SwUTC_0121 → SwUFn_0121)
+        assert e.function_id == "SwUFn_0121"
+
+    def test_kjpds02_tcid_short_form_function_id_fallback(self):
+        """KJPDS02 TC_ID 'SwUTC_NNNN' (4자리, SwUFn_ 부재) → function_id 'SwUFn_NNNN' fallback."""
+        from backend.services.swuts_excel_parser import parse_swuts_xlsm
+
+        xlsm_bytes = _build_swuts_xlsm(
+            sheet_name="2.SW Unit Test Spec",
+            header_row=4,
+            headers=["Index", "TC_ID", "Unit", "Test Method", "Generation Method"],
+            data_rows=[
+                ["1", "SwUTC_0121", "s_safe_rotr", "REQ", "ABV"],
+                ["2", "SwUTC_0250", "s_other_fn", "REQ", "ABV"],
+            ],
+        )
+        result = parse_swuts_xlsm(xlsm_bytes)
+        assert result.ok, result.parse_warnings
+        # 짧은 TC ID 형식 (SwUTC_NNNN) → function_id 매핑
+        assert result.by_tc_id["SwUTC_0121"].function_id == "SwUFn_0121"
+        assert result.by_tc_id["SwUTC_0250"].function_id == "SwUFn_0250"

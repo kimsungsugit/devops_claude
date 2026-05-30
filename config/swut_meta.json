@@ -46,7 +46,7 @@
       }
     },
     "KJPDS02": {
-      "_comment": "라운드 80 — KJPDS02 project 신규. 본 라운드는 path 등록만, 양식 본격 호환은 carry-over.",
+      "_comment": "라운드 80 path 등록 + 라운드 82 ISO 26262 docs 확장 (SRS/SDS/SUDS placeholder). swuts_excel_parser는 KJPDS02 양식 (header row 4 + TC ID 'SwUTC_NNNN' 형식 + Unit col 4) 자동 호환 검증 완료 (라운드 82 진단). 빌드 본격 호환(Coverage/SUTR/SITR template + vcast log)은 carry-over.",
       "project_id": "KJPDS02",
       "project_full_name": "KJPDS02",
       "asil_level": "ASIL A",
@@ -58,6 +58,10 @@
         "default_approver": "CH In"
       },
       "iso26262_docs": {
+        "_comment": "사용자가 KJPDS02 SRS/SDS/SUDS docx path 제공 시 활성. swut_input_adapter가 자동 추출 + session에 주입 + ASIL fallback chain (라운드 80 T1407) 자동 작동.",
+        "srs_docx_path": "",
+        "sds_docx_path": "",
+        "suds_docx_path": "",
         "swuts_xlsm_path": "U:\\연구소\\1000 프로젝트\\1200 자동차\\0002 A Cappella\\02 ADOS\\04 KJPDS02\\02.설계(연구소)\\01.설계 및 검증\\08.소프트웨어\\09.SW 단위 테스트\\01.Test Specification\\01.SwUTS\\(KJPDS02_SwUTS) Software Unit Test Specification_v1.01_251205_R.xlsm",
         "swits_xlsm_path": "U:\\연구소\\1000 프로젝트\\1200 자동차\\0002 A Cappella\\02 ADOS\\04 KJPDS02\\02.설계(연구소)\\01.설계 및 검증\\08.소프트웨어\\10.SW 통합 테스트\\01.Test Specification\\01.SwITS\\(KJPDS02_SwITS) Software Integration Test Specification_v1.01_251205_R.xlsm"
       }
