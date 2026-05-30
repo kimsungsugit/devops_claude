@@ -410,27 +410,46 @@ def _write_v202_extra_rows(
 def _compute_asil_distribution(
     function_rows: list[FunctionCoverage],
     function_asil_map: dict[str, str],
+    *,
+    function_asil_from_suds: dict[str, str] | None = None,
+    component_asil_from_sds: dict[str, str] | None = None,
+    function_asil_from_srs: dict[str, str] | None = None,
 ) -> tuple[dict[str, int], dict[str, list[str]]]:
-    """30차 W21 + 31차 W29: function 별 ASIL 등급 분포 계산.
+    """30차 W21 + 31차 W29 + 라운드 84 T1801: function 별 ASIL 등급 분포 계산.
+
+    라운드 84 T1801: SUDS/SDS/SRS source chain 통합 — `_write_coverage_sheet`/
+    `_write_test_log` 의 fallback chain (라운드 80)과 priority 일관:
+      1. c_source @asil (function_asil_map, 라운드 30 W21)
+      2. SUDS docx function 직접 (라운드 80)
+      3. SDS docx component (component_name 매칭, 라운드 80)
+      4. SRS docx 보조 (함수명, 라운드 80)
+      5. 미설정 → UNKNOWN
+
+    이전 (라운드 30~83): function_asil_map만 사용 → SUDS/SDS/SRS 추출 값
+    무시되어 AuditLog 시트 ASIL 분포 0건 (라운드 83 v17 검증).
 
     Args:
         function_rows: 집계된 함수 list (``FunctionCoverage``).
-        function_asil_map: ``swut_asil_resolver`` 결과 (``{SwUFn_NNNN: "A"/"B"/...}``).
+        function_asil_map: ``swut_asil_resolver`` 결과.
+        function_asil_from_suds: SUDS docx 함수 단위 ASIL (옵션, 라운드 80).
+        component_asil_from_sds: SDS docx 컴포넌트 ASIL (옵션, 라운드 80).
+        function_asil_from_srs: SRS docx 보조 ASIL (옵션, 라운드 80).
 
     Returns:
-        ``(distribution, function_ids_by_asil)``
-        - distribution: 등급별 개수 (예: ``{"ASIL_A": 15, "ASIL_D": 2, "UNKNOWN": 5}``)
-        - function_ids_by_asil: 등급별 함수 ID list dict — keys: "B"/"C"/"D"
-          (A/QM/UNKNOWN은 audit 강조 대상 아니므로 누적 안 함). 정렬됨.
+        ``(distribution, function_ids_by_asil)`` — A/B/C/D/QM/UNKNOWN 5+1 bucket.
+        function_ids_by_asil는 B/C/D만 누적 (audit 강조 대상).
     """
     distribution: dict[str, int] = {}
     ids_by_asil: dict[str, list[str]] = {"B": [], "C": [], "D": []}
+    suds_map = function_asil_from_suds or {}
+    sds_map = component_asil_from_sds or {}
+    srs_map = function_asil_from_srs or {}
 
     for fc in function_rows:
-        # function_id 결정 — fc.unit_id 또는 fc.name에서 SwUFn_NNNN 추출.
         candidate_keys = [fc.unit_id or "", fc.name or ""]
         asil = ""
         matched_id = ""
+        # 1) function_asil_map 직접 (c_source @asil 결과)
         for key in candidate_keys:
             if not key:
                 continue
@@ -443,10 +462,44 @@ def _compute_asil_distribution(
                 asil = function_asil_map[m.group(1)]
                 matched_id = m.group(1)
                 break
+        # 라운드 84 T1801: 2) SUDS function 직접 매핑 (SwUFn_NNNN 추출)
+        if not asil:
+            for key in candidate_keys:
+                if not key:
+                    continue
+                m = _TC_FN_RE.search(key)
+                if m:
+                    sw_fn_id = m.group(1)
+                    if sw_fn_id in suds_map:
+                        asil = suds_map[sw_fn_id]
+                        matched_id = sw_fn_id
+                        break
+        # 3) SDS component 매핑 (fc.component_name)
+        if not asil and sds_map and getattr(fc, "component_name", ""):
+            comp_raw = fc.component_name
+            import re as _re_cn
+            candidates_c = []
+            m_swcom = _re_cn.search(r"SwCom_\d+", comp_raw)
+            if m_swcom:
+                candidates_c.append(m_swcom.group(0))
+            for line in comp_raw.splitlines():
+                stripped = line.strip().strip("()").strip()
+                if stripped and stripped not in candidates_c:
+                    candidates_c.append(stripped)
+            candidates_c.append(comp_raw.strip())
+            for k in candidates_c:
+                if k in sds_map:
+                    asil = sds_map[k]
+                    matched_id = fc.unit_id or fc.name or ""
+                    break
+        # 4) SRS function 보조 (fc.name)
+        if not asil and srs_map and fc.name:
+            if fc.name in srs_map:
+                asil = srs_map[fc.name]
+                matched_id = fc.name
 
         bucket = f"ASIL_{asil}" if asil else "UNKNOWN"
         distribution[bucket] = distribution.get(bucket, 0) + 1
-        # 31차 W29: B/C/D 모두 누적 (이전 30차는 D만)
         if asil in ("B", "C", "D") and matched_id:
             ids_by_asil[asil].append(matched_id)
 
@@ -976,6 +1029,8 @@ def _build_audit_log_rows(
     rows.append(("", "", ""))
 
     # 3. ASIL 등급 분포 (라운드 81 5단계)
+    # 라운드 84 fix: _compute_asil_distribution은 "ASIL_A"/"UNKNOWN" key 사용 —
+    # short key("A"/"B"...) fallback 적용.
     asil_dist = summary.get("asil_distribution") or {}
     total_asil = sum(asil_dist.values()) if asil_dist else 0
     rows.append(("3. ASIL 등급 분포 (라운드 81 5단계 그라데이션)", "", ""))
@@ -986,9 +1041,14 @@ def _build_audit_log_rows(
         ("A", "ASIL A (구문 충분, 녹색)"),
         ("QM", "QM (비안전, 회색)"),
     ):
-        cnt = asil_dist.get(asil_key, 0)
+        # _compute_asil_distribution → "ASIL_A"/"ASIL_QM" / fallback short key
+        cnt = asil_dist.get(f"ASIL_{asil_key}", 0) or asil_dist.get(asil_key, 0)
         pct = f"{cnt / total_asil * 100:.1f}%" if total_asil else "0.0%"
         rows.append((label, str(cnt), pct))
+    unknown = asil_dist.get("UNKNOWN", 0)
+    if unknown:
+        unknown_pct = f"{unknown / total_asil * 100:.1f}%" if total_asil else "0.0%"
+        rows.append(("UNKNOWN (ASIL 미설정)", str(unknown), unknown_pct))
     rows.append(("Total", str(total_asil), "100.0%" if total_asil else "—"))
     rows.append(("", "", ""))
 
@@ -1890,10 +1950,13 @@ def build_coverage_report(
             # session.environments[].function_coverage는 unchanged (W2 격리).
             agg["function_rows"] = new_function_rows
 
-    # 30차 W21 + 31차 W29: 함수별 ASIL 분포 + B/C/D 별 함수 ID 그룹.
+    # 30차 W21 + 31차 W29 + 라운드 84 T1801: 함수별 ASIL 분포 (SUDS/SDS/SRS chain).
     asil_distribution, ids_by_asil = _compute_asil_distribution(
         agg.get("function_rows") or [],
         agg.get("function_asil_map") or {},
+        function_asil_from_suds=agg.get("function_asil_from_suds"),
+        component_asil_from_sds=agg.get("component_asil_from_sds"),
+        function_asil_from_srs=agg.get("function_asil_from_srs"),
     )
 
     summary = {

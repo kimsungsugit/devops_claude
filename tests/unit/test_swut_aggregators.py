@@ -2640,6 +2640,70 @@ class TestRound80AsilFallbackChain:
         assert isinstance(rgb, str) and rgb == ASIL_B_FILL_RGB
 
 
+class TestRound84AsilDistributionChain:
+    """라운드 84 T1801: _compute_asil_distribution SUDS/SDS/SRS chain 통합."""
+
+    def test_distribution_from_suds_only(self):
+        """function_asil_map 빈 + SUDS만 보유 — SUDS 매핑이 분포에 반영."""
+        from backend.services.swut_coverage_aggregator import _compute_asil_distribution
+        fns = [
+            FunctionCoverage(unit_id="SwUFn_0101", name="main"),
+            FunctionCoverage(unit_id="SwUFn_0102", name="g_init"),
+        ]
+        dist, ids = _compute_asil_distribution(
+            fns, {},
+            function_asil_from_suds={"SwUFn_0101": "B", "SwUFn_0102": "D"},
+        )
+        assert dist.get("ASIL_B") == 1
+        assert dist.get("ASIL_D") == 1
+        assert "SwUFn_0102" in ids["D"]
+        assert "SwUFn_0101" in ids["B"]
+
+    def test_distribution_priority_function_asil_map_over_suds(self):
+        """function_asil_map(c_source) 우선 > SUDS — chain priority 유지."""
+        from backend.services.swut_coverage_aggregator import _compute_asil_distribution
+        fns = [FunctionCoverage(unit_id="SwUFn_0101", name="main")]
+        dist, _ = _compute_asil_distribution(
+            fns,
+            {"SwUFn_0101": "A"},  # c_source = A
+            function_asil_from_suds={"SwUFn_0101": "D"},  # SUDS = D (무시됨)
+        )
+        # c_source 우선 → A
+        assert dist.get("ASIL_A") == 1
+        assert "ASIL_D" not in dist
+
+    def test_distribution_from_sds_component(self):
+        """component_name → SDS component ASIL 매핑."""
+        from backend.services.swut_coverage_aggregator import _compute_asil_distribution
+        fns = [
+            FunctionCoverage(
+                unit_id="SwUFn_0201", name="g_DrvIn_Main",
+                component_name="SwCom_02\n(DRV In)",
+            ),
+        ]
+        dist, ids = _compute_asil_distribution(
+            fns, {},
+            component_asil_from_sds={"SwCom_02": "C"},
+        )
+        assert dist.get("ASIL_C") == 1
+        assert "SwUFn_0201" in ids["C"]
+
+    def test_distribution_unknown_when_all_sources_miss(self):
+        """모든 source miss → UNKNOWN 등록."""
+        from backend.services.swut_coverage_aggregator import _compute_asil_distribution
+        fns = [FunctionCoverage(unit_id="SwUFn_0999", name="orphan")]
+        dist, ids = _compute_asil_distribution(
+            fns, {},
+            function_asil_from_suds={},
+            component_asil_from_sds={},
+            function_asil_from_srs={},
+        )
+        assert dist.get("UNKNOWN") == 1
+        assert ids["B"] == []
+        assert ids["C"] == []
+        assert ids["D"] == []
+
+
 class TestRound83AuditLogSheet:
     """라운드 83 T1701: AuditLog 시트 신규 추가 — 6 섹션 stamp 검증."""
 
@@ -2726,23 +2790,25 @@ class TestRound83AuditLogSheet:
         assert cells.get("Approver") == "CH In"
 
     def test_audit_log_stamps_asil_distribution_5stage(self):
-        """3. ASIL 분포 — A/B/C/D/QM 5단계 count + pct stamp."""
+        """3. ASIL 분포 — A/B/C/D/QM 5단계 count + pct stamp.
+
+        라운드 84 fix: _compute_asil_distribution key 'ASIL_A'/'ASIL_QM' 형식 호환.
+        """
         import openpyxl
         from backend.services.swut_coverage_aggregator import _write_audit_log_sheet
         session, meta, agg, summary = self._make_session_and_meta()
+        # 라운드 84: 실제 _compute_asil_distribution 출력 형식 (ASIL_X) 시뮬레이션
+        summary["asil_distribution"] = {"ASIL_A": 80, "ASIL_QM": 15, "ASIL_B": 3, "ASIL_C": 1, "ASIL_D": 1}
         wb = openpyxl.Workbook()
         ws = wb.active
         _write_audit_log_sheet(ws, meta, summary, agg, session)
-        # cell (label, value, pct)
         rows_3way = [(str(ws.cell(r, 1).value or ""), str(ws.cell(r, 2).value or ""),
                       str(ws.cell(r, 3).value or ""))
                      for r in range(1, ws.max_row + 1)]
-        # ASIL A 80건 80% 매핑 (total 100)
         a_row = next((r for r in rows_3way if "ASIL A" in r[0]), None)
         assert a_row is not None
         assert a_row[1] == "80"
         assert "80.0%" in a_row[2]
-        # Total 100
         total_row = next((r for r in rows_3way if r[0] == "Total"), None)
         assert total_row is not None
         assert total_row[1] == "100"

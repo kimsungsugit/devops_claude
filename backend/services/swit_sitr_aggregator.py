@@ -196,10 +196,13 @@ def build_swit_sitr_report(
 
     agg = aggregate_session(session)
 
-    # 30차 W21 + 31차 W29: ASIL 분포 — SwUT Coverage builder 재활용 (대칭 키).
+    # 30차 W21 + 31차 W29 + 라운드 84 T1801: ASIL 분포 (SUDS/SDS/SRS chain).
     asil_distribution, ids_by_asil = _compute_asil_distribution(
         agg.get("function_rows") or [],
         agg.get("function_asil_map") or {},
+        function_asil_from_suds=agg.get("function_asil_from_suds"),
+        component_asil_from_sds=agg.get("component_asil_from_sds"),
+        function_asil_from_srs=agg.get("function_asil_from_srs"),
     )
 
     summary: dict[str, Any] = {
