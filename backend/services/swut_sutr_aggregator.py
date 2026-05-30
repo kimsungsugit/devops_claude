@@ -1301,6 +1301,24 @@ def build_sutr(
             summary["consistency_swuds_compared"] = False
             incomplete_sheets.append("2.Consistency (SwUDS 비교 partial — v3.02)")
 
+    summary["template_sha256_12"] = template_sha256_12
+    summary["build_timestamp"] = meta.build_timestamp
+
+    # 라운드 83 T1703: AuditLog 시트 신규 추가 (Coverage 대칭, 회사 양식 영향 0).
+    try:
+        from backend.services.swut_coverage_aggregator import _write_audit_log_sheet
+        if "AuditLog" not in wb.sheetnames:
+            audit_ws = wb.create_sheet("AuditLog")
+            n_audit = _write_audit_log_sheet(
+                audit_ws, meta, summary, agg, session, warnings,
+            )
+            summary["audit_log_rows_written"] = n_audit
+            summary["audit_log_sheet_added"] = True
+    except Exception as _e:  # pragma: no cover — fail-safe
+        warnings.append(
+            f"AuditLog 시트 작성 실패 (산출물 영향 0): {type(_e).__name__}: {str(_e)[:80]}"
+        )
+
     # 14차 W1: BytesIO 그대로 result에 저장 — getvalue() copy 회피.
     out = io.BytesIO()
     wb.save(out)
@@ -1312,8 +1330,6 @@ def build_sutr(
         f"v{meta.release_sw_version}_{short_date(meta.test_date)}_R.xlsm"
     )
 
-    summary["template_sha256_12"] = template_sha256_12
-    summary["build_timestamp"] = meta.build_timestamp
     return SutrBuildResult(
         ok=True,
         xlsm_io=out,

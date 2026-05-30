@@ -2638,3 +2638,144 @@ class TestRound80AsilFallbackChain:
         rgb = found_rgb or ""
         # SUDS 우선 → ASIL B (파랑)
         assert isinstance(rgb, str) and rgb == ASIL_B_FILL_RGB
+
+
+class TestRound83AuditLogSheet:
+    """라운드 83 T1701: AuditLog 시트 신규 추가 — 6 섹션 stamp 검증."""
+
+    def _make_session_and_meta(self):
+        """공통 session/meta/agg/summary fixture."""
+        from backend.services.swut_input_adapter import SwUTSession, EnvironmentData
+        from backend.services.swut_sutr_aggregator import SutrBuildMeta
+        env = EnvironmentData(env_name="SWTE_01", component_name="SwCom_01")
+        session = SwUTSession(
+            project_id="HDPDM01",
+            environments=[env],
+            parse_warnings=["session warning 1", "session warning 2"],
+        )
+        session.function_asil_from_suds = {f"SwUFn_{i:04d}": "A" for i in range(100)}
+        session.component_asil_from_sds = {"SwCom_01": "A"}
+        session.function_asil_from_srs = {"g_fn_x": "A"}
+        session.c_function_map = {
+            "fn_a": {"comment_asil": "B"},
+            "fn_b": {"comment_asil": "QM"},
+            "fn_c": {"comment_asil": ""},
+        }
+        meta = SutrBuildMeta(
+            project_id="HDPDM01",
+            release_sw_version="1.00",
+            test_date="2026-05-31",
+            test_engineer="김성수",
+            default_author="JK Kim",
+            default_approver="CH In",
+        )
+        agg = {
+            "function_asil_from_suds": session.function_asil_from_suds,
+            "component_asil_from_sds": session.component_asil_from_sds,
+            "function_asil_from_srs": session.function_asil_from_srs,
+        }
+        summary = {
+            "environments": 1,
+            "total_tcs": 100,
+            "passed": 95,
+            "failed": 5,
+            "not_executed": 0,
+            "function_rows": 50,
+            "asil_distribution": {"A": 80, "QM": 15, "B": 3, "C": 1, "D": 1},
+            "build_timestamp": "2026-05-31T10:00:00",
+            "template_sha256_12": "abc123def456",
+        }
+        return session, meta, agg, summary
+
+    def test_audit_log_sheet_writes_6_sections(self):
+        """6 섹션 모두 stamp — 1.빌드환경 / 2.ASIL source / 3.ASIL 분포 / 4.통계 / 5.warnings / 6.qualification."""
+        import openpyxl
+        from backend.services.swut_coverage_aggregator import _write_audit_log_sheet
+        session, meta, agg, summary = self._make_session_and_meta()
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        n = _write_audit_log_sheet(ws, meta, summary, agg, session, warnings=["builder w1"])
+        assert n > 30  # 6 섹션 ≥ 30 row
+        # Title
+        assert "ISO 26262 Audit Log" in str(ws.cell(1, 1).value or "")
+        # 6 섹션 header label 모두 존재
+        labels = [str(ws.cell(r, 1).value or "") for r in range(1, n + 1)]
+        section_headers = [l for l in labels if l and l[0].isdigit() and "." in l[:3]]
+        assert len([h for h in section_headers if h.startswith("1.")]) >= 1
+        assert len([h for h in section_headers if h.startswith("2.")]) >= 1
+        assert len([h for h in section_headers if h.startswith("3.")]) >= 1
+        assert len([h for h in section_headers if h.startswith("4.")]) >= 1
+        assert len([h for h in section_headers if h.startswith("5.")]) >= 1
+        assert len([h for h in section_headers if h.startswith("6.")]) >= 1
+
+    def test_audit_log_stamps_build_env_from_meta(self):
+        """1. 빌드 환경 — project_id / version / engineer / author 정확 stamp."""
+        import openpyxl
+        from backend.services.swut_coverage_aggregator import _write_audit_log_sheet
+        session, meta, agg, summary = self._make_session_and_meta()
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        _write_audit_log_sheet(ws, meta, summary, agg, session)
+        # Project ID = HDPDM01 / Release SW Version = 1.00 등
+        cells = {str(ws.cell(r, 1).value or ""): str(ws.cell(r, 2).value or "")
+                 for r in range(1, ws.max_row + 1)}
+        assert cells.get("Project ID") == "HDPDM01"
+        assert cells.get("Release SW Version") == "1.00"
+        assert cells.get("Test Engineer") == "김성수"
+        assert cells.get("Author") == "JK Kim"
+        assert cells.get("Approver") == "CH In"
+
+    def test_audit_log_stamps_asil_distribution_5stage(self):
+        """3. ASIL 분포 — A/B/C/D/QM 5단계 count + pct stamp."""
+        import openpyxl
+        from backend.services.swut_coverage_aggregator import _write_audit_log_sheet
+        session, meta, agg, summary = self._make_session_and_meta()
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        _write_audit_log_sheet(ws, meta, summary, agg, session)
+        # cell (label, value, pct)
+        rows_3way = [(str(ws.cell(r, 1).value or ""), str(ws.cell(r, 2).value or ""),
+                      str(ws.cell(r, 3).value or ""))
+                     for r in range(1, ws.max_row + 1)]
+        # ASIL A 80건 80% 매핑 (total 100)
+        a_row = next((r for r in rows_3way if "ASIL A" in r[0]), None)
+        assert a_row is not None
+        assert a_row[1] == "80"
+        assert "80.0%" in a_row[2]
+        # Total 100
+        total_row = next((r for r in rows_3way if r[0] == "Total"), None)
+        assert total_row is not None
+        assert total_row[1] == "100"
+
+    def test_audit_log_warnings_top_20_with_truncation(self):
+        """5. parse_warnings — top 20 stamp + 초과 시 '외 N건 생략' 명시."""
+        import openpyxl
+        from backend.services.swut_coverage_aggregator import _write_audit_log_sheet
+        session, meta, agg, summary = self._make_session_and_meta()
+        # 25 builder warnings (top 20 + 5 truncated)
+        warnings = [f"builder warning {i}" for i in range(25)]
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        _write_audit_log_sheet(ws, meta, summary, agg, session, warnings=warnings)
+        cells_col1 = [str(ws.cell(r, 1).value or "") for r in range(1, ws.max_row + 1)]
+        cells_col2 = [str(ws.cell(r, 2).value or "") for r in range(1, ws.max_row + 1)]
+        # W1~W20 stamp (session 2 + builder 25 = 27건 중 top 20)
+        w_labels = [l for l in cells_col1 if l.startswith("W") and l[1:].isdigit()]
+        assert len(w_labels) == 20
+        # '외 N건 생략' 명시
+        assert any("외" in c and "생략" in c for c in cells_col2)
+
+    def test_audit_log_tool_qualification_metadata(self):
+        """6. Tool Qualification — evidence_class / ASIL usage / round 명시."""
+        import openpyxl
+        from backend.services.swut_coverage_aggregator import _write_audit_log_sheet
+        session, meta, agg, summary = self._make_session_and_meta()
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        _write_audit_log_sheet(ws, meta, summary, agg, session)
+        cells = {str(ws.cell(r, 1).value or ""): str(ws.cell(r, 2).value or "")
+                 for r in range(1, ws.max_row + 1)}
+        assert cells.get("Evidence Class") == "auto-generated draft"
+        assert "reviewer 검토 후" in cells.get("ASIL A Usage", "")
+        assert "manual review 의무" in cells.get("ASIL B/C/D Usage", "")
+        assert "R83" in cells.get("Round", "")

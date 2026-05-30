@@ -315,6 +315,21 @@ def build_swit_sitr_report(
             summary["consistency_swuds_compared"] = False
             incomplete_sheets.append("2.Consistency (SwUDS 비교 partial)")
 
+    # 라운드 83 T1703: AuditLog 시트 신규 추가 (SwUT 대칭).
+    try:
+        from backend.services.swut_coverage_aggregator import _write_audit_log_sheet
+        if "AuditLog" not in wb.sheetnames:
+            audit_ws = wb.create_sheet("AuditLog")
+            n_audit = _write_audit_log_sheet(
+                audit_ws, meta, summary, agg, session, warnings,
+            )
+            summary["audit_log_rows_written"] = n_audit
+            summary["audit_log_sheet_added"] = True
+    except Exception as _e:  # pragma: no cover — fail-safe
+        warnings.append(
+            f"AuditLog 시트 작성 실패 (산출물 영향 0): {type(_e).__name__}: {str(_e)[:80]}"
+        )
+
     # 14차 W1: BytesIO 그대로 result에 저장.
     out = io.BytesIO()
     wb.save(out)
