@@ -37,9 +37,11 @@ except ImportError:  # pragma: no cover
 from backend.services.excel_template_utils import (
     BLANK_MARKUP,
     build_release_history_row,
+    mark_asil_a_function,
     mark_asil_b_function,
     mark_asil_c_function,
     mark_asil_d_function,
+    mark_asil_qm_function,
     mark_fail_cell,
     mark_user_input_required,
     safe_write,
@@ -800,11 +802,14 @@ def _write_coverage_sheet(
                 _rasil = _srs_map.get(fc.name)
                 if _rasil:
                     asil = _rasil
-        # ASIL 등급별 시각 강조 — D(빨강) > C(주황) > B(파랑) 단계
+        # 라운드 81 T1503: ASIL 5단계 그라데이션 — A/QM 추가 (audit reviewer 친화).
+        # D(빨강) > C(주황) > B(파랑) > A(녹색) > QM(회색) 위험도 ↓
         _marker = {
+            "A": mark_asil_a_function,
             "B": mark_asil_b_function,
             "C": mark_asil_c_function,
             "D": mark_asil_d_function,
+            "QM": mark_asil_qm_function,
         }.get(asil or "")
         if _marker:
             for col in (2, 3):  # Unit ID + Function Name 컬럼

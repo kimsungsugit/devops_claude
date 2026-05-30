@@ -35,9 +35,11 @@ from backend.services.excel_template_utils import (
     find_kv_row,
     has_vba_macros,
     inspect_vba_refs,
+    mark_asil_a_function,
     mark_asil_b_function,
     mark_asil_c_function,
     mark_asil_d_function,
+    mark_asil_qm_function,
     mark_user_input_required,
     safe_write,
     short_date,
@@ -999,10 +1001,13 @@ def _write_test_log(
                     _rasil = _srs_map.get(_srs_key)
                     if _rasil:
                         asil = _rasil
+        # 라운드 81 T1503: ASIL 5단계 그라데이션 — A/QM 추가 (audit reviewer 친화).
         _asil_marker = {
+            "A": mark_asil_a_function,
             "B": mark_asil_b_function,
             "C": mark_asil_c_function,
             "D": mark_asil_d_function,
+            "QM": mark_asil_qm_function,
         }.get(asil)
         if _asil_marker:
             _asil_marker(ws, r, PASS_FAIL_UNIT_COL)

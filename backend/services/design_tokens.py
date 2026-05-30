@@ -43,6 +43,12 @@ ASIL_D_FILL_RGB: Final[str] = "FFFFC7CE"
 ASIL_B_FILL_RGB: Final[str] = "FFE2F0FF"   # 연한 파랑 (분기 커버리지 필수)
 ASIL_C_FILL_RGB: Final[str] = "FFFFE5CC"   # 연한 주황 (MC/DC 커버리지 권장)
 
+# 라운드 81 T1501: ASIL A / QM 함수 row 강조 — 5단계 그라데이션 완성.
+# HDPDM01 NE_GN7 환경처럼 A/QM 함수가 압도적인 경우에도 audit reviewer가
+# 시각적으로 함수 분포를 한눈에 인지 가능. B/C/D 와 명확히 구분되는 pastel.
+ASIL_A_FILL_RGB: Final[str] = "FFE4F3D5"   # 연한 녹색 (구문 커버리지로 충분, 가장 약한 안전 등급)
+ASIL_QM_FILL_RGB: Final[str] = "FFE8E8E8"  # 연한 회색 (Quality Management — 비안전, 정보성)
+
 
 # ---- 사용자 입력 placeholder 문자열 (셀에 쓰이는 안내) ----
 
@@ -53,8 +59,10 @@ USER_INPUT_PLACEHOLDER: Final[str] = "▶ 사용자 입력 필요"
 __all__ = [
     "USER_INPUT_FILL_RGB",
     "FAIL_FILL_RGB",
+    "ASIL_A_FILL_RGB",
     "ASIL_B_FILL_RGB",
     "ASIL_C_FILL_RGB",
     "ASIL_D_FILL_RGB",
+    "ASIL_QM_FILL_RGB",
     "USER_INPUT_PLACEHOLDER",
 ]

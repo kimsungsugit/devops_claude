@@ -458,6 +458,53 @@ class TestAsilBCMarker31:
         assert "FFE5CC" in str(ws.cell(5, 5).fill.fgColor.rgb).upper()
 
 
+class TestAsilAQmMarker81:
+    """라운드 81 T1502: ASIL A / QM 강조 helper — 5단계 그라데이션 완성."""
+
+    def test_mark_asil_a_applies_green_fill(self):
+        from backend.services.excel_template_utils import mark_asil_a_function
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.cell(1, 1).value = "SwUFn_0101"
+        result = mark_asil_a_function(ws, 1, 1)
+        assert result is True
+        # ASIL_A_FILL_RGB = "FFE4F3D5" 연한 녹색
+        assert "E4F3D5" in str(ws.cell(1, 1).fill.fgColor.rgb).upper()
+        assert ws.cell(1, 1).value == "SwUFn_0101"
+
+    def test_mark_asil_qm_applies_gray_fill(self):
+        from backend.services.excel_template_utils import mark_asil_qm_function
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.cell(2, 1).value = "SwUFn_0102"
+        result = mark_asil_qm_function(ws, 2, 1)
+        assert result is True
+        # ASIL_QM_FILL_RGB = "FFE8E8E8" 연한 회색
+        assert "E8E8E8" in str(ws.cell(2, 1).fill.fgColor.rgb).upper()
+        assert ws.cell(2, 1).value == "SwUFn_0102"
+
+    def test_asil_5stage_rgbs_are_all_distinct(self):
+        """ASIL A/B/C/D/QM RGB가 모두 다른 색 — 5단계 그라데이션 시각 구분."""
+        from backend.services import design_tokens
+        rgbs = {
+            design_tokens.ASIL_A_FILL_RGB,
+            design_tokens.ASIL_B_FILL_RGB,
+            design_tokens.ASIL_C_FILL_RGB,
+            design_tokens.ASIL_D_FILL_RGB,
+            design_tokens.ASIL_QM_FILL_RGB,
+        }
+        assert len(rgbs) == 5, f"중복된 RGB 발견: {rgbs}"
+
+    def test_asil_a_qm_distinct_from_user_input_and_fail(self):
+        """ASIL A/QM가 USER_INPUT(노랑)/FAIL(빨강)와도 다른 색."""
+        from backend.services import design_tokens
+        for rgb in (design_tokens.ASIL_A_FILL_RGB, design_tokens.ASIL_QM_FILL_RGB):
+            assert rgb not in (
+                design_tokens.USER_INPUT_FILL_RGB,
+                design_tokens.FAIL_FILL_RGB,
+            )
+
+
 # ---------------------------------------------------------------------------
 # 55-fix-2 W6 — build_release_history_row 빈 입력 warning 누적
 # ---------------------------------------------------------------------------

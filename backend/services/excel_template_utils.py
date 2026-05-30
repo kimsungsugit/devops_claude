@@ -16,9 +16,11 @@ import zipfile
 from typing import Any
 
 from .design_tokens import (
+    ASIL_A_FILL_RGB as _ASIL_A_FILL_RGB,
     ASIL_B_FILL_RGB as _ASIL_B_FILL_RGB,
     ASIL_C_FILL_RGB as _ASIL_C_FILL_RGB,
     ASIL_D_FILL_RGB as _ASIL_D_FILL_RGB,
+    ASIL_QM_FILL_RGB as _ASIL_QM_FILL_RGB,
     FAIL_FILL_RGB as _FAIL_FILL_RGB,
     USER_INPUT_FILL_RGB as _USER_INPUT_FILL_RGB,
     USER_INPUT_PLACEHOLDER,
@@ -882,6 +884,26 @@ def mark_asil_c_function(ws: Any, row: int, col: int) -> bool:
     사이 단계 — 색상으로 시각적 등급 차이 명시.
     """
     return _apply_fill(ws, row, col, _ASIL_C_FILL_RGB)
+
+
+def mark_asil_a_function(ws: Any, row: int, col: int) -> bool:
+    """라운드 81 T1502: 3.Coverage / SUTR Test Log ASIL A 함수 row 강조 — 연한 녹색.
+
+    audit 검토 우선순위: 구문 커버리지로 충분 (가장 약한 안전 등급).
+    HDPDM01 NE_GN7 환경처럼 A/QM 함수가 압도적인 경우에도 audit reviewer가
+    분포를 한눈에 인지 가능. ASIL B (파랑)보다 낮은 시인성으로 단계 구분.
+    """
+    return _apply_fill(ws, row, col, _ASIL_A_FILL_RGB)
+
+
+def mark_asil_qm_function(ws: Any, row: int, col: int) -> bool:
+    """라운드 81 T1502: 3.Coverage / SUTR Test Log QM 함수 row 강조 — 연한 회색.
+
+    Quality Management — 비안전, 정보성. 함수가 ISO 26262 안전 요구사항 외부
+    (애플리케이션 로직 등)에 있음을 audit reviewer에게 명시. ASIL A 이상
+    (녹색/파랑/주황/빨강)과 색조 자체 분리 (회색) — 안전 vs 비안전 한눈 구분.
+    """
+    return _apply_fill(ws, row, col, _ASIL_QM_FILL_RGB)
 
 
 def write_label_or_mark(

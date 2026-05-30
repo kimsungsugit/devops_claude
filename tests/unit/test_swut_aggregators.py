@@ -2545,6 +2545,64 @@ class TestRound80AsilFallbackChain:
         rgb = found_rgb or ""
         assert isinstance(rgb, str) and rgb == ASIL_C_FILL_RGB
 
+    def test_coverage_sheet_asil_a_marker_applied(self):
+        """라운드 81 T1503: ASIL A 함수 → mark_asil_a_function (연한 녹색) 적용."""
+        from backend.services.swut_coverage_aggregator import _write_coverage_sheet
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws["B1"] = "Unit ID"
+        vcast = [
+            FunctionCoverage(unit_id="SwUFn_0101", name="main",
+                             statement=CoverageStats(8, 8, 1.0)),
+        ]
+        agg = {
+            "function_rows": vcast,
+            "function_asil_map": {"SwUFn_0101": "A"},  # ASIL A 직접
+            "function_asil_from_suds": {},
+            "component_asil_from_sds": {},
+            "function_asil_from_srs": {},
+        }
+        n = _write_coverage_sheet(ws, agg)
+        assert n == 1
+        from backend.services.design_tokens import ASIL_A_FILL_RGB
+        found_rgb = None
+        for rr in range(2, ws.max_row + 1):
+            cell = ws.cell(rr, 2)
+            if cell.fill and cell.fill.start_color:
+                _rgb = getattr(cell.fill.start_color, "rgb", "")
+                if isinstance(_rgb, str) and _rgb not in ("", "00000000", "FFFFFFFF"):
+                    found_rgb = _rgb; break
+        assert found_rgb == ASIL_A_FILL_RGB
+
+    def test_coverage_sheet_asil_qm_marker_applied(self):
+        """라운드 81 T1503: ASIL QM 함수 → mark_asil_qm_function (연한 회색) 적용."""
+        from backend.services.swut_coverage_aggregator import _write_coverage_sheet
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws["B1"] = "Unit ID"
+        vcast = [
+            FunctionCoverage(unit_id="SwUFn_0301", name="non_safety_fn",
+                             statement=CoverageStats(5, 5, 1.0)),
+        ]
+        agg = {
+            "function_rows": vcast,
+            "function_asil_map": {},
+            "function_asil_from_suds": {"SwUFn_0301": "QM"},  # SUDS via QM
+            "component_asil_from_sds": {},
+            "function_asil_from_srs": {},
+        }
+        n = _write_coverage_sheet(ws, agg)
+        assert n == 1
+        from backend.services.design_tokens import ASIL_QM_FILL_RGB
+        found_rgb = None
+        for rr in range(2, ws.max_row + 1):
+            cell = ws.cell(rr, 2)
+            if cell.fill and cell.fill.start_color:
+                _rgb = getattr(cell.fill.start_color, "rgb", "")
+                if isinstance(_rgb, str) and _rgb not in ("", "00000000", "FFFFFFFF"):
+                    found_rgb = _rgb; break
+        assert found_rgb == ASIL_QM_FILL_RGB
+
     def test_coverage_sheet_chain_priority_suds_over_sds(self):
         """SUDS와 SDS 동시 매칭 시 SUDS 우선 (priority chain)."""
         from backend.services.swut_coverage_aggregator import _write_coverage_sheet
