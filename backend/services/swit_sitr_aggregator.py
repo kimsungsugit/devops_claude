@@ -272,12 +272,14 @@ def build_swit_sitr_report(
         warnings.append("Test Log/Result 시트 미발견")
     else:
         # 54차 T283: layout 전달 — v2.02 AL column marker fill
+        # 라운드 78 T1303: c_function_map 전달 — ASIL fallback (SwUT 대칭).
         n = _write_test_log(
             log_ws, session,
             function_asil_map=agg.get("function_asil_map"),
             out_warnings=warnings,
             layout=layout,
             swuts_map=swuts_map,
+            c_function_map=session.c_function_map or None,
         )
         summary["test_log_rows_written"] = n
 

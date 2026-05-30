@@ -422,6 +422,7 @@ def _write_test_log(
     *,
     layout: Any = None,
     swuts_map: dict[str, Any] | None = None,
+    c_function_map: dict[str, dict[str, Any]] | None = None,
 ) -> int:
     """Test Log 시트 — TC별 input/expected/actual/pass.
 
@@ -872,6 +873,38 @@ def _write_test_log(
         # 이전: col+5 (G=Param2) 잘못 강조. 현재: AJ row 시각 강조 (사용자 입력 영역 미침범).
         fn_id = tc_to_fn_id.get(tc_name, "")
         asil = asil_map.get(fn_id, "") if fn_id else ""
+        # 라운드 78 T1302 — c_function_map.comment_asil fallback.
+        # 라이브 v11/v12 측정: 1941 TC 중 ASIL 강조 0건 (asil_map 빈 dict).
+        # swuts_map.unit_name이 시그너처 형식 (`'void main( void )'`)이라 c_function_map
+        # key (함수명 `'main'`)와 직접 매칭 안 됨 → regex로 함수명 추출.
+        if not asil and c_function_map and tc_name:
+            # 1) swuts_map.unit_name 시그너처에서 함수명 추출
+            _cand_name = ""
+            if swuts_map:
+                _swuts_entry = swuts_map.get(tc_name)
+                if _swuts_entry is None:
+                    import re as _re_t
+                    _fm = _re_t.search(r"SwUFn_(\d+)", tc_name)
+                    if _fm:
+                        _swuts_entry = swuts_map.get(f"SwUTC_{_fm.group(1)}")
+                if _swuts_entry:
+                    _sig = getattr(_swuts_entry, "unit_name", "") or ""
+                    # 시그너처 패턴: `[modifiers] return_type fn_name(args)`.
+                    # 함수명 = `(` 직전 마지막 토큰. 예: 'static void s_SystemOperation( void )'
+                    # → 's_SystemOperation'.
+                    import re as _re_sig
+                    _match = _re_sig.search(r"(\w+)\s*\(", _sig)
+                    if _match:
+                        _cand_name = _match.group(1)
+                    else:
+                        _cand_name = _sig.strip()
+            # 2) cand_name으로 c_function_map lookup
+            if _cand_name:
+                _c_entry = c_function_map.get(_cand_name)
+                if _c_entry:
+                    _ca = (_c_entry.get("comment_asil") or "").strip().upper()
+                    if _ca in {"A", "B", "C", "D", "QM"}:
+                        asil = _ca
         _asil_marker = {
             "B": mark_asil_b_function,
             "C": mark_asil_c_function,
@@ -1125,12 +1158,15 @@ def build_sutr(
         warnings.append("Test Log/Result 시트 미발견")
     else:
         # 54-fix C1: layout 전달 — AL marker
+        # 라운드 78 T1303: c_function_map 전달 — ASIL fallback (asil_map 빈 dict 시
+        # c_parser comment_asil 매핑으로 ASIL 강조 적용).
         n = _write_test_log(
             log_ws, session,
             function_asil_map=agg.get("function_asil_map"),
             out_warnings=warnings,
             layout=layout,
             swuts_map=swuts_map,
+            c_function_map=session.c_function_map or None,
         )
         summary["test_log_rows_written"] = n
 

@@ -2253,6 +2253,87 @@ class TestRound74PhaseCDynamicSubfolder:
 # 라운드 76 — c_parser primary merge 재활성 통합 회귀 (T1108)
 # ---------------------------------------------------------------------------
 
+class TestRound78SutrAsilFallback:
+    """T1302 — _write_test_log이 asil_map 빈 dict 시 c_function_map.comment_asil fallback."""
+
+    def _setup_ws(self):
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        # 헤더 R1에 'Test Case ID' (find_kv_row 매칭용)
+        ws["B1"] = "Test Case ID"
+        return wb, ws
+
+    def test_asil_fallback_applied_when_asil_map_empty(self):
+        """asil_map 빈 dict + c_function_map에 매칭 → ASIL D fill 적용."""
+        from backend.services.swut_sutr_aggregator import _write_test_log
+        from backend.services.swuts_excel_parser import SwUTSEntry
+
+        wb, ws = self._setup_ws()
+        env = EnvironmentData(
+            env_name="SWTE_01", component_name="C1",
+            test_cases={"SwUTC_SwUFn_0101.001": [object()]},
+            test_results={"SwUTC_SwUFn_0101.001": ExecutionRow(
+                tc_name="SwUTC_SwUFn_0101.001", passed=True)},
+        )
+        session = SwUTSession(
+            project_id="HDPDM01", version="0.10",
+            source_kind="log_folder", source_path="",
+            environments=[env],
+        )
+        # swuts_map: tc_id → unit_name 'main' (c_function_map 매핑 key)
+        swuts_map = {
+            "SwUTC_0101": SwUTSEntry(
+                tc_id="SwUTC_0101", function_id="SwUFn_0101", unit_name="main",
+            ),
+        }
+        c_map = {
+            "main": {"comment_asil": "D", "signature": "void main(void)", "file": "main.c"},
+        }
+        # asil_map 빈 — fallback 경로 trigger
+        _write_test_log(
+            ws, session,
+            function_asil_map={},  # 빈 → fallback
+            swuts_map=swuts_map,
+            c_function_map=c_map,
+        )
+        # PASS_FAIL_UNIT_COL(36)에 ASIL D fill 적용 확인
+        from backend.services.design_tokens import ASIL_D_FILL_RGB
+        cell = ws.cell(2, 36)  # start_row=2 (header R1 + 1)
+        rgb = cell.fill.start_color.rgb if cell.fill.start_color else None
+        assert rgb == ASIL_D_FILL_RGB
+
+    def test_asil_fallback_skip_when_swuts_map_missing(self):
+        """swuts_map None 또는 unit_name 없으면 fallback skip — silent (false positive 차단)."""
+        from backend.services.swut_sutr_aggregator import _write_test_log
+
+        wb, ws = self._setup_ws()
+        env = EnvironmentData(
+            env_name="SWTE_01", component_name="C1",
+            test_cases={"SwUTC_SwUFn_0101.001": [object()]},
+            test_results={"SwUTC_SwUFn_0101.001": ExecutionRow(
+                tc_name="SwUTC_SwUFn_0101.001", passed=True)},
+        )
+        session = SwUTSession(
+            project_id="HDPDM01", version="0.10",
+            source_kind="log_folder", source_path="",
+            environments=[env],
+        )
+        c_map = {"main": {"comment_asil": "D", "file": "main.c"}}
+        # swuts_map=None → fallback skip
+        _write_test_log(
+            ws, session,
+            function_asil_map={},
+            swuts_map=None,
+            c_function_map=c_map,
+        )
+        # fill 미적용
+        cell = ws.cell(2, 36)
+        rgb = cell.fill.start_color.rgb if cell.fill.start_color else None
+        # default PatternFill — solid pattern 적용 안 됨
+        from backend.services.design_tokens import ASIL_D_FILL_RGB
+        assert rgb != ASIL_D_FILL_RGB
+
+
 class TestRound76CParserMergeReactivation:
     """c_parser merge 재활성 시 row 폭증 + cross-ref formula 동적 갱신 + audit 마킹."""
 
