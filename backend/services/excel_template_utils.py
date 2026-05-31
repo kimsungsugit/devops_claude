@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import io
 import re
+import weakref
 import zipfile
 from typing import Any
 
@@ -424,11 +425,40 @@ def find_kv_row(ws: Any, label: str, max_row: int = 50) -> tuple[int, int] | Non
     return None
 
 
+# 라운드 89 perf — worksheet별 row-indexed merge anchor 캐시.
+# 이전 resolve_merge_anchor는 ws.merged_cells.ranges 전체를 매 호출 선형 스캔(O(merges)).
+# auto_expand_row_block(copy_merge)가 확장 행마다 template merge를 복제해 merge가
+# 행 수에 비례 누적 → safe_write마다 O(merges) → 전체 O(n²) (py-spy n=24: safe_write의
+# resolve_merge_anchor가 최대 hotspot). row→[(min_col,max_col,anchor)] 인덱스로 해당
+# row의 merge만 검사(O(K)). merge 개수가 바뀔 때만 재색인. WeakKeyDictionary로 ws GC 시
+# 자동 정리 + ws 객체 비오염.
+_MERGE_ANCHOR_CACHE: "weakref.WeakKeyDictionary[Any, tuple[int, dict[int, list]]]" = (
+    weakref.WeakKeyDictionary()
+)
+
+
 def resolve_merge_anchor(ws: Any, row: int, col: int) -> tuple[int, int]:
-    """좌표가 머지 영역 안이면 top-left anchor 좌표로 보정."""
-    for mr in ws.merged_cells.ranges:
-        if mr.min_row <= row <= mr.max_row and mr.min_col <= col <= mr.max_col:
-            return (mr.min_row, mr.min_col)
+    """좌표가 머지 영역 안이면 top-left anchor 좌표로 보정 (row-indexed 캐시)."""
+    merges = ws.merged_cells.ranges
+    n = len(merges)
+    cached = _MERGE_ANCHOR_CACHE.get(ws)
+    if cached is None or cached[0] != n:
+        by_row: dict[int, list] = {}
+        for mr in merges:
+            span = (mr.min_col, mr.max_col, (mr.min_row, mr.min_col))
+            for r in range(mr.min_row, mr.max_row + 1):
+                by_row.setdefault(r, []).append(span)
+        cached = (n, by_row)
+        try:
+            _MERGE_ANCHOR_CACHE[ws] = cached
+        except TypeError:  # ws가 weakref 불가하면 캐시 skip (정확성 유지)
+            for mr in merges:
+                if mr.min_row <= row <= mr.max_row and mr.min_col <= col <= mr.max_col:
+                    return (mr.min_row, mr.min_col)
+            return (row, col)
+    for minc, maxc, anchor in cached[1].get(row, ()):
+        if minc <= col <= maxc:
+            return anchor
     return (row, col)
 
 

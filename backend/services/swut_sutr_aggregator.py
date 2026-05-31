@@ -680,6 +680,11 @@ def _write_test_log(
                 pass
 
     written = 0
+    # 라운드 89 perf — per-block merge를 루프 후 일괄 적용(defer). per-block merge는
+    # 항상 해당 블록 write 이후 + 다른 블록과 다른 row라 어떤 write에도 영향 없음 →
+    # defer는 출력 동일. 루프 중 merge 개수를 안정시켜 resolve_merge_anchor row-index
+    # 캐시가 1회만 빌드되게 함(merge 누적 시 매 블록 재색인 = O(n²) 방지).
+    _deferred_merges: list[tuple[int, int, int, int]] = []
     for tc_name in sorted_tc_names:
         r = start_row + (written * tc_row_step)
         env = tc_to_env.get(tc_name)
@@ -1065,19 +1070,24 @@ def _write_test_log(
                         # 측정상 perf 이득 없어 채택 안 함 — 잔존 O(n²)는 style copy가
                         # 아닌 _write_test_log 다른 경로, py-spy 후속 진단 대상.)
                         ws.cell(dst_row, c_n)._style = _copy.copy(tpl_style)
-            # Merge cells 적용 — template block의 local merge를 새 block 위치에 복사
+            # Merge cells — template block의 local merge를 새 block 위치에 복사.
+            # 라운드 89: 즉시 적용 대신 defer (위 설명 참조). 좌표만 수집.
             for off_start, off_end, mc_min_col, mc_max_col in template_merges_local:
-                new_min_r = r + off_start
-                new_max_r = r + off_end
-                try:
-                    ws.merge_cells(
-                        start_row=new_min_r, end_row=new_max_r,
-                        start_column=mc_min_col, end_column=mc_max_col,
-                    )
-                except (ValueError, AttributeError):
-                    pass
+                _deferred_merges.append(
+                    (r + off_start, r + off_end, mc_min_col, mc_max_col)
+                )
 
         written += 1
+
+    # 라운드 89: defer한 per-block merge 일괄 적용 (write 루프 종료 후).
+    for new_min_r, new_max_r, mc_min_col, mc_max_col in _deferred_merges:
+        try:
+            ws.merge_cells(
+                start_row=new_min_r, end_row=new_max_r,
+                start_column=mc_min_col, end_column=mc_max_col,
+            )
+        except (ValueError, AttributeError):
+            pass
 
     # 라운드 F7 T707: clear policy — 신규 stamp 후 다음 row부터 양식 default clear.
     # SwUTR/SwITR 회사 표준 양식이 R5/R7에 SwUTC_0101 default 데이터 보유 →
