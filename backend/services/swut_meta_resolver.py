@@ -226,6 +226,30 @@ def resolve_hmr_html_bytes(
         return None
 
 
+# 라운드 89 — SwUDS docx parse 캐시. 36MB+ docx가 빌드당 2회(resolve_swuds_maps +
+# resolve_swuds_function_ids) + Coverage/SUTR 각각 = 최대 4회 read+parse(파싱 ~수십초/회).
+# path 키 캐시로 중복 read+parse 제거. read-only U: 설계 docx는 동일 process(세션)
+# 동안 정적 가정 — 변경 시 backend 재시작으로 모듈 캐시 자연 무효. 동일 path는 1회만.
+_SWUDS_PARSE_CACHE: dict[str, Any] = {}
+
+
+def _cached_parse_swuds(path: str) -> Any:
+    """swuds docx를 path 키 캐시로 1회만 read+parse → SwUDSParseResult 반환.
+
+    read 예외(FileNotFoundError/PermissionError/OSError)는 caller가 처리하도록
+    전파(캐시 안 함). parse 결과(ok 여부 무관, 동일 bytes 결정적)는 캐시.
+    """
+    cached = _SWUDS_PARSE_CACHE.get(path)
+    if cached is not None:
+        return cached
+    from backend.services.file_resolver import get_resolver
+    from backend.services.swut_swuds_parser import parse_swuds_docx
+    docx_bytes = get_resolver().read_bytes(path)
+    result = parse_swuds_docx(docx_bytes, parse_warnings=[])
+    _SWUDS_PARSE_CACHE[path] = result
+    return result
+
+
 def resolve_swuds_function_ids(req: Any, project_id: str) -> set[str] | None:
     """16차 + 49차 — swuds_docx_path가 있으면 docx → function ID set 반환.
 
@@ -238,16 +262,10 @@ def resolve_swuds_function_ids(req: Any, project_id: str) -> set[str] | None:
     swuds_path = resolve_swuds_path(req, project_id)
     if not swuds_path:
         return None
-    # 지연 import — circular dependency 방지
-    from backend.services.file_resolver import get_resolver
-    from backend.services.swut_swuds_parser import parse_swuds_docx
     try:
-        resolver = get_resolver()
-        docx_bytes = resolver.read_bytes(swuds_path)
-        parse_warnings: list[str] = []
-        result = parse_swuds_docx(docx_bytes, parse_warnings=parse_warnings)
+        result = _cached_parse_swuds(swuds_path)  # 라운드 89 — path 키 캐시
         if not result.ok:
-            _logger.warning("SwUDS parse failed: %s", parse_warnings)
+            _logger.warning("SwUDS parse failed (function_ids)")
             return None
         return result.function_ids
     except (FileNotFoundError, PermissionError, OSError) as e:
@@ -284,15 +302,10 @@ def resolve_swuds_maps(
     swuds_path = resolve_swuds_path(req, project_id)
     if not swuds_path:
         return {}, {}
-    from backend.services.file_resolver import get_resolver
-    from backend.services.swut_swuds_parser import parse_swuds_docx
     try:
-        resolver = get_resolver()
-        docx_bytes = resolver.read_bytes(swuds_path)
-        parse_warnings: list[str] = []
-        result = parse_swuds_docx(docx_bytes, parse_warnings=parse_warnings)
+        result = _cached_parse_swuds(swuds_path)  # 라운드 89 — path 키 캐시 (중복 parse 제거)
         if not result.ok:
-            _logger.warning("SwUDS ASIL parse failed: %s", parse_warnings)
+            _logger.warning("SwUDS ASIL parse failed")
             return {}, {}
         return dict(result.function_asil_map), dict(result.function_name_to_id)
     except (FileNotFoundError, PermissionError, OSError) as e:

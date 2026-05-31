@@ -416,6 +416,17 @@ def _scan_test_log_columns(ws) -> dict[str, Optional[int]]:
             ):
                 # 'Pass/Fail Total'은 'Pass/Fail'보다 longer match — 먼저 검사.
                 result["pass_fail_total_col"] = c
+            elif (
+                result["pass_fail_total_col"] is None
+                and s == "total"
+                and result["pass_fail_col"] is not None
+                and c == result["pass_fail_col"] + 1
+            ):
+                # 라운드 89 — KJPDS02 v1.01 양식: 'Pass/Fail' 병합 헤더(AJ3:AK3) 아래
+                # 'Unit'(AJ4) / 'Total'(AK4) 서브헤더. Pass/Fail(Unit) col 바로 오른쪽의
+                # 'Total'을 Pass/Fail Total col로 인식 (이전엔 미감지 → AK 미기록, TC당
+                # Total Pass/Fail이 template prefill 1행만 남던 결함).
+                result["pass_fail_total_col"] = c
             elif result["pass_fail_col"] is None and s in (
                 "pass/fail", "pass/fail unit", "pass fail", "pass/fail (unit)",
             ):

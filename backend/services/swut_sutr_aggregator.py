@@ -935,14 +935,15 @@ def _write_test_log(
         safe_write(ws, r, PASS_FAIL_UNIT_COL, result_str)
         if PASS_FAIL_TOTAL_COL > 0:
             safe_write(ws, r, PASS_FAIL_TOTAL_COL, result_str)
-        # step row Pass/Fail clear — 양식 default 'Pass' 잔존 차단 (N1)
-        if tc_row_step > 1:
+        # step row Pass/Fail clear — 양식 default 'Pass' 잔존 차단 (N1).
+        # UNIT(AJ)은 per-step 개별 cell이라 step row clear 필요.
+        # 라운드 89: TOTAL(AK)은 TC당 세로 병합(예: AK5:AK10) — step row(AK6+)는
+        # 병합 non-anchor라 clear 시 resolve_merge_anchor가 anchor(AK5)를 가리켜
+        # 방금 쓴 Total 값을 wipe하는 결함("한 행만" 증상). TOTAL은 병합 cell이라
+        # step row에 독립 값이 없으므로 clear 자체가 불필요 → skip.
+        if tc_row_step > 1 and PASS_FAIL_UNIT_COL > 0:
             for sub_offset in range(1, tc_row_step):
-                sub_r = r + sub_offset
-                if PASS_FAIL_UNIT_COL > 0:
-                    safe_write(ws, sub_r, PASS_FAIL_UNIT_COL, None)
-                if PASS_FAIL_TOTAL_COL > 0:
-                    safe_write(ws, sub_r, PASS_FAIL_TOTAL_COL, None)
+                safe_write(ws, r + sub_offset, PASS_FAIL_UNIT_COL, None)
 
         # Log Data — VectorCAST log file path 추정.
         log_path = ""
