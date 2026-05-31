@@ -58,6 +58,8 @@
         "default_approver": "CH In"
       },
       "_comment_resolver_keys": "라운드 89 — swut_meta_resolver는 top-level swuds_docx_path / swuts_docx_path / c_source_root를 읽음 (iso26262_docs nested는 문서용). ASIL source = SwUDS docx (c_source_root 미사용). doc_filenames는 출력 파일명 패턴 ({version}/{date} 치환).",
+      "_comment_sutr_spec_based": "라운드 91 — true면 SUTR Test Log를 SwUTS spec 시트 통째 복사(Input/Expected 보존) + VectorCAST Actual/Pass-Fail 추가 신규 경로(swut_sutr_spec_builder)로 빌드. 회사 감사본 268열 '3.Test Log' 와이드 양식. spec은 top-level swuts_docx_path 사용. false/미설정이면 기존 build_sutr(표준 38열 양식).",
+      "sutr_spec_based": true,
       "c_source_root": "",
       "swuds_docx_path": "U:\\연구소\\1000 프로젝트\\1200 자동차\\0002 A Cappella\\02 ADOS\\04 KJPDS02\\02.설계(연구소)\\01.설계 및 검증\\08.소프트웨어\\04.SW 단위 설계\\01.SwUDS\\(KJPDS02_SwUDS) Software Unit Design Specification_v2.08_260406.docx",
       "swuts_docx_path": "U:\\연구소\\1000 프로젝트\\1200 자동차\\0002 A Cappella\\02 ADOS\\04 KJPDS02\\02.설계(연구소)\\01.설계 및 검증\\08.소프트웨어\\09.SW 단위 테스트\\01.Test Specification\\01.SwUTS\\(KJPDS02_SwUTS) Software Unit Test Specification_v1.01_251205_R.xlsm",

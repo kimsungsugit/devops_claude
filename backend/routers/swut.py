@@ -350,6 +350,70 @@ def _do_coverage_build(req: SwUTBuildRequest) -> Response:
     )
 
 
+def _is_sutr_spec_based(req: SwUTBuildRequest, cfg: dict[str, Any]) -> bool:
+    """라운드 91 — spec-based SUTR 경로 사용 여부.
+
+    config `sutr_spec_based: true` 가 명시되면 우선. 미명시 시 False
+    (backward-compat — 기존 build_sutr 표준 양식 유지).
+
+    spec xlsm path는 swut_meta_resolver.resolve_swuts_path 로 별도 해결.
+    """
+    return bool(cfg.get("sutr_spec_based", False))
+
+
+def _do_sutr_build_spec_based(
+    req: SwUTBuildRequest, session, meta, cfg: dict[str, Any],
+) -> Response:
+    """라운드 91 — SwUTS spec 시트 기반 SUTR '3.Test Log' 빌드 (회사 감사본 양식).
+
+    SwUTS spec xlsm 을 베이스로 복사 (Input/Expected 보존) + VectorCAST Actual/
+    Pass-Fail/Log 추가. 기존 build_sutr (표준 38열 양식)와 분리된 신규 경로.
+    """
+    from backend.services.swut_meta_resolver import resolve_swuts_path
+    from backend.services.swut_sutr_spec_builder import build_sutr_from_spec
+
+    spec_path = resolve_swuts_path(req, req.project_id)
+    if not spec_path:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "spec-based SUTR 빌드에 SwUTS spec xlsm path가 필요합니다 "
+                "(config swuts_docx_path 또는 req.swuts_docx_path)"
+            ),
+        )
+    resolver = get_resolver()
+    try:
+        spec_bytes = resolver.read_bytes(spec_path)
+    except (FileNotFoundError, PermissionError, OSError) as e:
+        raise HTTPException(
+            status_code=400,
+            detail=f"SwUTS spec xlsm 읽기 실패: {type(e).__name__}: {e}",
+        ) from e
+
+    # aggregate에서 ASIL 매핑 추출 (anchor 시각 강조용).
+    from backend.services.swut_input_adapter import aggregate_session
+    agg = aggregate_session(session)
+    function_asil_map = agg.get("function_asil_map") or {}
+
+    result = build_sutr_from_spec(
+        session, meta, spec_bytes,
+        function_asil_map=function_asil_map,
+    )
+    if not result.ok:
+        raise HTTPException(
+            status_code=500,
+            detail=f"spec-based SUTR 빌드 실패: {'; '.join(result.warnings[:3])}",
+        )
+    return _build_result_to_response(
+        content_io=result.xlsm_io,
+        filename=result.filename,
+        summary=result.summary,
+        warnings=result.warnings,
+        incomplete_sheets=result.incomplete_sheets,
+        media_type="application/vnd.ms-excel.sheet.macroenabled.12",
+    )
+
+
 def _do_sutr_build(req: SwUTBuildRequest) -> Response:
     resolver = get_resolver()
     # 56차 T308 — log_folder UNC + Local 모드 pre-flight check
@@ -373,9 +437,17 @@ def _do_sutr_build(req: SwUTBuildRequest) -> Response:
     )
     # 30차 W21: function 별 ASIL 매핑 — Coverage builder와 대칭.
     _apply_function_asil_map(req, session)
+    meta = _build_sutr_meta(req)
+
+    # 라운드 91 — spec-based SUTR 분기. config `sutr_spec_based: true` (또는 SwUTS
+    # spec xlsm path 보유)면 회사 감사본 양식 (spec 시트 통째 복사 + Actual/Pass-Fail
+    # 추가) 신규 경로 사용. 기존 build_sutr (표준 38열 함수블록 양식)는 보존.
+    _cfg = _load_meta_from_config(req.project_id)
+    if _is_sutr_spec_based(req, _cfg):
+        return _do_sutr_build_spec_based(req, session, meta, _cfg)
+
     # 51차 — SUTR 양식 전용 path 사용 (config fallback: sutr_template).
     template_bytes = _read_template_bytes(req.sutr_template_path, req.project_id, "sutr")
-    meta = _build_sutr_meta(req)
     # 17차 T172: SwUDS docx 처리 — Coverage builder와 대칭.
     swuds_fn_ids = _resolve_swuds_function_ids(req)
     # 60차 F6-A: SwUTS xlsm/docx → spec data dict (Test Log B/C/D + Precondition stamp).
