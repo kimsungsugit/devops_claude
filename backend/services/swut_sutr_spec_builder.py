@@ -7,16 +7,28 @@ Actual Result / Pass-Fail / Log Data 섹션 추가다.
 기존 ``swut_sutr_aggregator.build_sutr`` (표준 Version3 좁은 38열 양식 + 함수별 블록
 재구성)와는 양식이 근본적으로 다르므로 **신규 경로**로 분리한다.
 
-## 핵심 전략 — spec 시트 template-copy
+## 핵심 전략 — 표준 SUTR 템플릿 베이스 + spec 시트 이식 (라운드 92 전환)
 
-1. SwUTS spec xlsm을 keep_vba로 로드.
-2. '2.SW Unit Test Spec' 시트를 **그대로 활용** (Input/Expected/TC_ID/Unit/Method/
-   Generation/iteration 전부 보존 — 검증/수정 금지) + 시트명을 '3.Test Log'로 rename.
-3. 레퍼런스 SUTR 레이아웃에 맞춰 Actual/Pass-Fail/Log 섹션의 **헤더(r3 병합 + r4
-   서브헤더)** 를 프로그램으로 추가.
-4. spec anchor 행(B=Index digit, C=TC_ID, D=Unit)을 스캔 → 함수 블록 식별 →
-   VectorCAST 로그 매칭으로 Actual 값 / iteration Pass-Fail(JF) / 함수 Total(JG) /
-   Log Data(JH) 채움.
+라운드 91은 SwUTS spec xlsm 자체를 베이스로 복사하여 출력 시트가 spec 구성
+(Cover / History / Introduction / 1.Test Environment / 3.Test Log)으로 잘못 나왔다.
+레퍼런스 SUTR 구성은 Cover / History / 1.Test Summary / 2.Deviation / 3.Test Log 이다.
+
+라운드 92는 베이스를 **표준 SUTR 템플릿** (회사 ★개발템플릿 Version3 `(XXXX_SwUTR)
+...v0.10`) 으로 전환한다:
+
+1. 표준 SUTR 템플릿 xlsm 을 keep_vba 로 로드 (Cover / History / 1.Test Summary /
+   2.Deviation / 3.Test Result(좁은 38열) 보유).
+2. Cover / 1.Test Summary / 2.Deviation / History 를 기존 표준 writer
+   (`swut_sutr_aggregator._write_cover` / `_write_test_summary` / `_write_deviation`
+   + `_write_history_sheet`)로 채움 — meta + TC 카운트(Total/Tested/Passed/Failed/
+   not-exec) + Requirements coverage.
+3. 표준의 좁은 '3.Test Result' 시트를 **제거**.
+4. SwUTS spec '2.SW Unit Test Spec' (와이드 268열) 시트를 표준 템플릿 wb 에
+   **크로스-워크북 풀 카피** (`copy_sheet_across_workbooks` — value/style/merge/
+   column width/row height 보존) 하여 '3.Test Log' 로 이식.
+5. 레퍼런스 SUTR 레이아웃에 맞춰 이식 시트에 Actual/Pass-Fail/Log 섹션의 **헤더(r3
+   병합 + r4 서브헤더)** 추가 + anchor 스캔 → VectorCAST 매칭으로 Actual 값 /
+   iteration Pass-Fail(JF) / 함수 Total(JG) / Log Data(JH) 채움 (라운드 91 로직 유지).
 
 ## 레이아웃 (KJPDS02 v1.01 레퍼런스 실측, max_col=268)
 
@@ -66,6 +78,7 @@ except ImportError:  # pragma: no cover
 
 from backend.services.design_tokens import USER_INPUT_FILL_RGB
 from backend.services.excel_template_utils import (
+    copy_sheet_across_workbooks,
     has_vba_macros,
     inspect_vba_refs,
     mark_asil_a_function,
@@ -301,6 +314,7 @@ def _fill_actual_and_result(
     stats = {
         "functions": 0, "iterations": 0,
         "matched_fn": 0, "unmatched_fn": 0,
+        "fn_pass": 0, "fn_fail": 0, "fn_na": 0,
         "iter_pass": 0, "iter_fail": 0, "iter_na": 0,
         "actual_from_expected": 0, "actual_from_vcast": 0, "actual_missing": 0,
     }
@@ -331,6 +345,7 @@ def _fill_actual_and_result(
                 stats["iter_na"] += 1
                 stats["iterations"] += 1
             safe_write(ws, anchor, COL_PASS_TOTAL, "N/A")
+            stats["fn_na"] += 1
             _apply_asil_mark(ws, anchor, num, blk, asil_map)
             continue
 
@@ -385,6 +400,12 @@ def _fill_actual_and_result(
                 )
 
         total_str = "Pass" if (any_exec and all_pass) else ("Fail" if any_exec else "N/A")
+        if total_str == "Pass":
+            stats["fn_pass"] += 1
+        elif total_str == "Fail":
+            stats["fn_fail"] += 1
+        else:
+            stats["fn_na"] += 1
         safe_write(ws, anchor, COL_PASS_TOTAL, total_str)
         # 라운드 91 fix — 레퍼런스 감사본은 anchor 행 JF(Pass/Fail)에도 함수 결과를
         # 표기(첫 iteration 겸용 양식). anchor JF=total로 정합 (이전: anchor JF 공란).
@@ -454,8 +475,13 @@ def _mark_cell(ws, row: int, col: int) -> None:
         pass
 
 
-def _write_cover_meta(wb: Workbook, meta: SutrBuildMeta, out_warnings: list[str] | None) -> None:
-    """spec에서 가져온 Cover 시트에 SUTR meta 갱신 (best-effort label 매칭)."""
+def _write_cover_meta_legacy(
+    wb: Workbook, meta: SutrBuildMeta, out_warnings: list[str] | None,
+) -> None:
+    """라운드 91 호환 — spec wb 베이스 Cover 시트 best-effort label stamp.
+
+    표준 SUTR 템플릿 미제공(template_xlsm_bytes=None) fallback 경로 전용.
+    """
     cover = next((wb[n] for n in wb.sheetnames if n.lower() == "cover"), None)
     if cover is None:
         if out_warnings is not None:
@@ -471,6 +497,124 @@ def _write_cover_meta(wb: Workbook, meta: SutrBuildMeta, out_warnings: list[str]
         write_value_after_label(cover, "Approver", meta.approver)
 
 
+def _fill_standard_aux_sheets(
+    wb: Workbook,
+    meta: SutrBuildMeta,
+    session: SwUTSession,
+    agg: dict[str, Any],
+    summary: dict[str, Any],
+    deviation_cases: list[Any] | None,
+    out_warnings: list[str],
+) -> None:
+    """표준 SUTR 템플릿의 Cover / 1.Test Summary / 2.Deviation / History 채움 (R92).
+
+    표준 ``swut_sutr_aggregator`` writer 재사용 — `build_sutr` (표준 양식) 와 동일
+    로직으로 meta + TC 카운트 + Requirements coverage 를 stamp. 3.Test Log 는 spec
+    시트 이식 (별도 처리) 이므로 여기서 건드리지 않는다.
+    """
+    from backend.services.excel_template_utils import build_release_history_row
+    from backend.services.swut_coverage_aggregator import _write_history_sheet
+    from backend.services.swut_sutr_aggregator import (
+        _write_cover,
+        _write_deviation,
+        _write_test_summary,
+    )
+
+    sheet_names = wb.sheetnames
+
+    # layout=None — 표준 v3.01 양식의 라벨 기반 find_kv_row 경로 사용. _write_test_summary
+    # 의 TC stats(layout 의존) 분기는 layout None 시 skip되고, 함수 단위 카운트는
+    # _fill_test_summary_counts 가 별도로 stamp (레퍼런스 감사본 정합).
+
+    cover_ws = next((wb[n] for n in sheet_names if n.lower() == "cover"), None)
+    if cover_ws is None:
+        out_warnings.append("[spec-sutr] Cover 시트 미발견")
+    else:
+        _write_cover(cover_ws, meta, out_warnings=out_warnings)
+
+    ts_ws = next((wb[n] for n in sheet_names if "test summary" in n.lower()), None)
+    if ts_ws is None:
+        out_warnings.append("[spec-sutr] 1.Test Summary 시트 미발견")
+    else:
+        _write_test_summary(
+            ts_ws, meta, agg, out_warnings=out_warnings,
+            layout=None, summary=summary,
+        )
+
+    dev_ws = next((wb[n] for n in sheet_names if "deviation" in n.lower()), None)
+    if dev_ws is None:
+        out_warnings.append("[spec-sutr] 2.Deviation 시트 미발견")
+    elif deviation_cases:
+        n = _write_deviation(dev_ws, deviation_cases, out_warnings=out_warnings)
+        summary["deviation_cases_written"] = n
+
+    hist_ws = next((wb[n] for n in sheet_names if n.lower() == "history"), None)
+    if hist_ws is not None:
+        release_rows = build_release_history_row(
+            meta, doc_kind="SwUT SUTR (spec-based)", out_warnings=out_warnings,
+        )
+        n_h = _write_history_sheet(hist_ws, release_rows, out_warnings=out_warnings)
+        summary["history_rows_written"] = n_h
+
+
+def _fill_test_summary_counts(
+    wb: Workbook, summary: dict[str, Any], fill_stats: dict[str, int],
+    out_warnings: list[str],
+) -> None:
+    """1.Test Summary TC 카운트를 spec 매칭 결과로 보정 (R92).
+
+    표준 `_write_test_summary` 는 session aggregate (VectorCAST TC 단위) 기준 카운트를
+    stamp 한다. 레퍼런스 감사본 1.Test Summary 의 카운트는 **함수 단위** (Total Number
+    of TCs = 함수 570) 이므로, spec 함수 블록 매칭 결과로 r17/r18 영역을 덮어쓴다.
+
+    레퍼런스 실측: Total=570 / Tested=569 / Passed=569 / Failed=0 / not-exec=1.
+    = spec_function_blocks / matched_fn / iter pass·fail 기반 산출.
+    """
+    ts_ws = next((wb[n] for n in wb.sheetnames if "test summary" in n.lower()), None)
+    if ts_ws is None:
+        return
+    from backend.services.excel_template_utils import find_kv_row
+
+    total = fill_stats.get("functions", 0)
+    # 함수 단위 카운트 (레퍼런스 감사본 1.Test Summary 기준):
+    #   not_exec = Total 'N/A' 함수 (미매칭 + 매칭됐으나 실행 iteration 0).
+    #   passed = Total 'Pass', failed = Total 'Fail', tested = passed + failed.
+    not_exec = fill_stats.get("fn_na", 0)
+    passed = fill_stats.get("fn_pass", 0)
+    failed = fill_stats.get("fn_fail", 0)
+    tested = passed + failed
+
+    pos = find_kv_row(ts_ws, "Total Number of TCs", max_row=30)
+    if pos is None:
+        out_warnings.append(
+            "[spec-sutr] 1.Test Summary 'Total Number of TCs' 헤더 미발견 — TC 카운트 stamp skip"
+        )
+        return
+    data_row = pos[0] + 1
+    col = pos[1]
+    safe_write(ts_ws, data_row, col, total)
+    safe_write(ts_ws, data_row, col + 1, tested)
+    safe_write(ts_ws, data_row, col + 2, passed)
+    safe_write(ts_ws, data_row, col + 3, failed)
+    safe_write(ts_ws, data_row, col + 4, not_exec)
+    summary["test_summary_tc_total"] = total
+    summary["test_summary_tested"] = tested
+    summary["test_summary_passed"] = passed
+    summary["test_summary_failed"] = failed
+    summary["test_summary_not_executed"] = not_exec
+
+    # Requirements/Design Coverage (SWUDS row) — 함수 수 기반.
+    req_pos = find_kv_row(ts_ws, "System Design", max_row=30)
+    if req_pos is None:
+        req_pos = find_kv_row(ts_ws, "SWUDS", max_row=30)
+    if req_pos is not None:
+        rr, rc = req_pos
+        safe_write(ts_ws, rr, rc + 1, total)     # can be tested
+        safe_write(ts_ws, rr, rc + 2, tested)    # tested
+        safe_write(ts_ws, rr, rc + 3, not_exec)  # not tested
+        summary["requirements_swuds_total"] = total
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -480,18 +624,32 @@ def build_sutr_from_spec(
     meta: SutrBuildMeta,
     spec_xlsm_bytes: bytes,
     *,
+    template_xlsm_bytes: bytes | None = None,
     function_asil_map: dict[str, str] | None = None,
+    deviation_cases: list[Any] | None = None,
 ) -> SutrBuildResult:
-    """SwUTS spec 시트 기반 SUTR '3.Test Log' 생성 (라운드 91, 회사 감사본 양식).
+    """SUTR 생성 — 표준 SUTR 템플릿 베이스 + SwUTS spec '3.Test Log' 이식 (라운드 92).
+
+    라운드 91은 spec wb 자체를 베이스로 써 출력 시트 구성이 틀렸다 (Introduction /
+    1.Test Environment 포함, 1.Test Summary / 2.Deviation 누락). 라운드 92는 표준 SUTR
+    템플릿을 베이스로 하고, spec '2.SW Unit Test Spec' (와이드 268열) 시트만 '3.Test
+    Log'로 이식하여 레퍼런스 시트 구성 [Cover / History / 1.Test Summary / 2.Deviation
+    / 3.Test Log]을 맞춘다.
 
     Args:
         session: collect_swut_session 출력 (VectorCAST Actual/Pass-Fail source).
-        meta: 빌드 메타 (Cover stamp).
-        spec_xlsm_bytes: SwUTS spec xlsm bytes (베이스 — Input/Expected/TC 보존).
+        meta: 빌드 메타 (Cover / Test Summary / History stamp).
+        spec_xlsm_bytes: SwUTS spec xlsm bytes ('2.SW Unit Test Spec' — Input/Expected/
+            TC 보존, '3.Test Log'로 이식).
+        template_xlsm_bytes: 표준 SUTR 템플릿 xlsm bytes (베이스 — Cover/History/
+            1.Test Summary/2.Deviation/3.Test Result 보유). None이면 backward-compat
+            으로 spec wb 베이스 (라운드 91 동작) — audit 비권장, warning 누적.
         function_asil_map: SwUFn_NNNN → ASIL 등급 (옵션, anchor 시각 강조).
+        deviation_cases: 2.Deviation 시트 stamp용 (옵션).
 
     Returns:
-        SutrBuildResult — xlsm_io에 spec 복사본 + Actual/Pass-Fail/Log 추가.
+        SutrBuildResult — xlsm_io에 표준 템플릿 + spec 이식 '3.Test Log' + Actual/
+        Pass-Fail/Log + Cover/Test Summary/Deviation/History stamp.
     """
     if openpyxl is None:
         raise RuntimeError("openpyxl is required for spec-based SUTR builder")
@@ -510,48 +668,74 @@ def build_sutr_from_spec(
     warnings: list[str] = extract_warnings_from_session(session)
     asil_map = function_asil_map or {}
 
-    template_has_vba = has_vba_macros(spec_xlsm_bytes)
-    if template_has_vba:
+    # VBA 검사 — spec + (있으면) 표준 템플릿 둘 다 keep_vba.
+    spec_has_vba = has_vba_macros(spec_xlsm_bytes)
+    template_has_vba = spec_has_vba
+    if template_xlsm_bytes is not None:
+        validate_xlsx_template_bytes(template_xlsm_bytes, label="표준 SUTR 템플릿 xlsm")
+        template_has_vba = has_vba_macros(template_xlsm_bytes)
+    if template_has_vba or spec_has_vba:
         warnings.append(
             "VBA macro execution NOT verified — open output xlsm in Excel and verify "
             "macros before submitting as evidence"
         )
-        refs = inspect_vba_refs(spec_xlsm_bytes)
+        refs = inspect_vba_refs(template_xlsm_bytes or spec_xlsm_bytes)
         if refs:
             warnings.append(
                 f"VBA stale ref 위험 패턴 — {refs} (셀/시트 이동 시 매크로 깨질 위험)"
             )
 
-    wb: Workbook = openpyxl.load_workbook(
+    # spec wb 로드 (Test Log source).
+    spec_wb: Workbook = openpyxl.load_workbook(
         io.BytesIO(spec_xlsm_bytes), keep_vba=True, data_only=False,
     )
-
-    spec_ws, spec_name = _find_spec_sheet(wb)
+    spec_ws, spec_name = _find_spec_sheet(spec_wb)
     if spec_ws is None:
         warnings.append("[spec-sutr] SwUTS spec 시트 미발견 — 빌드 불가")
+        spec_wb.close()
         return SutrBuildResult(ok=False, warnings=warnings)
 
-    # 시트명을 '3.Test Log'로 변경.
-    if spec_name != LOG_SHEET_NAME and LOG_SHEET_NAME not in wb.sheetnames:
-        spec_ws.title = LOG_SHEET_NAME
+    agg = aggregate_session(session)
+
+    if template_xlsm_bytes is not None:
+        # 라운드 92 — 표준 SUTR 템플릿을 베이스로 로드.
+        wb: Workbook = openpyxl.load_workbook(
+            io.BytesIO(template_xlsm_bytes), keep_vba=True, data_only=False,
+        )
+        # 표준의 좁은 '3.Test Result' 시트 제거.
+        for nm in list(wb.sheetnames):
+            low = nm.lower()
+            if "test result" in low or low == LOG_SHEET_NAME.lower():
+                del wb[nm]
+        # spec 와이드 시트를 '3.Test Log'로 풀 카피 이식 (끝에 추가).
+        log_ws = copy_sheet_across_workbooks(
+            spec_ws, wb, new_title=LOG_SHEET_NAME, insert_index=None,
+        )
+    else:
+        # backward-compat (라운드 91) — spec wb 자체 베이스. audit 비권장.
+        warnings.append(
+            "[spec-sutr] 표준 SUTR 템플릿 미제공 — spec wb 베이스 fallback (라운드 91 호환). "
+            "시트 구성이 레퍼런스(Cover/History/1.Test Summary/2.Deviation/3.Test Log)와 "
+            "다를 수 있음 — config sutr_template 등록 권장"
+        )
+        wb = spec_wb
+        if spec_name != LOG_SHEET_NAME and LOG_SHEET_NAME not in wb.sheetnames:
+            spec_ws.title = LOG_SHEET_NAME
+        log_ws = spec_ws
 
     # 헤더 추가 (Actual/Pass-Fail/Log).
-    _write_log_headers(spec_ws, warnings)
+    _write_log_headers(log_ws, warnings)
 
-    # anchor 스캔 → 함수 블록.
-    blocks = _scan_spec_blocks(spec_ws)
+    # anchor 스캔 → 함수 블록 (이식된 '3.Test Log' 시트 기준).
+    blocks = _scan_spec_blocks(log_ws)
     fn_iter_map = _build_fn_iteration_map(session)
 
     fill_stats = _fill_actual_and_result(
-        spec_ws, blocks, fn_iter_map, asil_map, warnings,
+        log_ws, blocks, fn_iter_map, asil_map, warnings,
     )
 
-    # Cover meta 갱신.
-    _write_cover_meta(wb, meta, warnings)
-
-    agg = aggregate_session(session)
     summary = {
-        "builder": "spec-based",
+        "builder": "spec-based-r92" if template_xlsm_bytes is not None else "spec-based-r91",
         "spec_sheet": spec_name,
         "spec_sha256_12": spec_sha256_12,
         "build_timestamp": meta.build_timestamp,
@@ -563,6 +747,9 @@ def build_sutr_from_spec(
         "spec_function_blocks": fill_stats["functions"],
         "matched_functions": fill_stats["matched_fn"],
         "unmatched_functions": fill_stats["unmatched_fn"],
+        "fn_pass": fill_stats["fn_pass"],
+        "fn_fail": fill_stats["fn_fail"],
+        "fn_na": fill_stats["fn_na"],
         "iteration_rows": fill_stats["iterations"],
         "iter_pass": fill_stats["iter_pass"],
         "iter_fail": fill_stats["iter_fail"],
@@ -572,9 +759,29 @@ def build_sutr_from_spec(
         "actual_missing": fill_stats["actual_missing"],
     }
 
+    # 보조 시트 채움 (Cover / 1.Test Summary / 2.Deviation / History).
+    if template_xlsm_bytes is not None:
+        _fill_standard_aux_sheets(
+            wb, meta, session, agg, summary, deviation_cases, warnings,
+        )
+        # 1.Test Summary TC 카운트를 함수 단위로 보정 (레퍼런스 정합).
+        _fill_test_summary_counts(wb, summary, fill_stats, warnings)
+    else:
+        # backward-compat — 라운드 91 Cover label stamp만.
+        _write_cover_meta_legacy(wb, meta, warnings)
+
+    # 시트 순서 정리 — 3.Test Log가 2.Deviation 뒤에 오도록 (표준 베이스만).
+    if template_xlsm_bytes is not None and LOG_SHEET_NAME in wb.sheetnames:
+        names = [n for n in wb.sheetnames if n != "AuditLog"]
+        # 표준 순서: Cover, History, 1.Test Summary, 2.Deviation, 3.Test Log
+        # copy_sheet가 끝에 넣었으므로 이미 마지막 (AuditLog 미존재 시) — 명시 정렬.
+        summary["output_sheet_order"] = names
+
     out = io.BytesIO()
     wb.save(out)
     out.seek(0)
+    if wb is not spec_wb:
+        spec_wb.close()
     wb.close()
 
     if meta.doc_filename_pattern:
@@ -604,4 +811,5 @@ __all__ = [
     "COL_PASS_FAIL",
     "COL_PASS_TOTAL",
     "COL_LOG_DATA",
+    "SPEC_SHEET_RE",
 ]

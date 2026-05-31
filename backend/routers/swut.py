@@ -390,6 +390,21 @@ def _do_sutr_build_spec_based(
             detail=f"SwUTS spec xlsm 읽기 실패: {type(e).__name__}: {e}",
         ) from e
 
+    # 라운드 92 — 표준 SUTR 템플릿을 베이스로 로드 (Cover/History/1.Test Summary/
+    # 2.Deviation 보유). spec 와이드 시트만 '3.Test Log'로 이식하여 레퍼런스 시트
+    # 구성 정합. 표준 템플릿 미해결 시 spec wb 베이스 fallback (라운드 91 호환).
+    template_bytes: bytes | None = None
+    try:
+        template_bytes = _read_template_bytes(
+            req.sutr_template_path, req.project_id, "sutr",
+        )
+    except HTTPException as te:
+        # 표준 템플릿 미지정/미발견 — fallback 경로 (warning은 builder가 누적).
+        _logger.warning(
+            "spec-based SUTR 표준 템플릿 미해결 — spec wb 베이스 fallback: %s",
+            te.detail,
+        )
+
     # aggregate에서 ASIL 매핑 추출 (anchor 시각 강조용).
     from backend.services.swut_input_adapter import aggregate_session
     agg = aggregate_session(session)
@@ -397,7 +412,9 @@ def _do_sutr_build_spec_based(
 
     result = build_sutr_from_spec(
         session, meta, spec_bytes,
+        template_xlsm_bytes=template_bytes,
         function_asil_map=function_asil_map,
+        deviation_cases=req.deviation_cases,
     )
     if not result.ok:
         raise HTTPException(

@@ -265,3 +265,183 @@ def test_is_sutr_spec_based_flag():
     assert _is_sutr_spec_based(_Req(), {"sutr_spec_based": False}) is False
     assert _is_sutr_spec_based(_Req(), {}) is False  # 미설정 → backward-compat
 
+
+# ---------------------------------------------------------------------------
+# 라운드 92 — 표준 SUTR 템플릿 베이스 + spec 시트 이식
+# ---------------------------------------------------------------------------
+
+def _make_standard_template_bytes() -> bytes:
+    """합성 표준 SUTR 템플릿 (Cover/History/1.Test Summary/2.Deviation/3.Test Result)."""
+    wb = openpyxl.Workbook()
+    cover = wb.active
+    cover.title = "Cover"
+    cover.cell(3, 2).value = "Project"
+    cover.cell(4, 2).value = "ASIL Level"
+    cover.cell(5, 2).value = "Version"
+    cover.cell(6, 2).value = "Test Date"
+    cover.cell(7, 2).value = "Author"
+    cover.cell(8, 2).value = "Approver"
+
+    hist = wb.create_sheet("History")
+    hist.cell(3, 2).value = "No."
+    hist.cell(3, 3).value = "Date"
+    hist.cell(3, 4).value = "Version"
+    hist.cell(3, 5).value = "Description"
+    hist.cell(3, 6).value = "Author"
+
+    ts = wb.create_sheet("1.Test Summary")
+    ts.cell(4, 2).value = "Project Name"
+    ts.cell(5, 2).value = "SW Version"
+    ts.cell(6, 2).value = "HW Version"
+    ts.cell(7, 2).value = "Test Date"
+    ts.cell(8, 2).value = "Test Engineer"
+    ts.cell(17, 2).value = "Total Number of TCs"
+    ts.cell(17, 3).value = "Number of TCs Tested"
+    ts.cell(17, 4).value = "Number of TCs Passed"
+    ts.cell(17, 5).value = "Number of TCs Failed"
+    ts.cell(17, 6).value = "Number of TCs not executed"
+    ts.cell(21, 2).value = "Source"
+    ts.cell(22, 2).value = "System Design"
+
+    dev = wb.create_sheet("2.Deviation")
+    dev.cell(4, 2).value = "Test Case ID"
+    dev.cell(4, 3).value = "Issue"
+    dev.cell(4, 4).value = "Deviation"
+    dev.cell(4, 5).value = "Status"
+
+    res = wb.create_sheet("3.Test Result")
+    res.cell(1, 1).value = "Narrow 38-col result"
+    res.cell(5, 38).value = "edge"
+
+    bio = io.BytesIO()
+    wb.save(bio)
+    return bio.getvalue()
+
+
+def test_r92_template_base_sheet_composition():
+    """R92 — 표준 템플릿 베이스 시 시트 구성이 레퍼런스 정합.
+
+    [Cover, History, 1.Test Summary, 2.Deviation, 3.Test Log] (+AuditLog)
+    Introduction / 1.Test Environment / 3.Test Result 없음.
+    """
+    spec = _make_spec_bytes([
+        ("SwUTC_0101", "main", [("0x0", "0x1"), ("0x2", "0x3")]),
+        ("SwUTC_0102", "foo", [("a", "b")]),
+    ])
+    tmpl = _make_standard_template_bytes()
+    sess = _make_session({"SwUFn_0101": [True, True], "SwUFn_0102": [False]})
+    res = build_sutr_from_spec(
+        sess, _meta(), spec, template_xlsm_bytes=tmpl, function_asil_map={},
+    )
+    assert res.ok
+    wb = openpyxl.load_workbook(res.xlsm_io, data_only=False)
+    names = wb.sheetnames
+    # 좁은 3.Test Result 제거됨
+    assert "3.Test Result" not in names
+    # 레퍼런스 4 시트 + 3.Test Log 존재
+    for must in ("Cover", "History", "1.Test Summary", "2.Deviation", "3.Test Log"):
+        assert must in names, f"{must} 누락 (시트: {names})"
+    # spec 전용 시트 미존재
+    assert not any("introduction" in n.lower() for n in names)
+    assert not any("environment" in n.lower() for n in names)
+
+
+def test_r92_test_log_wide_sheet_grafted():
+    """R92 — 이식된 3.Test Log가 spec 와이드 양식(value/merge) 보존."""
+    spec = _make_spec_bytes([
+        ("SwUTC_0101", "main", [("0x0", "0x1"), ("0x2", "0x3")]),
+    ])
+    tmpl = _make_standard_template_bytes()
+    sess = _make_session({"SwUFn_0101": [True, True]})
+    res = build_sutr_from_spec(
+        sess, _meta(), spec, template_xlsm_bytes=tmpl, function_asil_map={},
+    )
+    wb = openpyxl.load_workbook(res.xlsm_io, data_only=False)
+    ws = wb["3.Test Log"]
+    # spec 보존 — Input/Expected
+    assert ws.cell(6, 8).value == "0x0"
+    assert ws.cell(6, 58).value == "0x1"
+    # R91 fill 로직 적용 — Actual/Pass-Fail
+    assert ws.cell(3, COL_ACTUAL_START).value == "Actual Result"
+    assert ws.cell(6, COL_ACTUAL_START).value == "0x1"  # Pass → Expected 복제
+    assert ws.cell(6, COL_PASS_FAIL).value == "Pass"
+    assert ws.cell(5, COL_PASS_TOTAL).value == "Pass"
+
+
+def test_r92_test_summary_function_counts():
+    """R92 — 1.Test Summary TC 카운트가 함수 단위(레퍼런스 정합)로 stamp."""
+    spec = _make_spec_bytes([
+        ("SwUTC_0101", "main", [("a", "b")]),       # pass fn
+        ("SwUTC_0102", "foo", [("c", "d")]),         # fail fn
+        ("SwUTC_0103", "bar", [("e", "f")]),         # na fn (vcast 미실행)
+    ])
+    tmpl = _make_standard_template_bytes()
+    sess = _make_session({"SwUFn_0101": [True], "SwUFn_0102": [False]})
+    res = build_sutr_from_spec(
+        sess, _meta(), spec, template_xlsm_bytes=tmpl, function_asil_map={},
+    )
+    assert res.summary["test_summary_tc_total"] == 3
+    assert res.summary["test_summary_passed"] == 1
+    assert res.summary["test_summary_failed"] == 1
+    assert res.summary["test_summary_not_executed"] == 1
+    assert res.summary["test_summary_tested"] == 2
+    wb = openpyxl.load_workbook(res.xlsm_io)
+    ts = wb["1.Test Summary"]
+    assert ts.cell(18, 2).value == 3   # Total
+    assert ts.cell(18, 3).value == 2   # Tested
+    assert ts.cell(18, 4).value == 1   # Passed
+    assert ts.cell(18, 5).value == 1   # Failed
+    assert ts.cell(18, 6).value == 1   # not executed
+
+
+def test_r92_cover_meta_stamped():
+    """R92 — Cover 시트 meta(Project/Version/Date) stamp."""
+    spec = _make_spec_bytes([("SwUTC_0101", "main", [("a", "b")])])
+    tmpl = _make_standard_template_bytes()
+    sess = _make_session({"SwUFn_0101": [True]})
+    res = build_sutr_from_spec(
+        sess, _meta(), spec, template_xlsm_bytes=tmpl, function_asil_map={},
+    )
+    wb = openpyxl.load_workbook(res.xlsm_io)
+    cover = wb["Cover"]
+    # 표준 _write_cover 가 stamp 하는 라벨: Project / ASIL Level / Version.
+    assert cover.cell(3, 3).value == "KJPDS02"          # Project value (C열)
+    assert cover.cell(4, 3).value == "ASIL A"           # ASIL Level
+    assert cover.cell(5, 3).value == "v1.01"            # Version
+    # Test Date 는 1.Test Summary 에 stamp.
+    ts = wb["1.Test Summary"]
+    assert ts.cell(7, 3).value == "2025-12-05"          # Test Date (Summary)
+
+
+def test_copy_sheet_across_workbooks_fidelity():
+    """크로스-워크북 시트 복사 helper — value/merge/width/height 보존."""
+    from backend.services.excel_template_utils import copy_sheet_across_workbooks
+
+    src_wb = openpyxl.Workbook()
+    src = src_wb.active
+    src.title = "Src"
+    src.cell(1, 1).value = "hello"
+    src.cell(2, 3).value = 42
+    src.merge_cells("A5:C5")
+    src.column_dimensions["B"].width = 33.0
+    src.row_dimensions[4].height = 22.0
+
+    dst_wb = openpyxl.Workbook()
+    dst = copy_sheet_across_workbooks(src, dst_wb, new_title="3.Test Log")
+    assert "3.Test Log" in dst_wb.sheetnames
+    assert dst.cell(1, 1).value == "hello"
+    assert dst.cell(2, 3).value == 42
+    assert "A5:C5" in [str(m) for m in dst.merged_cells.ranges]
+    assert dst.column_dimensions["B"].width == 33.0
+    assert dst.row_dimensions[4].height == 22.0
+
+
+def test_r91_fallback_when_no_template():
+    """R92 — template None이면 R91 fallback (spec wb 베이스) + warning."""
+    spec = _make_spec_bytes([("SwUTC_0101", "main", [("a", "b")])])
+    sess = _make_session({"SwUFn_0101": [True]})
+    res = build_sutr_from_spec(sess, _meta(), spec, function_asil_map={})
+    assert res.ok
+    assert res.summary["builder"] == "spec-based-r91"
+    assert any("표준 SUTR 템플릿 미제공" in w for w in res.warnings)
+

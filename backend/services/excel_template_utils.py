@@ -1003,3 +1003,107 @@ def short_date(s: str) -> str:
         return s.replace("-", "").replace("/", "")[:6]
     yy = m.group(1)[-2:]
     return f"{yy}{int(m.group(2)):02d}{int(m.group(3)):02d}"
+
+
+def copy_sheet_across_workbooks(
+    src_ws: Any,
+    dst_wb: Any,
+    *,
+    new_title: str,
+    insert_index: int | None = None,
+) -> Any:
+    """src 워크북의 시트를 dst 워크북에 풀 카피 (라운드 92).
+
+    openpyxl 은 워크북 간 ``copy_worksheet`` 를 native 지원하지 않으므로 cell value +
+    ``cell._style`` (StyleArray 복제) + merged_cells + column_dimensions +
+    row_dimensions + sheet_view/dimension 을 수동 복제한다. 회사 감사본 SUTR
+    '3.Test Log' (4340r × 268c, 병합/폭/높이 보존)를 표준 SUTR 템플릿 wb 에 이식하는
+    용도. R91 spec wb 베이스 → R92 표준 템플릿 wb 베이스 전환의 핵심 helper.
+
+    Args:
+        src_ws: 복사할 원본 worksheet (예: SwUTS spec '2.SW Unit Test Spec').
+        dst_wb: 대상 Workbook (표준 SUTR 템플릿 로드본).
+        new_title: 대상 시트 제목 (예: '3.Test Log').
+        insert_index: 대상 wb 의 sheet 위치 (None이면 끝에 추가). 0-based.
+
+    Returns:
+        생성된 대상 worksheet.
+
+    Notes:
+        - 머지셀은 ``src_ws.merged_cells.ranges`` 를 그대로 string 으로 재적용.
+        - 셀 스타일은 ``copy.copy(src_cell._style)`` (StyleArray 는 immutable index
+          tuple 이라 shallow copy 로 충분). 폰트/채움/테두리/정렬/표시형식 보존.
+        - 수식/문자열/숫자 value 모두 ``cell.value`` 로 그대로 이전 (data_only=False
+          로 로드한 원본이어야 수식 보존).
+        - column_dimensions (width/hidden) + row_dimensions (height/hidden) 복제.
+    """
+    import copy as _copy
+
+    if new_title in dst_wb.sheetnames:
+        # 동명 시트 충돌 방지 — 기존 제거 후 재생성.
+        del dst_wb[new_title]
+
+    dst_ws = dst_wb.create_sheet(title=new_title)
+
+    # 1) cell value + style 복제.
+    max_row = src_ws.max_row
+    max_col = src_ws.max_column
+    for row in src_ws.iter_rows(min_row=1, max_row=max_row, max_col=max_col):
+        for src_cell in row:
+            if src_cell.value is None and not getattr(src_cell, "has_style", False):
+                continue
+            dst_cell = dst_ws.cell(
+                row=src_cell.row, column=src_cell.column, value=src_cell.value,
+            )
+            if getattr(src_cell, "has_style", False):
+                try:
+                    dst_cell._style = _copy.copy(src_cell._style)
+                except (AttributeError, TypeError):
+                    pass
+
+    # 2) merged_cells 복제.
+    for mr in list(src_ws.merged_cells.ranges):
+        try:
+            dst_ws.merge_cells(str(mr))
+        except (ValueError, AttributeError):
+            pass
+
+    # 3) column_dimensions 복제 (width / hidden / outline).
+    for key, dim in src_ws.column_dimensions.items():
+        dst_dim = dst_ws.column_dimensions[key]
+        for attr in ("width", "hidden", "outlineLevel", "bestFit", "customWidth"):
+            val = getattr(dim, attr, None)
+            if val is not None:
+                try:
+                    setattr(dst_dim, attr, val)
+                except (AttributeError, ValueError):
+                    pass
+
+    # 4) row_dimensions 복제 (height / hidden).
+    for key, dim in src_ws.row_dimensions.items():
+        dst_dim = dst_ws.row_dimensions[key]
+        for attr in ("height", "hidden", "outlineLevel", "customHeight"):
+            val = getattr(dim, attr, None)
+            if val is not None:
+                try:
+                    setattr(dst_dim, attr, val)
+                except (AttributeError, ValueError):
+                    pass
+
+    # 5) sheet view / freeze panes / dimension 복제 (best-effort).
+    try:
+        dst_ws.freeze_panes = src_ws.freeze_panes
+    except (AttributeError, ValueError):
+        pass
+    try:
+        dst_ws.sheet_format.defaultColWidth = src_ws.sheet_format.defaultColWidth
+        dst_ws.sheet_format.defaultRowHeight = src_ws.sheet_format.defaultRowHeight
+    except (AttributeError, ValueError):
+        pass
+
+    # 6) 위치 재배치.
+    if insert_index is not None:
+        cur_idx = dst_wb.sheetnames.index(new_title)
+        dst_wb.move_sheet(new_title, offset=insert_index - cur_idx)
+
+    return dst_ws

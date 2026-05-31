@@ -1757,9 +1757,156 @@ def _write_consistency_sheet(
     return written
 
 
+def _build_spec_swufn_order(agg: dict[str, Any]) -> list[str]:
+    """라운드 93 — KJPDS02 spec-based 2.Traceability 매트릭스 함수 순서 도출.
+
+    4.Coverage 시트(_write_coverage_sheet)와 **동일한 함수 집합·순서**로 SwUFn
+    ID list를 만든다. 두 시트가 같은 ``function_rows`` 를 공유해야 audit reviewer
+    가 일관성을 확인할 수 있고, 회사 레퍼런스(KJPDS02_DV_SwUTCV v1.01)의 570
+    diagonal 매트릭스와 차원이 일치한다.
+
+    매핑 규칙 (4.Coverage 라운드 92 동작과 동일):
+      1) SwUDS 함수명→ID 매핑(``function_name_to_swufn_from_suds``) 성공 → 실 SwUFn.
+      2) 실패(SUDS 미등재) → 순차 ``SwUFn_NNNN`` fallback (4.Coverage D셀 노란
+         마킹과 동일한 추정 ID — 추적성 수동 검증 대상).
+      3) c_parser only row(unit_id ``SwUFn_C_`` prefix)는 fallback 순번 부여.
+
+    Returns:
+        ordered SwUFn ID list (function_rows 순서 보존). 빈 list면 spec-based 부적합.
+    """
+    function_rows = list(agg.get("function_rows") or [])
+    name_to_swufn: dict[str, str] = agg.get("function_name_to_swufn_from_suds") or {}
+    if not function_rows or not name_to_swufn:
+        return []
+    ordered: list[str] = []
+    for i, fc in enumerate(function_rows):
+        is_c_parser_only = bool(getattr(fc, "unit_id", "") and fc.unit_id.startswith("SwUFn_C_"))
+        resolved = ""
+        if not is_c_parser_only:
+            resolved = name_to_swufn.get(getattr(fc, "name", ""), "") or name_to_swufn.get(
+                getattr(fc, "unit_id", ""), ""
+            )
+        ordered.append(resolved or f"SwUFn_{i + 1:04d}")
+    return ordered
+
+
+def _write_traceability_spec_diagonal(
+    ws, swufn_ids: list[str], *, out_warnings: list[str] | None = None,
+) -> int:
+    """라운드 93 — KJPDS02 v1.01 SwUTCV 2.Traceability diagonal 매트릭스 작성.
+
+    회사 레퍼런스(KJPDS02_DV_SwUTCV v1.01) 2.Traceability 구조 (라이브 분석):
+      - R12 col D.. : 함수별 헤더 (``SwUFn_NNNN``), 함수당 1 col.
+      - R13 col D.. : count = 1 (``COUNTA`` 수식 채움).
+      - R14.. : TC row. col A=순번 / col B=``SwUTC_<SwUFn>`` / col C=1 / 대각선 'O'.
+    즉 함수 N개 → N col × N row 의 단위행렬(diagonal identity). 각 함수는 자신의
+    단일 SwUTC TC를 가지며 대각 위치에 'O' 1개.
+
+    템플릿(v0.10)은 419 함수만 정의 → SwUDS 전체(현재 데이터 571)보다 작아 ~143
+    row / ~1300 cell 누락이 발생. 본 함수가 ``swufn_ids`` (4.Coverage와 동일 집합)
+    로 헤더 col + diagonal row 를 **재작성**하여 레퍼런스 차원에 정렬한다.
+
+    HDPDM01/SwIT 등 spec-based 가 아닌 호출은 본 함수를 타지 않는다(graceful).
+
+    Args:
+        ws: 2.Traceability 시트.
+        swufn_ids: 함수 순서 SwUFn ID list (``_build_spec_swufn_order`` 출력).
+        out_warnings: 진단 메시지 누적.
+
+    Returns:
+        쓰여진 'O' 셀 수 (= len(swufn_ids), 정상 시).
+    """
+    if not ws or not swufn_ids:
+        return 0
+    from backend.services.excel_template_utils import (
+        auto_expand_row_block, clear_data_range, push_sentinel_to_last_row,
+    )
+
+    ws_title = getattr(ws, "title", "Traceability").strip()
+    header_row = 12        # 회사 v1.01 양식 고정 (Cover/요약 R1~R11 보존)
+    count_row = 13
+    data_start = 14
+    first_col = 4          # col D
+    n = len(swufn_ids)
+    needed_last_row = data_start + n - 1
+    needed_last_col = first_col + n - 1
+
+    # 1) 기존 template diagonal 영역 clear (헤더 col + data row + count row).
+    #    R1~R11 (요약/Note) 및 col A~C 라벨 수식은 보존 — header/count/diagonal만 재작성.
+    try:
+        clear_data_range(
+            ws,
+            start_row=header_row, end_row=ws.max_row,
+            start_col=first_col, end_col=max(ws.max_column or first_col, needed_last_col),
+            preserve_formula=False, preserve_merged_anchor=True,
+            sentinel_patterns=["End of Document", "Appendix", "TOTALS"],
+        )
+        # col A(순번)/B(라벨)/C(count) 의 data row 영역도 clear (template 419개 라벨 제거).
+        clear_data_range(
+            ws,
+            start_row=data_start, end_row=ws.max_row,
+            start_col=1, end_col=3,
+            preserve_formula=True, preserve_merged_anchor=True,
+            sentinel_patterns=["End of Document", "Appendix", "TOTALS"],
+        )
+    except Exception:  # noqa: BLE001 — clear 실패해도 stamp는 진행 (graceful)
+        pass
+
+    # 2) row 부족 시 자동 확장 (template 데이터 row 수 < n).
+    if needed_last_row > ws.max_row:
+        try:
+            shortage = needed_last_row - ws.max_row
+            auto_expand_row_block(
+                ws,
+                insert_at_row=ws.max_row + 1,
+                amount=shortage,
+                template_row_idx=data_start,
+                copy_style=True, copy_merge=True, copy_dimension=True,
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
+    # 3) 헤더 col(R12) + count(R13) + diagonal row(R14..) stamp.
+    written = 0
+    for i, fn_id in enumerate(swufn_ids):
+        col = first_col + i
+        r = data_start + i
+        safe_write(ws, header_row, col, fn_id)     # R12 함수 헤더
+        safe_write(ws, count_row, col, 1)          # R13 count
+        safe_write(ws, r, 1, i + 1)                # col A 순번
+        safe_write(ws, r, 2, f"SwUTC_{fn_id}")     # col B TC 라벨
+        safe_write(ws, r, 3, 1)                    # col C count
+        if safe_write(ws, r, col, "O"):            # 대각 'O'
+            written += 1
+
+    # 4) 요약 count 셀(C12=ID 수 / B13=TC 수) COUNTA 수식을 신규 차원으로 갱신.
+    #    레퍼런스(KJPDS02 v1.01)는 C12=`=COUNTA(D12:VA12)` / B13=`=COUNTA(B14:B583)`.
+    #    템플릿(419)의 stale 리터럴(419/418) 대신 신규 range 수식으로 재작성해
+    #    함수 수가 자동 재계산되도록 한다.
+    from openpyxl.utils import get_column_letter as _gcl
+    last_col_letter = _gcl(needed_last_col)
+    safe_write(ws, header_row, 3, f"=COUNTA({_gcl(first_col)}{header_row}:{last_col_letter}{header_row})")
+    safe_write(ws, count_row, 2, f"=COUNTA(B{data_start}:B{needed_last_row})")
+
+    try:
+        push_sentinel_to_last_row(ws)
+    except Exception:  # noqa: BLE001
+        pass
+
+    if out_warnings is not None:
+        out_warnings.append(
+            f"[trace] {ws_title} spec-based diagonal 재작성 — {n} 함수 × {n} TC "
+            f"(레퍼런스 KJPDS02 v1.01 양식 정렬). 'O' {written}건. "
+            "함수 집합·순서는 4.Coverage 와 동일(function_rows). 순차 SwUFn fallback "
+            "행은 4.Coverage D셀 노란 마킹과 동일 추적성 검증 대상."
+        )
+    return written
+
+
 def _write_traceability_sheet(
     ws, session: SwUTSession, out_warnings: list[str] | None = None,
     *, layout: Any = None, swits_tc_ids: list[str] | None = None,
+    agg: dict[str, Any] | None = None,
 ) -> int:
     """1.Traceability 시트 — TC × Function 매트릭스 본격 작성 (T133).
 
@@ -1947,6 +2094,20 @@ def _write_traceability_sheet(
             )
             out_warnings.append(note)
         return len(all_sids)
+
+    # 라운드 93 — KJPDS02 spec-based 2.Traceability diagonal 재작성.
+    #   회사 레퍼런스(KJPDS02_DV_SwUTCV v1.01)는 SwUDS 전체 함수(570) × TC diagonal
+    #   매트릭스. 표준 템플릿(v0.10)은 419 함수만 정의 → ~143 row / ~1300 cell 누락.
+    #   4.Coverage(라운드 92 spec_based)와 동일한 function_rows 집합으로 헤더 col +
+    #   대각 row 를 재작성하여 레퍼런스 차원에 정렬한다.
+    #   gate: agg에 function_name_to_swufn_from_suds 매핑 + function_rows 존재할 때만
+    #   (HDPDM01/SwIT v3.01/v2.02 — 매핑 없음 — 은 기존 template-header 경로 100% 보존).
+    if agg is not None and matrix_kind == "swufn_x_env":
+        spec_swufn_order = _build_spec_swufn_order(agg)
+        if spec_swufn_order:
+            return _write_traceability_spec_diagonal(
+                ws, spec_swufn_order, out_warnings=out_warnings,
+            )
 
     # 58차 F2: layout 제공 시 traceability_header_row 강제. fallback은 자동 탐색.
     header_row_idx = None
@@ -2282,7 +2443,9 @@ def build_coverage_report(
     if trace_ws is None:
         warnings.append("Traceability 시트 미발견")
     else:
-        n_o = _write_traceability_sheet(trace_ws, session, out_warnings=warnings, layout=layout)
+        n_o = _write_traceability_sheet(
+            trace_ws, session, out_warnings=warnings, layout=layout, agg=agg,
+        )
         summary["traceability_o_cells"] = n_o
         if n_o == 0:
             incomplete_sheets.append(trace_ws.title.strip())
