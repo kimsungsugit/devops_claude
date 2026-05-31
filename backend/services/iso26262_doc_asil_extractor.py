@@ -47,7 +47,7 @@ _REGEX_COMPONENT_PREFIX = re.compile(r"SwCom_\d+|Sw\s*Com\s*\d+", re.IGNORECASE)
 _REGEX_SWUFN_ONLY = re.compile(r"SwUFn_\d+")
 _REGEX_ASIL_ONLY = re.compile(r"ASIL[\s_-]*([ABCD]|QM)\b", re.IGNORECASE)
 
-DOCX_MAX_BYTES = 64 * 1024 * 1024  # 64MB DoS 방지 (swut_swuds_parser와 동일)
+DOCX_MAX_BYTES = 96 * 1024 * 1024  # 라운드 87 T2103: 96MB (SUDS v1.10+ 대비 마진, swut_swuds_parser와 동일)
 
 
 def _load_doc(docx_bytes: bytes, warnings: list[str]):

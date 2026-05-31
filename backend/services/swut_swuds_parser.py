@@ -46,7 +46,7 @@ except ImportError:  # pragma: no cover - hook fail-safe
 
 
 _SWUFN_RE = re.compile(r"^SwUFn_(\d+)\b")
-DOCX_MAX_BYTES = 64 * 1024 * 1024  # 64MB — DoS 방지
+DOCX_MAX_BYTES = 96 * 1024 * 1024  # 라운드 87 T2103: 96MB (SUDS v1.10+ 대비 마진, 이전 64MB)
 
 
 @dataclass

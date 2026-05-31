@@ -358,3 +358,60 @@ class TestSwUDSAsilExtraction32:
         result = parse_swuds_docx(bytes_)
         assert result.ok
         assert result.entries[0].asil == ""
+
+
+class TestRound87HeadingTableFallback:
+    """라운드 87 T2102: 라운드 80 regex fallback이 다양한 양식에서 정상 동작 회귀."""
+
+    def test_heading_table_format_extracts_asil_normally(self):
+        """기본 heading+table 양식 — regex fallback 발화 안 함 (정상 path)."""
+        from docx import Document  # type: ignore
+        doc = Document()
+        doc.add_paragraph("SwUFn_0201 — heading")
+        tbl = doc.add_table(rows=1, cols=2)
+        tbl.cell(0, 0).text = "ASIL"
+        tbl.cell(0, 1).text = "C"
+        buf = io.BytesIO()
+        doc.save(buf)
+        result = parse_swuds_docx(buf.getvalue())
+        assert result.ok
+        assert result.entries[0].asil == "C"
+        # 정상 path → regex fallback warning 없음
+        assert not any("regex fallback" in w for w in result.parse_warnings)
+
+    def test_no_table_asil_triggers_regex_fallback(self):
+        """heading+table 추출 0건 → regex fallback 발화 + 매핑 성공."""
+        from docx import Document  # type: ignore
+        doc = Document()
+        # heading + table (ASIL 라벨 없음) → table 추출 0
+        doc.add_paragraph("SwUFn_0301 — heading")
+        tbl = doc.add_table(rows=1, cols=2)
+        tbl.cell(0, 0).text = "Description"
+        tbl.cell(0, 1).text = "함수 설명"
+        # 본문에 SwUFn_0301 ASIL B 패턴 (regex fallback target)
+        doc.add_paragraph("SwUFn_0301 의 ASIL B 등급으로 분류됨.")
+        buf = io.BytesIO()
+        doc.save(buf)
+        result = parse_swuds_docx(buf.getvalue())
+        assert result.ok
+        # regex fallback 발화 → ASIL B 매핑
+        assert result.entries[0].asil == "B"
+        assert any("regex fallback" in w for w in result.parse_warnings)
+
+    def test_regex_fallback_silent_when_no_match(self):
+        """heading+table 0 + regex 0 — silent skip (fallback warning 안 emit)."""
+        from docx import Document  # type: ignore
+        doc = Document()
+        doc.add_paragraph("SwUFn_0401 — heading")
+        tbl = doc.add_table(rows=1, cols=2)
+        tbl.cell(0, 0).text = "Other"
+        tbl.cell(0, 1).text = "value"
+        # 본문에 ASIL 패턴 없음
+        buf = io.BytesIO()
+        doc.save(buf)
+        result = parse_swuds_docx(buf.getvalue())
+        assert result.ok
+        assert result.entries[0].asil == ""
+        # 매핑 0건 → fallback warning 안 emit
+        fallback_warnings = [w for w in result.parse_warnings if "regex fallback 적용" in w]
+        assert fallback_warnings == []

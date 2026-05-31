@@ -2726,6 +2726,26 @@ class TestRound84AsilDistributionChain:
         assert ids["D"] == []
 
 
+class TestRound87UnmappedClassification:
+    """라운드 87 T2101: UNKNOWN 함수 분류 — c_only / stub / orphan."""
+
+    def test_classify_c_only_stub_orphan(self):
+        """3 카테고리 분류 검증."""
+        from backend.services.swut_coverage_aggregator import _classify_unmapped_functions
+        unmapped = ["g_known_fn", "_internal_helper", "stub_setup_test", "true_orphan"]
+        c_map = {"g_known_fn": {"comment_asil": ""}}
+        result = _classify_unmapped_functions(unmapped, c_map)
+        assert result["c_only"] == ["g_known_fn"]
+        assert result["stub"] == ["_internal_helper", "stub_setup_test"]
+        assert result["orphan"] == ["true_orphan"]
+
+    def test_classify_empty_input(self):
+        """빈 input → 빈 결과."""
+        from backend.services.swut_coverage_aggregator import _classify_unmapped_functions
+        result = _classify_unmapped_functions([], {})
+        assert result == {"c_only": [], "stub": [], "orphan": []}
+
+
 class TestRound86UnmappedFunctionList:
     """라운드 86 T2001~T2002: _compute_asil_distribution unmapped fc list 반환 + AuditLog section 3-1."""
 

@@ -1073,15 +1073,32 @@ def _build_audit_log_rows(
     rows.append(("Total", str(total_asil), "100.0%" if total_asil else "—"))
     rows.append(("", "", ""))
 
-    # 라운드 86 T2002: 3-1. UNKNOWN 함수 list (audit 진단용, top 20).
+    # 라운드 86 T2002 + 87 T2101: 3-1. UNKNOWN 함수 list 분류 (c_only/stub/orphan).
+    # 분류 규칙:
+    #   c_only: c_function_map에 있음 → SUDS 등재 누락 (audit 추가 필요)
+    #   stub:   `_` / `stub_` prefix → 자동 생성 (SUDS 등재 불필요)
+    #   orphan: c source 부재 → vcast 결과만 (검토 필요)
     unmapped_fns = summary.get("unmapped_function_names") or []
     if unmapped_fns:
+        c_fn_map = getattr(session, "c_function_map", {}) or {}
+        classified = _classify_unmapped_functions(unmapped_fns, c_fn_map)
+        c_only = classified["c_only"]
+        stub = classified["stub"]
+        orphan = classified["orphan"]
         rows.append((
             f"3-1. UNKNOWN 함수 list (audit 진단용, top {_AUDIT_LOG_MAX_WARNINGS})",
-            f"총 {len(unmapped_fns)}건", "",
+            f"총 {len(unmapped_fns)}건",
+            f"c_only={len(c_only)} / stub={len(stub)} / orphan={len(orphan)}",
         ))
-        for i, fn in enumerate(unmapped_fns[:_AUDIT_LOG_MAX_WARNINGS], start=1):
-            rows.append((f"U{i}", str(fn)[:200], ""))
+        idx = 1
+        for cat, label in (("c_only", "SUDS 등재 누락"), ("stub", "자동 생성"), ("orphan", "c source 부재")):
+            for fn in classified[cat][:_AUDIT_LOG_MAX_WARNINGS - idx + 1]:
+                rows.append((f"U{idx}", f"[{cat}] {str(fn)[:160]}", label))
+                idx += 1
+                if idx > _AUDIT_LOG_MAX_WARNINGS:
+                    break
+            if idx > _AUDIT_LOG_MAX_WARNINGS:
+                break
         if len(unmapped_fns) > _AUDIT_LOG_MAX_WARNINGS:
             rows.append((
                 "...",
@@ -1089,6 +1106,7 @@ def _build_audit_log_rows(
                 "",
             ))
         rows.append(("", "", ""))
+
 
     # 4. 빌드 결과 통계
     n_envs = summary.get("environments", 0)
@@ -1144,6 +1162,32 @@ def _build_audit_log_rows(
     rows.append(("CLAUDE.md Reference", "## ISO 26262 Safety Context + ## 시각 강조 정책", ""))
 
     return rows
+
+
+def _classify_unmapped_functions(
+    unmapped: list[str], c_function_map: dict[str, Any],
+) -> dict[str, list[str]]:
+    """라운드 87 T2101: UNKNOWN 함수 분류 — audit reviewer 진단 분류.
+
+    Args:
+        unmapped: unmapped 함수명 list (정렬 / dedup된 input).
+        c_function_map: c_parser 결과 — comment_asil 없어도 c source 존재 확인용.
+
+    Returns:
+        ``{"c_only": [...], "stub": [...], "orphan": [...]}``
+        - c_only: c source 존재 + SUDS 미등재 (SUDS docx 보강 필요)
+        - stub: `_` / `stub_` prefix — 자동 생성 (정상 skip)
+        - orphan: c source 부재 — vcast 결과만 (수동 검토)
+    """
+    result: dict[str, list[str]] = {"c_only": [], "stub": [], "orphan": []}
+    for fn in unmapped:
+        if fn.startswith(("_", "stub_")):
+            result["stub"].append(fn)
+        elif c_function_map and fn in c_function_map:
+            result["c_only"].append(fn)
+        else:
+            result["orphan"].append(fn)
+    return result
 
 
 def _count_c_function_asil(c_function_map: dict[str, Any]) -> int:
