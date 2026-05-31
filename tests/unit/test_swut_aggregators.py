@@ -449,7 +449,7 @@ class TestAsilDistribution21:
             "SwUFn_0103": "D",
             "SwUFn_0104": "D",
         }
-        dist, ids_by_asil = _compute_asil_distribution(rows, asil_map)
+        dist, ids_by_asil, _ = _compute_asil_distribution(rows, asil_map)
         assert dist == {"ASIL_A": 1, "ASIL_B": 1, "ASIL_D": 2, "UNKNOWN": 1}
         assert ids_by_asil["D"] == ["SwUFn_0103", "SwUFn_0104"]
         assert ids_by_asil["B"] == ["SwUFn_0102"]
@@ -457,7 +457,7 @@ class TestAsilDistribution21:
 
     def test_distribution_empty_when_no_function_rows(self):
         from backend.services.swut_coverage_aggregator import _compute_asil_distribution
-        dist, ids_by_asil = _compute_asil_distribution([], {})
+        dist, ids_by_asil, _ = _compute_asil_distribution([], {})
         assert dist == {}
         assert ids_by_asil == {"B": [], "C": [], "D": []}
 
@@ -465,7 +465,7 @@ class TestAsilDistribution21:
         from backend.services.swut_coverage_aggregator import _compute_asil_distribution
         from backend.services.swut_input_adapter import FunctionCoverage
         rows = [FunctionCoverage(unit_id=f"SwUFn_010{i}") for i in range(3)]
-        dist, ids_by_asil = _compute_asil_distribution(rows, {})
+        dist, ids_by_asil, _ = _compute_asil_distribution(rows, {})
         assert dist == {"UNKNOWN": 3}
         assert ids_by_asil == {"B": [], "C": [], "D": []}
 
@@ -2650,7 +2650,7 @@ class TestRound84AsilDistributionChain:
             FunctionCoverage(unit_id="SwUFn_0101", name="main"),
             FunctionCoverage(unit_id="SwUFn_0102", name="g_init"),
         ]
-        dist, ids = _compute_asil_distribution(
+        dist, ids, _ = _compute_asil_distribution(
             fns, {},
             function_asil_from_suds={"SwUFn_0101": "B", "SwUFn_0102": "D"},
         )
@@ -2663,7 +2663,7 @@ class TestRound84AsilDistributionChain:
         """function_asil_map(c_source) 우선 > SUDS — chain priority 유지."""
         from backend.services.swut_coverage_aggregator import _compute_asil_distribution
         fns = [FunctionCoverage(unit_id="SwUFn_0101", name="main")]
-        dist, _ = _compute_asil_distribution(
+        dist, _, _ = _compute_asil_distribution(
             fns,
             {"SwUFn_0101": "A"},  # c_source = A
             function_asil_from_suds={"SwUFn_0101": "D"},  # SUDS = D (무시됨)
@@ -2681,7 +2681,7 @@ class TestRound84AsilDistributionChain:
                 component_name="SwCom_02\n(DRV In)",
             ),
         ]
-        dist, ids = _compute_asil_distribution(
+        dist, ids, _ = _compute_asil_distribution(
             fns, {},
             component_asil_from_sds={"SwCom_02": "C"},
         )
@@ -2696,7 +2696,7 @@ class TestRound84AsilDistributionChain:
             FunctionCoverage(unit_id="g_DrvIn_Main", name="g_DrvIn_Main"),
             FunctionCoverage(unit_id="orphan_fn", name="orphan_fn"),
         ]
-        dist, ids = _compute_asil_distribution(
+        dist, ids, _ = _compute_asil_distribution(
             fns, {},
             function_asil_from_suds={"SwUFn_0101": "A", "SwUFn_0201": "D"},
             function_name_to_swufn_from_suds={
@@ -2714,7 +2714,7 @@ class TestRound84AsilDistributionChain:
         """모든 source miss → UNKNOWN 등록."""
         from backend.services.swut_coverage_aggregator import _compute_asil_distribution
         fns = [FunctionCoverage(unit_id="SwUFn_0999", name="orphan")]
-        dist, ids = _compute_asil_distribution(
+        dist, ids, _ = _compute_asil_distribution(
             fns, {},
             function_asil_from_suds={},
             component_asil_from_sds={},
@@ -2724,6 +2724,74 @@ class TestRound84AsilDistributionChain:
         assert ids["B"] == []
         assert ids["C"] == []
         assert ids["D"] == []
+
+
+class TestRound86UnmappedFunctionList:
+    """라운드 86 T2001~T2002: _compute_asil_distribution unmapped fc list 반환 + AuditLog section 3-1."""
+
+    def test_distribution_returns_unmapped_list(self):
+        """모든 source miss 함수 → unmapped list 반환 (3-tuple)."""
+        from backend.services.swut_coverage_aggregator import _compute_asil_distribution
+        fns = [
+            FunctionCoverage(unit_id="known_fn", name="known_fn"),
+            FunctionCoverage(unit_id="orphan_a", name="orphan_a"),
+            FunctionCoverage(unit_id="orphan_b", name="orphan_b"),
+        ]
+        dist, ids, unmapped = _compute_asil_distribution(
+            fns, {},
+            function_asil_from_suds={"SwUFn_0101": "A"},
+            function_name_to_swufn_from_suds={"known_fn": "SwUFn_0101"},
+        )
+        # known_fn은 SUDS reverse map 매칭 → ASIL_A
+        assert dist.get("ASIL_A") == 1
+        # orphan_a, orphan_b는 UNKNOWN
+        assert dist.get("UNKNOWN") == 2
+        # unmapped list에 두 함수 (sorted dedup)
+        assert "orphan_a" in unmapped
+        assert "orphan_b" in unmapped
+        assert "known_fn" not in unmapped
+
+    def test_distribution_unmapped_sorted_deduped(self):
+        """unmapped 정렬 + 중복 제거."""
+        from backend.services.swut_coverage_aggregator import _compute_asil_distribution
+        fns = [
+            FunctionCoverage(unit_id="z_last", name="z_last"),
+            FunctionCoverage(unit_id="a_first", name="a_first"),
+            FunctionCoverage(unit_id="a_first", name="a_first"),  # 중복
+            FunctionCoverage(unit_id="m_mid", name="m_mid"),
+        ]
+        _, _, unmapped = _compute_asil_distribution(fns, {})
+        assert unmapped == ["a_first", "m_mid", "z_last"]
+
+    def test_audit_log_section_3_1_unmapped_stamped(self):
+        """라운드 86 T2002: AuditLog section 3-1 — UNKNOWN 함수 list stamp + top 20 cut."""
+        import openpyxl
+        from backend.services.swut_coverage_aggregator import _write_audit_log_sheet
+        from backend.services.swut_input_adapter import SwUTSession
+        from backend.services.swut_sutr_aggregator import SutrBuildMeta
+        session = SwUTSession(project_id="HDPDM01", environments=[])
+        meta = SutrBuildMeta(
+            project_id="HDPDM01", release_sw_version="1.00",
+            test_date="2026-05-31", test_engineer="test",
+        )
+        # 25 unmapped (top 20 + 5 truncated)
+        summary = {
+            "environments": 0, "total_tcs": 0, "passed": 0, "failed": 0,
+            "asil_distribution": {"UNKNOWN": 25},
+            "unmapped_function_names": [f"orphan_fn_{i:02d}" for i in range(25)],
+        }
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        _write_audit_log_sheet(ws, meta, summary, {}, session)
+        col1 = [str(ws.cell(r, 1).value or "") for r in range(1, ws.max_row + 1)]
+        col2 = [str(ws.cell(r, 2).value or "") for r in range(1, ws.max_row + 1)]
+        # section 3-1 header
+        assert any("3-1." in s and "UNKNOWN 함수 list" in s for s in col1)
+        # U1~U20 stamp
+        u_labels = [s for s in col1 if s.startswith("U") and s[1:].isdigit()]
+        assert len(u_labels) == 20
+        # '외 N건 생략' 명시
+        assert any("외" in s and "생략" in s for s in col2)
 
 
 class TestRound83AuditLogSheet:

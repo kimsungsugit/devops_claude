@@ -415,7 +415,7 @@ def _compute_asil_distribution(
     component_asil_from_sds: dict[str, str] | None = None,
     function_asil_from_srs: dict[str, str] | None = None,
     function_name_to_swufn_from_suds: dict[str, str] | None = None,
-) -> tuple[dict[str, int], dict[str, list[str]]]:
+) -> tuple[dict[str, int], dict[str, list[str]], list[str]]:
     """30차 W21 + 31차 W29 + 라운드 84 T1801: function 별 ASIL 등급 분포 계산.
 
     라운드 84 T1801: SUDS/SDS/SRS source chain 통합 — `_write_coverage_sheet`/
@@ -442,6 +442,8 @@ def _compute_asil_distribution(
     """
     distribution: dict[str, int] = {}
     ids_by_asil: dict[str, list[str]] = {"B": [], "C": [], "D": []}
+    # 라운드 86 T2001: UNKNOWN bucket 함수의 fc.unit_id/name list (audit 진단용).
+    unmapped: list[str] = []
     suds_map = function_asil_from_suds or {}
     sds_map = component_asil_from_sds or {}
     srs_map = function_asil_from_srs or {}
@@ -516,10 +518,15 @@ def _compute_asil_distribution(
         distribution[bucket] = distribution.get(bucket, 0) + 1
         if asil in ("B", "C", "D") and matched_id:
             ids_by_asil[asil].append(matched_id)
+        # 라운드 86 T2001: UNKNOWN bucket 함수 list 누적 (audit 진단용).
+        if not asil:
+            fn_key = fc.unit_id or fc.name or "<no-id>"
+            unmapped.append(fn_key)
 
     return (
         distribution,
         {k: sorted(set(v)) for k, v in ids_by_asil.items()},
+        sorted(set(unmapped)),
     )
 
 
@@ -1065,6 +1072,23 @@ def _build_audit_log_rows(
         rows.append(("UNKNOWN (ASIL 미설정)", str(unknown), unknown_pct))
     rows.append(("Total", str(total_asil), "100.0%" if total_asil else "—"))
     rows.append(("", "", ""))
+
+    # 라운드 86 T2002: 3-1. UNKNOWN 함수 list (audit 진단용, top 20).
+    unmapped_fns = summary.get("unmapped_function_names") or []
+    if unmapped_fns:
+        rows.append((
+            f"3-1. UNKNOWN 함수 list (audit 진단용, top {_AUDIT_LOG_MAX_WARNINGS})",
+            f"총 {len(unmapped_fns)}건", "",
+        ))
+        for i, fn in enumerate(unmapped_fns[:_AUDIT_LOG_MAX_WARNINGS], start=1):
+            rows.append((f"U{i}", str(fn)[:200], ""))
+        if len(unmapped_fns) > _AUDIT_LOG_MAX_WARNINGS:
+            rows.append((
+                "...",
+                f"외 {len(unmapped_fns) - _AUDIT_LOG_MAX_WARNINGS}건 생략",
+                "",
+            ))
+        rows.append(("", "", ""))
 
     # 4. 빌드 결과 통계
     n_envs = summary.get("environments", 0)
@@ -1964,8 +1988,8 @@ def build_coverage_report(
             # session.environments[].function_coverage는 unchanged (W2 격리).
             agg["function_rows"] = new_function_rows
 
-    # 30차 W21 + 31차 W29 + 라운드 84 T1801 + 라운드 85 T1903: SUDS reverse map.
-    asil_distribution, ids_by_asil = _compute_asil_distribution(
+    # 30차 W21 + 31차 W29 + 라운드 84 T1801 + 85 T1903 + 86 T2001: unmapped fc list.
+    asil_distribution, ids_by_asil, unmapped_fns = _compute_asil_distribution(
         agg.get("function_rows") or [],
         agg.get("function_asil_map") or {},
         function_asil_from_suds=agg.get("function_asil_from_suds"),
@@ -1985,6 +2009,8 @@ def build_coverage_report(
         "asil_b_function_ids": ids_by_asil.get("B", []),
         "asil_c_function_ids": ids_by_asil.get("C", []),
         "asil_d_function_ids": ids_by_asil.get("D", []),
+        # 라운드 86 T2002: UNKNOWN 함수 list (audit 진단용).
+        "unmapped_function_names": unmapped_fns,
         # 31-fix D15: audit reviewer 공지 메타 — 회사 v3.01 표준 외 색상 확장 명시.
         "asil_highlight_policy": (
             "B=파랑(#E2F0FF) / C=주황(#FFE5CC) / D=빨강(#FFC7CE) — "

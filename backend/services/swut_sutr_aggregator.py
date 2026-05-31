@@ -1182,9 +1182,9 @@ def build_sutr(
 
     agg = aggregate_session(session)
 
-    # 30차 W21 + 31차 W29 + 라운드 84 T1801 + 라운드 85 T1903: SUDS reverse map.
+    # 30차 W21 + 31차 W29 + 라운드 84 T1801 + 85 T1903 + 86 T2001: unmapped fc list.
     from backend.services.swut_coverage_aggregator import _compute_asil_distribution
-    asil_distribution, ids_by_asil = _compute_asil_distribution(
+    asil_distribution, ids_by_asil, unmapped_fns = _compute_asil_distribution(
         agg.get("function_rows") or [],
         agg.get("function_asil_map") or {},
         function_asil_from_suds=agg.get("function_asil_from_suds"),
@@ -1206,6 +1206,8 @@ def build_sutr(
         "asil_b_function_ids": ids_by_asil.get("B", []),
         "asil_c_function_ids": ids_by_asil.get("C", []),
         "asil_d_function_ids": ids_by_asil.get("D", []),
+        # 라운드 86 T2002: UNKNOWN 함수 list (audit 진단용).
+        "unmapped_function_names": unmapped_fns,
         # 31-fix D15: audit 공지 메타 — Coverage builder와 대칭.
         "asil_highlight_policy": (
             "B=파랑(#E2F0FF) / C=주황(#FFE5CC) / D=빨강(#FFC7CE) — "
