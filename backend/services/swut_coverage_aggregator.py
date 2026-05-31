@@ -1052,14 +1052,9 @@ def _write_spec_totals(
 
     `safe_write` 대신 직접 cell.value 할당 — 'Pass'/'Fail'/숫자 수식 모두 stamp.
     """
-    from openpyxl.utils import get_column_letter
-
     row_fail = last_data_row + 1
     row_pass = last_data_row + 2
     row_total = last_data_row + 3
-    hcol = get_column_letter(stmt_value_col)
-    lcol = get_column_letter(branch_value_col)
-    bcol = get_column_letter(no_col)
 
     def _set(rr, cc, val):
         try:
@@ -1067,30 +1062,43 @@ def _write_spec_totals(
         except (ValueError, AttributeError):
             pass
 
+    # 라운드 93 fix — 레퍼런스는 H/L 열이 (Excel 캐시된) literal 값. openpyxl이 쓴
+    # COUNTIF/SUM 수식은 캐시가 없어 파일 열기 전까지 공란("토탈결과 안 보임"). →
+    # 데이터 행(H/L)에서 직접 Pass/Fail을 count해 **literal 값**을 stamp.
+    def _count(value_col: int) -> tuple[int, int]:
+        n_fail = n_pass = 0
+        for rr in range(data_start, last_data_row + 1):
+            v = ws.cell(rr, value_col).value
+            s = str(v).strip().lower() if v is not None else ""
+            if s == "fail":
+                n_fail += 1
+            elif s == "pass":
+                n_pass += 1
+        return n_fail, n_pass
+
+    stmt_fail, stmt_pass = _count(stmt_value_col)
+    br_fail, br_pass = _count(branch_value_col)
+    stmt_total = stmt_fail + stmt_pass
+    br_total = br_fail + br_pass
+
     # D 'Total' 라벨 (Unit ID col, 첫 row)
     _set(row_fail, unit_id_col, "Total")
-    # Fail row — COUNTIF "Fail"
-    _set(row_fail, stmt_label_col, "Fail")
-    _set(row_fail, stmt_value_col, f'=COUNTIF({hcol}{data_start}:{hcol}{last_data_row},"Fail")')
-    _set(row_fail, branch_label_col, "Fail")
-    _set(row_fail, branch_value_col, f'=COUNTIF({lcol}{data_start}:{lcol}{last_data_row},"Fail")')
-    # Pass row — COUNTIF "Pass"
-    _set(row_pass, stmt_label_col, "Pass")
-    _set(row_pass, stmt_value_col, f'=COUNTIF({hcol}{data_start}:{hcol}{last_data_row},"Pass")')
-    _set(row_pass, branch_label_col, "Pass")
-    _set(row_pass, branch_value_col, f'=COUNTIF({lcol}{data_start}:{lcol}{last_data_row},"Pass")')
-    # Total row — SUM(Fail+Pass)
-    _set(row_total, stmt_label_col, "Total")
-    _set(row_total, stmt_value_col, f'=SUM({hcol}{row_fail}:{hcol}{row_pass})')
-    _set(row_total, branch_label_col, "Total")
-    _set(row_total, branch_value_col, f'=SUM({lcol}{row_fail}:{lcol}{row_pass})')
+    # Fail / Pass / Total row — literal count
+    _set(row_fail, stmt_label_col, "Fail"); _set(row_fail, stmt_value_col, stmt_fail)
+    _set(row_fail, branch_label_col, "Fail"); _set(row_fail, branch_value_col, br_fail)
+    _set(row_pass, stmt_label_col, "Pass"); _set(row_pass, stmt_value_col, stmt_pass)
+    _set(row_pass, branch_label_col, "Pass"); _set(row_pass, branch_value_col, br_pass)
+    _set(row_total, stmt_label_col, "Total"); _set(row_total, stmt_value_col, stmt_total)
+    _set(row_total, branch_label_col, "Total"); _set(row_total, branch_value_col, br_total)
 
-    # 상단 요약 r5/r6 — 레퍼런스 수식 패턴 (Total=함수 수, Fail Count=Fail row).
-    # E5=마지막 No row 값(=함수 수), F5=stmt fail, H5=coverage 비율.
-    _set(5, 5, f"={bcol}{last_data_row}")
-    _set(5, 6, f"={hcol}{row_fail}")
-    _set(6, 5, f"={bcol}{last_data_row}")
-    _set(6, 6, f"={lcol}{row_fail}")
+    # 상단 요약 r5(Statement)/r6(Branch) — literal: E=Total, F=Fail Count,
+    # G=Exception(=Fail, 레퍼런스 패턴), H=Coverage 비율((Total-Fail+Exception)/Total).
+    # 레퍼런스: Fail이 전부 deviation/exception으로 간주되어 H=1.0.
+    def _cov(total: int, fail: int) -> float:
+        return round((total - fail + fail) / total, 4) if total else 0.0
+
+    _set(5, 5, stmt_total); _set(5, 6, stmt_fail); _set(5, 7, stmt_fail); _set(5, 8, _cov(stmt_total, stmt_fail))
+    _set(6, 5, br_total); _set(6, 6, br_fail); _set(6, 7, br_fail); _set(6, 8, _cov(br_total, br_fail))
 
 
 # BLANK_MARKUP은 excel_template_utils에서 import (단일 출처).
