@@ -553,7 +553,11 @@ class TestSutrTestLogAsil31:
     """
 
     def test_test_log_pass_fail_at_aj_ak_col_v202(self):
-        """57차 T319: Pass/Fail은 AJ(col 36) + AK(col 37)에 stamp."""
+        """라운드 90: AK(Total, col 37)는 anchor row, AJ(Unit, col 36)는 iteration row.
+
+        함수 1개(SwUFn_0103) × iteration 1개 → anchor row 2 + iteration row 3.
+        exec_r 없음 → Total/Unit 모두 "N/A".
+        """
         import openpyxl
         from backend.services.swut_sutr_aggregator import _write_test_log
         wb = openpyxl.Workbook()
@@ -567,13 +571,13 @@ class TestSutrTestLogAsil31:
 
         n = _write_test_log(ws, session)
         assert n >= 1
-        # AJ (col 36) + AK (col 37) Pass/Fail Unit / Total
-        # exec_r 없음 → "N/A"
-        assert ws.cell(2, 36).value == "N/A"
+        # AK(col 37) = 함수 Total Pass/Fail (anchor row 2). exec 전무 → "N/A"
         assert ws.cell(2, 37).value == "N/A"
+        # AJ(col 36) = iteration Pass/Fail (iteration row 3). exec 없음 → "N/A"
+        assert ws.cell(3, 36).value == "N/A"
 
     def test_test_log_log_data_col_al_v202(self):
-        """57차 T319: Log Data는 AL(col 38)에 stamp (env_name/tc_name.log)."""
+        """라운드 90: Log Data는 AL(col 38) anchor row에 env_name/fn_id.log stamp."""
         import openpyxl
         from backend.services.swut_sutr_aggregator import _write_test_log
         wb = openpyxl.Workbook()
@@ -587,10 +591,10 @@ class TestSutrTestLogAsil31:
         env.test_results = {}
 
         _write_test_log(ws, session)
-        # AL (col 38) Log Data
+        # AL (col 38) Log Data — anchor row 2. 함수 단위 → env/fn_id.log
         al_val = ws.cell(2, 38).value
         assert al_val is not None
-        assert "SwUTC_SwUFn_0103.001" in al_val
+        assert "SwUFn_0103" in al_val
         assert "SWTE_01" in al_val
 
     def test_test_log_no_asil_col_overwrite_v202(self):
@@ -966,22 +970,29 @@ class TestSutrTestLogRowStep57:
         return buf.getvalue()
 
     def test_write_test_log_uses_coverage_source_and_step(self):
-        """SUTR _write_test_log이 Coverage TC source + row step 6 적용 → row 5/11/17/...에 stamp."""
-        session = _make_session()  # 5 TC 가진 mock session (SwUTC_0101 등)
+        """라운드 90 — 함수별 블록: 함수 anchor row B에 distinct TC ID stamp.
+
+        이전(57차)은 1 TC당 6 row 고정 step(B5/B11/B17). 라운드 90 재작성으로
+        함수(SwUFn_NNNN)당 1블록(anchor + iteration row)이 되어 step 고정이 폐기됨.
+        _make_session()은 SwUFn_0101 / SwUFn_0103 두 함수, 각 1 iteration →
+        anchor row 5(fn1) / row 7(fn2). 두 anchor의 TC ID가 distinct함을 검증.
+        """
+        session = _make_session()
         meta = SutrBuildMeta(release_sw_version="1.0.0", test_date="2024-02-19")
         result = build_sutr(session, meta, self._v202_sutr_template_step6())
         assert result.ok
         wb = openpyxl.load_workbook(io.BytesIO(result.xlsm_bytes), keep_vba=True)
-        # 3.Test Result 시트에서 TC가 row 5, 11, 17, ... (step=6) 에 stamp됐는지 확인
         log = wb["3.Test Result"]
-        # row 5: 첫 TC (sorted order — mock session의 SwUFn_NNNN.M format 또는 SwUTC_ 모두 허용)
+        # header row 4 → 첫 함수 anchor = row 5. 두 함수 anchor의 TC ID 수집.
+        anchor_ids = [
+            v for r in range(5, 20)
+            if (v := log.cell(r, 2).value) and isinstance(v, str) and v.strip()
+        ]
+        # 최소 2개 distinct 함수 anchor (SwUFn_0101 / SwUFn_0103 기반 ID)
+        assert len(set(anchor_ids)) >= 2, f"distinct anchor TC ID 2개 미만: {anchor_ids}"
+        # row 5에 첫 함수 anchor stamp
         row5 = log.cell(5, 2).value
         assert row5 is not None and isinstance(row5, str) and len(row5) > 0
-        # row 11: 두 번째 TC (step=6 적용 검증)
-        row11 = log.cell(11, 2).value
-        assert row11 is not None and isinstance(row11, str) and len(row11) > 0
-        # row 5 != row 11 (sorted unique TC) — step=6 fixture 정상 동작 보장
-        assert row5 != row11
 
     def test_write_test_log_default_step_1_for_v301(self):
         """v3.01 template (step=1) → SUTR Test Log row 연속 (backward compat)."""
@@ -2296,9 +2307,9 @@ class TestRound78SutrAsilFallback:
             swuts_map=swuts_map,
             c_function_map=c_map,
         )
-        # PASS_FAIL_UNIT_COL(36)에 ASIL D fill 적용 확인
+        # 라운드 90: ASIL 강조는 anchor row(=row 2)의 Total col(37, v3.01)에 적용.
         from backend.services.design_tokens import ASIL_D_FILL_RGB
-        cell = ws.cell(2, 36)  # start_row=2 (header R1 + 1)
+        cell = ws.cell(2, 37)  # anchor row 2, AK(Total)
         rgb = cell.fill.start_color.rgb if cell.fill.start_color else None
         assert rgb == ASIL_D_FILL_RGB
 
@@ -2326,8 +2337,8 @@ class TestRound78SutrAsilFallback:
             swuts_map=None,
             c_function_map=c_map,
         )
-        # fill 미적용
-        cell = ws.cell(2, 36)
+        # 라운드 90: fill 미적용 — anchor row Total col(37)에 ASIL D 없음
+        cell = ws.cell(2, 37)
         rgb = cell.fill.start_color.rgb if cell.fill.start_color else None
         # default PatternFill — solid pattern 적용 안 됨
         from backend.services.design_tokens import ASIL_D_FILL_RGB

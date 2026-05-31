@@ -482,18 +482,28 @@ def _write_test_log(
     swuts_map: dict[str, Any] | None = None,
     c_function_map: dict[str, dict[str, Any]] | None = None,
 ) -> int:
-    """Test Log 시트 — TC별 input/expected/actual/pass.
+    """Test Log/Test Result 시트 — 함수(SwUFn_NNNN)당 1블록.
 
-    회사 표준 layout (TC ID / Title / Method / Unit / Total + pass/fail) 단순화:
-    각 환경 / 각 TC 단위 한 행씩.
+    라운드 90 재작성 — 회사 감사본(SUTR v3.01 / SITR v2.02) 양식 정합.
+    이전(57~89차)은 iteration key(``SwUFn_1901.001``)를 TC 1개로 보고 per-TC 고정
+    6 row 블록을 만들고 한 iteration의 변수들을 anchor row의 열에 채웠다 → 회사
+    양식과 불일치. 신규 양식:
 
-    31차 W27: col+4 Function ID + col+5 ASIL 컬럼 추가 (function_asil_map 제공 시).
-    회사 양식 col+3까지만 사용 — col+4/5는 빈 영역 활용. ASIL D row는
-    mark_asil_d_function 적용 (audit 검토 우선순위 시각).
+    - **anchor row**: B=TC ID, C=Title, D=Generation Method, 그리고 Input/Expected/
+      Actual 섹션 각 열에 **변수명**을 나열. AK(Total)=함수 전체 Pass/Fail (블록
+      세로 병합). ASIL 등급 시각 강조도 anchor row에 적용.
+    - **iteration row** (anchor+1부터): E=iteration index(1..N), 각 변수 열에 그
+      iteration의 값(Input/Expected/Actual). AJ(Unit)=그 iteration의 Pass/Fail.
+    - 블록 높이 = 1 anchor + iteration 수 (가변).
 
-    60차 F6-A: swuts_map 제공 시 (SwUTS xlsm parser 결과) col B/C/D + Precondition
-    col에 spec docx 데이터 stamp. 매핑 fallback chain — 직접 tc_name 매칭 →
-    function_id (SwUFn_NNNN) 매칭 → 없으면 기존 하드코딩 ("AEC, ABV").
+    column 위치는 layout (test_log_input_col 등) 우선, 없으면 v3.01 hardcode
+    (Input=F/6, Expected=P/16, Actual=Z/26, AJ=36, AK=37, AL=38).
+
+    Generation Method(D열)는 swuts_map(SwUTS spec)의 test_method/generation_method
+    우선, 없으면 "AEC, ABV". VectorCAST 로그에는 method 정보 미존재(vcast_parser
+    확인) → 본 라운드는 spec fallback 유지.
+
+    변수 > layout max_count 시 truncate + out_warnings에 경고 누적.
     """
     if not ws:
         return 0
@@ -565,7 +575,6 @@ def _write_test_log(
     # 회사 v2.02 SUTR 양식: 6 TC × 6 row × 38 col merge/style pattern.
     # audit reviewer가 일관 양식으로 산출물 검토.
     import copy as _copy
-    template_block_count = 6  # 회사 양식 표준 default 6 TC blocks
     template_merges_local: list[tuple[int, int, int, int]] = []
     for _mc in list(ws.merged_cells.ranges):
         if (start_row <= _mc.min_row <= start_row + tc_row_step - 1 and
@@ -634,28 +643,46 @@ def _write_test_log(
         getattr(layout, "test_log_actual_max_count", 10) if layout is not None else 10
     )
 
-    # 59차 F4-A — 변수명 헤더 row stamp + 환경 합집합 sorted list 산출.
-    # KJPDS02 v1.01 양식: row 5에 변수명 stamp 후 TC 값은 col 순서대로 lookup.
-    # layout.test_log_variable_header_row None이면 빈 list 반환 (v2.02/v3.01 동작).
-    input_var_list, expected_var_list, actual_var_list = _write_variable_name_header_row(
-        ws,
-        layout,
-        session,
-        input_col=INPUT_COL,
-        expected_col=EXPECTED_COL,
-        actual_col=ACTUAL_COL,
-        input_max=input_max,
-        expected_max=expected_max,
-        actual_max=actual_max,
-        out_warnings=out_warnings,
-    )
+    # 라운드 90 T1601 — 회사 감사본 양식: 함수(SwUFn_NNNN)당 1블록.
+    #   anchor row: B=TC ID / C=Title / D=Method + Input/Expected/Actual 섹션에
+    #     **변수명을 열에 나열**. AK(Total)=함수 전체 Pass/Fail (블록 세로 병합).
+    #   iteration row (anchor+1부터): E=iteration index(1..N), 각 변수 열에 그
+    #     iteration의 값. AJ=그 iteration의 Pass/Fail.
+    # 이전(57차~89차) "iteration=행 1개, 변수=열" per-TC 6 row 고정 블록을 폐기하고
+    # 함수별 가변 높이 블록으로 재작성. _write_variable_name_header_row(글로벌 단일
+    # 헤더 row stamp)는 본 양식과 비호환이라 호출 제거 — 변수명은 함수별 anchor row에.
+    # 라운드 90 T1601 — 함수별 그룹핑.
+    #   iteration key 'SwUFn_1901.001' → 함수 id 'SwUFn_1901' (suffix '.NNN' 제거).
+    #   SwIT 'SwITC_SwUFn_0101.001' → 함수 id 'SwUFn_0101' (_collect_tc_to_function이
+    #     이미 SwUFn_NNNN 추출 — fn_id 그대로 group key 사용).
+    # group: fn_id → [iteration_key, ...] (정렬). iteration 정렬은 '.NNN' 숫자 우선.
+    def _iter_sort_key(tc_name: str) -> tuple[int, str]:
+        m = re.search(r"\.(\d+)\s*$", tc_name)
+        if m:
+            return (int(m.group(1)), tc_name)
+        return (0, tc_name)
 
-    # 라운드 73 T806 — SwIT Test Log row 자동 확장. SwIT SITR v2.02 양식 max_row=31
-    # 인데 12 TC × 6 step = 72 row 필요 → 4 TC만 stamp되던 결함. SwUT SUTR도 5000+ TC
-    # 미래에 대비.
-    sorted_tc_names = sorted(tc_to_fn_id.keys())
-    if sorted_tc_names:
-        needed_last_row = start_row + (len(sorted_tc_names) - 1) * tc_row_step + (tc_row_step - 1)
+    fn_groups: dict[str, list[str]] = {}
+    for tc_name, fn_id in tc_to_fn_id.items():
+        fn_groups.setdefault(fn_id, []).append(tc_name)
+    for fn_id in fn_groups:
+        fn_groups[fn_id].sort(key=_iter_sort_key)
+    sorted_fn_ids = sorted(fn_groups.keys())
+
+    # 블록 높이 = 1 anchor + iteration 수. 전체 needed row 미리 산출.
+    block_heights: dict[str, int] = {
+        fn_id: 1 + len(fn_groups[fn_id]) for fn_id in sorted_fn_ids
+    }
+    total_rows_needed = sum(block_heights.values())
+
+    # 변수>10 truncate 발생 함수 수 집계 (보고용).
+    _truncated_fn_count = 0
+
+    # 라운드 90 — 함수별 가변 높이 블록에 맞춰 row 확장.
+    # 이전(73차) needed = start + (TC수-1)*step + (step-1) (고정 step) 폐기.
+    # 신규 needed = start + (1 anchor + iter수 합) - 1.
+    if sorted_fn_ids:
+        needed_last_row = start_row + total_rows_needed - 1
         if needed_last_row > ws.max_row:
             try:
                 from backend.services.excel_template_utils import (
@@ -679,57 +706,26 @@ def _write_test_log(
             except ImportError:
                 pass
 
-    written = 0
-    # 라운드 89 perf — per-block merge를 루프 후 일괄 적용(defer). per-block merge는
-    # 항상 해당 블록 write 이후 + 다른 블록과 다른 row라 어떤 write에도 영향 없음 →
-    # defer는 출력 동일. 루프 중 merge 개수를 안정시켜 resolve_merge_anchor row-index
-    # 캐시가 1회만 빌드되게 함(merge 누적 시 매 블록 재색인 = O(n²) 방지).
-    _deferred_merges: list[tuple[int, int, int, int]] = []
-    for tc_name in sorted_tc_names:
-        r = start_row + (written * tc_row_step)
-        env = tc_to_env.get(tc_name)
-        component_name = env.component_name if env is not None else ""
-        exec_r = env.test_results.get(tc_name) if env is not None else None
-        result_str = (
-            "Pass" if exec_r and exec_r.passed else
-            "Fail" if exec_r else
-            "N/A"
-        )
-
-        # 60차 F6-A — SwUTS spec lookup (fallback chain).
-        # 1순위: tc_name 직접 매칭 (예: 'SwUTC_0121' 또는 'SwUFn_0121')
-        # 2순위: tc_name에서 SwUFn_NNNN 추출 → by_function_id 첫 entry
-        # 3순위: 없음 → 기존 하드코딩 fallback
-        # F6 자체평가 Round 1 C1 (re-fix): SwIT TC name 'SwITC_SwUFn_0121.001' 호환
-        # — re.match (^anchor) → re.search. 34차 deep-reviewer C1과 동일 회귀.
+    # 라운드 90 — anchor row TC ID/Title/Method를 함수의 첫 iteration + swuts_map으로
+    # 산출하는 helper (이전 per-TC 로직 재사용).
+    def _resolve_anchor_meta(rep_tc_name: str, component_name: str):
+        """함수 anchor row의 (TC ID, Title, Method, precondition_col, precondition,
+        swuts_entry) 산출. swuts_map 우선, 없으면 fallback."""
         swuts_entry = None
         if swuts_map:
-            swuts_entry = swuts_map.get(tc_name)
+            swuts_entry = swuts_map.get(rep_tc_name)
             if swuts_entry is None:
-                # function_id fallback — VectorCAST 'SwUFn_0121.001' / spec 'SwUTC_0121'
-                # 두 형식 모두 SwUFn_0121 substring 가짐. swuts_map은 by_tc_id 형식.
-                # re.search로 SwUT 'SwUFn_0121.001' + SwIT 'SwITC_SwUFn_0121.001' 모두 매칭.
-                _fn_match = re.search(r"SwUFn_(\d+)", tc_name)
+                _fn_match = re.search(r"SwUFn_(\d+)", rep_tc_name)
                 if _fn_match:
-                    _fn_id = _fn_match.group(0)
-                    # by_tc_id에서 ``SwUTC_<digits>`` 형식이 ``SwUFn_<digits>`` 와
-                    # 1:1 대응되는 SwUTC 찾기 (KJPDS02 SwUTS 패턴)
-                    _candidate_tc = f"SwUTC_{_fn_match.group(1)}"
-                    swuts_entry = swuts_map.get(_candidate_tc)
+                    _fn_id_full = _fn_match.group(0)
+                    swuts_entry = swuts_map.get(f"SwUTC_{_fn_match.group(1)}")
                     if swuts_entry is None:
-                        # HDPDM01 'SwUTC_SwUFn_NNNN' 형식 시도
-                        swuts_entry = swuts_map.get(f"SwUTC_{_fn_id}")
+                        swuts_entry = swuts_map.get(f"SwUTC_{_fn_id_full}")
                     if swuts_entry is None:
-                        # SwIT spec key는 'SwITC_NNNN' (function_id 4자리 그대로) 형식
-                        # 가능성 시도. KJPDS02 SwITS의 2자리 (`SwITC_NN`) 매핑은 본
-                        # 시도로 매칭 안 됨 — by_function_id 기반 lookup이 필요한 케이스는
-                        # 별도 라운드에서 처리 (Round 2 N1).
                         swuts_entry = swuts_map.get(f"SwITC_{_fn_match.group(1)}")
-
-        # B/C/D — TC ID / Title / Method (SwUTS spec 우선, 없으면 기존 fallback)
         if swuts_entry is not None:
-            _display_tc_id = getattr(swuts_entry, "tc_id", "") or tc_name
-            _display_description = (
+            tc_id = getattr(swuts_entry, "tc_id", "") or rep_tc_name
+            description = (
                 getattr(swuts_entry, "description", "")
                 or getattr(swuts_entry, "unit_name", "")
                 or component_name
@@ -737,292 +733,192 @@ def _write_test_log(
             _method = getattr(swuts_entry, "test_method", "")
             _gen_method = getattr(swuts_entry, "generation_method", "")
             if _method and _gen_method:
-                _display_method = f"{_method}, {_gen_method}"
+                method = f"{_method}, {_gen_method}"
             elif _method:
-                _display_method = _method
+                method = _method
             elif _gen_method:
-                _display_method = _gen_method
+                method = _gen_method
             else:
-                _display_method = "AEC, ABV"
-            safe_write(ws, r, col, _display_tc_id)
-            safe_write(ws, r, col + 1, _display_description)
-            safe_write(ws, r, col + 2, _display_method)
-            # Precondition stamp (layout 제공 시) — 회사 양식에 별도 col 존재할 때만.
-            _precondition_col = (
+                method = "AEC, ABV"
+            precond_col = (
                 getattr(layout, "test_log_precondition_col", None)
                 if layout is not None else None
             )
-            _precondition = getattr(swuts_entry, "precondition", "")
-            if _precondition_col and _precondition:
-                safe_write(ws, r, _precondition_col, _precondition)
-        else:
-            # F8 N8 fix: VectorCAST 'SwITC_SwUFn_NNNN.NNN' → 회사 표준 'SwITC_NNNN'
-            # 변환 (SwITCV 2.Traceability T705 stamp와 일관성). sub-index는 step row
-            # C3에 1~5 stamp되므로 anchor row는 SwITC ID prefix만.
-            # SwUT 형식 'SwUFn_NNNN.NNN' 또는 다른 prefix는 그대로 유지.
-            _display_tc_id = tc_name
-            _switc_fn = re.match(r"^SwITC_SwUFn_(\d+)", tc_name)
-            if _switc_fn:
-                _display_tc_id = f"SwITC_{_switc_fn.group(1)}"
-            safe_write(ws, r, col, _display_tc_id)
-            safe_write(ws, r, col + 1, component_name)
-            safe_write(ws, r, col + 2, "AEC, ABV")
-        # E (col 5) — TC ID row는 빈 cell (Pass/Fail 자리가 아님)
-        # sub-row E6~E10에 Params 1~5 stamp (template default 패턴)
-        if tc_row_step >= 2:
-            for sub_i in range(1, tc_row_step):
-                sub_r = r + sub_i
-                if ws.cell(sub_r, 5).value is None:  # col 5 = E
-                    safe_write(ws, sub_r, 5, sub_i)
+            precond = getattr(swuts_entry, "precondition", "")
+            return tc_id, description, method, precond_col, precond, swuts_entry
+        # fallback — SwIT 'SwITC_SwUFn_NNNN.NNN' → 'SwITC_NNNN', SwUT은 함수 id 그대로.
+        tc_id = rep_tc_name
+        _switc_fn = re.match(r"^SwITC_SwUFn_(\d+)", rep_tc_name)
+        if _switc_fn:
+            tc_id = f"SwITC_{_switc_fn.group(1)}"
+        return tc_id, component_name, "AEC, ABV", None, "", None
 
-        # 59차 F4-B — step 분배: input_data_steps 있으면 sub-row에 step별 input stamp.
-        # layout.test_log_step_layout=='step_in_rows' (v2.02 6 row pattern) + tc_item에
-        # input_data_steps 보유 시. HDPDM01 fixture는 input_data_steps 빈 list →
-        # 기존 동작 (TC ID row에만 stamp). KJPDS02 v1.01 호환 인프라.
-        _step_in_rows = (
-            layout is not None
-            and getattr(layout, "test_log_step_layout", "single_row") == "step_in_rows"
-            and tc_row_step >= 2
-        )
-
-        # 57차 T319 fix → 59차 F4-A 일반화 — Input/Expected/Actual stamp.
-        # VectorCAST TestCaseItem (vcast_parser.py:179) 에 input_data / expected_result
-        # / actual_result dict 보유. env.test_cases[tc_name] = List[TestCaseItem] —
-        # 첫 item 사용. F4-A: input_var_list (합집합 sorted) 있으면 그 col 순서 lookup,
-        # 없으면 backward-compat dict.values()[:input_max].
-        if env is not None:
-            tc_items = env.test_cases.get(tc_name) or []
-            tc_item = tc_items[0] if tc_items else None
-            if tc_item is not None:
-                input_data = getattr(tc_item, "input_data", {}) or {}
-                expected_data = getattr(tc_item, "expected_result", {}) or {}
-                # Input Params — col 순서 lookup 또는 dict.values()
-                if input_var_list:
-                    for pi, var_name in enumerate(input_var_list):
-                        val = input_data.get(var_name, "")
-                        safe_write(ws, r, INPUT_COL + pi, str(val) if val else "")
-                else:
-                    input_vals = list(input_data.values())[:input_max]
-                    for pi, val in enumerate(input_vals):
-                        safe_write(ws, r, INPUT_COL + pi, str(val) if val else "")
-                # Expected Result Params
-                if expected_var_list:
-                    for pi, var_name in enumerate(expected_var_list):
-                        val = expected_data.get(var_name, "")
-                        safe_write(ws, r, EXPECTED_COL + pi, str(val) if val else "")
-                else:
-                    expected_vals = list(expected_data.values())[:expected_max]
-                    for pi, val in enumerate(expected_vals):
-                        safe_write(ws, r, EXPECTED_COL + pi, str(val) if val else "")
-                # Actual Result Params
-                # 58차 F1: ExecutionRow.actual_result 우선 (BeautifulSoup 추출),
-                # 57차 T321 fallback: env.tc_result_items (vcast_parser TestResultItem).
-                # actual_result: Dict[str, Tuple[str, str]] — (actual_val, expected_val) tuple.
-                actual_dict: dict = {}
-                exec_r2 = env.test_results.get(tc_name) if env is not None else None
-                if exec_r2 is not None:
-                    actual_dict = getattr(exec_r2, "actual_result", {}) or {}
-                if not actual_dict:
-                    tr_items = getattr(env, "tc_result_items", {}).get(tc_name, [])
-                    tr_item = tr_items[0] if tr_items else None
-                    if tr_item is not None:
-                        actual_dict = getattr(tr_item, "actual_result", {}) or {}
-                if actual_dict:
-                    if actual_var_list:
-                        for pi, var_name in enumerate(actual_var_list):
-                            t = actual_dict.get(var_name, "")
-                            val = (
-                                t[0] if isinstance(t, tuple) and t
-                                else (str(t) if t else "")
-                            )
-                            safe_write(ws, r, ACTUAL_COL + pi, str(val) if val else "")
-                    else:
-                        actual_vals = [
-                            t[0] if isinstance(t, tuple) and t else (str(t) if t else "")
-                            for t in list(actual_dict.values())[:actual_max]
-                        ]
-                        for pi, val in enumerate(actual_vals):
-                            safe_write(ws, r, ACTUAL_COL + pi, str(val) if val else "")
-
-                # 59차 F4-B — step 분배 stamp.
-                # input_data_steps / expected_result_steps / actual_result_steps가
-                # 채워져 있을 때 sub-row (step 2~N) 에 각 step의 input 값 stamp.
-                # TC ID row (r) = step 1, sub_r = r + step_idx = step 1 + step_idx.
-                # HDPDM01 fixture는 steps 빈 list → skip (backward-compat).
-                if _step_in_rows:
-                    input_steps = (
-                        getattr(tc_item, "input_data_steps", []) or []
-                    )
-                    expected_steps = (
-                        getattr(tc_item, "expected_result_steps", []) or []
-                    )
-                    actual_steps: list = []
-                    if exec_r2 is not None:
-                        actual_steps = (
-                            getattr(exec_r2, "actual_result_steps", []) or []
-                        )
-                    # max iteration step count (각 list 길이 최댓값)
-                    max_step_count = max(
-                        len(input_steps), len(expected_steps), len(actual_steps),
-                    )
-                    for step_idx in range(1, min(tc_row_step, max_step_count)):
-                        sub_r = r + step_idx
-                        # input
-                        if step_idx < len(input_steps):
-                            sd = input_steps[step_idx]
-                            if input_var_list:
-                                for pi, var_name in enumerate(input_var_list):
-                                    val = sd.get(var_name, "")
-                                    safe_write(
-                                        ws, sub_r, INPUT_COL + pi,
-                                        str(val) if val else "",
-                                    )
-                            else:
-                                vals = list(sd.values())[:input_max]
-                                for pi, val in enumerate(vals):
-                                    safe_write(
-                                        ws, sub_r, INPUT_COL + pi,
-                                        str(val) if val else "",
-                                    )
-                        # expected
-                        if step_idx < len(expected_steps):
-                            sd = expected_steps[step_idx]
-                            if expected_var_list:
-                                for pi, var_name in enumerate(expected_var_list):
-                                    val = sd.get(var_name, "")
-                                    safe_write(
-                                        ws, sub_r, EXPECTED_COL + pi,
-                                        str(val) if val else "",
-                                    )
-                            else:
-                                vals = list(sd.values())[:expected_max]
-                                for pi, val in enumerate(vals):
-                                    safe_write(
-                                        ws, sub_r, EXPECTED_COL + pi,
-                                        str(val) if val else "",
-                                    )
-                        # actual (tuple — t[0] 사용)
-                        if step_idx < len(actual_steps):
-                            sd = actual_steps[step_idx]
-                            if actual_var_list:
-                                for pi, var_name in enumerate(actual_var_list):
-                                    t = sd.get(var_name, "")
-                                    val = (
-                                        t[0] if isinstance(t, tuple) and t
-                                        else (str(t) if t else "")
-                                    )
-                                    safe_write(
-                                        ws, sub_r, ACTUAL_COL + pi,
-                                        str(val) if val else "",
-                                    )
-                            else:
-                                vals = [
-                                    t[0] if isinstance(t, tuple) and t
-                                    else (str(t) if t else "")
-                                    for t in list(sd.values())[:actual_max]
-                                ]
-                                for pi, val in enumerate(vals):
-                                    safe_write(
-                                        ws, sub_r, ACTUAL_COL + pi,
-                                        str(val) if val else "",
-                                    )
-
-        # Pass/Fail stamp — Unit (필수) + Total (v3.01만, v2.02는 PASS_FAIL_TOTAL_COL=0이라 skip).
-        # F7 자체평가 R2 N1 fix: anchor row만 stamp가 양식 default 'Pass' 잔존
-        # (step row R+1~R+step-1) → 'Fail' anchor인데 step rows 'Pass' 표시되어
-        # audit reviewer false success. 모든 step row에 동일 result 동기 + log_path
-        # 도 첫 row만, step row는 None clear (default 'Pass' 차단).
-        safe_write(ws, r, PASS_FAIL_UNIT_COL, result_str)
-        if PASS_FAIL_TOTAL_COL > 0:
-            safe_write(ws, r, PASS_FAIL_TOTAL_COL, result_str)
-        # step row Pass/Fail clear — 양식 default 'Pass' 잔존 차단 (N1).
-        # UNIT(AJ)은 per-step 개별 cell이라 step row clear 필요.
-        # 라운드 89: TOTAL(AK)은 TC당 세로 병합(예: AK5:AK10) — step row(AK6+)는
-        # 병합 non-anchor라 clear 시 resolve_merge_anchor가 anchor(AK5)를 가리켜
-        # 방금 쓴 Total 값을 wipe하는 결함("한 행만" 증상). TOTAL은 병합 cell이라
-        # step row에 독립 값이 없으므로 clear 자체가 불필요 → skip.
-        if tc_row_step > 1 and PASS_FAIL_UNIT_COL > 0:
-            for sub_offset in range(1, tc_row_step):
-                safe_write(ws, r + sub_offset, PASS_FAIL_UNIT_COL, None)
-
-        # Log Data — VectorCAST log file path 추정.
-        log_path = ""
-        if env is not None and getattr(env, "env_name", ""):
-            log_path = f"{env.env_name}/{tc_name}.log"
-        safe_write(ws, r, LOG_DATA_COL, log_path)
-
-        # 31차 W27: TC name에서 SwUFn_NNNN 추출 → ASIL 시각 강조 (AJ 컬럼)
-        # 이전: col+5 (G=Param2) 잘못 강조. 현재: AJ row 시각 강조 (사용자 입력 영역 미침범).
-        fn_id = tc_to_fn_id.get(tc_name, "")
+    # 라운드 90 — 함수의 ASIL 등급 산출 (이전 per-TC 로직을 함수 단위로 1회).
+    def _resolve_fn_asil(fn_id: str, rep_tc_name: str, swuts_entry) -> str:
         asil = asil_map.get(fn_id, "") if fn_id else ""
-        # 라운드 78 T1302 — c_function_map.comment_asil fallback.
-        # 라이브 v11/v12 측정: 1941 TC 중 ASIL 강조 0건 (asil_map 빈 dict).
-        # swuts_map.unit_name이 시그너처 형식 (`'void main( void )'`)이라 c_function_map
-        # key (함수명 `'main'`)와 직접 매칭 안 됨 → regex로 함수명 추출.
-        if not asil and c_function_map and tc_name:
-            # 1) swuts_map.unit_name 시그너처에서 함수명 추출
-            _cand_name = ""
-            if swuts_map:
-                _swuts_entry = swuts_map.get(tc_name)
-                if _swuts_entry is None:
-                    import re as _re_t
-                    _fm = _re_t.search(r"SwUFn_(\d+)", tc_name)
+        _cand_name = ""
+        if not asil and c_function_map:
+            _se = swuts_entry
+            if _se is None and swuts_map:
+                _se = swuts_map.get(rep_tc_name)
+                if _se is None:
+                    _fm = re.search(r"SwUFn_(\d+)", rep_tc_name)
                     if _fm:
-                        _swuts_entry = swuts_map.get(f"SwUTC_{_fm.group(1)}")
-                if _swuts_entry:
-                    _sig = getattr(_swuts_entry, "unit_name", "") or ""
-                    # 시그너처 패턴: `[modifiers] return_type fn_name(args)`.
-                    # 함수명 = `(` 직전 마지막 토큰. 예: 'static void s_SystemOperation( void )'
-                    # → 's_SystemOperation'.
-                    import re as _re_sig
-                    _match = _re_sig.search(r"(\w+)\s*\(", _sig)
-                    if _match:
-                        _cand_name = _match.group(1)
-                    else:
-                        _cand_name = _sig.strip()
-            # 2) cand_name으로 c_function_map lookup
+                        _se = swuts_map.get(f"SwUTC_{_fm.group(1)}")
+            if _se:
+                _sig = getattr(_se, "unit_name", "") or ""
+                _match = re.search(r"(\w+)\s*\(", _sig)
+                _cand_name = _match.group(1) if _match else _sig.strip()
             if _cand_name:
                 _c_entry = c_function_map.get(_cand_name)
                 if _c_entry:
                     _ca = (_c_entry.get("comment_asil") or "").strip().upper()
                     if _ca in {"A", "B", "C", "D", "QM"}:
                         asil = _ca
-
-        # 라운드 80 T1407 — ISO 26262 추적성 체인 fallback chain.
-        # 우선순위: c_source(위) → SUDS function 직접 → SDS component → SRS 보조.
         if not asil and fn_id:
-            # 1) SUDS function ASIL (fn_id 직접 매칭 — 라이브 409건 검증)
             _suds_map = getattr(session, "function_asil_from_suds", {}) or {}
             _sasil = _suds_map.get(fn_id)
             if _sasil:
                 asil = _sasil
         if not asil and fn_id:
-            # 2) SDS component ASIL (fn_id → component_name → SwCom/별칭 lookup)
             _sds_map = getattr(session, "component_asil_from_sds", {}) or {}
             if _sds_map:
                 _casil = _resolve_component_asil(fn_id, _fn_to_comp_cache, _sds_map)
                 if _casil:
                     asil = _casil
         if not asil:
-            # 3) SRS function ASIL 보조 (함수명 매칭)
             _srs_map = getattr(session, "function_asil_from_srs", {}) or {}
-            _srs_key = ""
-            if _srs_map:
-                # _cand_name이 c_function_map fallback에서 추출됐으면 활용
-                _srs_key = locals().get("_cand_name", "") or ""
-                if not _srs_key and swuts_map:
-                    _entry_x = swuts_map.get(tc_name)
-                    if _entry_x:
-                        _sig_x = getattr(_entry_x, "unit_name", "") or ""
-                        import re as _re_srs
-                        _m_srs = _re_srs.search(r"(\w+)\s*\(", _sig_x)
-                        if _m_srs:
-                            _srs_key = _m_srs.group(1)
-                if _srs_key:
-                    _rasil = _srs_map.get(_srs_key)
-                    if _rasil:
-                        asil = _rasil
-        # 라운드 81 T1503: ASIL 5단계 그라데이션 — A/QM 추가 (audit reviewer 친화).
+            _srs_key = _cand_name
+            if not _srs_key and swuts_map:
+                _entry_x = swuts_entry or swuts_map.get(rep_tc_name)
+                if _entry_x:
+                    _sig_x = getattr(_entry_x, "unit_name", "") or ""
+                    _m_srs = re.search(r"(\w+)\s*\(", _sig_x)
+                    if _m_srs:
+                        _srs_key = _m_srs.group(1)
+            if _srs_map and _srs_key:
+                _rasil = _srs_map.get(_srs_key)
+                if _rasil:
+                    asil = _rasil
+        return asil
+
+    # 라운드 90 — 함수의 Input/Expected/Actual 변수명 union 산출.
+    # 첫 iteration 순서 보존 + 이후 iteration의 신규 var append (insertion-ordered).
+    def _collect_fn_var_union(iter_keys: list[str], envs_by_key: dict):
+        input_names: list[str] = []
+        expected_names: list[str] = []
+        actual_names: list[str] = []
+        seen_in: set[str] = set()
+        seen_exp: set[str] = set()
+        seen_act: set[str] = set()
+        for ik in iter_keys:
+            ev = envs_by_key.get(ik)
+            if ev is None:
+                continue
+            tc_items = ev.test_cases.get(ik) or []
+            tc_item = tc_items[0] if tc_items else None
+            if tc_item is not None:
+                for k in (getattr(tc_item, "input_data", {}) or {}):
+                    if k not in seen_in:
+                        seen_in.add(k)
+                        input_names.append(k)
+                for k in (getattr(tc_item, "expected_result", {}) or {}):
+                    if k not in seen_exp:
+                        seen_exp.add(k)
+                        expected_names.append(k)
+            # actual 변수명 — actual_result key (부정확 가능, 가능 범위). 없으면 후처리.
+            exec_r = ev.test_results.get(ik)
+            ad = getattr(exec_r, "actual_result", {}) or {} if exec_r else {}
+            if not ad:
+                tr_items = getattr(ev, "tc_result_items", {}).get(ik, [])
+                tr_item = tr_items[0] if tr_items else None
+                if tr_item is not None:
+                    ad = getattr(tr_item, "actual_result", {}) or {}
+            for k in ad:
+                if k not in seen_act:
+                    seen_act.add(k)
+                    actual_names.append(k)
+        return input_names, expected_names, actual_names
+
+    written = 0          # stamp된 함수 블록 수
+    iteration_rows = 0   # stamp된 iteration row 수 (진단/보고용)
+    cur_row = start_row
+    # 라운드 89 perf — per-block merge defer (resolve_merge_anchor 캐시 안정화).
+    _deferred_merges: list[tuple[int, int, int, int]] = []
+
+    for fn_id in sorted_fn_ids:
+        iter_keys = fn_groups[fn_id]
+        rep_tc_name = iter_keys[0]
+        env0 = tc_to_env.get(rep_tc_name)
+        component_name = env0.component_name if env0 is not None else ""
+
+        # 함수 전체 Pass/Fail Total — 모든 iteration passed면 Pass, 하나라도 Fail이면
+        # Fail, exec 전무면 N/A.
+        any_exec = False
+        all_pass = True
+        for ik in iter_keys:
+            ev = tc_to_env.get(ik)
+            er = ev.test_results.get(ik) if ev is not None else None
+            if er is not None:
+                any_exec = True
+                if not er.passed:
+                    all_pass = False
+        total_result_str = "Pass" if (any_exec and all_pass) else ("Fail" if any_exec else "N/A")
+
+        # 변수명 union 산출 + truncate.
+        in_names, exp_names, act_names = _collect_fn_var_union(iter_keys, tc_to_env)
+        # actual 변수명이 비었거나 부정확하면 expected 변수명 재사용 (spec 지침).
+        if not act_names:
+            act_names = list(exp_names)
+        _orig_in, _orig_exp, _orig_act = len(in_names), len(exp_names), len(act_names)
+        in_names = in_names[:input_max]
+        exp_names = exp_names[:expected_max]
+        act_names = act_names[:actual_max]
+        if (_orig_in > input_max or _orig_exp > expected_max
+                or _orig_act > actual_max):
+            _truncated_fn_count += 1
+            if out_warnings is not None:
+                out_warnings.append(
+                    f"[truncate] 함수 {fn_id} 변수 표기 한도 초과 — "
+                    f"input {_orig_in}→{len(in_names)}, "
+                    f"expected {_orig_exp}→{len(exp_names)}, "
+                    f"actual {_orig_act}→{len(act_names)} (한도 "
+                    f"{input_max}/{expected_max}/{actual_max})"
+                )
+
+        anchor_r = cur_row
+        block_height = block_heights[fn_id]
+
+        # --- anchor row ---
+        tc_id, title, method, precond_col, precond, swuts_entry = _resolve_anchor_meta(
+            rep_tc_name, component_name
+        )
+        safe_write(ws, anchor_r, col, tc_id)          # B = TC ID
+        safe_write(ws, anchor_r, col + 1, title)      # C = Title
+        safe_write(ws, anchor_r, col + 2, method)     # D = Generation Method
+        if precond_col and precond:
+            safe_write(ws, anchor_r, precond_col, precond)
+        # 변수명을 각 섹션 열에 나열.
+        for pi, var_name in enumerate(in_names):
+            safe_write(ws, anchor_r, INPUT_COL + pi, var_name)
+        for pi, var_name in enumerate(exp_names):
+            safe_write(ws, anchor_r, EXPECTED_COL + pi, var_name)
+        for pi, var_name in enumerate(act_names):
+            safe_write(ws, anchor_r, ACTUAL_COL + pi, var_name)
+        # AK(Total) — 함수 전체 Pass/Fail. anchor row에 1회 stamp 후 블록 세로 병합.
+        if PASS_FAIL_TOTAL_COL > 0:
+            safe_write(ws, anchor_r, PASS_FAIL_TOTAL_COL, total_result_str)
+            if block_height > 1:
+                _deferred_merges.append(
+                    (anchor_r, anchor_r + block_height - 1,
+                     PASS_FAIL_TOTAL_COL, PASS_FAIL_TOTAL_COL)
+                )
+        # Log Data — env/함수 단위 log path 추정 (anchor row).
+        if env0 is not None and getattr(env0, "env_name", ""):
+            safe_write(ws, anchor_r, LOG_DATA_COL, f"{env0.env_name}/{fn_id}.log")
+
+        # ASIL 시각 강조 — anchor row Total col (AK) 또는 Unit col (AJ).
+        asil = _resolve_fn_asil(fn_id, rep_tc_name, swuts_entry)
         _asil_marker = {
             "A": mark_asil_a_function,
             "B": mark_asil_b_function,
@@ -1031,56 +927,82 @@ def _write_test_log(
             "QM": mark_asil_qm_function,
         }.get(asil)
         if _asil_marker:
-            _asil_marker(ws, r, PASS_FAIL_UNIT_COL)
+            _mark_col = PASS_FAIL_TOTAL_COL if PASS_FAIL_TOTAL_COL > 0 else PASS_FAIL_UNIT_COL
+            _asil_marker(ws, anchor_r, _mark_col)
 
-        # 54차 T283 + 54-fix W4: v2.02 양식 AL column marker.
-        # AL = Log Data column (38). exec_r markers (✓/✗/—)는 별도 col에 stamp.
-        # AL과 충돌 시 skip.
-        if layout is not None and layout.test_log_extra_marker_col is not None:
-            al_col = layout.test_log_extra_marker_col
-            if al_col != LOG_DATA_COL:  # AL과 충돌 회피
-                marker = ""
-                if exec_r is not None:
-                    if exec_r.passed is True:
-                        marker = "✓"
-                    elif exec_r.passed is False:
-                        marker = "✗"
-                    else:
-                        marker = "—"
-                safe_write(ws, r, al_col, marker)
+        # --- iteration rows ---
+        for it_idx, ik in enumerate(iter_keys, start=1):
+            ir = anchor_r + it_idx
+            ev = tc_to_env.get(ik)
+            tc_items = ev.test_cases.get(ik) or [] if ev is not None else []
+            tc_item = tc_items[0] if tc_items else None
+            exec_r = ev.test_results.get(ik) if ev is not None else None
 
-        # 57차 T319 fix — 새 TC block (template 영역 밖)은 template style + merge
-        # 복사. 사용자 결정 — "빌드 속도는 좀 느려도 된다 정확하고 필요한 데이터는
-        # 다 쓸수있게해야해". Style copy 1941 TC × 6 row × 38 col = ~440k cell ops
-        # (~50초 추가), merge ~5800개 (~1초). audit 양식 일관성 100% 확보.
-        block_idx = written
-        if block_idx >= template_block_count and tc_row_step >= 2:
-            # 라운드 89 perf — precompute한 StyleArray(_style)를 복사 assign.
-            # 시각 결과는 5종 객체 deep-copy와 100% 동일 (StyleArray가 동일 style
-            # table 인덱스 묶음을 가리킴) — number_format 포함. 직렬화 머신 회피로
-            # TC당 ~980 expensive copy → cheap StyleArray copy. (사용자 정확/완전
-            # 결정 취지 유지: 양식 일관성 손실 0, 속도만 개선.)
-            for offset in range(tc_row_step):
-                dst_row = r + offset
-                if dst_row == start_row + offset:
-                    continue
+            safe_write(ws, ir, 5, it_idx)  # E = iteration index
+
+            input_data = getattr(tc_item, "input_data", {}) or {} if tc_item else {}
+            expected_data = (
+                getattr(tc_item, "expected_result", {}) or {} if tc_item else {}
+            )
+            actual_dict: dict = {}
+            if exec_r is not None:
+                actual_dict = getattr(exec_r, "actual_result", {}) or {}
+            if not actual_dict and ev is not None:
+                tr_items = getattr(ev, "tc_result_items", {}).get(ik, [])
+                tr_item = tr_items[0] if tr_items else None
+                if tr_item is not None:
+                    actual_dict = getattr(tr_item, "actual_result", {}) or {}
+
+            for pi, var_name in enumerate(in_names):
+                val = input_data.get(var_name, "")
+                safe_write(ws, ir, INPUT_COL + pi, str(val) if val else "")
+            for pi, var_name in enumerate(exp_names):
+                val = expected_data.get(var_name, "")
+                safe_write(ws, ir, EXPECTED_COL + pi, str(val) if val else "")
+            for pi, var_name in enumerate(act_names):
+                t = actual_dict.get(var_name, "")
+                val = t[0] if isinstance(t, tuple) and t else (str(t) if t else "")
+                safe_write(ws, ir, ACTUAL_COL + pi, str(val) if val else "")
+
+            # AJ(Unit) — 그 iteration의 Pass/Fail.
+            iter_result = (
+                "Pass" if exec_r and exec_r.passed else
+                "Fail" if exec_r else
+                "N/A"
+            )
+            safe_write(ws, ir, PASS_FAIL_UNIT_COL, iter_result)
+
+            iteration_rows += 1
+
+        # --- 신규 블록 style/merge 복제 (template 영역 밖) ---
+        # 이전 per-TC 6 row 고정 → 함수 블록 가변 높이. template block 1행
+        # (start_row)의 style/merge를 블록 각 row에 복제.
+        if anchor_r > start_row + tc_row_step - 1 and tc_row_step >= 1:
+            for off in range(block_height):
+                dst_row = anchor_r + off
+                # template block 내 대응 offset (블록 높이 > template step이면 wrap).
+                tpl_off = off % tc_row_step
                 for c_n in range(1, _tpl_max_col + 1):
-                    tpl_style = _tpl_block_styles.get((offset, c_n))
+                    tpl_style = _tpl_block_styles.get((tpl_off, c_n))
                     if tpl_style is not None:
-                        # 라운드 89: 캐시된 StyleArray를 copy해 assign. (공유 참조는
-                        # 측정상 perf 이득 없어 채택 안 함 — 잔존 O(n²)는 style copy가
-                        # 아닌 _write_test_log 다른 경로, py-spy 후속 진단 대상.)
                         ws.cell(dst_row, c_n)._style = _copy.copy(tpl_style)
-            # Merge cells — template block의 local merge를 새 block 위치에 복사.
-            # 라운드 89: 즉시 적용 대신 defer (위 설명 참조). 좌표만 수집.
             for off_start, off_end, mc_min_col, mc_max_col in template_merges_local:
                 _deferred_merges.append(
-                    (r + off_start, r + off_end, mc_min_col, mc_max_col)
+                    (anchor_r + off_start, anchor_r + off_end, mc_min_col, mc_max_col)
                 )
 
+        cur_row += block_height
         written += 1
 
-    # 라운드 89: defer한 per-block merge 일괄 적용 (write 루프 종료 후).
+    # 진단 로그.
+    if out_warnings is not None:
+        out_warnings.append(
+            f"[diag] R90 함수 블록 stamp: functions={written}, "
+            f"iteration_rows={iteration_rows}, truncated_fn={_truncated_fn_count}, "
+            f"last_row={cur_row - 1}"
+        )
+
+    # 라운드 89: defer한 merge 일괄 적용 (write 루프 종료 후).
     for new_min_r, new_max_r, mc_min_col, mc_max_col in _deferred_merges:
         try:
             ws.merge_cells(
@@ -1091,13 +1013,11 @@ def _write_test_log(
             pass
 
     # 라운드 F7 T707: clear policy — 신규 stamp 후 다음 row부터 양식 default clear.
-    # SwUTR/SwITR 회사 표준 양식이 R5/R7에 SwUTC_0101 default 데이터 보유 →
-    # 신규 session TC 2건 stamp 후 R17~ default 보존되어 partial overwrite 결함.
-    # clear_data_range로 stamp 끝 다음 row부터 ws.max_row까지 cell 비움.
+    # 라운드 90: clear_start는 함수 블록 누적 높이 기준 (cur_row).
     if written > 0:
         try:
             from backend.services.excel_template_utils import clear_data_range
-            clear_start = start_row + (written * tc_row_step)
+            clear_start = cur_row
             clear_end = ws.max_row
             if clear_end >= clear_start:
                 # F7 자체평가 R1 C1/C3 fix: col range 1~20 → 1~40 확장 (양식 default
