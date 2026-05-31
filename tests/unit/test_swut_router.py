@@ -369,9 +369,10 @@ class TestSwudsAsilFallback32:
 
         # 54차 T281 — SwUDS resolver mock은 swut_meta_resolver로 redirect
         from backend.services import swut_meta_resolver as meta_resolver_mod
+        # 라운드 89: apply는 단일 parse seam resolve_swuds_maps 사용 (id→ASIL, name→id).
         monkeypatch.setattr(
-            meta_resolver_mod, "resolve_swuds_function_asil_map",
-            lambda req, project_id: {"SwUFn_0101": "D", "SwUFn_0102": "C"},
+            meta_resolver_mod, "resolve_swuds_maps",
+            lambda req, project_id: ({"SwUFn_0101": "D", "SwUFn_0102": "C"}, {}),
         )
 
         from backend.schemas import SwUTBuildRequest
@@ -394,9 +395,10 @@ class TestSwudsAsilFallback32:
         from backend.routers import swut as swut_router
         # 54차 T281 — swut_meta_resolver로 redirect
         from backend.services import swut_meta_resolver as meta_resolver_mod
+        # 라운드 89: 단일 parse seam resolve_swuds_maps.
         monkeypatch.setattr(
-            meta_resolver_mod, "resolve_swuds_function_asil_map",
-            lambda req, project_id: {"SwUFn_0103": "D"},
+            meta_resolver_mod, "resolve_swuds_maps",
+            lambda req, project_id: ({"SwUFn_0103": "D"}, {}),
         )
         from backend.schemas import SwUTBuildRequest
         req = SwUTBuildRequest(

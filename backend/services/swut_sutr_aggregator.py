@@ -576,6 +576,21 @@ def _write_test_log(
                  _mc.min_col, _mc.max_col)
             )
 
+    # 라운드 89 perf — template block 스타일을 1회 precompute (StyleArray 캐시).
+    # 이전: 신규 TC block마다 cell별 font/border/fill/alignment/protection 5종을
+    # _copy.copy() → openpyxl serialisable __copy__/to_tree/from_tree 머신이 TC당
+    # ~980회 호출 (3771 TC = 7분+, endpoint 비실용적). openpyxl은 cell._style
+    # (StyleArray = 공유 style table 인덱스)로 스타일을 표현하므로 _style만 복사하면
+    # 시각 결과 100% 동일 + 직렬화 회피로 극적 가속. (offset, col) → _style.
+    _tpl_block_styles: dict[tuple[int, int], Any] = {}
+    _tpl_max_col = ws.max_column or 38
+    for _off in range(tc_row_step):
+        _src_r = start_row + _off
+        for _c in range(1, _tpl_max_col + 1):
+            _sc = ws.cell(_src_r, _c)
+            if _sc.has_style:
+                _tpl_block_styles[(_off, _c)] = _copy.copy(_sc._style)
+
     # 58차 F3 — column 매핑 layout-aware (layout 제공 시 동적, None이면 v3.01 hardcode):
     #   회사 v3.01 SUTR (SwUT): F=Input, P=Expected, Z=Actual, AJ=Pass/Fail Unit,
     #       AK=Pass/Fail Total, AL=Log Data
@@ -1034,22 +1049,22 @@ def _write_test_log(
         # (~50초 추가), merge ~5800개 (~1초). audit 양식 일관성 100% 확보.
         block_idx = written
         if block_idx >= template_block_count and tc_row_step >= 2:
-            max_col_n = ws.max_column or 38
+            # 라운드 89 perf — precompute한 StyleArray(_style)를 복사 assign.
+            # 시각 결과는 5종 객체 deep-copy와 100% 동일 (StyleArray가 동일 style
+            # table 인덱스 묶음을 가리킴) — number_format 포함. 직렬화 머신 회피로
+            # TC당 ~980 expensive copy → cheap StyleArray copy. (사용자 정확/완전
+            # 결정 취지 유지: 양식 일관성 손실 0, 속도만 개선.)
             for offset in range(tc_row_step):
-                src_row = start_row + offset
                 dst_row = r + offset
-                if dst_row == src_row:
+                if dst_row == start_row + offset:
                     continue
-                for c_n in range(1, max_col_n + 1):
-                    src_cell = ws.cell(src_row, c_n)
-                    dst_cell = ws.cell(dst_row, c_n)
-                    if src_cell.has_style:
-                        dst_cell.font = _copy.copy(src_cell.font)
-                        dst_cell.border = _copy.copy(src_cell.border)
-                        dst_cell.fill = _copy.copy(src_cell.fill)
-                        dst_cell.alignment = _copy.copy(src_cell.alignment)
-                        dst_cell.number_format = src_cell.number_format
-                        dst_cell.protection = _copy.copy(src_cell.protection)
+                for c_n in range(1, _tpl_max_col + 1):
+                    tpl_style = _tpl_block_styles.get((offset, c_n))
+                    if tpl_style is not None:
+                        # 라운드 89: 캐시된 StyleArray를 copy해 assign. (공유 참조는
+                        # 측정상 perf 이득 없어 채택 안 함 — 잔존 O(n²)는 style copy가
+                        # 아닌 _write_test_log 다른 경로, py-spy 후속 진단 대상.)
+                        ws.cell(dst_row, c_n)._style = _copy.copy(tpl_style)
             # Merge cells 적용 — template block의 local merge를 새 block 위치에 복사
             for off_start, off_end, mc_min_col, mc_max_col in template_merges_local:
                 new_min_r = r + off_start
@@ -1331,10 +1346,17 @@ def build_sutr(
     out.seek(0)
     wb.close()
 
-    filename = (
-        f"({meta.project_id}_SUTR) Software Unit Test Result_"
-        f"v{meta.release_sw_version}_{short_date(meta.test_date)}_R.xlsm"
-    )
+    # 라운드 89: config doc_filenames[sutr] 패턴 우선 ({version}/{date} 치환).
+    # 빈 값이면 HDPDM01 v3.01 하드코딩 default (backward compat).
+    if meta.doc_filename_pattern:
+        filename = meta.doc_filename_pattern.format(
+            version=meta.release_sw_version, date=short_date(meta.test_date),
+        )
+    else:
+        filename = (
+            f"({meta.project_id}_SUTR) Software Unit Test Result_"
+            f"v{meta.release_sw_version}_{short_date(meta.test_date)}_R.xlsm"
+        )
 
     return SutrBuildResult(
         ok=True,

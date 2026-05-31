@@ -992,6 +992,105 @@ def _parse_execution_result_via_temp(resolver: Any, html_path: str) -> Any:
         tmp.unlink(missing_ok=True)
 
 
+# ---------------------------------------------------------------------------
+# 라운드 89 — VectorCAST 출력 폴더 레이아웃 변종 (HDPDM01 SWTE vs KJPDS02 VC2025)
+# ---------------------------------------------------------------------------
+#
+# 같은 VectorCAST HTML 계열이지만 출력 폴더명/파일명 명명이 프로젝트마다 다르다.
+#
+#   SWTE 변종 (HDPDM01 NE_GN7):
+#     01.TestCaseDataReport/<env>_test_case_data_report.html      env=SWTE_NN
+#     02.ExecutionResultReport/<env>_execution_results_report.html
+#     03.AggregateCoverageReport/<env>_aggregate_coverage_report.html
+#     04.MetricsReport/<env>_metrics_report.html
+#
+#   VC2025 표준 (KJPDS02 / VectorCAST 2025 기본 리포트 폴더):
+#     TestCaseData/<env>_TestCaseDataReport.html                  env=SwUT_NN_<name>
+#     ExecutionResult/<env>_ExecutionResultReport.html
+#     Aggregate/<env>_AggregateCoverageReport.html
+#     Metrics/<env>_MetricsReport.html
+#
+# env 추출은 tc 파일명에서 tc_suffix를 strip하는 방식이 두 변종 모두에 정확하나,
+# SWTE는 기존 prefix 정규식(`_extract_env_from_filename`)을 유지해 300+ 회귀에
+# byte-identical 동작 보장 (env_mode="prefix"). VC2025만 suffix-strip 사용.
+
+
+@dataclass(frozen=True)
+class LogLayout:
+    """VectorCAST 출력 폴더 레이아웃 변종 기술자."""
+    name: str
+    tc_dir: str
+    exec_dir: str
+    cov_dir: str
+    metrics_dir: str
+    tc_suffix: str
+    exec_suffix: str
+    cov_suffix: str
+    metrics_suffix: str
+    env_mode: str  # "prefix" (SWTE 정규식) | "suffix" (suffix-strip)
+
+    def extract_env(self, filename: str, env_prefix: str) -> str:
+        """tc 리포트 파일명 → env 이름. 매칭 실패 시 빈 문자열."""
+        if self.env_mode == "suffix":
+            if filename.endswith(self.tc_suffix):
+                return filename[: -len(self.tc_suffix)]
+            return ""
+        # prefix 모드 — 기존 동작 (backward compat, SWTE/SwIT)
+        return _extract_env_from_filename(filename, env_prefix=env_prefix)
+
+
+SWTE_LAYOUT = LogLayout(
+    name="swte",
+    tc_dir="01.TestCaseDataReport",
+    exec_dir="02.ExecutionResultReport",
+    cov_dir="03.AggregateCoverageReport",
+    metrics_dir="04.MetricsReport",
+    tc_suffix="_test_case_data_report.html",
+    exec_suffix="_execution_results_report.html",
+    cov_suffix="_aggregate_coverage_report.html",
+    metrics_suffix="_metrics_report.html",
+    env_mode="prefix",
+)
+
+VC2025_LAYOUT = LogLayout(
+    name="vc2025",
+    tc_dir="TestCaseData",
+    exec_dir="ExecutionResult",
+    cov_dir="Aggregate",
+    metrics_dir="Metrics",
+    tc_suffix="_TestCaseDataReport.html",
+    exec_suffix="_ExecutionResultReport.html",
+    cov_suffix="_AggregateCoverageReport.html",
+    metrics_suffix="_MetricsReport.html",
+    env_mode="suffix",
+)
+
+# 탐지 순서 — SWTE 우선 (기존 동작 보존), 미발견 시 VC2025.
+_LOG_LAYOUTS = (SWTE_LAYOUT, VC2025_LAYOUT)
+
+
+def _detect_log_layout(
+    resolver: Any, log_folder: str, out_warnings: list[str] | None = None
+) -> LogLayout:
+    """log_folder 내 tc 폴더 존재 여부로 레이아웃 변종 자동 감지.
+
+    SWTE → VC2025 순으로 검사. 둘 다 미발견 시 SWTE_LAYOUT 반환 (기존
+    "하위 폴더 미발견" warning 흐름에 위임 — backward compat).
+    """
+    for layout in _LOG_LAYOUTS:
+        try:
+            if resolver.exists(os.path.join(log_folder, layout.tc_dir)):
+                if layout is not SWTE_LAYOUT and out_warnings is not None:
+                    out_warnings.append(
+                        f"로그 레이아웃 '{layout.name}' 자동 감지 "
+                        f"(폴더 {layout.tc_dir}/ 기준)"
+                    )
+                return layout
+        except Exception:  # noqa: BLE001 — exists 실패는 다음 layout 시도
+            continue
+    return SWTE_LAYOUT
+
+
 # 37차: log_folder 자동 latest release 선택 — `v<버전>_<YYMMDD>` 패턴.
 # 사용자가 `01.Log/` 상위 폴더만 지정해도 그 안의 최신 release 폴더 자동 선택.
 _RELEASE_FOLDER_RE = re.compile(r"^v[\d.]+_(\d{6,8})(?:[_-].+)?$")
@@ -1024,11 +1123,13 @@ def _resolve_latest_release_folder(
     Returns:
         실제 사용할 log_folder path (자동 선택되면 변경, 아니면 원본)
     """
-    # Case A 빠른 경로: sub-folder 이미 존재 → 그대로 사용
-    sub_tc = os.path.join(log_folder, "01.TestCaseDataReport")
+    # Case A 빠른 경로: tc sub-folder 이미 존재 → 그대로 사용.
+    # 라운드 89 — SWTE("01.TestCaseDataReport") / VC2025("TestCaseData") 둘 다 인정.
+    # exists 예외는 W2 계약대로 warning 누적 후 원본 반환 (silent 금지).
     try:
-        if resolver.exists(sub_tc):
-            return log_folder
+        for _layout in _LOG_LAYOUTS:
+            if resolver.exists(os.path.join(log_folder, _layout.tc_dir)):
+                return log_folder
     except Exception as e:
         # 37차 reviewer W2: resolver.exists 실패 원인을 silent로 삼키지 말 것.
         # cloudium 게이트 OFF / IPC 통신 실패 / path 형식 오류 등을 사용자가 인지하도록
@@ -1246,6 +1347,66 @@ def _extract_env_from_filename(name: str, *, env_prefix: str = "SWTE") -> str:
     return m.group(1) if m else ""
 
 
+def _norm_env_stem(stem: str) -> str:
+    """env stem 정규화 — 폴더 간 명명 불일치 흡수용 (라운드 89).
+
+    실 데이터(KJPDS02)에서 TestCaseData는 `..._SafeWriteQueue_PDS`, 형제 폴더는
+    `..._SafeWriteQueue` 로 trailing `_PDS` 토큰이 불일치하는 사례 발견. 매칭 키를
+    소문자 + trailing `_pds` 제거로 정규화해 같은 유닛을 연결한다.
+    """
+    s = stem.strip().lower()
+    while s.endswith("_pds"):
+        s = s[:-4]
+    return s
+
+
+def _resolve_report_path(
+    resolver: Any,
+    folder: str,
+    env: str,
+    suffix: str,
+    *,
+    idx_cache: dict[str, dict[str, str]],
+    out_warnings: list[str] | None,
+) -> str:
+    """`{env}{suffix}` exact 우선, 없으면 정규화 stem 매칭 fallback.
+
+    exact 파일이 존재하면 그대로 반환(happy path — SWTE/대부분 KJPDS02 env에
+    동작 byte-identical). 미존재 시에만 폴더를 1회 인덱싱하여 trailing `_PDS`
+    차이를 흡수한 후보를 찾고, 매칭되면 warning을 남기고 그 경로를 반환한다.
+    후보 0건이면 exact 경로를 그대로 반환(이후 read에서 FileNotFoundError →
+    parse_errors 기록, silent skip 차단 정책 유지).
+    """
+    exact = os.path.join(folder, f"{env}{suffix}")
+    try:
+        if resolver.exists(exact):
+            return exact
+    except Exception:  # noqa: BLE001 — exists 실패는 fuzzy로 위임
+        pass
+
+    idx = idx_cache.get(folder)
+    if idx is None:
+        idx = {}
+        try:
+            for f in _list_dir_via_resolver(resolver, folder, pattern="*.html"):
+                nm = Path(f).name
+                if nm.endswith(suffix):
+                    idx.setdefault(_norm_env_stem(nm[: -len(suffix)]), f)
+        except Exception:  # noqa: BLE001
+            idx = {}
+        idx_cache[folder] = idx
+
+    cand = idx.get(_norm_env_stem(env))
+    if cand and cand != exact:
+        if out_warnings is not None:
+            out_warnings.append(
+                f"파일명 불일치 fallback: env '{env}' → '{Path(cand).name}' "
+                f"({Path(folder).name}/ 폴더, trailing _PDS 정규화 매칭)"
+            )
+        return cand
+    return exact
+
+
 def collect_from_log_folder(
     resolver: Any,
     log_folder: str,
@@ -1315,20 +1476,25 @@ def collect_from_log_folder(
         parse_warnings=warnings,
     )
 
+    # 라운드 89 — 레이아웃 변종 자동 감지 (SWTE / VC2025). 폴더명 + 파일 suffix +
+    # env 추출 방식이 변종마다 다르다.
+    layout = _detect_log_layout(resolver, log_folder, warnings)
+    _diag_logger.info(f"collect_from_log_folder: layout={layout.name!r}")
+
     # 1) 3 sub-folder 존재 확인
-    sub_tc = os.path.join(log_folder, "01.TestCaseDataReport")
-    sub_exec = os.path.join(log_folder, "02.ExecutionResultReport")
-    sub_cov = os.path.join(log_folder, "03.AggregateCoverageReport")
-    # 라운드 74 T909/T910 — 04.MetricsReport (옵션) 동적 탐지. 존재 시 함수별 추가 metric.
-    sub_metrics = os.path.join(log_folder, "04.MetricsReport")
+    sub_tc = os.path.join(log_folder, layout.tc_dir)
+    sub_exec = os.path.join(log_folder, layout.exec_dir)
+    sub_cov = os.path.join(log_folder, layout.cov_dir)
+    # 라운드 74 T909/T910 — Metrics 폴더 (옵션) 동적 탐지. 존재 시 함수별 추가 metric.
+    sub_metrics = os.path.join(log_folder, layout.metrics_dir)
     has_metrics_folder = resolver.exists(sub_metrics)
     if has_metrics_folder:
         _diag_logger.info(f"collect_from_log_folder: 하위 폴더 존재 {sub_metrics!r}")
 
     for sub_path, label in [
-        (sub_tc, "01.TestCaseDataReport"),
-        (sub_exec, "02.ExecutionResultReport"),
-        (sub_cov, "03.AggregateCoverageReport"),
+        (sub_tc, layout.tc_dir),
+        (sub_exec, layout.exec_dir),
+        (sub_cov, layout.cov_dir),
     ]:
         if not resolver.exists(sub_path):
             warnings.append(f"하위 폴더 미발견: {label}")
@@ -1343,20 +1509,23 @@ def collect_from_log_folder(
         f"{len(tc_files)} files: {tc_files[:5]}"
     )
     env_names = sorted({
-        _extract_env_from_filename(Path(f).name, env_prefix=env_prefix)
+        layout.extract_env(Path(f).name, env_prefix)
         for f in tc_files
-        if _extract_env_from_filename(Path(f).name, env_prefix=env_prefix)
+        if layout.extract_env(Path(f).name, env_prefix)
     })
     _diag_logger.info(
         f"collect_from_log_folder: env_names ({len(env_names)}) = {env_names[:10]}"
     )
 
     # 3) 각 env마다 3 파일 추출
+    # 라운드 89 — 폴더별 정규화 stem 인덱스 캐시 (파일명 불일치 fallback용, exact
+    # 매칭 실패 시에만 1회 채워짐).
+    _folder_idx_cache: dict[str, dict[str, str]] = {}
     for env in env_names:
         env_data = EnvironmentData(env_name=env)
 
         # TestCaseData
-        tc_path = os.path.join(sub_tc, f"{env}_test_case_data_report.html")
+        tc_path = os.path.join(sub_tc, f"{env}{layout.tc_suffix}")
         try:
             tcbank = _parse_testcase_data_via_temp(resolver, tc_path)
             env_data.component_name = getattr(tcbank, "component_name", "")
@@ -1371,7 +1540,10 @@ def collect_from_log_folder(
             env_data.parse_errors.append(f"TestCaseData: {type(e).__name__}: {e}")
 
         # ExecutionResult
-        exec_path = os.path.join(sub_exec, f"{env}_execution_results_report.html")
+        exec_path = _resolve_report_path(
+            resolver, sub_exec, env, layout.exec_suffix,
+            idx_cache=_folder_idx_cache, out_warnings=warnings,
+        )
         try:
             data = _read_via_resolver(resolver, exec_path)
             # 58차 F1 — actual_result Dict까지 추출 (extract_execution_results_with_actual)
@@ -1394,7 +1566,10 @@ def collect_from_log_folder(
             env_data.parse_errors.append(f"ExecutionResult: {type(e).__name__}: {e}")
 
         # AggregateCoverage
-        cov_path = os.path.join(sub_cov, f"{env}_aggregate_coverage_report.html")
+        cov_path = _resolve_report_path(
+            resolver, sub_cov, env, layout.cov_suffix,
+            idx_cache=_folder_idx_cache, out_warnings=warnings,
+        )
         try:
             data = _read_via_resolver(resolver, cov_path)
             funcs, total = extract_aggregate_coverage(data)
@@ -1451,7 +1626,10 @@ def collect_from_log_folder(
         # HDPDM01 NE_GN7은 미존재 — silent skip (backward-compat). KJPDS02 같은 다른
         # 양식에 04.MetricsReport이 있으면 자동 활용.
         if has_metrics_folder:
-            metrics_path = os.path.join(sub_metrics, f"{env}_metrics_report.html")
+            metrics_path = _resolve_report_path(
+                resolver, sub_metrics, env, layout.metrics_suffix,
+                idx_cache=_folder_idx_cache, out_warnings=warnings,
+            )
             try:
                 if resolver.exists(metrics_path):
                     metrics_data = _read_via_resolver(resolver, metrics_path)
@@ -1461,7 +1639,10 @@ def collect_from_log_folder(
                     if hmr.ok and hmr.metrics:
                         existing_names = {fc.name for fc in env_data.function_coverage}
                         added = 0
-                        for m in hmr.metrics:
+                        # 라운드 89: hmr.metrics는 dict[str, FunctionCallsMetric] —
+                        # .values() 순회 (이전: 키(str) 순회로 AttributeError, HDPDM01엔
+                        # Metrics 폴더 부재로 미노출되다 KJPDS02 VC2025에서 처음 발현).
+                        for m in hmr.metrics.values():
                             if m.function_name in existing_names:
                                 continue
                             new_fc = FunctionCoverage(

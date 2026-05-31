@@ -265,9 +265,25 @@ def resolve_swuds_function_asil_map(req: Any, project_id: str) -> dict[str, str]
     Returns:
         {fn_id: "A"/"B"/"C"/"D"/"QM"} — 실패 시 빈 dict.
     """
+    # 라운드 89: 단일 parse seam(resolve_swuds_maps)에 위임 — id→ASIL만 반환
+    # (backward compat). name→id가 추가로 필요하면 resolve_swuds_maps 직접 호출.
+    return resolve_swuds_maps(req, project_id)[0]
+
+
+def resolve_swuds_maps(
+    req: Any, project_id: str,
+) -> tuple[dict[str, str], dict[str, str]]:
+    """라운드 89 — SwUDS docx 1회 parse → (function_asil_map, function_name_to_id).
+
+    36MB+ docx를 여러 번 파싱하면 timeout/메모리 폭증 → 단일 parse로 두 맵 동시
+    도출. ``apply_function_asil_map`` 이 reverse map(name→id) 구성에 사용.
+
+    Returns:
+        (``{SwUFn_id: ASIL}``, ``{name: SwUFn_id}``) — 실패 시 (빈, 빈).
+    """
     swuds_path = resolve_swuds_path(req, project_id)
     if not swuds_path:
-        return {}
+        return {}, {}
     from backend.services.file_resolver import get_resolver
     from backend.services.swut_swuds_parser import parse_swuds_docx
     try:
@@ -277,12 +293,12 @@ def resolve_swuds_function_asil_map(req: Any, project_id: str) -> dict[str, str]
         result = parse_swuds_docx(docx_bytes, parse_warnings=parse_warnings)
         if not result.ok:
             _logger.warning("SwUDS ASIL parse failed: %s", parse_warnings)
-            return {}
-        return dict(result.function_asil_map)
+            return {}, {}
+        return dict(result.function_asil_map), dict(result.function_name_to_id)
     except (FileNotFoundError, PermissionError, OSError) as e:
         # F6 Round 3 NC2: OSError 확대 — swuts/hmr 함수와 대칭.
         _logger.warning("SwUDS docx read for ASIL failed: %s", e)
-        return {}
+        return {}, {}
 
 
 def apply_function_asil_map(req: Any, session: Any, project_id: str) -> None:
@@ -326,7 +342,11 @@ def apply_function_asil_map(req: Any, session: Any, project_id: str) -> None:
                 f"c_source ASIL resolve 실패 — {type(e).__name__}"
             )
 
-    swuds_map = resolve_swuds_function_asil_map(req, project_id)
+    # 라운드 89 — SwUDS docx를 1회만 parse (36MB docx 다중 파싱 timeout/메모리
+    # 폭증 회피). resolve_swuds_maps가 id→ASIL (merge용) + name→id (reverse map)을
+    # 단일 parse로 반환. 이전: id-only 함수 + iso26262 regex extractor 2개가 각각
+    # 36MB docx를 별도 파싱 (~3~4회, 1.3GB×N, >200s timeout) → 단일 seam으로 통합.
+    swuds_map, swuds_name_to_id = resolve_swuds_maps(req, project_id)
 
     # Merge — c_source 우선 (swuds는 c_source 없는 키만 채움)
     merged = dict(swuds_map)
@@ -363,6 +383,21 @@ def apply_function_asil_map(req: Any, session: Any, project_id: str) -> None:
     if merged and session.environments:
         session.environments[0].function_asil_map = merged
 
+    # 라운드 89 — SUDS reverse maps 주입 (위 단일 parse 결과 재사용).
+    # 이유: coverage 함수 unit_id는 빌더 순차(SwUFn_0001..)라 SwUDS 문서 id
+    # (SwUFn_0101..)와 직접 매칭 실패 → `_compute_asil_distribution`의 함수명
+    # reverse 경로(name_to_swufn + suds_map)가 필요. (이전엔 round 84-85 extractor가
+    # 정의만 되고 미배선이라 KJPDS02 ASIL 전부 UNKNOWN.)
+    if swuds_map:
+        session.function_asil_from_suds = swuds_map
+    if swuds_name_to_id:
+        session.function_name_to_swufn_from_suds = swuds_name_to_id
+    if swuds_map or swuds_name_to_id:
+        session.parse_warnings.append(
+            f"SUDS reverse map (라운드 89) — ASIL {len(swuds_map)}건 / "
+            f"name→SwUFn {len(swuds_name_to_id)}건 주입 (단일 parse)"
+        )
+
 
 __all__ = [
     "load_meta_from_config",
@@ -370,6 +405,7 @@ __all__ = [
     "resolve_c_source_root",
     "resolve_swuds_function_ids",
     "resolve_swuds_function_asil_map",
+    "resolve_swuds_maps",
     "apply_function_asil_map",
     "resolve_swuts_path",
     "resolve_swuts_test_specs",

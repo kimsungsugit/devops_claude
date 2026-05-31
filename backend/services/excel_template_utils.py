@@ -699,10 +699,15 @@ def push_sentinel_to_last_row(
         return None
 
     scan_end = search_max_row or ws.max_row
+    # 라운드 89 perf — ws.max_column을 루프 밖으로 1회 hoist. openpyxl의 max_column은
+    # property로 매 호출마다 전체 셀을 순회(O(cells))하므로, for r 루프 안에서 호출하면
+    # O(rows × cells) = O(n²)가 된다 (py-spy: _write_test_log 시간의 99.7%가 여기).
+    # 본 함수는 읽기 후 sentinel 값만 이동 — 컬럼 수 불변이라 hoist는 동작 동일.
+    max_col = ws.max_column
     found_row: int | None = None
     found_col: int | None = None
     for r in range(1, scan_end + 1):
-        for c in range(1, ws.max_column + 1):
+        for c in range(1, max_col + 1):
             try:
                 v = ws.cell(row=r, column=c).value
             except (AttributeError, IndexError):
@@ -719,7 +724,7 @@ def push_sentinel_to_last_row(
     # 실제 데이터 last row 찾기 (sentinel 위치 제외, 그 위에서 마지막 non-empty)
     last_data_row = found_row
     for r in range(found_row + 1, scan_end + 1):
-        for c in range(1, ws.max_column + 1):
+        for c in range(1, max_col + 1):
             try:
                 v = ws.cell(row=r, column=c).value
             except (AttributeError, IndexError):

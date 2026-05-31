@@ -58,6 +58,9 @@ class SwUDSEntry:
     # 32차 W28: 함수별 ASIL 등급 — heading 다음 표의 'ASIL' 라벨 옆 셀에서 추출.
     # 단일 문자 ("A"/"B"/"C"/"D"/"QM") 또는 빈 string (라벨 없음/잘못된 값).
     asil: str = ""
+    # 라운드 89: 함수 이름 (table 'Name' 행 또는 heading 'SwUFn_NNNN: name'에서).
+    # coverage 함수명 ↔ ASIL reverse map 구성용 (id 직접 매칭 실패 대비).
+    name: str = ""
 
 
 @dataclass
@@ -79,6 +82,15 @@ class SwUDSParseResult:
         ASIL 비어있는 entry는 제외. 매핑 0건이면 빈 dict.
         """
         return {e.function_id: e.asil for e in self.entries if e.asil}
+
+    @property
+    def function_name_to_id(self) -> dict[str, str]:
+        """라운드 89: 함수 이름 → function_id dict.
+
+        coverage 함수 unit_id가 빌더 순차(SwUFn_0001..)라 SwUDS 문서 id와 직접
+        매칭 실패 → 함수명 reverse 경로용. name 비어있는 entry는 제외.
+        """
+        return {e.name: e.function_id for e in self.entries if e.name}
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -145,12 +157,23 @@ def _extract_asil_from_table(tbl: Any) -> str:
     try:
         from backend.services.swut_asil_resolver import _normalize_asil
         rows = tbl.rows
-        for row in rows[:5]:
+        # 라운드 89: 두 가지 양식 변종 동시 지원.
+        #   HDPDM01: ['ASIL', 'A']            — 라벨 다음 셀이 값
+        #   KJPDS02 v2.08: ['ASIL','ASIL','A','A','A','A'] — 라벨 2칸 merge + 값 'A'
+        # → 라벨 매칭 후 i+1만 보지 말고 이후 셀을 스캔해 첫 유효 등급 채택
+        #   (반복 라벨 셀 skip). 또한 KJPDS02 ASIL 행이 r5라 행 범위 5→8 확장
+        #   (Function Info: ID/Name/Prototype/Description/ASIL/Cyber/Reuse/Related).
+        for row in rows[:8]:
             cells = [c.text.strip() for c in row.cells]
             for i, c in enumerate(cells):
                 if c.lower() in _ASIL_LABEL_CANDIDATES:
-                    if i + 1 < len(cells):
-                        return _normalize_asil(cells[i + 1])
+                    for nxt in cells[i + 1:]:
+                        # 반복 라벨 셀은 건너뛰고 첫 유효 등급 채택.
+                        if nxt.lower() in _ASIL_LABEL_CANDIDATES:
+                            continue
+                        grade = _normalize_asil(nxt)
+                        if grade:
+                            return grade
     except Exception as e:  # pragma: no cover — 양식 다양성 fail-safe
         import logging
         logging.getLogger(__name__).debug(
@@ -158,6 +181,39 @@ def _extract_asil_from_table(tbl: Any) -> str:
             type(e).__name__, e,
         )
     return ""
+
+
+_NAME_LABEL_CANDIDATES = ("name", "function name", "함수명", "함수 이름", "이름")
+# heading 'SwUFn_0101: main' / 'SwUFn_0101 — DrvIn_Main' → name 추출.
+_HEADING_NAME_RE = re.compile(r"^SwUFn_\d+\s*[:—–\-]\s*([A-Za-z_]\w*)")
+
+
+def _extract_name_from_table(tbl: Any) -> str:
+    """라운드 89: 함수 table에서 'Name' 라벨 옆 첫 유효 값 추출 (ASIL과 동일 패턴).
+
+    KJPDS02 v2.08: ['Name','Name','main','main',...] — 라벨 2칸 + 값 반복.
+    라벨 이후 첫 비-라벨 셀 채택. 실패 시 빈 string (fail-safe).
+    """
+    try:
+        rows = tbl.rows
+        for row in rows[:8]:
+            cells = [c.text.strip() for c in row.cells]
+            for i, c in enumerate(cells):
+                if c.lower() in _NAME_LABEL_CANDIDATES:
+                    for nxt in cells[i + 1:]:
+                        if nxt.lower() in _NAME_LABEL_CANDIDATES:
+                            continue
+                        if nxt:
+                            return nxt[:120]
+    except Exception:  # pragma: no cover — 양식 다양성 fail-safe
+        pass
+    return ""
+
+
+def _name_from_heading(heading: str) -> str:
+    """heading 'SwUFn_NNNN: name' → name (table 미발견 시 fallback)."""
+    m = _HEADING_NAME_RE.match(heading.strip())
+    return m.group(1) if m else ""
 
 
 def parse_swuds_docx(
@@ -212,6 +268,7 @@ def parse_swuds_docx(
                         function_id=last_fn_id,
                         heading_text=last_heading,
                         description="",
+                        name=_name_from_heading(last_heading),
                     ))
                 last_heading = text
                 last_fn_id = f"SwUFn_{m.group(1)}"
@@ -222,11 +279,14 @@ def parse_swuds_docx(
             description = _extract_description_from_table(node)
             # 32차 W28: 동일 table에서 ASIL 추출 — Description 패턴 차용.
             asil = _extract_asil_from_table(node)
+            # 라운드 89: 함수 이름 — table 'Name' 행 우선, 없으면 heading fallback.
+            name = _extract_name_from_table(node) or _name_from_heading(last_heading or "")
             entries.append(SwUDSEntry(
                 function_id=last_fn_id,
                 heading_text=last_heading or "",
                 description=description,
                 asil=asil,
+                name=name,
             ))
             # 같은 heading 아래 다른 entry 추가 안 함 (중복 방지)
             last_fn_id = None
@@ -238,6 +298,7 @@ def parse_swuds_docx(
     ):
         entries.append(SwUDSEntry(
             function_id=last_fn_id, heading_text=last_heading, description="",
+            name=_name_from_heading(last_heading),
         ))
 
     if not entries:

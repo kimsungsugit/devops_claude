@@ -135,9 +135,10 @@ class TestApplyFunctionAsilMap:
         monkeypatch.setattr(
             asil_mod, "resolve_function_asil_map", lambda *_a, **_k: FakeResult(),
         )
+        # 라운드 89: apply는 단일 parse seam resolve_swuds_maps 사용 (id→ASIL, name→id).
         monkeypatch.setattr(
-            resolver, "resolve_swuds_function_asil_map",
-            lambda req, project_id: {"SwUFn_0101": "D"},
+            resolver, "resolve_swuds_maps",
+            lambda req, project_id: ({"SwUFn_0101": "D"}, {}),
         )
         req = _fake_req(c_source_root="C:/src", swuds_docx_path="C:/swuds.docx")
         session = self._session()

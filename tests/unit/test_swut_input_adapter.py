@@ -19,8 +19,13 @@ from backend.services.swut_input_adapter import (  # noqa: E402
     FunctionCoverage,
     SwUTSession,
     ExecutionRow,
+    SWTE_LAYOUT,
+    VC2025_LAYOUT,
+    _detect_log_layout,
     _extract_env_from_filename,
+    _norm_env_stem,
     _parse_metric_cell,
+    _resolve_report_path,
     collect_swut_session,
     extract_aggregate_coverage,
     extract_execution_results,
@@ -570,6 +575,137 @@ class TestCollectFromLogFolder:
             allowed_roots=[str(tmp_path / "project")],
         )
         assert session.project_id == "HDPDM01"
+
+
+# ---------------------------------------------------------------------------
+# 라운드 89 — VectorCAST 출력 레이아웃 변종 (SWTE / VC2025)
+# ---------------------------------------------------------------------------
+
+class TestLogLayout:
+    def test_detect_swte_layout(self):
+        log = r"C:\fake\rel"
+        resolver = _FakeResolver({}, {log, log + r"\01.TestCaseDataReport"})
+        assert _detect_log_layout(resolver, log).name == "swte"
+
+    def test_detect_vc2025_layout(self):
+        log = r"C:\fake\UT_Report_251104"
+        resolver = _FakeResolver({}, {log, log + r"\TestCaseData"})
+        warns: list[str] = []
+        layout = _detect_log_layout(resolver, log, warns)
+        assert layout.name == "vc2025"
+        assert any("vc2025" in w for w in warns)
+
+    def test_detect_defaults_to_swte_when_neither(self):
+        log = r"C:\fake\empty"
+        resolver = _FakeResolver({}, {log})
+        # 둘 다 미발견 → SWTE (기존 "하위 폴더 미발견" 흐름에 위임)
+        assert _detect_log_layout(resolver, log).name == "swte"
+
+    def test_swte_extract_env_prefix_mode(self):
+        # SWTE는 prefix 정규식 — 숫자 뒤 토큰 무시
+        assert SWTE_LAYOUT.extract_env(
+            "SWTE_01_test_case_data_report.html", "SWTE"
+        ) == "SWTE_01"
+
+    def test_vc2025_extract_env_suffix_strip(self):
+        # VC2025는 suffix-strip — 숫자 뒤 이름 보존
+        assert VC2025_LAYOUT.extract_env(
+            "SwUT_01_Lib_sha256_TestCaseDataReport.html", "SWTE"
+        ) == "SwUT_01_Lib_sha256"
+
+    def test_vc2025_extract_env_non_matching_returns_empty(self):
+        assert VC2025_LAYOUT.extract_env("readme.txt", "SWTE") == ""
+
+
+class TestNormEnvStem:
+    @pytest.mark.parametrize("raw,expected", [
+        ("SwUT_11_Lib_SafeWriteQueue_PDS", "swut_11_lib_safewritequeue"),
+        ("SwUT_11_Lib_SafeWriteQueue", "swut_11_lib_safewritequeue"),
+        ("SwUT_02_DrvIn_Main_PDS", "swut_02_drvin_main"),
+        ("Foo_PDS_PDS", "foo"),  # trailing 반복 제거
+        ("Foo", "foo"),
+    ])
+    def test_norm(self, raw, expected):
+        assert _norm_env_stem(raw) == expected
+
+
+class TestResolveReportPath:
+    def test_exact_match_returns_exact_no_warning(self):
+        folder = r"C:\fake\Aggregate"
+        exact = folder + r"\SwUT_01_Foo_AggregateCoverageReport.html"
+        resolver = _FakeResolver({exact: b"x"}, {folder})
+        warns: list[str] = []
+        out = _resolve_report_path(
+            resolver, folder, "SwUT_01_Foo",
+            VC2025_LAYOUT.cov_suffix, idx_cache={}, out_warnings=warns,
+        )
+        assert out.replace("/", "\\") == exact
+        assert warns == []
+
+    def test_pds_mismatch_fuzzy_fallback_with_warning(self):
+        # TestCaseData env엔 _PDS, Aggregate 파일엔 _PDS 없음 → 정규화 매칭
+        folder = r"C:\fake\Aggregate"
+        actual = folder + r"\SwUT_11_Lib_SafeWriteQueue_AggregateCoverageReport.html"
+        resolver = _FakeResolver({actual: b"x"}, {folder})
+        warns: list[str] = []
+        out = _resolve_report_path(
+            resolver, folder, "SwUT_11_Lib_SafeWriteQueue_PDS",
+            VC2025_LAYOUT.cov_suffix, idx_cache={}, out_warnings=warns,
+        )
+        assert out.replace("/", "\\") == actual
+        assert any("불일치 fallback" in w for w in warns)
+
+    def test_no_candidate_returns_exact_path(self):
+        folder = r"C:\fake\Aggregate"
+        resolver = _FakeResolver({}, {folder})
+        warns: list[str] = []
+        out = _resolve_report_path(
+            resolver, folder, "SwUT_99_Ghost",
+            VC2025_LAYOUT.cov_suffix, idx_cache={}, out_warnings=warns,
+        )
+        # 후보 0건 → exact 경로 반환 (이후 read에서 FileNotFoundError로 기록)
+        assert out.endswith("SwUT_99_Ghost_AggregateCoverageReport.html")
+        assert warns == []
+
+
+class TestCollectVC2025Layout:
+    def test_collects_vc2025_with_pds_mismatch(self):
+        """VC2025 CamelCase 폴더 + 1 env의 _PDS 파일명 불일치 fallback 통합."""
+        log = r"C:\fake\UT_Report_251104"
+        tc = log + r"\TestCaseData"
+        ex = log + r"\ExecutionResult"
+        cov = log + r"\Aggregate"
+
+        files = {
+            # env A — 전 폴더 일관
+            tc + r"\SwUT_01_Foo_TestCaseDataReport.html":
+                _make_tc_html(env="SwUT_01_Foo", component="Foo"),
+            ex + r"\SwUT_01_Foo_ExecutionResultReport.html":
+                _EXEC_HTML_TEMPLATE.encode("utf-8"),
+            cov + r"\SwUT_01_Foo_AggregateCoverageReport.html":
+                _AGG_HTML_TEMPLATE.encode("utf-8"),
+            # env B — TestCaseData만 _PDS, 형제 폴더는 _PDS 없음 (실데이터 패턴)
+            tc + r"\SwUT_11_Bar_PDS_TestCaseDataReport.html":
+                _make_tc_html(env="SwUT_11_Bar_PDS", component="Bar"),
+            ex + r"\SwUT_11_Bar_ExecutionResultReport.html":
+                _EXEC_HTML_TEMPLATE.encode("utf-8"),
+            cov + r"\SwUT_11_Bar_AggregateCoverageReport.html":
+                _AGG_HTML_TEMPLATE.encode("utf-8"),
+        }
+        dirs = {log, tc, ex, cov}
+        resolver = _FakeResolver(files, dirs)
+        session = collect_swut_session(
+            resolver, project_id="KJPDS02", log_folder=log,
+        )
+        assert len(session.environments) == 2
+        names = {e.env_name for e in session.environments}
+        assert names == {"SwUT_01_Foo", "SwUT_11_Bar_PDS"}
+        # 두 env 모두 coverage/exec 정상 추출 (fallback 포함)
+        for e in session.environments:
+            assert len(e.function_coverage) == 2, f"{e.env_name}: {e.parse_errors}"
+            assert len(e.test_results) == 2
+        # fallback warning 1개 이상 (env B의 3 폴더 중 exec/cov)
+        assert any("불일치 fallback" in w for w in session.parse_warnings)
 
 
 # ---------------------------------------------------------------------------

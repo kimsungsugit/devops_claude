@@ -28,6 +28,10 @@ class BuildMetaBase:
     default_author: str = ""
     default_reviewer: str = ""
     default_approver: str = ""
+    # 라운드 89: 출력 파일명 패턴 (config doc_filenames[kind]). `{version}`/`{date}`
+    # 치환자 지원. 빈 문자열이면 빌더가 HDPDM01 v3.01 하드코딩 default 사용
+    # (backward compat). 예: "(KJPDS02_DV_SwUTCV) ... Result_v{version}_{date}_R.xlsx".
+    doc_filename_pattern: str = ""
 
     # dialog (매 빌드 변경)
     release_sw_version: str = ""   # 예: 1.01.05

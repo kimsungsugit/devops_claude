@@ -2175,10 +2175,17 @@ def build_coverage_report(
     out.seek(0)  # router StreamingResponse가 처음부터 read
     wb.close()
 
-    filename = (
-        f"({meta.project_id})SwUT Coverage Report_"
-        f"v{meta.release_sw_version}_{short_date(meta.test_date)}_R.xlsx"
-    )
+    # 라운드 89: config doc_filenames[coverage] 패턴 우선 ({version}/{date} 치환).
+    # 빈 값이면 HDPDM01 v3.01 하드코딩 default (backward compat).
+    if meta.doc_filename_pattern:
+        filename = meta.doc_filename_pattern.format(
+            version=meta.release_sw_version, date=short_date(meta.test_date),
+        )
+    else:
+        filename = (
+            f"({meta.project_id})SwUT Coverage Report_"
+            f"v{meta.release_sw_version}_{short_date(meta.test_date)}_R.xlsx"
+        )
 
     return CoverageBuildResult(
         ok=True,

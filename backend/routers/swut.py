@@ -104,6 +104,8 @@ def _load_meta_from_config(project_id: str) -> dict[str, Any]:
 def _build_coverage_meta(req: SwUTBuildRequest) -> CoverageBuildMeta:
     cfg = _load_meta_from_config(req.project_id)
     approvers = cfg.get("approvers", {}) or {}
+    # 라운드 89: 출력 파일명 패턴 (config doc_filenames[coverage]). 없으면 빌더 default.
+    doc_filenames = cfg.get("doc_filenames", {}) or {}
     return CoverageBuildMeta(
         project_id=req.project_id,
         project_full_name=cfg.get("project_full_name", req.project_id),
@@ -113,6 +115,7 @@ def _build_coverage_meta(req: SwUTBuildRequest) -> CoverageBuildMeta:
         default_author=approvers.get("default_author", ""),
         default_reviewer=approvers.get("default_reviewer", ""),
         default_approver=approvers.get("default_approver", ""),
+        doc_filename_pattern=doc_filenames.get("coverage", ""),
         release_sw_version=req.release_sw_version,
         hw_version=req.hw_version,
         test_date=req.test_date,
@@ -126,6 +129,7 @@ def _build_coverage_meta(req: SwUTBuildRequest) -> CoverageBuildMeta:
 def _build_sutr_meta(req: SwUTBuildRequest) -> SutrBuildMeta:
     cfg = _load_meta_from_config(req.project_id)
     approvers = cfg.get("approvers", {}) or {}
+    doc_filenames = cfg.get("doc_filenames", {}) or {}
     return SutrBuildMeta(
         project_id=req.project_id,
         project_full_name=cfg.get("project_full_name", req.project_id),
@@ -135,6 +139,7 @@ def _build_sutr_meta(req: SwUTBuildRequest) -> SutrBuildMeta:
         default_author=approvers.get("default_author", ""),
         default_reviewer=approvers.get("default_reviewer", ""),
         default_approver=approvers.get("default_approver", ""),
+        doc_filename_pattern=doc_filenames.get("sutr", ""),
         release_sw_version=req.release_sw_version,
         hw_version=req.hw_version,
         test_date=req.test_date,
