@@ -620,6 +620,16 @@ def _write_coverage_sheet(
     # 30차 W21: 함수별 ASIL 매핑 + ASIL D 식별.
     function_asil_map: dict[str, str] = agg.get("function_asil_map") or {}
 
+    # 라운드 92 — KJPDS02 spec-based 양식 정렬 (회사 감사본 일치).
+    #   회사 SwUTCV v1.01 4.Coverage 데이터 행은:
+    #     C=SwCom_NN (컴포넌트 ID) / D=실 SwUFn_NNNN (SwUDS 함수 ID) /
+    #     H,L=Pass/Fail (Statement/Branch 합격 여부)
+    #   기존 (라운드 77~91) 동작은 D=순차 SwUFn_0001.. / C=env명 / H,L='O'/'X'.
+    #   graceful — name→SwUFn 매핑(SwUDS 함수명→ID)이 agg에 존재할 때만 활성.
+    #   매핑 없으면 (HDPDM01/SwIT) 기존 동작 100% 보존.
+    name_to_swufn: dict[str, str] = agg.get("function_name_to_swufn_from_suds") or {}
+    spec_based = bool(name_to_swufn) and has_component_col
+
     # F7 stage 8 T706 fix — SwITCV (회사 표준) layout 분기:
     # layout.coverage_metric_kind == "function_and_calls" → SwIT 양식
     #   회사 표준 SwITCV 4.Coverage R9 header: No(C2)/Component(C3)/Unit(C4-C5)/
@@ -706,9 +716,32 @@ def _write_coverage_sheet(
     # 회사 v3.01 SwUTCV 4.Coverage 양식 R8: C3='Component', C4='Unit', C5='Name'.
     # 이전: C3 미stamp (양식 default `SwCom_01: XXXX` 잔존 또는 빈). audit reviewer가
     # 함수의 소속 component (vcast component_name 또는 c_parser file) 인지 어려움.
+    # 라운드 92 — spec_based 시 C열(Component) 데이터 영역 병합 해제. 회사 감사본은
+    # C열 병합 없이 매 행 SwCom_NN 명시 (실측). 표준 v0.10 템플릿은 C10:C14 등
+    # 세로 병합 잔존 → 비-anchor 행 stamp가 무시됨. 데이터 영역 병합만 해제 (헤더
+    # C8:C9 보존). HDPDM01/SwIT (spec_based=False)는 영향 없음.
+    if spec_based:
+        comp_col_idx = no_col + 1
+        for rng in list(ws.merged_cells.ranges):
+            if (rng.min_col <= comp_col_idx <= rng.max_col
+                    and rng.min_row >= data_start):
+                try:
+                    ws.unmerge_cells(str(rng))
+                except (ValueError, KeyError):
+                    pass
     written = 0
+    # 라운드 92 — spec_based Statement/Branch Pass/Fail 집계 (TOTALS 섹션용) +
+    # SwUFn 매핑 실패 함수 list (audit 진단).
+    spec_stmt_fail = 0
+    spec_stmt_total = 0
+    spec_branch_fail = 0
+    spec_branch_total = 0
+    spec_unmatched: list[str] = []
+    spec_unmatched_count = 0
+    last_data_row = data_start - 1
     for i, fc in enumerate(function_rows):
         r = data_start + i
+        last_data_row = r
         safe_write(ws, r, no_col, i + 1)
 
         # 라운드 74 T906 — c_parser only row 식별 (unit_id `SwUFn_C_<idx>` prefix).
@@ -719,7 +752,22 @@ def _write_coverage_sheet(
         # 의도 (`SwUFn_0101` 형식 함수 식별자)와 mismatch. 사용자 검수: "ID가 함수이름이
         # 들어가 있네". vcast 함수 (unit_id == name인 경우)는 글로벌 sequential
         # `SwUFn_<i+1:04d>` 부여. sub_functions/c_parser only는 기존 unit_id 유지.
-        if (fc.unit_id == fc.name and fc.unit_id
+        # 라운드 92 — spec_based 시 D=실 SwUFn ID (SwUDS 함수명→ID 매핑).
+        # 매핑 성공: SwUFn_0121 (회사 감사본 일치). 실패 (SUDS 미등재 함수):
+        # 순차 SwUFn_NNNN fallback + spec_unmatched 누적 (audit 진단).
+        resolved_swufn = ""
+        if spec_based and not is_c_parser_only:
+            resolved_swufn = name_to_swufn.get(fc.name, "") or name_to_swufn.get(
+                fc.unit_id, ""
+            )
+            if not resolved_swufn:
+                spec_unmatched_count += 1
+                if len(spec_unmatched) < 60:
+                    spec_unmatched.append(fc.name or fc.unit_id or "<no-id>")
+
+        if resolved_swufn:
+            display_unit_id = resolved_swufn
+        elif (fc.unit_id == fc.name and fc.unit_id
                 and not fc.unit_id.startswith("SwUFn_")):
             display_unit_id = f"SwUFn_{i + 1:04d}"
         else:
@@ -731,17 +779,34 @@ def _write_coverage_sheet(
         # component name 추적, c_parser only는 file basename으로 주입 완료.
         if has_component_col:
             comp_col = no_col + 1  # No 다음 col
-            # 우선순위: fc.component_name (vcast/sub_function/c_parser only 모두 주입됨)
-            # → fc.file.stem fallback (component_name 빈 string인 backward-compat)
-            comp_name = fc.component_name
-            if not comp_name and fc.file:
-                from pathlib import Path as _PathLocal2
-                comp_name = _PathLocal2(fc.file).stem
+            comp_name = ""
+            # 라운드 92 — spec_based 시 C=SwCom_NN (회사 감사본 일치).
+            # 출처: 실 SwUFn_NNNN 앞 2자리 (SwUDS 'Related ID' SwCom 검증 결과 100%
+            # 일치 — 라운드 92 .codex_tmp 조사). 매핑 실패 시 env명 fallback.
+            if spec_based and resolved_swufn:
+                m_swufn = re.match(r"SwUFn_(\d{2})\d{2}", resolved_swufn)
+                if m_swufn:
+                    comp_name = f"SwCom_{m_swufn.group(1)}"
+            if not comp_name:
+                # 우선순위: fc.component_name (vcast/sub_function/c_parser only 주입)
+                # → fc.file.stem fallback (component_name 빈 string인 backward-compat)
+                comp_name = fc.component_name
+                if not comp_name and fc.file:
+                    from pathlib import Path as _PathLocal2
+                    comp_name = _PathLocal2(fc.file).stem
             if comp_name:
                 safe_write(ws, r, comp_col, comp_name)
 
         safe_write(ws, r, unit_id_col, display_unit_id)
         safe_write(ws, r, unit_id_col + 1, fc.name)
+
+        # 라운드 92 — spec_based 매핑 실패 행(SwUDS 미등재)은 D 셀 노란 마킹.
+        # 순차 SwUFn fallback은 추정 ID라 audit reviewer가 추적성 수동 검증 필요.
+        # SwUDS 매핑 성공 행은 마킹 없음 (회사 감사본 동일).
+        if spec_based and not is_c_parser_only and not resolved_swufn:
+            from backend.services.excel_template_utils import _apply_fill
+            from backend.services.design_tokens import USER_INPUT_FILL_RGB
+            _apply_fill(ws, r, unit_id_col, USER_INPUT_FILL_RGB)
 
         if is_swit_metric_layout:
             # SwITCV — Functions Pass (C6) + Function Called metric (C8/C9/C10)
@@ -780,12 +845,30 @@ def _write_coverage_sheet(
                 _apply_fill(ws, r, branch_count_col, USER_INPUT_FILL_RGB)
                 _apply_fill(ws, r, unit_id_col + 1, USER_INPUT_FILL_RGB)  # Name col
             else:
+                # 라운드 92 — spec_based 시 Pass 셀(H/L) 표기 'Pass'/'Fail'
+                # (회사 감사본). 기존 (HDPDM01/v3.01): 'O'/'X' 유지.
+                stmt_mark = (
+                    ("Pass" if fc.statement.passed else "Fail") if spec_based
+                    else ("O" if fc.statement.passed else "X")
+                )
+                branch_mark = (
+                    ("Pass" if fc.branch.passed else "Fail") if spec_based
+                    else ("O" if fc.branch.passed else "X")
+                )
                 safe_write(ws, r, stmt_count_col, fc.statement.total)
                 safe_write(ws, r, stmt_count_col + 1, fc.statement.covered)
-                safe_write(ws, r, stmt_count_col + 2, "O" if fc.statement.passed else "X")
+                safe_write(ws, r, stmt_count_col + 2, stmt_mark)
                 safe_write(ws, r, branch_count_col, fc.branch.total)
                 safe_write(ws, r, branch_count_col + 1, fc.branch.covered)
-                safe_write(ws, r, branch_count_col + 2, "O" if fc.branch.passed else "X")
+                safe_write(ws, r, branch_count_col + 2, branch_mark)
+                # 라운드 92 — spec_based TOTALS 집계 (Pass/Fail count).
+                if spec_based:
+                    spec_stmt_total += 1
+                    spec_branch_total += 1
+                    if not fc.statement.passed:
+                        spec_stmt_fail += 1
+                    if not fc.branch.passed:
+                        spec_branch_fail += 1
 
             # 59차 F4-C — KJPDS02 v1.01 양식 (HDPDM01과 별도): Function Calls metric col stamp.
             if (
@@ -918,7 +1001,96 @@ def _write_coverage_sheet(
                     )
         except ImportError:
             pass
+
+    # 라운드 92 — spec_based TOTALS 섹션 + 상단 요약 (회사 감사본 일치).
+    # clear 이후 stamp (clear가 default row 비운 뒤). 데이터 끝(last_data_row)
+    # 다음 3행에 Fail/Pass/Total 카운트.
+    if spec_based and written > 0 and not is_swit_metric_layout:
+        _write_spec_totals(
+            ws,
+            data_start=data_start,
+            last_data_row=last_data_row,
+            unit_id_col=unit_id_col,
+            stmt_label_col=stmt_count_col + 1,  # G (Fail/Pass/Total 라벨)
+            stmt_value_col=stmt_count_col + 2,  # H (count 수식)
+            branch_label_col=branch_count_col + 1,  # K
+            branch_value_col=branch_count_col + 2,  # L
+            no_col=no_col,
+        )
+        if out_warnings is not None:
+            out_warnings.append(
+                f"[spec-cov] 라운드 92 — Statement {spec_stmt_total} (Fail {spec_stmt_fail}) / "
+                f"Branch {spec_branch_total} (Fail {spec_branch_fail}) TOTALS + 요약 stamp"
+            )
+            if spec_unmatched_count > 0:
+                out_warnings.append(
+                    f"[spec-cov] 함수명↔SwUFn 매핑 실패 {spec_unmatched_count}건 — "
+                    f"SwUDS 미등재 함수 (순차 SwUFn fallback). 예: "
+                    f"{', '.join(spec_unmatched[:15])}"
+                )
     return written
+
+
+def _write_spec_totals(
+    ws, *, data_start: int, last_data_row: int,
+    unit_id_col: int, no_col: int,
+    stmt_label_col: int, stmt_value_col: int,
+    branch_label_col: int, branch_value_col: int,
+) -> None:
+    """라운드 92 — 회사 감사본 4.Coverage TOTALS 3행 (Fail/Pass/Total) + 상단 요약.
+
+    레퍼런스 (KJPDS02 v1.01) 실측 — H/L 열은 모두 수식:
+      r580: D='Total'  G='Fail'  H==COUNTIF(H10:H579,"Fail")  K='Fail'  L=COUNTIF(...)
+      r581:            G='Pass'  H==COUNTIF(H10:H579,"Pass")   K='Pass'  L=COUNTIF(...)
+      r582:            G='Total' H==SUM(H580:H581)             K='Total' L=SUM(...)
+
+    상단 요약 r5/r6 (양식 표준 v0.10 수식 `=E25`/`=H25` 등은 row 확장으로 cross-ref
+    갱신되나 단일 TOTALS 행을 가정 → 3행 구조와 misalign). 레퍼런스 수식 패턴으로
+    직접 덮어써 정합 보장:
+      r5 Statement: E==B<last_no_row>(함수 수=No 마지막) F==H<row_fail> H==(E5-F5)/E5
+      r6 Branch:    E==B<last_no_row>                   F==L<row_fail>
+
+    `safe_write` 대신 직접 cell.value 할당 — 'Pass'/'Fail'/숫자 수식 모두 stamp.
+    """
+    from openpyxl.utils import get_column_letter
+
+    row_fail = last_data_row + 1
+    row_pass = last_data_row + 2
+    row_total = last_data_row + 3
+    hcol = get_column_letter(stmt_value_col)
+    lcol = get_column_letter(branch_value_col)
+    bcol = get_column_letter(no_col)
+
+    def _set(rr, cc, val):
+        try:
+            ws.cell(rr, cc).value = val
+        except (ValueError, AttributeError):
+            pass
+
+    # D 'Total' 라벨 (Unit ID col, 첫 row)
+    _set(row_fail, unit_id_col, "Total")
+    # Fail row — COUNTIF "Fail"
+    _set(row_fail, stmt_label_col, "Fail")
+    _set(row_fail, stmt_value_col, f'=COUNTIF({hcol}{data_start}:{hcol}{last_data_row},"Fail")')
+    _set(row_fail, branch_label_col, "Fail")
+    _set(row_fail, branch_value_col, f'=COUNTIF({lcol}{data_start}:{lcol}{last_data_row},"Fail")')
+    # Pass row — COUNTIF "Pass"
+    _set(row_pass, stmt_label_col, "Pass")
+    _set(row_pass, stmt_value_col, f'=COUNTIF({hcol}{data_start}:{hcol}{last_data_row},"Pass")')
+    _set(row_pass, branch_label_col, "Pass")
+    _set(row_pass, branch_value_col, f'=COUNTIF({lcol}{data_start}:{lcol}{last_data_row},"Pass")')
+    # Total row — SUM(Fail+Pass)
+    _set(row_total, stmt_label_col, "Total")
+    _set(row_total, stmt_value_col, f'=SUM({hcol}{row_fail}:{hcol}{row_pass})')
+    _set(row_total, branch_label_col, "Total")
+    _set(row_total, branch_value_col, f'=SUM({lcol}{row_fail}:{lcol}{row_pass})')
+
+    # 상단 요약 r5/r6 — 레퍼런스 수식 패턴 (Total=함수 수, Fail Count=Fail row).
+    # E5=마지막 No row 값(=함수 수), F5=stmt fail, H5=coverage 비율.
+    _set(5, 5, f"={bcol}{last_data_row}")
+    _set(5, 6, f"={hcol}{row_fail}")
+    _set(6, 5, f"={bcol}{last_data_row}")
+    _set(6, 6, f"={lcol}{row_fail}")
 
 
 # BLANK_MARKUP은 excel_template_utils에서 import (단일 출처).
