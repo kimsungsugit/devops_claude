@@ -290,20 +290,49 @@ ISO 26262 ASIL A 단위테스트 산출물 자동 생성 + cross-validation 플�
 - SwUDS docx에서 ASIL 추출 (현재 C 소스 단일 출처)
 - ASIL B/C 함수 시각 강조 (본 라운드는 D만)
 
-### 시각 강조 정책 (23/24/29/30/31차)
+### 시각 강조 정책 (23/24/29/30/31차 + 라운드 81 5단계 확장)
 
-산출물 cell에 audit reviewer 친화 표시:
+산출물 cell에 audit reviewer 친화 표시. **라운드 81 ASIL 5단계 그라데이션 완성** —
+HDPDM01 NE_GN7 같은 A/QM-only 환경에서도 시각 분포 인지 가능.
 
 | 색상 RGB | 용도 | 헬퍼 |
 |----------|------|------|
 | 🟡 노란 `FFFFEB9C` | 사용자 입력 필요 | `mark_user_input_required` / `write_value_or_mark` |
-| 🟦 파랑 `FFE2F0FF` (**31차 W29**) | 3.Coverage / SUTR Test Log — ASIL B 함수 row (분기 커버리지 필수) | `mark_asil_b_function` |
-| 🟧 주황 `FFFFE5CC` (**31차 W29**) | 3.Coverage / SUTR Test Log — ASIL C 함수 row (MC/DC 권장) | `mark_asil_c_function` |
+| ⚪ 회색 `FFE8E8E8` (**라운드 81 T1501**) | 3.Coverage / Test Log — QM 함수 row (비안전, 정보성) | `mark_asil_qm_function` |
+| 🟢 녹색 `FFE4F3D5` (**라운드 81 T1501**) | 3.Coverage / Test Log — ASIL A 함수 row (구문 커버리지 충분) | `mark_asil_a_function` |
+| 🟦 파랑 `FFE2F0FF` (**31차 W29**) | 3.Coverage / Test Log — ASIL B 함수 row (분기 커버리지 필수) | `mark_asil_b_function` |
+| 🟧 주황 `FFFFE5CC` (**31차 W29**) | 3.Coverage / Test Log — ASIL C 함수 row (MC/DC 권장) | `mark_asil_c_function` |
 | 🔴 빨간 `FFFFC7CE` | 2.Consistency FAIL row Result 셀 | `mark_fail_cell` |
-| 🔴 빨간 `FFFFC7CE` (동일 RGB, **30차 W21 의미 분리**) | 3.Coverage / SUTR Test Log — ASIL D 함수 row (MC/DC 필수) | `mark_asil_d_function` |
+| 🔴 빨간 `FFFFC7CE` (동일 RGB, **30차 W21 의미 분리**) | 3.Coverage / Test Log — ASIL D 함수 row (MC/DC 필수) | `mark_asil_d_function` |
 | 기본 (없음) | 자동 채움 (config/meta 정상) | `safe_write` / `_write_label` |
 
-> **31차 W29 의미**: ASIL D > C > B 단계 색상으로 audit reviewer가 한눈에 검토 깊이 차이 인지. ASIL A/QM은 강조 없음 (구문 커버리지로 충분).
+> **라운드 81 5단계 그라데이션**: QM(회색) → A(녹색) → B(파랑) → C(주황) → D(빨강).
+> 위험도 단계별 시각 인지. 회사 v3.01/v2.02 양식은 빨강만 표준이라 audit reviewer
+> 사전 통보 의무 (라운드 81 commit `f609ba5`).
+
+> **30차 W21 의미 분리**: `mark_fail_cell` ↔ `mark_asil_d_function` 색상 RGB 동일 (`FFFFC7CE`)이나 호출 의미 다름. FAIL = TC 실행 실패, ASIL D = audit 검토 우선순위. 동일 셀 겹치면 ASIL D 우선 (호출 순서 보장). audit reviewer에게 정책 사전 통보 권장.
+
+### AuditLog 시트 정책 (라운드 83~87)
+
+산출물 6번째 시트 'AuditLog' (회사 양식 영향 0 — 시트 추가만, 기존 시트 보존).
+audit reviewer가 산출물 자체에서 빌드 환경 / ASIL source / 분포 / warnings / 분류 즉시 인지 (self-contained).
+
+**6 섹션**:
+1. **빌드 환경** (project_id/version/date/engineer/author/timestamp/sha256)
+2. **ISO 26262 ASIL Source 활용도** (c_source/SUDS/SDS/SRS/SwUDS docx)
+3. **ASIL 등급 분포** (D/C/B/A/QM/UNKNOWN/Total, 라운드 81 5단계)
+4. **빌드 결과 통계** (envs/TCs/passed/failed/not_executed/function_count)
+5. **Parse Warnings** (top 20, silent skip 차단)
+6. **Tool Qualification** (evidence_class / ASIL usage / Round 추적)
+
+**section 3-1 UNKNOWN 함수 분류** (라운드 86~87 추가):
+- `c_only` — c source 존재 + SUDS 미등재 → SUDS docx 보강 필요
+- `stub` — `_` / `stub_` prefix → 자동 생성 (정상 skip)
+- `orphan` — c source 부재 → 수동 검토
+
+> **라운드 87 통합 효과 (HDPDM01 v23)**: UNKNOWN 12건 자동 분류 → c_only 11
+> (`g_ApiIn_LinRx_ReadData` 등) + orphan 1 (`ADC0_stop_current_workaround`). audit
+> reviewer가 SUDS 등재 누락 함수 즉시 식별.
 
 > **30차 W21 의미 분리**: `mark_fail_cell` ↔ `mark_asil_d_function` 색상 RGB 동일 (`FFFFC7CE`)이나 호출 의미 다름. FAIL = TC 실행 실패, ASIL D = audit 검토 우선순위. 동일 셀 겹치면 ASIL D 우선 (호출 순서 보장). audit reviewer에게 정책 사전 통보 권장.
 
@@ -317,6 +346,8 @@ ISO 26262 ASIL A 단위테스트 산출물 자동 생성 + cross-validation 플�
 - `ASIL_D_FILL_RGB = "FFFFC7CE"` — **30차 W21 동일 값 / 의미 분리 (audit MC/DC 우선순위)**
 - `ASIL_C_FILL_RGB = "FFFFE5CC"` — **31차 W29 연한 주황 (MC/DC 권장)**
 - `ASIL_B_FILL_RGB = "FFE2F0FF"` — **31차 W29 연한 파랑 (분기 커버리지 필수)**
+- `ASIL_A_FILL_RGB = "FFE4F3D5"` — **라운드 81 T1501 연한 녹색 (구문 충분, 가장 약한 안전 등급)**
+- `ASIL_QM_FILL_RGB = "FFE8E8E8"` — **라운드 81 T1501 연한 회색 (비안전, 정보성)**
 - `USER_INPUT_PLACEHOLDER = "▶ 사용자 입력 필요"` — 24차 silent "N/A" 대체 안내
 
 `excel_template_utils.py`가 위 모듈에서 import — 이전 (23~28차) module-level hardcoded 제거. 신규 backend Excel builder는 반드시 `design_tokens`에서 import.
