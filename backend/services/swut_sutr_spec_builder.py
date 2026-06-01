@@ -87,6 +87,7 @@ from backend.services.excel_template_utils import (
     mark_asil_d_function,
     mark_asil_qm_function,
     safe_write,
+    sanitize_xlsm_external_links,
     short_date,
     validate_build_meta,
     validate_xlsx_template_bytes,
@@ -779,10 +780,23 @@ def build_sutr_from_spec(
 
     out = io.BytesIO()
     wb.save(out)
-    out.seek(0)
     if wb is not spec_wb:
         spec_wb.close()
     wb.close()
+
+    # 라운드 101 — 회사 ★개발템플릿 잔재(독일어 HARA externalLink + 외부참조
+    # defined names) 제거 → Excel "연결 업데이트/복구" 경고 차단. keep_vba 로드 시
+    # 외부링크 파트가 raw archive로 보존돼 openpyxl 객체 조작이 무효 → save된
+    # bytes를 zip 레벨에서 직접 정화.
+    _sanitized, _ext_removed = sanitize_xlsm_external_links(out.getvalue())
+    if _ext_removed:
+        out = io.BytesIO(_sanitized)
+        summary["external_links_stripped"] = _ext_removed
+        warnings.append(
+            f"[spec-sutr] 템플릿 외부링크 파트 {_ext_removed}건 + 외부참조 defined "
+            "name 제거 (독일어 HARA 양식 잔재 — Excel 연결 경고 차단)"
+        )
+    out.seek(0)
 
     if meta.doc_filename_pattern:
         filename = meta.doc_filename_pattern.format(

@@ -521,6 +521,100 @@ def force_write_cell(
         return False
 
 
+def strip_external_links(wb: Any) -> int:
+    """라운드 101 — 끊긴 외부 워크북 링크 + 외부참조 defined names 제거.
+
+    회사 ★개발템플릿(SUTR/Coverage 공용)에 다른 양식(독일어 HARA
+    ``FSE_HARA_v0.1_DE.xlsx``, 네트워크 경로 ``\\\\kffile1\\...``)에서 복사된
+    externalLink 잔재가 있어, 산출물을 열 때 Excel이 "연결 업데이트/복구" 경고를
+    띄운다. 외부 워크북이 우리 환경에 없으므로 끊긴 참조 — 산출물엔 불필요한 잔재.
+
+    제거 대상:
+      1) ``wb._external_links`` (externalLink 파트 — save 시 재생성 안 됨).
+      2) workbook-scoped defined names 중 외부참조(``[N]...`` 형식) — externalLink가
+         사라지면 깨지므로 함께 제거. 시트별 ``_xlnm.Print_Area`` 등 정상 이름은 보존
+         (값에 ``[`` 외부 인덱스 없음).
+
+    Returns:
+        제거한 항목 수 (external link + defined name).
+    """
+    removed = 0
+    ext = getattr(wb, "_external_links", None)
+    if ext:
+        removed += len(ext)
+        wb._external_links = []
+    # 외부참조 defined names (openpyxl 3.1 dict-like API).
+    try:
+        for _nm in list(wb.defined_names.keys()):
+            _val = getattr(wb.defined_names[_nm], "value", "") or ""
+            if "[" in _val and "]" in _val:
+                del wb.defined_names[_nm]
+                removed += 1
+    except (AttributeError, TypeError, KeyError):
+        pass
+    return removed
+
+
+def sanitize_xlsm_external_links(data: bytes) -> tuple[bytes, int]:
+    """라운드 101 — 저장된 xlsx/xlsm **bytes**에서 외부링크 파트/참조를 zip 레벨 제거.
+
+    ``strip_external_links(wb)`` (openpyxl 객체 레벨)는 ``keep_vba=True`` 로드 시
+    외부링크 파트가 raw archive로 보존돼 save 시 그대로 재출력되므로 무효였다
+    (라운드 101 진단). 따라서 **save 후 bytes**를 zip 레벨에서 직접 정화한다:
+
+      1) ``xl/externalLinks/**`` 파트 전체 제거.
+      2) ``[Content_Types].xml`` 의 externalLink Override 제거.
+      3) ``xl/workbook.xml`` 의 ``<externalReferences>`` 블록 + 외부참조
+         (``[N]...``) defined name 제거 (시트별 Print_Area 등 정상 이름 보존).
+      4) ``xl/_rels/workbook.xml.rels`` 의 externalLink relationship 제거.
+
+    외부링크 파트가 없으면 원본 bytes 그대로 반환 (변경 0).
+
+    Returns:
+        ``(정화된 bytes, 제거한 externalLink 파트 수)``.
+    """
+    import io as _io
+    import re as _re
+    import zipfile as _zip
+
+    zin = _zip.ZipFile(_io.BytesIO(data))
+    names = zin.namelist()
+    ext_parts = [n for n in names if n.startswith("xl/externalLinks/")]
+    if not ext_parts:
+        zin.close()
+        return data, 0
+
+    out = _io.BytesIO()
+    zout = _zip.ZipFile(out, "w", _zip.ZIP_DEFLATED)
+    for item in zin.infolist():
+        n = item.filename
+        if n.startswith("xl/externalLinks/"):
+            continue  # 1) 파트 제거
+        raw = zin.read(n)
+        if n == "[Content_Types].xml":
+            raw = _re.sub(
+                rb'<Override PartName="/xl/externalLinks/[^"]*"[^>]*/>', b"", raw,
+            )
+        elif n == "xl/workbook.xml":
+            txt = raw.decode("utf-8")
+            # 3a) <externalReferences>...</externalReferences> 제거.
+            txt = _re.sub(r"<externalReferences>.*?</externalReferences>", "", txt,
+                          flags=_re.DOTALL)
+            # 3b) 외부참조([N]...) defined name 제거 (정상 이름 보존).
+            txt = _re.sub(
+                r'<definedName\b[^>]*>\s*\[\d+\][^<]*</definedName>', "", txt,
+            )
+            raw = txt.encode("utf-8")
+        elif n == "xl/_rels/workbook.xml.rels":
+            raw = _re.sub(
+                rb'<Relationship\b[^>]*externalLink[^>]*/>', b"", raw,
+            )
+        zout.writestr(item, raw)
+    zout.close()
+    zin.close()
+    return out.getvalue(), len(ext_parts)
+
+
 def clear_data_range(
     ws: Any,
     *,

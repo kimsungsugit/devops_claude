@@ -163,6 +163,64 @@ class TestMergedCellHandling:
         assert ws["A1"].value == "Y"  # live 머지 → anchor에 기록
 
 
+class TestSanitizeXlsmExternalLinks:
+    """라운드 101 — xlsm bytes의 끊긴 외부링크/외부참조 defined name zip 레벨 정화."""
+
+    @staticmethod
+    def _synthetic_xlsm_with_external() -> bytes:
+        """externalLink 파트 + 외부참조 defined name 포함 합성 xlsx bytes."""
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+            z.writestr(
+                "[Content_Types].xml",
+                '<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+                '<Override PartName="/xl/externalLinks/externalLink1.xml" ContentType="ext"/>'
+                '<Override PartName="/xl/workbook.xml" ContentType="wb"/></Types>',
+            )
+            z.writestr("xl/externalLinks/externalLink1.xml", "<externalLink/>")
+            z.writestr("xl/externalLinks/_rels/externalLink1.xml.rels",
+                       '<Relationships/>')
+            z.writestr(
+                "xl/workbook.xml",
+                '<?xml version="1.0"?><workbook><definedNames>'
+                '<definedName name="Aufenthaltsdauer">[1]Reference_Tables!$I$2:$I$6</definedName>'
+                '<definedName name="_xlnm.Print_Area" localSheetId="0">\'Cover\'!$A$1:$L$33</definedName>'
+                '</definedNames><externalReferences><externalReference r:id="rId9"/>'
+                '</externalReferences></workbook>',
+            )
+            z.writestr(
+                "xl/_rels/workbook.xml.rels",
+                '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+                '<Relationship Id="rId9" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/externalLink" Target="externalLinks/externalLink1.xml"/>'
+                '</Relationships>',
+            )
+        return buf.getvalue()
+
+    def test_strips_external_link_parts_and_refs(self):
+        from backend.services.excel_template_utils import sanitize_xlsm_external_links
+        out, removed = sanitize_xlsm_external_links(self._synthetic_xlsm_with_external())
+        assert removed == 2  # externalLink1.xml + .rels
+        z = zipfile.ZipFile(io.BytesIO(out))
+        assert z.testzip() is None  # zip 무결성
+        assert not [n for n in z.namelist() if n.startswith("xl/externalLinks/")]
+        wb = z.read("xl/workbook.xml").decode("utf-8")
+        assert "Aufenthaltsdauer" not in wb       # 외부참조 defined name 제거
+        assert "externalReferences" not in wb     # 블록 제거
+        assert "_xlnm.Print_Area" in wb           # 정상 이름 보존
+        ct = z.read("[Content_Types].xml").decode("utf-8")
+        assert "externalLinks" not in ct          # Content_Types Override 제거
+
+    def test_noop_when_no_external_links(self):
+        from backend.services.excel_template_utils import sanitize_xlsm_external_links
+        wb = openpyxl.Workbook()
+        buf = io.BytesIO()
+        wb.save(buf)
+        data = buf.getvalue()
+        out, removed = sanitize_xlsm_external_links(data)
+        assert removed == 0
+        assert out == data  # 변경 없음 (원본 그대로)
+
+
 class TestValidateBuildMeta:
     """deep-reviewer X3: 빌더 입력 메타 검증."""
 
