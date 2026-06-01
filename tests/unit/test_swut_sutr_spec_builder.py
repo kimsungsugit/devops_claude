@@ -19,10 +19,13 @@ from backend.services.swut_input_adapter import (
 from backend.services.swut_sutr_aggregator import SutrBuildMeta
 from backend.services.swut_sutr_spec_builder import (
     COL_ACTUAL_START,
+    COL_EXPECTED_START,
     COL_LOG_DATA,
     COL_PASS_FAIL,
     COL_PASS_TOTAL,
     LOG_SHEET_NAME,
+    SUBHEADER_ROW,
+    _apply_actual_result_style,
     _build_fn_iteration_map,
     _lookup_vcast_actual,
     _scan_spec_blocks,
@@ -138,6 +141,38 @@ def test_build_fn_iteration_map():
     assert m["101"][1]["passed"] is True
     assert m["101"][2]["passed"] is False
     assert "102" in m
+
+
+def test_apply_actual_result_style_mirrors_expected():
+    """라운드 104 — Actual(162~)이 Expected(58~) 서식을 미러 + 헤더행 미변경."""
+    from openpyxl.styles import Border, Font, Side
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    thin = Side(style="thin")
+    bd = Border(left=thin, right=thin, top=thin, bottom=thin)
+    data_row = SUBHEADER_ROW + 1
+    # Expected 셀에 테두리/폰트 부여 (graft 서식 모사).
+    exp = ws.cell(data_row, COL_EXPECTED_START)
+    exp.border = bd
+    exp.font = Font(name="Arial", size=10)
+    # Expected 마지막(161) — Pass/Fail·Total·Log 미러 소스.
+    last_exp = ws.cell(data_row, COL_ACTUAL_START - 1)
+    last_exp.border = bd
+    last_exp.font = Font(name="Arial", size=10)
+    # 헤더 행(SUBHEADER_ROW)의 Actual 셀은 변경되면 안 됨 — 기본(무테) 확인용.
+    hdr_actual = ws.cell(SUBHEADER_ROW, COL_ACTUAL_START)
+
+    n = _apply_actual_result_style(ws)
+    assert n > 0
+    # Actual 대응 셀(162)이 Expected 테두리 미러.
+    act = ws.cell(data_row, COL_ACTUAL_START)
+    assert act.border.left is not None and act.border.left.style == "thin"
+    assert act.font.name == "Arial"
+    # Pass/Fail(266)·Log(268) border 적용.
+    assert ws.cell(data_row, COL_PASS_FAIL).border.top.style == "thin"
+    assert ws.cell(data_row, COL_LOG_DATA).border.bottom.style == "thin"
+    # 헤더 행은 미변경 (데이터 행만 대상).
+    assert hdr_actual.border.left is None or hdr_actual.border.left.style is None
 
 
 def test_lookup_vcast_actual_dotted():
