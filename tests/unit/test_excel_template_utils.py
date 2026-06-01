@@ -220,6 +220,37 @@ class TestSanitizeXlsmExternalLinks:
         assert removed == 0
         assert out == data  # 변경 없음 (원본 그대로)
 
+    def test_strips_dangling_vbaproject_rel(self):
+        """라운드 102 — vbaProject.bin 없는데 rels에 남은 끊긴 vba 참조 제거.
+
+        openpyxl keep_vba=True save가 만든 dangling (Excel '우리 산출물만 복구'
+        경고 진짜 원인).
+        """
+        from backend.services.excel_template_utils import sanitize_xlsm_external_links
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+            z.writestr(
+                "[Content_Types].xml",
+                '<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+                '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.ms-excel.sheet.macroEnabled.main+xml"/></Types>',
+            )
+            z.writestr("xl/workbook.xml", '<?xml version="1.0"?><workbook/>')
+            z.writestr(
+                "xl/_rels/workbook.xml.rels",
+                '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+                '<Relationship Id="rId1" Type="http://schemas.microsoft.com/office/2006/relationships/vbaProject" Target="vbaProject.bin"/>'
+                '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>'
+                '</Relationships>',
+            )
+            # vbaProject.bin 파트는 일부러 누락 (dangling 재현)
+        out, removed = sanitize_xlsm_external_links(buf.getvalue())
+        assert removed == 1
+        z = zipfile.ZipFile(io.BytesIO(out))
+        assert z.testzip() is None
+        rels = z.read("xl/_rels/workbook.xml.rels").decode("utf-8")
+        assert "vbaProject" not in rels   # 끊긴 vba 참조 제거
+        assert "styles.xml" in rels       # 정상 relationship 보존
+
 
 class TestValidateBuildMeta:
     """deep-reviewer X3: 빌더 입력 메타 검증."""

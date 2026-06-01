@@ -580,7 +580,17 @@ def sanitize_xlsm_external_links(data: bytes) -> tuple[bytes, int]:
     zin = _zip.ZipFile(_io.BytesIO(data))
     names = zin.namelist()
     ext_parts = [n for n in names if n.startswith("xl/externalLinks/")]
-    if not ext_parts:
+    # 라운드 102 — vbaProject dangling 검출: keep_vba=True save가 workbook.xml.rels
+    # 에 vbaProject relationship은 쓰면서 vbaProject.bin 파트는 안 써서 끊긴 참조
+    # 발생 (Excel "우리 산출물만 복구" 경고의 진짜 원인 — 라운드 102 진단). bin이
+    # 없는데 rels에 vbaProject 참조가 있으면 그 relationship 제거 (회사 원본 동일 상태).
+    _has_vba_bin = "xl/vbaProject.bin" in names
+    _wb_rels_name = "xl/_rels/workbook.xml.rels"
+    _vba_dangling = False
+    if not _has_vba_bin and _wb_rels_name in names:
+        _vba_dangling = "vbaproject" in zin.read(_wb_rels_name).decode(
+            "utf-8", "replace").lower()
+    if not ext_parts and not _vba_dangling:
         zin.close()
         return data, 0
 
@@ -609,10 +619,15 @@ def sanitize_xlsm_external_links(data: bytes) -> tuple[bytes, int]:
             raw = _re.sub(
                 rb'<Relationship\b[^>]*externalLink[^>]*/>', b"", raw,
             )
+            if _vba_dangling:
+                # vbaProject.bin 없는데 남은 끊긴 relationship 제거 (대소문자 무관).
+                raw = _re.sub(
+                    rb'<Relationship\b[^>]*[Vv][Bb][Aa][Pp]roject[^>]*/>', b"", raw,
+                )
         zout.writestr(item, raw)
     zout.close()
     zin.close()
-    return out.getvalue(), len(ext_parts)
+    return out.getvalue(), len(ext_parts) + (1 if _vba_dangling else 0)
 
 
 def clear_data_range(
