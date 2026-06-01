@@ -1547,6 +1547,157 @@ def _compute_self_consistency(
     return rows
 
 
+def _write_consistency_sheet_spec(
+    ws,
+    agg: dict[str, Any],
+    name_to_swufn: dict[str, str],
+    *,
+    out_warnings: list[str] | None = None,
+    test_kind: str = "SwUTS",
+) -> int:
+    """라운드 95 — KJPDS02 v1.01 SwUTCV 3.Consistency 레퍼런스 형식 작성 (spec_based).
+
+    회사 레퍼런스((KJPDS02_DV_SwUTCV) Software Unit Test Coverage Result_v1.01) 구조:
+      - r3~r7 요약: B3='Document Type' D3='SwUDS, SwUTS' / B4='Pass' D4=<O 개수> /
+        B5='Fail' D5=<X 개수> / B6='Total' D6=<함수 수> / B7='Coverage' D7=<Pass/Total>.
+        (라운드 94 정책: openpyxl 캐시 없음 회피 위해 수식 아닌 literal 값 stamp.)
+      - r10 헤더: B=No / C=ID / D=Function Name / E='SwUDS와 SwUTS 항목 정합성 확인' /
+        F=비고.
+      - r11+: B=순번 / C='SwUTC_'+실 SwUFn ID (예 SwUTC_SwUFn_0121) / D=함수명 /
+        E='O' (SwUDS 정의됨) 또는 'X' (미등재).
+
+    함수 순서·SwUFn 매핑은 4.Coverage(_write_coverage_sheet 라운드 92) 및
+    2.Traceability(_build_spec_swufn_order 라운드 93)와 **동일**하여 시트 간 일관성 유지.
+    매핑 실패(SwUDS 미등재) 함수는 순차 SwUFn fallback + C셀 노란 마킹 (4.Coverage D셀과
+    동일 추적성 — 추정 ID, audit reviewer 수동 검증 대상) + E='X'.
+
+    Args:
+        ws: 3.Consistency 시트.
+        agg: ``aggregate_session`` 결과 dict (function_rows 보유).
+        name_to_swufn: SwUDS 함수명→SwUFn ID 매핑 (4.Coverage/Traceability 공유).
+        out_warnings: 진단 메시지 누적.
+        test_kind: audit 라벨 (Document Type 표기용; KJPDS02는 'SwUDS, SwUTS').
+
+    Returns:
+        쓰여진 함수 list row 수.
+    """
+    function_rows = list(agg.get("function_rows") or [])
+    if not function_rows:
+        return 0
+
+    # 안내문 (A1) — 레퍼런스 형식 spec_based 명시.
+    safe_write(
+        ws, 1, 1,
+        f"본 시트는 SwUDS↔{test_kind} 함수 정합성 자동 검증 결과 (라운드 95 v1.01 "
+        "레퍼런스 형식). 함수 순서·SwUFn ID는 4.Coverage / 2.Traceability 와 동일. "
+        "'X' 행은 SwUDS 미등재 — reviewer 검토 + audit evidence 보강 필요.",
+    )
+
+    # 함수 순서·SwUFn ID 도출 — 4.Coverage 라운드 92 / _build_spec_swufn_order 와 동일 규칙.
+    pass_count = 0
+    fail_count = 0
+    unmatched: list[str] = []
+    rows_data: list[tuple[int, str, str, str, bool]] = []  # (no, swufn, name, result, matched)
+    for i, fc in enumerate(function_rows):
+        is_c_parser_only = bool(
+            getattr(fc, "unit_id", "") and fc.unit_id.startswith("SwUFn_C_")
+        )
+        resolved = ""
+        if not is_c_parser_only:
+            resolved = name_to_swufn.get(getattr(fc, "name", ""), "") or name_to_swufn.get(
+                getattr(fc, "unit_id", ""), ""
+            )
+        matched = bool(resolved)
+        swufn_id = resolved or f"SwUFn_{i + 1:04d}"
+        result = "O" if matched else "X"
+        if matched:
+            pass_count += 1
+        else:
+            fail_count += 1
+            if len(unmatched) < 60:
+                unmatched.append(getattr(fc, "name", "") or getattr(fc, "unit_id", "") or "<no-id>")
+        rows_data.append((i + 1, swufn_id, getattr(fc, "name", "") or "", result, matched))
+
+    total = len(rows_data)
+    coverage = round(pass_count / total, 4) if total else 0
+
+    # r3~r7 요약 (literal 값 — 라운드 94 정책, openpyxl 캐시 없음 회피).
+    safe_write(ws, 3, 2, "Document Type")
+    safe_write(ws, 3, 4, "SwUDS, SwUTS")
+    safe_write(ws, 4, 2, "Pass")
+    safe_write(ws, 4, 4, pass_count)
+    safe_write(ws, 5, 2, "Fail")
+    safe_write(ws, 5, 4, fail_count)
+    safe_write(ws, 6, 2, "Total")
+    safe_write(ws, 6, 4, total)
+    safe_write(ws, 7, 2, "Coverage")
+    safe_write(ws, 7, 4, coverage)
+
+    # r10 헤더 (회사 v1.01 양식).
+    header_row = 10
+    data_start = 11
+    safe_write(ws, header_row, 2, "No")
+    safe_write(ws, header_row, 3, "ID")
+    safe_write(ws, header_row, 4, "Function Name")
+    safe_write(ws, header_row, 5, "SwUDS와 SwUTS 항목 정합성 확인")
+    safe_write(ws, header_row, 6, "비고")
+
+    # row 부족 시 자동 확장 (4.Coverage/Traceability 와 동일 헬퍼).
+    needed_last_row = data_start + total - 1
+    old_max = ws.max_row
+    if needed_last_row > old_max:
+        from backend.services.excel_template_utils import (
+            auto_expand_row_block, push_sentinel_to_last_row,
+            update_cross_refs_after_row_expansion,
+        )
+        shortage = needed_last_row - old_max
+        inserted = auto_expand_row_block(
+            ws,
+            insert_at_row=data_start + 1,
+            amount=shortage,
+            template_row_idx=data_start,
+            copy_style=True, copy_merge=True, copy_dimension=True,
+        )
+        if inserted < shortage and out_warnings is not None:
+            out_warnings.append(
+                f"[row_expand] 3.Consistency(spec) function list row 부족 "
+                f"({shortage}개 필요, {inserted}개 확장) — 누락 가능"
+            )
+        try:
+            push_sentinel_to_last_row(ws)
+            update_cross_refs_after_row_expansion(
+                ws, old_totals_row=old_max, new_totals_row=needed_last_row,
+            )
+        except Exception:  # noqa: BLE001 — graceful
+            pass
+
+    # data row stamp.
+    written = 0
+    for no, swufn_id, fn_name, result, matched in rows_data:
+        r = data_start + (no - 1)
+        safe_write(ws, r, 2, no)                       # B: No
+        safe_write(ws, r, 3, f"SwUTC_{swufn_id}")      # C: SwUTC_<SwUFn>
+        safe_write(ws, r, 4, fn_name)                  # D: Function Name
+        safe_write(ws, r, 5, result)                   # E: 정합성 O/X
+        # 매핑 실패(추정 SwUFn) → C셀 노란 마킹 (4.Coverage D셀과 동일 추적성).
+        if not matched:
+            from backend.services.excel_template_utils import _apply_fill
+            from backend.services.design_tokens import USER_INPUT_FILL_RGB
+            _apply_fill(ws, r, 3, USER_INPUT_FILL_RGB)
+        written += 1
+
+    if fail_count and out_warnings is not None:
+        sample = ", ".join(unmatched[:10])
+        more = f" 외 {fail_count - 10}건" if fail_count > 10 else ""
+        out_warnings.append(
+            f"[consistency_spec] SwUDS 미등재(X) {fail_count}건 (Pass {pass_count}/"
+            f"{total}, Coverage {coverage}): {sample}{more}. SwUDS 버전 드리프트 가능 — "
+            "audit reviewer 확인 의무."
+        )
+
+    return written
+
+
 def _write_consistency_sheet(
     ws,
     session: SwUTSession,
@@ -1554,6 +1705,7 @@ def _write_consistency_sheet(
     out_warnings: list[str] | None = None,
     *,
     test_kind: str = "SwUTS",
+    agg: dict[str, Any] | None = None,
 ) -> int:
     """2.Consistency 시트 — {test_kind} 자체 일관성 + SwUDS↔{test_kind} 매핑 (16차).
 
@@ -1561,14 +1713,33 @@ def _write_consistency_sheet(
         swuds_function_ids: SwUDS docx에서 추출된 함수 ID set. 제공되면 row 5 추가.
         test_kind: audit 라벨 — SwUT는 "SwUTS" (default), SwIT는 "SwIT" (34차 C2 fix).
             intro 텍스트 + row 5 item label 동적 치환.
+        agg: ``aggregate_session`` 결과 dict (라운드 95). spec_based(KJPDS02 SwUDS
+            name→SwUFn 매핑 존재) 판정 + 4.Coverage/2.Traceability 와 동일 함수 순서
+            도출에 사용. None이면 기존(HDPDM01/SwIT 자체-일관성) 동작 보존.
 
-    Layout: A1 = 안내, row 3 = 헤더, row 4부터 결과 row (4 또는 5개).
+    Layout (비 spec_based): A1 = 안내, row 3 = 헤더, row 4부터 결과 row (4 또는 5개).
+    Layout (spec_based, 라운드 95): 회사 KJPDS02 v1.01 SwUTCV 레퍼런스 형식 —
+        r3~r7 요약(Document Type / Pass / Fail / Total / Coverage, literal 값) +
+        r10 헤더(No/ID/Function Name/정합성/비고) + r11+ 함수 list (C=SwUTC_<SwUFn>,
+        D=함수명, E=O/X). 함수 순서·SwUFn 매핑은 4.Coverage 와 동일.
 
     Returns:
         쓰여진 결과 row 수 (헤더 제외).
     """
     if not ws:
         return 0
+
+    # 라운드 95 — KJPDS02 spec_based 게이트. SwUDS 함수명→SwUFn 매핑이 존재하면
+    # 회사 레퍼런스(KJPDS02_DV_SwUTCV v1.01) 3.Consistency 형식으로 대체.
+    # HDPDM01/SwIT(매핑 부재)는 기존 자체-일관성 형식 보존.
+    _agg = agg if agg is not None else {}
+    name_to_swufn_spec: dict[str, str] = _agg.get("function_name_to_swufn_from_suds") or {}
+    spec_based_cons = bool(name_to_swufn_spec) and bool(_agg.get("function_rows"))
+    if spec_based_cons:
+        return _write_consistency_sheet_spec(
+            ws, _agg, name_to_swufn_spec,
+            out_warnings=out_warnings, test_kind=test_kind,
+        )
 
     rows = _compute_self_consistency(
         session, swuds_function_ids=swuds_function_ids, test_kind=test_kind,
@@ -2465,9 +2636,16 @@ def build_coverage_report(
             cons_ws, session,
             swuds_function_ids=swuds_function_ids,
             out_warnings=warnings,
+            agg=agg,
         )
         summary["consistency_self_check_rows"] = n_cons
-        if swuds_function_ids is not None:
+        # 라운드 95 — spec_based(KJPDS02)는 agg SwUDS name→SwUFn 매핑으로 정합성을
+        # 시트에 직접 stamp → swuds_function_ids 없어도 비교 완료로 간주.
+        _cons_spec_based = bool(
+            (agg.get("function_name_to_swufn_from_suds") or {})
+            and agg.get("function_rows")
+        )
+        if swuds_function_ids is not None or _cons_spec_based:
             summary["consistency_swuds_compared"] = True
             # SwUDS 매핑까지 자동 완료 — incomplete 표시 제거.
         else:
