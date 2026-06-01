@@ -49,6 +49,11 @@ ASIL_C_FILL_RGB: Final[str] = "FFFFE5CC"   # 연한 주황 (MC/DC 커버리지 �
 ASIL_A_FILL_RGB: Final[str] = "FFE4F3D5"   # 연한 녹색 (구문 커버리지로 충분, 가장 약한 안전 등급)
 ASIL_QM_FILL_RGB: Final[str] = "FFE8E8E8"  # 연한 회색 (Quality Management — 비안전, 정보성)
 
+# 라운드 98 — 회사 양식 재현용 음영. audit 마킹(위 ASIL/FAIL)과 성격 구분:
+# 이 값은 회사 SwUTCV/SwITCV 3.Consistency 순번(B)열 표준 음영을 그대로 재현하는
+# 고정값이며 우리가 정의한 의미 색이 아님. REF(회사 감사본) 일치 목적.
+INDEX_COL_SHADE_RGB: Final[str] = "FFEEEEEE"  # 연회색 (Consistency No 열 음영, 회사 양식)
+
 
 # ---- 사용자 입력 placeholder 문자열 (셀에 쓰이는 안내) ----
 
@@ -64,5 +69,6 @@ __all__ = [
     "ASIL_C_FILL_RGB",
     "ASIL_D_FILL_RGB",
     "ASIL_QM_FILL_RGB",
+    "INDEX_COL_SHADE_RGB",
     "USER_INPUT_PLACEHOLDER",
 ]

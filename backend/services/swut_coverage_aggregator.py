@@ -1727,6 +1727,33 @@ def _write_consistency_sheet_spec(
             "audit reviewer 확인 의무."
         )
 
+    # 라운드 98 — 데이터 행 회사 양식 재현 최종 패스 (REF 일치, 사용자 승인).
+    #   B(No)열: 회사 양식 연회색 음영 (INDEX_COL_SHADE_RGB) — 우리 빈 양식엔 없어
+    #     누락됐던 것 (REF 전 데이터 행 보유).
+    #   E(정합성)열: 하단 테두리 누락(b1101) → 인접 D열(정상 사방 b1111) border 복사로
+    #     통일. (4.Coverage C열 라운드 97 최종 패스와 동일 패턴 — 중간 단계 리셋 회피)
+    # spec_based 경로 전용 — HDPDM01/SwIT(_write_consistency_sheet) 비영향.
+    import copy as _copy_cs
+
+    from openpyxl.cell.cell import MergedCell as _MC_cs
+    from openpyxl.styles import PatternFill as _PF_cs
+
+    from backend.services.design_tokens import INDEX_COL_SHADE_RGB
+    for _no, _swufn, _name, _result, _matched in rows_data:
+        _r = data_start + (_no - 1)
+        _bc = ws.cell(_r, 2)
+        if not isinstance(_bc, _MC_cs):
+            _bc.fill = _PF_cs(
+                fill_type="solid",
+                fgColor=INDEX_COL_SHADE_RGB,
+                start_color=INDEX_COL_SHADE_RGB,
+                end_color=INDEX_COL_SHADE_RGB,
+            )
+        _ec = ws.cell(_r, 5)
+        _dc = ws.cell(_r, 4)
+        if not isinstance(_ec, _MC_cs) and not isinstance(_dc, _MC_cs):
+            _ec.border = _copy_cs.copy(_dc.border)
+
     return written
 
 
