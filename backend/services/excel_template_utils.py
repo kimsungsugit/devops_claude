@@ -472,7 +472,10 @@ def safe_write(ws: Any, row: int, col: int, value: Any) -> bool:
         return False
 
 
-def force_write_cell(ws: Any, row: int, col: int, value: Any) -> bool:
+def force_write_cell(
+    ws: Any, row: int, col: int, value: Any,
+    *, style_ref: tuple[int, int] | None = None,
+) -> bool:
     """라운드 96 — orphan ``MergedCell``에도 강제 기록.
 
     ``safe_write`` 상위 호환: live 머지면 anchor 보정 후 기록(동일 동작),
@@ -485,7 +488,16 @@ def force_write_cell(ws: Any, row: int, col: int, value: Any) -> bool:
     ``MergedCell`` 객체로 잔존 → ``safe_write``가 ``AttributeError``로 silent
     skip하여 C(Component) 공란 발생(라운드 96 진단). live 머지가 아니므로
     셀 재생성은 머지 무결성에 영향 없음.
+
+    Args:
+        style_ref: ``(row, col)`` 지정 시, orphan을 fresh ``Cell``로 재생성한
+            **경우에 한해** 그 좌표 셀의 border/fill/font/alignment를 복사한다
+            (라운드 97 fix). 재생성된 Cell은 기본 스타일(테두리 無)이라 회사
+            양식 세로 테두리가 끊김 → 같은 행의 정상 셀(예 D열) 스타일을
+            전파해 양식 일관성 보존. orphan이 아니면 기존 스타일 유지(복사 안 함).
     """
+    import copy as _copy
+
     from openpyxl.cell.cell import MergedCell as _MergedCell
     anchor_row, anchor_col = resolve_merge_anchor(ws, row, col)
     cell = ws.cell(row=anchor_row, column=anchor_col)
@@ -493,6 +505,15 @@ def force_write_cell(ws: Any, row: int, col: int, value: Any) -> bool:
         # live 머지 range 없는 orphan → stale 객체 제거 후 fresh Cell 생성.
         ws._cells.pop((anchor_row, anchor_col), None)
         cell = ws.cell(row=anchor_row, column=anchor_col)
+        # fresh Cell은 기본 스타일(테두리/배경 無) → 양식 일관성 위해 인접
+        # 정상 셀 스타일 전파 (라운드 97).
+        if style_ref is not None:
+            ref = ws.cell(row=style_ref[0], column=style_ref[1])
+            if not isinstance(ref, _MergedCell):
+                cell.border = _copy.copy(ref.border)
+                cell.fill = _copy.copy(ref.fill)
+                cell.font = _copy.copy(ref.font)
+                cell.alignment = _copy.copy(ref.alignment)
     try:
         cell.value = value
         return True

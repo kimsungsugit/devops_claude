@@ -805,6 +805,8 @@ def _write_coverage_sheet(
                 # (회사 양식 SwCom 그룹 병합 해제 잔존 셀) 강제 기록 → C 공란 해소.
                 # HDPDM01/SwIT는 기존 safe_write 동작 보존.
                 if spec_based:
+                    # C열 테두리 통일은 written 루프 종료 후 최종 패스에서 수행
+                    # (라운드 97 — 루프 중간 복사가 후속 단계에서 리셋되는 문제 회피).
                     force_write_cell(ws, r, comp_col, comp_name)
                 else:
                     safe_write(ws, r, comp_col, comp_name)
@@ -1040,6 +1042,24 @@ def _write_coverage_sheet(
                     f"SwUDS 미등재 함수 (순차 SwUFn fallback). 예: "
                     f"{', '.join(spec_unmatched[:15])}"
                 )
+
+    # 라운드 97 — spec_based C(Component)열 테두리 통일 (최종 패스).
+    # 회사 빈 양식 C열은 세로 테두리만(b1100)이고 orphan 재생성 셀은 무테(b0000)
+    # → REF는 사방 테두리(b1111). written 루프 중간 복사는 후속 단계(force_write/
+    # ASIL fill 등)에서 리셋되므로, 모든 stamp/clear/totals 완료 후 D열(unit_id_col,
+    # 정상 사방 테두리) border를 C열 데이터 행에 일괄 전파. spec_based(KJPDS02)만 —
+    # HDPDM01/SwIT 보존.
+    if spec_based and has_component_col and written > 0:
+        import copy as _copy_border
+
+        from openpyxl.cell.cell import MergedCell as _MC_border
+        _comp_col_final = no_col + 1
+        for _rr in range(data_start, last_data_row + 1):
+            _cc = ws.cell(_rr, _comp_col_final)
+            _dc = ws.cell(_rr, unit_id_col)
+            if not isinstance(_cc, _MC_border) and not isinstance(_dc, _MC_border):
+                _cc.border = _copy_border.copy(_dc.border)
+
     return written
 
 
