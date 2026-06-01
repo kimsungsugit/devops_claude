@@ -1043,22 +1043,48 @@ def _write_coverage_sheet(
                     f"{', '.join(spec_unmatched[:15])}"
                 )
 
-    # 라운드 97 — spec_based C(Component)열 테두리 통일 (최종 패스).
-    # 회사 빈 양식 C열은 세로 테두리만(b1100)이고 orphan 재생성 셀은 무테(b0000)
-    # → REF는 사방 테두리(b1111). written 루프 중간 복사는 후속 단계(force_write/
-    # ASIL fill 등)에서 리셋되므로, 모든 stamp/clear/totals 완료 후 D열(unit_id_col,
-    # 정상 사방 테두리) border를 C열 데이터 행에 일괄 전파. spec_based(KJPDS02)만 —
-    # HDPDM01/SwIT 보존.
+    # 라운드 97/99 — spec_based 데이터 행 테두리 통일 (최종 패스, 모든 stamp/clear/
+    # totals 완료 후 — 중간 단계 리셋 회피).
+    #   (a) 라운드 99: 회사 양식 스타일(테두리) 행 수를 함수 수가 초과해 마지막 함수
+    #       행(예 No 570,571)이 무테(b0000) 빈 행에 stamp됨 → **위 정상 스타일 행**
+    #       전체 border를 행 전체에 복제 (같은 행 D는 b0000이라 소스 부적격 — 라운드
+    #       97 한계).
+    #   (b) 라운드 97: 정상 행이지만 C(Component)열만 세로테두리(b1100)/무테인 경우
+    #       D열(정상 사방 b1111) border를 C에 통일.
+    # spec_based(KJPDS02)만 — HDPDM01/SwIT 보존.
     if spec_based and has_component_col and written > 0:
         import copy as _copy_border
 
         from openpyxl.cell.cell import MergedCell as _MC_border
         _comp_col_final = no_col + 1
+        _last_col = branch_count_col + 6  # clear range end_col 와 동일 (데이터 우측 끝)
+
+        def _has_border(_cell) -> bool:
+            _b = _cell.border
+            return any(
+                getattr(_b, _s) and getattr(_b, _s).style
+                for _s in ("left", "right", "top", "bottom")
+            )
+
+        _last_styled_row = None
         for _rr in range(data_start, last_data_row + 1):
-            _cc = ws.cell(_rr, _comp_col_final)
-            _dc = ws.cell(_rr, unit_id_col)
-            if not isinstance(_cc, _MC_border) and not isinstance(_dc, _MC_border):
-                _cc.border = _copy_border.copy(_dc.border)
+            if _has_border(ws.cell(_rr, no_col)):
+                _last_styled_row = _rr
+                # (b) 정상 행: C열 border를 D열(정상)로 통일.
+                _cc = ws.cell(_rr, _comp_col_final)
+                _dc = ws.cell(_rr, unit_id_col)
+                if not isinstance(_cc, _MC_border) and not isinstance(_dc, _MC_border):
+                    _cc.border = _copy_border.copy(_dc.border)
+            elif _last_styled_row is not None:
+                # (a) 무테 초과 행: 위 정상 스타일 행 전체 border 복제 + row height.
+                for _cc2 in range(no_col, _last_col + 1):
+                    _src = ws.cell(_last_styled_row, _cc2)
+                    _dst = ws.cell(_rr, _cc2)
+                    if not isinstance(_dst, _MC_border) and not isinstance(_src, _MC_border):
+                        _dst.border = _copy_border.copy(_src.border)
+                _src_h = ws.row_dimensions[_last_styled_row].height
+                if _src_h is not None:
+                    ws.row_dimensions[_rr].height = _src_h
 
     return written
 
@@ -1739,20 +1765,44 @@ def _write_consistency_sheet_spec(
     from openpyxl.styles import PatternFill as _PF_cs
 
     from backend.services.design_tokens import INDEX_COL_SHADE_RGB
+
+    def _has_border_cs(_cell) -> bool:
+        _b = _cell.border
+        return any(
+            getattr(_b, _s) and getattr(_b, _s).style
+            for _s in ("left", "right", "top", "bottom")
+        )
+
+    _shade = _PF_cs(
+        fill_type="solid",
+        fgColor=INDEX_COL_SHADE_RGB,
+        start_color=INDEX_COL_SHADE_RGB,
+        end_color=INDEX_COL_SHADE_RGB,
+    )
+    _last_styled_cs = None
     for _no, _swufn, _name, _result, _matched in rows_data:
         _r = data_start + (_no - 1)
+        # B(No)열 회사 양식 연회색 음영.
         _bc = ws.cell(_r, 2)
         if not isinstance(_bc, _MC_cs):
-            _bc.fill = _PF_cs(
-                fill_type="solid",
-                fgColor=INDEX_COL_SHADE_RGB,
-                start_color=INDEX_COL_SHADE_RGB,
-                end_color=INDEX_COL_SHADE_RGB,
-            )
-        _ec = ws.cell(_r, 5)
-        _dc = ws.cell(_r, 4)
-        if not isinstance(_ec, _MC_cs) and not isinstance(_dc, _MC_cs):
-            _ec.border = _copy_cs.copy(_dc.border)
+            _bc.fill = _copy_cs.copy(_shade)
+        # 라운드 99 — 무테 초과 행(No 570,571 등)은 위 정상 스타일 행 전체 복제.
+        if _has_border_cs(_bc):
+            _last_styled_cs = _r
+            # E(정합성)열 하단 테두리 → D열(정상) border 통일 (라운드 98).
+            _ec = ws.cell(_r, 5)
+            _dc = ws.cell(_r, 4)
+            if not isinstance(_ec, _MC_cs) and not isinstance(_dc, _MC_cs):
+                _ec.border = _copy_cs.copy(_dc.border)
+        elif _last_styled_cs is not None:
+            for _cc in range(2, 7):  # B~F
+                _src = ws.cell(_last_styled_cs, _cc)
+                _dst = ws.cell(_r, _cc)
+                if not isinstance(_dst, _MC_cs) and not isinstance(_src, _MC_cs):
+                    _dst.border = _copy_cs.copy(_src.border)
+            _src_h = ws.row_dimensions[_last_styled_cs].height
+            if _src_h is not None:
+                ws.row_dimensions[_r].height = _src_h
 
     return written
 
