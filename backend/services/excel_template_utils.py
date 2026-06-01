@@ -1204,6 +1204,15 @@ def copy_sheet_across_workbooks(
     dst_ws = dst_wb.create_sheet(title=new_title)
 
     # 1) cell value + style 복제.
+    # 라운드 103 — cross-workbook 스타일은 ``_style``(인덱스 튜플) 직접 복사 금지.
+    # src wb의 fontId/fillId/borderId 인덱스를 dst wb에 그대로 쓰면 dst의 fonts/
+    # fills/borders 배열 길이를 초과해 끊긴 참조 → Excel "styles.xml 복구" 경고
+    # (진단: fontId 38 > fonts 35). 실제 스타일 **객체**를 복사하면 openpyxl이 dst
+    # wb 스타일 테이블에 등록하고 인덱스를 재할당 → 정합 보장.
+    # 성능: 셀마다 객체 6개 복사는 O(cells×styles)로 268열×수천행에서 timeout.
+    # src ``_style`` (StyleArray) → dst ``_style`` 매핑 캐시로 **unique 스타일만**
+    # 변환 (수만 셀 → 수백 unique). 같은 dst wb 내 인덱스 재사용은 안전.
+    _style_map: dict = {}
     max_row = src_ws.max_row
     max_col = src_ws.max_column
     for row in src_ws.iter_rows(min_row=1, max_row=max_row, max_col=max_col):
@@ -1215,9 +1224,23 @@ def copy_sheet_across_workbooks(
             )
             if getattr(src_cell, "has_style", False):
                 try:
-                    dst_cell._style = _copy.copy(src_cell._style)
-                except (AttributeError, TypeError):
-                    pass
+                    _key = tuple(src_cell._style)
+                except (TypeError, AttributeError):
+                    _key = None
+                if _key is not None and _key in _style_map:
+                    dst_cell._style = _style_map[_key]
+                else:
+                    try:
+                        dst_cell.font = _copy.copy(src_cell.font)
+                        dst_cell.fill = _copy.copy(src_cell.fill)
+                        dst_cell.border = _copy.copy(src_cell.border)
+                        dst_cell.alignment = _copy.copy(src_cell.alignment)
+                        dst_cell.number_format = src_cell.number_format
+                        dst_cell.protection = _copy.copy(src_cell.protection)
+                        if _key is not None:
+                            _style_map[_key] = dst_cell._style
+                    except (AttributeError, TypeError):
+                        pass
 
     # 2) merged_cells 복제.
     for mr in list(src_ws.merged_cells.ranges):
