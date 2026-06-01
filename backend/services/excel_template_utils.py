@@ -472,6 +472,34 @@ def safe_write(ws: Any, row: int, col: int, value: Any) -> bool:
         return False
 
 
+def force_write_cell(ws: Any, row: int, col: int, value: Any) -> bool:
+    """라운드 96 — orphan ``MergedCell``에도 강제 기록.
+
+    ``safe_write`` 상위 호환: live 머지면 anchor 보정 후 기록(동일 동작),
+    추가로 **orphan MergedCell**(``ws.merged_cells.ranges``에 없는데 셀 객체가
+    ``MergedCell``로 남은 상태 — openpyxl 머지 해제 quirk)도 처리한다.
+    이 경우 stale 객체를 ``_cells``에서 제거 → fresh ``Cell`` 재생성 후 기록.
+
+    배경: 회사 양식의 일부 SwCom 그룹 C 셀이 세로 병합돼 있었고, 파이프라인
+    앞단계에서 해제되며 anchor만 normal Cell로 복원, continuation 행은
+    ``MergedCell`` 객체로 잔존 → ``safe_write``가 ``AttributeError``로 silent
+    skip하여 C(Component) 공란 발생(라운드 96 진단). live 머지가 아니므로
+    셀 재생성은 머지 무결성에 영향 없음.
+    """
+    from openpyxl.cell.cell import MergedCell as _MergedCell
+    anchor_row, anchor_col = resolve_merge_anchor(ws, row, col)
+    cell = ws.cell(row=anchor_row, column=anchor_col)
+    if isinstance(cell, _MergedCell):
+        # live 머지 range 없는 orphan → stale 객체 제거 후 fresh Cell 생성.
+        ws._cells.pop((anchor_row, anchor_col), None)
+        cell = ws.cell(row=anchor_row, column=anchor_col)
+    try:
+        cell.value = value
+        return True
+    except AttributeError:
+        return False
+
+
 def clear_data_range(
     ws: Any,
     *,

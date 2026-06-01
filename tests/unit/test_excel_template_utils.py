@@ -128,6 +128,40 @@ class TestMergedCellHandling:
         assert safe_write(ws, 1, 2, "X") is True
         assert ws["A1"].value == "X"  # anchor가 덮어쓰여짐
 
+    def test_force_write_orphan_merged_cell(self):
+        """라운드 96 — 병합 해제 후 잔존한 orphan MergedCell에도 강제 기록."""
+        from openpyxl.cell.cell import MergedCell
+
+        from backend.services.excel_template_utils import force_write_cell
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        # 세로 병합 → 해제: anchor(C3)는 Cell 복원, continuation(C4)은 MergedCell 잔존
+        ws.merge_cells("C3:C5")
+        ws.unmerge_cells("C3:C5")
+        # openpyxl quirk 재현: continuation 셀이 여전히 MergedCell (live range 없음)
+        if not isinstance(ws.cell(4, 3), MergedCell):
+            # 환경에 따라 자동 복원되면 강제로 orphan 상태 주입
+            ws._cells[(4, 3)] = MergedCell(ws, row=4, column=3)
+        assert not any(  # live merge range 없음 확인
+            mr.min_row <= 4 <= mr.max_row and mr.min_col <= 3 <= mr.max_col
+            for mr in ws.merged_cells.ranges
+        )
+        # safe_write는 orphan MergedCell에 silent skip (False)
+        assert safe_write(ws, 4, 3, "SwCom_33") is False
+        # force_write_cell은 orphan을 normal Cell로 교체 후 기록 (True)
+        assert force_write_cell(ws, 4, 3, "SwCom_33") is True
+        assert ws.cell(4, 3).value == "SwCom_33"
+
+    def test_force_write_respects_live_merge_anchor(self):
+        """라운드 96 — live 머지면 anchor 보정(safe_write 동일 동작)."""
+        from backend.services.excel_template_utils import force_write_cell
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws["A1"] = "anchor"
+        ws.merge_cells("A1:B1")
+        assert force_write_cell(ws, 1, 2, "Y") is True
+        assert ws["A1"].value == "Y"  # live 머지 → anchor에 기록
+
 
 class TestValidateBuildMeta:
     """deep-reviewer X3: 빌더 입력 메타 검증."""

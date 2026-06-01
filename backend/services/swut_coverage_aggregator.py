@@ -37,6 +37,7 @@ except ImportError:  # pragma: no cover
 from backend.services.excel_template_utils import (
     BLANK_MARKUP,
     build_release_history_row,
+    force_write_cell,
     mark_asil_a_function,
     mark_asil_b_function,
     mark_asil_c_function,
@@ -739,6 +740,7 @@ def _write_coverage_sheet(
     spec_unmatched: list[str] = []
     spec_unmatched_count = 0
     last_data_row = data_start - 1
+
     for i, fc in enumerate(function_rows):
         r = data_start + i
         last_data_row = r
@@ -782,9 +784,13 @@ def _write_coverage_sheet(
             comp_name = ""
             # 라운드 92 — spec_based 시 C=SwCom_NN (회사 감사본 일치).
             # 출처: 실 SwUFn_NNNN 앞 2자리 (SwUDS 'Related ID' SwCom 검증 결과 100%
-            # 일치 — 라운드 92 .codex_tmp 조사). 매핑 실패 시 env명 fallback.
-            if spec_based and resolved_swufn:
-                m_swufn = re.match(r"SwUFn_(\d{2})\d{2}", resolved_swufn)
+            # 일치 — 라운드 92 .codex_tmp 조사).
+            # 라운드 96 fix — resolved_swufn(SUDS 매핑 성공분) 대신 D열에 실제 표기되는
+            # display_unit_id 기준으로 도출. 이전엔 SUDS 미매핑이나 vcast가 실 SwUFn을
+            # 가진 행(예 SwUFn_3329)은 C 공란, 순차 fallback 행은 env명(Lib_sha256) leak.
+            # display_unit_id가 SwUFn_NNNN면 항상 SwCom_NN 부여 → 일관성 확보.
+            if spec_based:
+                m_swufn = re.match(r"SwUFn_(\d{2})\d{2}", str(display_unit_id))
                 if m_swufn:
                     comp_name = f"SwCom_{m_swufn.group(1)}"
             if not comp_name:
@@ -795,7 +801,13 @@ def _write_coverage_sheet(
                     from pathlib import Path as _PathLocal2
                     comp_name = _PathLocal2(fc.file).stem
             if comp_name:
-                safe_write(ws, r, comp_col, comp_name)
+                # 라운드 96 — spec_based는 force_write_cell로 orphan MergedCell
+                # (회사 양식 SwCom 그룹 병합 해제 잔존 셀) 강제 기록 → C 공란 해소.
+                # HDPDM01/SwIT는 기존 safe_write 동작 보존.
+                if spec_based:
+                    force_write_cell(ws, r, comp_col, comp_name)
+                else:
+                    safe_write(ws, r, comp_col, comp_name)
 
         safe_write(ws, r, unit_id_col, display_unit_id)
         safe_write(ws, r, unit_id_col + 1, fc.name)
