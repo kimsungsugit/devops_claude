@@ -125,6 +125,10 @@ COL_PASS_FAIL = 266          # JF
 COL_PASS_TOTAL = 267         # JG
 COL_LOG_DATA = 268           # JH
 ACTUAL_MAX = COL_PASS_FAIL - COL_ACTUAL_START  # 104 (Param 1~104)
+# 라운드 104 — Actual Result 서식 미러 소스. Expected Result(BF=58~FE=161, 104열)는
+# spec graft로 서식 보유하나 Actual(FF=162~)은 우리 추가 열이라 무서식 → Expected를
+# 1:1 미러(같은 변수의 기대/실제값, 동일 레이아웃). 헤더 r3 'Expected Result'@58 확인.
+COL_EXPECTED_START = 58      # BF
 
 _FILL_RGB = USER_INPUT_FILL_RGB
 
@@ -234,6 +238,58 @@ def _build_fn_iteration_map(session: SwUTSession) -> dict[str, dict[int, Any]]:
 # ---------------------------------------------------------------------------
 # Header writer (Actual / Pass-Fail / Log 섹션)
 # ---------------------------------------------------------------------------
+
+def _apply_actual_result_style(ws) -> int:
+    """라운드 104 — Actual Result(+Pass/Fail·Pass·Log) 열에 템플릿 서식 적용.
+
+    spec graft는 Test Case/Input/Expected(BF=58~FE=161)까지만 서식을 가져오고
+    Actual(FF=162~JE=265)·Pass/Fail(JF=266)·Pass(JG=267)·Log(JH=268)는 우리 추가
+    열이라 무서식(무테/default 폰트) → 사용자 보고 "Actual만 템플릿 미적용".
+
+    Expected를 1:1 미러: Actual col (162+i) ← Expected col (58+i). **같은 wb 내**이므로
+    ``_style`` 인덱스 직접 복사가 정확+빠름 (cross-wb는 라운드 103처럼 객체복사 필요하나
+    여기는 동일 wb). value는 보존(``_style`` 만 복제). Pass/Fail·Pass·Log은 Expected
+    대응이 없어 Expected 마지막 열(FE=161) 서식을 border/font 만 복제(기존 fill — ASIL/
+    Pass 강조 마킹 — 보존). 서브헤더/헤더 행(1~SUBHEADER_ROW)은 건드리지 않음.
+
+    Returns:
+        서식 적용한 셀 수.
+    """
+    import copy as _copy
+
+    from openpyxl.cell.cell import MergedCell as _MC
+    offset = COL_ACTUAL_START - COL_EXPECTED_START  # 104
+    restyled = 0
+    for r in range(SUBHEADER_ROW + 1, ws.max_row + 1):
+        # Actual(162~265) ← Expected(58~161) 미러 (_style 통째 — Actual엔 마킹 없음).
+        for ec in range(COL_EXPECTED_START, COL_ACTUAL_START):
+            exp = ws.cell(r, ec)
+            if not getattr(exp, "has_style", False):
+                continue
+            act = ws.cell(r, ec + offset)
+            if isinstance(act, _MC) or isinstance(exp, _MC):
+                continue
+            try:
+                act._style = _copy.copy(exp._style)
+                restyled += 1
+            except (AttributeError, TypeError):
+                pass
+        # Pass/Fail·Pass·Log(266~268): Expected 마지막 열(161) border/font 만 복제
+        # (fill 보존 — ASIL/Pass 강조 마킹 유지).
+        ref = ws.cell(r, COL_ACTUAL_START - 1)  # FE=161
+        if getattr(ref, "has_style", False) and not isinstance(ref, _MC):
+            for tc in (COL_PASS_FAIL, COL_PASS_TOTAL, COL_LOG_DATA):
+                dst = ws.cell(r, tc)
+                if isinstance(dst, _MC):
+                    continue
+                try:
+                    dst.border = _copy.copy(ref.border)
+                    dst.font = _copy.copy(ref.font)
+                    restyled += 1
+                except (AttributeError, TypeError):
+                    pass
+    return restyled
+
 
 def _write_log_headers(ws, out_warnings: list[str] | None) -> None:
     """레퍼런스 SUTR 레이아웃의 Actual/Pass-Fail/Log 헤더를 추가.
@@ -735,6 +791,13 @@ def build_sutr_from_spec(
         log_ws, blocks, fn_iter_map, asil_map, warnings,
     )
 
+    # 라운드 104 — Actual Result 열(FF=162~JE=265) 서식 적용. spec graft는 Test Case/
+    # Input/Expected 까지만 서식 보유, Actual 이후는 우리 추가 열이라 무서식(무테/
+    # default 폰트) → 사용자 보고 "Actual만 템플릿 미적용". Expected(BF=58~FE=161)를
+    # 1:1 미러. **같은 wb 내**이므로 cross-wb 객체복사가 아닌 ``_style`` 인덱스 직접
+    # 복사가 정확+빠름 (라운드 103 cross-wb 문제와 구분). value는 보존(_style만 복제).
+    _restyled = _apply_actual_result_style(log_ws)
+
     summary = {
         "builder": "spec-based-r92" if template_xlsm_bytes is not None else "spec-based-r91",
         "spec_sheet": spec_name,
@@ -758,6 +821,7 @@ def build_sutr_from_spec(
         "actual_from_expected": fill_stats["actual_from_expected"],
         "actual_from_vcast": fill_stats["actual_from_vcast"],
         "actual_missing": fill_stats["actual_missing"],
+        "actual_cells_restyled": _restyled,
     }
 
     # 보조 시트 채움 (Cover / 1.Test Summary / 2.Deviation / History).
