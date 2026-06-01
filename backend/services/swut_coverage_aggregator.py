@@ -1076,12 +1076,16 @@ def _write_coverage_sheet(
                 if not isinstance(_cc, _MC_border) and not isinstance(_dc, _MC_border):
                     _cc.border = _copy_border.copy(_dc.border)
             elif _last_styled_row is not None:
-                # (a) 무테 초과 행: 위 정상 스타일 행 전체 border 복제 + row height.
+                # (a) 무테 초과 행: 위 정상 스타일 행 전체 border/font/alignment 복제
+                # + row height (라운드 100 — font/alignment 추가. 라운드 99는 border/
+                # height만 복제 → 초과 행 폰트 11.0/미정렬/일부 bold-italic 잔존).
                 for _cc2 in range(no_col, _last_col + 1):
                     _src = ws.cell(_last_styled_row, _cc2)
                     _dst = ws.cell(_rr, _cc2)
                     if not isinstance(_dst, _MC_border) and not isinstance(_src, _MC_border):
                         _dst.border = _copy_border.copy(_src.border)
+                        _dst.font = _copy_border.copy(_src.font)
+                        _dst.alignment = _copy_border.copy(_src.alignment)
                 _src_h = ws.row_dimensions[_last_styled_row].height
                 if _src_h is not None:
                     ws.row_dimensions[_rr].height = _src_h
@@ -1157,6 +1161,21 @@ def _write_spec_totals(
 
     _set(5, 5, stmt_total); _set(5, 6, stmt_fail); _set(5, 7, stmt_fail); _set(5, 8, _cov(stmt_total, stmt_fail))
     _set(6, 5, br_total); _set(6, 6, br_fail); _set(6, 7, br_fail); _set(6, 8, _cov(br_total, br_fail))
+
+    # 라운드 100 — TOTALS 3행 폰트 통일. _set은 value만 stamp → 양식 기본(11.0)
+    # 잔존 (REF는 맑은 고딕 10.0). 정상 데이터행(data_start) name/size를 기준으로
+    # bold/italic은 명시 off (REF Total 라벨은 not bold/italic — data_start 행이
+    # italic일 수 있어 직접 복제 시 기울임 전파). 사용자 보고 "폰트/셀설정 토탈부분까지".
+    from openpyxl.cell.cell import MergedCell as _MC_tot
+    from openpyxl.styles import Font as _Font_tot
+    _base = ws.cell(data_start, unit_id_col).font
+    _ref_font = _Font_tot(name=_base.name, size=_base.size, bold=False, italic=False)
+    for _rr in (row_fail, row_pass, row_total):
+        for _cc in (unit_id_col, stmt_label_col, stmt_value_col,
+                    branch_label_col, branch_value_col):
+            _cell = ws.cell(_rr, _cc)
+            if not isinstance(_cell, _MC_tot):
+                _cell.font = _ref_font
 
 
 # BLANK_MARKUP은 excel_template_utils에서 import (단일 출처).
@@ -1800,6 +1819,8 @@ def _write_consistency_sheet_spec(
                 _dst = ws.cell(_r, _cc)
                 if not isinstance(_dst, _MC_cs) and not isinstance(_src, _MC_cs):
                     _dst.border = _copy_cs.copy(_src.border)
+                    _dst.font = _copy_cs.copy(_src.font)  # 라운드 100
+                    _dst.alignment = _copy_cs.copy(_src.alignment)
             _src_h = ws.row_dimensions[_last_styled_cs].height
             if _src_h is not None:
                 ws.row_dimensions[_r].height = _src_h
