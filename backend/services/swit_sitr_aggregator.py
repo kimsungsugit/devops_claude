@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -38,9 +39,14 @@ except ImportError:  # pragma: no cover
 
 from backend.services.excel_layout_resolver import inspect_swit_layout
 from backend.services.excel_template_utils import (
+    auto_expand_row_block,
     build_release_history_row,
+    clear_data_range,
+    find_kv_row,
     has_vba_macros,
     inspect_vba_refs,
+    push_sentinel_to_last_row,
+    safe_write,
     short_date,
     validate_build_meta,
     validate_xlsx_template_bytes,
@@ -59,7 +65,6 @@ from backend.services.swut_input_adapter import (
 from backend.services.swut_sutr_aggregator import (
     _write_cover,
     _write_deviation,
-    _write_test_log,
     _write_test_summary,
 )
 
@@ -115,6 +120,422 @@ class SwitSitrBuildResult:
             "summary": self.summary,
             "tool_qualification": self.tool_qualification,
         }
+
+
+def _norm_swit_key(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", (value or "").lower())
+
+
+def _find_swit_env_match(
+    unit_key: str, env_by_key: dict[str, Any],
+) -> tuple[str, Any] | tuple[None, None]:
+    env = env_by_key.get(unit_key)
+    if env is not None:
+        return unit_key, env
+    candidates = [
+        (env_key, env_value)
+        for env_key, env_value in env_by_key.items()
+        if unit_key.startswith(env_key)
+        and unit_key[len(env_key):].isdigit()
+        and len(unit_key) - len(env_key) <= 2
+    ]
+    if len(candidates) == 1:
+        return candidates[0]
+    return None, None
+
+
+def _swit_entry_method(entry: Any) -> str:
+    test_method = (getattr(entry, "test_method", "") or "").strip()
+    generation_method = (getattr(entry, "generation_method", "") or "").strip()
+    if test_method and generation_method:
+        return f"{test_method}, {generation_method}"
+    return test_method or generation_method or "REQ, IFT, AOR, ABV"
+
+
+def _swit_test_method(entry: Any) -> str:
+    raw = (getattr(entry, "test_method", "") or "").strip() or "REQ, IFT"
+    return re.sub(r"\s*,\s*", ", ", raw.replace("\n", " ")).strip()
+
+
+def _swit_generation_method(entry: Any) -> str:
+    raw = (getattr(entry, "generation_method", "") or "").strip() or "AOR, ABV "
+    normalized = re.sub(r"\s*,\s*", ", ", raw.replace("\n", " ")).strip()
+    return f"{normalized} " if normalized == "AOR, ABV" else normalized
+
+
+def _swit_env_result(env: Any) -> str:
+    results = list((getattr(env, "test_results", {}) or {}).values())
+    if not results:
+        return "N/A"
+    return "Pass" if all(getattr(r, "passed", False) for r in results) else "Fail"
+
+
+def _swit_value(value: Any) -> str:
+    if isinstance(value, tuple):
+        value = value[0] if value else ""
+    return "" if value is None else str(value)
+
+
+def _swit_var_names(env: Any) -> tuple[list[str], list[str], list[str]]:
+    input_names: list[str] = []
+    expected_names: list[str] = []
+    actual_names: list[str] = []
+    seen_in: set[str] = set()
+    seen_exp: set[str] = set()
+    seen_act: set[str] = set()
+    for tc_name in sorted((getattr(env, "test_cases", {}) or {}).keys()):
+        items = env.test_cases.get(tc_name) or []
+        item = items[0] if items else None
+        if item is not None:
+            for key in (getattr(item, "input_data", {}) or {}):
+                if key not in seen_in:
+                    seen_in.add(key)
+                    input_names.append(key)
+            for key in (getattr(item, "expected_result", {}) or {}):
+                if key not in seen_exp:
+                    seen_exp.add(key)
+                    expected_names.append(key)
+        result = (getattr(env, "test_results", {}) or {}).get(tc_name)
+        actual = getattr(result, "actual_result", {}) or {} if result else {}
+        if not actual:
+            result_items = getattr(env, "tc_result_items", {}).get(tc_name, [])
+            result_item = result_items[0] if result_items else None
+            actual = getattr(result_item, "actual_result", {}) or {} if result_item else {}
+        for key in actual:
+            if key not in seen_act:
+                seen_act.add(key)
+                actual_names.append(key)
+    if not actual_names:
+        actual_names = list(expected_names)
+    return input_names, expected_names, actual_names
+
+
+def _swit_tc_id_from_env(env: Any) -> str:
+    env_name = getattr(env, "env_name", "") or ""
+    match = re.search(r"SwUFn_(\d+(?:_\d+)?)", env_name, flags=re.IGNORECASE)
+    if match:
+        return f"SwITC_{match.group(1)}"
+    return env_name or "SwITC_UNKNOWN"
+
+
+def _build_swit_test_log_blocks(
+    session: SwUTSession,
+    swits_map: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    env_by_key = {
+        _norm_swit_key(getattr(env, "env_name", "") or ""): env
+        for env in session.environments
+    }
+    used_env_keys: set[str] = set()
+    blocks: list[dict[str, Any]] = []
+    missing_spec_blocks: list[dict[str, Any]] = []
+    grouped_entries: dict[str, dict[str, Any]] = {}
+
+    for tc_id, entry in (swits_map or {}).items():
+        unit_key = _norm_swit_key(getattr(entry, "unit_name", "") or "")
+        matched_key, env = _find_swit_env_match(unit_key, env_by_key)
+        if env is not None:
+            used_env_keys.add(matched_key or unit_key)
+            group = grouped_entries.setdefault(
+                matched_key or unit_key, {"env": env, "entries": []},
+            )
+            group["entries"].append((tc_id, entry))
+            continue
+        missing_spec_blocks.append({
+            "tc_id": getattr(entry, "tc_id", "") or tc_id,
+            "description": getattr(entry, "description", "") or getattr(entry, "unit_name", "") or "",
+            "method": _swit_test_method(entry),
+            "generation_method": _swit_generation_method(entry),
+            "precondition": getattr(entry, "precondition", "") or "",
+            "env": None,
+            "note": "SwITS spec entry - VectorCAST log missing",
+        })
+
+    for group in grouped_entries.values():
+        entries = group["entries"]
+        tc_ids = [getattr(entry, "tc_id", "") or tc_id for tc_id, entry in entries]
+        descriptions = list(dict.fromkeys(
+            (getattr(entry, "description", "") or getattr(entry, "unit_name", "") or "")
+            for _tc_id, entry in entries
+            if (getattr(entry, "description", "") or getattr(entry, "unit_name", "") or "")
+        ))
+        methods = list(dict.fromkeys(_swit_test_method(entry) for _tc_id, entry in entries))
+        generation_methods = list(dict.fromkeys(
+            _swit_generation_method(entry) for _tc_id, entry in entries
+        ))
+        preconditions = list(dict.fromkeys(
+            getattr(entry, "precondition", "") or ""
+            for _tc_id, entry in entries
+            if getattr(entry, "precondition", "") or ""
+        ))
+        description = descriptions[0] if descriptions else ""
+        if len(tc_ids) > 1:
+            description = f"{description}\nGrouped SwITS: {', '.join(tc_ids)}"
+        blocks.append({
+            "tc_id": ", ".join(tc_ids),
+            "description": description,
+            "method": ", ".join(methods),
+            "generation_method": ", ".join(generation_methods),
+            "precondition": "\n".join(preconditions),
+            "env": group["env"],
+            "note": "",
+        })
+
+    blocks.extend(missing_spec_blocks)
+
+    for env in session.environments:
+        env_key = _norm_swit_key(getattr(env, "env_name", "") or "")
+        if env_key in used_env_keys:
+            continue
+        blocks.append({
+            "tc_id": _swit_tc_id_from_env(env),
+            "description": getattr(env, "component_name", "") or getattr(env, "env_name", "") or "",
+            "method": "REQ, IFT",
+            "generation_method": "AOR, ABV ",
+            "precondition": "",
+            "env": env,
+            "note": "VectorCAST log entry - SwITS spec match missing",
+        })
+
+    return blocks
+
+
+def _write_swit_test_log(
+    ws: Any,
+    session: SwUTSession,
+    *,
+    layout: Any = None,
+    swits_map: dict[str, Any] | None = None,
+    out_warnings: list[str] | None = None,
+) -> tuple[int, int]:
+    pos = (
+        find_kv_row(ws, "TC ID", max_row=15)
+        or find_kv_row(ws, "TC_ID", max_row=15)
+        or find_kv_row(ws, "Test Case ID", max_row=15)
+    )
+    if pos is None:
+        if out_warnings is not None:
+            out_warnings.append("SwITR Test Log TC ID header not found")
+        return 0, 0
+
+    start_row = pos[0] + 1
+    blocks = _build_swit_test_log_blocks(session, swits_map)
+    rows_needed = sum(1 + len((getattr(b["env"], "test_cases", {}) or {})) for b in blocks)
+    if rows_needed <= 0:
+        return 0, 0
+
+    sentinel_row = None
+    for row_idx in range(start_row, ws.max_row + 1):
+        for col_idx in range(1, min(ws.max_column, 40) + 1):
+            value = ws.cell(row_idx, col_idx).value
+            if isinstance(value, str) and "End of Document" in value:
+                sentinel_row = row_idx
+                break
+        if sentinel_row:
+            break
+    data_slots = (sentinel_row - start_row) if sentinel_row else max(0, ws.max_row - start_row + 1)
+    if rows_needed > data_slots:
+        insert_at = sentinel_row or (ws.max_row + 1)
+        shortage = rows_needed - data_slots
+        auto_expand_row_block(
+            ws,
+            insert_at_row=insert_at,
+            amount=shortage,
+            template_row_idx=start_row,
+            copy_style=True,
+            copy_merge=True,
+            copy_dimension=True,
+        )
+        try:
+            push_sentinel_to_last_row(ws)
+        except Exception:  # noqa: BLE001
+            pass
+
+    for merged_range in list(ws.merged_cells.ranges):
+        if (
+            merged_range.max_row >= start_row
+            and merged_range.min_row <= min(ws.max_row, start_row + rows_needed + 20)
+            and merged_range.max_col >= 1
+            and merged_range.min_col <= 40
+        ):
+            try:
+                ws.unmerge_cells(str(merged_range))
+            except ValueError:
+                pass
+
+    is_reference_swit_log = (
+        (ws.max_column or 0) >= 300
+        and
+        str(ws.cell(4, 6).value or "").strip().lower() == "tc_id"
+        and str(ws.cell(4, 10).value or "").strip().lower() == "inpt[0]"
+    )
+    is_kjpds_swit_log = (
+        str(ws.cell(5, 8).value or "").strip().lower() == "input"
+        and str(ws.cell(5, 18).value or "").strip().lower() == "expected result"
+        and str(ws.cell(5, 28).value or "").strip().lower() == "actual result"
+    )
+    clear_end_col = 378 if is_reference_swit_log else 40
+    clear_data_range(
+        ws,
+        start_row=start_row,
+        end_row=min(ws.max_row, start_row + rows_needed + 20),
+        start_col=1,
+        end_col=min(ws.max_column or clear_end_col, clear_end_col),
+        preserve_formula=True,
+        preserve_merged_anchor=True,
+        sentinel_patterns=["End of Document", "< End"],
+    )
+
+    if is_reference_swit_log:
+        no_col = 2
+        env_col = 3
+        method_col = 4
+        generation_col = 5
+        tc_id_col = 6
+        iter_index_col = 7
+        desc_col = 8
+        iter_tc_col = desc_col
+        input_col = 10
+        expected_col = 108
+        actual_col = 242
+        unit_result_col = 376
+        total_result_col = 377
+        log_data_col = 0
+        precondition_col = 9
+        input_max = 98
+        expected_max = 134
+        actual_max = 134
+    elif is_kjpds_swit_log:
+        no_col = 0
+        env_col = 0
+        generation_col = 0
+        tc_id_col = 2
+        iter_index_col = 3
+        iter_tc_col = 4
+        desc_col = 3
+        method_col = 5
+        input_col = 8
+        expected_col = 18
+        actual_col = 28
+        unit_result_col = 38
+        total_result_col = 39
+        log_data_col = 40
+        precondition_col = 6
+        input_max = 10
+        expected_max = 10
+        actual_max = 10
+    else:
+        no_col = 0
+        env_col = 0
+        generation_col = 0
+        tc_id_col = 2
+        iter_index_col = 3
+        iter_tc_col = 4
+        desc_col = 3
+        method_col = pos[1] + 2
+        input_col = getattr(layout, "test_log_input_col", None) or pos[1] + 4
+        expected_col = getattr(layout, "test_log_expected_col", None) or input_col + 10
+        actual_col = getattr(layout, "test_log_actual_col", None) or expected_col + 10
+        unit_result_col = getattr(layout, "test_log_pass_fail_col", None) or pos[1] + 3
+        total_result_col = getattr(layout, "test_log_pass_fail_total_col", None) or 0
+        log_data_col = getattr(layout, "test_log_log_data_col", None) or 0
+        precondition_col = getattr(layout, "test_log_precondition_col", None) or 0
+        input_max = 10
+        expected_max = 10
+        actual_max = 10
+
+    row_idx = start_row
+    block_count = 0
+    iteration_count = 0
+    for block in blocks:
+        env = block["env"]
+        input_names: list[str] = []
+        expected_names: list[str] = []
+        actual_names: list[str] = []
+        tc_names: list[str] = []
+        if env is not None:
+            input_names, expected_names, actual_names = _swit_var_names(env)
+            tc_names = sorted((getattr(env, "test_cases", {}) or {}).keys())
+        input_names = input_names[:input_max]
+        expected_names = expected_names[:expected_max]
+        actual_names = actual_names[:actual_max]
+
+        block_no = str(block_count + 1) if is_reference_swit_log else block_count + 1
+        if no_col > 0:
+            safe_write(ws, row_idx, no_col, block_no)
+        if env_col > 0 and env is not None:
+            env_name = getattr(env, "env_name", "")
+            safe_write(ws, row_idx, env_col, env_name.upper() if is_reference_swit_log else env_name)
+        safe_write(ws, row_idx, tc_id_col, block["tc_id"])
+        if not is_reference_swit_log:
+            safe_write(ws, row_idx, desc_col, block["description"])
+        safe_write(ws, row_idx, method_col, block["method"])
+        if generation_col > 0:
+            safe_write(ws, row_idx, generation_col, block.get("generation_method", block["method"]))
+        if precondition_col > 0:
+            safe_write(ws, row_idx, precondition_col, block["precondition"])
+        for offset, name in enumerate(input_names):
+            safe_write(ws, row_idx, input_col + offset, name)
+        for offset, name in enumerate(expected_names):
+            safe_write(ws, row_idx, expected_col + offset, name)
+        for offset, name in enumerate(actual_names):
+            safe_write(ws, row_idx, actual_col + offset, name)
+
+        total_result = _swit_env_result(env) if env is not None else "N/A"
+        if is_reference_swit_log and unit_result_col > 0:
+            safe_write(ws, row_idx, unit_result_col, total_result)
+        if total_result_col > 0:
+            safe_write(ws, row_idx, total_result_col, total_result)
+        if env is not None and log_data_col > 0:
+            safe_write(ws, row_idx, log_data_col, getattr(env, "env_name", ""))
+        elif block["note"] and log_data_col > 0:
+            safe_write(ws, row_idx, log_data_col, block["note"])
+
+        for iter_idx, tc_name in enumerate(tc_names, start=1):
+            iter_row = row_idx + iter_idx
+            items = env.test_cases.get(tc_name) or [] if env is not None else []
+            item = items[0] if items else None
+            result = env.test_results.get(tc_name) if env is not None else None
+            actual = getattr(result, "actual_result", {}) or {} if result else {}
+            if not actual and env is not None:
+                result_items = getattr(env, "tc_result_items", {}).get(tc_name, [])
+                result_item = result_items[0] if result_items else None
+                actual = getattr(result_item, "actual_result", {}) or {} if result_item else {}
+            safe_write(ws, iter_row, iter_index_col, iter_idx)
+            if is_reference_swit_log:
+                if no_col > 0:
+                    safe_write(ws, iter_row, no_col, block_no)
+                if env_col > 0:
+                    safe_write(ws, iter_row, env_col, str(tc_name).split(".", 1)[0])
+                iter_description = (
+                    getattr(item, "description", "")
+                    or block["description"]
+                    or tc_name
+                )
+                safe_write(ws, iter_row, iter_tc_col, iter_description)
+            else:
+                safe_write(ws, iter_row, iter_tc_col, tc_name)
+            input_data = getattr(item, "input_data", {}) or {} if item else {}
+            expected_data = getattr(item, "expected_result", {}) or {} if item else {}
+            for offset, name in enumerate(input_names):
+                safe_write(ws, iter_row, input_col + offset, _swit_value(input_data.get(name, "")))
+            for offset, name in enumerate(expected_names):
+                safe_write(ws, iter_row, expected_col + offset, _swit_value(expected_data.get(name, "")))
+            for offset, name in enumerate(actual_names):
+                safe_write(ws, iter_row, actual_col + offset, _swit_value(actual.get(name, "")))
+            iter_result = "Pass" if result and getattr(result, "passed", False) else ("Fail" if result else "N/A")
+            safe_write(ws, iter_row, unit_result_col, iter_result)
+            iteration_count += 1
+
+        row_idx += 1 + len(tc_names)
+        block_count += 1
+
+    if out_warnings is not None:
+        out_warnings.append(
+            f"[swit-test-log] blocks={block_count}, iteration_rows={iteration_count}, "
+            f"swits_entries={len(swits_map or {})}, log_envs={len(session.environments)}"
+        )
+    return block_count, iteration_count
 
 
 def build_swit_sitr_report(
@@ -277,17 +698,12 @@ def build_swit_sitr_report(
     if log_ws is None:
         warnings.append("Test Log/Result 시트 미발견")
     else:
-        # 54차 T283: layout 전달 — v2.02 AL column marker fill
-        # 라운드 78 T1303: c_function_map 전달 — ASIL fallback (SwUT 대칭).
-        n = _write_test_log(
-            log_ws, session,
-            function_asil_map=agg.get("function_asil_map"),
+        n, n_iter = _write_swit_test_log(
+            log_ws, session, layout=layout, swits_map=swuts_map,
             out_warnings=warnings,
-            layout=layout,
-            swuts_map=swuts_map,
-            c_function_map=session.c_function_map or None,
         )
         summary["test_log_rows_written"] = n
+        summary["test_log_iteration_rows_written"] = n_iter
 
     incomplete_sheets: list[str] = []
 
@@ -342,12 +758,17 @@ def build_swit_sitr_report(
     out.seek(0)
     wb.close()
 
-    # 사용자 레퍼런스 파일명 패턴 정확 매칭:
-    # `(HDPDM01_SITR) Software Integration Test Result_v2.02_240219.xlsm`
-    filename = (
-        f"({meta.project_id}_SITR) Software Integration Test Result_"
-        f"v{meta.release_sw_version}_{short_date(meta.test_date)}_R.xlsm"
-    )
+    if meta.doc_filename_pattern:
+        filename = meta.doc_filename_pattern.format(
+            version=meta.release_sw_version, date=short_date(meta.test_date),
+        )
+    else:
+        # 사용자 레퍼런스 파일명 패턴 정확 매칭:
+        # `(HDPDM01_SITR) Software Integration Test Result_v2.02_240219.xlsm`
+        filename = (
+            f"({meta.project_id}_SITR) Software Integration Test Result_"
+            f"v{meta.release_sw_version}_{short_date(meta.test_date)}_R.xlsm"
+        )
 
     summary["template_sha256_12"] = template_sha256_12
     summary["build_timestamp"] = meta.build_timestamp

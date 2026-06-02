@@ -29,8 +29,6 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Response
 
 from backend.dependencies.admin import require_admin
-from fastapi.responses import StreamingResponse
-
 from backend.routers._safety import run_build_safely, run_consistency_safely, run_preview_safely
 from backend.schemas import (
     LogFolderPreviewRequest,
@@ -38,6 +36,12 @@ from backend.schemas import (
     SwITConsistencyCheckRequest,
     SwITSitrBuildRequest,
 )
+
+# 49차 — SwIT는 별도 config 없이 swut_meta.json HDPDM01 슬롯 재활용.
+# c_source_root + swuds_docx_path 공유, template_paths는 swit_coverage_template /
+# swit_sitr_template 별도 키 (v2.02 양식이 SwUT v3.01과 다름).
+# 54차 T281 — DRY 통합. swut_meta_resolver로 path/ASIL 로직 이전.
+from backend.services import swut_meta_resolver as _resolver_mod
 from backend.services.file_resolver import get_resolver
 from backend.services.path_mode_check import check_log_folder_mode_compat
 from backend.services.swit_consistency_checker import check_swit_consistency
@@ -51,18 +55,13 @@ from backend.services.swit_sitr_aggregator import (
     SwitSitrBuildResult,
     build_swit_sitr_report,
 )
-# 49차 — SwIT는 별도 config 없이 swut_meta.json HDPDM01 슬롯 재활용.
-# c_source_root + swuds_docx_path 공유, template_paths는 swit_coverage_template /
-# swit_sitr_template 별도 키 (v2.02 양식이 SwUT v3.01과 다름).
-# 54차 T281 — DRY 통합. swut_meta_resolver로 path/ASIL 로직 이전.
-from backend.services import swut_meta_resolver as _resolver_mod
 from backend.services.swut_meta_resolver import (
     apply_function_asil_map as _resolver_apply_function_asil_map,
     resolve_c_source_root as _resolver_resolve_c_source_root,
+    resolve_hmr_html_bytes as _resolver_resolve_hmr_html_bytes,
     resolve_swuds_function_ids as _resolver_resolve_swuds_function_ids,
     resolve_swuds_path as _resolver_resolve_swuds_path,
     resolve_swuts_test_specs as _resolver_resolve_swuts_test_specs,
-    resolve_hmr_html_bytes as _resolver_resolve_hmr_html_bytes,
 )
 
 # 54-fix W2: swut.py와 동일 backward compat alias — 회귀가 swit_mod._META_CONFIG_PATH
@@ -105,6 +104,7 @@ def _build_swit_coverage_meta(req: SwITBuildRequest) -> SwitCoverageBuildMeta:
     """
     cfg = _load_meta_from_config(req.project_id)
     approvers = cfg.get("approvers", {}) or {}
+    doc_filenames = cfg.get("doc_filenames", {}) or {}
     return SwitCoverageBuildMeta(
         project_id=req.project_id,
         project_full_name=cfg.get("project_full_name", req.project_id),
@@ -114,6 +114,11 @@ def _build_swit_coverage_meta(req: SwITBuildRequest) -> SwitCoverageBuildMeta:
         default_author=approvers.get("default_author", ""),
         default_reviewer=approvers.get("default_reviewer", ""),
         default_approver=approvers.get("default_approver", ""),
+        doc_filename_pattern=(
+            doc_filenames.get("switcv")
+            or doc_filenames.get("swit_coverage")
+            or ""
+        ),
         release_sw_version=req.release_sw_version,
         hw_version=req.hw_version,
         test_date=req.test_date,
@@ -133,6 +138,7 @@ def _build_swit_sitr_meta(req: SwITSitrBuildRequest) -> SwitSitrBuildMeta:
     """
     cfg = _load_meta_from_config(req.project_id)
     approvers = cfg.get("approvers", {}) or {}
+    doc_filenames = cfg.get("doc_filenames", {}) or {}
     return SwitSitrBuildMeta(
         project_id=req.project_id,
         project_full_name=cfg.get("project_full_name", req.project_id),
@@ -142,6 +148,12 @@ def _build_swit_sitr_meta(req: SwITSitrBuildRequest) -> SwitSitrBuildMeta:
         default_author=approvers.get("default_author", ""),
         default_reviewer=approvers.get("default_reviewer", ""),
         default_approver=approvers.get("default_approver", ""),
+        doc_filename_pattern=(
+            doc_filenames.get("switr")
+            or doc_filenames.get("sitr")
+            or doc_filenames.get("swit_sitr")
+            or ""
+        ),
         release_sw_version=req.release_sw_version,
         hw_version=req.hw_version,
         test_date=req.test_date,
@@ -180,6 +192,20 @@ def _resolve_swit_swuds_path(req: "SwITBuildRequest | SwITSitrBuildRequest") -> 
 def _resolve_swit_c_source_root(req: "SwITBuildRequest | SwITSitrBuildRequest") -> str:
     """Thin wrapper — 49차 정책 동일 (54차 DRY 통합)."""
     return _resolver_resolve_c_source_root(req, req.project_id)
+
+
+def _resolve_swit_log_folder(req: "SwITBuildRequest | SwITSitrBuildRequest") -> str | None:
+    """req.log_folder 우선, 비면 config의 SwIT log folder fallback."""
+    if req.log_folder:
+        return req.log_folder
+    cfg = _load_meta_from_config(req.project_id)
+    log_folders = cfg.get("log_folders", {}) or {}
+    return (
+        cfg.get("swit_log_folder")
+        or log_folders.get("swit")
+        or log_folders.get("integration")
+        or None
+    )
 
 
 _CHUNK_SIZE = 64 * 1024
@@ -281,13 +307,14 @@ def _apply_function_asil_map(req: SwITBuildRequest, session) -> None:
 
 def _do_swit_coverage_build(req: SwITBuildRequest) -> Response:
     resolver = get_resolver()
+    log_folder = _resolve_swit_log_folder(req)
     # 56차 T308 — log_folder UNC + Local 모드 pre-flight check
-    check_log_folder_mode_compat(req.log_folder, resolver)
+    check_log_folder_mode_compat(log_folder, resolver)
     session = collect_swit_session(
         resolver, req.project_id,
         jenkins_build_number=req.jenkins_build_number,
         cache_root=req.cache_root,
-        log_folder=req.log_folder,
+        log_folder=log_folder,
     )
     _apply_function_asil_map(req, session)
     # 51차 — Coverage 양식 전용 path 사용 (config fallback: swit_coverage_template).
@@ -300,12 +327,21 @@ def _do_swit_coverage_build(req: SwITBuildRequest) -> Response:
     hmr_html_bytes = _resolver_resolve_hmr_html_bytes(
         req, req.project_id, out_warnings=_hmr_warnings,
     )
+    # 60차 F6-A / 라운드 73 T807: SwITS spec 전체를 Traceability에 활용.
+    # SwITCV도 SITR과 동일하게 spec parse 실패 사유를 warnings로 노출한다.
+    _swits_warnings: list[str] = []
+    swits_map = _resolver_resolve_swuts_test_specs(
+        req, req.project_id, out_warnings=_swits_warnings,
+    )
     result: SwitCoverageBuildResult = build_swit_coverage_report(
         session, meta, template_bytes, swuds_function_ids=swuds_fn_ids,
         hmr_html_bytes=hmr_html_bytes,
+        swits_map=swits_map,
     )
     if _hmr_warnings:
         result.warnings.extend(_hmr_warnings)
+    if _swits_warnings:
+        result.warnings.extend(_swits_warnings)
     if not result.ok:
         raise HTTPException(status_code=500, detail="SwIT 빌드 실패 (ok=False)")
     return _build_result_to_response(
@@ -339,13 +375,14 @@ def _do_swit_sitr_build(req: SwITSitrBuildRequest) -> Response:
     "application/vnd.ms-excel.sheet.macroenabled.12".
     """
     resolver = get_resolver()
+    log_folder = _resolve_swit_log_folder(req)
     # 56차 T308 — log_folder UNC + Local 모드 pre-flight check
-    check_log_folder_mode_compat(req.log_folder, resolver)
+    check_log_folder_mode_compat(log_folder, resolver)
     session = collect_swit_session(
         resolver, req.project_id,
         jenkins_build_number=req.jenkins_build_number,
         cache_root=req.cache_root,
-        log_folder=req.log_folder,
+        log_folder=log_folder,
     )
     _apply_function_asil_map(req, session)
     # 51차 — SITR 양식 전용 path 사용 (config fallback: swit_sitr_template).

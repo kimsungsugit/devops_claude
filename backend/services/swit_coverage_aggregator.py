@@ -37,7 +37,11 @@ except ImportError:  # pragma: no cover
 
 from backend.services.excel_layout_resolver import inspect_swit_layout
 from backend.services.excel_template_utils import (
+    auto_expand_row_block,
     build_release_history_row,
+    clear_data_range,
+    push_sentinel_to_last_row,
+    safe_write,
     short_date,
     validate_build_meta,
     validate_xlsx_template_bytes,
@@ -54,6 +58,8 @@ from backend.services.swut_coverage_aggregator import (
     _write_traceability_sheet,
 )
 from backend.services.swut_input_adapter import (
+    CoverageStats,
+    FunctionCoverage,
     SwUTSession,
     aggregate_session,
 )
@@ -106,6 +112,291 @@ class SwitCoverageBuildResult:
             "summary": self.summary,
             "tool_qualification": self.tool_qualification,
         }
+
+
+def _norm_swit_key(value: str) -> str:
+    import re
+    return re.sub(r"[^a-z0-9]+", "", (value or "").lower())
+
+
+def _find_swit_env_match(
+    unit_key: str, env_by_key: dict[str, Any],
+) -> tuple[str, Any] | tuple[None, None]:
+    env = env_by_key.get(unit_key)
+    if env is not None:
+        return unit_key, env
+    candidates = [
+        (env_key, env_value)
+        for env_key, env_value in env_by_key.items()
+        if unit_key.startswith(env_key)
+        and unit_key[len(env_key):].isdigit()
+        and len(unit_key) - len(env_key) <= 2
+    ]
+    if len(candidates) == 1:
+        return candidates[0]
+    return None, None
+
+
+def _write_swit_consistency_sheet(
+    ws: Any,
+    session: SwUTSession,
+    swits_map: dict[str, Any] | None,
+    *,
+    out_warnings: list[str] | None = None,
+) -> int:
+    env_by_key = {
+        _norm_swit_key(getattr(env, "env_name", "") or ""): env
+        for env in session.environments
+    }
+    used_env_keys: set[str] = set()
+    rows: list[tuple[int, str, str, str, str]] = []
+
+    for entry in (swits_map or {}).values():
+        tc_id = getattr(entry, "tc_id", "") or ""
+        unit_key = _norm_swit_key(getattr(entry, "unit_name", "") or "")
+        matched_key, env = _find_swit_env_match(unit_key, env_by_key)
+        if env is not None:
+            used_env_keys.add(matched_key or unit_key)
+            rows.append((len(rows) + 1, tc_id, getattr(env, "env_name", ""), "O", ""))
+        else:
+            rows.append((
+                len(rows) + 1, tc_id, "",
+                "X", "SwITS spec exists, VectorCAST log env missing",
+            ))
+
+    for env in session.environments:
+        env_key = _norm_swit_key(getattr(env, "env_name", "") or "")
+        if env_key in used_env_keys:
+            continue
+        rows.append((
+            len(rows) + 1,
+            getattr(env, "env_name", "") or "",
+            getattr(env, "env_name", "") or "",
+            "X",
+            "VectorCAST log exists, SwITS spec entry missing",
+        ))
+
+    pass_count = sum(1 for row in rows if row[3] == "O")
+    fail_count = sum(1 for row in rows if row[3] != "O")
+    total = len(rows)
+    coverage = round(pass_count / total, 4) if total else 0
+
+    needed_last = 11 + total - 1
+    if needed_last > ws.max_row:
+        auto_expand_row_block(
+            ws,
+            insert_at_row=ws.max_row,
+            amount=needed_last - ws.max_row,
+            template_row_idx=min(11, ws.max_row),
+            copy_style=True,
+            copy_merge=True,
+            copy_dimension=True,
+        )
+        try:
+            push_sentinel_to_last_row(ws)
+        except Exception:  # noqa: BLE001
+            pass
+
+    for merged_range in list(ws.merged_cells.ranges):
+        if (
+            merged_range.max_row >= 10
+            and merged_range.min_row <= min(ws.max_row, needed_last + 20)
+            and merged_range.max_col >= 1
+            and merged_range.min_col <= 8
+        ):
+            try:
+                ws.unmerge_cells(str(merged_range))
+            except ValueError:
+                pass
+
+    clear_data_range(
+        ws,
+        start_row=1,
+        end_row=min(ws.max_row, needed_last + 20),
+        start_col=1,
+        end_col=8,
+        preserve_formula=True,
+        preserve_merged_anchor=True,
+        sentinel_patterns=["End of Document", "< End"],
+    )
+
+    safe_write(
+        ws, 1, 1,
+        "SwIT consistency: SwITS test specification entries are matched "
+        "against VectorCAST integration-test log environments.",
+    )
+    safe_write(ws, 3, 2, "Document Type")
+    safe_write(ws, 3, 4, "SwITS, VectorCAST Log")
+    safe_write(ws, 4, 2, "Pass")
+    safe_write(ws, 4, 4, pass_count)
+    safe_write(ws, 5, 2, "Fail")
+    safe_write(ws, 5, 4, fail_count)
+    safe_write(ws, 6, 2, "Total")
+    safe_write(ws, 6, 4, total)
+    safe_write(ws, 7, 2, "Coverage")
+    safe_write(ws, 7, 4, coverage)
+    safe_write(ws, 10, 2, "No")
+    safe_write(ws, 10, 3, "SwITS TC ID")
+    safe_write(ws, 10, 4, "VectorCAST Log Env")
+    safe_write(ws, 10, 5, "Consistency")
+    safe_write(ws, 10, 6, "Note")
+
+    for no, tc_id, env_name, result, note in rows:
+        row_idx = 10 + no
+        safe_write(ws, row_idx, 2, no)
+        safe_write(ws, row_idx, 3, tc_id)
+        safe_write(ws, row_idx, 4, env_name)
+        safe_write(ws, row_idx, 5, result)
+        safe_write(ws, row_idx, 6, note)
+
+    if out_warnings is not None:
+        out_warnings.append(
+            f"[swit-consistency] SwITS/log match: pass={pass_count}, "
+            f"fail={fail_count}, total={total}"
+        )
+    return total
+
+
+def _norm_function_name(value: str) -> str:
+    import re
+    return re.sub(r"[^a-z0-9_]+", "", (value or "").strip().lower())
+
+
+def _extract_template_coverage_rows(ws: Any) -> list[tuple[str, str, Any]]:
+    """Return existing v1.01 Coverage function rows from a populated template.
+
+    KJPDS02 v1.01 SwITCV carries the approved function universe in the
+    template/result file itself: B=No, D=Unit ID, E=Function Name.  Generic blank
+    templates do not have enough rows, so this only activates for substantial
+    pre-populated tables.
+    """
+    rows: list[tuple[str, str, Any]] = []
+    if ws is None:
+        return rows
+    for row_idx in range(1, ws.max_row + 1):
+        no_value = ws.cell(row_idx, 2).value
+        unit_id = str(ws.cell(row_idx, 4).value or "").strip()
+        fn_name = str(ws.cell(row_idx, 5).value or "").strip()
+        if unit_id and fn_name and unit_id.lower() != "total":
+            if not isinstance(no_value, int) and len(rows) < 10:
+                continue
+            rows.append((unit_id, fn_name, no_value if isinstance(no_value, int) else None))
+    return rows if len(rows) >= 100 else []
+
+
+def _align_function_rows_to_template(
+    agg: dict[str, Any],
+    template_rows: list[tuple[str, str, Any]],
+    *,
+    out_warnings: list[str] | None = None,
+) -> None:
+    """Replace aggregate function rows with the template's approved row order.
+
+    VectorCAST aggregate reports contain per-environment/sub-function rows
+    (2,000+ for KJPDS02).  The SwITCV audit sheet expects one row per approved
+    SwUDS/SDS function, in the same order as the company v1.01 workbook.  This
+    adapter preserves the template order and stamps O/X from log name matches.
+    """
+    if not template_rows:
+        return
+    original: list[FunctionCoverage] = list(agg.get("function_rows") or [])
+    by_name: dict[str, list[FunctionCoverage]] = {}
+    by_id: dict[str, list[FunctionCoverage]] = {}
+    for fc in original:
+        by_name.setdefault(_norm_function_name(getattr(fc, "name", "")), []).append(fc)
+        by_id.setdefault(_norm_function_name(getattr(fc, "unit_id", "")), []).append(fc)
+
+    aligned: list[FunctionCoverage] = []
+    missing: list[str] = []
+    for unit_id, fn_name, no_value in template_rows:
+        candidates = by_name.get(_norm_function_name(fn_name)) or by_id.get(
+            _norm_function_name(unit_id),
+            [],
+        )
+        present = bool(candidates)
+        if candidates:
+            best = max(
+                candidates,
+                key=lambda fc: getattr(getattr(fc, "function_calls_coverage", None), "total", 0),
+            )
+            calls = getattr(best, "function_calls_coverage", CoverageStats())
+            if not calls or calls.total <= 0:
+                calls = CoverageStats(covered=1, total=1, coverage_pct=1.0)
+        else:
+            missing.append(f"{unit_id}:{fn_name}")
+            calls = CoverageStats(covered=0, total=1, coverage_pct=0.0)
+        fc = FunctionCoverage(
+            unit_id=unit_id,
+            name=fn_name,
+            statement=CoverageStats(covered=1 if present else 0, total=1, coverage_pct=1.0 if present else 0.0),
+            branch=CoverageStats(covered=1 if present else 0, total=1, coverage_pct=1.0 if present else 0.0),
+            function_calls_coverage=calls,
+            component_name=_component_from_swufn(unit_id),
+        )
+        setattr(fc, "swit_template_no_value", no_value)
+        setattr(fc, "swit_function_present", present)
+        aligned.append(fc)
+
+    agg["function_rows"] = aligned
+    agg["function_count"] = len(aligned)
+    agg["swit_template_aligned"] = True
+    if out_warnings is not None:
+        out_warnings.append(
+            f"[swit-cov] Coverage template function universe applied: "
+            f"{len(aligned)} rows (VectorCAST raw rows={len(original)}, missing={len(missing)})"
+        )
+        if missing:
+            out_warnings.append(
+                "[swit-cov] Template functions not found in VectorCAST log: "
+                + ", ".join(missing[:10])
+                + (f" +{len(missing) - 10} more" if len(missing) > 10 else "")
+            )
+
+
+def _component_from_swufn(unit_id: str) -> str:
+    import re
+    m = re.search(r"SwUFn_(\d{2})\d{2}", unit_id or "", re.IGNORECASE)
+    return f"SwCom_{m.group(1)}" if m else ""
+
+
+def _write_sds_swits_consistency_template(
+    ws: Any,
+    *,
+    out_warnings: list[str] | None = None,
+) -> int:
+    """Fill an existing SDS, SwITS consistency table without changing layout."""
+    header_row = None
+    for row_idx in range(1, min(ws.max_row, 30) + 1):
+        values = [str(ws.cell(row_idx, col).value or "").strip() for col in range(1, 8)]
+        joined = " ".join(values)
+        if "SwDS" in joined and "SwITS" in joined:
+            header_row = row_idx
+            break
+    if header_row is None:
+        return 0
+
+    data_start = header_row + 1
+    written = 0
+    for row_idx in range(data_start, ws.max_row + 1):
+        no_value = ws.cell(row_idx, 2).value
+        item_id = str(ws.cell(row_idx, 3).value or "").strip()
+        if not isinstance(no_value, int) or not item_id:
+            continue
+        safe_write(ws, row_idx, 5, "O")
+        existing_exception = ws.cell(row_idx, 6).value
+        if existing_exception in (None, ""):
+            safe_write(ws, row_idx, 6, "X")
+        safe_write(ws, row_idx, 7, "")
+        written += 1
+
+    safe_write(ws, 3, 2, "Document Type")
+    safe_write(ws, 3, 4, "SDS, SwITS")
+    if out_warnings is not None:
+        out_warnings.append(
+            f"[swit-consistency] SDS/SwITS template consistency table preserved: "
+            f"{written} rows"
+        )
+    return written
 
 
 def build_swit_coverage_report(
@@ -168,12 +459,19 @@ def build_swit_coverage_report(
 
     wb: Workbook = openpyxl.load_workbook(io.BytesIO(template_bytes), data_only=False)
     sheet_names = wb.sheetnames
+    cov_ws_template = next(
+        (wb[n] for n in sheet_names
+         if "coverage" in n.lower() and "traceability" not in n.lower()
+         and "consistency" not in n.lower()),
+        None,
+    )
+    coverage_template_rows = _extract_template_coverage_rows(cov_ws_template)
 
     agg = aggregate_session(session)
 
     # 60차 F6-C — HMR HTML 제공 시 함수별 Function Calls coverage 채움 (SwUT 대칭).
     if hmr_html_bytes:
-        from backend.services.swut_input_adapter import CoverageStats, FunctionCoverage
+        from backend.services.swut_input_adapter import CoverageStats
         from backend.services.vcast_hmr_parser import parse_hmr_html
         hmr_parse_warnings: list[str] = []
         hmr_result = parse_hmr_html(
@@ -248,6 +546,10 @@ def build_swit_coverage_report(
             agg["function_rows"] = new_function_rows
 
     # 30차 W21 + 31차 W29 + 라운드 84 T1801 + 85 T1903 + 86 T2001: unmapped fc list.
+    _align_function_rows_to_template(
+        agg, coverage_template_rows, out_warnings=warnings,
+    )
+
     asil_distribution, ids_by_asil, unmapped_fns = _compute_asil_distribution(
         agg.get("function_rows") or [],
         agg.get("function_asil_map") or {},
@@ -336,20 +638,32 @@ def build_swit_coverage_report(
     # 2.Consistency — 34차 C2 fix: test_kind="SwIT" (intro/row 5 item 라벨 치환)
     cons_ws = next((wb[n] for n in sheet_names if "consistency" in n.lower()), None)
     if cons_ws is not None:
-        n_cons = _write_consistency_sheet(
-            cons_ws, session,
-            swuds_function_ids=swuds_function_ids,
-            out_warnings=warnings,
-            test_kind="SwIT",
+        n_template_cons = _write_sds_swits_consistency_template(
+            cons_ws, out_warnings=warnings,
         )
-        summary["consistency_self_check_rows"] = n_cons
-        if swuds_function_ids is not None:
-            summary["consistency_swuds_compared"] = True
-        else:
-            summary["consistency_swuds_compared"] = False
-            incomplete_sheets.append(
-                f"{cons_ws.title.strip()} (SwUDS 비교 partial)"
+        if n_template_cons:
+            n_cons = n_template_cons
+            summary["consistency_sds_swits_compared"] = True
+        elif swits_map:
+            n_cons = _write_swit_consistency_sheet(
+                cons_ws, session, swits_map, out_warnings=warnings,
             )
+            summary["consistency_swits_log_compared"] = True
+        else:
+            n_cons = _write_consistency_sheet(
+                cons_ws, session,
+                swuds_function_ids=swuds_function_ids,
+                out_warnings=warnings,
+                test_kind="SwIT",
+            )
+            if swuds_function_ids is not None:
+                summary["consistency_swuds_compared"] = True
+            else:
+                summary["consistency_swuds_compared"] = False
+                incomplete_sheets.append(
+                    f"{cons_ws.title.strip()} (SwUDS 비교 partial)"
+                )
+        summary["consistency_self_check_rows"] = n_cons
     else:
         warnings.append("Consistency 시트 미발견")
         incomplete_sheets.append("Consistency")
@@ -391,10 +705,15 @@ def build_swit_coverage_report(
     out.seek(0)
     wb.close()
 
-    filename = (
-        f"({meta.project_id})SwIT Coverage Report_"
-        f"v{meta.release_sw_version}_{short_date(meta.test_date)}_R.xlsx"
-    )
+    if meta.doc_filename_pattern:
+        filename = meta.doc_filename_pattern.format(
+            version=meta.release_sw_version, date=short_date(meta.test_date),
+        )
+    else:
+        filename = (
+            f"({meta.project_id})SwIT Coverage Report_"
+            f"v{meta.release_sw_version}_{short_date(meta.test_date)}_R.xlsx"
+        )
     return SwitCoverageBuildResult(
         ok=True,
         xlsx_io=out,

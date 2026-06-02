@@ -10,6 +10,7 @@ from __future__ import annotations
 import io
 from pathlib import Path
 import sys
+from types import SimpleNamespace
 
 import openpyxl
 import pytest
@@ -22,7 +23,7 @@ from backend.services.swit_coverage_aggregator import (  # noqa: E402
 )
 from backend.services.swit_meta import SwitCoverageBuildMeta  # noqa: E402
 from backend.services.swut_input_adapter import (  # noqa: E402
-    EnvironmentData, ExecutionRow, FunctionCoverage, SwUTSession,
+    CoverageStats, EnvironmentData, ExecutionRow, FunctionCoverage, SwUTSession,
 )
 
 
@@ -195,6 +196,22 @@ class TestBuildSwitCoverage:
         assert "v2.02" in result.filename
         assert result.filename.endswith("_R.xlsx")
 
+    def test_filename_uses_config_pattern_when_provided(self):
+        """KJPDS02 SwITCV 파일명 패턴을 최종 산출물명에 반영."""
+        meta = _make_swit_meta()
+        meta.project_id = "KJPDS02"
+        meta.doc_filename_pattern = (
+            "(KJPDS02_DV_SwITCV) Software Integration Test Coverage "
+            "Result_v{version}_{date}_R.xlsx"
+        )
+        result = build_swit_coverage_report(
+            _make_swit_session(), meta, _build_swit_template(),
+        )
+        assert result.filename == (
+            "(KJPDS02_DV_SwITCV) Software Integration Test Coverage "
+            "Result_v2.02_240219_R.xlsx"
+        )
+
     def test_summary_contains_asil_keys(self):
         """30차 W21 + 31차 W29 ASIL summary keys 노출 (SwUT 동일)."""
         result = build_swit_coverage_report(
@@ -303,6 +320,49 @@ class TestSwitSwudsFunctionIds:
         )
         assert result.ok
         assert result.summary.get("consistency_swuds_compared") is True
+
+
+class TestSwitSwitsConsistency:
+    def test_consistency_uses_swits_unit_name_to_log_env_match(self):
+        swits_map = {
+            "SwITC_0101_01": SimpleNamespace(
+                tc_id="SwITC_0101_01",
+                unit_name="SWTE_01",
+            ),
+            "SwITC_0101_02": SimpleNamespace(
+                tc_id="SwITC_0101_02",
+                unit_name="SWTE_01_01",
+            ),
+            "SwITC_0999": SimpleNamespace(
+                tc_id="SwITC_0999",
+                unit_name="SWTE_MISSING",
+            ),
+        }
+        result = build_swit_coverage_report(
+            _make_swit_session(),
+            _make_swit_meta(),
+            _build_swit_template(),
+            swuds_function_ids={"SwUFn_9999"},
+            swits_map=swits_map,
+        )
+
+        assert result.ok
+        assert result.summary.get("consistency_swits_log_compared") is True
+        assert result.summary.get("consistency_swuds_compared") is not True
+
+        wb = openpyxl.load_workbook(io.BytesIO(result.xlsx_bytes))
+        cons = wb["2.Consistency"]
+        assert cons.cell(3, 4).value == "SwITS, VectorCAST Log"
+        assert cons.cell(4, 4).value == 2
+        assert cons.cell(5, 4).value == 1
+        assert cons.cell(11, 3).value == "SwITC_0101_01"
+        assert cons.cell(11, 4).value == "SWTE_01"
+        assert cons.cell(11, 5).value == "O"
+        assert cons.cell(12, 3).value == "SwITC_0101_02"
+        assert cons.cell(12, 4).value == "SWTE_01"
+        assert cons.cell(12, 5).value == "O"
+        assert cons.cell(13, 3).value == "SwITC_0999"
+        assert cons.cell(13, 5).value == "X"
 
 
 class TestSwitMetaValidation:
@@ -676,6 +736,61 @@ class TestF7StageR3N7IsSwitCallerBranch:
         # Statement/Branch col (C7) — SwIT 분기는 stamp 안 함 (양식 default 잔존 가능)
         # SwIT 분기 정상 진입 확인
 
+    def test_swit_function_called_totals_row_after_expansion(self):
+        """SwITCV v1.01 row expansion must clear old totals and create new totals."""
+        from openpyxl import load_workbook
+
+        template = self._build_company_standard_swit_layout_template()
+        wb = load_workbook(io.BytesIO(template))
+        cov = wb["4.Coverage"]
+        cov["E5"] = "=B12"
+        cov["F5"] = "=F12"
+        cov["G5"] = "=G12"
+        cov["E6"] = "=B12"
+        cov["F6"] = "=J12"
+        cov["G6"] = "=K12"
+        cov.cell(12, 3).value = "Total"
+        cov.cell(12, 7).value = '=COUNTIF(G10:G11,"O")'
+        buf = io.BytesIO()
+        wb.save(buf)
+
+        env = EnvironmentData(env_name="SWTE_01", component_name="Comp")
+        env.test_cases = {"SwITC_SwUFn_0101.001": []}
+        env.test_results = {
+            "SwITC_SwUFn_0101.001": ExecutionRow(
+                tc_name="SwITC_SwUFn_0101.001", passed=True,
+            )
+        }
+        env.function_coverage = [
+            FunctionCoverage(
+                unit_id=f"SwUFn_{i:04d}",
+                name=f"fn_{i}",
+                component_name="Comp",
+                function_calls_coverage=CoverageStats(covered=1 if i % 2 else 0, total=1),
+            )
+            for i in range(1, 7)
+        ]
+        session = SwUTSession(
+            project_id="KJPDS02",
+            version="v1.01_251205",
+            source_kind="log_folder",
+            source_path="/tmp/fake",
+            environments=[env],
+        )
+        result = build_swit_coverage_report(session, _make_swit_meta(), buf.getvalue())
+        assert result.ok
+
+        wb_out = load_workbook(io.BytesIO(result.xlsx_io.getvalue()))
+        cov_out = wb_out["4.Coverage"]
+        assert "Total" not in [cov_out.cell(r, 3).value for r in range(10, 16)]
+        assert cov_out.cell(16, 2).value == 6
+        assert cov_out.cell(16, 4).value == "Total"
+        assert cov_out.cell(16, 6).value == 0
+        assert cov_out.cell(16, 10).value == 3
+        assert cov_out.cell(5, 5).value == "=B16"
+        assert cov_out.cell(6, 6).value == "=J16"
+        assert any("[swit-cov]" in w for w in result.warnings)
+
     def test_coverage_sheet_clear_form_default_function_rows_round_f8(self):
         """F7 R2 N5 carry-over — C2 Coverage clear 단위 회귀.
         SwIT layout (회사 표준 SwITCV)에서 신규 stamp 후 양식 default 함수 row clear
@@ -759,4 +874,3 @@ class TestF7StageR3N7IsSwitCallerBranch:
         assert c6 != "O" or c6 == 0, (
             f"SwUT 분기인데 SwIT 분기 진입 — C6={c6!r} (의도: int/None)"
         )
-

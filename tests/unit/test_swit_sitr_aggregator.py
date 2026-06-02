@@ -9,6 +9,7 @@ from __future__ import annotations
 import io
 from pathlib import Path
 import sys
+from types import SimpleNamespace
 
 import openpyxl
 import pytest
@@ -71,6 +72,65 @@ def _build_swit_sitr_template() -> bytes:
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
+
+
+def _build_kjpds_swit_sitr_template() -> bytes:
+    """KJPDS02 SwITR 4-sheet layout with fixed Test Log columns."""
+    wb = openpyxl.Workbook()
+    wb.remove(wb.active)
+    wb.create_sheet("Cover")
+    wb.create_sheet("History")
+    wb.create_sheet("1.Test Summary")
+    log = wb.create_sheet("2.Test Log")
+    log.cell(5, 2).value = "Test Case "
+    log.cell(5, 8).value = "Input"
+    log.cell(5, 18).value = "Expected Result"
+    log.cell(5, 28).value = "Actual Result"
+    log.cell(5, 38).value = "Pass/Fail"
+    log.cell(5, 40).value = "Log Data"
+    log.cell(6, 2).value = "TC ID"
+    log.cell(6, 3).value = "Description"
+    log.cell(6, 5).value = "Test Case Generation Method"
+    log.cell(6, 6).value = "Precondition"
+    log.cell(6, 8).value = "Param 1"
+    log.cell(6, 18).value = "Param 1"
+    log.cell(6, 28).value = "Param 1"
+    log.cell(6, 38).value = "Unit"
+    log.cell(6, 39).value = "Total"
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def _make_kjpds_swit_sitr_session() -> SwUTSession:
+    env = EnvironmentData(
+        env_name="SwIT_SwUFn_0101_depth4_file12",
+        component_name="SysOs_Main",
+        test_cases={
+            "main.001": [
+                SimpleNamespace(
+                    input_data={"input_a": 1},
+                    expected_result={"output_a": 2},
+                )
+            ],
+        },
+        test_results={
+            "main.001": ExecutionRow(
+                tc_name="main.001",
+                component="SysOs_Main",
+                passed=True,
+                actual_result={"output_a": 2},
+            ),
+        },
+    )
+    return SwUTSession(
+        project_id="KJPDS02",
+        version="v1.01_251205",
+        source_kind="log_folder",
+        source_path="/tmp/fake/251106_IT_Report",
+        environments=[env],
+    )
 
 
 def _make_swit_sitr_session() -> SwUTSession:
@@ -157,6 +217,24 @@ class TestBuildSwitSitr:
         assert "240219" in result.filename
         assert result.filename.endswith("_R.xlsm")
 
+    def test_filename_uses_config_pattern_when_provided(self):
+        """KJPDS02 SwITR 파일명 패턴을 최종 산출물명에 반영."""
+        meta = _make_swit_sitr_meta()
+        meta.project_id = "KJPDS02"
+        meta.doc_filename_pattern = (
+            "(KJPDS02_DV_SwITR) Software Integration Test Result_"
+            "v{version}_{date}_R.xlsm"
+        )
+        result = build_swit_sitr_report(
+            _make_swit_sitr_session(),
+            meta,
+            _build_swit_sitr_template(),
+        )
+        assert result.filename == (
+            "(KJPDS02_DV_SwITR) Software Integration Test Result_"
+            "v2.02_240219_R.xlsm"
+        )
+
     def test_summary_contains_asil_keys(self):
         """30차 W21 + 31차 W29 ASIL keys (SUTR과 대칭)."""
         result = build_swit_sitr_report(
@@ -242,6 +320,98 @@ class TestSitrTestLogAsil:
         for r in range(2, 4):
             v = str(log.cell(r, 7).value or "")
             assert "ASIL" not in v, f"col 7 (G)에 ASIL 라벨 stamp 발견 (v2.02 양식 위반): {v}"
+
+
+    def test_kjpds_swit_test_log_uses_swits_env_match(self):
+        """SwITS unit_name -> VectorCAST env matching fills the real Test Log."""
+        swits_map = {
+            "SwITC_0101_01": SimpleNamespace(
+                tc_id="SwITC_0101_01",
+                unit_name="SWIT_SWUFN_0101_DEPTH4_FILE12",
+                description="Interface : main -> s_System_InitSequence",
+                test_method="REQ,IFT,AOR,ABV",
+                precondition="Power on",
+            ),
+            "SwITC_0101_02": SimpleNamespace(
+                tc_id="SwITC_0101_02",
+                unit_name="SWIT_SWUFN_0101_DEPTH4_FILE12",
+                description="Interface : main -> s_System_InitSequence duplicate",
+                test_method="REQ,IFT,AOR,ABV",
+                precondition="Power on",
+            ),
+        }
+        result = build_swit_sitr_report(
+            _make_kjpds_swit_sitr_session(),
+            _make_swit_sitr_meta(),
+            _build_kjpds_swit_sitr_template(),
+            swuts_map=swits_map,
+        )
+
+        assert result.ok
+        assert result.summary["test_log_rows_written"] == 1
+        assert result.summary["test_log_iteration_rows_written"] == 1
+        wb = openpyxl.load_workbook(io.BytesIO(result.xlsm_bytes), keep_vba=True)
+        log = wb["2.Test Log"]
+
+        assert log.cell(7, 2).value == "SwITC_0101_01, SwITC_0101_02"
+        assert str(log.cell(7, 3).value).startswith(
+            "Interface : main -> s_System_InitSequence"
+        )
+        assert "Grouped SwITS: SwITC_0101_01, SwITC_0101_02" in log.cell(7, 3).value
+        assert log.cell(7, 5).value == "REQ, IFT, AOR, ABV"
+        assert log.cell(7, 6).value == "Power on"
+        assert log.cell(7, 8).value == "input_a"
+        assert log.cell(7, 18).value == "output_a"
+        assert log.cell(7, 28).value == "output_a"
+        assert log.cell(7, 39).value == "Pass"
+        assert log.cell(7, 40).value == "SwIT_SwUFn_0101_depth4_file12"
+        assert log.cell(8, 4).value == "main.001"
+        assert log.cell(8, 8).value == "1"
+        assert log.cell(8, 18).value == "2"
+        assert log.cell(8, 28).value == "2"
+        assert log.cell(8, 38).value == "Pass"
+
+    def test_swit_test_log_matches_two_digit_spec_suffix_to_base_env(self):
+        """SWIT_SWUFN_1109_01 can match log env SwIT_SwUFn_1109."""
+        env = EnvironmentData(
+            env_name="SwIT_SwUFn_1109",
+            component_name="Comp",
+            test_cases={"case.001": [SimpleNamespace(input_data={}, expected_result={})]},
+            test_results={"case.001": ExecutionRow(tc_name="case.001", passed=True)},
+        )
+        session = SwUTSession(
+            project_id="KJPDS02",
+            version="v1.01_251205",
+            source_kind="log_folder",
+            source_path="/tmp/fake",
+            environments=[env],
+        )
+        swits_map = {
+            "SwITC_1109_01": SimpleNamespace(
+                tc_id="SwITC_1109_01",
+                unit_name="SWIT_SWUFN_1109_01",
+                description="1109 case 1",
+            ),
+            "SwITC_1109_02": SimpleNamespace(
+                tc_id="SwITC_1109_02",
+                unit_name="SWIT_SWUFN_1109_02",
+                description="1109 case 2",
+            ),
+        }
+
+        result = build_swit_sitr_report(
+            session,
+            _make_swit_sitr_meta(),
+            _build_kjpds_swit_sitr_template(),
+            swuts_map=swits_map,
+        )
+        assert result.summary["test_log_rows_written"] == 1
+        assert result.summary["test_log_iteration_rows_written"] == 1
+        wb = openpyxl.load_workbook(io.BytesIO(result.xlsm_bytes), keep_vba=True)
+        log = wb["2.Test Log"]
+        assert log.cell(7, 2).value == "SwITC_1109_01, SwITC_1109_02"
+        assert log.cell(7, 40).value == "SwIT_SwUFn_1109"
+        assert log.cell(8, 4).value == "case.001"
 
 
 # ---------------------------------------------------------------------------

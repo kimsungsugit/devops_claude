@@ -1,0 +1,25 @@
+[shell_environment_policy]
+inherit = "core"
+
+[shell_environment_policy.set]
+PYTHONPATH = "."
+PYTHONDONTWRITEBYTECODE = "1"
+PYTHONUTF8 = "1"
+NODE_ENV = "development"
+
+[mcp_servers.devops-release]
+command = "C:/Users/kss11/AppData/Local/Programs/Python/Python312/python.exe"
+args = [
+    "-m",
+    "backend.mcp.stdio_server",
+]
+
+[mcp_servers.devops-release.env]
+PYTHONPATH = "D:/Project/devops/Release_claude"
+
+[mcp_servers.playwright]
+command = "npx"
+args = [
+    "@playwright/mcp@latest",
+    "--headed",
+]

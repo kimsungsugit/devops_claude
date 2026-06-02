@@ -1366,6 +1366,7 @@ def _resolve_report_path(
     env: str,
     suffix: str,
     *,
+    alt_suffixes: tuple[str, ...] = (),
     idx_cache: dict[str, dict[str, str]],
     out_warnings: list[str] | None,
 ) -> str:
@@ -1377,12 +1378,15 @@ def _resolve_report_path(
     후보 0건이면 exact 경로를 그대로 반환(이후 read에서 FileNotFoundError →
     parse_errors 기록, silent skip 차단 정책 유지).
     """
+    suffixes = (suffix, *alt_suffixes)
     exact = os.path.join(folder, f"{env}{suffix}")
-    try:
-        if resolver.exists(exact):
-            return exact
-    except Exception:  # noqa: BLE001 — exists 실패는 fuzzy로 위임
-        pass
+    for candidate_suffix in suffixes:
+        candidate = os.path.join(folder, f"{env}{candidate_suffix}")
+        try:
+            if resolver.exists(candidate):
+                return candidate
+        except Exception:  # noqa: BLE001 — exists 실패는 fuzzy로 위임
+            pass
 
     idx = idx_cache.get(folder)
     if idx is None:
@@ -1390,8 +1394,10 @@ def _resolve_report_path(
         try:
             for f in _list_dir_via_resolver(resolver, folder, pattern="*.html"):
                 nm = Path(f).name
-                if nm.endswith(suffix):
-                    idx.setdefault(_norm_env_stem(nm[: -len(suffix)]), f)
+                for candidate_suffix in suffixes:
+                    if nm.endswith(candidate_suffix):
+                        idx.setdefault(_norm_env_stem(nm[: -len(candidate_suffix)]), f)
+                        break
         except Exception:  # noqa: BLE001
             idx = {}
         idx_cache[folder] = idx
@@ -1566,8 +1572,14 @@ def collect_from_log_folder(
             env_data.parse_errors.append(f"ExecutionResult: {type(e).__name__}: {e}")
 
         # AggregateCoverage
+        cov_alt_suffixes = (
+            ("_AggregateReport.html",)
+            if layout.name == "vc2025" and layout.cov_suffix != "_AggregateReport.html"
+            else ()
+        )
         cov_path = _resolve_report_path(
             resolver, sub_cov, env, layout.cov_suffix,
+            alt_suffixes=cov_alt_suffixes,
             idx_cache=_folder_idx_cache, out_warnings=warnings,
         )
         try:

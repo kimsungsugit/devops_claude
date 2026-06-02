@@ -382,6 +382,75 @@ class TestSwitConfigFallback50:
         )
         assert _resolve_swit_swuds_path(req) == "U:/req_swuds.docx"
 
+    def test_resolve_swit_spec_prefers_swits_over_swuts_config(self, tmp_path, monkeypatch):
+        """SwIT 요청은 config fallback에서 SwITS spec을 SwUTS보다 우선 사용."""
+        from backend.schemas import SwITBuildRequest
+        from backend.services.swut_meta_resolver import resolve_swuts_path
+        self._setup_cfg(tmp_path, monkeypatch, {
+            "projects": {"KJPDS02": {
+                "swuts_docx_path": "U:/spec/(KJPDS02_SwUTS).xlsm",
+                "swits_docx_path": "U:/spec/(KJPDS02_SwITS).xlsm",
+            }}
+        })
+        req = SwITBuildRequest(
+            project_id="KJPDS02",
+            release_sw_version="1.01",
+            test_date="2025-12-05",
+        )
+        assert resolve_swuts_path(req, "KJPDS02") == "U:/spec/(KJPDS02_SwITS).xlsm"
+
+    def test_resolve_swit_spec_uses_nested_iso26262_swits_path(self, tmp_path, monkeypatch):
+        """top-level swits_docx_path가 없어도 iso26262_docs.swits_xlsm_path를 사용."""
+        from backend.schemas import SwITBuildRequest
+        from backend.services.swut_meta_resolver import resolve_swuts_path
+        self._setup_cfg(tmp_path, monkeypatch, {
+            "projects": {"KJPDS02": {
+                "swuts_docx_path": "U:/spec/(KJPDS02_SwUTS).xlsm",
+                "iso26262_docs": {
+                    "swits_xlsm_path": "U:/nested/(KJPDS02_SwITS).xlsm",
+                },
+            }}
+        })
+        req = SwITBuildRequest(
+            project_id="KJPDS02",
+            release_sw_version="1.01",
+            test_date="2025-12-05",
+        )
+        assert resolve_swuts_path(req, "KJPDS02") == "U:/nested/(KJPDS02_SwITS).xlsm"
+
+    def test_resolve_swit_log_folder_config_fallback(self, tmp_path, monkeypatch):
+        """req.log_folder가 비면 config.swit_log_folder를 사용."""
+        from backend.routers.swit import _resolve_swit_log_folder
+        from backend.schemas import SwITBuildRequest
+        self._setup_cfg(tmp_path, monkeypatch, {
+            "projects": {"KJPDS02": {
+                "swit_log_folder": "U:/logs/251106_IT_Report",
+            }}
+        })
+        req = SwITBuildRequest(
+            project_id="KJPDS02",
+            release_sw_version="1.01",
+            test_date="2025-12-05",
+        )
+        assert _resolve_swit_log_folder(req) == "U:/logs/251106_IT_Report"
+
+    def test_resolve_swit_log_folder_req_priority(self, tmp_path, monkeypatch):
+        """req.log_folder가 있으면 config fallback보다 우선."""
+        from backend.routers.swit import _resolve_swit_log_folder
+        from backend.schemas import SwITBuildRequest
+        self._setup_cfg(tmp_path, monkeypatch, {
+            "projects": {"KJPDS02": {
+                "swit_log_folder": "U:/logs/from_config",
+            }}
+        })
+        req = SwITBuildRequest(
+            project_id="KJPDS02",
+            release_sw_version="1.01",
+            test_date="2025-12-05",
+            log_folder="C:/logs/from_req",
+        )
+        assert _resolve_swit_log_folder(req) == "C:/logs/from_req"
+
     def test_read_template_bytes_empty_both_returns_400(self, tmp_path, monkeypatch):
         """req.template_path 빈 + config의 swit_coverage_template 빈 슬롯 → 400 raise (사용자가 swut_meta.json 미설정 시 명시 에러)."""
         from backend.routers.swit import _read_template_bytes
@@ -492,6 +561,26 @@ class TestSwitConfigFallback50:
         # doc_id_base는 SwIT 고유 — config 영향 안 받음
         assert meta.doc_id_base == "HDPDM01-SwIT"
 
+    def test_coverage_meta_uses_switcv_doc_filename_pattern(self, tmp_path, monkeypatch):
+        """SwIT Coverage meta는 SwUT coverage 패턴이 아니라 switcv 패턴을 사용."""
+        from backend.routers.swit import _build_swit_coverage_meta
+        from backend.schemas import SwITBuildRequest
+        self._setup_cfg(tmp_path, monkeypatch, {
+            "projects": {"KJPDS02": {
+                "doc_filenames": {
+                    "coverage": "(KJPDS02_DV_SwUTCV)_v{version}_{date}_R.xlsx",
+                    "switcv": "(KJPDS02_DV_SwITCV)_v{version}_{date}_R.xlsx",
+                }
+            }}
+        })
+        req = SwITBuildRequest(
+            project_id="KJPDS02",
+            release_sw_version="1.01",
+            test_date="2025-12-05",
+        )
+        meta = _build_swit_coverage_meta(req)
+        assert meta.doc_filename_pattern == "(KJPDS02_DV_SwITCV)_v{version}_{date}_R.xlsx"
+
     def test_sitr_meta_pulls_config_approvers(self, tmp_path, monkeypatch):
         """50차 — SwIT SITR meta도 config approvers fallback."""
         from backend.routers.swit import _build_swit_sitr_meta
@@ -510,6 +599,165 @@ class TestSwitConfigFallback50:
         assert meta.default_author == "AlphaUser"
         assert meta.default_approver == "ChIn"
         assert meta.doc_id_base == "HDPDM01-SITR"  # SwIT 고유 — config 무영향
+
+    def test_sitr_meta_uses_switr_doc_filename_pattern(self, tmp_path, monkeypatch):
+        """SwIT SITR meta는 SwUTR 패턴이 아니라 switr 패턴을 사용."""
+        from backend.routers.swit import _build_swit_sitr_meta
+        from backend.schemas import SwITSitrBuildRequest
+        self._setup_cfg(tmp_path, monkeypatch, {
+            "projects": {"KJPDS02": {
+                "doc_filenames": {
+                    "sutr": "(KJPDS02_DV_SwUTR)_v{version}_{date}_R.xlsm",
+                    "switr": "(KJPDS02_DV_SwITR)_v{version}_{date}_R.xlsm",
+                }
+            }}
+        })
+        req = SwITSitrBuildRequest(
+            project_id="KJPDS02",
+            release_sw_version="1.01",
+            test_date="2025-12-05",
+        )
+        meta = _build_swit_sitr_meta(req)
+        assert meta.doc_filename_pattern == "(KJPDS02_DV_SwITR)_v{version}_{date}_R.xlsm"
+
+    def test_coverage_build_passes_swits_map_to_builder(self, monkeypatch):
+        """SwITCV도 SwITS spec parse 결과를 Traceability writer로 전달."""
+        import io
+        from backend.routers import swit as swit_mod
+        from backend.schemas import SwITBuildRequest
+        from backend.services.swit_coverage_aggregator import SwitCoverageBuildResult
+
+        captured = {}
+        swits_map = {"SwITC_0001": object()}
+
+        monkeypatch.setattr(swit_mod, "check_log_folder_mode_compat", lambda *_args, **_kwargs: None)
+        monkeypatch.setattr(swit_mod, "collect_swit_session", lambda *_args, **_kwargs: object())
+        monkeypatch.setattr(swit_mod, "_apply_function_asil_map", lambda *_args, **_kwargs: None)
+        monkeypatch.setattr(swit_mod, "_read_template_bytes", lambda *_args, **_kwargs: b"template")
+        monkeypatch.setattr(swit_mod, "_resolve_swuds_function_ids", lambda _req: {"SwUFn_0001"})
+        monkeypatch.setattr(
+            swit_mod, "_resolver_resolve_hmr_html_bytes",
+            lambda *_args, **_kwargs: None,
+        )
+        monkeypatch.setattr(
+            swit_mod, "_resolver_resolve_swuts_test_specs",
+            lambda *_args, **_kwargs: swits_map,
+        )
+
+        def _fake_build(session, meta, template_bytes, **kwargs):
+            captured["swits_map"] = kwargs.get("swits_map")
+            return SwitCoverageBuildResult(
+                ok=True,
+                xlsx_io=io.BytesIO(b"dummy"),
+                filename="dummy.xlsx",
+                summary={},
+                warnings=[],
+                incomplete_sheets=[],
+            )
+
+        monkeypatch.setattr(swit_mod, "build_swit_coverage_report", _fake_build)
+        req = SwITBuildRequest(
+            project_id="KJPDS02",
+            release_sw_version="1.01",
+            test_date="2025-12-05",
+            log_folder="C:/fake/log",
+        )
+        response = swit_mod._do_swit_coverage_build(req)
+        assert response.status_code == 200
+        assert captured["swits_map"] is swits_map
+
+    def test_coverage_build_uses_config_log_folder_when_request_empty(self, tmp_path, monkeypatch):
+        """SwITCV build는 req.log_folder가 비면 config.swit_log_folder를 collector에 전달."""
+        import io
+        from backend.routers import swit as swit_mod
+        from backend.schemas import SwITBuildRequest
+        from backend.services.swit_coverage_aggregator import SwitCoverageBuildResult
+
+        self._setup_cfg(tmp_path, monkeypatch, {
+            "projects": {"KJPDS02": {
+                "swit_log_folder": "U:/logs/251106_IT_Report",
+            }}
+        })
+        captured = {}
+
+        monkeypatch.setattr(swit_mod, "check_log_folder_mode_compat", lambda *_args, **_kwargs: None)
+
+        def _fake_collect(_resolver, _project_id, **kwargs):
+            captured["log_folder"] = kwargs.get("log_folder")
+            return object()
+
+        monkeypatch.setattr(swit_mod, "collect_swit_session", _fake_collect)
+        monkeypatch.setattr(swit_mod, "_apply_function_asil_map", lambda *_args, **_kwargs: None)
+        monkeypatch.setattr(swit_mod, "_read_template_bytes", lambda *_args, **_kwargs: b"template")
+        monkeypatch.setattr(swit_mod, "_resolve_swuds_function_ids", lambda _req: set())
+        monkeypatch.setattr(swit_mod, "_resolver_resolve_hmr_html_bytes", lambda *_args, **_kwargs: None)
+        monkeypatch.setattr(swit_mod, "_resolver_resolve_swuts_test_specs", lambda *_args, **_kwargs: None)
+        monkeypatch.setattr(
+            swit_mod,
+            "build_swit_coverage_report",
+            lambda *_args, **_kwargs: SwitCoverageBuildResult(
+                ok=True,
+                xlsx_io=io.BytesIO(b"dummy"),
+                filename="dummy.xlsx",
+                summary={},
+                warnings=[],
+                incomplete_sheets=[],
+            ),
+        )
+        req = SwITBuildRequest(
+            project_id="KJPDS02",
+            release_sw_version="1.01",
+            test_date="2025-12-05",
+        )
+        response = swit_mod._do_swit_coverage_build(req)
+        assert response.status_code == 200
+        assert captured["log_folder"] == "U:/logs/251106_IT_Report"
+
+    def test_sitr_build_uses_config_log_folder_when_request_empty(self, tmp_path, monkeypatch):
+        """SwITR build도 req.log_folder가 비면 config.swit_log_folder를 collector에 전달."""
+        import io
+        from backend.routers import swit as swit_mod
+        from backend.schemas import SwITSitrBuildRequest
+        from backend.services.swit_sitr_aggregator import SwitSitrBuildResult
+
+        self._setup_cfg(tmp_path, monkeypatch, {
+            "projects": {"KJPDS02": {
+                "swit_log_folder": "U:/logs/251106_IT_Report",
+            }}
+        })
+        captured = {}
+
+        monkeypatch.setattr(swit_mod, "check_log_folder_mode_compat", lambda *_args, **_kwargs: None)
+
+        def _fake_collect(_resolver, _project_id, **kwargs):
+            captured["log_folder"] = kwargs.get("log_folder")
+            return object()
+
+        monkeypatch.setattr(swit_mod, "collect_swit_session", _fake_collect)
+        monkeypatch.setattr(swit_mod, "_apply_function_asil_map", lambda *_args, **_kwargs: None)
+        monkeypatch.setattr(swit_mod, "_read_template_bytes", lambda *_args, **_kwargs: b"template")
+        monkeypatch.setattr(swit_mod, "_resolve_swuds_function_ids", lambda _req: set())
+        monkeypatch.setattr(swit_mod, "_resolver_resolve_swuts_test_specs", lambda *_args, **_kwargs: None)
+        monkeypatch.setattr(
+            swit_mod,
+            "build_swit_sitr_report",
+            lambda *_args, **_kwargs: SwitSitrBuildResult(
+                ok=True,
+                xlsm_io=io.BytesIO(b"dummy"),
+                filename="dummy.xlsm",
+                summary={},
+                warnings=[],
+                incomplete_sheets=[],
+            ),
+        )
+        req = SwITSitrBuildRequest(
+            project_id="KJPDS02",
+            release_sw_version="1.01",
+            test_date="2025-12-05",
+        )
+        response = swit_mod._do_swit_sitr_build(req)
+        assert response.status_code == 200
+        assert captured["log_folder"] == "U:/logs/251106_IT_Report"
 
 
 class TestSwitSitrMetaBuilder:

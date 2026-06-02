@@ -55,7 +55,6 @@ from backend.services.excel_template_utils import (
 from backend.services.swut_builder_helpers import extract_warnings_from_session
 from backend.services.swut_meta import BuildMetaBase
 from backend.services.swut_input_adapter import (
-    EnvironmentData,
     FunctionCoverage,
     SwUTSession,
     aggregate_session,
@@ -582,7 +581,7 @@ def _write_coverage_sheet(
             str(c.value).strip() if c.value else ""
             for c in row
         ]
-        if any(l in ("Unit ID", "Function Name", "Component") for l in labels):
+        if any(label in ("Unit ID", "Function Name", "Component") for label in labels):
             header_row = row[0].row
             break
     if header_row is None:
@@ -595,7 +594,6 @@ def _write_coverage_sheet(
     # 산출물은 C1부터). header row scan으로 'No' col 동적 감지 → 그 col부터 stamp.
     # 미발견 시 기존 hardcoded C1 fallback (backward-compat).
     no_col = 1  # fallback
-    component_col_offset = 1  # No 다음 col이 Component (회사 표준) 또는 unit_id (HDPDM01)
     has_component_col = False
     for row in ws.iter_rows(min_row=max(1, header_row - 1),
                              max_row=header_row, values_only=False):
@@ -629,7 +627,11 @@ def _write_coverage_sheet(
     #   graceful — name→SwUFn 매핑(SwUDS 함수명→ID)이 agg에 존재할 때만 활성.
     #   매핑 없으면 (HDPDM01/SwIT) 기존 동작 100% 보존.
     name_to_swufn: dict[str, str] = agg.get("function_name_to_swufn_from_suds") or {}
-    spec_based = bool(name_to_swufn) and has_component_col
+    spec_based = (
+        bool(name_to_swufn)
+        and has_component_col
+        and not bool(agg.get("swit_template_aligned"))
+    )
 
     # F7 stage 8 T706 fix — SwITCV (회사 표준) layout 분기:
     # layout.coverage_metric_kind == "function_and_calls" → SwIT 양식
@@ -741,10 +743,28 @@ def _write_coverage_sheet(
     spec_unmatched_count = 0
     last_data_row = data_start - 1
 
+    if written == 0 and function_rows:
+        try:
+            from backend.services.excel_template_utils import clear_data_range
+            clear_data_range(
+                ws,
+                start_row=data_start,
+                end_row=needed_last_row,
+                start_col=no_col,
+                end_col=branch_count_col + 6,
+                preserve_formula=False,
+                preserve_merged_anchor=True,
+                sentinel_patterns=["End of Document", "< End", "Appendix"],
+            )
+        except ImportError:
+            pass
+
     for i, fc in enumerate(function_rows):
         r = data_start + i
         last_data_row = r
-        safe_write(ws, r, no_col, i + 1)
+        template_no_value = getattr(fc, "swit_template_no_value", i + 1)
+        if template_no_value is not None:
+            safe_write(ws, r, no_col, template_no_value)
 
         # 라운드 74 T906 — c_parser only row 식별 (unit_id `SwUFn_C_<idx>` prefix).
         is_c_parser_only = bool(fc.unit_id and fc.unit_id.startswith("SwUFn_C_"))
@@ -837,12 +857,17 @@ def _write_coverage_sheet(
                 # Name col(C5)도 [c_parser] suffix로 audit 마킹
                 _apply_fill(ws, r, unit_id_col + 1, USER_INPUT_FILL_RGB)
             else:
-                safe_write(ws, r, functions_pass_col, "O")
+                swit_present = bool(getattr(fc, "swit_function_present", True))
+                safe_write(ws, r, functions_pass_col, "O" if swit_present else "X")
+                if not swit_present:
+                    safe_write(ws, r, functions_pass_col + 1, "O")
                 fcc = getattr(fc, "function_calls_coverage", None)
                 if fcc is not None and fcc.total > 0:
                     safe_write(ws, r, fcalls_count_col, fcc.covered)
                     safe_write(ws, r, fcalls_count_col + 1, fcc.total)
                     safe_write(ws, r, fcalls_count_col + 2, "O" if fcc.passed else "X")
+                    if not fcc.passed:
+                        safe_write(ws, r, fcalls_count_col + 3, "O")
         else:
             # SwUTCV / HDPDM01 — Statement + Branch metric
             if is_c_parser_only:
@@ -1043,6 +1068,58 @@ def _write_coverage_sheet(
                     f"{', '.join(spec_unmatched[:15])}"
                 )
 
+    if is_swit_metric_layout and written > 0:
+        import copy as _copy_swit_total
+
+        from openpyxl.cell.cell import MergedCell as _MC_swit_total
+
+        row_total = last_data_row + 1
+        for _cc in range(no_col, branch_count_col + 7):
+            _src = ws.cell(last_data_row, _cc)
+            _dst = ws.cell(row_total, _cc)
+            if not isinstance(_src, _MC_swit_total) and not isinstance(_dst, _MC_swit_total):
+                _dst.border = _copy_swit_total.copy(_src.border)
+                _dst.font = _copy_swit_total.copy(_src.font)
+                _dst.alignment = _copy_swit_total.copy(_src.alignment)
+                _dst.fill = _copy_swit_total.copy(_src.fill)
+
+        function_fail = 0
+        function_exception = 0
+        function_call_fail = 0
+        function_call_exception = 0
+        for rr in range(data_start, last_data_row + 1):
+            if str(ws.cell(rr, no_col + 4).value or "").strip().upper() == "X":
+                function_fail += 1
+            if str(ws.cell(rr, no_col + 5).value or "").strip():
+                function_exception += 1
+            if str(ws.cell(rr, no_col + 8).value or "").strip().upper() == "X":
+                function_call_fail += 1
+            if str(ws.cell(rr, no_col + 9).value or "").strip():
+                function_call_exception += 1
+
+        from openpyxl.cell.cell import MergedCell as _MC_swit_total_label
+        total_label_col = (
+            no_col + 1
+            if isinstance(ws.cell(row_total, unit_id_col), _MC_swit_total_label)
+            else unit_id_col
+        )
+        total_no_count = sum(
+            1 for rr in range(data_start, last_data_row + 1)
+            if isinstance(ws.cell(rr, no_col).value, int)
+        )
+        safe_write(ws, row_total, no_col, total_no_count or written)
+        safe_write(ws, row_total, total_label_col, "Total")
+        safe_write(ws, row_total, no_col + 4, function_fail)
+        safe_write(ws, row_total, no_col + 5, function_exception)
+        safe_write(ws, row_total, no_col + 8, function_call_fail)
+        safe_write(ws, row_total, no_col + 9, function_call_exception)
+        if out_warnings is not None:
+            out_warnings.append(
+                f"[swit-cov] Function/Function Call totals row stamp R{row_total} "
+                f"(functions={written}, function_fail={function_fail}, "
+                f"function_call_fail={function_call_fail})"
+            )
+
     # 라운드 97/99 — spec_based 데이터 행 테두리 통일 (최종 패스, 모든 stamp/clear/
     # totals 완료 후 — 중간 단계 리셋 회피).
     #   (a) 라운드 99: 회사 양식 스타일(테두리) 행 수를 함수 수가 초과해 마지막 함수
@@ -1146,12 +1223,18 @@ def _write_spec_totals(
     # D 'Total' 라벨 (Unit ID col, 첫 row)
     _set(row_fail, unit_id_col, "Total")
     # Fail / Pass / Total row — literal count
-    _set(row_fail, stmt_label_col, "Fail"); _set(row_fail, stmt_value_col, stmt_fail)
-    _set(row_fail, branch_label_col, "Fail"); _set(row_fail, branch_value_col, br_fail)
-    _set(row_pass, stmt_label_col, "Pass"); _set(row_pass, stmt_value_col, stmt_pass)
-    _set(row_pass, branch_label_col, "Pass"); _set(row_pass, branch_value_col, br_pass)
-    _set(row_total, stmt_label_col, "Total"); _set(row_total, stmt_value_col, stmt_total)
-    _set(row_total, branch_label_col, "Total"); _set(row_total, branch_value_col, br_total)
+    _set(row_fail, stmt_label_col, "Fail")
+    _set(row_fail, stmt_value_col, stmt_fail)
+    _set(row_fail, branch_label_col, "Fail")
+    _set(row_fail, branch_value_col, br_fail)
+    _set(row_pass, stmt_label_col, "Pass")
+    _set(row_pass, stmt_value_col, stmt_pass)
+    _set(row_pass, branch_label_col, "Pass")
+    _set(row_pass, branch_value_col, br_pass)
+    _set(row_total, stmt_label_col, "Total")
+    _set(row_total, stmt_value_col, stmt_total)
+    _set(row_total, branch_label_col, "Total")
+    _set(row_total, branch_value_col, br_total)
 
     # 상단 요약 r5(Statement)/r6(Branch) — literal: E=Total, F=Fail Count,
     # G=Exception(=Fail, 레퍼런스 패턴), H=Coverage 비율((Total-Fail+Exception)/Total).
@@ -1159,8 +1242,14 @@ def _write_spec_totals(
     def _cov(total: int, fail: int) -> float:
         return round((total - fail + fail) / total, 4) if total else 0.0
 
-    _set(5, 5, stmt_total); _set(5, 6, stmt_fail); _set(5, 7, stmt_fail); _set(5, 8, _cov(stmt_total, stmt_fail))
-    _set(6, 5, br_total); _set(6, 6, br_fail); _set(6, 7, br_fail); _set(6, 8, _cov(br_total, br_fail))
+    _set(5, 5, stmt_total)
+    _set(5, 6, stmt_fail)
+    _set(5, 7, stmt_fail)
+    _set(5, 8, _cov(stmt_total, stmt_fail))
+    _set(6, 5, br_total)
+    _set(6, 6, br_fail)
+    _set(6, 7, br_fail)
+    _set(6, 8, _cov(br_total, br_fail))
 
     # 라운드 100 — TOTALS 3행 폰트 통일. _set은 value만 stamp → 양식 기본(11.0)
     # 잔존 (REF는 맑은 고딕 10.0). 정상 데이터행(data_start) name/size를 기준으로
@@ -1488,9 +1577,13 @@ def _write_audit_log_sheet(
     if ws is None:
         return 0
     # session.parse_warnings + builder warnings 통합
-    all_warnings = list(getattr(session, "parse_warnings", []) or [])
-    if warnings:
-        all_warnings.extend(warnings)
+    all_warnings: list[str] = []
+    seen_warnings: set[str] = set()
+    for warning in list(getattr(session, "parse_warnings", []) or []) + list(warnings or []):
+        if warning in seen_warnings:
+            continue
+        seen_warnings.add(warning)
+        all_warnings.append(warning)
     rows = _build_audit_log_rows(meta, summary, agg, session, all_warnings)
     for r_idx, (label, value, extra) in enumerate(rows, start=1):
         if label:
@@ -2282,6 +2375,27 @@ def _write_traceability_sheet(
 
         # 2) data start = header + 2 (R12 count + R13~ SwITC row)
         data_start = header_row_idx + 2
+        existing_o_cells = 0
+        existing_switc_rows = 0
+        for row in ws.iter_rows(
+            min_row=data_start,
+            max_row=ws.max_row,
+            min_col=1,
+            max_col=ws.max_column or 50,
+            values_only=True,
+        ):
+            row_id = row[0] if row else None
+            if isinstance(row_id, str) and row_id.strip().startswith("SwITC_"):
+                existing_switc_rows += 1
+                existing_o_cells += sum(1 for value in row[2:] if value == "O")
+        if existing_switc_rows >= 10 and existing_o_cells > 0:
+            if out_warnings is not None:
+                out_warnings.append(
+                    f"[swit-traceability] {ws_title} existing SwITC×SwST matrix "
+                    f"preserved: rows={existing_switc_rows}, O={existing_o_cells}"
+                )
+            return existing_o_cells
+
         # session에서 unique SwITC ID 추출
         tc_to_fn = _collect_tc_to_function(session)
         # SwITC TC name 패턴 'SwITC_NN' 또는 'SwITC_SwUFn_NNNN.NNN' → SwITC ID prefix 추출

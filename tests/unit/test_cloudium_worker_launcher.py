@@ -148,8 +148,10 @@ def test_ensure_lock_prevents_concurrent_spawn(tmp_path):
             threading.Thread(target=lambda: results.append(launcher.ensure_cloudium_worker_running()))
             for _ in range(5)
         ]
-        for t in threads: t.start()
-        for t in threads: t.join()
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
 
     # spawn 1회만 (나머지는 already_running)
     assert spawn_calls == [1]

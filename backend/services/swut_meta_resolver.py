@@ -105,6 +105,9 @@ def resolve_swuts_path(req: Any, project_id: str) -> str:
 
     field 명은 ``swuts_docx_path`` 로 유지 (사용자 mental model + 49차 swuds와
     네이밍 일관성). 실제 파일은 xlsm/docx 모두 허용 — parser가 자동 분기.
+    SwIT 요청은 SwITS spec을 우선 사용한다. 기존 API field 이름은
+    ``swuts_docx_path``로 유지하되 config fallback은 ``swits_docx_path`` 또는
+    ``iso26262_docs.swits_xlsm_path``를 먼저 본다.
 
     Args:
         req: SwUTBuildRequest 또는 SwITBuildRequest (덕 타이핑 — `swuts_docx_path`
@@ -118,7 +121,21 @@ def resolve_swuts_path(req: Any, project_id: str) -> str:
     if req_value:
         return req_value
     cfg = load_meta_from_config(project_id)
-    return (cfg.get("swuts_docx_path") or "").strip()
+    iso_docs = cfg.get("iso26262_docs", {}) or {}
+    req_type = type(req).__name__.lower()
+    if req_type.startswith("swit"):
+        return (
+            cfg.get("swits_docx_path")
+            or iso_docs.get("swits_xlsm_path")
+            or cfg.get("swuts_docx_path")
+            or iso_docs.get("swuts_xlsm_path")
+            or ""
+        ).strip()
+    return (
+        cfg.get("swuts_docx_path")
+        or iso_docs.get("swuts_xlsm_path")
+        or ""
+    ).strip()
 
 
 def resolve_swuts_test_specs(

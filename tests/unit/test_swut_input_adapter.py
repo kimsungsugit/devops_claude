@@ -403,7 +403,7 @@ class TestRound77ComponentName:
     def test_merge_c_parser_assigns_file_stem_as_component(self):
         """merge_function_rows_with_c_parser가 c_parser only row의 file.stem을 component_name 주입."""
         from backend.services.swut_input_adapter import (
-            merge_function_rows_with_c_parser, FunctionCoverage,
+            merge_function_rows_with_c_parser,
         )
         agg = {"function_rows": [], "function_asil_map": {}}
         c_map = {
@@ -642,6 +642,21 @@ class TestResolveReportPath:
         assert out.replace("/", "\\") == exact
         assert warns == []
 
+    def test_alt_suffix_match_returns_actual_vc2025_aggregate_report(self):
+        """KJPDS02 VC2025 logs use _AggregateReport.html without Coverage."""
+        folder = r"C:\fake\Aggregate"
+        actual = folder + r"\SwIT_SwUFn_0101_AggregateReport.html"
+        resolver = _FakeResolver({actual: b"x"}, {folder})
+        warns: list[str] = []
+        out = _resolve_report_path(
+            resolver, folder, "SwIT_SwUFn_0101",
+            VC2025_LAYOUT.cov_suffix,
+            alt_suffixes=("_AggregateReport.html",),
+            idx_cache={}, out_warnings=warns,
+        )
+        assert out.replace("/", "\\") == actual
+        assert warns == []
+
     def test_pds_mismatch_fuzzy_fallback_with_warning(self):
         # TestCaseData env엔 _PDS, Aggregate 파일엔 _PDS 없음 → 정규화 매칭
         folder = r"C:\fake\Aggregate"
@@ -682,7 +697,7 @@ class TestCollectVC2025Layout:
                 _make_tc_html(env="SwUT_01_Foo", component="Foo"),
             ex + r"\SwUT_01_Foo_ExecutionResultReport.html":
                 _EXEC_HTML_TEMPLATE.encode("utf-8"),
-            cov + r"\SwUT_01_Foo_AggregateCoverageReport.html":
+            cov + r"\SwUT_01_Foo_AggregateReport.html":
                 _AGG_HTML_TEMPLATE.encode("utf-8"),
             # env B — TestCaseData만 _PDS, 형제 폴더는 _PDS 없음 (실데이터 패턴)
             tc + r"\SwUT_11_Bar_PDS_TestCaseDataReport.html":
