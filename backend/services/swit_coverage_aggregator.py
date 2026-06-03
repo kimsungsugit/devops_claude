@@ -376,17 +376,35 @@ def _write_sds_swits_consistency_template(
         return 0
 
     data_start = header_row + 1
+    template_annotations: dict[int, tuple[Any, Any]] = {}
+    for row_idx in range(data_start, ws.max_row + 1):
+        no_value = ws.cell(row_idx, 2).value
+        item_id = str(ws.cell(row_idx, 3).value or "").strip()
+        if not isinstance(no_value, int) or not item_id:
+            continue
+        exception_value = ws.cell(row_idx, 6).value
+        note_value = ws.cell(row_idx, 7).value
+        if exception_value not in (None, "") or note_value not in (None, ""):
+            template_annotations[row_idx] = (exception_value, note_value)
+
     written = 0
+    preserved = 0
     for row_idx in range(data_start, ws.max_row + 1):
         no_value = ws.cell(row_idx, 2).value
         item_id = str(ws.cell(row_idx, 3).value or "").strip()
         if not isinstance(no_value, int) or not item_id:
             continue
         safe_write(ws, row_idx, 5, "O")
-        existing_exception = ws.cell(row_idx, 6).value
-        if existing_exception in (None, ""):
+        existing_exception, existing_note = template_annotations.get(row_idx, (None, None))
+        if existing_exception not in (None, ""):
+            safe_write(ws, row_idx, 6, existing_exception)
+            preserved += 1
+        else:
             safe_write(ws, row_idx, 6, "X")
-        safe_write(ws, row_idx, 7, "")
+        if existing_note not in (None, ""):
+            safe_write(ws, row_idx, 7, existing_note)
+        else:
+            safe_write(ws, row_idx, 7, "")
         written += 1
 
     safe_write(ws, 3, 2, "Document Type")
@@ -396,6 +414,11 @@ def _write_sds_swits_consistency_template(
             f"[swit-consistency] SDS/SwITS template consistency table preserved: "
             f"{written} rows"
         )
+        if preserved:
+            out_warnings.append(
+                "[swit-consistency] SDS/SwITS template exception annotations "
+                f"preserved: {preserved} rows"
+            )
     return written
 
 

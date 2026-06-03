@@ -816,6 +816,36 @@ class TestExtractExecutionResultsWithActual:
         assert results["SwUFn_0101.001"].passed is True
         assert results["SwUFn_0102.001"].passed is False
 
+    def test_actual_result_composes_nested_array_names(self):
+        """VC2025 actual rows keep parent array context instead of bare [0] keys."""
+        from backend.services.swut_input_adapter import (
+            extract_execution_results_with_actual,
+        )
+
+        html = b"""<html><body>
+        <h4>Start of SwUFn_0126.001</h4>
+        <h3 title="Execution Results">Execution Results (PASS)</h3>
+        <table>
+          <tr><td class="i2">buf</td><td></td><td></td><td></td></tr>
+          <tr>
+            <td class="i3">[0]</td><td>unsigned char</td><td>0x0</td>
+            <td class="success-marker">&lt;match&gt;</td>
+          </tr>
+          <tr>
+            <td class="i3">[1]</td><td>unsigned char</td><td>0x1</td>
+            <td class="success-marker">&lt;match&gt;</td>
+          </tr>
+        </table>
+        <h4>Start of SwUFn_0127.001</h4>
+        </body></html>"""
+
+        results = extract_execution_results_with_actual(html)
+
+        assert results["SwUFn_0126.001"].actual_result == {
+            "buf[0]": ("0x0", "0x0"),
+            "buf[1]": ("0x1", "0x1"),
+        }
+
 
 # ---------------------------------------------------------------------------
 # 59차 F4-B — extract_step_iterations (Iteration anchor 추출 인프라)

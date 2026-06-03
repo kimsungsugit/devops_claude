@@ -658,6 +658,7 @@ class SwUTBuildRequest(BaseModel):
     # 51차 — Coverage / SUTR 양식 분리 (이전 단일 template_path). 둘 다 비면 config fallback.
     coverage_template_path: str = Field("", max_length=500)
     sutr_template_path: str = Field("", max_length=500)
+    swutcr_template_path: str = Field("", max_length=500)
     # 16차: SwUDS docx (옵션) — 제공 시 2.Consistency에 SwUDS↔SwUTS 매핑 row 추가
     swuds_docx_path: str = Field("", max_length=500)
     # 30차 W21: C 소스 디렉토리 (옵션) — 제공 시 Doxygen @asil 태그에서 함수별
@@ -684,6 +685,7 @@ class SwUTBuildRequest(BaseModel):
 
     @field_validator("test_engineer", "reviewer_override", "approver_override",
                      "cache_root", "log_folder", "coverage_template_path", "sutr_template_path",
+                     "swutcr_template_path",
                      "swuds_docx_path", "c_source_root", "swuts_docx_path", "hmr_html_path")
     @classmethod
     def _no_newline(cls, v):

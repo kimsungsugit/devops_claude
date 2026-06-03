@@ -67,7 +67,6 @@ from __future__ import annotations
 import hashlib
 import io
 import re
-from dataclasses import dataclass, field
 from typing import Any
 
 try:
@@ -240,17 +239,19 @@ def _build_fn_iteration_map(session: SwUTSession) -> dict[str, dict[int, Any]]:
 # ---------------------------------------------------------------------------
 
 def _apply_actual_result_style(ws) -> int:
-    """라운드 104 — Actual Result(+Pass/Fail·Pass·Log) 열에 템플릿 서식 적용.
+    """라운드 104 — Actual Result(+Pass/Fail·Pass) 열에 템플릿 서식 적용.
 
     spec graft는 Test Case/Input/Expected(BF=58~FE=161)까지만 서식을 가져오고
-    Actual(FF=162~JE=265)·Pass/Fail(JF=266)·Pass(JG=267)·Log(JH=268)는 우리 추가
-    열이라 무서식(무테/default 폰트) → 사용자 보고 "Actual만 템플릿 미적용".
+    Actual(FF=162~JE=265)·Pass/Fail(JF=266)·Pass(JG=267)는 우리 추가 열이라
+    무서식(무테/default 폰트) → 사용자 보고 "Actual만 템플릿 미적용".
 
     Expected를 1:1 미러: Actual col (162+i) ← Expected col (58+i). **같은 wb 내**이므로
     ``_style`` 인덱스 직접 복사가 정확+빠름 (cross-wb는 라운드 103처럼 객체복사 필요하나
-    여기는 동일 wb). value는 보존(``_style`` 만 복제). Pass/Fail·Pass·Log은 Expected
+    여기는 동일 wb). value는 보존(``_style`` 만 복제). Pass/Fail·Pass는 Expected
     대응이 없어 Expected 마지막 열(FE=161) 서식을 border/font 만 복제(기존 fill — ASIL/
-    Pass 강조 마킹 — 보존). 서브헤더/헤더 행(1~SUBHEADER_ROW)은 건드리지 않음.
+    Pass 강조 마킹 — 보존). Log Data(JH) 데이터 영역은 레퍼런스처럼 비워 두므로
+    헤더 외 데이터 셀 서식을 강제로 입히지 않음. 서브헤더/헤더 행(1~SUBHEADER_ROW)은
+    건드리지 않음.
 
     Returns:
         서식 적용한 셀 수.
@@ -258,6 +259,23 @@ def _apply_actual_result_style(ws) -> int:
     import copy as _copy
 
     from openpyxl.cell.cell import MergedCell as _MC
+    from openpyxl.styles import Font
+
+    def _result_font(src_font, *, bold: bool | None = None) -> Font:
+        return Font(
+            name="맑은 고딕",
+            size=10,
+            bold=src_font.bold if bold is None else bold,
+            italic=src_font.italic,
+            underline=src_font.underline,
+            strike=src_font.strike,
+            color=_copy.copy(src_font.color),
+            vertAlign=src_font.vertAlign,
+            charset=src_font.charset,
+            family=src_font.family,
+            scheme=src_font.scheme,
+        )
+
     offset = COL_ACTUAL_START - COL_EXPECTED_START  # 104
     restyled = 0
     for r in range(SUBHEADER_ROW + 1, ws.max_row + 1):
@@ -274,17 +292,24 @@ def _apply_actual_result_style(ws) -> int:
                 restyled += 1
             except (AttributeError, TypeError):
                 pass
-        # Pass/Fail·Pass·Log(266~268): Expected 마지막 열(161) border/font 만 복제
+        # Pass/Fail·Pass(266~267): Expected 마지막 열(161) border/font 만 복제
         # (fill 보존 — ASIL/Pass 강조 마킹 유지).
         ref = ws.cell(r, COL_ACTUAL_START - 1)  # FE=161
         if getattr(ref, "has_style", False) and not isinstance(ref, _MC):
-            for tc in (COL_PASS_FAIL, COL_PASS_TOTAL, COL_LOG_DATA):
+            for tc in (COL_PASS_FAIL, COL_PASS_TOTAL):
                 dst = ws.cell(r, tc)
                 if isinstance(dst, _MC):
                     continue
                 try:
                     dst.border = _copy.copy(ref.border)
-                    dst.font = _copy.copy(ref.font)
+                    dst.font = _result_font(ref.font)
+                    restyled += 1
+                except (AttributeError, TypeError):
+                    pass
+            log_cell = ws.cell(r, COL_LOG_DATA)
+            if not isinstance(log_cell, _MC):
+                try:
+                    log_cell.font = _result_font(ref.font, bold=False)
                     restyled += 1
                 except (AttributeError, TypeError):
                     pass
@@ -311,6 +336,8 @@ def _write_log_headers(ws, out_warnings: list[str] | None) -> None:
             except (ValueError, KeyError):
                 pass
 
+    safe_write(ws, 1, 1, "Software Unit Test Log")
+
     # r3 섹션 헤더.
     safe_write(ws, HEADER_SECTION_ROW, COL_ACTUAL_START, "Actual Result")
     safe_write(ws, HEADER_SECTION_ROW, COL_PASS_FAIL, "Pass/Fail")
@@ -331,6 +358,23 @@ def _write_log_headers(ws, out_warnings: list[str] | None) -> None:
     # r4 서브헤더 — Param 1..ACTUAL_MAX.
     for i in range(ACTUAL_MAX):
         safe_write(ws, SUBHEADER_ROW, COL_ACTUAL_START + i, f"Param {i + 1}")
+    safe_write(ws, SUBHEADER_ROW, COL_PASS_FAIL, "Unit")
+    safe_write(ws, SUBHEADER_ROW, COL_PASS_TOTAL, "Pass")
+
+    try:
+        from copy import copy as _copy_style
+
+        from openpyxl.styles import Alignment, Font
+
+        header_font = Font(name="맑은 고딕", size=10, bold=True)
+        header_alignment = Alignment(horizontal="center", vertical="center")
+        for row_idx in (HEADER_SECTION_ROW, SUBHEADER_ROW):
+            for col_idx in range(COL_ACTUAL_START, COL_LOG_DATA + 1):
+                cell = ws.cell(row_idx, col_idx)
+                cell.font = _copy_style(header_font)
+                cell.alignment = _copy_style(header_alignment)
+    except (AttributeError, TypeError):
+        pass
 
     # r2 COUNTIF 요약 수식 (레퍼런스 복제 — 범위는 데이터 끝까지).
     last_row = ws.max_row
@@ -403,6 +447,14 @@ def _fill_actual_and_result(
                 stats["iterations"] += 1
             safe_write(ws, anchor, COL_PASS_TOTAL, "N/A")
             stats["fn_na"] += 1
+            if blk["iter_rows"]:
+                try:
+                    ws.merge_cells(
+                        start_row=anchor, end_row=blk["iter_rows"][-1],
+                        start_column=COL_PASS_TOTAL, end_column=COL_PASS_TOTAL,
+                    )
+                except (ValueError, AttributeError):
+                    pass
             _apply_asil_mark(ws, anchor, num, blk, asil_map)
             continue
 
@@ -410,8 +462,13 @@ def _fill_actual_and_result(
         any_exec = False
         all_pass = True
 
-        for it_idx, ir in enumerate(blk["iter_rows"], start=1):
+        for fallback_idx, ir in enumerate(blk["iter_rows"], start=1):
             stats["iterations"] += 1
+            raw_iter_idx = ws.cell(ir, COL_ITER_INDEX).value
+            try:
+                it_idx = int(str(raw_iter_idx).strip())
+            except (TypeError, ValueError):
+                it_idx = fallback_idx
             rec = iter_data.get(it_idx)
             if rec is None:
                 safe_write(ws, ir, COL_PASS_FAIL, "N/A")
@@ -448,14 +505,6 @@ def _fill_actual_and_result(
                 all_pass = False
                 safe_write(ws, ir, COL_PASS_FAIL, "Fail")
                 stats["iter_fail"] += 1
-            # Log Data (iteration env/tc).
-            env = rec.get("env")
-            if env is not None and getattr(env, "env_name", ""):
-                safe_write(
-                    ws, ir, COL_LOG_DATA,
-                    f"{env.env_name}/{rec.get('tc_name', '')}.html",
-                )
-
         total_str = "Pass" if (any_exec and all_pass) else ("Fail" if any_exec else "N/A")
         if total_str == "Pass":
             stats["fn_pass"] += 1

@@ -395,6 +395,299 @@ class TestBuildCoverageReport:
         # incomplete_sheets에서 1.Traceability 제거됨
         assert "1.Traceability" not in result.incomplete_sheets
 
+    def test_spec_based_coverage_uses_swuts_unit_map_before_suds_reverse_map(self):
+        """KJPDS02 spec-based Coverage uses SwUTS unit_name->SwUFn mapping first."""
+        import io as _io
+
+        from backend.services.swuts_excel_parser import SwUTSEntry
+
+        env = EnvironmentData(
+            env_name="SWTE_LIB",
+            component_name="Lib_sha256",
+            test_cases={
+                "SwUFn_0121.001": [object()],
+                "SwUFn_0101.001": [object()],
+            },
+            test_results={
+                "SwUFn_0121.001": ExecutionRow(tc_name="SwUFn_0121.001", passed=True),
+                "SwUFn_0101.001": ExecutionRow(tc_name="SwUFn_0101.001", passed=True),
+            },
+            function_coverage=[
+                FunctionCoverage(
+                    unit_id="s_safe_rotr",
+                    name="s_safe_rotr",
+                    statement=CoverageStats(3, 3, 1.0),
+                    branch=CoverageStats(1, 1, 1.0),
+                    file="sha256.c",
+                ),
+                FunctionCoverage(
+                    unit_id="main",
+                    name="main",
+                    statement=CoverageStats(5, 5, 1.0),
+                    branch=CoverageStats(2, 2, 1.0),
+                    file="main.c",
+                ),
+            ],
+        )
+        session = SwUTSession(
+            project_id="KJPDS02",
+            version="v1.01",
+            source_kind="log_folder",
+            environments=[env],
+            function_name_to_swufn_from_suds={"main": "SwUFn_3562"},
+        )
+        swuts_map = {
+            "SwUTC_0121": SwUTSEntry(
+                tc_id="SwUTC_0121",
+                unit_name="s_safe_rotr",
+                function_id="SwUFn_0121",
+            ),
+            "SwUTC_0101": SwUTSEntry(
+                tc_id="SwUTC_0101",
+                unit_name="main",
+                function_id="SwUFn_0101",
+            ),
+        }
+
+        wb = openpyxl.Workbook()
+        wb.remove(wb.active)
+        wb.create_sheet("Cover")
+        wb.create_sheet("Test Summary")
+        trace = wb.create_sheet("1.Traceability")
+        trace.cell(12, 4, "SwUFn_0121")
+        trace.cell(12, 5, "SwUFn_0101")
+        trace.cell(14, 2, "SwUTC_SwUFn_0121")
+        trace.cell(15, 2, "SwUTC_SwUFn_0101")
+        wb.create_sheet("2.Consistency")
+        cov = wb.create_sheet("3. Coverage")
+        cov.cell(8, 2, "No")
+        cov.cell(8, 3, "Component")
+        cov.cell(8, 4, "Unit ID")
+        cov.cell(8, 5, "Name")
+        cov.cell(8, 6, "Count")
+        cov.cell(8, 7, "Total")
+        cov.cell(8, 8, "Pass")
+        cov.cell(8, 10, "Count")
+        cov.cell(8, 11, "Total")
+        cov.cell(8, 12, "Pass")
+        cov.cell(8, 14, "File")
+        cov.merge_cells("C10:C14")
+        cov.merge_cells("N10:N14")
+        wb.create_sheet("History").cell(row=1, column=1, value="■ Revision History")
+        buf = _io.BytesIO()
+        wb.save(buf)
+
+        result = build_coverage_report(
+            session,
+            CoverageBuildMeta(release_sw_version="1.01", test_date="2025-12-05"),
+            buf.getvalue(),
+            swuts_map=swuts_map,
+        )
+        out_wb = openpyxl.load_workbook(_io.BytesIO(result.xlsx_bytes), data_only=False)
+        out_cov = out_wb["3. Coverage"]
+
+        assert out_cov.cell(10, 4).value == "SwUFn_0121"
+        assert out_cov.cell(11, 4).value == "SwUFn_0101"
+        assert out_cov.cell(10, 3).value == '="SwCom_" & MID(D10, FIND("_", D10) + 1, 2)'
+        assert out_cov.cell(11, 3).value == '="SwCom_" & MID(D11, FIND("_", D11) + 1, 2)'
+        assert "C10:C14" not in {str(r) for r in out_cov.merged_cells.ranges}
+        assert "N10:N14" not in {str(r) for r in out_cov.merged_cells.ranges}
+        assert result.summary["swuts_name_to_swufn_used"] == 2
+        assert result.summary["traceability_o_cells"] >= 2
+
+    def test_spec_based_coverage_reuses_template_order_and_formulas(self):
+        """Populated KJPDS02 templates drive row order and keep formula cells."""
+        import io as _io
+
+        env = EnvironmentData(
+            env_name="SWTE_LIB",
+            component_name="Lib_sha256",
+            test_cases={
+                "SwUFn_0121.001": [object()],
+                "SwUFn_0101.001": [object()],
+            },
+            test_results={
+                "SwUFn_0121.001": ExecutionRow(tc_name="SwUFn_0121.001", passed=True),
+                "SwUFn_0101.001": ExecutionRow(tc_name="SwUFn_0101.001", passed=True),
+            },
+            function_coverage=[
+                FunctionCoverage(
+                    unit_id="main",
+                    name="main",
+                    statement=CoverageStats(5, 5, 1.0),
+                    branch=CoverageStats(2, 2, 1.0),
+                    file="main.c",
+                ),
+                FunctionCoverage(
+                    unit_id="s_safe_rotr",
+                    name="s_safe_rotr",
+                    statement=CoverageStats(36, 38, 36 / 38),
+                    branch=CoverageStats(17, 18, 17 / 18),
+                    file="sha256.c",
+                ),
+            ],
+        )
+        session = SwUTSession(
+            project_id="KJPDS02",
+            environments=[env],
+            function_name_to_swufn_from_suds={
+                "s_safe_rotr": "SwUFn_0121",
+                "main": "SwUFn_0101",
+            },
+        )
+
+        wb = openpyxl.Workbook()
+        wb.remove(wb.active)
+        wb.create_sheet("Cover")
+        wb.create_sheet("Test Summary")
+        wb.create_sheet("1.Traceability")
+        wb.create_sheet("2.Consistency")
+        cov = wb.create_sheet("3. Coverage")
+        cov.cell(8, 2, "No")
+        cov.cell(8, 3, "Component")
+        cov.cell(8, 4, "Unit ID")
+        cov.cell(8, 5, "Name")
+        cov.cell(8, 6, "Count")
+        cov.cell(8, 7, "Total")
+        cov.cell(8, 8, "Pass")
+        cov.cell(8, 10, "Count")
+        cov.cell(8, 11, "Total")
+        cov.cell(8, 12, "Pass")
+        cov.cell(8, 14, "File")
+        cov.cell(10, 4, "SwUFn_0121")
+        cov.cell(10, 5, "s_safe_rotr")
+        cov.cell(11, 4, "SwUFn_0101")
+        cov.cell(11, 5, "main")
+        for idx in range(2, 60):
+            row = 10 + idx
+            cov.cell(row, 4, f"SwUFn_{2000 + idx:04d}")
+            cov.cell(row, 5, f"template_only_{idx}")
+        wb.create_sheet("History").cell(row=1, column=1, value="Revision History")
+        buf = _io.BytesIO()
+        wb.save(buf)
+
+        result = build_coverage_report(
+            session,
+            CoverageBuildMeta(
+                project_id="KJPDS02",
+                release_sw_version="1.01",
+                test_date="2025-12-05",
+                doc_filename_pattern=(
+                    "(KJPDS02_DV_SwUTCV) Software Unit Test Coverage Result_"
+                    "v{version}_{date}_R.xlsx"
+                ),
+            ),
+            buf.getvalue(),
+        )
+        out_wb = openpyxl.load_workbook(_io.BytesIO(result.xlsx_bytes), data_only=False)
+        out_cov = out_wb["3. Coverage"]
+
+        assert out_cov.cell(10, 4).value == "SwUFn_0121"
+        assert out_cov.cell(11, 4).value == "SwUFn_0101"
+        assert out_cov.cell(10, 3).value == '="SwCom_" & MID(D10, FIND("_", D10) + 1, 2)'
+        assert out_cov.cell(10, 6).value == 36
+        assert out_cov.cell(10, 7).value == 38
+        assert out_cov.cell(10, 8).value == '=IF(F10=G10, "Pass", "Fail")'
+        assert out_cov.cell(10, 9).value == "UT-CVG-DV-1"
+        assert out_cov.cell(10, 10).value == 17
+        assert out_cov.cell(10, 11).value == 18
+        assert out_cov.cell(10, 12).value == '=IF(J10=K10, "Pass", "Fail")'
+        assert out_cov.cell(10, 13).value == "UT-CVG-DV-2"
+        assert out_cov.cell(10, 14).value == "(KJPDS02_DV_SwUTCV) Software Unit Test Coverage Result"
+        assert out_cov.cell(12, 4).value == "Total"
+        assert out_cov.cell(12, 8).value == '=COUNTIF(H10:H11,"Fail")'
+        assert any("[template-order]" in warning for warning in result.warnings)
+
+    def test_spec_based_coverage_reports_template_mapping_drift(self):
+        """Reference/template SwUFn differences are reported, not copied over."""
+        import io as _io
+
+        env = EnvironmentData(
+            env_name="SWTE_LIB",
+            component_name="Lib_sha256",
+            test_cases={"SwUFn_0101.001": [object()]},
+            test_results={
+                "SwUFn_0101.001": ExecutionRow(tc_name="SwUFn_0101.001", passed=True),
+            },
+            function_coverage=[
+                FunctionCoverage(
+                    unit_id="main",
+                    name="main",
+                    statement=CoverageStats(5, 5, 1.0),
+                    branch=CoverageStats(2, 2, 1.0),
+                    file="main.c",
+                ),
+                FunctionCoverage(
+                    unit_id="current_extra",
+                    name="current_extra",
+                    statement=CoverageStats(1, 1, 1.0),
+                    branch=CoverageStats(1, 1, 1.0),
+                    file="extra.c",
+                ),
+            ],
+        )
+        session = SwUTSession(
+            project_id="KJPDS02",
+            environments=[env],
+            function_name_to_swufn_from_suds={
+                "main": "SwUFn_0101",
+                "current_extra": "SwUFn_7777",
+            },
+        )
+
+        wb = openpyxl.Workbook()
+        wb.remove(wb.active)
+        wb.create_sheet("Cover")
+        wb.create_sheet("Test Summary")
+        wb.create_sheet("1.Traceability")
+        wb.create_sheet("2.Consistency")
+        cov = wb.create_sheet("3. Coverage")
+        cov.cell(8, 2, "No")
+        cov.cell(8, 3, "Component")
+        cov.cell(8, 4, "Unit ID")
+        cov.cell(8, 5, "Name")
+        cov.cell(8, 6, "Count")
+        cov.cell(8, 7, "Total")
+        cov.cell(8, 8, "Pass")
+        cov.cell(8, 10, "Count")
+        cov.cell(8, 11, "Total")
+        cov.cell(8, 12, "Pass")
+        cov.cell(8, 14, "File")
+        cov.cell(10, 4, "SwUFn_9999")
+        cov.cell(10, 5, "main")
+        cov.cell(11, 4, "SwUFn_2222")
+        cov.cell(11, 5, "template_only")
+        for idx in range(2, 60):
+            row = 10 + idx
+            cov.cell(row, 4, f"SwUFn_{3000 + idx:04d}")
+            cov.cell(row, 5, f"template_only_{idx}")
+        wb.create_sheet("History").cell(row=1, column=1, value="Revision History")
+        buf = _io.BytesIO()
+        wb.save(buf)
+
+        result = build_coverage_report(
+            session,
+            CoverageBuildMeta(
+                project_id="KJPDS02",
+                release_sw_version="1.01",
+                test_date="2025-12-05",
+            ),
+            buf.getvalue(),
+        )
+
+        drift = result.summary["template_mapping_drift"]
+        assert drift["template_row_count"] >= 50
+        assert drift["current_function_count"] == 2
+        assert drift["swufn_id_drift_count"] == 1
+        assert drift["extra_in_current_count"] == 1
+        assert drift["missing_in_current_count"] >= 1
+        assert drift["swufn_id_drift"][0] == {
+            "function_name": "main",
+            "template_swufn": "SwUFn_9999",
+            "current_swufn": "SwUFn_0101",
+        }
+        assert any("[template-drift]" in warning for warning in result.warnings)
+
     def test_build_meta_base_default_factory(self):
         """T137: BuildMetaBase 기본 생성 + 3 property 동작."""
         from backend.services.swut_meta import BuildMetaBase
@@ -1231,9 +1524,7 @@ class TestWriteTestLogTruncateF4A:
         # row 5 col 6~15에 15개 변수 중 10개 stamp (입력 dict insertion order)
         if n > 0:
             # 첫 row stamp 확인 (정확한 row는 fixture에 따라 다름)
-            stamped_cols = [
-                ws.cell(5, c).value for c in range(6, 16) if ws.cell(5, c).value
-            ]
+            assert any(ws.cell(5, c).value for c in range(6, 16))
             # truncate 10개 — 11번째는 stamp 안 됨
             assert ws.cell(5, 16).value in (None, "")  # 11번째 col은 EXPECTED_COL
 
@@ -2250,7 +2541,6 @@ class TestRound74PhaseCDynamicSubfolder:
         # 직접 collect_from_log_folder 호출은 file_resolver 의존성이 큼 — 단위 회귀는
         # 가벼운 mock으로 has_metrics_folder = False 케이스만 검증.
         # (전체 통합은 build_real_vcast_v3.py로 검증)
-        import io
         from backend.services.swut_input_adapter import (
             merge_function_rows_with_c_parser, FunctionCoverage,
         )
@@ -2582,7 +2872,8 @@ class TestRound80AsilFallbackChain:
             if cell.fill and cell.fill.start_color:
                 _rgb = getattr(cell.fill.start_color, "rgb", "")
                 if isinstance(_rgb, str) and _rgb not in ("", "00000000", "FFFFFFFF"):
-                    found_rgb = _rgb; break
+                    found_rgb = _rgb
+                    break
         assert found_rgb == ASIL_A_FILL_RGB
 
     def test_coverage_sheet_asil_qm_marker_applied(self):
@@ -2611,7 +2902,8 @@ class TestRound80AsilFallbackChain:
             if cell.fill and cell.fill.start_color:
                 _rgb = getattr(cell.fill.start_color, "rgb", "")
                 if isinstance(_rgb, str) and _rgb not in ("", "00000000", "FFFFFFFF"):
-                    found_rgb = _rgb; break
+                    found_rgb = _rgb
+                    break
         assert found_rgb == ASIL_QM_FILL_RGB
 
     def test_coverage_sheet_chain_priority_suds_over_sds(self):
@@ -2885,7 +3177,10 @@ class TestRound83AuditLogSheet:
         assert "ISO 26262 Audit Log" in str(ws.cell(1, 1).value or "")
         # 6 섹션 header label 모두 존재
         labels = [str(ws.cell(r, 1).value or "") for r in range(1, n + 1)]
-        section_headers = [l for l in labels if l and l[0].isdigit() and "." in l[:3]]
+        section_headers = [
+            label for label in labels
+            if label and label[0].isdigit() and "." in label[:3]
+        ]
         assert len([h for h in section_headers if h.startswith("1.")]) >= 1
         assert len([h for h in section_headers if h.startswith("2.")]) >= 1
         assert len([h for h in section_headers if h.startswith("3.")]) >= 1
@@ -2947,7 +3242,10 @@ class TestRound83AuditLogSheet:
         cells_col1 = [str(ws.cell(r, 1).value or "") for r in range(1, ws.max_row + 1)]
         cells_col2 = [str(ws.cell(r, 2).value or "") for r in range(1, ws.max_row + 1)]
         # W1~W20 stamp (session 2 + builder 25 = 27건 중 top 20)
-        w_labels = [l for l in cells_col1 if l.startswith("W") and l[1:].isdigit()]
+        w_labels = [
+            label for label in cells_col1
+            if label.startswith("W") and label[1:].isdigit()
+        ]
         assert len(w_labels) == 20
         # '외 N건 생략' 명시
         assert any("외" in c and "생략" in c for c in cells_col2)

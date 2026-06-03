@@ -33,8 +33,6 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Response
 
 from backend.dependencies.admin import require_admin
-from fastapi.responses import StreamingResponse
-
 from backend.routers._safety import run_build_safely, run_consistency_safely, run_preview_safely
 from backend.schemas import (
     LogFolderPreviewRequest,
@@ -48,6 +46,10 @@ from backend.services.swut_consistency_checker import check_swut_consistency
 from backend.services.swut_coverage_aggregator import (
     CoverageBuildMeta,
     build_coverage_report,
+)
+from backend.services.swut_comprehensive_aggregator import (
+    SwutcrBuildMeta,
+    build_swutcr_report,
 )
 from backend.services.swut_input_adapter import collect_swut_session
 from backend.services.swut_sutr_aggregator import SutrBuildMeta, build_sutr
@@ -101,6 +103,14 @@ def _load_meta_from_config(project_id: str) -> dict[str, Any]:
     return _resolver_mod.load_meta_from_config(project_id)
 
 
+def _resolve_swut_log_folder(req: SwUTBuildRequest) -> str | None:
+    """Return request log_folder or project default SwUT VectorCAST log folder."""
+    if req.log_folder:
+        return req.log_folder
+    cfg = _load_meta_from_config(req.project_id)
+    return cfg.get("swut_log_folder") or None
+
+
 def _build_coverage_meta(req: SwUTBuildRequest) -> CoverageBuildMeta:
     cfg = _load_meta_from_config(req.project_id)
     approvers = cfg.get("approvers", {}) or {}
@@ -150,6 +160,31 @@ def _build_sutr_meta(req: SwUTBuildRequest) -> SutrBuildMeta:
     )
 
 
+def _build_swutcr_meta(req: SwUTBuildRequest) -> SwutcrBuildMeta:
+    cfg = _load_meta_from_config(req.project_id)
+    approvers = cfg.get("approvers", {}) or {}
+    doc_filenames = cfg.get("doc_filenames", {}) or {}
+    return SwutcrBuildMeta(
+        project_id=req.project_id,
+        project_full_name=cfg.get("project_full_name", req.project_id),
+        asil_level=cfg.get("asil_level", req.asil_level),
+        doc_id_base=cfg.get("swutcr_doc_id_base", f"{req.project_id}-SwUTCR"),
+        doc_id_sequence=req.doc_id_sequence,
+        default_author=approvers.get("default_author", ""),
+        default_reviewer=approvers.get("default_reviewer", ""),
+        default_approver=approvers.get("default_approver", ""),
+        doc_filename_pattern=doc_filenames.get("swutcr", ""),
+        release_sw_version=req.release_sw_version,
+        hw_version=req.hw_version,
+        test_date=req.test_date,
+        test_engineer=req.test_engineer,
+        validation_date=req.validation_date,
+        reviewer_override=req.reviewer_override,
+        approver_override=req.approver_override,
+        project_config=cfg,
+    )
+
+
 def _read_template_bytes(template_path: str, project_id: str, kind: str) -> bytes:
     """template_path 명시되면 그 path에서, 아니면 config의 template path에서 read."""
     resolver = get_resolver()
@@ -157,7 +192,12 @@ def _read_template_bytes(template_path: str, project_id: str, kind: str) -> byte
         return resolver.read_bytes(template_path)
     cfg = _load_meta_from_config(project_id)
     tmpl_cfg = cfg.get("template_paths", {})
-    key = "coverage_report_template" if kind == "coverage" else "sutr_template"
+    if kind == "coverage":
+        key = "coverage_report_template"
+    elif kind == "swutcr":
+        key = "swutcr_template"
+    else:
+        key = "sutr_template"
     tpath = tmpl_cfg.get(key, "")
     if not tpath:
         raise HTTPException(
@@ -300,19 +340,21 @@ def _apply_function_asil_map(req: SwUTBuildRequest, session) -> None:
 def _do_coverage_build(req: SwUTBuildRequest) -> Response:
     resolver = get_resolver()
     # 56차 T308 — log_folder UNC + Local 모드 pre-flight check
-    check_log_folder_mode_compat(req.log_folder, resolver)
+    log_folder = _resolve_swut_log_folder(req)
+    check_log_folder_mode_compat(log_folder, resolver)
     # 57차 T319 diag — Coverage build session params (SUTR과 비교용)
     import logging as _logging
     _logging.getLogger(__name__).info(
         f"Coverage build req: project_id={req.project_id!r}, jenkins_build_number="
         f"{req.jenkins_build_number!r}, cache_root={req.cache_root!r}, "
-        f"log_folder={req.log_folder!r}, coverage_template_path={req.coverage_template_path!r}"
+        f"log_folder={req.log_folder!r}, resolved_log_folder={log_folder!r}, "
+        f"coverage_template_path={req.coverage_template_path!r}"
     )
     session = collect_swut_session(
         resolver, req.project_id,
         jenkins_build_number=req.jenkins_build_number,
         cache_root=req.cache_root,
-        log_folder=req.log_folder,
+        log_folder=log_folder,
     )
     _logging.getLogger(__name__).info(
         f"Coverage build session collected: environments={len(session.environments)}, "
@@ -331,11 +373,18 @@ def _do_coverage_build(req: SwUTBuildRequest) -> Response:
     hmr_html_bytes = _resolver_resolve_hmr_html_bytes(
         req, req.project_id, out_warnings=_hmr_warnings,
     )
+    _swuts_warnings: list[str] = []
+    swuts_map = _resolver_resolve_swuts_test_specs(
+        req, req.project_id, out_warnings=_swuts_warnings,
+    )
     result = build_coverage_report(session, meta, template_bytes,
                                     swuds_function_ids=swuds_fn_ids,
+                                    swuts_map=swuts_map,
                                     hmr_html_bytes=hmr_html_bytes)
     if _hmr_warnings:
         result.warnings.extend(_hmr_warnings)
+    if _swuts_warnings:
+        result.warnings.extend(_swuts_warnings)
     if not result.ok:
         raise HTTPException(status_code=500, detail="빌드 실패 (ok=False)")
     return _build_result_to_response(
@@ -434,19 +483,21 @@ def _do_sutr_build_spec_based(
 def _do_sutr_build(req: SwUTBuildRequest) -> Response:
     resolver = get_resolver()
     # 56차 T308 — log_folder UNC + Local 모드 pre-flight check
-    check_log_folder_mode_compat(req.log_folder, resolver)
+    log_folder = _resolve_swut_log_folder(req)
+    check_log_folder_mode_compat(log_folder, resolver)
     # 57차 T319 diag — SUTR build session params 확인 (Coverage와 비교용)
     import logging as _logging
     _logging.getLogger(__name__).info(
         f"SUTR build req: project_id={req.project_id!r}, jenkins_build_number="
         f"{req.jenkins_build_number!r}, cache_root={req.cache_root!r}, "
-        f"log_folder={req.log_folder!r}, sutr_template_path={req.sutr_template_path!r}"
+        f"log_folder={req.log_folder!r}, resolved_log_folder={log_folder!r}, "
+        f"sutr_template_path={req.sutr_template_path!r}"
     )
     session = collect_swut_session(
         resolver, req.project_id,
         jenkins_build_number=req.jenkins_build_number,
         cache_root=req.cache_root,
-        log_folder=req.log_folder,
+        log_folder=log_folder,
     )
     _logging.getLogger(__name__).info(
         f"SUTR build session collected: environments={len(session.environments)}, "
@@ -494,6 +545,58 @@ def _do_sutr_build(req: SwUTBuildRequest) -> Response:
     )
 
 
+def _do_swutcr_build(req: SwUTBuildRequest) -> Response:
+    resolver = get_resolver()
+    log_folder = _resolve_swut_log_folder(req)
+    check_log_folder_mode_compat(log_folder, resolver)
+    import logging as _logging
+    _logging.getLogger(__name__).info(
+        f"SwUTCR build req: project_id={req.project_id!r}, jenkins_build_number="
+        f"{req.jenkins_build_number!r}, cache_root={req.cache_root!r}, "
+        f"log_folder={req.log_folder!r}, resolved_log_folder={log_folder!r}, "
+        f"swutcr_template_path={req.swutcr_template_path!r}"
+    )
+    session = collect_swut_session(
+        resolver, req.project_id,
+        jenkins_build_number=req.jenkins_build_number,
+        cache_root=req.cache_root,
+        log_folder=log_folder,
+    )
+    _apply_function_asil_map(req, session)
+    template_bytes = _read_template_bytes(req.swutcr_template_path, req.project_id, "swutcr")
+    meta = _build_swutcr_meta(req)
+    swuds_fn_ids = _resolve_swuds_function_ids(req)
+    hmr_warnings: list[str] = []
+    hmr_html_bytes = _resolver_resolve_hmr_html_bytes(
+        req, req.project_id, out_warnings=hmr_warnings,
+    )
+    swuts_warnings: list[str] = []
+    swuts_map = _resolver_resolve_swuts_test_specs(
+        req, req.project_id, out_warnings=swuts_warnings,
+    )
+    result = build_swutcr_report(
+        session, meta, template_bytes,
+        deviation_cases=req.deviation_cases,
+        swuds_function_ids=swuds_fn_ids,
+        swuts_map=swuts_map,
+        hmr_html_bytes=hmr_html_bytes,
+    )
+    if hmr_warnings:
+        result.warnings.extend(hmr_warnings)
+    if swuts_warnings:
+        result.warnings.extend(swuts_warnings)
+    if not result.ok:
+        raise HTTPException(status_code=500, detail="SwUTCR build failed (ok=False)")
+    return _build_result_to_response(
+        content_io=result.xlsm_io,
+        filename=result.filename,
+        summary=result.summary,
+        warnings=result.warnings,
+        incomplete_sheets=result.incomplete_sheets,
+        media_type="application/vnd.ms-excel.sheet.macroenabled.12",
+    )
+
+
 @router.post("/coverage/build")
 async def build_coverage(
     req: SwUTBuildRequest,
@@ -519,6 +622,18 @@ async def build_sutr_endpoint(
 
 
 # ── 18차 T177: Coverage ↔ SUTR cross-validation endpoint ──────────────
+
+@router.post("/swutcr/build")
+async def build_swutcr_endpoint(
+    req: SwUTBuildRequest,
+) -> Response:
+    """SwUTCR xlsm build. Preserves the comprehensive result template."""
+    async with _BUILD_SEMAPHORE:
+        return await asyncio.to_thread(
+            run_build_safely, series="swut", kind="swutcr",
+            build_fn=_do_swutcr_build, req=req, logger=_logger,
+        )
+
 
 def _do_consistency_check(req: SwUTConsistencyCheckRequest) -> dict[str, Any]:
     """파일 resolver로 두 산출물 bytes 읽기 + check_swut_consistency 호출.

@@ -103,6 +103,44 @@ def _build_kjpds_swit_sitr_template() -> bytes:
     return buf.getvalue()
 
 
+def _build_reference_swit_sitr_template(slot_count: int = 2) -> bytes:
+    """Wide KJPDS02 SwITR reference-like Test Log with merged B slots."""
+    wb = openpyxl.Workbook()
+    wb.remove(wb.active)
+    wb.create_sheet("Cover")
+    wb.create_sheet("History")
+    wb.create_sheet("1.Test Summary")
+    log = wb.create_sheet("2.Test Log")
+    log.cell(4, 1).value = "TC ID"
+    log.cell(4, 2).value = "No"
+    log.cell(4, 3).value = "Test Env."
+    log.cell(4, 4).value = "Test Method"
+    log.cell(4, 5).value = "Test Case Generation Method"
+    log.cell(4, 6).value = "tc_id"
+    log.cell(4, 7).value = "It."
+    log.cell(4, 8).value = "Description"
+    log.cell(4, 9).value = "Precondition"
+    log.cell(4, 10).value = "inpt[0]"
+    log.cell(4, 108).value = "expected[0]"
+    log.cell(4, 242).value = "actual[0]"
+    log.cell(4, 376).value = "Unit"
+    log.cell(4, 377).value = "Total"
+    log.cell(4, 378).value = "Tail"
+
+    for idx in range(slot_count):
+        start = 5 + (idx * 2)
+        log.merge_cells(start_row=start, start_column=2, end_row=start + 1, end_column=2)
+        log.merge_cells(start_row=start, start_column=3, end_row=start + 1, end_column=3)
+        log.merge_cells(start_row=start, start_column=4, end_row=start + 1, end_column=4)
+        log.merge_cells(start_row=start, start_column=5, end_row=start + 1, end_column=5)
+        log.merge_cells(start_row=start, start_column=6, end_row=start + 1, end_column=6)
+
+    log.cell(5 + (slot_count * 2), 2).value = "End of Document"
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
 def _make_kjpds_swit_sitr_session() -> SwUTSession:
     env = EnvironmentData(
         env_name="SwIT_SwUFn_0101_depth4_file12",
@@ -121,6 +159,48 @@ def _make_kjpds_swit_sitr_session() -> SwUTSession:
                 component="SysOs_Main",
                 passed=True,
                 actual_result={"output_a": 2},
+            ),
+        },
+    )
+    return SwUTSession(
+        project_id="KJPDS02",
+        version="v1.01_251205",
+        source_kind="log_folder",
+        source_path="/tmp/fake/251106_IT_Report",
+        environments=[env],
+    )
+
+
+def _make_reference_swit_sitr_session() -> SwUTSession:
+    env = EnvironmentData(
+        env_name="SwIT_SwUFn_0101_depth7",
+        component_name="Comp",
+        test_cases={
+            "a.001": [
+                SimpleNamespace(
+                    description="Beta path",
+                    input_data={"in": "beta"},
+                    expected_result={"out": "0x0A"},
+                )
+            ],
+            "b.001": [
+                SimpleNamespace(
+                    description="Alpha path",
+                    input_data={"in": "alpha"},
+                    expected_result={"out": "0x09"},
+                )
+            ],
+        },
+        test_results={
+            "a.001": ExecutionRow(
+                tc_name="a.001",
+                passed=True,
+                actual_result={"out": "10"},
+            ),
+            "b.001": ExecutionRow(
+                tc_name="b.001",
+                passed=True,
+                actual_result={"out": "9"},
             ),
         },
     )
@@ -370,6 +450,9 @@ class TestSitrTestLogAsil:
         assert log.cell(8, 18).value == "2"
         assert log.cell(8, 28).value == "2"
         assert log.cell(8, 38).value == "Pass"
+        assert "B7:B8" in {str(r) for r in log.merged_cells.ranges}
+        assert "E7:E8" in {str(r) for r in log.merged_cells.ranges}
+        assert "F7:F8" in {str(r) for r in log.merged_cells.ranges}
 
     def test_swit_test_log_matches_two_digit_spec_suffix_to_base_env(self):
         """SWIT_SWUFN_1109_01 can match log env SwIT_SwUFn_1109."""
@@ -412,6 +495,184 @@ class TestSitrTestLogAsil:
         assert log.cell(7, 2).value == "SwITC_1109_01, SwITC_1109_02"
         assert log.cell(7, 40).value == "SwIT_SwUFn_1109"
         assert log.cell(8, 4).value == "case.001"
+
+    def test_reference_layout_uses_description_before_sorted_tc_order(self):
+        """Wide reference layout slots keep merges and map TC rows by SwITS description."""
+        swits_map = {
+            "SwITC_0101_01": SimpleNamespace(
+                tc_id="SwITC_0101_01",
+                unit_name="SWIT_SWUFN_0101_DEPTH7",
+                description="Alpha path",
+                test_method="REQ, IFT",
+                generation_method="AOR, ABV",
+            ),
+            "SwITC_0101_02": SimpleNamespace(
+                tc_id="SwITC_0101_02",
+                unit_name="SWIT_SWUFN_0101_DEPTH7",
+                description="Beta path",
+                test_method="REQ, IFT",
+                generation_method="AOR, ABV",
+            ),
+        }
+        result = build_swit_sitr_report(
+            _make_reference_swit_sitr_session(),
+            _make_swit_sitr_meta(),
+            _build_reference_swit_sitr_template(slot_count=2),
+            swuts_map=swits_map,
+        )
+
+        assert result.summary["test_log_rows_written"] == 2
+        assert result.summary["test_log_iteration_rows_written"] == 2
+        wb = openpyxl.load_workbook(io.BytesIO(result.xlsm_bytes), keep_vba=True)
+        log = wb["2.Test Log"]
+        assert "B5:B6" in {str(r) for r in log.merged_cells.ranges}
+        assert "B7:B8" in {str(r) for r in log.merged_cells.ranges}
+        assert log.cell(5, 6).value == "SwITC_0101_01"
+        assert log.cell(6, 8).value == "Alpha path"
+        assert log.cell(6, 10).value == "alpha"
+        assert log.cell(6, 242).value == "0x09"
+        assert log.cell(7, 6).value == "SwITC_0101_02"
+        assert log.cell(8, 8).value == "Beta path"
+        assert log.cell(8, 10).value == "beta"
+        assert log.cell(8, 242).value == "0x0A"
+
+    def test_reference_layout_slot_overflow_warns_and_preserves_footer(self):
+        """If SwITS has more blocks than template slots, do not overwrite the footer."""
+        swits_map = {
+            "SwITC_0101_01": SimpleNamespace(
+                tc_id="SwITC_0101_01",
+                unit_name="SWIT_SWUFN_0101_DEPTH7",
+                description="Alpha path",
+            ),
+            "SwITC_0101_02": SimpleNamespace(
+                tc_id="SwITC_0101_02",
+                unit_name="SWIT_SWUFN_0101_DEPTH7",
+                description="Beta path",
+            ),
+        }
+        result = build_swit_sitr_report(
+            _make_reference_swit_sitr_session(),
+            _make_swit_sitr_meta(),
+            _build_reference_swit_sitr_template(slot_count=1),
+            swuts_map=swits_map,
+        )
+
+        assert result.summary["test_log_rows_written"] == 1
+        assert any("reference template slot overflow" in w for w in result.warnings)
+        wb = openpyxl.load_workbook(io.BytesIO(result.xlsm_bytes), keep_vba=True)
+        log = wb["2.Test Log"]
+        assert log.cell(7, 2).value == "End of Document"
+        assert log.cell(7, 6).value is None
+
+    def test_reference_layout_preserves_existing_parameter_value_on_parser_conflict(self):
+        """Duplicate variable names in VectorCAST input data must not overwrite a reference slot."""
+        template_wb = openpyxl.load_workbook(
+            io.BytesIO(_build_reference_swit_sitr_template(slot_count=1)),
+            keep_vba=True,
+        )
+        template_log = template_wb["2.Test Log"]
+        template_log.cell(5, 10).value = "u16g_SysDiag_SystemStatus"
+        template_log.cell(6, 10).value = "1"
+        template_log.cell(5, 11).value = "u8s_TemplateOnly"
+        template_log.cell(6, 11).value = "0"
+        template_buf = io.BytesIO()
+        template_wb.save(template_buf)
+
+        env = EnvironmentData(
+            env_name="SwIT_SwUFn_0101_depth7",
+            component_name="Comp",
+            test_cases={
+                "a.001": [
+                    SimpleNamespace(
+                        description="Alpha path",
+                        input_data={"u16g_SysDiag_SystemStatus": "3000"},
+                        expected_result={},
+                    )
+                ],
+            },
+            test_results={
+                "a.001": ExecutionRow(tc_name="a.001", passed=True, actual_result={}),
+            },
+        )
+        session = SwUTSession(
+            project_id="KJPDS02",
+            version="v1.01_251205",
+            source_kind="log_folder",
+            source_path="/tmp/fake",
+            environments=[env],
+        )
+        swits_map = {
+            "SwITC_0101_01": SimpleNamespace(
+                tc_id="SwITC_0101_01",
+                unit_name="SWIT_SWUFN_0101_DEPTH7",
+                description="Alpha path",
+            ),
+        }
+
+        result = build_swit_sitr_report(
+            session,
+            _make_swit_sitr_meta(),
+            template_buf.getvalue(),
+            swuts_map=swits_map,
+        )
+
+        wb = openpyxl.load_workbook(io.BytesIO(result.xlsm_bytes), keep_vba=True)
+        log = wb["2.Test Log"]
+        assert log.cell(5, 10).value == "u16g_SysDiag_SystemStatus"
+        assert log.cell(6, 10).value == "1"
+        assert log.cell(5, 11).value == "u8s_TemplateOnly"
+        assert log.cell(6, 11).value == "0"
+        assert any("reference template parameter cells preserved" in w for w in result.warnings)
+        assert any("reference template parameter cells restored" in w for w in result.warnings)
+
+    def test_non_reference_grouped_block_keeps_all_env_test_cases(self):
+        """Grouped non-reference output must not drop env TCs by SwITS description."""
+        env = EnvironmentData(
+            env_name="SwIT_SwUFn_0101_depth7",
+            component_name="Comp",
+            test_cases={
+                "a.001": [SimpleNamespace(description="Alpha path", input_data={}, expected_result={})],
+                "b.001": [SimpleNamespace(description="Beta path", input_data={}, expected_result={})],
+            },
+            test_results={
+                "a.001": ExecutionRow(tc_name="a.001", passed=True),
+                "b.001": ExecutionRow(tc_name="b.001", passed=True),
+            },
+        )
+        session = SwUTSession(
+            project_id="KJPDS02",
+            version="v1.01_251205",
+            source_kind="log_folder",
+            source_path="/tmp/fake",
+            environments=[env],
+        )
+        swits_map = {
+            "SwITC_0101_01": SimpleNamespace(
+                tc_id="SwITC_0101_01",
+                unit_name="SWIT_SWUFN_0101_DEPTH7",
+                description="Alpha path",
+            ),
+            "SwITC_0101_02": SimpleNamespace(
+                tc_id="SwITC_0101_02",
+                unit_name="SWIT_SWUFN_0101_DEPTH7",
+                description="Beta path",
+            ),
+        }
+
+        result = build_swit_sitr_report(
+            session,
+            _make_swit_sitr_meta(),
+            _build_swit_sitr_template(),
+            swuts_map=swits_map,
+        )
+
+        assert result.summary["test_log_rows_written"] == 1
+        assert result.summary["test_log_iteration_rows_written"] == 2
+        wb = openpyxl.load_workbook(io.BytesIO(result.xlsm_bytes), keep_vba=True)
+        log = wb["Test Log"]
+        assert log.cell(3, 4).value == "a.001"
+        assert log.cell(4, 4).value == "b.001"
+        assert "B2:B4" in {str(r) for r in log.merged_cells.ranges}
 
 
 # ---------------------------------------------------------------------------

@@ -323,6 +323,43 @@ class TestSwitSwudsFunctionIds:
 
 
 class TestSwitSwitsConsistency:
+    def test_sds_swits_template_exception_annotations_are_preserved(self):
+        wb = openpyxl.Workbook()
+        wb.remove(wb.active)
+        wb.create_sheet("Cover")
+        wb.create_sheet("1.Test Summary")
+        wb.create_sheet("2.Traceability")
+        cons = wb.create_sheet("3.Consistency")
+        cons.cell(10, 3, "SwDS")
+        cons.cell(10, 4, "SwITS")
+        cons.cell(11, 2, 1)
+        cons.cell(11, 3, "SDS-001")
+        cons.cell(11, 6, "X")
+        cons.cell(11, 7, "Legacy exception note")
+        cons.cell(12, 2, 2)
+        cons.cell(12, 3, "SDS-002")
+        wb.create_sheet("4.Coverage")
+        wb.create_sheet("History")
+        buf = io.BytesIO()
+        wb.save(buf)
+
+        result = build_swit_coverage_report(
+            _make_swit_session(),
+            _make_swit_meta(),
+            buf.getvalue(),
+        )
+
+        assert result.ok
+        assert result.summary.get("consistency_sds_swits_compared") is True
+        out_wb = openpyxl.load_workbook(io.BytesIO(result.xlsx_bytes))
+        out_cons = out_wb["3.Consistency"]
+        assert out_cons.cell(11, 5).value == "O"
+        assert out_cons.cell(11, 6).value == "X"
+        assert out_cons.cell(11, 7).value == "Legacy exception note"
+        assert out_cons.cell(12, 6).value == "X"
+        assert out_cons.cell(12, 7).value in (None, "")
+        assert any("exception annotations preserved" in w for w in result.warnings)
+
     def test_consistency_uses_swits_unit_name_to_log_env_match(self):
         swits_map = {
             "SwITC_0101_01": SimpleNamespace(

@@ -47,6 +47,7 @@ _ENDPOINTS = [
     # SwUT (5)
     ("POST", "/api/swut/coverage/build", {"project_id": "X", "release_sw_version": "1.0", "test_date": "2024-01-01"}),
     ("POST", "/api/swut/sutr/build", {"project_id": "X", "release_sw_version": "1.0", "test_date": "2024-01-01"}),
+    ("POST", "/api/swut/swutcr/build", {"project_id": "X", "release_sw_version": "1.0", "test_date": "2024-01-01"}),
     ("POST", "/api/swut/consistency/check", {"coverage_path": "C:/x", "sutr_path": "C:/y"}),
     ("POST", "/api/swut/log-folder/preview", {"log_folder": "C:/x"}),
     ("POST", "/api/swut/browse", {"path": "C:/x", "pattern": "*"}),

@@ -725,8 +725,23 @@ def _write_coverage_sheet(
     # C8:C9 보존). HDPDM01/SwIT (spec_based=False)는 영향 없음.
     if spec_based:
         comp_col_idx = no_col + 1
+        file_col_idx = None
+        for _hr in range(max(1, header_row - 1), header_row + 2):
+            for _hc in range(1, min(ws.max_column + 1, 20)):
+                try:
+                    _hv = ws.cell(_hr, _hc).value
+                except (AttributeError, IndexError):
+                    continue
+                if isinstance(_hv, str) and _hv.strip().lower() == "file":
+                    file_col_idx = _hc
+                    break
+            if file_col_idx:
+                break
+        data_area_unmerge_cols = {comp_col_idx}
+        if file_col_idx:
+            data_area_unmerge_cols.add(file_col_idx)
         for rng in list(ws.merged_cells.ranges):
-            if (rng.min_col <= comp_col_idx <= rng.max_col
+            if (any(rng.min_col <= col <= rng.max_col for col in data_area_unmerge_cols)
                     and rng.min_row >= data_start):
                 try:
                     ws.unmerge_cells(str(rng))
@@ -739,6 +754,17 @@ def _write_coverage_sheet(
     spec_stmt_total = 0
     spec_branch_fail = 0
     spec_branch_total = 0
+    spec_stmt_exception_seq = 0
+    spec_branch_exception_seq = 0
+    spec_stmt_exception_base = 0
+    if spec_based and not is_swit_metric_layout:
+        for _fc_for_exception in function_rows:
+            _is_c_parser_only_for_exception = bool(
+                getattr(_fc_for_exception, "unit_id", "")
+                and _fc_for_exception.unit_id.startswith("SwUFn_C_")
+            )
+            if not _is_c_parser_only_for_exception and not _fc_for_exception.statement.passed:
+                spec_stmt_exception_base += 1
     spec_unmatched: list[str] = []
     spec_unmatched_count = 0
     last_data_row = data_start - 1
@@ -827,7 +853,10 @@ def _write_coverage_sheet(
                 if spec_based:
                     # C열 테두리 통일은 written 루프 종료 후 최종 패스에서 수행
                     # (라운드 97 — 루프 중간 복사가 후속 단계에서 리셋되는 문제 회피).
-                    force_write_cell(ws, r, comp_col, comp_name)
+                    force_write_cell(
+                        ws, r, comp_col,
+                        f'="SwCom_" & MID(D{r}, FIND("_", D{r}) + 1, 2)',
+                    )
                 else:
                     safe_write(ws, r, comp_col, comp_name)
 
@@ -894,12 +923,38 @@ def _write_coverage_sheet(
                     ("Pass" if fc.branch.passed else "Fail") if spec_based
                     else ("O" if fc.branch.passed else "X")
                 )
-                safe_write(ws, r, stmt_count_col, fc.statement.total)
-                safe_write(ws, r, stmt_count_col + 1, fc.statement.covered)
-                safe_write(ws, r, stmt_count_col + 2, stmt_mark)
-                safe_write(ws, r, branch_count_col, fc.branch.total)
-                safe_write(ws, r, branch_count_col + 1, fc.branch.covered)
-                safe_write(ws, r, branch_count_col + 2, branch_mark)
+                if spec_based:
+                    safe_write(ws, r, stmt_count_col, fc.statement.covered)
+                    safe_write(ws, r, stmt_count_col + 1, fc.statement.total)
+                    safe_write(ws, r, stmt_count_col + 2, f'=IF(F{r}=G{r}, "Pass", "Fail")')
+                    if not fc.statement.passed:
+                        spec_stmt_exception_seq += 1
+                        safe_write(
+                            ws, r, stmt_count_col + 3,
+                            f"UT-CVG-DV-{spec_stmt_exception_seq}",
+                        )
+                    safe_write(ws, r, branch_count_col, fc.branch.covered)
+                    safe_write(ws, r, branch_count_col + 1, fc.branch.total)
+                    safe_write(ws, r, branch_count_col + 2, f'=IF(J{r}=K{r}, "Pass", "Fail")')
+                    if not fc.branch.passed:
+                        spec_branch_exception_seq += 1
+                        safe_write(
+                            ws, r, branch_count_col + 3,
+                            f"UT-CVG-DV-{spec_stmt_exception_base + spec_branch_exception_seq}",
+                        )
+                    if (not fc.statement.passed) or (not fc.branch.passed):
+                        exception_note = (
+                            agg.get("coverage_exception_note")
+                            or f"({agg.get('project_id', '')}_DV_SwUTCV) Software Unit Test Coverage Result"
+                        )
+                        safe_write(ws, r, branch_count_col + 4, exception_note)
+                else:
+                    safe_write(ws, r, stmt_count_col, fc.statement.total)
+                    safe_write(ws, r, stmt_count_col + 1, fc.statement.covered)
+                    safe_write(ws, r, stmt_count_col + 2, stmt_mark)
+                    safe_write(ws, r, branch_count_col, fc.branch.total)
+                    safe_write(ws, r, branch_count_col + 1, fc.branch.covered)
+                    safe_write(ws, r, branch_count_col + 2, branch_mark)
                 # 라운드 92 — spec_based TOTALS 집계 (Pass/Fail count).
                 if spec_based:
                     spec_stmt_total += 1
@@ -939,7 +994,7 @@ def _write_coverage_sheet(
                     break
             ws._file_col_cached = _file_col_detected or (12 if is_swit_caller else 14)
         file_col = ws._file_col_cached
-        if fc.file:
+        if fc.file and not spec_based:
             from pathlib import Path as _PathLocal
             safe_write(ws, r, file_col, _PathLocal(fc.file).name)
 
@@ -1204,52 +1259,53 @@ def _write_spec_totals(
     # 라운드 93 fix — 레퍼런스는 H/L 열이 (Excel 캐시된) literal 값. openpyxl이 쓴
     # COUNTIF/SUM 수식은 캐시가 없어 파일 열기 전까지 공란("토탈결과 안 보임"). →
     # 데이터 행(H/L)에서 직접 Pass/Fail을 count해 **literal 값**을 stamp.
-    def _count(value_col: int) -> tuple[int, int]:
+    def _metric_counts(count_col: int, total_col: int) -> tuple[int, int]:
         n_fail = n_pass = 0
         for rr in range(data_start, last_data_row + 1):
-            v = ws.cell(rr, value_col).value
-            s = str(v).strip().lower() if v is not None else ""
-            if s == "fail":
-                n_fail += 1
-            elif s == "pass":
+            covered = ws.cell(rr, count_col).value
+            total = ws.cell(rr, total_col).value
+            if covered in (None, "") and total in (None, ""):
+                continue
+            if covered == total:
                 n_pass += 1
+            else:
+                n_fail += 1
         return n_fail, n_pass
 
-    stmt_fail, stmt_pass = _count(stmt_value_col)
-    br_fail, br_pass = _count(branch_value_col)
-    stmt_total = stmt_fail + stmt_pass
-    br_total = br_fail + br_pass
+    stmt_fail, stmt_pass = _metric_counts(stmt_label_col - 1, stmt_label_col)
+    br_fail, br_pass = _metric_counts(branch_label_col - 1, branch_label_col)
+    from openpyxl.utils import get_column_letter as _gcl_tot
+    stmt_value_letter = _gcl_tot(stmt_value_col)
+    branch_value_letter = _gcl_tot(branch_value_col)
+    no_letter = _gcl_tot(no_col)
 
     # D 'Total' 라벨 (Unit ID col, 첫 row)
     _set(row_fail, unit_id_col, "Total")
     # Fail / Pass / Total row — literal count
     _set(row_fail, stmt_label_col, "Fail")
-    _set(row_fail, stmt_value_col, stmt_fail)
+    _set(row_fail, stmt_value_col, f'=COUNTIF({stmt_value_letter}{data_start}:{stmt_value_letter}{last_data_row},"Fail")')
     _set(row_fail, branch_label_col, "Fail")
-    _set(row_fail, branch_value_col, br_fail)
+    _set(row_fail, branch_value_col, f'=COUNTIF({branch_value_letter}{data_start}:{branch_value_letter}{last_data_row},"Fail")')
     _set(row_pass, stmt_label_col, "Pass")
-    _set(row_pass, stmt_value_col, stmt_pass)
+    _set(row_pass, stmt_value_col, f'=COUNTIF({stmt_value_letter}{data_start}:{stmt_value_letter}{last_data_row},"Pass")')
     _set(row_pass, branch_label_col, "Pass")
-    _set(row_pass, branch_value_col, br_pass)
+    _set(row_pass, branch_value_col, f'=COUNTIF({branch_value_letter}{data_start}:{branch_value_letter}{last_data_row},"Pass")')
     _set(row_total, stmt_label_col, "Total")
-    _set(row_total, stmt_value_col, stmt_total)
-    _set(row_total, branch_label_col, "Total")
-    _set(row_total, branch_value_col, br_total)
+    _set(row_total, stmt_value_col, f"=SUM({stmt_value_letter}{row_fail}:{stmt_value_letter}{row_pass})")
+    _set(row_total, branch_label_col, "Total ")
+    _set(row_total, branch_value_col, f"=SUM({branch_value_letter}{row_fail}:{branch_value_letter}{row_pass})")
 
     # 상단 요약 r5(Statement)/r6(Branch) — literal: E=Total, F=Fail Count,
     # G=Exception(=Fail, 레퍼런스 패턴), H=Coverage 비율((Total-Fail+Exception)/Total).
     # 레퍼런스: Fail이 전부 deviation/exception으로 간주되어 H=1.0.
-    def _cov(total: int, fail: int) -> float:
-        return round((total - fail + fail) / total, 4) if total else 0.0
-
-    _set(5, 5, stmt_total)
-    _set(5, 6, stmt_fail)
+    _set(5, 5, f"='{getattr(ws, 'title', '4. Coverage')}'!{no_letter}{last_data_row}")
+    _set(5, 6, f"={stmt_value_letter}{row_fail}")
     _set(5, 7, stmt_fail)
-    _set(5, 8, _cov(stmt_total, stmt_fail))
-    _set(6, 5, br_total)
-    _set(6, 6, br_fail)
+    _set(5, 8, "=(E5-F5+G5)/E5")
+    _set(6, 5, f"={no_letter}{last_data_row}")
+    _set(6, 6, f"={branch_value_letter}{row_fail}")
     _set(6, 7, br_fail)
-    _set(6, 8, _cov(br_total, br_fail))
+    _set(6, 8, "=(E6-F6+G6)/E6")
 
     # 라운드 100 — TOTALS 3행 폰트 통일. _set은 value만 stamp → 양식 기본(11.0)
     # 잔존 (REF는 맑은 고딕 10.0). 정상 데이터행(data_start) name/size를 기준으로
@@ -1614,6 +1670,171 @@ def _collect_tc_to_function(session: SwUTSession) -> dict[str, str]:
             if m:
                 out[tc_name] = m.group(1)
     return out
+
+
+def _build_swuts_name_to_swufn_map(swuts_map: dict[str, Any] | None) -> dict[str, str]:
+    """Build Unit/Test Spec function-name -> SwUFn map from parsed SwUTS entries."""
+    if not swuts_map:
+        return {}
+    out: dict[str, str] = {}
+    for entry in swuts_map.values():
+        unit_name = str(getattr(entry, "unit_name", "") or "").strip()
+        function_id = str(getattr(entry, "function_id", "") or "").strip()
+        if unit_name and function_id.startswith("SwUFn_") and unit_name not in out:
+            out[unit_name] = function_id
+    return out
+
+
+def _extract_template_swufn_order(ws: Any) -> list[tuple[str, str]]:
+    """Return (SwUFn, function name) rows already present in a company Coverage sheet."""
+    if ws is None:
+        return []
+    rows: list[tuple[str, str]] = []
+    max_scan_col = min(getattr(ws, "max_column", 0) or 0, 12)
+    for row_idx in range(1, (getattr(ws, "max_row", 0) or 0) + 1):
+        for col_idx in range(1, max_scan_col + 1):
+            raw = ws.cell(row_idx, col_idx).value
+            fn_id = str(raw or "").strip()
+            if not re.fullmatch(r"SwUFn_\d{4}", fn_id):
+                continue
+            fn_name = str(ws.cell(row_idx, col_idx + 1).value or "").strip()
+            rows.append((fn_id, fn_name))
+            break
+    return rows if len(rows) >= 50 else []
+
+
+def _norm_template_function_key(value: str) -> str:
+    return re.sub(r"[^a-z0-9_]+", "", (value or "").strip().lower())
+
+
+def _classify_template_mapping_drift(
+    template_order: list[tuple[str, str]],
+    function_rows: list[Any],
+    name_to_swufn: dict[str, str],
+) -> dict[str, Any]:
+    """Classify populated-template mapping differences against current sources.
+
+    Reference files are formatting/template aids only.  When the same function
+    name has a different SwUFn ID in current SUDS/SwUTS data, record the drift
+    instead of copying the reference ID into the generated workbook.
+    """
+    template_by_name: dict[str, tuple[str, str]] = {}
+    for swufn_id, fn_name in template_order:
+        key = _norm_template_function_key(fn_name)
+        if key and key not in template_by_name:
+            template_by_name[key] = (swufn_id, fn_name)
+
+    current_by_name: dict[str, dict[str, Any]] = {}
+    for fc in function_rows:
+        name = str(getattr(fc, "name", "") or "").strip()
+        unit_id = str(getattr(fc, "unit_id", "") or "").strip()
+        key = _norm_template_function_key(name)
+        if not key:
+            continue
+        current_swufn = (
+            name_to_swufn.get(name)
+            or name_to_swufn.get(unit_id)
+            or (unit_id if unit_id.startswith("SwUFn_") else "")
+        )
+        entry = current_by_name.setdefault(key, {"name": name, "swufn_ids": set()})
+        if current_swufn:
+            entry["swufn_ids"].add(current_swufn)
+
+    missing_names = [
+        template_by_name[key][1]
+        for key in sorted(template_by_name)
+        if key not in current_by_name
+    ]
+    extra_names = [
+        current_by_name[key]["name"]
+        for key in sorted(current_by_name)
+        if key not in template_by_name
+    ]
+    id_drift: list[dict[str, str]] = []
+    for key in sorted(set(template_by_name) & set(current_by_name)):
+        template_swufn, fn_name = template_by_name[key]
+        current_ids = sorted(current_by_name[key]["swufn_ids"])
+        if current_ids and template_swufn not in current_ids:
+            id_drift.append({
+                "function_name": fn_name,
+                "template_swufn": template_swufn,
+                "current_swufn": ",".join(current_ids),
+            })
+
+    return {
+        "template_row_count": len(template_order),
+        "current_function_count": len(function_rows),
+        "missing_in_current_count": len(missing_names),
+        "extra_in_current_count": len(extra_names),
+        "swufn_id_drift_count": len(id_drift),
+        "missing_in_current": missing_names[:50],
+        "extra_in_current": extra_names[:50],
+        "swufn_id_drift": id_drift[:50],
+    }
+
+
+def _apply_template_swufn_order(wb: Workbook, agg: dict[str, Any], warnings: list[str]) -> None:
+    """Use a populated Coverage template's SwUFn order before writing dependent sheets."""
+    cov_ws = next((
+        wb[n] for n in wb.sheetnames
+        if "coverage" in n.lower()
+        and "traceability" not in n.lower()
+        and "consistency" not in n.lower()
+    ), None)
+    template_order = _extract_template_swufn_order(cov_ws)
+    function_rows = list(agg.get("function_rows") or [])
+    name_to_swufn: dict[str, str] = agg.get("function_name_to_swufn_from_suds") or {}
+    if template_order and function_rows:
+        drift = _classify_template_mapping_drift(template_order, function_rows, name_to_swufn)
+        agg["template_mapping_drift"] = drift
+        if (
+            drift["missing_in_current_count"]
+            or drift["extra_in_current_count"]
+            or drift["swufn_id_drift_count"]
+        ):
+            warnings.append(
+                "[template-drift] Coverage template vs current SUDS/SwUTS data: "
+                f"missing={drift['missing_in_current_count']}, "
+                f"extra={drift['extra_in_current_count']}, "
+                f"id_drift={drift['swufn_id_drift_count']}"
+            )
+    if not template_order or not function_rows or not name_to_swufn:
+        return
+
+    buckets: dict[str, list[Any]] = {}
+    for fc in function_rows:
+        keys = [
+            name_to_swufn.get(getattr(fc, "name", ""), ""),
+            name_to_swufn.get(getattr(fc, "unit_id", ""), ""),
+            getattr(fc, "unit_id", ""),
+            getattr(fc, "name", ""),
+        ]
+        for key in keys:
+            if key:
+                buckets.setdefault(str(key), []).append(fc)
+
+    ordered: list[Any] = []
+    used_ids: set[int] = set()
+    for swufn_id, fn_name in template_order:
+        selected = None
+        for key in (swufn_id, fn_name):
+            for candidate in buckets.get(key, []):
+                if id(candidate) not in used_ids:
+                    selected = candidate
+                    break
+            if selected is not None:
+                break
+        if selected is not None:
+            ordered.append(selected)
+            used_ids.add(id(selected))
+
+    ordered.extend(fc for fc in function_rows if id(fc) not in used_ids)
+    if len(ordered) == len(function_rows) and [id(fc) for fc in ordered] != [id(fc) for fc in function_rows]:
+        agg["function_rows"] = ordered
+        warnings.append(
+            "[template-order] Coverage template SwUFn row order applied "
+            f"({len(template_order)} template rows, {len(used_ids)} matched functions)."
+        )
 
 
 def _compute_self_consistency(
@@ -2671,6 +2892,7 @@ def build_coverage_report(
     meta: CoverageBuildMeta,
     template_bytes: bytes,
     swuds_function_ids: set[str] | None = None,
+    swuts_map: dict[str, Any] | None = None,
     hmr_html_bytes: bytes | None = None,
 ) -> CoverageBuildResult:
     """Coverage Report v3.01 xlsx 생성.
@@ -2681,6 +2903,9 @@ def build_coverage_report(
         template_bytes: 기존 v3.01 xlsx 파일 bytes (template).
         swuds_function_ids: 16차 — SwUDS 함수 ID set (옵션). 제공되면 2.Consistency에
             'SwUDS↔SwUTS 함수 ID 매핑' row 5 추가 + incomplete_sheets에서 partial 라벨 제거.
+        swuts_map: SwUTS xlsm parser result ({tc_id: SwUTSEntry}). KJPDS02 같은
+            spec-based 양식에서는 Unit/Test Spec의 unit_name→function_id 매핑을
+            SUDS reverse map보다 우선 사용해 Coverage/Traceability/Consistency ID를 정렬.
         hmr_html_bytes: 60차 F6-C — VectorCAST aggregate metrics report HTML
             (옵션, Jenkins_PDSM_UT/IT_metrics_report.html 양식). 제공 시 함수별
             Function Calls coverage를 추출하여 fc.function_calls_coverage 채움.
@@ -2730,6 +2955,15 @@ def build_coverage_report(
     sheet_names = wb.sheetnames
 
     agg = aggregate_session(session)
+    swuts_name_to_swufn = _build_swuts_name_to_swufn_map(swuts_map)
+    if swuts_name_to_swufn:
+        merged_name_to_swufn = dict(agg.get("function_name_to_swufn_from_suds") or {})
+        merged_name_to_swufn.update(swuts_name_to_swufn)
+        agg["function_name_to_swufn_from_suds"] = merged_name_to_swufn
+        warnings.append(
+            "[swuts-map] Unit/Test Spec unit_name->SwUFn mapping applied "
+            f"({len(swuts_name_to_swufn)} entries, priority over SUDS reverse map)"
+        )
 
     # 60차 F6-C — HMR HTML 제공 시 함수별 Function Calls coverage 채움.
     # VectorCAST aggregate metrics report (Jenkins_PDSM_UT/IT_metrics_report)
@@ -2788,6 +3022,15 @@ def build_coverage_report(
             # session.environments[].function_coverage는 unchanged (W2 격리).
             agg["function_rows"] = new_function_rows
 
+    _apply_template_swufn_order(wb, agg, warnings)
+    agg["project_id"] = meta.project_id
+    if meta.doc_filename_pattern:
+        _exception_filename = meta.doc_filename_pattern.format(
+            version=meta.release_sw_version,
+            date=short_date(meta.test_date),
+        )
+        agg["coverage_exception_note"] = _exception_filename.split("_v", 1)[0]
+
     # 30차 W21 + 31차 W29 + 라운드 84 T1801 + 85 T1903 + 86 T2001: unmapped fc list.
     asil_distribution, ids_by_asil, unmapped_fns = _compute_asil_distribution(
         agg.get("function_rows") or [],
@@ -2804,6 +3047,8 @@ def build_coverage_report(
         "passed": agg["passed"],
         "failed": agg["failed"],
         "function_rows": agg["function_count"],
+        "swuts_name_to_swufn_used": len(swuts_name_to_swufn),
+        "template_mapping_drift": agg.get("template_mapping_drift", {}),
         # 30차 W21 + 31차 W29: ASIL 등급 분포 + 등급별 함수 ID.
         "asil_distribution": asil_distribution,
         "asil_b_function_ids": ids_by_asil.get("B", []),

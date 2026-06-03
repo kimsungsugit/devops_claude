@@ -26,6 +26,7 @@ const DEFAULT_FORM = {
   // 51차 — Coverage / SUTR 양식 분리 (이전 단일 template_path)
   coverage_template_path: '',
   sutr_template_path: '',
+  swutcr_template_path: '',
   swuds_docx_path: '',
   // 60차 F6-A: SwUTS spec 파일 (xlsm/docx 허용). 제공 시 SUTR Test Log의
   // TC_ID/Description/Precondition/Test Method/Generation Method 컬럼에 spec stamp.
@@ -168,9 +169,14 @@ export default function SwUTBuildSection() {
     // 51차 — kind별 필수 template_path 분리. 둘 다 비면 config fallback 시도 (backend가 400 raise).
     const kindTemplate = kind === 'coverage'
       ? form.coverage_template_path
-      : form.sutr_template_path;
+      : kind === 'swutcr'
+        ? form.swutcr_template_path
+        : form.sutr_template_path;
     if (!form.log_folder && !kindTemplate) {
-      toast('warning', `log_folder 또는 ${kind === 'coverage' ? 'Coverage' : 'SUTR'} Template Path 중 하나는 필수`); return;
+      const templateLabel = kind === 'coverage' ? 'Coverage'
+        : kind === 'swutcr' ? 'SwUTCR'
+          : 'SUTR';
+      toast('warning', `log_folder 또는 ${templateLabel} Template Path 중 하나는 필수`); return;
     }
 
     const user = getUsername();
@@ -226,7 +232,8 @@ export default function SwUTBuildSection() {
       const blob = await res.blob();
       const cd = res.headers.get('Content-Disposition') || '';
       const m = cd.match(/filename\*=UTF-8''([^;]+)/) || cd.match(/filename="([^"]+)"/);
-      const filename = m ? decodeURIComponent(m[1]) : `swut_${kind}.xlsx`;
+      const filename = m ? decodeURIComponent(m[1])
+        : `swut_${kind}.${kind === 'coverage' ? 'xlsx' : 'xlsm'}`;
 
       if (!mountedRef.current) return;
       triggerDownload(blob, filename);
@@ -385,6 +392,24 @@ export default function SwUTBuildSection() {
           onClick={() => openPicker('sutr_template_path', '*.xlsm', 'SUTR Template 파일 선택')}
         >📂 Browse</button>
       </div>
+      <div className="swut-form-row swut-field-with-browse">
+        <Field
+          name="swutcr_template_path"
+          label="SwUTCR Template Path (xlsm)"
+          value={form.swutcr_template_path}
+          onChange={v => setField('swutcr_template_path', v)}
+          placeholder="U:\...\(XXXX_SwUTCR) Software Unit Test Comprehesive Result_v0.10_2XXXXX.xlsm"
+          hint="SwUTCR build only. Empty uses config/swut_meta.json swutcr_template"
+          fullWidth
+        />
+        <button
+          className="swut-browse-btn"
+          type="button"
+          disabled={!isAdmin}
+          title={isAdmin ? undefined : browseDisabledTitle}
+          onClick={() => openPicker('swutcr_template_path', '*.xlsm', 'SwUTCR Template file')}
+        >📂 Browse</button>
+      </div>
       {/* 52차 — config 자동 사용 정책. SwUDS / C Source는 config의 swuds_docx_path / c_source_root에 등록되면 자동 사용. 사용자 override 필요 시만 펼침. */}
       <details className="swut-advanced-section" style={{ marginTop: 12 }}>
         <summary style={{ cursor: 'pointer', padding: '8px 0', fontSize: '0.92em', color: 'var(--text-muted, #888)' }}>
@@ -480,6 +505,14 @@ export default function SwUTBuildSection() {
           onClick={() => buildXlsx('sutr')}
         >
           {building === 'sutr' ? '빌드 중...' : '📝 SUTR 빌드 (xlsm)'}
+        </button>
+        <button
+          className="btn-primary"
+          disabled={!!building || !isAdmin}
+          title={isAdmin ? undefined : browseDisabledTitle}
+          onClick={() => buildXlsx('swutcr')}
+        >
+          {building === 'swutcr' ? '빌드 중...' : '📚 SwUTCR 빌드 (xlsm)'}
         </button>
       </div>
 

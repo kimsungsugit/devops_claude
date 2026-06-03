@@ -803,6 +803,7 @@ def _extract_var_rows_between(anchor, end_anchor) -> dict[str, tuple[str, str]]:
     actual_result: dict[str, tuple[str, str]] = {}
     if anchor is None:
         return actual_result
+    name_by_level: dict[int, str] = {}
     end_line = getattr(end_anchor, "sourceline", None) if end_anchor else None
     for tr in anchor.find_all_next("tr", limit=2000):
         tr_line = getattr(tr, "sourceline", None)
@@ -815,17 +816,42 @@ def _extract_var_rows_between(anchor, end_anchor) -> dict[str, tuple[str, str]]:
             continue
         first_td = tds[0]
         td_classes = first_td.get("class") or []
-        if not any(isinstance(c, str) and re.match(r"^i\d+$", c) for c in td_classes):
+        level_match = next(
+            (
+                re.match(r"^i(\d+)$", c)
+                for c in td_classes
+                if isinstance(c, str) and re.match(r"^i\d+$", c)
+            ),
+            None,
+        )
+        if not level_match:
             continue
+        classlevel = int(level_match.group(1))
         # 'i0' (UNIT label) / 'i1' (Globals label) 등은 variable row 아님 — 값이 변수명만
         # 보유. 실제 variable row는 td 3+ 보유 + 값/match 컬럼 있음.
-        var_name = first_td.get_text(strip=True)
-        if not var_name or var_name in actual_result:
+        raw_name = first_td.get_text(strip=True)
+        if not raw_name:
             continue
         # 'UNIT:' / 'Globals:' / 'Locals:' 등 label row skip
-        if any(var_name.startswith(prefix) for prefix in (
+        if any(raw_name.startswith(prefix) for prefix in (
             "UNIT:", "Globals:", "Locals:", "Parameters:", "Return Value:",
         )):
+            if classlevel <= 1:
+                name_by_level.clear()
+            continue
+        name_by_level[classlevel] = raw_name
+        for stale_level in [level for level in name_by_level if level > classlevel]:
+            name_by_level.pop(stale_level, None)
+        var_name = ""
+        for level in sorted(name_by_level):
+            part = name_by_level[level]
+            if not var_name:
+                var_name = part
+            elif part.startswith("["):
+                var_name += part
+            else:
+                var_name += f".{part}"
+        if not var_name or var_name in actual_result:
             continue
         # 마지막 td class가 success-marker → actual == expected (match)
         last_td_classes = tds[-1].get("class") or []
@@ -843,6 +869,8 @@ def _extract_var_rows_between(anchor, end_anchor) -> dict[str, tuple[str, str]]:
             expected_val = tds[3].get_text(strip=True)
         else:
             expected_val = tds[3].get_text(strip=True) if len(tds) > 3 else actual_val
+        if not actual_val and not expected_val and not (is_match or is_fail):
+            continue
         actual_result[var_name] = (actual_val, expected_val)
     return actual_result
 

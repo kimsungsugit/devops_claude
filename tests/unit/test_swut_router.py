@@ -16,12 +16,12 @@ from pathlib import Path
 from unittest.mock import patch
 
 import openpyxl
-import pytest
 from fastapi.testclient import TestClient
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from backend.main import app  # noqa: E402
+from backend.schemas import SwUTBuildRequest  # noqa: E402
 from backend.services.swut_input_adapter import (  # noqa: E402
     EnvironmentData,
     ExecutionRow,
@@ -60,6 +60,31 @@ def _make_session() -> SwUTSession:
         function_coverage=[FunctionCoverage(unit_id="SwUFn_0001", name="X")],
     )
     return SwUTSession(environments=[env])
+
+
+def test_resolve_swut_log_folder_uses_request_then_config(monkeypatch):
+    from backend.routers import swut as swut_mod
+
+    monkeypatch.setattr(
+        swut_mod,
+        "_load_meta_from_config",
+        lambda _project_id: {"swut_log_folder": "U:/unit/01.Log"},
+    )
+
+    req_default = SwUTBuildRequest(
+        project_id="KJPDS02",
+        release_sw_version="1.01",
+        test_date="2025-12-05",
+    )
+    assert swut_mod._resolve_swut_log_folder(req_default) == "U:/unit/01.Log"
+
+    req_override = SwUTBuildRequest(
+        project_id="KJPDS02",
+        release_sw_version="1.01",
+        test_date="2025-12-05",
+        log_folder="C:/request/log",
+    )
+    assert swut_mod._resolve_swut_log_folder(req_override) == "C:/request/log"
 
 
 # ---------------------------------------------------------------------------
@@ -228,6 +253,30 @@ class TestInputSurface13:
         if "template_path" in captured:
             assert captured["template_path"] == "C:/sutr.xlsm"
             assert captured["kind"] == "sutr"
+
+    def test_swutcr_endpoint_uses_swutcr_template_path(self, monkeypatch):
+        """SwUTCR endpoint uses swutcr_template_path only."""
+        from backend.routers import swut as swut_mod
+        captured = {}
+
+        def _fake_read(template_path, project_id, kind):
+            captured["template_path"] = template_path
+            captured["kind"] = kind
+            raise RuntimeError("stop after capture")
+
+        monkeypatch.setattr(swut_mod, "_read_template_bytes", _fake_read)
+        body = self._base_body()
+        body["log_folder"] = "C:/fake/log"
+        body["coverage_template_path"] = "C:/coverage.xlsx"
+        body["sutr_template_path"] = "C:/sutr.xlsm"
+        body["swutcr_template_path"] = "C:/swutcr.xlsm"
+        client.post(
+            "/api/swut/swutcr/build", json=body,
+            headers={"X-User": "tester"},
+        )
+        if "template_path" in captured:
+            assert captured["template_path"] == "C:/swutcr.xlsm"
+            assert captured["kind"] == "swutcr"
 
     def test_w9_jenkins_build_number_negative_rejected(self):
         """W9: jenkins_build_number 음수 차단."""

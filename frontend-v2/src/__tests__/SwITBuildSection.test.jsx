@@ -98,6 +98,55 @@ describe('SwITBuildSection', () => {
     expect(input.value).toBe('ASIL B');
   });
 
+  it('includes SwIT template/spec/HMR/source override paths in POST body', async () => {
+    const mockBlob = new Blob([new Uint8Array([0x50, 0x4b])], {
+      type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    });
+    const fetchSpy = vi.spyOn(global, 'fetch').mockResolvedValue({
+      ok: true,
+      headers: new Headers({
+        'Content-Disposition': 'attachment; filename="switcv.xlsx"',
+        'X-SwIT-Summary': JSON.stringify({ environments: 1 }),
+        'X-SwIT-Warnings': JSON.stringify([]),
+      }),
+      blob: async () => mockBlob,
+    });
+
+    render(<SwITBuildSection />);
+    fireEvent.change(screen.getByLabelText(/Release SW Version/), {
+      target: { value: '2.02' },
+    });
+    fireEvent.change(screen.getByLabelText(/Log Folder/), {
+      target: { value: 'C:/fake/log' },
+    });
+    fireEvent.change(screen.getByLabelText(/Coverage Template Path/), {
+      target: { value: 'U:/template/switcv.xlsx' },
+    });
+    fireEvent.change(screen.getByLabelText(/SITR Template Path/), {
+      target: { value: 'U:/template/switr.xlsm' },
+    });
+    fireEvent.change(screen.getByLabelText(/SwITS Spec Path/), {
+      target: { value: 'U:/spec/swits.xlsm' },
+    });
+    fireEvent.change(screen.getByLabelText(/HMR HTML Path/), {
+      target: { value: 'U:/logs/Jenkins_PDSM_IT_metrics_report.html' },
+    });
+    fireEvent.change(screen.getByLabelText(/C Source Root/), {
+      target: { value: 'U:/src/PDS' },
+    });
+    fireEvent.click(screen.getByText(/Coverage Report 빌드/));
+
+    await waitFor(() => {
+      expect(fetchSpy).toHaveBeenCalled();
+    });
+    const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
+    expect(body.coverage_template_path).toBe('U:/template/switcv.xlsx');
+    expect(body.sitr_template_path).toBe('U:/template/switr.xlsm');
+    expect(body.swuts_docx_path).toBe('U:/spec/swits.xlsm');
+    expect(body.hmr_html_path).toBe('U:/logs/Jenkins_PDSM_IT_metrics_report.html');
+    expect(body.c_source_root).toBe('U:/src/PDS');
+  });
+
   it('Coverage build calls /api/swit/coverage/build with X-User and X-SwIT-Summary parsed', async () => {
     const mockBlob = new Blob([new Uint8Array([0x50, 0x4b])], {
       type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',

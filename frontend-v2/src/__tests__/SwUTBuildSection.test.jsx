@@ -261,6 +261,68 @@ describe('SwUTBuildSection', () => {
     expect(body.swuds_docx_path).toBe('U:/docs/SwUDS_v3.docx');
   });
 
+  it('includes SwUT template/spec/HMR/source override paths in POST body', async () => {
+    const fetchSpy = vi.spyOn(global, 'fetch').mockResolvedValue({
+      ok: true,
+      headers: new Headers({ 'Content-Disposition': 'attachment; filename="x.xlsx"' }),
+      blob: async () => new Blob([new Uint8Array([0x50, 0x4b, 0x03, 0x04])]),
+    });
+
+    render(<SwUTBuildSection />);
+    fireEvent.change(screen.getByLabelText(/Release SW Version/), { target: { value: '2.02' } });
+    fireEvent.change(screen.getByLabelText(/Log Folder/), { target: { value: 'C:/fake/log' } });
+    fireEvent.change(screen.getByLabelText(/Coverage Template Path/), {
+      target: { value: 'U:/template/swutcv.xlsx' },
+    });
+    fireEvent.change(screen.getByLabelText(/SUTR Template Path/), {
+      target: { value: 'U:/template/swutr.xlsm' },
+    });
+    fireEvent.change(screen.getByLabelText(/SwUTCR Template Path/), {
+      target: { value: 'U:/template/swutcr.xlsm' },
+    });
+    fireEvent.change(screen.getByLabelText(/SwUTS Spec Path/), {
+      target: { value: 'U:/spec/swuts.xlsm' },
+    });
+    fireEvent.change(screen.getByLabelText(/HMR HTML Path/), {
+      target: { value: 'U:/logs/Jenkins_PDSM_UT_metrics_report.html' },
+    });
+    fireEvent.change(screen.getByLabelText(/C Source Root/), {
+      target: { value: 'U:/src/PDS' },
+    });
+    fireEvent.click(screen.getByText(/Coverage Report 빌드/));
+
+    await waitFor(() => {
+      expect(fetchSpy).toHaveBeenCalled();
+    });
+    const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
+    expect(body.coverage_template_path).toBe('U:/template/swutcv.xlsx');
+    expect(body.sutr_template_path).toBe('U:/template/swutr.xlsm');
+    expect(body.swutcr_template_path).toBe('U:/template/swutcr.xlsm');
+    expect(body.swuts_docx_path).toBe('U:/spec/swuts.xlsm');
+    expect(body.hmr_html_path).toBe('U:/logs/Jenkins_PDSM_UT_metrics_report.html');
+    expect(body.c_source_root).toBe('U:/src/PDS');
+  });
+
+  it('SwUTCR build calls /api/swut/swutcr/build and downloads xlsm', async () => {
+    const fetchSpy = vi.spyOn(global, 'fetch').mockResolvedValue({
+      ok: true,
+      headers: new Headers({ 'Content-Disposition': 'attachment; filename="swutcr.xlsm"' }),
+      blob: async () => new Blob([new Uint8Array([0x50, 0x4b, 0x03, 0x04])]),
+    });
+
+    render(<SwUTBuildSection />);
+    fireEvent.change(screen.getByLabelText(/Release SW Version/), { target: { value: '2.02' } });
+    fireEvent.change(screen.getByLabelText(/Log Folder/), { target: { value: 'C:/fake/log' } });
+    fireEvent.click(screen.getByText(/SwUTCR 빌드/));
+
+    await waitFor(() => {
+      expect(fetchSpy).toHaveBeenCalled();
+    });
+    const [url, init] = fetchSpy.mock.calls[0];
+    expect(url).toContain('/api/swut/swutcr/build');
+    expect(init.headers['X-User']).toBe('tester');
+  });
+
   it('revokes object URL immediately on unmount (F5 — 13차)', async () => {
     vi.spyOn(global, 'fetch').mockResolvedValue({
       ok: true,
@@ -340,7 +402,7 @@ describe('SwUTBuildSection', () => {
     //                swuds_docx_path / swuts_docx_path [60차 F6-A] / hmr_html_path [60차 F6-C] /
     //                c_source_root [30차] / coverage_path / sutr_path)
     const browseButtons = screen.getAllByText(/📂 Browse/);
-    expect(browseButtons.length).toBe(9);
+    expect(browseButtons.length).toBe(10);
   });
 
   it('renders reviewer/approver/validation_date input fields (26차 W16)', () => {

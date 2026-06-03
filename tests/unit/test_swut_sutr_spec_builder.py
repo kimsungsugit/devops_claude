@@ -168,9 +168,20 @@ def test_apply_actual_result_style_mirrors_expected():
     act = ws.cell(data_row, COL_ACTUAL_START)
     assert act.border.left is not None and act.border.left.style == "thin"
     assert act.font.name == "Arial"
-    # Pass/Fail(266)·Log(268) border 적용.
+    # Pass/Fail(266)·Pass(267) border 적용 + 레퍼런스 폰트 통일.
     assert ws.cell(data_row, COL_PASS_FAIL).border.top.style == "thin"
-    assert ws.cell(data_row, COL_LOG_DATA).border.bottom.style == "thin"
+    assert ws.cell(data_row, COL_PASS_TOTAL).border.bottom.style == "thin"
+    assert ws.cell(data_row, COL_PASS_FAIL).font.name == "맑은 고딕"
+    assert ws.cell(data_row, COL_PASS_FAIL).font.sz == 10
+    assert ws.cell(data_row, COL_PASS_TOTAL).font.name == "맑은 고딕"
+    assert ws.cell(data_row, COL_PASS_TOTAL).font.sz == 10
+    # Log Data(JH)는 데이터 값을 비워 두되 폰트만 레퍼런스 기준으로 통일.
+    assert (
+        ws.cell(data_row, COL_LOG_DATA).border.bottom is None
+        or ws.cell(data_row, COL_LOG_DATA).border.bottom.style is None
+    )
+    assert ws.cell(data_row, COL_LOG_DATA).font.name == "맑은 고딕"
+    assert ws.cell(data_row, COL_LOG_DATA).font.sz == 10
     # 헤더 행은 미변경 (데이터 행만 대상).
     assert hdr_actual.border.left is None or hdr_actual.border.left.style is None
 
@@ -195,11 +206,20 @@ def test_build_sutr_from_spec_layout_matches_reference():
     assert LOG_SHEET_NAME in wb.sheetnames
     ws = wb[LOG_SHEET_NAME]
     # 헤더
+    assert ws.cell(1, 1).value == "Software Unit Test Log"
     assert ws.cell(3, COL_ACTUAL_START).value == "Actual Result"
     assert ws.cell(3, COL_PASS_FAIL).value == "Pass/Fail"
     assert ws.cell(3, COL_PASS_TOTAL).value == "Pass"
     assert ws.cell(3, COL_LOG_DATA).value == "Log Data"
     assert ws.cell(4, COL_ACTUAL_START).value == "Param 1"
+    assert ws.cell(4, COL_PASS_FAIL).value == "Unit"
+    assert ws.cell(4, COL_PASS_TOTAL).value == "Pass"
+    assert ws.cell(3, COL_PASS_FAIL).font.name == "맑은 고딕"
+    assert ws.cell(3, COL_PASS_FAIL).font.sz == 10
+    assert ws.cell(3, COL_PASS_FAIL).font.bold is True
+    assert ws.cell(4, COL_PASS_FAIL).font.name == "맑은 고딕"
+    assert ws.cell(4, COL_PASS_FAIL).font.sz == 10
+    assert ws.cell(4, COL_PASS_FAIL).font.bold is True
     # Input/Expected 보존
     assert ws.cell(6, 8).value == "0x0"     # iteration1 input
     assert ws.cell(6, 58).value == "0x1"    # iteration1 expected
@@ -213,6 +233,8 @@ def test_build_sutr_from_spec_layout_matches_reference():
     assert ws.cell(7, COL_PASS_FAIL).value == "Pass"
     # Total
     assert ws.cell(5, COL_PASS_TOTAL).value == "Pass"
+    # Log Data 데이터 셀에는 로그 경로를 쓰지 않음(레퍼런스 정합).
+    assert ws.cell(6, COL_LOG_DATA).value is None
 
 
 def test_build_sutr_unmatched_function_na():
@@ -227,6 +249,11 @@ def test_build_sutr_unmatched_function_na():
     ws = openpyxl.load_workbook(res.xlsm_io)[LOG_SHEET_NAME]
     assert ws.cell(6, COL_PASS_FAIL).value == "N/A"
     assert ws.cell(5, COL_PASS_TOTAL).value == "N/A"
+    merges = [
+        str(m) for m in ws.merged_cells.ranges
+        if m.min_col == COL_PASS_TOTAL and m.min_row == 5
+    ]
+    assert merges, "미매칭 함수도 JG Total 세로병합 필요"
 
 
 def test_build_sutr_fail_iteration():
@@ -240,6 +267,28 @@ def test_build_sutr_fail_iteration():
     assert ws.cell(6, COL_PASS_FAIL).value == "Pass"
     assert ws.cell(7, COL_PASS_FAIL).value == "Fail"
     assert ws.cell(5, COL_PASS_TOTAL).value == "Fail"  # 하나라도 Fail
+
+
+def test_build_sutr_uses_spec_iteration_number_when_rows_have_gap():
+    """G열 iteration 번호가 비어도 해당 SwUFn suffix 결과를 매칭한다."""
+    spec = _make_spec_bytes([
+        ("SwUTC_0101", "main", [("0x0", "0x1"), ("0x2", "0x3")]),
+    ])
+    wb = openpyxl.load_workbook(io.BytesIO(spec), keep_vba=True)
+    ws = wb["2.SW Unit Test Spec"]
+    ws.cell(7, 7).value = 3
+    buf = io.BytesIO()
+    wb.save(buf)
+    sess = _make_session({"SwUFn_0101": [True, None, True]})
+
+    res = build_sutr_from_spec(sess, _meta(), buf.getvalue(), function_asil_map={})
+    out = openpyxl.load_workbook(res.xlsm_io, keep_vba=True)
+    log = out[LOG_SHEET_NAME]
+
+    assert log.cell(6, COL_PASS_FAIL).value == "Pass"
+    assert log.cell(7, COL_PASS_FAIL).value == "Pass"
+    assert log.cell(7, COL_ACTUAL_START).value == "0x3"
+    assert log.cell(5, COL_PASS_TOTAL).value == "Pass"
 
 
 def test_build_sutr_total_vertical_merge():
@@ -479,4 +528,3 @@ def test_r91_fallback_when_no_template():
     assert res.ok
     assert res.summary["builder"] == "spec-based-r91"
     assert any("표준 SUTR 템플릿 미제공" in w for w in res.warnings)
-

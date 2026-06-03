@@ -176,14 +176,67 @@ def _swit_value(value: Any) -> str:
     return "" if value is None else str(value)
 
 
-def _swit_var_names(env: Any) -> tuple[list[str], list[str], list[str]]:
+def _swit_numeric_value(value: str) -> int | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return int(text, 0)
+    except ValueError:
+        return None
+
+
+def _swit_missing_value(*, reference_layout: bool) -> str:
+    return "N/A" if reference_layout else ""
+
+
+def _swit_lookup_value(
+    data: dict[str, Any],
+    name: str,
+    *,
+    reference_layout: bool,
+) -> str:
+    if name not in data:
+        return _swit_missing_value(reference_layout=reference_layout)
+    value = _swit_value(data.get(name))
+    if value == "":
+        return _swit_missing_value(reference_layout=reference_layout)
+    return value
+
+
+def _swit_actual_value(
+    actual: dict[str, Any],
+    expected: dict[str, Any],
+    name: str,
+    *,
+    reference_layout: bool,
+) -> str:
+    if name not in actual:
+        return _swit_missing_value(reference_layout=reference_layout)
+    value = _swit_value(actual.get(name))
+    if value == "":
+        return _swit_missing_value(reference_layout=reference_layout)
+    expected_value = _swit_value(expected.get(name, ""))
+    if reference_layout and expected_value:
+        actual_num = _swit_numeric_value(value)
+        expected_num = _swit_numeric_value(expected_value)
+        if actual_num is not None and actual_num == expected_num:
+            return expected_value.strip()
+    return value
+
+
+def _swit_var_names(
+    env: Any,
+    tc_names: list[str] | None = None,
+) -> tuple[list[str], list[str], list[str]]:
     input_names: list[str] = []
     expected_names: list[str] = []
     actual_names: list[str] = []
     seen_in: set[str] = set()
     seen_exp: set[str] = set()
     seen_act: set[str] = set()
-    for tc_name in sorted((getattr(env, "test_cases", {}) or {}).keys()):
+    selected_tc_names = tc_names or sorted((getattr(env, "test_cases", {}) or {}).keys())
+    for tc_name in selected_tc_names:
         items = env.test_cases.get(tc_name) or []
         item = items[0] if items else None
         if item is not None:
@@ -210,6 +263,30 @@ def _swit_var_names(env: Any) -> tuple[list[str], list[str], list[str]]:
     return input_names, expected_names, actual_names
 
 
+def _swit_norm_description(value: str) -> str:
+    return re.sub(r"\s+", " ", (value or "")).strip().lower()
+
+
+def _swit_tc_names_for_block(env: Any, block_description: str) -> list[str]:
+    """Return TC names in an env that belong to one SwITS block description."""
+    tc_map = getattr(env, "test_cases", {}) or {}
+    all_tc_names = sorted(tc_map.keys())
+    desc_key = _swit_norm_description(block_description)
+    if not desc_key:
+        return all_tc_names
+
+    matched: list[str] = []
+    for tc_name in all_tc_names:
+        items = tc_map.get(tc_name) or []
+        item = items[0] if items else None
+        item_desc = _swit_norm_description(getattr(item, "description", "") if item else "")
+        if not item_desc:
+            continue
+        if item_desc == desc_key or item_desc.startswith(desc_key) or desc_key.startswith(item_desc):
+            matched.append(tc_name)
+    return matched or all_tc_names
+
+
 def _swit_tc_id_from_env(env: Any) -> str:
     env_name = getattr(env, "env_name", "") or ""
     match = re.search(r"SwUFn_(\d+(?:_\d+)?)", env_name, flags=re.IGNORECASE)
@@ -218,9 +295,25 @@ def _swit_tc_id_from_env(env: Any) -> str:
     return env_name or "SwITC_UNKNOWN"
 
 
+def _merge_swit_block_columns(ws: Any, start_row: int, end_row: int, columns: list[int]) -> None:
+    if end_row <= start_row:
+        return
+    existing_ranges = {str(rng) for rng in ws.merged_cells.ranges}
+    for col_idx in sorted({col for col in columns if col and col > 0}):
+        range_ref = (
+            f"{ws.cell(start_row, col_idx).coordinate}:"
+            f"{ws.cell(end_row, col_idx).coordinate}"
+        )
+        if range_ref in existing_ranges:
+            continue
+        ws.merge_cells(range_ref)
+
+
 def _build_swit_test_log_blocks(
     session: SwUTSession,
     swits_map: dict[str, Any] | None,
+    *,
+    split_entries: bool = False,
 ) -> list[dict[str, Any]]:
     env_by_key = {
         _norm_swit_key(getattr(env, "env_name", "") or ""): env
@@ -229,17 +322,25 @@ def _build_swit_test_log_blocks(
     used_env_keys: set[str] = set()
     blocks: list[dict[str, Any]] = []
     missing_spec_blocks: list[dict[str, Any]] = []
-    grouped_entries: dict[str, dict[str, Any]] = {}
 
     for tc_id, entry in (swits_map or {}).items():
         unit_key = _norm_swit_key(getattr(entry, "unit_name", "") or "")
         matched_key, env = _find_swit_env_match(unit_key, env_by_key)
         if env is not None:
             used_env_keys.add(matched_key or unit_key)
-            group = grouped_entries.setdefault(
-                matched_key or unit_key, {"env": env, "entries": []},
-            )
-            group["entries"].append((tc_id, entry))
+            blocks.append({
+                "tc_id": getattr(entry, "tc_id", "") or tc_id,
+                "description": (
+                    getattr(entry, "description", "")
+                    or getattr(entry, "unit_name", "")
+                    or ""
+                ),
+                "method": _swit_test_method(entry),
+                "generation_method": _swit_generation_method(entry),
+                "precondition": getattr(entry, "precondition", "") or "",
+                "env": env,
+                "note": "",
+            })
             continue
         missing_spec_blocks.append({
             "tc_id": getattr(entry, "tc_id", "") or tc_id,
@@ -251,35 +352,39 @@ def _build_swit_test_log_blocks(
             "note": "SwITS spec entry - VectorCAST log missing",
         })
 
-    for group in grouped_entries.values():
-        entries = group["entries"]
-        tc_ids = [getattr(entry, "tc_id", "") or tc_id for tc_id, entry in entries]
-        descriptions = list(dict.fromkeys(
-            (getattr(entry, "description", "") or getattr(entry, "unit_name", "") or "")
-            for _tc_id, entry in entries
-            if (getattr(entry, "description", "") or getattr(entry, "unit_name", "") or "")
-        ))
-        methods = list(dict.fromkeys(_swit_test_method(entry) for _tc_id, entry in entries))
-        generation_methods = list(dict.fromkeys(
-            _swit_generation_method(entry) for _tc_id, entry in entries
-        ))
-        preconditions = list(dict.fromkeys(
-            getattr(entry, "precondition", "") or ""
-            for _tc_id, entry in entries
-            if getattr(entry, "precondition", "") or ""
-        ))
-        description = descriptions[0] if descriptions else ""
-        if len(tc_ids) > 1:
-            description = f"{description}\nGrouped SwITS: {', '.join(tc_ids)}"
-        blocks.append({
-            "tc_id": ", ".join(tc_ids),
-            "description": description,
-            "method": ", ".join(methods),
-            "generation_method": ", ".join(generation_methods),
-            "precondition": "\n".join(preconditions),
-            "env": group["env"],
-            "note": "",
-        })
+    if not split_entries and blocks:
+        grouped_blocks: dict[str, dict[str, Any]] = {}
+        for block in blocks:
+            env = block["env"]
+            env_key = _norm_swit_key(getattr(env, "env_name", "") or "")
+            group = grouped_blocks.setdefault(env_key, {"env": env, "blocks": []})
+            group["blocks"].append(block)
+        blocks = []
+        for group in grouped_blocks.values():
+            group_blocks = group["blocks"]
+            tc_ids = [b["tc_id"] for b in group_blocks]
+            descriptions = list(dict.fromkeys(
+                b["description"] for b in group_blocks if b["description"]
+            ))
+            methods = list(dict.fromkeys(b["method"] for b in group_blocks if b["method"]))
+            generation_methods = list(dict.fromkeys(
+                b["generation_method"] for b in group_blocks if b["generation_method"]
+            ))
+            preconditions = list(dict.fromkeys(
+                b["precondition"] for b in group_blocks if b["precondition"]
+            ))
+            description = descriptions[0] if descriptions else ""
+            if len(tc_ids) > 1:
+                description = f"{description}\nGrouped SwITS: {', '.join(tc_ids)}"
+            blocks.append({
+                "tc_id": ", ".join(tc_ids),
+                "description": description,
+                "method": ", ".join(methods),
+                "generation_method": ", ".join(generation_methods),
+                "precondition": "\n".join(preconditions),
+                "env": group["env"],
+                "note": "",
+            })
 
     blocks.extend(missing_spec_blocks)
 
@@ -319,8 +424,36 @@ def _write_swit_test_log(
         return 0, 0
 
     start_row = pos[0] + 1
-    blocks = _build_swit_test_log_blocks(session, swits_map)
-    rows_needed = sum(1 + len((getattr(b["env"], "test_cases", {}) or {})) for b in blocks)
+    is_reference_swit_log = (
+        (ws.max_column or 0) >= 300
+        and
+        str(ws.cell(4, 6).value or "").strip().lower() == "tc_id"
+        and str(ws.cell(4, 10).value or "").strip().lower() == "inpt[0]"
+    )
+    blocks = _build_swit_test_log_blocks(
+        session, swits_map, split_entries=is_reference_swit_log,
+    )
+    reference_slots: list[tuple[int, int]] = []
+    if is_reference_swit_log:
+        for merged_range in sorted(ws.merged_cells.ranges, key=lambda x: (x.min_row, x.min_col)):
+            if (
+                merged_range.min_col == 2
+                and merged_range.max_col == 2
+                and merged_range.min_row >= start_row
+            ):
+                reference_slots.append((merged_range.min_row, merged_range.max_row))
+    if is_reference_swit_log and reference_slots and len(blocks) > len(reference_slots):
+        if out_warnings is not None:
+            out_warnings.append(
+                "[swit-test-log] reference template slot overflow: "
+                f"blocks={len(blocks)}, slots={len(reference_slots)} — "
+                "extra blocks skipped to preserve footer/template layout",
+            )
+        blocks = blocks[:len(reference_slots)]
+    if is_reference_swit_log and reference_slots:
+        rows_needed = max(end for _start, end in reference_slots) - start_row + 1
+    else:
+        rows_needed = sum(1 + len((getattr(b["env"], "test_cases", {}) or {})) for b in blocks)
     if rows_needed <= 0:
         return 0, 0
 
@@ -351,30 +484,34 @@ def _write_swit_test_log(
         except Exception:  # noqa: BLE001
             pass
 
-    for merged_range in list(ws.merged_cells.ranges):
-        if (
-            merged_range.max_row >= start_row
-            and merged_range.min_row <= min(ws.max_row, start_row + rows_needed + 20)
-            and merged_range.max_col >= 1
-            and merged_range.min_col <= 40
-        ):
-            try:
-                ws.unmerge_cells(str(merged_range))
-            except ValueError:
-                pass
-
-    is_reference_swit_log = (
-        (ws.max_column or 0) >= 300
-        and
-        str(ws.cell(4, 6).value or "").strip().lower() == "tc_id"
-        and str(ws.cell(4, 10).value or "").strip().lower() == "inpt[0]"
-    )
     is_kjpds_swit_log = (
         str(ws.cell(5, 8).value or "").strip().lower() == "input"
         and str(ws.cell(5, 18).value or "").strip().lower() == "expected result"
         and str(ws.cell(5, 28).value or "").strip().lower() == "actual result"
     )
+
+    if not is_reference_swit_log:
+        for merged_range in list(ws.merged_cells.ranges):
+            if (
+                merged_range.max_row >= start_row
+                and merged_range.min_row <= min(ws.max_row, start_row + rows_needed + 20)
+                and merged_range.max_col >= 1
+                and merged_range.min_col <= 40
+            ):
+                try:
+                    ws.unmerge_cells(str(merged_range))
+                except ValueError:
+                    pass
     clear_end_col = 378 if is_reference_swit_log else 40
+    preserved_reference_values: dict[tuple[int, int], Any] = {}
+    if is_reference_swit_log:
+        snapshot_end_row = min(ws.max_row, start_row + rows_needed + 20)
+        snapshot_end_col = min(ws.max_column or clear_end_col, clear_end_col)
+        for snap_row in range(start_row, snapshot_end_row + 1):
+            for snap_col in range(1, snapshot_end_col + 1):
+                snap_value = ws.cell(snap_row, snap_col).value
+                if snap_value not in (None, ""):
+                    preserved_reference_values[(snap_row, snap_col)] = snap_value
     clear_data_range(
         ws,
         start_row=start_row,
@@ -444,20 +581,66 @@ def _write_swit_test_log(
         expected_max = 10
         actual_max = 10
 
+    preserved_reference_conflicts = 0
+
+    def _write_reference_guarded(
+        row: int,
+        col: int,
+        value: Any,
+        *,
+        preserve_reference: bool = False,
+    ) -> None:
+        nonlocal preserved_reference_conflicts
+        if col <= 0:
+            return
+        if preserve_reference and is_reference_swit_log:
+            template_value = preserved_reference_values.get((row, col))
+            if (
+                template_value not in (None, "")
+                and value not in (None, "")
+                and str(template_value) != str(value)
+            ):
+                safe_write(ws, row, col, template_value)
+                preserved_reference_conflicts += 1
+                return
+        safe_write(ws, row, col, value)
+
     row_idx = start_row
     block_count = 0
     iteration_count = 0
+    reference_env_used: dict[str, set[str]] = {}
     for block in blocks:
         env = block["env"]
         input_names: list[str] = []
         expected_names: list[str] = []
         actual_names: list[str] = []
         tc_names: list[str] = []
+        slot_end_row: int | None = None
+        if is_reference_swit_log and block_count < len(reference_slots):
+            row_idx, slot_end_row = reference_slots[block_count]
         if env is not None:
-            input_names, expected_names, actual_names = _swit_var_names(env)
-            tc_names = sorted((getattr(env, "test_cases", {}) or {}).keys())
+            if is_reference_swit_log and slot_end_row is not None:
+                env_key = _norm_swit_key(getattr(env, "env_name", "") or "")
+                all_tc_names = sorted((getattr(env, "test_cases", {}) or {}).keys())
+                used_tc_names = reference_env_used.setdefault(env_key, set())
+                slot_count = max(0, slot_end_row - row_idx)
+                matched_tc_names = [
+                    name for name in _swit_tc_names_for_block(env, block["description"])
+                    if name not in used_tc_names
+                ]
+                fallback_tc_names = [
+                    name for name in all_tc_names
+                    if name not in used_tc_names and name not in matched_tc_names
+                ]
+                tc_names = (matched_tc_names + fallback_tc_names)[:slot_count]
+                used_tc_names.update(tc_names)
+            else:
+                tc_names = sorted((getattr(env, "test_cases", {}) or {}).keys())
+            input_names, expected_names, actual_names = _swit_var_names(env, tc_names)
         input_names = input_names[:input_max]
         expected_names = expected_names[:expected_max]
+        if is_reference_swit_log:
+            actual_names = list(expected_names)
         actual_names = actual_names[:actual_max]
 
         block_no = str(block_count + 1) if is_reference_swit_log else block_count + 1
@@ -475,11 +658,20 @@ def _write_swit_test_log(
         if precondition_col > 0:
             safe_write(ws, row_idx, precondition_col, block["precondition"])
         for offset, name in enumerate(input_names):
-            safe_write(ws, row_idx, input_col + offset, name)
+            _write_reference_guarded(
+                row_idx, input_col + offset, name,
+                preserve_reference=is_reference_swit_log,
+            )
         for offset, name in enumerate(expected_names):
-            safe_write(ws, row_idx, expected_col + offset, name)
+            _write_reference_guarded(
+                row_idx, expected_col + offset, name,
+                preserve_reference=is_reference_swit_log,
+            )
         for offset, name in enumerate(actual_names):
-            safe_write(ws, row_idx, actual_col + offset, name)
+            _write_reference_guarded(
+                row_idx, actual_col + offset, name,
+                preserve_reference=is_reference_swit_log,
+            )
 
         total_result = _swit_env_result(env) if env is not None else "N/A"
         if is_reference_swit_log and unit_result_col > 0:
@@ -503,34 +695,108 @@ def _write_swit_test_log(
                 actual = getattr(result_item, "actual_result", {}) or {} if result_item else {}
             safe_write(ws, iter_row, iter_index_col, iter_idx)
             if is_reference_swit_log:
-                if no_col > 0:
-                    safe_write(ws, iter_row, no_col, block_no)
-                if env_col > 0:
-                    safe_write(ws, iter_row, env_col, str(tc_name).split(".", 1)[0])
                 iter_description = (
                     getattr(item, "description", "")
                     or block["description"]
                     or tc_name
                 )
+                if iter_description.startswith("Interface :"):
+                    iter_description = f"                {iter_description}"
                 safe_write(ws, iter_row, iter_tc_col, iter_description)
             else:
                 safe_write(ws, iter_row, iter_tc_col, tc_name)
             input_data = getattr(item, "input_data", {}) or {} if item else {}
             expected_data = getattr(item, "expected_result", {}) or {} if item else {}
             for offset, name in enumerate(input_names):
-                safe_write(ws, iter_row, input_col + offset, _swit_value(input_data.get(name, "")))
+                _write_reference_guarded(
+                    iter_row,
+                    input_col + offset,
+                    _swit_lookup_value(
+                        input_data, name, reference_layout=is_reference_swit_log,
+                    ),
+                    preserve_reference=is_reference_swit_log,
+                )
             for offset, name in enumerate(expected_names):
-                safe_write(ws, iter_row, expected_col + offset, _swit_value(expected_data.get(name, "")))
+                _write_reference_guarded(
+                    iter_row,
+                    expected_col + offset,
+                    _swit_lookup_value(
+                        expected_data, name, reference_layout=is_reference_swit_log,
+                    ),
+                    preserve_reference=is_reference_swit_log,
+                )
             for offset, name in enumerate(actual_names):
-                safe_write(ws, iter_row, actual_col + offset, _swit_value(actual.get(name, "")))
+                _write_reference_guarded(
+                    iter_row,
+                    actual_col + offset,
+                    _swit_actual_value(
+                        actual, expected_data, name,
+                        reference_layout=is_reference_swit_log,
+                    ),
+                    preserve_reference=is_reference_swit_log,
+                )
             iter_result = "Pass" if result and getattr(result, "passed", False) else ("Fail" if result else "N/A")
             safe_write(ws, iter_row, unit_result_col, iter_result)
             iteration_count += 1
 
-        row_idx += 1 + len(tc_names)
+        if not is_reference_swit_log and tc_names:
+            per_iteration_cols = {
+                iter_index_col,
+                iter_tc_col,
+                unit_result_col,
+                *range(input_col, input_col + input_max),
+                *range(expected_col, expected_col + expected_max),
+                *range(actual_col, actual_col + actual_max),
+            }
+            merge_cols = [
+                col for col in (
+                    no_col,
+                    env_col,
+                    tc_id_col,
+                    desc_col,
+                    method_col,
+                    generation_col,
+                    precondition_col,
+                    total_result_col,
+                    log_data_col,
+                )
+                if col and col not in per_iteration_cols
+            ]
+            _merge_swit_block_columns(ws, row_idx, row_idx + len(tc_names), merge_cols)
+
+        if is_reference_swit_log and slot_end_row is not None:
+            row_idx = slot_end_row + 1
+        else:
+            row_idx += 1 + len(tc_names)
         block_count += 1
 
+    restored_reference_parameters = 0
+    if is_reference_swit_log and preserved_reference_values:
+        parameter_columns = (
+            set(range(input_col, input_col + input_max))
+            | set(range(expected_col, expected_col + expected_max))
+            | set(range(actual_col, actual_col + actual_max))
+        )
+        for (ref_row, ref_col), template_value in preserved_reference_values.items():
+            if ref_col not in parameter_columns:
+                continue
+            if ws.cell(ref_row, ref_col).value in (None, ""):
+                safe_write(ws, ref_row, ref_col, template_value)
+                restored_reference_parameters += 1
+
     if out_warnings is not None:
+        if preserved_reference_conflicts:
+            out_warnings.append(
+                "[swit-test-log] reference template parameter cells preserved on "
+                f"{preserved_reference_conflicts} parser conflicts "
+                "(duplicate variable-name ambiguity guard)"
+            )
+        if restored_reference_parameters:
+            out_warnings.append(
+                "[swit-test-log] reference template parameter cells restored on "
+                f"{restored_reference_parameters} blank parser slots "
+                "(wide template slot guard)"
+            )
         out_warnings.append(
             f"[swit-test-log] blocks={block_count}, iteration_rows={iteration_count}, "
             f"swits_entries={len(swits_map or {})}, log_envs={len(session.environments)}"
