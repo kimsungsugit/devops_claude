@@ -45,6 +45,11 @@ class TestSynthetic:
         assert top.basenames == ["lin_cfg.c", "lin_cfg.c"]
         assert top.start_lines == [263, 481]
 
+    def test_total_duplicated_locations(self):
+        # W3: 3블록 × 각 2위치 = 6 (line 합 211 과 구분되는 보조 지표)
+        assert self.r.total_duplicated_locations == 6
+        assert self.r.total_duplicated_lines == 211
+
     def test_mixed_path_separators(self):
         # 마지막 블록은 backslash + forward slash 혼합 경로
         last = self.r.blocks_sorted()[-1]
@@ -63,6 +68,15 @@ class TestEdge:
         r = parse_pmd_cpd(txt)
         assert r.result == "Pass"
         assert r.fail_count == 0
+
+    def test_plural_lines_matches(self):
+        # W2: 'lines'(복수형) 변종도 매칭 (silent 과소집계 방지)
+        txt = ("Found a 60 lines (200 tokens) duplication in the following files:\n"
+               "Starting at line 1 of a.c\nStarting at line 9 of b.c\n")
+        r = parse_pmd_cpd(txt)
+        assert r.total_blocks == 1
+        assert r.blocks[0].lines == 60
+        assert r.result == "Fail"  # 60 >= 50
 
 
 _REAL = os.path.join(

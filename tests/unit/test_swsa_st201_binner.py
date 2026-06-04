@@ -79,6 +79,22 @@ class TestBandAssignment:
         m = bin_metric_functions(fns)["ST201"]
         assert m.bands[0].count == 1  # v_g=5 만 계수, 'N/A' 는 skip
 
+    def test_unbinned_tracked(self):
+        # C3: 결측 metric 함수가 unbinned 로 집계되어 silent Pass 오기재 방지
+        fns = [_FakeFn(v_g=5), _FakeFn()]
+        fns[1]._v[MatrixItem.V_G] = ""  # 결측
+        m = bin_metric_functions(fns)["ST201"]
+        assert m.unbinned_count == 1
+        assert m.binned_count == 1
+        assert m.total_functions == 2
+
+    def test_negative_value_unbinned(self):
+        # I3: 음수 HIS metric 은 비정상 → Pass 밴드에 들어가지 않고 unbinned
+        fns = [_FakeFn(v_g=-3)]
+        m = bin_metric_functions(fns)["ST201"]
+        assert m.bands[0].count == 0
+        assert m.unbinned_count == 1
+
 
 class TestParse:
     def test_missing_file(self):

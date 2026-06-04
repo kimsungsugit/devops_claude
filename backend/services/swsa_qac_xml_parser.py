@@ -136,6 +136,9 @@ class QacXmlResult:
     source_files_active: int = 0
     groups: Dict[str, QacRuleGroup] = field(default_factory=dict)
     parse_warnings: List[str] = field(default_factory=list)
+    # C1/C2: 구조적 추출 실패 신호. True 면 '위반 0건'이 아니라 '파싱/추출 실패' —
+    # 호출자(aggregator)는 0 stamp 대신 노란 '사용자 입력 필요' 처리해야 한다.
+    extraction_failed: bool = False
 
     def group(self, name: str) -> Optional[QacRuleGroup]:
         return self.groups.get(name)
@@ -150,13 +153,22 @@ class QacXmlResult:
 
 
 def _load_root(source: Union[str, bytes, Path]) -> ET.Element:
+    """XML 로드. 빈/손상 입력은 ValueError/ET.ParseError, 미존재 경로는 FileNotFoundError."""
     if isinstance(source, (bytes, bytearray)):
+        if not bytes(source).strip():
+            raise ValueError("QAC xml: 빈 입력(bytes)")
         return ET.parse(io.BytesIO(bytes(source))).getroot()
-    if isinstance(source, str) and source.lstrip().startswith("<"):
-        return ET.fromstring(source)
+    if isinstance(source, str):
+        if not source.strip():
+            raise ValueError("QAC xml: 빈 문자열 입력")
+        if source.lstrip().startswith("<"):
+            return ET.fromstring(source)
     p = Path(source)
     if not p.exists():
         raise FileNotFoundError(f"QAC xml not found: {source!r}")
+    if p.is_dir():
+        # 빈 문자열이 Path('.')→디렉토리로 빠지는 혼란 방지
+        raise FileNotFoundError(f"QAC xml is a directory: {source!r}")
     return ET.parse(p).getroot()
 
 
@@ -184,23 +196,32 @@ def parse_qac_results_xml(source: Union[str, bytes, Path]) -> QacXmlResult:
         source: 파일 경로(str/Path), raw bytes, 또는 XML 문자열.
 
     Returns:
-        QacXmlResult. 부분 실패는 parse_warnings 누적 (silent skip 차단).
+        QacXmlResult. 손상/빈 XML 은 extraction_failed=True + parse_warnings 로
+        graceful 반환 (silent skip 차단). 미존재 경로만 FileNotFoundError raise.
     """
-    root = _load_root(source)
-    result = QacXmlResult(
-        helix_qac_version=root.get("helix_qac_version", ""),
-        helix_qac_build=root.get("helix_qac_build", ""),
-        project_path=root.get("projectpath", ""),
-        project_config=root.get("projectconfig", ""),
-        timestamp=root.get("timestamp", ""),
-    )
+    result = QacXmlResult()
+    try:
+        root = _load_root(source)
+    except (ET.ParseError, ValueError) as exc:
+        # 손상/빈 XML 은 부분 데이터 손실 — 빌드 전체 크래시 대신 graceful 신호
+        result.parse_warnings.append(f"XML 파싱 실패(손상/빈 입력 추정): {exc}")
+        result.extraction_failed = True
+        return result
+    result.helix_qac_version = root.get("helix_qac_version", "")
+    result.helix_qac_build = root.get("helix_qac_build", "")
+    result.project_path = root.get("projectpath", "")
+    result.project_config = root.get("projectconfig", "")
+    result.timestamp = root.get("timestamp", "")
 
     # dataroot[type='project'] 만 사용 (per-file 중복 차단)
     project = next((d for d in root if d.tag == "dataroot" and d.get("type") == "project"), None)
     if project is None:
-        # fallback: dataroot 미구분 시 root 전체 (구버전 호환)
-        project = root
-        result.parse_warnings.append("dataroot[type=project] 미발견 — root 전체 스캔 (중복 위험)")
+        # per-file dataroot 만 있는 변종: 아무 dataroot 라도 잡되 명시적 경고.
+        # (per-file dataroot 는 tree 가 없어 아래에서 RuleGroup 0 → extraction_failed)
+        project = next((d for d in root if d.tag == "dataroot"), None) or root
+        result.parse_warnings.append(
+            "dataroot[type=project] 미발견 — 대체 스캔 (중복/추출불가 위험)"
+        )
 
     trees = {t.get("type"): t for t in project.findall("tree")}
 
@@ -213,13 +234,18 @@ def parse_qac_results_xml(source: Union[str, bytes, Path]) -> QacXmlResult:
                 result.source_files_active = _to_int(folder.get("active"))
                 break
 
-    # by-rule 계층: tree[type='rules'] 우선, 없으면 files tree 의 RuleGroup.
+    # by-rule 계층: tree[type='rules'] 가 권위 소스. files tree 는 보통 RuleGroup 이
+    # 없으므로(Folder 만 보유) 진짜 fallback 이 아님 — 부재 시 명시적 추출실패 신호.
     # 주의: ElementTree 요소는 자식이 없으면 falsy → 반드시 `is None` 비교.
     rules_tree = trees.get("rules")
     if rules_tree is None:
-        rules_tree = files_tree
-    if rules_tree is None:
-        result.parse_warnings.append("tree[rules]/tree[files] 미발견 — RuleGroup 추출 불가")
+        rules_tree = files_tree  # 최후 시도 (실 구조상 RuleGroup 0 가능성 높음)
+    if rules_tree is None or not rules_tree.findall("RuleGroup"):
+        result.parse_warnings.append(
+            "tree[rules] 부재 + 대체 트리에 RuleGroup 없음 — by-rule 집계 불가 "
+            "(위반 0건 아님, 추출 실패)"
+        )
+        result.extraction_failed = True
         return result
 
     for group_el in rules_tree.findall("RuleGroup"):
@@ -242,15 +268,18 @@ def parse_qac_results_xml(source: Union[str, bytes, Path]) -> QacXmlResult:
             grp.leaf_rules.extend(_collect_leaf_rules(cat_el, cat_name))
         result.groups[name] = grp
 
-    # 정합성 경고: 카테고리 active 합 != 그룹 active
+    # 정합성 경고 (W4): 카테고리 active 합 != 그룹 active — audit 정확성 문맥상
+    # 단 1건 차이도 경고 (이전 5% 관대 임계 제거). 실데이터는 정확히 일치(286=286).
     for name, grp in result.groups.items():
         cat_sum = sum(c.active for c in grp.categories.values())
-        if grp.active and cat_sum and abs(cat_sum - grp.active) > max(2, grp.active * 0.05):
+        if cat_sum != grp.active:
             result.parse_warnings.append(
-                f"{name}: 카테고리 active 합({cat_sum}) != 그룹 active({grp.active})"
+                f"{name}: 카테고리 active 합({cat_sum}) != 그룹 active({grp.active}) "
+                f"— 분류 누락/중복 검토 필요"
             )
 
     if not result.groups:
         result.parse_warnings.append("RuleGroup 미발견 — results_data.xml 형식 확인 필요")
+        result.extraction_failed = True
 
     return result

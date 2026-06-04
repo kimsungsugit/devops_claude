@@ -40,8 +40,9 @@ DUP_BANDS = [
     (None, ">= 50", "Fail"),
 ]
 
+# W2: PMD 버전/로케일에 따라 'line'(단수)/'lines'(복수) 모두 출력 가능 → lines?
 _FOUND_RE = re.compile(
-    r"Found a\s+(\d+)\s+line\s+\((\d+)\s+tokens?\)\s+duplication", re.IGNORECASE
+    r"Found a\s+(\d+)\s+lines?\s+\((\d+)\s+tokens?\)\s+duplication", re.IGNORECASE
 )
 _STARTING_RE = re.compile(r"Starting at line\s+(\d+)\s+of\s+(.+?)\s*$", re.IGNORECASE)
 
@@ -87,7 +88,18 @@ class PmdResult:
 
     @property
     def total_duplicated_lines(self) -> int:
+        """블록당 line 수를 1회씩 합산 (블록 = 1 중복쌍/그룹).
+
+        W3: 중복은 본질적으로 2곳 이상 등장하므로 'location 합'(``total_duplicated_locations``)
+        과 다르다. 회사 양식 ST206 'Number Duplicated Code Lines' 정의가 블록 기준이면
+        본 값을, location 기준이면 보조 필드를 사용. 회귀(812)는 블록 기준 고정.
+        """
         return sum(b.lines for b in self.blocks)
+
+    @property
+    def total_duplicated_locations(self) -> int:
+        """각 블록이 등장한 위치(파일·라인) 수 합 — 한 블록이 N곳이면 N 계상."""
+        return sum(len(b.start_lines) for b in self.blocks)
 
     @property
     def max_lines(self) -> int:

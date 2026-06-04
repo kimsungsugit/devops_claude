@@ -69,11 +69,20 @@ class MetricResult:
     max_value: int = 0
     fail_count: int = 0
     conditional_count: int = 0
+    unbinned_count: int = 0   # metric 값 결측/비숫자로 밴드 미배정된 함수 수 (C3)
     worst_functions: List[Tuple[str, int]] = field(default_factory=list)
 
     @property
+    def binned_count(self) -> int:
+        return self.total_functions - self.unbinned_count
+
+    @property
     def result(self) -> str:
-        """Fail 밴드 함수가 1개 이상이면 Fail, 아니면 Pass."""
+        """Fail 밴드 함수 1개 이상이면 Fail, 아니면 Pass.
+
+        주의: unbinned_count>0(metric 결측)이면 '미평가'를 Pass 로 오기재할 위험 →
+        호출자는 ``unbinned_count`` 를 확인해 노란 표시할 것 (St201Result.parse_warnings).
+        """
         return "Fail" if self.fail_count > 0 else "Pass"
 
 
@@ -106,12 +115,16 @@ def bin_metric_functions(functions: list) -> Dict[str, MetricResult]:
         mr = MetricResult(st_id=st_id, metric_code=code, name=name, bands=bands,
                           total_functions=total)
         offenders: List[Tuple[str, int]] = []
+        binned = 0
         for it in functions:
             raw = it.get_matrix_value(mi)
             try:
                 val = int(raw)
             except (TypeError, ValueError):
-                continue
+                continue  # 결측/비숫자 → 아래 unbinned 로 집계
+            if val < 0:
+                continue  # I3: HIS metric 음수는 비정상 → 미평가(unbinned), silent Pass 차단
+            binned += 1
             mr.max_value = max(mr.max_value, val)
             # 밴드 배정 (upper inclusive, 마지막 None = 무한대)
             for bi, (upper, _lbl, verdict) in enumerate(band_defs):
@@ -124,7 +137,9 @@ def bin_metric_functions(functions: list) -> Dict[str, MetricResult]:
                     elif verdict == "Conditional":
                         mr.conditional_count += 1
                     break
-        offenders.sort(key=lambda t: -t[1])
+        mr.unbinned_count = total - binned
+        # I1: 동점 tie-break를 라벨 2차 키로 재현성 확보
+        offenders.sort(key=lambda t: (-t[1], t[0]))
         mr.worst_functions = offenders[:10]
         out[st_id] = mr
     return out
@@ -197,6 +212,13 @@ def parse_st201_from_hmr(
 
         result.total_functions = len(mgr.list_result)
         result.metrics = bin_metric_functions(mgr.list_result)
+        # C3: metric 결측 함수가 있으면 '미평가'를 Pass 로 오기재하지 않도록 경고
+        for st_id, mr in result.metrics.items():
+            if mr.unbinned_count > 0:
+                result.parse_warnings.append(
+                    f"{st_id}: {mr.unbinned_count}/{mr.total_functions} 함수 "
+                    f"{mr.metric_code} 결측 — 미평가(Pass 아님, 검토 필요)"
+                )
         return result
     finally:
         if tmp is not None:
