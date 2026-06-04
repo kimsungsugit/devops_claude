@@ -63,9 +63,26 @@ class StSheetLayout:
         return not self.missing
 
 
-def find_label_row(ws: Any, label: str, max_row: int = 120) -> Optional[Tuple[int, int]]:
-    """라벨 셀 (row, col) 탐색. 없으면 None."""
-    return find_kv_row(ws, label, max_row=max_row)
+def find_label_row(
+    ws: Any, label: str, max_row: int = 120, *,
+    label_col: Optional[int] = None, min_row: int = 1,
+) -> Optional[Tuple[int, int]]:
+    """라벨 셀 (row, col) 탐색. 없으면 None.
+
+    Args:
+        label_col: 지정 시 해당 컬럼의 라벨만 매칭 (동명 라벨 충돌 방지 —
+            예: Cover 'Author' 가 사인오프 헤더 I2 와 doc-block C30 양쪽 존재).
+        min_row: 탐색 시작 행.
+    """
+    if label_col is None and min_row == 1:
+        return find_kv_row(ws, label, max_row=max_row)
+    for row in ws.iter_rows(min_row=min_row, max_row=max_row, values_only=False):
+        for cell in row:
+            if label_col is not None and cell.column != label_col:
+                continue
+            if cell.value and isinstance(cell.value, str) and cell.value.strip() == label:
+                return (cell.row, cell.column)
+    return None
 
 
 def _label_end_col(ws: Any, r: int, c: int) -> int:
@@ -82,18 +99,20 @@ def _label_end_col(ws: Any, r: int, c: int) -> int:
 
 
 def find_value_target(
-    ws: Any, label: str, *, col_delta: int = 1, row_delta: int = 0, max_row: int = 120
+    ws: Any, label: str, *, col_delta: int = 1, row_delta: int = 0, max_row: int = 120,
+    label_col: Optional[int] = None, min_row: int = 1,
 ) -> Optional[Tuple[int, int]]:
     """라벨을 찾아 값을 쓸 셀 좌표(merge anchor 보정) 반환.
 
     Args:
         col_delta: 라벨 기준 값 셀의 컬럼 오프셋 (기본 +1 = 오른쪽).
         row_delta: 행 오프셋 (기본 0 = 같은 행). 표 헤더 아래 데이터는 +1.
+        label_col / min_row: 동명 라벨 충돌 방지용 제약 (find_label_row 참조).
 
     Returns:
         (row, col) 또는 라벨 미발견 시 None.
     """
-    pos = find_label_row(ws, label, max_row=max_row)
+    pos = find_label_row(ws, label, max_row=max_row, label_col=label_col, min_row=min_row)
     if pos is None:
         return None
     r, c = pos
