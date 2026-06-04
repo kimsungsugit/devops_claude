@@ -43,7 +43,12 @@ from backend.services.swsa_qac_xml_parser import (
     MISRA_REQUIRED,
     QacXmlResult,
 )
-from backend.services.swsa_st201_binner import St201Result
+from backend.services.swsa_st201_binner import (
+    St201Result,
+    bin_values_into_bands,
+    metric_item_for_name,
+    parse_band_predicate,
+)
 
 __all__ = ["SwsaBuildResult", "build_swsa_report"]
 
@@ -234,13 +239,79 @@ def _write_st101(ws: Any, meta: SwsaBuildMeta, qac: Optional[QacXmlResult], res:
 # ─────────────────────────── ST201 ───────────────────────────
 def _write_st201(ws: Any, meta: SwsaBuildMeta, st201: Optional[St201Result],
                  pmd: Optional[PmdResult], res: SwsaBuildResult) -> None:
+    """ST201 Test Summary Report — 템플릿 주도 메트릭 밴드 채우기.
+
+    템플릿 'Test Summary Report' 표를 스캔: D열 메트릭명 → MatrixItem, E열 밴드
+    라벨 → 술어. 함수값을 그 밴드로 binning 해 F열(함수 개수)에 기입. H(예외처리)/
+    J(수정대상=F-H)/L(결과)은 양식 수식이 자동 계산. 버전(v0.10/v0.11)·밴드 quirk
+    무관 (라벨 그대로 파싱). 무소스 메트릭(Recursion/Stress)은 skip + 경고.
+    """
     _write_st_test_info(ws, meta, res)
-    # ST201 결과표는 버전별 행 위치 편차가 커 본 라운드는 Test-Info + 함수개수만.
-    # (상세 메트릭 행 매핑은 metric-table row resolver 후속)
-    if st201 and st201.metrics:
-        # 함수 개수 라벨 옆 (있으면)
-        _stamp(ws, "함수 개수", st201.total_functions, max_row=12)
-    res.warnings.append(f"{ws.title}: ST201 메트릭 상세표는 후속(metric row resolver) — Test-Info만 기입")
+    # 'Test Summary Report' 섹션을 먼저 찾아 그 아래의 '함수 개수' 헤더만 매칭
+    # (상단 Result 블록의 '함수 개수' I4 오매칭 방지).
+    sec_row = 1
+    for rr in range(1, min(ws.max_row, 140) + 1):
+        bv = ws.cell(rr, 2).value
+        if isinstance(bv, str) and "Test Summary Report" in bv:
+            sec_row = rr
+            break
+    hdr = find_label_row(ws, "함수 개수", max_row=140, min_row=sec_row)
+    if hdr is None:
+        res.warnings.append(f"{ws.title}: Test Summary '함수 개수' 헤더 미발견 — 표 미기입")
+        res.sheets_filled.append(SHEET_ST201)
+        return
+    hr, fcol = hdr  # F열(count) = 헤더 컬럼
+
+    filled = 0
+    skipped: List[str] = []
+    partial: List[str] = []
+
+    def _flush(item: Any, name: str, rows: List[tuple]) -> None:
+        nonlocal filled
+        if not rows:
+            return
+        labels = [lbl for (_r, lbl) in rows]
+        vals: Optional[List[int]] = None
+        if item is not None and st201 is not None:
+            vals = st201.values_for(item)
+        elif "duplicat" in name.lower() and pmd is not None:
+            vals = [b.lines for b in pmd.blocks]
+        if not vals:
+            skipped.append(name.strip().replace("\n", " ")[:28])
+            return
+        counts = bin_values_into_bands(vals, labels)
+        # audit 투명성: 일부 값이 템플릿 밴드 밖이면(예: nesting=0 in '1~10') 기록
+        if sum(counts) < len(vals):
+            partial.append(f"{name.strip().replace(chr(10), ' ')[:20]}({sum(counts)}/{len(vals)})")
+        for (rr, _lbl), cnt in zip(rows, counts):
+            if safe_write(ws, rr, fcol, cnt):
+                filled += 1
+
+    current_item: Any = None
+    current_name = ""
+    pending: List[tuple] = []
+    r = hr + 1
+    while r <= min(ws.max_row, hr + 80):
+        bval = ws.cell(r, 2).value
+        if isinstance(bval, str) and bval.strip() == "Total":
+            break
+        dval = ws.cell(r, 4).value
+        eval_ = ws.cell(r, 5).value
+        if isinstance(dval, str) and dval.strip():
+            _flush(current_item, current_name, pending)
+            current_item = metric_item_for_name(dval)
+            current_name = dval
+            pending = []
+        if isinstance(eval_, str) and parse_band_predicate(eval_) is not None:
+            pending.append((r, eval_))
+        r += 1
+    _flush(current_item, current_name, pending)
+
+    if skipped:
+        res.warnings.append(f"{ws.title}: 무소스 메트릭 skip(수동 입력) {skipped}")
+    if partial:
+        res.warnings.append(f"{ws.title}: 일부 함수값이 템플릿 밴드 밖 {partial}")
+    res.filled_cells += filled
     res.sheets_filled.append(SHEET_ST201)
 
 

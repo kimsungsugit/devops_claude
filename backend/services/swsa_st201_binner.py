@@ -22,6 +22,7 @@ ISO 26262: HIS 메트릭은 ASIL 무관 권장. evidence 'auto-generated draft'.
 """
 from __future__ import annotations
 
+import re
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -35,6 +36,9 @@ __all__ = [
     "St201Result",
     "ST201_METRICS",
     "bin_metric_functions",
+    "bin_values_into_bands",
+    "metric_item_for_name",
+    "parse_band_predicate",
     "parse_st201_from_hmr",
 ]
 
@@ -91,11 +95,91 @@ class St201Result:
     total_functions: int = 0
     helix_version: str = ""
     old_version: bool = False
+    module: str = ""        # 로그 폴더 모듈명 (APP_… / BOOT_…) — 컬럼 split 용
     metrics: Dict[str, MetricResult] = field(default_factory=dict)
+    # 메트릭별 함수값 raw (템플릿 주도 재binning 용). key=MatrixItem.name (예: 'V_G').
+    function_values: Dict[str, List[int]] = field(default_factory=dict)
     parse_warnings: List[str] = field(default_factory=list)
 
     def metric(self, st_id: str) -> Optional[MetricResult]:
         return self.metrics.get(st_id)
+
+    def values_for(self, item: "MatrixItem") -> List[int]:
+        return self.function_values.get(item.name, [])
+
+
+# 템플릿 메트릭명(D열) → MatrixItem (substring, 소문자). Recursion/Duplicated/Stress 는
+# HMR 부재 → None (Recursion=별도, Duplicated=PMD).
+_NAME_TO_ITEM: List[Tuple[str, "MatrixItem"]] = [
+    ("cyclomatic", MatrixItem.V_G),
+    ("nesting", MatrixItem.LEVEL),
+    ("calling", MatrixItem.CALLING),
+    ("called", MatrixItem.CALLS),
+    ("parameter", MatrixItem.PARAM),
+    ("instruction", MatrixItem.STMT),
+    ("path", MatrixItem.PATH),
+    ("return", MatrixItem.RETURN),
+    ("goto", MatrixItem.GOTO),
+]
+
+# parse 시 수집할 MatrixItem (function_values)
+_VALUE_ITEMS: List["MatrixItem"] = [
+    MatrixItem.V_G, MatrixItem.LEVEL, MatrixItem.CALLING, MatrixItem.CALLS,
+    MatrixItem.PARAM, MatrixItem.STMT, MatrixItem.PATH, MatrixItem.RETURN, MatrixItem.GOTO,
+]
+
+
+def metric_item_for_name(name: str) -> Optional["MatrixItem"]:
+    """템플릿 메트릭명 → MatrixItem. 매칭 없으면 None (수동/타 소스)."""
+    low = (name or "").lower()
+    for kw, item in _NAME_TO_ITEM:
+        if kw in low:
+            return item
+    return None
+
+
+def parse_band_predicate(label: str):
+    """밴드 라벨('1 ~ 10','> 10','>=11','0','>0') → 술어 함수. 불가 시 None."""
+    s = (label or "").replace(" ", "")
+    if not s:
+        return None
+    m = re.match(r"^(\d+)~(\d+)$", s)
+    if m:
+        a, b = int(m.group(1)), int(m.group(2))
+        return lambda v: a <= v <= b
+    m = re.match(r"^>=(\d+)$", s)
+    if m:
+        n = int(m.group(1))
+        return lambda v: v >= n
+    m = re.match(r"^>(\d+)$", s)
+    if m:
+        n = int(m.group(1))
+        return lambda v: v > n
+    m = re.match(r"^<=(\d+)$", s)
+    if m:
+        n = int(m.group(1))
+        return lambda v: v <= n
+    m = re.match(r"^<(\d+)$", s)
+    if m:
+        n = int(m.group(1))
+        return lambda v: v < n
+    m = re.match(r"^(\d+)$", s)
+    if m:
+        n = int(m.group(1))
+        return lambda v: v == n
+    return None
+
+
+def bin_values_into_bands(values: List[int], band_labels: List[str]) -> List[int]:
+    """함수값들을 템플릿 밴드 라벨 순서대로 카운트. 밴드 겹치면 먼저 매칭한 밴드."""
+    preds = [parse_band_predicate(lbl) for lbl in band_labels]
+    counts = [0] * len(band_labels)
+    for v in values:
+        for i, p in enumerate(preds):
+            if p is not None and p(v):
+                counts[i] += 1
+                break
+    return counts
 
 
 def bin_metric_functions(functions: list) -> Dict[str, MetricResult]:
@@ -212,6 +296,14 @@ def parse_st201_from_hmr(
 
         result.total_functions = len(mgr.list_result)
         result.metrics = bin_metric_functions(mgr.list_result)
+        # 템플릿 주도 재binning 용 raw 함수값 수집 (모든 지원 MatrixItem)
+        for it in mgr.list_result:
+            for mi in _VALUE_ITEMS:
+                try:
+                    val = int(it.get_matrix_value(mi))
+                except (TypeError, ValueError):
+                    continue
+                result.function_values.setdefault(mi.name, []).append(val)
         # C3: metric 결측 함수가 있으면 '미평가'를 Pass 로 오기재하지 않도록 경고
         for st_id, mr in result.metrics.items():
             if mr.unbinned_count > 0:

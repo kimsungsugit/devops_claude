@@ -168,6 +168,9 @@ def merge_st201_results(results: List[St201Result]) -> Optional[St201Result]:
     for r in valid:
         merged.total_functions += r.total_functions
         merged.parse_warnings.extend(r.parse_warnings)
+        # 템플릿 주도 재binning 용 raw 함수값 병합 (모듈 간 concat)
+        for code, vals in r.function_values.items():
+            merged.function_values.setdefault(code, []).extend(vals)
         for st_id, mr in r.metrics.items():
             mm = merged.metrics.get(st_id)
             if mm is None:
@@ -238,6 +241,7 @@ def collect_swsa_inputs(resolver: Any, log_folder: str) -> SwsaInputData:
         b = _read(p)
         if b is not None:
             r = parse_st201_from_hmr(b)
+            r.module = _module_of(p)
             if r.metrics:  # 파싱 성공만
                 st_results.append(r)
             else:

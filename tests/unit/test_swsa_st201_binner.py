@@ -9,8 +9,59 @@ from backend.services.qac_parser import MatrixItem
 from backend.services.swsa_st201_binner import (
     ST201_METRICS,
     bin_metric_functions,
+    bin_values_into_bands,
+    metric_item_for_name,
+    parse_band_predicate,
     parse_st201_from_hmr,
 )
+
+
+class TestBandPredicate:
+    def test_range(self):
+        p = parse_band_predicate("1 ~ 10")
+        assert p(1) and p(10) and not p(0) and not p(11)
+
+    def test_gte(self):
+        p = parse_band_predicate(">=31")
+        assert p(31) and p(100) and not p(30)
+
+    def test_gt(self):
+        p = parse_band_predicate("> 10")
+        assert p(11) and not p(10)
+
+    def test_single(self):
+        p = parse_band_predicate("0")
+        assert p(0) and not p(1)
+
+    def test_invalid(self):
+        assert parse_band_predicate("측정치") is None
+        assert parse_band_predicate("") is None
+
+
+class TestBinIntoBands:
+    def test_first_match_wins(self):
+        # 겹치는 밴드(>10, >=11)에서 11은 먼저 매칭한 '>10'에 계수
+        labels = ["1 ~ 10", "> 10", ">=11"]
+        counts = bin_values_into_bands([5, 11, 12], labels)
+        assert counts == [1, 2, 0]
+
+    def test_out_of_band_dropped(self):
+        # 0은 '1~10' 밴드 밖 → 어디에도 안 들어감
+        counts = bin_values_into_bands([0, 5, 5], ["1 ~ 10", "> 10"])
+        assert counts == [2, 0]  # 0은 제외
+
+
+class TestMetricItemForName:
+    def test_mapping(self):
+        assert metric_item_for_name("Cyclomatic\nComplexity") == MatrixItem.V_G
+        assert metric_item_for_name("Maximum Nesting Level") == MatrixItem.LEVEL
+        assert metric_item_for_name("Maximum Function CallingNumber") == MatrixItem.CALLING
+        assert metric_item_for_name("Maximum Function CalledNumber") == MatrixItem.CALLS
+        assert metric_item_for_name("Number of Function Parameters") == MatrixItem.PARAM
+
+    def test_no_match(self):
+        assert metric_item_for_name("Recursion Function Number") is None
+        assert metric_item_for_name("Component Stress Complexity") is None
 
 
 class _FakeFn:

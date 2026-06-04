@@ -14,6 +14,8 @@ from backend.services.swsa_qac_xml_parser import parse_qac_results_xml
 _S = os.path.join(os.path.dirname(__file__), "..", "..", ".codex_tmp", "swsa_samples")
 _TEMPLATE = os.path.join(_S, "TEMPLATE_(XXXX_SwSA) Software Static Analysis Report_v0.10_2XXXXX.xlsm")
 _XML = os.path.join(_S, "XML_APP_NE1aW.xml")
+_HMR = os.path.join(_S, "LOG_QAC_NE1aW_01_HMR_27052026_183745.html")
+_PMD = os.path.join(_S, "LOG_NE1AW_PORTING_2631_PMD_Report_20260323.txt")
 
 
 def _meta():
@@ -125,3 +127,45 @@ class TestRealTemplateBuild:
     def test_st1101_graceful_skip(self):
         # v0.10 템플릿엔 ST1101 없음 → graceful 경고
         assert any("11.ST1101 시트 없음" in w for w in self.res.warnings)
+
+
+@pytest.mark.skipif(
+    not (os.path.exists(_TEMPLATE) and os.path.exists(_HMR) and os.path.exists(_PMD)),
+    reason="실 템플릿/HMR/PMD 샘플 없음",
+)
+class TestST201MetricTable:
+    """ST201 Test Summary Report 템플릿 주도 밴드 채우기."""
+
+    def setup_method(self):
+        from backend.services.swsa_pmd_parser import parse_pmd_cpd
+        from backend.services.swsa_st201_binner import parse_st201_from_hmr
+        with open(_TEMPLATE, "rb") as f:
+            tpl = f.read()
+        st201 = parse_st201_from_hmr(_HMR)
+        pmd = parse_pmd_cpd(_PMD)
+        res = build_swsa_report(tpl, _meta(), st201=st201, pmd=pmd)
+        self.ws = load_workbook(io.BytesIO(res.xlsm_io.getvalue()), keep_vba=True)["2.ST201"]
+        self.res = res
+
+    def test_cyclomatic_pass_band(self):
+        # 878 함수 전부 v(G) 1~10 → F63=878, 초과밴드 0
+        assert self.ws["F63"].value == 878
+        assert self.ws["F64"].value == 0
+
+    def test_calling_called_pass_band(self):
+        assert self.ws["F70"].value == 878   # Calling 0~5
+        assert self.ws["F73"].value == 878   # Called 0~7
+
+    def test_duplicated_from_pmd(self):
+        # PMD 21블록 → 10~49=18, >=50=3
+        assert self.ws["F79"].value == 18
+        assert self.ws["F80"].value == 3
+
+    def test_recursion_no_source_skipped(self):
+        # Recursion(STNRA) HMR 부재 → F 미기입 + 경고
+        assert self.ws["F77"].value is None
+        assert any("무소스" in w and "Recursion" in w for w in self.res.warnings)
+
+    def test_nesting_partial_band_warned(self):
+        # nesting=0 함수가 '1~10' 밴드 밖 → 투명성 경고
+        assert any("밴드 밖" in w for w in self.res.warnings)
