@@ -269,6 +269,9 @@ app.include_router(_swut_router)
 # 33차 라운드 — SwIT (Software Integration Test) Coverage Report v2.02
 from backend.routers.swit import router as _swit_router  # noqa: E402
 app.include_router(_swit_router)
+# SwSA (Software Static Analysis Report) — QAC/PMD 로그 자동 빌드
+from backend.routers.swsa import router as _swsa_router  # noqa: E402
+app.include_router(_swsa_router)
 
 # ---------------------------------------------------------------------------
 # Serve frontend-v2 production build (static files + SPA fallback)

@@ -824,6 +824,66 @@ class SwITSitrBuildRequest(SwITBuildRequest):
         return v
 
 
+# ── SwSA Software Static Analysis Report 빌드 요청 ───────────────────────
+
+class SwSABuildRequest(BaseModel):
+    """SwSA(Software Static Analysis Report) 빌드 요청.
+
+    웹에서 로그 폴더 + 템플릿 경로 + 메타만 제공하면 자동 빌드.
+    입력 표면(deep-reviewer X3): path maxlen 500 + 줄바꿈 금지, extra='forbid'.
+    SwSA Cover 날짜는 점 구분(2026.04.24)도 허용.
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    # 필수
+    project_id: str = Field(..., min_length=1, max_length=50)
+    # SW Ver. (ST Test-Info). 예: 2631.00
+    release_sw_version: str = Field(..., pattern=r"^\d+\.\d+(\.\d+)?$")
+    # Cover Date — yyyy.mm.dd / yyyy-mm-dd / yyyy/mm/dd
+    test_date: str = Field(..., pattern=r"^\d{2,4}[-/.]\d{1,2}[-/.]\d{1,2}$")
+
+    # 입력 소스 (자동 발견)
+    log_folder: str = Field("", max_length=500)       # 01.Log/PV — QAC/PMD 자동 스캔
+    template_path: str = Field("", max_length=500)    # 회사 v0.10 SwSA 양식 (비면 config fallback)
+
+    # Cover / Summary 메타
+    doc_id_base: str = Field("HKY-SwSA", max_length=80)
+    doc_id_sequence: str = Field("", pattern=r"^\d*$")
+    doc_version: str = Field("v0.10", max_length=20)
+    doc_status: str = Field("Unspecified", max_length=40)
+    asil_level: str = Field("ASIL A", max_length=20)
+    phase: str = Field("", max_length=20)
+    platform_version: str = Field("", max_length=120)   # (APP) ... / (BOOT) ...
+    product: str = Field("PDS", max_length=50)
+    verification_target: str = Field("MCU", max_length=20)
+    compiler: str = Field("", max_length=80)
+    mcu: str = Field("", max_length=80)
+
+    # ST Test-Information (모든 실행 시트 공통)
+    analysis_round: str = Field("1", max_length=10)
+    test_engineer: str = Field("", max_length=100)
+    debugger: str = Field("", max_length=100)
+    misra_rule_version: str = Field("MISRA C 2012", max_length=40)
+    secure_rule_version: str = Field("HKMC 4.1", max_length=40)
+
+    # 인사 메타 (선택)
+    reviewer_override: str = Field("", max_length=100)
+    approver_override: str = Field("", max_length=100)
+    validation_date: str = Field("", pattern=r"^$|^\d{2,4}[-/.]\d{1,2}[-/.]\d{1,2}$")
+    history_description: str = Field("", max_length=300)
+
+    @field_validator("log_folder", "template_path", "test_engineer", "debugger",
+                     "compiler", "mcu", "platform_version", "reviewer_override",
+                     "approver_override")
+    @classmethod
+    def _no_newline(cls, v):
+        if v is None:
+            return v
+        if "\n" in v or "\r" in v:
+            raise ValueError("줄바꿈 문자 금지 — 단일 라인 필요")
+        return v
+
+
 # ── SwUT Browse (21차 라운드) ─────────────────────────────────────────
 
 class SwUTBrowseRequest(BaseModel):
