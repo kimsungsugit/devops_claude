@@ -70,10 +70,10 @@
 | **swsa_qac_xml_parser** (ST101/ST1101) | 신규 | ✅ **Phase 1a 완료** |
 | **swsa_st201_binner** (ST201~204) | qac_parser 재사용 | ✅ **Phase 1a 완료** |
 | **swsa_pmd_parser** (ST206) | 신규 | ✅ **Phase 1a 완료** |
-| swsa_layout_resolver (라벨/레이아웃 감지) | `find_kv_row` 기반 | ⬜ Phase 1b |
-| swsa_input_adapter (로그 수집) | `swit_input_adapter` thin | ⬜ Phase 1b |
-| swsa_meta (`SwsaBuildMeta`) | `BuildMetaBase` 상속 | ⬜ Phase 1b |
-| swsa_aggregator (orchestrator + 시트 writer) | 70% swut/swit aggregator | ⬜ Phase 1b |
+| **swsa_layout_resolver** (라벨/레이아웃 감지) | `find_kv_row` 기반 | ✅ **Phase 1b 기반(b84c664)** — 병합라벨 흡수 |
+| **swsa_meta** (`SwsaBuildMeta`) | `BuildMetaBase` 상속 | ✅ **Phase 1b 기반(b84c664)** |
+| swsa_input_adapter (로그 수집) | `swit_input_adapter` thin | ⬜ Phase 1b (남음) |
+| swsa_aggregator (orchestrator + 시트 writer) | 70% swut/swit aggregator | ⬜ Phase 1b (남음) — 다음 단계 |
 | routers/swsa.py + SwSABuildRequest | 88~90% swit | ⬜ Phase 1c |
 | SwSABuildSection.jsx | 92% SwITBuildSection | ⬜ Phase 1c |
 
