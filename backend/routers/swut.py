@@ -25,6 +25,7 @@ import asyncio
 import io
 import json
 import logging
+import re
 from typing import Any
 
 # 38차 I2: psutil / _get_process_memory_mb / _run_*_safely 함수 제거.
@@ -337,6 +338,47 @@ def _apply_function_asil_map(req: SwUTBuildRequest, session) -> None:
     _resolver_apply_function_asil_map(req, session, req.project_id)
 
 
+def _apply_c_function_map(req: SwUTBuildRequest, session) -> None:
+    """Parse configured C source so SwUTCR can draft reason/action evidence."""
+    c_source_root = _resolve_c_source_root(req)
+    if not c_source_root:
+        return
+
+    from pathlib import Path
+
+    root = Path(c_source_root)
+    if not root.exists() or not root.is_dir():
+        session.parse_warnings.append(
+            f"[c_source] c_source_root not found for reason/action draft: {c_source_root}"
+        )
+        return
+
+    try:
+        from workflow.code_parser.c_parser import parse_c_project
+
+        parsed = parse_c_project(str(root), max_files=300)
+        functions = parsed.get("functions", []) if isinstance(parsed, dict) else parsed
+        c_map: dict[str, dict[str, Any]] = {}
+        for fn in functions:
+            if not isinstance(fn, dict):
+                continue
+            name = str(fn.get("name") or "").strip()
+            if name:
+                c_map[name] = fn
+            related = str(fn.get("comment_related") or "")
+            for swufn_id in re.findall(r"SwUFn_\d+", related):
+                c_map.setdefault(swufn_id, fn)
+        session.c_function_map = c_map
+        session.parse_warnings.append(
+            f"[c_source] parsed {len(functions)} C functions for SwUTCR reason/action "
+            f"drafts from {c_source_root}"
+        )
+    except Exception as exc:  # pragma: no cover - defensive endpoint fallback
+        session.parse_warnings.append(
+            f"[c_source] reason/action C parse failed: {type(exc).__name__}: {exc}"
+        )
+
+
 def _do_coverage_build(req: SwUTBuildRequest) -> Response:
     resolver = get_resolver()
     # 56차 T308 — log_folder UNC + Local 모드 pre-flight check
@@ -563,6 +605,7 @@ def _do_swutcr_build(req: SwUTBuildRequest) -> Response:
         log_folder=log_folder,
     )
     _apply_function_asil_map(req, session)
+    _apply_c_function_map(req, session)
     template_bytes = _read_template_bytes(req.swutcr_template_path, req.project_id, "swutcr")
     meta = _build_swutcr_meta(req)
     swuds_fn_ids = _resolve_swuds_function_ids(req)

@@ -6,9 +6,11 @@ import openpyxl
 
 from backend.services.swut_comprehensive_aggregator import (
     SwutcrBuildMeta,
+    _coverage_failures,
     build_swutcr_report,
 )
 from backend.services.swut_input_adapter import (
+    CoverageStats,
     EnvironmentData,
     ExecutionRow,
     FunctionCoverage,
@@ -95,6 +97,31 @@ def _session() -> SwUTSession:
         ],
     )
     return SwUTSession(environments=[env])
+
+
+def test_coverage_failures_draft_reason_from_c_source_default_branch():
+    failures = _coverage_failures(
+        [
+            FunctionCoverage(
+                unit_id="SwUFn_0001",
+                name="FunctionA",
+                branch=CoverageStats(covered=1, total=2),
+            )
+        ],
+        {
+            "FunctionA": {
+                "name": "FunctionA",
+                "file": "SysSafety.c",
+                "body": "switch (mode) { default: return E_NOT_OK; }",
+                "calls": [],
+                "used_globals": [],
+            }
+        },
+    )
+
+    assert len(failures) == 1
+    assert "switch/default defensive logic" in failures[0]["reason"]
+    assert "negative/default-path TC" in failures[0]["action"]
 
 
 def test_build_swutcr_preserves_template_and_writes_summary():

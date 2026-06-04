@@ -13,7 +13,7 @@ from __future__ import annotations
 # 라운드 C 추가: [semantic] (llm_semantic_validator) + [judge] (LLM-as-a-Judge).
 # F6 Round 5 NF3 단일 출처 패턴 — SwUT/SwIT routers의 sentinel breakdown에 자동 통합.
 KNOWN_WARNING_PREFIXES: tuple[str, ...] = (
-    "[hmr]", "[swuts]", "[layout]", "[semantic]", "[judge]",
+    "[hmr]", "[swuts]", "[layout]", "[semantic]", "[judge]", "[extraction]",
 )
 
 
@@ -37,6 +37,7 @@ def categorize_warnings(warnings: list[str]) -> dict[str, int]:
         "layout": sum(1 for w in warnings if w.startswith("[layout]")),
         "semantic": sum(1 for w in warnings if w.startswith("[semantic]")),
         "judge": sum(1 for w in warnings if w.startswith("[judge]")),
+        "extraction": sum(1 for w in warnings if w.startswith("[extraction]")),
         "other": sum(
             1 for w in warnings
             if not any(w.startswith(p) for p in KNOWN_WARNING_PREFIXES)

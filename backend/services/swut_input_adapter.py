@@ -1718,12 +1718,14 @@ def collect_from_log_folder(
     # 59차 F5 W4 — 추출 누락 summary parse_warnings emit (silent skip 차단).
     # audit reviewer가 산출물에 어떤 데이터가 누락됐는지 즉시 인지 가능.
     # ISO 26262 평가: 추출 실패가 silent skip되면 evidence_class 무관 거짓 PASS 위험.
-    _summary_missing_input = 0
-    _summary_missing_expected = 0
-    _summary_missing_actual = 0
-    _missing_input_by_env: dict[str, int] = {}
-    _missing_expected_by_env: dict[str, int] = {}
-    _missing_actual_by_env: dict[str, int] = {}
+    _summary_input_empty = 0
+    _summary_expected_empty = 0
+    _summary_actual_value_empty = 0
+    _summary_actual_execution_missing = 0
+    _input_empty_by_env: dict[str, int] = {}
+    _expected_empty_by_env: dict[str, int] = {}
+    _actual_value_empty_by_env: dict[str, int] = {}
+    _actual_execution_missing_by_env: dict[str, int] = {}
     _total_tcs = 0
 
     for env_data in session.environments:
@@ -1733,14 +1735,14 @@ def collect_from_log_folder(
             first = items[0] if items else None
             if first is not None:
                 if not (getattr(first, "input_data", None) or {}):
-                    _summary_missing_input += 1
-                    _missing_input_by_env[env_data.env_name] = (
-                        _missing_input_by_env.get(env_data.env_name, 0) + 1
+                    _summary_input_empty += 1
+                    _input_empty_by_env[env_data.env_name] = (
+                        _input_empty_by_env.get(env_data.env_name, 0) + 1
                     )
                 if not (getattr(first, "expected_result", None) or {}):
-                    _summary_missing_expected += 1
-                    _missing_expected_by_env[env_data.env_name] = (
-                        _missing_expected_by_env.get(env_data.env_name, 0) + 1
+                    _summary_expected_empty += 1
+                    _expected_empty_by_env[env_data.env_name] = (
+                        _expected_empty_by_env.get(env_data.env_name, 0) + 1
                     )
             # actual_result 확인 — ExecutionRow 또는 TestResultItem
             exec_r = env_data.test_results.get(tc_name)
@@ -1749,10 +1751,55 @@ def collect_from_log_folder(
             tr_first = tr_items_for_tc[0] if tr_items_for_tc else None
             actual_via_tr = bool(getattr(tr_first, "actual_result", None) or {}) if tr_first else False
             if not (actual_via_exec or actual_via_tr):
-                _summary_missing_actual += 1
-                _missing_actual_by_env[env_data.env_name] = (
-                    _missing_actual_by_env.get(env_data.env_name, 0) + 1
+                if exec_r is None and tr_first is None:
+                    _summary_actual_execution_missing += 1
+                    _actual_execution_missing_by_env[env_data.env_name] = (
+                        _actual_execution_missing_by_env.get(env_data.env_name, 0) + 1
+                    )
+                else:
+                    _summary_actual_value_empty += 1
+                    _actual_value_empty_by_env[env_data.env_name] = (
+                        _actual_value_empty_by_env.get(env_data.env_name, 0) + 1
+                    )
+
+    if _total_tcs > 0 and (
+        _summary_input_empty
+        or _summary_expected_empty
+        or _summary_actual_value_empty
+        or _summary_actual_execution_missing
+    ):
+        warnings.append(
+            f"[extraction] value-row summary: total={_total_tcs}, "
+            f"input_empty={_summary_input_empty}"
+            f"({100*_summary_input_empty/_total_tcs:.1f}%), "
+            f"expected_empty={_summary_expected_empty}"
+            f"({100*_summary_expected_empty/_total_tcs:.1f}%), "
+            f"actual_value_empty={_summary_actual_value_empty}"
+            f"({100*_summary_actual_value_empty/_total_tcs:.1f}%), "
+            f"actual_execution_missing={_summary_actual_execution_missing}"
+            f"({100*_summary_actual_execution_missing/_total_tcs:.1f}%). "
+            "Empty value rows can be valid when the VectorCAST TC has no data rows; "
+            "execution_missing requires audit review."
+        )
+        for label, dist in [
+            ("input_empty", _input_empty_by_env),
+            ("expected_empty", _expected_empty_by_env),
+            ("actual_value_empty", _actual_value_empty_by_env),
+            ("actual_execution_missing", _actual_execution_missing_by_env),
+        ]:
+            if dist:
+                top = sorted(dist.items(), key=lambda x: -x[1])[:5]
+                warnings.append(
+                    f"[extraction] env top5 {label}: "
+                    + ", ".join(f"{env}={cnt}" for env, cnt in top)
                 )
+
+    _summary_missing_input = 0
+    _summary_missing_expected = 0
+    _summary_missing_actual = 0
+    _missing_input_by_env: dict[str, int] = {}
+    _missing_expected_by_env: dict[str, int] = {}
+    _missing_actual_by_env: dict[str, int] = {}
 
     if _total_tcs > 0 and (
         _summary_missing_input or _summary_missing_expected or _summary_missing_actual

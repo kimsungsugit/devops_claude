@@ -22,7 +22,7 @@ class TestCategorizeWarnings:
         # 라운드 C: semantic/judge prefix 추가 (LLM hallucination 검증)
         assert result == {
             "ambiguous": 0, "hmr": 0, "swuts": 0, "layout": 0,
-            "semantic": 0, "judge": 0, "other": 0,
+            "semantic": 0, "judge": 0, "extraction": 0, "other": 0,
         }
 
     def test_nw7_ambiguous_precise_not_substring(self):
@@ -58,7 +58,18 @@ class TestCategorizeWarnings:
         assert result["hmr"] == 6
         assert result["swuts"] == 3
         assert result["layout"] == 2
+        assert result["extraction"] == 0
         assert result["other"] == 4
+
+    def test_extraction_prefix_counted(self):
+        warnings = [
+            "[extraction] value-row summary",
+            "[extraction] actual empty env top5",
+            "plain warning",
+        ]
+        result = categorize_warnings(warnings)
+        assert result["extraction"] == 2
+        assert result["other"] == 1
 
 
 class TestFormatBreakdownLabel:
@@ -78,7 +89,7 @@ class TestFormatBreakdownLabel:
         """NF3 단일 출처 — KNOWN_WARNING_PREFIXES tuple.
         라운드 C: [semantic]/[judge] 추가 (LLM hallucination 검증)."""
         assert KNOWN_WARNING_PREFIXES == (
-            "[hmr]", "[swuts]", "[layout]", "[semantic]", "[judge]",
+            "[hmr]", "[swuts]", "[layout]", "[semantic]", "[judge]", "[extraction]",
         )
 
     def test_hierarchical_hint_when_ambiguous_and_hmr_both_present_round7_nw11(self):

@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import io
 from dataclasses import dataclass, field, replace as dc_replace
+from pathlib import Path
 from typing import Any
 
 try:
@@ -159,7 +160,93 @@ def _stamp_hmr_metrics(
     )
 
 
-def _coverage_failures(function_rows: list[Any]) -> list[dict[str, Any]]:
+def _lookup_c_function(
+    function_name: str,
+    unit_id: str,
+    c_function_map: dict[str, dict[str, Any]] | None,
+) -> dict[str, Any] | None:
+    if not c_function_map:
+        return None
+    for key in (function_name, unit_id):
+        if key and key in c_function_map:
+            return c_function_map[key]
+    lowered = {k.lower(): v for k, v in c_function_map.items() if isinstance(k, str)}
+    for key in (function_name, unit_id):
+        if key and key.lower() in lowered:
+            return lowered[key.lower()]
+    return None
+
+
+def _draft_failure_rationale(
+    function_name: str,
+    kind: str,
+    value: str,
+    c_entry: dict[str, Any] | None,
+) -> tuple[str, str]:
+    if not c_entry:
+        return (
+            f"{kind} coverage not completed by VectorCAST result ({value}); "
+            "C source evidence unavailable.",
+            "Review VectorCAST uncovered path, add TC if reachable, or document "
+            "unreachable/deviation rationale.",
+        )
+
+    body = str(c_entry.get("body") or "").lower()
+    source_file = Path(str(c_entry.get("file") or "")).name or "C source"
+    calls = ", ".join(str(call) for call in (c_entry.get("calls") or [])[:3])
+    globals_used = ", ".join(str(item) for item in (c_entry.get("used_globals") or [])[:3])
+    context = f"{function_name} in {source_file}"
+
+    if "default:" in body:
+        return (
+            f"{kind} uncovered path appears to include switch/default defensive logic "
+            f"({context}, {value}).",
+            "Add a negative/default-path TC if reachable; otherwise record the "
+            "unreachable defensive-branch rationale.",
+        )
+    if "null" in body or "nullptr" in body:
+        return (
+            f"{kind} uncovered path appears to include NULL guard logic "
+            f"({context}, {value}).",
+            "Add a NULL-input/error-path TC if the interface permits it; otherwise "
+            "record why the guard is unreachable in this integration.",
+        )
+    if any(token in body for token in ("limit", "range", "min", "max", "overflow", "underflow")):
+        return (
+            f"{kind} uncovered path appears to include range or boundary handling "
+            f"({context}, {value}).",
+            "Add boundary-value TC coverage, or document the excluded operating range "
+            "with the linked requirement.",
+        )
+    if any(token in body for token in ("error", "fail", "timeout", "crc", "checksum", "not_ok")):
+        return (
+            f"{kind} uncovered path appears to include error-handling logic "
+            f"({context}, {value}).",
+            "Add fault-injection/error-path TC coverage, or document why the fault "
+            "condition cannot be stimulated.",
+        )
+    if c_entry.get("is_static"):
+        action_tail = f" Calls seen: {calls}." if calls else ""
+        return (
+            f"{kind} coverage not completed for static helper evidence "
+            f"({context}, {value}).",
+            "Review caller scenarios and add TC coverage through the public caller, "
+            f"or justify helper-only unreachable code.{action_tail}",
+        )
+
+    detail = f" Uses globals: {globals_used}." if globals_used else ""
+    return (
+        f"{kind} coverage not completed by VectorCAST result with C source matched "
+        f"({context}, {value}).",
+        "Review uncovered statements/branches against the source and add TC coverage "
+        f"or document unreachable/deviation rationale.{detail}",
+    )
+
+
+def _coverage_failures(
+    function_rows: list[Any],
+    c_function_map: dict[str, dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
     failures: list[dict[str, Any]] = []
     seen: set[tuple[str, str]] = set()
     for fc in function_rows:
@@ -170,15 +257,16 @@ def _coverage_failures(function_rows: list[Any]) -> list[dict[str, Any]]:
             if key in seen:
                 continue
             seen.add(key)
+            function_name = fc.name or fc.unit_id
+            value = f"{stats.covered}/{stats.total}"
+            c_entry = _lookup_c_function(function_name, fc.unit_id, c_function_map)
+            reason, action = _draft_failure_rationale(function_name, kind, value, c_entry)
             failures.append({
-                "function": fc.name or fc.unit_id,
+                "function": function_name,
                 "kind": kind,
-                "value": f"{stats.covered}/{stats.total}",
-                "reason": (
-                    f"{kind} coverage not completed by VectorCAST result "
-                    f"({stats.covered}/{stats.total})."
-                ),
-                "action": "Manual review required; document unreachable or defensive code rationale.",
+                "value": value,
+                "reason": reason,
+                "action": action,
             })
     return failures
 
@@ -232,7 +320,7 @@ def _write_ut101(
     function_rows = agg.get("function_rows") or []
     function_count = _swutcr_function_count(agg)
     failed_tcs = agg.get("failed", 0) or 0
-    failures = _coverage_failures(function_rows)
+    failures = _coverage_failures(function_rows, agg.get("c_function_map") or None)
     statement_fail = sum(1 for f in failures if f["kind"] == "Statement")
     branch_fail = sum(1 for f in failures if f["kind"] == "Branch")
 
@@ -479,6 +567,8 @@ def build_swutcr_report(
         warnings.extend([f"[sutr-layout] {w}" for w in sitr_layout.warnings])
 
     agg = aggregate_session(session)
+    if session.c_function_map:
+        agg["c_function_map"] = session.c_function_map
     from backend.services.swut_coverage_aggregator import (
         _apply_template_swufn_order,
         _build_swuts_name_to_swufn_map,
