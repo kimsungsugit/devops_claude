@@ -27,7 +27,8 @@ from openpyxl import load_workbook
 
 from backend.services.excel_template_utils import (
     has_vba_macros,
-    mark_user_input_required,
+    is_formula_cell,
+    mark_user_input_fill_only,
     safe_write,
     write_value_or_mark,
 )
@@ -86,6 +87,27 @@ def _stamp_or_mark(ws: Any, label: str, value: Any, *, hint: str = "", max_row: 
     if tgt is None:
         return None
     return write_value_or_mark(ws, tgt[0], tgt[1], value, hint=hint)
+
+
+def _write_value_safe(ws: Any, r: int, c: int, value: Any, res: "SwsaBuildResult",
+                      what: str = "") -> bool:
+    """수식 셀은 보존(미기입+경고), 비-수식 입력 셀만 값 기입 (C1/C2/C3 fix).
+
+    v0.11 양식의 summary 셀은 detail 표를 참조하는 `=COUNTIF(...)` 등 audit
+    교차검증 수식이다. literal 로 덮으면 summary↔detail 연결이 끊긴다. 또한 수식
+    operand 셀에 string 을 쓰면 `#VALUE!` 가 된다. 따라서 수식 셀은 건드리지 않고
+    경고만 남긴다 (v0.11 detail 표 채우기는 후속).
+    """
+    from openpyxl.utils import get_column_letter
+    if is_formula_cell(ws, r, c):
+        res.warnings.append(
+            f"{ws.title}: 수식 셀 보존 — {what} 미기입 ({get_column_letter(c)}{r})"
+        )
+        return False
+    if safe_write(ws, r, c, value):
+        res.filled_cells += 1
+        return True
+    return False
 
 
 # ─────────────────────────── Cover ───────────────────────────
@@ -205,25 +227,30 @@ def _write_st101(ws: Any, meta: SwsaBuildMeta, qac: Optional[QacXmlResult], res:
                 1 for r in misra.leaf_rules if r.severity == MISRA_MANDATORY and r.active > 0)
             cat_rules["Required"] = sum(
                 1 for r in misra.leaf_rules if r.severity == MISRA_REQUIRED and r.active > 0)
+            # H3: 표에 Mandatory/Required 행만 있고 둘 합이 Total과 다르면(Common 등) 경고
+            if {"Mandatory", "Required"} & set(srows) and "Total" in srows:
+                man_req = cat_active["Mandatory"] + cat_active["Required"]
+                if man_req != misra.active:
+                    res.warnings.append(
+                        f"{ws.title}: 카테고리 합(Man+Req={man_req}) != 총위반({misra.active}) "
+                        f"— 기타 카테고리(Common 등) 행 누락, audit 검토 필요"
+                    )
         for cat, r in srows.items():
-            # 총 위반 건수
+            # 총 위반 건수 / 위반 룰 개수 — 수식 셀(v0.11 =COUNTIF) 보존, 비-수식만 기입
             if failed:
-                mark_user_input_required(ws, r, h_total[1], hint="QAC 추출 실패")
+                # 추출 실패: operand 파괴 없이 노란 배경만 (string 금지 → #VALUE! 방지)
+                mark_user_input_fill_only(ws, r, h_total[1])
                 res.user_input_cells += 1
-            else:
-                safe_write(ws, r, h_total[1], cat_active.get(cat, 0))
-                res.filled_cells += 1
-            # 위반 룰 개수
-            if h_rules is not None:
-                if failed:
-                    mark_user_input_required(ws, r, h_rules[1], hint="QAC 추출 실패")
+                if h_rules is not None:
+                    mark_user_input_fill_only(ws, r, h_rules[1])
                     res.user_input_cells += 1
-                else:
-                    safe_write(ws, r, h_rules[1], cat_rules.get(cat, 0))
-                    res.filled_cells += 1
-            # 예외 처리 항목 수 — 로그 부재 → 노란 표시 (리뷰어 판정)
+            else:
+                _write_value_safe(ws, r, h_total[1], cat_active.get(cat, 0), res, "총 위반 건수")
+                if h_rules is not None:
+                    _write_value_safe(ws, r, h_rules[1], cat_rules.get(cat, 0), res, "위반 룰 개수")
+            # 예외 처리 항목 수 — 수식 operand(H77=D77-F77) 이므로 텍스트 금지, 노란 배경만
             if h_exc is not None:
-                mark_user_input_required(ws, r, h_exc[1], hint="리뷰어 Deviation 판정")
+                mark_user_input_fill_only(ws, r, h_exc[1])
                 res.user_input_cells += 1
 
     # Test Environment: 도구명 / Version
@@ -261,6 +288,17 @@ def _write_st201(ws: Any, meta: SwsaBuildMeta, st201: Optional[St201Result],
         res.sheets_filled.append(SHEET_ST201)
         return
     hr, fcol = hdr  # F열(count) = 헤더 컬럼
+
+    # C4: v0.11 양식은 F=APP / G=BOOT 분리. 현재는 병합 total 을 F 에 기입하므로
+    # 분리 양식이면 투명성 경고 (모듈별 분리 기입은 후속 — St201Result.module 활용).
+    sub = ws.cell(hr + 1, fcol).value
+    sub_next = ws.cell(hr + 1, fcol + 1).value
+    if isinstance(sub, str) and sub.strip().upper() == "APP" and \
+            isinstance(sub_next, str) and sub_next.strip().upper() == "BOOT":
+        res.warnings.append(
+            f"{ws.title}: F=APP/G=BOOT 분리 양식 — 병합 total 을 F열에 기입 "
+            "(모듈별 분리 미구현, G열 audit 검토 필요)"
+        )
 
     filled = 0
     skipped: List[str] = []
@@ -320,18 +358,27 @@ def _write_st1101(ws: Any, meta: SwsaBuildMeta, qac: Optional[QacXmlResult], res
     _write_st_test_info(ws, meta, res)
     _stamp(ws, "코딩룰 버전", meta.secure_rule_version, max_row=12)
     secure = qac.secure if qac else None
-    failed = (qac is None) or qac.extraction_failed or (secure is None)
-    h_total = find_label_row(ws, "총 위반 건수", max_row=120) or find_label_row(ws, "총 위반", max_row=12)
-    if h_total is not None:
-        # 총 위반 헤더 옆/아래 — LAYOUT-B 는 헤더 다음 행에 값
-        tgt = find_value_target(ws, "총 위반", max_row=12)
-        if tgt:
-            if failed or secure is None:
-                mark_user_input_required(ws, tgt[0], tgt[1], hint="QAC 추출 실패")
-                res.user_input_cells += 1
-            else:
-                safe_write(ws, tgt[0], tgt[1], secure.active)
-                res.filled_cells += 1
+    failed = (qac is None) or (qac is not None and qac.extraction_failed) or (secure is None)
+    # C3: Result 블록 헤더(J4=$E$79 수식) 오기입 방지 — Test Summary 섹션 앵커 후
+    # 'Test Summary Report' 아래의 '총 위반 건수' 데이터 행만 타깃.
+    sec_row = 1
+    for rr in range(1, min(ws.max_row, 140) + 1):
+        bv = ws.cell(rr, 2).value
+        if isinstance(bv, str) and "Test Summary Report" in bv:
+            sec_row = rr
+            break
+    h_total = find_label_row(ws, "총 위반 건수", max_row=140, min_row=sec_row)
+    if h_total is None:
+        res.warnings.append(f"{ws.title}: Test Summary '총 위반 건수' 헤더 미발견 — 미기입")
+        res.sheets_filled.append(SHEET_ST1101)
+        return
+    srows = _find_summary_rows(ws, h_total[0])
+    total_row = srows.get("Total", h_total[0] + 1)
+    if failed or secure is None:
+        mark_user_input_fill_only(ws, total_row, h_total[1])
+        res.user_input_cells += 1
+    else:
+        _write_value_safe(ws, total_row, h_total[1], secure.active, res, "ST1101 총 위반")
     res.sheets_filled.append(SHEET_ST1101)
 
 

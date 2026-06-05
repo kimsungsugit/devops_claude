@@ -111,3 +111,28 @@ class TestCollect:
 def test_logset_total_property():
     ls = SwsaLogSet(qac_xml=["a"], qac_hmr=["b", "c"], pmd_txt=["d"])
     assert ls.total == 4
+
+
+class TestLatestPerModule:
+    """날짜 중복 합산 차단 — 모듈별 최신 분석만 선택."""
+
+    def test_collect_dedups_dates(self):
+        # APP/BOOT 각 2개 날짜 → 최신만 (2088 더블카운팅 방지)
+        files = {
+            "U:/PV/QAC/APP_260326_v2631/results_data.xml": _XML_TPL.format(ft=100, fa=40, t=20, a=10).encode(),
+            "U:/PV/QAC/APP_260527_v0.05/results_data.xml": _XML_TPL.format(ft=200, fa=80, t=40, a=30).encode(),
+            "U:/PV/QAC/BOOT_260402_v1.13/results_data.xml": _XML_TPL.format(ft=50, fa=20, t=8, a=6).encode(),
+            "U:/PV/QAC/BOOT_260527_v1.16/results_data.xml": _XML_TPL.format(ft=60, fa=25, t=10, a=7).encode(),
+        }
+        data = collect_swsa_inputs(FakeResolver(files), "U:/PV")
+        # 최신: APP_260527(a=30) + BOOT_260527(a=7) = 37 (260326/260402 제외)
+        assert data.qac_xml.misra.active == 37
+        assert any("이전 분석 제외" in w for w in data.warnings)
+
+    def test_single_date_no_drop(self):
+        files = {
+            "U:/PV/QAC/APP_260527/results_data.xml": _XML_TPL.format(ft=100, fa=40, t=20, a=10).encode(),
+        }
+        data = collect_swsa_inputs(FakeResolver(files), "U:/PV")
+        assert data.qac_xml.misra.active == 10
+        assert not any("제외" in w for w in data.warnings)

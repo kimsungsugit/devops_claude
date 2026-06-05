@@ -872,11 +872,13 @@ class SwSABuildRequest(BaseModel):
     validation_date: str = Field("", pattern=r"^$|^\d{2,4}[-/.]\d{1,2}[-/.]\d{1,2}$")
     history_description: str = Field("", max_length=300)
 
-    @field_validator("log_folder", "template_path", "test_engineer", "debugger",
+    @field_validator("project_id", "log_folder", "template_path", "test_engineer", "debugger",
                      "compiler", "mcu", "platform_version", "reviewer_override",
-                     "approver_override")
+                     "approver_override", "doc_id_base", "doc_version", "doc_status",
+                     "phase", "product", "verification_target", "history_description")
     @classmethod
     def _no_newline(cls, v):
+        # M1: project_id/doc_version 등은 Content-Disposition filename 유입 → CRLF 차단 필수
         if v is None:
             return v
         if "\n" in v or "\r" in v:

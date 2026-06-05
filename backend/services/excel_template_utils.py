@@ -1043,6 +1043,26 @@ def write_value_or_mark(
     return False
 
 
+def mark_user_input_fill_only(ws: Any, row: int, col: int) -> bool:
+    """노란 배경만 적용 (텍스트 미기입).
+
+    수식의 operand 이거나 수식 셀에 placeholder STRING 을 쓰면 `=A-B` 같은 식이
+    `#VALUE!` 가 되거나 audit 교차검증 수식이 파괴된다. 그런 셀에는 텍스트 대신
+    배경색만으로 '사용자 입력 필요'를 표시한다 (값은 보존).
+    """
+    return _apply_fill(ws, row, col, _USER_INPUT_FILL_RGB)
+
+
+def is_formula_cell(ws: Any, row: int, col: int) -> bool:
+    """대상 셀(머지 anchor 보정)이 수식(`=...`)인지. 수식 셀 덮어쓰기 방지용."""
+    anchor_row, anchor_col = resolve_merge_anchor(ws, row, col)
+    try:
+        v = ws.cell(row=anchor_row, column=anchor_col).value
+    except (AttributeError, ValueError):
+        return False
+    return isinstance(v, str) and v.startswith("=")
+
+
 def mark_fail_cell(ws: Any, row: int, col: int) -> bool:
     """23차 T192: 2.Consistency FAIL row 등 강조용 빨간 배경."""
     return _apply_fill(ws, row, col, _FAIL_FILL_RGB)

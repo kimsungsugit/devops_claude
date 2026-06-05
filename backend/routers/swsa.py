@@ -14,19 +14,23 @@ import logging
 from typing import Any
 from urllib.parse import quote
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import Response
 
+from backend.dependencies.admin import require_admin
 from backend.routers._safety import run_build_safely
 from backend.schemas import SwSABuildRequest
 from backend.services.file_resolver import get_resolver
+from backend.services.path_mode_check import check_log_folder_mode_compat
 from backend.services.swsa_aggregator import build_swsa_report
 from backend.services.swsa_input_adapter import collect_swsa_inputs
 from backend.services.swsa_meta import SwsaBuildMeta
 
 _logger = logging.getLogger("devops_api")
 
-router = APIRouter(prefix="/api/swsa", tags=["swsa"])
+# SwUT/SwIT(40차)와 동일 — 라우터 전체 admin only. ASIL evidence 생성 + 임의 경로
+# read 방지 (local 모드는 미들웨어 우회 가능 → endpoint gate 가 유일 방어선).
+router = APIRouter(prefix="/api/swsa", tags=["swsa"], dependencies=[Depends(require_admin)])
 
 # SwIT 와 동일 보수적 시작 (신규 도구). worst-case 측정 후 상향 검토.
 _BUILD_SEMAPHORE = asyncio.Semaphore(2)
@@ -82,7 +86,11 @@ def _json_header(obj: Any) -> str:
 def _to_response(res: Any, meta: SwsaBuildMeta, inputs: Any) -> Response:
     data = res.xlsm_io.getvalue()
     filename = f"({meta.project_id}_SwSA) Software Static Analysis Report_{meta.doc_version}_{meta.test_date}.xlsm"
-    ascii_name = filename.encode("ascii", errors="replace").decode("ascii").replace('"', "_")
+    # CR/LF 는 valid ASCII 라 encode(replace)로 안 걸러짐 → 헤더 인젝션/500(h11) 방지 위해 제거
+    ascii_name = (
+        filename.encode("ascii", errors="replace").decode("ascii")
+        .replace('"', "_").replace("\r", " ").replace("\n", " ")
+    )
 
     summary = {
         "sheets_filled": res.sheets_filled,
@@ -105,6 +113,9 @@ def _to_response(res: Any, meta: SwsaBuildMeta, inputs: Any) -> Response:
 def _do_build(req: SwSABuildRequest) -> Response:
     resolver = get_resolver()
     log_folder = req.log_folder.strip()
+    if log_folder:
+        # local/cloudium 모드 ↔ 경로 형식 불일치 사전 진단 (swit 대칭, UX + UNC 차단)
+        check_log_folder_mode_compat(log_folder, resolver)
     inputs = collect_swsa_inputs(resolver, log_folder) if log_folder else None
     template_bytes = _read_template_bytes(req)
     meta = _build_meta(req)

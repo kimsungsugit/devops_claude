@@ -49,6 +49,19 @@ class TestSchemaValidation:
         assert r.status_code == 422
 
 
+class TestAdminGate:
+    def test_non_admin_forbidden(self):
+        # admin gate (require_admin) — 비-admin 사용자 차단 (SwUT/SwIT 대칭)
+        r = client.post(_EP, json=_valid_body(template_path="U:/x/tpl.xlsm"),
+                        headers={"X-User": "nonadmin_user_xyz"})
+        assert r.status_code in (401, 403)
+
+    def test_admin_passes_gate(self):
+        # admin(tester, conftest 등록)은 gate 통과 → template 부재 400 (gate 아님)
+        r = _post(_valid_body())
+        assert r.status_code == 400
+
+
 class TestBuildPath:
     def test_no_template_returns_400(self):
         r = _post(_valid_body(log_folder="", template_path=""))

@@ -31,6 +31,14 @@ def _meta():
     )
 
 
+def _is_yellow(cell) -> bool:
+    """USER_INPUT_FILL_RGB(노란) 배경 여부."""
+    try:
+        return bool(cell.fill and cell.fill.fill_type) and cell.fill.fgColor.rgb == "FFFFEB9C"
+    except (AttributeError, TypeError):
+        return False
+
+
 def _synth_template_bytes() -> bytes:
     """라벨/병합을 갖춘 최소 합성 템플릿(.xlsx, vba 없음) — graceful 테스트용."""
     wb = Workbook()
@@ -63,8 +71,9 @@ class TestSyntheticGraceful:
         # 총 위반 건수(D77) = MISRA active=286, 위반 룰 개수(B77)=15
         assert st["D77"].value == 286
         assert st["B77"].value == 15
-        # 예외 처리(F77) 노란 표시
-        assert "사용자 입력 필요" in str(st["F77"].value)
+        # 예외 처리(F77): 수식 operand 보존 — 텍스트 없이 노란 배경만 (C1 fix)
+        assert st["F77"].value is None
+        assert _is_yellow(st["F77"])
         assert res.filled_cells > 0
 
     def test_extraction_failed_marks_yellow(self):
@@ -73,7 +82,9 @@ class TestSyntheticGraceful:
         res = build_swsa_report(tpl, _meta(), qac_xml=None)
         out = load_workbook(io.BytesIO(res.xlsm_io.getvalue()))
         st = out["1.ST101"]
-        assert "사용자 입력 필요" in str(st["D77"].value)
+        # 추출 실패: D77(수식 operand) 텍스트 없이 노란 배경만 (#VALUE! 방지)
+        assert st["D77"].value is None
+        assert _is_yellow(st["D77"])
         assert res.user_input_cells >= 1
 
     def test_corrupt_xml_extraction_failed_marks(self):
@@ -82,7 +93,23 @@ class TestSyntheticGraceful:
         assert bad.extraction_failed is True
         res = build_swsa_report(tpl, _meta(), qac_xml=bad)
         out = load_workbook(io.BytesIO(res.xlsm_io.getvalue()))
-        assert "사용자 입력 필요" in str(out["1.ST101"]["D77"].value)
+        assert _is_yellow(out["1.ST101"]["D77"])
+
+    def test_formula_cell_preserved(self):
+        # C2: v0.11 처럼 D77 이 수식이면 literal 로 덮지 않고 보존 + 경고
+        wb = Workbook()
+        st = wb.create_sheet("1.ST101")
+        for r, lab in [(4, "분석차수"), (5, "SW Ver."), (6, "Tester"), (7, "Debugger")]:
+            st.cell(r, 2).value = lab
+        st.cell(76, 4).value = "총 위반 건수"
+        st.cell(77, 4).value = "=COUNTIF(L86:L102,\">0\")"  # 수식
+        bio = io.BytesIO(); wb.save(bio)
+        qac = parse_qac_results_xml(_XML)
+        res = build_swsa_report(bio.getvalue(), _meta(), qac_xml=qac)
+        out = load_workbook(io.BytesIO(res.xlsm_io.getvalue()))
+        # 수식 보존 (286 literal 로 덮이지 않음)
+        assert out["1.ST101"]["D77"].value == "=COUNTIF(L86:L102,\">0\")"
+        assert any("수식 셀 보존" in w for w in res.warnings)
 
 
 @pytest.mark.skipif(not os.path.exists(_TEMPLATE) or not os.path.exists(_XML),
@@ -113,7 +140,7 @@ class TestRealTemplateBuild:
         assert st["C4"].value == "1"
         assert st["D77"].value == 286   # MISRA active
         assert st["B77"].value == 15    # distinct rules
-        assert "사용자 입력 필요" in str(st["F77"].value)  # 예외처리 노란
+        assert st["F77"].value is None and _is_yellow(st["F77"])  # 예외처리 노란(텍스트X)
 
     def test_integrity_preserved(self):
         tpl_wb = load_workbook(_TEMPLATE, keep_vba=True)

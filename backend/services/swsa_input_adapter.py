@@ -17,7 +17,7 @@ ISO 26262: 발견 실패/파싱 실패는 warnings 누적 (silent skip 차단).
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 
 from backend.services.swsa_pmd_parser import DuplicationBlock, PmdResult, parse_pmd_cpd
 from backend.services.swsa_qac_xml_parser import (
@@ -109,6 +109,45 @@ def _module_of(path: str) -> str:
     """.../<TOOL>/<MODULE_날짜_버전>/file → MODULE_날짜_버전."""
     parts = path.replace("\\", "/").rstrip("/").split("/")
     return parts[-2] if len(parts) >= 2 else ""
+
+
+def _module_prefix_and_date(path: str) -> tuple[str, str]:
+    """모듈 폴더명 → (prefix, date). 예: 'APP_260527_v0.05.37' → ('APP', '260527')."""
+    folder = _module_of(path)
+    toks = folder.split("_")
+    prefix = toks[0] if toks else folder
+    date = ""
+    for t in toks[1:]:
+        if t.isdigit() and len(t) >= 6:
+            date = t
+            break
+    return prefix, date
+
+
+def _select_latest_per_module(paths: List[str], kind: str, warnings: List[str]) -> List[str]:
+    """동일 모듈(prefix)의 여러 분석 날짜 중 **최신만** 선택 (중복 합산 차단).
+
+    구조 ``<TOOL>/<MODULE_날짜_버전>/file`` 에서 같은 MODULE(APP/BOOT)이 여러 날짜
+    폴더에 존재하면(예: APP_260326 + APP_260527) 합산 시 메트릭/위반이 N배가 된다.
+    prefix별 최신 date 만 유지하고 제외 항목은 warnings 에 기록(silent drop 차단).
+    """
+    by_prefix: Dict[str, tuple] = {}  # prefix -> (path, date)
+    dropped: List[str] = []
+    for p in paths:
+        prefix, date = _module_prefix_and_date(p)
+        cur = by_prefix.get(prefix)
+        if cur is None:
+            by_prefix[prefix] = (p, date)
+        elif date > cur[1]:
+            dropped.append(f"{_module_of(cur[0])}")
+            by_prefix[prefix] = (p, date)
+        else:
+            dropped.append(f"{_module_of(p)}")
+    if dropped:
+        warnings.append(
+            f"{kind}: 모듈별 최신 분석만 사용 — 이전 분석 제외 {sorted(set(dropped))}"
+        )
+    return [v[0] for v in by_prefix.values()]
 
 
 # ─────────────────────────── 병합 ───────────────────────────
@@ -216,6 +255,10 @@ def merge_pmd_results(results: List[PmdResult]) -> Optional[PmdResult]:
 def collect_swsa_inputs(resolver: Any, log_folder: str) -> SwsaInputData:
     """로그 폴더 → 발견 → resolver read → 파싱 → 모듈 병합."""
     log_set = discover_swsa_logs(resolver, log_folder)
+    # 모듈별 최신 분석 날짜만 선택 (날짜 중복 합산 차단 — APP_260326+APP_260527 등)
+    log_set.qac_xml = _select_latest_per_module(log_set.qac_xml, "QAC xml", log_set.warnings)
+    log_set.qac_hmr = _select_latest_per_module(log_set.qac_hmr, "QAC HMR", log_set.warnings)
+    log_set.pmd_txt = _select_latest_per_module(log_set.pmd_txt, "PMD", log_set.warnings)
     data = SwsaInputData(log_set=log_set)
     data.warnings.extend(log_set.warnings)
 
