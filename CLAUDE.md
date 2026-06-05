@@ -334,8 +334,6 @@ audit reviewer가 산출물 자체에서 빌드 환경 / ASIL source / 분포 / 
 > (`g_ApiIn_LinRx_ReadData` 등) + orphan 1 (`ADC0_stop_current_workaround`). audit
 > reviewer가 SUDS 등재 누락 함수 즉시 식별.
 
-> **30차 W21 의미 분리**: `mark_fail_cell` ↔ `mark_asil_d_function` 색상 RGB 동일 (`FFFFC7CE`)이나 호출 의미 다름. FAIL = TC 실행 실패, ASIL D = audit 검토 우선순위. 동일 셀 겹치면 ASIL D 우선 (호출 순서 보장). audit reviewer에게 정책 사전 통보 권장.
-
 24차 silent "N/A" 제거 — Actual Coverage/Pass ratio가 data 부재 시 `▶ 사용자 입력 필요 — VectorCAST 데이터 부재 — log_folder 재확인` 명시 (deep-reviewer X7 강화).
 
 ### Design Token 단일 출처 (29차 W17)
@@ -394,7 +392,6 @@ audit reviewer가 산출물 자체에서 빌드 환경 / ASIL source / 분포 / 
 > .venv/Scripts/python.exe -m pytest tests/unit/test_swut_*.py tests/unit/test_excel_template_utils.py --collect-only -q | tail -3
 > cd frontend-v2 && npx vitest run src/__tests__/SwUTBuildSection.test.jsx --reporter=basic
 > ```
-> 27차까지 "~260개" 표기는 부정확 — 28차 실측 220개, 29차 design_tokens 회귀 +1, 30차 prep W25 fix로 환경 무관 221개.
 
 ### Backend Reload 절차 (26차 C6 명시)
 
@@ -467,12 +464,6 @@ ISO 26262 ASIL B+ 통합 테스트 산출물 자동 생성. SwUT 30~32차 인프
 - **Frontend** `frontend-v2/src/components/sections/SwITBuildSection.jsx` (신규, ~430 lines) — SwUTBuildSection 패턴 차용. 3 섹션: Coverage 빌드 / SITR 빌드 / Coverage↔SITR consistency 검증. localStorage 키 `devops_v2_swit_form` (SwUT와 분리). X-SwIT-Summary/Warnings 헤더
 - **Frontend** Detail.jsx에 SwIT 빌드 탭 추가 (icon 🧩, id 'swit')
 - 회귀: backend +5 / frontend +8
-
-### 34차 deep-reviewer C1/C2/C3 fix (commit 포함)
-- **C1 (Critical X3)**: `_collect_tc_to_function` `.match` → `.search`로 변경 (SwIT TC prefix `SwITC_` 호환 — 이전 항상 FAIL → 정상 매칭). `swut_coverage_aggregator.py:378`
-- **C2 (Critical X3)**: `_compute_self_consistency` + `_write_consistency_sheet`에 `test_kind: str = "SwUTS"` kwarg 추가. SwIT 호출 시 `test_kind="SwIT"` 전달 — intro 텍스트 + row 5 item label 동적 치환 (이전: SwUTS 하드코딩이 SwIT 산출물에 그대로 기록되어 audit reviewer 혼동)
-- **C3 (Critical X6)**: SwIT v2.02 양식 ASIL 시각 강조 사전 통보 — 31차 W29 색상 정책 (B 파랑 #E2F0FF / C 주황 #FFE5CC / D 빨강 #FFC7CE)이 SwIT 산출물에도 적용됨. **회사 v2.02 SITR 양식이 빨강만 표준이라 추가 색상은 비표준 audit 확장**. 라이브 PoC 검증 시 회사 audit reviewer에 사전 통보 의무
-- **W2 (Warning X4)**: SwIT SITR이 `_write_cover` / `_write_test_summary` / `_write_deviation` / `_write_test_log` private 함수 강결합. 향후 SwUT SUTR signature 변경 시 SwIT 회귀에서 자동 감지 위해 `__all__` 명시 또는 public alias 추가는 35차+ 정비 후보
 
 ### 라운드 archive (36-fix ~ 58차)
 

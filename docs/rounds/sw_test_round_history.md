@@ -1,7 +1,14 @@
-# SwUT/SwIT 라운드 히스토리 (36-fix ~ 58차)
+# SwUT/SwIT 라운드 히스토리 (34차 fix, 36-fix ~ 58차)
 
-> CLAUDE.md 본문 비대화 해결 (44차 W21, 이후 누적 정비) — 36-fix 이후 상세 라운드 노트를 본 파일로 분리.
-> CLAUDE.md 본문에는 라운드 summary table 1행 + 33~35차 핵심 정책만 유지. 신규 라운드 detail은 commit 직후 본 파일에 누적한다.
+> CLAUDE.md 본문 비대화 해결 (44차 W21, 이후 누적 정비) — 라운드 상세 노트를 본 파일로 분리.
+> CLAUDE.md 본문에는 라운드 summary table 1행 + 33~35차 핵심 정책(SwIT Builder 섹션)만 유지. 신규 라운드 detail은 commit 직후 본 파일에 누적한다.
+
+## 34차 deep-reviewer C1/C2/C3 fix (SwIT v2.02 대칭)
+
+- **C1 (Critical X3)**: `_collect_tc_to_function` `.match` → `.search`로 변경 (SwIT TC prefix `SwITC_` 호환 — 이전 항상 FAIL → 정상 매칭). `swut_coverage_aggregator.py:378`
+- **C2 (Critical X3)**: `_compute_self_consistency` + `_write_consistency_sheet`에 `test_kind: str = "SwUTS"` kwarg 추가. SwIT 호출 시 `test_kind="SwIT"` 전달 — intro 텍스트 + row 5 item label 동적 치환 (이전: SwUTS 하드코딩이 SwIT 산출물에 그대로 기록되어 audit reviewer 혼동)
+- **C3 (Critical X6)**: SwIT v2.02 양식 ASIL 시각 강조 사전 통보 — 31차 W29 색상 정책 (B 파랑 #E2F0FF / C 주황 #FFE5CC / D 빨강 #FFC7CE)이 SwIT 산출물에도 적용됨. **회사 v2.02 SITR 양식이 빨강만 표준이라 추가 색상은 비표준 audit 확장**. 라이브 PoC 검증 시 회사 audit reviewer에 사전 통보 의무
+- **W2 (Warning X4)**: SwIT SITR이 `_write_cover` / `_write_test_summary` / `_write_deviation` / `_write_test_log` private 함수 강결합. 향후 SwUT SUTR signature 변경 시 SwIT 회귀에서 자동 감지 위해 `__all__` 명시 또는 public alias 추가는 35차+ 정비 후보
 
 ## 36-fix — SwIT log filename SwITC_ prefix 지원 (Critical)
 - 35차 PoC 자체 평가 중 발견: `_extract_env_from_filename` regex가 `SWTE_\d+` 하드코딩
