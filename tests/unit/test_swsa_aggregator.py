@@ -16,6 +16,7 @@ _TEMPLATE = os.path.join(_S, "TEMPLATE_(XXXX_SwSA) Software Static Analysis Repo
 _XML = os.path.join(_S, "XML_APP_NE1aW.xml")
 _HMR = os.path.join(_S, "LOG_QAC_NE1aW_01_HMR_27052026_183745.html")
 _PMD = os.path.join(_S, "LOG_NE1AW_PORTING_2631_PMD_Report_20260323.txt")
+_DV = os.path.join(_S, "REFERENCE_(KJPDS02_DV_SwSA) Software Static Analysis Report_v1.02_260324_R.xlsm")
 
 
 def _meta():
@@ -155,6 +156,15 @@ class TestRealTemplateBuild:
         # v0.10 템플릿엔 ST1101 없음 → graceful 경고
         assert any("11.ST1101 시트 없음" in w for w in self.res.warnings)
 
+    def test_history_filled(self):
+        # History 최신 행 기입 (이전 미채움 갭)
+        h = self.out["History"]
+        assert "History" in self.res.sheets_filled
+        assert h["B5"].value == "v0.11"       # doc_version
+        assert h["C5"].value == "2026.04.24"  # test_date
+        assert h["E5"].value == "김진경"        # author
+        assert _is_yellow(h["F5"])            # reviewer 빈 → 노란
+
 
 @pytest.mark.skipif(
     not (os.path.exists(_TEMPLATE) and os.path.exists(_HMR) and os.path.exists(_PMD)),
@@ -193,6 +203,37 @@ class TestST201MetricTable:
         assert self.ws["F77"].value is None
         assert any("무소스" in w and "Recursion" in w for w in self.res.warnings)
 
-    def test_nesting_partial_band_warned(self):
-        # nesting=0 함수가 '1~10' 밴드 밖 → 투명성 경고
-        assert any("밴드 밖" in w for w in self.res.warnings)
+    def test_nesting_zero_absorbed_in_band1(self):
+        # rank1: nesting=0 함수도 첫 밴드(1~10)에 흡수 → F67=전체(878), '밴드 밖' 경고 없음
+        assert self.ws["F67"].value == 878
+        assert not any("밴드 밖" in w for w in self.res.warnings)
+
+
+@pytest.mark.skipif(not (os.path.exists(_TEMPLATE) and os.path.exists(_DV) and os.path.exists(_XML)),
+                    reason="실 템플릿/DV/XML 샘플 없음")
+class TestVariantSignoffDeviation:
+    def test_dv_variant_history_append(self):
+        # rank7: DV(기존 v0.10/v1.01/v1.02 3행)에 덮어쓰지 않고 append
+        with open(_DV, "rb") as f:
+            dv = f.read()
+        meta = SwsaBuildMeta(project_id="KJPDS02", release_sw_version="1.03",
+                             test_date="2026.06.05", doc_version="v1.03", test_engineer="김진경")
+        res = build_swsa_report(dv, meta, qac_xml=parse_qac_results_xml(_XML))
+        h = load_workbook(io.BytesIO(res.xlsm_io.getvalue()), keep_vba=True)["History"]
+        versions = [h.cell(r, 2).value for r in range(5, 10)]
+        assert "v1.02" in versions   # 기존 이력 보존
+        assert "v1.03" in versions   # 신규 append
+
+    def test_cover_signoff_and_deviation(self):
+        with open(_TEMPLATE, "rb") as f:
+            tpl = f.read()
+        meta = SwsaBuildMeta(project_id="KJPDS02", release_sw_version="2631.00",
+                             test_date="2026.04.24", reviewer_override="박검토",
+                             approver_override="이승인")
+        res = build_swsa_report(tpl, meta, qac_xml=parse_qac_results_xml(_XML))
+        cov = load_workbook(io.BytesIO(res.xlsm_io.getvalue()), keep_vba=True)["Cover"]
+        # rank8 사인오프
+        assert cov["J3"].value == "박검토"
+        assert cov["K3"].value == "이승인"
+        # rank5 deviation 경고 (제외 997/1283 = 78%)
+        assert any("deviation" in w and "78%" in w for w in res.warnings)

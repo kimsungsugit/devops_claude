@@ -55,6 +55,7 @@ __all__ = ["SwsaBuildResult", "build_swsa_report"]
 
 # 양식 시트명 (존재할 때만 채움)
 SHEET_COVER = "Cover"
+SHEET_HISTORY = "History"
 SHEET_SUMMARY = "Summary"
 SHEET_ST101 = "1.ST101"
 SHEET_ST201 = "2.ST201"
@@ -124,9 +125,61 @@ def _write_cover(ws: Any, meta: SwsaBuildMeta, res: SwsaBuildResult) -> None:
         # doc-block 라벨은 col C(3) — 사인오프 헤더 I2 'Author' 충돌 회피
         if _stamp(ws, label, val, max_row=40, label_col=3):
             n += 1
+    # rank8: 사인오프 블록 (I2 Author/J2 Reviewer/K2 Approver 헤더 → 아래 행 이름)
+    for label, val in (("Reviewer", meta.reviewer), ("Approver", meta.approver)):
+        if not val:
+            continue
+        pos = find_label_row(ws, label, max_row=8)
+        if pos and safe_write(ws, pos[0] + 1, pos[1], val):
+            n += 1
     res.filled_cells += n
     if n:
         res.sheets_filled.append(SHEET_COVER)
+
+
+# ─────────────────────────── History ───────────────────────────
+def _write_history(ws: Any, meta: SwsaBuildMeta, res: SwsaBuildResult) -> None:
+    """Revision History 최신 행 기입 (Version/Date/Description/Author/Reviewer/Approver).
+
+    헤더(B='Version') 다음 데이터 행(템플릿 placeholder 'v0.10/2X.XX.XX/-Draft/XXX')에
+    실제 빌드 정보를 기입. reviewer/approver 빈 값은 노란 표시 (Cover 정책 동일).
+    """
+    hdr = find_label_row(ws, "Version", max_row=20, label_col=2)
+    if hdr is None:
+        res.warnings.append(f"{ws.title}: 'Version' 헤더 미발견 — History 미기입")
+        return
+    hr, vcol = hdr  # B(Version) 컬럼
+    # rank7 fix: 첫 데이터 행을 무조건 덮으면 기존 이력(DV: v0.10/v1.01/v1.02)을
+    # 클로버. 첫 빈 행 또는 placeholder('2X.XX.XX'/'XXX') 행을 찾아 기입, 모두
+    # 채워졌으면 마지막 다음 행에 append.
+    r = hr + 1
+    last_filled = hr
+    for rr in range(hr + 1, hr + 31):
+        bval = ws.cell(rr, vcol).value
+        cval = ws.cell(rr, vcol + 1).value      # Date
+        if bval is None or (isinstance(bval, str) and not bval.strip()):
+            r = rr
+            break
+        if isinstance(cval, str) and "X" in cval.upper():  # placeholder 날짜
+            r = rr
+            break
+        last_filled = rr
+    else:
+        r = last_filled + 1  # 모든 행이 실제 이력 → append
+    # 컬럼: B=Version C=Date D=Description E=Author F=Reviewer G=Approver
+    safe_write(ws, r, vcol, meta.doc_version)
+    safe_write(ws, r, vcol + 1, meta.test_date)
+    desc = meta.history_description or f"- {meta.doc_version} 정적분석 작성"
+    safe_write(ws, r, vcol + 2, desc)
+    safe_write(ws, r, vcol + 3, meta.author)
+    res.filled_cells += 4
+    # Reviewer / Approver — 빈 값이면 노란 (audit 필수)
+    for off, val in ((4, meta.reviewer), (5, meta.approver)):
+        if write_value_or_mark(ws, r, vcol + off, val, hint="audit 필수"):
+            res.filled_cells += 1
+        else:
+            res.user_input_cells += 1
+    res.sheets_filled.append(SHEET_HISTORY)
 
 
 # ─────────────────────────── Summary ───────────────────────────
@@ -205,6 +258,16 @@ def _write_st101(ws: Any, meta: SwsaBuildMeta, qac: Optional[QacXmlResult], res:
 
     misra = qac.misra if qac else None
     failed = (qac is None) or qac.extraction_failed or (misra is None)
+
+    # rank5: deviation(제외) 노출 — 산출물은 active 만 표시하므로 제외 비율이 높으면
+    # audit deviation report 의무를 경고로 surface (excluded = total - active).
+    if misra is not None and misra.total > 0:
+        pct = misra.excluded / misra.total * 100
+        if pct >= 70:
+            res.warnings.append(
+                f"{ws.title}: 제외(deviation) {misra.excluded}/{misra.total}건 "
+                f"({pct:.0f}%) — 산출물은 active {misra.active}만 표시, deviation report 의무"
+            )
 
     # Test Summary 표: 헤더 '총 위반 건수' / '위반 룰 개수' 라벨 앵커
     h_total = find_label_row(ws, "총 위반 건수", max_row=120)
@@ -407,6 +470,8 @@ def build_swsa_report(
 
     if SHEET_COVER in sheets:
         _write_cover(wb[SHEET_COVER], meta, res)
+    if SHEET_HISTORY in sheets:
+        _write_history(wb[SHEET_HISTORY], meta, res)
     if SHEET_SUMMARY in sheets:
         _write_summary_header(wb[SHEET_SUMMARY], meta, res)
     if SHEET_ST101 in sheets:

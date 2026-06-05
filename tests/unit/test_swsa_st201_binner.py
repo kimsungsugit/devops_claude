@@ -45,10 +45,20 @@ class TestBinIntoBands:
         counts = bin_values_into_bands([5, 11, 12], labels)
         assert counts == [1, 2, 0]
 
-    def test_out_of_band_dropped(self):
-        # 0은 '1~10' 밴드 밖 → 어디에도 안 들어감
+    def test_first_band_absorbs_zero(self):
+        # rank1: 첫 밴드는 하한 개방 → 0 도 '1~10' Pass 밴드에 흡수 (audit fix)
         counts = bin_values_into_bands([0, 5, 5], ["1 ~ 10", "> 10"])
-        assert counts == [2, 0]  # 0은 제외
+        assert counts == [3, 0]  # 0 포함 (이전엔 드롭)
+
+    def test_first_band_absorbs_below_range(self):
+        # PARAM '1~5' 첫밴드가 0 흡수 → 전부 band-0
+        counts = bin_values_into_bands([0, 0, 3], ["1 ~ 5", "6 ~ 10", "> 10"])
+        assert counts == [3, 0, 0]
+
+    def test_later_bands_unaffected(self):
+        # 후속 밴드는 그대로 (하한 개방은 첫 밴드만)
+        counts = bin_values_into_bands([6, 11], ["1 ~ 5", "6 ~ 10", "> 10"])
+        assert counts == [0, 1, 1]
 
 
 class TestMetricItemForName:

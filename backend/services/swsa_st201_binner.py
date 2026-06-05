@@ -170,9 +170,37 @@ def parse_band_predicate(label: str):
     return None
 
 
+def _band_upper(label: str) -> Optional[int]:
+    """밴드 라벨의 상한값. 'a ~ b'→b, '<= n'→n, '< n'→n-1, 단일 'n'→n. 상한 없으면 None."""
+    s = (label or "").replace(" ", "")
+    m = re.match(r"^(\d+)~(\d+)$", s)
+    if m:
+        return int(m.group(2))
+    m = re.match(r"^<=(\d+)$", s)
+    if m:
+        return int(m.group(1))
+    m = re.match(r"^<(\d+)$", s)
+    if m:
+        return int(m.group(1)) - 1
+    m = re.match(r"^(\d+)$", s)
+    if m:
+        return int(m.group(1))
+    return None
+
+
 def bin_values_into_bands(values: List[int], band_labels: List[str]) -> List[int]:
-    """함수값들을 템플릿 밴드 라벨 순서대로 카운트. 밴드 겹치면 먼저 매칭한 밴드."""
+    """함수값들을 템플릿 밴드 라벨 순서대로 카운트. 밴드 겹치면 먼저 매칭한 밴드.
+
+    rank1 audit fix: 첫(Pass) 밴드는 **하한 개방**(`v <= 상한`)으로 처리한다. 회사
+    양식은 nesting/param 등 첫 밴드를 '1 ~ N' 으로 쓰지만 HIS metric 은 0 값을 가질
+    수 있고(예: nesting=0 함수), 레퍼런스가 첫 밴드에 전체 함수수(859)를 기재하는
+    것으로 보아 0 도 Pass 밴드에 포함하는 것이 정답. '1 ~ N' 의 0 누락을 방지.
+    """
     preds = [parse_band_predicate(lbl) for lbl in band_labels]
+    if band_labels:
+        upper0 = _band_upper(band_labels[0])
+        if upper0 is not None:
+            preds[0] = lambda v, u=upper0: v <= u  # 첫 밴드 하한 개방
     counts = [0] * len(band_labels)
     for v in values:
         for i, p in enumerate(preds):
