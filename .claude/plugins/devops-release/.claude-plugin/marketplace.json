@@ -1,0 +1,9 @@
+{
+  "plugins": [
+    {
+      "name": "devops-release",
+      "description": "DevOps Release 자동화 - 문서생성, 코드리뷰, 영향도분석, CI/CD 통합",
+      "source": "./"
+    }
+  ]
+}

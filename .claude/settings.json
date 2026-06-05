@@ -178,5 +178,17 @@
     "NODE_ENV": "development"
   },
   "enableAllProjectMcpServers": true,
+  "extraKnownMarketplaces": {
+    "devops-release-local": {
+      "source": {
+        "source": "directory",
+        "path": "./.claude/plugins/devops-release"
+      },
+      "autoUpdate": false
+    }
+  },
+  "enabledPlugins": {
+    "devops-release@devops-release-local": true
+  },
   "language": "korean"
 }

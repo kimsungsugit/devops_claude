@@ -1,7 +1,7 @@
-# SwUT/SwIT 라운드 히스토리 (36-fix ~ 42차)
+# SwUT/SwIT 라운드 히스토리 (36-fix ~ 58차)
 
-> CLAUDE.md 본문 비대화 해결 (44차 W21) — 36-fix ~ 42차 상세 라운드 노트를 본 파일로 분리.
-> 33-35차 핵심 정책 + 43차 (최신) + 44차+ 신규 라운드는 CLAUDE.md 본문 유지.
+> CLAUDE.md 본문 비대화 해결 (44차 W21, 이후 누적 정비) — 36-fix 이후 상세 라운드 노트를 본 파일로 분리.
+> CLAUDE.md 본문에는 라운드 summary table 1행 + 33~35차 핵심 정책만 유지. 신규 라운드 detail은 commit 직후 본 파일에 누적한다.
 
 ## 36-fix — SwIT log filename SwITC_ prefix 지원 (Critical)
 - 35차 PoC 자체 평가 중 발견: `_extract_env_from_filename` regex가 `SWTE_\d+` 하드코딩
@@ -107,6 +107,82 @@
 - **C2 PoC 강화**: local 모드 fixture로 admin 빌드 status=200 + 실 산출물 8,515 bytes + environments=1 검증 (41차 cloudium 권한 영향 0 bytes 해결)
 - **C3 error_handler 회귀 신규**: 7건 (str detail / dict detail / extra fields / missing code / empty dict)
 - 회귀: backend 1956 → ~1968 (+12 — bootstrap +1 _mask_user / error_handler +7 / file_mode_router 영향 +0) / frontend 240 → 242 (+2 debounce + retry)
+
+## 43차 — 42차 자체 평가 발견 결함 4건 통합 fix (W19/W20/W23/W24)
+- 42차 commit `1fa4692` 자체 비판 평가에서 발견한 자체 해결 가능 4건. C1 JWT는 44차+ 별도 큰 라운드.
+- **W19 mask_user public 승격**: `_mask_user` (private, 42차) → `mask_user` (public, `__all__` 등록). `dependencies/admin.py`가 underscore private 함수 import하는 convention 위반 해결. `_mask_user = mask_user` alias로 backward-compat 유지.
+- **W20 StrictMode safe**: AdminContext.jsx에 `isMountedRef` 도입 — fetch 응답/retry timer fire가 unmount 후 setState 호출 시 React warning. 모든 setState 직전 `isMountedRef.current` 확인 + 매 mount마다 `true` 복원 (StrictMode 두 번째 mount 대응). 회귀에서 unmount 후 timer fire 시 "unmounted" warning 발생 안 함 검증.
+- **W23 frontend 회귀 실행 검증**: 42차에 미실행한 vitest 전체 회귀 실 실행 (242 → 243 +1 W20). backend admin/auth 57건 통과 (W19 mask_user 영향 회귀).
+- **W24 error_handler 빈 dict fallback**: `HTTPException(detail={})` 또는 code만 있고 message 누락 시 `str(detail)` (= "{}") 노출되어 사용자 혼란 → status-aware fallback `HTTP <status> error` 사용. 회귀 +1 (`test_dict_with_only_code_no_message`).
+- 회귀: backend 1968 → 1970 (+1 W24 dict_with_only_code + empty_dict 갱신 +1 mask_user alias 검증 보강) / frontend 242 → 243 (+1 W20 StrictMode race) / backend admin gate 57건 무회귀
+
+## 44차 — 43차 자체 평가 발견 결함 4건 통합 fix (W21/W25/W28/I3)
+- 43차 commit `c577aa0` 자체 비판 평가에서 발견한 자체 해결 가능 4건. C1 JWT는 45차+ 별도 큰 라운드.
+- **W21 CLAUDE.md archive 분리**: 본문 1500+ → ~550 lines 압축. 36-fix~42차 상세 노트를 본 파일(`docs/rounds/sw_test_round_history.md`)로 분리. 본문에는 라운드 summary table + archive 링크. 33-35차 핵심 정책 + 43차/44차 (최신) 본문 유지.
+- **W25 act() warning 정리**: AdminContext.test.jsx의 W4 retry / W20 unmount 회귀에서 `render()` + `vi.waitFor` 호출을 `await act(...)` wrap — vitest stderr act warning 0건 (이전: 2건 출력).
+- **W28 error_handler falsy message 분리**: `detail.get("message")`가 `None` / `""` / falsy 모두 status-aware fallback (`HTTP <status> error`) 사용. 의도된 빈 message 노출 차단. 회귀 +2 (`test_dict_with_empty_string_message` + `test_dict_with_none_message`).
+- **I3 _mask_user deprecation warning**: `_mask_user` alias를 단순 변수 alias → `DeprecationWarning` 발화 wrapper 함수로 전환. `stacklevel=2`로 호출 지점 정확 표시. 45차+ 완전 제거 검토.
+- 회귀: backend 1970 → 1972 (+2 W28 empty_string + none_message) + bootstrap +1 (I3 deprecation) = +3 / frontend 243 → 243 (W25 동작 변경 없이 stderr 정리만)
+
+## 45차 — C1 JWT/세션 인증 도입 (X-User spoofing 차단)
+- 40~44차 X-User 헤더 신뢰 모델 → JWT bearer token으로 교체. ISO 26262 audit 추적성 — 진짜 사용자 식별 보장.
+- **사용자 결정** (AskUserQuestion 4건 모두 Recommended): localStorage 저장 / admin이 사용자 등록 + 임시 PW / 개발 모드 X-User backward-compat / Access 60분 + Refresh 7일.
+- **Backend 신규**:
+  - `backend/services/auth_service.py` — JWT encode/decode (PyJWT HS256) + bcrypt hash/verify. 72-byte limit 명시. dev fallback secret + DEV_MODE_X_USER_FALLBACK env.
+  - `backend/services/users.py` — `config/users.json` CRUD (FileLock + atomic write + lru_cache + mtime invalidate). add/change_password/remove/list_users + bootstrap_admin_user_from_env.
+  - `backend/routers/auth.py` 확장 — POST `/api/auth/login` + `/refresh` + `/change-password` + `/logout`. Pydantic LoginRequest/RefreshRequest/ChangePasswordRequest.
+  - `backend/user_context.py` 재작성 — JWT Authorization Bearer 우선 → DEV_MODE 활성 시 X-User fallback. `/api/auth/me`는 best-effort (실패해도 401 raise 안 함, authenticated=False 응답).
+  - `backend/main.py` lifespan — `bootstrap_admin_user_from_env()` startup hook.
+- **Frontend 신규**:
+  - `frontend-v2/src/contexts/AuthContext.jsx` — login/logout state + access/refresh token localStorage. /me 401 시 refresh 자동 시도 → 실패 시 logout. StrictMode safe (`isMountedRef`).
+  - `frontend-v2/src/views/Login.jsx` — 로그인 UI + must_change_password 강제 PW 변경 화면.
+  - `frontend-v2/src/components/AuthGate.jsx` — authenticated=false 또는 mustChangePassword=true 시 `<Login>` 렌더, true면 children.
+  - `frontend-v2/src/api.js` — `getAccessToken`/`getRefreshToken`/`setTokens`/`clearTokens` + `_authHeaders()` helper. `api()`/`postSse()`/`uploadServerUdsTemplate()` 모두 Authorization 자동 부착.
+  - `frontend-v2/src/main.jsx` — AuthProvider > AdminProvider > AuthGate > App 순서.
+- **Backward compat**:
+  - `DEV_MODE_X_USER_FALLBACK=1`: 개발 (`uvicorn --reload`) 환경에서 X-User 헤더만으로 호출 허용. 100+ 기존 회귀가 X-User 신뢰 모델 사용 — 깨지지 않도록 `tests/unit/conftest.py`에 autouse fixture로 자동 enable.
+  - 프로덕션 (`DEV_MODE_X_USER_FALLBACK=0` 또는 미설정): JWT 강제. X-User 헤더 무시. X-User spoofing 차단.
+- **회귀**:
+  - 신규 backend: +51 (auth_service 13 + users_service 19 + auth_login_router 13 + auth_router 기존 6 무회귀)
+  - 신규 frontend: +7 AuthContext (no token / valid token / login success / login fail / logout / mustChangePassword / 401 graceful)
+  - 광범위 backend 영향: admin_gate 39 + admin_users 12 + bootstrap 6 + error_handler 10 = 67건 무회귀
+- **신규 endpoint** (5):
+  - `POST /api/auth/login` (공개)
+  - `POST /api/auth/refresh` (공개)
+  - `POST /api/auth/change-password` (인증)
+  - `POST /api/auth/logout` (인증)
+  - `GET /api/auth/me` 확장 — must_change_password 응답 필드 추가
+- **CLAUDE.md** 입력 표면 매트릭스 갱신:
+  - JWT Authorization: middleware 검증 (전체 endpoint)
+  - X-User: DEV_MODE only fallback
+  - login/refresh: 공개 (인증 우회) — Pydantic + rate limit 의존
+- 패키지 추가: `PyJWT` + `bcrypt` (`pip install` 자동). passlib는 bcrypt 5.x 호환성으로 제외 (bcrypt 직접 사용).
+
+## 46차 — 45차 자체 평가 발견 W32/W33 fix (timing attack + PW UX)
+- 45차 commit `934d6bc` 자체 비판 평가에서 발견한 보안/UX 결함 2건. 사용자 결정: Recommended (W32+W33 묶음).
+- **W32 timing attack 차단** (user enumeration): `verify_credentials` unknown user / 손상 hash path에서도 dummy bcrypt verify 호출하여 응답 시간 동등화. module-level `_DUMMY_HASH` cache + `warmup_dummy_hash()` startup hook (`main.py` lifespan에서 호출 — 첫 로그인 latency 회피). 회귀 +3 (`test_unknown_user_calls_dummy_verify` + `test_warmup_dummy_hash_caches` + `test_unknown_vs_wrong_password_similar_duration` ratio 0.3~3.0).
+- **W33 PW UX 안내** (72-byte limit): Login.jsx에 `PasswordHint` 컴포넌트 — UTF-8 바이트 수 실시간 표시 + 72바이트 초과 시 빨간 경고 (`처음 72바이트만 인식`). 영문/한국어 입력 시 정확한 바이트 수 (TextEncoder fallback Blob). PW 변경 화면 + 로그인 화면 모두 적용. `login-hint-detail` / `login-hint-warn` CSS 추가. maxLength 200 → 100으로 정책 강화.
+- 회귀: backend 2013 → 2016 (+3 W32) / frontend 250 → 255 (+5 W33 — Login.test.jsx 신규)
+
+## 47차 — 46차 자체 평가 발견 W34/W35/W36/I5/I7 통합 fix (남은 결함 일괄 해소)
+- 46차 commit `a1b9be9` 자체 비판 평가에서 발견한 남은 결함 5건 일괄 처리. 사용자 명시: "남은 결함 해결".
+- **W35 refresh token revocation**: `users.json` user record에 `token_version: int` 필드 추가. access/refresh JWT에 `tv` claim 포함 (`auth_service.create_access_token` / `create_refresh_token`에 `token_version` 파라미터). `decode_token` + middleware (`_extract_user_from_authorization`)가 DB read하여 user.token_version과 일치 확인 → 불일치 시 `TOKEN_REVOKED` / 미존재 user는 `USER_REVOKED`. `logout` endpoint 인증 필요로 변경 + `increment_token_version()` 호출 → 기존 access/refresh 모두 즉시 무효. `change_password()`도 자동 tv 증가 + 새 access/refresh 발급 (재로그인 부담 회피). 도난된 refresh 7일간 유효 문제 해결.
+- **I5 자동 token refresh queue**: `api.js`의 `api()` wrapper에 401 + (TOKEN_EXPIRED|TOKEN_INVALID|AUTH_HEADER_MALFORMED) 시 single-flight refresh (`_refreshingPromise` module variable) + 재시도 1회 (recursion guard `_retried`). 동시 다발 401에도 refresh 1회만 호출 (`_refreshAccessTokenSingleFlight`). TOKEN_REVOKED / USER_REVOKED는 즉시 `auth-logout` event dispatch + `clearTokens()` (refresh 시도 무의미). AuthContext가 event listener로 state 갱신.
+- **W34 JWT 운영 매뉴얼**: `docs/rounds/auth_operations.md` 신규 (200+ lines) — JWT_SECRET 생성 (openssl rand) + 환경 설정 + 첫 admin 등록 (BOOTSTRAP env) + JWT_SECRET 변경 (긴급) + timing attack 검증 + refresh revocation 검증 cURL 예시 + 트러블슈팅 + Admin lockout 회복 + 모니터링 권장. CLAUDE.md 본문 link 추가 (비대화 방지).
+- **W36 dummy verify latency 안내**: auth_operations.md에 "미존재 사용자 로그인은 정상적으로 ~250ms 소요. dummy bcrypt verify로 인한 의도된 지연" 명시.
+- **I7 PasswordHint 다국어 안내**: Login.jsx PasswordHint에 hover tooltip 추가 — "영문/숫자 1바이트 / 한국어·일본어·중국어 3바이트 / 이모지 4바이트". 빈 입력 안내 메시지에 "영문 72자 / 한국어·일본어 24자 / 이모지 18자 이하 권장" 표기.
+- **운영 환경 fix (부수)**: `start.bat`이 사용하는 `backend\.venv\`에 PyJWT/bcrypt 미설치 발견 → 즉시 `pip install` 실행. root `.venv\`와 별개 venv 운영 발견. 향후 단일 venv 일원화는 별도 라운드.
+- 회귀: backend 2016 → 2028 (+12 — W35: auth_service +2 tv claim / users_service +5 token_version + change_password tv / auth_login_router +5 logout_authenticated + change_password new tokens + old token revoked + new token works + user_deleted revoked) / frontend 255 → 260 (+5 I5 — api_refresh.test.jsx single-flight + token_expired retry + token_revoked logout + user_revoked logout + refresh_failure logout)
+
+## 48차 — 47차 자체 평가 발견 C5/C6/C7 + W43/W44/W45 통합 fix
+- 47차 commit `93f6828` 자체 비판 평가에서 발견한 Critical 3건 + Warning 3건 일괄 처리.
+- **C5 logout DEV_MODE bypass 차단** (보안): DEV_MODE_X_USER_FALLBACK=1 환경에서 admin이 `X-User: other_user` 헤더만으로 `/api/auth/logout` 또는 `/change-password` 호출 시 middleware가 other_user 식별 → endpoint가 other_user에 destructive 작업 수행 가능했던 spoofing. 신규 `backend/dependencies/auth.py::require_jwt_user` Depends — Authorization Bearer 헤더 존재 강제 (X-User fallback 거부). `logout` + `change-password` 두 endpoint에 적용.
+- **C6 change_password 후 frontend token 갱신**: backend가 47차 W35 응답에 새 access/refresh 포함하는데 AuthContext.changePassword가 응답을 무시 → 다음 호출이 구 token (server에서 TOKEN_REVOKED) → I5 refresh queue 우회 발화 + 잘못된 refresh 시도 + UX 지연. `setTokens({access, refresh})`로 즉시 갱신.
+- **C7 postSse refresh queue 적용**: I5가 `api()`에만 적용 → `postSse`가 401 받으면 throw — SSE stream 만료 시 사용자 경험 깨짐. `_postSseInternal(_retried)` recursion guard + single-flight refresh + 재시도 1회. TOKEN_REVOKED/USER_REVOKED는 즉시 logout dispatch.
+- **W43 dead code 제거**: `users.py` `_save_users` 함수 미참조 + `__all__` 누락 → 제거.
+- **W44 mask_user 중복 제거**: `auth_router._mask` 함수가 `admin_users.mask_user`와 동일 로직 → `mask_user` import 사용으로 통합 (44차 W19 동일 패턴 재발 방지).
+- **W45 lazy import → top-level**: `user_context.py` middleware의 `from backend.services.users import get_user` 함수 내부 import → top-level. 매 요청 dict 조회 비용 절감 + circular safety 검증 완료 (users.py → user_context 미참조).
+- 회귀: backend 105 → 107 (+2: logout 인증 거부 + DEV_MODE X-User 거부) / frontend 18 → 19 (+1 AuthContext C6 token 갱신 회귀).
 
 ## 49차 — swut_meta.json fallback (SwUT/SwIT path 매번 입력 불필요)
 - 사용자 지적: SwUDS Docx Path / C Source Root는 프로젝트 config에 등록된 값을 자동 사용해야 함

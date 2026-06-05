@@ -67,7 +67,7 @@ ASIL 등급은 다음 순서로 판별한다:
 **Playwright MCP**: UI 검증이 필요하면 자동으로 브라우저 열어서 확인.
 **RAG/Knowledge Base**: 문서 생성 시 기존 지식베이스 자동 참조.
 
-### Settings/Hooks 변경 시 절차 (update-config 스킬 부재 정정)
+### Settings/Hooks 변경 시 절차
 
 `.claude/settings.json` / `.claude/settings.local.json` / hooks / permissions / env 변경 시 다음 절차 의무:
 
@@ -77,7 +77,7 @@ ASIL 등급은 다음 순서로 판별한다:
 
 **예외**: 단순 `permissions.allow` 항목 한두 개 추가는 직접 Edit 허용 (parse 검증만).
 
-> 이전 버전은 `update-config` 스킬 호출을 의무화했으나 해당 스킬이 `.claude/skills/`에 부재 (2026-05-08 정비 시 정정). 스킬 신규 작성은 별도 작업으로 예정.
+> **2026-06-05 갱신**: `update-config` 스킬이 등록되어 있으므로 settings/hooks 변경은 `/update-config` 사용을 권장한다. 단순 `permissions.allow` 1~2개 추가는 위 수동 절차(백업+parse 검증)만으로 직접 Edit 허용. 참고: Stop hook `quality_check.py`는 stdin이 아닌 `git diff` 상태 기반으로 동작하므로, 빈 입력 스모크 테스트(`echo '{}' | ...`)는 working tree가 clean일 때만 silent 종료한다 (변경 파일이 있으면 정상적으로 보고 출력).
 
 ### TaskCreate 선제화
 
@@ -148,11 +148,7 @@ ASIL 등급은 다음 순서로 판별한다:
 | **documenter** | sonnet | 계획서, 변경내역, 결과보고서 작성 + Bash 실행 | Gate 6 (문서화) |
 
 ### 에이전트 ↔ 스킬 관계
-- `/plan` → planner 에이전트에 위임
-- `/dev` → coder 에이전트에 위임
-- `/test-run` → tester 에이전트에 위임
-- `/workflow` → planner→coder→tester→reviewer 순차 호출
-- `/start-work` → 전체 Gate 1~6 순차 실행 (자동 라우팅)
+- `/start-work` → 전체 Gate 1~6 순차 실행 (planner→coder→tester→reviewer 자동 라우팅)
 
 ## Architecture
 - **Backend**: FastAPI (Python 3.12) — `backend/`
@@ -205,7 +201,11 @@ python -m pytest tests/ -v --cov=backend --cov=workflow --cov=report_gen --cov-r
 - **`POST /api/file-mode/add-allowed-prefix`** — Cloudium allowed_prefixes 동적 추가 (39차, admin only 40차)
 - **`POST /api/file-mode/remove-allowed-prefix`** — 동적 제거 (39차, admin only 40차)
 - **`GET /api/file-mode/extra-prefixes`** — 영구 저장 prefixes 조회 (39차, admin only 40차)
-- **`GET /api/auth/me`** — 현재 사용자 + is_admin (40차 신규, 공개)
+- **`POST /api/auth/login`** — JWT 로그인 (45차, 공개) → access(60분)/refresh(7일) 발급
+- **`POST /api/auth/refresh`** — access 재발급 (45차, 공개)
+- **`POST /api/auth/change-password`** — PW 변경 (45차, 인증) → 새 access/refresh + tv 증가 (47차)
+- **`POST /api/auth/logout`** — 로그아웃 (45차, 인증) → `increment_token_version` 즉시 무효화 (47차)
+- **`GET /api/auth/me`** — 현재 사용자 + is_admin + must_change_password (40/45차, 공개·best-effort)
 - **`GET /api/auth/admins`** — admin list 조회 (40차 신규, admin only)
 
 ## SwUT Builder (Software Unit Test, 8~20차 라운드)
@@ -474,9 +474,9 @@ ISO 26262 ASIL B+ 통합 테스트 산출물 자동 생성. SwUT 30~32차 인프
 - **C3 (Critical X6)**: SwIT v2.02 양식 ASIL 시각 강조 사전 통보 — 31차 W29 색상 정책 (B 파랑 #E2F0FF / C 주황 #FFE5CC / D 빨강 #FFC7CE)이 SwIT 산출물에도 적용됨. **회사 v2.02 SITR 양식이 빨강만 표준이라 추가 색상은 비표준 audit 확장**. 라이브 PoC 검증 시 회사 audit reviewer에 사전 통보 의무
 - **W2 (Warning X4)**: SwIT SITR이 `_write_cover` / `_write_test_summary` / `_write_deviation` / `_write_test_log` private 함수 강결합. 향후 SwUT SUTR signature 변경 시 SwIT 회귀에서 자동 감지 위해 `__all__` 명시 또는 public alias 추가는 35차+ 정비 후보
 
-### 라운드 archive (36-fix ~ 42차, 49~50차)
+### 라운드 archive (36-fix ~ 58차)
 
-> **44차 W21**: 36-fix ~ 42차 상세 노트는 [`docs/rounds/sw_test_round_history.md`](docs/rounds/sw_test_round_history.md) 분리 (본문 비대화 해소). 49~50차도 같은 파일에 누적.
+> **44차 W21 (이후 누적 정비)**: 36-fix ~ 58차 상세 라운드 노트는 [`docs/rounds/sw_test_round_history.md`](docs/rounds/sw_test_round_history.md)로 분리 (본문 비대화 해소). 본문에는 아래 summary table 1행 + 33~35차 핵심 정책만 유지하고, 신규 라운드 detail은 commit 직후 같은 파일에 누적한다.
 
 | 라운드 | 주제 | 회귀 (backend) |
 |--------|------|---------------|
@@ -487,6 +487,12 @@ ISO 26262 ASIL B+ 통합 테스트 산출물 자동 생성. SwUT 30~32차 인프
 | 40차 | Backend Admin Role 시스템 (A안: 전체 admin only) — 보안 강화 | 1895 → 1952 (+57) |
 | 41차 | Bootstrap admin + APIRouter deps + visibility refresh | 1952 → 1956 (+4) |
 | 42차 | error_handler nested + mask_user + retry + debounce | 1956 → 1968 (+12) |
+| 43차 | 42차 자체 평가 W19/W20/W23/W24 — mask_user public + StrictMode safe + error_handler 빈 dict fallback | 1968 → 1970 (+2) |
+| 44차 | 43차 자체 평가 W21/W25/W28/I3 — CLAUDE.md archive 분리 + act() 정리 + error_handler falsy + deprecation | 1970 → 1972 (+3) |
+| 45차 | **C1 JWT/세션 인증 도입** (X-User spoofing 차단) — auth_service/users/AuthContext/Login/AuthGate | +51 backend / +7 frontend |
+| 46차 | 45차 자체 평가 W32/W33 — timing attack 차단 + PW UX 72-byte 안내 | 2013 → 2016 (+3) / frontend +5 |
+| 47차 | 46차 자체 평가 W34/W35/W36/I5/I7 — refresh token revocation + 자동 refresh queue + JWT 운영 매뉴얼 | 2016 → 2028 (+12) / frontend +5 |
+| 48차 | 47차 자체 평가 C5/C6/C7 + W43/W44/W45 — logout DEV_MODE bypass 차단 + postSse refresh queue | +2 backend / +1 frontend |
 | 49차 | swut_meta.json fallback (c_source_root/swuds_docx_path/swit template) | 2030 → 2030 (변경 0, 50차 fallback 회귀로 +9) |
 | 50차 | 403 raw fetch fix (X9) + C1/C2 fallback 회귀 + W4/W5 source origin 시각화 + SwIT meta config approvers | 2030 → 2042 (+12) |
 | 51차 | Template 2-field 분리 (Coverage/SUTR/SITR) + schema + router + frontend UI | 2042 → 2042 (회귀 갱신, +sutr maxlen 1) |
@@ -504,83 +510,7 @@ ISO 26262 ASIL B+ 통합 테스트 산출물 자동 생성. SwUT 30~32차 인프
 | 57차 | SUTR/SITR Test Log 1941 TC 매칭 — T314 `_write_test_log` 재작성 (Coverage TC source 공유 + 회사 v2.02 양식 1 TC당 6 row step 자동 감지) + T315 SITR 자동 효과 (sutr_aggregator import 재사용) | 2139 → ~2145 (+6: layout step +3, SUTR test_log step +3) |
 | **58차** | **F1/F2/F3 통합 fix** — F3 SwIT SITR column layout-aware (`SwitLayout` 6 신규 col field + `_scan_test_log_columns`, v3.01 hardcode fallback) + F2 SwIT Coverage Traceability dynamic header (`traceability_header_row` + `_scan_traceability_header`, max_row 20→30 / SwUFn_ 임계 50→5 완화) + F1 SUTR Actual via BeautifulSoup (`ExecutionRow.actual_result` 신규 + `extract_execution_results_with_actual` — vcast_parser 결함 우회). 라이브 검증: Actual stamp **0% → 98.8%** (1918/1941), SwIT Coverage O stamp **0 → 335**, SwIT SITR column B/H/R/AB/AL/AN 정확 | ~2145 → ~2160 (+15: layout column 4 + traceability 4 + inspect_sitr 2 + actual 4 + traceability stamp 1) |
 
-### 48차 — 47차 자체 평가 발견 C5/C6/C7 + W43/W44/W45 통합 fix
-- 47차 commit `93f6828` 자체 비판 평가에서 발견한 Critical 3건 + Warning 3건 일괄 처리.
-- **C5 logout DEV_MODE bypass 차단** (보안): DEV_MODE_X_USER_FALLBACK=1 환경에서 admin이 `X-User: other_user` 헤더만으로 `/api/auth/logout` 또는 `/change-password` 호출 시 middleware가 other_user 식별 → endpoint가 other_user에 destructive 작업 수행 가능했던 spoofing. 신규 `backend/dependencies/auth.py::require_jwt_user` Depends — Authorization Bearer 헤더 존재 강제 (X-User fallback 거부). `logout` + `change-password` 두 endpoint에 적용.
-- **C6 change_password 후 frontend token 갱신**: backend가 47차 W35 응답에 새 access/refresh 포함하는데 AuthContext.changePassword가 응답을 무시 → 다음 호출이 구 token (server에서 TOKEN_REVOKED) → I5 refresh queue 우회 발화 + 잘못된 refresh 시도 + UX 지연. `setTokens({access, refresh})`로 즉시 갱신.
-- **C7 postSse refresh queue 적용**: I5가 `api()`에만 적용 → `postSse`가 401 받으면 throw — SSE stream 만료 시 사용자 경험 깨짐. `_postSseInternal(_retried)` recursion guard + single-flight refresh + 재시도 1회. TOKEN_REVOKED/USER_REVOKED는 즉시 logout dispatch.
-- **W43 dead code 제거**: `users.py` `_save_users` 함수 미참조 + `__all__` 누락 → 제거.
-- **W44 mask_user 중복 제거**: `auth_router._mask` 함수가 `admin_users.mask_user`와 동일 로직 → `mask_user` import 사용으로 통합 (44차 W19 동일 패턴 재발 방지).
-- **W45 lazy import → top-level**: `user_context.py` middleware의 `from backend.services.users import get_user` 함수 내부 import → top-level. 매 요청 dict 조회 비용 절감 + circular safety 검증 완료 (users.py → user_context 미참조).
-- 회귀: backend 105 → 107 (+2: logout 인증 거부 + DEV_MODE X-User 거부) / frontend 18 → 19 (+1 AuthContext C6 token 갱신 회귀).
-
-### 47차 — 46차 자체 평가 발견 W34/W35/W36/I5/I7 통합 fix (남은 결함 일괄 해소)
-- 46차 commit `a1b9be9` 자체 비판 평가에서 발견한 남은 결함 5건 일괄 처리. 사용자 명시: "남은 결함 해결".
-- **W35 refresh token revocation**: `users.json` user record에 `token_version: int` 필드 추가. access/refresh JWT에 `tv` claim 포함 (`auth_service.create_access_token` / `create_refresh_token`에 `token_version` 파라미터). `decode_token` + middleware (`_extract_user_from_authorization`)가 DB read하여 user.token_version과 일치 확인 → 불일치 시 `TOKEN_REVOKED` / 미존재 user는 `USER_REVOKED`. `logout` endpoint 인증 필요로 변경 + `increment_token_version()` 호출 → 기존 access/refresh 모두 즉시 무효. `change_password()`도 자동 tv 증가 + 새 access/refresh 발급 (재로그인 부담 회피). 도난된 refresh 7일간 유효 문제 해결.
-- **I5 자동 token refresh queue**: `api.js`의 `api()` wrapper에 401 + (TOKEN_EXPIRED|TOKEN_INVALID|AUTH_HEADER_MALFORMED) 시 single-flight refresh (`_refreshingPromise` module variable) + 재시도 1회 (recursion guard `_retried`). 동시 다발 401에도 refresh 1회만 호출 (`_refreshAccessTokenSingleFlight`). TOKEN_REVOKED / USER_REVOKED는 즉시 `auth-logout` event dispatch + `clearTokens()` (refresh 시도 무의미). AuthContext가 event listener로 state 갱신.
-- **W34 JWT 운영 매뉴얼**: `docs/rounds/auth_operations.md` 신규 (200+ lines) — JWT_SECRET 생성 (openssl rand) + 환경 설정 + 첫 admin 등록 (BOOTSTRAP env) + JWT_SECRET 변경 (긴급) + timing attack 검증 + refresh revocation 검증 cURL 예시 + 트러블슈팅 + Admin lockout 회복 + 모니터링 권장. CLAUDE.md 본문 link 추가 (비대화 방지).
-- **W36 dummy verify latency 안내**: auth_operations.md에 "미존재 사용자 로그인은 정상적으로 ~250ms 소요. dummy bcrypt verify로 인한 의도된 지연" 명시.
-- **I7 PasswordHint 다국어 안내**: Login.jsx PasswordHint에 hover tooltip 추가 — "영문/숫자 1바이트 / 한국어·일본어·중국어 3바이트 / 이모지 4바이트". 빈 입력 안내 메시지에 "영문 72자 / 한국어·일본어 24자 / 이모지 18자 이하 권장" 표기.
-- **운영 환경 fix (부수)**: `start.bat`이 사용하는 `backend\.venv\`에 PyJWT/bcrypt 미설치 발견 → 즉시 `pip install` 실행. root `.venv\`와 별개 venv 운영 발견. 향후 단일 venv 일원화는 별도 라운드.
-- 회귀: backend 2016 → 2028 (+12 — W35: auth_service +2 tv claim / users_service +5 token_version + change_password tv / auth_login_router +5 logout_authenticated + change_password new tokens + old token revoked + new token works + user_deleted revoked) / frontend 255 → 260 (+5 I5 — api_refresh.test.jsx single-flight + token_expired retry + token_revoked logout + user_revoked logout + refresh_failure logout)
-
-### 46차 — 45차 자체 평가 발견 W32/W33 fix (timing attack + PW UX)
-- 45차 commit `934d6bc` 자체 비판 평가에서 발견한 보안/UX 결함 2건. 사용자 결정: Recommended (W32+W33 묶음).
-- **W32 timing attack 차단** (user enumeration): `verify_credentials` unknown user / 손상 hash path에서도 dummy bcrypt verify 호출하여 응답 시간 동등화. module-level `_DUMMY_HASH` cache + `warmup_dummy_hash()` startup hook (`main.py` lifespan에서 호출 — 첫 로그인 latency 회피). 회귀 +3 (`test_unknown_user_calls_dummy_verify` + `test_warmup_dummy_hash_caches` + `test_unknown_vs_wrong_password_similar_duration` ratio 0.3~3.0).
-- **W33 PW UX 안내** (72-byte limit): Login.jsx에 `PasswordHint` 컴포넌트 — UTF-8 바이트 수 실시간 표시 + 72바이트 초과 시 빨간 경고 (`처음 72바이트만 인식`). 영문/한국어 입력 시 정확한 바이트 수 (TextEncoder fallback Blob). PW 변경 화면 + 로그인 화면 모두 적용. `login-hint-detail` / `login-hint-warn` CSS 추가. maxLength 200 → 100으로 정책 강화.
-- 회귀: backend 2013 → 2016 (+3 W32) / frontend 250 → 255 (+5 W33 — Login.test.jsx 신규)
-
-### 45차 — C1 JWT/세션 인증 도입 (X-User spoofing 차단)
-- 40~44차 X-User 헤더 신뢰 모델 → JWT bearer token으로 교체. ISO 26262 audit 추적성 — 진짜 사용자 식별 보장.
-- **사용자 결정** (AskUserQuestion 4건 모두 Recommended): localStorage 저장 / admin이 사용자 등록 + 임시 PW / 개발 모드 X-User backward-compat / Access 60분 + Refresh 7일.
-- **Backend 신규**:
-  - `backend/services/auth_service.py` — JWT encode/decode (PyJWT HS256) + bcrypt hash/verify. 72-byte limit 명시. dev fallback secret + DEV_MODE_X_USER_FALLBACK env.
-  - `backend/services/users.py` — `config/users.json` CRUD (FileLock + atomic write + lru_cache + mtime invalidate). add/change_password/remove/list_users + bootstrap_admin_user_from_env.
-  - `backend/routers/auth.py` 확장 — POST `/api/auth/login` + `/refresh` + `/change-password` + `/logout`. Pydantic LoginRequest/RefreshRequest/ChangePasswordRequest.
-  - `backend/user_context.py` 재작성 — JWT Authorization Bearer 우선 → DEV_MODE 활성 시 X-User fallback. `/api/auth/me`는 best-effort (실패해도 401 raise 안 함, authenticated=False 응답).
-  - `backend/main.py` lifespan — `bootstrap_admin_user_from_env()` startup hook.
-- **Frontend 신규**:
-  - `frontend-v2/src/contexts/AuthContext.jsx` — login/logout state + access/refresh token localStorage. /me 401 시 refresh 자동 시도 → 실패 시 logout. StrictMode safe (`isMountedRef`).
-  - `frontend-v2/src/views/Login.jsx` — 로그인 UI + must_change_password 강제 PW 변경 화면.
-  - `frontend-v2/src/components/AuthGate.jsx` — authenticated=false 또는 mustChangePassword=true 시 `<Login>` 렌더, true면 children.
-  - `frontend-v2/src/api.js` — `getAccessToken`/`getRefreshToken`/`setTokens`/`clearTokens` + `_authHeaders()` helper. `api()`/`postSse()`/`uploadServerUdsTemplate()` 모두 Authorization 자동 부착.
-  - `frontend-v2/src/main.jsx` — AuthProvider > AdminProvider > AuthGate > App 순서.
-- **Backward compat**:
-  - `DEV_MODE_X_USER_FALLBACK=1`: 개발 (`uvicorn --reload`) 환경에서 X-User 헤더만으로 호출 허용. 100+ 기존 회귀가 X-User 신뢰 모델 사용 — 깨지지 않도록 `tests/unit/conftest.py`에 autouse fixture로 자동 enable.
-  - 프로덕션 (`DEV_MODE_X_USER_FALLBACK=0` 또는 미설정): JWT 강제. X-User 헤더 무시. X-User spoofing 차단.
-- **회귀**:
-  - 신규 backend: +51 (auth_service 13 + users_service 19 + auth_login_router 13 + auth_router 기존 6 무회귀)
-  - 신규 frontend: +7 AuthContext (no token / valid token / login success / login fail / logout / mustChangePassword / 401 graceful)
-  - 광범위 backend 영향: admin_gate 39 + admin_users 12 + bootstrap 6 + error_handler 10 = 67건 무회귀
-- **신규 endpoint** (5):
-  - `POST /api/auth/login` (공개)
-  - `POST /api/auth/refresh` (공개)
-  - `POST /api/auth/change-password` (인증)
-  - `POST /api/auth/logout` (인증)
-  - `GET /api/auth/me` 확장 — must_change_password 응답 필드 추가
-- **CLAUDE.md** 입력 표면 매트릭스 갱신:
-  - JWT Authorization: middleware 검증 (전체 endpoint)
-  - X-User: DEV_MODE only fallback
-  - login/refresh: 공개 (인증 우회) — Pydantic + rate limit 의존
-- 패키지 추가: `PyJWT` + `bcrypt` (`pip install` 자동). passlib는 bcrypt 5.x 호환성으로 제외 (bcrypt 직접 사용).
-
-### 44차 — 43차 자체 평가 발견 결함 4건 통합 fix (W21/W25/W28/I3)
-- 43차 commit `c577aa0` 자체 비판 평가에서 발견한 자체 해결 가능 4건. C1 JWT는 45차+ 별도 큰 라운드.
-- **W21 CLAUDE.md archive 분리**: 본문 1500+ → ~550 lines 압축. 36-fix~42차 상세 노트를 [`docs/rounds/sw_test_round_history.md`](docs/rounds/sw_test_round_history.md)로 분리. 본문에는 라운드 summary table + archive 링크. 33-35차 핵심 정책 + 43차/44차 (최신) 본문 유지.
-- **W25 act() warning 정리**: AdminContext.test.jsx의 W4 retry / W20 unmount 회귀에서 `render()` + `vi.waitFor` 호출을 `await act(...)` wrap — vitest stderr act warning 0건 (이전: 2건 출력).
-- **W28 error_handler falsy message 분리**: `detail.get("message")`가 `None` / `""` / falsy 모두 status-aware fallback (`HTTP <status> error`) 사용. 의도된 빈 message 노출 차단. 회귀 +2 (`test_dict_with_empty_string_message` + `test_dict_with_none_message`).
-- **I3 _mask_user deprecation warning**: `_mask_user` alias를 단순 변수 alias → `DeprecationWarning` 발화 wrapper 함수로 전환. `stacklevel=2`로 호출 지점 정확 표시. 45차+ 완전 제거 검토.
-- 회귀: backend 1970 → 1972 (+2 W28 empty_string + none_message) + bootstrap +1 (I3 deprecation) = +3 / frontend 243 → 243 (W25 동작 변경 없이 stderr 정리만)
-
-### 43차 — 42차 자체 평가 발견 결함 4건 통합 fix (W19/W20/W23/W24)
-- 42차 commit `1fa4692` 자체 비판 평가에서 발견한 자체 해결 가능 4건. C1 JWT는 44차+ 별도 큰 라운드.
-- **W19 mask_user public 승격**: `_mask_user` (private, 42차) → `mask_user` (public, `__all__` 등록). `dependencies/admin.py`가 underscore private 함수 import하는 convention 위반 해결. `_mask_user = mask_user` alias로 backward-compat 유지.
-- **W20 StrictMode safe**: AdminContext.jsx에 `isMountedRef` 도입 — fetch 응답/retry timer fire가 unmount 후 setState 호출 시 React warning. 모든 setState 직전 `isMountedRef.current` 확인 + 매 mount마다 `true` 복원 (StrictMode 두 번째 mount 대응). 회귀에서 unmount 후 timer fire 시 "unmounted" warning 발생 안 함 검증.
-- **W23 frontend 회귀 실행 검증**: 42차에 미실행한 vitest 전체 회귀 실 실행 (242 → 243 +1 W20). backend admin/auth 57건 통과 (W19 mask_user 영향 회귀).
-- **W24 error_handler 빈 dict fallback**: `HTTPException(detail={})` 또는 code만 있고 message 누락 시 `str(detail)` (= "{}") 노출되어 사용자 혼란 → status-aware fallback `HTTP <status> error` 사용. 회귀 +1 (`test_dict_with_only_code_no_message`).
-- 회귀: backend 1968 → 1970 (+1 W24 dict_with_only_code + empty_dict 갱신 +1 mask_user alias 검증 보강) / frontend 242 → 243 (+1 W20 StrictMode race) / backend admin gate 57건 무회귀
-
-## Admin 운영 가이드 (40~47차)
+## Admin 운영 가이드 (40차~)
 
 > 상세 JWT 운영 (생성/회복/검증): [`docs/rounds/auth_operations.md`](docs/rounds/auth_operations.md)
 
@@ -595,14 +525,11 @@ ISO 26262 ASIL B+ 통합 테스트 산출물 자동 생성. SwUT 30~32차 인프
 | 13 endpoint 보호 | SwIT 4 + SwUT 5 + file-mode 4 — 라우터 또는 endpoint dependency로 admin only |
 
 ## Workflows (워크플로우 — 자동 연결)
-- `/workflow [기능설명]` — **전체 개발 흐름**: 기획→코드→테스트→리뷰→커밋 자동 실행
+- `/start-work [작업설명]` — **전체 개발 흐름**: 계획→설계→구현→테스트→리뷰→문서화 (Gate 1~6 자동 라우팅)
 - `/hotfix [버그설명]` — **긴급 수정**: 분석→수정→테스트→커밋 빠른 처리
 - `/doc-pipeline [all|uds|sts|suts|sits|delta]` — **문서 생성**: UDS→STS→SUTS→SITS 순차 자동 생성
 
 ## Individual Skills (개별 도구)
-- `/plan` — 기획만
-- `/dev` — 코드 작성만
-- `/test-run` — 테스트만
 - `/deploy` — 배포만
 - `/health-check` — 상태 점검
 - `/impact` — 영향도 분석
@@ -630,7 +557,7 @@ ISO 26262 ASIL B+ 통합 테스트 산출물 자동 생성. SwUT 30~32차 인프
 - Prompts: `triage_build_failure`, `summarize_change_risk`, `review_coverage_gap`
 
 ## Hooks (자동 품질 게이트)
-- **SessionStart**: `.env` 자동 생성 (.env.example → .env) + settings 변경 정책 reminder
+- **SessionStart**: `.env` 자동 생성 (.env.example → .env) + git hooks 자동 활성화 (`scripts/install_git_hooks.sh`) + settings 변경 정책 reminder
 - **PreToolUse**: C/H 파일 수정 시 ASIL C/D 태그 감지 → 경고
 - **PostToolUse**: 단일 dispatcher (`scripts/posttool_dispatch.py`) — Python syntax+ruff, JSX/TS ESLint, .md broken-link/heading-jump, workflow/report_gen 변경 시 관련 pytest
 - **PostToolBatch** (신규, 2026-05-11): 병렬 Write/Edit 일괄 종료 시 `scripts/posttoolbatch_report.py` — 변경 파일 집계 + CLAUDE.md L106 능동 보고 X1~X8 trigger 메시지를 메인 응답에 push. **단일 파일 turn은 silent** (PostToolUse가 이미 파일별 보고), 단 ASIL C/H는 단독이어도 hint 출력. ASIL 파일은 list 앞으로 정렬되어 truncation 시에도 누락되지 않음. 출력은 `ensure_ascii=False`로 한글 가독성 유지. **메인 에이전트의 능동 보고 의무는 그대로 유지** (hook은 보조 알림이며 대체 아님)
@@ -638,7 +565,7 @@ ISO 26262 ASIL B+ 통합 테스트 산출물 자동 생성. SwUT 30~32차 인프
 - **PreCompact**: git status + diff stat을 `.codex_tmp/precompact_context.json`에 저장 (출력은 schema 정합 `systemMessage` 형식)
 
 ## Gate 간 데이터 전달 프로토콜
-`/workflow` 실행 시 각 Gate에서 TaskCreate description에 구조화된 데이터를 포함:
+`/start-work` 실행 시 각 Gate에서 TaskCreate description에 구조화된 데이터를 포함:
 - **planner→architect**: affected_files, safety_impact(ASIL), priority
 - **architect→coder**: interface_spec, data_flow, design_decisions
 - **coder→tester**: changed_files, test_hints, safety_level

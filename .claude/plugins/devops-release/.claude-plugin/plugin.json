@@ -1,0 +1,32 @@
+{
+  "name": "devops-release",
+  "version": "1.0.0",
+  "description": "DevOps Release 자동화 플러그인 - 문서생성(UDS/STS/SUTS/SITS), 코드리뷰, 영향도분석, CI/CD 통합",
+  "author": {
+    "name": "kimsungsu"
+  },
+  "keywords": ["devops", "ci-cd", "document-generation", "impact-analysis"],
+
+  "skills": "./skills/",
+  "agents": "./agents/",
+  "hooks": "./hooks/hooks.json",
+
+  "userConfig": {
+    "backend_url": {
+      "description": "Backend API URL (e.g. http://127.0.0.1:8000)",
+      "sensitive": false
+    },
+    "jenkins_url": {
+      "description": "Jenkins server URL (e.g. http://192.168.110.40:7000)",
+      "sensitive": false
+    },
+    "jenkins_token": {
+      "description": "Jenkins API token for triggering builds",
+      "sensitive": true
+    },
+    "source_root": {
+      "description": "C source code root path (e.g. D:/Project/Ados/PDS64_RD)",
+      "sensitive": false
+    }
+  }
+}
