@@ -486,6 +486,12 @@ def build_swsa_report(
         if sn not in sheets:
             res.warnings.append(f"{sn} 시트 없음 (템플릿 버전에 미포함) — graceful skip")
 
+    # rank9: 파서 parse_warnings(unbinned/extraction/구버전 등)를 산출물 result 로
+    # 전파 (audit reviewer 가 X-SwSA-Warnings 로 인지). 이전엔 silent 손실.
+    for src, prefix in ((qac_xml, "QAC"), (st201, "HMR"), (pmd, "PMD")):
+        for w in getattr(src, "parse_warnings", []) or []:
+            res.warnings.append(f"[{prefix}] {w}")
+
     wb.save(res.xlsm_io)
     res.xlsm_io.seek(0)
     return res

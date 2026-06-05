@@ -92,6 +92,43 @@
 4. total vs active 모호(제외 룰) — 기본 active, total 별도 노출.
 5. 가용 로그(NE1aW 5월/FBL)는 레퍼런스(2631 3월)와 다른 빌드 → **포맷 검증용**. 실 라이브 검증은 레퍼런스 동일 빌드 로그로 build→cell 대조.
 
+## 7b. 심층 리뷰 (deep-reviewer ×2 라운드) 수정 내역
+
+opus deep-reviewer 2회 + workflow 2회로 실데이터 검증 후 수정 (모두 commit):
+
+**보안/무결성**:
+- admin gate: `/api/swsa` 라우터 `require_admin` (SwUT/SwIT 대칭). local 모드 임의 read 차단.
+- 수식 보존: `is_formula_cell` 가드 — v0.11 양식 summary 셀(`=COUNTIF`/`=I127`/`=$E$79`)을
+  literal 로 덮지 않음. 예외처리 셀은 `mark_user_input_fill_only`(텍스트 없는 노란)로 `#VALUE!` 방지.
+- CRLF: project_id/doc_version 등 헤더 유입 필드 `_no_newline` + ascii_name strip.
+
+**audit 정확성**:
+- 더블카운팅: HMR/PMD 모듈별 여러 분석 날짜 합산(2088) → `_select_latest_per_module`(1053).
+- ST201 밴드-0: 첫 밴드 하한 개방 — HIS metric 0값(nesting/param) 드롭 방지 (878 흡수).
+- deviation 노출: 제외율 ≥70% 경고 (active 만 표시함을 환기).
+- parser parse_warnings → result 전파 ([QAC]/[HMR]/[PMD]).
+
+**기능 갭**:
+- History 시트 `_write_history` 신규 (첫 빈/placeholder 행 탐색 + append, 기존 이력 보존).
+- Cover 사인오프 Reviewer/Approver(J3/K3).
+
+**검증된 의미론**: active = QAC deviation-adjusted (정답). active 210=RCR, excluded-sum 1864=SCR.
+
+## 7c. v0.11 full-support 스펙 (다음 증분 — rank 2/3/4)
+
+v0.10(빌드 타깃)은 완전 동작. v0.11 양식은 summary 셀이 **detail 표 참조 수식**이라
+detail 을 채워야 완성 (현재는 수식 보존 + 경고). 필요 작업:
+
+1. **per-module 데이터** (prereq): `merge_qac_results` 가 APP+BOOT 를 rule_id 별 합산해
+   per-module 손실. `QacLeafRule.per_module: dict[prefix,(total,active)]` 추가 또는
+   `SwsaInputData` 에 pre-merge per-module 결과 보존.
+2. **ST101 5.1 detail** (rows 86~110): 템플릿이 룰 목록(C=Rule ID/D=카테고리/E=설명) 보유.
+   각 행 Rule ID 매칭 → **J=APP active, K=BOOT active, M/N=excluded** 기입 (B=ROW()/L=비율
+   수식 보존). 그러면 D77(`=COUNTIF(L86:L102,">0")`)/F77(`=I127`)/H77 자동 재계산.
+3. **ST1101 detail** (rows 92~102 + 예외표 126~191): HKCCM 코드(C-INT/DCI/POS…) 매칭.
+
+> 빌드 타깃이 v0.10 generic 인 한 불필요. KJPDS02 v0.11 flavor blank 템플릿 빌드 시 착수.
+
 ## 8. 사용자 결정 (확정)
 
 1. Phase 1 = QAC 3시트(ST101/ST201/ST1101) 먼저, 나머지 양식/메타 + 노란 표시.

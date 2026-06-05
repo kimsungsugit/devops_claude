@@ -95,6 +95,8 @@ class TestSyntheticGraceful:
         res = build_swsa_report(tpl, _meta(), qac_xml=bad)
         out = load_workbook(io.BytesIO(res.xlsm_io.getvalue()))
         assert _is_yellow(out["1.ST101"]["D77"])
+        # rank9: 파서 parse_warnings 가 result 로 전파 ([QAC] prefix)
+        assert any(w.startswith("[QAC]") for w in res.warnings)
 
     def test_formula_cell_preserved(self):
         # C2: v0.11 처럼 D77 이 수식이면 literal 로 덮지 않고 보존 + 경고
