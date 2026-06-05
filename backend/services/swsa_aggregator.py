@@ -342,28 +342,47 @@ def _detect_app_boot(leaf_rules: List[Any]) -> tuple:
     return app, boot
 
 
-def _write_rule_violation_detail(ws: Any, leaf_rules: List[Any], res: SwsaBuildResult,
-                                 *, header_label: str = "위반 건수") -> None:
-    """v0.11 detail 표: 템플릿이 보유한 룰 행(C=Rule ID)에 J=APP/K=BOOT active 기입.
+def _norm_rid(rid: str) -> str:
+    """룰 ID 정규화 — 'C-INT-002'/'Rule-8.6' 의 'C-'/'Rule-' prefix 제거.
 
-    v0.10 은 룰 목록이 비어 헤더 미발견 → skip. 템플릿의 B(=ROW)/L(=비율) 수식은
-    그대로 두고 J/K(입력) 만 채운다 → summary 의 COUNTIF/SUM 수식이 자동 재계산.
-    reference 스타일대로 0 은 공란 유지(비기입).
+    ST101 detail 은 C='Rule-8.6'(parser 동일), ST1101 detail 은 D='INT-002'
+    (parser 'C-INT-002') 라 prefix 차이를 흡수해 매칭한다.
     """
-    hdr = find_label_row(ws, header_label, max_row=220)
-    if hdr is None:
+    s = (rid or "").strip()
+    parts = s.split("-", 1)
+    if len(parts) == 2 and parts[0] in ("C", "Rule"):
+        return parts[1]
+    return s
+
+
+def _write_rule_violation_detail(ws: Any, leaf_rules: List[Any], res: SwsaBuildResult) -> None:
+    """v0.11 detail 표: 템플릿 룰 행(Rule ID 열)에 J=APP/K=BOOT active 기입.
+
+    ST101(C=Rule ID)/ST1101(D=Rule ID) 모두 — 'Rule ID' 헤더로 ID 열을 동적 탐색,
+    '위반 건수' 헤더로 J(APP)/K(BOOT) 열을 탐색. prefix 정규화로 'INT-002'↔'C-INT-002'
+    매칭. v0.10(룰 목록 미보유) → 헤더 미발견 graceful skip. B(=ROW)/L(=비율) 수식은
+    보존하고 J/K 입력만 채운다 → summary COUNTIF/SUM 수식 자동 재계산. 0 은 공란.
+    """
+    j_hdr = find_label_row(ws, "위반 건수", max_row=220)
+    if j_hdr is None:
         return
-    hr, jcol = hdr
-    kcol = jcol + 1  # BOOT (J85=APP / K85=BOOT 서브헤더)
+    hr, jcol = j_hdr
+    kcol = jcol + 1  # BOOT (J=APP / K=BOOT 서브헤더)
+    id_hdr = find_label_row(ws, "Rule ID", max_row=hr + 6)
+    idcol = id_hdr[1] if id_hdr else 3  # default C
     app, boot = _detect_app_boot(leaf_rules)
-    by_id = {lr.rule_id.strip(): lr for lr in leaf_rules}
+    by_id: dict = {}
+    for lr in leaf_rules:
+        by_id[lr.rule_id.strip()] = lr
+        by_id.setdefault(_norm_rid(lr.rule_id), lr)
     n = 0
     matched = 0
     for r in range(hr + 1, hr + 200):
-        cval = ws.cell(r, 3).value  # C = Rule ID
+        cval = ws.cell(r, idcol).value
         if not isinstance(cval, str) or not cval.strip():
             continue
-        lr = by_id.get(cval.strip())
+        key = cval.strip()
+        lr = by_id.get(key) or by_id.get(_norm_rid(key))
         if lr is None:
             continue
         matched += 1
@@ -496,6 +515,8 @@ def _write_st1101(ws: Any, meta: SwsaBuildMeta, qac: Optional[QacXmlResult], res
         res.user_input_cells += 1
     else:
         _write_value_safe(ws, total_row, h_total[1], secure.active, res, "ST1101 총 위반")
+        # rank4: 5.1 detail (D=Rule ID 'INT-002') J=APP/K=BOOT → summary 수식 재계산
+        _write_rule_violation_detail(ws, secure.leaf_rules, res)
     res.sheets_filled.append(SHEET_ST1101)
 
 

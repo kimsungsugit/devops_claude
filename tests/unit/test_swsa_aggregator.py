@@ -267,3 +267,22 @@ class TestV011Detail:
         else:
             raise AssertionError("Rule-8.6 detail row not found")
         assert any("detail" in w and "매칭" in w for w in res.warnings)
+
+    def test_st1101_detail_boot_filled(self):
+        # rank4: ST1101 detail(D=Rule ID 'INT-002') prefix 정규화 매칭 → K(BOOT) 기입.
+        # J=COUNTIF(예외표) 수식 행은 보존(is_formula_cell).
+        from backend.services.swsa_input_adapter import merge_qac_results
+        merged = merge_qac_results(
+            [parse_qac_results_xml(_XML), parse_qac_results_xml(_XML_BOOT)], ["APP", "BOOT"])
+        with open(_REF_PV, "rb") as f:
+            ref = f.read()
+        meta = SwsaBuildMeta(project_id="KJPDS02", release_sw_version="2631.00", test_date="2026.04.24")
+        res = build_swsa_report(ref, meta, qac_xml=merged)
+        ws = load_workbook(io.BytesIO(res.xlsm_io.getvalue()), keep_vba=True)["11.ST1101"]
+        # POS-010(C-POS-010) BOOT active=30 → K94=30
+        for r in range(92, 103):
+            if ws.cell(r, 4).value == "POS-010":
+                assert ws.cell(r, 11).value == 30   # K=BOOT
+                break
+        else:
+            raise AssertionError("POS-010 detail row not found")
