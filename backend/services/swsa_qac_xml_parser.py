@@ -70,6 +70,17 @@ class QacLeafRule:
     severity: str = ""          # 소속 카테고리 text (Mandatory/Required, High/Middle/Low)
     total: int = 0
     active: int = 0
+    # v0.11 detail(J=APP/K=BOOT) 채우기용 — 모듈 prefix → (total, active). 단일 모듈
+    # 파싱 시 비어 있고, input_adapter.merge_qac_results 가 모듈 라벨로 채운다.
+    per_module: Dict[str, tuple] = field(default_factory=dict)
+
+    def active_for(self, module: str) -> int:
+        pm = self.per_module.get(module)
+        return pm[1] if pm else 0
+
+    def excluded_for(self, module: str) -> int:
+        pm = self.per_module.get(module)
+        return max(0, pm[0] - pm[1]) if pm else 0
 
     @property
     def code_prefix(self) -> str:

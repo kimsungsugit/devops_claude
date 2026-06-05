@@ -151,19 +151,29 @@ def _select_latest_per_module(paths: List[str], kind: str, warnings: List[str]) 
 
 
 # ─────────────────────────── 병합 ───────────────────────────
-def merge_qac_results(results: List[QacXmlResult]) -> Optional[QacXmlResult]:
-    """여러 모듈 QacXmlResult → 프로젝트 rollup (그룹/카테고리/leaf 합산)."""
-    valid = [r for r in results if r and not r.extraction_failed and r.groups]
-    if not valid:
+def merge_qac_results(results: List[QacXmlResult],
+                      modules: Optional[List[str]] = None) -> Optional[QacXmlResult]:
+    """여러 모듈 QacXmlResult → 프로젝트 rollup (그룹/카테고리/leaf 합산).
+
+    modules: results 와 평행한 모듈 prefix(APP/BOOT…) 리스트. 제공 시 leaf 룰의
+    per_module[prefix] 에 (total, active) 기록 → v0.11 detail(J=APP/K=BOOT) 채우기용.
+    modules 미제공 시 단일 결과는 passthrough(backward compat).
+    """
+    pairs = [
+        (r, (modules[i] if modules and i < len(modules) else ""))
+        for i, r in enumerate(results)
+        if r and not r.extraction_failed and r.groups
+    ]
+    if not pairs:
         return results[0] if results else None
-    if len(valid) == 1:
-        return valid[0]
+    if len(pairs) == 1 and not modules:
+        return pairs[0][0]
 
     merged = QacXmlResult(
-        helix_qac_version=valid[0].helix_qac_version,
-        project_config=valid[0].project_config,
+        helix_qac_version=pairs[0][0].helix_qac_version,
+        project_config=pairs[0][0].project_config,
     )
-    for r in valid:
+    for r, mod in pairs:
         merged.source_files_total += r.source_files_total
         merged.source_files_active += r.source_files_active
         merged.parse_warnings.extend(r.parse_warnings)
@@ -181,7 +191,7 @@ def merge_qac_results(results: List[QacXmlResult]) -> Optional[QacXmlResult]:
                     mg.categories[cname] = mc
                 mc.total += cat.total
                 mc.active += cat.active
-            # leaf 룰: id 별 합산 (모듈 간 동일 룰 합치기)
+            # leaf 룰: id 별 합산 + 모듈별 기록
             by_id = {lr.rule_id: lr for lr in mg.leaf_rules}
             for lr in grp.leaf_rules:
                 ex = by_id.get(lr.rule_id)
@@ -192,6 +202,9 @@ def merge_qac_results(results: List[QacXmlResult]) -> Optional[QacXmlResult]:
                     by_id[lr.rule_id] = ex
                 ex.total += lr.total
                 ex.active += lr.active
+                if mod:
+                    pt, pa = ex.per_module.get(mod, (0, 0))
+                    ex.per_module[mod] = (pt + lr.total, pa + lr.active)
     return merged
 
 
@@ -271,12 +284,14 @@ def collect_swsa_inputs(resolver: Any, log_folder: str) -> SwsaInputData:
 
     # QAC xml (ST101/ST1101)
     qac_results = []
+    qac_modules = []  # results 와 평행한 prefix(APP/BOOT) — per_module 채우기용
     for p in log_set.qac_xml:
         b = _read(p)
         if b is not None:
             qac_results.append(parse_qac_results_xml(b))
             data.modules.append(_module_of(p))
-    data.qac_xml = merge_qac_results(qac_results) if qac_results else None
+            qac_modules.append(_module_prefix_and_date(p)[0])
+    data.qac_xml = merge_qac_results(qac_results, qac_modules) if qac_results else None
 
     # HMR (ST201)
     st_results = []

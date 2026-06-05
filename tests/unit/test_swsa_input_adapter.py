@@ -80,6 +80,17 @@ class TestMergeQac:
         a = parse_qac_results_xml(_XML_TPL.format(ft=100, fa=40, t=20, a=10))
         assert merge_qac_results([a]) is a
 
+    def test_per_module_populated(self):
+        # v0.11 detail(J=APP/K=BOOT) 용 per_module 기록
+        a = parse_qac_results_xml(_XML_TPL.format(ft=100, fa=40, t=20, a=10))
+        b = parse_qac_results_xml(_XML_TPL.format(ft=50, fa=20, t=8, a=6))
+        merged = merge_qac_results([a, b], ["APP", "BOOT"])
+        leaf = next(lr for lr in merged.misra.leaf_rules if lr.rule_id == "Rule-8.6")
+        # Rule-8.6: APP active=10, BOOT active=6
+        assert leaf.active_for("APP") == 10
+        assert leaf.active_for("BOOT") == 6
+        assert leaf.active == 16
+
     def test_extraction_failed_excluded(self):
         ok = parse_qac_results_xml(_XML_TPL.format(ft=100, fa=40, t=20, a=10))
         bad = parse_qac_results_xml("<AnalysisData><broken")

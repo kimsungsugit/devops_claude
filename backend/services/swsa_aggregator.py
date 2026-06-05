@@ -323,7 +323,61 @@ def _write_st101(ws: Any, meta: SwsaBuildMeta, qac: Optional[QacXmlResult], res:
         if ver:
             _stamp(ws, "Version", ver, max_row=80)
 
+    # v0.11 5.1 Rule Violation detail (rank3) — 룰행 J/K 채우면 summary 수식 재계산
+    if not failed and misra is not None:
+        _write_rule_violation_detail(ws, misra.leaf_rules, res)
+
     res.sheets_filled.append(SHEET_ST101)
+
+
+def _detect_app_boot(leaf_rules: List[Any]) -> tuple:
+    """leaf 룰의 per_module 키에서 APP/BOOT prefix 감지. 단일 모듈이면 (mod, None)."""
+    mods: set = set()
+    for lr in leaf_rules:
+        mods.update(lr.per_module.keys())
+    app = next((m for m in mods if m.upper().startswith("APP")), None)
+    boot = next((m for m in mods if m.upper().startswith("BOOT")), None)
+    if app is None and mods:
+        app = sorted(mods)[0]
+    return app, boot
+
+
+def _write_rule_violation_detail(ws: Any, leaf_rules: List[Any], res: SwsaBuildResult,
+                                 *, header_label: str = "위반 건수") -> None:
+    """v0.11 detail 표: 템플릿이 보유한 룰 행(C=Rule ID)에 J=APP/K=BOOT active 기입.
+
+    v0.10 은 룰 목록이 비어 헤더 미발견 → skip. 템플릿의 B(=ROW)/L(=비율) 수식은
+    그대로 두고 J/K(입력) 만 채운다 → summary 의 COUNTIF/SUM 수식이 자동 재계산.
+    reference 스타일대로 0 은 공란 유지(비기입).
+    """
+    hdr = find_label_row(ws, header_label, max_row=220)
+    if hdr is None:
+        return
+    hr, jcol = hdr
+    kcol = jcol + 1  # BOOT (J85=APP / K85=BOOT 서브헤더)
+    app, boot = _detect_app_boot(leaf_rules)
+    by_id = {lr.rule_id.strip(): lr for lr in leaf_rules}
+    n = 0
+    matched = 0
+    for r in range(hr + 1, hr + 200):
+        cval = ws.cell(r, 3).value  # C = Rule ID
+        if not isinstance(cval, str) or not cval.strip():
+            continue
+        lr = by_id.get(cval.strip())
+        if lr is None:
+            continue
+        matched += 1
+        app_v = lr.active_for(app) if app else lr.active
+        boot_v = lr.active_for(boot) if boot else 0
+        if app_v and not is_formula_cell(ws, r, jcol) and safe_write(ws, r, jcol, app_v):
+            n += 1
+        if boot_v and not is_formula_cell(ws, r, kcol) and safe_write(ws, r, kcol, boot_v):
+            n += 1
+    res.filled_cells += n
+    if matched:
+        res.warnings.append(
+            f"{ws.title}: v0.11 detail — {matched} 룰 매칭, {n}셀(J/K) 기입 (summary 수식 재계산)"
+        )
 
 
 # ─────────────────────────── ST201 ───────────────────────────

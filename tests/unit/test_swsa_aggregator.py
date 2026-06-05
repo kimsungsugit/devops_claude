@@ -17,6 +17,8 @@ _XML = os.path.join(_S, "XML_APP_NE1aW.xml")
 _HMR = os.path.join(_S, "LOG_QAC_NE1aW_01_HMR_27052026_183745.html")
 _PMD = os.path.join(_S, "LOG_NE1AW_PORTING_2631_PMD_Report_20260323.txt")
 _DV = os.path.join(_S, "REFERENCE_(KJPDS02_DV_SwSA) Software Static Analysis Report_v1.02_260324_R.xlsm")
+_REF_PV = os.path.join(_S, "REFERENCE_(KJPDS02_PV_SwSA) Software Static Analysis Report_v0.11_260424.xlsm")
+_XML_BOOT = os.path.join(_S, "XML_BOOT_FBL.xml")
 
 
 def _meta():
@@ -239,3 +241,29 @@ class TestVariantSignoffDeviation:
         assert cov["K3"].value == "이승인"
         # rank5 deviation 경고 (제외 997/1283 = 78%)
         assert any("deviation" in w and "78%" in w for w in res.warnings)
+
+
+@pytest.mark.skipif(not (os.path.exists(_REF_PV) and os.path.exists(_XML) and os.path.exists(_XML_BOOT)),
+                    reason="v0.11 레퍼런스/XML 샘플 없음")
+class TestV011Detail:
+    """rank2/3: v0.11 ST101 5.1 detail per-rule J(APP)/K(BOOT) 채우기."""
+
+    def test_detail_filled_per_module(self):
+        from backend.services.swsa_input_adapter import merge_qac_results
+        merged = merge_qac_results(
+            [parse_qac_results_xml(_XML), parse_qac_results_xml(_XML_BOOT)],
+            ["APP", "BOOT"])
+        with open(_REF_PV, "rb") as f:
+            ref = f.read()
+        meta = SwsaBuildMeta(project_id="KJPDS02", release_sw_version="2631.00", test_date="2026.04.24")
+        res = build_swsa_report(ref, meta, qac_xml=merged)
+        ws = load_workbook(io.BytesIO(res.xlsm_io.getvalue()), keep_vba=True)["1.ST101"]
+        # Rule-8.6 행: J(APP)=104, K(BOOT)=363 (per-module merge 반영)
+        for r in range(86, 112):
+            if ws.cell(r, 3).value == "Rule-8.6":
+                assert ws.cell(r, 10).value == 104   # J=APP
+                assert ws.cell(r, 11).value == 363   # K=BOOT
+                break
+        else:
+            raise AssertionError("Rule-8.6 detail row not found")
+        assert any("detail" in w and "매칭" in w for w in res.warnings)
