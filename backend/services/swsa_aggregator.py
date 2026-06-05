@@ -451,7 +451,13 @@ def _write_st201(ws: Any, meta: SwsaBuildMeta, st201: Optional[St201Result],
         elif "duplicat" in name.lower() and pmd is not None:
             vals = [b.lines for b in pmd.blocks]
         if not vals:
+            # rank12: 무소스 메트릭(Recursion/Stress)은 F 밴드 셀을 노란 표시 —
+            # 템플릿 잔여/수식 결과가 '검증됨'으로 오인되지 않도록 audit 신호.
             skipped.append(name.strip().replace("\n", " ")[:28])
+            for (rr, _lbl) in rows:
+                if not is_formula_cell(ws, rr, fcol):
+                    mark_user_input_fill_only(ws, rr, fcol)
+                    res.user_input_cells += 1
             return
         counts = bin_values_into_bands(vals, labels)
         # audit 투명성: 일부 값이 템플릿 밴드 밖이면(예: nesting=0 in '1~10') 기록
