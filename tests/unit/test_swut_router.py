@@ -23,6 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from backend.main import app  # noqa: E402
 from backend.schemas import SwUTBuildRequest  # noqa: E402
 from backend.services.swut_input_adapter import (  # noqa: E402
+    CoverageStats,
     EnvironmentData,
     ExecutionRow,
     FunctionCoverage,
@@ -814,6 +815,98 @@ class TestSwutConfigFallback50:
             test_date="2024-02-19",
         )
         assert swut_mod._resolve_c_source_root(req) == ""
+
+    def test_apply_c_function_map_rejects_blocked_source_root_before_parse(
+        self, monkeypatch,
+    ):
+        """SwUTCR reason/action C scan must reuse the system-dir guard."""
+        from backend.routers import swut as swut_mod
+        from backend.schemas import SwUTBuildRequest
+        import backend.services.swut_asil_resolver as asil_resolver
+
+        monkeypatch.setattr(asil_resolver, "is_blocked_source_root", lambda _p: True)
+
+        def _fail_parse(*_args, **_kwargs):
+            raise AssertionError("parse_c_project must not run for blocked roots")
+
+        monkeypatch.setattr("workflow.code_parser.c_parser.parse_c_project", _fail_parse)
+
+        req = SwUTBuildRequest(
+            project_id="HDPDM01",
+            release_sw_version="1.0.0",
+            test_date="2024-02-19",
+            c_source_root="C:/Windows",
+        )
+
+        class _Session:
+            parse_warnings: list[str] = []
+            c_function_map: dict = {}
+
+        session = _Session()
+        swut_mod._apply_c_function_map(req, session)
+
+        assert session.c_function_map == {}
+        assert any("system directory rejected" in w for w in session.parse_warnings)
+
+    def test_vcast_source_fallback_extracts_full_function_after_prototype(self):
+        """SwUTCR can use VectorCAST HTML when C source root misses a static helper."""
+        from backend.routers import swut as swut_mod
+
+        env = EnvironmentData(
+            env_name="SWTE_01",
+            component_name="Door",
+            function_coverage=[
+                FunctionCoverage(
+                    unit_id="getPastSpeed",
+                    name="getPastSpeed",
+                    statement=CoverageStats(covered=7, total=8),
+                ),
+            ],
+        )
+        session = SwUTSession(environments=[env])
+        session.c_function_map = {}
+        session.parse_warnings = []
+
+        html = """
+        <html><body>
+          <span>static S16 getPastSpeed(U8 timeMs);</span>
+          <span>3338 58 0 (T) static S16 getPastSpeed(U8 timeMs)</span>
+          <span>3339 58 0 {</span>
+          <span>getPastSpeed</span>
+          <span>3340 58 0 * if (timeMs == 0U)</span>
+          <span>3341 58 0 {</span>
+          <span>3342 58 0 return 0;</span>
+          <span>3343 58 0 }</span>
+          <span>3344 58 0 else</span>
+          <span>3345 58 0 {</span>
+          <span>3344 58 0 return s16g_speed;</span>
+          <span>3345 58 0 }</span>
+          <span>3345 58 0 }</span>
+        </body></html>
+        """
+
+        class _Resolver:
+            def list_dir(self, path, pattern="*", recursive=False):
+                assert path == r"C:\vcast\Aggregate"
+                assert pattern == "*AggregateCoverageReport.html"
+                assert recursive is False
+                return [r"C:\vcast\Aggregate\Door_AggregateCoverageReport.html"]
+
+            def read_bytes(self, path):
+                assert path.endswith("AggregateCoverageReport.html")
+                return html.encode("utf-8")
+
+        swut_mod._apply_vcast_source_fallback(session, _Resolver(), r"C:\vcast")
+
+        c_entry = session.c_function_map["getPastSpeed"]
+        assert c_entry["source_origin"] == "vectorcast_aggregate_html"
+        assert c_entry["file"] == "Door_AggregateCoverageReport.html"
+        assert c_entry["signature"] == "static S16 getPastSpeed(U8 timeMs)"
+        assert "if (timeMs == 0U)" in c_entry["body"]
+        assert "\nelse\n" in f"\n{c_entry['body']}\n"
+        assert "\ngetPastSpeed\n" not in f"\n{c_entry['body']}\n"
+        assert c_entry["body"].rstrip().endswith("}")
+        assert any("VectorCAST aggregate source fallback applied" in w for w in session.parse_warnings)
 
     def test_resolve_swuds_path_config_fallback(self, tmp_path, monkeypatch):
         """req.swuds_docx_path 빈 string → config 값 fallback."""

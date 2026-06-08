@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+from copy import copy
 from dataclasses import dataclass, field, replace as dc_replace
 from pathlib import Path
 from typing import Any
@@ -177,6 +178,108 @@ def _lookup_c_function(
     return None
 
 
+def _find_source_line(c_entry: dict[str, Any]) -> int | None:
+    file_path = c_entry.get("file")
+    name = str(c_entry.get("name") or "")
+    signature = str(c_entry.get("signature") or "")
+    if not file_path or not name:
+        return None
+    try:
+        lines = Path(str(file_path)).read_text(encoding="utf-8", errors="ignore").splitlines()
+    except OSError:
+        return None
+
+    normalized_signature = " ".join(signature.split())
+    for idx, line in enumerate(lines, start=1):
+        stripped = line.strip()
+        if (
+            normalized_signature
+            and normalized_signature in " ".join(line.split())
+            and not stripped.endswith(";")
+        ):
+            return idx
+    needle = f"{name}("
+    for idx, line in enumerate(lines, start=1):
+        stripped = line.strip()
+        if needle in line.replace(" ", "") and not stripped.endswith(";"):
+            return idx
+    return None
+
+
+def _select_code_evidence_lines(body: str, function_name: str) -> list[str]:
+    lines = [line.strip() for line in body.splitlines() if line.strip()]
+    if not lines:
+        return []
+    lowered_name = function_name.lower()
+    lowered_lines = [line.lower() for line in lines]
+
+    priority_terms: list[str]
+    if "workaround" in lowered_name or "adc0" in lowered_name:
+        priority_terms = ["errata", "adc", "workaround", "adc0ctl", "adc0flwctl"]
+    elif "register" in lowered_name or any("eccie" in line for line in lowered_lines):
+        priority_terms = ["eccie", "register", "loopcnt"]
+    elif "interpolate" in lowered_name:
+        priority_terms = ["== (s32)0", "tempinterpolated", "adc2 - adc1"]
+    elif "default:" in "\n".join(lowered_lines):
+        priority_terms = ["default:", "switch"]
+    elif "boundary" in "\n".join(lowered_lines) or "clamp" in "\n".join(lowered_lines):
+        priority_terms = ["boundary", "<=", ">=", "clamp"]
+    else:
+        priority_terms = [
+            "if", "else", "error", "err", "fail", "protect", "timeout",
+            "crc", "checksum", "return",
+        ]
+
+    selected: list[str] = []
+    for term in priority_terms:
+        for idx, line in enumerate(lowered_lines):
+            if term in line:
+                start = max(idx - 1, 0)
+                end = min(idx + 3, len(lines))
+                selected.extend(lines[start:end])
+                break
+        if len(selected) >= 4:
+            break
+    if not selected:
+        selected = lines[:4]
+
+    deduped: list[str] = []
+    for line in selected:
+        if line not in deduped:
+            deduped.append(line)
+    return deduped[:6]
+
+
+def _build_c_evidence(function_name: str, c_entry: dict[str, Any] | None) -> tuple[str, str]:
+    if not c_entry:
+        return "", ""
+    source_file = Path(str(c_entry.get("file") or "")).name or "C source"
+    line_no = _find_source_line(c_entry)
+    location = f"{source_file}:{line_no}" if line_no else source_file
+    code_lines = _select_code_evidence_lines(str(c_entry.get("body") or ""), function_name)
+    if not code_lines:
+        return location, location
+    short_code = " / ".join(code_lines[:4])
+    if len(short_code) > 520:
+        short_code = short_code[:517] + "..."
+    detail = location + "\n" + "\n".join(code_lines)
+    return f"{location} | {short_code}", detail
+
+
+def _build_full_function_text(c_entry: dict[str, Any] | None) -> str:
+    if not c_entry:
+        return ""
+    signature = str(c_entry.get("signature") or "").strip()
+    body = str(c_entry.get("body") or "").strip()
+    if not (signature or body):
+        return ""
+    text = "\n".join(part for part in (signature, body) if part)
+    # Excel cell text limit is 32,767 chars. Keep room for action text prefix.
+    if len(text) > 30000:
+        text = text[:30000] + "\n/* truncated: function body exceeds Excel cell limit */"
+    return text
+
+
 def _draft_failure_rationale(
     function_name: str,
     kind: str,
@@ -196,6 +299,7 @@ def _draft_failure_rationale(
     calls = ", ".join(str(call) for call in (c_entry.get("calls") or [])[:3])
     globals_used = ", ".join(str(item) for item in (c_entry.get("used_globals") or [])[:3])
     context = f"{function_name} in {source_file}"
+    lowered_name = function_name.lower()
 
     if "default:" in body:
         return (
@@ -211,19 +315,45 @@ def _draft_failure_rationale(
             "Add a NULL-input/error-path TC if the interface permits it; otherwise "
             "record why the guard is unreachable in this integration.",
         )
-    if any(token in body for token in ("limit", "range", "min", "max", "overflow", "underflow")):
+    if "workaround" in lowered_name or "adc0" in lowered_name or "errata" in body:
         return (
-            f"{kind} uncovered path appears to include range or boundary handling "
-            f"({context}, {value}).",
-            "Add boundary-value TC coverage, or document the excluded operating range "
-            "with the linked requirement.",
+            f"{kind} uncovered path appears to include hardware errata/workaround "
+            f"logic ({context}, {value}).",
+            "Review whether the ADC/register workaround path is reachable in unit "
+            "test; add hardware-state TC or document tool/environment limitation.",
         )
-    if any(token in body for token in ("error", "fail", "timeout", "crc", "checksum", "not_ok")):
+    if "register" in lowered_name or "eccie" in body:
+        return (
+            f"{kind} uncovered path appears to include hardware register self-test "
+            f"logic ({context}, {value}).",
+            "Add register success/failure TC coverage if the register can be "
+            "stimulated; otherwise document hardware access limitation.",
+        )
+    if "interpolate" in lowered_name or "tempinterpolated" in body:
+        return (
+            f"{kind} uncovered path appears to include interpolation or divide-by-zero "
+            f"guard logic ({context}, {value}).",
+            "Add lookup-table boundary/interpolation TC coverage, including the "
+            "equal-ADC guard if reachable.",
+        )
+    if any(token in body for token in (
+        "error", "fail", "timeout", "crc", "checksum", "not_ok",
+        "err_", "_err", "protect", "mucerror",
+    )):
         return (
             f"{kind} uncovered path appears to include error-handling logic "
             f"({context}, {value}).",
             "Add fault-injection/error-path TC coverage, or document why the fault "
             "condition cannot be stimulated.",
+        )
+    if any(token in body for token in (
+        "boundary", "clamp", "overflow", "underflow", "<=", ">=", "lookup",
+    )):
+        return (
+            f"{kind} uncovered path appears to include range or boundary handling "
+            f"({context}, {value}).",
+            "Add boundary-value TC coverage, or document the excluded operating range "
+            "with the linked requirement.",
         )
     if c_entry.get("is_static"):
         action_tail = f" Calls seen: {calls}." if calls else ""
@@ -261,12 +391,24 @@ def _coverage_failures(
             value = f"{stats.covered}/{stats.total}"
             c_entry = _lookup_c_function(function_name, fc.unit_id, c_function_map)
             reason, action = _draft_failure_rationale(function_name, kind, value, c_entry)
+            evidence_short, evidence_detail = _build_c_evidence(function_name, c_entry)
+            full_function = _build_full_function_text(c_entry)
+            if evidence_short:
+                reason = f"{reason}\nC code evidence: {evidence_short}"
+                action = (
+                    f"{action}\nReview basis: use the above C code branch/condition "
+                    "as the TC design or unreachable/deviation rationale."
+                )
+            if full_function:
+                action = f"{action}\n\nFull C function:\n{full_function}"
             failures.append({
                 "function": function_name,
                 "kind": kind,
                 "value": value,
                 "reason": reason,
                 "action": action,
+                "c_evidence": evidence_detail,
+                "full_function_line_count": full_function.count("\n") + 1 if full_function else 0,
             })
     return failures
 
@@ -298,6 +440,15 @@ def _write_swutcr_sheet_header(ws, meta: SwutcrBuildMeta, cfg: dict[str, Any]) -
     safe_write(ws, 4, 6, md.get("prepare_hours", 0))
     safe_write(ws, 5, 6, md.get("execution_hours", 0))
     safe_write(ws, 6, 6, md.get("review_hours", 0))
+
+
+def _write_ut101_long_text(ws, row: int, col: int, value: str) -> None:
+    safe_write(ws, row, col, value)
+    cell = ws.cell(row, col)
+    alignment = copy(cell.alignment)
+    alignment.wrap_text = True
+    alignment.vertical = "top"
+    cell.alignment = alignment
 
 
 def _swutcr_function_count(agg: dict[str, Any]) -> int:
@@ -364,8 +515,15 @@ def _write_ut101(
         safe_write(ws, row, 4, failure["function"])
         safe_write(ws, row, 6, failure["kind"])
         safe_write(ws, row, 7, failure["value"])
-        safe_write(ws, row, 8, failure["reason"])
-        safe_write(ws, row, 12, failure["action"])
+        _write_ut101_long_text(ws, row, 8, failure["reason"])
+        _write_ut101_long_text(ws, row, 12, failure["action"])
+        line_count = max(
+            str(failure["reason"]).count("\n") + 1,
+            str(failure["action"]).count("\n") + 1,
+        )
+        full_function_lines = int(failure.get("full_function_line_count") or 0)
+        target_height = min(max(78, line_count * 12, full_function_lines * 8), 409)
+        ws.row_dimensions[row].height = max(ws.row_dimensions[row].height or 0, target_height)
         safe_write(ws, row, 15, "N/A")
 
 

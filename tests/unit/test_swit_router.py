@@ -20,6 +20,45 @@ from backend.main import app  # noqa: E402
 client = TestClient(app)
 
 
+def test_apply_c_function_map_populates_function_and_swufn_keys(tmp_path, monkeypatch):
+    """SwITCR reason/action evidence can use C source function bodies."""
+    from backend.routers import swit
+    from backend.schemas import SwITBuildRequest
+    from backend.services.swut_input_adapter import SwUTSession
+    from workflow.code_parser import c_parser
+
+    monkeypatch.setattr(
+        swit,
+        "_resolver_resolve_c_source_root",
+        lambda req, project_id: str(tmp_path),
+    )
+    monkeypatch.setattr(
+        c_parser,
+        "parse_c_project",
+        lambda root, max_files=300: {
+            "functions": [{
+                "name": "FunctionA",
+                "signature": "void FunctionA(void)",
+                "body": "void FunctionA(void) {}",
+                "file": "FunctionA.c",
+                "comment_related": "SwUFn_0001",
+            }]
+        },
+    )
+
+    req = SwITBuildRequest(
+        project_id="KJPDS02",
+        release_sw_version="1.01",
+        test_date="2025-12-05",
+    )
+    session = SwUTSession()
+    swit._apply_c_function_map(req, session)
+
+    assert session.c_function_map["FunctionA"]["file"] == "FunctionA.c"
+    assert session.c_function_map["SwUFn_0001"]["name"] == "FunctionA"
+    assert any("parsed 1 C functions" in warning for warning in session.parse_warnings)
+
+
 # ---------------------------------------------------------------------------
 # Pydantic input surface validation
 # ---------------------------------------------------------------------------
@@ -474,6 +513,18 @@ class TestSwitConfigFallback50:
             _read_template_bytes("", "HDPDM01", "sitr")
         assert exc_info.value.status_code == 400
         assert "swit_sitr_template" in str(exc_info.value.detail)
+
+    def test_read_template_bytes_switcr_kind_uses_switcr_key(self, tmp_path, monkeypatch):
+        """kind='switcr' uses switcr_template config key."""
+        from backend.routers.swit import _read_template_bytes
+        from fastapi import HTTPException
+        self._setup_cfg(tmp_path, monkeypatch, {
+            "projects": {"HDPDM01": {"template_paths": {"switcr_template": ""}}}
+        })
+        with pytest.raises(HTTPException) as exc_info:
+            _read_template_bytes("", "HDPDM01", "switcr")
+        assert exc_info.value.status_code == 400
+        assert "switcr_template" in str(exc_info.value.detail)
 
     def test_coverage_endpoint_uses_coverage_template_path(self, monkeypatch):
         """52차 W2 — SwIT Coverage endpoint이 coverage_template_path만 사용.

@@ -43,12 +43,13 @@ describe('SwITBuildSection', () => {
     vi.restoreAllMocks();
   });
 
-  it('renders SwIT-specific labels and 3 action buttons (Coverage / SITR / Consistency)', () => {
+  it('renders SwIT-specific labels and action buttons (Coverage / SITR / SwITCR / Consistency)', () => {
     render(<SwITBuildSection />);
     // 헤더 텍스트는 여러 곳 가능 — section title <h2> 만 검증
     expect(screen.getByRole('heading', { name: /SwIT 빌드/ })).toBeTruthy();
     expect(screen.getByText(/Coverage Report 빌드/)).toBeTruthy();
     expect(screen.getByText(/📝 SITR 빌드/)).toBeTruthy();
+    expect(screen.getByRole('button', { name: /SwITCR 빌드/ })).toBeTruthy();
     expect(screen.getByText(/일관성 검증 실행/)).toBeTruthy();
   });
 
@@ -67,13 +68,14 @@ describe('SwITBuildSection', () => {
 
   it('renders Browse buttons for path fields (51차 template 분리 + 60차 F6-A/F6-C)', () => {
     render(<SwITBuildSection />);
-    // 9개 path 필드 (log_folder / coverage_template_path / sitr_template_path /
+    // 12개 path 필드 (log_folder / coverage_template_path / sitr_template_path /
+    //                switcr_template_path / switcv_path / switr_path /
     //                swuds_docx_path / swuts_docx_path [60차 F6-B] /
     //                hmr_html_path [60차 F6-C] / c_source_root + 2 path)
     // F6 Round 7 NF7 fix: SwUT 회귀(SwUTBuildSection.test.jsx)와 대칭 — SwIT도
     // 신규 path field 추가 시 Browse 카운트로 회귀 lock.
     const browseButtons = screen.getAllByText(/📂 Browse/);
-    expect(browseButtons.length).toBe(9);
+    expect(browseButtons.length).toBe(12);
   });
 
   it('Browse 버튼이 JSX duplicate attribute warning을 발화하지 않음 (F6 Round 9 NW12)', () => {
@@ -125,6 +127,15 @@ describe('SwITBuildSection', () => {
     fireEvent.change(screen.getByLabelText(/SITR Template Path/), {
       target: { value: 'U:/template/switr.xlsm' },
     });
+    fireEvent.change(screen.getByLabelText(/SwITCR Template Path/), {
+      target: { value: 'U:/template/switcr.xlsm' },
+    });
+    fireEvent.change(screen.getByLabelText(/SwITCV Evidence Path/), {
+      target: { value: 'U:/evidence/switcv.xlsx' },
+    });
+    fireEvent.change(screen.getByLabelText(/SwITR Evidence Path/), {
+      target: { value: 'U:/evidence/switr.xlsm' },
+    });
     fireEvent.change(screen.getByLabelText(/SwITS Spec Path/), {
       target: { value: 'U:/spec/swits.xlsm' },
     });
@@ -142,6 +153,9 @@ describe('SwITBuildSection', () => {
     const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
     expect(body.coverage_template_path).toBe('U:/template/switcv.xlsx');
     expect(body.sitr_template_path).toBe('U:/template/switr.xlsm');
+    expect(body.switcr_template_path).toBe('U:/template/switcr.xlsm');
+    expect(body.switcv_path).toBe('U:/evidence/switcv.xlsx');
+    expect(body.switr_path).toBe('U:/evidence/switr.xlsm');
     expect(body.swuts_docx_path).toBe('U:/spec/swits.xlsm');
     expect(body.hmr_html_path).toBe('U:/logs/Jenkins_PDSM_IT_metrics_report.html');
     expect(body.c_source_root).toBe('U:/src/PDS');
@@ -205,6 +219,36 @@ describe('SwITBuildSection', () => {
     });
     const [url] = fetchSpy.mock.calls[0];
     expect(url).toContain('/api/swit/sitr/build');
+  });
+
+  it('SwITCR build calls /api/swit/switcr/build and downloads xlsm', async () => {
+    const mockBlob = new Blob([new Uint8Array([0x50, 0x4b])], {
+      type: 'application/vnd.ms-excel.sheet.macroenabled.12',
+    });
+    const fetchSpy = vi.spyOn(global, 'fetch').mockResolvedValue({
+      ok: true,
+      headers: new Headers({
+        'Content-Disposition': 'attachment; filename="switcr.xlsm"',
+        'X-SwIT-Summary': JSON.stringify({ switcr_function_count: 570 }),
+        'X-SwIT-Warnings': JSON.stringify([]),
+      }),
+      blob: async () => mockBlob,
+    });
+    render(<SwITBuildSection />);
+    fireEvent.change(screen.getByLabelText(/Release SW Version/), {
+      target: { value: '1.01' },
+    });
+    fireEvent.change(screen.getByLabelText(/Log Folder/), {
+      target: { value: 'C:/fake/log' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /SwITCR 빌드/ }));
+
+    await waitFor(() => {
+      expect(toastSpy).toHaveBeenCalledWith('success', expect.stringMatching(/다운로드/));
+    });
+    const [url, init] = fetchSpy.mock.calls[0];
+    expect(url).toContain('/api/swit/switcr/build');
+    expect(init.headers['X-User']).toBe('tester');
   });
 
   it('Consistency check calls /api/swit/consistency/check and renders issue cards', async () => {

@@ -345,6 +345,13 @@ def _apply_c_function_map(req: SwUTBuildRequest, session) -> None:
         return
 
     from pathlib import Path
+    from backend.services.swut_asil_resolver import is_blocked_source_root
+
+    if is_blocked_source_root(c_source_root):
+        session.parse_warnings.append(
+            f"[c_source] system directory rejected for reason/action draft: {c_source_root}"
+        )
+        return
 
     root = Path(c_source_root)
     if not root.exists() or not root.is_dir():
@@ -376,6 +383,174 @@ def _apply_c_function_map(req: SwUTBuildRequest, session) -> None:
     except Exception as exc:  # pragma: no cover - defensive endpoint fallback
         session.parse_warnings.append(
             f"[c_source] reason/action C parse failed: {type(exc).__name__}: {exc}"
+        )
+
+
+def _coverage_stats_incomplete(stats: Any) -> bool:
+    total = int(getattr(stats, "total", 0) or 0)
+    covered = int(getattr(stats, "covered", 0) or 0)
+    return total > 0 and covered < total
+
+
+def _session_uncovered_function_names(session) -> set[str]:
+    names: set[str] = set()
+    for env in getattr(session, "environments", []) or []:
+        for fc in getattr(env, "function_coverage", []) or []:
+            if not (
+                _coverage_stats_incomplete(getattr(fc, "statement", None))
+                or _coverage_stats_incomplete(getattr(fc, "branch", None))
+                or _coverage_stats_incomplete(getattr(fc, "mcdc", None))
+            ):
+                continue
+            for value in (getattr(fc, "name", ""), getattr(fc, "unit_id", "")):
+                name = str(value or "").strip()
+                if name:
+                    names.add(name)
+    return names
+
+
+def _clean_vcast_source_line(text: str) -> str:
+    line = str(text or "").replace("\xa0", " ").replace("\r", " ")
+    line = re.sub(r"\s+", " ", line).strip()
+    # Aggregate source spans often start with VectorCAST counters/markers,
+    # e.g. "3338 58 0 (T) * if (...)" before the original C source.
+    line = re.sub(r"^\d+\s+\d+\s+\d+\s*(?:\([A-Za-z]\))?\s*", "", line)
+    line = re.sub(r"^\*\s*", "", line)
+    c_keywords = {
+        "auto", "break", "case", "char", "const", "continue", "default", "do",
+        "double", "else", "enum", "extern", "float", "for", "goto", "if",
+        "inline", "int", "long", "register", "restrict", "return", "short",
+        "signed", "sizeof", "static", "struct", "switch", "typedef", "union",
+        "unsigned", "void", "volatile", "while",
+    }
+    if re.fullmatch(r"[A-Za-z_]\w*", line) and line not in c_keywords:
+        return ""
+    return line.strip()
+
+
+def _vcast_source_lines_from_html(html_text: str) -> list[str]:
+    try:
+        from bs4 import BeautifulSoup
+
+        soup = BeautifulSoup(html_text, "html.parser")
+        raw_lines = [span.get_text(" ", strip=True) for span in soup.find_all("span")]
+        if not raw_lines:
+            raw_lines = soup.get_text("\n").splitlines()
+    except Exception:  # pragma: no cover - bs4 is expected, regex fallback is defensive
+        raw_lines = re.sub(r"<br\s*/?>", "\n", html_text, flags=re.I).splitlines()
+
+    cleaned: list[str] = []
+    for raw in raw_lines:
+        line = _clean_vcast_source_line(raw)
+        if line:
+            cleaned.append(line)
+    return cleaned
+
+
+def _extract_vcast_function(lines: list[str], function_name: str) -> dict[str, Any] | None:
+    escaped = re.escape(function_name)
+    signature_pat = re.compile(rf"\b{escaped}\s*\(")
+
+    for idx, line in enumerate(lines):
+        if not signature_pat.search(line):
+            continue
+        if line.rstrip().endswith(";"):
+            continue
+
+        collected: list[str] = []
+        brace_depth = 0
+        started = False
+        for current in lines[idx: min(len(lines), idx + 400)]:
+            collected.append(current)
+            brace_depth += current.count("{") - current.count("}")
+            if "{" in current:
+                started = True
+            if started and brace_depth <= 0:
+                break
+        if not started or len(collected) < 2:
+            continue
+
+        signature = collected[0].strip()
+        body = "\n".join(collected[1:]).strip()
+        return {
+            "name": function_name,
+            "signature": signature,
+            "body": body,
+            "is_static": signature.startswith("static "),
+            "calls": [],
+            "used_globals": [],
+            "source_origin": "vectorcast_aggregate_html",
+        }
+    return None
+
+
+def _extract_vcast_functions_from_html(
+    html_text: str,
+    wanted_names: set[str],
+    source_name: str,
+) -> dict[str, dict[str, Any]]:
+    lines = _vcast_source_lines_from_html(html_text)
+    extracted: dict[str, dict[str, Any]] = {}
+    for name in sorted(wanted_names):
+        c_entry = _extract_vcast_function(lines, name)
+        if c_entry:
+            c_entry["file"] = source_name
+            extracted[name] = c_entry
+    return extracted
+
+
+def _apply_vcast_source_fallback(session, resolver: Any, log_folder: str) -> None:
+    """Fill missing SwUTCR C evidence from VectorCAST AggregateCoverageReport HTML."""
+    wanted_names = _session_uncovered_function_names(session)
+    if not wanted_names:
+        return
+
+    c_map = getattr(session, "c_function_map", None) or {}
+    missing = {name for name in wanted_names if name not in c_map}
+    if not missing or not log_folder:
+        return
+
+    normalized_log_folder = log_folder.rstrip("/\\")
+    aggregate_folder = f"{normalized_log_folder}\\Aggregate"
+    try:
+        report_paths = resolver.list_dir(
+            aggregate_folder,
+            pattern="*AggregateCoverageReport.html",
+            recursive=False,
+        )
+    except Exception as exc:  # pragma: no cover - defensive endpoint fallback
+        session.parse_warnings.append(
+            f"[c_source] VectorCAST aggregate source fallback list failed: "
+            f"{type(exc).__name__}: {exc}"
+        )
+        return
+
+    matched = 0
+    for report_path in report_paths:
+        if not missing:
+            break
+        try:
+            raw = resolver.read_bytes(report_path)
+            html_text = raw.decode("utf-8", errors="replace")
+        except Exception as exc:  # pragma: no cover - defensive endpoint fallback
+            session.parse_warnings.append(
+                f"[c_source] VectorCAST aggregate source fallback read failed "
+                f"({report_path}): {type(exc).__name__}: {exc}"
+            )
+            continue
+
+        source_name = str(report_path).replace("\\", "/").rsplit("/", 1)[-1]
+        extracted = _extract_vcast_functions_from_html(html_text, missing, source_name)
+        for name, c_entry in extracted.items():
+            c_map.setdefault(name, c_entry)
+        matched += len(extracted)
+        missing.difference_update(extracted)
+
+    if matched:
+        session.c_function_map = c_map
+        session.parse_warnings.append(
+            f"[c_source] VectorCAST aggregate source fallback applied: "
+            f"{matched} functions from {len(report_paths)} reports"
         )
 
 
@@ -606,6 +781,7 @@ def _do_swutcr_build(req: SwUTBuildRequest) -> Response:
     )
     _apply_function_asil_map(req, session)
     _apply_c_function_map(req, session)
+    _apply_vcast_source_fallback(session, resolver, log_folder)
     template_bytes = _read_template_bytes(req.swutcr_template_path, req.project_id, "swutcr")
     meta = _build_swutcr_meta(req)
     swuds_fn_ids = _resolve_swuds_function_ids(req)

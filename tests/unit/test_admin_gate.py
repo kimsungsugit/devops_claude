@@ -42,6 +42,7 @@ _ENDPOINTS = [
     # SwIT (4)
     ("POST", "/api/swit/coverage/build", {"project_id": "X", "release_sw_version": "1.0", "test_date": "2024-01-01"}),
     ("POST", "/api/swit/sitr/build", {"project_id": "X", "release_sw_version": "1.0", "test_date": "2024-01-01"}),
+    ("POST", "/api/swit/switcr/build", {"project_id": "X", "release_sw_version": "1.0", "test_date": "2024-01-01"}),
     ("POST", "/api/swit/consistency/check", {"coverage_path": "C:/x", "sitr_path": "C:/y"}),
     ("POST", "/api/swit/log-folder/preview", {"log_folder": "C:/x"}),
     # SwUT (5)

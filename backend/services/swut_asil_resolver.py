@@ -41,6 +41,28 @@ _FUNCTION_ID_RE = re.compile(r"(SwUFn_\d+)")
 # 정규화는 raw input이 어떤 형식이든 defensively 처리 (호출자 무관).
 _ASIL_NORMALIZE_RE = re.compile(r"ASIL[\s\-:_]*([A-D]|QM)", re.IGNORECASE)
 
+SYSTEM_SOURCE_ROOT_BLACKLIST: tuple[str, ...] = (
+    # Windows
+    "c:/windows", "c:/program files", "c:/programdata",
+    # Linux
+    "/etc", "/root", "/sys", "/proc", "/dev", "/boot",
+    "/var/log", "/usr/bin", "/usr/sbin", "/usr/lib",
+    # macOS
+    "/applications", "/library", "/system", "/private",
+    "/usr/local/bin", "/usr/local/sbin",
+)
+
+
+def is_blocked_source_root(c_source_root: str | Path) -> bool:
+    """Return True when a C source root points at a system directory."""
+    if not c_source_root:
+        return False
+    abs_root_norm = str(Path(c_source_root).resolve()).replace("\\", "/").lower()
+    return any(
+        abs_root_norm == bad or abs_root_norm.startswith(bad + "/")
+        for bad in SYSTEM_SOURCE_ROOT_BLACKLIST
+    )
+
 
 @dataclass
 class AsilResolveResult:

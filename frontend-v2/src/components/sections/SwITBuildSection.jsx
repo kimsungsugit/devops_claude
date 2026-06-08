@@ -26,6 +26,9 @@ const DEFAULT_FORM = {
   // 51차 — Coverage / SITR 양식 분리 (이전 단일 template_path)
   coverage_template_path: '',
   sitr_template_path: '',
+  switcr_template_path: '',
+  switcv_path: '',
+  switr_path: '',
   swuds_docx_path: '',
   // 60차 F6-B: SwITS spec 파일 (xlsm/docx 허용). 제공 시 SITR Test Log의
   // TC_ID/Description/Precondition/Test Method/Generation Method 컬럼에 spec stamp.
@@ -165,9 +168,12 @@ export default function SwITBuildSection() {
     // 51차 — kind별 필수 template_path 분리.
     const kindTemplate = kind === 'coverage'
       ? form.coverage_template_path
-      : form.sitr_template_path;
+      : kind === 'sitr'
+        ? form.sitr_template_path
+        : form.switcr_template_path;
     if (!form.log_folder && !kindTemplate) {
-      toast('warning', `log_folder 또는 ${kind === 'coverage' ? 'Coverage' : 'SITR'} Template Path 중 하나는 필수`); return;
+      const kindLabel = kind === 'coverage' ? 'Coverage' : kind === 'sitr' ? 'SITR' : 'SwITCR';
+      toast('warning', `log_folder 또는 ${kindLabel} Template Path 중 하나는 필수`); return;
     }
 
     const user = getUsername();
@@ -222,7 +228,7 @@ export default function SwITBuildSection() {
       const cd = res.headers.get('Content-Disposition') || '';
       const m = cd.match(/filename\*=UTF-8''([^;]+)/) || cd.match(/filename="([^"]+)"/);
       const filename = m ? decodeURIComponent(m[1])
-        : `swit_${kind}.${kind === 'sitr' ? 'xlsm' : 'xlsx'}`;
+        : `swit_${kind}.${kind === 'coverage' ? 'xlsx' : 'xlsm'}`;
 
       if (!mountedRef.current) return;
       triggerDownload(blob, filename);
@@ -474,11 +480,62 @@ export default function SwITBuildSection() {
           📂 Browse
         </button>
       </div>
+      <div className="swut-form-row swut-field-with-browse">
+        <Field
+          name="switcr_template_path"
+          label="SwITCR Template Path (xlsm)"
+          value={form.switcr_template_path}
+          onChange={v => setField('switcr_template_path', v)}
+          placeholder="U:\...\(XXXX_SwITCR) Software Integration Test Comprehesive Result_v0.10_XXXXXX.xlsm"
+          hint="SwITCR 빌드 전용 — 비우면 config/swut_meta.json의 switcr_template 사용"
+          fullWidth
+        />
+        <button className="swut-browse-btn" type="button"
+                disabled={!isAdmin}
+                title={isAdmin ? undefined : browseDisabledTitle}
+                onClick={() => openPicker('switcr_template_path', '*.xlsm', 'SwITCR Template 파일 선택')}>
+          📂 Browse
+        </button>
+      </div>
       {/* 52차 — config 자동 사용 정책. override 필요 시만 펼침 */}
       <details className="swut-advanced-section" style={{ marginTop: 12 }}>
         <summary style={{ cursor: 'pointer', padding: '8px 0', fontSize: '0.92em', color: 'var(--text-muted, #888)' }}>
           ▶ 고급 설정 (config 자동 사용 — override 필요 시만)
         </summary>
+        <div className="swut-form-row swut-field-with-browse">
+          <Field
+            name="switcv_path"
+            label="SwITCV Evidence Path (xlsx)"
+            value={form.switcv_path}
+            onChange={v => setField('switcv_path', v)}
+            placeholder="U:\...\(KJPDS02_SwITCV) Software Integration Test Coverage Result_v1.01_251205_R.xlsx"
+            hint="SwITCR evidence. Empty uses config/swut_meta.json swit_coverage_template"
+            fullWidth
+          />
+          <button className="swut-browse-btn" type="button"
+                  disabled={!isAdmin}
+                  title={isAdmin ? undefined : browseDisabledTitle}
+                  onClick={() => openPicker('switcv_path', '*.xlsx', 'SwITCV evidence file')}>
+            📂 Browse
+          </button>
+        </div>
+        <div className="swut-form-row swut-field-with-browse">
+          <Field
+            name="switr_path"
+            label="SwITR Evidence Path (xlsm)"
+            value={form.switr_path}
+            onChange={v => setField('switr_path', v)}
+            placeholder="U:\...\(KJPDS02_SwITR) Software Integration Test Result_v1.01_251205_R.xlsm"
+            hint="SwITCR evidence. Empty uses config/swut_meta.json swit_sitr_template"
+            fullWidth
+          />
+          <button className="swut-browse-btn" type="button"
+                  disabled={!isAdmin}
+                  title={isAdmin ? undefined : browseDisabledTitle}
+                  onClick={() => openPicker('switr_path', '*.xlsm', 'SwITR evidence file')}>
+            📂 Browse
+          </button>
+        </div>
         <div className="swut-form-row swut-field-with-browse">
           <Field
             name="swuds_docx_path"
@@ -557,6 +614,10 @@ export default function SwITBuildSection() {
         <button className="btn-primary" disabled={!!building || !isAdmin} title={isAdmin ? undefined : browseDisabledTitle}
                 onClick={() => buildXlsx('sitr')}>
           {building === 'sitr' ? '빌드 중...' : '📝 SITR 빌드 (xlsm, keep_vba)'}
+        </button>
+        <button className="btn-primary" disabled={!!building || !isAdmin} title={isAdmin ? undefined : browseDisabledTitle}
+                onClick={() => buildXlsx('switcr')}>
+          {building === 'switcr' ? '빌드 중...' : 'SwITCR 빌드 (xlsm)'}
         </button>
       </div>
 

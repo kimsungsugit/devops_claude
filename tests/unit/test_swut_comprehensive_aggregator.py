@@ -112,6 +112,7 @@ def test_coverage_failures_draft_reason_from_c_source_default_branch():
             "FunctionA": {
                 "name": "FunctionA",
                 "file": "SysSafety.c",
+                "signature": "void FunctionA(void)",
                 "body": "switch (mode) { default: return E_NOT_OK; }",
                 "calls": [],
                 "used_globals": [],
@@ -121,7 +122,60 @@ def test_coverage_failures_draft_reason_from_c_source_default_branch():
 
     assert len(failures) == 1
     assert "switch/default defensive logic" in failures[0]["reason"]
+    assert "C code evidence:" in failures[0]["reason"]
     assert "negative/default-path TC" in failures[0]["action"]
+    assert "Review basis:" in failures[0]["action"]
+    assert "Full C function:" in failures[0]["action"]
+    assert "void FunctionA(void)" in failures[0]["action"]
+    assert "default:" in failures[0]["c_evidence"]
+
+
+def test_coverage_failures_classifies_register_self_test_not_range():
+    failures = _coverage_failures(
+        [
+            FunctionCoverage(
+                unit_id="SwUFn_0002",
+                name="u8s_Register_Test",
+                branch=CoverageStats(covered=3, total=5),
+            )
+        ],
+        {
+            "u8s_Register_Test": {
+                "name": "u8s_Register_Test",
+                "file": "SysCtrl_Main_PDS.c",
+                "body": "ECCIE &= ~u8g_MAX; if (u8t_Register_InitialValue == u8g_CLR) { return OK; }",
+                "calls": [],
+                "used_globals": [],
+            }
+        },
+    )
+
+    assert "hardware register self-test" in failures[0]["reason"]
+    assert "range or boundary" not in failures[0]["reason"]
+
+
+def test_coverage_failures_classifies_interpolation_guard():
+    failures = _coverage_failures(
+        [
+            FunctionCoverage(
+                unit_id="SwUFn_0003",
+                name="s16s_ApiIn_InterpolateTemperature",
+                statement=CoverageStats(covered=8, total=9),
+            )
+        ],
+        {
+            "s16s_ApiIn_InterpolateTemperature": {
+                "name": "s16s_ApiIn_InterpolateTemperature",
+                "file": "ApiIn_Main_PDS.c",
+                "body": "if ((s32t_Adc2 - s32t_Adc1) == (S32)0) { s32t_TempInterpolated = s32t_Temp1; }",
+                "calls": [],
+                "used_globals": [],
+            }
+        },
+    )
+
+    assert "interpolation or divide-by-zero guard" in failures[0]["reason"]
+    assert "lookup-table boundary/interpolation" in failures[0]["action"]
 
 
 def test_build_swutcr_preserves_template_and_writes_summary():

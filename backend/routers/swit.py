@@ -24,6 +24,8 @@ import asyncio
 import io
 import json
 import logging
+import re
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Response
@@ -45,6 +47,11 @@ from backend.services import swut_meta_resolver as _resolver_mod
 from backend.services.file_resolver import get_resolver
 from backend.services.path_mode_check import check_log_folder_mode_compat
 from backend.services.swit_consistency_checker import check_swit_consistency
+from backend.services.swit_comprehensive_aggregator import (
+    SwitcrBuildMeta,
+    SwitcrBuildResult,
+    build_switcr_report,
+)
 from backend.services.swit_coverage_aggregator import (
     SwitCoverageBuildResult,
     build_swit_coverage_report,
@@ -164,6 +171,36 @@ def _build_swit_sitr_meta(req: SwITSitrBuildRequest) -> SwitSitrBuildMeta:
     )
 
 
+def _build_switcr_meta(req: SwITBuildRequest) -> SwitcrBuildMeta:
+    """SwITBuildRequest -> SwitcrBuildMeta."""
+    cfg = _load_meta_from_config(req.project_id)
+    approvers = cfg.get("approvers", {}) or {}
+    doc_filenames = cfg.get("doc_filenames", {}) or {}
+    return SwitcrBuildMeta(
+        project_id=req.project_id,
+        project_full_name=cfg.get("project_full_name", req.project_id),
+        asil_level=req.asil_level,
+        doc_id_base=cfg.get("switcr_doc_id_base", f"{req.project_id}-SwITCR"),
+        doc_id_sequence=req.doc_id_sequence,
+        default_author=approvers.get("default_author", ""),
+        default_reviewer=approvers.get("default_reviewer", ""),
+        default_approver=approvers.get("default_approver", ""),
+        doc_filename_pattern=(
+            doc_filenames.get("switcr")
+            or doc_filenames.get("swit_cr")
+            or ""
+        ),
+        release_sw_version=req.release_sw_version,
+        hw_version=req.hw_version,
+        test_date=req.test_date,
+        test_engineer=req.test_engineer,
+        validation_date=req.validation_date,
+        reviewer_override=req.reviewer_override,
+        approver_override=req.approver_override,
+        project_config=cfg,
+    )
+
+
 def _read_template_bytes(template_path: str, project_id: str, kind: str) -> bytes:
     """template_path 명시되면 그 path에서, 아니면 config의 swit_*_template fallback (49차).
 
@@ -174,7 +211,14 @@ def _read_template_bytes(template_path: str, project_id: str, kind: str) -> byte
         return resolver.read_bytes(template_path)
     cfg = _load_meta_from_config(project_id)
     tmpl_cfg = cfg.get("template_paths", {})
-    key = "swit_coverage_template" if kind == "coverage" else "swit_sitr_template"
+    key_by_kind = {
+        "coverage": "swit_coverage_template",
+        "sitr": "swit_sitr_template",
+        "switcr": "switcr_template",
+    }
+    key = key_by_kind.get(kind)
+    if key is None:
+        raise HTTPException(status_code=400, detail=f"unknown SwIT template kind: {kind}")
     tpath = (tmpl_cfg.get(key) or "").strip()
     if not tpath:
         raise HTTPException(
@@ -182,6 +226,18 @@ def _read_template_bytes(template_path: str, project_id: str, kind: str) -> byte
             detail=f"template_path 미지정 + config/swut_meta.json에 '{key}' 없음 ({project_id})",
         )
     return resolver.read_bytes(tpath)
+
+
+def _read_optional_config_file(req_path: str, project_id: str, config_key: str) -> bytes | None:
+    """Read optional SwITCR evidence workbook from request path or project config."""
+    resolver = get_resolver()
+    path = (req_path or "").strip()
+    if not path:
+        cfg = _load_meta_from_config(project_id)
+        path = str((cfg.get("template_paths", {}) or {}).get(config_key) or "").strip()
+    if not path:
+        return None
+    return resolver.read_bytes(path)
 
 
 def _resolve_swit_swuds_path(req: "SwITBuildRequest | SwITSitrBuildRequest") -> str:
@@ -303,6 +359,53 @@ def _resolve_swuds_function_ids(req: SwITBuildRequest) -> set[str] | None:
 def _apply_function_asil_map(req: SwITBuildRequest, session) -> None:
     """Thin wrapper — c_source_root > swuds_docx_path 정책 (54차 DRY 통합)."""
     _resolver_apply_function_asil_map(req, session, req.project_id)
+
+
+def _apply_c_function_map(req: SwITBuildRequest, session) -> None:
+    """Parse configured C source so SwITCR can draft reason/action evidence."""
+    c_source_root = _resolver_resolve_c_source_root(req, req.project_id)
+    if not c_source_root:
+        return
+
+    from backend.services.swut_asil_resolver import is_blocked_source_root
+
+    if is_blocked_source_root(c_source_root):
+        session.parse_warnings.append(
+            f"[c_source] system directory rejected for SwITCR reason/action draft: {c_source_root}"
+        )
+        return
+
+    root = Path(c_source_root)
+    if not root.exists() or not root.is_dir():
+        session.parse_warnings.append(
+            f"[c_source] c_source_root not found for SwITCR reason/action draft: {c_source_root}"
+        )
+        return
+
+    try:
+        from workflow.code_parser.c_parser import parse_c_project
+
+        parsed = parse_c_project(str(root), max_files=300)
+        functions = parsed.get("functions", []) if isinstance(parsed, dict) else parsed
+        c_map: dict[str, dict[str, Any]] = {}
+        for fn in functions:
+            if not isinstance(fn, dict):
+                continue
+            name = str(fn.get("name") or "").strip()
+            if name:
+                c_map[name] = fn
+            related = str(fn.get("comment_related") or "")
+            for swufn_id in re.findall(r"SwUFn_\d+", related):
+                c_map.setdefault(swufn_id, fn)
+        session.c_function_map = c_map
+        session.parse_warnings.append(
+            f"[c_source] parsed {len(functions)} C functions for SwITCR reason/action "
+            f"drafts from {c_source_root}"
+        )
+    except Exception as exc:  # pragma: no cover - defensive endpoint fallback
+        session.parse_warnings.append(
+            f"[c_source] SwITCR reason/action C parse failed: {type(exc).__name__}: {exc}"
+        )
 
 
 def _do_swit_coverage_build(req: SwITBuildRequest) -> Response:
@@ -430,6 +533,67 @@ async def build_swit_sitr(
 # ─────────────────────────────────────────────────────────────────────
 # 35차 — SwIT Coverage ↔ SITR cross-validation
 # ─────────────────────────────────────────────────────────────────────
+
+def _do_switcr_build(req: SwITBuildRequest) -> Response:
+    """SwITCR xlsm build entry."""
+    resolver = get_resolver()
+    log_folder = _resolve_swit_log_folder(req)
+    check_log_folder_mode_compat(log_folder, resolver)
+    session = collect_swit_session(
+        resolver, req.project_id,
+        jenkins_build_number=req.jenkins_build_number,
+        cache_root=req.cache_root,
+        log_folder=log_folder,
+    )
+    _apply_function_asil_map(req, session)
+    _apply_c_function_map(req, session)
+    template_bytes = _read_template_bytes(
+        req.switcr_template_path, req.project_id, "switcr",
+    )
+    meta = _build_switcr_meta(req)
+    _swits_warnings: list[str] = []
+    swits_map = _resolver_resolve_swuts_test_specs(
+        req, req.project_id, out_warnings=_swits_warnings,
+    )
+    switcv_bytes = _read_optional_config_file(
+        req.switcv_path, req.project_id, "swit_coverage_template",
+    )
+    switr_bytes = _read_optional_config_file(
+        req.switr_path, req.project_id, "swit_sitr_template",
+    )
+    result: SwitcrBuildResult = build_switcr_report(
+        session,
+        meta,
+        template_bytes,
+        swits_map=swits_map,
+        switcv_bytes=switcv_bytes,
+        switr_bytes=switr_bytes,
+    )
+    if _swits_warnings:
+        result.warnings.extend(_swits_warnings)
+    if not result.ok:
+        raise HTTPException(status_code=500, detail="SwITCR build failed (ok=False)")
+    return _build_result_to_response(
+        content_io=result.xlsm_io,
+        filename=result.filename,
+        summary=result.summary,
+        warnings=result.warnings,
+        incomplete_sheets=result.incomplete_sheets,
+        media_type="application/vnd.ms-excel.sheet.macroenabled.12",
+    )
+
+
+@router.post("/switcr/build")
+async def build_switcr(
+    req: SwITBuildRequest,
+) -> Response:
+    """SwITCR comprehensive result xlsm build."""
+    async with _BUILD_SEMAPHORE:
+        return await asyncio.to_thread(
+            run_build_safely, series="swit", kind="switcr",
+            build_fn=_do_switcr_build, req=req, logger=_logger,
+        )
+
 
 def _do_swit_consistency_check(req: SwITConsistencyCheckRequest) -> dict[str, Any]:
     """파일 resolver로 Coverage xlsx + SITR xlsm bytes 읽기 + check_swit_consistency 호출.
