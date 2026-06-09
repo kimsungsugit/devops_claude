@@ -561,6 +561,12 @@ def _do_switcr_build(req: SwITBuildRequest) -> Response:
     switr_bytes = _read_optional_config_file(
         req.switr_path, req.project_id, "swit_sitr_template",
     )
+    fault_injection_bytes = _read_optional_config_file(
+        req.fault_injection_result_path, req.project_id, "fault_injection_result",
+    )
+    switcr_reference_bytes = _read_optional_config_file(
+        getattr(req, "switcr_reference_path", ""), req.project_id, "switcr_reference",
+    )
     result: SwitcrBuildResult = build_switcr_report(
         session,
         meta,
@@ -568,6 +574,8 @@ def _do_switcr_build(req: SwITBuildRequest) -> Response:
         swits_map=swits_map,
         switcv_bytes=switcv_bytes,
         switr_bytes=switr_bytes,
+        fault_injection_bytes=fault_injection_bytes,
+        switcr_reference_bytes=switcr_reference_bytes,
     )
     if _swits_warnings:
         result.warnings.extend(_swits_warnings)

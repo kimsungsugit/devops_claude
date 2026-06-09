@@ -29,6 +29,7 @@ const DEFAULT_FORM = {
   switcr_template_path: '',
   switcv_path: '',
   switr_path: '',
+  fault_injection_result_path: '',
   swuds_docx_path: '',
   // 60차 F6-B: SwITS spec 파일 (xlsm/docx 허용). 제공 시 SITR Test Log의
   // TC_ID/Description/Precondition/Test Method/Generation Method 컬럼에 spec stamp.
@@ -533,6 +534,23 @@ export default function SwITBuildSection() {
                   disabled={!isAdmin}
                   title={isAdmin ? undefined : browseDisabledTitle}
                   onClick={() => openPicker('switr_path', '*.xlsm', 'SwITR evidence file')}>
+            📂 Browse
+          </button>
+        </div>
+        <div className="swut-form-row swut-field-with-browse">
+          <Field
+            name="fault_injection_result_path"
+            label="Fault Injection Evidence Path (xlsx)"
+            value={form.fault_injection_result_path}
+            onChange={v => setField('fault_injection_result_path', v)}
+            placeholder="U:\...\KJPDS02_DV_Fault_Injection_TestResult_v1.01_251205_R.xlsx"
+            hint="SwITCR 3.IT301 evidence. Empty uses config/swut_meta.json fault_injection_result"
+            fullWidth
+          />
+          <button className="swut-browse-btn" type="button"
+                  disabled={!isAdmin}
+                  title={isAdmin ? undefined : browseDisabledTitle}
+                  onClick={() => openPicker('fault_injection_result_path', '*.xlsx', 'Fault Injection evidence file')}>
             📂 Browse
           </button>
         </div>

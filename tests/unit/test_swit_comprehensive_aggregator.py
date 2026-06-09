@@ -73,6 +73,26 @@ def _switr_workbook() -> bytes:
     return buf.getvalue()
 
 
+def _fault_injection_workbook() -> bytes:
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "FI_Test Case"
+    ws.cell(9, 2).value = 1
+    ws.cell(9, 3).value = "SwIFITC_01"
+    ws.cell(9, 15).value = "ExpectedA"
+    ws.cell(9, 17).value = "ActualA"
+    ws.cell(10, 4).value = 1
+    ws.cell(10, 5).value = "FI"
+    ws.cell(10, 6).value = "AOR"
+    ws.cell(10, 15).value = "0"
+    ws.cell(10, 16).value = "1"
+    ws.cell(10, 17).value = "0"
+    ws.cell(10, 18).value = "1"
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
 def _session() -> SwUTSession:
     env = EnvironmentData(
         env_name="SWIT_SWUFN_0101_DEPTH4_FILE12",
@@ -122,6 +142,7 @@ def test_build_switcr_preserves_template_and_writes_active_sheets():
         swits_map={"SwITC_0101_01": {"tc_id": "SwITC_0101_01"}},
         switcv_bytes=_switcv_workbook(),
         switr_bytes=_switr_workbook(),
+        fault_injection_bytes=_fault_injection_workbook(),
     )
 
     assert result.ok is True
@@ -148,4 +169,9 @@ def test_build_switcr_preserves_template_and_writes_active_sheets():
     assert wb["1.IT101"]["E83"].value == "SwUFn_0101"
     assert wb["2.IT201"]["F70"].value == 1
     assert wb["2.IT201"]["G70"].value == 1
+    assert wb["3.IT301"]["C85"].value == 1
+    assert wb["3.IT301"]["E85"].value == 1
+    assert wb["3.IT301"]["F85"].value == 1
+    assert wb["3.IT301"]["C102"].value == "식별된 결함"
+    assert wb["3.IT301"]["C103"].value == "해당사항 없음"
     assert wb["Summary"]["G20"].value == "X"

@@ -760,6 +760,7 @@ class SwITBuildRequest(BaseModel):
     switcr_template_path: str = Field("", max_length=500)
     switcv_path: str = Field("", max_length=500)
     switr_path: str = Field("", max_length=500)
+    fault_injection_result_path: str = Field("", max_length=500)
     # SwUDS docx (옵션) — 2.Consistency 매핑 + 32차 W28 ASIL 추출
     swuds_docx_path: str = Field("", max_length=500)
     # 30차 W21 + 32차 W28: C 소스 디렉토리 (옵션) — Doxygen @asil 추출
@@ -780,7 +781,7 @@ class SwITBuildRequest(BaseModel):
 
     @field_validator("test_engineer", "reviewer_override", "approver_override",
                      "cache_root", "log_folder", "coverage_template_path", "sitr_template_path",
-                     "switcr_template_path", "switcv_path", "switr_path",
+                     "switcr_template_path", "switcv_path", "switr_path", "fault_injection_result_path",
                      "swuds_docx_path", "c_source_root", "swuts_docx_path", "hmr_html_path")
     @classmethod
     def _no_newline(cls, v):

@@ -68,14 +68,14 @@ describe('SwITBuildSection', () => {
 
   it('renders Browse buttons for path fields (51차 template 분리 + 60차 F6-A/F6-C)', () => {
     render(<SwITBuildSection />);
-    // 12개 path 필드 (log_folder / coverage_template_path / sitr_template_path /
-    //                switcr_template_path / switcv_path / switr_path /
+    // 13개 path 필드 (log_folder / coverage_template_path / sitr_template_path /
+    //                switcr_template_path / switcv_path / switr_path / fault_injection_result_path /
     //                swuds_docx_path / swuts_docx_path [60차 F6-B] /
     //                hmr_html_path [60차 F6-C] / c_source_root + 2 path)
     // F6 Round 7 NF7 fix: SwUT 회귀(SwUTBuildSection.test.jsx)와 대칭 — SwIT도
     // 신규 path field 추가 시 Browse 카운트로 회귀 lock.
     const browseButtons = screen.getAllByText(/📂 Browse/);
-    expect(browseButtons.length).toBe(12);
+    expect(browseButtons.length).toBe(13);
   });
 
   it('Browse 버튼이 JSX duplicate attribute warning을 발화하지 않음 (F6 Round 9 NW12)', () => {
@@ -136,6 +136,9 @@ describe('SwITBuildSection', () => {
     fireEvent.change(screen.getByLabelText(/SwITR Evidence Path/), {
       target: { value: 'U:/evidence/switr.xlsm' },
     });
+    fireEvent.change(screen.getByLabelText(/Fault Injection Evidence Path/), {
+      target: { value: 'U:/evidence/fault_injection.xlsx' },
+    });
     fireEvent.change(screen.getByLabelText(/SwITS Spec Path/), {
       target: { value: 'U:/spec/swits.xlsm' },
     });
@@ -156,6 +159,7 @@ describe('SwITBuildSection', () => {
     expect(body.switcr_template_path).toBe('U:/template/switcr.xlsm');
     expect(body.switcv_path).toBe('U:/evidence/switcv.xlsx');
     expect(body.switr_path).toBe('U:/evidence/switr.xlsm');
+    expect(body.fault_injection_result_path).toBe('U:/evidence/fault_injection.xlsx');
     expect(body.swuts_docx_path).toBe('U:/spec/swits.xlsm');
     expect(body.hmr_html_path).toBe('U:/logs/Jenkins_PDSM_IT_metrics_report.html');
     expect(body.c_source_root).toBe('U:/src/PDS');
