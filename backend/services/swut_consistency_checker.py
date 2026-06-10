@@ -102,8 +102,41 @@ class ConsistencyReport:
 # ---------------------------------------------------------------------------
 
 _RE_SWUFN = re.compile(r"^SwUFn_\d+$")
+# 라운드 96-fix W-B — Traceability 매트릭스 헤더 ID 일반화. HDPDM01은 TC×SwUFn
+# 매트릭스지만 KJPDS02 SwIT v1.01은 TC×SwST(SDS 설계 항목) 매트릭스 — SwUFn만
+# 인정하면 헤더 탐지 실패로 total_tcs=0 (cross-validation 무력).
+_RE_ITEM_ID = re.compile(r"^(?:SwUFn|SwST)_\d+$")
 # 35차: _RE_SWUTC를 module-level 고정에서 함수-local 동적 compile로 변경. tc_prefix
 # kwarg (SwUT="SwUTC" default, SwIT="SwITC")로 SwUT/SwIT 양쪽 호환.
+
+
+def _tc_id_patterns(tc_prefix: str) -> tuple[re.Pattern, re.Pattern]:
+    """라운드 96-fix W-B — TC ID 명명 변형 일반화 (KJPDS02 실측 호환).
+
+    지원 명명:
+      - HDPDM01: ``{P}_SwUFn_12`` (P=SwUTC/SwITC — 기존 유일 지원형)
+      - KJPDS02 DV spec/Test Log: ``{P}_0201`` / ``{P}_0101_01``
+      - KJPDS02 PV VectorCAST: ``SwIT_SwUFn_0101_01`` (P의 trailing 'C' 탈락형)
+        + compound iteration suffix ``.001``
+
+    Returns:
+        (match_re, fn_re):
+            match_re — TC ID 전체 매칭 판정 ($ 앵커).
+            fn_re — 함수 ID 추출 (group 1=SwUFn_id 또는 group 2=숫자 → SwUFn_{n}).
+    """
+    alt = tc_prefix[:-1] if tc_prefix.endswith("C") else tc_prefix
+    base = rf"(?:{re.escape(tc_prefix)}|{re.escape(alt)})"
+    match_re = re.compile(rf"^{base}_(?:SwUFn_)?\d+(?:_\d+)*(?:\.\d+)?$")
+    fn_re = re.compile(rf"^{base}_(?:(SwUFn_\d+)|(\d{{2,}}))")
+    return match_re, fn_re
+
+
+def _extract_function_id(fn_re: re.Pattern, tc_id: str) -> str | None:
+    """fn_re 매칭 결과에서 SwUFn 함수 ID 정규화 (KJPDS02 숫자형은 SwUFn_ 부여)."""
+    m = fn_re.match(tc_id)
+    if not m:
+        return None
+    return m.group(1) or f"SwUFn_{m.group(2)}"
 
 
 def _compact_row(row: tuple) -> list[tuple[int, str]]:
@@ -175,11 +208,12 @@ def _extract_coverage_summary(
         header_idx = None
         best_count = 0
         for i, r in enumerate(rows[:20]):
-            sw_count = sum(1 for c in r if isinstance(c, str) and _RE_SWUFN.match(c))
+            # 라운드 96-fix W-B: SwUFn(HDPDM01) 외 SwST(KJPDS02 SwIT) 헤더 허용
+            sw_count = sum(1 for c in r if isinstance(c, str) and _RE_ITEM_ID.match(c))
             if sw_count > best_count:
                 best_count = sw_count
                 header_idx = i
-        # 적어도 SwUFn 1개라도 있어야 함 — 0이면 Traceability 시트로 인정 안 함.
+        # 적어도 매트릭스 ID 1개라도 있어야 함 — 0이면 Traceability 시트로 인정 안 함.
         if best_count == 0:
             header_idx = None
 
@@ -187,13 +221,13 @@ def _extract_coverage_summary(
             header = rows[header_idx]
             func_cols: dict[int, str] = {
                 i: c for i, c in enumerate(header)
-                if isinstance(c, str) and _RE_SWUFN.match(c)
+                if isinstance(c, str) and _RE_ITEM_ID.match(c)
             }
             o_count_per_func: dict[str, int] = dict.fromkeys(func_cols.values(), 0)
             tc_count = 0
 
-            # 35차: tc_prefix를 동적으로 적용 — SwUT는 "SwUTC", SwIT는 "SwITC"
-            _tc_re = re.compile(rf"^{re.escape(tc_prefix)}_SwUFn_\d+$")
+            # 35차: tc_prefix 동적 적용 + 라운드 96-fix W-B 명명 변형 일반화
+            _tc_re, _ = _tc_id_patterns(tc_prefix)
             for r in rows[header_idx + 1:]:
                 tc_id = next(
                     (c for c in r[:5] if isinstance(c, str) and _tc_re.match(c)),
@@ -287,8 +321,10 @@ def _extract_sutr_summary(wb: Any, *, tc_prefix: str = "SwUTC") -> dict[str, Any
         section = None
         # 35차 reviewer W1: 루프 진입 전 한 번만 compile — _extract_coverage_summary
         # 패턴과 일관성. 수천 행 SITR에서 매 반복 compile 회피 (개선).
-        _tc_prefix_with_underscore = f"{tc_prefix}_"
-        _deviation_re = re.compile(rf"^{re.escape(tc_prefix)}_SwUFn_\d+")
+        # 라운드 96-fix W-B: KJPDS02 trailing 'C' 탈락형(SwIT_/SwUT_)도 허용
+        _alt_prefix = tc_prefix[:-1] if tc_prefix.endswith("C") else tc_prefix
+        _tc_prefixes = (f"{tc_prefix}_", f"{_alt_prefix}_")
+        _, _deviation_re = _tc_id_patterns(tc_prefix)
         for idx, r in enumerate(rows):
             pairs = _compact_row(r)
             if not pairs:
@@ -327,9 +363,9 @@ def _extract_sutr_summary(wb: Any, *, tc_prefix: str = "SwUTC") -> dict[str, Any
 
             # Section content: TC ID로 시작하는 행
             # 35차: SwUT는 "SwUTC_" prefix, SwIT는 "SwITC_" — 위 루프 진입 전 한 번 compile.
-            if section == "not_executed" and first.startswith(_tc_prefix_with_underscore):
+            if section == "not_executed" and first.startswith(_tc_prefixes):
                 summary["not_executed_tcs"].append(first)
-            elif section == "deviation" and first.startswith(_tc_prefix_with_underscore):
+            elif section == "deviation" and first.startswith(_tc_prefixes):
                 if _deviation_re.match(first):
                     summary["deviation_tcs"].append(first)
 
@@ -415,12 +451,12 @@ def check_swut_consistency(
     cov_uncov = set(cov.get("uncovered_functions") or [])
     sutr_ne = sutr.get("not_executed_tcs") or []
     sutr_ne_func: set[str] = set()
-    # 35차: tc_prefix를 동적으로 적용 — SwUT는 "SwUTC", SwIT는 "SwITC"
-    _tc_fn_re = re.compile(rf"^{re.escape(tc_prefix)}_(SwUFn_\d+)")
+    # 35차: tc_prefix 동적 적용 + 라운드 96-fix W-B 명명 변형 일반화
+    _, _tc_fn_re = _tc_id_patterns(tc_prefix)
     for tc in sutr_ne:
-        m = _tc_fn_re.match(tc)
-        if m:
-            sutr_ne_func.add(m.group(1))
+        fid = _extract_function_id(_tc_fn_re, tc)
+        if fid:
+            sutr_ne_func.add(fid)
 
     only_in_cov = cov_uncov - sutr_ne_func
     only_in_sutr = sutr_ne_func - cov_uncov

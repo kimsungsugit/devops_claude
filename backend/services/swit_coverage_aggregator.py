@@ -26,8 +26,12 @@ from __future__ import annotations
 
 import hashlib
 import io
+import re
 from dataclasses import dataclass, field
 from typing import Any
+
+# 라운드 96-fix W-D — 로그 측 silent drop 추적용 SwUFn ID 추출
+_RE_SWUFN_ID = re.compile(r"SwUFn_\d+", re.IGNORECASE)
 
 try:
     import openpyxl
@@ -308,6 +312,7 @@ def _align_function_rows_to_template(
 
     aligned: list[FunctionCoverage] = []
     missing: list[str] = []
+    matched_fc_ids: set[int] = set()  # 라운드 96-fix W-D — 로그 측 silent drop 추적
     for unit_id, fn_name, no_value in template_rows:
         candidates = by_name.get(_norm_function_name(fn_name)) or by_id.get(
             _norm_function_name(unit_id),
@@ -315,6 +320,7 @@ def _align_function_rows_to_template(
         )
         present = bool(candidates)
         if candidates:
+            matched_fc_ids.update(id(fc) for fc in candidates)
             best = max(
                 candidates,
                 key=lambda fc: getattr(getattr(fc, "function_calls_coverage", None), "total", 0),
@@ -350,6 +356,28 @@ def _align_function_rows_to_template(
                 "[swit-cov] Template functions not found in VectorCAST log: "
                 + ", ".join(missing[:10])
                 + (f" +{len(missing) - 10} more" if len(missing) > 10 else "")
+            )
+        # 라운드 96-fix W-D — 역방향 silent drop 차단: 로그에 실측된 함수가
+        # template universe(DV 양식 함수 목록)에 없어 4.Coverage에서 제외되는
+        # 경우 (예: KJPDS02 PV BOOT SwUFn_35xx — SwUDS v2.01에는 등재돼 있으나
+        # DV 스코프 template 571행에 부재). 양식 row 추가는 회사 양식 영향이
+        # 있어 자동 수행하지 않음 — audit reviewer가 universe 갱신 판단.
+        dropped = [fc for fc in original if id(fc) not in matched_fc_ids]
+        dropped_ids = sorted({
+            m.group(0)
+            for fc in dropped
+            for m in [_RE_SWUFN_ID.search(
+                f"{getattr(fc, 'unit_id', '')} {getattr(fc, 'name', '')}"
+            )]
+            if m
+        })
+        if dropped_ids:
+            out_warnings.append(
+                f"[swit-cov] VectorCAST 로그 함수 {len(dropped_ids)}개가 template "
+                "universe에 없어 4.Coverage에서 제외됨 (BOOT 등 신규 스코프는 "
+                "template/SwUDS universe 갱신 검토): "
+                + ", ".join(dropped_ids[:10])
+                + (f" +{len(dropped_ids) - 10} more" if len(dropped_ids) > 10 else "")
             )
 
 

@@ -10,6 +10,7 @@ import sys
 from pathlib import Path
 
 import openpyxl
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
@@ -225,3 +226,105 @@ class TestSwitReportToolQualification:
         tq = d["tool_qualification"]
         assert tq["evidence_class"] == "auto-generated draft"
         assert "asil_b_c_d_usage" in tq
+
+
+# ---------------------------------------------------------------------------
+# 라운드 96-fix W-B — KJPDS02 TC 명명 변형 일반화
+# ---------------------------------------------------------------------------
+
+
+class TestTcIdPatternsKJPDS02:
+    """_tc_id_patterns — HDPDM01 기존형 + KJPDS02 DV/PV 명명 모두 매칭."""
+
+    @staticmethod
+    def _patterns(prefix):
+        from backend.services.swut_consistency_checker import _tc_id_patterns
+        return _tc_id_patterns(prefix)
+
+    @pytest.mark.parametrize("tc_id", [
+        "SwITC_SwUFn_12",          # HDPDM01 기존형
+        "SwITC_0201",              # KJPDS02 DV Test Log
+        "SwITC_0101_01",           # KJPDS02 DV spec
+        "SwIT_SwUFn_0101_01",      # KJPDS02 PV VectorCAST (trailing C 탈락)
+        "SwIT_SwUFn_0101_01.001",  # compound iteration suffix
+    ])
+    def test_swit_match_variants(self, tc_id):
+        match_re, _ = self._patterns("SwITC")
+        assert match_re.match(tc_id), tc_id
+
+    @pytest.mark.parametrize("bad", [
+        "SwUFn_0101",        # 함수 ID 자체 (TC 아님)
+        "Range",             # 보조 행
+        "SwITCX_0101",       # 오타 prefix
+        "SwITC_",            # 숫자 없음
+    ])
+    def test_swit_reject_non_tc(self, bad):
+        match_re, _ = self._patterns("SwITC")
+        assert not match_re.match(bad), bad
+
+    @pytest.mark.parametrize("tc_id,expected_fn", [
+        ("SwITC_SwUFn_12", "SwUFn_12"),
+        ("SwITC_0201", "SwUFn_0201"),
+        ("SwIT_SwUFn_0101_01", "SwUFn_0101"),
+        ("SwUTC_SwUFn_0034", "SwUFn_0034"),
+    ])
+    def test_function_id_extraction(self, tc_id, expected_fn):
+        from backend.services.swut_consistency_checker import (
+            _extract_function_id, _tc_id_patterns,
+        )
+        prefix = "SwITC" if tc_id.startswith("SwIT") else "SwUTC"
+        _, fn_re = _tc_id_patterns(prefix)
+        assert _extract_function_id(fn_re, tc_id) == expected_fn
+
+    def test_swut_kjpds02_numeric_form(self):
+        """KJPDS02 SwUT TC 'SwUTC_NNNN' (라운드 82 양식)도 매칭."""
+        match_re, _ = self._patterns("SwUTC")
+        assert match_re.match("SwUTC_0001")
+        assert match_re.match("SwUTC_SwUFn_99")
+
+
+class TestKjpds02TraceabilityMatrix:
+    """KJPDS02 SwIT v1.01 — TC×SwST 매트릭스에서 total_tcs/total_functions 추출."""
+
+    def _make_cov_wb_bytes(self):
+        import io
+        import openpyxl
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "2.Traceability"
+        # 헤더: SwST 컬럼 (KJPDS02 SwIT — SwUFn 아님)
+        ws.cell(11, 2, "SwDS")
+        for i in range(3):
+            ws.cell(11, 3 + i, f"SwST_{i+1:02d}")
+        # TC rows — KJPDS02 DV 명명
+        for r, tc in enumerate(["SwITC_0101_01", "SwITC_0101_02", "SwITC_0201"], start=13):
+            ws.cell(r, 1, tc)
+            ws.cell(r, 3, "O")
+        # 3.Coverage placeholder (Exception 추출 — 없음)
+        wb.create_sheet("4.Coverage")
+        buf = io.BytesIO()
+        wb.save(buf)
+        return buf.getvalue()
+
+    def _make_sutr_wb_bytes(self):
+        import io
+        import openpyxl
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "Test Summary"
+        ws.cell(1, 1, "Final Test Result")
+        ws.cell(1, 2, "OK")
+        buf = io.BytesIO()
+        wb.save(buf)
+        return buf.getvalue()
+
+    def test_total_tcs_extracted_from_swst_matrix(self):
+        from backend.services.swit_consistency_checker import check_swit_consistency
+        report = check_swit_consistency(
+            self._make_cov_wb_bytes(), self._make_sutr_wb_bytes(),
+        )
+        d = report.to_dict()
+        assert d["coverage_summary"]["total_tcs"] == 3
+        assert d["coverage_summary"]["total_functions"] == 3
+        # SwST_02/03은 O 없음 → uncovered로 식별
+        assert "SwST_02" in d["coverage_summary"]["uncovered_functions"]

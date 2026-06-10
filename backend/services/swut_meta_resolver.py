@@ -25,6 +25,7 @@ import functools
 import json
 import logging
 import os
+import threading
 from typing import Any
 
 _logger = logging.getLogger(__name__)
@@ -248,6 +249,11 @@ def resolve_hmr_html_bytes(
 # path 키 캐시로 중복 read+parse 제거. read-only U: 설계 docx는 동일 process(세션)
 # 동안 정적 가정 — 변경 시 backend 재시작으로 모듈 캐시 자연 무효. 동일 path는 1회만.
 _SWUDS_PARSE_CACHE: dict[str, Any] = {}
+# 라운드 96-fix X1 — path별 parse 직렬화 lock. 동시 빌드 2건이 같은 SwUDS path를
+# miss하면 36MB+ read+parse가 중복 실행되던 race 차단 (결과 정합성은 결정적
+# parse라 문제 없었으나 메모리/시간 2배). 전역 단일 lock — parse는 같은 path가
+# 대부분이라 path별 lock 분리는 과설계.
+_SWUDS_PARSE_LOCK = threading.Lock()
 
 
 def _cached_parse_swuds(path: str) -> Any:
@@ -255,16 +261,21 @@ def _cached_parse_swuds(path: str) -> Any:
 
     read 예외(FileNotFoundError/PermissionError/OSError)는 caller가 처리하도록
     전파(캐시 안 함). parse 결과(ok 여부 무관, 동일 bytes 결정적)는 캐시.
+    라운드 96-fix X1: double-checked locking — miss 시 lock 안에서 재확인 후 parse.
     """
     cached = _SWUDS_PARSE_CACHE.get(path)
     if cached is not None:
         return cached
-    from backend.services.file_resolver import get_resolver
-    from backend.services.swut_swuds_parser import parse_swuds_docx
-    docx_bytes = get_resolver().read_bytes(path)
-    result = parse_swuds_docx(docx_bytes, parse_warnings=[])
-    _SWUDS_PARSE_CACHE[path] = result
-    return result
+    with _SWUDS_PARSE_LOCK:
+        cached = _SWUDS_PARSE_CACHE.get(path)
+        if cached is not None:
+            return cached
+        from backend.services.file_resolver import get_resolver
+        from backend.services.swut_swuds_parser import parse_swuds_docx
+        docx_bytes = get_resolver().read_bytes(path)
+        result = parse_swuds_docx(docx_bytes, parse_warnings=[])
+        _SWUDS_PARSE_CACHE[path] = result
+        return result
 
 
 def resolve_swuds_function_ids(req: Any, project_id: str) -> set[str] | None:

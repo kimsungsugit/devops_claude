@@ -179,10 +179,11 @@ def aggregate_session(session: SwUTSession) -> dict[str, Any]:
 
     Keys:
         total/total_tcs (alias) — test_cases 합
-        tested — test_results 합
-        passed/failed — execution pass 결과
+        tested — test_results 중 test_cases에 정의된 TC 합 (라운드 96-fix W-A)
+        passed/failed — execution pass 결과 (test_cases 정의 TC만 — 불변식 passed+failed ≤ total)
         failed_tcs — (env_name, tc_name) 페어
         not_executed/not_executed_tcs — test_cases - test_results 차집합
+        unmatched_result_tcs — test_results - test_cases (집계 제외 + parse_warnings 노출)
         function_count/function_rows — function_coverage 평탄화
         tc_to_components — tc_name → set(component_name)
         deviated — 0 (deviation_generator 결과는 빌더가 별도 주입)
@@ -208,6 +209,7 @@ def aggregate_session(session: SwUTSession) -> dict[str, Any]:
     failed = 0
     failed_tcs: list[tuple[str, str]] = []
     not_executed_tcs: list[str] = []
+    unmatched_result_tcs: list[tuple[str, str]] = []  # 라운드 96-fix W-A
     all_functions: list[FunctionCoverage] = []
     tc_to_components: dict[str, set[str]] = {}
     function_asil_map: dict[str, str] = {}  # 30차 W21
@@ -218,6 +220,15 @@ def aggregate_session(session: SwUTSession) -> dict[str, Any]:
             total += len(tc_list) if tc_list else 1
             tc_to_components.setdefault(tc_name, set()).add(env.component_name)
         for tc_name, r in env.test_results.items():
+            # 라운드 96-fix W-A — passed/failed는 test_cases에 정의된 TC만 집계.
+            # ExecutionResult에만 존재하는 키 (KJPDS02 PV 실측: 'Range' 보조 행
+            # 오인 2건 + compound TC 'CTC_*.001' 1건)가 passed에 가산되면
+            # passed(584) > total(581) → Test Summary Actual Coverage 1.005(>100%)
+            # 같은 불가능 값이 산출물에 stamp됨. 미정의 실행 결과는 집계 제외 +
+            # unmatched_result_tcs로 노출 (silent 차단). 불변식: passed+failed ≤ total.
+            if tc_name not in env.test_cases:
+                unmatched_result_tcs.append((env.env_name, tc_name))
+                continue
             if r.passed:
                 passed += 1
             else:
@@ -232,6 +243,18 @@ def aggregate_session(session: SwUTSession) -> dict[str, Any]:
         # 등록될 가능성 0 — Hyundai 컨벤션은 함수 ID 글로벌 unique).
         function_asil_map.update(env.function_asil_map)
 
+    if unmatched_result_tcs:
+        _warn = (
+            f"[aggregate] 실행 결과에만 존재하는 TC {len(unmatched_result_tcs)}건 — "
+            "집계(passed/failed) 제외 (TestCaseData 미정의: compound TC/보조 행 가능): "
+            + ", ".join(f"{e}:{t}" for e, t in unmatched_result_tcs[:5])
+            + (f" +{len(unmatched_result_tcs) - 5} more"
+               if len(unmatched_result_tcs) > 5 else "")
+        )
+        # aggregate_session이 같은 session에 재호출돼도 중복 누적 방지
+        if _warn not in session.parse_warnings:
+            session.parse_warnings.append(_warn)
+
     tested = passed + failed
     return {
         "total": total,
@@ -242,6 +265,8 @@ def aggregate_session(session: SwUTSession) -> dict[str, Any]:
         "failed_tcs": failed_tcs,
         "not_executed_tcs": not_executed_tcs,
         "not_executed": len(not_executed_tcs),
+        # 라운드 96-fix W-A — ExecutionResult에만 존재해 집계 제외된 (env, tc) 페어
+        "unmatched_result_tcs": unmatched_result_tcs,
         "function_count": len(all_functions),
         "function_rows": all_functions,
         "tc_to_components": tc_to_components,
@@ -2059,8 +2084,14 @@ def _collect_from_log_folders_merged(
         - version: 첫 폴더 기준.
 
     Raises:
-        ValueError: allowed_roots 위반 폴더 발견 시 즉시 전파 (보안 검사 —
-            부분 성공 세션을 만들지 않는다).
+        ValueError: allowed_roots 위반 폴더 발견 시 즉시 전파 (보안 검사).
+
+    예외 계약 (라운드 96-fix W3 — reviewer 지적으로 명문화):
+        `collect_from_log_folder`가 folder 단위로 raise하는 모든 예외
+        (ValueError/PermissionError/OSError 등)는 본 함수가 catch하지 않고
+        즉시 전파 — 그 시점까지 병합된 **부분 세션은 반환되지 않는다**.
+        단, 폴더 내부의 파일 단위 파싱 문제는 단일 폴더 collect와 동일하게
+        parse_warnings로 흡수되므로, "전파 vs 흡수" 경계는 folder 단위다.
     """
     merged_warnings = parse_warnings if parse_warnings is not None else []
     merged = SwUTSession(

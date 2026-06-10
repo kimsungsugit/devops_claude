@@ -1253,3 +1253,81 @@ class TestCollectMultiLogFolders:
         )
         assert len(session.environments) == 1
         assert session.source_path == root
+
+
+class TestAggregateSessionUnmatchedResults:
+    """라운드 96-fix W-A — ExecutionResult에만 존재하는 TC의 집계 제외.
+
+    KJPDS02 PV 실측: 'Range' 보조 행 오인 2건 + compound TC 'CTC_*.001' 1건이
+    passed에 가산돼 passed(584) > total(581) → Actual Coverage 1.005(>100%)
+    가 산출물에 stamp되던 결함. 불변식 passed+failed ≤ total 보장.
+    """
+
+    @staticmethod
+    def _env_with_unmatched():
+        from backend.services.swut_input_adapter import (
+            EnvironmentData, ExecutionRow, SwUTSession,
+        )
+        env = EnvironmentData(
+            env_name="SwIT_SwUFn_0104",
+            component_name="SwCom_01",
+            test_cases={
+                "SwIT_SwUFn_0104_01": [object()],
+                "SwIT_SwUFn_0104_02": [object()],
+            },
+            test_results={
+                "SwIT_SwUFn_0104_01": ExecutionRow(
+                    tc_name="SwIT_SwUFn_0104_01", passed=True),
+                "SwIT_SwUFn_0104_02": ExecutionRow(
+                    tc_name="SwIT_SwUFn_0104_02", passed=False),
+                # TestCaseData에 없는 실행 결과 2건 (보조 행 + compound)
+                "Range": ExecutionRow(tc_name="Range", passed=True),
+                "CTC_SwIT_SwUFn_0104_01.001": ExecutionRow(
+                    tc_name="CTC_SwIT_SwUFn_0104_01.001", passed=True),
+            },
+        )
+        session = SwUTSession(project_id="KJPDS02")
+        session.environments.append(env)
+        return session
+
+    def test_unmatched_results_excluded_from_pass_fail(self):
+        from backend.services.swut_input_adapter import aggregate_session
+        session = self._env_with_unmatched()
+        agg = aggregate_session(session)
+        assert agg["total"] == 2
+        assert agg["passed"] == 1
+        assert agg["failed"] == 1
+        assert agg["tested"] == 2
+        assert agg["passed"] + agg["failed"] <= agg["total"]
+        assert agg["unmatched_result_tcs"] == [
+            ("SwIT_SwUFn_0104", "Range"),
+            ("SwIT_SwUFn_0104", "CTC_SwIT_SwUFn_0104_01.001"),
+        ]
+
+    def test_unmatched_results_emit_parse_warning_once(self):
+        from backend.services.swut_input_adapter import aggregate_session
+        session = self._env_with_unmatched()
+        aggregate_session(session)
+        aggregate_session(session)  # 재호출 — 중복 누적 방지 확인
+        warns = [w for w in session.parse_warnings if "[aggregate]" in w]
+        assert len(warns) == 1
+        assert "Range" in warns[0]
+
+    def test_all_matched_no_warning_backward_compat(self):
+        from backend.services.swut_input_adapter import (
+            EnvironmentData, ExecutionRow, SwUTSession, aggregate_session,
+        )
+        env = EnvironmentData(
+            env_name="SWTE_01",
+            component_name="SysOs_Main",
+            test_cases={"SwUFn_0101.001": [object()]},
+            test_results={
+                "SwUFn_0101.001": ExecutionRow(
+                    tc_name="SwUFn_0101.001", passed=True),
+            },
+        )
+        session = SwUTSession(project_id="HDPDM01")
+        session.environments.append(env)
+        agg = aggregate_session(session)
+        assert agg["passed"] == 1 and agg["unmatched_result_tcs"] == []
+        assert not [w for w in session.parse_warnings if "[aggregate]" in w]
