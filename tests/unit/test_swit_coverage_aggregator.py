@@ -911,3 +911,63 @@ class TestF7StageR3N7IsSwitCallerBranch:
         assert c6 != "O" or c6 == 0, (
             f"SwUT 분기인데 SwIT 분기 진입 — C6={c6!r} (의도: int/None)"
         )
+
+
+class TestAlignDroppedFunctionWarning:
+    """라운드 96-fix W-D — template universe 밖 실측 함수의 silent drop 경고.
+
+    KJPDS02 PV 실측: BOOT 함수 76개가 SwUDS v2.01에 등재돼 있으나 DV 스코프
+    template 571행에 부재 → 4.Coverage에서 조용히 제외되던 결함. 원시 행은
+    함수명만 보유하므로 SwUDS name→SwUFn reverse map 교차로 검출.
+    """
+
+    @staticmethod
+    def _run_align(agg):
+        from backend.services.swit_coverage_aggregator import (
+            _align_function_rows_to_template,
+        )
+        warnings: list[str] = []
+        template_rows = [("SwUFn_0101", "main", 1)]
+        _align_function_rows_to_template(agg, template_rows, out_warnings=warnings)
+        return warnings
+
+    def test_designed_dropped_function_warned(self):
+        from backend.services.swut_input_adapter import (
+            CoverageStats, FunctionCoverage,
+        )
+        matched = FunctionCoverage(
+            unit_id="", name="main",
+            statement=CoverageStats(1, 1, 1.0), branch=CoverageStats(1, 1, 1.0),
+        )
+        boot_fn = FunctionCoverage(
+            unit_id="", name="FBL_BootMain",
+            statement=CoverageStats(1, 1, 1.0), branch=CoverageStats(1, 1, 1.0),
+        )
+        helper_fn = FunctionCoverage(  # SwUDS 미등재 보조 함수 — 노이즈 차단 확인
+            unit_id="", name="memcpy_local",
+            statement=CoverageStats(1, 1, 1.0), branch=CoverageStats(1, 1, 1.0),
+        )
+        agg = {
+            "function_rows": [matched, boot_fn, helper_fn],
+            "function_name_to_swufn_from_suds": {"FBL_BootMain": "SwUFn_3514"},
+        }
+        warnings = self._run_align(agg)
+        dropped = [w for w in warnings if "제외됨" in w]
+        assert len(dropped) == 1
+        assert "SwUFn_3514:FBL_BootMain" in dropped[0]
+        assert "memcpy_local" not in dropped[0]
+
+    def test_no_dropped_no_warning(self):
+        from backend.services.swut_input_adapter import (
+            CoverageStats, FunctionCoverage,
+        )
+        matched = FunctionCoverage(
+            unit_id="", name="main",
+            statement=CoverageStats(1, 1, 1.0), branch=CoverageStats(1, 1, 1.0),
+        )
+        agg = {
+            "function_rows": [matched],
+            "function_name_to_swufn_from_suds": {"main": "SwUFn_0101"},
+        }
+        warnings = self._run_align(agg)
+        assert not [w for w in warnings if "제외됨" in w]

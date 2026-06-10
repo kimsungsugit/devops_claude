@@ -103,9 +103,14 @@ class ConsistencyReport:
 
 _RE_SWUFN = re.compile(r"^SwUFn_\d+$")
 # 라운드 96-fix W-B — Traceability 매트릭스 헤더 ID 일반화. HDPDM01은 TC×SwUFn
-# 매트릭스지만 KJPDS02 SwIT v1.01은 TC×SwST(SDS 설계 항목) 매트릭스 — SwUFn만
+# 매트릭스지만 KJPDS02 SwIT v1.01은 TC×SDS 설계 항목 매트릭스로 ID 계열이 혼합
+# (실측 r11: SwST_01~09 + SwSTR_* + SwFn_* + SwTK_* = 108 items) — SwUFn만
 # 인정하면 헤더 탐지 실패로 total_tcs=0 (cross-validation 무력).
-_RE_ITEM_ID = re.compile(r"^(?:SwUFn|SwST)_\d+$")
+# deep-reviewer 96-fix W#1/W#2: 광역 `Sw[A-Za-z]{1,6}` 대신 실측 계열 whitelist —
+# TC ID alt-prefix(SwIT_0201/SwUT_0101) 및 SwReq_/SwArch_ 과잉 매칭 차단
+# (ISO 26262 cross-validation 도구 결정성). 신규 계열 발견 시 여기에 명시 추가.
+# KJPDS02 v1.01 매트릭스 실측 108 = SwST 9 + SwSTR 22 + SwCom 33 + SwFn 41 + SwTK 3.
+_RE_ITEM_ID = re.compile(r"^(?:SwUFn|SwSTR|SwST|SwCom|SwFn|SwTK)_\d+$")
 # 35차: _RE_SWUTC를 module-level 고정에서 함수-local 동적 compile로 변경. tc_prefix
 # kwarg (SwUT="SwUTC" default, SwIT="SwITC")로 SwUT/SwIT 양쪽 호환.
 

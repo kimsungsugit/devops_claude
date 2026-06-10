@@ -328,3 +328,55 @@ class TestKjpds02TraceabilityMatrix:
         assert d["coverage_summary"]["total_functions"] == 3
         # SwST_02/03은 O 없음 → uncovered로 식별
         assert "SwST_02" in d["coverage_summary"]["uncovered_functions"]
+
+
+class TestItemIdGeneralization:
+    """라운드 96-fix W-B 추가 — 매트릭스 헤더 ID 계열 일반화 (KJPDS02 108열 실측)."""
+
+    @pytest.mark.parametrize("item", [
+        "SwUFn_12",   # HDPDM01
+        "SwST_01", "SwSTR_07", "SwCom_33", "SwFn_47", "SwTK_02",  # KJPDS02 SwIT 혼합 계열
+    ])
+    def test_item_id_accepted(self, item):
+        from backend.services.swut_consistency_checker import _RE_ITEM_ID
+        assert _RE_ITEM_ID.match(item), item
+
+    @pytest.mark.parametrize("bad", [
+        "SwUTC_0001", "SwITC_0101",   # TC ID 계열 — 데이터 행 오인 방지
+        "SwIT_0201", "SwUT_0101",     # deep-reviewer W#1 — alt-prefix TC 변형
+        "SwReq_12", "SwArch_3",       # deep-reviewer W#2 — 비-매트릭스 ID 과잉 매칭
+        "SwDS",                        # 라벨 (숫자 없음)
+        "SwST_",                       # 숫자 없음
+        "Software_1",                  # whitelist 외 계열
+    ])
+    def test_item_id_rejected(self, bad):
+        from backend.services.swut_consistency_checker import _RE_ITEM_ID
+        assert not _RE_ITEM_ID.match(bad), bad
+
+    def test_mixed_family_header_counts_all(self):
+        """SwST+SwSTR+SwFn+SwTK 혼합 헤더에서 전 계열 column 인식."""
+        import io
+        import openpyxl
+        from backend.services.swit_consistency_checker import check_swit_consistency
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "2.Traceability"
+        items = ["SwST_01", "SwSTR_01", "SwFn_47", "SwTK_02"]
+        for i, item in enumerate(items):
+            ws.cell(11, 3 + i, item)
+        ws.cell(13, 1, "SwITC_0101_01")
+        for i in range(len(items)):
+            ws.cell(13, 3 + i, "O")
+        wb.create_sheet("4.Coverage")
+        cov = io.BytesIO(); wb.save(cov)
+
+        wb2 = openpyxl.Workbook()
+        ws2 = wb2.active
+        ws2.title = "Test Summary"
+        ws2.cell(1, 1, "Final Test Result"); ws2.cell(1, 2, "OK")
+        sutr = io.BytesIO(); wb2.save(sutr)
+
+        d = check_swit_consistency(cov.getvalue(), sutr.getvalue()).to_dict()
+        assert d["coverage_summary"]["total_functions"] == 4
+        assert d["coverage_summary"]["total_tcs"] == 1
+        assert d["coverage_summary"]["uncovered_functions"] == []

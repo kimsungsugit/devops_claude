@@ -359,23 +359,36 @@ def _align_function_rows_to_template(
             )
         # 라운드 96-fix W-D — 역방향 silent drop 차단: 로그에 실측된 함수가
         # template universe(DV 양식 함수 목록)에 없어 4.Coverage에서 제외되는
-        # 경우 (예: KJPDS02 PV BOOT SwUFn_35xx — SwUDS v2.01에는 등재돼 있으나
-        # DV 스코프 template 571행에 부재). 양식 row 추가는 회사 양식 영향이
-        # 있어 자동 수행하지 않음 — audit reviewer가 universe 갱신 판단.
+        # 경우 (예: KJPDS02 PV BOOT — SwUDS v2.01에 76함수 등재돼 있으나
+        # DV 스코프 template 571행에 부재). 원시 행은 unit_id/name에 SwUFn ID가
+        # 없으므로(함수명만 보유) SwUDS name→SwUFn 맵과 교차해 "설계 등재 +
+        # 실행됨 + 보고서 누락"만 정밀 검출 (라이브러리/보조 함수 노이즈 차단).
+        # 양식 row 추가는 회사 양식 영향이 있어 자동 수행하지 않음 —
+        # audit reviewer가 universe 갱신 판단.
         dropped = [fc for fc in original if id(fc) not in matched_fc_ids]
-        dropped_ids = sorted({
-            m.group(0)
-            for fc in dropped
-            for m in [_RE_SWUFN_ID.search(
+        name_to_swufn = agg.get("function_name_to_swufn_from_suds") or {}
+        norm_name_to_swufn = {
+            _norm_function_name(k): v for k, v in name_to_swufn.items()
+        }
+        dropped_designed: set[str] = set()
+        for fc in dropped:
+            # 보조 1: unit_id/name 문자열에 SwUFn ID가 직접 박힌 경우
+            m = _RE_SWUFN_ID.search(
                 f"{getattr(fc, 'unit_id', '')} {getattr(fc, 'name', '')}"
-            )]
-            if m
-        })
+            )
+            if m:
+                dropped_designed.add(m.group(0))
+                continue
+            # 주 경로: 함수명 → SwUDS name→SwUFn reverse map
+            nm = _norm_function_name(getattr(fc, "name", ""))
+            if nm and nm in norm_name_to_swufn:
+                dropped_designed.add(f"{norm_name_to_swufn[nm]}:{getattr(fc, 'name', '')}")
+        dropped_ids = sorted(dropped_designed)
         if dropped_ids:
             out_warnings.append(
-                f"[swit-cov] VectorCAST 로그 함수 {len(dropped_ids)}개가 template "
-                "universe에 없어 4.Coverage에서 제외됨 (BOOT 등 신규 스코프는 "
-                "template/SwUDS universe 갱신 검토): "
+                f"[swit-cov] SwUDS 등재 함수 {len(dropped_ids)}개가 로그에 실측됐으나 "
+                "template universe에 없어 4.Coverage에서 제외됨 (BOOT 등 신규 "
+                "스코프는 template/SwUDS universe 갱신 검토): "
                 + ", ".join(dropped_ids[:10])
                 + (f" +{len(dropped_ids) - 10} more" if len(dropped_ids) > 10 else "")
             )

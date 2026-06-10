@@ -501,15 +501,23 @@ class CloudiumFileResolver(LocalFileResolver):
 
     def read_text(self, path: str, encoding: str = "utf-8") -> str:
         self._gate_then_allow(path)
-        result = self._ipc_call("read_text", {"path": path, "encoding": encoding})
+        # 라운드 96-fix — list_dir와 동일 사유 (U: latency spike, HMR html 수백 KB)
+        result = self._ipc_call("read_text", {"path": path, "encoding": encoding},
+                                timeout=60.0)
         return result if isinstance(result, str) else ""
 
     def list_dir(self, path: str, pattern: str = "*", recursive: bool = False,
                  include_dirs: bool = False) -> List[str]:
         self._gate_then_allow(path)
+        # 라운드 96-fix — timeout 10→30s: U: 네트워크 드라이브 latency spike
+        # (KJPDS02 PV 실측 2026-06-11: 유휴 후 첫 디렉토리 list가 10s 초과 →
+        # TimeoutError → 빌드 403). deep-reviewer W#3: 60s는 폴더 순차 스캔
+        # worst-case 직렬 hang을 6배 증폭 — 실측 스파이크(10s+)의 3배 여유인
+        # 30s로 차등 (대용량 단건 read인 read_bytes/read_text는 60s 유지).
         result = self._ipc_call("list_dir",
                                 {"path": path, "pattern": pattern,
-                                 "recursive": recursive, "include_dirs": include_dirs})
+                                 "recursive": recursive, "include_dirs": include_dirs},
+                                timeout=30.0)
         return list(result) if isinstance(result, list) else []
 
     # X5: read-only invariant — 명시적 write 차단 메서드.

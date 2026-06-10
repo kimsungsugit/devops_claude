@@ -829,3 +829,22 @@ backend 전체 SwUT/SwIT 회귀: 189 passed + 1 skipped (이전 ~190).
 - 운영 노트: `_META_CONFIG_PATH`가 CWD 상대경로 — backend는 반드시 **프로젝트 루트에서** `python -m uvicorn backend.main:app` 기동 (CLAUDE.md의 `cd backend && uvicorn main:app`은 meta config 미로딩 — silent 빈 config)
 
 회귀: 전체 2610 passed / 1 skipped (SwIT B2 미러 +18, resolver out_warnings +4, stale mock 3곳 **_kw 갱신)
+
+## 라운드 96-fix (2026-06-10~11) — PV 검증 발견 결함 4건 + 운영 결함 1건 개선
+
+> 라운드 96 잔여 W-A/W-B/W-D + reviewer/deep-reviewer 지적 반영. 자정 end-of-day
+> snapshot(d6f9e80)이 1차분(W-A/W-B/W-D 1차/X1/W3)을 자동 커밋 — 본 커밋은 2차분
+> (deep-reviewer 반영 + IPC timeout)과 문서.
+
+| # | 결함 | fix | 검증 (KJPDS02 PV 라이브) |
+|---|------|-----|--------------------------|
+| W-A | `aggregate_session` passed가 ExecutionResult 전체 키 기준 → TestCaseData 미정의 키('Range' 보조 행 2 + compound 'CTC_*.001' 1)가 가산, passed 584 > total 581 → SwITR Actual Coverage **1.005(>100%)** stamp | passed/failed를 test_cases 정의 TC만 집계 + `unmatched_result_tcs` 키 + parse_warnings 노출(재호출 중복 가드). 불변식 passed+failed ≤ total 구조 보장 | AuditLog **Passed 581 (100.0%)** + W10 `[aggregate]` 3건 명시 |
+| W-B | consistency checker가 HDPDM01 명명만 지원 — KJPDS02에서 coverage 추출 0건 | `_tc_id_patterns()` TC 명명 일반화(SwITC_0201/SwITC_0101_01/SwIT_SwUFn_0101_01.001) + `_extract_function_id()` + `_RE_ITEM_ID` 매트릭스 헤더 일반화. deep-reviewer W#1/W#2 반영: 광역 `Sw[A-Za-z]{1,6}` → **실측 5계열 whitelist**(SwUFn/SwST/SwSTR/SwFn/SwTK — alt-prefix TC·SwReq_ 과잉 매칭 차단) | coverage total_tcs **0→47**, total_functions 9→(whitelist 후 재검증) — cross-validation 복원 |
+| W-D | 로그 실측 함수가 template universe(DV 571행) 밖이면 4.Coverage에서 **silent drop** (BOOT 76함수 SwUDS 등재에도 누락) | `_align_function_rows_to_template`에 matched 추적 + **SwUDS name→SwUFn reverse map 교차**로 "설계 등재+실행+보고서 누락"만 정밀 경고 (라이브러리 노이즈 차단). 양식 row 자동 추가는 안 함(회사 양식 영향 — audit reviewer 판단) | 라이브 재빌드로 경고 확인 |
+| X1 | `_SWUDS_PARSE_CACHE` lock 없음 — 동시 miss 시 36MB parse 중복 | `_SWUDS_PARSE_LOCK` double-checked locking | 단위 회귀 |
+| 운영 | worker IPC `list_dir`/`read_text` timeout 10s — U: 유휴 후 latency spike 초과 → TimeoutError→403 (2026-06-11 01:42 실측) | `list_dir` 30s / `read_text` 60s (deep-reviewer W#3: 60s 일괄은 직렬 hang 6배 증폭 → 차등) | 4차 재빌드 3종 성공 (225/281/294s) |
+
+- W3(merged collect 예외 계약) docstring 명문화: "전파 vs 흡수" 경계는 folder 단위.
+- deep-reviewer 1회 (opus) — Critical 0 / Warning 3 (전부 반영: whitelist, 30s 차등, alt-prefix 제외). `_RE_SWUFN` dead code는 보존 (제거는 별도 라운드).
+- 잔여(미해결 유지): W-C SwITS PV spec released 후 config 교체, SwITCR FI/resource_usage DV 잔존(사용자 실측 필요), auth 테스트 1건 병렬 실행 시 ERROR(단독 통과 — flaky, 제 변경 무관).
+- 회귀: 2631 passed / 1 skipped (full) + 96-fix 신규: adapter 3 + checker 20 + align 2.
