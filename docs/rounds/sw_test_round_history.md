@@ -848,3 +848,23 @@ backend 전체 SwUT/SwIT 회귀: 189 passed + 1 skipped (이전 ~190).
 - deep-reviewer 1회 (opus) — Critical 0 / Warning 3 (전부 반영: whitelist, 30s 차등, alt-prefix 제외). `_RE_SWUFN` dead code는 보존 (제거는 별도 라운드).
 - 잔여(미해결 유지): W-C SwITS PV spec released 후 config 교체, SwITCR FI/resource_usage DV 잔존(사용자 실측 필요), auth 테스트 1건 병렬 실행 시 ERROR(단독 통과 — flaky, 제 변경 무관).
 - 회귀: 2631 passed / 1 skipped (full) + 96-fix 신규: adapter 3 + checker 20 + align 2.
+
+## 라운드 96-보강 (2026-06-11) — Frontend 다중 log_folders UI (B2 cross-stack 완성)
+
+> backend B2(라운드 96)가 frontend 미반영이라 UI에서 단일 폴더 입력 시 BOOT가
+> 조용히 빠진 문서가 생성될 수 있던 갭 해소. SwIT/SwUT 대칭.
+
+- `SwITBuildSection.jsx` / `SwUTBuildSection.jsx`:
+  - **다중 로그 폴더 textarea** (한 줄당 1개, 최대 8 — backend max_length=8 선반영 차단).
+    payload 변환: UI 전용 `log_folders_text` strip → `log_folders` 배열 주입
+    (backend extra='forbid' 422 회피). 우선순위는 backend 정의 그대로
+    (log_folders > log_folder > config list > 단수).
+  - **단일 폴더 안내 note**: log_folder만 입력 시 "분리 로그 프로젝트(KJPDS02 PV)는
+    다중 입력 또는 둘 다 비움(config 병합 기본) 사용" 노출 (silent BOOT 누락 방지).
+  - **하드 차단 완화**: "log_folder 또는 template 중 하나는 필수" 차단 → backend
+    config fallback 지원에 맞춰 info 안내("config 기본값으로 빌드") 후 진행.
+    config에도 없으면 backend 400 사유 그대로 표시.
+  - textarea label은 "다중 로그 폴더" (한글) — 기존 회귀의 `/Log Folder/` regex 충돌 회피.
+- 테스트: SwIT +4(payload 배열/8개 초과 차단/note 렌더 토글/fallback 안내 진행) +
+  SwUT +2(payload/note) + SwUT 기존 하드 차단 테스트 1건 신규 동작으로 갱신.
+  두 suite 53 passed (SwIT 21 + SwUT 32).

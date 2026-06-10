@@ -82,16 +82,19 @@ describe('SwUTBuildSection', () => {
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
-  it('rejects missing log_folder + Coverage template path with toast warning (51차 분리)', async () => {
-    const fetchSpy = vi.spyOn(global, 'fetch');
+  it('라운드 96-보강 — log_folder/template 모두 비우면 차단 대신 config fallback 안내 후 진행', async () => {
+    // 이전(51차): 하드 차단. 보강 후: backend config fallback
+    // (swut_log_folders/swut_log_folder + 양식 template 키) 지원이므로 info 안내 + 빌드 진행.
+    const fetchSpy = vi.spyOn(global, 'fetch').mockRejectedValue(new Error('network mock'));
     render(<SwUTBuildSection />);
-    // 필수 필드 채우되 log_folder / coverage_template_path 둘 다 비움
     fireEvent.change(screen.getByLabelText(/Release SW Version/), { target: { value: '2.02' } });
     fireEvent.click(screen.getByText(/Coverage Report 빌드/));
     await waitFor(() => {
-      expect(toastSpy).toHaveBeenCalledWith('warning', expect.stringMatching(/log_folder.*Coverage/));
+      expect(toastSpy).toHaveBeenCalledWith('info', expect.stringMatching(/config 기본값/));
     });
-    expect(fetchSpy).not.toHaveBeenCalled();
+    await waitFor(() => {
+      expect(fetchSpy).toHaveBeenCalled();
+    });
   });
 
   it('downloads xlsx blob on success + shows summary', async () => {
@@ -670,5 +673,55 @@ describe('SwUTBuildSection', () => {
       expect(toastSpy).toHaveBeenCalledWith('success', expect.stringMatching(/다운로드/));
     });
     expect(screen.queryByTestId('swut-blocked-inferred-warning')).toBeNull();
+  });
+});
+
+describe('SwUTBuildSection — 라운드 96-보강 다중 로그 폴더 (log_folders)', () => {
+  beforeEach(() => {
+    toastSpy.mockReset();
+    localStorage.clear();
+    localStorage.setItem('devops_admin_mode', 'true');
+    global.URL.createObjectURL = vi.fn(() => 'blob://mock');
+    global.URL.revokeObjectURL = vi.fn();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('textarea 입력 시 payload에 log_folders 배열 포함 + UI 전용 키 제거', async () => {
+    const fetchSpy = vi.spyOn(global, 'fetch').mockRejectedValue(new Error('network mock'));
+    render(<SwUTBuildSection />);
+    fireEvent.change(screen.getByLabelText(/Release SW Version/), { target: { value: '1.01' } });
+    fireEvent.change(screen.getByTestId('swut-log-folders-text'), {
+      target: { value: 'U:/pv/1.APP_UT\nU:/pv/2.BOOT_UT/Report_sort' },
+    });
+    fireEvent.click(screen.getByText(/Coverage Report 빌드/));
+    await waitFor(() => expect(fetchSpy).toHaveBeenCalled());
+    const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
+    expect(body.log_folders).toEqual(['U:/pv/1.APP_UT', 'U:/pv/2.BOOT_UT/Report_sort']);
+    expect(body).not.toHaveProperty('log_folders_text');
+  });
+
+  it('8개 초과(9개부터) 입력 시 warning + 빌드 차단 (backend max_length=8 선반영)', async () => {
+    const fetchSpy = vi.spyOn(global, 'fetch');
+    render(<SwUTBuildSection />);
+    fireEvent.change(screen.getByLabelText(/Release SW Version/), { target: { value: '1.01' } });
+    const nine = Array.from({ length: 9 }, (_, i) => `U:/p${i}`).join('\n');
+    fireEvent.change(screen.getByTestId('swut-log-folders-text'), { target: { value: nine } });
+    fireEvent.click(screen.getByText(/Coverage Report 빌드/));
+    await waitFor(() => {
+      expect(toastSpy).toHaveBeenCalledWith('warning', expect.stringMatching(/최대 8개/));
+    });
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('단일 log_folder만 입력 시 분리 로그 안내 note 렌더 / 다중 입력 시 미렌더', () => {
+    render(<SwUTBuildSection />);
+    expect(screen.queryByTestId('swut-single-folder-note')).toBeNull();
+    fireEvent.change(screen.getByLabelText(/^Log Folder/), { target: { value: 'C:/one' } });
+    expect(screen.getByTestId('swut-single-folder-note')).toBeTruthy();
+    fireEvent.change(screen.getByTestId('swut-log-folders-text'), { target: { value: 'C:/a\nC:/b' } });
+    expect(screen.queryByTestId('swut-single-folder-note')).toBeNull();
   });
 });

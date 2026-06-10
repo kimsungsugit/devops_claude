@@ -23,6 +23,10 @@ const DEFAULT_FORM = {
   hw_version: '1.00',
   asil_level: 'ASIL B',  // SwIT 통합테스트 default
   log_folder: '',
+  // 라운드 96-보강: 다중 log_folders 입력 (한 줄당 폴더 1개, 최대 8 — B2 대칭).
+  // UI 전용 필드 — 빌드 payload에서는 제거 후 log_folders 배열로 변환
+  // (backend extra='forbid' 422 회피). 입력 시 단일 log_folder보다 우선.
+  log_folders_text: '',
   // 51차 — Coverage / SITR 양식 분리 (이전 단일 template_path)
   coverage_template_path: '',
   sitr_template_path: '',
@@ -172,9 +176,18 @@ export default function SwITBuildSection() {
       : kind === 'sitr'
         ? form.sitr_template_path
         : form.switcr_template_path;
-    if (!form.log_folder && !kindTemplate) {
+    // 라운드 96-보강: 다중 log_folders (한 줄당 1개, 최대 8 — backend max_length=8).
+    const logFolders = (form.log_folders_text || '')
+      .split('\n').map(s => s.trim()).filter(Boolean);
+    if (logFolders.length > 8) {
+      toast('warning', `다중 로그 폴더는 최대 8개 (현재 ${logFolders.length}개)`); return;
+    }
+    if (!form.log_folder && logFolders.length === 0 && !kindTemplate) {
+      // 라운드 96-보강: 이전엔 차단했으나 backend가 config fallback
+      // (swit_log_folders/swit_log_folder + swit_*_template)을 지원하므로
+      // 안내 후 진행. config에도 없으면 backend가 400으로 사유 반환.
       const kindLabel = kind === 'coverage' ? 'Coverage' : kind === 'sitr' ? 'SITR' : 'SwITCR';
-      toast('warning', `log_folder 또는 ${kindLabel} Template Path 중 하나는 필수`); return;
+      toast('info', `log_folder/${kindLabel} Template 미입력 — config 기본값(fallback)으로 빌드 시도 (KJPDS02는 APP+BOOT 병합 기본, config에도 없으면 오류 안내)`);
     }
 
     const user = getUsername();
@@ -188,13 +201,19 @@ export default function SwITBuildSection() {
     abortRef.current = controller;
 
     try {
+      // 라운드 96-보강: log_folders_text(UI 전용)는 payload에서 제거하고
+      // (주의: 향후 UI 전용 키 추가 시 동일하게 strip — backend extra='forbid' 422)
+      // 비어있지 않으면 log_folders 배열로 변환 (backend 우선순위:
+      // log_folders > log_folder > config swit_log_folders > 단수).
+      const { log_folders_text: _lfText, ...payload } = form;
+      if (logFolders.length > 0) payload.log_folders = logFolders;
       const res = await fetch(buildUrl(`/api/swit/${kind}/build`), {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           ...authHeaders(),
         },
-        body: JSON.stringify(form),
+        body: JSON.stringify(payload),
         signal: controller.signal,
       });
 
@@ -394,7 +413,7 @@ export default function SwITBuildSection() {
           value={form.log_folder}
           onChange={v => setField('log_folder', v)}
           placeholder="U:\연구소\...\08.SW 통합테스트\03.Test Result\01.Log\v2.02_240219"
-          hint="VectorCAST html report 보유 디렉토리"
+          hint="VectorCAST html report 보유 디렉토리 — 비우면 config 기본 (다중 등록 시 병합)"
           fullWidth
         />
         <button className="swut-browse-btn" type="button"
@@ -414,6 +433,41 @@ export default function SwITBuildSection() {
         >
           {previewChecking ? '...' : '🔎 미리보기'}
         </button>
+      </div>
+      {/* 라운드 96-보강: 단일 폴더 입력 시 분리 로그 프로젝트 누락 경고 */}
+      {(form.log_folder || '').trim() && !(form.log_folders_text || '').trim() && (
+        <div className="swut-field-hint" data-testid="swit-single-folder-note">
+          ℹ️ 단일 Log Folder만 빌드됩니다 — APP+BOOT 분리 로그 프로젝트(예: KJPDS02 PV)는
+          아래 다중 로그 폴더를 사용하거나, 둘 다 비워 config 병합 기본
+          (swit_log_folders)을 사용하세요.
+        </div>
+      )}
+      {/* 라운드 96-보강: 다중 log_folders 입력 (B2 — APP+BOOT 병합 빌드) */}
+      <div className="swut-form-row">
+        <div className="swut-field swut-field-full">
+          <label className="swut-field-label" htmlFor="swit-log-folders-text">
+            다중 로그 폴더 (옵션 — 한 줄당 1개, 최대 8)
+          </label>
+          <textarea
+            id="swit-log-folders-text"
+            data-testid="swit-log-folders-text"
+            className="swut-field-input"
+            rows={3}
+            value={form.log_folders_text}
+            onChange={e => setField('log_folders_text', e.target.value)}
+            placeholder={'U:\\...\\01.Log\\PV\\1.APP_IT_Report_260604\nU:\\...\\01.Log\\PV\\2.BOOT_IT_Report_260604\\Report'}
+            autoComplete="off"
+            autoCorrect="off"
+            autoCapitalize="off"
+            spellCheck="false"
+            data-form-type="other"
+            data-lpignore="true"
+          />
+          <div className="swut-field-hint">
+            입력 시 단일 Log Folder보다 우선 — 분리 로그(APP+BOOT)를 한 산출물로 병합
+            빌드. env 중복은 첫 폴더 우선 + 경고 누적 (이중 집계 방지).
+          </div>
+        </div>
       </div>
       {/* 38차 W4: preview 결과 inline panel */}
       {previewResult && (

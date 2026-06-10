@@ -447,3 +447,65 @@ describe('SwITBuildSection', () => {
     expect(screen.queryByTestId('swit-blocked-inferred-warning')).toBeNull();
   });
 });
+
+describe('SwITBuildSection — 라운드 96-보강 다중 로그 폴더 (log_folders)', () => {
+  beforeEach(() => {
+    toastSpy.mockReset();
+    localStorage.clear();
+    localStorage.setItem('devops_admin_mode', 'true');
+    global.URL.createObjectURL = vi.fn(() => 'blob://mock');
+    global.URL.revokeObjectURL = vi.fn();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('textarea 입력 시 payload에 log_folders 배열 포함 + UI 전용 키 제거', async () => {
+    const fetchSpy = vi.spyOn(global, 'fetch').mockRejectedValue(new Error('network mock'));
+    render(<SwITBuildSection />);
+    fireEvent.change(screen.getByLabelText(/Release SW Version/), { target: { value: '0.10' } });
+    fireEvent.change(screen.getByTestId('swit-log-folders-text'), {
+      target: { value: 'U:/pv/APP\n\n  U:/pv/BOOT/Report  \n' },
+    });
+    fireEvent.click(screen.getByText(/Coverage Report 빌드/));
+    await waitFor(() => expect(fetchSpy).toHaveBeenCalled());
+    const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
+    // 빈 줄 제거 + trim — backend 우선순위: log_folders > log_folder > config
+    expect(body.log_folders).toEqual(['U:/pv/APP', 'U:/pv/BOOT/Report']);
+    expect(body).not.toHaveProperty('log_folders_text');
+  });
+
+  it('8개 초과(9개부터) 입력 시 warning + 빌드 차단 (backend max_length=8 선반영)', async () => {
+    const fetchSpy = vi.spyOn(global, 'fetch');
+    render(<SwITBuildSection />);
+    fireEvent.change(screen.getByLabelText(/Release SW Version/), { target: { value: '0.10' } });
+    const nine = Array.from({ length: 9 }, (_, i) => `U:/p${i}`).join('\n');
+    fireEvent.change(screen.getByTestId('swit-log-folders-text'), { target: { value: nine } });
+    fireEvent.click(screen.getByText(/Coverage Report 빌드/));
+    await waitFor(() => {
+      expect(toastSpy).toHaveBeenCalledWith('warning', expect.stringMatching(/최대 8개/));
+    });
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('단일 log_folder만 입력 시 분리 로그 안내 note 렌더 / 다중 입력 시 미렌더', () => {
+    render(<SwITBuildSection />);
+    expect(screen.queryByTestId('swit-single-folder-note')).toBeNull();
+    fireEvent.change(screen.getByLabelText(/^Log Folder/), { target: { value: 'C:/one' } });
+    expect(screen.getByTestId('swit-single-folder-note')).toBeTruthy();
+    fireEvent.change(screen.getByTestId('swit-log-folders-text'), { target: { value: 'C:/a\nC:/b' } });
+    expect(screen.queryByTestId('swit-single-folder-note')).toBeNull();
+  });
+
+  it('모두 비우면 config fallback 안내(info) 후 빌드 진행', async () => {
+    const fetchSpy = vi.spyOn(global, 'fetch').mockRejectedValue(new Error('network mock'));
+    render(<SwITBuildSection />);
+    fireEvent.change(screen.getByLabelText(/Release SW Version/), { target: { value: '0.10' } });
+    fireEvent.click(screen.getByText(/Coverage Report 빌드/));
+    await waitFor(() => {
+      expect(toastSpy).toHaveBeenCalledWith('info', expect.stringMatching(/config 기본값/));
+    });
+    await waitFor(() => expect(fetchSpy).toHaveBeenCalled());
+  });
+});
