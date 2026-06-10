@@ -718,7 +718,11 @@ class TestSwitConfigFallback50:
         assert captured["swits_map"] is swits_map
 
     def test_coverage_build_uses_config_log_folder_when_request_empty(self, tmp_path, monkeypatch):
-        """SwITCV build는 req.log_folder가 비면 config.swit_log_folder를 collector에 전달."""
+        """SwITCV build는 req.log_folder가 비면 config.swit_log_folder를 collector에 전달.
+
+        B2 대칭 이후 — 라우터는 단일 config 폴더도 ``log_folders=[folder]``
+        (list kwarg)로 collector에 전달한다.
+        """
         import io
         from backend.routers import swit as swit_mod
         from backend.schemas import SwITBuildRequest
@@ -734,7 +738,7 @@ class TestSwitConfigFallback50:
         monkeypatch.setattr(swit_mod, "check_log_folder_mode_compat", lambda *_args, **_kwargs: None)
 
         def _fake_collect(_resolver, _project_id, **kwargs):
-            captured["log_folder"] = kwargs.get("log_folder")
+            captured["log_folders"] = kwargs.get("log_folders")
             return object()
 
         monkeypatch.setattr(swit_mod, "collect_swit_session", _fake_collect)
@@ -762,10 +766,13 @@ class TestSwitConfigFallback50:
         )
         response = swit_mod._do_swit_coverage_build(req)
         assert response.status_code == 200
-        assert captured["log_folder"] == "U:/logs/251106_IT_Report"
+        assert captured["log_folders"] == ["U:/logs/251106_IT_Report"]
 
     def test_sitr_build_uses_config_log_folder_when_request_empty(self, tmp_path, monkeypatch):
-        """SwITR build도 req.log_folder가 비면 config.swit_log_folder를 collector에 전달."""
+        """SwITR build도 req.log_folder가 비면 config.swit_log_folder를 collector에 전달.
+
+        B2 대칭 이후 — 단일 config 폴더도 ``log_folders=[folder]`` list kwarg로 전달.
+        """
         import io
         from backend.routers import swit as swit_mod
         from backend.schemas import SwITSitrBuildRequest
@@ -781,7 +788,7 @@ class TestSwitConfigFallback50:
         monkeypatch.setattr(swit_mod, "check_log_folder_mode_compat", lambda *_args, **_kwargs: None)
 
         def _fake_collect(_resolver, _project_id, **kwargs):
-            captured["log_folder"] = kwargs.get("log_folder")
+            captured["log_folders"] = kwargs.get("log_folders")
             return object()
 
         monkeypatch.setattr(swit_mod, "collect_swit_session", _fake_collect)
@@ -808,7 +815,7 @@ class TestSwitConfigFallback50:
         )
         response = swit_mod._do_swit_sitr_build(req)
         assert response.status_code == 200
-        assert captured["log_folder"] == "U:/logs/251106_IT_Report"
+        assert captured["log_folders"] == ["U:/logs/251106_IT_Report"]
 
 
 class TestSwitSitrMetaBuilder:
@@ -968,3 +975,169 @@ class TestPathModeMismatch56:
             assert r.status_code == 400, f"expected 400 got {r.status_code}: {r.text[:200]}"
         finally:
             set_resolver(LocalFileResolver())
+
+
+# ---------------------------------------------------------------------------
+# B2 대칭 (SwIT) — _resolve_swit_log_folders 4단계 우선순위 + log_folders 스키마
+# (SwUT test_swut_router.py TestResolveSwutLogFoldersPriority/TestLogFoldersSchema 미러)
+# ---------------------------------------------------------------------------
+
+
+def _make_swit_req(**kwargs):
+    """최소 유효 SwITBuildRequest — log_folder(s) 우선순위 검증용."""
+    from backend.schemas import SwITBuildRequest
+    base = {
+        "project_id": "KJPDS02",
+        "release_sw_version": "0.10",
+        "test_date": "2026-06-04",
+    }
+    base.update(kwargs)
+    return SwITBuildRequest(**base)
+
+
+class TestResolveSwitLogFoldersPriority:
+    """B2 대칭 — req.log_folders > req.log_folder > config swit_log_folders >
+    config swit_log_folder."""
+
+    def _patch_cfg(self, monkeypatch, cfg: dict):
+        from backend.routers import swit as swit_mod
+        monkeypatch.setattr(
+            swit_mod, "_load_meta_from_config", lambda _project_id: cfg,
+        )
+        return swit_mod
+
+    _FULL_CFG = {
+        "swit_log_folders": ["U:/cfg/app_it", "U:/cfg/boot_it"],
+        "swit_log_folder": "U:/cfg/single_it",
+    }
+
+    def test_req_log_folders_first(self, monkeypatch):
+        swit_mod = self._patch_cfg(monkeypatch, dict(self._FULL_CFG))
+        req = _make_swit_req(
+            log_folders=["C:/req/app", "C:/req/boot"],
+            log_folder="C:/req/single",
+        )
+        assert swit_mod._resolve_swit_log_folders(req) == [
+            "C:/req/app", "C:/req/boot",
+        ]
+
+    def test_req_log_folder_second(self, monkeypatch):
+        swit_mod = self._patch_cfg(monkeypatch, dict(self._FULL_CFG))
+        req = _make_swit_req(log_folder="C:/req/single")
+        assert swit_mod._resolve_swit_log_folders(req) == ["C:/req/single"]
+
+    def test_config_log_folders_third(self, monkeypatch):
+        swit_mod = self._patch_cfg(monkeypatch, dict(self._FULL_CFG))
+        req = _make_swit_req()
+        assert swit_mod._resolve_swit_log_folders(req) == [
+            "U:/cfg/app_it", "U:/cfg/boot_it",
+        ]
+
+    def test_config_log_folder_fourth(self, monkeypatch):
+        swit_mod = self._patch_cfg(
+            monkeypatch, {"swit_log_folder": "U:/cfg/single_it"},
+        )
+        req = _make_swit_req()
+        assert swit_mod._resolve_swit_log_folders(req) == ["U:/cfg/single_it"]
+
+    def test_legacy_log_folders_dict_keys_still_work(self, monkeypatch):
+        """기존 log_folders dict 키 (swit/integration) fallback 유지."""
+        swit_mod = self._patch_cfg(
+            monkeypatch, {"log_folders": {"swit": "U:/cfg/dict_swit"}},
+        )
+        req = _make_swit_req()
+        assert swit_mod._resolve_swit_log_folders(req) == ["U:/cfg/dict_swit"]
+
+    def test_all_empty_returns_empty_list(self, monkeypatch):
+        swit_mod = self._patch_cfg(monkeypatch, {})
+        req = _make_swit_req()
+        assert swit_mod._resolve_swit_log_folders(req) == []
+
+    def test_config_empty_list_falls_through_to_single(self, monkeypatch):
+        swit_mod = self._patch_cfg(
+            monkeypatch,
+            {"swit_log_folders": [], "swit_log_folder": "U:/cfg/single_it"},
+        )
+        req = _make_swit_req()
+        assert swit_mod._resolve_swit_log_folders(req) == ["U:/cfg/single_it"]
+
+    def test_backward_compat_wrapper_returns_first(self, monkeypatch):
+        """_resolve_swit_log_folder(단수 wrapper) — 첫 폴더 단일 반환 계약 유지."""
+        swit_mod = self._patch_cfg(monkeypatch, dict(self._FULL_CFG))
+        req = _make_swit_req()
+        assert swit_mod._resolve_swit_log_folder(req) == "U:/cfg/app_it"
+        swit_mod2 = self._patch_cfg(monkeypatch, {})
+        assert swit_mod2._resolve_swit_log_folder(_make_swit_req()) is None
+
+
+class TestSwitLogFoldersSchema:
+    """B2 대칭 — SwITBuildRequest.log_folders 입력 표면 (maxlen/줄바꿈/개수/extra)."""
+
+    _BASE = {
+        "project_id": "KJPDS02",
+        "release_sw_version": "0.10",
+        "test_date": "2026-06-04",
+    }
+
+    def test_valid_two_folders_accepted(self):
+        req = _make_swit_req(log_folders=["C:/a", "C:/b"])
+        assert req.log_folders == ["C:/a", "C:/b"]
+
+    def test_item_over_500_rejected(self):
+        from pydantic import ValidationError
+        item = "C:/" + "x" * 498  # 501자
+        with pytest.raises(ValidationError, match="500"):
+            _make_swit_req(log_folders=[item])
+
+    @pytest.mark.parametrize("bad", ["C:/a\nb", "C:/a\rb", "C:/a\r\nX-Injected: evil"])
+    def test_item_newline_rejected(self, bad):
+        from pydantic import ValidationError
+        with pytest.raises(ValidationError, match="줄바꿈"):
+            _make_swit_req(log_folders=[bad])
+
+    def test_nine_items_rejected(self):
+        from pydantic import ValidationError
+        with pytest.raises(ValidationError):
+            _make_swit_req(log_folders=[f"C:/p{i}" for i in range(9)])
+
+    def test_extra_field_still_forbidden(self):
+        from pydantic import ValidationError
+        with pytest.raises(ValidationError):
+            _make_swit_req(log_folders_typo=["C:/a"])
+
+    def test_sitr_request_inherits_log_folders(self):
+        """SwITSitrBuildRequest(상속)도 log_folders 사용 가능."""
+        from backend.schemas import SwITSitrBuildRequest
+        req = SwITSitrBuildRequest(**self._BASE, log_folders=["C:/a", "C:/b"])
+        assert req.log_folders == ["C:/a", "C:/b"]
+
+    def test_endpoint_log_folders_newline_422(self):
+        r = client.post(
+            "/api/swit/coverage/build",
+            json={
+                **self._BASE,
+                "log_folders": ["C:/fake/log\r\nX-Injected: evil"],
+            },
+            headers={"X-User": "tester"},
+        )
+        assert r.status_code == 422
+
+
+def test_collect_swit_session_passes_log_folders_through(monkeypatch):
+    """collect_swit_session이 log_folders kwarg를 SwUT collect로 전달 (B2 대칭)."""
+    from backend.services import swit_input_adapter
+
+    captured: dict = {}
+
+    def _fake_collect(resolver, project_id, **kwargs):
+        captured.update(kwargs)
+        from backend.services.swut_input_adapter import SwUTSession
+        return SwUTSession(project_id=project_id)
+
+    monkeypatch.setattr(swit_input_adapter, "collect_swut_session", _fake_collect)
+    swit_input_adapter.collect_swit_session(
+        object(), "KJPDS02",
+        log_folders=["U:/app", "U:/boot"],
+    )
+    assert captured["log_folders"] == ["U:/app", "U:/boot"]
+    assert captured["env_prefix"] == "SwITC"

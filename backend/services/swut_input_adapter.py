@@ -1056,6 +1056,10 @@ class LogLayout:
     cov_suffix: str
     metrics_suffix: str
     env_mode: str  # "prefix" (SWTE 정규식) | "suffix" (suffix-strip)
+    # B1 — 실행결과 폴더명 대체 후보 (KJPDS02 PV 실측: "ExecutionResult" 대신
+    # "Execution"). exec_dir 미존재 시 순서대로 시도해 첫 존재 폴더로 대체.
+    # default 빈 튜플 — SWTE 등 기존 레이아웃 동작 영향 0.
+    exec_dir_alts: tuple[str, ...] = ()
 
     def extract_env(self, filename: str, env_prefix: str) -> str:
         """tc 리포트 파일명 → env 이름. 매칭 실패 시 빈 문자열."""
@@ -1083,6 +1087,8 @@ SWTE_LAYOUT = LogLayout(
 VC2025_LAYOUT = LogLayout(
     name="vc2025",
     tc_dir="TestCaseData",
+    # exec_dir="ExecutionResult" 유지 — 기존 HDPDM01 환경 backward compat.
+    # KJPDS02 PV 실측(260604)은 폴더명이 "Execution" — exec_dir_alts로 대체 지원.
     exec_dir="ExecutionResult",
     cov_dir="Aggregate",
     metrics_dir="Metrics",
@@ -1091,10 +1097,23 @@ VC2025_LAYOUT = LogLayout(
     cov_suffix="_AggregateCoverageReport.html",
     metrics_suffix="_MetricsReport.html",
     env_mode="suffix",
+    exec_dir_alts=("Execution",),
 )
 
 # 탐지 순서 — SWTE 우선 (기존 동작 보존), 미발견 시 VC2025.
 _LOG_LAYOUTS = (SWTE_LAYOUT, VC2025_LAYOUT)
+
+
+def _exists_quiet(resolver: Any, path: str) -> bool:
+    """resolver.exists 예외를 False로 흡수 — 대체 후보 탐색 전용.
+
+    primary 경로 존재 검사(기존 흐름)는 예외를 그대로 전파해 backward compat
+    유지. 본 헬퍼는 B1 exec_dir_alts probing처럼 "없으면 다음 후보" 분기에만 사용.
+    """
+    try:
+        return bool(resolver.exists(path))
+    except Exception:  # noqa: BLE001 — exists 실패는 미존재로 간주 (후보 탐색)
+        return False
 
 
 def _detect_log_layout(
@@ -1518,6 +1537,26 @@ def collect_from_log_folder(
     # 1) 3 sub-folder 존재 확인
     sub_tc = os.path.join(log_folder, layout.tc_dir)
     sub_exec = os.path.join(log_folder, layout.exec_dir)
+    exec_dir_label = layout.exec_dir
+    # B1 — 실행결과 폴더명 대체 후보 (KJPDS02 PV 실측 260604: "ExecutionResult"
+    # 대신 "Execution"). 기본 exec_dir 미존재 시 exec_dir_alts를 순서대로 시도,
+    # 첫 존재 폴더로 대체 + warning 기록. alts 빈 레이아웃(SWTE)은 단락 평가로
+    # 추가 resolver.exists 호출 0 — 기존 동작 byte-identical.
+    if layout.exec_dir_alts and not _exists_quiet(resolver, sub_exec):
+        for _alt_dir in layout.exec_dir_alts:
+            _alt_path = os.path.join(log_folder, _alt_dir)
+            if _exists_quiet(resolver, _alt_path):
+                warnings.append(
+                    f"실행결과 폴더 대체 감지: {layout.exec_dir} 미존재 → "
+                    f"{_alt_dir} 사용"
+                )
+                _diag_logger.info(
+                    f"collect_from_log_folder: exec_dir 대체 "
+                    f"{layout.exec_dir!r} → {_alt_dir!r}"
+                )
+                sub_exec = _alt_path
+                exec_dir_label = _alt_dir
+                break
     sub_cov = os.path.join(log_folder, layout.cov_dir)
     # 라운드 74 T909/T910 — Metrics 폴더 (옵션) 동적 탐지. 존재 시 함수별 추가 metric.
     sub_metrics = os.path.join(log_folder, layout.metrics_dir)
@@ -1525,9 +1564,10 @@ def collect_from_log_folder(
     if has_metrics_folder:
         _diag_logger.info(f"collect_from_log_folder: 하위 폴더 존재 {sub_metrics!r}")
 
+    # B1 — sub_exec/label은 위에서 대체됐을 수 있음 (exec_dir_alts) → 일관 반영.
     for sub_path, label in [
         (sub_tc, layout.tc_dir),
-        (sub_exec, layout.exec_dir),
+        (sub_exec, exec_dir_label),
         (sub_cov, layout.cov_dir),
     ]:
         if not resolver.exists(sub_path):
@@ -1999,6 +2039,73 @@ def collect_from_jenkins_cache(
 # Public API
 # ---------------------------------------------------------------------------
 
+def _collect_from_log_folders_merged(
+    resolver: Any,
+    log_folders: list[str],
+    project_id: str = "",
+    parse_warnings: list[str] | None = None,
+    allowed_roots: list[str] | None = None,
+    *,
+    env_prefix: str = "SWTE",
+) -> SwUTSession:
+    """B2 — 다중 log_folder collect + 세션 병합 (예: APP 43 + BOOT 10 = 53유닛 통합).
+
+    병합 정책 (이중 집계 방지 — docstring 계약):
+        - environments: 폴더 순서대로 합산. env_name 중복 시 **첫 폴더 우선 +
+          뒤 항목 skip + parse_warnings에 중복 경고**. 동일 env가 두 번 집계되면
+          total/passed 수치가 부풀어 evidence 신뢰성이 훼손되므로 first-wins.
+        - parse_warnings: 폴더 식별 prefix(`[#i <폴더명>]`) 부여 후 합산.
+        - source_path: 폴더별 (release 자동 선택 후) source_path를 ";"로 join.
+        - version: 첫 폴더 기준.
+
+    Raises:
+        ValueError: allowed_roots 위반 폴더 발견 시 즉시 전파 (보안 검사 —
+            부분 성공 세션을 만들지 않는다).
+    """
+    merged_warnings = parse_warnings if parse_warnings is not None else []
+    merged = SwUTSession(
+        project_id=project_id,
+        source_kind="log_folder",
+        parse_warnings=merged_warnings,
+    )
+    seen_envs: set[str] = set()
+    source_paths: list[str] = []
+    for idx, folder in enumerate(log_folders, start=1):
+        folder_name = Path(folder.rstrip("/\\")).name or folder
+        tag = f"[#{idx} {folder_name}]"
+        sub_warnings: list[str] = []
+        sub = collect_from_log_folder(
+            resolver, folder, project_id=project_id,
+            parse_warnings=sub_warnings, allowed_roots=allowed_roots,
+            env_prefix=env_prefix,
+        )
+        if not merged.version:
+            merged.version = sub.version
+        source_paths.append(sub.source_path or folder)
+        merged_warnings.extend(f"{tag} {w}" for w in sub_warnings)
+        for env in sub.environments:
+            if env.env_name in seen_envs:
+                merged_warnings.append(
+                    f"{tag} env_name 중복 — 첫 폴더 우선, 본 항목 skip "
+                    f"(이중 집계 방지): {env.env_name}"
+                )
+                continue
+            seen_envs.add(env.env_name)
+            merged.environments.append(env)
+        # 부가 dict 필드 first-wins 병합 — collect 시점엔 대부분 빈 dict이나
+        # (router가 사후 주입) 향후 collect 단계 채움에 대비한 방어적 병합.
+        for _attr in (
+            "c_function_map", "swuds_function_map", "function_asil_from_suds",
+            "component_asil_from_sds", "function_asil_from_srs",
+            "function_name_to_swufn_from_suds",
+        ):
+            _dst = getattr(merged, _attr)
+            for _k, _v in (getattr(sub, _attr, {}) or {}).items():
+                _dst.setdefault(_k, _v)
+    merged.source_path = ";".join(source_paths)
+    return merged
+
+
 def collect_swut_session(
     resolver: Any,
     project_id: str,
@@ -2006,6 +2113,7 @@ def collect_swut_session(
     jenkins_build_number: int | None = None,
     cache_root: str = "",
     log_folder: str | None = None,
+    log_folders: list[str] | None = None,
     allowed_roots: list[str] | None = None,
     env_prefix: str = "SWTE",
 ) -> SwUTSession:
@@ -2016,6 +2124,11 @@ def collect_swut_session(
         project_id: 예) "HDPDM01".
         jenkins_build_number: Jenkins build 번호. None이면 latest.
         log_folder: fallback path (`U:\\...\\01.Log\\v<VER>_<DATE>`).
+        log_folders: B2 — 다중 log_folder (예: KJPDS02 APP+BOOT 분리 폴더 통합
+            빌드). **비어있지 않으면 log_folder(단일)보다 우선.** 2개 이상이면
+            폴더별 collect 후 세션 병합 — env_name 중복 시 첫 폴더 우선 + 뒤
+            항목 skip + 중복 경고 (이중 집계 방지). 상세 정책은
+            `_collect_from_log_folders_merged` docstring.
         env_prefix: 환경 명명 prefix — SwUT="SWTE" (default), SwIT="SwITC" (36-fix).
             html 파일명 `<env_prefix>_NN_*.html` 매칭에 사용. SwIT는
             `swit_input_adapter.collect_swit_session`에서 "SwITC" 전달.
@@ -2041,10 +2154,21 @@ def collect_swut_session(
             return session
         warnings.append("Jenkins cache 실패 — log_folder fallback 시도")
 
-    # 2) log_folder fallback
-    if log_folder:
+    # 2) log_folder(s) fallback — B2: log_folders(비어있지 않으면) > log_folder 단일.
+    effective_folders = [f for f in (log_folders or []) if f]
+    if not effective_folders and log_folder:
+        effective_folders = [log_folder]
+
+    if len(effective_folders) == 1:
+        # 단일 폴더 — 기존 경로 그대로 (병합/prefix 미적용, backward compat).
         return collect_from_log_folder(
-            resolver, log_folder, project_id=project_id,
+            resolver, effective_folders[0], project_id=project_id,
+            parse_warnings=warnings, allowed_roots=allowed_roots,
+            env_prefix=env_prefix,
+        )
+    if effective_folders:
+        return _collect_from_log_folders_merged(
+            resolver, effective_folders, project_id=project_id,
             parse_warnings=warnings, allowed_roots=allowed_roots,
             env_prefix=env_prefix,
         )

@@ -797,3 +797,35 @@ backend 전체 SwUT/SwIT 회귀: 189 passed + 1 skipped (이전 ~190).
 - I15 SwIT v2.02 Coverage Traceability 양식의 수직 SwUFn_ 배열 인식 (현재 49KB 양식 limit) — 별도 데이터 source 필요 시
 - I16 ExecutionRow.actual_result 외 추가 VectorCAST 메타 (Coverage Hit Count, Branch Result 등)
 - I17 v2.02 외 회사 양식 (v2.10, v3.10 등) layout 확장
+
+## 라운드 96 (2026-06-10) — KJPDS02 PV SwIT 라이브 검증 + SwIT B2 다중 log_folder 대칭
+
+> 사용자 요청: PV SwIT 로그 (`...\10.SW 통합 테스트\02.Test Result\01.Log\PV\1.APP_IT_Report_260604` + `2.BOOT_IT_Report_260604`)
+> 로 SwITCV/SwITR/SwITCR 산출물이 U:(Cloudium worker 경유)에서 제대로 생성되는지 검토.
+> 병행 워크스트림이 SwUT B1/B2 (exec_dir_alts + 다중 log_folder 병합)를 같은 working tree에 작업 중이었고,
+> 본 라운드가 SwIT 대칭을 완성 (test_swut_meta_config.py docstring의 "별도 워크스트림" 예고와 합치).
+
+### 구현 (SwIT B2 대칭)
+- `SwITBuildRequest.log_folders` (max 8 + 항목 maxlen 500 + 줄바꿈 금지) — SwUT 미러
+- `routers/swit.py::_resolve_swit_log_folders` — req.log_folders > req.log_folder > config `swit_log_folders` > 단수/`log_folders` dict 키. coverage/sitr/switcr 3개 빌드에 적용 (T308 pre-flight 폴더별)
+- `swit_input_adapter.collect_swit_session` — `log_folders` pass-through (SwUT `_collect_from_log_folders_merged` 재활용, env_prefix="SwITC")
+- config KJPDS02: `swit_log_folders` 신규(APP + BOOT\Report), `swit_log_folder` PV APP 갱신, doc_filenames SwIT 3종 DV→PV, `c_source_root` C:\Project\Ados\NE1AW_PORTING (stale D:\ADOS fix), `switcr_metadata` PV 전환 (phase=PV + qualified_function_total/it101_tc_total/interface_total/interface_passed 제거 → 세션 계산 fallback. FI 5/5 + resource_usage는 DV 잔존 — PV 실측 후 갱신 의무)
+- **silent failure fix**: `resolve_swuds_maps`/`resolve_swuds_function_asil_map`에 `out_warnings` kwarg (F6 W1 패턴 대칭). cloudium allowed_prefixes 미포함 SwUDS 경로의 PermissionError가 backend 로그에만 남고 AuditLog엔 "SwUDS 0건"으로만 보이던 문제 차단
+- cloudium extra prefixes: KJPDS02 `10.SW 통합 테스트` + `08.소프트웨어` 상위 (SwUDS docx ASIL 접근 — reviewer W2: 범위 의도 확인됨, 더 좁히려면 04.SW 단위 설계만 분리 가능)
+
+### 라이브 검증 (.codex_tmp/swit_kjpds02_pv_260604/, 3차 빌드)
+| 산출물 | 결과 |
+|--------|------|
+| `(KJPDS02_PV_SwITCV)..._v0.10_260604_R.xlsx` | 40 env (APP 29 + BOOT 11) 병합 ✓, TC 581, 4.Coverage 997 cell 재stamp (HMR Function Calls 2522/5198), ASIL **A 528 / QM 16 / UNKNOWN 27** (1차 빌드 UNKNOWN 571 → prefix fix 후 복원), vc2025 레이아웃 자동 감지 |
+| `(KJPDS02_PV_SwITR)..._v0.10_260604_R.xlsm` | Cover/Test Summary PV meta ✓, Test Log 1821 cell 재작성 (SwITS spec v1.01 기반 47 TC × PV env 매핑) |
+| `(KJPDS02_PV_SwITCR)..._v0.10_260604_R.xlsm` | XXXX 공양식, Summary Phase=**PV** ✓, IT101 r77/78 = 581 (세션 계산 fallback ✓), Fail Report 46 함수 (로그 부재 template 함수) |
+
+### 잔여 발견 (후속 라운드 후보)
+- **W-A (집계 비대칭)**: `aggregate_session` total=TC sub-item 단위 vs passed=TC name 단위 → PV에서 passed 584 > total 581, SwITR Test Summary Actual Coverage **1.005 (>100%)** stamp. SwUT 공유 로직이라 자동 수정 보류
+- **W-B (checker 명명 갭)**: `swut_consistency_checker` regex `^SwITC_SwUFn_\d+$`가 KJPDS02 명명 (DV `SwITC_NNNN_NN` / PV `SwIT_SwUFn_NNNN_NN`) 어느 쪽도 미매칭 → coverage_summary 0건 (cross-validation 무력)
+- **W-C (spec 세대 불일치)**: Traceability/Test Log가 SwITS v1.01 (DV, 47 TC) 기준 — PV TC 581건과 명명/개수 미매칭. PV SwITS (작성중 v0.10_260602) released 후 config 교체 필요. 2.Traceability는 DV ref와 0 diff (보존 동작 — W15 의도)
+- **W-D**: BOOT 함수 (SwUFn_35xx) 가 4.Coverage 함수 universe (template 571)에 없음 — SwUDS/template의 BOOT 등재 여부 확인 필요
+- Info: `_SWUDS_PARSE_CACHE` lock 없음 (X1, pre-existing), Pydantic List max_length 패턴 (동작 확인됨), FI/resource_usage DV 잔존 마킹 메커니즘
+- 운영 노트: `_META_CONFIG_PATH`가 CWD 상대경로 — backend는 반드시 **프로젝트 루트에서** `python -m uvicorn backend.main:app` 기동 (CLAUDE.md의 `cd backend && uvicorn main:app`은 meta config 미로딩 — silent 빈 config)
+
+회귀: 전체 2610 passed / 1 skipped (SwIT B2 미러 +18, resolver out_warnings +4, stale mock 3곳 **_kw 갱신)

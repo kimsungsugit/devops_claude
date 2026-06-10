@@ -136,9 +136,10 @@ class TestApplyFunctionAsilMap:
             asil_mod, "resolve_function_asil_map", lambda *_a, **_k: FakeResult(),
         )
         # 라운드 89: apply는 단일 parse seam resolve_swuds_maps 사용 (id→ASIL, name→id).
+        # 2026-06-10: out_warnings kwarg 추가 — mock도 **kwargs 수용.
         monkeypatch.setattr(
             resolver, "resolve_swuds_maps",
-            lambda req, project_id: ({"SwUFn_0101": "D"}, {}),
+            lambda req, project_id, **_kw: ({"SwUFn_0101": "D"}, {}),
         )
         req = _fake_req(c_source_root="C:/src", swuds_docx_path="C:/swuds.docx")
         session = self._session()
@@ -256,3 +257,88 @@ class TestSwudsOSErrorRound3NC2:
         # 이전: IsADirectoryError → unhandled → 500. NC2 fix 후: graceful 빈 dict.
         result = resolver.resolve_swuds_function_asil_map(req, "HDPDM01")
         assert result == {}
+
+
+class TestResolveSwudsMapsOutWarnings:
+    """2026-06-10 KJPDS02 PV 검증 fix — resolve_swuds_maps의 silent failure 차단.
+
+    cloudium allowed_prefixes 미포함 SwUDS 경로의 PermissionError가 backend
+    로그에만 남고 산출물 AuditLog에는 'SwUDS 0건'으로만 보이던 문제 —
+    out_warnings kwarg (F6 Round 1 W1 패턴 대칭)로 사유 노출.
+    """
+
+    def test_out_warnings_on_permission_error(self, monkeypatch):
+        from types import SimpleNamespace
+        from backend.services import swut_meta_resolver as mod
+
+        monkeypatch.setattr(
+            mod, "resolve_swuds_path", lambda req, pid: "U:/blocked/swuds.docx",
+        )
+
+        def _raise(_path):
+            raise PermissionError("Cloudium 모드: 허용되지 않은 경로 접근 차단됨")
+
+        monkeypatch.setattr(mod, "_cached_parse_swuds", _raise)
+
+        warnings: list[str] = []
+        req = SimpleNamespace(swuds_docx_path="", project_id="KJPDS02")
+        asil_map, name_map = mod.resolve_swuds_maps(
+            req, "KJPDS02", out_warnings=warnings,
+        )
+        assert asil_map == {} and name_map == {}
+        assert len(warnings) == 1
+        assert "PermissionError" in warnings[0]
+        assert "allowed_prefixes" in warnings[0]
+
+    def test_out_warnings_default_none_backward_compat(self, monkeypatch):
+        """out_warnings 미전달 (기존 호출자) — 예외 없이 빈 맵 반환 계약 유지."""
+        from types import SimpleNamespace
+        from backend.services import swut_meta_resolver as mod
+
+        monkeypatch.setattr(
+            mod, "resolve_swuds_path", lambda req, pid: "U:/blocked/swuds.docx",
+        )
+
+        def _raise(_path):
+            raise FileNotFoundError("없음")
+
+        monkeypatch.setattr(mod, "_cached_parse_swuds", _raise)
+        req = SimpleNamespace(swuds_docx_path="", project_id="KJPDS02")
+        assert mod.resolve_swuds_maps(req, "KJPDS02") == ({}, {})
+
+    def test_out_warnings_on_parse_not_ok(self, monkeypatch):
+        from types import SimpleNamespace
+        from backend.services import swut_meta_resolver as mod
+
+        monkeypatch.setattr(
+            mod, "resolve_swuds_path", lambda req, pid: "U:/ok/swuds.docx",
+        )
+        monkeypatch.setattr(
+            mod, "_cached_parse_swuds", lambda _p: SimpleNamespace(ok=False),
+        )
+        warnings: list[str] = []
+        req = SimpleNamespace(swuds_docx_path="", project_id="KJPDS02")
+        assert mod.resolve_swuds_maps(req, "KJPDS02", out_warnings=warnings) == ({}, {})
+        assert warnings and "ok=False" in warnings[0]
+
+    def test_apply_function_asil_map_propagates_swuds_failure(self, monkeypatch):
+        """apply_function_asil_map 경유 시 session.parse_warnings에 사유 누적."""
+        from types import SimpleNamespace
+        from backend.services import swut_meta_resolver as mod
+
+        monkeypatch.setattr(mod, "resolve_c_source_root", lambda req, pid: "")
+        monkeypatch.setattr(
+            mod, "resolve_swuds_path", lambda req, pid: "U:/blocked/swuds.docx",
+        )
+
+        def _raise(_path):
+            raise PermissionError("차단")
+
+        monkeypatch.setattr(mod, "_cached_parse_swuds", _raise)
+
+        session = SimpleNamespace(environments=[], parse_warnings=[])
+        req = SimpleNamespace(
+            swuds_docx_path="", c_source_root="", project_id="KJPDS02",
+        )
+        mod.apply_function_asil_map(req, session, "KJPDS02")
+        assert any("[swuds] ASIL read 실패" in w for w in session.parse_warnings)

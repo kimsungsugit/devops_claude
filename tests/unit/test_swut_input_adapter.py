@@ -1035,3 +1035,221 @@ class TestEnhanceFunctionCoverageWithFile:
         assert n == 1
         assert function_rows[0].file == "main.c"
         assert function_rows[1].file == ""
+
+
+# ---------------------------------------------------------------------------
+# B1 — VC2025 exec 폴더명 대체 (KJPDS02 PV 실측 260604: ExecutionResult → Execution)
+# ---------------------------------------------------------------------------
+
+
+def _vc2025_log_folder(
+    root: str, exec_dirname: str = "ExecutionResult", include_exec: bool = True,
+) -> tuple[dict[str, bytes], set[str]]:
+    """VC2025 레이아웃 fixture — exec 폴더명 가변 (B1 대체 후보 검증용)."""
+    tc = root + r"\TestCaseData"
+    ex = root + "\\" + exec_dirname
+    cov = root + r"\Aggregate"
+    files = {
+        tc + r"\SwUT_01_Foo_TestCaseDataReport.html":
+            _make_tc_html(env="SwUT_01_Foo", component="Foo"),
+        cov + r"\SwUT_01_Foo_AggregateCoverageReport.html":
+            _AGG_HTML_TEMPLATE.encode("utf-8"),
+    }
+    dirs = {root, tc, cov}
+    if include_exec:
+        files[ex + r"\SwUT_01_Foo_ExecutionResultReport.html"] = (
+            _EXEC_HTML_TEMPLATE.encode("utf-8")
+        )
+        dirs.add(ex)
+    return files, dirs
+
+
+class TestExecDirAltFallback:
+    """B1 — VC2025 레이아웃 실행결과 폴더 대체 후보 (exec_dir_alts)."""
+
+    def test_layout_alt_constants(self):
+        """exec_dir_alts 단일 진리원 — VC2025만 ("Execution",), SWTE는 빈 튜플."""
+        assert VC2025_LAYOUT.exec_dir == "ExecutionResult"
+        assert VC2025_LAYOUT.exec_dir_alts == ("Execution",)
+        assert SWTE_LAYOUT.exec_dir_alts == ()
+
+    def test_execution_alt_folder_collected_with_warning(self):
+        """KJPDS02 PV 실측: ExecutionResult 미존재 + Execution 존재 → 대체 수집."""
+        root = r"C:\fake\1.APP_UT_report_260604"
+        files, dirs = _vc2025_log_folder(root, exec_dirname="Execution")
+        resolver = _FakeResolver(files, dirs)
+        session = collect_swut_session(
+            resolver, project_id="KJPDS02", log_folder=root,
+        )
+        assert len(session.environments) == 1
+        env = session.environments[0]
+        # 대체 폴더의 ExecutionResult 리포트에서 2 TC (PASS + FAIL) 정상 수집
+        assert len(env.test_results) == 2
+        passed = sum(1 for r in env.test_results.values() if r.passed)
+        assert passed == 1
+        assert any(
+            "실행결과 폴더 대체 감지" in w and "Execution" in w
+            for w in session.parse_warnings
+        )
+        # 대체 성공 → 미발견 warning 없음
+        assert not any("하위 폴더 미발견" in w for w in session.parse_warnings)
+
+    def test_execution_result_primary_unchanged_no_alt_warning(self):
+        """기존 HDPDM01 backward compat — ExecutionResult 존재 시 대체 미발동."""
+        root = r"C:\fake\UT_Report_251104"
+        files, dirs = _vc2025_log_folder(root, exec_dirname="ExecutionResult")
+        resolver = _FakeResolver(files, dirs)
+        session = collect_swut_session(
+            resolver, project_id="HDPDM01", log_folder=root,
+        )
+        assert len(session.environments) == 1
+        assert len(session.environments[0].test_results) == 2
+        assert not any(
+            "실행결과 폴더 대체 감지" in w for w in session.parse_warnings
+        )
+
+    def test_neither_exec_folder_missing_warning(self):
+        """ExecutionResult/Execution 둘 다 부재 → 기존 미발견 warning (graceful)."""
+        root = r"C:\fake\UT_Report_NOEXEC"
+        files, dirs = _vc2025_log_folder(root, include_exec=False)
+        resolver = _FakeResolver(files, dirs)
+        session = collect_swut_session(
+            resolver, project_id="KJPDS02", log_folder=root,
+        )
+        assert any(
+            "하위 폴더 미발견: ExecutionResult" in w
+            for w in session.parse_warnings
+        )
+        assert not any(
+            "실행결과 폴더 대체 감지" in w for w in session.parse_warnings
+        )
+        # env는 tc 파일 기준 수집되나 exec 리포트 부재 → test_results 비어있음
+        assert len(session.environments) == 1
+        assert session.environments[0].test_results == {}
+
+
+# ---------------------------------------------------------------------------
+# B2 — collect_swut_session(log_folders=...) 다중 폴더 병합 (APP+BOOT 통합 빌드)
+# ---------------------------------------------------------------------------
+
+_EXEC_HTML_ONE_TC = """<!DOCTYPE html>
+<!-- VectorCAST Report header -->
+<html><body>
+<!-- ExecutionResults/testcase_header -->
+<h3 title="Execution Results">Execution Results (PASS)</h3>
+<h4 class="test-start-header">Start of SwUFn_0201.001</h4>
+<!-- VectorCAST Report footer -->
+</body></html>
+"""
+
+
+def _swte_log_folder(
+    root: str, env: str, exec_html: bytes | None = None,
+) -> tuple[dict[str, bytes], set[str]]:
+    """SWTE 레이아웃 단일 env fixture — B2 다중 폴더 병합 검증용."""
+    tc_dir = root + r"\01.TestCaseDataReport"
+    ex_dir = root + r"\02.ExecutionResultReport"
+    cov_dir = root + r"\03.AggregateCoverageReport"
+    files = {
+        tc_dir + "\\" + env + "_test_case_data_report.html":
+            _make_tc_html(env=env),
+        ex_dir + "\\" + env + "_execution_results_report.html":
+            exec_html if exec_html is not None
+            else _EXEC_HTML_TEMPLATE.encode("utf-8"),
+        cov_dir + "\\" + env + "_aggregate_coverage_report.html":
+            _AGG_HTML_TEMPLATE.encode("utf-8"),
+    }
+    return files, {root, tc_dir, ex_dir, cov_dir}
+
+
+class TestCollectMultiLogFolders:
+    """B2 — log_folders 다중 입력 병합 정책 (env 합산 / 중복 first-wins / 우선순위)."""
+
+    def test_two_folders_merged_envs(self):
+        """APP+BOOT 시뮬 — env 합산 + source_path ';' join + version 첫 폴더."""
+        root_a = r"C:\fakeA\APP_UT_report_260604"
+        root_b = r"C:\fakeB\BOOT_UT_report_260604"
+        files_a, dirs_a = _swte_log_folder(root_a, "SWTE_01")
+        files_b, dirs_b = _swte_log_folder(root_b, "SWTE_02")
+        resolver = _FakeResolver({**files_a, **files_b}, dirs_a | dirs_b)
+        session = collect_swut_session(
+            resolver, project_id="KJPDS02", log_folders=[root_a, root_b],
+        )
+        assert {e.env_name for e in session.environments} == {"SWTE_01", "SWTE_02"}
+        assert session.source_path.split(";") == [root_a, root_b]
+        assert session.version == Path(root_a).name
+        assert session.source_kind == "log_folder"
+
+    def test_duplicate_env_first_folder_wins_with_warning(self):
+        """env_name 중복 — 첫 폴더 우선 + 뒤 항목 skip + 중복 경고 (이중 집계 방지)."""
+        root_a = r"C:\fakeA\APP_UT_report_260604"
+        root_b = r"C:\fakeB\BOOT_UT_report_260604"
+        # 폴더 A exec=2 TC, 폴더 B exec=1 TC — first-wins 식별 마커
+        files_a, dirs_a = _swte_log_folder(root_a, "SWTE_01")
+        files_b, dirs_b = _swte_log_folder(
+            root_b, "SWTE_01", exec_html=_EXEC_HTML_ONE_TC.encode("utf-8"),
+        )
+        resolver = _FakeResolver({**files_a, **files_b}, dirs_a | dirs_b)
+        session = collect_swut_session(
+            resolver, project_id="KJPDS02", log_folders=[root_a, root_b],
+        )
+        assert len(session.environments) == 1
+        env = session.environments[0]
+        assert env.env_name == "SWTE_01"
+        # 첫 폴더(A)의 2 TC 데이터 유지 — 폴더 B(1 TC)는 skip
+        assert len(env.test_results) == 2
+        assert "SwUFn_0101.001" in env.test_results
+        dup_warns = [w for w in session.parse_warnings if "env_name 중복" in w]
+        assert len(dup_warns) == 1
+        assert "[#2" in dup_warns[0]
+        assert "SWTE_01" in dup_warns[0]
+
+    def test_single_log_folder_backward_compat(self):
+        """기존 단일 log_folder — 병합/'[#i]' prefix 미적용 (기존 경로 그대로)."""
+        root = r"C:\fake\01.Log\v0.01_TEST"
+        files, dirs = _swte_log_folder(root, "SWTE_01")
+        resolver = _FakeResolver(files, dirs)
+        session = collect_swut_session(
+            resolver, project_id="HDPDM01", log_folder=root,
+        )
+        assert len(session.environments) == 1
+        assert session.source_path == root
+        assert ";" not in session.source_path
+        assert not any(w.startswith("[#") for w in session.parse_warnings)
+
+    def test_log_folders_single_item_no_merge_prefix(self):
+        """log_folders 1개 — 단일 경로와 동일 동작 (병합/prefix 미적용)."""
+        root = r"C:\fake\01.Log\v0.01_TEST"
+        files, dirs = _swte_log_folder(root, "SWTE_01")
+        resolver = _FakeResolver(files, dirs)
+        session = collect_swut_session(
+            resolver, project_id="HDPDM01", log_folders=[root],
+        )
+        assert len(session.environments) == 1
+        assert session.source_path == root
+        assert not any(w.startswith("[#") for w in session.parse_warnings)
+
+    def test_log_folders_priority_over_log_folder(self):
+        """log_folders 비어있지 않으면 log_folder(단일)보다 우선."""
+        root_a = r"C:\fakeA\APP_UT_report_260604"
+        root_b = r"C:\fakeB\BOOT_UT_report_260604"
+        files_a, dirs_a = _swte_log_folder(root_a, "SWTE_01")
+        files_b, dirs_b = _swte_log_folder(root_b, "SWTE_02")
+        resolver = _FakeResolver({**files_a, **files_b}, dirs_a | dirs_b)
+        session = collect_swut_session(
+            resolver, project_id="KJPDS02",
+            log_folder=root_b, log_folders=[root_a],
+        )
+        assert session.source_path == root_a
+        assert {e.env_name for e in session.environments} == {"SWTE_01"}
+
+    def test_log_folders_empty_falls_back_to_log_folder(self):
+        """log_folders=[] (빈 list) → log_folder 단일 fallback."""
+        root = r"C:\fake\01.Log\v0.01_TEST"
+        files, dirs = _swte_log_folder(root, "SWTE_01")
+        resolver = _FakeResolver(files, dirs)
+        session = collect_swut_session(
+            resolver, project_id="HDPDM01", log_folder=root, log_folders=[],
+        )
+        assert len(session.environments) == 1
+        assert session.source_path == root

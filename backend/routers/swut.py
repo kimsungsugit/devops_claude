@@ -104,12 +104,39 @@ def _load_meta_from_config(project_id: str) -> dict[str, Any]:
     return _resolver_mod.load_meta_from_config(project_id)
 
 
-def _resolve_swut_log_folder(req: SwUTBuildRequest) -> str | None:
-    """Return request log_folder or project default SwUT VectorCAST log folder."""
+def _resolve_swut_log_folders(req: SwUTBuildRequest) -> list[str]:
+    """B2 — log_folder 다중 입력 해석. 빈 list 반환 가능 (Jenkins-only 빌드).
+
+    우선순위:
+        1. req.log_folders (비어있지 않으면 — APP+BOOT 다중 폴더)
+        2. req.log_folder (기존 단일)
+        3. config `swut_log_folders` (신규 list 키 — config 에이전트 담당)
+        4. config `swut_log_folder` (기존 단일 str)
+    """
+    if req.log_folders:
+        folders = [f for f in req.log_folders if f]
+        if folders:
+            return folders
     if req.log_folder:
-        return req.log_folder
+        return [req.log_folder]
     cfg = _load_meta_from_config(req.project_id)
-    return cfg.get("swut_log_folder") or None
+    cfg_list = cfg.get("swut_log_folders")
+    if isinstance(cfg_list, (list, tuple)):
+        folders = [str(f) for f in cfg_list if f]
+        if folders:
+            return folders
+    single = cfg.get("swut_log_folder")
+    return [str(single)] if single else []
+
+
+def _resolve_swut_log_folder(req: SwUTBuildRequest) -> str | None:
+    """Return request log_folder or project default SwUT VectorCAST log folder.
+
+    Backward compat — 첫 폴더 단일 반환 (기존 회귀 계약 유지). 신규 코드는
+    `_resolve_swut_log_folders` (list 반환) 사용.
+    """
+    folders = _resolve_swut_log_folders(req)
+    return folders[0] if folders else None
 
 
 def _build_coverage_meta(req: SwUTBuildRequest) -> CoverageBuildMeta:
@@ -556,22 +583,24 @@ def _apply_vcast_source_fallback(session, resolver: Any, log_folder: str) -> Non
 
 def _do_coverage_build(req: SwUTBuildRequest) -> Response:
     resolver = get_resolver()
-    # 56차 T308 — log_folder UNC + Local 모드 pre-flight check
-    log_folder = _resolve_swut_log_folder(req)
-    check_log_folder_mode_compat(log_folder, resolver)
+    # 56차 T308 — log_folder UNC + Local 모드 pre-flight check (B2 — 폴더별 적용)
+    log_folders = _resolve_swut_log_folders(req)
+    for _lf in log_folders:
+        check_log_folder_mode_compat(_lf, resolver)
     # 57차 T319 diag — Coverage build session params (SUTR과 비교용)
     import logging as _logging
     _logging.getLogger(__name__).info(
         f"Coverage build req: project_id={req.project_id!r}, jenkins_build_number="
         f"{req.jenkins_build_number!r}, cache_root={req.cache_root!r}, "
-        f"log_folder={req.log_folder!r}, resolved_log_folder={log_folder!r}, "
+        f"log_folder={req.log_folder!r}, log_folders={req.log_folders!r}, "
+        f"resolved_log_folders={log_folders!r}, "
         f"coverage_template_path={req.coverage_template_path!r}"
     )
     session = collect_swut_session(
         resolver, req.project_id,
         jenkins_build_number=req.jenkins_build_number,
         cache_root=req.cache_root,
-        log_folder=log_folder,
+        log_folders=log_folders,
     )
     _logging.getLogger(__name__).info(
         f"Coverage build session collected: environments={len(session.environments)}, "
@@ -699,22 +728,24 @@ def _do_sutr_build_spec_based(
 
 def _do_sutr_build(req: SwUTBuildRequest) -> Response:
     resolver = get_resolver()
-    # 56차 T308 — log_folder UNC + Local 모드 pre-flight check
-    log_folder = _resolve_swut_log_folder(req)
-    check_log_folder_mode_compat(log_folder, resolver)
+    # 56차 T308 — log_folder UNC + Local 모드 pre-flight check (B2 — 폴더별 적용)
+    log_folders = _resolve_swut_log_folders(req)
+    for _lf in log_folders:
+        check_log_folder_mode_compat(_lf, resolver)
     # 57차 T319 diag — SUTR build session params 확인 (Coverage와 비교용)
     import logging as _logging
     _logging.getLogger(__name__).info(
         f"SUTR build req: project_id={req.project_id!r}, jenkins_build_number="
         f"{req.jenkins_build_number!r}, cache_root={req.cache_root!r}, "
-        f"log_folder={req.log_folder!r}, resolved_log_folder={log_folder!r}, "
+        f"log_folder={req.log_folder!r}, log_folders={req.log_folders!r}, "
+        f"resolved_log_folders={log_folders!r}, "
         f"sutr_template_path={req.sutr_template_path!r}"
     )
     session = collect_swut_session(
         resolver, req.project_id,
         jenkins_build_number=req.jenkins_build_number,
         cache_root=req.cache_root,
-        log_folder=log_folder,
+        log_folders=log_folders,
     )
     _logging.getLogger(__name__).info(
         f"SUTR build session collected: environments={len(session.environments)}, "
@@ -764,24 +795,30 @@ def _do_sutr_build(req: SwUTBuildRequest) -> Response:
 
 def _do_swutcr_build(req: SwUTBuildRequest) -> Response:
     resolver = get_resolver()
-    log_folder = _resolve_swut_log_folder(req)
-    check_log_folder_mode_compat(log_folder, resolver)
+    # B2 — 다중 log_folder: pre-flight check 폴더별 적용
+    log_folders = _resolve_swut_log_folders(req)
+    for _lf in log_folders:
+        check_log_folder_mode_compat(_lf, resolver)
     import logging as _logging
     _logging.getLogger(__name__).info(
         f"SwUTCR build req: project_id={req.project_id!r}, jenkins_build_number="
         f"{req.jenkins_build_number!r}, cache_root={req.cache_root!r}, "
-        f"log_folder={req.log_folder!r}, resolved_log_folder={log_folder!r}, "
+        f"log_folder={req.log_folder!r}, log_folders={req.log_folders!r}, "
+        f"resolved_log_folders={log_folders!r}, "
         f"swutcr_template_path={req.swutcr_template_path!r}"
     )
     session = collect_swut_session(
         resolver, req.project_id,
         jenkins_build_number=req.jenkins_build_number,
         cache_root=req.cache_root,
-        log_folder=log_folder,
+        log_folders=log_folders,
     )
     _apply_function_asil_map(req, session)
     _apply_c_function_map(req, session)
-    _apply_vcast_source_fallback(session, resolver, log_folder)
+    # B2 — 모든 폴더의 {log_folder}\Aggregate를 순회. missing이 소진되면 내부
+    # early-return (wanted/missing 재계산이 호출마다 수행 — first-wins 유지).
+    for _lf in log_folders:
+        _apply_vcast_source_fallback(session, resolver, _lf)
     template_bytes = _read_template_bytes(req.swutcr_template_path, req.project_id, "swutcr")
     meta = _build_swutcr_meta(req)
     swuds_fn_ids = _resolve_swuds_function_ids(req)

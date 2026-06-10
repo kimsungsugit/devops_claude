@@ -40,6 +40,7 @@ def collect_swit_session(
     jenkins_build_number: int | None = None,
     cache_root: str = "",
     log_folder: str | None = None,
+    log_folders: list[str] | None = None,
     allowed_roots: list[str] | None = None,
 ) -> SwUTSession:
     """SwIT 빌더용 session collect — 33차에서는 SwUT collect를 그대로 재활용.
@@ -53,6 +54,10 @@ def collect_swit_session(
         jenkins_build_number: Jenkins build 번호. None이면 latest.
         cache_root: Jenkins cache root prefix.
         log_folder: fallback path (`U:\\...\\08.SW 통합테스트\\03.Test Result\\01.Log\\v<VER>_<DATE>`).
+        log_folders: B2 대칭 (SwIT) — 다중 log_folder (예: KJPDS02 PV
+            APP+BOOT 분리 폴더 통합 빌드). 비어있지 않으면 log_folder(단일)보다
+            우선. 병합 정책(env_name 중복 first-wins + 경고)은 SwUT
+            `_collect_from_log_folders_merged` docstring 참조.
         allowed_roots: 신뢰 가능한 root prefix 화이트리스트.
 
     Returns:
@@ -68,6 +73,7 @@ def collect_swit_session(
         jenkins_build_number=jenkins_build_number,
         cache_root=cache_root,
         log_folder=log_folder,
+        log_folders=log_folders,
         allowed_roots=allowed_roots,
         env_prefix="SwITC",
     )

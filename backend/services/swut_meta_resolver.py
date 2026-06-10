@@ -291,27 +291,41 @@ def resolve_swuds_function_ids(req: Any, project_id: str) -> set[str] | None:
         return None
 
 
-def resolve_swuds_function_asil_map(req: Any, project_id: str) -> dict[str, str]:
+def resolve_swuds_function_asil_map(
+    req: Any, project_id: str,
+    out_warnings: list[str] | None = None,
+) -> dict[str, str]:
     """32차 W28 + 49차 — swuds_docx_path → SwUDS 'ASIL' 라벨 → function_asil_map.
 
     plan vs 구현 divergence (54-fix I2 / 55차):
         plan의 `kind` 인자는 req 객체 속성으로 흡수. 자세히는 `resolve_swuds_path`.
+
+    Args:
+        out_warnings: 실패 사유 누적 list (2026-06-10 reviewer W1 — 직접 호출
+            경로도 resolve_swuds_maps와 동일하게 silent failure 차단).
 
     Returns:
         {fn_id: "A"/"B"/"C"/"D"/"QM"} — 실패 시 빈 dict.
     """
     # 라운드 89: 단일 parse seam(resolve_swuds_maps)에 위임 — id→ASIL만 반환
     # (backward compat). name→id가 추가로 필요하면 resolve_swuds_maps 직접 호출.
-    return resolve_swuds_maps(req, project_id)[0]
+    return resolve_swuds_maps(req, project_id, out_warnings=out_warnings)[0]
 
 
 def resolve_swuds_maps(
     req: Any, project_id: str,
+    out_warnings: list[str] | None = None,
 ) -> tuple[dict[str, str], dict[str, str]]:
     """라운드 89 — SwUDS docx 1회 parse → (function_asil_map, function_name_to_id).
 
     36MB+ docx를 여러 번 파싱하면 timeout/메모리 폭증 → 단일 parse로 두 맵 동시
     도출. ``apply_function_asil_map`` 이 reverse map(name→id) 구성에 사용.
+
+    Args:
+        out_warnings: 실패 사유 누적 list (F6 Round 1 W1 패턴 — swuts/hmr 대칭).
+            KJPDS02 PV SwIT 검증(2026-06-10)에서 allowed_prefixes 미포함 경로의
+            PermissionError가 backend 로그에만 남고 산출물 AuditLog에는
+            "SwUDS 0건"으로만 보여 원인 추적이 불가했던 silent failure 차단.
 
     Returns:
         (``{SwUFn_id: ASIL}``, ``{name: SwUFn_id}``) — 실패 시 (빈, 빈).
@@ -323,11 +337,18 @@ def resolve_swuds_maps(
         result = _cached_parse_swuds(swuds_path)  # 라운드 89 — path 키 캐시 (중복 parse 제거)
         if not result.ok:
             _logger.warning("SwUDS ASIL parse failed")
+            if out_warnings is not None:
+                out_warnings.append("[swuds] ASIL parse 실패 (ok=False) — docx 양식 확인")
             return {}, {}
         return dict(result.function_asil_map), dict(result.function_name_to_id)
     except (FileNotFoundError, PermissionError, OSError) as e:
         # F6 Round 3 NC2: OSError 확대 — swuts/hmr 함수와 대칭.
         _logger.warning("SwUDS docx read for ASIL failed: %s", e)
+        if out_warnings is not None:
+            out_warnings.append(
+                f"[swuds] ASIL read 실패 — {type(e).__name__}: {str(e)[:160]} "
+                "(cloudium 모드면 allowed_prefixes에 SwUDS 경로 포함 여부 확인)"
+            )
         return {}, {}
 
 
@@ -376,7 +397,9 @@ def apply_function_asil_map(req: Any, session: Any, project_id: str) -> None:
     # 폭증 회피). resolve_swuds_maps가 id→ASIL (merge용) + name→id (reverse map)을
     # 단일 parse로 반환. 이전: id-only 함수 + iso26262 regex extractor 2개가 각각
     # 36MB docx를 별도 파싱 (~3~4회, 1.3GB×N, >200s timeout) → 단일 seam으로 통합.
-    swuds_map, swuds_name_to_id = resolve_swuds_maps(req, project_id)
+    swuds_map, swuds_name_to_id = resolve_swuds_maps(
+        req, project_id, out_warnings=session.parse_warnings,
+    )
 
     # Merge — c_source 우선 (swuds는 c_source 없는 키만 채움)
     merged = dict(swuds_map)

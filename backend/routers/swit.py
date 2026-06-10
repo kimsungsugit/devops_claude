@@ -250,18 +250,44 @@ def _resolve_swit_c_source_root(req: "SwITBuildRequest | SwITSitrBuildRequest") 
     return _resolver_resolve_c_source_root(req, req.project_id)
 
 
-def _resolve_swit_log_folder(req: "SwITBuildRequest | SwITSitrBuildRequest") -> str | None:
-    """req.log_folder 우선, 비면 config의 SwIT log folder fallback."""
+def _resolve_swit_log_folders(req: "SwITBuildRequest | SwITSitrBuildRequest") -> list[str]:
+    """B2 대칭 (SwIT) — log_folder 다중 입력 해석. 빈 list 반환 가능 (Jenkins-only 빌드).
+
+    SwUT `_resolve_swut_log_folders` 패턴 동일. 우선순위:
+        1. req.log_folders (비어있지 않으면 — APP+BOOT 다중 폴더)
+        2. req.log_folder (기존 단일)
+        3. config `swit_log_folders` (신규 list 키 — KJPDS02 PV APP+BOOT)
+        4. config `swit_log_folder` (기존 단일 str) / log_folders dict 키
+    """
+    if req.log_folders:
+        folders = [f for f in req.log_folders if f]
+        if folders:
+            return folders
     if req.log_folder:
-        return req.log_folder
+        return [req.log_folder]
     cfg = _load_meta_from_config(req.project_id)
+    cfg_list = cfg.get("swit_log_folders")
+    if isinstance(cfg_list, (list, tuple)):
+        folders = [str(f) for f in cfg_list if f]
+        if folders:
+            return folders
     log_folders = cfg.get("log_folders", {}) or {}
-    return (
+    single = (
         cfg.get("swit_log_folder")
         or log_folders.get("swit")
         or log_folders.get("integration")
         or None
     )
+    return [str(single)] if single else []
+
+
+def _resolve_swit_log_folder(req: "SwITBuildRequest | SwITSitrBuildRequest") -> str | None:
+    """Backward compat — 첫 폴더 단일 반환 (기존 회귀 계약 유지).
+
+    신규 코드는 `_resolve_swit_log_folders` (list 반환) 사용.
+    """
+    folders = _resolve_swit_log_folders(req)
+    return folders[0] if folders else None
 
 
 _CHUNK_SIZE = 64 * 1024
@@ -410,14 +436,15 @@ def _apply_c_function_map(req: SwITBuildRequest, session) -> None:
 
 def _do_swit_coverage_build(req: SwITBuildRequest) -> Response:
     resolver = get_resolver()
-    log_folder = _resolve_swit_log_folder(req)
-    # 56차 T308 — log_folder UNC + Local 모드 pre-flight check
-    check_log_folder_mode_compat(log_folder, resolver)
+    # B2 대칭 — 다중 log_folder (56차 T308 pre-flight check 폴더별 적용)
+    log_folders = _resolve_swit_log_folders(req)
+    for _lf in log_folders:
+        check_log_folder_mode_compat(_lf, resolver)
     session = collect_swit_session(
         resolver, req.project_id,
         jenkins_build_number=req.jenkins_build_number,
         cache_root=req.cache_root,
-        log_folder=log_folder,
+        log_folders=log_folders,
     )
     _apply_function_asil_map(req, session)
     # 51차 — Coverage 양식 전용 path 사용 (config fallback: swit_coverage_template).
@@ -478,14 +505,15 @@ def _do_swit_sitr_build(req: SwITSitrBuildRequest) -> Response:
     "application/vnd.ms-excel.sheet.macroenabled.12".
     """
     resolver = get_resolver()
-    log_folder = _resolve_swit_log_folder(req)
-    # 56차 T308 — log_folder UNC + Local 모드 pre-flight check
-    check_log_folder_mode_compat(log_folder, resolver)
+    # B2 대칭 — 다중 log_folder (56차 T308 pre-flight check 폴더별 적용)
+    log_folders = _resolve_swit_log_folders(req)
+    for _lf in log_folders:
+        check_log_folder_mode_compat(_lf, resolver)
     session = collect_swit_session(
         resolver, req.project_id,
         jenkins_build_number=req.jenkins_build_number,
         cache_root=req.cache_root,
-        log_folder=log_folder,
+        log_folders=log_folders,
     )
     _apply_function_asil_map(req, session)
     # 51차 — SITR 양식 전용 path 사용 (config fallback: swit_sitr_template).
@@ -537,13 +565,15 @@ async def build_swit_sitr(
 def _do_switcr_build(req: SwITBuildRequest) -> Response:
     """SwITCR xlsm build entry."""
     resolver = get_resolver()
-    log_folder = _resolve_swit_log_folder(req)
-    check_log_folder_mode_compat(log_folder, resolver)
+    # B2 대칭 — 다중 log_folder (pre-flight check 폴더별 적용)
+    log_folders = _resolve_swit_log_folders(req)
+    for _lf in log_folders:
+        check_log_folder_mode_compat(_lf, resolver)
     session = collect_swit_session(
         resolver, req.project_id,
         jenkins_build_number=req.jenkins_build_number,
         cache_root=req.cache_root,
-        log_folder=log_folder,
+        log_folders=log_folders,
     )
     _apply_function_asil_map(req, session)
     _apply_c_function_map(req, session)

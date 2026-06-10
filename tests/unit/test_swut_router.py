@@ -16,7 +16,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 import openpyxl
+import pytest
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
@@ -420,9 +422,10 @@ class TestSwudsAsilFallback32:
         # 54차 T281 — SwUDS resolver mock은 swut_meta_resolver로 redirect
         from backend.services import swut_meta_resolver as meta_resolver_mod
         # 라운드 89: apply는 단일 parse seam resolve_swuds_maps 사용 (id→ASIL, name→id).
+        # 2026-06-10: out_warnings kwarg 추가 — mock도 **kwargs 수용.
         monkeypatch.setattr(
             meta_resolver_mod, "resolve_swuds_maps",
-            lambda req, project_id: ({"SwUFn_0101": "D", "SwUFn_0102": "C"}, {}),
+            lambda req, project_id, **_kw: ({"SwUFn_0101": "D", "SwUFn_0102": "C"}, {}),
         )
 
         from backend.schemas import SwUTBuildRequest
@@ -446,9 +449,10 @@ class TestSwudsAsilFallback32:
         # 54차 T281 — swut_meta_resolver로 redirect
         from backend.services import swut_meta_resolver as meta_resolver_mod
         # 라운드 89: 단일 parse seam resolve_swuds_maps.
+        # 2026-06-10: out_warnings kwarg 추가 — mock도 **kwargs 수용.
         monkeypatch.setattr(
             meta_resolver_mod, "resolve_swuds_maps",
-            lambda req, project_id: ({"SwUFn_0103": "D"}, {}),
+            lambda req, project_id, **_kw: ({"SwUFn_0103": "D"}, {}),
         )
         from backend.schemas import SwUTBuildRequest
         req = SwUTBuildRequest(
@@ -1503,3 +1507,151 @@ class TestPathModeMismatch56:
             assert body.get("error", {}).get("code") == "PATH_MODE_MISMATCH", f"body={body}"
         finally:
             set_resolver(LocalFileResolver())
+
+
+# ---------------------------------------------------------------------------
+# B2 — _resolve_swut_log_folders 4단계 우선순위 + log_folders 스키마 검증
+# ---------------------------------------------------------------------------
+
+
+def _make_swut_req(**kwargs) -> SwUTBuildRequest:
+    """최소 유효 SwUTBuildRequest — log_folder(s) 우선순위 검증용."""
+    base = {
+        "project_id": "KJPDS02",
+        "release_sw_version": "1.01",
+        "test_date": "2025-12-05",
+    }
+    base.update(kwargs)
+    return SwUTBuildRequest(**base)
+
+
+class TestResolveSwutLogFoldersPriority:
+    """B2 — req.log_folders > req.log_folder > config swut_log_folders >
+    config swut_log_folder."""
+
+    def _patch_cfg(self, monkeypatch, cfg: dict):
+        from backend.routers import swut as swut_mod
+        monkeypatch.setattr(
+            swut_mod, "_load_meta_from_config", lambda _project_id: cfg,
+        )
+        return swut_mod
+
+    _FULL_CFG = {
+        "swut_log_folders": ["U:/cfg/app", "U:/cfg/boot"],
+        "swut_log_folder": "U:/cfg/single",
+    }
+
+    def test_req_log_folders_first(self, monkeypatch):
+        swut_mod = self._patch_cfg(monkeypatch, dict(self._FULL_CFG))
+        req = _make_swut_req(
+            log_folders=["C:/req/app", "C:/req/boot"],
+            log_folder="C:/req/single",
+        )
+        assert swut_mod._resolve_swut_log_folders(req) == [
+            "C:/req/app", "C:/req/boot",
+        ]
+
+    def test_req_log_folder_second(self, monkeypatch):
+        """req.log_folders 비면 req.log_folder가 config 양 키보다 우선."""
+        swut_mod = self._patch_cfg(monkeypatch, dict(self._FULL_CFG))
+        req = _make_swut_req(log_folder="C:/req/single")
+        assert swut_mod._resolve_swut_log_folders(req) == ["C:/req/single"]
+
+    def test_config_log_folders_third(self, monkeypatch):
+        """req 양 필드 비면 config swut_log_folders(list)가 단수 키보다 우선."""
+        swut_mod = self._patch_cfg(monkeypatch, dict(self._FULL_CFG))
+        req = _make_swut_req()
+        assert swut_mod._resolve_swut_log_folders(req) == [
+            "U:/cfg/app", "U:/cfg/boot",
+        ]
+
+    def test_config_log_folder_fourth(self, monkeypatch):
+        """config swut_log_folders 부재 시 기존 단수 swut_log_folder fallback."""
+        swut_mod = self._patch_cfg(
+            monkeypatch, {"swut_log_folder": "U:/cfg/single"},
+        )
+        req = _make_swut_req()
+        assert swut_mod._resolve_swut_log_folders(req) == ["U:/cfg/single"]
+
+    def test_all_empty_returns_empty_list(self, monkeypatch):
+        """전부 비면 빈 list — Jenkins-only 빌드 허용."""
+        swut_mod = self._patch_cfg(monkeypatch, {})
+        req = _make_swut_req()
+        assert swut_mod._resolve_swut_log_folders(req) == []
+
+    def test_config_empty_list_falls_through_to_single(self, monkeypatch):
+        """config swut_log_folders=[] (빈 list) → 단수 키 fallback."""
+        swut_mod = self._patch_cfg(
+            monkeypatch,
+            {"swut_log_folders": [], "swut_log_folder": "U:/cfg/single"},
+        )
+        req = _make_swut_req()
+        assert swut_mod._resolve_swut_log_folders(req) == ["U:/cfg/single"]
+
+    def test_backward_compat_wrapper_returns_first(self, monkeypatch):
+        """_resolve_swut_log_folder(단수 wrapper) — 첫 폴더 단일 반환 계약."""
+        swut_mod = self._patch_cfg(monkeypatch, dict(self._FULL_CFG))
+        req = _make_swut_req()
+        assert swut_mod._resolve_swut_log_folder(req) == "U:/cfg/app"
+        # 전부 비면 None (기존 계약)
+        swut_mod2 = self._patch_cfg(monkeypatch, {})
+        assert swut_mod2._resolve_swut_log_folder(_make_swut_req()) is None
+
+
+class TestLogFoldersSchema:
+    """B2 — SwUTBuildRequest.log_folders 입력 표면 (maxlen/줄바꿈/개수/extra)."""
+
+    _BASE = {
+        "project_id": "HDPDM01",
+        "release_sw_version": "1.0.0",
+        "test_date": "2024-02-19",
+    }
+
+    def test_valid_two_folders_accepted(self):
+        req = SwUTBuildRequest(**self._BASE, log_folders=["C:/a", "C:/b"])
+        assert req.log_folders == ["C:/a", "C:/b"]
+
+    def test_item_len_500_accepted(self):
+        item = "C:/" + "x" * 497
+        assert len(item) == 500
+        req = SwUTBuildRequest(**self._BASE, log_folders=[item])
+        assert req.log_folders == [item]
+
+    def test_item_over_500_rejected(self):
+        item = "C:/" + "x" * 498  # 501자
+        with pytest.raises(ValidationError, match="500"):
+            SwUTBuildRequest(**self._BASE, log_folders=[item])
+
+    @pytest.mark.parametrize("bad", ["C:/a\nb", "C:/a\rb", "C:/a\r\nX-Injected: evil"])
+    def test_item_newline_rejected(self, bad):
+        """W8 정책 동일 적용 — 항목별 줄바꿈 금지 (헤더 인젝션 안전)."""
+        with pytest.raises(ValidationError, match="줄바꿈"):
+            SwUTBuildRequest(**self._BASE, log_folders=[bad])
+
+    def test_exactly_8_items_accepted(self):
+        folders = [f"C:/p{i}" for i in range(8)]
+        req = SwUTBuildRequest(**self._BASE, log_folders=folders)
+        assert req.log_folders == folders
+
+    def test_nine_items_rejected(self):
+        with pytest.raises(ValidationError):
+            SwUTBuildRequest(
+                **self._BASE, log_folders=[f"C:/p{i}" for i in range(9)],
+            )
+
+    def test_extra_field_still_forbidden(self):
+        """extra='forbid' 유지 — 신규 필드 추가가 모델 설정을 풀지 않았는지."""
+        with pytest.raises(ValidationError):
+            SwUTBuildRequest(**self._BASE, log_folders_typo=["C:/a"])
+
+    def test_endpoint_log_folders_newline_422(self):
+        """endpoint 표면에서도 422 (TestClient 경유)."""
+        r = client.post(
+            "/api/swut/coverage/build",
+            json={
+                **self._BASE,
+                "log_folders": ["C:/fake/log\r\nX-Injected: evil"],
+            },
+            headers={"X-User": "tester"},
+        )
+        assert r.status_code == 422

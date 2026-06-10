@@ -629,6 +629,7 @@ class SwUTBuildRequest(BaseModel):
       - doc_id_sequence: digit only
       - test_date / validation_date: yyyy-mm-dd / yyyy/mm/dd ($ anchor)
       - cache_root / log_folder / coverage_template_path / sutr_template_path: maxlen 500, 줄바꿈 금지 (51차 분리)
+      - log_folders: 최대 8개, 항목별 maxlen 500 + 줄바꿈 금지 (B2 — APP+BOOT 다중 폴더)
       - jenkins_build_number: 1 ≤ n ≤ 99999 (Jenkins 운영 한도)
       - deviation_cases: 최대 200 items, 합산 256KB (13차 C3 — DoS 차단)
 
@@ -655,6 +656,10 @@ class SwUTBuildRequest(BaseModel):
     # 13차 W8: path maxlen 500 + 줄바꿈 금지 (validator)
     cache_root: str = Field("", max_length=500)
     log_folder: Optional[str] = Field(None, max_length=500)
+    # B2 — 다중 log_folder (예: KJPDS02 APP+BOOT 분리 폴더 통합 빌드).
+    # 비어있지 않으면 log_folder(단일)보다 우선. 항목별 검증은 기존 log_folder
+    # 패턴 동일 적용 (maxlen 500 + 줄바꿈 금지 — _validate_log_folders) + 최대 8개.
+    log_folders: Optional[List[str]] = Field(None, max_length=8)
     # 51차 — Coverage / SUTR 양식 분리 (이전 단일 template_path). 둘 다 비면 config fallback.
     coverage_template_path: str = Field("", max_length=500)
     sutr_template_path: str = Field("", max_length=500)
@@ -693,6 +698,26 @@ class SwUTBuildRequest(BaseModel):
             return v
         if "\n" in v or "\r" in v:
             raise ValueError("줄바꿈 문자 금지 — 단일 라인 필요")
+        return v
+
+    @field_validator("log_folders")
+    @classmethod
+    def _validate_log_folders(cls, v: Optional[List[str]]) -> Optional[List[str]]:
+        """B2 — 기존 log_folder 검증 패턴(maxlen 500 + 줄바꿈 금지)을 항목별 적용.
+
+        최대 8개 제한은 Field(max_length=8)가 처리. 본 validator는 항목 내부 검증.
+        """
+        if not v:
+            return v
+        for i, item in enumerate(v):
+            if len(item) > 500:
+                raise ValueError(
+                    f"log_folders[{i}]: 길이 ≤ 500 필요 (got {len(item)})"
+                )
+            if "\n" in item or "\r" in item:
+                raise ValueError(
+                    f"log_folders[{i}]: 줄바꿈 문자 금지 — 단일 라인 필요"
+                )
         return v
 
     @field_validator("deviation_cases")
@@ -753,6 +778,10 @@ class SwITBuildRequest(BaseModel):
     jenkins_build_number: Optional[int] = Field(None, ge=1, le=99999)
     cache_root: str = Field("", max_length=500)
     log_folder: Optional[str] = Field(None, max_length=500)
+    # B2 대칭 (SwIT) — 다중 log_folder (예: KJPDS02 PV APP+BOOT 분리 폴더 통합 빌드).
+    # 비어있지 않으면 log_folder(단일)보다 우선. SwUTBuildRequest.log_folders와
+    # 동일 정책: 최대 8개 + 항목별 maxlen 500 + 줄바꿈 금지 (_validate_swit_log_folders).
+    log_folders: Optional[List[str]] = Field(None, max_length=8)
     # 51차 — Coverage / SITR 양식 분리 (이전 단일 template_path). 둘 다 비면 config fallback.
     coverage_template_path: str = Field("", max_length=500)
     sitr_template_path: str = Field("", max_length=500)
@@ -789,6 +818,26 @@ class SwITBuildRequest(BaseModel):
             return v
         if "\n" in v or "\r" in v:
             raise ValueError("줄바꿈 문자 금지 — 단일 라인 필요")
+        return v
+
+    @field_validator("log_folders")
+    @classmethod
+    def _validate_swit_log_folders(cls, v: Optional[List[str]]) -> Optional[List[str]]:
+        """B2 대칭 — SwUTBuildRequest._validate_log_folders와 동일 정책.
+
+        최대 8개 제한은 Field(max_length=8)가 처리. 본 validator는 항목 내부 검증.
+        """
+        if not v:
+            return v
+        for i, item in enumerate(v):
+            if len(item) > 500:
+                raise ValueError(
+                    f"log_folders[{i}]: 길이 ≤ 500 필요 (got {len(item)})"
+                )
+            if "\n" in item or "\r" in item:
+                raise ValueError(
+                    f"log_folders[{i}]: 줄바꿈 문자 금지 — 단일 라인 필요"
+                )
         return v
 
 
