@@ -1050,3 +1050,96 @@ class TestUpdateCrossRefs:
         )
         assert n2 == 0
         assert ws["E5"].value == "=E396"  # 첫 갱신값 유지
+
+
+class TestSignatureBlockAndDocId96Final:
+    """라운드 96-final QA fix — 서명란 블록 + Document ID 보정 + dot_date."""
+
+    @staticmethod
+    def _trio_cover():
+        import openpyxl
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws["I2"] = "Author"
+        ws["J2"] = "Reviewer"
+        ws["K2"] = "Approver"
+        ws.merge_cells("I3:I4")
+        ws.merge_cells("J3:J4")
+        ws.merge_cells("K3:K4")
+        return ws
+
+    def test_signature_block_writes_below_labels(self):
+        from backend.services.excel_template_utils import write_signature_block
+        ws = self._trio_cover()
+        row = write_signature_block(ws, {
+            "Author": "주희영", "Reviewer": "", "Approver": "CH In",
+        })
+        assert row == 2
+        assert ws["I3"].value == "주희영"
+        assert ws["K3"].value == "CH In"
+        # 빈 Reviewer는 노란 placeholder
+        assert str(ws["J3"].value or "").startswith("▶")
+        # 라벨 셀 무손상 (이전 결함: J2가 이름으로 덮임)
+        assert ws["J2"].value == "Reviewer"
+
+    def test_signature_block_isolated_label_returns_none(self):
+        import openpyxl
+        from backend.services.excel_template_utils import write_signature_block
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws["B5"] = "Author"  # 단독 kv 라벨 — 블록 아님
+        assert write_signature_block(ws, {"Author": "x", "Reviewer": "y", "Approver": "z"}) is None
+
+    def test_stamp_document_id_phase_token_fix(self):
+        import openpyxl
+        from backend.services.excel_template_utils import stamp_cover_document_id
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws["C26"] = "Document ID"
+        ws["D26"] = "HKY-KJPDS02_DV-SwITCV-28A0"
+        warns: list[str] = []
+        changed = stamp_cover_document_id(
+            ws, project_id="KJPDS02",
+            doc_filename_pattern="(KJPDS02_PV_SwITCV) X_v{version}_{date}_R.xlsx",
+            out_warnings=warns,
+        )
+        assert changed
+        assert ws["D26"].value == "HKY-KJPDS02_PV-SwITCV-28A0"
+        assert ws["D26"].fill.start_color.rgb == "FFFFEB9C"  # serial 검증 노란 마킹
+        assert warns and "Document ID" in warns[0]
+
+    def test_stamp_document_id_pname_placeholder(self):
+        import openpyxl
+        from backend.services.excel_template_utils import stamp_cover_document_id
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws["C26"] = "Document ID"
+        ws["D26"] = "HKY-[P_Name]-SwITCR-28A1"
+        changed = stamp_cover_document_id(
+            ws, project_id="KJPDS02",
+            doc_filename_pattern="(KJPDS02_PV_SwITCR) X_v{version}_{date}_R.xlsm",
+        )
+        assert changed
+        assert ws["D26"].value == "HKY-KJPDS02_PV-SwITCR-28A1"
+
+    def test_stamp_document_id_no_pattern_noop(self):
+        import openpyxl
+        from backend.services.excel_template_utils import stamp_cover_document_id
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws["C26"] = "Document ID"
+        ws["D26"] = "HKY-KJPDS02_DV-SwITCV-28A0"
+        assert not stamp_cover_document_id(ws, project_id="KJPDS02", doc_filename_pattern="")
+        assert ws["D26"].value == "HKY-KJPDS02_DV-SwITCV-28A0"
+
+    def test_dot_date_and_find_kv_min_row(self):
+        import openpyxl
+        from backend.services.excel_template_utils import dot_date, find_kv_row
+        assert dot_date("2026-06-04") == "2026.06.04"
+        assert dot_date("2026/06/04") == "2026.06.04"
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws["I2"] = "Author"
+        ws["C30"] = "Author"
+        assert find_kv_row(ws, "Author") == (2, 9)
+        assert find_kv_row(ws, "Author", min_row=3) == (30, 3)

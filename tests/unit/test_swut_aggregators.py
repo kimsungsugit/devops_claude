@@ -3264,3 +3264,77 @@ class TestRound83AuditLogSheet:
         assert "reviewer 검토 후" in cells.get("ASIL A Usage", "")
         assert "manual review 의무" in cells.get("ASIL B/C/D Usage", "")
         assert "R83" in cells.get("Round", "")
+
+
+class TestCoverSignatureLayout96Final:
+    """라운드 96-final QA fix — KJPDS02 v1.01 Cover (가로 서명란 + C26~C30 kv).
+
+    이전 결함: 'Author' 값이 라벨-우측 기입으로 'Reviewer' 라벨(J2)을 덮어씀,
+    Date(G29)/Document ID(G26) 미스탬프로 DV 잔존.
+    """
+
+    @staticmethod
+    def _kjpds02_cover_ws():
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "Cover"
+        ws["I2"] = "Author"
+        ws["J2"] = "Reviewer"
+        ws["K2"] = "Approver"
+        ws.merge_cells("I3:I4")
+        ws.merge_cells("J3:J4")
+        ws.merge_cells("K3:K4")
+        ws["C26"] = "Document ID"
+        ws["D26"] = "HKY-KJPDS02_DV-SwITCV-28A0"
+        ws["C27"] = "Version"
+        ws["D27"] = "v1.01"
+        ws["C28"] = "Status"
+        ws["D28"] = "Approved"
+        ws["C29"] = "Date"
+        ws["D29"] = "2025.12.05"
+        ws["C30"] = "Author"
+        ws["D30"] = "이전작성자"
+        return ws
+
+    def test_cover_writer_kjpds02_v101_layout(self):
+        from backend.services.swut_coverage_aggregator import (
+            CoverageBuildMeta, _write_cover_sheet,
+        )
+        ws = self._kjpds02_cover_ws()
+        meta = CoverageBuildMeta(
+            project_id="KJPDS02", release_sw_version="0.10",
+            test_date="2026-06-04", test_engineer="주희영",
+            default_approver="CH In",
+            doc_filename_pattern="(KJPDS02_PV_SwITCV) X_v{version}_{date}_R.xlsx",
+        )
+        warns: list[str] = []
+        _write_cover_sheet(ws, meta, out_warnings=warns)
+        # 서명란 — 라벨 보존 + 이름은 아래 행
+        assert ws["J2"].value == "Reviewer"
+        assert ws["I3"].value == "주희영"
+        assert ws["K3"].value == "CH In"
+        assert str(ws["J3"].value or "").startswith("▶")  # reviewer 빈 값 노란
+        # 표지 kv — DV 잔존 해소
+        assert ws["D27"].value == "v0.10"
+        assert ws["D29"].value == "2026.06.04"
+        assert ws["D30"].value == "주희영"  # 하단 Author (두 번째 occurrence)
+        assert ws["D26"].value == "HKY-KJPDS02_PV-SwITCV-28A0"
+
+    def test_cover_writer_isolated_labels_backward_compat(self):
+        """v3.01류 (단독 kv 라벨) — 기존 라벨-우측 기입 경로 유지."""
+        from backend.services.swut_coverage_aggregator import (
+            CoverageBuildMeta, _write_cover_sheet,
+        )
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "Cover"
+        ws["B5"] = "Author"
+        ws["B7"] = "Approver"
+        meta = CoverageBuildMeta(
+            project_id="HDPDM01", release_sw_version="2.02",
+            test_date="2024-02-19", test_engineer="JK Kim",
+            default_approver="Approver Kim",
+        )
+        _write_cover_sheet(ws, meta, out_warnings=[])
+        assert ws["C5"].value == "JK Kim"
+        assert ws["C7"].value == "Approver Kim"

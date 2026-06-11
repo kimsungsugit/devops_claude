@@ -661,8 +661,12 @@ def _write_btb_sheet(ws, meta: SwutcrBuildMeta, cfg: dict[str, Any]) -> None:
     safe_write(ws, 6, 11, meta.test_engineer or md.get("tester", meta.author))
     safe_write(ws, 7, 4, md.get("debugger", ""))
     safe_write(ws, 7, 11, md.get("software_platform_ver", meta.release_sw_version))
-    safe_write(ws, 10, 3, md.get("test_iteration", "0.1"))
-    safe_write(ws, 10, 5, md.get("software_platform_ver", meta.release_sw_version))
+    # W-6-③ (라운드 96-final QA fix): 10행은 머지 라벨 헤더(C10:D11 'SW 버전' /
+    # E10:F11 'Test Period') — 10행에 쓰면 라벨이 값으로 덮어써진다. 값은 라벨
+    # 아래 값행 12행(값칸 C12:D12 / E12:F12)에 기입. 시간값 G12:J12는 기존부터
+    # 올바른 행이라 변경 없음.
+    safe_write(ws, 12, 3, md.get("test_iteration", "0.1"))
+    safe_write(ws, 12, 5, md.get("software_platform_ver", meta.release_sw_version))
     safe_write(ws, 12, 7, md.get("prepare_hours", 0))
     safe_write(ws, 12, 8, md.get("execution_hours", 0))
     safe_write(ws, 12, 9, md.get("review_hours", 0))
@@ -678,6 +682,45 @@ def _write_btb_sheet(ws, meta: SwutcrBuildMeta, cfg: dict[str, Any]) -> None:
     safe_write(ws, 50, 5, "-")
     safe_write(ws, 50, 7, "-")
     safe_write(ws, 50, 10, "해당 사항 없음")
+
+
+def _preserve_history_placeholders(ws, rows: list[dict[str, str]]) -> None:
+    """History reviewer/approver 빈 값의 템플릿 placeholder 소거 방지 (라운드 96-final).
+
+    `build_release_history_row`는 reviewer/approver를 audit 입력용 빈 string으로
+    반환하고 `_write_history_sheet`가 그대로 stamp → KJPDS02 v1.01 템플릿 History
+    r5의 F5/G5 placeholder '-'가 지워지던 결함. 쓰기 전에 대상 셀의 기존 템플릿
+    값을 읽어, 새 값이 빈 string이면 기존 값을 유지하도록 row dict를 보정한다.
+    템플릿 주도 보존이라 placeholder가 없는 양식(HDPDM01 v3.01 등)에서는 no-op,
+    값이 실제 제공되면 그대로 기입한다. 헤더 탐지는 `_write_history_sheet`와
+    동일 로직('Version' 라벨 기준) — 좌표 하드코딩 금지.
+    """
+    if ws is None or not rows:
+        return
+    header_pos = None
+    for row in ws.iter_rows(min_row=1, max_row=10, values_only=False):
+        for cell in row:
+            if isinstance(cell.value, str) and cell.value.strip() == "Version":
+                header_pos = (row[0].row, cell.column)
+                break
+        if header_pos:
+            break
+    if header_pos is None:
+        return
+    start_row, col = header_pos[0] + 1, header_pos[1]
+    # _write_history_sheet 컬럼 오프셋: version(0)/date(1)/description(2)/
+    # author(3)/reviewer(4)/approver(5). version/date/author 빈 값은 기존
+    # W6/W9 warning 정책(빈 cell + warning) 유지 — placeholder 보존은
+    # 사용자입력 칸인 reviewer/approver에 한정.
+    offsets = {"reviewer": 4, "approver": 5}
+    for i, h in enumerate(rows):
+        for key, off in offsets.items():
+            new_val = h.get(key)
+            if new_val is not None and str(new_val).strip():
+                continue
+            existing = ws.cell(row=start_row + i, column=col + off).value
+            if existing is not None and str(existing).strip():
+                h[key] = str(existing)
 
 
 def _write_swutcr_specific_sheets(
@@ -696,7 +739,9 @@ def _write_swutcr_specific_sheets(
         _write_ut101(wb["1.UT101"], meta, agg, cfg, warnings)
         written["ut101"] = True
     if "2.UT201" in wb.sheetnames:
-        _write_ut201(wb["2.UT201"], meta, agg, cfg)
+        # C-5 배선 (라운드 96-final): FI 실측 미제공 시 _write_ut201이 emit하는
+        # 사용자입력 마킹 warning이 산출물 warnings에 합류하도록 전달.
+        _write_ut201(wb["2.UT201"], meta, agg, cfg, warnings)
         written["ut201"] = True
     if "3.UT301" in wb.sheetnames:
         _write_ut301(wb["3.UT301"], meta, agg, cfg)
@@ -946,6 +991,8 @@ def build_swutcr_report(
     history_ws = _find_sheet(wb, "history")
     if history_ws is not None:
         rows = build_release_history_row(meta, doc_kind="SwUTCR", out_warnings=warnings)
+        # 라운드 96-final QA fix — 템플릿 F5/G5 placeholder '-' 보존.
+        _preserve_history_placeholders(history_ws, rows)
         count = _write_history_sheet(history_ws, rows, out_warnings=warnings)
         summary["history_rows_written"] = count
         if count == 0:

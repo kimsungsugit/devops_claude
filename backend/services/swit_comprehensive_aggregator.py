@@ -20,12 +20,17 @@ except ImportError:  # pragma: no cover
 
 from backend.services.excel_template_utils import (
     build_release_history_row,
+    dot_date,
     has_vba_macros,
     inspect_vba_refs,
     safe_write,
     short_date,
+    stamp_cover_document_id,
     validate_build_meta,
     validate_xlsx_template_bytes,
+    write_label_or_mark,
+    write_signature_block,
+    write_value_after_label,
 )
 from backend.services.swut_builder_helpers import (
     diagnose_asset_usage,
@@ -853,6 +858,15 @@ def _write_it101(
         safe_write(ws, row, 6, _it101_coverage_value(failure))
         _write_ut101_long_text(ws, row, 7, reason)
         _write_ut101_long_text(ws, row, 12, action)
+    # 라운드 96-final QA fix — 양식 10행 한도 초과분을 산출물 자체에 가시화
+    # (이전: warnings에만 truncation 기록 → audit reviewer가 문서 단독 검토 시
+    # 누락 인지 불가). 4.2는 r93, 4.3은 r107 빈 행에 '외 N건' 표기.
+    overflow = len(details) - len(visible_details)
+    if overflow > 0:
+        safe_write(ws, 93, 3,
+                   f"외 {overflow}건 — SwITCV 4.Coverage X 행 / AuditLog 참조")
+        safe_write(ws, 107, 3,
+                   f"외 {overflow}건 — SwITCV 4.Coverage X 행 / AuditLog 참조")
     return len(details)
 
     start = 83
@@ -1143,6 +1157,55 @@ def _write_not_applicable(ws, meta: SwitcrBuildMeta, cfg: dict[str, Any], reason
     return
 
 
+def _write_switcr_cover(
+    ws, meta: SwitcrBuildMeta, cfg: dict[str, Any],
+    out_warnings: list[str] | None = None,
+) -> None:
+    """라운드 96-final QA fix — SwITCR Cover stamp (이전: 완전 미스탬프 Critical).
+
+    XXXX 공양식 Cover placeholder(G26 'HKY-[P_Name]-SwITCR-28A1' / G28
+    'Unspecified' / G29 '202X.XX.XX' / G30 'XXXX')가 산출물에 그대로 잔존하던
+    결함. SwITCV/SwITR Cover와 동일 항목 체계(C26~C30 kv + I2/J2/K2 서명란)로
+    stamp한다.
+    """
+    if ws is None:
+        return
+    author = meta.test_engineer or meta.default_author or ""
+    reviewer = getattr(meta, "reviewer", "") or (
+        getattr(meta, "default_reviewer", "") or getattr(meta, "reviewer_override", "")
+    )
+    approver = getattr(meta, "approver", "") or (
+        getattr(meta, "default_approver", "") or getattr(meta, "approver_override", "")
+    )
+    # 서명란 (I2/J2/K2 라벨 아래 기입 — 빈 값은 노란 마킹)
+    sig_row = write_signature_block(ws, {
+        "Author": author, "Reviewer": reviewer, "Approver": approver,
+    }, hint_map={
+        "Author": "test_engineer 또는 default_author",
+        "Reviewer": "검토자 이름",
+        "Approver": "승인자 이름 (필수)",
+    })
+    if sig_row is None:
+        # deep-reviewer 96-final W1 — 비-trio 템플릿 변형 fallback (coverage/sutr
+        # writer와 대칭). 미적용 시 Reviewer/Approver가 어디에도 안 써지는 silent 누락.
+        write_label_or_mark(ws, "Reviewer", reviewer, hint="검토자 이름")
+        write_label_or_mark(ws, "Approver", approver, hint="승인자 이름 (필수)")
+    # 표지 kv 항목 (C27~C30) — Document ID는 placeholder/phase 보정 helper 사용
+    write_value_after_label(ws, "Version", f"v{meta.release_sw_version}")
+    write_value_after_label(ws, "Status", "DRAFT — PENDING REVIEW")
+    write_value_after_label(ws, "Date", dot_date(meta.test_date))
+    if author:
+        write_value_after_label(
+            ws, "Author", author,
+            min_row=(sig_row + 1) if sig_row else 1,
+        )
+    stamp_cover_document_id(
+        ws, project_id=meta.project_id,
+        doc_filename_pattern=getattr(meta, "doc_filename_pattern", "") or "",
+        out_warnings=out_warnings,
+    )
+
+
 def _write_summary_sheet(ws, meta: SwitcrBuildMeta, cfg: dict[str, Any]) -> None:
     md = cfg.get("switcr_metadata", {}) or {}
     safe_write(ws, 3, 5, md.get("project", meta.project_id))
@@ -1158,8 +1221,25 @@ def _write_summary_sheet(ws, meta: SwitcrBuildMeta, cfg: dict[str, Any]) -> None
         safe_write(ws, row, 7, "O")
     for row in (20, 21, 23, 24):
         safe_write(ws, row, 7, "X")
-    safe_write(ws, 23, 15, "8.IT801")
-    safe_write(ws, 24, 15, "8.IT802")
+    # 라운드 96-final QA fix — 비대상 시트 rename('(해당X)' prefix) 후 O열 참조
+    # 문자열 동기화. 이전: 구 시트명('5.IT501' 등) + 존재하지 않는 '8.IT802' stamp
+    # → H~L열 unguarded INDIRECT 20셀이 Excel 열람 시 #REF!. IT802 행(r24)은
+    # 8.IT801 시트 내 섹션이므로 동일 시트를 참조한다.
+    # deep-reviewer 96-final W2 — 하드코딩 대신 실제 wb 시트명에서 동적 해석:
+    # rename 실패/시트 부재 변형에서도 존재하는 이름만 stamp (desync 차단).
+    def _actual_sheet_name(base: str) -> str:
+        sheetnames = getattr(getattr(ws, "parent", None), "sheetnames", []) or []
+        renamed = f"(해당X){base}"
+        if renamed in sheetnames:
+            return renamed
+        if base in sheetnames:
+            return base
+        return renamed  # 시트 자체 부재 — rename 기대명 유지 (G열 'X' gate가 차단)
+
+    safe_write(ws, 20, 15, _actual_sheet_name("5.IT501"))
+    safe_write(ws, 21, 15, _actual_sheet_name("6.IT601"))
+    safe_write(ws, 23, 15, _actual_sheet_name("8.IT801"))
+    safe_write(ws, 24, 15, _actual_sheet_name("8.IT801"))
     safe_write(ws, 19, 13, '=IF(G19="O",INDIRECT($O19&"!I$10"), "")')
 
 
@@ -1342,6 +1422,14 @@ def build_switcr_report(
         _write_summary_sheet(summary_ws, meta, cfg)
     else:
         incomplete_sheets.append("Summary")
+
+    # 라운드 96-final QA fix — Cover stamp (이전: 완전 미스탬프 Critical)
+    cover_ws = _find_sheet(wb, "cover")
+    if cover_ws is not None:
+        _write_switcr_cover(cover_ws, meta, cfg, out_warnings=warnings)
+    else:
+        incomplete_sheets.append("Cover")
+        warnings.append("Cover sheet not found")
 
     history_ws = _find_sheet(wb, "history")
     if history_ws is not None:

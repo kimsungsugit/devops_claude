@@ -32,6 +32,7 @@ except ImportError:  # pragma: no cover
 
 from backend.services.excel_template_utils import (
     build_release_history_row,
+    dot_date,
     find_kv_row,
     has_vba_macros,
     inspect_vba_refs,
@@ -43,10 +44,12 @@ from backend.services.excel_template_utils import (
     mark_user_input_required,
     safe_write,
     short_date,
+    stamp_cover_document_id,
     truncate_cell_text,
     validate_build_meta,
     validate_xlsx_template_bytes,
     write_label_or_mark,
+    write_signature_block,
     write_value_after_label,
 )
 
@@ -142,6 +145,8 @@ _OPTIONAL_LABELS = {
     # 라운드 F7 D11 fix: 회사 표준 양식 (★개발템플릿 V3) Cover에 부재 — 1.Test
     # Summary로 이동 완료. silent OK (warning emit X).
     "Project", "ASIL Level", "Validation Date", "Status", "Version",
+    # 라운드 96-final: KJPDS02 v1.01 Cover 항목 (C29 'Date') — 타 양식 부재 시 silent.
+    "Date",
 }
 
 
@@ -180,15 +185,45 @@ def _write_cover(
     _write_label_or_mark(ws, labels.get("validation_date", "Validation Date"),
                          meta.validation_date,
                          "yyyy-mm-dd 형식 검증 완료일", out_warnings)
-    _write_label_or_mark(ws, labels.get("author", "Author"), meta.author,
-                         "test_engineer 또는 default_author", out_warnings)
-    _write_label_or_mark(ws, labels.get("approver", "Approver"), meta.approver,
-                         "승인자 이름 (필수)", out_warnings)
+    # 라운드 96-final QA fix — 가로 연속 서명란(KJPDS02 v1.01 I2/J2/K2) 감지 시
+    # 라벨 '아래' 셀에 이름 기입 ('Author' 값이 'Reviewer' 라벨을 덮어쓰던 결함).
+    _reviewer = getattr(meta, "reviewer", "") or (
+        getattr(meta, "default_reviewer", "") or getattr(meta, "reviewer_override", "")
+    )
+    _sig_row = write_signature_block(ws, {
+        labels.get("author", "Author"): meta.author,
+        labels.get("reviewer", "Reviewer"): _reviewer,
+        labels.get("approver", "Approver"): meta.approver,
+    }, hint_map={
+        labels.get("author", "Author"): "test_engineer 또는 default_author",
+        labels.get("reviewer", "Reviewer"): "검토자 이름",
+        labels.get("approver", "Approver"): "승인자 이름 (필수)",
+    })
+    if _sig_row is None:
+        _write_label_or_mark(ws, labels.get("author", "Author"), meta.author,
+                             "test_engineer 또는 default_author", out_warnings)
+        _write_label_or_mark(ws, labels.get("approver", "Approver"), meta.approver,
+                             "승인자 이름 (필수)", out_warnings)
+    else:
+        # 서명란 아래 별도 표지 항목 'Author' kv (예: KJPDS02 C30) — G30에 기입.
+        if meta.author:
+            write_value_after_label(
+                ws, labels.get("author", "Author"), meta.author,
+                min_row=_sig_row + 1,
+            )
     if meta.doc_id_sequence:
         _write_label(ws, labels.get("doc_id", "Doc. ID"),
                      f"{meta.doc_id_base}-{meta.doc_id_sequence}", out_warnings)
     _write_label(ws, labels.get("version", "Version"),
                  f"v{meta.release_sw_version}", out_warnings)
+    # 라운드 96-final QA fix — Cover 'Date' DV 잔존 차단 + 'Document ID' 보정.
+    _write_label(ws, labels.get("date", "Date"),
+                 dot_date(meta.test_date), out_warnings)
+    stamp_cover_document_id(
+        ws, project_id=meta.project_id,
+        doc_filename_pattern=getattr(meta, "doc_filename_pattern", "") or "",
+        out_warnings=out_warnings,
+    )
     # optional — 회사 v3.01 template에 라벨이 없을 수 있어 silent skip 허용.
     _write_label(ws, labels.get("build_timestamp", "Build Timestamp"),
                  meta.build_timestamp, out_warnings)
@@ -267,13 +302,20 @@ def _deviation_case_fields(case: Any) -> tuple[str, str, str, str] | None:
     return (str(tc_id), str(getattr(case, "tc_no", "") or ""), issue, rationale)
 
 
-def _write_deviation(ws, deviation_cases: list[Any], out_warnings: list[str] | None = None) -> int:
+def _write_deviation(
+    ws, deviation_cases: list[Any], out_warnings: list[str] | None = None,
+    *, none_text: str | None = None,
+) -> int:
     """Deviation 시트 — swut_deviation_generator 결과 기록.
 
     라운드 F7 T707: clear policy — deviation_cases 빈 list 또는 신규 stamp 후
     양식 default deviation 데이터 clear (Appendix sentinel 보존).
 
-    Returns: 쓰여진 행 수.
+    라운드 96-final: ``none_text`` (keyword-only, 기본 None — backward compat) —
+    0건일 때 첫 데이터 행에 기재할 DV 관례 문구 (예: '해당사항 없음'). None이면
+    기존 동작(공백 유지). SwIT(swit_sitr_aggregator) 등 기존 호출처 무영향.
+
+    Returns: 쓰여진 행 수 (none_text 기재는 카운트 제외).
     """
     pos = find_kv_row(ws, "Test Case ID", max_row=10)
     if pos is None:
@@ -331,6 +373,10 @@ def _write_deviation(ws, deviation_cases: list[Any], out_warnings: list[str] | N
                 )
     except ImportError:
         pass
+    # 라운드 96-final — 0건 시 DV 관례 '해당사항 없음' 기재 (옵션). clear 블록
+    # 이후에 기입해야 함 (clear_start=start_row+0 — 먼저 쓰면 clear가 지움).
+    if written == 0 and none_text:
+        safe_write(ws, start_row, pos[1], none_text)
     return written
 
 

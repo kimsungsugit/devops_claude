@@ -404,15 +404,15 @@ def _fill_actual_and_result(
     fn_iter_map: dict[str, dict[int, Any]],
     asil_map: dict[str, str],
     out_warnings: list[str] | None,
-) -> dict[str, int]:
+) -> dict[str, Any]:
     """spec 함수 블록에 Actual/Pass-Fail/Log 채움.
 
     Returns: 통계 dict (functions/iterations/matched_fn/unmatched_fn/
-        inexact_actual).
+        inexact_actual + ``na_tc_list`` — Total N/A 함수 대표 목록, W-4 기재용).
     """
     from openpyxl.utils import get_column_letter  # noqa: F401
 
-    stats = {
+    stats: dict[str, Any] = {
         "functions": 0, "iterations": 0,
         "matched_fn": 0, "unmatched_fn": 0,
         "fn_pass": 0, "fn_fail": 0, "fn_na": 0,
@@ -420,6 +420,11 @@ def _fill_actual_and_result(
         "actual_from_expected": 0, "actual_from_vcast": 0, "actual_missing": 0,
     }
     unmatched_list: list[str] = []
+    # 라운드 96-final W-4 — Total 'N/A' 함수(미매칭 + 매칭됐으나 실행 0) 대표 목록.
+    # '■ List of Test Case not Executed' 기재용 — cap으로 메모리 상한 (전체 카운트는
+    # fn_na, 잔여는 '외 N건' 요약).
+    _NA_LIST_MAX = 20
+    na_tc_list: list[str] = []
 
     for blk in blocks:
         stats["functions"] += 1
@@ -440,6 +445,8 @@ def _fill_actual_and_result(
             stats["unmatched_fn"] += 1
             if len(unmatched_list) < 40:
                 unmatched_list.append(f"{blk['tc_id']}({blk['unit']})")
+            if len(na_tc_list) < _NA_LIST_MAX:
+                na_tc_list.append(f"{blk['tc_id']} ({blk['unit']})")
             # 미매칭 함수 — Pass/Fail N/A 표기 + Total N/A.
             for ir in blk["iter_rows"]:
                 safe_write(ws, ir, COL_PASS_FAIL, "N/A")
@@ -512,6 +519,9 @@ def _fill_actual_and_result(
             stats["fn_fail"] += 1
         else:
             stats["fn_na"] += 1
+            # 매칭됐으나 실행 iteration 0 — 미실행 목록에 등재 (W-4).
+            if len(na_tc_list) < _NA_LIST_MAX:
+                na_tc_list.append(f"{blk['tc_id']} ({blk['unit']})")
         safe_write(ws, anchor, COL_PASS_TOTAL, total_str)
         # 라운드 91 fix — 레퍼런스 감사본은 anchor 행 JF(Pass/Fail)에도 함수 결과를
         # 표기(첫 iteration 겸용 양식). anchor JF=total로 정합 (이전: anchor JF 공란).
@@ -532,6 +542,7 @@ def _fill_actual_and_result(
             f"[spec-sutr] 함수↔SwUFn 매칭 실패 {stats['unmatched_fn']}건 — "
             f"Pass/Fail N/A 표기. 예: {', '.join(unmatched_list[:15])}"
         )
+    stats["na_tc_list"] = na_tc_list
     return stats
 
 
@@ -650,8 +661,15 @@ def _fill_standard_aux_sheets(
     dev_ws = next((wb[n] for n in sheet_names if "deviation" in n.lower()), None)
     if dev_ws is None:
         out_warnings.append("[spec-sutr] 2.Deviation 시트 미발견")
-    elif deviation_cases:
-        n = _write_deviation(dev_ws, deviation_cases, out_warnings=out_warnings)
+    else:
+        # 라운드 96-final — 0건이어도 호출: 템플릿 default 행 clear + DV 관례
+        # '해당사항 없음' 기재 (B5 상당 — 'Test Case ID' 헤더 아래 첫 행).
+        # 이전: deviation_cases 비면 호출 자체를 skip → 템플릿 잔존 행 미정리 +
+        # silent 공백 (24차 silent N/A 제거 정책 위반).
+        n = _write_deviation(
+            dev_ws, deviation_cases or [], out_warnings=out_warnings,
+            none_text="해당사항 없음",
+        )
         summary["deviation_cases_written"] = n
 
     hist_ws = next((wb[n] for n in sheet_names if n.lower() == "history"), None)
@@ -719,6 +737,175 @@ def _fill_test_summary_counts(
         safe_write(ts_ws, rr, rc + 2, tested)    # tested
         safe_write(ts_ws, rr, rc + 3, not_exec)  # not tested
         summary["requirements_swuds_total"] = total
+
+        # 라운드 96-final C-4 — coverage 수식 통일 (모순 차단).
+        # 템플릿 잔존 '=IFERROR(D22/C22,"")'는 N/A(not tested)를 미가산(92.3%),
+        # 'Actual Coverage'(C10)는 리터럴 1(100%)이라 열람 시 두 수치가 모순.
+        # DV 감사본 형식 '=IFERROR((D22+E22)/C22,"")'(tested+N/A 가산)로 교체하고
+        # C10은 리터럴 대신 이 셀을 참조하는 수식으로 재기입 — 항상 동일 산출.
+        # 좌표는 req_pos 기준 동적 산출 (데이터 양에 따라 행이 이동해도 정합).
+        from openpyxl.utils import get_column_letter
+        col_total = get_column_letter(rc + 1)    # 예: C (can be tested)
+        col_tested = get_column_letter(rc + 2)   # 예: D (tested)
+        col_na = get_column_letter(rc + 3)       # 예: E (not tested)
+        cov_col = rc + 4                         # 예: F (coverage 수식)
+        cov_letter = get_column_letter(cov_col)
+
+        def _dv_cov_formula(r: int) -> str:
+            return (
+                f'=IFERROR(({col_tested}{r}+{col_na}{r})/{col_total}{r},"")'
+            )
+
+        safe_write(ts_ws, rr, cov_col, _dv_cov_formula(rr))
+        # 동일 블록의 다른 requirement row에 남은 템플릿 수식(Dn/Cn 형식)도 통일.
+        _tmpl_cov_re = re.compile(
+            rf"^=\s*IFERROR\(\s*{col_tested}(\d+)\s*/\s*{col_total}\1",
+            re.IGNORECASE,
+        )
+        for r2 in range(max(1, rr - 3), rr + 4):
+            if r2 == rr:
+                continue
+            v2 = ts_ws.cell(r2, cov_col).value
+            if isinstance(v2, str) and _tmpl_cov_re.match(v2):
+                safe_write(ts_ws, r2, cov_col, _dv_cov_formula(r2))
+        summary["requirements_coverage_formula"] = _dv_cov_formula(rr)
+
+        # 'Actual Coverage' — _write_test_summary가 stamp한 리터럴(agg 기반)을
+        # 위 coverage 수식 셀 참조로 재기입 (두 표시 단일 진리원).
+        cov_label_pos = find_kv_row(ts_ws, "Actual Coverage", max_row=30)
+        if cov_label_pos is not None:
+            lr, lc = cov_label_pos
+            target_col = lc + 1
+            for mr in ts_ws.merged_cells.ranges:
+                if mr.min_row <= lr <= mr.max_row and mr.min_col <= lc <= mr.max_col:
+                    target_col = mr.max_col + 1
+                    break
+            safe_write(ts_ws, lr, target_col, f"={cov_letter}{rr}")
+            summary["actual_coverage_formula"] = f"={cov_letter}{rr}"
+
+
+def _write_not_executed_list(
+    wb: Workbook, fill_stats: dict[str, Any], summary: dict[str, Any],
+    out_warnings: list[str],
+) -> int:
+    """'■ List of Test Case not Executed' 목록 stamp (라운드 96-final W-4).
+
+    검증 발견: 미실행 카운트(예: F18=44)는 stamp되는데 목록 영역은 공백 —
+    카운트·목록 불일치로 audit reviewer가 미실행 TC를 문서 단독으로 식별 불가.
+    가용 빈 행 한도 내 대표 항목 + 잔여 '외 N건 — DV spec(v1.01) 등재, PV 로그
+    미실행' 요약 기재 (전체 목록은 session 데이터/AuditLog).
+
+    헤더/가용 행은 동적 탐색 — 좌표 하드코딩 금지 (데이터 양에 따라 이동).
+
+    Returns: 기재한 행 수 (요약 행 포함).
+    """
+    ts_ws = next((wb[n] for n in wb.sheetnames if "test summary" in n.lower()), None)
+    if ts_ws is None:
+        return 0
+    total_na = int(fill_stats.get("fn_na", 0) or 0)
+    if total_na <= 0:
+        return 0
+    na_list: list[str] = list(fill_stats.get("na_tc_list") or [])
+
+    # 헤더 탐색 — '■ List of Test Case not Executed' (v1.01 변형 흡수 substring).
+    header_pos: tuple[int, int] | None = None
+    for row in ts_ws.iter_rows(min_row=1, max_row=min(ts_ws.max_row, 80)):
+        for cell in row:
+            v = cell.value
+            if (isinstance(v, str) and "list" in v.lower()
+                    and "not executed" in v.lower()):
+                header_pos = (cell.row, cell.column)
+                break
+        if header_pos is not None:
+            break
+    if header_pos is None:
+        out_warnings.append(
+            f"[spec-sutr] 미실행 TC {total_na}건 — '■ List of Test Case not "
+            "Executed' 헤더 미발견으로 목록 기재 skip (양식 확인)"
+        )
+        return 0
+    hr, hc = header_pos
+
+    # 가용 빈 행 스캔 — 다음 섹션/비어있지 않은 행 전까지, 최대 8행.
+    avail: list[int] = []
+    for r in range(hr + 1, min(hr + 9, ts_ws.max_row + 1)):
+        row_vals = [
+            ts_ws.cell(r, c).value for c in range(max(1, hc - 1), hc + 8)
+        ]
+        if any(v not in (None, "") for v in row_vals):
+            break
+        avail.append(r)
+    if not avail:
+        out_warnings.append(
+            f"[spec-sutr] 미실행 TC {total_na}건 — 목록 가용 행 0 (양식 확인)"
+        )
+        return 0
+
+    # 대표 항목 + '외 N건' 요약 — 전부 들어가면 요약 행 생략.
+    if total_na <= len(avail) and len(na_list) >= total_na:
+        n_show = total_na
+    else:
+        n_show = min(len(na_list), len(avail) - 1)
+    written = 0
+    for i in range(n_show):
+        safe_write(ts_ws, avail[i], hc, na_list[i])
+        written += 1
+    rest = total_na - n_show
+    if rest > 0:
+        safe_write(
+            ts_ws, avail[written], hc,
+            f"외 {rest}건 — DV spec(v1.01) 등재, PV 로그 미실행",
+        )
+        written += 1
+    summary["not_executed_list_rows"] = written
+    summary["not_executed_total"] = total_na
+    return written
+
+
+def _apply_phase_platform_meta(
+    wb: Workbook, meta: SutrBuildMeta, summary: dict[str, Any],
+    out_warnings: list[str],
+) -> None:
+    """1.Test Summary 프로젝트/버전 항목 phase 보정 (라운드 96-final W-11).
+
+    KJPDS02 v1.01 1.Test Summary 상단 kv (좌표는 라벨 동적 탐색):
+      - Project Name(C4): ``{project_id}_{phase}`` (예: KJPDS02_PV) — phase는
+        config ``swutcr_metadata.phase``. 키 부재 시 기존 동작 유지 (full name).
+      - SW Version(C5): config ``swutcr_metadata.software_platform_ver``(예: 25A1)
+        우선 — 부재 시 기존 동작.
+      - HW Version(C6): SwUT는 HW 비대상 — cfg ``hw_version`` 부재 시 'N/A' 기본.
+        v3.01 양식 라벨('Test Target Version(HW)')은 건드리지 않음 (라벨 미발견
+        silent — _write_test_summary의 meta.hw_version stamp 유지).
+
+    cfg 접근은 기존 config 헬퍼(``load_meta_from_config`` — mtime 캐시) 경유,
+    빌더 시그니처 불변. config 미존재/키 부재 시 모든 항목 기존 동작.
+    """
+    ts_ws = next((wb[n] for n in wb.sheetnames if "test summary" in n.lower()), None)
+    if ts_ws is None:
+        return
+    from backend.services.swut_meta_resolver import load_meta_from_config
+    md = (load_meta_from_config(meta.project_id) or {}).get(
+        "swutcr_metadata", {}) or {}
+    if not isinstance(md, dict):
+        md = {}
+
+    phase = str(md.get("phase", "") or "").strip()
+    if phase and meta.project_id:
+        project_phase = f"{meta.project_id}_{phase}"
+        if write_value_after_label(ts_ws, "Project Name", project_phase):
+            summary["test_summary_project"] = project_phase
+
+    platform_ver = str(md.get("software_platform_ver", "") or "").strip()
+    if platform_ver:
+        ok = write_value_after_label(ts_ws, "SW Version", platform_ver)
+        if not ok:
+            ok = write_value_after_label(ts_ws, "Release Name(SW)", platform_ver)
+        if ok:
+            summary["test_summary_sw_version"] = platform_ver
+
+    hw = str(md.get("hw_version", "") or "").strip() or "N/A"
+    if write_value_after_label(ts_ws, "HW Version", hw):
+        summary["test_summary_hw_version"] = hw
 
 
 # ---------------------------------------------------------------------------
@@ -880,6 +1067,10 @@ def build_sutr_from_spec(
         )
         # 1.Test Summary TC 카운트를 함수 단위로 보정 (레퍼런스 정합).
         _fill_test_summary_counts(wb, summary, fill_stats, warnings)
+        # 라운드 96-final W-4 — 미실행 TC 목록 (not-exec 카운트와 목록 정합).
+        _write_not_executed_list(wb, fill_stats, summary, warnings)
+        # 라운드 96-final W-11 — phase/platform ver 보정 (KJPDS02_PV / 25A1 / N/A).
+        _apply_phase_platform_meta(wb, meta, summary, warnings)
     else:
         # backward-compat — 라운드 91 Cover label stamp만.
         _write_cover_meta_legacy(wb, meta, warnings)

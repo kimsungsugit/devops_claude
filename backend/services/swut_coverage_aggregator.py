@@ -173,6 +173,31 @@ def _write_label_or_mark(
     )
 
 
+def _write_label_keep_formula(
+    ws, label: str, value: Any, out_warnings: list[str] | None,
+) -> None:
+    """라운드 96-final C-1 — 라벨 우측 셀이 템플릿 수식이면 보존 (덮어쓰기 금지).
+
+    KJPDS02 v1.01 '1.Test Summary' C10(Final Test Result)은 템플릿 수식
+    ``=IF(AND(B13=C9,...),"OK","NG")`` — meta 기본값 'PASS' 리터럴로 덮어쓰면
+    Consistency 미달이어도 항상 PASS로 보이는 fabrication이 된다 (2026-06-11
+    PV 검증 확정). 수식이면 skip — Consistency 미달 시 NG가 표시되는 것이
+    정직한 상태. 수식이 아닌 양식(HDPDM01 v3.01 등 빈 셀)은 기존 동작 유지.
+    """
+    from backend.services.excel_template_utils import find_kv_row, is_formula_cell
+    pos = find_kv_row(ws, label, 50)
+    if pos:
+        row, col = pos
+        target_col = col + 1
+        for mr in ws.merged_cells.ranges:
+            if mr.min_row <= row <= mr.max_row and mr.min_col <= col <= mr.max_col:
+                target_col = mr.max_col + 1
+                break
+        if is_formula_cell(ws, row, target_col):
+            return  # 템플릿 OK/NG 판정 수식 보존
+    _write_label(ws, label, value, out_warnings)
+
+
 def _write_cover_sheet(
     ws, meta: CoverageBuildMeta, out_warnings: list[str] | None = None,
     *, layout: Any = None,
@@ -271,8 +296,11 @@ def _write_test_summary_sheet(
     _write_label_or_mark(ws, labels.get("test_engineer", "Test Engineer"),
                          meta.test_engineer,
                          "테스트 엔지니어 이름", out_warnings)
-    _write_label(ws, labels.get("final_test_result", "Final Test Result"),
-                 meta.final_test_result, out_warnings)
+    # 라운드 96-final C-1 — 템플릿 OK/NG 수식 보존 (KJPDS02 v1.01 C10).
+    _write_label_keep_formula(
+        ws, labels.get("final_test_result", "Final Test Result"),
+        meta.final_test_result, out_warnings,
+    )
 
     # 54차 T283: v2.02 양식 신규 row — TC stats / Requirements
     _write_v202_extra_rows(ws, agg, layout, summary, out_warnings)
@@ -804,6 +832,11 @@ def _write_coverage_sheet(
                 spec_stmt_exception_base += 1
     spec_unmatched: list[str] = []
     spec_unmatched_count = 0
+    # 라운드 96-final W-8 — exception note ID prefix는 config phase를 따른다
+    # (PV 산출물에 'DV' 고정 방지). build_coverage_report가 config
+    # projects.<id>.swutcr_metadata.phase를 agg["phase"]로 주입. 미정의 시
+    # 기존 'DV' 유지 (HDPDM01/SwIT 등 backward-compat).
+    spec_phase = str(agg.get("phase") or "").strip() or "DV"
     last_data_row = data_start - 1
 
     if written == 0 and function_rows:
@@ -986,7 +1019,7 @@ def _write_coverage_sheet(
                         spec_stmt_exception_seq += 1
                         safe_write(
                             ws, r, stmt_count_col + 3,
-                            f"UT-CVG-DV-{spec_stmt_exception_seq}",
+                            f"UT-CVG-{spec_phase}-{spec_stmt_exception_seq}",
                         )
                     safe_write(ws, r, branch_count_col, fc.branch.covered)
                     safe_write(ws, r, branch_count_col + 1, fc.branch.total)
@@ -995,7 +1028,8 @@ def _write_coverage_sheet(
                         spec_branch_exception_seq += 1
                         safe_write(
                             ws, r, branch_count_col + 3,
-                            f"UT-CVG-DV-{spec_stmt_exception_base + spec_branch_exception_seq}",
+                            f"UT-CVG-{spec_phase}-"
+                            f"{spec_stmt_exception_base + spec_branch_exception_seq}",
                         )
                     if (not fc.statement.passed) or (not fc.branch.passed):
                         exception_note = (
@@ -1165,6 +1199,7 @@ def _write_coverage_sheet(
             branch_label_col=branch_count_col + 1,  # K
             branch_value_col=branch_count_col + 2,  # L
             no_col=no_col,
+            out_warnings=out_warnings,
         )
         if out_warnings is not None:
             out_warnings.append(
@@ -1294,6 +1329,7 @@ def _write_spec_totals(
     unit_id_col: int, no_col: int,
     stmt_label_col: int, stmt_value_col: int,
     branch_label_col: int, branch_value_col: int,
+    out_warnings: list[str] | None = None,
 ) -> None:
     """라운드 92 — 회사 감사본 4.Coverage TOTALS 3행 (Fail/Pass/Total) + 상단 요약.
 
@@ -1385,6 +1421,63 @@ def _write_spec_totals(
             _cell = ws.cell(_rr, _cc)
             if not isinstance(_cell, _MC_tot):
                 _cell.font = _ref_font
+
+    # 라운드 96-final W-13 — Total 블록 회색 음영 재배치 (+3 오프셋 보정).
+    # 템플릿(v0.10) 마지막 3행이 Total 블록(회색 음영)인데, row 확장
+    # (auto_expand_row_block, insert_at=data_start+1)이 그 3행을 정확히 마지막
+    # 데이터 3행 위치로 밀어낸다 (shortage = needed_last - old_max → 템플릿 끝
+    # 3행의 신규 위치 = 마지막 함수행-2..마지막 함수행). 한편 실제 Total 블록은
+    # last_data_row+1..+3에 stamp → 음영이 데이터행에 +3 오프셋으로 잘못 표시
+    # (PV 검증 W-13). 마지막 함수행 기준으로: 데이터 3행(row-3)의 음영이 기준
+    # 데이터행(data_start)과 다르면 Total 행으로 fill 이동 + 데이터행 fill 정상화.
+    # ASIL/노란 마킹 등 의도된 마커 fill은 제외 (이동 금지). 음영이 검출되지
+    # 않으면 no-op — row 확장이 없었던 빌드/소형 데이터에 무영향.
+    import copy as _copy_shade
+
+    from backend.services.design_tokens import (
+        ASIL_A_FILL_RGB, ASIL_B_FILL_RGB, ASIL_C_FILL_RGB, ASIL_D_FILL_RGB,
+        ASIL_QM_FILL_RGB, FAIL_FILL_RGB, USER_INPUT_FILL_RGB,
+    )
+    _marker_rgbs = {
+        ASIL_A_FILL_RGB, ASIL_B_FILL_RGB, ASIL_C_FILL_RGB, ASIL_D_FILL_RGB,
+        ASIL_QM_FILL_RGB, FAIL_FILL_RGB, USER_INPUT_FILL_RGB,
+    }
+
+    def _fill_sig(_c) -> tuple | None:
+        _f = _c.fill
+        try:
+            if _f is None or _f.fill_type is None:
+                return None
+            return (_f.fill_type, getattr(_f.start_color, "rgb", None))
+        except AttributeError:
+            return None
+
+    _shade_last_col = branch_value_col + 4  # 데이터 우측 끝 (clear range와 동일 폭)
+    _relocated = 0
+    for _tr in (row_fail, row_pass, row_total):
+        _sr = _tr - 3
+        if _sr <= data_start:  # 데이터 3행 미만 — 비교 기준행과 겹침, skip
+            continue
+        for _cc in range(no_col, _shade_last_col + 1):
+            _src_c = ws.cell(_sr, _cc)
+            _dst_c = ws.cell(_tr, _cc)
+            _base_c = ws.cell(data_start, _cc)
+            if isinstance(_src_c, _MC_tot) or isinstance(_dst_c, _MC_tot):
+                continue
+            _src_sig = _fill_sig(_src_c)
+            if _src_sig is None or _src_sig == _fill_sig(_base_c):
+                continue  # 무음영 또는 정상 데이터행과 동일 — 이동 불필요
+            if _src_sig[1] in _marker_rgbs:
+                continue  # ASIL/노란/FAIL 마커 — 의도된 데이터행 강조, 보존
+            _dst_c.fill = _copy_shade.copy(_src_c.fill)
+            if not isinstance(_base_c, _MC_tot):
+                _src_c.fill = _copy_shade.copy(_base_c.fill)
+            _relocated += 1
+    if _relocated and out_warnings is not None:
+        out_warnings.append(
+            f"[spec-cov] Total 블록 회색 음영 {_relocated}셀 재배치 — 데이터행 "
+            f"잔존(+3 오프셋) → R{row_fail}~R{row_total} (라운드 96-final W-13)"
+        )
 
 
 # BLANK_MARKUP은 excel_template_utils에서 import (단일 출처).
@@ -2013,9 +2106,10 @@ def _write_consistency_sheet_spec(
     """라운드 95 — KJPDS02 v1.01 SwUTCV 3.Consistency 레퍼런스 형식 작성 (spec_based).
 
     회사 레퍼런스((KJPDS02_DV_SwUTCV) Software Unit Test Coverage Result_v1.01) 구조:
-      - r3~r7 요약: B3='Document Type' D3='SwUDS, SwUTS' / B4='Pass' D4=<O 개수> /
-        B5='Fail' D5=<X 개수> / B6='Total' D6=<함수 수> / B7='Coverage' D7=<Pass/Total>.
-        (라운드 94 정책: openpyxl 캐시 없음 회피 위해 수식 아닌 literal 값 stamp.)
+      - r3~r7 요약: B3='Document Type' D3='SwUDS, SwUTS' / B4='Pass' D4=COUNTIF /
+        B5='Fail' D5='=D6-D4' / B6='Total' D6=COUNTA / B7='Coverage' D7='=(D4)/D6'.
+        (라운드 96-final W-3: DV 완성본과 동일한 살아있는 수식으로 stamp — 데이터
+        행 수동 수정 시 자동 재계산. 라운드 94 literal 정책 폐기, 사용자 결정.)
       - r10 헤더: B=No / C=ID / D=Function Name / E='SwUDS와 SwUTS 항목 정합성 확인' /
         F=비고.
       - r11+: B=순번 / C='SwUTC_'+실 SwUFn ID (예 SwUTC_SwUFn_0121) / D=함수명 /
@@ -2040,13 +2134,12 @@ def _write_consistency_sheet_spec(
     if not function_rows:
         return 0
 
-    # 안내문 (A1) — 레퍼런스 형식 spec_based 명시.
-    safe_write(
-        ws, 1, 1,
-        f"본 시트는 SwUDS↔{test_kind} 함수 정합성 자동 검증 결과 (라운드 95 v1.01 "
-        "레퍼런스 형식). 함수 순서·SwUFn ID는 4.Coverage / 2.Traceability 와 동일. "
-        "'X' 행은 SwUDS 미등재 — reviewer 검토 + audit evidence 보강 필요.",
-    )
+    # 라운드 96-final QA fix (info) — A1 내부 개발 노트('라운드 95...' 류) 제거.
+    # 회사 표준 제목('정합성 검증')은 템플릿 값 보존 — A1이 빈 양식(테스트 최소
+    # 템플릿 등)일 때만 표준 제목 stamp. 진단 정보는 out_warnings로만 전달.
+    _a1_value = ws.cell(1, 1).value
+    if _a1_value is None or (isinstance(_a1_value, str) and not _a1_value.strip()):
+        safe_write(ws, 1, 1, "정합성 검증")
 
     # 함수 순서·SwUFn ID 도출 — 4.Coverage 라운드 92 / _build_spec_swufn_order 와 동일 규칙.
     pass_count = 0
@@ -2076,21 +2169,27 @@ def _write_consistency_sheet_spec(
     total = len(rows_data)
     coverage = round(pass_count / total, 4) if total else 0
 
-    # r3~r7 요약 (literal 값 — 라운드 94 정책, openpyxl 캐시 없음 회피).
+    # r10 헤더 / r11+ 데이터 (회사 v1.01 양식).
+    header_row = 10
+    data_start = 11
+    last_fn_row = data_start + total - 1
+
+    # r3~r7 요약 — 라운드 96-final W-3: DV 완성본과 동일한 살아있는 수식 stamp
+    # (마지막 데이터 행 동적). 이전 라운드 94 literal 정책은 데이터 행 수동 수정
+    # 시 요약이 재계산되지 않는 결함 (PV 검증 W-3) — 사용자 결정으로 수식 전환.
+    # pass_count/fail_count/coverage literal은 out_warnings 진단용으로만 유지.
     safe_write(ws, 3, 2, "Document Type")
     safe_write(ws, 3, 4, "SwUDS, SwUTS")
     safe_write(ws, 4, 2, "Pass")
-    safe_write(ws, 4, 4, pass_count)
+    safe_write(ws, 4, 4, f'=COUNTIF(E{data_start}:E{last_fn_row},"=O")')
     safe_write(ws, 5, 2, "Fail")
-    safe_write(ws, 5, 4, fail_count)
+    safe_write(ws, 5, 4, "=D6-D4")
     safe_write(ws, 6, 2, "Total")
-    safe_write(ws, 6, 4, total)
+    safe_write(ws, 6, 4, f"=COUNTA(C{data_start}:C{last_fn_row})")
     safe_write(ws, 7, 2, "Coverage")
-    safe_write(ws, 7, 4, coverage)
+    safe_write(ws, 7, 4, "=(D4)/D6")
 
     # r10 헤더 (회사 v1.01 양식).
-    header_row = 10
-    data_start = 11
     safe_write(ws, header_row, 2, "No")
     safe_write(ws, header_row, 3, "ID")
     safe_write(ws, header_row, 4, "Function Name")
@@ -2514,9 +2613,12 @@ def _write_traceability_spec_diagonal(
     count_row = 13
     data_start = 14
     first_col = 4          # col D
+    summary_row = 8        # R8: F/G COUNTIF + H 커버리지 비율 (회사 v1.01)
+    exception_row = 11     # R11: Exception 행 (헤더 R12 바로 위, 회사 v1.01)
     n = len(swufn_ids)
     needed_last_row = data_start + n - 1
     needed_last_col = first_col + n - 1
+    clear_end_col = max(ws.max_column or first_col, needed_last_col)
 
     # 1) 기존 template diagonal 영역 clear (헤더 col + data row + count row).
     #    R1~R11 (요약/Note) 및 col A~C 라벨 수식은 보존 — header/count/diagonal만 재작성.
@@ -2524,7 +2626,7 @@ def _write_traceability_spec_diagonal(
         clear_data_range(
             ws,
             start_row=header_row, end_row=ws.max_row,
-            start_col=first_col, end_col=max(ws.max_column or first_col, needed_last_col),
+            start_col=first_col, end_col=clear_end_col,
             preserve_formula=False, preserve_merged_anchor=True,
             sentinel_patterns=["End of Document", "Appendix", "TOTALS"],
         )
@@ -2536,6 +2638,41 @@ def _write_traceability_spec_diagonal(
             preserve_formula=True, preserve_merged_anchor=True,
             sentinel_patterns=["End of Document", "Appendix", "TOTALS"],
         )
+    except Exception:  # noqa: BLE001 — clear 실패해도 stamp는 진행 (graceful)
+        pass
+
+    # 1-b) 라운드 96-final C-3 — template 샘플 Exception 행(R11) 잔존물 clear.
+    #    기존 clear는 R12부터라 템플릿에서 복사된 샘플 Exception 'O'(예 CN11)와
+    #    핑크 fill이 커버된 함수 좌표에 잔존 → R8 커버리지 수식이 100.1%로 왜곡
+    #    (PV 검증 확정). 매트릭스 폭 전체(D..끝)의 값 + solid fill을 제거한 뒤
+    #    실제 exception만 남긴다 — 현 파이프라인은 함수별 단일 TC diagonal이라
+    #    전 함수가 커버됨(실제 exception 소스 없음) → 마킹 0건이 정상. 향후
+    #    exception 데이터 소스 연결 시 이 지점에서 'O'+핑크 fill을 stamp한다.
+    #    A~C(라벨)는 보존 — 매트릭스 영역만.
+    try:
+        from openpyxl.cell.cell import MergedCell as _MC_exc
+        from openpyxl.styles import PatternFill as _PF_exc
+        _exc_cleared = 0
+        for _cc in range(first_col, clear_end_col + 1):
+            _ec = ws.cell(exception_row, _cc)
+            if isinstance(_ec, _MC_exc):
+                continue
+            _changed = False
+            if _ec.value is not None:
+                _ec.value = None
+                _changed = True
+            _fill = _ec.fill
+            if _fill is not None and getattr(_fill, "fill_type", None) is not None:
+                _ec.fill = _PF_exc()  # no-fill 리셋 (핑크 잔존 제거)
+                _changed = True
+            if _changed:
+                _exc_cleared += 1
+        if _exc_cleared and out_warnings is not None:
+            out_warnings.append(
+                f"[trace] {ws_title} R{exception_row} template 샘플 Exception 잔존물 "
+                f"{_exc_cleared}셀 clear (값/핑크 fill) — 실제 exception 소스 부재, "
+                "커버리지 수식 왜곡(100% 초과) 차단 (라운드 96-final C-3)"
+            )
     except Exception:  # noqa: BLE001 — clear 실패해도 stamp는 진행 (graceful)
         pass
 
@@ -2574,6 +2711,41 @@ def _write_traceability_spec_diagonal(
     last_col_letter = _gcl(needed_last_col)
     safe_write(ws, header_row, 3, f"=COUNTA({_gcl(first_col)}{header_row}:{last_col_letter}{header_row})")
     safe_write(ws, count_row, 2, f"=COUNTA(B{data_start}:B{needed_last_row})")
+
+    # 5) 라운드 96-final W-1 — R8 F/G COUNTIF 범위를 매트릭스 실폭(D..마지막열)
+    #    으로 동적 확장. 템플릿(419열) 수식이 그대로면 확장분(420~끝) 함수가
+    #    카운트에서 누락된다. 가로 단일행 range(r1==r2)만 끝 열을 재작성 —
+    #    세로 range(B14:B583 등)는 step 4가 별도 관리하므로 보존.
+    _h_rng_re = re.compile(r"\$?([A-Z]{1,3})\$?(\d+):\$?([A-Z]{1,3})\$?(\d+)")
+
+    def _expand_horizontal_ranges(formula: str) -> str:
+        def _sub(m: "re.Match[str]") -> str:
+            c1, r1, _c2, r2 = m.group(1), m.group(2), m.group(3), m.group(4)
+            if r1 == r2:
+                return f"{c1}{r1}:{last_col_letter}{r2}"
+            return m.group(0)
+        return _h_rng_re.sub(_sub, formula)
+
+    for _fc_col in (6, 7):  # F8 / G8
+        _f_cell = ws.cell(summary_row, _fc_col)
+        _f_val = _f_cell.value
+        if isinstance(_f_val, str) and _f_val.startswith("="):
+            _new_val = _expand_horizontal_ranges(_f_val)
+            if _new_val != _f_val:
+                try:
+                    _f_cell.value = _new_val
+                except AttributeError:  # MergedCell 비-anchor — skip
+                    pass
+
+    # 6) 라운드 96-final C-2 — C5/C6 요약 텍스트를 매트릭스 실데이터로 갱신.
+    #    템플릿 stale 리터럴(419 기준) 잔존 방지. DV 완성본 표기 형식:
+    #    'Coverage of SwUDS: 100.0% (1014 / 1014)' / 'Missing of SwUTS: 0.0% (0 / 1014)'.
+    #    covered = diagonal 'O' stamp 성공 수(written), missing = n - written.
+    _missing = max(n - written, 0)
+    _cov_pct = (written / n * 100.0) if n else 0.0
+    _miss_pct = (_missing / n * 100.0) if n else 0.0
+    safe_write(ws, 5, 3, f"Coverage of SwUDS: {_cov_pct:.1f}% ({written} / {n})")
+    safe_write(ws, 6, 3, f"Missing of SwUTS: {_miss_pct:.1f}% ({_missing} / {n})")
 
     try:
         push_sentinel_to_last_row(ws)
@@ -3088,6 +3260,16 @@ def build_coverage_report(
 
     _apply_template_swufn_order(wb, agg, warnings)
     agg["project_id"] = meta.project_id
+    # 라운드 96-final W-8 — exception note ID('UT-CVG-{phase}-N') phase 동적화.
+    # config projects.<id>.swutcr_metadata.phase ('PV' 등)에서 읽는다. 키 부재/
+    # config 오류 시 빈 값 → _write_coverage_sheet가 기존 'DV' 유지 (backward-compat).
+    try:
+        from backend.services.swut_meta_resolver import load_meta_from_config
+        _swutcr_md = (load_meta_from_config(meta.project_id) or {}).get(
+            "swutcr_metadata") or {}
+        agg["phase"] = str(_swutcr_md.get("phase") or "").strip()
+    except Exception:  # noqa: BLE001 — config 부재/오류는 기존 동작 유지
+        agg["phase"] = ""
     if meta.doc_filename_pattern:
         _exception_filename = meta.doc_filename_pattern.format(
             version=meta.release_sw_version,

@@ -971,3 +971,97 @@ class TestAlignDroppedFunctionWarning:
         }
         warnings = self._run_align(agg)
         assert not [w for w in warnings if "제외됨" in w]
+
+
+class TestNoAutoException96Final:
+    """라운드 96-final QA fix (W#5) — 미실행/미달 함수 Exception 자동 'O' 제거.
+
+    이전: 미실행 46함수 전건 Exception 'O' → Coverage 수식 100% 표시 (audit 위험).
+    신규: Exception 셀 노란 fill만 (값 비움) + Note(L열) 사유 기재 안내 +
+    totals Exception=0 + 정책 warning.
+    """
+
+    def _template(self) -> bytes:
+        wb = openpyxl.Workbook()
+        wb.remove(wb.active)
+        wb.create_sheet("Cover")
+        ts = wb.create_sheet("1.Test Summary")
+        ts["B1"] = "Project Name"
+        ts["B2"] = "SW Version"
+        trace = wb.create_sheet("2.Traceability")
+        for i in range(5):
+            trace.cell(11, 4 + i).value = f"SwST_{i+1:02d}"
+        cons = wb.create_sheet("3.Consistency")
+        cons["A1"] = "Item"
+        cov = wb.create_sheet("4.Coverage")
+        cov["B8"] = "No"
+        cov["C8"] = "Component"
+        cov["D8"] = "Unit"
+        cov["F8"] = "Functions"
+        cov["D9"] = "ID"
+        cov["E9"] = "Name"
+        cov["F9"] = "Count"
+        wb.create_sheet("History")
+        buf = io.BytesIO()
+        wb.save(buf)
+        return buf.getvalue()
+
+    def test_missing_function_no_auto_exception(self):
+        from openpyxl import load_workbook
+        session = _make_swit_session()
+        env = session.environments[0]
+        missing = FunctionCoverage(
+            unit_id="SwUFn_9999", name="never_executed",
+            statement=CoverageStats(0, 1, 0.0), branch=CoverageStats(0, 1, 0.0),
+            function_calls_coverage=CoverageStats(0, 1, 0.0),
+        )
+        setattr(missing, "swit_function_present", False)
+        env.function_coverage.append(missing)
+
+        result = build_swit_coverage_report(
+            session, _make_swit_meta(), self._template(),
+        )
+        assert result.ok
+        wb = load_workbook(io.BytesIO(result.xlsx_io.getvalue()))
+        cov = wb["4.Coverage"]
+        # data_start=10 — missing 함수 행 탐색 (F='X')
+        miss_row = None
+        for r in range(10, cov.max_row + 1):
+            if cov.cell(r, 6).value == "X":
+                miss_row = r
+                break
+        assert miss_row is not None, "미실행 함수 행(F='X') 미발견"
+        # Exception(G) — 자동 'O' 금지, 값 비움 + 노란 fill
+        assert cov.cell(miss_row, 7).value in (None, ""), (
+            f"Exception 자동 stamp 잔존: {cov.cell(miss_row, 7).value!r}"
+        )
+        assert cov.cell(miss_row, 7).fill.start_color.rgb == "FFFFEB9C"
+        # Note(L=12) — 사유 기재 안내
+        assert str(cov.cell(miss_row, 12).value or "").startswith("▶")
+        # 정책 warning 노출
+        assert any("Exception 자동" in w for w in result.warnings)
+
+    def test_totals_exception_count_zero(self):
+        from openpyxl import load_workbook
+        session = _make_swit_session()
+        env = session.environments[0]
+        missing = FunctionCoverage(
+            unit_id="SwUFn_9999", name="never_executed",
+            statement=CoverageStats(0, 1, 0.0), branch=CoverageStats(0, 1, 0.0),
+        )
+        setattr(missing, "swit_function_present", False)
+        env.function_coverage.append(missing)
+        result = build_swit_coverage_report(
+            session, _make_swit_meta(), self._template(),
+        )
+        assert result.ok
+        wb = load_workbook(io.BytesIO(result.xlsx_io.getvalue()))
+        cov = wb["4.Coverage"]
+        # totals 행 — 'Total' 라벨 행에서 G(Exception 합)=0
+        total_row = None
+        for r in range(10, cov.max_row + 1):
+            if any(str(cov.cell(r, c).value or "").strip() == "Total" for c in (3, 4)):
+                total_row = r
+                break
+        assert total_row is not None
+        assert cov.cell(total_row, 7).value == 0

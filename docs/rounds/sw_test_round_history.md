@@ -868,3 +868,20 @@ backend 전체 SwUT/SwIT 회귀: 189 passed + 1 skipped (이전 ~190).
 - 테스트: SwIT +4(payload 배열/8개 초과 차단/note 렌더 토글/fallback 안내 진행) +
   SwUT +2(payload/note) + SwUT 기존 하드 차단 테스트 1건 신규 동작으로 갱신.
   두 suite 53 passed (SwIT 21 + SwUT 32).
+
+## 라운드 96-final (2026-06-11) — 최종 QA 확정 결함 5건 fix (Cover stamp / INDIRECT / Exception 정책)
+
+> 폰트/테두리/데이터 최종 QA(워크플로우 18 에이전트, 적대적 재검증 12건 확정/반증 0)에서
+> 확정된 산출물 결함 fix. 스타일(폰트/테두리/머지)은 QA에서 무손상 확인 — 본 라운드는 데이터 측.
+
+| # | 결함 (QA 확정) | fix | 라이브 검증 (5차 재빌드) |
+|---|----------------|-----|--------------------------|
+| A | **SwITCR Cover 완전 미스탬프** (Critical — XXXX placeholder 잔존) | `_write_switcr_cover` 신규 + build flow 호출 | G26 `HKY-KJPDS02_PV-SwITCR-28A1` / Status DRAFT / Date 2026.06.04 / Author 주희영 / 서명란 ✓ |
+| B | SwITCR Summary O열 구시트명+`8.IT802` 오타 → unguarded INDIRECT **20셀 #REF!** + Fail Report 한도 초과 silent | O20/21/23/24 `(해당X)` rename 동기 (IT802→8.IT801 시트) + r93/r107 '외 N건' 가시화 | O열 4셀 동기 ✓, "외 89건" 표기 ✓ |
+| C | Cover 서명란 — 'Author' 값이 **'Reviewer' 라벨 덮어씀** (가로 trio 레이아웃 미지원) | `write_signature_block` 신규 (라벨 아래 머지 anchor 기입, 미감지 시 기존 경로 — v3.01 backward compat) + Coverage/SUTR writer 통합 | J2 라벨 보존, I3/K3 이름, J3 노란 ✓ (SwITCV+SwITR) |
+| D | Cover **Date DV 잔존** (2025.12.05) + Document ID `_DV`/`[P_Name]` 토큰 | `dot_date` + Date stamp (_OPTIONAL_LABELS) + `stamp_cover_document_id` (phase 토큰/placeholder 보정 + 노란 + warning) | G29 2026.06.04 ✓, G26 `_PV` 보정 ✓ (SwITR은 원본 무토큰 — no-op 정상) |
+| E | 미커버 46함수 **무사유 자동 Exception 'O'** → Function Coverage 항상 100% 표시 (audit 위험) | Exception 셀 노란 fill만(값 비움) + Note(L) 사유 안내 + totals 정합 + 정책 warning. **Coverage 비율 100%→실측치(91.9%) 의도 변화** | X 46행 Exception 잔존 0/노란 46/Note 46, totals G=0/K=0 ✓ |
+
+- 유틸: `find_kv_row`/`write_value_after_label` min_row kwarg (서명란 아래 두 번째 'Author' kv).
+- 신규 회귀: utils 6 + cover 2 + switcr 2 + no-auto-exception 2 (+totals 보정) — 대상 batch 455 passed.
+- ISO 26262: E는 evidence 수치 변화(100%→실측) — audit reviewer 통보 의무. Exception 인정은 Note 사유 기재 후 manual reviewer 결정.

@@ -1380,10 +1380,14 @@ def copy_sheet_across_workbooks(
         except (ValueError, AttributeError):
             pass
 
-    # 3) column_dimensions 복제 (width / hidden / outline).
+    # 3) column_dimensions 복제 (width / hidden / outline / 범위 min~max).
+    # 라운드 96-final W-14 — openpyxl은 `<col min="18" max="57" hidden="1"/>` 같은
+    # 범위 col 정의를 첫 열 key 1개에 min/max로 보존한다. min/max 미복제 시 dst가
+    # 단일 열로 축소돼 DV spec 시트의 hidden 범위(cols 18-57/74-161)·폭 설정 소실.
     for key, dim in src_ws.column_dimensions.items():
         dst_dim = dst_ws.column_dimensions[key]
-        for attr in ("width", "hidden", "outlineLevel", "bestFit", "customWidth"):
+        for attr in ("min", "max", "width", "hidden", "outlineLevel",
+                     "bestFit", "customWidth", "collapsed"):
             val = getattr(dim, attr, None)
             if val is not None:
                 try:

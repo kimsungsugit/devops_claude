@@ -175,3 +175,102 @@ def test_build_switcr_preserves_template_and_writes_active_sheets():
     assert wb["3.IT301"]["C102"].value == "식별된 결함"
     assert wb["3.IT301"]["C103"].value == "해당사항 없음"
     assert wb["Summary"]["G20"].value == "X"
+
+
+class TestSwitcrCoverAndSummary96Final:
+    """라운드 96-final QA fix — SwITCR Cover stamp (이전 완전 미스탬프 Critical)
+    + Summary O열 시트명 rename 동기 (INDIRECT #REF! 차단)."""
+
+    @staticmethod
+    def _meta():
+        from backend.services.swit_comprehensive_aggregator import SwitcrBuildMeta
+        return SwitcrBuildMeta(
+            project_id="KJPDS02", release_sw_version="0.10",
+            test_date="2026-06-04", test_engineer="주희영",
+            default_author="JK Kim", default_approver="CH In",
+            doc_filename_pattern="(KJPDS02_PV_SwITCR) X_v{version}_{date}_R.xlsm",
+        )
+
+    def test_switcr_cover_stamps_xxxx_placeholders(self):
+        import openpyxl
+        from backend.services.swit_comprehensive_aggregator import _write_switcr_cover
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "Cover"
+        ws["I2"] = "Author"
+        ws["J2"] = "Reviewer"
+        ws["K2"] = "Approver"
+        ws["C26"] = "Document ID"
+        ws["D26"] = "HKY-[P_Name]-SwITCR-28A1"
+        ws["C27"] = "Version"
+        ws["D27"] = "v0.10"
+        ws["C28"] = "Status"
+        ws["D28"] = "Unspecified"
+        ws["C29"] = "Date"
+        ws["D29"] = "202X.XX.XX"
+        ws["C30"] = "Author"
+        ws["D30"] = "XXXX"
+        warns: list[str] = []
+        _write_switcr_cover(ws, self._meta(), {}, out_warnings=warns)
+        assert ws["D26"].value == "HKY-KJPDS02_PV-SwITCR-28A1"
+        assert ws["D28"].value == "DRAFT — PENDING REVIEW"
+        assert ws["D29"].value == "2026.06.04"
+        assert ws["D30"].value == "주희영"  # test_engineer 우선
+        assert ws["J2"].value == "Reviewer"  # 라벨 보존
+        assert ws["I3"].value == "주희영"
+        assert ws["K3"].value == "CH In"
+
+    def test_summary_o_col_synced_to_renamed_sheets(self):
+        import openpyxl
+        from backend.services.swit_comprehensive_aggregator import _write_summary_sheet
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "Summary"
+        _write_summary_sheet(ws, self._meta(), {})
+        assert ws.cell(20, 15).value == "(해당X)5.IT501"
+        assert ws.cell(21, 15).value == "(해당X)6.IT601"
+        assert ws.cell(23, 15).value == "(해당X)8.IT801"
+        # IT802는 8.IT801 시트 내 섹션 — 존재하지 않는 '8.IT802' stamp 금지
+        assert ws.cell(24, 15).value == "(해당X)8.IT801"
+
+
+class TestSwitcrCoverDeepReviewerW1W2:
+    """deep-reviewer 96-final W1/W2 — 비-trio fallback + O열 동적 참조."""
+
+    def test_non_trio_template_fallback_writes_reviewer_approver(self):
+        import openpyxl
+        from backend.services.swit_comprehensive_aggregator import (
+            SwitcrBuildMeta, _write_switcr_cover,
+        )
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "Cover"
+        # 세로 단독 kv 라벨 (가로 trio 없음)
+        ws["B5"] = "Reviewer"
+        ws["B7"] = "Approver"
+        meta = SwitcrBuildMeta(
+            project_id="KJPDS02", release_sw_version="0.10",
+            test_date="2026-06-04", default_approver="CH In",
+        )
+        _write_switcr_cover(ws, meta, {}, out_warnings=[])
+        # fallback 경로 — Approver 기입 + Reviewer 빈 값 노란
+        assert ws["C7"].value == "CH In"
+        assert str(ws["C5"].value or "").startswith("▶")
+
+    def test_summary_o_col_resolves_actual_names(self):
+        import openpyxl
+        from backend.services.swit_comprehensive_aggregator import (
+            SwitcrBuildMeta, _write_summary_sheet,
+        )
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "Summary"
+        # rename이 일부만 적용된 변형: 5.IT501은 rename됨, 6.IT601은 원명 유지
+        wb.create_sheet("(해당X)5.IT501")
+        wb.create_sheet("6.IT601")
+        meta = SwitcrBuildMeta(
+            project_id="KJPDS02", release_sw_version="0.10", test_date="2026-06-04",
+        )
+        _write_summary_sheet(ws, meta, {})
+        assert ws.cell(20, 15).value == "(해당X)5.IT501"
+        assert ws.cell(21, 15).value == "6.IT601"  # 원명 유지분은 원명 참조 (desync 차단)
