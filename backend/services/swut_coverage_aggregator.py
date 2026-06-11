@@ -37,6 +37,7 @@ except ImportError:  # pragma: no cover
 from backend.services.excel_template_utils import (
     BLANK_MARKUP,
     build_release_history_row,
+    dot_date,
     force_write_cell,
     mark_asil_a_function,
     mark_asil_b_function,
@@ -44,12 +45,15 @@ from backend.services.excel_template_utils import (
     mark_asil_d_function,
     mark_asil_qm_function,
     mark_fail_cell,
+    mark_user_input_fill_only,
     mark_user_input_required,
     safe_write,
     short_date,
+    stamp_cover_document_id,
     validate_build_meta,
     validate_xlsx_template_bytes,
     write_label_or_mark,
+    write_signature_block,
     write_value_after_label,
 )
 from backend.services.swut_builder_helpers import extract_warnings_from_session
@@ -145,6 +149,8 @@ _OPTIONAL_LABELS = {
     # 'Project Name'/'SW Version' 등은 1.Test Summary 시트로 이동 — Cover에 미발견
     # 시 silent OK (warning emit X).
     "Project", "ASIL Level", "Validation Date", "Status", "Version",
+    # 라운드 96-final: KJPDS02 v1.01 Cover 항목 (C29 'Date') — 타 양식 부재 시 silent.
+    "Date",
 }
 
 
@@ -189,12 +195,33 @@ def _write_cover_sheet(
     _write_label_or_mark(ws, labels.get("validation_date", "Validation Date"),
                          meta.validation_date,
                          "yyyy-mm-dd 형식 검증 완료일", out_warnings)
-    _write_label_or_mark(ws, labels.get("author", "Author"), meta.author,
-                         "test_engineer 또는 default_author", out_warnings)
-    _write_label_or_mark(ws, labels.get("reviewer", "Reviewer"), meta.reviewer,
-                         "검토자 이름", out_warnings)
-    _write_label_or_mark(ws, labels.get("approver", "Approver"), meta.approver,
-                         "승인자 이름 (필수)", out_warnings)
+    # 라운드 96-final QA fix — 가로 연속 서명란(KJPDS02 v1.01 I2/J2/K2) 감지 시
+    # 라벨 '아래' 셀에 이름 기입. 기존 우측 기입은 'Author' 값이 'Reviewer' 라벨을
+    # 덮어쓰는 결함 (2026-06-11 QA 확정). 블록 미감지 시 기존 경로 유지 (v3.01 등).
+    _sig_row = write_signature_block(ws, {
+        labels.get("author", "Author"): meta.author,
+        labels.get("reviewer", "Reviewer"): meta.reviewer,
+        labels.get("approver", "Approver"): meta.approver,
+    }, hint_map={
+        labels.get("author", "Author"): "test_engineer 또는 default_author",
+        labels.get("reviewer", "Reviewer"): "검토자 이름",
+        labels.get("approver", "Approver"): "승인자 이름 (필수)",
+    })
+    if _sig_row is None:
+        _write_label_or_mark(ws, labels.get("author", "Author"), meta.author,
+                             "test_engineer 또는 default_author", out_warnings)
+        _write_label_or_mark(ws, labels.get("reviewer", "Reviewer"), meta.reviewer,
+                             "검토자 이름", out_warnings)
+        _write_label_or_mark(ws, labels.get("approver", "Approver"), meta.approver,
+                             "승인자 이름 (필수)", out_warnings)
+    else:
+        # 서명란 아래 별도 표지 항목 'Author' kv (예: KJPDS02 C30) — 두 번째
+        # occurrence를 min_row로 탐색해 우측(G30)에 기입.
+        if meta.author:
+            write_value_after_label(
+                ws, labels.get("author", "Author"), meta.author,
+                min_row=_sig_row + 1,
+            )
     if meta.doc_id_sequence:
         _write_label(ws, labels.get("doc_id", "Doc. ID"),
                      f"{meta.doc_id_base}-{meta.doc_id_sequence}", out_warnings)
@@ -202,6 +229,16 @@ def _write_cover_sheet(
     # G27 'Version'에 'v2.02' 기록, Coverage는 누락되어 template default 'v0.10' 유지)
     _write_label(ws, labels.get("version", "Version"),
                  f"v{meta.release_sw_version}", out_warnings)
+    # 라운드 96-final QA fix — Cover 'Date' (KJPDS02 v1.01 C29): DV 날짜 잔존 차단.
+    # 회사 표기(점 구분)로 기입. 라벨 없는 양식은 silent skip (_OPTIONAL_LABELS).
+    _write_label(ws, labels.get("date", "Date"),
+                 dot_date(meta.test_date), out_warnings)
+    # 라운드 96-final QA fix — 'Document ID' phase 토큰/placeholder 보정 (+노란 마킹).
+    stamp_cover_document_id(
+        ws, project_id=meta.project_id,
+        doc_filename_pattern=getattr(meta, "doc_filename_pattern", "") or "",
+        out_warnings=out_warnings,
+    )
     _write_label(ws, labels.get("build_timestamp", "Build Timestamp"),
                  meta.build_timestamp, out_warnings)
 
@@ -888,15 +925,33 @@ def _write_coverage_sheet(
             else:
                 swit_present = bool(getattr(fc, "swit_function_present", True))
                 safe_write(ws, r, functions_pass_col, "O" if swit_present else "X")
+                # 라운드 96-final QA fix (W#5) — 무사유 자동 Exception 'O' 제거.
+                # 이전: 미실행/미달 함수 전건에 Exception 'O' 자동 stamp →
+                # Coverage 수식 (Total-Fail+Exception)/Total이 항상 100% 표시
+                # (DV 감사본은 X 3건에 각각 Note 사유 기재 후 Exception 처리).
+                # 신규: Exception 셀은 노란 fill만 (값 비움 — totals 카운트/수식
+                # 정합), Note 셀(no_col+10)에 사유 기재 안내. manual reviewer가
+                # 사유 기재 후 Exception 여부를 결정한다 (ISO 26262 evidence 정책).
+                _note_col = no_col + 10
                 if not swit_present:
-                    safe_write(ws, r, functions_pass_col + 1, "O")
+                    mark_user_input_fill_only(ws, r, functions_pass_col + 1)
+                    if not str(ws.cell(r, _note_col).value or "").strip():
+                        mark_user_input_required(
+                            ws, r, _note_col, hint="미실행 사유 (Exception 결정 근거)",
+                        )
                 fcc = getattr(fc, "function_calls_coverage", None)
                 if fcc is not None and fcc.total > 0:
                     safe_write(ws, r, fcalls_count_col, fcc.covered)
                     safe_write(ws, r, fcalls_count_col + 1, fcc.total)
                     safe_write(ws, r, fcalls_count_col + 2, "O" if fcc.passed else "X")
                     if not fcc.passed:
-                        safe_write(ws, r, fcalls_count_col + 3, "O")
+                        # 동일 정책 — Function Called Exception도 자동 'O' 제거
+                        mark_user_input_fill_only(ws, r, fcalls_count_col + 3)
+                        if not str(ws.cell(r, _note_col).value or "").strip():
+                            mark_user_input_required(
+                                ws, r, _note_col,
+                                hint="Function Call 미달 사유 (Exception 결정 근거)",
+                            )
         else:
             # SwUTCV / HDPDM01 — Statement + Branch metric
             if is_c_parser_only:
@@ -1174,6 +1229,15 @@ def _write_coverage_sheet(
                 f"(functions={written}, function_fail={function_fail}, "
                 f"function_call_fail={function_call_fail})"
             )
+            # 라운드 96-final W#5 — Exception 자동 처리 제거 정책 고지 (audit 가시화)
+            if (function_fail or function_call_fail) and not (
+                function_exception or function_call_exception
+            ):
+                out_warnings.append(
+                    "[swit-cov] 미실행/미달 함수 Exception 자동 'O' 처리 제거됨 — "
+                    "Coverage 비율은 실측치로 표시. Exception 인정은 manual reviewer가 "
+                    "Note 사유 기재 후 결정 (해당 셀 노란 마킹)"
+                )
 
     # 라운드 97/99 — spec_based 데이터 행 테두리 통일 (최종 패스, 모든 stamp/clear/
     # totals 완료 후 — 중간 단계 리셋 회피).

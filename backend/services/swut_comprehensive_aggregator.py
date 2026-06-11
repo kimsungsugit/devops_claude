@@ -24,6 +24,7 @@ from backend.services.excel_template_utils import (
     build_release_history_row,
     has_vba_macros,
     inspect_vba_refs,
+    mark_user_input_required,
     safe_write,
     short_date,
     validate_build_meta,
@@ -468,6 +469,9 @@ def _write_ut101(
     warnings: list[str] | None = None,
 ) -> None:
     _write_swutcr_sheet_header(ws, meta, cfg)
+    # W-8: 결함 ID prefix는 config phase를 따른다 (PV 산출물에 'DV' 고정 방지).
+    md = cfg.get("swutcr_metadata", {}) or {}
+    phase = md.get("phase", "DV")
     function_rows = agg.get("function_rows") or []
     function_count = _swutcr_function_count(agg)
     failed_tcs = agg.get("failed", 0) or 0
@@ -510,7 +514,7 @@ def _write_ut101(
         )
     for idx, failure in enumerate(failures[:max_failure_rows], start=1):
         row = start + idx - 1
-        safe_write(ws, row, 2, f"UT-CVG-DV-{idx}")
+        safe_write(ws, row, 2, f"UT-CVG-{phase}-{idx}")
         safe_write(ws, row, 3, "CVG")
         safe_write(ws, row, 4, failure["function"])
         safe_write(ws, row, 6, failure["kind"])
@@ -527,17 +531,16 @@ def _write_ut101(
         safe_write(ws, row, 15, "N/A")
 
 
-def _write_ut201(ws, meta: SwutcrBuildMeta, agg: dict[str, Any], cfg: dict[str, Any]) -> None:
+def _write_ut201(
+    ws,
+    meta: SwutcrBuildMeta,
+    agg: dict[str, Any],
+    cfg: dict[str, Any],
+    warnings: list[str] | None = None,
+) -> None:
     _write_swutcr_sheet_header(ws, meta, cfg)
     md = cfg.get("swutcr_metadata", {}) or {}
     function_count = _swutcr_function_count(agg)
-    total_failed = agg.get("failed", 0) or 0
-    fi_total = md.get("fault_injection_total", function_count)
-    fi_passed = md.get("fault_injection_passed", fi_total if total_failed == 0 else 0)
-    try:
-        fi_failed = max(int(fi_total) - int(fi_passed), 0)
-    except (TypeError, ValueError):
-        fi_failed = 0
     safe_write(ws, 70, 4, md.get("tool_name", "VectorCAST"))
     safe_write(ws, 71, 4, md.get("tool_version", ""))
     safe_write(ws, 72, 3, md.get("excluded_scope", ""))
@@ -545,11 +548,47 @@ def _write_ut201(ws, meta: SwutcrBuildMeta, agg: dict[str, Any], cfg: dict[str, 
     safe_write(ws, 77, 3, md.get("reference_document", "SwTP"))
     safe_write(ws, 78, 3, md.get("reference_id", "SwUTE_01"))
     safe_write(ws, 85, 3, function_count)
-    safe_write(ws, 85, 5, fi_total)
-    safe_write(ws, 85, 6, fi_passed)
-    safe_write(ws, 85, 7, "=E85-F85")
-    safe_write(ws, 85, 8, "=E86")
-    safe_write(ws, 90, 3, "해당 사항 없음 " if fi_failed == 0 else f"Fail TC {fi_failed}건")
+
+    # C-5: Fault Injection 실측치는 config 키가 있을 때만 stamp.
+    # 이전 fallback(total=함수 수, passed=failed==0이면 total)은 FI 실측 부재 시
+    # 측정한 것처럼 보이는 수치(예: 1014/1014)를 무표식 기입 — 24차 silent N/A
+    # 제거 정책에 따라 노란 사용자입력 마킹으로 대체 (write_value_or_mark 패턴).
+    fi_total = md.get("fault_injection_total")
+    fi_passed = md.get("fault_injection_passed")
+    has_fi_total = fi_total is not None and fi_total != ""
+    has_fi_passed = fi_passed is not None and fi_passed != ""
+    if has_fi_total:
+        safe_write(ws, 85, 5, fi_total)
+    else:
+        mark_user_input_required(ws, 85, 5, hint="FI 실측 미제공")
+    if has_fi_passed:
+        safe_write(ws, 85, 6, fi_passed)
+    else:
+        mark_user_input_required(ws, 85, 6, hint="FI 실측 미제공")
+    if has_fi_total and has_fi_passed:
+        try:
+            fi_failed = max(int(fi_total) - int(fi_passed), 0)
+        except (TypeError, ValueError):
+            fi_failed = 0
+        safe_write(ws, 85, 7, "=E85-F85")
+        safe_write(ws, 85, 8, "=E86")
+        safe_write(ws, 90, 3, "해당 사항 없음 " if fi_failed == 0 else f"Fail TC {fi_failed}건")
+    else:
+        # 파생 셀(G85 수식/H85/90행 비고)도 fabricated 입력 기반 stamp 금지 —
+        # placeholder 텍스트가 수식 operand가 되면 #VALUE! 가 되므로 수식 미기입.
+        mark_user_input_required(ws, 90, 3, hint="FI 실측 미제공")
+        if warnings is not None:
+            missing = [
+                key for key, present in (
+                    ("fault_injection_total", has_fi_total),
+                    ("fault_injection_passed", has_fi_passed),
+                ) if not present
+            ]
+            warnings.append(
+                "[swutcr] 2.UT201 fault injection 실측 미제공"
+                f" ({', '.join(missing)}) — E85/F85/C90 사용자입력 마킹"
+                " (함수 수 기반 fallback stamp 제거)"
+            )
 
 
 def _write_ut301(ws, meta: SwutcrBuildMeta, agg: dict[str, Any], cfg: dict[str, Any]) -> None:
@@ -573,10 +612,13 @@ def _write_ut301(ws, meta: SwutcrBuildMeta, agg: dict[str, Any], cfg: dict[str, 
         safe_write(ws, 80, 5, "해당 사항 없음")
         safe_write(ws, 80, 8, note)
         safe_write(ws, 80, 12, "Summary에서 UT301 비적용(X) 처리")
-        safe_write(ws, 91, 3, "N/A")
-        safe_write(ws, 91, 5, "-")
-        safe_write(ws, 91, 8, note)
-        safe_write(ws, 91, 12, "추가 B2B evidence source 제공 시 재작성")
+        # W-6-①: 90:91행은 세로 머지된 라벨 헤더('SW Unit(함수)'/'미달성 사유'/
+        # '대책'/'문장') — 91행에 쓰면 merge anchor redirect로 90행 라벨이 값으로
+        # 덮어써진다. 라벨 보존을 위해 값은 헤더 아래 첫 값행(92행)에 기입.
+        safe_write(ws, 92, 3, "N/A")
+        safe_write(ws, 92, 5, "-")
+        safe_write(ws, 92, 8, note)
+        safe_write(ws, 92, 12, "추가 B2B evidence source 제공 시 재작성")
 
 
 def _write_it801(ws, meta: SwutcrBuildMeta, cfg: dict[str, Any]) -> None:
@@ -592,12 +634,14 @@ def _write_it801(ws, meta: SwutcrBuildMeta, cfg: dict[str, Any]) -> None:
     access_count = md.get("heap_access_violation_count", 0)
     safe_write(ws, 45, 5, leak_count)
     safe_write(ws, 46, 5, access_count)
-    safe_write(ws, 50, 3, "N/A")
-    safe_write(ws, 50, 5, "해당 사항 없음")
-    safe_write(ws, 50, 7, "O")
+    # W-6-②: 50행은 헤더('파일명'/'오류 내용'/'수정 여부') — 값은 헤더 아래
+    # 첫 값행(51행)에 기입 (헤더 라벨 덮어쓰기 방지, +1 보정).
+    safe_write(ws, 51, 3, "N/A")
+    safe_write(ws, 51, 5, "해당 사항 없음")
+    safe_write(ws, 51, 7, "O")
     safe_write(
         ws,
-        50,
+        51,
         10,
         md.get(
             "heap_detail_note",

@@ -416,9 +416,16 @@ def inspect_vba_refs(data: bytes) -> list[str]:
 # Sheet helpers (머지셀 보정)
 # ---------------------------------------------------------------------------
 
-def find_kv_row(ws: Any, label: str, max_row: int = 50) -> tuple[int, int] | None:
-    """시트의 첫 N행에서 label 셀 위치(row,col) 찾기."""
-    for row in ws.iter_rows(min_row=1, max_row=max_row, values_only=False):
+def find_kv_row(
+    ws: Any, label: str, max_row: int = 50, *, min_row: int = 1,
+) -> tuple[int, int] | None:
+    """시트의 첫 N행에서 label 셀 위치(row,col) 찾기.
+
+    라운드 96-final: ``min_row`` 추가 — 같은 라벨이 서명란(상단)과 표지 항목
+    (하단, 예: KJPDS02 v1.01 Cover의 I2 'Author'와 C30 'Author')에 중복될 때
+    두 번째 occurrence를 찾기 위한 시작 행 (default 1 — backward compat).
+    """
+    for row in ws.iter_rows(min_row=min_row, max_row=max_row, values_only=False):
         for cell in row:
             if cell.value and isinstance(cell.value, str) and cell.value.strip() == label:
                 return (cell.row, cell.column)
@@ -1158,9 +1165,11 @@ def write_label_or_mark(
     return write_value_or_mark(ws, row, target_col, value, hint=hint)
 
 
-def write_value_after_label(ws: Any, label: str, value: Any, max_row: int = 50) -> bool:
+def write_value_after_label(
+    ws: Any, label: str, value: Any, max_row: int = 50, *, min_row: int = 1,
+) -> bool:
     """`label` 셀 옆 컬럼에 value 쓰기 (머지 영역 보정)."""
-    pos = find_kv_row(ws, label, max_row)
+    pos = find_kv_row(ws, label, max_row, min_row=min_row)
     if not pos:
         return False
     row, col = pos
@@ -1170,6 +1179,108 @@ def write_value_after_label(ws: Any, label: str, value: Any, max_row: int = 50) 
             target_col = mr.max_col + 1
             break
     return safe_write(ws, row, target_col, value)
+
+
+def write_signature_block(
+    ws: Any,
+    names: "dict[str, Any]",
+    *,
+    hint_map: "dict[str, str] | None" = None,
+    max_row: int = 10,
+) -> int | None:
+    """라운드 96-final — 가로 연속 서명란 감지 후 라벨 '아래' 셀에 이름 기입.
+
+    KJPDS02 v1.01 Cover 등은 서명란 라벨(Author/Reviewer/Approver)이 같은 행에
+    가로로 인접(I2/J2/K2)하고 이름 칸은 라벨 아래 머지 셀(I3:I4 등)이다.
+    기존 ``write_value_after_label``(라벨 우측 기입)을 이 레이아웃에 쓰면
+    'Author' 값이 'Reviewer' **라벨을 덮어쓰는** 결함 발생 (2026-06-11 QA 확정).
+
+    같은 행에 ``names``의 라벨이 2개 이상 발견되면 서명란 블록으로 판정하고,
+    각 라벨 바로 아래 셀(머지 anchor 보정)에 값 기입 — 빈 값은 노란 마킹.
+
+    Returns:
+        처리한 라벨 행 번호 (블록 미발견 시 None — caller는 기존 우측 기입 fallback).
+    """
+    label_cells: dict[str, tuple[int, int]] = {}
+    sig_row: int | None = None
+    for row in ws.iter_rows(min_row=1, max_row=max_row, values_only=False):
+        found: dict[str, tuple[int, int]] = {}
+        for cell in row:
+            v = cell.value
+            if isinstance(v, str) and v.strip() in names:
+                found.setdefault(v.strip(), (cell.row, cell.column))
+        if len(found) >= 2:
+            label_cells = found
+            sig_row = next(iter(found.values()))[0]
+            break
+    if sig_row is None:
+        return None
+    for label, (r, c) in label_cells.items():
+        tr, tc = resolve_merge_anchor(ws, r + 1, c)
+        write_value_or_mark(
+            ws, tr, tc, names.get(label),
+            hint=(hint_map or {}).get(label, f"{label} 이름"),
+        )
+    return sig_row
+
+
+def dot_date(s: str) -> str:
+    """`2026-06-04` / `2026/06/04` → `2026.06.04` (회사 Cover Date 표기)."""
+    return re.sub(r"[-/]", ".", (s or "").strip())
+
+
+def stamp_cover_document_id(
+    ws: Any,
+    *,
+    project_id: str,
+    doc_filename_pattern: str = "",
+    out_warnings: "list[str] | None" = None,
+    label: str = "Document ID",
+) -> bool:
+    """라운드 96-final — Cover 'Document ID' 셀의 placeholder/phase 토큰 보정.
+
+    보정 규칙 (값 변경 시 노란 마킹 + warning — serial은 사용자 검증 의무):
+      1. ``[P_Name]`` placeholder (XXXX 공양식) → ``{project_id}_{phase}`` 치환.
+      2. phase 토큰 불일치 (예: 빌드는 PV인데 ``_DV-`` 잔존) → ``_{phase}-`` 치환.
+    phase는 ``doc_filename_pattern``의 ``_PV_``/``_DV_`` 토큰에서 도출 — 없으면 skip.
+
+    Returns:
+        값을 변경했으면 True.
+    """
+    pos = find_kv_row(ws, label, 50)
+    if not pos:
+        return False
+    row, col = pos
+    target_col = col + 1
+    for mr in ws.merged_cells.ranges:
+        if mr.min_row <= row <= mr.max_row and mr.min_col <= col <= mr.max_col:
+            target_col = mr.max_col + 1
+            break
+    tr, tc = resolve_merge_anchor(ws, row, target_col)
+    cur = str(ws.cell(tr, tc).value or "")
+    if not cur:
+        return False
+    m = re.search(r"_(PV|DV)_", doc_filename_pattern or "")
+    phase = m.group(1) if m else ""
+    new = cur
+    if "[P_Name]" in new and project_id:
+        new = new.replace(
+            "[P_Name]", f"{project_id}_{phase}" if phase else project_id,
+        )
+    if phase:
+        other = "DV" if phase == "PV" else "PV"
+        if f"_{other}-" in new:
+            new = new.replace(f"_{other}-", f"_{phase}-")
+    if new == cur:
+        return False
+    safe_write(ws, tr, tc, new)
+    _apply_fill(ws, tr, tc, _USER_INPUT_FILL_RGB)
+    if out_warnings is not None:
+        out_warnings.append(
+            f"[cover] Document ID 자동 보정 '{cur}' → '{new}' — serial(끝 토큰)은 "
+            "회사 문서 채번 규칙으로 검증 필요 (노란 마킹)"
+        )
+    return True
 
 
 def short_date(s: str) -> str:
