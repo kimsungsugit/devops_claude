@@ -1209,7 +1209,7 @@ def _write_switcr_cover(
 def _write_summary_sheet(ws, meta: SwitcrBuildMeta, cfg: dict[str, Any]) -> None:
     md = cfg.get("switcr_metadata", {}) or {}
     safe_write(ws, 3, 5, md.get("project", meta.project_id))
-    safe_write(ws, 4, 5, md.get("phase", "DV"))
+    safe_write(ws, 4, 5, str(md.get("phase") or "").strip() or "DV")
     safe_write(ws, 5, 5, md.get("software_platform_ver", meta.release_sw_version))
     safe_write(ws, 6, 5, md.get("product", ""))
     safe_write(ws, 7, 5, md.get("verification_target", ""))

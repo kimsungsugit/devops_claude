@@ -495,9 +495,20 @@ class TestBuildCoverageReport:
         assert result.summary["swuts_name_to_swufn_used"] == 2
         assert result.summary["traceability_o_cells"] >= 2
 
-    def test_spec_based_coverage_reuses_template_order_and_formulas(self):
-        """Populated KJPDS02 templates drive row order and keep formula cells."""
+    def test_spec_based_coverage_reuses_template_order_and_formulas(self, monkeypatch):
+        """Populated KJPDS02 templates drive row order and keep formula cells.
+
+        라운드 96-final W-8 — exception note ID('UT-CVG-{phase}-N')는 config
+        ``projects.<id>.swutcr_metadata.phase``를 따른다. 실 config(KJPDS02='PV')
+        의존을 끊기 위해 load_meta_from_config를 명시 PV로 격리하고 PV ID 단언.
+        """
         import io as _io
+
+        import backend.services.swut_meta_resolver as _meta_resolver
+        monkeypatch.setattr(
+            _meta_resolver, "load_meta_from_config",
+            lambda pid: {"swutcr_metadata": {"phase": "PV"}},
+        )
 
         env = EnvironmentData(
             env_name="SWTE_LIB",
@@ -588,11 +599,11 @@ class TestBuildCoverageReport:
         assert out_cov.cell(10, 6).value == 36
         assert out_cov.cell(10, 7).value == 38
         assert out_cov.cell(10, 8).value == '=IF(F10=G10, "Pass", "Fail")'
-        assert out_cov.cell(10, 9).value == "UT-CVG-DV-1"
+        assert out_cov.cell(10, 9).value == "UT-CVG-PV-1"
         assert out_cov.cell(10, 10).value == 17
         assert out_cov.cell(10, 11).value == 18
         assert out_cov.cell(10, 12).value == '=IF(J10=K10, "Pass", "Fail")'
-        assert out_cov.cell(10, 13).value == "UT-CVG-DV-2"
+        assert out_cov.cell(10, 13).value == "UT-CVG-PV-2"
         assert out_cov.cell(10, 14).value == "(KJPDS02_DV_SwUTCV) Software Unit Test Coverage Result"
         assert out_cov.cell(12, 4).value == "Total"
         assert out_cov.cell(12, 8).value == '=COUNTIF(H10:H11,"Fail")'
@@ -3338,3 +3349,216 @@ class TestCoverSignatureLayout96Final:
         _write_cover_sheet(ws, meta, out_warnings=[])
         assert ws["C5"].value == "JK Kim"
         assert ws["C7"].value == "Approver Kim"
+
+
+class TestFinalTestResultKeepFormula96Final:
+    """라운드 96-final C-1 — '1.Test Summary' Final Test Result 템플릿 수식 보존.
+
+    KJPDS02 v1.01 C10은 '=IF(AND(...),"OK","NG")' 판정 수식 — 'PASS' 리터럴로
+    덮어쓰면 Consistency 미달이어도 항상 PASS로 보이는 fabrication (2026-06-11
+    PV 검증 확정). 수식이면 보존, 수식 없는 양식(HDPDM01 v3.01)은 기존 리터럴
+    기입 유지 (backward-compat).
+    """
+
+    _FORMULA = '=IF(AND(B13=C9,B14=C10),"OK","NG")'
+
+    def test_formula_cell_preserved(self):
+        from backend.services.swut_coverage_aggregator import _write_label_keep_formula
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws["B6"] = "Final Test Result"
+        ws["C6"] = self._FORMULA
+        _write_label_keep_formula(ws, "Final Test Result", "PASS", [])
+        assert ws["C6"].value == self._FORMULA
+
+    def test_no_formula_writes_literal_v301_compat(self):
+        from backend.services.swut_coverage_aggregator import _write_label_keep_formula
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws["B6"] = "Final Test Result"
+        _write_label_keep_formula(ws, "Final Test Result", "PASS", [])
+        assert ws["C6"].value == "PASS"
+
+    def test_formula_preserved_with_merged_label(self):
+        """라벨 머지(B6:C6) 시 우측 셀(D6) 수식도 보존."""
+        from backend.services.swut_coverage_aggregator import _write_label_keep_formula
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws["B6"] = "Final Test Result"
+        ws.merge_cells("B6:C6")
+        ws["D6"] = self._FORMULA
+        _write_label_keep_formula(ws, "Final Test Result", "PASS", [])
+        assert ws["D6"].value == self._FORMULA
+
+    def test_test_summary_writer_wires_keep_formula(self):
+        from backend.services.swut_coverage_aggregator import _write_test_summary_sheet
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws["B1"] = "Project Name"
+        ws["B2"] = "Release Name(SW)"
+        ws["B3"] = "Test Target Version(HW)"
+        ws["B4"] = "Test Date"
+        ws["B5"] = "Test Engineer"
+        ws["B6"] = "Final Test Result"
+        ws["C6"] = self._FORMULA
+        meta = CoverageBuildMeta(
+            project_id="KJPDS02", project_full_name="KJPDS02",
+            release_sw_version="1.01", test_date="2025-12-05",
+            test_engineer="주희영",
+        )
+        _write_test_summary_sheet(ws, meta, {}, [])
+        assert ws["C6"].value == self._FORMULA  # 수식 보존 — 'PASS' 미덮어쓰기
+        assert ws["C1"].value == "KJPDS02"      # 다른 라벨은 정상 기입
+
+
+class TestSpecExceptionPhaseDynamic96Final:
+    """라운드 96-final W-8 — exception note ID 'UT-CVG-{phase}-N' phase 동적화.
+
+    config ``projects.<id>.swutcr_metadata.phase``를 ID prefix에 반영하고,
+    config 비등재/키 부재 시 기존 'DV' 유지 (HDPDM01/SwIT backward-compat).
+    실 config 의존 차단을 위해 load_meta_from_config monkeypatch 격리.
+    """
+
+    @staticmethod
+    def _spec_template() -> bytes:
+        wb = openpyxl.Workbook()
+        wb.remove(wb.active)
+        wb.create_sheet("Cover")
+        wb.create_sheet("Test Summary")
+        wb.create_sheet("1.Traceability")
+        wb.create_sheet("2.Consistency")
+        cov = wb.create_sheet("3. Coverage")
+        cov.cell(8, 2, "No")
+        cov.cell(8, 3, "Component")
+        cov.cell(8, 4, "Unit ID")
+        cov.cell(8, 5, "Name")
+        cov.cell(8, 6, "Count")
+        cov.cell(8, 7, "Total")
+        cov.cell(8, 8, "Pass")
+        cov.cell(8, 10, "Count")
+        cov.cell(8, 11, "Total")
+        cov.cell(8, 12, "Pass")
+        cov.cell(8, 14, "File")
+        wb.create_sheet("History").cell(row=1, column=1, value="Revision History")
+        buf = io.BytesIO()
+        wb.save(buf)
+        return buf.getvalue()
+
+    @staticmethod
+    def _failing_session() -> SwUTSession:
+        env = EnvironmentData(
+            env_name="SWTE_LIB",
+            component_name="Lib_sha256",
+            test_cases={"SwUFn_0121.001": [object()]},
+            test_results={
+                "SwUFn_0121.001": ExecutionRow(
+                    tc_name="SwUFn_0121.001", passed=True,
+                ),
+            },
+            function_coverage=[
+                FunctionCoverage(
+                    unit_id="s_safe_rotr",
+                    name="s_safe_rotr",
+                    statement=CoverageStats(36, 38, 36 / 38),
+                    branch=CoverageStats(17, 18, 17 / 18),
+                    file="sha256.c",
+                ),
+            ],
+        )
+        return SwUTSession(
+            project_id="KJPDS02",
+            environments=[env],
+            function_name_to_swufn_from_suds={"s_safe_rotr": "SwUFn_0121"},
+        )
+
+    @pytest.mark.parametrize(
+        ("cfg", "expected_prefix"),
+        [
+            ({"swutcr_metadata": {"phase": "SOP"}}, "UT-CVG-SOP"),
+            ({"swutcr_metadata": {}}, "UT-CVG-DV"),  # phase 키 부재 — DV 유지
+            ({}, "UT-CVG-DV"),                        # config 비등재 — DV 유지
+        ],
+    )
+    def test_exception_note_id_follows_config_phase(
+        self, monkeypatch, cfg, expected_prefix,
+    ):
+        import backend.services.swut_meta_resolver as _meta_resolver
+        monkeypatch.setattr(
+            _meta_resolver, "load_meta_from_config", lambda pid: cfg,
+        )
+        result = build_coverage_report(
+            self._failing_session(),
+            CoverageBuildMeta(
+                project_id="KJPDS02",
+                release_sw_version="1.01",
+                test_date="2025-12-05",
+            ),
+            self._spec_template(),
+        )
+        out_cov = openpyxl.load_workbook(
+            io.BytesIO(result.xlsx_bytes), data_only=False,
+        )["3. Coverage"]
+        # 단일 함수 stmt/branch 동시 미달 — stmt ID -1, branch ID -(base 1 + 1)=2.
+        assert out_cov.cell(10, 9).value == f"{expected_prefix}-1"
+        assert out_cov.cell(10, 13).value == f"{expected_prefix}-2"
+
+
+class TestSutrCoverPlaceholder96Final:
+    """라운드 96-final C-6/W-7 — SwUTR Cover placeholder 치환 + 라벨 불가침.
+
+    KJPDS02 v1.01 Cover: 가로 서명란(I2/J2/K2) 라벨 보존 + 이름은 아래 행,
+    Document ID phase 토큰 보정(노란 마킹 + warning), Date dot 표기 갱신,
+    하단 'Author' kv(C30)는 두 번째 occurrence 기입.
+    """
+
+    @staticmethod
+    def _kjpds02_cover_ws():
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "Cover"
+        ws["I2"] = "Author"
+        ws["J2"] = "Reviewer"
+        ws["K2"] = "Approver"
+        ws.merge_cells("I3:I4")
+        ws.merge_cells("J3:J4")
+        ws.merge_cells("K3:K4")
+        ws["C26"] = "Document ID"
+        ws["D26"] = "HKY-KJPDS02_DV-SUTR-28A2"
+        ws["C27"] = "Version"
+        ws["D27"] = "v1.01"
+        ws["C29"] = "Date"
+        ws["D29"] = "2025.12.05"
+        ws["C30"] = "Author"
+        ws["D30"] = "이전작성자"
+        return ws
+
+    def test_cover_placeholder_substitution_and_label_inviolate(self):
+        from backend.services.swut_sutr_aggregator import _write_cover
+        ws = self._kjpds02_cover_ws()
+        meta = SutrBuildMeta(
+            project_id="KJPDS02", project_full_name="KJPDS02",
+            asil_level="ASIL A", release_sw_version="0.10",
+            test_date="2026-06-04", test_engineer="주희영",
+            default_approver="CH In",
+            doc_filename_pattern=(
+                "(KJPDS02_PV_SwUTR) Software Unit Test Result_"
+                "v{version}_{date}_R.xlsm"
+            ),
+        )
+        warns: list[str] = []
+        _write_cover(ws, meta, out_warnings=warns)
+        # 서명란 — 라벨 불가침 + 이름은 라벨 아래 행 (머지 anchor)
+        assert ws["I2"].value == "Author"
+        assert ws["J2"].value == "Reviewer"
+        assert ws["K2"].value == "Approver"
+        assert ws["I3"].value == "주희영"
+        assert ws["K3"].value == "CH In"
+        assert str(ws["J3"].value or "").startswith("▶")  # reviewer 빈 값 노란
+        # Document ID — DV phase 토큰 → PV 치환 + 노란 마킹 + warning
+        assert ws["D26"].value == "HKY-KJPDS02_PV-SUTR-28A2"
+        assert ws["D26"].fill.start_color.rgb == "FFFFEB9C"
+        assert any("Document ID" in w for w in warns)
+        # 표지 kv — DV 잔존 해소
+        assert ws["D27"].value == "v0.10"
+        assert ws["D29"].value == "2026.06.04"
+        assert ws["D30"].value == "주희영"  # 하단 Author (두 번째 occurrence)

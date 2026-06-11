@@ -280,3 +280,151 @@ def test_build_swutcr_specific_template_uses_project_config_and_no_generic_warni
     assert wb["21.IT801"]["E46"].value == 0
     assert wb["통합검증_BTB"]["D4"].value == "KJPDS02"
     assert wb["통합검증_BTB"]["C37"].value == "N/A"
+
+
+# ---------------------------------------------------------------------------
+# 라운드 96-final QA fix — C-5 (UT201 FI 마킹) + W-6 3건 (라벨행 보존)
+# ---------------------------------------------------------------------------
+
+_USER_INPUT_YELLOW = "FFFFEB9C"
+
+
+def _meta_96final() -> SwutcrBuildMeta:
+    return SwutcrBuildMeta(
+        project_id="KJPDS02",
+        project_full_name="KJPDS02",
+        release_sw_version="1.01",
+        test_date="2025-12-05",
+        test_engineer="주희영",
+    )
+
+
+class TestUt201FaultInjection96Final:
+    """C-5 — Fault Injection 실측 config 키 부재 시 노란 사용자입력 마킹.
+
+    이전 fallback(total=함수 수, passed=failed==0이면 total)은 FI 실측 부재 시
+    측정한 것처럼 보이는 수치(예: 1014/1014)를 무표식 기입 — 24차 silent N/A
+    제거 정책 위반 (fabrication). 키 존재 시에는 기존대로 실측 stamp.
+    """
+
+    def test_fi_keys_absent_marks_user_input_and_warns(self):
+        from backend.services.swut_comprehensive_aggregator import _write_ut201
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        warns: list[str] = []
+        cfg = {"swutcr_metadata": {"tool_name": "VectorCAST"}}
+        _write_ut201(ws, _meta_96final(), {"swutcr_qualified_function_count": 570},
+                     cfg, warns)
+        assert ws.cell(85, 3).value == 570  # 함수 수는 정상 stamp
+        # E85/F85/C90 — placeholder 텍스트 + 노란 fill
+        for row, col in ((85, 5), (85, 6), (90, 3)):
+            assert str(ws.cell(row, col).value or "").startswith("▶"), (
+                f"({row},{col}) placeholder 미기입: {ws.cell(row, col).value!r}"
+            )
+            assert ws.cell(row, col).fill.start_color.rgb == _USER_INPUT_YELLOW
+        # 파생 수식(G85/H85)은 미기입 — placeholder operand #VALUE! 차단
+        assert ws.cell(85, 7).value is None
+        assert ws.cell(85, 8).value is None
+        assert any("fault injection 실측 미제공" in w for w in warns)
+
+    def test_fi_keys_present_stamps_measured_values(self):
+        from backend.services.swut_comprehensive_aggregator import _write_ut201
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        warns: list[str] = []
+        cfg = {"swutcr_metadata": {
+            "fault_injection_total": 402,
+            "fault_injection_passed": 400,
+        }}
+        _write_ut201(ws, _meta_96final(), {}, cfg, warns)
+        assert ws.cell(85, 5).value == 402
+        assert ws.cell(85, 6).value == 400
+        assert ws.cell(85, 7).value == "=E85-F85"
+        assert ws.cell(90, 3).value == "Fail TC 2건"
+        assert not any("fault injection" in w for w in warns)
+
+    def test_fi_all_passed_writes_none_note(self):
+        from backend.services.swut_comprehensive_aggregator import _write_ut201
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        cfg = {"swutcr_metadata": {
+            "fault_injection_total": 402,
+            "fault_injection_passed": 402,
+        }}
+        _write_ut201(ws, _meta_96final(), {}, cfg, [])
+        assert str(ws.cell(90, 3).value).strip() == "해당 사항 없음"
+
+
+class TestW6LabelRowFixes96Final:
+    """W-6 ①②③ — 머지 라벨 헤더행 덮어쓰기 결함 fix (값은 헤더 아래 값행에).
+
+    ① 3.UT301 r90:91 세로 머지 라벨 → 값은 92행.
+    ② 21.IT801 r50 헤더('파일명' 등) → 값은 51행.
+    ③ 통합검증_BTB r10 머지 라벨(C10:D11 'SW 버전'/E10:F11 'Test Period')
+       → 값은 12행 (C12:D12/E12:F12 머지 anchor).
+    """
+
+    def test_ut301_w6_1_labels_preserved_values_on_row92(self):
+        from backend.services.swut_comprehensive_aggregator import _write_ut301
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        labels = {3: "SW Unit(함수)", 5: "미달성 사유", 8: "대책", 12: "문장"}
+        for col, text in labels.items():
+            ws.cell(90, col).value = text
+            ws.merge_cells(start_row=90, end_row=91, start_column=col, end_column=col)
+        cfg = {"swutcr_metadata": {"ut301_enabled": "X"}}
+        _write_ut301(ws, _meta_96final(), {}, cfg)
+        # 라벨 보존 (이전: 91행 기입 → merge anchor redirect로 90행 라벨 덮어씀)
+        for col, text in labels.items():
+            assert ws.cell(90, col).value == text, f"라벨 col {col} 덮어써짐"
+        # 값은 헤더 아래 첫 값행(92행)
+        assert ws.cell(92, 3).value == "N/A"
+        assert ws.cell(92, 5).value == "-"
+        assert "Back-to-back" in str(ws.cell(92, 8).value)
+        assert ws.cell(92, 12).value == "추가 B2B evidence source 제공 시 재작성"
+        assert ws.cell(80, 3).value == "N/A"  # 기존 80행 stamp 불변
+
+    def test_it801_w6_2_header_row50_preserved_values_on_row51(self):
+        from backend.services.swut_comprehensive_aggregator import _write_it801
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.cell(50, 3).value = "파일명"
+        ws.cell(50, 5).value = "오류 내용"
+        ws.cell(50, 7).value = "수정 여부"
+        _write_it801(ws, _meta_96final(), {})
+        assert ws.cell(50, 3).value == "파일명"
+        assert ws.cell(50, 5).value == "오류 내용"
+        assert ws.cell(50, 7).value == "수정 여부"
+        assert ws.cell(51, 3).value == "N/A"
+        assert ws.cell(51, 5).value == "해당 사항 없음"
+        assert ws.cell(51, 7).value == "O"
+        assert "mpatrol" in str(ws.cell(51, 10).value)
+
+    def test_btb_w6_3_merged_labels_row10_preserved_values_on_row12(self):
+        from backend.services.swut_comprehensive_aggregator import _write_btb_sheet
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.cell(10, 3).value = "SW 버전"
+        ws.merge_cells("C10:D11")
+        ws.cell(10, 5).value = "Test Period"
+        ws.merge_cells("E10:F11")
+        ws.merge_cells("C12:D12")
+        ws.merge_cells("E12:F12")
+        cfg = {"swutcr_metadata": {
+            "test_iteration": "0.1",
+            "software_platform_ver": "25A1",
+            "prepare_hours": 10,
+            "execution_hours": 20,
+            "review_hours": 30,
+        }}
+        _write_btb_sheet(ws, _meta_96final(), cfg)
+        # 머지 라벨 헤더(10행) 보존
+        assert ws.cell(10, 3).value == "SW 버전"
+        assert ws.cell(10, 5).value == "Test Period"
+        # 값행(12행) — C12/E12 머지 anchor + 시간값 G12:J12
+        assert ws.cell(12, 3).value == "0.1"
+        assert ws.cell(12, 5).value == "25A1"
+        assert ws.cell(12, 7).value == 10
+        assert ws.cell(12, 8).value == 20
+        assert ws.cell(12, 9).value == 30
+        assert ws.cell(12, 10).value == "=SUM(G12:I12)"

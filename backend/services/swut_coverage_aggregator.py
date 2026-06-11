@@ -1034,7 +1034,7 @@ def _write_coverage_sheet(
                     if (not fc.statement.passed) or (not fc.branch.passed):
                         exception_note = (
                             agg.get("coverage_exception_note")
-                            or f"({agg.get('project_id', '')}_DV_SwUTCV) Software Unit Test Coverage Result"
+                            or f"({agg.get('project_id', '')}_{spec_phase}_SwUTCV) Software Unit Test Coverage Result"
                         )
                         safe_write(ws, r, branch_count_col + 4, exception_note)
                 else:
@@ -1529,8 +1529,16 @@ def _write_history_sheet(
         safe_write(ws, r, col + 1, h.get("date", ""))
         safe_write(ws, r, col + 2, h.get("description", ""))
         safe_write(ws, r, col + 3, h.get("author", ""))
-        safe_write(ws, r, col + 4, h.get("reviewer", ""))
-        safe_write(ws, r, col + 5, h.get("approver", ""))
+        # 라운드 96-final-2 (QA major): reviewer/approver(사용자입력 칸)는 빈 값일 때
+        # 템플릿 placeholder('-')를 보존 — KJPDS02 v1.01 History F5/G5 소거 결함.
+        # writer 단일 적용으로 전 호출처(SwUT 3종/SwIT 3종) 일괄 해소 (H5).
+        # placeholder 없는 양식(HDPDM01 v3.01)은 기존과 동일하게 빈 string 기입.
+        for off, key in ((4, "reviewer"), (5, "approver")):
+            new_val = str(h.get(key, "") or "").strip()
+            existing = ws.cell(row=r, column=col + off).value
+            if not new_val and existing is not None and str(existing).strip():
+                continue
+            safe_write(ws, r, col + off, h.get(key, ""))
         written += 1
     return written
 

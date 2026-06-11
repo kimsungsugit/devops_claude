@@ -885,3 +885,29 @@ backend 전체 SwUT/SwIT 회귀: 189 passed + 1 skipped (이전 ~190).
 - 유틸: `find_kv_row`/`write_value_after_label` min_row kwarg (서명란 아래 두 번째 'Author' kv).
 - 신규 회귀: utils 6 + cover 2 + switcr 2 + no-auto-exception 2 (+totals 보정) — 대상 batch 455 passed.
 - ISO 26262: E는 evidence 수치 변화(100%→실측) — audit reviewer 통보 의무. Exception 인정은 Note 사유 기재 후 manual reviewer 결정.
+
+## 라운드 96-final-2 (2026-06-12) — SwUT 3종 PV 산출물 QA 잔여 결함 fix (critical 6 전건 해소 완료)
+
+> 셀 단위 검증(98체크: ground-truth 수치 전수 일치/fabrication 0건, 템플릿 채움 계층 critical 6·warning 14)
+> 발견사항 중 라운드 96-final이 해소한 Cover/FI/UT301/IT801 외 **SwUT 잔여 전건** fix.
+> 2-lens 적대 리뷰(23 findings, critical 0) major 2건 + minor 3건 후속 반영 포함.
+
+| # | 결함 | fix |
+|---|------|-----|
+| C-1 | SwUTCV Final Test Result **'PASS' 리터럴** (수식대로면 NG인 상태에서 합격 하드코딩) | `_write_label_keep_formula` — 템플릿 수식 보존, v3.01(수식 없음)은 기존 동작 |
+| C-2 | 2.Traceability C5/C6 템플릿 텍스트 잔존('99.0% (418/419)') | 매트릭스 실데이터로 갱신 |
+| C-3 | stale exception 마킹(CN열 'O'+핑크) → 추적성 100.1% | R11 Exception행 실폭 clear + warning |
+| C-4 | SwUTR Actual Coverage=1 리터럴 vs F22 수식 0.92 모순 | F22를 DV식 `(D+E)/C`로 + C10='=F22' 단일 진리원 |
+| W-1/3 | F8/G8 COUNTIF 범위 미확장 / Consistency D4~D7 리터럴 | 실폭 동적 확장 / 살아있는 수식 |
+| W-4/11 | 미실행 44건 목록 공백 / Project Name PV 접미사·SW Ver 미충전 | 대표+'외 N건' 기재 / `KJPDS02_PV`·`25A1`(config) |
+| W-6-③ | BTB C10/E10 라벨 덮어쓰기 | 값행 12행으로 보정 |
+| W-8 | 결함 ID `UT-CVG-DV-` phase 하드코딩 (SwUTCV 2곳+Note fallback) | `UT-CVG-{phase}-` config 동적 |
+| W-13/14 | 4.Coverage Total행 음영 +3 오프셋 / spec graft 숨김열 소실 | 음영 재배치 패스 / col min·max 복제 |
+| 리뷰 major | History F5/G5 placeholder 보존이 SwUTCR 1곳만 배선 (H5 누락) | `_write_history_sheet` 내부로 호이스트 — 전 빌더(SwUT/SwIT 6종) 단일 적용 |
+| 리뷰 minor | phase 가드 비대칭(`md.get` 4곳) / Note fallback `_DV_` 잔존 | `str(... or '').strip() or 'DV'` 통일 / `_{spec_phase}_` |
+
+- 기존 단언 갱신: `UT-CVG-DV-1/2` → PV (config phase 결합 — monkeypatch 격리 포함, 테스트 3파일).
+- 사용자 결정: SwUTR Safety Related 269열 미반영(DV 268열 유지 — PV SwUTS spec released 시 graft로 반영),
+  FI 실측 부재 시 노란 사용자입력 마킹(실측 위장 제거).
+- 잔여(후속): PV SwUTS spec(작성중 v0.10_260608) released 후 config 교체+재빌드(N/A 44 해소),
+  PV FI 실측 확보 시 swutcr_metadata 재기입, consistency checker 수식 셀 silent skip 가시화(리뷰 minor).

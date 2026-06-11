@@ -528,3 +528,75 @@ def test_r91_fallback_when_no_template():
     assert res.ok
     assert res.summary["builder"] == "spec-based-r91"
     assert any("표준 SUTR 템플릿 미제공" in w for w in res.warnings)
+
+
+# ---------------------------------------------------------------------------
+# 라운드 96-final QA fix — C-4 (coverage 수식 통일) + W-14 (col dims 범위 복제)
+# ---------------------------------------------------------------------------
+
+def test_c4_requirements_coverage_formula_unified(monkeypatch):
+    """C-4 — Requirements coverage 수식이 DV 감사본 형식(N/A 가산)으로 통일.
+
+    템플릿 잔존 '=IFERROR(Dn/Cn,"")'(N/A 미가산)과 'Actual Coverage' 리터럴이
+    모순 수치를 표시하던 결함 — 수식 셀은 '(D+E)/C' 형식으로 교체, Actual
+    Coverage는 그 셀 참조 수식('=F22')으로 단일 진리원화. 좌표는 라벨 동적.
+    """
+    import backend.services.swut_meta_resolver as _meta_resolver
+    monkeypatch.setattr(_meta_resolver, "load_meta_from_config", lambda pid: {})
+
+    tmpl_wb = openpyxl.load_workbook(io.BytesIO(_make_standard_template_bytes()))
+    ts = tmpl_wb["1.Test Summary"]
+    ts.cell(10, 2).value = "Actual Coverage"
+    # 동일 블록 잔존 템플릿 수식 (N/A 미가산형) — 통일 대상
+    ts.cell(21, 6).value = '=IFERROR(D21/C21,"")'
+    bio = io.BytesIO()
+    tmpl_wb.save(bio)
+
+    spec = _make_spec_bytes([
+        ("SwUTC_0101", "main", [("a", "b")]),
+        ("SwUTC_0103", "bar", [("e", "f")]),  # 미실행 fn → not tested 1
+    ])
+    sess = _make_session({"SwUFn_0101": [True]})
+    res = build_sutr_from_spec(
+        sess, _meta(), spec, template_xlsm_bytes=bio.getvalue(),
+        function_asil_map={},
+    )
+    assert res.ok
+    out = openpyxl.load_workbook(res.xlsm_io, data_only=False)
+    ts_out = out["1.Test Summary"]
+    # 'System Design' row 22 — coverage 수식 F22가 DV 형식 (tested+N/A 가산)
+    assert ts_out.cell(22, 6).value == '=IFERROR((D22+E22)/C22,"")'
+    # 동일 블록 잔존 템플릿 수식(F21)도 통일
+    assert ts_out.cell(21, 6).value == '=IFERROR((D21+E21)/C21,"")'
+    # 'Actual Coverage'(B10) 우측 — 리터럴 대신 F22 참조 수식 (단일 진리원)
+    assert ts_out.cell(10, 3).value == "=F22"
+    assert res.summary["requirements_coverage_formula"] == '=IFERROR((D22+E22)/C22,"")'
+    assert res.summary["actual_coverage_formula"] == "=F22"
+
+
+def test_w14_copy_sheet_preserves_column_dimension_ranges():
+    """W-14 — column_dimensions 범위 정의(min/max)·hidden·width 복제 보존.
+
+    openpyxl은 '<col min="18" max="57" hidden="1"/>' 범위를 첫 열 key 1개에
+    min/max로 보존 — min/max 미복제 시 단일 열로 축소돼 DV spec 시트의 hidden
+    범위(cols 18-57 등)·폭 설정이 graft에서 소실되던 결함.
+    """
+    from backend.services.excel_template_utils import copy_sheet_across_workbooks
+
+    src_wb = openpyxl.Workbook()
+    src = src_wb.active
+    src.title = "Src"
+    src.cell(1, 1).value = "x"
+    dim = src.column_dimensions["R"]  # col 18
+    dim.min = 18
+    dim.max = 57
+    dim.hidden = True
+    dim.width = 9.0
+
+    dst_wb = openpyxl.Workbook()
+    dst = copy_sheet_across_workbooks(src, dst_wb, new_title="3.Test Log")
+    dd = dst.column_dimensions["R"]
+    assert dd.min == 18
+    assert dd.max == 57
+    assert dd.hidden is True
+    assert dd.width == 9.0
