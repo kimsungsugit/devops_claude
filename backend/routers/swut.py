@@ -798,16 +798,24 @@ def _resolve_spec_fi_for_swutcr(
     cfg: dict[str, Any],
     resolver: Any,
     out_warnings: list[str],
+    *,
+    preloaded_spec_bytes: bytes | None = None,
 ) -> dict[str, Any] | None:
     """확정 규칙(2026-06-12) — UT201 FI spec 자동 산출 입력 준비.
 
     config ``swutcr_metadata.fault_injection_total/passed`` 가 **둘 다 부재**할
-    때만 SwUTS spec을 1회 로드해 FI 블록/iteration을 추출한다:
+    때만 SwUTS spec을 로드해 FI 블록/iteration을 추출한다:
 
     - config 키가 하나라도 있으면 None — ``_write_ut201`` 기존 config 분기
       그대로 (heavy spec 로드 비용 회피).
     - spec path 미해결이면 None — 기존 노란 마킹 유지 (HDPDM01 무회귀).
+    - xlsm/xlsx 외 확장자(docx 류)는 FI 자동 산출 미지원 — silent skip 아닌
+      사유 warning + None (라운드 108 INFO-8).
     - 읽기/추출 실패는 out_warnings에 사유 push + None (실측 위장 금지).
+    - ``preloaded_spec_bytes`` — 라운드 108 MINOR-5: caller가
+      ``resolve_swuts_test_specs(out_xlsm_bytes=...)`` 로 이미 읽은 동일
+      spec bytes(동일 ``resolve_swuts_path`` 해결 경로)를 전달하면 재차
+      read하지 않는다 (PV ~20s 중복 read 제거). None이면 기존대로 직접 read.
     """
     md = cfg.get("swutcr_metadata", {}) or {}
     fi_total = md.get("fault_injection_total")
@@ -818,16 +826,25 @@ def _resolve_spec_fi_for_swutcr(
     spec_path = resolve_swuts_path(req, req.project_id)
     if not spec_path:
         return None
-    try:
-        spec_bytes = resolver.read_bytes(spec_path)
-    except (FileNotFoundError, PermissionError, OSError) as e:
+    spec_name = str(spec_path).replace("\\", "/").rsplit("/", 1)[-1]
+    if not spec_name.lower().endswith((".xlsm", ".xlsx")):
         out_warnings.append(
-            "[swutcr] UT201 FI spec 읽기 실패 — 자동 산출 skip (노란 마킹 "
-            f"유지). path={spec_path}, {type(e).__name__}: {e}"
+            "[swutcr] UT201 FI spec 자동 산출 skip — spec 확장자가 xlsm/xlsx "
+            f"아님 (docx 류 미지원): {spec_name} — 노란 마킹 유지"
         )
         return None
+    if preloaded_spec_bytes is not None:
+        spec_bytes = preloaded_spec_bytes
+    else:
+        try:
+            spec_bytes = resolver.read_bytes(spec_path)
+        except (FileNotFoundError, PermissionError, OSError) as e:
+            out_warnings.append(
+                "[swutcr] UT201 FI spec 읽기 실패 — 자동 산출 skip (노란 마킹 "
+                f"유지). path={spec_path}, {type(e).__name__}: {e}"
+            )
+            return None
     from backend.services.swut_sutr_spec_builder import extract_spec_fi_stats
-    spec_name = str(spec_path).replace("\\", "/").rsplit("/", 1)[-1]
     return extract_spec_fi_stats(
         spec_bytes, spec_filename=spec_name, out_warnings=out_warnings,
     )
@@ -867,14 +884,20 @@ def _do_swutcr_build(req: SwUTBuildRequest) -> Response:
         req, req.project_id, out_warnings=hmr_warnings,
     )
     swuts_warnings: list[str] = []
+    # 라운드 108 MINOR-5 — 동일 SwUTS spec 2회 read 제거: resolve_swuts_test_specs
+    # 가 read한 bytes를 out-param으로 받아 FI 자동 산출에 재사용 (두 소비자 모두
+    # resolve_swuts_path 동일 해결 경로 — bytes 동일성 보장).
+    _spec_bytes_box: list[bytes] = []
     swuts_map = _resolver_resolve_swuts_test_specs(
         req, req.project_id, out_warnings=swuts_warnings,
+        out_xlsm_bytes=_spec_bytes_box,
     )
     # 확정 규칙(2026-06-12) — UT201 FI spec 자동 산출. config FI 키 둘 다 부재
-    # 시에만 spec 1회 로드 (config 존재 시 기존 동작, spec도 없으면 노란 마킹).
+    # 시에만 spec 로드 (config 존재 시 기존 동작, spec도 없으면 노란 마킹).
     fi_spec_warnings: list[str] = []
     spec_fi = _resolve_spec_fi_for_swutcr(
         req, meta.project_config or {}, resolver, fi_spec_warnings,
+        preloaded_spec_bytes=_spec_bytes_box[0] if _spec_bytes_box else None,
     )
     result = build_swutcr_report(
         session, meta, template_bytes,

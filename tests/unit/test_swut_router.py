@@ -1809,3 +1809,41 @@ class TestSwutcrSpecFiResolve107:
         )
         assert out is not None
         assert out["spec_filename"] == "spec_from_cfg.xlsm"
+
+    def test_preloaded_spec_bytes_skips_resolver_read(self, tmp_path, monkeypatch):
+        """라운드 108 MINOR-5 — preloaded bytes 전달 시 spec 재read 없음.
+
+        SwUTCR 빌드는 resolve_swuts_test_specs(out_xlsm_bytes=...)가 이미
+        읽은 동일 spec bytes를 재사용 — PV ~20s 중복 read 제거.
+        """
+        from backend.routers import swut as swut_mod
+        self._setup_cfg(tmp_path, monkeypatch, {"projects": {"HDPDM01": {}}})
+        warns: list[str] = []
+        out = swut_mod._resolve_spec_fi_for_swutcr(
+            self._req(swuts_docx_path="C:/x/wip_pv_SwUTS_v0.10_260608.xlsm"),
+            {"swutcr_metadata": {}},
+            self._RaisingResolver(),  # read 호출 시 즉시 실패 — 미호출 증명
+            warns,
+            preloaded_spec_bytes=_make_fi_spec_min_bytes(),
+        )
+        assert out is not None
+        assert out["fi_block_total"] == 1
+        assert out["spec_filename"] == "wip_pv_SwUTS_v0.10_260608.xlsm"
+
+    def test_docx_spec_extension_warns_and_skips(self, tmp_path, monkeypatch):
+        """라운드 108 INFO-8 — xlsm/xlsx 외 확장자(docx)는 사유 warning + skip.
+
+        silent skip(예외 삼킴) 대신 명시 사유 — read 자체도 생략.
+        """
+        from backend.routers import swut as swut_mod
+        self._setup_cfg(tmp_path, monkeypatch, {"projects": {"HDPDM01": {}}})
+        warns: list[str] = []
+        out = swut_mod._resolve_spec_fi_for_swutcr(
+            self._req(swuts_docx_path="C:/x/spec.docx"),
+            {"swutcr_metadata": {}}, self._RaisingResolver(), warns,
+        )
+        assert out is None
+        assert any(
+            "spec 확장자가 xlsm/xlsx 아님" in w and "spec.docx" in w
+            for w in warns
+        )

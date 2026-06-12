@@ -223,6 +223,58 @@ class TestResolveSwutsTestSpecsWarnings:
         assert "PermissionError" in warnings[0]
 
 
+class TestResolveSwutsTestSpecsOutBytes:
+    """라운드 108 MINOR-5 — out_xlsm_bytes out-param (SwUTCR spec 2회 read 제거)."""
+
+    def test_out_bytes_populated_even_when_parse_fails(self, monkeypatch, cfg_setup):
+        """read 성공 시 parse 결과와 무관하게 bytes append — FI 추출기는
+        별도 파서라 SwUTS parse 실패와 독립적으로 재사용 가능해야 한다."""
+        cfg_setup({"projects": {"HDPDM01": {}}})
+        payload = b"not a real xlsm"
+
+        class _FakeResolver:
+            def read_bytes(self, path):
+                return payload
+
+        import backend.services.file_resolver as fr_mod
+        monkeypatch.setattr(fr_mod, "get_resolver", lambda: _FakeResolver())
+
+        req = SimpleNamespace(swuts_docx_path="U:/x.xlsm", project_id="HDPDM01")
+        box: list[bytes] = []
+        result = resolver.resolve_swuts_test_specs(
+            req, "HDPDM01", out_warnings=[], out_xlsm_bytes=box,
+        )
+        assert result is None  # parse 실패 (가짜 bytes)
+        assert box == [payload]  # read는 성공 — bytes 재사용 가능
+
+    def test_out_bytes_empty_on_read_failure(self, monkeypatch, cfg_setup):
+        cfg_setup({"projects": {"HDPDM01": {}}})
+
+        class _FakeResolver:
+            def read_bytes(self, path):
+                raise FileNotFoundError(path)
+
+        import backend.services.file_resolver as fr_mod
+        monkeypatch.setattr(fr_mod, "get_resolver", lambda: _FakeResolver())
+
+        req = SimpleNamespace(swuts_docx_path="U:/x.xlsm", project_id="HDPDM01")
+        box: list[bytes] = []
+        result = resolver.resolve_swuts_test_specs(
+            req, "HDPDM01", out_warnings=[], out_xlsm_bytes=box,
+        )
+        assert result is None
+        assert box == []
+
+    def test_out_bytes_empty_when_no_path(self, cfg_setup):
+        cfg_setup({"projects": {"HDPDM01": {}}})
+        req = SimpleNamespace(swuts_docx_path="", project_id="HDPDM01")
+        box: list[bytes] = []
+        assert resolver.resolve_swuts_test_specs(
+            req, "HDPDM01", out_xlsm_bytes=box,
+        ) is None
+        assert box == []
+
+
 class TestSwudsOSErrorRound3NC2:
     """F6 Round 3 NC2: resolve_swuds_function_ids/asil_map OSError catch 확대."""
 

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import re
 from copy import copy
 from dataclasses import dataclass, field, replace as dc_replace
 from pathlib import Path
@@ -532,9 +533,45 @@ def _write_ut101(
         safe_write(ws, row, 15, "N/A")
 
 
+def _collect_fi_fail_observations(
+    session: SwUTSession,
+) -> tuple[set[tuple[str, int]], list[tuple[str, int]]]:
+    """라운드 108 MAJOR-2 — env 전수 관측으로 Fail 우선 병합 입력 수집.
+
+    ``_build_fn_iteration_map`` 은 SUTR 공용(마지막 env가 같은
+    'SwUFn_NNNN.MMM' 키를 덮어씀 — last-wins)이라 env1 Fail + env2 Pass면
+    Fail이 가려진다. 공용 함수는 불변으로 두고, UT201 FI 교차 전용으로 전
+    env를 다시 관측해 (a) Fail이 1회라도 관측된 키 집합, (b) env 간 상충
+    (동일 키에 서로 다른 결과 상태) 키 목록을 돌려준다.
+
+    Returns:
+        (fail_keys, conflict_keys) — 키는 (정규화 num, iteration idx).
+    """
+    observed: dict[tuple[str, int], set[str]] = {}
+    fail_keys: set[tuple[str, int]] = set()
+    for env in session.environments:
+        for tc_name in env.test_cases:
+            m = re.match(r"SwUFn_(\d+)\.(\d+)", tc_name)
+            if not m:
+                continue
+            key = (m.group(1).lstrip("0") or "0", int(m.group(2)))
+            exec_r = env.test_results.get(tc_name)
+            if exec_r is None:
+                state = "miss"
+            elif bool(exec_r.passed):
+                state = "pass"
+            else:
+                state = "fail"
+                fail_keys.add(key)
+            observed.setdefault(key, set()).add(state)
+    conflict_keys = sorted(k for k, states in observed.items() if len(states) > 1)
+    return fail_keys, conflict_keys
+
+
 def _cross_spec_fi_with_session(
     spec_fi: dict[str, Any],
     session: SwUTSession,
+    out_warnings: list[str] | None = None,
 ) -> dict[str, Any]:
     """spec FI 추출 결과 × 실행결과 교차 (확정 규칙 2026-06-12).
 
@@ -545,24 +582,58 @@ def _cross_spec_fi_with_session(
     불가 — 검증 불가는 보수적으로 미실행 취급) 블록 수, ``failed_blocks`` =
     ≥1 Fail 블록 수. 한 블록이 양쪽 모두에 잡힐 수 있음 (집합 중첩 허용 —
     total ≠ passed + 미실행 + fail 일 수 있다).
+
+    라운드 108 보수화 3종 (리뷰 findings fix):
+        - MAJOR-2: env 간 동일 TC iteration 상충 결과는 Fail 우선 병합
+          (passed=False 1회라도 관측되면 고정) + 상충 warning.
+        - MINOR-3: 검증 가능 FI iteration 0개 블록(FI 세그먼트 anchor-only
+          등)은 공허 통과 금지 — 미실행 분류 + 블록 수 warning.
+        - MINOR-4: 중복 TC_ID 숫자 키(``fi_dup_keys``) 블록은 실행결과 귀속이
+          모호하므로 보수적 미실행 처리 (블록 단위 카운트).
+
+    ``stamped`` 는 ``_write_ut201`` 이 실제 E85/F85 stamp 분기에서만 True로
+    갱신 (MINOR-6 — 시트 전무 템플릿에서 산출 위장 차단).
     """
     from backend.services.swut_sutr_spec_builder import _build_fn_iteration_map
 
     fn_iter_map = _build_fn_iteration_map(session)
+    fail_keys, conflict_keys = _collect_fi_fail_observations(session)
     fi_keys: set[str] = spec_fi.get("fi_block_keys") or set()
     rows_per: dict[str, list[int]] = spec_fi.get("fi_iter_rows_per_block") or {}
     iters_per: dict[str, list[int]] = spec_fi.get("fi_iters_per_block") or {}
+    dup_list: list[str] = list(spec_fi.get("fi_dup_keys") or [])
+    dup_set: set[str] = set(dup_list)
 
     passed = 0
     not_executed = 0
     failed = 0
+    zero_verifiable_blocks = 0
+    dup_blocks = 0
     for key in sorted(fi_keys):
+        if key in dup_set:
+            # MINOR-4 — dup 키는 블록 단위 복원(1 + 추가 entry 수)해 전부
+            # 미실행 처리 (total은 블록 단위라 counter도 블록 단위 정합).
+            n_blocks = 1 + dup_list.count(key)
+            dup_blocks += n_blocks
+            not_executed += n_blocks
+            continue
         rows = rows_per.get(key) or []
         iters = iters_per.get(key) or []
         rec_map = fn_iter_map.get(key) or {}
+        if not iters:
+            # MINOR-3 — 검증 가능 FI iteration 0개: any_missing=False·
+            # any_fail=False 공허 통과를 차단하고 보수적 미실행 분류
+            # (index 파싱 불가를 미실행 취급하는 기존 정책과 대칭).
+            zero_verifiable_blocks += 1
+            not_executed += 1
+            continue
         any_missing = len(iters) < len(rows)  # index 파싱 불가 행 — 검증 불가
         any_fail = False
         for it in iters:
+            if (key, it) in fail_keys:
+                # MAJOR-2 — 어느 env든 Fail 1회 관측 시 고정 (last-wins 차단).
+                any_fail = True
+                continue
             rec = rec_map.get(it)
             if rec is None or rec.get("passed") is None:
                 any_missing = True
@@ -575,6 +646,28 @@ def _cross_spec_fi_with_session(
         if not any_fail and not any_missing:
             passed += 1
 
+    if out_warnings is not None:
+        if conflict_keys:
+            sample = ", ".join(
+                f"SwUFn_{num}.{idx:03d}" for num, idx in conflict_keys[:5]
+            )
+            out_warnings.append(
+                "[swutcr] UT201 FI 교차 — env 간 동일 TC iteration 상충 결과 "
+                f"{len(conflict_keys)}건 (예: {sample}) — Fail 관측 키는 Fail "
+                "우선 고정"
+            )
+        if zero_verifiable_blocks:
+            out_warnings.append(
+                "[swutcr] UT201 FI 교차 — 검증 가능 FI iteration 0개 블록 "
+                f"{zero_verifiable_blocks}건 (FI 세그먼트 anchor-only 등) — "
+                "보수적 미실행 처리"
+            )
+        if dup_blocks:
+            out_warnings.append(
+                "[swutcr] UT201 FI 교차 — 중복 TC_ID 숫자 키 블록 "
+                f"{dup_blocks}건 — 실행결과 귀속 모호로 보수적 미실행 처리"
+            )
+
     return {
         "total": int(spec_fi.get("fi_block_total") or 0),
         "passed": passed,
@@ -583,6 +676,8 @@ def _cross_spec_fi_with_session(
         "iteration_total": int(spec_fi.get("fi_iteration_total") or 0),
         "spec_filename": str(spec_fi.get("spec_filename") or ""),
         "rule": str(spec_fi.get("rule") or "Test Method 'FI' 포함 TC 블록 수"),
+        # MINOR-6 — 실제 stamp 분기(_write_ut201)에서만 True로 갱신.
+        "stamped": False,
     }
 
 
@@ -619,6 +714,9 @@ def _write_ut201(
     # 그대로). 둘 다 없고 spec도 없으면 기존 노란 마킹 (HDPDM01 — 무회귀).
     # warning 필수: 규칙·spec 파일명 명기 — DV 감사본 수기 402(재현 불가 stale
     # 카운트)와의 차이가 추적 가능해야 한다 (실측 위장 금지).
+    # 라운드 108 MAJOR-1 — spec_fi_auto 분기는 미통과 N = 미실행 + Fail 혼합
+    # (교차값)이므로 C90 비고에 breakdown을 보존해 미실행 블록의 Fail 위장 차단.
+    spec_auto_breakdown: tuple[int, int] | None = None
     if not has_fi_total and not has_fi_passed and spec_fi_auto:
         try:
             _auto_total = int(spec_fi_auto.get("total"))  # type: ignore[arg-type]
@@ -633,15 +731,18 @@ def _write_ut201(
         if _auto_total is not None and _auto_passed is not None:
             fi_total, fi_passed = _auto_total, _auto_passed
             has_fi_total = has_fi_passed = True
+            _ne = int(spec_fi_auto.get("not_executed_blocks") or 0)
+            _fl = int(spec_fi_auto.get("failed_blocks") or 0)
+            spec_auto_breakdown = (_ne, _fl)
+            # MINOR-6 — 실제 stamp 분기에서만 True (시트 전무/skip 시 False 유지).
+            spec_fi_auto["stamped"] = True
             if warnings is not None:
-                _ne = int(spec_fi_auto.get("not_executed_blocks") or 0)
-                _fl = int(spec_fi_auto.get("failed_blocks") or 0)
                 _spec_name = spec_fi_auto.get("spec_filename") or "(파일명 미상)"
                 _rule = spec_fi_auto.get("rule") or "Test Method 'FI' 포함 TC 블록 수"
                 warnings.append(
                     f"[swutcr] UT201 FI spec 자동 산출 — 규칙: {_rule}, "
                     f"spec={_spec_name}, total={_auto_total}/passed={_auto_passed}"
-                    f"(미실행 {_ne}, fail {_fl})"
+                    f" (미실행 {_ne}, fail {_fl})"
                 )
 
     if has_fi_total:
@@ -659,7 +760,19 @@ def _write_ut201(
             fi_failed = 0
         safe_write(ws, 85, 7, "=E85-F85")
         safe_write(ws, 85, 8, "=E86")
-        safe_write(ws, 90, 3, "해당 사항 없음 " if fi_failed == 0 else f"Fail TC {fi_failed}건")
+        if fi_failed == 0:
+            note = "해당 사항 없음 "
+        elif spec_auto_breakdown is not None:
+            # MAJOR-1 — spec 자동 산출 미통과는 미실행/Fail 혼합 — 'Fail TC
+            # N건'으로 미실행 블록을 Fail로 위장하지 않는다 (breakdown 명기).
+            note = (
+                f"미통과 {fi_failed}건(미실행 {spec_auto_breakdown[0]}, "
+                f"Fail {spec_auto_breakdown[1]})"
+            )
+        else:
+            # config 분기(수기 실측) — 기존 문구 그대로.
+            note = f"Fail TC {fi_failed}건"
+        safe_write(ws, 90, 3, note)
     else:
         # 파생 셀(G85 수식/H85/90행 비고)도 fabricated 입력 기반 stamp 금지 —
         # placeholder 텍스트가 수식 operand가 되면 #VALUE! 가 되므로 수식 미기입.
@@ -1070,9 +1183,12 @@ def build_swutcr_report(
 
     # 확정 규칙(2026-06-12) — UT201 FI spec 산출 × 실행결과 교차. spec_fi
     # 부재 시 None → _write_ut201 기존 분기 (config 키 / 노란 마킹) 그대로.
+    # 라운드 108 — 교차 보수화 warning(상충/공허/중복)은 산출물 warnings 합류.
+    # summary['ut201_fi_auto'].stamped 는 _write_ut201 실제 stamp 시에만 True
+    # (MINOR-6 — 2.UT201 시트 전무 템플릿에서 산출 위장 차단).
     spec_fi_auto: dict[str, Any] | None = None
     if spec_fi:
-        spec_fi_auto = _cross_spec_fi_with_session(spec_fi, session)
+        spec_fi_auto = _cross_spec_fi_with_session(spec_fi, session, warnings)
         summary["ut201_fi_auto"] = spec_fi_auto
 
     if any(name in wb.sheetnames for name in ("Summary", "1.UT101", "2.UT201")):

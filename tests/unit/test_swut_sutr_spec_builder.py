@@ -1206,6 +1206,37 @@ class TestSpecFiExtraction:
         assert stats["fi_block_keys"] == {"103"}
         assert stats["fi_iteration_total"] == 1
 
+    def test_dup_tc_id_numeric_keys_exported_with_warning(self):
+        """라운드 108 MINOR-4 — 중복 TC_ID 숫자 키는 fi_dup_keys로 노출.
+
+        'SwUTC_0101'+'SwUTC_101' → 동일 키 '101' 병합 — total은 블록 단위(2)
+        인데 실행결과 매칭은 키 단위라 어긋난다. 교차검증이 dup 블록을
+        보수적 미실행 처리할 수 있도록 추가 블록당 1 entry를 노출 +
+        기존 dup warning 유지. DV/PV 실파일은 dup 0 (실파일 가드 warns==[]
+        무영향 — ``TestSpecFiExtractionRealFiles`` 참조).
+        """
+        from backend.services.swut_sutr_spec_builder import extract_spec_fi_stats
+        spec = _make_fi_spec_bytes([
+            ("SwUTC_0101", "fn_a", [("FI", 1)]),
+            ("SwUTC_101", "fn_a_dup", [("FI", 1)]),   # 숫자 키 동일 ('101')
+            ("SwUTC_0102", "fn_b", [("FI", 1)]),
+        ])
+        warns: list[str] = []
+        stats = extract_spec_fi_stats(spec, out_warnings=warns)
+        assert stats is not None
+        assert stats["fi_block_total"] == 3          # 블록 단위 (dup 포함)
+        assert stats["fi_block_keys"] == {"101", "102"}
+        assert stats["fi_dup_keys"] == ["101"]       # 추가 블록당 1 entry
+        assert any("중복 TC_ID 숫자 키" in w for w in warns)
+
+    def test_no_dup_keys_returns_empty_list(self):
+        """라운드 108 MINOR-4 — dup 없으면 fi_dup_keys=[] (실파일 동형)."""
+        from backend.services.swut_sutr_spec_builder import extract_spec_fi_stats
+        spec = _make_fi_spec_bytes([("SwUTC_0101", "fn_a", [("FI", 1)])])
+        stats = extract_spec_fi_stats(spec)
+        assert stats is not None
+        assert stats["fi_dup_keys"] == []
+
 
 # ---------------------------------------------------------------------------
 # 라운드 107 — 로컬 실파일 ground truth 가드 (.codex_tmp 존재 시에만 — skipif)
@@ -1248,6 +1279,7 @@ class TestSpecFiExtractionRealFiles:
         assert stats["fi_iteration_total"] == 1598
         assert stats["method_col"] == 5  # DV 레이아웃 — E열
         assert stats["layout_detected"] is True
+        assert stats["fi_dup_keys"] == []  # 라운드 108 MINOR-4 — 실파일 dup 0
         assert warns == []
 
     @pytest.mark.skipif(
@@ -1274,4 +1306,5 @@ class TestSpecFiExtractionRealFiles:
         assert stats["fi_iteration_total"] == 3229
         assert stats["method_col"] == 6  # PV — 'Safety Related' 삽입 시프트, F열
         assert stats["layout_detected"] is True
+        assert stats["fi_dup_keys"] == []  # 라운드 108 MINOR-4 — 실파일 dup 0
         assert warns == []

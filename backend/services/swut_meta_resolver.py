@@ -143,6 +143,7 @@ def resolve_swuts_test_specs(
     req: Any, project_id: str,
     *,
     out_warnings: list[str] | None = None,
+    out_xlsm_bytes: list[bytes] | None = None,
 ) -> dict[str, Any] | None:
     """60차 F6-A — swuts_docx_path xlsm → {tc_id: SwUTSEntry} dict.
 
@@ -158,6 +159,11 @@ def resolve_swuts_test_specs(
         req: SwUT/SwIT BuildRequest (덕 타이핑).
         project_id: req.project_id.
         out_warnings: list[str] (mutable) — 실패 사유 push 받음.
+        out_xlsm_bytes: 라운드 108 MINOR-5 — read 성공 시 spec bytes를 append
+            받는 out-param. SwUTCR 빌드가 동일 spec을 UT201 FI 자동 산출에
+            재사용해 2회 read(PV ~20s)를 제거한다. read 직후(parse 결과와
+            무관하게) append — FI 추출기는 별도 파서라 parse 실패와 독립.
+            None이면 기존 동작 (backward-compat — SUTR/Coverage 경로 무영향).
 
     Returns:
         {tc_id: SwUTSEntry} dict 또는 None (path 비었거나 parse 실패).
@@ -170,6 +176,8 @@ def resolve_swuts_test_specs(
     try:
         resolver = get_resolver()
         xlsm_bytes = resolver.read_bytes(swuts_path)
+        if out_xlsm_bytes is not None:
+            out_xlsm_bytes.append(xlsm_bytes)
         parse_warnings: list[str] = []
         result = parse_swuts_xlsm(xlsm_bytes, parse_warnings=parse_warnings)
         if not result.ok:

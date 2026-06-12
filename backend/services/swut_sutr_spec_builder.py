@@ -112,6 +112,7 @@ from backend.services.excel_template_utils import (
 from backend.services.swut_builder_helpers import extract_warnings_from_session
 from backend.services.swut_input_adapter import SwUTSession, aggregate_session
 from backend.services.swut_sutr_aggregator import SutrBuildMeta, SutrBuildResult
+from backend.services.swuts_excel_parser import XLSM_MAX_BYTES as _XLSM_MAX_BYTES
 
 # ---------------------------------------------------------------------------
 # 레이아웃 상수 (KJPDS02 DV v1.01 레퍼런스 실측 — 라운드 105부터 **기본값/fallback**.
@@ -301,8 +302,9 @@ def _detect_spec_layout(ws, out_warnings: list[str] | None = None) -> SpecLayout
 
 _TEST_METHOD_LABEL = "test method"
 _FI_METHOD_VALUE = "FI"
-# swuts_excel_parser와 동일 DoS 가드 (64MB) — 값 동기 유지.
-_SPEC_FI_MAX_BYTES = 64 * 1024 * 1024
+# 라운드 108 INFO-8 — swuts_excel_parser.XLSM_MAX_BYTES(64MB) 재사용 (리터럴
+# 중복 정의 제거 — DoS 가드 단일 진리원).
+_SPEC_FI_MAX_BYTES = _XLSM_MAX_BYTES
 
 
 def _find_test_method_col(ws) -> int | None:
@@ -349,8 +351,8 @@ def _extract_fi_from_sheet(
     Returns:
         {fi_block_keys: set[str(정규화 num)], fi_iter_rows_per_block,
          fi_iters_per_block(iteration index), fi_block_total,
-         fi_iteration_total, blocks_total, method_col} 또는 None (Test
-        Method 열 미발견).
+         fi_iteration_total, blocks_total, fi_dup_keys, method_col} 또는
+        None (Test Method 열 미발견).
 
     블록 키는 ``_build_fn_iteration_map`` 과 동일 정규화 (``lstrip('0')``).
     iteration index 파싱 불가 행은 ``fi_iter_rows_per_block`` 에만 남고
@@ -428,6 +430,10 @@ def _extract_fi_from_sheet(
         "fi_block_keys": fi_block_keys,
         "fi_iter_rows_per_block": fi_iter_rows_per_block,
         "fi_iters_per_block": fi_iters_per_block,
+        # 라운드 108 MINOR-4 — 중복 TC_ID 숫자 키 (추가 블록당 1 entry — 키별
+        # 블록 수 복원용). 교차검증이 dup 키 블록을 보수적 미실행 처리하는 입력.
+        # DV/PV 실파일 실측 dup 0 — 실파일 가드(warns==[]) 무영향.
+        "fi_dup_keys": dup_keys,
         "method_col": method_col,
         "layout_detected": layout.detected,
     }

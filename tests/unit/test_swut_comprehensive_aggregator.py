@@ -450,6 +450,9 @@ class TestUt201SpecFiAutoDerivation:
             "iteration_total": 1598,
             "spec_filename": "bk_SwUTS_v0.11_251126.xlsm",
             "rule": "Test Method 'FI' 포함 TC 블록 수",
+            # 라운드 108 MINOR-6 — _cross_spec_fi_with_session 출력 미러:
+            # 실제 _write_ut201 stamp 분기에서만 True로 갱신된다.
+            "stamped": False,
         }
         base.update(over)
         return base
@@ -459,27 +462,45 @@ class TestUt201SpecFiAutoDerivation:
 
         warning 필수 — 규칙·spec 파일명·total/passed·미실행/fail 명기
         (DV 감사본 수기 402와의 차이 추적 가능성 — 실측 위장 금지).
+        라운드 108 MAJOR-1 — C90 비고는 미통과 breakdown 명기 (미실행 블록을
+        'Fail TC N건'으로 위장 금지 — 구 단언 동기 수정). INFO-7 — warning의
+        passed=M 뒤 공백 1자.
         """
         from backend.services.swut_comprehensive_aggregator import _write_ut201
         wb = openpyxl.Workbook()
         ws = wb.active
         warns: list[str] = []
+        spec_fi_auto = self._spec_fi_auto()
         _write_ut201(ws, _meta_96final(), {}, {"swutcr_metadata": {}}, warns,
-                     self._spec_fi_auto())
+                     spec_fi_auto)
         assert ws.cell(85, 5).value == 405
         assert ws.cell(85, 6).value == 403
         # 파생 셀 — config-제공 분기와 동일.
         assert ws.cell(85, 7).value == "=E85-F85"
         assert ws.cell(85, 8).value == "=E86"
-        assert ws.cell(90, 3).value == "Fail TC 2건"
+        # MAJOR-1 — 미통과 2 = 미실행 2 + Fail 0 (Fail 위장 금지 breakdown).
+        assert ws.cell(90, 3).value == "미통과 2건(미실행 2, Fail 0)"
         fi_warns = [w for w in warns if "UT201 FI spec 자동 산출" in w]
         assert len(fi_warns) == 1
         assert "규칙: Test Method 'FI' 포함 TC 블록 수" in fi_warns[0]
         assert "spec=bk_SwUTS_v0.11_251126.xlsm" in fi_warns[0]
-        assert "total=405/passed=403" in fi_warns[0]
-        assert "미실행 2" in fi_warns[0] and "fail 0" in fi_warns[0]
+        # INFO-7 — 'passed=M (미실행 K, fail J)' 공백 포함 형식.
+        assert "total=405/passed=403 (미실행 2, fail 0)" in fi_warns[0]
         # 실측 미제공 마킹 warning은 없어야 함.
         assert not any("실측 미제공" in w for w in warns)
+        # MINOR-6 — 실제 stamp됐으므로 True.
+        assert spec_fi_auto["stamped"] is True
+
+    def test_spec_auto_failed_blocks_in_breakdown_note(self):
+        """라운드 108 MAJOR-1 — Fail 블록 포함 시 breakdown에 Fail 수 명기."""
+        from backend.services.swut_comprehensive_aggregator import _write_ut201
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        _write_ut201(ws, _meta_96final(), {}, {"swutcr_metadata": {}}, [],
+                     self._spec_fi_auto(total=405, passed=400,
+                                        not_executed_blocks=2,
+                                        failed_blocks=3))
+        assert ws.cell(90, 3).value == "미통과 5건(미실행 2, Fail 3)"
 
     def test_spec_auto_all_passed_writes_none_note(self):
         """전 블록 Pass — C90 '해당 사항 없음' (config 분기와 동일 비고)."""
@@ -502,10 +523,13 @@ class TestUt201SpecFiAutoDerivation:
         cfg = {"swutcr_metadata": {
             "fault_injection_total": 402, "fault_injection_passed": 402,
         }}
-        _write_ut201(ws, _meta_96final(), {}, cfg, warns, self._spec_fi_auto())
+        spec_fi_auto = self._spec_fi_auto()
+        _write_ut201(ws, _meta_96final(), {}, cfg, warns, spec_fi_auto)
         assert ws.cell(85, 5).value == 402
         assert ws.cell(85, 6).value == 402
         assert not any("UT201 FI spec 자동 산출" in w for w in warns)
+        # 라운드 108 MINOR-6 — config 우선이라 spec 산출 stamp 미발생.
+        assert spec_fi_auto["stamped"] is False
 
     def test_config_partial_key_wins_over_spec_auto(self):
         """config 키 하나라도 있으면 기존 partial 동작 — spec 산출 미적용."""
@@ -526,12 +550,15 @@ class TestUt201SpecFiAutoDerivation:
         wb = openpyxl.Workbook()
         ws = wb.active
         warns: list[str] = []
+        spec_fi_auto = self._spec_fi_auto(total=None, passed=None)
         _write_ut201(ws, _meta_96final(), {}, {"swutcr_metadata": {}}, warns,
-                     self._spec_fi_auto(total=None, passed=None))
+                     spec_fi_auto)
         for row, col in ((85, 5), (85, 6), (90, 3)):
             assert str(ws.cell(row, col).value or "").startswith("▶")
         assert any("비정수" in w for w in warns)
         assert any("실측 미제공" in w for w in warns)
+        # 라운드 108 MINOR-6 — stamp skip이므로 False 유지.
+        assert spec_fi_auto["stamped"] is False
 
     def test_cross_spec_fi_with_session_classifies_blocks(self):
         """교차 분류 — 전부 Pass / 일부 미실행 / 일부 Fail / 전 블록 미매칭."""
@@ -591,6 +618,162 @@ class TestUt201SpecFiAutoDerivation:
         assert out["passed"] == 0
         assert out["not_executed_blocks"] == 1
 
+    def test_cross_env_conflict_fail_wins_over_pass(self):
+        """라운드 108 MAJOR-2 — env1 Fail + env2 Pass 동일 iteration → Fail 고정.
+
+        _build_fn_iteration_map(SUTR 공용, last-wins)은 불변 — 교차 전용
+        env 전수 관측으로 'Fail 있으면 미통과' 확정 규칙 위반을 차단 +
+        상충 warning emit.
+        """
+        from backend.services.swut_comprehensive_aggregator import (
+            _cross_spec_fi_with_session,
+        )
+        env1 = EnvironmentData(env_name="SwUT_01", component_name="T")
+        env1.test_cases["SwUFn_0101.001"] = []
+        env1.test_results["SwUFn_0101.001"] = ExecutionRow(
+            tc_name="SwUFn_0101.001", passed=False,  # env1 Fail
+        )
+        env2 = EnvironmentData(env_name="SwUT_02", component_name="T")
+        env2.test_cases["SwUFn_0101.001"] = []
+        env2.test_results["SwUFn_0101.001"] = ExecutionRow(
+            tc_name="SwUFn_0101.001", passed=True,   # env2 Pass (마지막 env)
+        )
+        session = SwUTSession(environments=[env1, env2])
+        spec_fi = {
+            "fi_block_total": 1,
+            "fi_iteration_total": 1,
+            "fi_block_keys": {"101"},
+            "fi_iter_rows_per_block": {"101": [6]},
+            "fi_iters_per_block": {"101": [1]},
+        }
+        warns: list[str] = []
+        out = _cross_spec_fi_with_session(spec_fi, session, warns)
+        assert out["passed"] == 0          # last-wins였다면 1 (규칙 위반)
+        assert out["failed_blocks"] == 1
+        assert out["not_executed_blocks"] == 0
+        conflict_warns = [w for w in warns if "상충" in w]
+        assert len(conflict_warns) == 1
+        assert "1건" in conflict_warns[0]
+        assert "SwUFn_101.001" in conflict_warns[0]
+        assert "Fail" in conflict_warns[0]
+
+    def test_cross_env_conflict_fail_wins_reversed_order(self):
+        """라운드 108 MAJOR-2 — env1 Pass + env2 Fail (역순)도 동일 Fail 고정."""
+        from backend.services.swut_comprehensive_aggregator import (
+            _cross_spec_fi_with_session,
+        )
+        env1 = EnvironmentData(env_name="SwUT_01", component_name="T")
+        env1.test_cases["SwUFn_0101.001"] = []
+        env1.test_results["SwUFn_0101.001"] = ExecutionRow(
+            tc_name="SwUFn_0101.001", passed=True,
+        )
+        env2 = EnvironmentData(env_name="SwUT_02", component_name="T")
+        env2.test_cases["SwUFn_0101.001"] = []
+        env2.test_results["SwUFn_0101.001"] = ExecutionRow(
+            tc_name="SwUFn_0101.001", passed=False,
+        )
+        session = SwUTSession(environments=[env1, env2])
+        spec_fi = {
+            "fi_block_total": 1,
+            "fi_iteration_total": 1,
+            "fi_block_keys": {"101"},
+            "fi_iter_rows_per_block": {"101": [6]},
+            "fi_iters_per_block": {"101": [1]},
+        }
+        out = _cross_spec_fi_with_session(spec_fi, session)
+        assert out["passed"] == 0
+        assert out["failed_blocks"] == 1
+
+    def test_cross_multi_env_consistent_pass_no_conflict_warning(self):
+        """라운드 108 MAJOR-2 가드 — env 간 결과 일치(Pass/Pass)면 warning 없음."""
+        from backend.services.swut_comprehensive_aggregator import (
+            _cross_spec_fi_with_session,
+        )
+        envs = []
+        for name in ("SwUT_01", "SwUT_02"):
+            env = EnvironmentData(env_name=name, component_name="T")
+            env.test_cases["SwUFn_0101.001"] = []
+            env.test_results["SwUFn_0101.001"] = ExecutionRow(
+                tc_name="SwUFn_0101.001", passed=True,
+            )
+            envs.append(env)
+        session = SwUTSession(environments=envs)
+        spec_fi = {
+            "fi_block_total": 1,
+            "fi_iteration_total": 1,
+            "fi_block_keys": {"101"},
+            "fi_iter_rows_per_block": {"101": [6]},
+            "fi_iters_per_block": {"101": [1]},
+        }
+        warns: list[str] = []
+        out = _cross_spec_fi_with_session(spec_fi, session, warns)
+        assert out["passed"] == 1
+        assert not any("상충" in w for w in warns)
+
+    def test_cross_zero_verifiable_iterations_not_executed(self):
+        """라운드 108 MINOR-3 — 검증 가능 FI iteration 0개 블록 공허 통과 차단.
+
+        FI 세그먼트가 anchor만 덮으면 rows=[]·iters=[] — 구 구현은
+        any_missing=False·any_fail=False로 passed 집계(index 파싱불가의
+        보수적 미실행 취급과 비대칭). 미실행 분류 + 블록 수 warning.
+        """
+        from backend.services.swut_comprehensive_aggregator import (
+            _cross_spec_fi_with_session,
+        )
+        env = EnvironmentData(env_name="SwUT_01", component_name="T")
+        env.test_cases["SwUFn_0101.001"] = []
+        env.test_results["SwUFn_0101.001"] = ExecutionRow(
+            tc_name="SwUFn_0101.001", passed=True,
+        )
+        session = SwUTSession(environments=[env])
+        spec_fi = {
+            "fi_block_total": 2,
+            "fi_iteration_total": 1,
+            "fi_block_keys": {"101", "102"},
+            "fi_iter_rows_per_block": {"101": [6], "102": []},  # 102: anchor-only
+            "fi_iters_per_block": {"101": [1], "102": []},
+        }
+        warns: list[str] = []
+        out = _cross_spec_fi_with_session(spec_fi, session, warns)
+        assert out["passed"] == 1            # 101만 — 102 공허 통과 금지
+        assert out["not_executed_blocks"] == 1
+        zero_warns = [w for w in warns if "검증 가능 FI iteration 0개" in w]
+        assert len(zero_warns) == 1
+        assert "1건" in zero_warns[0]
+
+    def test_cross_dup_key_blocks_not_executed(self):
+        """라운드 108 MINOR-4 — 중복 TC_ID 숫자 키 블록은 보수적 미실행 처리.
+
+        'SwUTC_0101'+'SwUTC_101' → 같은 키 '101'로 병합되어 total은 블록
+        단위(2), passed는 키 단위(최대 1)로 어긋났음 — dup 키 블록 전체
+        (1 + 추가 entry 수)를 미실행으로 분류해 passed 집계에서 제외.
+        """
+        from backend.services.swut_comprehensive_aggregator import (
+            _cross_spec_fi_with_session,
+        )
+        env = EnvironmentData(env_name="SwUT_01", component_name="T")
+        env.test_cases["SwUFn_0101.001"] = []
+        env.test_results["SwUFn_0101.001"] = ExecutionRow(
+            tc_name="SwUFn_0101.001", passed=True,
+        )
+        session = SwUTSession(environments=[env])
+        spec_fi = {
+            "fi_block_total": 2,             # 블록 단위 (dup 포함)
+            "fi_iteration_total": 2,
+            "fi_block_keys": {"101"},
+            "fi_iter_rows_per_block": {"101": [6, 10]},  # 두 블록 병합 귀속
+            "fi_iters_per_block": {"101": [1, 1]},
+            "fi_dup_keys": ["101"],          # 추가 블록당 1 entry
+        }
+        warns: list[str] = []
+        out = _cross_spec_fi_with_session(spec_fi, session, warns)
+        assert out["total"] == 2
+        assert out["passed"] == 0
+        assert out["not_executed_blocks"] == 2  # 블록 단위 (1 + dup 1)
+        dup_warns = [w for w in warns if "중복 TC_ID" in w]
+        assert len(dup_warns) == 1
+        assert "2건" in dup_warns[0]
+
     def test_build_swutcr_report_wires_spec_fi(self):
         """build_swutcr_report(spec_fi=...) — 교차→stamp→summary→warning 배선."""
         env = EnvironmentData(
@@ -623,6 +806,8 @@ class TestUt201SpecFiAutoDerivation:
         assert result.ok is True
         assert result.summary["ut201_fi_auto"]["total"] == 1
         assert result.summary["ut201_fi_auto"]["passed"] == 1
+        # 라운드 108 MINOR-6 — 실제 2.UT201 stamp 발생 시에만 True.
+        assert result.summary["ut201_fi_auto"]["stamped"] is True
         wb = openpyxl.load_workbook(result.xlsm_io, data_only=False)
         assert wb["2.UT201"]["E85"].value == 1
         assert wb["2.UT201"]["F85"].value == 1
@@ -631,6 +816,53 @@ class TestUt201SpecFiAutoDerivation:
         fi_warns = [w for w in result.warnings if "UT201 FI spec 자동 산출" in w]
         assert len(fi_warns) == 1
         assert "spec=wip_pv_SwUTS_v0.10_260608.xlsm" in fi_warns[0]
+
+    def test_build_swutcr_report_without_ut201_sheet_not_stamped(self):
+        """라운드 108 MINOR-6 — 2.UT201 시트 전무 템플릿: stamped=False.
+
+        구 구현은 summary['ut201_fi_auto']를 시트 존재 게이트 이전에 무조건
+        설정 — stamp 없는데 산출된 것처럼 보였다. stamped 플래그는 실제
+        _write_ut201 stamp 분기에서만 True.
+        """
+        wb = openpyxl.load_workbook(
+            io.BytesIO(_minimal_swutcr_specific_template()), keep_vba=False,
+        )
+        del wb["2.UT201"]
+        buf = io.BytesIO()
+        wb.save(buf)
+        env = EnvironmentData(
+            env_name="SWTE_01",
+            component_name="CompA",
+            test_cases={"SwUFn_0101.001": [object()]},
+            test_results={
+                "SwUFn_0101.001": ExecutionRow(
+                    tc_name="SwUFn_0101.001", passed=True,
+                ),
+            },
+            function_coverage=[
+                FunctionCoverage(unit_id="SwUFn_0101", name="FunctionA"),
+            ],
+        )
+        session = SwUTSession(environments=[env])
+        spec_fi = {
+            "fi_block_total": 1,
+            "fi_iteration_total": 1,
+            "fi_block_keys": {"101"},
+            "fi_iter_rows_per_block": {"101": [6]},
+            "fi_iters_per_block": {"101": [1]},
+            "spec_filename": "spec.xlsm",
+        }
+        result = build_swutcr_report(
+            session, _meta_96final(), buf.getvalue(), spec_fi=spec_fi,
+        )
+        assert result.ok is True
+        # 교차값은 노출되지만 stamped=False — 산출 위장 차단.
+        assert result.summary["ut201_fi_auto"]["passed"] == 1
+        assert result.summary["ut201_fi_auto"]["stamped"] is False
+        assert "ut201" not in result.summary.get("swutcr_specific_written", {})
+        assert not any(
+            "UT201 FI spec 자동 산출 — 규칙" in w for w in result.warnings
+        )
 
     def test_build_swutcr_report_without_spec_fi_keeps_marking(self):
         """spec_fi 미전달(HDPDM01 경로) — 기존 노란 마킹 유지 (무회귀)."""
