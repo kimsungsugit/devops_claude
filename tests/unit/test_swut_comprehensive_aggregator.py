@@ -358,11 +358,12 @@ class TestUt201FaultInjection96Final:
 class TestUt201FaultInjectionR105Branches:
     """라운드 105 — UT201 FI 분기 가드 (config 우선 / 부재 시 노란 마킹).
 
-    **spec 산출 분기는 구현 보류 상태 그대로** — DV v1.01 산출물로 'FI=402'
-    산출 규칙 실증 불가(세 후보 1,598/405/405 전부 불일치, Probe 결론). 검증
-    불가 추정 기반 자동화는 금지이므로 여기서는 구현된 두 분기(config 실측
-    stamp / 부재 시 사용자입력 마킹)의 경계만 보강한다 — spec 기반 자동 산출이
-    추가되려면 문서 작성자/검토자의 산출 규칙 확정이 선행돼야 한다.
+    라운드 107(2026-06-12)에서 사용자 규칙 확정으로 spec 산출 분기가 구현됨
+    (FI = Test Method 'FI' 포함 TC 블록 수 — DV 405/1,598·PV 808 ground truth
+    재현, ``TestUt201SpecFiAutoDerivation`` 참조). DV 감사본 수기 402는 전
+    가용 산출물로 재현 불가한 stale 카운트로 판명. 여기서는 기존 두 분기
+    (config 실측 stamp / 부재+spec 부재 시 사용자입력 마킹)의 경계를 가드한다
+    — agg 카운트 기반 fabrication 재도입 금지는 여전히 유효.
     """
 
     def test_fi_partial_keys_total_only_marks_passed_and_skips_derived(self):
@@ -408,10 +409,12 @@ class TestUt201FaultInjectionR105Branches:
         assert any("fault injection 실측 미제공" in w for w in warns)
 
     def test_fi_no_spec_derivation_even_with_rich_agg(self):
-        """보류 가드 — agg에 함수/패스 카운트가 있어도 FI 자동 산출 금지.
+        """fabrication 가드 — agg 함수/패스 카운트 기반 FI 자동 산출 금지.
 
-        함수 수 기반 fallback(과거 fabrication) 재도입 + 미확정 spec 산출
-        규칙 선구현 양쪽을 차단: config 키 부재면 무조건 사용자입력 마킹.
+        함수 수 기반 fallback(과거 fabrication) 재도입 차단: config 키 부재
+        + spec 산출값(spec_fi_auto) 미전달이면 무조건 사용자입력 마킹.
+        spec 기반 자동 산출은 확정 규칙(2026-06-12) 경로(spec_fi_auto 전달)
+        에서만 허용 — ``TestUt201SpecFiAutoDerivation`` 참조.
         """
         from backend.services.swut_comprehensive_aggregator import _write_ut201
         wb = openpyxl.Workbook()
@@ -428,6 +431,218 @@ class TestUt201FaultInjectionR105Branches:
             assert not isinstance(v, int), f"FI 자동 산출 금지 위반: ({row},{col})={v!r}"
             assert str(v or "").startswith("▶")
         assert any("실측 미제공" in w for w in warns)
+
+
+class TestUt201SpecFiAutoDerivation:
+    """라운드 107 — UT201 FI spec 자동 산출 (확정 규칙 2026-06-12).
+
+    규칙: FI total = spec Test Method 'FI' 포함 TC 블록 수, passed = FI
+    iteration 전부 실행+Pass 블록 수. 우선순위: config 키 > spec 산출 >
+    노란 마킹. ground truth(DV 405/1,598·PV 808)는 spec 추출기 테스트
+    (test_swut_sutr_spec_builder.TestSpecFiExtraction)에서 가드.
+    """
+
+    @staticmethod
+    def _spec_fi_auto(**over):
+        base = {
+            "total": 405, "passed": 403,
+            "not_executed_blocks": 2, "failed_blocks": 0,
+            "iteration_total": 1598,
+            "spec_filename": "bk_SwUTS_v0.11_251126.xlsm",
+            "rule": "Test Method 'FI' 포함 TC 블록 수",
+        }
+        base.update(over)
+        return base
+
+    def test_spec_auto_stamps_when_config_absent(self):
+        """config 키 둘 다 부재 + spec 산출값 → E85/F85 + 파생 셀 stamp.
+
+        warning 필수 — 규칙·spec 파일명·total/passed·미실행/fail 명기
+        (DV 감사본 수기 402와의 차이 추적 가능성 — 실측 위장 금지).
+        """
+        from backend.services.swut_comprehensive_aggregator import _write_ut201
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        warns: list[str] = []
+        _write_ut201(ws, _meta_96final(), {}, {"swutcr_metadata": {}}, warns,
+                     self._spec_fi_auto())
+        assert ws.cell(85, 5).value == 405
+        assert ws.cell(85, 6).value == 403
+        # 파생 셀 — config-제공 분기와 동일.
+        assert ws.cell(85, 7).value == "=E85-F85"
+        assert ws.cell(85, 8).value == "=E86"
+        assert ws.cell(90, 3).value == "Fail TC 2건"
+        fi_warns = [w for w in warns if "UT201 FI spec 자동 산출" in w]
+        assert len(fi_warns) == 1
+        assert "규칙: Test Method 'FI' 포함 TC 블록 수" in fi_warns[0]
+        assert "spec=bk_SwUTS_v0.11_251126.xlsm" in fi_warns[0]
+        assert "total=405/passed=403" in fi_warns[0]
+        assert "미실행 2" in fi_warns[0] and "fail 0" in fi_warns[0]
+        # 실측 미제공 마킹 warning은 없어야 함.
+        assert not any("실측 미제공" in w for w in warns)
+
+    def test_spec_auto_all_passed_writes_none_note(self):
+        """전 블록 Pass — C90 '해당 사항 없음' (config 분기와 동일 비고)."""
+        from backend.services.swut_comprehensive_aggregator import _write_ut201
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        _write_ut201(ws, _meta_96final(), {}, {"swutcr_metadata": {}}, [],
+                     self._spec_fi_auto(total=808, passed=808,
+                                        not_executed_blocks=0))
+        assert ws.cell(85, 5).value == 808
+        assert ws.cell(85, 6).value == 808
+        assert str(ws.cell(90, 3).value).strip() == "해당 사항 없음"
+
+    def test_config_keys_win_over_spec_auto(self):
+        """config 키 존재 시 spec 산출값 무시 — 기존 동작 그대로 (단일 진리원)."""
+        from backend.services.swut_comprehensive_aggregator import _write_ut201
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        warns: list[str] = []
+        cfg = {"swutcr_metadata": {
+            "fault_injection_total": 402, "fault_injection_passed": 402,
+        }}
+        _write_ut201(ws, _meta_96final(), {}, cfg, warns, self._spec_fi_auto())
+        assert ws.cell(85, 5).value == 402
+        assert ws.cell(85, 6).value == 402
+        assert not any("UT201 FI spec 자동 산출" in w for w in warns)
+
+    def test_config_partial_key_wins_over_spec_auto(self):
+        """config 키 하나라도 있으면 기존 partial 동작 — spec 산출 미적용."""
+        from backend.services.swut_comprehensive_aggregator import _write_ut201
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        warns: list[str] = []
+        cfg = {"swutcr_metadata": {"fault_injection_total": 402}}
+        _write_ut201(ws, _meta_96final(), {}, cfg, warns, self._spec_fi_auto())
+        assert ws.cell(85, 5).value == 402
+        assert str(ws.cell(85, 6).value or "").startswith("▶")
+        assert not any("UT201 FI spec 자동 산출" in w for w in warns)
+        assert any("fault_injection_passed" in w for w in warns)
+
+    def test_spec_auto_non_numeric_falls_back_to_marking(self):
+        """spec 산출값 비정수 — stamp 금지 + 노란 마킹 유지 (정직 폴백)."""
+        from backend.services.swut_comprehensive_aggregator import _write_ut201
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        warns: list[str] = []
+        _write_ut201(ws, _meta_96final(), {}, {"swutcr_metadata": {}}, warns,
+                     self._spec_fi_auto(total=None, passed=None))
+        for row, col in ((85, 5), (85, 6), (90, 3)):
+            assert str(ws.cell(row, col).value or "").startswith("▶")
+        assert any("비정수" in w for w in warns)
+        assert any("실측 미제공" in w for w in warns)
+
+    def test_cross_spec_fi_with_session_classifies_blocks(self):
+        """교차 분류 — 전부 Pass / 일부 미실행 / 일부 Fail / 전 블록 미매칭."""
+        from backend.services.swut_comprehensive_aggregator import (
+            _cross_spec_fi_with_session,
+        )
+        env = EnvironmentData(env_name="SwUT_01", component_name="T")
+        results = {
+            "SwUFn_0101.002": True, "SwUFn_0101.003": True,  # 101: 전부 Pass
+            "SwUFn_0102.001": True,                          # 102: .002 미실행
+            "SwUFn_0103.001": False,                         # 103: Fail
+            # 104: 실행 기록 자체 없음 (블록 미매칭)
+        }
+        for tc_name, passed in results.items():
+            env.test_cases[tc_name] = []
+            env.test_results[tc_name] = ExecutionRow(tc_name=tc_name, passed=passed)
+        session = SwUTSession(environments=[env])
+        spec_fi = {
+            "fi_block_total": 4,
+            "fi_iteration_total": 6,
+            "fi_block_keys": {"101", "102", "103", "104"},
+            "fi_iter_rows_per_block": {
+                "101": [6, 7], "102": [10, 11], "103": [14], "104": [17],
+            },
+            "fi_iters_per_block": {
+                "101": [2, 3], "102": [1, 2], "103": [1], "104": [1],
+            },
+            "spec_filename": "spec.xlsm",
+        }
+        out = _cross_spec_fi_with_session(spec_fi, session)
+        assert out["total"] == 4
+        assert out["passed"] == 1            # 101만
+        assert out["not_executed_blocks"] == 2  # 102(.002), 104(전체)
+        assert out["failed_blocks"] == 1     # 103
+        assert out["iteration_total"] == 6
+        assert out["spec_filename"] == "spec.xlsm"
+
+    def test_cross_unparseable_iter_index_counts_as_not_executed(self):
+        """iteration index 파싱 불가(rows>iters) — 검증 불가는 미실행 취급."""
+        from backend.services.swut_comprehensive_aggregator import (
+            _cross_spec_fi_with_session,
+        )
+        env = EnvironmentData(env_name="SwUT_01", component_name="T")
+        env.test_cases["SwUFn_0101.001"] = []
+        env.test_results["SwUFn_0101.001"] = ExecutionRow(
+            tc_name="SwUFn_0101.001", passed=True,
+        )
+        session = SwUTSession(environments=[env])
+        spec_fi = {
+            "fi_block_total": 1,
+            "fi_iteration_total": 2,
+            "fi_block_keys": {"101"},
+            "fi_iter_rows_per_block": {"101": [6, 7]},  # 행 2개
+            "fi_iters_per_block": {"101": [1]},         # index 1개만 파싱됨
+        }
+        out = _cross_spec_fi_with_session(spec_fi, session)
+        assert out["passed"] == 0
+        assert out["not_executed_blocks"] == 1
+
+    def test_build_swutcr_report_wires_spec_fi(self):
+        """build_swutcr_report(spec_fi=...) — 교차→stamp→summary→warning 배선."""
+        env = EnvironmentData(
+            env_name="SWTE_01",
+            component_name="CompA",
+            test_cases={"SwUFn_0101.001": [object()]},
+            test_results={
+                "SwUFn_0101.001": ExecutionRow(
+                    tc_name="SwUFn_0101.001", passed=True,
+                ),
+            },
+            function_coverage=[
+                FunctionCoverage(unit_id="SwUFn_0101", name="FunctionA"),
+            ],
+        )
+        session = SwUTSession(environments=[env])
+        spec_fi = {
+            "rule": "Test Method 'FI' 포함 TC 블록 수",
+            "fi_block_total": 1,
+            "fi_iteration_total": 1,
+            "fi_block_keys": {"101"},
+            "fi_iter_rows_per_block": {"101": [6]},
+            "fi_iters_per_block": {"101": [1]},
+            "spec_filename": "wip_pv_SwUTS_v0.10_260608.xlsm",
+        }
+        result = build_swutcr_report(
+            session, _meta_96final(), _minimal_swutcr_specific_template(),
+            spec_fi=spec_fi,
+        )
+        assert result.ok is True
+        assert result.summary["ut201_fi_auto"]["total"] == 1
+        assert result.summary["ut201_fi_auto"]["passed"] == 1
+        wb = openpyxl.load_workbook(result.xlsm_io, data_only=False)
+        assert wb["2.UT201"]["E85"].value == 1
+        assert wb["2.UT201"]["F85"].value == 1
+        assert wb["2.UT201"]["G85"].value == "=E85-F85"
+        assert str(wb["2.UT201"]["C90"].value).strip() == "해당 사항 없음"
+        fi_warns = [w for w in result.warnings if "UT201 FI spec 자동 산출" in w]
+        assert len(fi_warns) == 1
+        assert "spec=wip_pv_SwUTS_v0.10_260608.xlsm" in fi_warns[0]
+
+    def test_build_swutcr_report_without_spec_fi_keeps_marking(self):
+        """spec_fi 미전달(HDPDM01 경로) — 기존 노란 마킹 유지 (무회귀)."""
+        result = build_swutcr_report(
+            _session(), _meta_96final(), _minimal_swutcr_specific_template(),
+        )
+        assert result.ok is True
+        assert "ut201_fi_auto" not in result.summary
+        wb = openpyxl.load_workbook(result.xlsm_io, data_only=False)
+        assert str(wb["2.UT201"]["E85"].value or "").startswith("▶")
+        assert str(wb["2.UT201"]["F85"].value or "").startswith("▶")
+        assert any("fault injection 실측 미제공" in w for w in result.warnings)
 
 
 class TestW6LabelRowFixes96Final:

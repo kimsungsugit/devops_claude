@@ -285,6 +285,230 @@ def _detect_spec_layout(ws, out_warnings: list[str] | None = None) -> SpecLayout
 
 
 # ---------------------------------------------------------------------------
+# 라운드 107 — UT201 Fault Injection spec 자동 산출 (확정 규칙 2026-06-12)
+#
+# 규칙: FI 수량 = spec '2.SW Unit Test Spec'에서 Test Method 열에 'FI' 세그먼트를
+# 1개 이상 포함한 TC(함수) 블록 수. Test Method 열은 method 세그먼트 단위
+# **세로병합**(anchor만 값)이라 merged range 전개 없이는 FI iteration 행 귀속이
+# 누락된다 (PV 실측: 병합 1,865 range).
+#
+# ground truth 재현 검증 (2026-06-12 실측):
+#   - DV bk_SwUTS_v0.11_251126.xlsm → FI 블록 405 / FI iteration 1,598
+#   - PV wip_pv_SwUTS_v0.10_260608.xlsm → FI 블록 808 / FI iteration 3,229
+# (DV 감사본 수기 402는 전 가용 산출물로 재현 불가한 stale 카운트로 판명 —
+#  산출물 warning에 규칙·spec 파일명을 명기해 차이를 추적 가능하게 한다.)
+# ---------------------------------------------------------------------------
+
+_TEST_METHOD_LABEL = "test method"
+_FI_METHOD_VALUE = "FI"
+# swuts_excel_parser와 동일 DoS 가드 (64MB) — 값 동기 유지.
+_SPEC_FI_MAX_BYTES = 64 * 1024 * 1024
+
+
+def _find_test_method_col(ws) -> int | None:
+    """'Test Method' 헤더 열 탐색 — r4(서브헤더) 우선, r3 폴백.
+
+    DV=5(E) / PV=6(F — 'Safety Related' 삽입 시프트, 실측). 공백 collapse +
+    case-insensitive 비교. 미발견 시 None.
+    """
+    max_col = min(int(ws.max_column or 0), 64)
+    for row in (SUBHEADER_ROW, HEADER_SECTION_ROW):
+        for c in range(1, max_col + 1):
+            v = ws.cell(row, c).value
+            if (
+                isinstance(v, str)
+                and " ".join(v.split()).strip().lower() == _TEST_METHOD_LABEL
+            ):
+                return c
+    return None
+
+
+def _method_values_by_row(ws, method_col: int) -> dict[int, Any]:
+    """Test Method 열 세로병합 세그먼트 전개 — {row: anchor 값}.
+
+    read-write 로드에서 병합 range의 비-anchor 셀은 None이므로, method_col을
+    덮는 모든 merged range의 anchor(min_row, min_col) 값을 range 전 행에 전파.
+    map 미포함 행은 caller가 셀 직접 읽기 (비병합 행 — DV는 대부분 비병합 실측).
+    """
+    merged: dict[int, Any] = {}
+    for rng in ws.merged_cells.ranges:
+        if rng.min_col <= method_col <= rng.max_col:
+            anchor_val = ws.cell(rng.min_row, rng.min_col).value
+            for rr in range(rng.min_row, rng.max_row + 1):
+                merged[rr] = anchor_val
+    return merged
+
+
+def _extract_fi_from_sheet(
+    ws,
+    layout: SpecLayout,
+    out_warnings: list[str] | None = None,
+) -> dict[str, Any] | None:
+    """spec 시트에서 FI 블록/iteration 추출 (확정 규칙 — docstring 위 참조).
+
+    Returns:
+        {fi_block_keys: set[str(정규화 num)], fi_iter_rows_per_block,
+         fi_iters_per_block(iteration index), fi_block_total,
+         fi_iteration_total, blocks_total, method_col} 또는 None (Test
+        Method 열 미발견).
+
+    블록 키는 ``_build_fn_iteration_map`` 과 동일 정규화 (``lstrip('0')``).
+    iteration index 파싱 불가 행은 ``fi_iter_rows_per_block`` 에만 남고
+    ``fi_iters_per_block`` 에는 빠진다 — 교차검증에서 '미실행' 취급 (보수적).
+    """
+    method_col = _find_test_method_col(ws)
+    if method_col is None:
+        if out_warnings is not None:
+            out_warnings.append(
+                "[swutcr] UT201 FI spec 자동 산출 불가 — 'Test Method' 헤더 열 "
+                "미발견 (r3/r4 스캔). 노란 마킹 유지"
+            )
+        return None
+
+    blocks = _scan_spec_blocks(ws, layout=layout)
+    merged_method = _method_values_by_row(ws, method_col)
+
+    def _method_at(row: int) -> str:
+        v = merged_method.get(row)
+        if v is None and row not in merged_method:
+            v = ws.cell(row, method_col).value
+        return str(v).strip().upper() if v is not None else ""
+
+    fi_block_keys: set[str] = set()
+    fi_iter_rows_per_block: dict[str, list[int]] = {}
+    fi_iters_per_block: dict[str, list[int]] = {}
+    fi_block_total = 0
+    fi_iteration_total = 0
+    dup_keys: list[str] = []
+
+    for blk in blocks:
+        key = (blk["num"] or "").lstrip("0") or "0"
+        block_has_fi = False
+        fi_rows: list[int] = []
+        fi_iters: list[int] = []
+        # anchor 포함 — 실측상 anchor는 method 빈 값 + iteration index 없음이나,
+        # FI 세그먼트가 anchor를 덮는 변종도 블록 FI 판정에는 포함 (보수적).
+        for r in [blk["anchor"]] + blk["iter_rows"]:
+            if _method_at(r) != _FI_METHOD_VALUE:
+                continue
+            block_has_fi = True
+            raw_idx = ws.cell(r, layout.iter_index).value
+            if raw_idx in (None, ""):
+                continue  # iteration index 없는 행 — FI iteration 아님
+            fi_rows.append(r)
+            try:
+                fi_iters.append(int(str(raw_idx).strip()))
+            except (TypeError, ValueError):
+                pass  # 행은 남기고 index만 누락 → 교차검증에서 미실행 취급
+        if not block_has_fi:
+            continue
+        fi_block_total += 1
+        fi_iteration_total += len(fi_rows)
+        if key in fi_block_keys:
+            dup_keys.append(key)
+            fi_iter_rows_per_block[key].extend(fi_rows)
+            fi_iters_per_block[key].extend(fi_iters)
+        else:
+            fi_block_keys.add(key)
+            fi_iter_rows_per_block[key] = fi_rows
+            fi_iters_per_block[key] = fi_iters
+
+    if dup_keys and out_warnings is not None:
+        out_warnings.append(
+            "[swutcr] UT201 FI spec 자동 산출 — 중복 TC_ID 숫자 키 "
+            f"{sorted(set(dup_keys))[:5]} (FI 블록 {len(dup_keys)}건 병합 귀속, "
+            "교차검증 정확도 영향 가능)"
+        )
+
+    return {
+        "rule": "Test Method 'FI' 포함 TC 블록 수",
+        "blocks_total": len(blocks),
+        "fi_block_total": fi_block_total,
+        "fi_iteration_total": fi_iteration_total,
+        "fi_block_keys": fi_block_keys,
+        "fi_iter_rows_per_block": fi_iter_rows_per_block,
+        "fi_iters_per_block": fi_iters_per_block,
+        "method_col": method_col,
+        "layout_detected": layout.detected,
+    }
+
+
+def extract_spec_fi_stats(
+    spec_xlsm_bytes: bytes,
+    *,
+    spec_filename: str = "",
+    out_warnings: list[str] | None = None,
+) -> dict[str, Any] | None:
+    """SwUTS spec xlsm bytes → UT201 FI 자동 산출 통계 (확정 규칙 2026-06-12).
+
+    SwUTCR `_write_ut201` 의 config ``fault_injection_total/passed`` 부재 시
+    spec 산출 경로 입력. 실패(파일 깨짐/시트·헤더 미발견)는 None + warning —
+    caller는 기존 노란 마킹 경로 유지 (실측 위장 금지).
+
+    Args:
+        spec_xlsm_bytes: SwUTS spec xlsm bytes ('2.SW Unit Test Spec' 보유).
+        spec_filename: 산출물 warning 추적용 spec 파일명 (결과 dict에 동봉).
+        out_warnings: 실패/모호 사유 push (None이면 silent).
+
+    Returns:
+        ``_extract_fi_from_sheet`` 결과 + ``spec_filename`` 키, 또는 None.
+    """
+    if openpyxl is None:
+        if out_warnings is not None:
+            out_warnings.append(
+                "[swutcr] UT201 FI spec 자동 산출 불가 — openpyxl 미설치"
+            )
+        return None
+    if not spec_xlsm_bytes:
+        if out_warnings is not None:
+            out_warnings.append(
+                "[swutcr] UT201 FI spec 자동 산출 불가 — spec bytes 비어있음"
+            )
+        return None
+    if len(spec_xlsm_bytes) > _SPEC_FI_MAX_BYTES:
+        if out_warnings is not None:
+            out_warnings.append(
+                f"[swutcr] UT201 FI spec 자동 산출 불가 — spec 크기 "
+                f"{len(spec_xlsm_bytes):,} > 한도 {_SPEC_FI_MAX_BYTES:,} (DoS 방지)"
+            )
+        return None
+
+    wb = None
+    try:
+        # 병합 range 전개가 필요해 read_only 불가(ReadOnlyWorksheet는
+        # merged_cells 미보장) — read-write 로드. keep_vba=False (읽기 전용 용도).
+        wb = openpyxl.load_workbook(
+            io.BytesIO(spec_xlsm_bytes), keep_vba=False, data_only=False,
+        )
+        ws, _name = _find_spec_sheet(wb)
+        if ws is None:
+            if out_warnings is not None:
+                out_warnings.append(
+                    "[swutcr] UT201 FI spec 자동 산출 불가 — SwUTS spec 시트 "
+                    "('2.SW Unit Test Spec' 류) 미발견"
+                )
+            return None
+        layout = _detect_spec_layout(ws, out_warnings)
+        stats = _extract_fi_from_sheet(ws, layout, out_warnings)
+        if stats is not None:
+            stats["spec_filename"] = spec_filename
+        return stats
+    except Exception as exc:  # noqa: BLE001 — 산출 실패는 노란 마킹 폴백 (정직 보고)
+        if out_warnings is not None:
+            out_warnings.append(
+                "[swutcr] UT201 FI spec 자동 산출 실패 — "
+                f"{type(exc).__name__}: {exc} (노란 마킹 유지)"
+            )
+        return None
+    finally:
+        if wb is not None:
+            try:
+                wb.close()
+            except Exception:  # noqa: BLE001 — close 실패 무해
+                pass
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
@@ -1370,6 +1594,7 @@ def build_sutr_from_spec(
 
 __all__ = [
     "build_sutr_from_spec",
+    "extract_spec_fi_stats",
     "LOG_SHEET_NAME",
     "COL_ACTUAL_START",
     "COL_PASS_FAIL",

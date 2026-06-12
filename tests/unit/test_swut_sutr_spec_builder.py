@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import io
+import os
 
 import openpyxl
 import pytest
@@ -1020,3 +1021,257 @@ class TestR105SwUFnTcIdBlocks:
         # 때문에 비-anchor iteration 행을 놓침 — 동적화 필요성의 실측 근거 재현.
         legacy = _scan_spec_blocks(ws)
         assert len(legacy[0]["iter_rows"]) < 2
+
+
+# ---------------------------------------------------------------------------
+# 라운드 107 — UT201 FI spec 자동 산출 추출기 (확정 규칙 2026-06-12)
+# ---------------------------------------------------------------------------
+
+def _make_fi_spec_bytes(
+    blocks: list[tuple[str, str, list[tuple[str, int]]]],
+    *,
+    merge_method: bool = True,
+    method_header: str = "Test Method",
+) -> bytes:
+    """합성 spec — Test Method 세그먼트 단위 세로병합 재현 (DV 레이아웃 축소판).
+
+    blocks: [(tc_id, unit, [(method, n_iters), ...]), ...]
+        method 세그먼트는 실물처럼 iteration 행만 덮는 세로병합(anchor만 값).
+        anchor 행 method는 빈 값 (DV/PV 실측 — '' 570/1,024건).
+    """
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "2.SW Unit Test Spec"
+    ws.cell(1, 1).value = "Software Unit Test"
+    ws.cell(3, 2).value = "Test Case"
+    ws.cell(3, 7).value = "Input"
+    ws.cell(3, 58).value = "Expected Result"
+    ws.cell(3, 162).value = "Related ID"
+    ws.cell(4, 2).value = "Index"
+    ws.cell(4, 3).value = "TC_ID"
+    ws.cell(4, 4).value = "Unit"
+    ws.cell(4, 5).value = method_header
+    ws.cell(4, 6).value = "Test Case Generation"
+    ws.cell(4, 7).value = " "
+    ws.cell(4, 8).value = "Inpt[0]"
+    ws.cell(4, 58).value = "ExpR[0]"
+    rr = 5
+    idx = 1
+    for tc_id, unit, segments in blocks:
+        anchor = rr
+        ws.cell(anchor, 2).value = idx
+        ws.cell(anchor, 3).value = tc_id
+        ws.cell(anchor, 4).value = unit
+        ws.cell(anchor, 8).value = "in_var"
+        ws.cell(anchor, 58).value = "exp_var"
+        it_no = 0
+        seg_start = anchor + 1
+        for method, n_iters in segments:
+            for _ in range(n_iters):
+                it_no += 1
+                ir = anchor + it_no
+                ws.cell(ir, 7).value = it_no
+                ws.cell(ir, 8).value = f"in{it_no}"
+                ws.cell(ir, 58).value = f"exp{it_no}"
+            seg_end = anchor + it_no
+            ws.cell(seg_start, 5).value = method  # 세그먼트 anchor만 값
+            if merge_method and seg_end > seg_start:
+                ws.merge_cells(start_row=seg_start, end_row=seg_end,
+                               start_column=5, end_column=5)
+            seg_start = seg_end + 1
+        rr = anchor + it_no + 1
+        idx += 1
+    bio = io.BytesIO()
+    wb.save(bio)
+    return bio.getvalue()
+
+
+class TestSpecFiExtraction:
+    """확정 규칙(2026-06-12) — FI 수량 = Test Method 'FI' 포함 TC 블록 수.
+
+    ground truth 실측 재현 검증 완료 (extract_spec_fi_stats, 2026-06-12):
+    DV bk_SwUTS_v0.11_251126.xlsm → FI 블록 405 / FI iteration 1,598,
+    PV wip_pv_SwUTS_v0.10_260608.xlsm → FI 블록 808 / FI iteration 3,229.
+    여기서는 합성 spec으로 규칙 요소(병합 전개/정규화/실패 폴백)를 가드.
+    """
+
+    def test_fi_blocks_and_iterations_with_merged_segments(self):
+        """FI 블록 카운트 + merged 세그먼트 전개로 iteration 블록별 귀속."""
+        from backend.services.swut_sutr_spec_builder import extract_spec_fi_stats
+        spec = _make_fi_spec_bytes([
+            ("SwUTC_0101", "fn_a", [("REQ", 2), ("FI", 3)]),
+            ("SwUTC_0102", "fn_b", [("REQ", 2)]),          # FI 없음 — 제외
+            ("SwUTC_0103", "fn_c", [("fi ", 1)]),          # 소문자+공백 정규화
+            ("SwUTC_0104", "fn_d", []),                    # stub — method 없음
+        ])
+        warns: list[str] = []
+        stats = extract_spec_fi_stats(
+            spec, spec_filename="t.xlsm", out_warnings=warns,
+        )
+        assert stats is not None
+        assert stats["blocks_total"] == 4
+        assert stats["fi_block_total"] == 2
+        assert stats["fi_block_keys"] == {"101", "103"}
+        assert stats["fi_iteration_total"] == 4
+        # 병합 전개 핵심 — FI 세그먼트 3행 중 anchor(첫 행)만 값 보유.
+        # 전개 없으면 iteration 1개만 귀속된다 (PV 병합 1,865 range 실측 근거).
+        assert stats["fi_iters_per_block"]["101"] == [3, 4, 5]
+        assert stats["fi_iters_per_block"]["103"] == [1]
+        assert stats["spec_filename"] == "t.xlsm"
+        assert stats["method_col"] == 5  # DV
+        assert not warns
+
+    def test_unmerged_method_rows_also_counted(self):
+        """DV 실측 — method 비병합(행마다 값) spec도 동일 산출."""
+        from backend.services.swut_sutr_spec_builder import extract_spec_fi_stats
+        spec = _make_fi_spec_bytes(
+            [("SwUTC_0101", "fn_a", [("FI", 1), ("FI", 1)])],
+            merge_method=False,
+        )
+        stats = extract_spec_fi_stats(spec)
+        assert stats is not None
+        assert stats["fi_block_total"] == 1
+        assert stats["fi_iters_per_block"]["101"] == [1, 2]
+
+    def test_pv_layout_method_col6_detected(self):
+        """PV — 'Safety Related' 삽입으로 Test Method=6, iter index=8."""
+        from backend.services.swut_sutr_spec_builder import extract_spec_fi_stats
+        spec = _make_pv_spec_bytes([
+            ("SwUFn_0101", "main", [("a", "b", "c"), ("d", "e", "f")]),
+        ])
+        # _make_pv_spec_bytes는 method(col6)에 'REQ' 기입 — FI로 치환.
+        wb = openpyxl.load_workbook(io.BytesIO(spec))
+        ws = wb["2.SW Unit Test Spec"]
+        ws.cell(6, 6).value = "FI"
+        ws.cell(7, 6).value = "FI"
+        bio = io.BytesIO()
+        wb.save(bio)
+        stats = extract_spec_fi_stats(bio.getvalue())
+        assert stats is not None
+        assert stats["method_col"] == 6
+        assert stats["fi_block_total"] == 1
+        assert stats["fi_block_keys"] == {"101"}
+        assert stats["fi_iters_per_block"]["101"] == [1, 2]
+
+    def test_method_header_missing_returns_none_with_warning(self):
+        """'Test Method' 헤더 미발견 — None + warning (노란 마킹 폴백)."""
+        from backend.services.swut_sutr_spec_builder import extract_spec_fi_stats
+        spec = _make_fi_spec_bytes(
+            [("SwUTC_0101", "fn_a", [("FI", 1)])],
+            method_header="Method종류",  # 비표준 헤더
+        )
+        warns: list[str] = []
+        assert extract_spec_fi_stats(spec, out_warnings=warns) is None
+        assert any("'Test Method' 헤더 열 미발견" in w for w in warns)
+
+    def test_no_spec_sheet_returns_none_with_warning(self):
+        """spec 시트 미발견 — None + warning."""
+        from backend.services.swut_sutr_spec_builder import extract_spec_fi_stats
+        wb = openpyxl.Workbook()
+        wb.active.title = "다른 시트"
+        bio = io.BytesIO()
+        wb.save(bio)
+        warns: list[str] = []
+        assert extract_spec_fi_stats(bio.getvalue(), out_warnings=warns) is None
+        assert any("spec 시트" in w for w in warns)
+
+    def test_corrupt_bytes_returns_none_with_warning(self):
+        """깨진 bytes — 예외 삼키고 None + warning (빌드 전체 실패 차단)."""
+        from backend.services.swut_sutr_spec_builder import extract_spec_fi_stats
+        warns: list[str] = []
+        assert extract_spec_fi_stats(b"not a zip", out_warnings=warns) is None
+        assert any("자동 산출 실패" in w for w in warns)
+        warns2: list[str] = []
+        assert extract_spec_fi_stats(b"", out_warnings=warns2) is None
+        assert any("비어있음" in w for w in warns2)
+
+    def test_composite_method_segment_not_counted_exact_match_rule(self):
+        """확정 규칙 — 'FI' strip+대소문자 무시 '정확 일치'만 집계.
+
+        'REQ/FI' 류 복합 표기는 미집계. DV/PV 실측 method 분포는
+        REQ/FI/빈값 3종뿐이라 현재 데이터엔 영향 없음 — 향후 spec 양식이
+        복합 표기를 도입하면 규칙 재확정 필요 (concerns 명기). 본 테스트가
+        깨지면 매칭 규칙이 부분 일치로 바뀐 것 — 사용자 재확정 없이 금지.
+        """
+        from backend.services.swut_sutr_spec_builder import extract_spec_fi_stats
+        spec = _make_fi_spec_bytes([
+            ("SwUTC_0101", "fn_a", [("REQ/FI", 2)]),   # 복합 표기 — 미집계
+            ("SwUTC_0102", "fn_b", [("FIT", 1)]),      # 부분 문자열 — 미집계
+            ("SwUTC_0103", "fn_c", [("FI", 1)]),
+        ])
+        stats = extract_spec_fi_stats(spec)
+        assert stats is not None
+        assert stats["blocks_total"] == 3
+        assert stats["fi_block_total"] == 1
+        assert stats["fi_block_keys"] == {"103"}
+        assert stats["fi_iteration_total"] == 1
+
+
+# ---------------------------------------------------------------------------
+# 라운드 107 — 로컬 실파일 ground truth 가드 (.codex_tmp 존재 시에만 — skipif)
+# ---------------------------------------------------------------------------
+
+_KJPDS02_REFS = os.path.join(
+    os.path.dirname(__file__), "..", "..", ".codex_tmp", "kjpds02_refs",
+)
+_DV_BK_SPEC = os.path.join(_KJPDS02_REFS, "bk_SwUTS_v0.11_251126.xlsm")
+_PV_WIP_SPEC = os.path.join(_KJPDS02_REFS, "wip_pv_SwUTS_v0.10_260608.xlsm")
+
+
+class TestSpecFiExtractionRealFiles:
+    """확정 규칙(2026-06-12) ground truth — 로컬 실파일 재현 가드.
+
+    DV 감사본 수기 402는 전 가용 산출물(SwUTS 백업 2종/SwUDS/코드)로 재현
+    불가한 stale 카운트로 판명 — 규칙 기준 실측은 405. 본 가드가 깨지면
+    추출 규칙 회귀이므로 산출물 warning의 402 추적성(규칙·spec 파일명
+    명기)도 함께 재검토할 것. 실파일은 git 미추적(.codex_tmp) — CI/타
+    환경에서는 skip (합성 spec 가드 ``TestSpecFiExtraction`` 이 대체).
+    """
+
+    @pytest.mark.skipif(
+        not os.path.exists(_DV_BK_SPEC),
+        reason="DV 백업 spec 로컬 미존재 (.codex_tmp/kjpds02_refs)",
+    )
+    def test_dv_backup_spec_fi_405_blocks_1598_iterations(self):
+        """DV bk_SwUTS_v0.11_251126.xlsm — FI 블록 405 / iteration 1,598."""
+        from backend.services.swut_sutr_spec_builder import extract_spec_fi_stats
+        with open(_DV_BK_SPEC, "rb") as f:
+            data = f.read()
+        warns: list[str] = []
+        stats = extract_spec_fi_stats(
+            data, spec_filename="bk_SwUTS_v0.11_251126.xlsm",
+            out_warnings=warns,
+        )
+        assert stats is not None
+        assert stats["blocks_total"] == 570
+        assert stats["fi_block_total"] == 405
+        assert stats["fi_iteration_total"] == 1598
+        assert stats["method_col"] == 5  # DV 레이아웃 — E열
+        assert stats["layout_detected"] is True
+        assert warns == []
+
+    @pytest.mark.skipif(
+        not os.path.exists(_PV_WIP_SPEC),
+        reason="PV WIP spec 로컬 미존재 (.codex_tmp/kjpds02_refs)",
+    )
+    def test_pv_wip_spec_fi_808_blocks_3229_iterations(self):
+        """PV wip_pv_SwUTS_v0.10_260608.xlsm — FI 블록 808 / iteration 3,229.
+
+        7,899행×189열 + Test Method 세로병합 1,865 range — merged range
+        전개 회귀 시 iteration 귀속이 무너져 본 수치가 깨진다 (~20s 로드).
+        """
+        from backend.services.swut_sutr_spec_builder import extract_spec_fi_stats
+        with open(_PV_WIP_SPEC, "rb") as f:
+            data = f.read()
+        warns: list[str] = []
+        stats = extract_spec_fi_stats(
+            data, spec_filename="wip_pv_SwUTS_v0.10_260608.xlsm",
+            out_warnings=warns,
+        )
+        assert stats is not None
+        assert stats["blocks_total"] == 1014
+        assert stats["fi_block_total"] == 808
+        assert stats["fi_iteration_total"] == 3229
+        assert stats["method_col"] == 6  # PV — 'Safety Related' 삽입 시프트, F열
+        assert stats["layout_detected"] is True
+        assert warns == []

@@ -532,12 +532,67 @@ def _write_ut101(
         safe_write(ws, row, 15, "N/A")
 
 
+def _cross_spec_fi_with_session(
+    spec_fi: dict[str, Any],
+    session: SwUTSession,
+) -> dict[str, Any]:
+    """spec FI 추출 결과 × 실행결과 교차 (확정 규칙 2026-06-12).
+
+    passed = FI 블록 중 (a) 모든 FI iteration이 실행결과에 존재하고 (b) 전부
+    Pass인 블록 수 — Fail 또는 미실행 FI iteration이 있으면 미통과.
+
+    ``not_executed_blocks`` = ≥1 FI iteration 미실행(또는 iteration index 파싱
+    불가 — 검증 불가는 보수적으로 미실행 취급) 블록 수, ``failed_blocks`` =
+    ≥1 Fail 블록 수. 한 블록이 양쪽 모두에 잡힐 수 있음 (집합 중첩 허용 —
+    total ≠ passed + 미실행 + fail 일 수 있다).
+    """
+    from backend.services.swut_sutr_spec_builder import _build_fn_iteration_map
+
+    fn_iter_map = _build_fn_iteration_map(session)
+    fi_keys: set[str] = spec_fi.get("fi_block_keys") or set()
+    rows_per: dict[str, list[int]] = spec_fi.get("fi_iter_rows_per_block") or {}
+    iters_per: dict[str, list[int]] = spec_fi.get("fi_iters_per_block") or {}
+
+    passed = 0
+    not_executed = 0
+    failed = 0
+    for key in sorted(fi_keys):
+        rows = rows_per.get(key) or []
+        iters = iters_per.get(key) or []
+        rec_map = fn_iter_map.get(key) or {}
+        any_missing = len(iters) < len(rows)  # index 파싱 불가 행 — 검증 불가
+        any_fail = False
+        for it in iters:
+            rec = rec_map.get(it)
+            if rec is None or rec.get("passed") is None:
+                any_missing = True
+            elif rec.get("passed") is False:
+                any_fail = True
+        if any_fail:
+            failed += 1
+        if any_missing:
+            not_executed += 1
+        if not any_fail and not any_missing:
+            passed += 1
+
+    return {
+        "total": int(spec_fi.get("fi_block_total") or 0),
+        "passed": passed,
+        "not_executed_blocks": not_executed,
+        "failed_blocks": failed,
+        "iteration_total": int(spec_fi.get("fi_iteration_total") or 0),
+        "spec_filename": str(spec_fi.get("spec_filename") or ""),
+        "rule": str(spec_fi.get("rule") or "Test Method 'FI' 포함 TC 블록 수"),
+    }
+
+
 def _write_ut201(
     ws,
     meta: SwutcrBuildMeta,
     agg: dict[str, Any],
     cfg: dict[str, Any],
     warnings: list[str] | None = None,
+    spec_fi_auto: dict[str, Any] | None = None,
 ) -> None:
     _write_swutcr_sheet_header(ws, meta, cfg)
     md = cfg.get("swutcr_metadata", {}) or {}
@@ -558,6 +613,37 @@ def _write_ut201(
     fi_passed = md.get("fault_injection_passed")
     has_fi_total = fi_total is not None and fi_total != ""
     has_fi_passed = fi_passed is not None and fi_passed != ""
+
+    # 확정 규칙(2026-06-12) — config 키 **둘 다 부재** + spec 자동 산출값 존재
+    # 시 spec 산출 FI stamp (config 하나라도 있으면 config 우선 — 기존 동작
+    # 그대로). 둘 다 없고 spec도 없으면 기존 노란 마킹 (HDPDM01 — 무회귀).
+    # warning 필수: 규칙·spec 파일명 명기 — DV 감사본 수기 402(재현 불가 stale
+    # 카운트)와의 차이가 추적 가능해야 한다 (실측 위장 금지).
+    if not has_fi_total and not has_fi_passed and spec_fi_auto:
+        try:
+            _auto_total = int(spec_fi_auto.get("total"))  # type: ignore[arg-type]
+            _auto_passed = int(spec_fi_auto.get("passed"))  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            _auto_total = _auto_passed = None  # type: ignore[assignment]
+            if warnings is not None:
+                warnings.append(
+                    "[swutcr] UT201 FI spec 자동 산출값 비정수 — stamp skip, "
+                    "노란 마킹 유지"
+                )
+        if _auto_total is not None and _auto_passed is not None:
+            fi_total, fi_passed = _auto_total, _auto_passed
+            has_fi_total = has_fi_passed = True
+            if warnings is not None:
+                _ne = int(spec_fi_auto.get("not_executed_blocks") or 0)
+                _fl = int(spec_fi_auto.get("failed_blocks") or 0)
+                _spec_name = spec_fi_auto.get("spec_filename") or "(파일명 미상)"
+                _rule = spec_fi_auto.get("rule") or "Test Method 'FI' 포함 TC 블록 수"
+                warnings.append(
+                    f"[swutcr] UT201 FI spec 자동 산출 — 규칙: {_rule}, "
+                    f"spec={_spec_name}, total={_auto_total}/passed={_auto_passed}"
+                    f"(미실행 {_ne}, fail {_fl})"
+                )
+
     if has_fi_total:
         safe_write(ws, 85, 5, fi_total)
     else:
@@ -691,6 +777,7 @@ def _write_swutcr_specific_sheets(
     agg: dict[str, Any],
     cfg: dict[str, Any],
     warnings: list[str] | None = None,
+    spec_fi_auto: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     written: dict[str, Any] = {}
     summary_ws = wb["Summary"] if "Summary" in wb.sheetnames else None
@@ -703,7 +790,9 @@ def _write_swutcr_specific_sheets(
     if "2.UT201" in wb.sheetnames:
         # C-5 배선 (라운드 96-final): FI 실측 미제공 시 _write_ut201이 emit하는
         # 사용자입력 마킹 warning이 산출물 warnings에 합류하도록 전달.
-        _write_ut201(wb["2.UT201"], meta, agg, cfg, warnings)
+        # 확정 규칙(2026-06-12): spec_fi_auto = spec 산출 × 실행결과 교차값 —
+        # config 키 부재 시 _write_ut201이 소비 (config 존재 시 무시).
+        _write_ut201(wb["2.UT201"], meta, agg, cfg, warnings, spec_fi_auto)
         written["ut201"] = True
     if "3.UT301" in wb.sheetnames:
         _write_ut301(wb["3.UT301"], meta, agg, cfg)
@@ -727,8 +816,16 @@ def build_swutcr_report(
     swuds_function_ids: set[str] | None = None,
     swuts_map: dict[str, Any] | None = None,
     hmr_html_bytes: bytes | None = None,
+    spec_fi: dict[str, Any] | None = None,
 ) -> SwutcrBuildResult:
-    """Build a SwUTCR xlsm from template and SwUT evidence data."""
+    """Build a SwUTCR xlsm from template and SwUT evidence data.
+
+    Args:
+        spec_fi: ``swut_sutr_spec_builder.extract_spec_fi_stats`` 결과 (확정
+            규칙 2026-06-12 — UT201 FI spec 자동 산출). None이면 기존 동작
+            (config 키 또는 노란 마킹). 존재 시 session 실행결과와 교차해
+            ``_write_ut201`` 에 전달 — config 키가 있으면 config 우선.
+    """
     if openpyxl is None:
         raise RuntimeError("openpyxl is required for SwUTCR builder")
 
@@ -971,9 +1068,16 @@ def build_swutcr_report(
         summary["audit_log_rows_written"] = count
         summary["audit_log_sheet_added"] = True
 
+    # 확정 규칙(2026-06-12) — UT201 FI spec 산출 × 실행결과 교차. spec_fi
+    # 부재 시 None → _write_ut201 기존 분기 (config 키 / 노란 마킹) 그대로.
+    spec_fi_auto: dict[str, Any] | None = None
+    if spec_fi:
+        spec_fi_auto = _cross_spec_fi_with_session(spec_fi, session)
+        summary["ut201_fi_auto"] = spec_fi_auto
+
     if any(name in wb.sheetnames for name in ("Summary", "1.UT101", "2.UT201")):
         summary["swutcr_specific_written"] = _write_swutcr_specific_sheets(
-            wb, meta, agg, cfg, warnings,
+            wb, meta, agg, cfg, warnings, spec_fi_auto,
         )
 
     out = io.BytesIO()

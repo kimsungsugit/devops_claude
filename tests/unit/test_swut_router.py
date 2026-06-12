@@ -1655,3 +1655,157 @@ class TestLogFoldersSchema:
             headers={"X-User": "tester"},
         )
         assert r.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# 라운드 107 — UT201 FI spec 자동 산출 라우터 게이트 (_resolve_spec_fi_for_swutcr)
+# ---------------------------------------------------------------------------
+
+def _make_fi_spec_min_bytes() -> bytes:
+    """FI 블록 1개짜리 최소 DV 레이아웃 spec (라우터 게이트 통과 검증용)."""
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "2.SW Unit Test Spec"
+    ws.cell(3, 2).value = "Test Case"
+    ws.cell(3, 58).value = "Expected Result"
+    ws.cell(3, 162).value = "Related ID"
+    ws.cell(4, 2).value = "Index"
+    ws.cell(4, 3).value = "TC_ID"
+    ws.cell(4, 4).value = "Unit"
+    ws.cell(4, 5).value = "Test Method"
+    ws.cell(4, 8).value = "Inpt[0]"
+    ws.cell(4, 58).value = "ExpR[0]"
+    ws.cell(5, 2).value = 1
+    ws.cell(5, 3).value = "SwUTC_0101"
+    ws.cell(5, 4).value = "fn_a"
+    ws.cell(6, 5).value = "FI"
+    ws.cell(6, 7).value = 1
+    ws.cell(6, 8).value = "0x0"
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+class TestSwutcrSpecFiResolve107:
+    """확정 규칙(2026-06-12) — config FI 키 부재 시에만 spec 1회 로드.
+
+    우선순위: config fault_injection_total/passed > spec 산출 > 노란 마킹.
+    config 키가 하나라도 있으면 spec 로드 자체를 skip (heavy 로드 비용 회피 +
+    _write_ut201 config 분기와 게이트 일치). spec path 부재(HDPDM01)는
+    None — 기존 노란 마킹 경로 무회귀.
+    """
+
+    def _req(self, **over) -> SwUTBuildRequest:
+        kw = dict(
+            project_id="HDPDM01",
+            release_sw_version="1.0.0",
+            test_date="2024-02-19",
+        )
+        kw.update(over)
+        return SwUTBuildRequest(**kw)
+
+    def _setup_cfg(self, tmp_path, monkeypatch, cfg_dict):
+        """resolve_swuts_path의 config fallback을 hermetic하게 격리."""
+        import json as _json
+        from backend.services import swut_meta_resolver as resolver_mod
+        cfg_path = tmp_path / "swut_meta.json"
+        cfg_path.write_text(_json.dumps(cfg_dict), encoding="utf-8")
+        monkeypatch.setattr(resolver_mod, "_META_CONFIG_PATH", str(cfg_path))
+        resolver_mod._read_meta_config_raw.cache_clear()
+
+    class _RaisingResolver:
+        """spec read가 호출되면 안 되는 경로 가드."""
+        def read_bytes(self, path):
+            raise AssertionError(f"spec read 금지 경로에서 read_bytes 호출: {path}")
+
+    class _BytesResolver:
+        def __init__(self, data: bytes):
+            self._data = data
+            self.read_paths: list[str] = []
+
+        def read_bytes(self, path):
+            self.read_paths.append(path)
+            return self._data
+
+    class _FailingResolver:
+        def read_bytes(self, path):
+            raise FileNotFoundError(path)
+
+    def test_config_fi_keys_present_skips_spec_load(self, tmp_path, monkeypatch):
+        from backend.routers import swut as swut_mod
+        self._setup_cfg(tmp_path, monkeypatch, {"projects": {"HDPDM01": {}}})
+        warns: list[str] = []
+        cfg = {"swutcr_metadata": {
+            "fault_injection_total": 402, "fault_injection_passed": 402,
+        }}
+        out = swut_mod._resolve_spec_fi_for_swutcr(
+            self._req(swuts_docx_path="C:/x/spec.xlsm"), cfg,
+            self._RaisingResolver(), warns,
+        )
+        assert out is None
+        assert warns == []
+
+    def test_config_partial_fi_key_skips_spec_load(self, tmp_path, monkeypatch):
+        """키 하나만 있어도 config 우선 — _write_ut201 partial 분기와 일치."""
+        from backend.routers import swut as swut_mod
+        self._setup_cfg(tmp_path, monkeypatch, {"projects": {"HDPDM01": {}}})
+        warns: list[str] = []
+        cfg = {"swutcr_metadata": {"fault_injection_total": 402}}
+        out = swut_mod._resolve_spec_fi_for_swutcr(
+            self._req(swuts_docx_path="C:/x/spec.xlsm"), cfg,
+            self._RaisingResolver(), warns,
+        )
+        assert out is None
+        assert warns == []
+
+    def test_no_spec_path_returns_none_silently(self, tmp_path, monkeypatch):
+        """HDPDM01 경로 — config 키도 spec도 없음 → None (노란 마킹 무회귀)."""
+        from backend.routers import swut as swut_mod
+        self._setup_cfg(tmp_path, monkeypatch, {"projects": {"HDPDM01": {}}})
+        warns: list[str] = []
+        out = swut_mod._resolve_spec_fi_for_swutcr(
+            self._req(), {"swutcr_metadata": {}}, self._RaisingResolver(), warns,
+        )
+        assert out is None
+        assert warns == []
+
+    def test_spec_read_failure_warns_and_returns_none(self, tmp_path, monkeypatch):
+        from backend.routers import swut as swut_mod
+        self._setup_cfg(tmp_path, monkeypatch, {"projects": {"HDPDM01": {}}})
+        warns: list[str] = []
+        out = swut_mod._resolve_spec_fi_for_swutcr(
+            self._req(swuts_docx_path="C:/x/spec.xlsm"), {},
+            self._FailingResolver(), warns,
+        )
+        assert out is None
+        assert any("UT201 FI spec 읽기 실패" in w for w in warns)
+
+    def test_spec_loaded_extracted_with_filename(self, tmp_path, monkeypatch):
+        """config 키 부재 + spec 존재 — 1회 로드 + 추출 + 파일명 동봉."""
+        from backend.routers import swut as swut_mod
+        self._setup_cfg(tmp_path, monkeypatch, {"projects": {"HDPDM01": {}}})
+        resolver = self._BytesResolver(_make_fi_spec_min_bytes())
+        warns: list[str] = []
+        out = swut_mod._resolve_spec_fi_for_swutcr(
+            self._req(swuts_docx_path="C:/x/wip_pv_SwUTS_v0.10_260608.xlsm"),
+            {"swutcr_metadata": {}}, resolver, warns,
+        )
+        assert out is not None
+        assert out["fi_block_total"] == 1
+        assert out["fi_block_keys"] == {"101"}
+        assert out["fi_iters_per_block"]["101"] == [1]
+        assert out["spec_filename"] == "wip_pv_SwUTS_v0.10_260608.xlsm"
+        assert resolver.read_paths == ["C:/x/wip_pv_SwUTS_v0.10_260608.xlsm"]
+
+    def test_config_spec_path_fallback_used(self, tmp_path, monkeypatch):
+        """req path 비면 config swuts_docx_path fallback (resolve_swuts_path 정책)."""
+        from backend.routers import swut as swut_mod
+        self._setup_cfg(tmp_path, monkeypatch, {"projects": {"HDPDM01": {
+            "swuts_docx_path": "U:/cfg/spec_from_cfg.xlsm",
+        }}})
+        resolver = self._BytesResolver(_make_fi_spec_min_bytes())
+        out = swut_mod._resolve_spec_fi_for_swutcr(
+            self._req(), {"swutcr_metadata": {}}, resolver, [],
+        )
+        assert out is not None
+        assert out["spec_filename"] == "spec_from_cfg.xlsm"

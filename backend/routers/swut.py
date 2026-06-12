@@ -793,6 +793,46 @@ def _do_sutr_build(req: SwUTBuildRequest) -> Response:
     )
 
 
+def _resolve_spec_fi_for_swutcr(
+    req: SwUTBuildRequest,
+    cfg: dict[str, Any],
+    resolver: Any,
+    out_warnings: list[str],
+) -> dict[str, Any] | None:
+    """확정 규칙(2026-06-12) — UT201 FI spec 자동 산출 입력 준비.
+
+    config ``swutcr_metadata.fault_injection_total/passed`` 가 **둘 다 부재**할
+    때만 SwUTS spec을 1회 로드해 FI 블록/iteration을 추출한다:
+
+    - config 키가 하나라도 있으면 None — ``_write_ut201`` 기존 config 분기
+      그대로 (heavy spec 로드 비용 회피).
+    - spec path 미해결이면 None — 기존 노란 마킹 유지 (HDPDM01 무회귀).
+    - 읽기/추출 실패는 out_warnings에 사유 push + None (실측 위장 금지).
+    """
+    md = cfg.get("swutcr_metadata", {}) or {}
+    fi_total = md.get("fault_injection_total")
+    fi_passed = md.get("fault_injection_passed")
+    if not (fi_total in (None, "") and fi_passed in (None, "")):
+        return None
+    from backend.services.swut_meta_resolver import resolve_swuts_path
+    spec_path = resolve_swuts_path(req, req.project_id)
+    if not spec_path:
+        return None
+    try:
+        spec_bytes = resolver.read_bytes(spec_path)
+    except (FileNotFoundError, PermissionError, OSError) as e:
+        out_warnings.append(
+            "[swutcr] UT201 FI spec 읽기 실패 — 자동 산출 skip (노란 마킹 "
+            f"유지). path={spec_path}, {type(e).__name__}: {e}"
+        )
+        return None
+    from backend.services.swut_sutr_spec_builder import extract_spec_fi_stats
+    spec_name = str(spec_path).replace("\\", "/").rsplit("/", 1)[-1]
+    return extract_spec_fi_stats(
+        spec_bytes, spec_filename=spec_name, out_warnings=out_warnings,
+    )
+
+
 def _do_swutcr_build(req: SwUTBuildRequest) -> Response:
     resolver = get_resolver()
     # B2 — 다중 log_folder: pre-flight check 폴더별 적용
@@ -830,17 +870,26 @@ def _do_swutcr_build(req: SwUTBuildRequest) -> Response:
     swuts_map = _resolver_resolve_swuts_test_specs(
         req, req.project_id, out_warnings=swuts_warnings,
     )
+    # 확정 규칙(2026-06-12) — UT201 FI spec 자동 산출. config FI 키 둘 다 부재
+    # 시에만 spec 1회 로드 (config 존재 시 기존 동작, spec도 없으면 노란 마킹).
+    fi_spec_warnings: list[str] = []
+    spec_fi = _resolve_spec_fi_for_swutcr(
+        req, meta.project_config or {}, resolver, fi_spec_warnings,
+    )
     result = build_swutcr_report(
         session, meta, template_bytes,
         deviation_cases=req.deviation_cases,
         swuds_function_ids=swuds_fn_ids,
         swuts_map=swuts_map,
         hmr_html_bytes=hmr_html_bytes,
+        spec_fi=spec_fi,
     )
     if hmr_warnings:
         result.warnings.extend(hmr_warnings)
     if swuts_warnings:
         result.warnings.extend(swuts_warnings)
+    if fi_spec_warnings:
+        result.warnings.extend(fi_spec_warnings)
     if not result.ok:
         raise HTTPException(status_code=500, detail="SwUTCR build failed (ok=False)")
     return _build_result_to_response(
