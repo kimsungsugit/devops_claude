@@ -911,3 +911,35 @@ backend 전체 SwUT/SwIT 회귀: 189 passed + 1 skipped (이전 ~190).
   FI 실측 부재 시 노란 사용자입력 마킹(실측 위장 제거).
 - 잔여(후속): PV SwUTS spec(작성중 v0.10_260608) released 후 config 교체+재빌드(N/A 44 해소),
   PV FI 실측 확보 시 swutcr_metadata 재기입, consistency checker 수식 셀 silent skip 가시화(리뷰 minor).
+
+## 라운드 97 (2026-06-12) — KJPDS02 PV SwUT 3종 재빌드 + 수정 항목 전수 재검증 (96-final/final-2 fix 발현 확인)
+
+> 라운드 96-final/96-final-2 fix가 반영된 빌더로 PV 3종 라이브 재빌드(.codex_tmp/poc_kjpds02_pv_build.py,
+> env 53 / TC 6880 / fail 0) 후 openpyxl 셀 단위 재검증 20체크. 결과 **20/20 PASS** (재검증 중 W-4 잔여
+> 결함 1건 발견·수정·재빌드 포함).
+
+### 재검증 결과 (전건 발현 확인)
+- SwUTCV: C10 템플릿 OK/NG 수식 보존(C-1) / 2.Traceability C5 '100.0% (1014 / 1014)'·C6 실측(C-2) /
+  R11 stale Exception 0건·H8 수동 산출 1.0000(C-3) / F8·G8 `D13:AMC13`/`D11:AMC11` 실폭 확장(W-1) /
+  3.Consistency D4~D7 살아있는 수식 + A1 내부노트 제거(W-3) / Total 블록 회색 음영 R1024 정위치·데이터행
+  잔존 0(W-13) / exception ID UT-CVG-PV- 60건·DV 0건(W-8) / Cover G26 `HKY-KJPDS02_PV-SwUTCV-2891`·J2
+  'Reviewer' 보존·G29 2026.06.04
+- SwUTR: F22 `=IFERROR((D22+E22)/C22,"")` + C10 `=F22` 단일 진리원, (526+44)/570=1.0 정합(C-4) /
+  C4 'KJPDS02_PV'·C5 '25A1'(W-11) / Cover G26·J2/L2/I3·J3 노란 마킹(C) / 3.Test Log col defs 10개
+  원본 spec 1:1(W-14)
+- SwUTCR: UT201 E85/F85/C90 노란 '▶ 사용자 입력 필요 — FI 실측 미제공'(C-5) / UT301 r90:91 라벨 보존 +
+  r92 값(W-6-①) / IT801 r50 라벨 + r51 값(W-6-②) / BTB C10 'SW 버전'·E10 'Test Period' 라벨 보존 +
+  r12 값(0.1/25A1)(W-6-③) / UT101 UT-CVG-PV- 21건(W-8) / Cover G26 `HKY-KJPDS02_PV-SwUTCR-2892`
+- 수치 무회귀: SwUT_17_Cpu 블록 spot 5함수(_EntryPoint/PE_Initialize_* 4) stmt/branch ↔
+  app_Cpu_Aggregate.html 전수 일치 (fabrication 0건 유지)
+
+### 본 라운드 fix (재검증 중 발견)
+| # | 결함 | fix |
+|---|------|-----|
+| W-4 잔여 | `_write_not_executed_list` 가용 행 스캔이 헤더(R26) 바로 아래 **컬럼 sub-header(R27 'Test Case ID'...)에서 break** → 가용 행 0 → 미실행 44건 목록 여전히 미기재 (96-final-2 fix 미발현 — 라이브 검증 누락분) | sub-header 행은 skip 후 그 아래 빈 행(R28~R31)을 가용 행으로 사용. 재빌드 후 대표 3건 + '외 41건 — DV spec(v1.01) 등재, PV 로그 미실행' 기재 확인. spec_based 경로 전용 — v3.01/SwIT 비영향. 신규 테스트 2건 |
+
+### 데이터 한계 (issues 기록만 — 코드 무변경)
+- SwUTR 3.Test Log hidden 열(18-57/74-161): DV **감사본**에만 존재(엔지니어 수동 숨김) — 원본 SwUTS spec
+  v1.01 시트는 hidden 정의 없음(worker 실측: 10 col defs, H:8-161 w14.625). W-14 복제 로직은 원본과 1:1
+  일치 — 정상. PV SwUTS released 시 재확인.
+- FI 실측/미실행 44건(N/A)/Reviewer 이름: PV 실측·spec 교체·사용자 입력 대기 (96-final-2 잔여 동일).

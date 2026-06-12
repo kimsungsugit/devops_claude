@@ -600,3 +600,63 @@ def test_w14_copy_sheet_preserves_column_dimension_ranges():
     assert dd.max == 57
     assert dd.hidden is True
     assert dd.width == 9.0
+
+
+def test_not_executed_list_skips_column_subheader():
+    """라운드 97 재검증 — W-4 발현 보장: 컬럼 sub-header에서 break 금지.
+
+    KJPDS02 v1.01 실측: '■ List of Test Case not Executed'(R26) 바로 아래
+    R27이 컬럼 sub-header('Test Case ID'/'Rationale ...')라 기존 스캔이
+    즉시 break → 가용 행 0 → 목록 영영 미기재. sub-header는 skip하고 그
+    아래 빈 행(R28~)에 대표 목록 + '외 N건' 요약을 기재해야 한다.
+    """
+    from backend.services.swut_sutr_spec_builder import _write_not_executed_list
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "1.Test Summary"
+    ws.cell(row=26, column=2, value="■ List of Test Case not Executed")
+    ws.cell(row=27, column=2, value="Test Case ID")
+    ws.cell(row=27, column=3, value="Rationale why test case is not executed")
+    ws.cell(row=27, column=6, value="When test case executes")
+    ws.cell(row=32, column=2, value="■  Test Defects List")
+
+    fill_stats = {
+        "fn_na": 44,
+        "na_tc_list": [f"SwUT_x_{i:02d} (SwUFn_{i:04d})" for i in range(1, 9)],
+    }
+    summary: dict = {}
+    warnings: list[str] = []
+    written = _write_not_executed_list(wb, fill_stats, summary, warnings)
+
+    assert written == 4  # 대표 3 (R28~R30) + '외 41건' 요약 (R31)
+    assert ws.cell(row=28, column=2).value == "SwUT_x_01 (SwUFn_0001)"
+    assert ws.cell(row=30, column=2).value == "SwUT_x_03 (SwUFn_0003)"
+    assert "외 41건" in str(ws.cell(row=31, column=2).value)
+    # sub-header(R27)·다음 섹션(R32) 침범 금지.
+    assert ws.cell(row=27, column=2).value == "Test Case ID"
+    assert ws.cell(row=32, column=2).value == "■  Test Defects List"
+    assert summary["not_executed_list_rows"] == 4
+    assert summary["not_executed_total"] == 44
+    assert not [w for w in warnings if "가용 행 0" in w]
+
+
+def test_not_executed_list_without_subheader_unchanged():
+    """sub-header 없는 양식(헤더 바로 아래 빈 행)은 기존 동작 그대로."""
+    from backend.services.swut_sutr_spec_builder import _write_not_executed_list
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "1.Test Summary"
+    ws.cell(row=10, column=2, value="■ List of Test Case not Executed")
+    ws.cell(row=15, column=2, value="■  Test Defects List")
+
+    fill_stats = {"fn_na": 2, "na_tc_list": ["TC_A (SwUFn_0001)", "TC_B (SwUFn_0002)"]}
+    summary: dict = {}
+    warnings: list[str] = []
+    written = _write_not_executed_list(wb, fill_stats, summary, warnings)
+
+    assert written == 2  # 전건 기재 — 요약 행 없음
+    assert ws.cell(row=11, column=2).value == "TC_A (SwUFn_0001)"
+    assert ws.cell(row=12, column=2).value == "TC_B (SwUFn_0002)"
+    assert ws.cell(row=13, column=2).value is None

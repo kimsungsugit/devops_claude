@@ -833,6 +833,17 @@ def _write_not_executed_list(
             ts_ws.cell(r, c).value for c in range(max(1, hc - 1), hc + 8)
         ]
         if any(v not in (None, "") for v in row_vals):
+            # 라운드 97 재검증 fix — 섹션 컬럼 sub-header 행('Test Case ID' /
+            # 'Rationale why ...')은 목록 영역의 일부다. KJPDS02 v1.01 실측:
+            # 헤더(R26) 바로 아래 R27이 sub-header라 여기서 break하면 가용 행
+            # 0 → 미실행 목록이 영영 미기재 (W-4 fix 무효화). sub-header는
+            # skip하고 그 아래 빈 행을 가용 행으로 쓴다. 다음 섹션 헤더
+            # ('■ ...' 등 일반 비어있지 않은 행)는 기존대로 break.
+            if any(
+                isinstance(v, str) and v.strip().lower() == "test case id"
+                for v in row_vals
+            ):
+                continue
             break
         avail.append(r)
     if not avail:
