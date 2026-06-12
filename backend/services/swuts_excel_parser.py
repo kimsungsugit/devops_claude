@@ -50,7 +50,11 @@ except ImportError:  # pragma: no cover - hook fail-safe
 XLSM_MAX_BYTES = 64 * 1024 * 1024  # 64MB — DoS 방지
 _TC_SHEET_RE = re.compile(r"(Unit|Integration)\s*Test\s*Spec", re.IGNORECASE)
 _HEADER_SCAN_MAX_ROWS = 15  # 첫 15 row에서 header 자동 감지
-_DATA_SCAN_MAX_ROWS = 2000  # data row max (KJPDS02 ~140 TC, 안전 마진)
+# 라운드 106 — 2000 → 20000. KJPDS02 PV 작성중 SwUTS(v0.10_260608)는 data
+# 7,898행(블록 1,014)인데 구 한도 2000이 silent 절단 → by_tc_id 288 entries
+# (3.Consistency X 350 직접 원인). DV spec(~4,338행)도 동일 절단이 잠재해
+# 있었음. 한도 초과 시 이제 warning emit (아래 truncation 검사).
+_DATA_SCAN_MAX_ROWS = 20000  # data row max (PV 7,898행 + 안전 마진)
 _MAX_COL = 30  # 회사 양식 최대 컬럼 추정 (KJPDS02 SwUTS는 20+)
 _MIN_HEADER_LABELS = 3  # header row 인식 임계
 
@@ -473,6 +477,17 @@ def parse_swuts_xlsm(
             if entries_this_sheet == 0:
                 warnings.append(
                     f"시트 {sheet_name!r}: data row 0건 — header 다음 row가 모두 빈 cell"
+                )
+
+            # 라운드 106 — silent 절단 가드: 시트 데이터가 스캔 한도를 넘으면
+            # 사용자/audit reviewer가 누락을 인지하도록 warning emit.
+            sheet_max_row = int(getattr(ws, "max_row", 0) or 0)
+            scan_last_row = header_row_1based + _DATA_SCAN_MAX_ROWS
+            if sheet_max_row > scan_last_row:
+                warnings.append(
+                    f"시트 {sheet_name!r}: data {sheet_max_row}행 > 스캔 한도 "
+                    f"{scan_last_row}행 — row {scan_last_row + 1}~{sheet_max_row} "
+                    "TC 누락 가능 (_DATA_SCAN_MAX_ROWS 상향 필요)"
                 )
         except Exception as exc:
             warnings.append(

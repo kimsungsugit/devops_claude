@@ -63,3 +63,23 @@ class TestSwutMetaConfigKJPDS02PV:
                 f"{key}: DV 실측 고정값 — PV 전환으로 제거됨 "
                 "(부재 시 aggregator가 session 계산값으로 graceful fallback)"
             )
+
+    def test_swuts_docx_path_wip_pv_spec_v0_10(self):
+        """2026-06-10 — swuts_docx_path가 작성중 PV spec(v0.10_260608)을 가리킴.
+
+        빌더 라운드 105(spec 레이아웃 동적화)와 한 쌍인 config 교체분 가드:
+        - 구 DV spec(v1.01_251205_R)으로 조용히 되돌아가면 PV SwUT 빌드가
+          구 spec 기반으로 산출되는 회귀.
+        - top-level 키가 비면 resolve_swuts_path가 iso26262_docs.swuts_xlsm_path
+          (여전히 DV v1.01_R)로 폴백하는 잠재 함정 — 비어있지 않음을 고정.
+        """
+        k = _load_cfg()["projects"]["KJPDS02"]
+        p = k["swuts_docx_path"]
+        assert isinstance(p, str) and p.strip(), (
+            "swuts_docx_path 공란 — iso26262_docs(DV spec) silent 폴백 함정"
+        )
+        assert p.endswith(
+            "작성중(KJPDS02_SwUTS) Software Unit Test "
+            "Specification_v0.10_260608.xlsm"
+        ), f"PV WIP spec 미지정: {p!r}"
+        assert "v1.01_251205_R" not in p, "구 DV spec으로 회귀 금지"

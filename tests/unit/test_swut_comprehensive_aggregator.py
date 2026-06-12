@@ -355,6 +355,81 @@ class TestUt201FaultInjection96Final:
         assert str(ws.cell(90, 3).value).strip() == "해당 사항 없음"
 
 
+class TestUt201FaultInjectionR105Branches:
+    """라운드 105 — UT201 FI 분기 가드 (config 우선 / 부재 시 노란 마킹).
+
+    **spec 산출 분기는 구현 보류 상태 그대로** — DV v1.01 산출물로 'FI=402'
+    산출 규칙 실증 불가(세 후보 1,598/405/405 전부 불일치, Probe 결론). 검증
+    불가 추정 기반 자동화는 금지이므로 여기서는 구현된 두 분기(config 실측
+    stamp / 부재 시 사용자입력 마킹)의 경계만 보강한다 — spec 기반 자동 산출이
+    추가되려면 문서 작성자/검토자의 산출 규칙 확정이 선행돼야 한다.
+    """
+
+    def test_fi_partial_keys_total_only_marks_passed_and_skips_derived(self):
+        """total만 있고 passed 부재 — 있는 키는 stamp, 없는 키만 마킹.
+
+        파생 수식(G85/H85)·C90 비고는 절반 입력 기반 stamp 금지 (placeholder
+        operand #VALUE! 차단), warning은 누락 키만 명시.
+        """
+        from backend.services.swut_comprehensive_aggregator import _write_ut201
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        warns: list[str] = []
+        cfg = {"swutcr_metadata": {"fault_injection_total": 402}}
+        _write_ut201(ws, _meta_96final(), {}, cfg, warns)
+        assert ws.cell(85, 5).value == 402                     # 실측 있는 키 stamp
+        assert str(ws.cell(85, 6).value or "").startswith("▶")  # 부재 키 마킹
+        assert ws.cell(85, 6).fill.start_color.rgb == _USER_INPUT_YELLOW
+        assert ws.cell(85, 7).value is None                    # 파생 수식 미기입
+        assert ws.cell(85, 8).value is None
+        assert str(ws.cell(90, 3).value or "").startswith("▶")
+        assert any("fault_injection_passed" in w for w in warns)
+        assert not any("fault_injection_total" in w for w in warns)
+
+    def test_fi_empty_string_values_treated_as_absent(self):
+        """config 키가 빈 문자열이면 부재와 동일 — 노란 마킹 + warning.
+
+        빈 값을 stamp하면 측정한 것처럼 보이는 공란이 됨 (silent N/A 정책 위반).
+        """
+        from backend.services.swut_comprehensive_aggregator import _write_ut201
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        warns: list[str] = []
+        cfg = {"swutcr_metadata": {
+            "fault_injection_total": "",
+            "fault_injection_passed": "",
+        }}
+        _write_ut201(ws, _meta_96final(), {}, cfg, warns)
+        for row, col in ((85, 5), (85, 6), (90, 3)):
+            assert str(ws.cell(row, col).value or "").startswith("▶")
+            assert ws.cell(row, col).fill.start_color.rgb == _USER_INPUT_YELLOW
+        assert ws.cell(85, 7).value is None
+        assert ws.cell(85, 8).value is None
+        assert any("fault injection 실측 미제공" in w for w in warns)
+
+    def test_fi_no_spec_derivation_even_with_rich_agg(self):
+        """보류 가드 — agg에 함수/패스 카운트가 있어도 FI 자동 산출 금지.
+
+        함수 수 기반 fallback(과거 fabrication) 재도입 + 미확정 spec 산출
+        규칙 선구현 양쪽을 차단: config 키 부재면 무조건 사용자입력 마킹.
+        """
+        from backend.services.swut_comprehensive_aggregator import _write_ut201
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        warns: list[str] = []
+        rich_agg = {
+            "swutcr_qualified_function_count": 1005,
+            "total": 6880, "tested": 6880, "passed": 6880, "failed": 0,
+        }
+        _write_ut201(ws, _meta_96final(), rich_agg, {"swutcr_metadata": {}}, warns)
+        assert ws.cell(85, 3).value == 1005          # 함수 수는 정상 stamp
+        for row, col in ((85, 5), (85, 6)):
+            v = ws.cell(row, col).value
+            assert not isinstance(v, int), f"FI 자동 산출 금지 위반: ({row},{col})={v!r}"
+            assert str(v or "").startswith("▶")
+        assert any("실측 미제공" in w for w in warns)
+
+
 class TestW6LabelRowFixes96Final:
     """W-6 ①②③ — 머지 라벨 헤더행 덮어쓰기 결함 fix (값은 헤더 아래 값행에).
 

@@ -943,3 +943,25 @@ backend 전체 SwUT/SwIT 회귀: 189 passed + 1 skipped (이전 ~190).
   v1.01 시트는 hidden 정의 없음(worker 실측: 10 col defs, H:8-161 w14.625). W-14 복제 로직은 원본과 1:1
   일치 — 정상. PV SwUTS released 시 재확인.
 - FI 실측/미실행 44건(N/A)/Reviewer 이름: PV 실측·spec 교체·사용자 입력 대기 (96-final-2 잔여 동일).
+
+## 라운드 105~106 (2026-06-12) — PV SwUTS spec 호환 (SpecLayout 동적화) + 파서 절단 fix + 보더/표기
+
+> 작성중 PV SwUTS(v0.10_260608, 7,899행×189열 — TC_ID `SwUFn_` 직접·Safety Related 신설·Expected 105~188·Related ID 189)
+> 를 빌드 가능하게. Probe가 고정 상수(162/266~268) 적용 시 깨짐 9건을 실행 실증한 뒤 동적화.
+
+| 항목 | 내용 |
+|---|---|
+| SpecLayout 동적화 | frozen dataclass + `_detect_spec_layout`(r3 'Expected Result'/'Related ID' 스캔, r4 ExpR 폴백, 실패 시 DV 상수 fallback+warning). DV에서 산출값==기존 상수(기존 테스트 무수정 통과 = 하위 호환 게이트). PV: Actual=189~272, PF/PT/LOG=273/274/275, iter col 8 |
+| 파서 silent 절단 fix | `_DATA_SCAN_MAX_ROWS` 2,000→20,000 + 한도 초과 warning — PV spec 7,899행 중 288/1,014 TC만 캡처돼 3.Consistency X=350의 직접 원인이었음 |
+| 보더 fix (사용자 보고) | Pass/Fail(L:double R:thin)·Pass(전변 thin)·Log Data(L:thin, 첫행 T:medium) — DV 감사본 패턴, 동적 좌표 적용 |
+| config | swuts_docx_path → 작성중 PV spec (released 후 R 버전 교체 주석) |
+| '외 N건' 표기 중립화 | 'DV spec(v1.01) 등재' → 'spec 등재, 실행 로그 미발견' (spec 소스 가변) |
+
+- **UT201 FI 자동 산출은 구현 보류 (정직성 규약)**: DV 402를 세 방식(FI iteration 1,598/FI 블록 405/FI 함수 405)으로
+  재계산 — 전부 불일치. 405−3=402가 후기 추가 TC 3건(SwUTC_3351~3353)과 정확히 맞고 Test Method 컬럼 자체가
+  SwUTCR v0.10 작성 후 추가됨 → 402는 stale 수기 카운트 추정. **산출 규칙은 문서 작성자 확인 필요** — 확정 전 자동화는 위조.
+- PV spec 재빌드 라이브 검증: 블록 1,014(N/A 1 = spec 데이터 결함 'SwUfn_1361' 소문자 stub), 3.Consistency X 418→**0**,
+  Traceability 100.0% (1014/1014), Expected/SUDS 원본 비침범, 보더 DV 패턴 재현, Cpu spot 수치 무회귀.
+- WIP spec 데이터 결함(작성자 정리 필요): `SwUfn_1361` 소문자 stub TC 1건, Test Method 없는 iteration 9행
+  (SwUFn_1558/1562/1566/1568). 잔여 minor: Related ID 잔존 191셀(라벨 0 anchor), partial-detection 가드 2건.
+- 신규 테스트 +18. 회귀: 2,699 passed / 1 skipped / 1 deselected.

@@ -61,12 +61,29 @@ VectorCAST ``actual_result`` 는 dotted 변수명 분리(예 ``_LP0DR.Byte`` →
 ## ISO 26262 Tool Qualification
 ASIL A 한정 draft. B/C/D는 manual review 의무. Input/Expected는 spec 그대로 보존
 (audit truth 불변), Actual/Pass-Fail만 추가.
+
+## 라운드 105 — spec 컬럼 레이아웃 동적화 (PV WIP spec 공존)
+
+PV SwUTS spec(작성중 v0.10)은 'Safety Related' 열 삽입(col 5)으로 Test Method=6/
+Generation=7/iteration index=8/Inpt[0]=9, Expected=ExpR[0..83](105~188), Related
+ID(r4='SUDS')=189 — DV 고정 상수(Expected 58~161, Related ID=162)를 그대로 쓰면
+Actual stamp가 Expected 헤더/데이터(105~188)와 SUDS(189)를 덮어쓰고 겹침 병합을
+만든다(실측 깨짐 9건). 따라서 위 레이아웃 표는 **DV 레퍼런스 기본값**이며, 실제
+빌드는 ``_detect_spec_layout`` 이 r3 그룹 헤더('Expected Result'/'Related ID') +
+r4 'ExpR[..]'/'Inpt[..]' 서브헤더를 스캔해 ``SpecLayout`` 을 동적 산출한다:
+
+- Actual 시작 = Related ID 열 (대체 — DV 레퍼런스 SUTR과 동일 규칙).
+- Actual 폭 = Expected 폭, Pass/Fail·Pass·Log Data = Actual 끝 +1/+2/+3.
+- iteration index 열 = Inpt[0] 직전 열 (DV=G7, PV=8).
+- **DV 호환 게이트**: DV spec에서 동적 산출값 == 기존 상수 (58/162/266/267/268).
+  스캔 실패 시 DV 상수 fallback + warning.
 """
 from __future__ import annotations
 
 import hashlib
 import io
 import re
+from dataclasses import dataclass
 from typing import Any
 
 try:
@@ -97,7 +114,9 @@ from backend.services.swut_input_adapter import SwUTSession, aggregate_session
 from backend.services.swut_sutr_aggregator import SutrBuildMeta, SutrBuildResult
 
 # ---------------------------------------------------------------------------
-# 레이아웃 상수 (KJPDS02 v1.01 레퍼런스 실측)
+# 레이아웃 상수 (KJPDS02 DV v1.01 레퍼런스 실측 — 라운드 105부터 **기본값/fallback**.
+# 실제 빌드는 _detect_spec_layout 이 SpecLayout 을 동적 산출. DV spec에서는 산출값
+# == 아래 상수 (하위 호환 게이트 — 기존 268열 테스트 단언 무수정 통과 근거).)
 # ---------------------------------------------------------------------------
 
 SPEC_SHEET_RE = re.compile(r"(Unit|Integration)\s*Test\s*Spec", re.IGNORECASE)
@@ -108,13 +127,20 @@ HEADER_SECTION_ROW = 3       # 병합 섹션 헤더 (Test Case / Input / Expecte
 SUBHEADER_ROW = 4            # 서브헤더 (Index / TC_ID / Inpt[0] / ExpR[0] / Param 1 ...)
 DATA_START_ROW = 5           # 첫 함수 anchor
 
+# 라운드 105 — Safety Related 열 삽입(PV col 5) 전수 점검 결과:
+#   - COL_INDEX/COL_TC_ID/COL_UNIT(2/3/4)는 DV·PV 동일 (Safety Related는 Unit 뒤
+#     삽입 — PV r4 실측 Index(2)/TC_ID(3)/Unit(4)/Safety Related(5)) → 고정 유지.
+#   - COL_METHOD/COL_GENERATION은 DV 위치(5/6) 참고용 — 빌더 로직 미사용 (PV는 6/7).
+#   - COL_ITER_INDEX/COL_INPUT_START는 PV에서 8/9로 시프트 → SpecLayout 동적
+#     (iter_index = Inpt[0] 직전 열). 아래 값은 DV 기본값.
+#   - HEADER_SECTION_ROW/SUBHEADER_ROW/DATA_START_ROW(3/4/5)는 DV·PV 동일 → 고정.
 COL_INDEX = 2                # B
 COL_TC_ID = 3                # C
 COL_UNIT = 4                 # D
-COL_METHOD = 5               # E
-COL_GENERATION = 6           # F
-COL_ITER_INDEX = 7           # G
-COL_INPUT_START = 8          # H
+COL_METHOD = 5               # E (DV 전용 참고 — 로직 미사용)
+COL_GENERATION = 6           # F (DV 전용 참고 — 로직 미사용)
+COL_ITER_INDEX = 7           # G (DV 기본값 — PV=8, SpecLayout.iter_index 사용)
+COL_INPUT_START = 8          # H (DV 기본값 — PV=9, SpecLayout.input_start 사용)
 
 # Expected 끝 = spec 시트 마지막 데이터 열 직전(FE=161). spec FF(162)=Related ID.
 # 레퍼런스 SUTR: Actual=FF(162)~JE(265), JF(266)=Pass/Fail, JG(267)=Total, JH(268)=Log.
@@ -133,6 +159,132 @@ _FILL_RGB = USER_INPUT_FILL_RGB
 
 
 # ---------------------------------------------------------------------------
+# 라운드 105 — spec 컬럼 레이아웃 동적 산출
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class SpecLayout:
+    """spec 시트 컬럼 레이아웃 (라운드 105 — 헤더 스캔 동적 산출).
+
+    기본값 = DV 레퍼런스(KJPDS02 v1.01, 268열) 상수와 동일 — 스캔 실패 fallback /
+    레거시 직접 호출(layout 미전달) 시에도 기존 동작 보존. 파생 좌표는 전부
+    property 로 단일 진리원화:
+
+    - ``actual_start`` = Related ID 열 (대체) — DV 162 / PV 189.
+    - ``actual_max`` = Expected 폭 — DV 104 / PV 84.
+    - ``pass_fail``/``pass_total``/``log_data`` = Actual 끝 +1/+2/+3 —
+      DV 266/267/268, PV 273/274/275.
+    - ``iter_index`` = Inpt[0] 직전 열 — DV 7(G) / PV 8.
+    """
+
+    expected_start: int = COL_EXPECTED_START   # 58 (DV) / 105 (PV)
+    related_id: int = COL_RELATED_ID           # 162 (DV) / 189 (PV)
+    input_start: int = COL_INPUT_START         # 8 (DV) / 9 (PV)
+    detected: bool = False                     # True = 헤더 스캔 성공
+
+    @property
+    def actual_start(self) -> int:
+        return self.related_id
+
+    @property
+    def actual_max(self) -> int:
+        return self.related_id - self.expected_start
+
+    @property
+    def pass_fail(self) -> int:
+        return self.actual_start + self.actual_max
+
+    @property
+    def pass_total(self) -> int:
+        return self.pass_fail + 1
+
+    @property
+    def log_data(self) -> int:
+        return self.pass_total + 1
+
+    @property
+    def iter_index(self) -> int:
+        return self.input_start - 1
+
+
+def _detect_spec_layout(ws, out_warnings: list[str] | None = None) -> SpecLayout:
+    """spec 시트 헤더 스캔 → :class:`SpecLayout` 동적 산출 (라운드 105).
+
+    r3 그룹 헤더('Expected Result' 시작 / 'Related ID' 위치)를 1차 소스로,
+    r4 'ExpR[..]' 범위를 r3 미발견 시 폴백 소스로 사용한다 (병합 r3 헤더는
+    read-write 로드에서 anchor 셀에 값이 있으므로 직접 읽기 가능). iteration
+    index 열은 r4 'Inpt[..]' 첫 위치 직전 열로 산출 (DV=7, PV=8 — PV col 7은
+    Generation Method 세그먼트 병합이라 고정 상수로는 iteration 행 67% 누락).
+
+    **반드시 ``_write_log_headers`` 전에 호출** — 헤더 stamp가 r3 'Related ID'
+    를 'Actual Result'로 덮어쓰므로 이후에는 스캔 불가.
+
+    스캔 실패(헤더 미발견/순서 모순) 시 DV 상수 fallback + warning.
+    """
+    max_col = min(int(ws.max_column or 0), 4096)
+
+    expected_start: int | None = None
+    related_id: int | None = None
+    for c in range(1, max_col + 1):
+        v = ws.cell(HEADER_SECTION_ROW, c).value
+        if not isinstance(v, str):
+            continue
+        t = " ".join(v.split()).lower()
+        if expected_start is None and t == "expected result":
+            expected_start = c
+        elif related_id is None and t == "related id":
+            related_id = c
+
+    expr_first: int | None = None
+    expr_last: int | None = None
+    inpt_first: int | None = None
+    for c in range(1, max_col + 1):
+        v = ws.cell(SUBHEADER_ROW, c).value
+        if not isinstance(v, str):
+            continue
+        t = v.strip().lower()
+        if t.startswith("expr["):
+            if expr_first is None:
+                expr_first = c
+            expr_last = c
+        elif t.startswith("inpt[") and inpt_first is None:
+            inpt_first = c
+
+    # r3 미발견 시 r4 ExpR[..] 범위 폴백 (Expected 시작=ExpR[0], Related ID=마지막+1).
+    if expected_start is None:
+        expected_start = expr_first
+    if related_id is None and expr_last is not None:
+        related_id = expr_last + 1
+
+    if (
+        expected_start is None
+        or related_id is None
+        or not (COL_UNIT < expected_start < related_id)
+    ):
+        if out_warnings is not None:
+            out_warnings.append(
+                "[spec-sutr] spec 헤더 스캔 실패 ('Expected Result'/'Related ID'/"
+                "'ExpR[..]' 미발견 또는 순서 모순) — DV 레퍼런스 상수 레이아웃 "
+                f"fallback (Actual={COL_ACTUAL_START}, Pass/Fail={COL_PASS_FAIL})"
+            )
+        return SpecLayout()
+
+    # iteration index = Inpt[0] 직전 열. Inpt 미발견/비정상(<7 — Test Case 메타
+    # 열 침범)이면 DV 기본값 8 유지.
+    if inpt_first is not None and COL_GENERATION < inpt_first < expected_start:
+        input_start = inpt_first
+    else:
+        input_start = COL_INPUT_START
+
+    return SpecLayout(
+        expected_start=expected_start,
+        related_id=related_id,
+        input_start=input_start,
+        detected=True,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
@@ -144,14 +296,22 @@ def _find_spec_sheet(wb: Workbook):
     return None, None
 
 
-def _scan_spec_blocks(ws) -> list[dict[str, Any]]:
+def _scan_spec_blocks(ws, layout: SpecLayout | None = None) -> list[dict[str, Any]]:
     """spec 시트 anchor 스캔 → 함수 블록 list.
 
     각 블록: anchor row(B=Index digit, C=TC_ID, D=Unit) + iteration row들.
 
+    TC_ID는 DV ``SwUTC_NNNN`` / PV ``SwUFn_NNNN`` 직접 표기 모두 지원 — 숫자만
+    추출(``(\\d+)``)하므로 prefix·대소문자('SwUfn_1361' WIP 오타 포함) 무관하게
+    VectorCAST ``SwUFn_NNNN.MMM`` 매칭 키가 나온다.
+
+    iteration index 열은 ``layout.iter_index`` (DV=7/G, PV=8 — PV col 7은
+    Generation Method 세그먼트 병합이라 고정 7 사용 시 행 67% 누락, 라운드 105).
+
     Returns:
         [{anchor, tc_id, unit, num(4-digit), iter_rows: [row,...]}, ...]
     """
+    lo = layout or SpecLayout()
     blocks: list[dict[str, Any]] = []
     rr = DATA_START_ROW
     max_row = ws.max_row
@@ -162,7 +322,7 @@ def _scan_spec_blocks(ws) -> list[dict[str, Any]]:
             tc_id = str(c).strip()
             num_m = re.search(r"(\d+)", tc_id)
             num = num_m.group(1) if num_m else ""
-            # iteration row: anchor 다음부터, 다음 anchor 전까지, G(iter index) 보유.
+            # iteration row: anchor 다음부터, 다음 anchor 전까지, iter index 보유.
             iter_rows: list[int] = []
             k = rr + 1
             while k <= max_row:
@@ -170,7 +330,7 @@ def _scan_spec_blocks(ws) -> list[dict[str, Any]]:
                 nc = ws.cell(k, COL_TC_ID).value
                 if str(nb if nb is not None else "").strip().isdigit() and nc:
                     break  # 다음 anchor
-                g = ws.cell(k, COL_ITER_INDEX).value
+                g = ws.cell(k, lo.iter_index).value
                 if g not in (None, ""):
                     iter_rows.append(k)
                 k += 1
@@ -187,14 +347,20 @@ def _scan_spec_blocks(ws) -> list[dict[str, Any]]:
     return blocks
 
 
-def _expected_var_cols(ws, anchor_row: int) -> list[int]:
-    """anchor row의 Expected 섹션(BF=58~FE=161)에서 변수명이 있는 열 리스트.
+def _expected_var_cols(
+    ws, anchor_row: int, layout: SpecLayout | None = None,
+) -> list[int]:
+    """anchor row의 Expected 섹션에서 변수명이 있는 열 리스트.
 
-    Actual 변수명/값 stamp 시 동일 열 offset 사용 (감사본은 Actual 변수 = Expected
-    변수와 동일 — 레퍼런스 실측: anchor r5 BF='return', FF='return').
+    범위는 ``layout.expected_start`` ~ ``layout.related_id - 1`` (DV 58~161,
+    PV 105~188 — 고정 58 사용 시 PV에서 Input 열을 expected로 오인 + ExpR[57..83]
+    누락, 라운드 105). Actual 변수명/값 stamp 시 동일 열 offset 사용 (감사본은
+    Actual 변수 = Expected 변수와 동일 — 레퍼런스 실측: anchor r5 BF='return',
+    FF='return').
     """
+    lo = layout or SpecLayout()
     cols: list[int] = []
-    for c in range(58, COL_RELATED_ID):  # BF(58) ~ FE(161)
+    for c in range(lo.expected_start, lo.related_id):
         if ws.cell(anchor_row, c).value not in (None, ""):
             cols.append(c)
     return cols
@@ -238,7 +404,7 @@ def _build_fn_iteration_map(session: SwUTSession) -> dict[str, dict[int, Any]]:
 # Header writer (Actual / Pass-Fail / Log 섹션)
 # ---------------------------------------------------------------------------
 
-def _apply_actual_result_style(ws) -> int:
+def _apply_actual_result_style(ws, layout: SpecLayout | None = None) -> int:
     """라운드 104 — Actual Result(+Pass/Fail·Pass) 열에 템플릿 서식 적용.
 
     spec graft는 Test Case/Input/Expected(BF=58~FE=161)까지만 서식을 가져오고
@@ -247,11 +413,24 @@ def _apply_actual_result_style(ws) -> int:
 
     Expected를 1:1 미러: Actual col (162+i) ← Expected col (58+i). **같은 wb 내**이므로
     ``_style`` 인덱스 직접 복사가 정확+빠름 (cross-wb는 라운드 103처럼 객체복사 필요하나
-    여기는 동일 wb). value는 보존(``_style`` 만 복제). Pass/Fail·Pass는 Expected
-    대응이 없어 Expected 마지막 열(FE=161) 서식을 border/font 만 복제(기존 fill — ASIL/
-    Pass 강조 마킹 — 보존). Log Data(JH) 데이터 영역은 레퍼런스처럼 비워 두므로
-    헤더 외 데이터 셀 서식을 강제로 입히지 않음. 서브헤더/헤더 행(1~SUBHEADER_ROW)은
-    건드리지 않음.
+    여기는 동일 wb). value는 보존(``_style`` 만 복제). 서브헤더/헤더 행
+    (1~SUBHEADER_ROW)은 건드리지 않음.
+
+    라운드 106 — Pass/Fail·Pass·Log Data 는 Expected 마지막 열 border 복제
+    (L:thin R:double)가 DV 감사본 패턴과 불일치 실측되어 **명시 Border 교체**:
+
+    - Pass/Fail: L:double R:thin B:thin, T:thin (첫 데이터행만 T:medium —
+      헤더 경계선).
+    - Pass(Total): L:thin R:thin T:thin B:thin (함수별 병합 outline 동일 렌더).
+    - Log Data: L:thin 만, 첫 데이터행 T:medium (DV 레퍼런스 실측 — 데이터
+      영역은 그 외 무테, 값도 비워 둠).
+
+    font 는 기존대로 Expected 마지막 열 미러(맑은 고딕 10 통일), fill 은 보존
+    (ASIL/Pass 강조 마킹 유지).
+
+    라운드 105 — 열 좌표는 ``layout`` 동적 값 사용 (DV offset 104 / PV offset 84.
+    고정 offset 사용 시 PV에서 미러 소스 앞 47열이 Input 영역 + ExpR[57..83]/SUDS
+    서식 오염).
 
     Returns:
         서식 적용한 셀 수.
@@ -259,7 +438,7 @@ def _apply_actual_result_style(ws) -> int:
     import copy as _copy
 
     from openpyxl.cell.cell import MergedCell as _MC
-    from openpyxl.styles import Font
+    from openpyxl.styles import Border, Font, Side
 
     def _result_font(src_font, *, bold: bool | None = None) -> Font:
         return Font(
@@ -276,11 +455,15 @@ def _apply_actual_result_style(ws) -> int:
             scheme=src_font.scheme,
         )
 
-    offset = COL_ACTUAL_START - COL_EXPECTED_START  # 104
+    lo = layout or SpecLayout()
+    offset = lo.actual_start - lo.expected_start  # DV 104 / PV 84
+    _thin = Side(style="thin")
+    _double = Side(style="double")
+    _medium = Side(style="medium")
     restyled = 0
     for r in range(SUBHEADER_ROW + 1, ws.max_row + 1):
-        # Actual(162~265) ← Expected(58~161) 미러 (_style 통째 — Actual엔 마킹 없음).
-        for ec in range(COL_EXPECTED_START, COL_ACTUAL_START):
+        # Actual ← Expected 미러 (_style 통째 — Actual엔 마킹 없음).
+        for ec in range(lo.expected_start, lo.actual_start):
             exp = ws.cell(r, ec)
             if not getattr(exp, "has_style", False):
                 continue
@@ -292,23 +475,37 @@ def _apply_actual_result_style(ws) -> int:
                 restyled += 1
             except (AttributeError, TypeError):
                 pass
-        # Pass/Fail·Pass(266~267): Expected 마지막 열(161) border/font 만 복제
-        # (fill 보존 — ASIL/Pass 강조 마킹 유지).
-        ref = ws.cell(r, COL_ACTUAL_START - 1)  # FE=161
+        # Pass/Fail·Pass·Log Data: DV 감사본 패턴 명시 Border (라운드 106 —
+        # docstring 참조. Expected 마지막 열 복제는 L:thin R:double 로 불일치).
+        # font 는 Expected 마지막 열 미러, fill 보존(ASIL/Pass 강조 마킹 유지).
+        ref = ws.cell(r, lo.actual_start - 1)  # DV FE=161 / PV 188
         if getattr(ref, "has_style", False) and not isinstance(ref, _MC):
-            for tc in (COL_PASS_FAIL, COL_PASS_TOTAL):
+            first_data = r == DATA_START_ROW
+            col_borders = (
+                (lo.pass_fail, Border(
+                    left=_double, right=_thin,
+                    top=(_medium if first_data else _thin), bottom=_thin,
+                )),
+                (lo.pass_total, Border(
+                    left=_thin, right=_thin, top=_thin, bottom=_thin,
+                )),
+            )
+            for tc, tc_border in col_borders:
                 dst = ws.cell(r, tc)
                 if isinstance(dst, _MC):
                     continue
                 try:
-                    dst.border = _copy.copy(ref.border)
+                    dst.border = tc_border
                     dst.font = _result_font(ref.font)
                     restyled += 1
                 except (AttributeError, TypeError):
                     pass
-            log_cell = ws.cell(r, COL_LOG_DATA)
+            log_cell = ws.cell(r, lo.log_data)
             if not isinstance(log_cell, _MC):
                 try:
+                    log_cell.border = Border(
+                        left=_thin, top=(_medium if first_data else None),
+                    )
                     log_cell.font = _result_font(ref.font, bold=False)
                     restyled += 1
                 except (AttributeError, TypeError):
@@ -316,21 +513,30 @@ def _apply_actual_result_style(ws) -> int:
     return restyled
 
 
-def _write_log_headers(ws, out_warnings: list[str] | None) -> None:
+def _write_log_headers(
+    ws, out_warnings: list[str] | None, layout: SpecLayout | None = None,
+) -> None:
     """레퍼런스 SUTR 레이아웃의 Actual/Pass-Fail/Log 헤더를 추가.
 
-    - r3: FF='Actual Result' (FF~JE 병합), JF='Pass/Fail', JG='Pass', JH='Log Data'.
-    - r4: FF~ 'Param N' 서브헤더 + JH 'Log Data' (r3:r4 병합).
-    - spec FF의 'Related ID' 헤더는 Actual로 대체됨.
-    - r2: JF/JG COUNTIF 요약 수식 (레퍼런스 복제, 범위는 데이터 끝까지 확장).
+    좌표는 ``layout`` 동적 값 (DV: Actual=FF162~JE265, JF/JG/JH=266/267/268.
+    PV: Actual=189~272, 273/274/275 — 라운드 105). 고정 상수 사용 시 PV에서
+    r3 'Expected Result'(105) 병합 anchor 덮어쓰기 + ExpR[57..83]/SUDS 서브헤더
+    파괴 + 겹침 병합 생성(Excel 복구 경고)이 실측됨.
+
+    - r3: Actual 시작='Actual Result' (Actual 폭 병합), +'Pass/Fail'/'Pass'/'Log Data'.
+    - r4: 'Param N' 서브헤더 + Log Data (r3:r4 병합).
+    - spec Related ID(r4 'SUDS' 포함) 컬럼 헤더는 Actual로 대체됨 (DV 레퍼런스 규칙).
+    - r2: Pass/Fail·Pass COUNTIF 요약 수식 (레퍼런스 복제, 범위는 데이터 끝까지 확장).
     """
-    # spec의 Related ID(FF) 컬럼은 함수 블록마다 세로 병합(FF5:FF12 등) + r3/r4
-    # 헤더 병합 보유. Actual을 iteration별로 채우려면 FF~JE(162~265) 범위에 걸친
-    # 모든 병합을 해제해야 한다 (병합 셀의 비-anchor 셀 쓰기는 openpyxl이 무시 →
-    # iteration Actual 값이 anchor row로 흘러가 손실됨). JG(Total)는 후속 함수별
-    # 재병합. 데이터 병합 + r3/r4 헤더 병합 모두 해제.
+    lo = layout or SpecLayout()
+    # spec의 Related ID 컬럼은 함수 블록마다 세로 병합 + r3/r4 헤더 병합 보유.
+    # Actual을 iteration별로 채우려면 Actual 영역 범위에 걸친 모든 병합을 해제해야
+    # 한다 (병합 셀의 비-anchor 셀 쓰기는 openpyxl이 무시 → iteration Actual 값이
+    # anchor row로 흘러가 손실됨). Total(pass_total)은 후속 함수별 재병합.
+    # 데이터 병합 + r3/r4 헤더 병합 모두 해제. Expected 영역 병합(min_col <
+    # actual_start — PV r3 DA3:GF3 등)은 보존된다.
     for rng in list(ws.merged_cells.ranges):
-        if COL_ACTUAL_START <= rng.min_col <= (COL_PASS_FAIL - 1):
+        if lo.actual_start <= rng.min_col <= (lo.pass_fail - 1):
             try:
                 ws.unmerge_cells(str(rng))
             except (ValueError, KeyError):
@@ -339,27 +545,27 @@ def _write_log_headers(ws, out_warnings: list[str] | None) -> None:
     safe_write(ws, 1, 1, "Software Unit Test Log")
 
     # r3 섹션 헤더.
-    safe_write(ws, HEADER_SECTION_ROW, COL_ACTUAL_START, "Actual Result")
-    safe_write(ws, HEADER_SECTION_ROW, COL_PASS_FAIL, "Pass/Fail")
-    safe_write(ws, HEADER_SECTION_ROW, COL_PASS_TOTAL, "Pass")
-    safe_write(ws, HEADER_SECTION_ROW, COL_LOG_DATA, "Log Data")
+    safe_write(ws, HEADER_SECTION_ROW, lo.actual_start, "Actual Result")
+    safe_write(ws, HEADER_SECTION_ROW, lo.pass_fail, "Pass/Fail")
+    safe_write(ws, HEADER_SECTION_ROW, lo.pass_total, "Pass")
+    safe_write(ws, HEADER_SECTION_ROW, lo.log_data, "Log Data")
     try:
         ws.merge_cells(
             start_row=HEADER_SECTION_ROW, end_row=HEADER_SECTION_ROW,
-            start_column=COL_ACTUAL_START, end_column=COL_PASS_FAIL - 1,
+            start_column=lo.actual_start, end_column=lo.pass_fail - 1,
         )
         ws.merge_cells(
             start_row=HEADER_SECTION_ROW, end_row=SUBHEADER_ROW,
-            start_column=COL_LOG_DATA, end_column=COL_LOG_DATA,
+            start_column=lo.log_data, end_column=lo.log_data,
         )
     except (ValueError, AttributeError):
         pass
 
-    # r4 서브헤더 — Param 1..ACTUAL_MAX.
-    for i in range(ACTUAL_MAX):
-        safe_write(ws, SUBHEADER_ROW, COL_ACTUAL_START + i, f"Param {i + 1}")
-    safe_write(ws, SUBHEADER_ROW, COL_PASS_FAIL, "Unit")
-    safe_write(ws, SUBHEADER_ROW, COL_PASS_TOTAL, "Pass")
+    # r4 서브헤더 — Param 1..actual_max.
+    for i in range(lo.actual_max):
+        safe_write(ws, SUBHEADER_ROW, lo.actual_start + i, f"Param {i + 1}")
+    safe_write(ws, SUBHEADER_ROW, lo.pass_fail, "Unit")
+    safe_write(ws, SUBHEADER_ROW, lo.pass_total, "Pass")
 
     try:
         from copy import copy as _copy_style
@@ -369,7 +575,7 @@ def _write_log_headers(ws, out_warnings: list[str] | None) -> None:
         header_font = Font(name="맑은 고딕", size=10, bold=True)
         header_alignment = Alignment(horizontal="center", vertical="center")
         for row_idx in (HEADER_SECTION_ROW, SUBHEADER_ROW):
-            for col_idx in range(COL_ACTUAL_START, COL_LOG_DATA + 1):
+            for col_idx in range(lo.actual_start, lo.log_data + 1):
                 cell = ws.cell(row_idx, col_idx)
                 cell.font = _copy_style(header_font)
                 cell.alignment = _copy_style(header_alignment)
@@ -379,13 +585,13 @@ def _write_log_headers(ws, out_warnings: list[str] | None) -> None:
     # r2 COUNTIF 요약 수식 (레퍼런스 복제 — 범위는 데이터 끝까지).
     last_row = ws.max_row
     from openpyxl.utils import get_column_letter
-    jf = get_column_letter(COL_PASS_FAIL)
-    jg = get_column_letter(COL_PASS_TOTAL)
+    jf = get_column_letter(lo.pass_fail)
+    jg = get_column_letter(lo.pass_total)
     try:
-        ws.cell(2, COL_PASS_FAIL).value = (
+        ws.cell(2, lo.pass_fail).value = (
             f'=COUNTIF({jf}{DATA_START_ROW}:{jf}{last_row}, "Fail")'
         )
-        ws.cell(2, COL_PASS_TOTAL).value = (
+        ws.cell(2, lo.pass_total).value = (
             f'=COUNTIF({jg}{DATA_START_ROW}:{jg}{last_row},"Fail")'
             f'+COUNTIF({jg}{DATA_START_ROW}:{jg}{last_row},"N/A")'
         )
@@ -404,13 +610,19 @@ def _fill_actual_and_result(
     fn_iter_map: dict[str, dict[int, Any]],
     asil_map: dict[str, str],
     out_warnings: list[str] | None,
+    layout: SpecLayout | None = None,
 ) -> dict[str, Any]:
     """spec 함수 블록에 Actual/Pass-Fail/Log 채움.
+
+    좌표는 ``layout`` 동적 값 (라운드 105) — 고정 상수 사용 시 PV에서 Actual
+    stamp가 ExpR[57..83] 실데이터(2,355셀) + SUDS 추적성(1,014셀)을 덮어쓴다.
 
     Returns: 통계 dict (functions/iterations/matched_fn/unmatched_fn/
         inexact_actual + ``na_tc_list`` — Total N/A 함수 대표 목록, W-4 기재용).
     """
     from openpyxl.utils import get_column_letter  # noqa: F401
+
+    lo = layout or SpecLayout()
 
     stats: dict[str, Any] = {
         "functions": 0, "iterations": 0,
@@ -433,13 +645,13 @@ def _fill_actual_and_result(
         iter_data = fn_iter_map.get(num)
 
         # Expected 변수 열 (anchor) = Actual 변수 열 offset.
-        exp_cols = _expected_var_cols(ws, anchor)
+        exp_cols = _expected_var_cols(ws, anchor, lo)
         # Actual 변수명 = Expected 변수명 (감사본 패턴) — anchor에 stamp.
         for off, ec in enumerate(exp_cols):
-            if off >= ACTUAL_MAX:
+            if off >= lo.actual_max:
                 break
             var_name = ws.cell(anchor, ec).value
-            safe_write(ws, anchor, COL_ACTUAL_START + off, var_name)
+            safe_write(ws, anchor, lo.actual_start + off, var_name)
 
         if iter_data is None:
             stats["unmatched_fn"] += 1
@@ -449,20 +661,20 @@ def _fill_actual_and_result(
                 na_tc_list.append(f"{blk['tc_id']} ({blk['unit']})")
             # 미매칭 함수 — Pass/Fail N/A 표기 + Total N/A.
             for ir in blk["iter_rows"]:
-                safe_write(ws, ir, COL_PASS_FAIL, "N/A")
+                safe_write(ws, ir, lo.pass_fail, "N/A")
                 stats["iter_na"] += 1
                 stats["iterations"] += 1
-            safe_write(ws, anchor, COL_PASS_TOTAL, "N/A")
+            safe_write(ws, anchor, lo.pass_total, "N/A")
             stats["fn_na"] += 1
             if blk["iter_rows"]:
                 try:
                     ws.merge_cells(
                         start_row=anchor, end_row=blk["iter_rows"][-1],
-                        start_column=COL_PASS_TOTAL, end_column=COL_PASS_TOTAL,
+                        start_column=lo.pass_total, end_column=lo.pass_total,
                     )
                 except (ValueError, AttributeError):
                     pass
-            _apply_asil_mark(ws, anchor, num, blk, asil_map)
+            _apply_asil_mark(ws, anchor, num, blk, asil_map, lo)
             continue
 
         stats["matched_fn"] += 1
@@ -471,27 +683,27 @@ def _fill_actual_and_result(
 
         for fallback_idx, ir in enumerate(blk["iter_rows"], start=1):
             stats["iterations"] += 1
-            raw_iter_idx = ws.cell(ir, COL_ITER_INDEX).value
+            raw_iter_idx = ws.cell(ir, lo.iter_index).value
             try:
                 it_idx = int(str(raw_iter_idx).strip())
             except (TypeError, ValueError):
                 it_idx = fallback_idx
             rec = iter_data.get(it_idx)
             if rec is None:
-                safe_write(ws, ir, COL_PASS_FAIL, "N/A")
+                safe_write(ws, ir, lo.pass_fail, "N/A")
                 stats["iter_na"] += 1
                 continue
             passed = rec["passed"]
             if passed is None:
-                safe_write(ws, ir, COL_PASS_FAIL, "N/A")
+                safe_write(ws, ir, lo.pass_fail, "N/A")
                 stats["iter_na"] += 1
                 continue
             any_exec = True
             # Actual 값 채우기 — Pass면 Expected 복제 (감사본 패턴), Fail이면 vcast.
             for off, ec in enumerate(exp_cols):
-                if off >= ACTUAL_MAX:
+                if off >= lo.actual_max:
                     break
-                ac = COL_ACTUAL_START + off
+                ac = lo.actual_start + off
                 if passed:
                     exp_val = ws.cell(ir, ec).value
                     safe_write(ws, ir, ac, exp_val)
@@ -506,11 +718,11 @@ def _fill_actual_and_result(
                         _mark_cell(ws, ir, ac)
                         stats["actual_missing"] += 1
             if passed:
-                safe_write(ws, ir, COL_PASS_FAIL, "Pass")
+                safe_write(ws, ir, lo.pass_fail, "Pass")
                 stats["iter_pass"] += 1
             else:
                 all_pass = False
-                safe_write(ws, ir, COL_PASS_FAIL, "Fail")
+                safe_write(ws, ir, lo.pass_fail, "Fail")
                 stats["iter_fail"] += 1
         total_str = "Pass" if (any_exec and all_pass) else ("Fail" if any_exec else "N/A")
         if total_str == "Pass":
@@ -522,20 +734,20 @@ def _fill_actual_and_result(
             # 매칭됐으나 실행 iteration 0 — 미실행 목록에 등재 (W-4).
             if len(na_tc_list) < _NA_LIST_MAX:
                 na_tc_list.append(f"{blk['tc_id']} ({blk['unit']})")
-        safe_write(ws, anchor, COL_PASS_TOTAL, total_str)
+        safe_write(ws, anchor, lo.pass_total, total_str)
         # 라운드 91 fix — 레퍼런스 감사본은 anchor 행 JF(Pass/Fail)에도 함수 결과를
         # 표기(첫 iteration 겸용 양식). anchor JF=total로 정합 (이전: anchor JF 공란).
-        safe_write(ws, anchor, COL_PASS_FAIL, total_str)
+        safe_write(ws, anchor, lo.pass_fail, total_str)
         # 함수 Total 세로 병합 (anchor ~ 마지막 iteration).
         if blk["iter_rows"]:
             try:
                 ws.merge_cells(
                     start_row=anchor, end_row=blk["iter_rows"][-1],
-                    start_column=COL_PASS_TOTAL, end_column=COL_PASS_TOTAL,
+                    start_column=lo.pass_total, end_column=lo.pass_total,
                 )
             except (ValueError, AttributeError):
                 pass
-        _apply_asil_mark(ws, anchor, num, blk, asil_map)
+        _apply_asil_mark(ws, anchor, num, blk, asil_map, lo)
 
     if unmatched_list and out_warnings is not None:
         out_warnings.append(
@@ -568,8 +780,12 @@ def _lookup_vcast_actual(actual_dict: dict, var_name: Any) -> Any:
     return None
 
 
-def _apply_asil_mark(ws, anchor: int, num: str, blk: dict, asil_map: dict[str, str]) -> None:
-    """anchor의 Total(JG) 셀에 ASIL 등급 시각 강조."""
+def _apply_asil_mark(
+    ws, anchor: int, num: str, blk: dict, asil_map: dict[str, str],
+    layout: SpecLayout | None = None,
+) -> None:
+    """anchor의 Total(DV JG=267 / PV 274) 셀에 ASIL 등급 시각 강조."""
+    lo = layout or SpecLayout()
     fn_id = f"SwUFn_{num.zfill(4)}" if num else ""
     asil = asil_map.get(fn_id, "") if fn_id else ""
     marker = {
@@ -578,7 +794,7 @@ def _apply_asil_mark(ws, anchor: int, num: str, blk: dict, asil_map: dict[str, s
         "QM": mark_asil_qm_function,
     }.get((asil or "").strip().upper())
     if marker:
-        marker(ws, anchor, COL_PASS_TOTAL)
+        marker(ws, anchor, lo.pass_total)
 
 
 def _mark_cell(ws, row: int, col: int) -> None:
@@ -792,8 +1008,9 @@ def _write_not_executed_list(
 
     검증 발견: 미실행 카운트(예: F18=44)는 stamp되는데 목록 영역은 공백 —
     카운트·목록 불일치로 audit reviewer가 미실행 TC를 문서 단독으로 식별 불가.
-    가용 빈 행 한도 내 대표 항목 + 잔여 '외 N건 — DV spec(v1.01) 등재, PV 로그
-    미실행' 요약 기재 (전체 목록은 session 데이터/AuditLog).
+    가용 빈 행 한도 내 대표 항목 + 잔여 '외 N건 — spec 등재, 실행 로그 미발견'
+    요약 기재 (전체 목록은 session 데이터/AuditLog). spec 버전 문구는 소스가
+    바뀔 수 있어 중립 표기 (라운드 106 리뷰 minor).
 
     헤더/가용 행은 동적 탐색 — 좌표 하드코딩 금지 (데이터 양에 따라 이동).
 
@@ -865,7 +1082,7 @@ def _write_not_executed_list(
     if rest > 0:
         safe_write(
             ts_ws, avail[written], hc,
-            f"외 {rest}건 — DV spec(v1.01) 등재, PV 로그 미실행",
+            f"외 {rest}건 — spec 등재, 실행 로그 미발견",
         )
         written += 1
     summary["not_executed_list_rows"] = written
@@ -1027,15 +1244,22 @@ def build_sutr_from_spec(
             spec_ws.title = LOG_SHEET_NAME
         log_ws = spec_ws
 
+    # 라운드 105 — spec 컬럼 레이아웃 동적 산출 (DV 268열 / PV 'Safety Related'
+    # 삽입 + ExpR[0..83](105~188) + SUDS(189) 레이아웃 공존). 반드시 헤더 stamp
+    # **전에** 스캔 — _write_log_headers가 r3 'Related ID'를 'Actual Result'로
+    # 덮어쓰므로 이후에는 위치 식별 불가. DV spec에서는 산출값 == 기존 상수
+    # (162/266/267/268 — 하위 호환 게이트), 스캔 실패 시 DV 상수 fallback+warning.
+    layout = _detect_spec_layout(log_ws, warnings)
+
     # 헤더 추가 (Actual/Pass-Fail/Log).
-    _write_log_headers(log_ws, warnings)
+    _write_log_headers(log_ws, warnings, layout=layout)
 
     # anchor 스캔 → 함수 블록 (이식된 '3.Test Log' 시트 기준).
-    blocks = _scan_spec_blocks(log_ws)
+    blocks = _scan_spec_blocks(log_ws, layout=layout)
     fn_iter_map = _build_fn_iteration_map(session)
 
     fill_stats = _fill_actual_and_result(
-        log_ws, blocks, fn_iter_map, asil_map, warnings,
+        log_ws, blocks, fn_iter_map, asil_map, warnings, layout=layout,
     )
 
     # 라운드 104 — Actual Result 열(FF=162~JE=265) 서식 적용. spec graft는 Test Case/
@@ -1043,12 +1267,23 @@ def build_sutr_from_spec(
     # default 폰트) → 사용자 보고 "Actual만 템플릿 미적용". Expected(BF=58~FE=161)를
     # 1:1 미러. **같은 wb 내**이므로 cross-wb 객체복사가 아닌 ``_style`` 인덱스 직접
     # 복사가 정확+빠름 (라운드 103 cross-wb 문제와 구분). value는 보존(_style만 복제).
-    _restyled = _apply_actual_result_style(log_ws)
+    _restyled = _apply_actual_result_style(log_ws, layout=layout)
 
     summary = {
         "builder": "spec-based-r92" if template_xlsm_bytes is not None else "spec-based-r91",
         "spec_sheet": spec_name,
         "spec_sha256_12": spec_sha256_12,
+        # 라운드 105 — 동적 산출 레이아웃 (관측성: DV=162/266/267/268, PV=189/273/274/275).
+        "spec_layout": {
+            "detected": layout.detected,
+            "expected_start": layout.expected_start,
+            "actual_start": layout.actual_start,
+            "actual_max": layout.actual_max,
+            "pass_fail": layout.pass_fail,
+            "pass_total": layout.pass_total,
+            "log_data": layout.log_data,
+            "iter_index": layout.iter_index,
+        },
         "build_timestamp": meta.build_timestamp,
         "environments": len(session.environments),
         "total": agg["total"],
@@ -1141,4 +1376,5 @@ __all__ = [
     "COL_PASS_TOTAL",
     "COL_LOG_DATA",
     "SPEC_SHEET_RE",
+    "SpecLayout",
 ]

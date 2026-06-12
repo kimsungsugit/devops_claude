@@ -18,15 +18,21 @@ from backend.services.swut_input_adapter import (
 )
 from backend.services.swut_sutr_aggregator import SutrBuildMeta
 from backend.services.swut_sutr_spec_builder import (
+    ACTUAL_MAX,
     COL_ACTUAL_START,
     COL_EXPECTED_START,
+    COL_INPUT_START,
+    COL_ITER_INDEX,
     COL_LOG_DATA,
     COL_PASS_FAIL,
     COL_PASS_TOTAL,
+    COL_RELATED_ID,
     LOG_SHEET_NAME,
     SUBHEADER_ROW,
+    SpecLayout,
     _apply_actual_result_style,
     _build_fn_iteration_map,
+    _detect_spec_layout,
     _lookup_vcast_actual,
     _scan_spec_blocks,
     build_sutr_from_spec,
@@ -168,20 +174,29 @@ def test_apply_actual_result_style_mirrors_expected():
     act = ws.cell(data_row, COL_ACTUAL_START)
     assert act.border.left is not None and act.border.left.style == "thin"
     assert act.font.name == "Arial"
-    # Pass/Fail(266)·Pass(267) border 적용 + 레퍼런스 폰트 통일.
-    assert ws.cell(data_row, COL_PASS_FAIL).border.top.style == "thin"
-    assert ws.cell(data_row, COL_PASS_TOTAL).border.bottom.style == "thin"
-    assert ws.cell(data_row, COL_PASS_FAIL).font.name == "맑은 고딕"
-    assert ws.cell(data_row, COL_PASS_FAIL).font.sz == 10
-    assert ws.cell(data_row, COL_PASS_TOTAL).font.name == "맑은 고딕"
-    assert ws.cell(data_row, COL_PASS_TOTAL).font.sz == 10
-    # Log Data(JH)는 데이터 값을 비워 두되 폰트만 레퍼런스 기준으로 통일.
-    assert (
-        ws.cell(data_row, COL_LOG_DATA).border.bottom is None
-        or ws.cell(data_row, COL_LOG_DATA).border.bottom.style is None
-    )
-    assert ws.cell(data_row, COL_LOG_DATA).font.name == "맑은 고딕"
-    assert ws.cell(data_row, COL_LOG_DATA).font.sz == 10
+    # Pass/Fail(266)·Pass(267) — 라운드 106 DV 감사본 명시 Border + 레퍼런스 폰트.
+    # data_row == DATA_START_ROW(첫 데이터행) → Pass/Fail T:medium (헤더 경계).
+    pf = ws.cell(data_row, COL_PASS_FAIL)
+    assert pf.border.left.style == "double"
+    assert pf.border.right.style == "thin"
+    assert pf.border.top.style == "medium"
+    assert pf.border.bottom.style == "thin"
+    pt = ws.cell(data_row, COL_PASS_TOTAL)
+    assert pt.border.left.style == "thin"
+    assert pt.border.right.style == "thin"
+    assert pt.border.top.style == "thin"
+    assert pt.border.bottom.style == "thin"
+    assert pf.font.name == "맑은 고딕"
+    assert pf.font.sz == 10
+    assert pt.font.name == "맑은 고딕"
+    assert pt.font.sz == 10
+    # Log Data(JH)는 값 비움 + L:thin / 첫 데이터행 T:medium / B 무테 (DV 실측).
+    log = ws.cell(data_row, COL_LOG_DATA)
+    assert log.border.left.style == "thin"
+    assert log.border.top.style == "medium"
+    assert log.border.bottom is None or log.border.bottom.style is None
+    assert log.font.name == "맑은 고딕"
+    assert log.font.sz == 10
     # 헤더 행은 미변경 (데이터 행만 대상).
     assert hdr_actual.border.left is None or hdr_actual.border.left.style is None
 
@@ -660,3 +675,348 @@ def test_not_executed_list_without_subheader_unchanged():
     assert ws.cell(row=11, column=2).value == "TC_A (SwUFn_0001)"
     assert ws.cell(row=12, column=2).value == "TC_B (SwUFn_0002)"
     assert ws.cell(row=13, column=2).value is None
+
+
+# ---------------------------------------------------------------------------
+# 라운드 105 — spec 컬럼 레이아웃 동적화 (DV 268열 / PV 'Safety Related' 삽입 공존)
+#
+# PV WIP spec(v0.10_260608) 실측 레이아웃: Safety Related(5) 삽입으로 Test
+# Method=6/Generation=7/iter=8/Inpt[0]=9, ExpR[0..83]=105~188, Related ID(r4=
+# 'SUDS')=189. DV 고정 상수(162/266/267/268) 그대로 쓰면 Actual stamp가
+# Expected(105~188)·SUDS(189)를 덮어쓴다 — _detect_spec_layout이 헤더 스캔으로
+# SpecLayout을 동적 산출하고, DV spec에서는 산출값 == 기존 상수(하위 호환 게이트).
+# ---------------------------------------------------------------------------
+
+# PV 레이아웃 좌표 (작성중 v0.10_260608 실측 축소판)
+_PV_ITER = 8           # iteration index 열 (DV 7)
+_PV_INPUT = 9          # Inpt[0] (DV 8)
+_PV_EXP0 = 105         # ExpR[0] (DV 58)
+_PV_EXP_LAST = 188     # ExpR[83] (DV 161)
+_PV_REL = 189          # Related ID / r4 'SUDS' (DV 162)
+_PV_PASS_FAIL = 273    # Actual 끝 +1 (DV 266)
+_PV_PASS_TOTAL = 274   # (DV 267)
+_PV_LOG = 275          # (DV 268)
+
+_YELLOW = "FFFFEB9C"   # design_tokens.USER_INPUT_FILL_RGB (openpyxl ARGB)
+
+
+def _make_pv_spec_bytes(
+    blocks: list[tuple[str, str, list[tuple]]],
+    *,
+    with_r3_headers: bool = True,
+) -> bytes:
+    """합성 PV SwUTS spec xlsm (작성중 v0.10_260608 양식 축소판 — 189열).
+
+    blocks: [(tc_id, unit, [(input, exp1, exp2), ...]), ...]
+        변수 2개: exp_var@105(ExpR[0]) / exp_var2@188(ExpR[83] — 경계 검증용).
+    with_r3_headers=False면 r3 그룹 헤더 생략 — r4 'ExpR[..]' 폴백 검증용.
+    """
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "2.SW Unit Test Spec"
+    ws.cell(1, 1).value = "Software Unit Test"
+    if with_r3_headers:
+        ws.cell(3, 2).value = "SwUTC_Test Case"
+        ws.cell(3, _PV_ITER).value = "Input"
+        ws.cell(3, _PV_EXP0).value = "Expected Result"
+        # 실물 PV spec의 r3 Expected 병합(DA3:GF3) 재현 — 빌더가 보존해야 함.
+        ws.merge_cells(start_row=3, end_row=3,
+                       start_column=_PV_EXP0, end_column=_PV_EXP_LAST)
+        ws.cell(3, _PV_REL).value = "Related ID"
+    ws.cell(4, 2).value = "Index"
+    ws.cell(4, 3).value = "TC_ID"
+    ws.cell(4, 4).value = "Unit"
+    ws.cell(4, 5).value = "Safety Related"
+    ws.cell(4, 6).value = "Test Method"
+    ws.cell(4, 7).value = "Test Case Generation Method"
+    ws.cell(4, _PV_ITER).value = " "
+    ws.cell(4, _PV_INPUT).value = "Inpt[0]"
+    for i in range(84):  # ExpR[0..83] = 105~188
+        ws.cell(4, _PV_EXP0 + i).value = f"ExpR[{i}]"
+    ws.cell(4, _PV_REL).value = "SUDS"
+    rr = 5
+    idx = 1
+    for tc_id, unit, iters in blocks:
+        anchor = rr
+        ws.cell(anchor, 2).value = idx
+        ws.cell(anchor, 3).value = tc_id
+        ws.cell(anchor, 4).value = unit
+        ws.cell(anchor, 5).value = "O"
+        ws.cell(anchor, _PV_INPUT).value = "in_var"
+        ws.cell(anchor, _PV_EXP0).value = "exp_var"
+        ws.cell(anchor, _PV_EXP_LAST).value = "exp_var2"
+        ws.cell(anchor, _PV_REL).value = f"SwUDS_{idx:04d}"  # SUDS 추적성 참조
+        if iters:
+            # 실물 spec의 Related ID 세로병합 재현 — 빌더가 해제해야 함.
+            ws.merge_cells(start_row=anchor, end_row=anchor + len(iters),
+                           start_column=_PV_REL, end_column=_PV_REL)
+        for it_no, (inp, exp1, exp2) in enumerate(iters, start=1):
+            ir = anchor + it_no
+            ws.cell(ir, 6).value = "REQ"
+            if it_no == 1:
+                ws.cell(ir, 7).value = "ABV"
+            ws.cell(ir, _PV_ITER).value = it_no
+            ws.cell(ir, _PV_INPUT).value = inp
+            ws.cell(ir, _PV_EXP0).value = exp1
+            ws.cell(ir, _PV_EXP_LAST).value = exp2
+        if len(iters) > 1:
+            # 실물 PV spec의 Generation Method(7) 세그먼트 병합 재현 — 비-anchor
+            # 행은 col 7이 None이라 고정 iter=7 사용 시 iteration 행 누락(실측 67%).
+            ws.merge_cells(start_row=anchor + 1, end_row=anchor + len(iters),
+                           start_column=7, end_column=7)
+        rr = anchor + len(iters) + 1
+        idx += 1
+    bio = io.BytesIO()
+    wb.save(bio)
+    return bio.getvalue()
+
+
+class TestR105SpecLayoutDetection:
+    """(a) 동적 레이아웃 — DV 상수 재현(하위 호환 게이트) + PV 산출 + fallback."""
+
+    def test_spec_layout_defaults_equal_dv_constants(self):
+        """SpecLayout() 기본값(미스캔/레거시 직접 호출)이 기존 DV 상수와 동일.
+
+        기존 268열 테스트가 layout 미전달로도 무수정 통과하는 근거 — 파생
+        property 전부 단일 진리원 검증.
+        """
+        lo = SpecLayout()
+        assert lo.detected is False
+        assert lo.expected_start == COL_EXPECTED_START == 58
+        assert lo.related_id == COL_RELATED_ID == 162
+        assert lo.actual_start == COL_ACTUAL_START == 162
+        assert lo.actual_max == ACTUAL_MAX == 104
+        assert lo.pass_fail == COL_PASS_FAIL == 266
+        assert lo.pass_total == COL_PASS_TOTAL == 267
+        assert lo.log_data == COL_LOG_DATA == 268
+        assert lo.input_start == COL_INPUT_START == 8
+        assert lo.iter_index == COL_ITER_INDEX == 7
+
+    def test_detect_dv_layout_reproduces_constants(self):
+        """DV 합성 spec 헤더 스캔 산출값 == 기존 상수 (하위 호환 게이트)."""
+        spec = _make_spec_bytes([("SwUTC_0101", "main", [("a", "b")])])
+        ws = openpyxl.load_workbook(io.BytesIO(spec))["2.SW Unit Test Spec"]
+        warns: list[str] = []
+        lo = _detect_spec_layout(ws, warns)
+        assert lo.detected is True
+        assert lo.expected_start == COL_EXPECTED_START
+        assert lo.actual_start == COL_ACTUAL_START
+        assert lo.actual_max == ACTUAL_MAX
+        assert lo.pass_fail == COL_PASS_FAIL
+        assert lo.pass_total == COL_PASS_TOTAL
+        assert lo.log_data == COL_LOG_DATA
+        assert lo.iter_index == COL_ITER_INDEX
+        assert lo.input_start == COL_INPUT_START
+        assert warns == []
+
+    def test_detect_pv_layout_from_r3_headers(self):
+        """PV 합성 spec(189열) — Actual=Related ID(189), Pass/Fail=273/274/275."""
+        spec = _make_pv_spec_bytes([("SwUFn_0101", "main", [("a", "b", "c")])])
+        ws = openpyxl.load_workbook(io.BytesIO(spec))["2.SW Unit Test Spec"]
+        lo = _detect_spec_layout(ws)
+        assert lo.detected is True
+        assert lo.expected_start == _PV_EXP0
+        assert lo.related_id == _PV_REL
+        assert lo.actual_start == _PV_REL      # Actual 시작 = Related ID 열 대체
+        assert lo.actual_max == 84             # Expected 폭 (ExpR[0..83])
+        assert lo.pass_fail == _PV_PASS_FAIL
+        assert lo.pass_total == _PV_PASS_TOTAL
+        assert lo.log_data == _PV_LOG
+        assert lo.input_start == _PV_INPUT
+        assert lo.iter_index == _PV_ITER
+
+    def test_detect_pv_layout_r4_expr_fallback_without_r3(self):
+        """r3 그룹 헤더 부재 시 r4 'ExpR[..]' 범위 폴백 (Related ID=마지막+1)."""
+        spec = _make_pv_spec_bytes(
+            [("SwUFn_0101", "main", [("a", "b", "c")])], with_r3_headers=False,
+        )
+        ws = openpyxl.load_workbook(io.BytesIO(spec))["2.SW Unit Test Spec"]
+        lo = _detect_spec_layout(ws)
+        assert lo.detected is True
+        assert lo.expected_start == _PV_EXP0
+        assert lo.related_id == _PV_REL
+        assert lo.input_start == _PV_INPUT
+
+    def test_detect_scan_failure_falls_back_dv_constants_with_warning(self):
+        """헤더 전무(빈 시트) — DV 상수 fallback + warning (silent 오배치 금지)."""
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        warns: list[str] = []
+        lo = _detect_spec_layout(ws, warns)
+        assert lo.detected is False
+        assert lo.actual_start == COL_ACTUAL_START
+        assert lo.pass_fail == COL_PASS_FAIL
+        assert any("스캔 실패" in w for w in warns)
+
+    def test_build_sutr_dv_summary_spec_layout_observability(self):
+        """DV 빌드 summary.spec_layout 관측성 — 산출값 == 기존 상수 전체."""
+        spec = _make_spec_bytes([("SwUTC_0101", "main", [("a", "b")])])
+        sess = _make_session({"SwUFn_0101": [True]})
+        res = build_sutr_from_spec(sess, _meta(), spec, function_asil_map={})
+        assert res.ok
+        assert res.summary["spec_layout"] == {
+            "detected": True,
+            "expected_start": 58,
+            "actual_start": 162,
+            "actual_max": 104,
+            "pass_fail": 266,
+            "pass_total": 267,
+            "log_data": 268,
+            "iter_index": 7,
+        }
+
+
+class TestR105PvLayoutBuild:
+    """(a) PV 레이아웃 e2e — Actual=189 시작·Expected(105~188) 비침범·273/274/275."""
+
+    def _build_pv(self):
+        spec = _make_pv_spec_bytes([
+            ("SwUFn_0101", "main",
+             [("0x0", "0x1", "0xA"), ("0x2", "0x3", "0xB"), ("0x4", "0x5", "0xC")]),
+        ])
+        # it1 Pass / it2 Fail / it3 미실행 — Actual 3경로(Expected 복제/vcast/N-A).
+        sess = _make_session({"SwUFn_0101": [True, False, None]})
+        res = build_sutr_from_spec(sess, _meta(), spec, function_asil_map={})
+        assert res.ok
+        return res, openpyxl.load_workbook(res.xlsm_io, data_only=False)[LOG_SHEET_NAME]
+
+    def test_pv_headers_at_dynamic_positions(self):
+        res, ws = self._build_pv()
+        assert ws.cell(3, _PV_REL).value == "Actual Result"
+        assert ws.cell(3, _PV_PASS_FAIL).value == "Pass/Fail"
+        assert ws.cell(3, _PV_PASS_TOTAL).value == "Pass"
+        assert ws.cell(3, _PV_LOG).value == "Log Data"
+        assert ws.cell(4, _PV_REL).value == "Param 1"            # r4 'SUDS' 대체
+        assert ws.cell(4, _PV_REL + 83).value == "Param 84"      # Actual 폭 84
+        assert ws.cell(4, _PV_PASS_FAIL).value == "Unit"
+        assert ws.cell(4, _PV_PASS_TOTAL).value == "Pass"
+        # DV 고정 좌표에는 아무 것도 stamp되지 않음 (구 상수 회귀 가드).
+        assert ws.cell(3, COL_PASS_FAIL).value is None           # 266
+        assert ws.cell(3, COL_LOG_DATA).value is None            # 268
+        # r2 COUNTIF 요약 수식이 동적 열 문자 사용.
+        from openpyxl.utils import get_column_letter
+        jf = get_column_letter(_PV_PASS_FAIL)
+        jg = get_column_letter(_PV_PASS_TOTAL)
+        assert f"{jf}5:" in str(ws.cell(2, _PV_PASS_FAIL).value)
+        assert f"{jg}5:" in str(ws.cell(2, _PV_PASS_TOTAL).value)
+        # summary 관측성 — PV 산출 좌표 전체.
+        assert res.summary["spec_layout"] == {
+            "detected": True,
+            "expected_start": _PV_EXP0,
+            "actual_start": _PV_REL,
+            "actual_max": 84,
+            "pass_fail": _PV_PASS_FAIL,
+            "pass_total": _PV_PASS_TOTAL,
+            "log_data": _PV_LOG,
+            "iter_index": _PV_ITER,
+        }
+
+    def test_pv_expected_region_not_invaded(self):
+        """Expected(105~188) 헤더·데이터·r3 병합 비침범 — DV 상수 사용 시 깨지던 영역."""
+        _res, ws = self._build_pv()
+        # r3 'Expected Result' anchor + 병합(DA3:GF3) 보존.
+        assert ws.cell(3, _PV_EXP0).value == "Expected Result"
+        from openpyxl.utils import get_column_letter
+        exp_merge = (
+            f"{get_column_letter(_PV_EXP0)}3:{get_column_letter(_PV_EXP_LAST)}3"
+        )
+        assert exp_merge in [str(m) for m in ws.merged_cells.ranges]
+        # r4 ExpR 서브헤더 보존 (경계 — DV 상수면 'Param N'으로 덮임).
+        assert ws.cell(4, _PV_EXP0).value == "ExpR[0]"
+        assert ws.cell(4, 162).value == "ExpR[57]"   # 구 COL_ACTUAL_START 위치
+        assert ws.cell(4, _PV_EXP_LAST).value == "ExpR[83]"
+        # Expected 데이터 보존 (iteration 행).
+        assert ws.cell(6, _PV_EXP0).value == "0x1"
+        assert ws.cell(6, _PV_EXP_LAST).value == "0xA"
+        assert ws.cell(7, _PV_EXP_LAST).value == "0xB"
+        # Input 보존.
+        assert ws.cell(6, _PV_INPUT).value == "0x0"
+
+    def test_pv_actual_starts_at_related_id_with_packed_vars(self):
+        """Actual 시작=189 (Related ID/SUDS 대체) + 변수 packed stamp."""
+        res, ws = self._build_pv()
+        # anchor: SUDS 참조가 Actual 변수명으로 대체 (DV 레퍼런스 규칙).
+        assert ws.cell(5, _PV_REL).value == "exp_var"
+        assert ws.cell(5, _PV_REL + 1).value == "exp_var2"   # packed (188→190)
+        # it1 Pass — Actual = Expected 복제.
+        assert ws.cell(6, _PV_REL).value == "0x1"
+        assert ws.cell(6, _PV_REL + 1).value == "0xA"
+        # it2 Fail — exp_var는 vcast actual, exp_var2는 부재 → 노란 마킹.
+        assert ws.cell(7, _PV_REL).value == "actual_v"
+        assert ws.cell(7, _PV_REL + 1).value is None
+        assert ws.cell(7, _PV_REL + 1).fill.start_color.rgb == _YELLOW
+        # it3 미실행 — Actual 비움.
+        assert ws.cell(8, _PV_REL).value is None
+        assert res.summary["actual_from_expected"] == 2
+        assert res.summary["actual_from_vcast"] == 1
+        assert res.summary["actual_missing"] == 1
+
+    def test_pv_pass_fail_total_positions_and_merge(self):
+        """Pass/Fail=273, 함수 Total=274 세로병합, Related ID 병합 해제."""
+        _res, ws = self._build_pv()
+        assert ws.cell(6, _PV_PASS_FAIL).value == "Pass"
+        assert ws.cell(7, _PV_PASS_FAIL).value == "Fail"
+        assert ws.cell(8, _PV_PASS_FAIL).value == "N/A"
+        assert ws.cell(5, _PV_PASS_FAIL).value == "Fail"     # anchor = 함수 결과
+        assert ws.cell(5, _PV_PASS_TOTAL).value == "Fail"
+        merges = [
+            m for m in ws.merged_cells.ranges
+            if m.min_col == _PV_PASS_TOTAL and m.min_row == 5
+        ]
+        assert merges and merges[0].max_row == 8
+        # spec Related ID(189) 세로병합은 해제됨 (겹침 병합/anchor 흘림 차단).
+        assert not [
+            m for m in ws.merged_cells.ranges
+            if m.min_col == _PV_REL and m.max_col == _PV_REL and m.min_row == 5
+        ]
+
+    def test_pv_matched_function_counts(self):
+        """(b) PV SwUFn_ TC_ID 직접 표기 블록이 VectorCAST와 매칭."""
+        res, _ws = self._build_pv()
+        assert res.summary["spec_function_blocks"] == 1
+        assert res.summary["matched_functions"] == 1
+        assert res.summary["unmatched_functions"] == 0
+        assert res.summary["fn_fail"] == 1   # it2 Fail 포함 → 함수 Fail
+
+
+class TestR105SwUFnTcIdBlocks:
+    """(b) SwUFn_ TC_ID 블록 매칭 — PV는 SwUTC_가 아닌 SwUFn_NNNN 직접 사용."""
+
+    def test_scan_spec_blocks_swufn_and_lowercase_stub(self):
+        """SwUFn_/소문자 'SwUfn_'(WIP 오타 실측) 모두 숫자 추출."""
+        spec = _make_spec_bytes([
+            ("SwUFn_0101", "main", [("a", "b")]),
+            ("SwUfn_1361", "stub", []),   # WIP 실측 stub — iteration 0건
+        ])
+        ws = openpyxl.load_workbook(io.BytesIO(spec))["2.SW Unit Test Spec"]
+        blocks = _scan_spec_blocks(ws)
+        assert [b["num"] for b in blocks] == ["0101", "1361"]
+        assert blocks[1]["iter_rows"] == []
+
+    def test_build_sutr_swufn_tc_id_matches_dv_layout(self):
+        """DV 레이아웃 + SwUFn_ 직접 TC_ID — 매칭·Pass stamp 동일 동작."""
+        spec = _make_spec_bytes([("SwUFn_0101", "main", [("0x0", "0x1")])])
+        sess = _make_session({"SwUFn_0101": [True]})
+        res = build_sutr_from_spec(sess, _meta(), spec, function_asil_map={})
+        assert res.ok
+        assert res.summary["matched_functions"] == 1
+        assert res.summary["unmatched_functions"] == 0
+        ws = openpyxl.load_workbook(res.xlsm_io)[LOG_SHEET_NAME]
+        assert ws.cell(5, COL_PASS_TOTAL).value == "Pass"
+        assert ws.cell(6, COL_ACTUAL_START).value == "0x1"
+
+    def test_scan_spec_blocks_pv_iter_column_8(self):
+        """PV iteration index 열=8 — 고정 7 사용 시 iteration 행 누락 회귀 가드."""
+        spec = _make_pv_spec_bytes([
+            ("SwUFn_0101", "main", [("a", "b", "c"), ("d", "e", "f")]),
+        ])
+        ws = openpyxl.load_workbook(io.BytesIO(spec))["2.SW Unit Test Spec"]
+        lo = _detect_spec_layout(ws)
+        blocks = _scan_spec_blocks(ws, layout=lo)
+        assert len(blocks) == 1
+        assert len(blocks[0]["iter_rows"]) == 2
+        assert ws.cell(blocks[0]["iter_rows"][0], lo.iter_index).value == 1
+        # 레거시(layout 미전달 → DV iter=7)는 Generation Method(7) 세그먼트 병합
+        # 때문에 비-anchor iteration 행을 놓침 — 동적화 필요성의 실측 근거 재현.
+        legacy = _scan_spec_blocks(ws)
+        assert len(legacy[0]["iter_rows"]) < 2
