@@ -965,3 +965,34 @@ backend 전체 SwUT/SwIT 회귀: 189 passed + 1 skipped (이전 ~190).
 - WIP spec 데이터 결함(작성자 정리 필요): `SwUfn_1361` 소문자 stub TC 1건, Test Method 없는 iteration 9행
   (SwUFn_1558/1562/1566/1568). 잔여 minor: Related ID 잔존 191셀(라벨 0 anchor), partial-detection 가드 2건.
 - 신규 테스트 +18. 회귀: 2,699 passed / 1 skipped / 1 deselected.
+
+## 라운드 107 (2026-06-12) — UT201 FI spec 자동 산출 (확정 규칙 구현, 커밋 37f2da0)
+
+> 사용자가 산출 규칙 확정("405개가 맞다고 하면 진행가능한거지?" — FI 포함 TC 블록 수 = DV 405):
+> **UT201 Fault Injection 수량 = spec '2.SW Unit Test Spec'에서 Test Method에 'FI'를 1개 이상 포함한
+> TC(함수) 블록 수, passed = 그 블록 중 전 FI iteration이 실행·Pass인 블록 수.** DV 감사본의 402는
+> 모든 가용 산출물(SwUTS 백업 2종/SwUDS/코드)로 재현 불가한 stale 수기 카운트로 판정(라운드 105~106).
+
+| 항목 | 내용 |
+|---|---|
+| extract_spec_fi_stats | `swut_sutr_spec_builder` 신규 public — Test Method 열 동적 감지(r4→r3 스캔, DV col5/PV col6) + 세로병합 merged range 전개(PV 1,865개), 블록 키는 `_build_fn_iteration_map`과 동일 lstrip('0') 정규화. 실패(시트/헤더 미발견/깨진 bytes/64MB 초과)는 None+warning → 노란 마킹 폴백 |
+| _cross_spec_fi_with_session | spec FI × 실행결과 교차 — passed = 전 FI iteration 실행+Pass 블록, 미실행/fail 블록 별도 카운트, index 파싱불가는 보수적 미실행 취급 |
+| _write_ut201 spec_fi_auto | config 키(fault_injection_total/passed) **둘 다 부재** + spec 산출값 존재 시에만 E85/F85 stamp + 파생 셀(G85/H85/C90) + 필수 audit warning(규칙·spec 파일명·total/passed·미실행/fail 명기 — 402 차이 추적성) |
+| _resolve_spec_fi_for_swutcr | 라우터 — config 키 하나라도 있으면 spec 로드 자체 skip, spec path 부재 시 None(HDPDM01 노란 마킹 무회귀) |
+| 우선순위 | config 키 > spec 자동 산출 > 노란 사용자입력 마킹 (라우터·빌더 게이트 일치) |
+
+- **ground truth 재현(의무 게이트)**: DV bk_v0.11_251126 → FI 블록 405/iteration 1,598 정확 재현,
+  PV WIP v0.10_260608 → FI 블록 808/iteration 3,229 (method_col 5/6 동적 감지, 중복 키 0, warning 0).
+- **라이브 재빌드 검증 12/12 PASS**: 2.UT201 C85=1014/E85=808/F85=808/G85='=E85-F85'/H85='=E86'/
+  C90='해당 사항 없음'(노란 마킹 0), **빌더 코드 미사용 독립 구현이 DV 405/1,598 재현 후 PV 808 일치**,
+  U:↔로컬 spec sha256 동일, 타 시트 cell-diff 0(SwUTR ~217만 셀 포함), config 키 우선/HDPDM01 무회귀,
+  FI warning 원문 emit 확인.
+- 신규 테스트 +24 (합성 병합 spec 6 + UT201 파생 9 + 라우터 게이트 6 + 복합표기/실파일 ground truth 가드 3).
+  회귀: **2,723 passed / 1 skipped / 1 deselected** (기준선 2,699 → 2,723 갱신).
+- 리뷰 findings 10건(critical 0, major 2) — 라운드 108에서 fix 예정: ① C90 'Fail TC N건'이 spec 자동
+  산출 경로에서 미실행 블록을 Fail로 위장(실측 위장 금지 위배 소지), ② env 중복 TC 시 마지막 env 승자
+  — Fail 기록 있어도 passed 집계 가능(B2 다중 폴더 현실 시나리오).
+- 자동화 불가(정직 보고): DV 402 유래 규명(작성자 확인), HDPDM01 FI(근거 부재 — 노란 마킹 유지),
+  PV FI 808은 WIP spec 기준(개정 시 변동 — warning에 spec 파일명 동봉으로 추적 가능),
+  PV iteration 3,229 외부 ground truth(이중 독립 구현 일치까지가 한계), 변칙 실행결과 TC명 4건
+  ('CTC_SwUFn_0431.001'/'Range' 2건/'SwUfn_1361.001') 원천 정정.
