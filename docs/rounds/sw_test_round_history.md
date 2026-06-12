@@ -996,3 +996,30 @@ backend 전체 SwUT/SwIT 회귀: 189 passed + 1 skipped (이전 ~190).
   PV FI 808은 WIP spec 기준(개정 시 변동 — warning에 spec 파일명 동봉으로 추적 가능),
   PV iteration 3,229 외부 ground truth(이중 독립 구현 일치까지가 한계), 변칙 실행결과 TC명 4건
   ('CTC_SwUFn_0431.001'/'Range' 2건/'SwUfn_1361.001') 원천 정정.
+
+## 라운드 108 (2026-06-12~13) — 라운드 107 리뷰 findings 8건 전수 fix (커밋 6d0677e)
+
+> 라운드 107 적대 리뷰의 findings(critical 0·major 2·minor 4·info 2)를 보류 없이 전수 수정.
+> 보수화 fix들은 현 KJPDS02 PV 실데이터(fail 0·미실행 0·상충 0·dup 0)에서 미발현이 정상 —
+> 합성 probe + 단위 테스트로 발현 경로 검증, 라이브 재빌드로 무회귀 확인.
+
+| # | finding | fix |
+|---|---|---|
+| MAJOR-1 | spec 자동 산출 C90 'Fail TC N건'이 미실행 블록을 Fail로 위장 | spec_fi_auto 분기만 '미통과 N건(미실행 X, Fail Y)' breakdown, N=0은 '해당 사항 없음' 유지. config 수기 분기 불변 |
+| MAJOR-2 | env 간 동일 TC 상충 시 `_build_fn_iteration_map` last-wins로 Fail 가림 | 신규 `_collect_fi_fail_observations` — 전 env 재관측, Fail 1회 관측 키는 Fail 우선 고정 + 상충 warning. SUTR 공용 함수 미접촉(diff hunk 증명, SUTR 계열 183 green) |
+| MINOR-3 | 검증 가능 FI iteration 0개 블록(anchor-only) 공허 통과 | not_executed 분류 + warning (index 파싱불가 보수 취급과 대칭화) |
+| MINOR-4 | 중복 TC_ID 키 병합 시 total(블록)/passed(키) 단위 불일치 | dup 키 블록 전부(1+count) not_executed 보수 처리, 실파일 가드에 fi_dup_keys==[] 단언 추가 |
+| MINOR-5 | SwUTS xlsm 2회 read(+~20s) | `resolve_swuts_test_specs`에 backward-compat `out_xlsm_bytes` out-param + `preloaded_spec_bytes` 전달 — 재read 제거(_RaisingResolver 미호출 증명). 타 caller 5곳 무영향 |
+| MINOR-6 | summary `ut201_fi_auto`가 시트 게이트 이전 무조건 설정 | `stamped` bool — _write_ut201 실 stamp 분기에서만 True. 시트 삭제 템플릿 테스트로 False 증명 |
+| INFO-7 | audit warning 'passed=M(미실행' 공백 누락 | 공백 추가 — 라이브 캡처로 fix 전후 대비 확인 |
+| INFO-8 | `_SPEC_FI_MAX_BYTES` 64MB 리터럴 중복 | `XLSM_MAX_BYTES` import 단일화 + docx-spec 확장자 사전 사유 warning(silent skip 아님) |
+
+- 신규 테스트 +14. 회귀: **2,737 passed / 1 skipped / 1 deselected** (기준선 2,723 → 2,737 갱신).
+- 라이브 재빌드 검증 6/6 PASS: PoC 3/3 산출(issues 0), 2.UT201 E85=808/F85=808/C90 유지·노란 마킹 0,
+  FI warning 원문에 INFO-7 공백 발현 + stamped=true, **라운드 107 산출물 대비 ~359만 셀 diff 1건**
+  (SwUTCV AuditLog 타임스탬프)뿐 — 재빌드 결정성, MAJOR-2 합성 probe 8/8(Fail 우선 고정·통제군 정상).
+- 라운드 107 baseline 산출물은 `.codex_tmp/kjpds02_pv_baseline_r107/` 보존, 신규 산출물이 kjpds02_pv_out/ 대체.
+- 재리뷰 잔여(비차단 — 백로그): 상충 warning 스코프가 비-FI TC 상충도 카운트(노이즈만, 수치 무영향),
+  pass↔miss 상충은 여전히 env 순서 의존(Fail은 어느 방향도 안 가려짐 — 수용), C90 breakdown 중첩 블록 시
+  X+Y>N 가능(docstring 명기), dup 블록 Fail 동시 보유 시 failed_blocks 과소(passed 제외라 규칙 합치),
+  FI 키 정규화 regex 2곳 리터럴 중복(H5류 — 현재 동일 확인).
