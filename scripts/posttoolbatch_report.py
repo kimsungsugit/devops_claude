@@ -4,7 +4,7 @@ Claude Code가 한 응답에서 여러 Write/Edit/Bash 등을 병렬 호출하�
 모든 도구가 끝난 시점에 본 훅이 1회 발동한다. 목적:
 
 1. 변경된 파일 목록을 한 번에 집계해서 (확장자별, 위치별) 보고
-2. CLAUDE.md L106 "능동 보고" 의 X1~X8 mini-checklist 골격을
+2. self-review.md "능동 보고 (필수)" 의 X1~X8 mini-checklist 골격을
    `additionalContext` 로 메인 에이전트에게 push — 메인은 이를 그대로
    commit 직전 응답에 포함하면 됨
 
@@ -98,7 +98,7 @@ def _build_report(entries: list[dict]) -> str | None:
     checklist = (
         "X-check 자동 보고 trigger: 다음 응답에 (1) 변경 요약 표 "
         "(2) X1~X8 mini-checklist 표 (3) 잠재 문제 표 (4) 결론 1줄을 "
-        "포함하라 (CLAUDE.md L106)."
+        "포함하라 (self-review.md 능동 보고 정책)."
     )
 
     # ASIL(c/h) 파일을 앞으로 정렬해 truncation 시 hint 누락 방지.

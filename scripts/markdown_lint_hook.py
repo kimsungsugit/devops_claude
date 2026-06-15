@@ -94,6 +94,22 @@ def main(payload: dict | None = None) -> None:
             if not os.path.exists(target_path):
                 issues.append(f"L{i}: broken link → {target}")
 
+        # @import 라인 (CLAUDE.md/메모리 파일) 대상 존재 검증 — `](path)` 링크와 달리
+        # 기존 broken-link 검사가 못 잡던 always-on import 깨짐을 포착.
+        m_import = re.match(r"^@([\w./~+-]+)$", masked.strip())
+        if m_import:
+            imp = m_import.group(1)
+            # 경로꼴(슬래시 포함 또는 알려진 확장자)일 때만 검증 — `@mention` 류 오탐 방지
+            if "/" in imp or imp.endswith((".md", ".json", ".txt")):
+                if imp.startswith("~"):
+                    imp_path = os.path.expanduser(imp)
+                elif os.path.isabs(imp):
+                    imp_path = imp
+                else:
+                    imp_path = os.path.normpath(os.path.join(base_dir, imp))
+                if not os.path.exists(imp_path):
+                    issues.append(f"L{i}: broken @import → {imp}")
+
     if not issues:
         _emit("clean")
     else:

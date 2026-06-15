@@ -101,7 +101,7 @@ review_depth 정의(meta/light/standard/deep), 키워드 트리거, ASIL 자동 
 
 STEP 4에서의 동작:
 - **meta** → STEP 4 생략, 메인이 정책 일관성(X4/X5/X6)만 점검
-- **light** → STEP 4 생략 가능, AGENTS.md 미니 체크리스트(10개) 의무 점검
+- **light** → STEP 4 생략 가능, AGENTS.md 미니 체크리스트(11개, X9 포함) 의무 점검
 - **standard** → reviewer 단일 호출 (S/P/Q/R/F + X1~X8 전체) → Critical 0이면 통과
 - **deep** → 아래 적응형 3~5회 루프
 

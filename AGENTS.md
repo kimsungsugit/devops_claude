@@ -69,15 +69,15 @@ ASIL 등급은 다음 순서로 판별한다:
 
 ### Settings/Hooks 변경 시 절차 (update-config 스킬 부재 정정)
 
-`.Codex/settings.json` / `.Codex/settings.local.json` / hooks / permissions / env 변경 시 다음 절차 의무:
+`.codex/config.toml` / `.codex/hooks.json` / hooks / permissions / env 변경 시 다음 절차 의무:
 
-1. **백업**: `cp .Codex/settings.json .Codex/settings.json.bak.YYYYMMDD` (롤백 안전망)
-2. **변경 후 parse 검증**: `python -c "import json; json.load(open('.Codex/settings.json'))"` — 0 exit 아니면 즉시 백업 복원
+1. **백업**: `cp .codex/config.toml .codex/config.toml.bak.YYYYMMDD` (롤백 안전망)
+2. **변경 후 parse 검증**: `python -c "import tomllib; tomllib.load(open('.codex/config.toml','rb'))"` — 0 exit 아니면 즉시 백업 복원
 3. **hook 변경 시 스모크 테스트**: `echo '{}' | python scripts/<hook>.py` 빈 입력으로 silent 종료 확인
 
 **예외**: 단순 `permissions.allow` 항목 한두 개 추가는 직접 Edit 허용 (parse 검증만).
 
-> 이전 버전은 `update-config` 스킬 호출을 의무화했으나 해당 스킬이 `.Codex/skills/`에 부재 (2026-05-08 정비 시 정정). 스킬 신규 작성은 별도 작업으로 예정.
+> 이전 버전은 `update-config` 스킬 호출을 의무화했으나 해당 스킬이 `.codex/skills/`에 부재 (2026-05-08 정비 시 정정). 스킬 신규 작성은 별도 작업으로 예정.
 
 ### TaskCreate 선제화
 
@@ -92,7 +92,7 @@ ASIL 등급은 다음 순서로 판별한다:
 
 코드 변경 작업을 마치고 사용자에게 완료 보고하기 직전, **변경 규모에 맞는 깊이로 reviewer 에이전트를 호출**하여 비판적 자체 검토를 수행한다. PostToolUse hook의 syntax/lint는 기계적 검사일 뿐 설계·논리·동시성 같은 비판적 검토를 대체하지 않는다.
 
-**review_depth 정의 단일 출처**: `.Codex/agents/reviewer/reviewer.md` `## 검토 깊이 자동 판정` 섹션을 참조. meta / light / standard / deep 4단계, 키워드 강제 승격, ASIL 자동 판정, 변경 통계 측정 시점 모두 거기에 정의돼 있다. 본 문서와 SKILL.md들은 그 정의를 그대로 따른다.
+**review_depth 정의 단일 출처**: `.claude/agents/reviewer/reviewer.md` `### 검토 깊이 자동 판정` 섹션을 참조. meta / light / standard / deep 4단계, 키워드 강제 승격, ASIL 자동 판정, 변경 통계 측정 시점 모두 거기에 정의돼 있다. 본 문서와 SKILL.md들은 그 정의를 그대로 따른다.
 
 **호출 정책 (review_depth 별)**:
 - **meta** (정책/문서만 변경) → reviewer 생략, 메인 에이전트가 X4/X5/X6만 직접 점검

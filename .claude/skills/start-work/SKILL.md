@@ -101,7 +101,7 @@ review_depth (meta / light / standard / deep) 정의·키워드 트리거·ASIL 
 
 Gate 5에서의 동작:
 - **meta** → Gate 5 생략, 메인 에이전트가 X4/X5/X6 정책 일관성만 직접 점검
-- **light** → Gate 5 생략 가능, 단 CLAUDE.md `### 작업 종료 직전 비판적 자체 검토`의 미니 체크리스트(10개) 점검 의무
+- **light** → Gate 5 생략 가능, 단 CLAUDE.md @import `self-review.md`의 미니 체크리스트(11개, X9 포함) 점검 의무
 - **standard** → reviewer **단일 호출** (S/P/Q/R/F + X1~X8 전체). Critical 0이면 Gate 6, 있으면 1회 fix 후 재검토 1회만
 - **deep** → 아래 **적응형 3~5회 루프** 발동
 
@@ -123,7 +123,7 @@ while round <= MAX_ROUNDS:
        - 프론트엔드 코드 패턴 (R1~R7)
        - ISO 26262 (F1~F8): MISRA-C, ASIL, 추적성
        - X1~X8 비정형 비판 — **시나리오 / timeline / 트리** 의무 (deep-reviewer.md 참조)
-       - deep-reviewer 호출 실패(403 등) 시 sonnet reviewer로 폴백, 그래도 실패하면 메인 에이전트 미니 체크리스트 10개
+       - deep-reviewer 호출 실패(403 등) 시 sonnet reviewer로 폴백, 그래도 실패하면 메인 에이전트 미니 체크리스트 11개
     
     2. 종합 품질 검사 실행:
        python scripts/quality_check.py --round {round} --json
