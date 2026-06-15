@@ -184,6 +184,10 @@ class JenkinsReportRequest(BaseModel):
     job_url: str
     cache_root: str
     build_selector: str = "lastSuccessfulBuild"
+    # VectorCAST 결과가 Jenkins 빌드에 없을 때(예: 부트로더/FBL 별도 산출) 읽을
+    # Cloudium 경로 (vectorcast_rag.json 파일 또는 그 상위 폴더). SwUT/SwIT 로그처럼
+    # 사용자가 '입력 문서 현황'에서 지정. 미지정/local 모드면 무시.
+    vcast_log_path: Optional[str] = None
 
 
 class JenkinsCallTreeRequest(JenkinsReportRequest):

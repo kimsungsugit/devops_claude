@@ -28,6 +28,9 @@ config/uds_template_server_config.json
 config/uds_template_server_config.json.bak
 config/allowed_users.json
 config/admins.json
+config/file_mode.json
+config/file_mode.invalid.json
+config/*.lock
 
 # === 관리자가 업로드한 UDS 템플릿 (프로젝트별 고객 문서 포함 가능) ===
 docs/uds_templates/

@@ -1718,6 +1718,48 @@ def generate_uds_traceability_matrix(
 
     req_id_set = set(req_ids)
 
+    # ── SDS 함수명 bridge (사용자 결정: "SDS로 bridge") ──
+    # UDS는 함수를 설계레벨 ID(SwSTR 등)에, SUTS/SITS는 단위/통합 ID에 추적해서 SRS
+    # 요구사항(SwTR/SwEI 등)과 직접 안 맞는다. 그런데 SDS의 component_ids에는 SwCom_XX
+    # 뿐 아니라 함수명(g_sysoptionctrl 등)이 들어 있어 "SRS요구사항→함수명"을 제공한다.
+    # 이를 역으로 "함수명(lower)→[SRS요구사항]"으로 만들어 UDS 함수·테스트 unit을 SRS
+    # 행에 연결한다. (component description/SwCom 키도 들어가지만 함수명 키만 실제 매칭)
+    sds_func_to_reqs: Dict[str, List[str]] = {}
+    for rid_srs, comps in sds_lookup.items():
+        if rid_srs not in req_id_set:
+            continue
+        for comp in comps:
+            key = str(comp).strip().lower()
+            if not key:
+                continue
+            lst = sds_func_to_reqs.setdefault(key, [])
+            if rid_srs not in lst:
+                lst.append(rid_srs)
+
+    # UDS 함수 전체 (lower→원형 display) — source_ids bridge용
+    uds_all_funcs: Dict[str, str] = {}
+    for mp in mapping_pairs:
+        if not isinstance(mp, dict):
+            continue
+        srcs = mp.get("source_ids") or []
+        if isinstance(srcs, str):
+            srcs = [s.strip() for s in srcs.split(",") if s.strip()]
+        for fn in (srcs or []):
+            f = str(fn).strip()
+            if f:
+                uds_all_funcs.setdefault(f.lower(), f)
+
+    # SITS 2-hop bridge용: SUTS가 제공하는 SwUFn(단위함수 ID) → 함수명 맵.
+    # SITS는 testcase에 SwUFn ID를 박아두지만 함수명/SRS ID가 없다. SUTS의
+    # SwUFn↔함수명(unit)으로 함수명을 얻은 뒤 SDS 함수명 bridge로 SRS에 연결한다.
+    swufn_to_func: Dict[str, str] = {}
+    for row in all_test_rows:
+        if isinstance(row, dict) and row.get("source") == "SUTS":
+            srid = _normalize_req_id(str(row.get("requirement_id") or ""))
+            sfn = str(row.get("unit") or "").strip().lower()
+            if srid and sfn:
+                swufn_to_func.setdefault(srid, sfn)
+
     # Enrich SUTS/SITS rows with reverse mappings
     enriched_rows: List[Dict[str, Any]] = []
     for row in all_test_rows:
@@ -1743,11 +1785,30 @@ def generate_uds_traceability_matrix(
                 enriched_rows.append({**row, "requirement_id": mrid, "trace_type": "indirect"})
 
         # Function name reverse mapping: unit → [SwTR_XXXX, ...]
+        # UDS 기반(func_to_reqs)은 SwSTR 등 설계레벨이라 SRS 행과 안 맞을 수 있어,
+        # SDS 함수명 bridge(sds_func_to_reqs, → SRS 요구사항)를 함께 사용한다.
         if unit and source in ("SUTS", "SITS"):
-            mapped_rids = func_to_reqs.get(unit, [])
+            mapped_rids = list(func_to_reqs.get(unit, []))
+            for r in sds_func_to_reqs.get(unit, []):
+                if r not in mapped_rids:
+                    mapped_rids.append(r)
             for mrid in mapped_rids:
-                if mrid != orig_rid:
+                # 유효한 SRS 요구사항(req_id_set)으로만 간접 추적 추가 — SwSTR 등 노이즈 배제
+                if mrid != orig_rid and mrid in req_id_set:
                     enriched_rows.append({**row, "requirement_id": mrid, "trace_type": "indirect"})
+
+        # SITS 2-hop bridge: testcase에 박힌 SwUFn → (SUTS)함수명 → (SDS)SRS 요구사항.
+        # SITS는 함수명/SRS ID 컬럼이 없어 unit bridge가 안 걸리므로 별도 처리.
+        if source == "SITS":
+            seen_sits: set = set()
+            for swufn in re.findall(r"SwUFN_\d+", str(row.get("testcase") or ""), re.IGNORECASE):
+                fn = swufn_to_func.get(_normalize_req_id(swufn))
+                if not fn:
+                    continue
+                for mrid in sds_func_to_reqs.get(fn, []):
+                    if mrid in req_id_set and mrid != orig_rid and mrid not in seen_sits:
+                        seen_sits.add(mrid)
+                        enriched_rows.append({**row, "requirement_id": mrid, "trace_type": "indirect"})
 
     vcast_map = _normalize_vcast_rows(enriched_rows)
 
@@ -1763,7 +1824,12 @@ def generate_uds_traceability_matrix(
     for rid in req_ids:
         tests = vcast_map.get(rid, [])
         test_ids = [t.get("testcase") for t in tests if t.get("testcase")]
-        src_list = map_lookup.get(rid, [])
+        src_list = list(map_lookup.get(rid, []))
+        # SDS 함수명 bridge: 이 SRS 요구사항에 SDS가 귀속한 함수 중 UDS에 존재하는 것을
+        # UDS 추적(source_ids)으로 채운다 (UDS가 SwSTR로 추적해 직접 안 붙던 문제 해소).
+        for flower, fdisp in uds_all_funcs.items():
+            if rid in sds_func_to_reqs.get(flower, []) and fdisp not in src_list:
+                src_list.append(fdisp)
         sds_list = sds_lookup.get(rid, [])
         if src_list:
             mapped_source_count += 1

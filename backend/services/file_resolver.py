@@ -33,6 +33,7 @@ import sys
 import socket
 import logging
 import time
+import unicodedata
 import uuid
 from abc import ABC, abstractmethod
 from pathlib import Path
@@ -400,7 +401,10 @@ class CloudiumFileResolver(LocalFileResolver):
           3) Windows에서만 lowercase (case-insensitive FS 보정)
           4) UNC `\\server\share` 의 leading `//` 보정
         """
-        n = os.path.normpath(p).replace("\\", "/")
+        # NFC/NFD(한글 조합형/분해형) 차이 흡수 — SVN/네트워크 드라이브에서 분해형으로
+        # 들어온 동일 경로가 NFC 화이트리스트와 불일치해 오차단되는 것 방지 (양쪽 NFC로
+        # 통일하므로 같은 경로만 매칭, 보안 경계는 그대로).
+        n = unicodedata.normalize("NFC", os.path.normpath(p)).replace("\\", "/")
         if sys.platform == "win32":
             n = n.lower()
         # normpath가 UNC `//server/share`의 leading `//`를 `/`로 줄이는 윈도 동작 보정
@@ -577,14 +581,45 @@ class CloudiumFileResolver(LocalFileResolver):
 _resolver: Optional[FileResolver] = None
 
 
+def _build_initial_resolver() -> FileResolver:
+    """startup 초기 resolver 결정 — 영속 저장소(사용자 마지막 선택) > env > local.
+
+    `/api/file-mode`로 전환한 모드는 config/file_mode.json에 영속되므로 재시작
+    시에도 복원된다 (in-memory 싱글톤만으로는 소실되던 문제 해결). 저장소가
+    없거나 손상이면 기존대로 DEVOPS_FILE_MODE env, 그것도 없으면 local.
+    """
+    persisted = None
+    try:
+        from backend.services.file_mode_store import load_file_mode
+        persisted = load_file_mode()
+    except Exception:  # pragma: no cover — 저장소 문제는 env fallback으로 흡수
+        persisted = None
+
+    if persisted:
+        mode = persisted["mode"]
+        # switch_mode와 동일하게 cloudium kwargs만 추림
+        kwargs = {
+            k: v for k, v in (
+                ("allowed_prefixes", persisted.get("allowed_prefixes", "")),
+                ("gate_process", persisted.get("gate_process", "")),
+            ) if v
+        }
+    else:
+        mode = os.getenv("DEVOPS_FILE_MODE", "local").strip().lower()
+        kwargs = {}
+
+    if mode == "cloudium":
+        return CloudiumFileResolver(**kwargs)
+    return LocalFileResolver()
+
+
 def get_resolver() -> FileResolver:
     global _resolver
     if _resolver is None:
-        mode = os.getenv("DEVOPS_FILE_MODE", "local").strip().lower()
-        if mode == "cloudium":
-            _resolver = CloudiumFileResolver()
-        else:
-            _resolver = LocalFileResolver()
+        # lock 없는 lazy init — main.py lifespan이 startup에서 먼저 1회 호출해
+        # _resolver를 채우고, cloudium은 --workers 1 필수(D2)라 동시 double-init은
+        # 같은 모드로 idempotent. _build_initial_resolver의 디스크 read도 동일.
+        _resolver = _build_initial_resolver()
         _logger.info("File resolver: mode=%s", _resolver.mode)
     return _resolver
 

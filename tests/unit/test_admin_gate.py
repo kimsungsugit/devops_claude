@@ -35,6 +35,11 @@ def _isolated_admins(tmp_path, monkeypatch):
         monkeypatch.setattr(au, "_LOCK", threading.Lock())
     au._cache["mtime"] = 0.0
     au._cache["admins"] = set()
+    # config/file_mode.json(cloudium 영속)이 dev 머신에 있으면 get_resolver가 cloudium
+    # 으로 초기화돼 /api/swut/browse가 cloudium 게이트 경로로 빠져 admin 403 검증이
+    # 깨진다 → admin 게이트 회귀는 기본 local로 고정.
+    from backend.services import file_resolver as fr
+    monkeypatch.setattr(fr, "_resolver", fr.LocalFileResolver())
 
 
 # 13 endpoint × (method, path, sample body)

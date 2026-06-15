@@ -22,11 +22,18 @@ client = TestClient(app)
 
 @pytest.fixture(autouse=True)
 def _isolated_storage(tmp_path, monkeypatch):
-    """endpoint 회귀 사이 영구 저장소 격리."""
+    """endpoint 회귀 사이 영구 저장소 격리 + 기본 local 모드 고정.
+
+    config/file_mode.json(cloudium 영속)이 dev 머신에 있으면 get_resolver가 cloudium
+    으로 초기화돼 local-mode 거부 테스트가 깨진다 → 기본 local로 고정. cloudium 테스트는
+    _cloudium_resolver fixture가 override.
+    """
     import threading
     p = tmp_path / "extra.json"
     monkeypatch.setattr(cep, "PREFIXES_PATH", p)
     monkeypatch.setattr(cep, "_LOCK", threading.Lock())
+    from backend.services import file_resolver as fr
+    monkeypatch.setattr(fr, "_resolver", fr.LocalFileResolver())
     return p
 
 

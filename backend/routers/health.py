@@ -91,11 +91,33 @@ async def get_file_mode():
     return get_resolver().get_config()
 
 
+# NOTE(보안 트레이드오프): 이 endpoint는 의도적으로 admin 비게이트(일반 router)다.
+# 이 배포는 비-admin 사용자가 직접 cloudium 모드를 전환해 사용하며, 그 선택을
+# 재시작 후에도 유지(config/file_mode.json 영속)하는 것이 요구사항이다. admin_router로
+# 옮기면 require_admin(config/admin_users.json 미등록 거부)이 비-admin의 전환을 막아
+# 기능이 깨진다. 단, 영속화로 인해 비-admin도 cloudium→local 강등을 durable하게
+# 고정할 수 있다는 점(read-only 경계 약화)은 알려진 한계 — 운영상 admin 전용이 필요하면
+# 사용자를 admin_users.json에 등록 후 이 데코레이터를 admin_router로 전환할 것.
 @router.post("/file-mode")
 async def set_file_mode(body: FileModeRequest):
     from backend.services.file_resolver import switch_mode
     kwargs = body.model_dump(exclude={"mode"}, exclude_none=True)
     resolver = switch_mode(body.mode, **kwargs)
+    # 재시작 간 모드 유지 — 선택을 config/file_mode.json에 영속 (in-memory 소실 fix).
+    # allowed_prefixes/gate_process는 UI가 보낸 base 값만 저장한다. SCM 경로와
+    # 사용자 추가 prefix는 각각 scm_registry.json / cloudium_extra_prefixes.json에
+    # 별도 영속되어 startup(main.py lifespan)에서 재merge되므로 여기서 중복 저장 안 함.
+    # 영속 실패가 모드 전환 자체를 막지 않도록 graceful.
+    try:
+        from backend.services.file_mode_store import save_file_mode
+        save_file_mode(
+            body.mode,
+            allowed_prefixes=body.allowed_prefixes or "",
+            gate_process=body.gate_process or "",
+        )
+    except Exception as _pe:  # noqa: BLE001
+        import logging
+        logging.getLogger("devops_api").warning("file-mode persist 실패: %s", _pe)
     # cloudium 모드 전환 시 worker 자동 시작 시도 (이미 떠 있으면 skip).
     # 결과를 응답에 포함하여 frontend가 즉시 인지 가능 (W4).
     worker_action: dict = {"action": "skipped_local_mode"}

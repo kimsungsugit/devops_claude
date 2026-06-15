@@ -36,6 +36,26 @@ export default function SrsSdsSection({ job, analysisResult }) {
   const scmLinkedDocs = activeScm?.linked_docs;
   const scmId = activeScm?.id || '';
   const [linkedDocs, setLinkedDocs] = useState(scmLinkedDocs || {});
+
+  // VectorCAST 결과 로그 경로 (Cloudium) — Jenkins 빌드에 RAG 없을 때 fallback.
+  // 부트로더/FBL 등 별도 결과 대응. SCM(프로젝트)별로 localStorage에 보관.
+  const VCAST_KEY = 'devops_v2_vcast_log_paths';
+  const [vcastLogPath, setVcastLogPath] = useState('');
+  useEffect(() => {
+    try {
+      const m = JSON.parse(localStorage.getItem(VCAST_KEY) || '{}');
+      setVcastLogPath(m[scmId || '_'] || '');
+    } catch (_) { setVcastLogPath(''); }
+  }, [scmId]);
+  const saveVcastLogPath = useCallback((v) => {
+    setVcastLogPath(v);
+    try {
+      const m = JSON.parse(localStorage.getItem(VCAST_KEY) || '{}');
+      m[scmId || '_'] = v;
+      localStorage.setItem(VCAST_KEY, JSON.stringify(m));
+    } catch (_) { /* noop */ }
+  }, [scmId]);
+
   useEffect(() => {
     if (scmLinkedDocs && (scmLinkedDocs.sts || scmLinkedDocs.suts || scmLinkedDocs.sits)) {
       setLinkedDocs(scmLinkedDocs);
@@ -218,6 +238,8 @@ export default function SrsSdsSection({ job, analysisResult }) {
           job_url: job.url,
           cache_root: cacheRoot,
           build_selector: cfg.buildSelector || 'lastSuccessfulBuild',
+          // Cloudium 폴백: Jenkins 빌드에 RAG 없으면 이 경로(부트로더 등 별도 결과)에서 read
+          vcast_log_path: vcastLogPath || '',
         });
         const rawRows = ragData?.data?.test_rows || [];
 
@@ -284,7 +306,7 @@ export default function SrsSdsSection({ job, analysisResult }) {
       setLoadProgress('');
       if (stepWarnings.length > 0) setWarnings(stepWarnings);
     }
-  }, [job, cfg, cacheRoot, docPaths, linkedDocs, scmId, toast]);
+  }, [job, cfg, cacheRoot, docPaths, linkedDocs, scmId, toast, vcastLogPath]);
 
   const impactData = analysisResult?.impactData;
   const impacts = impactData?.impacts ?? impactData?.impact_items ?? [];
@@ -323,6 +345,24 @@ export default function SrsSdsSection({ job, analysisResult }) {
               )}
             </div>
           ))}
+          {/* VectorCAST 결과 로그 (Cloudium) — Jenkins 빌드에 RAG 없을 때 폴백.
+              부트로더/FBL 등 결과가 별도로 나올 때 SwUT/SwIT처럼 경로 지정. */}
+          <div className="artifact-item" style={{ background: 'var(--bg)', overflow: 'hidden' }}>
+            <span className="pill pill-purple" style={{ minWidth: 40, textAlign: 'center', flexShrink: 0 }}>VC로그</span>
+            <input
+              type="text"
+              value={vcastLogPath}
+              onChange={e => saveVcastLogPath(e.target.value)}
+              placeholder="VectorCAST 결과 경로 (Cloudium, 미입력 시 Jenkins 빌드 사용)"
+              spellCheck="false"
+              autoComplete="off"
+              style={{ flex: 1, minWidth: 0, fontSize: 12, padding: '2px 6px' }}
+              aria-label="VectorCAST 결과 로그 경로"
+            />
+            {vcastLogPath
+              ? <StatusBadge tone="success">지정됨</StatusBadge>
+              : <StatusBadge tone="neutral">Jenkins</StatusBadge>}
+          </div>
         </div>
       </div>
 

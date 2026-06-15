@@ -17,7 +17,7 @@
       "ignore_patterns": [],
       "webhook_secret_env": "",
       "linked_docs": {
-        "uds": "U:/연구소/1000 프로젝트/1200 자동차/0002 A Cappella/02 ADOS/03 NE_GN7/08.Software/04.SW 단위설계/01.SUDS/(HDPDM01_SUDS) Software Unit Design Specification_v1.07_240213.docx",
+        "uds": "U:/연구소/1000 프로젝트/1200 자동차/0002 A Cappella/02 ADOS/04 KJPDS02/02.설계(연구소)/01.설계 및 검증/08.소프트웨어/04.SW 단위 설계/01.SwUDS/(KJPDS02_SwUDS) Software Unit Design Specification_v2.08_260406.docx",
         "sts": "U:/연구소/1000 프로젝트/1200 자동차/0002 A Cappella/02 ADOS/03 NE_GN7/08.Software/07.SW 테스트/03.Test Specification/01.STS/(HDPDM01_STS) Software Test Specification_v1.02_230116.xlsm",
         "suts": "U:/연구소/1000 프로젝트/1200 자동차/0002 A Cappella/02 ADOS/03 NE_GN7/08.Software/10.SW 단위테스트/02.Test Specification/01.SUTS/(HDPDM01_SUTS) Software Unit Test Specification_v3.01_240221_R.xlsm",
         "sits": "U:/연구소/1000 프로젝트/1200 자동차/0002 A Cappella/02 ADOS/03 NE_GN7/08.Software/08.SW 통합테스트/02.Test Specification/01.SITS/(HDPDM01_SITS) Software Integration Test Specification_v2.02_240219.xlsm",
@@ -27,7 +27,7 @@
         "stp": "U:/연구소/1000 프로젝트/1200 자동차/0002 A Cappella/02 ADOS/03 NE_GN7/08.Software/07.SW 테스트/02.Test Plan/01.STP/(HDPDM01_STP) Software Test Plan_v1.01_20230113_B.docx"
       },
       "created_at": "2026-03-23T14:10:41",
-      "updated_at": "2026-05-13T16:04:29",
+      "updated_at": "2026-06-15T12:19:14",
       "last_triggered": "",
       "last_revision": ""
     },

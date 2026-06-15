@@ -232,7 +232,10 @@ export const getInitialTheme = () =>
 
 export const saveTheme = (t) => localStorage.setItem('devops_v2_theme', t);
 
-/** Jenkins config — 토큰은 sessionStorage (탭 닫으면 삭제), 나머지는 localStorage */
+/** Jenkins config — 토큰 포함 전부 localStorage 영속 (재시작·탭 닫기 후에도 유지).
+ *  과거에는 토큰만 sessionStorage(탭 닫으면 소멸)였으나 사용자 요구로 영속화.
+ *  보안 트레이드오프: Jenkins API 토큰이 localStorage에 남으므로 공용 PC에서는
+ *  사용 후 설정 초기화 권장. (서버 영속 `/api/config/jenkins`는 admin 전용 별도 경로) */
 const JENKINS_KEY = 'devops_v2_jenkins';
 const JENKINS_TOKEN_KEY = 'devops_v2_jenkins_token';
 
@@ -240,18 +243,31 @@ export function loadJenkinsConfig() {
   try {
     const raw = localStorage.getItem(JENKINS_KEY);
     const cfg = raw ? JSON.parse(raw) : {};
-    // 토큰은 sessionStorage에서 로드
-    cfg.token = sessionStorage.getItem(JENKINS_TOKEN_KEY) || cfg.token || '';
+    let token = localStorage.getItem(JENKINS_TOKEN_KEY);
+    if (!token) {
+      // 과거 sessionStorage 저장분 1회 migrate → localStorage 영속
+      const legacy = sessionStorage.getItem(JENKINS_TOKEN_KEY);
+      if (legacy) {
+        localStorage.setItem(JENKINS_TOKEN_KEY, legacy);
+        try { sessionStorage.removeItem(JENKINS_TOKEN_KEY); } catch (_) { /* noop */ }
+        token = legacy;
+      }
+    }
+    cfg.token = token || cfg.token || '';
     return cfg;
   } catch (_) { return {}; }
 }
 
 export function saveJenkinsConfig(cfg) {
-  // 토큰은 sessionStorage에만 저장 (탭 닫으면 소멸)
+  // 토큰을 localStorage에 영속 (재시작 후에도 유지). 빈 토큰이면 키 제거.
   if (cfg.token) {
-    sessionStorage.setItem(JENKINS_TOKEN_KEY, cfg.token);
+    localStorage.setItem(JENKINS_TOKEN_KEY, cfg.token);
+  } else {
+    localStorage.removeItem(JENKINS_TOKEN_KEY);
   }
-  // localStorage에는 토큰 제외하고 저장
+  // 과거 sessionStorage 키 정리 (잔존분 제거)
+  try { sessionStorage.removeItem(JENKINS_TOKEN_KEY); } catch (_) { /* noop */ }
+  // localStorage(JENKINS_KEY)에는 토큰 제외하고 저장
   const { token, ...rest } = cfg;
   localStorage.setItem(JENKINS_KEY, JSON.stringify(rest));
 }

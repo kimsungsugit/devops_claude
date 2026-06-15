@@ -491,7 +491,8 @@ export default function Dashboard({ onGoDetail }) {
       <div className="toolbar">
         <span className="toolbar-title">Jenkins 프로젝트</span>
         <input
-          type="text"
+          type="search"
+          role="searchbox"
           name={filterInputName}
           id={filterInputName}
           placeholder="Job 이름 필터..."

@@ -801,47 +801,87 @@ def jenkins_report_summary(req: JenkinsReportRequest) -> Dict[str, Any]:
     return build_report_summary(report_dir, project_root=repo_root)
 
 
+def _load_vectorcast_rag_from_cloudium(path: str) -> Dict[str, Any]:
+    """Jenkins 캐시에 VectorCAST RAG가 없을 때 Cloudium 경로에서 읽는다 (worker IPC).
+
+    부트로더/FBL 등 테스트 결과가 Jenkins와 별도로 나올 수 있어, SwUT/SwIT 로그처럼
+    사용자가 지정한 경로에서 resolver(local=직접 / cloudium=worker)로 vectorcast_rag.json
+    을 읽는다. path가 .json이면 직접, 폴더면 표준 하위 경로들을 탐색.
+    """
+    import json as _json
+    p = str(path or "").strip()
+    if not p:
+        return {}
+    from backend.services.file_resolver import get_resolver
+    from backend.services.resolver_helpers import enforce_resolver_access
+    resolver = get_resolver()
+    base = p.rstrip("/\\")
+    cands = [p] if p.lower().endswith(".json") else [
+        base + "/vectorcast_rag.json",
+        base + "/vectorcast_rag/vectorcast_rag.json",
+        base + "/report/vectorcast_rag/vectorcast_rag.json",
+    ]
+    for cand in cands:
+        try:
+            enforce_resolver_access(cand)
+            if not resolver.exists(cand):
+                continue
+            obj = _json.loads(resolver.read_bytes(cand).decode("utf-8", "ignore"))
+            if isinstance(obj, dict) and obj:
+                return obj
+        except (PermissionError, OSError):
+            continue
+        except Exception:
+            continue
+    return {}
+
+
 @router.post("/api/jenkins/report/vectorcast-rag")
 def jenkins_vectorcast_rag(req: JenkinsReportRequest) -> Dict[str, Any]:
     build_root = _resolve_cached_build_root(req.job_url, req.cache_root, req.build_selector)
-    if not build_root:
-        raise HTTPException(status_code=404, detail="cached build not found")
-    payload = _load_vectorcast_rag(build_root)
+    payload = _load_vectorcast_rag(build_root) if build_root else {}
+    source = "jenkins"
+    # Cloudium 폴백 — Jenkins 빌드에 RAG 없으면 사용자 지정 경로(부트로더 등 별도 결과)에서.
+    if not payload and (req.vcast_log_path or "").strip():
+        payload = _load_vectorcast_rag_from_cloudium(req.vcast_log_path)
+        source = "cloudium"
     if not payload:
         return {"ok": False, "error": "missing"}
 
     comparison: Dict[str, Any] = {}
-    try:
-        builds = list_cached_builds(job_url=req.job_url, cache_root=_normalize_jenkins_cache_root(req.cache_root))
-        summaries: List[Dict[str, Any]] = []
-        for row in builds:
-            cand_root = Path(row.get("build_root", ""))
-            if not cand_root.exists():
-                continue
-            rag = _load_vectorcast_rag(cand_root)
-            if not isinstance(rag, dict) or not rag.get("summary"):
-                continue
-            summaries.append({"summary": rag.get("summary") or {}, "build": row})
+    # 이전 빌드 delta 비교는 Jenkins 캐시 기반 — cloudium 폴백 소스에는 비적용.
+    if build_root and source == "jenkins":
+        try:
+            builds = list_cached_builds(job_url=req.job_url, cache_root=_normalize_jenkins_cache_root(req.cache_root))
+            summaries: List[Dict[str, Any]] = []
+            for row in builds:
+                cand_root = Path(row.get("build_root", ""))
+                if not cand_root.exists():
+                    continue
+                rag = _load_vectorcast_rag(cand_root)
+                if not isinstance(rag, dict) or not rag.get("summary"):
+                    continue
+                summaries.append({"summary": rag.get("summary") or {}, "build": row})
+                if len(summaries) >= 2:
+                    break
             if len(summaries) >= 2:
-                break
-        if len(summaries) >= 2:
-            cur = summaries[0]["summary"]
-            prev = summaries[1]["summary"]
-            comparison = {
-                "current": cur,
-                "previous": prev,
-                "delta": {
-                    "total": (cur.get("total") or 0) - (prev.get("total") or 0),
-                    "passed": (cur.get("passed") or 0) - (prev.get("passed") or 0),
-                    "failed": (cur.get("failed") or 0) - (prev.get("failed") or 0),
-                    "skipped": (cur.get("skipped") or 0) - (prev.get("skipped") or 0),
-                    "pass_rate": (cur.get("pass_rate") or 0) - (prev.get("pass_rate") or 0),
-                },
-            }
-    except Exception:
-        comparison = {}
+                cur = summaries[0]["summary"]
+                prev = summaries[1]["summary"]
+                comparison = {
+                    "current": cur,
+                    "previous": prev,
+                    "delta": {
+                        "total": (cur.get("total") or 0) - (prev.get("total") or 0),
+                        "passed": (cur.get("passed") or 0) - (prev.get("passed") or 0),
+                        "failed": (cur.get("failed") or 0) - (prev.get("failed") or 0),
+                        "skipped": (cur.get("skipped") or 0) - (prev.get("skipped") or 0),
+                        "pass_rate": (cur.get("pass_rate") or 0) - (prev.get("pass_rate") or 0),
+                    },
+                }
+        except Exception:
+            comparison = {}
 
-    return {"ok": True, "data": payload, "comparison": comparison}
+    return {"ok": True, "data": payload, "comparison": comparison, "source": source}
 
 
 @router.post("/api/jenkins/source-root")
@@ -2689,18 +2729,75 @@ def jenkins_sts_extract_traceability(body: Dict[str, Any]) -> Dict[str, Any]:
         }
 
     vcast_rows = []
+    import re as _re
+
+    # 헤더 기반 컬럼 탐지 (list 형식 전용) — KJPDS02 SwTS/SwUTS "3.SW Test Spec"처럼
+    # TC ID/요구사항 컬럼이 고정 위치가 아니라 'Test Case ID' / 'SRS' 헤더로만 식별되는
+    # 파일 대응. 헤더 행을 스캔해 TC 컬럼 + 요구사항(SRS/Related/SwRS) 컬럼을 찾는다.
+    # 못 찾으면 기존 고정 컬럼(TC=5/req=6) 로직으로 fallback (하위호환).
+    def _detect_header_cols(ws):
+        # 상위 30행까지 스캔 (SwUTS는 preamble이 길어 헤더가 12행 이후). 먼저 그 행에
+        # TC ID 컬럼이 있는지 보고, 있으면 같은 행에서 요구사항/Related 컬럼을 찾는다
+        # (요구사항 컬럼을 TC 헤더 행으로 한정 → preamble/데이터 오탐 방지).
+        max_c = min((ws.max_column or 1), 200)
+        max_r = min((ws.max_row or 1), 30)
+        for hr in range(1, max_r + 1):
+            tc_col = None
+            for c in range(1, max_c + 1):
+                h = str(ws.cell(hr, c).value or "").strip().lower()
+                if not h:
+                    continue
+                # TC ID 컬럼: 'Test Case ID'(SwTS) / 'TC_ID'(SwUTS) 등 표기 변형 흡수.
+                # 'Test Case Generation Method'는 'testcaseid' 미포함 → 오탐 방지.
+                _hn = h.replace(" ", "").replace("_", "")
+                if "testcaseid" in _hn or _hn == "tcid":
+                    tc_col = c
+                    break
+            if tc_col is None:
+                continue
+            # 멀티행 헤더 대응: 'Related ID'가 TC 상세헤더(예: SwUTS row4)보다 위 행
+            # (병합 타이틀, row3)에 있을 수 있어 TC 행 포함 위로 3행 band를 스캔한다.
+            req_id_cols = []
+            for rr in range(max(1, hr - 3), hr + 1):
+                for c in range(1, max_c + 1):
+                    if c in req_id_cols:
+                        continue
+                    h = str(ws.cell(rr, c).value or "").strip().lower()
+                    if not h:
+                        continue
+                    # 요구사항/추적 링크 컬럼만 매칭. 'srs'/'swrs'는 specific해서 substring
+                    # 허용, 'related'/'requirement'는 'related functionality'/'requirement
+                    # category' 같은 오탐 방지 위해 완전일치(공백 제거)로 한정. FS_REQ 제외.
+                    hn = h.replace(" ", "")
+                    if ("srs" in hn or "swrs" in hn
+                            or hn in ("related", "relatedid", "relatedids",
+                                      "relatedrequirement", "relatedreq", "requirement",
+                                      "requirementid", "reqid", "trace", "traceid")):
+                        req_id_cols.append(c)
+            if req_id_cols:
+                # unit(함수명) 컬럼 — SUTS/SITS를 SDS 함수명 bridge로 SRS에 연결하기
+                # 위해 캡처 (SwUTS의 col4 'Unit' = 함수명). TC 헤더 행에서 완전일치 탐색.
+                unit_col = None
+                for c in range(1, max_c + 1):
+                    h = str(ws.cell(hr, c).value or "").strip().lower()
+                    if h in ("unit", "function", "function name",
+                             "unit name", "function_name", "unit_name"):
+                        unit_col = c
+                        break
+                return hr, tc_col, req_id_cols, unit_col
+        return None
 
     # Determine source label from doc_type or auto-detect from sheet structure
     if trace_type == "matrix":
         source_label = doc_type.upper() if doc_type in ("sts", "suts") else "STS"
         # STS format: row 4 has req IDs as column headers, rows 5+ have TC IDs with markers
         req_cols = []
-        for c in range(3, trace_ws.max_column + 1):
+        for c in range(3, (trace_ws.max_column or 0) + 1):
             v = trace_ws.cell(4, c).value
             if v and ("Sw" in str(v) or "SW" in str(v).upper() or "Sy" in str(v)):
                 req_cols.append((c, _normalize_req_id(str(v).strip())))
 
-        for r in range(5, trace_ws.max_row + 1):
+        for r in range(5, (trace_ws.max_row or 0) + 1):
             tc_id = str(trace_ws.cell(r, 3).value or "").strip()
             if not tc_id:
                 continue
@@ -2715,23 +2812,60 @@ def jenkins_sts_extract_traceability(body: Dict[str, Any]) -> Dict[str, Any]:
                     })
     else:
         source_label = doc_type.upper() if doc_type in ("sts", "suts") else "SUTS"
-        # SUTS format: columns — TC ID (5), SRS Req ID (6)
-        for r in range(4, trace_ws.max_row + 1):
-            tc_id = str(trace_ws.cell(r, 5).value or "").strip()
-            req_raw = str(trace_ws.cell(r, 6).value or "").strip()
-            func_name = str(trace_ws.cell(r, 4).value or "").strip()
-            if not tc_id:
-                continue
-            import re as _re
-            req_ids = _re.findall(r"Sw[A-Z]{2,}_\d+|Sy[A-Z]{2,}_\d+", req_raw)
-            for rid in req_ids:
-                vcast_rows.append({
-                    "requirement_id": _normalize_req_id(rid),
-                    "testcase": tc_id,
-                    "unit": func_name,
-                    "source": source_label,
-                    "result": "mapped",
-                })
+        detected = _detect_header_cols(trace_ws)
+        if detected:
+            # 헤더 기반: TC ID 컬럼 ↔ 요구사항 컬럼. 병합셀/연속행은 직전 TC 유지,
+            # 빈 행 50연속 시 조기 종료. 요구사항은 req 컬럼에서만 regex 추출.
+            header_row, tc_col, req_id_cols, unit_col = detected
+            empty_streak = 0
+            current_tc = ""
+            current_unit = ""
+            for r in range(header_row + 1, (trace_ws.max_row or header_row) + 1):
+                tc_v = str(trace_ws.cell(r, tc_col).value or "").strip()
+                if tc_v:
+                    current_tc = tc_v
+                    current_unit = ""  # 새 TC 블록 시작 → unit 초기화
+                if unit_col:
+                    uv = str(trace_ws.cell(r, unit_col).value or "").strip()
+                    if uv:
+                        current_unit = uv
+                found = []
+                for rc in req_id_cols:
+                    cv = str(trace_ws.cell(r, rc).value or "").strip()
+                    if cv:
+                        found += _re.findall(r"Sw[A-Za-z]{2,}_\d+|Sy[A-Za-z]{2,}_\d+", cv)
+                if not tc_v and not found:
+                    empty_streak += 1
+                    if empty_streak >= 50:
+                        break
+                    continue
+                empty_streak = 0
+                if current_tc and found:
+                    for rid in found:
+                        vcast_rows.append({
+                            "requirement_id": _normalize_req_id(rid),
+                            "testcase": current_tc,
+                            "unit": current_unit,
+                            "source": source_label,
+                            "result": "mapped",
+                        })
+        else:
+            # Fallback: 기존 고정 컬럼 (TC=5, SRS req=6, func=4)
+            for r in range(4, trace_ws.max_row + 1):
+                tc_id = str(trace_ws.cell(r, 5).value or "").strip()
+                req_raw = str(trace_ws.cell(r, 6).value or "").strip()
+                func_name = str(trace_ws.cell(r, 4).value or "").strip()
+                if not tc_id:
+                    continue
+                req_ids = _re.findall(r"Sw[A-Z]{2,}_\d+|Sy[A-Z]{2,}_\d+", req_raw)
+                for rid in req_ids:
+                    vcast_rows.append({
+                        "requirement_id": _normalize_req_id(rid),
+                        "testcase": tc_id,
+                        "unit": func_name,
+                        "source": source_label,
+                        "result": "mapped",
+                    })
 
     wb.close()
 
@@ -2865,18 +2999,26 @@ def jenkins_sits_extract_traceability(body: Dict[str, Any]) -> Dict[str, Any]:
 
     if trace_ws:
         empty_streak = 0
-        for r in range(4, (trace_ws.max_row or 0) + 1):
-            tc_id = str(trace_ws.cell(r, 2).value or "").strip()
+        # PERF: read_only 모드에서 ws.cell(r,c) 랜덤 접근은 호출마다 시트 상단부터
+        # 재파싱돼 O(행²·열)로 폭주한다(1874행×146열 실측 ~75분). 순차 iter_rows
+        # 단일 패스는 O(행)이며 동일 파일에서 0.4초로 동작한다. 열은 4~199만 본다.
+        # max_column은 read_only 모드에서 None일 수 있음 → 그 경우 199(상한)까지
+        # 스캔해 cols 5+ req ID 누락 방지. 좁은 시트는 아래 len(row) 가드가 처리.
+        max_col = min(trace_ws.max_column or 199, 199)
+        for row in trace_ws.iter_rows(min_row=4, max_col=max_col, values_only=True):
+            # 1-based 열 2/3 == 0-based 인덱스 1/2
+            tc_id = str(row[1] or "").strip() if len(row) > 1 else ""
             if not tc_id or not _re.match(r"Sw\w+_\d+", tc_id, _re.I):
-                tc_id = str(trace_ws.cell(r, 3).value or "").strip()
+                tc_id = str(row[2] or "").strip() if len(row) > 2 else ""
             if not tc_id:
                 empty_streak += 1
                 if empty_streak >= _MAX_EMPTY_ROWS:
                     break
                 continue
             empty_streak = 0
-            for col in range(4, min((trace_ws.max_column or 4) + 1, 200)):
-                val = str(trace_ws.cell(r, col).value or "").strip()
+            # 1-based 열 4부터 == 0-based 인덱스 3부터
+            for ci in range(3, len(row)):
+                val = str(row[ci] or "").strip()
                 req_ids = _re.findall(r"Sw[A-Za-z]{2,}_\d+|Sy[A-Za-z]{2,}_\d+", val)
                 for rid in req_ids:
                     vcast_rows.append({
@@ -2911,20 +3053,30 @@ def jenkins_sits_extract_traceability(body: Dict[str, Any]) -> Dict[str, Any]:
                 "available_sheets": list(wb.sheetnames),
             }
 
-        # Find the Related ID column by scanning headers
+        # Find the Related ID column by scanning header rows 5/6.
+        # PERF: 본문 random .cell() 스캔도 Strategy 1과 동일한 O(행²) 폭주를
+        # 유발하므로 header(2행)·본문 모두 iter_rows 순차 패스로 처리한다.
         related_col = -1
-        for c in range(1, min((spec_ws.max_column or 1) + 1, 200)):
-            hdr = str(spec_ws.cell(5, c).value or "").strip().lower()
-            hdr2 = str(spec_ws.cell(6, c).value or "").strip().lower()
-            if "related" in hdr or "related" in hdr2 or "swds" in hdr2:
-                related_col = c
+        hdr_scan_max = min(spec_ws.max_column or 199, 199)
+        hdr_rows = list(spec_ws.iter_rows(
+            min_row=5, max_row=6, max_col=hdr_scan_max, values_only=True))
+        hdr5 = hdr_rows[0] if len(hdr_rows) > 0 else ()
+        hdr6 = hdr_rows[1] if len(hdr_rows) > 1 else ()
+        for ci in range(len(hdr5)):
+            h5 = str(hdr5[ci] or "").strip().lower()
+            h6 = str(hdr6[ci] or "").strip().lower() if ci < len(hdr6) else ""
+            if "related" in h5 or "related" in h6 or "swds" in h6:
+                related_col = ci + 1  # 0-based -> 1-based
                 break
         if related_col < 0:
             related_col = 145  # default SITS layout
 
         empty_streak = 0
-        for r in range(7, (spec_ws.max_row or 7) + 1):
-            tc_id = str(spec_ws.cell(r, 2).value or "").strip()
+        # related_col(기본 145)까지 포함하도록 max_col 보장 (단 199 상한)
+        body_max_col = min(max(spec_ws.max_column or 199, related_col), 199)
+        for row in spec_ws.iter_rows(
+                min_row=7, max_col=body_max_col, values_only=True):
+            tc_id = str(row[1] or "").strip() if len(row) > 1 else ""
             if not tc_id:
                 empty_streak += 1
                 if empty_streak >= _MAX_EMPTY_ROWS:
@@ -2933,7 +3085,7 @@ def jenkins_sits_extract_traceability(body: Dict[str, Any]) -> Dict[str, Any]:
             empty_streak = 0
 
             # Extract entry function name from description ("Verify integration: FuncName → ...")
-            desc = str(spec_ws.cell(r, 3).value or "").strip()
+            desc = str(row[2] or "").strip() if len(row) > 2 else ""
             entry_fn = ""
             if "integration:" in desc.lower():
                 parts = desc.split(":", 1)
@@ -2942,7 +3094,7 @@ def jenkins_sits_extract_traceability(body: Dict[str, Any]) -> Dict[str, Any]:
                     if fn_part and not fn_part.startswith("("):
                         entry_fn = fn_part
 
-            related_val = str(spec_ws.cell(r, related_col).value or "").strip()
+            related_val = str(row[related_col - 1] or "").strip() if len(row) >= related_col else ""
             req_ids = _re.findall(r"Sw[A-Za-z]{2,}_\d+|Sy[A-Za-z]{2,}_\d+", related_val)
             for rid in req_ids:
                 vcast_rows.append({
