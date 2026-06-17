@@ -1,29 +1,31 @@
 """report_gen.requirements - Auto-split from report_generator.py"""
 # Re-import common dependencies
-import re
-import os
-import json
 import csv
+import json
 import logging
-import time
+import re
 from io import StringIO
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from report_gen.function_analyzer import _normalize_symbol_name
 from report_gen.source_parser import (
-    _scan_source_requirement_ids,
-    _scan_source_function_names,
     _extract_comment_lines,
+    _scan_source_function_names,
+    _scan_source_requirement_ids,
 )
 from report_gen.utils import (
-    _normalize_swcom_label,
-    _normalize_related_ids,
     _dedupe_multiline_text,
     _normalize_asil_value,
+    _normalize_related_ids,
+    _normalize_swcom_label,
 )
 
 _logger = logging.getLogger("report_generator")
+
+# SwUFn/SwIFn 단위·통합 함수 ID 패턴 — SITS/VectorCAST 2-hop bridge에서 행마다
+# 재사용(7천+ 행 루프 재컴파일 방지, reviewer INFO 권고).
+_SWUFN_RE = re.compile(r"Sw[UI]Fn_\d+", re.IGNORECASE)
 
 _REQ_ID_PAT = re.compile(r"\b(Sw(?:TR|TSR|NTR|NTSR|CNF|EI|ST|STR|Fn|TK)_\d+)\b", re.I)
 
@@ -335,7 +337,7 @@ def _extract_function_info_from_docx(doc) -> Dict[str, Dict[str, Any]]:
                 elif label_norm in {"사용 전역변수", "사용 전역 변수"}:
                     all_vars = [ln.strip() for ln in value.splitlines() if ln.strip()]
                     info["globals"] = all_vars
-                    from config import STATIC_VAR_PREFIXES, GLOBAL_VAR_PREFIXES
+                    from config import GLOBAL_VAR_PREFIXES, STATIC_VAR_PREFIXES
                     for var in all_vars:
                         v_stripped = var.split(",")[0].strip().split(":")[0].strip()
                         if any(v_stripped.startswith(p) for p in STATIC_VAR_PREFIXES):
@@ -1598,8 +1600,11 @@ def _normalize_vcast_rows(rows: List[Dict[str, Any]]) -> Dict[str, List[Dict[str
         testcase = row.get("testcase") or row.get("subprogram") or ""
         source = row.get("source") or ""
         result = row.get("result") or ""
-        # Deduplicate: same requirement + testcase + source = skip
-        dedup_key = (rid, testcase, source)
+        # Deduplicate: same requirement + testcase + source + subprogram = skip.
+        # subprogram을 키에 포함(reviewer INFO): 서로 다른 함수가 동일 testcase 명을
+        # 가지고 같은 SRS req로 bridge될 때 한 건이 silent drop되던 경계 케이스 방지.
+        # 비-vcast 행은 subprogram이 비어 키에 영향 없음(STS/SUTS/SITS 동작 불변).
+        dedup_key = (rid, testcase, source, str(row.get("subprogram") or ""))
         if dedup_key in seen_keys:
             continue
         seen_keys.add(dedup_key)
@@ -1623,6 +1628,7 @@ def generate_uds_traceability_matrix(
     vcast_rows: Optional[List[Dict[str, Any]]] = None,
     sds_pairs: Optional[List[Dict[str, Any]]] = None,
     sits_rows: Optional[List[Dict[str, Any]]] = None,
+    uds_function_ids: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     # Build original→normalized ID mapping to preserve display IDs
     raw_ids = sorted({str(x.get("id") or "").strip() for x in items if str(x.get("id") or "").strip()})
@@ -1748,29 +1754,47 @@ def generate_uds_traceability_matrix(
             f = str(fn).strip()
             if f:
                 uds_all_funcs.setdefault(f.lower(), f)
+    # extract-mapping이 전달한 전체 UDS 함수 인벤토리(설계 req 참조 없는 함수 포함)로 보강.
+    # mapping_pairs는 설계 req를 참조하는 함수(~5%)만 담으므로, 이것 없이는 SDS→UDS bridge가
+    # 대다수 함수를 못 찾아 "UDS 함수" 컬럼이 비게 된다(54/1005 누락 케이스).
+    for fn in (uds_function_ids or []):
+        f = str(fn).strip()
+        if f:
+            uds_all_funcs.setdefault(f.lower(), f)
 
-    # SITS 2-hop bridge용: SUTS가 제공하는 SwUFn(단위함수 ID) → 함수명 맵.
-    # SITS는 testcase에 SwUFn ID를 박아두지만 함수명/SRS ID가 없다. SUTS의
-    # SwUFn↔함수명(unit)으로 함수명을 얻은 뒤 SDS 함수명 bridge로 SRS에 연결한다.
-    swufn_to_func: Dict[str, str] = {}
+    # SITS/VectorCAST 2-hop bridge용: SUTS가 제공하는 SwUFn(단위함수 ID) → 함수명 맵.
+    # SITS/vcast는 testcase·subprogram에 SwUFn ID를 박아두지만 함수명/SRS ID가 없다.
+    # SUTS의 SwUFn↔함수명(unit)으로 함수명을 얻은 뒤 SDS 함수명 bridge로 SRS에 연결.
+    # 한 SwUFn이 여러 함수명에 대응(리팩터·분할)할 수 있어 List로 누적(reviewer WARNING:
+    # first-wins setdefault는 대체 함수명을 버려 silent under-trace — 안전상 더 위험한 방향).
+    swufn_to_func: Dict[str, List[str]] = {}
     for row in all_test_rows:
         if isinstance(row, dict) and row.get("source") == "SUTS":
             srid = _normalize_req_id(str(row.get("requirement_id") or ""))
             sfn = str(row.get("unit") or "").strip().lower()
             if srid and sfn:
-                swufn_to_func.setdefault(srid, sfn)
+                _fns = swufn_to_func.setdefault(srid, [])
+                if sfn not in _fns:
+                    _fns.append(sfn)
 
     # Enrich SUTS/SITS rows with reverse mappings
     enriched_rows: List[Dict[str, Any]] = []
+    # VectorCAST 추적 가시성(reviewer WARNING): 입력 vcast 행 중 SRS 요구사항에
+    # bridge된 행 수를 집계해, "의도적 미추적(부트로더/ISR)"과 "bridge 파손"을
+    # 구분할 신호를 summary로 노출한다. 미추적 행은 매트릭스에서 빠지므로 카운트만.
+    vcast_input_rows = 0
+    vcast_traced_rows = 0
     for row in all_test_rows:
         if not isinstance(row, dict):
             continue
         orig_rid = _normalize_req_id(str(row.get("requirement_id") or ""))
         source = row.get("source", "")
         unit = str(row.get("unit") or "").strip().lower()
+        subprogram = str(row.get("subprogram") or "").strip()
 
         # Skip rows with no useful data
-        if not orig_rid and not unit:
+        # (VectorCAST 행은 requirement_id/unit 없이 subprogram만 들고 오므로 포함)
+        if not orig_rid and not unit and not subprogram:
             continue
 
         # Keep original row only if its requirement_id is a valid matrix requirement
@@ -1801,14 +1825,37 @@ def generate_uds_traceability_matrix(
         # SITS는 함수명/SRS ID 컬럼이 없어 unit bridge가 안 걸리므로 별도 처리.
         if source == "SITS":
             seen_sits: set = set()
-            for swufn in re.findall(r"SwUFN_\d+", str(row.get("testcase") or ""), re.IGNORECASE):
-                fn = swufn_to_func.get(_normalize_req_id(swufn))
-                if not fn:
-                    continue
-                for mrid in sds_func_to_reqs.get(fn, []):
-                    if mrid in req_id_set and mrid != orig_rid and mrid not in seen_sits:
-                        seen_sits.add(mrid)
-                        enriched_rows.append({**row, "requirement_id": mrid, "trace_type": "indirect"})
+            for swufn in _SWUFN_RE.findall(str(row.get("testcase") or "")):
+                for fn in swufn_to_func.get(_normalize_req_id(swufn), []):
+                    for mrid in sds_func_to_reqs.get(fn, []):
+                        if mrid in req_id_set and mrid != orig_rid and mrid not in seen_sits:
+                            seen_sits.add(mrid)
+                            enriched_rows.append({**row, "requirement_id": mrid, "trace_type": "indirect"})
+
+        # VectorCAST 함수기반 추적: vcast 행은 subprogram(거의 SwUFn ID)만 들고 온다.
+        # UDS 매핑은 설계레벨(SwSTR)이라 SRS에 직접 안 닿으므로, SUTS/SITS와 동일한
+        # 함수명→SRS bridge로 간접 연결한다. 두 경로 모두 시도:
+        #   (1) subprogram이 함수명이면 SDS 함수명 bridge 직접 매칭
+        #   (2) subprogram/testcase의 SwUFn → (SUTS)함수명 → (SDS)SRS 2-hop
+        # (vcast subprogram의 ~98%가 SwUFn ID라 (2)가 주 경로. 매칭 안 되는 행은
+        #  부트로더/ISR 등 SRS 추적 대상이 아니므로 자연히 매트릭스에서 제외된다.)
+        if source == "VectorCAST" and subprogram:
+            vcast_input_rows += 1
+            seen_vc: set = set()
+            sub_lower = subprogram.lower()
+            for mrid in sds_func_to_reqs.get(sub_lower, []):
+                if mrid in req_id_set and mrid not in seen_vc:
+                    seen_vc.add(mrid)
+                    enriched_rows.append({**row, "requirement_id": mrid, "trace_type": "indirect"})
+            hay = subprogram + " " + str(row.get("testcase") or "")
+            for swufn in _SWUFN_RE.findall(hay):
+                for fn in swufn_to_func.get(_normalize_req_id(swufn), []):
+                    for mrid in sds_func_to_reqs.get(fn, []):
+                        if mrid in req_id_set and mrid not in seen_vc:
+                            seen_vc.add(mrid)
+                            enriched_rows.append({**row, "requirement_id": mrid, "trace_type": "indirect"})
+            if seen_vc:
+                vcast_traced_rows += 1
 
     vcast_map = _normalize_vcast_rows(enriched_rows)
 
@@ -1854,6 +1901,9 @@ def generate_uds_traceability_matrix(
         sts_tests = [t for t in tests if t.get("source") == "STS"]
         suts_tests = [t for t in tests if t.get("source") == "SUTS"]
         sits_tests = [t for t in tests if t.get("source") == "SITS"]
+        # VectorCAST 실행추적(fuzzy, indirect) — V-model 통계에 별도 노출(reviewer INFO:
+        # vcast 기여가 *_indirect 카운트에 안 잡혀 audit 불가하던 문제 해소).
+        vcast_tests_row = [t for t in tests if t.get("source") == "VectorCAST"]
 
         # Direct vs Indirect trace counts
         sts_direct = [t for t in sts_tests if t.get("trace_type") != "indirect"]
@@ -1898,6 +1948,8 @@ def generate_uds_traceability_matrix(
                 "sits_count": len(sits_tests),
                 "sits_direct": len(sits_direct),
                 "sits_indirect": len(sits_indirect),
+                # VectorCAST 실행추적 (전부 indirect/fuzzy)
+                "vcast_count": len(vcast_tests_row),
                 # 기존 호환
                 "tests": tests,
                 "test_ids": test_ids,
@@ -1928,6 +1980,11 @@ def generate_uds_traceability_matrix(
             "mapped_suts_indirect": sum(1 for r in matrix if r.get("suts_indirect")),
             "mapped_sits_direct": sum(1 for r in matrix if r.get("sits_direct")),
             "mapped_sits_indirect": sum(1 for r in matrix if r.get("sits_indirect")),
+            "mapped_vcast_count": sum(1 for r in matrix if r.get("vcast_count")),
+            # VectorCAST bridge 가시성 — 입력 행 중 SRS에 연결된 행 수 / 미연결(부트로더·ISR 등)
+            "vcast_input_rows": vcast_input_rows,
+            "vcast_traced_rows": vcast_traced_rows,
+            "vcast_untraced_rows": vcast_input_rows - vcast_traced_rows,
         },
         "has_sds_mapping": any(r.get("sds_components") for r in matrix),
         "has_source_mapping": any(r.get("source_ids") for r in matrix),

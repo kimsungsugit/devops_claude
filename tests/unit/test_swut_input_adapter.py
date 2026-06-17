@@ -29,7 +29,44 @@ from backend.services.swut_input_adapter import (  # noqa: E402
     collect_swut_session,
     extract_aggregate_coverage,
     extract_execution_results,
+    extract_execution_results_with_actual,
 )
+
+
+# ---------------------------------------------------------------------------
+# rank3 회귀 — 인접 TC 결과 누설(PASS↔FAIL 오분류) 방지 (index-pairing)
+# ---------------------------------------------------------------------------
+def test_exec_results_no_adjacent_fail_leak_variant_b():
+    """변형 B(h4→h3) + TC1(FAIL)→TC2(PASS) 인접: TC2가 TC1의 FAIL을 상속하면 안 됨.
+
+    과거 sourceline ±20 근사는 TC2.h3_prev(=TC1 FAIL)를 오채택해 TC2를 FAIL로 만들었다.
+    """
+    html = (
+        b"<html><body>"
+        b"<h4>Start of SwUFn_0101.001</h4>"
+        b"<h3 title='Execution Results'>Execution Results (FAIL)</h3>"
+        b"<h4>Start of SwUFn_0102.001</h4>"
+        b"<h3 title='Execution Results'>Execution Results (PASS)</h3>"
+        b"</body></html>"
+    )
+    res = extract_execution_results_with_actual(html)
+    assert res["SwUFn_0101.001"].passed is False
+    assert res["SwUFn_0102.001"].passed is True  # FAIL 누설 없음
+
+
+def test_exec_results_variant_a_still_correct():
+    """변형 A(h3→h4)도 index-pairing으로 정확 — TC1=PASS, TC2=FAIL."""
+    html = (
+        b"<html><body>"
+        b"<h3 title='Execution Results'>Execution Results (PASS)</h3>"
+        b"<h4>Start of SwUFn_0201.001</h4>"
+        b"<h3 title='Execution Results'>Execution Results (FAIL)</h3>"
+        b"<h4>Start of SwUFn_0202.001</h4>"
+        b"</body></html>"
+    )
+    res = extract_execution_results_with_actual(html)
+    assert res["SwUFn_0201.001"].passed is True
+    assert res["SwUFn_0202.001"].passed is False
 
 
 # ---------------------------------------------------------------------------

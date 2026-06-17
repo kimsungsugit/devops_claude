@@ -680,29 +680,44 @@ def extract_execution_results_with_actual(html_bytes: bytes) -> dict[str, Execut
         if m:
             all_h4_starts.append((m.group(1), h4))
 
+    # rank3 fix(인접 TC 결과 누설 차단): TC당 'Execution Results' h3 1개가 'Start of'
+    # h4 1개와 교대로 나타난다(변형 A: h3→h4 / 변형 B: h4→h3). 기존 sourceline ±20
+    # 근사는 변형 B + FAIL에서 직전 TC의 FAIL h3를 현재 TC로 오채택했다(로컬 재현).
+    # 문서순서상 k번째 결과 h3가 k번째 TC에 대응하므로 index로 짝지으면 두 변형 모두
+    # 정확하다. 단 h3/h4 개수가 다르면(미실행 TC 등 비정형) 인덱스가 밀리므로 기존
+    # 근접 로직으로 폴백해 backward compat(HDPDM01 300+ 회귀)을 보존한다.
+    exec_h3s = soup.find_all("h3", title=re.compile("Execution Results", re.I))
+
+    def _is_pass(h3node) -> bool:
+        t = h3node.get_text(" ", strip=True)
+        return "(PASS)" in t or ("PASS" in t and "FAIL" not in t)
+
+    paired_by_index = len(exec_h3s) == len(all_h4_starts) and len(exec_h3s) > 0
+
     for idx, (tc_name, h4) in enumerate(all_h4_starts):
         if tc_name in results:
             continue
         # 다음 h4 Start of marker — 섹션 종료점
         next_h4 = all_h4_starts[idx + 1][1] if idx + 1 < len(all_h4_starts) else None
-        # passed 판별 — 가장 가까운 h3 'Execution Results' (이전 또는 이후)
         passed = False
-        h3_prev = h4.find_previous("h3", title=re.compile("Execution Results", re.I))
-        h3_next = h4.find_next("h3", title=re.compile("Execution Results", re.I))
-        # next_h4 이전인 h3만 검토
-        for h3 in (h3_prev, h3_next):
-            if h3 is None:
-                continue
-            h3_line = getattr(h3, "sourceline", 0) or 0
-            h4_line = getattr(h4, "sourceline", 0) or 0
-            next_h4_line = getattr(next_h4, "sourceline", 10**9) if next_h4 else 10**9
-            # 이전 h3은 직전 TC 종료점 이후 (즉 h4 직전), 다음 h3은 next_h4 이전이어야 매칭
-            if (h3 is h3_prev and h3_line >= h4_line - 20) or (
-                h3 is h3_next and h3_line < (next_h4_line or 10**9)
-            ):
-                txt = h3.get_text(" ", strip=True)
-                passed = "(PASS)" in txt or ("PASS" in txt and "FAIL" not in txt)
-                break
+        if paired_by_index:
+            # 문서순서 정렬 — k번째 결과 h3 = k번째 TC.
+            passed = _is_pass(exec_h3s[idx])
+        else:
+            # 폴백: 가장 가까운 h3 'Execution Results' (이전 또는 이후) — 비정형 리포트용.
+            h3_prev = h4.find_previous("h3", title=re.compile("Execution Results", re.I))
+            h3_next = h4.find_next("h3", title=re.compile("Execution Results", re.I))
+            for h3 in (h3_prev, h3_next):
+                if h3 is None:
+                    continue
+                h3_line = getattr(h3, "sourceline", 0) or 0
+                h4_line = getattr(h4, "sourceline", 0) or 0
+                next_h4_line = getattr(next_h4, "sourceline", 10**9) if next_h4 else 10**9
+                if (h3 is h3_prev and h3_line >= h4_line - 20) or (
+                    h3 is h3_next and h3_line < (next_h4_line or 10**9)
+                ):
+                    passed = _is_pass(h3)
+                    break
         actual_result = _extract_var_rows_between(h4, next_h4)
         results[tc_name] = ExecutionRow(
             tc_name=tc_name, passed=passed, actual_result=actual_result,
@@ -1250,16 +1265,14 @@ def _resolve_latest_release_folder(
                     f"  entry skip (no pattern match): name={name!r}"
                 )
                 continue
-            sub_check = os.path.join(entry_path, "01.TestCaseDataReport")
-            try:
-                if not resolver.exists(sub_check):
-                    _diag_logger.debug(
-                        f"  entry skip (sub-dir미발견): {sub_check!r}"
-                    )
-                    continue
-            except Exception as e:  # noqa: BLE001
+            # rank6: SWTE('01.TestCaseDataReport')만이 아니라 VC2025('TestCaseData') 등
+            # 모든 레이아웃의 tc_dir를 인정 (_detect_log_layout/Case A와 일관).
+            if not any(
+                _exists_quiet(resolver, os.path.join(entry_path, _lay.tc_dir))
+                for _lay in _LOG_LAYOUTS
+            ):
                 _diag_logger.debug(
-                    f"  entry skip (exists 예외 {type(e).__name__}): {sub_check!r}"
+                    f"  entry skip (tc_dir미발견): {entry_path!r}"
                 )
                 continue
             candidates_c.append((m.group(1), entry_path))
@@ -1297,8 +1310,12 @@ def _resolve_latest_release_folder(
                 m = _RELEASE_FOLDER_RE.match(entry.name)
                 if not m:
                     continue
-                # 추가 검증: 후보 디렉토리에 `01.TestCaseDataReport` 존재해야 진짜 release
-                if not os.path.isdir(os.path.join(entry.path, "01.TestCaseDataReport")):
+                # 추가 검증: 후보에 tc_dir 존재해야 진짜 release.
+                # rank6: SWTE/VC2025 모든 레이아웃의 tc_dir 인정.
+                if not any(
+                    os.path.isdir(os.path.join(entry.path, _lay.tc_dir))
+                    for _lay in _LOG_LAYOUTS
+                ):
                     continue
                 date_suffix = m.group(1)
                 candidates.append((date_suffix, entry.path))
@@ -1382,7 +1399,11 @@ def preview_release_candidates(
                         m = _RELEASE_FOLDER_RE.match(entry.name)
                         if not m:
                             continue
-                        if not os.path.isdir(os.path.join(entry.path, "01.TestCaseDataReport")):
+                        # rank6: SWTE/VC2025 모든 레이아웃의 tc_dir 인정.
+                        if not any(
+                            os.path.isdir(os.path.join(entry.path, _lay.tc_dir))
+                            for _lay in _LOG_LAYOUTS
+                        ):
                             continue
                         raw.append((m.group(1), entry.name))
                     raw.sort(key=lambda x: x[0], reverse=True)

@@ -11,8 +11,22 @@ from __future__ import annotations
 from pathlib import Path
 
 import openpyxl
+import pytest
 
 from backend.routers.jenkins import jenkins_sits_extract_traceability
+
+
+@pytest.fixture(autouse=True)
+def _local_mode(monkeypatch: pytest.MonkeyPatch):
+    """resolver를 local로 고정 — tmp 파일을 직접 read (cloudium IPC 회피).
+
+    config/file_mode.json이 cloudium으로 영속된 dev 머신에서 get_resolver가
+    CloudiumFileResolver를 반환하면, 본 파싱 단위 테스트가 tmp_path의 로컬 xlsx를
+    worker gate로 읽으려다 403/IPC 실패한다. 배포 file_mode와 무관하게 파싱 로직만
+    검증하도록 local resolver를 강제한다 (test_jenkins_sts_traceability와 동일 패턴).
+    """
+    from backend.services import file_resolver as fr
+    monkeypatch.setattr(fr, "_resolver", fr.LocalFileResolver())
 
 
 def _save(wb: openpyxl.Workbook, tmp_path: Path, name: str) -> str:

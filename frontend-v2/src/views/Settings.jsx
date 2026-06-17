@@ -157,7 +157,7 @@ function ScmSection() {
       branch: '',
       base_ref: 'HEAD~1',
       source_root: '',
-      linked_docs: { srs: '', sds: '', uds: '', sts: '', suts: '', sits: '', hsis: '', stp: '' },
+      linked_docs: { srs: '', sds: '', uds: '', sts: '', suts: '', sits: '', hsis: '', stp: '', vectorcast: [] },
     };
   }
 
@@ -263,6 +263,37 @@ function ScmSection() {
     }
   };
 
+  // VectorCAST 결과 로그는 복수 경로(부트로더/FBL/APP 별도 결과). linked_docs.vectorcast
+  // 는 string[] — setLinked(단일 string)와 달리 array 전체를 교체한다.
+  const setVcastPaths = (arr) =>
+    setForm(p => ({ ...p, linked_docs: { ...p.linked_docs, vectorcast: Array.isArray(arr) ? arr : [] } }));
+
+  const pickVcastPath = async () => {
+    try {
+      // 연결 문서 경로 = 폴더(경로)만 등록. 백엔드 로더가 폴더 안의
+      // vectorcast_rag.json(또는 표준 하위 경로)을 탐색하므로 directory를 고른다.
+      const picked = await post('/api/file-mode/browse-file', {
+        title: 'VectorCAST 결과 폴더 선택 (부트로더/FBL/APP 결과 상위 폴더)',
+        kind: 'directory',
+      });
+      if (!picked || !picked.ok || !picked.path) {
+        if (picked?.error === 'cancelled') return;
+        toast('error', `다이얼로그 실패: ${picked?.error || picked?.detail || 'unknown'}`);
+        return;
+      }
+      const cur = Array.isArray(form.linked_docs.vectorcast) ? form.linked_docs.vectorcast : [];
+      if (cur.includes(picked.path)) {
+        toast('info', '이미 추가된 경로입니다.');
+        return;
+      }
+      setVcastPaths([...cur, picked.path]);
+      await ensureCloudiumPrefix(picked.path);
+      toast('success', 'VectorCAST 폴더 추가됨');
+    } catch (e) {
+      toast('error', `다이얼로그 실패: ${e.message}`);
+    }
+  };
+
   return (
     <div className="settings-section">
       <div className="settings-section-title">
@@ -343,6 +374,14 @@ function ScmSection() {
                 </div>
               </div>
             ))}
+          </div>
+          <div className="field span-2" style={{ marginTop: 8 }}>
+            <label>VectorCAST 결과 로그 (복수 경로 — 부트로더/FBL/APP 별도 결과)</label>
+            <VcastDocsEditor
+              paths={form.linked_docs.vectorcast}
+              onChange={setVcastPaths}
+              onBrowse={pickVcastPath}
+            />
           </div>
           <button className="btn-primary" onClick={saveScm} style={{ marginTop: 8 }}>{editMode ? '수정 저장' : '등록'}</button>
         </div>
@@ -1014,6 +1053,77 @@ function SourceRootEditor({ value, onChange }) {
       {paths.length === 0 && (
         <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 4 }}>
           소스 코드 경로를 추가하세요. 부트/어플 분리 프로젝트는 여러 경로를 추가할 수 있습니다.
+        </div>
+      )}
+    </div>
+  );
+}
+
+// VectorCAST 결과 로그 복수 경로 편집기. 부트로더/FBL/APP 등 결과가 별도
+// vectorcast_rag.json으로 나올 수 있어 SCM별로 여러 경로를 등록한다. paths는
+// string[] (SourceRootEditor의 콤마 string과 달리 array 그대로 다룸).
+function VcastDocsEditor({ paths, onChange, onBrowse }) {
+  const list = Array.isArray(paths) ? paths : [];
+  const [draft, setDraft] = useState('');
+
+  const addPath = () => {
+    const p = draft.trim();
+    if (!p) return;
+    if (list.includes(p)) { setDraft(''); return; }
+    onChange([...list, p]);
+    setDraft('');
+  };
+  const removePath = (idx) => onChange(list.filter((_, i) => i !== idx));
+
+  return (
+    <div>
+      {list.length > 0 && (
+        <div style={{ marginBottom: 6 }}>
+          {list.map((p, i) => (
+            <div key={i} style={{
+              display: 'flex', alignItems: 'center', gap: 6, padding: '3px 0',
+              borderBottom: '1px solid var(--border-light, var(--border))',
+            }}>
+              <span style={{ fontSize: 11, fontFamily: 'monospace', flex: 1, wordBreak: 'break-all' }}>{p}</span>
+              <button
+                type="button"
+                onClick={() => removePath(i)}
+                style={{
+                  background: 'none', border: 'none', color: 'var(--color-danger, red)',
+                  cursor: 'pointer', fontSize: 14, padding: '0 4px', lineHeight: 1,
+                }}
+                title="경로 제거"
+              >
+                ×
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+      <div style={{ display: 'flex', gap: 6 }}>
+        <input
+          value={draft}
+          onChange={e => setDraft(e.target.value)}
+          onKeyDown={e => e.key === 'Enter' && (e.preventDefault(), addPath())}
+          placeholder="U:\...\report\vectorcast_rag (폴더 경로)"
+          spellCheck="false"
+          autoComplete="off"
+          style={{ flex: 1, fontSize: 12 }}
+        />
+        <button type="button" onClick={addPath} className="btn-sm" style={{ whiteSpace: 'nowrap' }}>
+          + 경로 추가
+        </button>
+        <button
+          type="button"
+          onClick={onBrowse}
+          className="btn-sm"
+          title="폴더 찾기 (클라우디움 모드면 worker IPC, 로컬이면 backend tkinter)"
+        >📂</button>
+      </div>
+      {list.length === 0 && (
+        <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 4 }}>
+          미등록 시 Jenkins 빌드의 VectorCAST RAG를 사용합니다. 부트로더 등 결과가 별도로
+          나오면 결과가 담긴 폴더 경로를 추가하세요(폴더 안의 vectorcast_rag.json을 자동 탐색).
         </div>
       )}
     </div>

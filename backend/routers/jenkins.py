@@ -1,30 +1,68 @@
 """Auto-generated router: jenkins"""
-from fastapi import APIRouter, HTTPException, Request, Query, UploadFile, File, Form
-from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
-from typing import Any, Dict, List, Optional, Tuple
 import json
+import logging
 import os
 import re
 import tempfile
 import threading
-import traceback
-import logging
 import time
-import asyncio
+import traceback
 import uuid
+from datetime import datetime
 from pathlib import Path
-from urllib.parse import urlparse, unquote
+from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import unquote, urlparse
 
-from backend.user_context import wrap_with_user
+from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile
+from fastapi.responses import FileResponse
 
+import config
+from backend.helpers import (
+    _apply_uds_view_filters,
+    _build_excel_artifact_payload,
+    _build_excel_artifact_summary,
+    _compute_uds_mapping_summary,
+    _create_jenkins_zip_file,
+    _generate_docx_with_retry,
+    _get_progress,
+    _get_uds_view_payload_cached,
+    _is_allowed_req_doc,
+    _jenkins_exports_dir,
+    _jenkins_logic_dir,
+    _jenkins_report_publish_impl,
+    _jenkins_sts_dir,
+    _jenkins_suts_dir,
+    _jenkins_templates_dir,
+    _load_uds_meta,
+    _load_vectorcast_rag,
+    _normalize_jenkins_cache_root,
+    _parse_component_map_file,
+    _parse_path_list,
+    _read_excel_artifact_sidecar,
+    _resolve_cached_build_root,
+    _run_impact_analysis_for_uds,
+    _run_report_with_timeout,
+    _safe_extract_zip,
+    _safe_int,
+    _save_uds_meta,
+    _set_progress,
+    _split_csv,
+    _uds_generate_from_paths,
+    _write_excel_artifact_sidecar,
+    _write_residual_tbd_report,
+    _write_upload_to_temp,
+    build_vectorcast_metadata,
+    evaluate_vectorcast_readiness,
+    load_vectorcast_project_config,
+)
 from backend.schemas import (
     CallTreePreviewRequest,
     JenkinsBuildInfoRequest,
     JenkinsBuildsRequest,
     JenkinsCacheRequest,
     JenkinsCallTreeRequest,
-    JenkinsJobsRequest,
     JenkinsImpactTriggerRequest,
+    JenkinsJobsRequest,
     JenkinsPublishRequest,
     JenkinsRagQueryRequest,
     JenkinsReportRequest,
@@ -41,50 +79,45 @@ from backend.schemas import (
     UdsPublishRequest,
     UdsTraceabilityMatrixRequest,
 )
-from datetime import datetime
-import config
-from backend.helpers import _apply_uds_view_filters, _build_excel_artifact_payload, _build_excel_artifact_summary, _compute_uds_mapping_summary, _create_jenkins_zip_file, _generate_docx_with_retry, _get_progress, _get_uds_view_payload_cached, _is_allowed_req_doc, _jenkins_exports_dir, _jenkins_logic_dir, _jenkins_report_publish_impl, _jenkins_sts_dir, _jenkins_suts_dir, _jenkins_templates_dir, _load_uds_meta, _load_vectorcast_rag, _normalize_jenkins_cache_root, _parse_component_map_file, _parse_path_list, _read_excel_artifact_sidecar, _resolve_cached_build_root, _run_impact_analysis_for_uds, _run_report_with_timeout, _safe_extract_zip, _safe_int, _save_uds_meta, _set_progress, _split_csv, _uds_generate_from_paths, _write_excel_artifact_sidecar, _write_residual_tbd_report, _write_upload_to_temp, build_vectorcast_metadata, evaluate_vectorcast_readiness, load_vectorcast_project_config
-from backend.services.jenkins_helpers import _detect_reports_dir, _safe_artifact_path, _job_slug
+from backend.services.assistant_service import read_report_bundle
+from backend.services.files import list_log_candidates, read_csv_rows, tail_text
 from backend.services.jenkins_client import JenkinsClient
+from backend.services.jenkins_helpers import _detect_reports_dir, _job_slug, _safe_artifact_path
 from backend.services.jenkins_service import (
+    ensure_source_checkout,
     get_build_info,
     list_builds,
     list_cached_builds,
     list_jobs,
-    ensure_source_checkout,
     sync_jenkins_artifacts,
     sync_local_reports,
 )
+from backend.services.local_service import run_svn, svn_info_url
+from backend.services.paths import is_under_any, safe_resolve_under
 from backend.services.report_parsers import (
     build_report_summary,
     find_jenkins_source_root,
-    find_project_report_dirs,
-    write_report_index,
-    build_report_comparisons,
 )
-from backend.services.paths import is_under_any, safe_resolve_under
-from backend.services.assistant_service import read_report_bundle
-from backend.services.files import tail_text, read_csv_rows, list_log_candidates
-from backend.services.local_service import run_svn, svn_info_url
+from backend.user_context import wrap_with_user
 from report_generator import (
     _build_req_map_from_doc_paths,
     enrich_function_details_with_docs,
+    generate_asil_related_confidence_report,
     generate_called_calling_accuracy_report,
     generate_swcom_context_report,
-    generate_swcom_context_diff_report,
-    generate_asil_related_confidence_report,
-    generate_uds_source_sections,
-    generate_uds_requirements_from_docs,
-    generate_uds_validation_report,
-    generate_uds_field_quality_gate_report,
     generate_uds_constraints_report,
-    generate_uds_preview_html,
-    generate_uds_traceability_matrix,
-    generate_uds_requirements_preview,
-    generate_uds_requirements_mapping,
-    generate_uds_requirements_compare,
+    generate_uds_field_quality_gate_report,
     generate_uds_function_mapping,
+    generate_uds_preview_html,
+    generate_uds_requirements_compare,
+    generate_uds_requirements_from_docs,
+    generate_uds_requirements_mapping,
+    generate_uds_requirements_preview,
+    generate_uds_source_sections,
+    generate_uds_traceability_matrix,
+    generate_uds_validation_report,
 )
+
 try:
     from workflow.rag import _read_text_from_file, get_kb, ingest_external_sources
 except ImportError:
@@ -96,8 +129,8 @@ try:
 except ImportError:
     generate_uds_ai_sections = None
 from workflow.change_trigger import build_registry_trigger
-from workflow.impact_orchestrator import run_impact_update
 from workflow.impact_jobs import start_impact_job
+from workflow.impact_orchestrator import run_impact_update
 
 repo_root = Path(__file__).resolve().parents[2]
 
@@ -833,7 +866,318 @@ def _load_vectorcast_rag_from_cloudium(path: str) -> Dict[str, Any]:
             continue
         except Exception:
             continue
+    # vectorcast_rag.json(우리 산출물)이 없으면 — cloudium 원본 VectorCAST 리포트
+    # 폴더로 보고 직접 파싱한다 (SwUT/SwIT 빌더의 검증된 추출기 재사용). path가
+    # .json이면 단일 파일 지정이므로 폴더 파싱 불가 → {}.
+    if not p.lower().endswith(".json"):
+        return _parse_vcast_logs_from_cloudium_folder(p)
     return {}
+
+
+# cloudium 원본 리포트 폴더 파싱은 무겁다(폴더당 수십 env × ExecutionResult HTML
+# worker IPC read + BS4 — 실측 ~100s). cloudium은 read-only라 리포트가 릴리스 단위로
+# 정적이므로 폴더 경로 기준 TTL 캐시로 반복 매트릭스 로드를 즉시화한다. 비어있는 결과
+# ({})는 캐시하지 않아 worker 일시 장애 후 재시도를 허용한다.
+_VCAST_CLOUDIUM_PARSE_CACHE: Dict[str, "tuple[float, Dict[str, Any]]"] = {}
+_VCAST_CLOUDIUM_PARSE_LOCK = threading.Lock()
+_VCAST_CLOUDIUM_PARSE_TTL = 1800.0  # 30분
+
+
+def _parse_vcast_logs_from_cloudium_folder(path: str) -> Dict[str, Any]:
+    """vectorcast_rag.json이 없는 cloudium 원본 리포트 폴더에서 실행결과를 직접 파싱.
+
+    사용자가 설정 SCM '연결 문서 경로'에 등록하는 폴더는 우리 산출물(vectorcast_rag.json)
+    이 아니라 VectorCAST 원본 리포트 폴더(`TestCaseData/`·`Execution/`·`Aggregate/`)다.
+    SwUT/SwIT 빌더가 이미 cloudium에서 사용하는 `swut_input_adapter`의 레이아웃 자동
+    감지(SWTE/VC2025) + 실행결과 추출기를 재사용해 pass/fail testcase 행을 만든다.
+
+    무거운 TestCaseData(파일당 100+ 테이블)·coverage 파싱은 건너뛰고 ExecutionResult
+    HTML만 읽어 매트릭스 join용 test_rows(subprogram/testcase/unit/result)를 조립한다.
+    subprogram은 tc_name(`SwUFn_3401.001`)에서 함수 id(`SwUFn_3401`)를 도출 — ISO 26262
+    추적성 체인이 SwUFn id로 매핑되므로 UDS mapping_pairs.source_ids와 join된다.
+    """
+    import re as _re
+    from pathlib import Path as _P
+
+    p = str(path or "").strip()
+    if not p:
+        return {}
+    # TTL 캐시 조회 — parse는 락 밖에서 수행(동시 miss는 redundant parse 허용,
+    # 락 점유 최소화). 캐시 객체 변형 방지 위해 사본 반환.
+    _key = p.replace("\\", "/").rstrip("/").lower()
+    _now = time.time()
+    with _VCAST_CLOUDIUM_PARSE_LOCK:
+        _cached = _VCAST_CLOUDIUM_PARSE_CACHE.get(_key)
+    if _cached and (_now - _cached[0]) < _VCAST_CLOUDIUM_PARSE_TTL:
+        return dict(_cached[1])
+    try:
+        from backend.services import swut_input_adapter as SA
+        from backend.services.file_resolver import get_resolver
+        from backend.services.jenkins_adapter import (
+            _normalize_vcast_result,
+            _summarize_vcast_tests,
+        )
+    except Exception as e:  # noqa: BLE001
+        logging.getLogger(__name__).error(
+            "vcast cloudium 파서 의존 모듈 import 실패: %s: %s", type(e).__name__, e
+        )
+        return {}
+
+    resolver = get_resolver()
+    # UT/IT 판별 — 등록 경로 문자열 기반 (source 태깅 + env_prefix; VC2025 suffix
+    # 모드에선 env_prefix 미사용이라 무해, SWTE 변종 대비 정확 prefix 전달).
+    # rank18: 'swit' bare substring은 무관 경로를 IT로 오분류할 수 있어 path-segment
+    # (앞뒤가 경계/구분자) 매칭으로 제한.
+    low = p.replace("\\", "/").lower()
+    is_it = (
+        ("통합" in p)
+        or ("_it_" in low)
+        or (_re.search(r"(?:^|[/_])swit(?:[/_]|$)", low) is not None)
+    )
+    kind = "IT" if is_it else "UT"
+    env_prefix = "SwITC" if is_it else "SWTE"
+    warnings: List[str] = []
+    try:
+        folder = SA._resolve_latest_release_folder(resolver, p, out_warnings=warnings)
+        layout = SA._detect_log_layout(resolver, folder, warnings)
+        sub_tc = os.path.join(folder, layout.tc_dir)
+        if not resolver.exists(sub_tc):
+            return {}
+        # ExecutionResult 폴더 — exec_dir 미존재 시 exec_dir_alts("Execution") 시도.
+        sub_exec = os.path.join(folder, layout.exec_dir)
+        if layout.exec_dir_alts and not SA._exists_quiet(resolver, sub_exec):
+            for _alt in layout.exec_dir_alts:
+                _cand = os.path.join(folder, _alt)
+                if SA._exists_quiet(resolver, _cand):
+                    sub_exec = _cand
+                    break
+        # TestCaseData 리포트 파일명에서 env 목록 빌드.
+        tc_files = SA._list_dir_via_resolver(resolver, sub_tc, pattern="*.html")
+        env_names = sorted({
+            layout.extract_env(_P(f).name, env_prefix)
+            for f in tc_files
+            if layout.extract_env(_P(f).name, env_prefix)
+        })
+        test_rows: List[Dict[str, Any]] = []
+        idx_cache: Dict[str, Dict[str, str]] = {}
+        for env in env_names:
+            exec_path = SA._resolve_report_path(
+                resolver, sub_exec, env, layout.exec_suffix,
+                idx_cache=idx_cache, out_warnings=warnings,
+            )
+            try:
+                data = SA._read_via_resolver(resolver, exec_path)
+                results = SA.extract_execution_results_with_actual(data)
+            except (PermissionError, OSError) as e:
+                warnings.append(f"{env}: ExecutionResult 접근 실패 ({type(e).__name__})")
+                continue
+            except Exception as e:  # noqa: BLE001 — 개별 env 파싱 실패는 skip + 누적
+                warnings.append(f"{env}: ExecutionResult 파싱 실패 ({type(e).__name__})")
+                continue
+            for tc_name, row in (results or {}).items():
+                tc = (tc_name or "").strip()
+                # VectorCAST 의사 엔트리(<<COMPOUND>>/<<INIT>> 등)는 실제 함수가 아니므로
+                # summary 과계상 방지를 위해 제외.
+                if not tc or tc.startswith("<<"):
+                    continue
+                # subprogram: testcase명에 SwUFn/SwIFn ID가 박혀 있으면 그 ID로 정규화한다
+                # (CTC_SwUFn_0431 / SwIT_SwUFn_0101_01 → SwUFn_0431/SwUFn_0101). UDS
+                # extract-mapping이 source_ids에 동일 SwUFn ID를 노출하므로 join 성립.
+                # SwUFn이 없으면 함수명 base(점 앞)로 fallback — UDS func_name과 매칭.
+                m = _re.search(r"Sw[UI]Fn_\d+", tc)
+                swufn = m.group(0) if m else ""
+                func_base = tc.split(".")[0].strip()
+                subprogram = (getattr(row, "subprogram", "") or swufn or func_base).strip()
+                result = "PASS" if getattr(row, "passed", False) else "FAIL"
+                test_rows.append({
+                    "subprogram": subprogram,
+                    "testcase": tc,
+                    "unit": (getattr(row, "component", "") or env).strip(),
+                    "result": result,
+                    "function_id": swufn or func_base,
+                    "source": kind,
+                    "report": env,
+                })
+        if not test_rows:
+            return {}
+        summary = _summarize_vcast_tests(test_rows)
+        failures: List[Dict[str, Any]] = [
+            {
+                "testcase": r.get("testcase"),
+                "subprogram": r.get("subprogram"),
+                "unit": r.get("unit"),
+                "result": r.get("result"),
+                "report": r.get("report"),
+                "source": r.get("source"),
+            }
+            for r in test_rows
+            if _normalize_vcast_result(r.get("result")) == "fail"
+        ]
+        top_n = int(getattr(config, "VCAST_FAILURES_TOP_N", 50))
+        if top_n > 0:
+            failures = failures[:top_n]
+        payload_out: Dict[str, Any] = {
+            "build_root": folder,
+            "source_folder": p,
+            "vcast_kind": kind,
+            "test_rows": test_rows,
+            "test_rows_count": len(test_rows),
+            "summary": summary,
+            "failures": failures,
+            "ut_reports": [] if is_it else [folder],
+            "it_reports": [folder] if is_it else [],
+            "parse_warnings": warnings,
+            "parsed_from": "cloudium_raw_reports",
+        }
+        # 비어있지 않은 결과만 캐시 (worker 일시 장애 후 재시도 허용).
+        with _VCAST_CLOUDIUM_PARSE_LOCK:
+            # rank19: 무한 증가 방지 — 엔트리당 수 MB라 상한 도달 시 비운다.
+            # 등록 경로는 통상 한 자릿수라 32 상한은 충분한 여유.
+            if len(_VCAST_CLOUDIUM_PARSE_CACHE) >= 32:
+                _VCAST_CLOUDIUM_PARSE_CACHE.clear()
+            _VCAST_CLOUDIUM_PARSE_CACHE[_key] = (_now, payload_out)
+        return dict(payload_out)
+    except (PermissionError, OSError) as e:
+        # rank11: 권한/IPC 장애를 '데이터 없음'으로 silent 은폐하지 말 것 — 누적 warning과
+        # 함께 로그. 반환은 {}(graceful)이되 사유는 운영자가 추적 가능하게 남긴다.
+        logging.getLogger(__name__).warning(
+            "vcast cloudium 파싱 접근 실패 path=%s err=%s: %s warnings=%s",
+            p, type(e).__name__, e, warnings[:5],
+        )
+        return {}
+    except Exception:  # noqa: BLE001
+        logging.getLogger(__name__).debug(
+            "vcast cloudium 파싱 예외 path=%s", p, exc_info=True
+        )
+        return {}
+
+
+def _merge_vectorcast_payloads(payloads: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """여러 Cloudium VectorCAST RAG payload를 하나로 병합한다.
+
+    부트로더/FBL/APP 등 결과가 별도 파일로 나올 때 각 payload의 test_rows를 합치고
+    summary/failures를 재계산한다. 같은 경로를 중복 등록하거나 부모/자식 경로가 같은
+    파일을 가리키는 경우 동일 row가 중복될 수 있어 (subprogram,testcase,unit,result,
+    report) 키로 dedup하여 이중 집계를 막는다.
+    """
+    from backend.services.jenkins_adapter import (
+        _normalize_vcast_result,
+        _summarize_vcast_tests,
+    )
+    merged_rows: List[Dict[str, Any]] = []
+    seen: set = set()
+    ut_reports: List[Any] = []
+    it_reports: List[Any] = []
+    for pl in payloads:
+        if not isinstance(pl, dict):
+            continue
+        for r in (pl.get("test_rows") or []):
+            if not isinstance(r, dict):
+                continue
+            key = (
+                str(r.get("subprogram") or ""),
+                str(r.get("testcase") or ""),
+                str(r.get("unit") or ""),
+                str(r.get("result") or ""),
+                str(r.get("report") or ""),
+                # rank9: source(UT/IT) 포함 — 같은 TC가 단위(UT)와 통합(IT) 양쪽에서
+                # PASS로 나오는 정당한 케이스(ISO 26262 T4/T5 별도 캠페인 증거)에서
+                # IT 증거가 조용히 드롭되는 것을 막는다.
+                str(r.get("source") or ""),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            merged_rows.append(r)
+        ut = pl.get("ut_reports")
+        if isinstance(ut, list):
+            ut_reports.extend(ut)
+        it = pl.get("it_reports")
+        if isinstance(it, list):
+            it_reports.extend(it)
+
+    summary = _summarize_vcast_tests(merged_rows)
+    top_n = int(getattr(config, "VCAST_FAILURES_TOP_N", 50))
+    failures = [
+        {
+            "testcase": r.get("testcase"),
+            "requirement_id": r.get("requirement_id"),
+            "unit": r.get("unit"),
+            "subprogram": r.get("subprogram"),
+            "result": r.get("result"),
+            "report": r.get("report"),
+            "source": r.get("source"),
+        }
+        for r in merged_rows
+        if _normalize_vcast_result(r.get("result")) == "fail"
+    ]
+    if top_n > 0:
+        failures = failures[:top_n]
+
+    return {
+        "test_rows": merged_rows,
+        "test_rows_count": len(merged_rows),
+        "summary": summary,
+        "failures": failures,
+        "ut_reports": ut_reports,
+        "it_reports": it_reports,
+        "merged_sources": len([p for p in payloads if isinstance(p, dict) and p]),
+    }
+
+
+def _load_vectorcast_rag_from_cloudium_multi(paths: List[str]) -> Dict[str, Any]:
+    """복수 Cloudium 경로에서 VectorCAST RAG를 읽어 병합한다.
+
+    단일 경로일 때는 원본 payload를 그대로 반환(모든 필드 보존), 2개 이상이면
+    _merge_vectorcast_payloads로 test_rows/summary/failures를 합친다.
+    """
+    payloads: List[Dict[str, Any]] = []
+    if len(paths) <= 1:
+        for p in paths:
+            pl = _load_vectorcast_rag_from_cloudium(p)
+            if pl:
+                payloads.append(pl)
+    else:
+        # rank4 fix: 폴더별 파싱은 독립적이고 cloudium worker는 동시 read를 정확히
+        # 처리한다(검증: 3-thread 동시 read byte-identical). 직렬 시 5폴더 ~500s로
+        # 브라우저/프록시 타임아웃 → 폴더 단위 병렬(max 4)로 ~max(단일폴더)≈100-150s로
+        # 단축. 폴더별 TTL 캐시로 부분 진행도 보존된다.
+        import concurrent.futures as _cf
+        with _cf.ThreadPoolExecutor(max_workers=min(4, len(paths))) as _ex:
+            # map은 입력 순서 보존 — merge dedup은 순서 무관.
+            for pl in _ex.map(_load_vectorcast_rag_from_cloudium, paths):
+                if pl:
+                    payloads.append(pl)
+    if not payloads:
+        return {}
+    if len(payloads) == 1:
+        return payloads[0]
+    return _merge_vectorcast_payloads(payloads)
+
+
+def _collect_vcast_paths(req: JenkinsReportRequest) -> List[str]:
+    """요청에서 VectorCAST cloudium 경로 목록을 정규화/중복제거하여 모은다.
+
+    vcast_log_paths(복수, 우선) + vcast_log_path(단일, 하위호환)를 합치고 순서를
+    보존하며 대소문자/슬래시 방향 무시 dedup.
+    """
+    raw: List[str] = []
+    for p in (req.vcast_log_paths or []):
+        s = str(p or "").strip()
+        if s:
+            raw.append(s)
+    legacy = (req.vcast_log_path or "").strip()
+    if legacy:
+        raw.append(legacy)
+    seen: set = set()
+    out: List[str] = []
+    for p in raw:
+        k = p.replace("\\", "/").rstrip("/").lower()
+        if k in seen:
+            continue
+        seen.add(k)
+        out.append(p)
+    return out
 
 
 @router.post("/api/jenkins/report/vectorcast-rag")
@@ -841,11 +1185,24 @@ def jenkins_vectorcast_rag(req: JenkinsReportRequest) -> Dict[str, Any]:
     build_root = _resolve_cached_build_root(req.job_url, req.cache_root, req.build_selector)
     payload = _load_vectorcast_rag(build_root) if build_root else {}
     source = "jenkins"
-    # Cloudium 폴백 — Jenkins 빌드에 RAG 없으면 사용자 지정 경로(부트로더 등 별도 결과)에서.
-    if not payload and (req.vcast_log_path or "").strip():
-        payload = _load_vectorcast_rag_from_cloudium(req.vcast_log_path)
-        source = "cloudium"
-    if not payload:
+
+    def _has_vcast_rows(p: Any) -> bool:
+        return isinstance(p, dict) and bool(p.get("test_rows"))
+
+    # Cloudium 폴백 — Jenkins 빌드 RAG가 없거나(빈 dict), "스캔은 됐지만 test_rows가 비어
+    # 있는" 경우(VectorCAST 결과가 Jenkins 빌드엔 없고 cloudium U:/ 경로에만 있는 흔한
+    # 케이스)에도 사용자 지정 경로(부트로더/APP 등 별도 결과)로 폴백한다. 과거엔 truthy-but-
+    # rowless payload(예: build_20 vectorcast_rag.json은 키는 많지만 test_rows=[])를
+    # 'present'로 오인해 `if not payload`가 폴백을 건너뛰어 → 등록 경로 결과가 끝까지
+    # 안 쓰이고 VectorCAST/P&F 컬럼이 빈 채로 나왔다. test_rows 유무로 판정해 폴백한다.
+    if not _has_vcast_rows(payload):
+        cloud_paths = _collect_vcast_paths(req)
+        if cloud_paths:
+            cloud_payload = _load_vectorcast_rag_from_cloudium_multi(cloud_paths)
+            if _has_vcast_rows(cloud_payload):
+                payload = cloud_payload
+                source = "cloudium"
+    if not _has_vcast_rows(payload):
         return {"ok": False, "error": "missing"}
 
     comparison: Dict[str, Any] = {}
@@ -1859,8 +2216,8 @@ async def jenkins_sts_generate_async(
     asil_level: str = Form(""),
     max_tc_per_req: int = Form(5),
 ) -> Dict[str, Any]:
-    from sts_generator import generate_sts
     from backend.services.resolver_helpers import reject_upload_in_cloudium
+    from sts_generator import generate_sts
     reject_upload_in_cloudium(*(req_files or []))
 
     _first_root = source_root.split(",")[0].strip() if source_root else ""
@@ -2525,6 +2882,7 @@ def jenkins_uds_traceability_matrix(req: UdsTraceabilityMatrixRequest) -> Dict[s
             vcast_rows=req.vcast_rows or [],
             sds_pairs=req.sds_pairs or [],
             sits_rows=req.sits_rows or [],
+            uds_function_ids=req.uds_function_ids or [],
         )
         # Cache compact summary for dashboard quick-load (best-effort)
         try:
@@ -2575,17 +2933,73 @@ def jenkins_trace_summary(req: dict) -> Dict[str, Any]:
         return {"has_data": False, "reason": f"cache read failed: {exc}"}
 
 
+# UDS 매핑 추출은 36MB read + 73MB document.xml 파싱(손상 docx fallback 시)이라 무겁다.
+# 매트릭스 재로드/연타 시 같은 파싱이 쌓여 worker/CPU 경합 → 타임아웃을 유발하므로
+# uds_path 기준 TTL 캐시로 재추출을 막는다. 파일은 세션 중 거의 안 바뀌므로 30분 TTL.
+_UDS_MAPPING_CACHE: Dict[str, "tuple[float, Dict[str, Any]]"] = {}
+_UDS_MAPPING_LOCK = threading.Lock()
+_UDS_MAPPING_TTL = 1800.0
+
+
+def _docx_tables_text(data: bytes) -> Optional[List[List[List[str]]]]:
+    """docx bytes → tables[행[셀텍스트]]. 손상 docx 복구 fallback 포함.
+
+    정상 파일은 python-docx로 읽는다. 임베디드 이미지 CRC 오류 등으로 python-docx가
+    실패해도 추적성 매핑은 이미지와 무관한 '표'에서만 추출하므로, word/document.xml만
+    직접 스트리밍 파싱해 표를 복구한다(손상 미디어 파트 우회). document.xml까지 손상돼
+    파싱 불가하면 None.
+    """
+    import io as _io
+    # 1) 정상 경로 — python-docx
+    try:
+        import docx as _docx
+        doc = _docx.Document(_io.BytesIO(data))
+        return [[[c.text for c in r.cells] for r in t.rows] for t in doc.tables]
+    except Exception:
+        pass
+    # 2) 손상 fallback — document.xml만 직접 파싱 (이미지 등 손상 파트 우회).
+    #    document.xml은 수십 MB일 수 있어 iterparse + elem.clear()로 메모리 방어.
+    try:
+        import xml.etree.ElementTree as _ET
+        import zipfile as _zip
+        W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+        tables: List[List[List[str]]] = []
+        with _zip.ZipFile(_io.BytesIO(data)) as zf:
+            with zf.open("word/document.xml") as f:
+                for _event, elem in _ET.iterparse(f, events=("end",)):
+                    if elem.tag != W + "tbl":
+                        continue
+                    rows: List[List[str]] = []
+                    for tr in elem.findall(W + "tr"):
+                        rows.append([
+                            "".join(t.text or "" for t in tc.iter(W + "t"))
+                            for tc in tr.findall(W + "tc")
+                        ])
+                    tables.append(rows)
+                    elem.clear()
+        return tables
+    except Exception:
+        return None
+
+
 @router.post("/api/jenkins/uds/extract-mapping")
 def jenkins_uds_extract_mapping(body: Dict[str, Any]) -> Dict[str, Any]:
     """UDS 문서에서 함수↔요구사항 매핑을 추출"""
-    import io
     import re as _re
+
     from backend.services.file_resolver import get_resolver
     from backend.services.resolver_helpers import enforce_resolver_access
     uds_path = str(body.get("uds_path", "")).strip()
     if not uds_path:
         raise HTTPException(status_code=400, detail="uds_path required")
     enforce_resolver_access(uds_path)  # C3: health.py와 일관된 방어심층
+    # TTL 캐시 — 손상 docx fallback(73MB 파싱) 재로드 pile-up 방지.
+    _ck = uds_path.replace("\\", "/").rstrip("/").lower()
+    _now = time.time()
+    with _UDS_MAPPING_LOCK:
+        _hit = _UDS_MAPPING_CACHE.get(_ck)
+    if _hit and (_now - _hit[0]) < _UDS_MAPPING_TTL:
+        return dict(_hit[1])
     resolver = get_resolver()
     try:
         if not resolver.exists(uds_path):
@@ -2594,31 +3008,47 @@ def jenkins_uds_extract_mapping(body: Dict[str, Any]) -> Dict[str, Any]:
         raise HTTPException(status_code=403, detail=f"파일 접근 거부: {exc}")
 
     try:
-        import docx as _docx
         data = resolver.read_bytes(uds_path)
-        doc = _docx.Document(io.BytesIO(data))
     except (PermissionError, OSError) as exc:
         raise HTTPException(status_code=403, detail=f"파일 접근 거부: {exc}")
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"UDS 파싱 실패: {exc}")
+    # 손상된 docx(임베디드 이미지 CRC 오류 등)도 매핑은 표에서만 추출하므로 python-docx
+    # 실패 시 document.xml 직접 파싱으로 복구. document.xml까지 손상되면 None.
+    tables_text = _docx_tables_text(data)
+    if tables_text is None:
+        raise HTTPException(
+            status_code=500,
+            detail="UDS 파싱 실패: 문서를 열 수 없습니다(파일 손상 가능). 원본을 다시 저장 후 교체하세요.",
+        )
 
     # Extract func_id → func_name → requirement_ids from Function Information tables
     req_to_sources: Dict[str, set] = {}
-    for table in doc.tables:
-        rows = table.rows
+    # 전체 UDS 함수 인벤토리(함수명 + SwUFn ID) — 설계 req(SwSTR 등) 참조 유무와 무관하게
+    # 모은다. UDS 함수표의 대부분(~95%)은 자기 SwUFn ID·Name만 있고 설계 req 참조가 없어
+    # req_to_sources(=mapping_pairs)에서 누락되는데, 매트릭스의 SDS→UDS bridge는 함수명만
+    # 매칭하면 되므로 전체 목록을 별도로 전달해 "UDS 함수" 컬럼이 채워지게 한다.
+    all_funcs: set = set()
+    for rows in tables_text:
         if len(rows) < 4:
             continue
-        first_cell = rows[0].cells[0].text.strip()
+        first_cell = (rows[0][0] if rows[0] else "").strip()
         if "Function Information" not in first_cell:
             continue
 
         func_id = ""
         func_name = ""
         req_refs = []
-        for row in rows:
-            cells = [c.text.strip() for c in row.cells]
+        for cells in rows:
+            cells = [str(c).strip() for c in cells]
             label = cells[0] if cells else ""
-            value = cells[2] if len(cells) > 2 else ""
+            # python-docx는 병합셀을 grid로 펼쳐 값이 cells[2]에 오지만, document.xml
+            # 직접 파싱(손상 docx fallback)은 실제 w:tc만 추출해 값이 cells[1]에 온다.
+            # 두 경우 모두 커버: 3+셀이면 [2], 2셀이면 마지막 셀.
+            if len(cells) > 2:
+                value = cells[2]
+            elif len(cells) > 1:
+                value = cells[1]
+            else:
+                value = ""
             if label == "ID":
                 func_id = value
             elif label == "Name":
@@ -2628,11 +3058,20 @@ def jenkins_uds_extract_mapping(body: Dict[str, Any]) -> Dict[str, Any]:
                 req_refs.extend(_re.findall(r"Sw[A-Z]{2,}_\d+", c))
 
         if func_name:
+            all_funcs.add(func_name)
+            if func_id:
+                all_funcs.add(func_id)
             req_refs = sorted(set(req_refs) - {func_id})
             for rid in req_refs:
                 if rid not in req_to_sources:
                     req_to_sources[rid] = set()
                 req_to_sources[rid].add(func_name)
+                # rank1 fix: func_id(SwUFn_NNNN)도 source로 등록한다. VectorCAST 원본
+                # 리포트는 testcase를 SwUFn ID로 식별하므로(예 SwUFn_0133.001),
+                # func_name(예 'main')만으로는 join이 0건이 된다. SwUFn ID를 함께
+                # 노출해 vcast subprogram(SwUFn_NNNN 정규화)과 매칭되게 한다.
+                if func_id:
+                    req_to_sources[rid].add(func_id)
 
     # Convert to mapping_pairs format expected by traceability-matrix API
     mapping_pairs = []
@@ -2642,12 +3081,21 @@ def jenkins_uds_extract_mapping(body: Dict[str, Any]) -> Dict[str, Any]:
             "source_ids": sorted(sources),
         })
 
-    return {
+    result = {
         "ok": True,
         "mapping_pairs": mapping_pairs,
         "total_requirements": len(mapping_pairs),
         "total_functions": len({fn for fns in req_to_sources.values() for fn in fns}),
+        # 전체 UDS 함수 인벤토리(매트릭스 uds_all_funcs 시드용) — 설계 req 참조 없는
+        # 함수까지 포함. 매트릭스 SDS→UDS bridge가 이 목록으로 전체 함수를 매칭한다.
+        "all_function_ids": sorted(all_funcs),
+        "all_functions_count": len(all_funcs),
     }
+    with _UDS_MAPPING_LOCK:
+        if len(_UDS_MAPPING_CACHE) >= 16:
+            _UDS_MAPPING_CACHE.clear()
+        _UDS_MAPPING_CACHE[_ck] = (_now, result)
+    return dict(result)
 
 
 def _normalize_req_id(rid: str) -> str:
@@ -2672,6 +3120,7 @@ def _normalize_req_id(rid: str) -> str:
 def jenkins_sts_extract_traceability(body: Dict[str, Any]) -> Dict[str, Any]:
     """STS/SUTS Excel에서 Traceability 시트의 요구사항↔TC 매핑 추출"""
     import io
+
     from backend.services.file_resolver import get_resolver
     from backend.services.resolver_helpers import enforce_resolver_access
     file_path = str(body.get("path", "")).strip()
@@ -2884,9 +3333,10 @@ def jenkins_sds_extract_mapping(body: Dict[str, Any]) -> Dict[str, Any]:
     """SDS 문서에서 SwCom↔요구사항 매핑 추출 (추적성 매트릭스용)"""
     import re as _re
     import tempfile
-    from report_gen.requirements import _extract_sds_partition_map, _normalize_req_id
+
     from backend.services.file_resolver import get_resolver
     from backend.services.resolver_helpers import enforce_resolver_access
+    from report_gen.requirements import _extract_sds_partition_map, _normalize_req_id
 
     sds_path = str(body.get("sds_path", "")).strip()
     if not sds_path:
@@ -2955,6 +3405,7 @@ def jenkins_sits_extract_traceability(body: Dict[str, Any]) -> Dict[str, Any]:
     """SITS Excel에서 TC ID↔요구사항 매핑 추출"""
     import io
     import re as _re
+
     from backend.services.file_resolver import get_resolver
     from backend.services.resolver_helpers import enforce_resolver_access
 

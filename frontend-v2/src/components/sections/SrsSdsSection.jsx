@@ -37,27 +37,22 @@ export default function SrsSdsSection({ job, analysisResult }) {
   const scmId = activeScm?.id || '';
   const [linkedDocs, setLinkedDocs] = useState(scmLinkedDocs || {});
 
-  // VectorCAST 결과 로그 경로 (Cloudium) — Jenkins 빌드에 RAG 없을 때 fallback.
-  // 부트로더/FBL 등 별도 결과 대응. SCM(프로젝트)별로 localStorage에 보관.
-  const VCAST_KEY = 'devops_v2_vcast_log_paths';
-  const [vcastLogPath, setVcastLogPath] = useState('');
-  useEffect(() => {
-    try {
-      const m = JSON.parse(localStorage.getItem(VCAST_KEY) || '{}');
-      setVcastLogPath(m[scmId || '_'] || '');
-    } catch (_) { setVcastLogPath(''); }
-  }, [scmId]);
-  const saveVcastLogPath = useCallback((v) => {
-    setVcastLogPath(v);
-    try {
-      const m = JSON.parse(localStorage.getItem(VCAST_KEY) || '{}');
-      m[scmId || '_'] = v;
-      localStorage.setItem(VCAST_KEY, JSON.stringify(m));
-    } catch (_) { /* noop */ }
-  }, [scmId]);
+  // VectorCAST 결과 로그 경로(복수) — Jenkins 빌드에 RAG 없을 때 cloudium fallback.
+  // 부트로더/FBL/APP 등 별도 결과 대응. 설정의 SCM '연결 문서 경로'(linked_docs.vectorcast)
+  // 에서 등록하며, 여기서는 read-only로 표시만 한다.
+  const vcastPaths = useMemo(
+    () => (Array.isArray(linkedDocs?.vectorcast) ? linkedDocs.vectorcast.filter(Boolean) : []),
+    [linkedDocs],
+  );
 
   useEffect(() => {
-    if (scmLinkedDocs && (scmLinkedDocs.sts || scmLinkedDocs.suts || scmLinkedDocs.sits)) {
+    // analysisResult.matchedScm.linked_docs는 분석 실행 시점의 스냅샷이라, 이후 Settings에서
+    // 등록한 vectorcast(복수 경로)가 누락되거나 빈 배열([])로 굳어 있을 수 있다(vectorcast
+    // 필드 추가 직후~경로 입력 전 시점에 캡처된 경우). core 문서가 있고 vectorcast가
+    // '비어있지 않을' 때만 스냅샷을 그대로 쓰고, 그 외엔 레지스트리(단일 진실원) 최신본을
+    // 가져온다 — 안 그러면 VectorCAST/P&F가 끝까지 비어 나온다.
+    if (scmLinkedDocs && (scmLinkedDocs.sts || scmLinkedDocs.suts || scmLinkedDocs.sits)
+        && Array.isArray(scmLinkedDocs.vectorcast) && scmLinkedDocs.vectorcast.length > 0) {
       setLinkedDocs(scmLinkedDocs);
       return;
     }
@@ -68,19 +63,32 @@ export default function SrsSdsSection({ job, analysisResult }) {
       // in multi-SCM environments.
       const matched = scmId ? items.find(it => it.id === scmId) : items[0];
       if (matched?.linked_docs) setLinkedDocs(matched.linked_docs);
-    }).catch(() => {});
+      else if (scmLinkedDocs) setLinkedDocs(scmLinkedDocs);
+    }).catch(() => { if (scmLinkedDocs) setLinkedDocs(scmLinkedDocs); });
   }, [scmId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const loadMatrix = useCallback(async (forceRefresh = false) => {
     // Ensure linkedDocs is loaded from SCM before proceeding
     let activeDocs = linkedDocs;
-    if (!activeDocs.sts && !activeDocs.suts) {
+    // core 문서가 비었거나(최초 진입), vectorcast가 없거나 빈 배열([])이면 레지스트리(단일
+    // 진실원) 최신본을 가져온다. 분석 스냅샷은 vectorcast 등록 전/직후에 캡처되어 vectorcast가
+    // undefined 또는 []로 굳어 있을 수 있고, 그러면 sts/suts 스냅샷 때문에 재fetch를 건너뛰어
+    // VectorCAST 경로가 끝까지 안 실린다(P/F 공백의 직접 원인). 빈 배열도 stale일 수 있으므로
+    // 레지스트리로 한 번 확인한다 — 레지스트리도 비어있으면 그게 정답이라 그대로 진행.
+    const vcastMissing = !Array.isArray(activeDocs.vectorcast) || activeDocs.vectorcast.length === 0;
+    if ((!activeDocs.sts && !activeDocs.suts) || vcastMissing) {
       try {
         const scmData = await api('/api/scm/list');
         const items = scmData?.items || (Array.isArray(scmData) ? scmData : []);
         const matched = scmId ? items.find(it => it.id === scmId) : items[0];
         if (matched?.linked_docs) {
-          activeDocs = matched.linked_docs;
+          // sts/suts가 이미 스냅샷에 있으면 core 문서는 유지하고 vectorcast만 레지스트리
+          // 최신본으로 보강(분석 시점 일관성 + vcast 최신화). 둘 다 없으면 전체 교체.
+          if (!activeDocs.sts && !activeDocs.suts) {
+            activeDocs = matched.linked_docs;
+          } else if (Array.isArray(matched.linked_docs.vectorcast)) {
+            activeDocs = { ...activeDocs, vectorcast: matched.linked_docs.vectorcast };
+          }
           setLinkedDocs(activeDocs);
         }
       } catch (_) {}
@@ -89,7 +97,7 @@ export default function SrsSdsSection({ job, analysisResult }) {
     // Debug: log activeDocs state
 
     // Cache check: skip API calls if inputs haven't changed
-    const cacheKey = JSON.stringify({ srs: docPaths.srs, sds: docPaths.sds, jobUrl: job?.url, sts: activeDocs.sts, suts: activeDocs.suts, sits: activeDocs.sits });
+    const cacheKey = JSON.stringify({ srs: docPaths.srs, sds: docPaths.sds, jobUrl: job?.url, sts: activeDocs.sts, suts: activeDocs.suts, sits: activeDocs.sits, vcast: (Array.isArray(activeDocs?.vectorcast) ? activeDocs.vectorcast : []).filter(Boolean).join(',') });
     if (!forceRefresh && matrixCacheRef.current?.key === cacheKey && matrixCacheRef.current?.data) {
       setMatrix(matrixCacheRef.current.data);
       toast('info', '캐시된 매트릭스를 사용합니다. 새로고침하려면 버튼을 다시 클릭하세요.');
@@ -110,6 +118,7 @@ export default function SrsSdsSection({ job, analysisResult }) {
 
       let reqItems = [];
       let mappingPairs = [];
+      let udsFunctionIds = [];  // 전체 UDS 함수 인벤토리(SDS→UDS bridge 시드용)
       try {
         const user = getUsername();
         const previewRes = await fetch('/api/jenkins/uds/requirements-preview', {
@@ -135,8 +144,11 @@ export default function SrsSdsSection({ job, analysisResult }) {
             uds_path: activeDocs.uds,
           });
           mappingPairs = udsMapping?.mapping_pairs || [];
+          // 전체 UDS 함수 인벤토리 — 설계 req 참조 없는 함수까지 포함. 매트릭스 SDS→UDS
+          // bridge가 전체 함수를 매칭하도록 별도 전달(mapping_pairs만으론 ~5%만 커버).
+          udsFunctionIds = udsMapping?.all_function_ids || [];
           if (mappingPairs.length > 0) {
-            toast('info', `UDS에서 ${mappingPairs.length}개 매핑 추출`);
+            toast('info', `UDS에서 ${mappingPairs.length}개 매핑 / ${udsFunctionIds.length}개 함수 추출`);
           }
         } catch (e) {
           stepWarnings.push(`UDS 매핑 추출 실패: ${e.message}`);
@@ -164,8 +176,9 @@ export default function SrsSdsSection({ job, analysisResult }) {
       // STS/SUTS/SITS are exact matches; VectorCAST is fuzzy (function-name based)
       let vcastRows = [];
       let sitsRows = [];
-      const exactCoveredReqs = new Set();  // all exact-covered reqs (for display)
-      const stsSutsCoveredReqs = new Set(); // only STS+SUTS covered (for VectorCAST filter)
+      // (이전엔 exactCoveredReqs/stsSutsCoveredReqs Set으로 STS·SUTS·SITS exact-커버
+      //  req를 VectorCAST fuzzy 추론에서 제외했으나, 이제 VectorCAST를 실행 evidence로
+      //  exact-커버 req에도 함께 노출(confidence='mixed')하는 정책이라 제거됨.)
 
       // 3a. STS traceability (요구사항↔TC 직접 매핑 — 가장 정확, confidence=exact)
       if (activeDocs.sts) {
@@ -175,10 +188,6 @@ export default function SrsSdsSection({ job, analysisResult }) {
           if (stsData?.vcast_rows?.length) {
             for (const row of stsData.vcast_rows) {
               vcastRows.push({ ...row, source: row.source || 'STS', confidence: 'exact' });
-              if (row.requirement_id) {
-                exactCoveredReqs.add(row.requirement_id.toUpperCase());
-                stsSutsCoveredReqs.add(row.requirement_id.toUpperCase());
-              }
             }
             dataSources.push(`STS: ${stsData.vcast_rows.length}건`);
           } else if (Array.isArray(stsData?.available_sheets)) {
@@ -197,10 +206,6 @@ export default function SrsSdsSection({ job, analysisResult }) {
           if (sutsData?.vcast_rows?.length) {
             for (const row of sutsData.vcast_rows) {
               vcastRows.push({ ...row, source: row.source || 'SUTS', confidence: 'exact' });
-              if (row.requirement_id) {
-                exactCoveredReqs.add(row.requirement_id.toUpperCase());
-                stsSutsCoveredReqs.add(row.requirement_id.toUpperCase());
-              }
             }
             dataSources.push(`SUTS: ${sutsData.vcast_rows.length}건`);
           } else if (Array.isArray(sutsData?.available_sheets)) {
@@ -218,9 +223,6 @@ export default function SrsSdsSection({ job, analysisResult }) {
           const sitsData = await post('/api/jenkins/sits/extract-traceability', { path: activeDocs.sits });
           if (sitsData?.vcast_rows?.length) {
             sitsRows = sitsData.vcast_rows.map(r => ({ ...r, source: r.source || 'SITS', confidence: 'exact' }));
-            for (const row of sitsRows) {
-              if (row.requirement_id) exactCoveredReqs.add(row.requirement_id.toUpperCase());
-            }
             dataSources.push(`SITS: ${sitsData.vcast_rows.length}건`);
           } else if (Array.isArray(sitsData?.available_sheets)) {
             stepWarnings.push(`SITS: ${sitsData.warning || sitsData.error || '시트 미인식'}. 사용 가능한 시트: ${sitsData.available_sheets.join(', ')}`);
@@ -234,34 +236,54 @@ export default function SrsSdsSection({ job, analysisResult }) {
       // Only add VectorCAST rows for req IDs NOT already covered by STS/SUTS/SITS
       setLoadProgress('VectorCAST 데이터 수집 중...');
       try {
+        // Cloudium 폴백: Jenkins 빌드에 RAG 없으면 등록된 경로들(부트로더/FBL/APP 등
+        // 별도 결과)에서 read. activeDocs는 loadMatrix가 새로 fetch한 최신 linked_docs.
+        const vcastLogPaths = Array.isArray(activeDocs?.vectorcast)
+          ? activeDocs.vectorcast.filter(Boolean)
+          : [];
         const ragData = await post('/api/jenkins/report/vectorcast-rag', {
           job_url: job.url,
           cache_root: cacheRoot,
           build_selector: cfg.buildSelector || 'lastSuccessfulBuild',
-          // Cloudium 폴백: Jenkins 빌드에 RAG 없으면 이 경로(부트로더 등 별도 결과)에서 read
-          vcast_log_path: vcastLogPath || '',
+          vcast_log_paths: vcastLogPaths,
         });
         const rawRows = ragData?.data?.test_rows || [];
 
-        const funcToReqs = {};
-        for (const mp of mappingPairs) {
-          for (const fn of (mp.source_ids || [])) {
-            if (!funcToReqs[fn]) funcToReqs[fn] = [];
-            funcToReqs[fn].push(mp.requirement_id);
-          }
-        }
-
-        let vcastAdded = 0;
+        // VectorCAST는 함수(subprogram) 단위로 롤업해 SUTS와 동일 granularity로 맞춘다.
+        // per-실행(수천 행)을 그대로 보내면 한 요구사항에 수백~수천 셀이 붙어 렌더가
+        // 무거워지고 추적성 가독성이 떨어진다(함수의 TC 중 하나라도 fail이면 fail).
+        // 요구사항 매핑은 backend(generate_uds_traceability_matrix)가 SUTS·SDS 함수명
+        // bridge로 수행한다: SwUFn → (SUTS)함수명 → (SDS)SRS. 그래서 requirement_id=''.
+        // (과거엔 여기서 UDS 설계레벨 매핑(SwSTR)으로 미리 join했는데, 그 ID는 SRS
+        //  매트릭스 행(SwTR/SwEI 등)과 namespace가 달라 전부 누락되는 원인이었다.)
+        // backend 소비 필드(subprogram/testcase/result/unit/report)만 추려 payload 슬림화.
+        const FAIL_R = new Set(['fail', 'failed', 'false', '0', 'ng']);
+        const vcByFunc = new Map();
         for (const row of rawRows) {
-          const fn = row.subprogram || '';
-          const reqs = funcToReqs[fn] || [];
-          for (const rid of reqs) {
-            if (stsSutsCoveredReqs.has((rid || '').toUpperCase())) continue;
-            vcastRows.push({ ...row, requirement_id: rid, testcase: fn, source: 'VectorCAST', confidence: 'fuzzy' });
-            vcastAdded++;
-          }
+          const sub = (row.subprogram || '').trim();
+          if (!sub) continue;
+          const res = String(row.result || '').toLowerCase();
+          let agg = vcByFunc.get(sub);
+          if (!agg) { agg = { sub, report: row.report || '', unit: row.unit || '', tc: 0, fail: 0 }; vcByFunc.set(sub, agg); }
+          agg.tc += 1;
+          if (FAIL_R.has(res)) agg.fail += 1;
         }
-        if (vcastAdded > 0) dataSources.push(`VectorCAST: ${vcastAdded}건`);
+        let vcastAdded = 0;
+        for (const agg of vcByFunc.values()) {
+          const label = agg.tc > 1 ? `${agg.sub} (${agg.tc} TC${agg.fail ? `, ${agg.fail} fail` : ''})` : agg.sub;
+          vcastRows.push({
+            subprogram: agg.sub,
+            testcase: label,
+            result: agg.fail > 0 ? 'fail' : 'pass',
+            unit: agg.unit,
+            report: agg.report,
+            requirement_id: '',
+            source: 'VectorCAST',
+            confidence: 'fuzzy',
+          });
+          vcastAdded++;
+        }
+        if (vcastAdded > 0) dataSources.push(`VectorCAST: ${vcastAdded}개 함수`);
       } catch (e) {
         stepWarnings.push(`VectorCAST 수집 실패: ${e.message}`);
       }
@@ -284,6 +306,7 @@ export default function SrsSdsSection({ job, analysisResult }) {
       const data = await post('/api/jenkins/uds/traceability-matrix', {
         requirement_items: reqItems,
         mapping_pairs: mappingPairs,
+        uds_function_ids: udsFunctionIds,
         vcast_rows: vcastRows,
         sds_pairs: sdsPairs,
         sits_rows: sitsRows,
@@ -292,6 +315,15 @@ export default function SrsSdsSection({ job, analysisResult }) {
         cache_root: cacheRoot || '.devops_pro_cache',
         build_selector: cfg?.buildSelector || 'lastSuccessfulBuild',
       });
+      // VectorCAST bridge 가시성: SRS에 연결된 함수 수 / 미연결(부트로더·ISR 등
+      // SRS 추적 대상이 아닌 함수). 미연결 수가 급증하면 bridge 파손 신호.
+      const vcSum = (data?.matrix?.summary) || data?.summary || {};
+      if (typeof vcSum.vcast_input_rows === 'number' && vcSum.vcast_input_rows > 0) {
+        const untraced = vcSum.vcast_untraced_rows ?? 0;
+        if (untraced > 0) {
+          stepWarnings.push(`VectorCAST ${vcSum.vcast_traced_rows}/${vcSum.vcast_input_rows} 함수가 SRS에 연결됨. ${untraced}개는 SRS 추적 대상 아님(부트로더·ISR 등) — 정상이나, 이 수가 급증하면 SUTS/SDS 매핑을 확인하세요.`);
+        }
+      }
       // Attach metadata
       data._dataSources = dataSources;
       setMatrix(data);
@@ -306,7 +338,7 @@ export default function SrsSdsSection({ job, analysisResult }) {
       setLoadProgress('');
       if (stepWarnings.length > 0) setWarnings(stepWarnings);
     }
-  }, [job, cfg, cacheRoot, docPaths, linkedDocs, scmId, toast, vcastLogPath]);
+  }, [job, cfg, cacheRoot, docPaths, linkedDocs, scmId, toast]);
 
   const impactData = analysisResult?.impactData;
   const impacts = impactData?.impacts ?? impactData?.impact_items ?? [];
@@ -346,22 +378,42 @@ export default function SrsSdsSection({ job, analysisResult }) {
             </div>
           ))}
           {/* VectorCAST 결과 로그 (Cloudium) — Jenkins 빌드에 RAG 없을 때 폴백.
-              부트로더/FBL 등 결과가 별도로 나올 때 SwUT/SwIT처럼 경로 지정. */}
-          <div className="artifact-item" style={{ background: 'var(--bg)', overflow: 'hidden' }}>
-            <span className="pill pill-purple" style={{ minWidth: 40, textAlign: 'center', flexShrink: 0 }}>VC로그</span>
-            <input
-              type="text"
-              value={vcastLogPath}
-              onChange={e => saveVcastLogPath(e.target.value)}
-              placeholder="VectorCAST 결과 경로 (Cloudium, 미입력 시 Jenkins 빌드 사용)"
-              spellCheck="false"
-              autoComplete="off"
-              style={{ flex: 1, minWidth: 0, fontSize: 12, padding: '2px 6px' }}
-              aria-label="VectorCAST 결과 로그 경로"
-            />
-            {vcastLogPath
-              ? <StatusBadge tone="success">지정됨</StatusBadge>
-              : <StatusBadge tone="neutral">Jenkins</StatusBadge>}
+              부트로더/FBL/APP 등 결과가 별도로 나올 때 설정 → SCM '연결 문서 경로'에서
+              복수 경로 등록. 여기서는 read-only 표시만. */}
+          <div
+            className="artifact-item"
+            style={{ background: 'var(--bg)', overflow: 'hidden', flexDirection: 'column', alignItems: 'stretch', gap: 4 }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <span className="pill pill-purple" style={{ minWidth: 40, textAlign: 'center', flexShrink: 0 }}>VC로그</span>
+              {vcastPaths.length > 0 ? (
+                <>
+                  <span className="artifact-name" style={{ flex: 1, minWidth: 0 }}>
+                    {vcastPaths.length === 1 ? '경로 1개 등록됨' : `경로 ${vcastPaths.length}개 등록됨`}
+                  </span>
+                  <span className="pill pill-info" style={{ fontSize: 9 }}>SCM</span>
+                  <StatusBadge tone="success">지정됨</StatusBadge>
+                </>
+              ) : (
+                <>
+                  <span className="text-muted text-sm" style={{ flex: 1, minWidth: 0 }}>설정 → SCM &lsquo;연결 문서 경로&rsquo;에서 VectorCAST 경로 등록 (미등록 시 Jenkins 빌드 사용)</span>
+                  <StatusBadge tone="neutral">Jenkins</StatusBadge>
+                </>
+              )}
+            </div>
+            {vcastPaths.length > 0 && (
+              <ul style={{ margin: 0, paddingLeft: 46, listStyle: 'none' }}>
+                {vcastPaths.map((p, i) => (
+                  <li
+                    key={i}
+                    title={p}
+                    style={{ fontSize: 11, fontFamily: 'monospace', color: 'var(--text-muted)', wordBreak: 'break-all', padding: '1px 0' }}
+                  >
+                    <span style={{ color: 'var(--text-muted)', marginRight: 4 }}></span>{p}
+                  </li>
+                ))}
+              </ul>
+            )}
           </div>
         </div>
       </div>

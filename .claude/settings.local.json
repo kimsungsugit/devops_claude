@@ -11,7 +11,19 @@
       "Bash(start *)",
       "Bash(dir *)",
       "Bash(powershell *)",
-      "Bash(powershell.exe *)"
+      "Bash(powershell.exe *)",
+      "Bash(git diff *)",
+      "Bash(\"D:/Project/devops/Release_claude/.venv/Scripts/python.exe\" /tmp/list_vcast.py)",
+      "Bash(\"D:/Project/devops/Release_claude/.venv/Scripts/python.exe\" /tmp/worker_ls.py)",
+      "Bash(\"D:/Project/devops/Release_claude/.venv/Scripts/python.exe\" /tmp/inspect_html.py)",
+      "Bash(\"D:/Project/devops/Release_claude/.venv/Scripts/python.exe\" /tmp/inspect_test_html.py)",
+      "Bash(\"D:/Project/devops/Release_claude/.venv/Scripts/python.exe\" /tmp/subdirs.py)",
+      "Bash(taskkill //F //PID 27068)",
+      "Bash(\"C:/Users/kss11/AppData/Local/Programs/Python/Python312/python.exe\" -m uvicorn backend.main:app --port 9000 --host 127.0.0.1)",
+      "Bash(cat .codex_tmp/diag_full.log)",
+      "Bash(tail -3 .codex_tmp/backend_run.log)",
+      "Bash(npm run *)",
+      "Read(//d/Project/devops/.codex_tmp/**)"
     ]
   }
 }

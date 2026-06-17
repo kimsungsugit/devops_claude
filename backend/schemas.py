@@ -5,7 +5,6 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-
 # ── Session ───────────────────────────────────────────────────────────
 
 class SessionNamePayload(BaseModel):
@@ -113,6 +112,10 @@ class ScmLinkedDocs(BaseModel):
     sds: str = ""
     hsis: str = ""
     stp: str = ""
+    # VectorCAST 결과 로그 경로(들). 부트로더/FBL/APP 등 결과가 별도 파일로 나올 수
+    # 있어 단일 문자열이 아닌 복수 경로 list. 각 경로는 vectorcast_rag.json 파일 또는
+    # 그 상위 폴더. SwUT/SwIT 로그처럼 SCM별로 설정의 '연결 문서 경로'에서 등록.
+    vectorcast: List[str] = Field(default_factory=list)
 
 
 class ScmRegistryEntry(BaseModel):
@@ -186,8 +189,39 @@ class JenkinsReportRequest(BaseModel):
     build_selector: str = "lastSuccessfulBuild"
     # VectorCAST 결과가 Jenkins 빌드에 없을 때(예: 부트로더/FBL 별도 산출) 읽을
     # Cloudium 경로 (vectorcast_rag.json 파일 또는 그 상위 폴더). SwUT/SwIT 로그처럼
-    # 사용자가 '입력 문서 현황'에서 지정. 미지정/local 모드면 무시.
+    # 사용자가 설정의 'SCM 연결 문서 경로'에서 등록. 미지정/local 모드면 무시.
+    # 부트로더/FBL/APP 등 결과가 별도로 나올 수 있어 복수 경로(vcast_log_paths)를
+    # 우선 사용하고, vcast_log_path(단일)는 하위 호환을 위해 유지한다.
+    vcast_log_paths: Optional[List[str]] = None
     vcast_log_path: Optional[str] = None
+
+    @field_validator("vcast_log_paths")
+    @classmethod
+    def _check_vcast_log_paths(cls, v: Optional[List[str]]) -> Optional[List[str]]:
+        # rank7: 입력 표면 제한 — 개수≤16, 항목 길이≤500, 줄바꿈 금지 (DoS/주입 방어).
+        if v is None:
+            return v
+        if len(v) > 16:
+            raise ValueError("vcast_log_paths는 최대 16개까지 허용됩니다")
+        for item in v:
+            s = str(item or "")
+            if len(s) > 500:
+                raise ValueError("vcast_log_paths 항목 길이는 500자 이하여야 합니다")
+            if "\n" in s or "\r" in s:
+                raise ValueError("vcast_log_paths 항목에 줄바꿈 금지")
+        return v
+
+    @field_validator("vcast_log_path")
+    @classmethod
+    def _check_vcast_log_path(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
+        s = str(v)
+        if len(s) > 500:
+            raise ValueError("vcast_log_path 길이는 500자 이하여야 합니다")
+        if "\n" in s or "\r" in s:
+            raise ValueError("vcast_log_path에 줄바꿈 금지")
+        return v
 
 
 class JenkinsCallTreeRequest(JenkinsReportRequest):
@@ -611,11 +645,19 @@ class QualityGateResult(BaseModel):
 # ── UDS Traceability ──────────────────────────────────────────────────
 
 class UdsTraceabilityMatrixRequest(BaseModel):
-    requirement_items: List[Dict[str, Any]] = []
-    mapping_pairs: List[Dict[str, Any]] = []
-    vcast_rows: List[Dict[str, Any]] = []
-    sds_pairs: List[Dict[str, Any]] = []   # SDS component↔requirement mapping
-    sits_rows: List[Dict[str, Any]] = []   # SITS TC↔requirement mapping
+    # list 필드 DoS 캡 (reviewer WARNING — deviation_cases/log_folders 등 코드베이스
+    # 컨벤션 일치). 인증 뒤이고 frontend가 echo하는 자기 데이터지만, 항목당 nested
+    # Any + 행마다 re.findall O(n) 결합 시 단일 요청으로 worker 점유 가능. 캡은 실데이터
+    # 상한(vcast 함수 ~1k, per-실행 fallback 시 ~8k)의 넉넉한 배수로 정상 회귀 없음.
+    requirement_items: List[Dict[str, Any]] = Field(default_factory=list, max_length=20000)
+    mapping_pairs: List[Dict[str, Any]] = Field(default_factory=list, max_length=20000)
+    vcast_rows: List[Dict[str, Any]] = Field(default_factory=list, max_length=50000)
+    sds_pairs: List[Dict[str, Any]] = Field(default_factory=list, max_length=20000)   # SDS component↔requirement mapping
+    sits_rows: List[Dict[str, Any]] = Field(default_factory=list, max_length=50000)   # SITS TC↔requirement mapping
+    # 전체 UDS 함수 인벤토리(함수명+SwUFn ID) — extract-mapping이 설계 req 참조 없는 함수까지
+    # 모아 전달. SDS→UDS bridge가 전체 함수를 매칭하도록 매트릭스 uds_all_funcs를 시드.
+    # UDS 함수 ~1k(이름+ID 2배=~2k) 상한의 넉넉한 배수.
+    uds_function_ids: List[str] = Field(default_factory=list, max_length=20000)
     # Optional cache-persist hints (for dashboard summary quick-load)
     job_url: Optional[str] = None
     cache_root: Optional[str] = None
