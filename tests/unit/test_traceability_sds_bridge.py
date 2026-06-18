@@ -222,3 +222,24 @@ def test_unmapped_vcast_dedup_distinct_subprogram():
     assert mx["summary"]["vcast_input_rows"] == 2          # 행 기준
     assert mx["summary"]["vcast_untraced_rows"] == 2       # 행 기준
     assert mx["summary"]["unmapped_vcast_count"] == 1      # distinct subprogram
+    # ★W2: PASS(tc1) 선행 후 FAIL(tc2)이 와도 FAIL이 우선 보존돼야 한다
+    # (worst-case 집계 — silent FAIL 손실로 트리 미추적 FAIL 카운트가 과소표시되는 것 방지)
+    assert mx["unmapped_vcast"][0]["result"].lower() == "fail"
+
+
+def test_unmapped_vcast_safety_handler_not_isr():
+    """이름이 ISR/_handler 패턴이어도 안전·진단 토큰(fault/diag/safety 등)을 가지면
+    isr(인프라, warn=false)로 침묵 강등하지 않고 vcast_only로 둔다 — 안전 핸들러의
+    백워드 추적성 검토 신호 보존(재검증 W4). 순수 ISR(안전 토큰 없음)은 그대로 isr."""
+    items = [{"id": "SwTR_0101"}]
+    sds_pairs = [{"requirement_id": "SwTR_0101", "component_ids": ["foo_func"]}]
+    vcast = [
+        # 이름은 _handler(=ISR 패턴)지만 'fault' 안전 토큰 보유 + SUTS 단위시험 없음 + VectorCAST 단독
+        {"subprogram": "Brake_Fault_Handler", "testcase": "tc1", "result": "fail", "source": "VectorCAST"},
+        # 안전 토큰 없는 순수 ISR → 그대로 isr
+        {"subprogram": "Tim0_Ch0_ISR", "testcase": "tc2", "result": "pass", "source": "VectorCAST"},
+    ]
+    mx = generate_uds_traceability_matrix(items, vcast_rows=vcast, sds_pairs=sds_pairs)
+    by_sub = {u["subprogram"]: u for u in mx["unmapped_vcast"]}
+    assert by_sub["Brake_Fault_Handler"]["category"] == "vcast_only"  # isr로 강등 안 됨
+    assert by_sub["Tim0_Ch0_ISR"]["category"] == "isr"

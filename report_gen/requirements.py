@@ -31,8 +31,18 @@ _SWUFN_RE = re.compile(r"Sw[UI]Fn_\d+", re.IGNORECASE)
 # 'SRS 추적 대상이 아닌 게 당연한' 인프라 함수를 식별(트리 미추적 루트의 isr 버킷).
 # 정밀도 우선(reviewer WARNING): interrupt/exception/trap/fault 같은 무경계 부분일치는
 # 안전 관련 일반 함수(Fault_Monitor, Entrapment_Detect=끼임감지, Bootstrap_Init 등)를
-# ISR로 오분류해 검토 신호를 숨기므로 제외. 명확한 앵커(_isr/_handler 접미·\bnmi\b·_irq)만 사용.
-_ISR_RE = re.compile(r"(_isr$|_isr_|\bisr\b|_irq|_handler$|\bnmi\b)", re.I)
+# ISR로 오분류해 검토 신호를 숨기므로 제외. 모든 토큰을 앵커/경계로만 매치한다
+# (_irq도 _irq$/_irq_로 앵커 — config_irqd 류 무경계 부분일치 제거, 라운드 재검증 I4).
+_ISR_RE = re.compile(r"(_isr$|_isr_|\bisr\b|_irq$|_irq_|_handler$|\bnmi\b)", re.I)
+
+# isr 버킷은 warn=false('추적 대상 아님이 정상인 인프라')다. 그러나 _handler$ 앵커는
+# Safety_Fault_Handler·Diag_Trap_Handler 같은 안전 핸들러도 매치하므로(라운드 재검증 W4),
+# 안전/진단 토큰을 가진 함수는 isr로 침묵 강등하지 않고 vcast_only로 둬 검토 신호를 보존한다.
+_SAFETY_TOKEN_RE = re.compile(r"(fault|diag|safety|monitor|watchdog|wdg|trap|brake|steer|airbag|crash|asil)", re.I)
+
+# 미추적 VectorCAST FAIL 판정 — 프론트(TraceUnmappedRoot failTotal/failN)의
+# /^(fail|failed|false|0)$/i 와 동일. dedup 시 FAIL을 PASS보다 우선 보존(W2).
+_RESULT_FAIL_RE = re.compile(r"^(fail|failed|false|0)$", re.I)
 
 _REQ_ID_PAT = re.compile(r"\b(Sw(?:TR|TSR|NTR|NTSR|CNF|EI|ST|STR|Fn|TK)_\d+)\b", re.I)
 
@@ -1796,7 +1806,7 @@ def generate_uds_traceability_matrix(
     # 트리 뷰의 'SRS 미추적 시험 포함' 토글이 이 목록을 의미 3버킷으로 묶어 보여준다.
     # 카운트(vcast_*)는 행 기준 그대로 두고, 목록만 distinct subprogram으로 dedup한다.
     unmapped_vcast: List[Dict[str, Any]] = []
-    _seen_unmapped: set = set()
+    _unmapped_idx: Dict[str, int] = {}   # sub_lower → unmapped_vcast 인덱스 (FAIL 우선 머지용, W2)
     for row in all_test_rows:
         if not isinstance(row, dict):
             continue
@@ -1875,8 +1885,8 @@ def generate_uds_traceability_matrix(
                 #   isr        : 부트로더/ISR/핸들러 등 추적 대상 아님이 당연한 인프라
                 #   suts_tested: SUTS 단위시험이 존재(함수명 해석됨) — '시험했으나 미명세', 검토 가치 ↑
                 #   vcast_only : SUTS 참조도 없음(VectorCAST 단독 커버리지)
-                if sub_lower not in _seen_unmapped:
-                    _seen_unmapped.add(sub_lower)
+                res_str = str(row.get("result") or "")
+                if sub_lower not in _unmapped_idx:
                     resolved: List[str] = []
                     for swufn in _SWUFN_RE.findall(hay):
                         for fn in swufn_to_func.get(_normalize_req_id(swufn), []):
@@ -1884,22 +1894,30 @@ def generate_uds_traceability_matrix(
                                 resolved.append(fn)
                     # 분류 우선순위: SUTS 단위시험 존재(resolved)는 강한 '시험했으나 미명세'
                     # 신호 → ISR 이름 휴리스틱보다 우선한다(reviewer WARNING). 이름만 ISR이고
-                    # 단위시험 없는 것만 isr(인프라)로 본다. 안전 관련 함수(fault/diag 등)가
-                    # 단위시험을 가진 채 isr로 침묵 강등돼 검토에서 누락되는 것을 방지.
+                    # 단위시험 없는 것만 isr(인프라)로 본다. 단, 이름이 ISR 패턴이어도 안전/진단
+                    # 토큰(Safety_Fault_Handler 등)을 가지면 isr로 침묵 강등하지 않는다(재검증 W4).
                     if resolved:
                         category = "suts_tested"
-                    elif _ISR_RE.search(subprogram):
+                    elif _ISR_RE.search(subprogram) and not _SAFETY_TOKEN_RE.search(subprogram):
                         category = "isr"
                     else:
                         category = "vcast_only"
+                    _unmapped_idx[sub_lower] = len(unmapped_vcast)
                     unmapped_vcast.append({
                         "subprogram": subprogram,
-                        "result": str(row.get("result") or ""),
+                        "result": res_str,
                         "testcase": str(row.get("testcase") or ""),
                         "unit": str(row.get("unit") or ""),
                         "resolved_funcs": resolved,
                         "category": category,
                     })
+                else:
+                    # worst-case 집계: 동일 subprogram의 후속 행이 FAIL이면 기존 항목 result를
+                    # FAIL로 격상(재검증 W2: PASS 선행 시 FAIL이 silent 손실돼 트리의 미추적
+                    # FAIL 카운트가 과소표시되는 것을 방지). 프론트 failTotal과 동일 판정.
+                    _existing = unmapped_vcast[_unmapped_idx[sub_lower]]
+                    if _RESULT_FAIL_RE.match(res_str) and not _RESULT_FAIL_RE.match(str(_existing["result"])):
+                        _existing["result"] = res_str
 
     # 의미 버킷 우선순위로 정렬 — 잘림/상단 노출 시 신호(suts_tested)가 먼저 보이도록.
     _UNMAPPED_ORDER = {"suts_tested": 0, "isr": 1, "vcast_only": 2}

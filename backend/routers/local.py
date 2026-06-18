@@ -1688,7 +1688,11 @@ def local_traceability(
         rid = r["id"]
         fids = req_to_fids.get(rid, [])
         func_names = []
-        for fid in fids[:10]:
+        # 전체 fid 순회 — 과거 fids[:10] 절단은 UDS 함수를 최대 ~188개 silent 누락시켜
+        # source_ids 기반 트리의 단위시험 미연결/orphan SUTS 계산을 거짓으로 만들었다
+        # (라운드 재검증 W1: 외곽 슬라이스만 제거됐고 이 내부 루프 절단이 잔존했음).
+        # 아래 suts_tcs_for_req는 이미 전체 fids를 쓰므로 비대칭도 해소된다.
+        for fid in fids:
             info = function_details.get(fid)
             if isinstance(info, dict):
                 func_names.append(info.get("name", fid))
