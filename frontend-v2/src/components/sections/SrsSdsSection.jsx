@@ -659,6 +659,10 @@ const SOURCE_COLORS = { STS: '#2563eb', SUTS: '#7c3aed', SITS: '#0891b2', Vector
 const CONFIDENCE_LABELS = { exact: 'Exact', direct: 'Direct', indirect: 'Indirect', fuzzy: 'Fuzzy', mixed: 'Mixed' };
 const CONFIDENCE_COLORS = { exact: '#16a34a', direct: '#16a34a', indirect: '#d97706', fuzzy: '#9ca3af', mixed: '#2563eb' };
 
+// 안정 빈 배열 참조 — unmapped_vcast 키 부재(로컬 파일모드) 시 매 렌더 새 [] 리터럴이
+// 생성돼 gapStats useMemo가 매번 재계산되던 것을 방지(재검증 I3, 정확성 무관·성능 미세).
+const _EMPTY_ARR = [];
+
 // 추적성 공백 배지 — 정/역방향 공백 카운트를 상시 노출(0이면 녹색, >0이면 amber).
 function GapBadge({ label, value, tone, title, sub }) {
   const warn = tone === 'warn';
@@ -681,7 +685,7 @@ function TraceMatrix({ matrix }) {
   // 역방향 추적성 공백 — 시험은 됐으나 이 SRS에 안 닿는 VectorCAST 함수(백엔드 unmapped_vcast).
   // 트리 'SRS 미추적 시험 포함' 토글이 의미 3버킷으로 묶어 별도 루트로 표시한다.
   // unmappedSupported: 키 자체 부재(로컬 파일모드 — 미계산)와 빈 배열(공백 0)을 구분(deep-analyze).
-  const unmappedVcast = Array.isArray(inner?.unmapped_vcast) ? inner.unmapped_vcast : [];
+  const unmappedVcast = Array.isArray(inner?.unmapped_vcast) ? inner.unmapped_vcast : _EMPTY_ARR;
   const unmappedSupported = inner != null && inner.unmapped_vcast !== undefined;
 
   const [searchTerm, setSearchTerm] = useState('');
@@ -1047,9 +1051,9 @@ function TraceMatrix({ matrix }) {
             <GapBadge label="SDS有·UDS無 (설계 단절)" value={gapStats.sdsNoUds} tone={gapStats.sdsNoUds ? 'warn' : 'ok'}
               title="SRS→SDS는 추적됐으나 SDS→UDS(단위설계)가 끊긴 행" />
             <GapBadge label="UDS함수 단위시험 미연결" value={gapStats.udsUntestedFns} tone={gapStats.udsUntestedFns ? 'warn' : 'ok'}
-              title={`설계된 UDS 함수 ${gapStats.udsFnTotal}개 중 SUTS 단위시험이 안 붙은 함수`} />
+              title={`SUTS 단위시험이 안 붙은 (요구사항×UDS함수) 쌍 — 여러 요구사항이 공유하는 함수는 요구사항마다 합산(중복 포함). 분모 ${gapStats.udsFnTotal}도 동일 기준`} />
             <GapBadge label="orphan SUTS (시험有 설계無)" value={gapStats.orphanSuts} tone={gapStats.orphanSuts ? 'warn' : 'ok'}
-              title="어느 UDS 함수에도 매핑되지 않는 SUTS 단위시험(역방향 공백)" />
+              title="어느 UDS 함수에도 매핑되지 않는 SUTS 단위시험(역방향 공백) — (요구사항×시험) 쌍 기준, 공유 시험은 중복 합산" />
             {unmappedSupported ? (
               <GapBadge label="SRS 미추적 시험 (역방향)" value={gapStats.unmappedTotal} tone={gapStats.unmappedTotal ? 'warn' : 'ok'}
                 title="시험은 됐으나 이 SRS 요구사항에 안 닿는 VectorCAST 함수(종, 중복 제거)"
@@ -1788,6 +1792,7 @@ function TraceUnmappedRoot({ unmapped, expanded, onToggle }) {
   const nodeId = '__unmapped__';
   const isOpen = expanded.has(nodeId);
   const failTotal = list.filter(u => /^(fail|failed|false|0)$/i.test(String(u.result || ''))).length;
+  const safetyTotal = list.filter(u => u && u.safety).length;  // 안전/진단 토큰 보유(재검증 W4 가시화)
   return (
     <li style={{ borderTop: '2px solid var(--accent)' }}>
       <div
@@ -1804,6 +1809,7 @@ function TraceUnmappedRoot({ unmapped, expanded, onToggle }) {
         <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
           시험은 했으나 이 SRS 요구사항에 안 닿는 VectorCAST 함수 {list.length}종(중복 제거)
           {failTotal > 0 && <span style={{ color: '#dc2626', fontWeight: 600 }}> · {failTotal} fail</span>}
+          {safetyTotal > 0 && <span style={{ color: COVERAGE_COLORS.partial.fg, fontWeight: 700 }}> · ⚠ {safetyTotal} 안전</span>}
         </span>
         <span style={{ marginLeft: 'auto', fontSize: 10, color: 'var(--text-muted)' }}>역방향 추적성 공백</span>
       </div>
@@ -1825,7 +1831,11 @@ function TraceUnmappedBucket({ bucket, items, parentId, expanded, onToggle }) {
   const empty = list.length === 0;
   const isOpen = !empty && expanded.has(nodeId);
   const failN = list.filter(u => /^(fail|failed|false|0)$/i.test(String(u.result || ''))).length;
-  const warn = bucket.warn && list.length > 0;
+  const safetyN = list.filter(u => u && u.safety).length;  // 안전/진단 토큰 보유(W4)
+  // 안전 항목이 있으면 비-warn 버킷(vcast_only/isr)이라도 amber로 승격 — 검토 신호 보존.
+  const warn = (bucket.warn || safetyN > 0) && list.length > 0;
+  // 안전 항목을 버킷 상단으로 정렬(잘림/스크롤 시 우선 노출). 안전 없으면 원순서 유지.
+  const sorted = safetyN > 0 ? [...list].sort((a, b) => (b && b.safety ? 1 : 0) - (a && a.safety ? 1 : 0)) : list;
   return (
     <li style={{ marginTop: 6 }}>
       <div
@@ -1846,7 +1856,7 @@ function TraceUnmappedBucket({ bucket, items, parentId, expanded, onToggle }) {
           {warn ? '⚠ ' : ''}{bucket.label}
         </span>
         <span style={{ color: empty ? '#9ca3af' : 'var(--text-muted)' }}>
-          {list.length}개{failN > 0 ? ` · ${failN} fail` : ''}
+          {list.length}개{failN > 0 ? ` · ${failN} fail` : ''}{safetyN > 0 ? ` · ⚠ ${safetyN} 안전` : ''}
         </span>
       </div>
       {isOpen && (
@@ -1860,9 +1870,12 @@ function TraceUnmappedBucket({ bucket, items, parentId, expanded, onToggle }) {
               </tr>
             </thead>
             <tbody>
-              {list.map((u, i) => (
-                <tr key={i} style={{ borderBottom: '1px solid var(--border)' }}>
-                  <td style={{ padding: '3px 6px', fontFamily: 'monospace' }}>{u.subprogram || '-'}</td>
+              {sorted.map((u, i) => (
+                <tr key={i} style={{ borderBottom: '1px solid var(--border)', background: u && u.safety ? COVERAGE_COLORS.partial.bg + '60' : undefined }}>
+                  <td style={{ padding: '3px 6px', fontFamily: 'monospace', fontWeight: u && u.safety ? 700 : undefined }}
+                    title={u && u.safety ? '안전/진단 토큰 보유 — SRS 미추적이나 백워드 추적성 검토 권장' : undefined}>
+                    {u && u.safety ? '⚠ ' : ''}{u.subprogram || '-'}
+                  </td>
                   <td style={{ padding: '3px 6px', fontFamily: 'monospace', color: 'var(--text-muted)' }}>
                     {(Array.isArray(u.resolved_funcs) && u.resolved_funcs.length) ? u.resolved_funcs.join(', ') : '—'}
                   </td>

@@ -1910,6 +1910,9 @@ def generate_uds_traceability_matrix(
                         "unit": str(row.get("unit") or ""),
                         "resolved_funcs": resolved,
                         "category": category,
+                        # 안전/진단 토큰 보유 — 버킷(isr/vcast_only)과 무관하게 프론트에서
+                        # amber로 강조해 백워드 추적성 검토 신호를 보존한다(재검증 W4 가시화).
+                        "safety": bool(_SAFETY_TOKEN_RE.search(subprogram)),
                     })
                 else:
                     # worst-case 집계: 동일 subprogram의 후속 행이 FAIL이면 기존 항목 result를
@@ -2056,6 +2059,8 @@ def generate_uds_traceability_matrix(
             "unmapped_suts_tested": sum(1 for u in unmapped_vcast if u["category"] == "suts_tested"),
             "unmapped_vcast_only": sum(1 for u in unmapped_vcast if u["category"] == "vcast_only"),
             "unmapped_isr": sum(1 for u in unmapped_vcast if u["category"] == "isr"),
+            # 버킷과 무관하게 안전/진단 토큰을 가진 미추적 함수 수 — 프론트 amber 강조·뱃지용(W4).
+            "unmapped_safety": sum(1 for u in unmapped_vcast if u.get("safety")),
         },
         # 역방향 추적성 공백 — '시험은 했으나 이 SRS에 안 닿는' VectorCAST subprogram 전체 목록.
         # 트리 뷰의 'SRS 미추적 시험 포함' 토글이 의미 3버킷으로 묶어 보여준다.

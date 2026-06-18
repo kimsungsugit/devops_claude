@@ -243,3 +243,8 @@ def test_unmapped_vcast_safety_handler_not_isr():
     by_sub = {u["subprogram"]: u for u in mx["unmapped_vcast"]}
     assert by_sub["Brake_Fault_Handler"]["category"] == "vcast_only"  # isr로 강등 안 됨
     assert by_sub["Tim0_Ch0_ISR"]["category"] == "isr"
+    # ★W4 가시화: 안전 토큰 보유 함수는 safety=True로 플래그(프론트 amber 강조용),
+    # 순수 ISR은 False. summary.unmapped_safety도 동기.
+    assert by_sub["Brake_Fault_Handler"]["safety"] is True
+    assert by_sub["Tim0_Ch0_ISR"]["safety"] is False
+    assert mx["summary"]["unmapped_safety"] == 1
