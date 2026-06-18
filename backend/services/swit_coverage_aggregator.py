@@ -367,9 +367,20 @@ def _align_function_rows_to_template(
         # audit reviewer가 universe 갱신 판단.
         dropped = [fc for fc in original if id(fc) not in matched_fc_ids]
         name_to_swufn = agg.get("function_name_to_swufn_from_suds") or {}
-        norm_name_to_swufn = {
-            _norm_function_name(k): v for k, v in name_to_swufn.items()
-        }
+        # 2026-06-19 (deep-review C — W2 ci-collision sibling) — 정규화 인덱스의
+        # last-wins comprehension은 서로 다른 함수명이 같은 정규화 키로 충돌할 때
+        # (C 대소문자 + _norm은 비영숫자까지 제거해 충돌공간 큼) 엉뚱한 SwUFn ID를
+        # 경고에 박는다. 충돌(정규화 시 2개 이상 distinct value) 키는 제외 → 미매칭.
+        norm_name_to_swufn: dict[str, str] = {}
+        _ambiguous: set[str] = set()
+        for k, v in name_to_swufn.items():
+            nk = _norm_function_name(k)
+            if nk in norm_name_to_swufn and norm_name_to_swufn[nk] != v:
+                _ambiguous.add(nk)
+            else:
+                norm_name_to_swufn[nk] = v
+        for nk in _ambiguous:
+            norm_name_to_swufn.pop(nk, None)
         dropped_designed: set[str] = set()
         for fc in dropped:
             # 보조 1: unit_id/name 문자열에 SwUFn ID가 직접 박힌 경우
@@ -379,10 +390,16 @@ def _align_function_rows_to_template(
             if m:
                 dropped_designed.add(m.group(0))
                 continue
-            # 주 경로: 함수명 → SwUDS name→SwUFn reverse map
-            nm = _norm_function_name(getattr(fc, "name", ""))
+            # 주 경로: 함수명 → SwUDS name→SwUFn reverse map. exact-name 우선
+            # (정규화 폴백 전에 정확 매칭 — 손실적 정규화의 오매칭 차단).
+            fc_name = getattr(fc, "name", "")
+            exact = name_to_swufn.get(fc_name)
+            if exact:
+                dropped_designed.add(f"{exact}:{fc_name}")
+                continue
+            nm = _norm_function_name(fc_name)
             if nm and nm in norm_name_to_swufn:
-                dropped_designed.add(f"{norm_name_to_swufn[nm]}:{getattr(fc, 'name', '')}")
+                dropped_designed.add(f"{norm_name_to_swufn[nm]}:{fc_name}")
         dropped_ids = sorted(dropped_designed)
         if dropped_ids:
             out_warnings.append(

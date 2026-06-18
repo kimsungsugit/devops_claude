@@ -9,7 +9,11 @@ from pathlib import Path
 from typing import List, Optional
 
 from backend.services.qac_parser import QACDataManager, MatrixItem, HISItem
-from backend.services.vcast_excel_generator import XlsxManager, XlsCellStyle
+from backend.services.vcast_excel_generator import (
+    ILLEGAL_CHARACTERS_RE,
+    XlsCellStyle,
+    XlsxManager,
+)
 
 try:
     from openpyxl import Workbook
@@ -253,7 +257,13 @@ def add_summary_charts(wb, manager: QACDataManager) -> None:
         vg_value = his_item.get_matrix_value(MatrixItem.V_G)
         warn_level = manager.check_warning_level(MatrixItem.V_G, vg_value)
 
-        ws.cell(row=data_row, column=1, value=his_item.function_name)
+        # 2026-06-19 (deep-review C1 sibling) — 차트 데이터 직접 대입 경로는 write_data
+        # sink를 우회하므로, QAC 파싱 function_name의 Excel 불법 제어문자를 inline 정제
+        # (IllegalCharacterError로 generate 전체 크래시 방지).
+        ws.cell(
+            row=data_row, column=1,
+            value=ILLEGAL_CHARACTERS_RE.sub("", str(his_item.function_name or "")),
+        )
 
         # v(G) 값을 숫자로 기록 (차트에서 사용)
         try:

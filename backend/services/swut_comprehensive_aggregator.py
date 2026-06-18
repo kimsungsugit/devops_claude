@@ -173,7 +173,24 @@ def _lookup_c_function(
     for key in (function_name, unit_id):
         if key and key in c_function_map:
             return c_function_map[key]
-    lowered = {k.lower(): v for k, v in c_function_map.items() if isinstance(k, str)}
+    # 2026-06-19 (deep-review C — W2 ci-collision sibling) — case-insensitive 폴백.
+    # C는 대소문자 구분 언어라 'Foo'/'foo'가 서로 다른 함수일 수 있다. 소문자 인덱스를
+    # last-wins comprehension으로 만들면 충돌 키에서 엉뚱한 함수의 body/signature가
+    # Deviation 근거(C evidence)에 silent 첨부돼 ISO 26262 추적성 무결성을 깬다.
+    # 충돌(소문자화 시 2개 이상 distinct value) 키는 인덱스에서 제외 → 폴백이 None을
+    # 반환(거짓 evidence 첨부 대신 미매칭). exact 매칭은 위에서 이미 처리됨.
+    lowered: dict[str, dict[str, Any]] = {}
+    ambiguous: set[str] = set()
+    for k, v in c_function_map.items():
+        if not isinstance(k, str):
+            continue
+        lk = k.lower()
+        if lk in lowered and lowered[lk] is not v:
+            ambiguous.add(lk)
+        else:
+            lowered[lk] = v
+    for lk in ambiguous:
+        lowered.pop(lk, None)
     for key in (function_name, unit_id):
         if key and key.lower() in lowered:
             return lowered[key.lower()]

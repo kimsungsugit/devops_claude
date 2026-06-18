@@ -18,7 +18,10 @@ try:
     from openpyxl.utils import get_column_letter
     from openpyxl.chart import BarChart, Reference
     from openpyxl.chart.series import DataPoint
+    from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
+    from openpyxl.utils.exceptions import IllegalCharacterError
 except ImportError:
+    import re as _re_fallback
     Workbook = None
     Font = None
     PatternFill = None
@@ -27,6 +30,9 @@ except ImportError:
     Side = None
     Comment = None
     get_column_letter = None
+    # openpyxl 미설치 fail-safe — excel_template_utils.py와 동일 정의.
+    ILLEGAL_CHARACTERS_RE = _re_fallback.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+    IllegalCharacterError = ValueError  # type: ignore[assignment,misc]
     BarChart = None
     Reference = None
     DataPoint = None
@@ -205,12 +211,20 @@ class XlsxManager:
             return
         
         cell = self.worksheet.cell(row=row, column=col)
-        if isinstance(data, (int, float)):
+        if isinstance(data, bool):
             cell.value = data
-        elif isinstance(data, bool):
+        elif isinstance(data, (int, float)):
             cell.value = data
         else:
-            cell.value = str(data) if data is not None else ""
+            # 2026-06-19 (deep-review C1 sibling) — vcast/qac 파싱 텍스트(C 소스/덤프/
+            # 로그)에 Excel 불법 제어문자(\x0c form-feed/\x07/\x1a)가 섞이면 openpyxl이
+            # cell.value 대입 시 IllegalCharacterError를 raise → 단일 셀이 generate 전체
+            # 크래시. sanitize 후 재시도(\t\n\r 보존). qac_excel_generator도 본 sink 공유.
+            text = str(data) if data is not None else ""
+            try:
+                cell.value = text
+            except IllegalCharacterError:
+                cell.value = ILLEGAL_CHARACTERS_RE.sub("", text)
     
     def apply_style(self, row_start: int, col_start: int, row_end: int, col_end: int, style: XlsCellStyle) -> None:
         """스타일 적용"""
