@@ -30,7 +30,20 @@ from typing import Any
 
 _logger = logging.getLogger(__name__)
 
-_META_CONFIG_PATH = "config/swut_meta.json"
+# 2026-06-18 — CWD 무관 config 해결. 서버가 `cd backend && uvicorn main:app`로
+# 실행되면 CWD=backend/ 라 상대경로 "config/swut_meta.json"이 backend/config/...로
+# 잘못 해석되어 파일 부재 → 전 프로젝트 config가 빈 {} 반환(템플릿/swuds/파일명
+# fallback 전부 실패)했다. 모듈 위치(backend/services/) 기준으로 repo root를 앵커링.
+# repo root config가 없으면 legacy 상대경로로 폴백(배포 레이아웃 호환).
+_MODULE_DIR = os.path.dirname(os.path.abspath(__file__))
+_ANCHORED_META_CONFIG_PATH = os.path.normpath(
+    os.path.join(_MODULE_DIR, "..", "..", "config", "swut_meta.json")
+)
+_META_CONFIG_PATH = (
+    _ANCHORED_META_CONFIG_PATH
+    if os.path.isfile(_ANCHORED_META_CONFIG_PATH)
+    else "config/swut_meta.json"
+)
 
 
 @functools.lru_cache(maxsize=1)

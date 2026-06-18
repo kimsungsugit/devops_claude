@@ -92,7 +92,10 @@ try:
 except ImportError:  # pragma: no cover
     openpyxl = None  # type: ignore[assignment]
 
-from backend.services.design_tokens import USER_INPUT_FILL_RGB
+from backend.services.design_tokens import (
+    USER_INPUT_FILL_RGB,
+    USER_INPUT_PLACEHOLDER,
+)
 from backend.services.excel_template_utils import (
     copy_sheet_across_workbooks,
     has_vba_macros,
@@ -605,7 +608,11 @@ def _build_fn_iteration_map(session: SwUTSession) -> dict[str, dict[int, Any]]:
     fn_map: dict[str, dict[int, Any]] = {}
     for env in session.environments:
         for tc_name in env.test_cases:
-            m = re.match(r"SwUFn_(\d+)\.(\d+)", tc_name)
+            # 2026-06-18 fix — case-insensitive. spec TC_ID에 'SwUfn_NNNN'(소문자 fn)
+            # WIP 오타가 섞이면(레퍼런스 SUTR도 동일 오타 보유) 기존 case-sensitive
+            # match가 탈락 → 해당 함수 iteration 전부 누락 → Total N/A(미실행) 오표기.
+            # 레퍼런스는 동일 소문자에도 Pass 렌더되므로 robust 매칭이 정합.
+            m = re.match(r"SwUFn_(\d+)\.(\d+)", tc_name, re.IGNORECASE)
             if not m:
                 continue
             num = m.group(1).lstrip("0") or "0"
@@ -775,9 +782,10 @@ def _write_log_headers(
     safe_write(ws, 1, 1, "Software Unit Test Log")
 
     # r3 섹션 헤더.
+    # 2026-06-18 fix — 레퍼런스 실측: r3 Pass/Fail(col273), Pass열(col274=pass_total)은
+    # r3 공란, Log Data(col275). 기존엔 pass_total r3에 'Pass'를 써 레퍼런스(공란)와 불일치.
     safe_write(ws, HEADER_SECTION_ROW, lo.actual_start, "Actual Result")
     safe_write(ws, HEADER_SECTION_ROW, lo.pass_fail, "Pass/Fail")
-    safe_write(ws, HEADER_SECTION_ROW, lo.pass_total, "Pass")
     safe_write(ws, HEADER_SECTION_ROW, lo.log_data, "Log Data")
     try:
         ws.merge_cells(
@@ -791,11 +799,14 @@ def _write_log_headers(
     except (ValueError, AttributeError):
         pass
 
-    # r4 서브헤더 — Param 1..actual_max.
+    # r4 서브헤더 — ActR[0..actual_max-1] (레퍼런스 0-base 인덱싱 스킴).
+    # 2026-06-18 fix — 기존 'Param N'(1-base)은 레퍼런스 'ActR[N]'(0-base, Expected의
+    # ExpR[N]·Input의 Inpt[N]과 동일 스킴)과 전 84열 불일치였음. JN(pass_total) r4도
+    # 'Pass'→'Total'로 교정(레퍼런스 실측 JN4='Total').
     for i in range(lo.actual_max):
-        safe_write(ws, SUBHEADER_ROW, lo.actual_start + i, f"Param {i + 1}")
+        safe_write(ws, SUBHEADER_ROW, lo.actual_start + i, f"ActR[{i}]")
     safe_write(ws, SUBHEADER_ROW, lo.pass_fail, "Unit")
-    safe_write(ws, SUBHEADER_ROW, lo.pass_total, "Pass")
+    safe_write(ws, SUBHEADER_ROW, lo.pass_total, "Total")
 
     try:
         from copy import copy as _copy_style
@@ -910,6 +921,30 @@ def _fill_actual_and_result(
         stats["matched_fn"] += 1
         any_exec = False
         all_pass = True
+
+        # 2026-06-18 fix — Log Data(JO) 채움. 레퍼런스 실측: 함수 블록당 1회,
+        # anchor+1행(iter_rows[0])에 '{env_name}_TestCaseDataReport' 기록
+        # (env_name은 VC2025 레이아웃에서 'SwUT_NN_<comp>' 형식 → 레퍼런스 값과 동일).
+        # 기존엔 JO 전 행 공란(레퍼런스 622건 미채움). 미매칭 함수(iter_data None)는
+        # 보고서 매핑 불가라 공란 유지 (레퍼런스도 미실행 블록 공란).
+        if blk["iter_rows"]:
+            # reviewer W2 — 다중 env 함수: 실제 실행된(passed 결정됨) iteration의
+            # env 우선 선택. 함수가 두 번째 env에서만 실행됐을 때 첫 env명이 잘못
+            # 라벨되는 것 방지. 실행 레코드 없으면 임의 env(공란 fallback)로 강등.
+            _env_obj = next(
+                (r.get("env") for r in iter_data.values()
+                 if r.get("env") and r.get("passed") is not None),
+                None,
+            ) or next(
+                (r.get("env") for r in iter_data.values() if r.get("env")), None
+            )
+            _env_nm = getattr(_env_obj, "env_name", "") if _env_obj else ""
+            if _env_nm:
+                safe_write(
+                    ws, blk["iter_rows"][0], lo.log_data,
+                    f"{_env_nm}_TestCaseDataReport",
+                )
+                stats["log_data_written"] = stats.get("log_data_written", 0) + 1
 
         for fallback_idx, ir in enumerate(blk["iter_rows"], start=1):
             stats["iterations"] += 1
@@ -1038,6 +1073,316 @@ def _mark_cell(ws, row: int, col: int) -> None:
         pass
 
 
+def _collect_coverage_gaps(
+    agg: dict[str, Any],
+) -> list[tuple[str, str, Any, Any, str]]:
+    """agg function_coverage에서 커버리지<100% 함수 추출 (2026-06-18 Fix 4).
+
+    Returns: [(swufn_id, name, stmt_gap|None, branch_gap|None, resolve_kind)]
+      — swufn 숫자→name 순. gap = (covered, total, coverage_pct). 둘 다 None인 함수는 제외.
+      resolve_kind ∈ {'exact','ci','fallback'} (W2 — 'ci'/'fallback'은 B열 노란마킹).
+    같은 함수(name 기준)가 다중 env로 중복 시 더 낮은 커버리지(보수적) 유지.
+    """
+    # 2026-06-18 Item 1 — 해결 우선순위: SwUTS 스펙(권위) > SwUDS 이름맵 >
+    # case-insensitive(casing 차이 흡수) > fc.unit_id > 함수명 원문(fallback).
+    spec_map: dict[str, str] = agg.get("spec_name_to_swufn") or {}
+    suds_map: dict[str, str] = agg.get("function_name_to_swufn_from_suds") or {}
+
+    # 2026-06-19 deep-review W2 — case-insensitive 인덱스는 모호 키(소문자화 시 서로
+    # 다른 SwUFn으로 충돌하는 키, 예 'Calc'→0010 / 'calc'→0021)를 제외한다. 모호 키로
+    # CI 폴백하면 둘 중 임의 함수에 오매칭되므로 아예 폴백 금지(→ fallback 노란마킹).
+    def _ci_index(m: dict[str, str]) -> dict[str, str]:
+        idx: dict[str, str] = {}
+        ambiguous: set[str] = set()
+        for k, v in m.items():
+            lk = k.lower()
+            if lk in idx and idx[lk] != v:
+                ambiguous.add(lk)
+            else:
+                idx[lk] = v
+        for lk in ambiguous:
+            idx.pop(lk, None)
+        return idx
+
+    spec_ci = _ci_index(spec_map)
+    suds_ci = _ci_index(suds_map)
+
+    def _resolve_swufn(name: str, unit_id: str) -> tuple[str, str]:
+        """(swufn, kind) — kind ∈ {'exact','ci','fallback'}.
+
+        'ci'(case-insensitive 폴백)는 C 대소문자 충돌쌍(Foo vs foo)을 다른 함수에
+        오매칭할 수 있어, 호출자가 valid-looking SwUFn이어도 노란마킹하도록 구분한다.
+        """
+        nl = name.lower()
+        exact = spec_map.get(name) or suds_map.get(name)
+        if exact:
+            return (exact, "exact")
+        ci = spec_ci.get(nl) or suds_ci.get(nl)
+        if ci:
+            return (ci, "ci")
+        return (unit_id or name, "fallback")
+
+    # 2026-06-19 deep-review W3 — acc 키를 함수 식별자(name)로 둔다. 이전엔 resolve된
+    # swufn을 키로 써서, 서로 다른 두 함수가 같은 SwUFn으로 resolve되면(CI 오매칭 또는
+    # spec num 중복) 1행으로 붕괴해 한 함수의 커버리지 갭이 산출물에서 누락됐다
+    # (안전 산출물에서 갭 under-reporting은 위험). swufn은 표시값으로만 보관. 동일
+    # 함수의 다중 env 병합(보수적 최소 pct)은 name 키로 그대로 유지.
+    acc: dict[str, dict[str, Any]] = {}
+    for fc in agg.get("function_rows", []) or []:
+        name = getattr(fc, "name", "") or ""
+        swufn, kind = _resolve_swufn(name, getattr(fc, "unit_id", "") or name)
+        s = getattr(fc, "statement", None)
+        b = getattr(fc, "branch", None)
+        s_gap = (
+            (s.covered, s.total, s.coverage_pct)
+            if s and s.total > 0 and s.covered < s.total else None
+        )
+        b_gap = (
+            (b.covered, b.total, b.coverage_pct)
+            if b and b.total > 0 and b.covered < b.total else None
+        )
+        if not s_gap and not b_gap:
+            continue
+        ident = name or swufn
+        cur = acc.get(ident)
+        if cur is None:
+            acc[ident] = {
+                "swufn": swufn, "name": name, "kind": kind,
+                "stmt": s_gap, "branch": b_gap,
+            }
+        else:
+            if s_gap and (cur["stmt"] is None or s_gap[2] < cur["stmt"][2]):
+                cur["stmt"] = s_gap
+            if b_gap and (cur["branch"] is None or b_gap[2] < cur["branch"][2]):
+                cur["branch"] = b_gap
+
+    def _num(sw: str) -> int:
+        m = re.search(r"(\d+)", sw or "")
+        return int(m.group(1)) if m else 0
+
+    return [
+        (info["swufn"], info["name"], info["stmt"], info["branch"], info["kind"])
+        for info in sorted(
+            acc.values(), key=lambda v: (_num(v["swufn"]), v["name"])
+        )
+    ]
+
+
+def _compress_line_numbers(nums: list[int]) -> str:
+    """미커버 line 번호 리스트 → 압축 문자열 (2026-06-18 Item 2).
+
+    연속 구간은 ``a~b`` 로, 단독은 그대로. 레퍼런스 G 스타일 정합.
+    예: [202] → '202', [152..169] → '152~169', [1,2,5,6,9] → '1~2, 5~6, 9'.
+    """
+    s = sorted({int(n) for n in nums if n is not None})
+    if not s:
+        return ""
+    runs: list[tuple[int, int]] = []
+    start = prev = s[0]
+    for n in s[1:]:
+        if n == prev + 1:
+            prev = n
+        else:
+            runs.append((start, prev))
+            start = prev = n
+    runs.append((start, prev))
+    return ", ".join(f"{a}~{b}" if a != b else f"{a}" for a, b in runs)
+
+
+# Excel(.xlsx) 불법 제어문자 — C 소스/주석에 form-feed(\x0c)·\x07·\x1a 등이 섞이면
+# openpyxl이 셀 .value 대입 시 IllegalCharacterError를 raise. \t\n\r은 합법이라 보존.
+# (deep-review C1 — safe_write에도 동일 방어 있으나 source 단에서도 정제해 이중 안전.)
+_EXCEL_ILLEGAL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+
+
+def _format_gap_source(pairs: list[tuple[int, str]], max_len: int = 240) -> str:
+    """미커버 (line, source) → G(Description) 셀 텍스트 (2026-06-18 Item 2).
+
+    중복 소스 제거 후 줄바꿈 연결 (레퍼런스 G 스타일). 셀 가독성 위해 길이 제한.
+    Excel 불법 제어문자는 제거(2026-06-19 deep-review C1 — IllegalCharacterError 방지).
+    """
+    seen: list[str] = []
+    for _ln, src in pairs:
+        t = _EXCEL_ILLEGAL_CHARS_RE.sub("", src or "").strip()
+        if t and t not in seen:
+            seen.append(t)
+    out = "\n".join(seen)
+    return out[: max_len - 1] + "…" if len(out) > max_len else out
+
+
+def _write_spec_deviation(
+    ws, agg: dict[str, Any], out_warnings: list[str],
+) -> int:
+    """spec-based SUTR 2.Deviation — 레퍼런스 감사본 스키마 (2026-06-18 Fix 4).
+
+    표준 ``_write_deviation``(Test Case ID/Issue/Status 스키마)와 분리된 신규 경로.
+    표준 SUTR(HDPDM01/SwIT)은 기존 writer 유지 — 본 함수는 spec-based만 사용.
+
+    레퍼런스 실측 스키마 (KJPDS02 PV SwUTR 260615 2.Deviation):
+      r1: B='Deviation Report'
+      r3: B='■ Deviation List'
+      r4: B='Unit'(B:C) | D='Coverage'(D:E) | F='미달성 사유'(F:G)
+      r5: B='ID' C='Name' D='Type' E='Value' F='line' G='Description'
+      r6+: 커버리지<100% 함수 — B=SwUFn C=name D=Statements/Branches E='N / M (X%)'
+           F=미달 line G=소스 발췌+사유
+
+    자동/수기 경계 (2026-06-18 Item 2 갱신): B/C/D/E는 커버리지 집계로 자동 산출.
+    F(미달 line)·G(소스 발췌)는 AggregateCoverageReport annotated source('Code
+    Coverage for <unit>')에서 추출한 ``agg["function_gap_lines"]``로 **자동 채움**.
+    annotated source 미가용/함수명 미스매치 함수만 노란 placeholder 유지(fail-safe).
+
+    Returns: 쓰여진 gap 행 수.
+    """
+    gaps = _collect_coverage_gaps(agg)
+    # 2026-06-18 Item 2 — 함수명→{statements/branches:[(line,src)]} 미커버 line 맵.
+    # extract_uncovered_lines가 채움. case-insensitive 폴백 인덱스 동반(metrics 표
+    # 함수명과 annotated source 함수명 casing 차이 흡수).
+    gap_lines_map: dict[str, dict] = agg.get("function_gap_lines") or {}
+    gap_lines_ci = {str(k).lower(): v for k, v in gap_lines_map.items()}
+    auto_fg = 0
+    placeholder_fg = 0
+    nonexact_fn = 0  # W2 — exact가 아닌(ci/fallback) SwUFn 해결 함수 수(노란마킹)
+
+    # 1) 기존 템플릿(표준 Test Case ID 스키마) 영역 clear — 병합 해제 후 값 제거.
+    # reviewer W3 — ws.max_row가 merged-only 행을 누락할 수 있어(openpyxl 특성)
+    # 하한 100으로 상향. 표준 deviation 템플릿(72행 + Appendix)의 잔여 행까지 확실히
+    # clear (잔존 시 신규 스키마와 혼재). 신규 데이터는 항상 100행 미만이라 안전.
+    clear_rows = max(ws.max_row or 0, 100)
+    for rng in list(ws.merged_cells.ranges):
+        if rng.min_row <= clear_rows and rng.min_col <= 8:
+            try:
+                ws.unmerge_cells(str(rng))
+            except (ValueError, KeyError):
+                pass
+    for r in range(1, clear_rows + 1):
+        for c in range(1, 9):
+            try:
+                ws.cell(r, c).value = None
+            except (ValueError, AttributeError):
+                pass
+
+    # 2) 헤더 (레퍼런스 스키마).
+    safe_write(ws, 1, 2, "Deviation Report")
+    safe_write(ws, 3, 2, "■ Deviation List")
+    safe_write(ws, 4, 2, "Unit")
+    safe_write(ws, 4, 4, "Coverage")
+    safe_write(ws, 4, 6, "미달성 사유")
+    safe_write(ws, 5, 2, "ID")
+    safe_write(ws, 5, 3, "Name")
+    safe_write(ws, 5, 4, "Type")
+    safe_write(ws, 5, 5, "Value")
+    safe_write(ws, 5, 6, "line")
+    safe_write(ws, 5, 7, "Description")
+    for a, b in (("B4", "C4"), ("D4", "E4"), ("F4", "G4")):
+        try:
+            ws.merge_cells(f"{a}:{b}")
+        except (ValueError, AttributeError):
+            pass
+    try:
+        from copy import copy as _copy
+        from openpyxl.styles import Alignment, Font
+        hf = Font(name="맑은 고딕", size=10, bold=True)
+        ha = Alignment(horizontal="center", vertical="center")
+        for rr in (4, 5):
+            for cc in range(2, 8):
+                cell = ws.cell(rr, cc)
+                cell.font = _copy(hf)
+                cell.alignment = _copy(ha)
+    except (AttributeError, TypeError):
+        pass
+
+    # 3) gap 행 — B/C/D/E 자동, F/G annotated source 자동(미가용 시 placeholder).
+    r = 6
+    written = 0
+    if not gaps:
+        safe_write(ws, r, 2, "해당 사항 없음")
+        r += 1
+    for swufn, name, s_gap, b_gap, kind in gaps:
+        first = True
+        gl = gap_lines_map.get(name) or gap_lines_ci.get(str(name).lower()) or {}
+        for typ, gap, bucket in (
+            ("Statements", s_gap, "statements"),
+            ("Branches", b_gap, "branches"),
+        ):
+            if gap is None:
+                continue
+            covered, total, pct = gap
+            if first:
+                safe_write(ws, r, 2, swufn)
+                safe_write(ws, r, 3, name)
+                # W1 — SwUFn 미해결(fallback) 시 B에 함수명 원문. 'SwUFn_' 형식이
+                # 아니면 노란 마킹. 2026-06-19 deep-review W2 — kind=='ci'(대소문자
+                # 폴백)는 valid-looking 'SwUFn_NNNN'이어도 다른 함수 오매칭 가능성이
+                # 있어 노란 마킹(audit 수기 검증 유도). 'exact'만 무마킹.
+                if (kind != "exact"
+                        or not re.match(r"SwUFn_\d", str(swufn), re.IGNORECASE)):
+                    _mark_cell(ws, r, 2)
+                    nonexact_fn += 1
+                first = False
+            safe_write(ws, r, 4, typ)
+            safe_write(ws, r, 5, f"{covered} / {total} ({round(pct * 100)}%)")
+            # F(미달 line)·G(소스 발췌) — annotated source 자동 산출. 해당 type의
+            # gap line이 있으면 자동 채움, 없으면(파싱 미스/미가용) 노란 placeholder.
+            pairs = (gl.get(bucket) if isinstance(gl, dict) else None) or []
+            if pairs:
+                safe_write(ws, r, 6, _compress_line_numbers([p[0] for p in pairs]))
+                g_txt = _format_gap_source(pairs)
+                if g_txt:
+                    safe_write(ws, r, 7, g_txt)
+                else:
+                    safe_write(ws, r, 7, USER_INPUT_PLACEHOLDER)
+                    _mark_cell(ws, r, 7)
+                auto_fg += 1
+            else:
+                safe_write(ws, r, 6, USER_INPUT_PLACEHOLDER)
+                _mark_cell(ws, r, 6)
+                safe_write(ws, r, 7, USER_INPUT_PLACEHOLDER)
+                _mark_cell(ws, r, 7)
+                placeholder_fg += 1
+            r += 1
+            written += 1
+
+    # 4) Appendix sentinel + End (레퍼런스 정합).
+    r += 1
+    safe_write(ws, r, 2, "■ Appendix - 발생 가능 값")
+    r += 1
+    safe_write(ws, r, 2, "Related Test Case ID")
+    safe_write(ws, r, 3, "Parameter")
+    safe_write(ws, r, 5, "Value")
+    safe_write(ws, r, 7, "Note")
+    r += 1
+    safe_write(ws, r, 2, "해당 사항 없음")
+    r += 2
+    safe_write(ws, r, 2, "■ Appendix - 첨부자료")
+    r += 2
+    safe_write(ws, r, 2, "< End of Document >")
+
+    if out_warnings is not None and written:
+        out_warnings.append(
+            f"[spec-sutr] 2.Deviation 커버리지 미달 {written}행 기재 — "
+            f"F(line)/G(소스) 자동 {auto_fg}행 (annotated source), "
+            f"placeholder {placeholder_fg}행 (annotated source 미가용)"
+        )
+        if nonexact_fn:
+            out_warnings.append(
+                f"[spec-sutr] 2.Deviation SwUFn 해결 비-exact {nonexact_fn}함수 "
+                f"(B열 노란마킹) — 스펙/SwUDS 미등재 또는 case-insensitive 폴백. "
+                f"audit 수기 검증 필요."
+            )
+        # 2026-06-19 deep-review W1 — E(커버리지 값)는 _collect_coverage_gaps의
+        # metric별 최저 coverage env, F/G(line/소스)는 aggregate_session의 gap-line
+        # 최다 env 기준이라, 동일 함수가 다중 env에 등장하면 E와 F/G가 서로 다른 env
+        # 스냅샷일 수 있다(라인 수와 미달 카운트 불일치 가능). 단일 env 함수(현 KJPDS02
+        # PV 실측: env당 함수 unique)에서는 미발현이나, 다중 env 일반 경로에서 잠재 →
+        # 정직 disclosure.
+        out_warnings.append(
+            "[spec-sutr] 2.Deviation 주의: 다중 env에 동일 함수가 등장할 경우 "
+            "E(커버리지 값)와 F/G(미달 line/소스)가 서로 다른 env 스냅샷일 수 있음 "
+            "(라인 수↔미달 카운트 불일치 가능) — 다중 env 함수는 audit 수기 확인 권장."
+        )
+    return written
+
+
 def _write_cover_meta_legacy(
     wb: Workbook, meta: SutrBuildMeta, out_warnings: list[str] | None,
 ) -> None:
@@ -1079,7 +1424,6 @@ def _fill_standard_aux_sheets(
     from backend.services.swut_coverage_aggregator import _write_history_sheet
     from backend.services.swut_sutr_aggregator import (
         _write_cover,
-        _write_deviation,
         _write_test_summary,
     )
 
@@ -1108,14 +1452,13 @@ def _fill_standard_aux_sheets(
     if dev_ws is None:
         out_warnings.append("[spec-sutr] 2.Deviation 시트 미발견")
     else:
-        # 라운드 96-final — 0건이어도 호출: 템플릿 default 행 clear + DV 관례
-        # '해당사항 없음' 기재 (B5 상당 — 'Test Case ID' 헤더 아래 첫 행).
-        # 이전: deviation_cases 비면 호출 자체를 skip → 템플릿 잔존 행 미정리 +
-        # silent 공백 (24차 silent N/A 제거 정책 위반).
-        n = _write_deviation(
-            dev_ws, deviation_cases or [], out_warnings=out_warnings,
-            none_text="해당사항 없음",
-        )
+        # 2026-06-18 Fix 4 — spec-based 전용 deviation writer. 레퍼런스 감사본
+        # 2.Deviation은 'Test Case ID/Issue/Status'(표준 _write_deviation)가 아니라
+        # 커버리지 미달 함수 목록(Unit/Coverage/미달성 사유) 스키마. 표준 writer는
+        # 표준 SUTR(HDPDM01/SwIT)에서 그대로 사용되므로 spec 경로만 신규 writer로
+        # 분기 (회귀 없음). deviation_cases(수기 입력 deviation)는 spec 양식엔
+        # Appendix '발생 가능 값'으로 분리되므로 본 목록과 무관.
+        n = _write_spec_deviation(dev_ws, agg, out_warnings=out_warnings)
         summary["deviation_cases_written"] = n
 
     hist_ws = next((wb[n] for n in sheet_names if n.lower() == "history"), None)
@@ -1487,6 +1830,19 @@ def build_sutr_from_spec(
     # anchor 스캔 → 함수 블록 (이식된 '3.Test Log' 시트 기준).
     blocks = _scan_spec_blocks(log_ws, layout=layout)
     fn_iter_map = _build_fn_iteration_map(session)
+
+    # 2026-06-18 Item 1 — SwUTS 스펙 자체가 함수명↔SwUFn 권위 소스. blk["unit"](D열)=
+    # VectorCAST 함수명, blk["num"]=SwUFn 4-digit. SwUDS 이름맵은 정적/private 헬퍼
+    # (s_*, prv_*, _FC 등)를 다수 누락하나, 시험 대상 함수는 전부 스펙에 정의돼 있어
+    # 2.Deviation B열 SwUFn 해결률이 14/22 → 22/22로 개선. agg에 주입 →
+    # _collect_coverage_gaps가 SwUDS보다 우선 사용.
+    spec_name_to_swufn: dict[str, str] = {}
+    for _blk in blocks:
+        _u = (_blk.get("unit") or "").strip()
+        _n = (_blk.get("num") or "").strip()
+        if _u and _n:
+            spec_name_to_swufn.setdefault(_u, f"SwUFn_{_n.zfill(4)}")
+    agg["spec_name_to_swufn"] = spec_name_to_swufn
 
     fill_stats = _fill_actual_and_result(
         log_ws, blocks, fn_iter_map, asil_map, warnings, layout=layout,

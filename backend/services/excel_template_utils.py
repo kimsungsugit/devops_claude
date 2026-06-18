@@ -29,11 +29,15 @@ from .design_tokens import (
 
 try:
     import openpyxl  # type: ignore
+    from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE  # type: ignore
     from openpyxl.styles import PatternFill  # type: ignore
+    from openpyxl.utils.exceptions import IllegalCharacterError  # type: ignore
     _HAS_PATTERN_FILL = True
 except ImportError:  # pragma: no cover - openpyxl 미설치 fail-safe
     openpyxl = None  # type: ignore[assignment]
     PatternFill = None  # type: ignore[assignment]
+    ILLEGAL_CHARACTERS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")  # type: ignore
+    IllegalCharacterError = ValueError  # type: ignore[assignment,misc]
     _HAS_PATTERN_FILL = False
 
 # ZIP bomb 한계 — 압축 해제 후 100MB 초과 시 거부. 일반 xlsx/xlsm은 수 MB.
@@ -470,13 +474,29 @@ def resolve_merge_anchor(ws: Any, row: int, col: int) -> tuple[int, int]:
 
 
 def safe_write(ws: Any, row: int, col: int, value: Any) -> bool:
-    """머지 영역 anchor 보정 후 쓰기. 머지된 비-anchor 셀이면 silent skip + False."""
+    """머지 영역 anchor 보정 후 쓰기. 머지된 비-anchor 셀이면 silent skip + False.
+
+    2026-06-19 (deep-review C1) — C 소스/로그 유래 문자열(예: 2.Deviation G열 소스
+    발췌)에 Excel 불법 제어문자(form-feed \\x0c, \\x07, \\x1a 등)가 섞이면 openpyxl이
+    셀 .value 대입 시 ``IllegalCharacterError``를 raise한다. 이전엔 ``AttributeError``
+    만 잡아 예외가 빌더 전체로 전파 → 산출물 생성 자체가 중단됐다. 불법문자를 제거
+    (``\\t``\\n``\\r`` 합법 문자는 보존)하고 1회 재시도해 단일 셀 이상이 전체 빌드를
+    깨지 않도록 한다(모든 cell-write 경로 공통 방어).
+    """
     anchor_row, anchor_col = resolve_merge_anchor(ws, row, col)
     try:
         ws.cell(row=anchor_row, column=anchor_col).value = value
         return True
     except AttributeError:
         return False
+    except IllegalCharacterError:
+        try:
+            ws.cell(row=anchor_row, column=anchor_col).value = (
+                ILLEGAL_CHARACTERS_RE.sub("", str(value))
+            )
+            return True
+        except (AttributeError, IllegalCharacterError, ValueError):
+            return False
 
 
 def force_write_cell(
@@ -526,6 +546,14 @@ def force_write_cell(
         return True
     except AttributeError:
         return False
+    except IllegalCharacterError:
+        # 2026-06-19 (deep-review C1 sibling) — safe_write와 동일 방어. 현재 호출처는
+        # 통제된 수식만 기록하나, shared helper 미래 오용 대비 불법 제어문자 sanitize.
+        try:
+            cell.value = ILLEGAL_CHARACTERS_RE.sub("", str(value))
+            return True
+        except (AttributeError, IllegalCharacterError, ValueError):
+            return False
 
 
 def strip_external_links(wb: Any) -> int:

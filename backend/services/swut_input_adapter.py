@@ -144,6 +144,11 @@ class EnvironmentData:
     # 30차 W21: function_id (SwUFn_NNNN) → ASIL 등급 (A/B/C/D/QM) 매핑.
     # router에서 swut_asil_resolver를 호출해 채워 넣음 (default 빈 dict).
     function_asil_map: dict[str, str] = field(default_factory=dict)
+    # 2026-06-18 Item 2 — AggregateCoverageReport annotated source에서 추출한
+    # 함수별 미커버 line. {func_name: {"statements": [(line, src), ...],
+    # "branches": [(line, src), ...]}}. spec-based SUTR 2.Deviation의 F(line)/
+    # G(Description) 자동 산출용. 파싱 실패/미가용 시 빈 dict (backward-compat).
+    function_gap_lines: dict[str, dict[str, list]] = field(default_factory=dict)
 
 
 @dataclass
@@ -213,6 +218,7 @@ def aggregate_session(session: SwUTSession) -> dict[str, Any]:
     all_functions: list[FunctionCoverage] = []
     tc_to_components: dict[str, set[str]] = {}
     function_asil_map: dict[str, str] = {}  # 30차 W21
+    function_gap_lines: dict[str, dict[str, list]] = {}  # 2026-06-18 Item 2
 
     for env in session.environments:
         all_functions.extend(env.function_coverage)
@@ -242,6 +248,17 @@ def aggregate_session(session: SwUTSession) -> dict[str, Any]:
         # 다르게 매핑된 경우 마지막 값 우선 (실 운영에서는 동일 함수가 다른 ASIL로
         # 등록될 가능성 0 — Hyundai 컨벤션은 함수 ID 글로벌 unique).
         function_asil_map.update(env.function_asil_map)
+        # 2026-06-18 Item 2 — 함수별 미커버 line roll-up. 동일 함수가 여러 env에서
+        # 나오면 gap line 총수가 더 많은(정보 손실 최소=보수적) 쪽을 유지.
+        for _fn, _gap in (getattr(env, "function_gap_lines", None) or {}).items():
+            _prev = function_gap_lines.get(_fn)
+            if _prev is None:
+                function_gap_lines[_fn] = _gap
+            else:
+                _new_n = len(_gap.get("statements", [])) + len(_gap.get("branches", []))
+                _old_n = len(_prev.get("statements", [])) + len(_prev.get("branches", []))
+                if _new_n > _old_n:
+                    function_gap_lines[_fn] = _gap
 
     if unmatched_result_tcs:
         _warn = (
@@ -277,6 +294,8 @@ def aggregate_session(session: SwUTSession) -> dict[str, Any]:
         "function_asil_from_srs": dict(getattr(session, "function_asil_from_srs", {}) or {}),
         # 라운드 85 T1902 — SUDS reverse map (함수명→SwUFn).
         "function_name_to_swufn_from_suds": dict(getattr(session, "function_name_to_swufn_from_suds", {}) or {}),
+        # 2026-06-18 Item 2 — 함수명→{statements/branches: [(line, src)]} 미커버 line.
+        "function_gap_lines": function_gap_lines,
         "deviated": 0,
     }
 
@@ -520,6 +539,92 @@ def extract_aggregate_coverage(html_bytes: bytes) -> tuple[list[FunctionCoverage
             functions.append(fc)
 
     return (functions, grand_total)
+
+
+# VectorCAST AggregateCoverageReport annotated source(Code Coverage for <unit>)
+# span line 패턴. 실제 양식(KJPDS02 VC2025) 예:
+#   <span class="full-cvg success-marker"><strong>   216</strong> 9 1  * byte ...</span>
+#   <span class="part-cvg success-marker fail-marker"><strong>   236</strong> 9 11 ( )(F) if ...</span>
+#   <span class="no-cvg fail-marker"><strong>   237</strong> 9 12  result = 9U;</span>
+#   <span class="na-cvg"><strong>      </strong>  } else </span>           # 비코드 라인(번호 없음)
+# class 의미: full-cvg=완전커버 / part-cvg=부분커버(분기) / no-cvg=미커버 / na-cvg=비코드.
+_AGG_SPAN_RE = re.compile(
+    r'<span class="([^"]*?)">\s*<strong>\s*(\d*)\s*</strong>([^<]*)</span>', re.S
+)
+# rest = " <grp> <idx>  <marker> <source>" — marker는 (T)(F)/( )/* 조합, source는 나머지.
+_AGG_HEAD_RE = re.compile(r'\s*(\d+)\s+(\d+)\s+(.*)$', re.S)
+_AGG_MARKER_RE = re.compile(r'((?:\([^)]*\)|\*)+)\s*(.*)$', re.S)
+
+
+def extract_uncovered_lines(
+    html_bytes: bytes,
+) -> dict[str, dict[str, list[tuple[int, str]]]]:
+    """AggregateCoverageReport annotated source → 함수별 미커버 line + 소스 발췌.
+
+    2026-06-18 Item 2 — spec-based SUTR 2.Deviation의 F(미달 line)/G(소스 발췌)를
+    자동 산출하기 위한 line-level 추출기. ``extract_aggregate_coverage`` 가 파싱하는
+    것과 **동일 HTML** ('Code Coverage for <unit>' 섹션의 annotated source)에서
+    추출하므로 별도 파일 read 불필요.
+
+    Returns:
+        ``{func_name: {"statements": [(line, src), ...],
+                       "branches": [(line, src), ...]}}`` — gap 없는 함수는 제외.
+        statements = 미커버 구문(marker '*' 또는 무marker), branches = 부분/미커버
+        분기(marker에 '(' 포함). 빈/비정상 입력 시 빈 dict (fail-safe).
+
+    데이터 vintage 주의: 본 추출의 line 번호/소스는 파싱 대상 AggregateCoverageReport
+    의 instrumented 소스 기준 — 회사 레퍼런스 SUTR가 다른 빌드 vintage로 작성됐다면
+    line 번호가 다를 수 있으나(예: Pass/Fail 카운트 vintage 차이와 동일 원리), 같은
+    리포트 내 coverage 카운트와는 **self-consistent**.
+    """
+    if not html_bytes:
+        return {}
+    from html import unescape as _unescape
+    try:
+        text = (
+            html_bytes.decode("utf-8", "ignore")
+            if isinstance(html_bytes, (bytes, bytearray))
+            else str(html_bytes)
+        )
+    except (UnicodeDecodeError, AttributeError):
+        return {}
+
+    start = text.lower().find("code coverage for")
+    seg = text[start:] if start >= 0 else text
+
+    result: dict[str, dict[str, list[tuple[int, str]]]] = {}
+    group_func: dict[str, str] = {}
+    for m in _AGG_SPAN_RE.finditer(seg):
+        cls, lineno, rest = m.group(1), m.group(2), m.group(3)
+        head = _AGG_HEAD_RE.match(rest)
+        if not head:
+            continue
+        grp, idx, after = head.group(1), head.group(2), head.group(3)
+        msrc = _AGG_MARKER_RE.match(after)
+        marker = msrc.group(1) if msrc else ""
+        source = _unescape((msrc.group(2) if msrc else after)).strip()
+        if idx == "0":
+            # 함수 진입 라인 — source == 함수명, group 번호로 본문 라인 귀속.
+            if source:
+                group_func[grp] = source
+                result.setdefault(source, {"statements": [], "branches": []})
+            continue
+        fname = group_func.get(grp)
+        if not fname or not lineno:
+            continue
+        if "no-cvg" in cls:
+            pass  # 미커버
+        elif "part-cvg" in cls:
+            pass  # 부분커버
+        else:
+            continue  # full-cvg / na-cvg → gap 아님
+        bucket = "branches" if "(" in marker else "statements"
+        try:
+            result[fname][bucket].append((int(lineno), source))
+        except (ValueError, KeyError):
+            continue
+
+    return {k: v for k, v in result.items() if v["statements"] or v["branches"]}
 
 
 def _parse_aggregate_coverage_via_temp(
@@ -1701,6 +1806,14 @@ def collect_from_log_folder(
             funcs, total = extract_aggregate_coverage(data)
             env_data.function_coverage = funcs
             env_data.grand_total = total
+            # 2026-06-18 Item 2 — 동일 HTML annotated source에서 함수별 미커버 line
+            # 추출(2.Deviation F/G 자동 산출). 실패해도 함수 커버리지엔 무영향(fail-safe).
+            try:
+                env_data.function_gap_lines = extract_uncovered_lines(data)
+            except Exception as e_gap:
+                env_data.parse_errors.append(
+                    f"UncoveredLines: {type(e_gap).__name__}: {e_gap}"
+                )
         except Exception as e:
             env_data.parse_errors.append(f"AggregateCoverage: {type(e).__name__}: {e}")
 
@@ -2070,9 +2183,17 @@ def collect_from_jenkins_cache(
         if cov_path:
             try:
                 with open(cov_path, "rb") as fh:
-                    funcs, total = extract_aggregate_coverage(fh.read())
+                    cov_data = fh.read()
+                funcs, total = extract_aggregate_coverage(cov_data)
                 env_data.function_coverage = funcs
                 env_data.grand_total = total
+                # 2026-06-18 Item 2 — 미커버 line 추출 (fail-safe).
+                try:
+                    env_data.function_gap_lines = extract_uncovered_lines(cov_data)
+                except Exception as e_gap:
+                    env_data.parse_errors.append(
+                        f"UncoveredLines: {type(e_gap).__name__}: {e_gap}"
+                    )
             except Exception as e:
                 env_data.parse_errors.append(f"AggregateCoverage: {type(e).__name__}: {e}")
 

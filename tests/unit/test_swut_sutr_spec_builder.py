@@ -225,11 +225,15 @@ def test_build_sutr_from_spec_layout_matches_reference():
     assert ws.cell(1, 1).value == "Software Unit Test Log"
     assert ws.cell(3, COL_ACTUAL_START).value == "Actual Result"
     assert ws.cell(3, COL_PASS_FAIL).value == "Pass/Fail"
-    assert ws.cell(3, COL_PASS_TOTAL).value == "Pass"
+    # 2026-06-18 Fix 2 — 레퍼런스 실측: r3 pass_total(col 267/274)은 공란
+    # (이전 'Pass' stamp는 레퍼런스와 불일치였음).
+    assert ws.cell(3, COL_PASS_TOTAL).value is None
     assert ws.cell(3, COL_LOG_DATA).value == "Log Data"
-    assert ws.cell(4, COL_ACTUAL_START).value == "Param 1"
+    # 2026-06-18 Fix 2 — Actual 서브헤더 'ActR[0..]' 0-base(ExpR/Inpt와 동일 스킴,
+    # 이전 'Param N' 1-base 폐기), pass_total r4 'Total'(이전 'Pass').
+    assert ws.cell(4, COL_ACTUAL_START).value == "ActR[0]"
     assert ws.cell(4, COL_PASS_FAIL).value == "Unit"
-    assert ws.cell(4, COL_PASS_TOTAL).value == "Pass"
+    assert ws.cell(4, COL_PASS_TOTAL).value == "Total"
     assert ws.cell(3, COL_PASS_FAIL).font.name == "맑은 고딕"
     assert ws.cell(3, COL_PASS_FAIL).font.sz == 10
     assert ws.cell(3, COL_PASS_FAIL).font.bold is True
@@ -249,8 +253,11 @@ def test_build_sutr_from_spec_layout_matches_reference():
     assert ws.cell(7, COL_PASS_FAIL).value == "Pass"
     # Total
     assert ws.cell(5, COL_PASS_TOTAL).value == "Pass"
-    # Log Data 데이터 셀에는 로그 경로를 쓰지 않음(레퍼런스 정합).
-    assert ws.cell(6, COL_LOG_DATA).value is None
+    # 2026-06-18 Fix 3 — Log Data(JO/JH)는 함수 블록당 1회, anchor+1행(iter_rows[0])에
+    # '{env_name}_TestCaseDataReport' 기록(레퍼런스 실측 정합, 이전엔 전 행 공란).
+    # 두 번째 iteration(row 7)은 공란 유지.
+    assert ws.cell(6, COL_LOG_DATA).value == "SwUT_01_Test_TestCaseDataReport"
+    assert ws.cell(7, COL_LOG_DATA).value is None
 
 
 def test_build_sutr_unmatched_function_na():
@@ -885,12 +892,15 @@ class TestR105PvLayoutBuild:
         res, ws = self._build_pv()
         assert ws.cell(3, _PV_REL).value == "Actual Result"
         assert ws.cell(3, _PV_PASS_FAIL).value == "Pass/Fail"
-        assert ws.cell(3, _PV_PASS_TOTAL).value == "Pass"
+        # 2026-06-18 Fix 2 — r3 pass_total(PV col 274) 공란 (레퍼런스 실측 정합).
+        assert ws.cell(3, _PV_PASS_TOTAL).value is None
         assert ws.cell(3, _PV_LOG).value == "Log Data"
-        assert ws.cell(4, _PV_REL).value == "Param 1"            # r4 'SUDS' 대체
-        assert ws.cell(4, _PV_REL + 83).value == "Param 84"      # Actual 폭 84
+        # 2026-06-18 Fix 2 — Actual 서브헤더 ActR[0..83] 0-base(이전 'Param N'),
+        # pass_total r4 'Total'(이전 'Pass') — 레퍼런스 JN4='Total' 정합.
+        assert ws.cell(4, _PV_REL).value == "ActR[0]"            # r4 'SUDS' 대체
+        assert ws.cell(4, _PV_REL + 83).value == "ActR[83]"      # Actual 폭 84
         assert ws.cell(4, _PV_PASS_FAIL).value == "Unit"
-        assert ws.cell(4, _PV_PASS_TOTAL).value == "Pass"
+        assert ws.cell(4, _PV_PASS_TOTAL).value == "Total"
         # DV 고정 좌표에는 아무 것도 stamp되지 않음 (구 상수 회귀 가드).
         assert ws.cell(3, COL_PASS_FAIL).value is None           # 266
         assert ws.cell(3, COL_LOG_DATA).value is None            # 268
@@ -1308,3 +1318,91 @@ class TestSpecFiExtractionRealFiles:
         assert stats["layout_detected"] is True
         assert stats["fi_dup_keys"] == []  # 라운드 108 MINOR-4 — 실파일 dup 0
         assert warns == []
+
+
+# ---------------------------------------------------------------------------
+# 2026-06-19 deep-review fixes (C1 불법문자 / W2 CI 오매칭 / W3 갭 붕괴)
+# ---------------------------------------------------------------------------
+
+class TestDeepReviewItem12Fixes:
+    """Item 1·2 deep-review 확정 결함(C1/W2/W3) 회귀 가드."""
+
+    def test_c1_format_gap_source_strips_excel_illegal_chars(self):
+        """C1 — C 소스의 Excel 불법 제어문자(\x0c\x07\x1a) 제거, \t\n 보존."""
+        from backend.services.swut_sutr_spec_builder import _format_gap_source
+        out = _format_gap_source([(10, "byte x = 0;\x0c\x07"), (11, "if (a\tb\x1a)")])
+        assert "\x0c" not in out and "\x07" not in out and "\x1a" not in out
+        assert "byte x = 0;" in out
+        assert "a\tb" in out  # tab(\x09)은 합법 — 중간 위치 보존(.strip은 양끝만 제거)
+
+    def test_c1_safe_write_sanitizes_illegal_chars_no_crash(self):
+        """C1 — safe_write가 IllegalCharacterError를 잡아 sanitize 후 기록(빌드 무중단)."""
+        from backend.services.excel_template_utils import safe_write
+        ws = openpyxl.Workbook().active
+        ok = safe_write(ws, 1, 1, "foo\x07bar\x0cbaz")
+        assert ok is True
+        assert ws.cell(1, 1).value == "foobarbaz"
+        # 합법 문자(\n\t)는 보존
+        assert safe_write(ws, 2, 1, "a\nb\tc") is True
+        assert ws.cell(2, 1).value == "a\nb\tc"
+
+    def test_w3_distinct_functions_same_swufn_not_collapsed(self):
+        """W3 — 서로 다른 두 함수가 같은 SwUFn으로 resolve돼도 1행으로 붕괴하지 않음."""
+        from backend.services.swut_input_adapter import CoverageStats, FunctionCoverage
+        from backend.services.swut_sutr_spec_builder import _collect_coverage_gaps
+
+        def _fc(name, sc, st):
+            return FunctionCoverage(
+                unit_id=name, name=name,
+                statement=CoverageStats(sc, st, sc / st),
+                branch=CoverageStats(5, 5, 1.0),
+            )
+        # spec엔 'Foo'만 등재(0010), metrics엔 'Foo'(gap)+'foo'(다른 함수, gap)
+        agg = {
+            "spec_name_to_swufn": {"Foo": "SwUFn_0010"},
+            "function_name_to_swufn_from_suds": {},
+            "function_rows": [_fc("Foo", 8, 10), _fc("foo", 4, 10)],
+        }
+        gaps = _collect_coverage_gaps(agg)
+        names = {g[1] for g in gaps}
+        assert names == {"Foo", "foo"}  # 붕괴 없이 2행 (갭 누락 방지)
+
+    def test_w2_ci_fallback_marked_exact_not_marked(self):
+        """W2 — case-insensitive 폴백(ci)은 valid-looking SwUFn이어도 kind='ci'로 구분."""
+        from backend.services.swut_input_adapter import CoverageStats, FunctionCoverage
+        from backend.services.swut_sutr_spec_builder import _collect_coverage_gaps
+
+        def _fc(name):
+            return FunctionCoverage(
+                unit_id=name, name=name,
+                statement=CoverageStats(8, 10, 0.8),
+                branch=CoverageStats(5, 5, 1.0),
+            )
+        agg = {
+            "spec_name_to_swufn": {"Foo": "SwUFn_0010"},
+            "function_name_to_swufn_from_suds": {},
+            "function_rows": [_fc("Foo"), _fc("foo")],
+        }
+        kinds = {g[1]: g[4] for g in _collect_coverage_gaps(agg)}
+        assert kinds["Foo"] == "exact"
+        assert kinds["foo"] == "ci"  # 오매칭 가능 → 노란마킹 대상
+
+    def test_w2_ambiguous_ci_key_excluded(self):
+        """W2 — 소문자화 시 서로 다른 SwUFn으로 충돌하는 모호 키는 CI 폴백 금지."""
+        from backend.services.swut_input_adapter import CoverageStats, FunctionCoverage
+        from backend.services.swut_sutr_spec_builder import _collect_coverage_gaps
+
+        def _fc(name):
+            return FunctionCoverage(
+                unit_id=name, name=name,
+                statement=CoverageStats(8, 10, 0.8),
+                branch=CoverageStats(5, 5, 1.0),
+            )
+        # 'Calc'->0010, 'calc'->0021 (모호) → 'CALC'(metrics)는 CI 폴백 불가 = fallback
+        agg = {
+            "spec_name_to_swufn": {"Calc": "SwUFn_0010", "calc": "SwUFn_0021"},
+            "function_name_to_swufn_from_suds": {},
+            "function_rows": [_fc("CALC")],
+        }
+        kind = _collect_coverage_gaps(agg)[0][4]
+        assert kind == "fallback"  # 모호 키 제외 → 오매칭 차단

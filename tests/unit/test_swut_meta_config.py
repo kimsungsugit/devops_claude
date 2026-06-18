@@ -65,13 +65,16 @@ class TestSwutMetaConfigKJPDS02PV:
             )
 
     def test_swuts_docx_path_wip_pv_spec_v0_10(self):
-        """2026-06-10 — swuts_docx_path가 작성중 PV spec(v0.10_260608)을 가리킴.
+        """2026-06-18 — swuts_docx_path가 현행 PV spec((KJPDS02_PV_SwUTS) v0.10_260615)을 가리킴.
 
         빌더 라운드 105(spec 레이아웃 동적화)와 한 쌍인 config 교체분 가드:
         - 구 DV spec(v1.01_251205_R)으로 조용히 되돌아가면 PV SwUT 빌드가
           구 spec 기반으로 산출되는 회귀.
         - top-level 키가 비면 resolve_swuts_path가 iso26262_docs.swuts_xlsm_path
           (여전히 DV v1.01_R)로 폴백하는 잠재 함정 — 비어있지 않음을 고정.
+        - 2026-06-18: 팀이 작성중...v0.10_260608 → (KJPDS02_PV_SwUTS)...v0.10_260615로
+          rename(작성중 prefix 제거+날짜 갱신). 구 경로는 404로 빌드 전체 실패 →
+          현행 파일명 가드.
         """
         k = _load_cfg()["projects"]["KJPDS02"]
         p = k["swuts_docx_path"]
@@ -79,7 +82,7 @@ class TestSwutMetaConfigKJPDS02PV:
             "swuts_docx_path 공란 — iso26262_docs(DV spec) silent 폴백 함정"
         )
         assert p.endswith(
-            "작성중(KJPDS02_SwUTS) Software Unit Test "
-            "Specification_v0.10_260608.xlsm"
-        ), f"PV WIP spec 미지정: {p!r}"
+            "(KJPDS02_PV_SwUTS) Software Unit Test "
+            "Specification_v0.10_260615.xlsm"
+        ), f"현행 PV spec 미지정: {p!r}"
         assert "v1.01_251205_R" not in p, "구 DV spec으로 회귀 금지"
