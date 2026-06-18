@@ -12,6 +12,7 @@ import ProjectSetupSection from '../components/sections/ProjectSetupSection.jsx'
 import SwUTBuildSection from '../components/sections/SwUTBuildSection.jsx';
 import SwITBuildSection from '../components/sections/SwITBuildSection.jsx';
 import SwSABuildSection from '../components/sections/SwSABuildSection.jsx';
+import SwReportSummarySection from '../components/sections/SwReportSummarySection.jsx';
 
 const SECTIONS = [
   { id: 'build',   icon: '🔨', label: '빌드 정보',    Component: BuildInfoSection },
@@ -25,6 +26,7 @@ const SECTIONS = [
   { id: 'swut',    icon: '🧪', label: 'SwUT 빌드',     Component: SwUTBuildSection },
   { id: 'swit',    icon: '🧩', label: 'SwIT 빌드',     Component: SwITBuildSection },
   { id: 'swsa',    icon: '🔬', label: 'SwSA 빌드',     Component: SwSABuildSection },
+  { id: 'swreport',icon: '🔗', label: '통합 결과 정리', Component: SwReportSummarySection },
   { id: 'ai',      icon: '🤖', label: 'AI 어시스턴트', Component: AiAssistSection },
 ];
 

@@ -104,6 +104,10 @@ _CLOUDIUM_PATH_KEYS = frozenset({
     "folder", "root", "status_path",
     "validation_report_path", "residual_report_path",
     "stp_path", "hsis_path", "output_dir",
+    # SwReport 통합 Summary — source_paths(JSON list)의 element(단일 path)는 C-N1
+    # list 처리가 parent_key="source_paths"로 _check_path_value를 호출하므로 여기 등록 시
+    # 각 element가 cloudium gate 검사됨 (리뷰 S3/X4 — 방어심층 1단 복원).
+    "source_paths",
 })
 
 # **D2 fix**: 콤마/세미콜론/뉴라인 구분 multi-path 키. value를 split 후 각 element를

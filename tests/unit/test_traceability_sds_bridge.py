@@ -160,3 +160,65 @@ def test_vcast_mixed_confidence_with_exact_sts():
     assert row["sts_direct"] >= 1
     assert row["vcast_count"] >= 1
     assert row["confidence"] == "mixed"
+
+
+def test_unmapped_vcast_categories():
+    """미추적 VectorCAST subprogram이 unmapped_vcast에 의미 3버킷으로 분류되는지.
+    역방향 추적성 공백(시험은 됐으나 이 SRS에 안 닿음) 가시화 — 트리 'SRS 미추적 시험' 루트."""
+    items = [{"id": "SwTR_0101"}]
+    sds_pairs = [{"requirement_id": "SwTR_0101", "component_ids": ["foo_func"]}]
+    suts = [
+        {"requirement_id": "SwUFn_0100", "unit": "foo_func", "source": "SUTS", "testcase": "u0"},
+        # 미추적이지만 SUTS 단위시험 존재(함수명 해석됨) → suts_tested (검토 가치 ↑)
+        {"requirement_id": "SwUFn_0200", "unit": "secret_hash", "source": "SUTS", "testcase": "u1"},
+        # ISR 이름이면서 SUTS 단위시험도 존재 → resolved 우선이라 suts_tested여야(침묵 강등 방지)
+        {"requirement_id": "SwUFn_0300", "unit": "my_func", "source": "SUTS", "testcase": "u2"},
+    ]
+    vcast = [
+        {"subprogram": "SwUFn_0100", "testcase": "SwUFn_0100", "result": "pass", "source": "VectorCAST"},  # traced
+        {"subprogram": "SwUFn_0200", "testcase": "SwUFn_0200", "result": "fail", "source": "VectorCAST"},  # suts_tested
+        {"subprogram": "SwUFn_9999", "testcase": "SwUFn_9999", "result": "pass", "source": "VectorCAST"},  # vcast_only
+        {"subprogram": "Tim0_Ch0_ISR", "testcase": "Tim0_Ch0_ISR", "result": "pass", "source": "VectorCAST"},  # isr (단위시험 없음)
+        # subprogram이 ISR 이름(_handler)이지만 testcase의 SwUFn_0300이 SUTS로 해석됨 → suts_tested
+        {"subprogram": "my_handler", "testcase": "SwUFn_0300", "result": "pass", "source": "VectorCAST"},
+        # 'fault'를 부분문자열로 포함하지만 안전 관련 일반 함수 → 무경계 매치 제거로 isr 아님(vcast_only)
+        {"subprogram": "default_config", "testcase": "default_config", "result": "pass", "source": "VectorCAST"},
+    ]
+    mx = generate_uds_traceability_matrix(items, vcast_rows=suts + vcast, sds_pairs=sds_pairs)
+    by_sub = {u["subprogram"]: u for u in mx["unmapped_vcast"]}
+    # traced된 SwUFn_0100은 미추적 목록에 없어야 한다
+    assert "SwUFn_0100" not in by_sub
+    assert by_sub["SwUFn_0200"]["category"] == "suts_tested"
+    assert by_sub["SwUFn_0200"]["resolved_funcs"] == ["secret_hash"]
+    assert by_sub["SwUFn_0200"]["result"] == "fail"
+    assert by_sub["SwUFn_9999"]["category"] == "vcast_only"
+    assert by_sub["Tim0_Ch0_ISR"]["category"] == "isr"
+    # ★resolved 우선: ISR 이름이어도 단위시험이 있으면 suts_tested (침묵 강등 방지)
+    assert by_sub["my_handler"]["category"] == "suts_tested"
+    assert by_sub["my_handler"]["resolved_funcs"] == ["my_func"]
+    # ★정밀 regex: 'default_config'는 'fault' 부분일치 제거로 isr 아님 → vcast_only
+    assert by_sub["default_config"]["category"] == "vcast_only"
+    # summary 버킷 카운트 (suts_tested 2, vcast_only 2, isr 1)
+    assert mx["summary"]["unmapped_vcast_count"] == 5
+    assert mx["summary"]["unmapped_suts_tested"] == 2
+    assert mx["summary"]["unmapped_vcast_only"] == 2
+    assert mx["summary"]["unmapped_isr"] == 1
+    # 정렬: suts_tested(신호)가 맨 앞 — 잘림/상단 노출 시 우선 보이도록
+    assert mx["unmapped_vcast"][0]["category"] == "suts_tested"
+
+
+def test_unmapped_vcast_dedup_distinct_subprogram():
+    """같은 subprogram이 여러 행으로 와도 미추적 목록엔 distinct 1개만(UI 중복 방지).
+    카운트(vcast_*)는 행 기준 그대로, 목록만 dedup."""
+    items = [{"id": "SwTR_0101"}]
+    sds_pairs = [{"requirement_id": "SwTR_0101", "component_ids": ["foo_func"]}]
+    vcast = [
+        {"subprogram": "SwUFn_9999", "testcase": "tc1", "result": "pass", "source": "VectorCAST"},
+        {"subprogram": "SwUFn_9999", "testcase": "tc2", "result": "fail", "source": "VectorCAST"},
+    ]
+    mx = generate_uds_traceability_matrix(items, vcast_rows=vcast, sds_pairs=sds_pairs)
+    subs = [u["subprogram"] for u in mx["unmapped_vcast"]]
+    assert subs.count("SwUFn_9999") == 1
+    assert mx["summary"]["vcast_input_rows"] == 2          # 행 기준
+    assert mx["summary"]["vcast_untraced_rows"] == 2       # 행 기준
+    assert mx["summary"]["unmapped_vcast_count"] == 1      # distinct subprogram

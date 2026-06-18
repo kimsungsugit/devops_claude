@@ -273,6 +273,10 @@ app.include_router(_swit_router)
 from backend.routers.swsa import router as _swsa_router  # noqa: E402
 app.include_router(_swsa_router)
 
+# SwReport (SW Test Result Report) — 레벨별 산출물 → ES95411 통합 Summary
+from backend.routers.swreport import router as _swreport_router  # noqa: E402
+app.include_router(_swreport_router)
+
 # ---------------------------------------------------------------------------
 # Serve frontend-v2 production build (static files + SPA fallback)
 # ---------------------------------------------------------------------------

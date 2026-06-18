@@ -1740,7 +1740,10 @@ def local_traceability(
         rows.append({
             "requirement_id": rid,
             "sds_components": sds_comps,
-            "source_ids": func_names[:10],
+            # 전체 함수 유지 — 과거 [:10] 절단은 UDS 함수를 최대 ~188개 silent 누락시켜
+            # 트리의 단위시험 미연결/orphan SUTS 계산을 거짓으로 만들었다(deep-analyze).
+            # Jenkins 경로(generate_uds_traceability_matrix)는 전량 싣는다 — 표시는 프론트가 스크롤로 제한.
+            "source_ids": func_names,
             "tests": tests,
             "test_ids": test_ids,
             "test_count": len(tests),

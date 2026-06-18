@@ -1096,3 +1096,70 @@ class SwITConsistencyCheckRequest(BaseModel):
         if "\n" in v or "\r" in v:
             raise ValueError("줄바꿈 문자 금지 — 단일 라인 path 필요")
         return v
+
+
+# ── SW Test Result Report — 전 레벨 통합 Summary (ES95411) ──────────────────
+# 완성된 레벨별 산출물(SwUTCR/SwITCR/SwSA 등 — ES95411-style detail 시트 보유)을
+# 파싱하여 마스터 리포트의 Summary 시트(ST/UT/IT/ET)를 채운 .xlsm을 생성. build와
+# preview(JSON) 공용 request — 둘 다 동일 입력(template + source 산출물 + meta).
+
+class SwReportBuildRequest(BaseModel):
+    """ES95411 통합 Summary build/preview 요청 body.
+
+    입력 표면 (SwUTBuildRequest 패턴 동일):
+      - project_id / release_sw_version(regex) / test_date(regex) 필수
+      - template_path: ES95411 양식 xlsm (비면 config 'es95411_template' fallback)
+      - source_paths: 레벨별 산출물 경로 (≤16, 항목별 maxlen 500 + 줄바꿈 금지).
+        비면 template 자체를 source로 사용(단일파일 Summary refresh).
+      - 모든 path/문자열: maxlen 500 + 줄바꿈 금지 (헤더 인젝션 안전)
+
+    extra='forbid': unknown 키 422 — silent wrong-pick 차단.
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    # 필수
+    project_id: str = Field(..., min_length=1, max_length=50)
+    release_sw_version: str = Field(..., pattern=r"^\d+\.\d+(\.\d+)?$")
+    test_date: str = Field(..., pattern=r"^\d{2,4}[-/]\d{1,2}[-/]\d{1,2}$")
+
+    # 입력 산출물
+    template_path: str = Field("", max_length=500)
+    source_paths: List[str] = Field(default_factory=list, max_length=16)
+
+    # 헤더 블록 메타 (선택 — 비면 template 값 유지)
+    project_full_name: str = Field("", max_length=200)
+    asil_level: str = Field("", max_length=20)
+    hw_version: str = Field("", max_length=20)
+    phase: str = Field("", max_length=50)
+    product: str = Field("", max_length=50)
+    test_target: str = Field("", max_length=50)
+    compiler: str = Field("", max_length=100)
+    mcu: str = Field("", max_length=100)
+    software_platform_ver: str = Field("", max_length=50)
+    test_engineer: str = Field("", max_length=100)
+    reviewer_override: str = Field("", max_length=100)
+    approver_override: str = Field("", max_length=100)
+    doc_id_sequence: str = Field("", pattern=r"^\d*$")
+    validation_date: str = Field("", pattern=r"^$|^\d{2,4}[-/]\d{1,2}[-/]\d{1,2}$")
+
+    @field_validator(
+        "project_id", "template_path", "project_full_name", "asil_level",
+        "hw_version", "phase", "product", "test_target", "compiler", "mcu",
+        "software_platform_ver", "test_engineer", "reviewer_override",
+        "approver_override",
+    )
+    @classmethod
+    def _no_newline_swreport(cls, v: str) -> str:
+        if v and ("\n" in v or "\r" in v):
+            raise ValueError("줄바꿈 문자 금지 — 단일 라인 필요")
+        return v
+
+    @field_validator("source_paths")
+    @classmethod
+    def _validate_source_paths(cls, v: List[str]) -> List[str]:
+        for i, item in enumerate(v):
+            if len(item) > 500:
+                raise ValueError(f"source_paths[{i}]: 길이 ≤ 500 필요 (got {len(item)})")
+            if "\n" in item or "\r" in item:
+                raise ValueError(f"source_paths[{i}]: 줄바꿈 문자 금지 — 단일 라인 path 필요")
+        return v

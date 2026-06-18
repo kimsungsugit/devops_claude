@@ -27,6 +27,13 @@ _logger = logging.getLogger("report_generator")
 # 재사용(7천+ 행 루프 재컴파일 방지, reviewer INFO 권고).
 _SWUFN_RE = re.compile(r"Sw[UI]Fn_\d+", re.IGNORECASE)
 
+# 미추적 VectorCAST subprogram 의미 분류용 — ISR/인터럽트/부트 핸들러 등
+# 'SRS 추적 대상이 아닌 게 당연한' 인프라 함수를 식별(트리 미추적 루트의 isr 버킷).
+# 정밀도 우선(reviewer WARNING): interrupt/exception/trap/fault 같은 무경계 부분일치는
+# 안전 관련 일반 함수(Fault_Monitor, Entrapment_Detect=끼임감지, Bootstrap_Init 등)를
+# ISR로 오분류해 검토 신호를 숨기므로 제외. 명확한 앵커(_isr/_handler 접미·\bnmi\b·_irq)만 사용.
+_ISR_RE = re.compile(r"(_isr$|_isr_|\bisr\b|_irq|_handler$|\bnmi\b)", re.I)
+
 _REQ_ID_PAT = re.compile(r"\b(Sw(?:TR|TSR|NTR|NTSR|CNF|EI|ST|STR|Fn|TK)_\d+)\b", re.I)
 
 def _extract_requirements_from_comments(text: str) -> List[str]:
@@ -1784,6 +1791,12 @@ def generate_uds_traceability_matrix(
     # 구분할 신호를 summary로 노출한다. 미추적 행은 매트릭스에서 빠지므로 카운트만.
     vcast_input_rows = 0
     vcast_traced_rows = 0
+    # 미추적(SRS 미연결) VectorCAST subprogram 목록 — 역방향 추적성 공백 가시화.
+    # 시험은 했으나 이 SRS 요구사항에 안 닿는 함수(일부 보안/안전 관련이라 의미 있음).
+    # 트리 뷰의 'SRS 미추적 시험 포함' 토글이 이 목록을 의미 3버킷으로 묶어 보여준다.
+    # 카운트(vcast_*)는 행 기준 그대로 두고, 목록만 distinct subprogram으로 dedup한다.
+    unmapped_vcast: List[Dict[str, Any]] = []
+    _seen_unmapped: set = set()
     for row in all_test_rows:
         if not isinstance(row, dict):
             continue
@@ -1856,6 +1869,41 @@ def generate_uds_traceability_matrix(
                             enriched_rows.append({**row, "requirement_id": mrid, "trace_type": "indirect"})
             if seen_vc:
                 vcast_traced_rows += 1
+            else:
+                # SRS 미연결 — 역방향 추적 공백 목록에 distinct subprogram만 수집.
+                # SUTS bridge(swufn_to_func)로 함수명을 해석해 의미 분류한다:
+                #   isr        : 부트로더/ISR/핸들러 등 추적 대상 아님이 당연한 인프라
+                #   suts_tested: SUTS 단위시험이 존재(함수명 해석됨) — '시험했으나 미명세', 검토 가치 ↑
+                #   vcast_only : SUTS 참조도 없음(VectorCAST 단독 커버리지)
+                if sub_lower not in _seen_unmapped:
+                    _seen_unmapped.add(sub_lower)
+                    resolved: List[str] = []
+                    for swufn in _SWUFN_RE.findall(hay):
+                        for fn in swufn_to_func.get(_normalize_req_id(swufn), []):
+                            if fn and fn not in resolved:
+                                resolved.append(fn)
+                    # 분류 우선순위: SUTS 단위시험 존재(resolved)는 강한 '시험했으나 미명세'
+                    # 신호 → ISR 이름 휴리스틱보다 우선한다(reviewer WARNING). 이름만 ISR이고
+                    # 단위시험 없는 것만 isr(인프라)로 본다. 안전 관련 함수(fault/diag 등)가
+                    # 단위시험을 가진 채 isr로 침묵 강등돼 검토에서 누락되는 것을 방지.
+                    if resolved:
+                        category = "suts_tested"
+                    elif _ISR_RE.search(subprogram):
+                        category = "isr"
+                    else:
+                        category = "vcast_only"
+                    unmapped_vcast.append({
+                        "subprogram": subprogram,
+                        "result": str(row.get("result") or ""),
+                        "testcase": str(row.get("testcase") or ""),
+                        "unit": str(row.get("unit") or ""),
+                        "resolved_funcs": resolved,
+                        "category": category,
+                    })
+
+    # 의미 버킷 우선순위로 정렬 — 잘림/상단 노출 시 신호(suts_tested)가 먼저 보이도록.
+    _UNMAPPED_ORDER = {"suts_tested": 0, "isr": 1, "vcast_only": 2}
+    unmapped_vcast.sort(key=lambda x: (_UNMAPPED_ORDER.get(x["category"], 3), x["subprogram"].lower()))
 
     vcast_map = _normalize_vcast_rows(enriched_rows)
 
@@ -1985,7 +2033,15 @@ def generate_uds_traceability_matrix(
             "vcast_input_rows": vcast_input_rows,
             "vcast_traced_rows": vcast_traced_rows,
             "vcast_untraced_rows": vcast_input_rows - vcast_traced_rows,
+            # 미추적 목록(distinct subprogram)의 의미 버킷별 개수 — 트리 미추적 루트 뱃지용.
+            "unmapped_vcast_count": len(unmapped_vcast),
+            "unmapped_suts_tested": sum(1 for u in unmapped_vcast if u["category"] == "suts_tested"),
+            "unmapped_vcast_only": sum(1 for u in unmapped_vcast if u["category"] == "vcast_only"),
+            "unmapped_isr": sum(1 for u in unmapped_vcast if u["category"] == "isr"),
         },
+        # 역방향 추적성 공백 — '시험은 했으나 이 SRS에 안 닿는' VectorCAST subprogram 전체 목록.
+        # 트리 뷰의 'SRS 미추적 시험 포함' 토글이 의미 3버킷으로 묶어 보여준다.
+        "unmapped_vcast": unmapped_vcast,
         "has_sds_mapping": any(r.get("sds_components") for r in matrix),
         "has_source_mapping": any(r.get("source_ids") for r in matrix),
         "has_tests": any(r.get("test_count") for r in matrix),

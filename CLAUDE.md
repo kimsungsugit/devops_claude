@@ -168,6 +168,7 @@ python -m pytest tests/ -v --cov=backend --cov=workflow --cov=report_gen --cov-r
 | [`docs/api/key-endpoints.md`](docs/api/key-endpoints.md) | API endpoint 추가/변경 시 — 전체 endpoint 목록 |
 | [`docs/builders/swut_builder.md`](docs/builders/swut_builder.md) | SwUT 빌더 작업 시 — `backend/routers/swut.py`·`backend/services/*`, frontend-v2 SwUT 탭(`SwUTBuildSection.jsx`) 편집 포함 (X-SwUT-Summary truncation 계약은 §Frontend UI) |
 | [`docs/builders/swit_builder.md`](docs/builders/swit_builder.md) | SwIT 빌더 작업 시 — `backend/routers/swit.py`, frontend-v2 SwIT 탭(`SwITBuildSection.jsx`) 편집 포함 + 36-fix~58차 라운드 archive |
+| [`docs/builders/swreport_summary.md`](docs/builders/swreport_summary.md) | 전 레벨 통합 Summary(ES95411) 빌더 작업 시 — `backend/routers/swreport.py`·`swreport_summary_aggregator.py`, frontend-v2 통합 정리 탭(`SwReportSummarySection.jsx`). 레벨별 산출물 → 마스터 Summary roll-up |
 | [`docs/builders/visual-marking-and-design-tokens.md`](docs/builders/visual-marking-and-design-tokens.md) | 산출물 셀 시각 강조 / Excel RGB / design_tokens 변경 시 |
 | [`docs/admin-operations.md`](docs/admin-operations.md) | admin 등록/회복/권한 endpoint 작업 시 |
 | [`docs/rounds/sw_test_round_history.md`](docs/rounds/sw_test_round_history.md) | 36-fix~ 라운드 상세 노트 |
