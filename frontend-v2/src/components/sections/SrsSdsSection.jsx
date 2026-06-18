@@ -926,11 +926,13 @@ function TraceMatrix({ matrix }) {
     if (unmappedVcast.length > 0) {
       csvRows.push('');
       csvRows.push(csvEscape(`# SRS 미추적 시험 (역방향 공백 ${unmappedVcast.length}종 — 시험됐으나 이 SRS 요구사항 미명세)`));
-      csvRows.push(['Subprogram', '해석된 함수', '분류', 'VectorCAST 결과'].join(','));
+      csvRows.push(['Subprogram', '해석된 함수', 'SDS 설계', '분류', 'VectorCAST 결과'].join(','));
       for (const u of unmappedVcast) {
+        const sr = Array.isArray(u.sds_reqs) ? u.sds_reqs : [];
         csvRows.push([
           csvEscape(u.subprogram ?? ''),
           csvEscape((Array.isArray(u.resolved_funcs) ? u.resolved_funcs : []).join('; ')),
+          csvEscape(sr.length ? sr.join('; ') : '미명세'),
           csvEscape(u.category ?? ''),
           csvEscape(u.result ?? ''),
         ].join(','));
@@ -1793,6 +1795,9 @@ function TraceUnmappedRoot({ unmapped, expanded, onToggle }) {
   const isOpen = expanded.has(nodeId);
   const failTotal = list.filter(u => /^(fail|failed|false|0)$/i.test(String(u.result || ''))).length;
   const safetyTotal = list.filter(u => u && u.safety).length;  // 안전/진단 토큰 보유(재검증 W4 가시화)
+  // SDS 설계엔 명세됐으나 SRS만 끊긴 함수(역방향 부분추적). 정규화 fix 후 KJPDS02=0이나
+  // 타 데이터/향후 대비 표기(라운드 109). >0일 때만 노출(safetyTotal 패턴과 동일).
+  const sdsLinkedTotal = list.filter(u => u && Array.isArray(u.sds_reqs) && u.sds_reqs.length > 0).length;
   return (
     <li style={{ borderTop: '2px solid var(--accent)' }}>
       <div
@@ -1810,6 +1815,7 @@ function TraceUnmappedRoot({ unmapped, expanded, onToggle }) {
           시험은 했으나 이 SRS 요구사항에 안 닿는 VectorCAST 함수 {list.length}종(중복 제거)
           {failTotal > 0 && <span style={{ color: '#dc2626', fontWeight: 600 }}> · {failTotal} fail</span>}
           {safetyTotal > 0 && <span style={{ color: COVERAGE_COLORS.partial.fg, fontWeight: 700 }}> · ⚠ {safetyTotal} 안전</span>}
+          {sdsLinkedTotal > 0 && <span style={{ color: COVERAGE_COLORS.partial.fg, fontWeight: 600 }} title="SDS 설계엔 명세됐으나 그 요구사항이 SRS 추적 매트릭스 밖(부분추적)"> · {sdsLinkedTotal} SDS부분</span>}
         </span>
         <span style={{ marginLeft: 'auto', fontSize: 10, color: 'var(--text-muted)' }}>역방향 추적성 공백</span>
       </div>
@@ -1866,22 +1872,34 @@ function TraceUnmappedBucket({ bucket, items, parentId, expanded, onToggle }) {
               <tr style={{ background: '#e5e7eb' }}>
                 <th style={{ padding: '3px 6px', textAlign: 'left' }}>Subprogram</th>
                 <th style={{ padding: '3px 6px', textAlign: 'left' }}>해석된 함수</th>
+                <th style={{ padding: '3px 6px', textAlign: 'left' }} title="SDS(설계)에 함수명으로 명세된 SRS 요구사항. SRS 미추적이라도 설계엔 닿으면 표기, 없으면 'SRS·SDS 모두 미명세'">SDS 설계</th>
                 <th style={{ padding: '3px 6px', textAlign: 'center', width: 50 }}>결과</th>
               </tr>
             </thead>
             <tbody>
-              {sorted.map((u, i) => (
-                <tr key={i} style={{ borderBottom: '1px solid var(--border)', background: u && u.safety ? COVERAGE_COLORS.partial.bg + '60' : undefined }}>
-                  <td style={{ padding: '3px 6px', fontFamily: 'monospace', fontWeight: u && u.safety ? 700 : undefined }}
-                    title={u && u.safety ? '안전/진단 토큰 보유 — SRS 미추적이나 백워드 추적성 검토 권장' : undefined}>
-                    {u && u.safety ? '⚠ ' : ''}{u.subprogram || '-'}
-                  </td>
-                  <td style={{ padding: '3px 6px', fontFamily: 'monospace', color: 'var(--text-muted)' }}>
-                    {(Array.isArray(u.resolved_funcs) && u.resolved_funcs.length) ? u.resolved_funcs.join(', ') : '—'}
-                  </td>
-                  <td style={{ padding: '3px 6px', textAlign: 'center', fontWeight: 600, color: _testResultColor(u.result) }}>{u.result || '-'}</td>
-                </tr>
-              ))}
+              {sorted.map((u, i) => {
+                // SDS 멤버십 — sds_reqs는 (미추적 함수 특성상) 항상 SRS 매트릭스 밖 요구사항이다:
+                // SDS엔 명세됐으나 그 요구사항이 SRS 추적 범위(SwFn/SwST 등 타 계층) 밖이라 SRS까진
+                // 안 닿음. 녹색(추적됨) 대신 amber(부분추적)로 표기하고 툴팁에 명시(reviewer W2/F3).
+                const sr = Array.isArray(u.sds_reqs) ? u.sds_reqs : [];
+                return (
+                  <tr key={i} style={{ borderBottom: '1px solid var(--border)', background: u && u.safety ? COVERAGE_COLORS.partial.bg + '60' : undefined }}>
+                    <td style={{ padding: '3px 6px', fontFamily: 'monospace', fontWeight: u && u.safety ? 700 : undefined }}
+                      title={u && u.safety ? '안전/진단 토큰 보유 — SRS 미추적이나 백워드 추적성 검토 권장' : undefined}>
+                      {u && u.safety ? '⚠ ' : ''}{u.subprogram || '-'}
+                    </td>
+                    <td style={{ padding: '3px 6px', fontFamily: 'monospace', color: 'var(--text-muted)' }}>
+                      {(Array.isArray(u.resolved_funcs) && u.resolved_funcs.length) ? u.resolved_funcs.join(', ') : '—'}
+                    </td>
+                    {sr.length > 0
+                      ? <td style={{ padding: '3px 6px', fontFamily: 'monospace', color: COVERAGE_COLORS.partial.fg, fontWeight: 600 }}
+                          title={`SDS 설계엔 명세됨(요구사항 ${sr.join(', ')}) — 단 이 요구사항은 SRS 추적 매트릭스 밖이라 SRS까지 안 닿음(부분추적)`}>△ {sr.join(', ')}</td>
+                      : <td style={{ padding: '3px 6px', color: '#9ca3af', fontStyle: 'italic' }}
+                          title="SDS 설계에도 함수명으로 명세되지 않음 — SRS·SDS 모두 미명세">미명세</td>}
+                    <td style={{ padding: '3px 6px', textAlign: 'center', fontWeight: 600, color: _testResultColor(u.result) }}>{u.result || '-'}</td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>

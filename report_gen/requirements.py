@@ -44,6 +44,35 @@ _SAFETY_TOKEN_RE = re.compile(r"(fault|diag|safety|monitor|watchdog|wdg|trap|bra
 # /^(fail|failed|false|0)$/i 와 동일. dedup 시 FAIL을 PASS보다 우선 보존(W2).
 _RESULT_FAIL_RE = re.compile(r"^(fail|failed|false|0)$", re.I)
 
+# SDS 컴포넌트명 → 함수명 bridge 키 정규화 (라운드 109 fix).
+# SDS 추출(sds/extract-mapping)이 함수명에 C 시그니처 조각('s_systemhashcalculate( void'),
+# 배열 첨자('u8g_..._partnoinfo[10]'), 표 파싱 아티팩트('33\tswcom_35: ...\t115')를 붙여
+# 와서, 정확매칭 bridge(sds_func_to_reqs)가 실제 함수를 못 찾고 SRS 추적을 silent 누락한다.
+# 실데이터 KJPDS02: 's_systemhashcalculate( void'가 14개 SRS 요구사항에 귀속됐으나 노이즈로
+# 미추적(suts_tested)으로 오분류 → 정규화하면 정상 추적 복구. fuzzy 아님: 괄호 '이전'만,
+# 첨자만 제거하므로 'mcu 이상 감지(레지스터 미지원)' 같은 한글 설명문은 키가 그대로 비매칭.
+_SDS_TABLE_ARTIFACT_RE = re.compile(r"^\d+\s*\t")   # 선행 '행번호+탭'
+_SDS_ARRAY_SUBSCRIPT_RE = re.compile(r"\[[^\]]*\]")  # 배열 첨자 [10]/[]
+_C_IDENT_RE = re.compile(r"[a-z_][a-z0-9_]*\Z")      # C 식별자(소문자화 후)
+
+
+def _sds_comp_key(comp: Any) -> str:
+    """SDS component_id를 함수명 bridge용 정규화 키(lower)로 변환.
+
+    추출 노이즈(시그니처 조각·배열 첨자·표 아티팩트)를 제거해 실제 C 식별자와
+    정확매칭되게 한다. 정규화 후 **순수 C 식별자가 아니면 빈 문자열을 반환**해 키를
+    버린다(reviewer W1): 공백/콜론/한글/선행숫자가 남은 설명문 컴포넌트('power operation
+    disable', 'mcu 이상 감지', 'swcom_35: bootloader\\t115')는 함수명과 절대 매칭되면
+    안 되므로 dict 오염·거짓 bridge 표면을 원천 차단한다. None/숫자 입력도 여기서 걸러짐.
+    """
+    s = str(comp).strip().lower()
+    if not s:
+        return ""
+    s = _SDS_TABLE_ARTIFACT_RE.sub("", s)
+    s = s.split("(", 1)[0]            # 'name( void' / 'name(void)' → 'name'
+    s = _SDS_ARRAY_SUBSCRIPT_RE.sub("", s).strip()
+    return s if _C_IDENT_RE.match(s) else ""
+
 _REQ_ID_PAT = re.compile(r"\b(Sw(?:TR|TSR|NTR|NTSR|CNF|EI|ST|STR|Fn|TK)_\d+)\b", re.I)
 
 def _extract_requirements_from_comments(text: str) -> List[str]:
@@ -1747,17 +1776,26 @@ def generate_uds_traceability_matrix(
     # 뿐 아니라 함수명(g_sysoptionctrl 등)이 들어 있어 "SRS요구사항→함수명"을 제공한다.
     # 이를 역으로 "함수명(lower)→[SRS요구사항]"으로 만들어 UDS 함수·테스트 unit을 SRS
     # 행에 연결한다. (component description/SwCom 키도 들어가지만 함수명 키만 실제 매칭)
+    # 키는 _sds_comp_key로 정규화 — 추출 노이즈('( void'/'[10]'/표아티팩트)가 실제 함수의
+    # SRS 추적을 끊는 것을 방지(라운드 109 fix). 매트릭스에 있는 SRS 요구사항만 시드.
     sds_func_to_reqs: Dict[str, List[str]] = {}
+    # 전체 SDS 멤버십(req_id_set 미필터) — 미추적 함수가 '설계엔 명세됐는지'(SDS 닿는지)
+    # 판별용. matrix 밖 req(SwFn/SwST 등)에만 귀속한 함수까지 포함해 'SDS 연동 but SRS 미추적'
+    # 신호를 줄 수 있다. 단 정확매칭이라 거짓양성 없음(fuzzy 미사용).
+    sds_all_func_to_reqs: Dict[str, List[str]] = {}
     for rid_srs, comps in sds_lookup.items():
-        if rid_srs not in req_id_set:
-            continue
+        in_matrix = rid_srs in req_id_set
         for comp in comps:
-            key = str(comp).strip().lower()
+            key = _sds_comp_key(comp)
             if not key:
                 continue
-            lst = sds_func_to_reqs.setdefault(key, [])
-            if rid_srs not in lst:
-                lst.append(rid_srs)
+            all_lst = sds_all_func_to_reqs.setdefault(key, [])
+            if rid_srs not in all_lst:
+                all_lst.append(rid_srs)
+            if in_matrix:
+                lst = sds_func_to_reqs.setdefault(key, [])
+                if rid_srs not in lst:
+                    lst.append(rid_srs)
 
     # UDS 함수 전체 (lower→원형 display) — source_ids bridge용
     uds_all_funcs: Dict[str, str] = {}
@@ -1902,6 +1940,15 @@ def generate_uds_traceability_matrix(
                         category = "isr"
                     else:
                         category = "vcast_only"
+                    # SDS(설계) 멤버십 — subprogram·해석된 함수명이 SDS 컴포넌트로 명세돼 있나.
+                    # SRS엔 미추적이라도 '설계엔 닿는'(SDS 연동) 함수면 매트릭스 밖 req를 노출.
+                    # 정확매칭(정규화 키)이므로 거짓양성 없음. 비면 프론트는 'SDS 미명세'로 표기
+                    # → 'SRS·SDS 모두 미명세' 추적성 공백을 정직히 가시화(라운드 109).
+                    sds_reqs: List[str] = []
+                    for cand in [sub_lower, *resolved]:
+                        for r in sds_all_func_to_reqs.get(_sds_comp_key(cand), []):
+                            if r not in sds_reqs:
+                                sds_reqs.append(r)
                     _unmapped_idx[sub_lower] = len(unmapped_vcast)
                     unmapped_vcast.append({
                         "subprogram": subprogram,
@@ -1910,6 +1957,8 @@ def generate_uds_traceability_matrix(
                         "unit": str(row.get("unit") or ""),
                         "resolved_funcs": resolved,
                         "category": category,
+                        # SDS 설계에 명세된 SRS 요구사항(매트릭스 밖 포함) — 비면 'SDS 미명세'.
+                        "sds_reqs": sds_reqs,
                         # 안전/진단 토큰 보유 — 버킷(isr/vcast_only)과 무관하게 프론트에서
                         # amber로 강조해 백워드 추적성 검토 신호를 보존한다(재검증 W4 가시화).
                         "safety": bool(_SAFETY_TOKEN_RE.search(subprogram)),
@@ -2061,6 +2110,9 @@ def generate_uds_traceability_matrix(
             "unmapped_isr": sum(1 for u in unmapped_vcast if u["category"] == "isr"),
             # 버킷과 무관하게 안전/진단 토큰을 가진 미추적 함수 수 — 프론트 amber 강조·뱃지용(W4).
             "unmapped_safety": sum(1 for u in unmapped_vcast if u.get("safety")),
+            # SRS 미추적이지만 SDS 설계엔 명세된(역방향 부분추적) 함수 수 — 프론트 'SDS:<req>' 뱃지용.
+            # 정규화 fix 후 KJPDS02 실데이터에선 0(설계가 이 함수들을 명세 안 함). 라운드 109.
+            "unmapped_sds_linked": sum(1 for u in unmapped_vcast if u.get("sds_reqs")),
         },
         # 역방향 추적성 공백 — '시험은 했으나 이 SRS에 안 닿는' VectorCAST subprogram 전체 목록.
         # 트리 뷰의 'SRS 미추적 시험 포함' 토글이 의미 3버킷으로 묶어 보여준다.

@@ -7,7 +7,7 @@ SUTS/SITS unit을 SRS 행에 연결한다(사용자 결정: "SDS로 bridge"). �
 """
 from __future__ import annotations
 
-from report_gen.requirements import generate_uds_traceability_matrix
+from report_gen.requirements import _normalize_req_id, generate_uds_traceability_matrix
 
 
 def test_bridge_fills_uds_source_ids_via_sds_function():
@@ -248,3 +248,84 @@ def test_unmapped_vcast_safety_handler_not_isr():
     assert by_sub["Brake_Fault_Handler"]["safety"] is True
     assert by_sub["Tim0_Ch0_ISR"]["safety"] is False
     assert mx["summary"]["unmapped_safety"] == 1
+
+
+# ── SDS 컴포넌트 추출 노이즈 정규화 (라운드 109) ──────────────────────────
+# SDS 추출이 함수명에 C 시그니처 조각('( void')·배열 첨자('[10]')·표 아티팩트를
+# 붙여 와서 정확매칭 bridge가 실제 함수의 SRS 추적을 silent 누락하던 회귀를 고정.
+
+
+def test_sds_comp_signature_noise_normalized_recovers_trace():
+    """SDS 컴포넌트 's_systemhashcalculate( void'(시그니처 조각 노이즈)가 정규화로
+    정확매칭 복구돼 함수명 직접·SUTS 2-hop 양쪽 vcast 추적이 살아난다.
+    실데이터 KJPDS02: 이 1함수가 14개 SRS 요구사항 추적을 끊었던 회귀."""
+    items = [{"id": "SwTR_0101"}]
+    sds_pairs = [{"requirement_id": "SwTR_0101", "component_ids": ["s_systemhashcalculate( void"]}]
+    mapping_pairs = [{"requirement_id": "SwSTR_01", "source_ids": ["s_systemhashcalculate"]}]
+    suts = [{"requirement_id": "SwUFn_0127", "unit": "s_systemhashcalculate",
+             "source": "SUTS", "testcase": "u1"}]
+    vcast = [{"subprogram": "SwUFn_0127", "testcase": "v1", "result": "pass", "source": "VectorCAST"}]
+    mx = generate_uds_traceability_matrix(
+        items, mapping_pairs=mapping_pairs, vcast_rows=suts + vcast, sds_pairs=sds_pairs)
+    row = mx["rows"][0]
+    # source_ids bridge 복구 (노이즈 이전엔 누락됐음)
+    assert "s_systemhashcalculate" in row["source_ids"]
+    # vcast 2-hop 추적 복구 → 미추적에서 빠짐
+    assert "SwUFn_0127" not in {u["subprogram"] for u in mx["unmapped_vcast"]}
+    assert mx["summary"]["vcast_traced_rows"] == 1
+    assert mx["summary"]["vcast_untraced_rows"] == 0
+
+
+def test_sds_comp_array_subscript_noise_normalized():
+    """배열 첨자('[10]'/'[]')도 정규화 — 같은 변수의 [10]/[] 표기 차이가 동일 키로 매칭."""
+    items = [{"id": "SwTR_0101"}]
+    sds_pairs = [{"requirement_id": "SwTR_0101",
+                  "component_ids": ["u8g_partnoinfo[10]", "u8g_partnoinfo[]"]}]
+    mapping_pairs = [{"requirement_id": "SwSTR_01", "source_ids": ["u8g_partnoinfo"]}]
+    mx = generate_uds_traceability_matrix(items, mapping_pairs=mapping_pairs, sds_pairs=sds_pairs)
+    assert "u8g_partnoinfo" in mx["rows"][0]["source_ids"]
+
+
+def test_sds_comp_korean_description_not_falsely_bridged():
+    """한글 설명문 컴포넌트('mcu 이상 감지(레지스터 미지원)')는 괄호 제거 후에도 공백 포함
+    문자열이라 함수명 'mcu'와 불일치 → 거짓 bridge 없음(fuzzy 미사용 보장)."""
+    items = [{"id": "SwTR_0101"}]
+    sds_pairs = [{"requirement_id": "SwTR_0101", "component_ids": ["mcu 이상 감지(레지스터 미지원)"]}]
+    mapping_pairs = [{"requirement_id": "SwSTR_01", "source_ids": ["mcu"]}]
+    mx = generate_uds_traceability_matrix(items, mapping_pairs=mapping_pairs, sds_pairs=sds_pairs)
+    assert "mcu" not in (mx["rows"][0]["source_ids"] or [])
+
+
+# ── 미추적 함수의 SDS 멤버십(sds_reqs) — 역방향 부분추적 표기 (라운드 109) ──
+
+
+def test_unmapped_vcast_sds_reqs_populated_for_out_of_matrix_req():
+    """SRS 미추적이지만 SDS가 매트릭스 밖 req(SwST_08 등)에 명세한 함수는
+    sds_reqs가 채워져 'SDS 설계엔 닿음'(SRS만 끊김)을 노출한다."""
+    items = [{"id": "SwTR_0101"}]  # 매트릭스 req = SwTR_0101 only
+    sds_pairs = [
+        {"requirement_id": "SwTR_0101", "component_ids": ["foo_func"]},
+        # SwST_08 은 items(매트릭스) 밖 → bar_func은 SRS 행엔 안 닿지만 SDS엔 명세됨
+        {"requirement_id": "SwST_08", "component_ids": ["bar_func"]},
+    ]
+    suts = [{"requirement_id": "SwUFn_0200", "unit": "bar_func", "source": "SUTS", "testcase": "u1"}]
+    vcast = [{"subprogram": "SwUFn_0200", "testcase": "v1", "result": "pass", "source": "VectorCAST"}]
+    mx = generate_uds_traceability_matrix(items, vcast_rows=suts + vcast, sds_pairs=sds_pairs)
+    by_sub = {u["subprogram"]: u for u in mx["unmapped_vcast"]}
+    entry = by_sub["SwUFn_0200"]
+    assert entry["category"] == "suts_tested"            # 단위시험 존재
+    assert _normalize_req_id("SwST_08") in entry["sds_reqs"]  # SDS엔 명세(매트릭스 밖)
+    assert mx["summary"]["unmapped_sds_linked"] == 1
+
+
+def test_unmapped_vcast_sds_reqs_empty_when_absent_from_sds():
+    """SDS 어디에도 명세 안 된 미추적 함수 → sds_reqs 빈 배열(프론트 '미명세' 표기).
+    모든 미추적 항목이 sds_reqs 키를 갖는 스키마 일관성도 확인."""
+    items = [{"id": "SwTR_0101"}]
+    sds_pairs = [{"requirement_id": "SwTR_0101", "component_ids": ["foo_func"]}]
+    vcast = [{"subprogram": "ghost_func", "testcase": "v1", "result": "pass", "source": "VectorCAST"}]
+    mx = generate_uds_traceability_matrix(items, vcast_rows=vcast, sds_pairs=sds_pairs)
+    by_sub = {u["subprogram"]: u for u in mx["unmapped_vcast"]}
+    assert by_sub["ghost_func"]["sds_reqs"] == []
+    assert all("sds_reqs" in u for u in mx["unmapped_vcast"])
+    assert mx["summary"]["unmapped_sds_linked"] == 0
