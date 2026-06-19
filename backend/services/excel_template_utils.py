@@ -590,6 +590,82 @@ def strip_external_links(wb: Any) -> int:
     return removed
 
 
+def compact_empty_styled_cells(data: bytes) -> tuple[bytes, int]:
+    """라운드 106 — openpyxl 3.1.5가 빈 스타일 셀을 ``<c s=".." t="n"></c>``
+    (값 None인데 닫는 태그 명시)로 저장하는 비효율을 self-closing ``<c s=".."/>`` 로
+    정규화 (저장된 xlsx/xlsm **bytes** zip 레벨 후처리).
+
+    배경: 회사 감사본 양식은 격자 테두리를 위해 데이터 영역 전체에 스타일을 깔아,
+    값 없는 셀이 시트의 90%+ 를 차지한다 (KJPDS02 PV SwUTR '3.Test Log' = 7899행
+    × 275열 중 **92%(199만)가 빈 양식 셀**). openpyxl 3.1.5 는 이 빈 셀을
+    self-closing 하지 않고 ``t="n"`` 타입 + 닫는 태그로 써서 비압축 XML 이 ~24%
+    부푼다 (73MB → 56MB). 거대 시트의 비대는 Excel 열기 파싱 메모리/속도를
+    악화시키고, save 중 메모리 압박으로 XML 이 잘리는(unclosed token) 손상 위험을
+    키운다 (PV SwUTR '파일 안 열림' 보고의 근인).
+
+    값 셀(``<v>``/``<is>`` 내용 보유)·스타일(``s`` 속성)·병합은 보존하고, **값 없는**
+    빈 셀의 불필요한 ``t="n"></c>`` / ``t="inlineStr"></c>`` 만 self-closing 으로 압축.
+    worksheet XML 만 대상 (vbaProject/media 등 바이너리 파트 무영향).
+
+    Returns:
+        ``(정규화된 bytes, 압축한 빈 셀 수)``. 대상이 없으면 원본 그대로 (count 0).
+    """
+    import io as _io
+    import re as _re
+    import zipfile as _zip
+
+    _empty_n = _re.compile(rb'<c([^>]*) t="n"></c>')
+    _empty_s = _re.compile(rb'<c([^>]*) t="inlineStr"></c>')
+    zin = _zip.ZipFile(_io.BytesIO(data))
+    total = 0
+    out = _io.BytesIO()
+    with _zip.ZipFile(out, "w", _zip.ZIP_DEFLATED) as zout:
+        for item in zin.infolist():
+            raw = zin.read(item.filename)
+            n = item.filename
+            if n.startswith("xl/worksheets/sheet") and n.endswith(".xml"):
+                raw, c1 = _empty_n.subn(rb"<c\1/>", raw)
+                raw, c2 = _empty_s.subn(rb"<c\1/>", raw)
+                total += c1 + c2
+            zout.writestr(item, raw)
+    zin.close()
+    if total == 0:
+        return data, 0
+    return out.getvalue(), total
+
+
+def verify_xlsx_integrity(data: bytes) -> tuple[bool, str]:
+    """라운드 106 — 저장된 xlsx/xlsm **bytes** 무결성 검증 (배포 전 손상 차단).
+
+    거대 시트('3.Test Log' 등) save 가 메모리 압박으로 중단되면 worksheet XML 이
+    ``</worksheet>`` 로 닫히지 못한 채 잘리거나(unclosed token) zip CRC 가 깨진다.
+    이 손상은 Excel 에서 "파일을 열 수 없음/복구"로 나타난다 (PV SwUTR 실측:
+    sheet5.xml CRC 손상 + unclosed token). 본 검증은 worksheet 파트의 (1) CRC
+    (zipfile read 가 자동 검증), (2) ``</worksheet>`` 종료 태그 완결성을 확인해
+    손상 산출물이 사용자에게 배포되기 전에 감지한다.
+
+    Returns:
+        ``(ok, error_message)``. ok=True 면 error 는 빈 문자열.
+    """
+    import io as _io
+    import zipfile as _zip
+
+    try:
+        z = _zip.ZipFile(_io.BytesIO(data))
+    except _zip.BadZipFile as e:
+        return False, f"zip 손상: {e}"
+    for item in z.infolist():
+        n = item.filename
+        if n.startswith("xl/worksheets/sheet") and n.endswith(".xml"):
+            try:
+                raw = z.read(n)  # zipfile.read 가 CRC 자동 검증
+            except _zip.BadZipFile as e:
+                return False, f"{n} CRC 손상: {e}"
+            if not raw.rstrip().endswith(b"</worksheet>"):
+                return False, f"{n} XML 미완결(truncated — save 중단 의심)"
+    return True, ""
+
+
 def sanitize_xlsm_external_links(data: bytes) -> tuple[bytes, int]:
     """라운드 101 — 저장된 xlsx/xlsm **bytes**에서 외부링크 파트/참조를 zip 레벨 제거.
 

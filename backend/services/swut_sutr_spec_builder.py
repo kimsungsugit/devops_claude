@@ -106,7 +106,9 @@ from backend.services.excel_template_utils import (
     mark_asil_d_function,
     mark_asil_qm_function,
     safe_write,
+    compact_empty_styled_cells,
     sanitize_xlsm_external_links,
+    verify_xlsx_integrity,
     short_date,
     validate_build_meta,
     validate_xlsx_template_bytes,
@@ -1916,6 +1918,21 @@ def build_sutr_from_spec(
 
     out = io.BytesIO()
     wb.save(out)
+    # 라운드 106 — save 직후 무결성 검증 + 손상 시 gc 후 1회 재시도. 거대 '3.Test Log'
+    #   save 가 일시적 메모리 압박으로 잘리면(unclosed token / CRC 손상) 첫 시도가
+    #   손상될 수 있어, 가비지 수거 후 재 save 로 복구 시도 (wb close 전이어야 재 save 가능).
+    _save_ok, _save_err = verify_xlsx_integrity(out.getvalue())
+    if not _save_ok:
+        import gc as _gc
+        _gc.collect()
+        out = io.BytesIO()
+        wb.save(out)
+        summary["save_retried"] = True
+        warnings.append(
+            f"[spec-sutr] 첫 save 무결성 실패({_save_err}) → gc 후 재 save (거대 "
+            "Test Log 메모리 압박 의심). 최종 상태는 아래 무결성 검증으로 재확인, "
+            "동시 빌드 수 축소 권장."
+        )
     if wb is not spec_wb:
         spec_wb.close()
     wb.close()
@@ -1924,6 +1941,19 @@ def build_sutr_from_spec(
     # defined names) 제거 → Excel "연결 업데이트/복구" 경고 차단. keep_vba 로드 시
     # 외부링크 파트가 raw archive로 보존돼 openpyxl 객체 조작이 무효 → save된
     # bytes를 zip 레벨에서 직접 정화.
+    # 라운드 106 — 빈 양식 셀 self-closing 정규화 (openpyxl 3.1.5 비효율 제거).
+    #   거대 '3.Test Log'(7899행×275열 중 92%가 빈 양식 셀)의 비압축 XML ~24% 절감
+    #   → Excel 열기 메모리/속도 개선 + save 중 손상(unclosed token) 위험 완화.
+    #   값/스타일/병합 보존, worksheet 파트만 대상 (PV SwUTR '파일 안 열림' 근인 대응).
+    _compacted, _n_compact = compact_empty_styled_cells(out.getvalue())
+    if _n_compact:
+        out = io.BytesIO(_compacted)
+        summary["empty_cells_compacted"] = _n_compact
+        warnings.append(
+            f"[spec-sutr] 빈 양식 셀 {_n_compact}개 self-closing 정규화 "
+            "(openpyxl 3.1.5 비효율 — Test Log 비대/손상 완화)"
+        )
+
     _sanitized, _ext_removed = sanitize_xlsm_external_links(out.getvalue())
     if _ext_removed:
         out = io.BytesIO(_sanitized)
@@ -1931,6 +1961,18 @@ def build_sutr_from_spec(
         warnings.append(
             f"[spec-sutr] 템플릿 외부링크 파트 {_ext_removed}건 + 외부참조 defined "
             "name 제거 (독일어 HARA 양식 잔재 — Excel 연결 경고 차단)"
+        )
+    out.seek(0)
+
+    # 라운드 106 — save 무결성 검증 (거대 Test Log XML 잘림 손상 배포 차단).
+    #   save 가 메모리 압박으로 중단되면 worksheet XML 이 </worksheet> 미완결로
+    #   잘려 Excel 에서 안 열린다 (PV SwUTR 실측). 손상 감지 시 critical warning.
+    _ok, _err = verify_xlsx_integrity(out.getvalue())
+    summary["integrity_check"] = "ok" if _ok else f"FAILED: {_err}"
+    if not _ok:
+        warnings.append(
+            f"[spec-sutr] ⚠️ 산출물 무결성 검증 실패: {_err} — 거대 '3.Test Log' "
+            "save 가 메모리 압박으로 잘렸을 수 있음. 재생성 권장 (동시 빌드 축소 시 회복)."
         )
     out.seek(0)
 

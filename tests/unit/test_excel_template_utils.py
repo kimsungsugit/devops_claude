@@ -18,6 +18,7 @@ from backend.services.excel_template_utils import (  # noqa: E402
     auto_expand_row_block,
     clear_data_range,
     find_kv_row,
+    normalize_expanded_data_block,
     push_sentinel_to_last_row,
     resolve_merge_anchor,
     safe_write,
@@ -1143,3 +1144,201 @@ class TestSignatureBlockAndDocId96Final:
         ws["C30"] = "Author"
         assert find_kv_row(ws, "Author") == (2, 9)
         assert find_kv_row(ws, "Author", min_row=3) == (30, 3)
+
+
+class TestNormalizeExpandedDataBlock:
+    """라운드 101 — auto_expand insert로 데이터 영역 끝에 밀려든 빈 양식 footer
+    잔재(본문끝 무테 / Totals medium / 무테 sentinel)를 본문 표준으로 정규화.
+
+    KJPDS02 PV 보고('3.Consistency/4.Coverage 마지막 3~4행 서식이 다름') 회귀 가드.
+    """
+
+    @staticmethod
+    def _b(top=None, bottom=None, left=None, right=None):
+        from openpyxl.styles import Border, Side
+        def s(x):
+            return Side(style=x) if x else Side()
+        return Border(top=s(top), bottom=s(bottom), left=s(left), right=s(right))
+
+    @staticmethod
+    def _sig(ws, r, lo=2, hi=6):
+        out = []
+        for c in range(lo, hi + 1):
+            b = ws.cell(r, c).border
+            out.append(tuple(
+                (getattr(b, s).style if getattr(b, s) else None)
+                for s in ("top", "bottom", "left", "right")
+            ))
+        return tuple(out)
+
+    def _make(self, n_body=8, n_footer=3):
+        """본문 n_body행(동일 thin) + footer n_footer행(제각각 잔재)."""
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        data_start = 11
+        body = self._b(top="thin", bottom="thin", left="thin", right="thin")
+        for i in range(n_body):
+            r = data_start + i
+            for c in range(2, 7):
+                ws.cell(r, c).value = f"b{r}"
+                ws.cell(r, c).border = body
+        # footer 잔재: (a) bottom 없음, (b) bottom medium, (c) 무테
+        variants = [
+            self._b(top="thin", left="thin", right="thin"),
+            self._b(top="thin", bottom="medium", left="thin", right="thin"),
+            self._b(),
+        ]
+        for j in range(n_footer):
+            r = data_start + n_body + j
+            v = variants[j % len(variants)]
+            for c in range(2, 7):
+                ws.cell(r, c).value = f"f{r}"
+                ws.cell(r, c).border = v
+        return wb, ws, data_start, n_body + n_footer
+
+    def test_footer_residue_normalized_to_body(self):
+        wb, ws, ds, total = self._make(n_body=8, n_footer=3)
+        body_sig = self._sig(ws, ds)
+        fixed = normalize_expanded_data_block(
+            ws, data_start=ds, total=total, col_lo=2, col_hi=6,
+        )
+        assert fixed == 3  # footer 3행만 교정 (본문 8행은 이미 표준)
+        for r in range(ds, ds + total):
+            assert self._sig(ws, r) == body_sig
+
+    def test_finalize_medium_on_last_row_only(self):
+        wb, ws, ds, total = self._make(n_body=8, n_footer=3)
+        normalize_expanded_data_block(
+            ws, data_start=ds, total=total, col_lo=2, col_hi=6,
+            finalize_medium_cols=(3, 4, 5, 6),
+        )
+        last = ds + total - 1
+        for c in (3, 4, 5, 6):
+            assert ws.cell(last, c).border.bottom.style == "medium"
+        # B(2)는 마감 대상 아님 → 본문 thin 유지 (REF 실측)
+        assert ws.cell(last, 2).border.bottom.style == "thin"
+        # 마지막 직전 행은 medium 마감 없음
+        for c in (3, 4, 5, 6):
+            assert ws.cell(last - 1, c).border.bottom.style == "thin"
+
+    def test_noop_when_all_uniform(self):
+        wb, ws, ds, total = self._make(n_body=10, n_footer=0)
+        assert normalize_expanded_data_block(
+            ws, data_start=ds, total=total, col_lo=2, col_hi=6,
+        ) == 0
+
+    def test_majority_wins_not_reverse(self):
+        """본문(다수)이 표준 — 소수 footer가 본문으로 교정되지 그 반대 아님."""
+        wb, ws, ds, total = self._make(n_body=8, n_footer=2)
+        body_sig = self._sig(ws, ds)
+        normalize_expanded_data_block(
+            ws, data_start=ds, total=total, col_lo=2, col_hi=6,
+        )
+        for r in range(ds, ds + total):
+            assert self._sig(ws, r) == body_sig
+
+    def test_merged_cell_safe(self):
+        wb, ws, ds, total = self._make(n_body=6, n_footer=2)
+        r = ds + total - 1
+        ws.merge_cells(f"C{r}:E{r}")
+        # 크래시 없이 실행 (MergedCell skip)
+        normalize_expanded_data_block(
+            ws, data_start=ds, total=total, col_lo=2, col_hi=6,
+            finalize_medium_cols=(3, 4, 5, 6),
+        )
+
+    def test_zero_total_returns_zero(self):
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        assert normalize_expanded_data_block(ws, data_start=11, total=0) == 0
+
+
+class TestCompactAndVerify:
+    """라운드 106 — 빈 양식 셀 self-closing 정규화 + save 무결성 검증.
+
+    KJPDS02 PV SwUTR '3.Test Log' 손상(92% 빈 셀 비대 → save 중 XML 잘림 → 파일
+    안 열림) 회귀 가드.
+    """
+
+    @staticmethod
+    def _make_styled_wb() -> bytes:
+        import io as _io
+
+        from openpyxl.styles import Border, Side
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        thin = Side(style="thin")
+        b = Border(top=thin, bottom=thin, left=thin, right=thin)
+        ws.cell(1, 1, value="HELLO").border = b
+        ws.cell(1, 2, value=42).border = b
+        # 빈 스타일(격자) 셀 — openpyxl 3.1.5는 <c s=.. t="n"></c>로 저장
+        for r in range(2, 20):
+            for c in range(1, 10):
+                ws.cell(r, c).border = b
+        buf = _io.BytesIO()
+        wb.save(buf)
+        return buf.getvalue()
+
+    def test_compact_normalizes_empty_cells(self):
+        import io as _io
+        import zipfile
+
+        from backend.services.excel_template_utils import compact_empty_styled_cells
+        raw = self._make_styled_wb()
+        compacted, n = compact_empty_styled_cells(raw)
+        assert n > 0
+        assert len(compacted) <= len(raw)
+        xml = zipfile.ZipFile(_io.BytesIO(compacted)).read("xl/worksheets/sheet1.xml")
+        assert b't="n"></c>' not in xml
+
+    def test_compact_preserves_values_and_style(self):
+        import io as _io
+
+        from backend.services.excel_template_utils import compact_empty_styled_cells
+        compacted, _ = compact_empty_styled_cells(self._make_styled_wb())
+        wb = openpyxl.load_workbook(_io.BytesIO(compacted))
+        ws = wb.active
+        assert ws.cell(1, 1).value == "HELLO"
+        assert ws.cell(1, 2).value == 42
+        assert ws.cell(2, 2).border.top.style == "thin"
+
+    def test_compact_noop_when_no_empty(self):
+        import io as _io
+
+        from backend.services.excel_template_utils import compact_empty_styled_cells
+        wb = openpyxl.Workbook()
+        wb.active["A1"] = "x"
+        buf = _io.BytesIO()
+        wb.save(buf)
+        raw = buf.getvalue()
+        out, n = compact_empty_styled_cells(raw)
+        assert n == 0
+        assert out is raw
+
+    def test_verify_ok_on_valid(self):
+        from backend.services.excel_template_utils import verify_xlsx_integrity
+        ok, err = verify_xlsx_integrity(self._make_styled_wb())
+        assert ok and err == ""
+
+    def test_verify_detects_truncated_worksheet(self):
+        import io as _io
+        import zipfile
+
+        from backend.services.excel_template_utils import verify_xlsx_integrity
+        raw = self._make_styled_wb()
+        zin = zipfile.ZipFile(_io.BytesIO(raw))
+        out = _io.BytesIO()
+        with zipfile.ZipFile(out, "w") as zout:
+            for it in zin.infolist():
+                d = zin.read(it.filename)
+                if it.filename == "xl/worksheets/sheet1.xml":
+                    d = d[: len(d) // 2]  # 절반 절단 → </worksheet> 누락
+                zout.writestr(it, d)
+        ok, err = verify_xlsx_integrity(out.getvalue())
+        assert not ok
+        assert "sheet1" in err
+
+    def test_verify_detects_non_zip(self):
+        from backend.services.excel_template_utils import verify_xlsx_integrity
+        ok, err = verify_xlsx_integrity(b"not a zip at all")
+        assert not ok
