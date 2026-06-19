@@ -82,6 +82,7 @@ from backend.services.swut_sutr_aggregator import (
     _write_test_summary,
 )
 from backend.services.swut_sutr_spec_builder import (
+    DATA_START_ROW,
     _apply_actual_result_style,
     _collect_coverage_gaps,
     _compress_line_numbers,
@@ -90,7 +91,6 @@ from backend.services.swut_sutr_spec_builder import (
     _find_spec_sheet,
     _format_gap_source,
     _mark_cell,
-    _scan_spec_blocks,
     _write_log_headers,
 )
 
@@ -102,37 +102,59 @@ _NARROW_LOG_SHEET_NAME = "2.Test Log"
 
 
 # ---------------------------------------------------------------------------
-# SwIT 전용 iteration map (SwITC_SwUFn_ / SwUFn_ 양쪽 prefix 허용)
+# SwIT 전용 iteration map (env_name 기준 — SwUFn id는 tc_name이 아닌 env_name에 있음)
 # ---------------------------------------------------------------------------
 
-# VectorCAST SwIT env test_case 명: 'SwITC_SwUFn_0101.001' / 'SwUFn_0101.001'.
-# SwUTR `_build_fn_iteration_map`의 `re.match(r"SwUFn_(\d+)\.(\d+)")`는 anchor
-# 되어 'SwITC_SwUFn_' prefix를 탈락시키므로 SwIT 전용으로 재작성. SwITS spec
-# B열 TC-id가 'SwITC_NNNN'/'SwUFn_NNNN'/'SwUfn_NNNN'(WIP 오타)이라도 _scan_spec_blocks
-# 가 4-digit 숫자만 추출하므로 매칭 키는 동일 (숫자).
-_SWIT_TC_RE = re.compile(r"(?:SwITC_)?SwUFn_(\d+)\.(\d+)", re.IGNORECASE)
+
+def _swit_tc_key(value: str) -> str:
+    """SwIT TC 식별자 정규화 — spec TC_ID와 VectorCAST env_name을 동일 키로 정렬.
+
+    실측(2026-06-19): VectorCAST SwIT는 **env_name**에 SwUFn id가 있고
+    (``SwIT_SwUFn_0101_01`` / ``SwIT_FI_SwFn_34``), **tc_name**은 서브프로그램명+
+    iteration(``g_Ap_Main.001``)이다. spec TC_ID(``SwITC_SwUFn_0101_01`` /
+    ``SwITC_FI_SwFn_34``)와 env_name을 매칭하려면 선두 ``SwITC_`` / ``SwIT_``
+    prefix를 떼고 대문자화한다:
+
+      spec ``SwITC_SwUFn_0101_01`` / env ``SwIT_SwUFn_0101_01`` → ``SWUFN_0101_01``
+      spec ``SwITC_FI_SwFn_34``    / env ``SwIT_FI_SwFn_34``    → ``FI_SWFN_34``
+
+    영문 시작이라 ``_fill_actual_and_result`` 의 ``num.lstrip('0')`` 무영향.
+    실측 44/54 블록 매칭(나머지 10 SWUFN_1701~1710은 로그에 env 부재=미실행 N/A).
+    """
+    s = str(value or "").strip()
+    s = re.sub(r"^Sw(?:ITC|IT)_", "", s, count=1, flags=re.IGNORECASE)
+    return s.upper()
+
+
+# tc_name 끝의 .MMM iteration suffix (서브프로그램명.NNN).
+_SWIT_ITER_RE = re.compile(r"\.(\d+)\s*$")
 
 
 def _build_swit_fn_iteration_map(
     session: SwUTSession,
 ) -> dict[str, dict[int, Any]]:
-    """SwUFn 숫자(4-digit) → {iteration_index(int): {"passed", "actual",
-    "env", "tc_name"}} (SwIT 델타 — SwUTR ``_build_fn_iteration_map`` 미러).
+    """env_name 정규화 키 → {iteration_index(int): {"passed","actual","env",
+    "tc_name"}} (SwIT 델타 — 2026-06-19 env_name 기준 재작성).
 
-    SwUTR 원본과 동일 구조이나 정규식만 ``(?:SwITC_)?SwUFn_(\\d+)\\.(\\d+)`` 로
-    교체 — VectorCAST SwIT test_case 명(``SwITC_SwUFn_0101.001``)의 ``SwITC_``
-    prefix를 흡수한다. ``SwUFn_`` 직접 표기(SwUT 호환)도 그대로 매칭.
+    구버전은 tc_name에서 ``SwUFn_(\\d+)\\.(\\d+)`` 매칭을 시도했으나, 실측상 SwIT
+    tc_name은 서브프로그램명(``g_Ap_Main.001``)이라 전부 미스(맵 0개) → fill
+    미동작. SwUFn id는 ``env.env_name``(``SwIT_SwUFn_0101_01``)에 있으므로 env
+    단위로 키잉하고 iteration index는 tc_name ``.MMM`` suffix에서 추출한다.
 
-    iteration_index 는 ``.MMM`` suffix(1-based). 정렬 보장.
+    동일 idx 다중 서브프로그램 충돌 시 첫 등록 보존하되, passed 미결정 슬롯은
+    passed 결정된 레코드로 승격(실행 누락 라벨 방지).
     """
     fn_map: dict[str, dict[int, Any]] = {}
     for env in session.environments:
+        key = _swit_tc_key(getattr(env, "env_name", ""))
+        if not key:
+            continue
+        slot = fn_map.setdefault(key, {})
         for tc_name in env.test_cases:
-            m = _SWIT_TC_RE.match(tc_name)
+            m = _SWIT_ITER_RE.search(str(tc_name))
             if not m:
                 continue
-            num = m.group(1).lstrip("0") or "0"
-            idx = int(m.group(2))
+            idx = int(m.group(1))
             exec_r = env.test_results.get(tc_name)
             actual_dict: dict = {}
             passed = None
@@ -144,7 +166,12 @@ def _build_swit_fn_iteration_map(
                 tr_item = tr_items[0] if tr_items else None
                 if tr_item is not None:
                     actual_dict = getattr(tr_item, "actual_result", {}) or {}
-            fn_map.setdefault(num, {})[idx] = {
+            existing = slot.get(idx)
+            if existing is not None and not (
+                existing.get("passed") is None and passed is not None
+            ):
+                continue  # 첫 등록 보존 (passed 미결정→결정 승격만 허용)
+            slot[idx] = {
                 "passed": passed,
                 "actual": actual_dict,
                 "env": env,
@@ -188,6 +215,79 @@ def _derive_swit_tc_from_swufn(swufn: str) -> str:
     if not m:
         return ""
     return f"SwITC_SwUFn_{m.group(1)}"
+
+
+# ---------------------------------------------------------------------------
+# SwIT 전용 spec 블록 스캐너 (SwUTS `_scan_spec_blocks` 미러 — SwITS 레이아웃 델타)
+# ---------------------------------------------------------------------------
+
+# SwITS spec B열 anchor TC_ID 패턴. SwUTS는 B=숫자 index(`isdigit`)이나 SwITS PV는
+# B열에 TC_ID(`SwITC_SwUFn_NNNN_NN` / WIP 'SwUfn' 오타)가 직접 들어가고 블록 전체가
+# 세로병합된다. 'SwITC_FI_SwFn_NN'(Fault Injection) 블록도 anchor로 포착(매칭은
+# `_build_swit_fn_iteration_map`의 SwUFn 정규식이 거르므로 N/A 처리됨).
+_SWIT_ANCHOR_RE = re.compile(r"Sw(?:ITC|UFn|Ufn)", re.IGNORECASE)
+
+
+def _scan_swit_spec_blocks(ws, layout=None) -> list[dict[str, Any]]:
+    """SwITS spec anchor 스캔 → 함수 블록 list (SwIT 델타).
+
+    SwUTR ``_scan_spec_blocks``(B=숫자 index, C=TC_ID, D=Unit)는 SwITS PV
+    레이아웃과 불일치해 anchor 0개 → fill 미동작. SwITS PV 실측 구조:
+
+      - **B열(2) = TC_ID**(``SwITC_SwUFn_NNNN_NN``), 블록 전체 **세로병합**
+        (예 B5:B40). 병합 비-anchor 행은 openpyxl이 None 반환 → anchor 행만 값.
+      - **C열(3) = iteration index**(1..N). anchor 행은 C 공란(변수명 행).
+      - Input은 I열(9)~ (anchor 행=변수명, iteration 행=값).
+
+    anchor 행(변수명) + 이후 다음 anchor 전까지 C열 digit(iteration index) 보유
+    행을 ``iter_rows``로 수집. ``num``은 TC_ID 첫 숫자열(4-digit) — VectorCAST
+    ``(?:SwITC_)?SwUFn_NNNN.MMM`` 매칭 키와 동일(``lstrip('0')`` 후).
+
+    iteration index 컬럼이 layout.iter_index(SwITS는 'Param 1' 헤더라 'Inpt['
+    미발견 → 기본 G열로 오탐, 공란)와 어긋나도, ``_fill_actual_and_result``가
+    iter index 파싱 실패 시 순번 fallback(enumerate)으로 강등 — iter_rows가 C열
+    기준 1..N 연속이므로 VectorCAST .001..00N과 순번 정합한다.
+
+    ``layout`` 인자는 시그니처 호환용(현재 미사용 — anchor/iter 판정이 B/C열
+    고정). Returns: ``[{anchor, tc_id, unit, num, iter_rows}, ...]``.
+    """
+    blocks: list[dict[str, Any]] = []
+    max_row = int(ws.max_row or 0)
+    rr = DATA_START_ROW
+    while rr <= max_row:
+        b = ws.cell(rr, 2).value  # B = TC_ID (SwITS)
+        bs = str(b).strip() if b is not None else ""
+        if bs and _SWIT_ANCHOR_RE.match(bs):
+            # num = fill 매칭 키. SwUFn id는 env_name과 동일 정규화(_swit_tc_key)로
+            # 정렬해야 하므로 (B열 TC_ID 전체 → 'SWUFN_0101_01' / 'FI_SWFN_34'),
+            # 4-digit 첫 숫자만 쓰면 _NN suffix 손실로 0101_01~05가 모두 충돌한다.
+            swufn_m = re.search(r"SwUFn_(\d+)", bs, re.IGNORECASE)
+            swufn_num = swufn_m.group(1) if swufn_m else ""
+            iter_rows: list[int] = []
+            k = rr + 1
+            while k <= max_row:
+                nb = ws.cell(k, 2).value
+                nbs = str(nb).strip() if nb is not None else ""
+                if nbs and _SWIT_ANCHOR_RE.match(nbs):
+                    break  # 다음 anchor
+                ci = ws.cell(k, 3).value  # C = iteration index
+                if ci is not None and str(ci).strip().isdigit():
+                    iter_rows.append(k)
+                k += 1
+            blocks.append({
+                "anchor": rr,
+                "tc_id": bs,
+                # SwITS spec엔 별도 Unit 열이 없음 — TC_ID에서 SwUFn_NNNN 파생
+                # (deviation 비움 모드라 fill엔 비핵심, spec_name_to_swufn/경고용).
+                "unit": f"SwUFn_{swufn_num.zfill(4)}" if swufn_num else bs,
+                # 매칭 키 — env_name 정규화와 동일 (TC_ID 전체 prefix-strip+대문자).
+                "num": _swit_tc_key(bs),
+                "iter_rows": iter_rows,
+            })
+            rr = k if k > rr else rr + 1
+        else:
+            rr += 1
+    return blocks
 
 
 # ---------------------------------------------------------------------------
@@ -583,17 +683,20 @@ def build_sitr_from_spec(
     # 헤더 추가 (Actual/Pass-Fail/Log).
     _write_log_headers(log_ws, warnings, layout=layout)
 
-    # anchor 스캔 → 함수 블록 (이식된 '3.Test Log' 기준).
-    blocks = _scan_spec_blocks(log_ws, layout=layout)
+    # anchor 스캔 → 함수 블록 (이식된 '3.Test Log' 기준). SwIT 전용 스캐너 —
+    # SwITS PV는 B열 TC_ID 세로병합 + C열 iteration index 구조라 SwUTS
+    # `_scan_spec_blocks`(B=숫자 index)로는 anchor 0개 (2026-06-19 fix).
+    blocks = _scan_swit_spec_blocks(log_ws, layout=layout)
     fn_iter_map = _build_swit_fn_iteration_map(session)
 
     # spec 자체가 함수명↔SwUFn 권위 소스 — agg 주입 (_collect_coverage_gaps 우선 사용).
+    # SwITS spec엔 별도 함수명 열이 없어 unit(SwUFn_NNNN)이 곧 SwUFn id (num은
+    # 2026-06-19부터 env_name 정렬용 정규화 키라 SwUFn 파생 불가 → unit 직접 사용).
     spec_name_to_swufn: dict[str, str] = {}
     for _blk in blocks:
         _u = (_blk.get("unit") or "").strip()
-        _n = (_blk.get("num") or "").strip()
-        if _u and _n:
-            spec_name_to_swufn.setdefault(_u, f"SwUFn_{_n.zfill(4)}")
+        if _u:
+            spec_name_to_swufn.setdefault(_u, _u)
     agg["spec_name_to_swufn"] = spec_name_to_swufn
 
     # 2.Deviation B열 TC-id 역매핑 (Unit → TC-id).

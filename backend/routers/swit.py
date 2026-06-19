@@ -178,6 +178,11 @@ def _build_swit_sitr_meta(req: SwITSitrBuildRequest) -> SwitSitrBuildMeta:
         validation_date=req.validation_date,
         reviewer_override=req.reviewer_override,
         approver_override=req.approver_override,
+        # 2026-06-19 — spec-based 2.Deviation 모드. true면 커버리지 미달 함수 목록을
+        # 기재하지 않고 '해당 사항 없음'으로 비워둔다. SwUTR `sutr_deviation_empty`
+        # 대칭. SwIT deviation(Functions/Function Calls 미달성 사유 H열)은 시험
+        # 엔지니어 수기 작성이라 자동 재현 불가 → 자동생성 미달 목록을 비움.
+        deviation_empty=bool(cfg.get("sitr_deviation_empty", False)),
     )
 
 
