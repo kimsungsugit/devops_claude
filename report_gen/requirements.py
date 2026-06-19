@@ -1356,6 +1356,13 @@ def _extract_requirement_blocks(text: str) -> List[Dict[str, Any]]:
             return
         if desc_lines:
             current["description"] = " ".join(desc_lines).strip()
+        # 표 셀 파이프 구분자 정제 — docx 표가 '| Battery Power Source' 형태로 추출돼
+        # name/description에 '| ' 잡음이 남던 것 제거(라운드110). 헤딩형은 이미 깨끗.
+        for _k in ("name", "description"):
+            if current.get(_k):
+                current[_k] = re.sub(r"\s*\|\s*", " ", str(current[_k])).strip()
+        if current.get("name") == "":
+            current.pop("name", None)
         blocks.append(current)
         current = {}
         desc_lines = []
@@ -1370,6 +1377,14 @@ def _extract_requirement_blocks(text: str) -> List[Dict[str, Any]]:
             continue
 
         m = id_re.search(line)
+        # 마크다운 헤딩형 요구사항 정의 '#### SwTR_0101: Auto Close' — 깨끗한 제목 포착.
+        # 기존 '^Sw...' 분기는 '#' 접두를 못 잡아 헤딩의 정상 제목을 놓치고, 표 파편의
+        # 빈/'| ' 잡음 name만 잡혔다(요구사항 제목이 빈/잡음으로 표시되던 회귀, 라운드110).
+        m_head = re.match(r"^#{1,6}\s*(Sw(?:TR|TSR|NTR|NTSR|CNF|EI|ST|STR|Fn|TK)_\d+)\s*[:：]\s*(.+)$", line)
+        if m_head:
+            _flush()
+            current = {"id": m_head.group(1), "name": m_head.group(2).strip()}
+            continue
         if line.startswith("ID") and m:
             _flush()
             current = {"id": m.group(1)}
@@ -1688,6 +1703,18 @@ def generate_uds_traceability_matrix(
             norm_to_raw[norm] = rid  # keep first occurrence for display
 
     req_ids = sorted(norm_to_raw.keys())
+
+    # 요구사항 표시명(name) — 한 ID에 파편 item이 여러 개(빈 헤더행/제목행)면 가장 정보량
+    # 많은(파이프 정제 후 비지 않고 긴) name을 채택. SRS 표 추출이 ID당 다중 행을 만들어
+    # 첫 행(빈 name)이 표시되던 문제 해소(라운드110). 방어적으로 '| ' 잔여 잡음도 정제.
+    name_map: Dict[str, str] = {}
+    for x in items:
+        rid_n = _normalize_req_id(str(x.get("id") or "").strip())
+        if not rid_n:
+            continue
+        nm = re.sub(r"\s*\|\s*", " ", str(x.get("name") or "")).strip()
+        if len(nm) > len(name_map.get(rid_n, "")):
+            name_map[rid_n] = nm
 
     # ── UDS function mapping (requirement → source functions) ──
     mapping_pairs = mapping_pairs or []
@@ -2048,6 +2075,8 @@ def generate_uds_traceability_matrix(
         matrix.append(
             {
                 "requirement_id": norm_to_raw.get(rid, rid),
+                # 요구사항 표시명(제목) — 프론트 표/트리에서 ID 옆에 노출(라운드110).
+                "requirement_name": name_map.get(rid, ""),
                 # T1: SRS→SDS (아키텍처 추적)
                 "sds_components": sds_list,
                 # T2: SDS→UDS (상세 설계 추적)

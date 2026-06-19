@@ -7,7 +7,11 @@ SUTS/SITS unit을 SRS 행에 연결한다(사용자 결정: "SDS로 bridge"). �
 """
 from __future__ import annotations
 
-from report_gen.requirements import _normalize_req_id, generate_uds_traceability_matrix
+from report_gen.requirements import (
+    _extract_requirement_blocks,
+    _normalize_req_id,
+    generate_uds_traceability_matrix,
+)
 
 
 def test_bridge_fills_uds_source_ids_via_sds_function():
@@ -329,3 +333,61 @@ def test_unmapped_vcast_sds_reqs_empty_when_absent_from_sds():
     assert by_sub["ghost_func"]["sds_reqs"] == []
     assert all("sds_reqs" in u for u in mx["unmapped_vcast"])
     assert mx["summary"]["unmapped_sds_linked"] == 0
+
+
+# ── 요구사항 제목(name) 추출 — 마크다운 헤딩 + 파이프 정제 (라운드110) ──────────
+# SRS의 '#### SwTR_0101: Auto Close' 헤딩은 '#' 접두 때문에 파서가 통째로 무시하고,
+# 표 파편의 빈/'| ' 잡음 name만 잡혀 요구사항 제목이 빈/잡음으로 표시되던 회귀를 고정.
+
+
+def test_extract_blocks_captures_markdown_heading_title():
+    """'#### SwTR_0101: Auto Close' 마크다운 헤딩에서 깨끗한 제목을 포착한다."""
+    text = "\n".join([
+        "## General Requirements",
+        "### Door 동작 모드",
+        "#### SwTR_0101: Auto Close",
+        "#### SwTR_0106: 초기화 모드",
+        "##### SwTSR_0101: Hall Sensor Power Switch 공급 전원 이상 감지",
+    ])
+    blocks = _extract_requirement_blocks(text)
+    names = {b["id"]: b.get("name") for b in blocks if b.get("id")}
+    assert names.get("SwTR_0101") == "Auto Close"
+    assert names.get("SwTR_0106") == "초기화 모드"
+    assert names.get("SwTSR_0101") == "Hall Sensor Power Switch 공급 전원 이상 감지"
+
+
+def test_extract_blocks_strips_pipe_artifacts():
+    """표 셀 추출로 'name'/'description'에 남는 '| ' 구분자 잡음을 정제한다."""
+    text = "\n".join([
+        "SwEI_01: | Battery Power Source",
+        "Description | 배터리 전원 입력 신호",
+    ])
+    blocks = _extract_requirement_blocks(text)
+    b = next(b for b in blocks if b.get("id") == "SwEI_01")
+    assert "|" not in (b.get("name") or "")
+    assert b.get("name") == "Battery Power Source"
+
+
+def test_changelog_id_mention_not_captured_as_requirement():
+    """'- SwTSR_0102 삭제' 같은 변경이력 언급은 요구사항으로 포착하지 않는다(삭제된 ID)."""
+    text = "\n".join([
+        "#### SwTR_0101: Auto Close",
+        "- SwTSR_0102 삭제",
+        "- SwNTR_0101 내용 수정",
+    ])
+    blocks = _extract_requirement_blocks(text)
+    ids = {b.get("id") for b in blocks}
+    assert "SwTR_0101" in ids
+    assert "SwTSR_0102" not in ids   # changelog 언급 → 미포착
+
+
+def test_matrix_requirement_name_picks_clean_longest():
+    """매트릭스 행 requirement_name — ID당 파편(빈/제목) 중 정제 후 가장 긴 name 채택."""
+    items = [
+        {"id": "SwTR_0101", "name": ""},               # 빈 헤더 파편(먼저)
+        {"id": "SwTR_0101", "name": "| Auto Close"},   # 표 파편(파이프)
+        {"id": "SwTR_0101", "name": "Auto Close"},      # 헤딩 제목
+    ]
+    mx = generate_uds_traceability_matrix(items)
+    row = next(r for r in mx["rows"] if r["requirement_id"] == "SwTR_0101")
+    assert row["requirement_name"] == "Auto Close"     # 빈 첫 파편이 아니라 깨끗한 제목

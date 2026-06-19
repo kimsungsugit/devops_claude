@@ -889,7 +889,7 @@ function TraceMatrix({ matrix }) {
   const exportCSV = () => {
     // 감사 증빙: Pass/Fail은 VectorCAST 실행 결과만(STS/SUTS/SITS는 매핑·통과 아님).
     // 설계단절·단위시험미연결 공백 플래그 + 역방향 미추적 섹션을 포함해 완전 스냅샷으로 만든다.
-    const header = ['요구사항 ID', 'SDS 컴포넌트(T1)', 'UDS 함수(T2)', '함수 수', 'STS TC(T3)', 'SUTS TC(T4)', 'SITS TC(T5)', 'VectorCAST', '테스트 매핑 수', 'VectorCAST실행 Pass', 'VectorCAST실행 Fail', '상태(매핑)', '설계단절(SDS有UDS無)', 'UDS함수 단위시험미연결', '신뢰도'];
+    const header = ['요구사항 ID', '요구사항명', 'SDS 컴포넌트(T1)', 'UDS 함수(T2)', '함수 수', 'STS TC(T3)', 'SUTS TC(T4)', 'SITS TC(T5)', 'VectorCAST', '테스트 매핑 수', 'VectorCAST실행 Pass', 'VectorCAST실행 Fail', '상태(매핑)', '설계단절(SDS有UDS無)', 'UDS함수 단위시험미연결', '신뢰도'];
     const csvRows = [header.join(',')];
     // 화면 필터와 무관하게 전체 rows를 내보낸다(필터 종속 재현성 문제 해소 — deep-analyze).
     for (const r of rows) {
@@ -906,6 +906,7 @@ function TraceMatrix({ matrix }) {
       const untestedFns = uds.filter(fn => !((m.get(_normFn(fn)) || []).length)).length;
       csvRows.push([
         csvEscape(r.requirement_id ?? ''),
+        csvEscape(r.requirement_name ?? ''),
         csvEscape(sds.join('; ')),
         csvEscape(uds.join('; ')),
         uds.length,
@@ -1286,8 +1287,9 @@ function TraceMatrix({ matrix }) {
               <React.Fragment key={reqId}>
                 <tr style={{ background: colors.bg, cursor: 'pointer' }}
                     onClick={() => setExpandedReqId(isExpanded ? null : reqId)}>
-                  <td style={{ fontFamily: 'monospace', fontSize: 11, fontWeight: 600 }}>
-                    {isExpanded ? '\u25BC' : '\u25B6'} {reqId}
+                  <td style={{ fontSize: 11, fontWeight: 600 }}>
+                    <span style={{ fontFamily: 'monospace' }}>{isExpanded ? '\u25BC' : '\u25B6'} {reqId}</span>
+                    {r.requirement_name && <span style={{ fontWeight: 400, color: 'var(--text-muted)', marginLeft: 6 }} title={r.requirement_name}>{r.requirement_name}</span>}
                   </td>
                   <td style={{ fontSize: 10, maxWidth: 140, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
                       title={sdsComps.join(', ')}>
@@ -1936,6 +1938,7 @@ function TraceTreeRoot({ r, idx, expanded, onToggle }) {
       >
         <span style={{ fontFamily: 'monospace', fontSize: 11 }}>{isOpen ? '▼' : '▶'}</span>
         <span style={{ fontFamily: 'monospace', fontWeight: 700, fontSize: 12, minWidth: 110 }}>{reqId}</span>
+        {r.requirement_name && <span style={{ fontSize: 11, color: 'var(--text-muted)', maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={r.requirement_name}>{r.requirement_name}</span>}
         {/* 단계 체인 칩 — 끊긴 곳이 회색으로 드러남 */}
         <span style={{ display: 'flex', alignItems: 'center', gap: 4, flexWrap: 'wrap' }}>
           {stageCounts.map((s, i) => (
