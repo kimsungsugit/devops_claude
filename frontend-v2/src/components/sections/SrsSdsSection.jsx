@@ -927,7 +927,7 @@ function TraceMatrix({ matrix }) {
     if (unmappedVcast.length > 0) {
       csvRows.push('');
       csvRows.push(csvEscape(`# SRS 미추적 시험 (역방향 공백 ${unmappedVcast.length}종 — 시험됐으나 이 SRS 요구사항 미명세)`));
-      csvRows.push(['Subprogram', '해석된 함수', 'SDS 설계', 'UDS 설계', '분류', 'VectorCAST 결과'].join(','));
+      csvRows.push(['Subprogram', '해석된 함수', 'SDS 설계', 'UDS 설계', 'ISO계층', '분류', 'VectorCAST 결과'].join(','));
       for (const u of unmappedVcast) {
         const sr = Array.isArray(u.sds_reqs) ? u.sds_reqs : [];
         const uf = Array.isArray(u.uds_funcs) ? u.uds_funcs : [];
@@ -936,6 +936,7 @@ function TraceMatrix({ matrix }) {
           csvEscape((Array.isArray(u.resolved_funcs) ? u.resolved_funcs : []).join('; ')),
           csvEscape(sr.length ? sr.join('; ') : '미명세'),
           csvEscape(u.in_uds === true ? (uf.length ? uf.join('; ') : '설계됨') : (u.in_uds === false ? '미설계' : '')),
+          csvEscape(LAYER_LABELS[u.layer] ?? ''),
           csvEscape(u.category ?? ''),
           csvEscape(u.result ?? ''),
         ].join(','));
@@ -1784,6 +1785,15 @@ const _UNMAPPED_BUCKETS = [
   { key: 'vcast_only', label: 'VectorCAST 단독 커버리지', desc: 'SUTS 단위시험 참조 없이 VectorCAST만 시험한 함수', warn: false },
 ];
 
+// ISO 26262 SwDS 계층 라벨(라운드112) — 미추적 함수의 layer 코드 → CSV/표시용 한국어.
+const LAYER_LABELS = {
+  APP_LEAF: '애플리케이션',
+  BSW_DRIVER: 'BSW/드라이버',
+  BOOT_REPROG: '부트/재프로그래밍',
+  LIB_UTIL: '라이브러리',
+  TEST_ARTIFACT: '시험산출물',
+};
+
 // SRS 미추적 시험 루트 — 시험은 됐으나 이 SRS에 안 닿는 VectorCAST 함수를 의미 버킷으로 묶는다.
 // 요구사항 루트와 nodeId 네임스페이스(__unmapped__)를 분리해 펼침 상태 충돌을 막는다.
 function TraceUnmappedRoot({ unmapped, expanded, onToggle }) {
@@ -1808,6 +1818,12 @@ function TraceUnmappedRoot({ unmapped, expanded, onToggle }) {
   // in_uds === false 만 갭으로 카운트(undefined=구 응답은 제외) — 버전 스큐 거짓 갭 방지(X6).
   const udsLinkedTotal = list.filter(u => u && u.in_uds === true).length;
   const designGapTotal = list.filter(u => u && u.in_uds === false).length;
+  // ISO 26262 SwDS 계층(라운드112) — '애플리케이션 설계 공백(app_leaf=실 finding)'과
+  // '정당한 범위 경계(bsw/boot/lib)'를 분리 표기. 구 응답엔 layer 없어 카운트 0 → 자동 숨김.
+  // 기존 버킷/색은 그대로 두고 보조 hint 라인만 추가(보수적 단계 노출).
+  const layerCounts = { APP_LEAF: 0, BSW_DRIVER: 0, BOOT_REPROG: 0, LIB_UTIL: 0, TEST_ARTIFACT: 0 };
+  for (const u of list) { if (u && u.layer && layerCounts[u.layer] !== undefined) layerCounts[u.layer] += 1; }
+  const hasLayers = (layerCounts.APP_LEAF + layerCounts.BSW_DRIVER + layerCounts.BOOT_REPROG + layerCounts.LIB_UTIL + layerCounts.TEST_ARTIFACT) > 0;
   return (
     <li style={{ borderTop: '2px solid var(--accent)' }}>
       <div
@@ -1829,6 +1845,17 @@ function TraceUnmappedRoot({ unmapped, expanded, onToggle }) {
           {udsLinkedTotal > 0 && <span style={{ color: COVERAGE_COLORS.covered.fg, fontWeight: 600 }} title="UDS 단위설계엔 함수가 존재 — 시험+단위설계 완료, SDS 아키텍처 roll-up만 누락(정당한 입도차)"> · {udsLinkedTotal} UDS설계</span>}
           {designGapTotal > 0 && <span style={{ color: COVERAGE_COLORS.uncovered.fg, fontWeight: 700 }} title="UDS 단위설계에도 없음 — 시험만 존재하는 진짜 설계 공백(검토 우선순위 높음)"> · {designGapTotal} 미설계</span>}
         </span>
+        {hasLayers && (
+          <span style={{ flexBasis: '100%', fontSize: 11, color: 'var(--text-muted)', paddingLeft: 22 }}>
+            ISO 26262 계층:
+            {layerCounts.APP_LEAF > 0 && <span style={{ color: COVERAGE_COLORS.partial.fg, fontWeight: 700 }} title="애플리케이션 구현 leaf 함수가 SDS에 함수단위로 미명세 — 아키텍처→유닛 roll-up 공백(실제 추적성 finding, 검토 권장)"> APP {layerCounts.APP_LEAF}</span>}
+            {layerCounts.BOOT_REPROG > 0 && <span title="부트로더/재프로그래밍/EEPROM — SDS에 컴포넌트로 존재(컴포넌트 추적 성립), 별도 부트 설계 범위"> · 부트 {layerCounts.BOOT_REPROG}</span>}
+            {layerCounts.BSW_DRIVER > 0 && <span title="기반 SW/드라이버(HAL·LIN/CAN) — BSW 설계명세/플랫폼 범위에서 추적(애플리케이션 SDS 범위 밖)"> · BSW {layerCounts.BSW_DRIVER}</span>}
+            {layerCounts.LIB_UTIL > 0 && <span title="범용 라이브러리/연산 유틸 — 호출처 컴포넌트 설계에 라이브러리로 귀속 추적"> · LIB {layerCounts.LIB_UTIL}</span>}
+            {layerCounts.TEST_ARTIFACT > 0 && <span title="시험 산출물/스텁 — 추적 대상 아님"> · 시험 {layerCounts.TEST_ARTIFACT}</span>}
+            <span style={{ color: COVERAGE_COLORS.partial.fg }} title="APP=애플리케이션 설계 공백(실 finding) / 부트·BSW·LIB=정당한 범위 경계"> ⓘ</span>
+          </span>
+        )}
         <span style={{ marginLeft: 'auto', fontSize: 10, color: 'var(--text-muted)' }}>역방향 추적성 공백</span>
       </div>
       {isOpen && (
@@ -1886,6 +1913,7 @@ function TraceUnmappedBucket({ bucket, items, parentId, expanded, onToggle }) {
                 <th style={{ padding: '3px 6px', textAlign: 'left' }}>해석된 함수</th>
                 <th style={{ padding: '3px 6px', textAlign: 'left' }} title="SDS(설계)에 함수명으로 명세된 SRS 요구사항. SRS 미추적이라도 설계엔 닿으면 표기, 없으면 'SRS·SDS 모두 미명세'">SDS 설계</th>
                 <th style={{ padding: '3px 6px', textAlign: 'left' }} title="UDS(단위설계) 인벤토리에 함수가 존재하는지. SRS 역추적이 끊겨도 단위설계엔 명세돼 있으면 '시험+단위설계 완료, SDS 아키텍처 roll-up만 누락'(정당한 입도차)이고, 없으면 시험만 존재하는 진짜 설계 공백">UDS 설계</th>
+                <th style={{ padding: '3px 6px', textAlign: 'left' }} title="ISO 26262 SwDS 계층. 애플리케이션=구현 leaf가 SDS에 함수단위 미명세(실 finding) / 부트·BSW·라이브러리=정당한 범위 경계(컴포넌트·플랫폼·라이브러리 추적)">ISO계층</th>
                 <th style={{ padding: '3px 6px', textAlign: 'center', width: 50 }}>결과</th>
               </tr>
             </thead>
@@ -1923,6 +1951,12 @@ function TraceUnmappedBucket({ bucket, items, parentId, expanded, onToggle }) {
                             title={`UDS 단위설계에 명세됨${uf.length ? ` (${uf.join(', ')})` : ''} — 시험+단위설계 완료, SDS 아키텍처 roll-up만 누락(정당한 입도차)`}>✓ {uf.length ? uf.join(', ') : '설계됨'}</td>
                         : <td style={{ padding: '3px 6px', color: COVERAGE_COLORS.uncovered.fg, fontWeight: 600 }}
                             title="UDS 단위설계에도 함수가 없음 — 시험만 존재하는 진짜 설계 공백(검토 우선순위 높음)">✗ 미설계</td>}
+                    {/* ISO 26262 계층(라운드112) — APP=애플리케이션 설계공백(실 finding) amber 강조,
+                        부트/BSW/LIB=정당한 범위 경계 muted, 구 응답(layer 없음)은 중립 '—'. */}
+                    {u && u.layer
+                      ? <td style={{ padding: '3px 6px', color: u.layer === 'APP_LEAF' ? COVERAGE_COLORS.partial.fg : 'var(--text-muted)', fontWeight: u.layer === 'APP_LEAF' ? 700 : 400 }}
+                          title={u.layer === 'APP_LEAF' ? '애플리케이션 구현 leaf — SDS에 함수단위 미명세(아키텍처→유닛 roll-up 공백, 검토 권장)' : '정당한 범위 경계 — 컴포넌트/플랫폼/라이브러리 레벨에서 추적'}>{LAYER_LABELS[u.layer] || u.layer}</td>
+                      : <td style={{ padding: '3px 6px', color: '#9ca3af', fontStyle: 'italic' }} title="계층 정보 없음(구 응답 형식) — backend 재생성 후 표기됨">—</td>}
                     <td style={{ padding: '3px 6px', textAlign: 'center', fontWeight: 600, color: _testResultColor(u.result) }}>{u.result || '-'}</td>
                   </tr>
                 );

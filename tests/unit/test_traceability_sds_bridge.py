@@ -10,9 +10,11 @@ from __future__ import annotations
 import pytest
 
 from report_gen.requirements import (
+    _classify_unmapped_layer,
     _extract_requirement_blocks,
     _normalize_req_id,
     _safe_docx_open,
+    _sds_comp_key,
     _strip_ret_type_prefix,
     generate_uds_traceability_matrix,
 )
@@ -626,3 +628,133 @@ def test_safe_docx_open_recovers_from_corrupt_embedded_image():
     doc = _safe_docx_open(io.BytesIO(corrupt))
     cells = [c.text for t in doc.tables for r in t.rows for c in r.cells]
     assert "SwCom_7" in cells
+
+
+# ── ISO 26262 미추적 함수 계층(layer) 분류 (라운드112) ────────────────────────
+# 미추적 함수를 'SwDS가 어느 계층에서 명세해야 하는가'로 분류해 '애플리케이션 설계 공백
+# (APP_LEAF=실 finding)'과 '정당한 범위 경계(BSW/부트/라이브러리)'를 정직히 구분한다.
+
+
+def test_classify_unmapped_layer_helper():
+    """계층 분류기: 인프라(부트/BSW/라이브러리)는 잡고, 애플리케이션은 기본값 APP_LEAF."""
+    # BOOT/REPROG/EEPROM (선두 앵커)
+    assert _classify_unmapped_layer(["sf_runcrc32verification"]) == "BOOT_REPROG"
+    assert _classify_unmapped_layer(["s_syseepromctrl_writedata_direct"]) == "BOOT_REPROG"
+    assert _classify_unmapped_layer(["eepromreadversiondata"]) == "BOOT_REPROG"
+    # BSW/driver/HAL
+    assert _classify_unmapped_layer(["adc_monitor_init"]) == "BSW_DRIVER"
+    assert _classify_unmapped_layer(["s_drvin_spi_writedrv8706"]) == "BSW_DRIVER"
+    assert _classify_unmapped_layer(["lin_lld_sci_init"]) == "BSW_DRIVER"
+    # LIB/util
+    assert _classify_unmapped_layer(["s_sha256_transform"]) == "LIB_UTIL"
+    assert _classify_unmapped_layer(["s16s_latgforce2slope_conv"]) == "LIB_UTIL"
+    # APP_LEAF (기본값 = 검토 대상). 애플리케이션 leaf — 인프라 토큰 없음.
+    assert _classify_unmapped_layer(["u16s_motorcurrent_check"]) == "APP_LEAF"
+    assert _classify_unmapped_layer(["s_isdoorclosed"]) == "APP_LEAF"
+    assert _classify_unmapped_layer(["u8s_countup_guarded"]) == "APP_LEAF"  # 안전은 직교 플래그
+    # 빈 입력 → 안전측 기본값
+    assert _classify_unmapped_layer([]) == "APP_LEAF"
+    # TEST_ARTIFACT — 순수 C 식별자 아님 / range-test 산출물
+    assert _classify_unmapped_layer(["Range"]) == "TEST_ARTIFACT"
+    assert _classify_unmapped_layer(["<<INIT>>"]) == "TEST_ARTIFACT"
+
+
+def test_classify_layer_does_not_swallow_app_function_with_midword_eeprom():
+    """중간에 'eeprom'이 든 애플리케이션 함수를 BOOT로 잘못 삼키면 안 됨(공백 은닉 방지)."""
+    # 앵커(^eep)가 아니라 중간 'eeprom' — 애플리케이션 previousctrl 리셋
+    assert _classify_unmapped_layer(["s_ap_previousctrl_reseteepromparams"]) == "APP_LEAF"
+
+
+def test_unmapped_layer_field_and_summary_counts():
+    """unmapped_vcast 각 항목에 layer 필드 + summary layer 카운트가 합이 맞아야."""
+    items = [{"id": "SwTR_0101"}]
+    sds_pairs = [{"requirement_id": "SwTR_0101", "component_ids": ["foo_func"]}]
+    suts = [
+        {"requirement_id": "SwUFn_0910", "unit": "u16s_motorcurrent_check", "source": "SUTS", "testcase": "u1"},
+        {"requirement_id": "SwUFn_0911", "unit": "sf_runcrc32verification", "source": "SUTS", "testcase": "u2"},
+        {"requirement_id": "SwUFn_0912", "unit": "adc_monitor_init", "source": "SUTS", "testcase": "u3"},
+    ]
+    vcast = [
+        {"subprogram": "SwUFn_0910", "testcase": "SwUFn_0910", "result": "pass", "source": "VectorCAST"},
+        {"subprogram": "SwUFn_0911", "testcase": "SwUFn_0911", "result": "pass", "source": "VectorCAST"},
+        {"subprogram": "SwUFn_0912", "testcase": "SwUFn_0912", "result": "pass", "source": "VectorCAST"},
+    ]
+    mx = generate_uds_traceability_matrix(items, vcast_rows=suts + vcast, sds_pairs=sds_pairs)
+    by_sub = {u["subprogram"]: u for u in mx["unmapped_vcast"]}
+    assert by_sub["SwUFn_0910"]["layer"] == "APP_LEAF"
+    assert by_sub["SwUFn_0911"]["layer"] == "BOOT_REPROG"
+    assert by_sub["SwUFn_0912"]["layer"] == "BSW_DRIVER"
+    s = mx["summary"]
+    layer_sum = (
+        s["unmapped_layer_app_leaf"]
+        + s["unmapped_layer_bsw_driver"]
+        + s["unmapped_layer_boot_reprog"]
+        + s["unmapped_layer_lib_util"]
+        + s["unmapped_layer_test_artifact"]
+    )
+    assert layer_sum == s["unmapped_vcast_count"]
+    assert s["unmapped_layer_app_leaf"] >= 1
+    assert s["unmapped_layer_boot_reprog"] >= 1
+    assert s["unmapped_layer_bsw_driver"] >= 1
+
+
+def test_safety_flag_e2e_crc_clock_range_monitors():
+    """라운드112: E2E/CRC/range/CPU클록 안전·무결성 기제가 safety 플래그된다."""
+    items = [{"id": "SwTR_0101"}]
+    sds_pairs = [{"requirement_id": "SwTR_0101", "component_ids": ["foo_func"]}]
+    suts = [
+        {"requirement_id": "SwUFn_0920", "unit": "u8s_e2e_ac_profilecheck_sbcm0", "source": "SUTS", "testcase": "u1"},
+        {"requirement_id": "SwUFn_0921", "unit": "u8g_lib_u16bit_rangecheck", "source": "SUTS", "testcase": "u2"},
+        {"requirement_id": "SwUFn_0922", "unit": "u8s_cpupllstatuscheck", "source": "SUTS", "testcase": "u3"},
+        {"requirement_id": "SwUFn_0923", "unit": "sf_runcrc32verification", "source": "SUTS", "testcase": "u4"},
+    ]
+    vcast = [
+        {"subprogram": f"SwUFn_092{i}", "testcase": f"SwUFn_092{i}", "result": "pass", "source": "VectorCAST"}
+        for i in range(4)
+    ]
+    mx = generate_uds_traceability_matrix(items, vcast_rows=suts + vcast, sds_pairs=sds_pairs)
+    by_sub = {u["subprogram"]: u for u in mx["unmapped_vcast"]}
+    assert by_sub["SwUFn_0920"]["safety"] is True  # E2E profile check
+    assert by_sub["SwUFn_0921"]["safety"] is True  # range check
+    assert by_sub["SwUFn_0922"]["safety"] is True  # CPU PLL status monitor
+    assert by_sub["SwUFn_0923"]["safety"] is True  # CRC32 verification
+
+
+def test_safety_flag_no_false_positive_on_write2eeprom():
+    """'writE2Eeprom'(write2eeprom) 속 'e2e' substring으로 거짓 safety 플래그되면 안 됨."""
+    items = [{"id": "SwTR_0101"}]
+    sds_pairs = [{"requirement_id": "SwTR_0101", "component_ids": ["foo_func"]}]
+    suts = [{"requirement_id": "SwUFn_0930", "unit": "s_write2eeprom_partno", "source": "SUTS", "testcase": "u1"}]
+    vcast = [{"subprogram": "SwUFn_0930", "testcase": "SwUFn_0930", "result": "pass", "source": "VectorCAST"}]
+    mx = generate_uds_traceability_matrix(items, vcast_rows=suts + vcast, sds_pairs=sds_pairs)
+    by_sub = {u["subprogram"]: u for u in mx["unmapped_vcast"]}
+    assert by_sub["SwUFn_0930"]["safety"] is False
+
+
+def test_sds_comp_key_strips_leading_underscore():
+    """_sds_comp_key는 선행 언더스코어를 제거해 '_entrypoint'↔'entrypoint' bridge를 잇는다."""
+    assert _sds_comp_key("_entrypoint") == "entrypoint"
+    assert _sds_comp_key("entrypoint") == "entrypoint"
+    # 일반 함수는 불변(선행 _ 없음)
+    assert _sds_comp_key("s_motorstatectrl") == "s_motorstatectrl"
+    # 전부 언더스코어/빈값은 버려짐
+    assert _sds_comp_key("___") == ""
+
+
+def test_leading_underscore_func_bridges_to_matrix():
+    """SDS 'entrypoint' ↔ 테스트 '_entrypoint'(선행 _) 정규화 불일치로 끊겼던 SRS 추적 복구.
+
+    SwUFn → (SUTS)'_entrypoint' → (SDS)'entrypoint' → 매트릭스 req(SwTR_0106) 2-hop 완전 bridge.
+    """
+    items = [{"id": "SwTR_0106"}]
+    # SDS는 'entrypoint'(선행 _ 없음)로 명세
+    sds_pairs = [{"requirement_id": "SwTR_0106", "component_ids": ["swcom_35", "entrypoint"]}]
+    # SUTS unit은 '_entrypoint'(선행 _) — 정규화 불일치
+    suts = [{"requirement_id": "SwUFn_1710", "unit": "_entrypoint", "source": "SUTS", "testcase": "u1"}]
+    vcast = [{"subprogram": "SwUFn_1710", "testcase": "SwUFn_1710", "result": "pass", "source": "VectorCAST"}]
+    mx = generate_uds_traceability_matrix(items, vcast_rows=suts + vcast, sds_pairs=sds_pairs)
+    # 매트릭스 req로 완전 bridge → 미추적 목록에 없어야
+    assert all(u["subprogram"] != "SwUFn_1710" for u in mx["unmapped_vcast"])
+    row = mx["rows"][0]
+    assert row["requirement_id"] == "SwTR_0106"
+    assert row["test_count"] >= 1  # _entrypoint 시험이 SRS 행에 연결됨

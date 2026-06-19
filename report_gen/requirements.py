@@ -44,6 +44,13 @@ _ISR_RE = re.compile(r"(_isr$|_isr_|\bisr\b|_irq$|_irq_|_handler$|\bnmi\b)", re.
 # *_Guarded(11개) 등 20개 ASIL 안전기제가 amber 검토우선에 안 걸렸다. 실데이터(1005함수)에서
 # 신규 매치 20개 전부 진짜 안전기제(거짓양성 0) 확인 후 토큰 추가. 토큰은 충분히 구체적이라
 # (registercheck/cpuinstr/rom_test 등) 일반 함수 오탐 위험 낮음.
+# 라운드112 보강: ISO 26262-3/-6 통신·클록·범위 안전기제가 추가로 under-flag돼 있었다 —
+# E2E AC/CRC 프로파일 체크(AUTOSAR E2E protection), CRC 무결성, lib *bit_rangecheck(방어적
+# 범위검사), CPU PLL/OSC/clock status 감시가 빠져 있었다. 실데이터(2088함수 universe)에서
+# 신규 매치 23개 전부 진짜 안전/무결성 기제(거짓양성 0) 확인 후 토큰 추가.
+#  (?<![a-z])e2e : 'writE2Eeprom'(write2eeprom) 속 'e2e' substring 오탐 차단, e2e_*/e2eprofile 유지.
+#  crc/rangecheck/cpupll/cpuosc/pllstatus/oscstatus/failurecheck : 모두 안전·무결성 의미가
+#  내재된 구체 토큰이라 경계 없이도 오탐 없음(linfailchecktimer 등 진짜 TP 포착).
 _SAFETY_TOKEN_RE = re.compile(
     # 워드 경계 정밀화(라운드111 reviewer): substring 오탐 차단.
     #  (?<!de)fault : 'default'(handleDefault) 속 'fault' 차단 (s_MotorBattShortRun_HandleDefault).
@@ -52,7 +59,10 @@ _SAFETY_TOKEN_RE = re.compile(
     #     메모리 자가시험 ROM/RAM/EEPROM_Test 유지.
     r"((?<!de)fault|diag|safety|monitor|watchdog|wdg|(?<![a-z])trap|brake|steer|airbag|crash|asil"
     r"|guard|selftest|self_test|stackover|stackchk|cpuinstr|instructiontest|registercheck"
-    r"|register_check|mcuerror|eeprom_?test|(?<![a-z])rom_?test|(?<![a-z])ram_?test|eccerr|integrit)",
+    r"|register_check|mcuerror|eeprom_?test|(?<![a-z])rom_?test|(?<![a-z])ram_?test|eccerr|integrit"
+    # 라운드112: 통신(E2E/CRC)·클록(PLL/OSC)·범위·실패감시 안전기제.
+    r"|(?<![a-z])e2e|crc|rangecheck|range_check|pllstatus|oscstatus|clockcheck|clockstatus"
+    r"|cpustatus|cpupll|cpuosc|failurecheck|failcheck)",
     re.I,
 )
 
@@ -87,6 +97,11 @@ def _sds_comp_key(comp: Any) -> str:
     s = _SDS_TABLE_ARTIFACT_RE.sub("", s)
     s = s.split("(", 1)[0]            # 'name( void' / 'name(void)' → 'name'
     s = _SDS_ARRAY_SUBSCRIPT_RE.sub("", s).strip()
+    # 선행 언더스코어 정규화(라운드112): 링커/컴파일러 내부 표기('_entrypoint')와 설계 표기
+    # ('entrypoint')의 차이로 bridge가 끊기는 것을 막는다. 실데이터 검증: SDS 키 중 선행 '_'는
+    # 0개라 strip은 기존 매칭을 절대 깨지 않고(순수 가산) '_entrypoint'->'entrypoint' 1건만 새로
+    # 연결한다. 추적성 목적상 선행 '_'는 의미 구분자가 아니므로 양변에서 동일 제거.
+    s = s.lstrip("_")
     return s if _C_IDENT_RE.match(s) else ""
 
 
@@ -102,6 +117,61 @@ _RET_TYPE_PREFIX_RE = re.compile(r"^(?:u8|u16|u32|s8|s16|s32)(?=[sgl]_)")
 def _strip_ret_type_prefix(key: str) -> str:
     """SDS 함수키의 선행 반환형 토큰 제거(없으면 원본). 'u16s_x'->'s_x', 'u8g_y'->'g_y'."""
     return _RET_TYPE_PREFIX_RE.sub("", key)
+
+
+# ── ISO 26262 미추적 함수 계층(layer) 분류 (라운드112) ──
+# SRS 미추적 VectorCAST/SUTS 함수를 'SwDS가 그 단위를 어느 계층에서 명세·추적해야 하는가'로
+# 분류해, '애플리케이션 설계 공백(=실제 추적성 finding)'과 '정당한 범위 경계(BSW/부트/라이브러리)'를
+# 정직히 구분 노출한다. 이 분류는 보고 hint일 뿐 in_uds/sds_reqs/safety 같은 1차 추적 판정을
+# 바꾸지 않는다(순수 additive). 안전성은 직교 신호이므로 layer가 아니라 _SAFETY_TOKEN_RE 기반
+# safety 플래그로 따로 표시한다(가드연산 같은 안전기제도 도메인은 APP일 수 있으므로).
+# 분류 원칙(보수): 인프라 토큰은 함수명 core(선행 _·반환형·저장클래스 제거) 선두 앵커 위주로 잡아
+# 애플리케이션 함수(중간에 eeprom 등 포함)를 인프라로 잘못 삼켜 공백을 숨기는 것을 막는다.
+# 불확실하면 APP_LEAF(=검토 대상)로 떨어뜨려 안전측(공백 미은닉)으로 편향한다.
+_LAYER_CORE_PREFIX_RE = re.compile(r"^(?:u8|u16|u32|s8|s16|s32)?[sgl]_")
+_LAYER_BOOT_RE = re.compile(
+    # entrypoint는 선두 앵커(^) — 'validate_entrypoint'/'check_entrypoint_valid' 같은 APP
+    # 함수를 BOOT로 오삼켜 공백을 숨기지 않도록(라운드112 W2). 실 부트 엔트리는 core가 정확히
+    # 'entrypoint'라 ^로 충분(실데이터 '_entrypoint'는 lstrip 후 core='entrypoint').
+    r"(^sf_|secureflash|bootload|^boot|^reprog|^clearreprog|^chkprog|^checkprog|^setreprog"
+    r"|^getreprog|^eep|^syseepromctrl|^entrypoint|jump_main|chkappisvalid|copy_shadow"
+    r"|backupsector|fccob|^linuds|linudsreprog|^writeblock$|^writeword$)",
+    re.I,
+)
+_LAYER_BSW_RE = re.compile(
+    r"(^adc|^pwm|^spi|^gpio|^port|^timer|^pt[0-9]|^dma|^clock|^osc|^pll|^lin|^can|^uart|^sci"
+    r"|drv8706|iim20670|^drvin|^drvout|spictrl|lintp|lin_lld|sbcm|^sbc|^hw_|^mcu_|^reg_)",
+    re.I,
+)
+_LAYER_LIB_RE = re.compile(
+    r"(sha256|^aes|crc32|^lib_|_lib_|movingaverage|_conv$|_conv_|slope_conv|^math|^util)",
+    re.I,
+)
+
+
+def _classify_unmapped_layer(names: List[str]) -> str:
+    """미추적 함수명 후보(정규화 lower 배열)를 ISO 26262 SwDS 계층으로 분류.
+
+    반환: 'TEST_ARTIFACT' | 'BOOT_REPROG' | 'BSW_DRIVER' | 'LIB_UTIL' | 'APP_LEAF'.
+    우선순위 TEST>BOOT>BSW>LIB>APP(기본값). names가 비면 APP_LEAF.
+    """
+    # 방어적 소문자화(라운드112 I2): docstring 계약(lower 배열)을 보장하고, _C_IDENT_RE가
+    # [a-z_] 기반이라 대소문자 혼재 입력이 거짓 TEST_ARTIFACT로 분류되는 latent edge를 막는다.
+    cand = [n.lower() for n in (names or []) if n]
+    if not cand:
+        return "APP_LEAF"
+    first = cand[0]
+    # 순수 C 식별자가 아니거나 VectorCAST range-test 산출물은 추적 대상 함수가 아님.
+    if not _C_IDENT_RE.match(first.lstrip("_")) or re.match(r"^(range$|<<)", first, re.I):
+        return "TEST_ARTIFACT"
+    cores = " ".join(_LAYER_CORE_PREFIX_RE.sub("", n.lstrip("_")) for n in cand)
+    if _LAYER_BOOT_RE.search(cores):
+        return "BOOT_REPROG"
+    if _LAYER_BSW_RE.search(cores):
+        return "BSW_DRIVER"
+    if _LAYER_LIB_RE.search(cores):
+        return "LIB_UTIL"
+    return "APP_LEAF"
 
 
 _REQ_ID_PAT = re.compile(r"\b(Sw(?:TR|TSR|NTR|NTSR|CNF|EI|ST|STR|Fn|TK)_\d+)\b", re.I)
@@ -2007,7 +2077,10 @@ def generate_uds_traceability_matrix(
         # SDS 함수명 bridge(sds_func_to_reqs, → SRS 요구사항)를 함께 사용한다.
         if unit and source in ("SUTS", "SITS"):
             mapped_rids = list(func_to_reqs.get(unit, []))
-            for r in sds_func_to_reqs.get(unit, []):
+            # SDS 키는 _sds_comp_key로 정규화돼 있으므로 조회 키도 동일 정규화해야 한다
+            # (라운드112): 선행 '_'('_entrypoint') 등으로 raw 키가 어긋나면 정당한 SRS 추적이
+            # silent 누락된다. func_to_reqs는 raw lowercase 키 규약이라 그대로 둔다.
+            for r in sds_func_to_reqs.get(_sds_comp_key(unit), []):
                 if r not in mapped_rids:
                     mapped_rids.append(r)
             for mrid in mapped_rids:
@@ -2021,7 +2094,7 @@ def generate_uds_traceability_matrix(
             seen_sits: set = set()
             for swufn in _SWUFN_RE.findall(str(row.get("testcase") or "")):
                 for fn in swufn_to_func.get(_normalize_req_id(swufn), []):
-                    for mrid in sds_func_to_reqs.get(fn, []):
+                    for mrid in sds_func_to_reqs.get(_sds_comp_key(fn), []):
                         if mrid in req_id_set and mrid != orig_rid and mrid not in seen_sits:
                             seen_sits.add(mrid)
                             enriched_rows.append({**row, "requirement_id": mrid, "trace_type": "indirect"})
@@ -2037,14 +2110,14 @@ def generate_uds_traceability_matrix(
             vcast_input_rows += 1
             seen_vc: set = set()
             sub_lower = subprogram.lower()
-            for mrid in sds_func_to_reqs.get(sub_lower, []):
+            for mrid in sds_func_to_reqs.get(_sds_comp_key(sub_lower), []):
                 if mrid in req_id_set and mrid not in seen_vc:
                     seen_vc.add(mrid)
                     enriched_rows.append({**row, "requirement_id": mrid, "trace_type": "indirect"})
             hay = subprogram + " " + str(row.get("testcase") or "")
             for swufn in _SWUFN_RE.findall(hay):
                 for fn in swufn_to_func.get(_normalize_req_id(swufn), []):
-                    for mrid in sds_func_to_reqs.get(fn, []):
+                    for mrid in sds_func_to_reqs.get(_sds_comp_key(fn), []):
                         if mrid in req_id_set and mrid not in seen_vc:
                             seen_vc.add(mrid)
                             enriched_rows.append({**row, "requirement_id": mrid, "trace_type": "indirect"})
@@ -2119,6 +2192,11 @@ def generate_uds_traceability_matrix(
                             or any(_SAFETY_TOKEN_RE.search(str(f)) for f in resolved)
                             or any(_SAFETY_TOKEN_RE.search(str(f)) for f in uds_funcs)
                         ),
+                        # ISO 26262 SwDS 계층(라운드112) — 추적 공백을 정직히 분리: APP_LEAF/
+                        # BSW_DRIVER/BOOT_REPROG/LIB_UTIL/TEST_ARTIFACT. 보고 hint이며 안전성은
+                        # 직교(safety 플래그). 입력은 해석된 실제 함수명(_uds_cands) — SwUFn ID
+                        # 자기-메아리를 피하고 도메인 토큰이 실린 진짜 이름으로 분류한다.
+                        "layer": _classify_unmapped_layer(_uds_cands),
                     })
                 else:
                     # worst-case 집계: 동일 subprogram의 후속 행이 FAIL이면 기존 항목 result를
@@ -2149,8 +2227,10 @@ def generate_uds_traceability_matrix(
         src_list = list(map_lookup.get(rid, []))
         # SDS 함수명 bridge: 이 SRS 요구사항에 SDS가 귀속한 함수 중 UDS에 존재하는 것을
         # UDS 추적(source_ids)으로 채운다 (UDS가 SwSTR로 추적해 직접 안 붙던 문제 해소).
+        # 조회 키는 _sds_comp_key로 정규화 — SDS 키 공간과 일치(라운드112 W1: 다른 4개 bridge
+        # 조회 사이트와 동일하게, 선행 '_'('_entrypoint') 등 정규화 차이로 끊기는 것 방지).
         for flower, fdisp in uds_all_funcs.items():
-            if rid in sds_func_to_reqs.get(flower, []) and fdisp not in src_list:
+            if rid in sds_func_to_reqs.get(_sds_comp_key(flower), []) and fdisp not in src_list:
                 src_list.append(fdisp)
         sds_list = sds_lookup.get(rid, [])
         if src_list:
@@ -2279,6 +2359,14 @@ def generate_uds_traceability_matrix(
             "unmapped_uds_linked": sum(1 for u in unmapped_vcast if u.get("in_uds")),
             # UDS에도 없는(단위설계 미명세) 미추적 함수 수 — 진짜 설계 공백(검토 우선순위 ↑).
             "unmapped_design_gap": sum(1 for u in unmapped_vcast if not u.get("in_uds")),
+            # ISO 26262 SwDS 계층별 미추적 함수 수(라운드112) — '애플리케이션 설계 공백
+            # (app_leaf=실 finding)'과 '정당한 범위 경계(bsw_driver/boot_reprog/lib_util)'를
+            # 분리 집계. 프론트 루트는 unmapped_vcast list의 layer로 직접 재계산(카운트 동기).
+            "unmapped_layer_app_leaf": sum(1 for u in unmapped_vcast if u.get("layer") == "APP_LEAF"),
+            "unmapped_layer_bsw_driver": sum(1 for u in unmapped_vcast if u.get("layer") == "BSW_DRIVER"),
+            "unmapped_layer_boot_reprog": sum(1 for u in unmapped_vcast if u.get("layer") == "BOOT_REPROG"),
+            "unmapped_layer_lib_util": sum(1 for u in unmapped_vcast if u.get("layer") == "LIB_UTIL"),
+            "unmapped_layer_test_artifact": sum(1 for u in unmapped_vcast if u.get("layer") == "TEST_ARTIFACT"),
         },
         # 역방향 추적성 공백 — '시험은 했으나 이 SRS에 안 닿는' VectorCAST subprogram 전체 목록.
         # 트리 뷰의 'SRS 미추적 시험 포함' 토글이 의미 3버킷으로 묶어 보여준다.
