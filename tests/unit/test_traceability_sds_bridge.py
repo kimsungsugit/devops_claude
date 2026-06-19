@@ -7,9 +7,12 @@ SUTS/SITS unit을 SRS 행에 연결한다(사용자 결정: "SDS로 bridge"). �
 """
 from __future__ import annotations
 
+import pytest
+
 from report_gen.requirements import (
     _extract_requirement_blocks,
     _normalize_req_id,
+    _safe_docx_open,
     generate_uds_traceability_matrix,
 )
 
@@ -391,3 +394,49 @@ def test_matrix_requirement_name_picks_clean_longest():
     mx = generate_uds_traceability_matrix(items)
     row = next(r for r in mx["rows"] if r["requirement_id"] == "SwTR_0101")
     assert row["requirement_name"] == "Auto Close"     # 빈 첫 파편이 아니라 깨끗한 제목
+
+
+# ── 손상 임베드 파트 복원 docx 로더 (라운드110) ───────────────────────────
+# python-docx는 문서를 열 때 모든 파트를 eager 로드 → 깨진 임베드 이미지 1개로 문서 전체가
+# 안 열린다. KJPDS02 SDS v2.03이 깨진 image*.png 32개로 sds_pairs=0 되던 회귀를 고정.
+
+
+def test_safe_docx_open_recovers_from_corrupt_embedded_image():
+    """본문은 멀쩡하고 임베드 이미지만 깨진 docx를 _safe_docx_open이 복원해 연다."""
+    import io
+    import struct
+    import zipfile
+
+    docx = pytest.importorskip("docx")
+    # 표 + 이미지가 있는 정상 docx 생성
+    d = docx.Document()
+    tb = d.add_table(rows=1, cols=2)
+    tb.rows[0].cells[0].text = "SC ID"
+    tb.rows[0].cells[1].text = "SwCom_7"
+    png = bytes.fromhex(
+        "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489"
+        "0000000a49444154789c63000100000500010d0a2db40000000049454e44ae426082"
+    )
+    d.add_picture(io.BytesIO(png))
+    buf = io.BytesIO()
+    d.save(buf)
+    raw = bytearray(buf.getvalue())
+
+    # 이미지 멤버의 압축 데이터 첫 바이트를 flip → read 시 CRC/zip 오류 유발(로컬헤더 정상,
+    # 중앙디렉터리 정상 → 문서 구조는 열리되 그 멤버 read만 실패: 실제 v2.03 증상 재현)
+    zin = zipfile.ZipFile(io.BytesIO(bytes(raw)))
+    img = next(i for i in zin.infolist() if i.filename.startswith("word/media/"))
+    off = img.header_offset
+    n, m = struct.unpack("<HH", bytes(raw[off + 26:off + 30]))
+    data_start = off + 30 + n + m
+    for k in range(data_start, data_start + 6):
+        raw[k] ^= 0xFF
+    corrupt = bytes(raw)
+
+    # 1) 일반 python-docx 열기는 실패해야(손상 멤버) — 전제 확인
+    with pytest.raises(Exception):
+        docx.Document(io.BytesIO(corrupt))
+    # 2) _safe_docx_open은 손상 이미지를 우회해 열고, 본문 표가 읽혀야 한다
+    doc = _safe_docx_open(io.BytesIO(corrupt))
+    cells = [c.text for t in doc.tables for r in t.rows for c in r.cells]
+    assert "SwCom_7" in cells

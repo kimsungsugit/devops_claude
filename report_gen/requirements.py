@@ -400,9 +400,60 @@ def _extract_function_info_from_docx(doc) -> Dict[str, Dict[str, Any]]:
     return result
 
 
+# 손상 임베드 파트(깨진 이미지 등)로 python-docx의 Package.open이 BadZipFile을 던지는 docx를
+# 위해, 읽히는 멤버만 재압축해 여는 resilient 로더. python-docx는 문서를 열 때 모든 파트를
+# eager 로드하므로 임베드 이미지 1개만 깨져도 본문(document.xml)이 멀쩡한데 전체가 안 열린다.
+# (라운드110: KJPDS02 SDS v2.03이 깨진 image4.png 등 32개로 sds_pairs=0 되던 회귀.)
+# 정상 문서는 첫 시도에서 바로 열려 fast-path, 예외 시에만 재압축 우회 → 투명·저위험.
+_DOCX_PNG_1x1 = bytes.fromhex(
+    "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489"
+    "0000000a49444154789c63000100000500010d0a2db40000000049454e44ae426082"
+)
+_DOCX_IMG_EXT = (".png", ".jpg", ".jpeg", ".gif", ".bmp", ".emf", ".wmf", ".tif", ".tiff")
+
+
+def _safe_docx_open(source: Any) -> Any:
+    """python-docx로 docx를 연다. 손상 파트로 실패하면 읽히는 멤버만 재압축 후 재시도.
+
+    손상 이미지는 유효한 1x1 PNG로 대체해 relationship을 유지한다(표/문단 추출에는
+    이미지가 불필요). document.xml이 정상이면 매핑 추출이 그대로 동작한다.
+    """
+    import docx  # type: ignore
+
+    try:
+        return docx.Document(source)
+    except Exception:
+        pass
+    import io
+    import zipfile
+
+    if isinstance(source, (bytes, bytearray)):
+        raw = bytes(source)
+    elif hasattr(source, "read"):          # file-like(BytesIO 등) — 첫 시도가 소비했을 수 있어 되감기
+        try:
+            source.seek(0)
+        except Exception:
+            pass
+        raw = source.read()
+    else:
+        raw = Path(source).read_bytes()
+    src = zipfile.ZipFile(io.BytesIO(raw))
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zout:
+        for info in src.infolist():
+            try:
+                blob = src.read(info.filename)
+            except Exception:
+                # 손상 멤버: 이미지면 유효한 1x1 PNG로 대체(rels 유지), 그 외 빈 바이트
+                blob = _DOCX_PNG_1x1 if info.filename.lower().endswith(_DOCX_IMG_EXT) else b""
+            zout.writestr(info, blob)
+    buf.seek(0)
+    return docx.Document(buf)
+
+
 def _extract_sds_partition_map(doc_path: str) -> Dict[str, Dict[str, str]]:
     try:
-        import docx  # type: ignore
+        pass  # type: ignore
     except Exception:
         return {}
     if not doc_path:
@@ -411,7 +462,7 @@ def _extract_sds_partition_map(doc_path: str) -> Dict[str, Dict[str, str]]:
     if not path.exists():
         return {}
     try:
-        doc = docx.Document(str(path))
+        doc = _safe_docx_open(str(path))
     except Exception:
         return {}
     mapping: Dict[str, Dict[str, str]] = {}
@@ -795,7 +846,7 @@ def _build_req_map_from_doc_paths(doc_paths: List[str], texts: Optional[List[str
             if not path.exists() or path.suffix.lower() != ".docx":
                 continue
             try:
-                doc = docx.Document(str(path))
+                doc = _safe_docx_open(str(path))
             except Exception:
                 continue
 
