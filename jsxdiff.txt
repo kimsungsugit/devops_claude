@@ -1,0 +1,768 @@
+commit cad08724b2a2cfc40ce667f6896dc1c78f8d8be5
+Author: kimsungsu <forest888@naver.com>
+Date:   Thu Jun 18 17:00:07 2026 +0900
+
+    chore(auto): end-of-day snapshot 2026-06-18
+
+diff --git a/frontend-v2/src/components/sections/SrsSdsSection.jsx b/frontend-v2/src/components/sections/SrsSdsSection.jsx
+index c68b290..5a9d230 100644
+--- a/frontend-v2/src/components/sections/SrsSdsSection.jsx
++++ b/frontend-v2/src/components/sections/SrsSdsSection.jsx
+@@ -315,19 +315,28 @@ export default function SrsSdsSection({ job, analysisResult }) {
+         cache_root: cacheRoot || '.devops_pro_cache',
+         build_selector: cfg?.buildSelector || 'lastSuccessfulBuild',
+       });
+-      // VectorCAST bridge 가시성: SRS에 연결된 함수 수 / 미연결(부트로더·ISR 등
+-      // SRS 추적 대상이 아닌 함수). 미연결 수가 급증하면 bridge 파손 신호.
++      // 이 시점까지의 경고 = 실제 step 실패(SUTS/SITS/VectorCAST 추출 실패·매핑 없음).
++      // 아래 untraced 경고는 정보성이므로 캐시 가드 판단에서 제외하기 위해 먼저 스냅샷.
++      const hadStepFailure = stepWarnings.length > 0;
++      // VectorCAST bridge 가시성: SRS에 연결된 함수 수 / 미연결(이 SRS 범위 밖 함수).
++      // 미연결엔 단위시험된 함수(SDS 명세 공백 후보)도 포함 — 트리 'SRS 미추적 시험'에서 확인.
+       const vcSum = (data?.matrix?.summary) || data?.summary || {};
+       if (typeof vcSum.vcast_input_rows === 'number' && vcSum.vcast_input_rows > 0) {
+         const untraced = vcSum.vcast_untraced_rows ?? 0;
+         if (untraced > 0) {
+-          stepWarnings.push(`VectorCAST ${vcSum.vcast_traced_rows}/${vcSum.vcast_input_rows} 함수가 SRS에 연결됨. ${untraced}개는 SRS 추적 대상 아님(부트로더·ISR 등) — 정상이나, 이 수가 급증하면 SUTS/SDS 매핑을 확인하세요.`);
++          const sutsTested = vcSum.unmapped_suts_tested ?? 0;
++          const tail = sutsTested > 0 ? ` 이 중 ${sutsTested}개는 단위시험까지 됨(SDS 명세 공백 가능) — 트리 'SRS 미추적 시험'에서 확인하세요.` : ' 부트로더·ISR 등 — 정상이나, 이 수가 급증하면 SUTS/SDS 매핑을 확인하세요.';
++          stepWarnings.push(`VectorCAST ${vcSum.vcast_traced_rows}/${vcSum.vcast_input_rows} 함수가 SRS에 연결됨. ${untraced}개는 이 SRS 범위 밖.${tail}`);
+         }
+       }
+       // Attach metadata
+       data._dataSources = dataSources;
+       setMatrix(data);
+-      matrixCacheRef.current = { key: cacheKey, data };
++      // 부분 실패(step 실패) 시 캐시 저장 안 함 — 불완전 매트릭스가 '캐시 사용'으로 굳어
++      // 시험 evidence 누락을 silent 은폐하는 것 방지(deep-analyze WARNING). 정상 시에만 캐시.
++      if (!hadStepFailure) {
++        matrixCacheRef.current = { key: cacheKey, data };
++      }
+       if (dataSources.length > 0) {
+         toast('success', `매트릭스 생성 완료: ${dataSources.join(', ')}`);
+       }
+@@ -650,11 +659,30 @@ const SOURCE_COLORS = { STS: '#2563eb', SUTS: '#7c3aed', SITS: '#0891b2', Vector
+ const CONFIDENCE_LABELS = { exact: 'Exact', direct: 'Direct', indirect: 'Indirect', fuzzy: 'Fuzzy', mixed: 'Mixed' };
+ const CONFIDENCE_COLORS = { exact: '#16a34a', direct: '#16a34a', indirect: '#d97706', fuzzy: '#9ca3af', mixed: '#2563eb' };
+ 
++// 추적성 공백 배지 — 정/역방향 공백 카운트를 상시 노출(0이면 녹색, >0이면 amber).
++function GapBadge({ label, value, tone, title, sub }) {
++  const warn = tone === 'warn';
++  const c = warn ? COVERAGE_COLORS.partial : COVERAGE_COLORS.covered;
++  return (
++    <span title={title} style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '4px 10px', borderRadius: 16,
++      background: warn ? c.bg : '#f0fdf4', border: `1px solid ${c.border}`, whiteSpace: 'nowrap' }}>
++      <span style={{ color: 'var(--fg)' }}>{label}</span>
++      <span style={{ fontWeight: 700, fontSize: 13, color: warn ? c.fg : COVERAGE_COLORS.covered.fg }}>{value}</span>
++      {sub ? <span style={{ fontSize: 10, color: c.fg, fontWeight: 600 }}>({sub})</span> : null}
++    </span>
++  );
++}
++
+ function TraceMatrix({ matrix }) {
+   const inner = matrix?.matrix ?? matrix;
+   const rows = Array.isArray(inner?.rows) ? inner.rows : (Array.isArray(inner?.items) ? inner.items : []);
+   const summary = inner?.summary ?? matrix?.summary;
+   const dataSources = matrix?._dataSources || [];
++  // 역방향 추적성 공백 — 시험은 됐으나 이 SRS에 안 닿는 VectorCAST 함수(백엔드 unmapped_vcast).
++  // 트리 'SRS 미추적 시험 포함' 토글이 의미 3버킷으로 묶어 별도 루트로 표시한다.
++  // unmappedSupported: 키 자체 부재(로컬 파일모드 — 미계산)와 빈 배열(공백 0)을 구분(deep-analyze).
++  const unmappedVcast = Array.isArray(inner?.unmapped_vcast) ? inner.unmapped_vcast : [];
++  const unmappedSupported = inner != null && inner.unmapped_vcast !== undefined;
+ 
+   const [searchTerm, setSearchTerm] = useState('');
+   const [statusFilter, setStatusFilter] = useState('all');
+@@ -666,9 +694,26 @@ function TraceMatrix({ matrix }) {
+   const [sortKey, setSortKey] = useState(null);    // 'req_id' | 'func_count' | 'test_count' | 'status'
+   const [sortAsc, setSortAsc] = useState(true);
+   const [expandedReqId, setExpandedReqId] = useState(null); // expanded row by requirement_id
++  const [viewMode, setViewMode] = useState('table');        // 'table' | 'tree' — additive tree view (기존 표는 무변경)
++  const [expandedTreeNodes, setExpandedTreeNodes] = useState(() => new Set()); // 트리 노드 id 집합 (다중 펼침)
++  const [includeUnmapped, setIncludeUnmapped] = useState(false); // 트리: SRS 미추적 시험 별도 루트 표시 토글
+ 
+   // Reset page when rows change (e.g., new matrix data)
+-  useEffect(() => { setCurrentPage(0); setExpandedReqId(null); }, [rows]);
++  useEffect(() => { setCurrentPage(0); setExpandedReqId(null); setExpandedTreeNodes(new Set()); }, [rows]);
++
++  // 트리 펼침은 page-absolute nodeId를 쓰므로 페이지 이동엔 유지되지만, 행 집합/정렬/
++  // 페이지크기가 바뀌면 절대 인덱스가 다른 행을 가리킬 수 있어(특히 anonymous 행) 초기화한다.
++  useEffect(() => { setExpandedTreeNodes(new Set()); },
++    [searchTerm, statusFilter, sourceFilter, reqTypeFilter, testResultFilter, sortKey, sortAsc, pageSize]);
++
++  // 트리 노드 펼침 토글 — 불변 업데이트(새 Set)로 React 리렌더 보장
++  const toggleTreeNode = useCallback((nodeId) => {
++    setExpandedTreeNodes(prev => {
++      const next = new Set(prev);
++      if (next.has(nodeId)) next.delete(nodeId); else next.add(nodeId);
++      return next;
++    });
++  }, []);
+ 
+   // Drill-down: jump the matrix straight to the uncovered row the user clicked
+   // in the Top-N list. Uses the existing filter+search+expand state so the UX
+@@ -724,6 +769,33 @@ function TraceMatrix({ matrix }) {
+     return { covered, partial, uncovered, total, partialWithDesign, designTotal, pct: total > 0 ? Math.round((covered / total) * 100) : 0 };
+   }, [rows]);
+ 
++  // V-Model 단계별 추적성 공백 — 정방향(설계 단절)·역방향(미추적 시험)을 viewMode와
++  // 무관하게 항상 노출(deep-analyze WARNING: 공백이 covered 녹색/토글 뒤에 묻힘).
++  //  - sdsNoUds: SRS→SDS는 됐으나 SDS→UDS 끊김(설계 단절)
++  //  - udsUntestedFns: UDS 함수 중 SUTS 단위시험 미연결(정방향 검증 공백)
++  //  - orphanSuts: 어느 UDS 함수에도 안 붙는 SUTS(역방향: 시험有 설계無)
++  //  - unmappedTotal/Suts: VectorCAST 미추적(역방향) — 백엔드 summary 우선
++  const gapStats = useMemo(() => {
++    let sdsNoUds = 0, udsUntestedFns = 0, udsFnTotal = 0, orphanSuts = 0;
++    for (const r of rows) {
++      const sds = Array.isArray(r.sds_components) ? r.sds_components : [];
++      const uds = Array.isArray(r.source_ids) ? r.source_ids : [];
++      if (sds.length > 0 && uds.length === 0) sdsNoUds++;
++      const m = _unitTestMap(r);
++      udsFnTotal += uds.length;
++      for (const fn of uds) if (!((m.get(_normFn(fn)) || []).length)) udsUntestedFns++;
++      const udsSet = new Set(uds.map(_normFn));
++      for (const t of _stageMembers(r, 'SUTS').items) {
++        const u = _normFn(t && t.unit);
++        if (u && !udsSet.has(u)) orphanSuts++;
++      }
++    }
++    const unmappedTotal = summary?.unmapped_vcast_count ?? unmappedVcast.length;
++    const unmappedSuts = summary?.unmapped_suts_tested ?? unmappedVcast.filter(u => u && u.category === 'suts_tested').length;
++    const hasAny = sdsNoUds || udsUntestedFns || orphanSuts || unmappedTotal;
++    return { sdsNoUds, udsUntestedFns, udsFnTotal, orphanSuts, unmappedTotal, unmappedSuts, hasAny };
++  }, [rows, summary, unmappedVcast]);
++
+   // Filter + sort
+   const filtered = useMemo(() => {
+     let result = rows;
+@@ -811,20 +883,28 @@ function TraceMatrix({ matrix }) {
+     return s.includes(',') || s.includes('"') || s.includes('\n') ? `"${s.replace(/"/g, '""')}"` : s;
+   };
+   const exportCSV = () => {
+-    const header = ['요구사항 ID', 'SDS 컴포넌트(T1)', 'UDS 함수(T2)', '함수 수', 'STS TC(T3)', 'SUTS TC(T4)', 'SITS TC(T5)', 'VectorCAST', '테스트 수', 'Pass', 'Fail', '상태', '신뢰도'];
++    // 감사 증빙: Pass/Fail은 VectorCAST 실행 결과만(STS/SUTS/SITS는 매핑·통과 아님).
++    // 설계단절·단위시험미연결 공백 플래그 + 역방향 미추적 섹션을 포함해 완전 스냅샷으로 만든다.
++    const header = ['요구사항 ID', 'SDS 컴포넌트(T1)', 'UDS 함수(T2)', '함수 수', 'STS TC(T3)', 'SUTS TC(T4)', 'SITS TC(T5)', 'VectorCAST', '테스트 매핑 수', 'VectorCAST실행 Pass', 'VectorCAST실행 Fail', '상태(매핑)', '설계단절(SDS有UDS無)', 'UDS함수 단위시험미연결', '신뢰도'];
+     const csvRows = [header.join(',')];
+-    for (const r of filtered) {
++    // 화면 필터와 무관하게 전체 rows를 내보낸다(필터 종속 재현성 문제 해소 — deep-analyze).
++    for (const r of rows) {
+       const status = deriveStatus(r);
+       const rawTests = Array.isArray(r.tests) ? r.tests : [];
+       const stsCount = (r.sts_tests ?? rawTests.filter(t => t.source === 'STS')).length;
+       const sutsCount = (r.suts_tests ?? rawTests.filter(t => t.source === 'SUTS')).length;
+       const sitsCount = (r.sits_tests ?? rawTests.filter(t => t.source === 'SITS')).length;
+       const vcastCount = rawTests.filter(t => t.source === 'VectorCAST').length;
++      const sds = Array.isArray(r.sds_components) ? r.sds_components : [];
++      const uds = Array.isArray(r.source_ids) ? r.source_ids : [];
++      const designBreak = sds.length > 0 && uds.length === 0 ? 'Y' : '';
++      const m = _unitTestMap(r);
++      const untestedFns = uds.filter(fn => !((m.get(_normFn(fn)) || []).length)).length;
+       csvRows.push([
+         csvEscape(r.requirement_id ?? ''),
+-        csvEscape((r.sds_components ?? []).join('; ')),
+-        csvEscape((r.source_ids ?? []).join('; ')),
+-        (r.source_ids ?? []).length,
++        csvEscape(sds.join('; ')),
++        csvEscape(uds.join('; ')),
++        uds.length,
+         stsCount,
+         sutsCount,
+         sitsCount,
+@@ -833,9 +913,25 @@ function TraceMatrix({ matrix }) {
+         r.pass_count ?? 0,
+         r.fail_count ?? 0,
+         status,
++        designBreak,
++        untestedFns,
+         r.confidence ?? '-',
+       ].join(','));
+     }
++    // 역방향 추적성 공백 — 'SRS 미추적 시험'(시험됐으나 이 SRS에 안 닿음) 별도 섹션.
++    if (unmappedVcast.length > 0) {
++      csvRows.push('');
++      csvRows.push(csvEscape(`# SRS 미추적 시험 (역방향 공백 ${unmappedVcast.length}종 — 시험됐으나 이 SRS 요구사항 미명세)`));
++      csvRows.push(['Subprogram', '해석된 함수', '분류', 'VectorCAST 결과'].join(','));
++      for (const u of unmappedVcast) {
++        csvRows.push([
++          csvEscape(u.subprogram ?? ''),
++          csvEscape((Array.isArray(u.resolved_funcs) ? u.resolved_funcs : []).join('; ')),
++          csvEscape(u.category ?? ''),
++          csvEscape(u.result ?? ''),
++        ].join(','));
++      }
++    }
+     const blob = new Blob(['\uFEFF' + csvRows.join('\n')], { type: 'text/csv;charset=utf-8;' });
+     const url = URL.createObjectURL(blob);
+     const a = document.createElement('a');
+@@ -859,8 +955,8 @@ function TraceMatrix({ matrix }) {
+           <div style={{ padding: '10px 14px', background: 'var(--bg)', borderBottom: '1px solid var(--border)', fontWeight: 600, fontSize: 13, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+             <span>추적성 요약</span>
+             {summary?.total_tests > 0 && (
+-              <span style={{ fontSize: 11, fontWeight: 400, color: 'var(--text-muted)' }}>
+-                테스트 {summary.total_pass ?? 0} Pass / {summary.total_fail ?? 0} Fail / {summary.total_tests} Total
++              <span style={{ fontSize: 11, fontWeight: 400, color: 'var(--text-muted)' }} title="P/F는 VectorCAST 실행 결과만. STS/SUTS/SITS는 '매핑 존재'(중립)이며 시험 통과 아님 — 매핑 엔트리는 Total에 포함되나 P/F 대상이 아님.">
++                실행검증(VectorCAST) {summary.total_pass ?? 0}P / {summary.total_fail ?? 0}F · 매핑 {summary.total_tests}건(STS/SUTS/SITS=매핑·통과 아님)
+               </span>
+             )}
+           </div>
+@@ -883,11 +979,11 @@ function TraceMatrix({ matrix }) {
+               </tr>
+               <tr style={{ background: COVERAGE_COLORS.covered.bg }}>
+                 <td style={{ padding: '6px 12px', fontWeight: 600, color: COVERAGE_COLORS.covered.fg }}>
+-                  Covered (설계+테스트 완료)
++                  Covered (설계+시험 <em>매핑</em> 존재)
+                 </td>
+                 <td style={{ padding: '6px 12px', textAlign: 'center', fontWeight: 700, fontSize: 14, color: COVERAGE_COLORS.covered.fg }}>{coverage.covered}</td>
+                 <td style={{ padding: '6px 12px', textAlign: 'center', fontWeight: 600, color: COVERAGE_COLORS.covered.fg }}>{coverage.pct}%</td>
+-                <td style={{ padding: '6px 12px', fontSize: 11 }}>UDS 소스 매핑 + STS/VectorCAST 테스트 매핑 모두 존재</td>
++                <td style={{ padding: '6px 12px', fontSize: 11 }}>UDS 소스 매핑 + STS/SUTS/SITS/VectorCAST 시험 <strong>매핑</strong> 존재 — 매핑일 뿐 시험 통과 아님(P/F는 VectorCAST만)</td>
+               </tr>
+               {coverage.partial > 0 && (
+                 <tr style={{ background: COVERAGE_COLORS.partial.bg }}>
+@@ -940,6 +1036,37 @@ function TraceMatrix({ matrix }) {
+         </div>
+       )}
+ 
++      {/* 추적성 공백 (양방향) — viewMode 무관 상시 노출. 정방향 설계 단절 + 역방향 미명세 시험.
++          deep-analyze: 공백이 covered 녹색·토글 뒤에 묻혀 감사에서 누락되는 문제 해소. */}
++      {gapStats.hasAny ? (
++        <div style={{ marginBottom: 12, border: `1px solid ${COVERAGE_COLORS.partial.border}`, borderLeft: `4px solid ${COVERAGE_COLORS.partial.border}`, borderRadius: 8, padding: '10px 14px', background: COVERAGE_COLORS.partial.bg + '40' }}>
++          <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 6, color: COVERAGE_COLORS.partial.fg }}>
++            ⚠ 추적성 공백 (양방향 — 매핑 존재만으로 가려지지 않게 상시 표시)
++          </div>
++          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, fontSize: 12 }}>
++            <GapBadge label="SDS有·UDS無 (설계 단절)" value={gapStats.sdsNoUds} tone={gapStats.sdsNoUds ? 'warn' : 'ok'}
++              title="SRS→SDS는 추적됐으나 SDS→UDS(단위설계)가 끊긴 행" />
++            <GapBadge label="UDS함수 단위시험 미연결" value={gapStats.udsUntestedFns} tone={gapStats.udsUntestedFns ? 'warn' : 'ok'}
++              title={`설계된 UDS 함수 ${gapStats.udsFnTotal}개 중 SUTS 단위시험이 안 붙은 함수`} />
++            <GapBadge label="orphan SUTS (시험有 설계無)" value={gapStats.orphanSuts} tone={gapStats.orphanSuts ? 'warn' : 'ok'}
++              title="어느 UDS 함수에도 매핑되지 않는 SUTS 단위시험(역방향 공백)" />
++            {unmappedSupported ? (
++              <GapBadge label="SRS 미추적 시험 (역방향)" value={gapStats.unmappedTotal} tone={gapStats.unmappedTotal ? 'warn' : 'ok'}
++                title="시험은 됐으나 이 SRS 요구사항에 안 닿는 VectorCAST 함수(종, 중복 제거)"
++                sub={gapStats.unmappedSuts ? `단위시험됨 ${gapStats.unmappedSuts}` : ''} />
++            ) : (
++              <span title="로컬 파일모드는 VectorCAST 역방향 추적(미추적 시험)을 계산하지 않습니다 — Jenkins 경로에서 확인하세요"
++                style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '4px 10px', borderRadius: 16, background: '#f3f4f6', border: '1px solid #e5e7eb', whiteSpace: 'nowrap', color: '#9ca3af' }}>
++                SRS 미추적 시험 (역방향) <span style={{ fontWeight: 700 }}>미지원</span>
++              </span>
++            )}
++          </div>
++          <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 6 }}>
++            정방향(요구사항→설계→시험)·역방향(시험→요구사항) 공백. ISO 26262 양방향 추적성 신호 — 0이 아니면 보강 검토. 역방향 상세는 트리 뷰 'SRS 미추적 시험'.
++          </div>
++        </div>
++      ) : null}
++
+       {/* Coverage bar */}
+       {coverage && (
+         <div style={{ marginBottom: 12 }}>
+@@ -1064,6 +1191,29 @@ function TraceMatrix({ matrix }) {
+           <option value="fail">Fail 있음</option>
+           <option value="no_test">테스트 없음</option>
+         </select>
++        {/* 보기 방식 토글: 표(기존) | 트리(신규 ID 기준 추적성 트리) */}
++        <div role="group" aria-label="보기 방식" style={{ display: 'inline-flex', border: '1px solid var(--border)', borderRadius: 6, overflow: 'hidden' }}>
++          <button type="button" onClick={() => setViewMode('table')} aria-pressed={viewMode === 'table'} title="표 보기"
++            style={{ padding: '6px 10px', fontSize: 11, border: 'none', cursor: 'pointer',
++              background: viewMode === 'table' ? 'var(--accent)' : 'var(--bg)',
++              color: viewMode === 'table' ? '#fff' : 'var(--fg)', fontWeight: viewMode === 'table' ? 700 : 400 }}>
++            표
++          </button>
++          <button type="button" onClick={() => setViewMode('tree')} aria-pressed={viewMode === 'tree'} title="ID 기준 추적성 트리 보기"
++            style={{ padding: '6px 10px', fontSize: 11, border: 'none', borderLeft: '1px solid var(--border)', cursor: 'pointer',
++              background: viewMode === 'tree' ? 'var(--accent)' : 'var(--bg)',
++              color: viewMode === 'tree' ? '#fff' : 'var(--fg)', fontWeight: viewMode === 'tree' ? 700 : 400 }}>
++            트리
++          </button>
++        </div>
++        {/* 트리 전용: SRS 미추적 시험(역방향 공백) 별도 루트 표시 토글 — 데이터 있을 때만 노출 */}
++        {viewMode === 'tree' && unmappedVcast.length > 0 && (
++          <label style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11, cursor: 'pointer', color: 'var(--fg)', userSelect: 'none' }}
++            title="시험은 됐지만 이 SRS 요구사항에 추적되지 않는 VectorCAST 함수를 트리 하단에 별도 루트로 표시 (역방향 추적성 공백)">
++            <input type="checkbox" checked={includeUnmapped} onChange={e => setIncludeUnmapped(e.target.checked)} style={{ cursor: 'pointer' }} />
++            SRS 미추적 시험 포함 ({unmappedVcast.length})
++          </label>
++        )}
+         <button className="btn-sm" onClick={exportCSV} title="CSV 내보내기" style={{ fontSize: 11 }}>
+           CSV
+         </button>
+@@ -1072,7 +1222,8 @@ function TraceMatrix({ matrix }) {
+         </span>
+       </div>
+ 
+-      {/* Matrix table */}
++      {/* Matrix table (표 보기 — 기존 그대로) */}
++      {viewMode === 'table' && (
+       <div style={{ overflowX: 'auto' }}>
+       <table className="impact-table" style={{ minWidth: 950 }}>
+         <thead>
+@@ -1292,8 +1443,18 @@ function TraceMatrix({ matrix }) {
+         </tbody>
+       </table>
+       </div>
++      )}
++
++      {/* 트리 보기 (ID 기준 추적성 트리). 트리는 추적성 '전체 조망'이 목적이므로 페이지 슬라이스가
++          아닌 filtered 전체를 넘긴다(접힘 기본이라 DOM 비용 낮음). 미추적 루트도 1회만 렌더됨
++          (페이지별 중복 제거 — deep-analyze). baseIndex=0: nodeId는 filtered 절대 인덱스 기준. */}
++      {viewMode === 'tree' && (
++        <TraceTree rows={filtered} baseIndex={0} expanded={expandedTreeNodes} onToggle={toggleTreeNode}
++          unmapped={includeUnmapped ? unmappedVcast : null} />
++      )}
+ 
+-      {/* Pagination */}
++      {/* Pagination (표 모드 전용 — 트리는 filtered 전체를 한 번에 조망하므로 페이지네이션 불필요) */}
++      {viewMode === 'table' && (
+       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 0', flexWrap: 'wrap', gap: 8 }}>
+         <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+           <span className="text-sm text-muted">페이지당</span>
+@@ -1317,6 +1478,7 @@ function TraceMatrix({ matrix }) {
+           </div>
+         )}
+       </div>
++      )}
+     </div>
+   );
+ }
+@@ -1471,3 +1633,440 @@ export function UncoveredTopList({ rows, onPick }) {
+     </div>
+   );
+ }
++
++/* ── TraceTree — ID 기준 추적성 트리 뷰 ───────────────────────────────────
++ * 기존 flat 매트릭스 표(TraceMatrix)는 그대로 두고, 같은 row 데이터를
++ * SRS-ID 루트 → 문서 단계(SDS/UDS/STS/SUTS/SITS/VectorCAST) 트리로 재구성한다.
++ * 한 요구사항이 어느 단계까지 추적됐고 어디서 끊겼는지(빈 단계 = 회색 칩)를
++ * 펼치지 않아도 한눈에 본다.
++ *  - 상태 분류: deriveStatus 재사용 → 표/대시보드/백엔드 _cache_trace_summary와 lockstep.
++ *  - P/F: 표(L1246-1252)와 동일 규칙. STS/SUTS/SITS의 result='mapped'는 '시험 통과'가
++ *    아니라 '매핑 존재'이므로 중립색 유지(ISO 26262: 매핑 존재 ≠ 시험 통과).
++ *  - SDS↔UDS 정확 부모-자식 엣지는 row 데이터에 없으므로(평탄 배열) 거짓 중첩 대신
++ *    SRS 직속 단계 노드로 평면 배치한다. VectorCAST만 실행 P/F 보유. */
++
++const TREE_STAGES = [
++  { key: 'SDS',  label: 'SDS',  kind: 'design' },
++  { key: 'UDS',  label: 'UDS',  kind: 'design' },
++  { key: 'STS',  label: 'STS',  kind: 'test' },
++  { key: 'SUTS', label: 'SUTS', kind: 'test' },
++  { key: 'SITS', label: 'SITS', kind: 'test' },
++  { key: 'VectorCAST', label: 'VectorCAST', kind: 'test' },
++];
++
++// STS/SUTS/SITS는 'mapped' 리터럴(실 P/F 아님) → 중립. VectorCAST만 실제 결과.
++function _testResultColor(result) {
++  const r = (result || '').toLowerCase();
++  if (/^(pass|passed|true|1)$/.test(r)) return '#16a34a';
++  if (/^(fail|failed|false|0)$/.test(r)) return '#dc2626';
++  return '#6b7280'; // mapped/unknown — 중립
++}
++
++// 단계별 멤버 추출 — 표(L1109-1121)의 분리 규칙과 동일.
++// VectorCAST 단계는 표의 vcastCount 의미(VectorCAST + 분류 안 된 other source)와 일치시킨다.
++function _stageMembers(r, stageKey) {
++  if (stageKey === 'SDS') return { type: 'ids', items: Array.isArray(r.sds_components) ? r.sds_components : [] };
++  if (stageKey === 'UDS') return { type: 'ids', items: Array.isArray(r.source_ids) ? r.source_ids : [] };
++  const raw = Array.isArray(r.tests) ? r.tests : [];
++  if (stageKey === 'STS')  return { type: 'tests', items: Array.isArray(r.sts_tests)  ? r.sts_tests  : raw.filter(t => t.source === 'STS') };
++  if (stageKey === 'SUTS') return { type: 'tests', items: Array.isArray(r.suts_tests) ? r.suts_tests : raw.filter(t => t.source === 'SUTS') };
++  if (stageKey === 'SITS') return { type: 'tests', items: Array.isArray(r.sits_tests) ? r.sits_tests : raw.filter(t => t.source === 'SITS') };
++  if (stageKey === 'VectorCAST') return { type: 'tests', items: raw.filter(t => t.source === 'VectorCAST' || !['STS', 'SUTS', 'SITS'].includes(t.source)) };
++  return { type: 'ids', items: [] };
++}
++
++// 함수명 정규화 — SUTS test.unit(=함수명)을 source_ids(UDS 함수)와 매칭하기 위함.
++// VectorCAST 롤업 라벨 'SwUFn_x (N TC)'의 괄호 이후도 안전하게 제거.
++function _normFn(x) {
++  return String(x ?? '').replace(/\s*\(.*$/, '').trim().toLowerCase();
++}
++
++// SUTS 단위시험을 test.unit(=함수명) 기준으로 묶는다. SUTS는 unit=함수명이라 UDS 함수와
++// 1:1 매칭된다(실데이터 검증: UDS 2901개 중 2888개 연결). 이 맵으로 "UDS 함수 → 그 함수를
++// 시험하는 단위시험(SUTS) TC" 교차문서 연결을 트리에 중첩하고, 매칭 0인 함수는 단위시험 공백으로 본다.
++// SUTS 한정 이유: STS/SITS는 unit이 비어 있고 VectorCAST unit은 시험파일명(함수명 아님)이라
++// 함수 매칭에 기여하지 않는다 — '단위시험'(=SUTS) 의미와 코드를 1:1로 묶고 false-nesting을 차단.
++function _unitTestMap(r) {
++  const m = new Map();
++  for (const t of _stageMembers(r, 'SUTS').items) {
++    const u = _normFn(t && t.unit);
++    if (!u) continue;
++    if (!m.has(u)) m.set(u, []);
++    m.get(u).push(t);
++  }
++  return m;
++}
++
++// 시험 TC 표 — TraceTreeStage(시험 단계)와 TraceTreeFunc(함수별 중첩)가 공유.
++// 'mapped'는 _testResultColor가 중립 회색 처리(ISO 26262: 매핑 존재 ≠ 시험 통과).
++// 소스 열 없음(의도): 트리의 모든 시험 표는 단일 소스로 그룹화돼 들어온다 — 단계 노드는
++// 헤더(STS/SUTS/SITS/VectorCAST)가 곧 소스이고, 함수 중첩은 _unitTestMap이 SUTS 전용이라
++// 전부 SUTS다. 표 모드 drilldown은 소스 혼합이라 소스 열을 갖지만 트리는 불필요(중복 방지).
++function TestTable({ tests }) {
++  const list = Array.isArray(tests) ? tests : [];
++  return (
++    <table style={{ width: '100%', fontSize: 10, borderCollapse: 'collapse' }}>
++      <thead>
++        <tr style={{ background: '#e5e7eb' }}>
++          <th style={{ padding: '3px 6px', textAlign: 'left' }}>TC</th>
++          <th style={{ padding: '3px 6px', textAlign: 'center', width: 60 }}>결과</th>
++          <th style={{ padding: '3px 6px', textAlign: 'center', width: 45 }}>추적</th>
++          <th style={{ padding: '3px 6px', textAlign: 'center', width: 45 }}>신뢰</th>
++        </tr>
++      </thead>
++      <tbody>
++        {list.map((t, ti) => (
++          <tr key={ti} style={{ borderBottom: '1px solid var(--border)' }}>
++            <td style={{ padding: '3px 6px', fontFamily: 'monospace' }}>{t.testcase || t.unit || '-'}</td>
++            <td style={{ padding: '3px 6px', textAlign: 'center', fontWeight: 600, color: _testResultColor(t.result) }}>{t.result || '-'}</td>
++            <td style={{ padding: '3px 6px', textAlign: 'center', fontSize: 9,
++              color: t.trace_type === 'direct' ? '#16a34a' : t.trace_type === 'indirect' ? '#d97706' : '#6b7280' }}>
++              {t.trace_type === 'direct' ? '직접' : t.trace_type === 'indirect' ? '경유' : '-'}
++            </td>
++            <td style={{ padding: '3px 6px', textAlign: 'center', fontSize: 9, color: CONFIDENCE_COLORS[t.confidence] || '#6b7280' }}>
++              {t.confidence || '-'}
++            </td>
++          </tr>
++        ))}
++      </tbody>
++    </table>
++  );
++}
++
++function TraceTree({ rows, baseIndex = 0, expanded, onToggle, unmapped = null }) {
++  const list = Array.isArray(rows) ? rows : [];
++  const exp = expanded instanceof Set ? expanded : new Set();
++  const unmappedList = Array.isArray(unmapped) ? unmapped : [];
++  if (list.length === 0 && unmappedList.length === 0) {
++    return <div className="text-muted text-sm" style={{ padding: '16px 4px' }}>표시할 요구사항이 없습니다.</div>;
++  }
++  return (
++    <div style={{ border: '1px solid var(--border)', borderRadius: 8, overflow: 'hidden' }}>
++      {/* 범례 */}
++      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 14, padding: '8px 12px', background: 'var(--bg)', borderBottom: '1px solid var(--border)', fontSize: 11, color: 'var(--text-muted)' }}>
++        <span style={{ fontWeight: 600 }}>단계 SRS → SDS → UDS → STS → SUTS → SITS → VectorCAST</span>
++        <span><span style={{ display: 'inline-block', width: 10, height: 10, borderRadius: 2, background: COVERAGE_COLORS.covered.border, marginRight: 4, verticalAlign: 'middle' }} />연결됨</span>
++        <span><span style={{ display: 'inline-block', width: 10, height: 10, borderRadius: 2, background: '#d1d5db', marginRight: 4, verticalAlign: 'middle' }} />끊김(연결 없음)</span>
++        <span>P/F는 VectorCAST 실행 결과만 (STS/SUTS/SITS는 매핑 존재 표시)</span>
++        <span>UDS 펼침 → 함수별 단위시험(SUTS) 중첩(같은 SUTS를 함수축으로 재배치 — 합산 아님) · <span style={{ color: COVERAGE_COLORS.partial.fg }}>⚠ = 단위시험 없는 함수 / 함수 미매핑 SUTS</span></span>
++      </div>
++      <ul style={{ listStyle: 'none', margin: 0, padding: 0 }}>
++        {list.map((r, idx) => {
++          // page-absolute index — 페이지/필터/정렬 전환 시 nodeId 충돌(유령 펼침) 방지.
++          // anonymous·중복 reqId 행이 같은 page-local 위치에 와도 절대 인덱스로 구분되고,
++          // 펼침 상태(Set)가 페이지 왕복 후에도 정확히 유지된다.
++          const absIdx = baseIndex + idx;
++          return (
++            <TraceTreeRoot key={`${_rowReqId(r) || 'row'}#${absIdx}`} r={r} idx={absIdx} expanded={exp} onToggle={onToggle} />
++          );
++        })}
++        {/* SRS 미추적 시험 — 요구사항 트리 하단의 별도 루트(역방향 추적성 공백). 페이지 무관 전체. */}
++        <TraceUnmappedRoot unmapped={unmappedList} expanded={exp} onToggle={onToggle} />
++      </ul>
++    </div>
++  );
++}
++
++// 의미 3버킷 정의 — suts_tested(검토 가치 ↑)를 맨 위로. warn=amber 강조.
++const _UNMAPPED_BUCKETS = [
++  { key: 'suts_tested', label: '단위시험까지 한 미추적 함수', desc: 'SUTS 단위시험은 있으나 이 SRS 요구사항에 안 닿음 — 요구사항 명세 공백 가능, 검토 가치 높음', warn: true },
++  { key: 'isr', label: 'ISR·인터럽트·부트 핸들러', desc: '부트로더/ISR 등 SRS 추적 대상이 아닌 게 정상인 인프라 함수', warn: false },
++  { key: 'vcast_only', label: 'VectorCAST 단독 커버리지', desc: 'SUTS 단위시험 참조 없이 VectorCAST만 시험한 함수', warn: false },
++];
++
++// SRS 미추적 시험 루트 — 시험은 됐으나 이 SRS에 안 닿는 VectorCAST 함수를 의미 버킷으로 묶는다.
++// 요구사항 루트와 nodeId 네임스페이스(__unmapped__)를 분리해 펼침 상태 충돌을 막는다.
++function TraceUnmappedRoot({ unmapped, expanded, onToggle }) {
++  const list = Array.isArray(unmapped) ? unmapped : [];
++  // hooks는 조건부 return 이전에 무조건 호출(rules of hooks) — list 빈 경우도 동일 순서 보장.
++  const byCat = useMemo(() => {
++    const m = { suts_tested: [], isr: [], vcast_only: [] };
++    for (const u of list) (m[u.category] || (m[u.category] = [])).push(u);
++    return m;
++  }, [list]);
++  if (list.length === 0) return null;
++  const nodeId = '__unmapped__';
++  const isOpen = expanded.has(nodeId);
++  const failTotal = list.filter(u => /^(fail|failed|false|0)$/i.test(String(u.result || ''))).length;
++  return (
++    <li style={{ borderTop: '2px solid var(--accent)' }}>
++      <div
++        role="button"
++        tabIndex={0}
++        aria-expanded={isOpen}
++        aria-label={`SRS 미추적 시험 ${list.length}건 ${isOpen ? '접기' : '펼치기'}`}
++        onClick={() => onToggle(nodeId)}
++        onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onToggle(nodeId); } }}
++        style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 12px', cursor: 'pointer', flexWrap: 'wrap', background: COVERAGE_COLORS.partial.bg + '40' }}
++      >
++        <span style={{ fontFamily: 'monospace', fontSize: 11 }}>{isOpen ? '▼' : '▶'}</span>
++        <span style={{ fontWeight: 700, fontSize: 12 }}>🔎 SRS 미추적 시험</span>
++        <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
++          시험은 했으나 이 SRS 요구사항에 안 닿는 VectorCAST 함수 {list.length}종(중복 제거)
++          {failTotal > 0 && <span style={{ color: '#dc2626', fontWeight: 600 }}> · {failTotal} fail</span>}
++        </span>
++        <span style={{ marginLeft: 'auto', fontSize: 10, color: 'var(--text-muted)' }}>역방향 추적성 공백</span>
++      </div>
++      {isOpen && (
++        <ul style={{ listStyle: 'none', margin: 0, padding: '0 12px 8px 30px', background: 'var(--bg)' }}>
++          {_UNMAPPED_BUCKETS.map(b => (
++            <TraceUnmappedBucket key={b.key} bucket={b} items={byCat[b.key] || []} parentId={nodeId} expanded={expanded} onToggle={onToggle} />
++          ))}
++        </ul>
++      )}
++    </li>
++  );
++}
++
++// 미추적 버킷 1개 — 펼치면 subprogram·해석된 함수명·결과 표. 빈 버킷은 비활성(클릭 불가).
++function TraceUnmappedBucket({ bucket, items, parentId, expanded, onToggle }) {
++  const list = Array.isArray(items) ? items : [];
++  const nodeId = `${parentId}::${bucket.key}`;
++  const empty = list.length === 0;
++  const isOpen = !empty && expanded.has(nodeId);
++  const failN = list.filter(u => /^(fail|failed|false|0)$/i.test(String(u.result || ''))).length;
++  const warn = bucket.warn && list.length > 0;
++  return (
++    <li style={{ marginTop: 6 }}>
++      <div
++        role={empty ? undefined : 'button'}
++        tabIndex={empty ? undefined : 0}
++        aria-expanded={empty ? undefined : isOpen}
++        aria-label={empty ? undefined : `${bucket.label} ${list.length}건 ${isOpen ? '접기' : '펼치기'}`}
++        onClick={empty ? undefined : () => onToggle(nodeId)}
++        onKeyDown={empty ? undefined : (e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onToggle(nodeId); } })}
++        title={bucket.desc}
++        style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '4px 8px', borderRadius: 6, fontSize: 11,
++          cursor: empty ? 'default' : 'pointer',
++          background: empty ? '#f9fafb' : (warn ? COVERAGE_COLORS.partial.bg + '50' : COVERAGE_COLORS.covered.bg + '30'),
++          border: `1px solid ${empty ? '#e5e7eb' : (warn ? COVERAGE_COLORS.partial.border : 'var(--border)')}` }}
++      >
++        <span style={{ fontFamily: 'monospace', fontSize: 10, width: 12, display: 'inline-block' }}>{empty ? '' : (isOpen ? '▼' : '▶')}</span>
++        <span style={{ fontWeight: 700, color: warn ? COVERAGE_COLORS.partial.fg : 'var(--fg)' }}>
++          {warn ? '⚠ ' : ''}{bucket.label}
++        </span>
++        <span style={{ color: empty ? '#9ca3af' : 'var(--text-muted)' }}>
++          {list.length}개{failN > 0 ? ` · ${failN} fail` : ''}
++        </span>
++      </div>
++      {isOpen && (
++        <div style={{ margin: '4px 0 0 24px', maxHeight: 300, overflowY: 'auto', border: '1px solid var(--border)', borderRadius: 6 }}>
++          <table style={{ width: '100%', fontSize: 10, borderCollapse: 'collapse' }}>
++            <thead>
++              <tr style={{ background: '#e5e7eb' }}>
++                <th style={{ padding: '3px 6px', textAlign: 'left' }}>Subprogram</th>
++                <th style={{ padding: '3px 6px', textAlign: 'left' }}>해석된 함수</th>
++                <th style={{ padding: '3px 6px', textAlign: 'center', width: 50 }}>결과</th>
++              </tr>
++            </thead>
++            <tbody>
++              {list.map((u, i) => (
++                <tr key={i} style={{ borderBottom: '1px solid var(--border)' }}>
++                  <td style={{ padding: '3px 6px', fontFamily: 'monospace' }}>{u.subprogram || '-'}</td>
++                  <td style={{ padding: '3px 6px', fontFamily: 'monospace', color: 'var(--text-muted)' }}>
++                    {(Array.isArray(u.resolved_funcs) && u.resolved_funcs.length) ? u.resolved_funcs.join(', ') : '—'}
++                  </td>
++                  <td style={{ padding: '3px 6px', textAlign: 'center', fontWeight: 600, color: _testResultColor(u.result) }}>{u.result || '-'}</td>
++                </tr>
++              ))}
++            </tbody>
++          </table>
++        </div>
++      )}
++    </li>
++  );
++}
++
++function TraceTreeRoot({ r, idx, expanded, onToggle }) {
++  const reqId = _rowReqId(r) || `row-${idx}`;
++  const nodeId = `${reqId}#${idx}`;
++  const isOpen = expanded.has(nodeId);
++  const status = deriveStatus(r);
++  const colors = COVERAGE_COLORS[status] || {};
++  const passCount = r.pass_count ?? 0;
++  const failCount = r.fail_count ?? 0;
++  const stageCounts = TREE_STAGES.map(s => ({ ...s, count: _stageMembers(r, s.key).items.length }));
++  // 설계 단절: SRS→SDS는 됐으나 SDS→UDS(단위설계) 끊김. deriveStatus는 covered로 보지만
++  // V-Model 중간 단계 공백이라 시각 마커로 별도 경고(판정 자체는 불변 — ASIL 안전로직 보존).
++  const sdsN = (stageCounts.find(s => s.key === 'SDS') || {}).count || 0;
++  const udsN = (stageCounts.find(s => s.key === 'UDS') || {}).count || 0;
++  const designBreak = sdsN > 0 && udsN === 0;
++
++  return (
++    <li style={{ borderBottom: '1px solid var(--border)' }}>
++      <div
++        role="button"
++        tabIndex={0}
++        aria-expanded={isOpen}
++        aria-label={`요구사항 ${reqId} 추적성 트리 ${isOpen ? '접기' : '펼치기'}`}
++        onClick={() => onToggle(nodeId)}
++        onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onToggle(nodeId); } }}
++        style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 12px', cursor: 'pointer', flexWrap: 'wrap', background: colors.bg ? colors.bg + '55' : 'transparent' }}
++      >
++        <span style={{ fontFamily: 'monospace', fontSize: 11 }}>{isOpen ? '▼' : '▶'}</span>
++        <span style={{ fontFamily: 'monospace', fontWeight: 700, fontSize: 12, minWidth: 110 }}>{reqId}</span>
++        {/* 단계 체인 칩 — 끊긴 곳이 회색으로 드러남 */}
++        <span style={{ display: 'flex', alignItems: 'center', gap: 4, flexWrap: 'wrap' }}>
++          {stageCounts.map((s, i) => (
++            <React.Fragment key={s.key}>
++              {i > 0 && <span style={{ color: 'var(--text-muted)', fontSize: 10 }}>{'→'}</span>}
++              <span title={`${s.label}: ${s.count > 0 ? s.count + '개 연결' : '연결 없음(끊김)'}`}
++                style={{ fontSize: 9, padding: '1px 6px', borderRadius: 8, fontWeight: 600, whiteSpace: 'nowrap',
++                  background: s.count > 0 ? COVERAGE_COLORS.covered.bg : '#f3f4f6',
++                  color: s.count > 0 ? COVERAGE_COLORS.covered.fg : '#9ca3af',
++                  border: `1px solid ${s.count > 0 ? COVERAGE_COLORS.covered.border : '#e5e7eb'}` }}>
++                {s.label} {s.count > 0 ? s.count : '·'}
++              </span>
++            </React.Fragment>
++          ))}
++        </span>
++        {(passCount > 0 || failCount > 0) && (
++          <span style={{ fontSize: 9, marginLeft: 4 }} title="VectorCAST 실행 결과">
++            {passCount > 0 && <span style={{ color: '#16a34a', fontWeight: 600 }}>{passCount}P</span>}
++            {passCount > 0 && failCount > 0 && '/'}
++            {failCount > 0 && <span style={{ color: '#dc2626', fontWeight: 600 }}>{failCount}F</span>}
++          </span>
++        )}
++        <span style={{ marginLeft: 'auto', display: 'inline-flex', alignItems: 'center', gap: 6 }}>
++          {designBreak && (
++            <span title="SRS→SDS는 추적됐으나 SDS→UDS(단위설계)가 끊김 — 설계 추적 단절(covered 배지와 무관하게 검토 필요)"
++              style={{ fontSize: 9, padding: '1px 6px', borderRadius: 8, fontWeight: 700, whiteSpace: 'nowrap',
++                background: COVERAGE_COLORS.partial.bg, color: COVERAGE_COLORS.partial.fg, border: `1px solid ${COVERAGE_COLORS.partial.border}` }}>
++              ⚠ 설계 단절
++            </span>
++          )}
++          <StatusBadge tone={coverageTone(status)}>{status}</StatusBadge>
++        </span>
++      </div>
++      {isOpen && (
++        <ul style={{ listStyle: 'none', margin: 0, padding: '0 12px 8px 30px', background: 'var(--bg)' }}>
++          {TREE_STAGES.map(s => (
++            <TraceTreeStage key={s.key} r={r} stage={s} parentId={nodeId} expanded={expanded} onToggle={onToggle} />
++          ))}
++        </ul>
++      )}
++    </li>
++  );
++}
++
++function TraceTreeStage({ r, stage, parentId, expanded, onToggle }) {
++  const { type, items } = _stageMembers(r, stage.key);
++  const count = items.length;
++  const nodeId = `${parentId}::${stage.key}`;
++  const broken = count === 0;
++  const isOpen = !broken && expanded.has(nodeId);
++  const accent = SOURCE_COLORS[stage.key] || (stage.kind === 'design' ? '#1e40af' : 'var(--fg)');
++
++  // UDS 단계는 함수별로 단위시험(SUTS)을 중첩하고, 단위시험 없는 함수는 공백으로 표시한다.
++  // SUTS 단계는 어느 UDS 함수에도 안 붙는 orphan SUTS(역방향 추적 공백)를 라벨에 노출한다.
++  const isUds = stage.key === 'UDS';
++  const isSuts = stage.key === 'SUTS';
++  // 함수↔단위시험 매칭은 row 단위로만 변하므로 메모이즈(displayedRows=filtered.slice라 r 참조 안정
++  // → 필터/rows 변경 전까지 유지). 무메모이즈 시 토글마다 row 전체 시험 재순회 비용 발생.
++  const { fnMap, untestedFns, orphanSuts } = useMemo(() => {
++    if (!isUds && !isSuts) return { fnMap: null, untestedFns: 0, orphanSuts: 0 };
++    const m = _unitTestMap(r);
++    const srcIds = Array.isArray(r.source_ids) ? r.source_ids : [];
++    const untested = isUds ? srcIds.filter(fn => !((m.get(_normFn(fn)) || []).length)).length : 0;
++    const udsSet = new Set(srcIds.map(_normFn));
++    const orphan = isSuts
++      ? _stageMembers(r, 'SUTS').items.filter(t => { const u = _normFn(t && t.unit); return u && !udsSet.has(u); }).length
++      : 0;
++    return { fnMap: m, untestedFns: untested, orphanSuts: orphan };
++  }, [r, isUds, isSuts]);
++  const warn = (isUds && untestedFns > 0) || (isSuts && orphanSuts > 0);
++
++  let label;
++  if (broken) label = stage.kind === 'design' ? '설계 연결 없음 — 추적 끊김' : '시험 연결 없음';
++  else if (isUds) label = `함수 ${count}개${untestedFns ? ` · ⚠ ${untestedFns}개 단위시험 미연결` : ' · 모두 단위시험 연결'}`;
++  else if (isSuts) label = `${count}개 연결${orphanSuts ? ` · ⚠ ${orphanSuts}건 함수 미매핑` : ''}`;
++  else label = `${count}개 연결`;
++
++  return (
++    <li style={{ marginTop: 6 }}>
++      <div
++        role={broken ? undefined : 'button'}
++        tabIndex={broken ? undefined : 0}
++        aria-expanded={broken ? undefined : isOpen}
++        aria-label={broken ? undefined : `${stage.label} ${label} ${isOpen ? '접기' : '펼치기'}`}
++        onClick={broken ? undefined : () => onToggle(nodeId)}
++        onKeyDown={broken ? undefined : (e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onToggle(nodeId); } })}
++        style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '4px 8px', borderRadius: 6, fontSize: 11,
++          cursor: broken ? 'default' : 'pointer',
++          background: broken ? '#f9fafb' : (warn ? COVERAGE_COLORS.partial.bg + '50' : COVERAGE_COLORS.covered.bg + '40'),
++          border: `1px solid ${broken ? '#e5e7eb' : (warn ? COVERAGE_COLORS.partial.border : COVERAGE_COLORS.covered.border)}` }}
++      >
++        <span style={{ fontFamily: 'monospace', fontSize: 10, width: 12, display: 'inline-block' }}>
++          {broken ? '' : (isOpen ? '▼' : '▶')}
++        </span>
++        <span style={{ fontWeight: 700, minWidth: 78, color: accent }}>{stage.label}</span>
++        <span style={{ color: broken ? '#9ca3af' : 'var(--fg)' }}>{label}</span>
++      </div>
++      {isOpen && (
++        <div style={{ margin: '4px 0 0 24px' }}>
++          {isUds ? (
++            <ul style={{ listStyle: 'none', margin: 0, padding: 0, maxHeight: 260, overflowY: 'auto' }}>
++              {items.map((fn, i) => (
++                <TraceTreeFunc key={i} fn={String(fn)} tests={fnMap.get(_normFn(fn)) || []}
++                  parentId={`${nodeId}#${i}`} expanded={expanded} onToggle={onToggle} />
++              ))}
++            </ul>
++          ) : type === 'ids' ? (
++            <div style={{ maxHeight: 180, overflowY: 'auto', fontSize: 11 }}>
++              {items.map((id, i) => (
++                <div key={i} style={{ padding: '2px 0', fontFamily: 'monospace', borderBottom: '1px solid var(--border)' }}>{String(id)}</div>
++              ))}
++            </div>
++          ) : (
++            <div style={{ maxHeight: 200, overflowY: 'auto' }}>
++              <TestTable tests={items} />
++            </div>
++          )}
++        </div>
++      )}
++    </li>
++  );
++}
++
++// UDS 함수 1개 노드 — 그 함수를 시험하는 단위시험(SUTS) TC를 중첩 표시.
++// 매칭 시험 0이면 'ISO 26262 단위시험 미연결' 공백을 amber로 드러낸다(함수 단위 추적 공백).
++function TraceTreeFunc({ fn, tests, parentId, expanded, onToggle }) {
++  const list = Array.isArray(tests) ? tests : [];
++  const has = list.length > 0;
++  const nodeId = `${parentId}::fn`;
++  const isOpen = has && expanded.has(nodeId);
++  return (
++    <li>
++      <div
++        role={has ? 'button' : undefined}
++        tabIndex={has ? 0 : undefined}
++        aria-expanded={has ? isOpen : undefined}
++        aria-label={has ? `함수 ${fn} 단위시험 ${list.length}개 ${isOpen ? '접기' : '펼치기'}` : `함수 ${fn} 단위시험 미연결`}
++        onClick={has ? () => onToggle(nodeId) : undefined}
++        onKeyDown={has ? (e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onToggle(nodeId); } }) : undefined}
++        style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '3px 8px', fontSize: 11,
++          cursor: has ? 'pointer' : 'default', borderBottom: '1px solid var(--border)',
++          background: has ? 'transparent' : COVERAGE_COLORS.partial.bg + '40' }}
++      >
++        <span style={{ fontFamily: 'monospace', fontSize: 10, width: 12, display: 'inline-block' }}>{has ? (isOpen ? '▼' : '▶') : ''}</span>
++        <span style={{ fontFamily: 'monospace', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={fn}>{fn}</span>
++        {has ? (
++          <span style={{ fontSize: 9, padding: '1px 6px', borderRadius: 8, fontWeight: 600, whiteSpace: 'nowrap',
++            background: COVERAGE_COLORS.covered.bg, color: COVERAGE_COLORS.covered.fg, border: `1px solid ${COVERAGE_COLORS.covered.border}` }}>
++            단위시험 {list.length}
++          </span>
++        ) : (
++          <span style={{ fontSize: 9, padding: '1px 6px', borderRadius: 8, fontWeight: 600, whiteSpace: 'nowrap',
++            background: COVERAGE_COLORS.partial.bg, color: COVERAGE_COLORS.partial.fg, border: `1px solid ${COVERAGE_COLORS.partial.border}` }}>
++            ⚠ 단위시험 미연결
++          </span>
++        )}
++      </div>
++      {isOpen && (
++        <div style={{ margin: '3px 0 4px 24px', maxHeight: 200, overflowY: 'auto' }}>
++          <TestTable tests={list} />
++        </div>
++      )}
++    </li>
++  );
++}

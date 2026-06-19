@@ -23,7 +23,24 @@
       "Bash(cat .codex_tmp/diag_full.log)",
       "Bash(tail -3 .codex_tmp/backend_run.log)",
       "Bash(npm run *)",
-      "Read(//d/Project/devops/.codex_tmp/**)"
+      "Read(//d/Project/devops/.codex_tmp/**)",
+      "Bash([ -f \"$OUT\" ])",
+      "Bash(git show *)",
+      "Read(//tmp/**)",
+      "Bash(sed 's#KJPDS02_SUTR_v6#KJPDS02_SUTR_prod#' D:/Project/devops/Release_claude/.codex_tmp/verify_v6.py)",
+      "Bash(D:/Project/devops/Release_claude/.venv/Scripts/python.exe D:/Project/devops/Release_claude/.codex_tmp/verify_prod.py)",
+      "Bash(./.venv/Scripts/python.exe -m pytest tests/unit/ -q --tb=short -k \"trace or requirement or report_gen or matrix or sds or uds\")",
+      "Bash(./.venv/Scripts/python.exe -)",
+      "Bash(./.venv/Scripts/python.exe -c \"import docx; print\\('python-docx', docx.__version__\\)\")",
+      "Bash(CLOUDIUM_ALLOWED_PREFIXES=\"U:/\" ./.venv/Scripts/python.exe -)",
+      "Bash(./.venv/Scripts/python.exe -m pytest tests/unit/test_traceability_sds_bridge.py -q --tb=short)",
+      "Bash(CLOUDIUM_ALLOWED_PREFIXES=\"U:/\" ./.venv/Scripts/python.exe .codex_tmp/verify_v203.py)",
+      "Bash(./.venv/Scripts/python.exe -m pytest tests/unit/ -q --tb=short -k \"trace or requirement or report_gen or matrix or sds or uds or preview\")",
+      "Bash(./.venv/Scripts/python.exe -m pytest tests/unit/ -q --tb=short -k \"trace or requirement or report_gen or matrix or sds or uds or preview or docx\")",
+      "Bash(./backend/.venv/Scripts/python.exe -c \"import backend.main; print\\('import OK'\\)\")",
+      "Bash(./backend/.venv/Scripts/python.exe -m uvicorn backend.main:app --host 0.0.0.0 --port 9000)",
+      "Bash(./.venv/Scripts/python.exe -c \"import bcrypt, jwt; import main; print\\('preflight OK'\\)\")",
+      "Bash(./.venv/Scripts/python.exe -m uvicorn main:app --host 0.0.0.0 --port 9000 --log-level info)"
     ]
   }
 }
