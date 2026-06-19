@@ -97,6 +97,7 @@ from backend.services.design_tokens import (
     USER_INPUT_PLACEHOLDER,
 )
 from backend.services.excel_template_utils import (
+    compact_empty_styled_cells,
     copy_sheet_across_workbooks,
     has_vba_macros,
     inspect_vba_refs,
@@ -106,12 +107,11 @@ from backend.services.excel_template_utils import (
     mark_asil_d_function,
     mark_asil_qm_function,
     safe_write,
-    compact_empty_styled_cells,
     sanitize_xlsm_external_links,
-    verify_xlsx_integrity,
     short_date,
     validate_build_meta,
     validate_xlsx_template_bytes,
+    verify_xlsx_integrity,
     write_value_after_label,
 )
 from backend.services.swut_builder_helpers import extract_warnings_from_session
@@ -1213,7 +1213,7 @@ def _format_gap_source(pairs: list[tuple[int, str]], max_len: int = 240) -> str:
 
 
 def _write_spec_deviation(
-    ws, agg: dict[str, Any], out_warnings: list[str],
+    ws, agg: dict[str, Any], out_warnings: list[str], *, empty: bool = False,
 ) -> int:
     """spec-based SUTR 2.Deviation — 레퍼런스 감사본 스키마 (2026-06-18 Fix 4).
 
@@ -1235,7 +1235,11 @@ def _write_spec_deviation(
 
     Returns: 쓰여진 gap 행 수.
     """
-    gaps = _collect_coverage_gaps(agg)
+    # 2026-06-19 — empty 모드(config sutr_deviation_empty): 커버리지 미달 목록을
+    # 수집하지 않고 header + "해당 사항 없음"(회사 DV ref v1.01 표준형)으로 비워둔다.
+    # 미달 정보는 SwUTCV(커버리지 산출물)에 별도 기재되므로 deviation은 실제 시험
+    # deviation(=없음)만 표기. gaps=[]이면 아래 `if not gaps:` 분기가 "해당 사항 없음"을 쓴다.
+    gaps = [] if empty else _collect_coverage_gaps(agg)
     # 2026-06-18 Item 2 — 함수명→{statements/branches:[(line,src)]} 미커버 line 맵.
     # extract_uncovered_lines가 채움. case-insensitive 폴백 인덱스 동반(metrics 표
     # 함수명과 annotated source 함수명 casing 차이 흡수).
@@ -1244,6 +1248,12 @@ def _write_spec_deviation(
     auto_fg = 0
     placeholder_fg = 0
     nonexact_fn = 0  # W2 — exact가 아닌(ci/fallback) SwUFn 해결 함수 수(노란마킹)
+
+    if empty and out_warnings is not None:
+        out_warnings.append(
+            "[spec-sutr] 2.Deviation 비움(config sutr_deviation_empty=true) — 커버리지 "
+            "미달 목록 미기재, '해당 사항 없음' 표기. 미달 상세는 SwUTCV 산출물 참조."
+        )
 
     # 1) 기존 템플릿(표준 Test Case ID 스키마) 영역 clear — 병합 해제 후 값 제거.
     # reviewer W3 — ws.max_row가 merged-only 행을 누락할 수 있어(openpyxl 특성)
@@ -1282,6 +1292,7 @@ def _write_spec_deviation(
             pass
     try:
         from copy import copy as _copy
+
         from openpyxl.styles import Alignment, Font
         hf = Font(name="맑은 고딕", size=10, bold=True)
         ha = Alignment(horizontal="center", vertical="center")
@@ -1460,7 +1471,10 @@ def _fill_standard_aux_sheets(
         # 표준 SUTR(HDPDM01/SwIT)에서 그대로 사용되므로 spec 경로만 신규 writer로
         # 분기 (회귀 없음). deviation_cases(수기 입력 deviation)는 spec 양식엔
         # Appendix '발생 가능 값'으로 분리되므로 본 목록과 무관.
-        n = _write_spec_deviation(dev_ws, agg, out_warnings=out_warnings)
+        n = _write_spec_deviation(
+            dev_ws, agg, out_warnings=out_warnings,
+            empty=bool(getattr(meta, "deviation_empty", False)),
+        )
         summary["deviation_cases_written"] = n
 
     hist_ws = next((wb[n] for n in sheet_names if n.lower() == "history"), None)

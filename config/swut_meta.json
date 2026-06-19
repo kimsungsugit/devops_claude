@@ -60,6 +60,8 @@
       "_comment_resolver_keys": "라운드 89 — swut_meta_resolver는 top-level swuds_docx_path / swuts_docx_path / swits_docx_path / c_source_root를 읽음. SwIT 요청은 swits_docx_path 또는 iso26262_docs.swits_xlsm_path 우선. ASIL source = SwUDS docx (c_source_root 미사용). doc_filenames는 출력 파일명 패턴 ({version}/{date} 치환).",
       "_comment_sutr_spec_based": "라운드 91 — true면 SUTR Test Log를 SwUTS spec 시트 통째 복사(Input/Expected 보존) + VectorCAST Actual/Pass-Fail 추가 신규 경로(swut_sutr_spec_builder)로 빌드. 회사 감사본 268열 '3.Test Log' 와이드 양식. spec은 top-level swuts_docx_path 사용. false/미설정이면 기존 build_sutr(표준 38열 양식).",
       "sutr_spec_based": true,
+      "_comment_sutr_deviation_empty": "2026-06-19 — true면 spec-based 2.Deviation에 커버리지 미달 함수 목록을 기재하지 않고 표준 '해당 사항 없음'(회사 DV ref v1.01 형식)으로 비워둔다. 미달 상세는 SwUTCV(커버리지 산출물)에 별도 기재됨. false/미설정이면 기존 미달 목록 유지.",
+      "sutr_deviation_empty": true,
       "_comment_c_source_root": "2026-06-10 stale path 갱신 (구 D:\\ADOS\\NE1AW_PORTING — 본 PC 부재). APP=NE1AW_PORTING, BOOT=C:\\Project\\Ados\\PDS128_FBL (요청별 c_source_root override로 지정). ASIL source는 SwUDS docx — c_source는 @asil 태그 보유 키만 override (merge first-wins 정책)라 안전.",
       "c_source_root": "C:\\Project\\Ados\\NE1AW_PORTING",
       "swuds_docx_path": "U:\\연구소\\1000 프로젝트\\1200 자동차\\0002 A Cappella\\02 ADOS\\04 KJPDS02\\02.설계(연구소)\\01.설계 및 검증\\08.소프트웨어\\04.SW 단위 설계\\04.Released\\v2.01\\(KJPDS02_SwUDS) Software Unit Design Specification_v2.01_251202_R.docx",

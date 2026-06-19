@@ -41,7 +41,6 @@ from backend.services.excel_template_utils import (
     mark_asil_c_function,
     mark_asil_d_function,
     mark_asil_qm_function,
-    mark_user_input_required,
     safe_write,
     short_date,
     stamp_cover_document_id,
@@ -70,6 +69,10 @@ class SutrBuildMeta(BuildMetaBase):
     target_coverage: float = 1.0
     target_pass_ratio: float = 1.0
     final_test_result: str = "OK"  # Coverage는 "PASS", SUTR은 "OK"
+    # 2026-06-19 — spec-based 2.Deviation 모드. True면 커버리지 미달 함수 목록을
+    # 기재하지 않고 표준 "해당 사항 없음"(회사 DV ref v1.01 형식)으로 비워둔다.
+    # config `sutr_deviation_empty` (per-project)에서 주입. False=기존 미달 목록 유지.
+    deviation_empty: bool = False
 
 
 @dataclass
@@ -732,7 +735,8 @@ def _write_test_log(
         if needed_last_row > ws.max_row:
             try:
                 from backend.services.excel_template_utils import (
-                    auto_expand_row_block, push_sentinel_to_last_row,
+                    auto_expand_row_block,
+                    push_sentinel_to_last_row,
                 )
                 shortage = needed_last_row - ws.max_row
                 # template block 1번 (start_row ~ start_row + tc_row_step - 1) 다음에 row 확장.

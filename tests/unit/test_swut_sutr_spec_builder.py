@@ -39,7 +39,6 @@ from backend.services.swut_sutr_spec_builder import (
     build_sutr_from_spec,
 )
 
-
 # ---------------------------------------------------------------------------
 # 합성 spec xlsm 생성 (회사 KJPDS02 v1.01 양식 축소판)
 # ---------------------------------------------------------------------------
@@ -1406,3 +1405,62 @@ class TestDeepReviewItem12Fixes:
         }
         kind = _collect_coverage_gaps(agg)[0][4]
         assert kind == "fallback"  # 모호 키 제외 → 오매칭 차단
+
+
+class TestDeviationEmptyToggle:
+    """2026-06-19 — config sutr_deviation_empty → 2.Deviation 비움(empty) 회귀 가드.
+
+    True면 커버리지 미달 함수 목록을 기재하지 않고 표준 "해당 사항 없음"으로 비운다.
+    미달 상세는 SwUTCV(커버리지 산출물)에 별도 기재. False는 기존 미달 목록 유지.
+    """
+
+    @staticmethod
+    def _agg_with_gap():
+        from backend.services.swut_input_adapter import CoverageStats, FunctionCoverage
+        fc = FunctionCoverage(
+            unit_id="SwUFn_0124", name="s_sha256_update",
+            statement=CoverageStats(16, 16, 1.0),
+            branch=CoverageStats(10, 11, 10 / 11),  # branch 90% 미달
+        )
+        return {
+            "spec_name_to_swufn": {"s_sha256_update": "SwUFn_0124"},
+            "function_name_to_swufn_from_suds": {},
+            "function_rows": [fc],
+            "function_gap_lines": {"s_sha256_update": {"branches": [(123, "if(x){}")]}},
+        }
+
+    @staticmethod
+    def _col_b(ws, upto=20):
+        return [ws.cell(r, 2).value for r in range(1, upto + 1) if ws.cell(r, 2).value]
+
+    def test_empty_true_writes_no_gap_rows(self):
+        """empty=True — 미달 함수 미기재 + '해당 사항 없음' + 헤더 보존 + written=0."""
+        from openpyxl import Workbook
+
+        from backend.services.swut_sutr_spec_builder import _write_spec_deviation
+        ws = Workbook().active
+        warnings: list[str] = []
+        n = _write_spec_deviation(ws, self._agg_with_gap(), warnings, empty=True)
+        b = self._col_b(ws)
+        assert n == 0
+        assert "SwUFn_0124" not in b  # 미달 함수 미기재
+        assert "해당 사항 없음" in b
+        assert b[0] == "Deviation Report"  # 헤더 보존
+        # audit 투명성 — 비움 사유 disclosure 워닝
+        assert any("sutr_deviation_empty" in w for w in warnings)
+
+    def test_empty_false_keeps_gap_list(self):
+        """empty=False(기본) — 기존 동작: 미달 함수가 그대로 기재(무회귀)."""
+        from openpyxl import Workbook
+
+        from backend.services.swut_sutr_spec_builder import _write_spec_deviation
+        ws = Workbook().active
+        n = _write_spec_deviation(ws, self._agg_with_gap(), [], empty=False)
+        b = self._col_b(ws)
+        assert n == 1
+        assert "SwUFn_0124" in b  # 미달 함수 기재됨
+
+    def test_meta_flag_default_false(self):
+        """SutrBuildMeta.deviation_empty 기본값 False — 미설정 프로젝트 무회귀."""
+        from backend.services.swut_sutr_aggregator import SutrBuildMeta
+        assert SutrBuildMeta().deviation_empty is False

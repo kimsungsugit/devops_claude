@@ -30,7 +30,6 @@ from typing import Any
 
 # 38차 I2: psutil / _get_process_memory_mb / _run_*_safely 함수 제거.
 # backend/routers/_safety.run_build_safely / run_consistency_safely 내부 처리.
-
 from fastapi import APIRouter, Depends, HTTPException, Response
 
 from backend.dependencies.admin import require_admin
@@ -43,14 +42,14 @@ from backend.schemas import (
 )
 from backend.services.file_resolver import get_resolver
 from backend.services.path_mode_check import check_log_folder_mode_compat
+from backend.services.swut_comprehensive_aggregator import (
+    SwutcrBuildMeta,
+    build_swutcr_report,
+)
 from backend.services.swut_consistency_checker import check_swut_consistency
 from backend.services.swut_coverage_aggregator import (
     CoverageBuildMeta,
     build_coverage_report,
-)
-from backend.services.swut_comprehensive_aggregator import (
-    SwutcrBuildMeta,
-    build_swutcr_report,
 )
 from backend.services.swut_input_adapter import collect_swut_session
 from backend.services.swut_sutr_aggregator import SutrBuildMeta, build_sutr
@@ -79,12 +78,24 @@ _BUILD_SEMAPHORE = asyncio.Semaphore(3)
 from backend.services import swut_meta_resolver as _resolver_mod  # noqa: E402
 from backend.services.swut_meta_resolver import (  # noqa: E402
     apply_function_asil_map as _resolver_apply_function_asil_map,
+)
+from backend.services.swut_meta_resolver import (
     resolve_c_source_root as _resolver_resolve_c_source_root,
-    resolve_swuds_function_asil_map as _resolver_resolve_swuds_function_asil_map,
-    resolve_swuds_function_ids as _resolver_resolve_swuds_function_ids,
-    resolve_swuds_path as _resolver_resolve_swuds_path,
-    resolve_swuts_test_specs as _resolver_resolve_swuts_test_specs,
+)
+from backend.services.swut_meta_resolver import (
     resolve_hmr_html_bytes as _resolver_resolve_hmr_html_bytes,
+)
+from backend.services.swut_meta_resolver import (
+    resolve_swuds_function_asil_map as _resolver_resolve_swuds_function_asil_map,
+)
+from backend.services.swut_meta_resolver import (
+    resolve_swuds_function_ids as _resolver_resolve_swuds_function_ids,
+)
+from backend.services.swut_meta_resolver import (
+    resolve_swuds_path as _resolver_resolve_swuds_path,
+)
+from backend.services.swut_meta_resolver import (
+    resolve_swuts_test_specs as _resolver_resolve_swuts_test_specs,
 )
 
 # Backward compat alias — 기존 회귀가 `monkeypatch.setattr(swut, '_META_CONFIG_PATH', ...)`
@@ -185,6 +196,7 @@ def _build_sutr_meta(req: SwUTBuildRequest) -> SutrBuildMeta:
         validation_date=req.validation_date,
         reviewer_override=req.reviewer_override,
         approver_override=req.approver_override,
+        deviation_empty=bool(cfg.get("sutr_deviation_empty", False)),
     )
 
 
@@ -372,6 +384,7 @@ def _apply_c_function_map(req: SwUTBuildRequest, session) -> None:
         return
 
     from pathlib import Path
+
     from backend.services.swut_asil_resolver import is_blocked_source_root
 
     if is_blocked_source_root(c_source_root):
