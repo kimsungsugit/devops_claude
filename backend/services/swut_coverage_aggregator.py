@@ -1274,52 +1274,33 @@ def _write_coverage_sheet(
                     "Note 사유 기재 후 결정 (해당 셀 노란 마킹)"
                 )
 
-    # 라운드 97/99 — spec_based 데이터 행 테두리 통일 (최종 패스, 모든 stamp/clear/
-    # totals 완료 후 — 중간 단계 리셋 회피).
-    #   (a) 라운드 99: 회사 양식 스타일(테두리) 행 수를 함수 수가 초과해 마지막 함수
-    #       행(예 No 570,571)이 무테(b0000) 빈 행에 stamp됨 → **위 정상 스타일 행**
-    #       전체 border를 행 전체에 복제 (같은 행 D는 b0000이라 소스 부적격 — 라운드
-    #       97 한계).
-    #   (b) 라운드 97: 정상 행이지만 C(Component)열만 세로테두리(b1100)/무테인 경우
-    #       D열(정상 사방 b1111) border를 C에 통일.
+    # 라운드 101 — spec_based 데이터 행 테두리 통일 (footer 잔재 정규화, 최종 패스).
+    #   3.Consistency와 **동일 결함**: auto_expand insert로 빈 양식 footer(본문끝
+    #   무테 / Totals medium / 빈 / sentinel)가 데이터 영역 끝(마지막 3행)으로 밀려
+    #   stamp됨 → 라운드 97/99의 _has_border(No열) 판정이 top/left/right 보유한
+    #   footer 잔재를 '정상 행'으로 오판(bottom 없음/medium 미교정).
+    #   border 시그니처 다수결 헬퍼(normalize_expanded_data_block)로 교체 — col
+    #   no_col~_last_col 정규화. 4.Coverage는 데이터행 뒤 별도 마감행(음영)이 있어
+    #   마지막 데이터행 medium 마감은 생략(finalize_medium_cols=None).
+    #   (b) 정상 행 C(Component)열만 세로테두리/무테인 경우도 다수결과 다른
+    #   시그니처이므로 동일 헬퍼로 함께 교정된다.
     # spec_based(KJPDS02)만 — HDPDM01/SwIT 보존.
     if spec_based and has_component_col and written > 0:
-        import copy as _copy_border
-
-        from openpyxl.cell.cell import MergedCell as _MC_border
-        _comp_col_final = no_col + 1
+        from backend.services.excel_template_utils import (
+            normalize_expanded_data_block,
+        )
         _last_col = branch_count_col + 6  # clear range end_col 와 동일 (데이터 우측 끝)
-
-        def _has_border(_cell) -> bool:
-            _b = _cell.border
-            return any(
-                getattr(_b, _s) and getattr(_b, _s).style
-                for _s in ("left", "right", "top", "bottom")
+        _total_rows = last_data_row - data_start + 1
+        if _total_rows > 0:
+            normalize_expanded_data_block(
+                ws,
+                data_start=data_start,
+                total=_total_rows,
+                col_lo=no_col,
+                col_hi=_last_col,
+                copy_fill=False,
+                finalize_medium_cols=None,
             )
-
-        _last_styled_row = None
-        for _rr in range(data_start, last_data_row + 1):
-            if _has_border(ws.cell(_rr, no_col)):
-                _last_styled_row = _rr
-                # (b) 정상 행: C열 border를 D열(정상)로 통일.
-                _cc = ws.cell(_rr, _comp_col_final)
-                _dc = ws.cell(_rr, unit_id_col)
-                if not isinstance(_cc, _MC_border) and not isinstance(_dc, _MC_border):
-                    _cc.border = _copy_border.copy(_dc.border)
-            elif _last_styled_row is not None:
-                # (a) 무테 초과 행: 위 정상 스타일 행 전체 border/font/alignment 복제
-                # + row height (라운드 100 — font/alignment 추가. 라운드 99는 border/
-                # height만 복제 → 초과 행 폰트 11.0/미정렬/일부 bold-italic 잔존).
-                for _cc2 in range(no_col, _last_col + 1):
-                    _src = ws.cell(_last_styled_row, _cc2)
-                    _dst = ws.cell(_rr, _cc2)
-                    if not isinstance(_dst, _MC_border) and not isinstance(_src, _MC_border):
-                        _dst.border = _copy_border.copy(_src.border)
-                        _dst.font = _copy_border.copy(_src.font)
-                        _dst.alignment = _copy_border.copy(_src.alignment)
-                _src_h = ws.row_dimensions[_last_styled_row].height
-                if _src_h is not None:
-                    ws.row_dimensions[_rr].height = _src_h
 
     return written
 
@@ -2233,19 +2214,15 @@ def _write_consistency_sheet_spec(
         except Exception:  # noqa: BLE001 — graceful
             pass
 
-    # data row stamp.
+    # data row stamp. (미매칭 C셀 노란 마킹은 아래 라운드 101 fill 패스에서 일괄
+    # 처리 — footer 잔재 fill 제거와 단일 출처로 통합.)
     written = 0
-    for no, swufn_id, fn_name, result, matched in rows_data:
+    for no, swufn_id, fn_name, result, _matched in rows_data:
         r = data_start + (no - 1)
         safe_write(ws, r, 2, no)                       # B: No
         safe_write(ws, r, 3, f"SwUTC_{swufn_id}")      # C: SwUTC_<SwUFn>
         safe_write(ws, r, 4, fn_name)                  # D: Function Name
         safe_write(ws, r, 5, result)                   # E: 정합성 O/X
-        # 매핑 실패(추정 SwUFn) → C셀 노란 마킹 (4.Coverage D셀과 동일 추적성).
-        if not matched:
-            from backend.services.excel_template_utils import _apply_fill
-            from backend.services.design_tokens import USER_INPUT_FILL_RGB
-            _apply_fill(ws, r, 3, USER_INPUT_FILL_RGB)
         written += 1
 
     if fail_count and out_warnings is not None:
@@ -2257,58 +2234,69 @@ def _write_consistency_sheet_spec(
             "audit reviewer 확인 의무."
         )
 
-    # 라운드 98 — 데이터 행 회사 양식 재현 최종 패스 (REF 일치, 사용자 승인).
-    #   B(No)열: 회사 양식 연회색 음영 (INDEX_COL_SHADE_RGB) — 우리 빈 양식엔 없어
-    #     누락됐던 것 (REF 전 데이터 행 보유).
-    #   E(정합성)열: 하단 테두리 누락(b1101) → 인접 D열(정상 사방 b1111) border 복사로
-    #     통일. (4.Coverage C열 라운드 97 최종 패스와 동일 패턴 — 중간 단계 리셋 회피)
+    # 라운드 101 — 데이터 행 회사 양식 재현 최종 패스 (footer 잔재 정규화).
+    #   원인(KJPDS02 PV 보고): auto_expand insert가 빈 양식 footer(본문끝 무테 /
+    #   Totals medium+강조fill / 빈 / sentinel)를 데이터 영역 끝(마지막 3~4행)으로
+    #   밀어넣고 그 위에 데이터를 stamp → 마지막 N행 border/fill 불균일.
+    #   라운드 98~100의 _has_border(No열) 판정은 footer 잔재(top/left/right는 보유)를
+    #   '정상 행'으로 오판해 bottom 없음/medium을 못 고쳤다 → border 시그니처
+    #   다수결 헬퍼(normalize_expanded_data_block)로 교체.
+    #   fill(B 음영 / 미매칭 C 노란마킹)은 헬퍼 후 규칙 재적용 — footer Totals의
+    #   강조 fill(C~F) 잔재까지 명시 제거. 마지막 데이터 행은 회사 v1.01 양식
+    #   충실히 C~F bottom medium 마감 (B는 thin 유지 — REF 실측).
     # spec_based 경로 전용 — HDPDM01/SwIT(_write_consistency_sheet) 비영향.
     import copy as _copy_cs
 
     from openpyxl.cell.cell import MergedCell as _MC_cs
     from openpyxl.styles import PatternFill as _PF_cs
 
-    from backend.services.design_tokens import INDEX_COL_SHADE_RGB
+    from backend.services.design_tokens import (
+        INDEX_COL_SHADE_RGB,
+        USER_INPUT_FILL_RGB as _user_fill_rgb,
+    )
+    from backend.services.excel_template_utils import (
+        normalize_expanded_data_block,
+    )
 
-    def _has_border_cs(_cell) -> bool:
-        _b = _cell.border
-        return any(
-            getattr(_b, _s) and getattr(_b, _s).style
-            for _s in ("left", "right", "top", "bottom")
-        )
+    # 1) border/font/alignment/height 다수결 정규화 + 마지막 행 C~F medium 마감.
+    normalize_expanded_data_block(
+        ws,
+        data_start=data_start,
+        total=total,
+        col_lo=2,
+        col_hi=6,
+        copy_fill=False,
+        finalize_medium_cols=(3, 4, 5, 6),
+    )
 
+    # 2) fill 규칙 재적용 — footer Totals 강조 fill 잔재 제거 + 회사 양식 음영/마킹.
+    #   B(No)열: 연회색 음영(INDEX_COL_SHADE_RGB) / 미매칭 C열: 노란 마킹(추정 SwUFn,
+    #   audit reviewer 수동 검증 대상) / 그 외 데이터 셀(C 매칭·D~F): 무fill.
     _shade = _PF_cs(
         fill_type="solid",
         fgColor=INDEX_COL_SHADE_RGB,
         start_color=INDEX_COL_SHADE_RGB,
         end_color=INDEX_COL_SHADE_RGB,
     )
-    _last_styled_cs = None
+    _yellow = _PF_cs(
+        fill_type="solid",
+        fgColor=_user_fill_rgb,
+        start_color=_user_fill_rgb,
+        end_color=_user_fill_rgb,
+    )
+    _nofill = _PF_cs()
     for _no, _swufn, _name, _result, _matched in rows_data:
         _r = data_start + (_no - 1)
-        # B(No)열 회사 양식 연회색 음영.
         _bc = ws.cell(_r, 2)
         if not isinstance(_bc, _MC_cs):
             _bc.fill = _copy_cs.copy(_shade)
-        # 라운드 99 — 무테 초과 행(No 570,571 등)은 위 정상 스타일 행 전체 복제.
-        if _has_border_cs(_bc):
-            _last_styled_cs = _r
-            # E(정합성)열 하단 테두리 → D열(정상) border 통일 (라운드 98).
-            _ec = ws.cell(_r, 5)
-            _dc = ws.cell(_r, 4)
-            if not isinstance(_ec, _MC_cs) and not isinstance(_dc, _MC_cs):
-                _ec.border = _copy_cs.copy(_dc.border)
-        elif _last_styled_cs is not None:
-            for _cc in range(2, 7):  # B~F
-                _src = ws.cell(_last_styled_cs, _cc)
-                _dst = ws.cell(_r, _cc)
-                if not isinstance(_dst, _MC_cs) and not isinstance(_src, _MC_cs):
-                    _dst.border = _copy_cs.copy(_src.border)
-                    _dst.font = _copy_cs.copy(_src.font)  # 라운드 100
-                    _dst.alignment = _copy_cs.copy(_src.alignment)
-            _src_h = ws.row_dimensions[_last_styled_cs].height
-            if _src_h is not None:
-                ws.row_dimensions[_r].height = _src_h
+        _cc = ws.cell(_r, 3)
+        if not isinstance(_cc, _MC_cs):
+            _cc.fill = _copy_cs.copy(_yellow) if not _matched else _copy_cs.copy(_nofill)
+        for _col in (4, 5, 6):
+            _x = ws.cell(_r, _col)
+            if not isinstance(_x, _MC_cs):
+                _x.fill = _copy_cs.copy(_nofill)
 
     return written
 

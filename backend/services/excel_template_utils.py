@@ -1029,6 +1029,118 @@ def update_cross_refs_after_row_expansion(
     return updated
 
 
+def normalize_expanded_data_block(
+    ws: Any,
+    *,
+    data_start: int,
+    total: int,
+    col_lo: int = 2,
+    col_hi: int = 6,
+    copy_fill: bool = False,
+    finalize_medium_cols: list[int] | tuple[int, ...] | None = None,
+) -> int:
+    """라운드 101: auto_expand insert로 데이터 영역 끝에 밀려든 빈 양식 footer
+    잔재(본문끝 무테 / Totals medium+강조fill / 빈 / sentinel)를 본문 표준 행
+    스타일로 교정한다.
+
+    배경: 회사 빈 양식은 고정 sample slot + Totals/sentinel footer를 갖는다.
+    함수 수가 slot을 초과하면 ``auto_expand_row_block``이 ``insert_at_row``
+    (=data_start+1)에 행을 삽입하면서 원래 footer 행들이 데이터 영역 끝으로
+    downshift되고, 그 위에 데이터가 stamp되어 마지막 N행의 테두리/음영이 본문과
+    불균일해진다 (KJPDS02 PV 보고 — 3.Consistency/4.Coverage 마지막 3~4행).
+
+    기존 시트별 패스는 'No열에 테두리가 하나라도 있으면 정상 행'(``any(border)``)으로
+    판정해 footer 잔재(bottom 없음·medium)를 정상으로 **오판**했다 (footer 행도
+    top/left/right 테두리는 보유). 본 헬퍼는 데이터 영역 border 시그니처의 **다수결**로
+    본문 표준을 정하고, 표준에서 벗어난 행만 표준 행의 border/font/alignment/
+    (옵션)fill/height로 교정한다 — footer 잔재(소수)는 반드시 표준과 다른
+    시그니처이므로 누락 없이 잡힌다.
+
+    Args:
+        ws: openpyxl Worksheet.
+        data_start: 첫 데이터 행 (1-based).
+        total: 데이터 행 수. 마지막 데이터 행 = ``data_start + total - 1``.
+        col_lo, col_hi: 정규화 대상 열 범위 (inclusive, 1-based).
+        copy_fill: True면 fill도 표준 행에서 복제 (footer 강조 fill 잔재 제거).
+            B열 음영·노란 마킹 등 규칙 fill은 호출자가 헬퍼 호출 **후** 재적용해야 한다.
+        finalize_medium_cols: 지정 시 마지막 데이터 행의 해당 열 bottom을 medium으로
+            마감 (회사 양식 표끝 굵은 선). None이면 마감 생략 (별도 마감행 존재 시).
+
+    Returns:
+        교정된 행 수 (footer 잔재 없으면 0).
+
+    Policy:
+        - auto_expand 미가동(함수 ≤ slot) 시 데이터 영역에 footer 잔재가 없어
+          전 행이 단일 시그니처 → 교정 0 (no-op, backward-compat).
+        - MergedCell anchor가 아닌 셀은 skip (openpyxl write 금지).
+        - fill을 건드리지 않는 기본(copy_fill=False) 모드는 노란 마킹 등 stamp 시점
+          fill을 보존한다.
+    """
+    if openpyxl is None or total <= 0 or data_start < 1 or col_hi < col_lo:
+        return 0
+    import copy as _cp
+    from collections import Counter
+
+    from openpyxl.cell.cell import MergedCell
+    from openpyxl.styles import Border, Side
+
+    def _sig(r: int) -> tuple:
+        out = []
+        for c in range(col_lo, col_hi + 1):
+            b = ws.cell(r, c).border
+            out.append(tuple(
+                (getattr(b, s).style if getattr(b, s) else None)
+                for s in ("top", "bottom", "left", "right")
+            ))
+        return tuple(out)
+
+    rows = [data_start + i for i in range(total)]
+    counter: Counter = Counter()
+    row_sig: dict[int, tuple] = {}
+    for r in rows:
+        s = _sig(r)
+        row_sig[r] = s
+        counter[s] += 1
+    if not counter:
+        return 0
+    std_sig, _ = counter.most_common(1)[0]
+    std_row = next((r for r in rows if row_sig[r] == std_sig), data_start)
+    std_h = ws.row_dimensions[std_row].height
+
+    fixed = 0
+    for r in rows:
+        if row_sig[r] == std_sig:
+            continue
+        for c in range(col_lo, col_hi + 1):
+            dst = ws.cell(r, c)
+            src = ws.cell(std_row, c)
+            if isinstance(dst, MergedCell) or isinstance(src, MergedCell):
+                continue
+            dst.border = _cp.copy(src.border)
+            dst.font = _cp.copy(src.font)
+            dst.alignment = _cp.copy(src.alignment)
+            if copy_fill:
+                dst.fill = _cp.copy(src.fill)
+        if std_h is not None:
+            ws.row_dimensions[r].height = std_h
+        fixed += 1
+
+    if finalize_medium_cols:
+        last = data_start + total - 1
+        med = Side(style="medium")
+        for c in finalize_medium_cols:
+            lc = ws.cell(last, c)
+            if isinstance(lc, MergedCell):
+                continue
+            b = lc.border
+            lc.border = Border(
+                top=b.top, left=b.left, right=b.right, bottom=med,
+                diagonal=b.diagonal, diagonalUp=b.diagonalUp,
+                diagonalDown=b.diagonalDown,
+            )
+    return fixed
+
+
 # 23차 T192 / 29차 W17: 시각 강조 RGB + placeholder 텍스트는
 # ``design_tokens`` 단일 출처에서 import (위 import 블록 참조).
 
