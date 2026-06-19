@@ -38,7 +38,23 @@ _ISR_RE = re.compile(r"(_isr$|_isr_|\bisr\b|_irq$|_irq_|_handler$|\bnmi\b)", re.
 # isr 버킷은 warn=false('추적 대상 아님이 정상인 인프라')다. 그러나 _handler$ 앵커는
 # Safety_Fault_Handler·Diag_Trap_Handler 같은 안전 핸들러도 매치하므로(라운드 재검증 W4),
 # 안전/진단 토큰을 가진 함수는 isr로 침묵 강등하지 않고 vcast_only로 둬 검토 신호를 보존한다.
-_SAFETY_TOKEN_RE = re.compile(r"(fault|diag|safety|monitor|watchdog|wdg|trap|brake|steer|airbag|crash|asil)", re.I)
+# 라운드111 보강: ISO 26262-5 하드웨어 자가진단(CPU/레지스터/스택/메모리 무결성 시험)과
+# 방어적 가드 연산(overflow-protected arithmetic)이 누락돼 있었다 — s_StackGuardCheck·
+# s_CPUInstructionTest·s_RegisterCheck·s_MCUErrorCheck·*_ECCerror·ROM/RAM/EEPROM_Test·
+# *_Guarded(11개) 등 20개 ASIL 안전기제가 amber 검토우선에 안 걸렸다. 실데이터(1005함수)에서
+# 신규 매치 20개 전부 진짜 안전기제(거짓양성 0) 확인 후 토큰 추가. 토큰은 충분히 구체적이라
+# (registercheck/cpuinstr/rom_test 등) 일반 함수 오탐 위험 낮음.
+_SAFETY_TOKEN_RE = re.compile(
+    # 워드 경계 정밀화(라운드111 reviewer): substring 오탐 차단.
+    #  (?<!de)fault : 'default'(handleDefault) 속 'fault' 차단 (s_MotorBattShortRun_HandleDefault).
+    #  (?<![a-z])trap : 'strap'/'bootstrap' 차단, '_trap'/'Diag_Trap_Handler'는 유지.
+    #  eeprom_?test|(?<![a-z])rom/ram_?test : 'from_test'/'paramtest'/'histogram_test' 차단,
+    #     메모리 자가시험 ROM/RAM/EEPROM_Test 유지.
+    r"((?<!de)fault|diag|safety|monitor|watchdog|wdg|(?<![a-z])trap|brake|steer|airbag|crash|asil"
+    r"|guard|selftest|self_test|stackover|stackchk|cpuinstr|instructiontest|registercheck"
+    r"|register_check|mcuerror|eeprom_?test|(?<![a-z])rom_?test|(?<![a-z])ram_?test|eccerr|integrit)",
+    re.I,
+)
 
 # 미추적 VectorCAST FAIL 판정 — 프론트(TraceUnmappedRoot failTotal/failN)의
 # /^(fail|failed|false|0)$/i 와 동일. dedup 시 FAIL을 PASS보다 우선 보존(W2).
@@ -2095,7 +2111,14 @@ def generate_uds_traceability_matrix(
                         "in_uds": bool(uds_funcs),
                         # 안전/진단 토큰 보유 — 버킷(isr/vcast_only)과 무관하게 프론트에서
                         # amber로 강조해 백워드 추적성 검토 신호를 보존한다(재검증 W4 가시화).
-                        "safety": bool(_SAFETY_TOKEN_RE.search(subprogram)),
+                        # ★subprogram은 대개 SwUFn ID(안전토큰 無)라 해석된 함수명(resolved)·
+                        # UDS 정규명(uds_funcs)에도 적용해야 ASIL 자가진단·가드 함수가 잡힌다
+                        # (라운드111: subprogram만 검사하던 누락 — s_StackGuardCheck 등 미플래그).
+                        "safety": bool(
+                            _SAFETY_TOKEN_RE.search(subprogram)
+                            or any(_SAFETY_TOKEN_RE.search(str(f)) for f in resolved)
+                            or any(_SAFETY_TOKEN_RE.search(str(f)) for f in uds_funcs)
+                        ),
                     })
                 else:
                     # worst-case 집계: 동일 subprogram의 후속 행이 FAIL이면 기존 항목 result를

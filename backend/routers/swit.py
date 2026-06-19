@@ -46,12 +46,12 @@ from backend.schemas import (
 from backend.services import swut_meta_resolver as _resolver_mod
 from backend.services.file_resolver import get_resolver
 from backend.services.path_mode_check import check_log_folder_mode_compat
-from backend.services.swit_consistency_checker import check_swit_consistency
 from backend.services.swit_comprehensive_aggregator import (
     SwitcrBuildMeta,
     SwitcrBuildResult,
     build_switcr_report,
 )
+from backend.services.swit_consistency_checker import check_swit_consistency
 from backend.services.swit_coverage_aggregator import (
     SwitCoverageBuildResult,
     build_swit_coverage_report,
@@ -64,10 +64,20 @@ from backend.services.swit_sitr_aggregator import (
 )
 from backend.services.swut_meta_resolver import (
     apply_function_asil_map as _resolver_apply_function_asil_map,
+)
+from backend.services.swut_meta_resolver import (
     resolve_c_source_root as _resolver_resolve_c_source_root,
+)
+from backend.services.swut_meta_resolver import (
     resolve_hmr_html_bytes as _resolver_resolve_hmr_html_bytes,
+)
+from backend.services.swut_meta_resolver import (
     resolve_swuds_function_ids as _resolver_resolve_swuds_function_ids,
+)
+from backend.services.swut_meta_resolver import (
     resolve_swuds_path as _resolver_resolve_swuds_path,
+)
+from backend.services.swut_meta_resolver import (
     resolve_swuts_test_specs as _resolver_resolve_swuts_test_specs,
 )
 
@@ -498,6 +508,87 @@ async def build_swit_coverage(
         )
 
 
+def _is_sitr_spec_based(req: SwITSitrBuildRequest, cfg: dict[str, Any]) -> bool:
+    """SwITR spec-based 경로 사용 여부 (SwUTR `_is_sutr_spec_based` 대칭).
+
+    config `sitr_spec_based: true` 가 명시되면 우선. 미명시 시 False
+    (backward-compat — 기존 build_swit_sitr_report 표준 양식 유지).
+
+    spec xlsm path는 swut_meta_resolver.resolve_swuts_path 로 별도 해결
+    (SwIT 요청 타입이면 config swits_docx_path/swits_xlsm_path 우선 분기).
+    """
+    return bool(cfg.get("sitr_spec_based", False))
+
+
+def _do_swit_sitr_build_spec_based(
+    req: SwITSitrBuildRequest, session, meta, cfg: dict[str, Any],
+) -> Response:
+    """SwITS spec 시트 기반 SwITR '3.Test Log' 빌드 (회사 PV v0.10 양식).
+
+    SwITS spec xlsm 을 베이스로 복사 (Input/Expected 보존) + VectorCAST Actual/
+    Pass-Fail/Log 추가 + 2.Deviation(커버리지 미달) 신규 시트. 기존
+    build_swit_sitr_report (구 v1.01 4시트 양식)와 분리된 신규 경로.
+    """
+    from backend.services.swit_sitr_spec_builder import build_sitr_from_spec
+    from backend.services.swut_meta_resolver import resolve_swuts_path
+
+    spec_path = resolve_swuts_path(req, req.project_id)
+    if not spec_path:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "spec-based SwITR 빌드에 SwITS spec xlsm path가 필요합니다 "
+                "(config swits_docx_path 또는 req.swuts_docx_path)"
+            ),
+        )
+    resolver = get_resolver()
+    try:
+        spec_bytes = resolver.read_bytes(spec_path)
+    except (FileNotFoundError, PermissionError, OSError) as e:
+        raise HTTPException(
+            status_code=400,
+            detail=f"SwITS spec xlsm 읽기 실패: {type(e).__name__}: {e}",
+        ) from e
+
+    # v0.10 SwITR 템플릿을 베이스로 로드 (Cover/History/1.Test Summary 보유, 좁은
+    # 2.Test Log는 builder가 삭제 후 spec 와이드 시트를 '3.Test Log'로 이식 +
+    # 2.Deviation 신규 생성). 템플릿 미해결 시 spec wb 베이스 fallback.
+    template_bytes: bytes | None = None
+    try:
+        template_bytes = _read_template_bytes(
+            req.sitr_template_path, req.project_id, "sitr",
+        )
+    except HTTPException as te:
+        _logger.warning(
+            "spec-based SwITR 표준 템플릿 미해결 — spec wb 베이스 fallback: %s",
+            te.detail,
+        )
+
+    from backend.services.swut_input_adapter import aggregate_session
+    agg = aggregate_session(session)
+    function_asil_map = agg.get("function_asil_map") or {}
+
+    result = build_sitr_from_spec(
+        session, meta, spec_bytes,
+        template_xlsm_bytes=template_bytes,
+        function_asil_map=function_asil_map,
+        deviation_cases=req.deviation_cases,
+    )
+    if not result.ok:
+        raise HTTPException(
+            status_code=500,
+            detail=f"spec-based SwITR 빌드 실패: {'; '.join(result.warnings[:3])}",
+        )
+    return _build_result_to_response(
+        content_io=result.xlsm_io,
+        filename=result.filename,
+        summary=result.summary,
+        warnings=result.warnings,
+        incomplete_sheets=result.incomplete_sheets,
+        media_type="application/vnd.ms-excel.sheet.macroenabled.12",
+    )
+
+
 def _do_swit_sitr_build(req: SwITSitrBuildRequest) -> Response:
     """SwIT SITR v2.02 xlsm 빌드 entry (34차).
 
@@ -516,9 +607,17 @@ def _do_swit_sitr_build(req: SwITSitrBuildRequest) -> Response:
         log_folders=log_folders,
     )
     _apply_function_asil_map(req, session)
+    meta = _build_swit_sitr_meta(req)
+
+    # SwITR spec-based 분기 (SwUTR _do_sutr_build 대칭) — config sitr_spec_based:true 면
+    # SwITS spec 시트 기반 '3.Test Log' + 2.Deviation 신규 양식(swit_sitr_spec_builder).
+    # 표준 build_swit_sitr_report(구 v1.01 4시트)는 분기 아래 그대로 보존.
+    _cfg = _load_meta_from_config(req.project_id)
+    if _is_sitr_spec_based(req, _cfg):
+        return _do_swit_sitr_build_spec_based(req, session, meta, _cfg)
+
     # 51차 — SITR 양식 전용 path 사용 (config fallback: swit_sitr_template).
     template_bytes = _read_template_bytes(req.sitr_template_path, req.project_id, "sitr")
-    meta = _build_swit_sitr_meta(req)
     swuds_fn_ids = _resolve_swuds_function_ids(req)
     # 60차 F6-A: SwITS xlsm/docx → spec data dict (Test Log B/C/D + Precondition stamp).
     # F6 Round 1 W1: spec 실패 사유 누적 (silent 차단).

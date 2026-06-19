@@ -478,6 +478,52 @@ def test_sds_ret_type_prefix_alias_skipped_on_multi_prefix_collapse():
     assert r202.get("vcast_count", 0) == 0
 
 
+# ── ASIL 안전기제 safety 플래그 — 해석함수명 적용 + default 오탐 방지 (라운드111) ──
+# safety 플래그가 subprogram(대개 SwUFn ID, 안전토큰 無)에만 적용돼 ASIL 자가진단·가드
+# 함수가 amber 검토우선에 안 걸리던 누락을 보강. + 'default' 속 'fault' 부분일치 오탐 방지.
+
+
+def test_safety_flag_via_resolved_func_name():
+    """safety는 SwUFn ID subprogram이어도 SUTS 해석 함수명(s_StackGuardCheck)에 적용된다."""
+    items = [{"id": "SwTR_0101"}]
+    sds_pairs = [{"requirement_id": "SwTR_0101", "component_ids": ["foo_func"]}]
+    suts = [{"requirement_id": "SwUFn_0900", "unit": "s_StackGuardCheck", "source": "SUTS", "testcase": "u1"}]
+    vcast = [{"subprogram": "SwUFn_0900", "testcase": "SwUFn_0900", "result": "pass", "source": "VectorCAST"}]
+    mx = generate_uds_traceability_matrix(items, vcast_rows=suts + vcast, sds_pairs=sds_pairs)
+    by_sub = {u["subprogram"]: u for u in mx["unmapped_vcast"]}
+    assert by_sub["SwUFn_0900"]["safety"] is True
+    assert mx["summary"]["unmapped_safety"] >= 1
+
+
+def test_safety_flag_no_false_positive_on_default():
+    """'HandleDefault' 속 'fault' 부분일치로 거짓 safety 플래그되면 안 됨((?<!de)fault)."""
+    items = [{"id": "SwTR_0101"}]
+    sds_pairs = [{"requirement_id": "SwTR_0101", "component_ids": ["foo_func"]}]
+    suts = [{"requirement_id": "SwUFn_0901", "unit": "s_MotorBattShortRun_HandleDefault", "source": "SUTS", "testcase": "u1"}]
+    vcast = [{"subprogram": "SwUFn_0901", "testcase": "SwUFn_0901", "result": "pass", "source": "VectorCAST"}]
+    mx = generate_uds_traceability_matrix(items, vcast_rows=suts + vcast, sds_pairs=sds_pairs)
+    by_sub = {u["subprogram"]: u for u in mx["unmapped_vcast"]}
+    assert by_sub["SwUFn_0901"]["safety"] is False
+
+
+def test_safety_flag_guarded_arithmetic_and_genuine_fault():
+    """ASIL 방어적 가드 연산(*_Guarded)·진짜 fault(ClearFaults)는 flag(거짓 default와 구분)."""
+    items = [{"id": "SwTR_0101"}]
+    sds_pairs = [{"requirement_id": "SwTR_0101", "component_ids": ["foo_func"]}]
+    suts = [
+        {"requirement_id": "SwUFn_0902", "unit": "u32s_ApiIn_AddU32_Guarded", "source": "SUTS", "testcase": "u1"},
+        {"requirement_id": "SwUFn_0903", "unit": "s_DriveIC_ClearFaults", "source": "SUTS", "testcase": "u2"},
+    ]
+    vcast = [
+        {"subprogram": "SwUFn_0902", "testcase": "SwUFn_0902", "result": "pass", "source": "VectorCAST"},
+        {"subprogram": "SwUFn_0903", "testcase": "SwUFn_0903", "result": "pass", "source": "VectorCAST"},
+    ]
+    mx = generate_uds_traceability_matrix(items, vcast_rows=suts + vcast, sds_pairs=sds_pairs)
+    by_sub = {u["subprogram"]: u for u in mx["unmapped_vcast"]}
+    assert by_sub["SwUFn_0902"]["safety"] is True   # guarded 연산
+    assert by_sub["SwUFn_0903"]["safety"] is True   # clearfaults (진짜 fault)
+
+
 # ── 요구사항 제목(name) 추출 — 마크다운 헤딩 + 파이프 정제 (라운드110) ──────────
 # SRS의 '#### SwTR_0101: Auto Close' 헤딩은 '#' 접두 때문에 파서가 통째로 무시하고,
 # 표 파편의 빈/'| ' 잡음 name만 잡혀 요구사항 제목이 빈/잡음으로 표시되던 회귀를 고정.
