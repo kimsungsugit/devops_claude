@@ -13,6 +13,7 @@ from report_gen.requirements import (
     _extract_requirement_blocks,
     _normalize_req_id,
     _safe_docx_open,
+    _strip_ret_type_prefix,
     generate_uds_traceability_matrix,
 )
 
@@ -402,6 +403,79 @@ def test_unmapped_vcast_swufn_id_echo_not_counted_as_uds():
     assert entry["in_uds"] is False        # ID 메아리는 신호 아님
     assert entry["uds_funcs"] == []
     assert mx["summary"]["unmapped_uds_linked"] == 0
+
+
+# ── 반환형 헝가리안 접두사 불일치 보정 (라운드111) ────────────────────────────
+# SDS는 'u16s_MotorSpdCtrl_AutoOpen'(반환형 접두사)으로, 테스트/VectorCAST는
+# 's_MotorSpdCtrl_AutoOpen'으로 표기해 정확매칭 bridge가 끊겨 도어모터 4함수가
+# 각 11개 SRS 요구사항 추적을 잃던 실버그를 base alias로 복구. 단 base가 별도 SDS
+# 키로 존재하면(서로 다른 함수 가능) alias 생략해 거짓 병합을 막는다(충돌 안전).
+
+
+def test_strip_ret_type_prefix_helper():
+    """반환형 토큰(u8/u16/u32/s8/s16/s32)만 제거, 저장클래스(s/g/l) 직전일 때만."""
+    assert _strip_ret_type_prefix("u16s_motorspdctrl_autoopen") == "s_motorspdctrl_autoopen"
+    assert _strip_ret_type_prefix("u8g_drvin_datavalidation_f") == "g_drvin_datavalidation_f"
+    assert _strip_ret_type_prefix("s16g_doorprectrl_slopelvl") == "g_doorprectrl_slopelvl"
+    # 저장클래스 접두사 없는 'u8_foo'는 건드리지 않음('_foo' 오염 방지)
+    assert _strip_ret_type_prefix("u8_foo") == "u8_foo"
+    # 접두사 없는 일반 함수 불변
+    assert _strip_ret_type_prefix("s_sha256_transform") == "s_sha256_transform"
+    assert _strip_ret_type_prefix("g_lib_init") == "g_lib_init"
+
+
+def test_sds_ret_type_prefix_alias_bridges_unprefixed_test_func():
+    """SDS 'u16s_X' ↔ 테스트 's_X' 불일치를 base alias로 연결 → SRS 추적 복구."""
+    items = [{"id": "SwTR_0101"}]
+    sds_pairs = [{"requirement_id": "SwTR_0101", "component_ids": ["u16s_MotorSpdCtrl_AutoOpen"]}]
+    suts = [{"requirement_id": "SwUFn_0500", "unit": "s_motorspdctrl_autoopen", "source": "SUTS", "testcase": "u1"}]
+    vcast = [{"subprogram": "SwUFn_0500", "testcase": "SwUFn_0500", "result": "pass", "source": "VectorCAST"}]
+    mx = generate_uds_traceability_matrix(items, vcast_rows=suts + vcast, sds_pairs=sds_pairs)
+    # 미추적에서 빠지고(추적됨) SwTR_0101 행에 VectorCAST 추적으로 연결
+    subs = {u["subprogram"] for u in mx["unmapped_vcast"]}
+    assert "SwUFn_0500" not in subs
+    row = next(r for r in mx["rows"] if _normalize_req_id(r["requirement_id"]) == "SWTR_0101")
+    assert row.get("vcast_count", 0) > 0
+
+
+def test_sds_ret_type_prefix_alias_skipped_on_collision():
+    """base가 별도 SDS 키로 이미 존재하면 alias 생략 — 서로 다른 함수일 수 있어 거짓
+    req 병합을 막는다(충돌 안전, under-trace가 over-trace보다 안전한 ISO 기본값)."""
+    items = [{"id": "SwTR_0101"}, {"id": "SwTR_0202"}]
+    sds_pairs = [
+        {"requirement_id": "SwTR_0101", "component_ids": ["g_foo"]},      # 정확형
+        {"requirement_id": "SwTR_0202", "component_ids": ["u16g_foo"]},   # 접두사형(다른 req)
+    ]
+    suts = [{"requirement_id": "SwUFn_0600", "unit": "g_foo", "source": "SUTS", "testcase": "u1"}]
+    vcast = [{"subprogram": "SwUFn_0600", "testcase": "SwUFn_0600", "result": "pass", "source": "VectorCAST"}]
+    mx = generate_uds_traceability_matrix(items, vcast_rows=suts + vcast, sds_pairs=sds_pairs)
+    r101 = next(r for r in mx["rows"] if _normalize_req_id(r["requirement_id"]) == "SWTR_0101")
+    r202 = next(r for r in mx["rows"] if _normalize_req_id(r["requirement_id"]) == "SWTR_0202")
+    assert r101.get("vcast_count", 0) > 0   # g_foo 테스트 → 0101 연결(정확매칭)
+    assert r202.get("vcast_count", 0) == 0  # u16g_foo의 0202로 alias 누수 없음
+
+
+def test_sds_ret_type_prefix_alias_skipped_on_multi_prefix_collapse():
+    """2+ 접두사형(u8g_X·s8g_X — 반환형 다른 별개 함수 가능)이 같은 base로 모이면 alias
+    생략 — 서로 다른 함수 req의 union(거짓연결) 방지(라운드111 강화). 실데이터
+    g_doorctrl_slipchkspd(u8g_/s8g_) 케이스."""
+    items = [{"id": "SwTR_0101"}, {"id": "SwTR_0202"}]
+    sds_pairs = [
+        {"requirement_id": "SwTR_0101", "component_ids": ["u8g_foo"]},
+        {"requirement_id": "SwTR_0202", "component_ids": ["s8g_foo"]},
+    ]
+    suts = [{"requirement_id": "SwUFn_0700", "unit": "g_foo", "source": "SUTS", "testcase": "u1"}]
+    vcast = [{"subprogram": "SwUFn_0700", "testcase": "SwUFn_0700", "result": "pass", "source": "VectorCAST"}]
+    mx = generate_uds_traceability_matrix(items, vcast_rows=suts + vcast, sds_pairs=sds_pairs)
+    resolved = set()
+    for u in mx["unmapped_vcast"]:
+        for f in (u.get("resolved_funcs") or []):
+            resolved.add(f.lower())
+    assert "g_foo" in resolved              # 모호 → alias 생략 → 여전히 미추적
+    r101 = next(r for r in mx["rows"] if _normalize_req_id(r["requirement_id"]) == "SWTR_0101")
+    r202 = next(r for r in mx["rows"] if _normalize_req_id(r["requirement_id"]) == "SWTR_0202")
+    assert r101.get("vcast_count", 0) == 0  # 어느 쪽으로도 거짓연결 안 됨
+    assert r202.get("vcast_count", 0) == 0
 
 
 # ── 요구사항 제목(name) 추출 — 마크다운 헤딩 + 파이프 정제 (라운드110) ──────────

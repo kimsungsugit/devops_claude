@@ -73,6 +73,21 @@ def _sds_comp_key(comp: Any) -> str:
     s = _SDS_ARRAY_SUBSCRIPT_RE.sub("", s).strip()
     return s if _C_IDENT_RE.match(s) else ""
 
+
+# 반환형 헝가리안 접두사 보정 (라운드 111 fix).
+# SDS는 함수명에 반환형을 붙여(u16s_MotorSpdCtrl_AutoOpen) 표기하나, 테스트/VectorCAST는
+# 생략한 형(s_MotorSpdCtrl_AutoOpen)을 쓴다. 이 불일치로 정확매칭 bridge가 끊겨 실데이터에서
+# 도어 모터제어 4함수(s_motorspdctrl_{auto,assist}{open,close})가 각 11개 SRS 요구사항 추적을
+# 잃고 있었다. 저장클래스 접두사(s/g/l) '직전'의 반환형 토큰만 제거한다 — lookahead로 s/g/l_가
+# 뒤따를 때만 매칭하므로 'u8_foo'(저장클래스 없음)는 건드리지 않아 '_foo' 같은 오염을 막는다.
+_RET_TYPE_PREFIX_RE = re.compile(r"^(?:u8|u16|u32|s8|s16|s32)(?=[sgl]_)")
+
+
+def _strip_ret_type_prefix(key: str) -> str:
+    """SDS 함수키의 선행 반환형 토큰 제거(없으면 원본). 'u16s_x'->'s_x', 'u8g_y'->'g_y'."""
+    return _RET_TYPE_PREFIX_RE.sub("", key)
+
+
 _REQ_ID_PAT = re.compile(r"\b(Sw(?:TR|TSR|NTR|NTSR|CNF|EI|ST|STR|Fn|TK)_\d+)\b", re.I)
 
 def _extract_requirements_from_comments(text: str) -> List[str]:
@@ -1861,19 +1876,43 @@ def generate_uds_traceability_matrix(
     # 판별용. matrix 밖 req(SwFn/SwST 등)에만 귀속한 함수까지 포함해 'SDS 연동 but SRS 미추적'
     # 신호를 줄 수 있다. 단 정확매칭이라 거짓양성 없음(fuzzy 미사용).
     sds_all_func_to_reqs: Dict[str, List[str]] = {}
+    # 모든 SDS comp 키 선스캔 — 반환형 접두사 alias가 별도 SDS 키와 충돌하면(서로 다른 함수
+    # 오인 위험) alias를 생략하기 위함(라운드111). 예: u16g_drvin_motorspeed의 base
+    # g_drvin_motorspeed가 이미 별도 SDS 키면 alias 추가하지 않고 기존 정확매칭에 맡긴다.
+    _all_sds_keys = {
+        k for comps in sds_lookup.values() for c in comps if (k := _sds_comp_key(c))
+    }
+    # 반환형 접두사 alias 안전 집합(라운드111): base가 ① 기존 SDS 키가 아니고 ② 단 하나의
+    # 접두사형에서만 파생될 때만 허용. 2+ 접두사형(예: u8g_doorctrl_slipchkspd·
+    # s8g_doorctrl_slipchkspd — unsigned8/signed8 반환형이 다른 별개 함수일 수 있음)이 같은
+    # base로 모이면, 그 base로 들어오는 테스트 함수에 서로 다른 함수의 req가 union돼 거짓연결될
+    # 위험이 있으므로 alias를 만들지 않는다(over-trace > under-trace 위험, 충돌 보수 처리).
+    _prefixed_base_count: Dict[str, int] = {}
+    for _k in _all_sds_keys:
+        _b = _strip_ret_type_prefix(_k)
+        if _b != _k:
+            _prefixed_base_count[_b] = _prefixed_base_count.get(_b, 0) + 1
+    _alias_safe = {b for b, c in _prefixed_base_count.items() if c == 1 and b not in _all_sds_keys}
     for rid_srs, comps in sds_lookup.items():
         in_matrix = rid_srs in req_id_set
         for comp in comps:
             key = _sds_comp_key(comp)
             if not key:
                 continue
-            all_lst = sds_all_func_to_reqs.setdefault(key, [])
-            if rid_srs not in all_lst:
-                all_lst.append(rid_srs)
-            if in_matrix:
-                lst = sds_func_to_reqs.setdefault(key, [])
-                if rid_srs not in lst:
-                    lst.append(rid_srs)
+            # 반환형 헝가리안 접두사 불일치 보정(라운드111): SDS 'u16s_X' ↔ 테스트 's_X'.
+            # exact 키는 보존(양쪽 prefixed 매칭 불변), 안전한 base만 alias 추가 등록.
+            keys = [key]
+            alias = _strip_ret_type_prefix(key)
+            if alias != key and alias in _alias_safe:
+                keys.append(alias)
+            for kk in keys:
+                all_lst = sds_all_func_to_reqs.setdefault(kk, [])
+                if rid_srs not in all_lst:
+                    all_lst.append(rid_srs)
+                if in_matrix:
+                    lst = sds_func_to_reqs.setdefault(kk, [])
+                    if rid_srs not in lst:
+                        lst.append(rid_srs)
 
     # UDS 함수 전체 (lower→원형 display) — source_ids bridge용
     uds_all_funcs: Dict[str, str] = {}
