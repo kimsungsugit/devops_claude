@@ -83,6 +83,8 @@ from backend.services.swut_sutr_aggregator import (
 )
 from backend.services.swut_sutr_spec_builder import (
     DATA_START_ROW,
+    HEADER_SECTION_ROW,
+    SUBHEADER_ROW,
     _apply_actual_result_style,
     _collect_coverage_gaps,
     _compress_line_numbers,
@@ -270,8 +272,14 @@ def _scan_swit_spec_blocks(ws, layout=None) -> list[dict[str, Any]]:
                 nbs = str(nb).strip() if nb is not None else ""
                 if nbs and _SWIT_ANCHOR_RE.match(nbs):
                     break  # 다음 anchor
-                ci = ws.cell(k, 3).value  # C = iteration index
-                if ci is not None and str(ci).strip().isdigit():
+                # iteration index 열: regular 블록은 C(3)·H(8) 둘 다, FI 블록
+                # (SwITC_FI_SwFn_NN)은 C 공란 + H(8)에만 index → C-or-H로 양쪽 포착
+                # (H만 쓰면 무방하나 robust하게 OR). anchor 행은 둘 다 공란이라 제외.
+                ci = ws.cell(k, 3).value  # C = iteration index (regular)
+                hi = ws.cell(k, 8).value  # H = iteration index (regular+FI)
+                if (ci is not None and str(ci).strip().isdigit()) or (
+                    hi is not None and str(hi).strip().isdigit()
+                ):
                     iter_rows.append(k)
                 k += 1
             blocks.append({
@@ -288,6 +296,76 @@ def _scan_swit_spec_blocks(ws, layout=None) -> list[dict[str, Any]]:
         else:
             rr += 1
     return blocks
+
+
+def _apply_swit_legend_offset(ws, layout, out_warnings=None) -> bool:
+    """Test Log 상단에 2행 삽입 + B2:B4 색범례 — 회사 PV 레퍼런스 정합.
+
+    spec 복사본은 헤더 r3(HEADER_SECTION_ROW)/데이터 r5(DATA_START_ROW)이나,
+    레퍼런스 SwITR Test Log는 상단에 Expected/Actual/Pass-Fail 색범례(B2:B4) 3행을
+    두어 **헤더 r5 / 서브헤더 r6 / 데이터 r7**이다(2행 하향).
+
+    ``move_range(translate=True)`` 로 A2:끝을 2행 하향(셀 값·_style·수식 자동 보정
+    — 실측: COUNTIF LE5:LE669 → LE7:LE671 자동 변환), 병합 range는 move_range가
+    이동 안 하므로 사전 unmerge → 사후 +2 재매핑. 범례 텍스트는 레퍼 실측 그대로
+    (오타 'Acual' 포함), fill은 각 컬럼 그룹 헤더(Expected/Actual/Pass-Fail)에서
+    복제해 색 코딩을 일치시킨다.
+
+    **반드시 모든 Test Log 쓰기(fill·style) 완료 후 호출** — 이후 행 좌표가 +2.
+    실패 시(비치명) 시프트 없이 원본 레이아웃 유지하고 False 반환.
+    """
+    from copy import copy as _copy
+
+    from openpyxl.utils import get_column_letter
+    from openpyxl.utils.cell import range_boundaries
+
+    try:
+        max_col = int(ws.max_column or 0)
+        max_row = int(ws.max_row or 0)
+        if max_col < 2 or max_row < DATA_START_ROW:
+            return False
+        merges = [str(rng) for rng in ws.merged_cells.ranges]
+        for m in merges:
+            ws.unmerge_cells(m)
+        # A2:끝 2행 하향 (행1 상단 빈행 유지). translate=True → 수식 좌표 자동 +2.
+        ws.move_range(
+            f"A2:{get_column_letter(max_col)}{max_row}", rows=2, cols=0, translate=True,
+        )
+        # 병합 재매핑 (+2행, min_row==1 병합은 미시프트).
+        for m in merges:
+            c1, r1, c2, r2 = range_boundaries(m)
+            if None in (c1, r1, c2, r2):
+                continue
+            ws.merge_cells(
+                start_row=(r1 + 2 if r1 >= 2 else r1), start_column=c1,
+                end_row=(r2 + 2 if r2 >= 2 else r2), end_column=c2,
+            )
+        # 범례 B2:B4 (+ C열 '-'). 헤더는 이제 HEADER_SECTION_ROW+2 (=r5).
+        hdr_row = HEADER_SECTION_ROW + 2
+        legend = (
+            ("Expected Result", layout.expected_start),
+            ("Acual Result", layout.actual_start),  # 레퍼 실측 철자 그대로(Acual)
+            ("Pass//Fail", layout.pass_fail),
+        )
+        for i, (label, src_col) in enumerate(legend):
+            row = 2 + i
+            safe_write(ws, row, 2, label)
+            safe_write(ws, row, 3, "-")
+            try:
+                src_fill = ws.cell(hdr_row, src_col).fill
+                if src_fill is not None:
+                    ws.cell(row, 2).fill = _copy(src_fill)
+            except (AttributeError, ValueError):
+                pass
+        return True
+    except (ValueError, AttributeError, TypeError, KeyError, IndexError) as e:
+        # 범례는 cosmetic — 실패해도 데이터/구조는 정상이므로 시프트 없이 진행.
+        if out_warnings is not None:
+            out_warnings.append(
+                f"[spec-sitr] Test Log 범례 offset 실패(비치명, 원본 레이아웃 유지): "
+                f"{type(e).__name__}: {e}"
+            )
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -683,6 +761,15 @@ def build_sitr_from_spec(
     # 헤더 추가 (Actual/Pass-Fail/Log).
     _write_log_headers(log_ws, warnings, layout=layout)
 
+    # Actual 서브헤더를 Expected 서브헤더(Param N)와 동일하게 미러 — `_write_log_headers`
+    # 는 'ActR[i]'를 stamp하나, 회사 PV 레퍼런스는 Expected와 동일한 'Param N' 라벨을
+    # 사용(Actual=Expected 1:1 미러). `_apply_actual_result_style`는 _style만 복제(값 보존)
+    # 라 이 값이 유지된다. expected_start~ 라벨이 비면 ActR[i] 유지(fallback).
+    for _i in range(layout.actual_max):
+        _exp_label = log_ws.cell(SUBHEADER_ROW, layout.expected_start + _i).value
+        if _exp_label not in (None, ""):
+            safe_write(log_ws, SUBHEADER_ROW, layout.actual_start + _i, _exp_label)
+
     # anchor 스캔 → 함수 블록 (이식된 '3.Test Log' 기준). SwIT 전용 스캐너 —
     # SwITS PV는 B열 TC_ID 세로병합 + C열 iteration index 구조라 SwUTS
     # `_scan_spec_blocks`(B=숫자 index)로는 anchor 0개 (2026-06-19 fix).
@@ -708,6 +795,10 @@ def build_sitr_from_spec(
 
     # Actual Result 열 서식 적용 (Expected 1:1 미러).
     _restyled = _apply_actual_result_style(log_ws, layout=layout)
+
+    # Test Log 상단 2행 색범례 offset — 회사 PV 레퍼런스 정합 (헤더 r5/데이터 r7).
+    # **모든 Test Log 쓰기 완료 후** (이후 행 좌표 +2). 비치명 — 실패해도 진행.
+    _legend_ok = _apply_swit_legend_offset(log_ws, layout, out_warnings=warnings)
 
     summary: dict[str, Any] = {
         "builder": "swit-spec-based" if template_xlsm_bytes is not None
@@ -744,6 +835,7 @@ def build_sitr_from_spec(
         "actual_from_vcast": fill_stats["actual_from_vcast"],
         "actual_missing": fill_stats["actual_missing"],
         "actual_cells_restyled": _restyled,
+        "legend_offset_applied": _legend_ok,
     }
 
     # spec 매칭 0건 — TC-id 매칭 실패 가능성 (SwITS↔레퍼런스 불일치) 정직 보고.
