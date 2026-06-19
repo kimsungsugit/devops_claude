@@ -338,6 +338,72 @@ def test_unmapped_vcast_sds_reqs_empty_when_absent_from_sds():
     assert mx["summary"]["unmapped_sds_linked"] == 0
 
 
+# ── UDS(단위설계) 연동 신호 — SRS 미추적이어도 함수가 단위설계엔 존재하는지 ──────────
+# 사용자 질문("SDS 미추적이어도 UDS엔 연동돼 있나"). SRS 역추적이 끊긴 함수라도 UDS
+# 인벤토리에 있으면 '시험+단위설계 완료, SDS 아키텍처 roll-up만 누락'(정당한 입도차),
+# 없으면 시험만 존재하는 진짜 설계 공백으로 구분한다. KJPDS02 실데이터 661 UDS연동/1 갭.
+
+
+def test_unmapped_vcast_in_uds_via_resolved_func():
+    """미추적 SwUFn이 SUTS로 함수명 해석되고 그 함수가 UDS 인벤토리에 있으면
+    in_uds=True, uds_funcs=[정규 함수명], summary unmapped_uds_linked=1."""
+    items = [{"id": "SwTR_0101"}]
+    sds_pairs = [{"requirement_id": "SwTR_0101", "component_ids": ["foo_func"]}]
+    # SwUFn_0200 은 SDS에 없어 SRS 미추적이지만, SUTS로 s_sha256_transform 해석되고
+    # 그 함수는 UDS 단위설계 인벤토리에 존재한다.
+    suts = [{"requirement_id": "SwUFn_0200", "unit": "s_sha256_transform", "source": "SUTS", "testcase": "u1"}]
+    vcast = [{"subprogram": "SwUFn_0200", "testcase": "SwUFn_0200", "result": "pass", "source": "VectorCAST"}]
+    mx = generate_uds_traceability_matrix(
+        items, vcast_rows=suts + vcast, sds_pairs=sds_pairs,
+        uds_function_ids=["s_sha256_transform", "other_func"],
+    )
+    by_sub = {u["subprogram"]: u for u in mx["unmapped_vcast"]}
+    entry = by_sub["SwUFn_0200"]
+    assert entry["in_uds"] is True
+    assert entry["uds_funcs"] == ["s_sha256_transform"]
+    assert mx["summary"]["unmapped_uds_linked"] == 1
+    assert mx["summary"]["unmapped_design_gap"] == 0
+
+
+def test_unmapped_vcast_design_gap_when_not_in_uds():
+    """해석된 함수가 UDS 인벤토리에도 없으면 in_uds=False(진짜 설계 공백) +
+    summary unmapped_design_gap 카운트. 모든 항목이 in_uds/uds_funcs 키를 갖는다."""
+    items = [{"id": "SwTR_0101"}]
+    sds_pairs = [{"requirement_id": "SwTR_0101", "component_ids": ["foo_func"]}]
+    # 해석은 되지만(ghost_unit) UDS 인벤토리엔 없음 → 진짜 갭
+    suts = [{"requirement_id": "SwUFn_0300", "unit": "ghost_unit", "source": "SUTS", "testcase": "u1"}]
+    vcast = [{"subprogram": "SwUFn_0300", "testcase": "SwUFn_0300", "result": "pass", "source": "VectorCAST"}]
+    mx = generate_uds_traceability_matrix(
+        items, vcast_rows=suts + vcast, sds_pairs=sds_pairs,
+        uds_function_ids=["unrelated_func"],
+    )
+    by_sub = {u["subprogram"]: u for u in mx["unmapped_vcast"]}
+    entry = by_sub["SwUFn_0300"]
+    assert entry["in_uds"] is False
+    assert entry["uds_funcs"] == []
+    assert all("in_uds" in u and "uds_funcs" in u for u in mx["unmapped_vcast"])
+    assert mx["summary"]["unmapped_design_gap"] == 1
+    assert mx["summary"]["unmapped_uds_linked"] == 0
+
+
+def test_unmapped_vcast_swufn_id_echo_not_counted_as_uds():
+    """★UDS 인벤토리가 SwUFn ID도 포함(함수명+ID)하므로, subprogram이 SwUFn ID인 경우
+    그 ID 자기-매칭(메아리)을 in_uds로 오인하면 안 된다. 함수명 해석이 없으면 in_uds=False."""
+    items = [{"id": "SwTR_0101"}]
+    sds_pairs = [{"requirement_id": "SwTR_0101", "component_ids": ["foo_func"]}]
+    # SUTS 해석 없음. uds_function_ids에 SwUFn ID 자체가 들어있어도 echo로 in_uds 되면 안 됨.
+    vcast = [{"subprogram": "SwUFn_0500", "testcase": "SwUFn_0500", "result": "pass", "source": "VectorCAST"}]
+    mx = generate_uds_traceability_matrix(
+        items, vcast_rows=vcast, sds_pairs=sds_pairs,
+        uds_function_ids=["SwUFn_0500", "real_func"],  # ID echo 함정
+    )
+    by_sub = {u["subprogram"]: u for u in mx["unmapped_vcast"]}
+    entry = by_sub["SwUFn_0500"]
+    assert entry["in_uds"] is False        # ID 메아리는 신호 아님
+    assert entry["uds_funcs"] == []
+    assert mx["summary"]["unmapped_uds_linked"] == 0
+
+
 # ── 요구사항 제목(name) 추출 — 마크다운 헤딩 + 파이프 정제 (라운드110) ──────────
 # SRS의 '#### SwTR_0101: Auto Close' 헤딩은 '#' 접두 때문에 파서가 통째로 무시하고,
 # 표 파편의 빈/'| ' 잡음 name만 잡혀 요구사항 제목이 빈/잡음으로 표시되던 회귀를 고정.

@@ -2027,6 +2027,20 @@ def generate_uds_traceability_matrix(
                         for r in sds_all_func_to_reqs.get(_sds_comp_key(cand), []):
                             if r not in sds_reqs:
                                 sds_reqs.append(r)
+                    # UDS(단위설계) 인벤토리 존재 여부 — 사용자 질문("SDS 미추적이어도 UDS엔
+                    # 연동됐나"). SRS 역추적이 끊긴 함수라도 UDS 단위설계엔 명세돼 있으면
+                    # '시험+단위설계 완료, SDS 아키텍처 roll-up만 누락'(정당한 입도차)으로,
+                    # UDS에도 없으면 '진짜 설계 갭'으로 구분 가시화한다. SwUFn ID 자기-메아리
+                    # (인벤토리가 ID도 포함)는 신호가 아니므로, SUTS로 해석된 실제 함수명 +
+                    # subprogram이 함수명인 경우(SwUFn ID 아님)만 UDS 인벤토리와 대조한다.
+                    uds_funcs: List[str] = []
+                    _uds_cands = list(resolved)
+                    if not _SWUFN_RE.search(subprogram):
+                        _uds_cands.append(sub_lower)
+                    for cand in _uds_cands:
+                        disp = uds_all_funcs.get(cand) or uds_all_funcs.get(_sds_comp_key(cand))
+                        if disp and disp not in uds_funcs:
+                            uds_funcs.append(disp)
                     _unmapped_idx[sub_lower] = len(unmapped_vcast)
                     unmapped_vcast.append({
                         "subprogram": subprogram,
@@ -2037,6 +2051,9 @@ def generate_uds_traceability_matrix(
                         "category": category,
                         # SDS 설계에 명세된 SRS 요구사항(매트릭스 밖 포함) — 비면 'SDS 미명세'.
                         "sds_reqs": sds_reqs,
+                        # UDS 단위설계 인벤토리에 존재하는 정규 함수명(비면 '단위설계 미명세' = 진짜 갭).
+                        "uds_funcs": uds_funcs,
+                        "in_uds": bool(uds_funcs),
                         # 안전/진단 토큰 보유 — 버킷(isr/vcast_only)과 무관하게 프론트에서
                         # amber로 강조해 백워드 추적성 검토 신호를 보존한다(재검증 W4 가시화).
                         "safety": bool(_SAFETY_TOKEN_RE.search(subprogram)),
@@ -2193,6 +2210,13 @@ def generate_uds_traceability_matrix(
             # SRS 미추적이지만 SDS 설계엔 명세된(역방향 부분추적) 함수 수 — 프론트 'SDS:<req>' 뱃지용.
             # 정규화 fix 후 KJPDS02 실데이터에선 0(설계가 이 함수들을 명세 안 함). 라운드 109.
             "unmapped_sds_linked": sum(1 for u in unmapped_vcast if u.get("sds_reqs")),
+            # SRS 미추적이지만 UDS 단위설계엔 존재하는 함수 수 — '시험+단위설계 완료, SDS
+            # 아키텍처 roll-up만 누락'(정당한 입도차). KJPDS02 실데이터 661/662.
+            # (unmapped_sds_linked와 동일 패턴: 캐시 trace_summary.json·감사·문서화용 집계이며,
+            #  프론트 루트 뱃지는 unmapped_vcast list의 in_uds로 직접 재계산해 표시·카운트 동기 보장.)
+            "unmapped_uds_linked": sum(1 for u in unmapped_vcast if u.get("in_uds")),
+            # UDS에도 없는(단위설계 미명세) 미추적 함수 수 — 진짜 설계 공백(검토 우선순위 ↑).
+            "unmapped_design_gap": sum(1 for u in unmapped_vcast if not u.get("in_uds")),
         },
         # 역방향 추적성 공백 — '시험은 했으나 이 SRS에 안 닿는' VectorCAST subprogram 전체 목록.
         # 트리 뷰의 'SRS 미추적 시험 포함' 토글이 의미 3버킷으로 묶어 보여준다.

@@ -927,13 +927,15 @@ function TraceMatrix({ matrix }) {
     if (unmappedVcast.length > 0) {
       csvRows.push('');
       csvRows.push(csvEscape(`# SRS 미추적 시험 (역방향 공백 ${unmappedVcast.length}종 — 시험됐으나 이 SRS 요구사항 미명세)`));
-      csvRows.push(['Subprogram', '해석된 함수', 'SDS 설계', '분류', 'VectorCAST 결과'].join(','));
+      csvRows.push(['Subprogram', '해석된 함수', 'SDS 설계', 'UDS 설계', '분류', 'VectorCAST 결과'].join(','));
       for (const u of unmappedVcast) {
         const sr = Array.isArray(u.sds_reqs) ? u.sds_reqs : [];
+        const uf = Array.isArray(u.uds_funcs) ? u.uds_funcs : [];
         csvRows.push([
           csvEscape(u.subprogram ?? ''),
           csvEscape((Array.isArray(u.resolved_funcs) ? u.resolved_funcs : []).join('; ')),
           csvEscape(sr.length ? sr.join('; ') : '미명세'),
+          csvEscape(u.in_uds === true ? (uf.length ? uf.join('; ') : '설계됨') : (u.in_uds === false ? '미설계' : '')),
           csvEscape(u.category ?? ''),
           csvEscape(u.result ?? ''),
         ].join(','));
@@ -1800,6 +1802,12 @@ function TraceUnmappedRoot({ unmapped, expanded, onToggle }) {
   // SDS 설계엔 명세됐으나 SRS만 끊긴 함수(역방향 부분추적). 정규화 fix 후 KJPDS02=0이나
   // 타 데이터/향후 대비 표기(라운드 109). >0일 때만 노출(safetyTotal 패턴과 동일).
   const sdsLinkedTotal = list.filter(u => u && Array.isArray(u.sds_reqs) && u.sds_reqs.length > 0).length;
+  // UDS(단위설계) 연동 — SRS 역추적이 끊겨도 함수가 단위설계엔 존재(시험+단위설계 완료).
+  // 사용자 질문("SDS 미추적이어도 UDS엔 연동돼 있나")의 직접 답: 대다수가 UDS엔 존재한다.
+  // 미설계(in_uds=false)는 시험만 존재하는 진짜 설계 공백이라 빨강으로 별도 노출.
+  // in_uds === false 만 갭으로 카운트(undefined=구 응답은 제외) — 버전 스큐 거짓 갭 방지(X6).
+  const udsLinkedTotal = list.filter(u => u && u.in_uds === true).length;
+  const designGapTotal = list.filter(u => u && u.in_uds === false).length;
   return (
     <li style={{ borderTop: '2px solid var(--accent)' }}>
       <div
@@ -1818,6 +1826,8 @@ function TraceUnmappedRoot({ unmapped, expanded, onToggle }) {
           {failTotal > 0 && <span style={{ color: '#dc2626', fontWeight: 600 }}> · {failTotal} fail</span>}
           {safetyTotal > 0 && <span style={{ color: COVERAGE_COLORS.partial.fg, fontWeight: 700 }}> · ⚠ {safetyTotal} 안전</span>}
           {sdsLinkedTotal > 0 && <span style={{ color: COVERAGE_COLORS.partial.fg, fontWeight: 600 }} title="SDS 설계엔 명세됐으나 그 요구사항이 SRS 추적 매트릭스 밖(부분추적)"> · {sdsLinkedTotal} SDS부분</span>}
+          {udsLinkedTotal > 0 && <span style={{ color: COVERAGE_COLORS.covered.fg, fontWeight: 600 }} title="UDS 단위설계엔 함수가 존재 — 시험+단위설계 완료, SDS 아키텍처 roll-up만 누락(정당한 입도차)"> · {udsLinkedTotal} UDS설계</span>}
+          {designGapTotal > 0 && <span style={{ color: COVERAGE_COLORS.uncovered.fg, fontWeight: 700 }} title="UDS 단위설계에도 없음 — 시험만 존재하는 진짜 설계 공백(검토 우선순위 높음)"> · {designGapTotal} 미설계</span>}
         </span>
         <span style={{ marginLeft: 'auto', fontSize: 10, color: 'var(--text-muted)' }}>역방향 추적성 공백</span>
       </div>
@@ -1875,6 +1885,7 @@ function TraceUnmappedBucket({ bucket, items, parentId, expanded, onToggle }) {
                 <th style={{ padding: '3px 6px', textAlign: 'left' }}>Subprogram</th>
                 <th style={{ padding: '3px 6px', textAlign: 'left' }}>해석된 함수</th>
                 <th style={{ padding: '3px 6px', textAlign: 'left' }} title="SDS(설계)에 함수명으로 명세된 SRS 요구사항. SRS 미추적이라도 설계엔 닿으면 표기, 없으면 'SRS·SDS 모두 미명세'">SDS 설계</th>
+                <th style={{ padding: '3px 6px', textAlign: 'left' }} title="UDS(단위설계) 인벤토리에 함수가 존재하는지. SRS 역추적이 끊겨도 단위설계엔 명세돼 있으면 '시험+단위설계 완료, SDS 아키텍처 roll-up만 누락'(정당한 입도차)이고, 없으면 시험만 존재하는 진짜 설계 공백">UDS 설계</th>
                 <th style={{ padding: '3px 6px', textAlign: 'center', width: 50 }}>결과</th>
               </tr>
             </thead>
@@ -1884,6 +1895,10 @@ function TraceUnmappedBucket({ bucket, items, parentId, expanded, onToggle }) {
                 // SDS엔 명세됐으나 그 요구사항이 SRS 추적 범위(SwFn/SwST 등 타 계층) 밖이라 SRS까진
                 // 안 닿음. 녹색(추적됨) 대신 amber(부분추적)로 표기하고 툴팁에 명시(reviewer W2/F3).
                 const sr = Array.isArray(u.sds_reqs) ? u.sds_reqs : [];
+                // UDS(단위설계) 멤버십 — in_uds면 함수가 단위설계에 존재(uds_funcs 정규명).
+                // SRS 역추적이 끊겨도 '시험+단위설계 완료'를 녹색으로 가시화하고, false면
+                // 시험만 존재하는 진짜 설계 공백을 빨강으로 강조(사용자 질문: "uds랑은 연동돼 있나").
+                const uf = Array.isArray(u.uds_funcs) ? u.uds_funcs : [];
                 return (
                   <tr key={i} style={{ borderBottom: '1px solid var(--border)', background: u && u.safety ? COVERAGE_COLORS.partial.bg + '60' : undefined }}>
                     <td style={{ padding: '3px 6px', fontFamily: 'monospace', fontWeight: u && u.safety ? 700 : undefined }}
@@ -1898,6 +1913,16 @@ function TraceUnmappedBucket({ bucket, items, parentId, expanded, onToggle }) {
                           title={`SDS 설계엔 명세됨(요구사항 ${sr.join(', ')}) — 단 이 요구사항은 SRS 추적 매트릭스 밖이라 SRS까지 안 닿음(부분추적)`}>△ {sr.join(', ')}</td>
                       : <td style={{ padding: '3px 6px', color: '#9ca3af', fontStyle: 'italic' }}
                           title="SDS 설계에도 함수명으로 명세되지 않음 — SRS·SDS 모두 미명세">미명세</td>}
+                    {/* in_uds 미존재(구 백엔드 응답·버전 스큐)는 중립('—')으로 — 미설계(빨강)로
+                        오인하면 backend 재시작 전 전이 상태에서 전 항목이 거짓 갭으로 보인다(X6). */}
+                    {typeof (u && u.in_uds) !== 'boolean'
+                      ? <td style={{ padding: '3px 6px', color: '#9ca3af', fontStyle: 'italic' }}
+                          title="UDS 연동 정보 없음(구 응답 형식) — backend 재생성 후 표기됨">—</td>
+                      : u.in_uds
+                        ? <td style={{ padding: '3px 6px', fontFamily: 'monospace', color: COVERAGE_COLORS.covered.fg, fontWeight: 600 }}
+                            title={`UDS 단위설계에 명세됨${uf.length ? ` (${uf.join(', ')})` : ''} — 시험+단위설계 완료, SDS 아키텍처 roll-up만 누락(정당한 입도차)`}>✓ {uf.length ? uf.join(', ') : '설계됨'}</td>
+                        : <td style={{ padding: '3px 6px', color: COVERAGE_COLORS.uncovered.fg, fontWeight: 600 }}
+                            title="UDS 단위설계에도 함수가 없음 — 시험만 존재하는 진짜 설계 공백(검토 우선순위 높음)">✗ 미설계</td>}
                     <td style={{ padding: '3px 6px', textAlign: 'center', fontWeight: 600, color: _testResultColor(u.result) }}>{u.result || '-'}</td>
                   </tr>
                 );
