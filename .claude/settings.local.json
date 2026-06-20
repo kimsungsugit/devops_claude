@@ -40,7 +40,20 @@
       "Bash(./backend/.venv/Scripts/python.exe -c \"import backend.main; print\\('import OK'\\)\")",
       "Bash(./backend/.venv/Scripts/python.exe -m uvicorn backend.main:app --host 0.0.0.0 --port 9000)",
       "Bash(./.venv/Scripts/python.exe -c \"import bcrypt, jwt; import main; print\\('preflight OK'\\)\")",
-      "Bash(./.venv/Scripts/python.exe -m uvicorn main:app --host 0.0.0.0 --port 9000 --log-level info)"
+      "Bash(./.venv/Scripts/python.exe -m uvicorn main:app --host 0.0.0.0 --port 9000 --log-level info)",
+      "Bash(./backend/.venv/Scripts/python.exe *)",
+      "Bash(awk -F: '$1<1463')",
+      "Bash(rg -rn \"class SutrBuildMeta\" backend/)",
+      "Bash(awk '/class SutrBuildMeta/,/^class [A-Z]|^def /' backend/services/swut_sutr_aggregator.py)",
+      "Bash(rg -rn \"class SwUTBuildRequest\" backend/)",
+      "Bash(rg -rn \"SutrBuildMeta\\\\\\(\" backend/ tests/)",
+      "Bash(rg -rn \"_write_spec_deviation\\\\\\(\" backend/ tests/)",
+      "Bash(rg -rn \"auto-merge|extra prefixes|allowed_prefixes|CLOUDIUM_ALLOWED_PREFIXES|set_allowed_prefixes|merge.*prefix\" backend/ --glob \"*.py\")",
+      "Bash(rg -n \"CLOUDIUM_ALLOWED_PREFIXES|allowed_prefixes.*split|split.*allowed_prefixes|os.environ.*PREFIX|getenv.*PREFIX\" backend/services/file_resolver.py backend/services/*.py)",
+      "Bash(CLOUDIUM_ALLOWED_PREFIXES='U:\\\\연구소' ./backend/.venv/Scripts/python.exe .codex_tmp/scout_switr.py)",
+      "Bash(CLOUDIUM_ALLOWED_PREFIXES='U:\\\\연구소' ./backend/.venv/Scripts/python.exe .codex_tmp/dump_ref_switr.py)",
+      "Bash(rg -iE \"sitr|swit.*session|environments=|total_tcs|collect_swit|build done|build start|warning|error|0 files|env_names\")",
+      "Bash(\"D:/Project/devops/Release_claude/backend/.venv/Scripts/python.exe\" -c \"import openpyxl; print\\('openpyxl', openpyxl.__version__\\)\")"
     ]
   }
 }

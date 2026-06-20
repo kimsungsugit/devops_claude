@@ -2,6 +2,7 @@ import { useState, useCallback } from 'react';
 import { api, post, defaultCacheRoot, getUsername } from '../../api.js';
 import { useJenkinsCfg, useToast } from '../../App.jsx';
 import StatusBadge from '../StatusBadge.jsx';
+import { loadSharedInputs } from '../../sharedInputs.js';
 
 const TABS = [
   { key: 'qac', label: '정적 분석 (QAC/PRQA)', icon: '📊' },
@@ -14,17 +15,18 @@ export default function ReportGenSection({ job, analysisResult }) {
 
   return (
     <div>
-      {/* Tab selector */}
-      <div style={{ display: 'flex', borderBottom: '1px solid var(--border)', marginBottom: 12 }}>
+      {/* 리포트 종류 선택 — 허브 세그먼트(밑줄형)와 구분되도록 pill 형태 사용 */}
+      <div style={{ display: 'flex', gap: 6, marginBottom: 12, flexWrap: 'wrap' }}>
         {TABS.map(t => (
           <button
             key={t.key}
             onClick={() => setActiveTab(t.key)}
             style={{
-              padding: '8px 16px', border: 'none',
-              borderBottom: activeTab === t.key ? '2px solid var(--accent)' : '2px solid transparent',
-              background: 'none', fontWeight: activeTab === t.key ? 700 : 400,
-              color: activeTab === t.key ? 'var(--accent)' : 'var(--text-muted)',
+              padding: '6px 14px', borderRadius: 999,
+              border: '1px solid var(--border)',
+              background: activeTab === t.key ? 'var(--accent)' : 'var(--panel)',
+              color: activeTab === t.key ? '#fff' : 'var(--text-muted)',
+              fontWeight: activeTab === t.key ? 600 : 400,
               cursor: 'pointer', fontSize: 13,
             }}
           >
@@ -50,7 +52,8 @@ function QACPanel({ job, analysisResult }) {
   const [loading, setLoading] = useState(false);
   const [generating, setGenerating] = useState(false);
   const [generatedFile, setGeneratedFile] = useState(null);
-  const [scanFolder, setScanFolder] = useState('');
+  // 입력 일원화: Settings 공유 'QAC·PRQA 리포트 폴더'를 초기값으로 prefill.
+  const [scanFolder, setScanFolder] = useState(() => loadSharedInputs().log_qac_prqa || '');
   const [reports, setReports] = useState([]);
 
   const loadReports = useCallback(async () => {
@@ -341,7 +344,8 @@ function VCastPanel({ job, analysisResult }) {
   const [parsing, setParsing] = useState(false);
   const [generating, setGenerating] = useState(false);
   const [reports, setReports] = useState([]);
-  const [scanFolder, setScanFolder] = useState('');
+  // 입력 일원화: 공유 VectorCAST 로그(멀티라인)의 첫 '비공백' 줄을 단일 scan 폴더 초기값으로.
+  const [scanFolder, setScanFolder] = useState(() => (loadSharedInputs().log_vectorcast || '').split('\n').map(s => s.trim()).find(Boolean) || '');
   const [scanFiles, setScanFiles] = useState([]);
   const [scanLoading, setScanLoading] = useState(false);
   const [testSummary, setTestSummary] = useState(null);

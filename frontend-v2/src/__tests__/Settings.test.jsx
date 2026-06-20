@@ -90,13 +90,13 @@ describe('Settings', () => {
     expect(screen.getByText(/SCM 레지스트리/)).toBeInTheDocument();
   });
 
-  // STS-SETTINGS-004: 입력 문서 설정 섹션 노출
-  it('렌더링: 입력 문서 설정 섹션이 표시된다', () => {
+  // STS-SETTINGS-004: 입력 자료 설정 섹션 노출 (문서+템플릿+로그 일원화)
+  it('렌더링: 입력 자료 설정 섹션이 표시된다', () => {
     // Arrange & Act
     render(<Settings />);
 
     // Assert
-    expect(screen.getByText(/입력 문서 설정/)).toBeInTheDocument();
+    expect(screen.getByText(/입력 자료 설정/)).toBeInTheDocument();
   });
 
   // STS-SETTINGS-005: 품질 기준 섹션 노출

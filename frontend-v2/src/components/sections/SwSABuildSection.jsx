@@ -3,6 +3,7 @@ import { getUsername, authHeaders } from '../../api.js';
 import { useToast } from '../../App.jsx';
 import { useAdminMode } from '../../contexts/AdminContext.jsx';
 import PathPickerDialog from '../PathPickerDialog.jsx';
+import { loadSharedInputs, sharedDefaultsFor, applySharedDefaults, useSharedInputSync, markTouched, resolveTouched } from '../../sharedInputs.js';
 
 const API_BASE = (typeof window !== 'undefined' && window.__ARIA_API_BASE__)
   || import.meta.env?.VITE_API_BASE_URL || '';
@@ -46,9 +47,13 @@ const DEFAULT_FORM = {
 function loadSavedForm() {
   try {
     const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
-    return { ...DEFAULT_FORM, test_date: new Date().toISOString().slice(0, 10), ...saved };
+    const base = { ...DEFAULT_FORM, test_date: new Date().toISOString().slice(0, 10), ...saved };
+    // 입력 일원화: touched가 아닌(prefill) 매핑 필드만 공유 기본값으로 채움(사용자 입력·빈값 보존).
+    const touched = resolveTouched('swsa', STORAGE_KEY, saved);
+    return applySharedDefaults(base, touched, sharedDefaultsFor('swsa', loadSharedInputs()));
   } catch (e) {
-    return { ...DEFAULT_FORM, test_date: new Date().toISOString().slice(0, 10) };
+    const base = { ...DEFAULT_FORM, test_date: new Date().toISOString().slice(0, 10) };
+    return applySharedDefaults(base, new Set(), sharedDefaultsFor('swsa', loadSharedInputs()));
   }
 }
 
@@ -73,6 +78,8 @@ export default function SwSABuildSection() {
   const [lastSummary, setLastSummary] = useState(null);
   const [lastWarnings, setLastWarnings] = useState([]);
   const [form, setForm] = useState(loadSavedForm);
+  // 입력 일원화: Settings 공유값 변경을 같은 세션에서 미변경 필드에 즉시 반영.
+  useSharedInputSync('swsa', setForm, STORAGE_KEY);
   const [picker, setPicker] = useState(null);
   const { isAdmin } = useAdminMode();
   const browseDisabledTitle = '관리자 전용 — Ctrl+Shift+A로 admin 모드 활성화';
@@ -99,6 +106,7 @@ export default function SwSABuildSection() {
     setForm(next);
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+      markTouched(STORAGE_KEY, k);   // 사용자가 손댄 필드 기록 → 공유 동기화에서 제외(freezing 방지)
     } catch (e) {
       console.warn('SwSA form persist failed:', e?.message || e);
     }

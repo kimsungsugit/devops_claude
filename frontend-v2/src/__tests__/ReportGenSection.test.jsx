@@ -46,6 +46,7 @@ describe('ReportGenSection', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    localStorage.clear();   // 공유 입력 prefill 격리 (scanFolder 초기값 오염 방지)
     globalThis.fetch.mockResolvedValue({
       ok: true,
       json: () => Promise.resolve({ reports: [] }),
@@ -138,5 +139,32 @@ describe('ReportGenSection', () => {
     await waitFor(() => {
       expect(api).toHaveBeenCalled();
     });
+  });
+
+  // STS-REPORTGEN-007: 입력 일원화 — QAC 폴더가 공유값으로 prefill
+  it('입력 일원화: 공유 log_qac_prqa가 QAC 스캔 폴더 초기값으로 prefill된다', () => {
+    // Arrange
+    localStorage.setItem('devops_v2_shared_inputs', JSON.stringify({ log_qac_prqa: 'D:/shared/PRQA' }));
+
+    // Act
+    render(<ReportGenSection job={mockJob} analysisResult={mockAnalysisResult} />);
+
+    // Assert — QAC 패널(기본 탭) 폴더 입력이 공유값으로 채워짐
+    expect(screen.getByPlaceholderText(/PRQA/)).toHaveValue('D:/shared/PRQA');
+  });
+
+  // STS-REPORTGEN-008: 입력 일원화 — VCast 폴더는 멀티라인 공유값의 첫 비공백 줄
+  it('입력 일원화: 공유 log_vectorcast 첫 비공백 줄이 VCast 스캔 폴더 초기값으로', async () => {
+    // Arrange — 빈 첫 줄 + 공백 포함 멀티라인
+    localStorage.setItem('devops_v2_shared_inputs', JSON.stringify({ log_vectorcast: '\n  U:/log/PV  \nU:/log/PV2' }));
+    const user = userEvent.setup();
+
+    // Act
+    render(<ReportGenSection job={mockJob} analysisResult={mockAnalysisResult} />);
+    await user.click(screen.getByText(/동적 분석 \(VectorCAST\)/));
+
+    // Assert — 첫 비공백 줄을 trim하여 단일 폴더로
+    const input = await screen.findByPlaceholderText(/VectorCAST/);
+    expect(input).toHaveValue('U:/log/PV');
   });
 });

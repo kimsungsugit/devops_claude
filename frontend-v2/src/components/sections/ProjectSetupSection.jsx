@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { api, getUsername } from '../../api.js';
+import { useToast } from '../../App.jsx';
 
 // FormData(multipart) POST — api() 헬퍼는 JSON 전용이라 raw fetch 유지하되
 // X-User 헤더는 명시 추가 (UserContextMiddleware 401 silent failure 차단).
@@ -14,7 +15,10 @@ const post = async (url, body) => {
   return res.json();
 };
 
-export default function ProjectSetupSection({ toast }) {
+export default function ProjectSetupSection() {
+  // toast는 prop이 아닌 useToast() 컨텍스트에서 — Detail은 toast prop을 넘기지 않아
+  // 기존 toast prop은 항상 undefined(no-op)였다. 컨텍스트 직접 사용으로 정상화.
+  const toast = useToast();
   const [status, setStatus] = useState(null);
   const [loading, setLoading] = useState(false);
   const [sdsPath, setSdsPath] = useState('');

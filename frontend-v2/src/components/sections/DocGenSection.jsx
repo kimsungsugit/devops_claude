@@ -87,9 +87,11 @@ export default function DocGenSection({ job, analysisResult }) {
       // Pass linked doc paths
       const srsPath = docPaths.srs || linkedDocs.srs || '';
       const sdsPath = docPaths.sds || linkedDocs.sds || '';
-      const hsisPath = linkedDocs.hsis || '';
-      const stpPath = linkedDocs.stp || '';
-      const udsPath = linkedDocs.uds || '';
+      // Settings '입력 자료 설정' 경로(docPaths)를 SCM linked_docs보다 우선 폴백으로 사용.
+      // (sts는 stp, sits는 hsis/stp/uds를 수용 — 백엔드 미수용 docType에선 무시됨)
+      const hsisPath = docPaths.hsis || linkedDocs.hsis || '';
+      const stpPath = docPaths.stp || linkedDocs.stp || '';
+      const udsPath = docPaths.uds || linkedDocs.uds || '';
       // UDS uses req_paths; STS/SUTS use srs_path/sds_path
       if (docType === 'uds') {
         const reqPaths = [srsPath, sdsPath].filter(Boolean).join(',');

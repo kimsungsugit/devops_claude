@@ -3,6 +3,7 @@ import { getUsername, authHeaders, post } from '../../api.js';
 import { useToast } from '../../App.jsx';
 import { useAdminMode } from '../../contexts/AdminContext.jsx';
 import PathPickerDialog from '../PathPickerDialog.jsx';
+import { loadSharedInputs, sharedDefaultsFor, applySharedDefaults, useSharedInputSync, markTouched, resolveTouched } from '../../sharedInputs.js';
 
 // API base 해석 — SwUTBuildSection과 동일 (raw fetch blob 전용. JSON은 api.js post() 사용).
 const API_BASE = (typeof window !== 'undefined' && window.__ARIA_API_BASE__)
@@ -38,13 +39,13 @@ const DEFAULT_FORM = {
 function loadSavedForm() {
   try {
     const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
-    return {
-      ...DEFAULT_FORM,
-      test_date: new Date().toISOString().slice(0, 10),
-      ...saved,
-    };
+    const base = { ...DEFAULT_FORM, test_date: new Date().toISOString().slice(0, 10), ...saved };
+    // 입력 일원화: touched가 아닌(prefill) 매핑 필드만 공유 기본값으로 채움(사용자 입력·빈값 보존).
+    const touched = resolveTouched('swreport', STORAGE_KEY, saved);
+    return applySharedDefaults(base, touched, sharedDefaultsFor('swreport', loadSharedInputs()));
   } catch (e) {
-    return { ...DEFAULT_FORM, test_date: new Date().toISOString().slice(0, 10) };
+    const base = { ...DEFAULT_FORM, test_date: new Date().toISOString().slice(0, 10) };
+    return applySharedDefaults(base, new Set(), sharedDefaultsFor('swreport', loadSharedInputs()));
   }
 }
 
@@ -79,6 +80,8 @@ function buildPayload(form) {
 export default function SwReportSummarySection() {
   const toast = useToast();
   const [form, setForm] = useState(loadSavedForm);
+  // 입력 일원화: Settings 공유값 변경을 같은 세션에서 미변경 필드에 즉시 반영.
+  useSharedInputSync('swreport', setForm, STORAGE_KEY);
   const [previewing, setPreviewing] = useState(false);
   const [building, setBuilding] = useState(false);
   const [preview, setPreview] = useState(null);       // preview JSON {rows, warnings, summary}
@@ -118,6 +121,7 @@ export default function SwReportSummarySection() {
     setForm(next);
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+      markTouched(STORAGE_KEY, k);   // 사용자가 손댄 필드 기록 → 공유 동기화에서 제외(freezing 방지)
     } catch (e) {
       console.warn('SwReport form persist failed:', e?.message || e);
     }

@@ -2,14 +2,16 @@ import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
+// useToast 컨텍스트 mock — ProjectSetupSection은 toast prop이 아닌 useToast()로 토스트를 얻는다.
+const mockToast = vi.fn();
+vi.mock('../App.jsx', () => ({ useToast: () => mockToast }));
+
 // fetch mock — ProjectSetupSection은 직접 fetch를 사용한다
 globalThis.fetch = vi.fn();
 
 const { default: ProjectSetupSection } = await import('../components/sections/ProjectSetupSection.jsx');
 
 describe('ProjectSetupSection', () => {
-  const mockToast = vi.fn();
-
   beforeEach(() => {
     vi.clearAllMocks();
     // 기본 상태 API 응답

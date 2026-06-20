@@ -1,9 +1,10 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useId } from 'react';
 import { useJenkinsCfg, useToast } from '../App.jsx';
 import {
   post, api, saveServerJenkinsConfig,
   fetchServerUdsTemplate, saveServerUdsTemplate, uploadServerUdsTemplate,
 } from '../api.js';
+import { loadSharedInputs, saveSharedInputs, SHARED_FIELD_GROUPS } from '../sharedInputs.js';
 
 export default function Settings() {
   return (
@@ -414,36 +415,129 @@ function ScmSection() {
   );
 }
 
-/* ── 입력 문서 설정 ───────────────────────────────────────────────── */
+/* ── 입력 자료 설정 (문서 + 템플릿/로그/메타 일원화) ───────────────── */
 const DOC_KEY = 'devops_v2_doc_paths';
+
+// devops_v2_doc_paths 키. DocGenSection 생성 payload는 srs/sds/template + (백엔드 수용
+// 범위 내) hsis/stp/uds를 docPaths 우선 폴백으로 사용한다. uds/sts/suts/sits는 주로
+// '문서 현황' 미리보기/참조용이며 생성기별로 수용 여부가 다르다(아래 '(참조)' 표기).
+const DOC_FIELDS = [
+  { key: 'srs', label: 'SRS 경로', ph: 'C:/docs/SRS_v1.docx', browse: 'file' },
+  { key: 'sds', label: 'SDS 경로', ph: 'C:/docs/SDS_v1.docx', browse: 'file' },
+  { key: 'hsis', label: 'HSIS 경로', ph: 'C:/docs/HSIS.docx', browse: 'file' },
+  { key: 'stp', label: 'STP 경로', ph: 'C:/docs/STP.docx', browse: 'file' },
+  { key: 'uds', label: 'UDS 경로 (참조)', ph: 'C:/docs/UDS.docx', browse: 'file' },
+  { key: 'sts', label: 'STS 경로 (참조)', ph: 'C:/docs/STS.docx', browse: 'file' },
+  { key: 'suts', label: 'SUTS 경로 (참조)', ph: 'C:/docs/SUTS.docx', browse: 'file' },
+  { key: 'sits', label: 'SITS 경로 (참조)', ph: 'C:/docs/SITS.docx', browse: 'file' },
+  { key: 'template', label: 'UDS 템플릿 경로', ph: 'C:/templates/UDS_template.docx', browse: 'file' },
+];
+
+// 경로 입력 + 📂 찾기(파일/폴더) 한 줄 필드. onBrowse 없으면 input만.
+function PathField({ label, value, ph, onChange, onBrowse, span2 = false, multiline = false }) {
+  const id = useId();
+  return (
+    <div className={`field${span2 || multiline ? ' span-2' : ''}`}>
+      <label htmlFor={id}>{label}</label>
+      {multiline ? (
+        <textarea id={id} rows={3} value={value} onChange={e => onChange(e.target.value)} placeholder={ph} spellCheck="false" autoComplete="off" />
+      ) : (
+        <div style={{ display: 'flex', gap: 4 }}>
+          <input id={id} style={{ flex: 1 }} value={value} onChange={e => onChange(e.target.value)} placeholder={ph} spellCheck="false" autoComplete="off" />
+          {onBrowse && (
+            <button type="button" className="btn-sm" title="파일/폴더 찾기 (클라우디움이면 worker IPC, 로컬이면 backend)" onClick={onBrowse}>📂</button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
 
 function DocInputSection() {
   const toast = useToast();
   const [paths, setPaths] = useState(() => {
     try { return JSON.parse(localStorage.getItem(DOC_KEY) || '{}'); } catch (_) { return {}; }
   });
+  const [shared, setShared] = useState(loadSharedInputs);
 
-  const set = (k, v) => {
+  const setDoc = (k, v) => {
     const next = { ...paths, [k]: v };
     setPaths(next);
     localStorage.setItem(DOC_KEY, JSON.stringify(next));
   };
+  const setShr = (k, v) => {
+    const next = { ...shared, [k]: v };
+    setShared(next);
+    saveSharedInputs(next);
+  };
+
+  // /api/file-mode/browse-file 재사용 (post 헬퍼 — X-User 포함). 선택 경로 반환 or null.
+  const browse = async (kind) => {
+    try {
+      const picked = await post('/api/file-mode/browse-file', {
+        title: kind === 'directory' ? '폴더 선택' : '파일 선택',
+        kind: kind === 'directory' ? 'directory' : 'file',
+      });
+      if (!picked || !picked.ok || !picked.path) {
+        if (picked?.error === 'cancelled') return null;
+        toast('error', `다이얼로그 실패: ${picked?.error || picked?.detail || 'unknown'}`);
+        return null;
+      }
+      return picked.path;
+    } catch (e) {
+      toast('error', `다이얼로그 실패: ${e.message}`);
+      return null;
+    }
+  };
 
   return (
     <div className="settings-section">
-      <div className="settings-section-title">📋 입력 문서 설정</div>
-      <div className="field-group">
-        {[
-          { key: 'srs', label: 'SRS 파일 경로', ph: 'C:/docs/SRS_v1.docx' },
-          { key: 'sds', label: 'SDS 파일 경로', ph: 'C:/docs/SDS_v1.docx' },
-          { key: 'template', label: 'UDS 템플릿 경로', ph: 'C:/templates/UDS_template.docx' },
-        ].map(({ key, label, ph }) => (
-          <div className="field span-2" key={key}>
-            <label>{label}</label>
-            <input value={paths[key] || ''} onChange={e => set(key, e.target.value)} placeholder={ph} />
-          </div>
+      <div className="settings-section-title">📋 입력 자료 설정</div>
+      <div className="text-sm text-muted" style={{ marginBottom: 12 }}>
+        여기 등록한 문서·템플릿·로그 폴더는 <b>문서 생성</b> 탭의 각 생성기에서 칸이 비었을 때 자동으로 채워집니다(생성 탭에서 직접 입력하면 그 값이 우선).
+      </div>
+
+      {/* 입력/참조 문서 (devops_v2_doc_paths) */}
+      <div className="field-group cols-3">
+        {DOC_FIELDS.map(f => (
+          <PathField
+            key={f.key}
+            label={f.label}
+            ph={f.ph}
+            value={paths[f.key] || ''}
+            onChange={v => setDoc(f.key, v)}
+            onBrowse={async () => { const p = await browse(f.browse); if (p) setDoc(f.key, p); }}
+          />
         ))}
       </div>
+
+      {/* 공유 입력 그룹 — 템플릿 / 로그 폴더 / 공통 메타 (devops_v2_shared_inputs) */}
+      {SHARED_FIELD_GROUPS.map(group => {
+        const filled = group.keys.filter(k => shared[k.key]).length;
+        return (
+        <details key={group.title} open={group.open || filled > 0} style={{ marginTop: 8, borderTop: '1px solid var(--border)', paddingTop: 8 }}>
+          <summary style={{ cursor: 'pointer', fontWeight: 600, fontSize: 13, marginBottom: 8 }}>
+            {group.title}
+            <span className="text-muted" style={{ fontWeight: 400, fontSize: 11, marginLeft: 6 }}>
+              ({filled}/{group.keys.length} 설정됨)
+            </span>
+          </summary>
+          <div className="field-group cols-3">
+            {group.keys.map(f => (
+              <PathField
+                key={f.key}
+                label={f.label}
+                ph={f.ph}
+                value={shared[f.key] || ''}
+                multiline={!!f.multiline}
+                onChange={v => setShr(f.key, v)}
+                onBrowse={f.browse ? async () => { const p = await browse(f.browse); if (p) setShr(f.key, p); } : undefined}
+              />
+            ))}
+          </div>
+        </details>
+        );
+      })}
     </div>
   );
 }

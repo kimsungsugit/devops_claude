@@ -11,7 +11,7 @@
  * - useJob: App.jsx mock
  * - 모든 Section 컴포넌트: mock (단위 격리)
  */
-import { render, screen } from '@testing-library/react';
+import { render, screen, act, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
@@ -39,23 +39,28 @@ vi.mock('../components/sections/AnalysisSection.jsx', () => ({
 vi.mock('../components/sections/SrsSdsSection.jsx', () => ({
   default: () => <div data-testid="section-srssds">SrsSds</div>,
 }));
-vi.mock('../components/sections/DocGenSection.jsx', () => ({
-  default: () => <div data-testid="section-docgen">DocGen</div>,
+// 통합 후 Detail은 6개 생성 섹션 대신 DocGenHubSection 하나만 import한다.
+// onSubChange 콜백 + initialSub 라우팅 경로 검증을 위한 경량 mock(hook 미사용 — 호이스팅 안전).
+let mockCapturedInitialSubs = [];
+vi.mock('../components/sections/DocGenHubSection.jsx', () => ({
+  default: ({ onSubChange, initialSub }) => {
+    mockCapturedInitialSubs.push(initialSub);
+    return (
+      <div data-testid="section-docgen">
+        DocGenHub
+        <button onClick={() => onSubChange?.('swit', 'SwIT')}>__setsub</button>
+      </div>
+    );
+  },
 }));
 vi.mock('../components/sections/AiAssistSection.jsx', () => ({
   default: () => <div data-testid="section-ai">AiAssist</div>,
-}));
-vi.mock('../components/sections/ReportGenSection.jsx', () => ({
-  default: () => <div data-testid="section-reports">ReportGen</div>,
 }));
 vi.mock('../components/sections/ImpactGuideSection.jsx', () => ({
   default: () => <div data-testid="section-impact">ImpactGuide</div>,
 }));
 vi.mock('../components/sections/ProjectSetupSection.jsx', () => ({
   default: () => <div data-testid="section-setup">ProjectSetup</div>,
-}));
-vi.mock('../components/sections/SwUTBuildSection.jsx', () => ({
-  default: () => <div data-testid="section-swut">SwUTBuild</div>,
 }));
 
 const { default: Detail } = await import('../views/Detail.jsx');
@@ -65,6 +70,7 @@ describe('Detail', () => {
     vi.clearAllMocks();
     mockSelectedJob = null;
     mockAnalysisResult = null;
+    mockCapturedInitialSubs = [];
   });
 
   // ── selectedJob 없을 때 빈 상태 ────────────────────────────────
@@ -156,6 +162,35 @@ describe('Detail', () => {
 
     // Assert
     expect(screen.getByTestId('section-docgen')).toBeInTheDocument();
+  });
+
+  // ── 통합 허브 sub breadcrumb / 레거시 라우팅 ──────────────────
+
+  it('docgen 허브의 onSubChange가 breadcrumb에 서브 라벨을 추가한다', async () => {
+    // Arrange
+    const user = userEvent.setup();
+    mockSelectedJob = { name: 'my-job', url: 'http://jenkins/job/my-job/' };
+
+    // Act
+    render(<Detail />);
+    await user.click(screen.getByText('문서 생성'));   // activeSection = docgen
+    await user.click(screen.getByText('__setsub'));     // onSubChange('swit', 'SwIT')
+
+    // Assert — breadcrumb 끝에 sub 라벨(SwIT)이 추가 렌더
+    expect(screen.getByText('SwIT')).toBeInTheDocument();
+  });
+
+  it('레거시 생성 탭 id로 외부 네비게이션 시 docgen 허브로 라우팅 + initialSub 전달', async () => {
+    // Arrange
+    mockSelectedJob = { name: 'my-job', url: 'http://jenkins/job/my-job/' };
+    render(<Detail />);
+
+    // Act — 통합 전 'swut' id로 진입
+    act(() => { window.__detailSection('swut'); });
+
+    // Assert — docgen 섹션 활성화 + 허브에 initialSub='swut' 전달(소비-초기화 전)
+    expect(screen.getByTestId('section-docgen')).toBeInTheDocument();
+    await waitFor(() => expect(mockCapturedInitialSubs).toContain('swut'));
   });
 
   it('탭 클릭 시 브레드크럼 섹션 레이블이 업데이트된다', async () => {

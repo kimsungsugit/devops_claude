@@ -197,6 +197,20 @@ body {
   font-weight: 600;
 }
 
+/* 문서 생성 허브 — 6개 생성 종류를 전환하는 옵션 세그먼트 서브내비 */
+.docgen-subnav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-1);
+  border-bottom: 1px solid var(--border);
+  margin-bottom: var(--sp-4);
+}
+.docgen-subnav .tab-item {
+  padding: 8px var(--sp-3);
+  font-size: var(--text-sm);
+  white-space: nowrap;
+}
+
 /* ── Main content area ── */
 .app-body {
   flex: 1;
@@ -796,6 +810,8 @@ label {
   .app-header { padding: 0 var(--sp-2); height: 40px; }
   .tab-bar { overflow-x: auto; }
   .tab-item { padding: 8px var(--sp-3); font-size: var(--text-sm); white-space: nowrap; }
+  /* 좁은 폭에서 메인 탭바와 동일하게 한 줄 가로 스크롤 유지(wrap로 인한 헤더 높이 가변 방지) */
+  .docgen-subnav { flex-wrap: nowrap; overflow-x: auto; }
   .stats-row { flex-direction: column; }
   .detail-layout { flex-direction: column; }
   .accordion-nav { width: 100%; position: static; }
@@ -1160,10 +1176,12 @@ label {
   margin-bottom: var(--sp-3);
 }
 
+/* 문서 생성 허브 통합 후: 상단 세그먼트 + breadcrumb이 종류를 표기하므로
+   섹션 자체 제목은 부제 수준으로 격하(이중 대제목 방지). */
 .swut-section-header h2 {
   margin: 0 0 var(--sp-1) 0;
-  font-size: var(--text-xl);
-  font-weight: 700;
+  font-size: var(--text-lg);
+  font-weight: 600;
   color: var(--text);
 }
 
