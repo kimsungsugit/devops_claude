@@ -374,6 +374,86 @@ def test_write_review_artifact_includes_context_and_linked_summary(tmp_path, mon
     assert "SwTR_0202" in text
 
 
+def test_run_impact_update_sits_uses_cross_module_impact(tmp_path, monkeypatch):
+    """SITS 대상이면 module 경계를 넘는 영향을 별도(cross-module)로 계산한다.
+    uds(module-scoped)는 cross-module callee를 제외하지만 SITS는 포함해야 한다."""
+    from backend.schemas import ScmRegisterRequest
+    from backend.services import scm_registry
+    from workflow import impact_audit, impact_orchestrator
+
+    reg_path = tmp_path / "config" / "scm_registry.json"
+    audit_dir = tmp_path / "audit"
+    monkeypatch.setattr(scm_registry, "REGISTRY_PATH", reg_path)
+    monkeypatch.setattr(impact_audit, "AUDIT_DIR", audit_dir)
+    monkeypatch.setattr(impact_audit, "LOCK_PATH", audit_dir / ".run_lock")
+    scm_registry.register_entry(
+        ScmRegisterRequest(id="x", name="X", scm_type="git", source_root=str(tmp_path / "src"))
+    )
+
+    monkeypatch.setattr(
+        impact_orchestrator, "classify_changed_functions",
+        lambda *a, **k: {"seed": "SIGNATURE"},
+    )
+    monkeypatch.setattr(
+        impact_orchestrator, "_load_source_sections",
+        lambda _r: {
+            "call_map": {"seed": ["cross_fn"]},
+            "function_details_by_name": {
+                "seed": {"module_name": "a", "file": "Sources/APP/a/Ap_A.c"},
+                "cross_fn": {"module_name": "b", "file": "Sources/APP/b/Ap_B.c"},
+            },
+        },
+    )
+
+    result = impact_orchestrator.run_impact_update(
+        ChangeTrigger(
+            trigger_type="local", scm_id="x", source_root=str(tmp_path / "src"),
+            scm_type="git", base_ref="HEAD~1", changed_files=["Ap_A.c"],
+            dry_run=True, targets=["uds", "sits"], metadata={},
+        )
+    )
+
+    assert result["ok"] is True
+    # module-scoped(uds): cross-module callee 제외
+    assert result["impact"]["indirect_1hop"] == []
+    # SITS cross-module: 포함
+    assert result["impact_sits_cross"]["indirect_1hop"] == ["cross_fn"]
+    assert any("SITS cross-module" in w for w in result["warnings"])
+    # SITS action(FLAG)의 functions가 cross-module 영향 전체를 담는다([2] fix)
+    assert "cross_fn" in result["actions"]["sits"]["functions"]
+    # uds(module-scoped) action에는 cross-module callee가 들어가지 않는다
+    assert "cross_fn" not in result["actions"]["uds"]["functions"]
+
+
+def test_run_impact_update_no_sits_has_no_cross_field(tmp_path, monkeypatch):
+    """SITS 미대상이면 cross-module 계산을 하지 않는다(불필요 연산 회피)."""
+    from backend.schemas import ScmRegisterRequest
+    from backend.services import scm_registry
+    from workflow import impact_audit, impact_orchestrator
+
+    monkeypatch.setattr(scm_registry, "REGISTRY_PATH", tmp_path / "config" / "scm_registry.json")
+    monkeypatch.setattr(impact_audit, "AUDIT_DIR", tmp_path / "audit")
+    monkeypatch.setattr(impact_audit, "LOCK_PATH", tmp_path / "audit" / ".run_lock")
+    scm_registry.register_entry(
+        ScmRegisterRequest(id="x", name="X", scm_type="git", source_root=str(tmp_path / "src"))
+    )
+    monkeypatch.setattr(impact_orchestrator, "classify_changed_functions", lambda *a, **k: {"seed": "BODY"})
+    monkeypatch.setattr(
+        impact_orchestrator, "_load_source_sections",
+        lambda _r: {"call_map": {"seed": ["cross_fn"]},
+                    "function_details_by_name": {
+                        "seed": {"module_name": "a", "file": "Sources/APP/a/Ap_A.c"},
+                        "cross_fn": {"module_name": "b", "file": "Sources/APP/b/Ap_B.c"}}},
+    )
+    result = impact_orchestrator.run_impact_update(
+        ChangeTrigger(trigger_type="local", scm_id="x", source_root=str(tmp_path / "src"),
+                      scm_type="git", base_ref="HEAD~1", changed_files=["Ap_A.c"],
+                      dry_run=True, targets=["uds", "suts"], metadata={})
+    )
+    assert result["ok"] is True
+    assert "impact_sits_cross" not in result
+
+
 def test_resolve_changed_types_to_functions_uses_matching_source_file():
     from workflow import impact_orchestrator
 

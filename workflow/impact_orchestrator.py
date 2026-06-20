@@ -716,6 +716,10 @@ def _action_for_target(target: str, changed_types: Dict[str, str], changed_files
     return decision
 
 
+def _impacted_union(groups: Dict[str, List[str]]) -> Set[str]:
+    return set(groups.get("direct", [])) | set(groups.get("indirect_1hop", [])) | set(groups.get("indirect_2hop", []))
+
+
 def _summarize_actions(
     targets: List[str],
     changed_types: Dict[str, str],
@@ -723,11 +727,14 @@ def _summarize_actions(
     impact_groups: Dict[str, List[str]],
     *,
     auto_generate: bool = False,
+    sits_impact_groups: Dict[str, List[str]] | None = None,
 ) -> Dict[str, Dict[str, Any]]:
-    impacted_all = set(impact_groups.get("direct", [])) | set(impact_groups.get("indirect_1hop", [])) | set(impact_groups.get("indirect_2hop", []))
-    changed_direct = set(impact_groups.get("direct", []))
     actions: Dict[str, Dict[str, Any]] = {}
     for target in targets:
+        # SITS는 cross-module 영향 집합을 사용(과소추정 방지). 나머지는 module-scoped.
+        groups = sits_impact_groups if (target == "sits" and sits_impact_groups is not None) else impact_groups
+        impacted_all = _impacted_union(groups)
+        changed_direct = set(groups.get("direct", []))
         decision = _action_for_target(target, changed_types, changed_files)
         # Downgrade AUTO → FLAG when auto_generate is disabled
         if decision == "AUTO" and not auto_generate:
@@ -741,7 +748,8 @@ def _summarize_actions(
                 "functions": funcs,
             }
         elif decision == "FLAG":
-            funcs = sorted(changed_direct or impacted_all)
+            # SITS는 통합 영향이라 검토 대상이 cross-module 영향 전체(직접+간접). 나머지는 직접 변경 함수.
+            funcs = sorted(impacted_all or changed_direct) if target == "sits" else sorted(changed_direct or impacted_all)
             actions[target] = {
                 "mode": "FLAG",
                 "status": "review_required",
@@ -793,14 +801,23 @@ def run_impact_update(
             by_name_raw = sections.get("function_details_by_name", {}) or {}
             by_name = {str(k).strip().lower(): v for k, v in by_name_raw.items() if isinstance(v, dict)}
             changed_types = _resolve_changed_types_to_functions(changed_types, trigger.changed_files, by_name)
+            call_map = sections.get("call_map", {}) or {}
             neighbors = _build_neighbors(
-                sections.get("call_map", {}) or {},
+                call_map,
                 by_name,
                 same_module_only=options.same_module_only,
+            )
+            # SITS는 cross-module 통합 시험 — module 가지치기를 끈 별도 neighbor로 계산해
+            # 과소추정을 방지한다(uds/suts는 module-scoped 유지). 가지치기가 꺼져 있으면 동일하므로 생략.
+            neighbors_cross = (
+                _build_neighbors(call_map, by_name, same_module_only=False)
+                if ("sits" in targets and options.same_module_only)
+                else None
             )
         else:
             by_name = {}
             neighbors = {}
+            neighbors_cross = None
 
         impact_groups = _hop_limited_impact(
             set(changed_types),
@@ -808,13 +825,44 @@ def run_impact_update(
             max_hop=options.max_hop,
             max_impacted_functions=options.max_impacted_functions,
         )
-        impacted_total = len(set(impact_groups["direct"]) | set(impact_groups["indirect_1hop"]) | set(impact_groups["indirect_2hop"]))
+        sits_impact_groups: Dict[str, List[str]] | None = None
+        if neighbors_cross is not None:
+            sits_impact_groups = _hop_limited_impact(
+                set(changed_types),
+                neighbors_cross,
+                max_hop=options.max_hop,
+                max_impacted_functions=options.max_impacted_functions,
+            )
+        impacted_total = len(_impacted_union(impact_groups))
         warnings: List[str] = []
         if impacted_total > options.max_impacted_functions:
             warnings.append(
                 f"impacted function count exceeded limit ({impacted_total}>{options.max_impacted_functions}); promote to review"
             )
-        actions = _summarize_actions(targets, changed_types, trigger.changed_files, impact_groups, auto_generate=bool(trigger.auto_generate))
+        if sits_impact_groups is not None:
+            sits_total = len(_impacted_union(sits_impact_groups))
+            if sits_total > impacted_total:
+                warnings.append(
+                    f"SITS cross-module impact ({sits_total}) exceeds same-module impact ({impacted_total}); SITS uses cross-module set"
+                )
+            if sits_total > options.max_impacted_functions:
+                warnings.append(
+                    f"SITS cross-module impacted ({sits_total}) exceeded limit ({options.max_impacted_functions}); promote to review"
+                )
+        # Jenkins changeSet로 파일집합을 받은 경우, 변경 '유형' 분류는 여전히 로컬 working-copy
+        # diff(base_ref) 기준이라 빌드 revision과 어긋날 수 있음을 투명하게 알린다.
+        if (trigger.metadata or {}).get("changed_files_source") == "jenkins_changeset":
+            warnings.append(
+                "changed file set from Jenkins build changeSet; change-type classification uses local working-copy diff — verify build/local revision alignment"
+            )
+        actions = _summarize_actions(
+            targets,
+            changed_types,
+            trigger.changed_files,
+            impact_groups,
+            auto_generate=bool(trigger.auto_generate),
+            sits_impact_groups=sits_impact_groups,
+        )
         if warnings:
             for target, info in actions.items():
                 if info.get("mode") == "AUTO":
@@ -830,6 +878,10 @@ def run_impact_update(
             "warnings": warnings,
             "actions": actions,
         }
+        if "sits" in targets:
+            # SITS 전용 cross-module 영향을 항상 노출(계약 일관성). same_module_only가 이미
+            # False면 module-scoped == cross이므로 impact_groups를 그대로 사용한다.
+            result["impact_sits_cross"] = sits_impact_groups if sits_impact_groups is not None else impact_groups
         if not trigger.dry_run:
             linked_docs = entry.linked_docs if entry else ScmLinkedDocs()
             if callable(on_progress):
@@ -881,6 +933,10 @@ def run_impact_update(
                                 "current_index": idx,
                             },
                         )
+                    # SITS FLAG 아티팩트/가이드는 cross-module 영향 집합을 사용.
+                    _groups_for_target = (
+                        sits_impact_groups if (target == "sits" and sits_impact_groups is not None) else impact_groups
+                    )
                     # Generate AI guide for FLAG targets (best-effort)
                     _ai_guide = None
                     try:
@@ -893,7 +949,7 @@ def run_impact_update(
                         _sits_linked = getattr(linked_docs, "sits", "")
                         _ctx = ImpactGuideContext(
                             changed_types=changed_types,
-                            impact_groups=impact_groups,
+                            impact_groups=_groups_for_target,
                             by_name=by_name or {},
                             uds_fn_details=_load_uds_fn_details(_uds_linked, _flagged_fns) if _uds_linked else {},
                             suts_tcs=_load_suts_fn_tcs(_suts_linked, _flagged_fns) if _suts_linked else {},
@@ -907,7 +963,7 @@ def run_impact_update(
                         target,
                         trigger,
                         changed_types,
-                        impact_groups,
+                        _groups_for_target,
                         by_name,
                         getattr(linked_docs, target, ""),
                         ai_guide=_ai_guide,
@@ -919,8 +975,10 @@ def run_impact_update(
             "scm_id": trigger.scm_id,
             "trigger": trigger.trigger_type,
             "changed_files": trigger.changed_files,
+            "changed_files_source": (trigger.metadata or {}).get("changed_files_source", ""),
             "changed_functions": dict(sorted(changed_types.items())),
             "impacted_functions": impact_groups,
+            "impacted_functions_sits_cross": sits_impact_groups,
             "targets": targets,
             "dry_run": bool(trigger.dry_run),
             "warnings": warnings,

@@ -1409,21 +1409,76 @@ def jenkins_scm_info(req: JenkinsScmInfoRequest) -> Dict[str, Any]:
     raise HTTPException(status_code=400, detail="unsupported scm_type")
 
 
+def _resolve_jenkins_changed_files(req: JenkinsImpactTriggerRequest):
+    """선택한 빌드의 changeSet에서 변경 .c/.h 파일을 가져온다.
+
+    반환: (manual_changed_files, use_manual_only, meta_extra)
+      - 성공: (files, True, {...jenkins_changeset...}) — files가 []여도 '빌드 변경 0건'으로
+        간주(use_manual_only=True라 로컬 working-copy diff로 잘못 되돌아가지 않음).
+      - 자격증명 없음/조회 실패: (None, False, {...local_diff_fallback...}) — 기존 로컬 SCM diff.
+    서버 측 Jenkins 자격증명(config.get_jenkins_config)만 사용 — HTTP body로 토큰 받지 않음.
+    """
+    if not (req.build_number and str(req.job_url or "").strip()):
+        return None, False, {"changed_files_source": "local_diff_fallback", "linkage_reason": "no build_number/job_url"}
+    try:
+        from backend.routers.config import get_jenkins_config
+        cfg = get_jenkins_config()
+        user = str(cfg.get("username") or "").strip()
+        token = str(cfg.get("token") or "").strip()
+        if not (user and token):
+            return None, False, {"changed_files_source": "local_diff_fallback", "linkage_reason": "jenkins credentials not configured"}
+        # SSRF/크리덴셜 유출 방지(fail-closed): 사용자 입력 job_url에 서버 토큰을 실어
+        # 보내므로, baseUrl이 설정돼 있고 job_url이 그 하위(또는 동일)이며 '..'가 없을 때만
+        # 호출한다. baseUrl 미설정이면 검증 불가 → 조회하지 않고 로컬 diff로 폴백한다.
+        base_url = str(cfg.get("baseUrl") or "").strip().rstrip("/")
+        job = str(req.job_url or "").strip()
+        job_l = job.lower()
+        under_base = bool(base_url) and (job_l == base_url.lower() or job_l.startswith(base_url.lower() + "/"))
+        if (not under_base) or (".." in job):
+            return None, False, {"changed_files_source": "local_diff_fallback", "linkage_reason": "job_url not under configured Jenkins baseUrl"}
+        from backend.services.jenkins_service import get_build_changed_files
+        res = get_build_changed_files(
+            job_url=req.job_url,
+            build_number=int(req.build_number),
+            username=user,
+            api_token=token,
+            verify_tls=bool(cfg.get("verifyTls", True)),
+        )
+        files = [str(x) for x in (res.get("files") or [])]
+        return files, True, {
+            "changed_files_source": "jenkins_changeset",
+            "build_revision": res.get("revision", ""),
+            "jenkins_changed_file_count": len(files),
+        }
+    except Exception as exc:  # noqa: BLE001 — 조회 실패는 로컬 diff로 graceful fallback
+        _logger.warning("jenkins changeset fetch failed (scm=%s build=%s): %s", req.scm_id, req.build_number, exc, exc_info=True)
+        return None, False, {"changed_files_source": "local_diff_fallback", "linkage_reason": f"changeset fetch failed: {exc}"[:200]}
+
+
+def _make_jenkins_impact_trigger(req: JenkinsImpactTriggerRequest, *, source: str):
+    """영향도를 '선택한 빌드의 실제 changeSet'에 묶어 ChangeTrigger를 만든다."""
+    manual, use_manual_only, meta_extra = _resolve_jenkins_changed_files(req)
+    return build_registry_trigger(
+        trigger_type="jenkins",
+        scm_id=req.scm_id,
+        base_ref=req.base_ref,
+        dry_run=req.dry_run,
+        targets=req.targets or None,
+        manual_changed_files=manual,
+        use_manual_only=use_manual_only,
+        metadata={
+            "source": source,
+            "build_number": req.build_number,
+            "job_url": req.job_url,
+            **meta_extra,
+        },
+    )
+
+
 @router.post("/api/jenkins/impact/trigger")
 def jenkins_impact_trigger(req: JenkinsImpactTriggerRequest) -> Dict[str, Any]:
     try:
-        trigger = build_registry_trigger(
-            trigger_type="jenkins",
-            scm_id=req.scm_id,
-            base_ref=req.base_ref,
-            dry_run=req.dry_run,
-            targets=req.targets or None,
-            metadata={
-                "source": "api/jenkins/impact/trigger",
-                "build_number": req.build_number,
-                "job_url": req.job_url,
-            },
-        )
+        trigger = _make_jenkins_impact_trigger(req, source="api/jenkins/impact/trigger")
     except KeyError:
         raise HTTPException(status_code=404, detail="registry entry not found")
     return run_impact_update(trigger)
@@ -1432,18 +1487,7 @@ def jenkins_impact_trigger(req: JenkinsImpactTriggerRequest) -> Dict[str, Any]:
 @router.post("/api/jenkins/impact/trigger-async")
 def jenkins_impact_trigger_async(req: JenkinsImpactTriggerRequest) -> Dict[str, Any]:
     try:
-        trigger = build_registry_trigger(
-            trigger_type="jenkins",
-            scm_id=req.scm_id,
-            base_ref=req.base_ref,
-            dry_run=req.dry_run,
-            targets=req.targets or None,
-            metadata={
-                "source": "api/jenkins/impact/trigger-async",
-                "build_number": req.build_number,
-                "job_url": req.job_url,
-            },
-        )
+        trigger = _make_jenkins_impact_trigger(req, source="api/jenkins/impact/trigger-async")
     except KeyError:
         raise HTTPException(status_code=404, detail="registry entry not found")
     return start_impact_job(trigger)

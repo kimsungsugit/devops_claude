@@ -382,6 +382,70 @@ def get_build_info(
     }
 
 
+def get_build_changed_files(
+    *,
+    job_url: str,
+    build_number: int,
+    username: str,
+    api_token: str,
+    verify_tls: bool = True,
+) -> Dict[str, Any]:
+    """특정 Jenkins 빌드의 SCM changeSet(변경 파일 경로) + revision을 조회한다.
+
+    영향도 분석을 '선택한 빌드의 실제 변경분'에 묶기 위한 헬퍼. git/svn 양쪽의
+    changeSet 표현(affectedPaths / paths[].file)을 모두 수집하고, .c/.h 소스만
+    반환한다(get_changed_files와 동일 범위). 자격증명/네트워크/파싱 오류는 호출자가
+    local diff fallback으로 처리하도록 예외를 그대로 전파한다.
+
+    Returns: {"files": [.c/.h 경로...], "revision": "<SHA1/rev>", "all_count": N}
+    """
+    client = JenkinsClient(
+        job_url=_norm_job_url(job_url),
+        username=username,
+        api_token=api_token,
+        timeout_sec=30,
+        verify_ssl=bool(verify_tls),
+    )
+    tree = (
+        "changeSet[items[affectedPaths,commitId,paths[file]]],"
+        "changeSets[items[affectedPaths,commitId,paths[file]]],"
+        "actions[lastBuiltRevision[SHA1,revision]]"
+    )
+    api = f"{client.job_url}{int(build_number)}/api/json?tree={tree}"
+    data = client._open_json(api)  # type: ignore[attr-defined]
+
+    csets: List[Dict[str, Any]] = []
+    if isinstance(data.get("changeSet"), dict):
+        csets.append(data["changeSet"])
+    for cs in data.get("changeSets") or []:
+        if isinstance(cs, dict):
+            csets.append(cs)
+
+    files: set[str] = set()
+    revision = ""
+    for cs in csets:
+        for item in cs.get("items") or []:
+            if not isinstance(item, dict):
+                continue
+            for p in item.get("affectedPaths") or []:
+                if p:
+                    files.add(str(p))
+            for pth in item.get("paths") or []:
+                if isinstance(pth, dict) and pth.get("file"):
+                    files.add(str(pth["file"]))
+            if not revision and item.get("commitId"):
+                revision = str(item["commitId"])
+
+    for act in data.get("actions") or []:
+        if isinstance(act, dict) and isinstance(act.get("lastBuiltRevision"), dict):
+            lbr = act["lastBuiltRevision"]
+            revision = str(lbr.get("SHA1") or lbr.get("revision") or revision)
+            break
+
+    src = sorted(f for f in files if str(f).lower().endswith((".c", ".h")))
+    return {"files": src, "revision": revision, "all_count": len(files)}
+
+
 def sync_local_reports(
     *,
     job_url: str,
