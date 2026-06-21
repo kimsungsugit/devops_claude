@@ -468,3 +468,24 @@ def test_resolve_changed_types_to_functions_uses_matching_source_file():
     )
 
     assert resolved == {"buzzer_run": "BODY", "buzzer_init": "BODY"}
+
+
+def test_resolve_changed_types_preserves_classify_kind():
+    """classify가 함수별로 분류한 정밀 kind(SIGNATURE/NEW)를 _resolve가 보존한다
+    (확장자 BODY로 평탄화하지 않음 — 시그니처 변경 가이드/ SDS FLAG 라우팅 정확성)."""
+    from workflow import impact_orchestrator
+
+    resolved = impact_orchestrator._resolve_changed_types_to_functions(
+        {"Ap_Door_Init": "SIGNATURE", "Ap_Door_Reset": "NEW", "Ap_Door_Run": "SIGNATURE"},
+        ["Ap_Door.c"],
+        {
+            "ap_door_init": {"file": "D:/p/Sources/APP/Ap_Door.c"},
+            "ap_door_run": {"file": "D:/p/Sources/APP/Ap_Door.c"},
+            "ap_door_reset": {"file": "D:/p/Sources/APP/Ap_Door.c"},
+        },
+    )
+    assert resolved == {
+        "ap_door_init": "SIGNATURE",
+        "ap_door_run": "SIGNATURE",
+        "ap_door_reset": "NEW",
+    }

@@ -686,12 +686,15 @@ def _resolve_changed_types_to_functions(
 ) -> Dict[str, str]:
     if not changed_types or not by_name:
         return changed_types
+    # classify가 함수명으로 분류한 정밀 kind(SIGNATURE/NEW/DELETE/VARIABLE 등)를 보존한다.
+    # (대소문자 무시 — by_name 키는 소문자, classify 키는 원본 케이스일 수 있음.)
+    ct_lower = {str(k).strip().lower(): v for k, v in changed_types.items()}
     resolved: Dict[str, str] = {}
     for path_text in changed_files:
         raw = str(path_text or "").strip()
         if not raw:
             continue
-        kind = "HEADER" if raw.lower().endswith(".h") else "BODY"
+        ext_kind = "HEADER" if raw.lower().endswith(".h") else "BODY"
         raw_norm = raw.replace("\\", "/").lower()
         raw_name = Path(raw_norm).name
         for func_name, info in by_name.items():
@@ -699,7 +702,8 @@ def _resolve_changed_types_to_functions(
             if not file_path:
                 continue
             if file_path.endswith(raw_norm) or file_path.endswith(raw_name):
-                resolved[func_name] = kind
+                # 함수별 정밀 kind가 있으면 그것을 사용, 없으면 파일 확장자 기반 기본값.
+                resolved[func_name] = ct_lower.get(func_name, ext_kind)
     return resolved or changed_types
 
 
