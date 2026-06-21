@@ -943,9 +943,10 @@ def run_impact_update(
         coverage_target = _COVERAGE_TARGET.get(_max_changed_asil, "미상(ASIL 확인 필요)")
         if asil_escalation:
             promote_to_review = True  # 안전(ASIL B+) 문서를 사람 검토 없이 자동 재생성하지 않는다
+            _mcdc_note = ", MC/DC 재검증 필수" if mcdc_required else ""
             warnings.append(
-                f"ASIL escalation: 직접 변경에 ASIL {_max_changed_asil} 함수 포함 — 검증강도 상향(커버리지 타깃: {coverage_target}"
-                + (", MC/DC 재검증 필수)" if mcdc_required else ")")
+                f"ASIL escalation: 직접 변경에 ASIL {_max_changed_asil} 함수 포함 — 검증강도 상향"
+                f"(커버리지 타깃: {coverage_target}{_mcdc_note})"
             )
         if asil_unknown_changed:
             warnings.append(
@@ -969,6 +970,44 @@ def run_impact_update(
             "coverage_target": coverage_target,
             "mcdc_required": mcdc_required,
         }
+        # MC/DC delta: 영향 함수의 VectorCAST 커버리지(statement/branch/MC/DC) → ASIL 타깃 대비 gap
+        # + 직전 스냅샷 대비 delta(회귀). vectorcast 미연결/RAG metrics 없음 → available=False(분석 계속).
+        coverage_gap: Dict[str, Any] = {"available": False}
+        _vc_paths = list(getattr(_lk, "vectorcast", []) or []) if _lk else []
+        if _vc_paths and _flagged:
+            try:
+                from workflow.coverage_gap import compute_coverage_gap
+                coverage_gap = compute_coverage_gap(
+                    _flagged, {fn: _asil_of(fn) for fn in _flagged}, _vc_paths,
+                    cache_root=str(REPO_ROOT / ".devops_pro_cache"),
+                    scm_id=str(trigger.scm_id or ""),
+                    update_baseline=not trigger.dry_run,
+                )
+            except Exception:  # noqa: BLE001 — 커버리지 연동 실패는 영향도 분석을 막지 않는다
+                coverage_gap = {"available": False, "reason": "coverage gap 계산 실패"}
+        _cd_impacted = [fn for fn in _flagged if _asil_of(fn) in ("C", "D")]
+        if coverage_gap.get("available"):
+            _summ = coverage_gap.get("summary", {})
+            _below_safety = [
+                r for r in coverage_gap.get("functions", [])
+                if not r.get("meets_target") and r.get("asil") in ("C", "D") and not r.get("asil_unknown")
+            ]
+            _unmatched_safety = _summ.get("unmatched_safety", 0)
+            if _below_safety or _unmatched_safety:
+                promote_to_review = True  # ASIL C/D 커버리지 미달/미측정 → 사람 재검증(증거 부재≠충족)
+                warnings.append(
+                    f"커버리지: ASIL C/D 영향 함수 — 목표 미달 {len(_below_safety)}개 / 미측정 {_unmatched_safety}개 — 재검증 필요"
+                )
+            _regr = _summ.get("regressed", 0)
+            if _regr:
+                warnings.append(f"커버리지 회귀: 직전 대비 {_regr}개 함수 커버리지 하락")
+        elif _vc_paths and _cd_impacted:
+            # vectorcast는 연결됐으나 커버리지 데이터를 못 읽음 + ASIL C/D 영향 →
+            # '증거 없음'을 안전 통과로 보지 않는다(안전측, 수동 확인 유도).
+            promote_to_review = True
+            warnings.append(
+                f"커버리지 데이터 없음(RAG metrics 미생성) — ASIL C/D 영향 함수 {len(_cd_impacted)}개 MC/DC·분기 미검증(수동 확인 필요)"
+            )
 
         actions = _summarize_actions(
             targets,
@@ -1018,6 +1057,7 @@ def run_impact_update(
                 "coverage_target": coverage_target,
                 "unknown_changed_count": asil_unknown_changed,
             },
+            "coverage_gap": coverage_gap,
         }
         if "sits" in targets:
             # SITS 전용 cross-module 영향을 항상 노출(계약 일관성). same_module_only가 이미
@@ -1133,6 +1173,7 @@ def run_impact_update(
                 "coverage_target": coverage_target,
                 "unknown_changed_count": asil_unknown_changed,
             },
+            "coverage_gap": coverage_gap,
         }
         audit_path = write_impact_audit(audit_payload)
         change_log = build_change_log(

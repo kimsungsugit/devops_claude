@@ -4,6 +4,34 @@ import { useJenkinsCfg, useToast } from '../../App.jsx';
 import StatusBadge from '../StatusBadge.jsx';
 
 const CHANGE_TYPE_KO = { BODY: '본문', HEADER: '헤더', SIGNATURE: '시그니처', NEW: '신규', DELETE: '삭제', VARIABLE: '변수' };
+const COVERAGE_METRIC_KO = { mcdc: 'MC/DC', branch: '분기', statement: '구문' };
+
+// 함수별 VectorCAST 커버리지 셀 — ASIL 타깃 메트릭 % + 충족 여부 + 직전 대비 Δ.
+function renderCoverageCell(cov) {
+  if (!cov) return <span className="text-muted">-</span>;
+  const cur = cov.current_rate;
+  const pct = (typeof cur === 'number') ? `${Math.round(cur * 100)}%` : '—';
+  const metricKo = COVERAGE_METRIC_KO[cov.target_metric] || cov.target_metric;
+  const d = cov.delta;
+  let deltaEl = null;
+  if (typeof d === 'number' && Math.abs(d) > 1e-9) {
+    const down = d < 0;
+    deltaEl = (
+      <span style={{ color: down ? 'var(--color-danger)' : 'var(--color-success)', marginLeft: 4, fontSize: 9 }}>
+        {down ? '▼' : '▲'}{Math.abs(Math.round(d * 100))}
+      </span>
+    );
+  }
+  return (
+    <span title={`${metricKo} 커버리지 ${pct} (목표 100%)${typeof d === 'number' ? `, 직전 대비 ${(d * 100).toFixed(0)}%p` : ''}`}>
+      <span className={`pill ${cov.meets_target ? 'pill-success' : 'pill-danger'}`} style={{ fontSize: 9 }}>
+        {metricKo} {pct}
+      </span>
+      {deltaEl}
+    </span>
+  );
+}
+
 const DOC_STATUS = {
   review_required: { tone: 'warning', label: '검토 필요' },
   completed: { tone: 'success', label: '완료' },
@@ -41,6 +69,13 @@ export default function ImpactGuideSection({ job, analysisResult }) {
   const functionMeta = impact?.function_meta ?? {};
   const impactWarnings = Array.isArray(impact?.warnings) ? impact.warnings : [];
   const asilInfo = impact?.asil ?? null;
+  // MC/DC delta: 영향 함수별 VectorCAST 커버리지(ASIL 타깃 대비 gap + 이력 delta).
+  const coverageGap = impact?.coverage_gap ?? null;
+  const coverageByFn = useMemo(() => {
+    const m = {};
+    for (const r of (coverageGap?.functions || [])) { if (r.function) m[r.function] = r; }
+    return m;
+  }, [coverageGap]);
 
   // Demo data for testing — simulates real .c file changes
   const demoFunctions = {
@@ -167,6 +202,7 @@ export default function ImpactGuideSection({ job, analysisResult }) {
           function: fn,
           changeType,
           asil: functionMeta[fn]?.asil || '',
+          coverage: coverageByFn[fn] || null,
           hop,
           requirements: reqs,
           stsTestCases: [...stsTcSet],
@@ -210,7 +246,7 @@ export default function ImpactGuideSection({ job, analysisResult }) {
     } finally {
       setLoading(false);
     }
-  }, [activeFnEntries, linkedDocs, actions, activeImpactGroups, activeChangedFiles, functionMeta, toast]);
+  }, [activeFnEntries, linkedDocs, actions, activeImpactGroups, activeChangedFiles, functionMeta, coverageByFn, toast]);
 
 
   // 영향받은 함수 집합(직접+간접+변경)을 추적성 매트릭스 focus로 넘기고 SRS/SDS 탭으로 이동.
@@ -264,6 +300,36 @@ export default function ImpactGuideSection({ job, analysisResult }) {
               </div>
             );
           })}
+        </div>
+      )}
+      {/* MC/DC delta — VectorCAST 커버리지 ASIL 타깃 대비 gap + 이력 회귀 요약. */}
+      {coverageGap?.available && (
+        <div className="panel" style={{ marginBottom: 12,
+          borderLeft: `3px solid ${(coverageGap.summary?.below_target || coverageGap.summary?.regressed) ? 'var(--color-danger)' : 'var(--color-success)'}` }}>
+          <div className="text-sm" style={{ fontWeight: 700, marginBottom: 6 }}>
+            🎯 커버리지 (ASIL 타깃 대비)
+          </div>
+          <div className="stats-row">
+            <div className="stat-card">
+              <div className="text-muted text-sm">평가된 영향 함수</div>
+              <div style={{ fontSize: 20, fontWeight: 700 }}>{coverageGap.summary?.evaluated ?? 0}</div>
+            </div>
+            <div className="stat-card">
+              <div className="text-muted text-sm">목표 미달</div>
+              <div style={{ fontSize: 20, fontWeight: 700, color: coverageGap.summary?.below_target ? 'var(--color-danger)' : undefined }}>
+                {coverageGap.summary?.below_target ?? 0}
+              </div>
+            </div>
+            <div className="stat-card">
+              <div className="text-muted text-sm">직전 대비 회귀</div>
+              <div style={{ fontSize: 20, fontWeight: 700, color: coverageGap.summary?.regressed ? 'var(--color-danger)' : undefined }}>
+                {coverageGap.summary?.regressed ?? 0}
+              </div>
+            </div>
+          </div>
+          {!coverageGap.summary?.had_baseline && (
+            <div className="text-muted text-sm" style={{ marginTop: 4 }}>직전 스냅샷 없음 — 이번 실행을 기준으로 저장(다음 분석부터 Δ 표시).</div>
+          )}
         </div>
       )}
       {/* Summary */}
@@ -505,6 +571,7 @@ export default function ImpactGuideSection({ job, analysisResult }) {
                 <th style={{ width: 60 }}>변경</th>
                 <th style={{ width: 50 }}>ASIL</th>
                 <th style={{ width: 50 }}>영향</th>
+                <th style={{ width: 96 }} title="ASIL 타깃 구조 커버리지(D=MC/DC, C/B=분기, A/QM=구문) 대비. Δ=직전 대비 변화">커버리지</th>
                 <th>요구사항</th>
                 <th>STS TC</th>
                 <th>SUTS TC</th>
@@ -522,6 +589,7 @@ export default function ImpactGuideSection({ job, analysisResult }) {
                       : <span className="text-muted" style={{ fontSize: 9 }} title="ASIL 미상 — 수동 확인 필요">미상</span>}
                   </td>
                   <td><span className={`pill ${d.hop === 'direct' ? 'pill-danger' : 'pill-info'}`} style={{ fontSize: 9 }}>{d.hop}</span></td>
+                  <td style={{ fontSize: 10, whiteSpace: 'nowrap' }}>{renderCoverageCell(d.coverage)}</td>
                   <td style={{ fontSize: 10 }}>
                     {d.requirements.length > 0
                       ? <span title={d.requirements.join(', ')} style={{ cursor: 'pointer', color: 'var(--accent)', textDecoration: 'underline' }}

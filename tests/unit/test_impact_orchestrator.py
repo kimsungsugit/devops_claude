@@ -580,6 +580,73 @@ def test_asil_escalation_downgrades_auto_and_normalizes_prefix(tmp_path, monkeyp
     assert result["actions"]["uds"]["mode"] == "FLAG"    # 안전: AUTO 봉쇄
 
 
+def test_run_impact_update_includes_coverage_gap(tmp_path, monkeypatch):
+    """linked vectorcast가 있으면 coverage_gap을 result에 싣고, ASIL C/D 미달 시 검토 강등 + 경고."""
+    from backend.schemas import ScmRegisterRequest
+    from backend.services import scm_registry
+    from workflow import coverage_gap as cg, impact_audit, impact_orchestrator
+
+    monkeypatch.setattr(scm_registry, "REGISTRY_PATH", tmp_path / "config" / "scm_registry.json")
+    monkeypatch.setattr(impact_audit, "AUDIT_DIR", tmp_path / "audit")
+    monkeypatch.setattr(impact_audit, "LOCK_PATH", tmp_path / "audit" / ".run_lock")
+    scm_registry.register_entry(ScmRegisterRequest(
+        id="x", name="X", scm_type="git", source_root=str(tmp_path / "src"),
+        linked_docs={"vectorcast": ["rag.json"]},
+    ))
+    monkeypatch.setattr(impact_orchestrator, "_is_cloudium_mode", lambda: False)
+    monkeypatch.setattr(impact_orchestrator, "classify_changed_functions", lambda *a, **k: {"safety": "BODY"})
+    monkeypatch.setattr(
+        impact_orchestrator, "_load_source_sections",
+        lambda _r: {"call_map": {}, "function_details_by_name": {
+            "safety": {"module_name": "m", "file": "Sources/APP/Ap_X.c", "asil": "D"}}},
+    )
+    monkeypatch.setattr(cg, "compute_coverage_gap", lambda *a, **k: {
+        "available": True,
+        "functions": [{"function": "safety", "asil": "D", "target_metric": "mcdc",
+                       "current_rate": 0.8, "meets_target": False, "delta": -0.1}],
+        "summary": {"evaluated": 1, "below_target": 1, "regressed": 1, "had_baseline": True},
+    })
+    result = impact_orchestrator.run_impact_update(ChangeTrigger(
+        trigger_type="local", scm_id="x", source_root=str(tmp_path / "src"), scm_type="git",
+        base_ref="HEAD", changed_files=["Ap_X.c"], dry_run=True, auto_generate=True,
+        targets=["uds"], metadata={}))
+    assert result["coverage_gap"]["available"] is True
+    assert result["coverage_gap"]["summary"]["below_target"] == 1
+    assert result["actions"]["uds"]["mode"] == "FLAG"   # ASIL C/D 커버리지 미달 → 검토 강등
+    assert any("목표 미달" in w for w in result["warnings"])
+    assert any("커버리지 회귀" in w for w in result["warnings"])
+
+
+def test_run_impact_update_no_coverage_data_with_safety_promotes(tmp_path, monkeypatch):
+    """vectorcast 연결됐으나 커버리지 데이터 없음 + ASIL C/D 영향 → 미검증을 안전 통과로 보지 않고 경고+검토 강등."""
+    from backend.schemas import ScmRegisterRequest
+    from backend.services import scm_registry
+    from workflow import coverage_gap as cg, impact_audit, impact_orchestrator
+
+    monkeypatch.setattr(scm_registry, "REGISTRY_PATH", tmp_path / "config" / "scm_registry.json")
+    monkeypatch.setattr(impact_audit, "AUDIT_DIR", tmp_path / "audit")
+    monkeypatch.setattr(impact_audit, "LOCK_PATH", tmp_path / "audit" / ".run_lock")
+    scm_registry.register_entry(ScmRegisterRequest(
+        id="x", name="X", scm_type="git", source_root=str(tmp_path / "src"),
+        linked_docs={"vectorcast": ["rag.json"]},
+    ))
+    monkeypatch.setattr(impact_orchestrator, "_is_cloudium_mode", lambda: False)
+    monkeypatch.setattr(impact_orchestrator, "classify_changed_functions", lambda *a, **k: {"safety": "BODY"})
+    monkeypatch.setattr(
+        impact_orchestrator, "_load_source_sections",
+        lambda _r: {"call_map": {}, "function_details_by_name": {
+            "safety": {"module_name": "m", "file": "Sources/APP/Ap_X.c", "asil": "D"}}},
+    )
+    # 커버리지 데이터 없음(RAG metrics 미생성) 시나리오
+    monkeypatch.setattr(cg, "compute_coverage_gap", lambda *a, **k: {"available": False, "functions": [], "summary": {}})
+    result = impact_orchestrator.run_impact_update(ChangeTrigger(
+        trigger_type="local", scm_id="x", source_root=str(tmp_path / "src"), scm_type="git",
+        base_ref="HEAD", changed_files=["Ap_X.c"], dry_run=True, auto_generate=True,
+        targets=["uds"], metadata={}))
+    assert any("커버리지 데이터 없음" in w for w in result["warnings"])
+    assert result["actions"]["uds"]["mode"] == "FLAG"   # 증거 없음 → 안전측 검토
+
+
 def test_resolve_preserves_deleted_functions():
     """삭제된 함수는 현재 소스(by_name)에 없어도 DELETE로 보존 — SUTS/SITS TC 제거 가이드 트리거."""
     from workflow import impact_orchestrator

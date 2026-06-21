@@ -183,4 +183,30 @@ describe('ImpactGuideSection', () => {
     expect(screen.getByText(/under-reported/)).toBeInTheDocument();
     expect(screen.getByText(/ASIL escalation/)).toBeInTheDocument();
   });
+
+  // STS-IMPACT-009: coverage_gap(MC/DC delta)이 있으면 커버리지 요약 카드 표시
+  it('렌더링: coverage_gap이 있으면 커버리지(ASIL 타깃 대비) 요약 카드가 표시된다', () => {
+    // Arrange
+    const analysisResult = {
+      impactData: {
+        trigger: { changed_files: ['Ap.c'] },
+        changed_function_types: { foo: 'BODY' },
+        actions: {},
+        impact: { direct: ['foo'] },
+        coverage_gap: {
+          available: true,
+          functions: [{ function: 'foo', asil: 'D', target_metric: 'mcdc', current_rate: 0.85, meets_target: false, delta: -0.1 }],
+          summary: { evaluated: 1, below_target: 1, regressed: 1, had_baseline: true },
+        },
+      },
+    };
+
+    // Act
+    render(<ImpactGuideSection job={mockJob} analysisResult={analysisResult} />);
+
+    // Assert: 커버리지 카드 + 미달/회귀 통계
+    expect(screen.getByText(/커버리지 \(ASIL 타깃 대비\)/)).toBeInTheDocument();
+    expect(screen.getByText(/목표 미달/)).toBeInTheDocument();
+    expect(screen.getByText(/직전 대비 회귀/)).toBeInTheDocument();
+  });
 });
