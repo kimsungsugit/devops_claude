@@ -766,6 +766,15 @@ def _summarize_actions(
     return actions
 
 
+def _is_cloudium_mode() -> bool:
+    """현재 file_mode가 cloudium(원격/읽기전용 worker)인지. backend 미가용이면 False."""
+    try:
+        from backend.services.file_resolver import get_resolver
+        return getattr(get_resolver(), "mode", "local") != "local"
+    except Exception:
+        return False
+
+
 def run_impact_update(
     trigger: ChangeTrigger,
     *,
@@ -783,16 +792,23 @@ def run_impact_update(
     try:
         entry = get_registry_entry(trigger.scm_id)
         previous_linked_docs = entry.linked_docs.model_dump(mode="json") if entry else {}
+        cloudium = _is_cloudium_mode()
         if callable(on_progress):
             on_progress("classify", "변경 함수를 분류 중입니다.", {"changed_files": len(trigger.changed_files or [])})
-        changed_types = classify_changed_functions(
-            trigger.source_root,
-            trigger.changed_files,
-            scm_type=trigger.scm_type,
-            base_ref=trigger.base_ref,
-        )
-        if not changed_types and trigger.changed_files:
+        if cloudium:
+            # cloudium: git/svn diff subprocess는 원격 source_root(로컬 미존재)에서 동작 불가하고
+            # 결과도 _resolve_changed_types_to_functions가 by_name+확장자로 재산정하므로,
+            # 무의미한 per-file subprocess를 생략하고 파일 기반 분류로 직행한다.
             changed_types = _fallback_changed_types_from_files(trigger.changed_files)
+        else:
+            changed_types = classify_changed_functions(
+                trigger.source_root,
+                trigger.changed_files,
+                scm_type=trigger.scm_type,
+                base_ref=trigger.base_ref,
+            )
+            if not changed_types and trigger.changed_files:
+                changed_types = _fallback_changed_types_from_files(trigger.changed_files)
 
         if entry and entry.source_root:
             if callable(on_progress):
@@ -855,12 +871,24 @@ def run_impact_update(
             warnings.append(
                 "changed file set from Jenkins build changeSet; change-type classification uses local working-copy diff — verify build/local revision alignment"
             )
+        # cloudium에서 소스 인덱스(by_name)가 비었는데 변경파일이 있으면 worker read 실패 가능성 →
+        # 영향이 과소보고될 수 있음을 명시(빈 결과를 '영향 없음'으로 오인 방지, X7/X9 안전측).
+        if cloudium and not by_name and trigger.changed_files:
+            warnings.append(
+                "cloudium: source index empty (worker read may have failed) — impact may be under-reported; review manually"
+            )
+        # cloudium(원격/읽기전용)에서는 AUTO 재생성의 입력 read 표면이 아직 미지원(분석/FLAG만 지원)
+        # → AUTO를 FLAG로 강등하여 안전하게 검토 아티팩트만 생성한다. (cloudium은 상단에서 계산)
+        if cloudium and bool(trigger.auto_generate):
+            warnings.append(
+                "cloudium mode: AUTO regeneration disabled (read surface not yet supported); downgraded to FLAG"
+            )
         actions = _summarize_actions(
             targets,
             changed_types,
             trigger.changed_files,
             impact_groups,
-            auto_generate=bool(trigger.auto_generate),
+            auto_generate=bool(trigger.auto_generate) and not cloudium,
             sits_impact_groups=sits_impact_groups,
         )
         if warnings:

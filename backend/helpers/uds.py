@@ -560,8 +560,22 @@ def _to_swcom_from_fn(info: Dict[str, Any]) -> str:
 def _get_source_sections_cached(source_root: str, max_files: int = 1200) -> Dict[str, Any]:
     # 콤마 구분 복수 경로 지원: 첫 번째 경로로 검증, 전체를 전달
     _first = (source_root or "").split(",")[0].strip()
-    root = Path(_first).expanduser().resolve() if _first else Path(".")
-    if not root.exists() or not root.is_dir():
+    # cloudium 모드면 worker IPC resolver로 검증(원격 경로는 로컬 resolve/exists로 못 잡음).
+    # local/standalone이면 기존 로컬 검증 그대로.
+    try:
+        from backend.services.file_resolver import get_resolver as _gr
+        _res = _gr()
+    except Exception:
+        _res = None
+    if _res is not None and getattr(_res, "mode", "local") != "local":
+        try:
+            _ok = bool(_first) and _res.is_dir(_first)
+        except Exception:
+            _ok = False   # worker 미기동/권한거부 등 → 접근불가로 처리(500 누출 방지 → 400)
+    else:
+        _root_chk = Path(_first).expanduser().resolve() if _first else Path(".")
+        _ok = _root_chk.exists() and _root_chk.is_dir()
+    if not _ok:
         raise HTTPException(status_code=400, detail="source_root not found or not directory")
     key = source_root  # 캐시 키는 전체 경로
     now = time()

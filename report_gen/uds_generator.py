@@ -218,7 +218,46 @@ def generate_uds_source_sections(
 ) -> Dict[str, str]:
     # 콤마/세미콜론 구분 복수 소스 루트 지원
     _raw_roots = [p.strip() for p in str(source_root).replace(";", ",").split(",") if p.strip()]
-    _roots = [Path(p).resolve() for p in _raw_roots if Path(p).resolve().exists()]
+
+    # cloudium 모드면 worker IPC resolver로 소스 접근(read-only). local/standalone이면 None →
+    # 기존 os.walk/Path 경로 그대로 사용(회귀 0). backend 미가용이면 조용히 None.
+    _src_resolver = None
+    try:
+        from backend.services.file_resolver import get_resolver as _get_resolver
+        _r0 = _get_resolver()
+        if getattr(_r0, "mode", "local") != "local":
+            _src_resolver = _r0
+    except Exception:
+        _src_resolver = None
+
+    def _src_walk(walk_root):
+        if _src_resolver is not None:
+            for _sp in _src_resolver.list_dir(str(walk_root), pattern="*", recursive=True):
+                yield Path(_sp)
+        else:
+            for _dp, _, _fns in os.walk(walk_root):
+                for _n in _fns:
+                    yield Path(_dp) / _n
+
+    def _src_read(p) -> str:
+        if _src_resolver is not None:
+            try:
+                return _src_resolver.read_bytes(str(p)).decode("utf-8", errors="ignore")
+            except Exception:
+                return ""
+        try:
+            return Path(p).read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            return ""
+
+    def _src_relbase(p):
+        # 모듈명 계산용. cloudium은 로컬 resolve 금지(원격경로 그대로), local은 기존 resolve.
+        return Path(p) if _src_resolver is not None else Path(p).resolve()
+
+    if _src_resolver is not None:
+        _roots = [Path(p) for p in _raw_roots if _src_resolver.is_dir(p)]
+    else:
+        _roots = [Path(p).resolve() for p in _raw_roots if Path(p).resolve().exists()]
     if not _roots:
         return {}
     root = _roots[0]  # 기본 루트 (상대경로 계산 기준)
@@ -331,39 +370,35 @@ def generate_uds_source_sections(
 
     truncated = False
     for _walk_root in _roots:
-        for dirpath, _, filenames in os.walk(_walk_root):
-            for name in filenames:
-                p = Path(dirpath) / name
-                ext = p.suffix.lower()
-                if ext not in allowed:
-                    continue
-                if component_map:
-                    # 경로 기반 매칭 우선 (동일 파일명 충돌 해결)
-                    mapped = None
-                    fp_norm = str(p).replace("\\", "/")
-                    for cm_key in component_map:
-                        if "/" in cm_key and fp_norm.endswith(cm_key):
-                            mapped = component_map[cm_key]
-                            break
-                    # 파일명 fallback
-                    if not mapped or not isinstance(mapped, dict):
-                        mapped = component_map.get(p.name) or component_map.get(p.stem)
-                    if isinstance(mapped, dict):
-                        verify = str(mapped.get("verify") or "").strip().upper()
-                        if verify == "X":
-                            continue
-                files.append(p)
-                ext_counts[ext] = ext_counts.get(ext, 0) + 1
-                try:
-                    rel = p.relative_to(_walk_root)
-                except ValueError:
-                    rel = p
-                top = rel.parts[0] if rel.parts else "."
-                top_dirs[top] = top_dirs.get(top, 0) + 1
-                if len(files) >= max_files:
-                    truncated = True
-                    break
-            if truncated:
+        for p in _src_walk(_walk_root):
+            ext = p.suffix.lower()
+            if ext not in allowed:
+                continue
+            if component_map:
+                # 경로 기반 매칭 우선 (동일 파일명 충돌 해결)
+                mapped = None
+                fp_norm = str(p).replace("\\", "/")
+                for cm_key in component_map:
+                    if "/" in cm_key and fp_norm.endswith(cm_key):
+                        mapped = component_map[cm_key]
+                        break
+                # 파일명 fallback
+                if not mapped or not isinstance(mapped, dict):
+                    mapped = component_map.get(p.name) or component_map.get(p.stem)
+                if isinstance(mapped, dict):
+                    verify = str(mapped.get("verify") or "").strip().upper()
+                    if verify == "X":
+                        continue
+            files.append(p)
+            ext_counts[ext] = ext_counts.get(ext, 0) + 1
+            try:
+                rel = p.relative_to(_walk_root)
+            except ValueError:
+                rel = p
+            top = rel.parts[0] if rel.parts else "."
+            top_dirs[top] = top_dirs.get(top, 0) + 1
+            if len(files) >= max_files:
+                truncated = True
                 break
         if truncated:
             break
@@ -478,16 +513,12 @@ def generate_uds_source_sections(
     # additional documentation files (txt/md) for structured templates
     doc_files = 0
     for _walk_root2 in _roots:
-        for dirpath, _, filenames in os.walk(_walk_root2):
-            for name in filenames:
-                ext = Path(name).suffix.lower()
-                if ext not in {".txt", ".md"}:
-                    continue
-                p = Path(dirpath) / name
-                doc_texts.append(_read_text_limited(p))
-                doc_files += 1
-                if doc_files >= 20:
-                    break
+        for p in _src_walk(_walk_root2):
+            ext = p.suffix.lower()
+            if ext not in {".txt", ".md"}:
+                continue
+            doc_texts.append(_read_text_limited(p))
+            doc_files += 1
             if doc_files >= 20:
                 break
         if doc_files >= 20:
@@ -652,7 +683,7 @@ def generate_uds_source_sections(
                     }
         for src_file in [f for f in files if f.suffix.lower() == ".c"][:200]:
             try:
-                src_text = src_file.read_text(encoding="utf-8", errors="replace")
+                src_text = _src_read(src_file)
                 source_text_cache[str(src_file)] = src_text
             except Exception:
                 continue
@@ -671,7 +702,7 @@ def generate_uds_source_sections(
         c_source_texts = [text for path, text in source_text_cache.items() if str(path).lower().endswith(".c")]
         for hdr_file in [f for f in files if f.suffix.lower() == ".h"][:300]:
             try:
-                hdr_text = hdr_file.read_text(encoding="utf-8", errors="replace")
+                hdr_text = _src_read(hdr_file)
                 source_text_cache[str(hdr_file)] = hdr_text
             except Exception:
                 continue
@@ -836,7 +867,7 @@ def generate_uds_source_sections(
                 continue
             if file_path and file_path not in source_text_cache:
                 try:
-                    source_text_cache[file_path] = Path(file_path).read_text(encoding="utf-8", errors="replace")
+                    source_text_cache[file_path] = _src_read(file_path)
                 except Exception:
                     source_text_cache[file_path] = ""
             if not isinstance(calls, list):
@@ -860,7 +891,7 @@ def generate_uds_source_sections(
             module_name = "Module"
             if file_path:
                 try:
-                    fp_resolved = Path(file_path).resolve()
+                    fp_resolved = _src_relbase(file_path)
                     rel = None
                     for _r in _roots:
                         try:
@@ -1125,7 +1156,7 @@ def generate_uds_source_sections(
                     continue
                 if file_path and file_path not in source_text_cache:
                     try:
-                        source_text_cache[file_path] = Path(file_path).read_text(encoding="utf-8", errors="replace")
+                        source_text_cache[file_path] = _src_read(file_path)
                     except Exception:
                         source_text_cache[file_path] = ""
                 if not isinstance(calls, list):
@@ -1143,7 +1174,7 @@ def generate_uds_source_sections(
                 module_name = "Module"
                 if file_path:
                     try:
-                        rel = Path(file_path).resolve().relative_to(root)
+                        rel = _src_relbase(file_path).relative_to(root)
                         module_name = rel.parts[0] if rel.parts else "Module"
                     except Exception:
                         module_name = "Module"

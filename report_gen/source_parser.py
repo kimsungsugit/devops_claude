@@ -217,9 +217,22 @@ def _parse_c_declaration_statement(stmt: str) -> List[Dict[str, str]]:
         )
     return results
 
+def _read_bytes_resolver_aware(path: Path) -> bytes:
+    """cloudium 모드면 worker IPC resolver로 read, 그 외(local/standalone)는 직접 read.
+    backend 미가용(standalone report_gen)이면 조용히 로컬 경로로 폴백 → 회귀 0."""
+    try:
+        from backend.services.file_resolver import get_resolver
+        r = get_resolver()
+        if getattr(r, "mode", "local") != "local":
+            return r.read_bytes(str(path))
+    except Exception:
+        pass
+    return Path(path).read_bytes()
+
+
 def _read_text_limited(path: Path, max_bytes: int = 200000) -> str:
     try:
-        data = path.read_bytes()
+        data = _read_bytes_resolver_aware(path)
     except Exception:
         return ""
     if max_bytes and len(data) > max_bytes:
