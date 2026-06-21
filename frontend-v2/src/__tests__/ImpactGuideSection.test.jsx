@@ -158,4 +158,29 @@ describe('ImpactGuideSection', () => {
     expect(stored.functions).toEqual(expect.arrayContaining(['g_DrvIn_Main', 'g_MotorCtrl', 's_Helper']));
     delete window.__detailSection;
   });
+
+  // STS-IMPACT-008: backend 경고(과소보고/ASIL escalation 등)가 경고 카드로 표면화
+  it('렌더링: backend warnings가 영향 탭 경고 카드로 표시된다', () => {
+    // Arrange
+    const analysisResult = {
+      impactData: {
+        trigger: { changed_files: ['Ap.c'] },
+        changed_function_types: { foo: 'BODY' },
+        actions: {},
+        impact: { direct: ['foo'] },
+        warnings: [
+          'cloudium: source index empty (worker read may have failed) — impact may be under-reported',
+          'ASIL escalation: 직접 변경에 ASIL D 함수 포함',
+        ],
+      },
+    };
+
+    // Act
+    render(<ImpactGuideSection job={mockJob} analysisResult={analysisResult} />);
+
+    // Assert: 경고 카드 + 개별 경고 노출
+    expect(screen.getByText(/분석 경고/)).toBeInTheDocument();
+    expect(screen.getByText(/under-reported/)).toBeInTheDocument();
+    expect(screen.getByText(/ASIL escalation/)).toBeInTheDocument();
+  });
 });

@@ -24,6 +24,13 @@ logger = logging.getLogger(__name__)
 REPO_ROOT = Path(__file__).resolve().parents[1]
 AUTO_DOCS = {"uds", "suts", "sits"}
 FLAG_DOCS = {"sts", "sds"}
+
+# ISO 26262 증거 보강: ASIL 등급 순위 + 등급별 구조 커버리지 타깃(Part 6 Table 9/12 권고).
+_ASIL_RANK = {"QM": 0, "A": 1, "B": 2, "C": 3, "D": 4}
+_COVERAGE_TARGET = {
+    "D": "MC/DC", "C": "분기(branch)", "B": "분기(branch)",
+    "A": "구문(statement)", "QM": "구문(statement)",
+}
 # Default matrix — AUTO targets are only executed when trigger.auto_generate=True;
 # otherwise they are downgraded to FLAG at runtime.
 ACTION_MATRIX: Dict[str, Dict[str, str]] = {
@@ -868,7 +875,11 @@ def run_impact_update(
             )
         impacted_total = len(_impacted_union(impact_groups))
         warnings: List[str] = []
+        # AUTO를 검토(FLAG)로 강등할 '실질적' 사유만 모은다 — 정보성 경고(Jenkins revision/SITS
+        # cross 안내 등)는 AUTO를 봉쇄하지 않는다(과보수 회귀 방지). 한도 초과·ASIL 에스컬레이션만.
+        promote_to_review = False
         if impacted_total > options.max_impacted_functions:
+            promote_to_review = True
             warnings.append(
                 f"impacted function count exceeded limit ({impacted_total}>{options.max_impacted_functions}); promote to review"
             )
@@ -879,6 +890,7 @@ def run_impact_update(
                     f"SITS cross-module impact ({sits_total}) exceeds same-module impact ({impacted_total}); SITS uses cross-module set"
                 )
             if sits_total > options.max_impacted_functions:
+                promote_to_review = True
                 warnings.append(
                     f"SITS cross-module impacted ({sits_total}) exceeded limit ({options.max_impacted_functions}); promote to review"
                 )
@@ -900,6 +912,64 @@ def run_impact_update(
             warnings.append(
                 "cloudium mode: AUTO regeneration disabled (read surface not yet supported); downgraded to FLAG"
             )
+
+        # ── ISO 26262 증거 보강: 함수별 ASIL/메타 + ASIL 차등 + 회귀시험 선정 + 커버리지 타깃 ──
+        def _asil_of(_fn: str) -> str:
+            _a = str((by_name.get(_fn) or {}).get("asil") or "").strip().upper()
+            return re.sub(r"^ASIL[\s_-]*", "", _a).strip()  # 'ASIL B'/'ASIL-B' → 'B'
+
+        _changed_set = set(changed_types)
+        _impacted_all = _impacted_union(impact_groups) | (
+            _impacted_union(sits_impact_groups) if sits_impact_groups else set()
+        )
+        # 함수별 메타(ASIL/모듈/파일/변경유형) — UI·감사기록·ai-guide ASIL 흐름의 단일 소스.
+        function_meta = {
+            fn: {
+                "asil": _asil_of(fn),
+                "module": str((by_name.get(fn) or {}).get("module_name") or ""),
+                "file": str((by_name.get(fn) or {}).get("file") or ""),
+                "change_type": changed_types.get(fn, ""),
+            }
+            for fn in sorted(_changed_set | _impacted_all)
+        }
+        # ASIL 차등: 직접 변경 함수의 최대 ASIL → 검증강도. B+ = 에스컬레이션, C/D = MC/DC(분기) 재검증 필수.
+        _changed_asils = [_asil_of(fn) for fn in _changed_set]
+        _max_changed_asil = max(
+            (a for a in _changed_asils if a in _ASIL_RANK), key=lambda a: _ASIL_RANK[a], default="",
+        )
+        asil_escalation = any(_ASIL_RANK.get(a, 0) >= 2 for a in _changed_asils)
+        mcdc_required = any(_ASIL_RANK.get(a, 0) >= 3 for a in _changed_asils)
+        asil_unknown_changed = sum(1 for a in _changed_asils if a not in _ASIL_RANK)
+        coverage_target = _COVERAGE_TARGET.get(_max_changed_asil, "미상(ASIL 확인 필요)")
+        if asil_escalation:
+            promote_to_review = True  # 안전(ASIL B+) 문서를 사람 검토 없이 자동 재생성하지 않는다
+            warnings.append(
+                f"ASIL escalation: 직접 변경에 ASIL {_max_changed_asil} 함수 포함 — 검증강도 상향(커버리지 타깃: {coverage_target}"
+                + (", MC/DC 재검증 필수)" if mcdc_required else ")")
+            )
+        if asil_unknown_changed:
+            warnings.append(
+                f"직접 변경 함수 중 ASIL 미상 {asil_unknown_changed}개 — 안전 등급 수동 확인 필요(QM 단정 금지)"
+            )
+        # 회귀시험 선정: 영향 함수 → 기존 SUTS TC / SITS call-chain 집계(재실행 대상 증거).
+        _lk = entry.linked_docs if entry else None
+        _flagged = sorted(_impacted_all | _changed_set)
+        regression_test_set: Dict[str, Any] = {"suts": {}, "sits": {}}
+        try:
+            if _lk and getattr(_lk, "suts", ""):
+                regression_test_set["suts"] = _load_suts_fn_tcs(_lk.suts, _flagged)
+            if _lk and getattr(_lk, "sits", ""):
+                regression_test_set["sits"] = _load_sits_fn_chains(_lk.sits, _flagged)
+        except Exception:  # noqa: BLE001 — 회귀집합은 best-effort, 없어도 분석은 진행
+            pass
+        regression_test_set["summary"] = {
+            "suts_tc_count": sum(len(v) for v in regression_test_set["suts"].values()),
+            "sits_chain_count": sum(len(v) for v in regression_test_set["sits"].values()),
+            "impacted_function_count": len(_flagged),
+            "coverage_target": coverage_target,
+            "mcdc_required": mcdc_required,
+        }
+
         actions = _summarize_actions(
             targets,
             changed_types,
@@ -908,11 +978,28 @@ def run_impact_update(
             auto_generate=bool(trigger.auto_generate) and not cloudium,
             sits_impact_groups=sits_impact_groups,
         )
-        if warnings:
+        if promote_to_review:
             for target, info in actions.items():
                 if info.get("mode") == "AUTO":
                     info["mode"] = "FLAG"
                     info["status"] = "review_required"
+
+        # ASIL 차등 게이트: ASIL B+ 직접 변경이면 설계/요구사항 시험(sds/sts)도 검토 강제
+        # (skipped로 빠지지 않게). C/D는 MC/DC 재검증 플래그를 시험 산출물에 부착.
+        _direct = sorted(set(impact_groups.get("direct", [])))
+        if asil_escalation:
+            for _t in ("sds", "sts"):
+                if _t in actions and actions[_t].get("mode") in ("-", None):
+                    actions[_t] = {
+                        "mode": "FLAG", "status": "review_required",
+                        "function_count": len(_direct), "functions": _direct,
+                    }
+        for _t, _info in actions.items():
+            if asil_escalation:
+                _info["asil_escalation"] = True
+            if mcdc_required and _t in ("suts", "sits", "sts"):
+                _info["mcdc_required"] = True
+                _info["coverage_target"] = coverage_target
 
         result = {
             "ok": True,
@@ -922,6 +1009,15 @@ def run_impact_update(
             "impact": impact_groups,
             "warnings": warnings,
             "actions": actions,
+            "function_meta": function_meta,
+            "regression_test_set": regression_test_set,
+            "asil": {
+                "max_changed": _max_changed_asil,
+                "escalation": asil_escalation,
+                "mcdc_required": mcdc_required,
+                "coverage_target": coverage_target,
+                "unknown_changed_count": asil_unknown_changed,
+            },
         }
         if "sits" in targets:
             # SITS 전용 cross-module 영향을 항상 노출(계약 일관성). same_module_only가 이미
@@ -1028,6 +1124,15 @@ def run_impact_update(
             "dry_run": bool(trigger.dry_run),
             "warnings": warnings,
             "actions": actions,
+            "function_meta": function_meta,
+            "regression_test_set": regression_test_set,
+            "asil": {
+                "max_changed": _max_changed_asil,
+                "escalation": asil_escalation,
+                "mcdc_required": mcdc_required,
+                "coverage_target": coverage_target,
+                "unknown_changed_count": asil_unknown_changed,
+            },
         }
         audit_path = write_impact_audit(audit_payload)
         change_log = build_change_log(

@@ -37,6 +37,10 @@ export default function ImpactGuideSection({ job, analysisResult }) {
     ?? analysisResult?.scmList?.[0]?.linked_docs
     ?? {};
   const impactGroups = impact?.impact ?? {};
+  // 백엔드 ISO 증거: 함수별 메타(ASIL 등) + 경고(과소보고/cloudium/ASIL escalation 등) + ASIL 요약.
+  const functionMeta = impact?.function_meta ?? {};
+  const impactWarnings = Array.isArray(impact?.warnings) ? impact.warnings : [];
+  const asilInfo = impact?.asil ?? null;
 
   // Demo data for testing — simulates real .c file changes
   const demoFunctions = {
@@ -162,6 +166,7 @@ export default function ImpactGuideSection({ job, analysisResult }) {
         details.push({
           function: fn,
           changeType,
+          asil: functionMeta[fn]?.asil || '',
           hop,
           requirements: reqs,
           stsTestCases: [...stsTcSet],
@@ -191,6 +196,10 @@ export default function ImpactGuideSection({ job, analysisResult }) {
         const aiData = await post('/api/impact/ai-guide', {
           changed_types: Object.fromEntries(activeFnEntries),
           impact_groups: activeImpactGroups,
+          // 함수별 ASIL을 함께 보내 위험평가가 실제 ASIL을 반영(없으면 'ASIL 미상'으로 정직 표시).
+          by_name: Object.fromEntries(
+            Object.entries(functionMeta).map(([fn, m]) => [fn, { asil: m?.asil || '' }]),
+          ),
         });
         if (aiData?.ok) setAiGuide(aiData.guide);
       } catch (_) { /* AI guide is optional */ }
@@ -201,7 +210,7 @@ export default function ImpactGuideSection({ job, analysisResult }) {
     } finally {
       setLoading(false);
     }
-  }, [activeFnEntries, linkedDocs, actions, activeImpactGroups, activeChangedFiles, toast]);
+  }, [activeFnEntries, linkedDocs, actions, activeImpactGroups, activeChangedFiles, functionMeta, toast]);
 
 
   // 영향받은 함수 집합(직접+간접+변경)을 추적성 매트릭스 focus로 넘기고 SRS/SDS 탭으로 이동.
@@ -242,6 +251,21 @@ export default function ImpactGuideSection({ job, analysisResult }) {
 
   return (
     <div>
+      {/* 백엔드 경고 표면화 — 과소보고/cloudium degrade/revision 불일치/ASIL escalation 등.
+          0 영향을 '영향 없음'으로 오인하지 않도록 안전 신호를 의사결정 화면에 노출. */}
+      {impactWarnings.length > 0 && (
+        <div className="panel" style={{ marginBottom: 12, borderLeft: '3px solid var(--color-warning)' }}>
+          <div className="text-sm" style={{ fontWeight: 700, marginBottom: 6 }}>⚠️ 분석 경고 ({impactWarnings.length})</div>
+          {impactWarnings.map((w, i) => {
+            const danger = /under-reported|empty|escalation|미상|과소|MC\/DC|unavailable/i.test(String(w));
+            return (
+              <div key={i} className="text-sm" style={{ color: danger ? 'var(--color-danger)' : 'var(--text-muted)', padding: '1px 0' }}>
+                • {w}
+              </div>
+            );
+          })}
+        </div>
+      )}
       {/* Summary */}
       <div className="panel" style={{ marginBottom: 12 }}>
         <div className="panel-header">
@@ -479,6 +503,7 @@ export default function ImpactGuideSection({ job, analysisResult }) {
               <tr>
                 <th style={{ width: 150 }}>함수</th>
                 <th style={{ width: 60 }}>변경</th>
+                <th style={{ width: 50 }}>ASIL</th>
                 <th style={{ width: 50 }}>영향</th>
                 <th>요구사항</th>
                 <th>STS TC</th>
@@ -491,6 +516,11 @@ export default function ImpactGuideSection({ job, analysisResult }) {
                 <tr key={i} style={{ background: d.hop === 'direct' ? 'var(--bg)' : undefined }}>
                   <td style={{ fontFamily: 'monospace', fontSize: 10, fontWeight: 600 }}>{d.function}</td>
                   <td><span className="pill pill-warning" style={{ fontSize: 9 }}>{CHANGE_TYPE_KO[d.changeType] || d.changeType}</span></td>
+                  <td>
+                    {d.asil && /^[A-D]$/.test(d.asil)
+                      ? <span className={`pill ${/[CD]/.test(d.asil) ? 'pill-danger' : 'pill-warning'}`} style={{ fontSize: 9 }}>{d.asil}</span>
+                      : <span className="text-muted" style={{ fontSize: 9 }} title="ASIL 미상 — 수동 확인 필요">미상</span>}
+                  </td>
                   <td><span className={`pill ${d.hop === 'direct' ? 'pill-danger' : 'pill-info'}`} style={{ fontSize: 9 }}>{d.hop}</span></td>
                   <td style={{ fontSize: 10 }}>
                     {d.requirements.length > 0

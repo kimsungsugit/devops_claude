@@ -491,6 +491,95 @@ def test_resolve_changed_types_preserves_classify_kind():
     }
 
 
+def test_run_impact_update_asil_differentiation_and_evidence(tmp_path, monkeypatch):
+    """ASIL D 직접 변경 → sds 강제 FLAG(BODY는 본래 '-') + MC/DC 플래그 + function_meta +
+    regression_test_set + asil 요약(ISO 증거 보강)."""
+    from backend.schemas import ScmRegisterRequest
+    from backend.services import scm_registry
+    from workflow import impact_audit, impact_orchestrator
+
+    monkeypatch.setattr(scm_registry, "REGISTRY_PATH", tmp_path / "config" / "scm_registry.json")
+    monkeypatch.setattr(impact_audit, "AUDIT_DIR", tmp_path / "audit")
+    monkeypatch.setattr(impact_audit, "LOCK_PATH", tmp_path / "audit" / ".run_lock")
+    scm_registry.register_entry(
+        ScmRegisterRequest(id="x", name="X", scm_type="git", source_root=str(tmp_path / "src"))
+    )
+    monkeypatch.setattr(impact_orchestrator, "classify_changed_functions", lambda *a, **k: {"safety_fn": "BODY"})
+    monkeypatch.setattr(
+        impact_orchestrator, "_load_source_sections",
+        lambda _r: {
+            "call_map": {},
+            "function_details_by_name": {
+                "safety_fn": {"module_name": "door", "file": "Sources/APP/Ap_X.c", "asil": "D"},
+            },
+        },
+    )
+    result = impact_orchestrator.run_impact_update(
+        ChangeTrigger(
+            trigger_type="local", scm_id="x", source_root=str(tmp_path / "src"),
+            scm_type="git", base_ref="HEAD", changed_files=["Ap_X.c"],
+            dry_run=True, targets=["uds", "sts", "sds"], metadata={},
+        )
+    )
+    assert result["ok"] is True
+    # ASIL 요약
+    assert result["asil"]["max_changed"] == "D"
+    assert result["asil"]["escalation"] is True
+    assert result["asil"]["mcdc_required"] is True
+    assert result["asil"]["coverage_target"] == "MC/DC"
+    # function_meta에 ASIL D
+    assert result["function_meta"]["safety_fn"]["asil"] == "D"
+    # ASIL 차등 게이트: BODY는 본래 sds='-'(skip)이나 ASIL D 에스컬레이션으로 FLAG 강제
+    assert result["actions"]["sds"]["mode"] == "FLAG"
+    # 시험 산출물에 MC/DC 재검증 플래그
+    assert result["actions"]["sts"].get("mcdc_required") is True
+    # 회귀시험 선정 요약
+    assert result["regression_test_set"]["summary"]["coverage_target"] == "MC/DC"
+    assert result["regression_test_set"]["summary"]["impacted_function_count"] >= 1
+    # 경고에 ASIL escalation
+    assert any("ASIL escalation" in w for w in result["warnings"])
+
+
+def _reg_demo(tmp_path, monkeypatch, classify, by_name):
+    from backend.schemas import ScmRegisterRequest
+    from backend.services import scm_registry
+    from workflow import impact_audit, impact_orchestrator
+    monkeypatch.setattr(scm_registry, "REGISTRY_PATH", tmp_path / "config" / "scm_registry.json")
+    monkeypatch.setattr(impact_audit, "AUDIT_DIR", tmp_path / "audit")
+    monkeypatch.setattr(impact_audit, "LOCK_PATH", tmp_path / "audit" / ".run_lock")
+    scm_registry.register_entry(ScmRegisterRequest(id="x", name="X", scm_type="git", source_root=str(tmp_path / "src")))
+    monkeypatch.setattr(impact_orchestrator, "classify_changed_functions", lambda *a, **k: dict(classify))
+    monkeypatch.setattr(impact_orchestrator, "_load_source_sections",
+                        lambda _r: {"call_map": {}, "function_details_by_name": by_name})
+    monkeypatch.setattr(impact_orchestrator, "_is_cloudium_mode", lambda: False)  # 이 테스트들은 local 가정
+    return impact_orchestrator
+
+
+def test_info_warning_does_not_downgrade_auto(tmp_path, monkeypatch):
+    """정보성 경고(jenkins changeSet)만 있으면 auto_generate AUTO를 강등하지 않는다(C1 회귀)."""
+    io = _reg_demo(tmp_path, monkeypatch, {"foo": "BODY"},
+                   {"foo": {"module_name": "m", "file": "Sources/APP/Ap_X.c", "asil": ""}})
+    result = io.run_impact_update(ChangeTrigger(
+        trigger_type="jenkins", scm_id="x", source_root=str(tmp_path / "src"), scm_type="git",
+        base_ref="HEAD", changed_files=["Ap_X.c"], dry_run=True, auto_generate=True,
+        targets=["uds"], metadata={"changed_files_source": "jenkins_changeset"}))
+    assert result["actions"]["uds"]["mode"] == "AUTO"   # 정보성 경고는 AUTO 봉쇄 안 함
+    assert any("changeSet" in w or "changeset" in w for w in result["warnings"])
+
+
+def test_asil_escalation_downgrades_auto_and_normalizes_prefix(tmp_path, monkeypatch):
+    """ASIL B+ 직접변경이면 auto_generate AUTO를 검토(FLAG)로 강등 + 'ASIL D' 접두어 정규화(W1)."""
+    io = _reg_demo(tmp_path, monkeypatch, {"safety": "BODY"},
+                   {"safety": {"module_name": "m", "file": "Sources/APP/Ap_X.c", "asil": "ASIL D"}})
+    result = io.run_impact_update(ChangeTrigger(
+        trigger_type="local", scm_id="x", source_root=str(tmp_path / "src"), scm_type="git",
+        base_ref="HEAD", changed_files=["Ap_X.c"], dry_run=True, auto_generate=True,
+        targets=["uds"], metadata={}))
+    assert result["asil"]["max_changed"] == "D"          # 'ASIL D' → 'D' 정규화
+    assert result["asil"]["escalation"] is True
+    assert result["actions"]["uds"]["mode"] == "FLAG"    # 안전: AUTO 봉쇄
+
+
 def test_resolve_preserves_deleted_functions():
     """삭제된 함수는 현재 소스(by_name)에 없어도 DELETE로 보존 — SUTS/SITS TC 제거 가이드 트리거."""
     from workflow import impact_orchestrator
