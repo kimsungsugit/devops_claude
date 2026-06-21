@@ -15,6 +15,20 @@ export default function SrsSdsSection({ job, analysisResult }) {
   const [warnings, setWarnings] = useState([]);           // partial failure warnings
   const matrixCacheRef = useRef(null);                     // cache key + data
 
+  // 영향도 분석(ImpactGuideSection)에서 넘어온 focus(영향 함수 집합) — 1회 소비.
+  // 있으면 매트릭스를 그 함수들로 자동 필터해 "이 변경이 닿는 요구사항/시험/공백"만 보여준다.
+  const [traceFocus, setTraceFocus] = useState(() => {
+    try {
+      const raw = localStorage.getItem('devops_v2_trace_focus');
+      if (!raw) return null;
+      localStorage.removeItem('devops_v2_trace_focus');  // 1회 소비(stale 방지)
+      const o = JSON.parse(raw);
+      if (o && Array.isArray(o.functions) && o.functions.length && Date.now() - (o.ts || 0) < 120000) return o;
+    } catch (_) { /* ignore */ }
+    return null;
+  });
+  const _autoLoadedRef = useRef(false);
+
   const localDocPaths = useMemo(() => {
     try { return JSON.parse(localStorage.getItem('devops_v2_doc_paths') || '{}'); } catch (_) { return {}; }
   }, []);
@@ -349,6 +363,14 @@ export default function SrsSdsSection({ job, analysisResult }) {
     }
   }, [job, cfg, cacheRoot, docPaths, linkedDocs, scmId, toast]);
 
+  // focus(영향도 → 추적성)를 갖고 진입하면 매트릭스를 자동 생성한다(1회).
+  useEffect(() => {
+    if (traceFocus && !_autoLoadedRef.current) {
+      _autoLoadedRef.current = true;
+      loadMatrix(false);
+    }
+  }, [traceFocus, loadMatrix]);
+
   const impactData = analysisResult?.impactData;
   const impacts = impactData?.impacts ?? impactData?.impact_items ?? [];
   const changedFiles = impactData?.changed_files ?? [];
@@ -564,7 +586,7 @@ export default function SrsSdsSection({ job, analysisResult }) {
         )}
 
         {matrix ? (
-          <TraceMatrix matrix={matrix} />
+          <TraceMatrix matrix={matrix} focusFunctions={traceFocus?.functions || null} onClearFocus={() => setTraceFocus(null)} />
         ) : (
           <div className="text-muted text-sm">
             SRS/SDS 경로를 설정 탭에서 등록한 후 매트릭스 생성 버튼을 클릭하세요.
@@ -677,7 +699,7 @@ function GapBadge({ label, value, tone, title, sub }) {
   );
 }
 
-function TraceMatrix({ matrix }) {
+function TraceMatrix({ matrix, focusFunctions = null, onClearFocus = null }) {
   const inner = matrix?.matrix ?? matrix;
   const rows = Array.isArray(inner?.rows) ? inner.rows : (Array.isArray(inner?.items) ? inner.items : []);
   const summary = inner?.summary ?? matrix?.summary;
@@ -804,6 +826,14 @@ function TraceMatrix({ matrix }) {
   const filtered = useMemo(() => {
     let result = rows;
 
+    // 영향도 연동 focus — 변경 영향 함수(source_ids 교집합)가 닿는 요구사항 행만.
+    if (focusFunctions && focusFunctions.length) {
+      const fset = new Set(focusFunctions.map(f => String(f).trim().toLowerCase()));
+      result = result.filter(r =>
+        (r.source_ids ?? []).some(s => fset.has(String(s).trim().toLowerCase()))
+      );
+    }
+
     // Status filter
     if (statusFilter !== 'all') {
       result = result.filter(r => deriveStatus(r) === statusFilter);
@@ -867,7 +897,7 @@ function TraceMatrix({ matrix }) {
     }
 
     return result;
-  }, [rows, searchTerm, statusFilter, sourceFilter, reqTypeFilter, testResultFilter, sortKey, sortAsc]);
+  }, [rows, searchTerm, statusFilter, sourceFilter, reqTypeFilter, testResultFilter, sortKey, sortAsc, focusFunctions]);
 
   // Pagination
   const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
@@ -959,6 +989,22 @@ function TraceMatrix({ matrix }) {
 
   return (
     <div>
+      {/* 영향도 분석 연동 — 변경 영향 함수로 필터 중임을 명시 + 해제 */}
+      {focusFunctions && focusFunctions.length > 0 && (
+        <div style={{ margin: '0 0 12px', padding: '8px 12px', borderRadius: 6, border: '1px solid var(--accent)',
+          background: 'var(--color-info-soft, rgba(59,130,246,0.08))', display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+          <span style={{ fontSize: 12 }}>
+            🔗 <b>영향도 분석 연동</b> — 변경 영향 함수 <b>{focusFunctions.length}개</b>가 닿는 요구사항만 표시 중
+            <span className="text-muted" style={{ marginLeft: 6, fontSize: 11 }}>
+              ({filtered.length}/{rows.length}행) — 이 함수들의 추적성·커버리지·공백을 확인하세요
+            </span>
+          </span>
+          <span style={{ flex: 1 }} />
+          {onClearFocus && (
+            <button className="btn-sm" onClick={onClearFocus} title="필터 해제하고 전체 매트릭스 보기">필터 해제</button>
+          )}
+        </div>
+      )}
       {/* Coverage summary table */}
       {coverage && (
         <div style={{ marginBottom: 16, border: '1px solid var(--border)', borderRadius: 8, overflow: 'hidden' }}>

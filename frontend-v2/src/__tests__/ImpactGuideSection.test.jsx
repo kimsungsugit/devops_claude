@@ -132,4 +132,30 @@ describe('ImpactGuideSection', () => {
     // Assert
     expect(screen.getByText(/상세 가이드 생성/)).toBeInTheDocument();
   });
+
+  // STS-IMPACT-007: 추적성 매트릭스 연동 — 영향 함수 집합을 focus로 저장하고 srssds로 이동
+  it('인터랙션: "추적성 매트릭스에서 보기" 클릭 시 영향 함수 focus 저장 + srssds 이동', async () => {
+    // Arrange
+    const user = userEvent.setup();
+    window.__detailSection = vi.fn();
+    localStorage.removeItem('devops_v2_trace_focus');
+    const analysisResult = {
+      impactData: {
+        trigger: { changed_files: ['Ap.c'] },
+        changed_function_types: { g_DrvIn_Main: 'BODY', g_MotorCtrl: 'SIGNATURE' },
+        actions: {},
+        impact: { direct: ['g_DrvIn_Main'], indirect_1hop: ['s_Helper'], indirect_2hop: [] },
+      },
+    };
+    render(<ImpactGuideSection job={mockJob} analysisResult={analysisResult} />);
+
+    // Act
+    await user.click(screen.getByText(/추적성 매트릭스에서 보기/));
+
+    // Assert: srssds로 이동 + 영향 함수(직접+간접+변경)가 focus에 저장
+    expect(window.__detailSection).toHaveBeenCalledWith('srssds');
+    const stored = JSON.parse(localStorage.getItem('devops_v2_trace_focus'));
+    expect(stored.functions).toEqual(expect.arrayContaining(['g_DrvIn_Main', 'g_MotorCtrl', 's_Helper']));
+    delete window.__detailSection;
+  });
 });

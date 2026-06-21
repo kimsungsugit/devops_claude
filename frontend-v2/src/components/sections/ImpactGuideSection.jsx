@@ -204,6 +204,28 @@ export default function ImpactGuideSection({ job, analysisResult }) {
   }, [activeFnEntries, linkedDocs, actions, activeImpactGroups, activeChangedFiles, toast]);
 
 
+  // 영향받은 함수 집합(직접+간접+변경)을 추적성 매트릭스 focus로 넘기고 SRS/SDS 탭으로 이동.
+  // 기존 추적성 UI(SrsSdsSection의 V-model 매트릭스 + 정/역방향 공백 분석)를 재사용해
+  // "이 변경이 어떤 요구사항/시험/커버리지 공백에 닿는지"를 그 화면에서 본다.
+  const openInTraceability = useCallback(() => {
+    const fns = [...new Set([
+      ...activeFnEntries.map(([fn]) => fn),
+      ...(activeImpactGroups.direct || []),
+      ...(activeImpactGroups.indirect_1hop || []),
+      ...(activeImpactGroups.indirect_2hop || []),
+    ].filter(Boolean))];
+    if (!fns.length) {
+      toast('info', '영향받은 함수가 없습니다.');
+      return;
+    }
+    try {
+      localStorage.setItem('devops_v2_trace_focus', JSON.stringify({
+        functions: fns, label: `변경 영향 함수 ${fns.length}개`, ts: Date.now(),
+      }));
+    } catch (_) { /* ignore */ }
+    window.__detailSection?.('srssds');
+  }, [activeFnEntries, activeImpactGroups, toast]);
+
   // Auto-enable demo if real data has no rich mappings (only header changes)
   const hasRichData = activeFnEntries.length > 1 || (guide?.summary?.impactedReqs > 0);
 
@@ -227,6 +249,10 @@ export default function ImpactGuideSection({ job, analysisResult }) {
           <div style={{ display: 'flex', gap: 4 }}>
             <button className="btn-primary btn-sm" onClick={buildGuide} disabled={loading}>
               {loading ? '분석 중...' : '상세 가이드 생성'}
+            </button>
+            <button className="btn-sm" onClick={openInTraceability}
+              title="영향받은 함수 집합으로 추적성 매트릭스(SRS↔SDS↔UDS↔STS↔SUTS↔SITS)를 필터해서 봅니다">
+              추적성 매트릭스에서 보기
             </button>
             <button className="btn-sm" onClick={() => setDemoMode(!demoMode)}>
               {demoMode ? '실제 데이터' : '데모 시나리오'}
