@@ -145,3 +145,32 @@ class TestGenerateImpactGuide:
         assert len(guide.test_recommendations) >= 1
         assert any("신규" in r.get("test_type", "") or "NEW" in r.get("test_type", "")
                     for r in guide.test_recommendations)
+
+
+def test_unknown_asil_not_silently_defaulted_to_qm():
+    """ASIL 정보가 없으면 QM(비안전)으로 단정하지 않고 UNKNOWN으로 표시 + 수동확인 체크리스트(안전측, CLAUDE.md #4)."""
+    from workflow.impact_ai_guide import generate_impact_guide, ImpactGuideContext
+
+    g = generate_impact_guide(ImpactGuideContext(
+        changed_types={"foo": "BODY"},
+        impact_groups={"direct": ["foo"], "indirect_1hop": [], "indirect_2hop": []},
+        by_name={},  # ASIL 정보 없음
+    )).to_dict()
+    assert g["risk"]["unknown_asil_count"] >= 1
+    assert g["risk"]["max_asil"] == "UNKNOWN"
+    assert g["risk"]["grade"] != "LOW"   # 미상이면 LOW 단정 금지
+    assert any("ASIL 미상" in c.get("item", "") for c in g["review_checklist"])
+
+
+def test_known_asil_still_classified():
+    """명시적 ASIL D는 정상 분류(회귀 보호)."""
+    from workflow.impact_ai_guide import generate_impact_guide, ImpactGuideContext
+
+    g = generate_impact_guide(ImpactGuideContext(
+        changed_types={"safety_fn": "SIGNATURE"},
+        impact_groups={"direct": ["safety_fn"], "indirect_1hop": [], "indirect_2hop": []},
+        by_name={"safety_fn": {"asil": "D"}},
+    )).to_dict()
+    assert g["risk"]["max_asil"] == "D"
+    assert g["risk"]["unknown_asil_count"] == 0
+    assert g["risk"]["asil_escalation"] is True

@@ -82,6 +82,7 @@ class RiskAssessment:
     max_asil: str
     justification: str
     affected_safety_functions: List[str] = field(default_factory=list)
+    unknown_asil_count: int = 0  # ASIL 미상(미파싱/TBD) 함수 수 — QM 단정 금지(안전측)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -91,6 +92,7 @@ class RiskAssessment:
             "max_asil": self.max_asil,
             "justification": self.justification,
             "affected_safety_functions": self.affected_safety_functions,
+            "unknown_asil_count": self.unknown_asil_count,
         }
 
 
@@ -142,7 +144,10 @@ def assess_risk(
 
     Fully deterministic — no LLM required.
     """
-    if not changed_types:
+    # 변경 함수도 영향 범위도 전혀 없을 때만 LOW로 단정. (영향 집합만 있는 경로 — 예:
+    # /api/impact/analyze는 변경 '유형'을 산출 안 하므로 changed_types가 비지만 영향은 있다.)
+    _has_impact = any(impact_groups.get(k) for k in (impact_groups or {}))
+    if not changed_types and not _has_impact:
         return RiskAssessment(
             grade="LOW", score=0, asil_escalation=False, max_asil="QM",
             justification="변경된 함수 없음",
@@ -156,19 +161,26 @@ def assess_risk(
 
     asil_levels: List[str] = []
     safety_funcs: List[str] = []
+    unknown_asil_count = 0
     for fn in all_impacted:
         info = by_name.get(fn)
         if info is None:
             info = by_name.get(fn.lower())
         if info is None:
             info = {}
-        asil = str(info.get("asil") or "QM").strip().upper()
-        if asil in _ASIL_RANK:
+        asil = str(info.get("asil") or "").strip().upper()
+        if asil in _ASIL_RANK:  # QM/A/B/C/D — 명시적으로 분류된 경우만
             asil_levels.append(asil)
-            if _ASIL_RANK.get(asil, 0) >= 2:  # B, C, D
+            if _ASIL_RANK[asil] >= 2:  # B, C, D
                 safety_funcs.append(f"{fn} (ASIL {asil})")
+        else:
+            # ASIL 미상(소스/문서 미파싱, TBD 등): QM(비안전)으로 단정하지 않는다 — 안전측(CLAUDE.md #4).
+            unknown_asil_count += 1
 
-    max_asil = max(asil_levels, key=lambda a: _ASIL_RANK.get(a, 0)) if asil_levels else "QM"
+    max_asil = (
+        max(asil_levels, key=lambda a: _ASIL_RANK.get(a, 0)) if asil_levels
+        else ("UNKNOWN" if unknown_asil_count else "QM")
+    )
 
     # Calculate risk score (0-100)
     # Components: ASIL weight (40%), change type weight (30%), scope weight (30%)
@@ -200,6 +212,10 @@ def assess_risk(
     else:
         grade = "LOW"
 
+    # ASIL 미상이 있는데 known safety ASIL이 없으면 LOW로 단정 금지 — 최소 MEDIUM(수동 확인).
+    if unknown_asil_count and grade == "LOW":
+        grade = "MEDIUM"
+
     # Justification
     parts = []
     parts.append(f"최대 ASIL: {max_asil}")
@@ -207,6 +223,8 @@ def assess_risk(
     parts.append(f"총 영향 범위: {total_impacted}개 함수")
     if safety_funcs:
         parts.append(f"안전 관련 함수: {', '.join(safety_funcs[:5])}")
+    if unknown_asil_count:
+        parts.append(f"ASIL 미상 {unknown_asil_count}개 — 수동 확인 필요(QM 단정 금지)")
     change_types_str = ", ".join(set(changed_types.values()))
     parts.append(f"변경 유형: {change_types_str}")
 
@@ -217,6 +235,7 @@ def assess_risk(
         max_asil=max_asil,
         justification="; ".join(parts),
         affected_safety_functions=safety_funcs[:10],
+        unknown_asil_count=unknown_asil_count,
     )
 
 
@@ -471,6 +490,13 @@ def _build_review_checklist(
             "priority": "CRITICAL",
             "item": "ASIL 에스컬레이션 — 안전 분석 담당자 리뷰 필수",
             "scope": f"함수: {', '.join(risk.affected_safety_functions[:3])}",
+        })
+
+    if risk.unknown_asil_count:
+        checklist.append({
+            "priority": "HIGH",
+            "item": f"ASIL 미상 {risk.unknown_asil_count}개 함수 — 안전 등급 수동 확인(QM 단정 금지)",
+            "scope": "소스 @asil 태그 또는 SCM 안전요구 매핑 확인",
         })
 
     for doc_type, impacts in cross_doc.items():

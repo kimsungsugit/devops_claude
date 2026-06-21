@@ -178,8 +178,12 @@ def classify_changed_functions(
                 continue
 
             hunk_funcs = {m.group(1) for m in _HUNK_FUNC.finditer(diff_text)}
-            added_decl = {m.group(1) for m in re.finditer(r"^\+\s*.*?\b(\w+)\s*\(", diff_text, re.MULTILINE)}
-            removed_decl = {m.group(1) for m in re.finditer(r"^-\s*.*?\b(\w+)\s*\(", diff_text, re.MULTILINE)}
+            # 제어 키워드(if/for/while...)는 '(' 앞에 와도 함수 선언이 아님 — 오탐 제외.
+            # (최종 SIGNATURE/NEW/DELETE 판정은 func_decl_names AND 게이트가 추가로 거르지만,
+            #  added/removed_decl 자체의 노이즈를 줄여 경계 케이스 오분류를 방지한다.)
+            _CTRL_KW = {"if", "for", "while", "switch", "return", "sizeof", "do", "else", "case"}
+            added_decl = {m.group(1) for m in re.finditer(r"^\+\s*.*?\b(\w+)\s*\(", diff_text, re.MULTILINE) if m.group(1) not in _CTRL_KW}
+            removed_decl = {m.group(1) for m in re.finditer(r"^-\s*.*?\b(\w+)\s*\(", diff_text, re.MULTILINE) if m.group(1) not in _CTRL_KW}
             func_decl_names = {m.group(1) for m in _FUNC_DECL_LINE.finditer(diff_text)}
             func_proto_names = {m.group(1) for m in _FUNC_PROTO_LINE.finditer(diff_text)}
             var_changed = bool(_VAR_DECL_LINE.search(diff_text))

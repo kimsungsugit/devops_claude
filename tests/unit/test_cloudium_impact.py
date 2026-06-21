@@ -123,6 +123,28 @@ def test_impact_analyze_runs_in_process(tmp_path, monkeypatch):
     assert res["report_path"].endswith(".md") and res["json_path"].endswith(".json")
 
 
+def test_impact_analyze_ai_guide_not_fake_low(tmp_path, monkeypatch):
+    """include_ai_guide=True면 빈 컨텍스트 LOW 위장이 아니라 scope/ASIL미상 기반 평가가 나온다."""
+    from backend.routers import impact as imod
+    from backend.schemas import ImpactAnalyzeRequest
+    import backend.services.file_resolver as fr
+    import tools.impact_analysis as tia
+
+    (tmp_path / "x.c").write_text("void f(void){}", encoding="utf-8")
+
+    class _Local:
+        mode = "local"
+    monkeypatch.setattr(fr, "get_resolver", lambda: _Local())
+    monkeypatch.setattr(
+        tia, "analyze",
+        lambda sr, ch: {"impacted_functions": ["f", "g", "h"], "impacted_function_count": 3,
+                        "seed_function_count": 1, "impacted_swcom": []},
+    )
+    res = imod.impact_analyze(ImpactAnalyzeRequest(source_root=str(tmp_path), changed_files=["x.c"], include_ai_guide=True))
+    assert res["ai_guide"] is not None
+    assert res["ai_guide"]["risk"]["unknown_asil_count"] >= 1   # by_name 없음 → ASIL 미상 명시(QM 위장 아님)
+
+
 def test_impact_analyze_cloudium_worker_down_returns_400(monkeypatch):
     """cloudium worker 다운 시 is_dir 예외가 500이 아닌 깨끗한 400으로 처리된다."""
     from backend.routers import impact as imod

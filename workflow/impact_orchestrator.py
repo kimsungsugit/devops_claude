@@ -697,13 +697,26 @@ def _resolve_changed_types_to_functions(
         ext_kind = "HEADER" if raw.lower().endswith(".h") else "BODY"
         raw_norm = raw.replace("\\", "/").lower()
         raw_name = Path(raw_norm).name
+        # 1차: 전체 상대경로(raw_norm) endswith — 정확. 2차: 그 파일에 1차 매칭이 전무할 때만
+        # basename(raw_name) 폴백 — 동명 파일이 여러 모듈에 있을 때의 과대 매칭을 줄인다.
+        full_hits: Dict[str, str] = {}
+        base_hits: Dict[str, str] = {}
         for func_name, info in by_name.items():
             file_path = str(info.get("file") or "").replace("\\", "/").lower()
             if not file_path:
                 continue
-            if file_path.endswith(raw_norm) or file_path.endswith(raw_name):
-                # 함수별 정밀 kind가 있으면 그것을 사용, 없으면 파일 확장자 기반 기본값.
-                resolved[func_name] = ct_lower.get(func_name, ext_kind)
+            # 함수별 정밀 kind가 있으면 그것을, 없으면 파일 확장자 기반 기본값.
+            kind = ct_lower.get(func_name, ext_kind)
+            if file_path.endswith(raw_norm):
+                full_hits[func_name] = kind
+            elif file_path.endswith(raw_name):
+                base_hits[func_name] = kind
+        resolved.update(full_hits or base_hits)
+    # DELETE 등 현재 소스(by_name)에 더는 존재하지 않는 함수(삭제됨)는 위 file-매칭으로 잡히지
+    # 않으므로 명시 보존한다 — 그래야 SUTS/SITS의 '삭제 TC 제거' 가이드가 트리거된다.
+    for fn, kind in ct_lower.items():
+        if kind == "DELETE" and fn not in resolved:
+            resolved[fn] = kind
     return resolved or changed_types
 
 

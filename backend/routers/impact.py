@@ -80,10 +80,14 @@ def impact_analyze(req: ImpactAnalyzeRequest) -> Dict[str, Any]:
             from workflow.impact_ai_guide import (
                 generate_impact_guide, ImpactGuideContext,
             )
+            # analyze()는 변경 '유형' 분류/by_name을 산출하지 않으므로 이전엔 빈 컨텍스트로
+            # 위험이 항상 LOW로 위장됐다. 영향 집합(impacted_functions)을 direct로 매핑해
+            # scope 기반 평가가 동작하게 하고, ASIL 미상은 assess_risk가 명시한다(QM 단정 금지).
+            _impacted = list(data.get("impacted_functions") or [])
             ctx = ImpactGuideContext(
-                changed_types=data.get("changed_function_types") or {},
-                impact_groups=data.get("impact") or {},
-                by_name=data.get("by_name") or {},
+                changed_types={},
+                impact_groups={"direct": _impacted},
+                by_name={},
             )
             guide = generate_impact_guide(ctx)
             ai_guide_data = guide.to_dict()

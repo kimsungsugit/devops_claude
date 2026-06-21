@@ -489,3 +489,32 @@ def test_resolve_changed_types_preserves_classify_kind():
         "ap_door_run": "SIGNATURE",
         "ap_door_reset": "NEW",
     }
+
+
+def test_resolve_preserves_deleted_functions():
+    """삭제된 함수는 현재 소스(by_name)에 없어도 DELETE로 보존 — SUTS/SITS TC 제거 가이드 트리거."""
+    from workflow import impact_orchestrator
+
+    resolved = impact_orchestrator._resolve_changed_types_to_functions(
+        {"ap_keep": "BODY", "ap_old_fn": "DELETE"},
+        ["Ap_Mod.c"],
+        {"ap_keep": {"file": "D:/p/Sources/APP/Ap_Mod.c"}},  # ap_old_fn 부재(삭제됨)
+    )
+    assert resolved["ap_keep"] == "BODY"
+    assert resolved["ap_old_fn"] == "DELETE"
+
+
+def test_resolve_prefers_full_path_over_basename_collision():
+    """동명 파일이 여러 모듈에 있을 때, 변경 경로와 full-path 일치하는 함수만 — basename 과대매칭 방지."""
+    from workflow import impact_orchestrator
+
+    resolved = impact_orchestrator._resolve_changed_types_to_functions(
+        {"comm_foo": "BODY"},
+        ["comm/Foo.c"],
+        {
+            "comm_foo": {"file": "D:/p/Sources/comm/Foo.c"},
+            "app_foo": {"file": "D:/p/Sources/app/Foo.c"},  # 동명·타모듈
+        },
+    )
+    assert "comm_foo" in resolved
+    assert "app_foo" not in resolved
