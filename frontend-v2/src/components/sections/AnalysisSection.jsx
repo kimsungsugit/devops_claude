@@ -117,6 +117,11 @@ export default function AnalysisSection({ job, analysisResult }) {
   const covPct = typeof rd?.coverage === 'number' ? rd.coverage
     : (cov.line_rate != null ? Math.round(cov.line_rate * 100) : null);
   const brPct = cov.branch_rate != null ? Math.round(cov.branch_rate * 100) : null;
+  // 빌드 산출물에 실제 커버리지가 있는지 — line_rate=0.0(데이터 없음)을 '0% 미검증'으로 오인하지
+  // 않도록. 이 프로젝트는 일반 커버리지가 아니라 VectorCAST UT/IT 커버리지를 쓰며 그 데이터는
+  // cloudium SCM 로그에 있다(빌드엔 미동기화 → covPct=0).
+  const hasAnyCoverage = (covPct != null && covPct > 0) || (brPct != null && brPct > 0)
+    || utCov.line_covered != null || utCov.branch_covered != null || modules.length > 0;
 
   // Complexity table
   const rows = complexity?.rows ?? complexity?.functions ?? [];
@@ -139,6 +144,13 @@ export default function AnalysisSection({ job, analysisResult }) {
       {/* ── Coverage Detail ── */}
       <div className="panel" style={{ marginBottom: 12 }}>
         <div className="panel-header"><span className="panel-title">코드 커버리지</span></div>
+        {!hasAnyCoverage ? (
+          <div className="text-sm text-muted" style={{ padding: 8 }}>
+            이 빌드 산출물에 커버리지 데이터가 없습니다 (line_rate 0). 이 프로젝트의 커버리지는
+            VectorCAST 시험 로그(SCM 등록 경로)에 있으며, &apos;SCM 경로에서 불러오기&apos;는 현재 시험
+            통과/실패만 로드합니다 — 구문/분기/MC&#47;DC 커버리지 수치 연동은 후속 작업입니다.
+          </div>
+        ) : (<>
         <div className="stats-row">
           {covPct != null && (
             <div className="stat-card" style={{ borderLeft: `3px solid ${covPct >= 80 ? 'var(--color-success)' : 'var(--color-warning)'}` }}>
@@ -195,6 +207,7 @@ export default function AnalysisSection({ job, analysisResult }) {
             </div>
           </details>
         )}
+        </>)}
       </div>
 
       {/* ── VectorCAST Detail ── */}
