@@ -13,6 +13,11 @@ export default function AnalysisSection({ job, analysisResult }) {
   const [complexityLoading, setComplexityLoading] = useState(false);
   const [compSort, setCompSort] = useState('complexity');
   const [compFilter, setCompFilter] = useState('');
+  // SCM 등록 VectorCAST 경로 지연 로드(빌드 산출물에 결과가 없을 때). 무거운 cloudium 폴더
+  // 파싱(~100s)이라 analyze 임계경로에 넣지 않고 사용자 명시 클릭 시에만 /report/vectorcast-rag
+  // (build→cloudium 폴백 내장)를 호출한다.
+  const [scmVcast, setScmVcast] = useState(null);
+  const [scmVcastLoading, setScmVcastLoading] = useState(false);
 
   const loadComplexity = useCallback(async () => {
     setComplexityLoading(true);
@@ -20,13 +25,40 @@ export default function AnalysisSection({ job, analysisResult }) {
       const data = await post('/api/jenkins/report/complexity', {
         job_url: job.url, cache_root: cacheRoot, build_selector: cfg.buildSelector,
       });
-      setComplexity(data);
+      setComplexity(data ?? { rows: [] });
+      // 빈 결과를 placeholder로 silent 되돌리지 않고 명시 안내(데이터 미동기화 vs 미클릭 구분).
+      const n = (data?.rows ?? data?.functions ?? []).length;
+      if (n === 0) toast('info', '이 빌드에 complexity.csv가 없습니다 (복잡도 데이터 미동기화).');
     } catch (e) {
       toast('error', `복잡도 조회 실패: ${e.message}`);
     } finally {
       setComplexityLoading(false);
     }
   }, [job, cfg, cacheRoot, toast]);
+
+  const loadScmVcast = useCallback(async () => {
+    const paths = analysisResult?.matchedScm?.linked_docs?.vectorcast || [];
+    if (!paths.length) { toast('info', 'SCM에 등록된 VectorCAST 경로가 없습니다.'); return; }
+    setScmVcastLoading(true);
+    try {
+      // /report/vectorcast-rag: 빌드 RAG가 없거나 test_rows가 비면 vcast_log_paths(cloudium)
+      // 로 폴백(이미 구현됨). 폴더 파싱은 무거우나 백엔드 TTL 캐시(30분)로 2회차+ 즉시.
+      const data = await post('/api/jenkins/report/vectorcast-rag', {
+        job_url: job.url, cache_root: cacheRoot, build_selector: cfg.buildSelector,
+        vcast_log_paths: paths,
+      });
+      if (data?.ok && data.data) {
+        setScmVcast(data);
+        toast('success', `SCM 경로에서 VectorCAST ${data.data.test_rows_count ?? 0}건 로드 (출처: ${data.source || 'cloudium'})`);
+      } else {
+        toast('warning', 'SCM 등록 경로에서도 VectorCAST 결과를 찾지 못했습니다.');
+      }
+    } catch (e) {
+      toast('error', `VectorCAST 로드 실패: ${e.message}`);
+    } finally {
+      setScmVcastLoading(false);
+    }
+  }, [analysisResult, job, cfg, cacheRoot, toast]);
 
   const rd = analysisResult?.reportData;
   const kpis = rd?.kpis || {};
@@ -36,6 +68,14 @@ export default function AnalysisSection({ job, analysisResult }) {
   const cm = kpis.code_metrics || {};
   const vc = kpis.vectorcast || {};
   const tester = rd?.tester || {};
+  // VectorCAST 표시용 — SCM 지연로드 결과가 있으면 그걸, 없으면 빌드 산출물(tester.vectorcast).
+  const scmVcastPaths = analysisResult?.matchedScm?.linked_docs?.vectorcast || [];
+  const buildVcast = tester?.vectorcast || {};
+  const buildHasVcast = (buildVcast.test_rows_count || 0) > 0
+    || (buildVcast.ut_reports || []).length > 0 || (buildVcast.it_reports || []).length > 0;
+  const effVcast = scmVcast?.data
+    ? { test_rows_count: scmVcast.data.test_rows_count, ut_reports: scmVcast.data.ut_reports || [], it_reports: scmVcast.data.it_reports || [], _source: scmVcast.source || 'cloudium' }
+    : buildVcast;
   const utCov = vc.ut || {};
   const itCov = vc.it || {};
   const modules = utCov.modules || [];
@@ -130,20 +170,41 @@ export default function AnalysisSection({ job, analysisResult }) {
 
       {/* ── VectorCAST Detail ── */}
       <div className="panel" style={{ marginBottom: 12 }}>
-        <div className="panel-header"><span className="panel-title">VectorCAST 테스트</span></div>
+        <div className="panel-header">
+          <span className="panel-title">VectorCAST 테스트</span>
+          {/* 빌드 산출물에 결과가 없고 SCM에 경로가 등록돼 있으면 그 경로에서 지연 로드. */}
+          {!buildHasVcast && !scmVcast && scmVcastPaths.length > 0 && (
+            <button className="btn-sm" onClick={loadScmVcast} disabled={scmVcastLoading}
+              title="Jenkins 빌드 산출물에 VectorCAST 결과가 없어, SCM 연결 문서 경로에 등록한 VectorCAST 로그에서 직접 불러옵니다(원격 폴더 파싱은 수십 초 소요).">
+              {scmVcastLoading ? <span className="spinner" /> : 'SCM 경로에서 불러오기'}
+            </button>
+          )}
+        </div>
+        {effVcast._source && (
+          <div className="text-sm text-muted" style={{ marginBottom: 6 }}>
+            출처: SCM 연결 경로({effVcast._source}) — Jenkins 빌드 산출물 외부 결과
+          </div>
+        )}
+        {!buildHasVcast && !scmVcast && (
+          <div className="text-sm text-muted" style={{ marginBottom: 6 }}>
+            {scmVcastPaths.length > 0
+              ? '이 빌드 산출물에 VectorCAST 결과가 없습니다. SCM에 등록한 경로에서 불러오려면 위 버튼을 클릭하세요.'
+              : '이 빌드 산출물에 VectorCAST 결과가 없습니다. (설정 > SCM 연결 문서 경로에 VectorCAST 로그 폴더를 등록하면 여기서 불러올 수 있습니다.)'}
+          </div>
+        )}
         <div className="stats-row">
-          {tester?.vectorcast?.test_rows_count != null && (
+          {effVcast.test_rows_count != null && (
             <div className="stat-card">
-              <div className="stat-value">{tester.vectorcast.test_rows_count.toLocaleString()}</div>
+              <div className="stat-value">{effVcast.test_rows_count.toLocaleString()}</div>
               <div className="stat-label">테스트 케이스</div>
             </div>
           )}
           <div className="stat-card">
-            <div className="stat-value">{(tester?.vectorcast?.ut_reports || []).length}</div>
+            <div className="stat-value">{(effVcast.ut_reports || []).length}</div>
             <div className="stat-label">UT 리포트</div>
           </div>
           <div className="stat-card">
-            <div className="stat-value">{(tester?.vectorcast?.it_reports || []).length}</div>
+            <div className="stat-value">{(effVcast.it_reports || []).length}</div>
             <div className="stat-label">IT 리포트</div>
           </div>
           {tester?.vectorcast_ut_line_rate != null && (
@@ -298,6 +359,11 @@ export default function AnalysisSection({ job, analysisResult }) {
             </div>
             {filteredRows.length > 100 && <div className="text-muted text-sm" style={{ padding: 6, textAlign: 'center' }}>{filteredRows.length - 100}건 더 있음</div>}
           </>
+        ) : complexity ? (
+          <div className="text-muted text-sm" style={{ padding: 12 }}>
+            이 빌드에 complexity.csv가 없습니다 — 복잡도 데이터가 동기화되지 않았습니다.
+            (PRQA HMR 복잡도는 위 정적분석 상세 패널을 참고하세요.)
+          </div>
         ) : (
           <div className="text-muted text-sm" style={{ padding: 12 }}>불러오기 버튼을 클릭하세요.</div>
         )}

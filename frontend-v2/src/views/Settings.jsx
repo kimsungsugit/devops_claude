@@ -453,12 +453,33 @@ function PathField({ label, value, ph, onChange, onBrowse, span2 = false, multil
   );
 }
 
+// linked_docs(SCM 연결문서)에서 상속 가능한 doc_paths 키 (template/vectorcast 제외 — 전자는
+// linked_docs에 없고 후자는 복수 경로 list라 단일 문서 필드와 매핑 안 됨).
+const SCM_INHERIT_KEYS = ['srs', 'sds', 'hsis', 'stp', 'uds', 'sts', 'suts', 'sits'];
+const DOC_SCM_KEY = 'devops_v2_doc_scm';
+
 function DocInputSection() {
   const toast = useToast();
   const [paths, setPaths] = useState(() => {
     try { return JSON.parse(localStorage.getItem(DOC_KEY) || '{}'); } catch (_) { return {}; }
   });
   const [shared, setShared] = useState(loadSharedInputs);
+  // 입력 자료 = SCM 레지스트리 연결문서와 겹침 → 기준 SCM을 고르면 그 linked_docs를 상속(중복
+  // 입력 제거). 빈 칸은 SCM 경로를 placeholder로 보여주고 '빈 칸 채우기'로 doc_paths에 복사
+  // (생성 탭 prefill이 doc_paths를 읽으므로 그때 실제 사용됨). 직접 입력값은 항상 우선.
+  const [scms, setScms] = useState([]);
+  const [scmId, setScmId] = useState(() => localStorage.getItem(DOC_SCM_KEY) || '');
+  useEffect(() => {
+    (async () => {
+      try {
+        const data = await api('/api/scm/list');
+        setScms(Array.isArray(data) ? data : (data.items ?? data.registries ?? []));
+      } catch (_) { /* SCM 목록 없으면 상속 UI만 숨김 */ }
+    })();
+  }, []);
+  const selectedScm = scms.find(s => s.id === scmId) || null;
+  const scmLinks = selectedScm?.linked_docs || {};
+  const pickScm = (id) => { setScmId(id); localStorage.setItem(DOC_SCM_KEY, id); };
 
   const setDoc = (k, v) => {
     const next = { ...paths, [k]: v };
@@ -469,6 +490,22 @@ function DocInputSection() {
     const next = { ...shared, [k]: v };
     setShared(next);
     saveSharedInputs(next);
+  };
+
+  // 선택 SCM의 linked_docs로 '빈 칸만' 채운다(직접 입력값은 보존). 생성 탭 prefill이
+  // doc_paths를 읽으므로 한 번 채우면 같은 경로를 다시 입력할 필요가 없다.
+  const fillFromScm = () => {
+    if (!selectedScm) { toast('info', '기준 SCM을 먼저 선택하세요.'); return; }
+    const next = { ...paths };
+    let filled = 0;
+    for (const k of SCM_INHERIT_KEYS) {
+      const inh = (scmLinks[k] || '').trim();
+      if (inh && !(next[k] || '').trim()) { next[k] = inh; filled += 1; }
+    }
+    if (!filled) { toast('info', '채울 빈 칸이 없습니다 (이미 입력됨 또는 SCM에 경로 없음).'); return; }
+    setPaths(next);
+    localStorage.setItem(DOC_KEY, JSON.stringify(next));
+    toast('success', `선택 SCM 연결문서로 빈 칸 ${filled}개를 채웠습니다.`);
   };
 
   // /api/file-mode/browse-file 재사용 (post 헬퍼 — X-User 포함). 선택 경로 반환 or null.
@@ -497,18 +534,45 @@ function DocInputSection() {
         여기 등록한 문서·템플릿·로그 폴더는 <b>문서 생성</b> 탭의 각 생성기에서 칸이 비었을 때 자동으로 채워집니다(생성 탭에서 직접 입력하면 그 값이 우선).
       </div>
 
+      {/* 기준 SCM 상속 — SCM 레지스트리 '연결 문서 경로'와 겹치는 입력을 한 번에 가져온다. */}
+      {scms.length > 0 && (
+        <div className="field-group" style={{ marginBottom: 10, padding: 8, border: '1px solid var(--border)', borderRadius: 6, background: 'var(--bg)' }}>
+          <div className="field span-2">
+            <label htmlFor="doc-scm-select">기준 SCM (연결 문서 상속)</label>
+            <div style={{ display: 'flex', gap: 4, alignItems: 'center', flexWrap: 'wrap' }}>
+              <select id="doc-scm-select" style={{ flex: 1, minWidth: 160 }} value={scmId} onChange={e => pickScm(e.target.value)}>
+                <option value="">(선택 안 함)</option>
+                {scms.map(s => <option key={s.id} value={s.id}>{s.name || s.id}</option>)}
+              </select>
+              <button type="button" className="btn-sm" disabled={!selectedScm} onClick={fillFromScm}
+                title="선택한 SCM의 연결 문서 경로(SRS/SDS/UDS/STS/SUTS/SITS/HSIS/STP)로 아래 빈 칸을 채웁니다. 직접 입력한 값은 보존됩니다.">
+                빈 칸 채우기
+              </button>
+            </div>
+            <div className="text-sm text-muted" style={{ marginTop: 4 }}>
+              SCM 레지스트리의 연결 문서 경로와 중복 입력을 피합니다. 빈 칸은 선택 SCM 경로가 흐리게 표시되며, '빈 칸 채우기'로 복사합니다(직접 입력값 우선).
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* 입력/참조 문서 (devops_v2_doc_paths) */}
       <div className="field-group cols-3">
-        {DOC_FIELDS.map(f => (
-          <PathField
-            key={f.key}
-            label={f.label}
-            ph={f.ph}
-            value={paths[f.key] || ''}
-            onChange={v => setDoc(f.key, v)}
-            onBrowse={async () => { const p = await browse(f.browse); if (p) setDoc(f.key, p); }}
-          />
-        ))}
+        {DOC_FIELDS.map(f => {
+          const explicit = paths[f.key] || '';
+          const inherited = SCM_INHERIT_KEYS.includes(f.key) ? (scmLinks[f.key] || '').trim() : '';
+          const inheritedActive = !explicit && !!inherited;
+          return (
+            <PathField
+              key={f.key}
+              label={f.label + (inheritedActive ? ' · SCM 상속' : '')}
+              ph={inheritedActive ? `(상속: ${inherited})` : f.ph}
+              value={explicit}
+              onChange={v => setDoc(f.key, v)}
+              onBrowse={async () => { const p = await browse(f.browse); if (p) setDoc(f.key, p); }}
+            />
+          );
+        })}
       </div>
 
       {/* 공유 입력 그룹 — 템플릿 / 로그 폴더 / 공통 메타 (devops_v2_shared_inputs) */}

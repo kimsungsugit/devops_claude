@@ -170,4 +170,27 @@ describe('AnalysisSection', () => {
     // Assert
     expect(screen.getByText('불러오기')).toBeInTheDocument();
   });
+
+  // ── VectorCAST SCM 경로 폴백(이슈①) ──────────────────────────────
+  it('빌드에 VectorCAST가 없고 SCM에 경로가 등록돼 있으면 "SCM 경로에서 불러오기" 버튼을 표시한다', () => {
+    // Arrange: tester.vectorcast 비어 있음 + matchedScm.linked_docs.vectorcast 등록
+    const result = makeAnalysisResult({
+      matchedScm: { id: 'kjpds02', name: 'KJPDS02', linked_docs: { vectorcast: ['U:/PROJ/vcast'] } },
+    });
+
+    // Act
+    render(<AnalysisSection job={makeJob()} analysisResult={result} />);
+
+    // Assert
+    expect(screen.getByText('SCM 경로에서 불러오기')).toBeInTheDocument();
+  });
+
+  it('빌드에 VectorCAST가 없고 SCM 경로도 없으면 설정 등록 안내를 표시한다', () => {
+    // Arrange: vectorcast 비어 있음 + matchedScm 없음
+    render(<AnalysisSection job={makeJob()} analysisResult={makeAnalysisResult()} />);
+
+    // Assert: 버튼 대신 설정 안내
+    expect(screen.queryByText('SCM 경로에서 불러오기')).toBeNull();
+    expect(screen.getByText(/SCM 연결 문서 경로에 VectorCAST 로그 폴더를 등록/)).toBeInTheDocument();
+  });
 });
