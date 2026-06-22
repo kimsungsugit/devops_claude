@@ -660,6 +660,64 @@ def test_resolve_preserves_deleted_functions():
     assert resolved["ap_old_fn"] == "DELETE"
 
 
+def test_resolve_applies_edit_type_new_to_file_functions():
+    """editType=add 파일의 함수는 확장자 기본값(BODY) 대신 NEW로 격상(Phase 3 cloudium 정밀)."""
+    from workflow import impact_orchestrator
+
+    resolved = impact_orchestrator._resolve_changed_types_to_functions(
+        {"ap_new": "NEW"},                       # classify(edit_types)의 stem 키
+        ["Sources/APP/Ap_New.c"],
+        {"ap_new_fn": {"file": "D:/p/Sources/APP/Ap_New.c"}},
+        edit_types={"Sources/APP/Ap_New.c": "add"},
+    )
+    assert resolved["ap_new_fn"] == "NEW"        # 함수 단위로 NEW 전파
+
+
+def test_resolve_local_diff_func_kind_overrides_edit_type():
+    """로컬 diff가 함수별 정밀 kind(SIGNATURE 등)를 준 경우, 파일 editType 기본값보다 우선한다."""
+    from workflow import impact_orchestrator
+
+    resolved = impact_orchestrator._resolve_changed_types_to_functions(
+        {"ap_sig": "SIGNATURE"},                 # func 단위 정밀 kind
+        ["Sources/APP/Ap_New.c"],
+        {"ap_sig": {"file": "D:/p/Sources/APP/Ap_New.c"}},
+        edit_types={"Sources/APP/Ap_New.c": "add"},
+    )
+    assert resolved["ap_sig"] == "SIGNATURE"     # func 정밀 kind 우선(editType 기본값 무시)
+
+
+def test_run_impact_update_uses_edit_types_and_skips_local_diff(tmp_path, monkeypatch):
+    """jenkins_changeset + edit_types → 로컬 diff 생략 + add→NEW/delete→DELETE 전파 + 경고 정확화."""
+    from backend.schemas import ScmRegisterRequest
+    from backend.services import scm_registry
+    from workflow import delta_update, impact_audit, impact_orchestrator
+
+    monkeypatch.setattr(scm_registry, "REGISTRY_PATH", tmp_path / "config" / "scm_registry.json")
+    monkeypatch.setattr(impact_audit, "AUDIT_DIR", tmp_path / "audit")
+    monkeypatch.setattr(impact_audit, "LOCK_PATH", tmp_path / "audit" / ".run_lock")
+    scm_registry.register_entry(ScmRegisterRequest(
+        id="x", name="X", scm_type="svn", source_root=str(tmp_path / "src")))
+    monkeypatch.setattr(impact_orchestrator, "_is_cloudium_mode", lambda: False)  # local 모드 + changeset
+    # classify는 진짜 함수를 써야 editType 경로를 검증 — 대신 로컬 diff는 호출되면 안 됨.
+    monkeypatch.setattr(delta_update, "_run_unified_diff",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("editType 경로에서 diff 금지")))
+    monkeypatch.setattr(impact_orchestrator, "_load_source_sections",
+                        lambda _r: {"call_map": {}, "function_details_by_name": {
+                            "ap_new_fn": {"module_name": "m", "file": "Sources/APP/Ap_New.c", "asil": ""}}})
+
+    result = impact_orchestrator.run_impact_update(ChangeTrigger(
+        trigger_type="jenkins", scm_id="x", source_root=str(tmp_path / "src"), scm_type="svn",
+        base_ref="", changed_files=["Sources/APP/Ap_New.c", "Sources/APP/Ap_Old.c"], dry_run=True,
+        auto_generate=False, targets=["uds", "suts"],
+        metadata={"changed_files_source": "jenkins_changeset",
+                  "changed_file_edit_types": {"Sources/APP/Ap_New.c": "add",
+                                              "Sources/APP/Ap_Old.c": "delete"}}))
+    cft = result["changed_function_types"]
+    assert cft.get("ap_new_fn") == "NEW"        # add 파일 함수 → NEW 전파
+    assert cft.get("ap_old") == "DELETE"        # delete 파일(by_name 부재) → stem DELETE 보존
+    assert any("editType" in w for w in result["warnings"])  # 경고가 editType 기반으로 정확화
+
+
 def test_resolve_prefers_full_path_over_basename_collision():
     """동명 파일이 여러 모듈에 있을 때, 변경 경로와 full-path 일치하는 함수만 — basename 과대매칭 방지."""
     from workflow import impact_orchestrator

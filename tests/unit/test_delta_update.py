@@ -53,6 +53,51 @@ def test_classify_changed_functions_signature_body_new_delete_header(monkeypatch
     assert result["Foo_Header"] == "HEADER"
 
 
+def test_classify_from_edit_types_skips_diff(monkeypatch, tmp_path):
+    """edit_types(Jenkins changeSet)가 주어지면 git/svn diff를 호출하지 않고 파일 단위로 분류한다.
+
+    add→NEW / delete→DELETE / .c edit→BODY / .h edit→HEADER / editType 미제공→확장자 기반.
+    """
+    from workflow import delta_update
+
+    def _boom(*a, **k):
+        raise AssertionError("edit_types가 있으면 _run_unified_diff를 호출하면 안 된다")
+
+    monkeypatch.setattr(delta_update, "_run_unified_diff", _boom)
+
+    result = delta_update.classify_changed_functions(
+        str(tmp_path),
+        ["Sources/APP/Ap_New.c", "Sources/APP/Ap_Old.c", "Sources/APP/Ap_Edit.c", "Sources/APP/Ap_Hdr.h", "Sources/APP/Ap_NoType.c"],
+        edit_types={
+            "Sources/APP/Ap_New.c": "add",
+            "Sources/APP/Ap_Old.c": "delete",
+            "Sources/APP/Ap_Edit.c": "edit",
+            "Sources/APP/Ap_Hdr.h": "edit",
+            # Ap_NoType.c는 editType 미제공 → 확장자 기반(BODY)
+        },
+    )
+    assert result["ap_new"] == "NEW"        # 키는 파일 stem(소문자)
+    assert result["ap_old"] == "DELETE"
+    assert result["ap_edit"] == "BODY"
+    assert result["ap_hdr"] == "HEADER"
+    assert result["ap_notype"] == "BODY"
+
+
+def test_classify_from_edit_types_path_normalization_and_priority(monkeypatch, tmp_path):
+    """경로 구분자(\\ vs /) 정규화 + 동일 stem 다중파일에서 DELETE/NEW가 edit에 덮이지 않음."""
+    from workflow import delta_update
+
+    monkeypatch.setattr(delta_update, "_run_unified_diff",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("diff 금지")))
+
+    result = delta_update.classify_changed_functions(
+        str(tmp_path),
+        ["src\\APP\\Ap_Mod.c"],   # 백슬래시 경로 — edit_types는 슬래시 키
+        edit_types={"src/APP/Ap_Mod.c": "delete"},
+    )
+    assert result["ap_mod"] == "DELETE"   # \\→/ 정규화 후 매칭
+
+
 def test_classify_changed_functions_variable_change_uses_hunk_context(monkeypatch, tmp_path):
     from workflow import delta_update
 

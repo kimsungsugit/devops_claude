@@ -1445,11 +1445,17 @@ def _resolve_jenkins_changed_files(req: JenkinsImpactTriggerRequest):
             verify_tls=bool(cfg.get("verifyTls", True)),
         )
         files = [str(x) for x in (res.get("files") or [])]
-        return files, True, {
+        meta: Dict[str, Any] = {
             "changed_files_source": "jenkins_changeset",
             "build_revision": res.get("revision", ""),
             "jenkins_changed_file_count": len(files),
         }
+        # per-file editType(add/edit/delete) — cloudium/원격에서 NEW/DELETE 변경유형 분류의
+        # 유일한 근거(로컬 working-copy diff 불가). 비어 있으면(affectedPaths만 제공) 생략.
+        edit_types = res.get("edit_types") or {}
+        if edit_types:
+            meta["changed_file_edit_types"] = edit_types
+        return files, True, meta
     except Exception as exc:  # noqa: BLE001 — 조회 실패는 로컬 diff로 graceful fallback
         _logger.warning("jenkins changeset fetch failed (scm=%s build=%s): %s", req.scm_id, req.build_number, exc, exc_info=True)
         return None, False, {"changed_files_source": "local_diff_fallback", "linkage_reason": f"changeset fetch failed: {exc}"[:200]}

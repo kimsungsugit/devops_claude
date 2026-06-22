@@ -156,14 +156,59 @@ def get_changed_functions(
     return changed_funcs
 
 
+def _classify_from_edit_types(
+    changed_files: List[str], edit_types: Dict[str, str]
+) -> Dict[str, str]:
+    """Jenkins changeSet editType(파일경로→add/edit/delete) 기반 파일 단위 분류.
+
+    cloudium/원격에서 로컬 working-copy diff가 불가할 때 사용. diff(subprocess) 없이
+    add→NEW / delete→DELETE / edit·미상→.h:HEADER·.c:BODY로 분류한다. SIGNATURE는 diff
+    없이 구분 불가하므로 BODY로 보수 처리(영향 과대평가=안전측). 키는 파일 stem(소문자)로,
+    _resolve_changed_types_to_functions가 by_name을 통해 실제 함수에 재매핑한다.
+    """
+    norm = {
+        str(k).replace("\\", "/").strip().lower(): str(v or "").strip().lower()
+        for k, v in (edit_types or {}).items()
+    }
+    out: Dict[str, str] = {}
+    for fpath in changed_files:
+        raw = str(fpath or "").strip()
+        if not raw:
+            continue
+        stem = Path(raw).stem.lower()
+        if not stem:
+            continue
+        et = norm.get(raw.replace("\\", "/").lower(), "edit")
+        if et == "add":
+            kind = "NEW"
+        elif et == "delete":
+            kind = "DELETE"
+        else:  # edit/modify/기타
+            kind = "HEADER" if raw.lower().endswith(".h") else "BODY"
+        # 동일 stem 다중 파일: 구조적 변경(NEW/DELETE)은 단순 edit이 덮어쓰지 않게 보존.
+        if out.get(stem) in {"NEW", "DELETE"}:
+            continue
+        out[stem] = kind
+    return out
+
+
 def classify_changed_functions(
     project_root: str,
     changed_files: List[str],
     *,
     scm_type: str = "git",
     base_ref: str = "HEAD~1",
+    edit_types: Optional[Dict[str, str]] = None,
 ) -> Dict[str, str]:
-    """Classify changed functions conservatively from unified diff text."""
+    """Classify changed functions conservatively from unified diff text.
+
+    edit_types(Jenkins changeSet의 파일별 add/edit/delete)가 주어지면 git/svn diff를
+    생략하고 editType 기반 파일 단위 분류로 직행한다(원격/cloudium에서 로컬 working-copy
+    부재 대응). 상세는 _classify_from_edit_types 참조.
+    """
+    if edit_types:
+        return _classify_from_edit_types(changed_files, edit_types)
+
     classifications: Dict[str, str] = {}
 
     for fpath in changed_files:

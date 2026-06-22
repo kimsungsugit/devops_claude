@@ -407,8 +407,8 @@ def get_build_changed_files(
         verify_ssl=bool(verify_tls),
     )
     tree = (
-        "changeSet[items[affectedPaths,commitId,paths[file]]],"
-        "changeSets[items[affectedPaths,commitId,paths[file]]],"
+        "changeSet[items[affectedPaths,commitId,paths[file,editType]]],"
+        "changeSets[items[affectedPaths,commitId,paths[file,editType]]],"
         "actions[lastBuiltRevision[SHA1,revision]]"
     )
     api = f"{client.job_url}{int(build_number)}/api/json?tree={tree}"
@@ -422,6 +422,10 @@ def get_build_changed_files(
             csets.append(cs)
 
     files: set[str] = set()
+    # paths[].editType(add/edit/delete) — git/svn 모두 노출. cloudium/원격에서 로컬 diff가
+    # 불가할 때 변경유형(NEW/DELETE) 분류의 유일한 출처. affectedPaths는 editType이 없으므로
+    # paths[]가 있는 항목에서만 채워지며, 없으면 다운스트림이 확장자 기반(edit)으로 처리한다.
+    edit_types: Dict[str, str] = {}
     revision = ""
     for cs in csets:
         for item in cs.get("items") or []:
@@ -432,7 +436,15 @@ def get_build_changed_files(
                     files.add(str(p))
             for pth in item.get("paths") or []:
                 if isinstance(pth, dict) and pth.get("file"):
-                    files.add(str(pth["file"]))
+                    f = str(pth["file"])
+                    files.add(f)
+                    et = str(pth.get("editType") or "").strip().lower()
+                    if et and f.lower().endswith((".c", ".h")):
+                        # 동일 파일이 여러 commit에 걸친 경우 DELETE/add를 단순 edit이 덮지 않게
+                        # 보존(가장 구조적인 변경 유형 우선).
+                        prev = edit_types.get(f)
+                        if prev not in ("delete", "add"):
+                            edit_types[f] = et
             if not revision and item.get("commitId"):
                 revision = str(item["commitId"])
 
@@ -443,7 +455,7 @@ def get_build_changed_files(
             break
 
     src = sorted(f for f in files if str(f).lower().endswith((".c", ".h")))
-    return {"files": src, "revision": revision, "all_count": len(files)}
+    return {"files": src, "revision": revision, "all_count": len(files), "edit_types": edit_types}
 
 
 def sync_local_reports(

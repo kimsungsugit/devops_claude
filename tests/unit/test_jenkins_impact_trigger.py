@@ -83,6 +83,72 @@ def test_get_build_changed_files_parses_changeset(monkeypatch):
     assert out["all_count"] == 3
 
 
+def test_get_build_changed_files_extracts_edit_types(monkeypatch):
+    """paths[].editType(add/edit/delete)를 .c/.h에 한해 edit_types로 수집한다."""
+    from backend.services import jenkins_service
+
+    fixture = {
+        "changeSet": {"items": [
+            {"paths": [
+                {"file": "Sources/APP/Ap_New.c", "editType": "add"},
+                {"file": "Sources/APP/Ap_Old.c", "editType": "delete"},
+                {"file": "Sources/APP/Ap_Edit.c", "editType": "edit"},
+                {"file": "docs/readme.md", "editType": "edit"},   # 비-소스 제외
+            ], "commitId": "c1"},
+        ]},
+        "actions": [{"lastBuiltRevision": {"SHA1": "rev9"}}],
+    }
+    monkeypatch.setattr(jenkins_service.JenkinsClient, "_open_json", lambda self, url: fixture)
+
+    out = jenkins_service.get_build_changed_files(
+        job_url="http://jenkins/job/X", build_number=7, username="u", api_token="t", verify_tls=True,
+    )
+    assert out["edit_types"] == {
+        "Sources/APP/Ap_New.c": "add",
+        "Sources/APP/Ap_Old.c": "delete",
+        "Sources/APP/Ap_Edit.c": "edit",
+    }
+    assert "docs/readme.md" not in out["edit_types"]
+    assert out["files"] == ["Sources/APP/Ap_Edit.c", "Sources/APP/Ap_New.c", "Sources/APP/Ap_Old.c"]
+
+
+def test_get_build_changed_files_edit_types_empty_when_only_affected_paths(monkeypatch):
+    """affectedPaths만 있으면(editType 부재) edit_types는 비어 있고, 다운스트림이 확장자 기반 처리."""
+    from backend.services import jenkins_service
+
+    fixture = {"changeSet": {"items": [{"affectedPaths": ["Sources/APP/Ap_X.c"], "commitId": "c1"}]}}
+    monkeypatch.setattr(jenkins_service.JenkinsClient, "_open_json", lambda self, url: fixture)
+    out = jenkins_service.get_build_changed_files(
+        job_url="http://jenkins/job/X", build_number=7, username="u", api_token="t",
+    )
+    assert out["edit_types"] == {}
+    assert out["files"] == ["Sources/APP/Ap_X.c"]
+
+
+def test_resolve_jenkins_changed_files_propagates_edit_types(monkeypatch):
+    """get_build_changed_files의 edit_types가 trigger metadata로 전파된다(비어 있으면 생략)."""
+    from backend.routers import jenkins as jr
+    import backend.routers.config as cfgmod
+    import backend.services.jenkins_service as jsvc
+    from backend.schemas import JenkinsImpactTriggerRequest
+
+    monkeypatch.setattr(cfgmod, "get_jenkins_config",
+                        lambda: {"username": "u", "token": "t", "baseUrl": "http://j", "verifyTls": True})
+    monkeypatch.setattr(jsvc, "get_build_changed_files", lambda **k: {
+        "files": ["a.c"], "revision": "r", "all_count": 1, "edit_types": {"a.c": "add"}})
+
+    _f, _u, meta = jr._resolve_jenkins_changed_files(
+        JenkinsImpactTriggerRequest(scm_id="x", build_number=5, job_url="http://j/job/X"))
+    assert meta["changed_file_edit_types"] == {"a.c": "add"}
+
+    # 빈 edit_types → 키 생략
+    monkeypatch.setattr(jsvc, "get_build_changed_files", lambda **k: {
+        "files": ["a.c"], "revision": "r", "all_count": 1, "edit_types": {}})
+    _f2, _u2, meta2 = jr._resolve_jenkins_changed_files(
+        JenkinsImpactTriggerRequest(scm_id="x", build_number=5, job_url="http://j/job/X"))
+    assert "changed_file_edit_types" not in meta2
+
+
 def test_resolve_jenkins_changed_files_injects_build_changeset(monkeypatch):
     from backend.routers import jenkins as jr
     import backend.routers.config as cfgmod

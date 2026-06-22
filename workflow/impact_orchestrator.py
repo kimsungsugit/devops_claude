@@ -690,12 +690,19 @@ def _resolve_changed_types_to_functions(
     changed_types: Dict[str, str],
     changed_files: List[str],
     by_name: Dict[str, Dict[str, Any]],
+    edit_types: Dict[str, str] | None = None,
 ) -> Dict[str, str]:
     if not changed_types or not by_name:
         return changed_types
     # classify가 함수명으로 분류한 정밀 kind(SIGNATURE/NEW/DELETE/VARIABLE 등)를 보존한다.
     # (대소문자 무시 — by_name 키는 소문자, classify 키는 원본 케이스일 수 있음.)
     ct_lower = {str(k).strip().lower(): v for k, v in changed_types.items()}
+    # Jenkins changeSet editType(파일경로→add/edit/delete) — 로컬 diff 불가(cloudium/원격)
+    # 시 해당 파일 함수들의 기본 kind를 확장자(BODY/HEADER) 대신 NEW/DELETE로 격상한다.
+    et_norm = {
+        str(k).replace("\\", "/").strip().lower(): str(v or "").strip().lower()
+        for k, v in (edit_types or {}).items()
+    }
     resolved: Dict[str, str] = {}
     for path_text in changed_files:
         raw = str(path_text or "").strip()
@@ -704,6 +711,15 @@ def _resolve_changed_types_to_functions(
         ext_kind = "HEADER" if raw.lower().endswith(".h") else "BODY"
         raw_norm = raw.replace("\\", "/").lower()
         raw_name = Path(raw_norm).name
+        # editType이 있으면 그 파일 함수의 기본 kind를 editType으로(add→NEW/delete→DELETE).
+        # func별 정밀 kind(로컬 diff)가 있으면 그쪽이 우선(아래 ct_lower.get).
+        _et = et_norm.get(raw_norm)
+        if _et == "add":
+            file_default = "NEW"
+        elif _et == "delete":
+            file_default = "DELETE"
+        else:
+            file_default = ext_kind
         # 1차: 전체 상대경로(raw_norm) endswith — 정확. 2차: 그 파일에 1차 매칭이 전무할 때만
         # basename(raw_name) 폴백 — 동명 파일이 여러 모듈에 있을 때의 과대 매칭을 줄인다.
         full_hits: Dict[str, str] = {}
@@ -712,8 +728,8 @@ def _resolve_changed_types_to_functions(
             file_path = str(info.get("file") or "").replace("\\", "/").lower()
             if not file_path:
                 continue
-            # 함수별 정밀 kind가 있으면 그것을, 없으면 파일 확장자 기반 기본값.
-            kind = ct_lower.get(func_name, ext_kind)
+            # 함수별 정밀 kind가 있으면 그것을, 없으면 파일 editType/확장자 기반 기본값.
+            kind = ct_lower.get(func_name, file_default)
             if file_path.endswith(raw_norm):
                 full_hits[func_name] = kind
             elif file_path.endswith(raw_name):
@@ -817,13 +833,23 @@ def run_impact_update(
         entry = get_registry_entry(trigger.scm_id)
         previous_linked_docs = entry.linked_docs.model_dump(mode="json") if entry else {}
         cloudium = _is_cloudium_mode()
+        _meta = trigger.metadata or {}
+        # Jenkins changeSet의 파일별 editType(add/edit/delete) — 로컬 working-copy diff가
+        # 불가하거나(빌드 revision≠로컬) 부정확할 때 변경유형 분류의 1차 근거.
+        edit_types = _meta.get("changed_file_edit_types") or {}
+        _is_changeset = _meta.get("changed_files_source") == "jenkins_changeset"
         if callable(on_progress):
             on_progress("classify", "변경 함수를 분류 중입니다.", {"changed_files": len(trigger.changed_files or [])})
-        if cloudium:
-            # cloudium: git/svn diff subprocess는 원격 source_root(로컬 미존재)에서 동작 불가하고
-            # 결과도 _resolve_changed_types_to_functions가 by_name+확장자로 재산정하므로,
-            # 무의미한 per-file subprocess를 생략하고 파일 기반 분류로 직행한다.
-            changed_types = _fallback_changed_types_from_files(trigger.changed_files)
+        if cloudium or (_is_changeset and edit_types):
+            # cloudium 또는 Jenkins changeSet 연동: git/svn diff subprocess는 원격 source_root
+            # (로컬 미존재) 또는 빌드 revision 불일치로 무의미/오정렬. editType이 있으면 그걸로
+            # NEW/DELETE까지 정밀 분류, 없으면 확장자 기반(BODY/HEADER) 보수 분류로 직행한다.
+            if edit_types:
+                changed_types = classify_changed_functions(
+                    trigger.source_root, trigger.changed_files, edit_types=edit_types
+                )
+            else:
+                changed_types = _fallback_changed_types_from_files(trigger.changed_files)
         else:
             changed_types = classify_changed_functions(
                 trigger.source_root,
@@ -840,7 +866,9 @@ def run_impact_update(
             sections = _load_source_sections(entry.source_root)
             by_name_raw = sections.get("function_details_by_name", {}) or {}
             by_name = {str(k).strip().lower(): v for k, v in by_name_raw.items() if isinstance(v, dict)}
-            changed_types = _resolve_changed_types_to_functions(changed_types, trigger.changed_files, by_name)
+            changed_types = _resolve_changed_types_to_functions(
+                changed_types, trigger.changed_files, by_name, edit_types=edit_types
+            )
             call_map = sections.get("call_map", {}) or {}
             neighbors = _build_neighbors(
                 call_map,
@@ -894,12 +922,20 @@ def run_impact_update(
                 warnings.append(
                     f"SITS cross-module impacted ({sits_total}) exceeded limit ({options.max_impacted_functions}); promote to review"
                 )
-        # Jenkins changeSet로 파일집합을 받은 경우, 변경 '유형' 분류는 여전히 로컬 working-copy
-        # diff(base_ref) 기준이라 빌드 revision과 어긋날 수 있음을 투명하게 알린다.
-        if (trigger.metadata or {}).get("changed_files_source") == "jenkins_changeset":
-            warnings.append(
-                "changed file set from Jenkins build changeSet; change-type classification uses local working-copy diff — verify build/local revision alignment"
-            )
+        # Jenkins changeSet로 파일집합을 받은 경우의 변경 '유형' 분류 출처를 투명하게 알린다.
+        # editType이 있으면 빌드 changeSet 기준, 없으면 로컬 working-copy diff 기준.
+        # 정직 고지(X7): diff가 없어 SIGNATURE를 BODY로 분류 → ACTION_MATRIX상 BODY는 sds='-'
+        # 이므로, .c만 바뀐 인터페이스(시그니처) 변경은 SDS 검토가 자동 FLAG되지 않을 수 있다
+        # (.h가 changeSet에 함께 오면 sds/sts FLAG 가드로 커버됨). ASIL 관련 인터페이스는 수동 확인.
+        if _is_changeset:
+            if edit_types:
+                warnings.append(
+                    "change-type classification from Jenkins changeSet editType (add→NEW/delete→DELETE/edit→BODY|HEADER); signature changes not distinguished without diff — SDS may not be auto-flagged for .c-only interface changes (verify ASIL-relevant interfaces manually)"
+                )
+            else:
+                warnings.append(
+                    "changed file set from Jenkins build changeSet; change-type classification uses local working-copy diff — verify build/local revision alignment"
+                )
         # cloudium에서 소스 인덱스(by_name)가 비었는데 변경파일이 있으면 worker read 실패 가능성 →
         # 영향이 과소보고될 수 있음을 명시(빈 결과를 '영향 없음'으로 오인 방지, X7/X9 안전측).
         if cloudium and not by_name and trigger.changed_files:
