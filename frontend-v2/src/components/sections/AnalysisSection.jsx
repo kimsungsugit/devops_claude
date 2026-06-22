@@ -166,8 +166,9 @@ export default function AnalysisSection({ job, analysisResult }) {
         {!hasAnyCoverage ? (
           <div className="text-sm text-muted" style={{ padding: 8 }}>
             이 빌드 산출물에 커버리지 데이터가 없습니다 (line_rate 0). 이 프로젝트의 커버리지는
-            VectorCAST 시험 로그(SCM 등록 경로)에 있으며, &apos;SCM 경로에서 불러오기&apos;는 현재 시험
-            통과/실패만 로드합니다 — 구문/분기/MC&#47;DC 커버리지 수치 연동은 후속 작업입니다.
+            VectorCAST 시험 로그(SCM 등록 경로)에 있습니다 — 아래 &apos;VectorCAST 테스트&apos; 패널의
+            &apos;SCM 경로에서 불러오기&apos;를 누르면 구문/분기 커버리지가 여기 표시됩니다(단위시험 로그 기준,
+            수 분 소요). 통합시험(IT)은 함수 커버리지라 구문/분기 수치는 없습니다.
           </div>
         ) : (<>
         {scmCovHas && (
