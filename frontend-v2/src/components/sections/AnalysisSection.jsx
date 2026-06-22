@@ -1,5 +1,5 @@
-import { useState, useCallback, useMemo } from 'react';
-import { post } from '../../api.js';
+import { useState, useCallback, useMemo, useRef, useEffect } from 'react';
+import { post, api } from '../../api.js';
 import { useJenkinsCfg, useToast } from '../../App.jsx';
 import StatusBadge from '../StatusBadge.jsx';
 import { defaultCacheRoot } from '../../api.js';
@@ -18,6 +18,10 @@ export default function AnalysisSection({ job, analysisResult }) {
   // (build→cloudium 폴백 내장)를 호출한다.
   const [scmVcast, setScmVcast] = useState(null);
   const [scmVcastLoading, setScmVcastLoading] = useState(false);
+  // 언마운트 후 폴링 루프가 setState/네트워크를 계속 돌지 않도록 가드(W2). 잡 자체는 서버에서
+  // 계속 실행되며 결과는 TTL 캐시되므로, 재진입 시 재클릭하면 빠르게 받는다.
+  const mountedRef = useRef(true);
+  useEffect(() => () => { mountedRef.current = false; }, []);
 
   const loadComplexity = useCallback(async () => {
     setComplexityLoading(true);
@@ -41,22 +45,47 @@ export default function AnalysisSection({ job, analysisResult }) {
     if (!paths.length) { toast('info', 'SCM에 등록된 VectorCAST 경로가 없습니다.'); return; }
     setScmVcastLoading(true);
     try {
-      // /report/vectorcast-rag: 빌드 RAG가 없거나 test_rows가 비면 vcast_log_paths(cloudium)
-      // 로 폴백(이미 구현됨). 폴더 파싱은 무거우나 백엔드 TTL 캐시(30분)로 2회차+ 즉시.
-      const data = await post('/api/jenkins/report/vectorcast-rag', {
+      // 원격 cloudium 폴더 파싱은 수 분 걸려 동기 호출 시 4~5분 블로킹(타임아웃/언마운트 abort로
+      // '에러'처럼 보임) → 백그라운드 잡으로 던지고 폴링한다. 백엔드 TTL 캐시(30분)로 2회차+ 즉시.
+      const start = await post('/api/jenkins/report/vectorcast-rag-async', {
         job_url: job.url, cache_root: cacheRoot, build_selector: cfg.buildSelector,
         vcast_log_paths: paths,
       });
-      if (data?.ok && data.data) {
-        setScmVcast(data);
-        toast('success', `SCM 경로에서 VectorCAST ${data.data.test_rows_count ?? 0}건 로드 (출처: ${data.source || 'cloudium'})`);
-      } else {
-        toast('warning', 'SCM 등록 경로에서도 VectorCAST 결과를 찾지 못했습니다.');
+      const jobId = start?.job_id;
+      if (!jobId) throw new Error('잡 생성에 실패했습니다.');
+      toast('info', 'VectorCAST 원격 로그 파싱을 시작했습니다 (수 분 소요될 수 있습니다).');
+      const t0 = Date.now();
+      const TIMEOUT_MS = 12 * 60 * 1000;   // 12분 상한(최악 다폴더 파싱 + 여유)
+      while (mountedRef.current) {
+        if (Date.now() - t0 > TIMEOUT_MS) {
+          toast('warning', 'VectorCAST 로딩 시간 초과 — 잠시 후 다시 시도하세요(캐시되어 빨라집니다).');
+          return;
+        }
+        await new Promise(r => setTimeout(r, 3000));
+        if (!mountedRef.current) return;   // 대기 중 언마운트 → 폴링 중단(잡은 서버에서 계속)
+        const st = await api(`/api/scm/impact-job/${jobId}`);
+        const status = st?.job?.status;
+        if (status === 'completed') {
+          const data = st.job.result;
+          if (!mountedRef.current) return;
+          if (data?.ok && data.data) {
+            setScmVcast(data);
+            toast('success', `VectorCAST ${data.data.test_rows_count ?? 0}건 로드 (출처: ${data.source || 'cloudium'})`);
+          } else {
+            toast('warning', 'SCM 등록 경로에서 VectorCAST 결과를 찾지 못했습니다 (경로/레이아웃 확인).');
+          }
+          return;
+        }
+        if (status === 'failed') {
+          toast('error', `VectorCAST 로드 실패: ${st.job?.error?.title || st.job?.error?.detail || 'unknown'}`);
+          return;
+        }
+        // queued/running → 계속 폴링
       }
     } catch (e) {
-      toast('error', `VectorCAST 로드 실패: ${e.message}`);
+      if (mountedRef.current) toast('error', `VectorCAST 로드 실패: ${e.message}`);
     } finally {
-      setScmVcastLoading(false);
+      if (mountedRef.current) setScmVcastLoading(false);
     }
   }, [analysisResult, job, cfg, cacheRoot, toast]);
 

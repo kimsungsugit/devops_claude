@@ -1180,8 +1180,12 @@ def _collect_vcast_paths(req: JenkinsReportRequest) -> List[str]:
     return out
 
 
-@router.post("/api/jenkins/report/vectorcast-rag")
-def jenkins_vectorcast_rag(req: JenkinsReportRequest) -> Dict[str, Any]:
+def _compute_vectorcast_rag(req: JenkinsReportRequest) -> Dict[str, Any]:
+    """VectorCAST RAG 계산(빌드 산출물 → cloudium 등록 경로 폴백). 동기/비동기 라우트 공용.
+
+    cloudium 원본 폴더 파싱은 무거우므로(수 분) 비동기 잡 경로(vectorcast-rag-async)에서도
+    동일 로직을 재사용한다. 결과는 폴더 단위 TTL 캐시(_VCAST_CLOUDIUM_PARSE_CACHE)로 2회차+ 즉시.
+    """
     build_root = _resolve_cached_build_root(req.job_url, req.cache_root, req.build_selector)
     payload = _load_vectorcast_rag(build_root) if build_root else {}
     source = "jenkins"
@@ -1239,6 +1243,33 @@ def jenkins_vectorcast_rag(req: JenkinsReportRequest) -> Dict[str, Any]:
             comparison = {}
 
     return {"ok": True, "data": payload, "comparison": comparison, "source": source}
+
+
+@router.post("/api/jenkins/report/vectorcast-rag")
+def jenkins_vectorcast_rag(req: JenkinsReportRequest) -> Dict[str, Any]:
+    return _compute_vectorcast_rag(req)
+
+
+@router.post("/api/jenkins/report/vectorcast-rag-async")
+def jenkins_vectorcast_rag_async(req: JenkinsReportRequest) -> Dict[str, Any]:
+    """무거운 cloudium VectorCAST 폴더 파싱(수 분)을 백그라운드 잡으로 실행한다.
+
+    동기 호출은 원격 IPC 직렬 파싱으로 4~5분 블로킹 → 브라우저/프록시 타임아웃·탭 전환 abort로
+    '에러처럼' 보였다. 잡으로 돌리고 기존 폴링(/api/scm/impact-job/{id}, /result)을 재사용한다.
+    user context는 start_job의 wrap_with_user가 상속(cloudium worker 접근 필수).
+    """
+    from workflow.impact_jobs import start_job
+
+    def _runner(_job_id: str) -> Dict[str, Any]:
+        return _compute_vectorcast_rag(req)
+
+    return start_job(
+        scm_id=_job_slug(req.job_url) or "vcast",
+        trigger_type="vectorcast",
+        runner=_runner,
+        # 내부 cloudium 경로를 잡 메타(폴링 응답에 노출)에 싣지 않는다 — 개수만 진단용 기록(W3).
+        metadata={"job_url": req.job_url, "vcast_path_count": len(_collect_vcast_paths(req))},
+    )
 
 
 @router.post("/api/jenkins/source-root")

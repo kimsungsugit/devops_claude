@@ -63,6 +63,14 @@ def update_job(
     error: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     job = load_job(job_id)
+    # heartbeat(모든 필드 None인 순수 touch)가 이미 종료된 잡을 되살리지 않도록 무시.
+    # complete_job/fail_job과 heartbeat의 read-modify-write race로 completed→running 되돌림 방지(W1).
+    if (
+        job.get("status") in {"completed", "failed"}
+        and status is None and stage is None and message is None
+        and progress is None and result is None and error is None
+    ):
+        return job
     if status is not None:
         job["status"] = status
         if status == "running" and not job.get("started_at"):
@@ -153,6 +161,28 @@ def list_jobs(*, scm_id: str = "", limit: int = 10) -> List[Dict[str, Any]]:
     return items
 
 
+def _prune_jobs(keep: int = 200) -> None:
+    """완료/실패한 오래된 잡 파일을 상한(keep) 초과분만 정리(누적 디스크 방지). best-effort.
+
+    VectorCAST 잡 result는 test_rows 포함 시 수백 KB~MB라 누적이 빠르다. 최신 keep개는
+    보존하고, 그 너머의 terminal(completed/failed) 잡만 삭제한다(running 잡은 절대 삭제 안 함).
+    """
+    try:
+        files = sorted(JOB_DIR.glob("job_*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+    except Exception:
+        return
+    for path in files[keep:]:
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if isinstance(raw, dict) and raw.get("status") in {"completed", "failed"}:
+            try:
+                path.unlink()
+            except OSError:
+                continue
+
+
 def _build_error(code: str, title: str, detail: str = "", *, retryable: bool = False) -> Dict[str, Any]:
     return {
         "code": code,
@@ -238,7 +268,7 @@ def _run_job(job_id: str, trigger: ChangeTrigger, options: ImpactOptions) -> Non
                 return
             if str(job.get("status") or "") != "running":
                 return
-            update_job(job_id, status="running")
+            update_job(job_id)  # status 재설정 없이 updated_at만 갱신(W1 race 회피)
 
     heartbeat_thread = threading.Thread(target=heartbeat, name=f"impact-job-heartbeat-{job_id}", daemon=True)
     heartbeat_thread.start()
@@ -273,6 +303,61 @@ def _run_job(job_id: str, trigger: ChangeTrigger, options: ImpactOptions) -> Non
     finally:
         heartbeat_stop.set()
         heartbeat_thread.join(timeout=1)
+
+
+def start_job(
+    *,
+    scm_id: str,
+    trigger_type: str,
+    runner,
+    metadata: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """범용 백그라운드 잡 — runner(job_id)->result dict를 user context를 상속한 스레드에서 실행.
+
+    cloudium worker 접근(resolver ContextVar)이 필요한 무거운 작업(예: VectorCAST 원격
+    폴더 파싱 수 분)을 동기 HTTP 대신 잡으로 돌려 프록시/브라우저 타임아웃과 컴포넌트
+    언마운트 abort를 피한다. 폴링은 기존 /api/scm/impact-job/{id}(+/result)를 재사용한다.
+    runner 예외는 _classify_exception으로 분류해 fail_job에 기록한다.
+    """
+    _prune_jobs()
+    job = create_job(scm_id=scm_id, trigger_type=trigger_type, dry_run=False, metadata=metadata)
+    job_id = str(job["job_id"])
+
+    def _exec() -> None:
+        update_job(job_id, status="running", stage="prepare", message="실행을 시작합니다.")
+        heartbeat_stop = threading.Event()
+
+        def heartbeat() -> None:
+            while not heartbeat_stop.wait(15):
+                try:
+                    j = load_job(job_id)
+                except Exception:
+                    return
+                if str(j.get("status") or "") != "running":
+                    return
+                # status는 재설정하지 않고 updated_at만 갱신 — stale read와 runner의
+                # complete_job 사이 race로 completed를 running으로 되돌리는 것을 방지.
+                update_job(job_id)
+
+        hb = threading.Thread(target=heartbeat, name=f"job-heartbeat-{job_id}", daemon=True)
+        hb.start()
+        try:
+            result = runner(job_id)
+            complete_job(job_id, result if isinstance(result, dict) else {"ok": True, "result": result})
+        except Exception as exc:  # noqa: BLE001 — 분류 후 fail_job에 기록
+            fail_job(job_id, _classify_exception(exc))
+        finally:
+            heartbeat_stop.set()
+            hb.join(timeout=1)
+
+    try:
+        from backend.user_context import wrap_with_user
+        target = wrap_with_user(_exec)
+    except ImportError:
+        target = _exec
+    thread = threading.Thread(target=target, name=f"job-{job_id}", daemon=True)
+    thread.start()
+    return {"ok": True, "job_id": job_id, "status": "queued", "job": load_job(job_id)}
 
 
 def start_impact_job(trigger: ChangeTrigger, *, options: Optional[ImpactOptions] = None) -> Dict[str, Any]:

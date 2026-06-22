@@ -71,6 +71,48 @@ def test_start_impact_job_without_changed_files_completes_cleanly(tmp_path, monk
     assert loaded["result"]["warnings"] == ["no changed files detected"]
 
 
+def test_start_job_generic_runs_runner_and_completes(tmp_path, monkeypatch):
+    """범용 start_job: runner 결과를 잡 result로 저장하고 completed."""
+    from workflow import impact_jobs
+
+    monkeypatch.setattr(impact_jobs, "JOB_DIR", tmp_path / "jobs")
+
+    created = impact_jobs.start_job(
+        scm_id="kjpds02",
+        trigger_type="vectorcast",
+        runner=lambda job_id: {"ok": True, "data": {"test_rows_count": 7}, "source": "cloudium"},
+        metadata={"job_url": "http://j/job/X"},
+    )
+    job_id = created["job_id"]
+    _wait_for_job(impact_jobs, job_id, timeout=10)
+
+    loaded = impact_jobs.load_job(job_id)
+    assert created["ok"] is True
+    assert loaded["status"] == "completed"
+    assert loaded["result"]["data"]["test_rows_count"] == 7
+    assert loaded["result"]["source"] == "cloudium"
+    assert loaded["trigger_type"] == "vectorcast"
+
+
+def test_start_job_generic_failure_is_classified(tmp_path, monkeypatch):
+    """runner 예외는 fail_job으로 분류 기록(잡이 멈추지 않고 failed 상태)."""
+    from workflow import impact_jobs
+
+    monkeypatch.setattr(impact_jobs, "JOB_DIR", tmp_path / "jobs")
+
+    def _boom(_job_id):
+        raise RuntimeError("worker IPC down")
+
+    created = impact_jobs.start_job(scm_id="x", trigger_type="vectorcast", runner=_boom)
+    job_id = created["job_id"]
+    _wait_for_job(impact_jobs, job_id, timeout=10)
+
+    loaded = impact_jobs.load_job(job_id)
+    assert loaded["status"] == "failed"
+    assert loaded["error"]["code"] == "impact_exception"
+    assert "worker IPC down" in (loaded["error"]["detail"] or "")
+
+
 def _wait_for_job(impact_jobs_mod, job_id: str, timeout: float = 10) -> None:
     """Poll job status until terminal, with a hard timeout to prevent hangs."""
     import time

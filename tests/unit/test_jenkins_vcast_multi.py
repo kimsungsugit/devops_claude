@@ -298,6 +298,43 @@ def test_docx_tables_text_returns_none_on_garbage() -> None:
     assert J._docx_tables_text(b"this is not a zip / docx at all") is None
 
 
+# ── 동기/비동기 vectorcast-rag (리팩터 + 잡 전환) ─────────────────────
+def test_compute_vectorcast_rag_missing_when_nothing_found(monkeypatch) -> None:
+    """빌드 캐시 없음 + 등록 경로 없음 → {ok:false, error:missing} (리팩터 후 동기 동작 보존)."""
+    monkeypatch.setattr(J, "_resolve_cached_build_root", lambda *a, **k: None)
+    req = JenkinsReportRequest(job_url="http://j/job/x", cache_root=".c")
+    out = J._compute_vectorcast_rag(req)
+    assert out == {"ok": False, "error": "missing"}
+
+
+def test_vectorcast_rag_async_dispatches_job(monkeypatch) -> None:
+    """async 엔드포인트는 무거운 파싱을 start_job(trigger_type='vectorcast')으로 던지고 job_id 반환."""
+    import workflow.impact_jobs as IJ
+
+    captured = {}
+
+    def _fake_start_job(*, scm_id, trigger_type, runner, metadata=None):
+        captured["scm_id"] = scm_id
+        captured["trigger_type"] = trigger_type
+        captured["runner"] = runner
+        captured["metadata"] = metadata
+        return {"ok": True, "job_id": "job_test", "status": "queued"}
+
+    monkeypatch.setattr(IJ, "start_job", _fake_start_job)
+    # runner가 호출되면 동기 계산을 수행하는지 확인용으로 _compute도 모킹.
+    monkeypatch.setattr(J, "_compute_vectorcast_rag", lambda req: {"ok": True, "data": {"test_rows": [1]}})
+
+    req = JenkinsReportRequest(job_url="http://j/job/x", cache_root=".c", vcast_log_paths=["U:/vc"])
+    out = J.jenkins_vectorcast_rag_async(req)
+    assert out["ok"] is True and out["job_id"] == "job_test"
+    assert captured["trigger_type"] == "vectorcast"
+    # 내부 경로는 메타에 싣지 않고 개수만(W3).
+    assert captured["metadata"]["vcast_path_count"] == 1
+    assert "vcast_paths" not in captured["metadata"]
+    # runner는 _compute_vectorcast_rag를 호출(잡 스레드에서 실행될 본체).
+    assert captured["runner"]("job_test")["ok"] is True
+
+
 # ── ScmLinkedDocs.vectorcast schema ───────────────────────────────────
 def test_linked_docs_vectorcast_defaults_empty_list() -> None:
     ld = ScmLinkedDocs()

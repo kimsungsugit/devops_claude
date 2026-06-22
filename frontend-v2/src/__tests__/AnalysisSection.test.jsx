@@ -14,7 +14,7 @@
  * - api.js (post, defaultCacheRoot): mock
  * - StatusBadge: 실제 컴포넌트 사용 (단순 UI)
  */
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, fireEvent } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 // ── Context mock ──────────────────────────────────────────────────────
@@ -37,6 +37,7 @@ vi.mock('../App.jsx', () => ({
 // ── api.js mock ───────────────────────────────────────────────────────
 vi.mock('../api.js', () => ({
   post: vi.fn(),
+  api: vi.fn(),
   defaultCacheRoot: vi.fn(() => ''),
 }));
 
@@ -192,5 +193,33 @@ describe('AnalysisSection', () => {
     // Assert: 버튼 대신 설정 안내
     expect(screen.queryByText('SCM 경로에서 불러오기')).toBeNull();
     expect(screen.getByText(/SCM 연결 문서 경로에 VectorCAST 로그 폴더를 등록/)).toBeInTheDocument();
+  });
+
+  it('"SCM 경로에서 불러오기" 클릭 시 비동기 잡으로 던지고 폴링한다(블로킹 회피)', async () => {
+    // Arrange: 동기 4.5분 블로킹 대신 async 잡 + /api/scm/impact-job 폴링
+    vi.useFakeTimers();
+    try {
+      const { post, api } = await import('../api.js');
+      post.mockResolvedValue({ ok: true, job_id: 'job_x', status: 'queued' });
+      api.mockResolvedValue({
+        ok: true,
+        job: { status: 'completed', result: { ok: true, source: 'cloudium', data: { test_rows_count: 42, ut_reports: [], it_reports: [] } } },
+      });
+      const result = makeAnalysisResult({ matchedScm: { id: 's', name: 'S', linked_docs: { vectorcast: ['U:/vc'] } } });
+      render(<AnalysisSection job={makeJob()} analysisResult={result} />);
+
+      // Act
+      fireEvent.click(screen.getByText('SCM 경로에서 불러오기'));
+      await vi.advanceTimersByTimeAsync(3500);   // 폴링 1회(3s) 경과
+
+      // Assert: async 엔드포인트 + 폴링 호출
+      expect(post).toHaveBeenCalledWith(
+        '/api/jenkins/report/vectorcast-rag-async',
+        expect.objectContaining({ vcast_log_paths: ['U:/vc'] }),
+      );
+      expect(api).toHaveBeenCalledWith('/api/scm/impact-job/job_x');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
