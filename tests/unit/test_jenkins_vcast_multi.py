@@ -225,6 +225,67 @@ def test_folder_parse_it_classification(monkeypatch) -> None:
     assert out["test_rows"][0]["source"] == "IT"
 
 
+class _CS:
+    """CoverageStats stub — covered/total만 사용."""
+    def __init__(self, covered: int, total: int) -> None:
+        self.covered = covered
+        self.total = total
+
+
+class _FC:
+    """FunctionCoverage stub — statement/branch/mcdc."""
+    def __init__(self, s, b, m) -> None:
+        self.statement = _CS(*s)
+        self.branch = _CS(*b)
+        self.mcdc = _CS(*m)
+
+
+def test_folder_parse_extracts_coverage(monkeypatch) -> None:
+    """env별 AggregateCoverage 리포트에서 구문/분기/MC-DC 커버리지를 추출해 payload.coverage에 담는다."""
+    import backend.services.swut_input_adapter as SA
+    _patch_folder_parse(monkeypatch, exec_results={"SwUFn_0133.001": _FakeRow(True)})
+    # grand_total이 90/100(구문)·40/50(분기)·8/10(MC-DC) 반환하도록 추출기 모킹.
+    monkeypatch.setattr(SA, "extract_aggregate_coverage",
+                        lambda data: ([], _FC((90, 100), (40, 50), (8, 10))))
+    out = J._parse_vcast_logs_from_cloudium_folder("U:/x/09.SW 단위 테스트/cov_UT")
+    cov = out["coverage"]
+    assert cov["statement"] == {"covered": 90, "total": 100, "rate": 0.9}
+    assert cov["branch"] == {"covered": 40, "total": 50, "rate": 0.8}
+    assert cov["mcdc"] == {"covered": 8, "total": 10, "rate": 0.8}
+
+
+def test_merge_combines_coverage_overall_and_ut_it() -> None:
+    """병합이 전체 coverage + UT/IT 분리 합산을 산출한다."""
+    ut = {
+        "test_rows": [{"subprogram": "f", "result": "PASS"}], "vcast_kind": "UT",
+        "coverage": {"statement": {"covered": 90, "total": 100, "rate": 0.9},
+                     "branch": {"covered": 0, "total": 0, "rate": None},
+                     "mcdc": {"covered": 0, "total": 0, "rate": None}},
+    }
+    it = {
+        "test_rows": [{"subprogram": "g", "result": "PASS"}], "vcast_kind": "IT",
+        "coverage": {"statement": {"covered": 40, "total": 50, "rate": 0.8},
+                     "branch": {"covered": 0, "total": 0, "rate": None},
+                     "mcdc": {"covered": 0, "total": 0, "rate": None}},
+    }
+    merged = J._merge_vectorcast_payloads([ut, it])
+    assert merged["coverage"]["statement"] == {"covered": 130, "total": 150, "rate": round(130 / 150, 4)}
+    assert merged["coverage_ut"]["statement"]["covered"] == 90
+    assert merged["coverage_it"]["statement"]["covered"] == 40
+    # 데이터 전무한 메트릭은 None rate.
+    assert merged["coverage"]["mcdc"]["rate"] is None
+
+
+def test_merge_no_coverage_yields_none() -> None:
+    """coverage 없는 payload만 병합하면 coverage 키가 None(빈 표시 회피)."""
+    merged = J._merge_vectorcast_payloads([
+        {"test_rows": [{"subprogram": "f", "result": "PASS"}]},
+        {"test_rows": [{"subprogram": "g", "result": "FAIL"}]},
+    ])
+    assert merged["coverage"] is None
+    assert merged["coverage_ut"] is None
+
+
 def test_folder_parse_empty_results_returns_empty(monkeypatch) -> None:
     _patch_folder_parse(monkeypatch, exec_results={})
     out = J._parse_vcast_logs_from_cloudium_folder("U:/x/단위 테스트/empty_UT")

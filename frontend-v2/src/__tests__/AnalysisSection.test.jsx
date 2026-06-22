@@ -14,7 +14,7 @@
  * - api.js (post, defaultCacheRoot): mock
  * - StatusBadge: 실제 컴포넌트 사용 (단순 UI)
  */
-import { render, screen, waitFor, fireEvent } from '@testing-library/react';
+import { render, screen, waitFor, fireEvent, act } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 // ── Context mock ──────────────────────────────────────────────────────
@@ -218,6 +218,42 @@ describe('AnalysisSection', () => {
         expect.objectContaining({ vcast_log_paths: ['U:/vc'] }),
       );
       expect(api).toHaveBeenCalledWith('/api/scm/impact-job/job_x');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('SCM 커버리지가 로드되면 코드 커버리지 패널에 구문/분기/MC-DC %를 표시한다', async () => {
+    vi.useFakeTimers();
+    try {
+      const { post, api } = await import('../api.js');
+      post.mockResolvedValue({ ok: true, job_id: 'jcov' });
+      api.mockResolvedValue({
+        ok: true,
+        job: { status: 'completed', result: { ok: true, source: 'cloudium', data: {
+          test_rows_count: 42, ut_reports: [], it_reports: [],
+          coverage: {
+            statement: { covered: 90, total: 100, rate: 0.9 },
+            branch: { covered: 40, total: 50, rate: 0.8 },
+            mcdc: { covered: 8, total: 10, rate: 0.8 },
+          },
+        } } },
+      });
+      // 빌드 커버리지는 없음(coverage:null) → 로드 전 빈 상태, 로드 후 SCM 커버리지 표시.
+      const result = makeAnalysisResult({
+        reportData: { coverage: null, kpis: { coverage: {}, prqa: {}, code_metrics: {}, vectorcast: {}, tests: {}, scan: {}, files: {}, build: {} }, tester: {} },
+        matchedScm: { id: 's', name: 'S', linked_docs: { vectorcast: ['U:/vc'] } },
+      });
+      render(<AnalysisSection job={makeJob()} analysisResult={result} />);
+
+      await act(async () => {
+        fireEvent.click(screen.getByText('SCM 경로에서 불러오기'));
+        await vi.advanceTimersByTimeAsync(3500);   // 폴링 1회(3s) → 완료 → setScmVcast 플러시
+      });
+
+      expect(screen.getByText('구문(Statement)')).toBeInTheDocument();
+      expect(screen.getByText('90%')).toBeInTheDocument();
+      expect(screen.getByText('MC/DC')).toBeInTheDocument();
     } finally {
       vi.useRealTimers();
     }

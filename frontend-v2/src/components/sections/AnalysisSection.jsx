@@ -4,6 +4,20 @@ import { useJenkinsCfg, useToast } from '../../App.jsx';
 import StatusBadge from '../StatusBadge.jsx';
 import { defaultCacheRoot } from '../../api.js';
 
+// VectorCAST 커버리지 셀({covered,total,rate}) → 통계 카드. rate는 0..1.
+function covCard(label, cell) {
+  if (!cell || !cell.total) return null;
+  const pct = Math.round((typeof cell.rate === 'number' ? cell.rate : cell.covered / cell.total) * 100);
+  const color = pct >= 80 ? 'var(--color-success)' : 'var(--color-warning)';
+  return (
+    <div className="stat-card" style={{ borderLeft: `3px solid ${color}` }}>
+      <div className="stat-value" style={{ color }}>{pct}%</div>
+      <div className="stat-label">{label}</div>
+      <div className="text-muted" style={{ fontSize: 9 }}>{cell.covered?.toLocaleString()}/{cell.total?.toLocaleString()}</div>
+    </div>
+  );
+}
+
 export default function AnalysisSection({ job, analysisResult }) {
   const { cfg } = useJenkinsCfg();
   const toast = useToast();
@@ -108,6 +122,11 @@ export default function AnalysisSection({ job, analysisResult }) {
   const utCov = vc.ut || {};
   const itCov = vc.it || {};
   const modules = utCov.modules || [];
+  // SCM 경로에서 불러온 VectorCAST 커버리지(구문/분기/MC-DC) — 빌드에 커버리지가 없을 때 표시.
+  const scmCov = scmVcast?.data?.coverage || null;        // 전체(UT+IT)
+  const scmCovUt = scmVcast?.data?.coverage_ut || null;
+  const scmCovIt = scmVcast?.data?.coverage_it || null;
+  const scmCovHas = !!(scmCov && (scmCov.statement?.total || scmCov.branch?.total || scmCov.mcdc?.total));
   const qualityCfg = (() => {
     try { return JSON.parse(localStorage.getItem('devops_v2_quality') || '{}'); } catch (_) { return {}; }
   })();
@@ -121,7 +140,7 @@ export default function AnalysisSection({ job, analysisResult }) {
   // 않도록. 이 프로젝트는 일반 커버리지가 아니라 VectorCAST UT/IT 커버리지를 쓰며 그 데이터는
   // cloudium SCM 로그에 있다(빌드엔 미동기화 → covPct=0).
   const hasAnyCoverage = (covPct != null && covPct > 0) || (brPct != null && brPct > 0)
-    || utCov.line_covered != null || utCov.branch_covered != null || modules.length > 0;
+    || utCov.line_covered != null || utCov.branch_covered != null || modules.length > 0 || scmCovHas;
 
   // Complexity table
   const rows = complexity?.rows ?? complexity?.functions ?? [];
@@ -151,6 +170,18 @@ export default function AnalysisSection({ job, analysisResult }) {
             통과/실패만 로드합니다 — 구문/분기/MC&#47;DC 커버리지 수치 연동은 후속 작업입니다.
           </div>
         ) : (<>
+        {scmCovHas && (
+          <div style={{ marginBottom: 8 }}>
+            <div className="text-sm text-muted" style={{ marginBottom: 4 }}>
+              VectorCAST 커버리지 (출처: SCM 경로 — 단위/통합 합산)
+            </div>
+            <div className="stats-row">
+              {covCard('구문(Statement)', scmCov.statement)}
+              {covCard('분기(Branch)', scmCov.branch)}
+              {covCard('MC/DC', scmCov.mcdc)}
+            </div>
+          </div>
+        )}
         <div className="stats-row">
           {covPct != null && (
             <div className="stat-card" style={{ borderLeft: `3px solid ${covPct >= 80 ? 'var(--color-success)' : 'var(--color-warning)'}` }}>

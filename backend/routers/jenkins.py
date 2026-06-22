@@ -1016,6 +1016,43 @@ def _parse_vcast_logs_from_cloudium_folder(path: str) -> Dict[str, Any]:
         top_n = int(getattr(config, "VCAST_FAILURES_TOP_N", 50))
         if top_n > 0:
             failures = failures[:top_n]
+
+        # 커버리지(구문/분기/MC-DC) — env별 AggregateCoverage 리포트 단일 HTML에서 추출해
+        # 합산한다. ExecutionResult와 동급 비용(env당 HTML 1개 + BS4 표 1개, 무거운
+        # TestCaseData 전체 파싱은 여전히 skip). SwUT 빌더의 검증된 extract_aggregate_coverage
+        # 재사용. 리포트 미존재/파싱 실패는 best-effort skip(테스트 결과는 그대로 반환).
+        cov_acc: Dict[str, List[int]] = {"statement": [0, 0], "branch": [0, 0], "mcdc": [0, 0]}
+        sub_cov = os.path.join(folder, layout.cov_dir)
+        cov_alt = ("_AggregateReport.html",) if layout.name == "vc2025" else ()
+        if SA._exists_quiet(resolver, sub_cov):
+            for env in env_names:
+                try:
+                    cov_path = SA._resolve_report_path(
+                        resolver, sub_cov, env, layout.cov_suffix,
+                        alt_suffixes=cov_alt, idx_cache=idx_cache, out_warnings=warnings,
+                    )
+                    cdata = SA._read_via_resolver(resolver, cov_path)
+                    funcs, grand = SA.extract_aggregate_coverage(cdata)
+                except (PermissionError, OSError) as e:
+                    warnings.append(f"{env}: AggregateCoverage 접근 실패 ({type(e).__name__})")
+                    continue
+                except Exception as e:  # noqa: BLE001 — 개별 env 커버리지 실패는 skip + 누적
+                    warnings.append(f"{env}: AggregateCoverage 파싱 실패 ({type(e).__name__})")
+                    continue
+                # env당 grand_total이 곧 그 env 함수들의 합 — 있으면 그것만(이중집계 방지),
+                # 없으면 함수별 합산. 두 출처를 섞지 않는다.
+                _has_grand = bool(grand and (grand.statement.total or grand.branch.total))
+                for fc in ([grand] if _has_grand else funcs):
+                    for _k in ("statement", "branch", "mcdc"):
+                        cs = getattr(fc, _k, None)
+                        if cs is not None and cs.total:
+                            cov_acc[_k][0] += cs.covered
+                            cov_acc[_k][1] += cs.total
+        coverage: Dict[str, Any] = {}
+        for _k in ("statement", "branch", "mcdc"):
+            _c, _t = cov_acc[_k]
+            coverage[_k] = {"covered": _c, "total": _t, "rate": (round(_c / _t, 4) if _t else None)}
+
         payload_out: Dict[str, Any] = {
             "build_root": folder,
             "source_folder": p,
@@ -1024,6 +1061,7 @@ def _parse_vcast_logs_from_cloudium_folder(path: str) -> Dict[str, Any]:
             "test_rows_count": len(test_rows),
             "summary": summary,
             "failures": failures,
+            "coverage": coverage,
             "ut_reports": [] if is_it else [folder],
             "it_reports": [folder] if is_it else [],
             "parse_warnings": warnings,
@@ -1068,6 +1106,11 @@ def _merge_vectorcast_payloads(payloads: List[Dict[str, Any]]) -> Dict[str, Any]
     seen: set = set()
     ut_reports: List[Any] = []
     it_reports: List[Any] = []
+    # 커버리지 합산 — 전체 + UT/IT 분리. 각 payload의 coverage는 폴더 단위 집계라 폴더별
+    # 합산(row dedup과 무관). [covered, total].
+    cov_all: Dict[str, List[int]] = {"statement": [0, 0], "branch": [0, 0], "mcdc": [0, 0]}
+    cov_ut: Dict[str, List[int]] = {"statement": [0, 0], "branch": [0, 0], "mcdc": [0, 0]}
+    cov_it: Dict[str, List[int]] = {"statement": [0, 0], "branch": [0, 0], "mcdc": [0, 0]}
     for pl in payloads:
         if not isinstance(pl, dict):
             continue
@@ -1095,6 +1138,18 @@ def _merge_vectorcast_payloads(payloads: List[Dict[str, Any]]) -> Dict[str, Any]
         it = pl.get("it_reports")
         if isinstance(it, list):
             it_reports.extend(it)
+        cov = pl.get("coverage")
+        if isinstance(cov, dict):
+            _it = str(pl.get("vcast_kind") or "").upper() == "IT"
+            for _m in ("statement", "branch", "mcdc"):
+                _cell = cov.get(_m) or {}
+                _c = int(_cell.get("covered") or 0)
+                _t = int(_cell.get("total") or 0)
+                cov_all[_m][0] += _c
+                cov_all[_m][1] += _t
+                _tgt = cov_it if _it else cov_ut
+                _tgt[_m][0] += _c
+                _tgt[_m][1] += _t
 
     summary = _summarize_vcast_tests(merged_rows)
     top_n = int(getattr(config, "VCAST_FAILURES_TOP_N", 50))
@@ -1114,6 +1169,15 @@ def _merge_vectorcast_payloads(payloads: List[Dict[str, Any]]) -> Dict[str, Any]
     if top_n > 0:
         failures = failures[:top_n]
 
+    def _cov_dict(acc: Dict[str, List[int]]) -> Optional[Dict[str, Any]]:
+        out: Dict[str, Any] = {}
+        any_total = False
+        for _m in ("statement", "branch", "mcdc"):
+            _c, _t = acc[_m]
+            out[_m] = {"covered": _c, "total": _t, "rate": (round(_c / _t, 4) if _t else None)}
+            any_total = any_total or _t > 0
+        return out if any_total else None
+
     return {
         "test_rows": merged_rows,
         "test_rows_count": len(merged_rows),
@@ -1121,6 +1185,9 @@ def _merge_vectorcast_payloads(payloads: List[Dict[str, Any]]) -> Dict[str, Any]
         "failures": failures,
         "ut_reports": ut_reports,
         "it_reports": it_reports,
+        "coverage": _cov_dict(cov_all),
+        "coverage_ut": _cov_dict(cov_ut),
+        "coverage_it": _cov_dict(cov_it),
         "merged_sources": len([p for p in payloads if isinstance(p, dict) and p]),
     }
 
