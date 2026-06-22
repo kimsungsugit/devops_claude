@@ -53,7 +53,11 @@
       "Bash(CLOUDIUM_ALLOWED_PREFIXES='U:\\\\연구소' ./backend/.venv/Scripts/python.exe .codex_tmp/scout_switr.py)",
       "Bash(CLOUDIUM_ALLOWED_PREFIXES='U:\\\\연구소' ./backend/.venv/Scripts/python.exe .codex_tmp/dump_ref_switr.py)",
       "Bash(rg -iE \"sitr|swit.*session|environments=|total_tcs|collect_swit|build done|build start|warning|error|0 files|env_names\")",
-      "Bash(\"D:/Project/devops/Release_claude/backend/.venv/Scripts/python.exe\" -c \"import openpyxl; print\\('openpyxl', openpyxl.__version__\\)\")"
+      "Bash(\"D:/Project/devops/Release_claude/backend/.venv/Scripts/python.exe\" -c \"import openpyxl; print\\('openpyxl', openpyxl.__version__\\)\")",
+      "Bash(backend/.venv/Scripts/python.exe *)",
+      "Bash(./dist/excel_rename_gui_v2.exe *)",
+      "Bash(awk 'NR>=2560' \"C:/Users/kss11/AppData/Local/Temp/claude/D--Project-devops-Release-claude/72de4a9a-77e1-41ae-9759-54ac021f95f3/tasks/bi1olnniq.output\")",
+      "Bash(read f *)"
     ]
   }
 }
