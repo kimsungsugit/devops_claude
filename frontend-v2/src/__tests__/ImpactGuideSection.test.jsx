@@ -209,4 +209,54 @@ describe('ImpactGuideSection', () => {
     expect(screen.getByText(/목표 미달/)).toBeInTheDocument();
     expect(screen.getByText(/직전 대비 회귀/)).toBeInTheDocument();
   });
+
+  // STS-IMPACT-010: impact.asil(ASIL 차등) 요약이 결정론적으로 표면화된다
+  it('렌더링: impact.asil이 있으면 ASIL 차등 검증 strip(escalation·MC/DC·미상)이 표시된다', () => {
+    // Arrange
+    const analysisResult = {
+      impactData: {
+        trigger: { changed_files: ['Ap.c'] },
+        changed_function_types: { foo: 'BODY' },
+        actions: {},
+        impact: { direct: ['foo'] },
+        asil: { max_changed: 'D', escalation: true, mcdc_required: true, coverage_target: 'MC/DC', unknown_changed_count: 2 },
+      },
+    };
+
+    // Act
+    render(<ImpactGuideSection job={mockJob} analysisResult={analysisResult} />);
+
+    // Assert: ASIL 차등 strip + escalation/MC/DC/미상 표면화
+    expect(screen.getByText(/ASIL 차등 검증/)).toBeInTheDocument();
+    expect(screen.getByText(/Escalation/)).toBeInTheDocument();
+    expect(screen.getByText(/MC\/DC 필수/)).toBeInTheDocument();
+    expect(screen.getByText(/ASIL 미상 2개/)).toBeInTheDocument();
+  });
+
+  // STS-IMPACT-011: regression_test_set(회귀시험 선정) 카드가 표시된다
+  it('렌더링: regression_test_set이 있으면 회귀시험 선정 카드(SUTS TC/SITS 체인)가 표시된다', () => {
+    // Arrange
+    const analysisResult = {
+      impactData: {
+        trigger: { changed_files: ['Ap.c'] },
+        changed_function_types: { foo: 'BODY' },
+        actions: {},
+        impact: { direct: ['foo'] },
+        regression_test_set: {
+          suts: { foo: ['TC_001', 'TC_002'] },
+          sits: { foo: ['CHAIN_A'] },
+          summary: { suts_tc_count: 2, sits_chain_count: 1, impacted_function_count: 1, coverage_target: 'MC/DC', mcdc_required: true },
+        },
+      },
+    };
+
+    // Act
+    render(<ImpactGuideSection job={mockJob} analysisResult={analysisResult} />);
+
+    // Assert: 회귀 카드 + 재실행 대상 통계 + 함수별 TC ("재실행 TC"는 stat-card·breakdown 헤더 양쪽 존재)
+    expect(screen.getByText(/회귀시험 선정/)).toBeInTheDocument();
+    expect(screen.getByText(/SUTS 재실행 TC \(함수별\)/)).toBeInTheDocument();
+    expect(screen.getByText(/SITS 영향 체인/)).toBeInTheDocument();
+    expect(screen.getByText('TC_001')).toBeInTheDocument();
+  });
 });

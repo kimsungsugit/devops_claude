@@ -76,6 +76,8 @@ export default function ImpactGuideSection({ job, analysisResult }) {
     for (const r of (coverageGap?.functions || [])) { if (r.function) m[r.function] = r; }
     return m;
   }, [coverageGap]);
+  // 회귀시험 선정: 영향 함수 → 재실행 대상 SUTS TC / SITS call-chain(ISO 26262 증거).
+  const regressionSet = impact?.regression_test_set ?? null;
 
   // Demo data for testing — simulates real .c file changes
   const demoFunctions = {
@@ -302,6 +304,28 @@ export default function ImpactGuideSection({ job, analysisResult }) {
           })}
         </div>
       )}
+      {/* ASIL 차등 검증 — 직접 변경 함수의 최대 ASIL → 검증강도(escalation·MC/DC 필수·커버리지 타깃)
+          를 결정론적으로 표면화(ai-guide 선택 호출과 독립, 항상 노출). 미상은 QM 단정 금지로 경고. */}
+      {asilInfo && (asilInfo.max_changed || asilInfo.escalation || (asilInfo.unknown_changed_count || 0) > 0) && (
+        <div className="panel" style={{ marginBottom: 12, borderLeft: `3px solid ${asilInfo.escalation ? 'var(--color-danger)' : 'var(--border)'}` }}>
+          <div className="text-sm" style={{ fontWeight: 700, marginBottom: 6 }}>🛡️ ASIL 차등 검증</div>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', fontSize: 11 }}>
+            <span>변경 최대 ASIL:&nbsp;
+              {asilInfo.max_changed && /^[A-D]$/.test(asilInfo.max_changed)
+                ? <span className={`pill ${/[CD]/.test(asilInfo.max_changed) ? 'pill-danger' : 'pill-warning'}`} style={{ fontSize: 9 }}>{asilInfo.max_changed}</span>
+                : <span className="text-muted">미상</span>}
+            </span>
+            {asilInfo.escalation && <StatusBadge tone="danger">Escalation (ASIL B+ 직접변경 — AUTO→검토)</StatusBadge>}
+            {asilInfo.mcdc_required && <span className="pill pill-danger" style={{ fontSize: 9 }}>MC/DC 필수</span>}
+            {asilInfo.coverage_target && <span className="pill pill-info" style={{ fontSize: 9 }}>커버리지 타깃: {asilInfo.coverage_target}</span>}
+            {(asilInfo.unknown_changed_count || 0) > 0 && (
+              <span className="pill pill-warning" style={{ fontSize: 9 }} title="ASIL 미상 직접변경 — 안전 등급 수동 확인 필요(QM 단정 금지)">
+                ASIL 미상 {asilInfo.unknown_changed_count}개
+              </span>
+            )}
+          </div>
+        </div>
+      )}
       {/* MC/DC delta — VectorCAST 커버리지 ASIL 타깃 대비 gap + 이력 회귀 요약. */}
       {coverageGap?.available && (
         <div className="panel" style={{ marginBottom: 12,
@@ -329,6 +353,59 @@ export default function ImpactGuideSection({ job, analysisResult }) {
           </div>
           {!coverageGap.summary?.had_baseline && (
             <div className="text-muted text-sm" style={{ marginTop: 4 }}>직전 스냅샷 없음 — 이번 실행을 기준으로 저장(다음 분석부터 Δ 표시).</div>
+          )}
+        </div>
+      )}
+      {/* 회귀시험 선정 — 영향 함수에 매핑된 기존 SUTS TC / SITS call-chain(재실행 대상 증거, ISO 26262). */}
+      {regressionSet?.summary && ((regressionSet.summary.suts_tc_count || 0) > 0 || (regressionSet.summary.sits_chain_count || 0) > 0) && (
+        <div className="panel" style={{ marginBottom: 12, borderLeft: '3px solid var(--color-info)' }}>
+          <div className="text-sm" style={{ fontWeight: 700, marginBottom: 6 }}>🔁 회귀시험 선정 (재실행 대상)</div>
+          <div className="stats-row">
+            <div className="stat-card">
+              <div className="text-muted text-sm">영향 함수</div>
+              <div style={{ fontSize: 20, fontWeight: 700 }}>{regressionSet.summary.impacted_function_count ?? 0}</div>
+            </div>
+            <div className="stat-card">
+              <div className="text-muted text-sm">SUTS 재실행 TC</div>
+              <div style={{ fontSize: 20, fontWeight: 700 }}>{regressionSet.summary.suts_tc_count ?? 0}</div>
+            </div>
+            <div className="stat-card">
+              <div className="text-muted text-sm">SITS 영향 체인</div>
+              <div style={{ fontSize: 20, fontWeight: 700 }}>{regressionSet.summary.sits_chain_count ?? 0}</div>
+            </div>
+          </div>
+          {Object.keys(regressionSet.suts || {}).length > 0 && (
+            <div style={{ marginTop: 8 }}>
+              <div className="text-sm" style={{ fontWeight: 600, marginBottom: 4 }}>SUTS 재실행 TC (함수별)</div>
+              <div style={{ maxHeight: 120, overflow: 'auto' }}>
+                {Object.entries(regressionSet.suts).slice(0, 12).map(([fn, tcs]) => (
+                  <div key={fn} style={{ fontSize: 10, padding: '2px 0' }}>
+                    <span style={{ fontFamily: 'monospace', fontWeight: 600 }}>{fn}</span>
+                    <span className="text-muted"> — {(tcs || []).length} TC </span>
+                    {(tcs || []).slice(0, 6).map((tc, i) => (
+                      <span key={i} className="pill pill-neutral" style={{ fontSize: 8, margin: 1 }}>{tc}</span>
+                    ))}
+                    {(tcs || []).length > 6 && <span className="text-muted" style={{ fontSize: 8 }}> +{(tcs || []).length - 6}</span>}
+                  </div>
+                ))}
+                {Object.keys(regressionSet.suts).length > 12 && (
+                  <div className="text-muted" style={{ fontSize: 9 }}>+{Object.keys(regressionSet.suts).length - 12}개 함수 더</div>
+                )}
+              </div>
+            </div>
+          )}
+          {Object.keys(regressionSet.sits || {}).length > 0 && (
+            <div style={{ marginTop: 8 }}>
+              <div className="text-sm" style={{ fontWeight: 600, marginBottom: 4 }}>SITS 영향 call-chain (함수별)</div>
+              <div style={{ maxHeight: 100, overflow: 'auto' }}>
+                {Object.entries(regressionSet.sits).slice(0, 10).map(([fn, chains]) => (
+                  <div key={fn} style={{ fontSize: 10, padding: '2px 0' }}>
+                    <span style={{ fontFamily: 'monospace', fontWeight: 600 }}>{fn}</span>
+                    <span className="text-muted"> — {(chains || []).length} 체인</span>
+                  </div>
+                ))}
+              </div>
+            </div>
           )}
         </div>
       )}
