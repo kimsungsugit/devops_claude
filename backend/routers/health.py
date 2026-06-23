@@ -26,6 +26,143 @@ except ImportError:
     psutil = None
 
 
+# ── 문서 미리보기 캐시 ────────────────────────────────────────────────────────
+# 페이지 이동/이미지 로드 시 거대 원본(예: 36MB UDS docx)을 resolver로 매번 다시
+# 읽고(cloudium은 IPC) python-docx로 전체 재파싱하던 비용을 제거한다.
+#  - _preview_bytes  : 원본 바이트(LRU + 바이트 예산). excel/csv 페이지 이동, docx 이미지 공용.
+#  - _preview_payload: docx 텍스트 시트(전체 행)(item cap + 바이트 예산). 페이지 이동은 캐시 슬라이스만.
+#  - _preview_relmap : docx 이미지 rId→media 경로 맵(작음, item cap만).
+# 무효화: ① TTL(_preview_ttl, 기본 120s). ② local 모드는 (mtime,size) 시그니처로 정확 무효화
+#   (cloudium은 backend가 U: 경로를 stat 못 함 → sig=None → TTL만). ③ file_mode 전환·
+#   /cache/clear 시 clear_preview_cache로 전량 무효화(cross-mode 오염 방지).
+import os as _os
+import threading as _threading
+import time as _time
+from collections import OrderedDict as _OrderedDict
+
+_PREVIEW_CACHE_LOCK = _threading.Lock()
+_PREVIEW_BYTES_BUDGET = 128 * 1024 * 1024   # 바이트 캐시 총량 상한
+_PREVIEW_PAYLOAD_BUDGET = 64 * 1024 * 1024  # docx payload 추정 텍스트 총량 상한
+_PREVIEW_PAYLOAD_MAX = 8                     # 파싱된 docx 페이로드 최대 보관 수
+_PREVIEW_RELMAP_MAX = 32                     # rId 맵 최대 보관 수(엔트리 작음)
+
+
+def _preview_ttl() -> float:
+    return float(getattr(config, "PREVIEW_CACHE_TTL", 120.0))
+
+
+def _path_sig(path: str):
+    """local 모드: (mtime_ns, size) 시그니처. cloudium(U: 경로 stat 불가)·오류 시 None.
+
+    None이면 get 경로에서 재-stat을 건너뛰어 추가 비용 0 → cloudium은 순수 TTL 동작.
+    """
+    try:
+        st = _os.stat(path)
+    except OSError:
+        return None
+    return (st.st_mtime_ns, st.st_size)
+
+
+class _PreviewCache:
+    """TTL + (mtime,size)시그니처 + LRU(+바이트 예산) 캐시.
+
+    모든 메서드는 _PREVIEW_CACHE_LOCK 보유 상태에서 호출한다(공개 헬퍼가 락 획득).
+    엔트리 = [ts, value, sig, size]. self.total은 size 합으로, 만료/시그니처불일치/
+    캡/예산 축출 모든 경로에서 일관되게 감산한다(phantom debt 방지).
+    """
+
+    def __init__(self, byte_budget: int = 0, item_cap: int = 0):
+        self.store: "_OrderedDict" = _OrderedDict()   # key -> [ts, value, sig, size]
+        self.byte_budget = byte_budget
+        self.item_cap = item_cap
+        self.total = 0
+
+    def _drop(self, key: str, ent) -> None:
+        self.store.pop(key, None)
+        self.total -= ent[3]
+
+    def get(self, key: str):
+        ent = self.store.get(key)
+        if ent is None:
+            return None
+        ts, value, sig, _size = ent
+        if _time.time() - ts > _preview_ttl():
+            self._drop(key, ent)
+            return None
+        # local 모드: 동일 path가 다른 내용으로 바뀌면(재생성/경로 재사용) 무효화.
+        if sig is not None:
+            cur = _path_sig(key)
+            if cur is not None and cur != sig:
+                self._drop(key, ent)
+                return None
+        self.store.move_to_end(key)
+        return value
+
+    def put(self, key: str, value, size: int, sig) -> None:
+        old = self.store.pop(key, None)
+        if old is not None:
+            self.total -= old[3]
+        self.store[key] = [_time.time(), value, sig, size]
+        self.total += size
+        if self.item_cap:
+            while len(self.store) > self.item_cap:
+                _k, ev = self.store.popitem(last=False)
+                self.total -= ev[3]
+        if self.byte_budget:
+            # 예산 초과 시 LRU 축출. 최근 1개는 보존(거대 단일 파일이 캐시를 무력화하지 않도록).
+            while self.total > self.byte_budget and len(self.store) > 1:
+                _k, ev = self.store.popitem(last=False)
+                self.total -= ev[3]
+
+    def clear(self) -> None:
+        self.store.clear()
+        self.total = 0
+
+
+_preview_bytes = _PreviewCache(byte_budget=_PREVIEW_BYTES_BUDGET)
+_preview_payload = _PreviewCache(byte_budget=_PREVIEW_PAYLOAD_BUDGET, item_cap=_PREVIEW_PAYLOAD_MAX)
+_preview_relmap = _PreviewCache(item_cap=_PREVIEW_RELMAP_MAX)
+
+
+def _preview_cache_get(cache: "_PreviewCache", key: str):
+    with _PREVIEW_CACHE_LOCK:
+        return cache.get(key)
+
+
+def _preview_cache_put(cache: "_PreviewCache", key: str, value, size: int, sig) -> None:
+    with _PREVIEW_CACHE_LOCK:
+        cache.put(key, value, size, sig)
+
+
+def _estimate_payload_size(sheets) -> int:
+    """docx payload(시트 전체 행) 추정 바이트(문자 수 합). 예산 산정용."""
+    total = 0
+    for s in sheets:
+        for row in s.get("rows", []):
+            for cell in row:
+                total += len(cell)
+    return total
+
+
+def _read_bytes_cached(resolver, path: str) -> bytes:
+    """resolver.read_bytes를 TTL+LRU 캐시. cloudium IPC/디스크 재read를 제거한다."""
+    cached = _preview_cache_get(_preview_bytes, path)
+    if cached is not None:
+        return cached
+    # IPC read는 락 밖에서 수행(락 점유 최소화). 동시 miss는 중복 read 후 last-write(무해).
+    data = resolver.read_bytes(path)
+    _preview_cache_put(_preview_bytes, path, data, len(data), _path_sig(path))
+    return data
+
+
+def clear_preview_cache() -> None:
+    """미리보기 캐시 전체 비움(테스트/모드 전환/cache-clear용)."""
+    with _PREVIEW_CACHE_LOCK:
+        _preview_bytes.clear()
+        _preview_payload.clear()
+        _preview_relmap.clear()
+
+
 class FileModeRequest(BaseModel):
     mode: str = "local"
     base_url: Optional[str] = None
@@ -105,6 +242,9 @@ async def set_file_mode(body: FileModeRequest):
     from backend.services.file_resolver import switch_mode
     kwargs = body.model_dump(exclude={"mode"}, exclude_none=True)
     resolver = switch_mode(body.mode, **kwargs)
+    # 모드/프리픽스 전환 시 미리보기 캐시 무효화 — 같은 path가 다른 출처(local FS vs
+    # 워커 마운트)를 가리킬 수 있어 cross-mode 캐시 오염을 막는다(리뷰 C2).
+    clear_preview_cache()
     # 재시작 간 모드 유지 — 선택을 config/file_mode.json에 영속 (in-memory 소실 fix).
     # allowed_prefixes/gate_process는 UI가 보낸 base 값만 저장한다. SCM 경로와
     # 사용자 추가 prefix는 각각 scm_registry.json / cloudium_extra_prefixes.json에
@@ -354,6 +494,197 @@ def _detect_preview_header_row(scan: list, is_test_spec: bool) -> int:
     return best_ri
 
 
+def _extract_docx_sheets(doc) -> List[Dict[str, Any]]:
+    """docx에서 미리보기 시트를 '전체 행'으로 추출(페이지 슬라이싱은 호출부).
+
+    반환 시트의 rows에는 전체 데이터가 담기고 total_rows/total_cols가 채워진다.
+    paginate=True 시트만 호출부에서 row_start:row_end로 슬라이싱한다(other_tables는
+    추출 시 100행으로 이미 캡됨 → paginate=False). 결과는 페이지 무관 → 캐시 안전.
+    """
+    ns_a = {'a': 'http://schemas.openxmlformats.org/drawingml/2006/main',
+            'r': 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'}
+    func_tables: List[Dict[str, str]] = []
+    comp_tables: List[Dict[str, str]] = []
+    attr_tables: List[Dict[str, str]] = []
+    other_tables: List[Dict[str, Any]] = []
+    for table in doc.tables:
+        first_text = table.rows[0].cells[0].text.strip() if table.rows else ""
+        if "Software Component" in first_text and "Information" in first_text:
+            comp_data: Dict[str, str] = {}
+            for row in table.rows[1:]:
+                cells = [c.text.strip() for c in row.cells]
+                if len(cells) >= 3:
+                    label = cells[0] or cells[1]
+                    value = cells[2]
+                    if label and "Software Component" not in label:
+                        comp_data[label] = value
+            if comp_data.get("ID") or comp_data.get("Name") or comp_data.get("SC ID") or comp_data.get("SC Name"):
+                comp_tables.append(comp_data)
+        elif first_text == "Attribute" and len(table.rows) <= 10:
+            attr_data: Dict[str, str] = {}
+            for row in table.rows:
+                cells = [c.text.strip() for c in row.cells]
+                if len(cells) >= 2 and cells[0]:
+                    attr_data[cells[0]] = cells[1] if len(cells) > 1 else ""
+            if attr_data:
+                attr_tables.append(attr_data)
+        elif "Function Information" in first_text:
+            func_data: Dict[str, str] = {}
+            for row in table.rows[1:]:
+                cells_raw = row.cells
+                cells = [c.text.strip() for c in cells_raw]
+                if len(cells) >= 3:
+                    label = cells[0] or cells[1]
+                    value = cells[2]
+                    if label and label != "[ Function Information ]":
+                        func_data[label] = value
+                    if label == "Logic Diagram":
+                        for cell in cells_raw[2:]:
+                            blips = cell._element.findall('.//a:blip', ns_a)
+                            for b in blips:
+                                embed = b.get('{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed')
+                                if embed:
+                                    func_data["_image_id"] = embed
+                                    break
+                            if func_data.get("_image_id"):
+                                break
+            if func_data.get("ID") or func_data.get("Name"):
+                func_tables.append(func_data)
+        else:
+            rows_data: List[List[str]] = []
+            headers: List[str] = []
+            for ri, row in enumerate(table.rows):
+                raw = [c.text.strip() for c in row.cells]
+                deduped: List[str] = []
+                prev = None
+                for c in raw:
+                    if c != prev:
+                        deduped.append(c)
+                    prev = c
+                if ri == 0:
+                    headers = deduped
+                else:
+                    rows_data.append(deduped)
+                if ri >= 100:
+                    break
+            if headers or rows_data:
+                # other_tables는 페이지네이션 미구현 → 100행 캡 + paginate=False(무한 페이저 방지).
+                other_tables.append({
+                    "name": f"Table {len(other_tables)+1}",
+                    "headers": headers,
+                    "rows": rows_data[:100],
+                    "paginate": False,
+                    "has_more": False,
+                    "total_rows": min(len(table.rows), 100),
+                    "total_cols": len(headers),
+                })
+
+    sheets: List[Dict[str, Any]] = []
+
+    if comp_tables:
+        comp_keys = ["SC ID", "SC Name", "ID", "Name", "Description", "ASIL", "Related ID",
+                     "Allocated Requirements", "Allocated Function", "Sub-Components", "Interface"]
+        comp_headers = [k for k in comp_keys if any(c.get(k) for c in comp_tables)]
+        extra = sorted(k for k in {k for c in comp_tables for k in c.keys()} - set(comp_headers)
+                       if k and not k.isdigit() and not k.startswith("[") and not k.startswith("N/A") and len(k) > 2)
+        comp_headers.extend(extra[:10])
+        comp_rows = [[c.get(k, "") for k in comp_headers] for c in comp_tables]
+        sheets.append({
+            "name": f"Components ({len(comp_tables)})",
+            "headers": comp_headers,
+            "rows": comp_rows,
+            "paginate": True,
+            "total_rows": len(comp_tables),
+            "total_cols": len(comp_headers),
+        })
+
+    if attr_tables:
+        attr_keys = sorted({k for a in attr_tables for k in a.keys()})
+        attr_rows = [[a.get(k, "") for k in attr_keys] for a in attr_tables]
+        sheets.append({
+            "name": f"Attributes ({len(attr_tables)})",
+            "headers": attr_keys,
+            "rows": attr_rows,
+            "paginate": True,
+            "total_rows": len(attr_tables),
+            "total_cols": len(attr_keys),
+        })
+
+    if func_tables:
+        func_keys = ["ID", "Name", "Prototype", "Description", "ASIL", "Related ID",
+                     "Input Parameters", "Output Parameters", "Called Function", "Calling Function"]
+        func_headers = [k for k in func_keys if any(f.get(k) for f in func_tables)]
+        has_images = any(f.get("_image_id") for f in func_tables)
+        if has_images:
+            func_headers.append("Logic Diagram")
+        func_rows = []
+        for f in func_tables:
+            # "Logic Diagram"만 제외(이미지 열은 별도 append). [:-1] 슬라이스는 has_images=False
+            # 시 마지막 실데이터 열을 누락시켜 열 수 불일치를 유발하므로 사용하지 않는다.
+            row_data = [f.get(k, "") for k in func_headers if k != "Logic Diagram"]
+            if has_images:
+                img_id = f.get("_image_id", "")
+                row_data.append(f"__IMG__{img_id}" if img_id else "")
+            func_rows.append(row_data)
+        sheets.append({
+            "name": f"Functions ({len(func_tables)})",
+            "headers": func_headers,
+            "rows": func_rows,
+            "paginate": True,
+            "total_rows": len(func_tables),
+            "total_cols": len(func_headers),
+        })
+
+    sheets.extend(other_tables[:10])
+
+    all_paras = [pg.text for pg in doc.paragraphs if pg.text.strip()]
+    sheets.append({
+        "name": "Content",
+        "headers": ["Text"],
+        "rows": [[t] for t in all_paras],
+        "paginate": True,
+        "total_rows": len(all_paras),
+        "total_cols": 1,
+    })
+
+    # Table N(generic) 제외 — 의미 있는 명명 시트만 남긴다.
+    useful = [s for s in sheets if not s["name"].startswith("Table ")]
+    return useful if useful else sheets[:3]
+
+
+def _docx_relmap(data: bytes) -> Dict[str, str]:
+    """docx의 word/_rels/document.xml.rels에서 이미지 rId→Target 맵을 추출(작음)."""
+    import io as _io
+    import zipfile
+    import xml.etree.ElementTree as ET
+    out: Dict[str, str] = {}
+    try:
+        with zipfile.ZipFile(_io.BytesIO(data)) as z:
+            rels_xml = z.read('word/_rels/document.xml.rels')
+    except (KeyError, zipfile.BadZipFile):
+        return out
+    try:
+        root = ET.fromstring(rels_xml)
+    except ET.ParseError:
+        return out
+    for rel in root:
+        rid = rel.get('Id')
+        target = rel.get('Target')
+        rtype = (rel.get('Type') or '').lower()
+        if rid and target and 'image' in rtype:
+            out[rid] = target
+    return out
+
+
+def _docx_image_member(target: str) -> str:
+    """rels Target(예: 'media/image1.png')을 zip 멤버 경로('word/media/image1.png')로."""
+    import posixpath
+    t = (target or '').replace('\\', '/')
+    if t.startswith('/'):
+        return t.lstrip('/')
+    return posixpath.normpath(posixpath.join('word', t))
+
+
 @router.post("/preview-excel")
 def preview_excel_file(body: PreviewExcelRequest):
     """범용 문서 미리보기 — Cloudium 모드에서는 worker IPC로 read 위임.
@@ -389,7 +720,8 @@ def preview_excel_file(body: PreviewExcelRequest):
     try:
         if ext in ('.xlsx', '.xls', '.xlsm'):
             import openpyxl
-            data = resolver.read_bytes(file_path)
+            # 바이트 캐시 → 페이지 이동 시 원본 재IPC/재read 제거(윈도우 파싱은 유지).
+            data = _read_bytes_cached(resolver, file_path)
             wb = openpyxl.load_workbook(io.BytesIO(data), read_only=True, data_only=True)
             sheets = []
 
@@ -467,173 +799,36 @@ def preview_excel_file(body: PreviewExcelRequest):
             return {"ok": True, "filename": p.name, "sheets": chosen, "sheet_names": [s["name"] for s in chosen]}
 
         elif ext == '.docx':
-            from report_gen.requirements import _safe_docx_open
-            data = resolver.read_bytes(file_path)
-            # 일부 SwUDS/SwDS docx는 임베드 이미지 파트가 깨져(BadZipFile) raw
-            # docx.Document가 실패 → 500. _safe_docx_open이 손상 멤버만 우회 복원해 연다.
-            doc = _safe_docx_open(io.BytesIO(data))
+            # 전체 시트 추출(전체 행)은 페이지 무관 → TTL 캐시. 페이지 이동 시
+            # 36MB 재IPC + python-docx 전체 재파싱을 제거하고 캐시 슬라이스만 수행.
+            payload = _preview_cache_get(_preview_payload, file_path)
+            if payload is None:
+                from report_gen.requirements import _safe_docx_open
+                data = _read_bytes_cached(resolver, file_path)
+                # 일부 SwUDS/SwDS docx는 임베드 이미지 파트가 깨져(BadZipFile) raw
+                # docx.Document가 실패 → 500. _safe_docx_open이 손상 멤버만 우회 복원해 연다.
+                doc = _safe_docx_open(io.BytesIO(data))
+                payload = _extract_docx_sheets(doc)
+                _preview_cache_put(_preview_payload, file_path, payload,
+                                   _estimate_payload_size(payload), _path_sig(file_path))
 
-            # Detect structured tables (UDS Function Info / SDS Component Info)
-            func_tables = []
-            comp_tables = []
-            attr_tables = []
-            other_tables = []
-            for i, table in enumerate(doc.tables):
-                first_text = table.rows[0].cells[0].text.strip() if table.rows else ""
-                if "Software Component" in first_text and "Information" in first_text:
-                    # SDS component table — parse as key-value
-                    comp_data = {}
-                    for row in table.rows[1:]:
-                        cells = [c.text.strip() for c in row.cells]
-                        if len(cells) >= 3:
-                            label = cells[0] or cells[1]
-                            value = cells[2]
-                            if label and "Software Component" not in label:
-                                comp_data[label] = value
-                    if comp_data.get("ID") or comp_data.get("Name") or comp_data.get("SC ID") or comp_data.get("SC Name"):
-                        comp_tables.append(comp_data)
-                elif first_text == "Attribute" and len(table.rows) <= 10:
-                    # SDS attribute table
-                    attr_data = {}
-                    for row in table.rows:
-                        cells = [c.text.strip() for c in row.cells]
-                        if len(cells) >= 2 and cells[0]:
-                            attr_data[cells[0]] = cells[1] if len(cells) > 1 else ""
-                    if attr_data:
-                        attr_tables.append(attr_data)
-                elif "Function Information" in first_text:
-                    func_data = {}
-                    ns_a = {'a': 'http://schemas.openxmlformats.org/drawingml/2006/main',
-                            'r': 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'}
-                    for row in table.rows[1:]:
-                        cells_raw = row.cells
-                        cells = [c.text.strip() for c in cells_raw]
-                        if len(cells) >= 3:
-                            label = cells[0] or cells[1]
-                            value = cells[2]
-                            if label and label != "[ Function Information ]":
-                                func_data[label] = value
-                            if label == "Logic Diagram":
-                                for cell in cells_raw[2:]:
-                                    blips = cell._element.findall('.//a:blip', ns_a)
-                                    for b in blips:
-                                        embed = b.get('{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed')
-                                        if embed:
-                                            func_data["_image_id"] = embed
-                                            break
-                                    if func_data.get("_image_id"):
-                                        break
-                    if func_data.get("ID") or func_data.get("Name"):
-                        func_tables.append(func_data)
+            # 페이지 슬라이싱(캐시된 전체 시트에서). 캐시 객체는 변형하지 않는다(슬라이스=복사).
+            chosen = []
+            for fs in payload:
+                if fs.get("paginate", True):
+                    rows = fs["rows"][row_start:row_end]
+                    has_more = fs["total_rows"] > row_end
                 else:
-                    rows_data = []
-                    headers = []
-                    for ri, row in enumerate(table.rows):
-                        # Deduplicate merged cells
-                        raw = [c.text.strip() for c in row.cells]
-                        deduped = []
-                        prev = None
-                        for c in raw:
-                            if c != prev:
-                                deduped.append(c)
-                            prev = c
-                        if ri == 0:
-                            headers = deduped
-                        else:
-                            rows_data.append(deduped)
-                        if ri >= 100:
-                            break
-                    if headers or rows_data:
-                        # other_tables는 항상 선두 100행만 read(페이지네이션 미구현) →
-                        # has_more=False로 고정해 무한 페이저 방지, total_rows도 100으로 캡.
-                        other_tables.append({
-                            "name": f"Table {len(other_tables)+1}",
-                            "headers": headers,
-                            "rows": rows_data[:100],
-                            "has_more": False,
-                            "total_rows": min(len(table.rows), 100),
-                            "total_cols": len(headers),
-                        })
-
-            sheets = []
-
-            # SDS Component list
-            if comp_tables:
-                comp_keys = ["SC ID", "SC Name", "ID", "Name", "Description", "ASIL", "Related ID",
-                             "Allocated Requirements", "Allocated Function", "Sub-Components", "Interface"]
-                comp_headers = [k for k in comp_keys if any(c.get(k) for c in comp_tables)]
-                # Add meaningful extra keys (skip numeric, bracket-prefixed)
-                extra = sorted(k for k in {k for c in comp_tables for k in c.keys()} - set(comp_headers)
-                               if k and not k.isdigit() and not k.startswith("[") and not k.startswith("N/A") and len(k) > 2)
-                comp_headers.extend(extra[:10])  # limit extras
-                comp_rows = [[c.get(k, "") for k in comp_headers] for c in comp_tables[row_start:row_end]]
-                sheets.append({
-                    "name": f"Components ({len(comp_tables)})",
-                    "headers": comp_headers,
-                    "rows": comp_rows,
-                    "total_rows": len(comp_tables),
-                    "total_cols": len(comp_headers),
+                    rows = fs["rows"]            # other_tables: 추출 시 100행 캡, 페이지네이션 없음
+                    has_more = False
+                chosen.append({
+                    "name": fs["name"],
+                    "headers": fs["headers"],
+                    "rows": rows,
+                    "has_more": has_more,
+                    "total_rows": fs["total_rows"],
+                    "total_cols": fs["total_cols"],
                 })
-
-            # SDS Attribute list
-            if attr_tables:
-                attr_keys = sorted({k for a in attr_tables for k in a.keys()})
-                attr_rows = [[a.get(k, "") for k in attr_keys] for a in attr_tables[row_start:row_end]]
-                sheets.append({
-                    "name": f"Attributes ({len(attr_tables)})",
-                    "headers": attr_keys,
-                    "rows": attr_rows,
-                    "total_rows": len(attr_tables),
-                    "total_cols": len(attr_keys),
-                })
-
-            # UDS Function list as structured table
-            if func_tables:
-                func_keys = ["ID", "Name", "Prototype", "Description", "ASIL", "Related ID",
-                              "Input Parameters", "Output Parameters", "Called Function", "Calling Function"]
-                func_headers = [k for k in func_keys if any(f.get(k) for f in func_tables)]
-                # Add Logic Diagram column if images exist
-                has_images = any(f.get("_image_id") for f in func_tables)
-                if has_images:
-                    func_headers.append("Logic Diagram")
-                func_rows = []
-                for f in func_tables[row_start:row_end]:
-                    # "Logic Diagram"만 제외(이미지 열은 아래서 별도 append). [:-1] 슬라이스는
-                    # has_images=False 시 마지막 실데이터 열(예: Calling Function)을 누락시켜
-                    # 헤더와 열 수 불일치 → 마지막 열 공백 렌더 버그를 유발하므로 제거.
-                    row_data = [f.get(k, "") for k in func_headers if k != "Logic Diagram"]
-                    if has_images:
-                        img_id = f.get("_image_id", "")
-                        row_data.append(f"__IMG__{img_id}" if img_id else "")
-                    func_rows.append(row_data)
-                sheets.append({
-                    "name": f"Functions ({len(func_tables)})",
-                    "headers": func_headers,
-                    "rows": func_rows,
-                    "total_rows": len(func_tables),
-                    "total_cols": len(func_headers),
-                })
-
-            # Other tables
-            sheets.extend(other_tables[:10])
-
-            # Paragraphs (페이지 윈도우 적용 — 본문이 길어도 페이지 이동 가능)
-            all_paras = [pg.text for pg in doc.paragraphs if pg.text.strip()]
-            paras = all_paras[row_start:row_end]
-            sheets.append({
-                "name": "Content",
-                "headers": ["Text"],
-                "rows": [[t] for t in paras],
-                "total_rows": len(all_paras),
-                "total_cols": 1,
-            })
-
-            # docx는 total_rows가 정확하므로 has_more = total_rows > row_end.
-            for s in sheets:
-                s.setdefault("has_more", s.get("total_rows", 0) > row_end)
-            # Keep only named sheets (Functions, Components, Attributes, Content) — remove generic Table N
-            useful = [s for s in sheets if not s["name"].startswith("Table ")]
-            chosen = useful if useful else sheets[:3]
             return {"ok": True, "filename": p.name, "sheets": chosen, "sheet_names": [s["name"] for s in chosen]}
 
         elif ext == '.txt':
@@ -651,7 +846,7 @@ def preview_excel_file(body: PreviewExcelRequest):
 
         elif ext in ('.csv', '.tsv'):
             import csv
-            data = resolver.read_bytes(file_path)
+            data = _read_bytes_cached(resolver, file_path)
             # 인코딩 자동 감지 — utf-8(BOM 포함) 우선, 실패 시 cp949
             try:
                 text = data.decode('utf-8-sig')
@@ -699,15 +894,28 @@ def preview_image(path: str, image_id: str):
     except (PermissionError, OSError) as exc:
         raise HTTPException(status_code=403, detail=f"파일 접근 거부: {exc}")
     try:
-        from report_gen.requirements import _safe_docx_open
-        data = resolver.read_bytes(path)
-        # 깨진 임베드 이미지 파트가 있어도 열리도록 안전 오픈(preview-excel와 동일 정책).
-        doc = _safe_docx_open(io.BytesIO(data))
-        rel = doc.part.rels.get(image_id)
-        if not rel or 'image' not in rel.reltype:
+        import mimetypes
+        import zipfile
+        # 바이트 캐시 + rId 맵 캐시 → 이미지 1장마다 36MB 재IPC + python-docx 전체
+        # 재파싱하던 비용 제거. zip에서 해당 이미지 멤버 1개만 read(전 blob 적재 회피).
+        data = _read_bytes_cached(resolver, path)
+        relmap = _preview_cache_get(_preview_relmap, path)
+        if relmap is None:
+            relmap = _docx_relmap(data)
+            _preview_cache_put(_preview_relmap, path, relmap, 0, _path_sig(path))
+        target = relmap.get(image_id)
+        if not target:
             raise HTTPException(status_code=404, detail="image not found")
-        blob = rel.target_part.blob
-        ct = rel.target_part.content_type or 'image/png'
+        member = _docx_image_member(target)
+        try:
+            with zipfile.ZipFile(io.BytesIO(data)) as z:
+                blob = z.read(member)
+        except Exception:  # noqa: BLE001 — 이미지는 비필수: 멤버 누락/CRC 손상/zlib 디코드
+            # 실패(KeyError·BadZipFile·zlib.error 등) → 유효한 1x1 PNG로 graceful 대체
+            # (깨진 이미지 아이콘 방지, _safe_docx_open과 동일 정책).
+            from report_gen.requirements import _DOCX_PNG_1x1
+            return Response(content=_DOCX_PNG_1x1, media_type='image/png')
+        ct = mimetypes.guess_type(member)[0] or 'image/png'
         return Response(content=blob, media_type=ct)
     except HTTPException:
         raise
@@ -828,4 +1036,5 @@ async def clear_cache():
     state.uds_view_cache.clear()
     state.source_sections_cache.clear()
     state.session_list_cache.clear()
+    clear_preview_cache()  # 리뷰 W6/W7: 미리보기 캐시도 비워 "All caches" 계약 충족 + 수동 무효화 레버
     return {"ok": True, "message": "All caches cleared"}

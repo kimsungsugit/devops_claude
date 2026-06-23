@@ -1068,12 +1068,17 @@ class TestPreviewExcelFixes:
     @pytest.fixture(autouse=True)
     def _force_local_resolver(self):
         from backend.services import file_resolver as _fr
+        from backend.routers import health as _health
         prev = _fr.get_resolver()
         _fr.set_resolver(_fr.LocalFileResolver())
+        # 미리보기 캐시는 path 키 + TTL이므로, mkstemp가 경로를 재사용하면 직전
+        # 테스트의 바이트/payload가 stale로 잡힐 수 있다 → 매 테스트 전후 비워 결정성 확보.
+        _health.clear_preview_cache()
         try:
             yield
         finally:
             _fr.set_resolver(prev)
+            _health.clear_preview_cache()
 
     def _xlsx(self, sheets: dict) -> str:
         """{sheet_name: [row, ...]} → 임시 .xlsx 경로."""
@@ -1319,5 +1324,237 @@ class TestPreviewExcelFixes:
                 assert "has_more" in s
                 if s["name"].startswith("Table "):
                     assert s["has_more"] is False
+        finally:
+            os.unlink(path)
+
+
+class TestPreviewCache:
+    """미리보기 캐시(바이트/payload/relmap) — 페이지 이동·이미지 로드 시 원본
+    재IPC + python-docx 전체 재파싱을 제거하는지 검증."""
+
+    class _CountingResolver:
+        """LocalFileResolver를 감싸 read_bytes 호출 수를 센다(나머지는 위임)."""
+
+        def __init__(self, inner):
+            self._inner = inner
+            self.read_calls = 0
+
+        def exists(self, path):
+            return self._inner.exists(path)
+
+        def read_bytes(self, path):
+            self.read_calls += 1
+            return self._inner.read_bytes(path)
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+    @pytest.fixture(autouse=True)
+    def _isolate(self):
+        from backend.routers import health as _health
+        from backend.services import file_resolver as _fr
+        prev = _fr.get_resolver()
+        _fr.set_resolver(_fr.LocalFileResolver())
+        _health.clear_preview_cache()
+        self._fr = _fr
+        self._health = _health
+        try:
+            yield
+        finally:
+            _fr.set_resolver(prev)
+            _health.clear_preview_cache()
+
+    def _install_counter(self):
+        counter = self._CountingResolver(self._fr.LocalFileResolver())
+        self._fr.set_resolver(counter)
+        return counter
+
+    def _xlsx_big(self) -> str:
+        import openpyxl
+        wb = openpyxl.Workbook()
+        wb.remove(wb.active)
+        ws = wb.create_sheet("Big")
+        ws.append(["ID", "Val"])
+        for i in range(250):
+            ws.append([str(i), f"v{i}"])
+        fd, path = tempfile.mkstemp(suffix=".xlsx")
+        os.close(fd)
+        wb.save(path)
+        return path
+
+    def _docx_multi(self) -> str:
+        docx = pytest.importorskip("docx")
+        d = docx.Document()
+        for i in range(150):
+            tb = d.add_table(rows=3, cols=3)
+            tb.rows[0].cells[0].text = "Function Information"
+            tb.rows[1].cells[0].text = "ID"
+            tb.rows[1].cells[2].text = f"SwFn_{i}"
+            tb.rows[2].cells[0].text = "Name"
+            tb.rows[2].cells[2].text = f"f{i}"
+        fd, path = tempfile.mkstemp(suffix=".docx")
+        os.close(fd)
+        d.save(path)
+        return path
+
+    def _docx_with_image(self):
+        docx = pytest.importorskip("docx")
+        import io
+        png = bytes.fromhex(
+            "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489"
+            "0000000a49444154789c63000100000500010d0a2db40000000049454e44ae426082"
+        )
+        d = docx.Document()
+        d.add_picture(io.BytesIO(png))
+        fd, path = tempfile.mkstemp(suffix=".docx")
+        os.close(fd)
+        d.save(path)
+        return path, png
+
+    def test_xlsx_bytes_cache_single_read_across_pages(self):
+        """xlsx 두 페이지 요청 → 원본 read 1회(바이트 캐시), 페이지 내용은 정확."""
+        counter = self._install_counter()
+        path = self._xlsx_big()
+        try:
+            r0 = client.post("/api/preview-excel", json={"path": path, "page": 0, "page_size": 100})
+            r2 = client.post("/api/preview-excel", json={"path": path, "page": 2, "page_size": 100})
+            assert r0.status_code == 200 and r2.status_code == 200
+            assert counter.read_calls == 1, counter.read_calls
+            s0 = next(s for s in r0.json()["sheets"] if s["name"] == "Big")
+            s2 = next(s for s in r2.json()["sheets"] if s["name"] == "Big")
+            assert s0["rows"][0] == ["0", "v0"] and s2["rows"][0] == ["200", "v200"]
+        finally:
+            os.unlink(path)
+
+    def test_docx_payload_cache_single_parse_across_pages(self):
+        """docx 두 페이지 요청 → read+parse 1회(payload 캐시), 페이지마다 다른 행."""
+        counter = self._install_counter()
+        path = self._docx_multi()
+        try:
+            r0 = client.post("/api/preview-excel", json={"path": path, "page": 0, "page_size": 100})
+            r1 = client.post("/api/preview-excel", json={"path": path, "page": 1, "page_size": 100})
+            assert r0.status_code == 200 and r1.status_code == 200
+            assert counter.read_calls == 1, counter.read_calls
+            f0 = next(s for s in r0.json()["sheets"] if s["name"].startswith("Functions"))
+            f1 = next(s for s in r1.json()["sheets"] if s["name"].startswith("Functions"))
+            assert len(f0["rows"]) == 100 and f0["has_more"] is True
+            assert len(f1["rows"]) == 50 and f1["has_more"] is False
+            assert f0["rows"][0] != f1["rows"][0]
+        finally:
+            os.unlink(path)
+
+    def test_ttl_expiry_reparses(self, monkeypatch):
+        """TTL=0 → 매 요청 캐시 만료 → 원본 재read(무효화 동작 확인)."""
+        counter = self._install_counter()
+        path = self._xlsx_big()
+        monkeypatch.setattr(self._health, "_preview_ttl", lambda: 0.0)
+        try:
+            client.post("/api/preview-excel", json={"path": path, "page": 0})
+            client.post("/api/preview-excel", json={"path": path, "page": 0})
+            assert counter.read_calls == 2, counter.read_calls
+        finally:
+            os.unlink(path)
+
+    def test_preview_image_returns_blob_and_caches(self):
+        """preview-image가 zip 멤버에서 이미지 바이트를 반환하고, 두 번째 요청은
+        바이트 캐시 히트로 원본을 재read하지 않는다(이미지마다 36MB 재IPC 제거)."""
+        counter = self._install_counter()
+        path, png = self._docx_with_image()
+        try:
+            with open(path, "rb") as f:
+                raw = f.read()
+            relmap = self._health._docx_relmap(raw)
+            assert relmap, "이미지 rId 맵이 비어있음"
+            rid = next(iter(relmap))
+            counter.read_calls = 0
+            self._health.clear_preview_cache()
+            r1 = client.get("/api/preview-image", params={"path": path, "image_id": rid})
+            r2 = client.get("/api/preview-image", params={"path": path, "image_id": rid})
+            assert r1.status_code == 200 and r2.status_code == 200
+            assert r1.content == png
+            assert r1.headers["content-type"].startswith("image/")
+            assert counter.read_calls == 1, counter.read_calls
+        finally:
+            os.unlink(path)
+
+    def test_preview_image_corrupt_member_falls_back_to_png(self):
+        """유효 rId이지만 이미지 멤버가 CRC 손상 → 1x1 PNG로 graceful 대체(200)."""
+        corrupt = TestPreviewExcelFixes()._corrupt_docx()
+        fd, path = tempfile.mkstemp(suffix=".docx")
+        os.close(fd)
+        with open(path, "wb") as f:
+            f.write(corrupt)
+        try:
+            relmap = self._health._docx_relmap(corrupt)
+            assert relmap
+            rid = next(iter(relmap))
+            r = client.get("/api/preview-image", params={"path": path, "image_id": rid})
+            assert r.status_code == 200, r.text
+            assert r.headers["content-type"] == "image/png"
+            assert r.content[:8] == bytes.fromhex("89504e470d0a1a0a")  # PNG signature
+        finally:
+            os.unlink(path)
+
+    def test_docx_image_member_resolution(self):
+        """rels Target → zip 멤버 경로 정규화(상대/절대/.. 처리)."""
+        m = self._health._docx_image_member
+        assert m("media/image1.png") == "word/media/image1.png"
+        assert m("/word/media/image2.png") == "word/media/image2.png"
+        assert m("../media/image3.png") == "media/image3.png"
+
+    def test_bytes_total_no_phantom_debt(self, monkeypatch):
+        """리뷰 C1: TTL 만료로 엔트리 회수 시 total이 정확히 감산 — 반복 만료에도
+        phantom debt가 누적되지 않아 바이트 캐시가 capacity-1로 붕괴하지 않는다."""
+        self._install_counter()
+        path = self._xlsx_big()
+        try:
+            with open(path, "rb") as f:
+                size = len(f.read())
+            monkeypatch.setattr(self._health, "_preview_ttl", lambda: 0.0)
+            for _ in range(5):
+                client.post("/api/preview-excel", json={"path": path, "page": 0})
+            # 5회 만료·재적재 후에도 total은 단일 파일 크기, 엔트리 1개(누수 0).
+            assert self._health._preview_bytes.total == size, self._health._preview_bytes.total
+            assert len(self._health._preview_bytes.store) == 1
+        finally:
+            os.unlink(path)
+
+    def test_local_sig_invalidation_same_path_new_content(self):
+        """리뷰 W5: local 모드에서 같은 path를 다른 내용으로 덮어쓰면 (mtime,size)
+        시그니처 불일치로 무효화되어 stale이 아닌 새 내용을 반환한다."""
+        import time
+
+        import openpyxl
+        self._install_counter()
+        path = self._xlsx_big()
+        try:
+            r1 = client.post("/api/preview-excel", json={"path": path, "page": 0})
+            s1 = next(s for s in r1.json()["sheets"] if s["name"] == "Big")
+            assert s1["rows"][0] == ["0", "v0"]
+            time.sleep(0.01)
+            wb = openpyxl.Workbook()
+            wb.remove(wb.active)
+            ws = wb.create_sheet("Big")
+            ws.append(["ID", "Val"])
+            for i in range(300):
+                ws.append([str(i), f"NEW{i}"])
+            wb.save(path)  # 같은 path, 다른 크기/내용
+            r2 = client.post("/api/preview-excel", json={"path": path, "page": 0})
+            s2 = next(s for s in r2.json()["sheets"] if s["name"] == "Big")
+            assert s2["rows"][0] == ["0", "NEW0"], s2["rows"][0]
+        finally:
+            os.unlink(path)
+
+    def test_clear_preview_cache_empties_all(self):
+        """리뷰 C2/W6: clear_preview_cache가 세 캐시를 비우고 total을 0으로 되돌린다
+        (모드 전환·/cache/clear 무효화 레버)."""
+        self._install_counter()
+        path = self._xlsx_big()
+        try:
+            client.post("/api/preview-excel", json={"path": path, "page": 0})
+            assert len(self._health._preview_bytes.store) >= 1
+            self._health.clear_preview_cache()
+            assert len(self._health._preview_bytes.store) == 0
+            assert self._health._preview_bytes.total == 0
         finally:
             os.unlink(path)
