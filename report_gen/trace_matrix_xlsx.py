@@ -197,7 +197,8 @@ def build_trace_xlsx(matrix: Any, meta: Optional[Dict[str, Any]] = None) -> byte
         ws.cell(rr, 2, _cs(b["name"]))
         col = 3
         if has_asil:
-            ac = ws.cell(rr, col, (b["asil"] + (" ⚠" if gaprow else "")) if b["asil"] else "–")
+            # 수식주입 가드: ASIL 값도 _cs 적용(echo 경로 신뢰 불가) — 폰트색은 raw 토큰 기준이라 무영향.
+            ac = ws.cell(rr, col, (_cs(b["asil"]) + (" ⚠" if gaprow else "")) if b["asil"] else "–")
             ac.alignment = center
             if b["asil"] in _ASIL_FONT:
                 ac.font = Font(bold=True, color=_ASIL_FONT[b["asil"]])

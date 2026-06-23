@@ -148,3 +148,22 @@ def test_formula_injection_guarded():
     # 링크테이블 target_id도 가드
     ws2 = _open(data)["링크테이블"]
     assert str(ws2.cell(2, 1).value).startswith("'=")
+
+
+def test_asil_cell_formula_injection_guarded():
+    # CRITICAL 회귀(11a859a 적대검증): 교차표 ASIL 셀도 _cs 가드를 거쳐야 한다.
+    # export 엔드포인트가 클라 matrix body를 echo하므로 ASIL 값이 신뢰 불가 입력 표면.
+    # 정상 'A' 행이 has_asil을 발동시켜 ASIL 열이 노출되고, 주입 행 셀이 무력화돼야 함.
+    m = {"rows": [
+        {"requirement_id": "R1", "requirement_name": "n1", "asil": "A", "sds_components": ["c1"]},
+        {"requirement_id": "R2", "requirement_name": "n2",
+         "asil": '=HYPERLINK("http://evil")', "sds_components": ["c1"]},
+    ]}
+    m["link_table"] = build_link_table(m)
+    ws = _open(build_trace_xlsx(m))["교차표"]
+    hr = next(r for r in range(1, 20) if ws.cell(r, 1).value == "요구사항")
+    headers = [ws.cell(hr, c).value for c in range(1, ws.max_column + 1)]
+    assert "ASIL" in headers   # 정상 A 행이 has_asil 발동 → ASIL 열 노출
+    ai = headers.index("ASIL") + 1
+    r2 = next(r for r in range(hr + 1, ws.max_row + 1) if ws.cell(r, 1).value == "R2")
+    assert str(ws.cell(r2, ai).value).startswith("'=")   # 수식 → ' 프리픽스로 무력화

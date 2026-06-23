@@ -32,9 +32,10 @@ _PREFIX_RE = re.compile(r"^[A-Za-z]+")
 
 # placeholder/미완성 토큰: SwCom_XX, FOO_NN, ??, <id>, TBD/TODO/FIXME 등.
 # 보수적으로 — 2글자+ X/N run(경계), 2개+ '?', 또는 명시 토큰만. 단일 X(MAX 등) 미매칭.
+# X/N run은 *대문자 한정*: placeholder 관례(SwCom_XX)는 대문자이고, 실제 C 식별자의
+# 소문자 토큰(eeprom_xx_write, g_nnn_idx)을 오탐하지 않도록 함. 키워드만 대소문자 무관.
 _PLACEHOLDER_RE = re.compile(
-    r"(?:\b|_)(?:X{2,}|N{2,}|\?{2,})(?:\b|_|$)|<[^>]*>|\b(?:TBD|TODO|FIXME)\b",
-    re.IGNORECASE,
+    r"(?:\b|_)(?:X{2,}|N{2,}|\?{2,})(?:\b|_|$)|<[^>]*>|\b(?i:TBD|TODO|FIXME)\b",
 )
 
 # DoS / 출력 비대 방지 캡 — counts(stats)는 전수, list만 절단.

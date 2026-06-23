@@ -122,6 +122,16 @@ def test_placeholder_conservative_single_letter():
     assert a["stats"]["placeholder_count"] == 0
 
 
+def test_placeholder_lowercase_identifier_not_matched():
+    # 적대검증 Info fix: 소문자 xx/nn run은 실제 C 식별자이지 placeholder 아님.
+    # placeholder 관례(SwCom_XX)는 대문자 → 대문자 한정으로 오탐 제거.
+    a = _audit(related_ids={"UDS": ["EEPROM_xx_write", "g_nnn_idx", "CAN_xx_handler"],
+                            "SDS": ["SwCom_XX"]})
+    assert a["placeholder_ids"].get("UDS", []) == []        # 소문자 → 미매칭
+    assert "SwCom_XX" in a["placeholder_ids"].get("SDS", [])  # 대문자 → 여전히 매칭
+    assert a["stats"]["placeholder_count"] == 1
+
+
 # ── clean / graceful ──
 def test_clean_when_empty():
     a = _audit()
