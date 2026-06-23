@@ -1,15 +1,51 @@
-import { useState, useRef, useCallback, useEffect } from 'react';
+import { useState, useRef, useCallback, useEffect, Fragment } from 'react';
 import { post, postSse, api, defaultCacheRoot } from '../../api.js';
 import { useJenkinsCfg, useToast } from '../../App.jsx';
 import StatusBadge from '../StatusBadge.jsx';
 
-const NODE_LABELS = {
-  classify_intent: '질문 분석',
-  build_context: '컨텍스트 수집',
-  select_model: '모델 선택',
-  approval_gate: '승인 확인',
-  llm_answer: '답변 생성',
-};
+// 챗 그래프 5노드(assistant_service.answer_chat) — 진행 stepper 단계 정의
+const STEP_DEFS = [
+  { key: 'classify_intent', label: '질문 분석' },
+  { key: 'build_context', label: '컨텍스트' },
+  { key: 'select_model', label: '모델' },
+  { key: 'approval_gate', label: '승인' },
+  { key: 'llm_answer', label: '답변' },
+];
+
+function formatMs(ms) {
+  if (ms == null || Number.isNaN(ms)) return '';
+  return ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${Math.round(ms)}ms`;
+}
+
+function StepIcon({ status }) {
+  if (status === 'active') return <span className="spinner" style={{ display: 'inline-block', width: 12, height: 12 }} />;
+  if (status === 'done') return <span style={{ color: 'var(--success, #16a34a)', fontSize: 12, fontWeight: 700 }}>✓</span>;
+  return <span aria-hidden style={{ color: 'var(--text-muted)', fontSize: 12, lineHeight: 1 }}>○</span>;
+}
+
+// graph_node_started/finished 이벤트를 5단계 진행 표시로 렌더 (경과시간 포함)
+function ProgressStepper({ stepStatus, onCancel }) {
+  return (
+    <div className="row" role="status" aria-live="polite"
+      style={{ gap: 2, alignItems: 'center', paddingLeft: 8, flexWrap: 'wrap', rowGap: 4 }}>
+      {STEP_DEFS.map((d, i) => {
+        const st = stepStatus[d.key]?.status || 'pending';
+        const ms = stepStatus[d.key]?.ms;
+        return (
+          <Fragment key={d.key}>
+            {i > 0 && <span aria-hidden style={{ width: 10, height: 1, background: 'var(--border)', margin: '0 2px' }} />}
+            <span className="row" style={{ gap: 3, alignItems: 'center', opacity: st === 'pending' ? 0.45 : 1 }}>
+              <StepIcon status={st} />
+              <span style={{ fontSize: 11, color: st === 'active' ? 'var(--accent)' : 'var(--text-muted)', fontWeight: st === 'active' ? 600 : 400 }}>{d.label}</span>
+              {st === 'done' && ms != null && <span className="text-muted" style={{ fontSize: 9 }}>{formatMs(ms)}</span>}
+            </span>
+          </Fragment>
+        );
+      })}
+      <button className="btn-sm" onClick={onCancel} style={{ fontSize: 10, marginLeft: 8 }}>중단</button>
+    </div>
+  );
+}
 
 function formatRagAnswer(data) {
   if (typeof data?.answer === 'string') return data.answer;
@@ -39,7 +75,8 @@ export default function AiAssistSection({ job, analysisResult }) {
   const [mode, setMode] = useState('ai'); // 'ai' = LLM 추론(/api/chat) | 'fast' = 벡터검색(RAG)
   const [threadId, setThreadId] = useState('');
   const [approval, setApproval] = useState(null);
-  const [progress, setProgress] = useState('');
+  const [stepStatus, setStepStatus] = useState({}); // { [node]: { status: 'active'|'done', ms } }
+  const [streaming, setStreaming] = useState(false); // SSE 스트리밍 중에만 stepper 표시
   const [ragStatus, setRagStatus] = useState(null);
   const [statusLoading, setStatusLoading] = useState(false);
   const [topK, setTopK] = useState(5);
@@ -65,7 +102,7 @@ export default function AiAssistSection({ job, analysisResult }) {
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages, approval, progress]);
+  }, [messages, approval, stepStatus]);
 
   const loadRagStatus = useCallback(async () => {
     setStatusLoading(true);
@@ -96,6 +133,7 @@ export default function AiAssistSection({ job, analysisResult }) {
     if (!q || pending) return;
     setInput('');
     setApproval(null);
+    setStepStatus({});
     setMessages(prev => [...prev, { role: 'user', content: q }, { role: 'assistant', content: '', pending: true }]);
     setPending(true);
 
@@ -121,6 +159,7 @@ export default function AiAssistSection({ job, analysisResult }) {
     // AI 추론 (SSE 스트리밍)
     const ctrl = new AbortController();
     abortRef.current = ctrl;
+    setStreaming(true);
     try {
       await postSse('/api/chat/stream', {
         mode: job?.url ? 'jenkins' : 'local',
@@ -137,8 +176,14 @@ export default function AiAssistSection({ job, analysisResult }) {
         signal: ctrl.signal,
         onEvent: (_evType, data) => {
           const t = data?.type;
-          if (t === 'graph_node_started') {
-            setProgress(NODE_LABELS[data.payload?.node] || '처리 중');
+          if (t === 'started') {
+            setStepStatus({});
+          } else if (t === 'graph_node_started') {
+            const node = data.payload?.node;
+            if (node) setStepStatus(s => ({ ...s, [node]: { status: 'active', ms: s[node]?.ms } }));
+          } else if (t === 'graph_node_finished') {
+            const node = data.payload?.node;
+            if (node) setStepStatus(s => ({ ...s, [node]: { status: 'done', ms: data.payload?.elapsed_ms } }));
           } else if (t === 'message') {
             const r = data;
             if (r.thread_id) {
@@ -164,7 +209,8 @@ export default function AiAssistSection({ job, analysisResult }) {
       }
     } finally {
       setPending(false);
-      setProgress('');
+      setStreaming(false);
+      setStepStatus({});
       abortRef.current = null;
       // W2: message 이벤트 없이 스트림이 끝난 경우(네트워크 이상 등) 빈 pending 버블 정리
       setMessages(prev => {
@@ -428,13 +474,9 @@ export default function AiAssistSection({ job, analysisResult }) {
             messages.map((m, i) => <ChatBubble key={i} message={m} onNextStep={send} />)
           )}
 
-          {/* 진행 표시 (AI 추론 스트리밍) */}
-          {pending && progress && (
-            <div className="row" style={{ gap: 8, alignItems: 'center', paddingLeft: 8 }}>
-              <span className="spinner" style={{ display: 'inline-block' }} />
-              <span className="text-sm text-muted">{progress}</span>
-              <button className="btn-sm" onClick={cancel} style={{ fontSize: 10 }}>중단</button>
-            </div>
+          {/* 진행 표시 (AI 추론 스트리밍) — graph 노드별 단계 stepper */}
+          {streaming && (
+            <ProgressStepper stepStatus={stepStatus} onCancel={cancel} />
           )}
 
           {/* 승인 카드 */}

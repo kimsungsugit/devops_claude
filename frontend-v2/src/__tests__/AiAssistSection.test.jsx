@@ -213,4 +213,36 @@ describe('AiAssistSection', () => {
     });
     expect(await screen.findByText('이전 대화')).toBeInTheDocument();
   });
+
+  // STS-AIASSIST-010: graph_node 이벤트 → 진행 stepper 단계/경과시간 렌더
+  it('인터랙션: graph_node_started/finished 이벤트로 진행 stepper가 단계와 경과시간을 표시한다', async () => {
+    // Arrange
+    const user = userEvent.setup();
+    const { post, postSse } = await import('../api.js');
+    post.mockResolvedValue(null);
+    // onEvent 를 동기 발사하고, finally 가 stepStatus 를 비우지 않도록 pending 유지
+    postSse.mockImplementation((_path, _body, opts) => {
+      opts.onEvent('message', { type: 'started' });
+      opts.onEvent('message', { type: 'graph_node_started', payload: { node: 'classify_intent' } });
+      opts.onEvent('message', { type: 'graph_node_finished', payload: { node: 'classify_intent', elapsed_ms: 123 } });
+      opts.onEvent('message', { type: 'graph_node_started', payload: { node: 'build_context' } });
+      return new Promise(() => {}); // 스트리밍 유지
+    });
+
+    render(<AiAssistSection job={mockJob} analysisResult={null} />);
+    const textarea = screen.getByPlaceholderText(/질문을 입력하세요/);
+    await user.type(textarea, '진행 표시 확인');
+
+    // Act
+    await user.click(screen.getByText('전송'));
+
+    // Assert: 5단계 라벨 + 완료 단계 경과시간 + 진행 상태 role
+    await waitFor(() => {
+      expect(screen.getByText('질문 분석')).toBeInTheDocument();
+    });
+    expect(screen.getByText('컨텍스트')).toBeInTheDocument();
+    expect(screen.getByText('모델')).toBeInTheDocument();
+    expect(screen.getByText('답변')).toBeInTheDocument();
+    expect(screen.getByText('123ms')).toBeInTheDocument(); // classify_intent 완료 경과
+  });
 });
