@@ -348,7 +348,15 @@ def build_trace_xlsx(matrix: Any, meta: Optional[Dict[str, Any]] = None) -> byte
                 ws4.cell(rr4, 1, "namespace 분포").font = bold
                 ws4.cell(rr4, 2, _cs(ns_txt))
                 rr4 += 1
-            for ci, h in enumerate(("출처", "참조 ID(raw)", "정규화", "namespace", "심각도"), 1):
+            # foreign의 V-model 계층 분포(예: SwDS(설계) 34건) — 계층참조가 정상임을 명시.
+            layer_map = integ.get("dangling_layer_summary") or {}
+            layer_txt = " · ".join(f"{k} {v}건" for k, v in layer_map.items() if v)
+            if layer_txt:
+                ws4.cell(rr4, 1, "계층참조 분포").font = bold
+                ws4.cell(rr4, 2, _cs(layer_txt))
+                rr4 += 1
+            # 계층 열은 끝(col 6)에 추가 — 기존 열 위치/심각도(col 5) 보존.
+            for ci, h in enumerate(("출처", "참조 ID(raw)", "정규화", "namespace", "심각도", "V-model 계층"), 1):
                 cc = ws4.cell(rr4, ci, h)
                 cc.font = bold
                 cc.fill = header_fill
@@ -367,6 +375,7 @@ def build_trace_xlsx(matrix: Any, meta: Optional[Dict[str, Any]] = None) -> byte
                     ws4.cell(rr4, 3, _cs(d.get("normalized")))
                     ws4.cell(rr4, 4, _cs(d.get("namespace")))
                     sc = ws4.cell(rr4, 5, "오참조 의심" if sev == "suspect" else "계층참조")
+                    ws4.cell(rr4, 6, _cs(d.get("layer")))
                     # 오참조 의심만 앰버 강조 — foreign(계층참조)은 무강조(정보성).
                     if sev == "suspect":
                         sc.fill = amber_fill

@@ -65,7 +65,8 @@ def test_dangling_refs_namespace_grouped():
     assert a["dangling_by_namespace"]["UDS"] == {"SWFN": 1}
     sds = a["dangling_refs"]["SDS"]
     assert sds == [
-        {"ref_id": "SwST_500", "normalized": "SWST_500", "namespace": "SWST", "severity": "foreign"}
+        {"ref_id": "SwST_500", "normalized": "SWST_500", "namespace": "SWST",
+         "severity": "foreign", "layer": "SwDS(설계)"}
     ]
 
 
@@ -120,6 +121,32 @@ def test_placeholder_conservative_single_letter():
     a = _audit(related_ids={"UDS": ["MAX_SPEED", "ANNUAL_RESET", "g_connect", "0xFF"]})
     assert a["placeholder_ids"] == {}
     assert a["stats"]["placeholder_count"] == 0
+
+
+def test_dangling_layer_labeled_swds():
+    # 설계계층 라벨(추가형): SwSTR/SwST/SwTK는 SwDS(설계) 계층으로 명시되어야 함.
+    # SRS namespace는 SWTR/SWEI 등 → SwSTR은 foreign이고 layer='SwDS(설계)'.
+    a = _audit(
+        req_ids=["SwTR_01", "SwEI_02"],
+        referenced={"UDS": {"SWSTR_07": "SwSTR_07", "SWST_03": "SwST_03", "SWTK_01": "SwTK_01"}},
+    )
+    foreign = a["dangling_refs"]["UDS"]
+    assert all(d["layer"] == "SwDS(설계)" for d in foreign)        # 각 항목에 layer 필드
+    assert a["dangling_layer_summary"] == {"SwDS(설계)": 3}        # foreign 계층 집계
+    assert a["stats"]["dangling_foreign_count"] == 3
+    assert a["stats"]["dangling_suspect_count"] == 0
+
+
+def test_dangling_layer_summary_excludes_suspect():
+    # suspect(SRS namespace 내 부재)는 계층차가 아니므로 layer_summary에 포함 안 됨.
+    a = _audit(
+        req_ids=["SwTR_01"],                          # srs namespace = {SWTR}
+        referenced={"UDS": {"SWTR_99": "SwTR_99",     # suspect (SWTR namespace 공유)
+                            "SWSTR_07": "SwSTR_07"}},  # foreign (SwDS 설계)
+    )
+    assert a["stats"]["dangling_suspect_count"] == 1
+    assert a["stats"]["dangling_foreign_count"] == 1
+    assert a["dangling_layer_summary"] == {"SwDS(설계)": 1}        # suspect 제외, foreign만
 
 
 def test_placeholder_lowercase_identifier_not_matched():

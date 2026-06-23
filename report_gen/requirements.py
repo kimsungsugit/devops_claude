@@ -2403,6 +2403,7 @@ def generate_uds_traceability_matrix(
         # (suspect/foreign 키 포함) — 소비자의 '?? default'/destructure 함정 방지.
         integrity = {
             "id_collisions": [], "dangling_refs": {}, "dangling_by_namespace": {},
+            "dangling_layer_summary": {},
             "placeholder_ids": {},
             "stats": {"collision_count": 0, "collision_affected_raw": 0,
                       "dangling_count": 0, "dangling_suspect_count": 0,

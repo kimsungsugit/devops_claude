@@ -814,6 +814,12 @@ function CrossMatrixView({ rows, linkTable, fullMatrix, exportMeta }) {
     .map(c => `${c.canonical} ← raw ${c.variant_count}종`).join('  ·  ');
   const danglingTitle = Object.entries(integ?.dangling_by_namespace || {})
     .map(([band, ns]) => `${band}: ${Object.entries(ns || {}).map(([k, v]) => `${k}×${v}`).join(', ')}`).join('   ');
+  // foreign(계층참조)의 V-model 계층 분포 — "어느 계층 ID인가" 명시(예: SwDS(설계)).
+  const layerSummary = integ?.dangling_layer_summary || {};
+  const layerEntries = Object.entries(layerSummary).filter(([, v]) => v > 0).sort((a, b) => b[1] - a[1]);
+  const layerTitle = layerEntries.map(([k, v]) => `${k} ${v}건`).join(' · ');
+  // 단일 계층이 foreign 전부를 차지하면 칩 라벨에 그 계층명을 직접 노출(예: 'SwDS(설계) 참조').
+  const foreignLayerLabel = layerEntries.length === 1 ? layerEntries[0][0] : null;
 
   if (built.length === 0) {
     return <div style={{ padding: 24, textAlign: 'center', color: 'var(--text-muted)' }}>표시할 요구사항이 없습니다.</div>;
@@ -880,14 +886,14 @@ function CrossMatrixView({ rows, linkTable, fullMatrix, exportMeta }) {
             오참조 의심 {integStats.dangling_suspect_count} ⚠
           </span>
         )}
-        {/* 계층참조(foreign) — SRS에 없는 namespace(다른 요구사항 계층, 구조적일 수 있음) — 정보성, 경보 아님 */}
+        {/* 계층참조(foreign) — SRS에 없는 namespace = 다른 V-model 계층 ID(예 SwDS 설계). 구조적 정상, 정보성 */}
         {integ && integStats.dangling_foreign_count > 0 && (
-          <span title={`계층참조 — SRS에 없는 namespace의 요구사항 참조(UDS/SDS가 다른 요구사항 계층 인용). 구조적일 수 있어 정보성으로만 표시. namespace 분포 → ${danglingTitle}`}
+          <span title={`계층참조 — SRS에 없는 namespace의 ID 참조. V-model상 다른 계층(예: SwSTR/SwST/SwTK는 SDS가 정의하는 설계 ID로 SRS 요구사항이 아님 → 정상). 결함 아니라 정보성.${layerTitle ? `\n계층 분포 → ${layerTitle}` : ''}\nnamespace → ${danglingTitle}`}
             style={{
               fontSize: 11, padding: '3px 8px', borderRadius: 12, fontWeight: 600,
               border: '1px solid var(--border)', background: 'var(--bg)', color: 'var(--text-muted)',
             }}>
-            계층참조 {integStats.dangling_foreign_count}
+            {foreignLayerLabel ? `${foreignLayerLabel} 참조` : '계층참조'} {integStats.dangling_foreign_count}
           </span>
         )}
         {integ && integStats.placeholder_count > 0 && (

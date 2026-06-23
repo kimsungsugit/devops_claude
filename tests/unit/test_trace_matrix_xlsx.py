@@ -108,10 +108,35 @@ def test_integrity_sheet_rendered():
         },
     }
     ws = _open(build_trace_xlsx(m))["정합성 감사"]
-    txt = [ws.cell(r, c).value for r in range(1, ws.max_row + 1) for c in range(1, 6)]
+    txt = [ws.cell(r, c).value for r in range(1, ws.max_row + 1) for c in range(1, 7)]
     assert any(v == "오참조 의심" for v in txt)   # suspect severity 셀
     assert any(v == "계층참조" for v in txt)      # foreign severity 셀
     assert ws.cell(2, 2).value and "오참조 의심 1" in ws.cell(2, 2).value
+
+
+def test_integrity_sheet_layer_column():
+    # 설계계층 라벨(추가형): dangling 표 끝에 'V-model 계층' 열 + layer 값 렌더.
+    m = {
+        "rows": [{"requirement_id": "R1", "sds_components": ["c1"]}],
+        "integrity": {
+            "id_collisions": [],
+            "dangling_refs": {"UDS": [
+                {"ref_id": "SwSTR_7", "normalized": "SWSTR_7", "namespace": "SWSTR",
+                 "severity": "foreign", "layer": "SwDS(설계)"},
+            ]},
+            "dangling_by_namespace": {"UDS": {"SWSTR": 1}},
+            "dangling_layer_summary": {"SwDS(설계)": 1},
+            "placeholder_ids": {},
+            "stats": {"collision_count": 0, "collision_affected_raw": 0, "dangling_count": 1,
+                      "dangling_suspect_count": 0, "dangling_foreign_count": 1,
+                      "placeholder_count": 0, "clean": False},
+        },
+    }
+    ws = _open(build_trace_xlsx(m))["정합성 감사"]
+    txt = [ws.cell(r, c).value for r in range(1, ws.max_row + 1) for c in range(1, 7)]
+    assert "V-model 계층" in txt          # 헤더 열
+    assert "SwDS(설계)" in txt            # layer 값 셀 + 계층참조 분포 라인
+    assert any(v and "계층참조 분포" in str(v) for v in txt)
 
 
 def test_sheet4_dos_capped():

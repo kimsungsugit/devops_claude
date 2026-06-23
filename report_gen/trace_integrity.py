@@ -43,6 +43,29 @@ _MAX_GROUP_LIST = 5000      # 충돌/dangling 목록 최대 항목
 _MAX_VARIANTS = 50          # 한 충돌 그룹의 raw 변형 표시 상한
 _MAX_PLACEHOLDER = 2000
 
+# namespace prefix(대문자) → V-model 계층 라벨. hiMA IDRules + 실문서 정의/참조 분포로 도출.
+# foreign dangling이 "오류"가 아니라 "어느 계층의 ID인가"를 명시해 V-model 구조차를 가독화.
+# (예: SwSTR/SwST/SwTK는 SDS가 정의하는 설계 ID → SRS 요구사항이 아닌 게 정상.)
+_VMODEL_LAYER = {
+    # 요구사항(SwRS): SRS universe가 정의하는 계열
+    "SWTR": "SwRS(요구사항)", "SWTSR": "SwRS(요구사항)", "SWNTR": "SwRS(요구사항)",
+    "SWNTSR": "SwRS(요구사항)", "SWCNF": "SwRS(요구사항)", "SWEI": "SwRS(요구사항)",
+    "SWEIF": "SwRS(요구사항)",
+    # 설계(SwDS): 아키텍처 설계서가 정의하는 ID — UDS가 참조하나 SRS엔 없음
+    "SWSTR": "SwDS(설계)", "SWST": "SwDS(설계)", "SWTK": "SwDS(설계)",
+    "SWCOM": "SwDS(설계)", "SWFN": "SwDS(설계)", "SWCON": "SwDS(설계)",
+    "SWPT": "SwDS(설계)",
+    # 단위설계(SwUDS)
+    "SWUFN": "SwUDS(단위설계)",
+    # 시스템 계층
+    "SYRS": "Sy(시스템)", "SYDS": "Sy(시스템)",
+}
+
+
+def _layer_of(namespace: str) -> str:
+    """namespace prefix → V-model 계층 라벨('기타'=미분류). 'SWSTR'→'SwDS(설계)'."""
+    return _VMODEL_LAYER.get(str(namespace or "").upper(), "기타")
+
 
 def _namespace(raw: str) -> str:
     """ID의 namespace prefix(선행 알파벳 run, 대문자) — dangling 정직 그룹핑용.
@@ -114,6 +137,8 @@ def build_integrity_audit(
     #   구조적일 수 있음 — 거짓경보 방지). dangling_suspect_count가 진짜 검토 우선순위.
     dangling_refs: Dict[str, List[Dict[str, str]]] = {}
     dangling_by_namespace: Dict[str, Dict[str, int]] = {}
+    # foreign(계층참조)을 V-model 계층별로 집계 — "어느 계층의 ID인가" 가독화(추가형).
+    dangling_layer_summary: Dict[str, int] = {}
     dangling_total = 0
     suspect_total = 0
     for band in sorted(referenced or {}):
@@ -127,10 +152,15 @@ def build_integrity_audit(
             raw = str(mapping.get(norm) or norm)
             ns = _namespace(raw)
             severity = "suspect" if ns in srs_namespaces else "foreign"
+            layer = _layer_of(ns)
             if severity == "suspect":
                 suspect_total += 1
+            else:
+                # foreign만 계층 집계(suspect는 SRS 내 오타라 계층차 아님).
+                dangling_layer_summary[layer] = dangling_layer_summary.get(layer, 0) + 1
             band_list.append(
-                {"ref_id": raw, "normalized": n, "namespace": ns, "severity": severity}
+                {"ref_id": raw, "normalized": n, "namespace": ns,
+                 "severity": severity, "layer": layer}
             )
             ns_counts[ns] = ns_counts.get(ns, 0) + 1
         if band_list:
@@ -157,6 +187,8 @@ def build_integrity_audit(
         "id_collisions": collisions[:_MAX_GROUP_LIST],
         "dangling_refs": dangling_refs,
         "dangling_by_namespace": dangling_by_namespace,
+        # foreign dangling의 V-model 계층 분포(예: {'SwDS(설계)': 34}) — 추가형.
+        "dangling_layer_summary": dict(sorted(dangling_layer_summary.items())),
         "placeholder_ids": placeholder_ids,
         "stats": {
             "collision_count": len(collisions),
