@@ -13,7 +13,9 @@
  * - fetch: globalThis mock
  */
 import { render, screen, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { post } from '../api.js';
 
 // ── Context mock ──────────────────────────────────────────────────────
 const mockToast = vi.fn();
@@ -182,5 +184,64 @@ describe('DocGenSection', () => {
     await waitFor(() => {
       expect(screen.getAllByText('UDS').length).toBeGreaterThanOrEqual(1);
     });
+  });
+
+  // ── 미리보기 서버 페이지네이션(refetch) ──────────────────────────
+  it('미리보기에서 "다음" 클릭 시 다음 page로 서버에 재요청한다', async () => {
+    // Arrange — STS 경로가 있는 SCM, post는 has_more=true 미리보기 반환
+    const user = userEvent.setup();
+    post.mockResolvedValue({
+      ok: true,
+      filename: 'sts.xlsm',
+      sheets: [{ name: 'Spec', headers: ['ID', 'Val'], rows: [['1', 'a'], ['2', 'b']], has_more: true, total_rows: 250, total_cols: 2 }],
+      sheet_names: ['Spec'],
+    });
+    const ar = {
+      cacheRoot: '.cache',
+      scmList: [{ id: 'scm1', name: 'R', source_root: '/src', linked_docs: { sts: '/docs/sts.xlsm' } }],
+    };
+
+    // Act — STS 행의 "보기" 클릭 → page 0 로드
+    render(<DocGenSection job={makeJob()} analysisResult={ar} />);
+    const viewBtns = await screen.findAllByText('보기');
+    await user.click(viewBtns[0]);
+
+    // Assert — page 0, page_size 100으로 요청
+    await waitFor(() => expect(post).toHaveBeenCalledWith(
+      '/api/preview-excel', expect.objectContaining({ page: 0, page_size: 100 }),
+    ));
+
+    // "다음 ›" 클릭 → page 1 재요청 (client slice가 아니라 서버 refetch)
+    const next = await screen.findByText('다음 ›');
+    post.mockClear();
+    await user.click(next);
+    await waitFor(() => expect(post).toHaveBeenCalledWith(
+      '/api/preview-excel', expect.objectContaining({ path: '/docs/sts.xlsm', page: 1 }),
+    ));
+  });
+
+  it('미리보기 has_more=false면 "다음" 버튼이 비활성(유령 페이지 방지)', async () => {
+    // Arrange
+    const user = userEvent.setup();
+    post.mockResolvedValue({
+      ok: true,
+      filename: 'sts.xlsm',
+      sheets: [{ name: 'Spec', headers: ['ID', 'Val'], rows: [['1', 'a']], has_more: false, total_rows: 1, total_cols: 2 }],
+      sheet_names: ['Spec'],
+    });
+    const ar = {
+      cacheRoot: '.cache',
+      scmList: [{ id: 'scm1', name: 'R', source_root: '/src', linked_docs: { sts: '/docs/sts.xlsm' } }],
+    };
+
+    // Act
+    render(<DocGenSection job={makeJob()} analysisResult={ar} />);
+    const viewBtns = await screen.findAllByText('보기');
+    await user.click(viewBtns[0]);
+    // 미리보기 패널 로드 대기('크게보기'는 미리보기 패널 고유 버튼)
+    await screen.findByText('크게보기');
+
+    // Assert — 단일 페이지(has_more=false, page 0): 페이저 자체가 렌더되지 않음
+    expect(screen.queryByText('다음 ›')).toBeNull();
   });
 });

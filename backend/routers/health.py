@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Depends, HTTPException
 
 from backend.dependencies.admin import require_admin
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator
 
 import config
 from backend.error_handler import APIError
@@ -48,8 +48,10 @@ class FileModeRequest(BaseModel):
 
 class PreviewExcelRequest(BaseModel):
     path: str
-    page: int = 0
-    page_size: int = 100
+    # 음수 page는 음수 슬라이스/iter_rows로 전체 노출/오작동 → ge=0. page_size 상한으로
+    # 단건 윈도우 비용(메모리/파싱) 제한(DoS 완화).
+    page: int = Field(default=0, ge=0)
+    page_size: int = Field(default=100, ge=1, le=500)
 
 
 class CheckAccessRequest(BaseModel):
@@ -299,8 +301,61 @@ async def remove_allowed_prefix(body: _RemovePrefixBody):
     }
 
 
+def _detect_preview_header_row(scan: list, is_test_spec: bool) -> int:
+    """미리보기용 헤더 행 추정.
+
+    - test-spec 시트: 기존 점수식(ID/상세 키워드 가중) 그대로 유지 → 회귀 0.
+    - 일반 시트: row0가 병합 제목행(비어있는 셀 다수)일 때 더 풍부한 헤더행으로 교체.
+      HSIS처럼 row0='Hardware Software'(1셀) / row1='Device,Pin,Signal...'(8셀+)인
+      경우 header_row=0 고정 탓에 `r[:len(headers)]`로 데이터가 1열로 잘리던 버그 해소.
+      row0보다 비어있지 않은 셀이 2개 이상 많은 행이 앞 8행 내에 있을 때만 교체(저위험).
+    """
+    if not scan:
+        return 0
+    if is_test_spec:
+        best_row, best_score = 0, -1
+        for ri, row in enumerate(scan[:15]):
+            non_empty = sum(1 for c in row if c.strip())
+            has_id = any('id' in c.lower() for c in row)
+            has_detail = any(kw in ' '.join(row).lower()
+                             for kw in ['title', 'description', 'method', 'environment', 'result', 'function'])
+            score = non_empty + (3 if has_id else 0) + (3 if has_detail else 0)
+            if score > best_score:
+                best_score, best_row = score, ri
+        return best_row
+    # 일반 시트: 병합 헤더는 데이터행보다 셀 수가 적으므로 '셀 개수'가 아닌
+    # '라벨 키워드 단어 수'로 헤더행을 판정한다. (HSIS row0=제목 1셀, row1=Device/
+    # Pin/Signal… 라벨 다수 → row1 선택). 라벨 단어가 0개면 데이터만 있는 시트로
+    # 보고 row0 유지(데이터행 오선택 방지). 1차=키워드수, 2차=비어있지 않은 셀 수.
+    import re as _re
+    HDR_WORDS = {
+        'id', 'name', 'type', 'desc', 'description', 'signal', 'device', 'pin',
+        'value', 'unit', 'address', 'addr', 'index', 'no', 'date', 'version',
+        'author', 'method', 'result', 'function', 'parameter', 'param', 'mapping',
+        'range', 'default', 'min', 'max', 'comment', 'remark', 'title', 'category',
+        'environment', 'item', 'status', 'priority', 'requirement', 'req', 'class',
+        '사용', '설명', '이름', '항목', '구분', '번호', '내용', '비고', '용도', '종류',
+    }
+    best_ri, best_key = 0, (-1, -1)
+    for ri, row in enumerate(scan[:10]):
+        non_empty = sum(1 for c in row if c.strip())
+        kw = sum(1 for c in row
+                 if c.strip() and any(w in HDR_WORDS for w in _re.findall(r'[a-z가-힣]+', c.lower())))
+        key = (kw, non_empty)
+        if key > best_key:
+            best_key, best_ri = key, ri
+    # 키워드가 전혀 없으면(데이터만 있는 시트) row0 유지.
+    if best_key[0] <= 0:
+        return 0
+    # 깊은 행(4행+)이 헤더로 뽑혔는데 키워드가 빈약(<3)하면 데이터행 오승격으로 보고 row0 유지.
+    # (row0이 약어 헤더라 키워드 0인데 데이터행이 우연히 라벨 단어를 가질 때의 오선택 방지)
+    if best_ri >= 4 and best_key[0] < 3:
+        return 0
+    return best_ri
+
+
 @router.post("/preview-excel")
-async def preview_excel_file(body: PreviewExcelRequest):
+def preview_excel_file(body: PreviewExcelRequest):
     """범용 문서 미리보기 — Cloudium 모드에서는 worker IPC로 read 위임.
 
     Cloudium 모드에서는 backend python.exe가 OS open 권한이 없으므로
@@ -340,58 +395,83 @@ async def preview_excel_file(body: PreviewExcelRequest):
 
             for name in wb.sheetnames:
                 ws = wb[name]
-                # Find actual header row (first row with multiple non-empty values)
-                header_row = 0
-                all_rows_raw = []
-                for ri, row in enumerate(ws.iter_rows(values_only=True)):
-                    str_row = [str(c or '') for c in row]
-                    all_rows_raw.append(str_row)
-                    if ri >= 200:
-                        break
+                # 헤더 탐지용으로 앞 15행만 스캔(윈도우 read — 7900행 시트 전체 파싱 회피).
+                head_scan = [[str(c or '') for c in row]
+                             for row in ws.iter_rows(min_row=1, max_row=15, values_only=True)]
 
-                # For test spec sheets, find the row with TC ID / Test Case ID
                 is_test_spec = any(kw in name.lower() for kw in ['test spec', 'test case', 'traceability', 'unit test'])
-                if is_test_spec:
-                    # Find the most detailed header row (with TC ID, Title, etc.)
-                    best_row = 0
-                    best_score = 0
-                    for ri, row in enumerate(all_rows_raw[:15]):
-                        non_empty = sum(1 for c in row if c.strip())
-                        has_id = any('id' in c.lower() for c in row)
-                        has_detail = any(kw in ' '.join(row).lower() for kw in ['title', 'description', 'method', 'environment', 'result', 'function'])
-                        score = non_empty + (3 if has_id else 0) + (3 if has_detail else 0)
-                        if score > best_score:
-                            best_score = score
-                            best_row = ri
-                    header_row = best_row
+                header_row = _detect_preview_header_row(head_scan, is_test_spec)
 
-                headers = all_rows_raw[header_row] if header_row < len(all_rows_raw) else []
+                headers = list(head_scan[header_row]) if header_row < len(head_scan) else []
                 while headers and not headers[-1].strip():
                     headers.pop()
-                all_data = all_rows_raw[header_row + 1:]
-                data_rows = [r[:len(headers)] for r in all_data[row_start:row_end]]
+                ncols = len(headers)
+
+                # 병합 헤더 직후의 빈 행(서브헤더 병합 공백)은 데이터가 아니므로 건너뜀.
+                # head_scan 기반이라 페이지 무관하게 일관(데이터 시작 오프셋 고정).
+                data_offset = header_row
+                for r in head_scan[header_row + 1:]:
+                    if any(c.strip() for c in r):
+                        break
+                    data_offset += 1
+
+                # ws.max_row(차원 태그)는 빈 행으로 부풀 수 있어(예: 7904인데 실데이터 3행)
+                # 페이지 네비게이션은 total이 아닌 has_more(윈도우 뒤를 peek)로 판정한다.
+                # max_row=None은 차원 태그 없는 xlsx(pandas/xlsxwriter 등) — iter_rows는
+                # max_row=None을 허용(시트 끝까지)하므로 None을 0으로 강제하지 않는다.
+                max_row = ws.max_row
+                # 데이터는 1-based로 data_offset+2 행부터. 요청 윈도우 + peek 한 번에 read.
+                win_min = data_offset + 2 + row_start
+                win_max = data_offset + 1 + row_end
+                PEEK = 200
+                read_max = (win_max + PEEK) if max_row is None else min(win_max + PEEK, max_row)
+                buf = []
+                if max_row is None or win_min <= max_row:
+                    for row in ws.iter_rows(min_row=win_min, max_row=read_max, values_only=True):
+                        buf.append([str(c or '') for c in row])
+                page_len = row_end - row_start
+                window = buf[:page_len]
+                peek = buf[page_len:]
+                # 후행 빈 행 제거(마지막 페이지/유령 페이지 깔끔하게).
+                while window and not any(c.strip() for c in window[-1]):
+                    window.pop()
+                data_rows = [(r[:ncols] if ncols else r) for r in window]
+                has_more = any(any(c.strip() for c in r) for r in peek)
+                # 시트 표시 여부(페이지 무관): head_scan에 헤더 다음 데이터가 있는가.
+                # 단, 머리말(병합 제목/개정이력)이 길어 데이터가 16행+에서 시작하면 head_scan만으론
+                # false-negative → 이미 읽은 buf 첫 행도 함께 검사(추가 I/O 없음).
+                has_head_data = (
+                    any(any(c.strip() for c in r) for r in head_scan[data_offset + 1:])
+                    or (len(buf) > 0 and any(c.strip() for c in buf[0]))
+                )
 
                 sheets.append({
                     "name": name,
                     "headers": headers,
                     "rows": data_rows,
-                    "total_rows": ws.max_row - header_row,
-                    "total_cols": len(headers),
+                    "has_more": has_more,
+                    # total_rows: max_row 기반 상한(부정확할 수 있음 — 탭 힌트 용도).
+                    "total_rows": max(0, (max_row or 0) - (data_offset + 1)),
+                    "total_cols": ncols,
+                    "_has_head_data": has_head_data,
                 })
 
             wb.close()
-            # Keep only sheets with meaningful data — skip Cover, History, Introduction
+            # 시트 목록은 페이지와 무관하게 안정적이어야 함(프론트 previewSheet 인덱스 유효 유지).
+            # → head_scan 기반 데이터 유무로 판정(윈도우 행이 아님). Cover/History만 제외.
             skip = {'cover', 'history'}
-            useful = [s for s in sheets
-                      if s["name"].lower() not in skip
-                      and len([r for r in s.get("rows", []) if any(c.strip() for c in r)]) >= 2]
-            return {"ok": True, "filename": p.name, "sheets": useful if useful else sheets, "sheet_names": [s["name"] for s in (useful if useful else sheets)]}
+            useful = [s for s in sheets if s["name"].lower() not in skip and s["_has_head_data"]]
+            chosen = useful if useful else sheets
+            for s in chosen:
+                s.pop("_has_head_data", None)
+            return {"ok": True, "filename": p.name, "sheets": chosen, "sheet_names": [s["name"] for s in chosen]}
 
         elif ext == '.docx':
-            import docx as _docx
-            import re as _re
+            from report_gen.requirements import _safe_docx_open
             data = resolver.read_bytes(file_path)
-            doc = _docx.Document(io.BytesIO(data))
+            # 일부 SwUDS/SwDS docx는 임베드 이미지 파트가 깨져(BadZipFile) raw
+            # docx.Document가 실패 → 500. _safe_docx_open이 손상 멤버만 우회 복원해 연다.
+            doc = _safe_docx_open(io.BytesIO(data))
 
             # Detect structured tables (UDS Function Info / SDS Component Info)
             func_tables = []
@@ -464,11 +544,14 @@ async def preview_excel_file(body: PreviewExcelRequest):
                         if ri >= 100:
                             break
                     if headers or rows_data:
+                        # other_tables는 항상 선두 100행만 read(페이지네이션 미구현) →
+                        # has_more=False로 고정해 무한 페이저 방지, total_rows도 100으로 캡.
                         other_tables.append({
                             "name": f"Table {len(other_tables)+1}",
                             "headers": headers,
                             "rows": rows_data[:100],
-                            "total_rows": len(table.rows),
+                            "has_more": False,
+                            "total_rows": min(len(table.rows), 100),
                             "total_cols": len(headers),
                         })
 
@@ -483,11 +566,11 @@ async def preview_excel_file(body: PreviewExcelRequest):
                 extra = sorted(k for k in {k for c in comp_tables for k in c.keys()} - set(comp_headers)
                                if k and not k.isdigit() and not k.startswith("[") and not k.startswith("N/A") and len(k) > 2)
                 comp_headers.extend(extra[:10])  # limit extras
-                comp_rows = [[c.get(k, "") for k in comp_headers] for c in comp_tables[:200]]
+                comp_rows = [[c.get(k, "") for k in comp_headers] for c in comp_tables[row_start:row_end]]
                 sheets.append({
                     "name": f"Components ({len(comp_tables)})",
                     "headers": comp_headers,
-                    "rows": comp_rows[:100],
+                    "rows": comp_rows,
                     "total_rows": len(comp_tables),
                     "total_cols": len(comp_headers),
                 })
@@ -495,11 +578,11 @@ async def preview_excel_file(body: PreviewExcelRequest):
             # SDS Attribute list
             if attr_tables:
                 attr_keys = sorted({k for a in attr_tables for k in a.keys()})
-                attr_rows = [[a.get(k, "") for k in attr_keys] for a in attr_tables[:200]]
+                attr_rows = [[a.get(k, "") for k in attr_keys] for a in attr_tables[row_start:row_end]]
                 sheets.append({
                     "name": f"Attributes ({len(attr_tables)})",
                     "headers": attr_keys,
-                    "rows": attr_rows[:100],
+                    "rows": attr_rows,
                     "total_rows": len(attr_tables),
                     "total_cols": len(attr_keys),
                 })
@@ -515,7 +598,10 @@ async def preview_excel_file(body: PreviewExcelRequest):
                     func_headers.append("Logic Diagram")
                 func_rows = []
                 for f in func_tables[row_start:row_end]:
-                    row_data = [f.get(k, "") for k in func_headers[:-1] if k != "Logic Diagram"]
+                    # "Logic Diagram"만 제외(이미지 열은 아래서 별도 append). [:-1] 슬라이스는
+                    # has_images=False 시 마지막 실데이터 열(예: Calling Function)을 누락시켜
+                    # 헤더와 열 수 불일치 → 마지막 열 공백 렌더 버그를 유발하므로 제거.
+                    row_data = [f.get(k, "") for k in func_headers if k != "Logic Diagram"]
                     if has_images:
                         img_id = f.get("_image_id", "")
                         row_data.append(f"__IMG__{img_id}" if img_id else "")
@@ -523,7 +609,7 @@ async def preview_excel_file(body: PreviewExcelRequest):
                 sheets.append({
                     "name": f"Functions ({len(func_tables)})",
                     "headers": func_headers,
-                    "rows": func_rows[:100],
+                    "rows": func_rows,
                     "total_rows": len(func_tables),
                     "total_cols": len(func_headers),
                 })
@@ -531,28 +617,35 @@ async def preview_excel_file(body: PreviewExcelRequest):
             # Other tables
             sheets.extend(other_tables[:10])
 
-            # Paragraphs
-            paras = [pg.text for pg in doc.paragraphs if pg.text.strip()][:200]
+            # Paragraphs (페이지 윈도우 적용 — 본문이 길어도 페이지 이동 가능)
+            all_paras = [pg.text for pg in doc.paragraphs if pg.text.strip()]
+            paras = all_paras[row_start:row_end]
             sheets.append({
                 "name": "Content",
                 "headers": ["Text"],
-                "rows": [[t] for t in paras[:100]],
-                "total_rows": len(paras),
+                "rows": [[t] for t in paras],
+                "total_rows": len(all_paras),
                 "total_cols": 1,
             })
 
+            # docx는 total_rows가 정확하므로 has_more = total_rows > row_end.
+            for s in sheets:
+                s.setdefault("has_more", s.get("total_rows", 0) > row_end)
             # Keep only named sheets (Functions, Components, Attributes, Content) — remove generic Table N
             useful = [s for s in sheets if not s["name"].startswith("Table ")]
-            return {"ok": True, "filename": p.name, "sheets": useful if useful else sheets[:3], "sheet_names": [s["name"] for s in (useful if useful else sheets[:3])]}
+            chosen = useful if useful else sheets[:3]
+            return {"ok": True, "filename": p.name, "sheets": chosen, "sheet_names": [s["name"] for s in chosen]}
 
         elif ext == '.txt':
             text = resolver.read_text(file_path, encoding='utf-8')
-            lines = text.splitlines()[:200]
+            all_lines = text.splitlines()
+            lines = all_lines[row_start:row_end]
             return {"ok": True, "filename": p.name, "sheets": [{
                 "name": "Content",
                 "headers": ["Line"],
-                "rows": [[l] for l in lines[:100]],
-                "total_rows": len(lines),
+                "rows": [[l] for l in lines],
+                "has_more": len(all_lines) > row_end,
+                "total_rows": len(all_lines),
                 "total_cols": 1,
             }], "sheet_names": ["Content"]}
 
@@ -572,7 +665,8 @@ async def preview_excel_file(body: PreviewExcelRequest):
             return {"ok": True, "filename": p.name, "sheets": [{
                 "name": "Sheet1",
                 "headers": headers,
-                "rows": data_rows[:100],
+                "rows": data_rows,
+                "has_more": max(0, len(all_rows) - 1) > row_end,
                 "total_rows": max(0, len(all_rows) - 1),
                 "total_cols": len(headers),
             }], "sheet_names": ["Sheet1"]}
@@ -587,7 +681,7 @@ async def preview_excel_file(body: PreviewExcelRequest):
 
 
 @router.get("/preview-image")
-async def preview_image(path: str, image_id: str):
+def preview_image(path: str, image_id: str):
     """docx 문서에서 이미지 추출 반환.
 
     Cloudium 모드에서는 worker IPC로 read 위임 (backend 직접 open 시
@@ -605,9 +699,10 @@ async def preview_image(path: str, image_id: str):
     except (PermissionError, OSError) as exc:
         raise HTTPException(status_code=403, detail=f"파일 접근 거부: {exc}")
     try:
-        import docx as _docx
+        from report_gen.requirements import _safe_docx_open
         data = resolver.read_bytes(path)
-        doc = _docx.Document(io.BytesIO(data))
+        # 깨진 임베드 이미지 파트가 있어도 열리도록 안전 오픈(preview-excel와 동일 정책).
+        doc = _safe_docx_open(io.BytesIO(data))
         rel = doc.part.rels.get(image_id)
         if not rel or 'image' not in rel.reltype:
             raise HTTPException(status_code=404, detail="image not found")

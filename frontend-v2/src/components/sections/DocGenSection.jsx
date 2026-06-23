@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import { api, post, defaultCacheRoot, getUsername } from '../../api.js';
 import { useJenkinsCfg, useToast } from '../../App.jsx';
 
@@ -32,6 +32,9 @@ async function pollStsProgress(jobId, action, jobUrl, { onMsg, signal, prefix = 
     if (p.status === 'failed' || p.status === 'error') return { error: p.error || p.message || '실패', ...p };
   }
 }
+
+// 미리보기 서버 페이지네이션 한 페이지 행 수(백엔드 page_size 기본값과 일치).
+const PREVIEW_PAGE_SIZE = 100;
 
 const DOC_TYPES = [
   { key: 'uds', label: 'UDS', icon: '📘', desc: 'Unit Design Specification' },
@@ -278,6 +281,9 @@ export default function DocGenSection({ job, analysisResult }) {
   const [previewLoading, setPreviewLoading] = useState(false);
   const [previewSheet, setPreviewSheet] = useState(0);
   const [fullscreen, setFullscreen] = useState(false);
+  // 미리보기 요청 시퀀스 — 동시/연속 요청 시 늦게 도착한 stale 응답이 최신 화면을
+  // 덮어쓰는 것 방지(예: 시트전환 fetch 중 다른 문서 클릭 → wrong-document 표시).
+  const previewReqRef = useRef(0);
 
   const allDocs = [
     { key: 'srs', label: 'SRS', type: 'input', path: localDocPaths.srs || linkedDocs.srs || '' },
@@ -290,22 +296,41 @@ export default function DocGenSection({ job, analysisResult }) {
     { key: 'sits', label: 'SITS', type: 'output', path: localDocPaths.sits || linkedDocs.sits || '' },
   ];
 
-  const loadDocPreview = useCallback(async (docKey, path) => {
+  // page/sheet 변경 시 서버에서 해당 윈도우를 재요청(refetch). 백엔드가 page_size
+  // 만큼만 윈도우 read하므로 클라이언트 슬라이스로는 다음 페이지 데이터를 가질 수 없다.
+  // resetSheet=true면 새 문서(시트 0부터), false면 같은 문서의 페이지/시트 이동.
+  // (라벨은 모든 입력/산출물에서 key 대문자와 동일 — SRS/SDS/HSIS/UDS/STS/SUTS/SITS)
+  const loadDocPreview = useCallback(async (docKey, path, page = 0, resetSheet = true) => {
     if (!path) { toast('warning', '문서 경로가 등록되지 않았습니다.'); return; }
+    const reqId = ++previewReqRef.current;   // 이 요청의 시퀀스 번호
     setPreviewLoading(true);
-    setDocPreview(null);
-    setPreviewSheet(0);
+    if (resetSheet) setPreviewSheet(0);
     try {
       const filename = path.split(/[\\/]/).pop();
-      // Use generic Excel preview API for all document types
-      const data = await post('/api/preview-excel', { path });
-      setDocPreview({ key: docKey, label: allDocs.find(d => d.key === docKey)?.label || docKey.toUpperCase(), filename, data, _path: path });
+      // Use generic Excel preview API for all document types (server-side pagination)
+      const data = await post('/api/preview-excel', { path, page, page_size: PREVIEW_PAGE_SIZE });
+      if (reqId !== previewReqRef.current) return;   // 더 새 요청이 시작됨 → stale 응답 폐기
+      setDocPreview({ key: docKey, label: docKey.toUpperCase(), filename, data, _path: path, page });
     } catch (e) {
+      if (reqId !== previewReqRef.current) return;   // stale 에러 무시
       toast('error', `문서 미리보기 실패: ${e.message}`);
     } finally {
-      setPreviewLoading(false);
+      if (reqId === previewReqRef.current) setPreviewLoading(false);
     }
   }, [toast]);
+
+  // 페이지 이동(같은 시트 유지) — 서버 윈도우 재요청.
+  const gotoPreviewPage = useCallback((newPage) => {
+    if (!docPreview || newPage < 0) return;
+    loadDocPreview(docPreview.key, docPreview._path, newPage, false);
+  }, [docPreview, loadDocPreview]);
+
+  // 시트 전환 — 해당 시트를 page 0부터 보여주기 위해 page 0 재요청 + previewSheet 갱신.
+  const switchPreviewSheet = useCallback((sheetIdx) => {
+    if (!docPreview) return;
+    setPreviewSheet(sheetIdx);
+    loadDocPreview(docPreview.key, docPreview._path, 0, false);
+  }, [docPreview, loadDocPreview]);
 
   return (
     <div>
@@ -354,7 +379,9 @@ export default function DocGenSection({ job, analysisResult }) {
       {docPreview && <DocPreviewPanel
         docPreview={docPreview}
         previewSheet={previewSheet}
-        setPreviewSheet={setPreviewSheet}
+        onSwitchSheet={switchPreviewSheet}
+        onGotoPage={gotoPreviewPage}
+        loading={previewLoading}
         fullscreen={fullscreen}
         setFullscreen={setFullscreen}
         onClose={() => { setDocPreview(null); setFullscreen(false); }}
@@ -590,16 +617,16 @@ function VectorCastExport({ job, analysisResult, cfg, cacheRoot }) {
   );
 }
 
-/* ── Document Preview Panel (inline / fullscreen) ── */
-function DocPreviewPanel({ docPreview, previewSheet, setPreviewSheet, fullscreen, setFullscreen, onClose }) {
+/* ── Document Preview Panel (inline / fullscreen) ──
+ * 서버 사이드 페이지네이션: 백엔드가 page_size 윈도우만 반환하고 has_more로 다음
+ * 페이지 존재 여부를 알려준다. 페이지/시트 이동은 부모(onGotoPage/onSwitchSheet)가
+ * 서버에 재요청. (이전엔 client slice가 page를 무시 + 200행 캡 → "페이지 안넘어감") */
+function DocPreviewPanel({ docPreview, previewSheet, onSwitchSheet, onGotoPage, loading, fullscreen, setFullscreen, onClose }) {
   const sheets = docPreview.data?.sheets || [];
   const sheet = sheets[previewSheet];
-  const [page, setPage] = useState(0);
-  const pageSize = fullscreen ? 200 : 100;
-  const docPath = docPreview.data?.filename ? undefined : undefined; // path from allDocs
+  const page = docPreview.page ?? 0;
 
-  // Reset page when switching sheets
-  const switchSheet = (i) => { setPreviewSheet(i); setPage(0); };
+  const switchSheet = (i) => { if (i !== previewSheet) onSwitchSheet(i); };
 
   const containerStyle = fullscreen ? {
     position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, zIndex: 9999,
@@ -644,10 +671,10 @@ function DocPreviewPanel({ docPreview, previewSheet, setPreviewSheet, fullscreen
       {/* Table */}
       {sheet ? (() => {
         const headers = sheet.headers || [];
-        const allRows = sheet.rows || [];
-        const totalRows = sheet.total_rows ?? allRows.length;
-        const rows = allRows.slice(0, pageSize);
-        const totalPages = Math.ceil(totalRows / pageSize);
+        // 서버가 이미 요청 페이지 윈도우만 반환 — 클라이언트 슬라이스 없이 그대로 렌더.
+        const rows = sheet.rows || [];
+        const startRow = page * PREVIEW_PAGE_SIZE;
+        const hasMore = !!sheet.has_more;
 
         const renderCell = (cell, ci) => {
           const val = String(cell ?? '');
@@ -688,16 +715,17 @@ function DocPreviewPanel({ docPreview, previewSheet, setPreviewSheet, fullscreen
                 ))}
               </tbody>
             </table>
-            {/* Pagination */}
-            {totalRows > pageSize && (
-              <div className="row" style={{ justifyContent: 'center', gap: 6, padding: '8px 0' }}>
-                <button className="btn-sm" onClick={() => setPage(0)} disabled={page === 0}>«</button>
-                <button className="btn-sm" onClick={() => setPage(p => p - 1)} disabled={page === 0}>‹</button>
+            {/* Pagination — 서버 윈도우(has_more) 기반. 총 행수가 부정확할 수 있어
+                표시 범위만 노출하고 '다음'은 has_more로 제어(유령 페이지 방지). */}
+            {(page > 0 || hasMore) && (
+              <div className="row" style={{ justifyContent: 'center', gap: 6, padding: '8px 0', alignItems: 'center' }}>
+                <button className="btn-sm" onClick={() => onGotoPage(0)} disabled={page === 0 || loading}>« 처음</button>
+                <button className="btn-sm" onClick={() => onGotoPage(page - 1)} disabled={page === 0 || loading}>‹ 이전</button>
                 <span className="text-sm" style={{ padding: '4px 8px' }}>
-                  {page * pageSize + 1}~{Math.min((page + 1) * pageSize, totalRows)} / {totalRows}행
+                  {rows.length > 0 ? `${startRow + 1}~${startRow + rows.length}행` : '데이터 없음'} · {page + 1}페이지
+                  {loading && <span className="spinner" style={{ marginLeft: 6, width: 12, height: 12, display: 'inline-block' }} />}
                 </span>
-                <button className="btn-sm" onClick={() => setPage(p => p + 1)} disabled={page >= totalPages - 1}>›</button>
-                <button className="btn-sm" onClick={() => setPage(totalPages - 1)} disabled={page >= totalPages - 1}>»</button>
+                <button className="btn-sm" onClick={() => onGotoPage(page + 1)} disabled={!hasMore || loading}>다음 ›</button>
               </div>
             )}
           </div>

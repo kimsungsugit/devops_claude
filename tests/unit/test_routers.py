@@ -4,7 +4,6 @@ Uses starlette TestClient to exercise FastAPI endpoints without a running server
 """
 from __future__ import annotations
 
-import json
 import os
 import sys
 import tempfile
@@ -784,7 +783,17 @@ class TestProfilesRouter:
 # Quality Router
 # ═══════════════════════════════════════════════════════════════════
 class TestQualityRouter:
-    """Tests for /api/quality endpoints."""
+    """Tests for /api/quality endpoints (응답 shape 검증).
+
+    /api/quality/* 는 라우터 레벨 require_admin 게이트가 걸려 있다(admin only).
+    게이트 동작 자체는 test_admin_gate.py 가 검증하므로, 여기서는 게이트를 우회해
+    응답 shape 만 본다 (관심사 분리). client 기본 헤더는 X-User=test(비admin).
+    """
+
+    @pytest.fixture(autouse=True)
+    def _bypass_admin_gate(self, monkeypatch):
+        import backend.dependencies.admin as _adm
+        monkeypatch.setattr(_adm, "is_admin", lambda _u: True)
 
     def test_list_runs_returns_runs(self):
         """GET /api/quality/runs returns runs list."""
@@ -1043,3 +1052,272 @@ class TestLocalRouter:
         assert r.status_code == 200
         data = r.json()
         assert isinstance(data, (list, dict))
+
+
+# ═══════════════════════════════════════════════════════════════════
+# preview-excel: 헤더 탐지 일반화 / 서버 페이지네이션 / docx 깨진 이미지 복원
+# (2026-06-23 — 문서 생성 미리보기 버그 3종 회귀 가드)
+# ═══════════════════════════════════════════════════════════════════
+class TestPreviewExcelFixes:
+    """preview-excel 미리보기 수정 회귀 테스트.
+
+    file_mode.json이 cloudium일 수 있으므로 LocalFileResolver를 강제 설치해
+    (worker 없이) 로컬 임시 파일을 read하도록 격리한다.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _force_local_resolver(self):
+        from backend.services import file_resolver as _fr
+        prev = _fr.get_resolver()
+        _fr.set_resolver(_fr.LocalFileResolver())
+        try:
+            yield
+        finally:
+            _fr.set_resolver(prev)
+
+    def _xlsx(self, sheets: dict) -> str:
+        """{sheet_name: [row, ...]} → 임시 .xlsx 경로."""
+        import openpyxl
+        wb = openpyxl.Workbook()
+        wb.remove(wb.active)
+        for name, rows in sheets.items():
+            ws = wb.create_sheet(title=name)
+            for row in rows:
+                ws.append(row)
+        fd, path = tempfile.mkstemp(suffix=".xlsx")
+        os.close(fd)
+        wb.save(path)
+        return path
+
+    # ── 헤더 탐지 일반화(HSIS형: row0 제목 → 실제 헤더는 row1) ──
+    def test_general_sheet_header_below_title_row(self):
+        """row0=병합 제목(1셀), row1=Device/Pin/Signal 라벨 → 헤더는 row1로,
+        데이터가 1열로 잘리지 않아야 한다(HSIS 데이터 안보임 버그)."""
+        rows = [
+            ["Hardware Software Interface", "", "", "", ""],          # row0 제목
+            ["", "Device", "Pin No", "Signal Name", "Signal Type"],   # row1 실헤더
+            ["", "MCU1", "12", "VCC_BAT", "Analog"],
+            ["", "MCU1", "13", "GND", "Power"],
+        ]
+        path = self._xlsx({"HSI": rows})
+        try:
+            r = client.post("/api/preview-excel", json={"path": path})
+            assert r.status_code == 200, r.text
+            sheets = r.json()["sheets"]
+            sh = next(s for s in sheets if s["name"] == "HSI")
+            assert "Device" in sh["headers"] and "Signal Name" in sh["headers"]
+            assert sh["total_cols"] >= 4
+            # 데이터 행이 1열로 잘리지 않음
+            assert any(len(row) >= 4 for row in sh["rows"])
+        finally:
+            os.unlink(path)
+
+    def test_clean_header_row0_unchanged(self):
+        """row0이 이미 정상 헤더면 그대로 row0을 헤더로 본다(회귀 0)."""
+        rows = [
+            ["ID", "Name", "Description"],
+            ["1", "alpha", "first"],
+            ["2", "beta", "second"],
+        ]
+        path = self._xlsx({"Data": rows})
+        try:
+            r = client.post("/api/preview-excel", json={"path": path})
+            assert r.status_code == 200, r.text
+            sh = next(s for s in r.json()["sheets"] if s["name"] == "Data")
+            assert sh["headers"][:3] == ["ID", "Name", "Description"]
+            assert ["1", "alpha", "first"] in sh["rows"]
+        finally:
+            os.unlink(path)
+
+    # ── 서버 페이지네이션 / has_more (200행 캡 제거) ──
+    def test_pagination_window_and_has_more(self):
+        """헤더 + 250 데이터행: page0=100행 has_more=True, page2=50행 has_more=False,
+        페이지마다 다른 행(이전 client slice 버그는 항상 첫 페이지만 보였음)."""
+        rows = [["ID", "Val"]] + [[str(i), f"v{i}"] for i in range(250)]
+        path = self._xlsx({"Big": rows})
+        try:
+            r0 = client.post("/api/preview-excel", json={"path": path, "page": 0, "page_size": 100})
+            r2 = client.post("/api/preview-excel", json={"path": path, "page": 2, "page_size": 100})
+            assert r0.status_code == 200 and r2.status_code == 200
+            s0 = next(s for s in r0.json()["sheets"] if s["name"] == "Big")
+            s2 = next(s for s in r2.json()["sheets"] if s["name"] == "Big")
+            assert len(s0["rows"]) == 100 and s0["has_more"] is True
+            assert len(s2["rows"]) == 50 and s2["has_more"] is False
+            assert s0["rows"][0] != s2["rows"][0]
+            assert s0["rows"][0] == ["0", "v0"]
+            assert s2["rows"][0] == ["200", "v200"]
+        finally:
+            os.unlink(path)
+
+    def test_small_sheet_no_phantom_pages(self):
+        """데이터 3행: has_more=False → 다음 페이지 없음(유령 페이지 방지)."""
+        rows = [["ID", "Val"], ["1", "a"], ["2", "b"], ["3", "c"]]
+        path = self._xlsx({"Tiny": rows})
+        try:
+            r = client.post("/api/preview-excel", json={"path": path, "page": 0, "page_size": 100})
+            sh = next(s for s in r.json()["sheets"] if s["name"] == "Tiny")
+            assert sh["has_more"] is False
+            assert len(sh["rows"]) == 3
+        finally:
+            os.unlink(path)
+
+    # ── docx 깨진 임베드 이미지 복원 ──
+    def _corrupt_docx(self) -> bytes:
+        import io
+        import struct
+        import zipfile
+        docx = pytest.importorskip("docx")
+        d = docx.Document()
+        tb = d.add_table(rows=1, cols=2)
+        tb.rows[0].cells[0].text = "ID"
+        tb.rows[0].cells[1].text = "SwCom_7"
+        png = bytes.fromhex(
+            "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489"
+            "0000000a49444154789c63000100000500010d0a2db40000000049454e44ae426082"
+        )
+        d.add_picture(io.BytesIO(png))
+        buf = io.BytesIO()
+        d.save(buf)
+        raw = bytearray(buf.getvalue())
+        zin = zipfile.ZipFile(io.BytesIO(bytes(raw)))
+        img = next(i for i in zin.infolist() if i.filename.startswith("word/media/"))
+        off = img.header_offset
+        n, m = struct.unpack("<HH", bytes(raw[off + 26:off + 30]))
+        data_start = off + 30 + n + m
+        for k in range(data_start, data_start + 6):
+            raw[k] ^= 0xFF
+        return bytes(raw)
+
+    def test_preview_excel_docx_corrupt_image_recovers(self):
+        """깨진 임베드 이미지 docx도 _safe_docx_open으로 500 없이 200 반환
+        (UDS/SDS BadZipFile 에러 버그)."""
+        import docx as _docx
+        import io
+        corrupt = self._corrupt_docx()
+        # 전제: raw python-docx는 실패
+        with pytest.raises(Exception):
+            _docx.Document(io.BytesIO(corrupt))
+        fd, path = tempfile.mkstemp(suffix=".docx")
+        os.close(fd)
+        with open(path, "wb") as f:
+            f.write(corrupt)
+        try:
+            r = client.post("/api/preview-excel", json={"path": path})
+            assert r.status_code == 200, r.text
+            assert r.json()["ok"] is True
+        finally:
+            os.unlink(path)
+
+    def test_preview_image_docx_corrupt_does_not_500(self):
+        """깨진 docx에 preview-image(없는 image_id) 호출 시 500이 아닌 404."""
+        corrupt = self._corrupt_docx()
+        fd, path = tempfile.mkstemp(suffix=".docx")
+        os.close(fd)
+        with open(path, "wb") as f:
+            f.write(corrupt)
+        try:
+            r = client.get("/api/preview-image", params={"path": path, "image_id": "rIdBogus"})
+            assert r.status_code == 404, r.text
+        finally:
+            os.unlink(path)
+
+    # ── 리뷰 반영 회귀 가드 ──────────────────────────────────────────
+    def test_page_bounds_validation(self):
+        """page<0 / page_size 상한초과는 422(음수 슬라이스/DoS 방지)."""
+        path = self._xlsx({"S": [["ID"], ["1"]]})
+        try:
+            assert client.post("/api/preview-excel", json={"path": path, "page": -1}).status_code == 422
+            assert client.post("/api/preview-excel", json={"path": path, "page_size": 99999}).status_code == 422
+            assert client.post("/api/preview-excel", json={"path": path, "page_size": 0}).status_code == 422
+        finally:
+            os.unlink(path)
+
+    def test_xlsx_without_dimension_tag(self):
+        """dimension 태그 없는 xlsx(ws.max_row=None)도 데이터를 반환해야(빈 미리보기 X)."""
+        import re as _re
+        import zipfile
+        path = self._xlsx({"Sheet1": [["ID", "Val"], ["1", "a"], ["2", "b"], ["3", "c"]]})
+        # 워크시트 XML에서 <dimension .../> 제거 → read_only에서 max_row=None 유발
+        with zipfile.ZipFile(path) as zin:
+            names = zin.namelist()
+            data = {n: zin.read(n) for n in names}
+        sheet_key = next(n for n in names if _re.match(r"xl/worksheets/sheet\d+\.xml$", n))
+        data[sheet_key] = _re.sub(rb"<dimension[^>]*/>", b"", data[sheet_key])
+        with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zout:
+            for n in names:
+                zout.writestr(n, data[n])
+        try:
+            r = client.post("/api/preview-excel", json={"path": path, "page": 0, "page_size": 100})
+            assert r.status_code == 200, r.text
+            sh = next(s for s in r.json()["sheets"] if s["name"] == "Sheet1")
+            assert len(sh["rows"]) == 3  # 빈 미리보기가 아니라 실제 3행
+            assert ["1", "a"] in sh["rows"]
+        finally:
+            os.unlink(path)
+
+    def test_header_detection_no_deep_data_row_promotion(self):
+        """row0=키워드 없는 실헤더 + 깊은 데이터행에 라벨 단어 → 데이터행 오승격 안 함."""
+        rows = [
+            ["항번", "코드", "값"],   # row0 실헤더(HDR_WORDS 매칭 0개)
+            ["1", "AX", "10"],
+            ["2", "BY", "20"],
+            ["3", "CZ", "30"],
+            ["4", "DW", "40"],
+            ["type", "name", "50"],  # row5(>=4)에 키워드 2개(<3) — 가드로 무시되어야
+        ]
+        path = self._xlsx({"Codes": rows})
+        try:
+            r = client.post("/api/preview-excel", json={"path": path})
+            sh = next(s for s in r.json()["sheets"] if s["name"] == "Codes")
+            assert sh["headers"][:3] == ["항번", "코드", "값"]
+            assert ["1", "AX", "10"] in sh["rows"]
+        finally:
+            os.unlink(path)
+
+    def test_docx_function_table_keeps_last_column_without_images(self):
+        """이미지 없는 UDS Function 표: 마지막 열(Calling Function)이 누락되지 않아야."""
+        docx = pytest.importorskip("docx")
+        d = docx.Document()
+        tb = d.add_table(rows=4, cols=3)
+        tb.rows[0].cells[0].text = "Function Information"
+        for i, (label, val) in enumerate(
+            [("ID", "SwFn_1"), ("Name", "foo"), ("Calling Function", "bar_caller")], start=1
+        ):
+            tb.rows[i].cells[0].text = label
+            tb.rows[i].cells[2].text = val
+        fd, path = tempfile.mkstemp(suffix=".docx")
+        os.close(fd)
+        d.save(path)
+        try:
+            r = client.post("/api/preview-excel", json={"path": path})
+            assert r.status_code == 200, r.text
+            fn = next(s for s in r.json()["sheets"] if s["name"].startswith("Functions"))
+            assert "Calling Function" in fn["headers"]
+            # 행 길이가 헤더 길이와 일치(마지막 열 누락 없음) + 마지막 열 값 존재
+            assert any(len(row) == len(fn["headers"]) and "bar_caller" in row for row in fn["rows"])
+        finally:
+            os.unlink(path)
+
+    def test_docx_other_table_no_infinite_pager(self):
+        """미인식 docx 표(other_tables)는 100행 초과여도 has_more=False(무한 페이저 방지)."""
+        docx = pytest.importorskip("docx")
+        d = docx.Document()
+        tb = d.add_table(rows=151, cols=2)
+        tb.rows[0].cells[0].text = "Col1"
+        tb.rows[0].cells[1].text = "Col2"
+        for i in range(1, 151):
+            tb.rows[i].cells[0].text = f"r{i}"
+            tb.rows[i].cells[1].text = "x"
+        fd, path = tempfile.mkstemp(suffix=".docx")
+        os.close(fd)
+        d.save(path)
+        try:
+            r = client.post("/api/preview-excel", json={"path": path})
+            assert r.status_code == 200, r.text
+            for s in r.json()["sheets"]:
+                # 모든 시트가 has_more 키를 가지며, Table N(other_tables)은 False
+                assert "has_more" in s
+                if s["name"].startswith("Table "):
+                    assert s["has_more"] is False
+        finally:
+            os.unlink(path)
