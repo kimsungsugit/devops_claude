@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import unquote, urlparse
 
-from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, Query, Response, UploadFile
 from fastapi.responses import FileResponse
 
 import config
@@ -3115,6 +3115,12 @@ def _cache_trace_summary(matrix: Dict[str, Any], req: UdsTraceabilityMatrixReque
     asil_cov = link_table.get("asil_coverage") if isinstance(link_table, dict) else None
     asil_cov = asil_cov if isinstance(asil_cov, dict) else {}
 
+    # ID 정합성 감사(trace_integrity) — 대시보드 quick-load가 충돌/dangling/placeholder를
+    # 매트릭스 재생성 없이 알 수 있게 카운트만 전파(ASIL 패턴과 동일). 데이터 없으면 0/clean.
+    integ = inner.get("integrity") if isinstance(inner, dict) else None
+    integ_stats = integ.get("stats") if isinstance(integ, dict) else None
+    integ_stats = integ_stats if isinstance(integ_stats, dict) else {}
+
     cache_payload = {
         "generated_at": datetime.now().isoformat(timespec="seconds"),
         "total_requirements": total,
@@ -3127,6 +3133,11 @@ def _cache_trace_summary(matrix: Dict[str, Any], req: UdsTraceabilityMatrixReque
         "asil_has": bool(asil_cov.get("has_asil")),
         "asil_gap_count": len(asil_cov.get("gaps") or []),
         "asil_unknown_count": int(asil_cov.get("unknown_count") or 0),
+        # ID 정합성 감사(trace_integrity) — 충돌/dangling/placeholder 카운트 + clean 플래그.
+        "integrity_clean": bool(integ_stats.get("clean", True)),
+        "integrity_collision_count": int(integ_stats.get("collision_count") or 0),
+        "integrity_dangling_count": int(integ_stats.get("dangling_count") or 0),
+        "integrity_placeholder_count": int(integ_stats.get("placeholder_count") or 0),
     }
 
     (report_dir / "trace_matrix_summary.json").write_text(
@@ -3199,6 +3210,38 @@ def jenkins_uds_traceability_matrix(req: UdsTraceabilityMatrixRequest) -> Dict[s
         return {"ok": True, "matrix": matrix}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.post("/api/jenkins/uds/traceability-matrix/export-xlsx")
+def jenkins_uds_traceability_matrix_xlsx(body: Dict[str, Any]) -> Response:
+    """추적성 매트릭스(클라이언트 보유 matrix)를 감사용 xlsx로 렌더해 반환.
+
+    hiMA TrMatrixReport(화면 그대로 xlsx) 대응 — 감사자가 가장 자주 요구하는 형식.
+    프론트가 이미 생성한 matrix(rows+link_table)를 body로 보내면 재추출 없이 포맷만 한다.
+    body: {"matrix": {...}, "meta": {project_name, job_url, build_selector, ...}}.
+    """
+    from report_gen.trace_matrix_xlsx import build_trace_xlsx
+
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="invalid body")
+    matrix = body.get("matrix") if isinstance(body.get("matrix"), dict) else body
+    meta = body.get("meta") if isinstance(body.get("meta"), dict) else {}
+    meta = dict(meta)
+    # 생성시각은 서버에서 주입(클라 신뢰 불요) — 헤더 블록 표시용.
+    meta.setdefault("generated_at", datetime.now().isoformat(timespec="seconds"))
+    try:
+        data = build_trace_xlsx(matrix, meta)
+    except ImportError as exc:
+        raise HTTPException(status_code=500, detail=f"openpyxl 미설치: {exc}")
+    except Exception as exc:
+        _api_logger.debug("Trace xlsx export failed: %s", exc)
+        raise HTTPException(status_code=500, detail=f"xlsx 생성 실패: {exc}")
+    fname = f"traceability_matrix_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+    return Response(
+        content=data,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )
 
 
 @router.post("/api/jenkins/uds/trace-summary")

@@ -729,8 +729,8 @@ function _rowBands(row) {
 // ASIL 등급별 색(ISO 26262) — 셀 강조용. 미상/QM은 muted.
 const _ASIL_COLORS = { D: '#991b1b', C: '#dc2626', B: '#b45309', A: '#2563eb', QM: '#6b7280' };
 
-function CrossMatrixView({ rows, linkTable }) {
-  const { built, cols, hasAsil, byBand, asilSummary, gapCount } = useMemo(() => {
+function CrossMatrixView({ rows, linkTable, fullMatrix, exportMeta }) {
+  const { built, cols, hasAsil, byBand, asilSummary, gapCount, unknownCount } = useMemo(() => {
     const list = Array.isArray(rows) ? rows : [];
     // ASIL 결합(P5) — link_table.asil_coverage의 갭/등급 요약을 행에 join.
     const ac = linkTable?.asil_coverage || null;
@@ -770,6 +770,50 @@ function CrossMatrixView({ rows, linkTable }) {
     document.body.appendChild(a); a.click(); document.body.removeChild(a);
     URL.revokeObjectURL(url);
   }, [linkTable]);
+
+  // xlsx 내보내기(hiMA TrMatrixReport 대응) — 전체 매트릭스를 서버에서 xlsx로 렌더.
+  // 바이너리 응답이라 api() 헬퍼 대신 raw fetch지만 X-User 헤더 + res.ok 검사 명시(X9).
+  const [xlsxBusy, setXlsxBusy] = useState(false);
+  const exportXlsx = useCallback(async () => {
+    setXlsxBusy(true);
+    try {
+      const user = getUsername();
+      const payload = { matrix: fullMatrix || { rows, link_table: linkTable }, meta: exportMeta || {} };
+      const res = await fetch('/api/jenkins/uds/traceability-matrix/export-xlsx', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...(user ? { 'X-User': user } : {}) },
+        body: JSON.stringify(payload),
+      });
+      if (!res.ok) {
+        const t = await res.text().catch(() => '');
+        throw new Error(`HTTP ${res.status} ${t.slice(0, 140)}`);
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = 'traceability_matrix.xlsx';
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      alert(`Excel 내보내기 실패: ${e.message}`);
+    } finally {
+      setXlsxBusy(false);
+    }
+  }, [fullMatrix, rows, linkTable, exportMeta]);
+
+  // ID 정합성 감사(trace_integrity) — fullMatrix.integrity에서 직접 읽음(link_table 아님).
+  // hiMA exact-match가 silent하게 오인하는 클래스(정규화 충돌·dangling·placeholder)를 칩으로 표면화.
+  const integ = fullMatrix?.integrity || null;
+  const integStats = integ?.stats || {};
+  // '정합성 ✓'는 진짜 결함(충돌·오참조 의심·placeholder)이 0일 때 표시. foreign(계층참조)은
+  // 구조적이라 결함 아님 → 그것만 있으면 ✓ 유지(stats.clean과 별개의 '결함 없음' 판정).
+  const integNoDefect = integ
+    ? !(integStats.collision_count || integStats.dangling_suspect_count || integStats.placeholder_count)
+    : true;
+  const collisionTitle = (integ?.id_collisions || []).slice(0, 8)
+    .map(c => `${c.canonical} ← raw ${c.variant_count}종`).join('  ·  ');
+  const danglingTitle = Object.entries(integ?.dangling_by_namespace || {})
+    .map(([band, ns]) => `${band}: ${Object.entries(ns || {}).map(([k, v]) => `${k}×${v}`).join(', ')}`).join('   ');
 
   if (built.length === 0) {
     return <div style={{ padding: 24, textAlign: 'center', color: 'var(--text-muted)' }}>표시할 요구사항이 없습니다.</div>;
@@ -814,8 +858,63 @@ function CrossMatrixView({ rows, linkTable }) {
             ASIL 미상 {unknownCount}
           </span>
         )}
+        {/* ID 정합성 감사 칩 — hiMA WrongRelatedID/WrongName 대응(현재 빌더가 log로 삼키던 것 표면화) */}
+        {integ && integStats.collision_count > 0 && (
+          <span title={`정규화 충돌 — 서로 다른 raw 철자가 같은 ID로 silent 병합(표시 1개만 유지). ${collisionTitle}`}
+            style={{
+              fontSize: 11, padding: '3px 8px', borderRadius: 12, fontWeight: 600,
+              border: `1px solid ${COVERAGE_COLORS.uncovered.border}`,
+              background: COVERAGE_COLORS.uncovered.bg, color: COVERAGE_COLORS.uncovered.fg,
+            }}>
+            ID 충돌 {integStats.collision_count} ⚠
+          </span>
+        )}
+        {/* 오참조 의심(suspect) — SRS에 쓰이는 namespace인데 이 ID만 부재(오타/오참조, hiMA WrongRelatedID 본류) */}
+        {integ && integStats.dangling_suspect_count > 0 && (
+          <span title={`오참조 의심 — SRS에 쓰이는 namespace인데 해당 ID만 부재(오타/잘못된 RelatedID 가능성). namespace 분포 → ${danglingTitle}`}
+            style={{
+              fontSize: 11, padding: '3px 8px', borderRadius: 12, fontWeight: 600,
+              border: `1px solid ${COVERAGE_COLORS.uncovered.border}`,
+              background: COVERAGE_COLORS.uncovered.bg, color: COVERAGE_COLORS.uncovered.fg,
+            }}>
+            오참조 의심 {integStats.dangling_suspect_count} ⚠
+          </span>
+        )}
+        {/* 계층참조(foreign) — SRS에 없는 namespace(다른 요구사항 계층, 구조적일 수 있음) — 정보성, 경보 아님 */}
+        {integ && integStats.dangling_foreign_count > 0 && (
+          <span title={`계층참조 — SRS에 없는 namespace의 요구사항 참조(UDS/SDS가 다른 요구사항 계층 인용). 구조적일 수 있어 정보성으로만 표시. namespace 분포 → ${danglingTitle}`}
+            style={{
+              fontSize: 11, padding: '3px 8px', borderRadius: 12, fontWeight: 600,
+              border: '1px solid var(--border)', background: 'var(--bg)', color: 'var(--text-muted)',
+            }}>
+            계층참조 {integStats.dangling_foreign_count}
+          </span>
+        )}
+        {integ && integStats.placeholder_count > 0 && (
+          <span title="placeholder 참조 ID — 미완성 템플릿 토큰(SwCom_XX/TBD/?? 등). 설계/시험 미완 신호."
+            style={{
+              fontSize: 11, padding: '3px 8px', borderRadius: 12, fontWeight: 600,
+              border: `1px solid ${COVERAGE_COLORS.partial.border}`,
+              background: COVERAGE_COLORS.partial.bg, color: COVERAGE_COLORS.partial.fg,
+            }}>
+            placeholder {integStats.placeholder_count}
+          </span>
+        )}
+        {integ && integNoDefect && (
+          <span title="ID 정합성 감사 통과 — 정규화 충돌·오참조 의심·placeholder 없음(계층참조는 구조적이라 결함 아님)"
+            style={{
+              fontSize: 11, padding: '3px 8px', borderRadius: 12, fontWeight: 600,
+              border: `1px solid ${COVERAGE_COLORS.covered.border}`,
+              background: '#f0fdf4', color: COVERAGE_COLORS.covered.fg,
+            }}>
+            정합성 ✓
+          </span>
+        )}
         <button className="btn-sm" onClick={downloadLinkTable}
           title="명시 RelatedID 링크 테이블(JSON) 내보내기 — 감사 baseline">링크 테이블 ↓</button>
+        <button className="btn-sm" onClick={exportXlsx} disabled={xlsxBusy}
+          title="추적성 매트릭스 전체를 xlsx로 내보내기 (교차표 + 링크테이블 + 커버리지 + ASIL 갭 + 정합성 감사)">
+          {xlsxBusy ? '생성 중…' : 'Excel 내보내기 ↓'}</button>
       </div>
       <div style={{ overflow: 'auto', maxHeight: 600, border: '1px solid var(--border)', borderRadius: 6 }}>
         <table className="impact-table" style={{ minWidth: 700, fontSize: 11, borderCollapse: 'collapse' }}>
@@ -1687,7 +1786,8 @@ function TraceMatrix({ matrix, focusFunctions = null, onClearFocus = null }) {
 
       {/* 매트릭스 보기 (신규 — hiMA식 교차표. filtered 반영, link_table 내보내기) */}
       {viewMode === 'matrix' && (
-        <CrossMatrixView rows={filtered} linkTable={inner?.link_table} />
+        <CrossMatrixView rows={filtered} linkTable={inner?.link_table} fullMatrix={inner}
+          exportMeta={{ job_url: matrix?.job_url || inner?.job_url || '' }} />
       )}
 
       {/* Pagination (표 모드 전용 — 트리는 filtered 전체를 한 번에 조망하므로 페이지네이션 불필요) */}

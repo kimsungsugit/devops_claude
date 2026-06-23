@@ -14,6 +14,7 @@ from report_gen.source_parser import (
     _scan_source_function_names,
     _scan_source_requirement_ids,
 )
+from report_gen.trace_integrity import build_integrity_audit
 from report_gen.utils import (
     _dedupe_multiline_text,
     _normalize_asil_value,
@@ -1880,12 +1881,17 @@ def generate_uds_traceability_matrix(
     raw_ids = sorted({str(x.get("id") or "").strip() for x in items if str(x.get("id") or "").strip()})
     logger = logging.getLogger(__name__)
     norm_to_raw: Dict[str, str] = {}
+    # 정합성 감사(trace_integrity): 한 canonical로 붕괴하는 raw 철자 전체를 보존한다.
+    # 기존 first-wins(norm_to_raw)는 표시용 1개만 남기고 나머지를 log로만 흘려 삼키므로,
+    # 여기서 전 변형을 모아 build_integrity_audit가 '정규화 충돌'을 표면화하게 한다(additive).
+    norm_to_raws: Dict[str, List[str]] = {}
     for rid in raw_ids:
         norm = _normalize_req_id(rid)
         if norm in norm_to_raw and norm_to_raw[norm] != rid:
             logger.warning("Duplicate requirement ID after normalization: '%s' and '%s' both normalize to '%s'", norm_to_raw[norm], rid, norm)
         if norm not in norm_to_raw:
             norm_to_raw[norm] = rid  # keep first occurrence for display
+        norm_to_raws.setdefault(norm, []).append(rid)
 
     req_ids = sorted(norm_to_raw.keys())
 
@@ -2358,6 +2364,50 @@ def generate_uds_traceability_matrix(
                 "confidence": row_confidence,
             }
         )
+    # ── ID 정합성 감사(trace_integrity, additive) ──
+    # hiMA exact-match가 silent하게 오인하는 클래스(정규화 충돌·SRS에 없는 대상 참조·
+    # placeholder)를 명시 finding으로 표면화. 본 매트릭스 로직/기존 키 불변, 새 'integrity'만 가산.
+    _ref: Dict[str, Dict[str, str]] = {"UDS": {}, "SDS": {}}
+    _rel: Dict[str, List[str]] = {"UDS": [], "SDS": []}
+    for _mp in mapping_pairs:
+        if not isinstance(_mp, dict):
+            continue
+        _raw = str(_mp.get("requirement_id") or "").strip()
+        if _raw:
+            _ref["UDS"].setdefault(_normalize_req_id(_raw), _raw)
+        _srcs = _mp.get("source_ids") or []
+        if isinstance(_srcs, str):
+            _srcs = [s.strip() for s in _srcs.split(",") if s.strip()]
+        for _s in (_srcs or []):
+            _ss = str(_s).strip()
+            if _ss:
+                _rel["UDS"].append(_ss)
+    for _sp in (sds_pairs or []):
+        if not isinstance(_sp, dict):
+            continue
+        _raw = str(_sp.get("requirement_id") or "").strip()
+        if _raw:
+            _ref["SDS"].setdefault(_normalize_req_id(_raw), _raw)
+        _comps = _sp.get("component_ids") or []
+        if isinstance(_comps, str):
+            _comps = [c.strip() for c in _comps.split(",") if c.strip()]
+        for _c in (_comps or []):
+            _cc = str(_c).strip()
+            if _cc:
+                _rel["SDS"].append(_cc)
+    try:
+        integrity = build_integrity_audit(req_ids, norm_to_raws, _ref, _rel)
+    except Exception as _intg_exc:  # best-effort: 감사 실패가 매트릭스 생성을 막지 않도록
+        logger.debug("Integrity audit skipped: %s", _intg_exc)
+        # 폴백 stats shape를 build_integrity_audit 정상경로와 정확히 일치시킨다
+        # (suspect/foreign 키 포함) — 소비자의 '?? default'/destructure 함정 방지.
+        integrity = {
+            "id_collisions": [], "dangling_refs": {}, "dangling_by_namespace": {},
+            "placeholder_ids": {},
+            "stats": {"collision_count": 0, "collision_affected_raw": 0,
+                      "dangling_count": 0, "dangling_suspect_count": 0,
+                      "dangling_foreign_count": 0, "placeholder_count": 0, "clean": True},
+        }
     return {
         "total_requirements": len(req_ids),
         "rows": matrix,
@@ -2413,6 +2463,8 @@ def generate_uds_traceability_matrix(
         # 역방향 추적성 공백 — '시험은 했으나 이 SRS에 안 닿는' VectorCAST subprogram 전체 목록.
         # 트리 뷰의 'SRS 미추적 시험 포함' 토글이 의미 3버킷으로 묶어 보여준다.
         "unmapped_vcast": unmapped_vcast,
+        # ID 정합성 감사(trace_integrity, additive) — 정규화 충돌·dangling·placeholder finding.
+        "integrity": integrity,
         "has_sds_mapping": any(r.get("sds_components") for r in matrix),
         "has_source_mapping": any(r.get("source_ids") for r in matrix),
         "has_tests": any(r.get("test_count") for r in matrix),
