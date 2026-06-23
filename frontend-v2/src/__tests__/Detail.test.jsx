@@ -193,6 +193,25 @@ describe('Detail', () => {
     await waitFor(() => expect(mockCapturedInitialSubs).toContain('swut'));
   });
 
+  it('keep-alive: 탭을 전환해도 이전 방문 섹션이 마운트 유지된다(결과 보존)', async () => {
+    // Arrange
+    const user = userEvent.setup();
+    mockSelectedJob = { name: 'my-job', url: 'http://jenkins/job/my-job/' };
+    render(<Detail />);
+
+    // Act — build(기본) → SCM → 프로젝트 분석 순차 방문
+    await user.click(screen.getByText('SCM'));
+    expect(screen.getByTestId('section-scm')).toBeInTheDocument();
+    await user.click(screen.getByText('프로젝트 분석'));
+
+    // Assert — 활성(analysis) + 이전 방문(build, scm)이 모두 DOM에 유지(언마운트 X = 상태 보존)
+    expect(screen.getByTestId('section-analysis')).toBeInTheDocument();
+    expect(screen.getByTestId('section-scm')).toBeInTheDocument();
+    expect(screen.getByTestId('section-build')).toBeInTheDocument();
+    // 미방문 섹션은 아직 마운트되지 않음(불필요 초기 요청 회피)
+    expect(screen.queryByTestId('section-ai')).toBeNull();
+  });
+
   it('탭 클릭 시 브레드크럼 섹션 레이블이 업데이트된다', async () => {
     // Arrange
     const user = userEvent.setup();

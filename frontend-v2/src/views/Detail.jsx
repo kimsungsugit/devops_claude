@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { useJob } from '../App.jsx';
 import BuildInfoSection from '../components/sections/BuildInfoSection.jsx';
 import ScmSection from '../components/sections/ScmSection.jsx';
@@ -32,6 +32,25 @@ export default function Detail() {
   const handleSubChange = useCallback((id, label) => setDocgenSub({ id, label }), []);
   // 레거시 생성 탭 id로 외부 라우팅 시 허브에 전달할 초기 서브(1회 소비).
   const [pendingSub, setPendingSub] = useState(null);
+  // keep-alive: 한 번 방문한 탭은 마운트를 유지(display:none)해, 탭을 바꿔도 오래 걸려 얻은
+  // 결과(VectorCAST 커버리지·영향 가이드 등 컴포넌트 로컬 상태)가 언마운트로 사라지지 않게 한다.
+  const [visited, setVisited] = useState(() => new Set(['build']));
+  const jobKey = selectedJob?.url || selectedJob?.name || '';
+
+  // 활성 탭을 방문 기록에 누적 — 이후 숨겨져도 마운트 유지.
+  useEffect(() => {
+    setVisited((v) => (v.has(activeSection) ? v : new Set(v).add(activeSection)));
+  }, [activeSection]);
+
+  // activeSection 최신값을 ref로 추적 — jobKey 변경 effect가 stale closure 없이 현재 탭을 읽도록.
+  const activeSectionRef = useRef(activeSection);
+  activeSectionRef.current = activeSection;
+
+  // job 변경 시 keep-alive 초기화 — 이전 job의 stale 상태/숨은 섹션 재요청 방지(key도 jobKey 포함).
+  // activeSection은 ref로 읽어 deps 불필요(매 탭 전환마다 리셋되면 keep-alive 무의미하므로 jobKey만 구독).
+  useEffect(() => {
+    setVisited(new Set([activeSectionRef.current]));
+  }, [jobKey]);
 
   // Allow external section navigation (from Dashboard)
   useEffect(() => {
@@ -71,7 +90,6 @@ export default function Detail() {
   }
 
   const current = SECTIONS.find(s => s.id === activeSection) ?? SECTIONS[0];
-  const { Component } = current;
 
   return (
     <div>
@@ -106,14 +124,24 @@ export default function Detail() {
           ))}
         </nav>
 
-        {/* Right content */}
+        {/* Right content — 방문한 섹션은 모두 마운트 유지(비활성은 display:none)해 상태 보존(keep-alive). */}
         <div className="detail-content">
-          <Component
-            job={selectedJob}
-            analysisResult={analysisResult}
-            onSubChange={current.id === 'docgen' ? handleSubChange : undefined}
-            initialSub={current.id === 'docgen' ? pendingSub : undefined}
-          />
+          {SECTIONS.map((s) => {
+            const isActive = s.id === activeSection;
+            // 아직 방문 안 한 탭은 마운트하지 않음(불필요한 초기 요청 회피). 방문 후엔 숨겨도 유지.
+            if (!isActive && !visited.has(s.id)) return null;
+            const C = s.Component;
+            return (
+              <div key={`${jobKey}::${s.id}`} style={isActive ? undefined : { display: 'none' }}>
+                <C
+                  job={selectedJob}
+                  analysisResult={analysisResult}
+                  onSubChange={s.id === 'docgen' ? handleSubChange : undefined}
+                  initialSub={s.id === 'docgen' ? pendingSub : undefined}
+                />
+              </div>
+            );
+          })}
         </div>
       </div>
     </div>
