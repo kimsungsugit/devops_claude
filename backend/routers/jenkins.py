@@ -796,6 +796,10 @@ def jenkins_complexity(req: JenkinsReportRequest) -> Dict[str, Any]:
     # 케이스) SCM 등록 VectorCAST 폴더의 AggregateCoverage per-function 복잡도로 폴백한다.
     # cloudium 폴더 파싱은 30분 TTL 캐시 — 동일 폴더를 vectorcast-rag(-async)로 한 번 로드했으면
     # 즉시 응답한다. (still-present sync /report/vectorcast-rag와 동일한 동기 계약)
+    # 주의: 프론트 loadComplexity는 vcast_log_paths를 보내지 않아 UI에서는 이 폴백이 트리거되지
+    # 않는다(UI는 비동기 vectorcast-rag-async가 실어 보낸 complexity_rows를 복잡도 표에 표시).
+    # 이 동기 경로는 vcast_log_paths를 명시적으로 넘기는 프로그래매틱 호출 전용 — cold 캐시 시
+    # ~100s 블로킹 가능하나 호출자 의도이며 이후 TTL 캐시로 즉시.
     cloud_paths = _collect_vcast_paths(req)
     if cloud_paths:
         cloud = _load_vectorcast_rag_from_cloudium_multi(cloud_paths)
