@@ -5,6 +5,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 // Mock api.js
 vi.mock('../api.js', () => ({
   post: vi.fn(),
+  postSse: vi.fn(),
   api: vi.fn(),
   defaultCacheRoot: vi.fn(() => '.devops_cache'),
 }));
@@ -106,12 +107,13 @@ describe('AiAssistSection', () => {
     expect(sendBtn).toBeDisabled();
   });
 
-  // STS-AIASSIST-006: 입력 후 전송 버튼 활성화 및 API 호출
-  it('인터랙션: 질문 입력 후 전송 버튼이 활성화되고 API를 호출한다', async () => {
+  // STS-AIASSIST-006: AI 추론 모드(기본) — 전송 시 /api/chat/stream(SSE) 호출
+  it('인터랙션: 기본 AI 추론 모드에서 전송 시 /api/chat/stream(SSE)을 호출한다', async () => {
     // Arrange
     const user = userEvent.setup();
-    const { post } = await import('../api.js');
-    post.mockResolvedValue({ answer: '테스트 답변입니다.' });
+    const { post, postSse } = await import('../api.js');
+    post.mockResolvedValue(null);
+    postSse.mockResolvedValue(undefined);
 
     render(<AiAssistSection job={mockJob} analysisResult={null} />);
 
@@ -126,8 +128,33 @@ describe('AiAssistSection', () => {
 
     // Assert
     await waitFor(() => {
+      expect(postSse).toHaveBeenCalledWith(
+        '/api/chat/stream',
+        expect.objectContaining({ question: '빌드 결과를 알려주세요' }),
+        expect.anything(),
+      );
+    });
+  });
+
+  // STS-AIASSIST-006b: 빠른 검색 모드 전환 — /api/jenkins/rag/query 호출 (폴백 유지)
+  it('인터랙션: 빠른 검색 모드로 전환 후 전송 시 /api/jenkins/rag/query를 호출한다', async () => {
+    // Arrange
+    const user = userEvent.setup();
+    const { post } = await import('../api.js');
+    post.mockResolvedValue({ answer: '검색 결과' });
+
+    render(<AiAssistSection job={mockJob} analysisResult={null} />);
+
+    // Act
+    await user.click(screen.getByText('빠른 검색'));
+    const textarea = screen.getByPlaceholderText(/질문을 입력하세요/);
+    await user.type(textarea, '실패 테스트');
+    await user.click(screen.getByText('전송'));
+
+    // Assert
+    await waitFor(() => {
       expect(post).toHaveBeenCalledWith('/api/jenkins/rag/query', expect.objectContaining({
-        query: '빌드 결과를 알려주세요',
+        query: '실패 테스트',
       }));
     });
   });
@@ -136,8 +163,9 @@ describe('AiAssistSection', () => {
   it('인터랙션: 메시지 전송 후 대화 초기화 버튼이 나타난다', async () => {
     // Arrange
     const user = userEvent.setup();
-    const { post } = await import('../api.js');
-    post.mockResolvedValue({ answer: '답변' });
+    const { post, postSse } = await import('../api.js');
+    post.mockResolvedValue(null);
+    postSse.mockResolvedValue(undefined);
 
     render(<AiAssistSection job={mockJob} analysisResult={null} />);
 
