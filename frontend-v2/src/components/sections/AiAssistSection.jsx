@@ -1,5 +1,5 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
-import { post, postSse, defaultCacheRoot } from '../../api.js';
+import { post, postSse, api, defaultCacheRoot } from '../../api.js';
 import { useJenkinsCfg, useToast } from '../../App.jsx';
 import StatusBadge from '../StatusBadge.jsx';
 
@@ -44,6 +44,9 @@ export default function AiAssistSection({ job, analysisResult }) {
   const [statusLoading, setStatusLoading] = useState(false);
   const [topK, setTopK] = useState(5);
   const [category, setCategory] = useState('');
+  const [showHistory, setShowHistory] = useState(false);
+  const [conversations, setConversations] = useState([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
   const bottomRef = useRef(null);
   const abortRef = useRef(null);
 
@@ -204,6 +207,54 @@ export default function AiAssistSection({ job, analysisResult }) {
     try { localStorage.removeItem(threadKey); } catch { /* noop */ }
   }, [threadKey]);
 
+  // 서버 대화 이력 (owner 는 X-User 헤더로 자동 격리)
+  const loadConversations = useCallback(async () => {
+    setHistoryLoading(true);
+    try {
+      const data = await api('/api/chat/history?limit=30');
+      setConversations(Array.isArray(data?.conversations) ? data.conversations : []);
+    } catch {
+      setConversations([]);
+    } finally {
+      setHistoryLoading(false);
+    }
+  }, []);
+
+  const openConversation = useCallback(async (tid) => {
+    if (!tid || pending) return;
+    setHistoryLoading(true);
+    try {
+      const data = await api(`/api/chat/history/${encodeURIComponent(tid)}`);
+      const msgs = Array.isArray(data?.messages)
+        ? data.messages.map(m => ({ role: m.role === 'assistant' ? 'assistant' : 'user', content: m.text || '' }))
+        : [];
+      setMessages(msgs);
+      setThreadId(tid);
+      persistThread(tid);
+      setApproval(null);
+      setShowHistory(false);
+    } catch (e) {
+      toast('error', e.message);
+    } finally {
+      setHistoryLoading(false);
+    }
+  }, [pending, persistThread, toast]);
+
+  const removeConversation = useCallback(async (tid, e) => {
+    e?.stopPropagation();
+    try {
+      await api(`/api/chat/history/${encodeURIComponent(tid)}`, { method: 'DELETE' });
+      setConversations(prev => prev.filter(c => c.thread_id !== tid));
+      if (tid === threadId) {
+        setMessages([]);
+        setThreadId('');
+        try { localStorage.removeItem(threadKey); } catch { /* noop */ }
+      }
+    } catch (err) {
+      toast('error', err.message);
+    }
+  }, [threadId, threadKey, toast]);
+
   const handleKey = (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
@@ -296,14 +347,57 @@ export default function AiAssistSection({ job, analysisResult }) {
         )}
       </div>
 
+      {/* 이력 사이드바 + 채팅 (가로 배치) */}
+      <div style={{ flex: 1, display: 'flex', gap: 12, minHeight: 0 }}>
+      {showHistory && (
+        <div className="panel" style={{ width: 220, flexShrink: 0, display: 'flex', flexDirection: 'column', minHeight: 0, padding: 8 }}>
+          <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+            <span style={{ fontSize: 12, fontWeight: 600 }}>대화 이력</span>
+            <button className="btn-sm" onClick={loadConversations} disabled={historyLoading} style={{ fontSize: 10 }}>
+              {historyLoading ? '...' : '새로고침'}
+            </button>
+          </div>
+          <div style={{ flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 4 }}>
+            {conversations.length === 0 ? (
+              <div className="text-sm text-muted" style={{ padding: 8 }}>
+                {historyLoading ? '불러오는 중...' : '저장된 대화가 없습니다.'}
+              </div>
+            ) : conversations.map(c => (
+              <div key={c.thread_id}
+                onClick={() => openConversation(c.thread_id)}
+                className="row"
+                style={{
+                  justifyContent: 'space-between', alignItems: 'center', gap: 4,
+                  padding: '6px 8px', borderRadius: 6, cursor: 'pointer',
+                  background: c.thread_id === threadId ? 'var(--bg)' : 'transparent',
+                  border: c.thread_id === threadId ? '1px solid var(--border)' : '1px solid transparent',
+                }}>
+                <div style={{ minWidth: 0, flex: 1 }}>
+                  <div className="text-sm" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {c.title || '(제목 없음)'}
+                  </div>
+                  <div className="text-muted" style={{ fontSize: 10 }}>{c.message_count || 0}개 메시지</div>
+                </div>
+                <button className="btn-sm" onClick={(e) => removeConversation(c.thread_id, e)} title="삭제"
+                  style={{ fontSize: 10, flexShrink: 0 }}>✕</button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
       {/* Chat panel */}
       <div className="panel" style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
         <div className="panel-header" style={{ flexShrink: 0 }}>
           <span className="panel-title">AI 어시스턴트</span>
           <div className="row" style={{ gap: 8, alignItems: 'center' }}>
+            <button
+              className="btn-sm"
+              onClick={() => setShowHistory(s => { const next = !s; if (next) loadConversations(); return next; })}
+              style={{ fontSize: 11 }}
+            >{showHistory ? '이력 닫기' : '이력'}</button>
             {threadId && <span className="text-sm text-muted" title={`thread: ${threadId}`}>대화 이어가는 중</span>}
             {messages.length > 0 && (
-              <button className="btn-sm" onClick={resetChat}>대화 초기화</button>
+              <button className="btn-sm" onClick={resetChat}>새 대화</button>
             )}
           </div>
         </div>
@@ -371,6 +465,7 @@ export default function AiAssistSection({ job, analysisResult }) {
             {pending ? <span className="spinner" style={{ display: 'inline-block' }} /> : '전송'}
           </button>
         </div>
+      </div>
       </div>
     </div>
   );

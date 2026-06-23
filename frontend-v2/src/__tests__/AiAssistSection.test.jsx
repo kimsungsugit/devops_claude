@@ -159,8 +159,8 @@ describe('AiAssistSection', () => {
     });
   });
 
-  // STS-AIASSIST-007: 대화 초기화 버튼
-  it('인터랙션: 메시지 전송 후 대화 초기화 버튼이 나타난다', async () => {
+  // STS-AIASSIST-007: 새 대화 버튼
+  it('인터랙션: 메시지 전송 후 새 대화 버튼이 나타난다', async () => {
     // Arrange
     const user = userEvent.setup();
     const { post, postSse } = await import('../api.js');
@@ -175,7 +175,7 @@ describe('AiAssistSection', () => {
 
     // Assert
     await waitFor(() => {
-      expect(screen.getByText('대화 초기화')).toBeInTheDocument();
+      expect(screen.getByText('새 대화')).toBeInTheDocument();
     });
   });
 
@@ -192,5 +192,25 @@ describe('AiAssistSection', () => {
     await waitFor(() => {
       expect(post).toHaveBeenCalledWith('/api/local/rag/status', {});
     });
+  });
+
+  // STS-AIASSIST-009: 이력 버튼 클릭 시 서버 대화 목록을 불러온다
+  it('인터랙션: 이력 버튼 클릭 시 대화 목록 API를 호출하고 표시한다', async () => {
+    // Arrange
+    const user = userEvent.setup();
+    const { post, api } = await import('../api.js');
+    post.mockResolvedValue(null);
+    api.mockResolvedValue({ conversations: [{ thread_id: 't1', title: '이전 대화', message_count: 4 }] });
+
+    render(<AiAssistSection job={mockJob} analysisResult={null} />);
+
+    // Act
+    await user.click(screen.getByText('이력'));
+
+    // Assert
+    await waitFor(() => {
+      expect(api).toHaveBeenCalledWith('/api/chat/history?limit=30');
+    });
+    expect(await screen.findByText('이전 대화')).toBeInTheDocument();
   });
 });
