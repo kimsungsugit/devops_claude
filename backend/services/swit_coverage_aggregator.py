@@ -66,6 +66,7 @@ from backend.services.swut_input_adapter import (
     FunctionCoverage,
     SwUTSession,
     aggregate_session,
+    compute_coverage_rollup,
 )
 
 
@@ -646,6 +647,8 @@ def build_swit_coverage_report(
         "passed": agg["passed"],
         "failed": agg["failed"],
         "function_rows": agg["function_count"],
+        # Quality DB 기록용 커버리지 roll-up (구문/분기/MC-DC %). SwUT와 동일 헬퍼.
+        **compute_coverage_rollup(agg.get("function_rows") or []),
         # 30차 W21 + 31차 W29 + 32차 W28: ASIL 분포 + 등급별 함수 ID + 정책 메타.
         "asil_distribution": asil_distribution,
         "asil_b_function_ids": ids_by_asil.get("B", []),

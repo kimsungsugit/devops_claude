@@ -57,13 +57,13 @@ from backend.services.excel_template_utils import (
     write_value_after_label,
 )
 from backend.services.swut_builder_helpers import extract_warnings_from_session
-from backend.services.swut_meta import BuildMetaBase
 from backend.services.swut_input_adapter import (
     FunctionCoverage,
     SwUTSession,
     aggregate_session,
+    compute_coverage_rollup,
 )
-
+from backend.services.swut_meta import BuildMetaBase
 
 # ---------------------------------------------------------------------------
 # Dialog/meta payload
@@ -625,7 +625,8 @@ def _write_coverage_sheet(
     # 라운드 76 T1107 — file 정보 사전 주입으로 dedup 정확성 향상.
     if c_function_map:
         from backend.services.swut_input_adapter import (
-            enhance_function_coverage_with_file, merge_function_rows_with_c_parser,
+            enhance_function_coverage_with_file,
+            merge_function_rows_with_c_parser,
         )
         # vcast function_rows에 c_parser file 정보 주입 → dedup key (name, file) 정확
         vcast_rows = list(agg.get("function_rows") or [])
@@ -720,7 +721,8 @@ def _write_coverage_sheet(
     needed_last_row = data_start + len(function_rows) - 1
     if needed_last_row > ws.max_row:
         from backend.services.excel_template_utils import (
-            auto_expand_row_block, push_sentinel_to_last_row,
+            auto_expand_row_block,
+            push_sentinel_to_last_row,
             update_cross_refs_after_row_expansion,
         )
         # 라운드 76 자체평가 fix — old_totals_row를 ws.max_row가 아닌 양식 R5/R6
@@ -937,8 +939,8 @@ def _write_coverage_sheet(
         # 순차 SwUFn fallback은 추정 ID라 audit reviewer가 추적성 수동 검증 필요.
         # SwUDS 매핑 성공 행은 마킹 없음 (회사 감사본 동일).
         if spec_based and not is_c_parser_only and not resolved_swufn:
-            from backend.services.excel_template_utils import _apply_fill
             from backend.services.design_tokens import USER_INPUT_FILL_RGB
+            from backend.services.excel_template_utils import _apply_fill
             _apply_fill(ws, r, unit_id_col, USER_INPUT_FILL_RGB)
 
         if is_swit_metric_layout:
@@ -949,8 +951,8 @@ def _write_coverage_sheet(
             if is_c_parser_only:
                 # 라운드 74 T906 — c_parser only Functions Pass cell에 '[c_parser]' 안내.
                 # 라운드 76 자체평가 fix — 안내 메시지 보강 + Name col에도 마킹.
-                from backend.services.excel_template_utils import _apply_fill
                 from backend.services.design_tokens import USER_INPUT_FILL_RGB
+                from backend.services.excel_template_utils import _apply_fill
                 safe_write(ws, r, functions_pass_col, "[c_parser only — 미실측]")
                 _apply_fill(ws, r, functions_pass_col, USER_INPUT_FILL_RGB)
                 # Name col(C5)도 [c_parser] suffix로 audit 마킹
@@ -989,8 +991,8 @@ def _write_coverage_sheet(
             # SwUTCV / HDPDM01 — Statement + Branch metric
             if is_c_parser_only:
                 # 라운드 76 자체평가 fix — c_parser only 안내 메시지 보강 + Name col 마킹.
-                from backend.services.excel_template_utils import _apply_fill
                 from backend.services.design_tokens import USER_INPUT_FILL_RGB
+                from backend.services.excel_template_utils import _apply_fill
                 safe_write(ws, r, stmt_count_col, "[c_parser only — 미실측]")
                 safe_write(ws, r, stmt_count_col + 1, "-")
                 safe_write(ws, r, stmt_count_col + 2, "-")
@@ -1416,8 +1418,13 @@ def _write_spec_totals(
     import copy as _copy_shade
 
     from backend.services.design_tokens import (
-        ASIL_A_FILL_RGB, ASIL_B_FILL_RGB, ASIL_C_FILL_RGB, ASIL_D_FILL_RGB,
-        ASIL_QM_FILL_RGB, FAIL_FILL_RGB, USER_INPUT_FILL_RGB,
+        ASIL_A_FILL_RGB,
+        ASIL_B_FILL_RGB,
+        ASIL_C_FILL_RGB,
+        ASIL_D_FILL_RGB,
+        ASIL_QM_FILL_RGB,
+        FAIL_FILL_RGB,
+        USER_INPUT_FILL_RGB,
     )
     _marker_rgbs = {
         ASIL_A_FILL_RGB, ASIL_B_FILL_RGB, ASIL_C_FILL_RGB, ASIL_D_FILL_RGB,
@@ -2190,7 +2197,8 @@ def _write_consistency_sheet_spec(
     old_max = ws.max_row
     if needed_last_row > old_max:
         from backend.services.excel_template_utils import (
-            auto_expand_row_block, push_sentinel_to_last_row,
+            auto_expand_row_block,
+            push_sentinel_to_last_row,
             update_cross_refs_after_row_expansion,
         )
         shortage = needed_last_row - old_max
@@ -2252,6 +2260,8 @@ def _write_consistency_sheet_spec(
 
     from backend.services.design_tokens import (
         INDEX_COL_SHADE_RGB,
+    )
+    from backend.services.design_tokens import (
         USER_INPUT_FILL_RGB as _user_fill_rgb,
     )
     from backend.services.excel_template_utils import (
@@ -2448,7 +2458,8 @@ def _write_consistency_sheet(
 
         if needed_last_row > ws.max_row:
             from backend.services.excel_template_utils import (
-                auto_expand_row_block, push_sentinel_to_last_row,
+                auto_expand_row_block,
+                push_sentinel_to_last_row,
                 update_cross_refs_after_row_expansion,
             )
             shortage = needed_last_row - ws.max_row
@@ -2601,7 +2612,9 @@ def _write_traceability_spec_diagonal(
     if not ws or not swufn_ids:
         return 0
     from backend.services.excel_template_utils import (
-        auto_expand_row_block, clear_data_range, push_sentinel_to_last_row,
+        auto_expand_row_block,
+        clear_data_range,
+        push_sentinel_to_last_row,
     )
 
     ws_title = getattr(ws, "title", "Traceability").strip()
@@ -2927,7 +2940,8 @@ def _write_traceability_sheet(
         if needed_last_row > ws.max_row:
             try:
                 from backend.services.excel_template_utils import (
-                    auto_expand_row_block, push_sentinel_to_last_row,
+                    auto_expand_row_block,
+                    push_sentinel_to_last_row,
                 )
                 shortage = needed_last_row - ws.max_row
                 auto_expand_row_block(
@@ -3063,7 +3077,8 @@ def _write_traceability_sheet(
     if missing_tcs_with_col:
         try:
             from backend.services.excel_template_utils import (
-                auto_expand_row_block, push_sentinel_to_last_row,
+                auto_expand_row_block,
+                push_sentinel_to_last_row,
             )
             last_existing_row = max(tc_row_index.values()) if tc_row_index else data_start
             inserted = auto_expand_row_block(
@@ -3289,6 +3304,9 @@ def build_coverage_report(
         "passed": agg["passed"],
         "failed": agg["failed"],
         "function_rows": agg["function_count"],
+        # Quality DB 기록용 커버리지 roll-up (구문/분기/MC-DC %). MC-DC 표면화.
+        # agg["function_rows"] = aggregate_session 이 반환한 FunctionCoverage 리스트.
+        **compute_coverage_rollup(agg.get("function_rows") or []),
         "swuts_name_to_swufn_used": len(swuts_name_to_swufn),
         "template_mapping_drift": agg.get("template_mapping_drift", {}),
         # 30차 W21 + 31차 W29: ASIL 등급 분포 + 등급별 함수 ID.

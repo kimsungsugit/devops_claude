@@ -646,6 +646,20 @@ def _do_coverage_build(req: SwUTBuildRequest) -> Response:
         result.warnings.extend(_swuts_warnings)
     if not result.ok:
         raise HTTPException(status_code=500, detail="빌드 실패 (ok=False)")
+    # Quality DB recording (non-fatal). Coverage 빌더 = SwUT 커버리지(구문/분기/MC-DC) 출처.
+    try:
+        from workflow.quality.recorder import record_run
+        record_run(
+            "swut", result.summary,
+            project_root=str(getattr(req, "project_id", "") or ""),
+            meta={
+                "asil_level": str(getattr(meta, "asil_level", "") or ""),
+                "kind": "coverage",
+                "release_sw_version": str(getattr(req, "release_sw_version", "") or ""),
+            },
+        )
+    except Exception:
+        pass
     return _build_result_to_response(
         content_io=result.xlsx_io,
         filename=result.filename,

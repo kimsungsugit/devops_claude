@@ -2,13 +2,22 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional
+from datetime import timezone
+from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Depends, Query
+
+from backend.dependencies.admin import require_admin
 
 _logger = logging.getLogger("devops_api.quality")
 
-router = APIRouter(prefix="/api/quality", tags=["quality"])
+# 형제 evidence 라우터(swsa/swut/swit/swreport)와 동일하게 라우터 전체 admin only.
+# 프론트 Quality 탭의 adminOnly 는 클라이언트 토글일 뿐이라 backend 게이트가 유일 방어선.
+router = APIRouter(
+    prefix="/api/quality",
+    tags=["quality"],
+    dependencies=[Depends(require_admin)],
+)
 
 
 def _run_to_dict(run, *, include_scores: bool = False) -> Dict[str, Any]:
@@ -20,7 +29,12 @@ def _run_to_dict(run, *, include_scores: bool = False) -> Dict[str, Any]:
         "project_root": run.project_root,
         "target_function": run.target_function,
         "status": run.status,
-        "created_at": run.created_at.isoformat() if run.created_at else None,
+        # 저장은 tz-naive UTC(datetime.now(utc)) → 응답에 UTC offset 명시.
+        # (naive isoformat 은 'Z' 없어 JS가 로컬해석 → KST 등에서 날짜 하루 밀림)
+        "created_at": (
+            run.created_at.replace(tzinfo=timezone.utc).isoformat()
+            if run.created_at else None
+        ),
         "elapsed_sec": run.elapsed_sec,
         "output_path": run.output_path,
         "output_size_bytes": run.output_size_bytes,
@@ -54,12 +68,12 @@ def _run_to_dict(run, *, include_scores: bool = False) -> Dict[str, Any]:
 def list_runs(
     doc_type: Optional[str] = Query(None, description="uds|sts|suts"),
     project_root: Optional[str] = Query(None),
-    limit: int = Query(50, le=200),
+    limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
 ) -> Dict[str, Any]:
     """생성 이력 목록 (summary 포함)."""
     try:
-        from workflow.quality.db import init_db, get_session
+        from workflow.quality.db import get_session, init_db
         from workflow.quality.models import GenerationRun
     except ImportError:
         return {"runs": [], "total": 0, "error": "quality module not available"}
@@ -73,7 +87,13 @@ def list_runs(
         if project_root:
             q = q.filter(GenerationRun.project_root == project_root)
         total = q.count()
-        runs = q.order_by(GenerationRun.created_at.desc()).offset(offset).limit(limit).all()
+        # created_at 동률 시 id 2차키로 결정적 정렬 (동시/근접 타임스탬프 역전 방지)
+        runs = (
+            q.order_by(GenerationRun.created_at.desc(), GenerationRun.id.desc())
+            .offset(offset)
+            .limit(limit)
+            .all()
+        )
         return {
             "runs": [_run_to_dict(r) for r in runs],
             "total": total,
@@ -86,7 +106,7 @@ def list_runs(
 def get_run(run_id: int) -> Dict[str, Any]:
     """단일 실행 상세 (scores 포함)."""
     try:
-        from workflow.quality.db import init_db, get_session
+        from workflow.quality.db import get_session, init_db
         from workflow.quality.models import GenerationRun
     except ImportError:
         return {"error": "quality module not available"}
@@ -102,40 +122,48 @@ def get_run(run_id: int) -> Dict[str, Any]:
 
 @router.get("/trend")
 def get_trend(
-    doc_type: str = Query("uds", description="uds|sts|suts"),
+    doc_type: Optional[str] = Query(None, description="uds|sts|suts (생략/all = 전체)"),
     project_root: Optional[str] = Query(None),
     target_function: Optional[str] = Query(None),
-    last_n: int = Query(20, le=100),
+    last_n: int = Query(20, ge=1, le=100),
 ) -> Dict[str, Any]:
-    """시계열 점수 추이."""
+    """시계열 점수 추이. doc_type 생략 또는 'all'이면 전 doc_type 통합 추이."""
     try:
-        from workflow.quality.db import init_db, get_session
+        from workflow.quality.db import get_session, init_db
         from workflow.quality.models import GenerationRun, QualitySummary
     except ImportError:
         return {"trend": [], "error": "quality module not available"}
 
     init_db()
 
+    dt = (doc_type or "").lower().strip()
     with get_session() as session:
-        q = (
-            session.query(GenerationRun)
-            .join(QualitySummary)
-            .filter(GenerationRun.doc_type == doc_type.lower().strip())
-        )
+        q = session.query(GenerationRun).join(QualitySummary)
+        # 프론트 "전체"(doc_type 생략) → 미필터. list_runs 와 동일한 전체 조회 의미.
+        if dt and dt != "all":
+            q = q.filter(GenerationRun.doc_type == dt)
         if project_root:
             q = q.filter(GenerationRun.project_root == project_root)
         if target_function:
             q = q.filter(GenerationRun.target_function == target_function)
 
-        runs = q.order_by(GenerationRun.created_at.desc()).limit(last_n).all()
+        runs = (
+            q.order_by(GenerationRun.created_at.desc(), GenerationRun.id.desc())
+            .limit(last_n)
+            .all()
+        )
         runs.reverse()  # oldest first for trend
 
         return {
-            "doc_type": doc_type,
+            "doc_type": dt or "all",
             "trend": [
                 {
                     "run_id": r.id,
-                    "created_at": r.created_at.isoformat() if r.created_at else None,
+                    "doc_type": r.doc_type,
+                    "created_at": (
+                        r.created_at.replace(tzinfo=timezone.utc).isoformat()
+                        if r.created_at else None
+                    ),
                     "overall_score": r.summary.overall_score if r.summary else None,
                     "gate_pass": r.summary.gate_pass if r.summary else None,
                     "score_delta": r.summary.score_delta if r.summary else None,

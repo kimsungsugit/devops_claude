@@ -1,21 +1,66 @@
 """Auto-generated router: local"""
-from fastapi import APIRouter, HTTPException, Request, Query, UploadFile, File, Form
-from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
-from typing import Any, Dict, List, Optional, Tuple
+import asyncio
 import json
+import logging
 import os
 import re
 import tempfile
 import threading
-import traceback
-import logging
 import time
-import asyncio
+import traceback
 import uuid
+from datetime import datetime
 from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
 
-from backend.user_context import wrap_with_user
+from fastapi import APIRouter, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 
+import config
+from backend.helpers import (
+    _apply_uds_view_filters,
+    _augment_path,
+    _build_excel_artifact_payload,
+    _build_excel_artifact_summary,
+    _build_preflight,
+    _build_quality_evaluation,
+    _collect_tool_paths,
+    _compute_quick_quality_gate,
+    _compute_uds_mapping_summary,
+    _enrich_function_quality_fields,
+    _generate_docx_with_retry,
+    _get_progress,
+    _get_source_sections_cached,
+    _get_uds_view_payload_cached,
+    _is_allowed_req_doc,
+    _local_reports_dir,
+    _local_sits_dir,
+    _local_sts_dir,
+    _local_suts_dir,
+    _local_uds_dir,
+    _open_local_path,
+    _parse_component_map_file,
+    _parse_path_list,
+    _read_excel_artifact_sidecar,
+    _resolve_local_report_path,
+    _resolve_local_sits_path,
+    _resolve_local_sts_path,
+    _resolve_local_suts_path,
+    _resolve_local_uds_path,
+    _resolve_report_dir,
+    _resolve_source_root_from_cfg,
+    _run_impact_analysis_for_uds,
+    _run_report_with_timeout,
+    _set_progress,
+    _validate_docx_template_bytes,
+    _write_excel_artifact_sidecar,
+    _write_residual_tbd_report,
+    _write_upload_to_temp,
+    build_vectorcast_metadata,
+    evaluate_vectorcast_readiness,
+    load_vectorcast_project_config,
+)
+from backend.helpers.sds import build_sds_view_model
 from backend.schemas import (
     EditorReadAbsRequest,
     EditorReadRequest,
@@ -37,27 +82,12 @@ from backend.schemas import (
     RagStorageRequest,
     ReplaceTextRequest,
     ScmRequest,
-    SearchRequest,
     SdsViewRequest,
+    SearchRequest,
     TextPreviewRequest,
 )
-from datetime import datetime
-from backend.helpers import _apply_uds_view_filters, _augment_path, _build_excel_artifact_payload, _build_excel_artifact_summary, _build_preflight, _build_quality_evaluation, _collect_tool_paths, _compute_quick_quality_gate, _compute_uds_mapping_summary, _enrich_function_quality_fields, _generate_docx_with_retry, _get_progress, _get_source_sections_cached, _get_uds_view_payload_cached, _is_allowed_req_doc, _local_reports_dir, _local_sits_dir, _local_sts_dir, _local_suts_dir, _local_uds_dir, _open_local_path, _parse_component_map_file, _parse_path_list, _read_excel_artifact_sidecar, _resolve_local_report_path, _resolve_local_sits_path, _resolve_local_sts_path, _resolve_local_suts_path, _resolve_local_uds_path, _resolve_report_dir, _resolve_source_root_from_cfg, _run_impact_analysis_for_uds, _run_report_with_timeout, _set_progress, _validate_docx_template_bytes, _write_excel_artifact_sidecar, _write_residual_tbd_report, _write_upload_to_temp, build_vectorcast_metadata, evaluate_vectorcast_readiness, load_vectorcast_project_config
-from report_generator import (
-    _build_req_map_from_doc_paths,
-    enrich_function_details_with_docs,
-    generate_uds_source_sections,
-    generate_uds_requirements_from_docs,
-    generate_uds_validation_report,
-    generate_uds_field_quality_gate_report,
-    generate_uds_constraints_report,
-    generate_uds_preview_html,
-    generate_called_calling_accuracy_report,
-    generate_swcom_context_report,
-    generate_swcom_context_diff_report,
-    generate_asil_related_confidence_report,
-)
-import config
+from backend.services.files import read_text_limited
+from backend.services.local_report_generator import generate_local_docx, generate_local_xlsx
 from backend.services.local_service import (
     delete_kb_entry,
     format_c_code,
@@ -70,8 +100,8 @@ from backend.services.local_service import (
     git_stage,
     git_status,
     git_unstage,
-    list_kb_entries,
     list_directory,
+    list_kb_entries,
     pick_directory,
     pick_file,
     read_file_text,
@@ -79,19 +109,30 @@ from backend.services.local_service import (
     replace_lines,
     run_git,
     run_svn,
-    svn_info_url,
     search_in_files,
     write_file_text,
 )
-from backend.helpers.sds import build_sds_view_model
-from workflow.change_trigger import build_registry_trigger
-from workflow.impact_orchestrator import run_impact_update
-from workflow.impact_jobs import start_impact_job
-from backend.services.local_report_generator import generate_local_docx, generate_local_xlsx
-from backend.services.files import read_text_limited
 from backend.services.paths import is_under_any
+from backend.user_context import wrap_with_user
+from report_generator import (
+    _build_req_map_from_doc_paths,
+    enrich_function_details_with_docs,
+    generate_asil_related_confidence_report,
+    generate_called_calling_accuracy_report,
+    generate_swcom_context_report,
+    generate_uds_constraints_report,
+    generate_uds_field_quality_gate_report,
+    generate_uds_preview_html,
+    generate_uds_requirements_from_docs,
+    generate_uds_source_sections,
+    generate_uds_validation_report,
+)
+from workflow.change_trigger import build_registry_trigger
+from workflow.impact_jobs import start_impact_job
+from workflow.impact_orchestrator import run_impact_update
+
 try:
-    from workflow.rag import _read_text_from_file, _read_and_chunk_file, get_kb, ingest_external_sources
+    from workflow.rag import _read_and_chunk_file, _read_text_from_file, get_kb, ingest_external_sources
 except ImportError:
     _read_text_from_file = None
     _read_and_chunk_file = None
@@ -967,6 +1008,12 @@ async def local_uds_generate(
             template_warning=template_warning,
             doc_only_mode=True,
         )
+        # Quality DB recording (non-fatal)
+        try:
+            from workflow.quality.recorder import record_uds_run
+            record_uds_run(quality_evaluation, output_path=str(out_path))
+        except Exception:
+            pass
         _logger.info("[UDS_GENERATE][%s] done file=%s (doc_only)", req_id, out_path.name)
         return {
             "ok": True,
@@ -1058,6 +1105,12 @@ async def local_uds_generate(
         template_warning=template_warning,
         doc_only_mode=False,
     )
+    # Quality DB recording (non-fatal)
+    try:
+        from workflow.quality.recorder import record_uds_run
+        record_uds_run(quality_evaluation, output_path=str(out_path))
+    except Exception:
+        pass
     _logger.info("[UDS_GENERATE][%s] done file=%s", req_id, out_path.name)
 
     return {
@@ -1337,6 +1390,13 @@ async def local_uds_generate_async(
                     timeout_seconds=report_timeout, report_name="quality gate",
                 )
 
+            # Quality DB recording (non-fatal)
+            try:
+                from workflow.quality.recorder import record_uds_run
+                record_uds_run(quick_qg, output_path=str(out_path))
+            except Exception:
+                pass
+
             _set_progress(
                 "local_uds", "local", "local",
                 {
@@ -1514,14 +1574,13 @@ def local_traceability(
     report_dir: str = Form(""),
 ) -> Dict[str, Any]:
     """Build full traceability matrix: SRS -> Functions -> Test Cases."""
-    from sts_generator import (
-        parse_srs_docx_tables,
-        parse_requirements_structured,
-        map_requirements_to_functions,
-        generate_traceability_matrix,
-    )
-    from report_gen.requirements import _extract_sds_partition_map, _normalize_req_id
     import re as _re
+
+    from report_gen.requirements import _extract_sds_partition_map, _normalize_req_id
+    from sts_generator import (
+        map_requirements_to_functions,
+        parse_srs_docx_tables,
+    )
 
     srs_docx: Optional[str] = None
     if srs_path:
@@ -1856,8 +1915,8 @@ async def local_sts_generate(
     report_dir: str = Form(""),
 ) -> Dict[str, Any]:
     """Generate STS (Software Test Specification) Excel from SRS + source code."""
-    from sts_generator import generate_sts, parse_srs_docx_tables
     from backend.services.resolver_helpers import reject_upload_in_cloudium
+    from sts_generator import generate_sts
     reject_upload_in_cloudium(*(req_files or []))
 
     req_id = (request.headers.get("x-req-id") or "").strip() or f"sts-gen-{int(time.time() * 1000)}"
@@ -2051,8 +2110,8 @@ async def local_sts_generate_stream(
     import queue
     import threading
 
-    from sts_generator import generate_sts
     from backend.services.resolver_helpers import reject_upload_in_cloudium
+    from sts_generator import generate_sts
     reject_upload_in_cloudium(*(req_files or []))
 
     srs_docx_path: Optional[str] = None
@@ -2232,8 +2291,8 @@ async def local_sts_generate_async(
     report_dir: str = Form(""),
 ) -> Dict[str, Any]:
     """Non-blocking STS generation. Returns job_id for progress polling."""
-    from sts_generator import generate_sts
     from backend.services.resolver_helpers import reject_upload_in_cloudium
+    from sts_generator import generate_sts
     reject_upload_in_cloudium(*(req_files or []))
 
     srs_docx_path: Optional[str] = None
@@ -3536,7 +3595,8 @@ def local_vectorcast_download(package_path: str = "", filename: str = ""):
             raise HTTPException(status_code=404, detail="File not found")
         return FileResponse(str(target), filename=filename)
     # filename 없으면 ZIP으로 전체 패키지 다운로드
-    import zipfile, tempfile
+    import tempfile
+    import zipfile
     tmp = tempfile.NamedTemporaryFile(suffix=".zip", delete=False)
     with zipfile.ZipFile(tmp.name, "w", zipfile.ZIP_DEFLATED) as zf:
         for f in pkg_dir.rglob("*"):

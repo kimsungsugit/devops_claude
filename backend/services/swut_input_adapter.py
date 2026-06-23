@@ -300,6 +300,27 @@ def aggregate_session(session: SwUTSession) -> dict[str, Any]:
     }
 
 
+def compute_coverage_rollup(function_rows: list) -> dict[str, Any]:
+    """FunctionCoverage list → 전체 구문/분기/MC-DC 커버리지 % (0~100).
+
+    Quality DB 기록용 roll-up. **total>0 인 함수만 합산** — c_parser-only 함수는
+    covered/total=0 이라 분모를 부풀려 커버리지를 가짜로 낮춘다. VectorCAST 실측분만
+    ISO 26262 coverage 로 인정. MC-DC 는 FunctionCoverage.mcdc(:83)에 파싱돼 있으나
+    그동안 어느 summary 에도 노출 안 되던 dead 데이터 — 여기서 표면화한다.
+    """
+    def _pct(attr: str) -> float:
+        cov = sum(getattr(fc, attr).covered for fc in function_rows if getattr(fc, attr).total > 0)
+        tot = sum(getattr(fc, attr).total for fc in function_rows if getattr(fc, attr).total > 0)
+        return round(cov / tot * 100, 2) if tot > 0 else 0.0
+
+    return {
+        "overall_statement_pct": _pct("statement"),
+        "overall_branch_pct": _pct("branch"),
+        "overall_mcdc_pct": _pct("mcdc"),
+        "functions_with_coverage": sum(1 for fc in function_rows if fc.statement.total > 0),
+    }
+
+
 def enhance_function_coverage_with_file(
     function_rows: list[FunctionCoverage],
     c_function_map: dict[str, dict[str, Any]] | None,
@@ -636,7 +657,9 @@ def _parse_aggregate_coverage_via_temp(
     `MetricsBank.sub_functions` 네스트 구조 반환 — `flatten_sub_functions`에 전달.
     """
     from backend.services.vcast_parser import (
-        ReportType, VCASTVersion, parse_vcast_report,
+        ReportType,
+        VCASTVersion,
+        parse_vcast_report,
     )
     data = _read_via_resolver(resolver, html_path)
     with tempfile.NamedTemporaryFile(suffix=".html", delete=False) as tf:

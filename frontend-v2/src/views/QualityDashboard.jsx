@@ -1,14 +1,27 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { api, post } from '../api.js';
 import { useToast } from '../App.jsx';
 
 /* ── Doc type options ────────────────────────────────────────────── */
 const DOC_TYPES = [
   { value: '', label: '전체' },
+  { value: 'uds', label: 'UDS' },
   { value: 'sts', label: 'STS' },
   { value: 'suts', label: 'SUTS' },
-  { value: 'uds', label: 'UDS' },
+  { value: 'sits', label: 'SITS' },
+  { value: 'swut', label: 'SwUT' },
+  { value: 'swit', label: 'SwIT' },
+  { value: 'swsa', label: 'SwSA' },
+  { value: 'swreport', label: '통합 Summary' },
 ];
+
+/* ── Run shape accessors ─────────────────────────────────────────────
+ * 백엔드 /api/quality/runs 는 점수/게이트를 run.summary.overall_score /
+ * run.summary.gate_pass 로 (중첩) 내려준다. 과거 프론트는 run.total_score /
+ * run.gate_passed (평탄) 를 가정해 항상 0점·FAIL 로 표시됐다.
+ * flat 폴백(total_score/gate_passed)도 유지해 구 응답·테스트 픽스처와 호환. */
+const runScore = (r) => r?.summary?.overall_score ?? r?.total_score ?? r?.score ?? 0;
+const runGate = (r) => r?.summary?.gate_pass ?? r?.gate_passed ?? (runScore(r) >= 70);
 
 /* ── SVG Bar Chart (no library) ──────────────────────────────────── */
 function TrendChart({ data }) {
@@ -67,8 +80,10 @@ function TrendChart({ data }) {
 
       {/* Bars */}
       {data.map((d, i) => {
-        const score = d.total_score ?? d.score ?? 0;
-        const passed = score >= 70;
+        const score = d.overall_score ?? d.total_score ?? d.score ?? 0;
+        // 막대 색은 백엔드 게이트 판정(gate_pass) 기준 — 점수>=70 추정과 분리해
+        // 테이블 게이트 pill 과 시각 일관성 유지. gate_pass 없으면 70 폴백.
+        const passed = d.gate_pass ?? (score >= 70);
         const barH = Math.max(1, (score / maxScore) * chartH);
         const x = offsetX + i * (barW + barGap);
         const y = padTop + chartH - barH;
@@ -135,7 +150,26 @@ function AdvicePanel({ runId, onClose }) {
 
   if (!advice) return null;
 
-  const items = advice.items || advice.suggestions || [];
+  // advisor/백엔드가 {error}(run 없음·모듈 없음 등)를 200으로 반환 — '제안 없음'(품질 양호)
+  // 으로 위장하지 않도록 명시적 에러 패널로 분기.
+  if (advice.error) {
+    return (
+      <div className="panel qd-advice-panel">
+        <div className="panel-header">
+          <span className="panel-title">개선 제안 - Run #{runId}</span>
+          <button className="btn-sm" onClick={onClose}>닫기</button>
+        </div>
+        <div className="qd-empty">
+          <span className="qd-empty-icon">!</span>
+          <span>개선 제안을 불러올 수 없습니다: {advice.error}</span>
+        </div>
+      </div>
+    );
+  }
+
+  // advisor.suggest_improvements 의 실제 키는 suggestions. 항목 필드는
+  // priority / value / advice (구 프론트가 가정한 severity / current / suggestion 아님).
+  const items = advice.suggestions || [];
   const SEVERITY_CLASS = {
     high: 'pill-danger',
     medium: 'pill-warning',
@@ -153,31 +187,45 @@ function AdvicePanel({ runId, onClose }) {
         <span className="panel-title">개선 제안 - Run #{runId}</span>
         <button className="btn-sm" onClick={onClose}>닫기</button>
       </div>
+      {/* 요약 줄 — 점수/게이트/제안수. unsupported(규칙 미정의)와 '품질 양호'를
+          구분하는 단일 출처. 백엔드 summary 를 그대로 노출. */}
+      {advice.summary && (
+        <div className="qd-advice-summary">{advice.summary}</div>
+      )}
       {items.length === 0 ? (
-        <div className="qd-empty">
-          <span>개선 제안이 없습니다</span>
-        </div>
+        // unsupported(규칙 미정의)는 위 summary 가 이미 안내 → 빈상태 텍스트 중복 생략.
+        // supported 인데 제안 0 일 때만 '모든 항목 통과' 명시(품질 양호와 구분).
+        advice.unsupported ? null : (
+          <div className="qd-empty">
+            <span>개선 제안이 없습니다 — 모든 항목이 임계값을 통과했습니다.</span>
+          </div>
+        )
       ) : (
         <div className="qd-advice-list">
-          {items.map((item, i) => (
-            <div key={i} className="qd-advice-item">
-              <div className="qd-advice-header">
-                <span className={`pill ${SEVERITY_CLASS[item.severity] || 'pill-neutral'}`}>
-                  {SEVERITY_LABEL[item.severity] || item.severity}
-                </span>
-                <span className="qd-advice-metric">{item.metric || item.category}</span>
-                {item.current != null && item.threshold != null && (
-                  <span className="qd-advice-score">
-                    {typeof item.current === 'number' ? item.current.toFixed(1) : item.current}%
-                    (임계값 {item.threshold}%)
+          {items.map((item, i) => {
+            const sev = item.priority ?? item.severity;
+            const cur = item.value ?? item.current;
+            const body = item.advice ?? item.suggestion;
+            return (
+              <div key={i} className="qd-advice-item">
+                <div className="qd-advice-header">
+                  <span className={`pill ${SEVERITY_CLASS[sev] || 'pill-neutral'}`}>
+                    {SEVERITY_LABEL[sev] || sev}
                   </span>
+                  <span className="qd-advice-metric">{item.label || item.metric || item.category}</span>
+                  {cur != null && item.threshold != null && (
+                    <span className="qd-advice-score">
+                      {typeof cur === 'number' ? cur.toFixed(1) : cur}%
+                      (임계값 {item.threshold}%)
+                    </span>
+                  )}
+                </div>
+                {body && (
+                  <div className="qd-advice-body">{body}</div>
                 )}
               </div>
-              {item.suggestion && (
-                <div className="qd-advice-body">{item.suggestion}</div>
-              )}
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
     </div>
@@ -192,25 +240,33 @@ export default function QualityDashboard() {
   const [runs, setRuns] = useState([]);
   const [trend, setTrend] = useState([]);
   const [loading, setLoading] = useState(false);
+  const [loadError, setLoadError] = useState(null);
   const [selectedRunId, setSelectedRunId] = useState(null);
+  const loadSeq = useRef(0);
 
   /* Fetch runs + trend */
   const load = useCallback(async () => {
+    const seq = ++loadSeq.current;  // docType 빠른 전환 시 out-of-order 응답 폐기용 토큰
     setLoading(true);
+    setLoadError(null);
     try {
-      const dt = docType || 'uds';
-      const qs = `?limit=20&doc_type=${dt}`;
-      const trendQs = `?doc_type=${dt}&last_n=20`;
+      // "전체"(docType='')는 doc_type 파라미터를 생략 → 백엔드의 미필터(전체) 분기.
+      // 과거엔 `docType || 'uds'`로 강제해 "전체"가 사실상 uds만 조회했다.
+      const dtParam = docType ? `&doc_type=${docType}` : '';
       const [runsData, trendData] = await Promise.all([
-        api(`/api/quality/runs${qs}`),
-        api(`/api/quality/trend${trendQs}`),
+        api(`/api/quality/runs?limit=20${dtParam}`),
+        api(`/api/quality/trend?last_n=20${dtParam}`),
       ]);
-      setRuns(runsData.items || runsData.runs || runsData || []);
-      setTrend(trendData.items || trendData.points || trendData || []);
+      if (seq !== loadSeq.current) return;  // 더 새 load가 시작됨 → stale 결과 무시
+      // 백엔드 실제 응답 키: { runs: [...] } / { trend: [...] }.
+      setRuns(runsData.runs || runsData.items || (Array.isArray(runsData) ? runsData : []));
+      setTrend(trendData.trend || trendData.items || (Array.isArray(trendData) ? trendData : []));
     } catch (err) {
+      if (seq !== loadSeq.current) return;
+      setLoadError(err.message || '로드 실패');  // 장애를 '기록 없음'(빈 상태)과 구분
       toast('error', `품질 데이터 로드 실패: ${err.message}`);
     } finally {
-      setLoading(false);
+      if (seq === loadSeq.current) setLoading(false);
     }
   }, [docType, toast]);
 
@@ -221,9 +277,9 @@ export default function QualityDashboard() {
   /* Computed stats */
   const totalRuns = runs.length;
   const avgScore = totalRuns > 0
-    ? runs.reduce((s, r) => s + (r.total_score ?? r.score ?? 0), 0) / totalRuns
+    ? runs.reduce((s, r) => s + runScore(r), 0) / totalRuns
     : 0;
-  const passCount = runs.filter(r => r.gate_passed ?? (r.total_score ?? r.score ?? 0) >= 70).length;
+  const passCount = runs.filter(r => runGate(r)).length;
   const passRate = totalRuns > 0 ? (passCount / totalRuns) * 100 : 0;
 
   return (
@@ -274,7 +330,13 @@ export default function QualityDashboard() {
         <div className="panel-header">
           <span className="panel-title">최근 실행 목록</span>
         </div>
-        {runs.length === 0 ? (
+        {loadError ? (
+          <div className="qd-empty">
+            <span className="qd-empty-icon">!</span>
+            <span>데이터 로드 실패: {loadError}</span>
+            <button className="btn-sm" onClick={load} style={{ marginTop: 8 }}>재시도</button>
+          </div>
+        ) : runs.length === 0 ? (
           <div className="qd-empty">
             <span className="qd-empty-icon">--</span>
             <span>{loading ? '로딩 중...' : '실행 기록이 없습니다'}</span>
@@ -294,8 +356,8 @@ export default function QualityDashboard() {
               </thead>
               <tbody>
                 {runs.map(run => {
-                  const score = run.total_score ?? run.score ?? 0;
-                  const passed = run.gate_passed ?? score >= 70;
+                  const score = runScore(run);
+                  const passed = runGate(run);
                   const date = run.created_at || run.timestamp;
                   const dateStr = date
                     ? new Date(date).toLocaleDateString('ko-KR', { month: '2-digit', day: '2-digit' })
@@ -309,7 +371,7 @@ export default function QualityDashboard() {
                         </span>
                       </td>
                       <td>
-                        <span className={score >= 70 ? 'qd-score-pass' : 'qd-score-fail'}>
+                        <span className={passed ? 'qd-score-pass' : 'qd-score-fail'}>
                           {score.toFixed(1)}
                         </span>
                       </td>

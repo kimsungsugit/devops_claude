@@ -34,14 +34,16 @@ vi.mock('../api.js', () => ({
 
 const { default: QualityDashboard } = await import('../views/QualityDashboard.jsx');
 
-/* ── 픽스처 ── */
-const makeRun = (overrides = {}) => ({
-  id: 1,
-  doc_type: 'uds',
-  total_score: 85.0,
-  gate_passed: true,
+/* ── 픽스처 ──
+ * 백엔드 /api/quality/runs 실제 응답 shape를 따른다: 점수/게이트는
+ * run.summary.overall_score / run.summary.gate_pass (중첩). score/pass 인자로
+ * summary를 구성하며, 나머지 overrides는 top-level 로 펼친다. */
+const makeRun = ({ id = 1, doc_type = 'uds', score = 85.0, pass = true, ...rest } = {}) => ({
+  id,
+  doc_type,
   created_at: '2026-01-01T00:00:00Z',
-  ...overrides,
+  summary: { overall_score: score, gate_pass: pass },
+  ...rest,
 });
 
 describe('QualityDashboard', () => {
@@ -126,7 +128,7 @@ describe('QualityDashboard', () => {
 
   it('실행 기록이 있을 때 테이블 헤더를 렌더링한다', async () => {
     // Arrange
-    mockApi.mockResolvedValue([makeRun()]);
+    mockApi.mockResolvedValue({ runs: [makeRun()] });
 
     // Act
     render(<QualityDashboard />);
@@ -140,7 +142,7 @@ describe('QualityDashboard', () => {
 
   it('실행 기록이 있을 때 PASS 배지를 렌더링한다', async () => {
     // Arrange
-    mockApi.mockResolvedValue([makeRun({ gate_passed: true })]);
+    mockApi.mockResolvedValue({ runs: [makeRun({ pass: true })] });
 
     // Act
     render(<QualityDashboard />);
@@ -153,7 +155,7 @@ describe('QualityDashboard', () => {
 
   it('실행 기록이 있을 때 FAIL 배지를 렌더링한다', async () => {
     // Arrange
-    mockApi.mockResolvedValue([makeRun({ gate_passed: false, total_score: 50.0 })]);
+    mockApi.mockResolvedValue({ runs: [makeRun({ pass: false, score: 50.0 })] });
 
     // Act
     render(<QualityDashboard />);

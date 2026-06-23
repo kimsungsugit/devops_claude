@@ -51,25 +51,35 @@ def evaluate_uds(quality_eval: Dict[str, Any]) -> MetricList:
         thresholds = {}
 
     quick_gate = quality_eval.get("quick_gate") or {}
-    fields = quick_gate.get("fields") or {}
+    # 실제 생산자 backend._compute_quick_quality_gate 는 quick_gate.rates.*_fill(0~100)
+    # 형태로 산출한다. 과거 코드는 quick_gate.fields.*_pct 를 읽었으나 그 구조를 만드는
+    # 생산자가 없어 dead path 였다(연결 시 전 함수 0점 기록 위험). rates 우선·fields 폴백.
+    rates = quick_gate.get("rates") or {}
+    legacy_fields = quick_gate.get("fields") or {}
 
-    # 필드별 메트릭 추출
-    field_mappings = [
-        ("called_pct", "called_min"),
-        ("calling_pct", "calling_min"),
-        ("input_pct", "input_min"),
-        ("output_pct", "output_min"),
-        ("global_pct", "global_min"),
-        ("static_pct", "static_min"),
-        ("description_pct", "description_min"),
-        ("asil_pct", "asil_min"),
-        ("related_pct", "related_min"),
+    def _rate_val(rate_key: str, metric_name: str) -> float:
+        # 실제 rates.*_fill 우선, 레거시 fields.*_pct 폴백.
+        return _safe_float(rates, rate_key) if rate_key in rates else _safe_float(legacy_fields, metric_name)
+
+    # 게이트·점수 반영 핵심 7필드 — backend quick_gate.gate_pass 기준과 정렬 (T5 진실원 통일).
+    # (메트릭명=_pct, 실제 rates 키=_fill, config threshold 키=_min)
+    gated_mappings = [
+        ("called_pct", "called_fill", "called_min"),
+        ("calling_pct", "calling_fill", "calling_min"),
+        ("input_pct", "input_fill", "input_min"),
+        ("output_pct", "output_fill", "output_min"),
+        ("description_pct", "description_fill", "description_min"),
+        ("asil_pct", "asil_fill", "asil_min"),
+        ("related_pct", "related_fill", "related_min"),
     ]
+    for metric_name, rate_key, threshold_key in gated_mappings:
+        metrics.append(_metric(metric_name, _rate_val(rate_key, metric_name),
+                               threshold=thresholds.get(threshold_key)))
 
-    for field_name, threshold_key in field_mappings:
-        val = _safe_float(fields, field_name)
-        thresh = thresholds.get(threshold_key)
-        metrics.append(_metric(field_name, val, threshold=thresh))
+    # 참고지표 — quick_gate 도 게이트에서 제외. 전역/정적 변수 적은 정상 모듈의 구조적
+    # 저평가를 막기 위해 값은 기록하되 threshold=None → overall_score/gate 미반영.
+    for metric_name, rate_key in (("global_pct", "global_fill"), ("static_pct", "static_fill")):
+        metrics.append(_metric(metric_name, _rate_val(rate_key, metric_name)))
 
     # Accuracy 메트릭
     accuracy = quality_eval.get("accuracy") or {}
@@ -160,6 +170,110 @@ def evaluate_suts(quality_report: Dict[str, Any]) -> MetricList:
     metrics.append(_metric("total_test_cases", total))
     metrics.append(_metric("total_sequences", _safe_float(quality_report, "total_sequences")))
 
+    return metrics
+
+
+def evaluate_sits(quality_report: Dict[str, Any]) -> MetricList:
+    """generators/sits.py SITS quality_report -> MetricList.
+
+    SITS는 시스템 통합시험 스펙(추적성/IO 커버리지 proxy — 실행 커버리지 아님).
+    """
+    metrics: MetricList = []
+    total = _safe_float(quality_report, "total_test_cases")
+
+    # 요구사항 추적성 (related ID 연결 비율)
+    metrics.append(
+        _metric("requirement_traceability_pct",
+                _safe_float(quality_report, "related_coverage_pct"), threshold=70.0),
+    )
+    # I/O 커버리지 (입출력 변수 보유 TC 비율)
+    metrics.append(
+        _metric("io_coverage_pct", _safe_float(quality_report, "io_coverage_pct"), threshold=60.0),
+    )
+    # 테스트 방법 다양성 (생성 방법 종류 수 / 3, 상한 100%)
+    methods = quality_report.get("gen_method_distribution") or {}
+    method_count = len([k for k in methods if k and k != "?"])
+    metrics.append(_metric("method_diversity_pct", round(min(method_count / 3.0, 1.0) * 100, 2)))
+    # 통합 밀도 (TC당 sub-case 평균 / 7, 상한 100%)
+    avg_sub = _safe_float(quality_report, "avg_sub_cases_per_tc")
+    metrics.append(_metric("integration_density_pct", round(min(avg_sub / 7.0, 1.0) * 100, 2)))
+
+    metrics.append(_metric("total_test_cases", total))
+    return metrics
+
+
+def evaluate_swreport(summary: Dict[str, Any]) -> MetricList:
+    """SwReport 통합 Summary(ES95411 roll-up) -> MetricList.
+
+    전 레벨 산출물의 P/F verdict 집계(커버리지 아님). performed/fail 기반 pass-rate.
+    """
+    metrics: MetricList = []
+    performed = _safe_float(summary, "performed_count")
+    fail = _safe_float(summary, "fail_count")
+
+    pass_rate = round((performed - fail) / max(performed, 1.0) * 100, 2)
+    metrics.append(_metric("pass_rate_pct", pass_rate, threshold=100.0))
+
+    overall_pass = 100.0 if str(summary.get("overall_result", "")).strip().lower() == "pass" else 0.0
+    metrics.append(_metric("overall_pass", overall_pass))
+
+    metrics.append(_metric("performed_count", performed))
+    metrics.append(_metric("fail_count", fail))
+    return metrics
+
+
+def evaluate_coverage(summary: Dict[str, Any], *, asil: Optional[str] = None) -> MetricList:
+    """SwUT/SwIT Coverage Report summary -> MetricList (ISO 26262 커버리지 게이트).
+
+    구문(전 ASIL)·분기(ASIL B+)·MC-DC(ASIL D)에 ASIL별 100% threshold. asil 미지정 시
+    분기/MC-DC 는 참고지표(threshold=None)로 점수 미반영 — QM/A 모듈 과잉 FAIL 방지.
+    """
+    metrics: MetricList = []
+    a = str(asil or "").upper().strip()
+
+    metrics.append(
+        _metric("statement_coverage_pct", _safe_float(summary, "overall_statement_pct"), threshold=100.0),
+    )
+    metrics.append(
+        _metric("branch_coverage_pct", _safe_float(summary, "overall_branch_pct"),
+                threshold=100.0 if a in ("B", "C", "D") else None),
+    )
+    metrics.append(
+        _metric("mcdc_coverage_pct", _safe_float(summary, "overall_mcdc_pct"),
+                threshold=100.0 if a == "D" else None),
+    )
+
+    passed = _safe_float(summary, "passed")
+    tested = passed + _safe_float(summary, "failed")
+    metrics.append(_metric("pass_rate_pct", round(passed / max(tested, 1.0) * 100, 2), threshold=100.0))
+
+    metrics.append(_metric("total_tcs", _safe_float(summary, "total_tcs")))
+    return metrics
+
+
+def evaluate_swsa(quality_data: Dict[str, Any]) -> MetricList:
+    """SwSA(MISRA/HIS 정적·안전분석) -> MetricList.
+
+    HIS pass% 만 게이트(threshold). MISRA/Secure/중복 위반 수는 프로젝트 규모에 비례하는
+    절대수라 hard-fail 부적합(ASIL A 도구) → threshold 없는 참고지표(trend 비교용).
+    HIS pass% 는 metric 별 (binned − fail)/total 평균이며 **unbinned(미평가) 함수는
+    분자에서 제외** — '미평가'를 Pass 로 오기재하지 않기 위함.
+    """
+    metrics: MetricList = []
+    rates = []
+    for m in quality_data.get("his_metrics") or []:
+        total = _safe_float(m, "total")
+        if total <= 0:
+            continue
+        passed = total - _safe_float(m, "fail") - _safe_float(m, "unbinned")
+        rates.append(max(0.0, passed) / total * 100)
+    his_pass = round(sum(rates) / len(rates), 2) if rates else 0.0
+    metrics.append(_metric("his_pass_pct", his_pass, threshold=80.0))
+
+    # 위반 수 — 참고지표(threshold 없음). QAC extraction_failed 시 호출자가 미포함.
+    metrics.append(_metric("misra_active_violations", _safe_float(quality_data, "misra_active")))
+    metrics.append(_metric("secure_active_violations", _safe_float(quality_data, "secure_active")))
+    metrics.append(_metric("duplication_fail_blocks", _safe_float(quality_data, "pmd_fail")))
     return metrics
 
 

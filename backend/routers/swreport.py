@@ -134,6 +134,16 @@ def _do_summary_build(req: SwReportBuildRequest) -> Response:
     result = build_summary_report(template_bytes, sources, _build_meta(req))
     if not result.ok:
         raise HTTPException(status_code=500, detail="SwReport Summary build failed (ok=False)")
+    # Quality DB recording (non-fatal). output_path 없음(BytesIO 응답, Cloudium read-only).
+    try:
+        from workflow.quality.recorder import record_run
+        record_run(
+            "swreport", result.summary,
+            project_root=str(getattr(req, "project_id", "") or ""),
+            meta={"release_sw_version": getattr(req, "release_sw_version", "")},
+        )
+    except Exception:
+        pass
     return _build_result_to_response(
         content_io=result.xlsm_io,
         filename=result.filename,

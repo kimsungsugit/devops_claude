@@ -7,11 +7,17 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from workflow.quality.models import GenerationRun, QualityScore, QualitySummary
 from workflow.quality.evaluator import (
-    evaluate_uds, evaluate_sts, evaluate_suts,
-    compute_overall_score, MetricList,
+    compute_overall_score,
+    evaluate_coverage,
+    evaluate_sits,
+    evaluate_sts,
+    evaluate_suts,
+    evaluate_swreport,
+    evaluate_swsa,
+    evaluate_uds,
 )
+from workflow.quality.models import GenerationRun, QualityScore, QualitySummary
 
 _logger = logging.getLogger("workflow.quality.recorder")
 
@@ -36,6 +42,22 @@ def record_run(
         run_id (성공 시), -1 (실패 시 -- 예외 전파하지 않음)
     """
     try:
+        # 빈 산출물 skip — 0점·FAIL 레코드가 KPI/trend 를 오염하지 않도록.
+        # (UDS 0함수는 record_uds_run 에서 선 차단 → doc_type 간 정책 통일)
+        _dt = (doc_type or "").lower().strip()
+        _qd = quality_data or {}
+        _empty = False
+        if _dt in ("sts", "suts", "sits"):
+            _empty = int(_qd.get("total_test_cases") or 0) <= 0
+        elif _dt == "swreport":
+            _empty = int(_qd.get("performed_count") or 0) <= 0
+        elif _dt in ("swut", "swit"):
+            _empty = int(_qd.get("total_tcs") or 0) <= 0
+        elif _dt == "swsa":
+            _empty = not (_qd.get("his_metrics"))
+        if _empty:
+            _logger.info("%s quality run skipped (empty output)", _dt)
+            return -1
         return _record_run_impl(
             doc_type, quality_data,
             project_root=project_root, target_function=target_function,
@@ -48,12 +70,49 @@ def record_run(
         return -1
 
 
+def record_uds_run(quality_eval: Dict[str, Any], **kwargs: Any) -> int:
+    """UDS 생성 품질을 Quality DB에 기록 (non-fatal).
+
+    Args:
+        quality_eval: backend._build_quality_evaluation() 반환 dict(quick_gate 포함)
+            또는 _compute_quick_quality_gate() 반환 dict(bare quick_gate: rates/counts 보유).
+        **kwargs: record_run 으로 전달 (project_root/output_path/elapsed_sec/ai_model 등).
+
+    함수가 0개(빈 생성)면 기록하지 않는다 — 대시보드 0점 오염 방지.
+
+    Returns:
+        run_id (성공 시), -1 (skip/실패 시 -- 예외 전파하지 않음).
+    """
+    try:
+        data = dict(quality_eval or {})
+        # bare quick_gate(rates/counts 보유)면 quick_gate 로 감싼다.
+        if "quick_gate" not in data and ("rates" in data or "counts" in data):
+            data = {
+                "quick_gate": data,
+                "gate_pass": data.get("gate_pass"),
+                "confidence_gate_pass": data.get("confidence_gate_pass"),
+            }
+        qg = data.get("quick_gate") or {}
+        total_fn = int(
+            (qg.get("counts") or {}).get("total_functions")
+            or qg.get("total_functions")
+            or 0
+        )
+        if total_fn <= 0:
+            _logger.info("UDS quality run skipped (0 functions)")
+            return -1
+        return record_run("uds", data, **kwargs)
+    except Exception:
+        _logger.exception("Failed to record UDS quality run (non-fatal)")
+        return -1
+
+
 def _record_run_impl(
     doc_type: str,
     quality_data: Dict[str, Any],
     **kwargs: Any,
 ) -> int:
-    from workflow.quality.db import init_db, get_session
+    from workflow.quality.db import get_session, init_db
 
     db_path = kwargs.get("db_path")
     init_db(db_path)
@@ -66,6 +125,15 @@ def _record_run_impl(
         metrics = evaluate_sts(quality_data)
     elif doc_type == "suts":
         metrics = evaluate_suts(quality_data)
+    elif doc_type == "sits":
+        metrics = evaluate_sits(quality_data)
+    elif doc_type == "swreport":
+        metrics = evaluate_swreport(quality_data)
+    elif doc_type in ("swut", "swit"):
+        _meta = kwargs.get("meta") or {}
+        metrics = evaluate_coverage(quality_data, asil=_meta.get("asil_level"))
+    elif doc_type == "swsa":
+        metrics = evaluate_swsa(quality_data)
     else:
         _logger.warning("Unknown doc_type: %s, skipping evaluation", doc_type)
         metrics = []
@@ -117,14 +185,16 @@ def _record_run_impl(
             )
             session.add(score)
 
-        # 직전 동일 doc_type run 조회 (delta 계산)
+        # 직전 동일 doc_type run 조회 (delta 계산).
+        # id < run.id (삽입 순서 엄밀히 이전) + (created_at, id) 결정적 정렬 →
+        # 동시 기록 시 더 새 run 을 prev 로 잘못 고르는 RMW 레이스 차단.
         prev_run = (
             session.query(GenerationRun)
             .filter(
                 GenerationRun.doc_type == doc_type,
-                GenerationRun.id != run.id,
+                GenerationRun.id < run.id,
             )
-            .order_by(GenerationRun.created_at.desc())
+            .order_by(GenerationRun.created_at.desc(), GenerationRun.id.desc())
             .first()
         )
 
@@ -134,11 +204,27 @@ def _record_run_impl(
             prev_run_id = prev_run.id
             score_delta = round(overall - prev_run.summary.overall_score, 2)
 
-        # fn_count 추출
+        # fn_count 추출 (doc_type별 분모)
         fn_count = None
         if doc_type == "uds":
             qg = quality_data.get("quick_gate") or {}
-            fn_count = int(qg.get("total_functions") or qg.get("fn_count") or 0)
+            counts = qg.get("counts") or {}
+            fn_count = int(
+                counts.get("total_functions")
+                or qg.get("total_functions")
+                or qg.get("fn_count")
+                or 0
+            )
+        elif doc_type == "swreport":
+            fn_count = int(quality_data.get("performed_count") or 0)
+        elif doc_type in ("swut", "swit"):
+            fn_count = int(
+                quality_data.get("functions_with_coverage")
+                or quality_data.get("function_rows")
+                or 0
+            )
+        elif doc_type == "swsa":
+            fn_count = int(quality_data.get("his_metric_count") or 0)
         else:
             fn_count = int(quality_data.get("total_test_cases") or 0)
 

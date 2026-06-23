@@ -833,7 +833,7 @@ def _create_sits_cover(
     wb, project_id: str, doc_id: str, version: str, asil_level: str,
     stp_context: Optional[Dict[str, Any]] = None,
 ) -> None:
-    from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
+    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
     ws = wb.active
     ws.title = "Cover"
 
@@ -897,7 +897,7 @@ def _create_sits_cover(
 
 
 def _create_sits_history(wb, version: str) -> None:
-    from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
+    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
     ws = wb.create_sheet("History")
     hdr_font = Font(name="맑은 고딕", size=10, bold=True)
     data_font = Font(name="맑은 고딕", size=9)
@@ -949,7 +949,7 @@ def _create_sits_intro(wb) -> None:
 
 
 def _create_sits_test_env(wb, stp_context: Optional[Dict[str, Any]] = None) -> None:
-    from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
+    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
     ws = wb.create_sheet("2.Test Environment")
     ws["A1"] = "Test Environments"
     ws["A1"].font = Font(name="맑은 고딕", size=12, bold=True)
@@ -994,7 +994,7 @@ def _create_sits_test_env(wb, stp_context: Optional[Dict[str, Any]] = None) -> N
 
 def _create_sits_strategy(wb, flows: List[Dict[str, Any]]) -> None:
     """Create integration strategy sheet listing component call hierarchy."""
-    from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
+    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
     ws = wb.create_sheet("3-1.SW Integration Strategy")
     hdr_font = Font(name="맑은 고딕", size=10, bold=True)
     data_font = Font(name="맑은 고딕", size=9)
@@ -1717,6 +1717,19 @@ def generate_sits(
     _progress(100, f"SITS 생성 완료 ({elapsed}s)")
     _logger.info("=== SITS Generation Done: %d TCs, %d sub-cases, %.1fs ===",
                  len(itcs), sum(len(t["sub_cases"]) for t in itcs), elapsed)
+
+    # Quality DB recording (non-fatal)
+    try:
+        from workflow.quality.recorder import record_run
+        record_run(
+            "sits", quality_report,
+            project_root=str(source_root or ""),
+            elapsed_sec=elapsed,
+            output_path=actual_output,
+            ai_model=str((ai_config or {}).get("model", "")),
+        )
+    except Exception:
+        pass
 
     return {
         "output_path": actual_output,

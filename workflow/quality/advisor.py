@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 _logger = logging.getLogger("workflow.quality.advisor")
 
@@ -91,6 +91,70 @@ _SUTS_ADVICE = {
     },
 }
 
+# SwUT/SwIT 커버리지 게이트(evaluate_coverage 메트릭명과 1:1).
+# branch/mcdc 는 ASIL 별 threshold(B+/D)라 rule 기본값을 두지 않는다 —
+# DB에 기록된 threshold(score_obj.threshold)가 있을 때(=ASIL 게이트 대상)만 제안.
+# QM/ASIL A 모듈은 evaluate_coverage 가 threshold=None 으로 저장 → 제안 skip.
+_SWUT_ADVICE = {
+    "statement_coverage_pct": {
+        "label": "구문 커버리지(Statement)",
+        "low_advice": "구문 커버리지가 100% 미만입니다(전 ASIL 필수). 실행되지 않은 코드 라인을 위한 TC를 추가하고, VectorCAST 빌드 산출물(.cov)이 최신인지·대상 함수가 테스트 하니스에 포함됐는지 확인하세요.",
+        "threshold": 100.0,
+    },
+    "branch_coverage_pct": {
+        "label": "분기 커버리지(Branch)",
+        "low_advice": "분기 커버리지가 미달입니다(ASIL B 이상 필수). if/switch 의 미실행 분기(참·거짓 경계)에 대한 TC를 추가하세요.",
+        # threshold 생략 — DB threshold(ASIL B+ 에서 100)가 있을 때만 제안.
+    },
+    "mcdc_coverage_pct": {
+        "label": "MC/DC 커버리지",
+        "low_advice": "MC/DC 커버리지가 미달입니다(ASIL D 필수). 복합 조건의 각 피연산자가 독립적으로 결과에 영향을 주는 테스트 조합을 보강하세요.",
+        # threshold 생략 — DB threshold(ASIL D 에서 100)가 있을 때만 제안.
+    },
+    "pass_rate_pct": {
+        "label": "테스트 통과율",
+        "low_advice": "실패한 TC가 있습니다. SwUTR/SwITR 의 FAIL 항목을 확인해 기대값 또는 구현을 수정하세요. 안전 관련(ASIL C/D) 함수는 자동 수정 금지 — 검토 필수입니다.",
+        "threshold": 100.0,
+    },
+}
+
+# SwReport 통합 Summary roll-up — P/F verdict 집계(커버리지 아님).
+_SWREPORT_ADVICE = {
+    "pass_rate_pct": {
+        "label": "통합 통과율(Pass Rate)",
+        "low_advice": "통합 Summary 에 FAIL 항목이 있습니다. 레벨별(SwUT/SwIT/SITS) 산출물의 fail_count 를 추적해 원인 레벨의 테스트를 수정하세요.",
+        "threshold": 100.0,
+    },
+    "overall_pass": {
+        "label": "전체 판정(Overall Result)",
+        "low_advice": "전체 판정이 Pass 가 아닙니다. 미수행(performed 누락) 또는 실패 항목을 점검하세요.",
+        "threshold": 100.0,
+    },
+}
+
+# SwSA(MISRA/HIS 정적·안전분석) — HIS pass% 만 게이트(위반 절대수는 제안 부적합).
+_SWSA_ADVICE = {
+    "his_pass_pct": {
+        "label": "HIS 메트릭 통과율",
+        "low_advice": "HIS 메트릭(복잡도/중첩/경로 등) 통과율이 낮습니다. 임계 초과 함수를 리팩터링하거나, 미평가(unbinned) 함수를 QAC 분석 대상에 포함하세요.",
+        "threshold": 80.0,
+    },
+}
+
+# SITS(시스템 통합시험) — 추적성/IO proxy(실행 커버리지 아님).
+_SITS_ADVICE = {
+    "requirement_traceability_pct": {
+        "label": "요구사항 추적성",
+        "low_advice": "시스템 요구사항 ID 와 연결되지 않은 TC 가 많습니다. SRS 문서 경로를 지정하고 related ID 매핑을 보강하세요.",
+        "threshold": 70.0,
+    },
+    "io_coverage_pct": {
+        "label": "I/O 커버리지",
+        "low_advice": "입출력 변수가 없는 통합 TC 가 많습니다. 시스템 인터페이스(신호/메시지) 정의가 소스에 반영됐는지 확인하세요.",
+        "threshold": 60.0,
+    },
+}
+
 
 def suggest_improvements(
     run_id: int,
@@ -111,8 +175,8 @@ def suggest_improvements(
             "summary": str,
         }
     """
-    from workflow.quality.db import init_db, get_session
-    from workflow.quality.models import GenerationRun, QualityScore, QualitySummary
+    from workflow.quality.db import get_session, init_db
+    from workflow.quality.models import GenerationRun
 
     init_db(db_path)
 
@@ -132,6 +196,14 @@ def suggest_improvements(
             advice_rules = _STS_ADVICE
         elif doc_type == "suts":
             advice_rules = _SUTS_ADVICE
+        elif doc_type in ("swut", "swit"):
+            advice_rules = _SWUT_ADVICE
+        elif doc_type == "swreport":
+            advice_rules = _SWREPORT_ADVICE
+        elif doc_type == "swsa":
+            advice_rules = _SWSA_ADVICE
+        elif doc_type == "sits":
+            advice_rules = _SITS_ADVICE
         else:
             advice_rules = {}
 
@@ -142,7 +214,19 @@ def suggest_improvements(
                 continue
 
             value = score_obj.value
-            threshold = rule["threshold"]
+            if value is None:
+                continue  # 외부 INSERT 등으로 value NULL이면 비교 TypeError 방지
+            # 진실원 단일화: DB에 기록된 실제 threshold 우선, 없으면 rule 기본값 폴백.
+            # (overall_pass 처럼 evaluator가 threshold 미저장이나 rule엔 threshold 가 있는
+            #  메트릭은 rule 폴백으로 제안 생성 — 정상.) DB·rule 둘 다 None 이면
+            #  (ASIL 미해당 branch/mcdc 같은 참고지표) 게이트 비대상 → 과잉 제안 방지로 skip.
+            rule_threshold = rule.get("threshold")
+            if score_obj.threshold is not None:
+                threshold = score_obj.threshold
+            elif rule_threshold is not None:
+                threshold = rule_threshold
+            else:
+                continue
 
             if value < threshold:
                 gap = threshold - value
@@ -172,7 +256,11 @@ def suggest_improvements(
         gate = summary.gate_pass if summary else False
         high_count = sum(1 for s in suggestions if s["priority"] == "high")
 
-        if not suggestions:
+        unsupported = not advice_rules
+        if unsupported:
+            # 미정의 doc_type(예: sits 등)을 '모든 항목 통과'(품질 양호)로 위장하지 않는다.
+            summary_text = f"doc_type '{doc_type}' 은 개선 제안 규칙이 정의되지 않았습니다."
+        elif not suggestions:
             summary_text = f"품질 점수 {overall:.1f}/100 -- 모든 항목이 임계값을 통과했습니다."
         elif gate:
             summary_text = f"품질 점수 {overall:.1f}/100 -- 게이트 통과. {len(suggestions)}개 항목 개선 가능."
@@ -186,5 +274,6 @@ def suggest_improvements(
             "gate_pass": gate,
             "suggestions": suggestions,
             "suggestion_count": len(suggestions),
+            "unsupported": unsupported,
             "summary": summary_text,
         }

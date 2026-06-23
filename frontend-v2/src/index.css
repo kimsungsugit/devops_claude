@@ -1040,6 +1040,16 @@ label {
   border-left: 3px solid var(--color-info);
 }
 
+.qd-advice-summary {
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+  padding: var(--sp-2) var(--sp-3);
+  margin-bottom: var(--sp-2);
+  border-radius: var(--radius-md);
+  background: var(--bg);
+  border: 1px solid var(--border);
+}
+
 .qd-advice-list {
   display: flex;
   flex-direction: column;

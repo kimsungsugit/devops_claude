@@ -489,6 +489,20 @@ def _do_swit_coverage_build(req: SwITBuildRequest) -> Response:
         result.warnings.extend(_swits_warnings)
     if not result.ok:
         raise HTTPException(status_code=500, detail="SwIT 빌드 실패 (ok=False)")
+    # Quality DB recording (non-fatal). SwIT Coverage 빌더 = 통합 커버리지 출처.
+    try:
+        from workflow.quality.recorder import record_run
+        record_run(
+            "swit", result.summary,
+            project_root=str(getattr(req, "project_id", "") or ""),
+            meta={
+                "asil_level": str(getattr(meta, "asil_level", "") or ""),
+                "kind": "coverage",
+                "release_sw_version": str(getattr(req, "release_sw_version", "") or ""),
+            },
+        )
+    except Exception:
+        pass
     return _build_result_to_response(
         content_io=result.xlsx_io,
         filename=result.filename,

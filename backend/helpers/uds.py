@@ -1,21 +1,19 @@
 """UDS (Unit Design Specification) domain helpers."""
-import re
-import os
-import sys
 import json
-import time
 import logging
-import tempfile
-import zipfile
-import traceback
+import os
+import re
 import subprocess
-import threading
+import sys
+import tempfile
+import time
+import zipfile
 from copy import deepcopy
+from datetime import datetime
 from io import BytesIO
 from pathlib import Path
-from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple, Set
 from time import time
+from typing import Any, Dict, List, Optional, Tuple
 
 try:
     from fastapi import HTTPException, UploadFile
@@ -23,33 +21,38 @@ except ImportError:
     HTTPException = Exception
     UploadFile = None  # type: ignore[assignment,misc]
 
+import config
+from backend.helpers.jenkins import _jenkins_exports_dir, _jenkins_logic_dir, _resolve_cached_build_root
+from backend.services.jenkins_helpers import _detect_reports_dir, _job_slug
+from backend.services.report_parsers import build_report_summary
 from backend.state import (
-    uds_view_cache_lock as _uds_view_cache_lock,
-    uds_view_cache as _uds_view_cache,
-    source_sections_cache_lock as _source_sections_cache_lock,
     source_sections_cache as _source_sections_cache,
 )
-from backend.services.paths import is_under_any
-from backend.services.jenkins_helpers import _detect_reports_dir, _job_slug
-from backend.helpers.jenkins import _resolve_cached_build_root, _jenkins_exports_dir, _jenkins_logic_dir
-from backend.services.report_parsers import build_report_summary
-
-import config
+from backend.state import (
+    source_sections_cache_lock as _source_sections_cache_lock,
+)
+from backend.state import (
+    uds_view_cache as _uds_view_cache,
+)
+from backend.state import (
+    uds_view_cache_lock as _uds_view_cache_lock,
+)
 from report_generator import (
     _build_req_map_from_doc_paths,
     build_uds_view_payload,
-    generate_uds_source_sections,
-    generate_uds_requirements_from_docs,
-    generate_uds_validation_report,
-    generate_uds_field_quality_gate_report,
-    generate_uds_constraints_report,
-    generate_uds_preview_html,
-    generate_uds_logic_items,
-    generate_called_calling_accuracy_report,
-    generate_swcom_context_report,
-    generate_swcom_context_diff_report,
     generate_asil_related_confidence_report,
+    generate_called_calling_accuracy_report,
+    generate_swcom_context_diff_report,
+    generate_swcom_context_report,
+    generate_uds_constraints_report,
+    generate_uds_field_quality_gate_report,
+    generate_uds_logic_items,
+    generate_uds_preview_html,
+    generate_uds_requirements_from_docs,
+    generate_uds_source_sections,
+    generate_uds_validation_report,
 )
+
 try:
     from workflow.uds_ai import generate_uds_ai_sections
 except ImportError:
@@ -61,32 +64,20 @@ except ImportError:
     get_kb = None
 
 from backend.helpers.common import (
-    _split_signature_params,
-    _extract_param_name_simple,
-    _mtime_or_zero,
-    _has_meaningful_value,
-    _normalize_field_source,
-    _has_trace_token,
-    _is_trusted_source_for_field,
-    _normalize_symbol_simple,
-    _compact_symbol_simple,
-    _normalize_asil_simple,
-    _infer_related_id_simple,
-    _parse_signature_params_simple,
-    _parse_signature_outputs_simple,
-    _is_allowed_req_doc,
-    _write_upload_to_temp,
-    _parse_component_map_file,
-    _read_json,
-    _write_json,
-    _run_report_with_timeout,
-    _progress_key,
-    _set_progress,
-    _get_progress,
-    _parse_path_list,
-    _safe_extract_zip,
-    SETTINGS_FILE,
     _api_logger,
+    _compact_symbol_simple,
+    _has_meaningful_value,
+    _has_trace_token,
+    _infer_related_id_simple,
+    _is_allowed_req_doc,
+    _is_trusted_source_for_field,
+    _mtime_or_zero,
+    _normalize_asil_simple,
+    _normalize_field_source,
+    _normalize_symbol_simple,
+    _parse_signature_outputs_simple,
+    _parse_signature_params_simple,
+    _run_report_with_timeout,
 )
 
 _logger = logging.getLogger("devops_api")
@@ -1632,6 +1623,18 @@ def _uds_generate_from_paths(
     )
     if not ok_quality_gate:
         quality_gate_path = None
+
+    # Quality DB recording (non-fatal)
+    try:
+        from workflow.quality.recorder import record_uds_run
+        # local 경로와 동일하게 enrich 후 quick_gate 계산 → 경로 간 점수 일관성.
+        _enrich_function_quality_fields(uds_payload)
+        record_uds_run(
+            _compute_quick_quality_gate(uds_payload),
+            output_path=str(out_path),
+        )
+    except Exception:
+        pass
 
     _progress("preview", 92, "미리보기 생성")
     preview_html = generate_uds_preview_html(uds_payload)

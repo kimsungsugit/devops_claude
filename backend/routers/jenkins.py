@@ -99,6 +99,11 @@ from backend.services.report_parsers import (
     find_jenkins_source_root,
 )
 from backend.user_context import wrap_with_user
+
+# 명시 RelatedID 링크 테이블 파생(P1) — 기존 빌더/생성기 수정 없이 그 출력만 소비.
+from report_gen.trace_link_table import build_link_table
+
+# 명시 RelatedID 링크 테이블 파생(P1) — 기존 빌더/생성기를 수정하지 않고 그 출력만 소비.
 from report_generator import (
     _build_req_map_from_doc_paths,
     enrich_function_details_with_docs,
@@ -1917,6 +1922,20 @@ async def jenkins_uds_generate(
     )
     if not ok_quality_gate:
         quality_gate_path = None
+
+    # Quality DB recording (non-fatal)
+    try:
+        from backend.helpers import _compute_quick_quality_gate, _enrich_function_quality_fields
+        from workflow.quality.recorder import record_uds_run
+        # local 경로와 동일하게 enrich 후 quick_gate 계산 → 경로 간 점수 일관성.
+        _enrich_function_quality_fields(uds_payload)
+        record_uds_run(
+            _compute_quick_quality_gate(uds_payload),
+            output_path=str(out_path),
+        )
+    except Exception:
+        pass
+
     preview_html = generate_uds_preview_html(uds_payload)
     preview_path = out_path.with_suffix(".html")
     preview_path.write_text(preview_html, encoding="utf-8")
@@ -3021,6 +3040,39 @@ def _cache_trace_summary(matrix: Dict[str, Any], req: UdsTraceabilityMatrixReque
     )
 
 
+def _cache_link_table(
+    link_table: Optional[Dict[str, Any]], req: UdsTraceabilityMatrixRequest
+) -> None:
+    """명시 RelatedID 링크 테이블(P1)을 ``report/trace_link_table.json``에 영속화.
+
+    ``build_link_table()`` 결과는 결정적(같은 입력 → 동일)이라, 이 파일은 빌드마다
+    재계산되는 휴리스틱 bridge와 달리 **감사 가능한 추적성 baseline**이 된다.
+    ``_cache_trace_summary``와 동일한 빌드 디렉토리 해석/쓰기 패턴을 따른다(best-effort).
+    """
+    if not isinstance(link_table, dict):
+        return
+    job_url = (req.job_url or "").strip()
+    if not job_url:
+        return
+
+    cache_root = req.cache_root or ".devops_pro_cache"
+    build_root = _resolve_job_build_root(job_url, cache_root)
+    if build_root is None:
+        return
+
+    report_dir = build_root / "report"
+    report_dir.mkdir(parents=True, exist_ok=True)
+
+    payload = {
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        **link_table,
+    }
+    (report_dir / "trace_link_table.json").write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
 @router.post("/api/jenkins/uds/traceability-matrix")
 def jenkins_uds_traceability_matrix(req: UdsTraceabilityMatrixRequest) -> Dict[str, Any]:
     try:
@@ -3032,11 +3084,22 @@ def jenkins_uds_traceability_matrix(req: UdsTraceabilityMatrixRequest) -> Dict[s
             sits_rows=req.sits_rows or [],
             uds_function_ids=req.uds_function_ids or [],
         )
+        # 명시 RelatedID 링크 테이블 파생(P1) — hiMA식 매트릭스/감사 baseline.
+        # additive: 기존 matrix dict를 변형하지 않고 새 키(link_table)만 더한다.
+        try:
+            matrix["link_table"] = build_link_table(matrix)
+        except Exception as lt_exc:
+            _api_logger.debug("Link table derivation skipped: %s", lt_exc)
         # Cache compact summary for dashboard quick-load (best-effort)
         try:
             _cache_trace_summary(matrix, req)
         except Exception as cache_exc:
             _api_logger.debug("Trace summary cache skipped: %s", cache_exc)
+        # 링크 테이블 영속화(P1) — 빌드마다 재계산 대신 감사 가능 baseline으로 고정(best-effort)
+        try:
+            _cache_link_table(matrix.get("link_table"), req)
+        except Exception as lt_cache_exc:
+            _api_logger.debug("Link table cache skipped: %s", lt_cache_exc)
         return {"ok": True, "matrix": matrix}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))

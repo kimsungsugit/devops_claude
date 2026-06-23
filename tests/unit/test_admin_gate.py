@@ -18,7 +18,6 @@ from fastapi.testclient import TestClient  # noqa: E402
 from backend.main import app  # noqa: E402
 from backend.services import admin_users as au  # noqa: E402
 
-
 client = TestClient(app)
 
 
@@ -62,6 +61,11 @@ _ENDPOINTS = [
     ("POST", "/api/file-mode/add-allowed-prefix", {"prefix": "U:/test"}),
     ("POST", "/api/file-mode/remove-allowed-prefix", {"prefix": "U:/test"}),
     ("POST", "/api/file-mode/browse-file", {"kind": "file"}),
+    # Quality (4) — ISO 26262 품질 evidence, 형제 라우터와 동일 admin only
+    ("GET", "/api/quality/runs", None),
+    ("GET", "/api/quality/runs/1", None),
+    ("GET", "/api/quality/trend", None),
+    ("POST", "/api/quality/runs/1/advice", {}),
 ]
 
 
