@@ -300,13 +300,25 @@ class UdsPublishRequest(BaseModel):
 
 class ChatHistoryItem(BaseModel):
     role: str
-    text: str
+    text: str = Field("", max_length=8000)
 
 
 class ChatJenkinsConfig(BaseModel):
     job_url: str = ""
     cache_root: str = ""
     build_selector: str = "lastSuccessfulBuild"
+
+    @field_validator("job_url")
+    @classmethod
+    def _validate_job_url(cls, v: str) -> str:
+        v = (v or "").strip()
+        if not v:
+            return v
+        if not (v.startswith("http://") or v.startswith("https://")):
+            raise ValueError("job_url must start with http:// or https://")
+        if len(v) > 2000:
+            raise ValueError("job_url too long")
+        return v
 
 
 class ApprovalRequestPayload(BaseModel):
@@ -375,13 +387,13 @@ class ChatResponse(BaseModel):
 
 class ChatRequest(BaseModel):
     mode: str = "local"
-    question: str
+    question: str = Field(..., max_length=8000)
     session_id: Optional[str] = None
     report_dir: Optional[str] = None
     llm_model: Optional[str] = None
     oai_config_path: Optional[str] = None
     ui_context: Optional[Dict[str, Any]] = None
-    history: List[ChatHistoryItem] = Field(default_factory=list)
+    history: List[ChatHistoryItem] = Field(default_factory=list, max_length=200)
     jenkins: Optional[ChatJenkinsConfig] = None
     thread_id: Optional[str] = None  # 기존 대화 이어하기 (서버 이력 로드)
     save_history: bool = True  # 서버측 이력 저장 여부
@@ -423,7 +435,7 @@ class ChatConversationListResponse(BaseModel):
 
 
 class ChatTitleUpdateRequest(BaseModel):
-    title: str
+    title: str = Field(..., max_length=500)
 
 
 # ── Local ─────────────────────────────────────────────────────────────

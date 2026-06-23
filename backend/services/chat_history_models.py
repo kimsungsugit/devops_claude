@@ -2,12 +2,18 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from typing import List, Optional
 
 from sqlalchemy import (
-    Column, Integer, String, Text, DateTime, ForeignKey, Index,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
-from typing import List, Optional
 
 
 class ChatHistoryBase(DeclarativeBase):
@@ -24,6 +30,7 @@ class ChatConversation(ChatHistoryBase):
     mode: Mapped[str] = mapped_column(String(20), default="local")
     report_dir: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     title: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    owner: Mapped[Optional[str]] = mapped_column(String(120), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=lambda: datetime.now(timezone.utc),
     )
@@ -65,5 +72,6 @@ class ChatMessage(ChatHistoryBase):
     conversation: Mapped["ChatConversation"] = relationship(back_populates="messages")
 
     __table_args__ = (
+        UniqueConstraint("conversation_id", "seq", name="uq_msg_conv_seq"),
         Index("ix_msg_conv_seq", "conversation_id", "seq"),
     )

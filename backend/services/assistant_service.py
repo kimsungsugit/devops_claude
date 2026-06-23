@@ -1,12 +1,13 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 import logging
 import os
 import re
-import time
 import threading
+import time
 import uuid
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -18,11 +19,12 @@ from backend.mcp import (
     get_jenkins_mcp_server,
     get_report_mcp_server,
 )
-from backend.services.files import list_log_candidates, parse_coverage_xml, tail_text
 from backend.services.chat_approval_store import save_pending_approval
-from backend.services.jenkins_helpers import _detect_reports_dir, _job_slug
+from backend.services.files import list_log_candidates, parse_coverage_xml
+from backend.services.jenkins_helpers import _job_slug
 from workflow.ai import agent_call, load_oai_config, load_oai_configs
 from workflow.chat_graph import emit_graph_event, new_chat_graph_state, run_chat_graph
+
 try:
     from workflow.mcp_bridge import get_langchain_mcp_tool_map
 except ImportError:
@@ -33,7 +35,8 @@ from workflow.retrieval import retrieve_contexts
 _chat_perf_logger = logging.getLogger("devops_chat_perf")
 _CHAT_PERF_LOG = str(os.environ.get("DEVOPS_CHAT_PERF_LOG", "1")).strip().lower() in ("1", "true", "yes")
 _report_bundle_cache_lock = threading.Lock()
-_report_bundle_cache: Dict[str, Tuple[Tuple[int, ...], Dict[str, Any]]] = {}
+_REPORT_BUNDLE_CACHE_MAX = 64
+_report_bundle_cache: OrderedDict[str, Tuple[Tuple[int, ...], Dict[str, Any]]] = OrderedDict()
 
 
 def _read_json(path: Path, default: Any) -> Any:
@@ -135,9 +138,9 @@ def _parse_structured_answer_payload(answer: str) -> Dict[str, Any]:
     if not isinstance(obj, dict):
         return {"answer": text, "evidence": [], "next_steps": []}
 
-    answer_line = str(obj.get("?듬?") or obj.get("answer") or "").strip()
-    evidence = _coerce_text_list(obj.get("洹쇨굅") or obj.get("evidence") or [])
-    next_steps = _coerce_text_list(obj.get("?ㅼ쓬 ?④퀎") or obj.get("next_steps") or obj.get("nextSteps") or [])
+    answer_line = str(obj.get("답변") or obj.get("answer") or "").strip()
+    evidence = _coerce_text_list(obj.get("근거") or obj.get("evidence") or [])
+    next_steps = _coerce_text_list(obj.get("다음 단계") or obj.get("next_steps") or obj.get("nextSteps") or [])
     return {
         "answer": answer_line or text,
         "evidence": evidence,
@@ -157,13 +160,13 @@ def _normalize_chat_answer_text(answer: str) -> str:
     evidence = list(parsed.get("evidence") or [])
     if isinstance(evidence, list) and evidence:
         lines.append("")
-        lines.append("**洹쇨굅**")
+        lines.append("**근거**")
         lines.extend([f"- {str(item).strip()}" for item in evidence if str(item).strip()])
 
     next_steps = list(parsed.get("next_steps") or [])
     if isinstance(next_steps, list) and next_steps:
         lines.append("")
-        lines.append("**?ㅼ쓬 ?④퀎**")
+        lines.append("**다음 단계**")
         lines.extend([f"{idx}. {str(item).strip()}" for idx, item in enumerate(next_steps, start=1) if str(item).strip()])
 
     normalized = "\n".join(lines).strip()
@@ -211,6 +214,7 @@ def read_report_bundle(report_dir: Path) -> Dict[str, Any]:
     with _report_bundle_cache_lock:
         cached = _report_bundle_cache.get(cache_key)
         if cached and cached[0] == signature:
+            _report_bundle_cache.move_to_end(cache_key)
             return dict(cached[1])
 
     summary = _read_json(report_dir / "analysis_summary.json", default={})
@@ -244,6 +248,9 @@ def read_report_bundle(report_dir: Path) -> Dict[str, Any]:
     }
     with _report_bundle_cache_lock:
         _report_bundle_cache[cache_key] = (signature, bundle)
+        _report_bundle_cache.move_to_end(cache_key)
+        while len(_report_bundle_cache) > _REPORT_BUNDLE_CACHE_MAX:
+            _report_bundle_cache.popitem(last=False)
     return dict(bundle)
 
 
@@ -1155,6 +1162,11 @@ def _prioritize_model_candidates(
     return prioritized[0], prioritized + deferred
 
 
+def _chat_max_turns() -> int:
+    """대화 이력에 포함할 최근 메시지 수 (config.CHAT_MAX_TURNS, 기본 16)."""
+    return int(getattr(config, "CHAT_MAX_TURNS", 16) or 16)
+
+
 def _build_chat_messages(
     *,
     mode: str,
@@ -1164,44 +1176,44 @@ def _build_chat_messages(
     history: Optional[List[Dict[str, str]]],
 ) -> List[Dict[str, str]]:
     base_prompt = (
-        "?덈뒗 DevOps ?뚰겕?뚮줈??遺꾩꽍 ?꾩슦誘몃떎. 諛섎뱶???쒓뎅?대줈 ?듬??쒕떎.\n"
-        "?몃? ??寃?됱씠??異붿륫? 湲덉??섍퀬, ?쒓났??而⑦뀓?ㅽ듃留??ъ슜?쒕떎.\n"
-        "而⑦뀓?ㅽ듃???녿뒗 ?댁슜? 紐⑤Ⅸ?ㅺ퀬 留먰븯怨?異붽? ?뺣낫瑜??붿껌?쒕떎.\n"
-        "?듬? 援ъ“???ㅼ쓬???곕Ⅸ??\n"
-        "1) ?듬?\n"
-        "2) 洹쇨굅(?ъ슜???뚯뒪 ?쇰꺼)\n"
-        "3) ?ㅼ쓬 ?④퀎(?덉쓣 ?뚮쭔)\n"
+        "너는 DevOps 플랫폼 분석 도우미다. 답변은 한국어로 한다.\n"
+        "근거 없는 추측은 금지하고, 제공된 컨텍스트만 사용한다.\n"
+        "컨텍스트에 없는 내용은 모른다고 말하고 추가 정보를 요청한다.\n"
+        "답변 구조는 다음을 따른다:\n"
+        "1) 답변\n"
+        "2) 근거(사용한 소스 라벨)\n"
+        "3) 다음 단계(있을 때만)\n"
     )
 
     if mode == "jenkins":
         mode_hint = (
-            "?꾩옱 Jenkins CI/CD ?뚯씠?꾨씪??遺꾩꽍 紐⑤뱶?대떎. "
-            "鍮뚮뱶 ?ㅽ뙣 ?먯씤, ?뚯씠?꾨씪??蹂듦뎄 諛⑸쾿, PRQA/VectorCAST 寃곌낵 ?댁꽍??吏묒쨷?쒕떎.\n"
+            "현재 Jenkins CI/CD 파이프라인 분석 모드다. "
+            "빌드 실패 원인, 파이프라인 복구 방법, PRQA/VectorCAST 결과 해석에 집중한다.\n"
         )
     else:
         mode_hint = (
-            "?꾩옱 濡쒖뺄 鍮뚮뱶/?뚯뒪??遺꾩꽍 紐⑤뱶?대떎. "
-            "?뚯뒪??而ㅻ쾭由ъ? ?μ긽, ?뺤쟻遺꾩꽍 ?댁뒋 ?섏젙, 鍮뚮뱶 ?ㅻ쪟 ?닿껐??吏묒쨷?쒕떎.\n"
+            "현재 로컬 빌드/테스트 분석 모드다. "
+            "테스트 커버리지 향상, 정적분석 이슈 수정, 빌드 오류 해결에 집중한다.\n"
         )
 
     if current_view == "editor":
         view_hint = (
-            "?ъ슜?먭? ?먮뵒??酉곗뿉 ?덈떎. 肄붾뱶 ?섏젙, ?댁뒋 ?닿껐, 由ы뙥?좊쭅 媛?대뱶瑜?援ъ껜?곸쑝濡??쒓났?쒕떎. "
-            "媛?ν븯硫?肄붾뱶 釉붾줉?쇰줈 ?섏젙 ?덉떆瑜?蹂댁뿬以??\n"
+            "사용자가 에디터 뷰에 있다. 코드 수정, 이슈 해결, 리팩터링 가이드를 구체적으로 제공한다. "
+            "가능하면 코드 블록으로 수정 예시를 보여준다.\n"
         )
     elif current_view == "workflow":
         view_hint = (
-            "?ъ슜?먭? ?뚰겕?뚮줈??酉곗뿉 ?덈떎. ?뚰겕?뚮줈???ㅽ뻾 ?곹깭 ?댁꽍, ?몃윭釉붿뒋?? "
-            "?ㅼ쓬 ?ㅽ뻾 ?④퀎瑜??덈궡?쒕떎.\n"
+            "사용자가 워크플로우 뷰에 있다. 워크플로우 실행 상태 해석, 트러블슈팅, "
+            "다음 실행 단계를 안내한다.\n"
         )
     else:
         view_hint = (
-            "?ъ슜?먭? ??쒕낫??酉곗뿉 ?덈떎. ?붿빟 ?곗씠???댁꽍, 硫뷀듃由??ㅻ챸, "
-            "?곗꽑?쒖쐞 湲곕컲 ?ㅼ쓬 ?④퀎瑜?異붿쿇?쒕떎.\n"
+            "사용자가 대시보드 뷰에 있다. 요약 데이터 해석, 메트릭 설명, "
+            "우선순위 기반 다음 단계를 추천한다.\n"
         )
 
     messages: List[Dict[str, str]] = [{"role": "system", "content": base_prompt + mode_hint + view_hint}]
-    for msg in (history or [])[-16:]:
+    for msg in (history or [])[-_chat_max_turns():]:
         role = msg.get("role") or "user"
         text = msg.get("text") or ""
         if not text.strip():
@@ -1210,7 +1222,7 @@ def _build_chat_messages(
             role = "user"
         messages.append({"role": role, "content": text})
 
-    user_prompt = f"吏덈Ц: {question}\n\n而⑦뀓?ㅽ듃:\n{context}\n"
+    user_prompt = f"질문: {question}\n\n컨텍스트:\n{context}\n"
     messages.append({"role": "user", "content": user_prompt})
     return messages
 
@@ -1258,6 +1270,9 @@ def _run_llm_candidates(
             blocked_api_types.add(api_type)
         if answer:
             break
+    if not answer and not last_llm_error:
+        # 모든 후보가 사전 차단되어 한 번도 호출되지 못한 경우 — 원인을 명시
+        last_llm_error = "all_blocked"
     return answer, selected_cfg, last_llm_error, (time.perf_counter() - llm_started) * 1000.0
 
 
@@ -1275,6 +1290,8 @@ def answer_chat(
     jenkins_cache_root: Optional[str] = None,
     jenkins_build_selector: Optional[str] = None,
     progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+    requester: Optional[str] = None,
+    cancel_check: Optional[Callable[[], bool]] = None,
 ) -> Dict[str, Any]:
     total_started = time.perf_counter()
     if not question or not question.strip():
@@ -1282,7 +1299,7 @@ def answer_chat(
             "ok": False,
             "request_id": "",
             "thread_id": "",
-            "answer": "吏덈Ц??鍮꾩뼱 ?덉뒿?덈떎.",
+            "answer": "질문이 비어 있습니다.",
             "sources": [],
             "citations": [],
             "evidence": [],
@@ -1383,6 +1400,7 @@ def answer_chat(
                 "jenkins_cache_root": jenkins_cache_root,
                 "jenkins_build_selector": jenkins_build_selector,
                 "approval_request": approval_request,
+                "owner": requester,
             },
         )
         emit_graph_event(
@@ -1430,10 +1448,10 @@ def answer_chat(
         ("approval_gate", _node_approval_gate),
         ("llm_answer", _node_llm_answer),
     ]
-    state = run_chat_graph(initial_state=state, nodes=nodes, event_callback=progress_callback)
+    state = run_chat_graph(initial_state=state, nodes=nodes, event_callback=progress_callback, cancel_check=cancel_check)
 
     if state.errors:
-        fallback = "?꾩옱 LLM ?ㅼ젙??遺덈윭?ㅼ? 紐삵뻽?듬땲?? ?대? 由ы룷??濡쒓렇 湲곕컲?쇰줈 異붽? ?뺣낫瑜??쒓났??二쇱꽭??"
+        fallback = "현재 LLM 설정을 불러오지 못했습니다. 이전 리포트 로그 기반으로 추가 정보를 제공해 주세요."
         return {
             "ok": False,
             "request_id": state.request_id,
@@ -1441,7 +1459,7 @@ def answer_chat(
             "answer": fallback,
             "sources": sources,
             "citations": citations,
-            "evidence": evidence,
+            "evidence": _build_evidence(citations=citations, sources=sources),
             "next_steps": _default_next_steps(question_type),
             "structured": {"answer": fallback, "evidence": [], "next_steps": _default_next_steps(question_type)},
             "approval_required": bool(state.approval_required),
@@ -1489,7 +1507,7 @@ def answer_chat(
                 payload={"reason": "network_denied"},
             )
         else:
-            answer = "?꾩옱 ?묐떟???앹꽦?섏? 紐삵뻽?듬땲?? 吏덈Ц??議곌툑 ??援ъ껜?뷀빐 二쇱꽭??"
+            answer = "현재 답변을 생성하지 못했습니다. 질문을 조금 더 구체화해 주세요."
 
     if answer:
         parsed_answer = _parse_structured_answer_payload(answer)
@@ -1509,7 +1527,7 @@ def answer_chat(
             str(resolved_report_dir) if resolved_report_dir else "",
             str(selected_cfg.get("model") or ""),
             len(question or ""),
-            len((history or [])[-16:]),
+            len((history or [])[-_chat_max_turns():]),
             len(context or ""),
             prompt_chars,
             len(sources),

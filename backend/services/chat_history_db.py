@@ -5,7 +5,7 @@ import logging
 import threading
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Optional, Generator
+from typing import Generator, Optional
 
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import Session, sessionmaker
@@ -21,12 +21,21 @@ _CHAT_HISTORY_DB_FILENAME = "chat_history.sqlite"
 
 
 def _default_db_path() -> Path:
+    """레포 루트 기준 절대경로로 anchor.
+
+    DEFAULT_REPORT_DIR 가 상대경로면 CWD(backend vs 루트)에 따라 다른 파일을
+    읽고 쓰는 split-brain 이 발생하므로 config.py 위치(레포 루트)에 고정한다.
+    """
     try:
         import config
         report_dir = getattr(config, "DEFAULT_REPORT_DIR", "reports")
-        return Path(report_dir) / _CHAT_HISTORY_DB_FILENAME
+        base = Path(report_dir)
+        if not base.is_absolute():
+            repo_root = Path(config.__file__).resolve().parent
+            base = repo_root / base
+        return base / _CHAT_HISTORY_DB_FILENAME
     except Exception:
-        return Path("reports") / _CHAT_HISTORY_DB_FILENAME
+        return (Path("reports").resolve()) / _CHAT_HISTORY_DB_FILENAME
 
 
 def get_engine(db_path: Optional[Path] = None, *, force_new: bool = False):
@@ -43,7 +52,8 @@ def get_engine(db_path: Optional[Path] = None, *, force_new: bool = False):
         db_path.parent.mkdir(parents=True, exist_ok=True)
 
         url = f"sqlite:///{db_path}"
-        _engine = create_engine(url, echo=False)
+        # D10: sync endpoint + 백그라운드 저장 스레드 동시 접근 허용
+        _engine = create_engine(url, echo=False, connect_args={"check_same_thread": False})
 
         @event.listens_for(_engine, "connect")
         def _set_sqlite_pragma(dbapi_conn, connection_record):
@@ -51,6 +61,7 @@ def get_engine(db_path: Optional[Path] = None, *, force_new: bool = False):
             cursor.execute("PRAGMA journal_mode=WAL")
             cursor.execute("PRAGMA synchronous=NORMAL")
             cursor.execute("PRAGMA foreign_keys=ON")
+            cursor.execute("PRAGMA wal_autocheckpoint=200")  # D10: WAL 무제한 증가 방지
             cursor.close()
 
         _logger.info("Chat History DB engine: %s", db_path)
@@ -59,15 +70,38 @@ def get_engine(db_path: Optional[Path] = None, *, force_new: bool = False):
 
 def get_session_factory(db_path: Optional[Path] = None):
     global _SessionLocal
-    if _SessionLocal is None:
-        engine = get_engine(db_path)
-        _SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
+    if _SessionLocal is not None:
+        return _SessionLocal
+    with _lock:  # W3: double-checked locking (reset_engine 직후 동시호출 시 stale factory 방지)
+        if _SessionLocal is None:
+            engine = get_engine(db_path)
+            _SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
     return _SessionLocal
+
+
+def _migrate_schema(engine) -> None:
+    """기존 chat_conversations 테이블에 owner 컬럼/인덱스 보강 (idempotent).
+
+    create_all 은 기존 테이블에 컬럼을 추가하지 않으므로, 구버전 DB(owner 없음)에
+    대해 ALTER TABLE 로 마이그레이션한다. 신규 DB는 create_all 이 이미 생성하므로 no-op.
+    """
+    try:
+        with engine.begin() as conn:
+            cols = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info(chat_conversations)")}
+            if cols and "owner" not in cols:
+                conn.exec_driver_sql("ALTER TABLE chat_conversations ADD COLUMN owner VARCHAR(120)")
+                conn.exec_driver_sql(
+                    "CREATE INDEX IF NOT EXISTS ix_chat_conversations_owner ON chat_conversations(owner)"
+                )
+                _logger.info("Chat History DB migrated: added owner column")
+    except Exception:
+        _logger.warning("Chat History DB owner migration failed", exc_info=True)
 
 
 def init_db(db_path: Optional[Path] = None) -> None:
     engine = get_engine(db_path)
     ChatHistoryBase.metadata.create_all(engine, checkfirst=True)
+    _migrate_schema(engine)
     _logger.info("Chat History DB tables initialized")
 
 

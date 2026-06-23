@@ -258,7 +258,6 @@ else:
 
 def resolve_oai_api_keys(config_list: list) -> list:
     """Resolve 'ENV:VAR_NAME' placeholders in api_key fields to actual env values."""
-    import json as _json
     resolved = []
     for entry in config_list:
         entry = dict(entry)
@@ -478,6 +477,9 @@ RAG_CATEGORY_BY_STAGE = {
 }
 
 # ---------------- Chat tuning ----------------
+# 활성: CHAT_MAX_TURNS, CHAT_APPROVAL_TTL_SECONDS.
+# 예약(현재 미소비 — 향후 요약/보존 기능에서 사용): CHAT_LOG_LINES, CHAT_SUMMARY_*,
+# CHAT_LONG_QUERY_CHARS, CHAT_MODEL_FAST.
 CHAT_MAX_TURNS = 16
 CHAT_LOG_LINES = 40
 CHAT_SUMMARY_MAX_CHARS = 1600
@@ -487,6 +489,7 @@ CHAT_MODEL_FAST = "gemini-3.1-flash-lite-preview"
 CHAT_SUMMARY_KEEP_DAYS = 7
 CHAT_SUMMARY_LOAD_FROM_FILE = True
 CHAT_SUMMARY_FILE_MAX_CHARS = 1200
+CHAT_APPROVAL_TTL_SECONDS = 1800  # 승인 대기 항목 만료(초) — in-memory store 메모리 누수 방지
 
 # ---------------- RAG ingestion (VectorCAST/UDS/Requirements/Code) ----------------
 RAG_INGEST_ENABLE = True
