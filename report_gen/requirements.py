@@ -1835,6 +1835,28 @@ def _normalize_vcast_rows(rows: List[Dict[str, Any]]) -> Dict[str, List[Dict[str
     return out
 
 
+# ASIL 등급 순위(ISO 26262: QM<A<B<C<D) — 요구사항 ASIL은 연결 설계요소 중 최고로 도출.
+_ASIL_RANK = {"QM": 0, "A": 1, "B": 2, "C": 3, "D": 4}
+
+
+def _asil_max_of(raw_values: List[str]) -> str:
+    """주어진 ASIL 문자열들('A','QM','A, B' 등) 중 최고 등급을 canonical 토큰으로 반환.
+
+    _normalize_asil_value로 정규화 후 토큰별 순위 비교. 인식 불가/빈 값은 무시.
+    하나도 인식 못 하면 빈 문자열(graceful — ASIL 미상).
+    """
+    best = ""
+    best_rank = -1
+    for v in raw_values:
+        for tok in _normalize_asil_value(v).split(","):
+            tok = tok.strip().upper()
+            r = _ASIL_RANK.get(tok)
+            if r is not None and r > best_rank:
+                best_rank = r
+                best = tok
+    return best
+
+
 def generate_uds_traceability_matrix(
     items: List[Dict[str, Any]],
     mapping_pairs: Optional[List[Dict[str, Any]]] = None,
@@ -1842,7 +1864,18 @@ def generate_uds_traceability_matrix(
     sds_pairs: Optional[List[Dict[str, Any]]] = None,
     sits_rows: Optional[List[Dict[str, Any]]] = None,
     uds_function_ids: Optional[List[str]] = None,
+    component_asil: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
+    # ASIL 결합(P5) — {컴포넌트/함수명(lower): ASIL}. SDS 추출(component_asil)에서 전달.
+    # 요구사항별 ASIL = 연결된 SDS 컴포넌트·UDS 함수의 ASIL 중 최고(QM<A<B<C<D).
+    # hiMA는 ASIL을 셀에 비노출 → 우리 차별점. 데이터 없으면 빈 문자열(graceful).
+    comp_asil_map: Dict[str, str] = {}
+    for _k, _v in (component_asil or {}).items():
+        _kk = str(_k or "").strip().lower()
+        _vv = str(_v or "").strip()
+        if _kk and _vv:
+            comp_asil_map[_kk] = _vv
+
     # Build original→normalized ID mapping to preserve display IDs
     raw_ids = sorted({str(x.get("id") or "").strip() for x in items if str(x.get("id") or "").strip()})
     logger = logging.getLogger(__name__)
@@ -2233,6 +2266,13 @@ def generate_uds_traceability_matrix(
             if rid in sds_func_to_reqs.get(_sds_comp_key(flower), []) and fdisp not in src_list:
                 src_list.append(fdisp)
         sds_list = sds_lookup.get(rid, [])
+        # ASIL 결합(P5) — 요구사항 ASIL = 연결된 SDS 컴포넌트·UDS 함수의 최고 ASIL.
+        # 컴포넌트/함수명(lower)으로 comp_asil_map 조회. 맵 없거나 매칭 0이면 ''(graceful).
+        row_asil = ""
+        if comp_asil_map:
+            _asil_keys = [str(c).strip().lower() for c in sds_list]
+            _asil_keys += [str(s).strip().lower() for s in src_list]
+            row_asil = _asil_max_of([comp_asil_map[k] for k in _asil_keys if k in comp_asil_map])
         if src_list:
             mapped_source_count += 1
         if sds_list:
@@ -2287,6 +2327,8 @@ def generate_uds_traceability_matrix(
                 "requirement_id": norm_to_raw.get(rid, rid),
                 # 요구사항 표시명(제목) — 프론트 표/트리에서 ID 옆에 노출(라운드110).
                 "requirement_name": name_map.get(rid, ""),
+                # ASIL(P5) — 연결 설계요소 최고 등급(QM<A<B<C<D). 데이터 없으면 ''(graceful).
+                "asil": row_asil,
                 # T1: SRS→SDS (아키텍처 추적)
                 "sds_components": sds_list,
                 # T2: SDS→UDS (상세 설계 추적)

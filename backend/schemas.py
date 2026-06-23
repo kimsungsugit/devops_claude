@@ -658,6 +658,10 @@ class UdsTraceabilityMatrixRequest(BaseModel):
     # 모아 전달. SDS→UDS bridge가 전체 함수를 매칭하도록 매트릭스 uds_all_funcs를 시드.
     # UDS 함수 ~1k(이름+ID 2배=~2k) 상한의 넉넉한 배수.
     uds_function_ids: List[str] = Field(default_factory=list, max_length=20000)
+    # ASIL 결합(P5) — {컴포넌트/함수명(lower): ASIL}. SDS 추출(component_asil)에서 echo.
+    # 매트릭스가 요구사항별 ASIL(연결 컴포넌트 max)을 도출해 행/링크테이블에 부착.
+    # 컴포넌트 ~1k(SwCom+함수)의 넉넉한 배수 상한.
+    component_asil: Dict[str, str] = Field(default_factory=dict, max_length=20000)
     # Optional cache-persist hints (for dashboard summary quick-load)
     job_url: Optional[str] = None
     cache_root: Optional[str] = None

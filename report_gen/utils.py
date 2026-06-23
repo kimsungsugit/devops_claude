@@ -1,14 +1,10 @@
 """report_gen.utils - Auto-split from report_generator.py"""
 # Re-import common dependencies
-import re
-import os
-import json
-import csv
 import logging
-import time
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Set
+import re
 from datetime import datetime
+from pathlib import Path
+from typing import Any, Dict, List, Tuple
 
 from report_gen.source_parser import _read_text_limited  # noqa: F401  (leaf module, no circular dep)
 
@@ -142,10 +138,10 @@ def generate_pdf_report(summary: Dict[str, Any], output_path: str) -> str:
     out.parent.mkdir(parents=True, exist_ok=True)
 
     try:
+        from reportlab.lib import colors
         from reportlab.lib.pagesizes import A4
         from reportlab.lib.styles import getSampleStyleSheet
-        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
-        from reportlab.lib import colors
+        from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
     except Exception as e:
         raise ImportError(
             "reportlab 미설치로 PDF 생성 불가. requirements에 reportlab 추가 필요"
@@ -430,8 +426,16 @@ def _dedupe_multiline_text(value: str, na_to_empty: bool = False) -> str:
 
 
 def _normalize_asil_value(value: str) -> str:
+    raw_str = str(value or "").strip()
+    # N/A·미적용·TBD류는 'ASIL 미부여'(빈 문자열)로 정규화한다. split이 'N/A'를 ['N','A']로
+    # 쪼개 'A'로 거짓 격상하던 안전 결함 차단(ISO 26262 ASIL 도출 정확성 — 추적성 갭 판정에
+    # 직접 영향). 'NA'(슬래시 없음)도 동일 처리.
+    if re.fullmatch(r"\s*(?:n\s*/?\s*a|tbd|none|미적용|해당\s*없음)\s*", raw_str, re.IGNORECASE):
+        return ""
     tokens: List[str] = []
-    for raw in re.split(r"[\s,;/]+", str(value or "").strip()):
+    # 괄호도 구분자로 포함 — 'B(C)'(공백 없는 보조등급 표기)를 ['B','C']로 분해해 등급
+    # 탈락(미상 처리)을 방지. 'D (B)' 등 기존 케이스는 영향 없음.
+    for raw in re.split(r"[\s,;/()]+", raw_str):
         t = str(raw or "").strip().upper()
         if not t:
             continue
@@ -440,7 +444,7 @@ def _normalize_asil_value(value: str) -> str:
             if canon not in tokens:
                 tokens.append(canon)
     if not tokens:
-        text = _dedupe_multiline_text(str(value or ""), na_to_empty=True)
+        text = _dedupe_multiline_text(raw_str, na_to_empty=True)
         return text
     return ", ".join(tokens)
 

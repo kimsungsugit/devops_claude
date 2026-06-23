@@ -1,8 +1,6 @@
 """Unit tests for report_gen.requirements — parsing, mapping, extraction."""
 from __future__ import annotations
 
-import pytest
-
 
 class TestExtractTableSection:
     def test_finds_section(self):
@@ -292,8 +290,9 @@ class TestNormalizeTraceMappingEntry:
 
 class TestParseTraceabilityJson:
     def test_list_format(self):
-        from report_gen.requirements import _parse_traceability_json
         import json
+
+        from report_gen.requirements import _parse_traceability_json
 
         data = json.dumps([
             {"requirement_id": "SwTR_001", "source_ids": ["a.c"]},
@@ -303,8 +302,9 @@ class TestParseTraceabilityJson:
         assert len(result) == 2
 
     def test_mappings_wrapper(self):
-        from report_gen.requirements import _parse_traceability_json
         import json
+
+        from report_gen.requirements import _parse_traceability_json
 
         data = json.dumps({"mappings": [
             {"requirement_id": "SwTR_001", "source_ids": ["a.c"]},
@@ -313,8 +313,9 @@ class TestParseTraceabilityJson:
         assert len(result) == 1
 
     def test_dict_format(self):
-        from report_gen.requirements import _parse_traceability_json
         import json
+
+        from report_gen.requirements import _parse_traceability_json
 
         data = json.dumps({"SwTR_001": ["a.c", "b.c"]})
         result = _parse_traceability_json(data)
@@ -343,8 +344,9 @@ class TestParseTraceabilityCsv:
 
 class TestParseTraceabilityText:
     def test_json_detected(self):
-        from report_gen.requirements import _parse_traceability_text
         import json
+
+        from report_gen.requirements import _parse_traceability_text
 
         data = json.dumps([{"requirement_id": "SwTR_001", "source_ids": ["a.c"]}])
         result = _parse_traceability_text(data)
@@ -673,6 +675,36 @@ class TestGenerateUdsTraceabilityMatrix:
 
         result = generate_uds_traceability_matrix([])
         assert result["total_requirements"] == 0
+
+    def test_row_asil_from_component_asil(self):
+        """ASIL 결합(P5) — 요구사항 ASIL이 연결 컴포넌트의 최고등급으로 도출되는지.
+
+        + _normalize_asil_value 엣지 전파: N/A는 거짓 'A' 격상 차단(''), B(C)는 max C.
+        (reviewer WARN-A/테스트 갭 — requirements 레이어 ASIL 도출 단위테스트 0건 해소)
+        """
+        from report_gen.requirements import generate_uds_traceability_matrix
+
+        items = [{"id": "R1"}, {"id": "R2"}, {"id": "R3"}, {"id": "R4"}]
+        sds_pairs = [
+            {"requirement_id": "R1", "component_ids": ["compA", "compB"]},  # max(A,B)=B
+            {"requirement_id": "R2", "component_ids": ["compNA"]},          # N/A → 미상('')
+            {"requirement_id": "R3", "component_ids": ["compBC"]},          # B(C) → max C
+            {"requirement_id": "R4", "component_ids": ["compX"]},           # 맵에 없음 → ''
+        ]
+        component_asil = {"compa": "A", "compb": "B", "compna": "N/A", "compbc": "B(C)"}
+        out = generate_uds_traceability_matrix(items, sds_pairs=sds_pairs, component_asil=component_asil)
+        by_id = {r["requirement_id"]: r for r in out["rows"]}
+        assert by_id["R1"]["asil"] == "B"   # 연결요소 최고
+        assert by_id["R2"]["asil"] == ""    # N/A → 거짓 A 격상 차단
+        assert by_id["R3"]["asil"] == "C"   # B(C) → 보조등급 max
+        assert by_id["R4"]["asil"] == ""    # 매칭 실패 → 미상(graceful)
+
+    def test_component_asil_optional(self):
+        """component_asil 미전달(기존 호출) 시 행에 asil='' (회귀 안전)."""
+        from report_gen.requirements import generate_uds_traceability_matrix
+
+        out = generate_uds_traceability_matrix([{"id": "R1"}])
+        assert out["rows"][0]["asil"] == ""
 
 
 class TestGenerateUdsRequirementsFromDocs:

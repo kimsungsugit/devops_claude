@@ -11,6 +11,9 @@
 """
 from __future__ import annotations
 
+import pytest
+from fastapi import HTTPException
+
 import backend.routers.jenkins as J
 from backend.schemas import JenkinsReportRequest, ScmLinkedDocs
 
@@ -407,3 +410,131 @@ def test_linked_docs_vectorcast_accepts_list() -> None:
     assert ld.vectorcast == ["U:/a", "U:/b"]
     # round-trip through model_dump (registry 저장 경로).
     assert ld.model_dump()["vectorcast"] == ["U:/a", "U:/b"]
+
+
+# ── per-function vcast_summary + complexity_rows (audit D2/D3 fix) ─────
+class _FCFull:
+    """FunctionCoverage stub — per-function entries/complexity 검증용 (name/unit_id/component_name/complexity 포함)."""
+    def __init__(self, name, s, b, m, complexity=0, component="") -> None:
+        self.name = name
+        self.unit_id = name
+        self.component_name = component
+        self.statement = _CS(*s)
+        self.branch = _CS(*b)
+        self.mcdc = _CS(*m)
+        self.complexity = complexity
+
+
+def test_folder_parse_emits_vcast_summary_and_complexity(monkeypatch) -> None:
+    """폴더 파서가 함수별 vcast_summary.{ut}_metrics.entries + complexity_rows를 산출(집계 폐기 방지).
+    MC/DC total=0이면 pairs.rate=None(0% 위장 금지)."""
+    import backend.services.swut_input_adapter as SA
+    _patch_folder_parse(monkeypatch, exec_results={"SwUFn_0133.001": _FakeRow(True)})
+    funcs = [
+        _FCFull("Ap_Door_Run", (10, 10), (8, 10), (17, 20), complexity=9, component="DoorU"),
+        _FCFull("Ap_NoMcdc", (5, 5), (0, 0), (0, 0), complexity=3, component="DoorU"),
+    ]
+    # grand 존재(집계는 grand 사용)해도 per-function은 항상 funcs에서 모음을 검증.
+    monkeypatch.setattr(SA, "extract_aggregate_coverage",
+                        lambda data: (funcs, _FC((15, 15), (8, 10), (17, 20))))
+    out = J._parse_vcast_logs_from_cloudium_folder("U:/x/09.SW 단위 테스트/vs_UT")
+    entries = out["vcast_summary"]["ut_metrics"]["entries"]
+    by = {e["subprogram"]: e for e in entries}
+    assert by["Ap_Door_Run"]["pairs"] == {"covered": 17, "total": 20, "rate": 0.85}
+    assert by["Ap_Door_Run"]["statements"] == {"covered": 10, "total": 10, "rate": 1.0}
+    assert by["Ap_Door_Run"]["ccn"] == 9
+    # MC/DC total=0 → rate None (증거 부재 ≠ 0% 미커버)
+    assert by["Ap_NoMcdc"]["pairs"]["rate"] is None
+    assert by["Ap_NoMcdc"]["pairs"]["total"] == 0
+    # complexity_rows — complexity>0 함수만, file/unit=component.
+    comp = {c["function"]: c for c in out["complexity_rows"]}
+    assert comp["Ap_Door_Run"]["complexity"] == 9
+    assert comp["Ap_Door_Run"]["file"] == "DoorU"
+    assert comp["Ap_NoMcdc"]["complexity"] == 3
+
+
+def test_folder_payload_feeds_coverage_gap(monkeypatch, tmp_path) -> None:
+    """P0 end-to-end: 폴더 파서 payload가 coverage_gap을 먹여 ASIL 차등 MC/DC 평가가 동작(available=True)."""
+    import backend.services.swut_input_adapter as SA
+    from workflow import coverage_gap
+    _patch_folder_parse(monkeypatch, exec_results={"SwUFn_0133.001": _FakeRow(True)})
+    funcs = [
+        _FCFull("Ap_Door_Run", (10, 10), (8, 10), (17, 20), complexity=9),  # MC/DC 0.85
+        _FCFull("Ap_Helper", (5, 5), (5, 5), (5, 5), complexity=2),         # 전부 100%
+    ]
+    monkeypatch.setattr(SA, "extract_aggregate_coverage",
+                        lambda data: (funcs, _FC((0, 0), (0, 0), (0, 0))))
+    payload = J._parse_vcast_logs_from_cloudium_folder("U:/x/09.SW 단위 테스트/e2e_UT")
+    # coverage_gap이 폴더 payload를 그대로 읽도록(로더 모킹).
+    monkeypatch.setattr(J, "_load_vectorcast_rag_from_cloudium", lambda p: payload)
+    res = coverage_gap.compute_coverage_gap(
+        ["Ap_Door_Run", "Ap_Helper"],
+        {"Ap_Door_Run": "D", "Ap_Helper": "QM"},
+        ["U:/x/09.SW 단위 테스트/e2e_UT"],
+        cache_root=str(tmp_path), scm_id="e2e", update_baseline=False,
+    )
+    assert res["available"] is True   # 회귀 핵심: 폴더 경로로 더 이상 available=False 아님
+    byfn = {r["function"]: r for r in res["functions"]}
+    assert byfn["Ap_Door_Run"]["target_metric"] == "mcdc"
+    assert byfn["Ap_Door_Run"]["meets_target"] is False    # 0.85 < 1.0
+    assert byfn["Ap_Helper"]["target_metric"] == "statement"
+    assert byfn["Ap_Helper"]["meets_target"] is True
+    assert res["summary"]["below_target"] == 1
+
+
+def test_merge_combines_vcast_summary_and_complexity() -> None:
+    """병합이 ut/it metrics entries와 complexity_rows를 보존·결합한다."""
+    ut = {
+        "test_rows": [{"subprogram": "f", "result": "PASS"}], "vcast_kind": "UT",
+        "vcast_summary": {"ut_metrics": {"entries": [
+            {"subprogram": "f", "ccn": 5,
+             "statements": {"covered": 10, "total": 10, "rate": 1.0},
+             "branches": {"covered": 0, "total": 0, "rate": None},
+             "pairs": {"covered": 0, "total": 0, "rate": None}},
+        ]}},
+        "complexity_rows": [{"function": "f", "file": "U1", "unit": "U1", "complexity": 5}],
+    }
+    it = {
+        "test_rows": [{"subprogram": "g", "result": "PASS"}], "vcast_kind": "IT",
+        "vcast_summary": {"it_metrics": {"entries": [
+            {"subprogram": "g", "ccn": 3,
+             "statements": {"covered": 0, "total": 0, "rate": None},
+             "branches": {"covered": 0, "total": 0, "rate": None},
+             "pairs": {"covered": 4, "total": 4, "rate": 1.0}},
+        ]}},
+        "complexity_rows": [{"function": "g", "file": "U2", "unit": "U2", "complexity": 3}],
+    }
+    merged = J._merge_vectorcast_payloads([ut, it])
+    assert merged["vcast_summary"]["ut_metrics"]["entries"][0]["subprogram"] == "f"
+    assert merged["vcast_summary"]["it_metrics"]["entries"][0]["subprogram"] == "g"
+    assert len(merged["complexity_rows"]) == 2
+
+
+def test_merge_dedups_complexity_rows() -> None:
+    """같은 (function,unit) complexity는 중복 등록돼도 1건."""
+    p1 = {"test_rows": [{"subprogram": "f", "result": "PASS"}],
+          "complexity_rows": [{"function": "f", "unit": "U", "complexity": 5}]}
+    p2 = {"test_rows": [{"subprogram": "f", "result": "PASS"}],
+          "complexity_rows": [{"function": "f", "unit": "U", "complexity": 5}]}
+    merged = J._merge_vectorcast_payloads([p1, p2])
+    assert len(merged["complexity_rows"]) == 1
+
+
+def test_complexity_endpoint_cloudium_fallback(monkeypatch) -> None:
+    """빌드 complexity.csv 없으면 SCM cloudium 폴더의 함수별 복잡도로 폴백(source=cloudium)."""
+    monkeypatch.setattr(J, "_resolve_cached_build_root", lambda *a, **k: None)
+    monkeypatch.setattr(J, "_load_vectorcast_rag_from_cloudium_multi",
+                        lambda paths: {"complexity_rows": [{"function": "f", "file": "U", "complexity": 12}]})
+    req = JenkinsReportRequest(job_url="http://j/job/x", cache_root=".c", vcast_log_paths=["U:/vc"])
+    out = J.jenkins_complexity(req)
+    assert out["source"] == "cloudium"
+    assert out["rows"][0]["complexity"] == 12
+
+
+def test_complexity_endpoint_404_when_no_build_no_scm(monkeypatch) -> None:
+    """빌드 없음 + SCM 경로 없음 → 기존처럼 404."""
+    monkeypatch.setattr(J, "_resolve_cached_build_root", lambda *a, **k: None)
+    req = JenkinsReportRequest(job_url="http://j/job/x", cache_root=".c")
+    with pytest.raises(HTTPException) as ei:
+        J.jenkins_complexity(req)
+    assert ei.value.status_code == 404

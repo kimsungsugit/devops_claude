@@ -1,8 +1,6 @@
 """Unit tests for report_gen pure-logic functions (utils, uds_text, function_analyzer)."""
 from __future__ import annotations
 
-import pytest
-
 
 class TestExtractIssuesCounts:
     def test_from_issue_counts(self):
@@ -70,6 +68,24 @@ class TestNormalizeAsilValue:
     def test_plain_letter(self):
         from report_gen.utils import _normalize_asil_value
         assert _normalize_asil_value("D") == "D"
+
+    def test_na_not_graded_as_a(self):
+        # N/A류는 ASIL 미부여('') — split이 'N/A'→['N','A']로 쪼개 거짓 'A' 격상하던
+        # 안전 결함 방지(ASIL 갭 판정 정확성).
+        from report_gen.utils import _normalize_asil_value
+        assert _normalize_asil_value("N/A") == ""
+        assert _normalize_asil_value("n/a") == ""
+        assert _normalize_asil_value("NA") == ""
+        assert _normalize_asil_value("TBD") == ""
+        assert _normalize_asil_value("미적용") == ""
+
+    def test_paren_decomposition_recognized(self):
+        # 'B(C)'(공백 없는 보조등급 표기)가 미상으로 탈락하지 않고 B·C 모두 인식.
+        from report_gen.utils import _normalize_asil_value
+        r = _normalize_asil_value("B(C)")
+        assert "B" in r and "C" in r
+        r2 = _normalize_asil_value("ASIL B(C)")
+        assert "B" in r2 and "C" in r2
 
 
 class TestNormalizeRelatedIds:

@@ -57,7 +57,14 @@
       "Bash(backend/.venv/Scripts/python.exe *)",
       "Bash(./dist/excel_rename_gui_v2.exe *)",
       "Bash(awk 'NR>=2560' \"C:/Users/kss11/AppData/Local/Temp/claude/D--Project-devops-Release-claude/72de4a9a-77e1-41ae-9759-54ac021f95f3/tasks/bi1olnniq.output\")",
-      "Bash(read f *)"
+      "Bash(read f *)",
+      "Bash(PYTHONIOENCODING=utf-8 backend/.venv/Scripts/python.exe .codex_tmp/diag_preview.py)",
+      "Bash(PYTHONIOENCODING=utf-8 backend/.venv/Scripts/python.exe .codex_tmp/diag_perf.py)",
+      "Bash(PYTHONIOENCODING=utf-8 backend/.venv/Scripts/python.exe .codex_tmp/diag_verify.py)",
+      "Bash(PYTHONIOENCODING=utf-8 backend/.venv/Scripts/python.exe .codex_tmp/diag_rows2.py)",
+      "Bash(PYTHONIOENCODING=utf-8 backend/.venv/Scripts/python.exe .codex_tmp/diag_verify2.py)",
+      "Bash(PYTHONIOENCODING=utf-8 backend/.venv/Scripts/python.exe -m pytest tests/unit/test_routers.py -q -k \"preview\")",
+      "Bash(PYTHONIOENCODING=utf-8 backend/.venv/Scripts/python.exe -m pytest tests/unit/test_routers.py::TestPreviewExcelFixes -q)"
     ]
   }
 }

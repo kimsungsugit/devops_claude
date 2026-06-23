@@ -171,6 +171,7 @@ export default function SrsSdsSection({ job, analysisResult }) {
 
       // Step 2b: Extract SDS component→requirement mapping
       let sdsPairs = [];
+      let componentAsil = {};  // ASIL 결합(P5) — {컴포넌트/함수명: ASIL}, 매트릭스가 요구사항 ASIL 도출
       if (docPaths.sds || activeDocs.sds) {
         setLoadProgress('SDS 컴포넌트 매핑 추출 중...');
         try {
@@ -178,6 +179,7 @@ export default function SrsSdsSection({ job, analysisResult }) {
             sds_path: docPaths.sds || activeDocs.sds,
           });
           sdsPairs = sdsData?.sds_pairs || [];
+          componentAsil = sdsData?.component_asil || {};
           if (sdsPairs.length > 0) {
             dataSources.push(`SDS: ${sdsPairs.length}개 매핑`);
           }
@@ -324,6 +326,7 @@ export default function SrsSdsSection({ job, analysisResult }) {
         vcast_rows: vcastRows,
         sds_pairs: sdsPairs,
         sits_rows: sitsRows,
+        component_asil: componentAsil,  // ASIL 결합(P5) — 요구사항별 ASIL 도출용
         // Required for server-side summary cache (dashboard TraceSummaryCard)
         job_url: job?.url || '',
         cache_root: cacheRoot || '.devops_pro_cache',
@@ -696,6 +699,172 @@ function GapBadge({ label, value, tone, title, sub }) {
       <span style={{ fontWeight: 700, fontSize: 13, color: warn ? c.fg : COVERAGE_COLORS.covered.fg }}>{value}</span>
       {sub ? <span style={{ fontSize: 10, color: c.fg, fontWeight: 600 }}>({sub})</span> : null}
     </span>
+  );
+}
+
+// ── hiMA식 교차 추적성 매트릭스 (additive '매트릭스' 뷰) ──
+// 행=요구사항(target), 열=SDS 컴포넌트(related), 셀=O/공백. 추적 0건 행은 핑크 강조
+// (hiMA 0카운트 밴드 대응). 데이터는 filtered rows에서 클라이언트 파생(필터 반영),
+// '링크 테이블 ↓'는 서버 파생 link_table(감사 baseline)을 그대로 내보낸다.
+const _TRACE_BANDS = ['SDS', 'UDS', 'STS', 'SUTS', 'SITS', 'VectorCAST'];
+
+function _testId(t) {
+  if (!t || typeof t !== 'object') return '';
+  return String(t.testcase || t.subprogram || t.unit || t.id || '').trim();
+}
+// 백엔드 build_link_table 의 밴드 추출과 동일 규칙 — 화면/내보내기 일관성.
+function _rowBands(row) {
+  const tids = (arr) => (Array.isArray(arr) ? arr : []).map(_testId).filter(Boolean);
+  return {
+    SDS: (Array.isArray(row.sds_components) ? row.sds_components : []).map(String).filter(Boolean),
+    UDS: (Array.isArray(row.source_ids) ? row.source_ids : []).map(String).filter(Boolean),
+    STS: tids(row.sts_tests),
+    SUTS: tids(row.suts_tests),
+    SITS: tids(row.sits_tests),
+    VectorCAST: (Array.isArray(row.tests) ? row.tests : [])
+      .filter(t => t && t.source === 'VectorCAST').map(_testId).filter(Boolean),
+  };
+}
+
+// ASIL 등급별 색(ISO 26262) — 셀 강조용. 미상/QM은 muted.
+const _ASIL_COLORS = { D: '#991b1b', C: '#dc2626', B: '#b45309', A: '#2563eb', QM: '#6b7280' };
+
+function CrossMatrixView({ rows, linkTable }) {
+  const { built, cols, hasAsil, byBand, asilSummary, gapCount } = useMemo(() => {
+    const list = Array.isArray(rows) ? rows : [];
+    // ASIL 결합(P5) — link_table.asil_coverage의 갭/등급 요약을 행에 join.
+    const ac = linkTable?.asil_coverage || null;
+    const gapMap = {};
+    (ac?.gaps || []).forEach(g => { if (g?.target_id) gapMap[g.target_id] = Array.isArray(g.missing) ? g.missing : []; });
+    const sdsCols = new Set();
+    const b = list.map(row => {
+      const rid = String(row?.requirement_id || '').trim();
+      const bands = _rowBands(row || {});
+      bands.SDS.forEach(c => sdsCols.add(c));
+      const total = _TRACE_BANDS.reduce((n, bd) => n + bands[bd].length, 0);
+      const asil = String(row?.asil || row?.requirement_asil || row?.ASIL || '').trim().toUpperCase();
+      return { rid, name: String(row?.requirement_name || '').trim(), bands, total, asil, gap: gapMap[rid] || null };
+    }).filter(r => r.rid);
+    const bb = {};
+    _TRACE_BANDS.forEach(bd => {
+      const linked = b.filter(r => r.bands[bd].length > 0).length;
+      // 부동소수 % (소수 1자리) — hiMA 정수나눗셈 절삭 회피
+      bb[bd] = { linked, total: b.length, pct: b.length ? Math.round(linked * 1000 / b.length) / 10 : 0 };
+    });
+    return {
+      built: b, cols: Array.from(sdsCols).sort(), hasAsil: b.some(r => r.asil), byBand: bb,
+      asilSummary: ac?.by_level || null,
+      // 갭 수 — link_table 우선, 없으면(구 백엔드) 클라 파생 폴백(폴백 시 gapMap 비어 0).
+      gapCount: ac?.gaps?.length ?? b.filter(r => r.gap?.length).length,
+      // ASIL 미상(안전등급 미할당) 요구사항 수 — 갭과 별개 표면화(서버 파생).
+      unknownCount: ac?.unknown_count ?? 0,
+    };
+  }, [rows, linkTable]);
+
+  const downloadLinkTable = useCallback(() => {
+    const payload = linkTable || { note: 'link_table 미제공(구버전 백엔드) — 화면은 filtered rows에서 파생됨' };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = 'trace_link_table.json';
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }, [linkTable]);
+
+  if (built.length === 0) {
+    return <div style={{ padding: 24, textAlign: 'center', color: 'var(--text-muted)' }}>표시할 요구사항이 없습니다.</div>;
+  }
+
+  const pink = COVERAGE_COLORS.uncovered;
+  const Cell = ({ on }) => on
+    ? <td style={{ textAlign: 'center', color: COVERAGE_COLORS.covered.fg, fontWeight: 700 }}>O</td>
+    : <td style={{ textAlign: 'center', color: 'var(--border)' }}>·</td>;
+
+  return (
+    <div>
+      {/* 밴드 커버리지 칩 + 링크테이블 내보내기 */}
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center', padding: '8px 0' }}>
+        {_TRACE_BANDS.map(bd => (
+          <span key={bd} title={`${bd}: ${byBand[bd].linked}/${byBand[bd].total} 요구사항 추적`}
+            style={{ fontSize: 11, padding: '3px 8px', borderRadius: 12, border: '1px solid var(--border)', background: 'var(--bg)' }}>
+            {bd} <strong>{byBand[bd].pct}%</strong>
+          </span>
+        ))}
+        {hasAsil && (
+          <span
+            title={asilSummary
+              ? Object.entries(asilSummary).map(([k, v]) => `${k}: ${v.targets}건(시험추적 ${v.test_covered}, 갭 ${v.gap})`).join('  ·  ')
+              : 'ASIL 등급별 추적성 충족/갭'}
+            style={{
+              fontSize: 11, padding: '3px 8px', borderRadius: 12, fontWeight: 600,
+              border: `1px solid ${gapCount > 0 ? COVERAGE_COLORS.uncovered.border : COVERAGE_COLORS.covered.border}`,
+              background: gapCount > 0 ? COVERAGE_COLORS.uncovered.bg : '#f0fdf4',
+              color: gapCount > 0 ? COVERAGE_COLORS.uncovered.fg : COVERAGE_COLORS.covered.fg,
+            }}>
+            ASIL 갭 {gapCount}{gapCount > 0 ? ' ⚠' : ' ✓'}
+          </span>
+        )}
+        {hasAsil && unknownCount > 0 && (
+          <span title="연결 설계요소에 ASIL 등급이 없는 요구사항 — 안전등급 미할당(확인 요망). 갭과는 별개."
+            style={{
+              fontSize: 11, padding: '3px 8px', borderRadius: 12, fontWeight: 600,
+              border: `1px solid ${COVERAGE_COLORS.partial.border}`,
+              background: COVERAGE_COLORS.partial.bg, color: COVERAGE_COLORS.partial.fg,
+            }}>
+            ASIL 미상 {unknownCount}
+          </span>
+        )}
+        <button className="btn-sm" onClick={downloadLinkTable}
+          title="명시 RelatedID 링크 테이블(JSON) 내보내기 — 감사 baseline">링크 테이블 ↓</button>
+      </div>
+      <div style={{ overflow: 'auto', maxHeight: 600, border: '1px solid var(--border)', borderRadius: 6 }}>
+        <table className="impact-table" style={{ minWidth: 700, fontSize: 11, borderCollapse: 'collapse' }}>
+          <thead>
+            <tr>
+              <th style={{ position: 'sticky', left: 0, background: 'var(--bg)', zIndex: 2 }}>요구사항</th>
+              {hasAsil && <th>ASIL</th>}
+              {cols.map(c => (
+                <th key={c} title={c}
+                  style={{ writingMode: 'vertical-rl', transform: 'rotate(180deg)', whiteSpace: 'nowrap', maxHeight: 140 }}>{c}</th>
+              ))}
+              <th title="SDS→UDS 단위함수 수">UDS</th>
+              <th title="SW 시험">STS</th><th title="단위 시험">SUTS</th><th title="통합 시험">SITS</th>
+              <th title="VectorCAST 실행추적">VC</th><th>합계</th>
+            </tr>
+          </thead>
+          <tbody>
+            {built.map(r => {
+              const uncovered = r.total === 0;
+              const gapRow = Array.isArray(r.gap) && r.gap.length > 0;
+              const sdsSet = new Set(r.bands.SDS);
+              // 우선순위: 추적0건(핑크) > ASIL 갭(앰버). 둘 다면 핑크가 더 심각.
+              const rowBg = uncovered ? pink.bg : (gapRow ? COVERAGE_COLORS.partial.bg : undefined);
+              return (
+                <tr key={r.rid} style={rowBg ? { background: rowBg } : undefined}>
+                  <td title={r.name} style={{ position: 'sticky', left: 0, background: rowBg || 'var(--bg)', whiteSpace: 'nowrap', fontWeight: 600 }}>{r.rid}</td>
+                  {hasAsil && (
+                    <td style={{ textAlign: 'center', color: _ASIL_COLORS[r.asil] || 'var(--text-muted)', fontWeight: 700 }}
+                      title={gapRow ? `ASIL ${r.asil}: 시험 추적 부족 — ${r.gap.join(', ')}` : (r.asil ? `ASIL ${r.asil}` : 'ASIL 미상')}>
+                      {r.asil || '–'}{gapRow ? ' ⚠' : ''}
+                    </td>
+                  )}
+                  {cols.map(c => <Cell key={c} on={sdsSet.has(c)} />)}
+                  <td style={{ textAlign: 'center' }}>{r.bands.UDS.length || ''}</td>
+                  <Cell on={r.bands.STS.length > 0} />
+                  <Cell on={r.bands.SUTS.length > 0} />
+                  <Cell on={r.bands.SITS.length > 0} />
+                  <Cell on={r.bands.VectorCAST.length > 0} />
+                  <td style={{ textAlign: 'center', fontWeight: 700, color: uncovered ? pink.fg : 'var(--fg)' }}>{r.total}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      <div style={{ fontSize: 11, color: 'var(--text-muted)', padding: '6px 0' }}>
+        O = 추적됨 · 핑크 행 = 추적 0건(공백){hasAsil ? ' · 앰버 행 = ASIL 갭(안전등급 대비 시험 추적 부족) ⚠' : ''}{cols.length > 80 ? ` · SDS 열 ${cols.length}개(가로 스크롤)` : ''}
+      </div>
+    </div>
   );
 }
 
@@ -1261,6 +1430,12 @@ function TraceMatrix({ matrix, focusFunctions = null, onClearFocus = null }) {
               color: viewMode === 'tree' ? '#fff' : 'var(--fg)', fontWeight: viewMode === 'tree' ? 700 : 400 }}>
             트리
           </button>
+          <button type="button" onClick={() => setViewMode('matrix')} aria-pressed={viewMode === 'matrix'} title="hiMA식 교차 매트릭스 (요구사항×SDS, O/공백, 0추적 강조)"
+            style={{ padding: '6px 10px', fontSize: 11, border: 'none', borderLeft: '1px solid var(--border)', cursor: 'pointer',
+              background: viewMode === 'matrix' ? 'var(--accent)' : 'var(--bg)',
+              color: viewMode === 'matrix' ? '#fff' : 'var(--fg)', fontWeight: viewMode === 'matrix' ? 700 : 400 }}>
+            매트릭스
+          </button>
         </div>
         {/* 트리 전용: SRS 미추적 시험(역방향 공백) 별도 루트 표시 토글 — 데이터 있을 때만 노출 */}
         {viewMode === 'tree' && unmappedVcast.length > 0 && (
@@ -1508,6 +1683,11 @@ function TraceMatrix({ matrix, focusFunctions = null, onClearFocus = null }) {
       {viewMode === 'tree' && (
         <TraceTree rows={filtered} baseIndex={0} expanded={expandedTreeNodes} onToggle={toggleTreeNode}
           unmapped={includeUnmapped ? unmappedVcast : null} />
+      )}
+
+      {/* 매트릭스 보기 (신규 — hiMA식 교차표. filtered 반영, link_table 내보내기) */}
+      {viewMode === 'matrix' && (
+        <CrossMatrixView rows={filtered} linkTable={inner?.link_table} />
       )}
 
       {/* Pagination (표 모드 전용 — 트리는 filtered 전체를 한 번에 조망하므로 페이지네이션 불필요) */}

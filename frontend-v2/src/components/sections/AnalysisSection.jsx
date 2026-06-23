@@ -117,7 +117,14 @@ export default function AnalysisSection({ job, analysisResult }) {
   const buildHasVcast = (buildVcast.test_rows_count || 0) > 0
     || (buildVcast.ut_reports || []).length > 0 || (buildVcast.it_reports || []).length > 0;
   const effVcast = scmVcast?.data
-    ? { test_rows_count: scmVcast.data.test_rows_count, ut_reports: scmVcast.data.ut_reports || [], it_reports: scmVcast.data.it_reports || [], _source: scmVcast.source || 'cloudium' }
+    ? {
+        test_rows_count: scmVcast.data.test_rows_count,
+        ut_reports: scmVcast.data.ut_reports || [],
+        it_reports: scmVcast.data.it_reports || [],
+        summary: scmVcast.data.summary || null,      // 통과/실패/pass_rate (P2)
+        failures: scmVcast.data.failures || [],       // 실패 testcase 목록 (P2)
+        _source: scmVcast.source || 'cloudium',
+      }
     : buildVcast;
   const utCov = vc.ut || {};
   const itCov = vc.it || {};
@@ -142,8 +149,9 @@ export default function AnalysisSection({ job, analysisResult }) {
   const hasAnyCoverage = (covPct != null && covPct > 0) || (brPct != null && brPct > 0)
     || utCov.line_covered != null || utCov.branch_covered != null || modules.length > 0 || scmCovHas;
 
-  // Complexity table
-  const rows = complexity?.rows ?? complexity?.functions ?? [];
+  // Complexity table — 빌드 complexity.csv가 없으면 SCM VectorCAST 폴더에서 추출한
+  // 함수별 복잡도(complexity_rows)로 폴백(async VectorCAST 로드 시 자동 표시).
+  const rows = complexity?.rows ?? complexity?.functions ?? scmVcast?.data?.complexity_rows ?? [];
   const filteredRows = useMemo(() => {
     let items = [...rows];
     if (compFilter.trim()) {
@@ -304,6 +312,52 @@ export default function AnalysisSection({ job, analysisResult }) {
             </div>
           )}
         </div>
+
+        {/* 시험 합부(pass/fail) — 백엔드 summary를 표면화(P2). 케이스 건수만 보이고 합부가 안 보이던 결함 수정. */}
+        {effVcast.summary && (effVcast.summary.total || 0) > 0 && (
+          <div className="stats-row" style={{ marginTop: 8 }}>
+            <div className="stat-card" style={{ borderLeft: '3px solid var(--color-success)' }}>
+              <div className="stat-value" style={{ color: 'var(--color-success)' }}>{(effVcast.summary.passed ?? 0).toLocaleString()}</div>
+              <div className="stat-label">통과</div>
+            </div>
+            <div className="stat-card" style={{ borderLeft: `3px solid ${(effVcast.summary.failed ?? 0) > 0 ? 'var(--color-danger)' : 'var(--color-success)'}` }}>
+              <div className="stat-value" style={{ color: (effVcast.summary.failed ?? 0) > 0 ? 'var(--color-danger)' : 'var(--color-success)' }}>{(effVcast.summary.failed ?? 0).toLocaleString()}</div>
+              <div className="stat-label">실패</div>
+            </div>
+            {(effVcast.summary.skipped ?? 0) > 0 && (
+              <div className="stat-card"><div className="stat-value">{effVcast.summary.skipped.toLocaleString()}</div><div className="stat-label">스킵</div></div>
+            )}
+            {effVcast.summary.pass_rate != null && (
+              <div className="stat-card" style={{ borderLeft: `3px solid ${effVcast.summary.pass_rate >= 0.95 ? 'var(--color-success)' : 'var(--color-warning)'}` }}>
+                <div className="stat-value" style={{ color: effVcast.summary.pass_rate >= 0.95 ? 'var(--color-success)' : 'var(--color-warning)' }}>{Math.round(effVcast.summary.pass_rate * 100)}%</div>
+                <div className="stat-label">통과율</div>
+              </div>
+            )}
+          </div>
+        )}
+        {(effVcast.failures || []).length > 0 && (
+          <details style={{ marginTop: 8 }}>
+            <summary style={{ cursor: 'pointer', fontSize: 12, fontWeight: 600, color: 'var(--color-danger)' }}>
+              실패 테스트케이스 ({effVcast.failures.length}건)
+            </summary>
+            <div style={{ maxHeight: 250, overflowY: 'auto', marginTop: 6 }}>
+              <table className="impact-table" style={{ fontSize: 10 }}>
+                <thead><tr><th>테스트케이스</th><th>함수(subprogram)</th><th>유닛</th><th>출처</th></tr></thead>
+                <tbody>
+                  {effVcast.failures.slice(0, 100).map((f, i) => (
+                    <tr key={i} style={{ background: '#fee2e2' }}>
+                      <td style={{ fontFamily: 'monospace', fontSize: 10 }}>{f.testcase ?? '-'}</td>
+                      <td style={{ fontFamily: 'monospace', fontSize: 10 }}>{f.subprogram ?? '-'}</td>
+                      <td className="text-sm" style={{ maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{f.unit ?? '-'}</td>
+                      <td style={{ textAlign: 'center' }}>{f.source ?? '-'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            {effVcast.failures.length > 100 && <div className="text-muted text-sm" style={{ padding: 6, textAlign: 'center' }}>{effVcast.failures.length - 100}건 더 있음</div>}
+          </details>
+        )}
       </div>
 
       {/* ── Code Metrics ── */}
@@ -411,7 +465,7 @@ export default function AnalysisSection({ job, analysisResult }) {
                 </thead>
                 <tbody>
                   {filteredRows.slice(0, 100).map((r, i) => {
-                    const cc = r.complexity ?? r.cc ?? 0;
+                    const cc = r.complexity ?? r.cc ?? r.ccn ?? 0;
                     return (
                       <tr key={i} style={{ background: cc > threshold ? '#fee2e2' : cc > threshold * 0.7 ? '#fef9c3' : undefined }}>
                         <td style={{ fontFamily: 'monospace', fontSize: 10 }}>{r.function ?? r.name ?? '-'}</td>
@@ -436,7 +490,9 @@ export default function AnalysisSection({ job, analysisResult }) {
         ) : complexity ? (
           <div className="text-muted text-sm" style={{ padding: 12 }}>
             이 빌드에 complexity.csv가 없습니다 — 복잡도 데이터가 동기화되지 않았습니다.
-            (PRQA HMR 복잡도는 위 정적분석 상세 패널을 참고하세요.)
+            {scmVcastPaths.length > 0
+              ? ' 위 \'VectorCAST 테스트\' 패널의 \'SCM 경로에서 불러오기\'를 누르면 SCM VectorCAST 함수별 복잡도가 여기 표시됩니다.'
+              : ' (PRQA HMR 복잡도는 위 정적분석 상세 패널을 참고하세요.)'}
           </div>
         ) : (
           <div className="text-muted text-sm" style={{ padding: 12 }}>불러오기 버튼을 클릭하세요.</div>

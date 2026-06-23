@@ -786,10 +786,25 @@ def jenkins_rag_query(req: JenkinsRagQueryRequest) -> Dict[str, Any]:
 @router.post("/api/jenkins/report/complexity")
 def jenkins_complexity(req: JenkinsReportRequest) -> Dict[str, Any]:
     build_root = _resolve_cached_build_root(req.job_url, req.cache_root, req.build_selector)
+    rows: List[Dict[str, Any]] = []
+    if build_root:
+        report_dir = _detect_reports_dir(build_root)
+        rows = read_csv_rows(report_dir / "complexity.csv")
+    if rows:
+        return {"rows": rows, "source": "jenkins"}
+    # 빌드 산출물에 complexity.csv가 없으면(VectorCAST 결과가 cloudium SCM 경로에만 있는 흔한
+    # 케이스) SCM 등록 VectorCAST 폴더의 AggregateCoverage per-function 복잡도로 폴백한다.
+    # cloudium 폴더 파싱은 30분 TTL 캐시 — 동일 폴더를 vectorcast-rag(-async)로 한 번 로드했으면
+    # 즉시 응답한다. (still-present sync /report/vectorcast-rag와 동일한 동기 계약)
+    cloud_paths = _collect_vcast_paths(req)
+    if cloud_paths:
+        cloud = _load_vectorcast_rag_from_cloudium_multi(cloud_paths)
+        cr = (cloud.get("complexity_rows") if isinstance(cloud, dict) else None) or []
+        if cr:
+            return {"rows": cr, "source": "cloudium"}
     if not build_root:
         raise HTTPException(status_code=404, detail="cached build not found")
-    report_dir = _detect_reports_dir(build_root)
-    return {"rows": read_csv_rows(report_dir / "complexity.csv")}
+    return {"rows": rows, "source": "jenkins"}
 
 
 @router.post("/api/jenkins/report/docs")
@@ -1027,6 +1042,20 @@ def _parse_vcast_logs_from_cloudium_folder(path: str) -> Dict[str, Any]:
         # TestCaseData 전체 파싱은 여전히 skip). SwUT 빌더의 검증된 extract_aggregate_coverage
         # 재사용. 리포트 미존재/파싱 실패는 best-effort skip(테스트 결과는 그대로 반환).
         cov_acc: Dict[str, List[int]] = {"statement": [0, 0], "branch": [0, 0], "mcdc": [0, 0]}
+        # per-function 상세(집계 폐기 방지). vcast_summary.{ut,it}_metrics.entries는 영향도
+        # ASIL 차등 MC/DC delta(coverage_gap.load_function_coverage)의 입력이고, complexity_rows는
+        # 복잡도 탭의 SCM 소스다. 추출기(extract_aggregate_coverage)가 이미 함수별로 다 주는데
+        # 집계로만 접던 결함(audit D2/D3) 수정 — 함수별은 grand가 아니라 항상 funcs에서 모은다.
+        fn_entries: List[Dict[str, Any]] = []
+        complexity_rows: List[Dict[str, Any]] = []
+        _comp_seen: set = set()
+
+        def _cov_cell(cs: Any) -> Dict[str, Any]:
+            """CoverageStats → {covered,total,rate}. total=0이면 rate=None(0% 위장 금지 — coverage_gap이 None을 '데이터 없음'으로 처리)."""
+            c = int(getattr(cs, "covered", 0) or 0)
+            t = int(getattr(cs, "total", 0) or 0)
+            return {"covered": c, "total": t, "rate": (round(c / t, 4) if t else None)}
+
         sub_cov = os.path.join(folder, layout.cov_dir)
         cov_alt = ("_AggregateReport.html",) if layout.name == "vc2025" else ()
         if SA._exists_quiet(resolver, sub_cov):
@@ -1053,10 +1082,38 @@ def _parse_vcast_logs_from_cloudium_folder(path: str) -> Dict[str, Any]:
                         if cs is not None and cs.total:
                             cov_acc[_k][0] += cs.covered
                             cov_acc[_k][1] += cs.total
+                # 함수별 entries/complexity는 grand 합산이 아니라 항상 per-function(funcs)에서.
+                for fc in funcs:
+                    sub = (getattr(fc, "name", "") or getattr(fc, "unit_id", "") or "").strip()
+                    if not sub:
+                        continue
+                    unit = (getattr(fc, "component_name", "") or env or "").strip()
+                    fn_entries.append({
+                        "unit": unit,
+                        "subprogram": sub,
+                        "ccn": int(getattr(fc, "complexity", 0) or 0),
+                        "statements": _cov_cell(getattr(fc, "statement", None)),
+                        "branches": _cov_cell(getattr(fc, "branch", None)),
+                        "pairs": _cov_cell(getattr(fc, "mcdc", None)),
+                    })
+                    cplx = int(getattr(fc, "complexity", 0) or 0)
+                    if cplx:
+                        _ckey = (sub, unit)
+                        if _ckey not in _comp_seen:
+                            _comp_seen.add(_ckey)
+                            complexity_rows.append({
+                                "function": sub, "file": unit, "unit": unit, "complexity": cplx,
+                            })
         coverage: Dict[str, Any] = {}
         for _k in ("statement", "branch", "mcdc"):
             _c, _t = cov_acc[_k]
             coverage[_k] = {"covered": _c, "total": _t, "rate": (round(_c / _t, 4) if _t else None)}
+
+        # vcast_summary는 빌드 RAG와 동일 스키마({ut,it}_metrics.entries) — coverage_gap이
+        # ut_metrics/it_metrics를 모두 읽으므로 폴더 종류(UT/IT)에 맞는 키 하나만 채운다.
+        vcast_summary: Dict[str, Any] = {}
+        if fn_entries:
+            vcast_summary["it_metrics" if is_it else "ut_metrics"] = {"entries": fn_entries}
 
         payload_out: Dict[str, Any] = {
             "build_root": folder,
@@ -1067,6 +1124,8 @@ def _parse_vcast_logs_from_cloudium_folder(path: str) -> Dict[str, Any]:
             "summary": summary,
             "failures": failures,
             "coverage": coverage,
+            "vcast_summary": vcast_summary,      # P0: ASIL 차등 MC/DC delta(coverage_gap) 입력
+            "complexity_rows": complexity_rows,  # P1: 복잡도 탭 SCM 소스
             "ut_reports": [] if is_it else [folder],
             "it_reports": [folder] if is_it else [],
             "parse_warnings": warnings,
@@ -1116,6 +1175,12 @@ def _merge_vectorcast_payloads(payloads: List[Dict[str, Any]]) -> Dict[str, Any]
     cov_all: Dict[str, List[int]] = {"statement": [0, 0], "branch": [0, 0], "mcdc": [0, 0]}
     cov_ut: Dict[str, List[int]] = {"statement": [0, 0], "branch": [0, 0], "mcdc": [0, 0]}
     cov_it: Dict[str, List[int]] = {"statement": [0, 0], "branch": [0, 0], "mcdc": [0, 0]}
+    # per-function entries(vcast_summary)·complexity_rows 병합 — 폴더별 함수 집합은 보통
+    # 서로소(부트로더/APP 등). entries는 coverage_gap이 메트릭별 max로 흡수하므로 단순 concat,
+    # complexity는 (function,unit)로 dedup.
+    merged_metrics: Dict[str, List[Dict[str, Any]]] = {}
+    merged_complexity: List[Dict[str, Any]] = []
+    comp_seen: set = set()
     for pl in payloads:
         if not isinstance(pl, dict):
             continue
@@ -1155,6 +1220,20 @@ def _merge_vectorcast_payloads(payloads: List[Dict[str, Any]]) -> Dict[str, Any]
                 _tgt = cov_it if _it else cov_ut
                 _tgt[_m][0] += _c
                 _tgt[_m][1] += _t
+        vs = pl.get("vcast_summary")
+        if isinstance(vs, dict):
+            for _mk in ("ut_metrics", "it_metrics"):
+                _blk = vs.get(_mk)
+                if isinstance(_blk, dict) and isinstance(_blk.get("entries"), list):
+                    merged_metrics.setdefault(_mk, []).extend(_blk["entries"])
+        for _cr in (pl.get("complexity_rows") or []):
+            if not isinstance(_cr, dict):
+                continue
+            _ck = (str(_cr.get("function") or ""), str(_cr.get("unit") or _cr.get("file") or ""))
+            if _ck in comp_seen:
+                continue
+            comp_seen.add(_ck)
+            merged_complexity.append(_cr)
 
     summary = _summarize_vcast_tests(merged_rows)
     top_n = int(getattr(config, "VCAST_FAILURES_TOP_N", 50))
@@ -1193,6 +1272,8 @@ def _merge_vectorcast_payloads(payloads: List[Dict[str, Any]]) -> Dict[str, Any]
         "coverage": _cov_dict(cov_all),
         "coverage_ut": _cov_dict(cov_ut),
         "coverage_it": _cov_dict(cov_it),
+        "vcast_summary": {k: {"entries": v} for k, v in merged_metrics.items()},
+        "complexity_rows": merged_complexity,
         "merged_sources": len([p for p in payloads if isinstance(p, dict) and p]),
     }
 
@@ -3024,6 +3105,12 @@ def _cache_trace_summary(matrix: Dict[str, Any], req: UdsTraceabilityMatrixReque
         uncovered += total - (covered + partial + uncovered)
     coverage_pct = round(covered / total * 100, 1) if total > 0 else 0.0
 
+    # ASIL 결합(P5) — 대시보드 quick-load가 ASIL 갭/미상을 알 수 있게 전파(reviewer WARN-C:
+    # 미전파 시 매트릭스 재생성해 detail 탭 진입해야만 갭이 보임). link_table에서 끌어옴.
+    link_table = inner.get("link_table") if isinstance(inner, dict) else None
+    asil_cov = link_table.get("asil_coverage") if isinstance(link_table, dict) else None
+    asil_cov = asil_cov if isinstance(asil_cov, dict) else {}
+
     cache_payload = {
         "generated_at": datetime.now().isoformat(timespec="seconds"),
         "total_requirements": total,
@@ -3032,6 +3119,10 @@ def _cache_trace_summary(matrix: Dict[str, Any], req: UdsTraceabilityMatrixReque
         "uncovered": uncovered,
         "coverage_pct": coverage_pct,
         "summary_raw": summary_data,
+        # ASIL 추적성 결합(P5) — 대시보드 표시용. 데이터 없으면 has=False/0.
+        "asil_has": bool(asil_cov.get("has_asil")),
+        "asil_gap_count": len(asil_cov.get("gaps") or []),
+        "asil_unknown_count": int(asil_cov.get("unknown_count") or 0),
     }
 
     (report_dir / "trace_matrix_summary.json").write_text(
@@ -3083,6 +3174,7 @@ def jenkins_uds_traceability_matrix(req: UdsTraceabilityMatrixRequest) -> Dict[s
             sds_pairs=req.sds_pairs or [],
             sits_rows=req.sits_rows or [],
             uds_function_ids=req.uds_function_ids or [],
+            component_asil=req.component_asil or {},
         )
         # 명시 RelatedID 링크 테이블 파생(P1) — hiMA식 매트릭스/감사 baseline.
         # additive: 기존 matrix dict를 변형하지 않고 새 키(link_table)만 더한다.
@@ -3583,6 +3675,15 @@ def jenkins_sds_extract_mapping(body: Dict[str, Any]) -> Dict[str, Any]:
     # W3: Apply _normalize_req_id to handle whitespace/case in related IDs
     req_to_comps: Dict[str, list] = {}
     comp_set = set()
+    # ASIL 결합(P5) — partition_map은 컴포넌트/함수별 ASIL을 이미 보유(_extract_sds_partition_map
+    # 가 SwCom ASIL 컬럼·모듈 ASIL 헤더에서 채움). 매트릭스가 요구사항별 ASIL을 도출할 수
+    # 있도록 {컴포넌트명(lower): ASIL} 맵을 그대로 노출(additive). related 없는 asil-only
+    # 엔트리(SwCom 정의 행 등)도 포함 — req의 component_id가 그 행을 가리킬 수 있음.
+    component_asil: Dict[str, str] = {}
+    for comp_key, info in partition_map.items():
+        casil = str(info.get("asil") or "").strip()
+        if casil:
+            component_asil[str(comp_key).strip().lower()] = casil
     for comp_key, info in partition_map.items():
         related = info.get("related", "")
         if not related:
@@ -3608,6 +3709,8 @@ def jenkins_sds_extract_mapping(body: Dict[str, Any]) -> Dict[str, Any]:
         "sds_pairs": sds_pairs,
         "total_components": len(comp_set),
         "total_requirements": len(sds_pairs),
+        # ASIL 결합(P5) — 컴포넌트/함수별 ASIL 맵. 매트릭스가 요구사항별 ASIL 도출에 사용.
+        "component_asil": component_asil,
     }
 
 
