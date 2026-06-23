@@ -46,6 +46,7 @@ except ImportError:  # pragma: no cover - hook fail-safe
     load_workbook = None  # type: ignore[assignment]
     _HAS_OPENPYXL = False
 
+from backend.services.test_method_map import map_test_method_note
 
 XLSM_MAX_BYTES = 64 * 1024 * 1024  # 64MB — DoS 방지
 _TC_SHEET_RE = re.compile(r"(Unit|Integration)\s*Test\s*Spec", re.IGNORECASE)
@@ -284,6 +285,15 @@ def _build_entry_from_row(
     test_method = _get_cell("test_method")
     generation_method = _get_cell("generation_method")
     sub_index = _get_cell("sub_index")
+
+    # DC-4: 스펙 시트에 미정규 노트('REQ/BA' 원문)가 들어오면 C# TestMethodMap 등가로
+    # 정규화. 이미 정규값('REQ'/'ABV' 등)이면 매핑 미존재 → mapped=False → 무변경(회귀 0).
+    # gen_method는 비어있을 때만 매핑값으로 채워 명시 스펙값을 덮지 않는다.
+    _tm_method, _tm_gen, _tm_mapped = map_test_method_note(test_method)
+    if _tm_mapped:
+        test_method = _tm_method
+        if not generation_method:
+            generation_method = _tm_gen
 
     # F6 라이브 검증 NW15 fix: HDPDM01 SITS v2.02 양식 layout 결함 대응 (사용자 결정).
     # 양식 header가 'Description=C3'이나 실제 sub-TC row의 C3=sub-index, C4=description.

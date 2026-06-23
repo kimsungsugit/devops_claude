@@ -54,9 +54,37 @@ from backend.services.excel_template_utils import (
 
 # 31차 W27: TC name에서 SwUFn_NNNN 함수 ID 추출 (Coverage builder와 동일 패턴).
 _TC_FN_RE = re.compile(r"(SwUFn_\d+)")
+from backend.services.array_collapse import build as _collapse_build
 from backend.services.swut_builder_helpers import extract_warnings_from_session
 from backend.services.swut_input_adapter import SwUTSession, aggregate_session
 from backend.services.swut_meta import BuildMetaBase
+
+
+def _collapsed_value_cell(grp, data: dict) -> str:
+    """DC-1: collapsed 다차원 배열 컬럼의 input/expected 셀 텍스트 (ArrayGroup.format_values).
+
+    그룹 멤버(원본 변수명)를 ``data`` dict에서 조회 — 키 없으면 None(집계 제외).
+    """
+    return grp.format_values(lambda k: str(data[k]) if k in data else None)
+
+
+def _collapsed_actual_cell(grp, actual_dict: dict) -> str:
+    """DC-1: collapsed actual 컬럼 셀 텍스트 (ArrayGroup.format_actual → OK / NG(k/N)).
+
+    actual_dict 값은 (actual, expected) 튜플 — 일치 여부로 OK/NG 집계. 튜플 아니거나
+    부재면 매치 판정 불가(None)로 집계에서 제외.
+    """
+    def _match(k):
+        t = actual_dict.get(k)
+        # reviewer W2: 부재(None)만 집계 제외. falsy 실제값('0','')은 정상 튜플이면 비교.
+        if t is None:
+            return None
+        if isinstance(t, tuple) and len(t) >= 2:
+            return str(t[0]) == str(t[1])
+        return None  # 튜플 아님(스칼라 등) → 매치 판정 불가
+
+    text, _ = grp.format_actual(_match)
+    return text
 
 
 @dataclass
@@ -724,6 +752,19 @@ def _write_test_log(
     }
     total_rows_needed = sum(block_heights.values())
 
+    # MERGE-06 가드 — tc_row_step 오검출 방어. 세로 병합(B/C/D 등)은 template_merges_local
+    # (양식 첫 블록 사전 병합)을 블록마다 복제해 재구성한다. tc_row_step이 1로 잘못 감지되면
+    # (예: v2.02 멀티행 양식인데 step=1) 첫 블록 병합 capture 범위가 1행으로 좁아져
+    # template_merges_local이 비고, 다중행(block_height>1) 블록이 세로 병합 없이 stamp된다.
+    # 즉시 오류는 아니나 '셀병합 불일치' 추가 실패면이라 audit reviewer가 식별하도록 경고.
+    if (out_warnings is not None and not template_merges_local
+            and sorted_fn_ids and max(block_heights.values()) > 1):
+        out_warnings.append(
+            f"[merge_guard] 함수 블록 세로 병합 양식 미검출 (tc_row_step={tc_row_step}, "
+            f"template 병합 0개, 최대 블록 {max(block_heights.values())}행) — 다중행 함수 "
+            "블록이 세로 병합 없이 stamp될 수 있음. 양식 헤더/tc_row_step 감지 확인 권장."
+        )
+
     # 변수>10 truncate 발생 함수 수 집계 (보고용).
     _truncated_fn_count = 0
 
@@ -915,12 +956,28 @@ def _write_test_log(
                     all_pass = False
         total_result_str = "Pass" if (any_exec and all_pass) else ("Fail" if any_exec else "N/A")
 
-        # 변수명 union 산출 + truncate.
-        in_names, exp_names, act_names = _collect_fn_var_union(iter_keys, tc_to_env)
+        # 변수명 union 산출.
+        in_raw, exp_raw, act_raw = _collect_fn_var_union(iter_keys, tc_to_env)
         # actual 변수명이 비었거나 부정확하면 expected 변수명 재사용 (spec 지침).
-        if not act_names:
-            act_names = list(exp_names)
+        if not act_raw:
+            act_raw = list(exp_raw)
+        # DC-1 + collapse_all (2026-06-24 실데이터 검증/사용자 결정): 모든 배열(단일차원·
+        # sparse 포함)을 base당 1열로 접는다. 실 HDPDM01 SUTR에서 45개 함수가 단일차원 배열
+        # (lin_pFrameBuf[0..21] 등)로 10열 절단·silent 손실 중이었음 — collapse_all로 45/45 해소.
+        # 배열 없는 함수는 columns == 원본 순서 그대로(no-op). C# gold(단일차원=별도 컬럼)와는
+        # 다른 표현이며 ASIL audit deviation으로 보고됨.
+        in_info = _collapse_build(in_raw, collapse_all=True)
+        exp_info = _collapse_build(exp_raw, collapse_all=True)
+        act_info = _collapse_build(act_raw, collapse_all=True)
+        in_names, exp_names, act_names = (
+            in_info.columns, exp_info.columns, act_info.columns
+        )
+        # truncate (이제 접기 후 컬럼 기준 — raw 대비 대폭 감소).
         _orig_in, _orig_exp, _orig_act = len(in_names), len(exp_names), len(act_names)
+        # DC-1 W2: ASIL audit가 손실 데이터를 식별하도록 잘리는 컬럼명을 보존.
+        _dropped = (
+            in_names[input_max:] + exp_names[expected_max:] + act_names[actual_max:]
+        )
         in_names = in_names[:input_max]
         exp_names = exp_names[:expected_max]
         act_names = act_names[:actual_max]
@@ -928,12 +985,17 @@ def _write_test_log(
                 or _orig_act > actual_max):
             _truncated_fn_count += 1
             if out_warnings is not None:
+                _drop_show = ", ".join(_dropped[:8])
+                if len(_dropped) > 8:
+                    _drop_show += f" …(+{len(_dropped) - 8})"
                 out_warnings.append(
-                    f"[truncate] 함수 {fn_id} 변수 표기 한도 초과 — "
+                    f"[truncate] 함수 {fn_id} 변수 컬럼 한도 초과(접기 후) — "
                     f"input {_orig_in}→{len(in_names)}, "
                     f"expected {_orig_exp}→{len(exp_names)}, "
                     f"actual {_orig_act}→{len(act_names)} (한도 "
-                    f"{input_max}/{expected_max}/{actual_max})"
+                    f"{input_max}/{expected_max}/{actual_max}; "
+                    f"raw {len(in_raw)}/{len(exp_raw)}/{len(act_raw)}; "
+                    f"누락 컬럼: {_drop_show})"
                 )
 
         anchor_r = cur_row
@@ -1003,16 +1065,33 @@ def _write_test_log(
                 if tr_item is not None:
                     actual_dict = getattr(tr_item, "actual_result", {}) or {}
 
-            for pi, var_name in enumerate(in_names):
-                val = input_data.get(var_name, "")
-                safe_write(ws, ir, INPUT_COL + pi, str(val) if val else "")
-            for pi, var_name in enumerate(exp_names):
-                val = expected_data.get(var_name, "")
-                safe_write(ws, ir, EXPECTED_COL + pi, str(val) if val else "")
-            for pi, var_name in enumerate(act_names):
-                t = actual_dict.get(var_name, "")
-                val = t[0] if isinstance(t, tuple) and t else (str(t) if t else "")
-                safe_write(ws, ir, ACTUAL_COL + pi, str(val) if val else "")
+            # DC-1: collapsed 컬럼은 group 멤버를 모아 1셀로(format_values/_actual),
+            # 일반 컬럼은 기존대로 dict 단일 조회. 접기 없으면 grp=None → 기존 동작 그대로.
+            for pi, col_name in enumerate(in_names):
+                grp = in_info.get_group(col_name)
+                if grp is not None:
+                    val = _collapsed_value_cell(grp, input_data)
+                else:
+                    v = input_data.get(col_name, "")
+                    val = str(v) if v else ""
+                safe_write(ws, ir, INPUT_COL + pi, val)
+            for pi, col_name in enumerate(exp_names):
+                grp = exp_info.get_group(col_name)
+                if grp is not None:
+                    val = _collapsed_value_cell(grp, expected_data)
+                else:
+                    v = expected_data.get(col_name, "")
+                    val = str(v) if v else ""
+                safe_write(ws, ir, EXPECTED_COL + pi, val)
+            for pi, col_name in enumerate(act_names):
+                grp = act_info.get_group(col_name)
+                if grp is not None:
+                    val = _collapsed_actual_cell(grp, actual_dict)
+                else:
+                    t = actual_dict.get(col_name, "")
+                    v = t[0] if isinstance(t, tuple) and t else (str(t) if t else "")
+                    val = str(v) if v else ""
+                safe_write(ws, ir, ACTUAL_COL + pi, val)
 
             # AJ(Unit) — 그 iteration의 Pass/Fail.
             iter_result = (
