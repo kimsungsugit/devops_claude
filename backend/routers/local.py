@@ -3909,6 +3909,11 @@ def local_rag_use_pgvector(req: RagStorageRequest) -> Dict[str, Any]:
     config.PGVECTOR_URL = url
     config.FORCE_PGVECTOR = True
     config.FORCE_PGVECTOR_STRICT = True
+    # get_kb 캐시는 base_dir 만 key 로 쓰고 storage(KB_STORAGE/FORCE_PGVECTOR) 는
+    # key 에 없다 → 캐시를 비우지 않으면 이전에 빌드된 sqlite 인스턴스가 반환되어
+    # pgvector 전환이 silent no-op 된다. config 변이 후 무효화.
+    from workflow.rag import _clear_kb_cache
+    _clear_kb_cache()
     report_dir = str(req.report_dir or getattr(config, "DEFAULT_REPORT_DIR", "reports"))
     report_path = (repo_root / report_dir).resolve()
     report_path.mkdir(parents=True, exist_ok=True)

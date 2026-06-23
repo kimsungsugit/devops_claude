@@ -447,6 +447,21 @@ AUTO_INSTALL_GCOVR = str(os.environ.get("AUTO_INSTALL_GCOVR", "1")).strip().lowe
 # 전역 KB를 사용하려면 경로 지정 (예: C:/Users/.../.devops_kb)
 KB_GLOBAL_DIR = os.environ.get("KB_GLOBAL_DIR", "").strip()
 KB_SOURCES_DIR = os.environ.get("KB_SOURCES_DIR", "").strip()
+
+# get_kb 프로세스 캐시 (D8): 매 호출 KnowledgeBase 재구성(_init_db+_load_all+_ingest)
+# 비용 제거. 인스턴스는 스레드 간 공유되며 KnowledgeBase 내부 RLock 이 동시성 보호.
+#   - TTL: 멀티프로세스(pipeline 별도 프로세스) staleness 상한(초). 0 = 무만료.
+#   - MAX_ENTRIES: session/build 별 고cardinality 경로 누수 차단용 LRU 상한.
+KB_CACHE_ENABLED = str(os.environ.get("KB_CACHE_ENABLED", "1")).strip().lower() in (
+    "1",
+    "true",
+    "yes",
+)
+# 모듈 import 시점 raw int() 는 잘못된 env(예: "two minutes") 에 ValueError 로
+# backend 기동 자체를 죽인다 — _kb_cache_ttl()/_kb_cache_max() 의 런타임 폴백과
+# 일관되게 _safe_int 로 파싱(불량 값 → 기본값).
+KB_CACHE_TTL_SECONDS = _safe_int("KB_CACHE_TTL_SECONDS", 120)
+KB_CACHE_MAX_ENTRIES = _safe_int("KB_CACHE_MAX_ENTRIES", 32)
 PGVECTOR_DSN = os.environ.get("PGVECTOR_DSN", "").strip()
 PGVECTOR_URL = os.environ.get("PGVECTOR_URL", "").strip()
 KB_CATEGORIES = [

@@ -10,7 +10,6 @@ admin으로 등록 → 기존 회귀 깨지지 않음.
 from __future__ import annotations
 
 import threading
-from pathlib import Path
 
 import pytest
 
@@ -43,6 +42,26 @@ def _default_admin_users(tmp_path_factory, monkeypatch, request):
     # cache invalidate — 다음 load_admins에서 disk read
     au._cache["mtime"] = 0.0
     au._cache["admins"] = set()
+
+
+@pytest.fixture(autouse=True)
+def _reset_kb_cache():
+    """get_kb 프로세스 캐시(D8)가 테스트 간 인스턴스를 누수시키지 않도록 격리.
+
+    전역 _KB_CACHE 가 살아있으면, 같은 base_dir 을 쓰는 다른 테스트가 stale
+    인스턴스를 보거나 디스크 fixture 변경을 캐시 hit 으로 건너뛴다.
+    """
+    try:
+        from workflow.rag import _clear_kb_cache
+        _clear_kb_cache()
+    except Exception:
+        pass
+    yield
+    try:
+        from workflow.rag import _clear_kb_cache
+        _clear_kb_cache()
+    except Exception:
+        pass
 
 
 @pytest.fixture(autouse=True)
