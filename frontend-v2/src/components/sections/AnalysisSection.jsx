@@ -159,12 +159,38 @@ export default function AnalysisSection({ job, analysisResult }) {
       items = items.filter(r => (r.function ?? r.name ?? '').toLowerCase().includes(q) || (r.file ?? r.path ?? '').toLowerCase().includes(q));
     }
     items.sort((a, b) => {
-      if (compSort === 'complexity') return (b.complexity ?? b.cc ?? 0) - (a.complexity ?? a.cc ?? 0);
+      if (compSort === 'complexity') return (b.complexity ?? b.cc ?? b.ccn ?? 0) - (a.complexity ?? a.cc ?? a.ccn ?? 0);
       if (compSort === 'name') return (a.function ?? a.name ?? '').localeCompare(b.function ?? b.name ?? '');
       return 0;
     });
     return items;
   }, [rows, compFilter, compSort]);
+
+  // 복잡도 분포 히스토그램(표 위 차트) — 임계값(threshold) 정렬 4구간, 색상은 표 행과 동일 위험도.
+  // ISO 26262 HIS VG 관리 관점에서 임계 초과 함수 비중을 한눈에. 외부 차트 라이브러리 없이 순수 div.
+  const compDist = useMemo(() => {
+    const ccs = rows
+      .map(r => r.complexity ?? r.cc ?? r.ccn ?? 0)
+      .filter(v => typeof v === 'number' && !Number.isNaN(v) && v > 0);
+    if (!ccs.length) return null;
+    const t = threshold;
+    const wEnd = Math.max(1, Math.floor(t * 0.7));   // success 상한(표 행 `cc > t*0.7` 경계와 일치)
+    const edges = [
+      { label: `1–${wEnd}`, lo: 1, hi: wEnd, tone: 'success' },
+      { label: `${wEnd + 1}–${t}`, lo: wEnd + 1, hi: t, tone: 'warning' },
+      { label: `${t + 1}–${t * 2}`, lo: t + 1, hi: t * 2, tone: 'danger' },
+      { label: `${t * 2 + 1}+`, lo: t * 2 + 1, hi: Infinity, tone: 'danger' },
+    ];
+    const buckets = edges.map(e => ({ ...e, count: ccs.filter(v => v >= e.lo && v <= e.hi).length }));
+    const maxCount = Math.max(1, ...buckets.map(b => b.count));
+    const total = ccs.length;
+    return {
+      buckets, maxCount, total,
+      max: Math.max(...ccs),
+      avg: ccs.reduce((a, b) => a + b, 0) / total,
+      over: ccs.filter(v => v > t).length,
+    };
+  }, [rows, threshold]);
 
   return (
     <div>
@@ -448,6 +474,34 @@ export default function AnalysisSection({ job, analysisResult }) {
         </div>
         {rows.length > 0 ? (
           <>
+            {compDist && (
+              <div style={{ marginBottom: 10, padding: 10, background: 'var(--bg)', borderRadius: 6 }}>
+                <div className="row" style={{ justifyContent: 'space-between', marginBottom: 8, flexWrap: 'wrap', gap: 6 }}>
+                  <span className="text-sm" style={{ fontWeight: 600 }}>복잡도 분포</span>
+                  <span className="text-sm text-muted">
+                    함수 {compDist.total.toLocaleString()} · 최대 {compDist.max} · 평균 {compDist.avg.toFixed(1)} ·{' '}
+                    <span style={{ color: compDist.over > 0 ? 'var(--color-danger)' : 'var(--color-success)', fontWeight: 600 }}>
+                      임계(&gt;{threshold}) 초과 {compDist.over}
+                    </span>
+                  </span>
+                </div>
+                <div style={{ display: 'flex', alignItems: 'flex-end', gap: 6, height: 92 }}>
+                  {compDist.buckets.map((b, i) => {
+                    const h = Math.round((b.count / compDist.maxCount) * 72);
+                    const col = `var(--color-${b.tone})`;
+                    const pct = compDist.total ? Math.round((b.count / compDist.total) * 100) : 0;
+                    return (
+                      <div key={i} title={`${b.label}: ${b.count}개 (${pct}%)`}
+                        style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'flex-end', height: '100%' }}>
+                        <div style={{ fontSize: 10, fontWeight: 700, color: b.count ? col : 'var(--text-muted)', marginBottom: 2 }}>{b.count}</div>
+                        <div style={{ width: '100%', height: Math.max(b.count ? 3 : 0, h), background: col, opacity: b.count ? 1 : 0.18, borderRadius: '3px 3px 0 0' }} />
+                        <div style={{ fontSize: 9, color: 'var(--text-muted)', marginTop: 3, whiteSpace: 'nowrap' }}>{b.label}</div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
             <div className="row" style={{ gap: 8, marginBottom: 8, flexWrap: 'wrap' }}>
               <input type="text" placeholder="함수명/파일 검색..." value={compFilter} onChange={e => setCompFilter(e.target.value)}
                 style={{ flex: 1, minWidth: 150, padding: '5px 8px', fontSize: 12, border: '1px solid var(--border)', borderRadius: 6 }} />
