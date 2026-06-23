@@ -1227,6 +1227,63 @@ def _build_chat_messages(
     return messages
 
 
+def _is_anthropic_cfg(cfg: Dict[str, Any]) -> bool:
+    """후보 cfg 가 Anthropic(Claude) 공급자인지 판별."""
+    api_type = str(cfg.get("api_type") or cfg.get("provider") or "").strip().lower()
+    if api_type in ("anthropic", "claude"):
+        return True
+    if not api_type and "claude" in str(cfg.get("model") or "").lower():
+        return True
+    return False
+
+
+def _call_anthropic(cfg: Dict[str, Any], messages: List[Dict[str, str]]) -> Tuple[str, str]:
+    """Anthropic(Claude) 후보를 llm_adapters.AnthropicAdapter 경유로 호출.
+
+    ai.llm_call(agent_call) 은 gemini/openai_compat 만 분기해 Claude 를 못 쓴다(D4).
+    이미 구현된 AnthropicAdapter 를 재사용하되, 에러는 _run_llm_candidates 의
+    blocked_api_types 폴백 흐름과 호환되는 코드로 정규화한다.
+
+    Returns: (output, error_code) — 성공 시 error_code 는 "".
+
+    이미 _is_anthropic_cfg 로 공급자를 확정했으므로 get_adapter(LLM_PROVIDER env 가
+    api_type 보다 우선 — 전역 오설정 시 잘못된 어댑터 반환) 대신 AnthropicAdapter 를
+    직접 생성해 감지 결과를 그대로 존중한다.
+    """
+    try:
+        from workflow.llm_adapters import AnthropicAdapter
+    except Exception:
+        return "", "anthropic_sdk_missing"
+    try:
+        temperature = float(cfg.get("temperature", 0.3) or 0.3)
+    except (TypeError, ValueError):
+        temperature = 0.3
+    try:
+        max_tokens = int(cfg.get("max_tokens") or cfg.get("max_output_tokens") or 4096)
+    except (TypeError, ValueError):
+        max_tokens = 4096
+    try:
+        timeout = float(cfg.get("timeout") or getattr(config, "CHAT_LLM_TIMEOUT_SEC", 300.0))
+    except (TypeError, ValueError):
+        timeout = 300.0
+    try:
+        adapter = AnthropicAdapter(cfg)
+        result = adapter.generate(
+            messages, temperature=temperature, max_tokens=max_tokens, timeout=timeout,
+        ) or {}
+        return str(result.get("output") or "").strip(), ""
+    except ImportError:
+        return "", "anthropic_sdk_missing"
+    except Exception as exc:  # noqa: BLE001 — 후보 폴백 위해 광범위 포착(원인은 코드로 정규화)
+        low = str(exc).lower()
+        if ("api" in low and "key" in low) or "authentication" in low or "401" in low or "unauthor" in low:
+            return "", "missing_api_key"
+        if "denied" in low or "connection" in low or "network" in low or "timeout" in low:
+            return "", "network_denied"
+        _chat_perf_logger.warning("anthropic adapter call failed: %s", exc, exc_info=True)
+        return "", "anthropic_error"
+
+
 def _run_llm_candidates(
     *,
     cfg: Dict[str, Any],
@@ -1259,14 +1316,22 @@ def _run_llm_candidates(
         if api_type and api_type in blocked_api_types:
             continue
         selected_cfg = candidate_cfg
-        agent_result = agent_call(candidate_cfg, messages, log_dir=None, role="assistant", stage="chat_assistant")
-        answer = str(agent_result.get("output") or "").strip()
-        attempts = agent_result.get("attempts") or []
-        if attempts and isinstance(attempts[-1], dict):
-            llm_meta = attempts[-1].get("llm_meta") or {}
-            if isinstance(llm_meta, dict):
-                last_llm_error = str(llm_meta.get("error") or "").strip().lower()
-        if last_llm_error in ("network_denied", "missing_api_key", "gemini_sdk_missing") and api_type:
+        if _is_anthropic_cfg(candidate_cfg):
+            # Anthropic(Claude): ai.llm_call(agent_call) 미지원 → 어댑터 경유 (D4)
+            answer, last_llm_error = _call_anthropic(candidate_cfg, messages)
+        else:
+            agent_result = agent_call(candidate_cfg, messages, log_dir=None, role="assistant", stage="chat_assistant")
+            answer = str(agent_result.get("output") or "").strip()
+            last_llm_error = ""
+            attempts = agent_result.get("attempts") or []
+            if attempts and isinstance(attempts[-1], dict):
+                llm_meta = attempts[-1].get("llm_meta") or {}
+                if isinstance(llm_meta, dict):
+                    last_llm_error = str(llm_meta.get("error") or "").strip().lower()
+        if last_llm_error in (
+            "network_denied", "missing_api_key", "gemini_sdk_missing",
+            "anthropic_sdk_missing", "anthropic_error",
+        ) and api_type:
             blocked_api_types.add(api_type)
         if answer:
             break
