@@ -26,7 +26,6 @@ def _safe_float(value: Any) -> Optional[float]:
         return None
 
 
-import time as _time
 
 
 class ReportMCPServer:
@@ -77,7 +76,9 @@ class ReportMCPServer:
         except (ValueError, OSError):
             mtime = 0.0
         cached = self._bundle_cache.get(cache_key)
-        if cached and cached[0] == mtime and (_time.time() - cached[0]) < self._CACHE_TTL:
+        # D(버그fix): cached[0]=파일 mtime 이므로 (time()-mtime)=파일 나이 → 오래된 산출물이
+        # 영원히 miss 였다. 산출물 파일 mtime 일치만으로 hit 판정(내용 불변 보장).
+        if cached and cached[0] == mtime:
             return cached[1]
         summary = _read_json(report_dir / "analysis_summary.json", default={})
         findings = _read_json(report_dir / "findings_flat.json", default=[])

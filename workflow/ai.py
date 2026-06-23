@@ -13,17 +13,18 @@ AI helpers
 
 from __future__ import annotations
 
+import difflib
 import json
 import os
 import re
+import threading
 import time
 import traceback
-import difflib
-import threading
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeoutError
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Callable, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 # [Google Gemini SDK Import]
 try:
@@ -35,7 +36,7 @@ except Exception:  # pragma: no cover
 try:
     # Legacy SDK (deprecated): pip install google-generativeai
     import google.generativeai as genai_legacy  # type: ignore
-    from google.generativeai.types import HarmCategory, HarmBlockThreshold  # type: ignore
+    from google.generativeai.types import HarmBlockThreshold, HarmCategory  # type: ignore
 except Exception:  # pragma: no cover
     genai_legacy = None  # type: ignore
     HarmCategory = None  # type: ignore
@@ -49,8 +50,9 @@ except Exception:  # pragma: no cover
 import analysis_tools as tools
 import config
 from utils.log import get_logger
-from . import common, static
-from .common import read_excerpt, create_backup, standardize_result
+
+from . import static
+from .common import create_backup, read_excerpt
 
 logger = get_logger(__name__)
 
@@ -60,6 +62,8 @@ logger = get_logger(__name__)
 _gemini_cached_content: Dict[str, Any] = {}
 _oai_config_cache_lock = threading.Lock()
 _oai_config_cache: Dict[str, Tuple[int, Optional[Dict[str, Any]]]] = {}
+_oai_configs_cache_lock = threading.Lock()
+_oai_configs_cache: Dict[str, Tuple[int, List[Dict[str, Any]]]] = {}
 
 def create_gemini_cached_context(
     cfg: Dict[str, Any],
@@ -209,6 +213,17 @@ def load_oai_configs(path: Optional[str]) -> List[Dict[str, Any]]:
         logger.error("Config file not found: %s", p)
         return _merge_env_provider_candidates([])
 
+    # D13: mtime 캐시 (단수 load_oai_config 와 동일 패턴, 별도 lock)
+    try:
+        mtime_ns = int(p.stat().st_mtime_ns)
+    except OSError:
+        mtime_ns = -1
+    cache_key = str(p.resolve())
+    with _oai_configs_cache_lock:
+        cached = _oai_configs_cache.get(cache_key)
+        if cached and cached[0] == mtime_ns:
+            return [dict(it) for it in cached[1]]  # 호출자 mutation 격리
+
     try:
         data = json.loads(p.read_text(encoding="utf-8"))
 
@@ -222,10 +237,14 @@ def load_oai_configs(path: Optional[str]) -> List[Dict[str, Any]]:
         resolve = getattr(config, "resolve_oai_api_keys", None)
         if resolve:
             items = resolve(items)
-        return _merge_env_provider_candidates(items)
+        result = _merge_env_provider_candidates(items)
     except (json.JSONDecodeError, OSError) as e:
         logger.error("Failed to load OAI configs: %s", e)
         return []
+
+    with _oai_configs_cache_lock:
+        _oai_configs_cache[cache_key] = (mtime_ns, [dict(it) for it in result])
+    return [dict(it) for it in result]
 
 
 def load_oai_config(path: Optional[str]) -> Optional[Dict[str, Any]]:
