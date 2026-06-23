@@ -18,6 +18,13 @@ function covCard(label, cell) {
   );
 }
 
+// 복잡도 값 추출 — 빌드 complexity.csv는 ccn을 '문자열'로 반환(read_csv_rows)하므로 Number 강제.
+// SCM complexity_rows는 complexity(int). 비유효값은 0. (문자열이면 typeof 필터/비교가 깨져 차트 누락)
+function ccOf(r) {
+  const v = Number(r?.complexity ?? r?.cc ?? r?.ccn);
+  return Number.isFinite(v) ? v : 0;
+}
+
 export default function AnalysisSection({ job, analysisResult }) {
   const { cfg } = useJenkinsCfg();
   const toast = useToast();
@@ -137,7 +144,10 @@ export default function AnalysisSection({ job, analysisResult }) {
   const qualityCfg = (() => {
     try { return JSON.parse(localStorage.getItem('devops_v2_quality') || '{}'); } catch (_) { return {}; }
   })();
-  const threshold = qualityCfg.complexity ?? 15;
+  // threshold 정규화 — localStorage 오염(빈문자/0/음수/문자열)이 버킷 라벨/비교를 깨지 않도록 1~200 클램프.
+  let threshold = Number(qualityCfg.complexity);
+  if (!Number.isFinite(threshold) || threshold < 1) threshold = 15;
+  threshold = Math.min(threshold, 200);
 
   // Coverage as number
   const covPct = typeof rd?.coverage === 'number' ? rd.coverage
@@ -151,7 +161,9 @@ export default function AnalysisSection({ job, analysisResult }) {
 
   // Complexity table — 빌드 complexity.csv가 없으면 SCM VectorCAST 폴더에서 추출한
   // 함수별 복잡도(complexity_rows)로 폴백(async VectorCAST 로드 시 자동 표시).
-  const rows = complexity?.rows ?? complexity?.functions ?? scmVcast?.data?.complexity_rows ?? [];
+  // 빌드 complexity 응답이 비어도({rows:[]}) SCM 폴백이 nullish 단락으로 가려지지 않도록 길이 기반 폴백.
+  const buildComplexityRows = complexity?.rows ?? complexity?.functions ?? [];
+  const rows = buildComplexityRows.length ? buildComplexityRows : (scmVcast?.data?.complexity_rows ?? []);
   const filteredRows = useMemo(() => {
     let items = [...rows];
     if (compFilter.trim()) {
@@ -159,7 +171,7 @@ export default function AnalysisSection({ job, analysisResult }) {
       items = items.filter(r => (r.function ?? r.name ?? '').toLowerCase().includes(q) || (r.file ?? r.path ?? '').toLowerCase().includes(q));
     }
     items.sort((a, b) => {
-      if (compSort === 'complexity') return (b.complexity ?? b.cc ?? b.ccn ?? 0) - (a.complexity ?? a.cc ?? a.ccn ?? 0);
+      if (compSort === 'complexity') return ccOf(b) - ccOf(a);
       if (compSort === 'name') return (a.function ?? a.name ?? '').localeCompare(b.function ?? b.name ?? '');
       return 0;
     });
@@ -169,18 +181,16 @@ export default function AnalysisSection({ job, analysisResult }) {
   // 복잡도 분포 히스토그램(표 위 차트) — 임계값(threshold) 정렬 4구간, 색상은 표 행과 동일 위험도.
   // ISO 26262 HIS VG 관리 관점에서 임계 초과 함수 비중을 한눈에. 외부 차트 라이브러리 없이 순수 div.
   const compDist = useMemo(() => {
-    const ccs = rows
-      .map(r => r.complexity ?? r.cc ?? r.ccn ?? 0)
-      .filter(v => typeof v === 'number' && !Number.isNaN(v) && v > 0);
+    const ccs = rows.map(ccOf).filter(v => v > 0);   // ccOf가 Number 강제(문자열 ccn도 정상 집계)
     if (!ccs.length) return null;
-    const t = threshold;
+    const t = threshold;   // 이미 1~200로 정규화됨
     const wEnd = Math.max(1, Math.floor(t * 0.7));   // success 상한(표 행 `cc > t*0.7` 경계와 일치)
     const edges = [
       { label: `1–${wEnd}`, lo: 1, hi: wEnd, tone: 'success' },
       { label: `${wEnd + 1}–${t}`, lo: wEnd + 1, hi: t, tone: 'warning' },
       { label: `${t + 1}–${t * 2}`, lo: t + 1, hi: t * 2, tone: 'danger' },
       { label: `${t * 2 + 1}+`, lo: t * 2 + 1, hi: Infinity, tone: 'danger' },
-    ];
+    ].filter(e => e.lo <= e.hi);   // threshold 경계에서 역전(lo>hi) 버킷 제거
     const buckets = edges.map(e => ({ ...e, count: ccs.filter(v => v >= e.lo && v <= e.hi).length }));
     const maxCount = Math.max(1, ...buckets.map(b => b.count));
     const total = ccs.length;
@@ -519,7 +529,7 @@ export default function AnalysisSection({ job, analysisResult }) {
                 </thead>
                 <tbody>
                   {filteredRows.slice(0, 100).map((r, i) => {
-                    const cc = r.complexity ?? r.cc ?? r.ccn ?? 0;
+                    const cc = ccOf(r);
                     return (
                       <tr key={i} style={{ background: cc > threshold ? '#fee2e2' : cc > threshold * 0.7 ? '#fef9c3' : undefined }}>
                         <td style={{ fontFamily: 'monospace', fontSize: 10 }}>{r.function ?? r.name ?? '-'}</td>

@@ -151,6 +151,8 @@ def compute_coverage_gap(
     unmatched = 0          # 커버리지 데이터에 매칭 안 된 영향 함수
     unmatched_safety = 0   # 그 중 ASIL C/D — '미검증'을 안전 통과로 위장하면 안 됨
     unknown_asil = 0       # ASIL 미상 — statement 위장 평가 금지
+    unmeasured = 0         # 매칭됐으나 ASIL 타깃 메트릭이 미측정(rate=None) — 증거 부재≠목표 미달
+    unmeasured_safety = 0  # 그 중 ASIL C/D (예: MC/DC 리포트 없는 ASIL D 함수)
     for fn in impacted_functions:
         key = _norm_fn(fn)
         asil = str(asil_by_fn.get(fn) or "").strip().upper()
@@ -174,16 +176,24 @@ def compute_coverage_gap(
         cur = rec.get(metric)
         target = 1.0   # ISO 26262: 해당 ASIL 구조 커버리지 100% 목표(미달 시 정당화 필요)
         meets = cur is not None and cur >= target - 1e-9
+        # 매칭은 됐으나 타깃 메트릭이 미측정(rate=None) — 예: ASIL D 함수인데 리포트에 MC/DC 컬럼
+        # 없음. '목표 미달(실패)'이 아니라 '증거 부재(미측정)'로 별도 분류해야 false 미달 경보를 막는다.
+        is_unmeasured = cur is None
         prev = (baseline.get(key) or {}).get(metric)
         delta = (cur - prev) if (isinstance(cur, (int, float)) and isinstance(prev, (int, float))) else None
         if cur is not None and not meets:
             below_target += 1
+        if is_unmeasured:
+            unmeasured += 1
+            if asil in ("C", "D"):
+                unmeasured_safety += 1
         if isinstance(delta, (int, float)) and delta < -1e-9:
             regressed += 1
         rows.append({
             "function": fn, "asil": asil, "target_metric": metric,
             "statement": rec.get("statement"), "branch": rec.get("branch"), "mcdc": rec.get("mcdc"),
             "target_rate": target, "current_rate": cur, "meets_target": meets, "delta": delta,
+            "unmeasured_target": is_unmeasured,
         })
 
     if update_baseline:
@@ -200,6 +210,8 @@ def compute_coverage_gap(
             "regressed": regressed,
             "unmatched": unmatched,
             "unmatched_safety": unmatched_safety,
+            "unmeasured": unmeasured,
+            "unmeasured_safety": unmeasured_safety,
             "unknown_asil": unknown_asil,
             "had_baseline": bool(baseline),
         },

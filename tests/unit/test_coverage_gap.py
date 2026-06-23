@@ -109,3 +109,33 @@ def test_coverage_gap_no_data_available_false(tmp_path, monkeypatch):
     )
     assert res["available"] is False
     assert res["functions"] == []
+
+
+def test_coverage_gap_matched_but_metric_unmeasured(tmp_path, monkeypatch):
+    """매칭됐으나 ASIL 타깃 메트릭(MC/DC)이 미측정(rate=None)인 ASIL D 함수는 '목표 미달(실패)'이
+    아니라 '미측정(증거 부재)'으로 분리돼야 한다 — below_target=0, unmeasured/unmeasured_safety로 집계."""
+    import backend.routers.jenkins as jk
+    from workflow import coverage_gap
+
+    rag = {"vcast_summary": {"ut_metrics": {"entries": [
+        {"unit": "U", "subprogram": "Ap_NoMcdc",
+         "statements": {"covered": 10, "total": 10, "rate": 1.0},
+         "branches": {"covered": 10, "total": 10, "rate": 1.0},
+         "pairs": {"covered": 0, "total": 0, "rate": None}},   # MC/DC 컬럼 없음 → 미측정
+    ]}}}
+    monkeypatch.setattr(jk, "_load_vectorcast_rag_from_cloudium", lambda p: rag)
+    res = coverage_gap.compute_coverage_gap(
+        ["Ap_NoMcdc"], {"Ap_NoMcdc": "D"}, ["fake.json"],
+        cache_root=str(tmp_path), scm_id="x", update_baseline=False,
+    )
+    assert res["available"] is True
+    r = res["functions"][0]
+    assert r["target_metric"] == "mcdc"
+    assert r["current_rate"] is None
+    assert r["meets_target"] is False
+    assert r["unmeasured_target"] is True          # 미측정 플래그(증거 부재)
+    s = res["summary"]
+    assert s["below_target"] == 0                   # 실패로 집계 안 됨
+    assert s["unmeasured"] == 1
+    assert s["unmeasured_safety"] == 1              # ASIL D
+    assert s["unmatched"] == 0                       # 매칭은 됨(미매칭 아님)

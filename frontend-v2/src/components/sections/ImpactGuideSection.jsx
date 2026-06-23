@@ -10,8 +10,17 @@ const COVERAGE_METRIC_KO = { mcdc: 'MC/DC', branch: '분기', statement: '구문
 function renderCoverageCell(cov) {
   if (!cov) return <span className="text-muted">-</span>;
   const cur = cov.current_rate;
-  const pct = (typeof cur === 'number') ? `${Math.round(cur * 100)}%` : '—';
   const metricKo = COVERAGE_METRIC_KO[cov.target_metric] || cov.target_metric;
+  // 매칭됐으나 타깃 메트릭 미측정(예: 리포트에 MC/DC 컬럼 없음) — 빨강 '미달(실패)'이 아니라
+  // 노랑 '미측정(증거 부재)'으로 표시해 false 미달 경보를 막는다.
+  if (cov.unmeasured_target) {
+    return (
+      <span title={`${metricKo} 미측정 — 이 리포트에 ${metricKo} 데이터가 없습니다(증거 부재, 시험 실패 아님). 별도 ${metricKo} 리포트가 필요합니다.`}>
+        <span className="pill pill-warning" style={{ fontSize: 9 }}>{metricKo} 미측정</span>
+      </span>
+    );
+  }
+  const pct = (typeof cur === 'number') ? `${Math.round(cur * 100)}%` : '—';
   const d = cov.delta;
   let deltaEl = null;
   if (typeof d === 'number' && Math.abs(d) > 1e-9) {
@@ -342,6 +351,12 @@ export default function ImpactGuideSection({ job, analysisResult }) {
               <div className="text-muted text-sm">목표 미달</div>
               <div style={{ fontSize: 20, fontWeight: 700, color: coverageGap.summary?.below_target ? 'var(--color-danger)' : undefined }}>
                 {coverageGap.summary?.below_target ?? 0}
+              </div>
+            </div>
+            <div className="stat-card" title="매칭됐으나 해당 ASIL 타깃 메트릭(예: MC/DC) 데이터가 리포트에 없는 함수 — 증거 부재(시험 실패 아님)">
+              <div className="text-muted text-sm">미측정</div>
+              <div style={{ fontSize: 20, fontWeight: 700, color: coverageGap.summary?.unmeasured ? 'var(--color-warning)' : undefined }}>
+                {coverageGap.summary?.unmeasured ?? 0}
               </div>
             </div>
             <div className="stat-card">

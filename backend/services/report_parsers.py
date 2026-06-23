@@ -703,6 +703,10 @@ def build_report_summary(root_dir: Path, project_root: Optional[Path] = None) ->
                 "it_reports": vectorcast_rag.get("it_reports", []) if isinstance(vectorcast_rag, dict) else [],
                 "test_rows_count": vectorcast_rag.get("test_rows_count") if isinstance(vectorcast_rag, dict) else None,
                 "testcase_details_count": vectorcast_rag.get("testcase_details_count") if isinstance(vectorcast_rag, dict) else None,
+                # 합부 요약/실패 목록 — 빌드 산출물 경로도 SCM 경로와 동일하게 통과/실패 카드·실패
+                # testcase 표를 표면화하도록(프론트 effVcast=buildVcast 경로 대칭화).
+                "summary": vectorcast_rag.get("summary") if isinstance(vectorcast_rag, dict) else None,
+                "failures": vectorcast_rag.get("failures", []) if isinstance(vectorcast_rag, dict) else [],
             },
             "coverage_line": coverage.get("line_rate"),
             "vectorcast_metrics_avg_pct": vcast_metrics.get("avg_pct") if isinstance(vcast_metrics, dict) else None,

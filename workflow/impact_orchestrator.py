@@ -1024,15 +1024,20 @@ def run_impact_update(
         _cd_impacted = [fn for fn in _flagged if _asil_of(fn) in ("C", "D")]
         if coverage_gap.get("available"):
             _summ = coverage_gap.get("summary", {})
+            # '목표 미달(실패)'은 실제 측정값이 타깃에 못 미친 경우만 — 미측정(rate=None,
+            # unmeasured_target)은 증거 부재이므로 별도 '미측정' 버킷으로 센다(false 미달 경보 방지).
             _below_safety = [
                 r for r in coverage_gap.get("functions", [])
-                if not r.get("meets_target") and r.get("asil") in ("C", "D") and not r.get("asil_unknown")
+                if not r.get("meets_target") and not r.get("unmeasured_target")
+                and r.get("asil") in ("C", "D") and not r.get("asil_unknown")
             ]
             _unmatched_safety = _summ.get("unmatched_safety", 0)
-            if _below_safety or _unmatched_safety:
+            _unmeasured_safety = _summ.get("unmeasured_safety", 0)
+            _missing_safety = _unmatched_safety + _unmeasured_safety  # 미매칭 + 매칭됐으나 메트릭 미측정
+            if _below_safety or _missing_safety:
                 promote_to_review = True  # ASIL C/D 커버리지 미달/미측정 → 사람 재검증(증거 부재≠충족)
                 warnings.append(
-                    f"커버리지: ASIL C/D 영향 함수 — 목표 미달 {len(_below_safety)}개 / 미측정 {_unmatched_safety}개 — 재검증 필요"
+                    f"커버리지: ASIL C/D 영향 함수 — 목표 미달 {len(_below_safety)}개 / 미측정 {_missing_safety}개 — 재검증 필요"
                 )
             _regr = _summ.get("regressed", 0)
             if _regr:
