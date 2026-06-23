@@ -330,3 +330,54 @@ class TestRobustness:
             with get_session() as s:
                 s.add(ChatMessage(conversation_id=cid, seq=1, role="user", text="a"))
                 s.add(ChatMessage(conversation_id=cid, seq=1, role="user", text="b"))
+
+
+# ── 승인 감사로그 (ISO 26262, append-only) ────────────────────────────────
+
+class TestApprovalAudit:
+    def test_record_and_list_owner_filter(self):
+        from backend.services.chat_approval_audit import list_audit, record_audit
+        record_audit(approval_id="a1", status="created", owner="alice",
+                     action_type="git_operation", risk_level="high", question="commit now")
+        record_audit(approval_id="a1", status="approved", owner="alice", comment="ok")
+        record_audit(approval_id="b1", status="created", owner="bob", question="deploy")
+        res = list_audit(owner="alice")
+        assert res["total"] == 2
+        assert {it["status"] for it in res["items"]} == {"created", "approved"}
+        assert all(it["owner"] == "alice" for it in res["items"])
+
+    def test_resolve_reject_records_audit(self, monkeypatch):
+        import backend.routers.chat as chatmod
+        import backend.services.chat_approval_store as store
+        from backend.schemas import ApprovalResolutionRequest
+        from backend.services.chat_approval_audit import list_audit
+        store.save_pending_approval("ad1", {
+            "owner": "alice", "question": "deploy now",
+            "approval_request": {"action_type": "publish_report", "risk_level": "high"},
+        })
+        monkeypatch.setattr(chatmod, "get_current_user", lambda: "alice")
+        r = chatmod.chat_approval_resolve(ApprovalResolutionRequest(approval_id="ad1", decision="reject"))
+        assert r.ok is True
+        res = list_audit(owner="alice")
+        assert any(it["status"] == "rejected" and it["risk_level"] == "high" for it in res["items"])
+
+    def test_resolve_approve_records_audit(self, monkeypatch):
+        import backend.routers.chat as chatmod
+        import backend.services.chat_approval_store as store
+        from backend.schemas import ApprovalResolutionRequest
+        from backend.services.chat_approval_audit import list_audit
+        store.save_pending_approval("ad2", {
+            "owner": "alice", "question": "commit now",
+            "approval_request": {"action_type": "git_operation", "risk_level": "high"},
+        })
+        monkeypatch.setattr(chatmod, "get_current_user", lambda: "alice")
+        monkeypatch.setattr(chatmod, "answer_chat", lambda **kw: {
+            "ok": True, "request_id": "r", "thread_id": "t", "answer": "a",
+            "sources": [], "citations": [], "evidence": [], "next_steps": [],
+            "structured": {"answer": "a", "evidence": [], "next_steps": []},
+            "approval_required": False, "approval_request": None,
+        })
+        r = chatmod.chat_approval_resolve(ApprovalResolutionRequest(approval_id="ad2", decision="approve"))
+        assert r.ok is True
+        res = list_audit(owner="alice")
+        assert any(it["status"] == "approved" for it in res["items"])

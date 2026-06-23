@@ -75,3 +75,26 @@ class ChatMessage(ChatHistoryBase):
         UniqueConstraint("conversation_id", "seq", name="uq_msg_conv_seq"),
         Index("ix_msg_conv_seq", "conversation_id", "seq"),
     )
+
+
+class ChatApprovalAudit(ChatHistoryBase):
+    """승인 게이트 감사 로그 (append-only — ISO 26262). 이벤트 1건당 1행."""
+    __tablename__ = "chat_approval_audit"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    approval_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    owner: Mapped[Optional[str]] = mapped_column(String(120), nullable=True, index=True)
+    action_type: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    risk_level: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    tool_name: Mapped[Optional[str]] = mapped_column(String(60), nullable=True)
+    question_preview: Mapped[Optional[str]] = mapped_column(String(300), nullable=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False)  # created|approved|rejected|expired
+    comment: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(timezone.utc),
+    )
+
+    __table_args__ = (
+        Index("ix_audit_approval", "approval_id"),
+        Index("ix_audit_created", "created_at"),
+    )

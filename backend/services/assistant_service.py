@@ -1403,6 +1403,19 @@ def answer_chat(
                 "owner": requester,
             },
         )
+        try:
+            from backend.services.chat_approval_audit import record_audit as _rec_audit
+            _rec_audit(
+                approval_id=approval_request["approval_id"],
+                status="created",
+                owner=requester,
+                action_type=approval_request.get("action_type"),
+                risk_level=approval_request.get("risk_level"),
+                tool_name=approval_request.get("tool_name"),
+                question=question,
+            )
+        except Exception:
+            pass
         emit_graph_event(
             progress_callback,
             event_type="approval_required",

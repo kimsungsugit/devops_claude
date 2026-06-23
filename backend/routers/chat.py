@@ -6,10 +6,11 @@ import queue
 import threading
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 
 import config
+from backend.dependencies.admin import require_admin
 from backend.schemas import (
     ApprovalResolutionRequest,
     ChatConversationListResponse,
@@ -31,6 +32,26 @@ router = APIRouter()
 
 def _max_turns() -> int:
     return int(getattr(config, "CHAT_MAX_TURNS", 16) or 16)
+
+
+def _audit_approval(pending: Dict[str, Any], status: str, comment: str, owner: Optional[str]) -> None:
+    """승인 해소 감사 기록 (append-only, non-fatal)."""
+    try:
+        from backend.services.chat_approval_audit import record_audit
+        ar = pending.get("approval_request") or {}
+        record_audit(
+            approval_id=str(pending.get("approval_id") or ""),
+            status=status,
+            owner=owner,
+            action_type=ar.get("action_type"),
+            risk_level=ar.get("risk_level"),
+            tool_name=ar.get("tool_name"),
+            question=pending.get("question"),
+            comment=comment,
+        )
+    except Exception:
+        # W3: ISO 26262 — 감사 기록 실패가 silent 로 소실되지 않도록 로그 남김(흐름은 막지 않음)
+        _logger.warning("approval audit (%s) failed", status, exc_info=True)
 _logger = logging.getLogger("devops_api")
 
 
@@ -281,6 +302,17 @@ def chat_history_delete(thread_id: str):
 
 # ── Approval endpoints ───────────────────────────────────────────────
 
+@router.get("/api/chat/approval/audit", dependencies=[Depends(require_admin)])
+def chat_approval_audit(
+    owner: Optional[str] = Query(None),
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+):
+    """승인 감사 로그 조회 (admin 전용). /{approval_id} 보다 먼저 정의해 경로 충돌 방지."""
+    from backend.services.chat_approval_audit import list_audit
+    return list_audit(owner=owner, limit=limit, offset=offset)
+
+
 @router.get("/api/chat/approval/{approval_id}")
 def chat_approval_get(approval_id: str) -> Dict[str, Any]:
     record = get_pending_approval(approval_id)
@@ -317,6 +349,7 @@ def chat_approval_resolve(req: ApprovalResolutionRequest) -> ChatResponse:
         raise HTTPException(status_code=409, detail="approval already processed")
     pending["decision"] = decision
     pending["comment"] = str(req.comment or "")
+    _audit_approval(pending, "approved" if decision == "approve" else "rejected", str(req.comment or ""), requester)
 
     if decision == "reject":
         answer = "승인 요청이 거절되어 작업을 중단했습니다."
