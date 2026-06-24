@@ -416,6 +416,11 @@ export default function AnalysisSection({ job, analysisResult }) {
       {/* ── Coverage Detail ── */}
       <div className="panel" style={{ marginBottom: 12 }}>
         <div className="panel-header"><span className="panel-title">코드 커버리지</span></div>
+        <div className="text-sm text-muted" style={{ padding: '0 0 8px', lineHeight: 1.55 }}>
+          테스트가 소스 코드를 실제로 얼마나 실행했는지의 비율입니다. <b>구문</b>=실행된 문장,{' '}
+          <b>분기</b>=if·switch 등 분기 경로, <b>MC/DC 커버리지</b>=조건 조합(ASIL C/D 필수).{' '}
+          구문/분기/MC-DC 카드는 VectorCAST(SCM 경로), Line/Branch Coverage는 빌드 산출물 기준이며 80% 미만은 주황색으로 강조됩니다.
+        </div>
         {!hasAnyCoverage ? (
           <div className="text-sm text-muted" style={{ padding: 8 }}>
             이 빌드 산출물에 커버리지 데이터가 없습니다 (line_rate 0). 이 프로젝트의 커버리지는
@@ -506,6 +511,11 @@ export default function AnalysisSection({ job, analysisResult }) {
               {scmVcastLoading ? <span className="spinner" /> : 'SCM 경로에서 불러오기'}
             </button>
           )}
+        </div>
+        <div className="text-sm text-muted" style={{ padding: '0 0 8px', lineHeight: 1.55 }}>
+          VectorCAST 단위시험(UT)·통합시험(IT) 실행 결과입니다. <b>테스트 케이스</b>=총 시험 수,{' '}
+          <b>UT/IT 리포트</b>=병합된 리포트 폴더 수, <b>통과·실패·통과율</b>=시험 합부.{' '}
+          <b>UT Line/Branch Rate</b>는 단위시험이 달성한 라인·분기 커버리지이며, ASIL C/D는 통과율 100%·무실패가 권장됩니다.
         </div>
         {effVcast._source && (
           <div className="text-sm text-muted" style={{ marginBottom: 6 }}>
@@ -608,6 +618,11 @@ export default function AnalysisSection({ job, analysisResult }) {
       {/* ── Code Metrics ── */}
       <div className="panel" style={{ marginBottom: 12 }}>
         <div className="panel-header"><span className="panel-title">코드 메트릭</span></div>
+        <div className="text-sm text-muted" style={{ padding: '0 0 8px', lineHeight: 1.55 }}>
+          코드 규모 지표입니다. <b>소스 파일</b>=분석 대상 파일 수, <b>함수 수</b>=정의된 함수 개수,{' '}
+          <b>NLOC</b>=주석·공백을 뺀 순수 코드 라인 수(Non-comment Lines Of Code),{' '}
+          <b>PRQA 분석 함수</b>=정적분석(Helix QAC) 대상 함수 수.
+        </div>
         <div className="stats-row">
           {cm.code_files != null && <div className="stat-card"><div className="stat-value">{cm.code_files}</div><div className="stat-label">소스 파일</div></div>}
           {cm.functions != null && <div className="stat-card"><div className="stat-value">{cm.functions}</div><div className="stat-label">함수 수</div></div>}
@@ -620,6 +635,11 @@ export default function AnalysisSection({ job, analysisResult }) {
       {prqa.rule_violation_count != null && (
         <div className="panel" style={{ marginBottom: 12 }}>
           <div className="panel-header"><span className="panel-title">PRQA 정적분석 상세</span></div>
+          <div className="text-sm text-muted" style={{ padding: '0 0 8px', lineHeight: 1.55 }}>
+            Helix QAC(PRQA) 정적분석 결과입니다. <b>준수율</b>=MISRA-C 등 코딩 규칙 대비 적합 비율(90% 미만 경고),{' '}
+            <b>위반 건수</b>=규칙 위반 총량, <b>위반/전체 규칙</b>=위반된 규칙 종류, <b>진단 수</b>=개별 진단 메시지 수.{' '}
+            <b>HIS Metrics</b>는 함수 순환복잡도(VG, McCabe)의 최대·P95·평균이며 임계값({threshold}) 초과 시 위험입니다.
+          </div>
 
           {/* Compliance bar */}
           {prqa.project_compliance_index != null && (
@@ -690,6 +710,11 @@ export default function AnalysisSection({ job, analysisResult }) {
           <button className="btn-sm" onClick={loadComplexity} disabled={complexityLoading}>
             {complexityLoading ? <span className="spinner" /> : '불러오기'}
           </button>
+        </div>
+        <div className="text-sm text-muted" style={{ padding: '0 0 8px', lineHeight: 1.55 }}>
+          각 함수의 <b>순환복잡도</b>(Cyclomatic Complexity, 독립 실행 경로 수)입니다. 값이 클수록 분기가 많아 테스트·유지보수가 어렵습니다.{' '}
+          임계값({threshold}) 초과는 빨강, 임계값의 70% 이상은 주황으로 표시합니다. <b>막대</b>는 복잡도 구간별 함수 수 분포,{' '}
+          <b>산포도</b>는 복잡도(세로)×커버리지(가로)로 ‘복잡한데 덜 테스트된’ 위험 함수(좌상단)를 보여줍니다.
         </div>
         {rows.length > 0 ? (
           <>
