@@ -301,6 +301,22 @@ export default function AiAssistSection({ job, analysisResult }) {
     }
   }, [threadId, threadKey, toast]);
 
+  const renameConversation = useCallback(async (tid, currentTitle, e) => {
+    e?.stopPropagation();
+    const next = window.prompt('대화 제목', currentTitle || '');
+    if (next == null) return; // 취소
+    const title = next.trim();
+    if (!title || title === currentTitle) return;
+    try {
+      await api(`/api/chat/history/${encodeURIComponent(tid)}/title`, {
+        method: 'PATCH', body: JSON.stringify({ title }),
+      });
+      setConversations(prev => prev.map(c => c.thread_id === tid ? { ...c, title } : c));
+    } catch (err) {
+      toast('error', err.message);
+    }
+  }, [toast]);
+
   const handleKey = (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
@@ -424,6 +440,8 @@ export default function AiAssistSection({ job, analysisResult }) {
                   </div>
                   <div className="text-muted" style={{ fontSize: 10 }}>{c.message_count || 0}개 메시지</div>
                 </div>
+                <button className="btn-sm" onClick={(e) => renameConversation(c.thread_id, c.title, e)} title="제목 변경"
+                  style={{ fontSize: 10, flexShrink: 0 }}>✎</button>
                 <button className="btn-sm" onClick={(e) => removeConversation(c.thread_id, e)} title="삭제"
                   style={{ fontSize: 10, flexShrink: 0 }}>✕</button>
               </div>

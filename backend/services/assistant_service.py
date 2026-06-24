@@ -759,6 +759,26 @@ def _approved_approval_ids(ui_context: Optional[Dict[str, Any]]) -> set[str]:
     return {str(item).strip() for item in values if str(item).strip()}
 
 
+def _is_informational_question(text: str) -> bool:
+    """실행 요청이 아니라 방법/이유/현황을 '묻는' 질문이면 True (승인 false positive 억제).
+
+    risky_keyword(수정/edit 등)가 들어 있어도, 정보성 marker(방법/어떻게/알려…)가 있고
+    명시적 명령형 marker(해줘/진행해…)가 없으면 실행 요청이 아니라고 본다.
+    """
+    info_markers = (
+        "방법", "법은", "하는 법", "어떻게", "왜", "무엇", "뭐야", "뭔지", "설명", "알려",
+        "보여", "조회", "목록", "리스트", "현황", "분석", "확인해줄",
+        "how ", "what ", "why ", "explain", "show ", "list ", "which ",
+    )
+    imperative_markers = (
+        "해줘", "해 줘", "해주세요", "해주라", "하라", "해라", "할래", "진행해", "실행해",
+        "수행해", "처리해", "go ahead", "do it", "please ",
+    )
+    has_info = any(m in text for m in info_markers)
+    has_imperative = any(m in text for m in imperative_markers)
+    return has_info and not has_imperative
+
+
 def _build_approval_request(
     *,
     question: str,
@@ -778,6 +798,11 @@ def _build_approval_request(
         "수정", "패치", "커밋", "푸시", "재실행", "배포", "업로드",
     )
     if not force_probe and not any(token in text for token in risky_keywords):
+        return None
+    # false positive 억제: "수정 방법/어떻게 ~?" 같은 정보성 질문은 실행 요청이 아니다.
+    # 챗은 비실행(RAG-then-generate, 함수콜 아님)이므로 명령형 marker 없는 정보성
+    # 질문에 승인 게이트를 띄우면 UX 저해뿐 — force_approval 이면 그대로 진행.
+    if not force_probe and _is_informational_question(text):
         return None
 
     if existing_id and existing:

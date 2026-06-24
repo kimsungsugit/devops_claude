@@ -245,4 +245,30 @@ describe('AiAssistSection', () => {
     expect(screen.getByText('답변')).toBeInTheDocument();
     expect(screen.getByText('123ms')).toBeInTheDocument(); // classify_intent 완료 경과
   });
+
+  // STS-AIASSIST-011: 이력 항목 제목 변경(✎) → PATCH /title 호출
+  it('인터랙션: 이력 항목 제목 변경 시 PATCH /title 을 호출한다', async () => {
+    // Arrange
+    const user = userEvent.setup();
+    const { post, api } = await import('../api.js');
+    post.mockResolvedValue(null);
+    api.mockResolvedValue({ conversations: [{ thread_id: 't1', title: '이전 대화', message_count: 4 }] });
+    const promptSpy = vi.spyOn(window, 'prompt').mockReturnValue('새 제목');
+
+    render(<AiAssistSection job={mockJob} analysisResult={null} />);
+    await user.click(screen.getByText('이력'));
+    await screen.findByText('이전 대화');
+
+    // Act
+    await user.click(screen.getByTitle('제목 변경'));
+
+    // Assert
+    await waitFor(() => {
+      expect(api).toHaveBeenCalledWith(
+        '/api/chat/history/t1/title',
+        expect.objectContaining({ method: 'PATCH' }),
+      );
+    });
+    promptSpy.mockRestore();
+  });
 });
