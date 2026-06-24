@@ -611,15 +611,31 @@ class TestBuildCoverageReport:
         assert "C10:C11" in {str(r) for r in out_cov.merged_cells.ranges}
         assert out_cov.cell(10, 6).value == 36
         assert out_cov.cell(10, 7).value == 38
-        assert out_cov.cell(10, 8).value == '=IF(F10=G10, "Pass", "Fail")'
-        assert out_cov.cell(10, 9).value == "UT-CVG-PV-1"
+        # 라운드 103 — 회사 감사본 v0.10 정합: Pass 열(H/L)은 O/X (Pass/Fail 아님),
+        # Exception 열(I/M)은 실패행 'O' literal (UT-CVG 시퀀스 폐기), File 열(N) 공란.
+        assert out_cov.cell(10, 8).value == '=IF(F10=G10, "O", "X")'
+        assert out_cov.cell(10, 9).value == "O"  # s_safe_rotr stmt FAIL → Exception O
         assert out_cov.cell(10, 10).value == 17
         assert out_cov.cell(10, 11).value == 18
-        assert out_cov.cell(10, 12).value == '=IF(J10=K10, "Pass", "Fail")'
-        assert out_cov.cell(10, 13).value == "UT-CVG-PV-2"
-        assert out_cov.cell(10, 14).value == "(KJPDS02_DV_SwUTCV) Software Unit Test Coverage Result"
+        assert out_cov.cell(10, 12).value == '=IF(J10=K10, "O", "X")'
+        assert out_cov.cell(10, 13).value == "O"  # s_safe_rotr branch FAIL → Exception O
+        assert out_cov.cell(10, 14).value is None  # File 열 공란 (note 미기재)
+        # main(r11)은 합격 → Exception 공란
+        assert out_cov.cell(11, 9).value is None
+        assert out_cov.cell(11, 13).value is None
+        # 라운드 103 — 단일 TOTALS 행 r12 (3행 Fail/Pass/Total 폐기). literal 값.
         assert out_cov.cell(12, 4).value == "Total"
-        assert out_cov.cell(12, 8).value == '=COUNTIF(H10:H11,"Fail")'
+        assert out_cov.cell(12, 5).value == 2       # E = COUNTA(name) = 함수수
+        assert out_cov.cell(12, 6).value == 41      # F = SUM stmt covered (36+5)
+        assert out_cov.cell(12, 7).value == 43      # G = SUM stmt total (38+5)
+        assert out_cov.cell(12, 8).value == 1       # H = stmt fail (s_safe_rotr)
+        assert out_cov.cell(12, 9).value == 1       # I = stmt exception
+        assert out_cov.cell(12, 12).value == 1      # L = branch fail
+        assert out_cov.cell(12, 13).value == 1      # M = branch exception
+        # 상단 요약 r5(Statement)/r6(Branch) — Exception 상쇄로 Coverage 100%.
+        assert out_cov.cell(5, 5).value == 2 and out_cov.cell(5, 6).value == 1
+        assert out_cov.cell(5, 7).value == 1 and out_cov.cell(5, 8).value == 1.0
+        assert out_cov.cell(6, 8).value == 1.0
         assert any("[template-order]" in warning for warning in result.warnings)
 
     def test_spec_based_coverage_reports_template_mapping_drift(self):
@@ -3459,12 +3475,12 @@ class TestFinalTestResultKeepFormula96Final:
         assert ws["C1"].value == "KJPDS02"      # 다른 라벨은 정상 기입
 
 
-class TestSpecExceptionPhaseDynamic96Final:
-    """라운드 96-final W-8 — exception note ID 'UT-CVG-{phase}-N' phase 동적화.
+class TestSpecCoverageExceptionAndTotals103:
+    """라운드 103 — spec_based 4.Coverage Exception 'O' + 단일 TOTALS (회사 v0.10).
 
-    config ``projects.<id>.swutcr_metadata.phase``를 ID prefix에 반영하고,
-    config 비등재/키 부재 시 기존 'DV' 유지 (HDPDM01/SwIT backward-compat).
-    실 config 의존 차단을 위해 load_meta_from_config monkeypatch 격리.
+    기존(라운드 92~96) UT-CVG-{phase}-N 시퀀스 ID + 3행(Fail/Pass/Total) totals를
+    회사 감사본 형식으로 교체: 실패행 Exception 'O' literal, 단일 TOTALS 행
+    (COUNTA/SUM/COUNTIF 집계), Exception 상쇄로 Coverage 100%.
     """
 
     @staticmethod
@@ -3519,21 +3535,8 @@ class TestSpecExceptionPhaseDynamic96Final:
             function_name_to_swufn_from_suds={"s_safe_rotr": "SwUFn_0121"},
         )
 
-    @pytest.mark.parametrize(
-        ("cfg", "expected_prefix"),
-        [
-            ({"swutcr_metadata": {"phase": "SOP"}}, "UT-CVG-SOP"),
-            ({"swutcr_metadata": {}}, "UT-CVG-DV"),  # phase 키 부재 — DV 유지
-            ({}, "UT-CVG-DV"),                        # config 비등재 — DV 유지
-        ],
-    )
-    def test_exception_note_id_follows_config_phase(
-        self, monkeypatch, cfg, expected_prefix,
-    ):
-        import backend.services.swut_meta_resolver as _meta_resolver
-        monkeypatch.setattr(
-            _meta_resolver, "load_meta_from_config", lambda pid: cfg,
-        )
+    def test_failing_function_marks_exception_o_and_single_totals(self):
+        """실패 함수: Exception 'O' (stmt I열·branch M열) + 단일 TOTALS + 100% 상쇄."""
         result = build_coverage_report(
             self._failing_session(),
             CoverageBuildMeta(
@@ -3546,9 +3549,22 @@ class TestSpecExceptionPhaseDynamic96Final:
         out_cov = openpyxl.load_workbook(
             io.BytesIO(result.xlsx_bytes), data_only=False,
         )["3. Coverage"]
-        # 단일 함수 stmt/branch 동시 미달 — stmt ID -1, branch ID -(base 1 + 1)=2.
-        assert out_cov.cell(10, 9).value == f"{expected_prefix}-1"
-        assert out_cov.cell(10, 13).value == f"{expected_prefix}-2"
+        # 데이터행 r10 (s_safe_rotr 36/38·17/18 동시 미달) — Pass O/X 수식 + Exception 'O'.
+        assert out_cov.cell(10, 8).value == '=IF(F10=G10, "O", "X")'
+        assert out_cov.cell(10, 9).value == "O"   # stmt Exception
+        assert out_cov.cell(10, 12).value == '=IF(J10=K10, "O", "X")'
+        assert out_cov.cell(10, 13).value == "O"  # branch Exception
+        assert out_cov.cell(10, 14).value is None  # File 열 공란
+        # 단일 TOTALS 행 r11 (last_data_row=10 → +1). literal 집계.
+        assert out_cov.cell(11, 4).value == "Total"
+        assert out_cov.cell(11, 5).value == 1    # 함수수
+        assert out_cov.cell(11, 8).value == 1    # stmt fail
+        assert out_cov.cell(11, 9).value == 1    # stmt exception
+        assert out_cov.cell(11, 12).value == 1   # branch fail
+        assert out_cov.cell(11, 13).value == 1   # branch exception
+        # 요약 — Exception 상쇄로 Coverage 100%.
+        assert out_cov.cell(5, 8).value == 1.0
+        assert out_cov.cell(6, 8).value == 1.0
 
 
 class TestSutrCoverPlaceholder96Final:

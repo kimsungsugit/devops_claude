@@ -835,24 +835,10 @@ def _write_coverage_sheet(
     spec_stmt_total = 0
     spec_branch_fail = 0
     spec_branch_total = 0
-    spec_stmt_exception_seq = 0
-    spec_branch_exception_seq = 0
-    spec_stmt_exception_base = 0
-    if spec_based and not is_swit_metric_layout:
-        for _fc_for_exception in function_rows:
-            _is_c_parser_only_for_exception = bool(
-                getattr(_fc_for_exception, "unit_id", "")
-                and _fc_for_exception.unit_id.startswith("SwUFn_C_")
-            )
-            if not _is_c_parser_only_for_exception and not _fc_for_exception.statement.passed:
-                spec_stmt_exception_base += 1
+    # 라운드 103 — Exception은 실패행 'O' literal (UT-CVG 시퀀스 폐기, 라운드 92~96
+    # 잔재). 시퀀스 ID/phase prefix/base 누적 로직 제거 (회사 감사본 v0.10 정합).
     spec_unmatched: list[str] = []
     spec_unmatched_count = 0
-    # 라운드 96-final W-8 — exception note ID prefix는 config phase를 따른다
-    # (PV 산출물에 'DV' 고정 방지). build_coverage_report가 config
-    # projects.<id>.swutcr_metadata.phase를 agg["phase"]로 주입. 미정의 시
-    # 기존 'DV' 유지 (HDPDM01/SwIT 등 backward-compat).
-    spec_phase = str(agg.get("phase") or "").strip() or "DV"
     last_data_row = data_start - 1
 
     if written == 0 and function_rows:
@@ -1052,31 +1038,28 @@ def _write_coverage_sheet(
                     else ("O" if fc.branch.passed else "X")
                 )
                 if spec_based:
+                    # 라운드 103 (2026-06-24) — 회사 감사본(KJPDS02 v0.10 PV) 4.Coverage
+                    # 데이터행 형식 정합. SwITCV(bc6904d)와 동형 결함 수정:
+                    #   (1) Pass 열(H/L)은 'Pass'/'Fail' 텍스트가 아니라 O/X.
+                    #       레퍼런스 수식: =IF(Count=Total,"O","X").
+                    #   (2) Exception 열(I/M)은 UT-CVG 시퀀스가 아니라 실패행 'O' literal
+                    #       (Coverage 비율 상쇄 → 100%, 레퍼런스 패턴).
+                    #   (3) File 열(N)에 exception_note 미기재 (레퍼런스 데이터행 N 공란).
+                    from openpyxl.utils import get_column_letter as _gcl_row
+                    _f_l = _gcl_row(stmt_count_col)
+                    _g_l = _gcl_row(stmt_count_col + 1)
+                    _j_l = _gcl_row(branch_count_col)
+                    _k_l = _gcl_row(branch_count_col + 1)
                     safe_write(ws, r, stmt_count_col, fc.statement.covered)
                     safe_write(ws, r, stmt_count_col + 1, fc.statement.total)
-                    safe_write(ws, r, stmt_count_col + 2, f'=IF(F{r}=G{r}, "Pass", "Fail")')
+                    safe_write(ws, r, stmt_count_col + 2, f'=IF({_f_l}{r}={_g_l}{r}, "O", "X")')
                     if not fc.statement.passed:
-                        spec_stmt_exception_seq += 1
-                        safe_write(
-                            ws, r, stmt_count_col + 3,
-                            f"UT-CVG-{spec_phase}-{spec_stmt_exception_seq}",
-                        )
+                        safe_write(ws, r, stmt_count_col + 3, "O")
                     safe_write(ws, r, branch_count_col, fc.branch.covered)
                     safe_write(ws, r, branch_count_col + 1, fc.branch.total)
-                    safe_write(ws, r, branch_count_col + 2, f'=IF(J{r}=K{r}, "Pass", "Fail")')
+                    safe_write(ws, r, branch_count_col + 2, f'=IF({_j_l}{r}={_k_l}{r}, "O", "X")')
                     if not fc.branch.passed:
-                        spec_branch_exception_seq += 1
-                        safe_write(
-                            ws, r, branch_count_col + 3,
-                            f"UT-CVG-{spec_phase}-"
-                            f"{spec_stmt_exception_base + spec_branch_exception_seq}",
-                        )
-                    if (not fc.statement.passed) or (not fc.branch.passed):
-                        exception_note = (
-                            agg.get("coverage_exception_note")
-                            or f"({agg.get('project_id', '')}_{spec_phase}_SwUTCV) Software Unit Test Coverage Result"
-                        )
-                        safe_write(ws, r, branch_count_col + 4, exception_note)
+                        safe_write(ws, r, branch_count_col + 3, "O")
                 else:
                     safe_write(ws, r, stmt_count_col, fc.statement.total)
                     safe_write(ws, r, stmt_count_col + 1, fc.statement.covered)
@@ -1225,20 +1208,18 @@ def _write_coverage_sheet(
         except ImportError:
             pass
 
-    # 라운드 92 — spec_based TOTALS 섹션 + 상단 요약 (회사 감사본 일치).
-    # clear 이후 stamp (clear가 default row 비운 뒤). 데이터 끝(last_data_row)
-    # 다음 3행에 Fail/Pass/Total 카운트.
+    # 라운드 103 — spec_based 단일 TOTALS 행 + 상단 요약 (회사 감사본 v0.10 PV 정합).
+    # 기존 3행(Fail/Pass/Total) → 레퍼런스는 단일행 r1024 (COUNTA/SUM/COUNTIF 형식).
+    # clear 이후 stamp (clear가 default row 비운 뒤). 데이터 끝(last_data_row) 다음 1행.
     if spec_based and written > 0 and not is_swit_metric_layout:
         _write_spec_totals(
             ws,
             data_start=data_start,
             last_data_row=last_data_row,
             unit_id_col=unit_id_col,
-            stmt_label_col=stmt_count_col + 1,  # G (Fail/Pass/Total 라벨)
-            stmt_value_col=stmt_count_col + 2,  # H (count 수식)
-            branch_label_col=branch_count_col + 1,  # K
-            branch_value_col=branch_count_col + 2,  # L
             no_col=no_col,
+            stmt_count_col=stmt_count_col,
+            branch_count_col=branch_count_col,
             out_warnings=out_warnings,
         )
         if out_warnings is not None:
@@ -1400,28 +1381,65 @@ def _write_coverage_sheet(
 def _write_spec_totals(
     ws, *, data_start: int, last_data_row: int,
     unit_id_col: int, no_col: int,
-    stmt_label_col: int, stmt_value_col: int,
-    branch_label_col: int, branch_value_col: int,
+    stmt_count_col: int, branch_count_col: int,
     out_warnings: list[str] | None = None,
 ) -> None:
-    """라운드 92 — 회사 감사본 4.Coverage TOTALS 3행 (Fail/Pass/Total) + 상단 요약.
+    """라운드 103 — 회사 감사본(KJPDS02 v0.10 PV) 4.Coverage 단일 TOTALS 행 + 요약.
 
-    레퍼런스 (KJPDS02 v1.01) 실측 — H/L 열은 모두 수식:
-      r580: D='Total'  G='Fail'  H==COUNTIF(H10:H579,"Fail")  K='Fail'  L=COUNTIF(...)
-      r581:            G='Pass'  H==COUNTIF(H10:H579,"Pass")   K='Pass'  L=COUNTIF(...)
-      r582:            G='Total' H==SUM(H580:H581)             K='Total' L=SUM(...)
+    레퍼런스 실측 (단일행 r1024) — 컬럼은 component 레이아웃 기준:
+      D='Total'  E=COUNTA(name)=함수수  F=SUM(stmt count)  G=SUM(stmt total)
+      H=stmt fail(COUNTIF "X")  I=stmt exception(COUNTIF "O")
+      J=SUM(br count)  K=SUM(br total)  L=br fail  M=br exception
+    상단 요약 r5(Statement)/r6(Branch) (E/F/G/H 고정열):
+      E=Total  F=Fail Count  G=Exception  H=(E-F+G)/E → Exception 상쇄로 100%.
 
-    상단 요약 r5/r6 (양식 표준 v0.10 수식 `=E25`/`=H25` 등은 row 확장으로 cross-ref
-    갱신되나 단일 TOTALS 행을 가정 → 3행 구조와 misalign). 레퍼런스 수식 패턴으로
-    직접 덮어써 정합 보장:
-      r5 Statement: E==B<last_no_row>(함수 수=No 마지막) F==H<row_fail> H==(E5-F5)/E5
-      r6 Branch:    E==B<last_no_row>                   F==L<row_fail>
-
-    `safe_write` 대신 직접 cell.value 할당 — 'Pass'/'Fail'/숫자 수식 모두 stamp.
+    기존(라운드 92~100)은 3행(Fail/Pass/Total)이었으나 회사 v0.10 감사본은 단일행.
+    openpyxl 수식은 캐시가 없어 '안 보임'(라운드 93) → literal 값 stamp. H/L 데이터행은
+    `=IF(Count=Total,"O","X")` 수식이라 값 대신 F/G·J/K 직접 비교로 fail 산출.
+    `safe_write` 대신 직접 cell.value 할당.
     """
-    row_fail = last_data_row + 1
-    row_pass = last_data_row + 2
-    row_total = last_data_row + 3
+    import copy as _copy_tot
+
+    from openpyxl.cell.cell import MergedCell as _MC_tot
+    from openpyxl.styles import Font as _Font_tot
+
+    row_total = last_data_row + 1
+    name_col = unit_id_col + 1            # E
+    stmt_total_col = stmt_count_col + 1   # G
+    stmt_pass_col = stmt_count_col + 2    # H
+    stmt_exc_col = stmt_count_col + 3     # I
+    branch_total_col = branch_count_col + 1   # K
+    branch_pass_col = branch_count_col + 2    # L
+    branch_exc_col = branch_count_col + 3     # M
+    last_col = branch_exc_col + 1             # N (File)
+
+    # --- 집계 (데이터 영역 직접 스캔) ---
+    name_count = 0
+    stmt_cov_sum = stmt_tot_sum = branch_cov_sum = branch_tot_sum = 0
+    stmt_fail = branch_fail = stmt_exc = branch_exc = 0
+    for rr in range(data_start, last_data_row + 1):
+        if str(ws.cell(rr, name_col).value or "").strip():
+            name_count += 1
+        f = ws.cell(rr, stmt_count_col).value
+        g = ws.cell(rr, stmt_total_col).value
+        j = ws.cell(rr, branch_count_col).value
+        k = ws.cell(rr, branch_total_col).value
+        if isinstance(f, (int, float)):
+            stmt_cov_sum += f
+        if isinstance(g, (int, float)):
+            stmt_tot_sum += g
+        if isinstance(j, (int, float)):
+            branch_cov_sum += j
+        if isinstance(k, (int, float)):
+            branch_tot_sum += k
+        if isinstance(f, (int, float)) and isinstance(g, (int, float)) and f != g:
+            stmt_fail += 1
+        if isinstance(j, (int, float)) and isinstance(k, (int, float)) and j != k:
+            branch_fail += 1
+        if str(ws.cell(rr, stmt_exc_col).value or "").strip().upper() == "O":
+            stmt_exc += 1
+        if str(ws.cell(rr, branch_exc_col).value or "").strip().upper() == "O":
+            branch_exc += 1
 
     def _set(rr, cc, val):
         try:
@@ -1429,83 +1447,34 @@ def _write_spec_totals(
         except (ValueError, AttributeError):
             pass
 
-    # 라운드 93 fix — 레퍼런스는 H/L 열이 (Excel 캐시된) literal 값. openpyxl이 쓴
-    # COUNTIF/SUM 수식은 캐시가 없어 파일 열기 전까지 공란("토탈결과 안 보임"). →
-    # 데이터 행(H/L)에서 직접 Pass/Fail을 count해 **literal 값**을 stamp.
-    def _metric_counts(count_col: int, total_col: int) -> tuple[int, int]:
-        n_fail = n_pass = 0
-        for rr in range(data_start, last_data_row + 1):
-            covered = ws.cell(rr, count_col).value
-            total = ws.cell(rr, total_col).value
-            if covered in (None, "") and total in (None, ""):
-                continue
-            if covered == total:
-                n_pass += 1
-            else:
-                n_fail += 1
-        return n_fail, n_pass
+    # --- 단일 TOTALS 행 (literal) ---
+    _set(row_total, unit_id_col, "Total")
+    _set(row_total, name_col, name_count)
+    _set(row_total, stmt_count_col, stmt_cov_sum)
+    _set(row_total, stmt_total_col, stmt_tot_sum)
+    _set(row_total, stmt_pass_col, stmt_fail)     # H = COUNTIF "X"
+    _set(row_total, stmt_exc_col, stmt_exc)       # I = COUNTIF "O"
+    _set(row_total, branch_count_col, branch_cov_sum)
+    _set(row_total, branch_total_col, branch_tot_sum)
+    _set(row_total, branch_pass_col, branch_fail)  # L
+    _set(row_total, branch_exc_col, branch_exc)    # M
 
-    stmt_fail, stmt_pass = _metric_counts(stmt_label_col - 1, stmt_label_col)
-    br_fail, br_pass = _metric_counts(branch_label_col - 1, branch_label_col)
-    from openpyxl.utils import get_column_letter as _gcl_tot
-    stmt_value_letter = _gcl_tot(stmt_value_col)
-    branch_value_letter = _gcl_tot(branch_value_col)
-    no_letter = _gcl_tot(no_col)
+    # --- 상단 요약 r5(Statement)/r6(Branch) (E/F/G/H 고정열) ---
+    _cov_stmt = (name_count - stmt_fail + stmt_exc) / name_count if name_count else 0
+    _cov_branch = (name_count - branch_fail + branch_exc) / name_count if name_count else 0
+    _set(5, 5, name_count)
+    _set(5, 6, stmt_fail)
+    _set(5, 7, stmt_exc)
+    _set(5, 8, _cov_stmt)
+    _set(6, 5, name_count)
+    _set(6, 6, branch_fail)
+    _set(6, 7, branch_exc)
+    _set(6, 8, _cov_branch)
 
-    # D 'Total' 라벨 (Unit ID col, 첫 row)
-    _set(row_fail, unit_id_col, "Total")
-    # Fail / Pass / Total row — literal count
-    _set(row_fail, stmt_label_col, "Fail")
-    _set(row_fail, stmt_value_col, f'=COUNTIF({stmt_value_letter}{data_start}:{stmt_value_letter}{last_data_row},"Fail")')
-    _set(row_fail, branch_label_col, "Fail")
-    _set(row_fail, branch_value_col, f'=COUNTIF({branch_value_letter}{data_start}:{branch_value_letter}{last_data_row},"Fail")')
-    _set(row_pass, stmt_label_col, "Pass")
-    _set(row_pass, stmt_value_col, f'=COUNTIF({stmt_value_letter}{data_start}:{stmt_value_letter}{last_data_row},"Pass")')
-    _set(row_pass, branch_label_col, "Pass")
-    _set(row_pass, branch_value_col, f'=COUNTIF({branch_value_letter}{data_start}:{branch_value_letter}{last_data_row},"Pass")')
-    _set(row_total, stmt_label_col, "Total")
-    _set(row_total, stmt_value_col, f"=SUM({stmt_value_letter}{row_fail}:{stmt_value_letter}{row_pass})")
-    _set(row_total, branch_label_col, "Total ")
-    _set(row_total, branch_value_col, f"=SUM({branch_value_letter}{row_fail}:{branch_value_letter}{row_pass})")
-
-    # 상단 요약 r5(Statement)/r6(Branch) — literal: E=Total, F=Fail Count,
-    # G=Exception(=Fail, 레퍼런스 패턴), H=Coverage 비율((Total-Fail+Exception)/Total).
-    # 레퍼런스: Fail이 전부 deviation/exception으로 간주되어 H=1.0.
-    _set(5, 5, f"='{getattr(ws, 'title', '4. Coverage')}'!{no_letter}{last_data_row}")
-    _set(5, 6, f"={stmt_value_letter}{row_fail}")
-    _set(5, 7, stmt_fail)
-    _set(5, 8, "=(E5-F5+G5)/E5")
-    _set(6, 5, f"={no_letter}{last_data_row}")
-    _set(6, 6, f"={branch_value_letter}{row_fail}")
-    _set(6, 7, br_fail)
-    _set(6, 8, "=(E6-F6+G6)/E6")
-
-    # 라운드 100 — TOTALS 3행 폰트 통일. _set은 value만 stamp → 양식 기본(11.0)
-    # 잔존 (REF는 맑은 고딕 10.0). 정상 데이터행(data_start) name/size를 기준으로
-    # bold/italic은 명시 off (REF Total 라벨은 not bold/italic — data_start 행이
-    # italic일 수 있어 직접 복제 시 기울임 전파). 사용자 보고 "폰트/셀설정 토탈부분까지".
-    from openpyxl.cell.cell import MergedCell as _MC_tot
-    from openpyxl.styles import Font as _Font_tot
-    _base = ws.cell(data_start, unit_id_col).font
-    _ref_font = _Font_tot(name=_base.name, size=_base.size, bold=False, italic=False)
-    for _rr in (row_fail, row_pass, row_total):
-        for _cc in (unit_id_col, stmt_label_col, stmt_value_col,
-                    branch_label_col, branch_value_col):
-            _cell = ws.cell(_rr, _cc)
-            if not isinstance(_cell, _MC_tot):
-                _cell.font = _ref_font
-
-    # 라운드 96-final W-13 — Total 블록 회색 음영 재배치 (+3 오프셋 보정).
-    # 템플릿(v0.10) 마지막 3행이 Total 블록(회색 음영)인데, row 확장
-    # (auto_expand_row_block, insert_at=data_start+1)이 그 3행을 정확히 마지막
-    # 데이터 3행 위치로 밀어낸다 (shortage = needed_last - old_max → 템플릿 끝
-    # 3행의 신규 위치 = 마지막 함수행-2..마지막 함수행). 한편 실제 Total 블록은
-    # last_data_row+1..+3에 stamp → 음영이 데이터행에 +3 오프셋으로 잘못 표시
-    # (PV 검증 W-13). 마지막 함수행 기준으로: 데이터 3행(row-3)의 음영이 기준
-    # 데이터행(data_start)과 다르면 Total 행으로 fill 이동 + 데이터행 fill 정상화.
-    # ASIL/노란 마킹 등 의도된 마커 fill은 제외 (이동 금지). 음영이 검출되지
-    # 않으면 no-op — row 확장이 없었던 빌드/소형 데이터에 무영향.
-    import copy as _copy_shade
+    # --- 스타일 ---
+    # 폰트: 데이터행(data_start) name/size, bold/italic off (REF Total 라벨 정합).
+    _bf = ws.cell(data_start, unit_id_col).font
+    _ref_font = _Font_tot(name=_bf.name, size=_bf.size, bold=False, italic=False)
 
     from backend.services.design_tokens import (
         ASIL_A_FILL_RGB,
@@ -1521,7 +1490,7 @@ def _write_spec_totals(
         ASIL_QM_FILL_RGB, FAIL_FILL_RGB, USER_INPUT_FILL_RGB,
     }
 
-    def _fill_sig(_c) -> tuple | None:
+    def _sig(_c) -> tuple | None:
         _f = _c.fill
         try:
             if _f is None or _f.fill_type is None:
@@ -1530,31 +1499,49 @@ def _write_spec_totals(
         except AttributeError:
             return None
 
-    _shade_last_col = branch_value_col + 4  # 데이터 우측 끝 (clear range와 동일 폭)
-    _relocated = 0
-    for _tr in (row_fail, row_pass, row_total):
-        _sr = _tr - 3
-        if _sr <= data_start:  # 데이터 3행 미만 — 비교 기준행과 겹침, skip
+    # 음영: 레퍼런스 Total 행은 회색 solid. auto_expand가 템플릿 footer Total 행(회색)을
+    # 데이터 끝 근처로 밀어냄 → 그 회색을 캡처해 row_total에 적용 + 데이터영역 잔재행은
+    # 백색(data_start fill) 복원. marker(ASIL/노란/FAIL) fill은 보존(이동 금지).
+    _base_sig = _sig(ws.cell(data_start, no_col))
+    _gray_fill = None
+    for _sr in range(max(data_start + 1, last_data_row - 4), last_data_row + 1):
+        _c = ws.cell(_sr, no_col)
+        if isinstance(_c, _MC_tot):
             continue
-        for _cc in range(no_col, _shade_last_col + 1):
-            _src_c = ws.cell(_sr, _cc)
-            _dst_c = ws.cell(_tr, _cc)
-            _base_c = ws.cell(data_start, _cc)
-            if isinstance(_src_c, _MC_tot) or isinstance(_dst_c, _MC_tot):
-                continue
-            _src_sig = _fill_sig(_src_c)
-            if _src_sig is None or _src_sig == _fill_sig(_base_c):
-                continue  # 무음영 또는 정상 데이터행과 동일 — 이동 불필요
-            if _src_sig[1] in _marker_rgbs:
-                continue  # ASIL/노란/FAIL 마커 — 의도된 데이터행 강조, 보존
-            _dst_c.fill = _copy_shade.copy(_src_c.fill)
-            if not isinstance(_base_c, _MC_tot):
-                _src_c.fill = _copy_shade.copy(_base_c.fill)
-            _relocated += 1
-    if _relocated and out_warnings is not None:
+        _s = _sig(_c)
+        if _s is None or _s == _base_sig or (_s[1] in _marker_rgbs):
+            continue
+        if _gray_fill is None:
+            _gray_fill = _copy_tot.copy(_c.fill)
+        for _cc in range(no_col, last_col + 1):
+            _dc = ws.cell(_sr, _cc)
+            _bc = ws.cell(data_start, _cc)
+            if not isinstance(_dc, _MC_tot) and not isinstance(_bc, _MC_tot):
+                _dc.fill = _copy_tot.copy(_bc.fill)
+
+    # row_total 스타일 적용: 테두리/정렬은 마지막 데이터행 복제, 폰트 통일, 회색 음영.
+    _rt_sig = _sig(ws.cell(row_total, no_col))
+    _rt_has_gray = (
+        _rt_sig is not None and _rt_sig != _base_sig and _rt_sig[1] not in _marker_rgbs
+    )
+    for _cc in range(no_col, last_col + 1):
+        _src = ws.cell(last_data_row, _cc)
+        _dst = ws.cell(row_total, _cc)
+        if isinstance(_dst, _MC_tot):
+            continue
+        if not isinstance(_src, _MC_tot):
+            _dst.border = _copy_tot.copy(_src.border)
+            _dst.alignment = _copy_tot.copy(_src.alignment)
+        _dst.font = _ref_font
+        if _gray_fill is not None and not _rt_has_gray:
+            _dst.fill = _copy_tot.copy(_gray_fill)
+
+    if out_warnings is not None:
         out_warnings.append(
-            f"[spec-cov] Total 블록 회색 음영 {_relocated}셀 재배치 — 데이터행 "
-            f"잔존(+3 오프셋) → R{row_fail}~R{row_total} (라운드 96-final W-13)"
+            f"[spec-cov] 라운드 103 단일 TOTALS 행 R{row_total} — "
+            f"Statement(함수 {name_count}/Fail {stmt_fail}/Exc {stmt_exc}/Cov {_cov_stmt:.3f}) "
+            f"Branch(Fail {branch_fail}/Exc {branch_exc}/Cov {_cov_branch:.3f})"
+            + ("" if (_gray_fill or _rt_has_gray) else " [경고: Total 회색 음영 미검출]")
         )
 
 
