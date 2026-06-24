@@ -378,4 +378,85 @@ describe('AnalysisSection', () => {
       vi.useRealTimers();
     }
   });
+
+  // ── 복잡도 분포 막대↔산포도 토글 + 위험 사분면 ─────────────────────
+  const makeVcastWithComplexity = () => ({
+    test_rows_count: 5, ut_reports: [], it_reports: [],
+    complexity_rows: [
+      { function: 'risky_fn', file: 'mod_a', unit: 'mod_a', complexity: 40 },   // 高복잡(40>15)
+      { function: 'safe_fn', file: 'mod_b', unit: 'mod_b', complexity: 3 },
+    ],
+    vcast_summary: {
+      ut_metrics: { entries: [
+        // risky: 구문 10%(低) → 高복잡+低커버 = danger
+        { unit: 'mod_a', subprogram: 'risky_fn', ccn: 40,
+          statements: { covered: 10, total: 100, rate: 0.1 }, branches: { covered: 1, total: 10, rate: 0.1 }, pairs: { covered: 0, total: 4, rate: 0 } },
+        // safe: 구문 95%(高) → 低복잡+高커버 = success
+        { unit: 'mod_b', subprogram: 'safe_fn', ccn: 3,
+          statements: { covered: 95, total: 100, rate: 0.95 }, branches: { covered: 9, total: 10, rate: 0.9 }, pairs: { covered: 4, total: 4, rate: 1 } },
+      ] },
+    },
+  });
+
+  it('커버리지가 join되면 산포도가 기본 활성화되고 高복잡·低커버 함수를 위험으로 분류한다', async () => {
+    vi.useFakeTimers();
+    try {
+      const { post, api } = await import('../api.js');
+      post.mockResolvedValue({ ok: true, job_id: 'jscat' });
+      api.mockResolvedValue({
+        ok: true,
+        job: { status: 'completed', result: { ok: true, source: 'cloudium', data: makeVcastWithComplexity() } },
+      });
+      const result = makeAnalysisResult({ matchedScm: { id: 's', name: 'S', linked_docs: { vectorcast: ['U:/vc'] } } });
+      render(<AnalysisSection job={makeJob()} analysisResult={result} />);
+
+      await act(async () => {
+        fireEvent.click(screen.getByText('SCM 경로에서 불러오기'));
+        await vi.advanceTimersByTimeAsync(3500);
+      });
+
+      // 산포도 토글 존재 + 기본 산포도 뷰(축 설명/범례) + 위험1·양호1 분류
+      expect(screen.getByRole('button', { name: '산포도' })).toBeEnabled();
+      expect(screen.getByText(/X=커버리지\(구문%\)/)).toBeInTheDocument();
+      expect(screen.getByText(/위험 1/)).toBeInTheDocument();
+      expect(screen.getByText(/양호 1/)).toBeInTheDocument();
+
+      // '막대'로 전환하면 분포 버킷이 보인다(산포도 범례는 사라짐)
+      fireEvent.click(screen.getByRole('button', { name: '막대' }));
+      expect(screen.queryByText(/X=커버리지\(구문%\)/)).toBeNull();
+      expect(screen.getByText(/임계\(>15\) 초과/)).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('커버리지(vcast_summary)가 없으면 산포도 버튼이 비활성이고 막대 분포로 폴백한다', async () => {
+    vi.useFakeTimers();
+    try {
+      const { post, api } = await import('../api.js');
+      post.mockResolvedValue({ ok: true, job_id: 'jnocov' });
+      // complexity_rows는 있으나 vcast_summary 없음 → join 0건 → 산포 미가용
+      api.mockResolvedValue({
+        ok: true,
+        job: { status: 'completed', result: { ok: true, source: 'cloudium', data: {
+          test_rows_count: 1, ut_reports: [], it_reports: [],
+          complexity_rows: [{ function: 'f1', file: 'u', unit: 'u', complexity: 22 }],
+        } } },
+      });
+      const result = makeAnalysisResult({ matchedScm: { id: 's', name: 'S', linked_docs: { vectorcast: ['U:/vc'] } } });
+      render(<AnalysisSection job={makeJob()} analysisResult={result} />);
+
+      await act(async () => {
+        fireEvent.click(screen.getByText('SCM 경로에서 불러오기'));
+        await vi.advanceTimersByTimeAsync(3500);
+      });
+
+      // 산포도 버튼 비활성 + 막대 분포(임계 초과 요약) 표시
+      expect(screen.getByRole('button', { name: '산포도' })).toBeDisabled();
+      expect(screen.queryByText(/X=커버리지\(구문%\)/)).toBeNull();
+      expect(screen.getByText(/임계\(>15\) 초과/)).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

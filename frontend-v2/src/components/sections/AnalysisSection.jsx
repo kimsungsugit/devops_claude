@@ -25,6 +25,62 @@ function ccOf(r) {
   return Number.isFinite(v) ? v : 0;
 }
 
+// 복잡도 × 커버리지 산포도 — 各 점=함수, X=구문 커버리지%, Y=CC. 좌상단(高복잡·低커버) = ISO 26262
+// MC/DC 보강 1순위 사분면(음영). 단일 변수 막대 분포가 못 보여주는 '복잡한데 안 짜인 테스트'를 한눈에.
+// 외부 차트 라이브러리 없이 순수 SVG(프로젝트 규칙: 막대 분포도 div로 그림). props는 join 완료된 points.
+function ComplexityScatter({ points, naCount, yMax, threshold }) {
+  const W = 480, H = 200, ML = 36, MR = 12, MT = 12, MB = 26;
+  const pw = W - ML - MR, ph = H - MT - MB;
+  const ym = yMax || 1;
+  const xOf = (cov) => ML + (Math.max(0, Math.min(100, cov)) / 100) * pw;
+  const yOf = (cc) => MT + (1 - Math.min(Math.max(cc, 0), ym) / ym) * ph;
+  const thY = yOf(threshold);
+  const x80 = xOf(80);
+  const counts = { danger: 0, warning: 0, success: 0 };
+  for (const p of points) counts[p.tone] = (counts[p.tone] || 0) + 1;
+  return (
+    <div>
+      <svg viewBox={`0 0 ${W} ${H}`} width="100%" role="img" aria-label="복잡도-커버리지 산포도"
+        style={{ maxHeight: 240, display: 'block' }}>
+        {/* 위험 사분면(高복잡·低커버) 음영 */}
+        <rect x={ML} y={MT} width={Math.max(0, x80 - ML)} height={Math.max(0, thY - MT)}
+          fill="var(--color-danger)" opacity="0.07" />
+        {/* 임계선(가로) / 80% 선(세로) */}
+        <line x1={ML} y1={thY} x2={W - MR} y2={thY} stroke="var(--color-danger)" strokeOpacity="0.5" strokeDasharray="3 3" />
+        <line x1={x80} y1={MT} x2={x80} y2={H - MB} stroke="var(--color-warning)" strokeOpacity="0.6" strokeDasharray="3 3" />
+        {/* 축 */}
+        <line x1={ML} y1={H - MB} x2={W - MR} y2={H - MB} stroke="var(--border)" />
+        <line x1={ML} y1={MT} x2={ML} y2={H - MB} stroke="var(--border)" />
+        {[0, 25, 50, 75, 100].map(t => (
+          <text key={`x${t}`} x={xOf(t)} y={H - MB + 12} fontSize="8" fill="var(--text-muted)" textAnchor="middle">{t}</text>
+        ))}
+        {[0, threshold, Math.round(ym)].map((t, i) => (
+          <text key={`y${i}`} x={ML - 4} y={yOf(t) + 3} fontSize="8" fill="var(--text-muted)" textAnchor="end">{t}</text>
+        ))}
+        <text x={x80 + 3} y={MT + 9} fontSize="8" fill="var(--color-danger)" opacity="0.85">위험</text>
+        {points.map((p, i) => {
+          // 정수 격자 과겹침 완화용 결정적 지터(±, Math.random 미사용 → 안정 렌더)
+          const jx = (((i * 73) % 5) - 2) * 0.6;
+          const jy = (((i * 37) % 5) - 2) * 0.6;
+          return (
+            <circle key={i} cx={xOf(p.cov) + jx} cy={yOf(p.cc) + jy} r="2.4"
+              fill={`var(--color-${p.tone})`} fillOpacity="0.55">
+              <title>{`${p.fn}\n${p.file}\nCC ${p.cc} · 구문 ${p.cov}%${p.br != null ? ` · 분기 ${p.br}%` : ''}${p.mc != null ? ` · MC/DC ${p.mc}%` : ''}`}</title>
+            </circle>
+          );
+        })}
+      </svg>
+      <div className="row" style={{ gap: 10, flexWrap: 'wrap', fontSize: 10, color: 'var(--text-muted)', marginTop: 2 }}>
+        <span>X=커버리지(구문%) · Y=복잡도(CC)</span>
+        <span style={{ color: 'var(--color-danger)', fontWeight: 600 }}>● 위험 {counts.danger}</span>
+        <span style={{ color: 'var(--color-warning)', fontWeight: 600 }}>● 주의 {counts.warning}</span>
+        <span style={{ color: 'var(--color-success)', fontWeight: 600 }}>● 양호 {counts.success}</span>
+        {naCount > 0 && <span>커버리지 미상 {naCount}(산포 제외)</span>}
+      </div>
+    </div>
+  );
+}
+
 // 진행 중·완료된 SCM VectorCAST 잡을 job_url 단위로 보존한다. 원격 cloudium 파싱은 수 분 걸리는데,
 // 그 사이 탭 전환·새로고침·job 변경(remount)·브라우저 백그라운드 throttle로 in-memory 폴링 루프가
 // 끊기면 결과가 UI에 영영 안 실리고 스피너만 고착됐다. job_id를 남겨두면 재진입/포커스 복귀 시
@@ -65,6 +121,7 @@ export default function AnalysisSection({ job, analysisResult }) {
   const [complexityLoading, setComplexityLoading] = useState(false);
   const [compSort, setCompSort] = useState('complexity');
   const [compFilter, setCompFilter] = useState('');
+  const [compView, setCompView] = useState('scatter');   // 복잡도 분포 뷰 토글: 'dist'(막대) | 'scatter'(산포도)
   // SCM 등록 VectorCAST 경로 지연 로드(빌드 산출물에 결과가 없을 때). 무거운 cloudium 폴더
   // 파싱(~100s)이라 analyze 임계경로에 넣지 않고 사용자 명시 클릭 시에만 /report/vectorcast-rag
   // (build→cloudium 폴백 내장)를 호출한다.
@@ -302,6 +359,57 @@ export default function AnalysisSection({ job, analysisResult }) {
       over: ccs.filter(v => v > t).length,
     };
   }, [rows, threshold]);
+
+  // 산포도 데이터(복잡도 × 커버리지) — complexity_rows(CC)에 함수별 커버리지(vcast_summary.entries)를
+  // (unit, function/subprogram) 키로 join. 빌드 complexity.csv 경로엔 entries가 없어 join 0건 → 산포 미가용.
+  // X=구문 커버리지%, Y=CC. 색: 高복잡&低커버=danger, 둘 중 하나=warning, 양호=success(임계/80% 경계).
+  const compScatter = useMemo(() => {
+    const vs = scmVcast?.data?.vcast_summary;
+    if (!vs || typeof vs !== 'object') return { points: [], naCount: 0, yMax: 0 };
+    // ut/it entries 합치기 → (unit,subprogram) & subprogram-only 두 맵. 중복 키는 statements.total 큰(증거 많은) 쪽.
+    const byKey = new Map();   // `${unit} ${fn}` → entry
+    const byFn = new Map();    // fn → entry(폴백: unit 표기 불일치 대비)
+    const better = (e, prev) => !prev || (e?.statements?.total || 0) > (prev?.statements?.total || 0);
+    for (const mk of ['ut_metrics', 'it_metrics']) {
+      const arr = vs?.[mk]?.entries;
+      if (!Array.isArray(arr)) continue;
+      for (const e of arr) {
+        const fn = (e?.subprogram ?? '').trim();
+        if (!fn) continue;
+        const unit = (e?.unit ?? '').trim();
+        const k = `${unit} ${fn}`;
+        if (better(e, byKey.get(k))) byKey.set(k, e);
+        if (better(e, byFn.get(fn))) byFn.set(fn, e);
+      }
+    }
+    const cellPct = (c) => (c && c.total
+      ? Math.round((typeof c.rate === 'number' ? c.rate : c.covered / c.total) * 100) : null);
+    const points = [];
+    let naCount = 0;
+    for (const r of rows) {
+      const cc = ccOf(r);
+      if (cc <= 0) continue;
+      const unit = (r.unit ?? r.file ?? '').trim();
+      const fn = (r.function ?? r.name ?? '').trim();
+      const e = byKey.get(`${unit} ${fn}`) || byFn.get(fn);
+      const stPct = cellPct(e?.statements);
+      if (stPct == null) { naCount++; continue; }   // 커버리지 미상은 X=0 위장 대신 산포 제외
+      const ccBad = cc > threshold;
+      const covBad = stPct < 80;
+      const tone = ccBad && covBad ? 'danger' : (ccBad || covBad ? 'warning' : 'success');
+      points.push({
+        fn, file: r.file ?? r.unit ?? '-', cc, cov: stPct,
+        br: cellPct(e?.branches), mc: cellPct(e?.pairs), tone,
+      });
+    }
+    // Math.max(...spread)는 수만 함수 규모에서 스택 한계 → reduce로 선형 누적(W2).
+    const yMax = points.reduce((m, p) => (p.cc > m ? p.cc : m), points.length ? threshold * 2 : 0);
+    return { points, naCount, yMax };
+  }, [rows, scmVcast, threshold]);
+
+  const scatterAvailable = compScatter.points.length > 0;
+  // 기본은 산포도(추천 뷰)지만 커버리지 join이 비면 막대로 폴백하고 산포도 버튼은 비활성.
+  const compEffView = (compView === 'scatter' && scatterAvailable) ? 'scatter' : 'dist';
 
   return (
     <div>
@@ -588,7 +696,27 @@ export default function AnalysisSection({ job, analysisResult }) {
             {compDist && (
               <div style={{ marginBottom: 10, padding: 10, background: 'var(--bg)', borderRadius: 6 }}>
                 <div className="row" style={{ justifyContent: 'space-between', marginBottom: 8, flexWrap: 'wrap', gap: 6 }}>
-                  <span className="text-sm" style={{ fontWeight: 600 }}>복잡도 분포</span>
+                  <div className="row" style={{ gap: 8, alignItems: 'center' }}>
+                    <span className="text-sm" style={{ fontWeight: 600 }}>복잡도 분포</span>
+                    <div className="row" style={{ gap: 4 }}>
+                      {[['dist', '막대'], ['scatter', '산포도']].map(([v, label]) => {
+                        const active = compEffView === v;
+                        const disabled = v === 'scatter' && !scatterAvailable;
+                        return (
+                          <button key={v} type="button" onClick={() => setCompView(v)} disabled={disabled}
+                            title={disabled ? '커버리지가 로드되면 활성화됩니다 (위 \'SCM 경로에서 불러오기\')' : undefined}
+                            style={{ padding: '2px 9px', fontSize: 11, fontWeight: 600,
+                              cursor: disabled ? 'not-allowed' : 'pointer', borderRadius: 6,
+                              border: `1px solid ${active ? 'var(--color-primary, #2563eb)' : 'var(--border)'}`,
+                              background: active ? 'var(--color-primary, #2563eb)' : 'transparent',
+                              color: active ? '#fff' : (disabled ? 'var(--text-muted)' : 'inherit'),
+                              opacity: disabled ? 0.5 : 1 }}>
+                            {label}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
                   <span className="text-sm text-muted">
                     함수 {compDist.total.toLocaleString()} · 최대 {compDist.max} · 평균 {compDist.avg.toFixed(1)} ·{' '}
                     <span style={{ color: compDist.over > 0 ? 'var(--color-danger)' : 'var(--color-success)', fontWeight: 600 }}>
@@ -596,21 +724,26 @@ export default function AnalysisSection({ job, analysisResult }) {
                     </span>
                   </span>
                 </div>
-                <div style={{ display: 'flex', alignItems: 'flex-end', gap: 6, height: 92 }}>
-                  {compDist.buckets.map((b, i) => {
-                    const h = Math.round((b.count / compDist.maxCount) * 72);
-                    const col = `var(--color-${b.tone})`;
-                    const pct = compDist.total ? Math.round((b.count / compDist.total) * 100) : 0;
-                    return (
-                      <div key={i} title={`${b.label}: ${b.count}개 (${pct}%)`}
-                        style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'flex-end', height: '100%' }}>
-                        <div style={{ fontSize: 10, fontWeight: 700, color: b.count ? col : 'var(--text-muted)', marginBottom: 2 }}>{b.count}</div>
-                        <div style={{ width: '100%', height: Math.max(b.count ? 3 : 0, h), background: col, opacity: b.count ? 1 : 0.18, borderRadius: '3px 3px 0 0' }} />
-                        <div style={{ fontSize: 9, color: 'var(--text-muted)', marginTop: 3, whiteSpace: 'nowrap' }}>{b.label}</div>
-                      </div>
-                    );
-                  })}
-                </div>
+                {compEffView === 'scatter' ? (
+                  <ComplexityScatter points={compScatter.points} naCount={compScatter.naCount}
+                    yMax={compScatter.yMax} threshold={threshold} />
+                ) : (
+                  <div style={{ display: 'flex', alignItems: 'flex-end', gap: 6, height: 92 }}>
+                    {compDist.buckets.map((b, i) => {
+                      const h = Math.round((b.count / compDist.maxCount) * 72);
+                      const col = `var(--color-${b.tone})`;
+                      const pct = compDist.total ? Math.round((b.count / compDist.total) * 100) : 0;
+                      return (
+                        <div key={i} title={`${b.label}: ${b.count}개 (${pct}%)`}
+                          style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'flex-end', height: '100%' }}>
+                          <div style={{ fontSize: 10, fontWeight: 700, color: b.count ? col : 'var(--text-muted)', marginBottom: 2 }}>{b.count}</div>
+                          <div style={{ width: '100%', height: Math.max(b.count ? 3 : 0, h), background: col, opacity: b.count ? 1 : 0.18, borderRadius: '3px 3px 0 0' }} />
+                          <div style={{ fontSize: 9, color: 'var(--text-muted)', marginTop: 3, whiteSpace: 'nowrap' }}>{b.label}</div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
             )}
             <div className="row" style={{ gap: 8, marginBottom: 8, flexWrap: 'wrap' }}>
