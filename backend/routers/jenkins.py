@@ -1430,57 +1430,95 @@ def jenkins_vectorcast_rag_async(req: JenkinsReportRequest) -> Dict[str, Any]:
     )
 
 
-def _load_codesonar(paths: List[str]) -> Dict[str, Any]:
-    """SCM 등록 경로(폴더 또는 PDF)에서 최신 CodeSonar PDF를 찾아 파싱한다.
+def _load_static_analysis(paths: List[str]) -> Dict[str, Any]:
+    """SCM 등록 정적분석 폴더(또는 개별 파일)에서 4종 도구 산출물을 찾아 파싱한다.
 
-    각 path가 .pdf면 직접 대상, 폴더면 재귀로 'CodeSonar*.pdf' 검색. 여러 개면 경로 사전순
-    마지막(날짜 폴더 YYMMDD 기준 최신)을 채택. cloudium 모드는 worker IPC로 read(backend
-    python은 권한 없음). VectorCAST SCM 로드와 동일한 cloudium read 경로.
+    회사 정적분석 4종 = CodeSonar(PDF)·CPD(PMD CPD XML)·QAC HIS Metrics(PDF)·CodeEye(OSS
+    라이선스 종합보고서 PDF). 각 도구별로 재귀 탐색 후 경로 사전순 최신 1개를 선택해 파싱.
+    cloudium 모드는 worker IPC로 read(backend python은 권한 없음). 일부 도구만 있어도 graceful.
     """
     from backend.services.codesonar_pdf_parser import parse_codesonar_pdf
     from backend.services.file_resolver import get_resolver
+    from backend.services.static_analysis_parsers import (
+        parse_codeeye_pdf,
+        parse_cpd_xml,
+        parse_qac_his_pdf,
+    )
 
     resolver = get_resolver()
-    found: List[str] = []
+    all_files: List[str] = []
     for raw in paths or []:
         p = (raw or "").strip()
         if not p:
             continue
-        if p.lower().endswith(".pdf"):
-            found.append(p)
+        if p.lower().endswith((".pdf", ".xml")):
+            all_files.append(p)
             continue
         try:
-            files = resolver.list_dir(p, "*", recursive=True)
-        except Exception as e:  # cloudium 권한/미연결/경로부재 — 다음 경로로 graceful
-            _logger.warning("[codesonar] list_dir 실패 %s: %s", p[:80], e)
-            continue
-        for f in files:
-            fl = str(f).lower()
-            if fl.endswith(".pdf") and "codesonar" in fl:
-                found.append(str(f))
-    if not found:
-        return {"ok": False, "error": "missing", "detail": "CodeSonar PDF를 찾지 못했습니다 (경로/권한 확인)"}
+            all_files.extend(str(f) for f in resolver.list_dir(p, "*", recursive=True))
+        except Exception as e:  # cloudium 권한/미연결/경로부재 — graceful
+            _logger.warning("[static-analysis] list_dir 실패 %s: %s", p[:80], e)
 
-    found = sorted(set(found))
-    target = found[-1]
-    try:
-        data = resolver.read_bytes(target)
-    except Exception as e:
-        return {"ok": False, "error": "read_failed", "detail": f"{type(e).__name__}: {str(e)[:200]}"}
-    parsed = parse_codesonar_pdf(data)
-    parsed["source_pdf"] = target
-    parsed["available_count"] = len(found)
-    return parsed
+    def _latest(pred) -> Optional[str]:
+        cands = sorted({f for f in all_files if pred(f.lower())})
+        return cands[-1] if cands else None
+
+    def _read(path: Optional[str]) -> Optional[bytes]:
+        if not path:
+            return None
+        try:
+            return resolver.read_bytes(path)
+        except Exception as e:
+            _logger.warning("[static-analysis] read 실패 %s: %s", path[:80], e)
+            return None
+
+    out: Dict[str, Any] = {"ok": False}
+
+    cs_path = _latest(lambda fl: fl.endswith(".pdf") and "codesonar" in fl)
+    cs_bytes = _read(cs_path)
+    if cs_bytes:
+        cs = parse_codesonar_pdf(cs_bytes)
+        cs["source_pdf"] = cs_path
+        out["codesonar"] = cs
+
+    cpd_path = _latest(lambda fl: fl.endswith(".xml") and ("cpd" in fl or "result_xml" in fl))
+    cpd_bytes = _read(cpd_path)
+    if cpd_bytes:
+        cpd = parse_cpd_xml(cpd_bytes)
+        cpd["source"] = cpd_path
+        out["cpd"] = cpd
+
+    qac_path = _latest(lambda fl: fl.endswith(".pdf") and "his" in fl and "metric" in fl)
+    qac_bytes = _read(qac_path)
+    if qac_bytes:
+        qac = parse_qac_his_pdf(qac_bytes)
+        qac["source"] = qac_path
+        out["qac"] = qac
+
+    ce_path = _latest(lambda fl: fl.endswith(".pdf") and "codeeye" in fl and "종합" in fl)
+    ce_bytes = _read(ce_path)
+    if ce_bytes:
+        ce = parse_codeeye_pdf(ce_bytes)
+        ce["source"] = ce_path
+        out["codeeye"] = ce
+
+    out["ok"] = any(
+        isinstance(out.get(k), dict) and out[k].get("ok")
+        for k in ("codesonar", "cpd", "qac", "codeeye")
+    )
+    if not out["ok"]:
+        out["detail"] = "정적분석 산출물(CodeSonar/CPD/QAC/CodeEye)을 찾지 못했습니다 (경로/권한 확인)"
+    return out
 
 
-@router.post("/api/jenkins/report/codesonar")
-def jenkins_codesonar(req: CodeSonarRequest) -> Dict[str, Any]:
-    """CodeSonar(정적분석) PDF에서 경고 요약/분류별/파일별 지표를 추출한다.
+@router.post("/api/jenkins/report/static-analysis")
+def jenkins_static_analysis(req: CodeSonarRequest) -> Dict[str, Any]:
+    """SCM 정적분석 폴더에서 CodeSonar/CPD/QAC HIS/CodeEye 4종 요약 지표를 추출한다.
 
-    SCM 연결 문서 경로(linked_docs.codesonar) 또는 사용자 지정 폴더/PDF 경로 목록을 받아
-    최신 CodeSonar 리포트를 파싱. 산출물은 정적분석 섹션의 CodeSonar 카드/표에 표시된다.
+    SCM 연결 문서 경로(linked_docs.codesonar) 또는 사용자 지정 폴더/파일 경로 목록을 받아
+    각 도구별 최신 리포트를 파싱. 산출물은 정적분석 섹션의 도구별 카드/표에 표시된다.
     """
-    return _load_codesonar(req.paths)
+    return _load_static_analysis(req.paths)
 
 
 @router.post("/api/jenkins/source-root")

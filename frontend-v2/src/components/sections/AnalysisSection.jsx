@@ -208,9 +208,9 @@ export default function AnalysisSection({ job, analysisResult }) {
   // (build→cloudium 폴백 내장)를 호출한다.
   const [scmVcast, setScmVcast] = useState(null);
   const [scmVcastLoading, setScmVcastLoading] = useState(false);
-  // CodeSonar(정적분석 PDF, SCM 등록 경로) 지연 로드 — VectorCAST와 별개의 정적분석 도구.
-  const [codesonar, setCodesonar] = useState(null);
-  const [codesonarLoading, setCodesonarLoading] = useState(false);
+  // 정적분석 도구 4종(CodeSonar/CPD/QAC HIS/CodeEye) SCM PDF·XML 지연 로드 — VectorCAST와 별개.
+  const [sa, setSa] = useState(null);
+  const [saLoading, setSaLoading] = useState(false);
   // 언마운트 후 폴링 루프가 setState/네트워크를 계속 돌지 않도록 가드(W2). 잡 자체는 서버에서
   // 계속 실행되며 결과는 TTL 캐시되므로, 재진입 시 재클릭하면 빠르게 받는다.
   const mountedRef = useRef(true);
@@ -242,25 +242,26 @@ export default function AnalysisSection({ job, analysisResult }) {
     }
   }, [job, cfg, cacheRoot, toast]);
 
-  // CodeSonar(정적분석 PDF) 로드 — SCM 등록 경로(linked_docs.codesonar)에서 최신 리포트 파싱.
-  // VectorCAST와 달리 동기(파싱 빠름) — cloudium worker read + PDF 파싱은 초 단위.
-  const loadCodesonar = useCallback(async () => {
+  // 정적분석 4종 로드 — SCM 등록 경로(linked_docs.codesonar=정적분석 폴더)에서 CodeSonar/CPD/QAC/CodeEye
+  // 최신 리포트를 파싱. VectorCAST와 달리 동기(파싱 빠름) — cloudium worker read + PDF/XML 파싱은 초 단위.
+  const loadStaticAnalysis = useCallback(async () => {
     const paths = analysisResult?.matchedScm?.linked_docs?.codesonar || [];
-    if (!paths.length) { toast('info', 'SCM에 등록된 CodeSonar 경로가 없습니다.'); return; }
-    setCodesonarLoading(true);
+    if (!paths.length) { toast('info', 'SCM에 등록된 정적분석 경로가 없습니다.'); return; }
+    setSaLoading(true);
     try {
-      const data = await post('/api/jenkins/report/codesonar', { paths });
+      const data = await post('/api/jenkins/report/static-analysis', { paths });
       if (data?.ok) {
-        setCodesonar(data);
-        toast('success', `CodeSonar 경고 ${data.summary?.active_warnings ?? 0}건 로드`);
+        setSa(data);
+        const tools = ['codesonar', 'cpd', 'qac', 'codeeye'].filter(t => data[t]?.ok);
+        toast('success', `정적분석 ${tools.length}종 로드 (${tools.join('·')})`);
       } else {
-        setCodesonar(data || { ok: false });
-        toast('warning', `CodeSonar: ${data?.detail || '결과를 찾지 못했습니다'}`);
+        setSa(data || { ok: false });
+        toast('warning', `정적분석: ${data?.detail || '결과를 찾지 못했습니다'}`);
       }
     } catch (e) {
-      toast('error', `CodeSonar 로드 실패: ${e.message}`);
+      toast('error', `정적분석 로드 실패: ${e.message}`);
     } finally {
-      setCodesonarLoading(false);
+      setSaLoading(false);
     }
   }, [analysisResult, toast]);
 
@@ -706,83 +707,168 @@ export default function AnalysisSection({ job, analysisResult }) {
           </div>
         )}
 
-        {/* ── CodeSonar (GrammaTech) — SCM 정적분석 PDF ── */}
+        {/* ── SCM 정적분석 도구 4종 (CodeSonar/QAC HIS/CPD/CodeEye · PDF·XML) ── */}
         <div style={{ marginTop: 12, paddingTop: 10, borderTop: '1px solid var(--border)' }}>
           <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center', marginBottom: 6, flexWrap: 'wrap', gap: 6 }}>
-            <span className="text-sm" style={{ fontWeight: 700 }}>CodeSonar (GrammaTech) — 런타임 오류·데이터플로우 정적분석</span>
+            <span className="text-sm" style={{ fontWeight: 700 }}>SCM 정적분석 도구 (CodeSonar · QAC · CPD · CodeEye)</span>
             <div className="row" style={{ gap: 8, alignItems: 'center' }}>
-              {codesonar?.ok && <SourceBadge source="scm" />}
-              {!codesonar?.ok && codesonarPaths.length > 0 && (
-                <button className="btn-sm" onClick={loadCodesonar} disabled={codesonarLoading}
-                  title="SCM 등록 CodeSonar PDF에서 경고 요약/분류별/파일별 지표를 불러옵니다(cloudium read).">
-                  {codesonarLoading ? <span className="spinner" /> : 'CodeSonar 불러오기'}
+              {sa?.ok && <SourceBadge source="scm" />}
+              {!sa?.ok && codesonarPaths.length > 0 && (
+                <button className="btn-sm" onClick={loadStaticAnalysis} disabled={saLoading}
+                  title="SCM 정적분석 폴더에서 CodeSonar/CPD/QAC/CodeEye 최신 리포트를 불러옵니다(cloudium read).">
+                  {saLoading ? <span className="spinner" /> : '정적분석 불러오기'}
                 </button>
               )}
             </div>
           </div>
           <div className="text-sm text-muted" style={{ padding: '0 0 6px', lineHeight: 1.5 }}>
-            CodeSonar는 런타임 오류·데이터플로우 결함(미초기화 변수·도달불가 코드·쓸모없는 대입 등)을 잡는 정적분석 도구입니다.{' '}
-            <b>Active Warnings</b>=총 경고, <b>분류별</b>=경고 종류별 건수, <b>파일별</b>=파일당 경고. SCM 정적분석 PDF에서 추출합니다.
+            SCM에 올라간 정적분석 4종 산출물(PDF·XML)에서 요약을 추출합니다 — <b>CodeSonar</b>(런타임 오류·데이터플로우),{' '}
+            <b>QAC HIS</b>(함수 복잡도 v(G)), <b>CPD</b>(코드 중복), <b>CodeEye</b>(OSS 라이선스). 빌드 PRQA와 별개의 SCM 원본입니다.
           </div>
-          {!codesonar && codesonarPaths.length === 0 && (
-            <div className="text-sm text-muted">CodeSonar 경로 미등록 — 설정 &gt; SCM 연결 문서 경로에 정적분석 폴더(예: …/09.정적분석/01.Static Analysis)를 등록하면 불러올 수 있습니다.</div>
+          {!sa && codesonarPaths.length === 0 && (
+            <div className="text-sm text-muted">정적분석 경로 미등록 — 설정 &gt; SCM 연결 문서 경로에 정적분석 폴더(예: …/09.정적분석/01.Static Analysis)를 등록하면 불러올 수 있습니다.</div>
           )}
-          {codesonar && !codesonar.ok && (
-            <div className="text-sm text-muted">CodeSonar 결과를 찾지 못했습니다: {codesonar.detail || codesonar.error || '알 수 없음'}</div>
+          {sa && !sa.ok && (
+            <div className="text-sm text-muted">정적분석 결과를 찾지 못했습니다: {sa.detail || '알 수 없음'}</div>
           )}
-          {codesonar?.ok && (<>
-            <div className="stats-row" style={{ marginBottom: 8 }}>
-              <div className="stat-card" style={{ borderLeft: `3px solid ${(codesonar.summary?.active_warnings || 0) > 0 ? 'var(--color-warning)' : 'var(--color-success)'}` }}>
-                <div className="stat-value" style={{ color: (codesonar.summary?.active_warnings || 0) > 0 ? 'var(--color-warning)' : 'var(--color-success)' }}>{codesonar.summary?.active_warnings ?? '-'}</div>
-                <div className="stat-label">Active Warnings</div>
+
+          {/* CodeSonar */}
+          {sa?.codesonar?.ok && (
+            <div style={{ marginBottom: 12 }}>
+              <div className="text-sm" style={{ fontWeight: 600, marginBottom: 4 }}>🔍 CodeSonar — 런타임 오류·데이터플로우 ({sa.codesonar.summary?.analysis_name} #{sa.codesonar.summary?.analysis_id})</div>
+              <div className="stats-row" style={{ marginBottom: 6 }}>
+                <div className="stat-card" style={{ borderLeft: `3px solid ${(sa.codesonar.summary?.active_warnings || 0) > 0 ? 'var(--color-warning)' : 'var(--color-success)'}` }}>
+                  <div className="stat-value" style={{ color: (sa.codesonar.summary?.active_warnings || 0) > 0 ? 'var(--color-warning)' : 'var(--color-success)' }}>{sa.codesonar.summary?.active_warnings ?? '-'}</div>
+                  <div className="stat-label">Active Warnings</div>
+                </div>
+                <div className="stat-card"><div className="stat-value">{sa.codesonar.summary?.file_count ?? '-'}</div><div className="stat-label">분석 파일</div></div>
+                <div className="stat-card"><div className="stat-value">{sa.codesonar.summary?.distinct_classes ?? (sa.codesonar.by_class?.length ?? '-')}</div><div className="stat-label">경고 분류</div></div>
               </div>
-              <div className="stat-card"><div className="stat-value">{codesonar.summary?.file_count ?? '-'}</div><div className="stat-label">분석 파일 수</div></div>
-              <div className="stat-card"><div className="stat-value">{codesonar.summary?.distinct_classes ?? (codesonar.by_class?.length ?? '-')}</div><div className="stat-label">경고 분류 수</div></div>
-            </div>
-            <div className="text-muted" style={{ fontSize: 10, marginBottom: 8 }}>
-              {codesonar.summary?.analysis_name} analysis {codesonar.summary?.analysis_id} · {codesonar.summary?.generated}
-              {codesonar.available_count > 1 ? ` · 최신 1/${codesonar.available_count}개 리포트` : ''}
-            </div>
-            {Array.isArray(codesonar.by_class) && codesonar.by_class.length > 0 && (
-              <details open style={{ marginBottom: 8 }}>
-                <summary style={{ cursor: 'pointer', fontSize: 12, fontWeight: 600 }}>경고 분류별 (Warnings by Class)</summary>
-                <div style={{ marginTop: 6 }}>
-                  {codesonar.by_class.map((c, i) => {
-                    const max = codesonar.by_class[0]?.count || 1;
-                    return (
-                      <div key={i} className="row" style={{ gap: 8, alignItems: 'center', marginBottom: 3 }}>
-                        <span className="text-sm" style={{ minWidth: 170, fontSize: 11 }}>{c.warning_class}</span>
-                        <div style={{ flex: 1, height: 12, background: '#e5e7eb', borderRadius: 3, overflow: 'hidden' }}>
-                          <div style={{ width: `${Math.round((c.count / max) * 100)}%`, height: '100%', background: 'var(--color-warning)' }} />
+              {Array.isArray(sa.codesonar.by_class) && sa.codesonar.by_class.length > 0 && (
+                <details open style={{ marginBottom: 6 }}>
+                  <summary style={{ cursor: 'pointer', fontSize: 12, fontWeight: 600 }}>경고 분류별</summary>
+                  <div style={{ marginTop: 6 }}>
+                    {sa.codesonar.by_class.map((c, i) => {
+                      const max = sa.codesonar.by_class[0]?.count || 1;
+                      return (
+                        <div key={i} className="row" style={{ gap: 8, alignItems: 'center', marginBottom: 3 }}>
+                          <span className="text-sm" style={{ minWidth: 170, fontSize: 11 }}>{c.warning_class}</span>
+                          <div style={{ flex: 1, height: 12, background: '#e5e7eb', borderRadius: 3, overflow: 'hidden' }}>
+                            <div style={{ width: `${Math.round((c.count / max) * 100)}%`, height: '100%', background: 'var(--color-warning)' }} />
+                          </div>
+                          <span className="text-sm" style={{ fontWeight: 700, minWidth: 28, textAlign: 'right' }}>{c.count}</span>
                         </div>
-                        <span className="text-sm" style={{ fontWeight: 700, minWidth: 28, textAlign: 'right' }}>{c.count}</span>
-                      </div>
-                    );
-                  })}
+                      );
+                    })}
+                  </div>
+                </details>
+              )}
+              {Array.isArray(sa.codesonar.by_file) && sa.codesonar.by_file.length > 0 && (
+                <details>
+                  <summary style={{ cursor: 'pointer', fontSize: 12, fontWeight: 600 }}>파일별 경고 (상위 {sa.codesonar.by_file.length})</summary>
+                  <div style={{ maxHeight: 200, overflowY: 'auto', marginTop: 6 }}>
+                    <table className="impact-table" style={{ fontSize: 10 }}>
+                      <thead><tr><th>파일</th><th>경고</th><th>라인</th><th>언어</th></tr></thead>
+                      <tbody>
+                        {sa.codesonar.by_file.map((f, i) => (
+                          <tr key={i} style={{ background: f.warnings >= 10 ? '#fee2e2' : f.warnings >= 5 ? '#fef9c3' : undefined }}>
+                            <td style={{ fontFamily: 'monospace', fontSize: 10 }}>{f.file}</td>
+                            <td style={{ textAlign: 'center', fontWeight: 700 }}>{f.warnings}</td>
+                            <td style={{ textAlign: 'center' }}>{f.lines?.toLocaleString?.() ?? f.lines}</td>
+                            <td style={{ textAlign: 'center' }}>{f.language}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </details>
+              )}
+            </div>
+          )}
+
+          {/* QAC HIS Metrics */}
+          {sa?.qac?.ok && (
+            <div style={{ marginBottom: 12 }}>
+              <div className="text-sm" style={{ fontWeight: 600, marginBottom: 4 }}>📐 QAC HIS Metrics (Helix QAC) — 함수 순환복잡도 v(G)</div>
+              <div className="stats-row" style={{ marginBottom: 6 }}>
+                <div className="stat-card"><div className="stat-value">{sa.qac.summary?.function_count ?? '-'}</div><div className="stat-label">함수 수</div></div>
+                <div className="stat-card" style={{ borderLeft: `3px solid ${(sa.qac.summary?.vg_max || 0) > threshold ? 'var(--color-danger)' : 'var(--color-success)'}` }}>
+                  <div className="stat-value" style={{ color: (sa.qac.summary?.vg_max || 0) > threshold ? 'var(--color-danger)' : 'var(--color-success)' }}>{sa.qac.summary?.vg_max ?? '-'}</div>
+                  <div className="stat-label">v(G) Max</div>
                 </div>
-              </details>
-            )}
-            {Array.isArray(codesonar.by_file) && codesonar.by_file.length > 0 && (
-              <details open>
-                <summary style={{ cursor: 'pointer', fontSize: 12, fontWeight: 600 }}>파일별 경고 (Warnings by File · 상위 {codesonar.by_file.length})</summary>
-                <div style={{ maxHeight: 240, overflowY: 'auto', marginTop: 6 }}>
-                  <table className="impact-table" style={{ fontSize: 10 }}>
-                    <thead style={{ position: 'sticky', top: 0 }}><tr style={{ background: 'var(--bg)' }}><th>파일</th><th>경고</th><th>라인</th><th>언어</th></tr></thead>
-                    <tbody>
-                      {codesonar.by_file.map((f, i) => (
-                        <tr key={i} style={{ background: f.warnings >= 10 ? '#fee2e2' : f.warnings >= 5 ? '#fef9c3' : undefined }}>
-                          <td style={{ fontFamily: 'monospace', fontSize: 10 }}>{f.file}</td>
-                          <td style={{ textAlign: 'center', fontWeight: 700, color: f.warnings >= 10 ? 'var(--color-danger)' : f.warnings >= 5 ? 'var(--color-warning)' : undefined }}>{f.warnings}</td>
-                          <td style={{ textAlign: 'center' }}>{f.lines?.toLocaleString?.() ?? f.lines}</td>
-                          <td style={{ textAlign: 'center' }}>{f.language}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
+                <div className="stat-card"><div className="stat-value">{sa.qac.summary?.vg_p95 ?? '-'}</div><div className="stat-label">v(G) P95</div></div>
+                <div className="stat-card"><div className="stat-value">{sa.qac.summary?.vg_mean ?? '-'}</div><div className="stat-label">v(G) 평균</div></div>
+                <div className="stat-card"><div className="stat-value" style={{ color: (sa.qac.summary?.vg_over_10 || 0) > 0 ? 'var(--color-warning)' : undefined }}>{sa.qac.summary?.vg_over_10 ?? '-'}</div><div className="stat-label">v(G)&gt;10</div></div>
+              </div>
+              {Array.isArray(sa.qac.top_functions) && sa.qac.top_functions.length > 0 && (
+                <details>
+                  <summary style={{ cursor: 'pointer', fontSize: 12, fontWeight: 600 }}>복잡도 상위 함수 (top {sa.qac.top_functions.length})</summary>
+                  <div style={{ maxHeight: 180, overflowY: 'auto', marginTop: 6 }}>
+                    <table className="impact-table" style={{ fontSize: 10 }}>
+                      <thead><tr><th>함수</th><th>v(G)</th></tr></thead>
+                      <tbody>
+                        {sa.qac.top_functions.map((f, i) => (
+                          <tr key={i} style={{ background: f.vg > threshold ? '#fee2e2' : f.vg > threshold * 0.7 ? '#fef9c3' : undefined }}>
+                            <td style={{ fontFamily: 'monospace', fontSize: 10 }}>{f.function}</td>
+                            <td style={{ textAlign: 'center', fontWeight: 700 }}>{f.vg}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </details>
+              )}
+            </div>
+          )}
+
+          {/* CPD */}
+          {sa?.cpd?.ok && (
+            <div style={{ marginBottom: 12 }}>
+              <div className="text-sm" style={{ fontWeight: 600, marginBottom: 4 }}>📋 CPD (Copy-Paste Detection) — 코드 중복</div>
+              <div className="stats-row" style={{ marginBottom: 6 }}>
+                <div className="stat-card" style={{ borderLeft: `3px solid ${(sa.cpd.duplication_blocks || 0) > 0 ? 'var(--color-warning)' : 'var(--color-success)'}` }}>
+                  <div className="stat-value" style={{ color: (sa.cpd.duplication_blocks || 0) > 0 ? 'var(--color-warning)' : 'var(--color-success)' }}>{sa.cpd.duplication_blocks ?? '-'}</div>
+                  <div className="stat-label">중복 블록</div>
                 </div>
-              </details>
-            )}
-          </>)}
+                <div className="stat-card"><div className="stat-value">{sa.cpd.total_dup_lines?.toLocaleString?.() ?? sa.cpd.total_dup_lines ?? '-'}</div><div className="stat-label">중복 라인</div></div>
+                <div className="stat-card"><div className="stat-value">{sa.cpd.files_involved ?? '-'}</div><div className="stat-label">관련 파일</div></div>
+              </div>
+              {Array.isArray(sa.cpd.top_blocks) && sa.cpd.top_blocks.length > 0 && (
+                <details>
+                  <summary style={{ cursor: 'pointer', fontSize: 12, fontWeight: 600 }}>중복 블록 (큰 순 {sa.cpd.top_blocks.length})</summary>
+                  <div style={{ maxHeight: 180, overflowY: 'auto', marginTop: 6 }}>
+                    <table className="impact-table" style={{ fontSize: 10 }}>
+                      <thead><tr><th>중복 라인</th><th>토큰</th><th>파일</th></tr></thead>
+                      <tbody>
+                        {sa.cpd.top_blocks.map((b, i) => (
+                          <tr key={i} style={{ background: b.lines >= 25 ? '#fee2e2' : b.lines >= 10 ? '#fef9c3' : undefined }}>
+                            <td style={{ textAlign: 'center', fontWeight: 700 }}>{b.lines}</td>
+                            <td style={{ textAlign: 'center' }}>{b.tokens}</td>
+                            <td style={{ fontFamily: 'monospace', fontSize: 10 }}>{(b.files || []).join(', ')}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </details>
+              )}
+            </div>
+          )}
+
+          {/* CodeEye */}
+          {sa?.codeeye?.ok && (
+            <div>
+              <div className="text-sm" style={{ fontWeight: 600, marginBottom: 4 }}>📜 CodeEye — OSS 라이선스 검사</div>
+              <div className="stats-row">
+                <div className="stat-card"><div className="stat-value">{sa.codeeye.summary?.files_checked ?? '-'}</div><div className="stat-label">검사 파일</div></div>
+                <div className="stat-card" style={{ borderLeft: '3px solid var(--color-success)' }}><div className="stat-value" style={{ color: 'var(--color-success)' }}>{sa.codeeye.summary?.files_success ?? '-'}</div><div className="stat-label">검사 성공</div></div>
+                <div className="stat-card" style={{ borderLeft: `3px solid ${(sa.codeeye.summary?.files_fail || 0) > 0 ? 'var(--color-danger)' : 'var(--color-success)'}` }}><div className="stat-value" style={{ color: (sa.codeeye.summary?.files_fail || 0) > 0 ? 'var(--color-danger)' : 'var(--color-success)' }}>{sa.codeeye.summary?.files_fail ?? '-'}</div><div className="stat-label">검사 실패</div></div>
+              </div>
+              {sa.codeeye.summary?.purpose && (
+                <div className="text-muted" style={{ fontSize: 10, marginTop: 4 }}>검사목적: {sa.codeeye.summary.purpose} · 시작 {sa.codeeye.summary.started}</div>
+              )}
+            </div>
+          )}
         </div>
       </div>
 
