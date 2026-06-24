@@ -446,12 +446,17 @@ export default function AnalysisSection({ job, analysisResult }) {
     try {
       const res = await post(`/api/${series}/doc/summary`, { path, kind });
       if (!mountedRef.current) return;
-      setDoc(d => ({ ...d, [kind]: res }));
+      // _path 기록 → 경로가 바뀌면(타이핑/브라우즈) 카드 렌더 가드가 stale 카드를 자동 숨김.
+      setDoc(d => ({ ...d, [kind]: { ...res, _path: path } }));
       const pw = (res?.parse_warnings || []).length;
       toast(pw ? 'warning' : 'success',
         pw ? `산출물 파싱 완료 — 경고 ${pw}건(카드 확인)` : '산출물 결과 파싱 완료');
     } catch (e) {
-      if (mountedRef.current) toast('error', `산출물 파싱 실패: ${e.message}`);
+      // 실패 시 직전 성공 카드를 제거 — 토스트 사라진 뒤 옛 결과가 성공처럼 잔존하는 것 방지.
+      if (mountedRef.current) {
+        setDoc(d => ({ ...d, [kind]: null }));
+        toast('error', `산출물 파싱 실패: ${e.message}`);
+      }
     } finally {
       if (mountedRef.current) setBusy('');
     }
@@ -1244,21 +1249,23 @@ export default function AnalysisSection({ job, analysisResult }) {
               onBrowse={() => openPicker({ pattern: '*.xlsx', title: 'SwUTCV Coverage Report 선택', current: utcvForm.coverage_path, onSelect: p => setUtcvForm(f => ({ ...f, coverage_path: p })) })}
               isAdmin={isAdmin} browseTitle={browseDisabledTitle} placeholder="…/SwUTCV_Coverage_*.xlsx" />
             <button type="button" className="btn-secondary" style={{ fontSize: 11, marginBottom: 6 }}
-              disabled={utDocBusy === 'coverage' || !utcvForm.coverage_path}
+              disabled={!!utDocBusy || !utcvForm.coverage_path}
               onClick={() => parseDoc('swut', 'coverage', utcvForm.coverage_path)}>
               {utDocBusy === 'coverage' ? '파싱 중...' : '📄 이 문서 파싱 (Coverage)'}
             </button>
-            {utDoc.coverage && <ConsistencyResult report={utDoc.coverage} peerLabel="SUTR" hideVerdict />}
+            {utDoc.coverage && utDoc.coverage._path === utcvForm.coverage_path
+              && <ConsistencyResult report={utDoc.coverage} peerLabel="SUTR" hideVerdict />}
             <PathRow label="SUTR(.xlsm)" value={utcvForm.sutr_path}
               onChange={v => setUtcvForm(f => ({ ...f, sutr_path: v }))}
               onBrowse={() => openPicker({ pattern: '*.xlsm', title: 'SUTR 선택', current: utcvForm.sutr_path, onSelect: p => setUtcvForm(f => ({ ...f, sutr_path: p })) })}
               isAdmin={isAdmin} browseTitle={browseDisabledTitle} placeholder="…/SUTR_*.xlsm" />
             <button type="button" className="btn-secondary" style={{ fontSize: 11, marginBottom: 6 }}
-              disabled={utDocBusy === 'report' || !utcvForm.sutr_path}
+              disabled={!!utDocBusy || !utcvForm.sutr_path}
               onClick={() => parseDoc('swut', 'report', utcvForm.sutr_path)}>
               {utDocBusy === 'report' ? '파싱 중...' : '📄 이 문서 파싱 (SUTR)'}
             </button>
-            {utDoc.report && <ConsistencyResult report={utDoc.report} peerLabel="SUTR" hideVerdict />}
+            {utDoc.report && utDoc.report._path === utcvForm.sutr_path
+              && <ConsistencyResult report={utDoc.report} peerLabel="SUTR" hideVerdict />}
             <div style={{ borderTop: '1px solid var(--border)', margin: '8px 0' }} />
             <button type="button" className="btn-primary"
               disabled={utcvChecking || !utcvForm.coverage_path || !utcvForm.sutr_path}
@@ -1339,21 +1346,23 @@ export default function AnalysisSection({ job, analysisResult }) {
               onBrowse={() => openPicker({ pattern: '*.xlsx', title: 'SwITCV Coverage Report 선택', current: itcvForm.coverage_path, onSelect: p => setItcvForm(f => ({ ...f, coverage_path: p })) })}
               isAdmin={isAdmin} browseTitle={browseDisabledTitle} placeholder="…/SwITCV_Coverage_*.xlsx" />
             <button type="button" className="btn-secondary" style={{ fontSize: 11, marginBottom: 6 }}
-              disabled={itDocBusy === 'coverage' || !itcvForm.coverage_path}
+              disabled={!!itDocBusy || !itcvForm.coverage_path}
               onClick={() => parseDoc('swit', 'coverage', itcvForm.coverage_path)}>
               {itDocBusy === 'coverage' ? '파싱 중...' : '📄 이 문서 파싱 (Coverage)'}
             </button>
-            {itDoc.coverage && <ConsistencyResult report={itDoc.coverage} peerLabel="SITR" hideVerdict />}
+            {itDoc.coverage && itDoc.coverage._path === itcvForm.coverage_path
+              && <ConsistencyResult report={itDoc.coverage} peerLabel="SITR" hideVerdict />}
             <PathRow label="SITR(.xlsm)" value={itcvForm.sitr_path}
               onChange={v => setItcvForm(f => ({ ...f, sitr_path: v }))}
               onBrowse={() => openPicker({ pattern: '*.xlsm', title: 'SITR 선택', current: itcvForm.sitr_path, onSelect: p => setItcvForm(f => ({ ...f, sitr_path: p })) })}
               isAdmin={isAdmin} browseTitle={browseDisabledTitle} placeholder="…/SITR_*.xlsm" />
             <button type="button" className="btn-secondary" style={{ fontSize: 11, marginBottom: 6 }}
-              disabled={itDocBusy === 'report' || !itcvForm.sitr_path}
+              disabled={!!itDocBusy || !itcvForm.sitr_path}
               onClick={() => parseDoc('swit', 'report', itcvForm.sitr_path)}>
               {itDocBusy === 'report' ? '파싱 중...' : '📄 이 문서 파싱 (SITR)'}
             </button>
-            {itDoc.report && <ConsistencyResult report={itDoc.report} peerLabel="SITR" hideVerdict />}
+            {itDoc.report && itDoc.report._path === itcvForm.sitr_path
+              && <ConsistencyResult report={itDoc.report} peerLabel="SITR" hideVerdict />}
             <div style={{ borderTop: '1px solid var(--border)', margin: '8px 0' }} />
             <button type="button" className="btn-primary"
               disabled={itcvChecking || !itcvForm.coverage_path || !itcvForm.sitr_path}

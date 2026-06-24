@@ -380,6 +380,39 @@ describe('AnalysisSection', () => {
     expect(screen.getByText('실패')).toBeInTheDocument();
   });
 
+  it('단일 파싱 결과가 비면 "추출된 결과가 없습니다" 안내를 표시한다 (hideVerdict 빈 분기)', async () => {
+    const { post } = await import('../api.js');
+    post.mockResolvedValue({ coverage_summary: {}, parse_warnings: [] });
+    render(<AnalysisSection job={makeJob()} analysisResult={makeAnalysisResult()} />);
+
+    fireEvent.change(screen.getByPlaceholderText('…/SwUTCV_Coverage_*.xlsx'), { target: { value: 'U:/empty.xlsx' } });
+    await act(async () => {
+      fireEvent.click(screen.getAllByRole('button', { name: /이 문서 파싱 \(Coverage\)/ })[0]);
+    });
+
+    await waitFor(() => expect(screen.getByText(/추출된 결과가 없습니다/)).toBeInTheDocument());
+  });
+
+  it('파싱 후 경로를 바꾸면 stale 결과 카드가 사라진다 (FE-2 _path 가드)', async () => {
+    const { post } = await import('../api.js');
+    post.mockResolvedValue({
+      coverage_summary: { total_tcs: 100, uncovered_functions: [] },
+      parse_warnings: [],
+    });
+    render(<AnalysisSection job={makeJob()} analysisResult={makeAnalysisResult()} />);
+
+    const input = screen.getByPlaceholderText('…/SwUTCV_Coverage_*.xlsx');
+    fireEvent.change(input, { target: { value: 'U:/cov.xlsx' } });
+    await act(async () => {
+      fireEvent.click(screen.getAllByRole('button', { name: /이 문서 파싱 \(Coverage\)/ })[0]);
+    });
+    await waitFor(() => expect(screen.getByText('Traceability TC')).toBeInTheDocument());
+
+    // 경로 변경 → 직전 결과의 _path와 불일치 → stale 카드 자동 숨김
+    fireEvent.change(input, { target: { value: 'U:/other.xlsx' } });
+    await waitFor(() => expect(screen.queryByText('Traceability TC')).toBeNull());
+  });
+
   // ── 재진입 자동복구(스피너 고착/데이터 유실 방지) ──────────────────
   it('보존된 완료 잡이 있으면 재진입 시 클릭 없이 결과를 자동 복구한다', async () => {
     vi.useFakeTimers();

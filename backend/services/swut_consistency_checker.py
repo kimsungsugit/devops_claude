@@ -414,21 +414,34 @@ def summarize_coverage_report(
     Returns: {coverage_summary: dict, parse_warnings: list[str]}. 파싱 실패는
     parse_warnings에 누적되며 coverage_summary는 부분/빈 dict일 수 있다(예외 안 던짐).
     """
-    wb = _load_workbook(coverage_source)
     parse_warnings: list[str] = []
-    names = [n.lower() for n in wb.sheetnames]
-    if not any("traceability" in n for n in names):
+    # 손상/암호화/비-xlsx는 openpyxl이 BadZipFile/InvalidFileException 등을 던진다 —
+    # docstring 계약(예외 안 던짐)대로 잡아 빈 요약+사유로 환원(500 대신 200+warning).
+    try:
+        wb = _load_workbook(coverage_source)
+    except Exception as e:  # noqa: BLE001 — 로드 실패 전체를 계약대로 흡수
         parse_warnings.append(
-            "Coverage Report에 'Traceability' 시트 없음 — Hyundai/Mobis 포맷 가정 검증 필요"
+            f"Coverage Report 로드 실패 — 손상/암호화/비-xlsx 의심 ({type(e).__name__})"
         )
-    if not any(
-        "coverage" in n and "traceability" not in n and "consistency" not in n
-        for n in names
-    ):
-        parse_warnings.append("Coverage Report에 'Coverage' 시트(3.Coverage 등) 없음")
-    cov = _extract_coverage_summary(
-        wb, out_warnings=parse_warnings, tc_prefix=tc_prefix,
-    )
+        return {"coverage_summary": {}, "parse_warnings": parse_warnings}
+    _owns_wb = wb is not coverage_source  # passthrough Workbook(호출자 소유)은 닫지 않음
+    try:
+        names = [n.lower() for n in wb.sheetnames]
+        if not any("traceability" in n for n in names):
+            parse_warnings.append(
+                "Coverage Report에 'Traceability' 시트 없음 — Hyundai/Mobis 포맷 가정 검증 필요"
+            )
+        if not any(
+            "coverage" in n and "traceability" not in n and "consistency" not in n
+            for n in names
+        ):
+            parse_warnings.append("Coverage Report에 'Coverage' 시트(3.Coverage 등) 없음")
+        cov = _extract_coverage_summary(
+            wb, out_warnings=parse_warnings, tc_prefix=tc_prefix,
+        )
+    finally:
+        if _owns_wb and hasattr(wb, "close"):
+            wb.close()   # read_only 워크북의 ZipFile/파일핸들 해제
     return {"coverage_summary": cov, "parse_warnings": parse_warnings}
 
 
@@ -442,16 +455,38 @@ def summarize_test_report(
     여기서만 not_executed_tcs 목록 길이로 read-side 보정한다(공유 추출기/정합성 경로는
     불변, 단일 문서 표시값만 정확화). Returns {sutr_summary, parse_warnings}.
     """
-    wb = _load_workbook(sutr_source)
     parse_warnings: list[str] = []
-    names = [n.lower() for n in wb.sheetnames]
-    if not any("test summary" == n or ("summary" in n and "test" in n) for n in names):
-        parse_warnings.append("Test Report에 'Test Summary' 시트 없음")
-    sutr = _extract_sutr_summary(wb, tc_prefix=tc_prefix)
+    try:
+        wb = _load_workbook(sutr_source)
+    except Exception as e:  # noqa: BLE001 — 손상/암호화/비-xlsx를 계약대로 흡수
+        parse_warnings.append(
+            f"Test Report 로드 실패 — 손상/암호화/비-xlsx 의심 ({type(e).__name__})"
+        )
+        return {"sutr_summary": {}, "parse_warnings": parse_warnings}
+    _owns_wb = wb is not sutr_source
+    try:
+        names = [n.lower() for n in wb.sheetnames]
+        if not any(
+            "test summary" == n or ("summary" in n and "test" in n) for n in names
+        ):
+            parse_warnings.append("Test Report에 'Test Summary' 시트 없음")
+        sutr = _extract_sutr_summary(wb, tc_prefix=tc_prefix)
+    finally:
+        if _owns_wb and hasattr(wb, "close"):
+            wb.close()
     # not_executed read-side 보정 — 목록은 있는데 카운트가 0이면 목록 길이로 채움.
+    # 상한 clamp: 섹션 파싱 드리프트로 목록이 Total TC를 넘으면 total로 보정 + 경고
+    # (표시 전용 — 공유 _extract_sutr_summary/정합성 verdict는 raw 값 그대로 사용).
     ne_tcs = sutr.get("not_executed_tcs") or []
     if not sutr.get("not_executed") and ne_tcs:
-        sutr["not_executed"] = len(ne_tcs)
+        total = sutr.get("total_tcs") or 0
+        n = len(ne_tcs)
+        if total and n > total:
+            parse_warnings.append(
+                f"미실행 TC 목록 {n}건이 Total TC {total} 초과 — 섹션 파싱 드리프트 의심, {total}로 보정"
+            )
+            n = total
+        sutr["not_executed"] = n
     return {"sutr_summary": sutr, "parse_warnings": parse_warnings}
 
 

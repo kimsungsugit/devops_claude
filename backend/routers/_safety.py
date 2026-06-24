@@ -173,10 +173,17 @@ def run_consistency_safely(
             len(result.get("issues") or [])
             if isinstance(result, dict) else 0
         )
+        # /doc/summary 응답은 ok/issues 없이 {coverage_summary|sutr_summary,
+        # parse_warnings}만 반환 → parse_warnings도 로깅(ok=None은 비교가 아닌
+        # 단일 파싱 신호). 정합성 경로도 parse_warnings를 함께 노출해 관측성 향상.
+        n_warn = (
+            len(result.get("parse_warnings") or [])
+            if isinstance(result, dict) else 0
+        )
         mem_after = get_process_memory_mb()
         logger.info(
-            "%s.consistency.check done: ok=%s issues=%d mem_mb=%s",
-            series, ok, n_issues,
+            "%s.consistency.check done: ok=%s issues=%d warnings=%d mem_mb=%s",
+            series, ok, n_issues, n_warn,
             f"{mem_after:.1f}" if mem_after is not None else "n/a",
         )
         return result

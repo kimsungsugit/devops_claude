@@ -62,7 +62,8 @@ from backend.user_context import get_current_user
 
 _logger = logging.getLogger(__name__)
 
-# 41차 W3: 라우터 전체 admin only — 5 endpoint 모두 require_admin 적용 (40차 통합).
+# 41차 W3: 라우터 전체 admin only — router dependencies=[Depends(require_admin)]로
+# 모든 endpoint에 일괄 적용 (신규 endpoint 자동 포함; 개수 명시는 drift 방지 위해 지양).
 router = APIRouter(
     prefix="/api/swut",
     tags=["swut"],

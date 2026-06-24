@@ -104,7 +104,8 @@ def _load_meta_from_config(project_id: str) -> dict[str, Any]:
 
 _logger = logging.getLogger(__name__)
 
-# 41차 W3: 라우터 전체 admin only — 4 endpoint 모두 require_admin 적용 (40차 통합).
+# 41차 W3: 라우터 전체 admin only — router dependencies=[Depends(require_admin)]로
+# 모든 endpoint에 일괄 적용 (신규 endpoint 자동 포함; 개수 명시는 drift 방지 위해 지양).
 # endpoint signature에서 `_admin: str = Depends(require_admin)` 중복 제거.
 router = APIRouter(
     prefix="/api/swit",

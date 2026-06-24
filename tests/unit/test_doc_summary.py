@@ -118,3 +118,54 @@ def test_swit_wrappers_delegate_with_swit_prefix(monkeypatch):
     summarize_swit_coverage_report(b"x")
     summarize_swit_test_report(b"x")
     assert seen == {"cov": "SwITC", "rep": "SwITC"}
+
+
+def _raise_badzip(_src):
+    import zipfile
+    raise zipfile.BadZipFile("not a zip")
+
+
+def test_summarize_coverage_load_failure_sanitized(monkeypatch):
+    """손상/암호화/비-xlsx 로드 실패 → 예외 없이 빈 요약 + parse_warning(계약)."""
+    monkeypatch.setattr(cc, "_load_workbook", _raise_badzip)
+    out = summarize_coverage_report(b"garbage")
+    assert out["coverage_summary"] == {}
+    assert any("로드 실패" in w for w in out["parse_warnings"])
+
+
+def test_summarize_test_report_load_failure_sanitized(monkeypatch):
+    """SUTR/SITR 로드 실패도 동일하게 sanitize(500 아닌 빈 요약+사유)."""
+    monkeypatch.setattr(cc, "_load_workbook", _raise_badzip)
+    out = summarize_test_report(b"garbage")
+    assert out["sutr_summary"] == {}
+    assert any("로드 실패" in w for w in out["parse_warnings"])
+
+
+def test_not_executed_clamped_to_total(monkeypatch):
+    """미실행 목록이 Total TC 초과 시 total로 clamp + 경고(섹션 파싱 드리프트 방어)."""
+    monkeypatch.setattr(cc, "_load_workbook", lambda src: _FakeWB(["1.Test Summary"]))
+    monkeypatch.setattr(
+        cc, "_extract_sutr_summary",
+        lambda wb, *, tc_prefix="SwUTC": {
+            "total_tcs": 5, "not_executed": 0,
+            "not_executed_tcs": [f"SwITC_{i}" for i in range(12)],
+        },
+    )
+    out = summarize_test_report(b"x")
+    assert out["sutr_summary"]["not_executed"] == 5   # 12 → total 5로 clamp
+    assert any("초과" in w for w in out["parse_warnings"])
+
+
+def test_not_executed_no_clamp_when_total_zero(monkeypatch):
+    """total_tcs=0(미파싱)이면 clamp 불가 → 목록 길이 유지, 초과 경고 없음."""
+    monkeypatch.setattr(cc, "_load_workbook", lambda src: _FakeWB(["1.Test Summary"]))
+    monkeypatch.setattr(
+        cc, "_extract_sutr_summary",
+        lambda wb, *, tc_prefix="SwUTC": {
+            "total_tcs": 0, "not_executed": 0,
+            "not_executed_tcs": ["SwITC_1", "SwITC_2"],
+        },
+    )
+    out = summarize_test_report(b"x")
+    assert out["sutr_summary"]["not_executed"] == 2
+    assert not any("초과" in w for w in out["parse_warnings"])
