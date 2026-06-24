@@ -43,7 +43,17 @@ const DOC_TYPES = [
   { key: 'sits', label: 'SITS', icon: '📕', desc: 'Software Integration Test Specification' },
 ];
 
-export default function DocGenSection({ job, analysisResult }) {
+// 개별 서브탭을 가진 빌더 산출물 — 첫 탭(문서 생성)에서 UDS/STS/SUTS/SITS 생성 버튼
+// 옆에 바로가기 버튼으로 노출한다. 클릭 시 onNavigateSub로 해당 서브탭으로 전환(빌드
+// 설정 UI는 각 탭에 있으므로 즉시 생성이 아닌 이동). DocGenHubSection.SUBS의 id와 일치.
+const BUILDER_TABS = [
+  { id: 'swut', label: 'SwUT', icon: '🔧', desc: 'SW 단위시험 (SwUTCV/SUTR)' },
+  { id: 'swit', label: 'SwIT', icon: '🔗', desc: 'SW 통합시험 (SwITCV/SITR)' },
+  { id: 'swsa', label: 'SwSA', icon: '🔬', desc: 'SW 정적분석' },
+  { id: 'swreport', label: '통합 결과', icon: '📊', desc: '전 레벨 통합 Summary' },
+];
+
+export default function DocGenSection({ job, analysisResult, onNavigateSub }) {
   const { cfg } = useJenkinsCfg();
   const toast = useToast();
   const cacheRoot = analysisResult?.cacheRoot || defaultCacheRoot(job?.url) || cfg.cacheRoot;
@@ -393,7 +403,7 @@ export default function DocGenSection({ job, analysisResult }) {
           <span className="panel-title">문서 생성</span>
         </div>
 
-        <div style={{ display: 'flex', gap: 10, marginBottom: 12, flexWrap: 'wrap' }}>
+        <div style={{ display: 'flex', gap: 10, marginBottom: 12, flexWrap: 'wrap', alignItems: 'center' }}>
           {DOC_TYPES.map(dt => (
             <button
               key={dt.key}
@@ -408,6 +418,25 @@ export default function DocGenSection({ job, analysisResult }) {
               }
             </button>
           ))}
+          {/* 개별 탭을 가진 빌더 산출물 바로가기 — UDS/STS/SUTS/SITS 버튼 옆에 배치.
+              클릭 시 해당 서브탭으로 이동(빌드 설정 UI가 각 탭에 있음). */}
+          {onNavigateSub && (
+            <>
+              <span aria-hidden="true" style={{ alignSelf: 'stretch', width: 1, background: 'var(--border)', margin: '0 2px' }} />
+              {BUILDER_TABS.map(bt => (
+                <button
+                  key={bt.id}
+                  type="button"
+                  className="btn-secondary btn-sm"
+                  onClick={() => onNavigateSub(bt.id)}
+                  title={`${bt.desc} — '${bt.label}' 탭으로 이동`}
+                  style={{ minWidth: 110 }}
+                >
+                  {bt.icon} {bt.label} →
+                </button>
+              ))}
+            </>
+          )}
         </div>
 
         {/* Progress bar + status */}

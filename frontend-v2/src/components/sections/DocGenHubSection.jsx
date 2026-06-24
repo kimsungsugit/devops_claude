@@ -105,8 +105,10 @@ export default function DocGenHubSection({ job, analysisResult, onSubChange, ini
               style={{ display: active ? 'block' : 'none' }}
             >
               {/* 패널 컨테이너는 항상 렌더 → 탭 버튼 aria-controls IDREF 유효(dangling 방지).
-                  무거운 컴포넌트는 방문한 서브만 마운트(keep-alive: 이후 숨김 유지 → 빌드/폼 보존). */}
-              {mounted.has(s.id) && <Component job={job} analysisResult={analysisResult} />}
+                  무거운 컴포넌트는 방문한 서브만 마운트(keep-alive: 이후 숨김 유지 → 빌드/폼 보존).
+                  onNavigateSub: 첫 탭(문서 생성)의 'SwUT/SwIT/SwSA/통합' 바로가기 버튼이 해당
+                  서브탭으로 전환하기 위한 콜백. 다른 서브는 이 prop을 무시한다. */}
+              {mounted.has(s.id) && <Component job={job} analysisResult={analysisResult} onNavigateSub={select} />}
             </div>
           );
         })}

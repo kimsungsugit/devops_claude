@@ -132,6 +132,34 @@ describe('DocGenSection', () => {
     });
   });
 
+  // ── 빌더 산출물 바로가기 버튼 (onNavigateSub) ─────────────────────
+
+  it('onNavigateSub 미전달 시 빌더 바로가기 버튼(SwUT 등)은 렌더되지 않는다', async () => {
+    render(<DocGenSection job={makeJob()} analysisResult={makeAnalysisResult()} />);
+    await waitFor(() => expect(screen.getByText(/UDS 생성/)).toBeInTheDocument());
+    expect(screen.queryByRole('button', { name: /SwUT/ })).toBeNull();
+  });
+
+  it('onNavigateSub 전달 시 SwUT/SwIT/SwSA/통합 결과 바로가기 버튼을 렌더한다', async () => {
+    const onNavigateSub = vi.fn();
+    render(<DocGenSection job={makeJob()} analysisResult={makeAnalysisResult()} onNavigateSub={onNavigateSub} />);
+    await waitFor(() => expect(screen.getByRole('button', { name: /SwUT/ })).toBeInTheDocument());
+    expect(screen.getByRole('button', { name: /SwIT/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /SwSA/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /통합 결과/ })).toBeInTheDocument();
+  });
+
+  it('빌더 바로가기 버튼 클릭 시 해당 서브탭 id로 onNavigateSub를 호출한다', async () => {
+    const user = userEvent.setup();
+    const onNavigateSub = vi.fn();
+    render(<DocGenSection job={makeJob()} analysisResult={makeAnalysisResult()} onNavigateSub={onNavigateSub} />);
+    await waitFor(() => expect(screen.getByRole('button', { name: /SwUT/ })).toBeInTheDocument());
+    await user.click(screen.getByRole('button', { name: /SwUT/ }));
+    expect(onNavigateSub).toHaveBeenCalledWith('swut');
+    await user.click(screen.getByRole('button', { name: /통합 결과/ }));
+    expect(onNavigateSub).toHaveBeenCalledWith('swreport');
+  });
+
   // ── VectorCAST 패키지 관리 ───────────────────────────────────────
 
   it('VectorCAST 패키지 관리 패널 제목을 렌더링한다', async () => {
