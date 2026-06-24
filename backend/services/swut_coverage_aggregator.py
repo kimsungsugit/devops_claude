@@ -647,7 +647,17 @@ def _write_coverage_sheet(
             str(c.value).strip() if c.value else ""
             for c in row
         ]
-        if any(label in ("Unit ID", "Function Name", "Component") for label in labels):
+        # 라운드 102 (2026-06-24) — PV v0.10 SwITCV 헤더 인식 추가. PV는 'Unit ID'를
+        # 'Unit'(r9)+'ID'(r10)로 분리, 'Function Name'→'Name', Component 열 없음 →
+        # 기존 라벨로는 header_row 미발견 → return 0(스탬핑 skip, 템플릿 passthrough)
+        # 였다. 단 'Functions'는 상단 요약블록(r3~6)에도 등장하므로, 데이터 표 헤더
+        # 행(r9, 'No'+'Functions' 동시 보유)만 매칭하도록 'No' 동반 조건 부여. DV/
+        # SwUTCV(Component 보유)는 기존 매칭 유지 — 영향 없음.
+        _labels_set = set(labels)
+        if (
+            _labels_set & {"Unit ID", "Function Name", "Component"}
+            or ("Functions" in _labels_set and "No" in _labels_set)
+        ):
             header_row = row[0].row
             break
     if header_row is None:
@@ -708,10 +718,14 @@ def _write_coverage_sheet(
     # F7 stage 10 G3 fix: is_swit_caller 명시 — SwUT 호출 (build_coverage_report)는
     # SwUTCV (회사 표준 v1.01 layout)도 Statement/Branch 매핑. SwIT 호출
     # (build_swit_coverage_report)만 SwIT 분기 (Functions Pass + Function Called).
+    # 라운드 102 (2026-06-24) — has_component_col 의존 제거. PV v0.10 SwITCV는
+    # Component 열이 없어도 function_and_calls 메트릭 양식(Functions Pass + Function
+    # Called)이다. coverage_metric_kind(시트구성 기반 v1.01 감지, DV/PV 공통)로만
+    # 판정 → DV(11열)/PV(10열) 모두 SwIT 메트릭 stamp. 열 오프셋은 아래에서
+    # has_component_col로 별도 보정. is_swit_caller=True(SwIT 호출)만 해당 — SwUTCV 무관.
     is_swit_metric_layout = is_swit_caller and (
         layout is not None
         and getattr(layout, "coverage_metric_kind", "single") == "function_and_calls"
-        and has_component_col
     )
 
     # 라운드 73 T803 — row 자동 확장 (1회 batch insert로 O(N²) 회피).
@@ -907,7 +921,17 @@ def _write_coverage_sheet(
             # display_unit_id 기준으로 도출. 이전엔 SUDS 미매핑이나 vcast가 실 SwUFn을
             # 가진 행(예 SwUFn_3329)은 C 공란, 순차 fallback 행은 env명(Lib_sha256) leak.
             # display_unit_id가 SwUFn_NNNN면 항상 SwCom_NN 부여 → 일관성 확보.
+            # 라운드 102 (2026-06-24) — spec_based Component = VectorCAST 환경명
+            # (회사 감사본 실측: env_name.upper() = SWUT_01_LIB_SHA256 등, 환경별
+            # 세로병합). 라운드 92/96의 SwCom_NN 수식은 감사본 오판독 — 레퍼런스
+            # 직접 비교(scratchpad/refs)로 env_name.upper()가 정답 확인. 환경 그룹·
+            # 크기도 레퍼런스와 정확 일치(Lib_sha256 14, SysOs_Main 22 …).
             if spec_based:
+                _env = (getattr(fc, "env_name", "") or "").strip()
+                if _env:
+                    comp_name = _env.upper()
+            if spec_based and not comp_name:
+                # env_name 부재 시 기존 SwCom_NN fallback (backward-compat).
                 m_swufn = re.match(r"SwUFn_(\d{2})\d{2}", str(display_unit_id))
                 if m_swufn:
                     comp_name = f"SwCom_{m_swufn.group(1)}"
@@ -921,14 +945,11 @@ def _write_coverage_sheet(
             if comp_name:
                 # 라운드 96 — spec_based는 force_write_cell로 orphan MergedCell
                 # (회사 양식 SwCom 그룹 병합 해제 잔존 셀) 강제 기록 → C 공란 해소.
+                # 라운드 102 — 환경명 literal stamp (수식 폐기). 환경별 세로병합은
+                # written 루프 종료 후 최종 패스에서 (연속 동일 env 그룹).
                 # HDPDM01/SwIT는 기존 safe_write 동작 보존.
                 if spec_based:
-                    # C열 테두리 통일은 written 루프 종료 후 최종 패스에서 수행
-                    # (라운드 97 — 루프 중간 복사가 후속 단계에서 리셋되는 문제 회피).
-                    force_write_cell(
-                        ws, r, comp_col,
-                        f'="SwCom_" & MID(D{r}, FIND("_", D{r}) + 1, 2)',
-                    )
+                    force_write_cell(ws, r, comp_col, comp_name)
                 else:
                     safe_write(ws, r, comp_col, comp_name)
 
@@ -944,10 +965,14 @@ def _write_coverage_sheet(
             _apply_fill(ws, r, unit_id_col, USER_INPUT_FILL_RGB)
 
         if is_swit_metric_layout:
-            # SwITCV — Functions Pass (C6) + Function Called metric (C8/C9/C10)
-            # Functions Pass: function 매핑 여부 — 신규 session에 unit_id 있으면 'O'
-            functions_pass_col = no_col + 4
-            fcalls_count_col = no_col + 6
+            # SwITCV — Functions Pass + Function Called metric.
+            # 라운드 102 — PV 10열(Component 없음) 대응: DV 11열은 Component(no_col+1)
+            # 때문에 Functions=no_col+4 / FCalled Count=no_col+6, PV는 각각 -1 시프트.
+            # DV: No=B Component=C Unit=D Name=E Functions=F(no_col+4) ... FCalled=H(no_col+6).
+            # PV: No=B Unit=C Name=D Functions=E(no_col+3) ... FCalled=G(no_col+5).
+            _comp_off = 1 if has_component_col else 0
+            functions_pass_col = no_col + 3 + _comp_off
+            fcalls_count_col = no_col + 5 + _comp_off
             if is_c_parser_only:
                 # 라운드 74 T906 — c_parser only Functions Pass cell에 '[c_parser]' 안내.
                 # 라운드 76 자체평가 fix — 안내 메시지 보강 + Name col에도 마킹.
@@ -967,10 +992,12 @@ def _write_coverage_sheet(
                 # 신규: Exception 셀은 노란 fill만 (값 비움 — totals 카운트/수식
                 # 정합), Note 셀(no_col+10)에 사유 기재 안내. manual reviewer가
                 # 사유 기재 후 Exception 여부를 결정한다 (ISO 26262 evidence 정책).
-                _note_col = no_col + 10
+                # 라운드 102 — DV 11열만 Note 열(no_col+10) 존재. PV 10열은 no_col+9가
+                # File이라 note 미기재(미달 상세는 별도 Deviation/Consistency). None→skip.
+                _note_col = no_col + 10 if has_component_col else None
                 if not swit_present:
                     mark_user_input_fill_only(ws, r, functions_pass_col + 1)
-                    if not str(ws.cell(r, _note_col).value or "").strip():
+                    if _note_col is not None and not str(ws.cell(r, _note_col).value or "").strip():
                         mark_user_input_required(
                             ws, r, _note_col, hint="미실행 사유 (Exception 결정 근거)",
                         )
@@ -982,7 +1009,7 @@ def _write_coverage_sheet(
                     if not fcc.passed:
                         # 동일 정책 — Function Called Exception도 자동 'O' 제거
                         mark_user_input_fill_only(ws, r, fcalls_count_col + 3)
-                        if not str(ws.cell(r, _note_col).value or "").strip():
+                        if _note_col is not None and not str(ws.cell(r, _note_col).value or "").strip():
                             mark_user_input_required(
                                 ws, r, _note_col,
                                 hint="Function Call 미달 사유 (Exception 결정 근거)",
@@ -1230,18 +1257,27 @@ def _write_coverage_sheet(
                 _dst.alignment = _copy_swit_total.copy(_src.alignment)
                 _dst.fill = _copy_swit_total.copy(_src.fill)
 
+        # 라운드 102 (2026-06-24) — totals 집계/기록 열을 행별 스탬프와 동일하게
+        # Component-aware로 보정 (reviewer Critical #1). 기존 하드코딩(no_col+4/+5/+8/+9)은
+        # DV 11열 전용이라 PV 10열에선 1칸 어긋나 Function Fail이 Exception 열을 읽어
+        # 항상 0 산출 + 잘못된 열 기록. _comp_off=0(PV)/1(DV)로 통일.
+        _tot_comp_off = 1 if has_component_col else 0
+        _fp_col = no_col + 3 + _tot_comp_off   # Functions Pass (O/X)
+        _fe_col = no_col + 4 + _tot_comp_off   # Functions Exception
+        _fcf_col = no_col + 7 + _tot_comp_off  # Function Called Pass (=fcalls_count_col+2)
+        _fce_col = no_col + 8 + _tot_comp_off  # Function Called Exception
         function_fail = 0
         function_exception = 0
         function_call_fail = 0
         function_call_exception = 0
         for rr in range(data_start, last_data_row + 1):
-            if str(ws.cell(rr, no_col + 4).value or "").strip().upper() == "X":
+            if str(ws.cell(rr, _fp_col).value or "").strip().upper() == "X":
                 function_fail += 1
-            if str(ws.cell(rr, no_col + 5).value or "").strip():
+            if str(ws.cell(rr, _fe_col).value or "").strip():
                 function_exception += 1
-            if str(ws.cell(rr, no_col + 8).value or "").strip().upper() == "X":
+            if str(ws.cell(rr, _fcf_col).value or "").strip().upper() == "X":
                 function_call_fail += 1
-            if str(ws.cell(rr, no_col + 9).value or "").strip():
+            if str(ws.cell(rr, _fce_col).value or "").strip():
                 function_call_exception += 1
 
         from openpyxl.cell.cell import MergedCell as _MC_swit_total_label
@@ -1256,10 +1292,10 @@ def _write_coverage_sheet(
         )
         safe_write(ws, row_total, no_col, total_no_count or written)
         safe_write(ws, row_total, total_label_col, "Total")
-        safe_write(ws, row_total, no_col + 4, function_fail)
-        safe_write(ws, row_total, no_col + 5, function_exception)
-        safe_write(ws, row_total, no_col + 8, function_call_fail)
-        safe_write(ws, row_total, no_col + 9, function_call_exception)
+        safe_write(ws, row_total, _fp_col, function_fail)
+        safe_write(ws, row_total, _fe_col, function_exception)
+        safe_write(ws, row_total, _fcf_col, function_call_fail)
+        safe_write(ws, row_total, _fce_col, function_call_exception)
         if out_warnings is not None:
             out_warnings.append(
                 f"[swit-cov] Function/Function Call totals row stamp R{row_total} "
@@ -1302,6 +1338,44 @@ def _write_coverage_sheet(
                 col_hi=_last_col,
                 copy_fill=False,
                 finalize_medium_cols=None,
+            )
+
+        # 라운드 102 (2026-06-24) — spec_based Component(C) 환경별 세로병합.
+        # 회사 감사본은 연속 동일 환경명(env_name.upper()) 행을 1셀로 병합
+        # (예 C10:C23=SWUT_01_LIB_SHA256 14행). 라운드 92의 비병합(감사본 오판독)을
+        # 레퍼런스 직접 비교로 반증 → 되돌림. 헤더(C8:C9) 보존 — data_start 이후만.
+        # normalize(테두리 다수결) 이후 실행: 개별 셀 정규화 후 병합해야 anchor 테두리
+        # 보존. slave 셀 값 제거 후 merge (anchor만 값 — 회사본 패턴).
+        from openpyxl.utils import get_column_letter as _gcl_merge
+        _comp_col = no_col + 1
+        _comp_letter = _gcl_merge(_comp_col)
+        _vals = []
+        for _rr in range(data_start, last_data_row + 1):
+            _cv = ws.cell(_rr, _comp_col).value
+            _vals.append(str(_cv).strip() if _cv not in (None, "") else "")
+        _merged_groups = 0
+        _i, _n = 0, len(_vals)
+        while _i < _n:
+            _j = _i
+            while _j + 1 < _n and _vals[_j + 1] == _vals[_i] and _vals[_i] != "":
+                _j += 1
+            if _j > _i:  # run length >= 2 → 병합
+                _a, _b = data_start + _i, data_start + _j
+                for _sr in range(_a + 1, _b + 1):
+                    try:
+                        ws.cell(_sr, _comp_col).value = None
+                    except (ValueError, AttributeError):
+                        pass
+                try:
+                    ws.merge_cells(f"{_comp_letter}{_a}:{_comp_letter}{_b}")
+                    _merged_groups += 1
+                except (ValueError, AttributeError):
+                    pass
+            _i = _j + 1
+        if out_warnings is not None and _merged_groups > 0:
+            out_warnings.append(
+                f"[spec-cov] 라운드 102 — Component(C) 환경별 세로병합 {_merged_groups}그룹 "
+                f"(회사 감사본 일치, env_name.upper())"
             )
 
     return written

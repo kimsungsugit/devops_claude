@@ -44,7 +44,8 @@ class TestSwutMetaConfigKJPDS02PV:
         assert isinstance(folders, list)
         assert len(folders) == 2
         assert all(isinstance(f, str) and f for f in folders)
-        assert "1.APP_UT_report_260604" in folders[0]
+        # 2026-06-24 — APP UT 로그 신규본 260611 갱신 (BOOT는 260604 불변).
+        assert "1.APP_UT_report_260611" in folders[0]
         assert "2.BOOT_UT_report_260604" in folders[1]
         # 단수 키(기존 코드 호환)는 APP(첫 항목)과 일치 — 우선순위 4단계 일관성
         assert k["swut_log_folder"] == folders[0]

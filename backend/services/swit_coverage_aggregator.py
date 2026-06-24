@@ -278,10 +278,24 @@ def _extract_template_coverage_rows(ws: Any) -> list[tuple[str, str, Any]]:
     rows: list[tuple[str, str, Any]] = []
     if ws is None:
         return rows
+    # 라운드 102 (2026-06-24) — DV 11열(Component 있음)/PV 10열(Component 없음) 적응.
+    # DV: No=B(2), Component=C(3), Unit ID=D(4), Name=E(5).
+    # PV: No=B(2), Unit ID=C(3), Name=D(4) — Component 없어 한 칸 왼쪽.
+    # 헤더에서 'Component' 라벨 유무로 판정 (writing path has_component_col와 동일 기준).
+    _has_comp = False
+    for _hr in range(1, min(ws.max_row + 1, 12)):
+        for _hc in range(1, min(ws.max_column + 1, 14)):
+            if str(ws.cell(_hr, _hc).value or "").strip() == "Component":
+                _has_comp = True
+                break
+        if _has_comp:
+            break
+    _unit_col = 4 if _has_comp else 3
+    _name_col = 5 if _has_comp else 4
     for row_idx in range(1, ws.max_row + 1):
         no_value = ws.cell(row_idx, 2).value
-        unit_id = str(ws.cell(row_idx, 4).value or "").strip()
-        fn_name = str(ws.cell(row_idx, 5).value or "").strip()
+        unit_id = str(ws.cell(row_idx, _unit_col).value or "").strip()
+        fn_name = str(ws.cell(row_idx, _name_col).value or "").strip()
         if unit_id and fn_name and unit_id.lower() != "total":
             if not isinstance(no_value, int) and len(rows) < 10:
                 continue

@@ -97,6 +97,11 @@ class FunctionCoverage:
     # (예: 'SysOs_Main'). sub_functions: parent module name. c_parser only: 빈 string
     # (fc.file basename로 대체). backward-compat default `""`.
     component_name: str = ""
+    # 2026-06-24 — 소속 VectorCAST 환경명 (예 'SwUT_01_Lib_sha256'). SwUTCV
+    # 4.Coverage 'Component' 열 stamp source. 회사 감사본은 env_name.upper()
+    # (예 SWUT_01_LIB_SHA256)를 환경별 세로병합 — 레퍼런스 직접 비교 확인.
+    # aggregate_session flatten 시 env.env_name 주입. 미주입/비-spec 시 빈 string.
+    env_name: str = ""
 
 
 @dataclass
@@ -221,6 +226,16 @@ def aggregate_session(session: SwUTSession) -> dict[str, Any]:
     function_gap_lines: dict[str, dict[str, list]] = {}  # 2026-06-18 Item 2
 
     for env in session.environments:
+        # 2026-06-24 — flatten 시 각 함수에 소속 환경명 주입 (SwUTCV Component
+        # 환경별 세로병합 source). 각 fc는 정확히 한 env.function_coverage 소속이라
+        # in-place set 안전 (idempotent guard + 신규 top-level str 필드, 빌드별 독립
+        # session). **dataclasses.replace 불가**: SwIT 등은 fc에 setattr로 동적 속성
+        # (swit_function_present / swit_template_no_value 등)을 붙여 aggregate_session을
+        # 통과시키는데, replace는 dataclass 필드만 복사해 이 속성들을 소실시켜 SwIT
+        # 커버리지 'X' 마킹이 깨진다(reviewer Critical#1 권고는 이 이유로 기각). None 방어(or []).
+        for _fc in (env.function_coverage or []):
+            if not getattr(_fc, "env_name", ""):
+                _fc.env_name = env.env_name
         all_functions.extend(env.function_coverage)
         for tc_name, tc_list in env.test_cases.items():
             total += len(tc_list) if tc_list else 1
