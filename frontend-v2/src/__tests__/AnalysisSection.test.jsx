@@ -85,12 +85,18 @@ describe('AnalysisSection', () => {
     expect(screen.getByText('코드 커버리지')).toBeInTheDocument();
   });
 
-  it('"VectorCAST 테스트" 패널 제목을 렌더링한다', () => {
+  it('유닛테스트·통합테스트 패널 제목을 렌더링한다(VectorCAST 분리)', () => {
     // Arrange & Act
     render(<AnalysisSection job={makeJob()} analysisResult={makeAnalysisResult()} />);
 
-    // Assert
-    expect(screen.getByText('VectorCAST 테스트')).toBeInTheDocument();
+    // Assert: VectorCAST 단일 패널 → UT/IT 2개 섹션으로 분리
+    expect(screen.getByText('유닛테스트 (Unit Test · VectorCAST UT)')).toBeInTheDocument();
+    expect(screen.getByText('통합테스트 (Integration Test · VectorCAST IT)')).toBeInTheDocument();
+  });
+
+  it('정적분석(Helix QAC) 패널 제목을 렌더링한다', () => {
+    render(<AnalysisSection job={makeJob()} analysisResult={makeAnalysisResult()} />);
+    expect(screen.getByText('정적분석 (Helix QAC · MISRA-C)')).toBeInTheDocument();
   });
 
   it('"코드 메트릭" 패널 제목을 렌더링한다', () => {
@@ -115,9 +121,9 @@ describe('AnalysisSection', () => {
     // Arrange & Act
     render(<AnalysisSection job={makeJob()} analysisResult={makeAnalysisResult()} />);
 
-    // Assert
+    // Assert: Line Coverage 카드 표시(코드 메트릭 '라인 커버리지'와 85% 중복되므로 getAllByText)
     expect(screen.getByText('Line Coverage')).toBeInTheDocument();
-    expect(screen.getByText('85%')).toBeInTheDocument();
+    expect(screen.getAllByText('85%').length).toBeGreaterThan(0);
   });
 
   it('branch_rate가 있을 때 Branch Coverage 카드를 표시한다', () => {
@@ -254,7 +260,8 @@ describe('AnalysisSection', () => {
 
       expect(screen.getByText('구문(Statement)')).toBeInTheDocument();
       expect(screen.getByText('90%')).toBeInTheDocument();
-      expect(screen.getByText('MC/DC')).toBeInTheDocument();
+      // 'MC/DC'는 설명문(<b>MC/DC</b>)과 covCard 라벨 양쪽에 나오므로 getAllByText
+      expect(screen.getAllByText('MC/DC').length).toBeGreaterThan(0);
     } finally {
       vi.useRealTimers();
     }
@@ -485,6 +492,55 @@ describe('AnalysisSection', () => {
       expect(screen.getByText(/임계\(>15\) 초과/)).toBeInTheDocument();
       expect(screen.queryByText(/X=커버리지\(구문%\)/)).toBeNull();
       expect(screen.getByText(/커버리지가 로드되면 표시됩니다/)).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // ── Jenkins 출처 함수레벨: 함수콜 커버리지 + 모듈→함수 드릴다운 ──
+  const makeRichVcast = () => ({
+    test_rows_count: 100, ut_reports: ['r1'], it_reports: ['r2'],
+    coverage: { statement: { covered: 90, total: 100, rate: 0.9 }, branch: { covered: 40, total: 50, rate: 0.8 }, mcdc: { covered: 8, total: 10, rate: 0.8 } },
+    vcast_summary: {
+      ut_metrics: { entries: [
+        { unit: 'mod_a.c', subprogram: 'fn_a', ccn: 5, statements: { covered: 8, total: 10, rate: 0.8 }, branches: { covered: 2, total: 4, rate: 0.5 } },
+      ], grand_totals: {} },
+      it_metrics: { entries: [
+        { unit: 'mod_b.c', subprogram: 'fn_b', ccn: 3, functions: { covered: 1, total: 1, rate: 1 }, function_calls: { covered: 5, total: 10, rate: 0.5 } },
+      ], grand_totals: { function_calls: { covered: 855, total: 2989, rate: 0.28 }, functions: { covered: 504, total: 1638, rate: 0.3 } } },
+    },
+  });
+
+  it('빌드 vcast 있는 프로젝트는 함수레벨 로드 시 IT 함수콜 커버리지 + 모듈→함수 드릴다운을 표시한다', async () => {
+    vi.useFakeTimers();
+    try {
+      const { post, api } = await import('../api.js');
+      post.mockResolvedValue({ ok: true, job_id: 'jrich' });
+      api.mockResolvedValue({ ok: true, job: { status: 'completed', result: { ok: true, source: 'jenkins', data: makeRichVcast() } } });
+      // 빌드 산출물에 vcast 있음(tester.vectorcast reports) → SCM 경로 없이 '함수레벨 상세 불러오기' 노출
+      const result = makeAnalysisResult({
+        reportData: {
+          coverage: 99,
+          kpis: { coverage: { line_rate: 0.99 }, prqa: {}, code_metrics: { functions: 349 }, vectorcast: { ut: { modules: [{ name: 'mod_a.c', line_rate: 80, branch_rate: 50 }] } }, tests: {}, scan: {}, files: {}, build: {} },
+          tester: { vectorcast: { ut_reports: ['r1'], it_reports: ['r2'], test_rows_count: 100 }, vectorcast_ut_line_rate: 99, vectorcast_it_line_rate: 50 },
+        },
+        matchedScm: { id: 's', name: 'S', linked_docs: {} },
+      });
+      render(<AnalysisSection job={makeJob()} analysisResult={result} />);
+
+      // 빌드 vcast 있으면 SCM 경로 없이도 '함수레벨 상세 불러오기' 버튼
+      const btn = screen.getByRole('button', { name: '함수레벨 상세 불러오기' });
+      await act(async () => { fireEvent.click(btn); await vi.advanceTimersByTimeAsync(3500); });
+
+      // IT 함수콜 커버리지(28%) + 함수 진입(30%) — 통합테스트·코드메트릭 양쪽에 나오므로 getAllByText
+      expect(screen.getAllByText('함수콜 커버리지').length).toBeGreaterThan(0);
+      expect(screen.getAllByText('28%').length).toBeGreaterThan(0);
+      // 출처 배지(Jenkins)
+      expect(screen.getAllByText(/Jenkins 빌드/).length).toBeGreaterThan(0);
+      // 모듈→함수 드릴다운: mod_a.c 행 클릭 → 함수 fn_a 펼침
+      expect(screen.queryByText('fn_a')).toBeNull();
+      fireEvent.click(screen.getByText('mod_a.c'));
+      expect(screen.getByText('fn_a')).toBeInTheDocument();
     } finally {
       vi.useRealTimers();
     }
