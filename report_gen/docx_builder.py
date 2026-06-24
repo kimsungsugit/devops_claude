@@ -2051,24 +2051,51 @@ def generate_uds_docx(
     try:
         import config as _cfg
         _rag_enrich_on = bool(getattr(_cfg, "UDS_RAG_DESC_ENRICH", False))
-        from workflow.rag import KnowledgeBase
-        _kb_dir = Path(os.environ.get("KB_STORE_DIR", "")) if os.environ.get("KB_STORE_DIR") else Path("kb_store")
+        # 절대경로화(CWD 의존 제거, #14) + KB_GLOBAL_DIR 설정 시 get_kb 프로세스 캐시 재사용.
+        _kb_store_env = str(os.environ.get("KB_STORE_DIR") or "").strip()
+        _kb_global = str(getattr(_cfg, "KB_GLOBAL_DIR", "") or "").strip()
+        if _kb_store_env:
+            _kb_dir, _use_cache = Path(_kb_store_env).expanduser().resolve(), False
+        elif _kb_global:
+            _kb_dir, _use_cache = Path(_kb_global).expanduser().resolve(), True
+        else:
+            _kb_dir, _use_cache = Path("kb_store").expanduser().resolve(), False
         if _rag_enrich_on and _kb_dir.exists():
-            _kb = KnowledgeBase(_kb_dir)
+            if _use_cache:
+                from workflow.rag import get_kb
+                # 주(W2): KB_GLOBAL_DIR 설정 시 get_kb 는 인자를 무시하고 KB_GLOBAL_DIR 을
+                # re-resolve(_kb_resolve_base_dir)하므로 같은 캐시 키로 프로세스 캐시 인스턴스를
+                # 재사용한다(_kb_dir == KB_GLOBAL_DIR resolved 라 일치). 문서 간 _load_all 1회.
+                _kb = get_kb(_kb_dir)
+            else:
+                from workflow.rag import KnowledgeBase
+                _kb = KnowledgeBase(_kb_dir)
+            # N× 비용 상한: inference 함수 cap(기본 300) + 동일 query search 메모이즈.
+            _enrich_max = int(getattr(_cfg, "UDS_RAG_ENRICH_MAX_FUNCS", 300) or 300)
+            _search_memo = {}
+            _scanned = 0
             if _kb.data:
                 for fid, info in function_details.items():
                     if not isinstance(info, dict):
                         continue
                     if str(info.get("description_source") or "").strip() != "inference":
                         continue
+                    if _scanned >= _enrich_max:
+                        _logger.info("RAG enrich cap reached (%d funcs) — 나머지 skip", _enrich_max)
+                        break
                     fname = str(info.get("name") or "").strip()
                     proto = str(info.get("prototype") or "").strip()
                     query = f"{fname} {proto}".strip()
                     if not query:
                         continue
-                    results = _kb.search(query, top_k=3, tags=["uds_description", "code"])
-                    if not results:
-                        results = _kb.search(query, top_k=3)
+                    _scanned += 1
+                    if query in _search_memo:
+                        results = _search_memo[query]
+                    else:
+                        results = _kb.search(query, top_k=3, tags=["uds_description", "code"])
+                        if not results:
+                            results = _kb.search(query, top_k=3)
+                        _search_memo[query] = results
                     for r in results:
                         # KB 엔트리는 텍스트를 context/fix/error_clean 에 저장한다
                         # (add_document/_ensure_shape). 과거 text/content 키는 항상 빈값이라
