@@ -255,6 +255,49 @@ def _read_optional_config_file(req_path: str, project_id: str, config_key: str) 
     return resolver.read_bytes(path)
 
 
+def _discover_metric_report_bytes(resolver: Any, log_folders: list[str]) -> list[bytes]:
+    """라운드 102 (2026-06-24) — IT 로그 폴더에서 VectorCAST Metric report HTML 자동 발견.
+
+    SwITCV Functions O/X(커버리지 달성) + Function Called 실측 소스. 회사 PV IT 로그는
+    각 폴더에 `*_Metric_report_*.html`(APP) 또는 `*_IT_*.html`(BOOT, 일반명) 형태로
+    Metrics Report를 둔다(04.MetricsReport 서브폴더 아님). 파일명이 일정치 않아
+    content-detect: .html을 읽어 parse_hmr_html ok 여부로 판별. 폴더당 html 소수라
+    저렴. 실패/부재는 silent(값 정확도 미적용 → 기존 동작 fallback).
+    """
+    import os as _os
+
+    from backend.services.vcast_hmr_parser import parse_hmr_html as _php
+    out: list[bytes] = []
+    # 라운드 102 reviewer X6 — log_folders는 config 순서(APP→BOOT) 결정적이나,
+    # 폴더 내 list_dir 반환 순서는 드라이브/OS 의존(NTFS mtime/SMB 서버순). 폴더당
+    # metric html은 보통 1개라 positional 매칭에 영향 없지만, 다중 html 폴더 대비
+    # 사전순 정렬로 결정성 확보 (동명함수 positional 매칭 안정화).
+    for folder in log_folders or []:
+        try:
+            entries = sorted(resolver.list_dir(folder), key=lambda x: str(x).lower())
+        except Exception:
+            continue
+        for e in entries:
+            # reviewer W1 — basename만 추출해 `..` 등 traversal 토큰 원천 차단
+            # (defense-in-depth; resolver 게이트와 별개 레이어).
+            base = _os.path.basename(str(e).rstrip("\\/").replace("\\", "/"))
+            if not base.lower().endswith((".html", ".htm")):
+                continue
+            full = e if (e.startswith("U:") or e.startswith("/")) else folder.rstrip("\\/") + "\\" + base
+            try:
+                data = resolver.read_bytes(full)
+            except Exception:
+                continue
+            if not data:
+                continue
+            try:
+                if _php(data).ok:
+                    out.append(data)
+            except Exception:
+                continue
+    return out
+
+
 def _resolve_swit_swuds_path(req: "SwITBuildRequest | SwITSitrBuildRequest") -> str:
     """Thin wrapper — 49차 정책 동일 (54차 DRY 통합 → swut_meta_resolver)."""
     return _resolver_resolve_swuds_path(req, req.project_id)
@@ -472,6 +515,14 @@ def _do_swit_coverage_build(req: SwITBuildRequest) -> Response:
     hmr_html_bytes = _resolver_resolve_hmr_html_bytes(
         req, req.project_id, out_warnings=_hmr_warnings,
     )
+    # 라운드 102 (2026-06-24) — IT 로그 폴더의 Metric report HTML 자동 발견 →
+    # Functions O/X(달성) + Function Called 실측 산출 소스 (HMR 명시 path 없어도 동작).
+    _metric_report_bytes = _discover_metric_report_bytes(resolver, log_folders)
+    if _metric_report_bytes:
+        _hmr_warnings.append(
+            f"[swit-cov] Metric report 자동발견 {len(_metric_report_bytes)}건 "
+            "(IT 로그 폴더) — Functions 달성+Function Calls 실측 적용"
+        )
     # 60차 F6-A / 라운드 73 T807: SwITS spec 전체를 Traceability에 활용.
     # SwITCV도 SITR과 동일하게 spec parse 실패 사유를 warnings로 노출한다.
     _swits_warnings: list[str] = []
@@ -482,6 +533,7 @@ def _do_swit_coverage_build(req: SwITBuildRequest) -> Response:
         session, meta, template_bytes, swuds_function_ids=swuds_fn_ids,
         hmr_html_bytes=hmr_html_bytes,
         swits_map=swits_map,
+        hmr_html_bytes_list=_metric_report_bytes or None,
     )
     if _hmr_warnings:
         result.warnings.extend(_hmr_warnings)

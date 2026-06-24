@@ -308,6 +308,7 @@ def _align_function_rows_to_template(
     template_rows: list[tuple[str, str, Any]],
     *,
     out_warnings: list[str] | None = None,
+    hmr_metrics_by_name: dict[str, list[Any]] | None = None,
 ) -> None:
     """Replace aggregate function rows with the template's approved row order.
 
@@ -315,6 +316,13 @@ def _align_function_rows_to_template(
     (2,000+ for KJPDS02).  The SwITCV audit sheet expects one row per approved
     SwUDS/SDS function, in the same order as the company v1.01 workbook.  This
     adapter preserves the template order and stamps O/X from log name matches.
+
+    라운드 102 (2026-06-24) — hmr_metrics_by_name(IT Metric report 파싱 결과,
+    {function_name: [FunctionCallsMetric]}) 제공 시 Functions O/X를 '커버리지
+    달성'(functions_covered>=functions_total)으로, Function Called Count/Total/Pass를
+    실측(covered_calls/total_calls)으로 산출한다. 회사 감사본(레퍼런스) 직접 대조로
+    func_fail=4(SwUFn_1005/1167/3519/3554) 정확 일치 검증. 미제공 시(legacy/HMR
+    부재) 기존 '로그 존재=O + calls 1/1 합성' 동작 보존 (backward-compat).
     """
     if not template_rows:
         return
@@ -325,17 +333,62 @@ def _align_function_rows_to_template(
         by_name.setdefault(_norm_function_name(getattr(fc, "name", "")), []).append(fc)
         by_id.setdefault(_norm_function_name(getattr(fc, "unit_id", "")), []).append(fc)
 
+    # 라운드 102 — metric map을 정규화 키로 재색인 (이름 충돌 시 list 누적).
+    metric_by_norm: dict[str, list[Any]] = {}
+    if hmr_metrics_by_name:
+        for _nm, _ms in hmr_metrics_by_name.items():
+            metric_by_norm.setdefault(_norm_function_name(_nm), []).extend(_ms)
+
     aligned: list[FunctionCoverage] = []
     missing: list[str] = []
+    metric_hit = 0
+    metric_ambiguous = 0
+    name_occurrence: dict[str, int] = {}  # 라운드 102 — 동명함수 positional 매칭용
     matched_fc_ids: set[int] = set()  # 라운드 96-fix W-D — 로그 측 silent drop 추적
     for unit_id, fn_name, no_value in template_rows:
-        candidates = by_name.get(_norm_function_name(fn_name)) or by_id.get(
+        norm_fn = _norm_function_name(fn_name)
+        candidates = by_name.get(norm_fn) or by_id.get(
             _norm_function_name(unit_id),
             [],
         )
         present = bool(candidates)
         if candidates:
             matched_fc_ids.update(id(fc) for fc in candidates)
+
+        # 라운드 102 — Metric report 실측 우선 (Functions 달성 + Function Calls).
+        metric = None
+        m_bucket = metric_by_norm.get(norm_fn)
+        if m_bucket:
+            occ = name_occurrence.get(norm_fn, 0)
+            name_occurrence[norm_fn] = occ + 1
+            if len(m_bucket) == 1:
+                metric = m_bucket[0]
+            else:
+                # 동명함수 멀티-env(예 EEPROM_SetByte APP/BOOT) — positional 매칭:
+                # N번째 template 중복 → N번째 metric(폴더순 APP→BOOT, merge 순서 보존).
+                # template 중복수 == metric bucket수 검증 완료(9/9) → 정확 분리.
+                # 개수 불일치 시 마지막으로 clamp(방어).
+                metric_ambiguous += 1
+                metric = m_bucket[occ] if occ < len(m_bucket) else m_bucket[-1]
+
+        if metric is not None:
+            metric_hit += 1
+            # Functions O/X = 커버리지 달성 (functions_covered>=functions_total).
+            ftot = getattr(metric, "functions_total", 0) or 0
+            fcov = getattr(metric, "functions_covered", 0) or 0
+            achieved = bool(ftot > 0 and fcov >= ftot)
+            present = achieved
+            ctot = getattr(metric, "total_calls", 0) or 0
+            ccov = getattr(metric, "covered_calls", 0) or 0
+            if ctot > 0:
+                calls = CoverageStats(
+                    covered=ccov, total=ctot, coverage_pct=ccov / ctot,
+                )
+            else:
+                # call 없는 leaf 함수 — 빈 CoverageStats (writer가 stamp skip).
+                calls = CoverageStats()
+        elif candidates:
+            # legacy(HMR 미제공) — 로그 존재 기반 + 기존 1/1 합성 보존.
             best = max(
                 candidates,
                 key=lambda fc: getattr(getattr(fc, "function_calls_coverage", None), "total", 0),
@@ -357,6 +410,14 @@ def _align_function_rows_to_template(
         setattr(fc, "swit_template_no_value", no_value)
         setattr(fc, "swit_function_present", present)
         aligned.append(fc)
+
+    if out_warnings is not None and hmr_metrics_by_name:
+        out_warnings.append(
+            f"[swit-cov] 라운드 102 — Metric report 실측 적용: {metric_hit}/{len(template_rows)} "
+            f"함수 매칭 (Functions 달성 O/X + Function Calls 실측). "
+            f"동명함수 멀티-env {metric_ambiguous}건"
+            f"(positional: N번째 template 중복 → N번째 metric, 폴더순 APP→BOOT)."
+        )
 
     agg["function_rows"] = aligned
     agg["function_count"] = len(aligned)
@@ -502,6 +563,7 @@ def build_swit_coverage_report(
     swuds_function_ids: set[str] | None = None,
     hmr_html_bytes: bytes | None = None,
     swits_map: dict[str, Any] | None = None,
+    hmr_html_bytes_list: list[bytes] | None = None,
 ) -> SwitCoverageBuildResult:
     """SwIT Coverage Report v2.02 xlsx 생성.
 
@@ -641,9 +703,36 @@ def build_swit_coverage_report(
             )
             agg["function_rows"] = new_function_rows
 
+    # 라운드 102 (2026-06-24) — 멀티 Metric report(APP+BOOT IT) 파싱·병합 →
+    # _align에 전달해 Functions O/X(달성)+Function Calls 실측 산출. hmr_html_bytes_list
+    # (router 자동발견) 우선, 단일 hmr_html_bytes도 합산. metrics_by_name은 함수명별
+    # list라 dict merge 시 bucket extend (동명함수 멀티-env 보존).
+    merged_metrics_by_name: dict[str, list[Any]] = {}
+    _metric_sources: list[bytes] = []
+    if hmr_html_bytes_list:
+        _metric_sources.extend(b for b in hmr_html_bytes_list if b)
+    if hmr_html_bytes and hmr_html_bytes not in _metric_sources:
+        _metric_sources.append(hmr_html_bytes)
+    if _metric_sources:
+        from backend.services.vcast_hmr_parser import parse_hmr_html as _php
+        _ok_n = 0
+        for _src in _metric_sources:
+            _pw: list[str] = []
+            _res = _php(_src, parse_warnings=_pw)
+            if _res.ok:
+                _ok_n += 1
+                for _nm, _ms in _res.metrics_by_name.items():
+                    merged_metrics_by_name.setdefault(_nm, []).extend(_ms)
+        if merged_metrics_by_name:
+            warnings.append(
+                f"[swit-cov] 라운드 102 — Metric report {_ok_n}/{len(_metric_sources)}건 파싱, "
+                f"고유 함수 {len(merged_metrics_by_name)}개 (Functions 달성+Function Calls 실측 소스)"
+            )
+
     # 30차 W21 + 31차 W29 + 라운드 84 T1801 + 85 T1903 + 86 T2001: unmapped fc list.
     _align_function_rows_to_template(
         agg, coverage_template_rows, out_warnings=warnings,
+        hmr_metrics_by_name=merged_metrics_by_name or None,
     )
 
     asil_distribution, ids_by_asil, unmapped_fns = _compute_asil_distribution(
