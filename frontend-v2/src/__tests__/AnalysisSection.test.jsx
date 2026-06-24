@@ -398,7 +398,7 @@ describe('AnalysisSection', () => {
     },
   });
 
-  it('커버리지가 join되면 산포도가 기본 활성화되고 高복잡·低커버 함수를 위험으로 분류한다', async () => {
+  it('커버리지가 join되면 막대와 산포도를 한 화면에 나란히 표시하고 위험/양호를 분류한다', async () => {
     vi.useFakeTimers();
     try {
       const { post, api } = await import('../api.js');
@@ -415,22 +415,51 @@ describe('AnalysisSection', () => {
         await vi.advanceTimersByTimeAsync(3500);
       });
 
-      // 산포도 토글 존재 + 기본 산포도 뷰(축 설명/범례) + 위험1·양호1 분류
-      expect(screen.getByRole('button', { name: '산포도' })).toBeEnabled();
+      // 막대(임계 초과 요약)와 산포도(축 설명/범례)가 토글 없이 동시에 표시
+      expect(screen.getByText('구간별 함수 수 (막대)')).toBeInTheDocument();
+      expect(screen.getByText('복잡도 × 커버리지 (산포도)')).toBeInTheDocument();
+      expect(screen.getByText(/임계\(>15\) 초과/)).toBeInTheDocument();
       expect(screen.getByText(/X=커버리지\(구문%\)/)).toBeInTheDocument();
       expect(screen.getByText(/위험 1/)).toBeInTheDocument();
       expect(screen.getByText(/양호 1/)).toBeInTheDocument();
-
-      // '막대'로 전환하면 분포 버킷이 보인다(산포도 범례는 사라짐)
-      fireEvent.click(screen.getByRole('button', { name: '막대' }));
-      expect(screen.queryByText(/X=커버리지\(구문%\)/)).toBeNull();
-      expect(screen.getByText(/임계\(>15\) 초과/)).toBeInTheDocument();
+      // 토글 버튼은 더 이상 존재하지 않음
+      expect(screen.queryByRole('button', { name: '산포도' })).toBeNull();
     } finally {
       vi.useRealTimers();
     }
   });
 
-  it('커버리지(vcast_summary)가 없으면 산포도 버튼이 비활성이고 막대 분포로 폴백한다', async () => {
+  it('산포도 포인트에 마우스를 올리면 함수명 툴팁이 뜨고 벗어나면 사라진다', async () => {
+    vi.useFakeTimers();
+    try {
+      const { post, api } = await import('../api.js');
+      post.mockResolvedValue({ ok: true, job_id: 'jtip' });
+      api.mockResolvedValue({
+        ok: true,
+        job: { status: 'completed', result: { ok: true, source: 'cloudium', data: makeVcastWithComplexity() } },
+      });
+      const result = makeAnalysisResult({ matchedScm: { id: 's', name: 'S', linked_docs: { vectorcast: ['U:/vc'] } } });
+      render(<AnalysisSection job={makeJob()} analysisResult={result} />);
+
+      await act(async () => {
+        fireEvent.click(screen.getByText('SCM 경로에서 불러오기'));
+        await vi.advanceTimersByTimeAsync(3500);
+      });
+
+      // hover 전엔 툴팁 없음 → 첫 포인트(=risky_fn) hover 시 함수명 툴팁 → leave 시 제거
+      expect(screen.queryByTestId('scatter-tooltip')).toBeNull();
+      const circles = document.querySelectorAll('svg circle');
+      expect(circles.length).toBeGreaterThan(0);
+      fireEvent.mouseEnter(circles[0]);
+      expect(screen.getByTestId('scatter-tooltip')).toHaveTextContent('risky_fn');
+      fireEvent.mouseLeave(circles[0]);
+      expect(screen.queryByTestId('scatter-tooltip')).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('커버리지(vcast_summary)가 없으면 산포도 대신 안내를 띄우고 막대 분포만 표시한다', async () => {
     vi.useFakeTimers();
     try {
       const { post, api } = await import('../api.js');
@@ -451,10 +480,11 @@ describe('AnalysisSection', () => {
         await vi.advanceTimersByTimeAsync(3500);
       });
 
-      // 산포도 버튼 비활성 + 막대 분포(임계 초과 요약) 표시
-      expect(screen.getByRole('button', { name: '산포도' })).toBeDisabled();
-      expect(screen.queryByText(/X=커버리지\(구문%\)/)).toBeNull();
+      // 막대 분포(임계 초과 요약)는 보이고, 산포도는 미표시 + 안내 문구 표시
+      expect(screen.getByText('구간별 함수 수 (막대)')).toBeInTheDocument();
       expect(screen.getByText(/임계\(>15\) 초과/)).toBeInTheDocument();
+      expect(screen.queryByText(/X=커버리지\(구문%\)/)).toBeNull();
+      expect(screen.getByText(/커버리지가 로드되면 표시됩니다/)).toBeInTheDocument();
     } finally {
       vi.useRealTimers();
     }

@@ -29,6 +29,7 @@ function ccOf(r) {
 // MC/DC 보강 1순위 사분면(음영). 단일 변수 막대 분포가 못 보여주는 '복잡한데 안 짜인 테스트'를 한눈에.
 // 외부 차트 라이브러리 없이 순수 SVG(프로젝트 규칙: 막대 분포도 div로 그림). props는 join 완료된 points.
 function ComplexityScatter({ points, naCount, yMax, threshold }) {
+  const [hover, setHover] = useState(null);   // 마우스 올린 포인트 { p, x, y } | null
   const W = 480, H = 200, ML = 36, MR = 12, MT = 12, MB = 26;
   const pw = W - ML - MR, ph = H - MT - MB;
   const ym = yMax || 1;
@@ -39,9 +40,9 @@ function ComplexityScatter({ points, naCount, yMax, threshold }) {
   const counts = { danger: 0, warning: 0, success: 0 };
   for (const p of points) counts[p.tone] = (counts[p.tone] || 0) + 1;
   return (
-    <div>
+    <div style={{ position: 'relative' }}>
       <svg viewBox={`0 0 ${W} ${H}`} width="100%" role="img" aria-label="복잡도-커버리지 산포도"
-        style={{ maxHeight: 240, display: 'block' }}>
+        style={{ maxHeight: 240, display: 'block', overflow: 'visible' }}>
         {/* 위험 사분면(高복잡·低커버) 음영 */}
         <rect x={ML} y={MT} width={Math.max(0, x80 - ML)} height={Math.max(0, thY - MT)}
           fill="var(--color-danger)" opacity="0.07" />
@@ -62,11 +63,14 @@ function ComplexityScatter({ points, naCount, yMax, threshold }) {
           // 정수 격자 과겹침 완화용 결정적 지터(±, Math.random 미사용 → 안정 렌더)
           const jx = (((i * 73) % 5) - 2) * 0.6;
           const jy = (((i * 37) % 5) - 2) * 0.6;
+          const isHover = hover?.p === p;
           return (
-            <circle key={i} cx={xOf(p.cov) + jx} cy={yOf(p.cc) + jy} r="2.4"
-              fill={`var(--color-${p.tone})`} fillOpacity="0.55">
-              <title>{`${p.fn}\n${p.file}\nCC ${p.cc} · 구문 ${p.cov}%${p.br != null ? ` · 분기 ${p.br}%` : ''}${p.mc != null ? ` · MC/DC ${p.mc}%` : ''}`}</title>
-            </circle>
+            <circle key={i} cx={xOf(p.cov) + jx} cy={yOf(p.cc) + jy} r={isHover ? 4.5 : 3}
+              fill={`var(--color-${p.tone})`} fillOpacity={isHover ? 0.95 : 0.6}
+              stroke={isHover ? 'var(--text, #111)' : 'none'} strokeWidth={isHover ? 0.8 : 0}
+              style={{ cursor: 'pointer' }}
+              onMouseEnter={(e) => setHover({ p, x: e.clientX, y: e.clientY })}
+              onMouseLeave={() => setHover(null)} />
           );
         })}
       </svg>
@@ -77,6 +81,17 @@ function ComplexityScatter({ points, naCount, yMax, threshold }) {
         <span style={{ color: 'var(--color-success)', fontWeight: 600 }}>● 양호 {counts.success}</span>
         {naCount > 0 && <span>커버리지 미상 {naCount}(산포 제외)</span>}
       </div>
+      {hover && (
+        <div data-testid="scatter-tooltip" style={{ position: 'fixed', left: hover.x + 12, top: hover.y + 12,
+          zIndex: 50, pointerEvents: 'none', maxWidth: 260, padding: '6px 8px', fontSize: 11,
+          background: 'var(--panel, #fff)', border: '1px solid var(--border)', borderRadius: 6,
+          boxShadow: '0 2px 8px rgba(0,0,0,0.18)' }}>
+          <div style={{ fontWeight: 700, fontFamily: 'monospace', wordBreak: 'break-all' }}>{hover.p.fn}</div>
+          <div className="text-muted" style={{ fontSize: 10, wordBreak: 'break-all', marginBottom: 2 }}>{hover.p.file}</div>
+          <div>복잡도 <b style={{ color: `var(--color-${hover.p.tone})` }}>{hover.p.cc}</b> · 구문 {hover.p.cov}%
+            {hover.p.br != null ? ` · 분기 ${hover.p.br}%` : ''}{hover.p.mc != null ? ` · MC/DC ${hover.p.mc}%` : ''}</div>
+        </div>
+      )}
     </div>
   );
 }
@@ -121,7 +136,6 @@ export default function AnalysisSection({ job, analysisResult }) {
   const [complexityLoading, setComplexityLoading] = useState(false);
   const [compSort, setCompSort] = useState('complexity');
   const [compFilter, setCompFilter] = useState('');
-  const [compView, setCompView] = useState('scatter');   // 복잡도 분포 뷰 토글: 'dist'(막대) | 'scatter'(산포도)
   // SCM 등록 VectorCAST 경로 지연 로드(빌드 산출물에 결과가 없을 때). 무거운 cloudium 폴더
   // 파싱(~100s)이라 analyze 임계경로에 넣지 않고 사용자 명시 클릭 시에만 /report/vectorcast-rag
   // (build→cloudium 폴백 내장)를 호출한다.
@@ -408,8 +422,6 @@ export default function AnalysisSection({ job, analysisResult }) {
   }, [rows, scmVcast, threshold]);
 
   const scatterAvailable = compScatter.points.length > 0;
-  // 기본은 산포도(추천 뷰)지만 커버리지 join이 비면 막대로 폴백하고 산포도 버튼은 비활성.
-  const compEffView = (compView === 'scatter' && scatterAvailable) ? 'scatter' : 'dist';
 
   return (
     <div>
@@ -719,29 +731,9 @@ export default function AnalysisSection({ job, analysisResult }) {
         {rows.length > 0 ? (
           <>
             {compDist && (
-              <div style={{ marginBottom: 10, padding: 10, background: 'var(--bg)', borderRadius: 6 }}>
+              <div style={{ marginBottom: 10 }}>
                 <div className="row" style={{ justifyContent: 'space-between', marginBottom: 8, flexWrap: 'wrap', gap: 6 }}>
-                  <div className="row" style={{ gap: 8, alignItems: 'center' }}>
-                    <span className="text-sm" style={{ fontWeight: 600 }}>복잡도 분포</span>
-                    <div className="row" style={{ gap: 4 }}>
-                      {[['dist', '막대'], ['scatter', '산포도']].map(([v, label]) => {
-                        const active = compEffView === v;
-                        const disabled = v === 'scatter' && !scatterAvailable;
-                        return (
-                          <button key={v} type="button" onClick={() => setCompView(v)} disabled={disabled}
-                            title={disabled ? '커버리지가 로드되면 활성화됩니다 (위 \'SCM 경로에서 불러오기\')' : undefined}
-                            style={{ padding: '2px 9px', fontSize: 11, fontWeight: 600,
-                              cursor: disabled ? 'not-allowed' : 'pointer', borderRadius: 6,
-                              border: `1px solid ${active ? 'var(--color-primary, #2563eb)' : 'var(--border)'}`,
-                              background: active ? 'var(--color-primary, #2563eb)' : 'transparent',
-                              color: active ? '#fff' : (disabled ? 'var(--text-muted)' : 'inherit'),
-                              opacity: disabled ? 0.5 : 1 }}>
-                            {label}
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </div>
+                  <span className="text-sm" style={{ fontWeight: 600 }}>복잡도 분포</span>
                   <span className="text-sm text-muted">
                     함수 {compDist.total.toLocaleString()} · 최대 {compDist.max} · 평균 {compDist.avg.toFixed(1)} ·{' '}
                     <span style={{ color: compDist.over > 0 ? 'var(--color-danger)' : 'var(--color-success)', fontWeight: 600 }}>
@@ -749,26 +741,39 @@ export default function AnalysisSection({ job, analysisResult }) {
                     </span>
                   </span>
                 </div>
-                {compEffView === 'scatter' ? (
-                  <ComplexityScatter points={compScatter.points} naCount={compScatter.naCount}
-                    yMax={compScatter.yMax} threshold={threshold} />
-                ) : (
-                  <div style={{ display: 'flex', alignItems: 'flex-end', gap: 6, height: 92 }}>
-                    {compDist.buckets.map((b, i) => {
-                      const h = Math.round((b.count / compDist.maxCount) * 72);
-                      const col = `var(--color-${b.tone})`;
-                      const pct = compDist.total ? Math.round((b.count / compDist.total) * 100) : 0;
-                      return (
-                        <div key={i} title={`${b.label}: ${b.count}개 (${pct}%)`}
-                          style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'flex-end', height: '100%' }}>
-                          <div style={{ fontSize: 10, fontWeight: 700, color: b.count ? col : 'var(--text-muted)', marginBottom: 2 }}>{b.count}</div>
-                          <div style={{ width: '100%', height: Math.max(b.count ? 3 : 0, h), background: col, opacity: b.count ? 1 : 0.18, borderRadius: '3px 3px 0 0' }} />
-                          <div style={{ fontSize: 9, color: 'var(--text-muted)', marginTop: 3, whiteSpace: 'nowrap' }}>{b.label}</div>
-                        </div>
-                      );
-                    })}
+                {/* 막대(좌)·산포도(우) 한 화면 — auto-fit으로 좁으면 세로 적층(인라인 grid가 미디어쿼리 덮어쓰는 문제 회피) */}
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))', gap: 10 }}>
+                  <div style={{ padding: 10, background: 'var(--bg)', borderRadius: 6 }}>
+                    <div className="text-sm" style={{ fontWeight: 600, marginBottom: 8 }}>구간별 함수 수 (막대)</div>
+                    <div style={{ display: 'flex', alignItems: 'flex-end', gap: 6, height: 92 }}>
+                      {compDist.buckets.map((b, i) => {
+                        const h = Math.round((b.count / compDist.maxCount) * 72);
+                        const col = `var(--color-${b.tone})`;
+                        const pct = compDist.total ? Math.round((b.count / compDist.total) * 100) : 0;
+                        return (
+                          <div key={i} title={`${b.label}: ${b.count}개 (${pct}%)`}
+                            style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'flex-end', height: '100%' }}>
+                            <div style={{ fontSize: 10, fontWeight: 700, color: b.count ? col : 'var(--text-muted)', marginBottom: 2 }}>{b.count}</div>
+                            <div style={{ width: '100%', height: Math.max(b.count ? 3 : 0, h), background: col, opacity: b.count ? 1 : 0.18, borderRadius: '3px 3px 0 0' }} />
+                            <div style={{ fontSize: 9, color: 'var(--text-muted)', marginTop: 3, whiteSpace: 'nowrap' }}>{b.label}</div>
+                          </div>
+                        );
+                      })}
+                    </div>
                   </div>
-                )}
+                  <div style={{ padding: 10, background: 'var(--bg)', borderRadius: 6 }}>
+                    <div className="text-sm" style={{ fontWeight: 600, marginBottom: 8 }}>복잡도 × 커버리지 (산포도)</div>
+                    {scatterAvailable ? (
+                      <ComplexityScatter points={compScatter.points} naCount={compScatter.naCount}
+                        yMax={compScatter.yMax} threshold={threshold} />
+                    ) : (
+                      <div className="text-sm text-muted" style={{ padding: 8, lineHeight: 1.5 }}>
+                        커버리지가 로드되면 표시됩니다 — 위 ‘VectorCAST 테스트’의 ‘SCM 경로에서 불러오기’를 누르면
+                        함수별 복잡도×커버리지가 산포도로 나타납니다.
+                      </div>
+                    )}
+                  </div>
+                </div>
               </div>
             )}
             <div className="row" style={{ gap: 8, marginBottom: 8, flexWrap: 'wrap' }}>
