@@ -371,6 +371,7 @@ def _align_function_rows_to_template(
                 metric_ambiguous += 1
                 metric = m_bucket[occ] if occ < len(m_bucket) else m_bucket[-1]
 
+        calls_na = False  # 라운드 102 — Function Call 없는 leaf vacuous-pass 표식
         if metric is not None:
             metric_hit += 1
             # Functions O/X = 커버리지 달성 (functions_covered>=functions_total).
@@ -385,8 +386,11 @@ def _align_function_rows_to_template(
                     covered=ccov, total=ctot, coverage_pct=ccov / ctot,
                 )
             else:
-                # call 없는 leaf 함수 — 빈 CoverageStats (writer가 stamp skip).
+                # call 없는 leaf 함수 — 빈 CoverageStats (Count/Total 공백) + vacuous
+                # pass 표식(swit_calls_na). writer가 Pass열 'O'(검증할 호출 없음=합격).
+                # 라운드 102 — REF는 호출없는 함수도 Function Called Pass='O'.
                 calls = CoverageStats()
+                calls_na = True
         elif candidates:
             # legacy(HMR 미제공) — 로그 존재 기반 + 기존 1/1 합성 보존.
             best = max(
@@ -409,6 +413,7 @@ def _align_function_rows_to_template(
         )
         setattr(fc, "swit_template_no_value", no_value)
         setattr(fc, "swit_function_present", present)
+        setattr(fc, "swit_calls_na", calls_na)
         aligned.append(fc)
 
     if out_warnings is not None and hmr_metrics_by_name:
@@ -534,7 +539,11 @@ def _write_sds_swits_consistency_template(
             safe_write(ws, row_idx, 6, existing_exception)
             preserved += 1
         else:
-            safe_write(ws, row_idx, 6, "X")
+            # 라운드 102 (2026-06-24) — Exception(F열) default 공백 (회사 감사본 정합).
+            # 기존 'X'는 회사본(공백)과 불일치 + F121=COUNTIF(F,"O") 집계에 무의미한
+            # 노이즈. reviewer가 정당화 시 'O' 수기 기재(template_annotations 보존).
+            # 라운드96 W#5(미달 Exception 자동승인 금지) 정책과도 일관.
+            safe_write(ws, row_idx, 6, "")
         if existing_note not in (None, ""):
             safe_write(ws, row_idx, 7, existing_note)
         else:
@@ -871,20 +880,29 @@ def build_swit_coverage_report(
     summary["template_sha256_12"] = template_sha256_12
     summary["build_timestamp"] = meta.build_timestamp
 
-    # 라운드 87 fix: AuditLog 시트 추가 (SwUT Coverage 대칭, 라운드 83 누락분).
+    # 라운드 102 (2026-06-24) — AuditLog 시트 미생성 (회사 감사본 정합).
+    # 라운드 87이 SwUT 대칭으로 추가했으나 회사 SwITCV 양식엔 AuditLog 시트 자체가
+    # 없음(레퍼런스 직접 대조). 다운스트림(swit_comprehensive _load_workbook_summary는
+    # 4.Coverage만 read / swreport 미참조)이 content 미사용이라 제거 안전. 빌드 후
+    # 잔존 시 삭제(템플릿이 보유한 경우 대비). summary 키는 방어적으로 False/0 유지
+    # (router/frontend가 읽어도 KeyError 방지).
+    summary["audit_log_rows_written"] = 0
+    summary["audit_log_sheet_added"] = False
+    if "AuditLog" in wb.sheetnames:
+        try:
+            del wb["AuditLog"]
+        except Exception:  # pragma: no cover
+            pass
+
+    # 라운드 102 — 요약블록(4.Coverage r5/r6, 1.Test Summary r13, 3.Consistency
+    # D4~D8)은 템플릿 수식 그대로 보존(레퍼런스와 동일 수식). openpyxl은 수식을
+    # 계산/캐시 안 해 cached=None이나, fullCalcOnLoad로 Excel/뷰어가 열 때 자동
+    # 재계산해 채운다. literal stamp 대신 수식 유지가 W#5 정합(Exception 수기 입력 시
+    # Coverage 자동 갱신) + 데이터행 변동 자동 반영.
     try:
-        from backend.services.swut_coverage_aggregator import _write_audit_log_sheet
-        if "AuditLog" not in wb.sheetnames:
-            audit_ws = wb.create_sheet("AuditLog")
-            n_audit = _write_audit_log_sheet(
-                audit_ws, meta, summary, agg, session, warnings,
-            )
-            summary["audit_log_rows_written"] = n_audit
-            summary["audit_log_sheet_added"] = True
-    except Exception as _e:  # pragma: no cover
-        warnings.append(
-            f"AuditLog 시트 작성 실패 (산출물 영향 0): {type(_e).__name__}: {str(_e)[:80]}"
-        )
+        wb.calculation.fullCalcOnLoad = True
+    except Exception:  # pragma: no cover — openpyxl 버전 차 방어
+        pass
 
     # 14차 W1: BytesIO 그대로 result에 저장.
     out = io.BytesIO()

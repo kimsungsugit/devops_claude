@@ -1014,6 +1014,13 @@ def _write_coverage_sheet(
                                 ws, r, _note_col,
                                 hint="Function Call 미달 사유 (Exception 결정 근거)",
                             )
+                elif getattr(fc, "swit_calls_na", False):
+                    # 라운드 102 (2026-06-24) — Function Call이 없는 leaf 함수는 Pass열에
+                    # 'O'(vacuous pass — 검증할 호출 없음 = 합격). Count/Total은 공백 유지.
+                    # 회사 감사본 정합: REF는 호출없는 425행도 Function Called Pass='O'.
+                    # swit_calls_na는 _align이 Metric 확인 + total_calls==0일 때만 set →
+                    # metric 미수집(blank 유지)과 명확히 구분. legacy 경로 무영향.
+                    safe_write(ws, r, fcalls_count_col + 2, "O")
         else:
             # SwUTCV / HDPDM01 — Statement + Branch metric
             if is_c_parser_only:

@@ -8,8 +8,8 @@ fallback 위주.
 from __future__ import annotations
 
 import io
-from pathlib import Path
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import openpyxl
@@ -23,7 +23,11 @@ from backend.services.swit_coverage_aggregator import (  # noqa: E402
 )
 from backend.services.swit_meta import SwitCoverageBuildMeta  # noqa: E402
 from backend.services.swut_input_adapter import (  # noqa: E402
-    CoverageStats, EnvironmentData, ExecutionRow, FunctionCoverage, SwUTSession,
+    CoverageStats,
+    EnvironmentData,
+    ExecutionRow,
+    FunctionCoverage,
+    SwUTSession,
 )
 
 
@@ -354,9 +358,12 @@ class TestSwitSwitsConsistency:
         out_wb = openpyxl.load_workbook(io.BytesIO(result.xlsx_bytes))
         out_cons = out_wb["3.Consistency"]
         assert out_cons.cell(11, 5).value == "O"
+        # row 11: 템플릿에 미리 기재된 Exception 'X' + note는 preserved (reviewer 수기).
         assert out_cons.cell(11, 6).value == "X"
         assert out_cons.cell(11, 7).value == "Legacy exception note"
-        assert out_cons.cell(12, 6).value == "X"
+        # 라운드 102 — row 12(미주석 default)는 Exception 공백 (회사 감사본 정합).
+        # 기존 'X' 강제 기재 제거: F121=COUNTIF(F,"O") 집계 무의미 + REF 공백.
+        assert out_cons.cell(12, 6).value in (None, "")
         assert out_cons.cell(12, 7).value in (None, "")
         assert any("exception annotations preserved" in w for w in result.warnings)
 
@@ -573,7 +580,8 @@ class TestSwutBuilderV202InspectFix54:
     def test_swut_coverage_with_v202_template_fills_sw_version(self):
         """SwUT 빌더에 v2.02 template 입력 → SW Version cell 자동 채움."""
         from backend.services.swut_coverage_aggregator import (
-            CoverageBuildMeta, build_coverage_report,
+            CoverageBuildMeta,
+            build_coverage_report,
         )
         meta = CoverageBuildMeta(
             project_id="HDPDM01",
@@ -595,7 +603,8 @@ class TestSwutBuilderV202InspectFix54:
     def test_swut_coverage_with_v301_template_backward_compat(self):
         """SwUT 기존 v3.01 양식도 정상 채움 — fallback_to_v301."""
         from backend.services.swut_coverage_aggregator import (
-            CoverageBuildMeta, build_coverage_report,
+            CoverageBuildMeta,
+            build_coverage_report,
         )
         meta = CoverageBuildMeta(
             project_id="HDPDM01",
@@ -886,10 +895,12 @@ class TestF7StageR3N7IsSwitCallerBranch:
         """build_coverage_report (SwUT) default is_swit_caller=False → SwUT 분기.
         회사 표준 v1.01 양식 (coverage_metric_kind=function_and_calls + has_component_col)
         에서도 SwUT은 Statement+Branch stamp."""
-        from backend.services.swut_coverage_aggregator import (
-            build_coverage_report, CoverageBuildMeta,
-        )
         from openpyxl import load_workbook
+
+        from backend.services.swut_coverage_aggregator import (
+            CoverageBuildMeta,
+            build_coverage_report,
+        )
         template = self._build_company_standard_swit_layout_template()
         meta = CoverageBuildMeta(
             project_id="HDPDM01", release_sw_version="2.02",
@@ -933,7 +944,8 @@ class TestAlignDroppedFunctionWarning:
 
     def test_designed_dropped_function_warned(self):
         from backend.services.swut_input_adapter import (
-            CoverageStats, FunctionCoverage,
+            CoverageStats,
+            FunctionCoverage,
         )
         matched = FunctionCoverage(
             unit_id="", name="main",
@@ -959,7 +971,8 @@ class TestAlignDroppedFunctionWarning:
 
     def test_no_dropped_no_warning(self):
         from backend.services.swut_input_adapter import (
-            CoverageStats, FunctionCoverage,
+            CoverageStats,
+            FunctionCoverage,
         )
         matched = FunctionCoverage(
             unit_id="", name="main",
