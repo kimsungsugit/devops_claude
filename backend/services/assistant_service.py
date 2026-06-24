@@ -22,6 +22,7 @@ from backend.mcp import (
 from backend.services.chat_approval_store import save_pending_approval
 from backend.services.files import list_log_candidates, parse_coverage_xml
 from backend.services.jenkins_helpers import _job_slug
+from backend.services.paths import is_under_any, safe_resolve_under
 from workflow.ai import agent_call, load_oai_config, load_oai_configs
 from workflow.chat_graph import emit_graph_event, new_chat_graph_state, run_chat_graph
 
@@ -779,6 +780,22 @@ def _is_informational_question(text: str) -> bool:
     return has_info and not has_imperative
 
 
+# 위험 토큰: 영문은 단어경계 매칭(edit⊂editor/credit, push⊂pushed, commit⊂committed,
+# write⊂rewrite 등 substring 오탐 차단), 한글은 substring.
+_RISKY_EN_TOKENS = ("write", "patch", "edit", "modify", "commit", "push", "rerun", "deploy", "publish")
+_RISKY_KO_TOKENS = ("수정", "패치", "커밋", "푸시", "재실행", "배포", "업로드")
+_RISKY_EN_RE = re.compile(r"(?<![a-z])(" + "|".join(_RISKY_EN_TOKENS) + r")(?![a-z])", re.IGNORECASE)
+
+
+def _match_risky_tokens(text: str) -> set:
+    """text 에서 발견된 위험 토큰 집합(영문 단어경계 + 한글 substring)."""
+    found = {m.group(1).lower() for m in _RISKY_EN_RE.finditer(text or "")}
+    for ko in _RISKY_KO_TOKENS:
+        if ko in (text or ""):
+            found.add(ko)
+    return found
+
+
 def _build_approval_request(
     *,
     question: str,
@@ -793,11 +810,8 @@ def _build_approval_request(
 
     force_probe = bool((ui_context or {}).get("force_approval"))
     text = str(question or "").lower()
-    risky_keywords = (
-        "write", "patch", "edit", "modify", "commit", "push", "rerun", "deploy", "publish",
-        "수정", "패치", "커밋", "푸시", "재실행", "배포", "업로드",
-    )
-    if not force_probe and not any(token in text for token in risky_keywords):
+    risky = _match_risky_tokens(text)
+    if not force_probe and not risky:
         return None
     # false positive 억제: "수정 방법/어떻게 ~?" 같은 정보성 질문은 실행 요청이 아니다.
     # 챗은 비실행(RAG-then-generate, 함수콜 아님)이므로 명령형 marker 없는 정보성
@@ -811,15 +825,15 @@ def _build_approval_request(
     action_type = "write_file"
     tool_name = "pending_mutation"
     risk_level = "medium"
-    if any(token in text for token in ("deploy", "publish", "배포", "업로드")):
+    if risky & {"deploy", "publish", "배포", "업로드"}:
         action_type = "publish_report"
         tool_name = "publish_reports"
         risk_level = "high"
-    elif any(token in text for token in ("rerun", "재실행")):
+    elif risky & {"rerun", "재실행"}:
         action_type = "trigger_jenkins"
         tool_name = "sync_jenkins"
         risk_level = "medium"
-    elif any(token in text for token in ("commit", "push", "커밋", "푸시")):
+    elif risky & {"commit", "push", "커밋", "푸시"}:
         action_type = "git_operation"
         tool_name = "git_commit"
         risk_level = "high"
@@ -838,6 +852,78 @@ def _build_approval_request(
     }
 
 
+def _trusted_base_roots() -> List[Path]:
+    """챗 컨텍스트 수집이 파일을 읽어도 되는 신뢰 베이스 디렉토리 집합.
+
+    report_dir / project_root / oai_config_path 등 사용자 제어 경로를 이 루트들
+    하위로만 confine 한다(path traversal/임의 파일 읽기 차단). jenkins.py 의
+    is_under_any fail-closed 패턴과 동일.
+    """
+    try:
+        repo_root = Path(config.__file__).resolve().parent
+    except Exception:
+        repo_root = Path.cwd().resolve()
+    roots: List[Path] = [repo_root]
+
+    def _add(p: Any) -> None:
+        if not p:
+            return
+        try:
+            roots.append(Path(str(p)).expanduser().resolve())
+        except Exception:
+            pass
+
+    _add(getattr(config, "DEFAULT_PROJECT_ROOT", None))
+    # 리포트 디렉토리(상대면 repo 와 CWD 양쪽 — 코드베이스의 CWD split-brain 대응)
+    rd = getattr(config, "DEFAULT_REPORT_DIR", "reports")
+    try:
+        rdp = Path(rd)
+        if rdp.is_absolute():
+            roots.append(rdp.resolve())
+        else:
+            roots.append((repo_root / rdp).resolve())
+            roots.append(rdp.resolve())  # CWD 기준(_resolve_report_dir session 분기와 정합)
+    except Exception:
+        pass
+    for jr in (getattr(config, "JENKINS_SERVER_ROOTS", []) or []):
+        _add(jr)
+
+    seen: set = set()
+    out: List[Path] = []
+    for r in roots:
+        key = str(r)
+        if key not in seen:
+            seen.add(key)
+            out.append(r)
+    return out
+
+
+def _confine_path(raw: Optional[str], *, extra_roots: Optional[List[Path]] = None) -> Optional[Path]:
+    """raw 경로를 신뢰 루트 하위로 confine. 벗어나면 None(fail-closed)."""
+    if not raw:
+        return None
+    try:
+        p = Path(str(raw)).expanduser().resolve()
+    except Exception:
+        return None
+    roots = _trusted_base_roots()
+    if extra_roots:
+        roots = roots + list(extra_roots)
+    return p if is_under_any(p, roots) else None
+
+
+def _safe_project_root(ui_context: Optional[Dict[str, Any]]) -> str:
+    """ui_context.project_root 를 신뢰 루트 하위로만 허용. 벗어나면 안전 기본값으로 강등."""
+    raw = str(((ui_context or {}).get("project_root")) or "").strip()
+    if raw:
+        confined = _confine_path(raw)
+        if confined is not None:
+            return str(confined)
+        _chat_perf_logger.warning("chat: project_root outside trusted roots ignored: %r", raw)
+    default_root = getattr(config, "DEFAULT_PROJECT_ROOT", None)
+    return str(default_root) if default_root else str(Path.cwd())
+
+
 def _build_context(
     *,
     mode: str,
@@ -849,7 +935,12 @@ def _build_context(
     jenkins_build_selector: Optional[str] = None,
     progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
     graph_state: Optional[Any] = None,
+    cancel_check: Optional[Callable[[], bool]] = None,
 ) -> Tuple[str, List[str], List[Dict[str, Any]]]:
+    def _cancelled() -> bool:
+        # 클라이언트 disconnect 시 남은 컨텍스트 블록 진입을 막아 좀비 작업 단축
+        return bool(cancel_check and cancel_check())
+
     sources: List[str] = []
     citations: List[Dict[str, Any]] = []
     blocks: List[str] = []
@@ -867,7 +958,7 @@ def _build_context(
         sources.append("ui_context")
         citations.append({"source_type": "ui_context", "label": "ui_context", "uri": "", "path": "", "snippet": ""})
 
-    if report_dir and report_dir.exists():
+    if report_dir and report_dir.exists() and not _cancelled():
         bundle = report_mcp.read_bundle(report_dir)
         summary_tool = _call_mcp_tool(
             server=report_mcp,
@@ -932,7 +1023,10 @@ def _build_context(
                     sources.append(f"log:{key}")
                     citations.append(_citation_from_tool_result(log_tool, f"log:{key}", "log"))
 
-    if mode == "jenkins" and jenkins_job_url and jenkins_cache_root:
+    # 주: jenkins_cache_root 는 report_dir/project_root 와 같은 입력표면이나 여기서
+    # confine 하지 않는다 — jenkins 빌더 캐시 루트는 repo 밖(사용자 캐시)일 수 있어
+    # 신뢰 루트 confine 시 정당 흐름이 깨진다. 캐시 경로 검증은 jenkins 빌더 책임.
+    if mode == "jenkins" and jenkins_job_url and jenkins_cache_root and not _cancelled():
         jenkins_mcp = get_jenkins_mcp_server()
         summary_tool = _call_mcp_tool(
             server=jenkins_mcp,
@@ -1000,8 +1094,8 @@ def _build_context(
                 sources.append("log:jenkins_console")
                 citations.append(_citation_from_tool_result(console_tool, "log:jenkins_console", "jenkins"))
 
-    if question_type == "git":
-        project_root = str(((ui_context or {}).get("project_root")) or Path.cwd())
+    if question_type == "git" and not _cancelled():
+        project_root = _safe_project_root(ui_context)
         workdir_rel = str(((ui_context or {}).get("workdir_rel")) or ".")
         git_status_tool = _call_mcp_tool(
             server=git_mcp,
@@ -1058,8 +1152,8 @@ def _build_context(
                 sources.append("git_log")
                 citations.append(_citation_from_tool_result(git_log_tool, "git_log", "git"))
 
-    if question_type == "code":
-        project_root = str(((ui_context or {}).get("project_root")) or Path.cwd())
+    if question_type == "code" and not _cancelled():
+        project_root = _safe_project_root(ui_context)
         workdir_rel = str(((ui_context or {}).get("workdir_rel")) or ".")
         search_tool = _call_mcp_tool(
             server=code_mcp,
@@ -1102,7 +1196,7 @@ def _build_context(
                             sources.append("code_excerpt")
                             citations.append(_citation_from_tool_result(read_range_tool, f"code:{rel_path}", "code"))
 
-    if question_type == "docs":
+    if question_type == "docs" and not _cancelled():
         search_tool = _call_mcp_tool(
             server=docs_mcp,
             tool_name="search_docs",
@@ -1144,7 +1238,7 @@ def _build_context(
         question_type=question_type,
         report_dir=report_dir,
         ui_context=ui_context,
-    ) if policy.get("include_kb") or question_type in ("code", "docs") else ("", [], [])
+    ) if (policy.get("include_kb") or question_type in ("code", "docs")) and not _cancelled() else ("", [], [])
     if retrieval_text:
         blocks.append(_format_block("retrieval", _trim_text(retrieval_text, max_chars=3500)))
         sources.extend(retrieval_sources)
@@ -1156,10 +1250,20 @@ def _build_context(
 
 def _resolve_report_dir(report_dir: Optional[str], session_id: Optional[str]) -> Optional[Path]:
     if report_dir:
-        return Path(report_dir).expanduser().resolve()
+        # 보안: 신뢰 루트 하위로만 허용(임의 절대경로 → 로그/JSON 파일 내용 유출 차단).
+        confined = _confine_path(report_dir)
+        if confined is not None:
+            return confined
+        _chat_perf_logger.warning("chat: report_dir outside trusted roots ignored: %r", report_dir)
+        # session_id 폴백이 없으면 컨텍스트 없이 진행(.exists() 검사에서 자연 skip)
     if session_id:
         base = Path(getattr(config, "DEFAULT_REPORT_DIR", "reports")).resolve()
-        return (base / "sessions" / session_id).resolve()
+        # 보안: session_id 의 path traversal(../ 등) 차단 — 같은 입력표면.
+        try:
+            return safe_resolve_under(base, f"sessions/{session_id}")
+        except Exception:
+            _chat_perf_logger.warning("chat: invalid session_id ignored: %r", session_id)
+            return None
     return None
 
 
@@ -1314,6 +1418,7 @@ def _run_llm_candidates(
     cfg: Dict[str, Any],
     cfg_candidates: List[Dict[str, Any]],
     messages: List[Dict[str, str]],
+    cancel_check: Optional[Callable[[], bool]] = None,
 ) -> Tuple[str, Dict[str, Any], str, float]:
     llm_started = time.perf_counter()
     candidate_cfgs: List[Dict[str, Any]] = []
@@ -1337,6 +1442,8 @@ def _run_llm_candidates(
     selected_cfg = cfg
     blocked_api_types = set()
     for candidate_cfg in candidate_cfgs or [cfg]:
+        if cancel_check and cancel_check():  # disconnect 시 추가 후보 시도 중단
+            break
         api_type = str(candidate_cfg.get("api_type") or "").strip().lower()
         if api_type and api_type in blocked_api_types:
             continue
@@ -1435,6 +1542,7 @@ def answer_chat(
             jenkins_build_selector=jenkins_build_selector,
             progress_callback=progress_callback,
             graph_state=_state,
+            cancel_check=cancel_check,
         )
         context_elapsed_ms = (time.perf_counter() - started) * 1000.0
         return {
@@ -1445,7 +1553,22 @@ def answer_chat(
         }
 
     def _node_select_model(_state):
-        cfg_path = str(oai_config_path or getattr(config, "DEFAULT_OAI_CONFIG_PATH", None) or "").strip() or None
+        default_cfg_path = str(getattr(config, "DEFAULT_OAI_CONFIG_PATH", None) or "").strip() or None
+        cfg_path = default_cfg_path
+        raw_cfg_path = str(oai_config_path or "").strip() or None
+        if raw_cfg_path:
+            # 보안: oai_config_path 도 신뢰 루트(+기본 config 디렉토리) 하위로만 허용.
+            extra: List[Path] = []
+            if default_cfg_path:
+                try:
+                    extra.append(Path(default_cfg_path).resolve().parent)
+                except Exception:
+                    pass
+            confined = _confine_path(raw_cfg_path, extra_roots=extra)
+            if confined is not None:
+                cfg_path = str(confined)
+            else:
+                _chat_perf_logger.warning("chat: oai_config_path outside trusted roots ignored: %r", raw_cfg_path)
         cfg = load_oai_config(cfg_path)
         cfg_candidates = load_oai_configs(cfg_path)
         if not cfg:
@@ -1461,6 +1584,10 @@ def answer_chat(
         }
 
     def _node_approval_gate(_state):
+        # 선행 노드(build_context/select_model) 실패 시 승인 영속화/감사 skip
+        # (고아 pending·dangling 감사 방지; _node_llm_answer 의 errors 가드와 대칭).
+        if _state.errors:
+            return {"approval_required": False, "approval_request": None}
         approval_request = _build_approval_request(
             question=question,
             question_type=question_type,
@@ -1471,9 +1598,7 @@ def answer_chat(
                 "approval_required": False,
                 "approval_request": None,
             }
-        _state.approval_required = True
-        _state.approval_request = dict(approval_request)
-        save_pending_approval(
+        saved = save_pending_approval(
             approval_request["approval_id"],
             {
                 "request_id": _state.request_id,
@@ -1493,6 +1618,16 @@ def answer_chat(
                 "owner": requester,
             },
         )
+        if not saved:
+            # 저장 실패 시 승인 카드를 띄우면 resolve 가 404 → 혼란. 게이트를 생략하고
+            # 일반 답변으로 진행(챗은 비실행이라 안전). created 감사도 남기지 않음.
+            _chat_perf_logger.warning(
+                "chat: save_pending_approval failed — approval gate skipped (approval_id=%s)",
+                approval_request.get("approval_id"),
+            )
+            return {"approval_required": False, "approval_request": None}
+        _state.approval_required = True
+        _state.approval_request = dict(approval_request)
         try:
             from backend.services.chat_approval_audit import record_audit as _rec_audit
             _rec_audit(
@@ -1521,6 +1656,8 @@ def answer_chat(
         nonlocal llm_elapsed_ms, selected_cfg, prompt_chars, last_llm_error
         if _state.errors or _state.approval_required:
             return {}
+        if cancel_check and cancel_check():  # disconnect 후 LLM 호출 진입 차단
+            return {}
         current_view = str((ui_context or {}).get("current_view", "dashboard"))
         messages = _build_chat_messages(
             mode=mode,
@@ -1534,6 +1671,7 @@ def answer_chat(
             cfg=dict(_state.extra.get("cfg") or {}),
             cfg_candidates=list(_state.extra.get("cfg_candidates") or []),
             messages=messages,
+            cancel_check=cancel_check,
         )
         return {
             "answer": answer_text,

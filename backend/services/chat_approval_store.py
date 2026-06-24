@@ -60,7 +60,13 @@ def _decode(payload: Optional[str]) -> Optional[Dict[str, Any]]:
         return None
 
 
-def save_pending_approval(approval_id: str, record: Dict[str, Any]) -> None:
+def save_pending_approval(approval_id: str, record: Dict[str, Any]) -> bool:
+    """pending 승인 영속화. 성공 시 True, write 실패 시 False(호출처가 승인 게이트 억제).
+
+    실패를 bool 로 알리지 않으면 승인 카드는 떠도 resolve 시 404(레코드 없음)가 나
+    혼란스러운 UX 와 dangling 감사가 발생한다 — 호출처(_node_approval_gate)가 False
+    면 게이트를 생략하고 일반 답변으로 폴백한다.
+    """
     payload = dict(record or {})
     payload["approval_id"] = approval_id
     payload["saved_at"] = time.time()
@@ -80,9 +86,11 @@ def save_pending_approval(approval_id: str, record: Dict[str, Any]) -> None:
                 obj.owner = payload.get("owner")
                 obj.payload = data
                 obj.saved_at = float(payload["saved_at"])
+        return True
     except Exception:
-        # 저장 실패는 non-fatal(답변 흐름 유지) — 다만 이후 resolve 가 404 날 수 있음
+        # 저장 실패는 non-fatal(답변 흐름 유지). 호출처가 False 를 보고 게이트를 생략.
         _logger.warning("save_pending_approval failed (approval_id=%s)", approval_id, exc_info=True)
+        return False
 
 
 def get_pending_approval(approval_id: str) -> Optional[Dict[str, Any]]:

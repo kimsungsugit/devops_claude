@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import threading
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -29,14 +31,18 @@ def _safe_float(value: Any) -> Optional[float]:
 
 
 class ReportMCPServer:
-    _bundle_cache: Dict[str, tuple[float, Dict[str, Any]]] = {}
+    # 프로세스 싱글톤이 모든 요청 스레드에서 공유 → lock 으로 보호 + LRU 상한(무한 증가 방지).
+    _bundle_cache: "OrderedDict[str, tuple[float, Dict[str, Any]]]" = OrderedDict()
+    _cache_lock = threading.Lock()
     _CACHE_TTL = 60  # seconds
+    _CACHE_MAX = 64  # LRU 상한(report_dir cardinality 폭증 시 메모리 누수 차단)
 
     def clear_cache(self, report_dir: str | None = None) -> None:
-        if report_dir:
-            self._bundle_cache.pop(str(Path(report_dir).resolve()), None)
-        else:
-            self._bundle_cache.clear()
+        with self._cache_lock:
+            if report_dir:
+                self._bundle_cache.pop(str(Path(report_dir).resolve()), None)
+            else:
+                self._bundle_cache.clear()
 
     def list_tools(self) -> List[Dict[str, Any]]:
         return [
@@ -75,11 +81,13 @@ class ReportMCPServer:
             ) if report_dir.exists() else 0.0
         except (ValueError, OSError):
             mtime = 0.0
-        cached = self._bundle_cache.get(cache_key)
         # D(버그fix): cached[0]=파일 mtime 이므로 (time()-mtime)=파일 나이 → 오래된 산출물이
         # 영원히 miss 였다. 산출물 파일 mtime 일치만으로 hit 판정(내용 불변 보장).
-        if cached and cached[0] == mtime:
-            return cached[1]
+        with self._cache_lock:
+            cached = self._bundle_cache.get(cache_key)
+            if cached and cached[0] == mtime:
+                self._bundle_cache.move_to_end(cache_key)
+                return dict(cached[1])  # 최상위 얕은복사로 by-reference 캐시 오염 방지
         summary = _read_json(report_dir / "analysis_summary.json", default={})
         findings = _read_json(report_dir / "findings_flat.json", default=[])
         history = _read_json(report_dir / "history.json", default=[])
@@ -110,8 +118,12 @@ class ReportMCPServer:
             "status": status,
             "jenkins_scan": jenkins_scan,
         }
-        self._bundle_cache[cache_key] = (mtime, bundle)
-        return bundle
+        with self._cache_lock:
+            self._bundle_cache[cache_key] = (mtime, bundle)
+            self._bundle_cache.move_to_end(cache_key)
+            while len(self._bundle_cache) > self._CACHE_MAX:
+                self._bundle_cache.popitem(last=False)
+        return dict(bundle)
 
     def call_tool(self, tool_name: str, *, report_dir: str | Path, **kwargs: Any) -> Dict[str, Any]:
         report_dir = Path(report_dir).resolve()
