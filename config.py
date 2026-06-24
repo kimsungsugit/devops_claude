@@ -462,6 +462,14 @@ KB_CACHE_ENABLED = str(os.environ.get("KB_CACHE_ENABLED", "1")).strip().lower() 
 # 일관되게 _safe_int 로 파싱(불량 값 → 기본값).
 KB_CACHE_TTL_SECONDS = _safe_int("KB_CACHE_TTL_SECONDS", 120)
 KB_CACHE_MAX_ENTRIES = _safe_int("KB_CACHE_MAX_ENTRIES", 32)
+
+# UDS 문서 함수 설명 RAG 보강 (R3): inference 설명을 RAG 유사 함수로 보강.
+# ASIL 문서(UDS) 출력을 바꾸므로 기본 off — opt-in 시에만 동작.
+UDS_RAG_DESC_ENRICH = str(os.environ.get("UDS_RAG_DESC_ENRICH", "0")).strip().lower() in (
+    "1",
+    "true",
+    "yes",
+)
 PGVECTOR_DSN = os.environ.get("PGVECTOR_DSN", "").strip()
 PGVECTOR_URL = os.environ.get("PGVECTOR_URL", "").strip()
 KB_CATEGORIES = [

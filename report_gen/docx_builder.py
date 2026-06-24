@@ -1,6 +1,6 @@
 """report_gen.docx_builder - Auto-split from report_generator.py"""
 # Re-import common dependencies
-import re
+import logging
 
 # Payload field name constants (canonical source: report_gen.uds_generator)
 # Function-level (per-function, List[str]):
@@ -10,33 +10,29 @@ import re
 #   KEY_MOD_GLOBALS = "global_vars"    — global var definitions table
 #   KEY_MOD_STATICS = "static_vars"    — static var definitions table
 import os
-import json
-import csv
-import logging
-import time
+import re
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Set
-from io import BytesIO
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from report.constants import (
     GLOBALS_FORMAT_ORDER,
     GLOBALS_FORMAT_SEP,
     GLOBALS_FORMAT_WITH_LABELS,
-    LOGIC_MAX_DEPTH_DEFAULT,
     LOGIC_MAX_CHILDREN_DEFAULT,
+    LOGIC_MAX_DEPTH_DEFAULT,
     LOGIC_MAX_GRANDCHILDREN_DEFAULT,
 )
 from report_gen.function_analyzer import (
-    _parse_signature_outputs,
-    _fallback_function_description,
-    _parse_signature_params,
-    _normalize_symbol_name,
-    _enhance_function_description,
-    _is_generic_description,
-    _enhance_description_text,
-    _finalize_function_fields,
     _build_function_info_rows,
+    _enhance_description_text,
+    _enhance_function_description,
+    _fallback_function_description,
+    _finalize_function_fields,
+    _is_generic_description,
+    _normalize_symbol_name,
+    _parse_signature_outputs,
+    _parse_signature_params,
 )
 from report_gen.requirements import (
     _extract_doc_section,
@@ -44,19 +40,19 @@ from report_gen.requirements import (
     _extract_sds_partition_map,
 )
 from report_gen.uds_text import (
-    _merge_logic_ai_items,
-    _apply_uds_rules,
-    _merge_section_text,
     _ai_document_text,
     _ai_evidence_lines,
     _ai_quality_warnings,
+    _apply_uds_rules,
+    _merge_logic_ai_items,
+    _merge_section_text,
 )
 from report_gen.utils import (
     _build_global_rows,
-    _table_rows_from_texts,
-    _normalize_swufn_id,
     _extract_call_names,
+    _normalize_swufn_id,
     _safe_dict,
+    _table_rows_from_texts,
 )
 
 _logger = logging.getLogger("report_generator")
@@ -2048,13 +2044,17 @@ def generate_uds_docx(
         info["description"] = desc
 
     # ── RAG 기반 Description 보강 (inference인 함수에 대해 유사 함수 설명 참조) ──
+    # 기본 off: 이 보강은 ASIL 문서(UDS)의 함수 설명 출력을 바꾸므로, opt-in
+    # (UDS_RAG_DESC_ENRICH=1)일 때만 동작한다. 과거 존재하지 않는 KB load 메서드 호출로
+    # AttributeError 가 나며 영구 dead 였다 — KnowledgeBase.__init__ 이 _load_all 로 로드한다.
     _rag_desc_applied = 0
     try:
+        import config as _cfg
+        _rag_enrich_on = bool(getattr(_cfg, "UDS_RAG_DESC_ENRICH", False))
         from workflow.rag import KnowledgeBase
         _kb_dir = Path(os.environ.get("KB_STORE_DIR", "")) if os.environ.get("KB_STORE_DIR") else Path("kb_store")
-        if _kb_dir.exists():
+        if _rag_enrich_on and _kb_dir.exists():
             _kb = KnowledgeBase(_kb_dir)
-            _kb.load()
             if _kb.data:
                 for fid, info in function_details.items():
                     if not isinstance(info, dict):
@@ -2070,7 +2070,12 @@ def generate_uds_docx(
                     if not results:
                         results = _kb.search(query, top_k=3)
                     for r in results:
-                        chunk_text = str(r.get("text") or r.get("content") or "").strip()
+                        # KB 엔트리는 텍스트를 context/fix/error_clean 에 저장한다
+                        # (add_document/_ensure_shape). 과거 text/content 키는 항상 빈값이라
+                        # opt-in 시에도 보강이 inert 였다 — 올바른 키로 교정.
+                        chunk_text = str(
+                            r.get("context") or r.get("fix") or r.get("error_clean") or "",
+                        ).strip()
                         if not chunk_text or len(chunk_text) < 10:
                             continue
                         lines = chunk_text.split("\n")
@@ -3382,7 +3387,8 @@ def generate_uds_docx(
             f"호출 함수: {calls or 'N/A'}\n"
             "위 정보를 바탕으로 기술적 함수 설명을 JSON으로 반환하세요."
         )
-        import threading, json as _json
+        import json as _json
+        import threading
         result_holder: Dict[str, str] = {}
         def _call():
             try:
