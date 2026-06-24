@@ -545,4 +545,28 @@ describe('AnalysisSection', () => {
       vi.useRealTimers();
     }
   });
+
+  it('시험 결과가 전부 미분류(unknown)면 통과/실패 0 대신 미분류 안내를 표시한다', async () => {
+    vi.useFakeTimers();
+    try {
+      const { post, api } = await import('../api.js');
+      post.mockResolvedValue({ ok: true, job_id: 'junk' });
+      // 빌드 산출물 VectorCAST가 커버리지 기준 → result=None → summary 전부 unknown
+      api.mockResolvedValue({ ok: true, job: { status: 'completed', result: { ok: true, source: 'jenkins', data: {
+        test_rows_count: 10, ut_reports: ['r'], it_reports: ['r'],
+        summary: { total: 10, passed: 0, failed: 0, skipped: 0, unknown: 10, pass_rate: 0 },
+      } } } });
+      const result = makeAnalysisResult({ matchedScm: { id: 's', name: 'S', linked_docs: { vectorcast: ['U:/vc'] } } });
+      render(<AnalysisSection job={makeJob()} analysisResult={result} />);
+      await act(async () => {
+        fireEvent.click(screen.getByText('SCM 경로에서 불러오기'));
+        await vi.advanceTimersByTimeAsync(3500);
+      });
+      // 오해 소지의 '통과 0/실패 0/통과율 0%' 카드 대신 미분류 안내
+      expect(screen.queryByText('통과 (UT+IT)')).toBeNull();
+      expect(screen.getByText(/결과 미분류이며/)).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

@@ -597,7 +597,7 @@ export default function AnalysisSection({ job, analysisResult }) {
             </div>
           </div>
           {Array.isArray(prqa.top_rules) && prqa.top_rules.length > 0 && (
-            <details style={{ marginBottom: 10 }}>
+            <details open style={{ marginBottom: 10 }}>
               <summary style={{ cursor: 'pointer', fontSize: 12, fontWeight: 600 }}>위반 상위 규칙 ({prqa.top_rules.length})</summary>
               <div style={{ maxHeight: 220, overflowY: 'auto', marginTop: 6 }}>
                 <table className="impact-table" style={{ fontSize: 10 }}>
@@ -615,7 +615,7 @@ export default function AnalysisSection({ job, analysisResult }) {
             </details>
           )}
           {Array.isArray(prqa.top_files) && prqa.top_files.length > 0 && (
-            <details style={{ marginBottom: 10 }}>
+            <details open style={{ marginBottom: 10 }}>
               <summary style={{ cursor: 'pointer', fontSize: 12, fontWeight: 600 }}>위반 상위 파일 ({prqa.top_files.length})</summary>
               <div style={{ maxHeight: 220, overflowY: 'auto', marginTop: 6 }}>
                 <table className="impact-table" style={{ fontSize: 10 }}>
@@ -719,25 +719,35 @@ export default function AnalysisSection({ job, analysisResult }) {
           </div>
         )}
         {effVcast.summary && (effVcast.summary.total || 0) > 0 && (
-          <div className="stats-row" style={{ marginTop: 8 }}>
-            <div className="stat-card" style={{ borderLeft: '3px solid var(--color-success)' }}>
-              <div className="stat-value" style={{ color: 'var(--color-success)' }}>{(effVcast.summary.passed ?? 0).toLocaleString()}</div>
-              <div className="stat-label">통과 (UT+IT)</div>
-            </div>
-            <div className="stat-card" style={{ borderLeft: `3px solid ${(effVcast.summary.failed ?? 0) > 0 ? 'var(--color-danger)' : 'var(--color-success)'}` }}>
-              <div className="stat-value" style={{ color: (effVcast.summary.failed ?? 0) > 0 ? 'var(--color-danger)' : 'var(--color-success)' }}>{(effVcast.summary.failed ?? 0).toLocaleString()}</div>
-              <div className="stat-label">실패 (UT+IT)</div>
-            </div>
-            {(effVcast.summary.skipped ?? 0) > 0 && (
-              <div className="stat-card"><div className="stat-value">{effVcast.summary.skipped.toLocaleString()}</div><div className="stat-label">스킵</div></div>
-            )}
-            {effVcast.summary.pass_rate != null && (
-              <div className="stat-card" style={{ borderLeft: `3px solid ${effVcast.summary.pass_rate >= 0.95 ? 'var(--color-success)' : 'var(--color-warning)'}` }}>
-                <div className="stat-value" style={{ color: effVcast.summary.pass_rate >= 0.95 ? 'var(--color-success)' : 'var(--color-warning)' }}>{Math.round(effVcast.summary.pass_rate * 100)}%</div>
-                <div className="stat-label">통과율</div>
+          ((effVcast.summary.passed ?? 0) + (effVcast.summary.failed ?? 0) > 0) ? (
+            <div className="stats-row" style={{ marginTop: 8 }}>
+              <div className="stat-card" style={{ borderLeft: '3px solid var(--color-success)' }}>
+                <div className="stat-value" style={{ color: 'var(--color-success)' }}>{(effVcast.summary.passed ?? 0).toLocaleString()}</div>
+                <div className="stat-label">통과 (UT+IT)</div>
               </div>
-            )}
-          </div>
+              <div className="stat-card" style={{ borderLeft: `3px solid ${(effVcast.summary.failed ?? 0) > 0 ? 'var(--color-danger)' : 'var(--color-success)'}` }}>
+                <div className="stat-value" style={{ color: (effVcast.summary.failed ?? 0) > 0 ? 'var(--color-danger)' : 'var(--color-success)' }}>{(effVcast.summary.failed ?? 0).toLocaleString()}</div>
+                <div className="stat-label">실패 (UT+IT)</div>
+              </div>
+              {(effVcast.summary.skipped ?? 0) > 0 && (
+                <div className="stat-card"><div className="stat-value">{effVcast.summary.skipped.toLocaleString()}</div><div className="stat-label">스킵</div></div>
+              )}
+              {effVcast.summary.pass_rate != null && (
+                <div className="stat-card" style={{ borderLeft: `3px solid ${effVcast.summary.pass_rate >= 0.95 ? 'var(--color-success)' : 'var(--color-warning)'}` }}>
+                  <div className="stat-value" style={{ color: effVcast.summary.pass_rate >= 0.95 ? 'var(--color-success)' : 'var(--color-warning)' }}>{Math.round(effVcast.summary.pass_rate * 100)}%</div>
+                  <div className="stat-label">통과율</div>
+                </div>
+              )}
+            </div>
+          ) : (
+            // 결과 전부 미분류(result=None) — 빌드 산출물 VectorCAST가 '커버리지 기준'이라 per-testcase 합부가 없음.
+            // '통과 0/실패 0/통과율 0%'는 오해 소지 → 미분류임을 명시(빌드 자체는 성공).
+            <div className="text-sm text-muted" style={{ marginTop: 8, padding: 8, background: 'var(--bg)', borderRadius: 6, lineHeight: 1.55 }}>
+              이 빌드 산출물의 VectorCAST 데이터는 <b>커버리지 기준</b>(함수별 구문/분기/함수콜)이라 개별 시험 합부(pass/fail)가 없습니다 —
+              총 <b>{(effVcast.summary.total ?? 0).toLocaleString()}</b>건이 결과 미분류이며, <b>빌드 자체는 성공</b>입니다(통과율 0%는 실패가 아니라 미분류).
+              개별 시험 합부는 SCM의 VectorCAST 시험 로그(SwUTR/SwITR)에 있습니다.
+            </div>
+          )
         )}
         {(effVcast.failures || []).length > 0 && (
           <details style={{ marginTop: 8 }}>
@@ -810,8 +820,14 @@ export default function AnalysisSection({ job, analysisResult }) {
             IT 함수 {itEntries.length.toLocaleString()}개 — 함수별 함수콜은 아래 ‘코드 커버리지’의 모듈 행을 펼쳐 확인하세요.
           </div>
         )}
-        {!buildHasVcast && !scmVcast && (
-          <div className="text-sm text-muted" style={{ marginTop: 6 }}>통합시험 데이터가 없습니다. 위 ‘유닛테스트’의 불러오기 버튼으로 함께 로드됩니다.</div>
+        {!fnLevelLoaded && canLoadFnLevel && (
+          <div className="text-sm text-muted" style={{ marginTop: 6, padding: 8, background: 'var(--bg)', borderRadius: 6, lineHeight: 1.5 }}>
+            <b>함수콜·함수 진입 커버리지</b>와 IT 함수별 entries는 위 ‘유닛테스트’의 <b>‘함수레벨 상세 불러오기’</b>를 누르면 표시됩니다
+            (빌드 캐시에서 즉시 로드 — Jenkins 연결 불필요).
+          </div>
+        )}
+        {!buildHasVcast && !scmVcast && !canLoadFnLevel && (
+          <div className="text-sm text-muted" style={{ marginTop: 6 }}>통합시험 데이터가 없습니다.</div>
         )}
       </div>
 
