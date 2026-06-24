@@ -62,6 +62,7 @@ def get_engine(db_path: Optional[Path] = None, *, force_new: bool = False):
             cursor.execute("PRAGMA synchronous=NORMAL")
             cursor.execute("PRAGMA foreign_keys=ON")
             cursor.execute("PRAGMA wal_autocheckpoint=200")  # D10: WAL 무제한 증가 방지
+            cursor.execute("PRAGMA busy_timeout=5000")  # R2: 멀티워커 동시 write lock 경합 시 대기
             cursor.close()
 
         _logger.info("Chat History DB engine: %s", db_path)

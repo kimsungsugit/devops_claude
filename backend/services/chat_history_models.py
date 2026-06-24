@@ -6,6 +6,7 @@ from typing import List, Optional
 
 from sqlalchemy import (
     DateTime,
+    Float,
     ForeignKey,
     Index,
     Integer,
@@ -97,4 +98,22 @@ class ChatApprovalAudit(ChatHistoryBase):
     __table_args__ = (
         Index("ix_audit_approval", "approval_id"),
         Index("ix_audit_created", "created_at"),
+    )
+
+
+class ChatPendingApproval(ChatHistoryBase):
+    """미해소 승인 요청 (영속 — 멀티워커 공유). payload 는 전체 record JSON.
+
+    in-memory 대비: WEB_CONCURRENCY>1 에서 생성/해소가 다른 워커로 라우팅돼도
+    동일 SQLite 를 공유하므로 404 가 나지 않는다. saved_at(epoch) 으로 TTL 만료.
+    """
+    __tablename__ = "chat_pending_approvals"
+
+    approval_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    owner: Mapped[Optional[str]] = mapped_column(String(120), nullable=True, index=True)
+    payload: Mapped[str] = mapped_column(Text, nullable=False)  # 전체 record JSON
+    saved_at: Mapped[float] = mapped_column(Float, nullable=False, index=True)
+
+    __table_args__ = (
+        Index("ix_pending_saved", "saved_at"),
     )
