@@ -2,7 +2,8 @@
  * AnalysisSection 컴포넌트 단위 테스트
  *
  * 요구사항 추적: SRS-SECTION-ANALYSIS
- * - "코드 커버리지" 패널 렌더링
+ * - 커버리지가 유닛테스트/통합테스트 그룹으로 통합('커버리지 상세' 서브섹션, 구 '코드 커버리지' 패널 제거)
+ * - 유닛/통합테스트 그룹의 SwUTCV/SwITCV 정합성 검증(Coverage ↔ SUTR/SITR)
  * - "VectorCAST 테스트" 패널 렌더링
  * - "코드 메트릭" 패널 렌더링
  * - analysisResult에 coverage 데이터가 있을 때 퍼센트 표시
@@ -77,12 +78,13 @@ describe('AnalysisSection', () => {
 
   // ── 패널 렌더링 ───────────────────────────────────────────────────
 
-  it('"코드 커버리지" 패널 제목을 렌더링한다', () => {
-    // Arrange & Act
+  it('유닛테스트 패널에 ‘커버리지 상세’ 섹션을 렌더링한다(구 ‘코드 커버리지’ 패널 통합)', () => {
+    // Arrange & Act — 표준 '코드 커버리지' 패널은 제거되고 커버리지가 유닛테스트 그룹으로 통합됨.
     render(<AnalysisSection job={makeJob()} analysisResult={makeAnalysisResult()} />);
 
-    // Assert
-    expect(screen.getByText('코드 커버리지')).toBeInTheDocument();
+    // Assert: 별도 '코드 커버리지' 패널 없음 + 유닛테스트 그룹 내 '커버리지 상세' 서브섹션 존재.
+    expect(screen.queryByText('코드 커버리지')).toBeNull();
+    expect(screen.getByText(/커버리지 상세/)).toBeInTheDocument();
   });
 
   it('유닛테스트·통합테스트 패널 제목을 렌더링한다(VectorCAST 분리)', () => {
@@ -144,12 +146,13 @@ describe('AnalysisSection', () => {
     }).not.toThrow();
   });
 
-  it('analysisResult가 null이어도 "코드 커버리지" 패널을 표시한다', () => {
+  it('analysisResult가 null이어도 유닛테스트 패널을 표시한다(커버리지 데이터 없으면 상세 생략)', () => {
     // Arrange & Act
     render(<AnalysisSection job={makeJob()} analysisResult={null} />);
 
-    // Assert
-    expect(screen.getByText('코드 커버리지')).toBeInTheDocument();
+    // Assert: 커버리지가 유닛테스트 그룹으로 통합됐으므로 패널 자체는 항상 존재(데이터 없으면 상세만 생략).
+    expect(screen.getByText('유닛테스트 (Unit Test · VectorCAST UT)')).toBeInTheDocument();
+    expect(screen.queryByText('코드 커버리지')).toBeNull();
   });
 
   it('kpis.coverage가 없으면 Line Coverage 카드를 표시하지 않는다', () => {
@@ -265,6 +268,70 @@ describe('AnalysisSection', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  // ── SwUTCV/SwITCV 정합성 검증 (Coverage Report ↔ SUTR/SITR) ──
+
+  it('SwUTCV 정합성 검증: 경로 입력 후 실행하면 /api/swut/consistency/check 호출 + PASS·커버리지 요약 표시', async () => {
+    const { post } = await import('../api.js');
+    post.mockResolvedValue({
+      ok: true, issues: [], parse_warnings: [],
+      coverage_summary: { total_tcs: 240, total_functions: 30, uncovered_functions: [], exception_statement: 3, exception_branch: 2, final_result: 'PASS' },
+      sutr_summary: { total_tcs: 240, passed: 240, failed: 0, not_executed: 0 },
+    });
+    render(<AnalysisSection job={makeJob()} analysisResult={makeAnalysisResult()} />);
+
+    fireEvent.change(screen.getByPlaceholderText('…/SwUTCV_Coverage_*.xlsx'), { target: { value: 'U:/cov.xlsx' } });
+    fireEvent.change(screen.getByPlaceholderText('…/SUTR_*.xlsm'), { target: { value: 'U:/sutr.xlsm' } });
+    await act(async () => {
+      fireEvent.click(screen.getAllByRole('button', { name: /정합성 검증 실행/ })[0]);
+    });
+
+    await waitFor(() => expect(post).toHaveBeenCalledWith(
+      '/api/swut/consistency/check', { coverage_path: 'U:/cov.xlsx', sutr_path: 'U:/sutr.xlsm' },
+    ));
+    // ✅ PASS는 summary 접미사 + 상태줄 양쪽에 나옴(의도된 UX) → getAllByText
+    expect(screen.getAllByText(/✅ PASS/).length).toBeGreaterThan(0);
+    // 커버리지 결과 요약 카드(빌더 Coverage Report에서 파싱) + SUTR 합부
+    expect(screen.getByText('Traceability TC')).toBeInTheDocument();
+    expect(screen.getByText('미커버 함수')).toBeInTheDocument();
+  });
+
+  it('SwUTCV 정합성: issue가 있으면 FAIL + severity 배지로 표시한다', async () => {
+    const { post } = await import('../api.js');
+    post.mockResolvedValue({
+      ok: false, parse_warnings: [],
+      issues: [{ severity: 'warning', category: 'uncovered_mismatch', message: '미커버 함수 불일치 발견' }],
+      coverage_summary: {}, sutr_summary: {},
+    });
+    render(<AnalysisSection job={makeJob()} analysisResult={makeAnalysisResult()} />);
+
+    fireEvent.change(screen.getByPlaceholderText('…/SwUTCV_Coverage_*.xlsx'), { target: { value: 'U:/c.xlsx' } });
+    fireEvent.change(screen.getByPlaceholderText('…/SUTR_*.xlsm'), { target: { value: 'U:/s.xlsm' } });
+    await act(async () => {
+      fireEvent.click(screen.getAllByRole('button', { name: /정합성 검증 실행/ })[0]);
+    });
+
+    await waitFor(() => expect(screen.getAllByText(/⚠️ FAIL/).length).toBeGreaterThan(0));
+    expect(screen.getByText('[uncovered_mismatch]')).toBeInTheDocument();
+    expect(screen.getByText('미커버 함수 불일치 발견')).toBeInTheDocument();
+  });
+
+  it('SwITCV 정합성 검증: SITR 경로로 /api/swit/consistency/check 호출', async () => {
+    const { post } = await import('../api.js');
+    post.mockResolvedValue({ ok: true, issues: [], parse_warnings: [], coverage_summary: {}, sutr_summary: {} });
+    render(<AnalysisSection job={makeJob()} analysisResult={makeAnalysisResult()} />);
+
+    fireEvent.change(screen.getByPlaceholderText('…/SwITCV_Coverage_*.xlsx'), { target: { value: 'U:/itcov.xlsx' } });
+    fireEvent.change(screen.getByPlaceholderText('…/SITR_*.xlsm'), { target: { value: 'U:/sitr.xlsm' } });
+    await act(async () => {
+      // [0]=UT 실행 버튼, [1]=IT 실행 버튼 (DOM 순서)
+      fireEvent.click(screen.getAllByRole('button', { name: /정합성 검증 실행/ })[1]);
+    });
+
+    await waitFor(() => expect(post).toHaveBeenCalledWith(
+      '/api/swit/consistency/check', { coverage_path: 'U:/itcov.xlsx', sitr_path: 'U:/sitr.xlsm' },
+    ));
   });
 
   // ── 재진입 자동복구(스피너 고착/데이터 유실 방지) ──────────────────

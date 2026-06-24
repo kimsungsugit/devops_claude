@@ -3,6 +3,8 @@ import { post, api } from '../../api.js';
 import { useJenkinsCfg, useToast } from '../../App.jsx';
 import StatusBadge from '../StatusBadge.jsx';
 import { defaultCacheRoot } from '../../api.js';
+import { useAdminMode } from '../../contexts/AdminContext.jsx';
+import PathPickerDialog from '../PathPickerDialog.jsx';
 
 // VectorCAST 커버리지 셀({covered,total,rate}) → 통계 카드. rate는 0..1.
 function covCard(label, cell) {
@@ -82,6 +84,111 @@ function ModuleCovRow({ name, lineRate, branchRate, functions }) {
         );
       })}
     </>
+  );
+}
+
+// SwUTCV/SwITCV 정합성 검증(Coverage Report ↔ SUTR/SITR) 결과 카드. ConsistencyReport.to_dict 형태
+// ({ ok, issues:[{severity,category,message}], coverage_summary, sutr_summary, parse_warnings })를 렌더.
+// 커버리지 결과(coverage_summary)는 빌더 Coverage Report의 Traceability/Coverage 시트에서 파싱된 값이라
+// '미커버 함수·Exception·Total TC·Final Result'를 그대로 보여준다. severity 색은 SwUTBuildSection과
+// 동일한 전역 CSS(swut-issue-${severity})에 위임. peerLabel = 'SUTR'(UT) | 'SITR'(IT).
+function ConsistencyResult({ report, peerLabel = 'SUTR' }) {
+  if (!report) return null;
+  const issues = report.issues || [];
+  const pw = report.parse_warnings || [];
+  const cs = report.coverage_summary || {};
+  const ss = report.sutr_summary || {};
+  const exc = (cs.exception_statement || 0) + (cs.exception_branch || 0);
+  const uncovered = Array.isArray(cs.uncovered_functions) ? cs.uncovered_functions.length : null;
+  const hasCov = cs.total_tcs != null || cs.total_functions != null || uncovered != null || cs.final_result;
+  const hasPeer = ss.total_tcs != null || ss.passed != null || ss.failed != null;
+  return (
+    <div className="swut-consistency-result" style={{ marginTop: 8 }}>
+      <div className="swut-consistency-status">
+        결과: <strong>{report.ok ? '✅ PASS' : '⚠️ FAIL'}</strong>{' '}
+        — issue {issues.length}건, warning {pw.length}건
+      </div>
+      {hasCov && (
+        <div className="stats-row" style={{ marginTop: 6 }}>
+          {cs.total_tcs != null && (
+            <div className="stat-card"><div className="stat-value">{cs.total_tcs.toLocaleString()}</div><div className="stat-label">Traceability TC</div></div>
+          )}
+          {cs.total_functions != null && (
+            <div className="stat-card"><div className="stat-value">{cs.total_functions.toLocaleString()}</div><div className="stat-label">함수·항목</div></div>
+          )}
+          {uncovered != null && (
+            <div className="stat-card" style={{ borderLeft: `3px solid ${uncovered > 0 ? 'var(--color-warning)' : 'var(--color-success)'}` }}>
+              <div className="stat-value" style={{ color: uncovered > 0 ? 'var(--color-warning)' : 'var(--color-success)' }}>{uncovered}</div>
+              <div className="stat-label">미커버 함수</div>
+            </div>
+          )}
+          {(cs.exception_statement != null || cs.exception_branch != null) && (
+            <div className="stat-card"><div className="stat-value">{exc.toLocaleString()}</div><div className="stat-label">Exception</div></div>
+          )}
+          {cs.final_result && (
+            <div className="stat-card"><div className="stat-value" style={{ fontSize: 12 }}>{cs.final_result}</div><div className="stat-label">Coverage 결과</div></div>
+          )}
+        </div>
+      )}
+      {hasPeer && (
+        <div className="stats-row" style={{ marginTop: 6 }}>
+          {ss.total_tcs != null && (
+            <div className="stat-card"><div className="stat-value">{ss.total_tcs.toLocaleString()}</div><div className="stat-label">{peerLabel} TC</div></div>
+          )}
+          {ss.passed != null && (
+            <div className="stat-card" style={{ borderLeft: '3px solid var(--color-success)' }}><div className="stat-value" style={{ color: 'var(--color-success)' }}>{ss.passed.toLocaleString()}</div><div className="stat-label">통과</div></div>
+          )}
+          {ss.failed != null && (
+            <div className="stat-card" style={{ borderLeft: `3px solid ${ss.failed > 0 ? 'var(--color-danger)' : 'var(--color-success)'}` }}><div className="stat-value" style={{ color: ss.failed > 0 ? 'var(--color-danger)' : 'var(--color-success)' }}>{ss.failed.toLocaleString()}</div><div className="stat-label">실패</div></div>
+          )}
+          {ss.not_executed != null && (
+            <div className="stat-card"><div className="stat-value">{ss.not_executed.toLocaleString()}</div><div className="stat-label">미실행</div></div>
+          )}
+          {ss.deviated != null && (
+            <div className="stat-card"><div className="stat-value">{ss.deviated.toLocaleString()}</div><div className="stat-label">Deviation</div></div>
+          )}
+          {ss.final_result && (
+            <div className="stat-card"><div className="stat-value" style={{ fontSize: 12 }}>{ss.final_result}</div><div className="stat-label">{peerLabel} 결과</div></div>
+          )}
+        </div>
+      )}
+      {issues.length > 0 && (
+        <ul className="swut-issues-list">
+          {issues.map((iss, i) => (
+            <li key={i} className={`swut-issue swut-issue-${iss.severity || 'info'}`}>
+              <span className="swut-issue-cat">[{iss.category}]</span>{' '}
+              {iss.message}
+            </li>
+          ))}
+        </ul>
+      )}
+      {pw.length > 0 && (
+        <ul className="swut-warnings-list">
+          {pw.map((w, i) => <li key={i}>{w}</li>)}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+// 정합성 검증용 파일 경로 입력 행 (경로 텍스트 + admin 전용 Browse). 빌더 섹션의 Field/Browse 패턴 축약.
+function PathRow({ label, value, onChange, onBrowse, isAdmin, browseTitle, placeholder }) {
+  return (
+    <div style={{ display: 'flex', gap: 6, alignItems: 'center', marginBottom: 6, flexWrap: 'wrap' }}>
+      <label style={{ fontSize: 11, fontWeight: 600, minWidth: 104 }}>{label}</label>
+      <input
+        type="text" value={value} onChange={e => onChange(e.target.value)} placeholder={placeholder}
+        autoComplete="off" autoCorrect="off" autoCapitalize="off" spellCheck="false"
+        data-form-type="other" data-lpignore="true"
+        style={{ flex: 1, minWidth: 180, fontSize: 11, fontFamily: 'monospace', padding: '4px 6px',
+          border: '1px solid var(--border)', borderRadius: 4 }}
+      />
+      <button
+        type="button" className="btn-secondary"
+        disabled={!isAdmin} title={isAdmin ? undefined : browseTitle}
+        onClick={onBrowse} style={{ fontSize: 11, padding: '4px 8px' }}
+      >📂 찾기</button>
+    </div>
   );
 }
 
@@ -264,6 +371,59 @@ export default function AnalysisSection({ job, analysisResult }) {
       setSaLoading(false);
     }
   }, [analysisResult, toast]);
+
+  // ── SwUTCV/SwITCV 정합성 검증 (Coverage Report ↔ SUTR/SITR) ──
+  // 빌더가 생성한 산출물 2개의 경로를 받아 기존 /consistency/check 엔드포인트로 교차검증.
+  // 분석 화면은 project_id를 모르고 SCM에 빌드 산출물 경로도 없으므로 사용자가 파일 경로를 지정한다.
+  const { isAdmin } = useAdminMode();
+  const browseDisabledTitle = '관리자 전용 — Ctrl+Shift+A로 admin 모드 활성화';
+  const [picker, setPicker] = useState(null);   // { pattern, title, current, onSelect }
+  // useCallback 안정화 — PathRow onBrowse 인라인 화살표가 매 렌더 새 함수가 되지 않도록(reviewer W1).
+  const openPicker = useCallback((pickerCfg) => setPicker(pickerCfg), []);
+  const [utcvForm, setUtcvForm] = useState({ coverage_path: '', sutr_path: '' });
+  const [utcvReport, setUtcvReport] = useState(null);
+  const [utcvChecking, setUtcvChecking] = useState(false);
+  const [itcvForm, setItcvForm] = useState({ coverage_path: '', sitr_path: '' });
+  const [itcvReport, setItcvReport] = useState(null);
+  const [itcvChecking, setItcvChecking] = useState(false);
+
+  const runUtcvCheck = useCallback(async () => {
+    if (!utcvForm.coverage_path || !utcvForm.sutr_path) {
+      toast('warning', 'Coverage(.xlsx)와 SUTR(.xlsm) 파일 경로가 모두 필요합니다.'); return;
+    }
+    setUtcvChecking(true); setUtcvReport(null);
+    try {
+      const report = await post('/api/swut/consistency/check', utcvForm);
+      if (!mountedRef.current) return;
+      setUtcvReport(report);
+      const n = (report?.issues || []).length;
+      toast(n === 0 ? 'success' : 'warning',
+        n === 0 ? 'SwUTCV 정합성 검증 통과 — issue 0건' : `SwUTCV 정합성: issue ${n}건 — 카드 확인`);
+    } catch (e) {
+      if (mountedRef.current) toast('error', `정합성 검증 실패: ${e.message}`);
+    } finally {
+      if (mountedRef.current) setUtcvChecking(false);
+    }
+  }, [utcvForm, toast]);
+
+  const runItcvCheck = useCallback(async () => {
+    if (!itcvForm.coverage_path || !itcvForm.sitr_path) {
+      toast('warning', 'Coverage(.xlsx)와 SITR(.xlsm) 파일 경로가 모두 필요합니다.'); return;
+    }
+    setItcvChecking(true); setItcvReport(null);
+    try {
+      const report = await post('/api/swit/consistency/check', itcvForm);
+      if (!mountedRef.current) return;
+      setItcvReport(report);
+      const n = (report?.issues || []).length;
+      toast(n === 0 ? 'success' : 'warning',
+        n === 0 ? 'SwITCV 정합성 검증 통과 — issue 0건' : `SwITCV 정합성: issue ${n}건 — 카드 확인`);
+    } catch (e) {
+      if (mountedRef.current) toast('error', `정합성 검증 실패: ${e.message}`);
+    } finally {
+      if (mountedRef.current) setItcvChecking(false);
+    }
+  }, [itcvForm, toast]);
 
   // 잡 상태를 폴링해 완료 시 결과를 적재한다. 최초 시작과 재진입/포커스 복구가 공용으로 호출한다.
   // poll-first 구조라 '이미 완료된 잡'으로 재진입하면 첫 폴에서 즉시 적재된다(3초 대기 없음).
@@ -916,7 +1076,7 @@ export default function AnalysisSection({ job, analysisResult }) {
         ))}
         {utEntries.length > 0 && (
           <div className="text-sm text-muted" style={{ marginTop: 6 }}>
-            UT 함수 {utEntries.length.toLocaleString()}개 — 함수별 커버리지는 아래 ‘코드 커버리지’의 모듈 행을 펼쳐 확인하세요.
+            UT 함수 {utEntries.length.toLocaleString()}개 — 함수별 커버리지는 아래 ‘커버리지 상세’의 모듈 행을 펼쳐 확인하세요.
           </div>
         )}
         {effVcast.summary && (effVcast.summary.total || 0) > 0 && (
@@ -973,6 +1133,96 @@ export default function AnalysisSection({ job, analysisResult }) {
             {effVcast.failures.length > 100 && <div className="text-muted text-sm" style={{ padding: 6, textAlign: 'center' }}>{effVcast.failures.length - 100}건 더 있음</div>}
           </details>
         )}
+        {/* ── 커버리지 상세 (모듈·함수별 — 구 ‘코드 커버리지’ 패널에서 이동: UT 구문/분기 + IT 함수콜 합산) ── */}
+        {hasAnyCoverage && (
+          <div style={{ marginTop: 12, paddingTop: 10, borderTop: '1px solid var(--border)' }}>
+            <div className="text-sm" style={{ fontWeight: 600, marginBottom: 4 }}>📊 커버리지 상세 (모듈·함수별)</div>
+            <div className="text-sm text-muted" style={{ marginBottom: 8, lineHeight: 1.5 }}>
+              <b>구문</b>=실행 문장, <b>분기</b>=if·switch 경로, <b>MC/DC</b>=조건 조합(ASIL C/D 필수).{' '}
+              모듈 표의 <b>행을 클릭</b>하면 함수별 커버리지(UT 구문/분기 · IT 함수콜)로 펼쳐집니다.
+            </div>
+            {scmCovHas && (
+              <div style={{ marginBottom: 8 }}>
+                <div className="text-sm text-muted" style={{ marginBottom: 4 }}>VectorCAST 커버리지 (출처: SCM 경로 — 단위/통합 합산)</div>
+                <div className="stats-row">
+                  {covCard('구문(Statement)', scmCov.statement)}
+                  {covCard('분기(Branch)', scmCov.branch)}
+                  {covCard('MC/DC', scmCov.mcdc)}
+                </div>
+              </div>
+            )}
+            {(showBuildLine || showBuildBranch || utCov.line_covered != null || utCov.branch_covered != null) && (
+              <div className="stats-row">
+                {showBuildLine && (
+                  <div className="stat-card" style={{ borderLeft: `3px solid ${covPct >= 80 ? 'var(--color-success)' : 'var(--color-warning)'}` }}>
+                    <div className="stat-value" style={{ color: covPct >= 80 ? 'var(--color-success)' : 'var(--color-warning)' }}>{covPct}%</div>
+                    <div className="stat-label">Line Coverage</div>
+                  </div>
+                )}
+                {showBuildBranch && (
+                  <div className="stat-card" style={{ borderLeft: `3px solid ${brPct >= 80 ? 'var(--color-success)' : 'var(--color-warning)'}` }}>
+                    <div className="stat-value" style={{ color: brPct >= 80 ? 'var(--color-success)' : 'var(--color-warning)' }}>{brPct}%</div>
+                    <div className="stat-label">Branch Coverage</div>
+                  </div>
+                )}
+                {utCov.line_covered != null && (
+                  <div className="stat-card">
+                    <div className="stat-value">{utCov.line_covered?.toLocaleString()}<span style={{ fontSize: 11, fontWeight: 400 }}>/{utCov.line_total?.toLocaleString()}</span></div>
+                    <div className="stat-label">UT Statement</div>
+                  </div>
+                )}
+                {utCov.branch_covered != null && (
+                  <div className="stat-card">
+                    <div className="stat-value">{utCov.branch_covered?.toLocaleString()}<span style={{ fontSize: 11, fontWeight: 400 }}>/{utCov.branch_total?.toLocaleString()}</span></div>
+                    <div className="stat-label">UT Branch</div>
+                  </div>
+                )}
+              </div>
+            )}
+            {coverageModules.length > 0 && (
+              <details style={{ marginTop: 8 }} open>
+                <summary style={{ cursor: 'pointer', fontSize: 12, fontWeight: 600 }}>
+                  모듈별 커버리지 ({coverageModules.length}개){fnLevelLoaded ? ' — 행 클릭 시 함수별 펼침' : ' (함수 드릴다운은 함수레벨 상세 로드 후)'}
+                </summary>
+                <div style={{ maxHeight: 360, overflowY: 'auto', marginTop: 6 }}>
+                  <table className="impact-table" style={{ fontSize: 10 }}>
+                    <thead><tr><th>모듈</th><th>Line Rate</th><th>Branch Rate</th><th></th></tr></thead>
+                    <tbody>
+                      {coverageModules.map((m) => (
+                        <ModuleCovRow key={m.name} name={m.name} lineRate={m.lineRate} branchRate={m.branchRate} functions={m.functions} />
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </details>
+            )}
+          </div>
+        )}
+        {/* ── SwUTCV 정합성 검증 (Coverage Report ↔ SUTR) ── */}
+        <details style={{ marginTop: 12 }}>
+          <summary style={{ cursor: 'pointer', fontSize: 12, fontWeight: 600 }}>
+            🔍 정합성 검증 (SwUTCV Coverage ↔ SUTR){utcvReport ? (utcvReport.ok ? ' — ✅ PASS' : ' — ⚠️ FAIL') : ''}
+          </summary>
+          <div style={{ marginTop: 8 }}>
+            <div className="text-sm text-muted" style={{ marginBottom: 8, lineHeight: 1.5 }}>
+              생성한 <b>SwUTCV Coverage Report(.xlsx)</b>와 <b>SUTR(.xlsm)</b> 파일 경로를 지정하면, 빌더의 Coverage↔SUTR 교차검증(미커버 함수·Exception·Total TC·Final Result 정합성)을 표시합니다.
+            </div>
+            <PathRow label="Coverage(.xlsx)" value={utcvForm.coverage_path}
+              onChange={v => setUtcvForm(f => ({ ...f, coverage_path: v }))}
+              onBrowse={() => openPicker({ pattern: '*.xlsx', title: 'SwUTCV Coverage Report 선택', current: utcvForm.coverage_path, onSelect: p => setUtcvForm(f => ({ ...f, coverage_path: p })) })}
+              isAdmin={isAdmin} browseTitle={browseDisabledTitle} placeholder="…/SwUTCV_Coverage_*.xlsx" />
+            <PathRow label="SUTR(.xlsm)" value={utcvForm.sutr_path}
+              onChange={v => setUtcvForm(f => ({ ...f, sutr_path: v }))}
+              onBrowse={() => openPicker({ pattern: '*.xlsm', title: 'SUTR 선택', current: utcvForm.sutr_path, onSelect: p => setUtcvForm(f => ({ ...f, sutr_path: p })) })}
+              isAdmin={isAdmin} browseTitle={browseDisabledTitle} placeholder="…/SUTR_*.xlsm" />
+            <button type="button" className="btn-primary"
+              disabled={utcvChecking || !utcvForm.coverage_path || !utcvForm.sutr_path}
+              onClick={runUtcvCheck} style={{ fontSize: 12 }}>
+              {utcvChecking ? '검증 중...' : '🔍 정합성 검증 실행'}
+            </button>
+            <ConsistencyResult report={utcvReport} peerLabel="SUTR" />
+          </div>
+        </details>
       </div>
 
       {/* ── 통합테스트 (Integration Test · VectorCAST IT) ── */}
@@ -1018,7 +1268,7 @@ export default function AnalysisSection({ job, analysisResult }) {
         ) : null}
         {itEntries.length > 0 && (
           <div className="text-sm text-muted" style={{ marginTop: 6 }}>
-            IT 함수 {itEntries.length.toLocaleString()}개 — 함수별 함수콜은 아래 ‘코드 커버리지’의 모듈 행을 펼쳐 확인하세요.
+            IT 함수 {itEntries.length.toLocaleString()}개 — 함수별 함수콜은 유닛테스트 패널의 ‘커버리지 상세’ 모듈 표에서 행을 펼쳐 확인하세요.
           </div>
         )}
         {!fnLevelLoaded && canLoadFnLevel && (
@@ -1030,82 +1280,31 @@ export default function AnalysisSection({ job, analysisResult }) {
         {!buildHasVcast && !scmVcast && !canLoadFnLevel && (
           <div className="text-sm text-muted" style={{ marginTop: 6 }}>통합시험 데이터가 없습니다.</div>
         )}
-      </div>
-
-      {/* ── 코드 커버리지 (모듈별 + 함수 드릴다운) ── */}
-      <div className="panel" style={{ marginBottom: 12 }}>
-        <div className="panel-header">
-          <span className="panel-title">코드 커버리지</span>
-          {(scmCovHas || coverageModules.length > 0) && <SourceBadge source={vcastSource} />}
-        </div>
-        <div className="text-sm text-muted" style={{ padding: '0 0 8px', lineHeight: 1.55 }}>
-          전체·모듈·함수 단위 커버리지입니다. <b>구문</b>=실행 문장, <b>분기</b>=if·switch 경로, <b>MC/DC</b>=조건 조합(ASIL C/D 필수).{' '}
-          모듈별 표의 <b>행을 클릭</b>하면 그 모듈 소속 <b>함수별 커버리지</b>로 펼쳐집니다. Line/Branch Coverage는 빌드 산출물 기준(80% 미만 주황).
-        </div>
-        {!hasAnyCoverage ? (
-          <div className="text-sm text-muted" style={{ padding: 8 }}>
-            이 빌드 산출물에 커버리지 데이터가 없습니다. 위 ‘유닛테스트/통합테스트’의 불러오기 버튼으로
-            VectorCAST 커버리지(구문/분기/MC-DC + 모듈·함수별)를 채울 수 있습니다.
+        {/* ── SwITCV 정합성 검증 (Coverage Report ↔ SITR) ── */}
+        <details style={{ marginTop: 12 }}>
+          <summary style={{ cursor: 'pointer', fontSize: 12, fontWeight: 600 }}>
+            🔍 정합성 검증 (SwITCV Coverage ↔ SITR){itcvReport ? (itcvReport.ok ? ' — ✅ PASS' : ' — ⚠️ FAIL') : ''}
+          </summary>
+          <div style={{ marginTop: 8 }}>
+            <div className="text-sm text-muted" style={{ marginBottom: 8, lineHeight: 1.5 }}>
+              생성한 <b>SwITCV Coverage Report(.xlsx)</b>와 <b>SITR(.xlsm)</b> 파일 경로를 지정하면, 빌더의 Coverage↔SITR 교차검증(미커버 함수·Exception·Total TC·Final Result 정합성)을 표시합니다.
+            </div>
+            <PathRow label="Coverage(.xlsx)" value={itcvForm.coverage_path}
+              onChange={v => setItcvForm(f => ({ ...f, coverage_path: v }))}
+              onBrowse={() => openPicker({ pattern: '*.xlsx', title: 'SwITCV Coverage Report 선택', current: itcvForm.coverage_path, onSelect: p => setItcvForm(f => ({ ...f, coverage_path: p })) })}
+              isAdmin={isAdmin} browseTitle={browseDisabledTitle} placeholder="…/SwITCV_Coverage_*.xlsx" />
+            <PathRow label="SITR(.xlsm)" value={itcvForm.sitr_path}
+              onChange={v => setItcvForm(f => ({ ...f, sitr_path: v }))}
+              onBrowse={() => openPicker({ pattern: '*.xlsm', title: 'SITR 선택', current: itcvForm.sitr_path, onSelect: p => setItcvForm(f => ({ ...f, sitr_path: p })) })}
+              isAdmin={isAdmin} browseTitle={browseDisabledTitle} placeholder="…/SITR_*.xlsm" />
+            <button type="button" className="btn-primary"
+              disabled={itcvChecking || !itcvForm.coverage_path || !itcvForm.sitr_path}
+              onClick={runItcvCheck} style={{ fontSize: 12 }}>
+              {itcvChecking ? '검증 중...' : '🔍 정합성 검증 실행'}
+            </button>
+            <ConsistencyResult report={itcvReport} peerLabel="SITR" />
           </div>
-        ) : (<>
-        {scmCovHas && (
-          <div style={{ marginBottom: 8 }}>
-            <div className="text-sm text-muted" style={{ marginBottom: 4 }}>
-              VectorCAST 커버리지 (출처: SCM 경로 — 단위/통합 합산)
-            </div>
-            <div className="stats-row">
-              {covCard('구문(Statement)', scmCov.statement)}
-              {covCard('분기(Branch)', scmCov.branch)}
-              {covCard('MC/DC', scmCov.mcdc)}
-            </div>
-          </div>
-        )}
-        <div className="stats-row">
-          {showBuildLine && (
-            <div className="stat-card" style={{ borderLeft: `3px solid ${covPct >= 80 ? 'var(--color-success)' : 'var(--color-warning)'}` }}>
-              <div className="stat-value" style={{ color: covPct >= 80 ? 'var(--color-success)' : 'var(--color-warning)' }}>{covPct}%</div>
-              <div className="stat-label">Line Coverage</div>
-            </div>
-          )}
-          {showBuildBranch && (
-            <div className="stat-card" style={{ borderLeft: `3px solid ${brPct >= 80 ? 'var(--color-success)' : 'var(--color-warning)'}` }}>
-              <div className="stat-value" style={{ color: brPct >= 80 ? 'var(--color-success)' : 'var(--color-warning)' }}>{brPct}%</div>
-              <div className="stat-label">Branch Coverage</div>
-            </div>
-          )}
-          {utCov.line_covered != null && (
-            <div className="stat-card">
-              <div className="stat-value">{utCov.line_covered?.toLocaleString()}<span style={{ fontSize: 11, fontWeight: 400 }}>/{utCov.line_total?.toLocaleString()}</span></div>
-              <div className="stat-label">UT Statement</div>
-            </div>
-          )}
-          {utCov.branch_covered != null && (
-            <div className="stat-card">
-              <div className="stat-value">{utCov.branch_covered?.toLocaleString()}<span style={{ fontSize: 11, fontWeight: 400 }}>/{utCov.branch_total?.toLocaleString()}</span></div>
-              <div className="stat-label">UT Branch</div>
-            </div>
-          )}
-        </div>
-
-        {/* Module coverage table — 행 클릭 시 함수별 커버리지 드릴다운(scmVcast entries) */}
-        {coverageModules.length > 0 && (
-          <details style={{ marginTop: 8 }} open>
-            <summary style={{ cursor: 'pointer', fontSize: 12, fontWeight: 600 }}>
-              모듈별 커버리지 ({coverageModules.length}개){fnLevelLoaded ? ' — 행 클릭 시 함수별 펼침' : ' (함수 드릴다운은 함수레벨 상세 로드 후)'}
-            </summary>
-            <div style={{ maxHeight: 360, overflowY: 'auto', marginTop: 6 }}>
-              <table className="impact-table" style={{ fontSize: 10 }}>
-                <thead><tr><th>모듈</th><th>Line Rate</th><th>Branch Rate</th><th></th></tr></thead>
-                <tbody>
-                  {coverageModules.map((m) => (
-                    <ModuleCovRow key={m.name} name={m.name} lineRate={m.lineRate} branchRate={m.branchRate} functions={m.functions} />
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </details>
-        )}
-        </>)}
+        </details>
       </div>
 
       {/* ── Code Metrics ── */}
@@ -1257,6 +1456,16 @@ export default function AnalysisSection({ job, analysisResult }) {
           <div className="text-muted text-sm" style={{ padding: 12 }}>불러오기 버튼을 클릭하세요.</div>
         )}
       </div>
+
+      {/* 정합성 검증 파일 경로 선택 (admin) — UT/IT 공용. onSelect는 openPicker가 target별로 주입. */}
+      <PathPickerDialog
+        open={!!picker}
+        initialPath={picker?.current || ''}
+        pattern={picker?.pattern || '*'}
+        title={picker?.title || '경로 선택'}
+        onSelect={picker?.onSelect}
+        onClose={() => setPicker(null)}
+      />
     </div>
   );
 }
