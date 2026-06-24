@@ -985,35 +985,39 @@ def _write_coverage_sheet(
             else:
                 swit_present = bool(getattr(fc, "swit_function_present", True))
                 safe_write(ws, r, functions_pass_col, "O" if swit_present else "X")
-                # 라운드 96-final QA fix (W#5) — 무사유 자동 Exception 'O' 제거.
-                # 이전: 미실행/미달 함수 전건에 Exception 'O' 자동 stamp →
-                # Coverage 수식 (Total-Fail+Exception)/Total이 항상 100% 표시
-                # (DV 감사본은 X 3건에 각각 Note 사유 기재 후 Exception 처리).
-                # 신규: Exception 셀은 노란 fill만 (값 비움 — totals 카운트/수식
-                # 정합), Note 셀(no_col+10)에 사유 기재 안내. manual reviewer가
-                # 사유 기재 후 Exception 여부를 결정한다 (ISO 26262 evidence 정책).
-                # 라운드 102 — DV 11열만 Note 열(no_col+10) 존재. PV 10열은 no_col+9가
-                # File이라 note 미기재(미달 상세는 별도 Deviation/Consistency). None→skip.
+                # 라운드 102 (2026-06-24) — DV/PV Exception 정책 분기 (회사 양식 버전차).
+                #   PV v0.10 감사본(최신 정본): 미달(X) 함수의 Exception을 'O' 일괄 처리
+                #     (Note 없이) → Coverage=(Total-Fail+Exception)/Total=100%. 레퍼런스
+                #     직접 대조 확인(F=4·J=21·G5/G6=1.0). 사용자 결정: PV 기준 유지.
+                #   DV v1.01 감사본: Exception 비움 + Note 개별 사유(라운드96 W#5) →
+                #     Coverage 실측. manual reviewer가 사유 기재 후 결정.
+                # has_component_col=False(PV 10열) → auto Exception 'O'. True(DV) → W#5.
+                _pv_auto_exception = not has_component_col
                 _note_col = no_col + 10 if has_component_col else None
                 if not swit_present:
-                    mark_user_input_fill_only(ws, r, functions_pass_col + 1)
-                    if _note_col is not None and not str(ws.cell(r, _note_col).value or "").strip():
-                        mark_user_input_required(
-                            ws, r, _note_col, hint="미실행 사유 (Exception 결정 근거)",
-                        )
+                    if _pv_auto_exception:
+                        safe_write(ws, r, functions_pass_col + 1, "O")
+                    else:
+                        mark_user_input_fill_only(ws, r, functions_pass_col + 1)
+                        if _note_col is not None and not str(ws.cell(r, _note_col).value or "").strip():
+                            mark_user_input_required(
+                                ws, r, _note_col, hint="미실행 사유 (Exception 결정 근거)",
+                            )
                 fcc = getattr(fc, "function_calls_coverage", None)
                 if fcc is not None and fcc.total > 0:
                     safe_write(ws, r, fcalls_count_col, fcc.covered)
                     safe_write(ws, r, fcalls_count_col + 1, fcc.total)
                     safe_write(ws, r, fcalls_count_col + 2, "O" if fcc.passed else "X")
                     if not fcc.passed:
-                        # 동일 정책 — Function Called Exception도 자동 'O' 제거
-                        mark_user_input_fill_only(ws, r, fcalls_count_col + 3)
-                        if _note_col is not None and not str(ws.cell(r, _note_col).value or "").strip():
-                            mark_user_input_required(
-                                ws, r, _note_col,
-                                hint="Function Call 미달 사유 (Exception 결정 근거)",
-                            )
+                        if _pv_auto_exception:
+                            safe_write(ws, r, fcalls_count_col + 3, "O")
+                        else:
+                            mark_user_input_fill_only(ws, r, fcalls_count_col + 3)
+                            if _note_col is not None and not str(ws.cell(r, _note_col).value or "").strip():
+                                mark_user_input_required(
+                                    ws, r, _note_col,
+                                    hint="Function Call 미달 사유 (Exception 결정 근거)",
+                                )
                 elif getattr(fc, "swit_calls_na", False):
                     # 라운드 102 (2026-06-24) — Function Call이 없는 leaf 함수는 Pass열에
                     # 'O'(vacuous pass — 검증할 호출 없음 = 합격). Count/Total은 공백 유지.
@@ -1298,7 +1302,12 @@ def _write_coverage_sheet(
             if isinstance(ws.cell(rr, no_col).value, int)
         )
         safe_write(ws, row_total, no_col, total_no_count or written)
-        safe_write(ws, row_total, total_label_col, "Total")
+        # 라운드 102 (2026-06-24) — 'Total' 라벨은 DV 11열 양식만(Unit ID 열에 기재,
+        # 회사 DV본·테스트 정합). PV 10열 회사 감사본은 totals 행에 'Total' 라벨이
+        # 없음(C1025:D1025 빈 병합 + COUNTA/COUNTIF 수식만) → 라벨 미기재. 기존엔
+        # PV에도 'Total'을 Unit ID(C) 열에 써서 index 열이 오염되는 결함(사용자 지적).
+        if has_component_col:
+            safe_write(ws, row_total, total_label_col, "Total")
         safe_write(ws, row_total, _fp_col, function_fail)
         safe_write(ws, row_total, _fe_col, function_exception)
         safe_write(ws, row_total, _fcf_col, function_call_fail)
