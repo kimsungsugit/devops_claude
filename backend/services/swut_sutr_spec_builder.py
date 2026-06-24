@@ -1945,6 +1945,14 @@ def build_sutr_from_spec(
         # copy_sheet가 끝에 넣었으므로 이미 마지막 (AuditLog 미존재 시) — 명시 정렬.
         summary["output_sheet_order"] = names
 
+    # 라운드 107 — 템플릿/기입 수식(1.Test Summary Coverage 6개 등)을 openpyxl이
+    # 캐시 미저장(cached=None) → 재계산 안 하는 뷰어에서 공백. fullCalcOnLoad로 열 때
+    # 자동 재계산(SwITCV 라운드 102 정합). 캐시 불변이라 data_only 다운스트림 영향 0.
+    try:
+        wb.calculation.fullCalcOnLoad = True
+    except Exception:  # pragma: no cover — openpyxl 버전 차 방어
+        pass
+
     out = io.BytesIO()
     wb.save(out)
     # 라운드 106 — save 직후 무결성 검증 + 손상 시 gc 후 1회 재시도. 거대 '3.Test Log'

@@ -487,6 +487,8 @@ class TestBuildCoverageReport:
             swuts_map=swuts_map,
         )
         out_wb = openpyxl.load_workbook(_io.BytesIO(result.xlsx_bytes), data_only=False)
+        # 라운드 107 — 수식 캐시 미저장 대비 fullCalcOnLoad 보장 (회귀 가드).
+        assert out_wb.calculation.fullCalcOnLoad is True
         out_cov = out_wb["3. Coverage"]
 
         assert out_cov.cell(10, 4).value == "SwUFn_0121"
@@ -600,6 +602,9 @@ class TestBuildCoverageReport:
             buf.getvalue(),
         )
         out_wb = openpyxl.load_workbook(_io.BytesIO(result.xlsx_bytes), data_only=False)
+        # 라운드 107 — 템플릿/기입 수식(O/X·Coverage)이 뷰어 재계산 전 공백이 되지
+        # 않도록 fullCalcOnLoad=True 보장 (SwITCV 라운드 102 정합, silent 회귀 가드).
+        assert out_wb.calculation.fullCalcOnLoad is True
         out_cov = out_wb["3. Coverage"]
 
         assert out_cov.cell(10, 4).value == "SwUFn_0121"

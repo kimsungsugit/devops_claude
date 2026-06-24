@@ -67,6 +67,8 @@ class TestSyntheticGraceful:
         qac = parse_qac_results_xml(_XML)
         res = build_swsa_report(tpl, _meta(), qac_xml=qac)
         out = load_workbook(io.BytesIO(res.xlsm_io.getvalue()))
+        # 라운드 107 — 보존 COUNTIF/SUM 요약 수식 재계산 보장 (fullCalcOnLoad 회귀 가드).
+        assert out.calculation.fullCalcOnLoad is True
         st = out["1.ST101"]
         # Test-Info 기입 (LAYOUT-A: label B → value C)
         assert st["C4"].value == "1"

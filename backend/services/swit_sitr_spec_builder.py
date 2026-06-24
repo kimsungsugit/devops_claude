@@ -878,6 +878,14 @@ def build_sitr_from_spec(
     if LOG_SHEET_NAME in wb.sheetnames:
         summary["output_sheet_order"] = list(wb.sheetnames)
 
+    # 라운드 107 — 템플릿/기입 수식을 openpyxl이 캐시 미저장(cached=None) → 재계산
+    # 안 하는 뷰어에서 공백. fullCalcOnLoad로 열 때 자동 재계산(SwITCV 라운드 102 정합).
+    # 캐시 미저장은 불변이라 data_only 다운스트림 영향 0.
+    try:
+        wb.calculation.fullCalcOnLoad = True
+    except Exception:  # pragma: no cover — openpyxl 버전 차 방어
+        pass
+
     out = io.BytesIO()
     wb.save(out)
     # save 직후 무결성 검증 + 손상 시 gc 후 1회 재시도 (거대 '3.Test Log' 메모리 압박).

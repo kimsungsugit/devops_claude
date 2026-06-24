@@ -11,7 +11,8 @@ import hashlib
 import io
 import re
 from copy import copy
-from dataclasses import dataclass, field, replace as dc_replace
+from dataclasses import dataclass, field
+from dataclasses import replace as dc_replace
 from pathlib import Path
 from typing import Any
 
@@ -1011,8 +1012,8 @@ def build_swutcr_report(
         _compute_asil_distribution,
         _write_audit_log_sheet,
         _write_consistency_sheet,
-        _write_coverage_sheet,
         _write_cover_sheet,
+        _write_coverage_sheet,
         _write_history_sheet,
         _write_test_summary_sheet,
         _write_traceability_sheet,
@@ -1212,6 +1213,14 @@ def build_swutcr_report(
         summary["swutcr_specific_written"] = _write_swutcr_specific_sheets(
             wb, meta, agg, cfg, warnings, spec_fi_auto,
         )
+
+    # 라운드 107 — 템플릿/기입 수식을 openpyxl이 캐시 미저장(cached=None) → 재계산
+    # 안 하는 뷰어에서 공백. fullCalcOnLoad로 열 때 자동 재계산(SwITCV 라운드 102 정합).
+    # 캐시 미저장은 불변이라 data_only 다운스트림 영향 0.
+    try:
+        wb.calculation.fullCalcOnLoad = True
+    except Exception:  # pragma: no cover — openpyxl 버전 차 방어
+        pass
 
     out = io.BytesIO()
     wb.save(out)
