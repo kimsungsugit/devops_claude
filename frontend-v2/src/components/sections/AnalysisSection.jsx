@@ -208,6 +208,9 @@ export default function AnalysisSection({ job, analysisResult }) {
   // (build→cloudium 폴백 내장)를 호출한다.
   const [scmVcast, setScmVcast] = useState(null);
   const [scmVcastLoading, setScmVcastLoading] = useState(false);
+  // CodeSonar(정적분석 PDF, SCM 등록 경로) 지연 로드 — VectorCAST와 별개의 정적분석 도구.
+  const [codesonar, setCodesonar] = useState(null);
+  const [codesonarLoading, setCodesonarLoading] = useState(false);
   // 언마운트 후 폴링 루프가 setState/네트워크를 계속 돌지 않도록 가드(W2). 잡 자체는 서버에서
   // 계속 실행되며 결과는 TTL 캐시되므로, 재진입 시 재클릭하면 빠르게 받는다.
   const mountedRef = useRef(true);
@@ -238,6 +241,28 @@ export default function AnalysisSection({ job, analysisResult }) {
       setComplexityLoading(false);
     }
   }, [job, cfg, cacheRoot, toast]);
+
+  // CodeSonar(정적분석 PDF) 로드 — SCM 등록 경로(linked_docs.codesonar)에서 최신 리포트 파싱.
+  // VectorCAST와 달리 동기(파싱 빠름) — cloudium worker read + PDF 파싱은 초 단위.
+  const loadCodesonar = useCallback(async () => {
+    const paths = analysisResult?.matchedScm?.linked_docs?.codesonar || [];
+    if (!paths.length) { toast('info', 'SCM에 등록된 CodeSonar 경로가 없습니다.'); return; }
+    setCodesonarLoading(true);
+    try {
+      const data = await post('/api/jenkins/report/codesonar', { paths });
+      if (data?.ok) {
+        setCodesonar(data);
+        toast('success', `CodeSonar 경고 ${data.summary?.active_warnings ?? 0}건 로드`);
+      } else {
+        setCodesonar(data || { ok: false });
+        toast('warning', `CodeSonar: ${data?.detail || '결과를 찾지 못했습니다'}`);
+      }
+    } catch (e) {
+      toast('error', `CodeSonar 로드 실패: ${e.message}`);
+    } finally {
+      setCodesonarLoading(false);
+    }
+  }, [analysisResult, toast]);
 
   // 잡 상태를 폴링해 완료 시 결과를 적재한다. 최초 시작과 재진입/포커스 복구가 공용으로 호출한다.
   // poll-first 구조라 '이미 완료된 잡'으로 재진입하면 첫 폴에서 즉시 적재된다(3초 대기 없음).
@@ -357,6 +382,7 @@ export default function AnalysisSection({ job, analysisResult }) {
   const tester = rd?.tester || {};
   // VectorCAST 표시용 — SCM 지연로드 결과가 있으면 그걸, 없으면 빌드 산출물(tester.vectorcast).
   const scmVcastPaths = analysisResult?.matchedScm?.linked_docs?.vectorcast || [];
+  const codesonarPaths = analysisResult?.matchedScm?.linked_docs?.codesonar || [];
   const buildVcast = tester?.vectorcast || {};
   const buildHasVcast = (buildVcast.test_rows_count || 0) > 0
     || (buildVcast.ut_reports || []).length > 0 || (buildVcast.it_reports || []).length > 0;
@@ -676,9 +702,88 @@ export default function AnalysisSection({ job, analysisResult }) {
         </>) : (
           <div className="text-muted text-sm" style={{ padding: 8 }}>
             이 빌드 산출물에 PRQA(Helix QAC) 정적분석 결과가 없습니다. Jenkins 빌드의 PRQA HMR/RCR 리포트가 필요합니다.
-            (CodeSonar는 SCM 정적분석 로그(PDF)에 있으나 현재 미연결입니다.)
+            (CodeSonar는 아래에서 SCM 정적분석 PDF로 불러올 수 있습니다.)
           </div>
         )}
+
+        {/* ── CodeSonar (GrammaTech) — SCM 정적분석 PDF ── */}
+        <div style={{ marginTop: 12, paddingTop: 10, borderTop: '1px solid var(--border)' }}>
+          <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center', marginBottom: 6, flexWrap: 'wrap', gap: 6 }}>
+            <span className="text-sm" style={{ fontWeight: 700 }}>CodeSonar (GrammaTech) — 런타임 오류·데이터플로우 정적분석</span>
+            <div className="row" style={{ gap: 8, alignItems: 'center' }}>
+              {codesonar?.ok && <SourceBadge source="scm" />}
+              {!codesonar?.ok && codesonarPaths.length > 0 && (
+                <button className="btn-sm" onClick={loadCodesonar} disabled={codesonarLoading}
+                  title="SCM 등록 CodeSonar PDF에서 경고 요약/분류별/파일별 지표를 불러옵니다(cloudium read).">
+                  {codesonarLoading ? <span className="spinner" /> : 'CodeSonar 불러오기'}
+                </button>
+              )}
+            </div>
+          </div>
+          <div className="text-sm text-muted" style={{ padding: '0 0 6px', lineHeight: 1.5 }}>
+            CodeSonar는 런타임 오류·데이터플로우 결함(미초기화 변수·도달불가 코드·쓸모없는 대입 등)을 잡는 정적분석 도구입니다.{' '}
+            <b>Active Warnings</b>=총 경고, <b>분류별</b>=경고 종류별 건수, <b>파일별</b>=파일당 경고. SCM 정적분석 PDF에서 추출합니다.
+          </div>
+          {!codesonar && codesonarPaths.length === 0 && (
+            <div className="text-sm text-muted">CodeSonar 경로 미등록 — 설정 &gt; SCM 연결 문서 경로에 정적분석 폴더(예: …/09.정적분석/01.Static Analysis)를 등록하면 불러올 수 있습니다.</div>
+          )}
+          {codesonar && !codesonar.ok && (
+            <div className="text-sm text-muted">CodeSonar 결과를 찾지 못했습니다: {codesonar.detail || codesonar.error || '알 수 없음'}</div>
+          )}
+          {codesonar?.ok && (<>
+            <div className="stats-row" style={{ marginBottom: 8 }}>
+              <div className="stat-card" style={{ borderLeft: `3px solid ${(codesonar.summary?.active_warnings || 0) > 0 ? 'var(--color-warning)' : 'var(--color-success)'}` }}>
+                <div className="stat-value" style={{ color: (codesonar.summary?.active_warnings || 0) > 0 ? 'var(--color-warning)' : 'var(--color-success)' }}>{codesonar.summary?.active_warnings ?? '-'}</div>
+                <div className="stat-label">Active Warnings</div>
+              </div>
+              <div className="stat-card"><div className="stat-value">{codesonar.summary?.file_count ?? '-'}</div><div className="stat-label">분석 파일 수</div></div>
+              <div className="stat-card"><div className="stat-value">{codesonar.summary?.distinct_classes ?? (codesonar.by_class?.length ?? '-')}</div><div className="stat-label">경고 분류 수</div></div>
+            </div>
+            <div className="text-muted" style={{ fontSize: 10, marginBottom: 8 }}>
+              {codesonar.summary?.analysis_name} analysis {codesonar.summary?.analysis_id} · {codesonar.summary?.generated}
+              {codesonar.available_count > 1 ? ` · 최신 1/${codesonar.available_count}개 리포트` : ''}
+            </div>
+            {Array.isArray(codesonar.by_class) && codesonar.by_class.length > 0 && (
+              <details open style={{ marginBottom: 8 }}>
+                <summary style={{ cursor: 'pointer', fontSize: 12, fontWeight: 600 }}>경고 분류별 (Warnings by Class)</summary>
+                <div style={{ marginTop: 6 }}>
+                  {codesonar.by_class.map((c, i) => {
+                    const max = codesonar.by_class[0]?.count || 1;
+                    return (
+                      <div key={i} className="row" style={{ gap: 8, alignItems: 'center', marginBottom: 3 }}>
+                        <span className="text-sm" style={{ minWidth: 170, fontSize: 11 }}>{c.warning_class}</span>
+                        <div style={{ flex: 1, height: 12, background: '#e5e7eb', borderRadius: 3, overflow: 'hidden' }}>
+                          <div style={{ width: `${Math.round((c.count / max) * 100)}%`, height: '100%', background: 'var(--color-warning)' }} />
+                        </div>
+                        <span className="text-sm" style={{ fontWeight: 700, minWidth: 28, textAlign: 'right' }}>{c.count}</span>
+                      </div>
+                    );
+                  })}
+                </div>
+              </details>
+            )}
+            {Array.isArray(codesonar.by_file) && codesonar.by_file.length > 0 && (
+              <details open>
+                <summary style={{ cursor: 'pointer', fontSize: 12, fontWeight: 600 }}>파일별 경고 (Warnings by File · 상위 {codesonar.by_file.length})</summary>
+                <div style={{ maxHeight: 240, overflowY: 'auto', marginTop: 6 }}>
+                  <table className="impact-table" style={{ fontSize: 10 }}>
+                    <thead style={{ position: 'sticky', top: 0 }}><tr style={{ background: 'var(--bg)' }}><th>파일</th><th>경고</th><th>라인</th><th>언어</th></tr></thead>
+                    <tbody>
+                      {codesonar.by_file.map((f, i) => (
+                        <tr key={i} style={{ background: f.warnings >= 10 ? '#fee2e2' : f.warnings >= 5 ? '#fef9c3' : undefined }}>
+                          <td style={{ fontFamily: 'monospace', fontSize: 10 }}>{f.file}</td>
+                          <td style={{ textAlign: 'center', fontWeight: 700, color: f.warnings >= 10 ? 'var(--color-danger)' : f.warnings >= 5 ? 'var(--color-warning)' : undefined }}>{f.warnings}</td>
+                          <td style={{ textAlign: 'center' }}>{f.lines?.toLocaleString?.() ?? f.lines}</td>
+                          <td style={{ textAlign: 'center' }}>{f.language}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </details>
+            )}
+          </>)}
+        </div>
       </div>
 
       {/* ── 유닛테스트 (Unit Test · VectorCAST UT) ── */}

@@ -57,6 +57,7 @@ from backend.helpers import (
 )
 from backend.schemas import (
     CallTreePreviewRequest,
+    CodeSonarRequest,
     JenkinsBuildInfoRequest,
     JenkinsBuildsRequest,
     JenkinsCacheRequest,
@@ -1427,6 +1428,59 @@ def jenkins_vectorcast_rag_async(req: JenkinsReportRequest) -> Dict[str, Any]:
         # 내부 cloudium 경로를 잡 메타(폴링 응답에 노출)에 싣지 않는다 — 개수만 진단용 기록(W3).
         metadata={"job_url": req.job_url, "vcast_path_count": len(_collect_vcast_paths(req))},
     )
+
+
+def _load_codesonar(paths: List[str]) -> Dict[str, Any]:
+    """SCM 등록 경로(폴더 또는 PDF)에서 최신 CodeSonar PDF를 찾아 파싱한다.
+
+    각 path가 .pdf면 직접 대상, 폴더면 재귀로 'CodeSonar*.pdf' 검색. 여러 개면 경로 사전순
+    마지막(날짜 폴더 YYMMDD 기준 최신)을 채택. cloudium 모드는 worker IPC로 read(backend
+    python은 권한 없음). VectorCAST SCM 로드와 동일한 cloudium read 경로.
+    """
+    from backend.services.codesonar_pdf_parser import parse_codesonar_pdf
+    from backend.services.file_resolver import get_resolver
+
+    resolver = get_resolver()
+    found: List[str] = []
+    for raw in paths or []:
+        p = (raw or "").strip()
+        if not p:
+            continue
+        if p.lower().endswith(".pdf"):
+            found.append(p)
+            continue
+        try:
+            files = resolver.list_dir(p, "*", recursive=True)
+        except Exception as e:  # cloudium 권한/미연결/경로부재 — 다음 경로로 graceful
+            _logger.warning("[codesonar] list_dir 실패 %s: %s", p[:80], e)
+            continue
+        for f in files:
+            fl = str(f).lower()
+            if fl.endswith(".pdf") and "codesonar" in fl:
+                found.append(str(f))
+    if not found:
+        return {"ok": False, "error": "missing", "detail": "CodeSonar PDF를 찾지 못했습니다 (경로/권한 확인)"}
+
+    found = sorted(set(found))
+    target = found[-1]
+    try:
+        data = resolver.read_bytes(target)
+    except Exception as e:
+        return {"ok": False, "error": "read_failed", "detail": f"{type(e).__name__}: {str(e)[:200]}"}
+    parsed = parse_codesonar_pdf(data)
+    parsed["source_pdf"] = target
+    parsed["available_count"] = len(found)
+    return parsed
+
+
+@router.post("/api/jenkins/report/codesonar")
+def jenkins_codesonar(req: CodeSonarRequest) -> Dict[str, Any]:
+    """CodeSonar(정적분석) PDF에서 경고 요약/분류별/파일별 지표를 추출한다.
+
+    SCM 연결 문서 경로(linked_docs.codesonar) 또는 사용자 지정 폴더/PDF 경로 목록을 받아
+    최신 CodeSonar 리포트를 파싱. 산출물은 정적분석 섹션의 CodeSonar 카드/표에 표시된다.
+    """
+    return _load_codesonar(req.paths)
 
 
 @router.post("/api/jenkins/source-root")

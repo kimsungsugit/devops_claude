@@ -224,6 +224,32 @@ class JenkinsReportRequest(BaseModel):
         return v
 
 
+class CodeSonarRequest(BaseModel):
+    """CodeSonar(정적분석) PDF 로드 요청 — SCM 등록 폴더(또는 PDF) 경로 목록.
+
+    paths 각 항목은 CodeSonar PDF 파일이거나 그 상위 폴더(재귀 탐색)이다. cloudium 모드면
+    worker IPC로 read. 미지정/local 모드면 빈 결과.
+    """
+
+    paths: List[str] = []
+
+    @field_validator("paths")
+    @classmethod
+    def _check_paths(cls, v: List[str]) -> List[str]:
+        # vcast_log_paths와 동일한 입력 표면 제한(DoS/주입 방어).
+        if v is None:
+            return []
+        if len(v) > 16:
+            raise ValueError("paths는 최대 16개까지 허용됩니다")
+        for item in v:
+            s = str(item or "")
+            if len(s) > 500:
+                raise ValueError("paths 항목 길이는 500자 이하여야 합니다")
+            if "\n" in s or "\r" in s:
+                raise ValueError("paths 항목에 줄바꿈 금지")
+        return v
+
+
 class JenkinsCallTreeRequest(JenkinsReportRequest):
     source_root: Optional[str] = None
     entry: str = ""
