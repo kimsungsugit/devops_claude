@@ -758,8 +758,9 @@ def build_sitr_from_spec(
     # 'Actual Result'로 덮어쓰므로 이후 위치 식별 불가).
     layout = _detect_spec_layout(log_ws, warnings)
 
-    # 헤더 추가 (Actual/Pass-Fail/Log).
-    _write_log_headers(log_ws, warnings, layout=layout)
+    # 헤더 추가 (Actual/Pass-Fail/Log). title='Test Log' — SwITR A1은 회사 감사본 실측
+    # 'Test Log' (공유 함수 기본값 'Software Unit Test Log'는 Unit 전용, 2026-06-24 검증).
+    _write_log_headers(log_ws, warnings, layout=layout, title="Test Log")
 
     # Actual 서브헤더를 Expected 서브헤더(Param N)와 동일하게 미러 — `_write_log_headers`
     # 는 'ActR[i]'를 stamp하나, 회사 PV 레퍼런스는 Expected와 동일한 'Param N' 라벨을
@@ -789,8 +790,12 @@ def build_sitr_from_spec(
     # 2.Deviation B열 TC-id 역매핑 (Unit → TC-id).
     unit_to_tc = _build_swit_unit_to_tc_map(blocks)
 
+    # actual_offset_align=True — SwITR Actual 변수명·값을 Expected 열과 동일 offset에
+    # 정렬 (회사 감사본 SwITR 실측). SUTR는 packed 유지(기본 False). 2026-06-24 검증:
+    # _expected_var_cols 빈 선두 열 skip 시 packed면 Actual 밴드 1열 좌측 시프트.
     fill_stats = _fill_actual_and_result(
         log_ws, blocks, fn_iter_map, asil_map, warnings, layout=layout,
+        actual_offset_align=True,
     )
 
     # Actual Result 열 서식 적용 (Expected 1:1 미러).
