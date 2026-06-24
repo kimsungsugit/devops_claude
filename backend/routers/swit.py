@@ -36,6 +36,7 @@ from backend.schemas import (
     LogFolderPreviewRequest,
     SwITBuildRequest,
     SwITConsistencyCheckRequest,
+    SwITDocSummaryRequest,
     SwITSitrBuildRequest,
 )
 
@@ -51,7 +52,11 @@ from backend.services.swit_comprehensive_aggregator import (
     SwitcrBuildResult,
     build_switcr_report,
 )
-from backend.services.swit_consistency_checker import check_swit_consistency
+from backend.services.swit_consistency_checker import (
+    check_swit_consistency,
+    summarize_swit_coverage_report,
+    summarize_swit_test_report,
+)
 from backend.services.swit_coverage_aggregator import (
     SwitCoverageBuildResult,
     build_swit_coverage_report,
@@ -831,6 +836,34 @@ async def swit_consistency_check(
     return await asyncio.to_thread(
         run_consistency_safely, series="swit",
         check_fn=_do_swit_consistency_check, req=req, logger=_logger,
+    )
+
+
+def _do_swit_doc_summary(req: SwITDocSummaryRequest) -> dict[str, Any]:
+    """단일 산출물(Coverage xlsx | SITR xlsm) bytes를 읽어 해당 결과 요약만 추출(비교 없음).
+
+    정합성 검증(_do_swit_consistency_check)은 두 문서를 cross-validate하지만, 여기서는
+    빌더 산출물 1개만으로 그 문서의 결과(미커버 함수·Exception·Final Result 또는
+    SITR 통과/실패/미실행/Deviation)를 바로 본다.
+    """
+    resolver = get_resolver()
+    data = resolver.read_bytes(req.path)
+    if req.kind == "coverage":
+        return summarize_swit_coverage_report(data)
+    return summarize_swit_test_report(data)
+
+
+@router.post("/doc/summary")
+async def swit_doc_summary(req: SwITDocSummaryRequest) -> dict[str, Any]:
+    """SwITCV Coverage 또는 SITR 산출물 1개를 직접 파싱해 결과 요약 반환.
+
+    35차 정합성 비교(/consistency/check)의 단일 문서판 — 두 문서 쌍이 없어도
+    한 산출물의 결과를 표시. read-only, Semaphore 미적용.
+    """
+    return await asyncio.to_thread(
+        run_consistency_safely, series="swit",
+        check_fn=_do_swit_doc_summary, req=req, logger=_logger,
+        req_summary=f"doc kind={req.kind} path={req.path[:80]}",
     )
 
 

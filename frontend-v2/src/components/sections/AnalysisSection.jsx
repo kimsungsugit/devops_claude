@@ -92,7 +92,7 @@ function ModuleCovRow({ name, lineRate, branchRate, functions }) {
 // 커버리지 결과(coverage_summary)는 빌더 Coverage Report의 Traceability/Coverage 시트에서 파싱된 값이라
 // '미커버 함수·Exception·Total TC·Final Result'를 그대로 보여준다. severity 색은 SwUTBuildSection과
 // 동일한 전역 CSS(swut-issue-${severity})에 위임. peerLabel = 'SUTR'(UT) | 'SITR'(IT).
-function ConsistencyResult({ report, peerLabel = 'SUTR' }) {
+function ConsistencyResult({ report, peerLabel = 'SUTR', hideVerdict = false }) {
   if (!report) return null;
   const issues = report.issues || [];
   const pw = report.parse_warnings || [];
@@ -104,10 +104,16 @@ function ConsistencyResult({ report, peerLabel = 'SUTR' }) {
   const hasPeer = ss.total_tcs != null || ss.passed != null || ss.failed != null;
   return (
     <div className="swut-consistency-result" style={{ marginTop: 8 }}>
-      <div className="swut-consistency-status">
-        결과: <strong>{report.ok ? '✅ PASS' : '⚠️ FAIL'}</strong>{' '}
-        — issue {issues.length}건, warning {pw.length}건
-      </div>
+      {/* hideVerdict: 단일 산출물 직접 파싱(정합성 비교 아님) — PASS/FAIL·issue 헤더 생략 */}
+      {!hideVerdict && (
+        <div className="swut-consistency-status">
+          결과: <strong>{report.ok ? '✅ PASS' : '⚠️ FAIL'}</strong>{' '}
+          — issue {issues.length}건, warning {pw.length}건
+        </div>
+      )}
+      {hideVerdict && !hasCov && !hasPeer && pw.length === 0 && (
+        <div className="text-sm text-muted">추출된 결과가 없습니다 — 시트명/헤더 구조를 확인하세요.</div>
+      )}
       {hasCov && (
         <div className="stats-row" style={{ marginTop: 6 }}>
           {cs.total_tcs != null && (
@@ -386,6 +392,11 @@ export default function AnalysisSection({ job, analysisResult }) {
   const [itcvForm, setItcvForm] = useState({ coverage_path: '', sitr_path: '' });
   const [itcvReport, setItcvReport] = useState(null);
   const [itcvChecking, setItcvChecking] = useState(false);
+  // 단일 산출물 직접 파싱(정합성 비교 없이) — {coverage,report} 각 문서 요약 결과 + busy kind
+  const [utDoc, setUtDoc] = useState({ coverage: null, report: null });
+  const [utDocBusy, setUtDocBusy] = useState('');
+  const [itDoc, setItDoc] = useState({ coverage: null, report: null });
+  const [itDocBusy, setItDocBusy] = useState('');
 
   const runUtcvCheck = useCallback(async () => {
     if (!utcvForm.coverage_path || !utcvForm.sutr_path) {
@@ -424,6 +435,27 @@ export default function AnalysisSection({ job, analysisResult }) {
       if (mountedRef.current) setItcvChecking(false);
     }
   }, [itcvForm, toast]);
+
+  // 단일 산출물 직접 파싱 — 정합성 비교(두 문서 쌍) 없이 한 문서(kind: coverage|report)만
+  // 파싱해 그 결과 요약을 표시. series='swut'|'swit', kind='coverage'|'report'.
+  const parseDoc = useCallback(async (series, kind, path) => {
+    if (!path) { toast('warning', '먼저 산출물 파일 경로를 입력하세요.'); return; }
+    const setDoc = series === 'swut' ? setUtDoc : setItDoc;
+    const setBusy = series === 'swut' ? setUtDocBusy : setItDocBusy;
+    setBusy(kind);
+    try {
+      const res = await post(`/api/${series}/doc/summary`, { path, kind });
+      if (!mountedRef.current) return;
+      setDoc(d => ({ ...d, [kind]: res }));
+      const pw = (res?.parse_warnings || []).length;
+      toast(pw ? 'warning' : 'success',
+        pw ? `산출물 파싱 완료 — 경고 ${pw}건(카드 확인)` : '산출물 결과 파싱 완료');
+    } catch (e) {
+      if (mountedRef.current) toast('error', `산출물 파싱 실패: ${e.message}`);
+    } finally {
+      if (mountedRef.current) setBusy('');
+    }
+  }, [toast]);
 
   // 잡 상태를 폴링해 완료 시 결과를 적재한다. 최초 시작과 재진입/포커스 복구가 공용으로 호출한다.
   // poll-first 구조라 '이미 완료된 잡'으로 재진입하면 첫 폴에서 즉시 적재된다(3초 대기 없음).
@@ -1205,20 +1237,33 @@ export default function AnalysisSection({ job, analysisResult }) {
           </summary>
           <div style={{ marginTop: 8 }}>
             <div className="text-sm text-muted" style={{ marginBottom: 8, lineHeight: 1.5 }}>
-              생성한 <b>SwUTCV Coverage Report(.xlsx)</b>와 <b>SUTR(.xlsm)</b> 파일 경로를 지정하면, 빌더의 Coverage↔SUTR 교차검증(미커버 함수·Exception·Total TC·Final Result 정합성)을 표시합니다.
+              생성한 <b>SwUTCV Coverage(.xlsx)</b> / <b>SUTR(.xlsm)</b> 경로를 지정해, 문서 하나만 <b>‘이 문서 파싱’</b>하면 그 산출물 결과(미커버 함수·Exception·통과/실패 등)를, 둘 다 넣고 <b>‘정합성 비교’</b>하면 Coverage↔SUTR 교차검증까지 표시합니다.
             </div>
             <PathRow label="Coverage(.xlsx)" value={utcvForm.coverage_path}
               onChange={v => setUtcvForm(f => ({ ...f, coverage_path: v }))}
               onBrowse={() => openPicker({ pattern: '*.xlsx', title: 'SwUTCV Coverage Report 선택', current: utcvForm.coverage_path, onSelect: p => setUtcvForm(f => ({ ...f, coverage_path: p })) })}
               isAdmin={isAdmin} browseTitle={browseDisabledTitle} placeholder="…/SwUTCV_Coverage_*.xlsx" />
+            <button type="button" className="btn-secondary" style={{ fontSize: 11, marginBottom: 6 }}
+              disabled={utDocBusy === 'coverage' || !utcvForm.coverage_path}
+              onClick={() => parseDoc('swut', 'coverage', utcvForm.coverage_path)}>
+              {utDocBusy === 'coverage' ? '파싱 중...' : '📄 이 문서 파싱 (Coverage)'}
+            </button>
+            {utDoc.coverage && <ConsistencyResult report={utDoc.coverage} peerLabel="SUTR" hideVerdict />}
             <PathRow label="SUTR(.xlsm)" value={utcvForm.sutr_path}
               onChange={v => setUtcvForm(f => ({ ...f, sutr_path: v }))}
               onBrowse={() => openPicker({ pattern: '*.xlsm', title: 'SUTR 선택', current: utcvForm.sutr_path, onSelect: p => setUtcvForm(f => ({ ...f, sutr_path: p })) })}
               isAdmin={isAdmin} browseTitle={browseDisabledTitle} placeholder="…/SUTR_*.xlsm" />
+            <button type="button" className="btn-secondary" style={{ fontSize: 11, marginBottom: 6 }}
+              disabled={utDocBusy === 'report' || !utcvForm.sutr_path}
+              onClick={() => parseDoc('swut', 'report', utcvForm.sutr_path)}>
+              {utDocBusy === 'report' ? '파싱 중...' : '📄 이 문서 파싱 (SUTR)'}
+            </button>
+            {utDoc.report && <ConsistencyResult report={utDoc.report} peerLabel="SUTR" hideVerdict />}
+            <div style={{ borderTop: '1px solid var(--border)', margin: '8px 0' }} />
             <button type="button" className="btn-primary"
               disabled={utcvChecking || !utcvForm.coverage_path || !utcvForm.sutr_path}
               onClick={runUtcvCheck} style={{ fontSize: 12 }}>
-              {utcvChecking ? '검증 중...' : '🔍 정합성 검증 실행'}
+              {utcvChecking ? '검증 중...' : '🔍 정합성 비교 (두 문서)'}
             </button>
             <ConsistencyResult report={utcvReport} peerLabel="SUTR" />
           </div>
@@ -1287,20 +1332,33 @@ export default function AnalysisSection({ job, analysisResult }) {
           </summary>
           <div style={{ marginTop: 8 }}>
             <div className="text-sm text-muted" style={{ marginBottom: 8, lineHeight: 1.5 }}>
-              생성한 <b>SwITCV Coverage Report(.xlsx)</b>와 <b>SITR(.xlsm)</b> 파일 경로를 지정하면, 빌더의 Coverage↔SITR 교차검증(미커버 함수·Exception·Total TC·Final Result 정합성)을 표시합니다.
+              생성한 <b>SwITCV Coverage(.xlsx)</b> / <b>SITR(.xlsm)</b> 경로를 지정해, 문서 하나만 <b>‘이 문서 파싱’</b>하면 그 산출물 결과(미커버 함수·Exception·통과/실패 등)를, 둘 다 넣고 <b>‘정합성 비교’</b>하면 Coverage↔SITR 교차검증까지 표시합니다.
             </div>
             <PathRow label="Coverage(.xlsx)" value={itcvForm.coverage_path}
               onChange={v => setItcvForm(f => ({ ...f, coverage_path: v }))}
               onBrowse={() => openPicker({ pattern: '*.xlsx', title: 'SwITCV Coverage Report 선택', current: itcvForm.coverage_path, onSelect: p => setItcvForm(f => ({ ...f, coverage_path: p })) })}
               isAdmin={isAdmin} browseTitle={browseDisabledTitle} placeholder="…/SwITCV_Coverage_*.xlsx" />
+            <button type="button" className="btn-secondary" style={{ fontSize: 11, marginBottom: 6 }}
+              disabled={itDocBusy === 'coverage' || !itcvForm.coverage_path}
+              onClick={() => parseDoc('swit', 'coverage', itcvForm.coverage_path)}>
+              {itDocBusy === 'coverage' ? '파싱 중...' : '📄 이 문서 파싱 (Coverage)'}
+            </button>
+            {itDoc.coverage && <ConsistencyResult report={itDoc.coverage} peerLabel="SITR" hideVerdict />}
             <PathRow label="SITR(.xlsm)" value={itcvForm.sitr_path}
               onChange={v => setItcvForm(f => ({ ...f, sitr_path: v }))}
               onBrowse={() => openPicker({ pattern: '*.xlsm', title: 'SITR 선택', current: itcvForm.sitr_path, onSelect: p => setItcvForm(f => ({ ...f, sitr_path: p })) })}
               isAdmin={isAdmin} browseTitle={browseDisabledTitle} placeholder="…/SITR_*.xlsm" />
+            <button type="button" className="btn-secondary" style={{ fontSize: 11, marginBottom: 6 }}
+              disabled={itDocBusy === 'report' || !itcvForm.sitr_path}
+              onClick={() => parseDoc('swit', 'report', itcvForm.sitr_path)}>
+              {itDocBusy === 'report' ? '파싱 중...' : '📄 이 문서 파싱 (SITR)'}
+            </button>
+            {itDoc.report && <ConsistencyResult report={itDoc.report} peerLabel="SITR" hideVerdict />}
+            <div style={{ borderTop: '1px solid var(--border)', margin: '8px 0' }} />
             <button type="button" className="btn-primary"
               disabled={itcvChecking || !itcvForm.coverage_path || !itcvForm.sitr_path}
               onClick={runItcvCheck} style={{ fontSize: 12 }}>
-              {itcvChecking ? '검증 중...' : '🔍 정합성 검증 실행'}
+              {itcvChecking ? '검증 중...' : '🔍 정합성 비교 (두 문서)'}
             </button>
             <ConsistencyResult report={itcvReport} peerLabel="SITR" />
           </div>

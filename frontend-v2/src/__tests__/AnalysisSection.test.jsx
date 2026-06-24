@@ -284,7 +284,7 @@ describe('AnalysisSection', () => {
     fireEvent.change(screen.getByPlaceholderText('…/SwUTCV_Coverage_*.xlsx'), { target: { value: 'U:/cov.xlsx' } });
     fireEvent.change(screen.getByPlaceholderText('…/SUTR_*.xlsm'), { target: { value: 'U:/sutr.xlsm' } });
     await act(async () => {
-      fireEvent.click(screen.getAllByRole('button', { name: /정합성 검증 실행/ })[0]);
+      fireEvent.click(screen.getAllByRole('button', { name: /정합성 비교/ })[0]);
     });
 
     await waitFor(() => expect(post).toHaveBeenCalledWith(
@@ -309,7 +309,7 @@ describe('AnalysisSection', () => {
     fireEvent.change(screen.getByPlaceholderText('…/SwUTCV_Coverage_*.xlsx'), { target: { value: 'U:/c.xlsx' } });
     fireEvent.change(screen.getByPlaceholderText('…/SUTR_*.xlsm'), { target: { value: 'U:/s.xlsm' } });
     await act(async () => {
-      fireEvent.click(screen.getAllByRole('button', { name: /정합성 검증 실행/ })[0]);
+      fireEvent.click(screen.getAllByRole('button', { name: /정합성 비교/ })[0]);
     });
 
     await waitFor(() => expect(screen.getAllByText(/⚠️ FAIL/).length).toBeGreaterThan(0));
@@ -326,12 +326,58 @@ describe('AnalysisSection', () => {
     fireEvent.change(screen.getByPlaceholderText('…/SITR_*.xlsm'), { target: { value: 'U:/sitr.xlsm' } });
     await act(async () => {
       // [0]=UT 실행 버튼, [1]=IT 실행 버튼 (DOM 순서)
-      fireEvent.click(screen.getAllByRole('button', { name: /정합성 검증 실행/ })[1]);
+      fireEvent.click(screen.getAllByRole('button', { name: /정합성 비교/ })[1]);
     });
 
     await waitFor(() => expect(post).toHaveBeenCalledWith(
       '/api/swit/consistency/check', { coverage_path: 'U:/itcov.xlsx', sitr_path: 'U:/sitr.xlsm' },
     ));
+  });
+
+  // ── 단일 산출물 직접 파싱 (정합성 비교 없이 문서 1개만) ──
+
+  it('SwUTCV 단일 파싱: Coverage 경로로 /api/swut/doc/summary 호출 + verdict 없이 커버리지 카드만', async () => {
+    const { post } = await import('../api.js');
+    post.mockResolvedValue({
+      coverage_summary: { total_tcs: 100, total_functions: 12, uncovered_functions: ['SwUFn_3'], exception_statement: 1, exception_branch: 0, final_result: 'PASS' },
+      parse_warnings: [],
+    });
+    const { container } = render(<AnalysisSection job={makeJob()} analysisResult={makeAnalysisResult()} />);
+
+    fireEvent.change(screen.getByPlaceholderText('…/SwUTCV_Coverage_*.xlsx'), { target: { value: 'U:/cov.xlsx' } });
+    await act(async () => {
+      // [0]=UT Coverage 파싱 버튼 (IT에도 동명 버튼 존재 → DOM 순서 UT 먼저)
+      fireEvent.click(screen.getAllByRole('button', { name: /이 문서 파싱 \(Coverage\)/ })[0]);
+    });
+
+    await waitFor(() => expect(post).toHaveBeenCalledWith(
+      '/api/swut/doc/summary', { path: 'U:/cov.xlsx', kind: 'coverage' },
+    ));
+    expect(screen.getByText('Traceability TC')).toBeInTheDocument();
+    expect(screen.getByText('미커버 함수')).toBeInTheDocument();
+    // hideVerdict — 정합성 비교가 아니므로 PASS/FAIL verdict 상태줄 없음
+    expect(container.querySelector('.swut-consistency-status')).toBeNull();
+  });
+
+  it('SwITCV 단일 파싱: SITR 경로로 /api/swit/doc/summary {kind:report} 호출 + SITR 합부 카드', async () => {
+    const { post } = await import('../api.js');
+    post.mockResolvedValue({
+      sutr_summary: { total_tcs: 30, passed: 28, failed: 2, not_executed: 0, deviated: 0, final_result: 'NG' },
+      parse_warnings: [],
+    });
+    render(<AnalysisSection job={makeJob()} analysisResult={makeAnalysisResult()} />);
+
+    fireEvent.change(screen.getByPlaceholderText('…/SITR_*.xlsm'), { target: { value: 'U:/sitr.xlsm' } });
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /이 문서 파싱 \(SITR\)/ }));
+    });
+
+    await waitFor(() => expect(post).toHaveBeenCalledWith(
+      '/api/swit/doc/summary', { path: 'U:/sitr.xlsm', kind: 'report' },
+    ));
+    expect(screen.getByText('SITR TC')).toBeInTheDocument();
+    expect(screen.getByText('통과')).toBeInTheDocument();
+    expect(screen.getByText('실패')).toBeInTheDocument();
   });
 
   // ── 재진입 자동복구(스피너 고착/데이터 유실 방지) ──────────────────

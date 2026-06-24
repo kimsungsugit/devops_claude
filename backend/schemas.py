@@ -1,7 +1,7 @@
 """Pydantic request/response models for the backend API."""
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -1081,6 +1081,27 @@ class SwUTConsistencyCheckRequest(BaseModel):
         return v
 
 
+class SwUTDocSummaryRequest(BaseModel):
+    """단일 산출물(SwUTCV Coverage .xlsx 또는 SUTR .xlsm) 직접 파싱 요청 (정합성 비교 없이).
+
+    SwUTConsistencyCheckRequest와 달리 path 1개만 받아 해당 문서의 결과 요약만 반환.
+    kind='coverage' → coverage_summary, kind='report' → sutr_summary.
+
+    입력 표면 매트릭스:
+      - path: maxlen 500, 줄바꿈 금지 (헤더 인젝션 안전), 필수
+      - kind: 'coverage' | 'report' (Literal 강제)
+    """
+    path: str = Field(..., min_length=1, max_length=500)
+    kind: Literal["coverage", "report"]
+
+    @field_validator("path")
+    @classmethod
+    def _no_newline_doc_path(cls, v: str) -> str:
+        if "\n" in v or "\r" in v:
+            raise ValueError("줄바꿈 문자 금지 — 단일 라인 path 필요")
+        return v
+
+
 # ── SwIT Consistency Check (35차 라운드) ──────────────────────────────
 
 class AddAllowedPrefixRequest(BaseModel):
@@ -1142,6 +1163,27 @@ class SwITConsistencyCheckRequest(BaseModel):
     @field_validator("coverage_path", "sitr_path")
     @classmethod
     def _no_newline_swit_paths(cls, v: str) -> str:
+        if "\n" in v or "\r" in v:
+            raise ValueError("줄바꿈 문자 금지 — 단일 라인 path 필요")
+        return v
+
+
+class SwITDocSummaryRequest(BaseModel):
+    """단일 산출물(SwITCV Coverage .xlsx 또는 SITR .xlsm) 직접 파싱 요청 (정합성 비교 없이).
+
+    SwUTDocSummaryRequest와 동일 패턴 — SwIT용. kind='coverage' → coverage_summary,
+    kind='report' → sutr_summary(SITR 결과).
+
+    입력 표면 매트릭스:
+      - path: maxlen 500, 줄바꿈 금지 (헤더 인젝션 안전), 필수
+      - kind: 'coverage' | 'report' (Literal 강제)
+    """
+    path: str = Field(..., min_length=1, max_length=500)
+    kind: Literal["coverage", "report"]
+
+    @field_validator("path")
+    @classmethod
+    def _no_newline_swit_doc_path(cls, v: str) -> str:
         if "\n" in v or "\r" in v:
             raise ValueError("줄바꿈 문자 금지 — 단일 라인 path 필요")
         return v

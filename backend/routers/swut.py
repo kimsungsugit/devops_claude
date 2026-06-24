@@ -39,6 +39,7 @@ from backend.schemas import (
     SwUTBrowseRequest,
     SwUTBuildRequest,
     SwUTConsistencyCheckRequest,
+    SwUTDocSummaryRequest,
 )
 from backend.services.file_resolver import get_resolver
 from backend.services.path_mode_check import check_log_folder_mode_compat
@@ -46,7 +47,11 @@ from backend.services.swut_comprehensive_aggregator import (
     SwutcrBuildMeta,
     build_swutcr_report,
 )
-from backend.services.swut_consistency_checker import check_swut_consistency
+from backend.services.swut_consistency_checker import (
+    check_swut_consistency,
+    summarize_coverage_report,
+    summarize_test_report,
+)
 from backend.services.swut_coverage_aggregator import (
     CoverageBuildMeta,
     build_coverage_report,
@@ -1018,6 +1023,33 @@ async def consistency_check(
     return await asyncio.to_thread(
         run_consistency_safely, series="swut",
         check_fn=_do_consistency_check, req=req, logger=_logger,
+    )
+
+
+def _do_swut_doc_summary(req: SwUTDocSummaryRequest) -> dict[str, Any]:
+    """단일 산출물(SwUTCV Coverage xlsx | SUTR xlsm) bytes를 읽어 결과 요약만 추출(비교 없음).
+
+    정합성 검증(_do_consistency_check)은 두 문서를 cross-validate하지만, 여기서는
+    빌더 산출물 1개만으로 그 문서의 결과(미커버 함수·Exception·Final Result 또는
+    SUTR 통과/실패/미실행/Deviation)를 바로 본다.
+    """
+    resolver = get_resolver()
+    data = resolver.read_bytes(req.path)
+    if req.kind == "coverage":
+        return summarize_coverage_report(data)
+    return summarize_test_report(data)
+
+
+@router.post("/doc/summary")
+async def swut_doc_summary(req: SwUTDocSummaryRequest) -> dict[str, Any]:
+    """SwUTCV Coverage 또는 SUTR 산출물 1개를 직접 파싱해 결과 요약 반환.
+
+    18차 정합성 비교(/consistency/check)의 단일 문서판 — read-only, Semaphore 미적용.
+    """
+    return await asyncio.to_thread(
+        run_consistency_safely, series="swut",
+        check_fn=_do_swut_doc_summary, req=req, logger=_logger,
+        req_summary=f"doc kind={req.kind} path={req.path[:80]}",
     )
 
 

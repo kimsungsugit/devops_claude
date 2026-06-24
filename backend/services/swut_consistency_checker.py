@@ -49,7 +49,6 @@ except ImportError:  # pragma: no cover - hook fail-safe
 
 from backend.services.excel_template_utils import sheet_is_blank_placeholder
 
-
 # ---------------------------------------------------------------------------
 # Data classes
 # ---------------------------------------------------------------------------
@@ -401,6 +400,59 @@ def _load_workbook(source: Any) -> Any:
         return openpyxl.load_workbook(source, read_only=True, data_only=True)
     # assume already a Workbook
     return source
+
+
+def summarize_coverage_report(
+    coverage_source: Any, *, tc_prefix: str = "SwUTC",
+) -> dict[str, Any]:
+    """단일 Coverage Report(.xlsx)만 파싱해 coverage_summary를 반환(정합성 비교 없이).
+
+    check_swut_consistency가 내부적으로 쓰는 `_extract_coverage_summary`를 단독 호출 —
+    빌더 산출물 하나만 있어도 미커버 함수·Exception·Total TC·Final Result를 바로 본다.
+    SwIT는 thin wrapper(swit_consistency_checker)에서 tc_prefix="SwITC"로 호출.
+
+    Returns: {coverage_summary: dict, parse_warnings: list[str]}. 파싱 실패는
+    parse_warnings에 누적되며 coverage_summary는 부분/빈 dict일 수 있다(예외 안 던짐).
+    """
+    wb = _load_workbook(coverage_source)
+    parse_warnings: list[str] = []
+    names = [n.lower() for n in wb.sheetnames]
+    if not any("traceability" in n for n in names):
+        parse_warnings.append(
+            "Coverage Report에 'Traceability' 시트 없음 — Hyundai/Mobis 포맷 가정 검증 필요"
+        )
+    if not any(
+        "coverage" in n and "traceability" not in n and "consistency" not in n
+        for n in names
+    ):
+        parse_warnings.append("Coverage Report에 'Coverage' 시트(3.Coverage 등) 없음")
+    cov = _extract_coverage_summary(
+        wb, out_warnings=parse_warnings, tc_prefix=tc_prefix,
+    )
+    return {"coverage_summary": cov, "parse_warnings": parse_warnings}
+
+
+def summarize_test_report(
+    sutr_source: Any, *, tc_prefix: str = "SwUTC",
+) -> dict[str, Any]:
+    """단일 SUTR/SITR(.xlsm)만 파싱해 sutr_summary를 반환(정합성 비교 없이).
+
+    `_extract_sutr_summary` 단독 호출. not_executed는 빌더가 Test Summary 행에
+    숫자로 stamp하지 않는 알려진 결함이 있어(노란 hint 셀) 추출 시 0으로 남는다 —
+    여기서만 not_executed_tcs 목록 길이로 read-side 보정한다(공유 추출기/정합성 경로는
+    불변, 단일 문서 표시값만 정확화). Returns {sutr_summary, parse_warnings}.
+    """
+    wb = _load_workbook(sutr_source)
+    parse_warnings: list[str] = []
+    names = [n.lower() for n in wb.sheetnames]
+    if not any("test summary" == n or ("summary" in n and "test" in n) for n in names):
+        parse_warnings.append("Test Report에 'Test Summary' 시트 없음")
+    sutr = _extract_sutr_summary(wb, tc_prefix=tc_prefix)
+    # not_executed read-side 보정 — 목록은 있는데 카운트가 0이면 목록 길이로 채움.
+    ne_tcs = sutr.get("not_executed_tcs") or []
+    if not sutr.get("not_executed") and ne_tcs:
+        sutr["not_executed"] = len(ne_tcs)
+    return {"sutr_summary": sutr, "parse_warnings": parse_warnings}
 
 
 def check_swut_consistency(
