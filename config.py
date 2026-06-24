@@ -255,6 +255,10 @@ if _DEFAULT_OAI_CONFIG.exists():
 else:
     DEFAULT_OAI_CONFIG_PATH = os.environ.get("DEVOPS_OAI_CONFIG_PATH", "/app/OAI_CONFIG_LIST")
 
+# 챗 어시스턴트 전용 OAI config 경로(서버 고정 — 클라이언트 요청 본문의 oai_config_path
+# 제어를 차단하는 SSRF-lite 방어. 미설정 시 DEFAULT_OAI_CONFIG_PATH 폴백). env-only.
+CHAT_OAI_CONFIG_PATH = os.environ.get("CHAT_OAI_CONFIG_PATH", "").strip() or None
+
 
 def resolve_oai_api_keys(config_list: list) -> list:
     """Resolve 'ENV:VAR_NAME' placeholders in api_key fields to actual env values."""

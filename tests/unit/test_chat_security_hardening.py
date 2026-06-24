@@ -210,3 +210,66 @@ class TestReportBundleCacheLRU:
         b2 = srv.read_bundle(d)
         assert "__injected__" not in b2
         srv.clear_cache()
+
+
+# ── R1 oai_config_path 서버 고정 (SSRF-lite 차단) ─────────────────────────
+
+class TestOaiConfigServerFixed:
+    def test_client_oai_config_path_ignored(self, monkeypatch):
+        captured = {}
+        monkeypatch.setattr(asvc, "load_oai_config", lambda p: (captured.update(path=p) or _fake_cfg()))
+        monkeypatch.setattr(asvc, "load_oai_configs", lambda *a, **k: [_fake_cfg()])
+        monkeypatch.setattr(asvc, "_run_llm_candidates", lambda **k: ("ok", _fake_cfg(), "", 1.0))
+        asvc.answer_chat(
+            mode="local", question="안녕", report_dir=None, session_id=None, llm_model=None,
+            oai_config_path="C:/evil/secret.json", ui_context={"current_view": "detail"},
+            history=None, requester="alice",
+        )
+        # 클라이언트가 보낸 임의 경로가 무시되고 서버 고정값(DEFAULT)이 쓰임
+        assert captured.get("path") != "C:/evil/secret.json"
+
+
+# ── R2 부정문 승인 억제 + _skipped 노드 ───────────────────────────────────
+
+class TestNegationSuppression:
+    @pytest.mark.parametrize("text", [
+        "커밋하지마", "푸시하지 말고 보여줘", "don't commit this", "deploy without pushing",
+    ])
+    def test_negation_suppresses_gate(self, text):
+        assert asvc._build_approval_request(
+            question=text, question_type="general", ui_context=None,
+        ) is None
+
+    def test_has_negation(self):
+        assert asvc._has_negation("커밋하지마")
+        assert asvc._has_negation("don't commit")
+        assert not asvc._has_negation("커밋해줘")
+
+    def test_real_action_still_gates(self):
+        # 부정문 아닌 실제 실행 요청은 여전히 게이트
+        assert asvc._build_approval_request(
+            question="deploy to prod now", question_type="general", ui_context=None,
+        ) is not None
+
+
+class TestSkippedNodeEvent:
+    def test_skipped_emits_skipped_and_not_leak(self):
+        from workflow.chat_graph import new_chat_graph_state, run_chat_graph
+        events = []
+        state = new_chat_graph_state(
+            mode="local", question="q", session_id=None, report_dir=None,
+            ui_context=None, history=None,
+        )
+        run_chat_graph(
+            initial_state=state,
+            nodes=[("a", lambda s: {"approval_required": True}), ("b", lambda s: {"_skipped": True})],
+            event_callback=events.append,
+        )
+        fin_b = [e for e in events if e["type"] == "graph_node_finished" and e["payload"]["node"] == "b"]
+        assert fin_b and fin_b[0]["payload"]["skipped"] is True
+        # 정상 노드는 skipped=False
+        fin_a = [e for e in events if e["type"] == "graph_node_finished" and e["payload"]["node"] == "a"]
+        assert fin_a and fin_a[0]["payload"]["skipped"] is False
+        # _skipped 센티널이 state 로 새지 않음
+        assert "_skipped" not in state.extra
+        assert not hasattr(state, "_skipped")

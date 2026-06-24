@@ -150,6 +150,7 @@ def run_chat_graph(
                 except Exception as exc:  # D3: 노드 예외를 errors 로 흡수 (전체 500 방지)
                     updates = {"errors": [{"code": "node_error", "node": node_name, "message": str(exc)}]}
                 elapsed_ms = (time.perf_counter() - started) * 1000.0
+                skipped = bool(updates.pop("_skipped", False))  # 노드가 본문 없이 건너뜀
                 metrics = dict(state_dict.get("metrics") or {})
                 node_metrics = dict(metrics.get("nodes") or {})
                 node_metrics[node_name] = {"elapsed_ms": round(elapsed_ms, 1)}
@@ -159,7 +160,7 @@ def run_chat_graph(
                     event_callback,
                     event_type="graph_node_finished",
                     state=state_obj,
-                    payload={"node": node_name, "elapsed_ms": round(elapsed_ms, 1)},
+                    payload={"node": node_name, "elapsed_ms": round(elapsed_ms, 1), "skipped": skipped},
                 )
                 return updates
             return _wrapped
@@ -201,6 +202,7 @@ def run_chat_graph(
         except Exception as exc:  # D3: 노드 예외를 errors 로 흡수 (전체 500 방지)
             updates = {"errors": [*(state.errors or []), {"code": "node_error", "node": node_name, "message": str(exc)}]}
         elapsed_ms = (time.perf_counter() - started) * 1000.0
+        skipped = bool(updates.pop("_skipped", False))  # 노드가 본문 없이 건너뜀(flash 방지)
         for key, value in updates.items():
             if hasattr(state, key):
                 setattr(state, key, value)
@@ -216,6 +218,7 @@ def run_chat_graph(
             payload={
                 "node": node_name,
                 "elapsed_ms": round(elapsed_ms, 1),
+                "skipped": skipped,
             },
         )
     state.metrics["graph_total_ms"] = round((time.perf_counter() - total_started) * 1000.0, 1)

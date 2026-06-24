@@ -20,6 +20,7 @@ function formatMs(ms) {
 function StepIcon({ status }) {
   if (status === 'active') return <span className="spinner" style={{ display: 'inline-block', width: 12, height: 12 }} />;
   if (status === 'done') return <span style={{ color: 'var(--success, #16a34a)', fontSize: 12, fontWeight: 700 }}>✓</span>;
+  if (status === 'skipped') return <span aria-hidden title="건너뜀" style={{ color: 'var(--text-muted)', fontSize: 12, lineHeight: 1 }}>⊘</span>;
   return <span aria-hidden style={{ color: 'var(--text-muted)', fontSize: 12, lineHeight: 1 }}>○</span>;
 }
 
@@ -34,7 +35,7 @@ function ProgressStepper({ stepStatus, onCancel }) {
         return (
           <Fragment key={d.key}>
             {i > 0 && <span aria-hidden style={{ width: 10, height: 1, background: 'var(--border)', margin: '0 2px' }} />}
-            <span className="row" style={{ gap: 3, alignItems: 'center', opacity: st === 'pending' ? 0.45 : 1 }}>
+            <span className="row" style={{ gap: 3, alignItems: 'center', opacity: (st === 'pending' || st === 'skipped') ? 0.45 : 1 }}>
               <StepIcon status={st} />
               <span style={{ fontSize: 11, color: st === 'active' ? 'var(--accent)' : 'var(--text-muted)', fontWeight: st === 'active' ? 600 : 400 }}>{d.label}</span>
               {st === 'done' && ms != null && <span className="text-muted" style={{ fontSize: 9 }}>{formatMs(ms)}</span>}
@@ -183,7 +184,8 @@ export default function AiAssistSection({ job, analysisResult }) {
             if (node) setStepStatus(s => ({ ...s, [node]: { status: 'active', ms: s[node]?.ms } }));
           } else if (t === 'graph_node_finished') {
             const node = data.payload?.node;
-            if (node) setStepStatus(s => ({ ...s, [node]: { status: 'done', ms: data.payload?.elapsed_ms } }));
+            const sk = data.payload?.skipped;
+            if (node) setStepStatus(s => ({ ...s, [node]: { status: sk ? 'skipped' : 'done', ms: sk ? null : data.payload?.elapsed_ms } }));
           } else if (t === 'message') {
             const r = data;
             if (r.thread_id) {

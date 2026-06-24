@@ -796,6 +796,18 @@ def _match_risky_tokens(text: str) -> set:
     return found
 
 
+# 부정문: 위험 토큰이 있어도 "~하지마/말고/없이/don't ~"면 실행 요청이 아니다(승인 억제).
+_NEGATION_MARKERS = (
+    # "없이" 는 "문제없이/차질없이" 관용구 오탐이 커서 제외(W1). 행위 부정 marker 만.
+    "하지 마", "하지마", "하지 말", "하지말", "말고", "말아", "말라", "금지",
+    "안 하", "안하", "don't", "do not", "without", "no need", "shouldn't", "should not",
+)
+
+
+def _has_negation(text: str) -> bool:
+    return any(m in (text or "") for m in _NEGATION_MARKERS)
+
+
 def _build_approval_request(
     *,
     question: str,
@@ -813,10 +825,10 @@ def _build_approval_request(
     risky = _match_risky_tokens(text)
     if not force_probe and not risky:
         return None
-    # false positive 억제: "수정 방법/어떻게 ~?" 같은 정보성 질문은 실행 요청이 아니다.
-    # 챗은 비실행(RAG-then-generate, 함수콜 아님)이므로 명령형 marker 없는 정보성
-    # 질문에 승인 게이트를 띄우면 UX 저해뿐 — force_approval 이면 그대로 진행.
-    if not force_probe and _is_informational_question(text):
+    # false positive 억제: "수정 방법/어떻게 ~?" 같은 정보성 질문이나 "~하지마/말고/
+    # don't ~" 같은 부정문은 실행 요청이 아니다. 챗은 비실행(RAG-then-generate, 함수콜
+    # 아님)이므로 이런 질문에 승인 게이트를 띄우면 UX 저해뿐 — force_approval 이면 진행.
+    if not force_probe and (_is_informational_question(text) or _has_negation(text)):
         return None
 
     if existing_id and existing:
@@ -1553,22 +1565,18 @@ def answer_chat(
         }
 
     def _node_select_model(_state):
-        default_cfg_path = str(getattr(config, "DEFAULT_OAI_CONFIG_PATH", None) or "").strip() or None
-        cfg_path = default_cfg_path
-        raw_cfg_path = str(oai_config_path or "").strip() or None
-        if raw_cfg_path:
-            # 보안: oai_config_path 도 신뢰 루트(+기본 config 디렉토리) 하위로만 허용.
-            extra: List[Path] = []
-            if default_cfg_path:
-                try:
-                    extra.append(Path(default_cfg_path).resolve().parent)
-                except Exception:
-                    pass
-            confined = _confine_path(raw_cfg_path, extra_roots=extra)
-            if confined is not None:
-                cfg_path = str(confined)
-            else:
-                _chat_perf_logger.warning("chat: oai_config_path outside trusted roots ignored: %r", raw_cfg_path)
+        # 보안(S1): oai_config_path 는 클라이언트(요청 본문)가 제어할 수 없다 — repo 내
+        # 임의 JSON 을 LLM cfg 로 지정해 base_url 을 바꾸는 SSRF-lite 표면을 차단하기 위해
+        # 서버 고정값(env CHAT_OAI_CONFIG_PATH > config.DEFAULT_OAI_CONFIG_PATH)만 쓴다.
+        cfg_path = str(
+            getattr(config, "CHAT_OAI_CONFIG_PATH", None)
+            or getattr(config, "DEFAULT_OAI_CONFIG_PATH", None)
+            or ""
+        ).strip() or None
+        if str(oai_config_path or "").strip():
+            _chat_perf_logger.warning(
+                "chat: client-supplied oai_config_path ignored (server-fixed): %r", oai_config_path,
+            )
         cfg = load_oai_config(cfg_path)
         cfg_candidates = load_oai_configs(cfg_path)
         if not cfg:
@@ -1654,10 +1662,11 @@ def answer_chat(
 
     def _node_llm_answer(_state):
         nonlocal llm_elapsed_ms, selected_cfg, prompt_chars, last_llm_error
+        # _skipped: stepper 가 이 노드를 '완료(0ms)' 가 아닌 '건너뜀' 으로 렌더하도록 신호.
         if _state.errors or _state.approval_required:
-            return {}
+            return {"_skipped": True}
         if cancel_check and cancel_check():  # disconnect 후 LLM 호출 진입 차단
-            return {}
+            return {"_skipped": True}
         current_view = str((ui_context or {}).get("current_view", "dashboard"))
         messages = _build_chat_messages(
             mode=mode,
