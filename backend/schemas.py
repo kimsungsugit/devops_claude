@@ -116,6 +116,13 @@ class ScmLinkedDocs(BaseModel):
     # 있어 단일 문자열이 아닌 복수 경로 list. 각 경로는 vectorcast_rag.json 파일 또는
     # 그 상위 폴더. SwUT/SwIT 로그처럼 SCM별로 설정의 '연결 문서 경로'에서 등록.
     vectorcast: List[str] = Field(default_factory=list)
+    # 정적분석 산출물 폴더 경로(들) — 보통 회사 SCM의 '09.정적분석/01.Static Analysis' 폴더
+    # 하나를 등록하면 그 안의 4종 리포트(CodeSonar PDF / QAC HIS PDF / CPD XML / CodeEye PDF)를
+    # 모두 파싱한다. AnalysisSection '정적분석 불러오기'가 linked_docs.codesonar를 읽으므로,
+    # 이 필드가 ScmLinkedDocs에 정의돼 있어야 model_dump 직렬화에서 살아남아 프론트가 경로를
+    # 받는다(미정의 시 누락 → '등록된 정적분석 경로 없음'). scm.py의 allowed_prefixes 자동
+    # 병합(linked.model_dump().values())에도 포함돼 cloudium 접근 prefix가 자동 등록된다.
+    codesonar: List[str] = Field(default_factory=list)
 
 
 class ScmRegistryEntry(BaseModel):

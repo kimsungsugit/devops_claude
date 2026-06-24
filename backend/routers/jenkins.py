@@ -899,6 +899,56 @@ def _load_vectorcast_rag_from_cloudium(path: str) -> Dict[str, Any]:
     return {}
 
 
+# 2026-06-24 — SCM(cloudium) IT 함수콜 보강. AggregateCoverage(구문/분기/MC-DC) 리포트에는
+# 함수콜(Function Called) 커버리지가 없고 VectorCAST Metric report HTML에만 있다. 그동안
+# 함수콜은 Jenkins 빌드 산출물에서만 나왔는데, SwITCV 빌더가 쓰는 parse_hmr_html을 재사용해
+# SCM cloudium 경로에서도 동일하게 it_metrics.grand_totals(function_calls/functions)를 제공한다.
+_MAX_METRIC_HTML_SCAN = 40   # 폴더당 Metric report 후보 HTML read 상한(runaway IPC 방지).
+
+
+def _aggregate_it_function_calls(
+    html_bytes_list: List[bytes],
+) -> "tuple[Dict[str, Any], Dict[str, Dict[str, int]]]":
+    """IT VectorCAST Metric report HTML들 → it_metrics.grand_totals + 함수명→함수콜 셀 map.
+
+    각 HTML을 parse_hmr_html로 파싱(metric 양식 아니면 ok=False → skip), Function Called
+    (covered_calls/total_calls)와 Functions(functions_covered/functions_total)를 전 함수 합산해
+    grand_totals를 만든다. function_calls/functions 둘 다 total>0일 때만 키를 채운다(0% 위장 금지).
+
+    Returns:
+        (grand_totals, fc_by_name) — grand_totals는 {"function_calls": {covered,total,rate},
+        "functions": {covered,total,rate}} 일부/전체. fc_by_name은 entries 병합용
+        {함수명: {covered,total}}.
+    """
+    from backend.services.vcast_hmr_parser import parse_hmr_html
+    fc_cov = fc_tot = fn_cov = fn_tot = 0
+    fc_by_name: Dict[str, Dict[str, int]] = {}
+    for hb in html_bytes_list or []:
+        try:
+            hr = parse_hmr_html(hb)
+        except Exception:  # noqa: BLE001 — 개별 HTML 파싱 실패는 skip
+            continue
+        if not getattr(hr, "ok", False):
+            continue
+        for name, m in (getattr(hr, "metrics", None) or {}).items():
+            fc_cov += int(getattr(m, "covered_calls", 0) or 0)
+            fc_tot += int(getattr(m, "total_calls", 0) or 0)
+            fn_cov += int(getattr(m, "functions_covered", 0) or 0)
+            fn_tot += int(getattr(m, "functions_total", 0) or 0)
+            nm = (name or "").strip()
+            if nm and nm not in fc_by_name:
+                fc_by_name[nm] = {
+                    "covered": int(getattr(m, "covered_calls", 0) or 0),
+                    "total": int(getattr(m, "total_calls", 0) or 0),
+                }
+    grand: Dict[str, Any] = {}
+    if fc_tot:
+        grand["function_calls"] = {"covered": fc_cov, "total": fc_tot, "rate": round(fc_cov / fc_tot, 4)}
+    if fn_tot:
+        grand["functions"] = {"covered": fn_cov, "total": fn_tot, "rate": round(fn_cov / fn_tot, 4)}
+    return grand, fc_by_name
+
+
 # cloudium 원본 리포트 폴더 파싱은 무겁다(폴더당 수십 env × ExecutionResult HTML
 # worker IPC read + BS4 — 실측 ~100s). cloudium은 read-only라 리포트가 릴리스 단위로
 # 정적이므로 폴더 경로 기준 TTL 캐시로 반복 매트릭스 로드를 즉시화한다. 비어있는 결과
@@ -1119,6 +1169,64 @@ def _parse_vcast_logs_from_cloudium_folder(path: str) -> Dict[str, Any]:
         vcast_summary: Dict[str, Any] = {}
         if fn_entries:
             vcast_summary["it_metrics" if is_it else "ut_metrics"] = {"entries": fn_entries}
+
+        # IT 폴더 — Metric report HTML에서 함수콜(Function Called)/함수 진입(Functions) 커버리지를
+        # 추출해 it_metrics.grand_totals를 채운다. 함수콜은 AggregateCoverage(구문/분기/MC-DC)에
+        # 없고 Metric report에만 있어, 그동안 Jenkins 빌드 산출물에서만 나오던 함수콜을 SCM
+        # cloudium 경로에서도 동일하게 제공한다 (SwITCV 빌더 _discover_metric_report_bytes 대칭).
+        # 후보 폴더: 등록 경로(p) + 해석된 릴리스 폴더(folder) — 양식별 Metric report 위치 차이 대비.
+        # 파일명이 일정치 않아(APP `*_Metric_report_*`, BOOT `*_IT_*`) content-detect(parse_hmr_html.ok).
+        if is_it and fn_entries:
+            try:
+                _html_list: List[bytes] = []
+                _seen_html: set = set()
+                _cand_dirs: List[str] = []
+                for _d in (folder, p):
+                    _dk = str(_d or "").replace("\\", "/").rstrip("/").lower()
+                    if _d and _dk and _dk not in {str(x).replace(chr(92), '/').rstrip('/').lower() for x in _cand_dirs}:
+                        _cand_dirs.append(_d)
+                for _d in _cand_dirs:
+                    if len(_html_list) >= _MAX_METRIC_HTML_SCAN:
+                        break
+                    try:
+                        _htmls = SA._list_dir_via_resolver(resolver, _d, pattern="*.html")
+                    except Exception:  # noqa: BLE001
+                        continue
+                    for _e in sorted(_htmls, key=lambda x: str(x).lower()):
+                        if len(_html_list) >= _MAX_METRIC_HTML_SCAN:
+                            break
+                        _base = os.path.basename(str(_e).rstrip("\\/").replace("\\", "/"))
+                        _full = _e if (str(_e).startswith("U:") or str(_e).startswith("/")) \
+                            else os.path.join(_d, _base)
+                        _fk = _full.replace("\\", "/").lower()
+                        if _fk in _seen_html:
+                            continue
+                        _seen_html.add(_fk)
+                        try:
+                            _html_list.append(SA._read_via_resolver(resolver, _full))
+                        except Exception:  # noqa: BLE001
+                            continue
+                _it_grand, _fc_by_name = _aggregate_it_function_calls(_html_list)
+                if _it_grand:
+                    vcast_summary.setdefault("it_metrics", {})["grand_totals"] = _it_grand
+                    # per-function 함수콜을 entries에 병합(모듈 드릴다운 표시용) — 함수명/점앞 base 매칭.
+                    for _ent in fn_entries:
+                        _sp = (_ent.get("subprogram") or "").strip()
+                        _hit = _fc_by_name.get(_sp) or _fc_by_name.get(_sp.split(".")[0])
+                        if _hit and _hit.get("total"):
+                            _ent["function_calls"] = {
+                                "covered": _hit["covered"], "total": _hit["total"],
+                                "rate": round(_hit["covered"] / _hit["total"], 4),
+                            }
+                    if _it_grand.get("function_calls"):
+                        warnings.append(
+                            "[metric-report] IT 함수콜 커버리지 보강 "
+                            f"({_it_grand['function_calls']['covered']}/{_it_grand['function_calls']['total']})"
+                        )
+            except Exception:  # noqa: BLE001 — Metric report 부재/파싱 실패는 best-effort skip
+                logging.getLogger(__name__).debug(
+                    "IT Metric report 함수콜 집계 skip path=%s", p, exc_info=True
+                )
 
         payload_out: Dict[str, Any] = {
             "build_root": folder,

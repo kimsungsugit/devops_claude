@@ -1234,7 +1234,7 @@ export default function AnalysisSection({ job, analysisResult }) {
         <div className="text-sm text-muted" style={{ padding: '0 0 8px', lineHeight: 1.55 }}>
           VectorCAST 통합시험(IT) 결과입니다. IT는 <b>함수 호출(Function Call) 커버리지</b> 중심이라 구문/분기는 약하거나 없습니다.{' '}
           <b>IT 리포트</b>=리포트 폴더 수, <b>함수콜</b>=호출 커버리지, <b>함수 진입</b>=함수 진입 커버리지.{' '}
-          함수콜 데이터는 <b>Jenkins 빌드 산출물에서만</b> 제공됩니다(SCM 폴백은 구문/분기/MC-DC만).
+          함수콜 데이터는 <b>Jenkins 빌드 산출물</b> 또는 <b>SCM VectorCAST 로그</b>(폴더에 Metric report HTML이 있을 때)에서 제공됩니다.
         </div>
         <div className="stats-row">
           <div className="stat-card"><div className="stat-value">{(effVcast.it_reports || []).length}</div><div className="stat-label">IT 리포트</div></div>
