@@ -94,6 +94,7 @@ export default function Dashboard({ onGoDetail }) {
   const [aggStats, setAggStats] = useState(null);
   const [aggLoading, setAggLoading] = useState(false);
   const [filter, setFilter] = useState('');
+  const [offlineUrl, setOfflineUrl] = useState('');   // 오프라인 캐시 보기 Job URL 입력
   const filterInputName = useRef(`job-filter-${Math.random().toString(36).slice(2, 10)}`).current;
   const [favorites, setFavorites] = useState(() => {
     try { return JSON.parse(localStorage.getItem('devops_fav_jobs') || '[]'); } catch { return []; }
@@ -410,6 +411,43 @@ export default function Dashboard({ onGoDetail }) {
     }
   }, [selectedJob, cfg, toast, setAnalysisResult, manualScmId]);
 
+  // 오프라인 캐시 보기 — Jenkins 미연결/다운 시, 이전에 분석돼 캐시된 빌드를 sync 없이 report/summary로 바로 조회한다.
+  // 분석 흐름(sync→report)의 sync(Jenkins 의존) 단계를 건너뛰고 캐시된 리포트만 읽으므로 Jenkins 라이브 연결이 불필요하다.
+  const loadFromCache = useCallback(async (rawUrl) => {
+    if (!rawUrl || !rawUrl.trim()) { toast('info', 'Job URL을 입력하세요.'); return; }
+    const jobUrl = rawUrl.trim().replace(/\/+$/, '') + '/';
+    const name = jobUrl.split('/').filter(Boolean).pop();
+    setSelectedJob({ name, url: jobUrl });
+    const cacheRoot = defaultCacheRoot(jobUrl) || cfg.cacheRoot || '';
+    const buildSelector = cfg.buildSelector || 'lastSuccessfulBuild';
+    try {
+      toast('info', `캐시에서 '${name}' 불러오는 중...`);
+      let scmList = [];
+      try {
+        const d = await api('/api/scm/list');
+        scmList = Array.isArray(d) ? d : (d.items ?? d.registries ?? []);
+      } catch { scmList = []; }
+      const matchedScm = pickScmForJob(scmList, jobUrl);
+      const raw = await post('/api/jenkins/report/summary', { job_url: jobUrl, cache_root: cacheRoot, build_selector: buildSelector });
+      const reportData = {
+        ...raw,
+        build_number: raw?.kpis?.build?.build_number ?? raw?.build_number,
+        result: raw?.kpis?.build?.result ?? raw?.result,
+        coverage: raw?.kpis?.coverage?.line_rate != null
+          ? Math.round(raw.kpis.coverage.line_rate * 100)
+          : (typeof raw?.coverage === 'number' ? raw.coverage : null),
+      };
+      const artMap = raw?.artifacts ?? {};
+      const artifacts = Object.entries(artMap).flatMap(([type, list]) =>
+        (Array.isArray(list) ? list : []).map(f => ({ type, name: (f.path ?? f.title ?? '').split(/[\\/]/).pop(), path: f.path, title: f.title })));
+      setAnalysisResult({ artifacts, reportData, scmList, matchedScm, impactData: null, jobUrl, cacheRoot, _offline: true });
+      toast('success', `캐시 로드 완료 — 빌드 #${reportData.build_number ?? '?'} (Jenkins 미연결)`);
+      onGoDetail?.();
+    } catch (e) {
+      toast('error', `캐시 로드 실패: ${e.message} — 이 Job의 캐시가 없을 수 있습니다.`);
+    }
+  }, [cfg, toast, setSelectedJob, setAnalysisResult, onGoDetail]);
+
   autoRunRef.current = runAnalysis;
 
   const stopAnalysis = () => {
@@ -485,6 +523,38 @@ export default function Dashboard({ onGoDetail }) {
       {/* Aggregate number cards removed — data shown in AggregateCharts below */}
       {aggStats?.projects?.length >= 1 && (
         <AggregateCharts projects={aggStats.projects} buildStats={{ successCount, failCount, unstableCount, disabledCount, total: statsPool.length, recentBuilds: recentBuilds.length, recentSuccess }} />
+      )}
+
+      {/* 오프라인 캐시 보기 — Jenkins 목록을 못 불러온 경우(미연결/다운) 캐시된 빌드를 sync 없이 직접 조회 */}
+      {!jobsLoading && jobs.length === 0 && (
+        <div className="panel" style={{ marginBottom: 12, borderLeft: '3px solid var(--color-warning)' }}>
+          <div className="panel-header"><span className="panel-title">⚡ 오프라인 캐시 보기</span></div>
+          <div className="text-sm text-muted" style={{ marginBottom: 8, lineHeight: 1.5 }}>
+            Jenkins 프로젝트 목록을 불러오지 못했습니다(미연결/다운). 이전에 분석돼 <b>캐시된 빌드</b>는 Jenkins 없이 바로 볼 수 있습니다 —
+            동기화를 건너뛰고 캐시된 리포트만 읽어 프로젝트 분석 화면을 엽니다.
+          </div>
+          {favorites.length > 0 && (
+            <div style={{ marginBottom: 8 }}>
+              <div className="text-sm" style={{ fontWeight: 600, marginBottom: 4 }}>★ 즐겨찾기에서 바로 보기</div>
+              <div className="row" style={{ gap: 6, flexWrap: 'wrap' }}>
+                {favorites.map((url) => (
+                  <button key={url} className="btn-sm" onClick={() => loadFromCache(url)}>
+                    {url.split('/').filter(Boolean).pop()}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+          <div className="row" style={{ gap: 6, flexWrap: 'wrap' }}>
+            <input type="text" value={offlineUrl} onChange={e => setOfflineUrl(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter' && offlineUrl.trim()) loadFromCache(offlineUrl); }}
+              placeholder="Job URL (예: http://192.168.110.40:7000/job/HDPDM01_PDS64_RD/)"
+              style={{ flex: 1, minWidth: 260, padding: '6px 10px', fontSize: 12, border: '1px solid var(--border)', borderRadius: 6 }} />
+            <button className="btn-primary" onClick={() => loadFromCache(offlineUrl)} disabled={!offlineUrl.trim()}>
+              캐시에서 보기
+            </button>
+          </div>
+        </div>
       )}
 
       {/* Toolbar */}
