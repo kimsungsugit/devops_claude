@@ -132,12 +132,13 @@ def _load_workbook_summary(bytes_value: bytes | None, *, keep_vba: bool = False)
         }
         cov = wb["4.Coverage"] if "4.Coverage" in wb.sheetnames else None
         if cov is not None:
-            out["functions_total"] = cov["E5"].value
-            out["functions_fail_count"] = cov["F5"].value
-            out["functions_exception_count"] = cov["G5"].value
-            out["function_calls_total"] = cov["E6"].value
-            out["function_calls_fail_count"] = cov["F6"].value
-            out["function_calls_exception_count"] = cov["G6"].value
+            # 요약셀 E5/F5/G5/E6/F6/G6은 회사 템플릿 수식이라 openpyxl이 cached=None으로
+            # 저장 → data_only 읽기 시 항상 None (roll-up이 함수 fail/exception을 0으로
+            # 오인식해 거짓 100% 커버리지 표기, ISO 26262 무결성 결함). 데이터행(SwITCV
+            # function/call 경로는 O/X·count·exception 모두 리터럴, swut_coverage 라102)
+            # 에서 집계해 채운다. 셀에 리터럴 캐시값이 있으면(외부 재계산본) 그 값 우선.
+            fn_total = fn_fail = fn_exc = 0
+            call_rows = call_fail = call_exc = 0
             fail_details: list[dict[str, Any]] = []
             for row_idx in range(11, cov.max_row + 1):
                 unit_id = str(cov.cell(row_idx, 4).value or "").strip()
@@ -151,6 +152,17 @@ def _load_workbook_summary(bytes_value: bytes | None, *, keep_vba: bool = False)
                 call_result = cov.cell(row_idx, 10).value
                 call_exception = cov.cell(row_idx, 11).value
                 note = str(cov.cell(row_idx, 12).value or "").strip()
+                fn_total += 1
+                if function_result == "X":
+                    fn_fail += 1
+                if str(function_exception or "").strip().upper() == "O":
+                    fn_exc += 1
+                if str(call_result or "").strip().upper() in ("O", "X"):
+                    call_rows += 1
+                if call_result == "X":
+                    call_fail += 1
+                if str(call_exception or "").strip().upper() == "O":
+                    call_exc += 1
                 if function_result == "X":
                     fail_details.append({
                         "kind": "함수커버리지",
@@ -170,6 +182,23 @@ def _load_workbook_summary(bytes_value: bytes | None, *, keep_vba: bool = False)
                         "note": note,
                     })
             out["coverage_fail_details"] = fail_details
+            # 요약: 셀 리터럴 캐시값 우선, 없으면(수식→None) 데이터행 집계값.
+            _e5, _f5, _g5 = cov["E5"].value, cov["F5"].value, cov["G5"].value
+            _e6, _f6, _g6 = cov["E6"].value, cov["F6"].value, cov["G6"].value
+            out["functions_total"] = _e5 if isinstance(_e5, (int, float)) else fn_total
+            out["functions_fail_count"] = _f5 if isinstance(_f5, (int, float)) else fn_fail
+            out["functions_exception_count"] = (
+                _g5 if isinstance(_g5, (int, float)) else fn_exc
+            )
+            out["function_calls_total"] = (
+                _e6 if isinstance(_e6, (int, float)) else call_rows
+            )
+            out["function_calls_fail_count"] = (
+                _f6 if isinstance(_f6, (int, float)) else call_fail
+            )
+            out["function_calls_exception_count"] = (
+                _g6 if isinstance(_g6, (int, float)) else call_exc
+            )
         test_log = wb["2.Test Log"] if "2.Test Log" in wb.sheetnames else None
         if test_log is not None:
             tc_count = 0

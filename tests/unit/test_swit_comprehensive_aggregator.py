@@ -193,6 +193,7 @@ class TestSwitcrCoverAndSummary96Final:
 
     def test_switcr_cover_stamps_xxxx_placeholders(self):
         import openpyxl
+
         from backend.services.swit_comprehensive_aggregator import _write_switcr_cover
         wb = openpyxl.Workbook()
         ws = wb.active
@@ -222,6 +223,7 @@ class TestSwitcrCoverAndSummary96Final:
 
     def test_summary_o_col_synced_to_renamed_sheets(self):
         import openpyxl
+
         from backend.services.swit_comprehensive_aggregator import _write_summary_sheet
         wb = openpyxl.Workbook()
         ws = wb.active
@@ -239,8 +241,10 @@ class TestSwitcrCoverDeepReviewerW1W2:
 
     def test_non_trio_template_fallback_writes_reviewer_approver(self):
         import openpyxl
+
         from backend.services.swit_comprehensive_aggregator import (
-            SwitcrBuildMeta, _write_switcr_cover,
+            SwitcrBuildMeta,
+            _write_switcr_cover,
         )
         wb = openpyxl.Workbook()
         ws = wb.active
@@ -259,8 +263,10 @@ class TestSwitcrCoverDeepReviewerW1W2:
 
     def test_summary_o_col_resolves_actual_names(self):
         import openpyxl
+
         from backend.services.swit_comprehensive_aggregator import (
-            SwitcrBuildMeta, _write_summary_sheet,
+            SwitcrBuildMeta,
+            _write_summary_sheet,
         )
         wb = openpyxl.Workbook()
         ws = wb.active
@@ -274,3 +280,60 @@ class TestSwitcrCoverDeepReviewerW1W2:
         _write_summary_sheet(ws, meta, {})
         assert ws.cell(20, 15).value == "(해당X)5.IT501"
         assert ws.cell(21, 15).value == "6.IT601"  # 원명 유지분은 원명 참조 (desync 차단)
+
+
+def _switcv_workbook_formula_summary() -> bytes:
+    """요약셀(E5..G6)을 비워 수식→data_only None 을 모사. 실제 SwITCV는 이 셀들이
+    회사 템플릿 수식이라 openpyxl이 cached=None 으로 저장한다. 데이터행은 SwITCV
+    function/call 경로와 동일하게 O/X·count·exception 모두 리터럴."""
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "4.Coverage"
+    # E5..G6 미기입 (None) — 수식 캐시 부재 재현
+    rows = [
+        # unit_id, name, func_result, func_exc, ccount, ctotal, call_result, call_exc
+        ("SwUFn_0101", "FuncA", "X", "O", 2, 3, "X", "O"),
+        ("SwUFn_0102", "FuncB", "O", None, 3, 3, "O", None),
+        ("SwUFn_0103", "FuncC", "O", None, None, None, "O", None),
+    ]
+    for i, (uid, nm, fr, fe, cc, ct, cr, ce) in enumerate(rows):
+        r = 11 + i
+        ws.cell(r, 4).value = uid
+        ws.cell(r, 5).value = nm
+        ws.cell(r, 6).value = fr
+        if fe is not None:
+            ws.cell(r, 7).value = fe
+        if cc is not None:
+            ws.cell(r, 8).value = cc
+        if ct is not None:
+            ws.cell(r, 9).value = ct
+        ws.cell(r, 10).value = cr
+        if ce is not None:
+            ws.cell(r, 11).value = ce
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def test_load_workbook_summary_computes_from_rows_when_summary_blank():
+    """후속 결함 회귀 — 요약셀이 수식(data_only None)이어도 roll-up이 데이터행에서
+    함수/호출 fail·exception 을 정확 집계 (거짓 100% 커버리지 차단). 이전엔 None→0
+    으로 fail/exception 이 0 처리되어 coverage_fail_details(정상)와 모순이었다."""
+    from backend.services.swit_comprehensive_aggregator import _load_workbook_summary
+    out = _load_workbook_summary(_switcv_workbook_formula_summary())
+    assert out["functions_total"] == 3
+    assert out["functions_fail_count"] == 1
+    assert out["functions_exception_count"] == 1
+    assert out["function_calls_total"] == 3
+    assert out["function_calls_fail_count"] == 1
+    assert out["function_calls_exception_count"] == 1
+    assert len(out["coverage_fail_details"]) == 2  # func X + call X (동일 행)
+
+
+def test_load_workbook_summary_prefers_literal_summary_cells():
+    """셀에 리터럴 캐시값이 있으면(외부 재계산본) 데이터행 집계보다 우선."""
+    from backend.services.swit_comprehensive_aggregator import _load_workbook_summary
+    out = _load_workbook_summary(_switcv_workbook())  # E5=570/F5=1/G5=1 리터럴
+    assert out["functions_total"] == 570
+    assert out["functions_fail_count"] == 1
+    assert out["functions_exception_count"] == 1
