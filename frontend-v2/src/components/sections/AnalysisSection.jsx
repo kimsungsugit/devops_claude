@@ -25,6 +25,37 @@ function ccOf(r) {
   return Number.isFinite(v) ? v : 0;
 }
 
+// 진행 중·완료된 SCM VectorCAST 잡을 job_url 단위로 보존한다. 원격 cloudium 파싱은 수 분 걸리는데,
+// 그 사이 탭 전환·새로고침·job 변경(remount)·브라우저 백그라운드 throttle로 in-memory 폴링 루프가
+// 끊기면 결과가 UI에 영영 안 실리고 스피너만 고착됐다. job_id를 남겨두면 재진입/포커스 복귀 시
+// 폴링을 재개(완료면 즉시 적재)해 자동 복구한다.
+const VCAST_JOB_KEY = 'devops_v2_vcast_jobs';
+function _readVcastJobs() {
+  try { return JSON.parse(localStorage.getItem(VCAST_JOB_KEY) || '{}') || {}; }
+  catch { return {}; }
+}
+function saveVcastJob(jobUrl, jobId, startedAt) {
+  if (!jobUrl || !jobId) return;
+  const m = _readVcastJobs();
+  // 실제 시작시각을 보존해야 재진입(remount/새로고침) 후에도 12분 timeout이 '원래 시작' 기준으로
+  // 측정된다. 0(falsy)으로 저장하면 pollJob에서 t0가 Date.now()로 리셋돼 timeout이 무력화될 수 있다.
+  m[jobUrl] = { jobId, startedAt: startedAt || Date.now() };
+  try { localStorage.setItem(VCAST_JOB_KEY, JSON.stringify(m)); } catch { /* quota — best-effort */ }
+}
+function loadVcastJob(jobUrl) {
+  if (!jobUrl) return null;
+  const e = _readVcastJobs()[jobUrl];
+  return (e && e.jobId) ? e : null;
+}
+function clearVcastJob(jobUrl) {
+  if (!jobUrl) return;
+  const m = _readVcastJobs();
+  if (m[jobUrl] !== undefined) {
+    delete m[jobUrl];
+    try { localStorage.setItem(VCAST_JOB_KEY, JSON.stringify(m)); } catch { /* best-effort */ }
+  }
+}
+
 export default function AnalysisSection({ job, analysisResult }) {
   const { cfg } = useJenkinsCfg();
   const toast = useToast();
@@ -42,7 +73,16 @@ export default function AnalysisSection({ job, analysisResult }) {
   // 언마운트 후 폴링 루프가 setState/네트워크를 계속 돌지 않도록 가드(W2). 잡 자체는 서버에서
   // 계속 실행되며 결과는 TTL 캐시되므로, 재진입 시 재클릭하면 빠르게 받는다.
   const mountedRef = useRef(true);
-  useEffect(() => () => { mountedRef.current = false; }, []);
+  // StrictMode(dev)는 effect를 setup→cleanup→setup으로 이중 호출한다. cleanup만 두면 cleanup이
+  // mountedRef를 false로 만든 뒤 재-setup이 복원하지 않아, mountedRef가 마운트 직후부터 false로
+  // 고정된다 → 폴링 while(mountedRef.current)가 영영 안 돌고(=impact-job 요청 0), finally의
+  // setScmVcastLoading(false)도 스킵돼 스피너가 고착된다. setup에서 매번 true로 복원해야 한다.
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
+  // 동시 폴링 루프 방지 — start/resume/focus 복구가 겹쳐도 한 번에 하나만 돈다.
+  const pollingRef = useRef(false);
 
   const loadComplexity = useCallback(async () => {
     setComplexityLoading(true);
@@ -61,33 +101,33 @@ export default function AnalysisSection({ job, analysisResult }) {
     }
   }, [job, cfg, cacheRoot, toast]);
 
-  const loadScmVcast = useCallback(async () => {
-    const paths = analysisResult?.matchedScm?.linked_docs?.vectorcast || [];
-    if (!paths.length) { toast('info', 'SCM에 등록된 VectorCAST 경로가 없습니다.'); return; }
-    setScmVcastLoading(true);
+  // 잡 상태를 폴링해 완료 시 결과를 적재한다. 최초 시작과 재진입/포커스 복구가 공용으로 호출한다.
+  // poll-first 구조라 '이미 완료된 잡'으로 재진입하면 첫 폴에서 즉시 적재된다(3초 대기 없음).
+  // jobUrl은 호출 시점의 job.url을 명시 전달받는다 — 클로저의 job?.url에 의존하면, keep-alive로
+  // 같은 인스턴스에서 job prop만 바뀌는(향후 key 구조 변경) 경우 구 job의 보존 잡을 지울 수 있다(X1).
+  const pollJob = useCallback(async (jobId, startedAtMs, jobUrl) => {
+    if (!jobId || pollingRef.current) return;   // 중복 루프 차단
+    pollingRef.current = true;
+    if (mountedRef.current) setScmVcastLoading(true);
+    const t0 = startedAtMs || Date.now();
+    const TIMEOUT_MS = 12 * 60 * 1000;   // 12분 상한(최악 다폴더 파싱 + 여유). 보존된 시작시각 기준.
     try {
-      // 원격 cloudium 폴더 파싱은 수 분 걸려 동기 호출 시 4~5분 블로킹(타임아웃/언마운트 abort로
-      // '에러'처럼 보임) → 백그라운드 잡으로 던지고 폴링한다. 백엔드 TTL 캐시(30분)로 2회차+ 즉시.
-      const start = await post('/api/jenkins/report/vectorcast-rag-async', {
-        job_url: job.url, cache_root: cacheRoot, build_selector: cfg.buildSelector,
-        vcast_log_paths: paths,
-      });
-      const jobId = start?.job_id;
-      if (!jobId) throw new Error('잡 생성에 실패했습니다.');
-      toast('info', 'VectorCAST 원격 로그 파싱을 시작했습니다 (수 분 소요될 수 있습니다).');
-      const t0 = Date.now();
-      const TIMEOUT_MS = 12 * 60 * 1000;   // 12분 상한(최악 다폴더 파싱 + 여유)
       while (mountedRef.current) {
-        if (Date.now() - t0 > TIMEOUT_MS) {
-          toast('warning', 'VectorCAST 로딩 시간 초과 — 잠시 후 다시 시도하세요(캐시되어 빨라집니다).');
+        let st;
+        try {
+          st = await api(`/api/scm/impact-job/${jobId}`);
+        } catch (e) {
+          // 404(서버 재시작/프룬으로 잡 유실)·네트워크 오류 → 보존 잡 제거 후 종료(되살아나는 무한 폴링 방지).
+          clearVcastJob(jobUrl);
+          if (mountedRef.current && !/not found|404/i.test(String(e?.message || ''))) {
+            toast('error', `VectorCAST 상태 조회 실패: ${e.message}`);
+          }
           return;
         }
-        await new Promise(r => setTimeout(r, 3000));
-        if (!mountedRef.current) return;   // 대기 중 언마운트 → 폴링 중단(잡은 서버에서 계속)
-        const st = await api(`/api/scm/impact-job/${jobId}`);
         const status = st?.job?.status;
         if (status === 'completed') {
           const data = st.job.result;
+          clearVcastJob(jobUrl);
           if (!mountedRef.current) return;
           if (data?.ok && data.data) {
             setScmVcast(data);
@@ -98,17 +138,72 @@ export default function AnalysisSection({ job, analysisResult }) {
           return;
         }
         if (status === 'failed') {
-          toast('error', `VectorCAST 로드 실패: ${st.job?.error?.title || st.job?.error?.detail || 'unknown'}`);
+          clearVcastJob(jobUrl);
+          if (mountedRef.current) toast('error', `VectorCAST 로드 실패: ${st.job?.error?.title || st.job?.error?.detail || 'unknown'}`);
           return;
         }
+        if (Date.now() - t0 > TIMEOUT_MS) {
+          clearVcastJob(jobUrl);
+          if (mountedRef.current) toast('warning', 'VectorCAST 로딩 시간 초과 — 다시 시도하세요(캐시되어 빨라집니다).');
+          return;
+        }
+        await new Promise(r => setTimeout(r, 3000));
         // queued/running → 계속 폴링
       }
-    } catch (e) {
-      if (mountedRef.current) toast('error', `VectorCAST 로드 실패: ${e.message}`);
     } finally {
+      pollingRef.current = false;
       if (mountedRef.current) setScmVcastLoading(false);
     }
-  }, [analysisResult, job, cfg, cacheRoot, toast]);
+  }, [toast]);
+
+  const loadScmVcast = useCallback(async () => {
+    const paths = analysisResult?.matchedScm?.linked_docs?.vectorcast || [];
+    if (!paths.length) { toast('info', 'SCM에 등록된 VectorCAST 경로가 없습니다.'); return; }
+    if (pollingRef.current) return;   // 이미 진행 중 — 중복 잡 생성 방지
+    setScmVcastLoading(true);   // 즉시 버튼 비활성/스피너 (POST 왕복 동안 더블클릭 차단)
+    let jobId;
+    try {
+      // 원격 cloudium 폴더 파싱은 수 분 걸려 동기 호출 시 4~5분 블로킹(타임아웃/언마운트 abort로
+      // '에러'처럼 보임) → 백그라운드 잡으로 던지고 폴링한다. 백엔드 TTL 캐시(30분)로 2회차+ 즉시.
+      const start = await post('/api/jenkins/report/vectorcast-rag-async', {
+        job_url: job.url, cache_root: cacheRoot, build_selector: cfg.buildSelector,
+        vcast_log_paths: paths,
+      });
+      jobId = start?.job_id;
+      if (!jobId) throw new Error('잡 생성에 실패했습니다.');
+    } catch (e) {
+      if (mountedRef.current) { toast('error', `VectorCAST 로드 실패: ${e.message}`); setScmVcastLoading(false); }
+      return;
+    }
+    const startedAt = Date.now();
+    saveVcastJob(job?.url, jobId, startedAt);   // 새로고침/탭이동/remount에도 재진입 자동복구되도록 보존
+    toast('info', 'VectorCAST 원격 로그 파싱을 시작했습니다 (수 분 소요될 수 있습니다).');
+    await pollJob(jobId, startedAt, job?.url);
+  }, [analysisResult, job, cfg, cacheRoot, toast, pollJob]);
+
+  // 재진입 자동복구(mount·job 변경 remount·새로고침) — 보존된 진행 중/완료 잡이 있으면 폴링 재개.
+  // 완료된 잡이면 poll-first로 즉시 결과가 채워져, 사용자가 재클릭하지 않아도 데이터가 뜬다.
+  useEffect(() => {
+    if (!job?.url || scmVcast || pollingRef.current) return;
+    const saved = loadVcastJob(job.url);
+    if (saved?.jobId) pollJob(saved.jobId, saved.startedAt, job.url);
+  }, [job, scmVcast, pollJob]);
+
+  // 포커스 복구 — keep-alive(언마운트 안 함)에서 브라우저 백그라운드 throttle로 setTimeout 폴링이
+  // 멎은 채 탭으로 돌아온 경우, 진행 중 잡을 재확인한다(중복 루프는 pollingRef로 차단).
+  useEffect(() => {
+    const recover = () => {
+      if (document.hidden || scmVcast || pollingRef.current || !job?.url) return;
+      const saved = loadVcastJob(job.url);
+      if (saved?.jobId) pollJob(saved.jobId, saved.startedAt, job.url);
+    };
+    window.addEventListener('focus', recover);
+    document.addEventListener('visibilitychange', recover);
+    return () => {
+      window.removeEventListener('focus', recover);
+      document.removeEventListener('visibilitychange', recover);
+    };
+  }, [job, scmVcast, pollJob]);
 
   const rd = analysisResult?.reportData;
   const kpis = rd?.kpis || {};
@@ -153,6 +248,12 @@ export default function AnalysisSection({ job, analysisResult }) {
   const covPct = typeof rd?.coverage === 'number' ? rd.coverage
     : (cov.line_rate != null ? Math.round(cov.line_rate * 100) : null);
   const brPct = cov.branch_rate != null ? Math.round(cov.branch_rate * 100) : null;
+  // VectorCAST SCM 커버리지(구문/분기/MC-DC)가 표시될 때, 빌드 산출물 기준 Line/Branch가 0%
+  // (이 프로젝트는 빌드 라인커버리지 미계측 → 항상 0)이면 그 카드를 숨긴다. 'Line 0%'가
+  // 'Statement 70%' 옆에 같이 보여 라인커버리지가 0인 것처럼 오인되는 것을 막는다. 빌드에 실제
+  // 커버리지가 있는 프로젝트(0이 아님)는 그대로 표시한다.
+  const showBuildLine = covPct != null && !(scmCovHas && covPct === 0);
+  const showBuildBranch = brPct != null && !(scmCovHas && brPct === 0);
   // 빌드 산출물에 실제 커버리지가 있는지 — line_rate=0.0(데이터 없음)을 '0% 미검증'으로 오인하지
   // 않도록. 이 프로젝트는 일반 커버리지가 아니라 VectorCAST UT/IT 커버리지를 쓰며 그 데이터는
   // cloudium SCM 로그에 있다(빌드엔 미동기화 → covPct=0).
@@ -228,13 +329,13 @@ export default function AnalysisSection({ job, analysisResult }) {
           </div>
         )}
         <div className="stats-row">
-          {covPct != null && (
+          {showBuildLine && (
             <div className="stat-card" style={{ borderLeft: `3px solid ${covPct >= 80 ? 'var(--color-success)' : 'var(--color-warning)'}` }}>
               <div className="stat-value" style={{ color: covPct >= 80 ? 'var(--color-success)' : 'var(--color-warning)' }}>{covPct}%</div>
               <div className="stat-label">Line Coverage</div>
             </div>
           )}
-          {brPct != null && (
+          {showBuildBranch && (
             <div className="stat-card" style={{ borderLeft: `3px solid ${brPct >= 80 ? 'var(--color-success)' : 'var(--color-warning)'}` }}>
               <div className="stat-value" style={{ color: brPct >= 80 ? 'var(--color-success)' : 'var(--color-warning)' }}>{brPct}%</div>
               <div className="stat-label">Branch Coverage</div>
