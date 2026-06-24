@@ -58,15 +58,15 @@
         "hsis": "U:/연구소/1000 프로젝트/1200 자동차/0002 A Cappella/02 ADOS/04 KJPDS02/02.설계(연구소)/01.설계 및 검증/05.시스템/02.시스템 아키텍처 설계/02.HSIS/(KJPDS02_HSIS) Hardware Software Interface Specification_v2.01_260401_R.xlsx",
         "stp": "U:/연구소/1000 프로젝트/1200 자동차/0002 A Cappella/02 ADOS/04 KJPDS02/02.설계(연구소)/01.설계 및 검증/08.소프트웨어/07.SW 테스트 계획/01.SwTP/(KJPDS02_SwTP) Software Test Plan_v1.03_260408.docx",
         "vectorcast": [
-          "U:/연구소/1000 프로젝트/1200 자동차/0002 A Cappella/02 ADOS/04 KJPDS02/02.설계(연구소)/01.설계 및 검증/08.소프트웨어/09.SW 단위 테스트/02.Test Result/01.Log/PV/1.APP_UT_report_260604",
+          "U:/연구소/1000 프로젝트/1200 자동차/0002 A Cappella/02 ADOS/04 KJPDS02/02.설계(연구소)/01.설계 및 검증/08.소프트웨어/09.SW 단위 테스트/02.Test Result/01.Log/PV/1.APP_UT_report_260611",
           "U:/연구소/1000 프로젝트/1200 자동차/0002 A Cappella/02 ADOS/04 KJPDS02/02.설계(연구소)/01.설계 및 검증/08.소프트웨어/09.SW 단위 테스트/02.Test Result/01.Log/PV/2.BOOT_UT_report_260604/Report_sort",
-          "U:/연구소/1000 프로젝트/1200 자동차/0002 A Cappella/02 ADOS/04 KJPDS02/02.설계(연구소)/01.설계 및 검증/08.소프트웨어/10.SW 통합 테스트/02.Test Result/01.Log/PV/1.APP_IT_Report_260604",
-          "U:/연구소/1000 프로젝트/1200 자동차/0002 A Cappella/02 ADOS/04 KJPDS02/02.설계(연구소)/01.설계 및 검증/08.소프트웨어/10.SW 통합 테스트/02.Test Result/01.Log/PV/2.BOOT_IT_Report_260604/Report",
+          "U:/연구소/1000 프로젝트/1200 자동차/0002 A Cappella/02 ADOS/04 KJPDS02/02.설계(연구소)/01.설계 및 검증/08.소프트웨어/10.SW 통합 테스트/02.Test Result/01.Log/PV/1.APP_IT_Report_260610",
+          "U:/연구소/1000 프로젝트/1200 자동차/0002 A Cappella/02 ADOS/04 KJPDS02/02.설계(연구소)/01.설계 및 검증/08.소프트웨어/10.SW 통합 테스트/02.Test Result/01.Log/PV/2.BOOT_IT_Report_260610",
           "U:/연구소/1000 프로젝트/1200 자동차/0002 A Cappella/02 ADOS/04 KJPDS02/02.설계(연구소)/01.설계 및 검증/08.소프트웨어/08.SW 정적분석/01.Log/PV"
         ]
       },
       "created_at": "2026-04-21T15:02:58",
-      "updated_at": "2026-06-22T09:24:36",
+      "updated_at": "2026-06-24T09:07:47",
       "last_triggered": "",
       "last_revision": ""
     }

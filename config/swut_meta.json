@@ -73,20 +73,20 @@
       "swuts_docx_path": "U:\\연구소\\1000 프로젝트\\1200 자동차\\0002 A Cappella\\02 ADOS\\04 KJPDS02\\02.설계(연구소)\\01.설계 및 검증\\08.소프트웨어\\09.SW 단위 테스트\\01.Test Specification\\01.SwUTS\\(KJPDS02_PV_SwUTS) Software Unit Test Specification_v0.10_260615.xlsm",
       "_comment_swits_docx_path": "2026-06-19 PV spec 교체 — sitr_spec_based 빌드는 이 spec 시트를 통째 복사하므로 반드시 회사 PV 양식이어야 함. 구 (KJPDS02_SwITS)..v1.01_251205_R(DV, F열 SwITC_0101_01)에서 (KJPDS02_PV_SwITS)..v0.10_260616(PV, B열 SwITC_SwUFn_0101_01 — 레퍼런스 Test Log와 동일 포맷)으로 교체. SwUTS PV 갱신(swuts_docx_path)과 동일 패턴. released 후 R 버전 재교체.",
       "swits_docx_path": "U:\\연구소\\1000 프로젝트\\1200 자동차\\0002 A Cappella\\02 ADOS\\04 KJPDS02\\02.설계(연구소)\\01.설계 및 검증\\08.소프트웨어\\10.SW 통합 테스트\\01.Test Specification\\01.SwITS\\(KJPDS02_PV_SwITS) Software Integration Test Specification_v0.10_260616.xlsm",
-      "swut_log_folder": "U:\\연구소\\1000 프로젝트\\1200 자동차\\0002 A Cappella\\02 ADOS\\04 KJPDS02\\02.설계(연구소)\\01.설계 및 검증\\08.소프트웨어\\09.SW 단위 테스트\\02.Test Result\\01.Log\\PV\\1.APP_UT_report_260604",
-      "_comment_swut_log_folders": "PV 멀티 로그 폴더 (2026-06-04 실측): [0]=APP 43유닛, [1]=BOOT 10유닛(SwUT_35_*, Report_sort 하위). swut_log_folder(단수)는 기존 코드 호환용 APP 경로 유지.",
+      "swut_log_folder": "U:\\연구소\\1000 프로젝트\\1200 자동차\\0002 A Cappella\\02 ADOS\\04 KJPDS02\\02.설계(연구소)\\01.설계 및 검증\\08.소프트웨어\\09.SW 단위 테스트\\02.Test Result\\01.Log\\PV\\1.APP_UT_report_260611",
+      "_comment_swut_log_folders": "PV 멀티 로그 폴더 (2026-06-24 갱신): [0]=APP (1.APP_UT_report_260611 — 260604→260611 신규본), [1]=BOOT 10유닛(2.BOOT_UT_report_260604/Report_sort, SwUT_35_*, 불변). swut_log_folder(단수)는 기존 코드 호환용 APP 경로 유지.",
       "swut_log_folders": [
-        "U:\\연구소\\1000 프로젝트\\1200 자동차\\0002 A Cappella\\02 ADOS\\04 KJPDS02\\02.설계(연구소)\\01.설계 및 검증\\08.소프트웨어\\09.SW 단위 테스트\\02.Test Result\\01.Log\\PV\\1.APP_UT_report_260604",
+        "U:\\연구소\\1000 프로젝트\\1200 자동차\\0002 A Cappella\\02 ADOS\\04 KJPDS02\\02.설계(연구소)\\01.설계 및 검증\\08.소프트웨어\\09.SW 단위 테스트\\02.Test Result\\01.Log\\PV\\1.APP_UT_report_260611",
         "U:\\연구소\\1000 프로젝트\\1200 자동차\\0002 A Cappella\\02 ADOS\\04 KJPDS02\\02.설계(연구소)\\01.설계 및 검증\\08.소프트웨어\\09.SW 단위 테스트\\02.Test Result\\01.Log\\PV\\2.BOOT_UT_report_260604\\Report_sort"
       ],
-      "_comment_swit_log_folders": "PV SwIT 멀티 로그 폴더 (2026-06-10 실측): [0]=APP 29 env (SwIT_SwUFn_NNNN, VC2025 레이아웃 직속), [1]=BOOT 11 env (Report 하위). swit_log_folder(단수)는 기존 코드 호환용 APP 경로 유지. 구 DV 로그: 01.Log\\MDS_Test_시행_Report_Env\\251106_IT_Report.",
-      "swit_log_folder": "U:\\연구소\\1000 프로젝트\\1200 자동차\\0002 A Cappella\\02 ADOS\\04 KJPDS02\\02.설계(연구소)\\01.설계 및 검증\\08.소프트웨어\\10.SW 통합 테스트\\02.Test Result\\01.Log\\PV\\1.APP_IT_Report_260604",
+      "_comment_swit_log_folders": "PV SwIT 멀티 로그 폴더 (2026-06-24 갱신, 260604→260610 신규본): [0]=APP 1.APP_IT_Report_260610 (SwIT_SwUFn_NNNN, VC2025 레이아웃 직속), [1]=BOOT 2.BOOT_IT_Report_260610 (신규폴더는 HTML 직속 — 구 260604의 Report 하위구조 아님). swit_log_folder(단수)는 기존 코드 호환용 APP 경로 유지. 구 DV 로그: 01.Log\\MDS_Test_시행_Report_Env\\251106_IT_Report.",
+      "swit_log_folder": "U:\\연구소\\1000 프로젝트\\1200 자동차\\0002 A Cappella\\02 ADOS\\04 KJPDS02\\02.설계(연구소)\\01.설계 및 검증\\08.소프트웨어\\10.SW 통합 테스트\\02.Test Result\\01.Log\\PV\\1.APP_IT_Report_260610",
       "swit_log_folders": [
-        "U:\\연구소\\1000 프로젝트\\1200 자동차\\0002 A Cappella\\02 ADOS\\04 KJPDS02\\02.설계(연구소)\\01.설계 및 검증\\08.소프트웨어\\10.SW 통합 테스트\\02.Test Result\\01.Log\\PV\\1.APP_IT_Report_260604",
-        "U:\\연구소\\1000 프로젝트\\1200 자동차\\0002 A Cappella\\02 ADOS\\04 KJPDS02\\02.설계(연구소)\\01.설계 및 검증\\08.소프트웨어\\10.SW 통합 테스트\\02.Test Result\\01.Log\\PV\\2.BOOT_IT_Report_260604\\Report"
+        "U:\\연구소\\1000 프로젝트\\1200 자동차\\0002 A Cappella\\02 ADOS\\04 KJPDS02\\02.설계(연구소)\\01.설계 및 검증\\08.소프트웨어\\10.SW 통합 테스트\\02.Test Result\\01.Log\\PV\\1.APP_IT_Report_260610",
+        "U:\\연구소\\1000 프로젝트\\1200 자동차\\0002 A Cappella\\02 ADOS\\04 KJPDS02\\02.설계(연구소)\\01.설계 및 검증\\08.소프트웨어\\10.SW 통합 테스트\\02.Test Result\\01.Log\\PV\\2.BOOT_IT_Report_260610"
       ],
       "doc_filenames": {
-        "_comment": "SwUT 3종(coverage/sutr/swutcr)은 PV 전환 (2026-06-04 PV 실측 로그 기준). SwIT 3종(switcv/switr/switcr)도 PV 전환 (2026-06-10 — PV SwIT 로그 1.APP_IT_Report_260604 + 2.BOOT_IT_Report_260604 확보).",
+        "_comment": "SwUT 3종(coverage/sutr/swutcr)은 PV 전환 (APP 1.APP_UT_report_260611 + BOOT 2.BOOT_UT_report_260604 기준, 2026-06-24 갱신). SwIT 3종(switcv/switr/switcr)도 PV 전환 (PV SwIT 로그 1.APP_IT_Report_260610 + 2.BOOT_IT_Report_260610 확보, 2026-06-24 갱신).",
         "coverage": "(KJPDS02_PV_SwUTCV) Software Unit Test Coverage Result_v{version}_{date}_R.xlsx",
         "sutr": "(KJPDS02_PV_SwUTR) Software Unit Test Result_v{version}_{date}_R.xlsm",
         "swutcr": "(KJPDS02_PV_SwUTCR) Software Unit Test Comprehensive Result_v{version}_{date}_R.xlsm",
@@ -172,7 +172,8 @@
         "coverage_report_template": "U:\\연구소\\2000 연구소 공용\\2200 개발 사양\\2220 개발표준 Template\\★개발템플릿 Version3\\02.설계(연구소)\\01.설계 및 검증\\08.소프트웨어\\09.SW 단위 테스트\\02.Test Result\\02.Result Report\\(XXXX_SwUTCV) Software Unit Test Coverage Result_v0.10_2XXXXX.xlsx",
         "sutr_template": "U:\\연구소\\2000 연구소 공용\\2200 개발 사양\\2220 개발표준 Template\\★개발템플릿 Version3\\02.설계(연구소)\\01.설계 및 검증\\08.소프트웨어\\09.SW 단위 테스트\\02.Test Result\\02.Result Report\\(XXXX_SwUTR) Software Unit Test Result_v0.10_2XXXXX.xlsm",
         "swutcr_template": "U:\\연구소\\2000 연구소 공용\\2200 개발 사양\\2220 개발표준 Template\\★개발템플릿 Version3\\02.설계(연구소)\\01.설계 및 검증\\08.소프트웨어\\09.SW 단위 테스트\\02.Test Result\\02.Result Report\\(XXXX_SwUTCR) Software Unit Test Comprehesive Result_v0.10_2XXXXX.xlsm",
-        "swit_coverage_template": "U:\\연구소\\1000 프로젝트\\1200 자동차\\0002 A Cappella\\02 ADOS\\04 KJPDS02\\02.설계(연구소)\\01.설계 및 검증\\08.소프트웨어\\10.SW 통합 테스트\\02.Test Result\\02.Result Report\\(KJPDS02_SwITCV) Software Integration Test Coverage Result_v1.01_251205_R.xlsx",
+        "_comment_swit_coverage_template": "2026-06-24 PV 전환 — 구 DV본 (KJPDS02_SwITCV)..v1.01_251205_R(11열 Component有/universe 571 APP만)에서 PV본 (KJPDS02_PV_SwITCV)..v0.10_260617(10열 Component無/universe 1014 APP+BOOT, SwUFn_35xxx 포함)으로 교체. _extract_template_coverage_rows가 Component 유무로 Unit/Name 열(D/E↔C/D) 적응, is_swit_metric_layout는 has_component_col 비의존(라운드102). 레퍼런스=회사 감사본 직접 비교 확인.",
+        "swit_coverage_template": "U:\\연구소\\1000 프로젝트\\1200 자동차\\0002 A Cappella\\02 ADOS\\04 KJPDS02\\02.설계(연구소)\\01.설계 및 검증\\08.소프트웨어\\10.SW 통합 테스트\\02.Test Result\\02.Result Report\\(KJPDS02_PV_SwITCV) Software Integration Test Coverage Result_v0.10_260617.xlsx",
         "swit_sitr_template": "U:\\연구소\\1000 프로젝트\\1200 자동차\\0002 A Cappella\\02 ADOS\\04 KJPDS02\\02.설계(연구소)\\01.설계 및 검증\\08.소프트웨어\\10.SW 통합 테스트\\02.Test Result\\02.Result Report\\(KJPDS02_SwITR) Software Integration Test Result_v1.01_251205_R.xlsm",
         "fault_injection_result": "U:\\연구소\\1000 프로젝트\\1200 자동차\\0002 A Cappella\\02 ADOS\\04 KJPDS02\\02.설계(연구소)\\01.설계 및 검증\\08.소프트웨어\\10.SW 통합 테스트\\02.Test Result\\02.Result Report\\KJPDS02_DV_Fault_Injection_TestResult_v1.01_251205_R.xlsx",
         "switcr_template": "U:\\연구소\\2000 연구소 공용\\2200 개발 사양\\2220 개발표준 Template\\★개발템플릿 Version3\\02.설계(연구소)\\01.설계 및 검증\\08.소프트웨어\\10.SW 통합 테스트\\02.Test Result\\02.Result Report\\(XXXX_SwITCR) Software Integration Test Comprehesive Result_v0.10_XXXXXX.xlsm",
