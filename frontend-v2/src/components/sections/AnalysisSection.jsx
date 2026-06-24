@@ -743,18 +743,21 @@ export default function AnalysisSection({ job, analysisResult }) {
                 </div>
                 {/* 막대(좌)·산포도(우) 한 화면 — auto-fit으로 좁으면 세로 적층(인라인 grid가 미디어쿼리 덮어쓰는 문제 회피) */}
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))', gap: 10 }}>
-                  <div style={{ padding: 10, background: 'var(--bg)', borderRadius: 6 }}>
+                  <div style={{ padding: 10, background: 'var(--bg)', borderRadius: 6, display: 'flex', flexDirection: 'column' }}>
                     <div className="text-sm" style={{ fontWeight: 600, marginBottom: 8 }}>구간별 함수 수 (막대)</div>
-                    <div style={{ display: 'flex', alignItems: 'flex-end', gap: 6, height: 92 }}>
+                    {/* 바 영역을 flex:1로 늘려 셀 높이(우측 산포도와 동일)를 가득 채운다. 막대는 트랙(flex:1)의 %로 스케일(최대 86% — 위 count 라벨 자리 확보). */}
+                    <div style={{ flex: 1, minHeight: 160, display: 'flex', alignItems: 'stretch', gap: 6 }}>
                       {compDist.buckets.map((b, i) => {
-                        const h = Math.round((b.count / compDist.maxCount) * 72);
+                        const barPct = Math.max(b.count ? 4 : 0, Math.round((b.count / compDist.maxCount) * 86));
                         const col = `var(--color-${b.tone})`;
                         const pct = compDist.total ? Math.round((b.count / compDist.total) * 100) : 0;
                         return (
                           <div key={i} title={`${b.label}: ${b.count}개 (${pct}%)`}
-                            style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'flex-end', height: '100%' }}>
-                            <div style={{ fontSize: 10, fontWeight: 700, color: b.count ? col : 'var(--text-muted)', marginBottom: 2 }}>{b.count}</div>
-                            <div style={{ width: '100%', height: Math.max(b.count ? 3 : 0, h), background: col, opacity: b.count ? 1 : 0.18, borderRadius: '3px 3px 0 0' }} />
+                            style={{ flex: 1, height: '100%', display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+                            <div style={{ flex: 1, minHeight: 0, width: '100%', display: 'flex', flexDirection: 'column', justifyContent: 'flex-end', alignItems: 'center' }}>
+                              <div style={{ fontSize: 10, fontWeight: 700, color: b.count ? col : 'var(--text-muted)', marginBottom: 2 }}>{b.count}</div>
+                              <div style={{ width: '100%', height: `${barPct}%`, background: col, opacity: b.count ? 1 : 0.18, borderRadius: '3px 3px 0 0' }} />
+                            </div>
                             <div style={{ fontSize: 9, color: 'var(--text-muted)', marginTop: 3, whiteSpace: 'nowrap' }}>{b.label}</div>
                           </div>
                         );
