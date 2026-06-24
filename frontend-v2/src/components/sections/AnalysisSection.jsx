@@ -552,6 +552,24 @@ export default function AnalysisSection({ job, analysisResult }) {
 
   return (
     <div>
+      {/* ── 함수레벨 상세 로드 (전역) — UT/IT 함수별 커버리지·함수콜·드릴다운·산포도를 한 번에 채움 ── */}
+      {!fnLevelLoaded && canLoadFnLevel && (
+        <div className="panel" style={{ marginBottom: 12, borderLeft: '3px solid var(--color-primary, #2563eb)' }}>
+          <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+            <div className="text-sm" style={{ lineHeight: 1.5, flex: 1, minWidth: 240 }}>
+              <b>함수레벨 상세</b>를 불러오면 {buildHasVcast
+                ? 'UT/IT 함수별 커버리지·함수콜·함수 진입·모듈 드릴다운·복잡도×커버리지 산포도'
+                : 'VectorCAST 시험·커버리지 전체'}가 아래 모든 섹션(유닛/통합테스트·커버리지·복잡도)에 채워집니다.
+              <span className="text-muted"> 빌드 캐시 또는 SCM 로그에서 파싱 — Jenkins 라이브 연결 불필요.</span>
+            </div>
+            <button className="btn-primary" onClick={loadScmVcast} disabled={scmVcastLoading}
+              title="UT/IT 함수레벨 데이터를 한 번에 불러옵니다(빌드 캐시/SCM 로그 파싱, Jenkins 연결 불필요).">
+              {scmVcastLoading ? <span className="spinner" /> : (buildHasVcast ? '함수레벨 상세 불러오기' : 'SCM 경로에서 불러오기')}
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* ── 정적분석 (Static Analysis · Helix QAC/PRQA, MISRA-C) ── */}
       <div className="panel" style={{ marginBottom: 12 }}>
         <div className="panel-header">
@@ -667,15 +685,7 @@ export default function AnalysisSection({ job, analysisResult }) {
       <div className="panel" style={{ marginBottom: 12 }}>
         <div className="panel-header">
           <span className="panel-title">유닛테스트 (Unit Test · VectorCAST UT)</span>
-          <div className="row" style={{ gap: 8, alignItems: 'center' }}>
-            {vcastSource && <SourceBadge source={vcastSource} />}
-            {!fnLevelLoaded && canLoadFnLevel && (
-              <button className="btn-sm" onClick={loadScmVcast} disabled={scmVcastLoading}
-                title="함수레벨 커버리지(UT/IT 함수 entries·함수콜)를 불러옵니다. 빌드 캐시 또는 SCM 로그에서 파싱합니다(Jenkins 라이브 연결 불필요).">
-                {scmVcastLoading ? <span className="spinner" /> : (buildHasVcast ? '함수레벨 상세 불러오기' : 'SCM 경로에서 불러오기')}
-              </button>
-            )}
-          </div>
+          {vcastSource && <SourceBadge source={vcastSource} />}
         </div>
         <div className="text-sm text-muted" style={{ padding: '0 0 8px', lineHeight: 1.55 }}>
           VectorCAST 단위시험(UT) 결과입니다. <b>테스트 케이스</b>=시험 수, <b>UT 리포트</b>=리포트 폴더 수,{' '}
@@ -822,7 +832,7 @@ export default function AnalysisSection({ job, analysisResult }) {
         )}
         {!fnLevelLoaded && canLoadFnLevel && (
           <div className="text-sm text-muted" style={{ marginTop: 6, padding: 8, background: 'var(--bg)', borderRadius: 6, lineHeight: 1.5 }}>
-            <b>함수콜·함수 진입 커버리지</b>와 IT 함수별 entries는 위 ‘유닛테스트’의 <b>‘함수레벨 상세 불러오기’</b>를 누르면 표시됩니다
+            <b>함수콜·함수 진입 커버리지</b>와 IT 함수별 entries는 위쪽 <b>‘함수레벨 상세 불러오기’</b> 버튼을 누르면 표시됩니다
             (빌드 캐시에서 즉시 로드 — Jenkins 연결 불필요).
           </div>
         )}
@@ -998,7 +1008,7 @@ export default function AnalysisSection({ job, analysisResult }) {
                         yMax={compScatter.yMax} threshold={threshold} />
                     ) : (
                       <div className="text-sm text-muted" style={{ padding: 8, lineHeight: 1.5 }}>
-                        커버리지가 로드되면 표시됩니다 — 위 ‘VectorCAST 테스트’의 ‘SCM 경로에서 불러오기’를 누르면
+                        커버리지가 로드되면 표시됩니다 — 위쪽 ‘함수레벨 상세 불러오기’를 누르면
                         함수별 복잡도×커버리지가 산포도로 나타납니다.
                       </div>
                     )}
