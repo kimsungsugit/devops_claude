@@ -15,7 +15,7 @@ const SECTIONS = [
   { id: 'analysis',icon: '📊', label: '프로젝트 분석', Component: AnalysisSection },
   { id: 'setup',   icon: '⚙️', label: '프로젝트 설정', Component: ProjectSetupSection },
   { id: 'impact',  icon: '🔍', label: '변경 영향 가이드', Component: ImpactGuideSection },
-  { id: 'srssds',  icon: '📋', label: 'SRS/SDS 매핑', Component: SrsSdsSection },
+  { id: 'srssds',  icon: '📋', label: '추적성 분석', Component: SrsSdsSection },
   // 생성 6종(문서/리포트/SwUT/SwIT/SwSA/통합결과)을 단일 탭으로 통합 — 내부 옵션 세그먼트로 전환.
   { id: 'docgen',  icon: '📝', label: '문서 생성',     Component: DocGenHubSection },
   { id: 'ai',      icon: '🤖', label: 'AI 어시스턴트', Component: AiAssistSection },

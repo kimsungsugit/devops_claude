@@ -998,6 +998,19 @@ function TraceMatrix({ matrix, focusFunctions = null, onClearFocus = null }) {
   const [expandedTreeNodes, setExpandedTreeNodes] = useState(() => new Set()); // 트리 노드 id 집합 (다중 펼침)
   const [includeUnmapped, setIncludeUnmapped] = useState(false); // 트리: SRS 미추적 시험 별도 루트 표시 토글
 
+  // 콜트리 진입 함수(entry) 자동 시드 후보 — 매트릭스 row의 source_ids(UDS 함수)에서 함수명
+  // 토큰만 추출해 datalist로 제안한다(콜트리 entry는 빌드의 known 함수명과 일치해야 적중).
+  const callTreeSeeds = useMemo(() => {
+    const set = new Set();
+    for (const r of (rows || [])) {
+      for (const s of (Array.isArray(r.source_ids) ? r.source_ids : [])) {
+        const fn = String(s || '').split(/[\s(]/)[0].trim();
+        if (fn) set.add(fn);
+      }
+    }
+    return Array.from(set).slice(0, 500);
+  }, [rows]);
+
   // Reset page when rows change (e.g., new matrix data)
   useEffect(() => { setCurrentPage(0); setExpandedReqId(null); setExpandedTreeNodes(new Set()); }, [rows]);
 
@@ -1541,6 +1554,12 @@ function TraceMatrix({ matrix, focusFunctions = null, onClearFocus = null }) {
               color: viewMode === 'matrix' ? '#fff' : 'var(--fg)', fontWeight: viewMode === 'matrix' ? 700 : 400 }}>
             매트릭스
           </button>
+          <button type="button" onClick={() => setViewMode('calltree')} aria-pressed={viewMode === 'calltree'} title="함수 호출 트리 (tree-sitter 정밀 분석 · ASIL 강조)"
+            style={{ padding: '6px 10px', fontSize: 11, border: 'none', borderLeft: '1px solid var(--border)', cursor: 'pointer',
+              background: viewMode === 'calltree' ? 'var(--accent)' : 'var(--bg)',
+              color: viewMode === 'calltree' ? '#fff' : 'var(--fg)', fontWeight: viewMode === 'calltree' ? 700 : 400 }}>
+            콜트리
+          </button>
         </div>
         {/* 트리 전용: SRS 미추적 시험(역방향 공백) 별도 루트 표시 토글 — 데이터 있을 때만 노출 */}
         {viewMode === 'tree' && unmappedVcast.length > 0 && (
@@ -1794,6 +1813,13 @@ function TraceMatrix({ matrix, focusFunctions = null, onClearFocus = null }) {
       {viewMode === 'matrix' && (
         <CrossMatrixView rows={filtered} linkTable={inner?.link_table} fullMatrix={inner}
           exportMeta={{ job_url: matrix?.job_url || inner?.job_url || '' }} />
+      )}
+
+      {/* 콜트리 보기 (신규 — tree-sitter 정밀 함수 호출 트리. entry 기반 깊이탐색 + ASIL 강조) */}
+      {viewMode === 'calltree' && (
+        <CallTreeView job={job} cacheRoot={cacheRoot}
+          buildSelector={cfg?.buildSelector || 'lastSuccessfulBuild'}
+          seedFns={callTreeSeeds} toast={toast} />
       )}
 
       {/* Pagination (표 모드 전용 — 트리는 filtered 전체를 한 번에 조망하므로 페이지네이션 불필요) */}
@@ -2493,5 +2519,179 @@ function TraceTreeFunc({ fn, tests, parentId, expanded, onToggle }) {
         </div>
       )}
     </li>
+  );
+}
+
+/* ── CallTree — tree-sitter 정밀 함수 호출 트리 (viewMode='calltree') ──────────
+ * 추적성 매트릭스와 같은 섹션('추적성 분석') 안에서 함수 호출 관계를 보여준다.
+ * 백엔드 POST /api/jenkins/call-tree (engine='precise', build_call_tree_precise)가
+ * parse_c_project(tree-sitter)로 호출엣지를 추출하고, 노드에 ASIL/파일/시그니처를 실어준다.
+ * - entry(진입 함수)는 빌드 소스의 known 함수명과 일치해야 적중. 매트릭스 source_ids에서 자동완성.
+ * - 표준 라이브러리는 백엔드에서 제외. include_external 시 미정의(외부) 호출만 별도 표시.
+ * - 루트는 항상 펼침, 하위는 클릭 펼침(깊은 트리 DOM 비용 절감). cycle/truncated 플래그 표시. */
+function CallTreeNode({ node, path, expanded, onToggle, depth, includeExternal }) {
+  const children = Array.isArray(node?.calls) ? node.calls : [];
+  const externals = includeExternal && Array.isArray(node?.externals) ? node.externals : [];
+  const hasChildren = children.length > 0 || externals.length > 0;
+  const isOpen = depth === 0 || expanded.has(path);
+  const asil = node?.asil ? String(node.asil).toUpperCase() : '';
+  return (
+    <li style={{ listStyle: 'none' }}>
+      <div
+        role={hasChildren ? 'button' : undefined}
+        tabIndex={hasChildren ? 0 : undefined}
+        aria-expanded={hasChildren ? isOpen : undefined}
+        onClick={hasChildren ? () => onToggle(path) : undefined}
+        onKeyDown={hasChildren ? (e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onToggle(path); } }) : undefined}
+        title={node?.file || ''}
+        style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '2px 6px', fontSize: 11,
+          cursor: hasChildren ? 'pointer' : 'default', borderRadius: 4 }}
+      >
+        <span style={{ fontFamily: 'monospace', width: 12, display: 'inline-block', color: 'var(--text-muted)' }}>
+          {hasChildren ? (isOpen ? '▾' : '▸') : '·'}
+        </span>
+        <strong style={{ fontFamily: 'monospace' }}>{node?.name}</strong>
+        {asil && (
+          <span style={{ fontSize: 9, padding: '0 5px', borderRadius: 8, fontWeight: 700, color: '#fff',
+            background: _ASIL_COLORS[asil] || '#6b7280' }}>ASIL {asil}</span>
+        )}
+        {node?.cycle && <span style={{ fontSize: 9, color: '#d97706' }} title="재귀/순환 호출 — 더 펼치지 않음">↻ 순환</span>}
+        {node?.truncated && <span style={{ fontSize: 9, color: 'var(--text-muted)' }} title="최대 깊이 도달 — 더 펼치지 않음">… 깊이제한</span>}
+        {node?.signature && (
+          <code style={{ fontSize: 9, color: 'var(--text-muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 320 }}>
+            {node.signature}
+          </code>
+        )}
+      </div>
+      {isOpen && hasChildren && (
+        <ul style={{ margin: 0, paddingLeft: 18, borderLeft: '1px dashed var(--border)' }}>
+          {children.map((c, i) => (
+            <CallTreeNode key={`${path}.${i}`} node={c} path={`${path}.${i}`}
+              expanded={expanded} onToggle={onToggle} depth={depth + 1} includeExternal={includeExternal} />
+          ))}
+          {externals.map((e, i) => (
+            <li key={`ext-${path}-${i}`} style={{ listStyle: 'none', padding: '2px 6px', fontSize: 10, color: 'var(--text-muted)' }}>
+              <span style={{ fontFamily: 'monospace' }}>{e?.name}</span>{' '}
+              <em>[{e?.header || '?'} | {e?.library || '?'}]</em>
+            </li>
+          ))}
+        </ul>
+      )}
+    </li>
+  );
+}
+
+function CallTreeView({ job, cacheRoot, buildSelector, seedFns, toast }) {
+  const [entry, setEntry] = useState('');
+  const [depth, setDepth] = useState(5);
+  const [includeExternal, setIncludeExternal] = useState(false);
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [expanded, setExpanded] = useState(() => new Set());
+  const mountedRef = useRef(true);
+  useEffect(() => () => { mountedRef.current = false; }, []);
+
+  const toggle = useCallback((id) => {
+    setExpanded(prev => { const n = new Set(prev); if (n.has(id)) n.delete(id); else n.add(id); return n; });
+  }, []);
+
+  const load = useCallback(async () => {
+    const entries = String(entry || '').split(/[\n,]/).map(s => s.trim()).filter(Boolean);
+    if (!entries.length) { toast('warning', '진입 함수명을 입력하세요 (예: main).'); return; }
+    setLoading(true);
+    try {
+      const res = await post('/api/jenkins/call-tree', {
+        job_url: job?.url || '',
+        cache_root: cacheRoot || '.devops_pro_cache',
+        build_selector: buildSelector || 'lastSuccessfulBuild',
+        entry: entries.join(','),
+        max_depth: Math.max(1, Math.min(20, Number(depth) || 5)),
+        include_external: includeExternal,
+        engine: 'precise',
+      });
+      if (!mountedRef.current) return;
+      setData(res);
+      setExpanded(new Set());
+      const miss = Array.isArray(res?.missing) ? res.missing : [];
+      const st = res?.stats || {};
+      if (miss.length) {
+        toast('warning', `미발견 함수 ${miss.length}개: ${miss.slice(0, 5).join(', ')}${miss.length > 5 ? '…' : ''} — 빌드 소스의 함수명과 정확히 일치해야 합니다.`);
+      } else {
+        toast('success', `콜트리 생성 (${st.engine || '?'} · 함수 ${st.functions ?? 0} · 엣지 ${st.edges ?? 0})`);
+      }
+    } catch (e) {
+      if (mountedRef.current) toast('error', `콜트리 생성 실패: ${e.message}`);
+    } finally {
+      if (mountedRef.current) setLoading(false);
+    }
+  }, [entry, depth, includeExternal, job, cacheRoot, buildSelector, toast]);
+
+  const trees = Array.isArray(data?.trees) ? data.trees : [];
+  const st = data?.stats || {};
+
+  return (
+    <div style={{ padding: '8px 0' }}>
+      <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8, marginBottom: 10,
+        padding: 10, background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 6 }}>
+        <input list="calltree-seed-fns" value={entry} onChange={e => setEntry(e.target.value)}
+          onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); load(); } }}
+          placeholder="진입 함수명 (콤마 구분, 예: main, App_Init)"
+          style={{ flex: '1 1 280px', minWidth: 200, padding: '6px 8px', fontSize: 12, fontFamily: 'monospace',
+            border: '1px solid var(--border)', borderRadius: 4, background: 'var(--bg)', color: 'var(--fg)' }} />
+        <datalist id="calltree-seed-fns">
+          {(seedFns || []).map(f => <option key={f} value={f} />)}
+        </datalist>
+        <label style={{ fontSize: 11, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+          깊이
+          <input type="number" min={1} max={20} value={depth} onChange={e => setDepth(Number(e.target.value))}
+            style={{ width: 56, padding: '5px 6px', fontSize: 12, border: '1px solid var(--border)', borderRadius: 4, background: 'var(--bg)', color: 'var(--fg)' }} />
+        </label>
+        <label style={{ fontSize: 11, display: 'inline-flex', alignItems: 'center', gap: 4, cursor: 'pointer' }}
+          title="표준 라이브러리를 제외한 외부(미정의) 함수 호출도 트리에 표시">
+          <input type="checkbox" checked={includeExternal} onChange={e => setIncludeExternal(e.target.checked)} style={{ cursor: 'pointer' }} />
+          외부 함수
+        </label>
+        <button type="button" onClick={load} disabled={loading}
+          style={{ padding: '6px 14px', fontSize: 12, fontWeight: 600, border: 'none', borderRadius: 4, cursor: loading ? 'default' : 'pointer',
+            background: loading ? 'var(--border)' : 'var(--accent)', color: '#fff' }}>
+          {loading ? '분석 중…' : '콜트리 생성'}
+        </button>
+      </div>
+
+      {!data && !loading && (
+        <div style={{ fontSize: 12, color: 'var(--text-muted)', padding: '8px 4px' }}>
+          진입 함수명을 입력하고 <strong>콜트리 생성</strong>을 누르면 tree-sitter로 분석한 함수 호출 트리를 보여줍니다.
+          매트릭스가 로드돼 있으면 입력란에서 설계 함수명 자동완성을 제안합니다.
+        </div>
+      )}
+
+      {data && (
+        <div>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, fontSize: 11, color: 'var(--text-muted)', marginBottom: 8 }}>
+            <span>엔진 <strong style={{ color: st.engine === 'tree-sitter' ? '#16a34a' : '#d97706' }}>{st.engine || '?'}</strong></span>
+            <span>스캔 파일 {st.files_scanned ?? 0}</span>
+            <span>함수 {st.functions ?? 0}</span>
+            <span>호출 엣지 {st.edges ?? 0}</span>
+            {Array.isArray(data.missing) && data.missing.length > 0 && (
+              <span style={{ color: '#d97706' }}>미발견 {data.missing.length}</span>
+            )}
+          </div>
+          {trees.length === 0 ? (
+            <div style={{ fontSize: 12, color: 'var(--text-muted)', padding: 12, textAlign: 'center', border: '1px dashed var(--border)', borderRadius: 6 }}>
+              표시할 호출 트리가 없습니다.
+              {Array.isArray(data.missing) && data.missing.length > 0 && (
+                <> 입력한 함수({data.missing.join(', ')})를 빌드 소스에서 찾지 못했습니다 — 함수명/소스 캐시를 확인하세요.</>
+              )}
+            </div>
+          ) : (
+            <ul style={{ margin: 0, padding: 0 }}>
+              {trees.map((t, i) => (
+                <CallTreeNode key={i} node={t} path={`${i}`} expanded={expanded} onToggle={toggle} depth={0} includeExternal={includeExternal} />
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
+    </div>
   );
 }

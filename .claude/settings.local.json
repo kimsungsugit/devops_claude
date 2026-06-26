@@ -64,7 +64,10 @@
       "Bash(PYTHONIOENCODING=utf-8 backend/.venv/Scripts/python.exe .codex_tmp/diag_rows2.py)",
       "Bash(PYTHONIOENCODING=utf-8 backend/.venv/Scripts/python.exe .codex_tmp/diag_verify2.py)",
       "Bash(PYTHONIOENCODING=utf-8 backend/.venv/Scripts/python.exe -m pytest tests/unit/test_routers.py -q -k \"preview\")",
-      "Bash(PYTHONIOENCODING=utf-8 backend/.venv/Scripts/python.exe -m pytest tests/unit/test_routers.py::TestPreviewExcelFixes -q)"
+      "Bash(PYTHONIOENCODING=utf-8 backend/.venv/Scripts/python.exe -m pytest tests/unit/test_routers.py::TestPreviewExcelFixes -q)",
+      "Bash(../backend/.venv/Scripts/python.exe -m uvicorn main:app --host 127.0.0.1 --port 9000 --log-level warning)",
+      "Bash(ls backend/.venv/Scripts/python.exe)",
+      "Bash(ls .venv/Scripts/python.exe)"
     ]
   }
 }

@@ -81,6 +81,12 @@ from backend.schemas import (
     UdsTraceabilityMatrixRequest,
 )
 from backend.services.assistant_service import read_report_bundle
+from backend.services.call_tree import (
+    build_call_tree,
+    build_call_tree_precise,
+    call_tree_to_csv,
+    call_tree_to_html,
+)
 from backend.services.files import list_log_candidates, read_csv_rows, tail_text
 from backend.services.jenkins_client import JenkinsClient
 from backend.services.jenkins_helpers import _detect_reports_dir, _job_slug, _safe_artifact_path
@@ -4230,17 +4236,38 @@ def jenkins_call_tree(req: JenkinsCallTreeRequest) -> Dict[str, Any]:
     if not source_root.exists():
         raise HTTPException(status_code=404, detail="source_root not found")
     compile_db = Path(req.compile_commands_path).resolve() if req.compile_commands_path else None
-    payload = build_call_tree(
-        source_root,
-        entries,
-        include_paths=req.include_paths or [],
-        exclude_paths=req.exclude_paths or [],
-        max_depth=max(1, int(req.max_depth or 5)),
-        max_files=max(1, int(req.max_files or 2000)),
-        include_external=bool(req.include_external),
-        compile_commands_path=compile_db,
-        external_map=req.external_map or [],
-    )
+    def _regex_engine() -> Dict[str, Any]:
+        return build_call_tree(
+            source_root,
+            entries,
+            include_paths=req.include_paths or [],
+            exclude_paths=req.exclude_paths or [],
+            max_depth=max(1, int(req.max_depth or 5)),
+            max_files=max(1, int(req.max_files or 2000)),
+            include_external=bool(req.include_external),
+            compile_commands_path=compile_db,
+            external_map=req.external_map or [],
+        )
+
+    engine = str(getattr(req, "engine", "precise") or "precise").strip().lower()
+    if engine == "precise":
+        payload = build_call_tree_precise(
+            source_root,
+            entries,
+            include_paths=req.include_paths or [],
+            exclude_paths=req.exclude_paths or [],
+            max_depth=max(1, int(req.max_depth or 5)),
+            max_files=max(1, int(req.max_files or 2000)),
+            include_external=bool(req.include_external),
+            external_map=req.external_map or [],
+        )
+        # tree-sitter 미가용(engine='unavailable') → regex 엔진 자동 폴백 (R1 완화)
+        if (payload.get("stats") or {}).get("engine") == "unavailable":
+            payload = _regex_engine()
+            payload.setdefault("stats", {})["engine"] = "regex-fallback"
+    else:
+        payload = _regex_engine()
+        payload.setdefault("stats", {}).setdefault("engine", "regex")
     payload["meta"] = {
         "job_url": req.job_url,
         "build_selector": req.build_selector,

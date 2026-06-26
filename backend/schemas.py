@@ -267,6 +267,7 @@ class JenkinsCallTreeRequest(JenkinsReportRequest):
     include_external: bool = False
     compile_commands_path: Optional[str] = None
     output_format: str = "json"
+    engine: str = "precise"  # "precise"(tree-sitter) | "regex". precise 미가용 시 자동 regex 폴백.
     external_map: List[Dict[str, Any]] = []
     html_template: Optional[str] = None
 

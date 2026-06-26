@@ -345,19 +345,22 @@ def build_call_tree(
     func_defs, duplicates = _scan_functions(src_files)
     known = set(func_defs.keys())
     call_map: Dict[str, List[str]] = {}
-    external_map: Dict[str, List[Dict[str, str]]] = {}
+    # C2 fix: 과거 지역변수 `external_map`(Dict)이 파라미터 `external_map`(List, 사용자 custom
+    # 분류)을 동명으로 shadow해 349행 _build_external_lookup이 빈 dict를 받아 custom external_map이
+    # 무력화되던 결함. 함수별 external 결과는 별도 변수 `external_calls`로 분리한다.
+    external_calls: Dict[str, List[Dict[str, str]]] = {}
     external_lookup = _build_external_lookup(external_map)
     for name, info in func_defs.items():
         calls, externals = _extract_calls(info.get("body", ""), known, external_lookup)
         call_map[name] = calls
-        external_map[name] = externals
+        external_calls[name] = externals
     trees = []
     missing = []
     for entry in entries:
         if entry not in known:
             missing.append(entry)
             continue
-        trees.append(_build_tree(entry, call_map, external_map, max_depth, 0, set(), include_external))
+        trees.append(_build_tree(entry, call_map, external_calls, max_depth, 0, set(), include_external))
     edges = sum(len(v) for v in call_map.values())
     return {
         "source_root": str(root_dir),
@@ -370,6 +373,128 @@ def build_call_tree(
             "edges": edges,
             "duplicates": len(duplicates),
             "compile_commands": str(compile_db) if compile_db.exists() else "",
+        },
+    }
+
+
+def _enrich_nodes(node: Dict[str, Any], func_meta: Dict[str, Dict[str, Any]]) -> None:
+    """트리 노드에 함수 메타(file/signature/asil)를 주입 — 정밀 엔진 전용.
+
+    parse_c_project가 제공하는 Doxygen ASIL/시그니처/파일을 노드에 실어 프론트가 ASIL 배지·
+    소스 점프를 렌더할 수 있게 한다. cycle/truncated 노드도 name 기준으로 메타를 채운다.
+    """
+    meta = func_meta.get(node.get("name") or "")
+    if meta:
+        if meta.get("asil"):
+            node["asil"] = meta["asil"]
+        if meta.get("file"):
+            node["file"] = meta["file"]
+        if meta.get("signature"):
+            node["signature"] = meta["signature"]
+    for child in node.get("calls") or []:
+        _enrich_nodes(child, func_meta)
+
+
+def build_call_tree_precise(
+    source_root: Path,
+    entries: List[str],
+    include_paths: Optional[List[str]] = None,
+    exclude_paths: Optional[List[str]] = None,
+    max_depth: int = 5,
+    max_files: int = 2000,
+    include_external: bool = False,
+    external_map: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    """tree-sitter(parse_c_project) 기반 정밀 콜트리.
+
+    regex 엔진(build_call_tree)과 동일한 출력 shape를 내되, 호출엣지를 tree-sitter로 추출해
+    함수포인터/콜백 등록(handler·callback 대입)까지 잡는다. parse_c_project의 calls는
+    표준 라이브러리만 제거한 모든 호출이므로, known(프로젝트 정의 함수)에 없는 호출을 external로
+    분리해 _build_external_lookup으로 분류한다. 노드에는 ASIL/파일/시그니처 메타를 보강한다.
+
+    tree-sitter 미가용 시 parse_c_project가 functions=[]를 반환 → known 빈 → 모든 entry가
+    missing으로 떨어지고 stats.engine='unavailable'로 표기한다. 호출자(엔드포인트)는 이 신호로
+    regex 엔진 폴백을 결정할 수 있다(R1 완화).
+    """
+    root_dir = Path(source_root).resolve()
+    include_tokens = _normalize_tokens(include_paths)
+    exclude_tokens = _normalize_tokens(exclude_paths)
+    try:
+        from workflow.code_parser.c_parser import parse_c_project
+    except Exception:
+        return {
+            "source_root": str(root_dir),
+            "entries": entries,
+            "trees": [],
+            "missing": list(entries),
+            "stats": {
+                "files_scanned": 0,
+                "functions": 0,
+                "edges": 0,
+                "duplicates": 0,
+                "compile_commands": "",
+                "engine": "unavailable",
+            },
+        }
+    parsed = parse_c_project(str(root_dir), max_files=max(1, int(max_files)))
+    funcs = parsed.get("functions", []) or []
+    raw_calls: Dict[str, List[str]] = {}
+    func_meta: Dict[str, Dict[str, Any]] = {}
+    for f in funcs:
+        nm = f.get("name")
+        if not nm:
+            continue
+        # include/exclude를 함수의 소스 파일 경로 기준으로 적용(regex 엔진과 동일 의미)
+        if include_tokens or exclude_tokens:
+            rel = f.get("file") or ""
+            try:
+                rel_norm = Path(rel).resolve().relative_to(root_dir).as_posix()
+            except Exception:
+                rel_norm = str(rel).replace("\\", "/")
+            if not _matches_filters(rel_norm, include_tokens, exclude_tokens):
+                continue
+        raw_calls[nm] = list(f.get("calls", []) or [])
+        func_meta[nm] = {
+            "file": f.get("file"),
+            "signature": f.get("signature"),
+            "asil": f.get("comment_asil") or f.get("asil"),
+        }
+    known = set(raw_calls.keys())
+    external_lookup = _build_external_lookup(external_map)
+    call_map: Dict[str, List[str]] = {}
+    external_calls: Dict[str, List[Dict[str, str]]] = {}
+    for nm, calls in raw_calls.items():
+        internal: Set[str] = set()
+        externals: Dict[str, Dict[str, str]] = {}
+        for callee in calls:
+            if callee in known:
+                internal.add(callee)
+            elif callee not in externals:
+                externals[callee] = {"name": callee, **external_lookup.get(callee, _classify_external(callee))}
+        call_map[nm] = sorted(internal)
+        external_calls[nm] = [externals[k] for k in sorted(externals.keys())]
+    trees = []
+    missing = []
+    for entry in entries:
+        if entry not in known:
+            missing.append(entry)
+            continue
+        tree = _build_tree(entry, call_map, external_calls, max_depth, 0, set(), include_external)
+        _enrich_nodes(tree, func_meta)
+        trees.append(tree)
+    edges = sum(len(v) for v in call_map.values())
+    return {
+        "source_root": str(root_dir),
+        "entries": entries,
+        "trees": trees,
+        "missing": missing,
+        "stats": {
+            "files_scanned": len(parsed.get("scanned", []) or []),
+            "functions": len(known),
+            "edges": edges,
+            "duplicates": 0,
+            "compile_commands": "",
+            "engine": "tree-sitter",
         },
     }
 
