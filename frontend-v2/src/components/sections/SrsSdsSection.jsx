@@ -589,7 +589,9 @@ export default function SrsSdsSection({ job, analysisResult }) {
         )}
 
         {matrix ? (
-          <TraceMatrix matrix={matrix} focusFunctions={traceFocus?.functions || null} onClearFocus={() => setTraceFocus(null)} />
+          <TraceMatrix matrix={matrix} focusFunctions={traceFocus?.functions || null} onClearFocus={() => setTraceFocus(null)}
+            job={job} cacheRoot={cacheRoot} buildSelector={cfg?.buildSelector || 'lastSuccessfulBuild'}
+            sourceRoot={activeScm?.source_root || ''} toast={toast} />
         ) : (
           <div className="text-muted text-sm">
             SRS/SDS 경로를 설정 탭에서 등록한 후 매트릭스 생성 버튼을 클릭하세요.
@@ -973,7 +975,8 @@ function CrossMatrixView({ rows, linkTable, fullMatrix, exportMeta }) {
   );
 }
 
-function TraceMatrix({ matrix, focusFunctions = null, onClearFocus = null }) {
+function TraceMatrix({ matrix, focusFunctions = null, onClearFocus = null,
+  job = null, cacheRoot = '', buildSelector = 'lastSuccessfulBuild', sourceRoot = '', toast = () => {} }) {
   const inner = matrix?.matrix ?? matrix;
   const rows = Array.isArray(inner?.rows) ? inner.rows : (Array.isArray(inner?.items) ? inner.items : []);
   const summary = inner?.summary ?? matrix?.summary;
@@ -1817,9 +1820,8 @@ function TraceMatrix({ matrix, focusFunctions = null, onClearFocus = null }) {
 
       {/* 콜트리 보기 (신규 — tree-sitter 정밀 함수 호출 트리. entry 기반 깊이탐색 + ASIL 강조) */}
       {viewMode === 'calltree' && (
-        <CallTreeView job={job} cacheRoot={cacheRoot}
-          buildSelector={cfg?.buildSelector || 'lastSuccessfulBuild'}
-          seedFns={callTreeSeeds} toast={toast} />
+        <CallTreeView job={job} cacheRoot={cacheRoot} buildSelector={buildSelector}
+          sourceRoot={sourceRoot} seedFns={callTreeSeeds} toast={toast} />
       )}
 
       {/* Pagination (표 모드 전용 — 트리는 filtered 전체를 한 번에 조망하므로 페이지네이션 불필요) */}
@@ -2581,7 +2583,7 @@ function CallTreeNode({ node, path, expanded, onToggle, depth, includeExternal }
   );
 }
 
-function CallTreeView({ job, cacheRoot, buildSelector, seedFns, toast }) {
+function CallTreeView({ job, cacheRoot, buildSelector, sourceRoot, seedFns, toast }) {
   const [entry, setEntry] = useState('');
   const [depth, setDepth] = useState(5);
   const [includeExternal, setIncludeExternal] = useState(false);
@@ -2604,6 +2606,7 @@ function CallTreeView({ job, cacheRoot, buildSelector, seedFns, toast }) {
         job_url: job?.url || '',
         cache_root: cacheRoot || '.devops_pro_cache',
         build_selector: buildSelector || 'lastSuccessfulBuild',
+        source_root: sourceRoot || '',
         entry: entries.join(','),
         max_depth: Math.max(1, Math.min(20, Number(depth) || 5)),
         include_external: includeExternal,
@@ -2624,7 +2627,7 @@ function CallTreeView({ job, cacheRoot, buildSelector, seedFns, toast }) {
     } finally {
       if (mountedRef.current) setLoading(false);
     }
-  }, [entry, depth, includeExternal, job, cacheRoot, buildSelector, toast]);
+  }, [entry, depth, includeExternal, job, cacheRoot, buildSelector, sourceRoot, toast]);
 
   const trees = Array.isArray(data?.trees) ? data.trees : [];
   const st = data?.stats || {};

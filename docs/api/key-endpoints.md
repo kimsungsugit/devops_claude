@@ -8,6 +8,11 @@
 - `POST /api/local/sits/generate-async` — SITS 생성
 - `POST /api/jenkins/impact/trigger-async` — Impact 분석
 - `GET /api/jenkins/progress` — 진행률 조회
+- **`POST /api/jenkins/uds/traceability-matrix`** — 추적성 매트릭스(V-model 6단계: SRS→SDS→UDS→STS→SUTS→SITS/VectorCAST) 생성. 프론트가 5개 추출 엔드포인트로 모은 7배열을 echo back → P&F 함수명 bridge. '추적성 분석' 섹션(구 'SRS/SDS 매핑', 2026-06 rename)
+- **`POST /api/jenkins/call-tree`** — 함수 호출 트리. body `{job_url, cache_root, build_selector, source_root?, entry(콤마 구분), max_depth, include_external, engine}`. `engine='precise'`(tree-sitter `parse_c_project`, 기본)는 호출엣지+콜백+ASIL 메타 추출, 미가용 시 `regex` 자동 폴백. 응답 `{trees[], missing[], stats{engine,functions,edges,files_scanned}}`. cached build root 필수
+- **`POST /api/jenkins/call-tree/save`** — 콜트리를 html/csv/json으로 저장 (`output_format`)
+- **`POST /api/jenkins/call-tree/preview-html`** — 보유 call_tree dict → HTML 렌더 (`CallTreePreviewRequest`)
+- **`GET /api/jenkins/call-tree/download`** — 저장 콜트리 파일 다운로드 (`safe_resolve_under` 경로검증)
 - **`POST /api/swut/coverage/build`** — SwUT Coverage Report v3.01 xlsx 빌드 (16~17차)
 - **`POST /api/swut/sutr/build`** — SUTR v3.01 xlsm 빌드 (keep_vba=True, 17차 대칭)
 - **`POST /api/swut/consistency/check`** — Coverage↔SUTR cross-validation (18차)

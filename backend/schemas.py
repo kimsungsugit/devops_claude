@@ -259,22 +259,22 @@ class CodeSonarRequest(BaseModel):
 
 class JenkinsCallTreeRequest(JenkinsReportRequest):
     source_root: Optional[str] = None
-    entry: str = ""
-    max_depth: int = 5
+    entry: str = Field("", max_length=4096)
+    max_depth: int = Field(5, ge=1, le=20)
     include_paths: List[str] = []
     exclude_paths: List[str] = []
-    max_files: int = 2000
+    max_files: int = Field(2000, ge=1, le=10000)
     include_external: bool = False
     compile_commands_path: Optional[str] = None
     output_format: str = "json"
     engine: str = "precise"  # "precise"(tree-sitter) | "regex". precise 미가용 시 자동 regex 폴백.
     external_map: List[Dict[str, Any]] = []
-    html_template: Optional[str] = None
+    html_template: Optional[str] = Field(None, max_length=200000)
 
 
 class CallTreePreviewRequest(BaseModel):
     call_tree: Dict[str, Any]
-    html_template: Optional[str] = None
+    html_template: Optional[str] = Field(None, max_length=200000)
 
 
 class JenkinsPublishRequest(JenkinsReportRequest):

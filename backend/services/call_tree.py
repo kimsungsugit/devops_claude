@@ -420,7 +420,7 @@ def build_call_tree_precise(
     include_tokens = _normalize_tokens(include_paths)
     exclude_tokens = _normalize_tokens(exclude_paths)
     try:
-        from workflow.code_parser.c_parser import parse_c_project
+        from workflow.code_parser import c_parser as _cp
     except Exception:
         return {
             "source_root": str(root_dir),
@@ -436,7 +436,7 @@ def build_call_tree_precise(
                 "engine": "unavailable",
             },
         }
-    parsed = parse_c_project(str(root_dir), max_files=max(1, int(max_files)))
+    parsed = _cp.parse_c_project(str(root_dir), max_files=max(1, int(max_files)))
     funcs = parsed.get("functions", []) or []
     raw_calls: Dict[str, List[str]] = {}
     func_meta: Dict[str, Dict[str, Any]] = {}
@@ -460,6 +460,9 @@ def build_call_tree_precise(
             "asil": f.get("comment_asil") or f.get("asil"),
         }
     known = set(raw_calls.keys())
+    # include/exclude로 스코프 밖이지만 프로젝트 정의 함수(필터 전 전체) — external(unknown 라이브러리)로
+    # 오분류하지 않기 위해 별도 집합 유지(리뷰 finding [1]).
+    all_project_funcs = {f.get("name") for f in funcs if f.get("name")}
     external_lookup = _build_external_lookup(external_map)
     call_map: Dict[str, List[str]] = {}
     external_calls: Dict[str, List[Dict[str, str]]] = {}
@@ -468,6 +471,9 @@ def build_call_tree_precise(
         externals: Dict[str, Dict[str, str]] = {}
         for callee in calls:
             if callee in known:
+                internal.add(callee)
+            elif callee in all_project_funcs:
+                # 스코프 밖(필터 제외) 프로젝트 함수 — external 오분류 대신 internal leaf로(자식 없음).
                 internal.add(callee)
             elif callee not in externals:
                 externals[callee] = {"name": callee, **external_lookup.get(callee, _classify_external(callee))}
@@ -494,7 +500,9 @@ def build_call_tree_precise(
             "edges": edges,
             "duplicates": 0,
             "compile_commands": "",
-            "engine": "tree-sitter",
+            # tree-sitter 패키지는 import됐으나 Parser/언어 미구성이면 parse_c_project가 내부적으로
+            # regex fallback한다 — 그 경우 'regex-fallback'으로 정직하게 표기(리뷰 finding [2]).
+            "engine": "tree-sitter" if (getattr(_cp, "Parser", None) is not None and getattr(_cp, "c_language", None) is not None) else "regex-fallback",
         },
     }
 

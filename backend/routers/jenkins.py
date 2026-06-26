@@ -4230,7 +4230,10 @@ def jenkins_call_tree(req: JenkinsCallTreeRequest) -> Dict[str, Any]:
     if not build_root:
         raise HTTPException(status_code=404, detail="cached build not found")
     source_root = Path(req.source_root).resolve() if req.source_root else build_root
-    entries = [x.strip() for x in str(req.entry or "").replace("\n", ",").split(",") if x.strip()]
+    # source_root는 사용자 지정 절대경로 — 캐시 빌드 루트 밖 임의 경로 스캔(path traversal) 차단(리뷰 finding [3]).
+    if req.source_root and not is_under_any(source_root, [build_root]):
+        raise HTTPException(status_code=403, detail="source_root must be under the cached build root")
+    entries = [x.strip() for x in str(req.entry or "").replace("\n", ",").split(",") if x.strip()][:200]
     if not entries:
         raise HTTPException(status_code=400, detail="entry required")
     if not source_root.exists():
