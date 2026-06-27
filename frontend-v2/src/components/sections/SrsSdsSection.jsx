@@ -2858,13 +2858,73 @@ function _bez(x1, y1, x2, y2) {
   return `M${x1},${y1} C${mx},${y1} ${mx},${y2} ${x2},${y2}`;
 }
 
+// 단계 → 노드 모양(hiMA UCOneIDTrace getNodeShape 대응): SwDS=House, SwUDS=InvHouse,
+// SwTS/TR=Ellipse, SwUTS/UTR=Diamond, SwITS/ITR=Octagon, 요구사항=Box. VectorCAST는 hiMA에
+// 없으나 시험 실행결과라 Ellipse로 둔다(SUTS Diamond와 구분).
+const _NODE_SHAPE = { SDS: 'house', UDS: 'invhouse', STS: 'ellipse', SUTS: 'diamond', SITS: 'octagon', VectorCAST: 'ellipse' };
+
+function _shapePath(shape, W, H) {
+  if (shape === 'house') return `M0,9 L${W / 2},0 L${W},9 L${W},${H} L0,${H} Z`;        // 집(△지붕)
+  if (shape === 'invhouse') return `M0,0 L${W},0 L${W},${H - 9} L${W / 2},${H} L0,${H - 9} Z`; // 역집
+  if (shape === 'diamond') return `M12,0 L${W - 12},0 L${W},${H / 2} L${W - 12},${H} L12,${H} L0,${H / 2} Z`; // 늘인 ◇
+  if (shape === 'octagon') return `M9,0 L${W - 9},0 L${W},9 L${W},${H - 9} L${W - 9},${H} L9,${H} L0,${H - 9} L0,9 Z`; // 8각
+  return `M0,0 L${W},0 L${W},${H} L0,${H} Z`; // box fallback
+}
+
+// 내보내기용 SVG 직렬화 — CSS 변수 fill을 현재 테마 computed 값으로 인라인(다운로드 SVG/PNG는
+// CSS 컨텍스트 밖이라 var() 미해석). 우리 SVG의 var fill 3종만 치환.
+function _graphSvgString(svgEl) {
+  const clone = svgEl.cloneNode(true);
+  clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+  const cs = getComputedStyle(svgEl);
+  const fg = (cs.getPropertyValue('--fg') || '#111827').trim() || '#111827';
+  const bgEl = (cs.getPropertyValue('--bg-elevated') || '#ffffff').trim() || '#ffffff';
+  const muted = (cs.getPropertyValue('--text-muted') || '#6b7280').trim() || '#6b7280';
+  const bg = (cs.getPropertyValue('--bg') || '#ffffff').trim() || '#ffffff';
+  // 노드 강조 dim(노드/placeholder <g>의 opacity)이 다운로드본에 박히지 않게 복원 — 선택 상태에서
+  // 내보내도 워시아웃 없이 전체가 또렷. 엣지는 <path opacity>라 g[opacity] 선택에서 제외(시각계층 보존).
+  clone.querySelectorAll('g[opacity]').forEach(g => g.setAttribute('opacity', '1'));
+  // 다운로드 SVG는 컨테이너 var(--bg) 밖이라 투명 → 다크테마 헤더/placeholder가 뷰어 흰배경에 묻힘.
+  // PNG(canvas fillRect)와 정합하도록 불투명 배경 rect를 최하단에 삽입.
+  const bgRect = clone.ownerDocument.createElementNS('http://www.w3.org/2000/svg', 'rect');
+  bgRect.setAttribute('width', '100%');
+  bgRect.setAttribute('height', '100%');
+  bgRect.setAttribute('fill', bg);
+  clone.insertBefore(bgRect, clone.firstChild);
+  let s = new XMLSerializer().serializeToString(clone);
+  s = s.split('var(--bg-elevated, #ffffff)').join(bgEl)
+    .split('var(--fg)').join(fg)
+    .split('var(--text-muted)').join(muted);
+  return s;
+}
+
+function _downloadBlob(blob, name) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = name; document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1500);
+}
+
 // 그래프 노드 1개 (root/단계 공용). label은 truncate, 전체는 <title> 툴팁.
 // active=hover/선택 강조(dim), kbFocused=키보드 포커스 링(dim과 분리), node.impacted=영향도 변경함수.
 function ReqGraphNode({ node, color, active, kbFocused, onClick, onHover, onFocus, onBlur }) {
   const G = _GRAPH;
+  const W = G.NODE_W, H = G.NODE_H;
   const label = String(node.label || '');
   const shown = label.length > 20 ? label.slice(0, 19) + '…' : label;
   const impacted = !!node.impacted;
+  // 단계별 모양(hiMA 대응). root/요구사항은 box.
+  const shape = node.isRoot ? 'box' : (_NODE_SHAPE[node.stage] || 'box');
+  const stroke = impacted ? '#b45309' : color;
+  const sw = impacted ? 3 : (node.isRoot ? 2.5 : 1.5);
+  const fillStyle = { fill: 'var(--bg-elevated, #ffffff)' };
+  // 텍스트 y — house는 지붕만큼 아래, invhouse는 위쪽 본체에.
+  const textY = shape === 'house' ? H / 2 + 8 : shape === 'invhouse' ? H / 2 - 1 : H / 2 + 4;
+  const body = shape === 'box'
+    ? <rect width={W} height={H} rx={6} style={fillStyle} stroke={stroke} strokeWidth={sw} />
+    : shape === 'ellipse'
+      ? <rect width={W} height={H} rx={H / 2} style={fillStyle} stroke={stroke} strokeWidth={sw} />
+      : <path d={_shapePath(shape, W, H)} style={fillStyle} stroke={stroke} strokeWidth={sw} strokeLinejoin="round" />;
   return (
     <g transform={`translate(${node.x},${node.y})`} style={{ cursor: 'pointer' }} opacity={active ? 1 : 0.28}
       role="button" tabIndex={0} aria-label={impacted ? `${label} (변경 영향 함수)` : label}
@@ -2873,12 +2933,10 @@ function ReqGraphNode({ node, color, active, kbFocused, onClick, onHover, onFocu
       onMouseEnter={() => onHover?.(node.id)} onMouseLeave={() => onHover?.(null)}
       onFocus={() => onFocus?.(node.id)} onBlur={() => onBlur?.()}>
       <title>{impacted ? `${label} — 변경 영향 함수(영향도 연동)` : label}</title>
-      {kbFocused && <rect x={-3} y={-3} width={G.NODE_W + 6} height={G.NODE_H + 6} rx={8} fill="none" stroke="#2563eb" strokeWidth={2} strokeDasharray="3 2" />}
-      <rect width={G.NODE_W} height={G.NODE_H} rx={6} style={{ fill: 'var(--bg-elevated, #ffffff)' }}
-        stroke={impacted ? '#b45309' : color} strokeWidth={impacted ? 3 : (node.isRoot ? 2.5 : 1.5)} />
-      <rect width={5} height={G.NODE_H} rx={2} fill={color} />
-      {impacted && <circle cx={G.NODE_W - 9} cy={9} r={4} fill="#b45309" />}
-      <text x={12} y={G.NODE_H / 2 + 4} fontSize={11} fontWeight={node.isRoot || impacted ? 700 : 500} clipPath="url(#rg-node-clip)" style={{ fill: 'var(--fg)' }}>{shown}</text>
+      {kbFocused && <rect x={-3} y={-3} width={W + 6} height={H + 6} rx={8} fill="none" stroke="#2563eb" strokeWidth={2} strokeDasharray="3 2" />}
+      {body}
+      {impacted && <circle cx={W - 9} cy={9} r={4} fill="#b45309" />}
+      <text x={12} y={textY} fontSize={11} fontWeight={node.isRoot || impacted ? 700 : 500} clipPath="url(#rg-node-clip)" style={{ fill: 'var(--fg)' }}>{shown}</text>
     </g>
   );
 }
@@ -2890,6 +2948,7 @@ function TraceReqGraphView({ rows, focusFunctions = null, linkTable = null }) {
   const [hoverId, setHoverId] = useState(null);
   const [focusId, setFocusId] = useState(null); // 키보드 포커스(강조 dim과 분리)
   const [levelFilter, setLevelFilter] = useState('all'); // 'all' | 'design' | 'test' (hiMA DisplayLevel 대응)
+  const svgRef = useRef(null); // 내보내기(SVG/PNG)용 SVG 참조
 
   const visibleKeys = useMemo(() => {
     if (levelFilter === 'design') return ['SDS', 'UDS'];
@@ -2949,6 +3008,33 @@ function TraceReqGraphView({ rows, focusFunctions = null, linkTable = null }) {
   const isEdgeActive = (e) => !activeNodeId || e.from === activeNodeId || e.to === activeNodeId;
   const totalHiddenFail = graph ? graph.columns.reduce((n, c) => n + (c.hiddenFail || 0), 0) : 0;
   const impactedCount = graph ? graph.columns.reduce((n, c) => n + c.members.filter(m => m.impacted).length, 0) : 0;
+
+  // 내보내기(hiMA SaveInVectorFormat/SaveAsImage 대응) — 클라이언트에서 SVG 직렬화/PNG 래스터화.
+  const exportSvg = () => {
+    if (!svgRef.current || !graph) return;
+    const s = _graphSvgString(svgRef.current);
+    _downloadBlob(new Blob([s], { type: 'image/svg+xml;charset=utf-8' }), `${graph.reqId}_trace_graph.svg`);
+  };
+  const exportPng = () => {
+    if (!svgRef.current || !graph) return;
+    const s = _graphSvgString(svgRef.current);
+    const bg = (getComputedStyle(svgRef.current).getPropertyValue('--bg') || '#ffffff').trim() || '#ffffff';
+    const w = graph.width, h = graph.height, scale = 2;
+    const img = new Image();
+    const url = URL.createObjectURL(new Blob([s], { type: 'image/svg+xml;charset=utf-8' }));
+    img.onload = () => {
+      const canvas = document.createElement('canvas');
+      canvas.width = w * scale; canvas.height = h * scale;
+      const ctx = canvas.getContext('2d');
+      ctx.scale(scale, scale);
+      ctx.fillStyle = bg; ctx.fillRect(0, 0, w, h);
+      ctx.drawImage(img, 0, 0);
+      URL.revokeObjectURL(url);
+      canvas.toBlob(b => { if (b) _downloadBlob(b, `${graph.reqId}_trace_graph.png`); }, 'image/png');
+    };
+    img.onerror = () => URL.revokeObjectURL(url);
+    img.src = url;
+  };
 
   return (
     <div>
@@ -3019,11 +3105,20 @@ function TraceReqGraphView({ rows, focusFunctions = null, linkTable = null }) {
                 ⚠ 안전 검증 공백: {graph.safetyMissing.includes('ANY_TEST') ? '시험 없음' : `${graph.safetyMissing.join('·')} 누락`}
               </span>
             )}
+            <span style={{ opacity: 0.6 }} title="hiMA UCOneIDTrace 표기 대응 — 설계=집(△지붕)/단위설계=역집/시험스펙=타원/단위시험=◇/통합시험=8각/요구사항=□">
+              모양: 설계▭집·단위설계▽·시험◯◇⯃
+            </span>
+            <div style={{ marginLeft: 'auto', display: 'inline-flex', gap: 6 }}>
+              <button type="button" onClick={exportSvg} title="그래프를 SVG(벡터)로 내보내기 (hiMA SaveInVectorFormat 대응)"
+                style={{ padding: '4px 9px', fontSize: 11, border: '1px solid var(--border)', borderRadius: 5, background: 'var(--bg)', color: 'var(--fg)', cursor: 'pointer' }}>SVG ↓</button>
+              <button type="button" onClick={exportPng} title="그래프를 PNG(이미지)로 내보내기 (hiMA SaveAsImage 대응)"
+                style={{ padding: '4px 9px', fontSize: 11, border: '1px solid var(--border)', borderRadius: 5, background: 'var(--bg)', color: 'var(--fg)', cursor: 'pointer' }}>PNG ↓</button>
+            </div>
           </div>
 
           {/* SVG 그래프 */}
           <div style={{ overflow: 'auto', border: '1px solid var(--border)', borderRadius: 8, background: 'var(--bg)', maxHeight: 580 }}>
-            <svg width={graph.width} height={graph.height} style={{ display: 'block', minWidth: '100%' }} role="group" aria-label={`${graph.reqId} 하위 추적 그래프`}>
+            <svg ref={svgRef} width={graph.width} height={graph.height} style={{ display: 'block', minWidth: '100%' }} role="group" aria-label={`${graph.reqId} 하위 추적 그래프`}>
               <defs>
                 {/* 엣지 방향 화살표(타겟 노드 끝). userSpaceOnUse로 strokeWidth와 무관하게 일정 크기. */}
                 <marker id="rg-arrow" markerWidth={7} markerHeight={7} refX={6} refY={2.5} orient="auto" markerUnits="userSpaceOnUse">
