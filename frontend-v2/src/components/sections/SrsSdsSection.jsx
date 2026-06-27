@@ -2743,10 +2743,24 @@ function _buildReqGraph(row, focusSet, visibleKeys) {
   const reqName = String(row?.requirement_name ?? '').trim();
   const asil = String(row?.asil ?? row?.requirement_asil ?? row?.ASIL ?? '').trim().toUpperCase();
   const fset = focusSet instanceof Set && focusSet.size ? focusSet : null;
-  const isSafety = asil === 'C' || asil === 'D'; // ISO 26262 안전 등급(통합시험 필수)
-  // 안전 검증 공백 판정은 레벨 필터와 무관하게 전체 시험 단계 기준(필터로 숨겨도 정확).
-  const safetyGap = isSafety && !TREE_STAGES.filter(s => s.kind === 'test')
-    .some(s => (_stageMembers(row, s.key).items || []).length > 0);
+  const isSafety = asil === 'C' || asil === 'D'; // ISO 26262 최고 등급(시험 경로 강조용)
+  // 안전 검증 공백 — 백엔드 _asil_missing_bands(report_gen/trace_link_table.py)와 동일 규칙.
+  //   C/D = SUTS·SITS 둘 다 필수(하나라도 0이면 누락), A/B = 시험 밴드 중 1개 이상, QM/미상 = 기대 없음.
+  //   레벨 필터와 무관하게 전체 row 기준으로 판정(필터로 시험 단계를 숨겨도 정확).
+  // band 추출은 _rowBands(L718)를 재사용 — 백엔드 build_link_table과 byte-exact 동일 규칙
+  // (_testId non-empty 필터 + strict VectorCAST source). _stageMembers의 raw 멤버 길이/관대한
+  // VectorCAST 규칙을 쓰면 empty-rid·orphan-source 시험에서 갭을 under-report(안전 false-negative).
+  const _safetyBands = _rowBands(row);
+  const _bandCount = (key) => (_safetyBands[key] || []).length;
+  const _asilRank = { QM: 0, A: 1, B: 2, C: 3, D: 4 }[asil] ?? -1;
+  const safetyMissing = [];
+  if (_asilRank >= 3) { // ASIL C/D — SUTS·SITS 둘 다 필수
+    if (_bandCount('SUTS') === 0) safetyMissing.push('SUTS');
+    if (_bandCount('SITS') === 0) safetyMissing.push('SITS');
+  } else if (_asilRank >= 1) { // ASIL A/B — 시험 밴드 중 1개 이상
+    if (!['STS', 'SUTS', 'SITS', 'VectorCAST'].some(b => _bandCount(b) > 0)) safetyMissing.push('ANY_TEST');
+  }
+  const safetyGap = safetyMissing.length > 0;
   // 레벨 필터: visibleKeys에 든 단계만 컬럼화.
   const stages = (Array.isArray(visibleKeys) && visibleKeys.length)
     ? TREE_STAGES.filter(s => visibleKeys.includes(s.key)) : TREE_STAGES;
@@ -2828,7 +2842,7 @@ function _buildReqGraph(row, focusSet, visibleKeys) {
     }
   }
 
-  return { reqId, reqName, asil, isSafety, safetyGap, columns, edges, width, height, nodeXY, rootY };
+  return { reqId, reqName, asil, isSafety, safetyGap, safetyMissing, columns, edges, width, height, nodeXY, rootY };
 }
 
 function _bez(x1, y1, x2, y2) {
@@ -2890,13 +2904,20 @@ function TraceReqGraphView({ rows, focusFunctions = null }) {
 
   const graph = useMemo(() => (selectedRow ? _buildReqGraph(selectedRow, focusSet, visibleKeys) : null), [selectedRow, focusSet, visibleKeys]);
 
-  // 표시 그래프 교체 시 노드 상세/hover/focus 리셋 — selId가 아니라 graph에 묶는다.
-  // (selId='' 첫항목 폴백 상태에서 부모 filter 변경으로 list[0]=다른 요구사항이 돼도
-  //  graph 참조가 바뀌므로 stale selNode/유령 dimming을 차단. graph는 selectedRow 메모.)
-  useEffect(() => { setSelNode(null); setHoverId(null); setFocusId(null); }, [graph]);
+  // 표시 그래프 교체 시: 선택 노드가 새 graph에 여전히 존재하면 유지(레벨필터 좁히기에도 상세 보존),
+  // 없으면 리셋(selId 변경·필터로 단계 제거 시 stale selNode/유령 dimming 차단). hover/focus는 transient라 항상 리셋.
+  useEffect(() => {
+    // 노드 생존 시 보존하되, root('__root__')는 nodeXY에 항상 있으므로 요구사항 동일(label===reqId)일 때만
+    // 보존 — 안 그러면 요구사항 전환 후에도 root 상세패널이 옛 reqId를 영구 표시(stale).
+    setSelNode(prev => (prev && graph && graph.nodeXY[prev.id] && (!prev.isRoot || prev.label === graph.reqId)) ? prev : null);
+    setHoverId(null); setFocusId(null);
+  }, [graph]);
 
   // hover/선택 강조는 키보드 focus와 분리(focusId는 dim 트리거 안 함 — Tab 순회 깜빡임 방지).
-  const activeNodeId = hoverId || (selNode ? selNode.id : null);
+  // selValid: graph 교체 직후 useEffect 리셋 전 1프레임에 selNode가 stale일 수 있어, 렌더 중 즉시
+  // '현재 graph에 그 노드가 있을 때만' 강조를 채택 → 전환 프레임 전체-dim 깜빡임 방지(derive-during-render).
+  const selValid = selNode && graph && graph.nodeXY[selNode.id];
+  const activeNodeId = hoverId || (selValid ? selNode.id : null);
   // 활성 노드와 엣지로 직접 연결된 이웃 노드 집합 — UDS↔SUTS 매핑 등 인접 노드도 함께 강조.
   const neighborSet = useMemo(() => {
     const s = new Set();
@@ -2986,8 +3007,8 @@ function TraceReqGraphView({ rows, focusFunctions = null }) {
             )}
             {graph.safetyGap && (
               <span style={{ color: '#dc2626', fontWeight: 700 }}
-                title="ASIL C/D 요구사항인데 연결된 시험(STS/SUTS/SITS/VectorCAST)이 하나도 없습니다 — 안전 검증 공백.">
-                ⚠ 안전 검증 공백(시험 0)
+                title={`ISO 26262: ASIL ${graph.asil} 요구사항의 기대 시험이 누락됐습니다(백엔드 asil_coverage와 동일 규칙 — C/D=SUTS·SITS 필수, A/B=시험 1개 이상).`}>
+                ⚠ 안전 검증 공백: {graph.safetyMissing.includes('ANY_TEST') ? '시험 없음' : `${graph.safetyMissing.join('·')} 누락`}
               </span>
             )}
           </div>
