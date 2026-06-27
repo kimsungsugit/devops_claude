@@ -1563,6 +1563,12 @@ function TraceMatrix({ matrix, focusFunctions = null, onClearFocus = null,
               color: viewMode === 'calltree' ? '#fff' : 'var(--fg)', fontWeight: viewMode === 'calltree' ? 700 : 400 }}>
             콜트리
           </button>
+          <button type="button" onClick={() => setViewMode('graph')} aria-pressed={viewMode === 'graph'} title="요구사항 1개의 하위 추적 그래프 (SDS→UDS→STS/SUTS/SITS→VectorCAST · ASIL 강조 · UDS↔SUTS 매핑)"
+            style={{ padding: '6px 10px', fontSize: 11, border: 'none', borderLeft: '1px solid var(--border)', cursor: 'pointer',
+              background: viewMode === 'graph' ? 'var(--accent)' : 'var(--bg)',
+              color: viewMode === 'graph' ? '#fff' : 'var(--fg)', fontWeight: viewMode === 'graph' ? 700 : 400 }}>
+            그래프
+          </button>
         </div>
         {/* 트리 전용: SRS 미추적 시험(역방향 공백) 별도 루트 표시 토글 — 데이터 있을 때만 노출 */}
         {viewMode === 'tree' && unmappedVcast.length > 0 && (
@@ -1822,6 +1828,12 @@ function TraceMatrix({ matrix, focusFunctions = null, onClearFocus = null,
       {viewMode === 'calltree' && (
         <CallTreeView job={job} cacheRoot={cacheRoot} buildSelector={buildSelector}
           sourceRoot={sourceRoot} seedFns={callTreeSeeds} toast={toast} />
+      )}
+
+      {/* 그래프 보기 (신규 — 요구사항 1개의 하위 추적 그래프. SVG 노드-엣지, filtered row로 완결.
+          focusFunctions=영향도 연동 변경함수 → 그래프 안 해당 UDS/시험 노드 강조) */}
+      {viewMode === 'graph' && (
+        <TraceReqGraphView rows={filtered} focusFunctions={focusFunctions} />
       )}
 
       {/* Pagination (표 모드 전용 — 트리는 filtered 전체를 한 번에 조망하므로 페이지네이션 불필요) */}
@@ -2694,6 +2706,319 @@ function CallTreeView({ job, cacheRoot, buildSelector, sourceRoot, seedFns, toas
             </ul>
           )}
         </div>
+      )}
+    </div>
+  );
+}
+
+/* ── 요구사항 상하위 추적 그래프 (additive '그래프' 뷰) ──
+   요구사항 1개를 선택하면 그 하위 추적(SDS→UDS→STS/SUTS/SITS→VectorCAST)을 레벨별 SVG
+   노드-엣지 그래프로 보여준다. hiMA UCOneIDTrace(요구사항 ID 의존성 그래프)의 child 방향에
+   대응 — hiMA의 MSAGL Sugiyama 대신 레벨이 7컬럼으로 고정이라 컬럼 배치로 단순화(레이아웃 엔진 불필요).
+   데이터는 matrix row만으로 완결(백엔드 무변경): _stageMembers(단계 멤버) + _unitTestMap(UDS함수↔
+   SUTS단위시험 정확 매핑 엣지). 상위(부모 요구사항)는 row에 구조화 데이터가 없어(설계서 prose에 묻힘)
+   이번 범위에서 제외 — 하위 추적에 집중. 모든 시각화는 SVG(innerHTML 없음 → XSS 무관). */
+const _STAGE_COLORS = { SDS: '#0d9488', UDS: '#7c3aed', STS: '#2563eb', SUTS: '#0891b2', SITS: '#db2777', VectorCAST: '#ea580c' };
+const _GRAPH = { COL_W: 172, NODE_W: 150, NODE_H: 30, GAP: 9, HEADER_H: 26, PAD: 14, MAX_PER_COL: 40 };
+
+function _reqGraphId(r) {
+  return String(r?.requirement_id ?? r?.req_id ?? r?.id ?? '').trim();
+}
+
+// 한 요구사항 row → 레벨별 노드 + 엣지(좌표 포함). 순수 함수(렌더 외부 계산).
+// FAIL 우선 정렬 키 — 안전관련(FAIL) 시험이 MAX_PER_COL 캡에 silent하게 잘려나가지 않도록
+// 캡 적용 전 FAIL을 앞으로 보낸다. 0=FAIL, 1=mapped/unknown, 2=PASS.
+function _resultRank(result) {
+  const v = (result || '').toLowerCase();
+  if (/^(fail|failed|false|0)$/.test(v)) return 0;
+  if (/^(pass|passed|true|1)$/.test(v)) return 2;
+  return 1;
+}
+
+// focusSet(영향도 변경함수 정규화 집합)이 주어지면 UDS 함수/시험 유닛이 변경 영향인지 표시.
+function _buildReqGraph(row, focusSet) {
+  const G = _GRAPH;
+  const reqId = _reqGraphId(row) || '(이름없음)';
+  const reqName = String(row?.requirement_name ?? '').trim();
+  const asil = String(row?.asil ?? row?.requirement_asil ?? row?.ASIL ?? '').trim().toUpperCase();
+  const fset = focusSet instanceof Set && focusSet.size ? focusSet : null;
+
+  // 단계별 멤버(캡 적용 — 시험 수십 개 컬럼이 무한정 길어지는 것 방지)
+  const columns = TREE_STAGES.map((s, ci) => {
+    const { type, items } = _stageMembers(row, s.key);
+    let all = (Array.isArray(items) ? items : []).map((it, i) => {
+      const label = type === 'tests' ? _testId(it) : String(it ?? '').trim();
+      if (!label) return null;
+      const unit = type === 'tests' ? String(it?.unit ?? '') : '';
+      // 영향도 연동: UDS 함수명 또는 시험 유닛명이 변경함수 집합에 들면 강조
+      const impacted = !!(fset && (
+        (s.key === 'UDS' && fset.has(_normFn(label))) ||
+        (type === 'tests' && unit && fset.has(_normFn(unit)))
+      ));
+      return {
+        // id에 reqId prefix — 요구사항 간 위치기반 id 충돌(selNode 오매칭) 원천 차단
+        id: `${reqId}::${s.key}:${i}`, label, stage: s.key, kind: s.kind, type,
+        result: type === 'tests' ? String(it?.result ?? '') : '',
+        unit, source: type === 'tests' ? String(it?.source ?? '') : '',
+        confidence: type === 'tests' ? String(it?.confidence ?? '') : '',
+        impacted,
+      };
+    }).filter(Boolean);
+    // 시험 컬럼이 캡을 넘치면 FAIL 우선 정렬 후 자른다(안전 시험 우선 노출). 캡 이내면 원본 순서 유지.
+    if (type === 'tests' && all.length > G.MAX_PER_COL) {
+      all = all.map((m, idx) => ({ m, idx }))
+        .sort((a, b) => (_resultRank(a.m.result) - _resultRank(b.m.result)) || (a.idx - b.idx))
+        .map(o => o.m);
+    }
+    const shown = all.slice(0, G.MAX_PER_COL);
+    const hiddenFail = all.slice(G.MAX_PER_COL).filter(m => _resultRank(m.result) === 0).length;
+    return { stage: s.key, label: s.label, kind: s.kind, colIndex: ci + 1, members: shown, hidden: all.length - shown.length, hiddenFail };
+  });
+
+  // 좌표 계산
+  const maxRows = Math.max(1, ...columns.map(c => c.members.length || 1));
+  const bodyH = maxRows * (G.NODE_H + G.GAP);
+  const height = G.HEADER_H + bodyH + G.PAD * 2;
+  const width = (TREE_STAGES.length + 1) * G.COL_W;
+
+  const nodeXY = {};
+  const rootY = G.HEADER_H + G.PAD + Math.max(0, (bodyH - (G.NODE_H + G.GAP)) / 2);
+  nodeXY['__root__'] = { x: G.PAD, y: rootY };
+  for (const col of columns) {
+    const x = col.colIndex * G.COL_W + G.PAD;
+    col.members.forEach((m, mi) => {
+      const y = G.HEADER_H + G.PAD + mi * (G.NODE_H + G.GAP);
+      m.x = x; m.y = y;
+      nodeXY[m.id] = { x, y };
+    });
+  }
+
+  // 엣지: 요구사항(root) → 각 단계 멤버 (row 데이터는 모두 요구사항 기준이므로 SRS 직속).
+  // root 출발점이 한 점에 완전 중첩돼 hairball이 되던 것을 fromFrac으로 root 노드 우변 높이에
+  // 펼쳐(각 엣지 출발 y 분산) 초기 밀집을 완화한다.
+  const edges = [];
+  const reqEdges = [];
+  for (const col of columns) {
+    for (const m of col.members) {
+      reqEdges.push({ from: '__root__', to: m.id, color: _STAGE_COLORS[col.stage] || '#9ca3af', kind: 'req' });
+    }
+  }
+  reqEdges.forEach((e, i) => { e.fromFrac = (i + 0.5) / reqEdges.length; });
+  edges.push(...reqEdges);
+  // UDS 함수 ↔ SUTS 단위시험 정확 매핑(row에서 추출 가능한 유일한 단계간 엣지)
+  const udsCol = columns.find(c => c.stage === 'UDS');
+  const sutsCol = columns.find(c => c.stage === 'SUTS');
+  if (udsCol && sutsCol && sutsCol.members.length) {
+    const utMap = _unitTestMap(row);
+    for (const u of udsCol.members) {
+      const key = _normFn(u.label);
+      if (!key || !utMap.has(key)) continue;
+      for (const s of sutsCol.members) {
+        if (_normFn(s.unit) === key) edges.push({ from: u.id, to: s.id, color: '#2563eb', kind: 'unit' });
+      }
+    }
+  }
+
+  return { reqId, reqName, asil, columns, edges, width, height, nodeXY, rootY };
+}
+
+function _bez(x1, y1, x2, y2) {
+  const mx = (x1 + x2) / 2;
+  return `M${x1},${y1} C${mx},${y1} ${mx},${y2} ${x2},${y2}`;
+}
+
+// 그래프 노드 1개 (root/단계 공용). label은 truncate, 전체는 <title> 툴팁.
+// active=hover/선택 강조(dim), kbFocused=키보드 포커스 링(dim과 분리), node.impacted=영향도 변경함수.
+function ReqGraphNode({ node, color, active, kbFocused, onClick, onHover, onFocus, onBlur }) {
+  const G = _GRAPH;
+  const label = String(node.label || '');
+  const shown = label.length > 20 ? label.slice(0, 19) + '…' : label;
+  const impacted = !!node.impacted;
+  return (
+    <g transform={`translate(${node.x},${node.y})`} style={{ cursor: 'pointer' }} opacity={active ? 1 : 0.28}
+      role="button" tabIndex={0} aria-label={impacted ? `${label} (변경 영향 함수)` : label}
+      onClick={onClick}
+      onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onClick?.(); } }}
+      onMouseEnter={() => onHover?.(node.id)} onMouseLeave={() => onHover?.(null)}
+      onFocus={() => onFocus?.(node.id)} onBlur={() => onBlur?.()}>
+      <title>{impacted ? `${label} — 변경 영향 함수(영향도 연동)` : label}</title>
+      {kbFocused && <rect x={-3} y={-3} width={G.NODE_W + 6} height={G.NODE_H + 6} rx={8} fill="none" stroke="#2563eb" strokeWidth={2} strokeDasharray="3 2" />}
+      <rect width={G.NODE_W} height={G.NODE_H} rx={6} style={{ fill: 'var(--bg-elevated, #ffffff)' }}
+        stroke={impacted ? '#b45309' : color} strokeWidth={impacted ? 3 : (node.isRoot ? 2.5 : 1.5)} />
+      <rect width={5} height={G.NODE_H} rx={2} fill={color} />
+      {impacted && <circle cx={G.NODE_W - 9} cy={9} r={4} fill="#b45309" />}
+      <text x={12} y={G.NODE_H / 2 + 4} fontSize={11} fontWeight={node.isRoot || impacted ? 700 : 500} style={{ fill: 'var(--fg)' }}>{shown}</text>
+    </g>
+  );
+}
+
+function TraceReqGraphView({ rows, focusFunctions = null }) {
+  const list = useMemo(() => (Array.isArray(rows) ? rows.filter(r => _reqGraphId(r)) : []), [rows]);
+  const [selId, setSelId] = useState('');
+  const [selNode, setSelNode] = useState(null);
+  const [hoverId, setHoverId] = useState(null);
+  const [focusId, setFocusId] = useState(null); // 키보드 포커스(강조 dim과 분리)
+
+  // 영향도 연동 변경함수 집합(정규화) — 그래프 안에서 변경 영향 UDS/시험 노드를 강조.
+  const focusSet = useMemo(() => {
+    const arr = Array.isArray(focusFunctions) ? focusFunctions : [];
+    return new Set(arr.map(f => _normFn(f)).filter(Boolean));
+  }, [focusFunctions]);
+
+  // 선택 row (입력 없으면 첫 항목 자동)
+  const selectedRow = useMemo(() => {
+    if (!list.length) return null;
+    if (!selId) return list[0];
+    return list.find(r => _reqGraphId(r) === selId) || null;
+  }, [list, selId]);
+
+  const graph = useMemo(() => (selectedRow ? _buildReqGraph(selectedRow, focusSet) : null), [selectedRow, focusSet]);
+
+  // 표시 그래프 교체 시 노드 상세/hover/focus 리셋 — selId가 아니라 graph에 묶는다.
+  // (selId='' 첫항목 폴백 상태에서 부모 filter 변경으로 list[0]=다른 요구사항이 돼도
+  //  graph 참조가 바뀌므로 stale selNode/유령 dimming을 차단. graph는 selectedRow 메모.)
+  useEffect(() => { setSelNode(null); setHoverId(null); setFocusId(null); }, [graph]);
+
+  // hover/선택 강조는 키보드 focus와 분리(focusId는 dim 트리거 안 함 — Tab 순회 깜빡임 방지).
+  const activeNodeId = hoverId || (selNode ? selNode.id : null);
+  // 활성 노드와 엣지로 직접 연결된 이웃 노드 집합 — UDS↔SUTS 매핑 등 인접 노드도 함께 강조.
+  const neighborSet = useMemo(() => {
+    const s = new Set();
+    if (activeNodeId && graph) {
+      for (const e of graph.edges) {
+        if (e.from === activeNodeId) s.add(e.to);
+        else if (e.to === activeNodeId) s.add(e.from);
+      }
+    }
+    return s;
+  }, [graph, activeNodeId]);
+
+  if (!list.length) {
+    return <div style={{ fontSize: 12, color: 'var(--text-muted)', padding: 12 }}>표시할 요구사항이 없습니다.</div>;
+  }
+
+  const G = _GRAPH;
+  const headerLabels = ['요구사항', ...TREE_STAGES.map(s => s.label)];
+  const isNodeActive = (id) => !activeNodeId || id === activeNodeId || neighborSet.has(id);
+  const isEdgeActive = (e) => !activeNodeId || e.from === activeNodeId || e.to === activeNodeId;
+  const totalHiddenFail = graph.columns.reduce((n, c) => n + (c.hiddenFail || 0), 0);
+  const impactedCount = graph.columns.reduce((n, c) => n + c.members.filter(m => m.impacted).length, 0);
+
+  return (
+    <div>
+      {/* 요구사항 선택 */}
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center', marginBottom: 10 }}>
+        <label htmlFor="req-graph-input" style={{ fontSize: 12, fontWeight: 600, color: 'var(--fg)' }}>요구사항</label>
+        <input id="req-graph-input" list="req-graph-ids" value={selId} onChange={e => setSelId(e.target.value)}
+          placeholder={`요구사항 ID 선택/검색 (${list.length}건, 미입력 시 첫 항목)`}
+          style={{ flex: '1 1 280px', maxWidth: 440, padding: '6px 10px', fontSize: 12, border: '1px solid var(--border)', borderRadius: 6, background: 'var(--bg)', color: 'var(--fg)' }} />
+        <datalist id="req-graph-ids">
+          {list.slice(0, 1000).map((r, i) => {
+            const id = _reqGraphId(r);
+            return <option key={i} value={id}>{r.requirement_name ? `${id} — ${r.requirement_name}` : id}</option>;
+          })}
+        </datalist>
+        {selId && !selectedRow && <span style={{ fontSize: 11, color: '#d97706' }}>일치하는 요구사항 없음</span>}
+      </div>
+
+      {graph && (
+        <>
+          {/* 요약 + 범례 */}
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, fontSize: 11, color: 'var(--text-muted)', marginBottom: 8, alignItems: 'center' }}>
+            <span><strong style={{ color: 'var(--fg)' }}>{graph.reqId}</strong>{graph.reqName ? ` — ${graph.reqName}` : ''}</span>
+            {graph.asil && <span style={{ padding: '1px 7px', borderRadius: 10, background: (_ASIL_COLORS[graph.asil] || '#6b7280'), color: '#fff', fontWeight: 700 }}>ASIL {graph.asil}</span>}
+            {graph.columns.map(c => (
+              <span key={c.stage} style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                <span style={{ width: 9, height: 9, borderRadius: 2, background: _STAGE_COLORS[c.stage], display: 'inline-block' }} />
+                {c.label} {c.members.length}{c.hidden > 0 ? `(+${c.hidden})` : ''}
+              </span>
+            ))}
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+              <span style={{ width: 14, height: 0, borderTop: '2px dashed #2563eb', display: 'inline-block' }} />UDS↔SUTS 단위시험 매핑
+            </span>
+            <span style={{ opacity: 0.65 }} title="그래프/트리는 VectorCAST 컬럼에 미분류 소스 시험도 포함하나, 매트릭스 뷰는 엄격히 source='VectorCAST'만 셉니다(백엔드 link_table과 동일).">
+              ⓘ VectorCAST=실행시험+미분류 소스
+            </span>
+            {impactedCount > 0 && (
+              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, color: '#b45309', fontWeight: 600 }}
+                title="영향도 분석에서 변경된 함수에 해당하는 UDS/시험 노드 (주황 테두리·● 표시)">
+                <span style={{ width: 9, height: 9, borderRadius: '50%', background: '#b45309', display: 'inline-block' }} />변경 영향 {impactedCount}
+              </span>
+            )}
+            {totalHiddenFail > 0 && (
+              <span style={{ color: '#dc2626', fontWeight: 700 }}
+                title={`시험 컬럼 캡(${G.MAX_PER_COL})을 초과해 표시되지 않은 FAIL 시험이 있습니다. FAIL 우선 정렬로 대부분 노출되나, FAIL이 캡보다 많은 예외입니다.`}>
+                ⚠ 미표시 FAIL {totalHiddenFail}
+              </span>
+            )}
+          </div>
+
+          {/* SVG 그래프 */}
+          <div style={{ overflow: 'auto', border: '1px solid var(--border)', borderRadius: 8, background: 'var(--bg)', maxHeight: 580 }}>
+            <svg width={graph.width} height={graph.height} style={{ display: 'block', minWidth: '100%' }} role="group" aria-label={`${graph.reqId} 하위 추적 그래프`}>
+              {/* 컬럼 헤더 */}
+              {headerLabels.map((h, ci) => (
+                <text key={ci} x={ci * G.COL_W + G.PAD} y={16} fontSize={11} fontWeight={700} style={{ fill: 'var(--text-muted)' }}>{h}</text>
+              ))}
+              {/* 엣지 (노드보다 먼저 그려 뒤에 깔림) */}
+              {graph.edges.map((e, i) => {
+                const a = graph.nodeXY[e.from], b = graph.nodeXY[e.to];
+                if (!a || !b) return null;
+                const x1 = a.x + G.NODE_W;
+                const y1 = a.y + (e.fromFrac != null ? e.fromFrac * G.NODE_H : G.NODE_H / 2);
+                const x2 = b.x, y2 = b.y + G.NODE_H / 2;
+                const active = isEdgeActive(e);
+                // 초기(미선택) 상태에선 req 엣지를 옅게 깔아 hairball 밀도를 낮추고(unit 매핑은 약간 진하게),
+                // hover/선택 시 관련 엣지만 0.55/0.9로 부각, 무관 엣지는 0.06으로 후퇴.
+                const op = active
+                  ? (e.kind === 'unit' ? 0.9 : 0.55)
+                  : (activeNodeId ? 0.06 : (e.kind === 'unit' ? 0.5 : 0.16));
+                return <path key={i} d={_bez(x1, y1, x2, y2)} fill="none"
+                  stroke={e.kind === 'unit' ? '#2563eb' : e.color}
+                  strokeWidth={e.kind === 'unit' ? 2 : 1.2}
+                  strokeDasharray={e.kind === 'unit' ? '4 2' : undefined}
+                  opacity={op} />;
+              })}
+              {/* root(요구사항) 노드 */}
+              <ReqGraphNode node={{ id: '__root__', label: graph.reqId, x: G.PAD, y: graph.rootY, isRoot: true }}
+                color={_ASIL_COLORS[graph.asil] || '#374151'}
+                active={isNodeActive('__root__')} kbFocused={focusId === '__root__'}
+                onClick={() => setSelNode({ id: '__root__', label: graph.reqId, stage: '요구사항', asil: graph.asil, isRoot: true })}
+                onHover={setHoverId} onFocus={setFocusId} onBlur={() => setFocusId(null)} />
+              {/* 단계 노드 */}
+              {graph.columns.map(col => col.members.map(m => (
+                <ReqGraphNode key={m.id} node={m} color={_STAGE_COLORS[m.stage] || '#9ca3af'}
+                  active={isNodeActive(m.id)} kbFocused={focusId === m.id}
+                  onClick={() => setSelNode(m)} onHover={setHoverId} onFocus={setFocusId} onBlur={() => setFocusId(null)} />
+              )))}
+              {/* 끊긴 단계 placeholder('없음') */}
+              {graph.columns.filter(c => c.members.length === 0).map(c => (
+                <g key={`empty-${c.stage}`} opacity={activeNodeId ? 0.28 : 1} transform={`translate(${c.colIndex * G.COL_W + G.PAD},${G.HEADER_H + G.PAD})`}>
+                  <rect width={G.NODE_W} height={G.NODE_H} rx={5} fill="none" stroke="#d1d5db" strokeDasharray="4 3" />
+                  <text x={G.NODE_W / 2} y={G.NODE_H / 2 + 4} fontSize={10} textAnchor="middle" style={{ fill: '#9ca3af' }}>없음</text>
+                </g>
+              ))}
+            </svg>
+          </div>
+
+          {/* 노드 상세 */}
+          {selNode && (
+            <div style={{ marginTop: 10, padding: 12, border: '1px solid var(--border)', borderRadius: 8, background: 'var(--panel, #f9fafb)', fontSize: 12 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                <strong style={{ color: 'var(--fg)', wordBreak: 'break-all' }}>{selNode.label}</strong>
+                <button type="button" onClick={() => setSelNode(null)} style={{ border: 'none', background: 'none', cursor: 'pointer', color: 'var(--text-muted)', fontSize: 16, lineHeight: 1 }} aria-label="닫기">×</button>
+              </div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 14, color: 'var(--text-muted)' }}>
+                <span>단계 <strong style={{ color: selNode.isRoot ? 'var(--fg)' : (_STAGE_COLORS[selNode.stage] || 'var(--fg)') }}>{selNode.isRoot ? '요구사항' : selNode.stage}</strong></span>
+                {selNode.isRoot && selNode.asil && <span>ASIL <strong>{selNode.asil}</strong></span>}
+                {selNode.source && <span>소스 <strong>{selNode.source}</strong></span>}
+                {selNode.unit && <span>유닛 <strong>{selNode.unit}</strong></span>}
+                {selNode.result && <span>결과 <strong style={{ color: _testResultColor(selNode.result) }}>{selNode.result}</strong></span>}
+                {selNode.confidence && <span>신뢰 <strong>{CONFIDENCE_LABELS[selNode.confidence] || selNode.confidence}</strong></span>}
+              </div>
+            </div>
+          )}
+        </>
       )}
     </div>
   );
