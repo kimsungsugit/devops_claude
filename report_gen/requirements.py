@@ -580,7 +580,7 @@ def _extract_sds_partition_map(doc_path: str) -> Dict[str, Dict[str, str]]:
             result.append(value)
         return result
 
-    def _add_entry(name: str, asil: str, related: str, desc: str) -> None:
+    def _add_entry(name: str, asil: str, related: str, desc: str, kind: str = "component") -> None:
         key = str(name or "").strip().lower()
         if not key:
             return
@@ -591,6 +591,13 @@ def _extract_sds_partition_map(doc_path: str) -> Dict[str, Dict[str, str]]:
             entry["related"] = related
         if desc and not entry.get("description"):
             entry["description"] = desc
+        # kind: 'component'(SwCom/모듈) vs 'function'(인터페이스 함수). SDS 밴드/링크 집계는
+        # 컴포넌트만 세어 함수 fan-out 과대표기(요구사항당 16→413)를 막는다. 함수는 SUTS/VCAST
+        # 브리지에는 그대로 쓰인다. 같은 키가 컴포넌트로도 등록되면 'component'가 권위(우선).
+        if kind == "component":
+            entry["kind"] = "component"
+        elif not entry.get("kind"):
+            entry["kind"] = "function"
         mapping[key] = entry
 
     def _find_col(norm_headers: List[str], keywords: List[str]) -> int:
@@ -692,7 +699,7 @@ def _extract_sds_partition_map(doc_path: str) -> Dict[str, Dict[str, str]]:
                 _add_entry(sc_name, sc_asil, sc_related, sc_desc)
             for fr in func_rows:
                 fn = fr["name"].rstrip("()").strip()
-                _add_entry(fn, sc_asil, sc_related, fr.get("desc", ""))
+                _add_entry(fn, sc_asil, sc_related, fr.get("desc", ""), kind="function")
             continue
 
         idx_comp_id = _find_col(header_norm, ["comp id", "component id", "swcom"])
@@ -1950,6 +1957,31 @@ def generate_uds_traceability_matrix(
                 existing.append(c)
         sds_lookup[rid] = existing
 
+    # 실 설계 컴포넌트만(인터페이스 함수 제외) — 행 sds_components 표시/집계용. sds_lookup(전체)은
+    # 브리지(sds_func_to_reqs)·ASIL 롤업에 그대로 쓰여 동작 불변. design_component_ids 부재(구버전
+    # sds_pairs/클라이언트) 시 component_ids로 폴백 → 회귀 없음(분리 전과 동일 동작).
+    sds_comp_lookup: Dict[str, List[str]] = {}
+    for row in (sds_pairs or []):
+        if not isinstance(row, dict):
+            continue
+        rid = _normalize_req_id(str(row.get("requirement_id") or ""))
+        if not rid:
+            continue
+        dcomps = row.get("design_component_ids")
+        if dcomps is None:
+            dcomps = row.get("component_ids") or []
+        if isinstance(dcomps, str):
+            dcomps = [c.strip() for c in dcomps.split(",") if c.strip()]
+        elif isinstance(dcomps, list):
+            dcomps = [str(c).strip() for c in dcomps if str(c).strip()]
+        else:
+            dcomps = []
+        dexisting = sds_comp_lookup.get(rid, [])
+        for c in dcomps:
+            if c not in dexisting:
+                dexisting.append(c)
+        sds_comp_lookup[rid] = dexisting
+
     # ── Test rows: merge STS/SUTS/VectorCAST + SITS ──
     all_test_rows = list(vcast_rows or [])
     for row in (sits_rows or []):
@@ -2263,17 +2295,23 @@ def generate_uds_traceability_matrix(
     for rid in req_ids:
         tests = vcast_map.get(rid, [])
         test_ids = [t.get("testcase") for t in tests if t.get("testcase")]
-        src_list = list(map_lookup.get(rid, []))
+        src_direct = list(map_lookup.get(rid, []))  # 진짜 UDS RelatedID(직접 추적, confidence=direct)
+        src_list = list(src_direct)
         # SDS 함수명 bridge: 이 SRS 요구사항에 SDS가 귀속한 함수 중 UDS에 존재하는 것을
         # UDS 추적(source_ids)으로 채운다 (UDS가 SwSTR로 추적해 직접 안 붙던 문제 해소).
         # 조회 키는 _sds_comp_key로 정규화 — SDS 키 공간과 일치(라운드112 W1: 다른 4개 bridge
         # 조회 사이트와 동일하게, 선행 '_'('_entrypoint') 등 정규화 차이로 끊기는 것 방지).
+        # 여기서 append되는 항목은 SDS 경유 '추정'이라 link_table에서 indirect로 라벨(정직화).
         for flower, fdisp in uds_all_funcs.items():
             if rid in sds_func_to_reqs.get(_sds_comp_key(flower), []) and fdisp not in src_list:
                 src_list.append(fdisp)
-        sds_list = sds_lookup.get(rid, [])
+        sds_list = sds_lookup.get(rid, [])              # 전체(함수 포함) — ASIL 롤업·내부용
+        sds_comp_list = sds_comp_lookup.get(rid, [])    # 실 설계 컴포넌트만 — 표시/집계(추적 정화)
+        _scomp_set = set(sds_comp_list)
+        sds_func_list = [c for c in sds_list if c not in _scomp_set]  # 인터페이스 함수(별도)
         # ASIL 결합(P5) — 요구사항 ASIL = 연결된 SDS 컴포넌트·UDS 함수의 최고 ASIL.
         # 컴포넌트/함수명(lower)으로 comp_asil_map 조회. 맵 없거나 매칭 0이면 ''(graceful).
+        # ASIL 키는 전체(sds_list) 사용 — 함수가 부모 ASIL 상속이라 max 불변(분리 전과 동일).
         row_asil = ""
         if comp_asil_map:
             _asil_keys = [str(c).strip().lower() for c in sds_list]
@@ -2281,7 +2319,7 @@ def generate_uds_traceability_matrix(
             row_asil = _asil_max_of([comp_asil_map[k] for k in _asil_keys if k in comp_asil_map])
         if src_list:
             mapped_source_count += 1
-        if sds_list:
+        if sds_comp_list:
             mapped_sds_count += 1
         if test_ids:
             mapped_test_count += 1
@@ -2335,10 +2373,14 @@ def generate_uds_traceability_matrix(
                 "requirement_name": name_map.get(rid, ""),
                 # ASIL(P5) — 연결 설계요소 최고 등급(QM<A<B<C<D). 데이터 없으면 ''(graceful).
                 "asil": row_asil,
-                # T1: SRS→SDS (아키텍처 추적)
-                "sds_components": sds_list,
+                # T1: SRS→SDS (아키텍처 추적) — 실 설계 컴포넌트만(인터페이스 함수 fan-out 제외, 추적 정화)
+                "sds_components": sds_comp_list,
+                # 인터페이스 함수(투명성·드릴다운). SDS 밴드 집계엔 미포함, SUTS/VCAST 브리지엔 사용됨.
+                "sds_functions": sds_func_list,
                 # T2: SDS→UDS (상세 설계 추적)
                 "source_ids": src_list,
+                # 직접 UDS RelatedID만(나머지 source_ids는 SDS 브리지 추정) — link_table confidence 정직화용
+                "source_ids_direct": src_direct,
                 # T3: SRS→STS (SW 테스트 추적)
                 "sts_tests": sts_tests,
                 "sts_count": len(sts_tests),
@@ -2395,6 +2437,23 @@ def generate_uds_traceability_matrix(
             _cc = str(_c).strip()
             if _cc:
                 _rel["SDS"].append(_cc)
+    # 거친 입도 경고(추적 정화): 한 요구사항이 실 설계 컴포넌트의 큰 비율(>40%)에 연결되면
+    # 'coarse'로 표시 — SDS 작성 입도가 거칠어(예: SwCom Related-ID에 SwTR 전체 나열) 추적 변별력이
+    # 낮음을 정직하게 드러낸다. 함수 fan-out 제거 후의 실 컴포넌트 기준이라 의미 있음. 임계 40%
+    # 보수적, 총 컴포넌트 5개 미만이면 미적용(소규모 노이즈 방지).
+    _total_sds_comps = len({
+        str(c).strip().lower()
+        for r in matrix for c in (r.get("sds_components") or []) if str(c).strip()
+    })
+    _coarse_count = 0
+    if _total_sds_comps >= 5:
+        _coarse_threshold = 0.4 * _total_sds_comps
+        for r in matrix:
+            _is_coarse = len(r.get("sds_components") or []) > _coarse_threshold
+            r["sds_coarse"] = _is_coarse
+            if _is_coarse:
+                _coarse_count += 1
+
     try:
         integrity = build_integrity_audit(req_ids, norm_to_raws, _ref, _rel)
     except Exception as _intg_exc:  # best-effort: 감사 실패가 매트릭스 생성을 막지 않도록
@@ -2415,6 +2474,9 @@ def generate_uds_traceability_matrix(
         "summary": {
             "requirement_count": len(req_ids),
             "mapped_sds_count": mapped_sds_count,
+            # 추적 정화: 실 설계 컴포넌트 총수(함수 fan-out 제외) + 거친입도(>40% 연결) 요구사항 수
+            "total_sds_components": _total_sds_comps,
+            "sds_coarse_count": _coarse_count,
             "mapped_source_count": mapped_source_count,
             "mapped_test_count": mapped_test_count,
             "total_tests": total_tests,

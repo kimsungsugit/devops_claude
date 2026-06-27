@@ -161,10 +161,15 @@ def build_link_table(matrix: Any) -> Dict[str, Any]:
             c = str(comp or "").strip()
             if c:
                 columns["SDS"].add(c)
-        # T2: SDS → UDS (단위 함수)
+        # T2: SDS → UDS (단위 함수) — 직접 UDS RelatedID는 'direct', SDS 함수명 브리지로 회복된
+        # 것은 'indirect'(SDS 경유 추정, SUTS와 동일 메커니즘인데 direct로 은폐되던 것 정직화).
+        # source_ids_direct 부재(구버전 매트릭스) 시 전부 direct 폴백 → 회귀 없음.
+        _uds_direct = {str(x).strip() for x in (row.get("source_ids_direct") or [])}
+        _uds_has_prov = row.get("source_ids_direct") is not None
         for src in row.get("source_ids") or []:
-            add(target, src, "UDS", "direct")
             s = str(src or "").strip()
+            conf = "direct" if (not _uds_has_prov or s in _uds_direct) else "indirect"
+            add(target, src, "UDS", conf)
             if s:
                 columns["UDS"].add(s)
         # T3~T5: 시험 레벨 (STS/SUTS/SITS)

@@ -1589,7 +1589,11 @@ def local_traceability(
             srs_docx = str(p)
 
     # Parse SDS component mapping (V-Model 설계 계층)
+    # 추적 정화: sds_req_to_comps=컴포넌트+함수 전체(브리지/함수 표시용), sds_req_to_design_comps=
+    # 실 SwCom/모듈만(SDS 밴드 집계용). Jenkins 경로(jenkins.py sds extract)와 동일 정화 — 모드 간
+    # SDS 컴포넌트 수가 갈리지 않도록(함수 fan-out 24배 과대 방지).
     sds_req_to_comps: Dict[str, List[str]] = {}
+    sds_req_to_design_comps: Dict[str, List[str]] = {}
     if sds_path:
         sds_p = Path(sds_path).expanduser().resolve()
         if not is_under_any(sds_p, [repo_root, sds_p.parent.resolve()]):
@@ -1600,12 +1604,17 @@ def local_traceability(
                 related = info.get("related", "")
                 if not related:
                     continue
+                is_function = info.get("kind") == "function"
                 raw_ids = _re.findall(r"Sw[A-Za-z]{2,}\s*_\s*\d+|Sy[A-Za-z]{2,}\s*_\s*\d+", related)
                 for rid in raw_ids:
                     norm = _normalize_req_id(rid)
                     sds_req_to_comps.setdefault(norm, [])
                     if comp_key not in sds_req_to_comps[norm]:
                         sds_req_to_comps[norm].append(comp_key)
+                    if not is_function:
+                        sds_req_to_design_comps.setdefault(norm, [])
+                        if comp_key not in sds_req_to_design_comps[norm]:
+                            sds_req_to_design_comps[norm].append(comp_key)
 
     # Parse requirements
     reqs: List[Dict[str, Any]] = []
@@ -1770,9 +1779,12 @@ def local_traceability(
         has_sts = len(sts_tcs) > 0
         has_suts = len(suts_tcs_for_req) > 0
 
-        # SDS 컴포넌트 매핑 (V-Model 아키텍처 설계 계층)
-        sds_comps = sds_req_to_comps.get(norm_rid, [])
-        has_sds = len(sds_comps) > 0
+        # SDS 컴포넌트 매핑 (V-Model 아키텍처 설계 계층) — 정화: 컴포넌트만 표시, 함수는 분리.
+        sds_comps_all = sds_req_to_comps.get(norm_rid, [])
+        sds_comps = sds_req_to_design_comps.get(norm_rid, [])  # 실 SwCom/모듈만(함수 fan-out 제외)
+        _scset = set(sds_comps)
+        sds_funcs = [c for c in sds_comps_all if c not in _scset]  # 인터페이스 함수(분리)
+        has_sds = len(sds_comps) > 0 or len(sds_funcs) > 0  # 커버리지는 컴포넌트 또는 함수(회귀 방지)
 
         # tests 배열 통합 (Jenkins generate_uds_traceability_matrix 형식)
         tests: List[Dict[str, Any]] = []
@@ -1802,7 +1814,8 @@ def local_traceability(
         # status는 행에 포함하지 않음 — 프론트엔드 deriveStatus()가 단일 판정
         rows.append({
             "requirement_id": rid,
-            "sds_components": sds_comps,
+            "sds_components": sds_comps,        # 실 설계 컴포넌트만(함수 fan-out 제외)
+            "sds_functions": sds_funcs,         # 인터페이스 함수(분리, 투명성·브리지)
             # 전체 함수 유지 — 과거 [:10] 절단은 UDS 함수를 최대 ~188개 silent 누락시켜
             # 트리의 단위시험 미연결/orphan SUTS 계산을 거짓으로 만들었다(deep-analyze).
             # Jenkins 경로(generate_uds_traceability_matrix)는 전량 싣는다 — 표시는 프론트가 스크롤로 제한.
@@ -1822,7 +1835,9 @@ def local_traceability(
     # Summary — Jenkins 경로(generate_uds_traceability_matrix)와 동일 키 사용
     # deriveStatus 동일 로직: 설계(SDS or UDS) + 검증(any test) = covered
     def _derive(r):
-        has_d = bool(r.get("sds_components")) or bool(r.get("source_ids"))
+        # 추적 정화: sds_functions 포함 — 함수로만 추적된 요구사항이 설계 없음으로 회귀하지 않게
+        # (프론트 DESIGN_FIELDS·Jenkins _cache_trace_summary와 lockstep). 이게 실제 요약 집계 사이트.
+        has_d = bool(r.get("sds_components")) or bool(r.get("sds_functions")) or bool(r.get("source_ids"))
         has_t = bool(r.get("test_count"))
         if has_d and has_t:
             return "covered"
@@ -1879,7 +1894,8 @@ def local_traceability(
             "safety_total": safety_total,
             "safety_covered": safety_covered,
             "safety_pct": round(safety_covered / max(safety_total, 1) * 100, 1),
-            "total_sds_components": len(sds_req_to_comps),
+            # 정화: 실 설계 컴포넌트 distinct 수(함수 fan-out 제외) — Jenkins 경로와 동일 의미.
+            "total_sds_components": len({c for cs in sds_req_to_design_comps.values() for c in cs}),
             "total_functions": len(function_details),
             "total_sts_test_cases": len(sts_test_cases),
             "total_suts_test_cases": total_suts_fns,

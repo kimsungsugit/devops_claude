@@ -3296,6 +3296,7 @@ def _cache_trace_summary(matrix: Dict[str, Any], req: UdsTraceabilityMatrixReque
         has_design = bool(
             row.get("source_ids")
             or row.get("sds_components")
+            or row.get("sds_functions")  # 추적 정화: 함수로만 추적된 요구사항 커버리지 회귀 방지(프론트 DESIGN_FIELDS lockstep)
             or row.get("functions")
             or row.get("mapping")
             or row.get("sds")
@@ -3937,6 +3938,11 @@ def jenkins_sds_extract_mapping(body: Dict[str, Any]) -> Dict[str, Any]:
         casil = str(info.get("asil") or "").strip()
         if casil:
             component_asil[str(comp_key).strip().lower()] = casil
+    # 함수/컴포넌트 분리(추적 정화): design_component_ids = 실 SwCom/모듈만(kind!='function').
+    # SDS 밴드 집계가 인터페이스 함수 fan-out으로 24배 부풀려지던 것 차단. 함수는 component_ids에
+    # 그대로 남아 SUTS/VCAST 브리지(sds_func_to_reqs)에는 영향 없음.
+    req_to_design_comps: Dict[str, list] = {}
+    design_comp_set = set()
     for comp_key, info in partition_map.items():
         related = info.get("related", "")
         if not related:
@@ -3946,21 +3952,33 @@ def jenkins_sds_extract_mapping(body: Dict[str, Any]) -> Dict[str, Any]:
         req_ids = [_normalize_req_id(rid) for rid in raw_ids]
         if req_ids:
             comp_name = comp_key
+            is_function = info.get("kind") == "function"
             comp_set.add(comp_name)
+            if not is_function:
+                design_comp_set.add(comp_name)
             for rid in req_ids:
                 req_to_comps.setdefault(rid, [])
                 if comp_name not in req_to_comps[rid]:
                     req_to_comps[rid].append(comp_name)
+                if not is_function:
+                    req_to_design_comps.setdefault(rid, [])
+                    if comp_name not in req_to_design_comps[rid]:
+                        req_to_design_comps[rid].append(comp_name)
 
     sds_pairs = [
-        {"requirement_id": rid, "component_ids": comps}
+        {
+            "requirement_id": rid,
+            "component_ids": comps,  # 컴포넌트+함수 전체(브리지 호환)
+            "design_component_ids": req_to_design_comps.get(rid, []),  # 실 SwCom/모듈만(SDS 밴드용)
+        }
         for rid, comps in sorted(req_to_comps.items())
     ]
 
     return {
         "ok": True,
         "sds_pairs": sds_pairs,
-        "total_components": len(comp_set),
+        "total_components": len(design_comp_set),  # 실 설계 컴포넌트 수(함수 fan-out 제외)
+        "total_components_with_functions": len(comp_set),  # 참고: 함수 포함 전체
         "total_requirements": len(sds_pairs),
         # ASIL 결합(P5) — 컴포넌트/함수별 ASIL 맵. 매트릭스가 요구사항별 ASIL 도출에 사용.
         "component_asil": component_asil,

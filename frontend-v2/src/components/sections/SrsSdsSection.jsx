@@ -654,7 +654,9 @@ function _hasData(v) {
 // Any divergence here will cause the Dashboard trace summary card to disagree
 // with the Matrix / UncoveredTopList counts — keep the two in lockstep.
 const DESIGN_FIELDS = [
-  'source_ids', 'sds_components', 'functions', 'mapping', 'sds', 'source_mapping',
+  // sds_functions: 추적 정화 후 인터페이스 함수가 sds_components에서 분리됐다. 함수로만 추적되는
+  // 요구사항이 '설계 없음(uncovered)'으로 회귀하지 않도록 hasDesign 판정에 포함(백엔드 lockstep).
+  'source_ids', 'sds_components', 'sds_functions', 'functions', 'mapping', 'sds', 'source_mapping',
 ];
 const TEST_FIELDS = [
   'tests', 'sts_tests', 'suts_tests', 'sits_tests', 'vcast_tests', 'test_ids',
