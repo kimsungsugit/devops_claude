@@ -2736,15 +2736,23 @@ function _resultRank(result) {
 }
 
 // focusSet(영향도 변경함수 정규화 집합)이 주어지면 UDS 함수/시험 유닛이 변경 영향인지 표시.
-function _buildReqGraph(row, focusSet) {
+// visibleKeys(레벨 필터)가 주어지면 해당 단계만 컬럼으로 그린다(null/빈 배열=전체).
+function _buildReqGraph(row, focusSet, visibleKeys) {
   const G = _GRAPH;
   const reqId = _reqGraphId(row) || '(이름없음)';
   const reqName = String(row?.requirement_name ?? '').trim();
   const asil = String(row?.asil ?? row?.requirement_asil ?? row?.ASIL ?? '').trim().toUpperCase();
   const fset = focusSet instanceof Set && focusSet.size ? focusSet : null;
+  const isSafety = asil === 'C' || asil === 'D'; // ISO 26262 안전 등급(통합시험 필수)
+  // 안전 검증 공백 판정은 레벨 필터와 무관하게 전체 시험 단계 기준(필터로 숨겨도 정확).
+  const safetyGap = isSafety && !TREE_STAGES.filter(s => s.kind === 'test')
+    .some(s => (_stageMembers(row, s.key).items || []).length > 0);
+  // 레벨 필터: visibleKeys에 든 단계만 컬럼화.
+  const stages = (Array.isArray(visibleKeys) && visibleKeys.length)
+    ? TREE_STAGES.filter(s => visibleKeys.includes(s.key)) : TREE_STAGES;
 
   // 단계별 멤버(캡 적용 — 시험 수십 개 컬럼이 무한정 길어지는 것 방지)
-  const columns = TREE_STAGES.map((s, ci) => {
+  const columns = stages.map((s, ci) => {
     const { type, items } = _stageMembers(row, s.key);
     let all = (Array.isArray(items) ? items : []).map((it, i) => {
       const label = type === 'tests' ? _testId(it) : String(it ?? '').trim();
@@ -2779,7 +2787,7 @@ function _buildReqGraph(row, focusSet) {
   const maxRows = Math.max(1, ...columns.map(c => c.members.length || 1));
   const bodyH = maxRows * (G.NODE_H + G.GAP);
   const height = G.HEADER_H + bodyH + G.PAD * 2;
-  const width = (TREE_STAGES.length + 1) * G.COL_W;
+  const width = (stages.length + 1) * G.COL_W;
 
   const nodeXY = {};
   const rootY = G.HEADER_H + G.PAD + Math.max(0, (bodyH - (G.NODE_H + G.GAP)) / 2);
@@ -2800,7 +2808,8 @@ function _buildReqGraph(row, focusSet) {
   const reqEdges = [];
   for (const col of columns) {
     for (const m of col.members) {
-      reqEdges.push({ from: '__root__', to: m.id, color: _STAGE_COLORS[col.stage] || '#9ca3af', kind: 'req' });
+      // 안전 체인: ASIL C/D 요구사항이 시험 단계로 추적되는 경로를 ASIL 색으로 강조(hiMA FS-FS Navy 대응).
+      reqEdges.push({ from: '__root__', to: m.id, color: _STAGE_COLORS[col.stage] || '#9ca3af', kind: 'req', safety: isSafety && col.kind === 'test' });
     }
   }
   reqEdges.forEach((e, i) => { e.fromFrac = (i + 0.5) / reqEdges.length; });
@@ -2819,7 +2828,7 @@ function _buildReqGraph(row, focusSet) {
     }
   }
 
-  return { reqId, reqName, asil, columns, edges, width, height, nodeXY, rootY };
+  return { reqId, reqName, asil, isSafety, safetyGap, columns, edges, width, height, nodeXY, rootY };
 }
 
 function _bez(x1, y1, x2, y2) {
@@ -2858,6 +2867,13 @@ function TraceReqGraphView({ rows, focusFunctions = null }) {
   const [selNode, setSelNode] = useState(null);
   const [hoverId, setHoverId] = useState(null);
   const [focusId, setFocusId] = useState(null); // 키보드 포커스(강조 dim과 분리)
+  const [levelFilter, setLevelFilter] = useState('all'); // 'all' | 'design' | 'test' (hiMA DisplayLevel 대응)
+
+  const visibleKeys = useMemo(() => {
+    if (levelFilter === 'design') return ['SDS', 'UDS'];
+    if (levelFilter === 'test') return ['STS', 'SUTS', 'SITS', 'VectorCAST'];
+    return null; // 전체
+  }, [levelFilter]);
 
   // 영향도 연동 변경함수 집합(정규화) — 그래프 안에서 변경 영향 UDS/시험 노드를 강조.
   const focusSet = useMemo(() => {
@@ -2872,7 +2888,7 @@ function TraceReqGraphView({ rows, focusFunctions = null }) {
     return list.find(r => _reqGraphId(r) === selId) || null;
   }, [list, selId]);
 
-  const graph = useMemo(() => (selectedRow ? _buildReqGraph(selectedRow, focusSet) : null), [selectedRow, focusSet]);
+  const graph = useMemo(() => (selectedRow ? _buildReqGraph(selectedRow, focusSet, visibleKeys) : null), [selectedRow, focusSet, visibleKeys]);
 
   // 표시 그래프 교체 시 노드 상세/hover/focus 리셋 — selId가 아니라 graph에 묶는다.
   // (selId='' 첫항목 폴백 상태에서 부모 filter 변경으로 list[0]=다른 요구사항이 돼도
@@ -2898,11 +2914,12 @@ function TraceReqGraphView({ rows, focusFunctions = null }) {
   }
 
   const G = _GRAPH;
-  const headerLabels = ['요구사항', ...TREE_STAGES.map(s => s.label)];
+  // graph는 selId 비매칭 시 null일 수 있다(아래 JSX는 {graph && …}로 가드) — 파생 const도 null-safe.
+  const headerLabels = ['요구사항', ...(graph ? graph.columns.map(c => c.label) : [])];
   const isNodeActive = (id) => !activeNodeId || id === activeNodeId || neighborSet.has(id);
   const isEdgeActive = (e) => !activeNodeId || e.from === activeNodeId || e.to === activeNodeId;
-  const totalHiddenFail = graph.columns.reduce((n, c) => n + (c.hiddenFail || 0), 0);
-  const impactedCount = graph.columns.reduce((n, c) => n + c.members.filter(m => m.impacted).length, 0);
+  const totalHiddenFail = graph ? graph.columns.reduce((n, c) => n + (c.hiddenFail || 0), 0) : 0;
+  const impactedCount = graph ? graph.columns.reduce((n, c) => n + c.members.filter(m => m.impacted).length, 0) : 0;
 
   return (
     <div>
@@ -2919,6 +2936,16 @@ function TraceReqGraphView({ rows, focusFunctions = null }) {
           })}
         </datalist>
         {selId && !selectedRow && <span style={{ fontSize: 11, color: '#d97706' }}>일치하는 요구사항 없음</span>}
+        <div role="group" aria-label="단계 필터" style={{ display: 'inline-flex', border: '1px solid var(--border)', borderRadius: 6, overflow: 'hidden', marginLeft: 'auto' }}>
+          {[['all', '전체'], ['design', '설계'], ['test', '시험']].map(([k, lbl], i) => (
+            <button key={k} type="button" onClick={() => setLevelFilter(k)} aria-pressed={levelFilter === k}
+              title={k === 'design' ? 'SDS·UDS만' : k === 'test' ? 'STS·SUTS·SITS·VectorCAST만' : '전체 단계'}
+              style={{ padding: '5px 10px', fontSize: 11, border: 'none', borderLeft: i ? '1px solid var(--border)' : 'none', cursor: 'pointer',
+                background: levelFilter === k ? 'var(--accent)' : 'var(--bg)', color: levelFilter === k ? '#fff' : 'var(--fg)', fontWeight: levelFilter === k ? 700 : 400 }}>
+              {lbl}
+            </button>
+          ))}
+        </div>
       </div>
 
       {graph && (
@@ -2951,11 +2978,29 @@ function TraceReqGraphView({ rows, focusFunctions = null }) {
                 ⚠ 미표시 FAIL {totalHiddenFail}
               </span>
             )}
+            {graph.isSafety && (
+              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}
+                title="ASIL C/D 요구사항이 시험 단계로 추적되는 경로(안전 검증 체인)를 ASIL 색·굵게로 강조합니다.">
+                <span style={{ width: 14, height: 0, borderTop: `2px solid ${_ASIL_COLORS[graph.asil] || '#dc2626'}`, display: 'inline-block' }} />안전 검증 경로
+              </span>
+            )}
+            {graph.safetyGap && (
+              <span style={{ color: '#dc2626', fontWeight: 700 }}
+                title="ASIL C/D 요구사항인데 연결된 시험(STS/SUTS/SITS/VectorCAST)이 하나도 없습니다 — 안전 검증 공백.">
+                ⚠ 안전 검증 공백(시험 0)
+              </span>
+            )}
           </div>
 
           {/* SVG 그래프 */}
           <div style={{ overflow: 'auto', border: '1px solid var(--border)', borderRadius: 8, background: 'var(--bg)', maxHeight: 580 }}>
             <svg width={graph.width} height={graph.height} style={{ display: 'block', minWidth: '100%' }} role="group" aria-label={`${graph.reqId} 하위 추적 그래프`}>
+              <defs>
+                {/* 엣지 방향 화살표(타겟 노드 끝). userSpaceOnUse로 strokeWidth와 무관하게 일정 크기. */}
+                <marker id="rg-arrow" markerWidth={7} markerHeight={7} refX={6} refY={2.5} orient="auto" markerUnits="userSpaceOnUse">
+                  <path d="M0,0 L6,2.5 L0,5 Z" fill="#94a3b8" />
+                </marker>
+              </defs>
               {/* 컬럼 헤더 */}
               {headerLabels.map((h, ci) => (
                 <text key={ci} x={ci * G.COL_W + G.PAD} y={16} fontSize={11} fontWeight={700} style={{ fill: 'var(--text-muted)' }}>{h}</text>
@@ -2968,16 +3013,18 @@ function TraceReqGraphView({ rows, focusFunctions = null }) {
                 const y1 = a.y + (e.fromFrac != null ? e.fromFrac * G.NODE_H : G.NODE_H / 2);
                 const x2 = b.x, y2 = b.y + G.NODE_H / 2;
                 const active = isEdgeActive(e);
-                // 초기(미선택) 상태에선 req 엣지를 옅게 깔아 hairball 밀도를 낮추고(unit 매핑은 약간 진하게),
-                // hover/선택 시 관련 엣지만 0.55/0.9로 부각, 무관 엣지는 0.06으로 후퇴.
+                // 안전 체인(ASIL C/D 요구사항→시험 단계)은 ASIL 색·굵게로 부각(hiMA FS-FS Navy 대응).
+                const stroke = e.kind === 'unit' ? '#2563eb' : (e.safety ? (_ASIL_COLORS[graph.asil] || e.color) : e.color);
+                const sw = e.kind === 'unit' ? 2 : (e.safety ? 2 : 1.2);
+                // 초기(미선택) 상태에선 req 엣지를 옅게 깔아 hairball 밀도를 낮추되, 안전/unit 엣지는 진하게.
+                const idleOp = e.kind === 'unit' ? 0.5 : (e.safety ? 0.45 : 0.16);
                 const op = active
-                  ? (e.kind === 'unit' ? 0.9 : 0.55)
-                  : (activeNodeId ? 0.06 : (e.kind === 'unit' ? 0.5 : 0.16));
+                  ? (e.kind === 'unit' ? 0.9 : (e.safety ? 0.85 : 0.55))
+                  : (activeNodeId ? 0.06 : idleOp);
                 return <path key={i} d={_bez(x1, y1, x2, y2)} fill="none"
-                  stroke={e.kind === 'unit' ? '#2563eb' : e.color}
-                  strokeWidth={e.kind === 'unit' ? 2 : 1.2}
+                  stroke={stroke} strokeWidth={sw}
                   strokeDasharray={e.kind === 'unit' ? '4 2' : undefined}
-                  opacity={op} />;
+                  markerEnd="url(#rg-arrow)" opacity={op} />;
               })}
               {/* root(요구사항) 노드 */}
               <ReqGraphNode node={{ id: '__root__', label: graph.reqId, x: G.PAD, y: graph.rootY, isRoot: true }}
