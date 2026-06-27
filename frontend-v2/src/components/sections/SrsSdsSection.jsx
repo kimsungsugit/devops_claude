@@ -2852,7 +2852,10 @@ function _buildReqGraph(row, focusSet, visibleKeys, linkTable) {
     }
   }
 
-  return { reqId, reqName, asil, isSafety, safetyGap, safetyMissing, columns, edges, width, height, nodeXY, rootY };
+  // 분리된 인터페이스 함수(추적 정화) — 그래프 노드로는 안 그려 정화를 유지하되, 데이터 존재는
+  // 범례/패널로 정직하게 노출(함수가 UI에서 완전 소실되지 않도록).
+  const sdsFunctions = (Array.isArray(row?.sds_functions) ? row.sds_functions : []).map(s => String(s).trim()).filter(Boolean);
+  return { reqId, reqName, asil, isSafety, safetyGap, safetyMissing, sdsFunctions, columns, edges, width, height, nodeXY, rootY };
 }
 
 function _bez(x1, y1, x2, y2) {
@@ -2951,6 +2954,7 @@ function TraceReqGraphView({ rows, focusFunctions = null, linkTable = null }) {
   const [focusId, setFocusId] = useState(null); // 키보드 포커스(강조 dim과 분리)
   const [levelFilter, setLevelFilter] = useState('all'); // 'all' | 'design' | 'test' (hiMA DisplayLevel 대응)
   const svgRef = useRef(null); // 내보내기(SVG/PNG)용 SVG 참조
+  const [showSdsFns, setShowSdsFns] = useState(false); // SDS 인터페이스 함수 펼침(추적 정화 분리분)
 
   const visibleKeys = useMemo(() => {
     if (levelFilter === 'design') return ['SDS', 'UDS'];
@@ -3110,6 +3114,14 @@ function TraceReqGraphView({ rows, focusFunctions = null, linkTable = null }) {
             <span style={{ opacity: 0.6 }} title="hiMA UCOneIDTrace 표기 대응 — 설계=집(△지붕)/단위설계=역집/시험스펙=타원/단위시험=◇/통합시험=8각/요구사항=□">
               모양: 설계▭집·단위설계▽·시험◯◇⯃
             </span>
+            {graph.sdsFunctions.length > 0 && (
+              <button type="button" onClick={() => setShowSdsFns(v => !v)} aria-expanded={showSdsFns}
+                title="SDS 인터페이스 함수 — 추적 정화로 설계 컴포넌트와 분리(SDS 밴드 집계 제외). 단위시험(SUTS)·VectorCAST 추적의 근거. 클릭해 목록 보기."
+                style={{ display: 'inline-flex', alignItems: 'center', gap: 4, padding: '2px 8px', fontSize: 11, border: '1px solid var(--border)', borderRadius: 12,
+                  background: showSdsFns ? 'var(--accent)' : 'var(--bg)', color: showSdsFns ? '#fff' : 'var(--fg)', cursor: 'pointer' }}>
+                함수 {graph.sdsFunctions.length} {showSdsFns ? '▲' : '▼'}
+              </button>
+            )}
             <div style={{ marginLeft: 'auto', display: 'inline-flex', gap: 6 }}>
               <button type="button" onClick={exportSvg} title="그래프를 SVG(벡터)로 내보내기 (hiMA SaveInVectorFormat 대응)"
                 style={{ padding: '4px 9px', fontSize: 11, border: '1px solid var(--border)', borderRadius: 5, background: 'var(--bg)', color: 'var(--fg)', cursor: 'pointer' }}>SVG ↓</button>
@@ -3117,6 +3129,21 @@ function TraceReqGraphView({ rows, focusFunctions = null, linkTable = null }) {
                 style={{ padding: '4px 9px', fontSize: 11, border: '1px solid var(--border)', borderRadius: 5, background: 'var(--bg)', color: 'var(--fg)', cursor: 'pointer' }}>PNG ↓</button>
             </div>
           </div>
+
+          {/* SDS 인터페이스 함수 펼침 패널(추적 정화로 분리된 함수 — 기본 접힘, 그래프 노드 재팽창 방지) */}
+          {showSdsFns && graph.sdsFunctions.length > 0 && (
+            <div style={{ marginBottom: 8, padding: 10, border: '1px solid var(--border)', borderRadius: 8, background: 'var(--panel, #f9fafb)', maxHeight: 170, overflow: 'auto' }}>
+              <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 6 }}>
+                SDS 인터페이스 함수 {graph.sdsFunctions.length}개 — 설계 컴포넌트의 멤버 함수(SDS 밴드 집계엔 미포함, SUTS/VectorCAST 단위시험 추적 근거)
+              </div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                {graph.sdsFunctions.slice(0, 500).map((fn, i) => (
+                  <span key={i} style={{ fontSize: 10, padding: '1px 6px', borderRadius: 4, background: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--fg)' }}>{fn}</span>
+                ))}
+                {graph.sdsFunctions.length > 500 && <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>… +{graph.sdsFunctions.length - 500}</span>}
+              </div>
+            </div>
+          )}
 
           {/* SVG 그래프 */}
           <div style={{ overflow: 'auto', border: '1px solid var(--border)', borderRadius: 8, background: 'var(--bg)', maxHeight: 580 }}>
