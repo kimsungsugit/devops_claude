@@ -1833,7 +1833,7 @@ function TraceMatrix({ matrix, focusFunctions = null, onClearFocus = null,
       {/* 그래프 보기 (신규 — 요구사항 1개의 하위 추적 그래프. SVG 노드-엣지, filtered row로 완결.
           focusFunctions=영향도 연동 변경함수 → 그래프 안 해당 UDS/시험 노드 강조) */}
       {viewMode === 'graph' && (
-        <TraceReqGraphView rows={filtered} focusFunctions={focusFunctions} />
+        <TraceReqGraphView rows={filtered} focusFunctions={focusFunctions} linkTable={inner?.link_table} />
       )}
 
       {/* Pagination (표 모드 전용 — 트리는 filtered 전체를 한 번에 조망하므로 페이지네이션 불필요) */}
@@ -2737,28 +2737,36 @@ function _resultRank(result) {
 
 // focusSet(영향도 변경함수 정규화 집합)이 주어지면 UDS 함수/시험 유닛이 변경 영향인지 표시.
 // visibleKeys(레벨 필터)가 주어지면 해당 단계만 컬럼으로 그린다(null/빈 배열=전체).
-function _buildReqGraph(row, focusSet, visibleKeys) {
+function _buildReqGraph(row, focusSet, visibleKeys, linkTable) {
   const G = _GRAPH;
   const reqId = _reqGraphId(row) || '(이름없음)';
   const reqName = String(row?.requirement_name ?? '').trim();
-  const asil = String(row?.asil ?? row?.requirement_asil ?? row?.ASIL ?? '').trim().toUpperCase();
+  // ASIL 추출 연산자는 매트릭스 뷰(CrossMatrixView)와 통일(`||`) — present-but-empty asil에서 분기 방지.
+  const asil = String(row?.asil || row?.requirement_asil || row?.ASIL || '').trim().toUpperCase();
   const fset = focusSet instanceof Set && focusSet.size ? focusSet : null;
   const isSafety = asil === 'C' || asil === 'D'; // ISO 26262 최고 등급(시험 경로 강조용)
   // 안전 검증 공백 — 백엔드 _asil_missing_bands(report_gen/trace_link_table.py)와 동일 규칙.
   //   C/D = SUTS·SITS 둘 다 필수(하나라도 0이면 누락), A/B = 시험 밴드 중 1개 이상, QM/미상 = 기대 없음.
   //   레벨 필터와 무관하게 전체 row 기준으로 판정(필터로 시험 단계를 숨겨도 정확).
-  // band 추출은 _rowBands(L718)를 재사용 — 백엔드 build_link_table과 byte-exact 동일 규칙
-  // (_testId non-empty 필터 + strict VectorCAST source). _stageMembers의 raw 멤버 길이/관대한
-  // VectorCAST 규칙을 쓰면 empty-rid·orphan-source 시험에서 갭을 under-report(안전 false-negative).
-  const _safetyBands = _rowBands(row);
-  const _bandCount = (key) => (_safetyBands[key] || []).length;
-  const _asilRank = { QM: 0, A: 1, B: 2, C: 3, D: 4 }[asil] ?? -1;
-  const safetyMissing = [];
-  if (_asilRank >= 3) { // ASIL C/D — SUTS·SITS 둘 다 필수
-    if (_bandCount('SUTS') === 0) safetyMissing.push('SUTS');
-    if (_bandCount('SITS') === 0) safetyMissing.push('SITS');
-  } else if (_asilRank >= 1) { // ASIL A/B — 시험 밴드 중 1개 이상
-    if (!['STS', 'SUTS', 'SITS', 'VectorCAST'].some(b => _bandCount(b) > 0)) safetyMissing.push('ANY_TEST');
+  // 안전 검증 공백 — 백엔드 link_table.asil_coverage.gaps를 SSOT로 직독(매트릭스 뷰 CrossMatrixView와
+  // 동일 출처 → 같은 요구사항에 byte-identical 갭, drift 제거). 백엔드 link_table 부재(구버전/빌드 실패)
+  // 시에만 _rowBands(백엔드 build_link_table과 byte-exact 추출) + _asil_missing_bands 규칙으로 폴백 재계산.
+  let safetyMissing;
+  const _backendGaps = linkTable?.asil_coverage?.gaps;
+  if (Array.isArray(_backendGaps)) {
+    const g = _backendGaps.find(x => String(x?.target_id ?? '') === reqId);
+    safetyMissing = (g && Array.isArray(g.missing)) ? g.missing.slice() : [];
+  } else {
+    const _safetyBands = _rowBands(row);
+    const _bandCount = (key) => (_safetyBands[key] || []).length;
+    const _asilRank = { QM: 0, A: 1, B: 2, C: 3, D: 4 }[asil] ?? -1;
+    safetyMissing = [];
+    if (_asilRank >= 3) { // ASIL C/D — SUTS·SITS 둘 다 필수
+      if (_bandCount('SUTS') === 0) safetyMissing.push('SUTS');
+      if (_bandCount('SITS') === 0) safetyMissing.push('SITS');
+    } else if (_asilRank >= 1) { // ASIL A/B — 시험 밴드 중 1개 이상
+      if (!['STS', 'SUTS', 'SITS', 'VectorCAST'].some(b => _bandCount(b) > 0)) safetyMissing.push('ANY_TEST');
+    }
   }
   const safetyGap = safetyMissing.length > 0;
   // 레벨 필터: visibleKeys에 든 단계만 컬럼화.
@@ -2870,12 +2878,12 @@ function ReqGraphNode({ node, color, active, kbFocused, onClick, onHover, onFocu
         stroke={impacted ? '#b45309' : color} strokeWidth={impacted ? 3 : (node.isRoot ? 2.5 : 1.5)} />
       <rect width={5} height={G.NODE_H} rx={2} fill={color} />
       {impacted && <circle cx={G.NODE_W - 9} cy={9} r={4} fill="#b45309" />}
-      <text x={12} y={G.NODE_H / 2 + 4} fontSize={11} fontWeight={node.isRoot || impacted ? 700 : 500} style={{ fill: 'var(--fg)' }}>{shown}</text>
+      <text x={12} y={G.NODE_H / 2 + 4} fontSize={11} fontWeight={node.isRoot || impacted ? 700 : 500} clipPath="url(#rg-node-clip)" style={{ fill: 'var(--fg)' }}>{shown}</text>
     </g>
   );
 }
 
-function TraceReqGraphView({ rows, focusFunctions = null }) {
+function TraceReqGraphView({ rows, focusFunctions = null, linkTable = null }) {
   const list = useMemo(() => (Array.isArray(rows) ? rows.filter(r => _reqGraphId(r)) : []), [rows]);
   const [selId, setSelId] = useState('');
   const [selNode, setSelNode] = useState(null);
@@ -2902,7 +2910,7 @@ function TraceReqGraphView({ rows, focusFunctions = null }) {
     return list.find(r => _reqGraphId(r) === selId) || null;
   }, [list, selId]);
 
-  const graph = useMemo(() => (selectedRow ? _buildReqGraph(selectedRow, focusSet, visibleKeys) : null), [selectedRow, focusSet, visibleKeys]);
+  const graph = useMemo(() => (selectedRow ? _buildReqGraph(selectedRow, focusSet, visibleKeys, linkTable) : null), [selectedRow, focusSet, visibleKeys, linkTable]);
 
   // 표시 그래프 교체 시: 선택 노드가 새 graph에 여전히 존재하면 유지(레벨필터 좁히기에도 상세 보존),
   // 없으면 리셋(selId 변경·필터로 단계 제거 시 stale selNode/유령 dimming 차단). hover/focus는 transient라 항상 리셋.
@@ -3021,6 +3029,11 @@ function TraceReqGraphView({ rows, focusFunctions = null }) {
                 <marker id="rg-arrow" markerWidth={7} markerHeight={7} refX={6} refY={2.5} orient="auto" markerUnits="userSpaceOnUse">
                   <path d="M0,0 L6,2.5 L0,5 Z" fill="#94a3b8" />
                 </marker>
+                {/* 노드 라벨 클립 — 문자수 truncate가 CJK(한글 컴포넌트명 등)에서 박스를 넘어
+                    이웃 컬럼을 침범하던 것을 박스 내로 가둠. userSpaceOnUse라 g translate 로컬 좌표로 재사용. */}
+                <clipPath id="rg-node-clip">
+                  <rect x={0} y={0} width={G.NODE_W} height={G.NODE_H} rx={6} />
+                </clipPath>
               </defs>
               {/* 컬럼 헤더 */}
               {headerLabels.map((h, ci) => (
