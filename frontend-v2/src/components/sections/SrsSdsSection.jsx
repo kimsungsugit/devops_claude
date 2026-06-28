@@ -1051,6 +1051,78 @@ function CrossMatrixView({ rows, linkTable, fullMatrix, exportMeta }) {
   );
 }
 
+// ── 모자이크 뷰 (additive '모자이크' 뷰) — hiMA TrMosaicReport 대응 ──────────────
+// 교차표(매트릭스)가 req×SDS 상세 O/공백이라면, 모자이크는 req×밴드를 색상 셀(히트맵)로
+// 압축 조망 — 추적 패턴/공백/FAIL을 한눈에. 셀 진하기=연결 수, 빨강=VectorCAST FAIL.
+// 밴드 추출은 _rowBands(매트릭스/내보내기/백엔드 link_table과 lockstep) 재사용.
+const _MOSAIC_BANDS = [
+  { key: 'SDS', label: 'SDS' }, { key: 'HSIS', label: 'HSIS' }, { key: 'UDS', label: 'UDS' },
+  { key: 'STS', label: 'STS' }, { key: 'SUTS', label: 'SUTS' }, { key: 'SITS', label: 'SITS' },
+  { key: 'SyTS', label: 'SyTS' }, { key: 'SyITS', label: 'SyITS' }, { key: 'VectorCAST', label: 'VC' },
+];
+const _MOSAIC_FAIL_RE = /^(fail|failed|false|0|ng)$/i;
+function TraceMosaicView({ rows }) {
+  const list = Array.isArray(rows) ? rows : [];
+  if (!list.length) {
+    return <div className="text-muted text-sm" style={{ padding: '16px 4px' }}>표시할 요구사항이 없습니다.</div>;
+  }
+  return (
+    <div style={{ border: '1px solid var(--border)', borderRadius: 8, overflow: 'auto', maxHeight: '72vh' }}>
+      {/* 범례 */}
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, padding: '8px 12px', background: 'var(--bg)', borderBottom: '1px solid var(--border)', fontSize: 11, color: 'var(--text-muted)' }}>
+        <span style={{ fontWeight: 600 }}>모자이크 — 요구사항×밴드 추적 히트맵 (hiMA TrMosaicReport 대응)</span>
+        <span><span style={{ display: 'inline-block', width: 10, height: 10, borderRadius: 2, background: COVERAGE_COLORS.covered.border, marginRight: 4, verticalAlign: 'middle' }} />연결(진할수록 다건)</span>
+        <span><span style={{ display: 'inline-block', width: 10, height: 10, borderRadius: 2, background: '#eef0f2', border: '1px solid #e5e7eb', marginRight: 4, verticalAlign: 'middle' }} />공백</span>
+        <span><span style={{ display: 'inline-block', width: 10, height: 10, borderRadius: 2, background: '#dc2626', marginRight: 4, verticalAlign: 'middle' }} />VectorCAST FAIL</span>
+      </div>
+      <table style={{ borderCollapse: 'collapse', fontSize: 10 }}>
+        <thead>
+          <tr style={{ background: 'var(--bg)' }}>
+            <th style={{ position: 'sticky', left: 0, background: 'var(--bg)', padding: '4px 8px', textAlign: 'left', borderBottom: '1px solid var(--border)', zIndex: 2 }}>요구사항 ({list.length})</th>
+            <th style={{ padding: '4px 6px', borderBottom: '1px solid var(--border)' }} title="추적 상태(deriveStatus)">상태</th>
+            {_MOSAIC_BANDS.map(b => (
+              <th key={b.key} title={b.key} style={{ padding: '4px 3px', borderBottom: '1px solid var(--border)', color: _STAGE_COLORS[b.key] || 'var(--fg)', fontWeight: 700, fontSize: 9, minWidth: 26 }}>{b.label}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {list.map((r, idx) => {
+            const rid = _rowReqId(r) || `row-${idx}`;
+            const bands = _rowBands(r || {});
+            const status = deriveStatus(r);
+            const sc = COVERAGE_COLORS[status] || {};
+            const vcFail = (Array.isArray(r.tests) ? r.tests : []).some(t => t && t.source === 'VectorCAST' && _MOSAIC_FAIL_RE.test(String(t.result || '')));
+            return (
+              <tr key={rid}>
+                <td title={r.requirement_name ? `${rid} — ${r.requirement_name}` : rid}
+                  style={{ position: 'sticky', left: 0, background: 'var(--bg)', padding: '2px 8px', fontFamily: 'monospace', whiteSpace: 'nowrap', borderBottom: '1px solid var(--border)', maxWidth: 240, overflow: 'hidden', textOverflow: 'ellipsis', zIndex: 1 }}>{rid}</td>
+                <td style={{ padding: '2px 4px', textAlign: 'center', borderBottom: '1px solid var(--border)' }}>
+                  <span title={status} style={{ display: 'inline-block', width: 8, height: 8, borderRadius: '50%', background: sc.border || '#9ca3af' }} />
+                </td>
+                {_MOSAIC_BANDS.map(b => {
+                  const cnt = (bands[b.key] || []).length;
+                  const isFail = b.key === 'VectorCAST' && vcFail;
+                  const base = _STAGE_COLORS[b.key] || '#16a34a';
+                  // 진하기: 1건 옅게 → 다건 진하게(상한 1). FAIL은 빨강 고정.
+                  const op = cnt === 0 ? 1 : Math.min(1, 0.4 + Math.log2(cnt + 1) * 0.2);
+                  return (
+                    <td key={b.key} title={`${rid} · ${b.key}: ${cnt}건${isFail ? ' (FAIL 포함)' : ''}`}
+                      style={{ padding: '1px 2px', borderBottom: '1px solid var(--border)' }}>
+                      <div style={{ width: 22, height: 14, margin: '0 auto', borderRadius: 2,
+                        background: cnt === 0 ? '#eef0f2' : isFail ? '#dc2626' : base, opacity: op,
+                        border: cnt === 0 ? '1px solid #e5e7eb' : isFail ? '1px solid #991b1b' : 'none' }} />
+                    </td>
+                  );
+                })}
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 function TraceMatrix({ matrix, focusFunctions = null, onClearFocus = null,
   job = null, cacheRoot = '', buildSelector = 'lastSuccessfulBuild', sourceRoot = '', toast = () => {} }) {
   const inner = matrix?.matrix ?? matrix;
@@ -1679,6 +1751,12 @@ function TraceMatrix({ matrix, focusFunctions = null, onClearFocus = null,
               color: viewMode === 'matrix' ? '#fff' : 'var(--fg)', fontWeight: viewMode === 'matrix' ? 700 : 400 }}>
             매트릭스
           </button>
+          <button type="button" onClick={() => setViewMode('mosaic')} aria-pressed={viewMode === 'mosaic'} title="모자이크 — 요구사항×밴드 추적 히트맵 (hiMA TrMosaicReport 대응 · 색=밴드, 진하기=연결 수, 빨강=VectorCAST FAIL)"
+            style={{ padding: '6px 10px', fontSize: 11, border: 'none', borderLeft: '1px solid var(--border)', cursor: 'pointer',
+              background: viewMode === 'mosaic' ? 'var(--accent)' : 'var(--bg)',
+              color: viewMode === 'mosaic' ? '#fff' : 'var(--fg)', fontWeight: viewMode === 'mosaic' ? 700 : 400 }}>
+            모자이크
+          </button>
           <button type="button" onClick={() => { setCallTreeSeed(''); setViewMode('calltree'); }} aria-pressed={viewMode === 'calltree'} title="함수 호출 트리 (tree-sitter 정밀 분석 · ASIL 강조) — 또는 표 행 펼쳐 함수의 '콜트리' 클릭"
             style={{ padding: '6px 10px', fontSize: 11, border: 'none', borderLeft: '1px solid var(--border)', cursor: 'pointer',
               background: viewMode === 'calltree' ? 'var(--accent)' : 'var(--bg)',
@@ -1995,6 +2073,11 @@ function TraceMatrix({ matrix, focusFunctions = null, onClearFocus = null,
       {viewMode === 'matrix' && (
         <CrossMatrixView rows={filtered} linkTable={inner?.link_table} fullMatrix={inner}
           exportMeta={{ job_url: matrix?.job_url || inner?.job_url || '' }} />
+      )}
+
+      {/* 모자이크 보기 (신규 — hiMA TrMosaicReport 대응. 요구사항×밴드 색상 히트맵, filtered 반영) */}
+      {viewMode === 'mosaic' && (
+        <TraceMosaicView rows={filtered} />
       )}
 
       {/* 콜트리 보기 (신규 — tree-sitter 정밀 함수 호출 트리. entry 기반 깊이탐색 + ASIL 강조) */}
