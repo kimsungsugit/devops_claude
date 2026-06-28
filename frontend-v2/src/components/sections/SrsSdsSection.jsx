@@ -1061,56 +1061,65 @@ const _MOSAIC_BANDS = [
   { key: 'SyTS', label: 'SyTS' }, { key: 'SyITS', label: 'SyITS' }, { key: 'VectorCAST', label: 'VC' },
 ];
 const _MOSAIC_FAIL_RE = /^(fail|failed|false|0|ng)$/i;
-function TraceMosaicView({ rows }) {
-  const list = Array.isArray(rows) ? rows : [];
-  if (!list.length) {
+const TraceMosaicView = React.memo(function TraceMosaicView({ rows }) {
+  // 행별 셀 데이터 사전 파생(메모이즈) — CrossMatrixView 패턴과 통일, rows 불변 시(비필터 리렌더) 재계산 회피.
+  const cells = useMemo(() => {
+    const list = Array.isArray(rows) ? rows : [];
+    return list.map((r, idx) => {
+      const bands = _rowBands(r || {});
+      // FAIL은 cnt와 독립으로 도출 — 빈 testId FAIL이 cnt=0으로 은폐(회색)되지 않게 셀에서 우선 적용(I2).
+      const vcFail = (Array.isArray(r.tests) ? r.tests : []).some(t => t && t.source === 'VectorCAST' && _MOSAIC_FAIL_RE.test(String(t.result || '')));
+      return {
+        rid: _rowReqId(r) || `row-${idx}`,
+        name: String(r.requirement_name || ''),
+        status: deriveStatus(r),
+        bandCells: _MOSAIC_BANDS.map(b => ({ key: b.key, cnt: (bands[b.key] || []).length, isFail: b.key === 'VectorCAST' && vcFail })),
+      };
+    });
+  }, [rows]);
+  if (!cells.length) {
     return <div className="text-muted text-sm" style={{ padding: '16px 4px' }}>표시할 요구사항이 없습니다.</div>;
   }
+  const headBg = 'var(--bg)';
   return (
     <div style={{ border: '1px solid var(--border)', borderRadius: 8, overflow: 'auto', maxHeight: '72vh' }}>
-      {/* 범례 */}
-      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, padding: '8px 12px', background: 'var(--bg)', borderBottom: '1px solid var(--border)', fontSize: 11, color: 'var(--text-muted)' }}>
+      {/* 범례 — 셀 색=밴드별(상단 헤더 색), 진할수록 다건. 공백=테두리만(다크 적응), FAIL=빨강 고정. */}
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, padding: '8px 12px', background: headBg, borderBottom: '1px solid var(--border)', fontSize: 11, color: 'var(--text-muted)' }}>
         <span style={{ fontWeight: 600 }}>모자이크 — 요구사항×밴드 추적 히트맵 (hiMA TrMosaicReport 대응)</span>
-        <span><span style={{ display: 'inline-block', width: 10, height: 10, borderRadius: 2, background: COVERAGE_COLORS.covered.border, marginRight: 4, verticalAlign: 'middle' }} />연결(진할수록 다건)</span>
-        <span><span style={{ display: 'inline-block', width: 10, height: 10, borderRadius: 2, background: '#eef0f2', border: '1px solid #e5e7eb', marginRight: 4, verticalAlign: 'middle' }} />공백</span>
+        <span>연결 = <b>밴드색</b>(상단 헤더), 진할수록 다건</span>
+        <span><span style={{ display: 'inline-block', width: 10, height: 10, borderRadius: 2, background: 'transparent', border: '1px solid var(--border)', marginRight: 4, verticalAlign: 'middle' }} />공백</span>
         <span><span style={{ display: 'inline-block', width: 10, height: 10, borderRadius: 2, background: '#dc2626', marginRight: 4, verticalAlign: 'middle' }} />VectorCAST FAIL</span>
       </div>
       <table style={{ borderCollapse: 'collapse', fontSize: 10 }}>
         <thead>
-          <tr style={{ background: 'var(--bg)' }}>
-            <th style={{ position: 'sticky', left: 0, background: 'var(--bg)', padding: '4px 8px', textAlign: 'left', borderBottom: '1px solid var(--border)', zIndex: 2 }}>요구사항 ({list.length})</th>
-            <th style={{ padding: '4px 6px', borderBottom: '1px solid var(--border)' }} title="추적 상태(deriveStatus)">상태</th>
+          <tr style={{ background: headBg }}>
+            <th style={{ position: 'sticky', left: 0, top: 0, background: headBg, padding: '4px 8px', textAlign: 'left', borderBottom: '1px solid var(--border)', zIndex: 3 }}>요구사항 ({cells.length})</th>
+            <th style={{ position: 'sticky', top: 0, background: headBg, padding: '4px 6px', borderBottom: '1px solid var(--border)', zIndex: 2 }} title="추적 상태(deriveStatus)">상태</th>
             {_MOSAIC_BANDS.map(b => (
-              <th key={b.key} title={b.key} style={{ padding: '4px 3px', borderBottom: '1px solid var(--border)', color: _STAGE_COLORS[b.key] || 'var(--fg)', fontWeight: 700, fontSize: 9, minWidth: 26 }}>{b.label}</th>
+              <th key={b.key} title={b.key} style={{ position: 'sticky', top: 0, background: headBg, padding: '4px 3px', borderBottom: '1px solid var(--border)', color: _STAGE_COLORS[b.key] || 'var(--fg)', fontWeight: 700, fontSize: 9, minWidth: 26, zIndex: 2 }}>{b.label}</th>
             ))}
           </tr>
         </thead>
         <tbody>
-          {list.map((r, idx) => {
-            const rid = _rowReqId(r) || `row-${idx}`;
-            const bands = _rowBands(r || {});
-            const status = deriveStatus(r);
-            const sc = COVERAGE_COLORS[status] || {};
-            const vcFail = (Array.isArray(r.tests) ? r.tests : []).some(t => t && t.source === 'VectorCAST' && _MOSAIC_FAIL_RE.test(String(t.result || '')));
+          {cells.map((c) => {
+            const sc = COVERAGE_COLORS[c.status] || {};
             return (
-              <tr key={rid}>
-                <td title={r.requirement_name ? `${rid} — ${r.requirement_name}` : rid}
-                  style={{ position: 'sticky', left: 0, background: 'var(--bg)', padding: '2px 8px', fontFamily: 'monospace', whiteSpace: 'nowrap', borderBottom: '1px solid var(--border)', maxWidth: 240, overflow: 'hidden', textOverflow: 'ellipsis', zIndex: 1 }}>{rid}</td>
+              <tr key={c.rid}>
+                <td title={c.name ? `${c.rid} — ${c.name}` : c.rid}
+                  style={{ position: 'sticky', left: 0, background: headBg, padding: '2px 8px', fontFamily: 'monospace', whiteSpace: 'nowrap', borderBottom: '1px solid var(--border)', maxWidth: 240, overflow: 'hidden', textOverflow: 'ellipsis', zIndex: 1 }}>{c.rid}</td>
                 <td style={{ padding: '2px 4px', textAlign: 'center', borderBottom: '1px solid var(--border)' }}>
-                  <span title={status} style={{ display: 'inline-block', width: 8, height: 8, borderRadius: '50%', background: sc.border || '#9ca3af' }} />
+                  <span title={c.status} style={{ display: 'inline-block', width: 8, height: 8, borderRadius: '50%', background: sc.border || '#9ca3af' }} />
                 </td>
-                {_MOSAIC_BANDS.map(b => {
-                  const cnt = (bands[b.key] || []).length;
-                  const isFail = b.key === 'VectorCAST' && vcFail;
-                  const base = _STAGE_COLORS[b.key] || '#16a34a';
-                  // 진하기: 1건 옅게 → 다건 진하게(상한 1). FAIL은 빨강 고정.
-                  const op = cnt === 0 ? 1 : Math.min(1, 0.4 + Math.log2(cnt + 1) * 0.2);
+                {c.bandCells.map(bc => {
+                  const base = _STAGE_COLORS[bc.key] || '#16a34a';
+                  // FAIL=빨강 고정(불투명, cnt 독립) · 공백=토큰 테두리만(다크 적응) · 그 외 밴드색+연결수 진하기.
+                  const op = (bc.isFail || bc.cnt === 0) ? 1 : Math.min(1, 0.4 + Math.log2(bc.cnt + 1) * 0.2);
                   return (
-                    <td key={b.key} title={`${rid} · ${b.key}: ${cnt}건${isFail ? ' (FAIL 포함)' : ''}`}
+                    <td key={bc.key} title={`${c.rid} · ${bc.key}: ${bc.cnt}건${bc.isFail ? ' (FAIL 포함)' : ''}`}
                       style={{ padding: '1px 2px', borderBottom: '1px solid var(--border)' }}>
                       <div style={{ width: 22, height: 14, margin: '0 auto', borderRadius: 2,
-                        background: cnt === 0 ? '#eef0f2' : isFail ? '#dc2626' : base, opacity: op,
-                        border: cnt === 0 ? '1px solid #e5e7eb' : isFail ? '1px solid #991b1b' : 'none' }} />
+                        background: bc.isFail ? '#dc2626' : bc.cnt === 0 ? 'transparent' : base, opacity: op,
+                        border: bc.isFail ? '1px solid #991b1b' : bc.cnt === 0 ? '1px solid var(--border)' : 'none' }} />
                     </td>
                   );
                 })}
@@ -1121,7 +1130,7 @@ function TraceMosaicView({ rows }) {
       </table>
     </div>
   );
-}
+});
 
 function TraceMatrix({ matrix, focusFunctions = null, onClearFocus = null,
   job = null, cacheRoot = '', buildSelector = 'lastSuccessfulBuild', sourceRoot = '', toast = () => {} }) {
@@ -1534,7 +1543,7 @@ function TraceMatrix({ matrix, focusFunctions = null, onClearFocus = null,
                   {coverage.designTotal > 0 ? Math.round(coverage.covered / coverage.designTotal * 100) : 0}%
                 </td>
                 <td style={{ padding: '8px 12px', fontSize: 11, color: 'var(--text-muted)' }}>
-                  설계(SW: SDS·UDS / 인터페이스: HSIS) 매핑이 존재하는 요구사항 중 검증 완료 비율
+                  검증 완료 또는 설계(SDS·UDS·HSIS) 매핑이 존재하는 요구사항 중 검증 완료 비율
                 </td>
               </tr>
               <tr style={{ background: 'var(--bg)' }}>
@@ -1557,14 +1566,14 @@ function TraceMatrix({ matrix, focusFunctions = null, onClearFocus = null,
               { label: 'HSIS', n: summary?.mapped_hsis_count ?? 0, color: '#0e7490', t: 'HW-SW 인터페이스 명세' },
               { label: 'SyTS', n: summary?.mapped_syts_count ?? 0, color: '#9333ea', t: '시스템 시험' },
               { label: 'SyITS', n: summary?.mapped_syits_count ?? 0, color: '#c026d3', t: '시스템 통합시험' },
-              { label: '상위(SyRS)', n: summary?.mapped_syrs_count ?? 0, color: '#475569', t: '시스템 요구사항(상위 추적·커버리지 분모 제외)' },
+              { label: '상위(SyRS)', n: summary?.mapped_syrs_count ?? 0, color: '#64748b', t: '시스템 요구사항(상위 추적·커버리지 분모 제외)' },
             ].filter(b => b.n > 0);
             if (!sysBands.length) return null;
             return (
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center', padding: '8px 14px', borderTop: '1px solid var(--border)', background: 'var(--bg)', fontSize: 11 }}>
                 <span style={{ fontWeight: 600, color: 'var(--text-muted)' }}>시스템 레벨 연결</span>
                 {sysBands.map(b => (
-                  <span key={b.label} title={b.t} style={{ display: 'inline-flex', alignItems: 'center', gap: 4, padding: '2px 8px', borderRadius: 12, background: b.color + '18', color: b.color, border: `1px solid ${b.color}40`, fontWeight: 600 }}>
+                  <span key={b.label} title={b.t} style={{ display: 'inline-flex', alignItems: 'center', gap: 4, padding: '2px 8px', borderRadius: 12, background: b.color + '26', color: b.color, border: `1px solid ${b.color}59`, fontWeight: 600 }}>
                     {b.label} {b.n}
                   </span>
                 ))}
@@ -2871,7 +2880,8 @@ function CallTreeView({ job, cacheRoot, buildSelector, sourceRoot, seedFns, toas
   const [loading, setLoading] = useState(false);
   const [expanded, setExpanded] = useState(() => new Set());
   const mountedRef = useRef(true);
-  useEffect(() => () => { mountedRef.current = false; }, []);
+  // StrictMode(dev) 더블인보크 대비 — setup에서 true 복원(다른 섹션 동일 패턴). cleanup-only면 마운트 후 false 고착→자동로드 무음 실패.
+  useEffect(() => { mountedRef.current = true; return () => { mountedRef.current = false; }; }, []);
 
   const toggle = useCallback((id) => {
     setExpanded(prev => { const n = new Set(prev); if (n.has(id)) n.delete(id); else n.add(id); return n; });
@@ -2912,8 +2922,9 @@ function CallTreeView({ job, cacheRoot, buildSelector, sourceRoot, seedFns, toas
   // 표에서 함수 클릭 진입(initialEntry) 시 자동 1회 로드 — 검색 입력 없이 바로 콜트리 표시.
   const didAutoLoad = useRef(false);
   useEffect(() => {
-    if (initialEntry && !didAutoLoad.current) { didAutoLoad.current = true; load(); }
-  }, [initialEntry, load]);
+    // 소스(Jenkins job 또는 sourceRoot) 있을 때만 자동로드 — 무소스(로컬) 환경의 의도치 않은 404/에러 토스트 방지.
+    if (initialEntry && !didAutoLoad.current && (job?.url || sourceRoot)) { didAutoLoad.current = true; load(); }
+  }, [initialEntry, load, job, sourceRoot]);
 
   const trees = Array.isArray(data?.trees) ? data.trees : [];
   const st = data?.stats || {};
