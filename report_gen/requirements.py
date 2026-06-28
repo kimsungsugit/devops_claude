@@ -2544,6 +2544,8 @@ def generate_uds_traceability_matrix(
             "mapped_sts_count": sum(1 for r in matrix if r.get("sts_count")),
             "mapped_suts_count": sum(1 for r in matrix if r.get("suts_count")),
             "mapped_sits_count": sum(1 for r in matrix if r.get("sits_count")),
+            # 시스템 레벨 상위(SyRS) 연결 요구사항 수 — 상위 추적 provenance(다운스트림 커버리지 분모 제외, _UPSTREAM_BANDS)
+            "mapped_syrs_count": sum(1 for r in matrix if r.get("syrs_parents")),
             # 시스템 레벨 시험(SyTS/SyITS) 연결 요구사항 수
             "mapped_syts_count": sum(1 for r in matrix if r.get("syts_count")),
             "mapped_syits_count": sum(1 for r in matrix if r.get("syits_count")),
