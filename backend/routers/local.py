@@ -1837,9 +1837,16 @@ def local_traceability(
     def _derive(r):
         # 추적 정화: sds_functions 포함 — 함수로만 추적된 요구사항이 설계 없음으로 회귀하지 않게
         # (프론트 DESIGN_FIELDS·Jenkins _cache_trace_summary와 lockstep). 이게 실제 요약 집계 사이트.
-        has_d = bool(r.get("sds_components")) or bool(r.get("sds_functions")) or bool(r.get("source_ids"))
+        # jenkins _cache_trace_summary / 프론트 DESIGN_FIELDS와 동일 8필드 디텍터(lockstep 실현).
+        has_d = (bool(r.get("sds_components")) or bool(r.get("sds_functions"))
+                 or bool(r.get("source_ids")) or bool(r.get("hsis_signals"))
+                 or bool(r.get("functions")) or bool(r.get("mapping"))
+                 or bool(r.get("sds")) or bool(r.get("source_mapping")))
         has_t = bool(r.get("test_count"))
-        if has_d and has_t:
+        # 비기능/안전 요구(SwNTR/SwNTSR)는 설계 없이 시험으로 직접 검증(결정1, jenkins/프론트 lockstep).
+        _rid = str(r.get("requirement_id") or "").upper()
+        is_nf = _rid.startswith(("SWNTR", "SWNTSR", "SYNTR", "SYNTSR"))  # RAW 철자 — Sy* prefix도 인정
+        if has_t and (has_d or is_nf):
             return "covered"
         if has_d or has_t:
             return "partial"

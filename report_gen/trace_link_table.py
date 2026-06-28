@@ -21,16 +21,23 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Tuple
 
-# 추적 체인 밴드 순서 (V-model: 설계 → 단위 → 시험 레벨)
-BANDS: Tuple[str, ...] = ("SDS", "UDS", "STS", "SUTS", "SITS", "VectorCAST")
+# 추적 체인 밴드 순서. SyRS=상위(시스템요구, 요구의 부모) → 맨 앞. HSIS는 시스템 레벨 인터페이스(설계
+# 인접), SyTS/SyITS는 시스템 레벨 시험(SITS 뒤).
+BANDS: Tuple[str, ...] = ("SyRS", "SDS", "HSIS", "UDS", "STS", "SUTS", "SITS", "SyTS", "SyITS", "VectorCAST")
+# 상위(부모) 밴드 — 하위 커버리지 total/uncovered 판정에서 제외(provenance, 커버리지 아님).
+_UPSTREAM_BANDS: frozenset = frozenset({"SyRS"})
 
 # related_type 라벨 — 밴드별 관계 종류 (hiMA DocumentType 대응)
 _RELATED_TYPE = {
+    "SyRS": "SYRS_PARENT",
     "SDS": "SDS_COMPONENT",
+    "HSIS": "HSIS_SIGNAL",
     "UDS": "UDS_FUNCTION",
     "STS": "STS_TEST",
     "SUTS": "SUTS_TEST",
     "SITS": "SITS_TEST",
+    "SyTS": "SYTS_TEST",
+    "SyITS": "SYITS_TEST",
     "VectorCAST": "VCAST_FUNCTION",
 }
 
@@ -40,7 +47,9 @@ _RELATED_TYPE = {
 #   A/B: 최소 1개 시험(STS/SUTS/SITS/VectorCAST) 추적 기대.
 #   QM/미상: 기대 없음(안전 무관).
 _ASIL_RANK = {"QM": 0, "A": 1, "B": 2, "C": 3, "D": 4}
-_TEST_BANDS = ("STS", "SUTS", "SITS", "VectorCAST")
+# A/B의 'ANY_TEST' 증거에 시스템시험(SyTS/SyITS) 포함. C/D의 필수 SUTS·SITS 대체엔 비포함(보수,
+# _asil_missing_bands가 SUTS/SITS를 직접 검사하므로 단위/통합 면제 오판 없음).
+_TEST_BANDS = ("STS", "SUTS", "SITS", "SyTS", "SyITS", "VectorCAST")
 
 
 def _asil_missing_bands(asil: str, band_counts: Dict[str, int]) -> List[str]:
@@ -155,12 +164,24 @@ def build_link_table(matrix: Any) -> Dict[str, Any]:
         if _ra:
             target_asil[target] = _ra
 
+        # 상위: SwRS → SyRS (요구가 유도된 상위 시스템 요구, SR→SyRS→SwRS 체인). 정보성(커버리지 무관).
+        for parent in row.get("syrs_parents") or []:
+            add(target, parent, "SyRS", "direct")
+            pp = str(parent or "").strip()
+            if pp:
+                columns["SyRS"].add(pp)
         # T1: SRS → SDS (설계 컴포넌트)
         for comp in row.get("sds_components") or []:
             add(target, comp, "SDS", "direct")
             c = str(comp or "").strip()
             if c:
                 columns["SDS"].add(c)
+        # 인터페이스: SRS → HSIS (인터페이스 신호, 시스템 레벨 design-arm)
+        for sig in row.get("hsis_signals") or []:
+            add(target, sig, "HSIS", "direct")
+            s = str(sig or "").strip()
+            if s:
+                columns["HSIS"].add(s)
         # T2: SDS → UDS (단위 함수) — 직접 UDS RelatedID는 'direct', SDS 함수명 브리지로 회복된
         # 것은 'indirect'(SDS 경유 추정, SUTS와 동일 메커니즘인데 direct로 은폐되던 것 정직화).
         # source_ids_direct 부재(구버전 매트릭스) 시 전부 direct 폴백 → 회귀 없음.
@@ -172,8 +193,8 @@ def build_link_table(matrix: Any) -> Dict[str, Any]:
             add(target, src, "UDS", conf)
             if s:
                 columns["UDS"].add(s)
-        # T3~T5: 시험 레벨 (STS/SUTS/SITS)
-        for band in ("STS", "SUTS", "SITS"):
+        # T3~T5 + 시스템 시험: STS/SUTS/SITS/SyTS/SyITS (band.lower()+_tests = row 필드)
+        for band in ("STS", "SUTS", "SITS", "SyTS", "SyITS"):
             for t in row.get(f"{band.lower()}_tests") or []:
                 if not isinstance(t, dict):
                     continue
@@ -215,7 +236,10 @@ def build_link_table(matrix: Any) -> Dict[str, Any]:
         band = lk["source"]
         if tgt in by_target:
             by_target[tgt][band] += 1
-            by_target[tgt]["total"] += 1
+            # SyRS=상위(부모) provenance라 하위 커버리지 total/uncovered_targets 판정에서 제외
+            # (프론트 교차표 SrsSdsSection.jsx와 일치 — 상위만 있는 요구를 covered로 오인 방지).
+            if band not in _UPSTREAM_BANDS:
+                by_target[tgt]["total"] += 1
         band_link_count[band] += 1
 
     total_targets = len(targets)

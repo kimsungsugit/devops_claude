@@ -112,6 +112,12 @@ class ScmLinkedDocs(BaseModel):
     sds: str = ""
     hsis: str = ""
     stp: str = ""
+    # 시스템 레벨 문서 — SyRS(상위 시스템요구 docx), SyTS/SyITS(시스템 시험/통합시험 결과 xlsx).
+    # ScmLinkedDocs에 정의돼야 model_dump 직렬화에서 살아남아 프론트가 경로를 받고,
+    # scm.py allowed_prefixes 자동병합으로 cloudium 워커 접근 prefix가 등록된다.
+    syrs: str = ""
+    syts: str = ""
+    syits: str = ""
     # VectorCAST 결과 로그 경로(들). 부트로더/FBL/APP 등 결과가 별도 파일로 나올 수
     # 있어 단일 문자열이 아닌 복수 경로 list. 각 경로는 vectorcast_rag.json 파일 또는
     # 그 상위 폴더. SwUT/SwIT 로그처럼 SCM별로 설정의 '연결 문서 경로'에서 등록.
@@ -708,6 +714,9 @@ class UdsTraceabilityMatrixRequest(BaseModel):
     # 매트릭스가 요구사항별 ASIL(연결 컴포넌트 max)을 도출해 행/링크테이블에 부착.
     # 컴포넌트 ~1k(SwCom+함수)의 넉넉한 배수 상한.
     component_asil: Dict[str, str] = Field(default_factory=dict, max_length=20000)
+    # 시스템 레벨 인터페이스 밴드 — hsis extract가 요구사항↔인터페이스 신호(HSI_xx/SW변수)로 전달.
+    # 신호 ~수백 행 상한의 넉넉한 배수.
+    hsis_pairs: List[Dict[str, Any]] = Field(default_factory=list, max_length=20000)
     # Optional cache-persist hints (for dashboard summary quick-load)
     job_url: Optional[str] = None
     cache_root: Optional[str] = None

@@ -111,7 +111,7 @@ export default function SrsSdsSection({ job, analysisResult }) {
     // Debug: log activeDocs state
 
     // Cache check: skip API calls if inputs haven't changed
-    const cacheKey = JSON.stringify({ srs: docPaths.srs, sds: docPaths.sds, jobUrl: job?.url, sts: activeDocs.sts, suts: activeDocs.suts, sits: activeDocs.sits, vcast: (Array.isArray(activeDocs?.vectorcast) ? activeDocs.vectorcast : []).filter(Boolean).join(',') });
+    const cacheKey = JSON.stringify({ srs: docPaths.srs, sds: docPaths.sds, hsis: docPaths.hsis || activeDocs.hsis, jobUrl: job?.url, sts: activeDocs.sts, suts: activeDocs.suts, sits: activeDocs.sits, syts: activeDocs.syts, syits: activeDocs.syits, vcast: (Array.isArray(activeDocs?.vectorcast) ? activeDocs.vectorcast : []).filter(Boolean).join(',') });
     if (!forceRefresh && matrixCacheRef.current?.key === cacheKey && matrixCacheRef.current?.data) {
       setMatrix(matrixCacheRef.current.data);
       toast('info', '캐시된 매트릭스를 사용합니다. 새로고침하려면 버튼을 다시 클릭하세요.');
@@ -188,6 +188,23 @@ export default function SrsSdsSection({ job, analysisResult }) {
         }
       }
 
+      // Step 2c: Extract HSIS interface→requirement mapping (시스템 레벨 인터페이스 밴드)
+      let hsisPairs = [];
+      if (docPaths.hsis || activeDocs.hsis) {
+        setLoadProgress('HSIS 인터페이스 매핑 추출 중...');
+        try {
+          const hsisData = await post('/api/jenkins/hsis/extract-mapping', {
+            hsis_path: docPaths.hsis || activeDocs.hsis,
+          });
+          hsisPairs = hsisData?.hsis_pairs || [];
+          if (hsisPairs.length > 0) {
+            dataSources.push(`HSIS: ${hsisPairs.length}개 인터페이스 매핑`);
+          }
+        } catch (e) {
+          stepWarnings.push(`HSIS 매핑 추출 실패: ${e.message}`);
+        }
+      }
+
       // Step 3: Collect test rows — priority: STS > SUTS > SITS > VectorCAST
       // STS/SUTS/SITS are exact matches; VectorCAST is fuzzy (function-name based)
       let vcastRows = [];
@@ -245,6 +262,28 @@ export default function SrsSdsSection({ job, analysisResult }) {
           }
         } catch (e) {
           stepWarnings.push(`SITS 추출 실패: ${e.message}`);
+        }
+      }
+
+      // 3c-2. 시스템 시험(SyTS/SyITS) — SITS와 동일 구조, source 라벨만 다름.
+      // 비기능/안전 요구의 시스템 레벨 검증으로 covered 승격(결정1). vcast_rows에 합류(source로 분류).
+      for (const [docKey, ep, label] of [
+        ['syts', '/api/jenkins/syts/extract-traceability', 'SyTS'],
+        ['syits', '/api/jenkins/syits/extract-traceability', 'SyITS'],
+      ]) {
+        if (!activeDocs[docKey]) continue;
+        setLoadProgress(`${label} 추적성 추출 중...`);
+        try {
+          const sysData = await post(ep, { path: activeDocs[docKey] });
+          if (sysData?.vcast_rows?.length) {
+            for (const row of sysData.vcast_rows) vcastRows.push({ ...row, source: row.source || label, confidence: 'exact' });
+            dataSources.push(`${label}: ${sysData.vcast_rows.length}건`);
+          } else if (Array.isArray(sysData?.available_sheets)) {
+            // 0건이 silent하지 않게 — 시트 미인식 원인 노출(SITS와 동일).
+            stepWarnings.push(`${label}: ${sysData.warning || sysData.error || '시트 미인식'}. 사용 가능한 시트: ${sysData.available_sheets.join(', ')}`);
+          }
+        } catch (e) {
+          stepWarnings.push(`${label} 추출 실패: ${e.message}`);
         }
       }
 
@@ -325,6 +364,7 @@ export default function SrsSdsSection({ job, analysisResult }) {
         uds_function_ids: udsFunctionIds,
         vcast_rows: vcastRows,
         sds_pairs: sdsPairs,
+        hsis_pairs: hsisPairs,  // 시스템 레벨 인터페이스 밴드(design-arm)
         sits_rows: sitsRows,
         component_asil: componentAsil,  // ASIL 결합(P5) — 요구사항별 ASIL 도출용
         // Required for server-side summary cache (dashboard TraceSummaryCard)
@@ -656,10 +696,12 @@ function _hasData(v) {
 const DESIGN_FIELDS = [
   // sds_functions: 추적 정화 후 인터페이스 함수가 sds_components에서 분리됐다. 함수로만 추적되는
   // 요구사항이 '설계 없음(uncovered)'으로 회귀하지 않도록 hasDesign 판정에 포함(백엔드 lockstep).
-  'source_ids', 'sds_components', 'sds_functions', 'functions', 'mapping', 'sds', 'source_mapping',
+  // hsis_signals: 시스템 인터페이스(HSIS) realization — SwEI 등 인터페이스 요구 커버(결정1, 백엔드 has_design lockstep).
+  'source_ids', 'sds_components', 'sds_functions', 'hsis_signals', 'functions', 'mapping', 'sds', 'source_mapping',
 ];
 const TEST_FIELDS = [
-  'tests', 'sts_tests', 'suts_tests', 'sits_tests', 'vcast_tests', 'test_ids',
+  // syts_tests/syits_tests: 시스템 레벨 시험 — 비기능/안전 요구의 검증으로 covered 인정(결정1, 백엔드 has_tests lockstep).
+  'tests', 'sts_tests', 'suts_tests', 'sits_tests', 'syts_tests', 'syits_tests', 'vcast_tests', 'test_ids',
 ];
 
 function hasDesignData(r) {
@@ -674,8 +716,12 @@ function hasTestData(r) {
 export function deriveStatus(r) {
   const hasDesign = hasDesignData(r);
   const hasTest = hasTestData(r);
-  // Full: design (any of 6 field kinds) + test (any of 6 field kinds)
-  if (hasDesign && hasTest) return 'covered';
+  // 비기능/안전 요구(SwNTR/SwNTSR)는 설계 분해 없이 시험으로 직접 검증(결정1, 백엔드 lockstep).
+  const rid = String(r.requirement_id || '').toUpperCase();
+  // RAW 철자(정규화 전)라 SyNTR_/SyNTSR_도 인정(백엔드 jenkins/local lockstep).
+  const isNonFunctional = ['SWNTR', 'SWNTSR', 'SYNTR', 'SYNTSR'].some(p => rid.startsWith(p));
+  // Full: 시험 + (설계 OR 비기능 요구)
+  if (hasTest && (hasDesign || isNonFunctional)) return 'covered';
   // Partial: any one layer present
   if (hasDesign || hasTest) return 'partial';
   if (r.status && r.status !== 'uncovered') return r.status;
@@ -710,7 +756,7 @@ function GapBadge({ label, value, tone, title, sub }) {
 // 행=요구사항(target), 열=SDS 컴포넌트(related), 셀=O/공백. 추적 0건 행은 핑크 강조
 // (hiMA 0카운트 밴드 대응). 데이터는 filtered rows에서 클라이언트 파생(필터 반영),
 // '링크 테이블 ↓'는 서버 파생 link_table(감사 baseline)을 그대로 내보낸다.
-const _TRACE_BANDS = ['SDS', 'UDS', 'STS', 'SUTS', 'SITS', 'VectorCAST'];
+const _TRACE_BANDS = ['SyRS', 'SDS', 'HSIS', 'UDS', 'STS', 'SUTS', 'SITS', 'SyTS', 'SyITS', 'VectorCAST'];
 
 function _testId(t) {
   if (!t || typeof t !== 'object') return '';
@@ -720,11 +766,15 @@ function _testId(t) {
 function _rowBands(row) {
   const tids = (arr) => (Array.isArray(arr) ? arr : []).map(_testId).filter(Boolean);
   return {
+    SyRS: (Array.isArray(row.syrs_parents) ? row.syrs_parents : []).map(String).filter(Boolean),
     SDS: (Array.isArray(row.sds_components) ? row.sds_components : []).map(String).filter(Boolean),
+    HSIS: (Array.isArray(row.hsis_signals) ? row.hsis_signals : []).map(String).filter(Boolean),
     UDS: (Array.isArray(row.source_ids) ? row.source_ids : []).map(String).filter(Boolean),
     STS: tids(row.sts_tests),
     SUTS: tids(row.suts_tests),
     SITS: tids(row.sits_tests),
+    SyTS: tids(row.syts_tests),
+    SyITS: tids(row.syits_tests),
     VectorCAST: (Array.isArray(row.tests) ? row.tests : [])
       .filter(t => t && t.source === 'VectorCAST').map(_testId).filter(Boolean),
   };
@@ -745,7 +795,9 @@ function CrossMatrixView({ rows, linkTable, fullMatrix, exportMeta }) {
       const rid = String(row?.requirement_id || '').trim();
       const bands = _rowBands(row || {});
       bands.SDS.forEach(c => sdsCols.add(c));
-      const total = _TRACE_BANDS.reduce((n, bd) => n + bands[bd].length, 0);
+      // SyRS는 상위(부모) provenance라 하위 커버리지 total/핑크(0추적) 판정에서 제외(상위만 있는 요구를
+      // covered로 오인 방지). 밴드 칩(byBand)엔 SyRS도 집계됨.
+      const total = _TRACE_BANDS.reduce((n, bd) => n + (bd === 'SyRS' ? 0 : bands[bd].length), 0);
       const asil = String(row?.asil || row?.requirement_asil || row?.ASIL || '').trim().toUpperCase();
       return { rid, name: String(row?.requirement_name || '').trim(), bands, total, asil, gap: gapMap[rid] || null };
     }).filter(r => r.rid);
@@ -932,12 +984,15 @@ function CrossMatrixView({ rows, linkTable, fullMatrix, exportMeta }) {
             <tr>
               <th style={{ position: 'sticky', left: 0, background: 'var(--bg)', zIndex: 2 }}>요구사항</th>
               {hasAsil && <th>ASIL</th>}
+              <th title="상위 시스템 요구(SyRS) — SR→SyRS→SwRS 체인. 이 요구가 유도된 상위 요구 수">SyRS↑</th>
               {cols.map(c => (
                 <th key={c} title={c}
                   style={{ writingMode: 'vertical-rl', transform: 'rotate(180deg)', whiteSpace: 'nowrap', maxHeight: 140 }}>{c}</th>
               ))}
+              <th title="HW-SW 인터페이스(HSIS) 신호 수">HSIS</th>
               <th title="SDS→UDS 단위함수 수">UDS</th>
               <th title="SW 시험">STS</th><th title="단위 시험">SUTS</th><th title="통합 시험">SITS</th>
+              <th title="시스템 시험(SyTS)">SyTS</th><th title="시스템 통합시험(SyITS)">SyITS</th>
               <th title="VectorCAST 실행추적">VC</th><th>합계</th>
             </tr>
           </thead>
@@ -957,11 +1012,16 @@ function CrossMatrixView({ rows, linkTable, fullMatrix, exportMeta }) {
                       {r.asil || '–'}{gapRow ? ' ⚠' : ''}
                     </td>
                   )}
+                  <td style={{ textAlign: 'center', color: r.bands.SyRS.length ? _STAGE_COLORS.UDS : 'var(--text-muted)' }}
+                    title={r.bands.SyRS.length ? `상위 시스템 요구: ${r.bands.SyRS.join(', ')}` : '상위 요구 미추적'}>{r.bands.SyRS.length || ''}</td>
                   {cols.map(c => <Cell key={c} on={sdsSet.has(c)} />)}
+                  <td style={{ textAlign: 'center' }}>{r.bands.HSIS.length || ''}</td>
                   <td style={{ textAlign: 'center' }}>{r.bands.UDS.length || ''}</td>
                   <Cell on={r.bands.STS.length > 0} />
                   <Cell on={r.bands.SUTS.length > 0} />
                   <Cell on={r.bands.SITS.length > 0} />
+                  <Cell on={r.bands.SyTS.length > 0} />
+                  <Cell on={r.bands.SyITS.length > 0} />
                   <Cell on={r.bands.VectorCAST.length > 0} />
                   <td style={{ textAlign: 'center', fontWeight: 700, color: uncovered ? pink.fg : 'var(--fg)' }}>{r.total}</td>
                 </tr>
@@ -1571,6 +1631,12 @@ function TraceMatrix({ matrix, focusFunctions = null, onClearFocus = null,
               color: viewMode === 'graph' ? '#fff' : 'var(--fg)', fontWeight: viewMode === 'graph' ? 700 : 400 }}>
             그래프
           </button>
+          <button type="button" onClick={() => setViewMode('funcgraph')} aria-pressed={viewMode === 'funcgraph'} title="함수 1개의 V-model 추적 그래프 — 함수→구현 요구사항/설계 + 그 함수의 단위시험(SUTS)·VectorCAST 실행결과(함수중심, hiMA UCOneIDTrace 함수판)"
+            style={{ padding: '6px 10px', fontSize: 11, border: 'none', borderLeft: '1px solid var(--border)', cursor: 'pointer',
+              background: viewMode === 'funcgraph' ? 'var(--accent)' : 'var(--bg)',
+              color: viewMode === 'funcgraph' ? '#fff' : 'var(--fg)', fontWeight: viewMode === 'funcgraph' ? 700 : 400 }}>
+            함수그래프
+          </button>
         </div>
         {/* 트리 전용: SRS 미추적 시험(역방향 공백) 별도 루트 표시 토글 — 데이터 있을 때만 노출 */}
         {viewMode === 'tree' && unmappedVcast.length > 0 && (
@@ -1597,11 +1663,11 @@ function TraceMatrix({ matrix, focusFunctions = null, onClearFocus = null,
             <th rowSpan={2} style={{ verticalAlign: 'middle', width: 100, cursor: 'pointer' }} onClick={() => toggleSort('req_id')}>
               요구사항 ID{sortIcon('req_id')}
             </th>
-            <th colSpan={2} style={{ textAlign: 'center', background: '#eff6ff', borderBottom: '1px solid var(--border)', cursor: 'pointer' }} onClick={() => toggleSort('func_count')}>
-              설계 (T1,T2){sortIcon('func_count')}
+            <th colSpan={3} style={{ textAlign: 'center', background: '#eff6ff', borderBottom: '1px solid var(--border)', cursor: 'pointer' }} onClick={() => toggleSort('func_count')}>
+              설계 (T1,T2 + 인터페이스){sortIcon('func_count')}
             </th>
-            <th colSpan={4} style={{ textAlign: 'center', background: '#f0fdf4', borderBottom: '1px solid var(--border)', cursor: 'pointer' }} onClick={() => toggleSort('test_count')}>
-              검증 (T3,T4,T5){sortIcon('test_count')}
+            <th colSpan={6} style={{ textAlign: 'center', background: '#f0fdf4', borderBottom: '1px solid var(--border)', cursor: 'pointer' }} onClick={() => toggleSort('test_count')}>
+              검증 (T3,T4,T5 + 시스템){sortIcon('test_count')}
             </th>
             <th rowSpan={2} style={{ verticalAlign: 'middle', width: 50, textAlign: 'center' }}>P/F</th>
             <th rowSpan={2} style={{ verticalAlign: 'middle', width: 55, textAlign: 'center' }}>신뢰도</th>
@@ -1611,10 +1677,13 @@ function TraceMatrix({ matrix, focusFunctions = null, onClearFocus = null,
           </tr>
           <tr>
             <th style={{ fontSize: 10, background: '#eff6ff' }} title="T1: SRS→SDS">SDS 컴포넌트</th>
+            <th style={{ fontSize: 10, background: '#eff6ff' }} title="인터페이스: SRS→HSIS (HW-SW 인터페이스 신호)">HSIS 신호</th>
             <th style={{ fontSize: 10, background: '#eff6ff' }} title="T2: SDS→UDS">UDS 함수</th>
             <th style={{ fontSize: 10, background: '#f0fdf4' }} title="T3: SRS→STS">STS TC</th>
             <th style={{ fontSize: 10, background: '#f0fdf4' }} title="T4: UDS→SUTS">SUTS TC</th>
             <th style={{ fontSize: 10, background: '#f0fdf4' }} title="T5: SDS→SITS">SITS TC</th>
+            <th style={{ fontSize: 10, background: '#f0fdf4' }} title="시스템 시험(SyTS)">SyTS TC</th>
+            <th style={{ fontSize: 10, background: '#f0fdf4' }} title="시스템 통합시험(SyITS)">SyITS TC</th>
             <th style={{ fontSize: 10, background: '#f0fdf4' }}>VectorCAST</th>
           </tr>
         </thead>
@@ -1624,6 +1693,7 @@ function TraceMatrix({ matrix, focusFunctions = null, onClearFocus = null,
             const status = deriveStatus(r);
             const colors = COVERAGE_COLORS[status] || {};
             const sdsComps = r.sds_components ?? [];
+            const hsisSigs = r.hsis_signals ?? [];
             const srcFuncs = r.source_ids ?? [];
             const rawTests = Array.isArray(r.tests) ? r.tests : [];
             // ISO 26262 추적 관계별 분리: T3(STS), T4(SUTS), T5(SITS)
@@ -1631,10 +1701,14 @@ function TraceMatrix({ matrix, focusFunctions = null, onClearFocus = null,
             const sutsOnlyTests = Array.isArray(r.suts_tests) ? r.suts_tests : rawTests.filter(t => t.source === 'SUTS');
             const sitsTests = Array.isArray(r.sits_tests) ? r.sits_tests : rawTests.filter(t => t.source === 'SITS');
             const vcastTests = rawTests.filter(t => t.source === 'VectorCAST');
-            const otherTests = rawTests.filter(t => !['STS','SUTS','SITS','VectorCAST'].includes(t.source));
+            const sytsTests = Array.isArray(r.syts_tests) ? r.syts_tests : rawTests.filter(t => t.source === 'SyTS');
+            const syitsTests = Array.isArray(r.syits_tests) ? r.syits_tests : rawTests.filter(t => t.source === 'SyITS');
+            const otherTests = rawTests.filter(t => !['STS','SUTS','SITS','SyTS','SyITS','VectorCAST'].includes(t.source));
             const stsCount = stsOnlyTests.length;
             const sutsCount = sutsOnlyTests.length;
             const sitsCount = sitsTests.length;
+            const sytsCount = sytsTests.length;
+            const syitsCount = syitsTests.length;
             const vcastCount = vcastTests.length + otherTests.length;
             const passCount = r.pass_count ?? 0;
             const failCount = r.fail_count ?? 0;
@@ -1654,6 +1728,13 @@ function TraceMatrix({ matrix, focusFunctions = null, onClearFocus = null,
                       title={sdsComps.join(', ')}>
                     {sdsComps.length > 0
                       ? <><span style={{ fontSize: 9, padding: '1px 5px', borderRadius: 8, background: '#dbeafe', color: '#1e40af', fontWeight: 600 }}>{sdsComps.length}</span> {sdsComps.slice(0, 2).join(', ')}{sdsComps.length > 2 ? '...' : ''}</>
+                      : <span className="text-muted">-</span>
+                    }
+                  </td>
+                  <td style={{ fontSize: 10, maxWidth: 140, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+                      title={hsisSigs.join(', ')}>
+                    {hsisSigs.length > 0
+                      ? <><span style={{ fontSize: 9, padding: '1px 5px', borderRadius: 8, background: '#cffafe', color: _STAGE_COLORS.HSIS, fontWeight: 600 }}>{hsisSigs.length}</span> {hsisSigs.slice(0, 2).join(', ')}{hsisSigs.length > 2 ? '...' : ''}</>
                       : <span className="text-muted">-</span>
                     }
                   </td>
@@ -1685,6 +1766,18 @@ function TraceMatrix({ matrix, focusFunctions = null, onClearFocus = null,
                           {sitsCount} TC
                           {r.sits_indirect > 0 && <span style={{ fontSize: 8, color: 'var(--text-muted)' }}> ({r.sits_direct || 0}+{r.sits_indirect || 0})</span>}
                         </span>
+                      : <span className="text-muted">-</span>
+                    }
+                  </td>
+                  <td style={{ fontSize: 10, textAlign: 'center' }} title="시스템 시험(SyTS)">
+                    {sytsCount > 0
+                      ? <span style={{ fontSize: 9, padding: '1px 6px', borderRadius: 8, background: _STAGE_COLORS.SyTS + '20', color: _STAGE_COLORS.SyTS, fontWeight: 600 }}>{sytsCount} TC</span>
+                      : <span className="text-muted">-</span>
+                    }
+                  </td>
+                  <td style={{ fontSize: 10, textAlign: 'center' }} title="시스템 통합시험(SyITS)">
+                    {syitsCount > 0
+                      ? <span style={{ fontSize: 9, padding: '1px 6px', borderRadius: 8, background: _STAGE_COLORS.SyITS + '20', color: _STAGE_COLORS.SyITS, fontWeight: 600 }}>{syitsCount} TC</span>
                       : <span className="text-muted">-</span>
                     }
                   </td>
@@ -1720,7 +1813,8 @@ function TraceMatrix({ matrix, focusFunctions = null, onClearFocus = null,
                 {/* Expanded detail row — drilldown */}
                 {isExpanded && (
                   <tr style={{ background: '#f8fafc' }}>
-                    <td colSpan={10} style={{ padding: '10px 16px' }}>
+                    {/* 13컬럼: ID + 설계(SDS/HSIS/UDS)3 + 검증(STS/SUTS/SITS/SyTS/SyITS/VC)6 + P/F + 신뢰도 + 상태 */}
+                    <td colSpan={13} style={{ padding: '10px 16px' }}>
                       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 2fr', gap: 12 }}>
                         {/* SDS components */}
                         <div>
@@ -1836,6 +1930,12 @@ function TraceMatrix({ matrix, focusFunctions = null, onClearFocus = null,
           focusFunctions=영향도 연동 변경함수 → 그래프 안 해당 UDS/시험 노드 강조) */}
       {viewMode === 'graph' && (
         <TraceReqGraphView rows={filtered} focusFunctions={focusFunctions} linkTable={inner?.link_table} />
+      )}
+
+      {/* 함수중심 그래프 (신규 — 함수 1개의 V-model 추적. root=함수, 요구사항/설계는 함수가 구현한
+          요구사항 경유, 단위시험(SUTS)·VectorCAST 실행결과는 함수 직접 연결. hiMA UCOneIDTrace 함수판) */}
+      {viewMode === 'funcgraph' && (
+        <TraceFuncGraphView rows={rows} focusFunctions={focusFunctions} />
       )}
 
       {/* Pagination (표 모드 전용 — 트리는 filtered 전체를 한 번에 조망하므로 페이지네이션 불필요) */}
@@ -2032,10 +2132,13 @@ export function UncoveredTopList({ rows, onPick }) {
 
 const TREE_STAGES = [
   { key: 'SDS',  label: 'SDS',  kind: 'design' },
+  { key: 'HSIS', label: 'HSIS', kind: 'design' },
   { key: 'UDS',  label: 'UDS',  kind: 'design' },
   { key: 'STS',  label: 'STS',  kind: 'test' },
   { key: 'SUTS', label: 'SUTS', kind: 'test' },
   { key: 'SITS', label: 'SITS', kind: 'test' },
+  { key: 'SyTS', label: 'SyTS', kind: 'test' },
+  { key: 'SyITS', label: 'SyITS', kind: 'test' },
   { key: 'VectorCAST', label: 'VectorCAST', kind: 'test' },
 ];
 
@@ -2051,12 +2154,15 @@ function _testResultColor(result) {
 // VectorCAST 단계는 표의 vcastCount 의미(VectorCAST + 분류 안 된 other source)와 일치시킨다.
 function _stageMembers(r, stageKey) {
   if (stageKey === 'SDS') return { type: 'ids', items: Array.isArray(r.sds_components) ? r.sds_components : [] };
+  if (stageKey === 'HSIS') return { type: 'ids', items: Array.isArray(r.hsis_signals) ? r.hsis_signals : [] };
   if (stageKey === 'UDS') return { type: 'ids', items: Array.isArray(r.source_ids) ? r.source_ids : [] };
   const raw = Array.isArray(r.tests) ? r.tests : [];
   if (stageKey === 'STS')  return { type: 'tests', items: Array.isArray(r.sts_tests)  ? r.sts_tests  : raw.filter(t => t.source === 'STS') };
   if (stageKey === 'SUTS') return { type: 'tests', items: Array.isArray(r.suts_tests) ? r.suts_tests : raw.filter(t => t.source === 'SUTS') };
   if (stageKey === 'SITS') return { type: 'tests', items: Array.isArray(r.sits_tests) ? r.sits_tests : raw.filter(t => t.source === 'SITS') };
-  if (stageKey === 'VectorCAST') return { type: 'tests', items: raw.filter(t => t.source === 'VectorCAST' || !['STS', 'SUTS', 'SITS'].includes(t.source)) };
+  if (stageKey === 'SyTS') return { type: 'tests', items: Array.isArray(r.syts_tests) ? r.syts_tests : raw.filter(t => t.source === 'SyTS') };
+  if (stageKey === 'SyITS') return { type: 'tests', items: Array.isArray(r.syits_tests) ? r.syits_tests : raw.filter(t => t.source === 'SyITS') };
+  if (stageKey === 'VectorCAST') return { type: 'tests', items: raw.filter(t => t.source === 'VectorCAST' || !['STS', 'SUTS', 'SITS', 'SyTS', 'SyITS'].includes(t.source)) };
   return { type: 'ids', items: [] };
 }
 
@@ -2720,7 +2826,7 @@ function CallTreeView({ job, cacheRoot, buildSelector, sourceRoot, seedFns, toas
    데이터는 matrix row만으로 완결(백엔드 무변경): _stageMembers(단계 멤버) + _unitTestMap(UDS함수↔
    SUTS단위시험 정확 매핑 엣지). 상위(부모 요구사항)는 row에 구조화 데이터가 없어(설계서 prose에 묻힘)
    이번 범위에서 제외 — 하위 추적에 집중. 모든 시각화는 SVG(innerHTML 없음 → XSS 무관). */
-const _STAGE_COLORS = { SDS: '#0d9488', UDS: '#7c3aed', STS: '#2563eb', SUTS: '#0891b2', SITS: '#db2777', VectorCAST: '#ea580c' };
+const _STAGE_COLORS = { SDS: '#0d9488', HSIS: '#0e7490', UDS: '#7c3aed', STS: '#2563eb', SUTS: '#0891b2', SITS: '#db2777', SyTS: '#9333ea', SyITS: '#c026d3', VectorCAST: '#ea580c' };
 const _GRAPH = { COL_W: 172, NODE_W: 150, NODE_H: 30, GAP: 9, HEADER_H: 26, PAD: 14, MAX_PER_COL: 40 };
 
 function _reqGraphId(r) {
@@ -2767,7 +2873,7 @@ function _buildReqGraph(row, focusSet, visibleKeys, linkTable) {
       if (_bandCount('SUTS') === 0) safetyMissing.push('SUTS');
       if (_bandCount('SITS') === 0) safetyMissing.push('SITS');
     } else if (_asilRank >= 1) { // ASIL A/B — 시험 밴드 중 1개 이상
-      if (!['STS', 'SUTS', 'SITS', 'VectorCAST'].some(b => _bandCount(b) > 0)) safetyMissing.push('ANY_TEST');
+      if (!['STS', 'SUTS', 'SITS', 'SyTS', 'SyITS', 'VectorCAST'].some(b => _bandCount(b) > 0)) safetyMissing.push('ANY_TEST');
     }
   }
   const safetyGap = safetyMissing.length > 0;
@@ -2855,7 +2961,9 @@ function _buildReqGraph(row, focusSet, visibleKeys, linkTable) {
   // 분리된 인터페이스 함수(추적 정화) — 그래프 노드로는 안 그려 정화를 유지하되, 데이터 존재는
   // 범례/패널로 정직하게 노출(함수가 UI에서 완전 소실되지 않도록).
   const sdsFunctions = (Array.isArray(row?.sds_functions) ? row.sds_functions : []).map(s => String(s).trim()).filter(Boolean);
-  return { reqId, reqName, asil, isSafety, safetyGap, safetyMissing, sdsFunctions, columns, edges, width, height, nodeXY, rootY };
+  // SyRS 상위 추적(배지) — 그래프 좌표 무변경, root 위 배지로 노출(SR→SyRS→SwRS 체인). 풀 부모 컬럼은 후속.
+  const syrsParents = (Array.isArray(row?.syrs_parents) ? row.syrs_parents : []).map(s => String(s).trim()).filter(Boolean);
+  return { reqId, reqName, asil, isSafety, safetyGap, safetyMissing, sdsFunctions, syrsParents, columns, edges, width, height, nodeXY, rootY };
 }
 
 function _bez(x1, y1, x2, y2) {
@@ -2866,7 +2974,7 @@ function _bez(x1, y1, x2, y2) {
 // 단계 → 노드 모양(hiMA UCOneIDTrace getNodeShape 대응): SwDS=House, SwUDS=InvHouse,
 // SwTS/TR=Ellipse, SwUTS/UTR=Diamond, SwITS/ITR=Octagon, 요구사항=Box. VectorCAST는 hiMA에
 // 없으나 시험 실행결과라 Ellipse로 둔다(SUTS Diamond와 구분).
-const _NODE_SHAPE = { SDS: 'house', UDS: 'invhouse', STS: 'ellipse', SUTS: 'diamond', SITS: 'octagon', VectorCAST: 'ellipse' };
+const _NODE_SHAPE = { SDS: 'house', HSIS: 'house', UDS: 'invhouse', STS: 'ellipse', SUTS: 'diamond', SITS: 'octagon', SyTS: 'ellipse', SyITS: 'octagon', VectorCAST: 'ellipse' };
 
 function _shapePath(shape, W, H) {
   if (shape === 'house') return `M0,9 L${W / 2},0 L${W},9 L${W},${H} L0,${H} Z`;        // 집(△지붕)
@@ -2958,7 +3066,7 @@ function TraceReqGraphView({ rows, focusFunctions = null, linkTable = null }) {
 
   const visibleKeys = useMemo(() => {
     if (levelFilter === 'design') return ['SDS', 'UDS'];
-    if (levelFilter === 'test') return ['STS', 'SUTS', 'SITS', 'VectorCAST'];
+    if (levelFilter === 'test') return ['STS', 'SUTS', 'SITS', 'SyTS', 'SyITS', 'VectorCAST'];
     return null; // 전체
   }, [levelFilter]);
 
@@ -3075,6 +3183,12 @@ function TraceReqGraphView({ rows, focusFunctions = null, linkTable = null }) {
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, fontSize: 11, color: 'var(--text-muted)', marginBottom: 8, alignItems: 'center' }}>
             <span><strong style={{ color: 'var(--fg)' }}>{graph.reqId}</strong>{graph.reqName ? ` — ${graph.reqName}` : ''}</span>
             {graph.asil && <span style={{ padding: '1px 7px', borderRadius: 10, background: (_ASIL_COLORS[graph.asil] || '#6b7280'), color: '#fff', fontWeight: 700 }}>ASIL {graph.asil}</span>}
+            {graph.syrsParents && graph.syrsParents.length > 0 && (
+              <span title={`상위 시스템 요구(SyRS) — SR→SyRS→SwRS 체인: ${graph.syrsParents.join(', ')}`}
+                style={{ display: 'inline-flex', alignItems: 'center', gap: 4, padding: '2px 8px', borderRadius: 12, border: `1px solid ${_STAGE_COLORS.UDS}`, color: _STAGE_COLORS.UDS, fontWeight: 600 }}>
+                ↑ 상위요구 {graph.syrsParents.length}: {graph.syrsParents.slice(0, 4).join(', ')}{graph.syrsParents.length > 4 ? '…' : ''}
+              </span>
+            )}
             {graph.columns.map(c => (
               <span key={c.stage} style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
                 <span style={{ width: 9, height: 9, borderRadius: 2, background: _STAGE_COLORS[c.stage], display: 'inline-block' }} />
@@ -3216,6 +3330,429 @@ function TraceReqGraphView({ rows, focusFunctions = null, linkTable = null }) {
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 14, color: 'var(--text-muted)' }}>
                 <span>단계 <strong style={{ color: selNode.isRoot ? 'var(--fg)' : (_STAGE_COLORS[selNode.stage] || 'var(--fg)') }}>{selNode.isRoot ? '요구사항' : selNode.stage}</strong></span>
                 {selNode.isRoot && selNode.asil && <span>ASIL <strong>{selNode.asil}</strong></span>}
+                {selNode.source && <span>소스 <strong>{selNode.source}</strong></span>}
+                {selNode.unit && <span>유닛 <strong>{selNode.unit}</strong></span>}
+                {selNode.result && <span>결과 <strong style={{ color: _testResultColor(selNode.result) }}>{selNode.result}</strong></span>}
+                {selNode.confidence && <span>신뢰 <strong>{CONFIDENCE_LABELS[selNode.confidence] || selNode.confidence}</strong></span>}
+              </div>
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+/* ── 함수중심 V-model 트레이스 그래프 (viewMode='funcgraph') ──────────────────────
+   요구사항 그래프(TraceReqGraphView)의 역(逆). root=함수(UDS). 그 함수가 source_ids로
+   구현한 요구사항/설계(SDS, 요구사항 경유)와, 그 함수 직접 단위시험(SUTS unit==함수)·
+   VectorCAST 실행결과(subprogram==함수, PASS/FAIL)를 방사형으로. hiMA UCOneIDTrace의
+   '함수 ID' 추적에 대응하나, 우리만의 단위시험 코드연결·VectorCAST PASS/FAIL을 노드로 노출.
+   ── function-specific(SUTS·VectorCAST: 이 함수 직접) vs requirement-level(요구·설계·STS·SITS:
+   함수가 구현한 요구사항 경유)을 색·범례로 구분. MC/DC 등 커버리지%는 클라 데이터에 없어 표기 안 함. */
+const _FUNC_STAGES = [
+  { key: 'REQ',  label: '요구사항',        kind: 'req' },
+  { key: 'SDS',  label: '설계(SDS)',       kind: 'design' },
+  { key: 'STS',  label: 'STS',            kind: 'test' },
+  { key: 'SUTS', label: '단위시험(SUTS)',  kind: 'test' },
+  { key: 'SITS', label: 'SITS',           kind: 'test' },
+  { key: 'VectorCAST', label: 'VectorCAST', kind: 'test' },
+];
+// REQ 컬럼 색(요구사항=중립 슬레이트). 나머지 단계는 _STAGE_COLORS 재사용.
+const _FUNC_STAGE_COLORS = { REQ: '#475569', SDS: _STAGE_COLORS.SDS, STS: _STAGE_COLORS.STS, SUTS: _STAGE_COLORS.SUTS, SITS: _STAGE_COLORS.SITS, VectorCAST: _STAGE_COLORS.VectorCAST };
+const _FN_ASIL_RANK = { QM: 0, A: 1, B: 2, C: 3, D: 4 };
+// 선행 언더스코어 bridge — '_entrypoint'(UDS) vs 'entrypoint'(SUTS unit) 거짓 공백 방지(백엔드 _sds_comp_key 대응).
+function _looseFn(x) { return _normFn(x).replace(/^_+/, ''); }
+// ASIL 결합 토큰('A, B' · 'C/D')에서 최고 등급(백엔드 _asil_max_of 대칭). 단일 토큰만 키였던 과소평가 방어.
+function _asilMaxRank(raw) {
+  let rank = -1, asil = '';
+  for (const t of String(raw || '').toUpperCase().split(/[,/\s]+/).filter(Boolean)) {
+    const rk = _FN_ASIL_RANK[t];
+    if (rk != null && rk > rank) { rank = rk; asil = t; }
+  }
+  return { rank, asil };
+}
+
+// 전체 행의 UDS 함수 인벤토리(고유) — 피커용. {norm, display}.
+function _funcInventory(rows) {
+  const seen = new Map();
+  for (const r of (Array.isArray(rows) ? rows : [])) {
+    for (const s of (Array.isArray(r?.source_ids) ? r.source_ids : [])) {
+      const disp = String(s ?? '').trim();
+      const norm = _normFn(disp);
+      if (!norm || seen.has(norm)) continue;
+      seen.set(norm, disp);
+    }
+  }
+  return [...seen.entries()].map(([norm, display]) => ({ norm, display })).sort((a, b) => a.display.localeCompare(b.display));
+}
+
+function _buildFuncGraph(funcDisplay, rows, focusSet, visibleKeys) {
+  const G = _GRAPH;
+  const nf = _normFn(funcDisplay);      // 노드 id prefix·자기강조용(엄격)
+  const lf = _looseFn(funcDisplay);     // 크로스밴드 매칭용(선행 _ bridge)
+  const fset = focusSet instanceof Set && focusSet.size ? focusSet : null;
+  const impactedSelf = !!(fset && (fset.has(nf) || [...fset].some(f => _looseFn(f) === lf)));
+  // 이 함수를 source_ids(UDS)에 가진 요구사항 = 함수가 구현한 요구사항.
+  const implRows = (Array.isArray(rows) ? rows : []).filter(r =>
+    (Array.isArray(r?.source_ids) ? r.source_ids : []).some(s => _looseFn(s) === lf));
+  // 함수 ASIL = 구현 요구사항들의 최고 등급(결합 토큰 'A, B'도 split-max).
+  let asilRank = -1, asil = '';
+  for (const r of implRows) {
+    const { rank, asil: a } = _asilMaxRank(r?.asil || r?.requirement_asil || r?.ASIL);
+    if (rank > asilRank) { asilRank = rank; asil = a; }
+  }
+  const isSafety = asilRank >= 3; // ASIL C/D
+
+  // SwUFn-키 프로젝트 bridge: VectorCAST subprogram이 함수명이 아니라 SwUFn ID인 산출물(KJPDS02 등)에서
+  // 함수↔VectorCAST를 잇기 위해, 이 함수의 SUTS 시험케이스(SwUTC_SwUFn_####)에서 SwUFn ID를 유도한다.
+  const swufnSet = new Set();
+  const SWUFN_RE = /sw_?[ui]_?fn_?\d+/ig; // 백엔드 _SWUFN_RE(Sw[UI]Fn) 대칭 — 단위(U)·통합(I) 모두
+  for (const r of implRows) {
+    for (const t of _stageMembers(r, 'SUTS').items) {
+      if (_looseFn(t?.unit) !== lf && _looseFn(t?.subprogram) !== lf) continue;
+      const mm = String(t?.testcase ?? t?.id ?? '').match(SWUFN_RE);
+      if (mm) mm.forEach(x => swufnSet.add(_normFn(x)));
+    }
+  }
+  // 함수 직접 시험 매칭: 함수명(loose) 일치 OR SwUFn ID bridge 일치(SwUFn-키 vcast).
+  const matchesFn = (t) => {
+    if (_looseFn(t?.subprogram) === lf || _looseFn(t?.unit) === lf) return true;
+    if (swufnSet.size) {
+      const cand = _normFn(t?.subprogram) || _normFn(t?.testcase);
+      if (cand && swufnSet.has(cand)) return true;
+    }
+    return false;
+  };
+
+  // 요구사항·설계 멤버(고유) — REQ는 개별 ASIL/명 보유(mixed-criticality 추적 손실 방지).
+  const reqMembers = [];
+  const seenReq = new Set();
+  for (const r of implRows) {
+    const rid = _reqGraphId(r);
+    if (!rid || seenReq.has(rid)) continue;
+    seenReq.add(rid);
+    reqMembers.push({ label: rid, stage: 'REQ', kind: 'req', type: 'ids',
+      name: String(r?.requirement_name ?? '').trim(),
+      asil: _asilMaxRank(r?.asil || r?.requirement_asil || r?.ASIL).asil });
+  }
+  const sdsMembers = [];
+  const seenSds = new Set();
+  for (const r of implRows) {
+    for (const c of (Array.isArray(r?.sds_components) ? r.sds_components : [])) {
+      const lab = String(c ?? '').trim();
+      if (!lab || seenSds.has(lab)) continue;
+      seenSds.add(lab);
+      sdsMembers.push({ label: lab, stage: 'SDS', kind: 'design', type: 'ids' });
+    }
+  }
+  // 시험 멤버 — dedup(단계+라벨+유닛). fnSpecific=이 함수 직접(SUTS·VectorCAST, 함수명/SwUFn 매칭).
+  const collectTests = (stageKey, fnSpecific) => {
+    const out = [];
+    const seen = new Set();
+    for (const r of implRows) {
+      for (const t of _stageMembers(r, stageKey).items) {
+        if (fnSpecific && !matchesFn(t)) continue;
+        const lab = _testId(t);
+        if (!lab) continue;
+        const key = `${stageKey}|${lab}|${_normFn(t?.unit)}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        out.push({ label: lab, stage: stageKey, kind: 'test', type: 'tests',
+          result: String(t?.result ?? ''), unit: String(t?.unit ?? ''),
+          source: String(t?.source ?? ''), confidence: String(t?.confidence ?? '') });
+      }
+    }
+    return out;
+  };
+  const membersByStage = {
+    REQ: reqMembers,
+    SDS: sdsMembers,
+    STS: collectTests('STS', false),
+    SUTS: collectTests('SUTS', true),
+    SITS: collectTests('SITS', false),
+    VectorCAST: collectTests('VectorCAST', true),
+  };
+
+  // 안전 검증 공백 — ASIL C/D 함수인데 단위시험·VectorCAST 실행이 없거나 FAIL이면 공백.
+  const safetyMissing = [];
+  if (asilRank >= 3) {
+    if (membersByStage.SUTS.length === 0) safetyMissing.push('단위시험');
+    if (membersByStage.VectorCAST.length === 0) safetyMissing.push('VectorCAST');
+    // FAIL은 ASIL 무관 결함이나 '안전 검증 공백' 배너는 C/D 한정(요구사항 그래프 규칙과 통일).
+    // 모든 ASIL의 FAIL은 노드 결과 색(빨강)으로 이미 노출됨.
+    if (membersByStage.VectorCAST.some(m => _resultRank(m.result) === 0)) safetyMissing.push('VectorCAST FAIL');
+  }
+  const safetyGap = safetyMissing.length > 0;
+
+  const stages = (Array.isArray(visibleKeys) && visibleKeys.length)
+    ? _FUNC_STAGES.filter(s => visibleKeys.includes(s.key)) : _FUNC_STAGES;
+
+  const columns = stages.map((s, ci) => {
+    // 멤버 노드엔 impacted 부여 안 함 — 변경 영향은 root(함수) impactedSelf로만 표시. 시험/요구 노드에
+    // impacted를 달면 ReqGraphNode가 '변경 영향 함수'로 오표기(시험 TC는 변경함수가 아님).
+    let all = membersByStage[s.key].map((m, i) => ({ ...m, id: `${nf}::${s.key}:${i}` }));
+    if (s.kind === 'test' && all.length > G.MAX_PER_COL) {
+      all = all.map((m, idx) => ({ m, idx }))
+        .sort((a, b) => (_resultRank(a.m.result) - _resultRank(b.m.result)) || (a.idx - b.idx))
+        .map(o => o.m);
+    }
+    const shown = all.slice(0, G.MAX_PER_COL);
+    const hiddenFail = all.slice(G.MAX_PER_COL).filter(m => _resultRank(m.result) === 0).length;
+    return { stage: s.key, label: s.label, kind: s.kind, colIndex: ci + 1, members: shown, hidden: all.length - shown.length, hiddenFail };
+  });
+
+  // 좌표
+  const maxRows = Math.max(1, ...columns.map(c => c.members.length || 1));
+  const bodyH = maxRows * (G.NODE_H + G.GAP);
+  const height = G.HEADER_H + bodyH + G.PAD * 2;
+  const width = (stages.length + 1) * G.COL_W;
+  const nodeXY = {};
+  const rootY = G.HEADER_H + G.PAD + Math.max(0, (bodyH - (G.NODE_H + G.GAP)) / 2);
+  nodeXY['__root__'] = { x: G.PAD, y: rootY };
+  for (const col of columns) {
+    const x = col.colIndex * G.COL_W + G.PAD;
+    col.members.forEach((m, mi) => {
+      const y = G.HEADER_H + G.PAD + mi * (G.NODE_H + G.GAP);
+      m.x = x; m.y = y; nodeXY[m.id] = { x, y };
+    });
+  }
+  // 엣지: 함수(root) → 각 멤버. 안전 체인(C/D 함수→시험)은 ASIL 색 강조.
+  const edges = [];
+  for (const col of columns) {
+    // STS/SITS는 함수가 구현한 '요구사항'의 시험(함수 직접 대응 아님) → 점선으로 구분(범례 일치).
+    const viaReq = col.stage === 'STS' || col.stage === 'SITS';
+    for (const m of col.members) {
+      edges.push({ from: '__root__', to: m.id, color: _FUNC_STAGE_COLORS[col.stage] || '#9ca3af', kind: 'req', viaReq, safety: isSafety && col.kind === 'test' });
+    }
+  }
+  edges.forEach((e, i) => { e.fromFrac = (i + 0.5) / Math.max(1, edges.length); });
+
+  return { funcId: funcDisplay, asil, asilRank, isSafety, safetyGap, safetyMissing, impactedSelf, reqCount: reqMembers.length, columns, edges, width, height, nodeXY, rootY };
+}
+
+function TraceFuncGraphView({ rows, focusFunctions = null }) {
+  const inventory = useMemo(() => _funcInventory(rows), [rows]);
+  const [selFn, setSelFn] = useState('');
+  const [selNode, setSelNode] = useState(null);
+  const [hoverId, setHoverId] = useState(null);
+  const [focusId, setFocusId] = useState(null);
+  const [levelFilter, setLevelFilter] = useState('all'); // 'all' | 'design' | 'test'
+  const svgRef = useRef(null);
+
+  const visibleKeys = useMemo(() => {
+    if (levelFilter === 'design') return ['REQ', 'SDS'];
+    if (levelFilter === 'test') return ['STS', 'SUTS', 'SITS', 'SyTS', 'SyITS', 'VectorCAST'];
+    return null;
+  }, [levelFilter]);
+
+  const focusSet = useMemo(() => {
+    const arr = Array.isArray(focusFunctions) ? focusFunctions : [];
+    return new Set(arr.map(f => _normFn(f)).filter(Boolean));
+  }, [focusFunctions]);
+
+  const selectedFn = useMemo(() => {
+    if (!inventory.length) return null;
+    if (!selFn) return inventory[0].display;
+    const nf = _normFn(selFn);
+    const hit = inventory.find(f => f.norm === nf);
+    return hit ? hit.display : null;
+  }, [inventory, selFn]);
+
+  const graph = useMemo(() => (selectedFn ? _buildFuncGraph(selectedFn, rows, focusSet, visibleKeys) : null), [selectedFn, rows, focusSet, visibleKeys]);
+
+  useEffect(() => {
+    setSelNode(prev => (prev && graph && graph.nodeXY[prev.id] && (!prev.isRoot || prev.label === graph.funcId)) ? prev : null);
+    setHoverId(null); setFocusId(null);
+  }, [graph]);
+
+  const selValid = selNode && graph && graph.nodeXY[selNode.id];
+  const activeNodeId = hoverId || (selValid ? selNode.id : null);
+  const neighborSet = useMemo(() => {
+    const s = new Set();
+    if (activeNodeId && graph) {
+      for (const e of graph.edges) {
+        if (e.from === activeNodeId) s.add(e.to);
+        else if (e.to === activeNodeId) s.add(e.from);
+      }
+    }
+    return s;
+  }, [graph, activeNodeId]);
+
+  if (!inventory.length) {
+    return <div style={{ fontSize: 12, color: 'var(--text-muted)', padding: 12 }}>표시할 UDS 함수가 없습니다(추적성 매트릭스에 source_ids 미존재 — UDS 추출/매핑을 먼저 실행하세요).</div>;
+  }
+
+  const G = _GRAPH;
+  const headerLabels = ['함수', ...(graph ? graph.columns.map(c => c.label) : [])];
+  const isNodeActive = (id) => !activeNodeId || id === activeNodeId || neighborSet.has(id);
+  const isEdgeActive = (e) => !activeNodeId || e.from === activeNodeId || e.to === activeNodeId;
+  const totalHiddenFail = graph ? graph.columns.reduce((n, c) => n + (c.hiddenFail || 0), 0) : 0;
+
+  const exportSvg = () => {
+    if (!svgRef.current || !graph) return;
+    _downloadBlob(new Blob([_graphSvgString(svgRef.current)], { type: 'image/svg+xml;charset=utf-8' }), `${graph.funcId}_func_trace.svg`);
+  };
+  const exportPng = () => {
+    if (!svgRef.current || !graph) return;
+    const s = _graphSvgString(svgRef.current);
+    const bg = (getComputedStyle(svgRef.current).getPropertyValue('--bg') || '#ffffff').trim() || '#ffffff';
+    const w = graph.width, h = graph.height, scale = 2;
+    const img = new Image();
+    const url = URL.createObjectURL(new Blob([s], { type: 'image/svg+xml;charset=utf-8' }));
+    img.onload = () => {
+      const canvas = document.createElement('canvas');
+      canvas.width = w * scale; canvas.height = h * scale;
+      const ctx = canvas.getContext('2d');
+      ctx.scale(scale, scale);
+      ctx.fillStyle = bg; ctx.fillRect(0, 0, w, h);
+      ctx.drawImage(img, 0, 0);
+      URL.revokeObjectURL(url);
+      canvas.toBlob(b => { if (b) _downloadBlob(b, `${graph.funcId}_func_trace.png`); }, 'image/png');
+    };
+    img.onerror = () => URL.revokeObjectURL(url);
+    img.src = url;
+  };
+
+  return (
+    <div>
+      {/* 함수 선택 */}
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center', marginBottom: 10 }}>
+        <label htmlFor="func-graph-input" style={{ fontSize: 12, fontWeight: 600, color: 'var(--fg)' }}>함수</label>
+        <input id="func-graph-input" list="func-graph-ids" value={selFn} onChange={e => setSelFn(e.target.value)}
+          placeholder={`UDS 함수 선택/검색 (${inventory.length}개, 미입력 시 첫 항목)`}
+          style={{ flex: '1 1 280px', maxWidth: 440, padding: '6px 10px', fontSize: 12, border: '1px solid var(--border)', borderRadius: 6, background: 'var(--bg)', color: 'var(--fg)' }} />
+        <datalist id="func-graph-ids">
+          {inventory.slice(0, 2000).map((f, i) => <option key={i} value={f.display} />)}
+        </datalist>
+        {selFn && !selectedFn && <span style={{ fontSize: 11, color: '#d97706' }}>일치하는 함수 없음</span>}
+        <div role="group" aria-label="단계 필터" style={{ display: 'inline-flex', border: '1px solid var(--border)', borderRadius: 6, overflow: 'hidden', marginLeft: 'auto' }}>
+          {[['all', '전체'], ['design', '설계'], ['test', '시험']].map(([k, lbl], i) => (
+            <button key={k} type="button" onClick={() => setLevelFilter(k)} aria-pressed={levelFilter === k}
+              title={k === 'design' ? '요구사항·SDS만' : k === 'test' ? 'STS·SUTS·SITS·VectorCAST만' : '전체 단계'}
+              style={{ padding: '5px 10px', fontSize: 11, border: 'none', borderLeft: i ? '1px solid var(--border)' : 'none', cursor: 'pointer',
+                background: levelFilter === k ? 'var(--accent)' : 'var(--bg)', color: levelFilter === k ? '#fff' : 'var(--fg)', fontWeight: levelFilter === k ? 700 : 400 }}>
+              {lbl}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {graph && (
+        <>
+          {/* 요약 + 범례 */}
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, fontSize: 11, color: 'var(--text-muted)', marginBottom: 8, alignItems: 'center' }}>
+            <span><strong style={{ color: 'var(--fg)', wordBreak: 'break-all' }}>{graph.funcId}</strong></span>
+            {graph.asil && <span style={{ padding: '1px 7px', borderRadius: 10, background: (_ASIL_COLORS[graph.asil] || '#6b7280'), color: '#fff', fontWeight: 700 }}>ASIL {graph.asil}</span>}
+            {graph.reqCount > 0 && <span title="이 함수가 구현(source_ids 포함)하는 요구사항 수">구현 요구사항 <strong style={{ color: 'var(--fg)' }}>{graph.reqCount}</strong></span>}
+            {graph.columns.map(c => (
+              <span key={c.stage} style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                <span style={{ width: 9, height: 9, borderRadius: 2, background: _FUNC_STAGE_COLORS[c.stage], display: 'inline-block' }} />
+                {c.label} {c.members.length}{c.hidden > 0 ? `(+${c.hidden})` : ''}
+              </span>
+            ))}
+            <span style={{ opacity: 0.7 }} title="단위시험(SUTS)·VectorCAST는 이 함수에 직접 연결(unit/subprogram==함수). 요구사항·설계·STS·SITS는 이 함수가 구현한 요구사항을 경유한 연결입니다.">
+              ⓘ SUTS·VectorCAST=함수 직접 / 나머지=요구사항 경유
+            </span>
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }} title="STS·SITS는 함수가 구현한 요구사항의 시험(함수 직접 대응 아님)이라 점선으로 구분합니다.">
+              <span style={{ width: 14, height: 0, borderTop: '2px dashed #94a3b8', display: 'inline-block' }} />요구사항 경유 시험(STS·SITS)
+            </span>
+            {totalHiddenFail > 0 && (
+              <span style={{ color: '#dc2626', fontWeight: 700 }}
+                title={`시험 컬럼 캡(${G.MAX_PER_COL})을 초과해 표시되지 않은 FAIL 시험이 있습니다(FAIL 우선 정렬).`}>
+                ⚠ 미표시 FAIL {totalHiddenFail}
+              </span>
+            )}
+            {graph.isSafety && (
+              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}
+                title="ASIL C/D 함수가 단위시험·VectorCAST로 검증되는 경로를 ASIL 색·굵게로 강조합니다.">
+                <span style={{ width: 14, height: 0, borderTop: `2px solid ${_ASIL_COLORS[graph.asil] || '#dc2626'}`, display: 'inline-block' }} />안전 검증 경로
+              </span>
+            )}
+            {graph.safetyGap && (
+              <span style={{ color: '#dc2626', fontWeight: 700 }}
+                title={`ISO 26262: ASIL ${graph.asil} 함수의 시험 검증이 부족합니다(C/D=단위시험·VectorCAST 기대, FAIL 시 결함).`}>
+                ⚠ 검증 공백: {graph.safetyMissing.join('·')}
+              </span>
+            )}
+            {graph.impactedSelf && (
+              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, color: '#b45309', fontWeight: 600 }}
+                title="영향도 분석에서 변경된 함수입니다.">
+                <span style={{ width: 9, height: 9, borderRadius: '50%', background: '#b45309', display: 'inline-block' }} />변경 영향 함수
+              </span>
+            )}
+            <span style={{ opacity: 0.6 }} title="hiMA UCOneIDTrace 표기 대응 — 요구사항=□·설계=집(△지붕)·시험스펙=타원·단위시험=◇·통합시험=8각">
+              모양: 요구□·설계집·시험◯◇⯃
+            </span>
+            <div style={{ marginLeft: 'auto', display: 'inline-flex', gap: 6 }}>
+              <button type="button" onClick={exportSvg} title="그래프를 SVG(벡터)로 내보내기"
+                style={{ padding: '4px 9px', fontSize: 11, border: '1px solid var(--border)', borderRadius: 5, background: 'var(--bg)', color: 'var(--fg)', cursor: 'pointer' }}>SVG ↓</button>
+              <button type="button" onClick={exportPng} title="그래프를 PNG(이미지)로 내보내기"
+                style={{ padding: '4px 9px', fontSize: 11, border: '1px solid var(--border)', borderRadius: 5, background: 'var(--bg)', color: 'var(--fg)', cursor: 'pointer' }}>PNG ↓</button>
+            </div>
+          </div>
+
+          {/* SVG 그래프 */}
+          <div style={{ overflow: 'auto', border: '1px solid var(--border)', borderRadius: 8, background: 'var(--bg)', maxHeight: 580 }}>
+            <svg ref={svgRef} width={graph.width} height={graph.height} style={{ display: 'block', minWidth: '100%' }} role="group" aria-label={`${graph.funcId} 함수중심 추적 그래프`}>
+              <defs>
+                <marker id="rg-arrow" markerWidth={7} markerHeight={7} refX={6} refY={2.5} orient="auto" markerUnits="userSpaceOnUse">
+                  <path d="M0,0 L6,2.5 L0,5 Z" fill="#94a3b8" />
+                </marker>
+                <clipPath id="rg-node-clip">
+                  <rect x={0} y={0} width={G.NODE_W} height={G.NODE_H} rx={6} />
+                </clipPath>
+              </defs>
+              {headerLabels.map((h, ci) => (
+                <text key={ci} x={ci * G.COL_W + G.PAD} y={16} fontSize={11} fontWeight={700} style={{ fill: 'var(--text-muted)' }}>{h}</text>
+              ))}
+              {graph.edges.map((e, i) => {
+                const a = graph.nodeXY[e.from], b = graph.nodeXY[e.to];
+                if (!a || !b) return null;
+                const x1 = a.x + G.NODE_W;
+                const y1 = a.y + (e.fromFrac != null ? e.fromFrac * G.NODE_H : G.NODE_H / 2);
+                const x2 = b.x, y2 = b.y + G.NODE_H / 2;
+                const active = isEdgeActive(e);
+                const stroke = e.safety ? (_ASIL_COLORS[graph.asil] || e.color) : e.color;
+                const sw = e.safety ? 2 : 1.2;
+                const idleOp = e.safety ? 0.45 : 0.16;
+                const op = active ? (e.safety ? 0.85 : 0.55) : (activeNodeId ? 0.06 : idleOp);
+                return <path key={i} d={_bez(x1, y1, x2, y2)} fill="none" stroke={stroke} strokeWidth={sw} strokeDasharray={e.viaReq ? '4 2' : undefined} markerEnd="url(#rg-arrow)" opacity={op} />;
+              })}
+              {/* root(함수) 노드 */}
+              <ReqGraphNode node={{ id: '__root__', label: graph.funcId, x: G.PAD, y: graph.rootY, isRoot: true, impacted: graph.impactedSelf }}
+                color={_STAGE_COLORS.UDS}
+                active={isNodeActive('__root__')} kbFocused={focusId === '__root__'}
+                onClick={() => setSelNode({ id: '__root__', label: graph.funcId, stage: '함수', asil: graph.asil, isRoot: true })}
+                onHover={setHoverId} onFocus={setFocusId} onBlur={() => setFocusId(null)} />
+              {/* 단계 노드 */}
+              {graph.columns.map(col => col.members.map(m => (
+                <ReqGraphNode key={m.id} node={m} color={_FUNC_STAGE_COLORS[m.stage] || '#9ca3af'}
+                  active={isNodeActive(m.id)} kbFocused={focusId === m.id}
+                  onClick={() => setSelNode(m)} onHover={setHoverId} onFocus={setFocusId} onBlur={() => setFocusId(null)} />
+              )))}
+              {/* 끊긴 단계 placeholder */}
+              {graph.columns.filter(c => c.members.length === 0).map(c => (
+                <g key={`empty-${c.stage}`} opacity={activeNodeId ? 0.28 : 1} transform={`translate(${c.colIndex * G.COL_W + G.PAD},${G.HEADER_H + G.PAD})`}>
+                  <rect width={G.NODE_W} height={G.NODE_H} rx={5} fill="none" stroke="#d1d5db" strokeDasharray="4 3" />
+                  <text x={G.NODE_W / 2} y={G.NODE_H / 2 + 4} fontSize={10} textAnchor="middle" style={{ fill: '#9ca3af' }}>없음</text>
+                </g>
+              ))}
+            </svg>
+          </div>
+
+          {/* 노드 상세 */}
+          {selNode && (
+            <div style={{ marginTop: 10, padding: 12, border: '1px solid var(--border)', borderRadius: 8, background: 'var(--panel, #f9fafb)', fontSize: 12 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                <strong style={{ color: 'var(--fg)', wordBreak: 'break-all' }}>{selNode.label}</strong>
+                <button type="button" onClick={() => setSelNode(null)} style={{ border: 'none', background: 'none', cursor: 'pointer', color: 'var(--text-muted)', fontSize: 16, lineHeight: 1 }} aria-label="닫기">×</button>
+              </div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 14, color: 'var(--text-muted)' }}>
+                <span>단계 <strong style={{ color: selNode.isRoot ? 'var(--fg)' : (_FUNC_STAGE_COLORS[selNode.stage] || 'var(--fg)') }}>{selNode.isRoot ? '함수(UDS)' : (_FUNC_STAGES.find(s => s.key === selNode.stage)?.label || selNode.stage)}</strong></span>
+                {selNode.isRoot && selNode.asil && <span>ASIL <strong>{selNode.asil}</strong></span>}
+                {!selNode.isRoot && selNode.stage === 'REQ' && selNode.asil && <span>ASIL <strong style={{ color: _ASIL_COLORS[selNode.asil] || 'var(--fg)' }}>{selNode.asil}</strong></span>}
+                {!selNode.isRoot && selNode.name && <span style={{ flexBasis: '100%' }}>요구사항명 <strong style={{ color: 'var(--fg)' }}>{selNode.name}</strong></span>}
                 {selNode.source && <span>소스 <strong>{selNode.source}</strong></span>}
                 {selNode.unit && <span>유닛 <strong>{selNode.unit}</strong></span>}
                 {selNode.result && <span>결과 <strong style={{ color: _testResultColor(selNode.result) }}>{selNode.result}</strong></span>}

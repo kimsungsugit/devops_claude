@@ -101,7 +101,7 @@ def _merge_paths_to_cloudium_prefixes(entry: Any) -> None:
             try:
                 doc_paths = list(linked.model_dump().values())
             except AttributeError:
-                doc_paths = [linked.get(k, "") for k in ("srs", "sds", "uds", "sts", "suts", "sits", "hsis", "stp", "vectorcast")]
+                doc_paths = [linked.get(k, "") for k in ("srs", "sds", "uds", "sts", "suts", "sits", "hsis", "stp", "syrs", "syts", "syits", "vectorcast")]
             # vectorcast는 복수 경로 list — 단일 string 필드와 함께 평탄화한다.
             flat: list[str] = []
             for v in doc_paths:

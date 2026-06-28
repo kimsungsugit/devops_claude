@@ -3290,6 +3290,8 @@ def _cache_trace_summary(matrix: Dict[str, Any], req: UdsTraceabilityMatrixReque
             or row.get("sts_tests")
             or row.get("suts_tests")
             or row.get("sits_tests")
+            or row.get("syts_tests")   # 시스템 시험(결정1) — 비기능/안전 요구의 시스템 레벨 검증
+            or row.get("syits_tests")
             or row.get("vcast_tests")
             or row.get("test_ids")
         )
@@ -3297,12 +3299,19 @@ def _cache_trace_summary(matrix: Dict[str, Any], req: UdsTraceabilityMatrixReque
             row.get("source_ids")
             or row.get("sds_components")
             or row.get("sds_functions")  # 추적 정화: 함수로만 추적된 요구사항 커버리지 회귀 방지(프론트 DESIGN_FIELDS lockstep)
+            or row.get("hsis_signals")   # 시스템 인터페이스(HSIS) realization — SwEI 등 인터페이스 요구 커버(결정1)
             or row.get("functions")
             or row.get("mapping")
             or row.get("sds")
             or row.get("source_mapping")
         )
-        if has_design and has_tests:
+        # 비기능/안전 요구(SwNTR/SwNTSR)는 설계 분해 없이 시험으로 직접 검증된다(ISO 26262 요구사항기반
+        # 시험). 따라서 설계 링크가 없어도 시험만 있으면 covered로 인정(결정1, 3-site lockstep).
+        # 행 requirement_id는 RAW 철자(정규화 전)라 SyNTR_/SyNTSR_도 매칭(_normalize_req_id가 키에만
+        # Sy→Sw collapse). 비기능/안전 요구 prefix 4종 모두 인정.
+        _rid = str(row.get("requirement_id") or "").upper()
+        is_nonfunctional = _rid.startswith(("SWNTR", "SWNTSR", "SYNTR", "SYNTSR"))
+        if has_tests and (has_design or is_nonfunctional):
             covered += 1
         elif has_design or has_tests:
             partial += 1
@@ -3397,6 +3406,7 @@ def jenkins_uds_traceability_matrix(req: UdsTraceabilityMatrixRequest) -> Dict[s
             sits_rows=req.sits_rows or [],
             uds_function_ids=req.uds_function_ids or [],
             component_asil=req.component_asil or {},
+            hsis_pairs=req.hsis_pairs or [],
         )
         # 명시 RelatedID 링크 테이블 파생(P1) — hiMA식 매트릭스/감사 baseline.
         # additive: 기존 matrix dict를 변형하지 않고 새 키(link_table)만 더한다.
@@ -3985,6 +3995,84 @@ def jenkins_sds_extract_mapping(body: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+@router.post("/api/jenkins/hsis/extract-mapping")
+def jenkins_hsis_extract_mapping(body: Dict[str, Any]) -> Dict[str, Any]:
+    """HSIS(HW-SW 인터페이스) xlsx에서 요구사항↔인터페이스 신호 매핑 추출.
+
+    추적성 매트릭스의 인터페이스 밴드(design-arm)용. HSIS Related ID 컬럼의 시스템 요구
+    ID(SyTR/SyTSR/SyEI…)를 `_normalize_req_id`로 SW namespace에 평탄화 → 요구사항별
+    인터페이스 신호(HSI_xx / SW변수) 그룹. 인터페이스 요구(SwEI) 커버를 위해 SyEI→SwEI도
+    로컬 보강(이 사내 템플릿은 시스템/SW 인터페이스 번호가 1:1 병행).
+    """
+    import re as _re
+    import tempfile
+
+    from backend.services.file_resolver import get_resolver
+    from backend.services.resolver_helpers import enforce_resolver_access
+    from generators.sts import parse_hsis_signals
+
+    hsis_path = str(body.get("hsis_path", "")).strip()
+    if not hsis_path:
+        raise HTTPException(status_code=400, detail="hsis_path required")
+    enforce_resolver_access(hsis_path)  # C3
+    resolver = get_resolver()
+    try:
+        if not resolver.exists(hsis_path):
+            raise HTTPException(status_code=400, detail=f"파일을 찾을 수 없습니다: {hsis_path}")
+        data = resolver.read_bytes(hsis_path)
+    except (PermissionError, OSError) as exc:
+        raise HTTPException(status_code=403, detail=f"파일 접근 거부: {exc}")
+
+    # parse_hsis_signals은 file path를 받음 — cloudium IPC bytes를 임시파일로 떨군 뒤 파싱(SDS 패턴).
+    with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as tmp:
+        tmp.write(data)
+        tmp_path = tmp.name
+    try:
+        parsed = parse_hsis_signals(tmp_path)
+    finally:
+        try:
+            Path(tmp_path).unlink()
+        except OSError:
+            pass
+
+    signals = parsed.get("signals") or []
+
+    def _norm_hsis_req(rid: str) -> str:
+        n = _normalize_req_id(rid)  # SyTR→SwTR, SyTSR→SwTSR, SyEIF→SwEI 등 + 대문자
+        n = _re.sub(r"^SYEI_", "SWEI_", n)  # HSIS는 SyEI(F 없음) 사용 → 인터페이스 요구(SwEI)에 연결
+        return n
+
+    req_to_sigs: Dict[str, list] = {}
+    for s in signals:
+        related = str(s.get("related_id") or "")
+        raw_ids = _re.findall(r"Sw[A-Za-z]{2,}\s*_\s*\d+|Sy[A-Za-z]{2,}\s*_\s*\d+", related)
+        if not raw_ids:
+            continue
+        sig_label = (str(s.get("id") or "").strip()
+                     or str(s.get("sw_var_name") or "").strip()
+                     or str(s.get("signal_name") or "").strip())
+        if not sig_label:
+            continue
+        for rid in raw_ids:
+            nrid = _norm_hsis_req(rid)
+            if not nrid:
+                continue
+            req_to_sigs.setdefault(nrid, [])
+            if sig_label not in req_to_sigs[nrid]:
+                req_to_sigs[nrid].append(sig_label)
+
+    hsis_pairs = [
+        {"requirement_id": rid, "hsis_signals": sigs}
+        for rid, sigs in sorted(req_to_sigs.items())
+    ]
+    return {
+        "ok": True,
+        "hsis_pairs": hsis_pairs,
+        "total_signals": len(signals),
+        "total_requirements": len(hsis_pairs),
+    }
+
+
 @router.post("/api/jenkins/sits/extract-traceability")
 def jenkins_sits_extract_traceability(body: Dict[str, Any]) -> Dict[str, Any]:
     """SITS Excel에서 TC ID↔요구사항 매핑 추출"""
@@ -4016,6 +4104,8 @@ def jenkins_sits_extract_traceability(body: Dict[str, Any]) -> Dict[str, Any]:
 
     vcast_rows = []
     _MAX_EMPTY_ROWS = 50  # C3: break after N consecutive empty rows
+    # source 라벨 — 시스템 시험(SyTS/SyITS)이 동일 구조라 라벨만 갈아끼워 재사용(syts/syits 위임 엔드포인트).
+    src_label = (str(body.get("source_label") or "SITS").strip() or "SITS")
 
     # Strategy 1: Look for Traceability sheet — sheet_name 명시 + 자동 탐색 keyword 확장
     # (외부 도구 생성 SITS 파일 대응 — N20 follow-up)
@@ -4060,7 +4150,7 @@ def jenkins_sits_extract_traceability(body: Dict[str, Any]) -> Dict[str, Any]:
                     vcast_rows.append({
                         "requirement_id": _normalize_req_id(rid),
                         "testcase": tc_id,
-                        "source": "SITS",
+                        "source": src_label,
                         "result": "mapped",
                     })
     else:
@@ -4137,7 +4227,7 @@ def jenkins_sits_extract_traceability(body: Dict[str, Any]) -> Dict[str, Any]:
                     "requirement_id": _normalize_req_id(rid),
                     "testcase": tc_id,
                     "unit": entry_fn,
-                    "source": "SITS",
+                    "source": src_label,
                     "result": "mapped",
                 })
             # If no Sw* req IDs found but we have entry_fn, still add row
@@ -4147,7 +4237,7 @@ def jenkins_sits_extract_traceability(body: Dict[str, Any]) -> Dict[str, Any]:
                     "requirement_id": "",
                     "testcase": tc_id,
                     "unit": entry_fn,
-                    "source": "SITS",
+                    "source": src_label,
                     "result": "mapped",
                 })
 
@@ -4169,6 +4259,21 @@ def jenkins_sits_extract_traceability(body: Dict[str, Any]) -> Dict[str, Any]:
         "total_mappings": len(deduped),
         "requirements_covered": len(req_set),
     }
+
+
+@router.post("/api/jenkins/syts/extract-traceability")
+def jenkins_syts_extract_traceability(body: Dict[str, Any]) -> Dict[str, Any]:
+    """시스템 시험(SyTS) 결과 xlsx — SITS와 동일 TC↔요구사항 구조. source 라벨만 'SyTS'.
+
+    요구사항 ID는 SITS 경로의 `_normalize_req_id`가 SyTSR/SyNTSR→Sw*로 평탄화 →
+    비기능/안전 요구가 SW 행에 join돼 시스템 레벨 검증으로 covered 승격(결정1)."""
+    return jenkins_sits_extract_traceability({**body, "source_label": "SyTS"})
+
+
+@router.post("/api/jenkins/syits/extract-traceability")
+def jenkins_syits_extract_traceability(body: Dict[str, Any]) -> Dict[str, Any]:
+    """시스템 통합시험(SyITS) 결과 xlsx — SITS와 동일 구조. source 라벨만 'SyITS'."""
+    return jenkins_sits_extract_traceability({**body, "source_label": "SyITS"})
 
 
 @router.post("/api/jenkins/uds/publish")

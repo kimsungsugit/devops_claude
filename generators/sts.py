@@ -461,6 +461,138 @@ def _load_hsis_signals(hsis_path: str) -> Dict[str, Any]:
     return result
 
 
+def parse_hsis_signals(hsis_path: str) -> Dict[str, Any]:
+    """Cache-free HSIS xlsx parser with header auto-detection (layout-variant safe).
+
+    `_load_hsis_signals`(위)는 모듈 캐시 + 고정 0-based 컬럼이라 (1) 멀티파일 요청 시
+    첫 결과 오염, (2) HSIS 버전별 컬럼 오프셋(실측: 260105 v5.00 SwVar=20/Related=21 vs
+    hiMA계약 23/26)에 깨진다. 추적성 매트릭스 추출 엔드포인트는 이 함수를 쓴다 — 캐시 없이
+    헤더 라벨로 컬럼을 동적 탐지한다.
+
+    Returns: {signals:[{id, signal_name, sw_var_name, related_id, direction}], sw_var_names:[...]}.
+    헤더 탐지 실패 시 signals=[] + available_columns 힌트(STS available_sheets 패턴).
+    """
+    empty: Dict[str, Any] = {"sw_var_names": [], "signals": []}
+    if not hsis_path:
+        return empty
+    p = Path(hsis_path)
+    if not p.exists():
+        _logger.warning("HSIS file not found: %s", hsis_path)
+        return empty
+    try:
+        import openpyxl  # type: ignore
+        wb = openpyxl.load_workbook(str(p), read_only=True, data_only=True)
+    except Exception as e:
+        _logger.warning("Cannot open HSIS xlsx: %s", e)
+        return empty
+
+    sheet_name = None
+    for name in wb.sheetnames:
+        if "hsis" in name.lower() or "2." in name:
+            sheet_name = name
+            break
+    if sheet_name is None and wb.sheetnames:
+        sheet_name = wb.sheetnames[0]
+    if not sheet_name:
+        try:
+            wb.close()
+        except Exception:
+            pass
+        return empty
+    ws = wb[sheet_name]
+
+    rows: List[List[str]] = []
+    for ri, row in enumerate(ws.iter_rows(values_only=True)):
+        if ri > 5000:  # zip-bomb / runaway guard
+            break
+        rows.append([str(c or "").strip() for c in row])
+    try:
+        wb.close()
+    except Exception:
+        pass
+
+    def _norm(s: Any) -> str:
+        return re.sub(r"[\s_]+", "", str(s or "").strip().lower())
+
+    # 헤더 행 탐지: 'related id' + ('sw variable'|'variable name'|'signal name') 동시 포함.
+    hdr_idx = -1
+    cols: Dict[str, int] = {}
+    for ri in range(min(20, len(rows))):
+        normed = [_norm(c) for c in rows[ri]]
+        joined = " ".join(normed)
+        if "relatedid" in joined and ("swvariable" in joined or "variablename" in joined or "signalname" in joined):
+            for ci, n in enumerate(normed):
+                if n == "id" and "id" not in cols:
+                    cols["id"] = ci
+                if "relatedid" in n and "related" not in cols:
+                    cols["related"] = ci
+                if ("swvariable" in n or "variablename" in n) and "swvar" not in cols:
+                    cols["swvar"] = ci
+                if "signalname" in n and "signame" not in cols:
+                    cols["signame"] = ci
+                if n == "direction" and "dir" not in cols:
+                    cols["dir"] = ci
+            hdr_idx = ri
+            break
+    if hdr_idx < 0 or "related" not in cols:
+        _logger.info("HSIS: header not detected in %s (sheet=%s)", hsis_path, sheet_name)
+        return {"sw_var_names": [], "signals": [],
+                "available_columns": rows[2][:30] if len(rows) > 2 else []}
+
+    data_rows = rows[hdr_idx + 1:]
+    # ID 컬럼 disambiguation — 헤더 'id'가 여러 개(Arch Element ID·Connector ID)라
+    # 데이터에서 HSI_\d+ 빈도 최대 컬럼을 ID로 확정.
+    id_col = cols.get("id", -1)
+    _hsi = re.compile(r"HSI_?\d+", re.I)
+    if id_col < 0 or not any(_hsi.match(dr[id_col]) for dr in data_rows[:30] if id_col < len(dr)):
+        best, best_cnt = -1, 0
+        max_c = max((len(dr) for dr in data_rows[:50]), default=0)
+        for ci in range(max_c):
+            cnt = sum(1 for dr in data_rows[:50] if ci < len(dr) and _hsi.match(dr[ci]))
+            if cnt > best_cnt:
+                best, best_cnt = ci, cnt
+        if best_cnt:
+            id_col = best
+
+    related_col = cols["related"]
+    swvar_col = cols.get("swvar", -1)
+    signame_col = cols.get("signame", -1)
+    dir_col = cols.get("dir", -1)
+    _idpat = re.compile(r"S[wy][A-Za-z]{1,}_?\d+")
+
+    def _get(dr: List[str], ci: int) -> str:
+        return dr[ci] if 0 <= ci < len(dr) else ""
+
+    signals: List[Dict[str, Any]] = []
+    for dr in data_rows:
+        sid = _get(dr, id_col)
+        related = _get(dr, related_col)
+        swv = _get(dr, swvar_col)
+        # 데이터 행: HSI ID가 있거나 Related에 Sw/Sy ID가 있어야(설명/공백 행 스킵)
+        if not (_hsi.match(sid) or _idpat.search(related)):
+            continue
+        if not related and not swv:
+            continue
+        signals.append({
+            "id": sid,
+            "signal_name": _get(dr, signame_col),
+            "sw_var_name": swv,
+            "related_id": related,
+            "direction": _get(dr, dir_col),
+        })
+
+    sw_var_names: List[str] = []
+    for s in signals:
+        for tok in re.split(r"[\n,\s]+", s["sw_var_name"] or ""):
+            tok = tok.strip().strip(",")
+            if tok and re.match(r"^[A-Za-z_]\w+$", tok):
+                sw_var_names.append(tok)
+    sw_var_names = list(dict.fromkeys(sw_var_names))
+
+    _logger.info("HSIS parsed(headerless): %d signals from %s", len(signals), hsis_path)
+    return {"sw_var_names": sw_var_names, "signals": signals}
+
+
 def _merge_uds_into_function_details(
     function_details: Dict[str, Dict[str, Any]],
     uds_descriptions: Dict[str, str],

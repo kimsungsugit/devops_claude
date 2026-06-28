@@ -73,11 +73,15 @@ def _row_bands(row: Dict[str, Any]) -> Dict[str, List[str]]:
         return [x for x in (_test_id(t) for t in (arr if isinstance(arr, list) else [])) if x]
 
     return {
+        "SyRS": [str(p).strip() for p in (row.get("syrs_parents") or []) if str(p).strip()],
         "SDS": [str(c).strip() for c in (row.get("sds_components") or []) if str(c).strip()],
+        "HSIS": [str(s).strip() for s in (row.get("hsis_signals") or []) if str(s).strip()],
         "UDS": [str(s).strip() for s in (row.get("source_ids") or []) if str(s).strip()],
         "STS": tids(row.get("sts_tests")),
         "SUTS": tids(row.get("suts_tests")),
         "SITS": tids(row.get("sits_tests")),
+        "SyTS": tids(row.get("syts_tests")),
+        "SyITS": tids(row.get("syits_tests")),
         "VectorCAST": [
             _test_id(t) for t in (row.get("tests") or [])
             if isinstance(t, dict) and t.get("source") == "VectorCAST" and _test_id(t)
@@ -127,7 +131,8 @@ def build_trace_xlsx(matrix: Any, meta: Optional[Dict[str, Any]] = None) -> byte
             if c not in sds_seen:
                 sds_seen.add(c)
                 sds_cols.append(c)
-        total = sum(len(bands[b]) for b in bands)
+        # SyRS=상위 provenance라 하위 커버리지 total/핑크 판정에서 제외(build_link_table·프론트와 일치).
+        total = sum(len(bands[b]) for b in bands if b != "SyRS")
         built.append({
             "rid": rid,
             "name": str(row.get("requirement_name") or "").strip(),
@@ -162,8 +167,10 @@ def build_trace_xlsx(matrix: Any, meta: Optional[Dict[str, Any]] = None) -> byte
     # 커버리지 요약 한 줄
     by_band = (lt.get("coverage") or {}).get("by_band") or {}
     if by_band:
+        # 전 밴드(SyRS 상위 provenance는 한 줄 요약에서 제외) — 교차표/시트3과 정합.
         cov_txt = " · ".join(
-            f"{b} {(by_band.get(b) or {}).get('pct', 0)}%" for b in ("SDS", "UDS", "STS", "SUTS", "SITS", "VectorCAST")
+            f"{b} {(by_band.get(b) or {}).get('pct', 0)}%"
+            for b in ("SDS", "HSIS", "UDS", "STS", "SUTS", "SITS", "SyTS", "SyITS", "VectorCAST")
         )
         ws.cell(r, 1, "커버리지").font = bold
         ws.cell(r, 2, cov_txt)
@@ -180,7 +187,7 @@ def build_trace_xlsx(matrix: Any, meta: Optional[Dict[str, Any]] = None) -> byte
     headers = ["요구사항", "제목"]
     if has_asil:
         headers.append("ASIL")
-    headers += list(sds_cols) + ["UDS", "STS", "SUTS", "SITS", "VC", "합계"]
+    headers += ["SyRS↑"] + list(sds_cols) + ["HSIS", "UDS", "STS", "SUTS", "SITS", "SyTS", "SyITS", "VC", "합계"]
     for ci, h in enumerate(headers, 1):
         c = ws.cell(head_row, ci, _cs(h))
         c.font = bold
@@ -203,15 +210,20 @@ def build_trace_xlsx(matrix: Any, meta: Optional[Dict[str, Any]] = None) -> byte
             if b["asil"] in _ASIL_FONT:
                 ac.font = Font(bold=True, color=_ASIL_FONT[b["asil"]])
             col += 1
+        # SyRS 상위(카운트) — provenance, total 미포함
+        ws.cell(rr, col, len(b["bands"].get("SyRS") or []) or "").alignment = center
+        col += 1
         sds_set = set(b["bands"]["SDS"])
         for sc in sds_cols:
             cc = ws.cell(rr, col, "O" if sc in sds_set else "")
             cc.alignment = center
             col += 1
+        ws.cell(rr, col, len(b["bands"].get("HSIS") or []) or "").alignment = center
+        col += 1
         ws.cell(rr, col, len(b["bands"]["UDS"]) or "").alignment = center
         col += 1
-        for band in ("STS", "SUTS", "SITS", "VectorCAST"):
-            ws.cell(rr, col, "O" if b["bands"][band] else "").alignment = center
+        for band in ("STS", "SUTS", "SITS", "SyTS", "SyITS", "VectorCAST"):
+            ws.cell(rr, col, "O" if b["bands"].get(band) else "").alignment = center
             col += 1
         tc = ws.cell(rr, col, b["total"])
         tc.alignment = center
@@ -250,7 +262,7 @@ def build_trace_xlsx(matrix: Any, meta: Optional[Dict[str, Any]] = None) -> byte
     ws3.cell(2, 3, "전체").font = bold
     ws3.cell(2, 4, "비율(%)").font = bold
     rr = 3
-    for b in ("SDS", "UDS", "STS", "SUTS", "SITS", "VectorCAST"):
+    for b in ("SyRS", "SDS", "HSIS", "UDS", "STS", "SUTS", "SITS", "SyTS", "SyITS", "VectorCAST"):
         bd = by_band.get(b) or {}
         ws3.cell(rr, 1, b)
         ws3.cell(rr, 2, bd.get("linked_targets", 0))

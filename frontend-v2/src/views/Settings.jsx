@@ -356,7 +356,7 @@ function ScmSection() {
           </div>
           <div className="settings-section-title" style={{ fontSize: 12, marginBottom: 8, paddingBottom: 8 }}>연결 문서 경로</div>
           <div className="field-group cols-3">
-            {['srs', 'sds', 'uds', 'sts', 'suts', 'sits', 'hsis', 'stp'].map(k => (
+            {['srs', 'sds', 'uds', 'sts', 'suts', 'sits', 'hsis', 'stp', 'syrs', 'syts', 'syits'].map(k => (
               <div className="field" key={k}>
                 <label>{k.toUpperCase()} 경로</label>
                 <div style={{ display: 'flex', gap: 4 }}>
@@ -364,7 +364,7 @@ function ScmSection() {
                     style={{ flex: 1 }}
                     value={form.linked_docs[k] || ''}
                     onChange={e => setLinked(k, e.target.value)}
-                    placeholder={`/docs/${k}.docx`}
+                    placeholder={['syts', 'syits', 'hsis'].includes(k) ? `/docs/${k}.xlsx` : `/docs/${k}.docx`}
                   />
                   <button
                     type="button"

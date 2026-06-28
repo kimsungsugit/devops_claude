@@ -122,7 +122,59 @@ def test_empty_and_malformed_safe():
 def test_bands_constant_order():
     out = build_link_table(_sample_matrix())
     assert out["bands"] == list(BANDS)
-    assert tuple(out["bands"]) == ("SDS", "UDS", "STS", "SUTS", "SITS", "VectorCAST")
+    # SyRS=상위(맨앞), HSIS는 SDS 뒤(design-arm), SyTS/SyITS(시스템 시험)는 SITS 뒤.
+    assert tuple(out["bands"]) == ("SyRS", "SDS", "HSIS", "UDS", "STS", "SUTS", "SITS", "SyTS", "SyITS", "VectorCAST")
+
+
+def test_hsis_band_extracted():
+    """HSIS 인터페이스 밴드 — row.hsis_signals → HSIS_SIGNAL 링크 + coverage.by_band(시스템 레벨 design-arm)."""
+    matrix = {"rows": [
+        {"requirement_id": "SwEI_01", "hsis_signals": ["HSI_13", "u16g_ApiIn_Vsup"], "asil": "A"},
+        {"requirement_id": "SwTR_01", "sds_components": ["g_comp"], "asil": "A"},
+    ]}
+    out = build_link_table(matrix)
+    hsis_links = [lk for lk in out["links"] if lk["related_type"] == "HSIS_SIGNAL"]
+    assert len(hsis_links) == 2
+    assert all(lk["source"] == "HSIS" and lk["target_id"] == "SwEI_01" for lk in hsis_links)
+    assert set(out["columns"]["HSIS"]) == {"HSI_13", "u16g_ApiIn_Vsup"}
+    assert out["coverage"]["by_band"]["HSIS"]["linked_targets"] == 1
+    # 결정성 — 같은 입력 → 동일 링크 순서
+    assert build_link_table(matrix)["links"] == out["links"]
+
+
+def test_system_test_bands_extracted():
+    """SyTS/SyITS 시스템 시험 밴드 — syts_tests/syits_tests → SYTS_TEST/SYITS_TEST 링크."""
+    matrix = {"rows": [
+        {"requirement_id": "SwNTSR_0101",
+         "syts_tests": [{"testcase": "SyTC_01", "source": "SyTS"}],
+         "syits_tests": [{"testcase": "SyITC_01", "source": "SyITS"}],
+         "asil": "A"},
+    ]}
+    out = build_link_table(matrix)
+    rtypes = {lk["related_type"] for lk in out["links"]}
+    assert "SYTS_TEST" in rtypes and "SYITS_TEST" in rtypes
+    assert out["columns"]["SyTS"] == ["SyTC_01"]
+    assert out["columns"]["SyITS"] == ["SyITC_01"]
+    assert out["coverage"]["by_band"]["SyITS"]["linked_targets"] == 1
+
+
+def test_syrs_parent_band_excluded_from_coverage_total():
+    """SyRS=상위 provenance — 밴드/링크엔 집계되나 하위 커버리지 total·uncovered_targets엔 미포함(W1).
+
+    상위참조만 있고 설계·시험이 0인 요구가 covered로 오인되면 안 된다(감사본 전방추적 갭 정직).
+    """
+    matrix = {"rows": [
+        {"requirement_id": "SwTR_99", "syrs_parents": ["SyTR_5"]},  # 상위만, 하위 0
+        {"requirement_id": "SwTR_01", "sds_components": ["g_c"]},   # 설계 有
+    ]}
+    out = build_link_table(matrix)
+    # SyRS 밴드/링크는 존재
+    assert out["coverage"]["by_band"]["SyRS"]["linked_targets"] == 1
+    assert any(lk["related_type"] == "SYRS_PARENT" for lk in out["links"])
+    # 그러나 SwTR_99의 하위 total은 0 → uncovered_targets에 포함
+    assert out["coverage"]["by_target"]["SwTR_99"]["total"] == 0
+    assert "SwTR_99" in out["coverage"]["uncovered_targets"]
+    assert "SwTR_01" not in out["coverage"]["uncovered_targets"]
 
 
 # ── ASIL 결합(P5) ─────────────────────────────────────────────────────

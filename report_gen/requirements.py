@@ -1836,6 +1836,9 @@ def _normalize_vcast_rows(rows: List[Dict[str, Any]]) -> Dict[str, List[Dict[str
                 "unit": row.get("unit") or "",
                 "report": row.get("report") or "",
                 "source": source,
+                # subprogram(=시험 대상 함수, vcast 산출물에서만 채워짐) 보존 — 함수중심 그래프가
+                # 함수↔VectorCAST를 잇는 키. STS/SUTS/SITS는 비어 무영향(프론트 매칭은 unit 사용).
+                "subprogram": row.get("subprogram") or "",
                 "trace_type": row.get("trace_type") or "direct",
                 "confidence": row.get("confidence") if row.get("confidence") not in (None, "") else ("exact" if source in ("STS", "SUTS", "SITS") else "fuzzy"),
             }
@@ -1873,6 +1876,7 @@ def generate_uds_traceability_matrix(
     sits_rows: Optional[List[Dict[str, Any]]] = None,
     uds_function_ids: Optional[List[str]] = None,
     component_asil: Optional[Dict[str, str]] = None,
+    hsis_pairs: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     # ASIL 결합(P5) — {컴포넌트/함수명(lower): ASIL}. SDS 추출(component_asil)에서 전달.
     # 요구사항별 ASIL = 연결된 SDS 컴포넌트·UDS 함수의 ASIL 중 최고(QM<A<B<C<D).
@@ -1906,6 +1910,11 @@ def generate_uds_traceability_matrix(
     # 많은(파이프 정제 후 비지 않고 긴) name을 채택. SRS 표 추출이 ID당 다중 행을 만들어
     # 첫 행(빈 name)이 표시되던 문제 해소(라운드110). 방어적으로 '| ' 잔여 잡음도 정제.
     name_map: Dict[str, str] = {}
+    # SyRS 상위 추적(요구→상위 시스템요구) — items의 raw related_ids에서 Sy* 토큰을 보존 소비.
+    # builder 내부 _normalize_req_id(requirements.py:1804)는 Sy 보존(공백제거+대문자)이라 collapse 안 됨.
+    # → SR→SyRS→SwRS 체인의 상위 링크를 surface(배지/밴드). 신규 추출 아님(이미 들어온 raw 소비).
+    syrs_map: Dict[str, List[str]] = {}
+    _SY_RE = re.compile(r"Sy[A-Za-z]{2,}_\d+")
     for x in items:
         rid_n = _normalize_req_id(str(x.get("id") or "").strip())
         if not rid_n:
@@ -1913,6 +1922,13 @@ def generate_uds_traceability_matrix(
         nm = re.sub(r"\s*\|\s*", " ", str(x.get("name") or "")).strip()
         if len(nm) > len(name_map.get(rid_n, "")):
             name_map[rid_n] = nm
+        raw_rel = str(x.get("related_ids") or x.get("related") or "")
+        if raw_rel:
+            existing = syrs_map.setdefault(rid_n, [])
+            for tok in _SY_RE.findall(raw_rel):
+                tok = tok.upper()
+                if tok not in existing:
+                    existing.append(tok)
 
     # ── UDS function mapping (requirement → source functions) ──
     mapping_pairs = mapping_pairs or []
@@ -1956,6 +1972,29 @@ def generate_uds_traceability_matrix(
             if c not in existing:
                 existing.append(c)
         sds_lookup[rid] = existing
+
+    # ── HSIS interface mapping (requirement → interface signals) ──
+    # 시스템 레벨 인터페이스 밴드(design-arm). HSIS extract 엔드포인트가 Related ID(Sy*)를
+    # SW namespace로 평탄화해 hsis_pairs[{requirement_id, hsis_signals:[HSI_xx/SW변수]}]로 전달.
+    hsis_lookup: Dict[str, List[str]] = {}
+    for row in (hsis_pairs or []):
+        if not isinstance(row, dict):
+            continue
+        rid = _normalize_req_id(str(row.get("requirement_id") or ""))
+        if not rid:
+            continue
+        sigs = row.get("hsis_signals") or []
+        if isinstance(sigs, str):
+            sigs = [s.strip() for s in sigs.split(",") if s.strip()]
+        elif isinstance(sigs, list):
+            sigs = [str(s).strip() for s in sigs if str(s).strip()]
+        else:
+            sigs = []
+        existing = hsis_lookup.get(rid, [])
+        for s in sigs:
+            if s not in existing:
+                existing.append(s)
+        hsis_lookup[rid] = existing
 
     # 실 설계 컴포넌트만(인터페이스 함수 제외) — 행 sds_components 표시/집계용. sds_lookup(전체)은
     # 브리지(sds_func_to_reqs)·ASIL 롤업에 그대로 쓰여 동작 불변. design_component_ids 부재(구버전
@@ -2286,6 +2325,7 @@ def generate_uds_traceability_matrix(
     matrix: List[Dict[str, Any]] = []
     mapped_source_count = 0
     mapped_sds_count = 0
+    mapped_hsis_count = 0
     mapped_test_count = 0
     total_pass = 0
     total_fail = 0
@@ -2309,6 +2349,7 @@ def generate_uds_traceability_matrix(
         sds_comp_list = sds_comp_lookup.get(rid, [])    # 실 설계 컴포넌트만 — 표시/집계(추적 정화)
         _scomp_set = set(sds_comp_list)
         sds_func_list = [c for c in sds_list if c not in _scomp_set]  # 인터페이스 함수(별도)
+        hsis_list = hsis_lookup.get(rid, [])            # HSIS 인터페이스 신호(시스템 레벨 design-arm)
         # ASIL 결합(P5) — 요구사항 ASIL = 연결된 SDS 컴포넌트·UDS 함수의 최고 ASIL.
         # 컴포넌트/함수명(lower)으로 comp_asil_map 조회. 맵 없거나 매칭 0이면 ''(graceful).
         # ASIL 키는 전체(sds_list) 사용 — 함수가 부모 ASIL 상속이라 max 불변(분리 전과 동일).
@@ -2321,6 +2362,8 @@ def generate_uds_traceability_matrix(
             mapped_source_count += 1
         if sds_comp_list:
             mapped_sds_count += 1
+        if hsis_list:
+            mapped_hsis_count += 1
         if test_ids:
             mapped_test_count += 1
 
@@ -2340,6 +2383,9 @@ def generate_uds_traceability_matrix(
         sts_tests = [t for t in tests if t.get("source") == "STS"]
         suts_tests = [t for t in tests if t.get("source") == "SUTS"]
         sits_tests = [t for t in tests if t.get("source") == "SITS"]
+        # 시스템 레벨 시험(SyTS/SyITS) — 비기능/안전 요구의 시스템 레벨 검증(결정1, covered 승격).
+        syts_tests = [t for t in tests if t.get("source") == "SyTS"]
+        syits_tests = [t for t in tests if t.get("source") == "SyITS"]
         # VectorCAST 실행추적(fuzzy, indirect) — V-model 통계에 별도 노출(reviewer INFO:
         # vcast 기여가 *_indirect 카운트에 안 잡혀 audit 불가하던 문제 해소).
         vcast_tests_row = [t for t in tests if t.get("source") == "VectorCAST"]
@@ -2377,6 +2423,10 @@ def generate_uds_traceability_matrix(
                 "sds_components": sds_comp_list,
                 # 인터페이스 함수(투명성·드릴다운). SDS 밴드 집계엔 미포함, SUTS/VCAST 브리지엔 사용됨.
                 "sds_functions": sds_func_list,
+                # 인터페이스 밴드(시스템 레벨 design-arm) — HSIS 신호(HSI_xx/SW변수). SwEI 등 인터페이스 요구의 realization.
+                "hsis_signals": hsis_list,
+                # 상위 추적 — 이 요구가 유도된 상위 시스템 요구(SyRS: SyTR/SyTSR/SyEI…). SR→SyRS→SwRS 체인.
+                "syrs_parents": syrs_map.get(rid, []),
                 # T2: SDS→UDS (상세 설계 추적)
                 "source_ids": src_list,
                 # 직접 UDS RelatedID만(나머지 source_ids는 SDS 브리지 추정) — link_table confidence 정직화용
@@ -2395,6 +2445,11 @@ def generate_uds_traceability_matrix(
                 "sits_count": len(sits_tests),
                 "sits_direct": len(sits_direct),
                 "sits_indirect": len(sits_indirect),
+                # 시스템 레벨 시험(SyTS/SyITS) — 비기능/안전 요구의 시스템 검증(결정1)
+                "syts_tests": syts_tests,
+                "syts_count": len(syts_tests),
+                "syits_tests": syits_tests,
+                "syits_count": len(syits_tests),
                 # VectorCAST 실행추적 (전부 indirect/fuzzy)
                 "vcast_count": len(vcast_tests_row),
                 # 기존 호환
@@ -2478,6 +2533,8 @@ def generate_uds_traceability_matrix(
             "total_sds_components": _total_sds_comps,
             "sds_coarse_count": _coarse_count,
             "mapped_source_count": mapped_source_count,
+            # 시스템 레벨 인터페이스(HSIS) 연결된 요구사항 수
+            "mapped_hsis_count": mapped_hsis_count,
             "mapped_test_count": mapped_test_count,
             "total_tests": total_tests,
             "total_pass": total_pass,
@@ -2487,6 +2544,9 @@ def generate_uds_traceability_matrix(
             "mapped_sts_count": sum(1 for r in matrix if r.get("sts_count")),
             "mapped_suts_count": sum(1 for r in matrix if r.get("suts_count")),
             "mapped_sits_count": sum(1 for r in matrix if r.get("sits_count")),
+            # 시스템 레벨 시험(SyTS/SyITS) 연결 요구사항 수
+            "mapped_syts_count": sum(1 for r in matrix if r.get("syts_count")),
+            "mapped_syits_count": sum(1 for r in matrix if r.get("syits_count")),
             "mapped_sts_direct": sum(1 for r in matrix if r.get("sts_direct")),
             "mapped_suts_direct": sum(1 for r in matrix if r.get("suts_direct")),
             "mapped_suts_indirect": sum(1 for r in matrix if r.get("suts_indirect")),
