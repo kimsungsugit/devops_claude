@@ -427,14 +427,27 @@ export default function SrsSdsSection({ job, analysisResult }) {
           <span className="panel-title">입력 문서 현황</span>
         </div>
         <div className="field-group">
+          {/* 추적성 매트릭스 입력 문서 11종 — 설계(SRS/SDS/UDS)·인터페이스(HSIS)·SW시험(STS/SUTS/SITS)
+              ·시스템(SyRS상위/SyTS/SyITS)·계획(STP). 경로는 localStorage 우선, 없으면 SCM linked_docs. */}
           {[
-            { label: 'SRS', path: docPaths.srs, fromScm: !localDocPaths.srs && !!scmLinked.srs },
-            { label: 'SDS', path: docPaths.sds, fromScm: !localDocPaths.sds && !!scmLinked.sds },
-            { label: 'HSIS', path: docPaths.hsis, fromScm: !localDocPaths.hsis && !!scmLinked.hsis },
-            { label: 'STP', path: docPaths.stp, fromScm: !localDocPaths.stp && !!scmLinked.stp },
-          ].map(({ label, path, fromScm }) => (
+            { label: 'SRS', key: 'srs', grp: 'design' },
+            { label: 'SDS', key: 'sds', grp: 'design' },
+            { label: 'UDS', key: 'uds', grp: 'design' },
+            { label: 'HSIS', key: 'hsis', grp: 'interface' },
+            { label: 'STS', key: 'sts', grp: 'test' },
+            { label: 'SUTS', key: 'suts', grp: 'test' },
+            { label: 'SITS', key: 'sits', grp: 'test' },
+            { label: 'SyRS↑', key: 'syrs', grp: 'system' },
+            { label: 'SyTS', key: 'syts', grp: 'system' },
+            { label: 'SyITS', key: 'syits', grp: 'system' },
+            { label: 'STP', key: 'stp', grp: 'plan' },
+          ].map(({ label, key, grp }) => {
+            const path = localDocPaths[key] || scmLinked[key] || '';
+            const fromScm = !localDocPaths[key] && !!scmLinked[key];
+            const dot = { design: '#0d9488', interface: '#0e7490', test: '#2563eb', system: '#9333ea', plan: '#6b7280' }[grp];
+            return (
             <div key={label} className="artifact-item" style={{ background: 'var(--bg)', overflow: 'hidden' }}>
-              <span className="pill pill-purple" style={{ minWidth: 40, textAlign: 'center', flexShrink: 0 }}>{label}</span>
+              <span className="pill" style={{ minWidth: 46, textAlign: 'center', flexShrink: 0, background: dot, color: '#fff', fontWeight: 600 }}>{label}</span>
               {path ? (
                 <>
                   <span className="artifact-name" title={path} style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
@@ -445,12 +458,13 @@ export default function SrsSdsSection({ job, analysisResult }) {
                 </>
               ) : (
                 <>
-                  <span className="text-muted text-sm">설정 탭 또는 SCM에서 경로를 등록하세요</span>
+                  <span className="text-muted text-sm">{grp === 'system' ? '시스템 문서(선택) — 설정/SCM에서 등록' : '설정 탭 또는 SCM에서 경로를 등록하세요'}</span>
                   <StatusBadge tone="neutral">미등록</StatusBadge>
                 </>
               )}
             </div>
-          ))}
+            );
+          })}
           {/* VectorCAST 결과 로그 (Cloudium) — Jenkins 빌드에 RAG 없을 때 폴백.
               부트로더/FBL/APP 등 결과가 별도로 나올 때 설정 → SCM '연결 문서 경로'에서
               복수 경로 등록. 여기서는 read-only 표시만. */}
