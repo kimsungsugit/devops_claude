@@ -4347,15 +4347,48 @@ def jenkins_uds_delete(req: UdsDeleteRequest) -> Dict[str, Any]:
     return {"ok": True, "removed": removed}
 
 
+def _registered_scm_source_roots() -> List[Path]:
+    """admin이 SCM 레지스트리에 등록한 모든 source_root(신뢰 경계). comma/semicolon 다중경로 분해·resolve.
+    bare 드라이브/루트(parts<=1)는 과대 신뢰 방지로 제외. 클라가 못 바꾸는 admin 설정이라 path-traversal 안전."""
+    roots: List[Path] = []
+    try:
+        from backend.services.scm_registry import list_registry_entries
+
+        for entry in list_registry_entries():
+            raw = str(getattr(entry, "source_root", "") or "")
+            for part in raw.replace(";", ",").split(","):
+                part = part.strip()
+                if not part:
+                    continue
+                try:
+                    rp = Path(part).resolve()
+                except Exception:
+                    continue
+                if len(rp.parts) > 1:
+                    roots.append(rp)
+    except Exception:
+        pass
+    return roots
+
+
 @router.post("/api/jenkins/call-tree")
 def jenkins_call_tree(req: JenkinsCallTreeRequest) -> Dict[str, Any]:
     build_root = _resolve_cached_build_root(req.job_url, req.cache_root, req.build_selector)
     if not build_root:
         raise HTTPException(status_code=404, detail="cached build not found")
-    source_root = Path(req.source_root).resolve() if req.source_root else build_root
-    # source_root는 사용자 지정 절대경로 — 캐시 빌드 루트 밖 임의 경로 스캔(path traversal) 차단(리뷰 finding [3]).
-    if req.source_root and not is_under_any(source_root, [build_root]):
-        raise HTTPException(status_code=403, detail="source_root must be under the cached build root")
+    # 신뢰 소스 경계 = 캐시 빌드 루트 + admin이 SCM 레지스트리에 등록한 source_root(들).
+    # 등록 경로는 admin 설정이라 신뢰 → 외부 C 소스(C:/Project/Ados/...) 스캔 정당화.
+    # 클라가 보내는 임의 절대경로 traversal은 신뢰 경계 밖이면 403으로 차단(리뷰 finding [3] 유지).
+    trusted_roots = [build_root] + _registered_scm_source_roots()
+    raw_src = str(req.source_root or "").strip()
+    if raw_src:
+        # SCM source_root는 comma/semicolon 구분 다중 경로 가능 — 분해 후 신뢰·존재하는 첫 후보 사용.
+        cands = [Path(p.strip()).resolve() for p in raw_src.replace(";", ",").split(",") if p.strip()]
+        source_root = next((c for c in cands if is_under_any(c, trusted_roots) and c.exists()), None)
+        if source_root is None:
+            raise HTTPException(status_code=403, detail="source_root must be under the cached build root or a registered SCM source")
+    else:
+        source_root = build_root
     entries = [x.strip() for x in str(req.entry or "").replace("\n", ",").split(",") if x.strip()][:200]
     if not entries:
         raise HTTPException(status_code=400, detail="entry required")

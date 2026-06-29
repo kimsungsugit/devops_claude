@@ -678,7 +678,7 @@ describe('AnalysisSection', () => {
       const btn = screen.getByRole('button', { name: '함수레벨 상세 불러오기' });
       await act(async () => { fireEvent.click(btn); await vi.advanceTimersByTimeAsync(3500); });
 
-      // IT 함수콜 커버리지(28%) + 함수 진입(30%) — 통합테스트·코드메트릭 양쪽에 나오므로 getAllByText
+      // IT 함수콜 커버리지(28%) + 함수 진입(30%) — 통합테스트 패널에 표시(코드메트릭 중복 카드는 제거됨)
       expect(screen.getAllByText('함수콜 커버리지').length).toBeGreaterThan(0);
       expect(screen.getAllByText('28%').length).toBeGreaterThan(0);
       // 출처 배지(Jenkins)

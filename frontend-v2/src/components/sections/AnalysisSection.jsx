@@ -1379,8 +1379,8 @@ export default function AnalysisSection({ job, analysisResult }) {
         <div className="panel-header"><span className="panel-title">코드 메트릭</span></div>
         <div className="text-sm text-muted" style={{ padding: '0 0 8px', lineHeight: 1.55 }}>
           코드 규모·커버리지 지표입니다. <b>소스 파일</b>=분석 대상 파일 수, <b>함수 수</b>=정의된 함수 개수(lizard),{' '}
-          <b>NLOC</b>=주석·공백 제외 순수 코드 라인, <b>라인 커버리지</b>=빌드 라인 커버, <b>함수콜 커버리지</b>=호출 커버(IT, Jenkins 전용),{' '}
-          <b>함수 진입 커버리지</b>=진입 함수 비율. (PRQA 분석 함수 수는 위 ‘정적분석’ 섹션 — 도구가 달라 별개)
+          <b>NLOC</b>=주석·공백 제외 순수 코드 라인, <b>라인 커버리지</b>=빌드 라인 커버.{' '}
+          (함수콜·함수 진입 커버리지는 위 ‘통합테스트(IT)’ 패널 참조 — 동일 VectorCAST IT 데이터라 여기서는 생략. PRQA 분석 함수 수도 ‘정적분석’ 섹션 — 도구가 달라 별개)
         </div>
         <div className="stats-row">
           {cm.code_files != null && <div className="stat-card"><div className="stat-value">{cm.code_files}</div><div className="stat-label">소스 파일</div></div>}
@@ -1392,20 +1392,8 @@ export default function AnalysisSection({ job, analysisResult }) {
               <div className="stat-label">라인 커버리지</div>
             </div>
           )}
-          {itGrand.function_calls?.total ? (
-            <div className="stat-card" style={{ borderLeft: `3px solid ${pctOf(itGrand.function_calls) >= 80 ? 'var(--color-success)' : 'var(--color-warning)'}` }}>
-              <div className="stat-value" style={{ color: pctOf(itGrand.function_calls) >= 80 ? 'var(--color-success)' : 'var(--color-warning)' }}>{pctOf(itGrand.function_calls)}%</div>
-              <div className="stat-label">함수콜 커버리지</div>
-              <div className="text-muted" style={{ fontSize: 9 }}>{itGrand.function_calls.covered?.toLocaleString()}/{itGrand.function_calls.total?.toLocaleString()}</div>
-            </div>
-          ) : null}
-          {itGrand.functions?.total ? (
-            <div className="stat-card">
-              <div className="stat-value">{pctOf(itGrand.functions)}%</div>
-              <div className="stat-label">함수 진입 커버리지</div>
-              <div className="text-muted" style={{ fontSize: 9 }}>{itGrand.functions.covered?.toLocaleString()}/{itGrand.functions.total?.toLocaleString()}</div>
-            </div>
-          ) : null}
+          {/* 함수콜·함수 진입 커버리지 카드는 통합테스트(IT) 패널(itGrand.function_calls/functions)과
+              동일 객체라 중복 제거 — IT 지표는 통합테스트 패널에만 표시한다. */}
         </div>
       </div>
 
