@@ -929,6 +929,7 @@ def _aggregate_it_function_calls(
     from backend.services.vcast_hmr_parser import parse_hmr_html
     fc_cov = fc_tot = fn_cov = fn_tot = 0
     fc_by_name: Dict[str, Dict[str, int]] = {}
+    _seen_units: set = set()  # (함수명, unit_file) — multi-HTML 동일 함수 이중집계 방지
     for hb in html_bytes_list or []:
         try:
             hr = parse_hmr_html(hb)
@@ -936,17 +937,26 @@ def _aggregate_it_function_calls(
             continue
         if not getattr(hr, "ok", False):
             continue
-        for name, m in (getattr(hr, "metrics", None) or {}).items():
-            fc_cov += int(getattr(m, "covered_calls", 0) or 0)
-            fc_tot += int(getattr(m, "total_calls", 0) or 0)
-            fn_cov += int(getattr(m, "functions_covered", 0) or 0)
-            fn_tot += int(getattr(m, "functions_total", 0) or 0)
+        # metrics_by_name(유닛파일별 버킷)를 순회 — hr.metrics(이름 dedup, first-wins)는
+        # 동명 다른-파일 static 함수(osif.c::Init vs canif.c::Init)를 첫 개만 남기고
+        # 나머지를 합산에서 누락시켜 과소집계한다. by-name 버킷을 (함수,파일) 단위로 합산.
+        for name, mlist in (getattr(hr, "metrics_by_name", None) or {}).items():
             nm = (name or "").strip()
-            if nm and nm not in fc_by_name:
-                fc_by_name[nm] = {
-                    "covered": int(getattr(m, "covered_calls", 0) or 0),
-                    "total": int(getattr(m, "total_calls", 0) or 0),
-                }
+            for m in (mlist or []):
+                _uk = (nm, str(getattr(m, "unit_file", "") or ""))
+                if _uk in _seen_units:  # 다른 HTML의 동일 (함수,파일) 중복은 skip
+                    continue
+                _seen_units.add(_uk)
+                _cc = int(getattr(m, "covered_calls", 0) or 0)
+                _tc = int(getattr(m, "total_calls", 0) or 0)
+                fc_cov += _cc
+                fc_tot += _tc
+                fn_cov += int(getattr(m, "functions_covered", 0) or 0)
+                fn_tot += int(getattr(m, "functions_total", 0) or 0)
+                if nm:
+                    _agg = fc_by_name.setdefault(nm, {"covered": 0, "total": 0})
+                    _agg["covered"] += _cc
+                    _agg["total"] += _tc
     grand: Dict[str, Any] = {}
     if fc_tot:
         grand["function_calls"] = {"covered": fc_cov, "total": fc_tot, "rate": round(fc_cov / fc_tot, 4)}
@@ -1298,6 +1308,8 @@ def _merge_vectorcast_payloads(payloads: List[Dict[str, Any]]) -> Dict[str, Any]
     # 서로소(부트로더/APP 등). entries는 coverage_gap이 메트릭별 max로 흡수하므로 단순 concat,
     # complexity는 (function,unit)로 dedup.
     merged_metrics: Dict[str, List[Dict[str, Any]]] = {}
+    # {mk: {metric_key: {covered,total}}} — 폴더별 grand_totals 합산 누산기(버그2 fix)
+    merged_grand: Dict[str, Dict[str, Dict[str, int]]] = {}
     merged_complexity: List[Dict[str, Any]] = []
     comp_seen: set = set()
     for pl in payloads:
@@ -1343,8 +1355,21 @@ def _merge_vectorcast_payloads(payloads: List[Dict[str, Any]]) -> Dict[str, Any]
         if isinstance(vs, dict):
             for _mk in ("ut_metrics", "it_metrics"):
                 _blk = vs.get(_mk)
-                if isinstance(_blk, dict) and isinstance(_blk.get("entries"), list):
+                if not isinstance(_blk, dict):
+                    continue
+                if isinstance(_blk.get("entries"), list):
                     merged_metrics.setdefault(_mk, []).extend(_blk["entries"])
+                # grand_totals(함수콜/함수진입)는 폴더별 함수 집합이 disjoint(APP/BOOT 등)라
+                # covered/total을 합산해 보존 — 드롭하면 2폴더+ 로드 시 카드가 사라진다.
+                _gt = _blk.get("grand_totals")
+                if isinstance(_gt, dict):
+                    _acc = merged_grand.setdefault(_mk, {})
+                    for _metric_key in ("function_calls", "functions"):
+                        _mv = _gt.get(_metric_key)
+                        if isinstance(_mv, dict) and int(_mv.get("total") or 0) > 0:
+                            _sub = _acc.setdefault(_metric_key, {"covered": 0, "total": 0})
+                            _sub["covered"] += int(_mv.get("covered") or 0)
+                            _sub["total"] += int(_mv.get("total") or 0)
         for _cr in (pl.get("complexity_rows") or []):
             if not isinstance(_cr, dict):
                 continue
@@ -1381,6 +1406,25 @@ def _merge_vectorcast_payloads(payloads: List[Dict[str, Any]]) -> Dict[str, Any]
             any_total = any_total or _t > 0
         return out if any_total else None
 
+    def _vcast_summary_out() -> Dict[str, Any]:
+        # entries + 합산된 grand_totals(함수콜/함수진입)를 모두 실어 카드 유실 방지(버그2).
+        out: Dict[str, Any] = {}
+        for _mk in set(merged_metrics) | set(merged_grand):
+            _blk: Dict[str, Any] = {}
+            if _mk in merged_metrics:
+                _blk["entries"] = merged_metrics[_mk]
+            _gt_acc = merged_grand.get(_mk) or {}
+            _gt: Dict[str, Any] = {}
+            for _metric_key, _sub in _gt_acc.items():
+                _t = int(_sub.get("total") or 0)
+                if _t > 0:
+                    _cvd = int(_sub.get("covered") or 0)
+                    _gt[_metric_key] = {"covered": _cvd, "total": _t, "rate": round(_cvd / _t, 4)}
+            if _gt:
+                _blk["grand_totals"] = _gt
+            out[_mk] = _blk
+        return out
+
     return {
         "test_rows": merged_rows,
         "test_rows_count": len(merged_rows),
@@ -1391,7 +1435,7 @@ def _merge_vectorcast_payloads(payloads: List[Dict[str, Any]]) -> Dict[str, Any]
         "coverage": _cov_dict(cov_all),
         "coverage_ut": _cov_dict(cov_ut),
         "coverage_it": _cov_dict(cov_it),
-        "vcast_summary": {k: {"entries": v} for k, v in merged_metrics.items()},
+        "vcast_summary": _vcast_summary_out(),
         "complexity_rows": merged_complexity,
         "merged_sources": len([p for p in payloads if isinstance(p, dict) and p]),
     }

@@ -510,6 +510,90 @@ def test_merge_combines_vcast_summary_and_complexity() -> None:
     assert len(merged["complexity_rows"]) == 2
 
 
+def test_merge_preserves_and_sums_grand_totals() -> None:
+    """버그2 회귀: 다중 IT 폴더(APP+BOOT) 병합 시 it_metrics.grand_totals(함수콜/함수진입)를
+    드롭하지 않고 covered/total 합산·rate 재계산해 보존한다. 드롭하면 2폴더+ 로드 시 카드가
+    조용히 사라졌다."""
+    app = {
+        "test_rows": [{"subprogram": "a", "result": "PASS"}], "vcast_kind": "IT",
+        "vcast_summary": {"it_metrics": {
+            "entries": [{"subprogram": "a"}],
+            "grand_totals": {
+                "function_calls": {"covered": 855, "total": 2989, "rate": round(855 / 2989, 4)},
+                "functions": {"covered": 504, "total": 1638, "rate": round(504 / 1638, 4)},
+            },
+        }},
+    }
+    boot = {
+        "test_rows": [{"subprogram": "b", "result": "PASS"}], "vcast_kind": "IT",
+        "vcast_summary": {"it_metrics": {
+            "entries": [{"subprogram": "b"}],
+            "grand_totals": {
+                "function_calls": {"covered": 45, "total": 111, "rate": round(45 / 111, 4)},
+                "functions": {"covered": 20, "total": 62, "rate": round(20 / 62, 4)},
+            },
+        }},
+    }
+    merged = J._merge_vectorcast_payloads([app, boot])
+    gt = merged["vcast_summary"]["it_metrics"]["grand_totals"]
+    # 함수콜: (855+45)/(2989+111) = 900/3100
+    assert gt["function_calls"] == {"covered": 900, "total": 3100, "rate": round(900 / 3100, 4)}
+    # 함수 진입: (504+20)/(1638+62) = 524/1700
+    assert gt["functions"] == {"covered": 524, "total": 1700, "rate": round(524 / 1700, 4)}
+    # entries도 보존.
+    assert len(merged["vcast_summary"]["it_metrics"]["entries"]) == 2
+
+
+def test_merge_grand_totals_partial_and_zero_omitted() -> None:
+    """한 폴더에만 grand_totals가 있거나 total=0이면: 있는 것만 합산, total=0 메트릭은 키 생략."""
+    with_gt = {
+        "test_rows": [{"subprogram": "a", "result": "PASS"}], "vcast_kind": "IT",
+        "vcast_summary": {"it_metrics": {"grand_totals": {
+            "function_calls": {"covered": 10, "total": 20, "rate": 0.5},
+            "functions": {"covered": 0, "total": 0, "rate": None},  # total=0 → 생략
+        }}},
+    }
+    no_gt = {
+        "test_rows": [{"subprogram": "b", "result": "PASS"}], "vcast_kind": "IT",
+        "vcast_summary": {"it_metrics": {"entries": [{"subprogram": "b"}]}},
+    }
+    merged = J._merge_vectorcast_payloads([with_gt, no_gt])
+    gt = merged["vcast_summary"]["it_metrics"]["grand_totals"]
+    assert gt["function_calls"] == {"covered": 10, "total": 20, "rate": 0.5}
+    assert "functions" not in gt  # total=0이라 위장 카드 방지
+
+
+def test_merge_grand_totals_overlap_double_counts_documented() -> None:
+    """W1 동작 문서화: merge 레벨에는 cross-folder 함수 dedup이 없어, 공유 함수가 두 폴더
+    grand_totals에 모두 있으면 covered/total이 이중 계상된다. 이는 기존 coverage(구문/분기/
+    MCDC) 병합과 동일 정책이며, UI 주석 + _collect_vcast_paths 경로 dedup으로 완화한다.
+    정책을 나중에 함수별 dedup으로 바꾸면 이 테스트가 먼저 깨져 의도 변경을 드러낸다."""
+    shared = {
+        "test_rows": [{"subprogram": "sha_init", "result": "PASS"}], "vcast_kind": "IT",
+        "vcast_summary": {"it_metrics": {"grand_totals": {
+            "function_calls": {"covered": 3, "total": 5, "rate": 0.6},
+        }}},
+    }
+    merged = J._merge_vectorcast_payloads([dict(shared), dict(shared)])
+    gt = merged["vcast_summary"]["it_metrics"]["grand_totals"]
+    # 동일 payload 2개 → 합산이 2배(6/10) — 현 정책상 예상 동작(과대 계상 가능성 명시).
+    assert gt["function_calls"] == {"covered": 6, "total": 10, "rate": 0.6}
+
+
+def test_merge_grand_totals_only_no_entries() -> None:
+    """엣지: grand_totals만 있고 entries 없는 payload → 출력 blk에 grand_totals만(entries 키 없음)."""
+    only_gt = {
+        "test_rows": [{"subprogram": "a", "result": "PASS"}], "vcast_kind": "IT",
+        "vcast_summary": {"it_metrics": {"grand_totals": {
+            "function_calls": {"covered": 7, "total": 14, "rate": 0.5},
+        }}},
+    }
+    merged = J._merge_vectorcast_payloads([only_gt, only_gt])
+    blk = merged["vcast_summary"]["it_metrics"]
+    assert blk["grand_totals"]["function_calls"] == {"covered": 14, "total": 28, "rate": 0.5}
+    assert "entries" not in blk  # entries 없는 입력은 entries 키를 만들지 않음
+
+
 def test_merge_dedups_complexity_rows() -> None:
     """같은 (function,unit) complexity는 중복 등록돼도 1건."""
     p1 = {"test_rows": [{"subprogram": "f", "result": "PASS"}],

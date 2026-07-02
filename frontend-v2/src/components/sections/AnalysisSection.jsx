@@ -1286,7 +1286,8 @@ export default function AnalysisSection({ job, analysisResult }) {
         <div className="text-sm text-muted" style={{ padding: '0 0 8px', lineHeight: 1.55 }}>
           VectorCAST 통합시험(IT) 결과입니다. IT는 <b>함수 호출(Function Call) 커버리지</b> 중심이라 구문/분기는 약하거나 없습니다.{' '}
           <b>IT 리포트</b>=리포트 폴더 수, <b>함수콜</b>=호출 커버리지, <b>함수 진입</b>=함수 진입 커버리지.{' '}
-          함수콜 데이터는 <b>Jenkins 빌드 산출물</b> 또는 <b>SCM VectorCAST 로그</b>(폴더에 Metric report HTML이 있을 때)에서 제공됩니다.
+          함수콜 데이터는 <b>Jenkins 빌드 산출물</b> 또는 <b>SCM VectorCAST 로그</b>(폴더에 Metric report HTML이 있을 때)에서 제공됩니다.{' '}
+          <span style={{ color: 'var(--color-warning)' }}>※ 이 값은 <b>폴더 전체 함수 기준</b>입니다 — 시험 대상 함수만 집계하는 SwITCV/SITR 산출물과는 모집단(분모)이 달라 수치가 일치하지 않을 수 있습니다. 복수 SCM 폴더(APP+BOOT 등)를 합산할 때는 두 폴더에 공통으로 존재하는 공유 함수가 이중 계상될 수 있어 실제보다 높게 표시될 수 있습니다.</span>
         </div>
         <div className="stats-row">
           <div className="stat-card"><div className="stat-value">{(effVcast.it_reports || []).length}</div><div className="stat-label">IT 리포트</div></div>

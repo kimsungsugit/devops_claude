@@ -58,6 +58,35 @@ def test_multiple_reports_merge():
     assert set(by_name) == {"fa", "fb"}
 
 
+def test_same_name_different_file_not_deduped():
+    """버그1 회귀: 동명 다른-파일 static 함수(osif.c::Init vs canif.c::Init)가 이름
+    dedup으로 첫 개만 남으면 안 됨 — 둘 다 합산돼야 한다.
+
+    구 로직(hr.metrics, first-wins)은 Init 하나만 세어 함수콜/함수진입을 과소집계했다.
+    metrics_by_name(유닛파일별 버킷)로 순회하면 두 파일 모두 계상된다.
+    """
+    html = _hmr([
+        ("osif.c", "Init", "1", "1 / 1 (100%)", "4 / 8 (50%)"),
+        ("canif.c", "Init", "2", "0 / 1 (0%)", "2 / 6 (33%)"),
+    ])
+    grand, by_name = _aggregate_it_function_calls([html])
+    # 함수콜: (4+2)/(8+6) = 6/14 — 두 파일 모두 합산(dedup되면 4/8 또는 2/6로 과소)
+    assert grand["function_calls"] == {"covered": 6, "total": 14, "rate": round(6 / 14, 4)}
+    # 함수 진입: (1+0)/(1+1) = 1/2 (dedup되면 1/1 또는 0/1로 왜곡)
+    assert grand["functions"]["covered"] == 1
+    assert grand["functions"]["total"] == 2
+    # by_name['Init']은 두 파일 함수콜 합산.
+    assert by_name["Init"] == {"covered": 6, "total": 14}
+
+
+def test_same_report_twice_not_double_counted():
+    """버그3 회귀: 같은 (함수,파일)이 여러 HTML(후보 폴더 중복 스캔)에 나와도 이중집계 금지."""
+    html = _hmr([("a.c", "fa", "1", "1 / 1 (100%)", "3 / 6 (50%)")])
+    grand, by_name = _aggregate_it_function_calls([html, html])  # 동일 HTML 2회
+    assert grand["function_calls"] == {"covered": 3, "total": 6, "rate": 0.5}  # 6/12 아님
+    assert by_name["fa"] == {"covered": 3, "total": 6}
+
+
 def test_leaf_no_calls_omits_function_calls_key():
     """call 없는 leaf(빈 cell, total_calls=0)만 있으면 function_calls 키 생략(0% 위장 금지)."""
     html = _hmr([("a.c", "leaf", "1", "1 / 1 (100%)", "")])
