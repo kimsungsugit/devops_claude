@@ -91,6 +91,7 @@ from backend.services.files import list_log_candidates, read_csv_rows, tail_text
 from backend.services.jenkins_client import JenkinsClient
 from backend.services.jenkins_helpers import _detect_reports_dir, _job_slug, _safe_artifact_path
 from backend.services.jenkins_service import (
+    _source_is_complete,  # 체크아웃 완전성 판정 단일 출처(.source_complete 센티널) — 콜트리 폴백에서 재사용
     ensure_source_checkout,
     get_build_info,
     list_builds,
@@ -4391,48 +4392,30 @@ def jenkins_uds_delete(req: UdsDeleteRequest) -> Dict[str, Any]:
     return {"ok": True, "removed": removed}
 
 
-def _registered_scm_source_roots() -> List[Path]:
-    """admin이 SCM 레지스트리에 등록한 모든 source_root(신뢰 경계). comma/semicolon 다중경로 분해·resolve.
-    bare 드라이브/루트(parts<=1)는 과대 신뢰 방지로 제외. 클라가 못 바꾸는 admin 설정이라 path-traversal 안전."""
-    roots: List[Path] = []
-    try:
-        from backend.services.scm_registry import list_registry_entries
-
-        for entry in list_registry_entries():
-            raw = str(getattr(entry, "source_root", "") or "")
-            for part in raw.replace(";", ",").split(","):
-                part = part.strip()
-                if not part:
-                    continue
-                try:
-                    rp = Path(part).resolve()
-                except Exception:
-                    continue
-                if len(rp.parts) > 1:
-                    roots.append(rp)
-    except Exception:
-        pass
-    return roots
-
-
 @router.post("/api/jenkins/call-tree")
 def jenkins_call_tree(req: JenkinsCallTreeRequest) -> Dict[str, Any]:
     build_root = _resolve_cached_build_root(req.job_url, req.cache_root, req.build_selector)
     if not build_root:
         raise HTTPException(status_code=404, detail="cached build not found")
-    # 신뢰 소스 경계 = 캐시 빌드 루트 + admin이 SCM 레지스트리에 등록한 source_root(들).
-    # 등록 경로는 admin 설정이라 신뢰 → 외부 C 소스(C:/Project/Ados/...) 스캔 정당화.
-    # 클라가 보내는 임의 절대경로 traversal은 신뢰 경계 밖이면 403으로 차단(리뷰 finding [3] 유지).
-    trusted_roots = [build_root] + _registered_scm_source_roots()
+    # 신뢰 소스 경계 = 캐시 빌드 루트뿐 (path-traversal 리뷰 finding [3] 엄격 유지).
+    # Jenkins sync가 SCM 소스를 build_root/source(.source_complete 센티널)에 체크아웃하므로
+    # 외부 SCM 작업본(C:/Project/Ados/...)을 신뢰 목록에 넣을 필요가 없다. 프론트가 관성적으로
+    # 보내는 외부 절대경로는 신뢰하지 않고(레지스트리는 비-admin 쓰기 가능 → 신뢰 원천 부적격),
+    # build_root 하위의 체크아웃 사본을 스캔한다 — 두 소스는 동일(byte-identical checkout).
+    checked_out = build_root / "source"
+    # 완전성은 정본 센티널(.source_complete)로 판정 — bare exists()는 중단/진행중 체크아웃의
+    # 부분 트리를 완료본처럼 스캔해 과소집계를 완료로 오인시킨다. 신호는 meta로 정직하게 노출.
+    source_complete = _source_is_complete(checked_out)
+    source_root = checked_out if checked_out.exists() else build_root
     raw_src = str(req.source_root or "").strip()
     if raw_src:
-        # SCM source_root는 comma/semicolon 구분 다중 경로 가능 — 분해 후 신뢰·존재하는 첫 후보 사용.
+        # 클라가 build_root 하위 경로를 명시하면 그 부분만 스캔(신뢰 경계 안에서만 존중).
+        # build_root 밖(외부 SCM 경로 포함)이거나 미존재면 무시하고 체크아웃 사본으로 폴백 —
+        # 임의 외부 경로를 파일 read 대상으로 삼지 않으므로 traversal 우회 없음.
         cands = [Path(p.strip()).resolve() for p in raw_src.replace(";", ",").split(",") if p.strip()]
-        source_root = next((c for c in cands if is_under_any(c, trusted_roots) and c.exists()), None)
-        if source_root is None:
-            raise HTTPException(status_code=403, detail="source_root must be under the cached build root or a registered SCM source")
-    else:
-        source_root = build_root
+        picked = next((c for c in cands if is_under_any(c, [build_root]) and c.exists()), None)
+        if picked is not None:
+            source_root = picked
     entries = [x.strip() for x in str(req.entry or "").replace("\n", ",").split(",") if x.strip()][:200]
     if not entries:
         raise HTTPException(status_code=400, detail="entry required")
@@ -4475,6 +4458,11 @@ def jenkins_call_tree(req: JenkinsCallTreeRequest) -> Dict[str, Any]:
         "job_url": req.job_url,
         "build_selector": req.build_selector,
         "build_root": str(build_root),
+        # 실제 스캔된 경로와 체크아웃 완전성을 정직하게 노출 — 프론트가 외부 경로를 보냈어도
+        # build_root/source(체크아웃 사본)를 스캔했음을, 그리고 그 체크아웃이 부분/미완이면
+        # source_complete=false로 알려 undercounted 트리를 완료로 오인하지 않게 한다.
+        "source_root": str(source_root),
+        "source_complete": bool(source_complete),
     }
     return payload
 

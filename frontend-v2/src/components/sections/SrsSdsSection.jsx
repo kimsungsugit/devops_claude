@@ -2907,8 +2907,13 @@ function CallTreeView({ job, cacheRoot, buildSelector, sourceRoot, seedFns, toas
       setExpanded(new Set());
       const miss = Array.isArray(res?.missing) ? res.missing : [];
       const st = res?.stats || {};
+      // 백엔드가 실제 스캔한 소스(build_root/source 체크아웃 사본)의 완전성 신호. 명시적 false일 때만 경고
+      // (구버전 백엔드는 undefined → 기존 동작 유지). 부분 체크아웃을 완료로 오인해 undercounted 트리를 신뢰하는 것 방지.
+      const incomplete = res?.meta?.source_complete === false;
       if (miss.length) {
-        toast('warning', `미발견 함수 ${miss.length}개: ${miss.slice(0, 5).join(', ')}${miss.length > 5 ? '…' : ''} — 빌드 소스의 함수명과 정확히 일치해야 합니다.`);
+        toast('warning', `미발견 함수 ${miss.length}개: ${miss.slice(0, 5).join(', ')}${miss.length > 5 ? '…' : ''} — 빌드 소스의 함수명과 정확히 일치해야 합니다.${incomplete ? ' (체크아웃 소스가 미완 상태 — 빌드 동기화 완료 후 재시도 권장)' : ''}`);
+      } else if (incomplete) {
+        toast('warning', `콜트리 생성됨 (함수 ${st.functions ?? 0}) — 단, 체크아웃 소스가 미완(부분) 상태라 실제보다 적게 집계됐을 수 있습니다. 빌드 동기화 완료 후 재시도를 권장합니다.`);
       } else {
         toast('success', `콜트리 생성 (${st.engine || '?'} · 함수 ${st.functions ?? 0} · 엣지 ${st.edges ?? 0})`);
       }
