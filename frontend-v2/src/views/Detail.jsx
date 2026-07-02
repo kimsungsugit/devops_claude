@@ -1,7 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { useJob } from '../App.jsx';
-import BuildInfoSection from '../components/sections/BuildInfoSection.jsx';
-import ScmSection from '../components/sections/ScmSection.jsx';
+import BuildInfoWithScmSection from '../components/sections/BuildInfoWithScmSection.jsx';
 import AnalysisSection from '../components/sections/AnalysisSection.jsx';
 import SrsSdsSection from '../components/sections/SrsSdsSection.jsx';
 import DocGenHubSection from '../components/sections/DocGenHubSection.jsx';
@@ -10,10 +9,11 @@ import ImpactGuideSection from '../components/sections/ImpactGuideSection.jsx';
 import ProjectSetupSection from '../components/sections/ProjectSetupSection.jsx';
 
 const SECTIONS = [
-  { id: 'build',   icon: '🔨', label: '빌드 정보',    Component: BuildInfoSection },
-  { id: 'scm',     icon: '🌿', label: 'SCM',          Component: ScmSection },
+  // 빌드 정보 + SCM 통합 — SCM은 빌드 로그 아래에 배치(BuildInfoWithScmSection).
+  { id: 'build',   icon: '🔨', label: '빌드 정보 · SCM', Component: BuildInfoWithScmSection },
   { id: 'analysis',icon: '📊', label: '프로젝트 분석', Component: AnalysisSection },
-  { id: 'setup',   icon: '⚙️', label: '프로젝트 설정', Component: ProjectSetupSection },
+  // 프로젝트 설정 탭 일단 숨김(hidden: true) — nav/content/외부네비에서 제외. 되돌리려면 hidden 제거.
+  { id: 'setup',   icon: '⚙️', label: '프로젝트 설정', Component: ProjectSetupSection, hidden: true },
   { id: 'impact',  icon: '🔍', label: '변경 영향 가이드', Component: ImpactGuideSection },
   { id: 'srssds',  icon: '📋', label: '추적성 분석', Component: SrsSdsSection },
   // 생성 6종(문서/리포트/SwUT/SwIT/SwSA/통합결과)을 단일 탭으로 통합 — 내부 옵션 세그먼트로 전환.
@@ -61,7 +61,7 @@ export default function Detail() {
         setPendingSub(section);
         return;
       }
-      if (SECTIONS.some(s => s.id === section)) setActiveSection(section);
+      if (SECTIONS.some(s => s.id === section && !s.hidden)) setActiveSection(section);
     };
     return () => { delete window.__detailSection; };
   }, []);
@@ -111,7 +111,7 @@ export default function Detail() {
       <div className="detail-layout">
         {/* Left accordion nav */}
         <nav className="accordion-nav">
-          {SECTIONS.map(s => (
+          {SECTIONS.filter(s => !s.hidden).map(s => (
             <div key={s.id} className="accordion-item">
               <div
                 className={`accordion-header${activeSection === s.id ? ' active' : ''}`}
@@ -126,7 +126,7 @@ export default function Detail() {
 
         {/* Right content — 방문한 섹션은 모두 마운트 유지(비활성은 display:none)해 상태 보존(keep-alive). */}
         <div className="detail-content">
-          {SECTIONS.map((s) => {
+          {SECTIONS.filter(s => !s.hidden).map((s) => {
             const isActive = s.id === activeSection;
             // 아직 방문 안 한 탭은 마운트하지 않음(불필요한 초기 요청 회피). 방문 후엔 숨겨도 유지.
             if (!isActive && !visited.has(s.id)) return null;

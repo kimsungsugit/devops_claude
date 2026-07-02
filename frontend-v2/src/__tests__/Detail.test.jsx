@@ -108,10 +108,11 @@ describe('Detail', () => {
     // Act
     render(<Detail />);
 
-    // Assert — "빌드 정보"는 브레드크럼과 accordion 레이블에 중복 존재하므로 getAllByText 사용
-    expect(screen.getAllByText('빌드 정보').length).toBeGreaterThanOrEqual(1);
-    expect(screen.getByText('SCM')).toBeInTheDocument();
+    // Assert — 통합 탭 레이블 "빌드 정보 · SCM"(브레드크럼+accordion 중복) + 다른 탭.
+    // SCM은 더 이상 별도 탭이 아니라 빌드 탭에 통합됨.
+    expect(screen.getAllByText(/빌드 정보/).length).toBeGreaterThanOrEqual(1);
     expect(screen.getByText('문서 생성')).toBeInTheDocument();
+    expect(screen.getByText('프로젝트 분석')).toBeInTheDocument();
   });
 
   it('selectedJob이 있으면 브레드크럼에 Job 이름을 표시한다', () => {
@@ -138,16 +139,15 @@ describe('Detail', () => {
 
   // ── 섹션 탭 네비게이션 ─────────────────────────────────────────
 
-  it('SCM 섹션 탭 클릭 시 SCM 컴포넌트를 표시한다', async () => {
-    // Arrange
-    const user = userEvent.setup();
+  it('빌드 정보 탭에 SCM 섹션이 통합되어 함께 표시된다', () => {
+    // Arrange — build가 기본 활성. 통합 래퍼(BuildInfoWithScmSection)가 BuildInfo + SCM을 함께 렌더.
     mockSelectedJob = { name: 'my-job', url: 'http://jenkins/job/my-job/' };
 
     // Act
     render(<Detail />);
-    await user.click(screen.getByText('SCM'));
 
-    // Assert
+    // Assert — 별도 SCM 탭 없이 build 탭 안에서 section-build와 section-scm이 공존(빌드 로그 아래 배치)
+    expect(screen.getByTestId('section-build')).toBeInTheDocument();
     expect(screen.getByTestId('section-scm')).toBeInTheDocument();
   });
 
@@ -199,12 +199,11 @@ describe('Detail', () => {
     mockSelectedJob = { name: 'my-job', url: 'http://jenkins/job/my-job/' };
     render(<Detail />);
 
-    // Act — build(기본) → SCM → 프로젝트 분석 순차 방문
-    await user.click(screen.getByText('SCM'));
-    expect(screen.getByTestId('section-scm')).toBeInTheDocument();
+    // Act — build(기본, BuildInfo+SCM 통합 탭) → 프로젝트 분석 방문
+    expect(screen.getByTestId('section-scm')).toBeInTheDocument(); // 통합 탭에 SCM 포함
     await user.click(screen.getByText('프로젝트 분석'));
 
-    // Assert — 활성(analysis) + 이전 방문(build, scm)이 모두 DOM에 유지(언마운트 X = 상태 보존)
+    // Assert — 활성(analysis) + 이전 방문(build 통합=build/scm)이 모두 DOM에 유지(언마운트 X = 상태 보존)
     expect(screen.getByTestId('section-analysis')).toBeInTheDocument();
     expect(screen.getByTestId('section-scm')).toBeInTheDocument();
     expect(screen.getByTestId('section-build')).toBeInTheDocument();
@@ -219,10 +218,9 @@ describe('Detail', () => {
 
     // Act
     render(<Detail />);
-    await user.click(screen.getByText('SCM'));
+    await user.click(screen.getByText('프로젝트 분석'));
 
-    // Assert — 브레드크럼에서도 SCM 텍스트가 나타남
-    // 네비게이션 라벨 + 브레드크럼 합쳐서 2번 이상 등장
-    expect(screen.getAllByText('SCM').length).toBeGreaterThanOrEqual(1);
+    // Assert — 브레드크럼에서도 활성 섹션 라벨이 나타남(네비 라벨 + 브레드크럼 = 2회 이상)
+    expect(screen.getAllByText('프로젝트 분석').length).toBeGreaterThanOrEqual(2);
   });
 });

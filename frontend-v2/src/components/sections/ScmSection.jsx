@@ -4,6 +4,12 @@ import { useJenkinsCfg, useToast } from '../../App.jsx';
 import StatusBadge from '../StatusBadge.jsx';
 import { defaultCacheRoot } from '../../api.js';
 
+// 경로에서 파일명(basename)만 추출 — 전체 경로 대신 짧게 표시(전체 경로는 title로 hover 노출).
+const docBaseName = (p) => {
+  const s = String(p ?? '').replace(/\\/g, '/').replace(/\/+$/, '');
+  return s.split('/').filter(Boolean).pop() || s;
+};
+
 export default function ScmSection({ job, analysisResult }) {
   const { cfg } = useJenkinsCfg();
   const toast = useToast();
@@ -161,23 +167,36 @@ export default function ScmSection({ job, analysisResult }) {
                 ))}
               </div>
 
-              {/* Linked docs with existence status */}
-              {selected.linked_docs && Object.values(selected.linked_docs).some(Boolean) && (
+              {/* Linked docs with existence status — 전체 경로 대신 파일명만 표시(전체 경로는 hover title),
+                  칩을 flex-wrap으로 흘려 한 줄에 여러 파일명이 들어가도록 압축 */}
+              {selected.linked_docs && Object.values(selected.linked_docs).some(v => (Array.isArray(v) ? v.length : v)) && (
                 <div style={{ marginTop: 12 }}>
                   <div className="text-sm" style={{ fontWeight: 700, marginBottom: 6 }}>연결 문서</div>
-                  {Object.entries(selected.linked_docs).filter(([, v]) => v).map(([k, v]) => (
-                    <div key={k} className="artifact-item">
-                      <span className="artifact-icon">📄</span>
-                      <span className="pill pill-purple" style={{ marginRight: 4 }}>{k.toUpperCase()}</span>
-                      <span className="artifact-name">{v}</span>
-                      {docStatus[k] === 'found' && (
-                        <StatusBadge tone="success">존재</StatusBadge>
-                      )}
-                      {docStatus[k] === 'unknown' && (
-                        <StatusBadge tone="neutral">미확인</StatusBadge>
-                      )}
-                    </div>
-                  ))}
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                    {Object.entries(selected.linked_docs)
+                      .filter(([, v]) => (Array.isArray(v) ? v.length : v))
+                      .flatMap(([k, v]) => {
+                        const paths = (Array.isArray(v) ? v : [v]).filter(Boolean);
+                        return paths.map((p, i) => (
+                          <span
+                            key={`${k}-${i}`}
+                            className="artifact-item"
+                            title={p}
+                            style={{ width: 'auto', padding: '4px 8px' }}
+                          >
+                            <span className="artifact-icon">📄</span>
+                            <span className="pill pill-purple" style={{ marginRight: 2 }}>{k.toUpperCase()}</span>
+                            <span className="artifact-name" style={{ flex: 'none', fontSize: 12 }}>{docBaseName(p)}</span>
+                            {i === 0 && docStatus[k] === 'found' && (
+                              <StatusBadge tone="success">존재</StatusBadge>
+                            )}
+                            {i === 0 && docStatus[k] === 'unknown' && (
+                              <StatusBadge tone="neutral">미확인</StatusBadge>
+                            )}
+                          </span>
+                        ));
+                      })}
+                  </div>
                 </div>
               )}
 

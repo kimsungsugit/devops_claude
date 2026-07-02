@@ -160,7 +160,7 @@ describe('ScmSection', () => {
     expect(screen.getByText('연결 문서')).toBeInTheDocument();
   });
 
-  it('연결 문서 경로를 표시한다', () => {
+  it('연결 문서를 파일명만 표시하고 전체 경로는 title로 노출한다', () => {
     // Arrange
     const result = makeAnalysisResult({
       scmList: [makeScm({
@@ -171,8 +171,27 @@ describe('ScmSection', () => {
     // Act
     render(<ScmSection job={makeJob()} analysisResult={result} />);
 
+    // Assert — 파일명만 표시(전체 경로 텍스트 아님)
+    expect(screen.getByText('srs.xlsx')).toBeInTheDocument();
+    expect(screen.queryByText('D:/docs/srs.xlsx')).not.toBeInTheDocument();
+    // 전체 경로는 칩의 title(hover) 속성으로 보존
+    expect(screen.getByTitle('D:/docs/srs.xlsx')).toBeInTheDocument();
+  });
+
+  it('연결 문서 값이 배열(복수 경로)이면 각 파일명을 개별 칩으로 표시한다', () => {
+    // Arrange — vectorcast 등 list 값
+    const result = makeAnalysisResult({
+      scmList: [makeScm({
+        linked_docs: { vectorcast: ['U:/vc/APP_IT.html', 'U:/vc/BOOT_IT.html'] },
+      })],
+    });
+
+    // Act
+    render(<ScmSection job={makeJob()} analysisResult={result} />);
+
     // Assert
-    expect(screen.getByText('D:/docs/srs.xlsx')).toBeInTheDocument();
+    expect(screen.getByText('APP_IT.html')).toBeInTheDocument();
+    expect(screen.getByText('BOOT_IT.html')).toBeInTheDocument();
   });
 
   // ── 변경 파일 목록 ────────────────────────────────────────────────
