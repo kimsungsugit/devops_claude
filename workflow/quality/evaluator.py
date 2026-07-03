@@ -176,7 +176,7 @@ def evaluate_suts(quality_report: Dict[str, Any]) -> MetricList:
 def evaluate_sits(quality_report: Dict[str, Any]) -> MetricList:
     """generators/sits.py SITS quality_report -> MetricList.
 
-    SITS는 시스템 통합시험 스펙(추적성/IO 커버리지 proxy — 실행 커버리지 아님).
+    SITS는 SW 통합시험 스펙(추적성/IO 커버리지 proxy — 실행 커버리지 아님). 시스템 통합시험은 SyITS다.
     """
     metrics: MetricList = []
     total = _safe_float(quality_report, "total_test_cases")

@@ -300,8 +300,17 @@ def _build_tree(
     depth: int,
     visited: Set[str],
     include_external: bool,
+    budget: Optional[List[int]] = None,
 ) -> Dict[str, Any]:
+    # budget = [남은_노드_예산, 절단_플래그] (auto_roots 전체 포레스트에서만 전달). _build_tree는
+    # 자식마다 visited를 복사해 경로를 열거(그래프 아님)하므로 노드가 branching^depth로 팽창할 수
+    # 있다 → 전역 예산으로 상한(수동 entry 경로는 budget=None으로 무변경).
+    if budget is not None and budget[0] <= 0:
+        budget[1] = 1
+        return {"name": name, "calls": [], "budget_exceeded": True}
     node: Dict[str, Any] = {"name": name, "calls": []}
+    if budget is not None:
+        budget[0] -= 1
     if depth >= max_depth:
         node["truncated"] = True
         return node
@@ -311,11 +320,59 @@ def _build_tree(
     visited.add(name)
     for callee in call_map.get(name, []):
         node["calls"].append(
-            _build_tree(callee, call_map, external_map, max_depth, depth + 1, set(visited), include_external)
+            _build_tree(callee, call_map, external_map, max_depth, depth + 1, set(visited), include_external, budget)
         )
     if include_external:
         node["externals"] = external_map.get(name, [])
     return node
+
+
+# auto_roots(전체 콜트리) 자원 상한 — 수동 entry [:200] 캡과 parity + 포레스트 전역 노드 예산.
+# 대형 프로젝트에서 루트 수(=in-degree 0 함수)나 경로 열거 팽창이 payload/CPU/프론트 프리즈를
+# 유발하지 않도록 방어. 절단 발생은 stats(roots_truncated/nodes_truncated)로 정직하게 노출.
+_MAX_AUTO_ROOTS = 200
+_MAX_FOREST_NODES = 60000
+
+
+def _auto_root_entries(call_map: Dict[str, List[str]], known: Set[str]) -> List[str]:
+    """전체 콜트리용 루트 집합 산출.
+
+    루트 = in-degree 0 함수(아무도 호출하지 않는 진입점 — main·ISR·콜백·미사용 등).
+    이 루트들의 forest가 known 전체를 도달하도록, 순환만으로 묶여(mutual recursion) 루트에서
+    도달 불가한 컴포넌트는 결정적 순서로 대표 1개씩 추가 루트로 흡수한다 → 100% 커버 보장.
+    반환 순서는 결정적(정렬)이라 동일 입력에 동일 forest.
+    """
+    called: Set[str] = set()
+    for callees in call_map.values():
+        for c in callees:
+            if c in known:
+                called.add(c)
+    roots: List[str] = sorted(known - called)
+    reached: Set[str] = set()
+    stack: List[str] = list(roots)
+    while stack:
+        n = stack.pop()
+        if n in reached:
+            continue
+        reached.add(n)
+        for c in call_map.get(n, []):
+            if c in known and c not in reached:
+                stack.append(c)
+    # 순환 전용(미도달) 컴포넌트: 결정적 순서로 대표를 추가 루트화하며 그 컴포넌트 흡수
+    for n in sorted(known - reached):
+        if n in reached:
+            continue
+        roots.append(n)
+        stack = [n]
+        while stack:
+            m = stack.pop()
+            if m in reached:
+                continue
+            reached.add(m)
+            for c in call_map.get(m, []):
+                if c in known and c not in reached:
+                    stack.append(c)
+    return roots
 
 
 def build_call_tree(
@@ -328,6 +385,7 @@ def build_call_tree(
     include_external: bool = False,
     compile_commands_path: Optional[Path] = None,
     external_map: Optional[List[Dict[str, Any]]] = None,
+    auto_roots: bool = False,
 ) -> Dict[str, Any]:
     root_dir = Path(source_root).resolve()
     include_tokens = _normalize_tokens(include_paths)
@@ -354,13 +412,20 @@ def build_call_tree(
         calls, externals = _extract_calls(info.get("body", ""), known, external_lookup)
         call_map[name] = calls
         external_calls[name] = externals
+    roots_total = 0
+    budget: Optional[List[int]] = None
+    if auto_roots:
+        all_roots = _auto_root_entries(call_map, known)
+        roots_total = len(all_roots)
+        entries = all_roots[:_MAX_AUTO_ROOTS]
+        budget = [_MAX_FOREST_NODES, 0]
     trees = []
     missing = []
     for entry in entries:
         if entry not in known:
             missing.append(entry)
             continue
-        trees.append(_build_tree(entry, call_map, external_calls, max_depth, 0, set(), include_external))
+        trees.append(_build_tree(entry, call_map, external_calls, max_depth, 0, set(), include_external, budget))
     edges = sum(len(v) for v in call_map.values())
     return {
         "source_root": str(root_dir),
@@ -372,6 +437,10 @@ def build_call_tree(
             "functions": len(known),
             "edges": edges,
             "duplicates": len(duplicates),
+            "roots": len(entries) if auto_roots else 0,
+            "roots_total": roots_total,
+            "roots_truncated": bool(auto_roots and roots_total > len(entries)),
+            "nodes_truncated": bool(budget is not None and budget[1]),
             "compile_commands": str(compile_db) if compile_db.exists() else "",
         },
     }
@@ -404,6 +473,7 @@ def build_call_tree_precise(
     max_files: int = 2000,
     include_external: bool = False,
     external_map: Optional[List[Dict[str, Any]]] = None,
+    auto_roots: bool = False,
 ) -> Dict[str, Any]:
     """tree-sitter(parse_c_project) 기반 정밀 콜트리.
 
@@ -479,13 +549,20 @@ def build_call_tree_precise(
                 externals[callee] = {"name": callee, **external_lookup.get(callee, _classify_external(callee))}
         call_map[nm] = sorted(internal)
         external_calls[nm] = [externals[k] for k in sorted(externals.keys())]
+    roots_total = 0
+    budget: Optional[List[int]] = None
+    if auto_roots:
+        all_roots = _auto_root_entries(call_map, known)
+        roots_total = len(all_roots)
+        entries = all_roots[:_MAX_AUTO_ROOTS]
+        budget = [_MAX_FOREST_NODES, 0]
     trees = []
     missing = []
     for entry in entries:
         if entry not in known:
             missing.append(entry)
             continue
-        tree = _build_tree(entry, call_map, external_calls, max_depth, 0, set(), include_external)
+        tree = _build_tree(entry, call_map, external_calls, max_depth, 0, set(), include_external, budget)
         _enrich_nodes(tree, func_meta)
         trees.append(tree)
     edges = sum(len(v) for v in call_map.values())
@@ -499,6 +576,10 @@ def build_call_tree_precise(
             "functions": len(known),
             "edges": edges,
             "duplicates": 0,
+            "roots": len(entries) if auto_roots else 0,
+            "roots_total": roots_total,
+            "roots_truncated": bool(auto_roots and roots_total > len(entries)),
+            "nodes_truncated": bool(budget is not None and budget[1]),
             "compile_commands": "",
             # tree-sitter 패키지는 import됐으나 Parser/언어 미구성이면 parse_c_project가 내부적으로
             # regex fallback한다 — 그 경우 'regex-fallback'으로 정직하게 표기(리뷰 finding [2]).

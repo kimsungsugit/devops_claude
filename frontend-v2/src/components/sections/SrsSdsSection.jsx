@@ -1271,6 +1271,16 @@ function TraceMatrix({ matrix, focusFunctions = null, onClearFocus = null,
   //  - unmappedTotal/Suts: VectorCAST 미추적(역방향) — 백엔드 summary 우선
   const gapStats = useMemo(() => {
     let sdsNoUds = 0, udsUntestedFns = 0, udsFnTotal = 0, orphanSuts = 0;
+    // V-model 수평쌍 공백: 설계(좌) 밴드는 있으나 대응 시험(우) 밴드가 없는 요구사항 수.
+    // covered=any-design AND any-test라 쌍 불일치(예: SDS 설계는 있는데 SITS 통합시험 없음)가
+    // covered 녹색에 가려진다 → 밴드 SSOT(_rowBands)로 쌍별 결핍을 표면화(감사 신호).
+    // ★모드 게이트: local 파일모드(local_traceability)는 band별 *_tests/VectorCAST를 안 채우고
+    //   flat tests[]만 쓴다 → _rowBands 시험밴드가 전부 빈 배열이라 쌍 공백이 '문서 미로드'를
+    //   '진짜 공백'으로 오인해 전 설계 요구를 거짓 집계한다. band 필드가 실제로 채워지는 전체
+    //   Jenkins 매트릭스(unmappedSupported)에서만 산출한다. rightPresent로는 '미로드'와 '100%
+    //   실공백'을 구분 못 하므로(둘 다 빈 밴드) 모드 신호를 쓴다.
+    const supportsPairs = unmappedSupported;
+    const pg = { sdsNoSits: 0, udsNoSuts: 0, hsisNoSyits: 0, syrsNoSyts: 0, srcNoVc: 0 };
     for (const r of rows) {
       const sds = Array.isArray(r.sds_components) ? r.sds_components : [];
       const uds = Array.isArray(r.source_ids) ? r.source_ids : [];
@@ -1286,12 +1296,22 @@ function TraceMatrix({ matrix, focusFunctions = null, onClearFocus = null,
         const u = _normFn(t && t.unit);
         if (u && !udsSet.has(u)) orphanSuts++;
       }
+      // 수평쌍 공백 (밴드 추출은 매트릭스/링크테이블과 동일 SSOT _rowBands 재사용) — 전체 매트릭스 모드만.
+      if (supportsPairs) {
+        const b = _rowBands(r);
+        if (b.SDS.length && !b.SITS.length) pg.sdsNoSits++;
+        if (b.UDS.length && !b.SUTS.length) pg.udsNoSuts++;
+        if (b.HSIS.length && !b.SyITS.length) pg.hsisNoSyits++;
+        if (b.SyRS.length && !b.SyTS.length) pg.syrsNoSyts++;
+        if (b.UDS.length && !b.VectorCAST.length) pg.srcNoVc++;
+      }
     }
     const unmappedTotal = summary?.unmapped_vcast_count ?? unmappedVcast.length;
     const unmappedSuts = summary?.unmapped_suts_tested ?? unmappedVcast.filter(u => u && u.category === 'suts_tested').length;
-    const hasAny = sdsNoUds || udsUntestedFns || orphanSuts || unmappedTotal;
-    return { sdsNoUds, udsUntestedFns, udsFnTotal, orphanSuts, unmappedTotal, unmappedSuts, hasAny };
-  }, [rows, summary, unmappedVcast]);
+    const pairHasAny = supportsPairs && !!(pg.sdsNoSits || pg.udsNoSuts || pg.hsisNoSyits || pg.syrsNoSyts || pg.srcNoVc);
+    const hasAny = sdsNoUds || udsUntestedFns || orphanSuts || unmappedTotal || pairHasAny;
+    return { sdsNoUds, udsUntestedFns, udsFnTotal, orphanSuts, unmappedTotal, unmappedSuts, pairGaps: pg, pairSupported: supportsPairs, pairHasAny, hasAny };
+  }, [rows, summary, unmappedVcast, unmappedSupported]);
 
   // Filter + sort
   const filtered = useMemo(() => {
@@ -1609,9 +1629,28 @@ function TraceMatrix({ matrix, focusFunctions = null, onClearFocus = null,
               </span>
             )}
           </div>
+          {gapStats.pairHasAny ? (
+            <div style={{ marginTop: 10, paddingTop: 8, borderTop: `1px dashed ${COVERAGE_COLORS.partial.border}` }}>
+              <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 6, color: COVERAGE_COLORS.partial.fg }}>
+                V-model 수평쌍 공백 — 설계(좌) 있으나 대응 시험(우) 없음 (covered 녹색에 가려지는 쌍 불일치)
+              </div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, fontSize: 12 }}>
+                <GapBadge label="SDS→SITS (SW통합시험)" value={gapStats.pairGaps.sdsNoSits} tone={gapStats.pairGaps.sdsNoSits ? 'warn' : 'ok'}
+                  title="SW 아키텍처(SDS) 설계는 있으나 대응하는 SW 통합시험(SITS)이 없는 요구사항 수" />
+                <GapBadge label="UDS→SUTS (SW단위시험)" value={gapStats.pairGaps.udsNoSuts} tone={gapStats.pairGaps.udsNoSuts ? 'warn' : 'ok'}
+                  title="단위 상세설계(UDS) 함수는 있으나 대응하는 SW 단위시험(SUTS)이 없는 요구사항 수" />
+                <GapBadge label="Source→VectorCAST" value={gapStats.pairGaps.srcNoVc} tone={gapStats.pairGaps.srcNoVc ? 'warn' : 'ok'}
+                  title="소스(UDS 함수)는 있으나 VectorCAST 실행 결과가 없는 요구사항 수" />
+                <GapBadge label="HSIS→SyITS (시스템통합)" value={gapStats.pairGaps.hsisNoSyits} tone={gapStats.pairGaps.hsisNoSyits ? 'warn' : 'ok'}
+                  title="HW-SW 인터페이스(HSIS)는 있으나 대응하는 시스템 통합시험(SyITS)이 없는 요구사항 수 — 두 밴드가 같은 요구를 공유해야 성립" />
+                <GapBadge label="SyRS→SyTS (시스템시험)" value={gapStats.pairGaps.syrsNoSyts} tone={gapStats.pairGaps.syrsNoSyts ? 'warn' : 'ok'}
+                  title="상위 시스템요구(SyRS)는 연결됐으나 대응하는 시스템 시험(SyTS)이 없는 요구사항 수" />
+              </div>
+            </div>
+          ) : null}
           <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 6 }}>
             정방향(요구사항→설계→시험)·역방향(시험→요구사항) 공백. ISO 26262 양방향 추적성 신호 — 0이 아니면 보강 검토. 역방향 상세는 트리 뷰 'SRS 미추적 시험'.
-            <br />이 공백 집계는 SW 레벨(SDS→UDS 설계 단절·VectorCAST 함수 역추적) 범위입니다. 시스템시험(SyTS/SyITS)·인터페이스(HSIS) 연결 현황은 상단 요약의 '시스템 레벨 연결' 칩을 참조하세요.
+            <br />상단 행은 SW 레벨(SDS→UDS 설계 단절·VectorCAST 함수 역추적) 공백, 'V-model 수평쌍 공백' 행은 각 설계 밴드↔대응 시험 밴드(시스템 레벨 HSIS→SyITS·SyRS→SyTS 포함)가 같은 요구사항에서 짝을 이루는지의 공백입니다.
           </div>
         </div>
       ) : null}
@@ -2887,9 +2926,10 @@ function CallTreeView({ job, cacheRoot, buildSelector, sourceRoot, seedFns, toas
     setExpanded(prev => { const n = new Set(prev); if (n.has(id)) n.delete(id); else n.add(id); return n; });
   }, []);
 
-  const load = useCallback(async () => {
+  // allRoots=true면 진입 함수 없이 백엔드가 in-degree 0 함수(+순환 대표)를 자동 루트로 전체 forest 구성.
+  const load = useCallback(async (allRoots = false) => {
     const entries = String(entry || '').split(/[\n,]/).map(s => s.trim()).filter(Boolean);
-    if (!entries.length) { toast('warning', '진입 함수명을 입력하세요 (예: main).'); return; }
+    if (!allRoots && !entries.length) { toast('warning', '진입 함수명을 입력하세요 (예: main). 또는 [전체 트리]로 모든 루트를 자동 구성하세요.'); return; }
     setLoading(true);
     try {
       const res = await post('/api/jenkins/call-tree', {
@@ -2897,7 +2937,8 @@ function CallTreeView({ job, cacheRoot, buildSelector, sourceRoot, seedFns, toas
         cache_root: cacheRoot || '.devops_pro_cache',
         build_selector: buildSelector || 'lastSuccessfulBuild',
         source_root: sourceRoot || '',
-        entry: entries.join(','),
+        all_roots: allRoots,
+        entry: allRoots ? '' : entries.join(','),
         max_depth: Math.max(1, Math.min(20, Number(depth) || 5)),
         include_external: includeExternal,
         engine: 'precise',
@@ -2914,11 +2955,22 @@ function CallTreeView({ job, cacheRoot, buildSelector, sourceRoot, seedFns, toas
         toast('warning', `미발견 함수 ${miss.length}개: ${miss.slice(0, 5).join(', ')}${miss.length > 5 ? '…' : ''} — 빌드 소스의 함수명과 정확히 일치해야 합니다.${incomplete ? ' (체크아웃 소스가 미완 상태 — 빌드 동기화 완료 후 재시도 권장)' : ''}`);
       } else if (incomplete) {
         toast('warning', `콜트리 생성됨 (함수 ${st.functions ?? 0}) — 단, 체크아웃 소스가 미완(부분) 상태라 실제보다 적게 집계됐을 수 있습니다. 빌드 동기화 완료 후 재시도를 권장합니다.`);
+      } else if (allRoots) {
+        // 전체 트리는 백엔드가 루트 수(200)·포레스트 노드(60K)를 상한한다 — 절단 시 정직하게 경고.
+        const trunc = st.roots_truncated || st.nodes_truncated;
+        toast(trunc ? 'warning' : 'success',
+          `전체 콜트리 생성 (루트 ${st.roots ?? 0}${st.roots_truncated ? `/${st.roots_total}` : ''} · 함수 ${st.functions ?? 0} · 엣지 ${st.edges ?? 0})${trunc ? ' — 규모 상한 도달로 일부 절단(트리 깊이를 낮추거나 진입 함수를 지정하세요)' : ''}`);
       } else {
         toast('success', `콜트리 생성 (${st.engine || '?'} · 함수 ${st.functions ?? 0} · 엣지 ${st.edges ?? 0})`);
       }
     } catch (e) {
-      if (mountedRef.current) toast('error', `콜트리 생성 실패: ${e.message}`);
+      // 404(캐시 빌드 부재)는 raw 영문 대신 안내 메시지 — [콜트리 생성]·[전체 트리] 공통.
+      if (mountedRef.current) {
+        const msg = e?.status === 404
+          ? '캐시된 빌드가 없습니다 — 먼저 Jenkins 빌드를 동기화하거나, 소스가 있는 환경에서 진입 함수로 분석하세요.'
+          : `콜트리 생성 실패: ${e.message}`;
+        toast('error', msg);
+      }
     } finally {
       if (mountedRef.current) setLoading(false);
     }
@@ -2956,16 +3008,23 @@ function CallTreeView({ job, cacheRoot, buildSelector, sourceRoot, seedFns, toas
           <input type="checkbox" checked={includeExternal} onChange={e => setIncludeExternal(e.target.checked)} style={{ cursor: 'pointer' }} />
           외부 함수
         </label>
-        <button type="button" onClick={load} disabled={loading}
+        <button type="button" onClick={() => load(false)} disabled={loading}
           style={{ padding: '6px 14px', fontSize: 12, fontWeight: 600, border: 'none', borderRadius: 4, cursor: loading ? 'default' : 'pointer',
             background: loading ? 'var(--border)' : 'var(--accent)', color: '#fff' }}>
           {loading ? '분석 중…' : '콜트리 생성'}
+        </button>
+        <button type="button" onClick={() => load(true)} disabled={loading}
+          title="진입 함수 입력 없이, 아무 함수도 호출하지 않는 함수(루트: main·ISR·콜백·미사용)를 자동 탐지해 프로젝트 전체 호출 트리를 구성합니다."
+          style={{ padding: '6px 14px', fontSize: 12, fontWeight: 600, borderRadius: 4, cursor: loading ? 'default' : 'pointer',
+            background: 'var(--bg)', color: 'var(--accent)', border: '1px solid var(--accent)' }}>
+          전체 트리
         </button>
       </div>
 
       {!data && !loading && (
         <div style={{ fontSize: 12, color: 'var(--text-muted)', padding: '8px 4px' }}>
           진입 함수명을 입력하고 <strong>콜트리 생성</strong>을 누르면 tree-sitter로 분석한 함수 호출 트리를 보여줍니다.
+          진입점을 모르면 <strong>전체 트리</strong>로 프로젝트의 모든 루트 함수(main·ISR·콜백·미사용)를 자동 탐지해 전체 호출 구조를 구성합니다.
           매트릭스가 로드돼 있으면 입력란에서 설계 함수명 자동완성을 제안합니다.
         </div>
       )}
@@ -2977,6 +3036,7 @@ function CallTreeView({ job, cacheRoot, buildSelector, sourceRoot, seedFns, toas
             <span>스캔 파일 {st.files_scanned ?? 0}</span>
             <span>함수 {st.functions ?? 0}</span>
             <span>호출 엣지 {st.edges ?? 0}</span>
+            {st.roots > 0 && <span>루트 <strong>{st.roots}</strong></span>}
             {Array.isArray(data.missing) && data.missing.length > 0 && (
               <span style={{ color: '#d97706' }}>미발견 {data.missing.length}</span>
             )}

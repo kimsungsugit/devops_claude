@@ -4416,8 +4416,10 @@ def jenkins_call_tree(req: JenkinsCallTreeRequest) -> Dict[str, Any]:
         picked = next((c for c in cands if is_under_any(c, [build_root]) and c.exists()), None)
         if picked is not None:
             source_root = picked
+    # all_roots=True면 진입 함수를 백엔드가 자동 산출(in-degree 0 + 순환 대표) → entry 불필요.
+    all_roots = bool(getattr(req, "all_roots", False))
     entries = [x.strip() for x in str(req.entry or "").replace("\n", ",").split(",") if x.strip()][:200]
-    if not entries:
+    if not entries and not all_roots:
         raise HTTPException(status_code=400, detail="entry required")
     if not source_root.exists():
         raise HTTPException(status_code=404, detail="source_root not found")
@@ -4433,6 +4435,7 @@ def jenkins_call_tree(req: JenkinsCallTreeRequest) -> Dict[str, Any]:
             include_external=bool(req.include_external),
             compile_commands_path=compile_db,
             external_map=req.external_map or [],
+            auto_roots=all_roots,
         )
 
     engine = str(getattr(req, "engine", "precise") or "precise").strip().lower()
@@ -4446,6 +4449,7 @@ def jenkins_call_tree(req: JenkinsCallTreeRequest) -> Dict[str, Any]:
             max_files=max(1, int(req.max_files or 2000)),
             include_external=bool(req.include_external),
             external_map=req.external_map or [],
+            auto_roots=all_roots,
         )
         # tree-sitter 미가용(engine='unavailable') → regex 엔진 자동 폴백 (R1 완화)
         if (payload.get("stats") or {}).get("engine") == "unavailable":

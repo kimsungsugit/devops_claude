@@ -14,10 +14,17 @@ C 소스코드 + 요구사항 문서(SRS/SDS)로부터 설계/시험 규격서(U
 
 이 프로젝트는 **ISO 26262:2018** 자동차 기능안전 표준을 따르는 문서 자동 생성 플랫폼이다.
 
-### 추적성 체인
+### 추적성 체인 (ISO 26262 V-model — 좌 설계 ↔ 우 검증, 수평쌍)
 ```
-SRS (요구사항) → SDS (설계) → UDS (단위설계) → STS (단위시험) → SUTS (소프트웨어 통합시험) → SITS (시스템 통합시험)
+SyRS (시스템 요구)        ─────►  SyTS  (시스템 시험)
+HSIS (HW-SW 인터페이스)   ─────►  SyITS (시스템 통합시험)
+SDS  (SW 아키텍처 설계)   ─────►  SITS  (SW 통합시험)
+UDS  (단위 상세 설계)     ─────►  SUTS  (SW 단위시험)
+Source (소스코드)         ─────►  VectorCAST (실행 결과)
 ```
+- SW 요구(SRS/SwRS)는 추적 허브(요구사항 행) — STS(SW 요구 기반 시험)로 검증되고, 위로 SyRS·HSIS, 아래로 SDS→UDS→Source, 가로로 각 시험 밴드에 연결된다.
+- 밴드 SSOT(10, backend `BANDS` = frontend `_TRACE_BANDS` lockstep): SyRS·SDS·HSIS·UDS·STS·SUTS·SITS·SyTS·SyITS·VectorCAST. 모든 링크는 `target=요구ID`의 방사형(star) — 밴드↔밴드 직접 엣지 아님.
+- ⚠ 라벨 주의: **SUTS=SW 단위시험, SITS=SW 통합시험, SyITS=시스템 통합시험, SyTS=시스템 시험** (과거 'SUTS=SW통합 / SITS=시스템통합' 표기는 오류였음).
 
 ### ASIL 등급 인식
 - **ASIL D**: 최고 안전 등급. MC/DC 커버리지, 완전한 추적성, 코드 리뷰 필수

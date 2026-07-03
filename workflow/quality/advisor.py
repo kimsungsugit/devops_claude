@@ -141,7 +141,7 @@ _SWSA_ADVICE = {
     },
 }
 
-# SITS(시스템 통합시험) — 추적성/IO proxy(실행 커버리지 아님).
+# SITS(SW 통합시험 — 시스템 통합시험은 SyITS) — 추적성/IO proxy(실행 커버리지 아님).
 _SITS_ADVICE = {
     "requirement_traceability_pct": {
         "label": "요구사항 추적성",
