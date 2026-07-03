@@ -2853,7 +2853,7 @@ function TraceTreeFunc({ fn, tests, parentId, expanded, onToggle }) {
 }
 
 /* ── CallTree — tree-sitter 정밀 함수 호출 트리 (viewMode='calltree') ──────────
- * 추적성 매트릭스와 같은 섹션('추적성 분석') 안에서 함수 호출 관계를 보여준다.
+ * 추적성 매트릭스와 같은 섹션('요구사항 커버리지') 안에서 함수 호출 관계를 보여준다.
  * 백엔드 POST /api/jenkins/call-tree (engine='precise', build_call_tree_precise)가
  * parse_c_project(tree-sitter)로 호출엣지를 추출하고, 노드에 ASIL/파일/시그니처를 실어준다.
  * - entry(진입 함수)는 빌드 소스의 known 함수명과 일치해야 적중. 매트릭스 source_ids에서 자동완성.
@@ -2963,7 +2963,10 @@ function CallTreeView({ job, cacheRoot, buildSelector, sourceRoot, seedFns, toas
   const [entry, setEntry] = useState(initialEntry || '');
   const [depth, setDepth] = useState(5);
   const [includeExternal, setIncludeExternal] = useState(false);
-  const [reverse, setReverse] = useState(false); // 역방향(called-by): 누가 이 함수를 호출하나
+  // 방향: callee(호출 →) / caller(← 역호출) / both(↕ 양방향 — 한 함수 중심 caller+callee 동시)
+  const [direction, setDirection] = useState('callee');
+  const reverse = direction === 'caller';
+  const bidir = direction === 'both';
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [expanded, setExpanded] = useState(() => new Set());
@@ -2978,6 +2981,35 @@ function CallTreeView({ job, cacheRoot, buildSelector, sourceRoot, seedFns, toas
   // allRoots=true면 진입 함수 없이 백엔드가 in-degree 0 함수(+순환 대표)를 자동 루트로 전체 forest 구성.
   const load = useCallback(async (allRoots = false) => {
     const entries = String(entry || '').split(/[\n,]/).map(s => s.trim()).filter(Boolean);
+    // 양방향(피벗): 진입 함수 1개 중심으로 callee(정방향)·caller(역방향)를 동시 요청. all_roots 무의미.
+    if (bidir) {
+      if (!entries.length) { toast('warning', '양방향 뷰는 진입 함수가 필요합니다 (예: main).'); return; }
+      setLoading(true);
+      try {
+        const body = (rev) => ({
+          job_url: job?.url || '', cache_root: cacheRoot || '.devops_pro_cache',
+          build_selector: buildSelector || 'lastSuccessfulBuild', source_root: sourceRoot || '',
+          all_roots: false, reverse: rev, entry: entries.join(','),
+          max_depth: Math.max(1, Math.min(20, Number(depth) || 5)), include_external: includeExternal, engine: 'precise',
+        });
+        const [callees, callers] = await Promise.all([
+          post('/api/jenkins/call-tree', body(false)),
+          post('/api/jenkins/call-tree', body(true)),
+        ]);
+        if (!mountedRef.current) return;
+        setData({ bidir: true, callers, callees, stats: callees?.stats || {} });
+        setExpanded(new Set());
+        const st = callees?.stats || {};
+        const miss = [...(callees?.missing || []), ...(callers?.missing || [])];
+        if (miss.length) toast('warning', `미발견 함수: ${[...new Set(miss)].slice(0, 5).join(', ')} — 함수명을 확인하세요.`);
+        else toast('success', `양방향 콜트리 (${st.engine || '?'} · 함수 ${st.functions ?? 0})`);
+      } catch (e) {
+        if (mountedRef.current) toast('error', e?.status === 404
+          ? '캐시된 빌드가 없습니다 — 먼저 Jenkins 빌드를 동기화하세요.'
+          : `양방향 콜트리 실패: ${e.message}`);
+      } finally { if (mountedRef.current) setLoading(false); }
+      return;
+    }
     if (!allRoots && !entries.length) { toast('warning', '진입 함수명을 입력하세요 (예: main). 또는 [전체 트리]로 모든 루트를 자동 구성하세요.'); return; }
     setLoading(true);
     try {
@@ -3027,7 +3059,7 @@ function CallTreeView({ job, cacheRoot, buildSelector, sourceRoot, seedFns, toas
     } finally {
       if (mountedRef.current) setLoading(false);
     }
-  }, [entry, depth, includeExternal, reverse, job, cacheRoot, buildSelector, sourceRoot, toast]);
+  }, [entry, depth, includeExternal, reverse, bidir, job, cacheRoot, buildSelector, sourceRoot, toast]);
 
   // 표에서 함수 클릭 진입(initialEntry) 시 자동 1회 로드 — 검색 입력 없이 바로 콜트리 표시.
   const didAutoLoad = useRef(false);
@@ -3041,8 +3073,9 @@ function CallTreeView({ job, cacheRoot, buildSelector, sourceRoot, seedFns, toas
   // 진입점(boot)→ISR→일반 순 정렬(역방향은 이름순). load의 _ctBootExpansion과 동일 정렬 함수·동일
   // reverse(로드된 데이터 기준 st.reverse)라 자동펼침 path가 정합.
   const sortedTrees = useMemo(() => _ctSortRoots(trees, st.reverse), [trees, st.reverse]);
-  // 방향 토글을 바꾸고 재조회 전이면 표시 트리(data 기준)와 컨트롤(reverse)이 불일치 — 시각 단서 노출.
-  const dirStale = !!data && (!!st.reverse !== reverse);
+  // 방향 토글을 바꾸고 재조회 전이면 표시 데이터(로드 시점 방향)와 컨트롤(direction)이 불일치 — 시각 단서.
+  const loadedBidir = !!data?.bidir;
+  const dirStale = !!data && (loadedBidir !== bidir || (!loadedBidir && (!!st.reverse !== reverse)));
 
   return (
     <div style={{ padding: '8px 0' }}>
@@ -3067,32 +3100,35 @@ function CallTreeView({ job, cacheRoot, buildSelector, sourceRoot, seedFns, toas
           외부 함수
         </label>
         <label style={{ fontSize: 11, display: 'inline-flex', alignItems: 'center', gap: 4 }}
-          title="방향 — 호출: 이 함수가 부르는 함수(callee, 하향) / 역호출: 이 함수를 부르는 함수(caller, 상향 — 영향분석)">
+          title="방향 — 호출: 이 함수가 부르는 함수(callee, 하향) / 역호출: 이 함수를 부르는 함수(caller, 상향 — 영향분석) / 양방향: 한 함수 중심으로 위 caller·아래 callee 동시(진입 함수 필요)">
           방향
-          <select value={reverse ? 'rev' : 'fwd'} onChange={e => setReverse(e.target.value === 'rev')}
+          <select value={direction} onChange={e => setDirection(e.target.value)}
             style={{ padding: '5px 6px', fontSize: 12, border: '1px solid var(--border)', borderRadius: 4, background: 'var(--bg)', color: 'var(--fg)', cursor: 'pointer' }}>
-            <option value="fwd">호출 → (callee)</option>
-            <option value="rev">← 역호출 (caller)</option>
+            <option value="callee">호출 → (callee)</option>
+            <option value="caller">← 역호출 (caller)</option>
+            <option value="both">↕ 양방향 (caller+callee)</option>
           </select>
         </label>
         <button type="button" onClick={() => load(false)} disabled={loading}
           style={{ padding: '6px 14px', fontSize: 12, fontWeight: 600, border: 'none', borderRadius: 4, cursor: loading ? 'default' : 'pointer',
             background: loading ? 'var(--border)' : 'var(--accent)', color: '#fff' }}>
-          {loading ? '분석 중…' : (reverse ? '역콜트리 생성' : '콜트리 생성')}
+          {loading ? '분석 중…' : (bidir ? '양방향 생성' : reverse ? '역콜트리 생성' : '콜트리 생성')}
         </button>
-        <button type="button" onClick={() => load(true)} disabled={loading}
-          title="진입 함수 입력 없이, 아무 함수도 호출하지 않는 함수(루트: main·ISR·콜백·미사용)를 자동 탐지해 프로젝트 전체 호출 트리를 구성합니다."
-          style={{ padding: '6px 14px', fontSize: 12, fontWeight: 600, borderRadius: 4, cursor: loading ? 'default' : 'pointer',
-            background: 'var(--bg)', color: 'var(--accent)', border: '1px solid var(--accent)' }}>
-          {reverse ? '전체 역트리' : '전체 트리'}
-        </button>
+        {!bidir && (
+          <button type="button" onClick={() => load(true)} disabled={loading}
+            title="진입 함수 입력 없이, 아무 함수도 호출하지 않는 함수(루트: main·ISR·콜백·미사용)를 자동 탐지해 프로젝트 전체 호출 트리를 구성합니다."
+            style={{ padding: '6px 14px', fontSize: 12, fontWeight: 600, borderRadius: 4, cursor: loading ? 'default' : 'pointer',
+              background: 'var(--bg)', color: 'var(--accent)', border: '1px solid var(--accent)' }}>
+            {reverse ? '전체 역트리' : '전체 트리'}
+          </button>
+        )}
       </div>
 
       {dirStale && (
         <div style={{ fontSize: 11, color: '#92400e', background: '#fffbeb', border: '1px solid #fde68a',
           borderRadius: 4, padding: '5px 8px', marginBottom: 8 }}>
-          ⚠ 방향을 바꿨습니다 — 현재 표시된 트리는 여전히 <strong>{st.reverse ? '역호출(caller)' : '호출(callee)'}</strong> 기준입니다.
-          [{reverse ? '역콜트리 생성' : '콜트리 생성'}]을 다시 눌러 반영하세요.
+          ⚠ 방향을 바꿨습니다 — 현재 표시된 것은 여전히 <strong>{loadedBidir ? '양방향' : st.reverse ? '역호출(caller)' : '호출(callee)'}</strong> 기준입니다.
+          [{bidir ? '양방향 생성' : reverse ? '역콜트리 생성' : '콜트리 생성'}]을 다시 눌러 반영하세요.
         </div>
       )}
 
@@ -3100,13 +3136,68 @@ function CallTreeView({ job, cacheRoot, buildSelector, sourceRoot, seedFns, toas
         <div style={{ fontSize: 12, color: 'var(--text-muted)', padding: '8px 4px' }}>
           진입 함수명을 입력하고 <strong>콜트리 생성</strong>을 누르면 tree-sitter로 분석한 함수 호출 트리를 보여줍니다.
           진입점을 모르면 <strong>전체 트리</strong>로 프로젝트의 모든 루트 함수(main·ISR·콜백·미사용)를 자동 탐지해 전체 호출 구조를 구성합니다.
-          <strong>방향</strong>을 <em>역호출</em>로 바꾸면 “누가 이 함수를 호출하나(caller)”를 상향 추적합니다(영향분석).
+          <strong>방향</strong>을 <em>역호출</em>로 바꾸면 “누가 이 함수를 호출하나(caller)”를 상향 추적하고, <em>양방향</em>은 한 함수를 중심에 두고 위 caller·아래 callee를 동시에 보여줍니다(영향분석).
           함수포인터 참조로 추론된 엣지는 <span style={{ color: '#7c3aed' }}>↪ 참조</span>, 대상을 못 잇는 간접호출(디스패치·콜백)은 <span style={{ color: '#ea580c' }}>⚡ 간접호출</span> 배지로 표시합니다.
           매트릭스가 로드돼 있으면 입력란에서 설계 함수명 자동완성을 제안합니다.
         </div>
       )}
 
-      {data && (
+      {data && data.bidir && (() => {
+        // 양방향(피벗): 중심 함수를 두고 위=caller, 아래=callee. caller/callee 트리는 모두 진입 함수에
+        // 뿌리내리므로 각 트리의 root children만 렌더(진입 함수는 중앙에 한 번만). 경로 접두사 c/e로 분리.
+        const centerNode = data.callees?.trees?.[0] || data.callers?.trees?.[0] || null;
+        const centerName = centerNode?.name || '(진입 함수)';
+        const cAsil = centerNode?.asil ? String(centerNode.asil).toUpperCase() : '';
+        const callers = data.callers?.trees?.[0]?.calls || [];
+        const callees = data.callees?.trees?.[0]?.calls || [];
+        const bst = data.callees?.stats || {};
+        const notFound = !(data.callees?.trees?.length) && !(data.callers?.trees?.length);
+        return (
+          <div>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, fontSize: 11, color: 'var(--text-muted)', marginBottom: 8 }}>
+              <span style={{ fontWeight: 700, color: '#0369a1' }}>↕ 양방향 (caller+callee)</span>
+              <span>엔진 <strong style={{ color: bst.engine === 'tree-sitter' ? '#16a34a' : '#d97706' }}>{bst.engine || '?'}</strong></span>
+              <span>함수 {bst.functions ?? 0}</span>
+            </div>
+            {notFound ? (
+              <div style={{ fontSize: 12, color: 'var(--text-muted)', padding: 12, textAlign: 'center', border: '1px dashed var(--border)', borderRadius: 6 }}>
+                입력한 함수를 빌드 소스에서 찾지 못했습니다 — 함수명/소스 캐시를 확인하세요.
+              </div>
+            ) : (
+              <div>
+                <div style={{ fontSize: 11, fontWeight: 600, color: '#c026d3', marginBottom: 4 }}>⬆ 이 함수를 호출하는 함수 (caller)</div>
+                {callers.length ? (
+                  <ul style={{ margin: '0 0 6px', padding: 0 }}>
+                    {callers.map((n, i) => (
+                      <CallTreeNode key={`c${i}`} node={n} path={`c${i}`} expanded={expanded} onToggle={toggle} depth={0} includeExternal={includeExternal} />
+                    ))}
+                  </ul>
+                ) : <div style={{ fontSize: 11, color: 'var(--text-muted)', padding: '2px 6px 6px' }}>호출하는 함수 없음 (진입점·미사용)</div>}
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 10px', margin: '4px 0',
+                  background: 'var(--bg)', border: '2px solid var(--accent)', borderRadius: 6 }}>
+                  <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>◆ 중심</span>
+                  <strong style={{ fontFamily: 'monospace', fontSize: 12 }}>{centerName}</strong>
+                  {cAsil && <span style={{ fontSize: 9, padding: '0 5px', borderRadius: 8, fontWeight: 700, color: '#fff', background: _ASIL_COLORS[cAsil] || '#6b7280' }}>ASIL {cAsil}</span>}
+                  {Array.isArray(centerNode?.indirect) && centerNode.indirect.length > 0 && (
+                    <span style={{ fontSize: 9, padding: '0 5px', borderRadius: 8, fontWeight: 700, color: '#fff', background: '#ea580c' }}
+                      title={`미해결 간접호출:\n· ${centerNode.indirect.join('\n· ')}`}>⚡ 간접호출 {centerNode.indirect.length}</span>
+                  )}
+                </div>
+                <div style={{ fontSize: 11, fontWeight: 600, color: '#0891b2', margin: '4px 0' }}>⬇ 이 함수가 호출하는 함수 (callee)</div>
+                {callees.length ? (
+                  <ul style={{ margin: 0, padding: 0 }}>
+                    {callees.map((n, i) => (
+                      <CallTreeNode key={`e${i}`} node={n} path={`e${i}`} expanded={expanded} onToggle={toggle} depth={0} includeExternal={includeExternal} />
+                    ))}
+                  </ul>
+                ) : <div style={{ fontSize: 11, color: 'var(--text-muted)', padding: '2px 6px' }}>호출하는 하위 함수 없음 (leaf)</div>}
+              </div>
+            )}
+          </div>
+        );
+      })()}
+
+      {data && !data.bidir && (
         <div>
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, fontSize: 11, color: 'var(--text-muted)', marginBottom: 8 }}>
             {st.reverse && <span style={{ fontWeight: 700, color: '#c026d3' }} title="역방향 — 자식은 이 함수를 호출하는 함수(caller)">← 역콜트리(누가 호출하나)</span>}

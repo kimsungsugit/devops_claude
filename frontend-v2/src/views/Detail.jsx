@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import { useState, useEffect, useCallback, useRef, useMemo, Fragment } from 'react';
 import { useJob, useJenkinsCfg, useToast } from '../App.jsx';
 import { post } from '../api.js';
 import { loadProjectFromCache } from '../projectLoader.js';
@@ -13,14 +13,15 @@ import ProjectSetupSection from '../components/sections/ProjectSetupSection.jsx'
 const SECTIONS = [
   // 빌드 정보 + SCM 통합 — SCM은 빌드 로그 아래에 배치(BuildInfoWithScmSection).
   { id: 'build',   icon: '🔨', label: '빌드 & 입력 데이터 정보', Component: BuildInfoWithScmSection },
-  { id: 'analysis',icon: '📊', label: '프로젝트 분석', Component: AnalysisSection },
+  { id: 'analysis',icon: '📊', label: '테스트 결과', Component: AnalysisSection },
   // 프로젝트 설정 탭 일단 숨김(hidden: true) — nav/content/외부네비에서 제외. 되돌리려면 hidden 제거.
   { id: 'setup',   icon: '⚙️', label: '프로젝트 설정', Component: ProjectSetupSection, hidden: true },
-  { id: 'impact',  icon: '🔍', label: '변경 영향 가이드', Component: ImpactGuideSection },
-  { id: 'srssds',  icon: '📋', label: '추적성 분석', Component: SrsSdsSection },
+  { id: 'impact',  icon: '🔍', label: '변경 영향 평가', Component: ImpactGuideSection },
+  { id: 'srssds',  icon: '📋', label: '요구사항 커버리지', Component: SrsSdsSection },
   // 생성 6종(문서/리포트/SwUT/SwIT/SwSA/통합결과)을 단일 탭으로 통합 — 내부 옵션 세그먼트로 전환.
   { id: 'docgen',  icon: '📝', label: '문서 생성',     Component: DocGenHubSection },
-  { id: 'ai',      icon: '🤖', label: 'AI 어시스턴트', Component: AiAssistSection },
+  // AI 어시스턴트는 성격이 다른 대화형 도구 — 좌측 nav에서 구분선으로 앞 5개(결과/분석/생성)와 분리.
+  { id: 'ai',      icon: '🤖', label: 'AI 어시스턴트', Component: AiAssistSection, dividerBefore: true },
 ];
 
 // 통합 전 개별 탭 id — 외부 네비게이션 호환용. docgen 허브로 라우팅 후 서브 선택.
@@ -193,15 +194,25 @@ export default function Detail() {
         {/* Left accordion nav */}
         <nav className="accordion-nav">
           {SECTIONS.filter(s => !s.hidden).map(s => (
-            <div key={s.id} className="accordion-item">
-              <div
-                className={`accordion-header${activeSection === s.id ? ' active' : ''}`}
-                onClick={() => setActiveSection(s.id)}
-              >
-                <span className="accordion-icon">{s.icon}</span>
-                <span className="accordion-label">{s.label}</span>
+            <Fragment key={s.id}>
+              {s.dividerBefore && (
+                <div
+                  className="accordion-divider"
+                  role="separator"
+                  aria-hidden="true"
+                  style={{ height: 1, background: 'var(--border)', margin: '8px 12px' }}
+                />
+              )}
+              <div className="accordion-item">
+                <div
+                  className={`accordion-header${activeSection === s.id ? ' active' : ''}`}
+                  onClick={() => setActiveSection(s.id)}
+                >
+                  <span className="accordion-icon">{s.icon}</span>
+                  <span className="accordion-label">{s.label}</span>
+                </div>
               </div>
-            </div>
+            </Fragment>
           ))}
         </nav>
 

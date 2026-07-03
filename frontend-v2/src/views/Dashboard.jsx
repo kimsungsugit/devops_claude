@@ -493,7 +493,7 @@ export default function Dashboard({ onGoDetail }) {
           <div className="panel-header"><span className="panel-title">⚡ 오프라인 캐시 보기</span></div>
           <div className="text-sm text-muted" style={{ marginBottom: 8, lineHeight: 1.5 }}>
             Jenkins 프로젝트 목록을 불러오지 못했습니다(미연결/다운). 이전에 분석돼 <b>캐시된 빌드</b>는 Jenkins 없이 바로 볼 수 있습니다 —
-            동기화를 건너뛰고 캐시된 리포트만 읽어 프로젝트 분석 화면을 엽니다.
+            동기화를 건너뛰고 캐시된 리포트만 읽어 프로젝트 결과 화면을 엽니다.
           </div>
           {favorites.length > 0 && (
             <div style={{ marginBottom: 8 }}>

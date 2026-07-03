@@ -296,7 +296,7 @@ function ScmSection() {
   };
 
   // 정적분석 폴더(codesonar)도 복수 경로 — CodeSonar/QAC HIS/CPD/CodeEye 리포트 폴더.
-  // 프로젝트 분석 '정적분석' 패널이 linked_docs.codesonar를 읽으므로 vectorcast와 별도 필드로 관리.
+  // 테스트 결과 '정적분석' 패널이 linked_docs.codesonar를 읽으므로 vectorcast와 별도 필드로 관리.
   const setCodesonarPaths = (arr) =>
     setForm(p => ({ ...p, linked_docs: { ...p.linked_docs, codesonar: Array.isArray(arr) ? arr : [] } }));
 
@@ -417,7 +417,7 @@ function ScmSection() {
               onChange={setCodesonarPaths}
               onBrowse={pickCodesonarPath}
               placeholder="U:\...\09.정적분석\01.Static Analysis (폴더 경로)"
-              hint="프로젝트 분석 '정적분석' 패널이 이 폴더에서 CodeSonar(PDF)·CPD(XML)·QAC HIS(PDF)·CodeEye(PDF)를 찾아 표시합니다. VectorCAST 결과 로그와는 다른 필드입니다."
+              hint="테스트 결과 '정적분석' 패널이 이 폴더에서 CodeSonar(PDF)·CPD(XML)·QAC HIS(PDF)·CodeEye(PDF)를 찾아 표시합니다. VectorCAST 결과 로그와는 다른 필드입니다."
             />
           </div>
           <button className="btn-primary" onClick={saveScm} style={{ marginTop: 8 }}>{editMode ? '수정 저장' : '등록'}</button>

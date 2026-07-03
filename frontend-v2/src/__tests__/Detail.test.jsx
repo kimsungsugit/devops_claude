@@ -133,7 +133,7 @@ describe('Detail', () => {
     // SCM은 더 이상 별도 탭이 아니라 빌드 탭에 통합됨.
     expect(screen.getAllByText(/빌드 & 입력 데이터 정보/).length).toBeGreaterThanOrEqual(1);
     expect(screen.getByText('문서 생성')).toBeInTheDocument();
-    expect(screen.getByText('프로젝트 분석')).toBeInTheDocument();
+    expect(screen.getByText('테스트 결과')).toBeInTheDocument();
   });
 
   it('selectedJob이 있으면 브레드크럼에 Job 이름을 표시한다', () => {
@@ -220,9 +220,9 @@ describe('Detail', () => {
     mockSelectedJob = { name: 'my-job', url: 'http://jenkins/job/my-job/' };
     render(<Detail />);
 
-    // Act — build(기본, BuildInfo+SCM 통합 탭) → 프로젝트 분석 방문
+    // Act — build(기본, BuildInfo+SCM 통합 탭) → 테스트 결과 방문
     expect(screen.getByTestId('section-scm')).toBeInTheDocument(); // 통합 탭에 SCM 포함
-    await user.click(screen.getByText('프로젝트 분석'));
+    await user.click(screen.getByText('테스트 결과'));
 
     // Assert — 활성(analysis) + 이전 방문(build 통합=build/scm)이 모두 DOM에 유지(언마운트 X = 상태 보존)
     expect(screen.getByTestId('section-analysis')).toBeInTheDocument();
@@ -239,10 +239,10 @@ describe('Detail', () => {
 
     // Act
     render(<Detail />);
-    await user.click(screen.getByText('프로젝트 분석'));
+    await user.click(screen.getByText('테스트 결과'));
 
     // Assert — 브레드크럼에서도 활성 섹션 라벨이 나타남(네비 라벨 + 브레드크럼 = 2회 이상)
-    expect(screen.getAllByText('프로젝트 분석').length).toBeGreaterThanOrEqual(2);
+    expect(screen.getAllByText('테스트 결과').length).toBeGreaterThanOrEqual(2);
   });
 
   // ── 브레드크럼 프로젝트 선택기 ─────────────────────────────────────
