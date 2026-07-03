@@ -47,7 +47,7 @@ describe('App', () => {
   it('renders all tab buttons', () => {
     render(<App />);
     expect(screen.getByText('대시보드')).toBeInTheDocument();
-    expect(screen.getByText('세부 데이터')).toBeInTheDocument();
+    expect(screen.getByText('프로젝트 결과')).toBeInTheDocument();
     // '설정' 탭은 관리자 전용 — 기본(비관리자)에서는 숨김
     expect(screen.queryByText('설정')).not.toBeInTheDocument();
   });
@@ -62,9 +62,9 @@ describe('App', () => {
     const user = userEvent.setup();
     render(<App />);
 
-    // '설정'은 admin-only라 기본 탭 집합에 없음 → '세부 데이터'로 대체
-    await user.click(screen.getByText('세부 데이터'));
-    expect(screen.getByText('세부 데이터')).toHaveClass('active');
+    // '설정'은 admin-only라 기본 탭 집합에 없음 → '프로젝트 결과'로 대체
+    await user.click(screen.getByText('프로젝트 결과'));
+    expect(screen.getByText('프로젝트 결과')).toHaveClass('active');
     expect(screen.getByText('대시보드')).not.toHaveClass('active');
   });
 

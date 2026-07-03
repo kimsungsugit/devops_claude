@@ -1,9 +1,13 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
 import { post, api, defaultCacheRoot } from '../api.js';
 import { useToast, useJenkinsCfg, useJob } from '../App.jsx';
+import { pickScmForJob, loadProjectFromCache } from '../projectLoader.js';
 import JobCard from '../components/JobCard.jsx';
 import ResultPanel from '../components/ResultPanel.jsx';
 import AggregateCharts from '../components/AggregateCharts.jsx';
+
+// pickScmForJob은 projectLoader로 이관됨 — 기존 import 경로(views/Dashboard) 호환 위해 re-export.
+export { pickScmForJob };
 
 /* ── Step definitions ─────────────────────────────────────────────── */
 const STEPS = [
@@ -34,30 +38,6 @@ async function pollJenkinsProgress(jobUrl, buildSelector, jobId, action, { onMsg
     if (p.message || p.stage) onMsg(p.message || p.stage);
     if (p.done || p.error) return p;
   }
-}
-
-/**
- * Pick the most likely SCM registry entry for the given Jenkins job URL.
- *
- * Why this matters: the backend resolver treats `scm_id` as an authoritative
- * override (it short-circuits URL auto-matching). If we blindly send
- * `scmList[0]` when multiple projects are registered, a wrong entry's
- * credentials would be used for checkout. So we only assert a match when we
- * have reasonable confidence; otherwise we omit `scm_id` and let the backend
- * auto-resolve by repo_url.
- */
-export function pickScmForJob(scmList, jobUrl) {
-  if (!Array.isArray(scmList) || scmList.length === 0) return null;
-  if (scmList.length === 1) return scmList[0];
-  const jobStr = String(jobUrl || '').toLowerCase();
-  for (const entry of scmList) {
-    const tokens = [entry.id, entry.name]
-      .filter(Boolean)
-      .map(s => String(s).toLowerCase())
-      .filter(s => s.length >= 3);
-    if (tokens.some(t => jobStr.includes(t))) return entry;
-  }
-  return null;
 }
 
 /** Poll impact job until completed or failed */
@@ -418,30 +398,12 @@ export default function Dashboard({ onGoDetail }) {
     const jobUrl = rawUrl.trim().replace(/\/+$/, '') + '/';
     const name = jobUrl.split('/').filter(Boolean).pop();
     setSelectedJob({ name, url: jobUrl });
-    const cacheRoot = defaultCacheRoot(jobUrl) || cfg.cacheRoot || '';
-    const buildSelector = cfg.buildSelector || 'lastSuccessfulBuild';
     try {
       toast('info', `캐시에서 '${name}' 불러오는 중...`);
-      let scmList = [];
-      try {
-        const d = await api('/api/scm/list');
-        scmList = Array.isArray(d) ? d : (d.items ?? d.registries ?? []);
-      } catch { scmList = []; }
-      const matchedScm = pickScmForJob(scmList, jobUrl);
-      const raw = await post('/api/jenkins/report/summary', { job_url: jobUrl, cache_root: cacheRoot, build_selector: buildSelector });
-      const reportData = {
-        ...raw,
-        build_number: raw?.kpis?.build?.build_number ?? raw?.build_number,
-        result: raw?.kpis?.build?.result ?? raw?.result,
-        coverage: raw?.kpis?.coverage?.line_rate != null
-          ? Math.round(raw.kpis.coverage.line_rate * 100)
-          : (typeof raw?.coverage === 'number' ? raw.coverage : null),
-      };
-      const artMap = raw?.artifacts ?? {};
-      const artifacts = Object.entries(artMap).flatMap(([type, list]) =>
-        (Array.isArray(list) ? list : []).map(f => ({ type, name: (f.path ?? f.title ?? '').split(/[\\/]/).pop(), path: f.path, title: f.title })));
-      setAnalysisResult({ artifacts, reportData, scmList, matchedScm, impactData: null, jobUrl, cacheRoot, _offline: true });
-      toast('success', `캐시 로드 완료 — 빌드 #${reportData.build_number ?? '?'} (Jenkins 미연결)`);
+      // 캐시 로드 로직은 projectLoader.loadProjectFromCache로 단일화(Detail 브레드크럼 전환과 공유).
+      const result = await loadProjectFromCache(jobUrl, cfg);
+      setAnalysisResult(result);
+      toast('success', `캐시 로드 완료 — 빌드 #${result.reportData?.build_number ?? '?'} (Jenkins 미연결)`);
       onGoDetail?.();
     } catch (e) {
       toast('error', `캐시 로드 실패: ${e.message} — 이 Job의 캐시가 없을 수 있습니다.`);

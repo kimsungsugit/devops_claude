@@ -5,7 +5,7 @@
  * - 커버리지가 유닛테스트/통합테스트 그룹으로 통합('커버리지 상세' 서브섹션, 구 '코드 커버리지' 패널 제거)
  * - 유닛/통합테스트 그룹의 SwUTCV/SwITCV 정합성 검증(Coverage ↔ SUTR/SITR)
  * - "VectorCAST 테스트" 패널 렌더링
- * - "코드 메트릭" 패널 렌더링
+ * - 정적분석 "코드 규모 (lizard)" 지표 렌더링 (구 '코드 메트릭' 패널 이동)
  * - analysisResult에 coverage 데이터가 있을 때 퍼센트 표시
  * - analysisResult가 없을 때(빈 데이터) 안전하게 렌더링
  * - "함수 복잡도 상세" 불러오기 버튼 존재 확인
@@ -43,7 +43,7 @@ vi.mock('../api.js', () => ({
   defaultCacheRoot: vi.fn(() => ''),
 }));
 
-const { default: AnalysisSection } = await import('../components/sections/AnalysisSection.jsx');
+const { default: AnalysisSection, saModules } = await import('../components/sections/AnalysisSection.jsx');
 
 /* ── 픽스처 ── */
 const makeJob = () => ({
@@ -101,12 +101,20 @@ describe('AnalysisSection', () => {
     expect(screen.getByText('정적분석 (Helix QAC · MISRA-C)')).toBeInTheDocument();
   });
 
-  it('"코드 메트릭" 패널 제목을 렌더링한다', () => {
-    // Arrange & Act
-    render(<AnalysisSection job={makeJob()} analysisResult={makeAnalysisResult()} />);
+  it('code_metrics가 있으면 정적분석에 "코드 규모 (lizard)" 지표를 표시한다', () => {
+    // Arrange — 구 '코드 메트릭' 패널은 제거되고 고유 지표가 정적분석으로 이동됨
+    const result = makeAnalysisResult();
+    result.reportData.kpis.code_metrics = { code_files: 128, functions: 512, nloc: 24300 };
 
-    // Assert
-    expect(screen.getByText('코드 메트릭')).toBeInTheDocument();
+    // Act
+    render(<AnalysisSection job={makeJob()} analysisResult={result} />);
+
+    // Assert — lizard 코드 규모 카드가 정적분석 섹션에 표시(소스파일/함수수/NLOC)
+    expect(screen.getByText(/코드 규모 \(lizard\)/)).toBeInTheDocument();
+    expect(screen.getByText('소스 파일')).toBeInTheDocument();
+    expect(screen.getByText('함수 수 (lizard)')).toBeInTheDocument();
+    expect(screen.getByText('NLOC')).toBeInTheDocument();
+    expect(screen.getByText('24,300')).toBeInTheDocument();  // nloc toLocaleString
   });
 
   it('"함수 복잡도 상세" 패널 제목을 렌더링한다', () => {
@@ -123,7 +131,7 @@ describe('AnalysisSection', () => {
     // Arrange & Act
     render(<AnalysisSection job={makeJob()} analysisResult={makeAnalysisResult()} />);
 
-    // Assert: Line Coverage 카드 표시(코드 메트릭 '라인 커버리지'와 85% 중복되므로 getAllByText)
+    // Assert: Line Coverage 카드 표시 (구 코드 메트릭 '라인 커버리지' 중복 카드는 제거됨)
     expect(screen.getByText('Line Coverage')).toBeInTheDocument();
     expect(screen.getAllByText('85%').length).toBeGreaterThan(0);
   });
@@ -714,5 +722,30 @@ describe('AnalysisSection', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+// ── saModules: SCM 정적분석 응답 정규화(다중모듈 + 하위호환) ──────────────
+describe('saModules', () => {
+  it('modules 배열이 있으면 그대로 반환한다', () => {
+    const tool = { ok: true, modules: [{ label: 'APP' }, { label: 'BOOT' }] };
+    expect(saModules(tool).map((m) => m.label)).toEqual(['APP', 'BOOT']);
+  });
+
+  it('구 응답(modules 없음, ok)이면 단일 객체를 1-모듈로 감싼다', () => {
+    const legacy = { ok: true, summary: { active_warnings: 3 } };
+    const out = saModules(legacy);
+    expect(out).toHaveLength(1);
+    expect(out[0]).toBe(legacy);
+  });
+
+  it('ok=false 이거나 null/undefined면 빈 배열', () => {
+    expect(saModules({ ok: false })).toEqual([]);
+    expect(saModules(null)).toEqual([]);
+    expect(saModules(undefined)).toEqual([]);
+  });
+
+  it('빈 modules 배열은 그대로 빈 배열(ok여도 감싸지 않음)', () => {
+    expect(saModules({ ok: true, modules: [] })).toEqual([]);
   });
 });

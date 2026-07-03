@@ -166,6 +166,20 @@ describe('Settings', () => {
     expect(screen.getByPlaceholderText('my-project')).toBeInTheDocument();
   });
 
+  it('인터랙션: SCM 폼에 정적분석 폴더(codesonar) 필드가 VectorCAST 필드와 함께 표시된다', async () => {
+    // Arrange — 정적분석 패널(linked_docs.codesonar) 데이터 소스를 UI로 등록 가능해야 함
+    const user = userEvent.setup();
+    render(<Settings />);
+
+    // Act
+    await user.click(screen.getByText('+ 새 SCM 등록'));
+
+    // Assert — VectorCAST 결과 로그와 별개로 '정적분석 폴더' 필드가 렌더된다
+    // (VectorCAST 문구는 codesonar hint에도 등장하므로 getAllByText, '정적분석 폴더' 라벨은 유일)
+    expect(screen.getAllByText(/VectorCAST 결과 로그/).length).toBeGreaterThan(0);
+    expect(screen.getByText(/정적분석 폴더/)).toBeInTheDocument();
+  });
+
   // STS-SETTINGS-010: 입력 자료 — 기준 SCM 연결문서 상속(이슈③, 이중 입력 제거)
   it('인터랙션: SCM이 있으면 입력 자료에 기준 SCM 상속 UI가 표시되고 빈 칸 채우기가 동작한다', async () => {
     // Arrange: '/api/scm/list'만 SCM 목록 반환(다른 api 호출은 기존대로 undefined)

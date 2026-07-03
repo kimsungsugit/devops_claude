@@ -267,6 +267,7 @@ class JenkinsCallTreeRequest(JenkinsReportRequest):
     source_root: Optional[str] = None
     entry: str = Field("", max_length=4096)
     all_roots: bool = False  # True면 entry 무시하고 in-degree 0 함수(+순환 대표)를 자동 루트로 전체 forest 구성
+    reverse: bool = False     # True면 호출 그래프 반전 → '누가 이 함수를 호출하나(called-by)' 역방향 트리
     max_depth: int = Field(5, ge=1, le=20)
     include_paths: List[str] = []
     exclude_paths: List[str] = []

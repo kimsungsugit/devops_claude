@@ -206,7 +206,7 @@ function StatusFooter() {
 /* ── App root ───────────────────────────────────────────────────────── */
 const ALL_TABS = [
   { id: 'dashboard', label: '대시보드' },
-  { id: 'detail',    label: '세부 데이터' },
+  { id: 'detail',    label: '프로젝트 결과' },
   { id: 'quality',   label: 'Quality', adminOnly: true },
   { id: 'settings',  label: '설정', adminOnly: true },
 ];

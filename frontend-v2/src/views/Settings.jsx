@@ -158,7 +158,7 @@ function ScmSection() {
       branch: '',
       base_ref: 'HEAD~1',
       source_root: '',
-      linked_docs: { srs: '', sds: '', uds: '', sts: '', suts: '', sits: '', hsis: '', stp: '', vectorcast: [] },
+      linked_docs: { srs: '', sds: '', uds: '', sts: '', suts: '', sits: '', hsis: '', stp: '', vectorcast: [], codesonar: [] },
     };
   }
 
@@ -295,6 +295,32 @@ function ScmSection() {
     }
   };
 
+  // 정적분석 폴더(codesonar)도 복수 경로 — CodeSonar/QAC HIS/CPD/CodeEye 리포트 폴더.
+  // 프로젝트 분석 '정적분석' 패널이 linked_docs.codesonar를 읽으므로 vectorcast와 별도 필드로 관리.
+  const setCodesonarPaths = (arr) =>
+    setForm(p => ({ ...p, linked_docs: { ...p.linked_docs, codesonar: Array.isArray(arr) ? arr : [] } }));
+
+  const pickCodesonarPath = async () => {
+    try {
+      const picked = await post('/api/file-mode/browse-file', {
+        title: '정적분석 폴더 선택 (CodeSonar/QAC/CPD/CodeEye 리포트 상위 폴더)',
+        kind: 'directory',
+      });
+      if (!picked || !picked.ok || !picked.path) {
+        if (picked?.error === 'cancelled') return;
+        toast('error', `다이얼로그 실패: ${picked?.error || picked?.detail || 'unknown'}`);
+        return;
+      }
+      const cur = Array.isArray(form.linked_docs.codesonar) ? form.linked_docs.codesonar : [];
+      if (cur.includes(picked.path)) { toast('info', '이미 추가된 경로입니다.'); return; }
+      setCodesonarPaths([...cur, picked.path]);
+      await ensureCloudiumPrefix(picked.path);
+      toast('success', '정적분석 폴더 추가됨');
+    } catch (e) {
+      toast('error', `다이얼로그 실패: ${e.message}`);
+    }
+  };
+
   return (
     <div className="settings-section">
       <div className="settings-section-title">
@@ -382,6 +408,16 @@ function ScmSection() {
               paths={form.linked_docs.vectorcast}
               onChange={setVcastPaths}
               onBrowse={pickVcastPath}
+            />
+          </div>
+          <div className="field span-2" style={{ marginTop: 8 }}>
+            <label>정적분석 폴더 (CodeSonar·QAC HIS·CPD·CodeEye 리포트 — 복수 경로)</label>
+            <VcastDocsEditor
+              paths={form.linked_docs.codesonar}
+              onChange={setCodesonarPaths}
+              onBrowse={pickCodesonarPath}
+              placeholder="U:\...\09.정적분석\01.Static Analysis (폴더 경로)"
+              hint="프로젝트 분석 '정적분석' 패널이 이 폴더에서 CodeSonar(PDF)·CPD(XML)·QAC HIS(PDF)·CodeEye(PDF)를 찾아 표시합니다. VectorCAST 결과 로그와는 다른 필드입니다."
             />
           </div>
           <button className="btn-primary" onClick={saveScm} style={{ marginTop: 8 }}>{editMode ? '수정 저장' : '등록'}</button>
@@ -1220,7 +1256,7 @@ function SourceRootEditor({ value, onChange }) {
 // VectorCAST 결과 로그 복수 경로 편집기. 부트로더/FBL/APP 등 결과가 별도
 // vectorcast_rag.json으로 나올 수 있어 SCM별로 여러 경로를 등록한다. paths는
 // string[] (SourceRootEditor의 콤마 string과 달리 array 그대로 다룸).
-function VcastDocsEditor({ paths, onChange, onBrowse }) {
+function VcastDocsEditor({ paths, onChange, onBrowse, placeholder, hint }) {
   const list = Array.isArray(paths) ? paths : [];
   const [draft, setDraft] = useState('');
 
@@ -1263,7 +1299,7 @@ function VcastDocsEditor({ paths, onChange, onBrowse }) {
           value={draft}
           onChange={e => setDraft(e.target.value)}
           onKeyDown={e => e.key === 'Enter' && (e.preventDefault(), addPath())}
-          placeholder="U:\...\report\vectorcast_rag (폴더 경로)"
+          placeholder={placeholder || "U:\\...\\report\\vectorcast_rag (폴더 경로)"}
           spellCheck="false"
           autoComplete="off"
           style={{ flex: 1, fontSize: 12 }}
@@ -1280,8 +1316,7 @@ function VcastDocsEditor({ paths, onChange, onBrowse }) {
       </div>
       {list.length === 0 && (
         <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 4 }}>
-          미등록 시 Jenkins 빌드의 VectorCAST RAG를 사용합니다. 부트로더 등 결과가 별도로
-          나오면 결과가 담긴 폴더 경로를 추가하세요(폴더 안의 vectorcast_rag.json을 자동 탐색).
+          {hint || '미등록 시 Jenkins 빌드의 VectorCAST RAG를 사용합니다. 부트로더 등 결과가 별도로 나오면 결과가 담긴 폴더 경로를 추가하세요(폴더 안의 vectorcast_rag.json을 자동 탐색).'}
         </div>
       )}
     </div>

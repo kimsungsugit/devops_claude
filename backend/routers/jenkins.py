@@ -1589,12 +1589,69 @@ def jenkins_vectorcast_rag_async(req: JenkinsReportRequest) -> Dict[str, Any]:
     )
 
 
-def _load_static_analysis(paths: List[str]) -> Dict[str, Any]:
-    """SCM 등록 정적분석 폴더(또는 개별 파일)에서 4종 도구 산출물을 찾아 파싱한다.
+def _sa_module_of(path: str) -> str:
+    """.../<TOOL>/<MODULE_날짜_버전>/file → 'MODULE_날짜_버전' (파일의 부모 폴더명)."""
+    parts = re.split(r"[\\/]", (path or "").rstrip("\\/"))
+    return parts[-2] if len(parts) >= 2 else ""
 
-    회사 정적분석 4종 = CodeSonar(PDF)·CPD(PMD CPD XML)·QAC HIS Metrics(PDF)·CodeEye(OSS
-    라이선스 종합보고서 PDF). 각 도구별로 재귀 탐색 후 경로 사전순 최신 1개를 선택해 파싱.
-    cloudium 모드는 worker IPC로 read(backend python은 권한 없음). 일부 도구만 있어도 graceful.
+
+def _sa_module_label(path: str) -> str:
+    """모듈 폴더명 → 표시 라벨. 'APP_260527_v0.05.37' → 'APP'. prefix 없으면 폴더명."""
+    folder = _sa_module_of(path)
+    prefix = folder.split("_")[0] if folder else ""
+    return prefix or folder or "?"
+
+
+def _sa_pmd_to_cpd(pmd: Any) -> Dict[str, Any]:
+    """swsa PmdResult → 프론트 CPD 카드 shape(duplication_blocks/…/top_blocks)."""
+    files: set = set()
+    for b in pmd.blocks:
+        files.update(b.basenames)
+    top = pmd.blocks_sorted()[:20]
+    return {
+        "ok": pmd.total_blocks > 0,
+        "duplication_blocks": pmd.total_blocks,
+        "total_dup_lines": pmd.total_duplicated_lines,
+        "total_tokens": sum(b.tokens for b in pmd.blocks),
+        "files_involved": len(files),
+        "top_blocks": [
+            {"lines": b.lines, "tokens": b.tokens,
+             "fragments": len(b.files), "files": b.basenames}
+            for b in top
+        ],
+    }
+
+
+def _sa_st201_to_qac(st: Any) -> Dict[str, Any]:
+    """swsa St201Result(HMR) → 프론트 QAC HIS 카드 shape(함수 v(G) 분포)."""
+    from backend.services.qac_parser import MatrixItem
+
+    vgs = st.values_for(MatrixItem.V_G)
+    summary: Dict[str, Any] = {"function_count": st.total_functions}
+    if vgs:
+        vs = sorted(vgs)
+        summary["vg_max"] = max(vgs)
+        summary["vg_mean"] = round(sum(vgs) / len(vgs), 2)
+        summary["vg_p95"] = vs[min(len(vs) - 1, int(len(vs) * 0.95))]
+        summary["vg_over_10"] = sum(1 for v in vgs if v > 10)
+    mr = st.metric("ST201")
+    top = [{"function": nm, "vg": v} for nm, v in (mr.worst_functions if mr else [])]
+    return {"ok": bool(vgs), "summary": summary, "top_functions": top}
+
+
+def _load_static_analysis(paths: List[str]) -> Dict[str, Any]:
+    """SCM 등록 정적분석 폴더에서 4종 도구 산출물을 **모듈(APP/BOOT)별로** 찾아 파싱한다.
+
+    회사 정적분석 4종 = CodeSonar(PDF)·CodeEye(OSS 종합 PDF)·QAC HIS(HMR HTML)·CPD(PMD TXT).
+    각 도구는 ``<TOOL>/<MODULE_날짜_버전>/`` 하위에 모듈별로 존재 — 모듈 prefix(APP/BOOT)별
+    **최신 분석 1개씩** 파싱해 ``modules`` 리스트로 반환한다. (과거 단일-파일 방식은
+    사전순 마지막 1개만 남겨 APP 모듈을 누락시켰음.) 포맷 혼재 흡수: QAC는 html(HMR)+pdf(HIS),
+    CPD는 txt(PMD)+xml(CPD)을 **합집합**으로 모아 파서를 확장자로 분기(존재-기반 폴백 아님).
+    cloudium 모드는 worker IPC로 read(backend python은 권한 없음). 일부 도구/모듈만 있어도 graceful.
+
+    응답 shape::
+        {"ok", "codesonar"|"codeeye"|"qac"|"cpd": {"ok", "modules":[{label, module_folder, source, …}]},
+         "warnings"?, "detail"?}
     """
     from backend.services.codesonar_pdf_parser import parse_codesonar_pdf
     from backend.services.file_resolver import get_resolver
@@ -1603,6 +1660,9 @@ def _load_static_analysis(paths: List[str]) -> Dict[str, Any]:
         parse_cpd_xml,
         parse_qac_his_pdf,
     )
+    from backend.services.swsa_input_adapter import _select_latest_per_module
+    from backend.services.swsa_pmd_parser import parse_pmd_cpd
+    from backend.services.swsa_st201_binner import parse_st201_from_hmr
 
     resolver = get_resolver()
     all_files: List[str] = []
@@ -1610,17 +1670,13 @@ def _load_static_analysis(paths: List[str]) -> Dict[str, Any]:
         p = (raw or "").strip()
         if not p:
             continue
-        if p.lower().endswith((".pdf", ".xml")):
+        if p.lower().endswith((".pdf", ".xml", ".txt", ".html", ".htm")):
             all_files.append(p)
             continue
         try:
             all_files.extend(str(f) for f in resolver.list_dir(p, "*", recursive=True))
         except Exception as e:  # cloudium 권한/미연결/경로부재 — graceful
             _logger.warning("[static-analysis] list_dir 실패 %s: %s", p[:80], e)
-
-    def _latest(pred) -> Optional[str]:
-        cands = sorted({f for f in all_files if pred(f.lower())})
-        return cands[-1] if cands else None
 
     def _read(path: Optional[str]) -> Optional[bytes]:
         if not path:
@@ -1631,42 +1687,74 @@ def _load_static_analysis(paths: List[str]) -> Dict[str, Any]:
             _logger.warning("[static-analysis] read 실패 %s: %s", path[:80], e)
             return None
 
-    out: Dict[str, Any] = {"ok": False}
+    warnings: List[str] = []
 
-    cs_path = _latest(lambda fl: fl.endswith(".pdf") and "codesonar" in fl)
-    cs_bytes = _read(cs_path)
-    if cs_bytes:
-        cs = parse_codesonar_pdf(cs_bytes)
-        cs["source_pdf"] = cs_path
-        out["codesonar"] = cs
+    def _modules(files: List[str], kind: str, parse_bytes: Any) -> Dict[str, Any]:
+        """모듈 prefix별 최신 파일 1개씩 파싱 → {ok, modules:[…]}. 파서 예외는 모듈 단위 격리.
 
-    cpd_path = _latest(lambda fl: fl.endswith(".xml") and ("cpd" in fl or "result_xml" in fl))
-    cpd_bytes = _read(cpd_path)
-    if cpd_bytes:
-        cpd = parse_cpd_xml(cpd_bytes)
-        cpd["source"] = cpd_path
-        out["cpd"] = cpd
+        parse_bytes(data, path): path 확장자로 포맷 분기(QAC html/pdf·CPD txt/xml 혼재 대응).
+        """
+        sel = _select_latest_per_module(files, kind, warnings) if files else []
+        modules: List[Dict[str, Any]] = []
+        for path in sorted(sel):
+            data = _read(path)
+            if not data:
+                continue
+            try:
+                res = parse_bytes(data, path)
+            except Exception as e:  # 한 모듈 파싱 실패가 전체를 무너뜨리지 않도록 격리
+                _logger.warning("[static-analysis] %s 파싱 실패 %s: %s", kind, path[:80], e)
+                continue
+            if not (isinstance(res, dict) and res.get("ok")):
+                continue
+            res["label"] = _sa_module_label(path)
+            res["module_folder"] = _sa_module_of(path)
+            res["source"] = path
+            modules.append(res)
+        return {"ok": any(m.get("ok") for m in modules), "modules": modules}
 
-    qac_path = _latest(lambda fl: fl.endswith(".pdf") and "his" in fl and "metric" in fl)
-    qac_bytes = _read(qac_path)
-    if qac_bytes:
-        qac = parse_qac_his_pdf(qac_bytes)
-        qac["source"] = qac_path
-        out["qac"] = qac
+    def _parse_qac(data: bytes, path: str) -> Dict[str, Any]:
+        # 실 산출물이 html(HMR) 또는 pdf(HIS Metric) — 확장자로 분기(모듈별 혼재 허용).
+        if path.lower().endswith((".html", ".htm")):
+            return _sa_st201_to_qac(parse_st201_from_hmr(data))
+        return parse_qac_his_pdf(data)
 
-    ce_path = _latest(lambda fl: fl.endswith(".pdf") and "codeeye" in fl and "종합" in fl)
-    ce_bytes = _read(ce_path)
-    if ce_bytes:
-        ce = parse_codeeye_pdf(ce_bytes)
-        ce["source"] = ce_path
-        out["codeeye"] = ce
+    def _parse_cpd(data: bytes, path: str) -> Dict[str, Any]:
+        # PMD txt(회사 표준) 또는 PMD CPD xml — 확장자로 분기.
+        if path.lower().endswith(".txt"):
+            return _sa_pmd_to_cpd(parse_pmd_cpd(data))
+        return parse_cpd_xml(data)
 
-    out["ok"] = any(
-        isinstance(out.get(k), dict) and out[k].get("ok")
-        for k in ("codesonar", "cpd", "qac", "codeeye")
-    )
+    lo = [(f, f.lower()) for f in all_files]
+
+    cs_files = [f for f, fl in lo if fl.endswith(".pdf") and "codesonar" in fl]
+    ce_files = [f for f, fl in lo if fl.endswith(".pdf") and "codeeye" in fl and "종합" in f]
+    # QAC/CPD는 두 포맷을 **합집합**으로 모아 모듈별 최신 1개를 뽑고 파서를 확장자로 분기한다.
+    # (과거 'html 있으면 pdf 무시' 식 존재-기반 폴백은 손상된 primary가 유효한 fallback을
+    #  막거나 APP=html·BOOT=pdf 혼재 시 한쪽을 통째 누락시켰음.)
+    qac_files = [
+        f for f, fl in lo
+        if (fl.endswith((".html", ".htm")) and "hmr" in fl)
+        or (fl.endswith(".pdf") and "his" in fl and "metric" in fl
+            and "codesonar" not in fl and "codeeye" not in fl)
+    ]
+    cpd_files = [
+        f for f, fl in lo
+        if (fl.endswith(".txt") and "pmd" in fl)
+        or (fl.endswith(".xml") and ("cpd" in fl or "result_xml" in fl))
+    ]
+
+    out: Dict[str, Any] = {
+        "codesonar": _modules(cs_files, "CodeSonar", lambda data, _p: parse_codesonar_pdf(data)),
+        "codeeye": _modules(ce_files, "CodeEye", lambda data, _p: parse_codeeye_pdf(data)),
+        "qac": _modules(qac_files, "QAC", _parse_qac),
+        "cpd": _modules(cpd_files, "CPD", _parse_cpd),
+    }
+    out["ok"] = any(out[k].get("ok") for k in ("codesonar", "codeeye", "qac", "cpd"))
+    if warnings:
+        out["warnings"] = warnings
     if not out["ok"]:
-        out["detail"] = "정적분석 산출물(CodeSonar/CPD/QAC/CodeEye)을 찾지 못했습니다 (경로/권한 확인)"
+        out["detail"] = "정적분석 산출물(CodeSonar/CodeEye/QAC HMR/PMD)을 찾지 못했습니다 (경로/권한 확인)"
     return out
 
 
@@ -4418,6 +4506,7 @@ def jenkins_call_tree(req: JenkinsCallTreeRequest) -> Dict[str, Any]:
             source_root = picked
     # all_roots=True면 진입 함수를 백엔드가 자동 산출(in-degree 0 + 순환 대표) → entry 불필요.
     all_roots = bool(getattr(req, "all_roots", False))
+    reverse = bool(getattr(req, "reverse", False))  # 역방향(called-by) 트리 — 누가 이 함수를 호출하나
     entries = [x.strip() for x in str(req.entry or "").replace("\n", ",").split(",") if x.strip()][:200]
     if not entries and not all_roots:
         raise HTTPException(status_code=400, detail="entry required")
@@ -4436,6 +4525,7 @@ def jenkins_call_tree(req: JenkinsCallTreeRequest) -> Dict[str, Any]:
             compile_commands_path=compile_db,
             external_map=req.external_map or [],
             auto_roots=all_roots,
+            reverse=reverse,
         )
 
     engine = str(getattr(req, "engine", "precise") or "precise").strip().lower()
@@ -4450,6 +4540,7 @@ def jenkins_call_tree(req: JenkinsCallTreeRequest) -> Dict[str, Any]:
             include_external=bool(req.include_external),
             external_map=req.external_map or [],
             auto_roots=all_roots,
+            reverse=reverse,
         )
         # tree-sitter 미가용(engine='unavailable') → regex 엔진 자동 폴백 (R1 완화)
         if (payload.get("stats") or {}).get("engine") == "unavailable":

@@ -1,5 +1,7 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
-import { useJob } from '../App.jsx';
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import { useJob, useJenkinsCfg, useToast } from '../App.jsx';
+import { post } from '../api.js';
+import { loadProjectFromCache } from '../projectLoader.js';
 import BuildInfoWithScmSection from '../components/sections/BuildInfoWithScmSection.jsx';
 import AnalysisSection from '../components/sections/AnalysisSection.jsx';
 import SrsSdsSection from '../components/sections/SrsSdsSection.jsx';
@@ -10,7 +12,7 @@ import ProjectSetupSection from '../components/sections/ProjectSetupSection.jsx'
 
 const SECTIONS = [
   // 빌드 정보 + SCM 통합 — SCM은 빌드 로그 아래에 배치(BuildInfoWithScmSection).
-  { id: 'build',   icon: '🔨', label: '빌드 정보 · SCM', Component: BuildInfoWithScmSection },
+  { id: 'build',   icon: '🔨', label: '빌드 & 입력 데이터 정보', Component: BuildInfoWithScmSection },
   { id: 'analysis',icon: '📊', label: '프로젝트 분석', Component: AnalysisSection },
   // 프로젝트 설정 탭 일단 숨김(hidden: true) — nav/content/외부네비에서 제외. 되돌리려면 hidden 제거.
   { id: 'setup',   icon: '⚙️', label: '프로젝트 설정', Component: ProjectSetupSection, hidden: true },
@@ -25,8 +27,13 @@ const SECTIONS = [
 const DOCGEN_SUB_IDS = new Set(['docgen', 'reports', 'swut', 'swit', 'swsa', 'swreport']);
 
 export default function Detail() {
-  const { selectedJob, analysisResult } = useJob();
+  const { selectedJob, analysisResult, setSelectedJob, setAnalysisResult } = useJob();
+  const { cfg } = useJenkinsCfg();
+  const toast = useToast();
   const [activeSection, setActiveSection] = useState('build');
+  // 브레드크럼 프로젝트 전환용 — Jenkins job 목록(선택기 옵션) + 전환 진행 상태.
+  const [jobs, setJobs] = useState([]);
+  const [switching, setSwitching] = useState(false);
   // 문서 생성 허브의 활성 서브(종류) — breadcrumb 표기용.
   const [docgenSub, setDocgenSub] = useState(null);
   const handleSubChange = useCallback((id, label) => setDocgenSub({ id, label }), []);
@@ -76,6 +83,60 @@ export default function Detail() {
     if (pendingSub != null) setPendingSub(null);
   }, [pendingSub]);
 
+  // 프로젝트(job) 목록 로드 — Jenkins 자격정보가 있을 때만. 없으면 선택기 없이 이름만 표시.
+  useEffect(() => {
+    if (!cfg?.baseUrl || !cfg?.username || !cfg?.token) return;
+    if (jobs.length > 0) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const data = await post('/api/jenkins/jobs', {
+          base_url: cfg.baseUrl,
+          username: cfg.username,
+          api_token: cfg.token,
+          recursive: true,
+          max_depth: 2,
+          verify_tls: cfg.verifyTls,
+        });
+        if (!cancelled) setJobs(Array.isArray(data) ? data : (data.jobs ?? []));
+      } catch { /* creds/네트워크 문제 — 선택기 대신 static 이름 폴백 */ }
+    })();
+    return () => { cancelled = true; };
+  }, [cfg, jobs.length]);
+
+  // 브레드크럼 프로젝트 전환 — 캐시된 결과를 Jenkins 재sync 없이 로드(Dashboard 오프라인 보기와 동일 경로).
+  const switchProject = useCallback(async (rawUrl) => {
+    const jobUrl = String(rawUrl || '').replace(/\/+$/, '') + '/';
+    const curUrl = String(selectedJob?.url || '').replace(/\/+$/, '') + '/';
+    if (!rawUrl || jobUrl === curUrl) return;
+    const name = jobUrl.split('/').filter(Boolean).pop();
+    setSwitching(true);
+    setSelectedJob({ name, url: jobUrl });
+    try {
+      toast('info', `'${name}' 캐시 로드 중...`);
+      const result = await loadProjectFromCache(jobUrl, cfg);
+      setAnalysisResult(result);
+      toast('success', `'${name}' 로드 완료 — 빌드 #${result.reportData?.build_number ?? '?'}`);
+    } catch (e) {
+      toast('error', `프로젝트 로드 실패: ${e.message} — 이 Job의 캐시가 없을 수 있습니다.`);
+    } finally {
+      setSwitching(false);
+    }
+  }, [selectedJob, cfg, toast, setSelectedJob, setAnalysisResult]);
+
+  // 선택기 옵션 — 현재 선택된 job이 목록에 없으면 앞에 끼워 넣어 항상 표시.
+  const projectOptions = useMemo(() => {
+    const norm = (u) => String(u || '').replace(/\/+$/, '') + '/';
+    const opts = jobs
+      .map(j => ({ url: norm(j.url), name: j.name || j.fullName || j.url }))
+      .filter(o => o.url && o.url !== '/');
+    const curUrl = norm(selectedJob?.url);
+    if (curUrl && curUrl !== '/' && !opts.some(o => o.url === curUrl)) {
+      opts.unshift({ url: curUrl, name: selectedJob?.name || curUrl });
+    }
+    return opts;
+  }, [jobs, selectedJob]);
+
   if (!selectedJob) {
     return (
       <div className="empty-state">
@@ -83,7 +144,7 @@ export default function Detail() {
         <div className="empty-title">프로젝트를 선택하세요</div>
         <div className="empty-desc">
           대시보드에서 Jenkins Job을 선택하고 분석을 실행하면<br />
-          여기서 세부 데이터를 확인할 수 있습니다.
+          여기서 프로젝트 결과를 확인할 수 있습니다.
         </div>
       </div>
     );
@@ -97,7 +158,27 @@ export default function Detail() {
       <div className="row" style={{ marginBottom: 12, fontSize: 12, color: 'var(--text-muted)' }}>
         <span>대시보드</span>
         <span>›</span>
-        <span style={{ color: 'var(--text)', fontWeight: 600 }}>{selectedJob.name}</span>
+        {projectOptions.length > 1 ? (
+          <select
+            value={String(selectedJob.url || '').replace(/\/+$/, '') + '/'}
+            onChange={e => switchProject(e.target.value)}
+            disabled={switching}
+            title="프로젝트 전환 (캐시된 결과 로드 — Jenkins 재동기화 없음)"
+            style={{
+              fontSize: 12, fontWeight: 600, color: 'var(--text)',
+              background: 'var(--bg-elevated, var(--bg))', border: '1px solid var(--border)',
+              borderRadius: 4, padding: '2px 6px', maxWidth: 340,
+              cursor: switching ? 'wait' : 'pointer',
+            }}
+          >
+            {projectOptions.map(o => (
+              <option key={o.url} value={o.url}>{o.name}</option>
+            ))}
+          </select>
+        ) : (
+          <span style={{ color: 'var(--text)', fontWeight: 600 }}>{selectedJob.name}</span>
+        )}
+        {switching && <span className="spinner" style={{ marginLeft: 4 }} />}
         <span>›</span>
         <span style={{ color: 'var(--accent)' }}>{current.label}</span>
         {activeSection === 'docgen' && docgenSub && docgenSub.id !== 'docgen' && (

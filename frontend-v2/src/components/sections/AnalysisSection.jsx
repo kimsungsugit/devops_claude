@@ -307,6 +307,172 @@ function clearVcastJob(jobUrl) {
   }
 }
 
+// ── SCM 정적분석 도구 모듈 카드 (도구별 APP/BOOT 모듈 반복) ──────────────────
+// 백엔드 응답: sa[tool] = {ok, modules:[{label, module_folder, source, ...}]}.
+// 하위호환: modules 배열이 없으면(구 응답) 단일 객체를 1-모듈로 취급.
+export function saModules(tool) {
+  if (!tool) return [];
+  if (Array.isArray(tool.modules)) return tool.modules;
+  return tool.ok ? [tool] : [];
+}
+
+function SaModuleLabel({ m, extra }) {
+  return (
+    <div className="row" style={{ gap: 6, alignItems: 'center', marginBottom: 4 }}>
+      <span style={{ fontSize: 10, fontWeight: 700, padding: '1px 7px', borderRadius: 10,
+        background: 'var(--accent, #0052cc)', color: 'var(--text-inverse, #fff)' }}>
+        {m.label || '모듈'}
+      </span>
+      {extra && <span className="text-muted" style={{ fontSize: 10 }}>{extra}</span>}
+    </div>
+  );
+}
+
+function SaCodeSonarModule({ m }) {
+  const s = m.summary || {};
+  return (
+    <div style={{ borderLeft: '2px solid var(--border, #d1d5db)', paddingLeft: 8, marginBottom: 8 }}>
+      <SaModuleLabel m={m} extra={`${s.analysis_name || ''}${s.analysis_id ? ' #' + s.analysis_id : ''}`} />
+      <div className="stats-row" style={{ marginBottom: 6 }}>
+        <div className="stat-card" style={{ borderLeft: `3px solid ${(s.active_warnings || 0) > 0 ? 'var(--color-warning)' : 'var(--color-success)'}` }}>
+          <div className="stat-value" style={{ color: (s.active_warnings || 0) > 0 ? 'var(--color-warning)' : 'var(--color-success)' }}>{s.active_warnings ?? '-'}</div>
+          <div className="stat-label">Active Warnings</div>
+        </div>
+        <div className="stat-card"><div className="stat-value">{s.file_count ?? '-'}</div><div className="stat-label">분석 파일</div></div>
+        <div className="stat-card"><div className="stat-value">{s.distinct_classes ?? (m.by_class?.length ?? '-')}</div><div className="stat-label">경고 분류</div></div>
+      </div>
+      {Array.isArray(m.by_class) && m.by_class.length > 0 && (
+        <details open style={{ marginBottom: 6 }}>
+          <summary style={{ cursor: 'pointer', fontSize: 12, fontWeight: 600 }}>경고 분류별</summary>
+          <div style={{ marginTop: 6 }}>
+            {m.by_class.map((c, i) => {
+              const max = m.by_class[0]?.count || 1;
+              return (
+                <div key={i} className="row" style={{ gap: 8, alignItems: 'center', marginBottom: 3 }}>
+                  <span className="text-sm" style={{ minWidth: 170, fontSize: 11 }}>{c.warning_class}</span>
+                  <div style={{ flex: 1, height: 12, background: '#e5e7eb', borderRadius: 3, overflow: 'hidden' }}>
+                    <div style={{ width: `${Math.round((c.count / max) * 100)}%`, height: '100%', background: 'var(--color-warning)' }} />
+                  </div>
+                  <span className="text-sm" style={{ fontWeight: 700, minWidth: 28, textAlign: 'right' }}>{c.count}</span>
+                </div>
+              );
+            })}
+          </div>
+        </details>
+      )}
+      {Array.isArray(m.by_file) && m.by_file.length > 0 && (
+        <details>
+          <summary style={{ cursor: 'pointer', fontSize: 12, fontWeight: 600 }}>파일별 경고 (상위 {m.by_file.length})</summary>
+          <div style={{ maxHeight: 200, overflowY: 'auto', marginTop: 6 }}>
+            <table className="impact-table" style={{ fontSize: 10 }}>
+              <thead><tr><th>파일</th><th>경고</th><th>라인</th><th>언어</th></tr></thead>
+              <tbody>
+                {m.by_file.map((f, i) => (
+                  <tr key={i} style={{ background: f.warnings >= 10 ? '#fee2e2' : f.warnings >= 5 ? '#fef9c3' : undefined }}>
+                    <td style={{ fontFamily: 'monospace', fontSize: 10 }}>{f.file}</td>
+                    <td style={{ textAlign: 'center', fontWeight: 700 }}>{f.warnings}</td>
+                    <td style={{ textAlign: 'center' }}>{f.lines?.toLocaleString?.() ?? f.lines}</td>
+                    <td style={{ textAlign: 'center' }}>{f.language}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </details>
+      )}
+    </div>
+  );
+}
+
+function SaQacModule({ m, threshold }) {
+  const s = m.summary || {};
+  return (
+    <div style={{ borderLeft: '2px solid var(--border, #d1d5db)', paddingLeft: 8, marginBottom: 8 }}>
+      <SaModuleLabel m={m} />
+      <div className="stats-row" style={{ marginBottom: 6 }}>
+        <div className="stat-card"><div className="stat-value">{s.function_count ?? '-'}</div><div className="stat-label">함수 수</div></div>
+        <div className="stat-card" style={{ borderLeft: `3px solid ${(s.vg_max || 0) > threshold ? 'var(--color-danger)' : 'var(--color-success)'}` }}>
+          <div className="stat-value" style={{ color: (s.vg_max || 0) > threshold ? 'var(--color-danger)' : 'var(--color-success)' }}>{s.vg_max ?? '-'}</div>
+          <div className="stat-label">v(G) Max</div>
+        </div>
+        <div className="stat-card"><div className="stat-value">{s.vg_p95 ?? '-'}</div><div className="stat-label">v(G) P95</div></div>
+        <div className="stat-card"><div className="stat-value">{s.vg_mean ?? '-'}</div><div className="stat-label">v(G) 평균</div></div>
+        <div className="stat-card"><div className="stat-value" style={{ color: (s.vg_over_10 || 0) > 0 ? 'var(--color-warning)' : undefined }}>{s.vg_over_10 ?? '-'}</div><div className="stat-label">v(G)&gt;10</div></div>
+      </div>
+      {Array.isArray(m.top_functions) && m.top_functions.length > 0 && (
+        <details>
+          <summary style={{ cursor: 'pointer', fontSize: 12, fontWeight: 600 }}>복잡도 상위 함수 (top {m.top_functions.length})</summary>
+          <div style={{ maxHeight: 180, overflowY: 'auto', marginTop: 6 }}>
+            <table className="impact-table" style={{ fontSize: 10 }}>
+              <thead><tr><th>함수</th><th>v(G)</th></tr></thead>
+              <tbody>
+                {m.top_functions.map((f, i) => (
+                  <tr key={i} style={{ background: f.vg > threshold ? '#fee2e2' : f.vg > threshold * 0.7 ? '#fef9c3' : undefined }}>
+                    <td style={{ fontFamily: 'monospace', fontSize: 10 }}>{f.function}</td>
+                    <td style={{ textAlign: 'center', fontWeight: 700 }}>{f.vg}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </details>
+      )}
+    </div>
+  );
+}
+
+function SaCpdModule({ m }) {
+  return (
+    <div style={{ borderLeft: '2px solid var(--border, #d1d5db)', paddingLeft: 8, marginBottom: 8 }}>
+      <SaModuleLabel m={m} />
+      <div className="stats-row" style={{ marginBottom: 6 }}>
+        <div className="stat-card" style={{ borderLeft: `3px solid ${(m.duplication_blocks || 0) > 0 ? 'var(--color-warning)' : 'var(--color-success)'}` }}>
+          <div className="stat-value" style={{ color: (m.duplication_blocks || 0) > 0 ? 'var(--color-warning)' : 'var(--color-success)' }}>{m.duplication_blocks ?? '-'}</div>
+          <div className="stat-label">중복 블록</div>
+        </div>
+        <div className="stat-card"><div className="stat-value">{m.total_dup_lines?.toLocaleString?.() ?? m.total_dup_lines ?? '-'}</div><div className="stat-label">중복 라인</div></div>
+        <div className="stat-card"><div className="stat-value">{m.files_involved ?? '-'}</div><div className="stat-label">관련 파일</div></div>
+      </div>
+      {Array.isArray(m.top_blocks) && m.top_blocks.length > 0 && (
+        <details>
+          <summary style={{ cursor: 'pointer', fontSize: 12, fontWeight: 600 }}>중복 블록 (큰 순 {m.top_blocks.length})</summary>
+          <div style={{ maxHeight: 180, overflowY: 'auto', marginTop: 6 }}>
+            <table className="impact-table" style={{ fontSize: 10 }}>
+              <thead><tr><th>중복 라인</th><th>토큰</th><th>파일</th></tr></thead>
+              <tbody>
+                {m.top_blocks.map((b, i) => (
+                  <tr key={i} style={{ background: b.lines >= 25 ? '#fee2e2' : b.lines >= 10 ? '#fef9c3' : undefined }}>
+                    <td style={{ textAlign: 'center', fontWeight: 700 }}>{b.lines}</td>
+                    <td style={{ textAlign: 'center' }}>{b.tokens}</td>
+                    <td style={{ fontFamily: 'monospace', fontSize: 10 }}>{(b.files || []).join(', ')}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </details>
+      )}
+    </div>
+  );
+}
+
+function SaCodeEyeModule({ m }) {
+  const s = m.summary || {};
+  return (
+    <div style={{ borderLeft: '2px solid var(--border, #d1d5db)', paddingLeft: 8, marginBottom: 8 }}>
+      <SaModuleLabel m={m} />
+      <div className="stats-row">
+        <div className="stat-card"><div className="stat-value">{s.files_checked ?? '-'}</div><div className="stat-label">검사 파일</div></div>
+        <div className="stat-card" style={{ borderLeft: '3px solid var(--color-success)' }}><div className="stat-value" style={{ color: 'var(--color-success)' }}>{s.files_success ?? '-'}</div><div className="stat-label">검사 성공</div></div>
+        <div className="stat-card" style={{ borderLeft: `3px solid ${(s.files_fail || 0) > 0 ? 'var(--color-danger)' : 'var(--color-success)'}` }}><div className="stat-value" style={{ color: (s.files_fail || 0) > 0 ? 'var(--color-danger)' : 'var(--color-success)' }}>{s.files_fail ?? '-'}</div><div className="stat-label">검사 실패</div></div>
+      </div>
+      {s.purpose && (
+        <div className="text-muted" style={{ fontSize: 10, marginTop: 4 }}>검사목적: {s.purpose} · 시작 {s.started}</div>
+      )}
+    </div>
+  );
+}
+
 export default function AnalysisSection({ job, analysisResult }) {
   const { cfg } = useJenkinsCfg();
   const toast = useToast();
@@ -805,6 +971,18 @@ export default function AnalysisSection({ job, analysisResult }) {
           <b>위반 건수</b>=규칙 위반 총량, <b>위반/전체 규칙</b>=위반된 규칙 종류, <b>진단 수</b>=개별 진단 메시지,{' '}
           <b>HIS Metrics</b>=함수 순환복잡도(VG, 출처: Helix QAC). CodeSonar(PDF)·SonarQube는 현재 미연결입니다.
         </div>
+        {/* 코드 규모 (lizard) — 구 '코드 메트릭' 패널에서 이동. lizard도 정적분석 도구라 여기로 통합
+            (중복이던 '라인 커버리지' 카드는 위 Line Coverage와 겹쳐 제거). */}
+        {(cm.code_files != null || cm.functions != null || cm.nloc != null) && (
+          <div style={{ marginBottom: 12 }}>
+            <div className="text-sm" style={{ fontWeight: 600, marginBottom: 4 }}>📏 코드 규모 (lizard) — 파일·함수·라인</div>
+            <div className="stats-row" style={{ marginBottom: 6 }}>
+              {cm.code_files != null && <div className="stat-card"><div className="stat-value">{cm.code_files}</div><div className="stat-label">소스 파일</div></div>}
+              {cm.functions != null && <div className="stat-card"><div className="stat-value">{cm.functions}</div><div className="stat-label">함수 수 (lizard)</div></div>}
+              {cm.nloc != null && <div className="stat-card"><div className="stat-value">{cm.nloc.toLocaleString()}</div><div className="stat-label">NLOC</div></div>}
+            </div>
+          </div>
+        )}
         {prqa.rule_violation_count != null ? (<>
           {prqa.project_compliance_index != null && (
             <div style={{ marginBottom: 10 }}>
@@ -928,142 +1106,42 @@ export default function AnalysisSection({ job, analysisResult }) {
           {sa && !sa.ok && (
             <div className="text-sm text-muted">정적분석 결과를 찾지 못했습니다: {sa.detail || '알 수 없음'}</div>
           )}
-
-          {/* CodeSonar */}
-          {sa?.codesonar?.ok && (
-            <div style={{ marginBottom: 12 }}>
-              <div className="text-sm" style={{ fontWeight: 600, marginBottom: 4 }}>🔍 CodeSonar — 런타임 오류·데이터플로우 ({sa.codesonar.summary?.analysis_name} #{sa.codesonar.summary?.analysis_id})</div>
-              <div className="stats-row" style={{ marginBottom: 6 }}>
-                <div className="stat-card" style={{ borderLeft: `3px solid ${(sa.codesonar.summary?.active_warnings || 0) > 0 ? 'var(--color-warning)' : 'var(--color-success)'}` }}>
-                  <div className="stat-value" style={{ color: (sa.codesonar.summary?.active_warnings || 0) > 0 ? 'var(--color-warning)' : 'var(--color-success)' }}>{sa.codesonar.summary?.active_warnings ?? '-'}</div>
-                  <div className="stat-label">Active Warnings</div>
-                </div>
-                <div className="stat-card"><div className="stat-value">{sa.codesonar.summary?.file_count ?? '-'}</div><div className="stat-label">분석 파일</div></div>
-                <div className="stat-card"><div className="stat-value">{sa.codesonar.summary?.distinct_classes ?? (sa.codesonar.by_class?.length ?? '-')}</div><div className="stat-label">경고 분류</div></div>
-              </div>
-              {Array.isArray(sa.codesonar.by_class) && sa.codesonar.by_class.length > 0 && (
-                <details open style={{ marginBottom: 6 }}>
-                  <summary style={{ cursor: 'pointer', fontSize: 12, fontWeight: 600 }}>경고 분류별</summary>
-                  <div style={{ marginTop: 6 }}>
-                    {sa.codesonar.by_class.map((c, i) => {
-                      const max = sa.codesonar.by_class[0]?.count || 1;
-                      return (
-                        <div key={i} className="row" style={{ gap: 8, alignItems: 'center', marginBottom: 3 }}>
-                          <span className="text-sm" style={{ minWidth: 170, fontSize: 11 }}>{c.warning_class}</span>
-                          <div style={{ flex: 1, height: 12, background: '#e5e7eb', borderRadius: 3, overflow: 'hidden' }}>
-                            <div style={{ width: `${Math.round((c.count / max) * 100)}%`, height: '100%', background: 'var(--color-warning)' }} />
-                          </div>
-                          <span className="text-sm" style={{ fontWeight: 700, minWidth: 28, textAlign: 'right' }}>{c.count}</span>
-                        </div>
-                      );
-                    })}
-                  </div>
-                </details>
-              )}
-              {Array.isArray(sa.codesonar.by_file) && sa.codesonar.by_file.length > 0 && (
-                <details>
-                  <summary style={{ cursor: 'pointer', fontSize: 12, fontWeight: 600 }}>파일별 경고 (상위 {sa.codesonar.by_file.length})</summary>
-                  <div style={{ maxHeight: 200, overflowY: 'auto', marginTop: 6 }}>
-                    <table className="impact-table" style={{ fontSize: 10 }}>
-                      <thead><tr><th>파일</th><th>경고</th><th>라인</th><th>언어</th></tr></thead>
-                      <tbody>
-                        {sa.codesonar.by_file.map((f, i) => (
-                          <tr key={i} style={{ background: f.warnings >= 10 ? '#fee2e2' : f.warnings >= 5 ? '#fef9c3' : undefined }}>
-                            <td style={{ fontFamily: 'monospace', fontSize: 10 }}>{f.file}</td>
-                            <td style={{ textAlign: 'center', fontWeight: 700 }}>{f.warnings}</td>
-                            <td style={{ textAlign: 'center' }}>{f.lines?.toLocaleString?.() ?? f.lines}</td>
-                            <td style={{ textAlign: 'center' }}>{f.language}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                </details>
-              )}
+          {Array.isArray(sa?.warnings) && sa.warnings.length > 0 && (
+            <div className="text-muted" style={{ fontSize: 10, marginBottom: 8, padding: '4px 8px',
+              background: 'var(--accent-soft, #fef9c3)', color: 'var(--text)', borderRadius: 4 }}>
+              ⓘ 일부 산출물이 제외됐습니다: {sa.warnings.join(' · ')}
             </div>
           )}
 
-          {/* QAC HIS Metrics */}
+          {/* CodeSonar (모듈별 APP/BOOT) */}
+          {sa?.codesonar?.ok && (
+            <div style={{ marginBottom: 12 }}>
+              <div className="text-sm" style={{ fontWeight: 600, marginBottom: 4 }}>🔍 CodeSonar — 런타임 오류·데이터플로우</div>
+              {saModules(sa.codesonar).map((m, i) => <SaCodeSonarModule key={m.label || i} m={m} />)}
+            </div>
+          )}
+
+          {/* QAC HIS Metrics (모듈별 APP/BOOT) */}
           {sa?.qac?.ok && (
             <div style={{ marginBottom: 12 }}>
               <div className="text-sm" style={{ fontWeight: 600, marginBottom: 4 }}>📐 QAC HIS Metrics (Helix QAC) — 함수 순환복잡도 v(G)</div>
-              <div className="stats-row" style={{ marginBottom: 6 }}>
-                <div className="stat-card"><div className="stat-value">{sa.qac.summary?.function_count ?? '-'}</div><div className="stat-label">함수 수</div></div>
-                <div className="stat-card" style={{ borderLeft: `3px solid ${(sa.qac.summary?.vg_max || 0) > threshold ? 'var(--color-danger)' : 'var(--color-success)'}` }}>
-                  <div className="stat-value" style={{ color: (sa.qac.summary?.vg_max || 0) > threshold ? 'var(--color-danger)' : 'var(--color-success)' }}>{sa.qac.summary?.vg_max ?? '-'}</div>
-                  <div className="stat-label">v(G) Max</div>
-                </div>
-                <div className="stat-card"><div className="stat-value">{sa.qac.summary?.vg_p95 ?? '-'}</div><div className="stat-label">v(G) P95</div></div>
-                <div className="stat-card"><div className="stat-value">{sa.qac.summary?.vg_mean ?? '-'}</div><div className="stat-label">v(G) 평균</div></div>
-                <div className="stat-card"><div className="stat-value" style={{ color: (sa.qac.summary?.vg_over_10 || 0) > 0 ? 'var(--color-warning)' : undefined }}>{sa.qac.summary?.vg_over_10 ?? '-'}</div><div className="stat-label">v(G)&gt;10</div></div>
-              </div>
-              {Array.isArray(sa.qac.top_functions) && sa.qac.top_functions.length > 0 && (
-                <details>
-                  <summary style={{ cursor: 'pointer', fontSize: 12, fontWeight: 600 }}>복잡도 상위 함수 (top {sa.qac.top_functions.length})</summary>
-                  <div style={{ maxHeight: 180, overflowY: 'auto', marginTop: 6 }}>
-                    <table className="impact-table" style={{ fontSize: 10 }}>
-                      <thead><tr><th>함수</th><th>v(G)</th></tr></thead>
-                      <tbody>
-                        {sa.qac.top_functions.map((f, i) => (
-                          <tr key={i} style={{ background: f.vg > threshold ? '#fee2e2' : f.vg > threshold * 0.7 ? '#fef9c3' : undefined }}>
-                            <td style={{ fontFamily: 'monospace', fontSize: 10 }}>{f.function}</td>
-                            <td style={{ textAlign: 'center', fontWeight: 700 }}>{f.vg}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                </details>
-              )}
+              {saModules(sa.qac).map((m, i) => <SaQacModule key={m.label || i} m={m} threshold={threshold} />)}
             </div>
           )}
 
-          {/* CPD */}
+          {/* CPD (모듈별 APP/BOOT) */}
           {sa?.cpd?.ok && (
             <div style={{ marginBottom: 12 }}>
               <div className="text-sm" style={{ fontWeight: 600, marginBottom: 4 }}>📋 CPD (Copy-Paste Detection) — 코드 중복</div>
-              <div className="stats-row" style={{ marginBottom: 6 }}>
-                <div className="stat-card" style={{ borderLeft: `3px solid ${(sa.cpd.duplication_blocks || 0) > 0 ? 'var(--color-warning)' : 'var(--color-success)'}` }}>
-                  <div className="stat-value" style={{ color: (sa.cpd.duplication_blocks || 0) > 0 ? 'var(--color-warning)' : 'var(--color-success)' }}>{sa.cpd.duplication_blocks ?? '-'}</div>
-                  <div className="stat-label">중복 블록</div>
-                </div>
-                <div className="stat-card"><div className="stat-value">{sa.cpd.total_dup_lines?.toLocaleString?.() ?? sa.cpd.total_dup_lines ?? '-'}</div><div className="stat-label">중복 라인</div></div>
-                <div className="stat-card"><div className="stat-value">{sa.cpd.files_involved ?? '-'}</div><div className="stat-label">관련 파일</div></div>
-              </div>
-              {Array.isArray(sa.cpd.top_blocks) && sa.cpd.top_blocks.length > 0 && (
-                <details>
-                  <summary style={{ cursor: 'pointer', fontSize: 12, fontWeight: 600 }}>중복 블록 (큰 순 {sa.cpd.top_blocks.length})</summary>
-                  <div style={{ maxHeight: 180, overflowY: 'auto', marginTop: 6 }}>
-                    <table className="impact-table" style={{ fontSize: 10 }}>
-                      <thead><tr><th>중복 라인</th><th>토큰</th><th>파일</th></tr></thead>
-                      <tbody>
-                        {sa.cpd.top_blocks.map((b, i) => (
-                          <tr key={i} style={{ background: b.lines >= 25 ? '#fee2e2' : b.lines >= 10 ? '#fef9c3' : undefined }}>
-                            <td style={{ textAlign: 'center', fontWeight: 700 }}>{b.lines}</td>
-                            <td style={{ textAlign: 'center' }}>{b.tokens}</td>
-                            <td style={{ fontFamily: 'monospace', fontSize: 10 }}>{(b.files || []).join(', ')}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                </details>
-              )}
+              {saModules(sa.cpd).map((m, i) => <SaCpdModule key={m.label || i} m={m} />)}
             </div>
           )}
 
-          {/* CodeEye */}
+          {/* CodeEye (모듈별 APP/BOOT) */}
           {sa?.codeeye?.ok && (
             <div>
               <div className="text-sm" style={{ fontWeight: 600, marginBottom: 4 }}>📜 CodeEye — OSS 라이선스 검사</div>
-              <div className="stats-row">
-                <div className="stat-card"><div className="stat-value">{sa.codeeye.summary?.files_checked ?? '-'}</div><div className="stat-label">검사 파일</div></div>
-                <div className="stat-card" style={{ borderLeft: '3px solid var(--color-success)' }}><div className="stat-value" style={{ color: 'var(--color-success)' }}>{sa.codeeye.summary?.files_success ?? '-'}</div><div className="stat-label">검사 성공</div></div>
-                <div className="stat-card" style={{ borderLeft: `3px solid ${(sa.codeeye.summary?.files_fail || 0) > 0 ? 'var(--color-danger)' : 'var(--color-success)'}` }}><div className="stat-value" style={{ color: (sa.codeeye.summary?.files_fail || 0) > 0 ? 'var(--color-danger)' : 'var(--color-success)' }}>{sa.codeeye.summary?.files_fail ?? '-'}</div><div className="stat-label">검사 실패</div></div>
-              </div>
-              {sa.codeeye.summary?.purpose && (
-                <div className="text-muted" style={{ fontSize: 10, marginTop: 4 }}>검사목적: {sa.codeeye.summary.purpose} · 시작 {sa.codeeye.summary.started}</div>
-              )}
+              {saModules(sa.codeeye).map((m, i) => <SaCodeEyeModule key={m.label || i} m={m} />)}
             </div>
           )}
         </div>
@@ -1375,28 +1453,8 @@ export default function AnalysisSection({ job, analysisResult }) {
         </details>
       </div>
 
-      {/* ── Code Metrics ── */}
-      <div className="panel" style={{ marginBottom: 12 }}>
-        <div className="panel-header"><span className="panel-title">코드 메트릭</span></div>
-        <div className="text-sm text-muted" style={{ padding: '0 0 8px', lineHeight: 1.55 }}>
-          코드 규모·커버리지 지표입니다. <b>소스 파일</b>=분석 대상 파일 수, <b>함수 수</b>=정의된 함수 개수(lizard),{' '}
-          <b>NLOC</b>=주석·공백 제외 순수 코드 라인, <b>라인 커버리지</b>=빌드 라인 커버.{' '}
-          (함수콜·함수 진입 커버리지는 위 ‘통합테스트(IT)’ 패널 참조 — 동일 VectorCAST IT 데이터라 여기서는 생략. PRQA 분석 함수 수도 ‘정적분석’ 섹션 — 도구가 달라 별개)
-        </div>
-        <div className="stats-row">
-          {cm.code_files != null && <div className="stat-card"><div className="stat-value">{cm.code_files}</div><div className="stat-label">소스 파일</div></div>}
-          {cm.functions != null && <div className="stat-card"><div className="stat-value">{cm.functions}</div><div className="stat-label">함수 수 (lizard)</div></div>}
-          {cm.nloc != null && <div className="stat-card"><div className="stat-value">{cm.nloc.toLocaleString()}</div><div className="stat-label">NLOC</div></div>}
-          {covPct != null && covPct > 0 && (
-            <div className="stat-card" style={{ borderLeft: `3px solid ${covPct >= 80 ? 'var(--color-success)' : 'var(--color-warning)'}` }}>
-              <div className="stat-value" style={{ color: covPct >= 80 ? 'var(--color-success)' : 'var(--color-warning)' }}>{covPct}%</div>
-              <div className="stat-label">라인 커버리지</div>
-            </div>
-          )}
-          {/* 함수콜·함수 진입 커버리지 카드는 통합테스트(IT) 패널(itGrand.function_calls/functions)과
-              동일 객체라 중복 제거 — IT 지표는 통합테스트 패널에만 표시한다. */}
-        </div>
-      </div>
+      {/* '코드 메트릭' 패널 제거 — 고유 지표(소스파일/함수수 lizard/NLOC)는 '정적분석 › 코드 규모 (lizard)'로
+          이동, 중복이던 '라인 커버리지' 카드는 위 Line Coverage와 겹쳐 삭제(사용자 요청 2026-07-03). */}
 
       {/* ── Complexity Table ── */}
       <div className="panel">

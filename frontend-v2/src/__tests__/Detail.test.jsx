@@ -11,19 +11,38 @@
  * - useJob: App.jsx mock
  * - 모든 Section 컴포넌트: mock (단위 격리)
  */
-import { render, screen, act, waitFor } from '@testing-library/react';
+import { render, screen, act, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 // ── Context mock ──────────────────────────────────────────────────────
 let mockSelectedJob = null;
 let mockAnalysisResult = null;
+let mockCfg = {};
+let mockJobsResponse = [];
+const mockLoadProject = vi.fn(() =>
+  Promise.resolve({ reportData: { build_number: 1 }, artifacts: [], scmList: [], matchedScm: null, _offline: true }),
+);
 
 vi.mock('../App.jsx', () => ({
   useJob: () => ({
     selectedJob: mockSelectedJob,
     analysisResult: mockAnalysisResult,
+    setSelectedJob: () => {},
+    setAnalysisResult: () => {},
   }),
+  // Detail이 브레드크럼 프로젝트 선택기용으로 추가 소비 — creds 없는 cfg면 job fetch effect가 early return.
+  useJenkinsCfg: () => ({ cfg: mockCfg }),
+  useToast: () => () => {},
+}));
+// 브레드크럼 선택기: job 목록 fetch(post) + 전환 로드(loadProjectFromCache) mock.
+vi.mock('../api.js', () => ({
+  post: vi.fn((url) => (url === '/api/jenkins/jobs' ? Promise.resolve(mockJobsResponse) : Promise.resolve({}))),
+  api: vi.fn(() => Promise.resolve([])),
+  defaultCacheRoot: () => '',
+}));
+vi.mock('../projectLoader.js', () => ({
+  loadProjectFromCache: (...a) => mockLoadProject(...a),
 }));
 
 // ── Section 컴포넌트 일괄 mock ─────────────────────────────────────
@@ -71,6 +90,8 @@ describe('Detail', () => {
     mockSelectedJob = null;
     mockAnalysisResult = null;
     mockCapturedInitialSubs = [];
+    mockCfg = {};
+    mockJobsResponse = [];
   });
 
   // ── selectedJob 없을 때 빈 상태 ────────────────────────────────
@@ -108,9 +129,9 @@ describe('Detail', () => {
     // Act
     render(<Detail />);
 
-    // Assert — 통합 탭 레이블 "빌드 정보 · SCM"(브레드크럼+accordion 중복) + 다른 탭.
+    // Assert — 통합 탭 레이블 "빌드 & 입력 데이터 정보"(브레드크럼+accordion 중복) + 다른 탭.
     // SCM은 더 이상 별도 탭이 아니라 빌드 탭에 통합됨.
-    expect(screen.getAllByText(/빌드 정보/).length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText(/빌드 & 입력 데이터 정보/).length).toBeGreaterThanOrEqual(1);
     expect(screen.getByText('문서 생성')).toBeInTheDocument();
     expect(screen.getByText('프로젝트 분석')).toBeInTheDocument();
   });
@@ -222,5 +243,56 @@ describe('Detail', () => {
 
     // Assert — 브레드크럼에서도 활성 섹션 라벨이 나타남(네비 라벨 + 브레드크럼 = 2회 이상)
     expect(screen.getAllByText('프로젝트 분석').length).toBeGreaterThanOrEqual(2);
+  });
+
+  // ── 브레드크럼 프로젝트 선택기 ─────────────────────────────────────
+
+  it('Jenkins creds가 없으면 선택기 대신 프로젝트 이름만 표시한다', () => {
+    // Arrange — cfg에 creds 없음(기본)
+    mockSelectedJob = { name: 'job-a', url: 'http://jenkins/job/job-a/' };
+
+    // Act
+    render(<Detail />);
+
+    // Assert — select(combobox) 없음, 이름 span만
+    expect(screen.queryByRole('combobox')).toBeNull();
+    expect(screen.getByText('job-a')).toBeInTheDocument();
+  });
+
+  it('creds가 있으면 브레드크럼에 프로젝트 선택기(select)를 렌더한다', async () => {
+    // Arrange
+    mockSelectedJob = { name: 'job-a', url: 'http://jenkins/job/job-a/' };
+    mockCfg = { baseUrl: 'http://jenkins', username: 'u', token: 't' };
+    mockJobsResponse = [
+      { name: 'job-a', url: 'http://jenkins/job/job-a/' },
+      { name: 'job-b', url: 'http://jenkins/job/job-b/' },
+    ];
+
+    // Act
+    render(<Detail />);
+
+    // Assert — 비동기 job fetch 완료 후 select 등장(옵션 2개)
+    const select = await screen.findByRole('combobox');
+    const options = within(select).getAllByRole('option');
+    expect(options.length).toBe(2);
+  });
+
+  it('선택기에서 다른 프로젝트를 고르면 loadProjectFromCache로 캐시 로드한다', async () => {
+    // Arrange
+    const user = userEvent.setup();
+    mockSelectedJob = { name: 'job-a', url: 'http://jenkins/job/job-a/' };
+    mockCfg = { baseUrl: 'http://jenkins', username: 'u', token: 't' };
+    mockJobsResponse = [
+      { name: 'job-a', url: 'http://jenkins/job/job-a/' },
+      { name: 'job-b', url: 'http://jenkins/job/job-b/' },
+    ];
+    render(<Detail />);
+    const select = await screen.findByRole('combobox');
+
+    // Act — job-b 선택
+    await user.selectOptions(select, 'http://jenkins/job/job-b/');
+
+    // Assert — 캐시 로더가 선택 URL로 호출됨
+    expect(mockLoadProject).toHaveBeenCalledWith('http://jenkins/job/job-b/', expect.any(Object));
   });
 });
