@@ -2881,9 +2881,19 @@ function CallTreeNode({ node, path, expanded, onToggle, depth, includeExternal }
           {hasChildren ? (isOpen ? '▾' : '▸') : '·'}
         </span>
         <strong style={{ fontFamily: 'monospace' }}>{node?.name}</strong>
+        {node?.via_ref && (
+          <span style={{ fontSize: 9, padding: '0 5px', borderRadius: 8, fontWeight: 600, color: '#7c3aed', border: '1px dashed #7c3aed' }}
+            title="직접 호출이 아니라 함수포인터 참조(&함수 / 대입 / 인자 전달)로 추론된 엣지 — 실제 호출은 런타임에 포인터로 이뤄짐">↪ 참조</span>
+        )}
         {asil && (
           <span style={{ fontSize: 9, padding: '0 5px', borderRadius: 8, fontWeight: 700, color: '#fff',
             background: _ASIL_COLORS[asil] || '#6b7280' }}>ASIL {asil}</span>
+        )}
+        {Array.isArray(node?.indirect) && node.indirect.length > 0 && (
+          <span style={{ fontSize: 9, padding: '0 5px', borderRadius: 8, fontWeight: 700, color: '#fff', background: '#ea580c' }}
+            title={`함수포인터/디스패치 등 대상을 정적으로 못 잇는 간접 호출이 이 함수 본문에 있습니다(트리에 자식으로 안 나타남):\n· ${node.indirect.join('\n· ')}`}>
+            ⚡ 간접호출 {node.indirect.length}
+          </span>
         )}
         {node?.cycle && <span style={{ fontSize: 9, color: '#d97706' }} title="재귀/순환 호출 — 더 펼치지 않음">↻ 순환</span>}
         {node?.truncated && <span style={{ fontSize: 9, color: 'var(--text-muted)' }} title="최대 깊이 도달 — 더 펼치지 않음">… 깊이제한</span>}
@@ -2911,10 +2921,49 @@ function CallTreeNode({ node, path, expanded, onToggle, depth, includeExternal }
   );
 }
 
+// ── 전체 콜트리 루트 정렬/자동펼침 (표시 전용 — 커버리지/집계 무관) ──
+// 루트를 진입점(boot) → ISR/인터럽트 → 일반(라이브러리 고아) 순으로 정렬해 main·_Startup을 최상단에
+// 노출하고, boot 루트는 첫 레벨을 자동 펼쳐(_Startup→main) 애플리케이션 트리를 바로 보여준다.
+// 백엔드는 이름 기반 우선순위만 부여하나(시그니처 부재), 프론트는 노드 signature('ISR (...)')까지
+// 활용해 Cpu_* 등 시그니처 기반 ISR도 정확히 그룹핑한다.
+const _CT_BOOT_NAMES = new Set(['main', '_start', '__start', '_startup', '_entrypoint', 'reset_handler', 'startup']);
+function _ctRootKind(node) {
+  const name = String(node?.name || '');
+  const sig = String(node?.signature || '');
+  if (_CT_BOOT_NAMES.has(name.toLowerCase())) return 0;               // 0 = boot/진입점
+  if (/^\s*ISR\b/.test(sig) || /\bISR\s*\(/.test(sig)) return 1;      // 1 = ISR (tree-sitter 시그니처)
+  if (/(_Interrupt|_isr|_ISR|_IRQHandler|_IrqHandler|_IRQ)$/.test(name) || /^ISR_/.test(name)) return 1;
+  return 2;                                                            // 2 = 일반(라이브러리 고아 등)
+}
+function _ctSortRoots(trees, reverse = false) {
+  // 안정 정렬: (kind, name, 원본 index) — 동일 입력에 동일 순서(결정적). load 시 자동펼침 path 계산과
+  // 렌더가 반드시 같은 순서를 써야 하므로(index 정합) 양쪽 다 이 함수를 통과시킨다.
+  // 역방향(reverse) 루트는 forward-leaf라 boot/ISR 개념이 대응 안 됨 → kind 비교 생략, 이름순만.
+  return (Array.isArray(trees) ? trees : [])
+    .map((t, i) => ({ t, i, k: reverse ? 0 : _ctRootKind(t), n: String(t?.name || '') }))
+    .sort((a, b) => a.k - b.k || a.n.localeCompare(b.n) || a.i - b.i)
+    .map(x => x.t);
+}
+function _ctBootExpansion(trees, reverse = false) {
+  // boot 루트의 직계 자식 path를 펼침 집합에 넣어 _Startup→main 같은 첫 레벨을 자동 노출.
+  // 반드시 정렬 후 index로 계산(렌더 path와 일치). boot 없으면 빈 Set(기존 동작 = 루트만 펼침).
+  // 역방향은 boot 개념 무의미 → 자동펼침 없음(루트만 펼침).
+  if (reverse) return new Set();
+  const sorted = _ctSortRoots(trees, false);
+  const set = new Set();
+  sorted.forEach((t, ri) => {
+    if (_ctRootKind(t) !== 0) return;
+    const kids = Array.isArray(t?.calls) ? t.calls : [];
+    kids.forEach((_, ci) => set.add(`${ri}.${ci}`));
+  });
+  return set;
+}
+
 function CallTreeView({ job, cacheRoot, buildSelector, sourceRoot, seedFns, toast, initialEntry = '' }) {
   const [entry, setEntry] = useState(initialEntry || '');
   const [depth, setDepth] = useState(5);
   const [includeExternal, setIncludeExternal] = useState(false);
+  const [reverse, setReverse] = useState(false); // 역방향(called-by): 누가 이 함수를 호출하나
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [expanded, setExpanded] = useState(() => new Set());
@@ -2938,6 +2987,7 @@ function CallTreeView({ job, cacheRoot, buildSelector, sourceRoot, seedFns, toas
         build_selector: buildSelector || 'lastSuccessfulBuild',
         source_root: sourceRoot || '',
         all_roots: allRoots,
+        reverse,
         entry: allRoots ? '' : entries.join(','),
         max_depth: Math.max(1, Math.min(20, Number(depth) || 5)),
         include_external: includeExternal,
@@ -2945,7 +2995,9 @@ function CallTreeView({ job, cacheRoot, buildSelector, sourceRoot, seedFns, toas
       });
       if (!mountedRef.current) return;
       setData(res);
-      setExpanded(new Set());
+      // boot 루트(main·_Startup)의 첫 레벨을 자동 펼쳐 애플리케이션 트리를 바로 노출. boot가 없거나
+      // 역방향이면 빈 Set(루트만 펼침). 정렬/index는 렌더 sortedTrees와 동일 함수·동일 reverse라 정합.
+      setExpanded(_ctBootExpansion(res?.trees, res?.stats?.reverse));
       const miss = Array.isArray(res?.missing) ? res.missing : [];
       const st = res?.stats || {};
       // 백엔드가 실제 스캔한 소스(build_root/source 체크아웃 사본)의 완전성 신호. 명시적 false일 때만 경고
@@ -2958,10 +3010,11 @@ function CallTreeView({ job, cacheRoot, buildSelector, sourceRoot, seedFns, toas
       } else if (allRoots) {
         // 전체 트리는 백엔드가 루트 수(200)·포레스트 노드(60K)를 상한한다 — 절단 시 정직하게 경고.
         const trunc = st.roots_truncated || st.nodes_truncated;
+        const dir = st.reverse ? '전체 역콜트리(called-by)' : '전체 콜트리';
         toast(trunc ? 'warning' : 'success',
-          `전체 콜트리 생성 (루트 ${st.roots ?? 0}${st.roots_truncated ? `/${st.roots_total}` : ''} · 함수 ${st.functions ?? 0} · 엣지 ${st.edges ?? 0})${trunc ? ' — 규모 상한 도달로 일부 절단(트리 깊이를 낮추거나 진입 함수를 지정하세요)' : ''}`);
+          `${dir} 생성 (루트 ${st.roots ?? 0}${st.roots_truncated ? `/${st.roots_total}` : ''} · 함수 ${st.functions ?? 0} · 엣지 ${st.edges ?? 0})${trunc ? ' — 규모 상한 도달로 일부 절단(트리 깊이를 낮추거나 진입 함수를 지정하세요)' : ''}`);
       } else {
-        toast('success', `콜트리 생성 (${st.engine || '?'} · 함수 ${st.functions ?? 0} · 엣지 ${st.edges ?? 0})`);
+        toast('success', `${st.reverse ? '역콜트리(누가 호출하나)' : '콜트리'} 생성 (${st.engine || '?'} · 함수 ${st.functions ?? 0} · 엣지 ${st.edges ?? 0})`);
       }
     } catch (e) {
       // 404(캐시 빌드 부재)는 raw 영문 대신 안내 메시지 — [콜트리 생성]·[전체 트리] 공통.
@@ -2974,7 +3027,7 @@ function CallTreeView({ job, cacheRoot, buildSelector, sourceRoot, seedFns, toas
     } finally {
       if (mountedRef.current) setLoading(false);
     }
-  }, [entry, depth, includeExternal, job, cacheRoot, buildSelector, sourceRoot, toast]);
+  }, [entry, depth, includeExternal, reverse, job, cacheRoot, buildSelector, sourceRoot, toast]);
 
   // 표에서 함수 클릭 진입(initialEntry) 시 자동 1회 로드 — 검색 입력 없이 바로 콜트리 표시.
   const didAutoLoad = useRef(false);
@@ -2985,6 +3038,11 @@ function CallTreeView({ job, cacheRoot, buildSelector, sourceRoot, seedFns, toas
 
   const trees = Array.isArray(data?.trees) ? data.trees : [];
   const st = data?.stats || {};
+  // 진입점(boot)→ISR→일반 순 정렬(역방향은 이름순). load의 _ctBootExpansion과 동일 정렬 함수·동일
+  // reverse(로드된 데이터 기준 st.reverse)라 자동펼침 path가 정합.
+  const sortedTrees = useMemo(() => _ctSortRoots(trees, st.reverse), [trees, st.reverse]);
+  // 방향 토글을 바꾸고 재조회 전이면 표시 트리(data 기준)와 컨트롤(reverse)이 불일치 — 시각 단서 노출.
+  const dirStale = !!data && (!!st.reverse !== reverse);
 
   return (
     <div style={{ padding: '8px 0' }}>
@@ -3008,23 +3066,42 @@ function CallTreeView({ job, cacheRoot, buildSelector, sourceRoot, seedFns, toas
           <input type="checkbox" checked={includeExternal} onChange={e => setIncludeExternal(e.target.checked)} style={{ cursor: 'pointer' }} />
           외부 함수
         </label>
+        <label style={{ fontSize: 11, display: 'inline-flex', alignItems: 'center', gap: 4 }}
+          title="방향 — 호출: 이 함수가 부르는 함수(callee, 하향) / 역호출: 이 함수를 부르는 함수(caller, 상향 — 영향분석)">
+          방향
+          <select value={reverse ? 'rev' : 'fwd'} onChange={e => setReverse(e.target.value === 'rev')}
+            style={{ padding: '5px 6px', fontSize: 12, border: '1px solid var(--border)', borderRadius: 4, background: 'var(--bg)', color: 'var(--fg)', cursor: 'pointer' }}>
+            <option value="fwd">호출 → (callee)</option>
+            <option value="rev">← 역호출 (caller)</option>
+          </select>
+        </label>
         <button type="button" onClick={() => load(false)} disabled={loading}
           style={{ padding: '6px 14px', fontSize: 12, fontWeight: 600, border: 'none', borderRadius: 4, cursor: loading ? 'default' : 'pointer',
             background: loading ? 'var(--border)' : 'var(--accent)', color: '#fff' }}>
-          {loading ? '분석 중…' : '콜트리 생성'}
+          {loading ? '분석 중…' : (reverse ? '역콜트리 생성' : '콜트리 생성')}
         </button>
         <button type="button" onClick={() => load(true)} disabled={loading}
           title="진입 함수 입력 없이, 아무 함수도 호출하지 않는 함수(루트: main·ISR·콜백·미사용)를 자동 탐지해 프로젝트 전체 호출 트리를 구성합니다."
           style={{ padding: '6px 14px', fontSize: 12, fontWeight: 600, borderRadius: 4, cursor: loading ? 'default' : 'pointer',
             background: 'var(--bg)', color: 'var(--accent)', border: '1px solid var(--accent)' }}>
-          전체 트리
+          {reverse ? '전체 역트리' : '전체 트리'}
         </button>
       </div>
+
+      {dirStale && (
+        <div style={{ fontSize: 11, color: '#92400e', background: '#fffbeb', border: '1px solid #fde68a',
+          borderRadius: 4, padding: '5px 8px', marginBottom: 8 }}>
+          ⚠ 방향을 바꿨습니다 — 현재 표시된 트리는 여전히 <strong>{st.reverse ? '역호출(caller)' : '호출(callee)'}</strong> 기준입니다.
+          [{reverse ? '역콜트리 생성' : '콜트리 생성'}]을 다시 눌러 반영하세요.
+        </div>
+      )}
 
       {!data && !loading && (
         <div style={{ fontSize: 12, color: 'var(--text-muted)', padding: '8px 4px' }}>
           진입 함수명을 입력하고 <strong>콜트리 생성</strong>을 누르면 tree-sitter로 분석한 함수 호출 트리를 보여줍니다.
           진입점을 모르면 <strong>전체 트리</strong>로 프로젝트의 모든 루트 함수(main·ISR·콜백·미사용)를 자동 탐지해 전체 호출 구조를 구성합니다.
+          <strong>방향</strong>을 <em>역호출</em>로 바꾸면 “누가 이 함수를 호출하나(caller)”를 상향 추적합니다(영향분석).
+          함수포인터 참조로 추론된 엣지는 <span style={{ color: '#7c3aed' }}>↪ 참조</span>, 대상을 못 잇는 간접호출(디스패치·콜백)은 <span style={{ color: '#ea580c' }}>⚡ 간접호출</span> 배지로 표시합니다.
           매트릭스가 로드돼 있으면 입력란에서 설계 함수명 자동완성을 제안합니다.
         </div>
       )}
@@ -3032,11 +3109,12 @@ function CallTreeView({ job, cacheRoot, buildSelector, sourceRoot, seedFns, toas
       {data && (
         <div>
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, fontSize: 11, color: 'var(--text-muted)', marginBottom: 8 }}>
+            {st.reverse && <span style={{ fontWeight: 700, color: '#c026d3' }} title="역방향 — 자식은 이 함수를 호출하는 함수(caller)">← 역콜트리(누가 호출하나)</span>}
             <span>엔진 <strong style={{ color: st.engine === 'tree-sitter' ? '#16a34a' : '#d97706' }}>{st.engine || '?'}</strong></span>
             <span>스캔 파일 {st.files_scanned ?? 0}</span>
             <span>함수 {st.functions ?? 0}</span>
             <span>호출 엣지 {st.edges ?? 0}</span>
-            {st.roots > 0 && <span>루트 <strong>{st.roots}</strong></span>}
+            {st.roots > 0 && <span>루트 <strong>{st.roots}</strong>{!st.reverse && <span style={{ opacity: 0.65 }}> · 진입점·ISR 우선</span>}</span>}
             {Array.isArray(data.missing) && data.missing.length > 0 && (
               <span style={{ color: '#d97706' }}>미발견 {data.missing.length}</span>
             )}
@@ -3050,7 +3128,7 @@ function CallTreeView({ job, cacheRoot, buildSelector, sourceRoot, seedFns, toas
             </div>
           ) : (
             <ul style={{ margin: 0, padding: 0 }}>
-              {trees.map((t, i) => (
+              {sortedTrees.map((t, i) => (
                 <CallTreeNode key={i} node={t} path={`${i}`} expanded={expanded} onToggle={toggle} depth={0} includeExternal={includeExternal} />
               ))}
             </ul>

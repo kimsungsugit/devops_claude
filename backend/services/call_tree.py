@@ -301,6 +301,7 @@ def _build_tree(
     visited: Set[str],
     include_external: bool,
     budget: Optional[List[int]] = None,
+    ref_map: Optional[Dict[str, Set[str]]] = None,
 ) -> Dict[str, Any]:
     # budget = [남은_노드_예산, 절단_플래그] (auto_roots 전체 포레스트에서만 전달). _build_tree는
     # 자식마다 visited를 복사해 경로를 열거(그래프 아님)하므로 노드가 branching^depth로 팽창할 수
@@ -318,10 +319,13 @@ def _build_tree(
         node["cycle"] = True
         return node
     visited.add(name)
+    ref_children = ref_map.get(name, ()) if ref_map else ()
     for callee in call_map.get(name, []):
-        node["calls"].append(
-            _build_tree(callee, call_map, external_map, max_depth, depth + 1, set(visited), include_external, budget)
-        )
+        child = _build_tree(callee, call_map, external_map, max_depth, depth + 1, set(visited), include_external, budget, ref_map)
+        if callee in ref_children:
+            # feature 2: 직접호출이 아니라 함수포인터 참조(&/대입/인자 전달)로 추론된 엣지 — 신뢰도 구분.
+            child["via_ref"] = True
+        node["calls"].append(child)
     if include_external:
         node["externals"] = external_map.get(name, [])
     return node
@@ -333,6 +337,32 @@ def _build_tree(
 _MAX_AUTO_ROOTS = 200
 _MAX_FOREST_NODES = 60000
 
+# boot/진입점 루트를 truncation([:_MAX_AUTO_ROOTS])에서 우선 보존하기 위한 이름 기반 우선순위.
+# 백엔드는 시그니처가 없어 이름만으로 판별(0=boot, 1=ISR/인터럽트, 2=일반) — 프론트는 노드
+# signature('ISR (...)')까지 활용해 Cpu_* 등을 더 정밀히 재정렬한다(표시 전용). 여기서 boot를
+# 앞세우는 목적은, 대형 프로젝트에서 main·_Startup이 알파벳 절단에 밀려 누락되지 않게 하는 것.
+_BOOT_ROOT_NAMES = frozenset({"main", "_start", "__start", "_startup", "_entrypoint", "reset_handler", "startup"})
+
+
+def _invert_call_map(call_map: Dict[str, List[str]], known: Set[str]) -> Dict[str, List[str]]:
+    """호출 그래프 반전(feature 1 역방향). inv[callee] = [callee를 호출하는 caller들].
+    known 전체를 키로 초기화(고아 leaf도 루트 산출에 참여). 방향만 뒤집으므로 엣지 수는 동일."""
+    inv: Dict[str, Set[str]] = {k: set() for k in known}
+    for caller, callees in call_map.items():
+        for c in callees:
+            if c in known:
+                inv.setdefault(c, set()).add(caller)
+    return {k: sorted(v) for k, v in inv.items()}
+
+
+def _root_priority(name: str) -> int:
+    n = str(name or "").lower()
+    if n in _BOOT_ROOT_NAMES:
+        return 0
+    if n.endswith(("_interrupt", "_isr", "_irqhandler", "_irq")) or n.startswith("isr_"):
+        return 1
+    return 2
+
 
 def _auto_root_entries(call_map: Dict[str, List[str]], known: Set[str]) -> List[str]:
     """전체 콜트리용 루트 집합 산출.
@@ -340,14 +370,15 @@ def _auto_root_entries(call_map: Dict[str, List[str]], known: Set[str]) -> List[
     루트 = in-degree 0 함수(아무도 호출하지 않는 진입점 — main·ISR·콜백·미사용 등).
     이 루트들의 forest가 known 전체를 도달하도록, 순환만으로 묶여(mutual recursion) 루트에서
     도달 불가한 컴포넌트는 결정적 순서로 대표 1개씩 추가 루트로 흡수한다 → 100% 커버 보장.
-    반환 순서는 결정적(정렬)이라 동일 입력에 동일 forest.
+    반환 순서는 결정적: (진입점 우선순위, 이름)로 정렬 — boot(main·_Startup) → ISR → 일반 순.
+    이 순서가 [:_MAX_AUTO_ROOTS] 절단 선택 순서이기도 하므로 boot 루트가 먼저 보존된다.
     """
     called: Set[str] = set()
     for callees in call_map.values():
         for c in callees:
             if c in known:
                 called.add(c)
-    roots: List[str] = sorted(known - called)
+    roots: List[str] = sorted(known - called, key=lambda n: (_root_priority(n), n))
     reached: Set[str] = set()
     stack: List[str] = list(roots)
     while stack:
@@ -386,6 +417,7 @@ def build_call_tree(
     compile_commands_path: Optional[Path] = None,
     external_map: Optional[List[Dict[str, Any]]] = None,
     auto_roots: bool = False,
+    reverse: bool = False,
 ) -> Dict[str, Any]:
     root_dir = Path(source_root).resolve()
     include_tokens = _normalize_tokens(include_paths)
@@ -412,6 +444,10 @@ def build_call_tree(
         calls, externals = _extract_calls(info.get("body", ""), known, external_lookup)
         call_map[name] = calls
         external_calls[name] = externals
+    # feature 1: 역방향(called-by) — regex 엔진도 반전 parity. external은 방향상 무의미 → 비움.
+    if reverse:
+        call_map = _invert_call_map(call_map, known)
+        external_calls = {k: [] for k in external_calls}
     roots_total = 0
     budget: Optional[List[int]] = None
     if auto_roots:
@@ -442,6 +478,7 @@ def build_call_tree(
             "roots_truncated": bool(auto_roots and roots_total > len(entries)),
             "nodes_truncated": bool(budget is not None and budget[1]),
             "compile_commands": str(compile_db) if compile_db.exists() else "",
+            "reverse": bool(reverse),
         },
     }
 
@@ -460,6 +497,9 @@ def _enrich_nodes(node: Dict[str, Any], func_meta: Dict[str, Dict[str, Any]]) ->
             node["file"] = meta["file"]
         if meta.get("signature"):
             node["signature"] = meta["signature"]
+        if meta.get("indirect"):
+            # feature 3: 이 함수 본문의 미해결 간접호출(함수포인터/디스패치) — 프론트가 ⚡ 배지로 노출.
+            node["indirect"] = meta["indirect"]
     for child in node.get("calls") or []:
         _enrich_nodes(child, func_meta)
 
@@ -474,8 +514,13 @@ def build_call_tree_precise(
     include_external: bool = False,
     external_map: Optional[List[Dict[str, Any]]] = None,
     auto_roots: bool = False,
+    reverse: bool = False,
 ) -> Dict[str, Any]:
     """tree-sitter(parse_c_project) 기반 정밀 콜트리.
+
+    reverse=True면 호출 그래프를 반전해 '누가 이 함수를 호출하나(called-by)' 트리를 낸다(영향분석용).
+    func_refs(&foo/pfn=foo/f(foo))는 known 함수만 엣지로 승격해 함수포인터 등록의 도달성을 복원하고
+    (via_ref 태그), pointer_calls(미해결 간접호출)는 node.indirect로 실어 프론트가 배지로 노출한다.
 
     regex 엔진(build_call_tree)과 동일한 출력 shape를 내되, 호출엣지를 tree-sitter로 추출해
     함수포인터/콜백 등록(handler·callback 대입)까지 잡는다. parse_c_project의 calls는
@@ -509,6 +554,8 @@ def build_call_tree_precise(
     parsed = _cp.parse_c_project(str(root_dir), max_files=max(1, int(max_files)))
     funcs = parsed.get("functions", []) or []
     raw_calls: Dict[str, List[str]] = {}
+    raw_refs: Dict[str, List[str]] = {}      # feature 2: 함수 참조(&foo/pfn=foo/f(foo))
+    raw_pcalls: Dict[str, List[str]] = {}    # feature 3: 간접 호출 사이트((*p)()/obj->h()/pfn())
     func_meta: Dict[str, Dict[str, Any]] = {}
     for f in funcs:
         nm = f.get("name")
@@ -524,6 +571,8 @@ def build_call_tree_precise(
             if not _matches_filters(rel_norm, include_tokens, exclude_tokens):
                 continue
         raw_calls[nm] = list(f.get("calls", []) or [])
+        raw_refs[nm] = list(f.get("func_refs", []) or [])
+        raw_pcalls[nm] = list(f.get("pointer_calls", []) or [])
         func_meta[nm] = {
             "file": f.get("file"),
             "signature": f.get("signature"),
@@ -536,6 +585,7 @@ def build_call_tree_precise(
     external_lookup = _build_external_lookup(external_map)
     call_map: Dict[str, List[str]] = {}
     external_calls: Dict[str, List[Dict[str, str]]] = {}
+    ref_map: Dict[str, Set[str]] = {}   # feature 2: ref로만 생긴 엣지(via_ref 표시용 — 직접호출 제외)
     for nm, calls in raw_calls.items():
         internal: Set[str] = set()
         externals: Dict[str, Dict[str, str]] = {}
@@ -547,8 +597,29 @@ def build_call_tree_precise(
                 internal.add(callee)
             elif callee not in externals:
                 externals[callee] = {"name": callee, **external_lookup.get(callee, _classify_external(callee))}
+        # feature 2: &foo/pfn=foo/f(foo)로 참조된 known 함수를 엣지로 승격(함수포인터 등록 도달성 복원).
+        # 직접호출에 이미 있던 것은 제외 → ref로만 생긴 엣지만 via_ref로 표시(직접≠추론 구분).
+        promoted = {r for r in raw_refs.get(nm, []) if r in known and r != nm}
+        ref_map[nm] = promoted - internal
+        internal |= promoted
+        # feature 3: 미해결 간접호출만 남김 — known으로 풀리는 pfn명(실제 해결됨)은 제외, 구조적(->/[]/*)은 유지.
+        indirect = [p for p in raw_pcalls.get(nm, [])
+                    if not (re.fullmatch(r"[A-Za-z_]\w*", p) and p in known)]
+        if indirect:
+            func_meta.setdefault(nm, {})["indirect"] = indirect
         call_map[nm] = sorted(internal)
         external_calls[nm] = [externals[k] for k in sorted(externals.keys())]
+    # feature 1: 역방향(called-by) — 호출 그래프를 반전. external은 방향상 무의미 → 비움.
+    # via_ref(추론 엣지)는 방향도 함께 반전해 유지 — reverse에서 X의 자식(caller) C가 참조엣지였으면
+    # C를 via_ref로 표시(추론 엣지가 영향분석에서 실엣지처럼 위장하지 않게, 리뷰 W1).
+    if reverse:
+        call_map = _invert_call_map(call_map, known)
+        external_calls = {k: [] for k in external_calls}
+        inv_ref: Dict[str, Set[str]] = {}
+        for caller, callees in ref_map.items():
+            for c in callees:
+                inv_ref.setdefault(c, set()).add(caller)
+        ref_map = inv_ref
     roots_total = 0
     budget: Optional[List[int]] = None
     if auto_roots:
@@ -562,7 +633,7 @@ def build_call_tree_precise(
         if entry not in known:
             missing.append(entry)
             continue
-        tree = _build_tree(entry, call_map, external_calls, max_depth, 0, set(), include_external, budget)
+        tree = _build_tree(entry, call_map, external_calls, max_depth, 0, set(), include_external, budget, ref_map)
         _enrich_nodes(tree, func_meta)
         trees.append(tree)
     edges = sum(len(v) for v in call_map.values())
@@ -581,9 +652,11 @@ def build_call_tree_precise(
             "roots_truncated": bool(auto_roots and roots_total > len(entries)),
             "nodes_truncated": bool(budget is not None and budget[1]),
             "compile_commands": "",
-            # tree-sitter 패키지는 import됐으나 Parser/언어 미구성이면 parse_c_project가 내부적으로
-            # regex fallback한다 — 그 경우 'regex-fallback'으로 정직하게 표기(리뷰 finding [2]).
-            "engine": "tree-sitter" if (getattr(_cp, "Parser", None) is not None and getattr(_cp, "c_language", None) is not None) else "regex-fallback",
+            "reverse": bool(reverse),
+            # parse_c_project가 검증된 tree-sitter 파서 성공 여부를 parser_engine으로 정직 노출
+            # (import 유무가 아니라 실제 파싱 성공 — #if 중첩/capsule 소비로 regex 폴백되면 그대로 표기).
+            "engine": parsed.get("parser_engine")
+            or ("tree-sitter" if (getattr(_cp, "Parser", None) is not None and getattr(_cp, "c_language", None) is not None) else "regex-fallback"),
         },
     }
 

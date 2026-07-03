@@ -119,6 +119,38 @@ class TestResolveSampleSource:
         # 매핑 성공 → 진단 warning 없음
         assert not any("매칭 0건" in w for w in result.warnings)
 
+    def test_divergent_dup_asil_keeps_max_no_downgrade(self, tmp_path: Path):
+        """#ifdef 구성별 동명 정의로 ASIL이 갈리면(D vs B) 다운그레이드 없이 더 엄격한 D 유지 + warning.
+
+        리뷰 C1 후속 — last-wins가 활성분기와 무관하게 임의 등급을 채택해 ASIL D→B로 완화되던 위험.
+        (#if 0 죽은코드는 c_parser가 이미 제외하므로, 여기 남는 중복은 구성별 실코드로 간주.)
+        """
+        src = tmp_path / "variant.c"
+        src.write_text(
+            textwrap.dedent(
+                """
+                #ifdef FEATURE_A
+                /** @asil ASIL-D */
+                int SwUFn_0200_ctrl(void) { return 0; }
+                #else
+                /** @asil ASIL-B */
+                int SwUFn_0200_ctrl(void) { return 1; }
+                #endif
+                """
+            ).strip(),
+            encoding="utf-8",
+        )
+        result = resolve_function_asil_map(str(tmp_path))
+        assert result.function_asil_map.get("SwUFn_0200") == "D", "다운그레이드 금지 — 더 엄격한 D 유지"
+        assert any("불일치" in w and "SwUFn_0200" in w for w in result.warnings), "모호성 warning 노출"
+
+    def test_max_asil_unit(self):
+        from backend.services.swut_asil_resolver import _max_asil
+        assert _max_asil("B", "D") == "D"
+        assert _max_asil("D", "B") == "D"
+        assert _max_asil("QM", "A") == "A"
+        assert _max_asil("C", "C") == "C"
+
 
 class TestResolveUnknownFunctionIds:
     """function_ids 제공 시 매핑 못한 항목 누적."""

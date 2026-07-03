@@ -222,6 +222,34 @@ def test_auto_root_entries_multi_cycle_determinism():
     assert _auto_root_entries(cm, set(cm)) == ["a", "c"]
 
 
+def test_auto_root_entries_boot_priority_ordering():
+    """루트 정렬은 (진입점 우선순위, 이름) — boot(main·_Startup) → ISR → 일반 순.
+
+    truncation([:_MAX_AUTO_ROOTS])이 이 순서로 선택하므로 boot 루트가 알파벳에 밀려 절단되지
+    않아야 한다. 모두 in-degree 0 루트인 함수들만 두고 순서를 정확값으로 잠근다.
+    """
+    from backend.services.call_tree import _auto_root_entries
+
+    # 알파벳 순이면 [Cpu_Interrupt, _Startup, main, zzz_helper], boot 우선이면 아래 순서.
+    cm = {"_Startup": [], "main": [], "Cpu_Interrupt": [], "zzz_helper": []}
+    roots = _auto_root_entries(cm, set(cm))
+    # boot(_startup, main) 먼저(그 안에서 이름순 '_' < 'm'), 그 다음 ISR(Cpu_Interrupt), 마지막 일반.
+    assert roots == ["_Startup", "main", "Cpu_Interrupt", "zzz_helper"]
+
+
+def test_root_priority_classification():
+    """_root_priority: boot=0 / ISR·인터럽트=1 / 일반=2 (대소문자·접미/접두 규칙)."""
+    from backend.services.call_tree import _root_priority
+
+    assert _root_priority("main") == 0
+    assert _root_priority("_Startup") == 0
+    assert _root_priority("_EntryPoint") == 0
+    assert _root_priority("Cpu_Interrupt") == 1
+    assert _root_priority("lin_lld_sci_isr") == 1
+    assert _root_priority("ISR_Handler") == 1
+    assert _root_priority("g_Ap_DoorCtrl_GetDrMovgTmMon") == 2
+
+
 def test_auto_roots_root_cap_and_truncation_flag(tmp_path, monkeypatch):
     """루트 수가 _MAX_AUTO_ROOTS를 넘으면 [:cap]으로 bound하고 roots_truncated=True로 정직 노출."""
     import backend.services.call_tree as ct
@@ -270,6 +298,213 @@ def test_regex_auto_roots_parity(tmp_path):
     assert payload["stats"]["roots"] >= 1
     assert payload["missing"] == []
     assert any(t["name"] == "main_entry" for t in payload["trees"])
+
+
+# ── #if 중첩 함수 파싱 회귀(tree-sitter가 preproc_if 안 함수를 놓쳐 전 파일 regex 폴백되던 결함) ──
+_C_PREPROC = """
+typedef unsigned char (*cb_t)(void);
+static unsigned char s_safety_check(void) { return 1; }
+
+#if defined(FEATURE_A)
+void reg_site(void) {
+    cb_t pfn = &s_safety_check;   /* 주소취득 → func_ref 승격 대상 */
+    dispatch(pfn);                /* 인자 전달 → func_ref */
+}
+#endif
+"""
+
+
+def test_preproc_if_nested_functions_parsed(tmp_path):
+    """#if/#endif 안에 감싼 함수도 tree-sitter로 추출돼야 한다(엔진=tree-sitter 유지, 폴백 아님)."""
+    (tmp_path / "p.c").write_text(_C_PREPROC, encoding="utf-8")
+    payload = build_call_tree_precise(tmp_path, [], max_depth=5, auto_roots=True)
+    names = {f for t in payload["trees"] for f in _all_names(t)}
+    # preproc_if 안의 reg_site와 밖의 s_safety_check 둘 다 known으로 잡혀야 함
+    assert payload["stats"]["functions"] >= 2
+    assert payload["stats"]["engine"] == "tree-sitter"
+    assert "reg_site" in names or "s_safety_check" in names
+
+
+def _all_names(node):
+    yield node.get("name")
+    for c in node.get("calls", []) or []:
+        yield from _all_names(c)
+
+
+# ── feature 2: 함수포인터 참조(&foo/f(foo)) → known 엣지 승격 + via_ref 태그 ──
+def test_func_ref_promotion_and_via_ref(tmp_path):
+    (tmp_path / "r.c").write_text(_C_PREPROC, encoding="utf-8")
+    # reg_site를 진입점으로 — &s_safety_check 참조가 엣지로 승격되고 via_ref=True여야 함
+    payload = build_call_tree_precise(tmp_path, ["reg_site"], max_depth=3)
+    assert payload["trees"], "reg_site 트리 필요"
+    kids = {c["name"]: c for c in payload["trees"][0]["calls"]}
+    assert "s_safety_check" in kids, "함수포인터 참조가 엣지로 승격돼야 함"
+    assert kids["s_safety_check"].get("via_ref") is True, "추론 엣지는 via_ref로 표시"
+
+
+# ── feature 3: 미해결 간접호출(디스패치/함수포인터) → node.indirect 배지 ──
+_C_INDIRECT = """
+typedef struct { unsigned char (*pf_Handler)(void); } entry_t;
+static entry_t s_tbl[4];
+unsigned char u8_i;
+
+void dispatch_via_table(void) {
+    s_tbl[u8_i].pf_Handler();   /* 미해결 간접호출 — 대상 못 이음 */
+    real_leaf();
+}
+unsigned char real_leaf(void) { return 0; }
+"""
+
+
+def test_indirect_pointer_call_badge(tmp_path):
+    (tmp_path / "i.c").write_text(_C_INDIRECT, encoding="utf-8")
+    payload = build_call_tree_precise(tmp_path, ["dispatch_via_table"], max_depth=2)
+    node = payload["trees"][0]
+    assert node.get("indirect"), "간접호출 사이트가 node.indirect로 노출돼야 함"
+    assert any("pf_Handler" in x for x in node["indirect"])
+    # 직접 호출은 정상 엣지로 남아야 함
+    assert any(c["name"] == "real_leaf" for c in node["calls"])
+
+
+def test_indirect_macro_uppercase_not_flagged(tmp_path):
+    """함수형 매크로(전대문자, 예: CALLBACK_HANDLER)는 이름이 handler 패턴이라도 간접호출 배지 아님.
+
+    preprocess=False라 매크로가 미해결 call로 보이나, 전대문자 관례로 제외(_extract_calls와 동일 정책).
+    반면 실 함수포인터(pfn_… 혼합 케이스)는 배지 유지.
+    """
+    src = """
+void caller(void) {
+    EVENT_HANDLER(1, 2);      /* 함수형 매크로 — 간접호출 아님 */
+    pfn_SafetyCheck();        /* 진짜 함수포인터 파라미터 */
+    real_leaf();
+}
+unsigned char real_leaf(void) { return 0; }
+"""
+    (tmp_path / "m.c").write_text(src, encoding="utf-8")
+    payload = build_call_tree_precise(tmp_path, ["caller"], max_depth=2)
+    ind = payload["trees"][0].get("indirect") or []
+    assert not any("EVENT_HANDLER" in x for x in ind), "전대문자 매크로는 간접호출 배지 아님"
+    assert any("pfn_SafetyCheck" in x for x in ind), "진짜 함수포인터는 배지 유지"
+
+
+def test_indirect_resolved_identifier_excluded(tmp_path):
+    """pfn 관례 이름이라도 known으로 해결되면(실제 정의 존재) indirect 배지에서 제외."""
+    src = """
+unsigned char pfn_ok(void) { return 1; }
+void caller(void) { pfn_ok(); }
+"""
+    (tmp_path / "k.c").write_text(src, encoding="utf-8")
+    payload = build_call_tree_precise(tmp_path, ["caller"], max_depth=2)
+    node = payload["trees"][0]
+    assert not node.get("indirect"), "known으로 해결되는 호출은 간접 배지 아님"
+    assert any(c["name"] == "pfn_ok" for c in node["calls"])
+
+
+# ── feature 1: 역방향(called-by) 트리 ──
+def test_reverse_called_by(tmp_path):
+    (tmp_path / "s.c").write_text(C_SAMPLE, encoding="utf-8")
+    # compute를 호출하는 것은 main_entry — 역방향에서 compute의 자식으로 main_entry가 와야 함
+    fwd = build_call_tree_precise(tmp_path, ["compute"], max_depth=2)
+    assert fwd["stats"]["reverse"] is False
+    assert any(c["name"] in ("helper", "leaf") for c in fwd["trees"][0]["calls"])
+    rev = build_call_tree_precise(tmp_path, ["compute"], max_depth=2, reverse=True)
+    assert rev["stats"]["reverse"] is True
+    callers = {c["name"] for c in rev["trees"][0]["calls"]}
+    assert "main_entry" in callers, "compute의 호출자는 main_entry"
+    assert "helper" not in callers, "역방향엔 callee가 아니라 caller가 와야 함"
+
+
+def test_reverse_regex_parity(tmp_path):
+    """regex 엔진도 reverse 지원(엔진 간 parity)."""
+    (tmp_path / "s.c").write_text(C_SAMPLE, encoding="utf-8")
+    rev = build_call_tree(tmp_path, ["compute"], max_depth=2, reverse=True)
+    assert rev["stats"]["reverse"] is True
+    assert any(c["name"] == "main_entry" for c in rev["trees"][0]["calls"])
+
+
+def test_invert_call_map_unit():
+    from backend.services.call_tree import _invert_call_map
+    cm = {"a": ["b", "c"], "b": ["c"], "c": []}
+    inv = _invert_call_map(cm, {"a", "b", "c"})
+    assert inv["c"] == ["a", "b"]
+    assert inv["b"] == ["a"]
+    assert inv["a"] == []
+
+
+# ── C1 회귀(리뷰 Critical): #if 0 죽은 코드가 동명 활성 함수의 ASIL/엣지를 last-wins로 덮던 결함 ──
+_C_DEADCODE = """
+/** @asil D */
+unsigned char active_fn(void){ return live_leaf(); }
+#if 0
+/** @asil B */
+unsigned char active_fn(void){ return stale_leaf(); }
+unsigned char stale_leaf(void){ return 0; }
+#endif
+unsigned char live_leaf(void){ return 1; }
+"""
+
+
+def test_dead_code_if0_excluded_asil_and_edges(tmp_path):
+    """#if 0 안의 동명 정의(@asil B)가 제외돼 활성 정의의 ASIL(D)·엣지(live_leaf)가 보존돼야 한다."""
+    (tmp_path / "d.c").write_text(_C_DEADCODE, encoding="utf-8")
+    payload = build_call_tree_precise(tmp_path, ["active_fn"], max_depth=2)
+    node = payload["trees"][0]
+    assert node.get("asil") == "D", "ASIL이 #if 0의 B로 다운그레이드되면 안 됨"
+    kids = {c["name"] for c in node["calls"]}
+    assert "live_leaf" in kids and "stale_leaf" not in kids, "죽은 코드 호출이 활성 엣지를 덮으면 안 됨"
+    # stale_leaf는 #if 0 전용이므로 트리 어디에도 나타나면 안 됨
+    all_fns = {f for t in payload["trees"] for f in _all_names(t)}
+    assert "stale_leaf" not in all_fns
+
+
+def test_if0_else_keeps_active_else_branch(tmp_path):
+    """#if 0 … #else … #endif → then(죽음) 제외, else(활성) 유지."""
+    src = """
+#if 0
+unsigned char f(void){ return dead(); }
+#else
+unsigned char f(void){ return alive(); }
+#endif
+unsigned char alive(void){ return 0; }
+"""
+    (tmp_path / "e.c").write_text(src, encoding="utf-8")
+    payload = build_call_tree_precise(tmp_path, ["f"], max_depth=2)
+    kids = {c["name"] for c in payload["trees"][0]["calls"]}
+    assert "alive" in kids, "#else 활성 분기가 유지돼야 함"
+
+
+def test_if1_else_branch_dead(tmp_path):
+    """#if 1 … #else … #endif → else(죽음) 제외."""
+    src = """
+#if 1
+unsigned char f(void){ return alive(); }
+#else
+unsigned char f(void){ return dead(); }
+#endif
+unsigned char alive(void){ return 0; }
+"""
+    (tmp_path / "t.c").write_text(src, encoding="utf-8")
+    payload = build_call_tree_precise(tmp_path, ["f"], max_depth=2)
+    kids = {c["name"] for c in payload["trees"][0]["calls"]}
+    assert "alive" in kids and "dead" not in kids
+
+
+def test_reverse_preserves_via_ref(tmp_path):
+    """reverse 모드에서도 참조 추론 엣지가 via_ref로 표시돼야 한다(W1) — 영향분석 왜곡 방지."""
+    src = """
+unsigned char s_cb(void){ return 0; }
+void reg(void){ register_it(s_cb); }
+unsigned char register_it(unsigned char (*p)(void)){ return 0; }
+"""
+    (tmp_path / "v.c").write_text(src, encoding="utf-8")
+    fwd = build_call_tree_precise(tmp_path, ["reg"], max_depth=2)
+    fkids = {c["name"]: c for c in fwd["trees"][0]["calls"]}
+    assert fkids.get("s_cb", {}).get("via_ref") is True, "정방향: 참조 엣지 via_ref"
+    # 역방향: s_cb의 호출자(caller)로 reg가 오고, 그 엣지도 추론이므로 via_ref 유지
+    rev = build_call_tree_precise(tmp_path, ["s_cb"], max_depth=2, reverse=True)
+    rkids = {c["name"]: c for c in rev["trees"][0]["calls"]}
+    assert "reg" in rkids, "역방향: s_cb의 caller는 reg"
+    assert rkids["reg"].get("via_ref") is True, "역방향에서도 추론 엣지는 via_ref로 표시(W1)"
 
 
 if __name__ == "__main__":

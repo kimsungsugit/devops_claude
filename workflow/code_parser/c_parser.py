@@ -29,8 +29,10 @@ class CFunction:
     comment_related: str
     comment_precondition: str
     body_text: str
-    comment_params: List[Dict[str, str]] = None  # [{"name": "x", "desc": "..."}]
+    comment_params: Optional[List[Dict[str, str]]] = None  # [{"name": "x", "desc": "..."}]
     comment_return: str = ""
+    func_refs: Optional[List[str]] = None      # &foo/pfn=foo/f(foo) — 함수포인터 참조(엣지 승격 후보)
+    pointer_calls: Optional[List[str]] = None  # (*p)()/obj->h()/pfn() — 간접 호출 사이트(배지)
 
 
 def _run_preprocessor(
@@ -140,6 +142,11 @@ _CALLBACK_REGISTER_PATTERNS = re.compile(
     re.I,
 )
 
+# 함수포인터/콜백 관례 이름 — identifier 호출이 이 패턴이면 간접호출 후보로 본다(대상은 known
+# 필터로 최종 판정). 구조적 간접호출((*p)()/obj->h()/tbl[i]())은 이름과 무관하게 잡는다.
+# 'fp'(부동소수/프레임포인터 관례)는 실측상 참양성 0·타 프로젝트 거짓양성 위험만 있어 제외.
+_PTR_CALL_NAME = re.compile(r"(^|_)(pfn|pfunc|cb|callback|handler|hook)\d*(_|$)", re.I)
+
 _STD_LIB_FUNCS = frozenset({
     "printf", "sprintf", "snprintf", "fprintf", "scanf", "sscanf",
     "malloc", "calloc", "realloc", "free",
@@ -149,6 +156,46 @@ _STD_LIB_FUNCS = frozenset({
     "abs", "labs", "fabs", "sqrt", "pow", "log", "exp",
     "assert", "exit", "abort",
 })
+
+# 문/제어 키워드 — function_definition으로 오파싱되는 아티팩트(예: 매크로가 만든 `if(...)`) 방어.
+_C_STMT_KEYWORDS = frozenset({"if", "for", "while", "switch", "return", "sizeof", "do", "else"})
+
+# tree-sitter는 전처리기를 평가하지 않아 #if 0(죽은 코드)·#if 1 분기 본문을 그대로 파싱한다.
+# preprocess=False 경로에서 죽은 코드의 함수 정의가 들어오면 동명 함수가 ASIL resolver/call-tree의
+# last-wins로 활성 정의를 덮어 안전분류(ASIL D→B)·엣지를 왜곡한다 → 비활성 분기 함수를 제외한다.
+_FALSY_COND = frozenset({"0", "0u", "0U", "0ul", "0UL", "(0)", "false", "FALSE"})
+_TRUTHY_COND = frozenset({"1", "1u", "1U", "(1)", "true", "TRUE"})
+
+
+def _dead_function_nodes(root, src: bytes) -> Set[int]:
+    """비활성 전처리 분기의 function_definition 노드 id 집합.
+
+    - `#if 0 … [#else …] #endif` → then-분기(else/elif 이전) 함수는 죽음.
+    - `#if 1 … #else … #endif`   → else/elif(alternative) 분기 함수는 죽음(중첩 서브트리 포함).
+    보수성 원칙: literal 0/1만 판정하고 `#elif` 조건은 평가하지 않는다. 그 결과 `#if 0 / #elif 1 / #else`의
+    도달불가 `#else`, `#if 0 / #elif 0`의 죽은 `#elif`는 **살아남을 수 있다(과대포함)**. 이는 의도된 tradeoff —
+    영향/추적 도구에서 과대포함(죽은 함수 몇 개 더 노출)은 안전 방향이며, 실함수를 숨기거나 지우거나 ASIL을
+    강등하지 않는다(적대 검증 확인). 정밀 pruning이 필요하면 전처리(preprocess=True) 또는 elif 체인 평가를 추가하라.
+    """
+    dead: Set[int] = set()
+    for node in _walk(root):
+        if node.type != "preproc_if":
+            continue
+        cond = node.child_by_field_name("condition")
+        cond_txt = _node_text(src, cond).strip() if cond is not None else ""
+        alt = node.child_by_field_name("alternative")
+        if cond_txt in _FALSY_COND:
+            for ch in node.children:
+                if ch is alt or ch.type in ("preproc_else", "preproc_elif"):
+                    continue  # else/elif(활성 후보)는 살림
+                for d in _walk(ch):
+                    if d.type == "function_definition":
+                        dead.add(d.id)
+        elif cond_txt in _TRUTHY_COND and alt is not None:
+            for d in _walk(alt):
+                if d.type == "function_definition":
+                    dead.add(d.id)
+    return dead
 
 _REGEX_DEF_PAT = re.compile(
     r"^[\t ]*((?:static\s+)?[A-Za-z_][\w\s\*\(\),]*?)\s+([A-Za-z_]\w*)\s*\(([^;]*?)\)\s*\{",
@@ -195,6 +242,72 @@ def _extract_calls(func_node, src: bytes) -> List[str]:
                         if rname and not rname.isupper():
                             calls.add(rname)
     return sorted(calls - _STD_LIB_FUNCS)
+
+
+def _extract_func_refs(func_node, src: bytes) -> List[str]:
+    """직접 호출은 아니나 함수를 '참조'하는 지점 — &foo 주소취득 / pfn = foo 대입 /
+    f(..., foo, ...) 인자 전달. call_tree가 known 함수와의 교집합만 엣지로 승격해
+    함수포인터 등록으로 인한 도달성(거짓 루트)을 복원한다. 변수 참조는 known 필터로 탈락."""
+    out: Set[str] = set()
+    body = func_node.child_by_field_name("body")
+    if not body:
+        return []
+    for node in _walk(body):
+        t = node.type
+        if t == "pointer_expression":
+            # &foo(주소취득)만 — *p(역참조)는 제외. 연산자는 첫 자식.
+            if _node_text(src, node).lstrip().startswith("&"):
+                arg = node.child_by_field_name("argument")
+                if arg is not None and arg.type == "identifier":
+                    out.add(arg.text.decode("utf-8", errors="ignore"))
+        elif t == "assignment_expression":
+            right = node.child_by_field_name("right")
+            if right is not None and right.type == "identifier":
+                out.add(right.text.decode("utf-8", errors="ignore"))
+        elif t == "call_expression":
+            args = node.child_by_field_name("arguments")
+            if args is not None:
+                for a in args.children:
+                    if a.type == "identifier":
+                        out.add(a.text.decode("utf-8", errors="ignore"))
+    return sorted(out)
+
+
+def _extract_pointer_calls(func_node, src: bytes) -> List[str]:
+    """함수포인터/콜백을 통한 간접 호출 사이트(대상 미해결) — 정적 콜트리가 대상을 못 잇는 지점.
+    (*p)() 역참조 · obj->h()/obj.h() 멤버 · tbl[i]() 첨자, 그리고 pfn/cb/handler 관례 이름
+    identifier 호출을 수집한다. call_tree가 known으로 해결되는 항목은 제외하고 미해결분만 배지로 노출."""
+    out: Set[str] = set()
+    body = func_node.child_by_field_name("body")
+    if not body:
+        return []
+    for node in _walk(body):
+        if node.type != "call_expression":
+            continue
+        target = node.child_by_field_name("function")
+        if target is None:
+            continue
+        tt = target.type
+        if tt in ("field_expression", "subscript_expression"):
+            out.add(_node_text(src, target).strip())
+        elif tt == "pointer_expression":
+            ident = _find_ident(target)
+            if ident:
+                out.add(ident)
+        elif tt == "parenthesized_expression":
+            # (*pfn)() 역참조만 — (type)(x)/(expr)(x) 캐스트·괄호식은 제외(오탐 방지).
+            inner = next((ch for ch in target.children if ch.type == "pointer_expression"), None)
+            if inner is not None:
+                ident = _find_ident(inner)
+                if ident:
+                    out.add(ident)
+        elif tt == "identifier":
+            nm = target.text.decode("utf-8", errors="ignore")
+            # not isupper(): 전대문자는 함수형 매크로(CALLBACK_HANDLER 등) 관례 → 간접호출 아님.
+            # _extract_calls의 콜백 인자/대입 가드(isupper 제외)와 동일 정책으로 거짓 ⚡배지 방지.
+            if _PTR_CALL_NAME.search(nm) and not nm.isupper():
+                out.add(nm)
+    return sorted(out)
 
 
 def _extract_calls_from_body_text(body_text: str) -> List[str]:
@@ -363,18 +476,26 @@ def _extract_function_defs(
     root, src: bytes, file_path: str, globals_set: Set[str]
 ) -> List[CFunction]:
     functions: List[CFunction] = []
-    for node in root.children:
-        if node.type != "function_definition":
+    # root.children(직계)만 보면 #if/#ifdef(preproc_if) 안에 감싼 함수 정의를 통째로 놓쳐(이 코드베이스의
+    # 안전 관련 파일 다수) tree-sitter가 0개→전 파일 regex 폴백되던 결함. 전체 트리를 순회해 어느 깊이의
+    # function_definition도 잡는다(C는 함수 중첩 불가 → 중복 처리 없음).
+    # 단 #if 0(죽은 코드) 분기 함수는 제외 — 동명 활성 함수의 ASIL/엣지를 last-wins로 덮는 안전결함 방지.
+    dead = _dead_function_nodes(root, src)
+    for node in _walk(root):
+        if node.type != "function_definition" or node.id in dead:
             continue
         decl = node.child_by_field_name("declarator")
         decl_text = _node_text(src, decl) if decl else ""
         name = _find_ident(decl) if decl else None
-        if not name:
+        if not name or name in _C_STMT_KEYWORDS:
+            # 매크로/K&R 등으로 `if(...)`가 function_definition으로 오파싱되는 아티팩트 방어(regex 폴백과 동일 정책).
             continue
         prefix = _node_text(src, node.child_by_field_name("type")) or ""
         is_static = "static" in prefix
         signature = (prefix + " " + decl_text).strip()
         calls = _extract_calls(node, src)
+        func_refs = _extract_func_refs(node, src)
+        pointer_calls = _extract_pointer_calls(node, src)
         used_globals: Set[str] = set()
         body = node.child_by_field_name("body")
         body_text = _node_text(src, body) if body else ""
@@ -404,6 +525,8 @@ def _extract_function_defs(
                 body_text=body_text,
                 comment_params=c_params or None,
                 comment_return=c_return,
+                func_refs=func_refs,
+                pointer_calls=pointer_calls,
             )
         )
     return functions
@@ -551,6 +674,51 @@ def _extract_global_decls(root, src: bytes) -> List[Dict[str, str]]:
     return results
 
 
+def _make_parser():
+    """tree_sitter 버전차/capsule 1회성 소비 함정을 흡수하는 견고한 파서 생성.
+
+    구버전 API `Parser.set_language`는 최신 tree_sitter에서 제거됐는데, 실패한 set_language 호출이
+    c_language() capsule을 소비해 이후 `Language(capsule)`이 '빈 문법'이 되는 함정이 있다 — 파싱은
+    되나 function_definition 0개가 되어 전 파일이 조용히 regex 폴백되고, 엔진은 import 유무만 보고
+    'tree-sitter'로 오표기됐다(정밀 엔진이 실제로는 regex였음). 시도마다 capsule을 새로 얻고, 실제
+    C 스니펫에서 function_definition이 나오는지 검증한 뒤 반환한다. 모두 실패하면 None(→regex 폴백)."""
+    if Parser is None or c_language is None:
+        return None
+
+    def _valid(p) -> bool:
+        try:
+            t = p.parse(b"int _ts_probe(void){return 0;}")
+            return any(n.type == "function_definition" for n in _walk(t.root_node))
+        except Exception:
+            return False
+
+    if Language is not None:
+        # 1) 최신 권장: Parser(Language(capsule))
+        try:
+            p = Parser(Language(c_language()))
+            if _valid(p):
+                return p
+        except Exception:
+            pass
+        # 2) .language 속성 대입(중간 버전)
+        try:
+            p = Parser()
+            p.language = Language(c_language())
+            if _valid(p):
+                return p
+        except Exception:
+            pass
+    # 3) 구버전: set_language(capsule)
+    try:
+        p = Parser()
+        p.set_language(c_language())
+        if _valid(p):
+            return p
+    except Exception:
+        pass
+    return None
+
+
 def parse_c_project(
     source_root: str,
     *,
@@ -559,27 +727,17 @@ def parse_c_project(
     include_dirs: Optional[List[str]] = None,
     defines: Optional[List[str]] = None,
     cpp_path: str = "gcc",
-) -> Dict[str, List[Dict[str, any]]]:
+) -> Dict[str, object]:
     root = Path(source_root).resolve()
     if not root.exists():
         return {"functions": [], "globals": [], "scanned": []}
     allowed = {".c", ".h", ".cpp", ".hpp"}
-    functions: List[Dict[str, any]] = []
+    functions: List[Dict[str, object]] = []
     globals_list: Set[str] = set()
     globals_detailed: List[Dict[str, str]] = []
     scanned: List[str] = []
     preprocess_stats: Dict[str, int] = {"gcc": 0, "clang": 0, "no-preprocess": 0}
-    parser = None
-    if Parser is not None and c_language is not None:
-        parser = Parser()
-        lang = c_language()
-        try:
-            parser.set_language(lang)
-        except Exception:
-            if Language is not None:
-                parser.language = Language(lang)
-            else:
-                raise
+    parser = _make_parser()
     count = 0
     for dirpath, _, filenames in os.walk(root):
         for name in filenames:
@@ -635,6 +793,8 @@ def parse_c_project(
                         "comment_related": f.comment_related,
                         "comment_precondition": f.comment_precondition,
                         "body": f.body_text,
+                        "func_refs": f.func_refs or [],
+                        "pointer_calls": f.pointer_calls or [],
                     }
                 )
             if parser is not None:
@@ -662,4 +822,6 @@ def parse_c_project(
         "globals_detailed": globals_detailed,
         "scanned": scanned,
         "preprocess_stats": preprocess_stats,
+        # 실제 파서 성공 여부를 정직하게 노출 — import 유무가 아니라 검증된 tree-sitter 파서인지.
+        "parser_engine": "tree-sitter" if parser is not None else "regex-fallback",
     }

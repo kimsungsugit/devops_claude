@@ -103,6 +103,16 @@ def _normalize_asil(raw: str) -> str:
     return ""
 
 
+# ISO 26262 엄격도 순위 — 중복 정의(예: #ifdef 구성별)로 ASIL이 갈릴 때 절대 다운그레이드하지
+# 않도록 더 높은 등급을 채택하는 데 쓴다(안전 보수성). 미지값은 QM(0)로 강등해 비교.
+_ASIL_RANK = {"QM": 0, "A": 1, "B": 2, "C": 3, "D": 4}
+
+
+def _max_asil(a: str, b: str) -> str:
+    """두 ASIL 등급 중 더 엄격한(높은) 것을 반환 — 안전 다운그레이드 방지."""
+    return a if _ASIL_RANK.get(a, 0) >= _ASIL_RANK.get(b, 0) else b
+
+
 def _extract_function_id(c_function_name: str, related_id: str = "") -> str:
     """C 함수명 또는 Related ID 주석에서 SwUFn_NNNN 추출.
 
@@ -221,8 +231,20 @@ def resolve_function_asil_map(
         asil = _normalize_asil(asil_raw)
         if not asil:
             continue
-        # 가장 최근 정의가 우선 (중복 시 마지막 값으로 덮어쓰기).
-        result.function_asil_map[fn_id] = asil
+        # 중복 정의(#ifdef 구성별 등)로 ASIL이 갈리면 last-wins는 활성분기와 무관하게 임의 등급을
+        # 채택해 D→B 다운그레이드를 유발할 수 있다(리뷰 C1). ISO 26262 보수성: 절대 다운그레이드하지
+        # 않고 더 엄격한 등급을 유지 + warning으로 사용자에게 모호성을 알린다. (#if 0 죽은코드는
+        # c_parser _dead_function_nodes가 이미 제외하므로 여기 오는 중복은 구성별 실코드로 간주.)
+        prev = result.function_asil_map.get(fn_id)
+        if prev and prev != asil:
+            keep = _max_asil(prev, asil)
+            result.warnings.append(
+                f"함수 '{name}'(id={fn_id}) 중복 정의 ASIL 불일치({prev} vs {asil}) — "
+                f"보수적으로 {keep} 유지(다운그레이드 방지)"
+            )
+            result.function_asil_map[fn_id] = keep
+        else:
+            result.function_asil_map[fn_id] = asil
         seen_ids.add(fn_id)
 
     # 5) 매핑 못한 function_ids 누적.
