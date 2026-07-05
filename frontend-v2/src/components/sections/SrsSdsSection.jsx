@@ -2858,12 +2858,15 @@ function TraceTreeFunc({ fn, tests, parentId, expanded, onToggle }) {
  * parse_c_project(tree-sitter)로 호출엣지를 추출하고, 노드에 ASIL/파일/시그니처를 실어준다.
  * - entry(진입 함수)는 빌드 소스의 known 함수명과 일치해야 적중. 매트릭스 source_ids에서 자동완성.
  * - 표준 라이브러리는 백엔드에서 제외. include_external 시 미정의(외부) 호출만 별도 표시.
- * - 루트는 항상 펼침, 하위는 클릭 펼침(깊은 트리 DOM 비용 절감). cycle/truncated 플래그 표시. */
+ * - 루트는 기본 펼침(접기 가능), 하위는 클릭 펼침(깊은 트리 DOM 비용 절감). cycle/truncated 플래그 표시. */
 function CallTreeNode({ node, path, expanded, onToggle, depth, includeExternal }) {
   const children = Array.isArray(node?.calls) ? node.calls : [];
   const externals = includeExternal && Array.isArray(node?.externals) ? node.externals : [];
   const hasChildren = children.length > 0 || externals.length > 0;
-  const isOpen = depth === 0 || expanded.has(path);
+  // isOpen 규칙 — expanded Set은 "기본값에서 토글된 노드"를 담는다. 루트(depth 0)는 기본 열림이라
+  // Set 포함=접힘, 하위(depth>0)는 기본 닫힘이라 Set 포함=펼침. toggle은 단순 멤버십 flip이라 양 depth 통일.
+  // (과거 `depth===0 || has`는 루트를 항상 열림 고정 → ▾ 셰브론 클릭이 무반응인 dead affordance였음)
+  const isOpen = expanded.has(path) !== (depth === 0);
   const asil = node?.asil ? String(node.asil).toUpperCase() : '';
   return (
     <li style={{ listStyle: 'none' }}>
@@ -2971,6 +2974,9 @@ function CallTreeView({ job, cacheRoot, buildSelector, sourceRoot, seedFns, toas
   const [loading, setLoading] = useState(false);
   const [expanded, setExpanded] = useState(() => new Set());
   const mountedRef = useRef(true);
+  // 요청 시퀀스 토큰 — 로딩 중 재진입(입력창 Enter/버튼 재클릭) 시 늦게 도착한 이전 응답이 최신 결과를
+  // 덮어쓰지 않도록(stale setData 방지). load 진입마다 ++, resolve 시 자기 토큰이 최신일 때만 반영.
+  const loadSeq = useRef(0);
   // StrictMode(dev) 더블인보크 대비 — setup에서 true 복원(다른 섹션 동일 패턴). cleanup-only면 마운트 후 false 고착→자동로드 무음 실패.
   useEffect(() => { mountedRef.current = true; return () => { mountedRef.current = false; }; }, []);
 
@@ -2985,6 +2991,7 @@ function CallTreeView({ job, cacheRoot, buildSelector, sourceRoot, seedFns, toas
     if (bidir) {
       if (!entries.length) { toast('warning', '양방향 뷰는 진입 함수가 필요합니다 (예: main).'); return; }
       setLoading(true);
+      const myseq = ++loadSeq.current;
       try {
         const body = (rev) => ({
           job_url: job?.url || '', cache_root: cacheRoot || '.devops_pro_cache',
@@ -2996,7 +3003,7 @@ function CallTreeView({ job, cacheRoot, buildSelector, sourceRoot, seedFns, toas
           post('/api/jenkins/call-tree', body(false)),
           post('/api/jenkins/call-tree', body(true)),
         ]);
-        if (!mountedRef.current) return;
+        if (!mountedRef.current || myseq !== loadSeq.current) return;   // 재진입 stale 응답 무시
         setData({ bidir: true, callers, callees, stats: callees?.stats || {} });
         setExpanded(new Set());
         const st = callees?.stats || {};
@@ -3004,14 +3011,15 @@ function CallTreeView({ job, cacheRoot, buildSelector, sourceRoot, seedFns, toas
         if (miss.length) toast('warning', `미발견 함수: ${[...new Set(miss)].slice(0, 5).join(', ')} — 함수명을 확인하세요.`);
         else toast('success', `양방향 콜트리 (${st.engine || '?'} · 함수 ${st.functions ?? 0})`);
       } catch (e) {
-        if (mountedRef.current) toast('error', e?.status === 404
+        if (mountedRef.current && myseq === loadSeq.current) toast('error', e?.status === 404
           ? '캐시된 빌드가 없습니다 — 먼저 Jenkins 빌드를 동기화하세요.'
           : `양방향 콜트리 실패: ${e.message}`);
-      } finally { if (mountedRef.current) setLoading(false); }
+      } finally { if (mountedRef.current && myseq === loadSeq.current) setLoading(false); }
       return;
     }
     if (!allRoots && !entries.length) { toast('warning', '진입 함수명을 입력하세요 (예: main). 또는 [전체 트리]로 모든 루트를 자동 구성하세요.'); return; }
     setLoading(true);
+    const myseq = ++loadSeq.current;
     try {
       const res = await post('/api/jenkins/call-tree', {
         job_url: job?.url || '',
@@ -3025,7 +3033,7 @@ function CallTreeView({ job, cacheRoot, buildSelector, sourceRoot, seedFns, toas
         include_external: includeExternal,
         engine: 'precise',
       });
-      if (!mountedRef.current) return;
+      if (!mountedRef.current || myseq !== loadSeq.current) return;   // 재진입 stale 응답 무시
       setData(res);
       // boot 루트(main·_Startup)의 첫 레벨을 자동 펼쳐 애플리케이션 트리를 바로 노출. boot가 없거나
       // 역방향이면 빈 Set(루트만 펼침). 정렬/index는 렌더 sortedTrees와 동일 함수·동일 reverse라 정합.
@@ -3050,14 +3058,14 @@ function CallTreeView({ job, cacheRoot, buildSelector, sourceRoot, seedFns, toas
       }
     } catch (e) {
       // 404(캐시 빌드 부재)는 raw 영문 대신 안내 메시지 — [콜트리 생성]·[전체 트리] 공통.
-      if (mountedRef.current) {
+      if (mountedRef.current && myseq === loadSeq.current) {
         const msg = e?.status === 404
           ? '캐시된 빌드가 없습니다 — 먼저 Jenkins 빌드를 동기화하거나, 소스가 있는 환경에서 진입 함수로 분석하세요.'
           : `콜트리 생성 실패: ${e.message}`;
         toast('error', msg);
       }
     } finally {
-      if (mountedRef.current) setLoading(false);
+      if (mountedRef.current && myseq === loadSeq.current) setLoading(false);
     }
   }, [entry, depth, includeExternal, reverse, bidir, job, cacheRoot, buildSelector, sourceRoot, toast]);
 
@@ -3143,55 +3151,74 @@ function CallTreeView({ job, cacheRoot, buildSelector, sourceRoot, seedFns, toas
       )}
 
       {data && data.bidir && (() => {
-        // 양방향(피벗): 중심 함수를 두고 위=caller, 아래=callee. caller/callee 트리는 모두 진입 함수에
-        // 뿌리내리므로 각 트리의 root children만 렌더(진입 함수는 중앙에 한 번만). 경로 접두사 c/e로 분리.
-        const centerNode = data.callees?.trees?.[0] || data.callers?.trees?.[0] || null;
-        const centerName = centerNode?.name || '(진입 함수)';
-        const cAsil = centerNode?.asil ? String(centerNode.asil).toUpperCase() : '';
-        const callers = data.callers?.trees?.[0]?.calls || [];
-        const callees = data.callees?.trees?.[0]?.calls || [];
+        // 양방향(피벗): 각 진입 함수를 중심으로 위=caller·아래=callee를 스택. 콤마로 여러 진입 함수를 주면
+        // 함수마다 독립 피벗 블록으로 렌더(과거엔 trees[0]만 그려 나머지를 성공 토스트로 위장한 채 silent drop).
+        // caller/callee 트리는 index가 아니라 함수명으로 짝지어 매칭(백엔드가 direction 무관 동일 known을
+        // 순회하므로 정렬은 같으나, misalignment 방어). 경로 접두사 c{블록}_{i} / e{블록}_{i}로 충돌 방지.
+        const calleeTrees = Array.isArray(data.callees?.trees) ? data.callees.trees : [];
+        const callerTrees = Array.isArray(data.callers?.trees) ? data.callers.trees : [];
+        const callerByName = new Map(callerTrees.map(t => [String(t?.name || ''), t]));
+        const calleeByName = new Map(calleeTrees.map(t => [String(t?.name || ''), t]));
+        // 중심 함수 목록(callee 트리 순서 우선, caller-only 보충) — 중복 제거.
+        const names = [];
+        const seenNames = new Set();
+        [...calleeTrees, ...callerTrees].forEach(t => {
+          const n = String(t?.name || '');
+          if (n && !seenNames.has(n)) { seenNames.add(n); names.push(n); }
+        });
         const bst = data.callees?.stats || {};
-        const notFound = !(data.callees?.trees?.length) && !(data.callers?.trees?.length);
+        const notFound = names.length === 0;
         return (
           <div>
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, fontSize: 11, color: 'var(--text-muted)', marginBottom: 8 }}>
               <span style={{ fontWeight: 700, color: '#0369a1' }}>↕ 양방향 (caller+callee)</span>
               <span>엔진 <strong style={{ color: bst.engine === 'tree-sitter' ? '#16a34a' : '#d97706' }}>{bst.engine || '?'}</strong></span>
               <span>함수 {bst.functions ?? 0}</span>
+              {names.length > 1 && <span>중심 <strong>{names.length}</strong>개</span>}
             </div>
             {notFound ? (
               <div style={{ fontSize: 12, color: 'var(--text-muted)', padding: 12, textAlign: 'center', border: '1px dashed var(--border)', borderRadius: 6 }}>
                 입력한 함수를 빌드 소스에서 찾지 못했습니다 — 함수명/소스 캐시를 확인하세요.
               </div>
             ) : (
-              <div>
-                <div style={{ fontSize: 11, fontWeight: 600, color: '#c026d3', marginBottom: 4 }}>⬆ 이 함수를 호출하는 함수 (caller)</div>
-                {callers.length ? (
-                  <ul style={{ margin: '0 0 6px', padding: 0 }}>
-                    {callers.map((n, i) => (
-                      <CallTreeNode key={`c${i}`} node={n} path={`c${i}`} expanded={expanded} onToggle={toggle} depth={0} includeExternal={includeExternal} />
-                    ))}
-                  </ul>
-                ) : <div style={{ fontSize: 11, color: 'var(--text-muted)', padding: '2px 6px 6px' }}>호출하는 함수 없음 (진입점·미사용)</div>}
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 10px', margin: '4px 0',
-                  background: 'var(--bg)', border: '2px solid var(--accent)', borderRadius: 6 }}>
-                  <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>◆ 중심</span>
-                  <strong style={{ fontFamily: 'monospace', fontSize: 12 }}>{centerName}</strong>
-                  {cAsil && <span style={{ fontSize: 9, padding: '0 5px', borderRadius: 8, fontWeight: 700, color: '#fff', background: _ASIL_COLORS[cAsil] || '#6b7280' }}>ASIL {cAsil}</span>}
-                  {Array.isArray(centerNode?.indirect) && centerNode.indirect.length > 0 && (
-                    <span style={{ fontSize: 9, padding: '0 5px', borderRadius: 8, fontWeight: 700, color: '#fff', background: '#ea580c' }}
-                      title={`미해결 간접호출:\n· ${centerNode.indirect.join('\n· ')}`}>⚡ 간접호출 {centerNode.indirect.length}</span>
-                  )}
-                </div>
-                <div style={{ fontSize: 11, fontWeight: 600, color: '#0891b2', margin: '4px 0' }}>⬇ 이 함수가 호출하는 함수 (callee)</div>
-                {callees.length ? (
-                  <ul style={{ margin: 0, padding: 0 }}>
-                    {callees.map((n, i) => (
-                      <CallTreeNode key={`e${i}`} node={n} path={`e${i}`} expanded={expanded} onToggle={toggle} depth={0} includeExternal={includeExternal} />
-                    ))}
-                  </ul>
-                ) : <div style={{ fontSize: 11, color: 'var(--text-muted)', padding: '2px 6px' }}>호출하는 하위 함수 없음 (leaf)</div>}
-              </div>
+              names.map((nm, bi) => {
+                const centerNode = calleeByName.get(nm) || callerByName.get(nm) || null;
+                const cAsil = centerNode?.asil ? String(centerNode.asil).toUpperCase() : '';
+                const callers = callerByName.get(nm)?.calls || [];
+                const callees = calleeByName.get(nm)?.calls || [];
+                const multi = names.length > 1;
+                return (
+                  <div key={`pivot-${bi}`}
+                    style={multi ? { marginBottom: 14, paddingBottom: 10, borderBottom: '1px dashed var(--border)' } : undefined}>
+                    <div style={{ fontSize: 11, fontWeight: 600, color: '#c026d3', marginBottom: 4 }}>⬆ 이 함수를 호출하는 함수 (caller)</div>
+                    {callers.length ? (
+                      <ul style={{ margin: '0 0 6px', padding: 0 }}>
+                        {callers.map((n, i) => (
+                          <CallTreeNode key={`c${bi}_${i}`} node={n} path={`c${bi}_${i}`} expanded={expanded} onToggle={toggle} depth={1} includeExternal={includeExternal} />
+                        ))}
+                      </ul>
+                    ) : <div style={{ fontSize: 11, color: 'var(--text-muted)', padding: '2px 6px 6px' }}>호출하는 함수 없음 (진입점·미사용)</div>}
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 10px', margin: '4px 0',
+                      background: 'var(--bg)', border: '2px solid var(--accent)', borderRadius: 6 }}>
+                      <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>◆ 중심</span>
+                      <strong style={{ fontFamily: 'monospace', fontSize: 12 }}>{nm}</strong>
+                      {cAsil && <span style={{ fontSize: 9, padding: '0 5px', borderRadius: 8, fontWeight: 700, color: '#fff', background: _ASIL_COLORS[cAsil] || '#6b7280' }}>ASIL {cAsil}</span>}
+                      {Array.isArray(centerNode?.indirect) && centerNode.indirect.length > 0 && (
+                        <span style={{ fontSize: 9, padding: '0 5px', borderRadius: 8, fontWeight: 700, color: '#fff', background: '#ea580c' }}
+                          title={`미해결 간접호출:\n· ${centerNode.indirect.join('\n· ')}`}>⚡ 간접호출 {centerNode.indirect.length}</span>
+                      )}
+                    </div>
+                    <div style={{ fontSize: 11, fontWeight: 600, color: '#0891b2', margin: '4px 0' }}>⬇ 이 함수가 호출하는 함수 (callee)</div>
+                    {callees.length ? (
+                      <ul style={{ margin: 0, padding: 0 }}>
+                        {callees.map((n, i) => (
+                          <CallTreeNode key={`e${bi}_${i}`} node={n} path={`e${bi}_${i}`} expanded={expanded} onToggle={toggle} depth={1} includeExternal={includeExternal} />
+                        ))}
+                      </ul>
+                    ) : <div style={{ fontSize: 11, color: 'var(--text-muted)', padding: '2px 6px' }}>호출하는 하위 함수 없음 (leaf)</div>}
+                  </div>
+                );
+              })
             )}
           </div>
         );
