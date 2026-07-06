@@ -85,6 +85,51 @@ def test_merge_concatenates_and_recomputes_summary() -> None:
     assert merged["merged_sources"] == 2
 
 
+def test_merge_splits_summary_by_source() -> None:
+    """merge가 결합 summary와 별개로 source(UT/IT)별 summary/카운트를 분리 산출한다.
+
+    UT 패널은 summary_ut, IT 패널은 summary_it을 써서 합부가 섞이지 않게 한다.
+    """
+    ut = {"test_rows": [
+        {"subprogram": "u1", "testcase": "t1", "unit": "u", "result": "PASS", "report": "r", "source": "UT"},
+        {"subprogram": "u2", "testcase": "t2", "unit": "u", "result": "FAIL", "report": "r", "source": "UT"},
+    ]}
+    it = {"test_rows": [
+        {"subprogram": "i1", "testcase": "t3", "unit": "u", "result": "PASS", "report": "r", "source": "IT"},
+    ]}
+    merged = J._merge_vectorcast_payloads([ut, it])
+    # 결합은 그대로 3건.
+    assert merged["summary"]["total"] == 3
+    # 분리 카운트/합부.
+    assert merged["test_rows_count_ut"] == 2
+    assert merged["test_rows_count_it"] == 1
+    assert merged["summary_ut"]["passed"] == 1 and merged["summary_ut"]["failed"] == 1
+    assert merged["summary_it"]["passed"] == 1 and merged["summary_it"]["failed"] == 0
+    # ut + it == 전체 (누락/이중 없음)
+    assert merged["test_rows_count_ut"] + merged["test_rows_count_it"] == merged["test_rows_count"]
+
+
+def test_split_helper_unknown_source_counts_as_ut() -> None:
+    """_split_vcast_summary_by_source: source 미상 row는 UT로 귀속(ut+it=전체 보존)."""
+    rows = [
+        {"result": "PASS"},                    # source 없음 → UT
+        {"result": "PASS", "source": "it"},    # 소문자도 IT로 인식
+        {"result": "FAIL", "source": "UT"},
+    ]
+    split = J._split_vcast_summary_by_source(rows)
+    assert split["test_rows_count_ut"] == 2 and split["test_rows_count_it"] == 1
+    assert split["summary_ut"]["passed"] == 1 and split["summary_ut"]["failed"] == 1
+    assert split["summary_it"]["passed"] == 1
+
+
+def test_split_helper_single_kind_nulls_other() -> None:
+    """전부 UT면 summary_it=None, 전부 IT면 summary_ut=None(빈 카드 방지)."""
+    ut_only = J._split_vcast_summary_by_source([{"result": "PASS", "source": "UT"}])
+    assert ut_only["summary_it"] is None and ut_only["summary_ut"]["total"] == 1
+    it_only = J._split_vcast_summary_by_source([{"result": "PASS", "source": "IT"}])
+    assert it_only["summary_ut"] is None and it_only["summary_it"]["total"] == 1
+
+
 def test_merge_dedups_identical_rows() -> None:
     """같은 경로 두 번 등록(또는 부모/자식 경로) → 동일 row 이중 집계 방지."""
     same_row = {"subprogram": "f", "testcase": "tc", "unit": "u", "result": "PASS", "report": "r"}
@@ -105,11 +150,16 @@ def test_merge_tolerates_non_dict_and_missing_rows() -> None:
 
 # ── _load_vectorcast_rag_from_cloudium_multi ──────────────────────────
 def test_multi_single_path_returns_raw(monkeypatch) -> None:
-    """단일 경로면 원본 payload 그대로 (모든 필드 보존, 병합 미적용)."""
+    """단일 경로면 원본 payload 필드 보존(병합 미적용) + UT/IT 분리 필드만 추가."""
     raw = {"test_rows": [{"subprogram": "f"}], "build_root": "U:/x", "scanned_at": "t"}
     monkeypatch.setattr(J, "_load_vectorcast_rag_from_cloudium", lambda _p: dict(raw))
     out = J._load_vectorcast_rag_from_cloudium_multi(["U:/x"])
-    assert out == raw  # build_root/scanned_at 보존
+    # 원본 필드 보존
+    assert out["build_root"] == "U:/x" and out["scanned_at"] == "t"
+    assert out["test_rows"] == raw["test_rows"]
+    # UT/IT 분리 필드 추가(source 없는 row → UT 귀속).
+    assert out["test_rows_count_ut"] == 1 and out["test_rows_count_it"] == 0
+    assert out["summary_it"] is None and out["summary_ut"]["total"] == 1
 
 
 def test_multi_merges_when_two_paths(monkeypatch) -> None:
@@ -289,10 +339,14 @@ def test_merge_no_coverage_yields_none() -> None:
     assert merged["coverage_ut"] is None
 
 
-def test_folder_parse_empty_results_returns_empty(monkeypatch) -> None:
+def test_folder_parse_empty_results_returns_diagnostic(monkeypatch) -> None:
+    """결과 0건: silent-drop 방지(P1)로 빈 dict가 아니라 진단 dict를 반환한다
+    (test_rows=[], vcast_kind, parse_warnings에 '결과 0건' 경고 표면화)."""
     _patch_folder_parse(monkeypatch, exec_results={})
     out = J._parse_vcast_logs_from_cloudium_folder("U:/x/단위 테스트/empty_UT")
-    assert out == {}
+    assert out["test_rows"] == []
+    assert out["vcast_kind"] == "UT"
+    assert out.get("parse_warnings")  # 0건 경고 누적
 
 
 def test_folder_parse_uses_cache(monkeypatch) -> None:
@@ -364,11 +418,28 @@ def test_docx_tables_text_returns_none_on_garbage() -> None:
 
 # ── 동기/비동기 vectorcast-rag (리팩터 + 잡 전환) ─────────────────────
 def test_compute_vectorcast_rag_missing_when_nothing_found(monkeypatch) -> None:
-    """빌드 캐시 없음 + 등록 경로 없음 → {ok:false, error:missing} (리팩터 후 동기 동작 보존)."""
+    """빌드 캐시 없음 + 등록 경로 없음 → {ok:false, error:missing, parse_warnings:[]}
+    (P1: silent-drop 방지 계약 — 등록 경로가 없으니 사유도 빈 리스트)."""
     monkeypatch.setattr(J, "_resolve_cached_build_root", lambda *a, **k: None)
     req = JenkinsReportRequest(job_url="http://j/job/x", cache_root=".c")
     out = J._compute_vectorcast_rag(req)
-    assert out == {"ok": False, "error": "missing"}
+    assert out == {"ok": False, "error": "missing", "parse_warnings": []}
+
+
+def test_compute_vectorcast_rag_surfaces_cloudium_parse_warnings(monkeypatch) -> None:
+    """P1: cloudium 폴백이 test_rows를 못 얻어도 실패 사유(parse_warnings)를 missing 응답에
+    실어 표면화한다 — 과거엔 bare {ok:False,error:missing}로 사용자에게 사유 없이 열이 비었다.
+    worker timeout(PermissionError)/폴더 부재가 가장 흔한 KJPDS02 PV 통증."""
+    monkeypatch.setattr(J, "_resolve_cached_build_root", lambda *a, **k: None)
+    monkeypatch.setattr(
+        J, "_load_vectorcast_rag_from_cloudium_multi",
+        lambda paths: {"test_rows": [],
+                       "parse_warnings": ["IT: cloudium 접근 실패 PermissionError (worker 미응답/timeout 가능)"]},
+    )
+    req = JenkinsReportRequest(job_url="http://j/job/x", cache_root=".c", vcast_log_paths=["U:/vc"])
+    out = J._compute_vectorcast_rag(req)
+    assert out["ok"] is False and out["error"] == "missing"
+    assert any("PermissionError" in w for w in out.get("parse_warnings", []))
 
 
 def test_vectorcast_rag_async_dispatches_job(monkeypatch) -> None:

@@ -312,6 +312,18 @@ export default function SrsSdsSection({ job, analysisResult }) {
           vcast_log_paths: vcastLogPaths,
         });
         const rawRows = ragData?.data?.test_rows || [];
+        // silent-drop 방지(P1): VectorCAST 폴더 파싱 실패/빈결과 사유(worker timeout·폴더 부재
+        // 등)를 표면화한다. 부분 실패는 data.parse_warnings, 완전 실패(missing 응답)는 top-level.
+        const vcWarnings = ragData?.data?.parse_warnings || ragData?.parse_warnings || [];
+        // VectorCAST 데이터가 하나도 없을 때만(완전 실패) 사유를 표면화한다. 성공/부분성공
+        // (rawRows 존재)에는 성공 경로의 정보성 note([metric-report] 함수콜 보강 등)가 섞여 있어
+        // 표시하면 노이즈이고, 이 stepWarnings가 matrix 캐시 게이트(hadStepFailure)를 꺼
+        // 매 조회 재파싱을 유발한다(deep-review W1/W2). 데이터 0건일 때만 silent-drop을 막는다.
+        if (!rawRows.length && Array.isArray(vcWarnings) && vcWarnings.length) {
+          const _head = vcWarnings.slice(0, 3).join(' / ');
+          const _more = vcWarnings.length > 3 ? ` 외 ${vcWarnings.length - 3}건` : '';
+          stepWarnings.push(`VectorCAST: ${_head}${_more}`);
+        }
 
         // VectorCAST는 함수(subprogram) 단위로 롤업해 SUTS와 동일 granularity로 맞춘다.
         // per-실행(수천 행)을 그대로 보내면 한 요구사항에 수백~수천 셀이 붙어 렌더가

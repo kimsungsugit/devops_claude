@@ -109,6 +109,62 @@ def step3_vectorcast_it(entry) -> None:
         print(f"    IT 경로 {exists}: {p}")
 
 
+def step4_cloudium_read_completeness(entry) -> None:
+    """[worker] cloudium worker가 U: 문서를 '다' 읽는지 진단.
+
+    개별 파일 read(read_bytes)는 chunking으로 완전하나, 디렉토리 리스팅(list_dir)은
+    30s timeout·실패 시 silent 빈 목록 `[]`을 반환한다(실 로그에 정적분석 폴더 entries=0
+    이력). 폴더 스캔이 필요한 IT 로그류는 여기서 통째 누락될 수 있다. cold(유휴 후 첫)와
+    warm 리스팅 소요시간을 재 timeout 근접 여부를 본다.
+    """
+    print("\n========== STEP 4: cloudium worker read 완전성 진단 ==========")
+    import time
+    from backend.services import file_resolver as fr
+    try:
+        mode = fr.get_file_mode()
+    except Exception:  # noqa: BLE001
+        mode = "?"
+    print("file_mode:", mode)
+    resolver = fr.get_resolver()
+    is_cloud = resolver.__class__.__name__ == "CloudiumFileResolver"
+    print("resolver:", resolver.__class__.__name__)
+    if is_cloud:
+        try:
+            alive = fr.is_gate_running()
+            print("worker ping(8765):", "응답" if alive else "무응답 — worker 미실행!")
+        except Exception as exc:  # noqa: BLE001
+            print("worker ping 실패:", exc)
+
+    def _timed_list(path: str, label: str) -> None:
+        for tag in ("cold", "warm"):
+            t0 = time.time()
+            try:
+                items = resolver.list_dir(path, pattern="*")
+                dt = time.time() - t0
+                warn = "  <-- timeout 근접(30s)!" if dt > 20 else ("  <-- 빈 목록(누락 의심)" if not items else "")
+                print(f"  [{label}/{tag}] {dt:6.2f}s  entries={len(items)}{warn}")
+            except Exception as exc:  # noqa: BLE001
+                dt = time.time() - t0
+                print(f"  [{label}/{tag}] {dt:6.2f}s  ERROR: {type(exc).__name__}: {str(exc)[:80]}")
+
+    # SITS 문서 read_bytes 완전성(크기)
+    sits_path = entry.linked_docs.sits
+    if sits_path:
+        try:
+            t0 = time.time()
+            data = resolver.read_bytes(sits_path)
+            print(f"  SwITS read_bytes: {len(data):,} bytes in {time.time()-t0:.2f}s (완전 수신=chunking+eof)")
+        except Exception as exc:  # noqa: BLE001
+            print(f"  SwITS read_bytes ERROR: {type(exc).__name__}: {str(exc)[:100]}")
+    # IT 로그 폴더 + 정적분석 폴더 리스팅 timing
+    for p in list(entry.linked_docs.vectorcast or []):
+        if "_IT_" in p.upper() or "통합" in p:
+            _timed_list(p, "IT로그")
+    for p in list(entry.linked_docs.codesonar or []):
+        _timed_list(p, "정적분석")
+    print(">>> read_bytes는 크면 완전, list_dir이 timeout/빈목록이면 그 폴더 파일 통째 누락(silent)")
+
+
 def main() -> None:
     scm_id = sys.argv[1] if len(sys.argv) > 1 else "kjpds02_pv"
     entry = _load_scm(scm_id)
@@ -120,10 +176,12 @@ def main() -> None:
     step1_raw_document(sits_path)
     step2_parser_output(sits_path)
     step3_vectorcast_it(entry)
+    step4_cloudium_read_completeness(entry)
     print("\n========== 판정 가이드 ==========")
     print("A. STEP1 SwITC ≈ STEP2 파서 케이스  → 파싱 정상, SITS 낮음은 문서 특성(v0.10 작성중)")
     print("B. STEP1 SwITC >> STEP2 파서 케이스  → 파서 절단/누락 (시트선택·empty_streak=50·컬럼)")
     print("C. STEP3 IT 함수 >> STEP2 스펙 케이스 → 통합시험은 실행됐으나 스펙/IT 반영 누락")
+    print("D. STEP4 list_dir이 30s 근접/빈목록  → worker 리스팅 timeout으로 폴더 데이터 silent 누락")
 
 
 if __name__ == "__main__":

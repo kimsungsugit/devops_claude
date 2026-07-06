@@ -1034,7 +1034,10 @@ def _parse_vcast_logs_from_cloudium_folder(path: str) -> Dict[str, Any]:
         layout = SA._detect_log_layout(resolver, folder, warnings)
         sub_tc = os.path.join(folder, layout.tc_dir)
         if not resolver.exists(sub_tc):
-            return {}
+            # silent-drop 방지(P1): tc 폴더 부재/worker 접근 실패를 warnings로 표면화한다.
+            # 과거엔 bare {} 반환으로 사용자에게 사유 없이 VectorCAST 열이 비었다.
+            return {"test_rows": [], "vcast_kind": kind,
+                    "parse_warnings": warnings + [f"{kind}: 시험 TC 폴더 부재/접근 불가 ({sub_tc})"]}
         # ExecutionResult 폴더 — exec_dir 미존재 시 exec_dir_alts("Execution") 시도.
         sub_exec = os.path.join(folder, layout.exec_dir)
         if layout.exec_dir_alts and not SA._exists_quiet(resolver, sub_exec):
@@ -1091,7 +1094,9 @@ def _parse_vcast_logs_from_cloudium_folder(path: str) -> Dict[str, Any]:
                     "report": env,
                 })
         if not test_rows:
-            return {}
+            # silent-drop 방지(P1): env 스캔은 됐으나 결과 0건 — 누적 warnings 표면화.
+            return {"test_rows": [], "vcast_kind": kind,
+                    "parse_warnings": warnings + [f"{kind}: 시험 결과 0건 (폴더 스캔됨, env 파싱 실패 누적 가능)"]}
         summary = _summarize_vcast_tests(test_rows)
         failures: List[Dict[str, Any]] = [
             {
@@ -1276,12 +1281,37 @@ def _parse_vcast_logs_from_cloudium_folder(path: str) -> Dict[str, Any]:
             "vcast cloudium 파싱 접근 실패 path=%s err=%s: %s warnings=%s",
             p, type(e).__name__, e, warnings[:5],
         )
-        return {}
+        # silent-drop 방지(P1): worker 미응답/timeout(PermissionError)·IO 오류를 warnings로
+        # 표면화. cloudium U: 유휴 후 첫 접근 timeout이 가장 흔한 실사용 통증(KJPDS02 PV).
+        return {"test_rows": [], "vcast_kind": kind,
+                "parse_warnings": warnings + [f"{kind}: cloudium 접근 실패 {type(e).__name__} (worker 미응답/timeout 가능): {str(e)[:80]}"]}
     except Exception:  # noqa: BLE001
         logging.getLogger(__name__).debug(
             "vcast cloudium 파싱 예외 path=%s", p, exc_info=True
         )
-        return {}
+        # silent-drop 방지(P1): 예상 못한 파싱 예외도 warnings로 표면화(상세는 debug 로그).
+        return {"test_rows": [], "vcast_kind": kind,
+                "parse_warnings": warnings + [f"{kind}: 파싱 예외 (backend 로그 참조)"]}
+
+
+def _split_vcast_summary_by_source(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """test_rows를 source(UT/IT)별로 나눠 합부 summary/카운트를 분리한다.
+
+    각 row의 ``source``는 폴더 종류(``kind = "IT" if is_it else "UT"``, jenkins.py:1029)이며,
+    coverage 분리 로직(``cov_it if _it else cov_ut``)과 동일하게 **IT가 아니면 UT로 귀속**해
+    ut+it 합이 전체와 일치하도록 한다(미상 source는 UT로 흡수). 결합 summary와 별개로
+    UT 패널은 UT만, IT 패널은 IT만 표시하기 위한 필드.
+    """
+    from backend.services.jenkins_adapter import _summarize_vcast_tests
+
+    it_rows = [r for r in rows if str(r.get("source") or "").upper() == "IT"]
+    ut_rows = [r for r in rows if str(r.get("source") or "").upper() != "IT"]
+    return {
+        "summary_ut": _summarize_vcast_tests(ut_rows) if ut_rows else None,
+        "summary_it": _summarize_vcast_tests(it_rows) if it_rows else None,
+        "test_rows_count_ut": len(ut_rows),
+        "test_rows_count_it": len(it_rows),
+    }
 
 
 def _merge_vectorcast_payloads(payloads: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -1313,9 +1343,14 @@ def _merge_vectorcast_payloads(payloads: List[Dict[str, Any]]) -> Dict[str, Any]
     merged_grand: Dict[str, Dict[str, Dict[str, int]]] = {}
     merged_complexity: List[Dict[str, Any]] = []
     comp_seen: set = set()
+    merged_warnings: List[str] = []
     for pl in payloads:
         if not isinstance(pl, dict):
             continue
+        # silent-drop 방지(P1): 폴더별 파싱 실패/빈결과 사유(parse_warnings)를 병합 수집.
+        _pw = pl.get("parse_warnings")
+        if isinstance(_pw, list):
+            merged_warnings.extend(str(w) for w in _pw)
         for r in (pl.get("test_rows") or []):
             if not isinstance(r, dict):
                 continue
@@ -1430,6 +1465,7 @@ def _merge_vectorcast_payloads(payloads: List[Dict[str, Any]]) -> Dict[str, Any]
         "test_rows": merged_rows,
         "test_rows_count": len(merged_rows),
         "summary": summary,
+        **_split_vcast_summary_by_source(merged_rows),
         "failures": failures,
         "ut_reports": ut_reports,
         "it_reports": it_reports,
@@ -1439,6 +1475,8 @@ def _merge_vectorcast_payloads(payloads: List[Dict[str, Any]]) -> Dict[str, Any]
         "vcast_summary": _vcast_summary_out(),
         "complexity_rows": merged_complexity,
         "merged_sources": len([p for p in payloads if isinstance(p, dict) and p]),
+        # silent-drop 방지(P1): 폴더별 파싱 실패 사유를 병합해 상위로 전달(프론트 표면화).
+        "parse_warnings": merged_warnings,
     }
 
 
@@ -1468,7 +1506,11 @@ def _load_vectorcast_rag_from_cloudium_multi(paths: List[str]) -> Dict[str, Any]
     if not payloads:
         return {}
     if len(payloads) == 1:
-        return payloads[0]
+        # 단일 폴더(UT 또는 IT 하나)도 UT/IT 분리 필드를 채워 프론트 패널이 결합값을
+        # 오표시하지 않게 한다. 원본 캐시 dict를 변형하지 않도록 얕은 복사 후 갱신.
+        pl = dict(payloads[0])
+        pl.update(_split_vcast_summary_by_source(pl.get("test_rows") or []))
+        return pl
     return _merge_vectorcast_payloads(payloads)
 
 
@@ -1516,6 +1558,7 @@ def _compute_vectorcast_rag(req: JenkinsReportRequest) -> Dict[str, Any]:
     # rowless payload(예: build_20 vectorcast_rag.json은 키는 많지만 test_rows=[])를
     # 'present'로 오인해 `if not payload`가 폴백을 건너뛰어 → 등록 경로 결과가 끝까지
     # 안 쓰이고 VectorCAST/P&F 컬럼이 빈 채로 나왔다. test_rows 유무로 판정해 폴백한다.
+    cloud_warnings: List[str] = []
     if not _has_vcast_rows(payload):
         cloud_paths = _collect_vcast_paths(req)
         if cloud_paths:
@@ -1523,8 +1566,16 @@ def _compute_vectorcast_rag(req: JenkinsReportRequest) -> Dict[str, Any]:
             if _has_vcast_rows(cloud_payload):
                 payload = cloud_payload
                 source = "cloudium"
+            elif isinstance(cloud_payload, dict):
+                # silent-drop 방지(P1): 폴백이 test_rows를 못 얻어도 실패 사유(worker
+                # timeout/폴더 부재 등)는 살려 프론트가 표시하게 한다.
+                _pw = cloud_payload.get("parse_warnings")
+                if isinstance(_pw, list):
+                    cloud_warnings.extend(str(w) for w in _pw)
     if not _has_vcast_rows(payload):
-        return {"ok": False, "error": "missing"}
+        _pw = payload.get("parse_warnings") if isinstance(payload, dict) else None
+        all_pw = ([str(w) for w in _pw] if isinstance(_pw, list) else []) + cloud_warnings
+        return {"ok": False, "error": "missing", "parse_warnings": all_pw}
 
     comparison: Dict[str, Any] = {}
     # 이전 빌드 delta 비교는 Jenkins 캐시 기반 — cloudium 폴백 소스에는 비적용.
