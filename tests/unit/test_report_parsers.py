@@ -6,6 +6,7 @@ from backend.services.report_parsers import (
     _clean_text,
     _is_worstrules_header,
     _parse_number,
+    build_report_summary,
     parse_html_report,
     parse_prqa_rcr_details,
     read_text_safe,
@@ -204,6 +205,22 @@ class TestPrqaRcrDetails:
     def test_missing_file_graceful(self, tmp_path):
         res = parse_prqa_rcr_details(tmp_path / "nope.html")
         assert "error" in res
+
+    def test_build_summary_finds_rcr_in_parent(self, tmp_path):
+        """RCR HTML이 report/ 하위가 아니라 빌드 루트(부모)에 있어도 심층 상세를 복원한다.
+
+        KJPDS02_* Jenkins 잡은 RCR을 빌드 루트에 두는데 _detect_reports_dir는 report/를
+        반환해, report_dir 스캔이 RCR을 놓쳐 top_rules/top_files/violations_by_file이
+        전부 비던 회귀. build_report_summary의 부모 디렉토리 폴백을 고정한다.
+        """
+        build_root = tmp_path / "build_99"
+        report_dir = build_root / "report"
+        report_dir.mkdir(parents=True)
+        (build_root / "PROJ_RCR_01012026.html").write_text(_RCR_HTML, encoding="utf-8")
+        prqa = build_report_summary(report_dir)["kpis"]["prqa"]
+        assert len(prqa["violations_by_file"]) > 0   # 부모 폴백으로 RCR 발견
+        assert len(prqa["top_rules"]) > 0
+        assert len(prqa["top_files"]) > 0
 
     def test_same_basename_different_path_not_merged(self, tmp_path):
         # 동일 basename(config.c)이 APP/BOOT 두 경로에 존재 → full path 키로 분리돼야 함

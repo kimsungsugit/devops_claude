@@ -715,6 +715,16 @@ def build_report_summary(root_dir: Path, project_root: Optional[Path] = None) ->
     top_scan_files = _top_scan_files(jenkins_scan)
 
     prqa_rcr_path = next((root_dir / item["rel_path"] for item in html_files if "_RCR_" in item.get("rel_path", "")), None)
+    # RCR HTML이 report/ 하위가 아니라 빌드 루트(report_dir의 부모)에 놓이는 Jenkins 잡
+    # (예: KJPDS02_*)에서는 report_dir 스캔이 RCR을 놓쳐 top_rules/top_files/violations_by_file이
+    # 전부 비었다(rule_violation_count만 analysis_summary.json 폴백 → 심층 QAC UI 미표시).
+    # report_dir에서 못 찾으면 부모 디렉토리에서 직접 탐색해 심층 상세를 복원한다.
+    if prqa_rcr_path is None:
+        parent = root_dir.parent
+        if parent != root_dir:
+            _parent_rcrs = sorted(parent.glob("*_RCR_*.html"))
+            if _parent_rcrs:
+                prqa_rcr_path = _parent_rcrs[-1]
     job_slug = _job_slug_from_dir(root_dir)
     prqa_rcr = parse_prqa_rcr_summary(prqa_rcr_path) if prqa_rcr_path else {}
     prqa_rcr_details = parse_prqa_rcr_details(
