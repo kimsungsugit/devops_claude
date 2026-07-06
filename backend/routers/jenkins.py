@@ -1987,6 +1987,88 @@ def jenkins_scm_info(req: JenkinsScmInfoRequest) -> Dict[str, Any]:
     raise HTTPException(status_code=400, detail="unsupported scm_type")
 
 
+def _try_svn_revision_range(req: JenkinsImpactTriggerRequest, build_rev: str):
+    """현재 로컬 default 버전(A) ↔ 선택 빌드 버전(B) 사이의 svn 정밀 델타를 시도한다.
+
+    A = `svn info <source_root>`의 로컬 작업본 revision(오프라인, 자격증명 불필요).
+    B = build_rev(Jenkins lastBuiltRevision). 둘 다 정수 SVN revision일 때만
+    `svn diff --summarize -r A:B <repo_url>`로 변경 파일 집합을 구한다.
+
+    반환:
+      - (files, True, meta{changed_files_source:'svn_revision_range', ...}) — 성공.
+        A==B면 files=[]로 '변경 없음'을 명시(빈 changeSet 오등치와 구분).
+      - None — svn 대상 아님/작업본 아님/revision 비정수/조회 실패 → 호출자가 단일
+        빌드 changeSet 결과로 폴백(git·비-svn·회귀 0). repo_url은 registry(신뢰)에서만
+        오고 revision은 정수검증하므로 SSRF/인자 주입 표면 없음.
+    """
+    try:
+        if not str(build_rev or "").strip().isdigit():
+            return None  # svn revision은 정수 — git SHA1/빈 값이면 대상 아님
+        from backend.services.scm_registry import get_registry_entry, resolve_scm_credentials
+        entry = get_registry_entry(req.scm_id)
+        if entry is None or str(entry.scm_type or "").lower() != "svn":
+            return None
+        repo_url = str(entry.scm_url or "").strip()
+        source_root = str(entry.source_root or "").strip()
+        if not (repo_url and source_root):
+            return None
+        from backend.services.local_service import svn_info_url, svn_diff_summarize
+        # A: 로컬 작업본 base revision (source_root는 svn 체크아웃 경로) — 오프라인 조회.
+        info = svn_info_url(repo_url=source_root)
+        base_rev = str(info.get("revision") or "").strip()
+        if not base_rev.isdigit():
+            return None  # 작업본 아님/svn info 실패 → changeSet 폴백
+        # 리포지토리 정합 검증: svn revision은 리포지토리-전역 정수라, 작업본(A)이 diff 대상
+        # scm_url(B)과 '다른 리포'면 A:B 비교가 에러 없이 무의미한 결과를 낸다(silent wrong).
+        # 작업본의 Repository Root가 scm_url을 포함할 때만 A를 신뢰한다(불일치→changeSet 폴백).
+        repo_root = str(info.get("repo_root") or "").strip().rstrip("/")
+        scm_norm = repo_url.rstrip("/")
+        if repo_root and not (scm_norm == repo_root or scm_norm.startswith(repo_root + "/")):
+            _logger.warning(
+                "svn revision-range skipped: working copy repo root (%s) != scm_url (%s) — changeSet fallback",
+                repo_root, repo_url,
+            )
+            return None
+        if base_rev == build_rev:
+            # 로컬 default가 이미 빌드 revision과 동일 → 실제 변경 0건(확인됨).
+            return [], True, {
+                "changed_files_source": "svn_revision_range",
+                "baseline_revision": base_rev,
+                "build_revision": build_rev,
+                "jenkins_changed_file_count": 0,
+                "linkage_reason": f"local working copy already at build revision r{build_rev} (no changes)",
+            }
+        username, password, _ = resolve_scm_credentials(scm_id=req.scm_id)
+        diff = svn_diff_summarize(
+            repo_url=repo_url,
+            rev_a=base_rev,
+            rev_b=build_rev,
+            username=username,
+            password=password,
+        )
+        if int(diff.get("rc", 1)) != 0:
+            _logger.warning(
+                "svn diff -r %s:%s failed (scm=%s): %s",
+                base_rev, build_rev, req.scm_id, str(diff.get("output"))[:200],
+            )
+            return None  # 조회 실패 → changeSet 폴백
+        files = [str(x) for x in (diff.get("files") or [])]
+        meta: Dict[str, Any] = {
+            "changed_files_source": "svn_revision_range",
+            "baseline_revision": base_rev,
+            "build_revision": build_rev,
+            "jenkins_changed_file_count": len(files),
+            "linkage_reason": f"svn diff --summarize -r {base_rev}:{build_rev}",
+        }
+        edit_types = diff.get("edit_types") or {}
+        if edit_types:
+            meta["changed_file_edit_types"] = edit_types
+        return files, True, meta
+    except Exception as exc:  # noqa: BLE001 — 어떤 실패든 changeSet로 graceful 폴백
+        _logger.warning("svn revision-range diff failed (scm=%s): %s", req.scm_id, exc, exc_info=True)
+        return None
+
+
 def _resolve_jenkins_changed_files(req: JenkinsImpactTriggerRequest):
     """선택한 빌드의 changeSet에서 변경 .c/.h 파일을 가져온다.
 
@@ -2023,9 +2105,18 @@ def _resolve_jenkins_changed_files(req: JenkinsImpactTriggerRequest):
             verify_tls=bool(cfg.get("verifyTls", True)),
         )
         files = [str(x) for x in (res.get("files") or [])]
+        build_rev = str(res.get("revision") or "").strip()
+        # ── baseline(로컬 default 버전 A) ↔ build 버전(B) 정밀 델타 (svn revision-range) ──
+        # 영향은 '직전 빌드 대비 changeSet'이 아니라 '현재 로컬 작업본 revision(A) ↔ 선택
+        # 빌드 revision(B)' 사이여야 한다. svn diff --summarize -r A:B로 빌드가 몇 번 끼어
+        # 있든 A→B 전체 변경을 잡는다(빈 changeSet=0건 오등치 회피). svn 아님/작업본 아님/
+        # 조회 실패 시 아래 단일 빌드 changeSet 결과로 graceful 폴백한다(git·회귀 0).
+        svn_range = _try_svn_revision_range(req, build_rev)
+        if svn_range is not None:
+            return svn_range
         meta: Dict[str, Any] = {
             "changed_files_source": "jenkins_changeset",
-            "build_revision": res.get("revision", ""),
+            "build_revision": build_rev,
             "jenkins_changed_file_count": len(files),
         }
         # per-file editType(add/edit/delete) — cloudium/원격에서 NEW/DELETE 변경유형 분류의

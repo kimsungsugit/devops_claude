@@ -760,6 +760,17 @@ export default function AnalysisSection({ job, analysisResult }) {
         _source: scmVcast.source || 'cloudium',
       }
     : buildVcast;
+  // UT/IT 합부 분리 — 백엔드가 source(UT/IT)별로 나눈 summary. 분리값이 없으면(구 응답/빌드
+  // 산출물) 결합 summary로 하위호환. UT 패널은 UT만, IT 패널은 IT만 표시.
+  const sumUt = effVcast.summary_ut || null;
+  const sumIt = effVcast.summary_it || null;
+  const utSummary = sumUt || effVcast.summary || null;
+  const utTcCount = effVcast.test_rows_count_ut ?? effVcast.test_rows_count ?? null;
+  const itTcCount = effVcast.test_rows_count_it ?? null;
+  // 실패 목록도 source(UT/IT)별 분리 — 백엔드 failures는 top-N 결합 목록이라 여기서 나눈다.
+  const _allFailures = effVcast.failures || [];
+  const utFailures = _allFailures.filter(f => String(f.source || '').toUpperCase() !== 'IT');
+  const itFailures = _allFailures.filter(f => String(f.source || '').toUpperCase() === 'IT');
   const utCov = vc.ut || {};
   const modules = utCov.modules || [];
   // SCM 경로에서 불러온 VectorCAST 커버리지(구문/분기/MC-DC) — 빌드에 커버리지가 없을 때 표시.
@@ -1039,12 +1050,46 @@ export default function AnalysisSection({ job, analysisResult }) {
               <summary style={{ cursor: 'pointer', fontSize: 12, fontWeight: 600 }}>위반 상위 파일 ({prqa.top_files.length})</summary>
               <div style={{ maxHeight: 220, overflowY: 'auto', marginTop: 6 }}>
                 <table className="impact-table" style={{ fontSize: 10 }}>
-                  <thead><tr><th>파일</th><th>위반 수</th></tr></thead>
+                  <thead><tr><th>파일</th><th>위반 수</th><th>위반 규칙</th><th>준수율</th></tr></thead>
                   <tbody>
                     {prqa.top_files.slice(0, 20).map((f, i) => (
                       <tr key={i}>
-                        <td className="text-sm" style={{ maxWidth: 260, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{f.file ?? f.path ?? f.name ?? '-'}</td>
+                        <td className="text-sm" title={f.path || undefined} style={{ maxWidth: 260, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{f.file ?? f.path ?? f.name ?? '-'}</td>
                         <td style={{ textAlign: 'center', fontWeight: 600 }}>{f.count ?? f.violations ?? '-'}</td>
+                        <td style={{ textAlign: 'center' }}>{f.violated_rules ?? '-'}</td>
+                        <td style={{ textAlign: 'center' }}>{f.compliance_index ?? '-'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </details>
+          )}
+          {/* 위반 상세 — 파일 × 규칙 매트릭스(WorstRules). "어떤 파일에서 어떤 MISRA 규칙이 몇 건"까지 드릴다운.
+              함수/라인 단위는 QAC RCR에 없어(파일 레벨이 최대 granularity) 파일×규칙이 최상세. */}
+          {Array.isArray(prqa.violations_by_file) && prqa.violations_by_file.length > 0 && (
+            <details open style={{ marginBottom: 10 }}>
+              <summary style={{ cursor: 'pointer', fontSize: 12, fontWeight: 600 }}>
+                위반 상세 — 파일별 규칙 위반 내역 ({prqa.violations_by_file.length} 파일{prqa.violations_files_truncated_to ? ` · 상위 ${prqa.violations_files_truncated_to}개만` : ''})
+              </summary>
+              <div className="text-muted" style={{ fontSize: 10, margin: '4px 0 2px' }}>
+                각 소스 파일에서 위반된 MISRA 규칙과 건수입니다 (출처: Helix QAC RCR · 파일 레벨).
+              </div>
+              <div style={{ maxHeight: 320, overflowY: 'auto', marginTop: 4 }}>
+                <table className="impact-table" style={{ fontSize: 10 }}>
+                  <thead><tr><th>파일</th><th>위반 규칙 (건수)</th><th>합계</th></tr></thead>
+                  <tbody>
+                    {prqa.violations_by_file.map((f, i) => (
+                      <tr key={i} style={{ background: f.total >= 50 ? '#fee2e2' : f.total >= 10 ? '#fef9c3' : undefined }}>
+                        <td title={f.path || '특정 파일에 귀속되지 않은 위반 (분석 카테고리)'} style={{ fontFamily: 'monospace', fontSize: 10, maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontStyle: f.path ? 'normal' : 'italic', color: f.path ? undefined : 'var(--text-muted)' }}>{f.file}</td>
+                        <td style={{ fontSize: 10, lineHeight: 1.7 }}>
+                          {(f.rules || []).map((r, j) => (
+                            <span key={j} style={{ display: 'inline-block', margin: '1px 3px 1px 0', padding: '0 5px', borderRadius: 8, background: 'var(--bg)', border: '1px solid var(--border, #d1d5db)', whiteSpace: 'nowrap' }}>
+                              {r.rule} <b>{r.count}</b>
+                            </span>
+                          ))}
+                        </td>
+                        <td style={{ textAlign: 'center', fontWeight: 700 }}>{f.total}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -1154,8 +1199,8 @@ export default function AnalysisSection({ job, analysisResult }) {
           {vcastSource && <SourceBadge source={vcastSource} />}
         </div>
         <div className="text-sm text-muted" style={{ padding: '0 0 8px', lineHeight: 1.55 }}>
-          VectorCAST 단위시험(UT) 결과입니다. <b>테스트 케이스</b>=시험 수, <b>UT 리포트</b>=리포트 폴더 수,{' '}
-          <b>통과·실패·통과율</b>=시험 합부(UT+IT 합산), <b>Line/Branch Rate</b>=단위시험 라인·분기 커버리지.{' '}
+          VectorCAST 단위시험(UT) 결과입니다. <b>테스트 케이스</b>=UT 시험 수, <b>UT 리포트</b>=리포트 폴더 수,{' '}
+          <b>통과·실패·통과율</b>=단위시험(UT) 합부, <b>Line/Branch Rate</b>=단위시험 라인·분기 커버리지.{' '}
           ‘함수레벨 상세 불러오기’를 누르면 구문/분기/MC-DC 함수 entries가 채워집니다(ASIL C/D는 통과율 100% 권장).
         </div>
         {!buildHasVcast && !scmVcast && (
@@ -1166,8 +1211,8 @@ export default function AnalysisSection({ job, analysisResult }) {
           </div>
         )}
         <div className="stats-row">
-          {effVcast.test_rows_count != null && (
-            <div className="stat-card"><div className="stat-value">{effVcast.test_rows_count.toLocaleString()}</div><div className="stat-label">테스트 케이스</div></div>
+          {utTcCount != null && (
+            <div className="stat-card"><div className="stat-value">{utTcCount.toLocaleString()}</div><div className="stat-label">테스트 케이스</div></div>
           )}
           <div className="stat-card"><div className="stat-value">{(effVcast.ut_reports || []).length}</div><div className="stat-label">UT 리포트</div></div>
           {tester?.vectorcast_ut_line_rate != null && (
@@ -1194,24 +1239,24 @@ export default function AnalysisSection({ job, analysisResult }) {
             UT 함수 {utEntries.length.toLocaleString()}개 — 함수별 커버리지는 아래 ‘커버리지 상세’의 모듈 행을 펼쳐 확인하세요.
           </div>
         )}
-        {effVcast.summary && (effVcast.summary.total || 0) > 0 && (
-          ((effVcast.summary.passed ?? 0) + (effVcast.summary.failed ?? 0) > 0) ? (
+        {utSummary && (utSummary.total || 0) > 0 && (
+          ((utSummary.passed ?? 0) + (utSummary.failed ?? 0) > 0) ? (
             <div className="stats-row" style={{ marginTop: 8 }}>
               <div className="stat-card" style={{ borderLeft: '3px solid var(--color-success)' }}>
-                <div className="stat-value" style={{ color: 'var(--color-success)' }}>{(effVcast.summary.passed ?? 0).toLocaleString()}</div>
-                <div className="stat-label">통과 (UT+IT)</div>
+                <div className="stat-value" style={{ color: 'var(--color-success)' }}>{(utSummary.passed ?? 0).toLocaleString()}</div>
+                <div className="stat-label">통과 (UT)</div>
               </div>
-              <div className="stat-card" style={{ borderLeft: `3px solid ${(effVcast.summary.failed ?? 0) > 0 ? 'var(--color-danger)' : 'var(--color-success)'}` }}>
-                <div className="stat-value" style={{ color: (effVcast.summary.failed ?? 0) > 0 ? 'var(--color-danger)' : 'var(--color-success)' }}>{(effVcast.summary.failed ?? 0).toLocaleString()}</div>
-                <div className="stat-label">실패 (UT+IT)</div>
+              <div className="stat-card" style={{ borderLeft: `3px solid ${(utSummary.failed ?? 0) > 0 ? 'var(--color-danger)' : 'var(--color-success)'}` }}>
+                <div className="stat-value" style={{ color: (utSummary.failed ?? 0) > 0 ? 'var(--color-danger)' : 'var(--color-success)' }}>{(utSummary.failed ?? 0).toLocaleString()}</div>
+                <div className="stat-label">실패 (UT)</div>
               </div>
-              {(effVcast.summary.skipped ?? 0) > 0 && (
-                <div className="stat-card"><div className="stat-value">{effVcast.summary.skipped.toLocaleString()}</div><div className="stat-label">스킵</div></div>
+              {(utSummary.skipped ?? 0) > 0 && (
+                <div className="stat-card"><div className="stat-value">{utSummary.skipped.toLocaleString()}</div><div className="stat-label">스킵</div></div>
               )}
-              {effVcast.summary.pass_rate != null && (
-                <div className="stat-card" style={{ borderLeft: `3px solid ${effVcast.summary.pass_rate >= 0.95 ? 'var(--color-success)' : 'var(--color-warning)'}` }}>
-                  <div className="stat-value" style={{ color: effVcast.summary.pass_rate >= 0.95 ? 'var(--color-success)' : 'var(--color-warning)' }}>{Math.round(effVcast.summary.pass_rate * 100)}%</div>
-                  <div className="stat-label">통과율</div>
+              {utSummary.pass_rate != null && (
+                <div className="stat-card" style={{ borderLeft: `3px solid ${utSummary.pass_rate >= 0.95 ? 'var(--color-success)' : 'var(--color-warning)'}` }}>
+                  <div className="stat-value" style={{ color: utSummary.pass_rate >= 0.95 ? 'var(--color-success)' : 'var(--color-warning)' }}>{Math.round(utSummary.pass_rate * 100)}%</div>
+                  <div className="stat-label">통과율 (UT)</div>
                 </div>
               )}
             </div>
@@ -1220,32 +1265,31 @@ export default function AnalysisSection({ job, analysisResult }) {
             // '통과 0/실패 0/통과율 0%'는 오해 소지 → 미분류임을 명시(빌드 자체는 성공).
             <div className="text-sm text-muted" style={{ marginTop: 8, padding: 8, background: 'var(--bg)', borderRadius: 6, lineHeight: 1.55 }}>
               이 빌드 산출물의 VectorCAST 데이터는 <b>커버리지 기준</b>(함수별 구문/분기/함수콜)이라 개별 시험 합부(pass/fail)가 없습니다 —
-              총 <b>{(effVcast.summary.total ?? 0).toLocaleString()}</b>건이 결과 미분류이며, <b>빌드 자체는 성공</b>입니다(통과율 0%는 실패가 아니라 미분류).
+              총 <b>{(utSummary.total ?? 0).toLocaleString()}</b>건이 결과 미분류이며, <b>빌드 자체는 성공</b>입니다(통과율 0%는 실패가 아니라 미분류).
               개별 시험 합부는 SCM의 VectorCAST 시험 로그(SwUTR/SwITR)에 있습니다.
             </div>
           )
         )}
-        {(effVcast.failures || []).length > 0 && (
+        {utFailures.length > 0 && (
           <details style={{ marginTop: 8 }}>
             <summary style={{ cursor: 'pointer', fontSize: 12, fontWeight: 600, color: 'var(--color-danger)' }}>
-              실패 테스트케이스 ({effVcast.failures.length}건, UT+IT)
+              실패 테스트케이스 ({utFailures.length}건, UT)
             </summary>
             <div style={{ maxHeight: 250, overflowY: 'auto', marginTop: 6 }}>
               <table className="impact-table" style={{ fontSize: 10 }}>
-                <thead><tr><th>테스트케이스</th><th>함수(subprogram)</th><th>유닛</th><th>출처</th></tr></thead>
+                <thead><tr><th>테스트케이스</th><th>함수(subprogram)</th><th>유닛</th></tr></thead>
                 <tbody>
-                  {effVcast.failures.slice(0, 100).map((f, i) => (
+                  {utFailures.slice(0, 100).map((f, i) => (
                     <tr key={i} style={{ background: '#fee2e2' }}>
                       <td style={{ fontFamily: 'monospace', fontSize: 10 }}>{f.testcase ?? '-'}</td>
                       <td style={{ fontFamily: 'monospace', fontSize: 10 }}>{f.subprogram ?? '-'}</td>
                       <td className="text-sm" style={{ maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{f.unit ?? '-'}</td>
-                      <td style={{ textAlign: 'center' }}>{f.source ?? '-'}</td>
                     </tr>
                   ))}
                 </tbody>
               </table>
             </div>
-            {effVcast.failures.length > 100 && <div className="text-muted text-sm" style={{ padding: 6, textAlign: 'center' }}>{effVcast.failures.length - 100}건 더 있음</div>}
+            {utFailures.length > 100 && <div className="text-muted text-sm" style={{ padding: 6, textAlign: 'center' }}>{utFailures.length - 100}건 더 있음</div>}
           </details>
         )}
         {/* ── 커버리지 상세 (모듈·함수별 — 구 ‘코드 커버리지’ 패널에서 이동: UT 구문/분기 + IT 함수콜 합산) ── */}
@@ -1363,7 +1407,7 @@ export default function AnalysisSection({ job, analysisResult }) {
         </div>
         <div className="text-sm text-muted" style={{ padding: '0 0 8px', lineHeight: 1.55 }}>
           VectorCAST 통합시험(IT) 결과입니다. IT는 <b>함수 호출(Function Call) 커버리지</b> 중심이라 구문/분기는 약하거나 없습니다.{' '}
-          <b>IT 리포트</b>=리포트 폴더 수, <b>함수콜</b>=호출 커버리지, <b>함수 진입</b>=함수 진입 커버리지.{' '}
+          <b>IT 리포트</b>=리포트 폴더 수, <b>함수콜</b>=호출 커버리지, <b>함수 진입</b>=함수 진입 커버리지, <b>통과·실패·통과율</b>=통합시험(IT) 합부.{' '}
           함수콜 데이터는 <b>Jenkins 빌드 산출물</b> 또는 <b>SCM VectorCAST 로그</b>(폴더에 Metric report HTML이 있을 때)에서 제공됩니다.{' '}
           <span style={{ color: 'var(--color-warning)' }}>※ 이 값은 <b>폴더 전체 함수 기준</b>입니다 — 시험 대상 함수만 집계하는 SwITCV/SITR 산출물과는 모집단(분모)이 달라 수치가 일치하지 않을 수 있습니다. 복수 SCM 폴더(APP+BOOT 등)를 합산할 때는 두 폴더에 공통으로 존재하는 공유 함수가 이중 계상될 수 있어 실제보다 높게 표시될 수 있습니다.</span>
         </div>
@@ -1390,6 +1434,30 @@ export default function AnalysisSection({ job, analysisResult }) {
             </div>
           ) : null}
         </div>
+        {sumIt && (sumIt.total || 0) > 0 && ((sumIt.passed ?? 0) + (sumIt.failed ?? 0) > 0) && (
+          <div className="stats-row" style={{ marginTop: 8 }}>
+            {itTcCount != null && (
+              <div className="stat-card"><div className="stat-value">{itTcCount.toLocaleString()}</div><div className="stat-label">테스트 케이스 (IT)</div></div>
+            )}
+            <div className="stat-card" style={{ borderLeft: '3px solid var(--color-success)' }}>
+              <div className="stat-value" style={{ color: 'var(--color-success)' }}>{(sumIt.passed ?? 0).toLocaleString()}</div>
+              <div className="stat-label">통과 (IT)</div>
+            </div>
+            <div className="stat-card" style={{ borderLeft: `3px solid ${(sumIt.failed ?? 0) > 0 ? 'var(--color-danger)' : 'var(--color-success)'}` }}>
+              <div className="stat-value" style={{ color: (sumIt.failed ?? 0) > 0 ? 'var(--color-danger)' : 'var(--color-success)' }}>{(sumIt.failed ?? 0).toLocaleString()}</div>
+              <div className="stat-label">실패 (IT)</div>
+            </div>
+            {(sumIt.skipped ?? 0) > 0 && (
+              <div className="stat-card"><div className="stat-value">{sumIt.skipped.toLocaleString()}</div><div className="stat-label">스킵</div></div>
+            )}
+            {sumIt.pass_rate != null && (
+              <div className="stat-card" style={{ borderLeft: `3px solid ${sumIt.pass_rate >= 0.95 ? 'var(--color-success)' : 'var(--color-warning)'}` }}>
+                <div className="stat-value" style={{ color: sumIt.pass_rate >= 0.95 ? 'var(--color-success)' : 'var(--color-warning)' }}>{Math.round(sumIt.pass_rate * 100)}%</div>
+                <div className="stat-label">통과율 (IT)</div>
+              </div>
+            )}
+          </div>
+        )}
         {scmCovIt && (scmCovIt.statement?.total || scmCovIt.branch?.total || scmCovIt.mcdc?.total) ? (
           <div className="stats-row" style={{ marginTop: 8 }}>
             {covCard('IT 구문(Statement)', scmCovIt.statement)}
@@ -1397,6 +1465,28 @@ export default function AnalysisSection({ job, analysisResult }) {
             {covCard('IT MC/DC', scmCovIt.mcdc)}
           </div>
         ) : null}
+        {itFailures.length > 0 && (
+          <details style={{ marginTop: 8 }}>
+            <summary style={{ cursor: 'pointer', fontSize: 12, fontWeight: 600, color: 'var(--color-danger)' }}>
+              실패 테스트케이스 ({itFailures.length}건, IT)
+            </summary>
+            <div style={{ maxHeight: 250, overflowY: 'auto', marginTop: 6 }}>
+              <table className="impact-table" style={{ fontSize: 10 }}>
+                <thead><tr><th>테스트케이스</th><th>함수(subprogram)</th><th>유닛</th></tr></thead>
+                <tbody>
+                  {itFailures.slice(0, 100).map((f, i) => (
+                    <tr key={i} style={{ background: '#fee2e2' }}>
+                      <td style={{ fontFamily: 'monospace', fontSize: 10 }}>{f.testcase ?? '-'}</td>
+                      <td style={{ fontFamily: 'monospace', fontSize: 10 }}>{f.subprogram ?? '-'}</td>
+                      <td className="text-sm" style={{ maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{f.unit ?? '-'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            {itFailures.length > 100 && <div className="text-muted text-sm" style={{ padding: 6, textAlign: 'center' }}>{itFailures.length - 100}건 더 있음</div>}
+          </details>
+        )}
         {itEntries.length > 0 && (
           <div className="text-sm text-muted" style={{ marginTop: 6 }}>
             IT 함수 {itEntries.length.toLocaleString()}개 — 함수별 함수콜은 유닛테스트 패널의 ‘커버리지 상세’ 모듈 표에서 행을 펼쳐 확인하세요.

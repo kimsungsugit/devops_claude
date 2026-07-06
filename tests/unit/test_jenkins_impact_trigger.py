@@ -216,3 +216,238 @@ def test_resolve_jenkins_changed_files_fallback_without_build(monkeypatch):
     assert use_only is False
     assert meta["changed_files_source"] == "local_diff_fallback"
     assert "no build_number/job_url" in meta["linkage_reason"]
+
+
+# ── svn revision-range (현재 로컬 default 버전 A ↔ 새 빌드 버전 B) ─────────────
+
+class _FakeSvnEntry:
+    """resolve/entry용 최소 엔트리 — svn_revision_range 경로 테스트."""
+    def __init__(self, *, scm_type="svn", scm_url="https://svn.example/repo/trunk",
+                 source_root="D:/wc", entry_id="hdpdm01"):
+        self.scm_type = scm_type
+        self.scm_url = scm_url
+        self.source_root = source_root
+        self.id = entry_id
+
+
+def _patch_svn_range(monkeypatch, *, entry, info_rev, repo_root="https://svn.example/repo",
+                     diff=None, diff_boom=False):
+    import backend.services.scm_registry as reg
+    import backend.services.local_service as ls
+    monkeypatch.setattr(reg, "get_registry_entry", lambda _sid: entry)
+    monkeypatch.setattr(reg, "resolve_scm_credentials", lambda **_k: ("u", "p", None))
+    monkeypatch.setattr(ls, "svn_info_url", lambda **_k: {
+        "rc": 0 if info_rev else 1, "revision": info_rev,
+        "url": (repo_root + "/trunk") if repo_root else "", "repo_root": repo_root})
+    if diff_boom:
+        def _boom(**_k):
+            raise AssertionError("svn_diff_summarize must not be called")
+        monkeypatch.setattr(ls, "svn_diff_summarize", _boom)
+    elif diff is not None:
+        monkeypatch.setattr(ls, "svn_diff_summarize", lambda **_k: diff)
+
+
+def test_try_svn_revision_range_success(monkeypatch):
+    from backend.routers import jenkins as jr
+    from backend.schemas import JenkinsImpactTriggerRequest
+
+    _patch_svn_range(
+        monkeypatch, entry=_FakeSvnEntry(), info_rev="100",
+        diff={"rc": 0, "files": ["APP/a.c"], "edit_types": {"APP/a.c": "edit"}},
+    )
+    out = jr._try_svn_revision_range(
+        JenkinsImpactTriggerRequest(scm_id="hdpdm01", build_number=5, job_url="http://j/job/X"),
+        build_rev="150",
+    )
+    assert out is not None
+    files, use_only, meta = out
+    assert files == ["APP/a.c"]
+    assert use_only is True
+    assert meta["changed_files_source"] == "svn_revision_range"
+    assert meta["baseline_revision"] == "100"
+    assert meta["build_revision"] == "150"
+    assert meta["changed_file_edit_types"] == {"APP/a.c": "edit"}
+    assert "svn diff" in meta["linkage_reason"]
+
+
+def test_try_svn_revision_range_no_change_when_equal(monkeypatch):
+    """로컬 작업본 revision == 빌드 revision → 변경 0건(확인됨), diff 미호출."""
+    from backend.routers import jenkins as jr
+    from backend.schemas import JenkinsImpactTriggerRequest
+
+    _patch_svn_range(monkeypatch, entry=_FakeSvnEntry(), info_rev="150", diff_boom=True)
+    out = jr._try_svn_revision_range(
+        JenkinsImpactTriggerRequest(scm_id="hdpdm01", build_number=5, job_url="http://j/job/X"),
+        build_rev="150",
+    )
+    assert out is not None
+    files, use_only, meta = out
+    assert files == []
+    assert use_only is True
+    assert meta["changed_files_source"] == "svn_revision_range"
+    assert meta["baseline_revision"] == "150"
+    assert "no changes" in meta["linkage_reason"]
+
+
+def test_try_svn_revision_range_git_returns_none(monkeypatch):
+    """git 엔트리는 revision-range 대상 아님 → None(changeSet 폴백)."""
+    from backend.routers import jenkins as jr
+    from backend.schemas import JenkinsImpactTriggerRequest
+
+    _patch_svn_range(monkeypatch, entry=_FakeSvnEntry(scm_type="git"), info_rev="100")
+    out = jr._try_svn_revision_range(
+        JenkinsImpactTriggerRequest(scm_id="x", build_number=5, job_url="http://j/job/X"),
+        build_rev="150",
+    )
+    assert out is None
+
+
+def test_try_svn_revision_range_svn_info_fail_returns_none(monkeypatch):
+    """source_root가 작업본 아님/svn info 실패 → None(changeSet 폴백)."""
+    from backend.routers import jenkins as jr
+    from backend.schemas import JenkinsImpactTriggerRequest
+
+    _patch_svn_range(monkeypatch, entry=_FakeSvnEntry(), info_rev="")
+    out = jr._try_svn_revision_range(
+        JenkinsImpactTriggerRequest(scm_id="x", build_number=5, job_url="http://j/job/X"),
+        build_rev="150",
+    )
+    assert out is None
+
+
+def test_try_svn_revision_range_nonnumeric_build_returns_none():
+    """build_rev이 git SHA1/빈 값이면 svn 대상 아님 → None(registry 조회 전 조기 반환)."""
+    from backend.routers import jenkins as jr
+    from backend.schemas import JenkinsImpactTriggerRequest
+
+    req = JenkinsImpactTriggerRequest(scm_id="x", build_number=5, job_url="http://j/job/X")
+    assert jr._try_svn_revision_range(req, build_rev="deadbeef") is None
+    assert jr._try_svn_revision_range(req, build_rev="") is None
+
+
+def test_try_svn_revision_range_repo_mismatch_returns_none(monkeypatch):
+    """작업본 repo-root가 scm_url과 다른 리포지토리면 A:B 비교 무의미 → None(silent-wrong 차단)."""
+    from backend.routers import jenkins as jr
+    from backend.schemas import JenkinsImpactTriggerRequest
+
+    _patch_svn_range(
+        monkeypatch,
+        entry=_FakeSvnEntry(scm_url="https://svn.example/repoB/trunk"),
+        info_rev="100",
+        repo_root="https://svn.example/repoA",   # 작업본은 repoA, diff 대상은 repoB
+    )
+    out = jr._try_svn_revision_range(
+        JenkinsImpactTriggerRequest(scm_id="x", build_number=5, job_url="http://j/job/X"),
+        build_rev="150",
+    )
+    assert out is None
+
+
+def test_try_svn_revision_range_diff_failure_returns_none(monkeypatch):
+    """svn diff rc!=0 → None(changeSet 폴백)."""
+    from backend.routers import jenkins as jr
+    from backend.schemas import JenkinsImpactTriggerRequest
+
+    _patch_svn_range(
+        monkeypatch, entry=_FakeSvnEntry(), info_rev="100",
+        diff={"rc": 1, "files": [], "edit_types": {}, "output": "svn: E170013"},
+    )
+    out = jr._try_svn_revision_range(
+        JenkinsImpactTriggerRequest(scm_id="x", build_number=5, job_url="http://j/job/X"),
+        build_rev="150",
+    )
+    assert out is None
+
+
+def test_resolve_jenkins_changed_files_uses_svn_revision_range(monkeypatch):
+    """전체 _resolve 경로: svn A:B 결과가 단일 빌드 changeSet을 대체한다."""
+    from backend.routers import jenkins as jr
+    import backend.routers.config as cfgmod
+    import backend.services.jenkins_service as jsvc
+    from backend.schemas import JenkinsImpactTriggerRequest
+
+    monkeypatch.setattr(cfgmod, "get_jenkins_config",
+                        lambda: {"username": "u", "token": "t", "baseUrl": "http://j", "verifyTls": True})
+    # 단일 빌드 changeSet은 'prev.c'만 보이지만(직전 빌드 대비), svn A:B가 전체 델타를 잡는다.
+    monkeypatch.setattr(jsvc, "get_build_changed_files", lambda **_k: {
+        "files": ["prev.c"], "revision": "150", "all_count": 1, "edit_types": {"prev.c": "edit"}})
+    _patch_svn_range(
+        monkeypatch, entry=_FakeSvnEntry(), info_rev="100",
+        diff={"rc": 0, "files": ["APP/a.c", "APP/b.h"],
+              "edit_types": {"APP/a.c": "edit", "APP/b.h": "add"}},
+    )
+    files, use_only, meta = jr._resolve_jenkins_changed_files(
+        JenkinsImpactTriggerRequest(scm_id="hdpdm01", build_number=5, job_url="http://j/job/X"))
+    assert files == ["APP/a.c", "APP/b.h"]
+    assert use_only is True
+    assert meta["changed_files_source"] == "svn_revision_range"
+    assert meta["baseline_revision"] == "100"
+    assert meta["build_revision"] == "150"
+    assert meta["changed_file_edit_types"] == {"APP/a.c": "edit", "APP/b.h": "add"}
+
+
+def test_resolve_jenkins_changed_files_svn_range_falls_back_to_changeset(monkeypatch):
+    """svn info 실패 시 단일 빌드 changeSet(build_revision 정수여도)로 graceful 폴백."""
+    from backend.routers import jenkins as jr
+    import backend.routers.config as cfgmod
+    import backend.services.jenkins_service as jsvc
+    from backend.schemas import JenkinsImpactTriggerRequest
+
+    monkeypatch.setattr(cfgmod, "get_jenkins_config",
+                        lambda: {"username": "u", "token": "t", "baseUrl": "http://j", "verifyTls": True})
+    monkeypatch.setattr(jsvc, "get_build_changed_files", lambda **_k: {
+        "files": ["a.c"], "revision": "150", "all_count": 1, "edit_types": {"a.c": "edit"}})
+    # svn entry지만 source_root가 작업본 아님(svn info 실패) → changeSet 폴백
+    _patch_svn_range(monkeypatch, entry=_FakeSvnEntry(), info_rev="")
+    files, use_only, meta = jr._resolve_jenkins_changed_files(
+        JenkinsImpactTriggerRequest(scm_id="x", build_number=5, job_url="http://j/job/X"))
+    assert files == ["a.c"]
+    assert use_only is True
+    assert meta["changed_files_source"] == "jenkins_changeset"
+    assert meta["build_revision"] == "150"
+
+
+def test_svn_diff_summarize_parses_status(monkeypatch):
+    """svn diff --summarize 출력 파싱: M/A/D/R → edit/add/delete, .c/.h만, URL→상대경로."""
+    from backend.services import local_service as ls
+
+    base = "https://svn.example/repo/trunk"
+    fake_out = "\n".join([
+        f"M       {base}/APP/Ap_Door.c",
+        f"A       {base}/APP/Ap_New.c",
+        f"D       {base}/APP/Ap_Old.c",
+        f"M       {base}/docs/readme.md",   # 비-소스 제외
+        f"R       {base}/BSW/Bsw_X.h",       # 대체 → edit
+    ])
+    monkeypatch.setattr(ls, "_run_cmd", lambda *_a, **_k: (0, fake_out))
+    out = ls.svn_diff_summarize(repo_url=base, rev_a="100", rev_b="150")
+    assert out["rc"] == 0
+    assert out["files"] == ["APP/Ap_Door.c", "APP/Ap_New.c", "APP/Ap_Old.c", "BSW/Bsw_X.h"]
+    assert out["edit_types"] == {
+        "APP/Ap_Door.c": "edit",
+        "APP/Ap_New.c": "add",
+        "APP/Ap_Old.c": "delete",
+        "BSW/Bsw_X.h": "edit",
+    }
+
+
+def test_svn_diff_summarize_decodes_encoded_paths(monkeypatch):
+    """비-ASCII 경로(%-인코딩, 한글 폴더)를 디코딩해 by_name 로컬 경로와 매칭되게 한다."""
+    from backend.services import local_service as ls
+
+    base = "https://svn.example/repo/trunk"
+    fake_out = f"M       {base}/%ED%95%9C%EA%B8%80/App.c"  # '한글/App.c'
+    monkeypatch.setattr(ls, "_run_cmd", lambda *_a, **_k: (0, fake_out))
+    out = ls.svn_diff_summarize(repo_url=base, rev_a="100", rev_b="150")
+    assert out["files"] == ["한글/App.c"]
+    assert out["edit_types"] == {"한글/App.c": "edit"}
+
+
+def test_svn_diff_summarize_rejects_nonnumeric_rev():
+    """정수 아닌 revision(SHA1 등)은 거부 → 인자 주입 표면 차단."""
+    from backend.services import local_service as ls
+
+    out = ls.svn_diff_summarize(repo_url="https://x/r", rev_a="deadbeef", rev_b="150")
+    assert out["rc"] == 1
+    assert out["files"] == []
+    assert out["edit_types"] == {}

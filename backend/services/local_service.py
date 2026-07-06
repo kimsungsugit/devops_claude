@@ -6,6 +6,7 @@ import shutil
 import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import unquote
 
 import config
 
@@ -219,12 +220,95 @@ def svn_info_url(
         args += ["--non-interactive"]
     rc, out = _run_cmd(args, cwd=Path("."), timeout_sec=timeout_sec, stdin_input=stdin_input)
     revision = ""
+    url = ""
+    repo_root = ""
     if rc == 0:
         for line in out.splitlines():
-            if line.lower().startswith("revision:"):
+            low = line.lower()
+            if not revision and low.startswith("revision:"):
                 revision = line.split(":", 1)[1].strip()
-                break
-    return {"rc": rc, "output": out, "revision": revision}
+            elif not url and low.startswith("url:"):  # 'Relative URL:'은 매칭 안 됨
+                url = line.split(":", 1)[1].strip()
+            elif not repo_root and low.startswith("repository root:"):
+                repo_root = line.split(":", 1)[1].strip()
+    return {"rc": rc, "output": out, "revision": revision, "url": url, "repo_root": repo_root}
+
+def svn_diff_summarize(
+    *,
+    repo_url: str,
+    rev_a: str,
+    rev_b: str,
+    username: str = "",
+    password: str = "",
+    timeout_sec: int = 60,
+) -> Dict[str, Any]:
+    """`svn diff --summarize -r A:B <repo_url>` → 변경 .c/.h 파일 + editType.
+
+    영향도 분석을 '현재 로컬 default 버전(A) ↔ 새 빌드 버전(B)' 사이의 정밀 델타에
+    묶기 위한 헬퍼. URL 대상이라 워킹카피가 필요 없고(서버 조회) 빌드가 몇 번 끼어
+    있든 A→B 전체 변경을 정확히 잡는다(단일 빌드 changeSet의 '빈 changeSet=0건'
+    오등치 회피).
+
+    revision은 정수 SVN revision만 허용한다(git SHA1/임의 문자열 주입 차단). status
+    코드(A/M/D/R)를 editType(add/delete/edit)로 매핑하되, .c/.h 소스만 반환한다.
+
+    Returns: {"rc": int, "output": str, "files": [rel...], "edit_types": {rel: add|edit|delete}}
+    """
+    ra, rb = str(rev_a or "").strip(), str(rev_b or "").strip()
+    if not (ra.isdigit() and rb.isdigit()):
+        return {"rc": 1, "output": "rev_a/rev_b must be numeric svn revisions", "files": [], "edit_types": {}}
+    base = str(repo_url or "").strip().rstrip("/")
+    if not base:
+        return {"rc": 1, "output": "repo_url required", "files": [], "edit_types": {}}
+    clean_pw, pw_error = _sanitize_password(password)
+    if pw_error:
+        return {"rc": 1, "output": pw_error, "files": [], "edit_types": {}}
+    args: List[str] = ["svn", "diff", "--summarize", "-r", f"{ra}:{rb}", base]
+    if username.strip():
+        args += ["--username", username.strip()]
+    stdin_input: Optional[str] = None
+    if clean_pw:
+        if _svn_supports_password_stdin():
+            args += ["--password-from-stdin"]
+            stdin_input = clean_pw
+        else:
+            args += ["--password", clean_pw]
+    if username.strip() or clean_pw:
+        args += ["--non-interactive"]
+    rc, out = _run_cmd(args, cwd=Path("."), timeout_sec=timeout_sec, stdin_input=stdin_input)
+    files: List[str] = []
+    edit_types: Dict[str, str] = {}
+    if rc == 0:
+        for line in out.splitlines():
+            s = line.rstrip()
+            if not s:
+                continue
+            status = s[:1].upper()
+            # 'M' 수정 / 'A' 추가 / 'D' 삭제 / 'R' 대체. 프로퍼티 전용 변경('_'/공백 col1)은 제외.
+            if status not in ("A", "M", "D", "R"):
+                continue
+            parts = s.split()
+            if len(parts) < 2:
+                continue
+            url = parts[-1].strip()
+            rel = url[len(base):].lstrip("/") if url.startswith(base) else url
+            # svn은 URL의 비-ASCII/특수문자를 %-인코딩한다(한글 폴더 등) → by_name 로컬 경로와
+            # 매칭되도록 디코딩. base(registry URL)는 미인코딩이라 prefix strip 후 디코딩한다.
+            rel = unquote(rel.replace("\\", "/"))
+            if not rel.lower().endswith((".c", ".h")):
+                continue
+            et = {"A": "add", "D": "delete"}.get(status, "edit")  # M/R → edit
+            # 동일 파일 중복 라인: 구조적 변경(add/delete)을 단순 edit이 덮지 않게 보존.
+            if edit_types.get(rel) not in ("add", "delete"):
+                edit_types[rel] = et
+            files.append(rel)
+    return {
+        "rc": rc,
+        "output": out,
+        "files": sorted(dict.fromkeys(files)),
+        "edit_types": edit_types,
+    }
+
 
 def list_directory(project_root: str, rel_path: str = ".") -> Dict[str, Any]:
     root = Path(project_root or ".").resolve()

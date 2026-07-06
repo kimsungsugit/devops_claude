@@ -834,13 +834,17 @@ def run_impact_update(
         previous_linked_docs = entry.linked_docs.model_dump(mode="json") if entry else {}
         cloudium = _is_cloudium_mode()
         _meta = trigger.metadata or {}
-        # Jenkins changeSet의 파일별 editType(add/edit/delete) — 로컬 working-copy diff가
-        # 불가하거나(빌드 revision≠로컬) 부정확할 때 변경유형 분류의 1차 근거.
+        # Jenkins changeSet 또는 svn revision-range(baseline↔build)의 파일별 editType —
+        # 로컬 working-copy diff가 불가하거나(빌드 revision≠로컬) 부정확할 때 변경유형
+        # 분류의 1차 근거.
         edit_types = _meta.get("changed_file_edit_types") or {}
-        _is_changeset = _meta.get("changed_files_source") == "jenkins_changeset"
+        _changed_files_source = _meta.get("changed_files_source") or ""
+        _is_changeset = _changed_files_source == "jenkins_changeset"
+        # svn_revision_range도 원격 권위 diff(A:B) — editType이 있으면 로컬 diff 대신 사용.
+        _is_authoritative_remote = _changed_files_source in ("jenkins_changeset", "svn_revision_range")
         if callable(on_progress):
             on_progress("classify", "변경 함수를 분류 중입니다.", {"changed_files": len(trigger.changed_files or [])})
-        if cloudium or (_is_changeset and edit_types):
+        if cloudium or (_is_authoritative_remote and edit_types):
             # cloudium 또는 Jenkins changeSet 연동: git/svn diff subprocess는 원격 source_root
             # (로컬 미존재) 또는 빌드 revision 불일치로 무의미/오정렬. editType이 있으면 그걸로
             # NEW/DELETE까지 정밀 분류, 없으면 확장자 기반(BODY/HEADER) 보수 분류로 직행한다.
@@ -927,14 +931,45 @@ def run_impact_update(
         # 정직 고지(X7): diff가 없어 SIGNATURE를 BODY로 분류 → ACTION_MATRIX상 BODY는 sds='-'
         # 이므로, .c만 바뀐 인터페이스(시그니처) 변경은 SDS 검토가 자동 FLAG되지 않을 수 있다
         # (.h가 changeSet에 함께 오면 sds/sts FLAG 가드로 커버됨). ASIL 관련 인터페이스는 수동 확인.
-        if _is_changeset:
-            if edit_types:
+        if _is_authoritative_remote and edit_types:
+            _src_label = (
+                "SVN revision diff (svn diff --summarize -r baseline:build)"
+                if _changed_files_source == "svn_revision_range"
+                else "Jenkins changeSet editType"
+            )
+            warnings.append(
+                f"change-type classification from {_src_label} (add→NEW/delete→DELETE/edit→BODY|HEADER); "
+                "signature changes not distinguished without line diff — SDS may not be auto-flagged for "
+                ".c-only interface changes (verify ASIL-relevant interfaces manually)"
+            )
+        elif _is_changeset and not edit_types:
+            warnings.append(
+                "changed file set from Jenkins build changeSet; change-type classification uses local working-copy diff — verify build/local revision alignment"
+            )
+        # 신규 추가(add) 파일은 baseline A(로컬 작업본) 소스 인덱스(by_name)에 없어 함수 해석이
+        # 불가 → 신규 함수의 영향/시험 생성 가이드가 과소보고될 수 있다(svn A:B는 changeSet보다
+        # add 노출 빈도↑). by_name 파일경로 매칭(_resolve와 동일: full-path 또는 basename endswith)이
+        # 전무한 add 파일이 있으면 명시 고지(빈 결과를 '영향 없음'으로 오인 방지, X7 안전측).
+        if edit_types and by_name:
+            _bn_files = [
+                str((v or {}).get("file") or "").replace("\\", "/").lower()
+                for v in by_name.values()
+            ]
+            _bn_files = [p for p in _bn_files if p]
+
+            def _bn_has(_fp: str) -> bool:
+                _fpl = str(_fp).replace("\\", "/").lower()
+                _name = _fpl.rsplit("/", 1)[-1]
+                return any(p.endswith(_fpl) or p.endswith(_name) for p in _bn_files)
+
+            _unresolved_add = [
+                f for f, et in edit_types.items()
+                if str(et).strip().lower() == "add" and not _bn_has(f)
+            ]
+            if _unresolved_add:
                 warnings.append(
-                    "change-type classification from Jenkins changeSet editType (add→NEW/delete→DELETE/edit→BODY|HEADER); signature changes not distinguished without diff — SDS may not be auto-flagged for .c-only interface changes (verify ASIL-relevant interfaces manually)"
-                )
-            else:
-                warnings.append(
-                    "changed file set from Jenkins build changeSet; change-type classification uses local working-copy diff — verify build/local revision alignment"
+                    f"{len(_unresolved_add)} newly-added file(s) absent from baseline source index "
+                    "(analyzed against baseline revision A) — new functions may be under-reported; review manually"
                 )
         # cloudium에서 소스 인덱스(by_name)가 비었는데 변경파일이 있으면 worker read 실패 가능성 →
         # 영향이 과소보고될 수 있음을 명시(빈 결과를 '영향 없음'으로 오인 방지, X7/X9 안전측).
@@ -1198,6 +1233,11 @@ def run_impact_update(
             "trigger": trigger.trigger_type,
             "changed_files": trigger.changed_files,
             "changed_files_source": (trigger.metadata or {}).get("changed_files_source", ""),
+            # 어느 revision을 무슨 이유로 분석했는가 — svn revision-range(A:B) 또는 changeSet
+            # 폴백 사유. ISO 26262 추적성 증거(로컬 폴백을 '빌드 권위 분석'으로 오인 방지).
+            "baseline_revision": (trigger.metadata or {}).get("baseline_revision", ""),
+            "build_revision": (trigger.metadata or {}).get("build_revision", ""),
+            "linkage_reason": (trigger.metadata or {}).get("linkage_reason", ""),
             "changed_functions": dict(sorted(changed_types.items())),
             "impacted_functions": impact_groups,
             "impacted_functions_sits_cross": sits_impact_groups,

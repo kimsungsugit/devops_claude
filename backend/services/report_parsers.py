@@ -230,12 +230,57 @@ def _normalize_report_path(value: str, project_root: Optional[Path], job_slug: O
     return raw
 
 
+def _is_worstrules_header(headers: List[str]) -> bool:
+    """헤더 시그니처로 'Most Violated Rules'(WorstRules) 테이블을 식별.
+
+    WorstRules 테이블은 행=파일, 열=실제 규칙(Rule-8.6 등)이며 합계/진단 열이 없다.
+    이 시그니처로 판별하면 앵커 네이밍 차이(bare `WorstRules` vs 숫자 `WorstRules1`)에
+    무관하게 잡히고, DiagsPerParents(‘Total Violations’ 열 보유)·FileStatus
+    (‘Active Diagnostics’ 열 보유)는 자연히 제외된다.
+    """
+    if not headers or (headers[0] or "").strip().lower() != "files":
+        return False
+    rule_cols = [h for h in headers[1:] if (h or "").strip()]
+    if not rule_cols:
+        return False
+    joined = " ".join(h.lower() for h in rule_cols)
+    # DiagsPerParents(‘Total Violations’) / FileStatus(‘Active Diagnostics’ 등) 배제용 열 키워드.
+    # 'compliance index'로 좁혀 잡음: 규칙명에 'compliance'가 우연히 포함돼도 오배제하지 않도록.
+    for bad in ("total violation", "active diagnostic", "compliance index", "violated rules", "violation count"):
+        if bad in joined:
+            return False
+    # 규칙 열은 식별자(숫자 포함: Rule-8.6, C-INT-002 …) 형태여야 함
+    return any(re.search(r"\d", h) for h in rule_cols)
+
+
+# RCR 표 말미의 집계 행(파일 아님) — 파일 목록/매트릭스에서 제외.
+_RCR_AGGREGATE_ROWS = {"total", "totals", "grand total", "total violations"}
+
+
+def _is_rcr_aggregate_row(name: str) -> bool:
+    return (name or "").strip().lower() in _RCR_AGGREGATE_ROWS
+
+
 def parse_prqa_rcr_details(
     path: Path,
     top_n: int = 6,
     project_root: Optional[Path] = None,
     job_slug: Optional[str] = None,
+    max_files: int = 60,
 ) -> Dict[str, Any]:
+    """PRQA/Helix QAC RCR HTML → 위반 상세.
+
+    반환:
+      - ``top_rules``  : 규칙별 위반 합계 상위 top_n (WorstRules 열 합)
+      - ``top_files``  : 파일별 위반 상위 top_n (FileStatus, violated_rules/compliance_index 포함)
+      - ``violations_by_file`` : **파일 × 규칙 위반 매트릭스** — 각 파일에서 어떤 MISRA 규칙이
+        몇 건 위반됐는지. RCR이 제공하는 최대 granularity(함수/라인 위반은 RCR에 없음).
+
+    WorstRules 테이블(행=파일, 열=Rule-8.6 등)을 앵커 대신 헤더 시그니처로 스캔하므로
+    구형(bare `WorstRules`)·신형(숫자 `WorstRules1`+M3CM/Secure C 다중 테이블) 리포트 모두
+    처리한다. (구 코드는 ``_find_table("WorstRules")``가 숫자 앵커를 놓쳐 신형 리포트의
+    top_rules가 비었음 — 시그니처 스캔이 이 버그도 해소.)
+    """
     data = parse_html_report(path)
     if "error" in data:
         return {"path": str(path), "error": data["error"]}
@@ -246,31 +291,75 @@ def parse_prqa_rcr_details(
     except Exception:
         return {"path": str(path), "error": "read_failed"}
     soup = BeautifulSoup(raw, "html.parser")
-    def _find_table(anchor: str) -> Any:
-        node = soup.find(attrs={"name": anchor}) or soup.find(id=anchor)
-        if not node:
-            return None
-        return node.find_next("table")
 
-    worst_rules_table = _find_table("WorstRules")
-    file_status_table = _find_table("FileStatus")
-    worst_headers, worst_rows, _ = _parse_table_matrix(worst_rules_table)
-    file_headers, file_rows, file_meta = _parse_table_matrix(file_status_table)
-
-    top_rules: List[Dict[str, Any]] = []
-    if worst_headers and "Files" in worst_headers:
-        idx_files = worst_headers.index("Files")
-        rule_totals: Dict[str, float] = {}
-        for row in worst_rows:
-            for idx, header in enumerate(worst_headers):
-                if idx == idx_files or idx >= len(row):
+    # ── 파일 × 규칙 매트릭스 (WorstRules 시그니처 테이블 전부 병합) ──
+    # 한 파일이 M3CM·Secure C 등 여러 그룹 테이블에 등장할 수 있어 규칙 카운트를 합산한다.
+    per_file: Dict[str, Dict[str, Any]] = {}
+    rule_totals: Dict[str, float] = {}
+    for table in soup.find_all("table"):
+        headers, rows, meta = _parse_table_matrix(table)
+        if not _is_worstrules_header(headers):
+            continue
+        for row_idx, row in enumerate(rows):
+            if not row or len(row) < 2:
+                continue
+            fname = (row[0] or "").strip()
+            if not fname or _is_rcr_aggregate_row(fname):
+                continue
+            meta_cell = (
+                meta[row_idx][0] if row_idx < len(meta) and meta[row_idx] else {}
+            )
+            path_raw = meta_cell.get("title") or meta_cell.get("href") or ""
+            # 동일 basename이 다른 디렉토리에 존재할 수 있어(예: APP/config.c vs BOOT/config.c)
+            # full path(title/href)를 키로 잡아 오병합을 방지한다. path 없는 pseudo-row
+            # (RCMA 등 특정 파일에 귀속되지 않은 위반 버킷)는 표시명으로 키. 같은 파일이
+            # M3CM·Secure C 등 여러 그룹 테이블에 등장하면 동일 키로 규칙 카운트가 합산된다.
+            key = path_raw or fname
+            entry = per_file.setdefault(key, {"file": fname, "path_raw": path_raw, "rules": {}})
+            for col_idx in range(1, len(headers)):
+                if col_idx >= len(row):
                     continue
-                val = _parse_number(row[idx]) or 0
-                rule_totals[header] = rule_totals.get(header, 0) + val
-        top_rules = [
-            {"rule": key, "count": rule_totals[key]}
-            for key in sorted(rule_totals, key=lambda k: rule_totals[k], reverse=True)[:top_n]
-        ]
+                rule = (headers[col_idx] or "").strip()
+                if not rule:
+                    continue
+                cnt = int(_parse_number(row[col_idx]) or 0)
+                if cnt <= 0:
+                    continue
+                entry["rules"][rule] = entry["rules"].get(rule, 0) + cnt
+                rule_totals[rule] = rule_totals.get(rule, 0) + cnt
+
+    top_rules: List[Dict[str, Any]] = [
+        {"rule": key, "count": rule_totals[key]}
+        for key in sorted(rule_totals, key=lambda k: rule_totals[k], reverse=True)[:top_n]
+    ]
+
+    violations_by_file: List[Dict[str, Any]] = []
+    for entry in per_file.values():
+        rules = entry["rules"]
+        total = sum(rules.values())
+        if total <= 0:
+            continue
+        violations_by_file.append(
+            {
+                "file": entry["file"],
+                "path": _normalize_prqa_path(entry["path_raw"], project_root, job_slug),
+                "total": total,
+                "rules": [
+                    {"rule": r, "count": c}
+                    for r, c in sorted(rules.items(), key=lambda kv: (-kv[1], kv[0]))
+                ],
+            }
+        )
+    violations_by_file.sort(key=lambda f: (-f["total"], f["file"]))
+    files_truncated = len(violations_by_file) > max_files
+    violations_by_file = violations_by_file[:max_files]
+
+    # ── FileStatus: 파일별 위반수 + violated_rules + compliance_index ──
+    file_status_table = None
+    node = soup.find(attrs={"name": "FileStatus"}) or soup.find(id="FileStatus")
+    if node:
+        file_status_table = node.find_next("table")
+    file_headers, file_rows, file_meta = _parse_table_matrix(file_status_table)
 
     top_files: List[Dict[str, Any]] = []
     if file_headers:
@@ -279,30 +368,48 @@ def parse_prqa_rcr_details(
                 if name.lower() in h.lower():
                     return idx
             return None
+
         idx_file = _idx("File")
         idx_violation = _idx("Violation Count") or _idx("Violations") or _idx("Diagnostic Count")
+        idx_vrules = _idx("Violated Rules")
+        idx_compliance = _idx("Compliance")
         if idx_file is not None and idx_violation is not None:
-            rows: List[Tuple[float, str, Dict[str, str]]] = []
+            scored: List[Tuple[float, Dict[str, Any]]] = []
             for row_idx, row in enumerate(file_rows):
                 if idx_file >= len(row) or idx_violation >= len(row):
+                    continue
+                if _is_rcr_aggregate_row(row[idx_file]):
                     continue
                 score = _parse_number(row[idx_violation]) or 0
                 meta = {}
                 if row_idx < len(file_meta) and idx_file < len(file_meta[row_idx]):
                     meta = file_meta[row_idx][idx_file]
-                rows.append((score, row[idx_file], meta))
-            rows.sort(key=lambda x: x[0], reverse=True)
-            top_files = []
-            for score, name, meta in rows[:top_n]:
-                normalized_path = _normalize_prqa_path(meta.get("title") or meta.get("href") or "", project_root, job_slug)
-                top_files.append(
-                    {
-                        "file": name,
-                        "count": score,
-                        "path": normalized_path,
-                    }
-                )
-    return {"path": str(path), "top_rules": top_rules, "top_files": top_files}
+                item: Dict[str, Any] = {
+                    "file": row[idx_file],
+                    "count": score,
+                    "path": _normalize_prqa_path(
+                        meta.get("title") or meta.get("href") or "", project_root, job_slug
+                    ),
+                }
+                if idx_vrules is not None and idx_vrules < len(row):
+                    vr = _parse_number(row[idx_vrules])
+                    if vr is not None:
+                        item["violated_rules"] = int(vr)
+                if idx_compliance is not None and idx_compliance < len(row):
+                    item["compliance_index"] = _clean_text(row[idx_compliance])
+                scored.append((score, item))
+            scored.sort(key=lambda x: x[0], reverse=True)
+            top_files = [item for _score, item in scored[:top_n]]
+
+    result: Dict[str, Any] = {
+        "path": str(path),
+        "top_rules": top_rules,
+        "top_files": top_files,
+        "violations_by_file": violations_by_file,
+    }
+    if files_truncated:
+        result["files_truncated_to"] = max_files
+    return result
 
 
 def parse_vectorcast_metrics_summary(path: Path) -> Dict[str, Any]:
@@ -677,6 +784,8 @@ def build_report_summary(root_dir: Path, project_root: Optional[Path] = None) ->
                 "xlsx_violations_total": prqa_hmr.get("violations_total") if isinstance(prqa_hmr, dict) else None,
                 "top_rules": prqa_rcr_details.get("top_rules") if isinstance(prqa_rcr_details, dict) else [],
                 "top_files": prqa_rcr_details.get("top_files") if isinstance(prqa_rcr_details, dict) else [],
+                "violations_by_file": prqa_rcr_details.get("violations_by_file") if isinstance(prqa_rcr_details, dict) else [],
+                "violations_files_truncated_to": prqa_rcr_details.get("files_truncated_to") if isinstance(prqa_rcr_details, dict) else None,
                 "hmr_stats": as_hmr_stats,
             },
             "code_metrics": code_metrics,

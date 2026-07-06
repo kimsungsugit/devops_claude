@@ -100,8 +100,8 @@
       "linked_docs": {
         "uds": "U:/연구소/1000 프로젝트/1200 자동차/1220 진행/0002 A Cappella/02 ADOS/04 KJPDS02/02.설계(연구소)/01.설계 및 검증/08.소프트웨어/04.SW 단위 설계/01.SwUDS/(KJPDS02_SwUDS) Software Unit Design Specification_v2.08_260406.docx",
         "sts": "U:/연구소/1000 프로젝트/1200 자동차/1220 진행/0002 A Cappella/02 ADOS/04 KJPDS02/02.설계(연구소)/01.설계 및 검증/08.소프트웨어/11.SW 테스트/01.Test Specification/01.SwTS/(KJPDS02_SwTS) Software Test Specification_v1.01_251205_R.xlsm",
-        "suts": "U:/연구소/1000 프로젝트/1200 자동차/1220 진행/0002 A Cappella/02 ADOS/04 KJPDS02/02.설계(연구소)/01.설계 및 검증/08.소프트웨어/09.SW 단위 테스트/01.Test Specification/01.SwUTS/(KJPDS02_PV_SwUTS) Software Unit Test Specification_v0.10_260615.xlsm",
-        "sits": "U:/연구소/1000 프로젝트/1200 자동차/1220 진행/0002 A Cappella/02 ADOS/04 KJPDS02/02.설계(연구소)/01.설계 및 검증/08.소프트웨어/10.SW 통합 테스트/01.Test Specification/01.SwITS/(KJPDS02_PV_SwITS) Software Integration Test Specification_v0.10_260616.xlsm",
+        "suts": "U:/연구소/1000 프로젝트/1200 자동차/0002 A Cappella/02 ADOS/04 KJPDS02/02.설계(연구소)/01.설계 및 검증/08.소프트웨어/09.SW 단위 테스트/01.Test Specification/01.SwUTS/(KJPDS02_PV_SwUTS) Software Unit Test Specification_v1.02_260615.xlsm",
+        "sits": "U:/연구소/1000 프로젝트/1200 자동차/0002 A Cappella/02 ADOS/04 KJPDS02/02.설계(연구소)/01.설계 및 검증/08.소프트웨어/10.SW 통합 테스트/01.Test Specification/01.SwITS/(KJPDS02_PV_SwITS) Software Integration Test Specification_v1.02_260616.xlsm",
         "srs": "U:/연구소/1000 프로젝트/1200 자동차/1220 진행/0002 A Cappella/02 ADOS/04 KJPDS02/02.설계(연구소)/01.설계 및 검증/08.소프트웨어/01.SW 요구사항/01.SwRS/(KJPDS02_SwRS) Software Requirements Specification_v2.03_20260405.docx",
         "sds": "U:/연구소/1000 프로젝트/1200 자동차/1220 진행/0002 A Cappella/02 ADOS/04 KJPDS02/02.설계(연구소)/01.설계 및 검증/08.소프트웨어/03.SW 아키텍처 설계/01.SwDS/(KJPDS02_SwDS) Software Architecture Design Specification_v2.03_20260405.docx",
         "hsis": "U:/연구소/1000 프로젝트/1200 자동차/1220 진행/0002 A Cappella/02 ADOS/04 KJPDS02/02.설계(연구소)/01.설계 및 검증/05.시스템/02.시스템 아키텍처 설계/02.HSIS/(KJPDS02_HSIS) Hardware Software Interface Specification_v2.01_260401_R.xlsx",
@@ -120,7 +120,7 @@
         ]
       },
       "created_at": "2026-07-06T09:33:48",
-      "updated_at": "2026-07-06T09:33:48",
+      "updated_at": "2026-07-06T15:35:30",
       "last_triggered": "",
       "last_revision": ""
     }
