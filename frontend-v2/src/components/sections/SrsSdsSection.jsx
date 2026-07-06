@@ -1251,7 +1251,9 @@ function TraceMatrix({ matrix, focusFunctions = null, onClearFocus = null,
   // 표의 UDS 함수 클릭 → 함수그래프/콜트리로 이동(검색 입력 없이 바로). 탭 직접 클릭 시엔 시드 비워 첫 함수로.
   const [funcGraphSeed, setFuncGraphSeed] = useState('');
   const [callTreeSeed, setCallTreeSeed] = useState('');
-  const [inlineCtFn, setInlineCtFn] = useState('');         // 표 행 인라인 콜트리 — 현재 펼친 UDS 함수(bare name). ''=닫힘
+  const [reqGraphSeed, setReqGraphSeed] = useState('');     // '그래프' 탭 전체뷰 진입 시드(요구사항 ID). ''=첫 항목
+  // 표 행 인라인 뷰 — 펼친 행 안에서 한 번에 하나(콜트리/함수그래프/추적그래프)를 탭 전환 없이 표시. null=닫힘.
+  const [inlineView, setInlineView] = useState(null);       // { type:'calltree'|'funcgraph'|'reqgraph', key:string } | null
   const [expandedTreeNodes, setExpandedTreeNodes] = useState(() => new Set()); // 트리 노드 id 집합 (다중 펼침)
   const [includeUnmapped, setIncludeUnmapped] = useState(false); // 트리: SRS 미추적 시험 별도 루트 표시 토글
 
@@ -1280,11 +1282,16 @@ function TraceMatrix({ matrix, focusFunctions = null, onClearFocus = null,
     }
   }, []);
 
+  // 표 행 인라인 뷰 토글 — 같은 (type,key)를 다시 누르면 닫고, 다르면 그것으로 교체(한 번에 하나).
+  const toggleInline = useCallback((type, key) => {
+    setInlineView(prev => (prev && prev.type === type && prev.key === key) ? null : { type, key });
+  }, []);
+
   // Reset page when rows change (e.g., new matrix data)
   useEffect(() => { setCurrentPage(0); setExpandedReqId(null); setExpandedTreeNodes(new Set()); }, [rows]);
 
-  // 펼친 행이 바뀌면(다른 행 열기·현재 행 접기) 인라인 콜트리도 닫는다 — 이전 행 함수의 트리가 남는 것 방지.
-  useEffect(() => { setInlineCtFn(''); }, [expandedReqId]);
+  // 펼친 행이 바뀌면(다른 행 열기·현재 행 접기) 인라인 뷰도 닫는다 — 이전 행 함수/요구사항의 뷰가 남는 것 방지.
+  useEffect(() => { setInlineView(null); }, [expandedReqId]);
 
   // 트리 펼침은 page-absolute nodeId를 쓰므로 페이지 이동엔 유지되지만, 행 집합/정렬/
   // 페이지크기가 바뀌면 절대 인덱스가 다른 행을 가리킬 수 있어(특히 anonymous 행) 초기화한다.
@@ -1940,7 +1947,7 @@ function TraceMatrix({ matrix, focusFunctions = null, onClearFocus = null,
               color: viewMode === 'calltree' ? '#fff' : 'var(--fg)', fontWeight: viewMode === 'calltree' ? 700 : 400 }}>
             콜트리
           </button>
-          <button type="button" onClick={() => setViewMode('graph')} aria-pressed={viewMode === 'graph'} title="요구사항 1개의 하위 추적 그래프 — SW: SDS→UDS→STS/SUTS/SITS · 시스템: HSIS·SyTS·SyITS · 실행: VectorCAST (ASIL 강조 · UDS↔SUTS 매핑)"
+          <button type="button" onClick={() => { setReqGraphSeed(''); setViewMode('graph'); }} aria-pressed={viewMode === 'graph'} title="요구사항 1개의 하위 추적 그래프 — SW: SDS→UDS→STS/SUTS/SITS · 시스템: HSIS·SyTS·SyITS · 실행: VectorCAST (ASIL 강조 · UDS↔SUTS 매핑)"
             style={{ padding: '6px 10px', fontSize: 11, border: 'none', borderLeft: '1px solid var(--border)', cursor: 'pointer',
               background: viewMode === 'graph' ? 'var(--accent)' : 'var(--bg)',
               color: viewMode === 'graph' ? '#fff' : 'var(--fg)', fontWeight: viewMode === 'graph' ? 700 : 400 }}>
@@ -2005,6 +2012,7 @@ function TraceMatrix({ matrix, focusFunctions = null, onClearFocus = null,
         <tbody>
           {displayedRows.map((r, idx) => {
             const reqId = _rowReqId(r) || `row-${idx}`;
+            const rgId = _reqGraphId(r);   // 추적 그래프 시드용 순수 요구사항 ID(익명 행이면 '' → 그래프 버튼 숨김)
             const status = deriveStatus(r);
             const colors = COVERAGE_COLORS[status] || {};
             const sdsComps = r.sds_components ?? [];
@@ -2159,13 +2167,15 @@ function TraceMatrix({ matrix, focusFunctions = null, onClearFocus = null,
                             <div style={{ maxHeight: 150, overflowY: 'auto', fontSize: 11 }}>
                               {srcFuncs.map((fn, fi) => {
                                 const bareFn = String(fn).split(/[\s(]/)[0].trim();
-                                const ctOpen = inlineCtFn === bareFn;
+                                const ctOpen = inlineView?.type === 'calltree' && inlineView.key === bareFn;
+                                const fgOpen = inlineView?.type === 'funcgraph' && inlineView.key === fn;
                                 return (
                                 <div key={fi} style={{ padding: '2px 0', display: 'flex', alignItems: 'center', gap: 6, borderBottom: '1px solid #e5e7eb' }}>
-                                  <button type="button" onClick={(e) => { e.stopPropagation(); gotoFuncView(fn, 'funcgraph'); }}
-                                    title="클릭 → 이 함수의 V-model 추적 그래프(함수그래프)로 이동"
-                                    style={{ flex: 1, minWidth: 0, textAlign: 'left', fontFamily: 'monospace', fontSize: 11, padding: '1px 2px', border: 'none', background: 'none', cursor: 'pointer', color: _STAGE_COLORS.UDS, textDecoration: 'underline', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{fn}</button>
-                                  <button type="button" onClick={(e) => { e.stopPropagation(); setInlineCtFn(prev => prev === bareFn ? '' : bareFn); }}
+                                  <button type="button" onClick={(e) => { e.stopPropagation(); toggleInline('funcgraph', fn); }}
+                                    aria-pressed={fgOpen}
+                                    title="이 함수의 V-model 추적 그래프(함수그래프)를 이 자리에서 바로 펼침 (다시 누르면 닫힘)"
+                                    style={{ flex: 1, minWidth: 0, textAlign: 'left', fontFamily: 'monospace', fontSize: 11, padding: '1px 4px', border: 'none', borderRadius: 3, background: fgOpen ? 'var(--accent)' : 'none', cursor: 'pointer', color: fgOpen ? '#fff' : _STAGE_COLORS.UDS, textDecoration: fgOpen ? 'none' : 'underline', fontWeight: fgOpen ? 700 : 400, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{fn}</button>
+                                  <button type="button" onClick={(e) => { e.stopPropagation(); toggleInline('calltree', bareFn); }}
                                     aria-pressed={ctOpen}
                                     title="이 함수의 호출 트리(콜트리)를 이 자리에서 바로 펼침 — 호출/역호출 방향 전환 가능 (다시 누르면 닫힘)"
                                     style={{ flexShrink: 0, fontSize: 9, padding: '1px 5px', border: `1px solid ${ctOpen ? 'var(--accent)' : 'var(--border)'}`, borderRadius: 4, background: ctOpen ? 'var(--accent)' : 'var(--bg)', cursor: 'pointer', color: ctOpen ? '#fff' : 'var(--fg)', fontWeight: 600 }}>콜트리 {ctOpen ? '▴' : '▾'}</button>
@@ -2227,17 +2237,42 @@ function TraceMatrix({ matrix, focusFunctions = null, onClearFocus = null,
                       </div>
                       {/* V-Model trace path summary */}
                       <div style={{ marginTop: 10, padding: 8, background: 'var(--bg)', borderRadius: 6, borderLeft: '3px solid var(--accent)' }}>
-                        <div style={{ fontSize: 11, fontWeight: 700, marginBottom: 4 }}>V-Model {'\uCD94\uC801 \uACBD\uB85C'}</div>
+                        <div style={{ fontSize: 11, fontWeight: 700, marginBottom: 4, display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8 }}>
+                          <span>V-Model {'\uCD94\uC801 \uACBD\uB85C'}</span>
+                          {rgId && (() => {
+                            const rgOpen = inlineView?.type === 'reqgraph' && inlineView.key === rgId;
+                            return (
+                              <button type="button" onClick={(e) => { e.stopPropagation(); toggleInline('reqgraph', rgId); }}
+                                aria-pressed={rgOpen}
+                                title="\uC774 \uC694\uAD6C\uC0AC\uD56D\uC758 \uD558\uC704 \uCD94\uC801 \uADF8\uB798\uD504(SDS\u2192UDS\u2192\uC2DC\uD5D8\u2192VectorCAST)\uB97C \uC774 \uC790\uB9AC\uC5D0\uC11C \uBC14\uB85C \uD3BC\uCE68 (\uB2E4\uC2DC \uB204\uB974\uBA74 \uB2EB\uD798)"
+                                style={{ fontSize: 9, padding: '1px 7px', border: `1px solid ${rgOpen ? 'var(--accent)' : 'var(--border)'}`, borderRadius: 4, background: rgOpen ? 'var(--accent)' : 'var(--bg)', cursor: 'pointer', color: rgOpen ? '#fff' : 'var(--fg)', fontWeight: 600 }}>{'\uCD94\uC801 \uADF8\uB798\uD504'} {rgOpen ? '\u25B4' : '\u25BE'}</button>
+                            );
+                          })()}
+                        </div>
                         <div style={{ fontSize: 10 }}>
                           T1: SDS → {sdsComps.length}{'\uAC1C \uCEF4\uD3EC\uB10C\uD2B8'} | T2: UDS → {srcFuncs.length}{'\uAC1C \uD568\uC218'} | T3: STS → {stsCount} TC ({'\uC9C1\uC811'}) | T4: SUTS → {r.suts_direct || 0} {'\uC9C1\uC811'} + {r.suts_indirect || 0} {'\uACBD\uC720'} | T5: SITS → {r.sits_direct || 0} {'\uC9C1\uC811'} + {r.sits_indirect || 0} {'\uACBD\uC720'}
                         </div>
                       </div>
-                      {/* 인라인 콜트리 — 표 행 UDS '콜트리' 클릭 시 탭 전환 없이 이 자리에서 표시 (호출/역호출 토글 내장) */}
-                      {inlineCtFn && srcFuncs.some(f => String(f).split(/[\s(]/)[0].trim() === inlineCtFn) ? (
-                        <InlineCallTree fn={inlineCtFn} job={job} cacheRoot={cacheRoot} buildSelector={buildSelector}
+                      {/* 인라인 뷰 — 표 행에서 함수그래프/콜트리/추적그래프 클릭 시 탭 전환 없이 이 자리에서 표시 */}
+                      {inlineView?.type === 'calltree' && srcFuncs.some(f => String(f).split(/[\s(]/)[0].trim() === inlineView.key) ? (
+                        <InlineCallTree fn={inlineView.key} job={job} cacheRoot={cacheRoot} buildSelector={buildSelector}
                           sourceRoot={sourceRoot}
-                          onOpenFull={() => gotoFuncView(inlineCtFn, 'calltree')}
-                          onClose={() => setInlineCtFn('')} />
+                          onOpenFull={() => gotoFuncView(inlineView.key, 'calltree')}
+                          onClose={() => setInlineView(null)} />
+                      ) : null}
+                      {inlineView?.type === 'funcgraph' && srcFuncs.some(f => f === inlineView.key) ? (
+                        <InlineGraphFrame title="함수그래프" badge={inlineView.key}
+                          onOpenFull={() => gotoFuncView(inlineView.key, 'funcgraph')}
+                          onClose={() => setInlineView(null)}>
+                          <TraceFuncGraphView key={`fg:${inlineView.key}`} rows={rows} focusFunctions={focusFunctions} initialFn={inlineView.key} />
+                        </InlineGraphFrame>
+                      ) : null}
+                      {inlineView?.type === 'reqgraph' && rgId && inlineView.key === rgId ? (
+                        <InlineGraphFrame title="추적 그래프" badge={rgId}
+                          onOpenFull={() => { setReqGraphSeed(rgId); setViewMode('graph'); }}
+                          onClose={() => setInlineView(null)}>
+                          <TraceReqGraphView key={`rg:${rgId}`} rows={rows} focusFunctions={focusFunctions} linkTable={inner?.link_table} initialReqId={rgId} />
+                        </InlineGraphFrame>
                       ) : null}
                     </td>
                   </tr>
@@ -2278,7 +2313,7 @@ function TraceMatrix({ matrix, focusFunctions = null, onClearFocus = null,
       {/* 그래프 보기 (신규 — 요구사항 1개의 하위 추적 그래프. SVG 노드-엣지, filtered row로 완결.
           focusFunctions=영향도 연동 변경함수 → 그래프 안 해당 UDS/시험 노드 강조) */}
       {viewMode === 'graph' && (
-        <TraceReqGraphView rows={filtered} focusFunctions={focusFunctions} linkTable={inner?.link_table} />
+        <TraceReqGraphView rows={filtered} focusFunctions={focusFunctions} linkTable={inner?.link_table} initialReqId={reqGraphSeed} />
       )}
 
       {/* 함수중심 그래프 (신규 — 함수 1개의 V-model 추적. root=함수, 요구사항/설계는 함수가 구현한
@@ -3511,6 +3546,32 @@ function InlineCallTree({ fn, job, cacheRoot, buildSelector, sourceRoot, onOpenF
   );
 }
 
+/* ── 인라인 그래프 프레임 (함수그래프/추적그래프 공용 — 표 행 안에서 기존 그래프 컴포넌트를 감싸 표시) ──
+ * 헤더(제목·badge·⤢전체뷰·✕) + maxHeight 스크롤 본문. 자식 그래프 컴포넌트는 seed가 바뀌면
+ * 호출부에서 key로 remount하여 재시드한다(그래프 컴포넌트는 initial* 를 useState 1회 시드만 하므로). */
+function InlineGraphFrame({ title, badge, onOpenFull, onClose, children }) {
+  return (
+    <div style={{ marginTop: 10, border: '1px solid var(--accent)', borderRadius: 6, background: 'var(--bg)', overflow: 'hidden' }}>
+      <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8, padding: '6px 10px', borderBottom: '1px solid var(--border)' }}>
+        <span style={{ fontSize: 11, fontWeight: 700 }}>{title}</span>
+        {badge && (
+          <code style={{ fontSize: 11, fontFamily: 'monospace', fontWeight: 700, color: _STAGE_COLORS.UDS, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 360 }}>{badge}</code>
+        )}
+        <span style={{ flex: 1 }} />
+        {onOpenFull && (
+          <button type="button" onClick={onOpenFull} title="전용 탭(더 큰 캔버스)에서 열기"
+            style={{ fontSize: 10, padding: '2px 8px', border: '1px solid var(--border)', borderRadius: 4, background: 'var(--bg)', color: 'var(--accent)', cursor: 'pointer', fontWeight: 600 }}>⤢ 전체 뷰</button>
+        )}
+        <button type="button" onClick={onClose} title="닫기"
+          style={{ fontSize: 12, lineHeight: 1, padding: '2px 7px', border: '1px solid var(--border)', borderRadius: 4, background: 'var(--bg)', color: 'var(--fg)', cursor: 'pointer' }}>✕</button>
+      </div>
+      <div style={{ padding: '8px 10px', maxHeight: 460, overflow: 'auto' }}>
+        {children}
+      </div>
+    </div>
+  );
+}
+
 /* ── 요구사항 상하위 추적 그래프 (additive '그래프' 뷰) ──
    요구사항 1개를 선택하면 그 하위 추적(SW: SDS→UDS→STS/SUTS/SITS · 시스템: HSIS·SyTS·SyITS → VectorCAST)을 레벨별 SVG
    노드-엣지 그래프로 보여준다. hiMA UCOneIDTrace(요구사항 ID 의존성 그래프)의 child 방향에
@@ -3746,9 +3807,10 @@ function ReqGraphNode({ node, color, active, kbFocused, onClick, onHover, onFocu
   );
 }
 
-function TraceReqGraphView({ rows, focusFunctions = null, linkTable = null }) {
+function TraceReqGraphView({ rows, focusFunctions = null, linkTable = null, initialReqId = '' }) {
   const list = useMemo(() => (Array.isArray(rows) ? rows.filter(r => _reqGraphId(r)) : []), [rows]);
-  const [selId, setSelId] = useState('');
+  // 표 행에서 진입 시 그 요구사항으로 시작(인라인은 key로 remount되므로 초기값 시드로 충분). 검색창으로 변경 가능.
+  const [selId, setSelId] = useState(initialReqId || '');
   const [selNode, setSelNode] = useState(null);
   const [hoverId, setHoverId] = useState(null);
   const [focusId, setFocusId] = useState(null); // 키보드 포커스(강조 dim과 분리)
