@@ -2013,29 +2013,40 @@ def _try_svn_revision_range(req: JenkinsImpactTriggerRequest, build_rev: str):
         if not (repo_url and source_root):
             return None
         from backend.services.local_service import svn_info_url, svn_diff_summarize
-        # A: 로컬 작업본 base revision. source_root는 콤마/세미콜론 구분 멀티패스일 수 있으므로
-        # (예: 'C:\\...\\NE1AW_PORTING,C:\\...\\PDS128_FBL') 분리해, scm_url과 '같은 리포지토리'인
-        # 작업본의 revision을 고른다. svn revision은 리포지토리-전역 정수라 리포 정합(작업본
-        # Repository Root가 scm_url을 포함)이 맞는 경로만 A로 신뢰한다 — 불일치/미매칭이면 changeSet
-        # 폴백(silent-wrong 방지). svn info는 작업본 대상이라 오프라인 조회.
         scm_norm = repo_url.rstrip("/")
+        # A(baseline revision) 결정. 우선순위:
+        #  1) base_ref에 정수 svn revision이 명시되면 그걸 사용 — source_root가 export(.svn 없음)라
+        #     `svn info`가 불가한 프로젝트(예: KJPDS02_PV, 배포 소스가 export) 대응. baseline을
+        #     revision 번호로 고정한다(예: base_ref="1018"; 커밋 메시지의 ver 0.05.17에 해당).
+        #  2) 없으면 로컬 작업본에서 추출 — source_root는 콤마/세미콜론 멀티패스일 수 있으므로 분리해
+        #     scm_url과 '같은 리포지토리'(작업본 Repository Root가 scm_url 포함)인 작업본의 revision을
+        #     고른다(리포 정합, silent-wrong 방지). svn info는 작업본 대상이라 오프라인 조회.
         base_rev = ""
-        for _raw in source_root.replace(";", ",").split(","):
-            _p = _raw.strip()
-            if not _p:
-                continue
-            _info = svn_info_url(repo_url=_p)
-            _rev = str(_info.get("revision") or "").strip()
-            if not _rev.isdigit():
-                continue
-            _root = str(_info.get("repo_root") or "").strip().rstrip("/")
-            if _root and not (scm_norm == _root or scm_norm.startswith(_root + "/")):
-                continue  # 다른 리포지토리 작업본 — A로 쓰면 무의미
-            base_rev = _rev
-            break
+        _base_ref_hint = str(getattr(req, "base_ref", "") or getattr(entry, "base_ref", "") or "").strip()
+        # 'r1018' 같은 svn 관례 표기도 허용(선행 r/R 제거 후 정수면 revision). '0.05.17'처럼
+        # 정수가 아닌 버전 라벨은 revision 매핑 불가 → 작업본 경로로 폴백(대개 실패→changeSet).
+        if _base_ref_hint[:1] in ("r", "R") and _base_ref_hint[1:].isdigit():
+            _base_ref_hint = _base_ref_hint[1:]
+        if _base_ref_hint.isdigit():
+            base_rev = _base_ref_hint
+        else:
+            for _raw in source_root.replace(";", ",").split(","):
+                _p = _raw.strip()
+                if not _p:
+                    continue
+                _info = svn_info_url(repo_url=_p)
+                _rev = str(_info.get("revision") or "").strip()
+                if not _rev.isdigit():
+                    continue
+                _root = str(_info.get("repo_root") or "").strip().rstrip("/")
+                if _root and not (scm_norm == _root or scm_norm.startswith(_root + "/")):
+                    continue  # 다른 리포지토리 작업본 — A로 쓰면 무의미
+                base_rev = _rev
+                break
         if not base_rev.isdigit():
             _logger.warning(
-                "svn revision-range skipped: no working copy in source_root matches scm_url (%s) — changeSet fallback",
+                "svn revision-range skipped: no numeric base_ref and no svn working copy in source_root "
+                "matches scm_url (%s) — changeSet fallback",
                 repo_url,
             )
             return None

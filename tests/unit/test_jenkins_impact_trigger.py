@@ -325,6 +325,43 @@ def test_try_svn_revision_range_nonnumeric_build_returns_none():
     assert jr._try_svn_revision_range(req, build_rev="") is None
 
 
+def test_try_svn_revision_range_uses_numeric_base_ref(monkeypatch):
+    """source_root가 export(작업본 아님)여도 base_ref에 정수 revision이 있으면 그걸 A로 쓴다.
+
+    KJPDS02_PV 시나리오: NE1AW_PORTING이 svn export라 svn info 불가 → base_ref=1018(커밋
+    메시지 ver 0.05.17)을 baseline으로 명시.
+    """
+    from backend.routers import jenkins as jr
+    import backend.services.scm_registry as reg
+    import backend.services.local_service as ls
+    from backend.schemas import JenkinsImpactTriggerRequest
+
+    entry = _FakeSvnEntry(scm_url="svn://host/ADOS/NE1AW_PORTING",
+                          source_root="C:/Project/Ados/NE1AW_PORTING")  # export
+    monkeypatch.setattr(reg, "get_registry_entry", lambda _sid: entry)
+    monkeypatch.setattr(reg, "resolve_scm_credentials", lambda **_k: ("u", "p", None))
+
+    def _boom_info(**_k):
+        raise AssertionError("svn_info_url must NOT be called when base_ref is numeric")
+
+    monkeypatch.setattr(ls, "svn_info_url", _boom_info)
+    seen = {}
+
+    def _fake_diff(*, repo_url, rev_a, rev_b, **_k):
+        seen["a"] = rev_a
+        return {"rc": 0, "files": ["APP/a.c"], "edit_types": {"APP/a.c": "edit"}}
+
+    monkeypatch.setattr(ls, "svn_diff_summarize", _fake_diff)
+    out = jr._try_svn_revision_range(
+        JenkinsImpactTriggerRequest(scm_id="kjpds02_pv", build_number=5, job_url="http://j/job/X", base_ref="1018"),
+        build_rev="1050",
+    )
+    assert out is not None
+    _files, _use, meta = out
+    assert meta["baseline_revision"] == "1018"   # base_ref 우선(작업본 svn info 안 탐)
+    assert seen["a"] == "1018"
+
+
 def test_try_svn_revision_range_multipath_picks_matching_wc(monkeypatch):
     """멀티패스 source_root(app,boot)에서 scm_url(app=NE1AW)과 같은 repo인 작업본 rev를 A로 쓴다."""
     from backend.routers import jenkins as jr
