@@ -256,7 +256,16 @@ export default function SrsSdsSection({ job, analysisResult }) {
           const sitsData = await post('/api/jenkins/sits/extract-traceability', { path: activeDocs.sits });
           if (sitsData?.vcast_rows?.length) {
             sitsRows = sitsData.vcast_rows.map(r => ({ ...r, source: r.source || 'SITS', confidence: 'exact' }));
-            dataSources.push(`SITS: ${sitsData.vcast_rows.length}건`);
+            // 직접 요구 매핑(requirement_id 보유) vs testcase-only(2-hop 대기) 구분: 전부 후자면
+            // 요구열 없는 Test-Log 포맷이라 매트릭스 2-hop이 SUTS/SDS로 구제하지 못하면 SITS 밴드가
+            // 조용히 빈다. backend가 실은 warning을 성공 표시와 함께 노출한다(deep-review W6).
+            const directN = sitsData.vcast_rows.filter(r => r.requirement_id).length;
+            if (directN > 0) {
+              dataSources.push(`SITS: ${sitsData.vcast_rows.length}건`);
+            } else {
+              dataSources.push(`SITS: ${sitsData.vcast_rows.length}건(요구열 없음·2-hop 의존)`);
+              if (sitsData.warning) stepWarnings.push(`SITS: ${sitsData.warning}`);
+            }
           } else if (Array.isArray(sitsData?.available_sheets)) {
             stepWarnings.push(`SITS: ${sitsData.warning || sitsData.error || '시트 미인식'}. 사용 가능한 시트: ${sitsData.available_sheets.join(', ')}`);
           }

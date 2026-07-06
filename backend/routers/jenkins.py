@@ -4239,6 +4239,8 @@ def jenkins_sits_extract_traceability(body: Dict[str, Any]) -> Dict[str, Any]:
     _MAX_EMPTY_ROWS = 50  # C3: break after N consecutive empty rows
     # source 라벨 — 시스템 시험(SyTS/SyITS)이 동일 구조라 라벨만 갈아끼워 재사용(syts/syits 위임 엔드포인트).
     src_label = (str(body.get("source_label") or "SITS").strip() or "SITS")
+    # 매핑 0건일 때 진단용 — 실제로 스캔한 시트명(silent-empty 표면화, W-SITS-fix#4).
+    scanned_sheet = ""
 
     # Strategy 1: Look for Traceability sheet — sheet_name 명시 + 자동 탐색 keyword 확장
     # (외부 도구 생성 SITS 파일 대응 — N20 follow-up)
@@ -4257,6 +4259,7 @@ def jenkins_sits_extract_traceability(body: Dict[str, Any]) -> Dict[str, Any]:
                 break
 
     if trace_ws:
+        scanned_sheet = trace_ws.title
         empty_streak = 0
         # PERF: read_only 모드에서 ws.cell(r,c) 랜덤 접근은 호출마다 시트 상단부터
         # 재파싱돼 O(행²·열)로 폭주한다(1874행×146열 실측 ~75분). 순차 iter_rows
@@ -4311,6 +4314,7 @@ def jenkins_sits_extract_traceability(body: Dict[str, Any]) -> Dict[str, Any]:
                 "warning": "SITS Traceability 또는 Integration Test 시트를 찾을 수 없습니다. sheet_name 인자로 명시하세요.",
                 "available_sheets": list(wb.sheetnames),
             }
+        scanned_sheet = spec_ws.title
 
         # Find the Related ID column by scanning header rows 5/6.
         # PERF: 본문 random .cell() 스캔도 Strategy 1과 동일한 O(행²) 폭주를
@@ -4385,13 +4389,40 @@ def jenkins_sits_extract_traceability(body: Dict[str, Any]) -> Dict[str, Any]:
             seen.add(key)
             deduped.append(row)
 
-    req_set = set(r["requirement_id"] for r in deduped)
-    return {
+    # rid=""(testcase-only 행, W-SITS-fix#1)는 커버된 요구사항이 아니므로 covered에서 제외
+    # (허위 커버리지 방지 — deep-review I1). total_mappings는 전체(2-hop 대기 행 포함).
+    req_set = set(r["requirement_id"] for r in deduped if r["requirement_id"])
+    direct_mapped = len(req_set)
+    result: Dict[str, Any] = {
         "ok": True,
         "vcast_rows": deduped,
         "total_mappings": len(deduped),
-        "requirements_covered": len(req_set),
+        "requirements_covered": direct_mapped,
+        "direct_mapped": direct_mapped,
     }
+    # silent-empty 표면화(W-SITS-fix#4): 시트는 인식했으나 직접 요구 매핑 0건이면 warning+
+    # available_sheets를 실어 프론트(SrsSdsSection)가 '요구열 없는 Test-Log 포맷' 등 원인을
+    # 표기하게 한다. 과거엔 Strategy1이 시트를 찾고도 0행이면 아무 신호 없이 빈 배열만 반환해
+    # SITS 밴드가 조용히 비었다(Strategy2의 '시트 없음' 경로만 warning을 실었음 — 비대칭 해소).
+    if not deduped:
+        result["warning"] = (
+            f"{src_label} 시트('{scanned_sheet}')를 인식했으나 TC↔요구사항 매핑을 0건 추출했습니다. "
+            "요구(Related) 열이 없는 Test-Log 포맷이거나 시트 레이아웃이 예상과 다를 수 있습니다."
+        )
+        result["available_sheets"] = list(wb.sheetnames)
+    elif direct_mapped == 0:
+        # 전부 testcase-only(직접 요구열 없는 Test-Log) — 직접 매핑 0, 매트릭스 2-hop 브리지
+        # (TC의 SwUFn→SUTS→SDS→요구사항)에만 의존한다. fix#1(testcase-only emit)이 vcast_rows를
+        # 채워 위 'not deduped' 경로를 우회하므로, 이 경우를 별도 표면화해 2-hop 미해소 시의
+        # silent를 막는다(deep-review W6 — fix#1↔fix#4 상충 해소). 프론트는 이 warning을
+        # 성공 표시와 함께 노출한다.
+        result["warning"] = (
+            f"{src_label} 시트('{scanned_sheet}')에서 직접 요구사항 매핑 없이 testcase만 "
+            f"{len(deduped)}건 추출했습니다(요구 열 없는 Test-Log 포맷). 매트릭스의 2-hop 추적에 "
+            "의존하므로, SITS 밴드가 비면 SUTS/SDS 연결을 확인하세요."
+        )
+        result["available_sheets"] = list(wb.sheetnames)
+    return result
 
 
 @router.post("/api/jenkins/syts/extract-traceability")
