@@ -801,6 +801,64 @@ function GapBadge({ label, value, tone, title, sub }) {
   );
 }
 
+// ── V-model 수평쌍 완성도 요약 (상단 상시 노출) ──
+// 각 쌍: 좌(설계) 밴드 present 요구 중 우(검증) 밴드가 채워진 비율을 막대+판정으로.
+// covered(any-design AND any-test) 녹색이 통합/시스템 시험 미완을 가리는 것을 상단에서 한눈에 표면화.
+function _pairTone(gapGenuine) {
+  // 진짜 결핍 0 = 완결(green), 있으면 약함(amber). 대체검증분은 결핍으로 세지 않음(정직화 lockstep).
+  return gapGenuine === 0 ? 'ok' : 'warn';
+}
+
+function VModelPairSummary({ pg }) {
+  // 좌 분모 0(해당 설계 밴드를 쓰는 요구 없음)이면 그 쌍은 'N/A'로 회색 표시(거짓 100% 방지).
+  const pairs = [
+    { key: 'src', label: 'Source → VectorCAST', side: '실행 결과', left: pg.srcLeft, gap: pg.srcNoVc, genuine: pg.srcNoVc },
+    { key: 'uds', label: 'UDS → SUTS', side: 'SW 단위시험', left: pg.udsLeft, gap: pg.udsNoSuts, genuine: pg.udsNoSuts },
+    { key: 'sds', label: 'SDS → SITS', side: 'SW 통합시험', left: pg.sdsLeft, gap: pg.sdsNoSits, genuine: pg.sdsNoSitsGenuine, alt: pg.sdsNoSitsAlt },
+    { key: 'hsis', label: 'HSIS → SyITS', side: '시스템 통합시험', left: pg.hsisLeft, gap: pg.hsisNoSyits, genuine: pg.hsisNoSyits },
+    { key: 'syrs', label: 'SyRS → SyTS', side: '시스템 시험', left: pg.syrsLeft, gap: pg.syrsNoSyts, genuine: pg.syrsNoSyts },
+  ];
+  return (
+    <div style={{ marginBottom: 12, border: '1px solid var(--border)', borderRadius: 8, padding: '10px 14px', background: 'var(--bg)' }}>
+      <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 8, color: 'var(--fg)' }}>
+        V-model 수평쌍 완성도 <span style={{ fontWeight: 400, fontSize: 11, color: 'var(--text-muted)' }}>— 설계(좌) 대비 대응 검증(우) 채움 · 진짜 결핍만 '약함'</span>
+      </div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+        {pairs.map(p => {
+          const na = !p.left;
+          const done = na ? 0 : p.left - p.genuine;
+          const pct = na ? 0 : Math.round((done / p.left) * 100);
+          const tone = _pairTone(p.genuine);
+          const barC = na ? '#cbd5e1' : (tone === 'ok' ? COVERAGE_COLORS.covered.border : COVERAGE_COLORS.partial.border);
+          const fg = na ? 'var(--text-muted)' : (tone === 'ok' ? COVERAGE_COLORS.covered.fg : COVERAGE_COLORS.partial.fg);
+          return (
+            <div key={p.key} style={{ display: 'flex', alignItems: 'center', gap: 10, fontSize: 12 }}
+              title={na ? '이 설계 밴드를 쓰는 요구사항이 없어 해당 없음' :
+                `${p.label}: 설계 ${p.left}건 중 ${done}건 검증 완료` +
+                (p.alt ? ` · 대체검증 ${p.alt}건 제외` : '') +
+                (p.genuine ? ` · 진짜 결핍 ${p.genuine}건` : ' · 진짜 결핍 없음')}>
+              <span style={{ width: 168, fontWeight: 600, color: 'var(--fg)', whiteSpace: 'nowrap' }}>
+                {na ? '⊘' : (tone === 'ok' ? '✅' : '⚠')} {p.label}
+              </span>
+              <span style={{ width: 92, fontSize: 10, color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>{p.side}</span>
+              <div style={{ flex: 1, minWidth: 80, height: 8, background: '#e5e7eb', borderRadius: 4, overflow: 'hidden' }}>
+                <div style={{ width: `${pct}%`, height: '100%', background: barC }} />
+              </div>
+              <span style={{ width: 116, textAlign: 'right', color: fg, fontWeight: 700, whiteSpace: 'nowrap' }}>
+                {na ? '해당 없음' : `${done}/${p.left} (${pct}%)`}
+                {!na && p.genuine ? <span style={{ fontWeight: 600, fontSize: 10 }}> · 결핍 {p.genuine}</span> : null}
+              </span>
+            </div>
+          );
+        })}
+      </div>
+      <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 8 }}>
+        비율 = (설계 요구 − 진짜 결핍) / 설계 요구. 비기능(SyTS/STS)·인터페이스(HSIS/SyITS)로 검증되는 요구는 '대체검증'으로 결핍에서 제외(은폐 아님 — 상세는 아래 공백 패널·finding 시트).
+      </div>
+    </div>
+  );
+}
+
 // ── hiMA식 교차 추적성 매트릭스 (additive '매트릭스' 뷰) ──
 // 행=요구사항(target), 열=SDS 컴포넌트(related), 셀=O/공백. 추적 0건 행은 핑크 강조
 // (hiMA 0카운트 밴드 대응). 데이터는 filtered rows에서 클라이언트 파생(필터 반영),
@@ -1315,7 +1373,12 @@ function TraceMatrix({ matrix, focusFunctions = null, onClearFocus = null,
     //   Jenkins 매트릭스(unmappedSupported)에서만 산출한다. rightPresent로는 '미로드'와 '100%
     //   실공백'을 구분 못 하므로(둘 다 빈 밴드) 모드 신호를 쓴다.
     const supportsPairs = unmappedSupported;
-    const pg = { sdsNoSits: 0, sdsNoSitsGenuine: 0, sdsNoSitsAlt: 0, udsNoSuts: 0, hsisNoSyits: 0, syrsNoSyts: 0, srcNoVc: 0 };
+    // 각 수평쌍: 결핍 카운트 + 좌(설계) 밴드 present 분모(*Left) — 상단 V-model 요약 카드의 완성비율용.
+    const pg = {
+      sdsNoSits: 0, sdsNoSitsGenuine: 0, sdsNoSitsAlt: 0, sdsLeft: 0,
+      udsNoSuts: 0, udsLeft: 0, hsisNoSyits: 0, hsisLeft: 0,
+      syrsNoSyts: 0, syrsLeft: 0, srcNoVc: 0, srcLeft: 0,
+    };
     for (const r of rows) {
       const sds = Array.isArray(r.sds_components) ? r.sds_components : [];
       const uds = Array.isArray(r.source_ids) ? r.source_ids : [];
@@ -1353,6 +1416,11 @@ function TraceMatrix({ matrix, focusFunctions = null, onClearFocus = null,
         if (b.HSIS.length && !b.SyITS.length) pg.hsisNoSyits++;
         if (b.SyRS.length && !b.SyTS.length) pg.syrsNoSyts++;
         if (b.UDS.length && !b.VectorCAST.length) pg.srcNoVc++;
+        // 좌(설계) 밴드 present 분모 — 완성비율(=(좌−결핍)/좌) 계산용.
+        if (b.SDS.length) pg.sdsLeft++;
+        if (b.UDS.length) { pg.udsLeft++; pg.srcLeft++; }
+        if (b.HSIS.length) pg.hsisLeft++;
+        if (b.SyRS.length) pg.syrsLeft++;
       }
     }
     const unmappedTotal = summary?.unmapped_vcast_count ?? unmappedVcast.length;
@@ -1652,6 +1720,12 @@ function TraceMatrix({ matrix, focusFunctions = null, onClearFocus = null,
           })()}
         </div>
       )}
+
+      {/* V-model 수평쌍 완성도 요약 — 상단 상시 노출(전체 매트릭스 모드만; local은 밴드 미채움).
+          통합/시스템 시험 미완이 covered 녹색에 가려지지 않게 한눈 판정으로 표면화. */}
+      {gapStats.pairSupported && rows.length > 0 ? (
+        <VModelPairSummary pg={gapStats.pairGaps} />
+      ) : null}
 
       {/* 추적성 공백 (양방향) — viewMode 무관 상시 노출. 정방향 설계 단절 + 역방향 미명세 시험.
           deep-analyze: 공백이 covered 녹색·토글 뒤에 묻혀 감사에서 누락되는 문제 해소. */}
