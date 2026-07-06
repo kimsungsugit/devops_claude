@@ -60,24 +60,27 @@ export default function SrsSdsSection({ job, analysisResult }) {
   );
 
   useEffect(() => {
-    // analysisResult.matchedScm.linked_docs는 분석 실행 시점의 스냅샷이라, 이후 Settings에서
-    // 등록한 vectorcast(복수 경로)가 누락되거나 빈 배열([])로 굳어 있을 수 있다(vectorcast
-    // 필드 추가 직후~경로 입력 전 시점에 캡처된 경우). core 문서가 있고 vectorcast가
-    // '비어있지 않을' 때만 스냅샷을 그대로 쓰고, 그 외엔 레지스트리(단일 진실원) 최신본을
-    // 가져온다 — 안 그러면 VectorCAST/P&F가 끝까지 비어 나온다.
-    if (scmLinkedDocs && (scmLinkedDocs.sts || scmLinkedDocs.suts || scmLinkedDocs.sits)
-        && Array.isArray(scmLinkedDocs.vectorcast) && scmLinkedDocs.vectorcast.length > 0) {
-      setLinkedDocs(scmLinkedDocs);
-      return;
-    }
+    // 레지스트리(단일 진실원)를 항상 최신으로 가져온다. 과거엔 분석 시점 스냅샷
+    // (scmLinkedDocs)이 sts/suts/sits+vectorcast로 완전하면 재fetch를 건너뛰었는데(early-return),
+    // 그러면 관리/Settings에서 경로가 갱신돼도(예: SwUTS v0.10→v1.02 release, 상위폴더 이관)
+    // 프론트가 옛 경로를 고집해 '파일을 찾을 수 없습니다'가 나고 새로고침·분석 재실행으로도
+    // 안 고쳐졌다(스냅샷이 완전한 한 레지스트리를 안 읽음). 이제 레지스트리를 우선하되,
+    // 원 스냅샷의 유일 목적이던 vectorcast 누락 방지만 보존한다: 레지스트리 vectorcast가 비고
+    // 스냅샷에만 있으면 vectorcast만 스냅샷에서 보강(경로/문서는 레지스트리 최신본).
     api('/api/scm/list').then(d => {
       const items = d?.items || (Array.isArray(d) ? d : []);
       // Match the SAME registry entry the Dashboard selected for this job.
       // Falling back to items[0] would silently pull another project's docs
       // in multi-SCM environments.
       const matched = scmId ? items.find(it => it.id === scmId) : items[0];
-      if (matched?.linked_docs) setLinkedDocs(matched.linked_docs);
-      else if (scmLinkedDocs) setLinkedDocs(scmLinkedDocs);
+      if (matched?.linked_docs) {
+        const reg = matched.linked_docs;
+        const regVcast = Array.isArray(reg.vectorcast) ? reg.vectorcast.filter(Boolean) : [];
+        const snapVcast = Array.isArray(scmLinkedDocs?.vectorcast) ? scmLinkedDocs.vectorcast.filter(Boolean) : [];
+        setLinkedDocs(regVcast.length === 0 && snapVcast.length > 0
+          ? { ...reg, vectorcast: scmLinkedDocs.vectorcast }
+          : reg);
+      } else if (scmLinkedDocs) setLinkedDocs(scmLinkedDocs);
     }).catch(() => { if (scmLinkedDocs) setLinkedDocs(scmLinkedDocs); });
   }, [scmId]); // eslint-disable-line react-hooks/exhaustive-deps
 
