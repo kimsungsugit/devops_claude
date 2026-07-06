@@ -273,8 +273,9 @@ def svn_diff_summarize(
             stdin_input = clean_pw
         else:
             args += ["--password", clean_pw]
-    if username.strip() or clean_pw:
-        args += ["--non-interactive"]
+    # creds 유무와 무관하게 항상 non-interactive — 미신뢰 cert 프롬프트가 동기 스레드를
+    # timeout까지 점유하는 것을 방지한다.
+    args += ["--non-interactive"]
     rc, out = _run_cmd(args, cwd=Path("."), timeout_sec=timeout_sec, stdin_input=stdin_input)
     files: List[str] = []
     edit_types: Dict[str, str] = {}
@@ -308,6 +309,49 @@ def svn_diff_summarize(
         "files": sorted(dict.fromkeys(files)),
         "edit_types": edit_types,
     }
+
+
+def svn_diff_unified(
+    *,
+    repo_url: str,
+    rev_a: str,
+    rev_b: str,
+    username: str = "",
+    password: str = "",
+    timeout_sec: int = 60,
+) -> Dict[str, Any]:
+    """`svn diff -r A:B <repo_url>` 전체 unified diff(svn 내부 diff). 함수 시그니처 변경 추출용.
+
+    svn_diff_summarize(파일 레벨 상태)와 달리 라인 레벨 -/+ 를 반환해 함수 선언의 이전→이후
+    원문을 뽑을 수 있다. rev는 정수 SVN revision만 허용(인자 주입 차단). 외부 diff 바이너리
+    의존을 피하려고 svn 내부 diff(기본, `--diff-cmd` 미사용)를 쓴다. best-effort 보강용이라
+    실패는 호출자가 빈 결과로 흡수한다.
+
+    Returns: {"rc": int, "output": str}
+    """
+    ra, rb = str(rev_a or "").strip(), str(rev_b or "").strip()
+    if not (ra.isdigit() and rb.isdigit()):
+        return {"rc": 1, "output": "rev_a/rev_b must be numeric svn revisions"}
+    base = str(repo_url or "").strip().rstrip("/")
+    if not base:
+        return {"rc": 1, "output": "repo_url required"}
+    clean_pw, pw_error = _sanitize_password(password)
+    if pw_error:
+        return {"rc": 1, "output": pw_error}
+    args: List[str] = ["svn", "diff", "-r", f"{ra}:{rb}", base]
+    if username.strip():
+        args += ["--username", username.strip()]
+    stdin_input: Optional[str] = None
+    if clean_pw:
+        if _svn_supports_password_stdin():
+            args += ["--password-from-stdin"]
+            stdin_input = clean_pw
+        else:
+            args += ["--password", clean_pw]
+    # creds 유무와 무관하게 항상 non-interactive — 미신뢰 cert 프롬프트 hang 방지.
+    args += ["--non-interactive"]
+    rc, out = _run_cmd(args, cwd=Path("."), timeout_sec=timeout_sec, stdin_input=stdin_input)
+    return {"rc": rc, "output": out}
 
 
 def list_directory(project_root: str, rel_path: str = ".") -> Dict[str, Any]:

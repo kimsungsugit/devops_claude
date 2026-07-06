@@ -2038,6 +2038,14 @@ def _try_svn_revision_range(req: JenkinsImpactTriggerRequest, build_rev: str):
                 "jenkins_changed_file_count": 0,
                 "linkage_reason": f"local working copy already at build revision r{build_rev} (no changes)",
             }
+        # A>B: 로컬 작업본(A)이 선택 빌드(B)보다 최신 → svn diff -r A:B가 역방향 델타(NEW/DELETE·
+        # before/after 뒤집힘, '삭제 TC 제거' 가이드 오발동)를 낸다 → 명시적 changeSet 폴백.
+        if int(base_rev) > int(build_rev):
+            _logger.warning(
+                "svn revision-range skipped: local rev %s newer than build rev %s — changeSet fallback",
+                base_rev, build_rev,
+            )
+            return None
         username, password, _ = resolve_scm_credentials(scm_id=req.scm_id)
         diff = svn_diff_summarize(
             repo_url=repo_url,

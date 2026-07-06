@@ -259,6 +259,40 @@ def classify_changed_functions(
     return classifications
 
 
+def extract_signature_changes(diff_text: str) -> Dict[str, Dict[str, str]]:
+    """unified diff에서 함수별 이전(-)/이후(+) 선언 라인 원문을 추출한다.
+
+    반환: {func_name: {"before": "<선언 원문>", "after": "<선언 원문>"}} — 존재하는 쪽만 채움.
+      - SIGNATURE 변경: before/after 둘 다(매개변수/리턴타입 이전→이후).
+      - NEW: after만 / DELETE: before만.
+      - BODY(선언 라인 미변경): 결과에 없음(원문 표시 불필요).
+    한 함수에 여러 선언 라인이 잡히면 첫 라인을 유지한다(대개 1개). 여러 줄에 걸친 선언은
+    미지원(단일 라인 선언 가정 — C 코드 통상 단일 라인). UI '변경 상세' 원문 표시용이며,
+    변경유형 분류(classify_changed_functions)와 독립적인 best-effort 보강 데이터다.
+    """
+    out: Dict[str, Dict[str, str]] = {}
+    for line in diff_text.splitlines():
+        if len(line) < 2 or line[0] not in "+-":
+            continue
+        if line[:3] in ("+++", "---"):  # diff 파일 헤더(+++ / ---) 제외
+            continue
+        m = _FUNC_DECL_LINE.match(line) or _FUNC_PROTO_LINE.match(line)
+        if not m:
+            continue
+        func = m.group(1)
+        decl = line[1:].strip()
+        if decl.endswith("{"):  # 본문 여는 중괄호 제거 → 순수 선언부만
+            decl = decl[:-1].strip()
+        # 멀티라인 선언(파라미터 줄바꿈)은 여는 괄호까지만 잡혀 'void Foo('로 잘린다 →
+        # before==after 은폐를 막기 위해 괄호 불균형(닫힘 부족)이면 미확보로 처리(스킵).
+        if decl.count("(") > decl.count(")"):
+            continue
+        rec = out.setdefault(func, {})
+        key = "after" if line[0] == "+" else "before"
+        rec.setdefault(key, decl)
+    return out
+
+
 def compute_impact_set(
     changed_functions: Set[str],
     call_map: Dict[str, List[str]],

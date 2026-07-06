@@ -68,6 +68,64 @@ def test_run_impact_update_dry_run_builds_auto_and_flag_actions(tmp_path, monkey
     assert any(p.name.startswith("impact_") for p in audit_dir.iterdir())
 
 
+def test_run_impact_update_upgrades_body_to_signature_from_change_details(tmp_path, monkeypatch):
+    """svn A:B editType가 .c를 BODY로 분류해도, unified diff에서 시그니처 이전≠이후 원문이
+    나오면 SIGNATURE로 격상(SDS 자동 FLAG) + change_details에 원문(소문자 키) + display_name."""
+    from backend.schemas import ScmRegisterRequest
+    from backend.services import scm_registry
+    from workflow import impact_audit, impact_orchestrator
+
+    reg_path = tmp_path / "config" / "scm_registry.json"
+    audit_dir = tmp_path / "audit"
+    monkeypatch.setattr(scm_registry, "REGISTRY_PATH", reg_path)
+    monkeypatch.setattr(impact_audit, "AUDIT_DIR", audit_dir)
+    monkeypatch.setattr(impact_audit, "LOCK_PATH", audit_dir / ".run_lock")
+    scm_registry.register_entry(
+        ScmRegisterRequest(
+            id="hdpdm01", name="HDPDM01", scm_type="svn",
+            scm_url="https://svn.example/repo/trunk", source_root=str(tmp_path / "src"),
+        )
+    )
+    # editType 경로처럼 .c edit → BODY로 분류됐다고 가정
+    monkeypatch.setattr(
+        impact_orchestrator, "classify_changed_functions",
+        lambda *args, **kwargs: {"door_ctrl": "BODY"},
+    )
+    monkeypatch.setattr(
+        impact_orchestrator, "_load_source_sections",
+        lambda _sr: {"call_map": {}, "function_details_by_name": {
+            "door_ctrl": {"name": "Door_Ctrl", "module_name": "door", "file": "Sources/APP/Ap_Door.c"}}},
+    )
+    # unified diff에서 실제 시그니처 변경 원문이 추출됐다고 가정(before≠after)
+    monkeypatch.setattr(
+        impact_orchestrator, "_collect_signature_changes",
+        lambda *a, **k: {"Door_Ctrl": {"before": "int Door_Ctrl(int a)", "after": "int Door_Ctrl(int a, bool b)"}},
+    )
+
+    result = impact_orchestrator.run_impact_update(
+        ChangeTrigger(
+            trigger_type="jenkins", scm_id="hdpdm01", source_root=str(tmp_path / "src"),
+            scm_type="svn", base_ref="",
+            changed_files=["Ap_Door.c"], dry_run=True, targets=["uds", "sds", "sts"],
+            metadata={
+                "changed_files_source": "svn_revision_range",
+                "baseline_revision": "100", "build_revision": "150",
+                "changed_file_edit_types": {"Ap_Door.c": "edit"},
+            },
+        )
+    )
+
+    # BODY → SIGNATURE 격상 (editType 원본 케이스와 무관하게 조인)
+    assert result["changed_function_types"]["door_ctrl"] == "SIGNATURE"
+    # change_details: 이전→이후 원문(소문자 키, 프론트 조인 규약)
+    assert result["change_details"]["door_ctrl"]["before"] == "int Door_Ctrl(int a)"
+    assert result["change_details"]["door_ctrl"]["after"] == "int Door_Ctrl(int a, bool b)"
+    # SIGNATURE.sds=FLAG → SDS 자동 검토(BODY였다면 sds='-')
+    assert result["actions"]["sds"]["mode"] == "FLAG"
+    # 표시용 원본 케이스명
+    assert result["function_meta"]["door_ctrl"]["display_name"] == "Door_Ctrl"
+
+
 def test_run_impact_update_promotes_auto_to_flag_when_limit_exceeded(tmp_path, monkeypatch):
     from backend.schemas import ScmRegisterRequest
     from backend.services import scm_registry

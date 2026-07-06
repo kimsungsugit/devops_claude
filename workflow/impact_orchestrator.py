@@ -743,6 +743,58 @@ def _resolve_changed_types_to_functions(
     return resolved or changed_types
 
 
+def _collect_signature_changes(trigger, meta, entry) -> Dict[str, Dict[str, str]]:
+    """함수별 시그니처 이전/이후 선언 원문을 추출한다(UI '변경 상세' 원문 표시용).
+
+    - svn revision-range(baseline A ↔ build B): `svn diff -r A:B <scm_url>` 전체 unified diff 1회.
+    - 로컬 git/svn working-copy: 변경 파일별 unified diff(상한 60개).
+    best-effort — 실패/미지원이면 빈 dict(영향 분석 자체엔 무영향, UI 원문만 미표시).
+    """
+    from workflow.delta_update import extract_signature_changes
+    meta = meta or {}
+    base_rev = str(meta.get("baseline_revision") or "").strip()
+    build_rev = str(meta.get("build_revision") or "").strip()
+    scm_url = str(getattr(entry, "scm_url", "") or "").strip()
+    # (1) svn revision-range: 전체 unified diff 1회 (baseline A ↔ build B 정밀 델타)
+    if base_rev.isdigit() and build_rev.isdigit() and scm_url:
+        # A>B(로컬 작업본이 선택 빌드보다 최신)면 svn diff -r A:B가 역방향 델타를 내
+        # NEW/DELETE·before/after가 뒤집힌다 → 원문 보강 생략(정직한 미표시).
+        if int(base_rev) > int(build_rev):
+            return {}
+        try:
+            from backend.services.local_service import svn_diff_unified
+            from backend.services.scm_registry import resolve_scm_credentials
+            _user, _pw, _ = resolve_scm_credentials(scm_id=trigger.scm_id)
+            d = svn_diff_unified(
+                repo_url=scm_url, rev_a=base_rev, rev_b=build_rev,
+                username=_user, password=_pw,
+            )
+            if int(d.get("rc", 1)) == 0:
+                return extract_signature_changes(d.get("output") or "")
+        except Exception as exc:  # noqa: BLE001 — best-effort, 실패 흡수
+            logger.debug("svn_diff_unified signature extraction failed: %s", exc)
+        return {}
+    # (2) 로컬 git/svn working-copy diff: 변경 파일별(상한, 파일 단위 격리)
+    src = str(getattr(entry, "source_root", "") or getattr(trigger, "source_root", "") or "").strip()
+    scm_type = str(getattr(trigger, "scm_type", "") or "").lower()
+    changed_files = list(getattr(trigger, "changed_files", None) or [])
+    if src and scm_type in ("git", "svn") and changed_files:
+        from workflow.delta_update import _run_unified_diff
+        merged: Dict[str, Dict[str, str]] = {}
+        for fp in changed_files[:60]:
+            # 파일 단위 try/except — 개별 파일 timeout/권한 오류가 앞서 성공한 파일 원문을
+            # 폐기하지 않게 한다(sibling classify_changed_functions와 동일 패턴).
+            try:
+                dt = _run_unified_diff(src, base_ref=getattr(trigger, "base_ref", ""), scm_type=scm_type, file_path=fp)
+                for fn, sig in extract_signature_changes(dt or "").items():
+                    merged.setdefault(fn, {}).update(sig)
+            except Exception as exc:  # noqa: BLE001 — 파일 단위 실패는 건너뛴다
+                logger.debug("sig diff failed for %s: %s", fp, exc)
+                continue
+        return merged
+    return {}
+
+
 def _action_for_target(target: str, changed_types: Dict[str, str], changed_files: List[str]) -> str:
     decision = "-"
     for change_type in changed_types.values():
@@ -984,6 +1036,37 @@ def run_impact_update(
                 "cloudium mode: AUTO regeneration disabled (read surface not yet supported); downgraded to FLAG"
             )
 
+        # ── 함수별 변경 상세(시그니처 이전→이후 원문) + BODY→SIGNATURE 격상 ──
+        # svn A:B editType 경로는 .c edit를 BODY로 고정 분류하나, unified diff에서 실제 시그니처
+        # (매개변수/리턴) 변경 원문을 추출할 수 있다. 그 증거가 있으면 (1) UI '변경 상세'에
+        # 이전→이후를 렌더하고, (2) 변경유형을 SIGNATURE로 격상해 ACTION_MATRIX상 SDS 자동 FLAG가
+        # 걸리게 한다. 영향 집합은 함수 '키'만 쓰므로 격상은 영향범위 무변, 방향은 단방향 안전측
+        # (SDS 검토 추가). change_details 키는 소문자(프론트 조인 규약: fn.toLowerCase()).
+        change_details: Dict[str, Dict[str, str]] = {}
+        if changed_types:
+            _ct_by_lower = {str(k).strip().lower(): k for k in changed_types}
+            try:
+                _sig_map = _collect_signature_changes(trigger, _meta, entry)
+            except Exception as _sig_exc:  # noqa: BLE001 — 원문 보강 실패는 분석을 막지 않음
+                logger.debug("change_details extraction failed: %s", _sig_exc)
+                _sig_map = {}
+            for _fn, _sig in (_sig_map or {}).items():
+                _actual = _ct_by_lower.get(str(_fn).strip().lower())
+                if _actual is None:
+                    continue  # 변경유형에 안 잡힌 함수는 잡음 — 제외
+                _before = str(_sig.get("before") or "").strip()
+                _after = str(_sig.get("after") or "").strip()
+                _rec = {}
+                if _before:
+                    _rec["before"] = _before
+                if _after:
+                    _rec["after"] = _after
+                if _rec:
+                    change_details[str(_actual).strip().lower()] = _rec
+                # 이전≠이후(둘 다 존재)면 BODY/VARIABLE을 SIGNATURE로 격상(NEW/DELETE/HEADER 보존).
+                if _before and _after and _before != _after and changed_types.get(_actual) in ("BODY", "VARIABLE"):
+                    changed_types[_actual] = "SIGNATURE"
+
         # ── ISO 26262 증거 보강: 함수별 ASIL/메타 + ASIL 차등 + 회귀시험 선정 + 커버리지 타깃 ──
         def _asil_of(_fn: str) -> str:
             _a = str((by_name.get(_fn) or {}).get("asil") or "").strip().upper()
@@ -997,6 +1080,8 @@ def run_impact_update(
         function_meta = {
             fn: {
                 "asil": _asil_of(fn),
+                # 표시용 원본 케이스명(by_name 키는 소문자화됨 → UI 가독성). 미존재 시 fn 폴백.
+                "display_name": str((by_name.get(fn) or {}).get("name") or fn),
                 "module": str((by_name.get(fn) or {}).get("module_name") or ""),
                 "file": str((by_name.get(fn) or {}).get("file") or ""),
                 "change_type": changed_types.get(fn, ""),
@@ -1121,6 +1206,7 @@ def run_impact_update(
             "dry_run": bool(trigger.dry_run),
             "trigger": trigger.to_dict(),
             "changed_function_types": dict(sorted(changed_types.items())),
+            "change_details": change_details,
             "impact": impact_groups,
             "warnings": warnings,
             "actions": actions,

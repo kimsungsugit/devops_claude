@@ -4,7 +4,39 @@ import { useJenkinsCfg, useToast } from '../../App.jsx';
 import StatusBadge from '../StatusBadge.jsx';
 
 const CHANGE_TYPE_KO = { BODY: '본문', HEADER: '헤더', SIGNATURE: '시그니처', NEW: '신규', DELETE: '삭제', VARIABLE: '변수' };
+const CHANGE_TYPE_TONE = { NEW: 'success', DELETE: 'danger', SIGNATURE: 'warning', BODY: 'info', HEADER: 'neutral', VARIABLE: 'neutral' };
+// 정렬 우선순위 — 구조적 변경(시그니처/신규/삭제)을 위로.
+const CHANGE_ORDER = { SIGNATURE: 5, NEW: 4, DELETE: 4, VARIABLE: 3, HEADER: 2, BODY: 1 };
 const COVERAGE_METRIC_KO = { mcdc: 'MC/DC', branch: '분기', statement: '구문' };
+
+// 함수별 '변경 상세' 셀 — 시그니처는 이전(−)/이후(＋) 선언 원문, 신규/삭제는 해당 원문, 본문 등은 설명.
+function renderChangeDetailCell(kind, detail) {
+  const mono = { fontFamily: 'var(--font-mono, monospace)', fontSize: 11, whiteSpace: 'pre-wrap', wordBreak: 'break-all' };
+  if (kind === 'SIGNATURE') {
+    if (detail && (detail.before || detail.after)) {
+      return (
+        <div style={mono}>
+          {detail.before && <div style={{ color: 'var(--color-danger)' }}>− {detail.before}</div>}
+          {detail.after && <div style={{ color: 'var(--color-success)' }}>＋ {detail.after}</div>}
+        </div>
+      );
+    }
+    return <span className="text-muted" style={{ fontSize: 11 }}>파라미터/리턴타입 변경 (원문 미확보)</span>;
+  }
+  if (kind === 'NEW') {
+    return detail?.after
+      ? <span style={{ ...mono, color: 'var(--color-success)' }}>＋ {detail.after}</span>
+      : <span className="text-muted" style={{ fontSize: 11 }}>신규 함수 추가</span>;
+  }
+  if (kind === 'DELETE') {
+    return detail?.before
+      ? <span style={{ ...mono, color: 'var(--color-danger)' }}>− {detail.before}</span>
+      : <span className="text-muted" style={{ fontSize: 11 }}>함수 제거됨</span>;
+  }
+  if (kind === 'HEADER') return <span className="text-muted" style={{ fontSize: 11 }}>헤더(매크로/타입) 변경</span>;
+  if (kind === 'VARIABLE') return <span className="text-muted" style={{ fontSize: 11 }}>전역 변수 변경</span>;
+  return <span className="text-muted" style={{ fontSize: 11 }}>본문(로직) 변경</span>;
+}
 
 // 함수별 VectorCAST 커버리지 셀 — ASIL 타깃 메트릭 % + 충족 여부 + 직전 대비 Δ.
 function renderCoverageCell(cov) {
@@ -107,6 +139,11 @@ export default function ImpactGuideSection({ job, analysisResult }) {
   const activeFnEntries = demoMode ? Object.entries(demoFunctions) : changedFnEntries;
   const activeImpactGroups = demoMode ? demoImpact : impactGroups;
   const activeChangedFiles = demoMode ? ['DrvIn_Main_PDS.c', 'Ap_MotorCtrl_PDS.c'] : changedFiles;
+  // 함수별 변경 상세(시그니처 이전→이후 원문). 키는 소문자 함수명(백엔드 changed_types와 동일).
+  const changeDetails = impact?.change_details ?? {};
+  // 변경종류 요약(신규/삭제/시그니처/본문/헤더/변수 개수) — 데모 포함(activeFnEntries 기준).
+  const changeSummary = { NEW: 0, DELETE: 0, SIGNATURE: 0, BODY: 0, HEADER: 0, VARIABLE: 0 };
+  for (const [, k] of activeFnEntries) { if (k in changeSummary) changeSummary[k] += 1; }
 
   const filteredGuide = useMemo(() => {
     if (!guide) return [];
@@ -520,6 +557,49 @@ export default function ImpactGuideSection({ job, analysisResult }) {
           );
         })()}
       </div>
+
+      {/* 변경 상세 — 함수별 변경종류 + 시그니처 이전→이후 원문 (impactData 기반, 항상 렌더) */}
+      {activeFnEntries.length > 0 && (
+        <div className="panel" style={{ marginBottom: 12 }}>
+          <div className="panel-header">
+            <span className="panel-title">변경 상세 ({activeFnEntries.length}개 함수)</span>
+            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+              {changeSummary.NEW > 0 && <span className="pill pill-success" style={{ fontSize: 10 }}>🟢 신규 {changeSummary.NEW}</span>}
+              {changeSummary.DELETE > 0 && <span className="pill pill-danger" style={{ fontSize: 10 }}>🔴 삭제 {changeSummary.DELETE}</span>}
+              {changeSummary.SIGNATURE > 0 && <span className="pill pill-warning" style={{ fontSize: 10 }}>🟠 시그니처 {changeSummary.SIGNATURE}</span>}
+              {changeSummary.BODY > 0 && <span className="pill pill-info" style={{ fontSize: 10 }}>🔵 본문 {changeSummary.BODY}</span>}
+              {changeSummary.HEADER > 0 && <span className="pill" style={{ fontSize: 10 }}>헤더 {changeSummary.HEADER}</span>}
+              {changeSummary.VARIABLE > 0 && <span className="pill" style={{ fontSize: 10 }}>변수 {changeSummary.VARIABLE}</span>}
+            </div>
+          </div>
+          <div style={{ maxHeight: 420, overflow: 'auto', marginTop: 8 }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+              <thead>
+                <tr style={{ borderBottom: '1px solid var(--border)' }}>
+                  <th style={{ textAlign: 'left', padding: '6px 8px' }}>함수</th>
+                  <th style={{ textAlign: 'left', padding: '6px 8px', width: 90 }}>변경</th>
+                  <th style={{ textAlign: 'left', padding: '6px 8px' }}>상세 (이전 − → 이후 ＋)</th>
+                </tr>
+              </thead>
+              <tbody>
+                {[...activeFnEntries]
+                  .sort((a, b) => (CHANGE_ORDER[b[1]] || 0) - (CHANGE_ORDER[a[1]] || 0))
+                  .map(([fn, kind]) => (
+                    <tr key={fn} style={{ borderBottom: '1px solid var(--border-subtle, var(--border))' }}>
+                      <td style={{ padding: '6px 8px', fontFamily: 'var(--font-mono, monospace)', wordBreak: 'break-all' }}>{functionMeta[fn]?.display_name || fn}</td>
+                      <td style={{ padding: '6px 8px' }}>
+                        <StatusBadge tone={CHANGE_TYPE_TONE[kind] || 'neutral'}>{CHANGE_TYPE_KO[kind] || kind}</StatusBadge>
+                      </td>
+                      <td style={{ padding: '6px 8px' }}>
+                        {renderChangeDetailCell(kind, changeDetails[String(fn).toLowerCase()])}
+                      </td>
+                    </tr>
+                  ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
 
       {/* AI Risk & Cross-Document Impact Guide */}
       {aiGuide && (

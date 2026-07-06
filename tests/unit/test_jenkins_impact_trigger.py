@@ -451,3 +451,117 @@ def test_svn_diff_summarize_rejects_nonnumeric_rev():
     assert out["rc"] == 1
     assert out["files"] == []
     assert out["edit_types"] == {}
+
+
+# ── 변경 상세(시그니처 이전→이후) 추출 ──────────────────────────────────
+
+def test_extract_signature_changes_captures_before_after():
+    """unified diff에서 시그니처 이전(-)/이후(+) + 신규(after만)를 추출한다."""
+    from workflow.delta_update import extract_signature_changes
+
+    diff = "\n".join([
+        "Index: APP/motor.c",
+        "--- APP/motor.c\t(revision 100)",
+        "+++ APP/motor.c\t(revision 150)",
+        "@@ -10,7 +10,7 @@",
+        "-int s_MotorCtrl(int a) {",
+        "+int s_MotorCtrl(int a, bool b) {",
+        "     return a;",
+        " }",
+        "+void g_NewDoor(U8 mode) {",
+        "+    open(mode);",
+        "+}",
+    ])
+    out = extract_signature_changes(diff)
+    assert out["s_MotorCtrl"]["before"] == "int s_MotorCtrl(int a)"
+    assert out["s_MotorCtrl"]["after"] == "int s_MotorCtrl(int a, bool b)"
+    assert out["g_NewDoor"]["after"] == "void g_NewDoor(U8 mode)"
+    assert "before" not in out["g_NewDoor"]
+
+
+def test_extract_signature_changes_skips_unbalanced_decl():
+    """멀티라인 선언의 여는 괄호 줄만(닫힘 없음)은 before==after 은폐 방지 위해 스킵."""
+    from workflow.delta_update import extract_signature_changes
+
+    diff = "-int Foo(\n+int Foo("  # 괄호 불균형(닫힘 부족) → 미확보 처리
+    assert "Foo" not in extract_signature_changes(diff)
+
+
+def test_try_svn_revision_range_reverse_direction_returns_none(monkeypatch):
+    """A(로컬 작업본) > B(선택 빌드) 역방향이면 None(changeSet 폴백) — 삭제 가이드 오발동 방지."""
+    from backend.routers import jenkins as jr
+    from backend.schemas import JenkinsImpactTriggerRequest
+
+    _patch_svn_range(monkeypatch, entry=_FakeSvnEntry(), info_rev="200", diff_boom=True)
+    out = jr._try_svn_revision_range(
+        JenkinsImpactTriggerRequest(scm_id="x", build_number=5, job_url="http://j/job/X"),
+        build_rev="150",
+    )
+    assert out is None
+
+
+def test_collect_signature_changes_reverse_returns_empty(monkeypatch):
+    """A>B이면 svn_diff_unified를 호출하지 않고 빈 dict(역방향 원문 뒤집힘 방지)."""
+    from workflow import impact_orchestrator as orch
+    import backend.services.local_service as ls
+
+    class _T:
+        scm_id = "x"; scm_type = "svn"; base_ref = ""; changed_files = ["a.c"]; source_root = "D:/wc"
+
+    class _E:
+        scm_url = "https://svn.example/repo/trunk"; source_root = "D:/wc"
+
+    def _boom(**_k):
+        raise AssertionError("svn_diff_unified must not run for A>B")
+
+    monkeypatch.setattr(ls, "svn_diff_unified", _boom)
+    out = orch._collect_signature_changes(_T(), {"baseline_revision": "200", "build_revision": "150"}, _E())
+    assert out == {}
+
+
+def test_extract_signature_changes_ignores_body_only():
+    """본문(로직)만 바뀌면 선언 라인이 없어 원문 결과가 비어야 한다."""
+    from workflow.delta_update import extract_signature_changes
+
+    diff = "\n".join([
+        "@@ -5,3 +5,3 @@ int s_Foo(int a)",
+        "-    x = 1;",
+        "+    x = 2;",
+    ])
+    assert extract_signature_changes(diff) == {}
+
+
+def test_svn_diff_unified_rejects_nonnumeric_rev():
+    from backend.services import local_service as ls
+
+    out = ls.svn_diff_unified(repo_url="https://x/r", rev_a="abc", rev_b="150")
+    assert out["rc"] == 1
+
+
+def test_svn_diff_unified_runs(monkeypatch):
+    from backend.services import local_service as ls
+
+    monkeypatch.setattr(ls, "_run_cmd", lambda *_a, **_k: (0, "Index: a.c\n-int f(void) {\n+int f(int a) {"))
+    out = ls.svn_diff_unified(repo_url="https://x/repo/trunk", rev_a="100", rev_b="150")
+    assert out["rc"] == 0
+    assert "int f" in out["output"]
+
+
+def test_collect_signature_changes_svn_range(monkeypatch):
+    """svn A:B 경로: baseline/build revision이 있으면 전체 unified diff로 시그니처 추출."""
+    from workflow import impact_orchestrator as orch
+    import backend.services.local_service as ls
+    import backend.services.scm_registry as reg
+
+    class _T:
+        scm_id = "x"; scm_type = "svn"; base_ref = ""; changed_files = ["a.c"]; source_root = "D:/wc"
+
+    class _E:
+        scm_url = "https://svn.example/repo/trunk"; source_root = "D:/wc"
+
+    monkeypatch.setattr(reg, "resolve_scm_credentials", lambda **_k: ("u", "p", None))
+    monkeypatch.setattr(ls, "svn_diff_unified", lambda **_k: {
+        "rc": 0, "output": "-int f(void) {\n+int f(int a) {"})
+    out = orch._collect_signature_changes(_T(), {"baseline_revision": "100", "build_revision": "150"}, _E())
+    assert out["f"]["before"] == "int f(void)"
+    assert out["f"]["after"] == "int f(int a)"
