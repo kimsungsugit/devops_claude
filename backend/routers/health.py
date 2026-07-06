@@ -990,14 +990,22 @@ async def check_cloudium_access(body: CheckAccessRequest = CheckAccessRequest())
     if test_path:
         try:
             if isinstance(resolver, CloudiumFileResolver):
-                resolver._ensure_gate()
-                resolver._check_allowed(test_path)
-            accessible = Path(test_path).exists()
-            return {"ok": True, "accessible": accessible, "path": test_path,
-                    "mode": resolver.mode, **gate}
-        except PermissionError as e:
-            return {"ok": False, "accessible": False, "error": str(e),
-                    "mode": resolver.mode, **gate}
+                # 백엔드 프로세스는 cloudium 파일을 직접 못 봄(worker 위임 구조) → Path.exists()가
+                # 항상 False라 거짓 '없음'이 된다. worker IPC exists로 실제 존재를 검증한다
+                # (내부에서 gate ping + 화이트리스트 검사 포함, read-only op이라 파일 변경 없음).
+                accessible = resolver.exists(test_path)
+            else:
+                accessible = Path(test_path).exists()
+            # verified=True: 존재 여부를 실제로 검증함(local=Path, cloudium=worker) →
+            # accessible=False는 진짜 '없음'이다(프론트가 not_found로 표시).
+            return {"ok": True, "accessible": accessible, "verified": True,
+                    "path": test_path, "mode": resolver.mode, **gate}
+        except (PermissionError, OSError) as e:
+            # gate 미실행 / 화이트리스트 밖 / worker 연결·응답 오류 → 존재 여부 검증 불가.
+            # verified=False → 프론트는 '미확인'(거짓 '없음' 방지). _ipc_call은 실패 시
+            # PermissionError(연결/미응답/권한) 또는 OSError(응답 파싱)만 raise한다.
+            return {"ok": False, "accessible": False, "verified": False,
+                    "error": str(e), "mode": resolver.mode, **gate}
     return {"ok": True, "mode": resolver.mode, **cfg, **gate}
 
 

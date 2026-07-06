@@ -90,12 +90,13 @@ export default function ScmSection({ job, analysisResult }) {
         const data = await post('/api/file-mode/check-access', { path: docPath });
         if (data?.accessible) {
           result[docPath] = 'found';
-        } else if (data?.mode === 'cloudium') {
-          // cloudium 모드: 백엔드 프로세스가 파일을 직접 못 봄(worker 위임) → Path.exists()가 항상
-          // False라 '없음' 오탐이 난다. 직접 검증 불가이므로 '미확인'으로 처리(오탐 방지).
-          result[docPath] = 'unknown';
-        } else {
+        } else if (data?.verified) {
+          // 실제 검증됨(local=Path, cloudium=worker IPC exists) + 접근 불가 → 진짜 '없음'.
+          // (백엔드가 cloudium에서도 worker로 존재를 검증하므로 이제 '없음'을 정확히 표시)
           result[docPath] = 'not_found';
+        } else {
+          // 검증 불가(cloudium gate 미실행 / worker 연결·응답 오류 등) → '미확인'(거짓 '없음' 방지).
+          result[docPath] = 'unknown';
         }
       } catch {
         result[docPath] = 'unknown';
