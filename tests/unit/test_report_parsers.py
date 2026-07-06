@@ -222,6 +222,25 @@ class TestPrqaRcrDetails:
         assert len(prqa["top_rules"]) > 0
         assert len(prqa["top_files"]) > 0
 
+    def test_build_summary_picks_newest_rcr_across_locations(self, tmp_path):
+        """report/의 오래된 RCR보다 빌드 루트의 최신 RCR을 mtime 기준으로 선택한다.
+
+        파일명 사전순(DDMMYYYY)이나 report/ stale RCR에 오도되지 않도록 위치 무관
+        mtime 최신 선택을 고정. (사전순이면 'NEW' < 'OLD'라 stale을 골라 빈 상세가 됨.)
+        """
+        import os
+        build_root = tmp_path / "build_1"
+        report_dir = build_root / "report"
+        report_dir.mkdir(parents=True)
+        stale = report_dir / "NEW_RCR_01012020.html"   # 이름은 사전순 앞이나 mtime은 과거
+        stale.write_text("<html><body>empty</body></html>", encoding="utf-8")
+        fresh = build_root / "OLD_RCR_01012026.html"    # 이름은 사전순 뒤지만 mtime은 최신
+        fresh.write_text(_RCR_HTML, encoding="utf-8")
+        os.utime(stale, (1_000_000, 1_000_000))
+        os.utime(fresh, (2_000_000, 2_000_000))
+        prqa = build_report_summary(report_dir)["kpis"]["prqa"]
+        assert len(prqa["violations_by_file"]) > 0     # 최신(fresh) RCR 선택 → 상세 채워짐
+
     def test_same_basename_different_path_not_merged(self, tmp_path):
         # 동일 basename(config.c)이 APP/BOOT 두 경로에 존재 → full path 키로 분리돼야 함
         html = (
