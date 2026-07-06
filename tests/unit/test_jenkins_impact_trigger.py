@@ -325,6 +325,48 @@ def test_try_svn_revision_range_nonnumeric_build_returns_none():
     assert jr._try_svn_revision_range(req, build_rev="") is None
 
 
+def test_try_svn_revision_range_multipath_picks_matching_wc(monkeypatch):
+    """멀티패스 source_root(app,boot)에서 scm_url(app=NE1AW)과 같은 repo인 작업본 rev를 A로 쓴다."""
+    from backend.routers import jenkins as jr
+    import backend.services.scm_registry as reg
+    import backend.services.local_service as ls
+    from backend.schemas import JenkinsImpactTriggerRequest
+
+    entry = _FakeSvnEntry(
+        scm_url="svn://host/ADOS/NE1AW_PORTING",
+        source_root="C:/Project/Ados/NE1AW_PORTING,C:/Project/Ados/PDS128_FBL",
+    )
+    monkeypatch.setattr(reg, "get_registry_entry", lambda _sid: entry)
+    monkeypatch.setattr(reg, "resolve_scm_credentials", lambda **_k: ("u", "p", None))
+
+    def _fake_info(*, repo_url, **_k):
+        if "NE1AW" in repo_url:
+            return {"rc": 0, "revision": "100", "url": "svn://host/ADOS/NE1AW_PORTING", "repo_root": "svn://host/ADOS"}
+        if "PDS128" in repo_url:
+            return {"rc": 0, "revision": "90", "url": "svn://host/ADOS/PDS128_FBL", "repo_root": "svn://host/ADOS"}
+        return {"rc": 1, "revision": "", "url": "", "repo_root": ""}
+
+    monkeypatch.setattr(ls, "svn_info_url", _fake_info)
+    seen = {}
+
+    def _fake_diff(*, repo_url, rev_a, rev_b, **_k):
+        seen["a"] = rev_a
+        seen["url"] = repo_url
+        return {"rc": 0, "files": ["APP/a.c"], "edit_types": {"APP/a.c": "edit"}}
+
+    monkeypatch.setattr(ls, "svn_diff_summarize", _fake_diff)
+    out = jr._try_svn_revision_range(
+        JenkinsImpactTriggerRequest(scm_id="kjpds02_pv", build_number=5, job_url="http://j/job/X"),
+        build_rev="150",
+    )
+    assert out is not None
+    _files, _use, meta = out
+    assert meta["baseline_revision"] == "100"   # app(NE1AW) 작업본 rev (boot 90 아님)
+    assert seen["a"] == "100"                     # diff가 A=100로 실행
+    assert "NE1AW" in seen["url"]                 # scm_url(app)로 diff (boot 제외)
+    assert _files == ["APP/a.c"]
+
+
 def test_try_svn_revision_range_repo_mismatch_returns_none(monkeypatch):
     """작업본 repo-root가 scm_url과 다른 리포지토리면 A:B 비교 무의미 → None(silent-wrong 차단)."""
     from backend.routers import jenkins as jr

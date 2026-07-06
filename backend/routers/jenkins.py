@@ -2013,20 +2013,30 @@ def _try_svn_revision_range(req: JenkinsImpactTriggerRequest, build_rev: str):
         if not (repo_url and source_root):
             return None
         from backend.services.local_service import svn_info_url, svn_diff_summarize
-        # A: 로컬 작업본 base revision (source_root는 svn 체크아웃 경로) — 오프라인 조회.
-        info = svn_info_url(repo_url=source_root)
-        base_rev = str(info.get("revision") or "").strip()
-        if not base_rev.isdigit():
-            return None  # 작업본 아님/svn info 실패 → changeSet 폴백
-        # 리포지토리 정합 검증: svn revision은 리포지토리-전역 정수라, 작업본(A)이 diff 대상
-        # scm_url(B)과 '다른 리포'면 A:B 비교가 에러 없이 무의미한 결과를 낸다(silent wrong).
-        # 작업본의 Repository Root가 scm_url을 포함할 때만 A를 신뢰한다(불일치→changeSet 폴백).
-        repo_root = str(info.get("repo_root") or "").strip().rstrip("/")
+        # A: 로컬 작업본 base revision. source_root는 콤마/세미콜론 구분 멀티패스일 수 있으므로
+        # (예: 'C:\\...\\NE1AW_PORTING,C:\\...\\PDS128_FBL') 분리해, scm_url과 '같은 리포지토리'인
+        # 작업본의 revision을 고른다. svn revision은 리포지토리-전역 정수라 리포 정합(작업본
+        # Repository Root가 scm_url을 포함)이 맞는 경로만 A로 신뢰한다 — 불일치/미매칭이면 changeSet
+        # 폴백(silent-wrong 방지). svn info는 작업본 대상이라 오프라인 조회.
         scm_norm = repo_url.rstrip("/")
-        if repo_root and not (scm_norm == repo_root or scm_norm.startswith(repo_root + "/")):
+        base_rev = ""
+        for _raw in source_root.replace(";", ",").split(","):
+            _p = _raw.strip()
+            if not _p:
+                continue
+            _info = svn_info_url(repo_url=_p)
+            _rev = str(_info.get("revision") or "").strip()
+            if not _rev.isdigit():
+                continue
+            _root = str(_info.get("repo_root") or "").strip().rstrip("/")
+            if _root and not (scm_norm == _root or scm_norm.startswith(_root + "/")):
+                continue  # 다른 리포지토리 작업본 — A로 쓰면 무의미
+            base_rev = _rev
+            break
+        if not base_rev.isdigit():
             _logger.warning(
-                "svn revision-range skipped: working copy repo root (%s) != scm_url (%s) — changeSet fallback",
-                repo_root, repo_url,
+                "svn revision-range skipped: no working copy in source_root matches scm_url (%s) — changeSet fallback",
+                repo_url,
             )
             return None
         if base_rev == build_rev:
