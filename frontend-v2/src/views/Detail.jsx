@@ -143,9 +143,34 @@ export default function Detail() {
       <div className="empty-state">
         <div className="empty-icon">📂</div>
         <div className="empty-title">프로젝트를 선택하세요</div>
+        {/* 대시보드에서 job 미선택 상태로 들어와도 여기서 바로 프로젝트를 고를 수 있게 셀렉터 제공.
+            Jenkins 자격정보가 있어 job 목록이 로드된 경우에만 노출(없으면 대시보드 안내로 폴백). */}
+        {projectOptions.length > 0 && (
+          <div className="row" style={{ marginTop: 4, justifyContent: 'center' }}>
+            <select
+              value=""
+              onChange={e => { if (e.target.value) switchProject(e.target.value); }}
+              disabled={switching}
+              title="프로젝트 선택 (캐시된 결과 로드 — Jenkins 재동기화 없음)"
+              style={{
+                fontSize: 13, fontWeight: 600, color: 'var(--text)',
+                background: 'var(--bg-elevated, var(--bg))', border: '1px solid var(--border)',
+                borderRadius: 6, padding: '6px 10px', minWidth: 260, maxWidth: 420,
+                cursor: switching ? 'wait' : 'pointer',
+              }}
+            >
+              <option value="" disabled>프로젝트 선택…</option>
+              {projectOptions.map(o => (
+                <option key={o.url} value={o.url}>{o.name}</option>
+              ))}
+            </select>
+            {switching && <span className="spinner" style={{ marginLeft: 4 }} />}
+          </div>
+        )}
         <div className="empty-desc">
-          대시보드에서 Jenkins Job을 선택하고 분석을 실행하면<br />
-          여기서 프로젝트 결과를 확인할 수 있습니다.
+          {projectOptions.length > 0
+            ? '위에서 프로젝트를 고르면 캐시된 결과를 바로 불러옵니다.'
+            : (<>대시보드에서 Jenkins Job을 선택하고 분석을 실행하면<br />여기서 프로젝트 결과를 확인할 수 있습니다.</>)}
         </div>
       </div>
     );

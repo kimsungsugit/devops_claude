@@ -77,22 +77,32 @@ export default function ScmSection({ job, analysisResult }) {
     }
   }, [job, cfg, cacheRoot, toast]);
 
-  /* --- Check linked doc existence --- */
+  /* --- Check linked doc existence (경로별 상태 — 배열 값도 경로 단위로 개별 확인) --- */
   const checkDocStatus = useCallback(async (docs) => {
     if (!docs || !job?.url) return;
-    const entries = Object.entries(docs).filter(([, v]) => v);
-    if (entries.length === 0) return;
+    const paths = Object.values(docs)
+      .flatMap(v => (Array.isArray(v) ? v : [v]))
+      .filter(Boolean);
+    if (paths.length === 0) return;
     const result = {};
-    for (const [key, docPath] of entries) {
+    for (const docPath of paths) {
       try {
         const data = await post('/api/file-mode/check-access', { path: docPath });
-        result[key] = data?.accessible ? 'found' : 'not_found';
+        if (data?.accessible) {
+          result[docPath] = 'found';
+        } else if (data?.mode === 'cloudium') {
+          // cloudium 모드: 백엔드 프로세스가 파일을 직접 못 봄(worker 위임) → Path.exists()가 항상
+          // False라 '없음' 오탐이 난다. 직접 검증 불가이므로 '미확인'으로 처리(오탐 방지).
+          result[docPath] = 'unknown';
+        } else {
+          result[docPath] = 'not_found';
+        }
       } catch {
-        result[key] = 'unknown';
+        result[docPath] = 'unknown';
       }
     }
     setDocStatus(result);
-  }, [job, cacheRoot, cfg]);
+  }, [job]);
 
   const selected = scmList.find(s => s.id === selectedId);
   const changed = analysisResult?.impactData?.changed_files ?? [];
@@ -167,35 +177,51 @@ export default function ScmSection({ job, analysisResult }) {
                 ))}
               </div>
 
-              {/* Linked docs with existence status — 전체 경로 대신 파일명만 표시(전체 경로는 hover title),
-                  칩을 flex-wrap으로 흘려 한 줄에 여러 파일명이 들어가도록 압축 */}
+              {/* Linked docs — 표로 정리(유형·파일명·상태). 파일명만 표시하고 전체 경로는 행 title(hover)로
+                  노출한다(압축 규약 유지). 배열 값(복수 경로)은 경로별로 행을 분리하고, 유형 pill은 첫 행에만
+                  표기(연속 행은 ↳). 상태는 경로별 docStatus 조회. */}
               {selected.linked_docs && Object.values(selected.linked_docs).some(v => (Array.isArray(v) ? v.length : v)) && (
                 <div style={{ marginTop: 12 }}>
                   <div className="text-sm" style={{ fontWeight: 700, marginBottom: 6 }}>연결 문서</div>
-                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-                    {Object.entries(selected.linked_docs)
-                      .filter(([, v]) => (Array.isArray(v) ? v.length : v))
-                      .flatMap(([k, v]) => {
-                        const paths = (Array.isArray(v) ? v : [v]).filter(Boolean);
-                        return paths.map((p, i) => (
-                          <span
-                            key={`${k}-${i}`}
-                            className="artifact-item"
-                            title={p}
-                            style={{ width: 'auto', padding: '4px 8px' }}
-                          >
-                            <span className="artifact-icon">📄</span>
-                            <span className="pill pill-purple" style={{ marginRight: 2 }}>{k.toUpperCase()}</span>
-                            <span className="artifact-name" style={{ flex: 'none', fontSize: 12 }}>{docBaseName(p)}</span>
-                            {i === 0 && docStatus[k] === 'found' && (
-                              <StatusBadge tone="success">존재</StatusBadge>
-                            )}
-                            {i === 0 && docStatus[k] === 'unknown' && (
-                              <StatusBadge tone="neutral">미확인</StatusBadge>
-                            )}
-                          </span>
-                        ));
-                      })}
+                  <div style={{ overflowX: 'auto' }}>
+                    <table className="impact-table" style={{ marginTop: 0 }}>
+                      <thead>
+                        <tr>
+                          <th style={{ width: '1%', whiteSpace: 'nowrap' }}>유형</th>
+                          <th>파일명</th>
+                          <th style={{ width: '1%', whiteSpace: 'nowrap' }}>상태</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {Object.entries(selected.linked_docs)
+                          .filter(([, v]) => (Array.isArray(v) ? v.length : v))
+                          .flatMap(([k, v]) => {
+                            const paths = (Array.isArray(v) ? v : [v]).filter(Boolean);
+                            return paths.map((p, i) => {
+                              const st = docStatus[p];
+                              return (
+                                <tr key={`${k}-${i}`} title={p}>
+                                  <td style={{ whiteSpace: 'nowrap' }}>
+                                    {i === 0
+                                      ? <span className="pill pill-purple">{k.toUpperCase()}</span>
+                                      : <span className="text-muted" style={{ paddingLeft: 6 }}>↳</span>}
+                                  </td>
+                                  <td>
+                                    <span className="artifact-icon" style={{ marginRight: 6 }}>📄</span>
+                                    <span>{docBaseName(p)}</span>
+                                  </td>
+                                  <td style={{ whiteSpace: 'nowrap' }}>
+                                    {st === 'found' && <StatusBadge tone="success">존재</StatusBadge>}
+                                    {st === 'not_found' && <StatusBadge tone="danger">없음</StatusBadge>}
+                                    {st === 'unknown' && <StatusBadge tone="neutral">미확인</StatusBadge>}
+                                    {!st && <span className="text-muted text-sm">–</span>}
+                                  </td>
+                                </tr>
+                              );
+                            });
+                          })}
+                      </tbody>
+                    </table>
                   </div>
                 </div>
               )}

@@ -33,15 +33,25 @@ function ToastProvider({ children }) {
 }
 
 function ToastItem({ toast, onClose, icons }) {
+  // exit 애니메이션(0.2s)을 위해 제거 전 leaving 단계를 둔다 — 자동 소멸·수동 닫기 공통.
+  const [leaving, setLeaving] = useState(false);
+  const beginClose = useCallback(() => setLeaving(true), []);
+  // 자동 소멸 타이머 — duration 후 exit 시작(beginClose는 안정 참조라 재설정 없음).
   useEffect(() => {
-    const timer = setTimeout(onClose, toast.duration || 3500);
+    const timer = setTimeout(beginClose, toast.duration || 3500);
     return () => clearTimeout(timer);
-  }, [onClose, toast.duration]);
+  }, [beginClose, toast.duration]);
+  // leaving 진입 시 애니메이션 길이(200ms)만큼 대기 후 부모에서 실제 제거.
+  useEffect(() => {
+    if (!leaving) return undefined;
+    const t = setTimeout(onClose, 200);
+    return () => clearTimeout(t);
+  }, [leaving, onClose]);
   return (
-    <div className={`toast-item toast-${toast.type || 'info'}`} role="alert">
+    <div className={`toast-item toast-${toast.type || 'info'}${leaving ? ' toast-leaving' : ''}`} role="alert">
       <span className="toast-icon">{icons[toast.type] || icons.info}</span>
       <span className="toast-text">{toast.message}</span>
-      <button className="toast-close" onClick={onClose} aria-label="닫기">×</button>
+      <button className="toast-close" onClick={beginClose} aria-label="닫기">×</button>
     </div>
   );
 }

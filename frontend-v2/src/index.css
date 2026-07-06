@@ -846,6 +846,73 @@ label {
   flex-shrink: 0;
 }
 
+/* ── Motion (기능적 애니메이션 — 상태·피드백 전달 전용) ──────────────────
+   원칙: 장식이 아니라 "진행 중 / 값 변경 / 완결"을 전달한다.
+   모든 애니메이션은 하단 prefers-reduced-motion 블록에서 사실상 무효화된다
+   (접근성·멀미 방지 — ISO 26262 도구 필수). */
+
+/* (1) 진행 중 "살아있음" pulse — 현재 실행 단계/세그먼트/러닝 상태.
+   해당 클래스가 렌더되는 곳이면 JS 배선 없이 자동 적용. */
+@keyframes aria-pulse-live {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.55; }
+}
+.pipeline-step.step-active,
+.sync-segment.seg-active,
+.pill-running {
+  animation: aria-pulse-live 1.4s ease-in-out infinite;
+}
+
+/* (2) 불확정 진행바 — 완료시간 미상(빌드 중)일 때 .progress-bar에 .indeterminate 부여.
+   opt-in 유틸(현재 소비처 없음 — 긴 작업 progress 도입 시 클래스만 추가하면 동작). */
+@keyframes aria-progress-indeterminate {
+  from { background-position: 0 0; }
+  to   { background-position: 32px 0; }
+}
+.progress-bar.indeterminate .progress-fill,
+.progress-fill.indeterminate {
+  width: 100%;
+  background-color: var(--accent-soft);
+  background-image: repeating-linear-gradient(
+    -45deg,
+    var(--accent) 0, var(--accent) 8px,
+    transparent 8px, transparent 16px
+  );
+  background-size: 32px 32px;
+  animation: aria-progress-indeterminate 0.8s linear infinite;
+}
+
+/* (3) 값 변경 하이라이트 flash — 갱신된 숫자/셀에 .value-flash 부여.
+   마운트·key 변경 시 1회 재생(장기 무한 애니메이션 아님). */
+@keyframes aria-value-flash {
+  from { background-color: var(--highlight); }
+  to   { background-color: transparent; }
+}
+.value-flash {
+  animation: aria-value-flash 1.2s ease-out;
+  border-radius: var(--radius-sm);
+}
+
+/* (4) 토스트 exit fade-out — enter(toast-in)와 대칭. ToastItem이 닫힐 때 .toast-leaving 부여. */
+@keyframes toast-out {
+  from { opacity: 1; transform: translateY(0); }
+  to   { opacity: 0; transform: translateY(8px); }
+}
+.toast-item.toast-leaving {
+  animation: toast-out 0.2s ease forwards;
+  pointer-events: none;
+}
+
+/* 🔒 reduced-motion: 전 애니메이션/트랜지션 사실상 무효화 (접근성·멀미 방지). */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
 /* ── Scrollbar ── */
 ::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }
