@@ -212,7 +212,7 @@ export default function ScmSection({ job, analysisResult }) {
                                     <span>{docBaseName(p)}</span>
                                   </td>
                                   <td style={{ whiteSpace: 'nowrap' }}>
-                                    {st === 'found' && <StatusBadge tone="success">존재</StatusBadge>}
+                                    {st === 'found' && <StatusBadge tone="success">유효</StatusBadge>}
                                     {st === 'not_found' && <StatusBadge tone="danger">없음</StatusBadge>}
                                     {st === 'unknown' && <StatusBadge tone="neutral">미확인</StatusBadge>}
                                     {!st && <span className="text-muted text-sm">–</span>}

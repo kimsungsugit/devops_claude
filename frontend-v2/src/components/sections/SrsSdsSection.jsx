@@ -3049,6 +3049,8 @@ function CallTreeNode({ node, path, expanded, onToggle, depth, includeExternal }
   // (과거 `depth===0 || has`는 루트를 항상 열림 고정 → ▾ 셰브론 클릭이 무반응인 dead affordance였음)
   const isOpen = expanded.has(path) !== (depth === 0);
   const asil = node?.asil ? String(node.asil).toUpperCase() : '';
+  const isRoot = depth === 0;
+  const [hover, setHover] = useState(false);
   return (
     <li style={{ listStyle: 'none' }}>
       <div
@@ -3057,44 +3059,50 @@ function CallTreeNode({ node, path, expanded, onToggle, depth, includeExternal }
         aria-expanded={hasChildren ? isOpen : undefined}
         onClick={hasChildren ? () => onToggle(path) : undefined}
         onKeyDown={hasChildren ? (e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onToggle(path); } }) : undefined}
+        onMouseEnter={() => setHover(true)}
+        onMouseLeave={() => setHover(false)}
         title={node?.file || ''}
-        style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '2px 6px', fontSize: 11,
-          cursor: hasChildren ? 'pointer' : 'default', borderRadius: 4 }}
+        style={{ display: 'flex', alignItems: 'center', gap: 7, padding: '4px 8px', fontSize: 13, lineHeight: 1.5,
+          cursor: hasChildren ? 'pointer' : 'default', borderRadius: 5,
+          background: isRoot ? 'var(--bg-elevated)' : (hover ? 'var(--bg-elevated)' : 'transparent'),
+          boxShadow: isRoot ? 'inset 3px 0 0 var(--accent)' : 'none', transition: 'background 0.08s' }}
       >
-        <span style={{ fontFamily: 'monospace', width: 12, display: 'inline-block', color: 'var(--text-muted)' }}>
+        <span style={{ fontFamily: 'monospace', width: 14, flex: '0 0 auto', textAlign: 'center', fontSize: 12,
+          color: hasChildren ? 'var(--accent)' : 'var(--text-muted)' }}>
           {hasChildren ? (isOpen ? '▾' : '▸') : '·'}
         </span>
-        <strong style={{ fontFamily: 'monospace' }}>{node?.name}</strong>
+        <strong style={{ fontFamily: 'monospace', fontSize: isRoot ? 14 : 13, fontWeight: isRoot ? 700 : 600,
+          color: isRoot ? _STAGE_COLORS.UDS : 'var(--fg)' }}>{node?.name}</strong>
         {node?.via_ref && (
-          <span style={{ fontSize: 9, padding: '0 5px', borderRadius: 8, fontWeight: 600, color: '#7c3aed', border: '1px dashed #7c3aed' }}
+          <span style={{ fontSize: 10, padding: '1px 6px', borderRadius: 8, fontWeight: 600, color: '#7c3aed', border: '1px dashed #7c3aed' }}
             title="직접 호출이 아니라 함수포인터 참조(&함수 / 대입 / 인자 전달)로 추론된 엣지 — 실제 호출은 런타임에 포인터로 이뤄짐">↪ 참조</span>
         )}
         {asil && (
-          <span style={{ fontSize: 9, padding: '0 5px', borderRadius: 8, fontWeight: 700, color: '#fff',
+          <span style={{ fontSize: 10, padding: '1px 6px', borderRadius: 8, fontWeight: 700, color: '#fff',
             background: _ASIL_COLORS[asil] || '#6b7280' }}>ASIL {asil}</span>
         )}
         {Array.isArray(node?.indirect) && node.indirect.length > 0 && (
-          <span style={{ fontSize: 9, padding: '0 5px', borderRadius: 8, fontWeight: 700, color: '#fff', background: '#ea580c' }}
+          <span style={{ fontSize: 10, padding: '1px 6px', borderRadius: 8, fontWeight: 700, color: '#fff', background: '#ea580c' }}
             title={`함수포인터/디스패치 등 대상을 정적으로 못 잇는 간접 호출이 이 함수 본문에 있습니다(트리에 자식으로 안 나타남):\n· ${node.indirect.join('\n· ')}`}>
             ⚡ 간접호출 {node.indirect.length}
           </span>
         )}
-        {node?.cycle && <span style={{ fontSize: 9, color: '#d97706' }} title="재귀/순환 호출 — 더 펼치지 않음">↻ 순환</span>}
-        {node?.truncated && <span style={{ fontSize: 9, color: 'var(--text-muted)' }} title="최대 깊이 도달 — 더 펼치지 않음">… 깊이제한</span>}
+        {node?.cycle && <span style={{ fontSize: 10, color: '#d97706', fontWeight: 600 }} title="재귀/순환 호출 — 더 펼치지 않음">↻ 순환</span>}
+        {node?.truncated && <span style={{ fontSize: 10, color: 'var(--text-muted)' }} title="최대 깊이 도달 — 더 펼치지 않음">… 깊이제한</span>}
         {node?.signature && (
-          <code style={{ fontSize: 9, color: 'var(--text-muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 320 }}>
+          <code style={{ fontSize: 11, color: 'var(--text-muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 340 }}>
             {node.signature}
           </code>
         )}
       </div>
       {isOpen && hasChildren && (
-        <ul style={{ margin: 0, paddingLeft: 18, borderLeft: '1px dashed var(--border)' }}>
+        <ul style={{ margin: 0, paddingLeft: 20, marginLeft: 8, borderLeft: '1px solid var(--border)' }}>
           {children.map((c, i) => (
             <CallTreeNode key={`${path}.${i}`} node={c} path={`${path}.${i}`}
               expanded={expanded} onToggle={onToggle} depth={depth + 1} includeExternal={includeExternal} />
           ))}
           {externals.map((e, i) => (
-            <li key={`ext-${path}-${i}`} style={{ listStyle: 'none', padding: '2px 6px', fontSize: 10, color: 'var(--text-muted)' }}>
+            <li key={`ext-${path}-${i}`} style={{ listStyle: 'none', padding: '3px 8px', fontSize: 11, color: 'var(--text-muted)' }}>
               <span style={{ fontFamily: 'monospace' }}>{e?.name}</span>{' '}
               <em>[{e?.header || '?'} | {e?.library || '?'}]</em>
             </li>
@@ -3500,43 +3508,46 @@ function InlineCallTree({ fn, job, cacheRoot, buildSelector, sourceRoot, onOpenF
   const sortedTrees = useMemo(() => _ctSortRoots(trees, st.reverse), [trees, st.reverse]);
 
   return (
-    <div style={{ marginTop: 10, border: '1px solid var(--accent)', borderRadius: 6, background: 'var(--bg)', overflow: 'hidden' }}>
-      <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8, padding: '6px 10px', borderBottom: '1px solid var(--border)' }}>
-        <span style={{ fontSize: 11, fontWeight: 700 }}>콜트리</span>
-        <code style={{ fontSize: 11, fontFamily: 'monospace', fontWeight: 700, color: _STAGE_COLORS.UDS }}>{bare}</code>
-        <div style={{ display: 'inline-flex', border: '1px solid var(--border)', borderRadius: 4, overflow: 'hidden' }}>
+    <div style={{ marginTop: 12, border: '1px solid var(--accent)', borderRadius: 8, background: 'var(--panel)',
+      overflow: 'hidden', boxShadow: '0 2px 10px rgba(0,0,0,0.07)' }}>
+      <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 10, padding: '8px 12px',
+        borderBottom: '1px solid var(--border)', background: 'var(--bg-elevated)' }}>
+        <span style={{ fontSize: 13, fontWeight: 700 }}>콜트리</span>
+        <code style={{ fontSize: 13, fontFamily: 'monospace', fontWeight: 700, color: _STAGE_COLORS.UDS,
+          background: 'var(--bg)', padding: '2px 9px', borderRadius: 6, border: '1px solid var(--border)' }}>{bare}</code>
+        <div style={{ display: 'inline-flex', border: '1px solid var(--border)', borderRadius: 6, overflow: 'hidden' }}>
           {[['callee', '호출 →'], ['caller', '← 역호출']].map(([v, label]) => (
             <button key={v} type="button" onClick={() => setDirection(v)}
               title={v === 'callee' ? '이 함수가 호출하는 하위 함수(callee, 하향)' : '이 함수를 호출하는 함수(caller, 상향 — 영향분석)'}
-              style={{ fontSize: 10, padding: '2px 8px', border: 'none', cursor: 'pointer', fontWeight: direction === v ? 700 : 400,
-                background: direction === v ? 'var(--accent)' : 'var(--bg)', color: direction === v ? '#fff' : 'var(--fg)' }}>{label}</button>
+              style={{ fontSize: 11, padding: '4px 12px', border: 'none', cursor: 'pointer', fontWeight: direction === v ? 700 : 500,
+                background: direction === v ? 'var(--accent)' : 'transparent', color: direction === v ? '#fff' : 'var(--fg)' }}>{label}</button>
           ))}
         </div>
-        {loading && <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>분석 중…</span>}
+        {loading && <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>분석 중…</span>}
         {!loading && data && (
-          <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>
+          <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
             엔진 {st.engine || '?'} · 함수 {st.functions ?? 0} · 엣지 {st.edges ?? 0}
           </span>
         )}
         <span style={{ flex: 1 }} />
         {onOpenFull && (
           <button type="button" onClick={onOpenFull} title="전체 콜트리 뷰(깊이 조절·전체 트리·양방향)로 열기"
-            style={{ fontSize: 10, padding: '2px 8px', border: '1px solid var(--border)', borderRadius: 4, background: 'var(--bg)', color: 'var(--accent)', cursor: 'pointer', fontWeight: 600 }}>⤢ 전체 뷰</button>
+            style={{ fontSize: 11, padding: '4px 10px', border: '1px solid var(--border)', borderRadius: 6, background: 'var(--bg)', color: 'var(--accent)', cursor: 'pointer', fontWeight: 600 }}>⤢ 전체 뷰</button>
         )}
         <button type="button" onClick={onClose} title="콜트리 닫기"
-          style={{ fontSize: 12, lineHeight: 1, padding: '2px 7px', border: '1px solid var(--border)', borderRadius: 4, background: 'var(--bg)', color: 'var(--fg)', cursor: 'pointer' }}>✕</button>
+          style={{ fontSize: 14, lineHeight: 1, padding: '3px 9px', border: '1px solid var(--border)', borderRadius: 6, background: 'var(--bg)', color: 'var(--fg)', cursor: 'pointer' }}>✕</button>
       </div>
-      <div style={{ padding: '6px 10px', maxHeight: 320, overflowY: 'auto' }}>
+      <div style={{ padding: '10px 12px', maxHeight: 400, overflowY: 'auto', background: 'var(--bg)' }}>
         {!hasSource ? (
-          <div style={{ fontSize: 11, color: 'var(--text-muted)', padding: '6px 2px' }}>
+          <div style={{ fontSize: 12, color: 'var(--text-muted)', padding: '8px 2px', lineHeight: 1.5 }}>
             소스가 연결되지 않아(로컬 파일 모드) 콜트리를 만들 수 없습니다 — Jenkins 빌드가 있는 환경에서 시도하세요.
           </div>
         ) : error ? (
-          <div style={{ fontSize: 11, color: '#b91c1c', padding: '6px 2px' }}>{error}</div>
+          <div style={{ fontSize: 12, color: '#b91c1c', padding: '8px 2px', lineHeight: 1.5 }}>{error}</div>
         ) : (loading && !data) ? (
-          <div style={{ fontSize: 11, color: 'var(--text-muted)', padding: '6px 2px' }}>tree-sitter로 호출 트리 분석 중…</div>
+          <div style={{ fontSize: 12, color: 'var(--text-muted)', padding: '8px 2px' }}>tree-sitter로 호출 트리 분석 중…</div>
         ) : trees.length === 0 ? (
-          <div style={{ fontSize: 11, color: 'var(--text-muted)', padding: '6px 2px' }}>
+          <div style={{ fontSize: 12, color: 'var(--text-muted)', padding: '8px 2px' }}>
             {reverse ? '이 함수를 호출하는 함수가 없습니다 (진입점·미사용).' : '이 함수가 호출하는 하위 함수가 없습니다 (leaf).'}
           </div>
         ) : (
@@ -3556,21 +3567,25 @@ function InlineCallTree({ fn, job, cacheRoot, buildSelector, sourceRoot, onOpenF
  * 호출부에서 key로 remount하여 재시드한다(그래프 컴포넌트는 initial* 를 useState 1회 시드만 하므로). */
 function InlineGraphFrame({ title, badge, onOpenFull, onClose, children }) {
   return (
-    <div style={{ marginTop: 10, border: '1px solid var(--accent)', borderRadius: 6, background: 'var(--bg)', overflow: 'hidden' }}>
-      <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8, padding: '6px 10px', borderBottom: '1px solid var(--border)' }}>
-        <span style={{ fontSize: 11, fontWeight: 700 }}>{title}</span>
+    <div style={{ marginTop: 12, border: '1px solid var(--accent)', borderRadius: 8, background: 'var(--panel)',
+      overflow: 'hidden', boxShadow: '0 2px 10px rgba(0,0,0,0.07)' }}>
+      <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 10, padding: '8px 12px',
+        borderBottom: '1px solid var(--border)', background: 'var(--bg-elevated)' }}>
+        <span style={{ fontSize: 13, fontWeight: 700 }}>{title}</span>
         {badge && (
-          <code style={{ fontSize: 11, fontFamily: 'monospace', fontWeight: 700, color: _STAGE_COLORS.UDS, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 360 }}>{badge}</code>
+          <code style={{ fontSize: 13, fontFamily: 'monospace', fontWeight: 700, color: _STAGE_COLORS.UDS,
+            background: 'var(--bg)', padding: '2px 9px', borderRadius: 6, border: '1px solid var(--border)',
+            overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 360 }}>{badge}</code>
         )}
         <span style={{ flex: 1 }} />
         {onOpenFull && (
           <button type="button" onClick={onOpenFull} title="전용 탭(더 큰 캔버스)에서 열기"
-            style={{ fontSize: 10, padding: '2px 8px', border: '1px solid var(--border)', borderRadius: 4, background: 'var(--bg)', color: 'var(--accent)', cursor: 'pointer', fontWeight: 600 }}>⤢ 전체 뷰</button>
+            style={{ fontSize: 11, padding: '4px 10px', border: '1px solid var(--border)', borderRadius: 6, background: 'var(--bg)', color: 'var(--accent)', cursor: 'pointer', fontWeight: 600 }}>⤢ 전체 뷰</button>
         )}
         <button type="button" onClick={onClose} title="닫기"
-          style={{ fontSize: 12, lineHeight: 1, padding: '2px 7px', border: '1px solid var(--border)', borderRadius: 4, background: 'var(--bg)', color: 'var(--fg)', cursor: 'pointer' }}>✕</button>
+          style={{ fontSize: 14, lineHeight: 1, padding: '3px 9px', border: '1px solid var(--border)', borderRadius: 6, background: 'var(--bg)', color: 'var(--fg)', cursor: 'pointer' }}>✕</button>
       </div>
-      <div style={{ padding: '8px 10px', maxHeight: 460, overflow: 'auto' }}>
+      <div style={{ padding: '10px 12px', maxHeight: 460, overflow: 'auto', background: 'var(--bg)' }}>
         {children}
       </div>
     </div>
