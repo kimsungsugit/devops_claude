@@ -1251,6 +1251,7 @@ function TraceMatrix({ matrix, focusFunctions = null, onClearFocus = null,
   // 표의 UDS 함수 클릭 → 함수그래프/콜트리로 이동(검색 입력 없이 바로). 탭 직접 클릭 시엔 시드 비워 첫 함수로.
   const [funcGraphSeed, setFuncGraphSeed] = useState('');
   const [callTreeSeed, setCallTreeSeed] = useState('');
+  const [inlineCtFn, setInlineCtFn] = useState('');         // 표 행 인라인 콜트리 — 현재 펼친 UDS 함수(bare name). ''=닫힘
   const [expandedTreeNodes, setExpandedTreeNodes] = useState(() => new Set()); // 트리 노드 id 집합 (다중 펼침)
   const [includeUnmapped, setIncludeUnmapped] = useState(false); // 트리: SRS 미추적 시험 별도 루트 표시 토글
 
@@ -1281,6 +1282,9 @@ function TraceMatrix({ matrix, focusFunctions = null, onClearFocus = null,
 
   // Reset page when rows change (e.g., new matrix data)
   useEffect(() => { setCurrentPage(0); setExpandedReqId(null); setExpandedTreeNodes(new Set()); }, [rows]);
+
+  // 펼친 행이 바뀌면(다른 행 열기·현재 행 접기) 인라인 콜트리도 닫는다 — 이전 행 함수의 트리가 남는 것 방지.
+  useEffect(() => { setInlineCtFn(''); }, [expandedReqId]);
 
   // 트리 펼침은 page-absolute nodeId를 쓰므로 페이지 이동엔 유지되지만, 행 집합/정렬/
   // 페이지크기가 바뀌면 절대 인덱스가 다른 행을 가리킬 수 있어(특히 anonymous 행) 초기화한다.
@@ -2153,16 +2157,21 @@ function TraceMatrix({ matrix, focusFunctions = null, onClearFocus = null,
                           <div style={{ fontWeight: 600, fontSize: 11, marginBottom: 6 }}>UDS 함수 ({srcFuncs.length})</div>
                           {srcFuncs.length > 0 ? (
                             <div style={{ maxHeight: 150, overflowY: 'auto', fontSize: 11 }}>
-                              {srcFuncs.map((fn, fi) => (
+                              {srcFuncs.map((fn, fi) => {
+                                const bareFn = String(fn).split(/[\s(]/)[0].trim();
+                                const ctOpen = inlineCtFn === bareFn;
+                                return (
                                 <div key={fi} style={{ padding: '2px 0', display: 'flex', alignItems: 'center', gap: 6, borderBottom: '1px solid #e5e7eb' }}>
                                   <button type="button" onClick={(e) => { e.stopPropagation(); gotoFuncView(fn, 'funcgraph'); }}
                                     title="클릭 → 이 함수의 V-model 추적 그래프(함수그래프)로 이동"
                                     style={{ flex: 1, minWidth: 0, textAlign: 'left', fontFamily: 'monospace', fontSize: 11, padding: '1px 2px', border: 'none', background: 'none', cursor: 'pointer', color: _STAGE_COLORS.UDS, textDecoration: 'underline', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{fn}</button>
-                                  <button type="button" onClick={(e) => { e.stopPropagation(); gotoFuncView(fn, 'calltree'); }}
-                                    title="이 함수의 호출 트리(콜트리)로 이동"
-                                    style={{ flexShrink: 0, fontSize: 9, padding: '1px 5px', border: '1px solid var(--border)', borderRadius: 4, background: 'var(--bg)', cursor: 'pointer', color: 'var(--fg)', fontWeight: 600 }}>콜트리</button>
+                                  <button type="button" onClick={(e) => { e.stopPropagation(); setInlineCtFn(prev => prev === bareFn ? '' : bareFn); }}
+                                    aria-pressed={ctOpen}
+                                    title="이 함수의 호출 트리(콜트리)를 이 자리에서 바로 펼침 — 호출/역호출 방향 전환 가능 (다시 누르면 닫힘)"
+                                    style={{ flexShrink: 0, fontSize: 9, padding: '1px 5px', border: `1px solid ${ctOpen ? 'var(--accent)' : 'var(--border)'}`, borderRadius: 4, background: ctOpen ? 'var(--accent)' : 'var(--bg)', cursor: 'pointer', color: ctOpen ? '#fff' : 'var(--fg)', fontWeight: 600 }}>콜트리 {ctOpen ? '▴' : '▾'}</button>
                                 </div>
-                              ))}
+                                );
+                              })}
                             </div>
                           ) : <div className="text-muted text-sm">매핑된 함수 없음</div>}
                         </div>
@@ -2223,6 +2232,13 @@ function TraceMatrix({ matrix, focusFunctions = null, onClearFocus = null,
                           T1: SDS → {sdsComps.length}{'\uAC1C \uCEF4\uD3EC\uB10C\uD2B8'} | T2: UDS → {srcFuncs.length}{'\uAC1C \uD568\uC218'} | T3: STS → {stsCount} TC ({'\uC9C1\uC811'}) | T4: SUTS → {r.suts_direct || 0} {'\uC9C1\uC811'} + {r.suts_indirect || 0} {'\uACBD\uC720'} | T5: SITS → {r.sits_direct || 0} {'\uC9C1\uC811'} + {r.sits_indirect || 0} {'\uACBD\uC720'}
                         </div>
                       </div>
+                      {/* 인라인 콜트리 — 표 행 UDS '콜트리' 클릭 시 탭 전환 없이 이 자리에서 표시 (호출/역호출 토글 내장) */}
+                      {inlineCtFn && srcFuncs.some(f => String(f).split(/[\s(]/)[0].trim() === inlineCtFn) ? (
+                        <InlineCallTree fn={inlineCtFn} job={job} cacheRoot={cacheRoot} buildSelector={buildSelector}
+                          sourceRoot={sourceRoot}
+                          onOpenFull={() => gotoFuncView(inlineCtFn, 'calltree')}
+                          onClose={() => setInlineCtFn('')} />
+                      ) : null}
                     </td>
                   </tr>
                 )}
@@ -3378,6 +3394,119 @@ function CallTreeView({ job, cacheRoot, buildSelector, sourceRoot, seedFns, toas
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+/* ── 인라인 콜트리 (표 행 펼침 내부 — 탭 전환 없이 UDS 함수의 호출 트리를 그 자리에서 표시) ──
+ * CallTreeView(탭 전용)의 축약판: 진입 함수 1개 고정, 방향(호출/역호출) 토글, 깊이 5 고정, 외부함수 제외.
+ * 소스(job.url 또는 sourceRoot) 없으면 요청하지 않고 안내(로컬 파일모드의 doomed 404 방지).
+ * CallTreeNode·_ctSortRoots·_ctBootExpansion(모듈 SSOT) 재사용 — 렌더/정렬 규칙이 탭과 동일.
+ * loadSeq/mountedRef로 방향 연타·언마운트 시 stale setData 방지(CallTreeView와 동일 패턴).
+ * job 객체 대신 jobUrl 문자열을 deps로 써서 부모 리렌더로 인한 무한 재조회를 차단. */
+function InlineCallTree({ fn, job, cacheRoot, buildSelector, sourceRoot, onOpenFull, onClose }) {
+  const bare = String(fn || '').split(/[\s(]/)[0].trim();
+  const jobUrl = job?.url || '';
+  const hasSource = !!(jobUrl || sourceRoot);
+  const [direction, setDirection] = useState('callee');   // 'callee'(호출→) | 'caller'(←역호출)
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  const [expanded, setExpanded] = useState(() => new Set());
+  const mountedRef = useRef(true);
+  const loadSeq = useRef(0);
+  useEffect(() => { mountedRef.current = true; return () => { mountedRef.current = false; }; }, []);
+
+  const toggle = useCallback((id) => {
+    setExpanded(prev => { const n = new Set(prev); if (n.has(id)) n.delete(id); else n.add(id); return n; });
+  }, []);
+
+  const load = useCallback(async (dir) => {
+    if (!bare || !hasSource) return;
+    const rev = dir === 'caller';
+    setLoading(true); setError('');
+    const myseq = ++loadSeq.current;
+    try {
+      const res = await post('/api/jenkins/call-tree', {
+        job_url: jobUrl,
+        cache_root: cacheRoot || '.devops_pro_cache',
+        build_selector: buildSelector || 'lastSuccessfulBuild',
+        source_root: sourceRoot || '',
+        all_roots: false, reverse: rev, entry: bare,
+        max_depth: 5, include_external: false, engine: 'precise',
+      });
+      if (!mountedRef.current || myseq !== loadSeq.current) return;   // 재진입/언마운트 stale 무시
+      setData(res);
+      setExpanded(_ctBootExpansion(res?.trees, res?.stats?.reverse));
+      const miss = Array.isArray(res?.missing) ? res.missing : [];
+      if (miss.length) setError(`빌드 소스에서 '${bare}'를 찾지 못했습니다 — 함수명/소스 캐시를 확인하세요.`);
+    } catch (e) {
+      if (mountedRef.current && myseq === loadSeq.current) {
+        setError(e?.status === 404
+          ? '캐시된 빌드가 없습니다 — 먼저 Jenkins 빌드를 동기화하세요.'
+          : `콜트리 실패: ${e.message}`);
+      }
+    } finally {
+      if (mountedRef.current && myseq === loadSeq.current) setLoading(false);
+    }
+  }, [bare, hasSource, jobUrl, cacheRoot, buildSelector, sourceRoot]);
+
+  // 마운트 + 방향 변경 시 자동 로드 (사용자 클릭으로 진입했으므로 즉시 표시)
+  useEffect(() => { load(direction); }, [direction, load]);
+
+  const trees = Array.isArray(data?.trees) ? data.trees : [];
+  const st = data?.stats || {};
+  const reverse = direction === 'caller';
+  const sortedTrees = useMemo(() => _ctSortRoots(trees, st.reverse), [trees, st.reverse]);
+
+  return (
+    <div style={{ marginTop: 10, border: '1px solid var(--accent)', borderRadius: 6, background: 'var(--bg)', overflow: 'hidden' }}>
+      <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8, padding: '6px 10px', borderBottom: '1px solid var(--border)' }}>
+        <span style={{ fontSize: 11, fontWeight: 700 }}>콜트리</span>
+        <code style={{ fontSize: 11, fontFamily: 'monospace', fontWeight: 700, color: _STAGE_COLORS.UDS }}>{bare}</code>
+        <div style={{ display: 'inline-flex', border: '1px solid var(--border)', borderRadius: 4, overflow: 'hidden' }}>
+          {[['callee', '호출 →'], ['caller', '← 역호출']].map(([v, label]) => (
+            <button key={v} type="button" onClick={() => setDirection(v)}
+              title={v === 'callee' ? '이 함수가 호출하는 하위 함수(callee, 하향)' : '이 함수를 호출하는 함수(caller, 상향 — 영향분석)'}
+              style={{ fontSize: 10, padding: '2px 8px', border: 'none', cursor: 'pointer', fontWeight: direction === v ? 700 : 400,
+                background: direction === v ? 'var(--accent)' : 'var(--bg)', color: direction === v ? '#fff' : 'var(--fg)' }}>{label}</button>
+          ))}
+        </div>
+        {loading && <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>분석 중…</span>}
+        {!loading && data && (
+          <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>
+            엔진 {st.engine || '?'} · 함수 {st.functions ?? 0} · 엣지 {st.edges ?? 0}
+          </span>
+        )}
+        <span style={{ flex: 1 }} />
+        {onOpenFull && (
+          <button type="button" onClick={onOpenFull} title="전체 콜트리 뷰(깊이 조절·전체 트리·양방향)로 열기"
+            style={{ fontSize: 10, padding: '2px 8px', border: '1px solid var(--border)', borderRadius: 4, background: 'var(--bg)', color: 'var(--accent)', cursor: 'pointer', fontWeight: 600 }}>⤢ 전체 뷰</button>
+        )}
+        <button type="button" onClick={onClose} title="콜트리 닫기"
+          style={{ fontSize: 12, lineHeight: 1, padding: '2px 7px', border: '1px solid var(--border)', borderRadius: 4, background: 'var(--bg)', color: 'var(--fg)', cursor: 'pointer' }}>✕</button>
+      </div>
+      <div style={{ padding: '6px 10px', maxHeight: 320, overflowY: 'auto' }}>
+        {!hasSource ? (
+          <div style={{ fontSize: 11, color: 'var(--text-muted)', padding: '6px 2px' }}>
+            소스가 연결되지 않아(로컬 파일 모드) 콜트리를 만들 수 없습니다 — Jenkins 빌드가 있는 환경에서 시도하세요.
+          </div>
+        ) : error ? (
+          <div style={{ fontSize: 11, color: '#b91c1c', padding: '6px 2px' }}>{error}</div>
+        ) : (loading && !data) ? (
+          <div style={{ fontSize: 11, color: 'var(--text-muted)', padding: '6px 2px' }}>tree-sitter로 호출 트리 분석 중…</div>
+        ) : trees.length === 0 ? (
+          <div style={{ fontSize: 11, color: 'var(--text-muted)', padding: '6px 2px' }}>
+            {reverse ? '이 함수를 호출하는 함수가 없습니다 (진입점·미사용).' : '이 함수가 호출하는 하위 함수가 없습니다 (leaf).'}
+          </div>
+        ) : (
+          <ul style={{ margin: 0, padding: 0 }}>
+            {sortedTrees.map((t, i) => (
+              <CallTreeNode key={i} node={t} path={`${i}`} expanded={expanded} onToggle={toggle} depth={0} includeExternal={false} />
+            ))}
+          </ul>
+        )}
+      </div>
     </div>
   );
 }
