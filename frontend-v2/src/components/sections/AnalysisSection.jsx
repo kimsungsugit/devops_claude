@@ -765,6 +765,9 @@ export default function AnalysisSection({ job, analysisResult }) {
   const sumUt = effVcast.summary_ut || null;
   const sumIt = effVcast.summary_it || null;
   const utSummary = sumUt || effVcast.summary || null;
+  // 분리 summary(summary_ut)가 있으면 순수 UT, 없으면 결합값 fallback → 라벨을 정직하게.
+  // (빌드 산출물/재시작 전 캐시는 분리 필드가 없어 결합값을 'UT'로 오표기하면 안 됨.)
+  const utLabelSuffix = sumUt ? 'UT' : 'UT+IT';
   const utTcCount = effVcast.test_rows_count_ut ?? effVcast.test_rows_count ?? null;
   const itTcCount = effVcast.test_rows_count_it ?? null;
   // 실패 목록도 source(UT/IT)별 분리 — 백엔드 failures는 top-N 결합 목록이라 여기서 나눈다.
@@ -1054,7 +1057,7 @@ export default function AnalysisSection({ job, analysisResult }) {
                   <tbody>
                     {prqa.top_files.slice(0, 20).map((f, i) => (
                       <tr key={i}>
-                        <td className="text-sm" title={f.path || undefined} style={{ maxWidth: 260, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{f.file ?? f.path ?? f.name ?? '-'}</td>
+                        <td className="text-sm" title={(f.path || (f.file ? '특정 파일에 귀속되지 않은 위반 (분석 카테고리)' : undefined))} style={{ maxWidth: 260, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontStyle: f.path ? 'normal' : 'italic', color: f.path ? undefined : 'var(--text-muted)' }}>{f.file ?? f.path ?? f.name ?? '-'}</td>
                         <td style={{ textAlign: 'center', fontWeight: 600 }}>{f.count ?? f.violations ?? '-'}</td>
                         <td style={{ textAlign: 'center' }}>{f.violated_rules ?? '-'}</td>
                         <td style={{ textAlign: 'center' }}>{f.compliance_index ?? '-'}</td>
@@ -1244,11 +1247,11 @@ export default function AnalysisSection({ job, analysisResult }) {
             <div className="stats-row" style={{ marginTop: 8 }}>
               <div className="stat-card" style={{ borderLeft: '3px solid var(--color-success)' }}>
                 <div className="stat-value" style={{ color: 'var(--color-success)' }}>{(utSummary.passed ?? 0).toLocaleString()}</div>
-                <div className="stat-label">통과 (UT)</div>
+                <div className="stat-label">통과 ({utLabelSuffix})</div>
               </div>
               <div className="stat-card" style={{ borderLeft: `3px solid ${(utSummary.failed ?? 0) > 0 ? 'var(--color-danger)' : 'var(--color-success)'}` }}>
                 <div className="stat-value" style={{ color: (utSummary.failed ?? 0) > 0 ? 'var(--color-danger)' : 'var(--color-success)' }}>{(utSummary.failed ?? 0).toLocaleString()}</div>
-                <div className="stat-label">실패 (UT)</div>
+                <div className="stat-label">실패 ({utLabelSuffix})</div>
               </div>
               {(utSummary.skipped ?? 0) > 0 && (
                 <div className="stat-card"><div className="stat-value">{utSummary.skipped.toLocaleString()}</div><div className="stat-label">스킵</div></div>
@@ -1256,7 +1259,7 @@ export default function AnalysisSection({ job, analysisResult }) {
               {utSummary.pass_rate != null && (
                 <div className="stat-card" style={{ borderLeft: `3px solid ${utSummary.pass_rate >= 0.95 ? 'var(--color-success)' : 'var(--color-warning)'}` }}>
                   <div className="stat-value" style={{ color: utSummary.pass_rate >= 0.95 ? 'var(--color-success)' : 'var(--color-warning)' }}>{Math.round(utSummary.pass_rate * 100)}%</div>
-                  <div className="stat-label">통과율 (UT)</div>
+                  <div className="stat-label">통과율 ({utLabelSuffix})</div>
                 </div>
               )}
             </div>
@@ -1273,7 +1276,7 @@ export default function AnalysisSection({ job, analysisResult }) {
         {utFailures.length > 0 && (
           <details style={{ marginTop: 8 }}>
             <summary style={{ cursor: 'pointer', fontSize: 12, fontWeight: 600, color: 'var(--color-danger)' }}>
-              실패 테스트케이스 ({utFailures.length}건, UT)
+              실패 테스트케이스 ({utFailures.length}건, {utLabelSuffix})
             </summary>
             <div style={{ maxHeight: 250, overflowY: 'auto', marginTop: 6 }}>
               <table className="impact-table" style={{ fontSize: 10 }}>
