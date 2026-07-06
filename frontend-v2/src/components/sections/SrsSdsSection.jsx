@@ -3072,7 +3072,7 @@ function CallTreeNode({ node, path, expanded, onToggle, depth, includeExternal }
           {hasChildren ? (isOpen ? '▾' : '▸') : '·'}
         </span>
         <strong style={{ fontFamily: 'monospace', fontSize: isRoot ? 14 : 13, fontWeight: isRoot ? 700 : 600,
-          color: isRoot ? 'var(--accent)' : 'var(--fg)' }}>{node?.name}</strong>
+          color: isRoot ? _STAGE_COLORS.UDS : 'var(--fg)' }}>{node?.name}</strong>
         {node?.via_ref && (
           <span style={{ fontSize: 10, padding: '1px 6px', borderRadius: 8, fontWeight: 600, color: '#7c3aed', border: '1px dashed #7c3aed' }}
             title="직접 호출이 아니라 함수포인터 참조(&함수 / 대입 / 인자 전달)로 추론된 엣지 — 실제 호출은 런타임에 포인터로 이뤄짐">↪ 참조</span>
@@ -3088,7 +3088,7 @@ function CallTreeNode({ node, path, expanded, onToggle, depth, includeExternal }
           </span>
         )}
         {node?.cycle && <span style={{ fontSize: 10, color: '#d97706', fontWeight: 600 }} title="재귀/순환 호출 — 더 펼치지 않음">↻ 순환</span>}
-        {node?.truncated && <span style={{ fontSize: 10, color: 'var(--text-muted)' }} title="최대 깊이 도달 — 더 펼치지 않음">… 깊이제한</span>}
+        {node?.truncated && <span style={{ fontSize: 10, color: '#d97706', fontWeight: 600 }} title="설정한 최대 깊이에 도달해 이 아래 호출은 생략됨 — 헤더의 '깊이'를 높이면 더 깊이까지 표시됩니다.">… 깊이제한</span>}
         {node?.signature && (
           <code style={{ fontSize: 11, color: 'var(--text-muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 340 }}>
             {node.signature}
@@ -3148,6 +3148,20 @@ function _ctBootExpansion(trees, reverse = false) {
     const kids = Array.isArray(t?.calls) ? t.calls : [];
     kids.forEach((_, ci) => set.add(`${ri}.${ci}`));
   });
+  return set;
+}
+
+// 모두 펼치기 — 로드된 트리의 모든 자식(비루트, 자식 보유) path를 펼침 집합에 담는다.
+// isOpen 규칙(루트=기본열림, 비루트=기본닫힘)상 비루트 자식 path만 넣으면 전 노드가 열린다.
+// 반드시 렌더와 동일한 sortedTrees를 넘겨야 path index가 정합(자식은 node.calls 원순서라 CallTreeNode와 동일).
+function _ctAllExpandedPaths(trees) {
+  const set = new Set();
+  const walk = (node, path, depth) => {
+    const kids = Array.isArray(node?.calls) ? node.calls : [];
+    if (depth > 0 && kids.length) set.add(path);
+    kids.forEach((c, i) => walk(c, `${path}.${i}`, depth + 1));
+  };
+  (Array.isArray(trees) ? trees : []).forEach((t, i) => walk(t, `${i}`, 0));
   return set;
 }
 
@@ -3447,7 +3461,7 @@ function CallTreeView({ job, cacheRoot, buildSelector, sourceRoot, seedFns, toas
 }
 
 /* ── 인라인 콜트리 (표 행 펼침 내부 — 탭 전환 없이 UDS 함수의 호출 트리를 그 자리에서 표시) ──
- * CallTreeView(탭 전용)의 축약판: 진입 함수 1개 고정, 방향(호출/역호출) 토글, 깊이 5 고정, 외부함수 제외.
+ * CallTreeView(탭 전용)의 축약판: 진입 함수 1개 고정, 방향(호출/역호출) 토글, 깊이 조절(기본 8·최대 20)·모두 펼치기, 외부함수 제외.
  * 소스(job.url 또는 sourceRoot) 없으면 요청하지 않고 안내(로컬 파일모드의 doomed 404 방지).
  * CallTreeNode·_ctSortRoots·_ctBootExpansion(모듈 SSOT) 재사용 — 렌더/정렬 규칙이 탭과 동일.
  * loadSeq/mountedRef로 방향 연타·언마운트 시 stale setData 방지(CallTreeView와 동일 패턴).
@@ -3461,6 +3475,8 @@ function InlineCallTree({ fn, job, cacheRoot, buildSelector, sourceRoot, onOpenF
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [expanded, setExpanded] = useState(() => new Set());
+  const [depth, setDepth] = useState(8);                  // 호출 트리 최대 깊이(1~20) — '다 표시' 위해 조절 가능
+  const [allOpen, setAllOpen] = useState(false);          // 모두 펼치기 상태(로드된 노드 전체 펼침/접기)
   const mountedRef = useRef(true);
   const loadSeq = useRef(0);
   useEffect(() => { mountedRef.current = true; return () => { mountedRef.current = false; }; }, []);
@@ -3481,11 +3497,12 @@ function InlineCallTree({ fn, job, cacheRoot, buildSelector, sourceRoot, onOpenF
         build_selector: buildSelector || 'lastSuccessfulBuild',
         source_root: sourceRoot || '',
         all_roots: false, reverse: rev, entry: bare,
-        max_depth: 5, include_external: false, engine: 'precise',
+        max_depth: depth, include_external: false, engine: 'precise',
       });
       if (!mountedRef.current || myseq !== loadSeq.current) return;   // 재진입/언마운트 stale 무시
       setData(res);
       setExpanded(_ctBootExpansion(res?.trees, res?.stats?.reverse));
+      setAllOpen(false);   // 새 데이터 로드 시 펼침 상태 초기화(깊이/방향 변경 후 일관)
       const miss = Array.isArray(res?.missing) ? res.missing : [];
       if (miss.length) setError(`빌드 소스에서 '${bare}'를 찾지 못했습니다 — 함수명/소스 캐시를 확인하세요.`);
     } catch (e) {
@@ -3497,9 +3514,9 @@ function InlineCallTree({ fn, job, cacheRoot, buildSelector, sourceRoot, onOpenF
     } finally {
       if (mountedRef.current && myseq === loadSeq.current) setLoading(false);
     }
-  }, [bare, hasSource, jobUrl, cacheRoot, buildSelector, sourceRoot]);
+  }, [bare, hasSource, jobUrl, cacheRoot, buildSelector, sourceRoot, depth]);
 
-  // 마운트 + 방향 변경 시 자동 로드 (사용자 클릭으로 진입했으므로 즉시 표시)
+  // 마운트 + 방향/깊이 변경 시 자동 로드 (load가 depth를 deps로 물어 깊이 변경 시 재조회)
   useEffect(() => { load(direction); }, [direction, load]);
 
   const trees = Array.isArray(data?.trees) ? data.trees : [];
@@ -3507,13 +3524,20 @@ function InlineCallTree({ fn, job, cacheRoot, buildSelector, sourceRoot, onOpenF
   const reverse = direction === 'caller';
   const sortedTrees = useMemo(() => _ctSortRoots(trees, st.reverse), [trees, st.reverse]);
 
+  // 모두 펼치기/접기 — 클라이언트 측(재조회 없음). 펼침=로드된 전 노드 path, 접기=기본(boot) 펼침.
+  const toggleAllOpen = () => {
+    const next = !allOpen;
+    setAllOpen(next);
+    setExpanded(next ? _ctAllExpandedPaths(sortedTrees) : _ctBootExpansion(trees, st.reverse));
+  };
+
   return (
     <div style={{ marginTop: 12, border: '1px solid var(--accent)', borderRadius: 8, background: 'var(--panel)',
       overflow: 'hidden', boxShadow: '0 2px 10px rgba(0,0,0,0.07)' }}>
       <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 10, padding: '8px 12px',
         borderBottom: '1px solid var(--border)', background: 'var(--bg-elevated)' }}>
         <span style={{ fontSize: 13, fontWeight: 700 }}>콜트리</span>
-        <code style={{ fontSize: 13, fontFamily: 'monospace', fontWeight: 700, color: 'var(--accent)',
+        <code style={{ fontSize: 13, fontFamily: 'monospace', fontWeight: 700, color: _STAGE_COLORS.UDS,
           background: 'var(--bg)', padding: '2px 9px', borderRadius: 6, border: '1px solid var(--border)' }}>{bare}</code>
         <div style={{ display: 'inline-flex', border: '1px solid var(--border)', borderRadius: 6, overflow: 'hidden' }}>
           {[['callee', '호출 →'], ['caller', '← 역호출']].map(([v, label]) => (
@@ -3523,6 +3547,20 @@ function InlineCallTree({ fn, job, cacheRoot, buildSelector, sourceRoot, onOpenF
                 background: direction === v ? 'var(--accent)' : 'transparent', color: direction === v ? '#fff' : 'var(--fg)' }}>{label}</button>
           ))}
         </div>
+        <label style={{ fontSize: 11, display: 'inline-flex', alignItems: 'center', gap: 4, color: 'var(--text-muted)' }}
+          title="호출 트리 최대 깊이 (1~20) — 높일수록 더 깊은 호출까지 표시. '… 깊이제한' 배지는 이 깊이에서 잘렸다는 표시입니다.">
+          깊이
+          <input type="number" min={1} max={20} value={depth}
+            onChange={e => setDepth(Math.min(20, Math.max(1, Number(e.target.value) || 1)))}
+            style={{ width: 46, padding: '3px 5px', fontSize: 11, border: '1px solid var(--border)', borderRadius: 4, background: 'var(--bg)', color: 'var(--fg)' }} />
+        </label>
+        {trees.length > 0 && (
+          <button type="button" onClick={toggleAllOpen}
+            title={allOpen ? '모든 하위 노드 접기' : '로드된 모든 하위 노드를 한 번에 펼치기'}
+            style={{ fontSize: 11, padding: '4px 10px', border: '1px solid var(--border)', borderRadius: 6, background: 'var(--bg)', color: 'var(--fg)', cursor: 'pointer' }}>
+            {allOpen ? '모두 접기' : '모두 펼치기'}
+          </button>
+        )}
         {loading && <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>분석 중…</span>}
         {!loading && data && (
           <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
@@ -3573,7 +3611,7 @@ function InlineGraphFrame({ title, badge, onOpenFull, onClose, children }) {
         borderBottom: '1px solid var(--border)', background: 'var(--bg-elevated)' }}>
         <span style={{ fontSize: 13, fontWeight: 700 }}>{title}</span>
         {badge && (
-          <code style={{ fontSize: 13, fontFamily: 'monospace', fontWeight: 700, color: 'var(--accent)',
+          <code style={{ fontSize: 13, fontFamily: 'monospace', fontWeight: 700, color: _STAGE_COLORS.UDS,
             background: 'var(--bg)', padding: '2px 9px', borderRadius: 6, border: '1px solid var(--border)',
             overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 360 }}>{badge}</code>
         )}
