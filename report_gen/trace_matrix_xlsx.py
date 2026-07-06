@@ -67,6 +67,20 @@ def _test_id(t: Any) -> str:
     return ""
 
 
+def _req_class(rid: Any) -> str:
+    """요구사항 유형 — 프론트 _reqClass(SrsSdsSection.jsx)와 동일 SSOT.
+
+    nonfunctional(SwNTR/SwNTSR): 시험으로 직접 검증 → UDS/SITS 구조적 불요.
+    interface(SwEI/SwEIF): SDS→HSIS 실현·SyITS 검증 → SITS 구조적 불요.
+    """
+    s = str(rid or "").upper()
+    if any(s.startswith(p) for p in ("SWNTR", "SWNTSR", "SYNTR", "SYNTSR")):
+        return "nonfunctional"
+    if any(s.startswith(p) for p in ("SWEI", "SWEIF", "SYEI", "SYEIF")):
+        return "interface"
+    return "functional"
+
+
 def _row_bands(row: Dict[str, Any]) -> Dict[str, List[str]]:
     """행에서 밴드별 related_id 목록 — build_link_table/CrossMatrixView와 동일 규칙."""
     def tids(arr: Any) -> List[str]:
@@ -414,6 +428,99 @@ def build_trace_xlsx(matrix: Any, meta: Optional[Dict[str, Any]] = None) -> byte
                     rr4 += 1
         for ci, w in enumerate((20, 40, 20, 14, 14), 1):
             ws4.column_dimensions[get_column_letter(ci)].width = w
+
+    # ── 시트 5: 추적성 갭 finding (진짜 문서/설계 완전성 갭 — 조치 대상) ──
+    # 매칭 로직은 정확하나 문서/설계에 실제로 없는 갭만 추려 문서 작성자용 행동가능 리스트로 제공.
+    # 대체검증(비기능→SyTS/STS·인터페이스→HSIS/SyITS)된 항목은 프론트 gapStats와 동일 규칙으로 제외.
+    umv = inner.get("unmapped_vcast") if isinstance(inner, dict) else None
+    umv = [u for u in umv if isinstance(u, dict)] if isinstance(umv, list) else []
+    sits_gap: List[Dict[str, str]] = []
+    uds_gap: List[Dict[str, str]] = []
+    for b in built:
+        rid = b["rid"]
+        bands = b["bands"]
+        cls = _req_class(rid)
+        verified = ", ".join(k for k in ("STS", "SUTS", "SITS", "SyTS", "SyITS", "VectorCAST") if bands.get(k)) or "없음"
+        if bands.get("SDS") and not bands.get("SITS"):
+            alt = (cls == "nonfunctional" and (bands.get("SyTS") or bands.get("STS"))) \
+                or (cls == "interface" and (bands.get("HSIS") or bands.get("SyITS")))
+            if not alt:
+                sits_gap.append({"rid": rid, "cls": cls, "verified": verified})
+        if bands.get("SDS") and not bands.get("UDS") and not bands.get("HSIS"):
+            has_test = any(bands.get(k) for k in ("STS", "SUTS", "SITS", "SyTS", "SyITS", "VectorCAST"))
+            if not (cls == "nonfunctional" and has_test):
+                uds_gap.append({"rid": rid, "cls": cls, "verified": verified})
+    app_leaf = [u for u in umv if str(u.get("layer")) == "APP_LEAF"]
+    app_leaf.sort(key=lambda u: (0 if u.get("safety") else 1, str(u.get("subprogram") or "")))
+    suspect: List[tuple] = []
+    if isinstance(integ, dict):
+        for band, lst in (integ.get("dangling_refs") or {}).items():
+            for d in (lst if isinstance(lst, list) else []):
+                if isinstance(d, dict) and d.get("severity") == "suspect":
+                    suspect.append((band, d.get("ref_id"), d.get("namespace")))
+
+    ws5 = wb.create_sheet("추적성 갭 finding")
+    r5 = 1
+    ws5.cell(r5, 1, "추적성 갭 finding (진짜 문서/설계 완전성 갭 — 조치 대상)").font = Font(bold=True, size=13)
+    r5 += 2
+    ws5.cell(r5, 1, "매칭 로직은 정확하며 아래는 문서/설계에 실제로 없어 조치가 필요한 갭입니다. "
+                    "대체검증(비기능→SyTS/STS·인터페이스→HSIS/SyITS)된 항목은 제외했습니다.").font = Font(size=10)
+    r5 += 2
+
+    def _section(title: str, headers: tuple, data_rows: list, widths: tuple) -> None:
+        nonlocal r5
+        ws5.cell(r5, 1, title).font = Font(bold=True, size=11)
+        r5 += 1
+        for ci, h in enumerate(headers, 1):
+            c = ws5.cell(r5, ci, h)
+            c.font = bold
+            c.fill = header_fill
+        r5 += 1
+        if not data_rows:
+            ws5.cell(r5, 1, "— 해당 없음 —")
+            r5 += 2
+            return
+        for row_vals, amber in data_rows:
+            if r5 >= _MAX_SHEET4_ROWS:
+                break
+            for ci, v in enumerate(row_vals, 1):
+                cc = ws5.cell(r5, ci, _cs(v))
+                if amber and ci == 1:
+                    cc.fill = amber_fill
+            r5 += 1
+        r5 += 1
+
+    _section(
+        f"1. SITS 통합시험 공백 — 기능요구 {len(sits_gap)}건 (SDS 설계 有, SW 통합시험 無, 상위검증 無)",
+        ("요구사항 ID", "유형", "현재 검증 밴드", "권고 조치"),
+        [((g["rid"], g["cls"], g["verified"], "SW 통합시험(SITS) 추가 또는 미수행 정당화 문서화"), True) for g in sits_gap],
+        (18, 14, 24, 40),
+    )
+    _section(
+        f"2. SDS→UDS 공백 — 기능요구 {len(uds_gap)}건 (SDS 설계 有, 단위설계 無, HSIS 실현 아님)",
+        ("요구사항 ID", "유형", "현재 검증 밴드", "권고 조치"),
+        [((g["rid"], g["cls"], g["verified"], "단위 상세설계(UDS) 추가"), True) for g in uds_gap],
+        (18, 14, 24, 40),
+    )
+    _safe = sum(1 for u in app_leaf if u.get("safety"))
+    _section(
+        f"3. VectorCAST 미추적 APP_LEAF — {len(app_leaf)}건 (단위시험 完, SDS 아키텍처 미명세, 안전 {_safe}건)",
+        ("함수(subprogram)", "UDS 함수", "안전", "권고 조치"),
+        [((u.get("subprogram"), ", ".join((u.get("uds_funcs") or [])[:2]),
+           "★안전" if u.get("safety") else "",
+           "SDS 아키텍처에 반영 또는 라이브러리/보조함수로 out-of-scope 문서화"), bool(u.get("safety")))
+         for u in app_leaf],
+        (26, 30, 8, 44),
+    )
+    if suspect:
+        _section(
+            f"4. dangling 오참조 의심 — {len(suspect)}건 (복구가능: SRS namespace인데 해당 ID 부재)",
+            ("출처 밴드", "참조 ID", "namespace", "권고 조치"),
+            [((s[0], s[1], s[2], "RelatedID 오타/포맷 수정"), True) for s in suspect],
+            (14, 24, 12, 40),
+        )
+    for ci, w in enumerate((26, 30, 24, 44), 1):
+        ws5.column_dimensions[get_column_letter(ci)].width = w
 
     buf = io.BytesIO()
     wb.save(buf)

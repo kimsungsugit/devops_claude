@@ -750,14 +750,25 @@ function hasTestData(r) {
   return TEST_FIELDS.some(f => _hasData(r[f]));
 }
 
+// 요구사항 유형 분류 — pair-gap 정직화(진짜갭 vs 대체검증) + deriveStatus 비기능 판정 공용 SSOT.
+//  - nonfunctional(SwNTR/SwNTSR): 설계 분해 없이 시험으로 직접 검증(결정1) → UDS/SITS 구조적 불요.
+//  - interface(SwEI/SwEIF): SDS→HSIS 실현·시스템 통합시험(SyITS)으로 검증 → SITS 구조적 불요.
+// RAW 철자(정규화 전)라 Sy* 접두도 인정(백엔드 jenkins/local lockstep).
+export function _reqClass(rid) {
+  const s = String(rid || '').toUpperCase();
+  if (['SWNTR', 'SWNTSR', 'SYNTR', 'SYNTSR'].some(p => s.startsWith(p))) return 'nonfunctional';
+  if (['SWEI', 'SWEIF', 'SYEI', 'SYEIF'].some(p => s.startsWith(p))) return 'interface';
+  return 'functional';
+}
+
 // Derive coverage status from row data (pure function, shared across useMemo/filters)
 export function deriveStatus(r) {
   const hasDesign = hasDesignData(r);
   const hasTest = hasTestData(r);
   // 비기능/안전 요구(SwNTR/SwNTSR)는 설계 분해 없이 시험으로 직접 검증(결정1, 백엔드 lockstep).
   const rid = String(r.requirement_id || '').toUpperCase();
-  // RAW 철자(정규화 전)라 SyNTR_/SyNTSR_도 인정(백엔드 jenkins/local lockstep).
-  const isNonFunctional = ['SWNTR', 'SWNTSR', 'SYNTR', 'SYNTSR'].some(p => rid.startsWith(p));
+  // RAW 철자(정규화 전)라 SyNTR_/SyNTSR_도 인정 — 분류는 _reqClass SSOT 재사용(백엔드 lockstep).
+  const isNonFunctional = _reqClass(rid) === 'nonfunctional';
   // Full: 시험 + (설계 OR 비기능 요구)
   if (hasTest && (hasDesign || isNonFunctional)) return 'covered';
   // Partial: any one layer present
@@ -1294,7 +1305,7 @@ function TraceMatrix({ matrix, focusFunctions = null, onClearFocus = null,
   //  - orphanSuts: 어느 UDS 함수에도 안 붙는 SUTS(역방향: 시험有 설계無)
   //  - unmappedTotal/Suts: VectorCAST 미추적(역방향) — 백엔드 summary 우선
   const gapStats = useMemo(() => {
-    let sdsNoUds = 0, udsUntestedFns = 0, udsFnTotal = 0, orphanSuts = 0;
+    let sdsNoUds = 0, sdsNoUdsGenuine = 0, sdsNoUdsAlt = 0, udsUntestedFns = 0, udsFnTotal = 0, orphanSuts = 0;
     // V-model 수평쌍 공백: 설계(좌) 밴드는 있으나 대응 시험(우) 밴드가 없는 요구사항 수.
     // covered=any-design AND any-test라 쌍 불일치(예: SDS 설계는 있는데 SITS 통합시험 없음)가
     // covered 녹색에 가려진다 → 밴드 SSOT(_rowBands)로 쌍별 결핍을 표면화(감사 신호).
@@ -1304,14 +1315,20 @@ function TraceMatrix({ matrix, focusFunctions = null, onClearFocus = null,
     //   Jenkins 매트릭스(unmappedSupported)에서만 산출한다. rightPresent로는 '미로드'와 '100%
     //   실공백'을 구분 못 하므로(둘 다 빈 밴드) 모드 신호를 쓴다.
     const supportsPairs = unmappedSupported;
-    const pg = { sdsNoSits: 0, udsNoSuts: 0, hsisNoSyits: 0, syrsNoSyts: 0, srcNoVc: 0 };
+    const pg = { sdsNoSits: 0, sdsNoSitsGenuine: 0, sdsNoSitsAlt: 0, udsNoSuts: 0, hsisNoSyits: 0, syrsNoSyts: 0, srcNoVc: 0 };
     for (const r of rows) {
       const sds = Array.isArray(r.sds_components) ? r.sds_components : [];
       const uds = Array.isArray(r.source_ids) ? r.source_ids : [];
       // HSIS 크레딧: 인터페이스 요구(SwEI 등)는 SDS→HSIS로 실현되어 UDS 함수가 없는 게 정상.
       // HSIS 신호가 있으면 SDS→UDS 단절이 아니라 인터페이스 실현이므로 설계 단절에서 제외.
       const hsis = Array.isArray(r.hsis_signals) ? r.hsis_signals : [];
-      if (sds.length > 0 && uds.length === 0 && hsis.length === 0) sdsNoUds++;
+      if (sds.length > 0 && uds.length === 0 && hsis.length === 0) {
+        sdsNoUds++;
+        // 정직화: 비기능 요구는 UDS 분해 없이 시험으로 직접 검증(결정1)되므로 '설계 단절'이 아님 —
+        // 실제 시험이 있을 때만 대체검증으로 크레딧(증거 기반, 은폐 방지). 나머지는 진짜 갭.
+        if (_reqClass(r.requirement_id) === 'nonfunctional' && hasTestData(r)) sdsNoUdsAlt++;
+        else sdsNoUdsGenuine++;
+      }
       const m = _unitTestMap(r);
       udsFnTotal += uds.length;
       for (const fn of uds) if (!((m.get(_normFn(fn)) || []).length)) udsUntestedFns++;
@@ -1323,7 +1340,15 @@ function TraceMatrix({ matrix, focusFunctions = null, onClearFocus = null,
       // 수평쌍 공백 (밴드 추출은 매트릭스/링크테이블과 동일 SSOT _rowBands 재사용) — 전체 매트릭스 모드만.
       if (supportsPairs) {
         const b = _rowBands(r);
-        if (b.SDS.length && !b.SITS.length) pg.sdsNoSits++;
+        if (b.SDS.length && !b.SITS.length) {
+          pg.sdsNoSits++;
+          // 정직화: 비기능(SyTS/STS로 검증)·인터페이스(HSIS/SyITS로 실현·통합)는 SITS 구조적 불요 —
+          // 대체 밴드가 실제 존재할 때만 크레딧. 나머지(기능요구·상위검증 없음)는 진짜 통합시험 갭.
+          const _cls = _reqClass(r.requirement_id);
+          const _alt = (_cls === 'nonfunctional' && (b.SyTS.length || b.STS.length))
+            || (_cls === 'interface' && (b.HSIS.length || b.SyITS.length));
+          if (_alt) pg.sdsNoSitsAlt++; else pg.sdsNoSitsGenuine++;
+        }
         if (b.UDS.length && !b.SUTS.length) pg.udsNoSuts++;
         if (b.HSIS.length && !b.SyITS.length) pg.hsisNoSyits++;
         if (b.SyRS.length && !b.SyTS.length) pg.syrsNoSyts++;
@@ -1334,7 +1359,7 @@ function TraceMatrix({ matrix, focusFunctions = null, onClearFocus = null,
     const unmappedSuts = summary?.unmapped_suts_tested ?? unmappedVcast.filter(u => u && u.category === 'suts_tested').length;
     const pairHasAny = supportsPairs && !!(pg.sdsNoSits || pg.udsNoSuts || pg.hsisNoSyits || pg.syrsNoSyts || pg.srcNoVc);
     const hasAny = sdsNoUds || udsUntestedFns || orphanSuts || unmappedTotal || pairHasAny;
-    return { sdsNoUds, udsUntestedFns, udsFnTotal, orphanSuts, unmappedTotal, unmappedSuts, pairGaps: pg, pairSupported: supportsPairs, pairHasAny, hasAny };
+    return { sdsNoUds, sdsNoUdsGenuine, sdsNoUdsAlt, udsUntestedFns, udsFnTotal, orphanSuts, unmappedTotal, unmappedSuts, pairGaps: pg, pairSupported: supportsPairs, pairHasAny, hasAny };
   }, [rows, summary, unmappedVcast, unmappedSupported]);
 
   // Filter + sort
@@ -1636,8 +1661,9 @@ function TraceMatrix({ matrix, focusFunctions = null, onClearFocus = null,
             ⚠ 추적성 공백 (양방향 — 매핑 존재만으로 가려지지 않게 상시 표시)
           </div>
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, fontSize: 12 }}>
-            <GapBadge label="SDS有·UDS無 (설계 단절, HSIS 실현 제외)" value={gapStats.sdsNoUds} tone={gapStats.sdsNoUds ? 'warn' : 'ok'}
-              title="SRS→SDS는 추적됐으나 SDS→UDS(단위설계)가 끊긴 행. 인터페이스 요구(HSIS 신호로 실현, SwEI 등)는 UDS 없음이 정상이므로 제외." />
+            <GapBadge label="SDS有·UDS無 (설계 단절, HSIS 실현 제외)" value={gapStats.sdsNoUds} tone={gapStats.sdsNoUdsGenuine ? 'warn' : 'ok'}
+              sub={gapStats.sdsNoUds ? `진짜 ${gapStats.sdsNoUdsGenuine}${gapStats.sdsNoUdsAlt ? ` · 비기능 ${gapStats.sdsNoUdsAlt}` : ''}` : ''}
+              title="SRS→SDS는 추적됐으나 SDS→UDS(단위설계)가 끊긴 행. 인터페이스 요구(HSIS 신호로 실현, SwEI 등)는 UDS 없음이 정상이므로 제외. '진짜'=기능요구 설계단절(보강 대상), '비기능'=SwNTR 등 시험으로 직접 검증돼 UDS 불요(정상)." />
             <GapBadge label="UDS함수 단위시험 미연결" value={gapStats.udsUntestedFns} tone={gapStats.udsUntestedFns ? 'warn' : 'ok'}
               title={`SUTS 단위시험이 안 붙은 (요구사항×UDS함수) 쌍 — 여러 요구사항이 공유하는 함수는 요구사항마다 합산(중복 포함). 분모 ${gapStats.udsFnTotal}도 동일 기준`} />
             <GapBadge label="orphan SUTS (시험有 설계無)" value={gapStats.orphanSuts} tone={gapStats.orphanSuts ? 'warn' : 'ok'}
@@ -1659,8 +1685,9 @@ function TraceMatrix({ matrix, focusFunctions = null, onClearFocus = null,
                 V-model 수평쌍 공백 — 설계(좌) 있으나 대응 시험(우) 없음 (covered 녹색에 가려지는 쌍 불일치)
               </div>
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, fontSize: 12 }}>
-                <GapBadge label="SDS→SITS (SW통합시험)" value={gapStats.pairGaps.sdsNoSits} tone={gapStats.pairGaps.sdsNoSits ? 'warn' : 'ok'}
-                  title="SW 아키텍처(SDS) 설계는 있으나 대응하는 SW 통합시험(SITS)이 없는 요구사항 수" />
+                <GapBadge label="SDS→SITS (SW통합시험)" value={gapStats.pairGaps.sdsNoSits} tone={gapStats.pairGaps.sdsNoSitsGenuine ? 'warn' : 'ok'}
+                  sub={gapStats.pairGaps.sdsNoSits ? `진짜 ${gapStats.pairGaps.sdsNoSitsGenuine}${gapStats.pairGaps.sdsNoSitsAlt ? ` · 대체검증 ${gapStats.pairGaps.sdsNoSitsAlt}` : ''}` : ''}
+                  title="SW 아키텍처(SDS) 설계는 있으나 대응 SW 통합시험(SITS)이 없는 요구사항. '진짜'=기능요구·상위검증도 없음(통합시험 보강 또는 정당화 필요), '대체검증'=비기능(SyTS/STS)·인터페이스(HSIS/SyITS)로 검증돼 SITS 구조적 불요." />
                 <GapBadge label="UDS→SUTS (SW단위시험)" value={gapStats.pairGaps.udsNoSuts} tone={gapStats.pairGaps.udsNoSuts ? 'warn' : 'ok'}
                   title="단위 상세설계(UDS) 함수는 있으나 대응하는 SW 단위시험(SUTS)이 없는 요구사항 수" />
                 <GapBadge label="Source→VectorCAST" value={gapStats.pairGaps.srcNoVc} tone={gapStats.pairGaps.srcNoVc ? 'warn' : 'ok'}

@@ -38,11 +38,12 @@ def _open(data):
     return openpyxl.load_workbook(io.BytesIO(data))
 
 
-def test_produces_valid_xlsx_with_three_sheets():
+def test_produces_valid_xlsx_with_base_sheets():
     data = build_trace_xlsx(_matrix_with_link_table(), {"project_name": "P", "generated_at": "2026-06-23T00:00:00"})
     assert isinstance(data, bytes) and len(data) > 0
     wb = _open(data)
-    assert wb.sheetnames == ["교차표", "링크테이블", "커버리지"]
+    # 기본 3시트 + 갭 finding(테스트 매트릭스 R1=SITS 갭·R2=UDS 갭). integrity 없어 '정합성 감사' 시트는 생략.
+    assert wb.sheetnames == ["교차표", "링크테이블", "커버리지", "추적성 갭 finding"]
 
 
 def test_cross_sheet_has_asil_col_and_o_marks():
@@ -192,3 +193,52 @@ def test_asil_cell_formula_injection_guarded():
     ai = headers.index("ASIL") + 1
     r2 = next(r for r in range(hr + 1, ws.max_row + 1) if ws.cell(r, 1).value == "R2")
     assert str(ws.cell(r2, ai).value).startswith("'=")   # 수식 → ' 프리픽스로 무력화
+
+
+def _finding_text(wb):
+    ws = wb["추적성 갭 finding"]
+    return " ".join(
+        str(c) for row in ws.iter_rows(values_only=True) for c in row if c not in (None, "")
+    )
+
+
+def test_finding_sheet_credits_alternative_verification():
+    """비기능(SyTS/STS)·인터페이스(HSIS/SyITS) 대체검증 요구는 진짜 갭에서 제외(프론트 gapStats lockstep)."""
+    m = {"rows": [
+        # 기능요구 SITS 갭(UDS 있어 UDS 갭은 아님)
+        {"requirement_id": "SwTR_1", "sds_components": ["a"], "source_ids": ["f1"],
+         "suts_tests": [{"unit": "f1"}], "sts_tests": [{"testcase": "T"}]},
+        # 비기능 대체검증(SyTS) → SITS/UDS 갭 제외
+        {"requirement_id": "SwNTR_1", "sds_components": ["b"], "syts_tests": [{"testcase": "T"}]},
+        # 인터페이스 대체검증(HSIS) → SITS/UDS 갭 제외
+        {"requirement_id": "SwEI_1", "sds_components": ["c"], "hsis_signals": ["sig"]},
+    ], "link_table": {}}
+    text = _finding_text(_open(build_trace_xlsx(m)))
+    assert "SwTR_1" in text          # 기능요구 갭은 표시
+    assert "SwNTR_1" not in text     # 비기능 대체검증은 제외(은폐 아님·정직화)
+    assert "SwEI_1" not in text      # 인터페이스 대체검증은 제외
+
+
+def test_finding_sheet_lists_app_leaf_with_safety():
+    """unmapped_vcast의 APP_LEAF만 함수명+안전표시로 나열(BOOT/BSW/LIB은 제외)."""
+    m = {"rows": [], "link_table": {}, "unmapped_vcast": [
+        {"subprogram": "SwUFn_1", "layer": "APP_LEAF", "category": "suts_tested",
+         "uds_funcs": ["u32s_Add_Guarded"], "safety": True, "sds_reqs": []},
+        {"subprogram": "SwUFn_2", "layer": "BOOT_REPROG", "category": "vcast_only",
+         "uds_funcs": ["boot_x"], "safety": False, "sds_reqs": []},
+    ]}
+    text = _finding_text(_open(build_trace_xlsx(m)))
+    assert "u32s_Add_Guarded" in text   # APP_LEAF 함수명
+    assert "★안전" in text               # 안전 강조
+    assert "boot_x" not in text         # BOOT_REPROG은 finding 대상 아님
+
+
+def test_finding_sheet_present_but_empty_when_clean():
+    """갭 없는 매트릭스도 finding 시트는 존재하되 각 섹션 '해당 없음'(감사 positive 확인)."""
+    m = {"rows": [
+        {"requirement_id": "SwTR_9", "sds_components": ["a"], "source_ids": ["f"],
+         "suts_tests": [{"unit": "f"}], "sits_tests": [{"testcase": "I"}]},
+    ], "link_table": {}}
+    wb = _open(build_trace_xlsx(m))
+    assert "추적성 갭 finding" in wb.sheetnames
+    assert "해당 없음" in _finding_text(wb)
