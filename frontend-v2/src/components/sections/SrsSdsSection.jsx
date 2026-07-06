@@ -3072,7 +3072,7 @@ function CallTreeNode({ node, path, expanded, onToggle, depth, includeExternal }
           {hasChildren ? (isOpen ? '▾' : '▸') : '·'}
         </span>
         <strong style={{ fontFamily: 'monospace', fontSize: isRoot ? 14 : 13, fontWeight: isRoot ? 700 : 600,
-          color: isRoot ? _STAGE_COLORS.UDS : 'var(--fg)' }}>{node?.name}</strong>
+          color: isRoot ? 'var(--accent)' : 'var(--fg)' }}>{node?.name}</strong>
         {node?.via_ref && (
           <span style={{ fontSize: 10, padding: '1px 6px', borderRadius: 8, fontWeight: 600, color: '#7c3aed', border: '1px dashed #7c3aed' }}
             title="직접 호출이 아니라 함수포인터 참조(&함수 / 대입 / 인자 전달)로 추론된 엣지 — 실제 호출은 런타임에 포인터로 이뤄짐">↪ 참조</span>
@@ -3513,7 +3513,7 @@ function InlineCallTree({ fn, job, cacheRoot, buildSelector, sourceRoot, onOpenF
       <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 10, padding: '8px 12px',
         borderBottom: '1px solid var(--border)', background: 'var(--bg-elevated)' }}>
         <span style={{ fontSize: 13, fontWeight: 700 }}>콜트리</span>
-        <code style={{ fontSize: 13, fontFamily: 'monospace', fontWeight: 700, color: _STAGE_COLORS.UDS,
+        <code style={{ fontSize: 13, fontFamily: 'monospace', fontWeight: 700, color: 'var(--accent)',
           background: 'var(--bg)', padding: '2px 9px', borderRadius: 6, border: '1px solid var(--border)' }}>{bare}</code>
         <div style={{ display: 'inline-flex', border: '1px solid var(--border)', borderRadius: 6, overflow: 'hidden' }}>
           {[['callee', '호출 →'], ['caller', '← 역호출']].map(([v, label]) => (
@@ -3573,7 +3573,7 @@ function InlineGraphFrame({ title, badge, onOpenFull, onClose, children }) {
         borderBottom: '1px solid var(--border)', background: 'var(--bg-elevated)' }}>
         <span style={{ fontSize: 13, fontWeight: 700 }}>{title}</span>
         {badge && (
-          <code style={{ fontSize: 13, fontFamily: 'monospace', fontWeight: 700, color: _STAGE_COLORS.UDS,
+          <code style={{ fontSize: 13, fontFamily: 'monospace', fontWeight: 700, color: 'var(--accent)',
             background: 'var(--bg)', padding: '2px 9px', borderRadius: 6, border: '1px solid var(--border)',
             overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 360 }}>{badge}</code>
         )}
