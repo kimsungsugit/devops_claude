@@ -1468,7 +1468,7 @@ function TraceMatrix({ matrix, focusFunctions = null, onClearFocus = null,
     const bandMap = {};   // band -> 연결 요구사항 수
     for (const bk of _TRACE_BANDS) bandMap[bk] = 0;
     for (const r of rows) {
-      const raw = String(r.asil || '').toUpperCase().trim();
+      const raw = String(r.asil || r.requirement_asil || r.ASIL || '').toUpperCase().trim();
       const g = (raw === 'D' || raw === 'C' || raw === 'B' || raw === 'A' || raw === 'QM') ? raw : '미상';
       const cell = asilMap[g] || (asilMap[g] = { total: 0, covered: 0 });
       cell.total++;
@@ -3168,21 +3168,21 @@ function CallTreeNode({ node, path, expanded, onToggle, depth, includeExternal }
   const isOpen = expanded.has(path) !== (depth === 0);
   const asil = node?.asil ? String(node.asil).toUpperCase() : '';
   const isRoot = depth === 0;
-  const [hover, setHover] = useState(false);
+  // hover 하이라이트는 CSS(.ct-node-row:hover)로 처리 — 노드별 useState 제거(비메모 컴포넌트라
+  // 상위 hover가 하위 서브트리 전체 재렌더하던 W2 완화). 루트 배경은 인라인 유지(hover 무관 상시).
   return (
     <li style={{ listStyle: 'none' }}>
       <div
+        className="ct-node-row"
         role={hasChildren ? 'button' : undefined}
         tabIndex={hasChildren ? 0 : undefined}
         aria-expanded={hasChildren ? isOpen : undefined}
         onClick={hasChildren ? () => onToggle(path) : undefined}
         onKeyDown={hasChildren ? (e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onToggle(path); } }) : undefined}
-        onMouseEnter={() => setHover(true)}
-        onMouseLeave={() => setHover(false)}
         title={node?.file || ''}
         style={{ display: 'flex', alignItems: 'center', gap: 7, padding: '4px 8px', fontSize: 13, lineHeight: 1.5,
           cursor: hasChildren ? 'pointer' : 'default', borderRadius: 5,
-          background: isRoot ? 'var(--bg-elevated)' : (hover ? 'var(--bg-elevated)' : 'transparent'),
+          background: isRoot ? 'var(--bg-elevated)' : undefined,
           boxShadow: isRoot ? 'inset 3px 0 0 var(--accent)' : 'none', transition: 'background 0.08s' }}
       >
         <span style={{ fontFamily: 'monospace', width: 14, flex: '0 0 auto', textAlign: 'center', fontSize: 12,
@@ -3593,7 +3593,8 @@ function InlineCallTree({ fn, job, cacheRoot, buildSelector, sourceRoot, onOpenF
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [expanded, setExpanded] = useState(() => new Set());
-  const [depth, setDepth] = useState(8);                  // 호출 트리 최대 깊이(1~20) — '다 표시' 위해 조절 가능
+  const [depth, setDepth] = useState(8);                  // 확정 깊이(load 구동) — depthInput에서 디바운스 반영
+  const [depthInput, setDepthInput] = useState(8);        // 입력창 값(즉시) — 타이핑 중 재조회 폭주(W1) 방지용 분리
   const [allOpen, setAllOpen] = useState(false);          // 모두 펼치기 상태(로드된 노드 전체 펼침/접기)
   const mountedRef = useRef(true);
   const loadSeq = useRef(0);
@@ -3615,7 +3616,7 @@ function InlineCallTree({ fn, job, cacheRoot, buildSelector, sourceRoot, onOpenF
         build_selector: buildSelector || 'lastSuccessfulBuild',
         source_root: sourceRoot || '',
         all_roots: false, reverse: rev, entry: bare,
-        max_depth: depth, include_external: false, engine: 'precise',
+        max_depth: Math.min(20, Math.max(1, depth || 1)), include_external: false, engine: 'precise',
       });
       if (!mountedRef.current || myseq !== loadSeq.current) return;   // 재진입/언마운트 stale 무시
       setData(res);
@@ -3636,6 +3637,13 @@ function InlineCallTree({ fn, job, cacheRoot, buildSelector, sourceRoot, onOpenF
 
   // 마운트 + 방향/깊이 변경 시 자동 로드 (load가 depth를 deps로 물어 깊이 변경 시 재조회)
   useEffect(() => { load(direction); }, [direction, load]);
+
+  // depthInput → depth 디바운스(350ms) — number input 타이핑 중 키마다 재조회하던 낭비(W1) 차단.
+  // 확정 depth만 load deps를 바꿔 재조회를 1회로 합침(loadSeq가 stale 응답은 폐기하나 파싱 낭비 방지).
+  useEffect(() => {
+    const t = setTimeout(() => setDepth(depthInput), 350);
+    return () => clearTimeout(t);
+  }, [depthInput]);
 
   const trees = Array.isArray(data?.trees) ? data.trees : [];
   const st = data?.stats || {};
@@ -3668,8 +3676,8 @@ function InlineCallTree({ fn, job, cacheRoot, buildSelector, sourceRoot, onOpenF
         <label style={{ fontSize: 11, display: 'inline-flex', alignItems: 'center', gap: 4, color: 'var(--text-muted)' }}
           title="호출 트리 최대 깊이 (1~20) — 높일수록 더 깊은 호출까지 표시. '… 깊이제한' 배지는 이 깊이에서 잘렸다는 표시입니다.">
           깊이
-          <input type="number" min={1} max={20} value={depth}
-            onChange={e => setDepth(Math.min(20, Math.max(1, Number(e.target.value) || 1)))}
+          <input type="number" min={1} max={20} value={depthInput}
+            onChange={e => setDepthInput(Math.min(20, Math.max(1, Number(e.target.value) || 1)))}
             style={{ width: 46, padding: '3px 5px', fontSize: 11, border: '1px solid var(--border)', borderRadius: 4, background: 'var(--bg)', color: 'var(--fg)' }} />
         </label>
         {trees.length > 0 && (
@@ -3755,7 +3763,7 @@ function InlineGraphFrame({ title, badge, onOpenFull, onClose, children }) {
    데이터는 matrix row만으로 완결(백엔드 무변경): _stageMembers(단계 멤버) + _unitTestMap(UDS함수↔
    SUTS단위시험 정확 매핑 엣지). 상위(부모 요구사항)는 row에 구조화 데이터가 없어(설계서 prose에 묻힘)
    이번 범위에서 제외 — 하위 추적에 집중. 모든 시각화는 SVG(innerHTML 없음 → XSS 무관). */
-const _STAGE_COLORS = { SDS: '#0d9488', HSIS: '#0e7490', UDS: '#7c3aed', STS: '#2563eb', SUTS: '#0891b2', SITS: '#db2777', SyTS: '#9333ea', SyITS: '#c026d3', VectorCAST: '#ea580c' };
+const _STAGE_COLORS = { SyRS: '#475569', SDS: '#0d9488', HSIS: '#0e7490', UDS: '#7c3aed', STS: '#2563eb', SUTS: '#0891b2', SITS: '#db2777', SyTS: '#9333ea', SyITS: '#c026d3', VectorCAST: '#ea580c' };
 const _GRAPH = { COL_W: 172, NODE_W: 150, NODE_H: 30, GAP: 9, HEADER_H: 26, PAD: 14, MAX_PER_COL: 40 };
 
 function _reqGraphId(r) {

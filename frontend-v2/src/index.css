@@ -1809,3 +1809,9 @@ label {
   color: #d70015;
   font-weight: 500;
 }
+
+/* 콜트리 노드 hover 하이라이트 — CallTreeNode의 노드별 useState(hover) 대체(W2: 상위 hover
+   서브트리 재렌더 제거). 인라인/전체탭 공용. 루트 행은 인라인 배경(bg-elevated) 상시 적용. */
+.ct-node-row:hover {
+  background: var(--bg-elevated);
+}
