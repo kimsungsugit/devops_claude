@@ -285,6 +285,51 @@ function TraceSummaryCard({ summary, loading, onRefresh }) {
           </div>
         </div>
       </div>
+
+      {/* ASIL 등급별 분포·커버리지 — 백엔드 _cache_trace_summary가 실어주면 표시(구버전 캐시엔 없어 가드) */}
+      {summary.asil_distribution && Object.keys(summary.asil_distribution).length > 0 && (
+        <div style={{ marginTop: 'var(--sp-2)', paddingTop: 'var(--sp-2)', borderTop: '1px solid var(--border)' }}>
+          <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', marginBottom: 6 }}>ASIL 등급별 분포 · 커버리지</div>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+            {['D', 'C', 'B', 'A', 'QM', 'UNKNOWN'].filter((g) => summary.asil_distribution[g]).map((g) => {
+              const c = summary.asil_distribution[g];
+              const pct = c.total ? Math.round((c.covered / c.total) * 100) : 0;
+              const label = g === 'UNKNOWN' ? '미상' : g === 'QM' ? 'QM' : `ASIL ${g}`;
+              const col = pct >= GATE_PASS ? 'var(--color-success)' : pct >= GATE_WARN ? 'var(--color-warning)' : 'var(--color-danger)';
+              return (
+                <div key={g} title={`${label}: ${c.total}건 중 ${c.covered}건 검증 (${pct}%)`}
+                  style={{ padding: '4px 9px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--card-bg, var(--surface))', fontSize: 11, whiteSpace: 'nowrap' }}>
+                  <span style={{ fontWeight: 700 }}>{label}</span>{' '}
+                  <span style={{ color: 'var(--text-muted)' }}>{c.total}건 ·</span>{' '}
+                  <span style={{ fontWeight: 700, color: col }}>{pct}%</span>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* 밴드별 추적 현황 — 각 V-model 밴드에 연결된 요구사항 수 */}
+      {summary.band_counts && Object.keys(summary.band_counts).length > 0 && (
+        <div style={{ marginTop: 'var(--sp-2)', paddingTop: 'var(--sp-2)', borderTop: '1px solid var(--border)' }}>
+          <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', marginBottom: 6 }}>
+            밴드별 추적 현황 <span style={{ fontWeight: 400 }}>· 연결된 요구사항 수 (전체 {total})</span>
+          </div>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+            {['SyRS', 'SDS', 'HSIS', 'UDS', 'STS', 'SUTS', 'SITS', 'SyTS', 'SyITS', 'VectorCAST'].map((b) => {
+              const n = summary.band_counts[b] || 0;
+              const pct = total ? Math.round((n / total) * 100) : 0;
+              return (
+                <div key={b} title={`${b}: ${n}건 (${pct}%)`}
+                  style={{ padding: '4px 9px', borderRadius: 6, border: '1px solid var(--border)', background: n ? 'var(--card-bg, var(--surface))' : 'var(--bg)', fontSize: 11, whiteSpace: 'nowrap', opacity: n ? 1 : 0.55 }}>
+                  <span style={{ fontWeight: 600 }}>{b}</span>{' '}
+                  <span style={{ color: 'var(--text-muted)' }}>{n} ({pct}%)</span>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -3604,6 +3604,20 @@ def _cache_trace_summary(matrix: Dict[str, Any], req: UdsTraceabilityMatrixReque
     #   covered   : design (SDS or UDS source) AND tests both present
     #   partial   : exactly one of {design, tests} present
     #   uncovered : neither present
+    # ASIL 등급분포·밴드별 현황(대시보드 카드용) — link_table asil_coverage(req→grade) + 행 밴드 필드에서
+    # 단일 패스로 파생. asil_cov는 아래 cache_payload(has_asil/gap/unknown)에서도 재사용한다.
+    link_table = inner.get("link_table") if isinstance(inner, dict) else None
+    asil_cov = link_table.get("asil_coverage") if isinstance(link_table, dict) else None
+    asil_cov = asil_cov if isinstance(asil_cov, dict) else {}
+    _asil_by_target = asil_cov.get("by_target") if isinstance(asil_cov.get("by_target"), dict) else {}
+    _BAND_FIELDS = {
+        "SyRS": "syrs_parents", "SDS": "sds_components", "HSIS": "hsis_signals",
+        "UDS": "source_ids", "STS": "sts_tests", "SUTS": "suts_tests",
+        "SITS": "sits_tests", "SyTS": "syts_tests", "SyITS": "syits_tests",
+    }
+    asil_distribution: Dict[str, Dict[str, int]] = {}   # grade → {total, covered}
+    band_counts: Dict[str, int] = {b: 0 for b in (list(_BAND_FIELDS.keys()) + ["VectorCAST"])}
+
     covered = 0
     partial = 0
     uncovered = 0
@@ -3639,10 +3653,28 @@ def _cache_trace_summary(matrix: Dict[str, Any], req: UdsTraceabilityMatrixReque
         is_nonfunctional = _rid.startswith(("SWNTR", "SWNTSR", "SYNTR", "SYNTSR"))
         if has_tests and (has_design or is_nonfunctional):
             covered += 1
+            _row_covered = True
         elif has_design or has_tests:
             partial += 1
+            _row_covered = False
         else:
             uncovered += 1
+            _row_covered = False
+        # ASIL 등급분포 — 행 asil 우선, 없으면 link_table by_target(req→grade) 조인. 미상은 UNKNOWN.
+        _raw_grade = str(row.get("asil") or _asil_by_target.get(str(row.get("requirement_id") or "")) or "").upper().strip()
+        _grade = _raw_grade if _raw_grade in ("D", "C", "B", "A", "QM") else "UNKNOWN"
+        _cell = asil_distribution.setdefault(_grade, {"total": 0, "covered": 0})
+        _cell["total"] += 1
+        if _row_covered:
+            _cell["covered"] += 1
+        # 밴드별 현황 — 해당 밴드 필드가 비어있지 않은 요구 수(밴드 present 카운트).
+        for _band, _fld in _BAND_FIELDS.items():
+            _v = row.get(_fld)
+            if isinstance(_v, list) and _v:
+                band_counts[_band] += 1
+        _tests = row.get("tests")
+        if isinstance(_tests, list) and any(isinstance(_t, dict) and _t.get("source") == "VectorCAST" for _t in _tests):
+            band_counts["VectorCAST"] += 1
 
     # Prefer matrix-declared total; fall back to row count
     total = int(declared_total) if isinstance(declared_total, int) and declared_total > 0 else len(rows)
@@ -3651,11 +3683,7 @@ def _cache_trace_summary(matrix: Dict[str, Any], req: UdsTraceabilityMatrixReque
         uncovered += total - (covered + partial + uncovered)
     coverage_pct = round(covered / total * 100, 1) if total > 0 else 0.0
 
-    # ASIL 결합(P5) — 대시보드 quick-load가 ASIL 갭/미상을 알 수 있게 전파(reviewer WARN-C:
-    # 미전파 시 매트릭스 재생성해 detail 탭 진입해야만 갭이 보임). link_table에서 끌어옴.
-    link_table = inner.get("link_table") if isinstance(inner, dict) else None
-    asil_cov = link_table.get("asil_coverage") if isinstance(link_table, dict) else None
-    asil_cov = asil_cov if isinstance(asil_cov, dict) else {}
+    # (link_table / asil_cov는 위 단일 패스에서 이미 추출 — has_asil/gap/unknown은 아래 payload에서 재사용)
 
     # ID 정합성 감사(trace_integrity) — 대시보드 quick-load가 충돌/dangling/placeholder를
     # 매트릭스 재생성 없이 알 수 있게 카운트만 전파(ASIL 패턴과 동일). 데이터 없으면 0/clean.
@@ -3675,6 +3703,9 @@ def _cache_trace_summary(matrix: Dict[str, Any], req: UdsTraceabilityMatrixReque
         "asil_has": bool(asil_cov.get("has_asil")),
         "asil_gap_count": len(asil_cov.get("gaps") or []),
         "asil_unknown_count": int(asil_cov.get("unknown_count") or 0),
+        # ASIL 등급분포(등급→{total,covered}) + 밴드별 연결 요구 수 — 대시보드 카드 상세 요약용.
+        "asil_distribution": asil_distribution,
+        "band_counts": band_counts,
         # ID 정합성 감사(trace_integrity) — 충돌/dangling/placeholder 카운트 + clean 플래그.
         "integrity_clean": bool(integ_stats.get("clean", True)),
         "integrity_collision_count": int(integ_stats.get("collision_count") or 0),
