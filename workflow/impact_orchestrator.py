@@ -1362,20 +1362,29 @@ def run_impact_update(
             },
             "coverage_gap": coverage_gap,
         }
-        audit_path = write_impact_audit(audit_payload)
-        change_log = build_change_log(
-            run_id=audit_path.stem,
-            trigger=trigger.to_dict(),
-            result=result,
-            previous_linked_docs=previous_linked_docs,
-        )
-        change_log_path = write_change_log(change_log)
-        result["audit_path"] = str(audit_path)
-        result["change_log"] = {
-            "path": str(change_log_path),
-            "run_id": str(change_log.get("run_id") or audit_path.stem),
-            "summary": change_log.get("summary") or {},
-        }
+        # 감사기록/변경이력은 best-effort — payload가 cloudium U:\\(SMB) 접근 거부 등으로
+        # 실패해도 이미 완성된 영향분석 result 반환을 막지 않는다(핵심 결과 보존).
+        try:
+            audit_path = write_impact_audit(audit_payload)
+            result["audit_path"] = str(audit_path)
+        except Exception as _audit_exc:  # noqa: BLE001
+            logger.warning("impact audit write failed (best-effort): %s", _audit_exc)
+            audit_path = None
+        try:
+            change_log = build_change_log(
+                run_id=(audit_path.stem if audit_path else _ts()),
+                trigger=trigger.to_dict(),
+                result=result,
+                previous_linked_docs=previous_linked_docs,
+            )
+            change_log_path = write_change_log(change_log)
+            result["change_log"] = {
+                "path": str(change_log_path),
+                "run_id": str(change_log.get("run_id") or (audit_path.stem if audit_path else "")),
+                "summary": change_log.get("summary") or {},
+            }
+        except Exception as _cl_exc:  # noqa: BLE001
+            logger.warning("impact change-log write failed (best-effort): %s", _cl_exc)
         if callable(on_progress):
             on_progress("done", "완료되었습니다.", {"targets": len(actions)})
         return result

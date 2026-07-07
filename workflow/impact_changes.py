@@ -33,9 +33,11 @@ def _save_json(path: Path, payload: Dict[str, Any]) -> None:
 
 
 def _load_json(path: Path) -> Dict[str, Any]:
-    if not path.exists():
-        return {}
+    # cloudium U:\\(SMB) payload 등 접근 거부 경로는 exists()/read_text가 PermissionError
+    # (WinError 5)를 던질 수 있다 — 변경이력(best-effort)이 핵심 분석을 죽이지 않도록 흡수.
     try:
+        if not path.exists():
+            return {}
         raw = json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return {}
@@ -48,7 +50,13 @@ def _artifact_payload_path(path_text: str) -> Path | None:
         return None
     path = Path(raw)
     payload_path = path.with_suffix(".payload.json")
-    return payload_path if payload_path.exists() else None
+    # payload가 cloudium U:\\(SMB) 등 접근 거부 경로면 exists()가 False가 아니라
+    # PermissionError(WinError 5)/OSError를 던진다 — 변경 이력(best-effort)이 핵심
+    # 영향분석 전체를 죽이지 않도록 예외는 '없음'으로 처리한다.
+    try:
+        return payload_path if payload_path.exists() else None
+    except Exception:
+        return None
 
 
 def _normalize_value(value: Any) -> Any:
