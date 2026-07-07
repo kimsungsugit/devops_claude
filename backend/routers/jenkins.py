@@ -2002,8 +2002,6 @@ def _try_svn_revision_range(req: JenkinsImpactTriggerRequest, build_rev: str):
         오고 revision은 정수검증하므로 SSRF/인자 주입 표면 없음.
     """
     try:
-        if not str(build_rev or "").strip().isdigit():
-            return None  # svn revision은 정수 — git SHA1/빈 값이면 대상 아님
         from backend.services.scm_registry import get_registry_entry, resolve_scm_credentials
         entry = get_registry_entry(req.scm_id)
         if entry is None or str(entry.scm_type or "").lower() != "svn":
@@ -2013,6 +2011,20 @@ def _try_svn_revision_range(req: JenkinsImpactTriggerRequest, build_rev: str):
         if not (repo_url and source_root):
             return None
         from backend.services.local_service import svn_info_url, svn_diff_summarize
+        # B(build revision) 결정. Jenkins 빌드가 git으로 체크아웃하면 build_rev이 git SHA(비정수)라
+        # svn diff에 못 쓴다 → 그 경우 svn HEAD를 B로 대체한다(빌드 시점이 아닌 'svn 최신' 기준,
+        # 사용자 선택). build_rev이 svn 정수면 그대로 사용.
+        _cred_user, _cred_pw, _ = resolve_scm_credentials(scm_id=req.scm_id)
+        if not str(build_rev or "").strip().isdigit():
+            _head = svn_info_url(repo_url=repo_url, username=_cred_user, password=_cred_pw)
+            _head_rev = str(_head.get("revision") or "").strip()
+            if not _head_rev.isdigit():
+                _logger.warning(
+                    "svn revision-range skipped: build_rev not numeric and svn HEAD unavailable (%s) — changeSet fallback",
+                    repo_url,
+                )
+                return None
+            build_rev = _head_rev
         scm_norm = repo_url.rstrip("/")
         # A(baseline revision) 결정. 우선순위:
         #  1) base_ref에 정수 svn revision이 명시되면 그걸 사용 — source_root가 export(.svn 없음)라
@@ -2067,13 +2079,12 @@ def _try_svn_revision_range(req: JenkinsImpactTriggerRequest, build_rev: str):
                 base_rev, build_rev,
             )
             return None
-        username, password, _ = resolve_scm_credentials(scm_id=req.scm_id)
         diff = svn_diff_summarize(
             repo_url=repo_url,
             rev_a=base_rev,
             rev_b=build_rev,
-            username=username,
-            password=password,
+            username=_cred_user,
+            password=_cred_pw,
         )
         if int(diff.get("rc", 1)) != 0:
             _logger.warning(
@@ -2108,55 +2119,66 @@ def _resolve_jenkins_changed_files(req: JenkinsImpactTriggerRequest):
     서버 측 Jenkins 자격증명(config.get_jenkins_config)만 사용 — HTTP body로 토큰 받지 않음.
     """
     if not (req.build_number and str(req.job_url or "").strip()):
+        # build/job 없어도 svn A:B(base_ref↔HEAD)는 독립적으로 가능 — 먼저 시도.
+        _svn = _try_svn_revision_range(req, "")
+        if _svn is not None:
+            return _svn
         return None, False, {"changed_files_source": "local_diff_fallback", "linkage_reason": "no build_number/job_url"}
+
+    # Jenkins changeSet 조회(build_rev 확보용) — svn 프로젝트에선 build_rev이 git SHA일 수
+    # 있고, 조회 자체가 실패(Jenkins 다운)할 수도 있다. 둘 다 svn A:B(base_ref↔HEAD)는
+    # 독립적으로 성립하므로, Jenkins 결과 유무와 무관하게 svn 경로를 항상 먼저 시도한다.
+    build_rev = ""
+    _jenkins_res = None
+    _jenkins_err = ""
     try:
         from backend.routers.config import get_jenkins_config
         cfg = get_jenkins_config()
         user = str(cfg.get("username") or "").strip()
         token = str(cfg.get("token") or "").strip()
-        if not (user and token):
-            return None, False, {"changed_files_source": "local_diff_fallback", "linkage_reason": "jenkins credentials not configured"}
-        # SSRF/크리덴셜 유출 방지(fail-closed): 사용자 입력 job_url에 서버 토큰을 실어
-        # 보내므로, baseUrl이 설정돼 있고 job_url이 그 하위(또는 동일)이며 '..'가 없을 때만
-        # 호출한다. baseUrl 미설정이면 검증 불가 → 조회하지 않고 로컬 diff로 폴백한다.
         base_url = str(cfg.get("baseUrl") or "").strip().rstrip("/")
         job = str(req.job_url or "").strip()
         job_l = job.lower()
         under_base = bool(base_url) and (job_l == base_url.lower() or job_l.startswith(base_url.lower() + "/"))
-        if (not under_base) or (".." in job):
-            return None, False, {"changed_files_source": "local_diff_fallback", "linkage_reason": "job_url not under configured Jenkins baseUrl"}
-        from backend.services.jenkins_service import get_build_changed_files
-        res = get_build_changed_files(
-            job_url=req.job_url,
-            build_number=int(req.build_number),
-            username=user,
-            api_token=token,
-            verify_tls=bool(cfg.get("verifyTls", True)),
-        )
-        files = [str(x) for x in (res.get("files") or [])]
-        build_rev = str(res.get("revision") or "").strip()
-        # ── baseline(로컬 default 버전 A) ↔ build 버전(B) 정밀 델타 (svn revision-range) ──
-        # 영향은 '직전 빌드 대비 changeSet'이 아니라 '현재 로컬 작업본 revision(A) ↔ 선택
-        # 빌드 revision(B)' 사이여야 한다. svn diff --summarize -r A:B로 빌드가 몇 번 끼어
-        # 있든 A→B 전체 변경을 잡는다(빈 changeSet=0건 오등치 회피). svn 아님/작업본 아님/
-        # 조회 실패 시 아래 단일 빌드 changeSet 결과로 graceful 폴백한다(git·회귀 0).
-        svn_range = _try_svn_revision_range(req, build_rev)
-        if svn_range is not None:
-            return svn_range
+        if not (user and token):
+            _jenkins_err = "jenkins credentials not configured"
+        elif (not under_base) or (".." in job):
+            # SSRF fail-closed: baseUrl 하위가 아니면 서버 토큰을 싣지 않는다.
+            _jenkins_err = "job_url not under configured Jenkins baseUrl"
+        else:
+            from backend.services.jenkins_service import get_build_changed_files
+            _jenkins_res = get_build_changed_files(
+                job_url=req.job_url,
+                build_number=int(req.build_number),
+                username=user,
+                api_token=token,
+                verify_tls=bool(cfg.get("verifyTls", True)),
+            )
+            build_rev = str(_jenkins_res.get("revision") or "").strip()
+    except Exception as exc:  # noqa: BLE001 — Jenkins 조회 실패는 svn/로컬로 graceful fallback
+        _logger.warning("jenkins changeset fetch failed (scm=%s build=%s): %s", req.scm_id, req.build_number, exc, exc_info=True)
+        _jenkins_err = f"changeset fetch failed: {exc}"[:200]
+
+    # ── svn revision-range: baseline(base_ref A) ↔ build_rev(B, 비정수면 svn HEAD) 정밀 델타 ──
+    # svn diff --summarize -r A:B로 빌드가 몇 번 끼어 있든 A→B 전체 변경을 잡는다. Jenkins
+    # 조회 실패/build_rev이 git SHA여도 독립적으로 성립(svn HEAD를 B로 대체).
+    svn_range = _try_svn_revision_range(req, build_rev)
+    if svn_range is not None:
+        return svn_range
+
+    # svn 경로 미성립 → Jenkins changeSet 결과가 있으면 그걸로, 없으면 로컬 diff 폴백.
+    if _jenkins_res is not None:
+        files = [str(x) for x in (_jenkins_res.get("files") or [])]
         meta: Dict[str, Any] = {
             "changed_files_source": "jenkins_changeset",
             "build_revision": build_rev,
             "jenkins_changed_file_count": len(files),
         }
-        # per-file editType(add/edit/delete) — cloudium/원격에서 NEW/DELETE 변경유형 분류의
-        # 유일한 근거(로컬 working-copy diff 불가). 비어 있으면(affectedPaths만 제공) 생략.
-        edit_types = res.get("edit_types") or {}
+        edit_types = _jenkins_res.get("edit_types") or {}
         if edit_types:
             meta["changed_file_edit_types"] = edit_types
         return files, True, meta
-    except Exception as exc:  # noqa: BLE001 — 조회 실패는 로컬 diff로 graceful fallback
-        _logger.warning("jenkins changeset fetch failed (scm=%s build=%s): %s", req.scm_id, req.build_number, exc, exc_info=True)
-        return None, False, {"changed_files_source": "local_diff_fallback", "linkage_reason": f"changeset fetch failed: {exc}"[:200]}
+    return None, False, {"changed_files_source": "local_diff_fallback", "linkage_reason": _jenkins_err or "svn/changeset unavailable"}
 
 
 def _make_jenkins_impact_trigger(req: JenkinsImpactTriggerRequest, *, source: str):

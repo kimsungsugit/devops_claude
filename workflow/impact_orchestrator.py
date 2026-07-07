@@ -106,7 +106,7 @@ def _load_linked_doc_summary(linked_doc: str) -> Dict[str, Any]:
     if not linked_doc:
         return {}
     payload_path = Path(linked_doc).with_suffix(".payload.json")
-    if not payload_path.exists():
+    if not _safe_exists(payload_path):
         return {}
     payload = _load_json(payload_path)
     quality = payload.get("quality_report") if isinstance(payload.get("quality_report"), dict) else {}
@@ -129,6 +129,16 @@ def _update_linked_doc(entry_id: str, field: str, path_text: str) -> None:
     update_entry(entry_id, ScmUpdateRequest(linked_docs=ScmLinkedDocs(**merged)))
 
 
+def _safe_exists(path: Path) -> bool:
+    """Path.exists()의 예외 안전판. cloudium U:\\(SMB) 등 접근 거부 경로는 exists()가
+    False가 아니라 PermissionError(WinError 5)/OSError를 던질 수 있다 — 이 예외가 잡히지
+    않으면 best-effort 문서 읽기가 핵심 영향분석 전체를 500으로 죽인다. 예외는 '없음'으로 처리."""
+    try:
+        return path.exists()
+    except Exception:
+        return False
+
+
 def _load_uds_fn_details(
     linked_doc: str, flagged_fns: List[str]
 ) -> Dict[str, Dict[str, Any]]:
@@ -136,7 +146,7 @@ def _load_uds_fn_details(
     if not linked_doc:
         return {}
     payload_path = Path(linked_doc).with_suffix(".payload.json")
-    if not payload_path.exists():
+    if not _safe_exists(payload_path):
         return {}
     payload = _load_json(payload_path)
     by_name: Dict[str, Any] = payload.get("function_details_by_name") or {}
@@ -164,7 +174,7 @@ def _load_suts_fn_tcs(
 ) -> Dict[str, List[str]]:
     """Return {fn_name: [tc_id, ...]} by parsing the existing SUTS xlsm.
     Falls back to empty dict on any error (file missing, parse failure, etc.)."""
-    if not linked_doc or not Path(linked_doc).exists():
+    if not linked_doc or not _safe_exists(Path(linked_doc)):
         return {}
     try:
         from tools.export_suts_vectorcast import build_vectorcast_model  # type: ignore
@@ -184,25 +194,29 @@ def _load_suts_fn_tcs(
 def _load_sits_fn_chains(
     linked_doc: str, flagged_fns: List[str]
 ) -> Dict[str, List[str]]:
-    """Return {entry_fn: [label, ...]} from the SITS vectorcast intermediate JSON."""
+    """Return {entry_fn: [label, ...]} from the SITS vectorcast intermediate JSON.
+    Falls back to empty dict on any error (missing/inaccessible file — cloudium U:\\ 등)."""
     if not linked_doc:
         return {}
-    stem = Path(linked_doc).stem
-    intermediate = Path(linked_doc).with_name(stem + "_vectorcast.json")
-    if not intermediate.exists():
+    try:
+        stem = Path(linked_doc).stem
+        intermediate = Path(linked_doc).with_name(stem + "_vectorcast.json")
+        if not _safe_exists(intermediate):
+            return {}
+        data = _load_json(intermediate)
+        fn_set = {fn.strip().lower() for fn in flagged_fns}
+        result: Dict[str, List[str]] = {}
+        for itc in data.get("integrations") or []:
+            entry = str(itc.get("entry_fn") or "").strip()
+            if entry.lower() in fn_set:
+                chain = str(itc.get("call_chain") or "").strip()
+                tc_id = str(itc.get("tc_id") or "")
+                label = f"{tc_id}: {chain}" if tc_id else chain
+                if label:
+                    result.setdefault(entry, []).append(label)
+        return result
+    except Exception:
         return {}
-    data = _load_json(intermediate)
-    fn_set = {fn.strip().lower() for fn in flagged_fns}
-    result: Dict[str, List[str]] = {}
-    for itc in data.get("integrations") or []:
-        entry = str(itc.get("entry_fn") or "").strip()
-        if entry.lower() in fn_set:
-            chain = str(itc.get("call_chain") or "").strip()
-            tc_id = str(itc.get("tc_id") or "")
-            label = f"{tc_id}: {chain}" if tc_id else chain
-            if label:
-                result.setdefault(entry, []).append(label)
-    return result
 
 
 def _write_review_artifact(
@@ -1302,16 +1316,22 @@ def run_impact_update(
                     except Exception as _e:
                         logger.debug("AI guide skipped: %s", _e)
 
-                    artifact_path = _write_review_artifact(
-                        target,
-                        trigger,
-                        changed_types,
-                        _groups_for_target,
-                        by_name,
-                        getattr(linked_docs, target, ""),
-                        ai_guide=_ai_guide,
-                    )
-                    info["artifact_path"] = artifact_path
+                    # 검토 아티팩트 생성도 best-effort — linked_doc 요약이 cloudium U:\\ 접근
+                    # 거부 등으로 실패해도 핵심 영향분석 결과(변경파일/시그니처/영향함수)를
+                    # 죽이지 않는다(FLAG 액션은 이미 결정됐고 아티팩트는 보조 산출물).
+                    try:
+                        artifact_path = _write_review_artifact(
+                            target,
+                            trigger,
+                            changed_types,
+                            _groups_for_target,
+                            by_name,
+                            getattr(linked_docs, target, ""),
+                            ai_guide=_ai_guide,
+                        )
+                        info["artifact_path"] = artifact_path
+                    except Exception as _art_exc:  # noqa: BLE001
+                        logger.debug("review artifact skipped for %s: %s", target, _art_exc)
         if callable(on_progress):
             on_progress("write_audit", "실행 이력을 저장 중입니다.", {"targets": len(actions)})
         audit_payload = {

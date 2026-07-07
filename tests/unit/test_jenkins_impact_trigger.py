@@ -315,14 +315,51 @@ def test_try_svn_revision_range_svn_info_fail_returns_none(monkeypatch):
     assert out is None
 
 
-def test_try_svn_revision_range_nonnumeric_build_returns_none():
-    """build_rev이 git SHA1/빈 값이면 svn 대상 아님 → None(registry 조회 전 조기 반환)."""
+def test_try_svn_revision_range_unknown_scm_returns_none():
+    """registry에 없는 scm_id면 build_rev 형태와 무관하게 None(entry 없음 → svn 대상 아님)."""
     from backend.routers import jenkins as jr
     from backend.schemas import JenkinsImpactTriggerRequest
 
-    req = JenkinsImpactTriggerRequest(scm_id="x", build_number=5, job_url="http://j/job/X")
+    req = JenkinsImpactTriggerRequest(scm_id="__nope__", build_number=5, job_url="http://j/job/X")
     assert jr._try_svn_revision_range(req, build_rev="deadbeef") is None
     assert jr._try_svn_revision_range(req, build_rev="") is None
+
+
+def test_try_svn_revision_range_git_buildrev_uses_svn_head(monkeypatch):
+    """Jenkins 빌드가 git으로 체크아웃해 build_rev이 git SHA(비정수)면 svn HEAD를 B로 쓴다.
+
+    KJPDS02_PV 시나리오: 소스=svn, 빌드=git → build_revision이 git SHA40. base_ref=1018(A)와
+    svn HEAD(B)로 diff.
+    """
+    from backend.routers import jenkins as jr
+    import backend.services.scm_registry as reg
+    import backend.services.local_service as ls
+    from backend.schemas import JenkinsImpactTriggerRequest
+
+    entry = _FakeSvnEntry(scm_url="svn://host/ADOS/NE1AW_PORTING",
+                          source_root="C:/Project/Ados/NE1AW_PORTING")
+    monkeypatch.setattr(reg, "get_registry_entry", lambda _sid: entry)
+    monkeypatch.setattr(reg, "resolve_scm_credentials", lambda **_k: ("u", "p", None))
+    # svn info(repo_url) → HEAD 1053 (build_rev이 비정수일 때 B로 대체)
+    monkeypatch.setattr(ls, "svn_info_url", lambda **_k: {
+        "rc": 0, "revision": "1053", "url": "svn://host/ADOS/NE1AW_PORTING", "repo_root": "svn://host/ADOS"})
+    seen = {}
+
+    def _fake_diff(*, repo_url, rev_a, rev_b, **_k):
+        seen["a"], seen["b"] = rev_a, rev_b
+        return {"rc": 0, "files": ["APP/a.c"], "edit_types": {"APP/a.c": "edit"}}
+
+    monkeypatch.setattr(ls, "svn_diff_summarize", _fake_diff)
+    out = jr._try_svn_revision_range(
+        JenkinsImpactTriggerRequest(scm_id="kjpds02_pv", build_number=76,
+                                    job_url="http://j/job/X", base_ref="1018"),
+        build_rev="667a3cf2d8370b88bdcf2a56330b59d6484ef1bd",  # git SHA40 (비정수)
+    )
+    assert out is not None
+    _files, _use, meta = out
+    assert meta["baseline_revision"] == "1018"    # base_ref (A)
+    assert meta["build_revision"] == "1053"        # svn HEAD로 대체 (B, git SHA 아님)
+    assert seen["a"] == "1018" and seen["b"] == "1053"
 
 
 def test_try_svn_revision_range_uses_numeric_base_ref(monkeypatch):
@@ -463,6 +500,42 @@ def test_resolve_jenkins_changed_files_uses_svn_revision_range(monkeypatch):
     assert meta["baseline_revision"] == "100"
     assert meta["build_revision"] == "150"
     assert meta["changed_file_edit_types"] == {"APP/a.c": "edit", "APP/b.h": "add"}
+
+
+def test_resolve_jenkins_svn_range_when_jenkins_down(monkeypatch):
+    """Jenkins 조회가 실패(연결 끊김)해도 svn A:B(base_ref↔HEAD)는 독립적으로 성립한다.
+
+    KJPDS02_PV 실장애 시나리오: Jenkins(.40) WinError 10060 → 그래도 svn(.33)로 분석.
+    """
+    from backend.routers import jenkins as jr
+    import backend.routers.config as cfgmod
+    import backend.services.jenkins_service as jsvc
+    import backend.services.scm_registry as reg
+    import backend.services.local_service as ls
+    from backend.schemas import JenkinsImpactTriggerRequest
+
+    monkeypatch.setattr(cfgmod, "get_jenkins_config",
+                        lambda: {"username": "u", "token": "t", "baseUrl": "http://j", "verifyTls": True})
+
+    def _boom(**_k):
+        raise OSError("[WinError 10060] connection timed out")
+
+    monkeypatch.setattr(jsvc, "get_build_changed_files", _boom)
+    # svn 경로는 정상 (base_ref=1018, HEAD=1053)
+    entry = _FakeSvnEntry(scm_url="svn://host/ADOS/NE1AW_PORTING", source_root="C:/wc")
+    monkeypatch.setattr(reg, "get_registry_entry", lambda _sid: entry)
+    monkeypatch.setattr(reg, "resolve_scm_credentials", lambda **_k: ("u", "p", None))
+    monkeypatch.setattr(ls, "svn_info_url", lambda **_k: {
+        "rc": 0, "revision": "1053", "url": "svn://host/ADOS/NE1AW_PORTING", "repo_root": "svn://host/ADOS"})
+    monkeypatch.setattr(ls, "svn_diff_summarize", lambda **_k: {
+        "rc": 0, "files": ["APP/a.c"], "edit_types": {"APP/a.c": "edit"}})
+
+    files, use_only, meta = jr._resolve_jenkins_changed_files(
+        JenkinsImpactTriggerRequest(scm_id="kjpds02_pv", build_number=76,
+                                    job_url="http://j/job/KJPDS02_PV/", base_ref="1018"))
+    assert meta["changed_files_source"] == "svn_revision_range"   # Jenkins 죽어도 svn 성공
+    assert meta["baseline_revision"] == "1018" and meta["build_revision"] == "1053"
+    assert files == ["APP/a.c"] and use_only is True
 
 
 def test_resolve_jenkins_changed_files_svn_range_falls_back_to_changeset(monkeypatch):
