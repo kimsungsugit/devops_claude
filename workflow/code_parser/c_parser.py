@@ -772,6 +772,7 @@ def parse_c_project(
                 raw_text = ""
             file_globals: Set[str] = set()
             funcs: List[CFunction] = []
+            root_node = None
             if parser is not None:
                 tree = parser.parse(data)
                 root_node = tree.root_node
@@ -797,10 +798,9 @@ def parse_c_project(
                         "pointer_calls": f.pointer_calls or [],
                     }
                 )
-            if parser is not None:
-                tree = parser.parse(data)
-                root_node = tree.root_node
-                for g in _extract_globals(root_node, data):
+            if root_node is not None:
+                # 776에서 이미 파싱한 root_node 재사용(재파싱 제거). file_globals도 778 결과 재사용.
+                for g in file_globals:
                     if not g:
                         continue
                     globals_list.add(g)

@@ -700,6 +700,12 @@ def generate_uds_source_sections(
             _global_prefixes = ("g_", "s_", "u8g_", "u16g_", "u32g_", "u8s_", "u16s_", "u32s_")
         _extern_added = 0
         c_source_texts = [text for path, text in source_text_cache.items() if str(path).lower().endswith(".c")]
+        # extern 사용여부 판정을 위해 전체 .c 원문의 식별자 토큰집합을 1회만 만든다.
+        # (기존: extern마다 모든 .c에 re.search full-text 스캔 → O(헤더×extern×전체.c). 대형
+        #  트리에서 파싱 지연의 주요인. 토큰집합 in 검사로 O(extern)로 단축.)
+        _c_token_set: Set[str] = set()
+        for _src_text in c_source_texts:
+            _c_token_set.update(re.findall(r"[A-Za-z_]\w*", _src_text))
         for hdr_file in [f for f in files if f.suffix.lower() == ".h"][:300]:
             try:
                 hdr_text = _src_read(hdr_file)
@@ -716,9 +722,8 @@ def generate_uds_source_sections(
                 if etype.lower() in {"void"}:
                     continue
                 used_in_body = ename in used_identifier_set
-                used_in_source = used_in_body or any(
-                    re.search(rf"\b{re.escape(ename)}\b", src_text) for src_text in c_source_texts
-                )
+                # 토큰집합 멤버십(O(1))으로 전체 .c full-text re.search를 대체.
+                used_in_source = used_in_body or (ename in _c_token_set)
                 if not used_in_source:
                     continue
                 if (not any(ename.startswith(p) for p in _global_prefixes)) and not used_in_body:

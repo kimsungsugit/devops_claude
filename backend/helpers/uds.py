@@ -548,6 +548,53 @@ def _to_swcom_from_fn(info: Dict[str, Any]) -> str:
     return f"SwCom_{m.group(1)}" if m else "UNMAPPED"
 
 
+def _source_sections_disk_cache_path(source_root: str) -> Path:
+    """디스크 영속 캐시 파일 경로(정규화 source_root의 sha1). repo_root(모듈 전역, parents[2])."""
+    import hashlib
+    _key = os.path.normcase(str(source_root or "").strip())
+    _h = hashlib.sha1(_key.encode("utf-8", "ignore")).hexdigest()[:16]
+    return repo_root / ".devops_pro_cache" / "source_sections" / f"{_h}.json"
+
+
+def _source_root_signature(source_root: str, max_files: int = 1200) -> Optional[str]:
+    """로컬 소스 트리의 (경로,mtime,size) 시그니처. 로컬 FS만(cloudium은 None → 디스크캐시 미사용).
+
+    소스가 로컬에 있을 때만 유효 — 파일 하나라도 mtime/size가 바뀌면 시그니처가 달라져
+    캐시가 무효화된다. cloudium/원격은 로컬 stat이 무의미하므로 None을 반환(디스크캐시 skip).
+    """
+    import hashlib
+    roots = [p.strip() for p in str(source_root or "").replace(";", ",").split(",") if p.strip()]
+    if not roots:
+        return None
+    h = hashlib.sha1()
+    count = 0
+    for root in roots:
+        rp = Path(root).expanduser()
+        try:
+            if not rp.exists() or not rp.is_dir():
+                return None  # 로컬에 없음 → 시그니처 불가(cloudium 등)
+        except Exception:
+            return None  # U:\ 등 접근 거부(PermissionError) → 로컬 아님 → 디스크캐시 skip
+        for dp, _dns, fns in os.walk(rp):
+            for fn in fns:
+                if not fn.lower().endswith((".c", ".h")):
+                    continue
+                fpath = Path(dp) / fn
+                try:
+                    st = fpath.stat()
+                except Exception:
+                    return None
+                h.update(str(fpath).encode("utf-8", "ignore"))
+                h.update(str(int(st.st_mtime)).encode())
+                h.update(str(st.st_size).encode())
+                count += 1
+                if count > max_files:
+                    break
+            if count > max_files:
+                break
+    return f"{count}:{h.hexdigest()}"
+
+
 def _get_source_sections_cached(source_root: str, max_files: int = 1200) -> Dict[str, Any]:
     # 콤마 구분 복수 경로 지원: 첫 번째 경로로 검증, 전체를 전달
     _first = (source_root or "").split(",")[0].strip()
@@ -580,6 +627,23 @@ def _get_source_sections_cached(source_root: str, max_files: int = 1200) -> Dict
                 return deepcopy(payload)
     import logging as _logging
     _log = _logging.getLogger("uvicorn.error")
+    # 디스크 영속 캐시(로컬 소스만): 재기동/크래시 후 첫 요청의 풀 재파싱(수십분)을 회피한다.
+    # (경로,mtime,size) 시그니처가 일치하면 파싱 없이 로드. cloudium은 시그니처=None → skip.
+    _sig = _source_root_signature(source_root, max_files)
+    _disk_path = _source_sections_disk_cache_path(source_root)
+    if _sig:
+        try:
+            if _disk_path.exists():
+                _cached = json.loads(_disk_path.read_text(encoding="utf-8"))
+                if isinstance(_cached, dict) and _cached.get("signature") == _sig:
+                    _payload = _cached.get("payload")
+                    if isinstance(_payload, dict):
+                        _log.info("[source_sections] Disk cache hit for %s", key)
+                        with _source_sections_cache_lock:
+                            _source_sections_cache[key] = {"payload": _payload, "cached_at": now}
+                        return deepcopy(_payload)
+        except Exception as _dc_exc:  # noqa: BLE001 — 디스크캐시 실패는 파싱으로 폴백
+            _log.debug("source_sections disk cache read failed: %s", _dc_exc)
     _log.info("[source_sections] Parsing started for %s", key)
     t0 = time()
     sections = generate_uds_source_sections(source_root)  # 콤마 구분 그대로 전달
@@ -587,6 +651,14 @@ def _get_source_sections_cached(source_root: str, max_files: int = 1200) -> Dict
     _log.info("[source_sections] Parsing finished in %.1fs for %s", elapsed, key)
     with _source_sections_cache_lock:
         _source_sections_cache[key] = {"payload": sections, "cached_at": now}
+    if _sig:
+        try:
+            _disk_path.parent.mkdir(parents=True, exist_ok=True)
+            _tmp = _disk_path.with_suffix(f".{os.getpid()}.tmp")
+            _tmp.write_text(json.dumps({"signature": _sig, "payload": sections}, ensure_ascii=False), encoding="utf-8")
+            os.replace(_tmp, _disk_path)  # 원자적 교체
+        except Exception as _dc_exc:  # noqa: BLE001 — 디스크캐시 쓰기 실패는 무시(다음에 재파싱)
+            _log.debug("source_sections disk cache write failed: %s", _dc_exc)
     return deepcopy(sections)
 
 
