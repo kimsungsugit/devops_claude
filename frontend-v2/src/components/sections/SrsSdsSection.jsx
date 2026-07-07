@@ -859,6 +859,98 @@ function VModelPairSummary({ pg }) {
   );
 }
 
+// ── 추적성 요약 상세 (상태 총계 카드 · ASIL 등급별 분포/커버리지 · 밴드별 추적 현황) ──
+// 전부 rows(전체·필터 무관)에서 파생 — CoverageBar와 동일 소스라 수치 lockstep. 백엔드 무변경.
+// _STAGE_COLORS/_ASIL_COLORS/COVERAGE_COLORS/_TRACE_BANDS(모듈 상수)는 렌더 시점 접근이라 TDZ 무관.
+function TraceExtraSummary({ coverage, extra, onFilter }) {
+  if (!coverage || !extra) return null;
+  const total = coverage.total || 0;
+  const cards = [
+    { key: 'all', label: '전체 요구사항', val: total, fg: 'var(--fg)', bg: 'var(--bg-elevated)', border: 'var(--border)' },
+    { key: 'covered', label: '충족 (covered)', val: coverage.covered, fg: COVERAGE_COLORS.covered.fg, bg: COVERAGE_COLORS.covered.bg, border: COVERAGE_COLORS.covered.border },
+    { key: 'partial', label: '부분 (partial)', val: coverage.partial, fg: COVERAGE_COLORS.partial.fg, bg: COVERAGE_COLORS.partial.bg, border: COVERAGE_COLORS.partial.border },
+    { key: 'uncovered', label: '미충족 (uncovered)', val: coverage.uncovered, fg: COVERAGE_COLORS.uncovered.fg, bg: COVERAGE_COLORS.uncovered.bg, border: COVERAGE_COLORS.uncovered.border },
+  ];
+  const asilLabel = (g) => (g === '미상' ? '미상' : g === 'QM' ? 'QM' : `ASIL ${g}`);
+  return (
+    <div style={{ marginBottom: 12, border: '1px solid var(--border)', borderRadius: 8, padding: '10px 14px', background: 'var(--bg)' }}>
+      <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 10, color: 'var(--fg)' }}>
+        추적성 요약 상세 <span style={{ fontWeight: 400, fontSize: 11, color: 'var(--text-muted)' }}>— 상태 총계 · ASIL 분포 · 밴드별 추적 (전체 {total}건 기준)</span>
+      </div>
+
+      {/* 1) 상태 총계 카드 — 클릭 시 매트릭스 상태 필터 (CoverageBar와 동일 onFilter) */}
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 14 }}>
+        {cards.map(c => {
+          const pct = total ? Math.round((c.val / total) * 100) : 0;
+          return (
+            <button key={c.key} type="button" onClick={() => onFilter?.(c.key)}
+              title={`${c.label} — 클릭하면 매트릭스를 이 상태로 필터`}
+              style={{ flex: '1 1 130px', minWidth: 118, textAlign: 'left', padding: '9px 12px', borderRadius: 8,
+                border: `1px solid ${c.border}`, background: c.bg, cursor: 'pointer' }}>
+              <div style={{ fontSize: 11, color: c.fg, fontWeight: 600, marginBottom: 2 }}>{c.label}</div>
+              <div style={{ fontSize: 22, fontWeight: 800, color: c.fg, lineHeight: 1.1 }}>{c.val}</div>
+              {c.key !== 'all' && <div style={{ fontSize: 11, color: c.fg, opacity: 0.85 }}>{pct}%</div>}
+            </button>
+          );
+        })}
+      </div>
+
+      {/* 2) ASIL 등급별 분포·커버리지 */}
+      {extra.asilRows.length > 0 && (
+        <div style={{ marginBottom: 14 }}>
+          <div style={{ fontWeight: 700, fontSize: 12, marginBottom: 6, color: 'var(--fg)' }}>
+            ASIL 등급별 분포·커버리지 <span style={{ fontWeight: 400, fontSize: 11, color: 'var(--text-muted)' }}>— 등급별 요구사항 수와 검증(충족) 비율</span>
+          </div>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+            {extra.asilRows.map(a => {
+              const pct = a.total ? Math.round((a.covered / a.total) * 100) : 0;
+              const col = _ASIL_COLORS[a.grade] || '#6b7280';
+              const pctFg = pct >= 70 ? COVERAGE_COLORS.covered.fg : pct >= 30 ? COVERAGE_COLORS.partial.fg : COVERAGE_COLORS.uncovered.fg;
+              return (
+                <div key={a.grade} style={{ flex: '1 1 150px', minWidth: 138, border: '1px solid var(--border)', borderRadius: 8, padding: '8px 10px', background: 'var(--bg-elevated)' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 5 }}>
+                    <span style={{ fontSize: 10, fontWeight: 700, color: '#fff', background: col, padding: '1px 7px', borderRadius: 8, whiteSpace: 'nowrap' }}>{asilLabel(a.grade)}</span>
+                    <span style={{ fontSize: 13, fontWeight: 700, color: 'var(--fg)' }}>{a.total}</span>
+                    <span style={{ flex: 1 }} />
+                    <span style={{ fontSize: 11, fontWeight: 700, color: pctFg }}>{pct}%</span>
+                  </div>
+                  <div style={{ height: 6, background: '#e5e7eb', borderRadius: 3, overflow: 'hidden' }}>
+                    <div style={{ width: `${pct}%`, height: '100%', background: col }} />
+                  </div>
+                  <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 3 }}>검증 {a.covered}/{a.total}</div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* 3) 밴드별 추적 현황 — 각 V-model 밴드에 연결된 요구사항 수 */}
+      <div>
+        <div style={{ fontWeight: 700, fontSize: 12, marginBottom: 6, color: 'var(--fg)' }}>
+          밴드별 추적 현황 <span style={{ fontWeight: 400, fontSize: 11, color: 'var(--text-muted)' }}>— 각 V-model 밴드에 연결된 요구사항 수 (전체 {total} 대비)</span>
+        </div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+          {_TRACE_BANDS.map(b => {
+            const cnt = extra.bandMap[b] || 0;
+            const pct = total ? Math.round((cnt / total) * 100) : 0;
+            const col = _STAGE_COLORS[b] || '#64748b';
+            return (
+              <div key={b} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12 }}>
+                <span style={{ width: 84, fontWeight: 600, color: col, whiteSpace: 'nowrap' }}>{b}</span>
+                <div style={{ flex: 1, minWidth: 80, height: 8, background: '#e5e7eb', borderRadius: 4, overflow: 'hidden' }}>
+                  <div style={{ width: `${pct}%`, height: '100%', background: col }} />
+                </div>
+                <span style={{ width: 104, textAlign: 'right', color: cnt ? 'var(--fg)' : 'var(--text-muted)', fontWeight: cnt ? 700 : 400, whiteSpace: 'nowrap' }}>{cnt}건 · {pct}%</span>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── hiMA식 교차 추적성 매트릭스 (additive '매트릭스' 뷰) ──
 // 행=요구사항(target), 열=SDS 컴포넌트(related), 셀=O/공백. 추적 0건 행은 핑크 강조
 // (hiMA 0카운트 밴드 대응). 데이터는 filtered rows에서 클라이언트 파생(필터 반영),
@@ -1369,6 +1461,26 @@ function TraceMatrix({ matrix, focusFunctions = null, onClearFocus = null,
     return { covered, partial, uncovered, total, partialWithDesign, designTotal, pct: total > 0 ? Math.round((covered / total) * 100) : 0 };
   }, [rows]);
 
+  // ASIL 등급별 분포 + 밴드별 추적 현황 (TraceExtraSummary용) — 전체 rows 파생, coverage와 동일 소스.
+  const extraSummary = useMemo(() => {
+    if (!rows.length) return null;
+    const asilMap = {};   // grade -> { total, covered }
+    const bandMap = {};   // band -> 연결 요구사항 수
+    for (const bk of _TRACE_BANDS) bandMap[bk] = 0;
+    for (const r of rows) {
+      const raw = String(r.asil || '').toUpperCase().trim();
+      const g = (raw === 'D' || raw === 'C' || raw === 'B' || raw === 'A' || raw === 'QM') ? raw : '미상';
+      const cell = asilMap[g] || (asilMap[g] = { total: 0, covered: 0 });
+      cell.total++;
+      if (deriveStatus(r) === 'covered') cell.covered++;
+      const bands = _rowBands(r);
+      for (const bk of _TRACE_BANDS) if (bands[bk] && bands[bk].length) bandMap[bk]++;
+    }
+    const order = ['D', 'C', 'B', 'A', 'QM', '미상'];
+    const asilRows = order.filter(g => asilMap[g]).map(g => ({ grade: g, total: asilMap[g].total, covered: asilMap[g].covered }));
+    return { asilRows, bandMap };
+  }, [rows]);
+
   // V-Model 단계별 추적성 공백 — 정방향(설계 단절)·역방향(미추적 시험)을 viewMode와
   // 무관하게 항상 노출(deep-analyze WARNING: 공백이 covered 녹색/토글 뒤에 묻힘).
   //  - sdsNoUds: SRS→SDS는 됐으나 SDS→UDS 끊김(설계 단절). 단 HSIS 실현(인터페이스 요구)은 제외.
@@ -1799,6 +1911,12 @@ function TraceMatrix({ matrix, focusFunctions = null, onClearFocus = null,
           <CoverageBar covered={coverage.covered} partial={coverage.partial} total={coverage.total}
             onFilter={(status) => { setStatusFilter(status === 'all' ? 'all' : status); setCurrentPage(0); }} />
         </div>
+      )}
+
+      {/* 추적성 요약 상세 — 상태 총계 카드 · ASIL 분포/커버리지 · 밴드별 추적 현황 (CoverageBar 아래 상시 노출) */}
+      {coverage && extraSummary && (
+        <TraceExtraSummary coverage={coverage} extra={extraSummary}
+          onFilter={(k) => { setStatusFilter(k === 'all' ? 'all' : k); setCurrentPage(0); }} />
       )}
 
       {/* Data sources */}
