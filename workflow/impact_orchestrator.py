@@ -172,6 +172,93 @@ def _load_uds_fn_details(
     return result
 
 
+# 링크된 UDS 문서에서 추출한 {함수명(소문자): ASIL} 맵의 경로 캐시.
+# 대형 SwUDS docx(수십MB)를 매 impact 실행마다 워커 IPC로 재-read/재파싱하지 않도록 1회만.
+# 키는 문서 경로(파일명에 버전 포함이라 개정 시 경로가 바뀜 → staleness 위험 낮음).
+_UDS_NAME_ASIL_CACHE: Dict[str, Dict[str, str]] = {}
+
+
+def _uds_name_asil_map(uds_path: str) -> Dict[str, str]:
+    """링크된 UDS(SwUDS) 문서에서 {함수명(소문자): ASIL} 맵을 추출한다.
+
+    C 소스에 Doxygen `@asil` 주석이 없는 프로젝트(예: NE1AW_PORTING)는 함수 ASIL이 전부
+    '미상'이 되는데, 실제 등급은 UDS 문서에 있다. UDS는 cloudium U:\\일 수 있으므로 반드시
+    워커(`get_resolver().read_bytes`) 경유로 읽는다(직접 접근 금지). heading 기반 파서
+    (`parse_swuds_docx`)를 우선하고, heading-less 레이아웃은 reverse-corpus 추출기로 보완.
+    접근 불가/미존재/파싱 실패는 빈 맵으로 조용히 폴백(impact 본류 비차단). 경로 캐시.
+    """
+    if not uds_path:
+        return {}
+    _cached = _UDS_NAME_ASIL_CACHE.get(uds_path)
+    if _cached is not None:
+        return _cached
+    try:
+        from backend.services.file_resolver import get_resolver
+        docx_bytes = get_resolver().read_bytes(uds_path)
+    except (FileNotFoundError, PermissionError, OSError):
+        _UDS_NAME_ASIL_CACHE[uds_path] = {}  # 접근 불가(cloudium 미허용/미존재) → 빈 맵 캐시(재시도 폭주 방지)
+        return {}
+    except Exception:
+        return {}  # 일시 오류(워커 미기동 등)는 캐시하지 않음 — 다음 실행서 재시도
+    result: Dict[str, str] = {}
+    if docx_bytes:
+        # 1) heading 기반 SwUDS 파서 — 함수명→ASIL 직접(현대/모비스 포맷).
+        try:
+            from backend.services.swut_swuds_parser import parse_swuds_docx
+            _res = parse_swuds_docx(docx_bytes)
+            for _e in (_res.entries or []):
+                _n = str(getattr(_e, "name", "") or "").strip().lower()
+                _a = str(getattr(_e, "asil", "") or "").strip()
+                if _n and _a:
+                    result.setdefault(_n, _a)
+        except Exception:
+            pass
+        # 2) heading-less 레이아웃 폴백 — SwUFn 근접 매칭(reverse-corpus, v1.07류).
+        try:
+            from backend.services.iso26262_doc_asil_extractor import (
+                extract_function_asil_from_suds,
+                extract_function_name_to_swufn_from_suds,
+            )
+            _swufn_asil = extract_function_asil_from_suds(docx_bytes) or {}
+            _name_swufn = extract_function_name_to_swufn_from_suds(docx_bytes) or {}
+            for _n, _s in _name_swufn.items():
+                _a = _swufn_asil.get(_s)
+                _nl = str(_n or "").strip().lower()
+                if _nl and _a:
+                    result.setdefault(_nl, _a)
+        except Exception:
+            pass
+    _UDS_NAME_ASIL_CACHE[uds_path] = result
+    return result
+
+
+def _enrich_asil_from_uds(by_name: Dict[str, Any], uds_path: str) -> tuple[int, int]:
+    """소스 주석에 ASIL이 없는 함수만 링크된 UDS의 함수별 ASIL로 보강한다(안전측: 소스 > UDS).
+
+    소스 주석 ASIL이 있는 함수는 절대 덮지 않는다. 보강된 함수엔 `asil_source="uds"` 표식.
+    반환: (보강한 함수 수, 보강 후에도 남은 미상 수).
+    """
+    if not uds_path or not isinstance(by_name, dict):
+        return 0, 0
+    missing = [
+        fn for fn, info in by_name.items()
+        if isinstance(info, dict) and not str(info.get("asil") or "").strip()
+    ]
+    if not missing:
+        return 0, 0
+    name_asil = _uds_name_asil_map(uds_path)
+    if not name_asil:
+        return 0, len(missing)
+    enriched = 0
+    for fn in missing:
+        _a = name_asil.get(fn)
+        if _a:
+            by_name[fn]["asil"] = _a
+            by_name[fn]["asil_source"] = "uds"
+            enriched += 1
+    return enriched, len(missing) - enriched
+
+
 def _load_suts_fn_tcs(
     linked_doc: str, flagged_fns: List[str]
 ) -> Dict[str, List[str]]:
@@ -933,12 +1020,18 @@ def run_impact_update(
             if not changed_types and trigger.changed_files:
                 changed_types = _fallback_changed_types_from_files(trigger.changed_files)
 
+        _asil_uds_enriched = 0  # UDS 문서에서 ASIL을 보강한 함수 수(소스 주석 미기재분 — 아래서 채움)
         if entry and entry.source_root:
             if callable(on_progress):
                 on_progress("impact_analysis", "영향 범위를 계산 중입니다.", {"changed_functions": len(changed_types)})
             sections = _load_source_sections(entry.source_root)
             by_name_raw = sections.get("function_details_by_name", {}) or {}
             by_name = {str(k).strip().lower(): v for k, v in by_name_raw.items() if isinstance(v, dict)}
+            # C 소스에 @asil 주석이 없어도 링크된 UDS(함수별 ASIL)로 보강한다 — cloudium U:\는 워커 경유.
+            # (소스 ASIL이 있는 함수는 유지, 빈 함수만 채움 → _asil_of·에스컬레이션·커버리지 타깃에 반영)
+            _asil_uds_enriched, _asil_still_missing = _enrich_asil_from_uds(
+                by_name, getattr(getattr(entry, "linked_docs", None), "uds", "") or "",
+            )
             changed_types = _resolve_changed_types_to_functions(
                 changed_types, trigger.changed_files, by_name, edit_types=edit_types
             )
@@ -976,6 +1069,10 @@ def run_impact_update(
             )
         impacted_total = len(_impacted_union(impact_groups))
         warnings: List[str] = []
+        if _asil_uds_enriched:
+            warnings.append(
+                f"ASIL 보강: 소스 주석에 ASIL이 없는 함수 {_asil_uds_enriched}개를 UDS 문서에서 해석(cloudium 워커 경유)"
+            )
         # AUTO를 검토(FLAG)로 강등할 '실질적' 사유만 모은다 — 정보성 경고(Jenkins revision/SITS
         # cross 안내 등)는 AUTO를 봉쇄하지 않는다(과보수 회귀 방지). 한도 초과·ASIL 에스컬레이션만.
         promote_to_review = False
