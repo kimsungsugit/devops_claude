@@ -4927,6 +4927,17 @@ def jenkins_call_tree_xlsx(body: Dict[str, Any]) -> Response:
     # 함수명 폴백(단 cloudium 게이트 403은 그대로 전파해 경로 접근 불가를 알림).
     swit_map = None
     sits_path = str(body.get("sits_path") or "").strip()
+    scm_id = str(body.get("scm_id") or "").strip()
+    if not sits_path and scm_id:
+        # doc_paths.sits 미설정 시 SCM 연결문서(linked_docs.sits)에서 SITS 경로 해결.
+        # (Settings 화면엔 SCM 경로가 placeholder로만 보이고 doc_paths엔 복사 안 되는 흔한 케이스.)
+        try:
+            from backend.services.scm_registry import get_registry_entry
+            entry = get_registry_entry(scm_id)
+            ld = getattr(entry, "linked_docs", None) if entry else None
+            sits_path = str(getattr(ld, "sits", "") or "").strip() if ld else ""
+        except Exception as exc:
+            _api_logger.debug("SCM linked_docs.sits resolve failed (%s): %s", scm_id, exc)
     if sits_path:
         try:
             from backend.services.call_tree_xlsx import parse_swit_strategy_map

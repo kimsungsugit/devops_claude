@@ -3408,11 +3408,15 @@ function CallTreeView({ job, cacheRoot, buildSelector, sourceRoot, seedFns, toas
   const exportXlsx = useCallback(async (useSwitId = false) => {
     if (!data) { toast('warning', '먼저 콜트리를 생성한 뒤 내보내세요.'); return; }
     let sitsPath = '';
+    let scmId = '';
     if (useSwitId) {
       try { sitsPath = String((JSON.parse(localStorage.getItem('devops_v2_doc_paths') || '{}').sits) || '').trim(); }
       catch { sitsPath = ''; }
-      if (!sitsPath) {
-        toast('warning', 'SwIT ID 라벨에는 참조 SwITS(SITS) 파일 경로가 필요합니다 — 설정 > 입력자료에서 SITS 경로를 지정하세요.');
+      // doc_paths.sits 미설정이면 SCM 연결문서(linked_docs.sits)에서 백엔드가 해결하도록 기준 SCM id 전달.
+      // (설정 화면에 SITS가 SCM placeholder로만 보이고 '빈 칸 채우기'를 안 눌러 doc_paths엔 없는 흔한 케이스.)
+      if (!sitsPath) { scmId = String(localStorage.getItem('devops_v2_doc_scm') || '').trim(); }
+      if (!sitsPath && !scmId) {
+        toast('warning', 'SwIT ID 라벨에는 SITS 경로가 필요합니다 — 설정 > 입력자료에서 SITS 경로를 직접 지정하거나, 기준 SCM(연결문서에 SITS 포함)을 선택하세요.');
         return;
       }
     }
@@ -3426,7 +3430,10 @@ function CallTreeView({ job, cacheRoot, buildSelector, sourceRoot, seedFns, toas
         source_complete: data?.bidir ? data?.callees?.meta?.source_complete : data?.meta?.source_complete,
       };
       const bodyObj = { payload: data, meta };
-      if (useSwitId && sitsPath) bodyObj.sits_path = sitsPath;
+      if (useSwitId) {
+        if (sitsPath) bodyObj.sits_path = sitsPath;
+        else if (scmId) bodyObj.scm_id = scmId;
+      }
       const res = await fetch(buildUrl('/api/jenkins/call-tree/export-xlsx'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...authHeaders() },
