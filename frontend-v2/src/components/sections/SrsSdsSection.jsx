@@ -3403,8 +3403,19 @@ function CallTreeView({ job, cacheRoot, buildSelector, sourceRoot, seedFns, toas
   // xlsx 내보내기 — 현재 콜트리(data: 단방향 trees 또는 양방향 bidir)를 회사 SwITS
   // "2.SW Integration Strategy" 형식(depth 컬럼)으로 서버에서 렌더. 바이너리 응답이라
   // api() 헬퍼 대신 raw fetch지만 authHeaders(Bearer+X-User) + res.ok 검사 명시(X9).
-  const exportXlsx = useCallback(async () => {
+  // useSwitId=true면 진입 함수 블록 라벨을 참조 SwITS의 SwIT_SwUFn_ID로 치환(설정>입력자료의
+  // SITS 경로를 sits_path로 전달, 백엔드가 매핑 추출). false면 함수명 모드(현재 방식). 두 방식 병존.
+  const exportXlsx = useCallback(async (useSwitId = false) => {
     if (!data) { toast('warning', '먼저 콜트리를 생성한 뒤 내보내세요.'); return; }
+    let sitsPath = '';
+    if (useSwitId) {
+      try { sitsPath = String((JSON.parse(localStorage.getItem('devops_v2_doc_paths') || '{}').sits) || '').trim(); }
+      catch { sitsPath = ''; }
+      if (!sitsPath) {
+        toast('warning', 'SwIT ID 라벨에는 참조 SwITS(SITS) 파일 경로가 필요합니다 — 설정 > 입력자료에서 SITS 경로를 지정하세요.');
+        return;
+      }
+    }
     setXlsxBusy(true);
     try {
       const meta = {
@@ -3412,13 +3423,14 @@ function CallTreeView({ job, cacheRoot, buildSelector, sourceRoot, seedFns, toas
         build_selector: buildSelector || '',
         source_root: sourceRoot || '',
         // 감사 provenance — 체크아웃 소스 미완(부분 집계) 신호를 xlsx 헤더에도 전달(W3).
-        // 화면 토스트 경고가 내보낸 파일에서 사라져 부분 트리를 완전본으로 오인하는 것 방지.
         source_complete: data?.bidir ? data?.callees?.meta?.source_complete : data?.meta?.source_complete,
       };
+      const bodyObj = { payload: data, meta };
+      if (useSwitId && sitsPath) bodyObj.sits_path = sitsPath;
       const res = await fetch(buildUrl('/api/jenkins/call-tree/export-xlsx'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...authHeaders() },
-        body: JSON.stringify({ payload: data, meta }),
+        body: JSON.stringify(bodyObj),
       });
       if (!res.ok) {
         const t = await res.text().catch(() => '');
@@ -3427,10 +3439,10 @@ function CallTreeView({ job, cacheRoot, buildSelector, sourceRoot, seedFns, toas
       const blob = await res.blob();
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
-      a.href = url; a.download = 'call_tree_integration_strategy.xlsx';
+      a.href = url; a.download = useSwitId ? 'call_tree_swit_id.xlsx' : 'call_tree_integration_strategy.xlsx';
       document.body.appendChild(a); a.click(); document.body.removeChild(a);
       URL.revokeObjectURL(url);
-      toast('success', '엑셀 파일을 내보냈습니다.');
+      toast('success', useSwitId ? 'SwIT ID 엑셀을 내보냈습니다.' : '엑셀 파일을 내보냈습니다.');
     } catch (e) {
       toast('error', `엑셀 내보내기 실패: ${e.message}`);
     } finally {
@@ -3520,12 +3532,21 @@ function CallTreeView({ job, cacheRoot, buildSelector, sourceRoot, seedFns, toas
           </button>
         )}
         {data && (
-          <button type="button" onClick={exportXlsx} disabled={loading || xlsxBusy}
-            title="현재 호출 트리를 회사 SwITS 통합전략(2.SW Integration Strategy) 형식의 xlsx로 내보냅니다 — depth별 컬럼 들여쓰기·정의 파일·ASIL·마커 포함."
-            style={{ padding: '6px 14px', fontSize: 12, fontWeight: 600, borderRadius: 4, cursor: (loading || xlsxBusy) ? 'default' : 'pointer',
-              background: 'var(--bg)', color: 'var(--accent)', border: '1px solid var(--accent)' }}>
-            {xlsxBusy ? '생성 중…' : 'Excel 내보내기 ↓'}
-          </button>
+          <>
+            <button type="button" onClick={() => exportXlsx(false)} disabled={loading || xlsxBusy}
+              title="현재 호출 트리를 SwITS 통합전략(2.SW Integration Strategy) 형식 xlsx로 내보냅니다 — 진입 함수 블록을 함수명으로 표시. depth 컬럼·정의 파일·ASIL·마커 포함."
+              style={{ padding: '6px 14px', fontSize: 12, fontWeight: 600, borderRadius: 4, cursor: (loading || xlsxBusy) ? 'default' : 'pointer',
+                background: 'var(--bg)', color: 'var(--accent)', border: '1px solid var(--accent)' }}>
+              {xlsxBusy ? '생성 중…' : 'Excel(함수명) ↓'}
+            </button>
+            <button type="button" onClick={() => exportXlsx(true)} disabled={loading || xlsxBusy}
+              title="진입 함수 블록을 참조 SwITS의 SwIT_SwUFn_ID로 표시해 내보냅니다(설정>입력자료의 SITS 경로 필요). 매칭 안 되는 함수는 함수명 유지."
+              style={{ padding: '6px 14px', fontSize: 12, fontWeight: 600, borderRadius: 4, cursor: (loading || xlsxBusy) ? 'default' : 'pointer',
+                background: 'var(--bg)', color: '#fff', border: '1px solid var(--accent)',
+                backgroundColor: 'var(--accent)' }}>
+              {xlsxBusy ? '생성 중…' : 'Excel(SwIT ID) ↓'}
+            </button>
+          </>
         )}
       </div>
 

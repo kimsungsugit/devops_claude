@@ -4922,8 +4922,27 @@ def jenkins_call_tree_xlsx(body: Dict[str, Any]) -> Response:
     meta = dict(meta)
     # 생성시각은 서버 권위값으로 강제(클라가 보낸 값 무시) — audit '생성시각' 위조 방지(I-3).
     meta["generated_at"] = datetime.now().isoformat(timespec="seconds")
+    # SwIT ID 모드: 참조 SwITS 파일에서 {진입함수:SwIT_SwUFn_ID} 매핑을 읽어 루트 블록 라벨을
+    # ID로 치환. sits_path 미제공이면 swit_map=None → 함수명 모드(현재 방식). 파싱/접근 실패도
+    # 함수명 폴백(단 cloudium 게이트 403은 그대로 전파해 경로 접근 불가를 알림).
+    swit_map = None
+    sits_path = str(body.get("sits_path") or "").strip()
+    if sits_path:
+        try:
+            from backend.services.call_tree_xlsx import parse_swit_strategy_map
+            from backend.services.file_resolver import get_resolver
+            from backend.services.resolver_helpers import enforce_resolver_access
+            enforce_resolver_access(sits_path)
+            resolver = get_resolver()
+            if resolver.exists(sits_path):
+                swit_map = parse_swit_strategy_map(resolver.read_bytes(sits_path))
+        except HTTPException:
+            raise
+        except Exception as exc:
+            _api_logger.debug("SwIT strategy map parse failed: %s", exc)
+            swit_map = None
     try:
-        data = build_call_tree_xlsx(payload, meta)
+        data = build_call_tree_xlsx(payload, meta, swit_map=swit_map)
     except ImportError as exc:
         raise HTTPException(status_code=500, detail=f"openpyxl 미설치: {exc}")
     except Exception as exc:

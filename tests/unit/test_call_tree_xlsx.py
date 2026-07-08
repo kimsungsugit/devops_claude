@@ -249,3 +249,45 @@ def test_bidir_caller_sheet_reverse_label():
     wb = _open(build_call_tree_xlsx(bidir))
     assert "역호출(caller)" in (wb["역호출 트리 (caller)"].cell(2, 1).value or "")
     assert "호출(callee)" in (wb["호출 트리 (callee)"].cell(2, 1).value or "")
+
+
+def test_parse_swit_strategy_map():
+    """SwITS '2.SW Integration Strategy' 시트 → {진입함수: SwIT_ID} 추출."""
+    from backend.services.call_tree_xlsx import parse_swit_strategy_map
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "2.SW Integration Strategy"
+    ws.cell(7, 2, "SwIT_SwUFn_0504_01")   # B7 = ID
+    ws.cell(7, 3, "s_Ap_Execute")          # C7 = 진입 함수(첫 non-empty)
+    ws.cell(10, 2, "SwIT_SwUFn_3563")      # B10 = ID
+    ws.cell(10, 4, "main")                 # D10 = 진입 함수(C 비어도 첫 non-empty)
+    ws.cell(12, 2, "일반행")               # SwIT 아님 → 무시
+    ws.cell(12, 3, "noise")
+    buf = io.BytesIO()
+    wb.save(buf)
+    m = parse_swit_strategy_map(buf.getvalue())
+    assert m["s_Ap_Execute"] == "SwIT_SwUFn_0504_01"
+    assert m["main"] == "SwIT_SwUFn_3563"
+    assert "noise" not in m
+
+
+def test_swit_map_relabels_root_only():
+    """swit_map: 루트 B열만 SwIT_ID로 치환, depth 트리 컬럼은 함수명 유지."""
+    swit = {"main": "SwIT_SwUFn_3563", "child": "SwIT_SwUFn_9999"}
+    ws = _open(build_call_tree_xlsx(
+        {"trees": [{"name": "main", "calls": [{"name": "child", "calls": []}]}], "stats": {}},
+        {}, swit_map=swit,
+    ))["SW Integration Strategy"]
+    assert _find(ws, "SwIT_SwUFn_3563", col=2) is not None, "루트 B열 SwIT_ID 치환 안 됨"
+    assert _find(ws, "main", col=3) is not None, "트리 C열 함수명 유지 안 됨"
+    # 자식은 루트가 아니므로 B열 아님 — swit_map 매칭돼도 트리 컬럼(D)에 함수명
+    assert _find(ws, "child", col=4) is not None
+    assert _find(ws, "SwIT_SwUFn_9999", col=2) is None, "비루트가 B열에 잘못 치환됨"
+
+
+def test_no_swit_map_keeps_function_name():
+    """swit_map 미지정 → 함수명 유지(현재 방식)."""
+    ws = _open(build_call_tree_xlsx(
+        {"trees": [{"name": "main", "calls": []}], "stats": {}}, {},
+    ))["SW Integration Strategy"]
+    assert _find(ws, "main", col=2) is not None

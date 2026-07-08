@@ -120,6 +120,43 @@ def _scan_tree(trees: List[Dict[str, Any]]) -> Tuple[int, bool]:
     return min(max_depth, _MAX_DEPTH), truncated
 
 
+def parse_swit_strategy_map(xlsx_bytes: bytes) -> Dict[str, str]:
+    """SwITS '2.SW Integration Strategy' 시트 → {진입 함수명: SwIT_SwUFn_ID}.
+
+    B열이 'SwIT'로 시작하는 행을 통합테스트 ID로 보고, 같은 행의 C열~(depth 컬럼) 중 첫
+    non-empty 셀을 진입 함수명으로 매핑한다(회사 SwITS 통합전략 시트 레이아웃 재현). 콜트리
+    xlsx의 루트 블록 라벨을 함수명 대신 이 ID로 치환하는 데 쓰인다. 파싱 실패/시트 부재는
+    빈 dict(호출자가 함수명 폴백). DoS 캡: 5000행 × 20열.
+    """
+    from openpyxl import load_workbook
+
+    mapping: Dict[str, str] = {}
+    try:
+        wb = load_workbook(io.BytesIO(xlsx_bytes), data_only=True, read_only=True)
+    except Exception:
+        return mapping
+    try:
+        ws = None
+        for nm in wb.sheetnames:
+            if "Integration Strategy" in nm:
+                ws = wb[nm]
+                break
+        if ws is None:
+            return mapping
+        for row in ws.iter_rows(min_row=1, max_row=5000, max_col=20):
+            b = row[1].value if len(row) > 1 else None
+            if b and str(b).strip().startswith("SwIT"):
+                swit_id = str(b).strip()
+                for cell in row[2:]:
+                    v = cell.value
+                    if v and str(v).strip():
+                        mapping.setdefault(str(v).strip(), swit_id)
+                        break
+    finally:
+        wb.close()
+    return mapping
+
+
 def _meta_line(stats: Dict[str, Any], meta: Dict[str, Any], reverse: bool) -> str:
     """상단 메타 요약 한 줄. reverse는 호출자가 명시(양방향 시트는 stats.reverse 폴백에 의존 안 함)."""
     bits = [
@@ -143,7 +180,8 @@ def _meta_line(stats: Dict[str, Any], meta: Dict[str, Any], reverse: bool) -> st
     return "   |   ".join(bits)
 
 
-def build_call_tree_xlsx(payload: Any, meta: Optional[Dict[str, Any]] = None) -> bytes:
+def build_call_tree_xlsx(payload: Any, meta: Optional[Dict[str, Any]] = None,
+                         swit_map: Optional[Dict[str, str]] = None) -> bytes:
     """콜트리 payload dict → xlsx 바이트.
 
     Args:
@@ -181,6 +219,8 @@ def build_call_tree_xlsx(payload: Any, meta: Optional[Dict[str, Any]] = None) ->
         "depth_fills": [PatternFill("solid", fgColor=c) for c in CALL_TREE_DEPTH_FILLS],
         "asil_fills": {k: PatternFill("solid", fgColor=v) for k, v in _ASIL_FILL_RGB.items()},
         "get_col": get_column_letter,
+        # 진입 함수→SwIT_SwUFn_ID 매핑(참조 SwITS 유래). 루트 블록 라벨 치환용, 없으면 빈 dict.
+        "swit_map": swit_map if isinstance(swit_map, dict) else {},
     }
 
     wb = Workbook()
@@ -314,9 +354,11 @@ def _render_sheet(
             ac.font = S["note"]
             ac.alignment = S["center"]
 
-        # B열: 진입 함수명(루트만, 노란/남색 강조)
+        # B열: 진입 함수 블록 라벨(루트만, 노란/남색 강조). swit_map 있으면 SwIT_SwUFn_ID로
+        # 치환(참조 SwITS 통합테스트 ID), 매칭 없으면 함수명 유지. depth 트리 컬럼(C~)은 항상 함수명.
         if is_root:
-            bc = ws.cell(r, 2, _cs(name))
+            root_label = S["swit_map"].get(str(name or "")) or name
+            bc = ws.cell(r, 2, _cs(root_label))
             bc.font = S["root"]
             bc.fill = S["root_fill"]
             bc.alignment = S["left"]
