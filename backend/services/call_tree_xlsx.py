@@ -25,6 +25,7 @@
 from __future__ import annotations
 
 import io
+import re
 from typing import Any, Dict, List, Optional, Tuple
 
 from backend.services.design_tokens import (
@@ -48,6 +49,9 @@ from backend.services.design_tokens import (
 _MAX_TREES = 500        # 루트(진입 함수) 블록 수 상한
 _MAX_NODES = 20000      # 시트당 렌더 행(노드) 누적 상한
 _MAX_DEPTH = 40         # depth 컬럼 상한 — 초과 depth는 마지막 컬럼으로 clamp
+
+# 진입 함수명(C 식별자) 패턴 — 참조 SwITS의 순번/설명 셀을 함수명으로 오인 채택하는 것 방지(W2).
+_IDENT_RE = re.compile(r"^[A-Za-z_]\w*$")
 
 _ASIL_FILL_RGB = {
     "A": ASIL_A_FILL_RGB,
@@ -148,13 +152,38 @@ def parse_swit_strategy_map(xlsx_bytes: bytes) -> Dict[str, str]:
             if b and str(b).strip().startswith("SwIT"):
                 swit_id = str(b).strip()
                 for cell in row[2:]:
-                    v = cell.value
-                    if v and str(v).strip():
-                        mapping.setdefault(str(v).strip(), swit_id)
+                    v = str(cell.value or "").strip()
+                    # C열~ 첫 '함수명(식별자 패턴)' 셀만 진입 함수로 채택. 순번/설명(공백·한글·숫자
+                    # 시작 등 비식별자)은 건너뛰어 잘못된 key 등록→영구 미매칭(W2)을 방지.
+                    if v and _IDENT_RE.match(v):
+                        mapping.setdefault(v, swit_id)
                         break
     finally:
         wb.close()
     return mapping
+
+
+def count_swit_matched_roots(payload: Any, swit_map: Optional[Dict[str, str]]) -> Tuple[int, int]:
+    """(SwIT_ID로 치환된 루트 수, 전체 루트 수) — 라벨 모드 정직성 표면화용(W1).
+
+    endpoint가 응답 헤더로 노출해, 프론트 토스트가 '매칭 0인데 SwIT ID 성공'으로 위장하는
+    것을 막는다(사용자가 함수명 폴백을 SwIT_ID 라벨로 오인하는 audit 리스크 차단).
+    """
+    if not isinstance(payload, dict) or not isinstance(swit_map, dict):
+        return 0, 0
+
+    def _roots(pl: Dict[str, Any]) -> List[Dict[str, Any]]:
+        if pl.get("bidir"):
+            out: List[Dict[str, Any]] = []
+            for k in ("callees", "callers"):
+                sub = pl.get(k) if isinstance(pl.get(k), dict) else {}
+                out += [t for t in (sub.get("trees") or []) if isinstance(t, dict)]
+            return out
+        return [t for t in (pl.get("trees") or []) if isinstance(t, dict)]
+
+    roots = _roots(payload)
+    matched = sum(1 for t in roots if str(t.get("name") or "").strip() in swit_map)
+    return matched, len(roots)
 
 
 def _meta_line(stats: Dict[str, Any], meta: Dict[str, Any], reverse: bool) -> str:
@@ -357,7 +386,7 @@ def _render_sheet(
         # B열: 진입 함수 블록 라벨(루트만, 노란/남색 강조). swit_map 있으면 SwIT_SwUFn_ID로
         # 치환(참조 SwITS 통합테스트 ID), 매칭 없으면 함수명 유지. depth 트리 컬럼(C~)은 항상 함수명.
         if is_root:
-            root_label = S["swit_map"].get(str(name or "")) or name
+            root_label = S["swit_map"].get(str(name or "").strip()) or name
             bc = ws.cell(r, 2, _cs(root_label))
             bc.font = S["root"]
             bc.fill = S["root_fill"]

@@ -291,3 +291,31 @@ def test_no_swit_map_keeps_function_name():
         {"trees": [{"name": "main", "calls": []}], "stats": {}}, {},
     ))["SW Integration Strategy"]
     assert _find(ws, "main", col=2) is not None
+
+
+def test_count_swit_matched_roots():
+    """매칭 루트 수 계산(W1 표면화용) — 단방향/양방향/빈."""
+    from backend.services.call_tree_xlsx import count_swit_matched_roots
+    uni = {"trees": [{"name": "main", "calls": []}, {"name": "other", "calls": []}]}
+    assert count_swit_matched_roots(uni, {"main": "SwIT_1"}) == (1, 2)
+    bidir = {"bidir": True, "callees": {"trees": [{"name": "a", "calls": []}]},
+             "callers": {"trees": [{"name": "b", "calls": []}]}}
+    assert count_swit_matched_roots(bidir, {"a": "SwIT_A"}) == (1, 2)
+    assert count_swit_matched_roots(None, {"a": "1"}) == (0, 0)
+    assert count_swit_matched_roots({"trees": [{"name": "x"}]}, None) == (0, 0)
+
+
+def test_parse_skips_nonident_entry_cell():
+    """C열 순번/설명(비식별자)은 건너뛰고 함수명 셀을 진입 함수로 채택(W2)."""
+    from backend.services.call_tree_xlsx import parse_swit_strategy_map
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "2.SW Integration Strategy"
+    ws.cell(7, 2, "SwIT_SwUFn_9")   # B7 = ID
+    ws.cell(7, 3, "1)")             # C7 = 순번(비식별자) → skip
+    ws.cell(7, 4, "s_Real_Func")    # D7 = 함수명 → 채택
+    buf = io.BytesIO()
+    wb.save(buf)
+    m = parse_swit_strategy_map(buf.getvalue())
+    assert m.get("s_Real_Func") == "SwIT_SwUFn_9"
+    assert "1)" not in m

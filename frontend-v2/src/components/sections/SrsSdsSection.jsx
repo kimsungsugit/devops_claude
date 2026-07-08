@@ -3442,7 +3442,18 @@ function CallTreeView({ job, cacheRoot, buildSelector, sourceRoot, seedFns, toas
       a.href = url; a.download = useSwitId ? 'call_tree_swit_id.xlsx' : 'call_tree_integration_strategy.xlsx';
       document.body.appendChild(a); a.click(); document.body.removeChild(a);
       URL.revokeObjectURL(url);
-      toast('success', useSwitId ? 'SwIT ID 엑셀을 내보냈습니다.' : '엑셀 파일을 내보냈습니다.');
+      if (useSwitId) {
+        // W1: 백엔드가 매칭 루트 수를 X-Swit-Matched로 알림. 0매칭이면 함수명 폴백이므로
+        // '성공' 위장 대신 경고로 정직하게 표면화(진입 함수/SITS 경로 확인 유도).
+        const matched = res.headers.get('x-swit-matched') || '';
+        const zero = matched.startsWith('0/');
+        toast(zero ? 'warning' : 'success',
+          matched
+            ? `SwIT ID 엑셀 내보냄 — ${matched} 루트에 SwIT_ID 적용${zero ? ' (매칭 0 · 함수명으로 표시됨. 진입 함수 또는 설정>입력자료 SITS 경로 확인)' : ''}`
+            : 'SwIT ID 엑셀을 내보냈습니다.');
+      } else {
+        toast('success', '엑셀 파일을 내보냈습니다.');
+      }
     } catch (e) {
       toast('error', `엑셀 내보내기 실패: ${e.message}`);
     } finally {

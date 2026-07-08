@@ -4913,7 +4913,7 @@ def jenkins_call_tree_xlsx(body: Dict[str, Any]) -> Response:
     패턴 — 디스크/소스 read 없음, cloudium 워커 무관).
     body: {"payload": {...}, "meta": {job_url, build_selector, ...}}.
     """
-    from backend.services.call_tree_xlsx import build_call_tree_xlsx
+    from backend.services.call_tree_xlsx import build_call_tree_xlsx, count_swit_matched_roots
 
     if not isinstance(body, dict):
         raise HTTPException(status_code=400, detail="invalid body")
@@ -4949,10 +4949,16 @@ def jenkins_call_tree_xlsx(body: Dict[str, Any]) -> Response:
         _api_logger.debug("Call tree xlsx export failed: %s", exc)
         raise HTTPException(status_code=500, detail=f"xlsx 생성 실패: {exc}")
     fname = f"call_tree_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+    headers = {"Content-Disposition": f'attachment; filename="{fname}"'}
+    if swit_map is not None:
+        # W1: SwIT_ID로 치환된 루트 수를 헤더로 노출 → 프론트 토스트가 '매칭 0인데 성공'으로
+        # 위장하는 것을 방지(함수명 폴백을 SwIT_ID 라벨로 오인하는 audit 리스크 차단).
+        matched, total = count_swit_matched_roots(payload, swit_map)
+        headers["X-Swit-Matched"] = f"{matched}/{total}"
     return Response(
         content=data,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+        headers=headers,
     )
 
 
