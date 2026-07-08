@@ -3438,6 +3438,14 @@ function CallTreeView({ job, cacheRoot, buildSelector, sourceRoot, seedFns, toas
         if (sitsPath) bodyObj.sits_path = sitsPath;
         else if (scmId) bodyObj.scm_id = scmId;
         else if (autoSwit) bodyObj.auto_swit = true;
+        // SITS 진입함수 기준으로 콜트리를 재생성해 참조 시트처럼 모든 SwIT 블록이 나오게 함
+        // (화면이 전체 트리여도 SwIT ID xlsx는 SITS 진입함수 트리로 구성). 캐시 빌드 없으면 백엔드가 화면 트리 폴백.
+        bodyObj.regen_from_sits = true;
+        bodyObj.job_url = job?.url || '';
+        bodyObj.cache_root = cacheRoot || '.devops_pro_cache';
+        bodyObj.build_selector = buildSelector || 'lastSuccessfulBuild';
+        bodyObj.source_root = sourceRoot || '';
+        bodyObj.max_depth = Math.max(1, Math.min(20, Number(depth) || 5));
       }
       const res = await fetch(buildUrl('/api/jenkins/call-tree/export-xlsx'), {
         method: 'POST',

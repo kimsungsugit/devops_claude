@@ -4982,6 +4982,29 @@ def jenkins_call_tree_xlsx(body: Dict[str, Any]) -> Response:
         except Exception as exc:
             _api_logger.debug("auto SwIT map resolve failed: %s", exc)
             swit_map = None
+    # SITS 진입함수 기준 콜트리 재생성(참조 SwITS '2.SW Integration Strategy' 재현): swit_map의
+    # 진입함수들을 루트로 콜트리를 새로 만들어, 전체 트리에서 in-degree0 라이브러리/ISR만 루트라
+    # 매칭이 낮던 문제를 해소하고 모든 SwIT 블록이 나오게 한다. 캐시 빌드 부재 등은 화면 payload 폴백.
+    if swit_map and body.get("regen_from_sits"):
+        try:
+            entries = [str(k) for k in swit_map.keys() if k][:200]
+            if entries:
+                regen_req = JenkinsCallTreeRequest(
+                    job_url=str(body.get("job_url") or ""),
+                    cache_root=str(body.get("cache_root") or ""),
+                    build_selector=str(body.get("build_selector") or "lastSuccessfulBuild"),
+                    source_root=(str(body.get("source_root") or "") or None),
+                    entry=",".join(entries),
+                    max_depth=max(1, min(20, int(body.get("max_depth") or 5))),
+                    engine="precise",
+                )
+                regen = jenkins_call_tree(regen_req)
+                if isinstance(regen, dict) and regen.get("trees"):
+                    payload = regen
+        except HTTPException:
+            pass
+        except Exception as exc:
+            _api_logger.debug("SwIT regen from SITS failed: %s", exc)
     try:
         data = build_call_tree_xlsx(payload, meta, swit_map=swit_map)
     except ImportError as exc:
