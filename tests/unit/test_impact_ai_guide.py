@@ -1,15 +1,28 @@
-"""Tests for workflow.impact_ai_guide (deterministic parts)."""
+"""Tests for workflow.impact_ai_guide (deterministic parts + LLM enrichment wiring)."""
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+import workflow.ai as _wai  # monkeypatch 타깃 (lazy import가 이 모듈 속성을 읽음)
 from workflow.impact_ai_guide import (
     assess_risk,
     analyze_cross_document_impact,
     generate_impact_guide,
     ImpactGuideContext,
 )
+
+
+@pytest.fixture(autouse=True)
+def _force_deterministic(monkeypatch):
+    """기본적으로 LLM 미설정으로 강제 — 결정론 경로.
+
+    dev 머신에 Gemini config가 있어도 단위테스트가 실제 LLM 네트워크 호출을 하지 않도록
+    load_oai_config를 None으로 패치. enrichment 테스트는 이 위에 자체 setattr로 덮어쓴다.
+    """
+    monkeypatch.setattr(_wai, "load_oai_config", lambda *_a, **_k: None, raising=True)
 
 
 class TestAssessRisk:
@@ -174,3 +187,77 @@ def test_known_asil_still_classified():
     assert g["risk"]["max_asil"] == "D"
     assert g["risk"]["unknown_asil_count"] == 0
     assert g["risk"]["asil_escalation"] is True
+
+
+class TestLLMEnrichmentWiring:
+    """H1 회귀 그물 — LLM 강화 경로가 실제 배선돼 동작하는지 검증.
+
+    과거 generate_change_summary/suggest_test_additions가 agent_call를 존재하지 않는
+    시그니처(system_prompt=/user_prompt=)로 호출해 매번 TypeError→결정론 폴백 고정,
+    ai_enriched가 영구 False였다. 이 테스트들은 그 배선 버그가 재발하면 즉시 실패한다.
+    """
+
+    def test_summary_enriched_when_llm_configured(self, monkeypatch):
+        """cfg가 있고 agent_call_text가 텍스트를 주면 executive_summary가 LLM 값 + ai_enriched=True."""
+        monkeypatch.setattr(_wai, "load_oai_config", lambda *_a, **_k: {"model": "gemini"}, raising=True)
+        monkeypatch.setattr(
+            _wai, "agent_call_text",
+            lambda cfg, messages, **k: "## LLM 요약\n실제 AI가 작성한 영향도 요약본",
+            raising=True,
+        )
+        g = generate_impact_guide(ImpactGuideContext(
+            changed_types={"foo": "BODY"},
+            impact_groups={"direct": ["foo"], "indirect_1hop": [], "indirect_2hop": []},
+            by_name={"foo": {"asil": "B"}},
+        )).to_dict()
+        assert g["ai_enriched"] is True
+        assert "실제 AI가 작성한" in g["executive_summary"]
+
+    def test_test_recommendations_parsed_from_llm(self, monkeypatch):
+        """```json 펜스로 감싼 배열도 견고하게 파싱되어 test_recommendations에 반영."""
+        canned = (
+            "여기 제안입니다:\n```json\n"
+            '[{"function": "foo", "test_type": "경계값 재검증", '
+            '"description": "인터페이스 변경", "rationale": "타입 변경"}]\n```'
+        )
+        monkeypatch.setattr(_wai, "load_oai_config", lambda *_a, **_k: {"model": "gemini"}, raising=True)
+        monkeypatch.setattr(_wai, "agent_call_text", lambda cfg, messages, **k: canned, raising=True)
+        g = generate_impact_guide(ImpactGuideContext(
+            changed_types={"foo": "SIGNATURE"},
+            impact_groups={"direct": ["foo"], "indirect_1hop": [], "indirect_2hop": []},
+            by_name={"foo": {"asil": "C"}},
+        )).to_dict()
+        assert g["ai_enriched"] is True
+        assert any(r.get("function") == "foo" and r.get("test_type") == "경계값 재검증"
+                   for r in g["test_recommendations"])
+
+    def test_malformed_llm_tests_fall_back_deterministic(self, monkeypatch):
+        """LLM 응답이 malformed JSON이면 test_recommendations는 결정론 폴백(크래시/오염 없음)."""
+        monkeypatch.setattr(_wai, "load_oai_config", lambda *_a, **_k: {"model": "gemini"}, raising=True)
+        # 배열이 아닌 잡음 → _parse_test_suggestions_json이 []를 반환 → 결정론 폴백
+        monkeypatch.setattr(_wai, "agent_call_text",
+                            lambda cfg, messages, **k: "죄송합니다 JSON을 만들 수 없습니다",
+                            raising=True)
+        g = generate_impact_guide(ImpactGuideContext(
+            changed_types={"new_func": "NEW"},
+            impact_groups={"direct": ["new_func"], "indirect_1hop": [], "indirect_2hop": []},
+            by_name={"new_func": {"asil": "A"}},
+            suts_tcs={},
+        )).to_dict()
+        # NEW 함수 → 결정론 폴백이 '신규 TC 생성' 제안을 냄
+        assert len(g["test_recommendations"]) >= 1
+        assert any("신규" in r.get("test_type", "") for r in g["test_recommendations"])
+
+    def test_no_config_stays_deterministic(self, monkeypatch):
+        """cfg가 없으면(LLM 미설정) 예외 없이 결정론 유지 + ai_enriched=False."""
+        # autouse가 이미 load_oai_config→None. agent_call_text가 호출되면 실패하도록 감시.
+        def _boom(*_a, **_k):
+            raise AssertionError("cfg 없음에도 agent_call_text가 호출됨")
+        monkeypatch.setattr(_wai, "agent_call_text", _boom, raising=True)
+        g = generate_impact_guide(ImpactGuideContext(
+            changed_types={"foo": "BODY"},
+            impact_groups={"direct": ["foo"], "indirect_1hop": [], "indirect_2hop": []},
+            by_name={"foo": {"asil": "QM"}},
+        )).to_dict()
+        assert g["ai_enriched"] is False
+        assert g["executive_summary"]  # 결정론 요약 존재

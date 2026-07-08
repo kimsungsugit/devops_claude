@@ -172,13 +172,17 @@ export default function ImpactGuideSection({ job, analysisResult }) {
     }
     setLoading(true);
     try {
+      // 추출 API 실패를 삼키지 않고 수집 — '매핑 없음'(실제 부재)과 '조회 실패'(403/500/네트워크)를
+      // 구분해 사용자에게 표면화한다. 과거 catch(_){}로 실패해도 성공 토스트가 뜨던 silent 버그 방지.
+      const fetchFailures = [];
+
       // 1. UDS func→req mapping
       let udsMapping = [];
       if (linkedDocs.uds) {
         try {
           const d = await post('/api/jenkins/uds/extract-mapping', { uds_path: linkedDocs.uds });
           udsMapping = d?.mapping_pairs ?? [];
-        } catch (_) {}
+        } catch (e) { fetchFailures.push({ doc: 'UDS', msg: e?.message || '조회 실패' }); }
       }
 
       // 2. STS req→TC mapping
@@ -191,7 +195,7 @@ export default function ImpactGuideSection({ job, analysisResult }) {
           if (!stsTCs.length && Array.isArray(d?.available_sheets) && typeof toast === 'function') {
             toast('warning', `STS 시트 미인식. 사용 가능한 시트: ${d.available_sheets.join(', ')}`);
           }
-        } catch (_) {}
+        } catch (e) { fetchFailures.push({ doc: 'STS', msg: e?.message || '조회 실패' }); }
       }
 
       // 3. SUTS func→TC mapping
@@ -203,7 +207,7 @@ export default function ImpactGuideSection({ job, analysisResult }) {
           if (!sutsTCs.length && Array.isArray(d?.available_sheets) && typeof toast === 'function') {
             toast('warning', `SUTS 시트 미인식. 사용 가능한 시트: ${d.available_sheets.join(', ')}`);
           }
-        } catch (_) {}
+        } catch (e) { fetchFailures.push({ doc: 'SUTS', msg: e?.message || '조회 실패' }); }
       }
 
       // Build per-function guide
@@ -264,6 +268,7 @@ export default function ImpactGuideSection({ job, analysisResult }) {
 
       setGuide({
         details,
+        fetchFailures,
         summary: {
           changedFiles: changedFiles.length,
           changedFunctions: changedFnEntries.length,
@@ -288,7 +293,11 @@ export default function ImpactGuideSection({ job, analysisResult }) {
         if (aiData?.ok) setAiGuide(aiData.guide);
       } catch (_) { /* AI guide is optional */ }
 
-      toast('success', '영향도 가이드 생성 완료');
+      if (fetchFailures.length) {
+        toast('warning', `${fetchFailures.map(f => f.doc).join('/')} 매핑 조회 실패 — 해당 문서의 요구사항/TC 매핑이 누락됐을 수 있습니다('매핑 없음'이 실제 부재가 아닐 수 있음)`);
+      } else {
+        toast('success', '영향도 가이드 생성 완료');
+      }
     } catch (e) {
       toast('error', `가이드 생성 실패: ${e.message}`);
     } finally {
@@ -712,6 +721,13 @@ export default function ImpactGuideSection({ job, analysisResult }) {
           <div className="panel-header">
             <span className="panel-title">함수별 변경 가이드 ({guide.details.length}개)</span>
           </div>
+
+          {/* 추출 실패 표면화 — 매핑이 실제보다 적게 보일 수 있음을 지속 노출(토스트는 사라짐) */}
+          {guide.fetchFailures?.length > 0 && (
+            <div className="text-sm" style={{ margin: '4px 0 8px', padding: '6px 10px', borderLeft: '3px solid var(--color-warning)', background: 'var(--bg)', borderRadius: 4 }}>
+              ⚠️ {guide.fetchFailures.map(f => f.doc).join(', ')} 매핑 조회 실패 — 아래 요구사항/STS/SUTS TC 매핑이 실제보다 적게 보일 수 있습니다('매핑 없음' ≠ 확정 부재). 문서 경로/권한을 확인 후 다시 생성하세요.
+            </div>
+          )}
 
           {/* Search + Filter */}
           <div style={{ display: 'flex', gap: 8, marginBottom: 10, flexWrap: 'wrap', alignItems: 'center' }}>

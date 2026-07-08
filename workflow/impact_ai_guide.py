@@ -301,14 +301,20 @@ def _build_guide_prompt_context(ctx: ImpactGuideContext, risk: RiskAssessment) -
     return "\n".join(lines)
 
 
-def generate_change_summary(ctx: ImpactGuideContext, risk: RiskAssessment) -> str:
+def generate_change_summary(ctx: ImpactGuideContext, risk: RiskAssessment) -> Optional[str]:
     """Generate executive summary using LLM.
 
-    Falls back to deterministic summary if LLM unavailable.
+    반환: LLM이 생성한 요약 문자열, 또는 LLM 미설정/실패 시 None(caller가 결정론 폴백).
+    None(정상 폴백)과 예외(코드/호출 실패)를 구분한다 — 과거 agent_call 오시그니처로
+    매 호출 TypeError→debug 흡수되어 AI 강화가 영구 비활성이던 버그를 방지.
     """
     try:
-        from workflow.ai import agent_call
+        from workflow.ai import agent_call_text, load_oai_config
         from prompts import load_prompt
+
+        cfg = load_oai_config(None)
+        if not cfg:
+            return None  # LLM 미설정 — 결정론 폴백(정상 경로, 에러 아님)
 
         system = load_prompt("impact_guide")
         context = _build_guide_prompt_context(ctx, risk)
@@ -317,27 +323,66 @@ def generate_change_summary(ctx: ImpactGuideContext, risk: RiskAssessment) -> st
             f"위 변경 분석을 바탕으로 ISO 26262 관점의 영향도 요약을 작성하세요.\n"
             f"포함 항목: 변경 범위 요약, 리스크 판단 근거, 리뷰 우선순위, 권고사항."
         )
-        result = agent_call(system_prompt=system, user_prompt=user_msg, role="analysis")
-        if result and isinstance(result, str):
-            return result
-    except Exception as e:
-        logger.debug("LLM 가이드 생성 실패, 결정론적 폴백 사용: %s", e)
+        messages = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user_msg},
+        ]
+        output = agent_call_text(cfg, messages, role="analysis", stage="impact_guide")
+        if output and isinstance(output, str) and output.strip():
+            return output.strip()
+        return None
+    except Exception:
+        # 코드/호출 실패는 debug가 아닌 warning으로 승격 — 폴백 뒤에 배선 버그가 숨지 않도록.
+        logger.warning("LLM 영향도 요약 실패 — 결정론 폴백 사용", exc_info=True)
+        return None
 
-    # Deterministic fallback
-    return _deterministic_summary(ctx, risk)
+
+def _parse_test_suggestions_json(text: str) -> List[Dict[str, str]]:
+    """LLM 응답 문자열에서 테스트 제안 JSON 배열을 견고하게 파싱.
+
+    - ```json 펜스 제거 후 첫 '['~마지막 ']' 구간을 파싱
+    - list가 아니거나 원소가 dict/필수키(function/test_type/description) 미충족이면 드롭
+    - 프론트가 쓰는 3키를 보장하고 rationale 등 extra는 보존
+    """
+    if not text:
+        return []
+    stripped = re.sub(r"^```(?:json)?\s*\n?", "", text.strip())
+    stripped = re.sub(r"\n?```\s*$", "", stripped)
+    start = stripped.find("[")
+    end = stripped.rfind("]")
+    if start == -1 or end <= start:
+        return []
+    try:
+        parsed = json.loads(stripped[start:end + 1])
+    except (json.JSONDecodeError, ValueError):
+        return []
+    if not isinstance(parsed, list):
+        return []
+    out: List[Dict[str, str]] = []
+    for item in parsed:
+        if not isinstance(item, dict):
+            continue
+        if not (item.get("function") and item.get("test_type") and item.get("description")):
+            continue
+        out.append({str(k): ("" if v is None else str(v)) for k, v in item.items()})
+    return out
 
 
 def suggest_test_additions(
     ctx: ImpactGuideContext,
     risk: RiskAssessment,
-) -> List[Dict[str, str]]:
+) -> Optional[List[Dict[str, str]]]:
     """Suggest new test cases using LLM.
 
-    Falls back to deterministic suggestions if LLM unavailable.
+    반환: LLM 제안 리스트, 또는 LLM 미설정/실패/파싱실패 시 None(caller가 결정론 폴백).
     """
     try:
-        from workflow.ai import agent_call
+        from workflow.ai import agent_call_text, load_oai_config
         from prompts import load_prompt
+
+        cfg = load_oai_config(None)
+        if not cfg:
+            return None  # LLM 미설정 — 결정론 폴백(정상 경로)
 
         system = load_prompt("impact_test_advisor")
         context = _build_guide_prompt_context(ctx, risk)
@@ -346,19 +391,16 @@ def suggest_test_additions(
             f"위 변경에 대해 추가해야 할 테스트 케이스를 제안하세요.\n"
             f"JSON 배열로 응답: [{{\"function\": ..., \"test_type\": ..., \"description\": ..., \"rationale\": ...}}]"
         )
-        result = agent_call(system_prompt=system, user_prompt=user_msg, role="analysis")
-        if result:
-            text = result if isinstance(result, str) else str(result)
-            # Extract JSON array from response
-            start = text.find("[")
-            end = text.rfind("]")
-            if start != -1 and end > start:
-                return json.loads(text[start:end + 1])
-    except Exception as e:
-        logger.debug("LLM 테스트 제안 실패, 결정론적 폴백 사용: %s", e)
-
-    # Deterministic fallback
-    return _deterministic_test_suggestions(ctx)
+        messages = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user_msg},
+        ]
+        output = agent_call_text(cfg, messages, role="analysis", stage="impact_test_advisor")
+        parsed = _parse_test_suggestions_json(output or "")
+        return parsed or None
+    except Exception:
+        logger.warning("LLM 테스트 제안 실패 — 결정론 폴백 사용", exc_info=True)
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -379,26 +421,22 @@ def generate_impact_guide(ctx: ImpactGuideContext) -> ImpactGuide:
     # Step 3: review checklist (deterministic)
     checklist = _build_review_checklist(ctx, risk, cross_doc)
 
-    # Step 4: try LLM for summary and test suggestions
+    # Step 4: try LLM for summary and test suggestions.
+    # LLM 헬퍼는 성공 시 값, 미설정/실패 시 None을 반환한다(예외를 자체 흡수) —
+    # None 여부로 enrichment를 명시 판정(과거 문자열 비교 기반 취약 판정 + 폴백 이중계산 제거).
     ai_enriched = False
     summary = _deterministic_summary(ctx, risk)
     test_recs = _deterministic_test_suggestions(ctx)
 
-    try:
-        llm_summary = generate_change_summary(ctx, risk)
-        if llm_summary and llm_summary != summary:
-            summary = llm_summary
-            ai_enriched = True
-    except Exception:
-        pass
+    llm_summary = generate_change_summary(ctx, risk)
+    if llm_summary:
+        summary = llm_summary
+        ai_enriched = True
 
-    try:
-        llm_tests = suggest_test_additions(ctx, risk)
-        if llm_tests:
-            test_recs = llm_tests
-            ai_enriched = True
-    except Exception:
-        pass
+    llm_tests = suggest_test_additions(ctx, risk)
+    if llm_tests:
+        test_recs = llm_tests
+        ai_enriched = True
 
     return ImpactGuide(
         executive_summary=summary,
