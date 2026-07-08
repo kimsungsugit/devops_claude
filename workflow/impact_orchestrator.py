@@ -45,17 +45,19 @@ ACTION_MATRIX: Dict[str, Dict[str, str]] = {
 
 
 def _load_source_sections(source_root: str) -> Dict[str, Any]:
-    # impact는 preprocess=False로 파싱 — gcc 전처리(소스루트당 ~80s)를 생략해 대형 트리 분석을 가속한다.
-    # 파서의 preprocess=False 폴백(dead-code 휴리스틱 + .h 별도 스캔)은 '안전방향 과다포함'이라 실 함수
-    # 누락/ASIL 강등이 없다(문서생성 경로는 default True로 정밀 유지 — 교차오염은 캐시키 pp= 로 분리).
+    # impact도 preprocess=True(정밀)로 파싱한다(안전 우선, ISO 26262). preprocess=False는 gcc
+    # 전처리를 생략해 빠르지만 (1) 함수형 매크로로 가려진 호출 엣지를 놓쳐 영향 함수를 '과소보고'
+    # (진짜 영향받은 안전 함수를 재검증 대상에서 누락 — unsafe 방향)하고, (2) #ifdef 가드 동일
+    # 함수명 변형을 둘 다 파싱해 first-wins ASIL 오판 위험이 있다. 속도는 regex hot-loop 제거 +
+    # 디스크 캐시(동일 소스 재실행 시 파싱 skip)로 확보하며, 문서생성과 동일 정밀·동일 캐시 tier를 쓴다.
     try:
         from backend.helpers import _get_source_sections_cached
 
-        return _get_source_sections_cached(source_root, preprocess=False)
+        return _get_source_sections_cached(source_root, preprocess=True)
     except Exception:
         import report_generator as rg
 
-        return rg.generate_uds_source_sections(source_root, preprocess=False)
+        return rg.generate_uds_source_sections(source_root, preprocess=True)
 
 
 @dataclass
