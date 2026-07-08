@@ -3414,9 +3414,21 @@ function CallTreeView({ job, cacheRoot, buildSelector, sourceRoot, seedFns, toas
       catch { sitsPath = ''; }
       // doc_paths.sits 미설정이면 SCM 연결문서(linked_docs.sits)에서 백엔드가 해결하도록 기준 SCM id 전달.
       // (설정 화면에 SITS가 SCM placeholder로만 보이고 '빈 칸 채우기'를 안 눌러 doc_paths엔 없는 흔한 케이스.)
-      if (!sitsPath) { scmId = String(localStorage.getItem('devops_v2_doc_scm') || '').trim(); }
+      if (!sitsPath) {
+        scmId = String(localStorage.getItem('devops_v2_doc_scm') || '').trim();
+        // 기준 SCM 미선택이어도, 등록 SCM 중 linked_docs.sits 보유한 것을 자동 선택(무설정 폴백) →
+        // registry에 SITS가 있으면 사용자가 아무것도 안 골라도 경고 없이 SwIT_ID로 내보내진다.
+        if (!scmId) {
+          try {
+            const list = await api('/api/scm/list');
+            const items = Array.isArray(list) ? list : (list?.items ?? list?.registries ?? []);
+            const hit = (items || []).find(s => String((s?.linked_docs || {}).sits || '').trim());
+            if (hit) scmId = String(hit.scm_id || hit.id || '').trim();
+          } catch { /* SCM 목록 조회 실패 시 아래 경고로 폴백 */ }
+        }
+      }
       if (!sitsPath && !scmId) {
-        toast('warning', 'SwIT ID 라벨에는 SITS 경로가 필요합니다 — 설정 > 입력자료에서 SITS 경로를 직접 지정하거나, 기준 SCM(연결문서에 SITS 포함)을 선택하세요.');
+        toast('warning', 'SwIT ID 라벨에는 SITS 경로가 필요합니다 — 설정 > 입력자료에서 SITS 경로를 직접 지정하거나, SCM 연결문서에 SITS를 등록하세요.');
         return;
       }
     }
