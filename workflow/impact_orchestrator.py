@@ -334,6 +334,10 @@ def _write_review_artifact(
     by_name: Dict[str, Dict[str, Any]] | None = None,
     linked_doc: str = "",
     ai_guide: Any = None,
+    *,
+    pre_uds_details: Dict[str, Any] | None = None,
+    pre_suts_tcs: Dict[str, Any] | None = None,
+    pre_sits_chains: Dict[str, Any] | None = None,
 ) -> str:
     review_dir = REPO_ROOT / "reports" / "impact_audit"
     review_dir.mkdir(parents=True, exist_ok=True)
@@ -399,10 +403,21 @@ def _write_review_artifact(
     is_signature = "SIGNATURE" in change_kinds
     is_header = "HEADER" in change_kinds
     flagged_fns = list(changed_types.keys())
-    # Load document-specific data (best-effort; empty dict if linked_doc missing)
-    uds_doc_details: Dict[str, Any] = _load_uds_fn_details(linked_doc, flagged_fns) if target == "uds" else {}
-    suts_tcs: Dict[str, Any] = _load_suts_fn_tcs(linked_doc, flagged_fns) if target == "suts" else {}
-    sits_chains: Dict[str, Any] = _load_sits_fn_chains(linked_doc, flagged_fns) if target == "sits" else {}
+    # Load document-specific data (best-effort; empty dict if linked_doc missing).
+    # run 스코프 사전로드(pre_*)가 주어지면 재파싱을 회피한다 — FLAG 타깃 루프가 매 반복마다
+    # 동일 인자로 대형 SUTS xlsm을 재파싱하던 중복 제거. 미제공(None) 시 종전대로 매칭 타깃만 로드.
+    uds_doc_details: Dict[str, Any] = (
+        pre_uds_details if pre_uds_details is not None
+        else (_load_uds_fn_details(linked_doc, flagged_fns) if target == "uds" else {})
+    )
+    suts_tcs: Dict[str, Any] = (
+        pre_suts_tcs if pre_suts_tcs is not None
+        else (_load_suts_fn_tcs(linked_doc, flagged_fns) if target == "suts" else {})
+    )
+    sits_chains: Dict[str, Any] = (
+        pre_sits_chains if pre_sits_chains is not None
+        else (_load_sits_fn_chains(linked_doc, flagged_fns) if target == "sits" else {})
+    )
 
     lines.extend(["", "## Function Details"])
     for fn, kind in sorted(changed_types.items()):
@@ -824,6 +839,14 @@ def _resolve_changed_types_to_functions(
         str(k).replace("\\", "/").strip().lower(): str(v or "").strip().lower()
         for k, v in (edit_types or {}).items()
     }
+    # by_name의 파일경로 정규화를 1회만 선계산한다 — 과거엔 변경파일마다 전체 함수의 file 경로를
+    # str/replace/lower로 재정규화(O(F·N) 문자열 연산)했다. endswith 매칭 자체는 동일 문자열에
+    # 대해 그대로 수행하므로 결과 시맨틱은 완전히 불변(성능만 개선).
+    norm_files = [
+        (func_name, str(info.get("file") or "").replace("\\", "/").lower())
+        for func_name, info in by_name.items()
+    ]
+    norm_files = [(fn, fp) for fn, fp in norm_files if fp]
     resolved: Dict[str, str] = {}
     for path_text in changed_files:
         raw = str(path_text or "").strip()
@@ -845,10 +868,7 @@ def _resolve_changed_types_to_functions(
         # basename(raw_name) 폴백 — 동명 파일이 여러 모듈에 있을 때의 과대 매칭을 줄인다.
         full_hits: Dict[str, str] = {}
         base_hits: Dict[str, str] = {}
-        for func_name, info in by_name.items():
-            file_path = str(info.get("file") or "").replace("\\", "/").lower()
-            if not file_path:
-                continue
+        for func_name, file_path in norm_files:
             # 함수별 정밀 kind가 있으면 그것을, 없으면 파일 editType/확장자 기반 기본값.
             kind = ct_lower.get(func_name, file_default)
             if file_path.endswith(raw_norm):
@@ -1366,6 +1386,17 @@ def run_impact_update(
                 )
             action_items = list(actions.items())
             total_actions = len(action_items)
+            # FLAG 검토 아티팩트 + AI 가이드가 매 FLAG 타깃마다 동일 인자(changed_types.keys() +
+            # linked_docs)로 재파싱하던 문서 로드를 루프 밖에서 1회만(대형 SUTS xlsm 등 최대 ~7회→1회).
+            # FLAG 타깃이 하나도 없으면 로드 자체를 생략(종전과 동일한 no-load 동작 보존).
+            _has_flag = any(i.get("mode") == "FLAG" for _, i in action_items)
+            _flag_fns = list(changed_types.keys())
+            _uds_linked = getattr(linked_docs, "uds", "")
+            _suts_linked = getattr(linked_docs, "suts", "")
+            _sits_linked = getattr(linked_docs, "sits", "")
+            _shared_uds_details = _load_uds_fn_details(_uds_linked, _flag_fns) if (_has_flag and _uds_linked) else {}
+            _shared_suts_tcs = _load_suts_fn_tcs(_suts_linked, _flag_fns) if (_has_flag and _suts_linked) else {}
+            _shared_sits_chains = _load_sits_fn_chains(_sits_linked, _flag_fns) if (_has_flag and _sits_linked) else {}
             for idx, (target, info) in enumerate(action_items, start=1):
                 if info.get("mode") == "AUTO":
                     if callable(on_progress):
@@ -1417,17 +1448,14 @@ def run_impact_update(
                         from workflow.impact_ai_guide import (
                             generate_impact_guide, ImpactGuideContext,
                         )
-                        _flagged_fns = list(changed_types.keys())
-                        _suts_linked = getattr(linked_docs, "suts", "")
-                        _uds_linked = getattr(linked_docs, "uds", "")
-                        _sits_linked = getattr(linked_docs, "sits", "")
+                        # 루프 밖에서 1회 로드한 공용 문서 데이터 재사용(재파싱 제거).
                         _ctx = ImpactGuideContext(
                             changed_types=changed_types,
                             impact_groups=_groups_for_target,
                             by_name=by_name or {},
-                            uds_fn_details=_load_uds_fn_details(_uds_linked, _flagged_fns) if _uds_linked else {},
-                            suts_tcs=_load_suts_fn_tcs(_suts_linked, _flagged_fns) if _suts_linked else {},
-                            sits_chains=_load_sits_fn_chains(_sits_linked, _flagged_fns) if _sits_linked else {},
+                            uds_fn_details=_shared_uds_details,
+                            suts_tcs=_shared_suts_tcs,
+                            sits_chains=_shared_sits_chains,
                         )
                         _ai_guide = generate_impact_guide(_ctx)
                     except Exception as _e:
@@ -1445,6 +1473,9 @@ def run_impact_update(
                             by_name,
                             getattr(linked_docs, target, ""),
                             ai_guide=_ai_guide,
+                            pre_uds_details=(_shared_uds_details if target == "uds" else None),
+                            pre_suts_tcs=(_shared_suts_tcs if target == "suts" else None),
+                            pre_sits_chains=(_shared_sits_chains if target == "sits" else None),
                         )
                         info["artifact_path"] = artifact_path
                     except Exception as _art_exc:  # noqa: BLE001
