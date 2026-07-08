@@ -728,7 +728,7 @@ function _hasData(v) {
   return Boolean(v);
 }
 
-// Field lists aligned with backend _cache_trace_summary (jenkins.py L2385~2400).
+// Field lists aligned with backend _cache_trace_summary (jenkins.py, has_design/has_tests).
 // Any divergence here will cause the Dashboard trace summary card to disagree
 // with the Matrix / UncoveredTopList counts — keep the two in lockstep.
 const DESIGN_FIELDS = [

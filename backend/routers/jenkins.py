@@ -3615,8 +3615,15 @@ def _cache_trace_summary(matrix: Dict[str, Any], req: UdsTraceabilityMatrixReque
         "UDS": "source_ids", "STS": "sts_tests", "SUTS": "suts_tests",
         "SITS": "sits_tests", "SyTS": "syts_tests", "SyITS": "syits_tests",
     }
+    _TEST_BANDS = {"STS", "SUTS", "SITS", "SyTS", "SyITS"}  # dict-list(내용 _tid 필터), 나머지는 string-list 설계밴드
     asil_distribution: Dict[str, Dict[str, int]] = {}   # grade → {total, covered}
     band_counts: Dict[str, int] = {b: 0 for b in (list(_BAND_FIELDS.keys()) + ["VectorCAST"])}
+
+    def _tid(t: Any) -> Any:
+        # 프론트 _testId / link_table _test_related_id 와 동일 4필드 우선순위(testcase→subprogram→unit→id).
+        if not isinstance(t, dict):
+            return ""
+        return t.get("testcase") or t.get("subprogram") or t.get("unit") or t.get("id") or ""
 
     covered = 0
     partial = 0
@@ -3661,24 +3668,40 @@ def _cache_trace_summary(matrix: Dict[str, Any], req: UdsTraceabilityMatrixReque
             uncovered += 1
             _row_covered = False
         # ASIL 등급분포 — 행 asil 우선, 없으면 link_table by_target(req→grade) 조인. 미상은 UNKNOWN.
+        # (I1) by_target은 현재 row.asil의 순수 파생(trace_link_table target_asil)이라 이 폴백은 사실상
+        # 휴면이다. 상세탭 extraSummary엔 대칭 폴백이 없으므로, target_asil 파생이 row.asil과 분리되면
+        # 두 화면 ASIL 분포가 갈린다 — 그때 프론트 extraSummary에도 동일 폴백을 추가해 대칭 유지할 것.
         _raw_grade = str(row.get("asil") or _asil_by_target.get(str(row.get("requirement_id") or "")) or "").upper().strip()
         _grade = _raw_grade if _raw_grade in ("D", "C", "B", "A", "QM") else "UNKNOWN"
         _cell = asil_distribution.setdefault(_grade, {"total": 0, "covered": 0})
         _cell["total"] += 1
         if _row_covered:
             _cell["covered"] += 1
-        # 밴드별 현황 — 해당 밴드 필드가 비어있지 않은 요구 수(밴드 present 카운트).
+        # 밴드별 현황 — 해당 밴드에 '내용 있는' 항목이 하나라도 있는 요구 수. 공백규칙을 프론트
+        # _rowBands(_testId)·link_table by_band(_test_related_id)와 일치시켜(단순 non-empty list가
+        # 아니라) 내용없는 시험dict·빈문자열 설계원소가 대시보드만 과대집계되던 비대칭 제거(W1).
+        # 정상 데이터에선 count 불변(by_band==band_counts 실증) — malformed 항목에서만 갈리던 것 봉합.
         for _band, _fld in _BAND_FIELDS.items():
             _v = row.get(_fld)
-            if isinstance(_v, list) and _v:
+            if not isinstance(_v, list) or not _v:
+                continue
+            if _band in _TEST_BANDS:
+                if any(_tid(_t) for _t in _v):        # 식별자 있는 시험만
+                    band_counts[_band] += 1
+            elif any(str(_x) for _x in _v):           # 빈문자열 아닌 설계원소만(.map(String).filter(Boolean))
                 band_counts[_band] += 1
         _tests = row.get("tests")
-        if isinstance(_tests, list) and any(isinstance(_t, dict) and _t.get("source") == "VectorCAST" for _t in _tests):
+        if isinstance(_tests, list) and any(
+            isinstance(_t, dict) and _t.get("source") == "VectorCAST" and _tid(_t) for _t in _tests
+        ):
             band_counts["VectorCAST"] += 1
 
     # Prefer matrix-declared total; fall back to row count
     total = int(declared_total) if isinstance(declared_total, int) and declared_total > 0 else len(rows)
-    # Normalize: if declared_total > len(rows), unclassified extras are "uncovered"
+    # Normalize: if declared_total > len(rows), unclassified extras are "uncovered".
+    # (I2) asil_distribution/band_counts는 위에서 rows만 순회했다. 현재 declared_total==len(rows)
+    # (req_id당 1행·skip 없음)라 phantom이 없지만, 향후 declared_total>len(rows)인 매트릭스가 오면
+    # 그 phantom(미검증·미등급) 요구는 total엔 잡혀도 ASIL/밴드 카드엔 빠진다 — 그때 rows 대사 필요.
     if total > covered + partial + uncovered:
         uncovered += total - (covered + partial + uncovered)
     coverage_pct = round(covered / total * 100, 1) if total > 0 else 0.0

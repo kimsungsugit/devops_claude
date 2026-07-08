@@ -289,7 +289,9 @@ function TraceSummaryCard({ summary, loading, onRefresh }) {
       {/* ASIL 등급별 분포·커버리지 — 백엔드 _cache_trace_summary가 실어주면 표시(구버전 캐시엔 없어 가드) */}
       {summary.asil_distribution && Object.keys(summary.asil_distribution).length > 0 && (
         <div style={{ marginTop: 'var(--sp-2)', paddingTop: 'var(--sp-2)', borderTop: '1px solid var(--border)' }}>
-          <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', marginBottom: 6 }}>ASIL 등급별 분포 · 커버리지</div>
+          <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', marginBottom: 6 }}>
+            ASIL 등급별 분포 <span style={{ fontWeight: 400 }}>· 추적 존재율(검증 충분성 아님)</span>
+          </div>
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
             {['D', 'C', 'B', 'A', 'QM', 'UNKNOWN'].filter((g) => summary.asil_distribution[g]).map((g) => {
               const c = summary.asil_distribution[g];
@@ -297,7 +299,7 @@ function TraceSummaryCard({ summary, loading, onRefresh }) {
               const label = g === 'UNKNOWN' ? '미상' : g === 'QM' ? 'QM' : `ASIL ${g}`;
               const col = pct >= GATE_PASS ? 'var(--color-success)' : pct >= GATE_WARN ? 'var(--color-warning)' : 'var(--color-danger)';
               return (
-                <div key={g} title={`${label}: ${c.total}건 중 ${c.covered}건 검증 (${pct}%)`}
+                <div key={g} title={`${label}: 전체 ${c.total}건 중 ${c.covered}건 추적 확보 (${pct}%). 등급별 검증 rigor(MC/DC 등)는 별도 지표.`}
                   style={{ padding: '4px 9px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--card-bg, var(--surface))', fontSize: 11, whiteSpace: 'nowrap' }}>
                   <span style={{ fontWeight: 700 }}>{label}</span>{' '}
                   <span style={{ color: 'var(--text-muted)' }}>{c.total}건 ·</span>{' '}
