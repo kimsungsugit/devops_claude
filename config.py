@@ -194,7 +194,7 @@ UDS_JUDGE_ENABLED = (
 )
 UDS_JUDGE_THRESHOLD = _safe_float("UDS_JUDGE_THRESHOLD", 0.7)
 UDS_JUDGE_MODEL_SUBSTRING = os.environ.get(
-    "UDS_JUDGE_MODEL_SUBSTRING", "gemini-2.5-flash"
+    "UDS_JUDGE_MODEL_SUBSTRING", "gemini-3.1-flash-lite"
 )
 
 # ---------------- UDS DOCX retry 타임아웃 (초) ----------------
@@ -247,7 +247,7 @@ TEST_CODE_MAX_TOKENS = 16384
 # ---------------- LLM / 에이전트 설정 ----------------
 # [TIP] 70b 모델이 너무 느리면 "llama3:8b" 또는 "phi3" 등으로 변경 고려
 # 기본 모델을 제미나이로 변경하고 싶으면 아래를 수정하세요.
-DEFAULT_LLM_MODEL = "gemini-3.1-flash-lite-preview"
+DEFAULT_LLM_MODEL = "gemini-3.1-flash-lite"
 DEFAULT_LLM_BASE_URL_ENV = "OLLAMA_BASE_URL"
 _DEFAULT_OAI_CONFIG = _REPO_ROOT / "OAI_CONFIG_LIST"
 if _DEFAULT_OAI_CONFIG.exists():
@@ -512,7 +512,7 @@ CHAT_LOG_LINES = 40
 CHAT_SUMMARY_MAX_CHARS = 1600
 CHAT_ENABLE_SUMMARY = True
 CHAT_LONG_QUERY_CHARS = 800
-CHAT_MODEL_FAST = "gemini-3.1-flash-lite-preview"
+CHAT_MODEL_FAST = "gemini-3.1-flash-lite"
 CHAT_SUMMARY_KEEP_DAYS = 7
 CHAT_SUMMARY_LOAD_FROM_FILE = True
 CHAT_SUMMARY_FILE_MAX_CHARS = 1200

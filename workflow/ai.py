@@ -743,10 +743,13 @@ def llm_call(
                 or os.environ.get("GEMINI_LEGACY_FALLBACK_ON_NETWORK_DENIED")
                 or "0"
             ).strip().lower() in ("1", "true", "yes")
+            # gemini-3.1-flash-lite 단일 사용 정책: 타 모델(구 gemini-2.5-flash) 교차 폴백 제거.
+            # bad_request(400) 시엔 동일 모델로 출력 토큰만 줄여 재시도해 복구는 유지한다.
+            # 운영자가 cfg.fallback_model / LLM_FALLBACK_MODEL을 명시하면 그 값이 우선.
             fallback_model = (
                 cfg.get("fallback_model")
                 or os.environ.get("LLM_FALLBACK_MODEL")
-                or ("gemini-2.5-flash" if ("gemini-3" in str(model).lower() or "gemini-3.1" in str(model).lower()) else "")
+                or str(model)
             )
 
             def _try_gemini(model_name: str, max_tokens: int) -> Tuple[Optional[str], Optional[Any]]:
