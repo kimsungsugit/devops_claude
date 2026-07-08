@@ -640,6 +640,15 @@ class ImpactAnalyzeRequest(BaseModel):
     include_ai_guide: bool = False
 
 
+class ImpactAiGuideRequest(BaseModel):
+    """POST /api/impact/ai-guide 입력 — 과거 raw Request.json()으로 무검증 수신하던 것을
+    타입 계약으로 승격(analyze와 대칭). generate_impact_guide가 shape 세부는 처리하므로
+    값 타입은 느슨하게 두되 최상위 필드/타입만 강제한다."""
+    changed_types: Dict[str, Any] = Field(default_factory=dict)
+    impact_groups: Dict[str, Any] = Field(default_factory=dict)
+    by_name: Dict[str, Any] = Field(default_factory=dict)
+
+
 class TestGenerateRequest(BaseModel):
     source_root: str
     target_function: str

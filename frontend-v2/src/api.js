@@ -100,7 +100,7 @@ function _dispatchLogout() {
  */
 const API_BASE = (typeof window !== 'undefined' && window.__ARIA_API_BASE__) || import.meta.env?.VITE_API_BASE_URL || '';
 
-function buildUrl(path) {
+export function buildUrl(path) {
   if (!API_BASE) return path;
   if (path.startsWith('http://') || path.startsWith('https://')) return path;
   return API_BASE.replace(/\/$/, '') + path;

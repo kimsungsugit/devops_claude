@@ -1,7 +1,6 @@
 """Auto-generated router: impact"""
-from fastapi import APIRouter, HTTPException, Request, Query
-from fastapi.responses import FileResponse, HTMLResponse
-from typing import Any, Dict, List, Optional
+from fastapi import APIRouter, HTTPException
+from typing import Any, Dict, List
 import json
 import re
 import traceback
@@ -12,6 +11,7 @@ from datetime import datetime
 
 from backend.schemas import (
     ImpactAnalyzeRequest,
+    ImpactAiGuideRequest,
 )
 
 repo_root = Path(__file__).resolve().parents[2]
@@ -109,22 +109,22 @@ def impact_analyze(req: ImpactAnalyzeRequest) -> Dict[str, Any]:
 
 
 @router.post("/api/impact/ai-guide")
-async def impact_ai_guide(req: Request) -> Dict[str, Any]:
+def impact_ai_guide(req: ImpactAiGuideRequest) -> Dict[str, Any]:
     """Generate AI risk assessment and cross-document impact guide."""
     try:
-        body = await req.json()
         from workflow.impact_ai_guide import (
             generate_impact_guide, ImpactGuideContext,
         )
         ctx = ImpactGuideContext(
-            changed_types=body.get("changed_types") or {},
-            impact_groups=body.get("impact_groups") or {},
-            by_name=body.get("by_name") or {},
+            changed_types=req.changed_types or {},
+            impact_groups=req.impact_groups or {},
+            by_name=req.by_name or {},
         )
         guide = generate_impact_guide(ctx)
         return {"ok": True, "guide": guide.to_dict()}
-    except Exception as e:
-        _logger.warning("ai-guide failed: %s", e)
-        return {"ok": False, "error": str(e)}
+    except Exception:
+        # 내부 예외 문자열을 응답으로 노출하지 않는다(정보 누출) — 상세는 서버 로그로만.
+        _logger.exception("ai-guide failed")
+        return {"ok": False, "error": "ai-guide generation failed"}
 
 

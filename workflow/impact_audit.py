@@ -17,31 +17,17 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 AUDIT_DIR = REPO_ROOT / "reports" / "impact_audit"
 LOCK_PATH = AUDIT_DIR / ".run_lock"
 _RUN_FILE_LOCK = FileLock(str(LOCK_PATH) + ".flock", timeout=5) if FileLock else threading.Lock()
+# 다중 uvicorn 워커 배포: 실행 수명 동안 _RUN_FILE_LOCK을 '보유'해 진짜 cross-process 뮤텍스로
+# 쓴다(holder crash 시 OS가 fd를 닫으며 자동 해제 → 좀비 락 없음). _RUN_INTRA_LOCK은 같은
+# 프로세스 내 다중 daemon 잡을 직렬화(filelock은 같은 인스턴스에 re-entrant라 자체로 intra 배제
+# 불가). _RUN_LOCK_OWNER는 소유 스레드를 기록해 실패한 acquire/타 스레드가 남의 락을 풀지
+# 못하게 한다(threading.Lock은 owner 개념이 없어 명시 추적 필요).
+_RUN_INTRA_LOCK = threading.Lock()
+_RUN_LOCK_OWNER: Dict[str, Any] = {"tid": None}
 
 
 def _now_iso() -> str:
     return datetime.now().isoformat(timespec="seconds")
-
-
-def _pid_alive(pid: int) -> bool:
-    try:
-        os.kill(int(pid), 0)
-    except Exception:
-        return False
-    return True
-
-
-def _thread_alive(thread_id: int) -> bool:
-    try:
-        wanted = int(thread_id)
-    except Exception:
-        return False
-    for thread in threading.enumerate():
-        ident = getattr(thread, "ident", None)
-        native_id = getattr(thread, "native_id", None)
-        if ident == wanted or native_id == wanted:
-            return True
-    return False
 
 
 def _load_json(path: Path, default: Dict[str, Any]) -> Dict[str, Any]:
@@ -67,31 +53,38 @@ def ensure_audit_dir() -> Path:
     return AUDIT_DIR
 
 
+def _active_lock_result() -> Dict[str, Any]:
+    existing = _load_json(LOCK_PATH, default={}) or {}
+    return {"ok": False, "reason": "active_lock", "lock_path": str(LOCK_PATH), "lock": existing}
+
+
 def acquire_run_lock(scm_id: str) -> Dict[str, Any]:
+    """Impact 실행 중복을 차단하는 뮤텍스 획득(intra-process + cross-process).
+
+    성공 시 두 락을 '실행 수명 동안' 보유하고 release_run_lock()에서 해제한다(과거처럼 즉시
+    해제 후 .run_lock 내용검사에 의존하지 않는다 — 그 방식은 cross-process에서 살아있는 타
+    프로세스 락을 오회수했다). .run_lock 파일은 이제 진단용 메타데이터일 뿐 뮤텍스가 아니다.
+    """
     ensure_audit_dir()
+    # 1) intra-process 직렬화 — 같은 프로세스의 다른 daemon 잡 스레드가 이미 실행 중이면 차단.
+    #    (filelock은 동일 인스턴스에 re-entrant라 cross-process만으로는 이걸 못 막는다.)
+    if not _RUN_INTRA_LOCK.acquire(blocking=False):
+        return _active_lock_result()
+    # 2) cross-process 뮤텍스 — 다른 uvicorn 워커가 보유 중이면 즉시(timeout 0) 실패.
     try:
         if FileLock:
             _RUN_FILE_LOCK.acquire(timeout=0)
         elif not _RUN_FILE_LOCK.acquire(blocking=False):
             raise TimeoutError("lock held")
     except Exception:
-        # Lock held by another thread/process
-        existing = _load_json(LOCK_PATH, default={}) or {}
-        return {"ok": False, "reason": "active_lock", "lock_path": str(LOCK_PATH), "lock": existing}
-
-    # We hold the file lock — safe to check/write
-    if LOCK_PATH.exists():
-        existing = _load_json(LOCK_PATH, default={}) or {}
-        pid = int(existing.get("pid") or 0)
-        thread_id = int(existing.get("thread_id") or 0)
-        if pid and _pid_alive(pid) and thread_id and _thread_alive(thread_id):
-            try: _RUN_FILE_LOCK.release()
-            except Exception: pass
-            return {"ok": False, "reason": "active_lock", "lock_path": str(LOCK_PATH), "lock": existing}
         try:
-            LOCK_PATH.unlink()
-        except OSError:
+            _RUN_INTRA_LOCK.release()
+        except RuntimeError:
             pass
+        return _active_lock_result()
+
+    # 두 락 보유 — 소유 스레드 기록 후 진단 메타데이터 기록(뮤텍스 아님).
+    _RUN_LOCK_OWNER["tid"] = threading.get_ident()
     payload = {
         "scm_id": str(scm_id or "").strip(),
         "started_at": _now_iso(),
@@ -99,19 +92,36 @@ def acquire_run_lock(scm_id: str) -> Dict[str, Any]:
         "thread_id": threading.get_ident(),
     }
     _save_json(LOCK_PATH, payload)
-    try: _RUN_FILE_LOCK.release()
-    except Exception: pass
     return {"ok": True, "lock_path": str(LOCK_PATH), "lock": payload}
 
 
 def release_run_lock() -> bool:
-    if not LOCK_PATH.exists():
+    # 소유 스레드만 해제 — 실패한 acquire나 다른 스레드가 남의 락을 풀지 못하게(threading.Lock은
+    # owner 검증이 없어 명시 확인 필요). finally에서 무조건 호출돼도 비소유자는 no-op.
+    if _RUN_LOCK_OWNER.get("tid") != threading.get_ident():
         return False
+    _RUN_LOCK_OWNER["tid"] = None
+    removed = False
+    if LOCK_PATH.exists():
+        try:
+            LOCK_PATH.unlink()
+            removed = True
+        except OSError:
+            pass
     try:
-        LOCK_PATH.unlink()
-        return True
-    except OSError:
-        return False
+        if FileLock:
+            if getattr(_RUN_FILE_LOCK, "is_locked", False):
+                _RUN_FILE_LOCK.release()
+        elif _RUN_FILE_LOCK.locked():
+            _RUN_FILE_LOCK.release()
+    except Exception:
+        pass
+    try:
+        if _RUN_INTRA_LOCK.locked():
+            _RUN_INTRA_LOCK.release()
+    except RuntimeError:
+        pass
+    return removed
 
 
 def write_impact_audit(payload: Dict[str, Any]) -> Path:

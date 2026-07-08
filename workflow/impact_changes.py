@@ -322,20 +322,40 @@ def list_change_logs(scm_id: str = "", limit: int = 20) -> List[Dict[str, Any]]:
     return items
 
 
+def _safe_run_id(run_id: str) -> str:
+    """HTTP 경로에서 유입되는 run_id를 파일명 조각으로 안전화.
+
+    과거 `CHANGE_DIR / raw_id`는 Windows 절대경로('C:\\...')/백슬래시 traversal로 CHANGE_DIR
+    밖 임의 JSON을 읽을 수 있었다. 정상 run_id('impact_YYYYMMDD_HHMMSS')는 alnum/_/- 뿐이라
+    무변형. 구분자·상위참조 문자는 모두 제거된다.
+    """
+    return "".join(
+        ch if (ch.isalnum() or ch in {"-", "_"}) else "_" for ch in str(run_id or "").strip()
+    ).strip("_")
+
+
 def load_change_log(run_id: str) -> Dict[str, Any]:
     ensure_change_dir()
-    raw_id = str(run_id or "").strip()
+    raw_id = _safe_run_id(run_id)
     if not raw_id:
         raise KeyError("run_id required")
+    # 확장자 없는 raw 후보(임의 파일 read 표면)는 제거하고 change_*.json 규약만 허용.
     candidates = [
-        CHANGE_DIR / raw_id,
         CHANGE_DIR / f"{raw_id}.json",
         CHANGE_DIR / f"change_{raw_id}.json",
         CHANGE_DIR / f"change_{raw_id.replace('impact_', '', 1)}.json",
     ]
+    base = CHANGE_DIR.resolve()
     for path in candidates:
-        if path.exists():
-            payload = _load_json(path)
+        try:
+            resolved = path.resolve()
+        except OSError:
+            continue
+        # 방어적 containment 확인(sanitize로 이미 차단되나 belt-and-suspenders).
+        if not resolved.is_relative_to(base):
+            continue
+        if resolved.exists():
+            payload = _load_json(resolved)
             if payload:
                 return payload
     raise KeyError(raw_id)

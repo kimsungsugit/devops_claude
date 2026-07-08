@@ -29,7 +29,11 @@ def _sanitize_fragment(value: str) -> str:
 
 def _job_path(job_id: str) -> Path:
     JOB_DIR.mkdir(parents=True, exist_ok=True)
-    return JOB_DIR / f"job_{job_id}.json"
+    # HTTP 경로(/api/scm/impact-job/{job_id})에서 유입되는 job_id를 무검증 결합하면 Windows
+    # 백슬래시/절대경로로 JOB_DIR 밖 .json을 읽는 traversal이 된다(load_job). 정상 job_id는
+    # 'impact_<ts>_<scm>_<uuid8>'로 alnum/_/- 뿐이라 sanitize해도 무변형(왕복 안전).
+    safe = _sanitize_fragment(job_id)
+    return JOB_DIR / f"job_{safe}.json"
 
 
 def _write_job(job: Dict[str, Any]) -> Dict[str, Any]:
@@ -39,7 +43,14 @@ def _write_job(job: Dict[str, Any]) -> Dict[str, Any]:
     return job
 
 
-def load_job(job_id: str) -> Dict[str, Any]:
+# running으로 남았으나 heartbeat(15s 주기)가 이 시간 이상 끊기면 프로세스 사망으로 간주.
+# 20×heartbeat = 5분. heartbeat는 별도 daemon 스레드라 프로세스가 살아있는 한(장시간 subprocess
+# 중에도) 계속 갱신되므로, 이 임계를 넘긴 running은 프로세스 orphan으로 볼 수 있다.
+_STALE_RUNNING_SEC = 300
+
+
+def _load_job_raw(job_id: str) -> Dict[str, Any]:
+    """순수 읽기(회수 side-effect 없음). update_job이 재귀 없이 재사용."""
     path = _job_path(job_id)
     if not path.exists():
         raise KeyError(job_id)
@@ -52,6 +63,40 @@ def load_job(job_id: str) -> Dict[str, Any]:
     return raw
 
 
+def _reap_if_stale(raw: Dict[str, Any]) -> Dict[str, Any]:
+    """heartbeat가 끊긴 orphan running 잡을 failed로 회수(lazy, 접근 시점).
+
+    프로세스 재시작/크래시로 daemon 스레드가 죽으면 job JSON은 'running'으로 남고 폴링
+    클라이언트가 영구 running으로 관측한다. updated_at이 _STALE_RUNNING_SEC를 넘긴 running만
+    failed로 표시. 아직 fresh하거나 terminal(completed/failed)이면 그대로 반환.
+    """
+    if not isinstance(raw, dict) or raw.get("status") != "running":
+        return raw
+    try:
+        ts = datetime.fromisoformat(str(raw.get("updated_at") or ""))
+    except (ValueError, TypeError):
+        return raw
+    now = datetime.now(ts.tzinfo) if ts.tzinfo else datetime.now()
+    if (now - ts).total_seconds() < _STALE_RUNNING_SEC:
+        return raw
+    job_id = str(raw.get("job_id") or "")
+    if not job_id:
+        return raw
+    try:
+        return fail_job(job_id, _build_error(
+            "job_orphaned",
+            "실행이 중단되었습니다(프로세스 재시작 등).",
+            "heartbeat가 5분 이상 끊겨 orphan으로 회수했습니다. 다시 실행하세요.",
+            retryable=True,
+        ))
+    except Exception:
+        return raw
+
+
+def load_job(job_id: str) -> Dict[str, Any]:
+    return _reap_if_stale(_load_job_raw(job_id))
+
+
 def update_job(
     job_id: str,
     *,
@@ -62,7 +107,7 @@ def update_job(
     result: Optional[Dict[str, Any]] = None,
     error: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    job = load_job(job_id)
+    job = _load_job_raw(job_id)  # 순수 읽기 — reap 래퍼(load_job)를 쓰면 fail_job→update_job 재귀.
     # heartbeat(모든 필드 None인 순수 touch)가 이미 종료된 잡을 되살리지 않도록 무시.
     # complete_job/fail_job과 heartbeat의 read-modify-write race로 completed→running 되돌림 방지(W1).
     if (
@@ -155,7 +200,7 @@ def list_jobs(*, scm_id: str = "", limit: int = 10) -> List[Dict[str, Any]]:
             continue
         if scm_id and str(raw.get("scm_id") or "") != str(scm_id):
             continue
-        items.append(raw)
+        items.append(_reap_if_stale(raw))  # orphan running을 목록에서도 failed로 표면화
         if len(items) >= max(1, int(limit)):
             break
     return items
