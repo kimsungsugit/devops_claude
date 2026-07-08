@@ -195,11 +195,16 @@ def _uds_name_asil_map(uds_path: str) -> Dict[str, str]:
     try:
         from backend.services.file_resolver import get_resolver
         docx_bytes = get_resolver().read_bytes(uds_path)
-    except (FileNotFoundError, PermissionError, OSError):
-        _UDS_NAME_ASIL_CACHE[uds_path] = {}  # 접근 불가(cloudium 미허용/미존재) → 빈 맵 캐시(재시도 폭주 방지)
+    except FileNotFoundError:
+        _UDS_NAME_ASIL_CACHE[uds_path] = {}  # 진짜 부재 → 빈 맵 캐시(재파싱 회피)
+        return {}
+    except (PermissionError, OSError):
+        # ⚠ 워커 미기동/네트워크 블립을 read_bytes가 PermissionError/OSError로 던진다
+        # (file_resolver _ipc_call/_ensure_gate). 이걸 캐시하면 워커가 나중에 떠도 세션 내내
+        # 미보강(ASIL 안전게이트 무력화) → 캐시하지 않고 다음 impact 실행서 재시도한다.
         return {}
     except Exception:
-        return {}  # 일시 오류(워커 미기동 등)는 캐시하지 않음 — 다음 실행서 재시도
+        return {}  # 기타 일시 오류도 캐시 안 함
     result: Dict[str, str] = {}
     if docx_bytes:
         # 1) heading 기반 SwUDS 파서 — 함수명→ASIL 직접(현대/모비스 포맷).
@@ -213,23 +218,33 @@ def _uds_name_asil_map(uds_path: str) -> Dict[str, str]:
                     result.setdefault(_n, _a)
         except Exception:
             pass
-        # 2) heading-less 레이아웃 폴백 — SwUFn 근접 매칭(reverse-corpus, v1.07류).
-        try:
-            from backend.services.iso26262_doc_asil_extractor import (
-                extract_function_asil_from_suds,
-                extract_function_name_to_swufn_from_suds,
-            )
-            _swufn_asil = extract_function_asil_from_suds(docx_bytes) or {}
-            _name_swufn = extract_function_name_to_swufn_from_suds(docx_bytes) or {}
-            for _n, _s in _name_swufn.items():
-                _a = _swufn_asil.get(_s)
-                _nl = str(_n or "").strip().lower()
-                if _nl and _a:
-                    result.setdefault(_nl, _a)
-        except Exception:
-            pass
+        # 2) heading-less 레이아웃 폴백 — heading 파서가 거의 못 뽑을 때만(v1.07류). reverse-corpus는
+        #    자유 텍스트 근접매칭이라 프로즈를 함수명으로 오포착(false-positive→오등급 하향 위험)할 수 있고
+        #    36MB docx를 2회 더 파싱하므로, heading 파서가 구조화 표에서 신뢰성 있게 뽑으면 쓰지 않는다.
+        if len(result) < 5:
+            try:
+                from backend.services.iso26262_doc_asil_extractor import (
+                    extract_function_asil_from_suds,
+                    extract_function_name_to_swufn_from_suds,
+                )
+                _swufn_asil = extract_function_asil_from_suds(docx_bytes) or {}
+                _name_swufn = extract_function_name_to_swufn_from_suds(docx_bytes) or {}
+                for _n, _s in _name_swufn.items():
+                    _a = _swufn_asil.get(_s)
+                    _nl = str(_n or "").strip().lower()
+                    if _nl and _a:
+                        result.setdefault(_nl, _a)
+            except Exception:
+                pass
     _UDS_NAME_ASIL_CACHE[uds_path] = result
     return result
+
+
+def _is_blank_asil(value: Any) -> bool:
+    """ASIL이 '미상'인지 판정. ⚠ uds_generator는 소스/문서에 ASIL이 없으면 빈 문자열이 아니라
+    placeholder 'TBD'를 넣는다(report_gen/uds_generator.py:1126) — 빈 문자열만 검사하면 실제
+    미태그 함수(예: NE1AW의 497개)를 전부 놓쳐 보강이 no-op가 된다. helpers/uds._is_blank_value와 동일 집합."""
+    return str(value or "").strip().upper() in ("", "TBD", "N/A", "-", "UNKNOWN")
 
 
 def _enrich_asil_from_uds(by_name: Dict[str, Any], uds_path: str) -> tuple[int, int]:
@@ -242,7 +257,7 @@ def _enrich_asil_from_uds(by_name: Dict[str, Any], uds_path: str) -> tuple[int, 
         return 0, 0
     missing = [
         fn for fn, info in by_name.items()
-        if isinstance(info, dict) and not str(info.get("asil") or "").strip()
+        if isinstance(info, dict) and _is_blank_asil(info.get("asil"))
     ]
     if not missing:
         return 0, 0

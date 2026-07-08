@@ -584,13 +584,29 @@ def generate_uds_source_sections(
         except Exception:
             ast_result = {"functions": [], "globals": []}
         # AST 중복 함수 제거 (복수 루트에서 동일 함수명 중복 가능)
-        _seen_ast_names: Set[str] = set()
+        # ⚠ 안전: first-wins로 detail은 유지하되 ASIL은 중복 변형 중 '최대'로 보수적 상향한다.
+        # preprocess=False에선 #ifdef/#if MACRO로 가드된 동일 함수명 변형이 둘 다 파싱되는데,
+        # 소스 우선(source-first) 변형이 비활성(낮은 ASIL)일 수 있어 first-wins가 ASIL을 하향할 위험
+        # (ASIL D 변경을 A로 오판→에스컬레이션/MC-DC 게이트 미발동). ASIL만 max로 올려 하향을 차단.
+        _ASIL_R = {"QM": 0, "A": 1, "B": 2, "C": 3, "D": 4}
+
+        def _asil_rank_of(_v: Any) -> int:
+            _s = re.sub(r"^ASIL[\s_-]*", "", str(_v or "").strip().upper()).strip()
+            return _ASIL_R.get(_s, -1)
+
+        _seen_ast_idx: Dict[str, int] = {}
         _deduped: List[Dict[str, Any]] = []
         for _fn in (ast_result.get("functions") or []):
             _fn_name = str(_fn.get("name") or "").strip() if isinstance(_fn, dict) else ""
-            if _fn_name and _fn_name not in _seen_ast_names:
-                _seen_ast_names.add(_fn_name)
+            if not _fn_name:
+                continue
+            if _fn_name not in _seen_ast_idx:
+                _seen_ast_idx[_fn_name] = len(_deduped)
                 _deduped.append(_fn)
+            else:
+                _prev = _deduped[_seen_ast_idx[_fn_name]]
+                if _asil_rank_of(_fn.get("comment_asil")) > _asil_rank_of(_prev.get("comment_asil")):
+                    _prev["comment_asil"] = _fn.get("comment_asil")  # 하향 방지(보수적 상향)
         ast_result["functions"] = _deduped
         module_ids: Dict[str, int] = {}
         module_order = [
