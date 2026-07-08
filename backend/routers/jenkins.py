@@ -4952,6 +4952,36 @@ def jenkins_call_tree_xlsx(body: Dict[str, Any]) -> Response:
         except Exception as exc:
             _api_logger.debug("SwIT strategy map parse failed: %s", exc)
             swit_map = None
+    elif body.get("auto_swit"):
+        # 기준 SCM 미지정: 등록 SCM 각각의 SITS를 워커로 읽어 파싱 → 이 콜트리 루트와 매칭이
+        # 최대인 것을 선택. 다중 프로젝트 registry에서 다른 프로젝트 SITS(예: HDPDM01)를 골라
+        # 0매칭 나는 것을 방지(매칭 0인 SCM 대신 실제 대응 SCM을 데이터 기반으로 판별).
+        try:
+            from backend.services.call_tree_xlsx import parse_swit_strategy_map
+            from backend.services.scm_registry import list_registry_entries
+            from backend.services.file_resolver import get_resolver
+            from backend.services.resolver_helpers import enforce_resolver_access
+            resolver = get_resolver()
+            best_map, best_n = None, 0
+            for e in (list_registry_entries() or []):
+                ld = getattr(e, "linked_docs", None)
+                sp = str(getattr(ld, "sits", "") or "").strip() if ld else ""
+                if not sp:
+                    continue
+                try:
+                    enforce_resolver_access(sp)
+                    if not resolver.exists(sp):
+                        continue
+                    cand = parse_swit_strategy_map(resolver.read_bytes(sp))
+                    matched, _ = count_swit_matched_roots(payload, cand)
+                    if matched > best_n:
+                        best_n, best_map = matched, cand
+                except Exception:
+                    continue
+            swit_map = best_map
+        except Exception as exc:
+            _api_logger.debug("auto SwIT map resolve failed: %s", exc)
+            swit_map = None
     try:
         data = build_call_tree_xlsx(payload, meta, swit_map=swit_map)
     except ImportError as exc:

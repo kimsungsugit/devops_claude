@@ -3409,6 +3409,7 @@ function CallTreeView({ job, cacheRoot, buildSelector, sourceRoot, seedFns, toas
     if (!data) { toast('warning', '먼저 콜트리를 생성한 뒤 내보내세요.'); return; }
     let sitsPath = '';
     let scmId = '';
+    let autoSwit = false;
     if (useSwitId) {
       try { sitsPath = String((JSON.parse(localStorage.getItem('devops_v2_doc_paths') || '{}').sits) || '').trim(); }
       catch { sitsPath = ''; }
@@ -3416,21 +3417,12 @@ function CallTreeView({ job, cacheRoot, buildSelector, sourceRoot, seedFns, toas
       // (설정 화면에 SITS가 SCM placeholder로만 보이고 '빈 칸 채우기'를 안 눌러 doc_paths엔 없는 흔한 케이스.)
       if (!sitsPath) {
         scmId = String(localStorage.getItem('devops_v2_doc_scm') || '').trim();
-        // 기준 SCM 미선택이어도, 등록 SCM 중 linked_docs.sits 보유한 것을 자동 선택(무설정 폴백) →
-        // registry에 SITS가 있으면 사용자가 아무것도 안 골라도 경고 없이 SwIT_ID로 내보내진다.
-        if (!scmId) {
-          try {
-            const list = await api('/api/scm/list');
-            const items = Array.isArray(list) ? list : (list?.items ?? list?.registries ?? []);
-            const hit = (items || []).find(s => String((s?.linked_docs || {}).sits || '').trim());
-            if (hit) scmId = String(hit.scm_id || hit.id || '').trim();
-          } catch { /* SCM 목록 조회 실패 시 아래 경고로 폴백 */ }
-        }
+        // 기준 SCM 미선택이면 백엔드가 등록 SCM 각각의 SITS를 워커로 읽어 '이 콜트리 매칭 최대'인
+        // 것을 자동 선택(auto_swit). 프론트가 첫 SCM을 고르면 다중 프로젝트 registry에서 엉뚱한
+        // 프로젝트 SITS(매핑 0)를 골라 0매칭 나는 위험이 있어 데이터 기반 판별을 백엔드에 위임한다.
+        if (!scmId) autoSwit = true;
       }
-      if (!sitsPath && !scmId) {
-        toast('warning', 'SwIT ID 라벨에는 SITS 경로가 필요합니다 — 설정 > 입력자료에서 SITS 경로를 직접 지정하거나, SCM 연결문서에 SITS를 등록하세요.');
-        return;
-      }
+      // 사전 경고로 차단하지 않고 항상 진행 — 매칭 결과는 X-Swit-Matched 헤더로 사후 표면화한다.
     }
     setXlsxBusy(true);
     try {
@@ -3445,6 +3437,7 @@ function CallTreeView({ job, cacheRoot, buildSelector, sourceRoot, seedFns, toas
       if (useSwitId) {
         if (sitsPath) bodyObj.sits_path = sitsPath;
         else if (scmId) bodyObj.scm_id = scmId;
+        else if (autoSwit) bodyObj.auto_swit = true;
       }
       const res = await fetch(buildUrl('/api/jenkins/call-tree/export-xlsx'), {
         method: 'POST',
