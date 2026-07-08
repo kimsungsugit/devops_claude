@@ -55,6 +55,36 @@ ASIL_QM_FILL_RGB: Final[str] = "FFE8E8E8"  # 연한 회색 (Quality Management �
 INDEX_COL_SHADE_RGB: Final[str] = "FFEEEEEE"  # 연회색 (Consistency No 열 음영, 회사 양식)
 
 
+# ---- 함수 호출 트리(콜트리) xlsx 내보내기 색상 (call_tree_xlsx.py 전용) ----
+#
+# 회사 SwITS "2.SW Integration Strategy" 시트 재현용. 함수 호출 계층(depth)을
+# 컬럼 들여쓰기 + depth별 파스텔 배경으로 시각화(통합 순서). 회사 양식 색을 그대로
+# 재현한 고정값이며 우리가 정의한 의미 색이 아님(REF 일치 목적). audit 마킹(위
+# ASIL/FAIL)과 성격이 다르므로 별도 상수군으로 분리.
+#
+# depth 인덱스 → 배경. depth가 목록 길이를 넘으면 마지막 색을 유지(회사 양식은
+# 10 depth 이상을 단일 베이지로 통일 — 그 규칙을 재현).
+CALL_TREE_DEPTH_FILLS: Final[tuple] = (
+    "FFDDEBF7",  # depth 0: 연파랑
+    "FFDDEBF7",  # depth 1: 연파랑
+    "FFFFE6EE",  # depth 2: 연분홍
+    "FFE5F5E0",  # depth 3: 연초록
+    "FFFFF9DB",  # depth 4: 연노랑
+    "FFF5E6D0",  # depth 5+: 베이지 (이후 모든 depth 동일)
+)
+
+# 진입 함수 블록 헤더 셀 — 노란 배경 + 남색 굵은 글씨(회사 양식 B열 통합테스트 ID 셀).
+CALL_TREE_ROOT_FILL_RGB: Final[str] = "FFFFFF00"    # 노랑 (진입 함수 블록 헤더 배경)
+CALL_TREE_ROOT_FONT_RGB: Final[str] = "FF002060"    # 남색 (진입 함수명 글자색)
+CALL_TREE_SOURCE_FILL_RGB: Final[str] = "FFFFFFCC"  # 연노랑 (관련 소스 파일 셀)
+CALL_TREE_HEADER_FILL_RGB: Final[str] = "FFFFFF00"  # 노랑 (depth 헤더 행)
+CALL_TREE_EXTERNAL_FILL_RGB: Final[str] = "FFF2F2F2"  # 연회색 (외부/라이브러리 함수 셀)
+
+# 보조 텍스트(메타 라인·유형/비고·외부 함수명·정의 파일) 글자색 — muted gray.
+# Excel 산출물 공통 보조 정보용. 강조 색(ASIL/ROOT)과 구분되는 저채도 회색.
+MUTED_TEXT_FONT_RGB: Final[str] = "FF6B7280"  # 회색 (보조 정보 글자)
+
+
 # ---- 사용자 입력 placeholder 문자열 (셀에 쓰이는 안내) ----
 
 # 24차 silent "N/A" 제거 정책에 따라 명시적 안내. 뒤에 hint를 " — "로 이어 붙임.
@@ -70,5 +100,12 @@ __all__ = [
     "ASIL_D_FILL_RGB",
     "ASIL_QM_FILL_RGB",
     "INDEX_COL_SHADE_RGB",
+    "CALL_TREE_DEPTH_FILLS",
+    "CALL_TREE_ROOT_FILL_RGB",
+    "CALL_TREE_ROOT_FONT_RGB",
+    "CALL_TREE_SOURCE_FILL_RGB",
+    "CALL_TREE_HEADER_FILL_RGB",
+    "CALL_TREE_EXTERNAL_FILL_RGB",
+    "MUTED_TEXT_FONT_RGB",
     "USER_INPUT_PLACEHOLDER",
 ]

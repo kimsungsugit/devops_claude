@@ -1,5 +1,5 @@
 import React, { useState, useCallback, useEffect, useMemo, useRef } from 'react';
-import { api, post, getUsername } from '../../api.js';
+import { api, post, getUsername, authHeaders, buildUrl } from '../../api.js';
 import { useJenkinsCfg, useToast } from '../../App.jsx';
 import StatusBadge from '../StatusBadge.jsx';
 import { defaultCacheRoot } from '../../api.js';
@@ -1034,7 +1034,7 @@ function CrossMatrixView({ rows, linkTable, fullMatrix, exportMeta }) {
     try {
       const user = getUsername();
       const payload = { matrix: fullMatrix || { rows, link_table: linkTable }, meta: exportMeta || {} };
-      const res = await fetch('/api/jenkins/uds/traceability-matrix/export-xlsx', {
+      const res = await fetch(buildUrl('/api/jenkins/uds/traceability-matrix/export-xlsx'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...(user ? { 'X-User': user } : {}) },
         body: JSON.stringify(payload),
@@ -3293,7 +3293,9 @@ function CallTreeView({ job, cacheRoot, buildSelector, sourceRoot, seedFns, toas
   const bidir = direction === 'both';
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(false);
+  const [xlsxBusy, setXlsxBusy] = useState(false);
   const [expanded, setExpanded] = useState(() => new Set());
+  const [allOpen, setAllOpen] = useState(false);
   const mountedRef = useRef(true);
   // 요청 시퀀스 토큰 — 로딩 중 재진입(입력창 Enter/버튼 재클릭) 시 늦게 도착한 이전 응답이 최신 결과를
   // 덮어쓰지 않도록(stale setData 방지). load 진입마다 ++, resolve 시 자기 토큰이 최신일 때만 반영.
@@ -3359,6 +3361,7 @@ function CallTreeView({ job, cacheRoot, buildSelector, sourceRoot, seedFns, toas
       // boot 루트(main·_Startup)의 첫 레벨을 자동 펼쳐 애플리케이션 트리를 바로 노출. boot가 없거나
       // 역방향이면 빈 Set(루트만 펼침). 정렬/index는 렌더 sortedTrees와 동일 함수·동일 reverse라 정합.
       setExpanded(_ctBootExpansion(res?.trees, res?.stats?.reverse));
+      setAllOpen(false);   // 새 트리 로드 시 '모두 펼치기' 상태 초기화(라벨↔실제 펼침 정합)
       const miss = Array.isArray(res?.missing) ? res.missing : [];
       const st = res?.stats || {};
       // 백엔드가 실제 스캔한 소스(build_root/source 체크아웃 사본)의 완전성 신호. 명시적 false일 때만 경고
@@ -3397,11 +3400,68 @@ function CallTreeView({ job, cacheRoot, buildSelector, sourceRoot, seedFns, toas
     if (initialEntry && !didAutoLoad.current && (job?.url || sourceRoot)) { didAutoLoad.current = true; load(); }
   }, [initialEntry, load, job, sourceRoot]);
 
+  // xlsx 내보내기 — 현재 콜트리(data: 단방향 trees 또는 양방향 bidir)를 회사 SwITS
+  // "2.SW Integration Strategy" 형식(depth 컬럼)으로 서버에서 렌더. 바이너리 응답이라
+  // api() 헬퍼 대신 raw fetch지만 authHeaders(Bearer+X-User) + res.ok 검사 명시(X9).
+  const exportXlsx = useCallback(async () => {
+    if (!data) { toast('warning', '먼저 콜트리를 생성한 뒤 내보내세요.'); return; }
+    setXlsxBusy(true);
+    try {
+      const meta = {
+        job_url: job?.url || '',
+        build_selector: buildSelector || '',
+        source_root: sourceRoot || '',
+        // 감사 provenance — 체크아웃 소스 미완(부분 집계) 신호를 xlsx 헤더에도 전달(W3).
+        // 화면 토스트 경고가 내보낸 파일에서 사라져 부분 트리를 완전본으로 오인하는 것 방지.
+        source_complete: data?.bidir ? data?.callees?.meta?.source_complete : data?.meta?.source_complete,
+      };
+      const res = await fetch(buildUrl('/api/jenkins/call-tree/export-xlsx'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
+        body: JSON.stringify({ payload: data, meta }),
+      });
+      if (!res.ok) {
+        const t = await res.text().catch(() => '');
+        throw new Error(`HTTP ${res.status} ${t.slice(0, 140)}`);
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = 'call_tree_integration_strategy.xlsx';
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      toast('success', '엑셀 파일을 내보냈습니다.');
+    } catch (e) {
+      toast('error', `엑셀 내보내기 실패: ${e.message}`);
+    } finally {
+      setXlsxBusy(false);
+    }
+  }, [data, job, buildSelector, sourceRoot, toast]);
+
   const trees = Array.isArray(data?.trees) ? data.trees : [];
   const st = data?.stats || {};
   // 진입점(boot)→ISR→일반 순 정렬(역방향은 이름순). load의 _ctBootExpansion과 동일 정렬 함수·동일
   // reverse(로드된 데이터 기준 st.reverse)라 자동펼침 path가 정합.
   const sortedTrees = useMemo(() => _ctSortRoots(trees, st.reverse), [trees, st.reverse]);
+  // 모두 펼치기/접기 — 클라 측(재조회 없음). 펼침=로드된 전 노드 path, 접기=기본(boot) 펼침.
+  // sortedTrees를 넘겨 렌더와 동일 index로 path 생성(정합). 단방향(trees) 전용 — 양방향은 caller/callee 블록이라 별도.
+  const toggleAllOpen = () => {
+    const next = !allOpen;
+    if (next) {
+      const paths = _ctAllExpandedPaths(sortedTrees);
+      // W1: 대형 트리(전체 트리 등)를 한 번에 펼치면 비메모 CallTreeNode 수천 개가 단일 렌더
+      // 패스로 동시 마운트 → 브라우저 프리즈 위험. 임계 초과 시 확인 게이트로 사용자 동의 후 진행.
+      if (paths.size > 2000 && typeof window !== 'undefined' && typeof window.confirm === 'function'
+          && !window.confirm(`${paths.size.toLocaleString()}개 노드를 한 번에 펼칩니다. 트리가 크면 브라우저가 잠시 느려질 수 있습니다. 계속할까요?`)) {
+        return;
+      }
+      setAllOpen(true);
+      setExpanded(paths);
+    } else {
+      setAllOpen(false);
+      setExpanded(_ctBootExpansion(trees, st.reverse));
+    }
+  };
   // 방향 토글을 바꾸고 재조회 전이면 표시 데이터(로드 시점 방향)와 컨트롤(direction)이 불일치 — 시각 단서.
   const loadedBidir = !!data?.bidir;
   const dirStale = !!data && (loadedBidir !== bidir || (!loadedBidir && (!!st.reverse !== reverse)));
@@ -3449,6 +3509,22 @@ function CallTreeView({ job, cacheRoot, buildSelector, sourceRoot, seedFns, toas
             style={{ padding: '6px 14px', fontSize: 12, fontWeight: 600, borderRadius: 4, cursor: loading ? 'default' : 'pointer',
               background: 'var(--bg)', color: 'var(--accent)', border: '1px solid var(--accent)' }}>
             {reverse ? '전체 역트리' : '전체 트리'}
+          </button>
+        )}
+        {trees.length > 0 && (
+          <button type="button" onClick={toggleAllOpen}
+            title={allOpen ? '모든 하위 노드 접기(기본 펼침으로 복귀)' : '로드된 모든 하위 노드를 한 번에 펼치기'}
+            style={{ padding: '6px 14px', fontSize: 12, fontWeight: 600, borderRadius: 4, cursor: 'pointer',
+              background: 'var(--bg)', color: 'var(--fg)', border: '1px solid var(--border)' }}>
+            {allOpen ? '모두 접기 ⊟' : '모두 펼치기 ⊞'}
+          </button>
+        )}
+        {data && (
+          <button type="button" onClick={exportXlsx} disabled={loading || xlsxBusy}
+            title="현재 호출 트리를 회사 SwITS 통합전략(2.SW Integration Strategy) 형식의 xlsx로 내보냅니다 — depth별 컬럼 들여쓰기·정의 파일·ASIL·마커 포함."
+            style={{ padding: '6px 14px', fontSize: 12, fontWeight: 600, borderRadius: 4, cursor: (loading || xlsxBusy) ? 'default' : 'pointer',
+              background: 'var(--bg)', color: 'var(--accent)', border: '1px solid var(--accent)' }}>
+            {xlsxBusy ? '생성 중…' : 'Excel 내보내기 ↓'}
           </button>
         )}
       </div>

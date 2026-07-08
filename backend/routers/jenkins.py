@@ -4904,6 +4904,39 @@ def jenkins_call_tree_download(job_url: str, cache_root: str, filename: str) -> 
     return FileResponse(str(target), filename=target.name, media_type=media)
 
 
+@router.post("/api/jenkins/call-tree/export-xlsx")
+def jenkins_call_tree_xlsx(body: Dict[str, Any]) -> Response:
+    """콜트리(클라이언트 보유 payload)를 회사 SwITS 통합전략 형식 xlsx로 렌더해 반환.
+
+    프론트가 이미 생성한 콜트리 payload(trees/stats 또는 bidir callers/callees)를 body로
+    보내면 재분석 없이 depth-컬럼 형식으로 포맷만 한다(추적성 매트릭스 export-xlsx와 동일
+    패턴 — 디스크/소스 read 없음, cloudium 워커 무관).
+    body: {"payload": {...}, "meta": {job_url, build_selector, ...}}.
+    """
+    from backend.services.call_tree_xlsx import build_call_tree_xlsx
+
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="invalid body")
+    payload = body.get("payload") if isinstance(body.get("payload"), dict) else body
+    meta = body.get("meta") if isinstance(body.get("meta"), dict) else {}
+    meta = dict(meta)
+    # 생성시각은 서버 권위값으로 강제(클라가 보낸 값 무시) — audit '생성시각' 위조 방지(I-3).
+    meta["generated_at"] = datetime.now().isoformat(timespec="seconds")
+    try:
+        data = build_call_tree_xlsx(payload, meta)
+    except ImportError as exc:
+        raise HTTPException(status_code=500, detail=f"openpyxl 미설치: {exc}")
+    except Exception as exc:
+        _api_logger.debug("Call tree xlsx export failed: %s", exc)
+        raise HTTPException(status_code=500, detail=f"xlsx 생성 실패: {exc}")
+    fname = f"call_tree_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+    return Response(
+        content=data,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )
+
+
 @router.post("/api/jenkins/report/files")
 def jenkins_report_files(req: JenkinsReportRequest) -> Dict[str, Any]:
     build_root = _resolve_cached_build_root(req.job_url, req.cache_root, req.build_selector)
