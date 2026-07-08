@@ -1,6 +1,6 @@
 import { useState, useCallback, useMemo } from 'react';
-import { post, api, defaultCacheRoot } from '../../api.js';
-import { useJenkinsCfg, useToast } from '../../App.jsx';
+import { post } from '../../api.js';
+import { useToast } from '../../App.jsx';
 import StatusBadge from '../StatusBadge.jsx';
 
 const CHANGE_TYPE_KO = { BODY: '본문', HEADER: '헤더', SIGNATURE: '시그니처', NEW: '신규', DELETE: '삭제', VARIABLE: '변수' };
@@ -8,6 +8,43 @@ const CHANGE_TYPE_TONE = { NEW: 'success', DELETE: 'danger', SIGNATURE: 'warning
 // 정렬 우선순위 — 구조적 변경(시그니처/신규/삭제)을 위로.
 const CHANGE_ORDER = { SIGNATURE: 5, NEW: 4, DELETE: 4, VARIABLE: 3, HEADER: 2, BODY: 1 };
 const COVERAGE_METRIC_KO = { mcdc: 'MC/DC', branch: '분기', statement: '구문' };
+
+// 데모 시나리오용 매핑 — 데모 모드에서 실제 추출 API 대신 주입한다. 함수명은 demoFunctions/
+// demoImpact와 일치시켜, 조인 결과 요구사항/STS/SUTS TC가 채워진 완전한 데모를 보여준다.
+const DEMO_UDS_MAPPING = [
+  { requirement_id: 'SwRS_1001', source_ids: ['g_DrvIn_Main', 'g_DrvIn_MotorSpeed'] },
+  { requirement_id: 'SwRS_1002', source_ids: ['s_MotorSpdCtrl_AutoClose', 's_MotorSpdCtrl_AutoOpen'] },
+  { requirement_id: 'SwRS_1003', source_ids: ['s_AntipinchDetect_Close'] },
+  { requirement_id: 'SwRS_1010', source_ids: ['g_Ap_BuzzerCtrl_Func', 's_DoorStateCtrl'] },
+];
+const DEMO_STS_TCS = [
+  { requirement_id: 'SwRS_1001', testcase: 'STS_DrvIn_001' },
+  { requirement_id: 'SwRS_1001', testcase: 'STS_DrvIn_002' },
+  { requirement_id: 'SwRS_1002', testcase: 'STS_MotorSpd_010' },
+  { requirement_id: 'SwRS_1003', testcase: 'STS_Antipinch_021' },
+  { requirement_id: 'SwRS_1010', testcase: 'STS_Buzzer_030' },
+];
+const DEMO_SUTS_TCS = [
+  { unit: 'g_DrvIn_Main', testcase: 'SUTS_DrvIn_Main_01' },
+  { unit: 's_MotorSpdCtrl_AutoClose', testcase: 'SUTS_AutoClose_01' },
+  { unit: 's_MotorSpdCtrl_AutoOpen', testcase: 'SUTS_AutoOpen_01' },
+  { unit: 's_AntipinchDetect_Close', testcase: 'SUTS_Antipinch_01' },
+];
+
+// 브라우저에서 텍스트 파일 다운로드(내보내기). Blob+anchor, CSP 안전(외부 요청 없음).
+function downloadTextFile(filename, content, mime = 'text/markdown;charset=utf-8') {
+  try {
+    const blob = new Blob([content], { type: mime });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  } catch (_) { /* 다운로드 실패는 무해하게 무시 */ }
+}
 
 // 함수별 '변경 상세' 셀 — 시그니처는 이전(−)/이후(＋) 선언 원문, 신규/삭제는 해당 원문, 본문 등은 설명.
 function renderChangeDetailCell(kind, detail) {
@@ -81,10 +118,8 @@ const DOC_STATUS = {
   failed: { tone: 'danger', label: '실패' },
 };
 
-export default function ImpactGuideSection({ job, analysisResult }) {
-  const { cfg } = useJenkinsCfg();
+export default function ImpactGuideSection({ analysisResult }) {
   const toast = useToast();
-  const cacheRoot = analysisResult?.cacheRoot || defaultCacheRoot(job?.url) || cfg.cacheRoot;
 
   const impact = analysisResult?.impactData;
   const [guide, setGuide] = useState(null);
@@ -152,13 +187,16 @@ export default function ImpactGuideSection({ job, analysisResult }) {
     if (docFilter === 'has_reqs') items = items.filter(d => d.requirements.length > 0);
     else if (docFilter === 'has_sts') items = items.filter(d => d.stsTestCases.length > 0);
     else if (docFilter === 'has_suts') items = items.filter(d => d.sutsTestCases.length > 0);
-    else if (docFilter === 'no_mapping') items = items.filter(d => d.requirements.length === 0 && d.stsTestCases.length === 0);
+    // '매핑 없음'은 요구사항·STS·SUTS TC가 모두 없을 때만 — SUTS TC만 있는 함수를 '매핑 없음'으로
+    // 오분류하던 버그 수정(SUTS TC도 실제 매핑 증거).
+    else if (docFilter === 'no_mapping') items = items.filter(d => d.requirements.length === 0 && d.stsTestCases.length === 0 && d.sutsTestCases.length === 0);
     if (searchTerm.trim()) {
       const q = searchTerm.trim().toLowerCase();
       items = items.filter(d =>
         d.function.toLowerCase().includes(q) ||
         d.requirements.some(r => r.toLowerCase().includes(q)) ||
-        d.stsTestCases.some(tc => tc.toLowerCase().includes(q))
+        d.stsTestCases.some(tc => tc.toLowerCase().includes(q)) ||
+        d.sutsTestCases.some(tc => tc.toLowerCase().includes(q))
       );
     }
     return items;
@@ -175,39 +213,47 @@ export default function ImpactGuideSection({ job, analysisResult }) {
       // 추출 API 실패를 삼키지 않고 수집 — '매핑 없음'(실제 부재)과 '조회 실패'(403/500/네트워크)를
       // 구분해 사용자에게 표면화한다. 과거 catch(_){}로 실패해도 성공 토스트가 뜨던 silent 버그 방지.
       const fetchFailures = [];
-
-      // 1. UDS func→req mapping
       let udsMapping = [];
-      if (linkedDocs.uds) {
-        try {
-          const d = await post('/api/jenkins/uds/extract-mapping', { uds_path: linkedDocs.uds });
-          udsMapping = d?.mapping_pairs ?? [];
-        } catch (e) { fetchFailures.push({ doc: 'UDS', msg: e?.message || '조회 실패' }); }
-      }
-
-      // 2. STS req→TC mapping
       let stsTCs = [];
-      if (linkedDocs.sts) {
-        try {
-          const d = await post('/api/jenkins/sts/extract-traceability', { path: linkedDocs.sts, doc_type: 'sts' });
-          stsTCs = d?.vcast_rows ?? [];
-          // N21: 외부 형식 SUTS/STS — 시트 미인식 시 사용자에게 명확 안내
-          if (!stsTCs.length && Array.isArray(d?.available_sheets) && typeof toast === 'function') {
-            toast('warning', `STS 시트 미인식. 사용 가능한 시트: ${d.available_sheets.join(', ')}`);
-          }
-        } catch (e) { fetchFailures.push({ doc: 'STS', msg: e?.message || '조회 실패' }); }
-      }
-
-      // 3. SUTS func→TC mapping
       let sutsTCs = [];
-      if (linkedDocs.suts) {
-        try {
-          const d = await post('/api/jenkins/sts/extract-traceability', { path: linkedDocs.suts, doc_type: 'suts' });
-          sutsTCs = d?.vcast_rows ?? [];
-          if (!sutsTCs.length && Array.isArray(d?.available_sheets) && typeof toast === 'function') {
-            toast('warning', `SUTS 시트 미인식. 사용 가능한 시트: ${d.available_sheets.join(', ')}`);
-          }
-        } catch (e) { fetchFailures.push({ doc: 'SUTS', msg: e?.message || '조회 실패' }); }
+
+      if (demoMode) {
+        // 데모: 실제 추출 API를 데모 함수명으로 호출하면 매핑이 항상 비므로 데모 매핑을 직접 주입해
+        // 요구사항/STS/SUTS TC가 채워진 완전한 시나리오를 보여준다(과거엔 빈 가이드만 나왔다).
+        udsMapping = DEMO_UDS_MAPPING;
+        stsTCs = DEMO_STS_TCS;
+        sutsTCs = DEMO_SUTS_TCS;
+      } else {
+        // 1. UDS func→req mapping
+        if (linkedDocs.uds) {
+          try {
+            const d = await post('/api/jenkins/uds/extract-mapping', { uds_path: linkedDocs.uds });
+            udsMapping = d?.mapping_pairs ?? [];
+          } catch (e) { fetchFailures.push({ doc: 'UDS', msg: e?.message || '조회 실패' }); }
+        }
+
+        // 2. STS req→TC mapping
+        if (linkedDocs.sts) {
+          try {
+            const d = await post('/api/jenkins/sts/extract-traceability', { path: linkedDocs.sts, doc_type: 'sts' });
+            stsTCs = d?.vcast_rows ?? [];
+            // N21: 외부 형식 SUTS/STS — 시트 미인식 시 사용자에게 명확 안내
+            if (!stsTCs.length && Array.isArray(d?.available_sheets) && typeof toast === 'function') {
+              toast('warning', `STS 시트 미인식. 사용 가능한 시트: ${d.available_sheets.join(', ')}`);
+            }
+          } catch (e) { fetchFailures.push({ doc: 'STS', msg: e?.message || '조회 실패' }); }
+        }
+
+        // 3. SUTS func→TC mapping
+        if (linkedDocs.suts) {
+          try {
+            const d = await post('/api/jenkins/sts/extract-traceability', { path: linkedDocs.suts, doc_type: 'suts' });
+            sutsTCs = d?.vcast_rows ?? [];
+            if (!sutsTCs.length && Array.isArray(d?.available_sheets) && typeof toast === 'function') {
+              toast('warning', `SUTS 시트 미인식. 사용 가능한 시트: ${d.available_sheets.join(', ')}`);
+            }
+          } catch (e) { fetchFailures.push({ doc: 'SUTS', msg: e?.message || '조회 실패' }); }
+        }
       }
 
       // Build per-function guide
@@ -270,13 +316,8 @@ export default function ImpactGuideSection({ job, analysisResult }) {
         details,
         fetchFailures,
         summary: {
-          changedFiles: changedFiles.length,
-          changedFunctions: changedFnEntries.length,
           impactedReqs: allReqs.size,
           impactedStsTCs: allStsTcs.size,
-          directFns: (impactGroups.direct || []).length,
-          hop1Fns: (impactGroups.indirect_1hop || []).length,
-          hop2Fns: (impactGroups.indirect_2hop || []).length,
         },
       });
 
@@ -303,7 +344,7 @@ export default function ImpactGuideSection({ job, analysisResult }) {
     } finally {
       setLoading(false);
     }
-  }, [activeFnEntries, linkedDocs, actions, activeImpactGroups, activeChangedFiles, functionMeta, coverageByFn, toast]);
+  }, [activeFnEntries, linkedDocs, actions, activeImpactGroups, demoMode, functionMeta, coverageByFn, toast]);
 
 
   // 영향받은 함수 집합(직접+간접+변경)을 추적성 매트릭스 focus로 넘기고 SRS/SDS 탭으로 이동.
@@ -325,11 +366,65 @@ export default function ImpactGuideSection({ job, analysisResult }) {
         functions: fns, label: `변경 영향 함수 ${fns.length}개`, ts: Date.now(),
       }));
     } catch (_) { /* ignore */ }
-    window.__detailSection?.('srssds');
+    if (typeof window.__detailSection === 'function') {
+      window.__detailSection('srssds');
+    } else {
+      toast('info', '추적성 매트릭스 탭으로 이동할 수 없습니다. SRS/SDS 탭을 직접 열어주세요.');
+    }
   }, [activeFnEntries, activeImpactGroups, toast]);
 
-  // Auto-enable demo if real data has no rich mappings (only header changes)
-  const hasRichData = activeFnEntries.length > 1 || (guide?.summary?.impactedReqs > 0);
+  // 현재 영향도 분석 결과를 Markdown 리포트로 내보낸다(브라우저 다운로드, 외부 요청 없음).
+  // guide 생성 전에도 요약/변경상세/ASIL/커버리지/회귀는 내보낼 수 있고, guide가 있으면 함수별 표까지 포함.
+  const exportGuideMarkdown = useCallback(() => {
+    if (!activeFnEntries.length) {
+      toast('info', '내보낼 변경 함수가 없습니다.');
+      return;
+    }
+    const stamp = new Date().toISOString().replace('T', ' ').slice(0, 19);
+    const L = [];
+    L.push('# 변경 영향도 분석 결과');
+    L.push('');
+    L.push(`- 생성 시각: ${stamp}`);
+    if (demoMode) L.push('- ⚠ 데모 시나리오 (시뮬레이션 데이터)');
+    L.push(`- 변경 파일: ${activeChangedFiles.length}`);
+    L.push(`- 변경 함수: ${activeFnEntries.length} (신규 ${changeSummary.NEW} / 삭제 ${changeSummary.DELETE} / 시그니처 ${changeSummary.SIGNATURE} / 본문 ${changeSummary.BODY} / 헤더 ${changeSummary.HEADER} / 변수 ${changeSummary.VARIABLE})`);
+    L.push(`- 직접 영향: ${(activeImpactGroups.direct || []).length} / 간접: ${(activeImpactGroups.indirect_1hop || []).length + (activeImpactGroups.indirect_2hop || []).length}`);
+    if (asilInfo && (asilInfo.max_changed || asilInfo.escalation || asilInfo.unknown_changed_count)) {
+      L.push('', '## ASIL 차등 검증');
+      L.push(`- 변경 최대 ASIL: ${asilInfo.max_changed || '미상'}`);
+      if (asilInfo.escalation) L.push('- ⚠ Escalation (ASIL B+ 직접 변경 — AUTO→검토)');
+      if (asilInfo.mcdc_required) L.push('- MC/DC 필수');
+      if (asilInfo.coverage_target) L.push(`- 커버리지 타깃: ${asilInfo.coverage_target}`);
+      if (asilInfo.unknown_changed_count) L.push(`- ASIL 미상 직접변경: ${asilInfo.unknown_changed_count}개 (수동 확인 필요)`);
+    }
+    if (coverageGap?.available && coverageGap.summary) {
+      const s = coverageGap.summary;
+      L.push('', '## 커버리지 (ASIL 타깃 대비)');
+      L.push(`- 평가 ${s.evaluated ?? 0} / 목표 미달 ${s.below_target ?? 0} / 미측정 ${s.unmeasured ?? 0} / 직전 대비 회귀 ${s.regressed ?? 0}`);
+    }
+    if (regressionSet?.summary) {
+      L.push('', '## 회귀시험 선정 (재실행 대상)');
+      L.push(`- SUTS 재실행 TC: ${regressionSet.summary.suts_tc_count ?? 0} / SITS 영향 체인: ${regressionSet.summary.sits_chain_count ?? 0}`);
+    }
+    L.push('', '## 변경 함수');
+    for (const [fn, kind] of activeFnEntries) L.push(`- \`${fn}\` : ${CHANGE_TYPE_KO[kind] || kind}`);
+    if (guide?.details?.length) {
+      L.push('', '## 함수별 변경 가이드');
+      L.push('| 함수 | 변경 | ASIL | 영향 | 요구사항 | STS TC | SUTS TC |');
+      L.push('|------|------|------|------|----------|--------|---------|');
+      for (const d of guide.details) {
+        L.push(`| \`${d.function}\` | ${CHANGE_TYPE_KO[d.changeType] || d.changeType} | ${d.asil || '미상'} | ${d.hop} | ${(d.requirements || []).join(' ') || '-'} | ${(d.stsTestCases || []).length} | ${(d.sutsTestCases || []).length} |`);
+      }
+    }
+    if (aiGuide?.risk) {
+      L.push('', '## AI 위험 평가');
+      L.push(`- 등급: ${aiGuide.risk.grade} (${aiGuide.risk.score}/100), 최대 ASIL: ${aiGuide.risk.max_asil}`);
+      if (aiGuide.risk.justification) L.push(`- 근거: ${aiGuide.risk.justification}`);
+    }
+    L.push('');
+    downloadTextFile(`impact_analysis_${stamp.replace(/[: -]/g, '').slice(0, 14)}.md`, L.join('\n'));
+    toast('success', '영향도 분석 결과를 내보냈습니다.');
+  }, [activeFnEntries, activeChangedFiles, changeSummary, activeImpactGroups, asilInfo, coverageGap, regressionSet, guide, aiGuide, demoMode, toast]);
 
   if (!impact && !demoMode) {
     return (
@@ -481,6 +576,10 @@ export default function ImpactGuideSection({ job, analysisResult }) {
             <button className="btn-sm" onClick={openInTraceability}
               title="영향받은 함수 집합으로 추적성 매트릭스(SRS↔SDS↔UDS↔STS↔SUTS↔SITS)를 필터해서 봅니다">
               추적성 매트릭스에서 보기
+            </button>
+            <button className="btn-sm" onClick={exportGuideMarkdown}
+              title="현재 영향도 분석 결과를 Markdown 리포트로 다운로드합니다">
+              내보내기
             </button>
             <button className="btn-sm" onClick={() => setDemoMode(!demoMode)}>
               {demoMode ? '실제 데이터' : '데모 시나리오'}
