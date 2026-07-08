@@ -353,6 +353,26 @@ def _extract_leading_comment(src: bytes, start_byte: int) -> str:
     return "\n".join(reversed(collected)).strip()
 
 
+# _parse_comment_fields의 인라인 regex를 모듈 레벨로 승격 — 함수 주석 라인마다 호출돼
+# Python re 캐시(512)를 넘겨 재컴파일 폭주하던 병목(프로파일 실측 ~53s) 제거.
+_RE_NOISE_SEP = re.compile(r"[-=*#_/\\.\s]{4,}")
+_RE_BIT_REGISTERS = re.compile(r"\b\d+\s*-\s*BIT\s+REGISTERS\b", re.I)
+_RE_REGISTERS = re.compile(r"\bREGISTERS?\b", re.I)
+_RE_SEP3 = re.compile(r"[*=-]{3,}")
+_RE_C_BRIEF = re.compile(r"@brief\s+(.*)", re.I)
+_RE_C_DETAILS = re.compile(r"@details?\s+(.*)", re.I)
+_RE_C_ASIL = re.compile(r"\bASIL\b[:\s-]+([A-Za-z0-9-]+)", re.I)
+_RE_C_RELATED = re.compile(r"\bRelated ID\b[:\s]+(.+)", re.I)
+_RE_C_PRECOND = re.compile(r"(?:@pre|Pre-?condition|Precondition|Require(?:ment)?)\b[:\s]+(.+)", re.I)
+_RE_C_PRECOND_KO = re.compile(r"선행조건[:\s]+(.+)")
+_RE_C_RANGE = re.compile(r"\bRange\b[:\s]+(.+)", re.I)
+_RE_C_VALUE_RANGE = re.compile(r"\bValue Range\b[:\s]+(.+)", re.I)
+_RE_C_DESC = re.compile(r"\bDescription\b[:\s]+(.+)", re.I)
+_RE_C_PARAM = re.compile(r"@param\s+(?:\[(?:in|out|in,\s*out)\]\s*)?(\w+)\s*(.*)", re.I)
+_RE_C_RETURN = re.compile(r"@(?:return|retval)\s+(.*)", re.I)
+_RE_C_TAG_SKIP = re.compile(r"@(?:note|see|warning|file|author|date|version|since|deprecated|todo|bug|throws|exception)\b", re.I)
+
+
 def _parse_comment_fields(comment: str) -> Tuple[str, str, str, str, str, List[Dict[str, str]], str]:
     """Returns (desc, asil, related, precondition, range_text, params, return_desc)."""
     if not comment:
@@ -368,11 +388,11 @@ def _parse_comment_fields(comment: str) -> Tuple[str, str, str, str, str, List[D
         t = (text or "").strip()
         if not t:
             return True
-        if re.fullmatch(r"[-=*#_/\\.\s]{4,}", t):
+        if _RE_NOISE_SEP.fullmatch(t):
             return True
-        if re.search(r"\b\d+\s*-\s*BIT\s+REGISTERS\b", t, flags=re.I):
+        if _RE_BIT_REGISTERS.search(t):
             return True
-        if re.search(r"\bREGISTERS?\b", t, flags=re.I) and re.search(r"[*=-]{3,}", t):
+        if _RE_REGISTERS.search(t) and _RE_SEP3.search(t):
             return True
         return False
     brief_lines: List[str] = []
@@ -382,12 +402,12 @@ def _parse_comment_fields(comment: str) -> Tuple[str, str, str, str, str, List[D
         line = raw.strip().lstrip("*").strip()
         if not line:
             continue
-        m_brief = re.match(r"@brief\s+(.*)", line, flags=re.I)
+        m_brief = _RE_C_BRIEF.match(line)
         if m_brief:
             brief_lines.append(m_brief.group(1).strip())
             in_details = False
             continue
-        m_details = re.match(r"@details?\s+(.*)", line, flags=re.I)
+        m_details = _RE_C_DETAILS.match(line)
         if m_details:
             details_lines.append(m_details.group(1).strip())
             in_details = True
@@ -398,46 +418,46 @@ def _parse_comment_fields(comment: str) -> Tuple[str, str, str, str, str, List[D
         if line.startswith("@"):
             in_details = False
         if not asil:
-            m = re.search(r"\bASIL\b[:\s-]+([A-Za-z0-9-]+)", line, flags=re.I)
+            m = _RE_C_ASIL.search(line)
             if m:
                 asil = m.group(1).strip()
                 continue
         if not related:
-            m = re.search(r"\bRelated ID\b[:\s]+(.+)", line, flags=re.I)
+            m = _RE_C_RELATED.search(line)
             if m:
                 related = m.group(1).strip()
                 continue
         if not precondition:
-            m = re.search(r"(?:@pre|Pre-?condition|Precondition|Require(?:ment)?)\b[:\s]+(.+)", line, flags=re.I)
+            m = _RE_C_PRECOND.search(line)
             if m:
                 precondition = m.group(1).strip()
                 continue
-            m = re.search(r"선행조건[:\s]+(.+)", line)
+            m = _RE_C_PRECOND_KO.search(line)
             if m:
                 precondition = m.group(1).strip()
                 continue
         if not range_text:
-            m = re.search(r"\bRange\b[:\s]+(.+)", line, flags=re.I)
+            m = _RE_C_RANGE.search(line)
             if m:
                 range_text = m.group(1).strip()
                 continue
-            m = re.search(r"\bValue Range\b[:\s]+(.+)", line, flags=re.I)
+            m = _RE_C_VALUE_RANGE.search(line)
             if m:
                 range_text = m.group(1).strip()
                 continue
         if not desc:
-            m = re.search(r"\bDescription\b[:\s]+(.+)", line, flags=re.I)
+            m = _RE_C_DESC.search(line)
             if m:
                 cand = m.group(1).strip()
                 if not _is_noise_desc(cand):
                     desc = cand
                 continue
-        m_param = re.match(r"@param\s+(?:\[(?:in|out|in,\s*out)\]\s*)?(\w+)\s*(.*)", line, flags=re.I)
+        m_param = _RE_C_PARAM.match(line)
         if m_param:
             params.append({"name": m_param.group(1).strip(), "desc": m_param.group(2).strip()})
             in_details = False
             continue
-        m_ret = re.match(r"@(?:return|retval)\s+(.*)", line, flags=re.I)
+        m_ret = _RE_C_RETURN.match(line)
         if m_ret:
             return_desc = m_ret.group(1).strip()
             in_details = False
@@ -445,7 +465,7 @@ def _parse_comment_fields(comment: str) -> Tuple[str, str, str, str, str, List[D
         if not desc:
             if _is_noise_desc(line):
                 continue
-            if re.match(r"@(?:note|see|warning|file|author|date|version|since|deprecated|todo|bug|throws|exception)\b", line, flags=re.I):
+            if _RE_C_TAG_SKIP.match(line):
                 continue
             desc = line
     if not desc and brief_lines:

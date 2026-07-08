@@ -45,14 +45,17 @@ ACTION_MATRIX: Dict[str, Dict[str, str]] = {
 
 
 def _load_source_sections(source_root: str) -> Dict[str, Any]:
+    # impact는 preprocess=False로 파싱 — gcc 전처리(소스루트당 ~80s)를 생략해 대형 트리 분석을 가속한다.
+    # 파서의 preprocess=False 폴백(dead-code 휴리스틱 + .h 별도 스캔)은 '안전방향 과다포함'이라 실 함수
+    # 누락/ASIL 강등이 없다(문서생성 경로는 default True로 정밀 유지 — 교차오염은 캐시키 pp= 로 분리).
     try:
         from backend.helpers import _get_source_sections_cached
 
-        return _get_source_sections_cached(source_root)
+        return _get_source_sections_cached(source_root, preprocess=False)
     except Exception:
         import report_generator as rg
 
-        return rg.generate_uds_source_sections(source_root)
+        return rg.generate_uds_source_sections(source_root, preprocess=False)
 
 
 @dataclass

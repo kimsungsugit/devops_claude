@@ -548,10 +548,14 @@ def _to_swcom_from_fn(info: Dict[str, Any]) -> str:
     return f"SwCom_{m.group(1)}" if m else "UNMAPPED"
 
 
-def _source_sections_disk_cache_path(source_root: str) -> Path:
-    """디스크 영속 캐시 파일 경로(정규화 source_root의 sha1). repo_root(모듈 전역, parents[2])."""
+def _source_sections_disk_cache_path(source_root: str, preprocess: bool = True) -> Path:
+    """디스크 영속 캐시 파일 경로(정규화 source_root+preprocess의 sha1). repo_root(모듈 전역, parents[2]).
+
+    preprocess를 키에 포함 — impact(preprocess=False)와 문서생성(True)의 섹션은 내용이 달라
+    같은 소스라도 별도 캐시 파일이어야 교차오염이 없다.
+    """
     import hashlib
-    _key = os.path.normcase(str(source_root or "").strip())
+    _key = os.path.normcase(str(source_root or "").strip()) + f"|pp={int(bool(preprocess))}"
     _h = hashlib.sha1(_key.encode("utf-8", "ignore")).hexdigest()[:16]
     return repo_root / ".devops_pro_cache" / "source_sections" / f"{_h}.json"
 
@@ -595,7 +599,7 @@ def _source_root_signature(source_root: str, max_files: int = 1200) -> Optional[
     return f"{count}:{h.hexdigest()}"
 
 
-def _get_source_sections_cached(source_root: str, max_files: int = 1200) -> Dict[str, Any]:
+def _get_source_sections_cached(source_root: str, max_files: int = 1200, preprocess: bool = True) -> Dict[str, Any]:
     # 콤마 구분 복수 경로 지원: 첫 번째 경로로 검증, 전체를 전달
     _first = (source_root or "").split(",")[0].strip()
     # cloudium 모드면 worker IPC resolver로 검증(원격 경로는 로컬 resolve/exists로 못 잡음).
@@ -615,7 +619,7 @@ def _get_source_sections_cached(source_root: str, max_files: int = 1200) -> Dict
         _ok = _root_chk.exists() and _root_chk.is_dir()
     if not _ok:
         raise HTTPException(status_code=400, detail="source_root not found or not directory")
-    key = source_root  # 캐시 키는 전체 경로
+    key = f"{source_root}\x00pp={int(bool(preprocess))}"  # 캐시 키: 전체 경로 + preprocess(교차오염 방지)
     now = time()
     with _source_sections_cache_lock:
         item = _source_sections_cache.get(key)
@@ -630,7 +634,7 @@ def _get_source_sections_cached(source_root: str, max_files: int = 1200) -> Dict
     # 디스크 영속 캐시(로컬 소스만): 재기동/크래시 후 첫 요청의 풀 재파싱(수십분)을 회피한다.
     # (경로,mtime,size) 시그니처가 일치하면 파싱 없이 로드. cloudium은 시그니처=None → skip.
     _sig = _source_root_signature(source_root, max_files)
-    _disk_path = _source_sections_disk_cache_path(source_root)
+    _disk_path = _source_sections_disk_cache_path(source_root, preprocess)
     if _sig:
         try:
             if _disk_path.exists():
@@ -646,7 +650,7 @@ def _get_source_sections_cached(source_root: str, max_files: int = 1200) -> Dict
             _log.debug("source_sections disk cache read failed: %s", _dc_exc)
     _log.info("[source_sections] Parsing started for %s", key)
     t0 = time()
-    sections = generate_uds_source_sections(source_root)  # 콤마 구분 그대로 전달
+    sections = generate_uds_source_sections(source_root, preprocess=preprocess)  # 콤마 구분 그대로 전달
     elapsed = time() - t0
     _log.info("[source_sections] Parsing finished in %.1fs for %s", elapsed, key)
     with _source_sections_cache_lock:

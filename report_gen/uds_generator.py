@@ -215,6 +215,7 @@ def generate_uds_source_sections(
     source_root: str,
     component_map: Optional[Dict[str, Dict[str, str]]] = None,
     sds_partition_map: Optional[Dict[str, Dict[str, str]]] = None,
+    preprocess: bool = True,
 ) -> Dict[str, str]:
     # 콤마/세미콜론 구분 복수 소스 루트 지원
     _raw_roots = [p.strip() for p in str(source_root).replace(";", ",").split(",") if p.strip()]
@@ -573,7 +574,7 @@ def generate_uds_source_sections(
             ast_result = {"functions": [], "globals": [], "globals_detailed": []}
             for _parse_root in _roots:
                 try:
-                    _partial = parse_c_project(str(_parse_root), max_files=max_files, preprocess=True)
+                    _partial = parse_c_project(str(_parse_root), max_files=max_files, preprocess=preprocess)
                     if isinstance(_partial, dict):
                         ast_result["functions"].extend(_partial.get("functions") or [])
                         ast_result["globals"].extend(_partial.get("globals") or [])
@@ -754,7 +755,10 @@ def generate_uds_source_sections(
                     m_val = str(row[2]).strip()
                     if not m_name or not m_val:
                         continue
-                    hits = [g for g in global_names if re.search(rf"\b{re.escape(g)}\b", m_val)]
+                    # 전역명은 항상 식별자 토큰 → \bNAME\b ≡ 토큰 멤버십. m_val 1회 토큰화 후 O(1) in
+                    # 검사로 per-global re.search(rf...) 재컴파일(대형 트리에서 파싱 지연 주요인) 제거.
+                    _m_toks = set(re.findall(r"[A-Za-z_]\w*", m_val))
+                    hits = [g for g in global_names if g in _m_toks]
                     if hits:
                         macro_globals_map[m_name] = hits
                     call_hits: List[str] = []
@@ -786,8 +790,10 @@ def generate_uds_source_sections(
                     used = []
                 accessed_globals = [g for g in used if g in globals_info_map]
                 if not accessed_globals and body:
+                    # body 1회 토큰화 후 멤버십 — per-global re.search(rf...) 재컴파일 제거(위 macro 루프와 동일 관용구).
+                    _body_toks = set(re.findall(r"[A-Za-z_]\w*", body))
                     for gname in list(globals_info_map.keys())[:500]:
-                        if re.search(rf"\b{re.escape(gname)}\b", body):
+                        if gname in _body_toks:
                             accessed_globals.append(gname)
                 if accessed_globals:
                     _accessor_globals_map[fname.lower()] = accessed_globals[:10]
