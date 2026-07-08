@@ -46,7 +46,7 @@
       "scm_username": "kss1119",
       "scm_password_env": "",
       "branch": "",
-      "base_ref": "",
+      "base_ref": "1018",
       "source_root": "C:\\Project\\Ados\\NE1AW_PORTING,C:\\Project\\Ados\\PDS128_FBL",
       "watch_patterns": [
         "*.c",

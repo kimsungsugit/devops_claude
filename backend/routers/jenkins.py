@@ -1987,7 +1987,7 @@ def jenkins_scm_info(req: JenkinsScmInfoRequest) -> Dict[str, Any]:
     raise HTTPException(status_code=400, detail="unsupported scm_type")
 
 
-def _try_svn_revision_range(req: JenkinsImpactTriggerRequest, build_rev: str):
+def _try_svn_revision_range(req: JenkinsImpactTriggerRequest, build_rev: str, skip_info: Optional[Dict[str, Any]] = None):
     """현재 로컬 default 버전(A) ↔ 선택 빌드 버전(B) 사이의 svn 정밀 델타를 시도한다.
 
     A = `svn info <source_root>`의 로컬 작업본 revision(오프라인, 자격증명 불필요).
@@ -2000,16 +2000,22 @@ def _try_svn_revision_range(req: JenkinsImpactTriggerRequest, build_rev: str):
       - None — svn 대상 아님/작업본 아님/revision 비정수/조회 실패 → 호출자가 단일
         빌드 changeSet 결과로 폴백(git·비-svn·회귀 0). repo_url은 registry(신뢰)에서만
         오고 revision은 정수검증하므로 SSRF/인자 주입 표면 없음.
+      - skip_info(dict)가 주어지면 None 반환 시 'svn_skip_reason'을 채워 호출자가 fallback
+        meta로 노출한다(왜 changeSet로 떨어졌는지 silent 방지 — self-review 정책).
     """
+    def _skip(reason: str):
+        if isinstance(skip_info, dict):
+            skip_info["svn_skip_reason"] = reason
+        return None
     try:
         from backend.services.scm_registry import get_registry_entry, resolve_scm_credentials
         entry = get_registry_entry(req.scm_id)
         if entry is None or str(entry.scm_type or "").lower() != "svn":
-            return None
+            return _skip("not an svn-type SCM entry (scm_type != 'svn')")
         repo_url = str(entry.scm_url or "").strip()
         source_root = str(entry.source_root or "").strip()
         if not (repo_url and source_root):
-            return None
+            return _skip("svn entry missing scm_url or source_root")
         from backend.services.local_service import svn_info_url, svn_diff_summarize
         # B(build revision) 결정. Jenkins 빌드가 git으로 체크아웃하면 build_rev이 git SHA(비정수)라
         # svn diff에 못 쓴다 → 그 경우 svn HEAD를 B로 대체한다(빌드 시점이 아닌 'svn 최신' 기준,
@@ -2023,7 +2029,7 @@ def _try_svn_revision_range(req: JenkinsImpactTriggerRequest, build_rev: str):
                     "svn revision-range skipped: build_rev not numeric and svn HEAD unavailable (%s) — changeSet fallback",
                     repo_url,
                 )
-                return None
+                return _skip("build revision not numeric (git SHA?) and svn HEAD unavailable")
             build_rev = _head_rev
         scm_norm = repo_url.rstrip("/")
         # A(baseline revision) 결정. 우선순위:
@@ -2061,7 +2067,7 @@ def _try_svn_revision_range(req: JenkinsImpactTriggerRequest, build_rev: str):
                 "matches scm_url (%s) — changeSet fallback",
                 repo_url,
             )
-            return None
+            return _skip("no numeric base_ref set (SCM registry) and no svn working copy in source_root")
         if base_rev == build_rev:
             # 로컬 default가 이미 빌드 revision과 동일 → 실제 변경 0건(확인됨).
             return [], True, {
@@ -2078,7 +2084,7 @@ def _try_svn_revision_range(req: JenkinsImpactTriggerRequest, build_rev: str):
                 "svn revision-range skipped: local rev %s newer than build rev %s — changeSet fallback",
                 base_rev, build_rev,
             )
-            return None
+            return _skip(f"local baseline r{base_rev} newer than build r{build_rev} (reverse delta)")
         diff = svn_diff_summarize(
             repo_url=repo_url,
             rev_a=base_rev,
@@ -2091,7 +2097,7 @@ def _try_svn_revision_range(req: JenkinsImpactTriggerRequest, build_rev: str):
                 "svn diff -r %s:%s failed (scm=%s): %s",
                 base_rev, build_rev, req.scm_id, str(diff.get("output"))[:200],
             )
-            return None  # 조회 실패 → changeSet 폴백
+            return _skip(f"svn diff -r {base_rev}:{build_rev} failed (rc!=0)")  # 조회 실패 → changeSet 폴백
         files = [str(x) for x in (diff.get("files") or [])]
         meta: Dict[str, Any] = {
             "changed_files_source": "svn_revision_range",
@@ -2106,7 +2112,7 @@ def _try_svn_revision_range(req: JenkinsImpactTriggerRequest, build_rev: str):
         return files, True, meta
     except Exception as exc:  # noqa: BLE001 — 어떤 실패든 changeSet로 graceful 폴백
         _logger.warning("svn revision-range diff failed (scm=%s): %s", req.scm_id, exc, exc_info=True)
-        return None
+        return _skip(f"svn error: {str(exc)[:120]}")
 
 
 def _resolve_jenkins_changed_files(req: JenkinsImpactTriggerRequest):
@@ -2118,12 +2124,17 @@ def _resolve_jenkins_changed_files(req: JenkinsImpactTriggerRequest):
       - 자격증명 없음/조회 실패: (None, False, {...local_diff_fallback...}) — 기존 로컬 SCM diff.
     서버 측 Jenkins 자격증명(config.get_jenkins_config)만 사용 — HTTP body로 토큰 받지 않음.
     """
+    _svn_skip: Dict[str, Any] = {}
     if not (req.build_number and str(req.job_url or "").strip()):
         # build/job 없어도 svn A:B(base_ref↔HEAD)는 독립적으로 가능 — 먼저 시도.
-        _svn = _try_svn_revision_range(req, "")
+        _svn = _try_svn_revision_range(req, "", skip_info=_svn_skip)
         if _svn is not None:
             return _svn
-        return None, False, {"changed_files_source": "local_diff_fallback", "linkage_reason": "no build_number/job_url"}
+        return None, False, {
+            "changed_files_source": "local_diff_fallback",
+            "linkage_reason": "no build_number/job_url",
+            "svn_skip_reason": _svn_skip.get("svn_skip_reason"),
+        }
 
     # Jenkins changeSet 조회(build_rev 확보용) — svn 프로젝트에선 build_rev이 git SHA일 수
     # 있고, 조회 자체가 실패(Jenkins 다운)할 수도 있다. 둘 다 svn A:B(base_ref↔HEAD)는
@@ -2162,7 +2173,7 @@ def _resolve_jenkins_changed_files(req: JenkinsImpactTriggerRequest):
     # ── svn revision-range: baseline(base_ref A) ↔ build_rev(B, 비정수면 svn HEAD) 정밀 델타 ──
     # svn diff --summarize -r A:B로 빌드가 몇 번 끼어 있든 A→B 전체 변경을 잡는다. Jenkins
     # 조회 실패/build_rev이 git SHA여도 독립적으로 성립(svn HEAD를 B로 대체).
-    svn_range = _try_svn_revision_range(req, build_rev)
+    svn_range = _try_svn_revision_range(req, build_rev, skip_info=_svn_skip)
     if svn_range is not None:
         return svn_range
 
@@ -2173,12 +2184,18 @@ def _resolve_jenkins_changed_files(req: JenkinsImpactTriggerRequest):
             "changed_files_source": "jenkins_changeset",
             "build_revision": build_rev,
             "jenkins_changed_file_count": len(files),
+            # svn 우선인데 changeSet로 떨어졌으면 왜인지 표면화(silent 방지) — 예: base_ref 미설정.
+            "svn_skip_reason": _svn_skip.get("svn_skip_reason"),
         }
         edit_types = _jenkins_res.get("edit_types") or {}
         if edit_types:
             meta["changed_file_edit_types"] = edit_types
         return files, True, meta
-    return None, False, {"changed_files_source": "local_diff_fallback", "linkage_reason": _jenkins_err or "svn/changeset unavailable"}
+    return None, False, {
+        "changed_files_source": "local_diff_fallback",
+        "linkage_reason": _jenkins_err or "svn/changeset unavailable",
+        "svn_skip_reason": _svn_skip.get("svn_skip_reason"),
+    }
 
 
 def _make_jenkins_impact_trigger(req: JenkinsImpactTriggerRequest, *, source: str):
