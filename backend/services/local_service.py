@@ -338,7 +338,11 @@ def svn_diff_unified(
     clean_pw, pw_error = _sanitize_password(password)
     if pw_error:
         return {"rc": 1, "output": pw_error}
-    args: List[str] = ["svn", "diff", "-r", f"{ra}:{rb}", base]
+    # -x -p (show-c-function): @@ hunk 헤더에 함수 컨텍스트를 붙여 라인단위 변경 함수 분류
+    # (classify_changed_functions_from_diff_text)를 가능하게 한다. extract_signature_changes는
+    # +/- 선언 라인만 읽으므로 무해 → 두 소비자가 같은 diff blob을 공유한다. 구버전 svn이 -x -p를
+    # 조용히 무시하면 컨텍스트 없는 bare @@가 나올 수 있어, 호출측은 positive-context 가드로 검증한다.
+    args: List[str] = ["svn", "diff", "-r", f"{ra}:{rb}", "-x", "-p", base]
     if username.strip():
         args += ["--username", username.strip()]
     stdin_input: Optional[str] = None

@@ -884,14 +884,18 @@ def _resolve_changed_types_to_functions(
     return resolved or changed_types
 
 
-def _collect_signature_changes(trigger, meta, entry) -> Dict[str, Dict[str, str]]:
+def _collect_signature_changes(trigger, meta, entry, diff_text: str = "") -> Dict[str, Dict[str, str]]:
     """함수별 시그니처 이전/이후 선언 원문을 추출한다(UI '변경 상세' 원문 표시용).
 
+    - diff_text가 주어지면(A-3에서 이미 받은 svn A:B unified diff) 재-fetch 없이 그것으로 추출한다
+      (fetch-once — 623KB blob을 분류와 시그니처 추출이 공유).
     - svn revision-range(baseline A ↔ build B): `svn diff -r A:B <scm_url>` 전체 unified diff 1회.
     - 로컬 git/svn working-copy: 변경 파일별 unified diff(상한 60개).
     best-effort — 실패/미지원이면 빈 dict(영향 분석 자체엔 무영향, UI 원문만 미표시).
     """
     from workflow.delta_update import extract_signature_changes
+    if diff_text:
+        return extract_signature_changes(diff_text)
     meta = meta or {}
     base_rev = str(meta.get("baseline_revision") or "").strip()
     build_rev = str(meta.get("build_revision") or "").strip()
@@ -1035,6 +1039,44 @@ def run_impact_update(
         _is_changeset = _changed_files_source == "jenkins_changeset"
         # svn_revision_range도 원격 권위 diff(A:B) — editType이 있으면 로컬 diff 대신 사용.
         _is_authoritative_remote = _changed_files_source in ("jenkins_changeset", "svn_revision_range")
+        # ── A: svn revision-range 라인 diff 기반 정밀 변경분류(과대보고 축소 + 정확 kind) ──
+        # 원격 svn diff(-x -p)는 로컬 working-copy가 없어도(cloudium 포함) 동작한다 —
+        # _collect_signature_changes가 이미 같은 diff를 받으므로 여기서 1회 받아 A-5에서 공유한다.
+        # 실패/미접근/역방향/컨텍스트 없음 → _precise_types=None(기존 파일단위 보수 경로 유지,
+        # 조용한 narrowing 절대 없음 — 정밀분류는 성공했을 때만 적용하는 순수 상향).
+        _precise_types: Dict[str, str] | None = None
+        _precise_diff_text = ""
+        _line_classified_files: Set[str] = set()
+        _narrow_removed_n = 0  # A-4에서 정밀 narrowing으로 제거한 함수 수(감사/경고용)
+        _base_r = str(_meta.get("baseline_revision") or "").strip()
+        _build_r = str(_meta.get("build_revision") or "").strip()
+        _scm_url = str(getattr(entry, "scm_url", "") or "").strip()
+        if (
+            _changed_files_source == "svn_revision_range"
+            and _base_r.isdigit() and _build_r.isdigit() and int(_base_r) < int(_build_r)
+            and _scm_url
+        ):
+            try:
+                from backend.services.local_service import svn_diff_unified
+                from backend.services.scm_registry import resolve_scm_credentials
+                from workflow.delta_update import (
+                    classify_changed_functions_from_diff_text,
+                    diff_has_function_context,
+                )
+                _u, _pw, _ = resolve_scm_credentials(scm_id=trigger.scm_id)
+                _d = svn_diff_unified(repo_url=_scm_url, rev_a=_base_r, rev_b=_build_r, username=_u, password=_pw)
+                _out = _d.get("output") or ""
+                if int(_d.get("rc", 1)) == 0:
+                    # rc==0이면 A-5(_collect_signature_changes)와 공유해 재fetch를 막는다(W1) —
+                    # bare여도 시그니처 추출(+/- 선언 라인)엔 무해.
+                    _precise_diff_text = _out
+                    # positive-context 가드: -x -p 컨텍스트가 실제 붙어야 함수단위 분류가 신뢰 가능.
+                    # 컨텍스트가 전무(구 svn이 -p 무시)하면 정밀분류를 건너뛰어 보수 경로 유지.
+                    if diff_has_function_context(_out):
+                        _precise_types, _line_classified_files = classify_changed_functions_from_diff_text(_out)
+            except Exception as _pexc:  # noqa: BLE001 — 정밀분류 실패는 보수 경로로 폴백
+                logger.debug("precise line classification skipped: %s", _pexc)
+                _precise_types = None
         if callable(on_progress):
             on_progress("classify", "변경 함수를 분류 중입니다.", {"changed_files": len(trigger.changed_files or [])})
         # 분류 정밀도(프론트 라벨 정직화용). "file"=파일단위 보수(변경파일 내 전 함수 과대추정),
@@ -1078,6 +1120,41 @@ def run_impact_update(
             changed_types = _resolve_changed_types_to_functions(
                 changed_types, trigger.changed_files, by_name, edit_types=edit_types
             )
+            # A-4: post-resolve narrowing — resolve가 변경파일의 전체 함수로 재확장(fatten)한 것을,
+            # 라인변경이 검증된 순수 편집 .c(line_classified_files)에서만 실제 라인변경 함수로 좁힌다.
+            # 그 외(헤더/매크로·인클루드·모듈스코프 변경 .c)는 fatten 유지(안전측 — 라인변경 없는
+            # 함수도 데이터/매크로 결합으로 영향받을 수 있음, hop-BFS는 데이터엣지 미포함). 모든
+            # 파일에서 정밀 KIND(SIGNATURE/NEW/DELETE)는 승격해 SDS 자동 FLAG를 복원한다.
+            if _precise_types is not None:
+                _precise_lower = {str(k).strip().lower(): v for k, v in _precise_types.items()}
+
+                def _in_line_classified(_fn: str) -> bool:
+                    _f = str((by_name.get(_fn) or {}).get("file") or "").replace("\\", "/").lower()
+                    return bool(_f) and any(_f.endswith(_p) for _p in _line_classified_files)
+
+                _narrowed: Dict[str, str] = {}
+                for _fn, _kind in changed_types.items():
+                    _pk = _precise_lower.get(_fn)
+                    if _in_line_classified(_fn):
+                        if _pk is not None:
+                            _narrowed[_fn] = _pk  # 라인변경된 함수만, 정밀 kind
+                        # else: 순수 편집 파일에서 라인변경 없음 → 제거(진짜 무영향)
+                    else:
+                        _narrowed[_fn] = _pk if _pk is not None else _kind  # fatten 유지 + kind 승격
+                for _fn, _k in _precise_lower.items():  # 신규/삭제 함수(baseline 부재분) 편입
+                    if _k in ("NEW", "DELETE") and _fn not in _narrowed:
+                        _narrowed[_fn] = _k
+                # X8: 축소(제거)된 함수 감사 추적 — silent 제거 금지(ASIL C/D 리뷰 추적성).
+                _removed = sorted(set(changed_types) - set(_narrowed))
+                _narrow_removed_n = len(_removed)
+                if _removed:
+                    logger.info(
+                        "impact precise-narrow: removed %d function(s) from %d line-classified file(s): %s",
+                        _narrow_removed_n, len(_line_classified_files),
+                        ", ".join(_removed[:30]) + (" ..." if len(_removed) > 30 else ""),
+                    )
+                changed_types = _narrowed
+                _classification_granularity = "line"
             call_map = sections.get("call_map", {}) or {}
             neighbors = _build_neighbors(
                 call_map,
@@ -1140,7 +1217,16 @@ def run_impact_update(
         # 정직 고지(X7): diff가 없어 SIGNATURE를 BODY로 분류 → ACTION_MATRIX상 BODY는 sds='-'
         # 이므로, .c만 바뀐 인터페이스(시그니처) 변경은 SDS 검토가 자동 FLAG되지 않을 수 있다
         # (.h가 changeSet에 함께 오면 sds/sts FLAG 가드로 커버됨). ASIL 관련 인터페이스는 수동 확인.
-        if _is_authoritative_remote and edit_types:
+        if _precise_types is not None:
+            # 정밀 라인 분류 적용됨 — 시그니처/신규/삭제가 함수단위로 판별됨(위 보수 경고 대체).
+            warnings.append(
+                f"라인 diff 기반 정밀 변경분류 적용(svn diff -r {_base_r}:{_build_r} -x -p) — "
+                f"함수단위 kind(SIGNATURE/NEW/DELETE) 판별. 안전이 증명된 {len(_line_classified_files)}개 .c"
+                f"(순수 본문편집·전 hunk 함수귀속·전처리/top-level 변경 없음)에서 라인변경 없는 {_narrow_removed_n}개 함수 제외"
+                "(감사 로그 기록). 그 외 변경 .c(전처리·전역var·배열·typedef 등 top-level 변경)는 라인변경 없는 함수도 "
+                "데이터/매크로 결합으로 영향 가능하므로 파일단위 보수 분류를 유지(안전측 — under-report 방지)."
+            )
+        elif _is_authoritative_remote and edit_types:
             _src_label = (
                 "SVN revision diff (svn diff --summarize -r baseline:build)"
                 if _changed_files_source == "svn_revision_range"
@@ -1203,7 +1289,8 @@ def run_impact_update(
         if changed_types:
             _ct_by_lower = {str(k).strip().lower(): k for k in changed_types}
             try:
-                _sig_map = _collect_signature_changes(trigger, _meta, entry)
+                # A-5: A-3에서 이미 받은 diff를 재사용(fetch-once) — 없으면 종전대로 자체 fetch.
+                _sig_map = _collect_signature_changes(trigger, _meta, entry, diff_text=_precise_diff_text)
             except Exception as _sig_exc:  # noqa: BLE001 — 원문 보강 실패는 분석을 막지 않음
                 logger.debug("change_details extraction failed: %s", _sig_exc)
                 _sig_map = {}

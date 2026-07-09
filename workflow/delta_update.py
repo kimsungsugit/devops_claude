@@ -37,6 +37,25 @@ _VAR_DECL_LINE = re.compile(
     re.MULTILINE,
 )
 
+# --- 함수단위 narrowing 안전성(allowlist) 판정 신호 --------------------------------
+# 정책: "위험 패턴 열거(blocklist)"가 아니라 "안전이 증명될 때만 narrow(allowlist)". 미인식
+# top-level 구성(배열·값테이블·typedef·enum·struct·전역var·포인터·조건부컴파일·bare hunk)은
+# 아래 셋 중 하나에 걸려 자동으로 narrowable=False(파일단위 보수 유지, 안전측 — under-report 방지).
+_HUNK_ANY = re.compile(r"^@@ ", re.MULTILINE)  # 모든 hunk 마커(귀속 커버리지 분모)
+# 전처리 지시자 변경 전부(#define/#undef/#if/#ifdef/#ifndef/#include/#pragma/#error 등) — 라인변경
+# 없는 함수의 컴파일 여부/경로/매크로 전개를 바꿔 전역 영향.
+_PREPROC_CHANGE = re.compile(r"^[+-]\s*#", re.MULTILINE)
+# 컬럼0(함수 밖) 변경 라인 — +/- 직후 공백 없이 식별자/중괄호가 오는 라인. 전역var·배열·typedef·
+# enum·struct·함수 시그니처·닫는 브레이스 등 top-level 편집을 포괄 차단한다(함수 '본문'은 들여쓰기라
+# +/- 뒤 공백 → 미매치). 함수 시그니처(컬럼0)도 걸려 그 파일은 fatten 유지되나, 해당 함수는 kind
+# 승격(SIGNATURE)은 그대로 받는다(안전측 — set은 보수, kind는 정확).
+_TOPLEVEL_CHANGE = re.compile(r"^[+-][A-Za-z_{}]", re.MULTILINE)
+# 초기화자 컨텍스트 — `@@ ... @@ static const T g = MK_CFG(1,` 처럼 값-전용 편집의 hunk 컨텍스트가
+# 함수가 아니라 파일스코프 데이터 초기화(= ... word()인 경우. `_HUNK_FUNC`가 이를 함수로 오귀속해
+# narrowable을 부여하면(값 변경의 데이터 리더 함수 누락) under-report가 되므로 별도 차단한다(안전측).
+# (함수 시그니처엔 '='가 없어 무영향. 이 코드베이스엔 `= MACRO(` 파일스코프 초기화자 0건이나 방어적.)
+_HUNK_INIT_CTX = re.compile(r"^@@.*@@.*=.*\b\w+\s*\(", re.MULTILINE)
+
 
 def _run_unified_diff(
     project_root: str,
@@ -192,6 +211,56 @@ def _classify_from_edit_types(
     return out
 
 
+def _classify_one_file_diff(diff_text: str, is_header: bool) -> Tuple[Dict[str, str], bool]:
+    """단일 파일의 unified diff → ({func: kind}, narrowable).
+
+    함수단위 kind는 기존 로직과 동일(NEW/DELETE/SIGNATURE/BODY/VARIABLE/HEADER). 두 번째 반환값
+    narrowable=True 는 이 파일을 함수단위로 좁혀도(=라인변경 없는 함수 제거) **안전이 증명된** 경우만.
+    allowlist: .c 이고, 변경 hunk가 하나 이상이며, 모든 @@ hunk가 함수 컨텍스트로 귀속되고
+    (bare hunk 0), 전처리 지시자 변경이 없고, 컬럼0(함수 밖) 변경이 없을 때만 True. 미인식 top-level
+    구성(배열·값테이블·typedef·enum·전역var·조건부컴파일 등)은 위 조건에서 걸려 False → fatten 유지.
+    """
+    hunk_funcs = {m.group(1) for m in _HUNK_FUNC.finditer(diff_text)}
+    # 제어 키워드(if/for/while...)는 '(' 앞에 와도 함수 선언이 아님 — 오탐 제외.
+    _CTRL_KW = {"if", "for", "while", "switch", "return", "sizeof", "do", "else", "case"}
+    added_decl = {m.group(1) for m in re.finditer(r"^\+\s*.*?\b(\w+)\s*\(", diff_text, re.MULTILINE) if m.group(1) not in _CTRL_KW}
+    removed_decl = {m.group(1) for m in re.finditer(r"^-\s*.*?\b(\w+)\s*\(", diff_text, re.MULTILINE) if m.group(1) not in _CTRL_KW}
+    func_decl_names = {m.group(1) for m in _FUNC_DECL_LINE.finditer(diff_text)}
+    func_proto_names = {m.group(1) for m in _FUNC_PROTO_LINE.finditer(diff_text)}
+    var_changed = bool(_VAR_DECL_LINE.search(diff_text))
+
+    result: Dict[str, str] = {}
+    candidates = hunk_funcs | func_decl_names | (func_proto_names if is_header else set())
+    for func in sorted(candidates):
+        if is_header:
+            new_kind = "HEADER"
+        elif func in added_decl and func in removed_decl and func in func_decl_names:
+            new_kind = "SIGNATURE"
+        elif func in added_decl and func in func_decl_names:
+            new_kind = "NEW"
+        elif func in removed_decl and func in func_decl_names:
+            new_kind = "DELETE"
+        elif var_changed:
+            new_kind = "VARIABLE"
+        else:
+            new_kind = "BODY"
+        result[func] = new_kind
+
+    # allowlist — 모든 hunk가 함수로 귀속(bare 0) AND 전처리 변경 없음 AND 컬럼0 변경 없음.
+    total_hunks = len(_HUNK_ANY.findall(diff_text))
+    ctx_hunks = len(_HUNK_FUNC.findall(diff_text))
+    narrowable = (
+        (not is_header)
+        and total_hunks > 0
+        and ctx_hunks == total_hunks
+        and not _PREPROC_CHANGE.search(diff_text)
+        and not _TOPLEVEL_CHANGE.search(diff_text)
+        and not _HUNK_INIT_CTX.search(diff_text)
+        and bool(result)
+    )
+    return result, narrowable
+
+
 def classify_changed_functions(
     project_root: str,
     changed_files: List[str],
@@ -210,7 +279,6 @@ def classify_changed_functions(
         return _classify_from_edit_types(changed_files, edit_types)
 
     classifications: Dict[str, str] = {}
-
     for fpath in changed_files:
         try:
             diff_text = _run_unified_diff(
@@ -221,42 +289,74 @@ def classify_changed_functions(
             )
             if not diff_text:
                 continue
-
-            hunk_funcs = {m.group(1) for m in _HUNK_FUNC.finditer(diff_text)}
-            # 제어 키워드(if/for/while...)는 '(' 앞에 와도 함수 선언이 아님 — 오탐 제외.
-            # (최종 SIGNATURE/NEW/DELETE 판정은 func_decl_names AND 게이트가 추가로 거르지만,
-            #  added/removed_decl 자체의 노이즈를 줄여 경계 케이스 오분류를 방지한다.)
-            _CTRL_KW = {"if", "for", "while", "switch", "return", "sizeof", "do", "else", "case"}
-            added_decl = {m.group(1) for m in re.finditer(r"^\+\s*.*?\b(\w+)\s*\(", diff_text, re.MULTILINE) if m.group(1) not in _CTRL_KW}
-            removed_decl = {m.group(1) for m in re.finditer(r"^-\s*.*?\b(\w+)\s*\(", diff_text, re.MULTILINE) if m.group(1) not in _CTRL_KW}
-            func_decl_names = {m.group(1) for m in _FUNC_DECL_LINE.finditer(diff_text)}
-            func_proto_names = {m.group(1) for m in _FUNC_PROTO_LINE.finditer(diff_text)}
-            var_changed = bool(_VAR_DECL_LINE.search(diff_text))
-            is_header = fpath.endswith(".h")
-
-            candidates = hunk_funcs | func_decl_names | (func_proto_names if is_header else set())
-            for func in sorted(candidates):
-                current = classifications.get(func)
-                new_kind = "BODY"
-
-                if is_header:
-                    new_kind = "HEADER"
-                elif func in added_decl and func in removed_decl and func in func_decl_names:
-                    new_kind = "SIGNATURE"
-                elif func in added_decl and func in func_decl_names:
-                    new_kind = "NEW"
-                elif func in removed_decl and func in func_decl_names:
-                    new_kind = "DELETE"
-                elif var_changed:
-                    new_kind = "VARIABLE"
-
-                if current in {"NEW", "DELETE", "SIGNATURE", "HEADER"}:
+            per_file, _narrowable = _classify_one_file_diff(diff_text, fpath.endswith(".h"))
+            for func, new_kind in per_file.items():
+                # 같은 함수가 여러 파일 diff에 나오면 강한 kind(NEW/DELETE/SIGNATURE/HEADER) 보존.
+                if classifications.get(func) in {"NEW", "DELETE", "SIGNATURE", "HEADER"}:
                     continue
                 classifications[func] = new_kind
         except Exception as e:
             logger.warning("Failed to classify diff for %s: %s", fpath, e)
 
     return classifications
+
+
+def _split_svn_diff_by_file(combined_diff: str) -> List[Tuple[str, str]]:
+    """svn diff 통합 출력을 'Index: <path>' 기준으로 [(path, block), ...]로 분할한다."""
+    out: List[Tuple[str, str]] = []
+    cur_path = ""
+    cur_lines: List[str] = []
+    for line in (combined_diff or "").splitlines(keepends=True):
+        m = re.match(r"^Index:\s+(.+?)\s*$", line)
+        if m:
+            if cur_path:
+                out.append((cur_path, "".join(cur_lines)))
+            cur_path = m.group(1).strip()
+            cur_lines = [line]
+        else:
+            cur_lines.append(line)
+    if cur_path:
+        out.append((cur_path, "".join(cur_lines)))
+    return out
+
+
+def classify_changed_functions_from_diff_text(
+    combined_diff: str,
+) -> Tuple[Dict[str, str], Set[str]]:
+    """`svn diff -r A:B`(-x -p) 통합 diff blob → (정밀 changed_types, line_classified_files).
+
+    통합 blob을 'Index: <path>' 기준으로 파일 분할해 각 파일을 _classify_one_file_diff로 분류.
+    - changed_types: 함수단위 정밀 kind(NEW/DELETE/SIGNATURE/BODY/VARIABLE/HEADER).
+    - line_classified_files: is_header=False AND file_scope_change=False AND 함수 1개+ 귀속된 .c
+      경로 집합(정규화·소문자). 오케스트레이터는 이 집합의 파일만 함수단위 narrowing하고, 그 외
+      (헤더/매크로·인클루드·모듈스코프 변경 .c)는 파일단위 보수 분류를 유지한다(안전측 — 라인변경
+      없는 함수도 데이터/매크로 결합으로 영향받을 수 있으므로 과대추정을 남긴다).
+
+    ⚠ svn 기본 diff는 `@@` 헤더에 함수 컨텍스트가 없어 BODY-only 함수 귀속이 불가하다. 반드시
+    `-x -p`(show-c-function)로 받은 blob이어야 한다. 컨텍스트가 전무하면(구버전 svn이 -p 무시)
+    호출측이 positive-context 가드로 이 함수를 우회해야 한다.
+    """
+    changed_types: Dict[str, str] = {}
+    line_classified_files: Set[str] = set()
+    for path, block in _split_svn_diff_by_file(combined_diff):
+        is_header = path.lower().endswith((".h", ".hpp"))
+        per_file, narrowable = _classify_one_file_diff(block, is_header)
+        for func, new_kind in per_file.items():
+            if changed_types.get(func) in {"NEW", "DELETE", "SIGNATURE", "HEADER"}:
+                continue
+            changed_types[func] = new_kind
+        if narrowable:  # allowlist: 안전이 증명된 순수 본문편집 .c만
+            line_classified_files.add(path.replace("\\", "/").lower())
+    return changed_types, line_classified_files
+
+
+def diff_has_function_context(diff_text: str) -> bool:
+    """svn diff에 `@@ ... @@ func(` 함수 컨텍스트가 실제로 붙었는지 판정(positive-context 가드).
+
+    svn 기본 diff는 컨텍스트가 없고 `-x -p`(show-c-function)로만 붙는다. 구버전 svn이 `-p`를
+    조용히 무시하면 rc==0인데도 bare `@@`만 나오므로 rc로는 감지 불가 — 이 함수로 검증한다.
+    """
+    return bool(_HUNK_FUNC.search(diff_text or ""))
 
 
 def extract_signature_changes(diff_text: str) -> Dict[str, Dict[str, str]]:

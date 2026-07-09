@@ -176,6 +176,97 @@ def test_run_impact_update_classification_granularity_line_for_local_diff(tmp_pa
     assert result["classification"]["signature_distinguished"] is True
 
 
+def _setup_precise_env(tmp_path, monkeypatch, *, blob):
+    """A 정밀분류 테스트 공통 셋업 — 실 editType classify 사용(subprocess 없음), svn diff는 canned."""
+    from backend.schemas import ScmRegisterRequest
+    from backend.services import scm_registry, local_service
+    from workflow import impact_audit, impact_orchestrator
+
+    audit_dir = tmp_path / "audit"
+    monkeypatch.setattr(scm_registry, "REGISTRY_PATH", tmp_path / "config" / "scm_registry.json")
+    monkeypatch.setattr(impact_audit, "AUDIT_DIR", audit_dir)
+    monkeypatch.setattr(impact_audit, "LOCK_PATH", audit_dir / ".run_lock")
+    monkeypatch.setattr(impact_orchestrator, "_is_cloudium_mode", lambda: False)
+    scm_registry.register_entry(ScmRegisterRequest(
+        id="kj", name="KJ", scm_type="svn",
+        scm_url="https://svn.example/repo/trunk", source_root=str(tmp_path / "src")))
+    monkeypatch.setattr(impact_orchestrator, "_load_source_sections", lambda _sr: {
+        "call_map": {},
+        "function_details_by_name": {
+            "foo_run": {"name": "Foo_Run", "module_name": "m", "file": "sources/pure.c"},
+            "foo_extra": {"name": "Foo_Extra", "module_name": "m", "file": "sources/pure.c"},
+            "bar_init": {"name": "Bar_Init", "module_name": "n", "file": "sources/modvar.c"},
+            "bar_other": {"name": "Bar_Other", "module_name": "n", "file": "sources/modvar.c"},
+        },
+    })
+    calls = {"n": 0}
+
+    def _fake_svn(**_k):
+        calls["n"] += 1
+        return {"rc": 0, "output": blob}
+
+    monkeypatch.setattr(local_service, "svn_diff_unified", _fake_svn)
+    monkeypatch.setattr(scm_registry, "resolve_scm_credentials", lambda **_k: ("u", "p", None))
+    return impact_orchestrator, calls
+
+
+def _precise_trigger(tmp_path, changed_files):
+    return ChangeTrigger(
+        trigger_type="jenkins", scm_id="kj", source_root=str(tmp_path / "src"),
+        scm_type="svn", base_ref="", changed_files=changed_files, dry_run=True, targets=["uds"],
+        metadata={"changed_files_source": "svn_revision_range",
+                  "baseline_revision": "100", "build_revision": "150",
+                  "changed_file_edit_types": {f: "edit" for f in changed_files}})
+
+
+def test_run_impact_update_precise_narrowing_line_classified(tmp_path, monkeypatch):
+    """A: 순수 본문 편집 .c(pure.c)는 라인변경 함수(foo_run)만 유지·foo_extra 제거,
+    모듈스코프 var 파일(modvar.c)은 fattened 유지. granularity='line', svn diff는 1회(fetch-once)."""
+    blob = "\n".join([
+        "Index: sources/pure.c",
+        "@@ -10,3 +10,4 @@ Foo_Run(void)",
+        "-    return 0;",
+        "+    x++;",
+        "+    return x;",
+        "Index: sources/modvar.c",
+        "@@ -5,3 +5,3 @@ Bar_Init(void)",
+        "-static uint8 s_Mode;",
+        "+static uint8 s_Mode = 1;",
+        "",
+    ])
+    orch, calls = _setup_precise_env(tmp_path, monkeypatch, blob=blob)
+    result = orch.run_impact_update(_precise_trigger(tmp_path, ["sources/pure.c", "sources/modvar.c"]))
+    ct = result["changed_function_types"]
+    # pure.c=line_classified → 라인변경된 foo_run만 유지, foo_extra 제거
+    assert "foo_run" in ct
+    assert "foo_extra" not in ct
+    # modvar.c=모듈스코프 var → fattened 유지(둘 다)
+    assert "bar_init" in ct
+    assert "bar_other" in ct
+    assert result["classification"]["granularity"] == "line"
+    # fetch-once: svn_diff_unified 정확히 1회(분류+시그니처 공유)
+    assert calls["n"] == 1
+
+
+def test_run_impact_update_precise_fallback_on_bare_hunk(tmp_path, monkeypatch):
+    """A: svn diff에 -x -p 컨텍스트 없음(bare @@) → positive-context 가드가 정밀분류 우회 →
+    파일단위 보수 경로 유지(granularity='file', 파일 전체 함수 fattened)."""
+    blob_bare = "\n".join([
+        "Index: sources/pure.c",
+        "@@ -10,3 +10,4 @@",  # bare — 함수 컨텍스트 없음(구버전 svn이 -p 무시한 경우)
+        "-    return 0;",
+        "+    return 1;",
+        "",
+    ])
+    orch, _calls = _setup_precise_env(tmp_path, monkeypatch, blob=blob_bare)
+    result = orch.run_impact_update(_precise_trigger(tmp_path, ["sources/pure.c"]))
+    ct = result["changed_function_types"]
+    # 폴백 → pure.c 전체 함수 fattened(foo_run, foo_extra 둘 다)
+    assert "foo_run" in ct
+    assert "foo_extra" in ct
+    assert result["classification"]["granularity"] == "file"
+
+
 def test_run_impact_update_promotes_auto_to_flag_when_limit_exceeded(tmp_path, monkeypatch):
     from backend.schemas import ScmRegisterRequest
     from backend.services import scm_registry

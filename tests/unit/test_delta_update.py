@@ -160,3 +160,91 @@ def test_get_changed_files_supports_svn_working_copy_status(monkeypatch, tmp_pat
     result = delta_update.get_changed_files(str(tmp_path), scm_type="svn", base_ref="")
 
     assert result == ["Sources/APP/Ap_BuzzerCtrl_PDS.c", "Sources/APP/Ap_BuzzerCtrl_it_PDS.h"]
+
+
+def test_classify_changed_functions_from_diff_text_kinds_and_line_classified():
+    """svn A:B(-x -p) 통합 diff → 함수단위 kind + narrow 가능 파일 집합.
+
+    순수 본문/시그니처 편집 .c만 line_classified(narrow 대상). 모듈스코프 var/매크로/헤더 변경
+    파일은 file_scope_change/헤더로 제외되어 파일단위 보수 분류를 유지한다(안전측)."""
+    from workflow.delta_update import classify_changed_functions_from_diff_text
+    blob = "\n".join([
+        "Index: sources/pure_body.c",
+        "===================================================================",
+        "--- sources/pure_body.c\t(revision 100)",
+        "+++ sources/pure_body.c\t(revision 150)",
+        "@@ -10,4 +10,5 @@ Foo_Run(void)",
+        "     int x = 1;",
+        "-    return x;",
+        "+    x += 2;",
+        "+    return x;",
+        "Index: sources/sig.c",
+        "===================================================================",
+        "--- sources/sig.c\t(revision 100)",
+        "+++ sources/sig.c\t(revision 150)",
+        "@@ -8,3 +8,3 @@ Sig_Fn(int old)",
+        "-static void Sig_Fn(int old)",
+        "+static void Sig_Fn(int old, int extra)",
+        "     return;",
+        "Index: sources/modvar.c",
+        "===================================================================",
+        "--- sources/modvar.c\t(revision 100)",
+        "+++ sources/modvar.c\t(revision 150)",
+        "@@ -5,3 +5,3 @@ Bar_Init(void)",
+        "-static uint8 s_Mode;",
+        "+static uint8 s_Mode = 1;",
+        "     Bar_Sub();",
+        "Index: sources/macro.c",
+        "===================================================================",
+        "--- sources/macro.c\t(revision 100)",
+        "+++ sources/macro.c\t(revision 150)",
+        "@@ -1,2 +1,2 @@ Mac_Fn(void)",
+        "-#define MAXVAL 10",
+        "+#define MAXVAL 20",
+        "Index: include/hdr.h",
+        "===================================================================",
+        "--- include/hdr.h\t(revision 100)",
+        "+++ include/hdr.h\t(revision 150)",
+        "@@ -3,2 +3,2 @@",
+        "-void Hdr_Proto(void);",
+        "+void Hdr_Proto(int a);",
+        "",
+    ])
+    types, lcf = classify_changed_functions_from_diff_text(blob)
+    # kind는 narrowable 여부와 독립적으로 정확 — 시그니처/신규/삭제는 fatten 파일에서도 승격됨.
+    assert types.get("Foo_Run") == "BODY"
+    assert types.get("Sig_Fn") == "SIGNATURE"
+    assert types.get("Bar_Init") == "VARIABLE"
+    assert types.get("Hdr_Proto") == "HEADER"
+    # allowlist: 순수 본문편집 .c(컬럼0/전처리/top-level 변경 없음, 전 hunk 함수귀속)만 narrow 가능.
+    assert "sources/pure_body.c" in lcf
+    # 시그니처(컬럼0)·모듈스코프 var(컬럼0)·매크로(전처리)·헤더 → narrow 제외(fatten 유지, 안전측).
+    assert "sources/sig.c" not in lcf
+    assert "sources/modvar.c" not in lcf
+    assert "sources/macro.c" not in lcf
+    assert not any(p.endswith(".h") for p in lcf)
+
+
+def test_diff_has_function_context():
+    """positive-context 가드 — -x -p 컨텍스트 유무를 rc와 독립적으로 판정."""
+    from workflow.delta_update import diff_has_function_context
+    assert diff_has_function_context("@@ -1,2 +1,2 @@ Foo(void)\n-a\n+b\n") is True
+    assert diff_has_function_context("@@ -1,2 +1,2 @@\n-a\n+b\n") is False
+    assert diff_has_function_context("") is False
+
+
+def test_classify_from_diff_text_initializer_context_not_narrowable():
+    """W1 하드닝 — `= MACRO(` 초기화자 값-전용 편집의 hunk 컨텍스트가 함수로 오귀속돼도
+    narrowable=False(파일스코프 데이터 리더 함수 누락 방지). 함수 시그니처엔 '='가 없어 무영향."""
+    from workflow.delta_update import classify_changed_functions_from_diff_text
+    blob = "\n".join([
+        "Index: sources/cfg.c",
+        "@@ -3,4 +3,4 @@ static const Cfg_t g_cfg = MK_CFG( 1,",
+        "     0x10,",
+        "-    0x20,",
+        "+    0x21,",
+        "     0x30,",
+        "",
+    ])
+    _types, lcf = classify_changed_functions_from_diff_text(blob)
+    assert "sources/cfg.c" not in lcf
