@@ -1048,6 +1048,7 @@ def run_impact_update(
         _precise_diff_text = ""
         _line_classified_files: Set[str] = set()
         _narrow_removed_n = 0  # A-4에서 정밀 narrowing으로 제거한 함수 수(감사/경고용)
+        _narrow_removed_list: List[str] = []  # 제거 함수 전체 목록(durable audit 추적성 — ISO 26262)
         _base_r = str(_meta.get("baseline_revision") or "").strip()
         _build_r = str(_meta.get("build_revision") or "").strip()
         _scm_url = str(getattr(entry, "scm_url", "") or "").strip()
@@ -1147,6 +1148,7 @@ def run_impact_update(
                 # X8: 축소(제거)된 함수 감사 추적 — silent 제거 금지(ASIL C/D 리뷰 추적성).
                 _removed = sorted(set(changed_types) - set(_narrowed))
                 _narrow_removed_n = len(_removed)
+                _narrow_removed_list = _removed  # durable audit 추적성(전체 목록)
                 if _removed:
                     logger.info(
                         "impact precise-narrow: removed %d function(s) from %d line-classified file(s): %s",
@@ -1470,6 +1472,9 @@ def run_impact_update(
                 "granularity": _classification_granularity,
                 "source": _changed_files_source,
                 "signature_distinguished": _classification_granularity == "line",
+                # A 정밀분류가 함수단위로 축소한 파일 수 / 라인변경 없어 제외한 함수 수(투명성).
+                "line_classified_file_count": len(_line_classified_files),
+                "narrow_removed_count": _narrow_removed_n,
             },
         }
         if "sits" in targets:
@@ -1613,6 +1618,11 @@ def run_impact_update(
                 "granularity": _classification_granularity,
                 "source": _changed_files_source,
                 "signature_distinguished": _classification_granularity == "line",
+                "line_classified_file_count": len(_line_classified_files),
+                "narrow_removed_count": _narrow_removed_n,
+                # ISO 26262 추적성 — 정밀분류로 영향집합에서 제외한 함수 전체 목록(감사 레코드 durable).
+                # 안전 엔지니어가 "무엇을 왜 뺐는지"를 이 레코드에서 검증할 수 있게 한다(silent drop 금지).
+                "narrow_removed_functions": list(_narrow_removed_list),
             },
         }
         # 감사기록/변경이력은 best-effort — payload가 cloudium U:\\(SMB) 접근 거부 등으로

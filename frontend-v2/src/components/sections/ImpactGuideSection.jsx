@@ -147,6 +147,8 @@ export default function ImpactGuideSection({ analysisResult }) {
   // "변경 파일 내 전체 함수"의 과대추정(실제 수정 함수는 더 적음). "line"=라인 diff 정밀.
   const classification = impact?.classification ?? null;
   const isConservativeCount = classification?.granularity === 'file';
+  // "line"=라인 diff 정밀 분류 적용됨(SIGNATURE/NEW/DELETE 함수단위 판별). 축소 파일/제외 함수 수.
+  const isLineClassified = classification?.granularity === 'line';
   // 백엔드 ISO 증거: 함수별 메타(ASIL 등) + 경고(과소보고/cloudium/ASIL escalation 등) + ASIL 요약.
   const functionMeta = impact?.function_meta ?? {};
   const impactWarnings = Array.isArray(impact?.warnings) ? impact.warnings : [];
@@ -628,11 +630,15 @@ export default function ImpactGuideSection({ analysisResult }) {
             <div className="stat-value">{activeChangedFiles.length}</div>
             <div className="stat-label">변경 파일</div>
           </div>
-          <div className="stat-card" title={isConservativeCount ? '파일단위 보수 분류 — 변경된 파일에 속한 전체 함수를 집계합니다. 라인 diff가 없어 실제 수정된 함수는 이보다 적을 수 있습니다.' : undefined}>
+          <div className="stat-card" title={
+            isConservativeCount ? '파일단위 보수 분류 — 변경된 파일에 속한 전체 함수를 집계합니다. 라인 diff가 없어 실제 수정된 함수는 이보다 적을 수 있습니다.'
+              : isLineClassified ? `라인 diff 정밀 분류 — 시그니처/신규/삭제를 함수단위로 판별. ${classification?.line_classified_file_count || 0}개 파일을 함수단위로 축소(라인변경 없는 ${classification?.narrow_removed_count || 0}개 함수 제외).`
+              : undefined}>
             <div className="stat-value">{activeFnEntries.length}</div>
             <div className="stat-label">
               변경 함수
               {isConservativeCount && <span className="text-muted" style={{ fontSize: 9, marginLeft: 3 }}>(보수 추정)</span>}
+              {isLineClassified && <span className="pill pill-success" style={{ fontSize: 8, marginLeft: 3 }}>정밀</span>}
             </div>
           </div>
           <div className="stat-card">

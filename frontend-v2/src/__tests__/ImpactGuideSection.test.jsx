@@ -314,11 +314,13 @@ describe('ImpactGuideSection', () => {
         changed_function_types: { foo: 'SIGNATURE' },
         actions: {},
         impact: { direct: ['foo'] },
-        classification: { granularity: 'line', source: '', signature_distinguished: true },
+        classification: { granularity: 'line', source: '', signature_distinguished: true, line_classified_file_count: 2, narrow_removed_count: 5 },
       },
     };
     render(<ImpactGuideSection analysisResult={analysisResult} />);
     expect(screen.queryByText(/\(보수 추정\)/)).not.toBeInTheDocument();
     expect(screen.queryByText(/파일단위 보수 분류/)).not.toBeInTheDocument();
+    // 정밀 분류 긍정 신호 노출
+    expect(screen.getByText('정밀')).toBeInTheDocument();
   });
 });

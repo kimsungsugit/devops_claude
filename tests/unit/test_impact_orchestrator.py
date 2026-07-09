@@ -244,6 +244,9 @@ def test_run_impact_update_precise_narrowing_line_classified(tmp_path, monkeypat
     assert "bar_init" in ct
     assert "bar_other" in ct
     assert result["classification"]["granularity"] == "line"
+    # 투명성 필드: pure.c 1개 함수단위 축소, foo_extra 1개 제외(감사/프론트 노출)
+    assert result["classification"]["line_classified_file_count"] == 1
+    assert result["classification"]["narrow_removed_count"] == 1
     # fetch-once: svn_diff_unified 정확히 1회(분류+시그니처 공유)
     assert calls["n"] == 1
 
