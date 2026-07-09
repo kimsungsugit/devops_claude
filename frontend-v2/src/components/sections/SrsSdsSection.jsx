@@ -3306,6 +3306,8 @@ function CallTreeView({ job, cacheRoot, buildSelector, sourceRoot, seedFns, toas
   // 라벨 표시 모드: 'func'(함수명) / 'swit'(참조 SwITS의 SwIT_SwUFn_ID). switMap은 {진입함수:ID}.
   const [labelMode, setLabelMode] = useState('func');
   const [switMap, setSwitMap] = useState(null);
+  // SwIT ID 뷰: SITS 진입함수를 최상위로 재구성한 별도 트리(원본 data는 보존). null이면 재구성 안 됨(라벨-only 폴백).
+  const [switViewData, setSwitViewData] = useState(null);
   const [switBusy, setSwitBusy] = useState(false);
   const mountedRef = useRef(true);
   // 요청 시퀀스 토큰 — 로딩 중 재진입(입력창 Enter/버튼 재클릭) 시 늦게 도착한 이전 응답이 최신 결과를
@@ -3539,38 +3541,62 @@ function CallTreeView({ job, cacheRoot, buildSelector, sourceRoot, seedFns, toas
 
   // 라벨 함수명 ⇄ SwIT ID 전환. swit로 갈 때 매핑이 없으면 백엔드에서 1회 조회 후 캐시.
   const toggleLabelMode = useCallback(async () => {
-    if (labelMode === 'swit') { setLabelMode('func'); return; }
-    if (switMap && Object.keys(switMap).length) { setLabelMode('swit'); return; }
+    if (labelMode === 'swit') { setLabelMode('func'); return; }   // 원본 트리로 복귀(switViewData 캐시 유지)
+    if (switViewData && switMap && Object.keys(switMap).length) { setLabelMode('swit'); return; }  // 캐시 재사용
     const myseq = ++switSeq.current;   // W1: 이 조회 인스턴스 토큰
     setSwitBusy(true);
     try {
       const m = await fetchSwitMap();
-      // W1: await 중 언마운트/재진입/data변경(reset useEffect가 switSeq 증가) 시 stale 반영 차단 —
-      // 옛 트리 매핑을 새 트리에 적용하거나 방금 리셋한 labelMode/switMap을 되살리는 것을 막는다.
+      // W1: await 중 언마운트/재진입/data변경(reset useEffect가 switSeq 증가) 시 stale 반영 차단.
       if (!mountedRef.current || myseq !== switSeq.current) return;
       const cnt = m ? Object.keys(m).length : 0;
-      setSwitMap(m || {});
       if (!cnt) {
+        setSwitMap({});
         toast('warning', 'SwIT 매핑을 찾지 못했습니다 — 설정>입력자료의 SITS 경로 또는 기준 SCM을 확인하세요. (함수명 유지)');
         return;
       }
-      const roots = Array.isArray(data?.trees) ? data.trees.map(t => String(t?.name || '')) : [];
-      const matched = roots.filter(n => m[n]).length;
-      setLabelMode('swit');
-      toast(matched < roots.length ? 'info' : 'success',
-        `SwIT ID 표시 — 화면 루트 ${roots.length}개 중 ${matched}개 매칭 (참조 SITS ${cnt}개)`);
+      // SITS 진입함수를 최상위로 재구성(Excel(SwIT ID)와 동일 뷰). 진입함수들로 콜트리 재생성.
+      const entries = Object.keys(m);
+      let regen = null;
+      try {
+        regen = await post('/api/jenkins/call-tree', {
+          job_url: job?.url || '', cache_root: cacheRoot || '.devops_pro_cache',
+          build_selector: buildSelector || 'lastSuccessfulBuild', source_root: sourceRoot || '',
+          all_roots: false, reverse: false, entry: entries.join(','),
+          max_depth: Math.max(1, Math.min(20, Number(depth) || 5)), include_external: includeExternal, engine: 'precise',
+        });
+      } catch { regen = null; }
+      if (!mountedRef.current || myseq !== switSeq.current) return;   // W1: 재생성 대기 중 stale 차단
+      setSwitMap(m);
+      if (regen && Array.isArray(regen.trees) && regen.trees.length) {
+        setSwitViewData(regen);
+        setExpanded(new Set());
+        setLabelMode('swit');
+        const roots = regen.trees.map(t => String(t?.name || ''));
+        const matched = roots.filter(n => m[n]).length;
+        toast('success', `SwIT ID 뷰 — 진입 함수 ${roots.length}개를 최상위로 재구성 (${matched}개 SwIT_ID · 참조 SITS ${cnt}개)`);
+      } else {
+        // 캐시 빌드 부재 등으로 재구성 불가 → 현재 트리에 라벨만(폴백). switViewData 없이 labelMode만 전환.
+        setSwitViewData(null);
+        setLabelMode('swit');
+        const roots = Array.isArray(data?.trees) ? data.trees.map(t => String(t?.name || '')) : [];
+        const matched = roots.filter(n => m[n]).length;
+        toast('info', `SwIT ID 라벨 — 캐시 빌드가 없어 현재 트리에 라벨만 적용(${matched}/${roots.length}). 진입 함수 재구성은 Jenkins 빌드 캐시가 필요합니다.`);
+      }
     } catch (e) {
-      if (mountedRef.current && myseq === switSeq.current) toast('error', `SwIT 매핑 로드 실패: ${e.message}`);
+      if (mountedRef.current && myseq === switSeq.current) toast('error', `SwIT ID 뷰 실패: ${e.message}`);
     } finally {
       if (mountedRef.current && myseq === switSeq.current) setSwitBusy(false);
     }
-  }, [labelMode, switMap, fetchSwitMap, data, toast]);
+  }, [labelMode, switViewData, switMap, fetchSwitMap, data, job, cacheRoot, buildSelector, sourceRoot, depth, includeExternal, toast]);
 
   // 새 콜트리 로드 시 라벨 모드/매핑 초기화(이전 트리 매핑을 새 트리에 잘못 적용 방지).
-  useEffect(() => { switSeq.current += 1; setLabelMode('func'); setSwitMap(null); }, [data]);
+  useEffect(() => { switSeq.current += 1; setLabelMode('func'); setSwitMap(null); setSwitViewData(null); }, [data]);
 
-  const trees = Array.isArray(data?.trees) ? data.trees : [];
-  const st = data?.stats || {};
+  // SwIT ID 뷰 활성 시 재구성 트리(switViewData)를, 아니면 원본 data를 렌더 소스로. 원본은 불변 보존.
+  const activeData = (labelMode === 'swit' && switViewData) ? switViewData : data;
+  const trees = Array.isArray(activeData?.trees) ? activeData.trees : [];
+  const st = activeData?.stats || {};
   // 진입점(boot)→ISR→일반 순 정렬(역방향은 이름순). load의 _ctBootExpansion과 동일 정렬 함수·동일
   // reverse(로드된 데이터 기준 st.reverse)라 자동펼침 path가 정합.
   const sortedTrees = useMemo(() => _ctSortRoots(trees, st.reverse), [trees, st.reverse]);
@@ -3769,7 +3795,7 @@ function CallTreeView({ job, cacheRoot, buildSelector, sourceRoot, seedFns, toas
         );
       })()}
 
-      {data && !data.bidir && (
+      {activeData && !activeData.bidir && (
         <div>
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, fontSize: 11, color: 'var(--text-muted)', marginBottom: 8 }}>
             {st.reverse && <span style={{ fontWeight: 700, color: '#c026d3' }} title="역방향 — 자식은 이 함수를 호출하는 함수(caller)">← 역콜트리(누가 호출하나)</span>}
@@ -3778,15 +3804,15 @@ function CallTreeView({ job, cacheRoot, buildSelector, sourceRoot, seedFns, toas
             <span>함수 {st.functions ?? 0}</span>
             <span>호출 엣지 {st.edges ?? 0}</span>
             {st.roots > 0 && <span>루트 <strong>{st.roots}</strong>{!st.reverse && <span style={{ opacity: 0.65 }}> · 진입점·ISR 우선</span>}</span>}
-            {Array.isArray(data.missing) && data.missing.length > 0 && (
-              <span style={{ color: '#d97706' }}>미발견 {data.missing.length}</span>
+            {Array.isArray(activeData.missing) && activeData.missing.length > 0 && (
+              <span style={{ color: '#d97706' }}>미발견 {activeData.missing.length}</span>
             )}
           </div>
           {trees.length === 0 ? (
             <div style={{ fontSize: 12, color: 'var(--text-muted)', padding: 12, textAlign: 'center', border: '1px dashed var(--border)', borderRadius: 6 }}>
               표시할 호출 트리가 없습니다.
-              {Array.isArray(data.missing) && data.missing.length > 0 && (
-                <> 입력한 함수({data.missing.join(', ')})를 빌드 소스에서 찾지 못했습니다 — 함수명/소스 캐시를 확인하세요.</>
+              {Array.isArray(activeData.missing) && activeData.missing.length > 0 && (
+                <> 입력한 함수({activeData.missing.join(', ')})를 빌드 소스에서 찾지 못했습니다 — 함수명/소스 캐시를 확인하세요.</>
               )}
             </div>
           ) : (
