@@ -288,4 +288,37 @@ describe('ImpactGuideSection', () => {
     // s_Indirect는 '변경 상세'엔 없고 '영향 가이드' 표에만 존재 → 유일 매칭
     expect(screen.getByText('s_Indirect')).toBeInTheDocument();
   });
+
+  // STS-IMPACT-013: classification.granularity='file'이면 "변경 함수" 과대추정 정직화 라벨 노출
+  it('렌더링: classification.granularity=file이면 (보수 추정) 캡션과 안내가 표시된다', () => {
+    const analysisResult = {
+      impactData: {
+        trigger: { changed_files: ['a.c'] },
+        changed_function_types: { foo: 'BODY', bar: 'BODY' },
+        actions: {},
+        impact: { direct: ['foo', 'bar'] },
+        classification: { granularity: 'file', source: 'svn_revision_range', signature_distinguished: false },
+      },
+    };
+    render(<ImpactGuideSection analysisResult={analysisResult} />);
+    // "변경 함수" stat 라벨의 (보수 추정) 캡션 + 변경 상세 패널의 파일단위 안내
+    expect(screen.getByText(/\(보수 추정\)/)).toBeInTheDocument();
+    expect(screen.getByText(/파일단위 보수 분류/)).toBeInTheDocument();
+  });
+
+  // STS-IMPACT-014: granularity='line'이면 정직화 라벨 미노출(정밀 분류)
+  it('렌더링: classification.granularity=line이면 (보수 추정) 캡션이 없다', () => {
+    const analysisResult = {
+      impactData: {
+        trigger: { changed_files: ['a.c'] },
+        changed_function_types: { foo: 'SIGNATURE' },
+        actions: {},
+        impact: { direct: ['foo'] },
+        classification: { granularity: 'line', source: '', signature_distinguished: true },
+      },
+    };
+    render(<ImpactGuideSection analysisResult={analysisResult} />);
+    expect(screen.queryByText(/\(보수 추정\)/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/파일단위 보수 분류/)).not.toBeInTheDocument();
+  });
 });

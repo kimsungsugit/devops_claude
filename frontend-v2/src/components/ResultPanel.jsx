@@ -547,6 +547,8 @@ function ImpactPanel({ impactData }) {
   const docs = typeof rawDocs === 'object' ? rawDocs : {};
   const warnings = Array.isArray(impactData.warnings) ? impactData.warnings : [];
   const scmName = impactData._scm_name || '';
+  // 분류 정밀도 — "file"이면 변경 함수 수가 "변경 파일 내 전체 함수"의 과대추정.
+  const isConservativeCount = impactData.classification?.granularity === 'file';
 
   return (
     <div>
@@ -554,7 +556,10 @@ function ImpactPanel({ impactData }) {
 
       <div className="row" style={{ gap: 8, marginBottom: 10, flexWrap: 'wrap' }}>
         <span className="pill pill-info">파일 {changedFiles.length}</span>
-        <span className="pill pill-info">함수 {changedFnEntries.length}</span>
+        <span className="pill pill-info"
+          title={isConservativeCount ? '파일단위 보수 분류 — 변경 파일에 속한 전체 함수 집계. 라인 diff가 없어 실제 수정 함수는 이보다 적을 수 있습니다(*).' : undefined}>
+          함수 {changedFnEntries.length}{isConservativeCount ? '*' : ''}
+        </span>
         {counts.direct != null && (
           <span className="pill pill-warning">
             직접 {counts.direct} / 1hop {counts.indirect_1hop || 0} / 2hop {counts.indirect_2hop || 0}

@@ -1037,6 +1037,9 @@ def run_impact_update(
         _is_authoritative_remote = _changed_files_source in ("jenkins_changeset", "svn_revision_range")
         if callable(on_progress):
             on_progress("classify", "변경 함수를 분류 중입니다.", {"changed_files": len(trigger.changed_files or [])})
+        # 분류 정밀도(프론트 라벨 정직화용). "file"=파일단위 보수(변경파일 내 전 함수 과대추정),
+        # "line"=라인 diff 기반 함수단위. A(정밀화)가 성공하면 아래에서 "line"으로 승격한다.
+        _classification_granularity = "file"
         if cloudium or (_is_authoritative_remote and edit_types):
             # cloudium 또는 Jenkins changeSet 연동: git/svn diff subprocess는 원격 source_root
             # (로컬 미존재) 또는 빌드 revision 불일치로 무의미/오정렬. editType이 있으면 그걸로
@@ -1048,13 +1051,16 @@ def run_impact_update(
             else:
                 changed_types = _fallback_changed_types_from_files(trigger.changed_files)
         else:
+            # 로컬 working-copy diff — 라인 hunk 기반 함수단위 분류(SIGNATURE/NEW/DELETE 판별).
             changed_types = classify_changed_functions(
                 trigger.source_root,
                 trigger.changed_files,
                 scm_type=trigger.scm_type,
                 base_ref=trigger.base_ref,
             )
-            if not changed_types and trigger.changed_files:
+            if changed_types:
+                _classification_granularity = "line"
+            elif trigger.changed_files:
                 changed_types = _fallback_changed_types_from_files(trigger.changed_files)
 
         _asil_uds_enriched = 0  # UDS 문서에서 ASIL을 보강한 함수 수(소스 주석 미기재분 — 아래서 채움)
@@ -1371,6 +1377,13 @@ def run_impact_update(
                 "unknown_changed_count": asil_unknown_changed,
             },
             "coverage_gap": coverage_gap,
+            # 분류 정밀도 — 프론트 "변경 함수" 라벨 정직화용. "file"이면 파일단위 보수 분류라
+            # 변경 함수 수가 "변경 파일 내 전체 함수"의 과대추정(실제 수정 함수는 더 적음)임을 알린다.
+            "classification": {
+                "granularity": _classification_granularity,
+                "source": _changed_files_source,
+                "signature_distinguished": _classification_granularity == "line",
+            },
         }
         if "sits" in targets:
             # SITS 전용 cross-module 영향을 항상 노출(계약 일관성). same_module_only가 이미
@@ -1509,6 +1522,11 @@ def run_impact_update(
                 "unknown_changed_count": asil_unknown_changed,
             },
             "coverage_gap": coverage_gap,
+            "classification": {
+                "granularity": _classification_granularity,
+                "source": _changed_files_source,
+                "signature_distinguished": _classification_granularity == "line",
+            },
         }
         # 감사기록/변경이력은 best-effort — payload가 cloudium U:\\(SMB) 접근 거부 등으로
         # 실패해도 이미 완성된 영향분석 result 반환을 막지 않는다(핵심 결과 보존).

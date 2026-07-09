@@ -126,6 +126,56 @@ def test_run_impact_update_upgrades_body_to_signature_from_change_details(tmp_pa
     assert result["function_meta"]["door_ctrl"]["display_name"] == "Door_Ctrl"
 
 
+def _setup_classification_env(tmp_path, monkeypatch, *, scm_type, classify_result):
+    """granularity 테스트 공통 셋업 — registry/audit redirect + non-cloudium + stub."""
+    from backend.schemas import ScmRegisterRequest
+    from backend.services import scm_registry
+    from workflow import impact_audit, impact_orchestrator
+
+    audit_dir = tmp_path / "audit"
+    monkeypatch.setattr(scm_registry, "REGISTRY_PATH", tmp_path / "config" / "scm_registry.json")
+    monkeypatch.setattr(impact_audit, "AUDIT_DIR", audit_dir)
+    monkeypatch.setattr(impact_audit, "LOCK_PATH", audit_dir / ".run_lock")
+    # 분기를 결정적으로 — file_mode 전역 싱글톤(라이브 cloudium)에 의존하지 않게 non-cloudium 고정.
+    monkeypatch.setattr(impact_orchestrator, "_is_cloudium_mode", lambda: False)
+    # 실 svn/git subprocess 회피(코드베이스 관례) — 시그니처 원문 수집은 빈 dict.
+    monkeypatch.setattr(impact_orchestrator, "_collect_signature_changes", lambda *a, **k: {})
+    scm_registry.register_entry(ScmRegisterRequest(
+        id="kj", name="KJ", scm_type=scm_type,
+        scm_url="https://svn.example/repo/trunk", source_root=str(tmp_path / "src")))
+    monkeypatch.setattr(impact_orchestrator, "classify_changed_functions",
+                        lambda *a, **k: dict(classify_result))
+    monkeypatch.setattr(impact_orchestrator, "_load_source_sections",
+                        lambda _sr: {"call_map": {}, "function_details_by_name": {
+                            "foo": {"name": "Foo", "module_name": "m", "file": "a.c"}}})
+    return impact_orchestrator
+
+
+def test_run_impact_update_classification_granularity_file_for_edit_types(tmp_path, monkeypatch):
+    """svn revision-range editType 경로 → classification.granularity='file'(파일단위 보수 분류)."""
+    orch = _setup_classification_env(tmp_path, monkeypatch, scm_type="svn", classify_result={"foo": "BODY"})
+    result = orch.run_impact_update(ChangeTrigger(
+        trigger_type="jenkins", scm_id="kj", source_root=str(tmp_path / "src"),
+        scm_type="svn", base_ref="", changed_files=["a.c"], dry_run=True, targets=["uds"],
+        metadata={"changed_files_source": "svn_revision_range",
+                  "baseline_revision": "100", "build_revision": "150",
+                  "changed_file_edit_types": {"a.c": "edit"}}))
+    assert result["classification"]["granularity"] == "file"
+    assert result["classification"]["source"] == "svn_revision_range"
+    assert result["classification"]["signature_distinguished"] is False
+
+
+def test_run_impact_update_classification_granularity_line_for_local_diff(tmp_path, monkeypatch):
+    """로컬 working-copy diff 경로(edit_types 없음, non-cloudium) → granularity='line'."""
+    orch = _setup_classification_env(tmp_path, monkeypatch, scm_type="git", classify_result={"foo": "SIGNATURE"})
+    result = orch.run_impact_update(ChangeTrigger(
+        trigger_type="local", scm_id="kj", source_root=str(tmp_path / "src"),
+        scm_type="git", base_ref="HEAD~1", changed_files=["a.c"], dry_run=True, targets=["uds"],
+        metadata={}))
+    assert result["classification"]["granularity"] == "line"
+    assert result["classification"]["signature_distinguished"] is True
+
+
 def test_run_impact_update_promotes_auto_to_flag_when_limit_exceeded(tmp_path, monkeypatch):
     from backend.schemas import ScmRegisterRequest
     from backend.services import scm_registry

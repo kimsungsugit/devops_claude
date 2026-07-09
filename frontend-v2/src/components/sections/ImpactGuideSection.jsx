@@ -143,6 +143,10 @@ export default function ImpactGuideSection({ analysisResult }) {
     ?? analysisResult?.scmList?.[0]?.linked_docs
     ?? {};
   const impactGroups = impact?.impact ?? {};
+  // 분류 정밀도(백엔드 classification). "file"=파일단위 보수 분류 → "변경 함수" 수가
+  // "변경 파일 내 전체 함수"의 과대추정(실제 수정 함수는 더 적음). "line"=라인 diff 정밀.
+  const classification = impact?.classification ?? null;
+  const isConservativeCount = classification?.granularity === 'file';
   // 백엔드 ISO 증거: 함수별 메타(ASIL 등) + 경고(과소보고/cloudium/ASIL escalation 등) + ASIL 요약.
   const functionMeta = impact?.function_meta ?? {};
   const impactWarnings = Array.isArray(impact?.warnings) ? impact.warnings : [];
@@ -624,9 +628,12 @@ export default function ImpactGuideSection({ analysisResult }) {
             <div className="stat-value">{activeChangedFiles.length}</div>
             <div className="stat-label">변경 파일</div>
           </div>
-          <div className="stat-card">
+          <div className="stat-card" title={isConservativeCount ? '파일단위 보수 분류 — 변경된 파일에 속한 전체 함수를 집계합니다. 라인 diff가 없어 실제 수정된 함수는 이보다 적을 수 있습니다.' : undefined}>
             <div className="stat-value">{activeFnEntries.length}</div>
-            <div className="stat-label">변경 함수</div>
+            <div className="stat-label">
+              변경 함수
+              {isConservativeCount && <span className="text-muted" style={{ fontSize: 9, marginLeft: 3 }}>(보수 추정)</span>}
+            </div>
           </div>
           <div className="stat-card">
             <div className="stat-value">{(activeImpactGroups.direct || []).length}</div>
@@ -713,6 +720,11 @@ export default function ImpactGuideSection({ analysisResult }) {
               {changeSummary.VARIABLE > 0 && <span className="pill" style={{ fontSize: 10 }}>변수 {changeSummary.VARIABLE}</span>}
             </div>
           </div>
+          {isConservativeCount && (
+            <div className="text-muted" style={{ fontSize: 10, marginTop: 4, padding: '4px 8px', background: 'var(--bg)', borderRadius: 4 }}>
+              ⚠ 파일단위 보수 분류 — 변경 파일에 속한 전체 함수를 '본문'으로 집계합니다. 라인 diff가 없어 시그니처/신규/삭제가 본문으로 접히며, 실제 수정 함수는 이보다 적을 수 있습니다.
+            </div>
+          )}
           <div style={{ maxHeight: 420, overflow: 'auto', marginTop: 8 }}>
             <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
               <thead>
