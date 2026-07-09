@@ -1,4 +1,4 @@
-import { useState, useCallback, useMemo } from 'react';
+import { useState, useCallback, useMemo, useEffect, useRef } from 'react';
 import { post } from '../../api.js';
 import { useToast } from '../../App.jsx';
 import StatusBadge from '../StatusBadge.jsx';
@@ -56,14 +56,27 @@ function parseReturnType(sig) {
   const toks = head.split(/\s+/).filter(Boolean);
   return toks.length > 1 ? toks.slice(0, -1).join(' ') : head;
 }
-// 매개변수 목록 추출 — [{raw, type, name}]. void/빈 → [], 괄호 없음 → null.
+// 최상위 콤마로만 분리 — 괄호/대괄호/꺾쇠 안의 콤마(함수포인터 `void(*cb)(int,int)`·배열·템플릿)는
+// 분리자로 보지 않는다. `.split(',')`은 함수포인터 파라미터 내부 콤마에서 오분할했다(정확성 버그).
+function splitTopLevelCommas(s) {
+  const out = [];
+  let depth = 0, cur = '';
+  for (const ch of s) {
+    if (ch === '(' || ch === '[' || ch === '{' || ch === '<') depth++;
+    else if (ch === ')' || ch === ']' || ch === '}' || ch === '>') depth = Math.max(0, depth - 1);
+    if (ch === ',' && depth === 0) { out.push(cur); cur = ''; } else cur += ch;
+  }
+  out.push(cur);
+  return out.map(x => x.trim()).filter(Boolean);
+}
+// 매개변수 목록 추출 — [{raw, type, name}]. 선언 없음/void/빈 → [](0개), 내용 있으나 괄호 없음 → null(파싱불가).
 function parseSignatureParams(sig) {
-  if (!sig) return null;
+  if (!sig) return [];  // 빈 측(NEW의 before / DELETE의 after) = 매개변수 0개(파싱실패 아님)
   const m = String(sig).match(/\(([\s\S]*)\)/);
-  if (!m) return null;
+  if (!m) return null;  // 내용은 있으나 괄호 없음 = 파싱 불가(원문 참조 유도)
   const inner = m[1].trim();
   if (!inner || inner.toLowerCase() === 'void') return [];
-  return inner.split(',').map(s => s.trim()).filter(Boolean).map(raw => {
+  return splitTopLevelCommas(inner).map(raw => {
     const toks = raw.replace(/\*/g, ' * ').split(/\s+/).filter(Boolean);
     const last = toks[toks.length - 1] || '';
     const hasName = toks.length > 1 && /^[A-Za-z_]\w*$/.test(last);
@@ -73,11 +86,17 @@ function parseSignatureParams(sig) {
   });
 }
 // before/after 시그니처 매개변수 diff — 이름이 모두 있으면 이름 기준, 아니면 위치 기준.
+// 한쪽이라도 파싱 불가(null)면 failed=true로 "구조 파싱 불가"를 알린다(빈 값 0개로 오치환 금지).
 function diffSignatureParams(before, after) {
   const bp = parseSignatureParams(before);
   const ap = parseSignatureParams(after);
-  if (bp === null && ap === null) return null;
-  const bb = bp || [], aa = ap || [];
+  const meta = {
+    returnBefore: parseReturnType(before),
+    returnAfter: parseReturnType(after),
+    returnChanged: !!(before && after) && parseReturnType(before) !== parseReturnType(after),
+  };
+  if (bp === null || ap === null) return { ...meta, failed: true, rows: [], beforeCount: 0, afterCount: 0 };
+  const bb = bp, aa = ap;
   const rows = [];
   const named = (bb.length + aa.length) > 0 && bb.every(p => p.name) && aa.every(p => p.name);
   if (named) {
@@ -98,14 +117,7 @@ function diffSignatureParams(before, after) {
       else if (b) rows.push({ status: 'removed', before: b.raw, after: '' });
     }
   }
-  return {
-    rows,
-    returnBefore: parseReturnType(before),
-    returnAfter: parseReturnType(after),
-    returnChanged: !!(before && after) && parseReturnType(before) !== parseReturnType(after),
-    beforeCount: bb.length,
-    afterCount: aa.length,
-  };
+  return { ...meta, failed: false, rows, beforeCount: bb.length, afterCount: aa.length };
 }
 const PARAM_STATUS = {
   added: { tone: 'success', label: '추가', mark: '＋' },
@@ -195,6 +207,16 @@ export default function ImpactGuideSection({ analysisResult }) {
   const [selectedFn, setSelectedFn] = useState(null);
   // 선택 함수의 Gemini 변경 설명(함수별). fn이 바뀌면 폐기.
   const [explain, setExplain] = useState({ fn: null, text: '', loading: false, error: '' });
+  // 현재 선택 함수 ref — fetchExplanation의 늦은 응답이 다른 함수로 전환 후 덮어쓰는 race 방지.
+  const selectedFnRef = useRef(null);
+  useEffect(() => { selectedFnRef.current = selectedFn; }, [selectedFn]);
+  // 상세 모달 열렸을 때 Escape로 닫기(a11y).
+  useEffect(() => {
+    if (!selectedFn) return undefined;
+    const onKey = (e) => { if (e.key === 'Escape') setSelectedFn(null); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [selectedFn]);
   const [searchTerm, setSearchTerm] = useState('');
   const [hopFilter, setHopFilter] = useState('all');
   const [docFilter, setDocFilter] = useState('all');
@@ -538,6 +560,8 @@ export default function ImpactGuideSection({ analysisResult }) {
         module: functionMeta[String(d.function).toLowerCase()]?.module || '',
         requirements: (d.requirements || []).slice(0, 12),
       });
+      // race 가드: 응답 도착 시 사용자가 이미 다른 함수로 전환했으면 결과 폐기(오표시/슬롯 오염 방지).
+      if (selectedFnRef.current !== d.function) return;
       if (res?.ok && res.explanation) {
         setExplain({ fn: d.function, text: res.explanation, loading: false, error: '' });
       } else {
@@ -1068,6 +1092,7 @@ export default function ImpactGuideSection({ analysisResult }) {
               <div onClick={close}
                 style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.55)', zIndex: 1000, display: 'flex', alignItems: 'flex-start', justifyContent: 'center', padding: '5vh 16px', overflow: 'auto' }}>
                 <div onClick={e => e.stopPropagation()}
+                  role="dialog" aria-modal="true" aria-label={`${d.function} 변경 상세`}
                   style={{ background: 'var(--panel)', border: '2px solid var(--accent)', borderRadius: 10, maxWidth: 900, width: '100%', maxHeight: '90vh', overflow: 'auto', padding: 18, boxShadow: '0 10px 40px rgba(0,0,0,0.45)' }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 12, gap: 8 }}>
                   <div>
@@ -1120,7 +1145,7 @@ export default function ImpactGuideSection({ analysisResult }) {
                         </table>
                       ) : (
                         <div className="text-muted" style={{ fontSize: 11, marginBottom: 8 }}>
-                          {pdiff && pdiff.rows.length === 0 ? '매개변수 목록 변화 없음 (본문/기타 변경).' : '매개변수 구조 파싱 불가 — 아래 원문 참조.'}
+                          {pdiff?.failed ? '⚠ 매개변수 구조 파싱 불가 — 아래 원문을 직접 대조하세요.' : '매개변수 목록 변화 없음 (본문/기타 변경).'}
                         </div>
                       )}
                       <div style={{ fontFamily: 'var(--font-mono, monospace)', fontSize: 11, whiteSpace: 'pre-wrap', wordBreak: 'break-all', background: 'var(--bg)', borderRadius: 4, padding: '6px 8px' }}>

@@ -353,4 +353,33 @@ describe('ImpactGuideSection', () => {
     // AI 설명 버튼 노출
     expect(screen.getByRole('button', { name: /AI로 설명 생성/ })).toBeInTheDocument();
   });
+
+  // STS-IMPACT-016: 함수포인터 매개변수(내부 콤마) — depth 인식 분할로 콜백만 변경 표시(flag 오보고 없음)
+  it('상세 모달: 함수포인터 파라미터의 내부 콤마를 오분할하지 않는다', async () => {
+    const { post } = await import('../api.js');
+    post.mockResolvedValue({ ok: false });
+    const user = userEvent.setup();
+    const analysisResult = {
+      impactData: {
+        trigger: { changed_files: ['a.c'] },
+        changed_function_types: { reg: 'SIGNATURE' },
+        actions: {},
+        impact: { direct: ['reg'] },
+        function_meta: { reg: { asil: 'B' } },
+        change_details: { reg: {
+          before: 'void reg(void (*cb)(int,int), int flag)',
+          after: 'void reg(void (*cb)(int,int,int), int flag)',
+        } },
+      },
+    };
+    render(<ImpactGuideSection analysisResult={analysisResult} />);
+    await user.click(screen.getByText(/상세 가이드 생성/));
+    await waitFor(() => expect(screen.getByText(/함수별 영향 가이드/)).toBeInTheDocument());
+    await user.click(screen.getByRole('button', { name: '상세' }));
+    // 콜백 param(내부 콤마 포함)이 하나로 파싱돼 변경행에 노출 — flag는 불변이라 추가/삭제 행 없음
+    expect(screen.getAllByText(/void \(\*cb\)\(int,int,int\)/).length).toBeGreaterThanOrEqual(1);
+    // flag가 '추가'/'삭제' pill과 함께 오보고되지 않음(변화 없는 매개변수)
+    expect(screen.queryByText('추가')).not.toBeInTheDocument();
+    expect(screen.queryByText('삭제')).not.toBeInTheDocument();
+  });
 });

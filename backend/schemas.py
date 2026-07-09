@@ -660,7 +660,7 @@ class ImpactExplainChangeRequest(BaseModel):
     after: str = Field(default="", max_length=4000)
     asil: str = Field(default="", max_length=20)
     module: str = Field(default="", max_length=200)
-    requirements: List[str] = Field(default_factory=list)
+    requirements: List[str] = Field(default_factory=list, max_length=20)
 
 
 class TestGenerateRequest(BaseModel):
