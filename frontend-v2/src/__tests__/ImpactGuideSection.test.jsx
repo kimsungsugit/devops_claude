@@ -323,4 +323,34 @@ describe('ImpactGuideSection', () => {
     // 정밀 분류 긍정 신호 노출
     expect(screen.getByText('정밀')).toBeInTheDocument();
   });
+
+  // STS-IMPACT-015: 상세 모달 — SIGNATURE 함수의 매개변수 변화(추가) diff 표시
+  it('상세 모달: SIGNATURE 함수 상세 클릭 시 매개변수 변화 diff와 원문이 모달로 뜬다', async () => {
+    const { post } = await import('../api.js');
+    post.mockResolvedValue({ ok: false });
+    const user = userEvent.setup();
+    const analysisResult = {
+      impactData: {
+        trigger: { changed_files: ['a.c'] },
+        changed_function_types: { foo: 'SIGNATURE' },
+        actions: {},
+        impact: { direct: ['foo'] },
+        function_meta: { foo: { asil: 'B' } },
+        // A(svn diff)가 채운 before/after 선언 원문 — 매개변수 diff 근거
+        change_details: { foo: { before: 'int foo(int a)', after: 'int foo(int a, int b)' } },
+      },
+    };
+    render(<ImpactGuideSection analysisResult={analysisResult} />);
+    await user.click(screen.getByText(/상세 가이드 생성/));
+    await waitFor(() => expect(screen.getByText(/함수별 영향 가이드/)).toBeInTheDocument());
+    // 가이드 표의 '상세' 버튼(정확 매칭 — '상세 가이드 생성'과 구분)
+    await user.click(screen.getByRole('button', { name: '상세' }));
+    // 모달: 매개변수 변화 섹션 + 추가 pill + 변경 후 원문
+    expect(screen.getByText(/시그니처·매개변수 변화/)).toBeInTheDocument();
+    expect(screen.getByText(/추가/)).toBeInTheDocument();  // 매개변수 diff pill(모달 전용)
+    // 변경 후 원문(변경상세 패널 + 모달 양쪽 노출 — 최소 1개 이상)
+    expect(screen.getAllByText(/int foo\(int a, int b\)/).length).toBeGreaterThanOrEqual(1);
+    // AI 설명 버튼 노출
+    expect(screen.getByRole('button', { name: /AI로 설명 생성/ })).toBeInTheDocument();
+  });
 });

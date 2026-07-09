@@ -12,6 +12,7 @@ from datetime import datetime
 from backend.schemas import (
     ImpactAnalyzeRequest,
     ImpactAiGuideRequest,
+    ImpactExplainChangeRequest,
 )
 
 repo_root = Path(__file__).resolve().parents[2]
@@ -126,5 +127,28 @@ def impact_ai_guide(req: ImpactAiGuideRequest) -> Dict[str, Any]:
         # 내부 예외 문자열을 응답으로 노출하지 않는다(정보 누출) — 상세는 서버 로그로만.
         _logger.exception("ai-guide failed")
         return {"ok": False, "error": "ai-guide generation failed"}
+
+
+@router.post("/api/impact/explain-change")
+def impact_explain_change(req: ImpactExplainChangeRequest) -> Dict[str, Any]:
+    """단일 함수 변경의 자연어 설명(Gemini). LLM 미설정/실패 시 ok=False로 정직 반환
+    (프론트는 결정론 매개변수 diff로 폴백). 예외 문자열은 응답에 노출하지 않는다."""
+    try:
+        from workflow.impact_ai_guide import explain_function_change
+        explanation = explain_function_change(
+            function=req.function,
+            change_type=req.change_type,
+            before=req.before,
+            after=req.after,
+            asil=req.asil,
+            module=req.module,
+            requirements=req.requirements,
+        )
+        if explanation:
+            return {"ok": True, "explanation": explanation}
+        return {"ok": False, "error": "LLM 미설정 또는 응답 없음"}
+    except Exception:
+        _logger.exception("explain-change failed")
+        return {"ok": False, "error": "explain-change failed"}
 
 

@@ -261,3 +261,37 @@ class TestLLMEnrichmentWiring:
         )).to_dict()
         assert g["ai_enriched"] is False
         assert g["executive_summary"]  # 결정론 요약 존재
+
+
+def test_explain_function_change_no_llm_returns_none(monkeypatch):
+    """LLM 미설정이면 None(결정론 폴백) — 프론트가 매개변수 diff로 대체."""
+    from workflow import impact_ai_guide
+    from workflow import ai as _ai
+    monkeypatch.setattr(_ai, "load_oai_config", lambda _p: None)
+    out = impact_ai_guide.explain_function_change(
+        function="foo", change_type="SIGNATURE",
+        before="int foo(int a)", after="int foo(int a, int b)",
+    )
+    assert out is None
+
+
+def test_explain_function_change_with_llm(monkeypatch):
+    """LLM 설정 시 선언 원문을 프롬프트에 넣어 설명 문자열 반환."""
+    from workflow import impact_ai_guide
+    from workflow import ai as _ai
+    captured = {}
+
+    def _fake_call(cfg, messages, **k):
+        captured["messages"] = messages
+        return "매개변수 b(bool)가 추가되었습니다."
+
+    monkeypatch.setattr(_ai, "load_oai_config", lambda _p: {"provider": "gemini"})
+    monkeypatch.setattr(_ai, "agent_call_text", _fake_call)
+    out = impact_ai_guide.explain_function_change(
+        function="foo", change_type="SIGNATURE", asil="B",
+        before="int foo(int a)", after="int foo(int a, int b)",
+    )
+    assert out and "매개변수" in out
+    # 선언 원문이 프롬프트에 포함됐는지
+    joined = " ".join(m["content"] for m in captured["messages"])
+    assert "int foo(int a, int b)" in joined

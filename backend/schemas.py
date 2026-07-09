@@ -649,6 +649,20 @@ class ImpactAiGuideRequest(BaseModel):
     by_name: Dict[str, Any] = Field(default_factory=dict)
 
 
+class ImpactExplainChangeRequest(BaseModel):
+    """POST /api/impact/explain-change 입력 — 단일 함수 변경의 자연어 설명(Gemini).
+
+    선언 원문(before/after)은 UI가 change_details에서 넘긴 svn diff 원문. 값 길이는 상한을
+    둬 과대 페이로드/프롬프트 남용을 막는다(선언 라인 수준이라 4000자면 충분)."""
+    function: str = Field(default="", max_length=200)
+    change_type: str = Field(default="", max_length=40)
+    before: str = Field(default="", max_length=4000)
+    after: str = Field(default="", max_length=4000)
+    asil: str = Field(default="", max_length=20)
+    module: str = Field(default="", max_length=200)
+    requirements: List[str] = Field(default_factory=list)
+
+
 class TestGenerateRequest(BaseModel):
     source_root: str
     target_function: str

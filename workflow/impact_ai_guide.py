@@ -337,6 +337,66 @@ def generate_change_summary(ctx: ImpactGuideContext, risk: RiskAssessment) -> Op
         return None
 
 
+def explain_function_change(
+    *,
+    function: str,
+    change_type: str = "",
+    before: str = "",
+    after: str = "",
+    asil: str = "",
+    module: str = "",
+    requirements: Optional[List[str]] = None,
+) -> Optional[str]:
+    """단일 함수 변경에 대한 자연어 설명(무엇이/영향/리뷰 초점)을 LLM으로 생성.
+
+    선언 원문(before/after)이 있으면 매개변수·반환 변화를 구체적으로 설명한다.
+    반환: 설명 문자열, 또는 LLM 미설정/실패 시 None(caller가 결정론 폴백/미표시).
+    """
+    try:
+        from workflow.ai import agent_call_text, load_oai_config
+
+        cfg = load_oai_config(None)
+        if not cfg:
+            return None  # LLM 미설정 — 정상 폴백(에러 아님)
+
+        reqs = ", ".join(str(r) for r in (requirements or []) if str(r).strip()) or "-"
+        lines = [
+            f"함수: {function}",
+            f"변경 유형: {change_type or '미상'}",
+            f"ASIL 등급: {asil or '미상'}",
+            f"모듈: {module or '-'}",
+            f"연관 요구사항: {reqs}",
+        ]
+        if before:
+            lines.append(f"변경 전 선언:\n{before}")
+        if after:
+            lines.append(f"변경 후 선언:\n{after}")
+        context = "\n".join(lines)
+        system = (
+            "당신은 ISO 26262 자동차 기능안전 소프트웨어의 변경 영향 분석가입니다. "
+            "C 함수 변경을 검토하는 엔지니어에게 간결하고 정확한 한국어 설명을 제공합니다. "
+            "선언 원문이 주어지면 매개변수/반환의 실제 변화를 근거로 설명하고, 원문이 없으면 추정임을 명시하세요."
+        )
+        user_msg = (
+            f"{context}\n\n"
+            "위 함수 변경을 3~5문장으로 설명하세요:\n"
+            "1) 무엇이 바뀌었는가 — 매개변수 추가/삭제/타입변경, 반환타입, 동작 관점(원문 근거).\n"
+            "2) 호출부·시험(SUTS/SITS)·설계문서(UDS/SDS)에 주는 영향.\n"
+            "3) 리뷰 시 특히 확인할 점(ASIL 등급 고려). 확실치 않으면 '추정'이라 표기."
+        )
+        messages = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user_msg},
+        ]
+        output = agent_call_text(cfg, messages, role="analysis", stage="impact_explain")
+        if output and isinstance(output, str) and output.strip():
+            return output.strip()
+        return None
+    except Exception:
+        logger.warning("LLM 함수 변경 설명 실패 — 폴백", exc_info=True)
+        return None
+
+
 def _parse_test_suggestions_json(text: str) -> List[Dict[str, str]]:
     """LLM 응답 문자열에서 테스트 제안 JSON 배열을 견고하게 파싱.
 

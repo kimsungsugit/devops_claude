@@ -48,6 +48,71 @@ function downloadTextFile(filename, content, mime = 'text/markdown;charset=utf-8
   } catch (_) { /* 다운로드 실패는 무해하게 무시 */ }
 }
 
+// ── 함수 시그니처 매개변수 파싱/diff (change_details before/after 원문 기반, 결정론·정확) ──
+// C 함수 선언에서 반환 타입 추출(첫 '(' 앞, 함수명 토큰 제외).
+function parseReturnType(sig) {
+  if (!sig) return '';
+  const head = String(sig).split('(')[0].trim();
+  const toks = head.split(/\s+/).filter(Boolean);
+  return toks.length > 1 ? toks.slice(0, -1).join(' ') : head;
+}
+// 매개변수 목록 추출 — [{raw, type, name}]. void/빈 → [], 괄호 없음 → null.
+function parseSignatureParams(sig) {
+  if (!sig) return null;
+  const m = String(sig).match(/\(([\s\S]*)\)/);
+  if (!m) return null;
+  const inner = m[1].trim();
+  if (!inner || inner.toLowerCase() === 'void') return [];
+  return inner.split(',').map(s => s.trim()).filter(Boolean).map(raw => {
+    const toks = raw.replace(/\*/g, ' * ').split(/\s+/).filter(Boolean);
+    const last = toks[toks.length - 1] || '';
+    const hasName = toks.length > 1 && /^[A-Za-z_]\w*$/.test(last);
+    const name = hasName ? last : '';
+    const type = hasName ? toks.slice(0, -1).join(' ').replace(/\s+\*/g, '*') : raw;
+    return { raw, type, name };
+  });
+}
+// before/after 시그니처 매개변수 diff — 이름이 모두 있으면 이름 기준, 아니면 위치 기준.
+function diffSignatureParams(before, after) {
+  const bp = parseSignatureParams(before);
+  const ap = parseSignatureParams(after);
+  if (bp === null && ap === null) return null;
+  const bb = bp || [], aa = ap || [];
+  const rows = [];
+  const named = (bb.length + aa.length) > 0 && bb.every(p => p.name) && aa.every(p => p.name);
+  if (named) {
+    const aMap = new Map(aa.map(p => [p.name, p]));
+    const bMap = new Map(bb.map(p => [p.name, p]));
+    for (const p of bb) {
+      const a = aMap.get(p.name);
+      if (!a) rows.push({ status: 'removed', before: p.raw, after: '' });
+      else if (a.raw !== p.raw) rows.push({ status: 'changed', before: p.raw, after: a.raw });
+    }
+    for (const p of aa) if (!bMap.has(p.name)) rows.push({ status: 'added', before: '', after: p.raw });
+  } else {
+    const n = Math.max(bb.length, aa.length);
+    for (let i = 0; i < n; i++) {
+      const b = bb[i], a = aa[i];
+      if (b && a) { if (b.raw !== a.raw) rows.push({ status: 'changed', before: b.raw, after: a.raw }); }
+      else if (a) rows.push({ status: 'added', before: '', after: a.raw });
+      else if (b) rows.push({ status: 'removed', before: b.raw, after: '' });
+    }
+  }
+  return {
+    rows,
+    returnBefore: parseReturnType(before),
+    returnAfter: parseReturnType(after),
+    returnChanged: !!(before && after) && parseReturnType(before) !== parseReturnType(after),
+    beforeCount: bb.length,
+    afterCount: aa.length,
+  };
+}
+const PARAM_STATUS = {
+  added: { tone: 'success', label: '추가', mark: '＋' },
+  removed: { tone: 'danger', label: '삭제', mark: '－' },
+  changed: { tone: 'warning', label: '변경', mark: '~' },
+};
+
 // 함수별 '변경 상세' 셀 — 시그니처는 이전(−)/이후(＋) 선언 원문, 신규/삭제는 해당 원문, 본문 등은 설명.
 function renderChangeDetailCell(kind, detail) {
   const mono = { fontFamily: 'var(--font-mono, monospace)', fontSize: 11, whiteSpace: 'pre-wrap', wordBreak: 'break-all' };
@@ -128,6 +193,8 @@ export default function ImpactGuideSection({ analysisResult }) {
   const [aiGuide, setAiGuide] = useState(null);
   const [loading, setLoading] = useState(false);
   const [selectedFn, setSelectedFn] = useState(null);
+  // 선택 함수의 Gemini 변경 설명(함수별). fn이 바뀌면 폐기.
+  const [explain, setExplain] = useState({ fn: null, text: '', loading: false, error: '' });
   const [searchTerm, setSearchTerm] = useState('');
   const [hopFilter, setHopFilter] = useState('all');
   const [docFilter, setDocFilter] = useState('all');
@@ -455,6 +522,31 @@ export default function ImpactGuideSection({ analysisResult }) {
     downloadTextFile(`impact_analysis_${stamp.replace(/[: -]/g, '').slice(0, 14)}.md`, L.join('\n'));
     toast('success', '영향도 분석 결과를 내보냈습니다.');
   }, [activeFnEntries, activeChangedFiles, changeSummary, activeImpactGroups, asilInfo, coverageGap, regressionSet, guide, aiGuide, demoMode, toast]);
+
+  // 선택 함수의 변경을 Gemini로 설명(선언 원문 before/after 포함). LLM 미설정이면 ok=false로 폴백.
+  const fetchExplanation = useCallback(async (d) => {
+    if (!d) return;
+    const cd = changeDetails[String(d.function).toLowerCase()] || {};
+    setExplain({ fn: d.function, text: '', loading: true, error: '' });
+    try {
+      const res = await post('/api/impact/explain-change', {
+        function: d.function,
+        change_type: d.changeType || '',
+        before: cd.before || '',
+        after: cd.after || '',
+        asil: d.asil || '',
+        module: functionMeta[String(d.function).toLowerCase()]?.module || '',
+        requirements: (d.requirements || []).slice(0, 12),
+      });
+      if (res?.ok && res.explanation) {
+        setExplain({ fn: d.function, text: res.explanation, loading: false, error: '' });
+      } else {
+        setExplain({ fn: d.function, text: '', loading: false, error: res?.error || 'AI 설명을 가져오지 못했습니다(LLM 미설정일 수 있음).' });
+      }
+    } catch (e) {
+      setExplain({ fn: d.function, text: '', loading: false, error: e?.message || 'AI 설명 요청 실패' });
+    }
+  }, [changeDetails, functionMeta]);
 
   if (!impact && !demoMode) {
     return (
@@ -962,26 +1054,102 @@ export default function ImpactGuideSection({ analysisResult }) {
             </tbody>
           </table>
 
-          {/* Detail panel for selected function */}
+          {/* Detail modal for selected function — 화면 중앙 오버레이(스크롤 위치 무관 즉시 노출) */}
           {selectedFn && (() => {
             const d = guide.details.find(x => x.function === selectedFn);
             if (!d) return null;
             const ct = (d.changeType || '').toUpperCase();
+            const cd = changeDetails[String(d.function).toLowerCase()] || {};
+            const hasRaw = !!(cd.before || cd.after);
+            const pdiff = hasRaw ? diffSignatureParams(cd.before, cd.after) : null;
+            const exp = explain.fn === d.function ? explain : { text: '', loading: false, error: '' };
+            const close = () => setSelectedFn(null);
             return (
-              <div style={{ marginTop: 12, padding: 14, border: '2px solid var(--accent)', borderRadius: 8, background: 'var(--bg)' }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+              <div onClick={close}
+                style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.55)', zIndex: 1000, display: 'flex', alignItems: 'flex-start', justifyContent: 'center', padding: '5vh 16px', overflow: 'auto' }}>
+                <div onClick={e => e.stopPropagation()}
+                  style={{ background: 'var(--panel)', border: '2px solid var(--accent)', borderRadius: 10, maxWidth: 900, width: '100%', maxHeight: '90vh', overflow: 'auto', padding: 18, boxShadow: '0 10px 40px rgba(0,0,0,0.45)' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 12, gap: 8 }}>
                   <div>
-                    <span style={{ fontWeight: 700, fontSize: 15, fontFamily: 'monospace' }}>{d.function}</span>
-                    {d.changed
-                      ? <span className="pill pill-warning" style={{ fontSize: 10, marginLeft: 8 }}>{CHANGE_TYPE_KO[d.changeType] || d.changeType}</span>
-                      : <span className="pill pill-neutral" style={{ fontSize: 10, marginLeft: 8 }} title="직접 변경 아님 — 간접 영향 함수">영향</span>}
-                    <span className={`pill ${d.hop === 'direct' ? 'pill-danger' : 'pill-info'}`} style={{ fontSize: 10, marginLeft: 4 }}>{d.hop}</span>
+                    <span style={{ fontWeight: 700, fontSize: 16, fontFamily: 'monospace', wordBreak: 'break-all' }}>{d.function}</span>
+                    <div style={{ marginTop: 4, display: 'flex', gap: 4, flexWrap: 'wrap', alignItems: 'center' }}>
+                      {d.changed
+                        ? <span className="pill pill-warning" style={{ fontSize: 10 }}>{CHANGE_TYPE_KO[d.changeType] || d.changeType}</span>
+                        : <span className="pill pill-neutral" style={{ fontSize: 10 }} title="직접 변경 아님 — 간접 영향 함수">영향</span>}
+                      <span className={`pill ${d.hop === 'direct' ? 'pill-danger' : 'pill-info'}`} style={{ fontSize: 10 }}>{d.hop}</span>
+                      {d.asil && /^[A-D]$/.test(d.asil) && <span className={`pill ${/[CD]/.test(d.asil) ? 'pill-danger' : 'pill-warning'}`} style={{ fontSize: 10 }}>ASIL {d.asil}</span>}
+                      {d.requirements.length > 0 && <span className="text-muted" style={{ fontSize: 10 }}>요구사항 {d.requirements.length}개</span>}
+                    </div>
                   </div>
-                  {d.requirements.length > 0 && <span className="text-sm text-muted">영향 요구사항 {d.requirements.length}개</span>}
+                  <button className="btn-sm" onClick={close} style={{ flexShrink: 0 }}>✕ 닫기</button>
+                </div>
+
+                {/* 🔧 시그니처·매개변수 변화 — svn diff 원문(change_details) 기반 결정론 diff */}
+                {hasRaw && (
+                  <div style={{ marginBottom: 12, border: '1px solid var(--border)', borderRadius: 8, overflow: 'hidden' }}>
+                    <div style={{ padding: '6px 10px', background: 'var(--bg)', fontWeight: 700, fontSize: 12, borderBottom: '1px solid var(--border)' }}>
+                      🔧 시그니처·매개변수 변화 <span className="text-muted" style={{ fontWeight: 400, fontSize: 10 }}>(변경 원문 기반)</span>
+                    </div>
+                    <div style={{ padding: 10 }}>
+                      {pdiff?.returnChanged && (
+                        <div style={{ fontSize: 11, marginBottom: 8 }}>
+                          <strong>반환 타입:</strong>{' '}
+                          <span style={{ color: 'var(--color-danger)', fontFamily: 'monospace' }}>{pdiff.returnBefore || '(없음)'}</span>{' → '}
+                          <span style={{ color: 'var(--color-success)', fontFamily: 'monospace' }}>{pdiff.returnAfter || '(없음)'}</span>
+                        </div>
+                      )}
+                      {pdiff && pdiff.rows.length > 0 ? (
+                        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11, marginBottom: 8 }}>
+                          <thead><tr style={{ borderBottom: '1px solid var(--border)' }}>
+                            <th style={{ textAlign: 'left', padding: '3px 6px', width: 64 }}>구분</th>
+                            <th style={{ textAlign: 'left', padding: '3px 6px' }}>이전</th>
+                            <th style={{ textAlign: 'left', padding: '3px 6px' }}>이후</th>
+                          </tr></thead>
+                          <tbody>
+                            {pdiff.rows.map((r, i) => {
+                              const st = PARAM_STATUS[r.status] || { tone: 'neutral', label: r.status, mark: '' };
+                              return (
+                                <tr key={i} style={{ borderBottom: '1px solid var(--border-subtle, var(--border))' }}>
+                                  <td style={{ padding: '3px 6px' }}><span className={`pill pill-${st.tone}`} style={{ fontSize: 8 }}>{st.mark} {st.label}</span></td>
+                                  <td style={{ padding: '3px 6px', fontFamily: 'monospace', color: r.before ? 'var(--color-danger)' : 'var(--text-muted)' }}>{r.before || '—'}</td>
+                                  <td style={{ padding: '3px 6px', fontFamily: 'monospace', color: r.after ? 'var(--color-success)' : 'var(--text-muted)' }}>{r.after || '—'}</td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      ) : (
+                        <div className="text-muted" style={{ fontSize: 11, marginBottom: 8 }}>
+                          {pdiff && pdiff.rows.length === 0 ? '매개변수 목록 변화 없음 (본문/기타 변경).' : '매개변수 구조 파싱 불가 — 아래 원문 참조.'}
+                        </div>
+                      )}
+                      <div style={{ fontFamily: 'var(--font-mono, monospace)', fontSize: 11, whiteSpace: 'pre-wrap', wordBreak: 'break-all', background: 'var(--bg)', borderRadius: 4, padding: '6px 8px' }}>
+                        {cd.before && <div style={{ color: 'var(--color-danger)' }}>− {cd.before}</div>}
+                        {cd.after && <div style={{ color: 'var(--color-success)' }}>＋ {cd.after}</div>}
+                      </div>
+                    </div>
+                  </div>
+                )}
+                {!hasRaw && d.changed && ['SIGNATURE', 'NEW', 'DELETE'].includes(ct) && (
+                  <div className="text-muted" style={{ fontSize: 11, marginBottom: 12, padding: '6px 10px', background: 'var(--bg)', borderRadius: 6 }}>
+                    선언 원문 미확보(svn diff 접근 불가 등) — 매개변수 단위 변화는 표시할 수 없습니다. AI 설명으로 보완하세요.
+                  </div>
+                )}
+
+                {/* 🤖 AI 변경 설명 (Gemini) — 선언 원문 근거 자연어 설명 */}
+                <div style={{ marginBottom: 12, border: '1px solid var(--border)', borderRadius: 8, overflow: 'hidden' }}>
+                  <div style={{ padding: '6px 10px', background: 'var(--bg)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, borderBottom: (exp.text || exp.error) ? '1px solid var(--border)' : 'none' }}>
+                    <span style={{ fontWeight: 700, fontSize: 12 }}>🤖 AI 변경 설명 <span className="text-muted" style={{ fontWeight: 400, fontSize: 10 }}>(Gemini)</span></span>
+                    <button className="btn-sm" onClick={() => fetchExplanation(d)} disabled={exp.loading} style={{ flexShrink: 0 }}>
+                      {exp.loading ? '분석 중...' : (exp.text ? '다시 생성' : 'AI로 설명 생성')}
+                    </button>
+                  </div>
+                  {exp.text && <div style={{ padding: 10, fontSize: 12, whiteSpace: 'pre-wrap', lineHeight: 1.6 }}>{exp.text}</div>}
+                  {exp.error && <div style={{ padding: 10, fontSize: 11, color: 'var(--text-muted)' }}>⚠ {exp.error}</div>}
                 </div>
 
                 {/* Change description */}
-                <div style={{ padding: '8px 10px', background: 'var(--panel)', borderRadius: 6, marginBottom: 12, fontSize: 12, borderLeft: '3px solid var(--color-warning)' }}>
+                <div style={{ padding: '8px 10px', background: 'var(--bg)', borderRadius: 6, marginBottom: 12, fontSize: 12, borderLeft: '3px solid var(--color-warning)' }}>
                   {!d.changed && `이 함수는 직접 변경되지 않았으나, 변경 함수와의 호출 관계(${d.hop})로 영향받는 간접 함수입니다. 인터페이스 계약이 유지되는지, 회귀 시험(SUTS/SITS) 재실행이 필요한지 확인하세요.`}
                   {ct === 'BODY' && '함수 본문(로직)이 변경되었습니다. 동작 변경으로 인해 관련 문서의 Description, Test Action, Expected Result를 모두 재검토해야 합니다.'}
                   {ct === 'SIGNATURE' && '함수 시그니처(파라미터/리턴타입)가 변경되었습니다. 호출하는 모든 함수와 Input/Output Parameters, Pre-condition을 업데이트해야 합니다.'}
@@ -1064,6 +1232,7 @@ export default function ImpactGuideSection({ analysisResult }) {
                       {d.hop !== 'direct' && <li>Component Interaction — 간접 호출 관계 확인</li>}
                     </ul>
                   </div>
+                </div>
                 </div>
               </div>
             );
