@@ -365,3 +365,15 @@ def test_missing_swit_empty_no_render():
         isinstance(ws.cell(r, 1).value, str) and "미생성 SwIT" in ws.cell(r, 1).value
         for r in range(1, ws.max_row + 1)
     )
+
+
+def test_missing_swit_tolerates_extra_tuple_fields():
+    """missing_swit 항목이 3-tuple이어도 앞 2개(함수명·SwIT_ID)만 안전 언패킹(ValueError 방어, I2)."""
+    missing = [("fnA", "SwIT_1", "extra_field"), ("fnB", "SwIT_2")]
+    ws = _open(build_call_tree_xlsx(
+        _uni(), {}, swit_map={"s_Root": "SwIT_R"}, missing_swit=missing,
+    ))["SW Integration Strategy"]
+    assert _find(ws, "SwIT_1", col=2, rmax=ws.max_row)
+    assert _find(ws, "fnA", col=3, rmax=ws.max_row)
+    assert _find(ws, "SwIT_2", col=2, rmax=ws.max_row)
+    assert _find(ws, "fnB", col=3, rmax=ws.max_row)

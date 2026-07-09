@@ -500,7 +500,8 @@ def _render_sheet(
             mh = ws.cell(state["row"], col, lbl)
             mh.font = S["header"]
             mh.fill = S["header_fill"]
-        for fn, sid in ms:
+        for m in ms:
+            fn, sid = m[0], m[1]   # len>=2 보장(위 필터), 여분 필드는 무시(ValueError 방어)
             state["row"] += 1
             bc = ws.cell(state["row"], 2, _cs(sid))
             bc.font = S["root"]

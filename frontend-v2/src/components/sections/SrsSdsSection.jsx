@@ -3311,6 +3311,9 @@ function CallTreeView({ job, cacheRoot, buildSelector, sourceRoot, seedFns, toas
   // 요청 시퀀스 토큰 — 로딩 중 재진입(입력창 Enter/버튼 재클릭) 시 늦게 도착한 이전 응답이 최신 결과를
   // 덮어쓰지 않도록(stale setData 방지). load 진입마다 ++, resolve 시 자기 토큰이 최신일 때만 반영.
   const loadSeq = useRef(0);
+  // 라벨 토글(swit 매핑 조회)의 재진입/data변경/언마운트 stale 방지 토큰 — load의 loadSeq와 분리.
+  // data 변경 시 reset useEffect가 이 값을 증가시켜 in-flight toggleLabelMode를 무효화한다.
+  const switSeq = useRef(0);
   // StrictMode(dev) 더블인보크 대비 — setup에서 true 복원(다른 섹션 동일 패턴). cleanup-only면 마운트 후 false 고착→자동로드 무음 실패.
   useEffect(() => { mountedRef.current = true; return () => { mountedRef.current = false; }; }, []);
 
@@ -3486,15 +3489,32 @@ function CallTreeView({ job, cacheRoot, buildSelector, sourceRoot, seedFns, toas
         const matched = res.headers.get('x-swit-matched') || '';
         const made = parseInt(matched.split('/')[0] || '0', 10) || 0;
         const total = parseInt(matched.split('/')[1] || '0', 10) || 0;
-        const missing = parseInt(res.headers.get('x-swit-missing') || '', 10) || Math.max(0, total - made);
-        const zero = made === 0;
-        const partial = missing > 0;
-        toast(zero ? 'warning' : (partial ? 'info' : 'success'),
+        // W2: X-Swit-Missing은 regen 성공(소스에 진입함수 정의 없어 확정 누락) 시에만 온다. 헤더에만
+        // 근거하고 부재 시 미생성 수를 날조하지 않는다 — 폴백(캐시 없어 regen 미수행) 경로에서 없는
+        // '시트 하단 목록'을 안내하고 틀린 사유를 대던 오도(감사 정직성 훼손)를 제거.
+        const missing = parseInt(res.headers.get('x-swit-missing') || '0', 10) || 0;
+        let level = 'success';
+        let tail = ' (전량 적용)';
+        if (!matched) {
+          // I5: swit_map 자체를 못 찾음(SITS 경로/SCM 미해결, 헤더 부재) → 함수명 폴백임을 명시.
+          level = 'warning';
+          tail = ' — SITS 매핑을 찾지 못해 함수명으로 표시됨(설정>입력자료 SITS 경로/기준 SCM 확인)';
+        } else if (made === 0) {
+          level = 'warning';
+          tail = ' (매칭 0 · 함수명으로 표시됨. 진입 함수 또는 설정>입력자료 SITS 경로 확인)';
+        } else if (missing > 0) {
+          // regen 성공 + 소스 미정의 누락: 시트 하단에 실제 미생성 목록이 있음.
+          level = 'info';
+          tail = ` · ${missing}개 미생성(스캔 소스에 진입함수 정의 없음 · 시트 하단 목록 확인)`;
+        } else if (total > made) {
+          // W2: regen 미수행(캐시 빌드 부재) 폴백 — 화면 트리 기준이라 나머지는 '소스 미정의'가 아님.
+          level = 'info';
+          tail = ` · 나머지 ${total - made}개는 이 화면 트리에 루트로 없음(진입 함수 기준 재생성 필요 — 캐시 빌드 확인)`;
+        }
+        toast(level,
           matched
-            ? `SwIT ID 엑셀 내보냄 — SITS ${total || '?'}개 중 ${made}개 생성`
-              + (zero ? ' (매칭 0 · 함수명으로 표시됨. 진입 함수 또는 설정>입력자료 SITS 경로 확인)'
-                 : partial ? ` · ${missing}개 미생성(스캔 소스에 진입함수 정의 없음 · 시트 하단 목록 확인)` : ' (전량 적용)')
-            : 'SwIT ID 엑셀을 내보냈습니다.');
+            ? `SwIT ID 엑셀 내보냄 — SITS ${total || '?'}개 중 ${made}개 생성${tail}`
+            : `SwIT ID 엑셀 내보냄${tail}`);
       } else {
         toast('success', '엑셀 파일을 내보냈습니다.');
       }
@@ -3521,9 +3541,13 @@ function CallTreeView({ job, cacheRoot, buildSelector, sourceRoot, seedFns, toas
   const toggleLabelMode = useCallback(async () => {
     if (labelMode === 'swit') { setLabelMode('func'); return; }
     if (switMap && Object.keys(switMap).length) { setLabelMode('swit'); return; }
+    const myseq = ++switSeq.current;   // W1: 이 조회 인스턴스 토큰
     setSwitBusy(true);
     try {
       const m = await fetchSwitMap();
+      // W1: await 중 언마운트/재진입/data변경(reset useEffect가 switSeq 증가) 시 stale 반영 차단 —
+      // 옛 트리 매핑을 새 트리에 적용하거나 방금 리셋한 labelMode/switMap을 되살리는 것을 막는다.
+      if (!mountedRef.current || myseq !== switSeq.current) return;
       const cnt = m ? Object.keys(m).length : 0;
       setSwitMap(m || {});
       if (!cnt) {
@@ -3536,12 +3560,14 @@ function CallTreeView({ job, cacheRoot, buildSelector, sourceRoot, seedFns, toas
       toast(matched < roots.length ? 'info' : 'success',
         `SwIT ID 표시 — 화면 루트 ${roots.length}개 중 ${matched}개 매칭 (참조 SITS ${cnt}개)`);
     } catch (e) {
-      toast('error', `SwIT 매핑 로드 실패: ${e.message}`);
-    } finally { setSwitBusy(false); }
+      if (mountedRef.current && myseq === switSeq.current) toast('error', `SwIT 매핑 로드 실패: ${e.message}`);
+    } finally {
+      if (mountedRef.current && myseq === switSeq.current) setSwitBusy(false);
+    }
   }, [labelMode, switMap, fetchSwitMap, data, toast]);
 
   // 새 콜트리 로드 시 라벨 모드/매핑 초기화(이전 트리 매핑을 새 트리에 잘못 적용 방지).
-  useEffect(() => { setLabelMode('func'); setSwitMap(null); }, [data]);
+  useEffect(() => { switSeq.current += 1; setLabelMode('func'); setSwitMap(null); }, [data]);
 
   const trees = Array.isArray(data?.trees) ? data.trees : [];
   const st = data?.stats || {};
