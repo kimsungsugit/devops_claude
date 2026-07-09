@@ -259,4 +259,33 @@ describe('ImpactGuideSection', () => {
     expect(screen.getByText(/SITS 영향 체인/)).toBeInTheDocument();
     expect(screen.getByText('TC_001')).toBeInTheDocument();
   });
+
+  // STS-IMPACT-012: 간접 영향(1/2hop) 함수가 가이드 표에 포함된다(죽은 hop 필터 복구, ISO 26262 under-report fix)
+  it('가이드: 간접 영향 함수(1-hop)가 함수별 영향 가이드 표에 포함된다', async () => {
+    // Arrange: 직접 변경 1개 + 간접 1-hop 1개
+    const { post } = await import('../api.js');
+    post.mockResolvedValue({ ok: false }); // ai-guide는 스킵(linkedDocs 없어 매핑 fetch도 스킵)
+    const user = userEvent.setup();
+    const analysisResult = {
+      impactData: {
+        trigger: { changed_files: ['Ap.c'] },
+        changed_function_types: { g_Changed: 'BODY' },
+        actions: {},
+        impact: { direct: ['g_Changed'], indirect_1hop: ['s_Indirect'], indirect_2hop: [] },
+        function_meta: { g_Changed: { asil: 'D' }, s_Indirect: { asil: 'C' } },
+      },
+    };
+    render(<ImpactGuideSection analysisResult={analysisResult} />);
+
+    // Act: 상세 가이드 생성
+    await user.click(screen.getByText(/상세 가이드 생성/));
+
+    // Assert: 가이드 표에 직접(1)+간접(1)=2개, 간접 함수 s_Indirect가 표에 노출된다.
+    // (과거엔 변경 함수만 순회 → 간접 함수 누락 + 1-hop 필터 영구 0건)
+    await waitFor(() => {
+      expect(screen.getByText(/함수별 영향 가이드 \(2개\)/)).toBeInTheDocument();
+    });
+    // s_Indirect는 '변경 상세'엔 없고 '영향 가이드' 표에만 존재 → 유일 매칭
+    expect(screen.getByText('s_Indirect')).toBeInTheDocument();
+  });
 });

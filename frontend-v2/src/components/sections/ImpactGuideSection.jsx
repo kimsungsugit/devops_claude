@@ -29,6 +29,8 @@ const DEMO_SUTS_TCS = [
   { unit: 's_MotorSpdCtrl_AutoClose', testcase: 'SUTS_AutoClose_01' },
   { unit: 's_MotorSpdCtrl_AutoOpen', testcase: 'SUTS_AutoOpen_01' },
   { unit: 's_AntipinchDetect_Close', testcase: 'SUTS_Antipinch_01' },
+  // 간접 전용 함수도 기존 단위 TC가 있어 회귀 재실행 대상이 됨을 데모로 예시.
+  { unit: 's_NotifyObserver', testcase: 'SUTS_NotifyObserver_01' },
 ];
 
 // 브라우저에서 텍스트 파일 다운로드(내보내기). Blob+anchor, CSP 안전(외부 요청 없음).
@@ -168,7 +170,9 @@ export default function ImpactGuideSection({ analysisResult }) {
   };
   const demoImpact = {
     direct: ['g_DrvIn_Main', 'g_DrvIn_MotorSpeed', 's_MotorSpdCtrl_AutoClose', 's_MotorSpdCtrl_AutoOpen', 's_AntipinchDetect_Close'],
-    indirect_1hop: ['g_Ap_BuzzerCtrl_Func', 's_DoorStateCtrl'],
+    // s_NotifyObserver는 demoFunctions(변경 목록)에 없음 → 간접 전용(changed=false) 행으로 표시되어
+    // 데모만으로 '영향' 배지·1-hop 필터 실동작을 확인할 수 있다(간접 함수 노출 회귀 방지).
+    indirect_1hop: ['g_Ap_BuzzerCtrl_Func', 's_DoorStateCtrl', 's_NotifyObserver'],
     indirect_2hop: ['g_SystemStatusCheck'],
   };
   const activeFnEntries = demoMode ? Object.entries(demoFunctions) : changedFnEntries;
@@ -282,7 +286,21 @@ export default function ImpactGuideSection({ analysisResult }) {
       const allReqs = new Set();
       const allStsTcs = new Set();
 
-      for (const [fn, changeType] of activeFnEntries) {
+      // 가이드 행 = 변경(직접) 함수 ∪ 간접 영향 함수(1/2hop). 과거엔 changed 함수만 순회해서
+      // 모든 행의 hop이 'direct'로 고정 → 1-hop/2-hop 필터가 영구히 죽고, 간접 영향 ASIL 함수가
+      // 가이드에서 통째로 누락(ISO 26262 under-report)됐다. 간접 함수는 변경종류 없음(changed=false)으로
+      // 구분 표기하되, backend function_meta의 ASIL·커버리지·요구/시험 매핑은 동일하게 조인한다.
+      const changedMap = new Map(activeFnEntries.map(([fn, k]) => [fn, k]));
+      const guideFns = [...new Set([
+        ...changedMap.keys(),
+        ...(activeImpactGroups.direct || []),
+        ...(activeImpactGroups.indirect_1hop || []),
+        ...(activeImpactGroups.indirect_2hop || []),
+      ].filter(Boolean))];
+
+      for (const fn of guideFns) {
+        const changeType = changedMap.get(fn) || '';
+        const isChanged = changedMap.has(fn);
         const reqs = funcToReqs[fn] ? [...funcToReqs[fn]] : [];
         reqs.forEach(r => allReqs.add(r));
 
@@ -294,11 +312,13 @@ export default function ImpactGuideSection({ analysisResult }) {
         const sutsTcList = fnToSutsTCs[fn] ? [...fnToSutsTCs[fn]] : [];
         const hop = (activeImpactGroups.direct || []).includes(fn) ? 'direct'
           : (activeImpactGroups.indirect_1hop || []).includes(fn) ? '1-hop'
-          : (activeImpactGroups.indirect_2hop || []).includes(fn) ? '2-hop' : 'direct';
+          : (activeImpactGroups.indirect_2hop || []).includes(fn) ? '2-hop'
+          : (isChanged ? 'direct' : '1-hop');
 
         details.push({
           function: fn,
           changeType,
+          changed: isChanged,
           asil: functionMeta[fn]?.asil || '',
           coverage: coverageByFn[fn] || null,
           hop,
@@ -311,6 +331,9 @@ export default function ImpactGuideSection({ analysisResult }) {
           sdsAction: actions.sds,
         });
       }
+      // 직접(변경) → 1-hop → 2-hop 순으로 정렬(변경 함수 우선 노출), 동일 hop은 함수명순.
+      const HOP_RANK = { direct: 0, '1-hop': 1, '2-hop': 2 };
+      details.sort((a, b) => (HOP_RANK[a.hop] - HOP_RANK[b.hop]) || a.function.localeCompare(b.function));
 
       setGuide({
         details,
@@ -409,11 +432,12 @@ export default function ImpactGuideSection({ analysisResult }) {
     L.push('', '## 변경 함수');
     for (const [fn, kind] of activeFnEntries) L.push(`- \`${fn}\` : ${CHANGE_TYPE_KO[kind] || kind}`);
     if (guide?.details?.length) {
-      L.push('', '## 함수별 변경 가이드');
+      L.push('', '## 함수별 영향 가이드 (직접 변경 + 간접 영향)');
       L.push('| 함수 | 변경 | ASIL | 영향 | 요구사항 | STS TC | SUTS TC |');
       L.push('|------|------|------|------|----------|--------|---------|');
       for (const d of guide.details) {
-        L.push(`| \`${d.function}\` | ${CHANGE_TYPE_KO[d.changeType] || d.changeType} | ${d.asil || '미상'} | ${d.hop} | ${(d.requirements || []).join(' ') || '-'} | ${(d.stsTestCases || []).length} | ${(d.sutsTestCases || []).length} |`);
+        const chLabel = d.changed ? (CHANGE_TYPE_KO[d.changeType] || d.changeType) : '영향(간접)';
+        L.push(`| \`${d.function}\` | ${chLabel} | ${d.asil || '미상'} | ${d.hop} | ${(d.requirements || []).join(' ') || '-'} | ${(d.stsTestCases || []).length} | ${(d.sutsTestCases || []).length} |`);
       }
     }
     if (aiGuide?.risk) {
@@ -553,11 +577,17 @@ export default function ImpactGuideSection({ analysisResult }) {
           {Object.keys(regressionSet.sits || {}).length > 0 && (
             <div style={{ marginTop: 8 }}>
               <div className="text-sm" style={{ fontWeight: 600, marginBottom: 4 }}>SITS 영향 call-chain (함수별)</div>
-              <div style={{ maxHeight: 100, overflow: 'auto' }}>
+              <div style={{ maxHeight: 140, overflow: 'auto' }}>
                 {Object.entries(regressionSet.sits).slice(0, 10).map(([fn, chains]) => (
                   <div key={fn} style={{ fontSize: 10, padding: '2px 0' }}>
                     <span style={{ fontFamily: 'monospace', fontWeight: 600 }}>{fn}</span>
                     <span className="text-muted"> — {(chains || []).length} 체인</span>
+                    <div style={{ marginLeft: 10 }}>
+                      {(chains || []).slice(0, 4).map((c, i) => (
+                        <div key={i} title={c} style={{ fontSize: 9, color: 'var(--text-muted)', fontFamily: 'monospace', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>↳ {c}</div>
+                      ))}
+                      {(chains || []).length > 4 && <div className="text-muted" style={{ fontSize: 9 }}>+{(chains || []).length - 4}개 더</div>}
+                    </div>
                   </div>
                 ))}
               </div>
@@ -625,12 +655,15 @@ export default function ImpactGuideSection({ analysisResult }) {
           // Build doc stats from guide details or actions
           const docStats = {};
           if (guide) {
+            // 가이드 표(직접 변경 + 간접 영향)와 동일 스코프로 집계 — 간접 함수가 특정 문서에
+            // 매핑되면 그 문서도 '검토 필요'로 표시한다. 요약 카드의 impactedReqs/impactedStsTCs가
+            // 이미 전체(간접 포함) 스코프라, 칩 count도 동일 스코프여야 "영향 없음 + N TC" 모순이 없다.
             for (const d of guide.details) {
               if (d.requirements.length > 0) { docStats.uds = (docStats.uds || 0) + 1; }
               if (d.stsTestCases.length > 0) { docStats.sts = (docStats.sts || 0) + 1; }
               if (d.sutsTestCases.length > 0) { docStats.suts = (docStats.suts || 0) + 1; }
             }
-            // SDS/SITS always affected if any function changed
+            // SDS/SITS: 영향 함수(직접+간접)가 하나라도 있으면 검토 대상.
             if (guide.details.length > 0) {
               docStats.sds = guide.details.length;
               docStats.sits = guide.details.filter(d => d.stsTestCases.length > 0).length || 0;
@@ -818,7 +851,8 @@ export default function ImpactGuideSection({ analysisResult }) {
       {guide && (
         <div className="panel">
           <div className="panel-header">
-            <span className="panel-title">함수별 변경 가이드 ({guide.details.length}개)</span>
+            <span className="panel-title">함수별 영향 가이드 ({guide.details.length}개)</span>
+            <span className="text-muted text-sm" title="변경(직접) 함수와 그 호출 관계로 영향받는 간접(1/2-hop) 함수를 함께 표시합니다. '영향' 필터로 hop을 좁힐 수 있습니다.">직접 변경 + 간접 영향(1/2-hop) 포함</span>
           </div>
 
           {/* 추출 실패 표면화 — 매핑이 실제보다 적게 보일 수 있음을 지속 노출(토스트는 사라짐) */}
@@ -869,7 +903,11 @@ export default function ImpactGuideSection({ analysisResult }) {
               {filteredGuide.map((d, i) => (
                 <tr key={i} style={{ background: d.hop === 'direct' ? 'var(--bg)' : undefined }}>
                   <td style={{ fontFamily: 'monospace', fontSize: 10, fontWeight: 600 }}>{d.function}</td>
-                  <td><span className="pill pill-warning" style={{ fontSize: 9 }}>{CHANGE_TYPE_KO[d.changeType] || d.changeType}</span></td>
+                  <td>
+                    {d.changed
+                      ? <span className="pill pill-warning" style={{ fontSize: 9 }}>{CHANGE_TYPE_KO[d.changeType] || d.changeType}</span>
+                      : <span className="pill pill-neutral" style={{ fontSize: 9 }} title="직접 변경 아님 — 변경 함수의 호출 관계로 영향받는 간접 함수">영향</span>}
+                  </td>
                   <td>
                     {d.asil && /^[A-D]$/.test(d.asil)
                       ? <span className={`pill ${/[CD]/.test(d.asil) ? 'pill-danger' : 'pill-warning'}`} style={{ fontSize: 9 }}>{d.asil}</span>
@@ -916,7 +954,9 @@ export default function ImpactGuideSection({ analysisResult }) {
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
                   <div>
                     <span style={{ fontWeight: 700, fontSize: 15, fontFamily: 'monospace' }}>{d.function}</span>
-                    <span className="pill pill-warning" style={{ fontSize: 10, marginLeft: 8 }}>{CHANGE_TYPE_KO[d.changeType] || d.changeType}</span>
+                    {d.changed
+                      ? <span className="pill pill-warning" style={{ fontSize: 10, marginLeft: 8 }}>{CHANGE_TYPE_KO[d.changeType] || d.changeType}</span>
+                      : <span className="pill pill-neutral" style={{ fontSize: 10, marginLeft: 8 }} title="직접 변경 아님 — 간접 영향 함수">영향</span>}
                     <span className={`pill ${d.hop === 'direct' ? 'pill-danger' : 'pill-info'}`} style={{ fontSize: 10, marginLeft: 4 }}>{d.hop}</span>
                   </div>
                   {d.requirements.length > 0 && <span className="text-sm text-muted">영향 요구사항 {d.requirements.length}개</span>}
@@ -924,6 +964,7 @@ export default function ImpactGuideSection({ analysisResult }) {
 
                 {/* Change description */}
                 <div style={{ padding: '8px 10px', background: 'var(--panel)', borderRadius: 6, marginBottom: 12, fontSize: 12, borderLeft: '3px solid var(--color-warning)' }}>
+                  {!d.changed && `이 함수는 직접 변경되지 않았으나, 변경 함수와의 호출 관계(${d.hop})로 영향받는 간접 함수입니다. 인터페이스 계약이 유지되는지, 회귀 시험(SUTS/SITS) 재실행이 필요한지 확인하세요.`}
                   {ct === 'BODY' && '함수 본문(로직)이 변경되었습니다. 동작 변경으로 인해 관련 문서의 Description, Test Action, Expected Result를 모두 재검토해야 합니다.'}
                   {ct === 'SIGNATURE' && '함수 시그니처(파라미터/리턴타입)가 변경되었습니다. 호출하는 모든 함수와 Input/Output Parameters, Pre-condition을 업데이트해야 합니다.'}
                   {ct === 'HEADER' && '헤더 파일이 변경되었습니다. 매크로/타입 정의 변경으로 이 헤더를 include하는 모든 소스 파일의 함수에 영향이 있을 수 있습니다.'}
@@ -943,6 +984,7 @@ export default function ImpactGuideSection({ analysisResult }) {
                           {ct === 'BODY' && <><li>Description — 변경된 로직 반영</li><li>Called Function — 호출 함수 변경 여부</li><li>Used Globals — 사용 변수 변경 여부</li></>}
                           {ct === 'SIGNATURE' && <><li>Prototype — 새 시그니처 반영</li><li>Input/Output Parameters — 파라미터 변경</li><li>Calling Function — 호출부 영향 확인</li></>}
                           {ct === 'VARIABLE' && <><li>Used Globals (Global/Static) — 변수 정의 업데이트</li><li>Description — 변수 변경에 따른 동작 변경</li></>}
+                          {!['BODY', 'SIGNATURE', 'VARIABLE'].includes(ct) && <><li>Function Information — 변경/영향 내용에 맞게 항목 확인·갱신</li><li>Called/Calling Function — 호출 관계 유효성 확인</li></>}
                         </ul>
                         <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>
                           관련 요구사항: {d.requirements.slice(0, 5).join(', ')}{d.requirements.length > 5 ? ` +${d.requirements.length - 5}개` : ''}
