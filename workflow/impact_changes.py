@@ -59,6 +59,32 @@ def _artifact_payload_path(path_text: str) -> Path | None:
         return None
 
 
+def _load_payload_with_status(path_text: str) -> tuple[Dict[str, Any], str]:
+    """산출물 경로의 `.payload.json` 사이드카를 로드하고 로드 상태를 함께 반환한다.
+
+    상태: "loaded"(정상), "absent"(경로 미지정/부재 — 진짜 없음),
+          "unreadable"(경로는 존재하나 권한거부/읽기·파싱 실패 — cloudium U:\\ SMB 등).
+    ⚠ M6: unreadable을 absent(빈 dict)로 뭉개면 diff_uds_payload가 모든 함수를 'created'로,
+    SUTS/SITS before를 0으로 과대보고한다. 반드시 구분해 unreadable은 diff/delta를 미산출한다.
+    """
+    raw = str(path_text or "").strip()
+    if not raw:
+        return {}, "absent"
+    payload_path = Path(raw).with_suffix(".payload.json")
+    try:
+        exists = payload_path.exists()
+    except Exception:
+        # exists() 자체가 PermissionError/OSError(cloudium U:\\ SMB) → 존재하나 읽기 불가로 간주.
+        return {}, "unreadable"
+    if not exists:
+        return {}, "absent"
+    try:
+        raw_json = json.loads(payload_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}, "unreadable"  # 존재하나 읽기/파싱 실패
+    return (raw_json if isinstance(raw_json, dict) else {}), "loaded"
+
+
 def _normalize_value(value: Any) -> Any:
     if isinstance(value, list):
         return [_normalize_value(item) for item in value]
@@ -172,11 +198,15 @@ def build_change_log(
 
     uds_info = actions.get("uds") if isinstance(actions.get("uds"), dict) else {}
     if uds_info:
-        after_payload = _load_json(_artifact_payload_path(uds_info.get("output_path") or "") or Path("_missing_"))
-        before_payload = _load_json(_artifact_payload_path(previous_linked_docs.get("uds") or "") or Path("_missing_"))
-        if uds_info.get("status") == "completed" and after_payload:
+        after_payload, _ = _load_payload_with_status(uds_info.get("output_path") or "")
+        before_payload, before_status = _load_payload_with_status(previous_linked_docs.get("uds") or "")
+        # M6: 이전 payload가 unreadable(권한거부)면 diff를 계산하지 않는다 — 안 그러면 전 함수를
+        # 'created'로 과대보고. loaded/absent만 필드 diff를 산출한다(absent는 초판 문서화).
+        if uds_info.get("status") == "completed" and after_payload and before_status != "unreadable":
             docs["uds"] = diff_uds_payload(before_payload, after_payload, uds_info.get("functions") or changed_types.keys())
             docs["uds"]["artifact_path"] = str(uds_info.get("output_path") or "")
+            if before_status == "absent":
+                docs["uds"]["first_generation"] = True  # 이전 UDS 없음 → 증분 아닌 초판(전 함수 신규 문서화)
         else:
             flagged_count = int(uds_info.get("function_count") or 0)
             docs["uds"] = {
@@ -185,13 +215,18 @@ def build_change_log(
                 "changed_functions": [{"name": fn, "fields_changed": ["flagged"]} for fn in (uds_info.get("functions") or [])],
                 "artifact_path": str(uds_info.get("artifact_path") or uds_info.get("output_path") or ""),
             }
+            if before_status == "unreadable" and uds_info.get("status") == "completed":
+                # 재생성은 됐으나 이전 payload를 못 읽어 필드 diff 미산출 — 정직 고지(created 과대보고 회피).
+                docs["uds"]["before_unavailable"] = True
+                docs["uds"]["note"] = "이전 UDS payload 읽기 불가(권한거부 등) — 필드 단위 diff 미산출(과대보고 방지)"
 
     suts_info = actions.get("suts") if isinstance(actions.get("suts"), dict) else {}
     if suts_info:
-        after_payload = _load_json(_artifact_payload_path(suts_info.get("output_path") or "") or Path("_missing_"))
-        before_payload = _load_json(_artifact_payload_path(previous_linked_docs.get("suts") or "") or Path("_missing_"))
+        after_payload, _ = _load_payload_with_status(suts_info.get("output_path") or "")
+        before_payload, _suts_before_status = _load_payload_with_status(previous_linked_docs.get("suts") or "")
         after_summary = _payload_summary(after_payload)
         before_summary = _payload_summary(before_payload)
+        _suts_before_ok = _suts_before_status != "unreadable"  # M6: 못 읽으면 before=0 과대보고 회피
         changed_functions = [
             {"function": name, "change_type": "regenerated"}
             for name in (suts_info.get("functions") or [])
@@ -202,20 +237,24 @@ def build_change_log(
                 "changed_functions": len(changed_functions),
                 "changed_cases": int(after_summary.get("test_case_count") or 0),
                 "changed_sequences": int(after_summary.get("total_sequences") or 0),
-                "before_cases": int(before_summary.get("test_case_count") or 0),
-                "before_sequences": int(before_summary.get("total_sequences") or 0),
+                # unreadable이면 0이 아니라 None(불명) — "0→N" 과대보고 대신 "불명→N".
+                "before_cases": (int(before_summary.get("test_case_count") or 0) if _suts_before_ok else None),
+                "before_sequences": (int(before_summary.get("total_sequences") or 0) if _suts_before_ok else None),
             },
             "changed_cases": changed_functions,
             "artifact_path": str(suts_info.get("output_path") or ""),
             "validation_report_path": str((suts_info.get("result") or {}).get("validation_report_path") or ""),
         }
+        if not _suts_before_ok:
+            docs["suts"]["before_unavailable"] = True
 
     sits_info = actions.get("sits") if isinstance(actions.get("sits"), dict) else {}
     if sits_info:
         exec_result = sits_info.get("result") or {}
         after_tc = int(exec_result.get("test_case_count") or sits_info.get("test_case_count") or 0)
         after_sub = int(exec_result.get("total_sub_cases") or sits_info.get("total_sub_cases") or 0)
-        before_payload = _load_json(_artifact_payload_path(previous_linked_docs.get("sits") or "") or Path("_missing_"))
+        before_payload, _sits_before_status = _load_payload_with_status(previous_linked_docs.get("sits") or "")
+        _sits_before_ok = _sits_before_status != "unreadable"  # M6: 못 읽으면 delta=after-0 과대보고 회피
         before_tc = int(before_payload.get("test_case_count") or 0)
         before_sub = int(before_payload.get("total_sub_cases") or 0)
         flagged_fn_count = int(sits_info.get("function_count") or 0)
@@ -224,16 +263,19 @@ def build_change_log(
             "summary": {
                 "test_case_count": after_tc,
                 "total_sub_cases": after_sub,
-                "before_test_case_count": before_tc,
-                "before_total_sub_cases": before_sub,
-                "delta_cases": after_tc - before_tc,
-                "delta_sub_cases": after_sub - before_sub,
+                # unreadable이면 before/delta를 None(불명) — "delta = after - 0" 과대보고 대신 미산출.
+                "before_test_case_count": (before_tc if _sits_before_ok else None),
+                "before_total_sub_cases": (before_sub if _sits_before_ok else None),
+                "delta_cases": (after_tc - before_tc if _sits_before_ok else None),
+                "delta_sub_cases": (after_sub - before_sub if _sits_before_ok else None),
                 "flagged_functions": flagged_fn_count,
             },
             "flagged_functions": list(sits_info.get("functions") or []),
             "artifact_path": str(sits_info.get("artifact_path") or sits_info.get("output_path") or ""),
             "validation_report_path": str(exec_result.get("validation_report_path") or ""),
         }
+        if not _sits_before_ok:
+            docs["sits"]["before_unavailable"] = True
 
     for target in ("sts", "sds"):
         info = actions.get(target) if isinstance(actions.get(target), dict) else {}
@@ -253,10 +295,15 @@ def build_change_log(
         "suts_changed_sequences": int(docs.get("suts", {}).get("summary", {}).get("changed_sequences", 0)),
         "sits_test_cases": int(docs.get("sits", {}).get("summary", {}).get("test_case_count", 0)),
         "sits_sub_cases": int(docs.get("sits", {}).get("summary", {}).get("total_sub_cases", 0)),
-        "sits_delta_cases": int(docs.get("sits", {}).get("summary", {}).get("delta_cases", 0)),
+        # delta_cases는 before unreadable 시 None → int(None) 크래시 방지(or 0).
+        "sits_delta_cases": int(docs.get("sits", {}).get("summary", {}).get("delta_cases", 0) or 0),
         "sits_flagged": int(docs.get("sits", {}).get("summary", {}).get("flagged_functions", 0)),
         "sts_flagged": int(docs.get("sts", {}).get("summary", {}).get("flagged_functions", 0)),
         "sds_flagged": int(docs.get("sds", {}).get("summary", {}).get("flagged_functions", 0)),
+        # M6: 어느 문서든 이전 payload를 못 읽어 diff/delta 미산출이면 상위에 고지(과대보고 아님).
+        "before_payload_unavailable": any(
+            isinstance(d, dict) and d.get("before_unavailable") for d in docs.values()
+        ),
     }
 
     return {
