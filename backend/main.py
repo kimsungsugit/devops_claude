@@ -187,7 +187,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
     # 다운로드 파일명 + 커스텀 상태 헤더를 cross-origin(dev 5174)에서도 프론트가 읽게 노출.
-    expose_headers=["Content-Disposition", "X-Swit-Matched", "X-SwUT-Summary"],
+    expose_headers=["Content-Disposition", "X-Swit-Matched", "X-Swit-Missing", "X-SwUT-Summary"],
 )
 
 from backend.middleware import (  # noqa: E402

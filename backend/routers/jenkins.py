@@ -4904,33 +4904,22 @@ def jenkins_call_tree_download(job_url: str, cache_root: str, filename: str) -> 
     return FileResponse(str(target), filename=target.name, media_type=media)
 
 
-@router.post("/api/jenkins/call-tree/export-xlsx")
-def jenkins_call_tree_xlsx(body: Dict[str, Any]) -> Response:
-    """콜트리(클라이언트 보유 payload)를 회사 SwITS 통합전략 형식 xlsx로 렌더해 반환.
+def _resolve_swit_map_for_calltree(body: Dict[str, Any], payload: Any) -> Optional[Dict[str, str]]:
+    """콜트리 export/화면라벨 공용 — {진입함수: SwIT_SwUFn_ID} 매핑 해결.
 
-    프론트가 이미 생성한 콜트리 payload(trees/stats 또는 bidir callers/callees)를 body로
-    보내면 재분석 없이 depth-컬럼 형식으로 포맷만 한다(추적성 매트릭스 export-xlsx와 동일
-    패턴 — 디스크/소스 read 없음, cloudium 워커 무관).
-    body: {"payload": {...}, "meta": {job_url, build_selector, ...}}.
+    우선순위: body.sits_path → body.scm_id(linked_docs.sits) → body.auto_swit(등록 SCM 중 이
+    콜트리와 매칭 최대인 SITS 자동 선택). 미지정/파싱 실패는 None(함수명 폴백). cloudium 접근
+    게이트(enforce_resolver_access)의 HTTPException(403)은 그대로 전파해 경로 불가를 알린다.
     """
-    from backend.services.call_tree_xlsx import build_call_tree_xlsx, count_swit_matched_roots
+    from backend.services.call_tree_xlsx import count_swit_matched_roots, parse_swit_strategy_map
+    from backend.services.file_resolver import get_resolver
+    from backend.services.resolver_helpers import enforce_resolver_access
 
-    if not isinstance(body, dict):
-        raise HTTPException(status_code=400, detail="invalid body")
-    payload = body.get("payload") if isinstance(body.get("payload"), dict) else body
-    meta = body.get("meta") if isinstance(body.get("meta"), dict) else {}
-    meta = dict(meta)
-    # 생성시각은 서버 권위값으로 강제(클라가 보낸 값 무시) — audit '생성시각' 위조 방지(I-3).
-    meta["generated_at"] = datetime.now().isoformat(timespec="seconds")
-    # SwIT ID 모드: 참조 SwITS 파일에서 {진입함수:SwIT_SwUFn_ID} 매핑을 읽어 루트 블록 라벨을
-    # ID로 치환. sits_path 미제공이면 swit_map=None → 함수명 모드(현재 방식). 파싱/접근 실패도
-    # 함수명 폴백(단 cloudium 게이트 403은 그대로 전파해 경로 접근 불가를 알림).
-    swit_map = None
+    swit_map: Optional[Dict[str, str]] = None
     sits_path = str(body.get("sits_path") or "").strip()
     scm_id = str(body.get("scm_id") or "").strip()
     if not sits_path and scm_id:
         # doc_paths.sits 미설정 시 SCM 연결문서(linked_docs.sits)에서 SITS 경로 해결.
-        # (Settings 화면엔 SCM 경로가 placeholder로만 보이고 doc_paths엔 복사 안 되는 흔한 케이스.)
         try:
             from backend.services.scm_registry import get_registry_entry
             entry = get_registry_entry(scm_id)
@@ -4940,9 +4929,6 @@ def jenkins_call_tree_xlsx(body: Dict[str, Any]) -> Response:
             _api_logger.debug("SCM linked_docs.sits resolve failed (%s): %s", scm_id, exc)
     if sits_path:
         try:
-            from backend.services.call_tree_xlsx import parse_swit_strategy_map
-            from backend.services.file_resolver import get_resolver
-            from backend.services.resolver_helpers import enforce_resolver_access
             enforce_resolver_access(sits_path)
             resolver = get_resolver()
             if resolver.exists(sits_path):
@@ -4954,13 +4940,9 @@ def jenkins_call_tree_xlsx(body: Dict[str, Any]) -> Response:
             swit_map = None
     elif body.get("auto_swit"):
         # 기준 SCM 미지정: 등록 SCM 각각의 SITS를 워커로 읽어 파싱 → 이 콜트리 루트와 매칭이
-        # 최대인 것을 선택. 다중 프로젝트 registry에서 다른 프로젝트 SITS(예: HDPDM01)를 골라
-        # 0매칭 나는 것을 방지(매칭 0인 SCM 대신 실제 대응 SCM을 데이터 기반으로 판별).
+        # 최대인 것을 선택(다른 프로젝트 SITS로 0매칭 나는 것을 데이터 기반으로 방지).
         try:
-            from backend.services.call_tree_xlsx import parse_swit_strategy_map
             from backend.services.scm_registry import list_registry_entries
-            from backend.services.file_resolver import get_resolver
-            from backend.services.resolver_helpers import enforce_resolver_access
             resolver = get_resolver()
             best_map, best_n = None, 0
             for e in (list_registry_entries() or []):
@@ -4982,9 +4964,35 @@ def jenkins_call_tree_xlsx(body: Dict[str, Any]) -> Response:
         except Exception as exc:
             _api_logger.debug("auto SwIT map resolve failed: %s", exc)
             swit_map = None
+    return swit_map
+
+
+@router.post("/api/jenkins/call-tree/export-xlsx")
+def jenkins_call_tree_xlsx(body: Dict[str, Any]) -> Response:
+    """콜트리(클라이언트 보유 payload)를 회사 SwITS 통합전략 형식 xlsx로 렌더해 반환.
+
+    프론트가 이미 생성한 콜트리 payload(trees/stats 또는 bidir callers/callees)를 body로
+    보내면 재분석 없이 depth-컬럼 형식으로 포맷만 한다(추적성 매트릭스 export-xlsx와 동일
+    패턴 — 디스크/소스 read 없음, cloudium 워커 무관).
+    body: {"payload": {...}, "meta": {job_url, build_selector, ...}}.
+    """
+    from backend.services.call_tree_xlsx import build_call_tree_xlsx, count_swit_matched_roots
+
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="invalid body")
+    payload = body.get("payload") if isinstance(body.get("payload"), dict) else body
+    meta = body.get("meta") if isinstance(body.get("meta"), dict) else {}
+    meta = dict(meta)
+    # 생성시각은 서버 권위값으로 강제(클라가 보낸 값 무시) — audit '생성시각' 위조 방지(I-3).
+    meta["generated_at"] = datetime.now().isoformat(timespec="seconds")
+    # SwIT ID 모드: 참조 SwITS 파일에서 {진입함수:SwIT_SwUFn_ID} 매핑을 읽어 루트 블록 라벨을
+    # ID로 치환. sits_path 미제공이면 swit_map=None → 함수명 모드(현재 방식). 파싱/접근 실패도
+    # 함수명 폴백(단 cloudium 게이트 403은 그대로 전파해 경로 접근 불가를 알림).
+    swit_map = _resolve_swit_map_for_calltree(body, payload)
     # SITS 진입함수 기준 콜트리 재생성(참조 SwITS '2.SW Integration Strategy' 재현): swit_map의
     # 진입함수들을 루트로 콜트리를 새로 만들어, 전체 트리에서 in-degree0 라이브러리/ISR만 루트라
     # 매칭이 낮던 문제를 해소하고 모든 SwIT 블록이 나오게 한다. 캐시 빌드 부재 등은 화면 payload 폴백.
+    regen_ok = False
     if swit_map and body.get("regen_from_sits"):
         try:
             entries = [str(k) for k in swit_map.keys() if k][:200]
@@ -5001,12 +5009,25 @@ def jenkins_call_tree_xlsx(body: Dict[str, Any]) -> Response:
                 regen = jenkins_call_tree(regen_req)
                 if isinstance(regen, dict) and regen.get("trees"):
                     payload = regen
+                    regen_ok = True
         except HTTPException:
             pass
         except Exception as exc:
             _api_logger.debug("SwIT regen from SITS failed: %s", exc)
+    # regen 성공 시: 참조 SITS 전체 매핑 대비 실제 트리 루트가 된 진입함수를 비교해, 소스에
+    # 정의가 없어(이름 불일치 포함) 누락된 SwIT를 계산한다 — 43개 중 35개만 생성되고 8개가
+    # 무표기로 사라지는 것을 시트 하단·응답 헤더로 정직하게 표면화(silent 누락 방지). fallback
+    # (regen 미수행)에선 루트가 진입함수가 아니라 '미생성' 개념이 부적합하므로 계산하지 않는다.
+    missing_swit = None
+    if regen_ok and swit_map:
+        root_names = {str(t.get("name") or "").strip()
+                      for t in (payload.get("trees") or []) if isinstance(t, dict)}
+        missing_swit = sorted(
+            [(fn, sid) for fn, sid in swit_map.items() if fn and fn not in root_names],
+            key=lambda x: x[1],
+        )
     try:
-        data = build_call_tree_xlsx(payload, meta, swit_map=swit_map)
+        data = build_call_tree_xlsx(payload, meta, swit_map=swit_map, missing_swit=missing_swit)
     except ImportError as exc:
         raise HTTPException(status_code=500, detail=f"openpyxl 미설치: {exc}")
     except Exception as exc:
@@ -5015,15 +5036,37 @@ def jenkins_call_tree_xlsx(body: Dict[str, Any]) -> Response:
     fname = f"call_tree_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
     headers = {"Content-Disposition": f'attachment; filename="{fname}"'}
     if swit_map is not None:
-        # W1: SwIT_ID로 치환된 루트 수를 헤더로 노출 → 프론트 토스트가 '매칭 0인데 성공'으로
-        # 위장하는 것을 방지(함수명 폴백을 SwIT_ID 라벨로 오인하는 audit 리스크 차단).
-        matched, total = count_swit_matched_roots(payload, swit_map)
-        headers["X-Swit-Matched"] = f"{matched}/{total}"
+        # W1: 헤더로 'SwIT_ID가 적용된 루트 수 / 참조 SITS 전체 매핑 수'를 노출 → 프론트 토스트가
+        # (a) 매칭 0인데 성공으로 위장, (b) 43개 중 35개만 생성됐는데 '35/35 다 됨'으로 위장하는
+        # 것을 둘 다 방지. 분모는 전체 SITS 매핑(len(swit_map)). 누락 수는 X-Swit-Missing으로 보강.
+        matched, _ = count_swit_matched_roots(payload, swit_map)
+        headers["X-Swit-Matched"] = f"{matched}/{len(swit_map)}"
+        if missing_swit:
+            headers["X-Swit-Missing"] = str(len(missing_swit))
     return Response(
         content=data,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers=headers,
     )
+
+
+@router.post("/api/jenkins/call-tree/swit-map")
+def jenkins_call_tree_swit_map(body: Dict[str, Any]) -> Dict[str, Any]:
+    """콜트리 화면 라벨 토글용 — {진입함수: SwIT_SwUFn_ID} 매핑과 매칭 통계를 반환.
+
+    export-xlsx와 동일한 해결(sits_path→scm_id→auto_swit)을 쓰되 파일 생성 없이 매핑만 낸다.
+    payload(화면 콜트리)는 auto_swit이 '이 트리와 매칭 최대'인 SCM을 고르는 데만 사용한다.
+    프론트가 루트 진입 함수 라벨을 함수명 ⇄ SwIT_ID로 전환(토글)하는 데 쓴다.
+    """
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="invalid body")
+    payload = body.get("payload") if isinstance(body.get("payload"), dict) else {}
+    swit_map = _resolve_swit_map_for_calltree(body, payload)
+    if not swit_map:
+        return {"ok": True, "map": {}, "count": 0, "matched": 0, "roots": 0}
+    from backend.services.call_tree_xlsx import count_swit_matched_roots
+    matched, roots = count_swit_matched_roots(payload, swit_map)
+    return {"ok": True, "map": swit_map, "count": len(swit_map), "matched": matched, "roots": roots}
 
 
 @router.post("/api/jenkins/report/files")

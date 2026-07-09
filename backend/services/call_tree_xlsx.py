@@ -176,7 +176,9 @@ def count_swit_matched_roots(payload: Any, swit_map: Optional[Dict[str, str]]) -
         if pl.get("bidir"):
             out: List[Dict[str, Any]] = []
             for k in ("callees", "callers"):
-                sub = pl.get(k) if isinstance(pl.get(k), dict) else {}
+                sub = pl.get(k)
+                if not isinstance(sub, dict):
+                    sub = {}
                 out += [t for t in (sub.get("trees") or []) if isinstance(t, dict)]
             return out
         return [t for t in (pl.get("trees") or []) if isinstance(t, dict)]
@@ -210,13 +212,19 @@ def _meta_line(stats: Dict[str, Any], meta: Dict[str, Any], reverse: bool) -> st
 
 
 def build_call_tree_xlsx(payload: Any, meta: Optional[Dict[str, Any]] = None,
-                         swit_map: Optional[Dict[str, str]] = None) -> bytes:
+                         swit_map: Optional[Dict[str, str]] = None,
+                         missing_swit: Optional[List[Tuple[str, str]]] = None) -> bytes:
     """콜트리 payload dict → xlsx 바이트.
 
     Args:
         payload: ``/api/jenkins/call-tree`` 응답(단방향 ``{trees,stats,...}`` 또는
             양방향 ``{bidir,callers,callees,stats}``).
         meta: 헤더 블록용(generated_at, job_url, build_selector 등). 없으면 생략.
+        swit_map: {진입함수명: SwIT_SwUFn_ID}. 루트 블록 라벨을 ID로 치환.
+        missing_swit: [(진입함수명, SwIT_ID)] — 참조 SITS엔 있으나 스캔 소스에 정의가 없어
+            트리를 생성하지 못한 SwIT. SITS 진입함수 재생성(regen) 모드에서만 계산되며, 시트
+            하단에 명시해 '전체 SwIT 대비 무엇이 왜 빠졌는지' audit 정직성을 확보한다(silent
+            누락 방지). regen이 아니거나 누락이 없으면 None/빈 리스트 → 미표기(기존 동작).
 
     Returns:
         xlsx 파일 바이트(openpyxl). openpyxl 미설치 시 ImportError.
@@ -267,7 +275,7 @@ def build_call_tree_xlsx(payload: Any, meta: Optional[Dict[str, Any]] = None,
             "Software Integration Strategy — 호출(callee)",
             "- 각 진입 함수가 호출하는 하위 함수를 호출 계층(depth)에 따라 통합 순서로 정의함.",
             callees.get("stats") if isinstance(callees.get("stats"), dict) else stats_all,
-            meta, styles, reverse=False,
+            meta, styles, reverse=False, missing_swit=missing_swit,
         )
         ws2 = wb.create_sheet("역호출 트리 (caller)")
         _render_sheet(
@@ -294,7 +302,7 @@ def build_call_tree_xlsx(payload: Any, meta: Optional[Dict[str, Any]] = None,
             _render_sheet(
                 ws, trees, "Software Integration Strategy",
                 "- 각 진입 함수가 호출하는 하위 함수를 호출 계층(depth)에 따라 통합 순서로 정의함.",
-                stats, meta, styles, reverse=False,
+                stats, meta, styles, reverse=False, missing_swit=missing_swit,
             )
 
     buf = io.BytesIO()
@@ -311,6 +319,7 @@ def _render_sheet(
     meta: Dict[str, Any],
     S: Dict[str, Any],
     reverse: Optional[bool] = None,
+    missing_swit: Optional[List[Tuple[str, str]]] = None,
 ) -> None:
     """트리 리스트를 한 시트에 depth-컬럼 형식으로 렌더."""
     trees_all = [t for t in (trees_in if isinstance(trees_in, list) else []) if isinstance(t, dict)]
@@ -471,6 +480,32 @@ def _render_sheet(
                 state["row"], 1,
                 "⚠ " + " · ".join(cap_notes) + " — 진입 함수 지정 또는 깊이 축소를 권장합니다.",
             ).font = S["note"]
+
+    # 미생성 SwIT — 참조 SITS엔 있으나 스캔 소스에 진입함수 정의가 없어 트리를 못 만든 항목을
+    # 시트 하단에 명시(SITS 진입함수 재생성 모드 전용). '전체 SwIT 대비 무엇이 왜 빠졌는지'를
+    # 감사자가 알 수 있게 해 silent 누락(예: 43개 중 35개만 나오고 8개는 무표기)을 방지한다(W-1).
+    ms = [m for m in (missing_swit or []) if isinstance(m, (list, tuple)) and len(m) >= 2]
+    if ms:
+        state["row"] += 2
+        hc = ws.cell(
+            state["row"], 1,
+            f"⚠ 미생성 SwIT {len(ms)}개 — 아래 진입 함수는 참조 SITS에는 있으나 스캔된 소스에 "
+            "정의가 없어(이름 불일치 포함) 호출 트리를 생성하지 못했습니다.",
+        )
+        hc.font = S["header"]
+        ws.merge_cells(start_row=state["row"], start_column=1,
+                       end_row=state["row"], end_column=min(last_col, tree_start))
+        state["row"] += 1
+        for lbl, col in (("SwIT ID", 2), ("진입 함수", 3)):
+            mh = ws.cell(state["row"], col, lbl)
+            mh.font = S["header"]
+            mh.fill = S["header_fill"]
+        for fn, sid in ms:
+            state["row"] += 1
+            bc = ws.cell(state["row"], 2, _cs(sid))
+            bc.font = S["root"]
+            bc.fill = S["root_fill"]
+            ws.cell(state["row"], 3, _cs(fn)).font = S["ext"]
 
     # ── 열 너비 / 고정 창 ──
     ws.column_dimensions[get_col(1)].width = 5

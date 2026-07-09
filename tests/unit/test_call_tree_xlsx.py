@@ -319,3 +319,49 @@ def test_parse_skips_nonident_entry_cell():
     m = parse_swit_strategy_map(buf.getvalue())
     assert m.get("s_Real_Func") == "SwIT_SwUFn_9"
     assert "1)" not in m
+
+
+def test_missing_swit_rendered_at_bottom():
+    """regen 모드: 참조 SITS엔 있으나 소스에 정의 없는 SwIT를 시트 하단에 명시(정직성 표면화).
+
+    43개 매핑 중 35개만 트리로 나오고 8개가 무표기로 사라지던 갭을 방지 — SwIT_ID는 B열,
+    진입 함수명은 C열에 하단 별도 블록으로 렌더된다.
+    """
+    missing = [("SCI0_ISR", "SwIT_SwUFn_3546"), ("TIM0_Ch0_ISR", "SwIT_SwUFn_3514")]
+    ws = _open(build_call_tree_xlsx(
+        _uni(), {"generated_at": "2026-07-09"},
+        swit_map={"s_Root": "SwIT_SwUFn_0001"}, missing_swit=missing,
+    ))["SW Integration Strategy"]
+    assert any(
+        isinstance(ws.cell(r, 1).value, str) and "미생성 SwIT 2개" in ws.cell(r, 1).value
+        for r in range(1, ws.max_row + 1)
+    ), "미생성 SwIT 헤더 미표기"
+    # 각 미생성 SwIT_ID는 B열, 진입 함수명은 C열
+    assert _find(ws, "SwIT_SwUFn_3546", col=2, rmax=ws.max_row)
+    assert _find(ws, "SwIT_SwUFn_3514", col=2, rmax=ws.max_row)
+    assert _find(ws, "SCI0_ISR", col=3, rmax=ws.max_row)
+    assert _find(ws, "TIM0_Ch0_ISR", col=3, rmax=ws.max_row)
+    # 정상 루트(s_Root)는 여전히 존재 — 미생성 블록이 트리를 대체하지 않음
+    assert _find(ws, "SwIT_SwUFn_0001", col=2, rmax=ws.max_row)
+
+
+def test_missing_swit_none_no_render():
+    """missing_swit=None → 하단 미생성 표기 없음(기존 동작 보존)."""
+    ws = _open(build_call_tree_xlsx(
+        _uni(), {}, swit_map={"s_Root": "SwIT_1"}, missing_swit=None,
+    ))["SW Integration Strategy"]
+    assert not any(
+        isinstance(ws.cell(r, 1).value, str) and "미생성 SwIT" in ws.cell(r, 1).value
+        for r in range(1, ws.max_row + 1)
+    )
+
+
+def test_missing_swit_empty_no_render():
+    """missing_swit=[] → 하단 미생성 표기 없음."""
+    ws = _open(build_call_tree_xlsx(
+        _uni(), {}, swit_map={"s_Root": "SwIT_1"}, missing_swit=[],
+    ))["SW Integration Strategy"]
+    assert not any(
+        isinstance(ws.cell(r, 1).value, str) and "미생성 SwIT" in ws.cell(r, 1).value
+        for r in range(1, ws.max_row + 1)
+    )

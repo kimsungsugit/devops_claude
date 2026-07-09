@@ -3158,7 +3158,7 @@ function TraceTreeFunc({ fn, tests, parentId, expanded, onToggle }) {
  * - entry(진입 함수)는 빌드 소스의 known 함수명과 일치해야 적중. 매트릭스 source_ids에서 자동완성.
  * - 표준 라이브러리는 백엔드에서 제외. include_external 시 미정의(외부) 호출만 별도 표시.
  * - 루트는 기본 펼침(접기 가능), 하위는 클릭 펼침(깊은 트리 DOM 비용 절감). cycle/truncated 플래그 표시. */
-function CallTreeNode({ node, path, expanded, onToggle, depth, includeExternal }) {
+function CallTreeNode({ node, path, expanded, onToggle, depth, includeExternal, switMap }) {
   const children = Array.isArray(node?.calls) ? node.calls : [];
   const externals = includeExternal && Array.isArray(node?.externals) ? node.externals : [];
   const hasChildren = children.length > 0 || externals.length > 0;
@@ -3168,6 +3168,9 @@ function CallTreeNode({ node, path, expanded, onToggle, depth, includeExternal }
   const isOpen = expanded.has(path) !== (depth === 0);
   const asil = node?.asil ? String(node.asil).toUpperCase() : '';
   const isRoot = depth === 0;
+  // 루트(진입 함수)만 참조 SwITS의 SwIT_SwUFn_ID로 라벨 전환(labelMode='swit' 시 switMap 주입).
+  // 매핑 없으면 함수명 유지. 하위 노드는 SwIT 개념이 없어 항상 함수명.
+  const switId = (isRoot && switMap && node?.name) ? switMap[String(node.name).trim()] : null;
   // hover 하이라이트는 CSS(.ct-node-row:hover)로 처리 — 노드별 useState 제거(비메모 컴포넌트라
   // 상위 hover가 하위 서브트리 전체 재렌더하던 W2 완화). 루트 배경은 인라인 유지(hover 무관 상시).
   return (
@@ -3190,7 +3193,11 @@ function CallTreeNode({ node, path, expanded, onToggle, depth, includeExternal }
           {hasChildren ? (isOpen ? '▾' : '▸') : '·'}
         </span>
         <strong style={{ fontFamily: 'monospace', fontSize: isRoot ? 14 : 13, fontWeight: isRoot ? 700 : 600,
-          color: isRoot ? _STAGE_COLORS.UDS : 'var(--fg)' }}>{node?.name}</strong>
+          color: isRoot ? _STAGE_COLORS.UDS : 'var(--fg)' }}>{switId || node?.name}</strong>
+        {switId && (
+          <code style={{ fontFamily: 'monospace', fontSize: 11, color: 'var(--text-muted)', fontWeight: 500 }}
+            title="소스 함수명">{node?.name}</code>
+        )}
         {node?.via_ref && (
           <span style={{ fontSize: 10, padding: '1px 6px', borderRadius: 8, fontWeight: 600, color: '#7c3aed', border: '1px dashed #7c3aed' }}
             title="직접 호출이 아니라 함수포인터 참조(&함수 / 대입 / 인자 전달)로 추론된 엣지 — 실제 호출은 런타임에 포인터로 이뤄짐">↪ 참조</span>
@@ -3217,7 +3224,7 @@ function CallTreeNode({ node, path, expanded, onToggle, depth, includeExternal }
         <ul style={{ margin: 0, paddingLeft: 20, marginLeft: 8, borderLeft: '1px solid var(--border)' }}>
           {children.map((c, i) => (
             <CallTreeNode key={`${path}.${i}`} node={c} path={`${path}.${i}`}
-              expanded={expanded} onToggle={onToggle} depth={depth + 1} includeExternal={includeExternal} />
+              expanded={expanded} onToggle={onToggle} depth={depth + 1} includeExternal={includeExternal} switMap={switMap} />
           ))}
           {externals.map((e, i) => (
             <li key={`ext-${path}-${i}`} style={{ listStyle: 'none', padding: '3px 8px', fontSize: 11, color: 'var(--text-muted)' }}>
@@ -3296,6 +3303,10 @@ function CallTreeView({ job, cacheRoot, buildSelector, sourceRoot, seedFns, toas
   const [xlsxBusy, setXlsxBusy] = useState(false);
   const [expanded, setExpanded] = useState(() => new Set());
   const [allOpen, setAllOpen] = useState(false);
+  // 라벨 표시 모드: 'func'(함수명) / 'swit'(참조 SwITS의 SwIT_SwUFn_ID). switMap은 {진입함수:ID}.
+  const [labelMode, setLabelMode] = useState('func');
+  const [switMap, setSwitMap] = useState(null);
+  const [switBusy, setSwitBusy] = useState(false);
   const mountedRef = useRef(true);
   // 요청 시퀀스 토큰 — 로딩 중 재진입(입력창 Enter/버튼 재클릭) 시 늦게 도착한 이전 응답이 최신 결과를
   // 덮어쓰지 않도록(stale setData 방지). load 진입마다 ++, resolve 시 자기 토큰이 최신일 때만 반영.
@@ -3402,6 +3413,20 @@ function CallTreeView({ job, cacheRoot, buildSelector, sourceRoot, seedFns, toas
 
   // xlsx 내보내기 — 현재 콜트리(data: 단방향 trees 또는 양방향 bidir)를 회사 SwITS
   // "2.SW Integration Strategy" 형식(depth 컬럼)으로 서버에서 렌더. 바이너리 응답이라
+  // SwIT 매핑 해결 파라미터(설정>입력자료의 SITS 경로 → 기준 SCM → auto) — exportXlsx·fetchSwitMap 공유.
+  const resolveSwitParams = useCallback(() => {
+    let sitsPath = '';
+    try { sitsPath = String((JSON.parse(localStorage.getItem('devops_v2_doc_paths') || '{}').sits) || '').trim(); }
+    catch { sitsPath = ''; }
+    let scmId = '';
+    let autoSwit = false;
+    if (!sitsPath) {
+      scmId = String(localStorage.getItem('devops_v2_doc_scm') || '').trim();
+      if (!scmId) autoSwit = true;
+    }
+    return { sitsPath, scmId, autoSwit };
+  }, []);
+
   // api() 헬퍼 대신 raw fetch지만 authHeaders(Bearer+X-User) + res.ok 검사 명시(X9).
   // useSwitId=true면 진입 함수 블록 라벨을 참조 SwITS의 SwIT_SwUFn_ID로 치환(설정>입력자료의
   // SITS 경로를 sits_path로 전달, 백엔드가 매핑 추출). false면 함수명 모드(현재 방식). 두 방식 병존.
@@ -3411,18 +3436,9 @@ function CallTreeView({ job, cacheRoot, buildSelector, sourceRoot, seedFns, toas
     let scmId = '';
     let autoSwit = false;
     if (useSwitId) {
-      try { sitsPath = String((JSON.parse(localStorage.getItem('devops_v2_doc_paths') || '{}').sits) || '').trim(); }
-      catch { sitsPath = ''; }
-      // doc_paths.sits 미설정이면 SCM 연결문서(linked_docs.sits)에서 백엔드가 해결하도록 기준 SCM id 전달.
-      // (설정 화면에 SITS가 SCM placeholder로만 보이고 '빈 칸 채우기'를 안 눌러 doc_paths엔 없는 흔한 케이스.)
-      if (!sitsPath) {
-        scmId = String(localStorage.getItem('devops_v2_doc_scm') || '').trim();
-        // 기준 SCM 미선택이면 백엔드가 등록 SCM 각각의 SITS를 워커로 읽어 '이 콜트리 매칭 최대'인
-        // 것을 자동 선택(auto_swit). 프론트가 첫 SCM을 고르면 다중 프로젝트 registry에서 엉뚱한
-        // 프로젝트 SITS(매핑 0)를 골라 0매칭 나는 위험이 있어 데이터 기반 판별을 백엔드에 위임한다.
-        if (!scmId) autoSwit = true;
-      }
+      // sits_path → scm_id(linked_docs.sits) → auto_swit(매칭 최대 SCM). 화면 라벨 토글과 동일 로직.
       // 사전 경고로 차단하지 않고 항상 진행 — 매칭 결과는 X-Swit-Matched 헤더로 사후 표면화한다.
+      ({ sitsPath, scmId, autoSwit } = resolveSwitParams());
     }
     setXlsxBusy(true);
     try {
@@ -3463,13 +3479,21 @@ function CallTreeView({ job, cacheRoot, buildSelector, sourceRoot, seedFns, toas
       document.body.appendChild(a); a.click(); document.body.removeChild(a);
       URL.revokeObjectURL(url);
       if (useSwitId) {
-        // W1: 백엔드가 매칭 루트 수를 X-Swit-Matched로 알림. 0매칭이면 함수명 폴백이므로
-        // '성공' 위장 대신 경고로 정직하게 표면화(진입 함수/SITS 경로 확인 유도).
+        // W1: 백엔드가 'SwIT_ID 적용 루트 / 전체 SITS 매핑'을 x-swit-matched(예 "35/43")로, 소스에
+        // 진입함수 정의가 없어 못 만든 수를 x-swit-missing으로 알림. 0매칭=함수명 폴백(경고), 부분
+        // 생성(missing>0)=일부 진입함수 소스 부재(info·시트 하단 목록), 전량=성공. '35/35 다 됨'
+        // 위장(실제 43개 중 35개)을 방지 — 감사자가 무엇이 왜 빠졌는지 알 수 있게 정직 표면화.
         const matched = res.headers.get('x-swit-matched') || '';
-        const zero = matched.startsWith('0/');
-        toast(zero ? 'warning' : 'success',
+        const made = parseInt(matched.split('/')[0] || '0', 10) || 0;
+        const total = parseInt(matched.split('/')[1] || '0', 10) || 0;
+        const missing = parseInt(res.headers.get('x-swit-missing') || '', 10) || Math.max(0, total - made);
+        const zero = made === 0;
+        const partial = missing > 0;
+        toast(zero ? 'warning' : (partial ? 'info' : 'success'),
           matched
-            ? `SwIT ID 엑셀 내보냄 — ${matched} 루트에 SwIT_ID 적용${zero ? ' (매칭 0 · 함수명으로 표시됨. 진입 함수 또는 설정>입력자료 SITS 경로 확인)' : ''}`
+            ? `SwIT ID 엑셀 내보냄 — SITS ${total || '?'}개 중 ${made}개 생성`
+              + (zero ? ' (매칭 0 · 함수명으로 표시됨. 진입 함수 또는 설정>입력자료 SITS 경로 확인)'
+                 : partial ? ` · ${missing}개 미생성(스캔 소스에 진입함수 정의 없음 · 시트 하단 목록 확인)` : ' (전량 적용)')
             : 'SwIT ID 엑셀을 내보냈습니다.');
       } else {
         toast('success', '엑셀 파일을 내보냈습니다.');
@@ -3479,7 +3503,45 @@ function CallTreeView({ job, cacheRoot, buildSelector, sourceRoot, seedFns, toas
     } finally {
       setXlsxBusy(false);
     }
-  }, [data, job, buildSelector, sourceRoot, toast]);
+  }, [data, job, buildSelector, sourceRoot, toast, depth, cacheRoot, resolveSwitParams]);
+
+  // 화면 라벨 토글용 매핑 조회(파일 생성 없이 {진입함수:SwIT_ID}만). 빈/실패는 {}.
+  const fetchSwitMap = useCallback(async () => {
+    if (!data) return {};
+    const { sitsPath, scmId, autoSwit } = resolveSwitParams();
+    const body = { payload: data };
+    if (sitsPath) body.sits_path = sitsPath;
+    else if (scmId) body.scm_id = scmId;
+    else if (autoSwit) body.auto_swit = true;
+    const r = await post('/api/jenkins/call-tree/swit-map', body);
+    return (r && r.map && typeof r.map === 'object') ? r.map : {};
+  }, [data, resolveSwitParams]);
+
+  // 라벨 함수명 ⇄ SwIT ID 전환. swit로 갈 때 매핑이 없으면 백엔드에서 1회 조회 후 캐시.
+  const toggleLabelMode = useCallback(async () => {
+    if (labelMode === 'swit') { setLabelMode('func'); return; }
+    if (switMap && Object.keys(switMap).length) { setLabelMode('swit'); return; }
+    setSwitBusy(true);
+    try {
+      const m = await fetchSwitMap();
+      const cnt = m ? Object.keys(m).length : 0;
+      setSwitMap(m || {});
+      if (!cnt) {
+        toast('warning', 'SwIT 매핑을 찾지 못했습니다 — 설정>입력자료의 SITS 경로 또는 기준 SCM을 확인하세요. (함수명 유지)');
+        return;
+      }
+      const roots = Array.isArray(data?.trees) ? data.trees.map(t => String(t?.name || '')) : [];
+      const matched = roots.filter(n => m[n]).length;
+      setLabelMode('swit');
+      toast(matched < roots.length ? 'info' : 'success',
+        `SwIT ID 표시 — 화면 루트 ${roots.length}개 중 ${matched}개 매칭 (참조 SITS ${cnt}개)`);
+    } catch (e) {
+      toast('error', `SwIT 매핑 로드 실패: ${e.message}`);
+    } finally { setSwitBusy(false); }
+  }, [labelMode, switMap, fetchSwitMap, data, toast]);
+
+  // 새 콜트리 로드 시 라벨 모드/매핑 초기화(이전 트리 매핑을 새 트리에 잘못 적용 방지).
+  useEffect(() => { setLabelMode('func'); setSwitMap(null); }, [data]);
 
   const trees = Array.isArray(data?.trees) ? data.trees : [];
   const st = data?.stats || {};
@@ -3560,6 +3622,14 @@ function CallTreeView({ job, cacheRoot, buildSelector, sourceRoot, seedFns, toas
             style={{ padding: '6px 14px', fontSize: 12, fontWeight: 600, borderRadius: 4, cursor: 'pointer',
               background: 'var(--bg)', color: 'var(--fg)', border: '1px solid var(--border)' }}>
             {allOpen ? '모두 접기 ⊟' : '모두 펼치기 ⊞'}
+          </button>
+        )}
+        {data && !data.bidir && (
+          <button type="button" onClick={toggleLabelMode} disabled={loading || switBusy}
+            title="진입 함수(루트) 라벨을 함수명 ⇄ 참조 SwITS의 SwIT_SwUFn_ID로 전환합니다(화면 표시 전용). SwIT ID 매핑은 설정>입력자료의 SITS 경로 또는 기준 SCM에서 읽습니다."
+            style={{ padding: '6px 14px', fontSize: 12, fontWeight: 600, borderRadius: 4, cursor: (loading || switBusy) ? 'default' : 'pointer',
+              background: labelMode === 'swit' ? 'var(--accent)' : 'var(--bg)', color: labelMode === 'swit' ? '#fff' : 'var(--accent)', border: '1px solid var(--accent)' }}>
+            {switBusy ? '매핑 로드…' : (labelMode === 'swit' ? '라벨: SwIT ID ⇄' : '라벨: 함수명 ⇄')}
           </button>
         )}
         {data && (
@@ -3696,7 +3766,7 @@ function CallTreeView({ job, cacheRoot, buildSelector, sourceRoot, seedFns, toas
           ) : (
             <ul style={{ margin: 0, padding: 0 }}>
               {sortedTrees.map((t, i) => (
-                <CallTreeNode key={i} node={t} path={`${i}`} expanded={expanded} onToggle={toggle} depth={0} includeExternal={includeExternal} />
+                <CallTreeNode key={i} node={t} path={`${i}`} expanded={expanded} onToggle={toggle} depth={0} includeExternal={includeExternal} switMap={labelMode === 'swit' ? switMap : null} />
               ))}
             </ul>
           )}
