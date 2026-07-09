@@ -14,6 +14,24 @@ from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
+
+def _load_impact_oai_config() -> Optional[Dict[str, Any]]:
+    """영향도 AI의 LLM config 해석 — 챗 어시스턴트와 동일 경로(서버고정 env-only).
+
+    `config.CHAT_OAI_CONFIG_PATH`(env CHAT_OAI_CONFIG_PATH) > `DEFAULT_OAI_CONFIG_PATH`.
+    load_oai_config(None)은 CHAT_OAI_CONFIG_PATH 오버라이드를 놓쳐, 챗은 되는데 영향도 AI는
+    안 되는 불일치가 생긴다. 챗과 동일 해석을 써 "챗이 되는 배포면 영향도 AI도 된다"를 보장한다.
+    (클라이언트가 경로를 제어하지 못하는 서버고정값만 사용 — assistant_service와 동일 계약.)
+    """
+    from workflow.ai import load_oai_config
+    try:
+        import config as _appcfg
+        cfg_path = getattr(_appcfg, "CHAT_OAI_CONFIG_PATH", None) or None
+    except Exception:
+        cfg_path = None
+    return load_oai_config(cfg_path)
+
+
 # ASIL 등급 위험도 순서
 _ASIL_RANK = {"QM": 0, "A": 1, "B": 2, "C": 3, "D": 4}
 
@@ -309,10 +327,10 @@ def generate_change_summary(ctx: ImpactGuideContext, risk: RiskAssessment) -> Op
     매 호출 TypeError→debug 흡수되어 AI 강화가 영구 비활성이던 버그를 방지.
     """
     try:
-        from workflow.ai import agent_call_text, load_oai_config
+        from workflow.ai import agent_call_text
         from prompts import load_prompt
 
-        cfg = load_oai_config(None)
+        cfg = _load_impact_oai_config()
         if not cfg:
             return None  # LLM 미설정 — 결정론 폴백(정상 경로, 에러 아님)
 
@@ -353,9 +371,9 @@ def explain_function_change(
     반환: 설명 문자열, 또는 LLM 미설정/실패 시 None(caller가 결정론 폴백/미표시).
     """
     try:
-        from workflow.ai import agent_call_text, load_oai_config
+        from workflow.ai import agent_call_text
 
-        cfg = load_oai_config(None)
+        cfg = _load_impact_oai_config()
         if not cfg:
             return None  # LLM 미설정 — 정상 폴백(에러 아님)
 
@@ -437,10 +455,10 @@ def suggest_test_additions(
     반환: LLM 제안 리스트, 또는 LLM 미설정/실패/파싱실패 시 None(caller가 결정론 폴백).
     """
     try:
-        from workflow.ai import agent_call_text, load_oai_config
+        from workflow.ai import agent_call_text
         from prompts import load_prompt
 
-        cfg = load_oai_config(None)
+        cfg = _load_impact_oai_config()
         if not cfg:
             return None  # LLM 미설정 — 결정론 폴백(정상 경로)
 
