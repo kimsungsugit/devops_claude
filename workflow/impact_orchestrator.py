@@ -1302,6 +1302,14 @@ def run_impact_update(
                     continue  # 변경유형에 안 잡힌 함수는 잡음 — 제외
                 _before = str(_sig.get("before") or "").strip()
                 _after = str(_sig.get("after") or "").strip()
+                # 이전==이후(둘 다 존재하고 선언 동일 — 프로토타입 재정렬/이동)면 실제 시그니처 변화가
+                # 아니다: (1) SIGNATURE로 (오)분류됐으면 BODY로 강등, (2) change_details에 원문을 넣지
+                # 않는다(모달이 '변화 없는 시그니처'를 렌더하지 않도록). classify(정밀 경로)를 이미
+                # 고쳤으나 editType(cloudium) 경로·엣지케이스까지 최종 검증하는 안전망이다.
+                if _before and _after and _before == _after:
+                    if changed_types.get(_actual) == "SIGNATURE":
+                        changed_types[_actual] = "BODY"
+                    continue
                 _rec = {}
                 if _before:
                     _rec["before"] = _before

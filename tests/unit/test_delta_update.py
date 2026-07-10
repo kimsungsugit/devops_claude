@@ -225,6 +225,46 @@ def test_classify_changed_functions_from_diff_text_kinds_and_line_classified():
     assert not any(p.endswith(".h") for p in lcf)
 
 
+def test_classify_from_diff_text_reordered_proto_not_signature():
+    """프로토타입 재정렬/이동으로 동일 선언이 -/+ 양쪽에 나타나도 SIGNATURE로 오판하지 않는다.
+    실제 선언 원문 before==after면 본문 변경(BODY)이다 — kjpds02에서 SIGNATURE 135개 중 134개가
+    이 패턴(신규 24개 삽입으로 선언 블록이 밀려 동일 프로토타입이 -/+에 동시 등장)이었다."""
+    from workflow.delta_update import classify_changed_functions_from_diff_text
+    blob = "\n".join([
+        "Index: sources/proto.c",
+        "===================================================================",
+        "--- sources/proto.c\t(revision 100)",
+        "+++ sources/proto.c\t(revision 150)",
+        "@@ -5,6 +5,7 @@",
+        " static S16 keep_fn(S16 x);",
+        "-static U32 moved_fn(U16 a, U16 b);",
+        "+static U32 moved_fn(U16 a, U16 b);",
+        "+static void new_fn(void);",
+        "",
+    ])
+    types, _ = classify_changed_functions_from_diff_text(blob)
+    # moved_fn은 선언 원문 동일(재정렬) → SIGNATURE 아님(BODY). new_fn은 한쪽만 → NEW.
+    assert types.get("moved_fn") == "BODY", types
+    assert types.get("new_fn") == "NEW", types
+
+    # unknown(멀티라인 선언 — 원문 미확보)은 보수적으로 SIGNATURE 유지(실제 시그니처 변경 놓침 방지).
+    blob2 = "\n".join([
+        "Index: sources/multi.c",
+        "===================================================================",
+        "--- sources/multi.c\t(revision 100)",
+        "+++ sources/multi.c\t(revision 150)",
+        "@@ -5,6 +5,7 @@",
+        "-static void multi_fn(int a,",
+        "-                     int b);",
+        "+static void multi_fn(int a,",
+        "+                     int b,",
+        "+                     int c);",
+        "",
+    ])
+    types2, _ = classify_changed_functions_from_diff_text(blob2)
+    assert types2.get("multi_fn") == "SIGNATURE", types2
+
+
 def test_diff_has_function_context():
     """positive-context 가드 — -x -p 컨텍스트 유무를 rc와 독립적으로 판정."""
     from workflow.delta_update import diff_has_function_context
