@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -393,14 +394,24 @@ def explain_function_change(
         system = (
             "당신은 ISO 26262 자동차 기능안전 소프트웨어의 변경 영향 분석가입니다. "
             "C 함수 변경을 검토하는 엔지니어에게 간결하고 정확한 한국어 설명을 제공합니다. "
-            "선언 원문이 주어지면 매개변수/반환의 실제 변화를 근거로 설명하고, 원문이 없으면 추정임을 명시하세요."
+            "선언 원문이 주어지면 매개변수/반환의 실제 변화를 근거로 설명하고, 원문이 없으면 추정임을 명시하세요. "
+            "각 문서(UDS/STS/SUTS/SITS/SDS)에 '무엇을 어느 섹션에 어떻게' 반영해야 하는지 "
+            "실제 파라미터명을 넣어 구체적으로 제시하세요(일반론 금지)."
         )
         user_msg = (
             f"{context}\n\n"
-            "위 함수 변경을 3~5문장으로 설명하세요:\n"
-            "1) 무엇이 바뀌었는가 — 매개변수 추가/삭제/타입변경, 반환타입, 동작 관점(원문 근거).\n"
-            "2) 호출부·시험(SUTS/SITS)·설계문서(UDS/SDS)에 주는 영향.\n"
-            "3) 리뷰 시 특히 확인할 점(ASIL 등급 고려). 확실치 않으면 '추정'이라 표기."
+            "위 함수 변경을 ISO 26262 관점에서 분석하세요. 마크다운 소제목을 사용하세요.\n\n"
+            "### 1. 무엇이 바뀌었나\n"
+            "매개변수 추가/삭제/타입변경·반환타입·동작을 원문 근거로 2~3문장. 실제 파라미터명 명시.\n\n"
+            "### 2. 문서별 반영 사항\n"
+            "각 문서에 실제 파라미터명을 넣어 1~2줄씩 구체적으로. 해당 없으면 '영향 없음':\n"
+            "- **UDS**: Prototype / Input·Output Parameters / Description / Called·Calling 중 무엇을 어떻게\n"
+            "- **STS**: 어떤 TC의 Pre-condition / Test Action / Expected Result를 어떻게\n"
+            "- **SUTS**: Input·Output Variables / 경계값 케이스를 어떻게\n"
+            "- **SITS**: 콜체인 / 통합 데이터 흐름에 어떤 영향\n"
+            "- **SDS**: Component Interface / Description 반영 사항\n\n"
+            "### 3. 리뷰 초점\n"
+            "ASIL 등급을 고려한 확인 포인트. 확실치 않으면 '추정'이라 표기."
         )
         messages = [
             {"role": "system", "content": system},

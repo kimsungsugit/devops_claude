@@ -53,8 +53,11 @@ function downloadTextFile(filename, content, mime = 'text/markdown;charset=utf-8
 function parseReturnType(sig) {
   if (!sig) return '';
   const head = String(sig).split('(')[0].trim();
-  const toks = head.split(/\s+/).filter(Boolean);
-  return toks.length > 1 ? toks.slice(0, -1).join(' ') : head;
+  // 저장/링키지 지정자는 반환타입이 아니므로 제거(`static U8 f` → `U8`). 안 그러면
+  // 지정자만 추가돼도 반환타입이 바뀐 것처럼 오표시된다(reviewer W3).
+  const toks = head.split(/\s+/).filter(Boolean)
+    .filter(t => !/^(static|extern|inline|register|auto|__inline|__forceinline)$/.test(t));
+  return toks.length > 1 ? toks.slice(0, -1).join(' ') : (toks[0] || head);
 }
 // 최상위 콤마로만 분리 — 괄호/대괄호/꺾쇠 안의 콤마(함수포인터 `void(*cb)(int,int)`·배열·템플릿)는
 // 분리자로 보지 않는다. `.split(',')`은 함수포인터 파라미터 내부 콤마에서 오분할했다(정확성 버그).
@@ -77,11 +80,17 @@ function parseSignatureParams(sig) {
   const inner = m[1].trim();
   if (!inner || inner.toLowerCase() === 'void') return [];
   return splitTopLevelCommas(inner).map(raw => {
-    const toks = raw.replace(/\*/g, ' * ').split(/\s+/).filter(Boolean);
+    // 배열 접미사 분리: `U8 src[8]`/`char argv[]` → 이름이 대괄호에 가려지지 않게 base와 분리.
+    // 안 하면 last='src[8]'이 식별자 정규식에 안 맞아 name 추출 실패 → named diff가 위치기반으로
+    // 강등되고 삽입/삭제 시 매개변수를 서로 오귀속한다(reviewer Critical #1).
+    const arrM = raw.match(/^([\s\S]*?)\s*((?:\[[^\]]*\])+)\s*$/);
+    const base = arrM ? arrM[1] : raw;
+    const arraySuffix = arrM ? arrM[2] : '';
+    const toks = base.replace(/\*/g, ' * ').split(/\s+/).filter(Boolean);
     const last = toks[toks.length - 1] || '';
     const hasName = toks.length > 1 && /^[A-Za-z_]\w*$/.test(last);
     const name = hasName ? last : '';
-    const type = hasName ? toks.slice(0, -1).join(' ').replace(/\s+\*/g, '*') : raw;
+    const type = hasName ? (toks.slice(0, -1).join(' ').replace(/\s+\*/g, '*') + arraySuffix) : raw;
     return { raw, type, name };
   });
 }
@@ -95,7 +104,7 @@ function diffSignatureParams(before, after) {
     returnAfter: parseReturnType(after),
     returnChanged: !!(before && after) && parseReturnType(before) !== parseReturnType(after),
   };
-  if (bp === null || ap === null) return { ...meta, failed: true, rows: [], beforeCount: 0, afterCount: 0 };
+  if (bp === null || ap === null) return { ...meta, failed: true, rows: [], beforeCount: 0, afterCount: 0, positional: false };
   const bb = bp, aa = ap;
   const rows = [];
   const named = (bb.length + aa.length) > 0 && bb.every(p => p.name) && aa.every(p => p.name);
@@ -117,7 +126,10 @@ function diffSignatureParams(before, after) {
       else if (b) rows.push({ status: 'removed', before: b.raw, after: '' });
     }
   }
-  return { ...meta, failed: false, rows, beforeCount: bb.length, afterCount: aa.length };
+  // 위치기반 폴백(이름 매칭 불가한 매개변수 존재)이면서 실제 매개변수가 있으면, 삽입/삭제 시
+  // 인덱스 밀림으로 오귀속될 수 있으므로 positional 경고 플래그를 세운다(reviewer Critical #1).
+  const positional = !named && (bb.length > 0 || aa.length > 0);
+  return { ...meta, failed: false, rows, beforeCount: bb.length, afterCount: aa.length, positional };
 }
 const PARAM_STATUS = {
   added: { tone: 'success', label: '추가', mark: '＋' },
@@ -125,13 +137,207 @@ const PARAM_STATUS = {
   changed: { tone: 'warning', label: '변경', mark: '~' },
 };
 
-// 함수별 '변경 상세' 셀 — 시그니처는 이전(−)/이후(＋) 선언 원문, 신규/삭제는 해당 원문, 본문 등은 설명.
+// 백틱(`...`)으로 감싼 구간을 <code>로 렌더 — 문서 액션 텍스트의 파라미터명을 코드 스타일로.
+function renderInlineCode(text) {
+  return String(text).split(/(`[^`]+`)/g).map((p, i) =>
+    (p.length > 1 && p.startsWith('`') && p.endsWith('`'))
+      ? <code key={i} style={{ fontFamily: 'var(--font-mono, monospace)', background: 'var(--bg)', padding: '0 3px', borderRadius: 3 }}>{p.slice(1, -1)}</code>
+      : <span key={i}>{p}</span>
+  );
+}
+
+// 매개변수 diff(diffSignatureParams 결과)를 한눈 요약 뱃지로 — 원문 raw(+/-) 대신
+// "＋int flag / 반환 U8→U16"처럼 '무엇이' 바뀌었는지 직접 보여준다. 반환 { badges, hasChange }.
+function summarizeSignatureChange(pdiff) {
+  if (!pdiff || pdiff.failed) return { badges: [], hasChange: false, positional: false };
+  const badges = [];
+  if (pdiff.returnChanged) badges.push({ tone: 'warning', label: `반환 ${pdiff.returnBefore || '(void)'}→${pdiff.returnAfter || '(void)'}` });
+  for (const r of pdiff.rows) {
+    if (r.status === 'added') badges.push({ tone: 'success', label: `＋${r.after}` });
+    else if (r.status === 'removed') badges.push({ tone: 'danger', label: `－${r.before}` });
+    else if (r.status === 'changed') badges.push({ tone: 'warning', label: `${r.before} → ${r.after}` });
+  }
+  return { badges, hasChange: badges.length > 0, positional: !!pdiff.positional };
+}
+
+// diffSignatureParams 결과를 (before,after) 키로 캐시 — "변경 상세" 표가 SIGNATURE 행마다
+// 재계산하는데, 하단 검색창 타이핑 등으로 컴포넌트가 리렌더되면 매번 전량 재계산된다(reviewer W5).
+// 모듈 레벨 Map은 리렌더와 무관하게 유지되어 같은 선언쌍은 1회만 파싱한다(순수함수라 안전).
+const _sigDiffCache = new Map();
+function diffSignatureParamsCached(before, after) {
+  const key = `${before || ''} ${after || ''}`;
+  let v = _sigDiffCache.get(key);
+  if (v === undefined) {
+    v = diffSignatureParams(before, after);
+    if (_sigDiffCache.size < 4000) _sigDiffCache.set(key, v);  // 무한 성장 방지(실전 함수 수 << 4000)
+  }
+  return v;
+}
+
+// 함수 변경을 각 문서(UDS/STS/SUTS/SITS/SDS)의 '구체 편집 액션'으로 변환한다.
+// 매개변수 diff(pdiff)가 정상이면 실제 파라미터명을 넣어 "무엇을 어느 섹션에" 수준으로 구체화하고,
+// 원문이 없으면(pdiff null/failed) change_type 기반의 일반 액션으로 폴백한다. 순수·결정론(LLM 무관).
+// 참고: 백엔드 workflow/impact_ai_guide.py의 _DOC_CHANGE_SENSITIVITY도 변경유형→문서 매핑을
+//   'AI 영향도 분석 가이드' 패널용으로 독립 유지한다(파라미터 단위 아님) — 한쪽 수정 시 다른 쪽도 검토.
+// 반환: { uds:[{section,text,tone}], sts:[...], suts:[...], sits:[...], sds:[...] }
+function buildDocumentActions(d, pdiff) {
+  const ct = (d.changeType || '').toUpperCase();
+  const changed = !!d.changed;
+  const ok = !!pdiff && !pdiff.failed;
+  const added = ok ? pdiff.rows.filter(r => r.status === 'added') : [];
+  const removed = ok ? pdiff.rows.filter(r => r.status === 'removed') : [];
+  const chg = ok ? pdiff.rows.filter(r => r.status === 'changed') : [];
+  const retChanged = ok && pdiff.returnChanged;
+  const posWarn = ok && pdiff.positional;  // 이름 매칭 불가 → 파라미터 귀속이 위치 추정(오귀속 주의)
+  const listAfter = (rows) => rows.map(r => `\`${r.after || r.before}\``).join(', ');
+  const listBefore = (rows) => rows.map(r => `\`${r.before || r.after}\``).join(', ');
+  const pairText = (rows) => rows.map(r => `\`${r.before}\`→\`${r.after}\``).join(', ');
+  const reqN = d.requirements?.length || 0;
+  const stsN = d.stsTestCases?.length || 0;
+  const sutsN = d.sutsTestCases?.length || 0;
+  const A = (section, text, tone = 'neutral') => ({ section, text, tone });
+  const uds = [], sts = [], suts = [], sits = [], sds = [];
+
+  // 간접 영향(직접 변경 아님): 문서 본문 수정이 아니라 '계약 유지 확인 + 회귀'가 핵심.
+  if (!changed) {
+    uds.push(A('영향 확인', `직접 변경 아님(${d.hop}) — 호출 인터페이스 계약 유지 시 문서 수정 없음`, 'neutral'));
+    sts.push(A('회귀', stsN ? `${stsN}개 관련 TC 재실행 판단` : '직접 매핑 TC 없음', 'neutral'));
+    suts.push(A('회귀', sutsN ? `${sutsN}개 단위 TC 재실행` : '관련 단위 TC 없음', 'neutral'));
+    sits.push(A('회귀', '통합 콜체인 재실행 — 계약 유지 확인', 'neutral'));
+    sds.push(A('상호작용', 'Component Interaction(간접 호출 관계) 유효성 확인', 'neutral'));
+    return { uds, sts, suts, sits, sds };
+  }
+
+  // ── UDS (단위 상세 설계) ──
+  if (ct === 'SIGNATURE') {
+    if (posWarn) uds.push(A('주의', '매개변수 이름 매칭 불가 — 아래 귀속은 위치 추정(원문 대조 필요)', 'warning'));
+    uds.push(A('Prototype', '함수 선언을 새 시그니처로 교체', 'info'));
+    if (added.length) uds.push(A('Input/Output Parameters', `${listAfter(added)} 파라미터 행 추가`, 'success'));
+    if (removed.length) uds.push(A('Input/Output Parameters', `${listBefore(removed)} 파라미터 행 삭제`, 'danger'));
+    if (chg.length) uds.push(A('Input/Output Parameters', `${pairText(chg)} 타입 변경`, 'warning'));
+    if (retChanged) uds.push(A('Return Value', `반환타입 \`${pdiff.returnBefore || '(void)'}\`→\`${pdiff.returnAfter || '(void)'}\` 갱신`, 'warning'));
+    // 파라미터/반환 분해 결과가 비었을 때: 파싱 실패(구조 분해 불가)와 실질 무변화(공백/본문)를 구분(reviewer W4).
+    if (!added.length && !removed.length && !chg.length && !retChanged) {
+      uds.push(pdiff && pdiff.failed
+        ? A('Input/Output Parameters', '매개변수 구조 파싱 불가 — 원문 대조 후 반영', 'warning')
+        : A('Input/Output Parameters', '매개변수 목록 변화 없음 — 본문/주석/공백 변경 가능(원문 확인)', 'neutral'));
+    }
+    uds.push(A('Calling Function', '호출부 목록의 인자 사용 영향 확인', 'neutral'));
+  } else if (ct === 'BODY') {
+    uds.push(A('Description', '변경된 로직을 설명/의사코드에 반영', 'info'));
+    uds.push(A('Called Function · Used Globals', '호출 함수·사용 전역 변수 관계 재확인', 'neutral'));
+  } else if (ct === 'VARIABLE') {
+    uds.push(A('Used Globals', '전역/정적 변수 정의 갱신', 'warning'));
+    uds.push(A('Description', '변수 변경에 따른 동작 반영', 'info'));
+  } else if (ct === 'NEW') {
+    uds.push(A('Function Information', '신규 함수 항목 생성 — Prototype/Parameters/Description/Called·Calling', 'success'));
+  } else if (ct === 'DELETE') {
+    uds.push(A('Function Information', '해당 함수 항목 제거 및 호출부 참조 정리', 'danger'));
+  } else if (ct === 'HEADER') {
+    uds.push(A('Interface/Dependency', '헤더 타입·매크로 변경이 인터페이스에 주는 영향 확인', 'neutral'));
+  } else {
+    // 알 수 없는 change_type 방어(다른 4개 문서와 동일하게 catch-all — reviewer Info #8).
+    uds.push(A('Function Information', '변경 내용에 맞게 함수 정보 항목 확인·갱신', 'neutral'));
+  }
+  if (reqN) uds.push(A('추적성', `연관 요구사항 ${reqN}개와의 매핑 유지 확인`, 'neutral'));
+
+  // ── STS (SW 요구 기반 시험) ──
+  if (stsN) {
+    if (ct === 'SIGNATURE') {
+      if (added.length) sts.push(A('Pre-condition', `${listAfter(added)} 입력 초기 조건 추가`, 'success'));
+      sts.push(A('Test Action', `${stsN}개 TC의 함수 호출 인자를 새 시그니처로 갱신`, 'warning'));
+      if (retChanged) sts.push(A('Expected Result', '반환값 판정 기준 갱신', 'warning'));
+    } else if (ct === 'BODY') {
+      sts.push(A('Expected Result', `${stsN}개 TC의 기대 동작 재확인`, 'info'));
+      sts.push(A('Test Action', '변경 로직에 맞게 시퀀스 재검토', 'info'));
+    } else if (ct === 'VARIABLE') {
+      sts.push(A('Pre-condition', '변수 초기값/설정 반영', 'warning'));
+    } else if (ct === 'DELETE') {
+      sts.push(A('커버리지', `${stsN}개 TC의 요구사항 커버리지 재확인`, 'danger'));
+    } else {
+      sts.push(A('검토', `${stsN}개 TC 영향 확인`, 'neutral'));
+    }
+  } else {
+    sts.push(A('매핑', reqN ? '요구사항은 있으나 STS TC 미매핑 — 수동 확인' : '직접 매핑 요구사항/TC 없음', 'neutral'));
+  }
+
+  // ── SUTS (SW 단위시험) ──
+  if (ct === 'SIGNATURE') {
+    if (added.length) suts.push(A('Input Variables', `${listAfter(added)} 입력 변수 추가 — 경계값(MIN/MID/MAX/INV) 케이스`, 'success'));
+    if (removed.length) suts.push(A('Input Variables', `${listBefore(removed)} 입력 변수 제거`, 'danger'));
+    if (chg.length) suts.push(A('Input Variables', `${pairText(chg)} — 타입 변경, 경계값 재계산`, 'warning'));
+    if (retChanged) suts.push(A('Output Variables', '기대 출력 타입/값 갱신', 'warning'));
+    suts.push(A('회귀', sutsN ? `기존 ${sutsN}개 단위 TC 재검증` : '단위 TC 신규 필요', sutsN ? 'neutral' : 'warning'));
+  } else if (ct === 'BODY') {
+    suts.push(A('Expected', sutsN ? `${sutsN}개 TC 경계값·기대출력 재계산` : '로직 변경 — TC 없음, 신규 생성 권장', sutsN ? 'info' : 'warning'));
+  } else if (ct === 'NEW') {
+    suts.push(A('신규 TC', '단위 TC 신규 작성 — 경계값 분석(ABV: MIN/MID/MAX/INV)', 'success'));
+  } else if (ct === 'DELETE') {
+    suts.push(A('TC 정리', sutsN ? `${sutsN}개 관련 단위 TC 비활성화` : '관련 단위 TC 없음', 'danger'));
+  } else if (ct === 'VARIABLE') {
+    suts.push(A('입출력', '변수 입출력 매핑 확인', 'warning'));
+  } else {
+    suts.push(A('확인', sutsN ? `${sutsN}개 단위 TC 검토` : '관련 단위 TC 없음', 'neutral'));
+  }
+
+  // ── SITS (SW 통합시험) ──
+  if (ct === 'SIGNATURE') {
+    sits.push(A('Call Chain', `${d.function}의 콜체인 인자 전달 재검증(호출·피호출 양방향)`, 'warning'));
+    if (added.length) sits.push(A('Data Flow', `통합 데이터 흐름에 ${listAfter(added)} 반영`, 'success'));
+  } else if (ct === 'BODY') {
+    sits.push(A('시나리오', '통합 시나리오 기대값 재확인', 'info'));
+  } else if (ct === 'NEW') {
+    sits.push(A('콜체인', '신규 함수의 콜체인 포함 여부 및 통합 케이스 확인', 'success'));
+  } else if (ct === 'DELETE') {
+    sits.push(A('콜체인', '콜체인 단절/대체 경로 확인', 'danger'));
+  } else if (ct === 'HEADER') {
+    sits.push(A('의존성', '헤더 변경이 콜체인 인터페이스 의존성에 주는 영향 확인', 'neutral'));
+  } else {
+    sits.push(A('확인', '통합 데이터 흐름 영향 확인', 'neutral'));
+  }
+
+  // ── SDS (SW 아키텍처 설계) ──
+  if (ct === 'SIGNATURE') {
+    sds.push(A('Component Interface', `모듈 인터페이스(포트/파라미터)에 ${(added.length || chg.length) ? '변경 파라미터' : '새 시그니처'} 반영`, 'warning'));
+  } else if (ct === 'BODY') {
+    sds.push(A('Component Description', '컴포넌트 동작 설명 갱신', 'info'));
+  } else if (ct === 'VARIABLE') {
+    sds.push(A('Data Flow', '데이터 흐름/인터페이스 갱신', 'warning'));
+  } else if (ct === 'NEW') {
+    sds.push(A('설계 추가', '신규 컴포넌트/함수 아키텍처 반영', 'success'));
+  } else if (ct === 'DELETE') {
+    sds.push(A('설계 제거', '아키텍처에서 컴포넌트/함수 제거', 'danger'));
+  } else {
+    sds.push(A('확인', 'Component Description/State Transition 영향 확인', 'neutral'));
+  }
+
+  return { uds, sts, suts, sits, sds };
+}
+
+// 함수별 '변경 상세' 셀 — 시그니처는 매개변수 단위 요약 뱃지, 신규/삭제는 원문, 본문 등은 설명.
 function renderChangeDetailCell(kind, detail) {
   const mono = { fontFamily: 'var(--font-mono, monospace)', fontSize: 11, whiteSpace: 'pre-wrap', wordBreak: 'break-all' };
   if (kind === 'SIGNATURE') {
     if (detail && (detail.before || detail.after)) {
+      const pdiff = diffSignatureParamsCached(detail.before, detail.after);
+      const summary = summarizeSignatureChange(pdiff);
+      const posNote = summary.positional ? '\n⚠ 위치 추정 — 이름 매칭 불가 매개변수 존재(삽입/삭제 위치가 다를 수 있음)' : '';
+      const rawTitle = `이전: ${detail.before || '(없음)'}\n이후: ${detail.after || '(없음)'}${posNote}`;
+      if (summary.hasChange) {
+        // 매개변수 단위 요약 뱃지 — '무엇이' 바뀌었는지 직접 표시. 원문은 title 툴팁으로.
+        return (
+          <div style={{ display: 'flex', gap: 3, flexWrap: 'wrap', alignItems: 'center' }} title={rawTitle}>
+            {summary.positional && <span title="위치 기반 추정 — 삽입/삭제 위치가 다를 수 있음" style={{ fontSize: 10 }}>⚠</span>}
+            {summary.badges.map((b, i) => (
+              <span key={i} className={`pill pill-${b.tone}`} style={{ fontSize: 9, fontFamily: 'var(--font-mono, monospace)' }}>{b.label}</span>
+            ))}
+          </div>
+        );
+      }
+      // hasChange=false → 파싱 실패(구조 분해 불가)와 파싱 성공+실질 무변화(공백/본문)를 구분(reviewer W4).
+      const fbTitle = pdiff?.failed ? '매개변수 구조 파싱 불가 — 원문 대조' : '매개변수 변화 없음(공백/본문 등) — 원문 대조';
       return (
-        <div style={mono}>
+        <div style={mono} title={fbTitle}>
           {detail.before && <div style={{ color: 'var(--color-danger)' }}>− {detail.before}</div>}
           {detail.after && <div style={{ color: 'var(--color-success)' }}>＋ {detail.after}</div>}
         </div>
@@ -420,10 +626,6 @@ export default function ImpactGuideSection({ analysisResult }) {
           requirements: reqs,
           stsTestCases: [...stsTcSet],
           sutsTestCases: sutsTcList,
-          udsAction: actions.uds,
-          stsAction: actions.sts,
-          sutsAction: actions.suts,
-          sdsAction: actions.sds,
         });
       }
       // 직접(변경) → 1-hop → 2-hop 순으로 정렬(변경 함수 우선 노출), 동일 hop은 함수명순.
@@ -557,7 +759,9 @@ export default function ImpactGuideSection({ analysisResult }) {
         before: cd.before || '',
         after: cd.after || '',
         asil: d.asil || '',
-        module: functionMeta[String(d.function).toLowerCase()]?.module || '',
+        // function_meta는 원본 케이스 키(impact_orchestrator.py:1326 fn 그대로) — change_details처럼
+        // 소문자화하면 대소문자 혼용 함수명(g_DrvIn_Main 등)에서 조회 실패 → module 상시 공백(reviewer W2).
+        module: functionMeta[d.function]?.module || '',
         requirements: (d.requirements || []).slice(0, 12),
       });
       // race 가드: 응답 도착 시 사용자가 이미 다른 함수로 전환했으면 결과 폐기(오표시/슬롯 오염 방지).
@@ -1085,7 +1289,17 @@ export default function ImpactGuideSection({ analysisResult }) {
             const ct = (d.changeType || '').toUpperCase();
             const cd = changeDetails[String(d.function).toLowerCase()] || {};
             const hasRaw = !!(cd.before || cd.after);
-            const pdiff = hasRaw ? diffSignatureParams(cd.before, cd.after) : null;
+            const pdiff = hasRaw ? diffSignatureParamsCached(cd.before, cd.after) : null;
+            const sigSummary = summarizeSignatureChange(pdiff);
+            // 문서별 구체 편집 액션(결정론) — 실제 파라미터 diff·요구사항·TC 반영. LLM 무관·즉시.
+            const docActions = buildDocumentActions(d, pdiff);
+            const DOC_CARDS = [
+              { key: 'uds', icon: '📘', title: 'UDS 업데이트', note: d.requirements.length ? `관련 요구사항: ${d.requirements.slice(0, 5).join(', ')}${d.requirements.length > 5 ? ` +${d.requirements.length - 5}개` : ''}` : '' },
+              { key: 'sts', icon: '📗', title: 'STS 검토', chips: d.stsTestCases },
+              { key: 'suts', icon: '📙', title: 'SUTS 업데이트', chips: d.sutsTestCases },
+              { key: 'sits', icon: '📕', title: 'SITS 검토', note: '통합 콜체인·데이터 흐름' },
+              { key: 'sds', icon: '📋', title: 'SDS 확인', note: 'SW 아키텍처 설계' },
+            ];
             const exp = explain.fn === d.function ? explain : { text: '', loading: false, error: '' };
             const close = () => setSelectedFn(null);
             return (
@@ -1116,6 +1330,20 @@ export default function ImpactGuideSection({ analysisResult }) {
                       🔧 시그니처·매개변수 변화 <span className="text-muted" style={{ fontWeight: 400, fontSize: 10 }}>(변경 원문 기반)</span>
                     </div>
                     <div style={{ padding: 10 }}>
+                      {/* 한눈 요약 — 무엇이 추가/삭제/타입변경됐는지 뱃지로(원문 raw 대신 직접 표시) */}
+                      {sigSummary.hasChange && (
+                        <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginBottom: 8 }}>
+                          {sigSummary.badges.map((b, i) => (
+                            <span key={i} className={`pill pill-${b.tone}`} style={{ fontSize: 10, fontFamily: 'var(--font-mono, monospace)' }}>{b.label}</span>
+                          ))}
+                        </div>
+                      )}
+                      {/* 위치 추정 경고 — 이름 매칭 불가 매개변수(함수포인터 등)로 귀속이 부정확할 수 있음 */}
+                      {sigSummary.positional && (
+                        <div style={{ fontSize: 10, color: 'var(--color-warning)', marginBottom: 8, padding: '4px 8px', background: 'var(--bg)', borderRadius: 4, borderLeft: '2px solid var(--color-warning)' }}>
+                          ⚠ 매개변수 이름을 매칭할 수 없어 <strong>위치 기반</strong>으로 추정했습니다. 삽입/삭제 위치가 실제와 다를 수 있으니 아래 원문을 대조하세요.
+                        </div>
+                      )}
                       {pdiff?.returnChanged && (
                         <div style={{ fontSize: 11, marginBottom: 8 }}>
                           <strong>반환 타입:</strong>{' '}
@@ -1148,10 +1376,14 @@ export default function ImpactGuideSection({ analysisResult }) {
                           {pdiff?.failed ? '⚠ 매개변수 구조 파싱 불가 — 아래 원문을 직접 대조하세요.' : '매개변수 목록 변화 없음 (본문/기타 변경).'}
                         </div>
                       )}
-                      <div style={{ fontFamily: 'var(--font-mono, monospace)', fontSize: 11, whiteSpace: 'pre-wrap', wordBreak: 'break-all', background: 'var(--bg)', borderRadius: 4, padding: '6px 8px' }}>
-                        {cd.before && <div style={{ color: 'var(--color-danger)' }}>− {cd.before}</div>}
-                        {cd.after && <div style={{ color: 'var(--color-success)' }}>＋ {cd.after}</div>}
-                      </div>
+                      {/* 변경 원문(선언) — 기본 접힘. 요약/테이블로 이해되므로 필요 시만 펼쳐 대조 */}
+                      <details>
+                        <summary style={{ fontSize: 10, color: 'var(--text-muted)', cursor: 'pointer' }}>변경 원문(선언) 보기</summary>
+                        <div style={{ fontFamily: 'var(--font-mono, monospace)', fontSize: 11, whiteSpace: 'pre-wrap', wordBreak: 'break-all', background: 'var(--bg)', borderRadius: 4, padding: '6px 8px', marginTop: 4 }}>
+                          {cd.before && <div style={{ color: 'var(--color-danger)' }}>− {cd.before}</div>}
+                          {cd.after && <div style={{ color: 'var(--color-success)' }}>＋ {cd.after}</div>}
+                        </div>
+                      </details>
                     </div>
                   </div>
                 )}
@@ -1184,79 +1416,40 @@ export default function ImpactGuideSection({ analysisResult }) {
                   {ct === 'DELETE' && '함수가 삭제되었습니다. UDS에서 해당 함수를 제거하고, 관련 TC를 비활성화해야 합니다.'}
                 </div>
 
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
-                  {/* UDS */}
-                  <div style={{ padding: 10, border: '1px solid var(--border)', borderRadius: 6 }}>
-                    <div style={{ fontWeight: 600, fontSize: 12, marginBottom: 6, color: 'var(--accent)' }}>📘 UDS 업데이트</div>
-                    {d.requirements.length > 0 ? (
-                      <>
-                        <div className="text-sm" style={{ marginBottom: 6 }}>다음 항목을 확인하고 업데이트하세요:</div>
-                        <ul style={{ fontSize: 11, margin: '0 0 6px 16px', padding: 0 }}>
-                          {ct === 'BODY' && <><li>Description — 변경된 로직 반영</li><li>Called Function — 호출 함수 변경 여부</li><li>Used Globals — 사용 변수 변경 여부</li></>}
-                          {ct === 'SIGNATURE' && <><li>Prototype — 새 시그니처 반영</li><li>Input/Output Parameters — 파라미터 변경</li><li>Calling Function — 호출부 영향 확인</li></>}
-                          {ct === 'VARIABLE' && <><li>Used Globals (Global/Static) — 변수 정의 업데이트</li><li>Description — 변수 변경에 따른 동작 변경</li></>}
-                          {!['BODY', 'SIGNATURE', 'VARIABLE'].includes(ct) && <><li>Function Information — 변경/영향 내용에 맞게 항목 확인·갱신</li><li>Called/Calling Function — 호출 관계 유효성 확인</li></>}
-                        </ul>
-                        <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>
-                          관련 요구사항: {d.requirements.slice(0, 5).join(', ')}{d.requirements.length > 5 ? ` +${d.requirements.length - 5}개` : ''}
-                        </div>
-                      </>
-                    ) : (
-                      <div className="text-sm text-muted">직접 매핑 없음 — 간접 영향 확인 필요</div>
-                    )}
-                  </div>
-
-                  {/* STS */}
-                  <div style={{ padding: 10, border: '1px solid var(--border)', borderRadius: 6 }}>
-                    <div style={{ fontWeight: 600, fontSize: 12, marginBottom: 6, color: 'var(--accent)' }}>📗 STS 검토</div>
-                    {d.stsTestCases.length > 0 ? (
-                      <>
-                        <div className="text-sm" style={{ marginBottom: 6 }}><strong>{d.stsTestCases.length}개 TC</strong> 검토 필요:</div>
-                        <ul style={{ fontSize: 11, margin: '0 0 6px 16px', padding: 0 }}>
-                          {ct === 'BODY' && <><li>Test Action (Sequence) — 변경된 로직에 맞게 수정</li><li>Expected Result — 기대 결과 재확인</li><li>Pre-condition — 전제조건 변경 여부</li></>}
-                          {ct === 'SIGNATURE' && <><li>Pre-condition — 파라미터 변경 반영</li><li>Test Action — 호출 방식 변경</li><li>Expected Result — 리턴값 변경 확인</li></>}
-                          {ct === 'VARIABLE' && <><li>Test Action — 변수 초기값/설정 변경</li><li>Expected Result — 변수 기반 결과 변경</li></>}
-                        </ul>
-                        <div style={{ fontSize: 10, maxHeight: 60, overflow: 'auto' }}>
-                          {d.stsTestCases.slice(0, 10).map(tc => (
-                            <span key={tc} className="pill pill-neutral" style={{ fontSize: 9, margin: 1 }}>{tc}</span>
-                          ))}
-                          {d.stsTestCases.length > 10 && <span className="text-muted" style={{ fontSize: 9 }}> +{d.stsTestCases.length - 10}개</span>}
-                        </div>
-                      </>
-                    ) : (
-                      <div className="text-sm text-muted">직접 매핑된 TC 없음 — 관련 요구사항의 TC를 수동 확인</div>
-                    )}
-                  </div>
-
-                  {/* SUTS */}
-                  <div style={{ padding: 10, border: '1px solid var(--border)', borderRadius: 6 }}>
-                    <div style={{ fontWeight: 600, fontSize: 12, marginBottom: 6, color: 'var(--accent)' }}>📙 SUTS 업데이트</div>
-                    {d.sutsTestCases.length > 0 ? (
-                      <>
-                        <div className="text-sm" style={{ marginBottom: 4 }}><strong>{d.sutsTestCases.length}개</strong> 단위 테스트 시퀀스 수정:</div>
-                        <ul style={{ fontSize: 11, margin: '0 0 0 16px', padding: 0 }}>
-                          <li>Input Variables — 입력값 업데이트</li>
-                          <li>Output Variables — 기대 출력값 재검증</li>
-                          <li>Sequences — 테스트 시퀀스 순서 확인</li>
-                        </ul>
-                      </>
-                    ) : (
-                      <div className="text-sm text-muted">해당 단위 TC 없음{d.hop !== 'direct' ? ' (간접 영향)' : ''}</div>
-                    )}
-                  </div>
-
-                  {/* SDS */}
-                  <div style={{ padding: 10, border: '1px solid var(--border)', borderRadius: 6 }}>
-                    <div style={{ fontWeight: 600, fontSize: 12, marginBottom: 6, color: 'var(--accent)' }}>📋 SDS 확인</div>
-                    <div className="text-sm" style={{ marginBottom: 4 }}>SW Component 설계 문서 확인:</div>
-                    <ul style={{ fontSize: 11, margin: '0 0 0 16px', padding: 0 }}>
-                      {ct === 'SIGNATURE' && <li>Component Interface — 인터페이스 변경 반영</li>}
-                      <li>Component Description — 동작 설명 확인</li>
-                      <li>State Transition — 상태 전이 영향 확인</li>
-                      {d.hop !== 'direct' && <li>Component Interaction — 간접 호출 관계 확인</li>}
-                    </ul>
-                  </div>
+                <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 6 }}>
+                  각 문서에 <strong>무엇을 어느 섹션에</strong> 반영해야 하는지 — 실제 매개변수 변화 기반(결정론).
+                </div>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(250px, 1fr))', gap: 10 }}>
+                  {DOC_CARDS.map(card => {
+                    const acts = docActions[card.key] || [];
+                    const chips = card.chips || [];
+                    return (
+                      <div key={card.key} style={{ padding: 10, border: '1px solid var(--border)', borderRadius: 6 }}>
+                        <div style={{ fontWeight: 600, fontSize: 12, marginBottom: 6, color: 'var(--accent)' }}>{card.icon} {card.title}</div>
+                        {acts.length > 0 ? (
+                          <ul style={{ fontSize: 11, margin: '0 0 4px 0', padding: 0, listStyle: 'none' }}>
+                            {acts.map((a, i) => (
+                              <li key={i} style={{ marginBottom: 5, display: 'flex', gap: 5, alignItems: 'baseline' }}>
+                                <span className={`pill pill-${a.tone}`} style={{ fontSize: 8, flexShrink: 0, whiteSpace: 'nowrap' }}>{a.section}</span>
+                                <span style={{ lineHeight: 1.4 }}>{renderInlineCode(a.text)}</span>
+                              </li>
+                            ))}
+                          </ul>
+                        ) : (
+                          <div className="text-sm text-muted">특이 액션 없음</div>
+                        )}
+                        {chips.length > 0 && (
+                          <div style={{ fontSize: 10, maxHeight: 56, overflow: 'auto', marginTop: 2 }}>
+                            {chips.slice(0, 10).map(tc => (
+                              <span key={tc} className="pill pill-neutral" style={{ fontSize: 9, margin: 1 }}>{tc}</span>
+                            ))}
+                            {chips.length > 10 && <span className="text-muted" style={{ fontSize: 9 }}> +{chips.length - 10}개</span>}
+                          </div>
+                        )}
+                        {card.note && <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 4 }}>{card.note}</div>}
+                      </div>
+                    );
+                  })}
                 </div>
                 </div>
               </div>

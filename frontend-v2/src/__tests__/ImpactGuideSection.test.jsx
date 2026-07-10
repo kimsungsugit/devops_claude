@@ -345,13 +345,32 @@ describe('ImpactGuideSection', () => {
     await waitFor(() => expect(screen.getByText(/함수별 영향 가이드/)).toBeInTheDocument());
     // 가이드 표의 '상세' 버튼(정확 매칭 — '상세 가이드 생성'과 구분)
     await user.click(screen.getByRole('button', { name: '상세' }));
-    // 모달: 매개변수 변화 섹션 + 추가 pill + 변경 후 원문
+    // 모달: 매개변수 변화 섹션 + '추가'(매개변수 pill + 문서 액션 다중) + 변경 후 원문
     expect(screen.getByText(/시그니처·매개변수 변화/)).toBeInTheDocument();
-    expect(screen.getByText(/추가/)).toBeInTheDocument();  // 매개변수 diff pill(모달 전용)
-    // 변경 후 원문(변경상세 패널 + 모달 양쪽 노출 — 최소 1개 이상)
+    expect(screen.getAllByText(/추가/).length).toBeGreaterThan(0);  // 매개변수 diff pill + 문서 액션
+    // 문서별 구체 액션 카드 — SITS 포함 5문서 + 실제 파라미터명(int b) 액션에 반영(결정론)
+    expect(screen.getByText(/SITS 검토/)).toBeInTheDocument();
+    expect(screen.getAllByText(/int b/).length).toBeGreaterThanOrEqual(2);  // 요약 뱃지+테이블+문서 액션
+    // 변경 후 원문(변경상세 패널 + 모달 접기 양쪽 노출 — 최소 1개 이상)
     expect(screen.getAllByText(/int foo\(int a, int b\)/).length).toBeGreaterThanOrEqual(1);
     // AI 설명 버튼 노출
     expect(screen.getByRole('button', { name: /AI로 설명 생성/ })).toBeInTheDocument();
+  });
+
+  // STS-IMPACT-017: 목록 '변경 상세' 셀 — SIGNATURE는 원문 raw 대신 매개변수 요약 뱃지(＋int b)
+  it('변경 상세 셀: SIGNATURE는 매개변수 요약 뱃지로 표시된다(원문 raw 아님)', () => {
+    const analysisResult = {
+      impactData: {
+        trigger: { changed_files: ['a.c'] },
+        changed_function_types: { foo: 'SIGNATURE' },
+        impact: { direct: ['foo'] },
+        function_meta: { foo: { asil: 'B' } },
+        change_details: { foo: { before: 'int foo(int a)', after: 'int foo(int a, int b)' } },
+      },
+    };
+    render(<ImpactGuideSection analysisResult={analysisResult} />);
+    // '변경 상세' 패널은 가이드 생성 없이 항상 렌더 — 셀에 '＋int b' 요약 뱃지가 뜬다
+    expect(screen.getAllByText('＋int b').length).toBeGreaterThanOrEqual(1);
   });
 
   // STS-IMPACT-016: 함수포인터 매개변수(내부 콤마) — depth 인식 분할로 콜백만 변경 표시(flag 오보고 없음)
@@ -381,5 +400,58 @@ describe('ImpactGuideSection', () => {
     // flag가 '추가'/'삭제' pill과 함께 오보고되지 않음(변화 없는 매개변수)
     expect(screen.queryByText('추가')).not.toBeInTheDocument();
     expect(screen.queryByText('삭제')).not.toBeInTheDocument();
+  });
+
+  // STS-IMPACT-018: 배열 파라미터 앞 삽입 — 이름 매칭으로 삽입분만 '추가'(Critical #1 회귀 방지)
+  it('상세 모달: 배열 파라미터 앞 삽입 시 삽입분만 추가로 귀속(위치 오귀속 없음)', async () => {
+    const { post } = await import('../api.js');
+    post.mockResolvedValue({ ok: false });
+    const user = userEvent.setup();
+    const analysisResult = {
+      impactData: {
+        trigger: { changed_files: ['a.c'] },
+        changed_function_types: { s_CopyBuf: 'SIGNATURE' },
+        impact: { direct: ['s_CopyBuf'] },
+        function_meta: { s_CopyBuf: { asil: 'B' } },
+        // change_details 키는 소문자(백엔드 .lower() 관례)
+        change_details: { s_copybuf: {
+          before: 'void s_CopyBuf(U8 src[8], U8 dst[8])',
+          after: 'void s_CopyBuf(U8 len, U8 src[8], U8 dst[8])',
+        } },
+      },
+    };
+    render(<ImpactGuideSection analysisResult={analysisResult} />);
+    await user.click(screen.getByText(/상세 가이드 생성/));
+    await waitFor(() => expect(screen.getByText(/함수별 영향 가이드/)).toBeInTheDocument());
+    await user.click(screen.getByRole('button', { name: '상세' }));
+    // 삽입된 'U8 len'만 추가 뱃지로 귀속 — 배열 src/dst는 이름 매칭돼 오귀속되지 않음
+    expect(screen.getAllByText('＋U8 len').length).toBeGreaterThanOrEqual(1);
+    // 위치 강등 증상(기존 배열 파라미터가 '변경'으로 오보고)이 없음
+    expect(screen.queryByText(/U8 src\[8\].*→.*U8 len/)).not.toBeInTheDocument();
+  });
+
+  // STS-IMPACT-019: 이름 매칭 불가 매개변수(함수포인터) → 위치 추정 경고 배너 노출
+  it('상세 모달: 이름 매칭 불가 매개변수는 위치 추정 경고 배너를 표시한다', async () => {
+    const { post } = await import('../api.js');
+    post.mockResolvedValue({ ok: false });
+    const user = userEvent.setup();
+    const analysisResult = {
+      impactData: {
+        trigger: { changed_files: ['a.c'] },
+        changed_function_types: { reg2: 'SIGNATURE' },
+        impact: { direct: ['reg2'] },
+        function_meta: { reg2: { asil: 'B' } },
+        change_details: { reg2: {
+          before: 'void reg2(void (*cb)(int))',
+          after: 'void reg2(void (*cb)(int), int flag)',
+        } },
+      },
+    };
+    render(<ImpactGuideSection analysisResult={analysisResult} />);
+    await user.click(screen.getByText(/상세 가이드 생성/));
+    await waitFor(() => expect(screen.getByText(/함수별 영향 가이드/)).toBeInTheDocument());
+    await user.click(screen.getByRole('button', { name: '상세' }));
+    // 위치 추정 경고 배너(모달 시그니처 섹션)
+    expect(screen.getByText('위치 기반')).toBeInTheDocument();
   });
 });
