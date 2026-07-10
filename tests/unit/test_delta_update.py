@@ -322,6 +322,40 @@ def test_classify_from_diff_text_crossfile_homonym_static_not_masked():
     assert types.get("moved_fn") == "SIGNATURE", types
 
 
+def test_extract_function_diffs_per_function_hunks():
+    """함수별 본문 diff hunk를 함수 컨텍스트(@@..@@ func)로 귀속 — 소문자 키, 함수 간 미혼입."""
+    from workflow.delta_update import extract_function_diffs
+    diff = "\n".join([
+        "Index: sources/eeprom.c",
+        "===================================================================",
+        "--- sources/eeprom.c\t(revision 100)", "+++ sources/eeprom.c\t(revision 150)",
+        "@@ -10,4 +10,5 @@ g_Main(void)",
+        "     U8 s = 0;", "-    if (a) {", "+    if (a && b) {", "         w();",
+        "@@ -50,3 +51,3 @@ s_Calc(U16 addr)",
+        "-    sum = addr;", "+    sum = addr ^ 0xFF;", "     return sum;", "",
+    ])
+    r = extract_function_diffs(diff)
+    assert "g_main" in r and "s_calc" in r          # 소문자 키(조인 규약)
+    assert "if (a && b)" in r["g_main"]
+    assert "addr ^ 0xFF" in r["s_calc"]
+    assert "addr ^ 0xFF" not in r["g_main"]         # 함수 귀속 분리(미혼입)
+
+
+def test_extract_function_diffs_line_cap():
+    """함수당 max_lines_per_func 절단으로 프롬프트 크기 관리 — 생략 안내 포함."""
+    from workflow.delta_update import extract_function_diffs
+    body = "\n".join(f"+    x{i} = {i};" for i in range(100))
+    diff = "\n".join([
+        "Index: sources/big.c",
+        "===================================================================",
+        "--- sources/big.c\t(revision 100)", "+++ sources/big.c\t(revision 150)",
+        "@@ -1,1 +1,100 @@ big_fn(void)", body, "",
+    ])
+    r = extract_function_diffs(diff, max_lines_per_func=20)
+    assert "생략" in r["big_fn"]
+    assert len(r["big_fn"].splitlines()) <= 22      # 20줄 + 생략 안내
+
+
 def test_diff_has_function_context():
     """positive-context 가드 — -x -p 컨텍스트 유무를 rc와 독립적으로 판정."""
     from workflow.delta_update import diff_has_function_context

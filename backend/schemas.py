@@ -653,11 +653,14 @@ class ImpactExplainChangeRequest(BaseModel):
     """POST /api/impact/explain-change 입력 — 단일 함수 변경의 자연어 설명(Gemini).
 
     선언 원문(before/after)은 UI가 change_details에서 넘긴 svn diff 원문. 값 길이는 상한을
-    둬 과대 페이로드/프롬프트 남용을 막는다(선언 라인 수준이라 4000자면 충분)."""
+    둬 과대 페이로드/프롬프트 남용을 막는다(선언 라인 수준이라 4000자면 충분).
+    function_diff는 함수 본문 변경 hunk(BODY 함수도 실제 코드 근거 제공) — 서버에서 60줄 cap된
+    값이라 8000자면 충분하다."""
     function: str = Field(default="", max_length=200)
     change_type: str = Field(default="", max_length=40)
     before: str = Field(default="", max_length=4000)
     after: str = Field(default="", max_length=4000)
+    function_diff: str = Field(default="", max_length=8000)
     asil: str = Field(default="", max_length=20)
     module: str = Field(default="", max_length=200)
     requirements: List[str] = Field(default_factory=list, max_length=20)

@@ -1321,6 +1321,16 @@ def run_impact_update(
                 if _before and _after and _before != _after and changed_types.get(_actual) in ("BODY", "VARIABLE"):
                     changed_types[_actual] = "SIGNATURE"
 
+        # AI 설명용 함수별 본문 diff 원문 — BODY 등 선언 미변경 함수도 실제 코드 변경(hunk)을 근거로
+        # 제공해, Gemini가 '추정' 대신 실제 변수/로직 기반의 구체 문서 지침을 생성하도록 한다.
+        function_diffs: Dict[str, str] = {}
+        if _precise_diff_text:
+            try:
+                from workflow.delta_update import extract_function_diffs
+                function_diffs = extract_function_diffs(_precise_diff_text)
+            except Exception as _fd_exc:  # noqa: BLE001 — 원문 보강 실패는 분석을 막지 않음
+                logger.debug("function_diffs extraction failed: %s", _fd_exc)
+
         # ── ISO 26262 증거 보강: 함수별 ASIL/메타 + ASIL 차등 + 회귀시험 선정 + 커버리지 타깃 ──
         def _asil_of(_fn: str) -> str:
             _a = str((by_name.get(_fn) or {}).get("asil") or "").strip().upper()
@@ -1461,6 +1471,7 @@ def run_impact_update(
             "trigger": trigger.to_dict(),
             "changed_function_types": dict(sorted(changed_types.items())),
             "change_details": change_details,
+            "function_diffs": function_diffs,
             "impact": impact_groups,
             "warnings": warnings,
             "actions": actions,

@@ -358,6 +358,49 @@ def _split_svn_diff_by_file(combined_diff: str) -> List[Tuple[str, str]]:
     return out
 
 
+def extract_function_diffs(
+    combined_diff: str,
+    *,
+    max_lines_per_func: int = 60,
+    max_total_chars: int = 400_000,
+) -> Dict[str, str]:
+    """svn diff에서 함수별 본문 변경 hunk를 추출한다 — AI 설명용 원문 제공(BODY 함수도 실제 코드 근거).
+
+    각 hunk의 함수 컨텍스트(`@@ ... @@ <func>`)로 귀속하고, 한 함수의 여러 hunk는 이어붙인다.
+    함수당 max_lines_per_func 줄로 절단(AI 프롬프트 크기 관리)하고, 전체 max_total_chars를 넘으면
+    이후 함수는 저장하지 않는다(응답 폭주 방지). 반환 키는 소문자(change_details·프론트 조인 규약과 동일).
+    컨텍스트 없는 bare hunk(`@@ .. @@`만)는 함수 귀속 불가라 제외한다(-x -p 필수).
+    """
+    per_func: Dict[str, List[str]] = {}
+    for _path, block in _split_svn_diff_by_file(combined_diff):
+        cur_func = None
+        cur_hunk: List[str] = []
+        for ln in block.splitlines():
+            if ln.startswith("@@ "):
+                if cur_func and cur_hunk:
+                    per_func.setdefault(cur_func.lower(), []).append("\n".join(cur_hunk))
+                m = _HUNK_FUNC.match(ln)
+                cur_func = m.group(1) if m else None
+                cur_hunk = [ln] if cur_func else []
+            elif cur_func is not None:
+                cur_hunk.append(ln)
+        if cur_func and cur_hunk:  # 파일 끝 — 마지막 hunk flush
+            per_func.setdefault(cur_func.lower(), []).append("\n".join(cur_hunk))
+
+    out: Dict[str, str] = {}
+    total = 0
+    for func, hunks in per_func.items():
+        text = "\n".join(hunks)
+        lines = text.splitlines()
+        if len(lines) > max_lines_per_func:
+            text = "\n".join(lines[:max_lines_per_func]) + f"\n… (+{len(lines) - max_lines_per_func}줄 생략)"
+        if total + len(text) > max_total_chars:
+            break
+        out[func] = text
+        total += len(text)
+    return out
+
+
 def classify_changed_functions_from_diff_text(
     combined_diff: str,
 ) -> Tuple[Dict[str, str], Set[str]]:

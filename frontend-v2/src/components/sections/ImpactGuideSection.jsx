@@ -481,6 +481,8 @@ export default function ImpactGuideSection({ analysisResult }) {
   const activeChangedFiles = demoMode ? ['DrvIn_Main_PDS.c', 'Ap_MotorCtrl_PDS.c'] : changedFiles;
   // 함수별 변경 상세(시그니처 이전→이후 원문). 키는 소문자 함수명(백엔드 changed_types와 동일).
   const changeDetails = impact?.change_details ?? {};
+  // 함수별 본문 diff 원문(AI 설명용) — BODY 등 선언 미변경 함수도 실제 코드 근거를 Gemini에 전달.
+  const functionDiffs = impact?.function_diffs ?? {};
   // 변경종류 요약(신규/삭제/시그니처/본문/헤더/변수 개수) — 데모 포함(activeFnEntries 기준).
   const changeSummary = { NEW: 0, DELETE: 0, SIGNATURE: 0, BODY: 0, HEADER: 0, VARIABLE: 0 };
   for (const [, k] of activeFnEntries) { if (k in changeSummary) changeSummary[k] += 1; }
@@ -751,6 +753,7 @@ export default function ImpactGuideSection({ analysisResult }) {
   const fetchExplanation = useCallback(async (d) => {
     if (!d) return;
     const cd = changeDetails[String(d.function).toLowerCase()] || {};
+    const fd = functionDiffs[String(d.function).toLowerCase()] || '';
     setExplain({ fn: d.function, text: '', loading: true, error: '' });
     try {
       const res = await post('/api/impact/explain-change', {
@@ -758,6 +761,7 @@ export default function ImpactGuideSection({ analysisResult }) {
         change_type: d.changeType || '',
         before: cd.before || '',
         after: cd.after || '',
+        function_diff: fd,  // 본문 diff 원문 — BODY 함수도 실제 코드 근거로 AI 설명
         asil: d.asil || '',
         // function_meta는 원본 케이스 키(impact_orchestrator.py:1326 fn 그대로) — change_details처럼
         // 소문자화하면 대소문자 혼용 함수명(g_DrvIn_Main 등)에서 조회 실패 → module 상시 공백(reviewer W2).
@@ -774,7 +778,7 @@ export default function ImpactGuideSection({ analysisResult }) {
     } catch (e) {
       setExplain({ fn: d.function, text: '', loading: false, error: e?.message || 'AI 설명 요청 실패' });
     }
-  }, [changeDetails, functionMeta]);
+  }, [changeDetails, functionDiffs, functionMeta]);
 
   if (!impact && !demoMode) {
     return (
@@ -1288,6 +1292,7 @@ export default function ImpactGuideSection({ analysisResult }) {
             if (!d) return null;
             const ct = (d.changeType || '').toUpperCase();
             const cd = changeDetails[String(d.function).toLowerCase()] || {};
+            const fd = functionDiffs[String(d.function).toLowerCase()] || '';
             const hasRaw = !!(cd.before || cd.after);
             const pdiff = hasRaw ? diffSignatureParamsCached(cd.before, cd.after) : null;
             const sigSummary = summarizeSignatureChange(pdiff);
@@ -1390,6 +1395,25 @@ export default function ImpactGuideSection({ analysisResult }) {
                 {!hasRaw && d.changed && ['SIGNATURE', 'NEW', 'DELETE'].includes(ct) && (
                   <div className="text-muted" style={{ fontSize: 11, marginBottom: 12, padding: '6px 10px', background: 'var(--bg)', borderRadius: 6 }}>
                     선언 원문 미확보(svn diff 접근 불가 등) — 매개변수 단위 변화는 표시할 수 없습니다. AI 설명으로 보완하세요.
+                  </div>
+                )}
+
+                {/* 🔧 본문 변경 원문(function diff) — BODY 등 선언 미변경 함수의 실제 코드 변경(AI 근거) */}
+                {fd && (
+                  <div style={{ marginBottom: 12, border: '1px solid var(--border)', borderRadius: 8, overflow: 'hidden' }}>
+                    <details>
+                      <summary style={{ padding: '6px 10px', background: 'var(--bg)', fontWeight: 700, fontSize: 12, cursor: 'pointer' }}>
+                        🔧 본문 변경 원문 <span className="text-muted" style={{ fontWeight: 400, fontSize: 10 }}>(svn diff — AI 설명 근거)</span>
+                      </summary>
+                      <pre style={{ margin: 0, padding: 10, fontSize: 11, fontFamily: 'var(--font-mono, monospace)', whiteSpace: 'pre-wrap', wordBreak: 'break-all', maxHeight: 320, overflow: 'auto' }}>
+                        {fd.split('\n').map((ln, i) => {
+                          const color = (ln.startsWith('+') && !ln.startsWith('+++')) ? 'var(--color-success)'
+                            : (ln.startsWith('-') && !ln.startsWith('---')) ? 'var(--color-danger)'
+                            : ln.startsWith('@@') ? 'var(--accent)' : 'var(--text-muted)';
+                          return <div key={i} style={{ color }}>{ln || ' '}</div>;
+                        })}
+                      </pre>
+                    </details>
                   </div>
                 )}
 

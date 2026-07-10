@@ -362,13 +362,15 @@ def explain_function_change(
     change_type: str = "",
     before: str = "",
     after: str = "",
+    function_diff: str = "",
     asil: str = "",
     module: str = "",
     requirements: Optional[List[str]] = None,
 ) -> Optional[str]:
     """단일 함수 변경에 대한 자연어 설명(무엇이/영향/리뷰 초점)을 LLM으로 생성.
 
-    선언 원문(before/after)이 있으면 매개변수·반환 변화를 구체적으로 설명한다.
+    선언 원문(before/after)·본문 diff(function_diff)가 있으면 실제 코드 변화(변수·조건·로직)를
+    근거로 구체 설명한다. BODY 함수는 선언 변화가 없어 function_diff가 핵심 근거가 된다.
     반환: 설명 문자열, 또는 LLM 미설정/실패 시 None(caller가 결정론 폴백/미표시).
     """
     try:
@@ -390,28 +392,35 @@ def explain_function_change(
             lines.append(f"변경 전 선언:\n{before}")
         if after:
             lines.append(f"변경 후 선언:\n{after}")
+        if function_diff:
+            lines.append(f"변경 코드(unified diff, '-'제거/'+'추가):\n{function_diff}")
         context = "\n".join(lines)
         system = (
             "당신은 ISO 26262 자동차 기능안전 소프트웨어의 변경 영향 분석가입니다. "
-            "C 함수 변경을 검토하는 엔지니어에게 간결하고 정확한 한국어 설명을 제공합니다. "
-            "선언 원문이 주어지면 매개변수/반환의 실제 변화를 근거로 설명하고, 원문이 없으면 추정임을 명시하세요. "
+            "C 함수 변경을 검토하는 엔지니어에게 정확하고 실행 가능한 한국어 설명을 제공합니다. "
+            "변경 코드(diff)나 선언 원문이 주어지면 실제로 바뀐 변수·조건·로직·상수를 근거로 설명하고, "
+            "근거 자료가 없으면 반드시 '추정'임을 명시하세요. "
             "각 문서(UDS/STS/SUTS/SITS/SDS)에 '무엇을 어느 섹션에 어떻게' 반영해야 하는지 "
-            "실제 파라미터명을 넣어 구체적으로 제시하세요(일반론 금지)."
+            "실제 변수명·함수명·상수를 넣어 구체적으로 제시하고, 시험 문서(STS/SUTS/SITS)에는 "
+            "구체적 테스트 케이스(입력값·기대값·경계값)를 제안하세요. 일반론·모호한 표현 금지."
         )
         user_msg = (
             f"{context}\n\n"
             "위 함수 변경을 ISO 26262 관점에서 분석하세요. 마크다운 소제목을 사용하세요.\n\n"
             "### 1. 무엇이 바뀌었나\n"
-            "매개변수 추가/삭제/타입변경·반환타입·동작을 원문 근거로 2~3문장. 실제 파라미터명 명시.\n\n"
-            "### 2. 문서별 반영 사항\n"
-            "각 문서에 실제 파라미터명을 넣어 1~2줄씩 구체적으로. 해당 없으면 '영향 없음':\n"
-            "- **UDS**: Prototype / Input·Output Parameters / Description / Called·Calling 중 무엇을 어떻게\n"
-            "- **STS**: 어떤 TC의 Pre-condition / Test Action / Expected Result를 어떻게\n"
-            "- **SUTS**: Input·Output Variables / 경계값 케이스를 어떻게\n"
-            "- **SITS**: 콜체인 / 통합 데이터 흐름에 어떤 영향\n"
-            "- **SDS**: Component Interface / Description 반영 사항\n\n"
+            + ("변경 코드(diff)를 근거로 실제 바뀐 변수·조건·계산·상수·분기를 구체적으로 2~4문장. "
+               "어떤 변수가 추가/수정됐고 어떤 로직·분기가 바뀌었는지 명시.\n\n"
+               if function_diff else
+               "매개변수/반환/동작 변화를 원문 근거로 2~3문장(근거 원문 없으면 '추정' 명시).\n\n")
+            + "### 2. 문서별 반영 사항\n"
+            "각 문서에 실제 변수명·함수명을 넣어 구체적으로. 해당 없으면 '영향 없음':\n"
+            "- **UDS**: Description / Prototype / Input·Output Parameters / Called·Calling / Used Globals 중 무엇을 어떻게\n"
+            "- **STS**: 어떤 TC의 Pre-condition / Test Action / Expected Result를 — 구체 입력·기대값 제시\n"
+            "- **SUTS**: Input·Output Variables + 추가할 단위 테스트 케이스(경계값 MIN/MID/MAX/INV, 변경된 분기 커버)\n"
+            "- **SITS**: 콜체인 / 통합 데이터 흐름 영향 + 통합 시나리오 케이스\n"
+            "- **SDS**: Component Interface / Behavior 반영 사항\n\n"
             "### 3. 리뷰 초점\n"
-            "ASIL 등급을 고려한 확인 포인트. 확실치 않으면 '추정'이라 표기."
+            "ASIL 등급을 고려한 확인 포인트(구체적). 확실치 않으면 '추정'이라 표기."
         )
         messages = [
             {"role": "system", "content": system},

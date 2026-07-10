@@ -140,6 +140,7 @@ def impact_explain_change(req: ImpactExplainChangeRequest) -> Dict[str, Any]:
             change_type=req.change_type,
             before=req.before,
             after=req.after,
+            function_diff=req.function_diff,
             asil=req.asil,
             module=req.module,
             requirements=req.requirements,
