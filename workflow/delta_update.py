@@ -230,18 +230,38 @@ def _classify_one_file_diff(diff_text: str, is_header: bool) -> Tuple[Dict[str, 
     var_changed = bool(_VAR_DECL_LINE.search(diff_text))
 
     # 동일 선언이 -/+ 양쪽(프로토타입 재정렬·이동, 신규 함수 삽입으로 선언 블록 밀림 등)에 나타나면
-    # 함수명은 added_decl·removed_decl에 다 잡히지만 실제 시그니처 변화는 없다. 선언 원문 before/after를
-    # 비교해 '진짜 다를 때'만 SIGNATURE로 판정한다(같으면 본문/변수 변경). extract_signature_changes 재사용.
-    _sig_decls = extract_signature_changes(diff_text)
+    # 함수명은 added_decl·removed_decl에 다 잡히지만 실제 시그니처 변화는 없다. 선언 원문을 비교해
+    # '진짜 다를 때'만 SIGNATURE로 판정한다(같으면 본문 변경).
+    # C1 fix: 함수별로 '모든' -선언/+선언 원문을 집합으로 모은다. extract_signature_changes는 함수당
+    #   '첫 매치'만 담아, 같은 파일에 forward-decl(재정렬·무변화)과 definition(실변경)이 공존하면
+    #   먼저 나온 forward-decl로 고정돼 진짜 시그니처 변경을 은폐한다(under-report). 전체 집합이
+    #   완전히 같을 때만 'same'(순수 재정렬)으로 본다 — 하나라도 다르면 changed(SIGNATURE 유지).
+    _removed_decls: Dict[str, set] = {}
+    _added_decls: Dict[str, set] = {}
+    for _ln in diff_text.splitlines():
+        if len(_ln) < 2 or _ln[0] not in "+-" or _ln[:3] in ("+++", "---"):
+            continue
+        _m = _FUNC_DECL_LINE.match(_ln) or _FUNC_PROTO_LINE.match(_ln)
+        if not _m:
+            continue
+        _decl = _ln[1:].strip()
+        if _decl.endswith("{"):
+            _decl = _decl[:-1].strip()
+        if _decl.count("(") > _decl.count(")"):  # 멀티라인 선언(닫힘 부족) → 원문 미확보(스킵)
+            continue
+        (_added_decls if _ln[0] == "+" else _removed_decls).setdefault(_m.group(1), set()).add(_decl)
 
     def _sig_verdict(fn: str) -> str:
-        """선언 원문 비교: 'changed'(다름)/'same'(동일)/'unknown'(원문 미확보)."""
-        _d = _sig_decls.get(fn) or {}
-        _b = (_d.get("before") or "").strip()
-        _a = (_d.get("after") or "").strip()
-        if _b and _a:
-            return "changed" if _b != _a else "same"
-        return "unknown"
+        """선언 원문 비교: 'changed'(다름)/'same'(동일)/'unknown'(원문 미확보).
+
+        함수의 -선언 집합과 +선언 집합을 비교 — 완전히 같으면 same(순수 재정렬), 하나라도 다르면
+        changed(진짜 변경 은폐 방지). 한쪽이라도 비면 unknown(멀티라인 등 → 보수적 SIGNATURE 유지).
+        """
+        _b = _removed_decls.get(fn) or set()
+        _a = _added_decls.get(fn) or set()
+        if not _b or not _a:
+            return "unknown"
+        return "same" if _a == _b else "changed"
 
     result: Dict[str, str] = {}
     candidates = hunk_funcs | func_decl_names | (func_proto_names if is_header else set())
@@ -250,12 +270,10 @@ def _classify_one_file_diff(diff_text: str, is_header: bool) -> Tuple[Dict[str, 
             new_kind = "HEADER"
         elif func in added_decl and func in removed_decl and func in func_decl_names:
             # 선언이 -/+ 양쪽에 존재 — 원문이 '동일(same)'이면 재정렬/이동(시그니처 변화 없음)이므로
-            # 본문/변수로 강등. '다름(changed)' 또는 '미확보(unknown, 멀티라인 등)'는 보수적으로
+            # 본문 변경으로 본다. '다름(changed)' 또는 '미확보(unknown, 멀티라인 등)'는 보수적으로
             # SIGNATURE 유지 — 원문을 못 뽑았을 때 실제 시그니처 변경을 놓치지 않도록(under-report 방지).
-            if _sig_verdict(func) == "same":
-                new_kind = "VARIABLE" if var_changed else "BODY"
-            else:
-                new_kind = "SIGNATURE"
+            # W1 fix: same은 무조건 BODY로 강등 — var_changed(파일 전체 플래그)로 VARIABLE 오분류 금지.
+            new_kind = "BODY" if _sig_verdict(func) == "same" else "SIGNATURE"
         elif func in added_decl and func in func_decl_names:
             new_kind = "NEW"
         elif func in removed_decl and func in func_decl_names:

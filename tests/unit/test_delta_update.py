@@ -265,6 +265,63 @@ def test_classify_from_diff_text_reordered_proto_not_signature():
     assert types2.get("multi_fn") == "SIGNATURE", types2
 
 
+def test_classify_from_diff_text_forward_decl_plus_real_change_not_masked():
+    """C1: 같은 파일에 forward-decl(재정렬·무변화)과 definition(진짜 파라미터 추가)이 공존해도
+    진짜 시그니처 변경이 은폐되지 않고 SIGNATURE로 유지된다(함수별 '모든' -/+ 선언 집합 비교).
+    forward-decl이 텍스트상 먼저 나와도(이 코드베이스 관행) 첫-매치 고정으로 놓치지 않아야 한다."""
+    from workflow.delta_update import classify_changed_functions_from_diff_text
+    blob = "\n".join([
+        "Index: sources/mod.c",
+        "===================================================================",
+        "--- sources/mod.c\t(revision 100)",
+        "+++ sources/mod.c\t(revision 150)",
+        "@@ -5,6 +5,7 @@",
+        " static S16 keep(S16 x);",
+        "-static U32 moved_fn(U16 a, U16 b);",   # forward-decl 재정렬(무변화)
+        "+static U32 moved_fn(U16 a, U16 b);",
+        "+static void new_fn(void);",
+        "@@ -50,3 +51,3 @@ moved_fn(U16 a, U16 b)",
+        "-static U32 moved_fn(U16 a, U16 b)",     # definition — 진짜 파라미터 c 추가
+        "+static U32 moved_fn(U16 a, U16 b, U16 c)",
+        "     return 0;",
+        "",
+    ])
+    types, _ = classify_changed_functions_from_diff_text(blob)
+    assert types.get("moved_fn") == "SIGNATURE", types
+    # hunk 순서를 반전해도(정의가 먼저) 동일해야 — 순서 의존 결함 회귀 방지.
+    lines = blob.split("\n")
+    idx = lines.index("@@ -50,3 +51,3 @@ moved_fn(U16 a, U16 b)")
+    reordered = lines[:4] + lines[idx:idx + 4] + lines[4:idx] + lines[idx + 4:]
+    types_r, _ = classify_changed_functions_from_diff_text("\n".join(reordered))
+    assert types_r.get("moved_fn") == "SIGNATURE", types_r
+
+
+def test_classify_from_diff_text_crossfile_homonym_static_not_masked():
+    """C2: 다른 두 파일에 동명 static 함수 — fileA는 재정렬만, fileB는 진짜 변경. 파일 스코프로
+    분할 분류 후 병합 시 강한 kind(SIGNATURE)가 보존된다(전체 blob 스코프 오강등 방지)."""
+    from workflow.delta_update import classify_changed_functions_from_diff_text
+    blob = "\n".join([
+        "Index: sources/module_a.c",
+        "===================================================================",
+        "--- sources/module_a.c\t(revision 100)",
+        "+++ sources/module_a.c\t(revision 150)",
+        "@@ -5,3 +5,4 @@",
+        "-static U32 moved_fn(U16 a, U16 b);",
+        "+static U32 moved_fn(U16 a, U16 b);",
+        "+static void new_fn(void);",
+        "Index: sources/module_b.c",
+        "===================================================================",
+        "--- sources/module_b.c\t(revision 100)",
+        "+++ sources/module_b.c\t(revision 150)",
+        "@@ -10,3 +10,3 @@",
+        "-static U32 moved_fn(U16 a);",
+        "+static U32 moved_fn(U16 a, U16 b);",
+        "",
+    ])
+    types, _ = classify_changed_functions_from_diff_text(blob)
+    assert types.get("moved_fn") == "SIGNATURE", types
+
+
 def test_diff_has_function_context():
     """positive-context 가드 — -x -p 컨텍스트 유무를 rc와 독립적으로 판정."""
     from workflow.delta_update import diff_has_function_context

@@ -1302,13 +1302,13 @@ def run_impact_update(
                     continue  # 변경유형에 안 잡힌 함수는 잡음 — 제외
                 _before = str(_sig.get("before") or "").strip()
                 _after = str(_sig.get("after") or "").strip()
-                # 이전==이후(둘 다 존재하고 선언 동일 — 프로토타입 재정렬/이동)면 실제 시그니처 변화가
-                # 아니다: (1) SIGNATURE로 (오)분류됐으면 BODY로 강등, (2) change_details에 원문을 넣지
-                # 않는다(모달이 '변화 없는 시그니처'를 렌더하지 않도록). classify(정밀 경로)를 이미
-                # 고쳤으나 editType(cloudium) 경로·엣지케이스까지 최종 검증하는 안전망이다.
+                # 이전==이후(둘 다 존재·선언 동일 — 재정렬/이동)면 UI 원문 표시가 불필요하므로
+                # change_details에 넣지 않는다(모달이 '변화 없는 시그니처'를 렌더하지 않도록).
+                # 분류 강등(SIGNATURE→BODY)은 여기서 하지 않는다: _sig_map은 파일 미분할 전체 blob
+                # 기준이라 동명 static 함수가 다른 파일에 있으면 한 파일 값이 다른 파일 함수를
+                # 오강등한다(C2 under-report). 변경유형은 classify_changed_functions_from_diff_text가
+                # 파일 스코프로 이미 정확히 판정(same→BODY/changed·unknown→SIGNATURE)하므로 신뢰한다.
                 if _before and _after and _before == _after:
-                    if changed_types.get(_actual) == "SIGNATURE":
-                        changed_types[_actual] = "BODY"
                     continue
                 _rec = {}
                 if _before:
