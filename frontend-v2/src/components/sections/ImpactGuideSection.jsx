@@ -737,6 +737,15 @@ export default function ImpactGuideSection({ analysisResult }) {
       unmatchedSafety: s.unmatched_safety ?? 0,
       unmeasuredSafety: s.unmeasured_safety ?? 0,
       unknownAsil: s.unknown_asil ?? 0,
+      // Δ 신뢰도: (a) baseline이 같은 빌드 → delta≡0, (b) revision 미상(로컬 diff 등) → 같은 빌드인지
+      // 알 수 없음, (c) baseline이 더 최신(과거 빌드 분석) → 개선분이 음수 Δ로 뒤집혀 유령 회귀.
+      // 셋 중 하나라도 참이면 "회귀 N"을 수치로 단정하지 않는다(위장 방지).
+      sameRevBaseline: !!s.baseline_same_revision,
+      deltaUntrusted: !!(s.baseline_same_revision || s.baseline_revision_unknown || s.baseline_newer_than_build),
+      deltaUntrustReason: s.baseline_same_revision ? '같은 빌드 — Δ 비교 불가'
+        : s.baseline_newer_than_build ? '직전 스냅샷이 더 최신 빌드 — Δ 신뢰 불가(유령 회귀)'
+          : s.baseline_revision_unknown ? '스냅샷 빌드 미상 — Δ 신뢰 불가' : '',
+      baselineRevision: s.baseline_revision || '',
     };
     const base = { evaluated: s.evaluated ?? 0, below: s.below_target ?? 0, unmeasured: s.unmeasured ?? 0, regressed: s.regressed ?? 0, hidden: 0, hadBaseline: s.had_baseline, ...evid };
     const fns = coverageGap.functions || [];
@@ -777,7 +786,7 @@ export default function ImpactGuideSection({ analysisResult }) {
       );
     }
     return items;
-  }, [guide, hopFilter, docFilter, searchTerm, hideFileImpact, changeDetails, functionDiffs]);
+  }, [guide, hopFilter, docFilter, searchTerm, hideFileImpact, changeDetails, functionDiffs, functionMeta]);
 
   // Build detailed guide
   const buildGuide = useCallback(async () => {
@@ -1232,11 +1241,17 @@ export default function ImpactGuideSection({ analysisResult }) {
                 {covView.unmeasured}
               </div>
             </div>
-            <div className="stat-card">
+            <div className="stat-card"
+              title={covView.deltaUntrusted
+                ? `Δ(회귀) 신뢰 불가: ${covView.deltaUntrustReason}. 수치를 '회귀 없음/있음'으로 읽지 마십시오.`
+                : '직전 분석 스냅샷 대비 커버리지가 하락한 함수 수.'}>
               <div className="text-muted text-sm">직전 대비 회귀</div>
-              <div style={{ fontSize: 20, fontWeight: 700, color: covView.regressed ? 'var(--color-danger)' : undefined }}>
-                {covView.regressed}
+              <div style={{ fontSize: 20, fontWeight: 700, color: (!covView.deltaUntrusted && covView.regressed) ? 'var(--color-danger)' : undefined }}>
+                {covView.deltaUntrusted ? '—' : covView.regressed}
               </div>
+              {covView.deltaUntrusted && (
+                <div style={{ fontSize: 9, color: 'var(--color-warning)', marginTop: 2, lineHeight: 1.3, overflowWrap: 'anywhere' }}>⚠ {covView.deltaUntrustReason}</div>
+              )}
             </div>
             {/* 미매칭 = VectorCAST 커버리지 데이터에 함수가 아예 없음(증거 부재). 백엔드는 이를
                 'unmatched'로 산출하며 "미검증을 안전 통과로 위장 금지"를 명시 — UI가 감추면 그 위장이

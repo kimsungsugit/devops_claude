@@ -139,3 +139,45 @@ def test_coverage_gap_matched_but_metric_unmeasured(tmp_path, monkeypatch):
     assert s["unmeasured"] == 1
     assert s["unmeasured_safety"] == 1              # ASIL D
     assert s["unmatched"] == 0                       # 매칭은 됨(미매칭 아님)
+
+
+def test_coverage_gap_same_revision_baseline_flagged(tmp_path, monkeypatch):
+    """같은 빌드를 재분석하면 baseline이 자기 자신 → delta=0. '회귀 없음'이 아니라 '비교 불가'."""
+    import backend.routers.jenkins as jk
+    from workflow import coverage_gap
+
+    rag = _rag()
+    monkeypatch.setattr(jk, "_load_vectorcast_rag_from_cloudium", lambda p: rag)
+    # 1회차: build 1053 스냅샷 기록
+    r1 = coverage_gap.compute_coverage_gap(
+        ["Ap_Door_Run"], {"Ap_Door_Run": "D"}, ["fake.json"],
+        cache_root=str(tmp_path), scm_id="x", update_baseline=True, build_revision="1053",
+    )
+    assert r1["summary"]["baseline_same_revision"] is False  # 최초엔 baseline 없음
+    # 2회차: 같은 빌드(1053) 재분석 → Δ 비교 불가로 표면화
+    r2 = coverage_gap.compute_coverage_gap(
+        ["Ap_Door_Run"], {"Ap_Door_Run": "D"}, ["fake.json"],
+        cache_root=str(tmp_path), scm_id="x", update_baseline=True, build_revision="1053",
+    )
+    assert r2["summary"]["baseline_same_revision"] is True
+    assert r2["summary"]["baseline_revision"] == "1053"
+
+
+def test_coverage_gap_older_build_does_not_overwrite_baseline(tmp_path, monkeypatch):
+    """더 오래된 빌드 분석이 baseline을 과거로 되돌리지 않는다(Δ 기준 훼손 방지)."""
+    import backend.routers.jenkins as jk
+    from workflow import coverage_gap
+
+    rag = _rag()
+    monkeypatch.setattr(jk, "_load_vectorcast_rag_from_cloudium", lambda p: rag)
+    coverage_gap.compute_coverage_gap(
+        ["Ap_Door_Run"], {"Ap_Door_Run": "D"}, ["fake.json"],
+        cache_root=str(tmp_path), scm_id="x", update_baseline=True, build_revision="1053",
+    )
+    # 과거 빌드(1000)를 나중에 분석 → baseline revision은 1053 유지
+    coverage_gap.compute_coverage_gap(
+        ["Ap_Door_Run"], {"Ap_Door_Run": "D"}, ["fake.json"],
+        cache_root=str(tmp_path), scm_id="x", update_baseline=True, build_revision="1000",
+    )
+    _funcs, meta = coverage_gap._read_baseline(str(tmp_path), "x")
+    assert meta.get("revision") == "1053"

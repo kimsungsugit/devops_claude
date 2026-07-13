@@ -914,6 +914,31 @@ describe('ImpactGuideSection', () => {
     render(<ImpactGuideSection analysisResult={analysisResult} />);
     expect(screen.getByText(/1-hop까지만 계산/)).toBeInTheDocument();
   });
+
+  // STS-IMPACT-037: baseline이 같은 빌드면 Δ=0이라 '회귀 없음'이 아니라 '비교 불가'
+  it('커버리지 Δ: baseline이 같은 빌드면 회귀 0 대신 비교 불가로 표시한다', () => {
+    const analysisResult = {
+      impactData: {
+        trigger: { changed_files: ['a.c'] },
+        changed_function_types: { g_a: 'BODY' },
+        impact: { direct: ['g_a'] },
+        function_meta: { g_a: { asil: 'A', evidence: 'line' } },
+        coverage_gap: {
+          available: true,
+          summary: {
+            evaluated: 1, below_target: 0, unmeasured: 0, regressed: 0, had_baseline: true,
+            unmatched: 0, baseline_revision: '1053', build_revision: '1053',
+            baseline_same_revision: true,
+          },
+          functions: [{ function: 'g_a', meets_target: true, delta: 0 }],
+        },
+      },
+    };
+    render(<ImpactGuideSection analysisResult={analysisResult} />);
+    expect(screen.getByText(/같은 빌드 — Δ 비교 불가/)).toBeInTheDocument();
+    // 회귀 수치를 0으로 단정하지 않는다(—)
+    expect(screen.getByText('직전 대비 회귀').closest('.stat-card').textContent).toContain('—');
+  });
 });
 
 describe('extractDiffElements (순수 함수)', () => {

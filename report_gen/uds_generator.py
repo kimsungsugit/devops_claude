@@ -149,6 +149,44 @@ def generate_uds_logic_items(
     return items
 
 
+_BY_NAME_ASIL_RANK = {"QM": 0, "A": 1, "B": 2, "C": 3, "D": 4}
+
+
+def _put_by_name(
+    by_name: Dict[str, Dict[str, Any]], name: str, detail: Dict[str, Any]
+) -> None:
+    """function_details_by_name에 안전하게 등록 — 동일 이름의 다중 정의(파일 간 충돌) 병합.
+
+    C 프로젝트에는 같은 이름 함수가 여러 파일에 정의되는 경우가 있다(예: Generated_Code/EEPROM.c와
+    Sources/Eeprom/EEPROM.c의 eeprom_setbyte, main 등). 과거엔 last-wins라 한쪽 메타만 남아
+      (a) `asil`이 더 낮은 사본으로 덮여 **안전 등급이 손실**되고(ISO 26262 — escalation·MC/DC 게이트),
+      (b) `file`이 한쪽만 가리켜 영향분석의 파일 매칭이 다른 사본을 **누락**(under-report)했다.
+    → ASIL은 두 사본 중 **높은 등급**을 유지하고, 정의 파일은 `files` 목록으로 누적한다.
+    ⚠ 원본 detail(dict)은 변형하지 않는다 — function_details(문서 생성 소스)의 함수별 값 보존.
+    """
+    key = str(name or "").strip().lower()
+    if not key:
+        return
+    prev = by_name.get(key)
+    if prev is None or prev is detail:
+        by_name[key] = detail
+        return
+
+    def _rank(v: Any) -> int:
+        a = re.sub(r"^ASIL[\s_-]*", "", str(v or "").strip().upper()).strip()
+        return _BY_NAME_ASIL_RANK.get(a, -1)
+
+    merged = dict(detail)
+    if _rank(prev.get("asil")) > _rank(detail.get("asil")):
+        merged["asil"] = prev.get("asil")
+    files = set(prev.get("files") or ([prev.get("file")] if prev.get("file") else []))
+    if detail.get("file"):
+        files.add(detail["file"])
+    if files:
+        merged["files"] = sorted(files)
+    by_name[key] = merged
+
+
 def _group_function_blocks_by_swcom(blocks: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
     groups: Dict[str, List[Dict[str, Any]]] = {}
     for block in blocks:
@@ -1165,7 +1203,7 @@ def generate_uds_source_sections(
                 "logic": "Auto(call tree)" if called_list else "",
             }
             function_details[fn_id] = detail
-            function_details_by_name[name.lower()] = detail
+            _put_by_name(function_details_by_name, name, detail)  # 동일 이름 다중정의 안전 병합(ASIL max + files)
         # Fallback: AST에서 누락된 함수도 병합 (regex 기반 수집분)
         _ast_names = {r[3] for r in function_table_rows if len(r) >= 4}
         if fallback_functions:
@@ -1328,7 +1366,7 @@ def generate_uds_source_sections(
                     "logic": "Auto(call tree)" if called_list else "",
                 }
                 function_details[fn_id] = detail
-                function_details_by_name[name.lower()] = detail
+                _put_by_name(function_details_by_name, name, detail)  # 동일 이름 다중정의 안전 병합
         if globals_detailed:
             for g in globals_detailed:
                 if not isinstance(g, dict):

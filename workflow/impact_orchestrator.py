@@ -9,7 +9,7 @@ import sys
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Set
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 from backend.schemas import ScmLinkedDocs, ScmUpdateRequest
 from backend.services.scm_registry import get_registry_entry, update_entry
@@ -63,7 +63,12 @@ def _load_source_sections(source_root: str) -> Dict[str, Any]:
 @dataclass
 class ImpactOptions:
     max_hop: int = 2
-    same_module_only: bool = True
+    # ⚠ 기본 False(cross-module) — 모듈 가지치기는 '다른 파일/모듈에서 변경 함수를 호출하는 함수'를
+    # 영향 집합에서 제외해 UDS/SUTS/STS/SDS 검토 대상에서 누락시킨다(under-report = ISO 26262에서
+    # 위험한 방향). 실측(kjpds02): same-module 1hop=0 vs cross 1hop=67(ASIL A 50개·TBD 10개 포함,
+    # eeprom_setbyte 등). 과대보고는 안전측이고 impacted>50이면 어차피 검토 승격되므로 워크플로
+    # 변화도 없다. 노이즈를 줄이려면 호출측에서 명시적으로 True를 지정할 것.
+    same_module_only: bool = False
     max_impacted_functions: int = 50
 
 
@@ -797,13 +802,17 @@ def _execute_auto_action(target: str, trigger: ChangeTrigger, entry: Any, target
 
 
 def _module_name(info: Dict[str, Any]) -> str:
-    module = str(info.get("module_name") or "").strip()
-    if module:
-        return module.lower()
+    """콜그래프 모듈 스코핑용 모듈명 = **파일이 속한 디렉터리**.
+
+    ⚠ by_name["module_name"]은 uds_generator가 `Path(file).stem`(=파일명)으로 채운다. 그걸 모듈로
+    쓰면 same_module_only가 사실상 '같은 파일'이 되고, fatten이 이미 변경 파일의 전 함수를 seed로
+    넣으므로 **간접 영향이 구조적으로 항상 0**이 된다(다른 파일의 호출자가 UDS/SUTS/STS/SDS에서
+    통째로 누락 = under-report). 원래 의도(폴더=모듈)는 아래 폴백이 증명한다 — 디렉터리를 우선한다.
+    """
     file_path = str(info.get("file") or "").strip()
-    if not file_path:
-        return ""
-    return Path(file_path).parent.name.lower()
+    if file_path:
+        return Path(file_path.replace("\\", "/")).parent.name.lower()
+    return str(info.get("module_name") or "").strip().lower()
 
 
 def _build_neighbors(
@@ -824,6 +833,11 @@ def _build_neighbors(
             if not callee_key:
                 continue
             callee_info = by_name.get(callee_key) or {}
+            # ⚠ 모듈 미해결(한쪽이라도 module_name 없음)이면 엣지를 **유지**한다(fail-open).
+            #   이는 의도된 안전측 선택 — fail-closed로 바꾸면 모듈을 모르는 함수의 콜엣지가 통째로
+            #   사라져 영향 범위가 줄어든다(under-report = ISO 26262에서 위험한 방향). 대신 same-module
+            #   집합에 소수의 cross-module 엣지가 섞일 수 있다(과대보고 = 안전). 절대 fail-closed로
+            #   "고치지" 말 것.
             if same_module_only and caller_module and _module_name(callee_info) and caller_module != _module_name(callee_info):
                 continue
             neighbors.setdefault(caller_key, set()).add(callee_key)
@@ -920,11 +934,17 @@ def _resolve_changed_types_to_functions(
     # by_name의 파일경로 정규화를 1회만 선계산한다 — 과거엔 변경파일마다 전체 함수의 file 경로를
     # str/replace/lower로 재정규화(O(F·N) 문자열 연산)했다. endswith 매칭 자체는 동일 문자열에
     # 대해 그대로 수행하므로 결과 시맨틱은 완전히 불변(성능만 개선).
-    norm_files = [
-        (func_name, str(info.get("file") or "").replace("\\", "/").lower())
-        for func_name, info in by_name.items()
-    ]
-    norm_files = [(fn, fp) for fn, fp in norm_files if fp]
+    # 동일 이름 함수가 여러 파일에 정의된 경우(by_name["files"]) **모든** 정의 파일을 매칭 대상에
+    # 넣는다. 과거엔 last-wins로 남은 file 하나만 봐서, 다른 사본이 있는 파일이 변경돼도 그 함수가
+    # full_hits에 안 잡히고(basename 폴백은 `full_hits or base_hits`로 무시됨) **통째로 누락**됐다
+    # (예: Generated_Code/EEPROM.c 변경 시 eeprom_setbyte 등 5개 — 안전 관련 under-report).
+    norm_files: List[Tuple[str, str]] = []
+    for func_name, info in by_name.items():
+        _fs = info.get("files") or ([info.get("file")] if info.get("file") else [])
+        for _f in _fs:
+            _fp = str(_f or "").replace("\\", "/").lower()
+            if _fp:
+                norm_files.append((func_name, _fp))
     resolved: Dict[str, str] = {}
     for path_text in changed_files:
         raw = str(path_text or "").strip()
@@ -1225,7 +1245,13 @@ def run_impact_update(
                 _precise_lower = {str(k).strip().lower(): v for k, v in _precise_types.items()}
 
                 def _in_line_classified(_fn: str) -> bool:
-                    _f = str((by_name.get(_fn) or {}).get("file") or "").replace("\\", "/").lower()
+                    _info = by_name.get(_fn) or {}
+                    # 동일 이름 함수가 여러 파일에 정의됐으면 어느 사본 기준인지 확정 불가 →
+                    # narrow(제거)하면 다른 사본이 조용히 누락될 수 있다(under-report). 보수적으로
+                    # fatten 유지(= 절대 제거하지 않음).
+                    if len(_info.get("files") or []) > 1:
+                        return False
+                    _f = str(_info.get("file") or "").replace("\\", "/").lower()
                     if not _f:
                         return False
                     # ⚠ 경계 없는 endswith는 다른 파일을 오매칭한다: "…/myapp/led.c".endswith("app/led.c")
@@ -1399,11 +1425,17 @@ def run_impact_update(
                     f"{len(_unresolved_add)} newly-added file(s) absent from baseline source index "
                     "(analyzed against baseline revision A) — new functions may be under-reported; review manually"
                 )
-        # cloudium에서 소스 인덱스(by_name)가 비었는데 변경파일이 있으면 worker read 실패 가능성 →
-        # 영향이 과소보고될 수 있음을 명시(빈 결과를 '영향 없음'으로 오인 방지, X7/X9 안전측).
-        if cloudium and not by_name and trigger.changed_files:
+        # 소스 인덱스(by_name)가 비었는데 변경파일이 있으면 함수 해석이 불가능하다. 이때
+        # _resolve_changed_types_to_functions는 조기 반환하고 **파일명(stem)이 그대로 '함수'처럼**
+        # impact.direct/function_meta/coverage/actions.functions로 흘러간다(데이터 날조).
+        # 과거엔 이 경고가 cloudium에서만 떠서, 로컬 배포에서 source_root 경로가 없으면(가장 흔한
+        # 배포 실수) **완전히 조용히** 파일명이 함수로 보고됐다 → 모드 무관 경고 + 검토 승격.
+        if not by_name and trigger.changed_files:
+            promote_to_review = True
+            _reason = "cloudium worker read 실패 가능" if cloudium else "source_root 경로 부재/파싱 실패 가능"
             warnings.append(
-                "cloudium: source index empty (worker read may have failed) — impact may be under-reported; review manually"
+                f"소스 인덱스 0건({_reason}) — 함수 해석 불가로 **파일명이 함수처럼 표시**될 수 있습니다. "
+                "영향 결과(함수 목록·ASIL·커버리지·회귀시험)를 신뢰하지 말고 source_root/워커를 먼저 확인하십시오."
             )
         # cloudium(원격/읽기전용)에서는 AUTO 재생성의 입력 read 표면이 아직 미지원(분석/FLAG만 지원)
         # → AUTO를 FLAG로 강등하여 안전하게 검토 아티팩트만 생성한다. (cloudium은 상단에서 계산)
@@ -1552,6 +1584,8 @@ def run_impact_update(
                     cache_root=str(REPO_ROOT / ".devops_pro_cache"),
                     scm_id=str(trigger.scm_id or ""),
                     update_baseline=not trigger.dry_run,
+                    # Δ 신뢰도 판정 — baseline이 '같은 빌드'면 회귀 0은 '비교 불가'(위장 방지).
+                    build_revision=_build_r,
                 )
             except Exception:  # noqa: BLE001 — 커버리지 연동 실패는 영향도 분석을 막지 않는다
                 coverage_gap = {"available": False, "reason": "coverage gap 계산 실패"}
@@ -1708,9 +1742,19 @@ def run_impact_update(
                         if info["output_path"] and entry:
                             _update_linked_doc(entry.id, target, info["output_path"])
                     except Exception as exc:
+                        # ⚠ 문서 1개의 자동 생성 실패가 '분석 전체 실패'가 되면 안 된다. 과거엔
+                        # result["ok"]=False → impact_jobs가 fail_job으로 처리 → 이미 계산·디스크
+                        # 기록까지 끝난 ISO 증거(변경함수·ASIL·커버리지·회귀·audit_path)를 통째로
+                        # 폐기하고 클라이언트엔 error만 전달했다. 분석은 유효하므로 부분 실패로 표기.
                         info["status"] = "failed"
                         info["error"] = str(exc)
-                        result["ok"] = False
+                        result["ok"] = False           # 하위호환: 문서 생성 실패 신호(동기 endpoint 소비)
+                        result["partial_failure"] = True  # 분석 결과는 유효 — job은 완료 처리해 전달
+                        warnings.append(
+                            f"{target.upper()} 문서 자동 생성 실패({exc}) — 영향 분석 결과는 유효합니다"
+                            "(해당 문서만 수동 생성/재시도 필요)."
+                        )
+                        logger.warning("impact auto action failed for %s: %s", target, exc)
                 elif info.get("mode") == "FLAG":
                     if callable(on_progress):
                         on_progress(

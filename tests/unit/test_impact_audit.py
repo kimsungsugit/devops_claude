@@ -2,23 +2,25 @@ from __future__ import annotations
 
 
 def _isolate_locks(impact_audit, tmp_path, monkeypatch):
-    """테스트별로 락 상태를 격리 — 실제 프로세스 락/소유자 전역을 건드리지 않는다.
-
-    filelock 설치 여부와 무관하게 동작하도록 모듈의 FileLock 속성을 그대로 사용(미설치면 None →
-    threading.Lock 폴백, 프로덕션과 동일 경로)."""
+    """테스트별 락 격리. 락은 이제 **AUDIT_DIR 기준으로 scm별 지연 생성**되므로 AUDIT_DIR만
+    tmp로 바꾸면 실제로 격리된다(과거엔 FileLock이 import 시점 repo 경로에 바인딩돼 monkeypatch가
+    무시됐고, 그래서 테스트가 _RUN_FILE_LOCK을 직접 주입해야 했다 — 동시 실행 시 유령 실패의 원인).
+    """
     import threading
 
     audit = tmp_path / "audit"
+    audit.mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(impact_audit, "AUDIT_DIR", audit)
-    monkeypatch.setattr(impact_audit, "LOCK_PATH", audit / ".run_lock")
-    if impact_audit.FileLock:
-        audit.mkdir(parents=True, exist_ok=True)
-        fresh_file_lock = impact_audit.FileLock(str(audit / ".run_lock.flock"), timeout=5)
-    else:
-        fresh_file_lock = threading.Lock()
-    monkeypatch.setattr(impact_audit, "_RUN_FILE_LOCK", fresh_file_lock)
-    monkeypatch.setattr(impact_audit, "_RUN_INTRA_LOCK", threading.Lock())
-    monkeypatch.setattr(impact_audit, "_RUN_LOCK_OWNER", {"tid": None})
+    monkeypatch.setattr(impact_audit, "LOCK_PATH", audit / ".run_lock")  # legacy 참조 호환
+    monkeypatch.setattr(impact_audit, "_RUN_FILE_LOCKS", {})
+    monkeypatch.setattr(impact_audit, "_RUN_INTRA_LOCKS", {})
+    monkeypatch.setattr(impact_audit, "_RUN_LOCKS_GUARD", threading.Lock())
+    monkeypatch.setattr(impact_audit, "_RUN_LOCK_OWNERS", {})
+
+
+def _lock_json(impact_audit, scm_id="hdpdm01"):
+    """현재 AUDIT_DIR 기준 scm별 진단 JSON 경로."""
+    return impact_audit.AUDIT_DIR / f".run_lock_{impact_audit._lock_key(scm_id)}.json"
 
 
 def test_run_lock_acquire_release(tmp_path, monkeypatch):
@@ -29,12 +31,12 @@ def test_run_lock_acquire_release(tmp_path, monkeypatch):
 
     acquired = impact_audit.acquire_run_lock("hdpdm01")
     assert acquired["ok"] is True
-    assert impact_audit.LOCK_PATH.exists()
+    assert _lock_json(impact_audit).exists()
     assert acquired["lock"]["thread_id"] == threading.get_ident()
 
     released = impact_audit.release_run_lock()
     assert released is True
-    assert not impact_audit.LOCK_PATH.exists()
+    assert not _lock_json(impact_audit).exists()
 
 
 def test_run_lock_second_acquire_blocked_until_release(tmp_path, monkeypatch):
@@ -46,13 +48,20 @@ def test_run_lock_second_acquire_blocked_until_release(tmp_path, monkeypatch):
     first = impact_audit.acquire_run_lock("a")
     assert first["ok"] is True
 
-    second = impact_audit.acquire_run_lock("b")  # 아직 해제 안 함
+    # 같은 scm은 차단(중복 실행 방지)
+    second = impact_audit.acquire_run_lock("a")
     assert second["ok"] is False
     assert second["reason"] == "active_lock"
 
-    assert impact_audit.release_run_lock() is True
+    # 다른 scm은 차단하지 않는다 — 락은 scm별. (과거엔 전역 단일 락이라 프로젝트 A 분석이
+    # 프로젝트 B를 문서 자동생성 timeout(최대 1시간)까지 막았다.)
+    other = impact_audit.acquire_run_lock("b")
+    assert other["ok"] is True
+    assert other["lock"]["scm_id"] == "b"
 
-    third = impact_audit.acquire_run_lock("c")  # 이제 가능
+    assert impact_audit.release_run_lock() is True  # 이 스레드가 소유한 키 해제
+
+    third = impact_audit.acquire_run_lock("c")
     assert third["ok"] is True
     assert third["lock"]["scm_id"] == "c"
     impact_audit.release_run_lock()
@@ -67,7 +76,7 @@ def test_run_lock_stale_file_without_held_lock_is_reclaimed(tmp_path, monkeypatc
 
     _isolate_locks(impact_audit, tmp_path, monkeypatch)
     impact_audit.ensure_audit_dir()
-    impact_audit.LOCK_PATH.write_text(
+    _lock_json(impact_audit).write_text(
         '{"scm_id":"old","pid":999999,"thread_id":1,"started_at":"2026-03-20T00:00:00"}',
         encoding="utf-8",
     )
@@ -89,13 +98,14 @@ def test_run_lock_release_by_non_owner_is_noop(tmp_path, monkeypatch):
     assert acquired["ok"] is True
 
     # 다른 소유자가 쥐고 있는 것처럼 위장 → release는 no-op이어야 함
-    impact_audit._RUN_LOCK_OWNER["tid"] = -999
+    _k = impact_audit._lock_key("owner")
+    impact_audit._RUN_LOCK_OWNERS[_k] = -999
     assert impact_audit.release_run_lock() is False
-    assert impact_audit.LOCK_PATH.exists()  # 락 유지됨
+    assert _lock_json(impact_audit, "owner").exists()  # 락 유지됨
 
     # 실제 소유자로 복구 후 정상 해제
     import threading
-    impact_audit._RUN_LOCK_OWNER["tid"] = threading.get_ident()
+    impact_audit._RUN_LOCK_OWNERS[_k] = threading.get_ident()
     assert impact_audit.release_run_lock() is True
 
 

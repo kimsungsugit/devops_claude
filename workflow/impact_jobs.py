@@ -278,6 +278,9 @@ def _classify_exception(exc: Exception) -> Dict[str, Any]:
 
 def _run_job(job_id: str, trigger: ChangeTrigger, options: ImpactOptions) -> None:
     if not (trigger.changed_files or []):
+        # 변경 파일 0 fast-path — 페이로드 shape를 정상 실행과 동일하게 채운다. 과거엔 classification/
+        # function_meta/asil/coverage_gap/regression_test_set/impact_traversal이 통째로 빠져 프론트가
+        # undefined를 읽고(옵셔널 체이닝에 의존) 패널이 조용히 사라졌다 — 계약 발산 방지(X3).
         complete_job(
             job_id,
             {
@@ -285,9 +288,32 @@ def _run_job(job_id: str, trigger: ChangeTrigger, options: ImpactOptions) -> Non
                 "dry_run": bool(trigger.dry_run),
                 "trigger": trigger.to_dict(),
                 "changed_function_types": {},
+                "change_details": {},
+                "function_diffs": {},
                 "impact": {"direct": [], "indirect_1hop": [], "indirect_2hop": []},
                 "warnings": ["no changed files detected"],
                 "actions": {},
+                "function_meta": {},
+                "regression_test_set": {"suts": {}, "sits": {}, "summary": {
+                    "suts_tc_count": 0, "sits_chain_count": 0, "impacted_function_count": 0,
+                    "coverage_target": "", "mcdc_required": False,
+                }},
+                "asil": {
+                    "max_changed": "", "escalation": False, "mcdc_required": False,
+                    "coverage_target": "", "unknown_changed_count": 0,
+                },
+                "coverage_gap": {"available": False, "reason": "변경 파일 없음 — 커버리지 평가 생략"},
+                "classification": {
+                    "granularity": "file", "source": "", "signature_distinguished": False,
+                    "line_classified_file_count": 0, "narrow_removed_count": 0,
+                    "narrow_removed_functions": [],
+                    "evidenced_function_count": 0, "fattened_function_count": 0,
+                },
+                "impact_traversal": {
+                    "truncated": False, "truncated_at_hop": 0,
+                    "max_impacted_functions": int(getattr(options, "max_impacted_functions", 0) or 0),
+                    "max_hop": int(getattr(options, "max_hop", 0) or 0),
+                },
             },
         )
         return
@@ -332,6 +358,27 @@ def _run_job(job_id: str, trigger: ChangeTrigger, options: ImpactOptions) -> Non
                     "현재 실행 중인 작업이 끝난 뒤 다시 시도하세요.",
                     retryable=True,
                 ),
+            )
+            return
+        # 부분 실패(분석은 성공, 일부 문서 자동 생성만 실패) — 전체를 fail로 버리면 이미 계산된
+        # ISO 증거(변경함수·ASIL·커버리지·회귀시험·audit_path)가 통째로 사라진다. 결과를 그대로
+        # 전달하고 완료 처리하되, actions[target].status="failed"와 warnings로 실패를 표면화한다.
+        if result.get("partial_failure") and result.get("actions"):
+            _failed = [
+                t for t, info in (result.get("actions") or {}).items()
+                if isinstance(info, dict) and info.get("status") == "failed"
+            ]
+            # complete_job은 message를 "완료되었습니다."로 고정하므로 직접 update_job으로 완료 처리
+            # (부분 실패 사실을 message에 남긴다 — 성공으로 위장 금지).
+            update_job(
+                job_id,
+                status="completed",
+                stage="done",
+                message=(
+                    "분석은 완료했으나 일부 문서 생성에 실패했습니다: "
+                    f"{', '.join(t.upper() for t in sorted(_failed)) or '일부 대상'}"
+                ),
+                result=result,
             )
             return
         fail_job(

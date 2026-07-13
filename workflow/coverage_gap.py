@@ -19,7 +19,7 @@ import json
 import os
 import re
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 # ASIL → 요구 구조 커버리지 메트릭(ISO 26262 Part 6 Table 9/12). D=MC/DC(pairs), C/B=branch, A/QM=statement.
 _ASIL_METRIC = {"D": "mcdc", "C": "branch", "B": "branch", "A": "statement", "QM": "statement"}
@@ -100,25 +100,37 @@ def _baseline_path(cache_root: str, scm_id: str) -> Path:
     return Path(cache_root or ".devops_pro_cache") / _BASELINE_SUBDIR / f"coverage_baseline_{h}.json"
 
 
-def _read_baseline(cache_root: str, scm_id: str) -> Dict[str, Dict[str, float]]:
+def _read_baseline(cache_root: str, scm_id: str) -> Tuple[Dict[str, Dict[str, float]], Dict[str, Any]]:
+    """(함수별 커버리지, 메타). 메타는 스냅샷을 만든 빌드 revision 등.
+
+    구 포맷(플랫 dict)도 읽는다 — 그때는 meta={}(revision 미상)이라 Δ 신뢰도 판정에서 legacy로 처리.
+    """
     try:
         p = _baseline_path(cache_root, scm_id)
         if p.is_file():
             obj = json.loads(p.read_text(encoding="utf-8"))
             if isinstance(obj, dict):
-                return obj
+                if isinstance(obj.get("functions"), dict) and isinstance(obj.get("_meta"), dict):
+                    return obj["functions"], obj["_meta"]  # 신 포맷
+                return obj, {}  # 구 포맷(플랫) — revision 미상
     except Exception:  # noqa: BLE001
         pass
-    return {}
+    return {}, {}
 
 
-def _write_baseline(cache_root: str, scm_id: str, cov: Dict[str, Dict[str, Optional[float]]]) -> None:
+def _write_baseline(
+    cache_root: str,
+    scm_id: str,
+    cov: Dict[str, Dict[str, Optional[float]]],
+    revision: str = "",
+) -> None:
     try:
         p = _baseline_path(cache_root, scm_id)
         p.parent.mkdir(parents=True, exist_ok=True)
         # tmp 작성 후 원자적 교체 — 동시 쓰기 시 한쪽 기록 소실/부분 파일 방지(W5).
         tmp = p.with_suffix(f".{os.getpid()}.tmp")
-        tmp.write_text(json.dumps(cov, ensure_ascii=False), encoding="utf-8")
+        payload = {"_meta": {"revision": str(revision or "")}, "functions": cov}
+        tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
         os.replace(tmp, p)
     except Exception:  # noqa: BLE001 — 스냅샷 실패는 분석에 영향 없음
         pass
@@ -132,19 +144,28 @@ def compute_coverage_gap(
     cache_root: str = ".devops_pro_cache",
     scm_id: str = "",
     update_baseline: bool = True,
+    build_revision: str = "",
 ) -> Dict[str, Any]:
     """영향 함수 × ASIL 타깃 대비 커버리지 gap + 직전 스냅샷 대비 delta.
 
     반환: ``{available, functions:[{function, asil, target_metric, statement, branch, mcdc,
     target_rate, current_rate, meets_target, delta}], summary:{evaluated, below_target,
     regressed, had_baseline}}``. VectorCAST 커버리지 데이터가 없으면 available=False.
+
+    ⚠ Δ(회귀) 신뢰도: baseline은 매 실행마다 현재 커버리지로 갱신되므로, **같은 빌드를 재분석하면
+    baseline이 자기 자신**이 되어 delta=0 → "회귀 0"이 "회귀 없음"으로 위장된다. build_revision을
+    받아 스냅샷 revision과 비교하고, 같으면 summary.baseline_same_revision=True로 표면화한다.
+    또한 더 오래된 빌드의 커버리지로 baseline을 덮어쓰지 않는다(Δ 기준 훼손 방지).
     """
     cov = load_function_coverage(vectorcast_paths)
     if not cov:
         return {"available": False, "reason": "VectorCAST 커버리지 데이터 없음(RAG metrics 미생성)",
                 "functions": [], "summary": {}}
 
-    baseline = _read_baseline(cache_root, scm_id)
+    baseline, _base_meta = _read_baseline(cache_root, scm_id)
+    _base_rev = str(_base_meta.get("revision") or "")
+    _cur_rev = str(build_revision or "")
+    _same_rev = bool(_base_rev) and bool(_cur_rev) and _base_rev == _cur_rev
     rows: List[Dict[str, Any]] = []
     below_target = 0
     regressed = 0
@@ -199,7 +220,13 @@ def compute_coverage_gap(
     if update_baseline:
         # 다음 실행의 비교 기준 — 이번 커버리지 전체(영향 함수 한정 아님)를 스냅샷.
         # 주의: 삭제된 함수의 이전 rate가 stale entry로 누적될 수 있음(delta 산출엔 무해).
-        _write_baseline(cache_root, scm_id, cov)
+        # ⚠ 더 오래된 빌드로 baseline을 되돌리지 않는다 — 과거 빌드를 나중에 분석하면 Δ 기준이
+        #   과거로 훼손돼 이후 실행의 회귀 탐지가 무력화된다(둘 다 숫자 revision일 때만 비교).
+        _older = (
+            _base_rev.isdigit() and _cur_rev.isdigit() and int(_cur_rev) < int(_base_rev)
+        )
+        if not _older:
+            _write_baseline(cache_root, scm_id, cov, revision=_cur_rev)
 
     return {
         "available": True,
@@ -214,5 +241,15 @@ def compute_coverage_gap(
             "unmeasured_safety": unmeasured_safety,
             "unknown_asil": unknown_asil,
             "had_baseline": bool(baseline),
+            # Δ(회귀) 신뢰도 3종. 하나라도 참이면 regressed 수치를 '회귀 없음/있음'으로 읽으면 안 된다.
+            #  - same_revision : baseline이 이번과 같은 빌드 → Δ≡0 (비교 불가)
+            #  - revision_unknown : 한쪽이라도 revision 미상(로컬 diff 등) → 같은 빌드인지 알 수 없음
+            #  - newer_than_build : baseline이 더 최신 빌드(과거 빌드를 나중에 분석) → 개선분이
+            #                        음수 Δ로 뒤집혀 **유령 회귀**가 보고됨
+            "baseline_revision": _base_rev,
+            "build_revision": _cur_rev,
+            "baseline_same_revision": _same_rev,
+            "baseline_revision_unknown": bool(baseline) and (not _base_rev or not _cur_rev),
+            "baseline_newer_than_build": _base_rev.isdigit() and _cur_rev.isdigit() and int(_cur_rev) < int(_base_rev),
         },
     }

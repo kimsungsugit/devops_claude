@@ -129,3 +129,58 @@ def _wait_for_job(impact_jobs_mod, job_id: str, timeout: float = 10) -> None:
             return
         time.sleep(0.05)
     raise TimeoutError(f"Job {job_id} did not complete within {timeout}s")
+
+
+def test_partial_failure_preserves_analysis_result(tmp_path, monkeypatch):
+    """문서 1개 자동 생성 실패(partial_failure)가 분석 결과 전체를 폐기하지 않는다.
+
+    과거엔 result["ok"]=False → fail_job → 이미 계산된 ISO 증거(변경함수·ASIL·커버리지·회귀·
+    audit_path)가 통째로 사라지고 클라이언트엔 error만 갔다. 이제 완료 처리하고 결과를 전달하되,
+    message와 actions[t].status="failed"로 실패를 정직하게 표면화한다.
+    """
+    from workflow.change_trigger import ChangeTrigger
+    from workflow import impact_jobs
+
+    monkeypatch.setattr(impact_jobs, "JOB_DIR", tmp_path / "jobs")
+    monkeypatch.setattr(
+        impact_jobs,
+        "run_impact_update",
+        lambda trigger, options=None, on_progress=None: {
+            "ok": False,                 # 문서 생성 실패 신호(하위호환)
+            "partial_failure": True,     # 분석 자체는 유효
+            "dry_run": trigger.dry_run,
+            "trigger": trigger.to_dict(),
+            "changed_function_types": {"door_run": "BODY"},
+            "impact": {"direct": ["door_run"], "indirect_1hop": [], "indirect_2hop": []},
+            "asil": {"max_changed": "D", "escalation": True},
+            "coverage_gap": {"available": True, "summary": {"evaluated": 1}},
+            "audit_path": "reports/impact_audit/x.md",
+            "actions": {
+                "uds": {"mode": "AUTO", "status": "completed"},
+                "sits": {"mode": "AUTO", "status": "failed", "error": "template missing"},
+            },
+        },
+    )
+
+    created = impact_jobs.start_impact_job(
+        ChangeTrigger(
+            trigger_type="local", scm_id="hdpdm01", source_root=str(tmp_path / "src"),
+            scm_type="svn", base_ref="", changed_files=["a.c"], dry_run=True,
+            targets=["uds", "sits"], metadata={},
+        )
+    )
+    job_id = created["job_id"]
+    _wait_for_job(impact_jobs, job_id, timeout=10)
+    loaded = impact_jobs.load_job(job_id)
+
+    # 완료로 처리되고 분석 결과가 보존된다(과거엔 status=failed + result 없음)
+    assert loaded["status"] == "completed"
+    res = loaded["result"]
+    assert res["changed_function_types"] == {"door_run": "BODY"}
+    assert res["asil"]["escalation"] is True
+    assert res["coverage_gap"]["available"] is True
+    assert res["audit_path"]
+    # 실패는 감추지 않는다 — message + per-target status
+    assert "일부 문서 생성에 실패" in (loaded["message"] or "")
+    assert "SITS" in (loaded["message"] or "")
+    assert res["actions"]["sits"]["status"] == "failed"

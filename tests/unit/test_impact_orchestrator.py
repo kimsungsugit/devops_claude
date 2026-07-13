@@ -626,15 +626,32 @@ def test_run_impact_update_sits_uses_cross_module_impact(tmp_path, monkeypatch):
     )
 
     assert result["ok"] is True
-    # module-scoped(uds): cross-module callee 제외
-    assert result["impact"]["indirect_1hop"] == []
-    # SITS cross-module: 포함
+    # 기본값이 cross-module(same_module_only=False)로 바뀌었다 — 다른 모듈에서 변경 함수를 호출하는
+    # 함수(cross_fn)가 **주 영향 집합(impact)** 에 포함된다. 과거(module=파일 스코핑)엔 fatten이 이미
+    # 같은 파일 함수를 전부 seed로 넣어 indirect가 구조적으로 0이 됐고, 그 결과 cross_fn이 가이드
+    # 표·간접영향 스탯·hop 필터에서 통째로 사라졌다(under-report = ISO 위험 방향).
+    assert result["impact"]["indirect_1hop"] == ["cross_fn"]
+    # SITS cross 뷰는 계약 일관성 위해 항상 노출(가지치기 꺼져 있으면 impact와 동일)
     assert result["impact_sits_cross"]["indirect_1hop"] == ["cross_fn"]
-    assert any("SITS cross-module" in w for w in result["warnings"])
-    # SITS action(FLAG)의 functions가 cross-module 영향 전체를 담는다([2] fix)
+    # actions.sits는 영향 전체(impacted_all)를 담는다
     assert "cross_fn" in result["actions"]["sits"]["functions"]
-    # uds(module-scoped) action에는 cross-module callee가 들어가지 않는다
-    assert "cross_fn" not in result["actions"]["uds"]["functions"]
+    # uds/suts/sts/sds actions는 설계상 '직접 변경 함수'만 담는다(간접은 sits 몫) — 계약 불변
+    assert result["actions"]["uds"]["functions"] == ["seed"]
+
+    # 옵션으로 module 가지치기를 켜면 기존(module-scoped) 동작 — uds 제외, SITS는 cross 포함.
+    scoped = impact_orchestrator.run_impact_update(
+        ChangeTrigger(
+            trigger_type="local", scm_id="x", source_root=str(tmp_path / "src"),
+            scm_type="git", base_ref="HEAD~1", changed_files=["Ap_A.c"],
+            dry_run=True, targets=["uds", "sits"], metadata={},
+        ),
+        options=impact_orchestrator.ImpactOptions(same_module_only=True),
+    )
+    assert scoped["impact"]["indirect_1hop"] == []
+    assert scoped["impact_sits_cross"]["indirect_1hop"] == ["cross_fn"]
+    assert any("SITS cross-module" in w for w in scoped["warnings"])
+    assert "cross_fn" in scoped["actions"]["sits"]["functions"]
+    assert "cross_fn" not in scoped["actions"]["uds"]["functions"]
 
 
 def test_run_impact_update_no_sits_has_no_cross_field(tmp_path, monkeypatch):
