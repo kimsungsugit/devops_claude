@@ -491,6 +491,17 @@ function renderChangeDetailCell(kind, detail) {
   return <span className="text-muted" style={{ fontSize: 11 }}>본문(로직) 변경</span>;
 }
 
+// 무정보(파일영향) 판정 — 단일 출처. BODY/VARIABLE인데 function_diff(본문 hunk)·change_details(선언
+// 원문) 둘 다 없음 = 직접 변경 증거 없이 파일 단위 보수 분류(fatten)로 딸려온 함수. 전처리(#ifdef)만
+// 바뀐 파일의 안 바뀐 getter류가 여기 해당. "변경 함수" 집계를 부풀리므로 옵션(showFileImpact)으로만 노출.
+function functionHasNoEvidence(fn, kind, changeDetails, functionDiffs) {
+  const k = String(kind || '').toUpperCase();
+  if (k !== 'BODY' && k !== 'VARIABLE') return false;
+  const lf = String(fn).toLowerCase();
+  const cd = changeDetails && changeDetails[lf];
+  return !(functionDiffs && functionDiffs[lf]) && !(cd && (cd.before || cd.after));
+}
+
 // 함수별 영향 가이드 리스트의 '변경' 셀 — 유형 뱃지(유형별 색상+툴팁 설명)와, SIGNATURE면
 // 파라미터 변화 요약(＋int b 등)까지 표시해 모달을 열지 않고도 무슨 변경인지 파악하게 한다.
 function renderChangeSummaryCell(d, changeDetails, functionDiffs = {}) {
@@ -499,9 +510,8 @@ function renderChangeSummaryCell(d, changeDetails, functionDiffs = {}) {
   }
   const kind = (d.changeType || '').toUpperCase();
   const cd = changeDetails[String(d.function).toLowerCase()];
-  const fdCell = functionDiffs[String(d.function).toLowerCase()] || '';
-  // 무정보: BODY/VARIABLE인데 본문 diff·선언 원문 둘 다 없음 — 직접 변경 증거 없이 파일 단위 보수 포함(fatten)
-  const cellNoEvidence = (kind === 'BODY' || kind === 'VARIABLE') && !fdCell && !(cd && (cd.before || cd.after));
+  // 무정보(파일영향): 직접 변경 증거 없이 파일 단위 보수 포함(fatten) — 단일 출처 functionHasNoEvidence.
+  const cellNoEvidence = functionHasNoEvidence(d.function, kind, changeDetails, functionDiffs);
   const pdiff = (kind === 'SIGNATURE' && cd && (cd.before || cd.after)) ? diffSignatureParamsCached(cd.before, cd.after) : null;
   const sig = summarizeSignatureChange(pdiff);
   return (
@@ -592,6 +602,8 @@ export default function ImpactGuideSection({ analysisResult }) {
   const [hopFilter, setHopFilter] = useState('all');
   const [docFilter, setDocFilter] = useState('all');
   const [demoMode, setDemoMode] = useState(false);
+  // 파일영향(무정보 fatten 함수) 표시 토글 — 기본 숨김(집계·리스트에서 제외해 실변경 규모를 정직 표시).
+  const [showFileImpact, setShowFileImpact] = useState(false);
 
   // Impact data from analysis
   const changedFiles = impact?.trigger?.changed_files ?? impact?.changed_files ?? [];
@@ -648,13 +660,27 @@ export default function ImpactGuideSection({ analysisResult }) {
   const changeDetails = impact?.change_details ?? {};
   // 함수별 본문 diff 원문(AI 설명용) — BODY 등 선언 미변경 함수도 실제 코드 근거를 Gemini에 전달.
   const functionDiffs = impact?.function_diffs ?? {};
-  // 변경종류 요약(신규/삭제/시그니처/본문/헤더/변수 개수) — 데모 포함(activeFnEntries 기준).
+  // 변경종류 요약(신규/삭제/시그니처/본문/헤더/변수 개수) — 데모 포함(activeFnEntries 기준, 전체).
   const changeSummary = { NEW: 0, DELETE: 0, SIGNATURE: 0, BODY: 0, HEADER: 0, VARIABLE: 0 };
   for (const [, k] of activeFnEntries) { if (k in changeSummary) changeSummary[k] += 1; }
+
+  // ── 파일영향(무정보) 분리 — 직접 변경 증거 없이 fatten으로 딸려온 함수를 집계/리스트에서 옵션 처리 ──
+  // "변경 함수" 수를 부풀리므로 기본 숨김. 라인 diff 분류(isLineClassified)이면서 증거 有/無가 혼재할
+  // 때만 토글 제공(hasEvidenceSplit). 전부 보수 분류거나 전부 증거면 분리가 무의미 → 토글 없이 전체 표시.
+  const evidencedFnEntries = activeFnEntries.filter(([fn, k]) => !functionHasNoEvidence(fn, k, changeDetails, functionDiffs));
+  const noEvidenceCount = activeFnEntries.length - evidencedFnEntries.length;
+  // 데모(합성 데이터, change_details/function_diffs 없음)는 전부 무정보로 잡히므로 분리 제외 — 데모가 텅 비지 않게.
+  const hasEvidenceSplit = !demoMode && !isConservativeCount && noEvidenceCount > 0 && evidencedFnEntries.length > 0;
+  const hideFileImpact = hasEvidenceSplit && !showFileImpact;
+  const visibleFnEntries = hideFileImpact ? evidencedFnEntries : activeFnEntries;
+  const visibleChangeSummary = { NEW: 0, DELETE: 0, SIGNATURE: 0, BODY: 0, HEADER: 0, VARIABLE: 0 };
+  for (const [, k] of visibleFnEntries) { if (k in visibleChangeSummary) visibleChangeSummary[k] += 1; }
 
   const filteredGuide = useMemo(() => {
     if (!guide) return [];
     let items = guide.details;
+    // 파일영향(무정보) 숨김 — 직접 변경이나 증거 없는(fatten) 함수 제외. 간접(changed=false)은 유지.
+    if (hideFileImpact) items = items.filter(d => !(d.changed && functionHasNoEvidence(d.function, d.changeType, changeDetails, functionDiffs)));
     if (hopFilter !== 'all') items = items.filter(d => d.hop === hopFilter);
     if (docFilter === 'has_reqs') items = items.filter(d => d.requirements.length > 0);
     else if (docFilter === 'has_sts') items = items.filter(d => d.stsTestCases.length > 0);
@@ -672,7 +698,7 @@ export default function ImpactGuideSection({ analysisResult }) {
       );
     }
     return items;
-  }, [guide, hopFilter, docFilter, searchTerm]);
+  }, [guide, hopFilter, docFilter, searchTerm, hideFileImpact, changeDetails, functionDiffs]);
 
   // Build detailed guide
   const buildGuide = useCallback(async () => {
@@ -875,6 +901,8 @@ export default function ImpactGuideSection({ analysisResult }) {
     if (demoMode) L.push('- ⚠ 데모 시나리오 (시뮬레이션 데이터)');
     L.push(`- 변경 파일: ${activeChangedFiles.length}`);
     L.push(`- 변경 함수: ${activeFnEntries.length} (신규 ${changeSummary.NEW} / 삭제 ${changeSummary.DELETE} / 시그니처 ${changeSummary.SIGNATURE} / 본문 ${changeSummary.BODY} / 헤더 ${changeSummary.HEADER} / 변수 ${changeSummary.VARIABLE})`);
+    const noEvExport = activeFnEntries.filter(([fn, kind]) => functionHasNoEvidence(fn, kind, changeDetails, functionDiffs)).length;
+    if (noEvExport > 0) L.push(`  - 이 중 파일영향(직접 변경 증거 없음, 파일 단위 보수 포함): ${noEvExport}개 → 실 수정 함수 약 ${activeFnEntries.length - noEvExport}개`);
     L.push(`- 직접 영향: ${(activeImpactGroups.direct || []).length} / 간접: ${(activeImpactGroups.indirect_1hop || []).length + (activeImpactGroups.indirect_2hop || []).length}`);
     if (asilInfo && (asilInfo.max_changed || asilInfo.escalation || asilInfo.unknown_changed_count)) {
       L.push('', '## ASIL 차등 검증');
@@ -894,7 +922,10 @@ export default function ImpactGuideSection({ analysisResult }) {
       L.push(`- SUTS 재실행 TC: ${regressionSet.summary.suts_tc_count ?? 0} / SITS 영향 체인: ${regressionSet.summary.sits_chain_count ?? 0}`);
     }
     L.push('', '## 변경 함수');
-    for (const [fn, kind] of activeFnEntries) L.push(`- \`${fn}\` : ${CHANGE_TYPE_KO[kind] || kind}`);
+    for (const [fn, kind] of activeFnEntries) {
+      const noEvMark = functionHasNoEvidence(fn, kind, changeDetails, functionDiffs) ? ' (파일영향 — 직접 변경 증거 없음)' : '';
+      L.push(`- \`${fn}\` : ${CHANGE_TYPE_KO[kind] || kind}${noEvMark}`);
+    }
     if (guide?.details?.length) {
       L.push('', '## 함수별 영향 가이드 (직접 변경 + 간접 영향)');
       L.push('| 함수 | 변경 | ASIL | 영향 | 요구사항 | STS TC | SUTS TC |');
@@ -912,7 +943,7 @@ export default function ImpactGuideSection({ analysisResult }) {
     L.push('');
     downloadTextFile(`impact_analysis_${stamp.replace(/[: -]/g, '').slice(0, 14)}.md`, L.join('\n'));
     toast('success', '영향도 분석 결과를 내보냈습니다.');
-  }, [activeFnEntries, activeChangedFiles, changeSummary, activeImpactGroups, asilInfo, coverageGap, regressionSet, guide, aiGuide, demoMode, toast]);
+  }, [activeFnEntries, activeChangedFiles, changeSummary, activeImpactGroups, asilInfo, coverageGap, regressionSet, guide, aiGuide, demoMode, changeDetails, functionDiffs, toast]);
 
   // 선택 함수의 변경을 Gemini로 설명(선언 원문 before/after 포함). LLM 미설정이면 ok=false로 폴백.
   const fetchExplanation = useCallback(async (d) => {
@@ -1123,11 +1154,17 @@ export default function ImpactGuideSection({ analysisResult }) {
             isConservativeCount ? '파일단위 보수 분류 — 변경된 파일에 속한 전체 함수를 집계합니다. 라인 diff가 없어 실제 수정된 함수는 이보다 적을 수 있습니다.'
               : isLineClassified ? `라인 diff 정밀 분류 — 시그니처/신규/삭제를 함수단위로 판별. ${classification?.line_classified_file_count || 0}개 파일을 함수단위로 축소(라인변경 없는 ${classification?.narrow_removed_count || 0}개 함수 제외).`
               : undefined}>
-            <div className="stat-value">{activeFnEntries.length}</div>
+            <div className="stat-value">{visibleFnEntries.length}</div>
             <div className="stat-label">
               변경 함수
               {isConservativeCount && <span className="text-muted" style={{ fontSize: 9, marginLeft: 3 }}>(보수 추정)</span>}
               {isLineClassified && <span className="pill pill-success" style={{ fontSize: 8, marginLeft: 3 }}>정밀</span>}
+              {hasEvidenceSplit && (
+                <span className="text-muted" style={{ fontSize: 9, marginLeft: 3 }}
+                  title="파일영향 = 직접 변경 증거 없이 파일 단위 보수 분류로 포함된 함수(실제 수정 아님). 아래 '변경 상세'에서 표시/숨김 전환.">
+                  {showFileImpact ? `(파일영향 ${noEvidenceCount} 포함)` : `+${noEvidenceCount} 파일영향`}
+                </span>
+              )}
             </div>
           </div>
           <div className="stat-card">
@@ -1205,14 +1242,23 @@ export default function ImpactGuideSection({ analysisResult }) {
       {activeFnEntries.length > 0 && (
         <div className="panel" style={{ marginBottom: 12 }}>
           <div className="panel-header">
-            <span className="panel-title">변경 상세 ({activeFnEntries.length}개 함수)</span>
-            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-              {changeSummary.NEW > 0 && <span className="pill pill-success" style={{ fontSize: 10 }}>🟢 신규 {changeSummary.NEW}</span>}
-              {changeSummary.DELETE > 0 && <span className="pill pill-danger" style={{ fontSize: 10 }}>🔴 삭제 {changeSummary.DELETE}</span>}
-              {changeSummary.SIGNATURE > 0 && <span className="pill pill-warning" style={{ fontSize: 10 }}>🟠 시그니처 {changeSummary.SIGNATURE}</span>}
-              {changeSummary.BODY > 0 && <span className="pill pill-info" style={{ fontSize: 10 }}>🔵 본문 {changeSummary.BODY}</span>}
-              {changeSummary.HEADER > 0 && <span className="pill" style={{ fontSize: 10 }}>헤더 {changeSummary.HEADER}</span>}
-              {changeSummary.VARIABLE > 0 && <span className="pill" style={{ fontSize: 10 }}>변수 {changeSummary.VARIABLE}</span>}
+            <span className="panel-title">
+              변경 상세 ({visibleFnEntries.length}개 함수)
+              {hideFileImpact && <span className="text-muted" style={{ fontSize: 10, fontWeight: 400, marginLeft: 4 }}>{`· 파일영향 ${noEvidenceCount}개 숨김`}</span>}
+            </span>
+            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
+              {visibleChangeSummary.NEW > 0 && <span className="pill pill-success" style={{ fontSize: 10 }}>🟢 신규 {visibleChangeSummary.NEW}</span>}
+              {visibleChangeSummary.DELETE > 0 && <span className="pill pill-danger" style={{ fontSize: 10 }}>🔴 삭제 {visibleChangeSummary.DELETE}</span>}
+              {visibleChangeSummary.SIGNATURE > 0 && <span className="pill pill-warning" style={{ fontSize: 10 }}>🟠 시그니처 {visibleChangeSummary.SIGNATURE}</span>}
+              {visibleChangeSummary.BODY > 0 && <span className="pill pill-info" style={{ fontSize: 10 }}>🔵 본문 {visibleChangeSummary.BODY}</span>}
+              {visibleChangeSummary.HEADER > 0 && <span className="pill" style={{ fontSize: 10 }}>헤더 {visibleChangeSummary.HEADER}</span>}
+              {visibleChangeSummary.VARIABLE > 0 && <span className="pill" style={{ fontSize: 10 }}>변수 {visibleChangeSummary.VARIABLE}</span>}
+              {hasEvidenceSplit && (
+                <button className="btn-sm" onClick={() => setShowFileImpact(v => !v)}
+                  title="파일영향 = 직접 변경 증거(본문 diff·선언 변경)가 없이 파일 단위 보수 분류로 포함된 함수. 실제 수정이 아닐 수 있어 기본 숨김입니다.">
+                  {showFileImpact ? `파일영향 ${noEvidenceCount}개 숨기기` : `파일영향 ${noEvidenceCount}개 보기`}
+                </button>
+              )}
             </div>
           </div>
           {isConservativeCount && (
@@ -1230,13 +1276,16 @@ export default function ImpactGuideSection({ analysisResult }) {
                 </tr>
               </thead>
               <tbody>
-                {[...activeFnEntries]
+                {[...visibleFnEntries]
                   .sort((a, b) => (CHANGE_ORDER[b[1]] || 0) - (CHANGE_ORDER[a[1]] || 0))
                   .map(([fn, kind]) => (
                     <tr key={fn} style={{ borderBottom: '1px solid var(--border-subtle, var(--border))' }}>
                       <td style={{ padding: '6px 8px', fontFamily: 'var(--font-mono, monospace)', wordBreak: 'break-all' }}>{functionMeta[fn]?.display_name || fn}</td>
                       <td style={{ padding: '6px 8px' }}>
                         <StatusBadge tone={CHANGE_TYPE_TONE[kind] || 'neutral'}>{CHANGE_TYPE_KO[kind] || kind}</StatusBadge>
+                        {showFileImpact && functionHasNoEvidence(fn, kind, changeDetails, functionDiffs) && (
+                          <span className="pill pill-neutral" style={{ fontSize: 8, marginLeft: 3 }} title="직접 변경 증거 없음(function_diff·change_details 모두 없음) — 파일 단위 보수 포함(fatten)">파일영향</span>
+                        )}
                       </td>
                       <td style={{ padding: '6px 8px' }}>
                         {renderChangeDetailCell(kind, changeDetails[String(fn).toLowerCase()])}
@@ -1389,6 +1438,13 @@ export default function ImpactGuideSection({ analysisResult }) {
               <option value="has_suts">SUTS TC 있음</option>
               <option value="no_mapping">매핑 없음</option>
             </select>
+            {hasEvidenceSplit && (
+              <label style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 12, color: 'var(--text-muted)', cursor: 'pointer' }}
+                title="직접 변경 증거 없이 파일 단위 보수 분류로 포함된 함수(파일영향)를 목록에 포함합니다.">
+                <input type="checkbox" checked={showFileImpact} onChange={e => setShowFileImpact(e.target.checked)} />
+                {`파일영향 포함 (${noEvidenceCount})`}
+              </label>
+            )}
             <span className="text-muted text-sm">{filteredGuide.length}/{guide.details.length}건</span>
           </div>
 

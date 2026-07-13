@@ -556,6 +556,83 @@ describe('ImpactGuideSection', () => {
     expect(screen.getByText(/함수 본문\(로직\)이 변경되었습니다/)).toBeInTheDocument();  // 기존 단정 유지
     expect(screen.queryByText(/직접 변경\(hunk\/선언\)은 감지되지 않았습니다/)).not.toBeInTheDocument();
   });
+
+  // STS-IMPACT-024: 변경 상세 집계 — 파일영향(무정보 BODY)은 기본 숨김, 토글로 표시/집계 분리
+  it('변경 상세 집계: 파일영향(무정보 BODY)은 기본 숨김이고 토글로 표시/집계 분리된다', async () => {
+    const user = userEvent.setup();
+    const analysisResult = {
+      impactData: {
+        trigger: { changed_files: ['a.c'] },
+        // g_real=증거 있음(function_diffs), g_getter1/2=무정보(fd·cd 둘 다 없음)
+        changed_function_types: { g_real: 'BODY', g_getter1: 'BODY', g_getter2: 'BODY' },
+        impact: { direct: ['g_real', 'g_getter1', 'g_getter2'] },
+        function_meta: {},
+        function_diffs: { g_real: '@@ -1,2 +1,2 @@ void g_real(void)\n-    x = 1;\n+    x = 2;' },
+        classification: { granularity: 'line', line_classified_file_count: 1 },
+      },
+    };
+    render(<ImpactGuideSection analysisResult={analysisResult} />);
+    // 기본: 파일영향 2개 숨김 — 토글 버튼·숨김 캡션·스탯 부기 노출, 무정보 함수 미표시, 증거 함수만 표시
+    expect(screen.getByRole('button', { name: /파일영향 2개 보기/ })).toBeInTheDocument();
+    expect(screen.getByText(/파일영향 2개 숨김/)).toBeInTheDocument();
+    expect(screen.getByText('+2 파일영향')).toBeInTheDocument();   // 스탯 카드 부기(집계 분리)
+    expect(screen.queryByText('g_getter1')).not.toBeInTheDocument();
+    expect(screen.queryByText('g_getter2')).not.toBeInTheDocument();
+    expect(screen.getByText('g_real')).toBeInTheDocument();
+    // 토글 → 무정보 함수 표시, 버튼 라벨 전환
+    await user.click(screen.getByRole('button', { name: /파일영향 2개 보기/ }));
+    expect(screen.getByText('g_getter1')).toBeInTheDocument();
+    expect(screen.getByText('g_getter2')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /파일영향 2개 숨기기/ })).toBeInTheDocument();
+  });
+
+  // STS-IMPACT-025: 함수별 영향 가이드 리스트도 파일영향 기본 숨김 + 체크박스로 포함
+  it('가이드 리스트: 파일영향(무정보)은 기본 숨김이고 체크박스로 목록에 포함된다', async () => {
+    const { post } = await import('../api.js');
+    post.mockResolvedValue({ ok: false });
+    const user = userEvent.setup();
+    const analysisResult = {
+      impactData: {
+        trigger: { changed_files: ['a.c'] },
+        changed_function_types: { g_real: 'BODY', g_getter1: 'BODY', g_getter2: 'BODY' },
+        impact: { direct: ['g_real', 'g_getter1', 'g_getter2'] },
+        function_meta: {},
+        function_diffs: { g_real: '@@ -1,2 +1,2 @@ void g_real(void)\n-    x = 1;\n+    x = 2;' },
+        classification: { granularity: 'line', line_classified_file_count: 1 },
+      },
+    };
+    render(<ImpactGuideSection analysisResult={analysisResult} />);
+    await user.click(screen.getByText(/상세 가이드 생성/));
+    await waitFor(() => expect(screen.getByText(/함수별 영향 가이드/)).toBeInTheDocument());
+    // 가이드 필터에 '파일영향 포함' 체크박스 노출, 기본 미체크 → 무정보 함수 목록 미표시
+    expect(screen.getByText(/파일영향 포함 \(2\)/)).toBeInTheDocument();
+    const cb = screen.getByRole('checkbox');
+    expect(cb).not.toBeChecked();
+    expect(screen.queryByText('g_getter1')).not.toBeInTheDocument();
+    // 체크 → 무정보 함수가 목록(변경 상세·가이드 양쪽)에 표시
+    await user.click(cb);
+    expect(cb).toBeChecked();
+    expect(screen.getAllByText('g_getter1').length).toBeGreaterThanOrEqual(1);
+  });
+
+  // STS-IMPACT-026: 보수 분류(granularity=file)면 전부 무정보라도 분리 토글 없음(빈 표 방지 가드)
+  it('가드: 보수 분류(file)에서는 파일영향 토글이 없고 모든 함수가 그대로 표시된다', () => {
+    const analysisResult = {
+      impactData: {
+        trigger: { changed_files: ['a.c'] },
+        changed_function_types: { foo: 'BODY', bar: 'BODY' },
+        impact: { direct: ['foo', 'bar'] },
+        function_meta: {},
+        classification: { granularity: 'file' },  // 전부 무정보지만 보수 분류 → 분리 무의미
+      },
+    };
+    render(<ImpactGuideSection analysisResult={analysisResult} />);
+    // 토글 버튼/캡션 없음 + 두 함수 모두 표시(숨기면 빈 표가 되므로 분리하지 않음)
+    expect(screen.queryByRole('button', { name: /파일영향/ })).not.toBeInTheDocument();
+    expect(screen.queryByText(/파일영향.*숨김/)).not.toBeInTheDocument();
+    expect(screen.getByText('foo')).toBeInTheDocument();
+    expect(screen.getByText('bar')).toBeInTheDocument();
+  });
 });
 
 describe('extractDiffElements (순수 함수)', () => {
