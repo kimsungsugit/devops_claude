@@ -75,10 +75,16 @@ def load_registry_store() -> ScmRegistryStore:
         return ScmRegistryStore()
 
 
+def _save_store_unlocked(store: ScmRegistryStore) -> Path:
+    """락 없이 저장 — 이미 _REGISTRY_LOCK을 보유한 read-modify-write 안에서만 호출할 것.
+    (threading.Lock 폴백은 re-entrant가 아니라 save_registry_store를 중첩 호출하면 데드락)"""
+    _save_json(REGISTRY_PATH, store.model_dump(mode="json"))
+    return REGISTRY_PATH
+
+
 def save_registry_store(store: ScmRegistryStore) -> Path:
     with _REGISTRY_LOCK:
-        _save_json(REGISTRY_PATH, store.model_dump(mode="json"))
-    return REGISTRY_PATH
+        return _save_store_unlocked(store)
 
 
 def list_registry_entries() -> List[ScmRegistryEntry]:
@@ -97,58 +103,67 @@ def get_registry_entry(entry_id: str) -> ScmRegistryEntry | None:
 
 
 def register_entry(req: ScmRegisterRequest) -> ScmRegistryEntry:
-    store = load_registry_store()
-    if any(entry.id == req.id for entry in store.registries):
-        raise ValueError(f"registry id already exists: {req.id}")
-    # Validate/normalize the env var name before persisting. Raising here is
-    # preferable to silently resolving to `PATH` at checkout time.
-    payload = req.model_dump()
-    payload["scm_password_env"] = validate_scm_password_env(payload.get("scm_password_env", ""))
-    now = _now_iso()
-    entry = ScmRegistryEntry(
-        **payload,
-        created_at=now,
-        updated_at=now,
-    )
-    store.registries.append(entry)
-    save_registry_store(store)
-    return entry
+    # ⚠ read-modify-write 전체를 락으로 감싼다. 과거엔 load가 락 밖이라 동시 실행 시 lost-update가
+    #   났다(스토어 전체를 통째로 덮어쓰므로 다른 항목의 갱신이 조용히 되돌아감).
+    with _REGISTRY_LOCK:
+        store = load_registry_store()
+        if any(entry.id == req.id for entry in store.registries):
+            raise ValueError(f"registry id already exists: {req.id}")
+        # Validate/normalize the env var name before persisting. Raising here is
+        # preferable to silently resolving to `PATH` at checkout time.
+        payload = req.model_dump()
+        payload["scm_password_env"] = validate_scm_password_env(payload.get("scm_password_env", ""))
+        now = _now_iso()
+        entry = ScmRegistryEntry(
+            **payload,
+            created_at=now,
+            updated_at=now,
+        )
+        store.registries.append(entry)
+        _save_store_unlocked(store)
+        return entry
 
 
 def update_entry(entry_id: str, req: ScmUpdateRequest) -> ScmRegistryEntry:
-    store = load_registry_store()
-    for idx, entry in enumerate(store.registries):
-        if entry.id != entry_id:
-            continue
-        merged = entry.model_dump(mode="json")
-        patch = req.model_dump(exclude_none=True, mode="json")
-        if "scm_password_env" in patch:
-            patch["scm_password_env"] = validate_scm_password_env(patch["scm_password_env"])
-        if "linked_docs" in patch and isinstance(patch["linked_docs"], dict):
-            linked = ScmLinkedDocs.model_validate(
-                {
-                    **entry.linked_docs.model_dump(mode="json"),
-                    **patch["linked_docs"],
-                }
-            )
-            patch["linked_docs"] = linked.model_dump(mode="json")
-        merged.update(patch)
-        merged["updated_at"] = _now_iso()
-        updated = ScmRegistryEntry.model_validate(merged)
-        store.registries[idx] = updated
-        save_registry_store(store)
-        return updated
+    # ⚠ read-modify-write를 락 안에서 원자적으로. impact 실행 락이 scm별로 바뀌면서 서로 다른
+    #   프로젝트가 동시에 _update_linked_doc(run당 최대 3회)을 호출할 수 있고, load가 락 밖이면
+    #   한쪽이 stale 스토어로 전체를 덮어써 **방금 생성한 문서 경로가 조용히 되돌아간다**
+    #   (그 다음 실행의 before/after diff까지 오염).
+    with _REGISTRY_LOCK:
+        store = load_registry_store()
+        for idx, entry in enumerate(store.registries):
+            if entry.id != entry_id:
+                continue
+            merged = entry.model_dump(mode="json")
+            patch = req.model_dump(exclude_none=True, mode="json")
+            if "scm_password_env" in patch:
+                patch["scm_password_env"] = validate_scm_password_env(patch["scm_password_env"])
+            if "linked_docs" in patch and isinstance(patch["linked_docs"], dict):
+                linked = ScmLinkedDocs.model_validate(
+                    {
+                        **entry.linked_docs.model_dump(mode="json"),
+                        **patch["linked_docs"],
+                    }
+                )
+                patch["linked_docs"] = linked.model_dump(mode="json")
+            merged.update(patch)
+            merged["updated_at"] = _now_iso()
+            updated = ScmRegistryEntry.model_validate(merged)
+            store.registries[idx] = updated
+            _save_store_unlocked(store)
+            return updated
     raise KeyError(entry_id)
 
 
 def delete_entry(entry_id: str) -> bool:
-    store = load_registry_store()
-    remaining = [entry for entry in store.registries if entry.id != entry_id]
-    if len(remaining) == len(store.registries):
-        return False
-    store.registries = remaining
-    save_registry_store(store)
-    return True
+    with _REGISTRY_LOCK:  # read-modify-write 원자성(lost-update 방지)
+        store = load_registry_store()
+        remaining = [entry for entry in store.registries if entry.id != entry_id]
+        if len(remaining) == len(store.registries):
+            return False
+        store.registries = remaining
+        _save_store_unlocked(store)
+        return True
 
 
 def replace_linked_docs(entry_id: str, linked_docs: ScmLinkedDocs) -> ScmRegistryEntry:

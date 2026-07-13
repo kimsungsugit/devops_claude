@@ -152,39 +152,44 @@ def generate_uds_logic_items(
 _BY_NAME_ASIL_RANK = {"QM": 0, "A": 1, "B": 2, "C": 3, "D": 4}
 
 
+def _asil_rank(v: Any) -> int:
+    a = re.sub(r"^ASIL[\s_-]*", "", str(v or "").strip().upper()).strip()
+    return _BY_NAME_ASIL_RANK.get(a, -1)
+
+
 def _put_by_name(
-    by_name: Dict[str, Dict[str, Any]], name: str, detail: Dict[str, Any]
+    by_name: Dict[str, Dict[str, Any]],
+    name: str,
+    detail: Dict[str, Any],
+    collisions: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> None:
-    """function_details_by_name에 안전하게 등록 — 동일 이름의 다중 정의(파일 간 충돌) 병합.
+    """function_details_by_name 등록 + **동일 이름 다중 정의(파일 간 충돌) 기록**.
 
     C 프로젝트에는 같은 이름 함수가 여러 파일에 정의되는 경우가 있다(예: Generated_Code/EEPROM.c와
-    Sources/Eeprom/EEPROM.c의 eeprom_setbyte, main 등). 과거엔 last-wins라 한쪽 메타만 남아
+    Sources/Eeprom/EEPROM.c의 eeprom_setbyte, main 등). by_name은 last-wins라 한쪽 메타만 남아
       (a) `asil`이 더 낮은 사본으로 덮여 **안전 등급이 손실**되고(ISO 26262 — escalation·MC/DC 게이트),
       (b) `file`이 한쪽만 가리켜 영향분석의 파일 매칭이 다른 사본을 **누락**(under-report)했다.
-    → ASIL은 두 사본 중 **높은 등급**을 유지하고, 정의 파일은 `files` 목록으로 누적한다.
-    ⚠ 원본 detail(dict)은 변형하지 않는다 — function_details(문서 생성 소스)의 함수별 값 보존.
+
+    ⚠ 그렇다고 by_name에 **병합 사본(dict 복사)** 을 넣으면 안 된다 — by_name 값은 function_details의
+    **동일 객체**여야 하고(docx_builder가 참조문서 값을 `target[key] = ...`로 in-place 병합하므로,
+    복사본을 넣으면 그 갱신이 문서에 반영되지 않는다), 뒤이어 실행되는 콜그래프 보강 루프가
+    `function_details_by_name[fn] = info`로 다시 덮어써 병합이 무효화되기도 한다.
+    → by_name은 **동일성 유지(last-wins 그대로)**, 충돌 사실은 별도 맵(`collisions`)에 기록한다.
+      소비자(영향분석)는 자신의 deepcopy에 이 정보를 얹어 쓴다.
     """
     key = str(name or "").strip().lower()
     if not key:
         return
     prev = by_name.get(key)
-    if prev is None or prev is detail:
-        by_name[key] = detail
-        return
-
-    def _rank(v: Any) -> int:
-        a = re.sub(r"^ASIL[\s_-]*", "", str(v or "").strip().upper()).strip()
-        return _BY_NAME_ASIL_RANK.get(a, -1)
-
-    merged = dict(detail)
-    if _rank(prev.get("asil")) > _rank(detail.get("asil")):
-        merged["asil"] = prev.get("asil")
-    files = set(prev.get("files") or ([prev.get("file")] if prev.get("file") else []))
-    if detail.get("file"):
-        files.add(detail["file"])
-    if files:
-        merged["files"] = sorted(files)
-    by_name[key] = merged
+    if collisions is not None and prev is not None and prev is not detail:
+        ent = collisions.setdefault(key, {"files": [], "asil": ""})
+        for _d in (prev, detail):
+            _f = str(_d.get("file") or "").strip()
+            if _f and _f not in ent["files"]:
+                ent["files"].append(_f)
+            if _asil_rank(_d.get("asil")) > _asil_rank(ent.get("asil")):
+                ent["asil"] = str(_d.get("asil") or "")
+    by_name[key] = detail  # 동일성 보존(문서 생성의 in-place 갱신 경로 유지)
 
 
 def _group_function_blocks_by_swcom(blocks: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
@@ -328,6 +333,9 @@ def generate_uds_source_sections(
     function_table_rows: List[List[str]] = []
     function_details: Dict[str, Dict[str, Any]] = {}
     function_details_by_name: Dict[str, Dict[str, Any]] = {}
+    # 동일 이름 함수의 다중 정의(파일 간 충돌) 기록 — {name_lower: {files:[...], asil: max}}.
+    # by_name은 last-wins(동일성 보존)이라 이 정보가 없으면 영향분석이 다른 사본을 누락한다.
+    function_collisions: Dict[str, Dict[str, Any]] = {}
     call_map: Dict[str, List[str]] = {}
     fallback_functions: List[Dict[str, Any]] = []
     module_map: Dict[str, str] = {}
@@ -645,6 +653,21 @@ def generate_uds_source_sections(
                 _prev = _deduped[_seen_ast_idx[_fn_name]]
                 if _asil_rank_of(_fn.get("comment_asil")) > _asil_rank_of(_prev.get("comment_asil")):
                     _prev["comment_asil"] = _fn.get("comment_asil")  # 하향 방지(보수적 상향)
+                # ⚠ 여기서 두 번째 정의를 **파일 경로째 통째로 버린다**. 그래서 하위 레이어
+                # (_put_by_name / function_details_by_name)는 충돌을 **볼 수조차 없다** — 충돌 정보를
+                # 거기서 기록하려던 과거 시도들이 전부 죽은 코드였던 이유다.
+                # 동일 이름이 여러 파일에 정의되면(예: Generated_Code/EEPROM.c와 Sources/Eeprom/EEPROM.c의
+                # eeprom_setbyte, main 등) 영향분석은 남은 한 사본의 file만 보고 **다른 파일의 변경을
+                # 통째로 놓친다**(ISO 26262 under-report — 실제로 ASIL D 구현이 누락될 수 있음).
+                # → 정의 파일 전체와 최대 ASIL을 이 시점에 기록한다(소비자: impact_orchestrator).
+                _ck = _fn_name.strip().lower()
+                _ce = function_collisions.setdefault(_ck, {"files": [], "asil": ""})
+                for _d in (_prev, _fn):
+                    _df = str(_d.get("file") or "").strip()
+                    if _df and _df not in _ce["files"]:
+                        _ce["files"].append(_df)
+                    if _asil_rank_of(_d.get("comment_asil")) > _asil_rank_of(_ce.get("asil")):
+                        _ce["asil"] = str(_d.get("comment_asil") or "")
         ast_result["functions"] = _deduped
         module_ids: Dict[str, int] = {}
         module_order = [
@@ -1203,7 +1226,7 @@ def generate_uds_source_sections(
                 "logic": "Auto(call tree)" if called_list else "",
             }
             function_details[fn_id] = detail
-            _put_by_name(function_details_by_name, name, detail)  # 동일 이름 다중정의 안전 병합(ASIL max + files)
+            _put_by_name(function_details_by_name, name, detail, function_collisions)
         # Fallback: AST에서 누락된 함수도 병합 (regex 기반 수집분)
         _ast_names = {r[3] for r in function_table_rows if len(r) >= 4}
         if fallback_functions:
@@ -1366,7 +1389,7 @@ def generate_uds_source_sections(
                     "logic": "Auto(call tree)" if called_list else "",
                 }
                 function_details[fn_id] = detail
-                _put_by_name(function_details_by_name, name, detail)  # 동일 이름 다중정의 안전 병합
+                _put_by_name(function_details_by_name, name, detail, function_collisions)
         if globals_detailed:
             for g in globals_detailed:
                 if not isinstance(g, dict):
@@ -1881,7 +1904,9 @@ def generate_uds_source_sections(
         if hop2_callers:
             info["calling_indirect"] = hop2_callers[:20]
         if fn_name:
-            function_details_by_name[fn_name] = info
+            # ⚠ 직접 대입하면 위에서 기록한 충돌 정보가 아니라 **등록 순서**만 바뀌지만,
+            # 이 루프는 두 사본을 모두 순회하므로 충돌 기록을 계속 갱신해야 한다.
+            _put_by_name(function_details_by_name, fn_name, info, function_collisions)
 
     # ── 간접 Globals 추적: same-module direct/2-hop globals를 제한적으로 caller에 전파 ──
     if call_map and function_details_by_name:
@@ -1997,6 +2022,9 @@ def generate_uds_source_sections(
         "function_table_rows": function_table_rows,
         "function_details": function_details,
         "function_details_by_name": function_details_by_name,
+        # 동일 이름 다중정의(파일 간 충돌) — by_name은 last-wins이므로 이 맵이 없으면 영향분석이
+        # 다른 사본의 파일 변경을 놓치고(under-report) 낮은 ASIL로 오판한다. {name: {files, asil}}.
+        "function_collisions": function_collisions,
         "call_map": call_map,
         "calling_map": calling_map,
         "module_map": module_map,

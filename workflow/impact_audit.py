@@ -134,14 +134,23 @@ def acquire_run_lock(scm_id: str) -> Dict[str, Any]:
     return {"ok": True, "lock_path": str(json_path), "lock": payload}
 
 
-def release_run_lock() -> bool:
-    # 이 스레드가 소유한 키만 해제 — 실패한 acquire나 다른 스레드가 남의 락을 풀지 못하게(threading.
-    # Lock은 owner 검증이 없어 명시 확인 필요). finally에서 무조건 호출돼도 비소유자는 no-op.
+def release_run_lock(scm_id: str = "") -> bool:
+    """이 스레드가 소유한 락만 해제. scm_id를 주면 그 키만(권장 — 명시적).
+
+    ⚠ scm_id 없이 tid만으로 키를 찾으면(과거 방식) 스레드 ident 재사용 시 **남의 락을 해제**하고
+    진짜 소유 락은 프로세스 수명 내내 누수될 수 있다(파이썬은 ident 재사용을 허용). 소유자 검증은
+    유지하되 키는 호출측이 명시하는 것이 안전하다. 인자 없는 호출은 하위호환(폴백 스캔).
+    """
     tid = threading.get_ident()
     with _RUN_LOCKS_GUARD:
-        key = next((k for k, v in list(_RUN_LOCK_OWNERS.items()) if v == tid), None)
-        if key is None:
-            return False
+        if scm_id:
+            key = _lock_key(scm_id)
+            if _RUN_LOCK_OWNERS.get(key) != tid:
+                return False  # 비소유자 → no-op(남의 락 보호)
+        else:
+            key = next((k for k, v in list(_RUN_LOCK_OWNERS.items()) if v == tid), None)
+            if key is None:
+                return False
         _RUN_LOCK_OWNERS.pop(key, None)
         fl = _RUN_FILE_LOCKS.get(key)
         intra = _RUN_INTRA_LOCKS.get(key)
@@ -171,9 +180,22 @@ def release_run_lock() -> bool:
 
 
 def write_impact_audit(payload: Dict[str, Any]) -> Path:
+    """ISO 26262 감사 레코드 기록. 파일명에 **scm_id**를 포함하고 충돌 시 유니크화한다.
+
+    ⚠ 실행 락이 scm별로 바뀌면서 서로 다른 프로젝트가 **동시에** 끝날 수 있는데, 파일명이 초 단위
+    타임스탬프뿐이면 한쪽의 감사 기록이 조용히 덮어써진다(추적성 손실 — 안전 엔지니어가 "무엇을 왜
+    분석/제외했는지"를 검증할 유일한 durable 레코드다). scm_id + 중복 시 접미사로 손실을 막는다.
+    (읽기: list_impact_audits는 impact_*.json glob, change_log는 run_id=stem에서 파생 → 호환)
+    """
     ensure_audit_dir()
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    out = AUDIT_DIR / f"impact_{ts}.json"
+    scm = _lock_key(str(payload.get("scm_id") or ""))  # alnum/_/- 로 안전화
+    base = f"impact_{ts}" if scm == "default" else f"impact_{ts}_{scm}"
+    out = AUDIT_DIR / f"{base}.json"
+    _n = 1
+    while out.exists():  # 같은 초·같은 scm 재실행에서도 덮어쓰지 않는다
+        out = AUDIT_DIR / f"{base}_{_n}.json"
+        _n += 1
     _save_json(out, payload)
     return out
 

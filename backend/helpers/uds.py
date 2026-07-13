@@ -560,11 +560,22 @@ def _source_sections_disk_cache_path(source_root: str, preprocess: bool = True) 
     return repo_root / ".devops_pro_cache" / "source_sections" / f"{_h}.json"
 
 
+# 소스 인덱스(sections) 스키마/파서 버전. 파서가 산출물 구조·의미를 바꾸면 **반드시 올린다** —
+# 디스크 캐시 시그니처에 포함되므로, 소스가 그대로여도 이전 캐시가 자동 무효화되고 재파싱된다.
+# (v3: function_collisions 맵 — 동일 이름 다중정의의 **정의 파일 전체 + 최대 ASIL**. AST dedup이
+#      두 번째 정의를 파일 경로째 버려서, 그 아래 레이어에서 충돌을 기록하려던 시도(v2)는 항상 빈
+#      맵이었다 → dedup 지점에서 기록하도록 이동. v2 캐시는 collisions가 비어 있으므로 무효화 필요.
+#  v2: function_details_by_name 다중정의 처리 시도(무효 — 위 참조).
+#      버전이 없던 시절엔 소스가 안 바뀌면 구 캐시가 계속 히트해 **파서 fix가 프로덕션에서 무효**였다.)
+_SOURCE_SECTIONS_SCHEMA_VERSION = "v3"
+
+
 def _source_root_signature(source_root: str, max_files: int = 1200) -> Optional[str]:
-    """로컬 소스 트리의 (경로,mtime,size) 시그니처. 로컬 FS만(cloudium은 None → 디스크캐시 미사용).
+    """로컬 소스 트리의 (스키마버전, 경로,mtime,size) 시그니처. 로컬 FS만(cloudium은 None → 디스크캐시 미사용).
 
     소스가 로컬에 있을 때만 유효 — 파일 하나라도 mtime/size가 바뀌면 시그니처가 달라져
     캐시가 무효화된다. cloudium/원격은 로컬 stat이 무의미하므로 None을 반환(디스크캐시 skip).
+    파서 스키마 버전도 포함해, 소스 불변이어도 파서가 바뀌면 캐시를 무효화한다.
     """
     import hashlib
     roots = [p.strip() for p in str(source_root or "").replace(";", ",").split(",") if p.strip()]
@@ -596,7 +607,7 @@ def _source_root_signature(source_root: str, max_files: int = 1200) -> Optional[
                     break
             if count > max_files:
                 break
-    return f"{count}:{h.hexdigest()}"
+    return f"{_SOURCE_SECTIONS_SCHEMA_VERSION}:{count}:{h.hexdigest()}"
 
 
 def _get_source_sections_cached(source_root: str, max_files: int = 1200, preprocess: bool = True) -> Dict[str, Any]:

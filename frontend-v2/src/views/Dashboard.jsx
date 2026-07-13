@@ -358,7 +358,18 @@ export default function Dashboard({ onGoDetail }) {
           });
           impactData._linked_docs = matchedScm.linked_docs || {};
           impactData._scm_name = matchedScm.name || matchedScm.id;
-          setStep('impact', 'done', '완료');
+          // 부분 실패(분석은 성공, 일부 문서 자동 생성 실패)를 '완료'로 위장하지 않는다.
+          // 백엔드가 job을 completed로 내려주되 partial_failure/actions[t].status='failed'로 표시.
+          const _failedDocs = Object.entries(impactData.actions || {})
+            .filter(([, a]) => a && a.status === 'failed')
+            .map(([t]) => t.toUpperCase());
+          if (impactData.partial_failure || _failedDocs.length) {
+            const _list = _failedDocs.join(', ') || '일부 대상';
+            setStep('impact', 'done', `분석 완료 · ${_list} 문서 생성 실패`);
+            toast('warning', `영향 분석은 완료했으나 ${_list} 문서 자동 생성에 실패했습니다. 분석 결과는 유효합니다.`);
+          } else {
+            setStep('impact', 'done', '완료');
+          }
         } catch (e) {
           if (e.message === 'AbortError') throw e;
           setStep('impact', 'error', e.message);
@@ -381,7 +392,10 @@ export default function Dashboard({ onGoDetail }) {
           timestamp: Date.now(),
         };
       }
-      toast('success', '분석이 완료되었습니다.');
+      // 부분 실패는 위에서 warning 토스트로 이미 알렸다 — 성공으로 덮어쓰지 않는다(위장 방지).
+      if (!impactData?.partial_failure) {
+        toast('success', '분석이 완료되었습니다.');
+      }
     } catch (e) {
       if (e.message !== 'AbortError') {
         toast('error', `분석 중 오류: ${e.message}`);

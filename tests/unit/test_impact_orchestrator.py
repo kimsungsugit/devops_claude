@@ -1055,3 +1055,76 @@ def test_load_sits_fn_chains_missing_intermediate_warns(monkeypatch):
     out = orch._load_sits_fn_chains("U:/x/SITS.xlsm", ["door_run"], warn_sink=warns)
     assert out == {}
     assert any("중간파일 미생성" in w for w in warns)
+
+
+def test_multi_file_same_name_function_not_dropped(tmp_path, monkeypatch):
+    """동일 이름 함수가 두 파일에 정의될 때, 어느 파일이 바뀌어도 그 함수를 놓치지 않는다.
+
+    회귀(2라운드 연속 놓친 버그): AST dedup이 두 번째 정의를 **파일 경로째** 버려서 by_name에는
+    한 사본의 file만 남는다. 그 상태에서 다른 파일이 바뀌면
+      - full_hits(정확 경로 매칭)에 그 함수가 안 잡히고
+      - `resolved.update(full_hits or base_hits)` 규칙상 basename 폴백도 무시돼
+    **실제로 변경된 안전 함수(EEPROM 무결성 등)가 영향 집합에서 통째로 사라진다**(under-report).
+    → sections["function_collisions"]로 정의 파일 전체를 넘겨 해결.
+    """
+    from backend.schemas import ScmRegisterRequest
+    from backend.services import scm_registry
+    from workflow import impact_audit, impact_orchestrator
+
+    audit_dir = tmp_path / "audit"
+    monkeypatch.setattr(scm_registry, "REGISTRY_PATH", tmp_path / "config" / "scm_registry.json")
+    monkeypatch.setattr(impact_audit, "AUDIT_DIR", audit_dir)
+    monkeypatch.setattr(impact_audit, "_RUN_FILE_LOCKS", {})
+    monkeypatch.setattr(impact_audit, "_RUN_INTRA_LOCKS", {})
+    monkeypatch.setattr(impact_audit, "_RUN_LOCK_OWNERS", {})
+    scm_registry.register_entry(
+        ScmRegisterRequest(
+            id="coll", name="COLL", scm_type="git",
+            scm_url="https://example/repo.git", source_root=str(tmp_path / "src"),
+        )
+    )
+    monkeypatch.setattr(impact_orchestrator, "_is_cloudium_mode", lambda: False)
+    monkeypatch.setattr(impact_orchestrator, "_collect_signature_changes", lambda *a, **k: {})
+    # classify는 변경 파일의 함수 하나만 지목(실제 hunk 기반과 동일)
+    monkeypatch.setattr(
+        impact_orchestrator, "classify_changed_functions",
+        lambda *a, **k: {"eeprom_src_only": "BODY"},
+    )
+    # by_name은 last-wins라 eeprom_setbyte의 file이 Generated_Code만 가리킨다(현실 재현).
+    # function_collisions가 두 정의 파일을 모두 알려준다.
+    monkeypatch.setattr(
+        impact_orchestrator, "_load_source_sections",
+        lambda *a, **k: {
+            "function_details_by_name": {
+                "eeprom_setbyte": {"name": "eeprom_setbyte", "asil": "D",
+                                   "file": "src/Generated_Code/EEPROM.c", "module_name": "EEPROM"},
+                "eeprom_src_only": {"name": "eeprom_src_only", "asil": "QM",
+                                    "file": "src/Sources/Eeprom/EEPROM.c", "module_name": "EEPROM"},
+            },
+            "function_collisions": {
+                "eeprom_setbyte": {
+                    "files": ["src/Generated_Code/EEPROM.c", "src/Sources/Eeprom/EEPROM.c"],
+                    "asil": "D",
+                },
+            },
+            "call_map": {},
+        },
+    )
+
+    result = impact_orchestrator.run_impact_update(
+        ChangeTrigger(
+            trigger_type="local", scm_id="coll", source_root=str(tmp_path / "src"),
+            scm_type="git", base_ref="HEAD~1",
+            changed_files=["Sources/Eeprom/EEPROM.c"],  # 두 번째 정의가 있는 파일만 변경
+            dry_run=True, targets=["uds"], metadata={},
+        )
+    )
+    assert result["ok"] is True
+    ct = result["changed_function_types"]
+    # 변경 파일의 고유 함수 + **충돌 사본이 있는 eeprom_setbyte(ASIL D)** 둘 다 잡혀야 한다.
+    assert "eeprom_src_only" in ct
+    assert "eeprom_setbyte" in ct, "다중정의 안전 함수가 영향 집합에서 누락됨(under-report)"
+    # ASIL도 두 사본 중 높은 등급(D)이 유지돼 escalation/MC-DC 게이트가 발동한다
+    assert result["function_meta"]["eeprom_setbyte"]["asil"] == "D"
+    assert result["asil"]["escalation"] is True
+    assert result["asil"]["mcdc_required"] is True

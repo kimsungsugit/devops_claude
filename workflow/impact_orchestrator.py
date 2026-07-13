@@ -257,6 +257,12 @@ def _uds_name_asil_map(uds_path: str) -> Dict[str, str]:
     return result
 
 
+def _asil_rank(value: Any) -> int:
+    """'ASIL B'/'B'/'TBD'/'' → 등급 순위(미상/미지는 -1). 충돌 사본 중 최대 등급 선택용."""
+    a = re.sub(r"^ASIL[\s_-]*", "", str(value or "").strip().upper()).strip()
+    return _ASIL_RANK.get(a, -1)
+
+
 def _is_blank_asil(value: Any) -> bool:
     """ASIL이 '미상'인지 판정. ⚠ uds_generator는 소스/문서에 ASIL이 없으면 빈 문자열이 아니라
     placeholder 'TBD'를 넣는다(report_gen/uds_generator.py:1126) — 빈 문자열만 검사하면 실제
@@ -412,7 +418,17 @@ def _write_review_artifact(
 ) -> str:
     review_dir = REPO_ROOT / "reports" / "impact_audit"
     review_dir.mkdir(parents=True, exist_ok=True)
-    out_path = review_dir / f"{target}_review_required_{_ts()}.md"
+    # 파일명에 scm_id 포함 — 실행 락이 scm별이라 서로 다른 프로젝트가 같은 초에 끝날 수 있고,
+    # 그때 검토 산출물(ISO 26262 FLAG 증거)이 조용히 덮어써진다.
+    _scm = "".join(
+        c if (c.isalnum() or c in {"-", "_"}) else "_" for c in str(getattr(trigger, "scm_id", "") or "")
+    ).strip("_")
+    _stem = f"{target}_review_required_{_ts()}" + (f"_{_scm}" if _scm else "")
+    out_path = review_dir / f"{_stem}.md"
+    _n = 1
+    while out_path.exists():
+        out_path = review_dir / f"{_stem}_{_n}.md"
+        _n += 1
     by_name = by_name or {}
     doc_summary = _load_linked_doc_summary(linked_doc)
     modules: List[str] = []
@@ -1214,6 +1230,20 @@ def run_impact_update(
             sections = _load_source_sections(entry.source_root)
             by_name_raw = sections.get("function_details_by_name", {}) or {}
             by_name = {str(k).strip().lower(): v for k, v in by_name_raw.items() if isinstance(v, dict)}
+            # 동일 이름 함수의 다중 정의(파일 간 충돌)를 by_name에 얹는다. by_name은 last-wins라
+            # 한 사본의 file/asil만 남아 (a) 다른 파일 변경 시 그 함수를 통째로 놓치고(under-report),
+            # (b) 낮은 ASIL로 오판(escalation·MC/DC 게이트 무력화)한다.
+            # ⚠ sections는 _load_source_sections가 deepcopy로 돌려준 **이 실행 전용 사본**이므로
+            #    여기서 값을 수정해도 문서 생성 경로(function_details 원본)에는 영향이 없다.
+            for _cn, _ce in (sections.get("function_collisions") or {}).items():
+                _ci = by_name.get(str(_cn).strip().lower())
+                if not isinstance(_ci, dict) or not isinstance(_ce, dict):
+                    continue
+                _cf = [str(f) for f in (_ce.get("files") or []) if str(f or "").strip()]
+                if _cf:
+                    _ci["files"] = _cf
+                if _asil_rank(_ce.get("asil")) > _asil_rank(_ci.get("asil")):
+                    _ci["asil"] = str(_ce.get("asil") or "")  # 안전측 — 두 사본 중 높은 등급
             # C 소스에 @asil 주석이 없어도 링크된 UDS(함수별 ASIL)로 보강한다 — cloudium U:\는 워커 경유.
             # (소스 ASIL이 있는 함수는 유지, 빈 함수만 채움 → _asil_of·에스컬레이션·커버리지 타깃에 반영)
             _asil_uds_enriched, _asil_still_missing = _enrich_asil_from_uds(
@@ -1405,11 +1435,16 @@ def run_impact_update(
         # add 노출 빈도↑). by_name 파일경로 매칭(_resolve와 동일: full-path 또는 basename endswith)이
         # 전무한 add 파일이 있으면 명시 고지(빈 결과를 '영향 없음'으로 오인 방지, X7 안전측).
         if edit_types and by_name:
-            _bn_files = [
-                str((v or {}).get("file") or "").replace("\\", "/").lower()
-                for v in by_name.values()
-            ]
-            _bn_files = [p for p in _bn_files if p]
+            # 다중정의 함수는 files[]에 정의 파일이 전부 들어 있다 — file 하나만 보면 그 함수가
+            # '유일하게' 정의된 파일을 놓쳐 "baseline 인덱스에 없음" 허위 경고가 난다
+            # (_resolve_changed_types_to_functions와 동일한 확장을 써야 일관).
+            _bn_files = []
+            for v in by_name.values():
+                _vi = v or {}
+                for _f in (_vi.get("files") or ([_vi.get("file")] if _vi.get("file") else [])):
+                    _fp = str(_f or "").replace("\\", "/").lower()
+                    if _fp:
+                        _bn_files.append(_fp)
 
             def _bn_has(_fp: str) -> bool:
                 _fpl = str(_fp).replace("\\", "/").lower()
@@ -1808,7 +1843,12 @@ def run_impact_update(
                         )
                         info["artifact_path"] = artifact_path
                     except Exception as _art_exc:  # noqa: BLE001
-                        logger.debug("review artifact skipped for %s: %s", target, _art_exc)
+                        # FLAG 검토 산출물 = "사람이 반드시 검토해야 한다"는 ISO 증거. 실패를 debug
+                        # 로그로 삼키면 검토 대상이 통째로 사라지고 아무도 모른다 → 경고로 표면화.
+                        logger.warning("review artifact write failed for %s: %s", target, _art_exc)
+                        warnings.append(
+                            f"{target.upper()} 검토 산출물 저장 실패 — 검토 필요 증거가 남지 않았습니다({_art_exc})."
+                        )
         if callable(on_progress):
             on_progress("write_audit", "실행 이력을 저장 중입니다.", {"targets": len(actions)})
         audit_payload = {
@@ -1865,8 +1905,16 @@ def run_impact_update(
             audit_path = write_impact_audit(audit_payload)
             result["audit_path"] = str(audit_path)
         except Exception as _audit_exc:  # noqa: BLE001
+            # ⚠ ISO 26262 감사 레코드는 "무엇을 왜 분석/제외했는지"를 검증할 유일한 durable 증거다.
+            # 저장 실패를 로그로만 남기면 UI는 완전한 성공 분석을 보여주고 **감사 기록은 존재하지
+            # 않는다**(감사 시점까지 아무도 모름). 결과에 명시하고 경고로 표면화한다.
             logger.warning("impact audit write failed (best-effort): %s", _audit_exc)
             audit_path = None
+            result["audit_write_failed"] = True
+            warnings.append(
+                f"감사 기록 저장 실패 — ISO 26262 추적성 레코드가 남지 않았습니다({_audit_exc}). "
+                "reports/ 디스크 용량·권한을 확인하고 재실행하십시오."
+            )
         try:
             change_log = build_change_log(
                 run_id=(audit_path.stem if audit_path else _ts()),
@@ -1882,8 +1930,12 @@ def run_impact_update(
             }
         except Exception as _cl_exc:  # noqa: BLE001
             logger.warning("impact change-log write failed (best-effort): %s", _cl_exc)
+            result["change_log_write_failed"] = True
+            warnings.append(
+                f"변경 이력 저장 실패 — 이 실행의 변경 내역(문서별 delta)이 기록되지 않았습니다({_cl_exc})."
+            )
         if callable(on_progress):
             on_progress("done", "완료되었습니다.", {"targets": len(actions)})
         return result
     finally:
-        release_run_lock()
+        release_run_lock(trigger.scm_id)  # 명시적 키 — tid 재사용으로 남의 락을 푸는 사고 방지

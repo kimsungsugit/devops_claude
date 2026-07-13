@@ -175,10 +175,16 @@ def diff_uds_payload(before_payload: Dict[str, Any], after_payload: Dict[str, An
 
 def _payload_summary(payload: Dict[str, Any]) -> Dict[str, Any]:
     raw_result = payload.get("raw_result") if isinstance(payload.get("raw_result"), dict) else {}
+    # ⚠ `summary.primary`가 빈 리스트면 [0]이 IndexError, summary가 list면 .get이 AttributeError →
+    #   build_change_log 전체가 예외 → 상위 blanket except가 삼켜 **이 실행의 변경 이력이 통째로
+    #   기록되지 않는다**(사용자는 성공으로 보임). 방어적으로 접근한다.
+    _summary = payload.get("summary")
+    _primary = _summary.get("primary") if isinstance(_summary, dict) else None
+    _first = _primary[0] if isinstance(_primary, list) and _primary and isinstance(_primary[0], dict) else {}
     return {
         "test_case_count": payload.get("test_case_count")
         or raw_result.get("test_case_count")
-        or payload.get("summary", {}).get("primary", [{}])[0].get("value", 0),
+        or _first.get("value", 0),
         "total_sequences": payload.get("total_sequences") or raw_result.get("total_sequences") or 0,
     }
 
@@ -333,6 +339,11 @@ def build_change_log(
 
 
 def write_change_log(change_log: Dict[str, Any]) -> Path:
+    """변경 이력 durable 기록. 파일명은 run_id에서 파생(load_change_log가 run_id로 역조회).
+
+    run_id는 감사 파일 stem(`impact_{ts}_{scm}`)이라 scm이 포함돼 프로젝트 간 충돌이 없다.
+    (감사 파일명에 scm이 없던 시절엔 서로 다른 프로젝트가 같은 초에 끝나면 한쪽 이력이 사라졌다.)
+    """
     ensure_change_dir()
     run_id = str(change_log.get("run_id") or "").strip() or datetime.now().strftime("impact_%Y%m%d_%H%M%S")
     ts = run_id.replace("impact_", "", 1)

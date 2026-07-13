@@ -186,3 +186,43 @@ class TestExtractParamSymbol:
     def test_empty(self):
         from report_gen.function_analyzer import _extract_param_symbol
         assert _extract_param_symbol("") == ""
+
+
+def test_put_by_name_preserves_identity_and_records_collisions():
+    """동일 이름 다중정의: by_name은 **동일성 보존**(문서 생성의 in-place 갱신 경로), 충돌은 별도 맵.
+
+    회귀 방지:
+    - by_name에 dict 복사본을 넣으면 docx_builder의 `target[key] = ...`(참조문서 값 병합)이
+      function_details 원본에 반영되지 않아 문서가 조용히 누락된다.
+    - 뒤이은 콜그래프 보강 루프가 by_name을 다시 덮어써도 충돌 기록은 유지돼야 한다.
+    """
+    from report_gen.uds_generator import _put_by_name
+
+    by_name = {}
+    coll = {}
+    boot = {"name": "eeprom_setbyte", "file": "Generated_Code/EEPROM.c", "asil": "QM"}
+    app = {"name": "eeprom_setbyte", "file": "Sources/Eeprom/EEPROM.c", "asil": "B"}
+
+    _put_by_name(by_name, "eeprom_setbyte", boot, coll)
+    _put_by_name(by_name, "eeprom_setbyte", app, coll)
+
+    # 동일성 보존 — 마지막 등록 객체 그대로(복사본 아님)
+    assert by_name["eeprom_setbyte"] is app
+    # 충돌은 별도 맵에 — 두 파일 전부 + 최대 ASIL
+    ent = coll["eeprom_setbyte"]
+    assert sorted(ent["files"]) == ["Generated_Code/EEPROM.c", "Sources/Eeprom/EEPROM.c"]
+    assert ent["asil"] == "B"  # QM보다 높은 등급 유지(안전측)
+
+    # 보강 루프가 다시 덮어써도 충돌 기록은 유지된다
+    enriched = dict(app)
+    enriched["calling"] = "x"
+    _put_by_name(by_name, "eeprom_setbyte", enriched, coll)
+    assert by_name["eeprom_setbyte"] is enriched
+    assert sorted(coll["eeprom_setbyte"]["files"]) == ["Generated_Code/EEPROM.c", "Sources/Eeprom/EEPROM.c"]
+    assert coll["eeprom_setbyte"]["asil"] == "B"
+
+    # 단일 정의 함수는 충돌 맵에 기록되지 않는다
+    solo = {"name": "solo_fn", "file": "a.c", "asil": "A"}
+    _put_by_name(by_name, "solo_fn", solo, coll)
+    assert "solo_fn" not in coll
+    assert by_name["solo_fn"] is solo

@@ -49,9 +49,11 @@ def impact_analyze(req: ImpactAnalyzeRequest) -> Dict[str, Any]:
     try:
         from tools.impact_analysis import analyze as _impact_analyze
         data = _impact_analyze(source_root_str, changed_rows)
-    except Exception as exc:
+    except Exception:
+        # 내부 예외 문자열(서버 경로·subprocess/SVN 메시지 등)을 응답으로 노출하지 않는다
+        # — 형제 엔드포인트(/ai-guide, /explain-change)와 동일 정책. 상세는 서버 로그에만.
         _logger.exception("impact analyze failed")
-        raise HTTPException(status_code=500, detail=f"impact analyze failed: {exc}")
+        raise HTTPException(status_code=500, detail="영향도 분석에 실패했습니다. 서버 로그를 확인하세요.")
     out_dir = repo_root / "reports" / "uds"
     out_dir.mkdir(parents=True, exist_ok=True)
     out_md = out_dir / f"impact_analysis_api_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}.md"
