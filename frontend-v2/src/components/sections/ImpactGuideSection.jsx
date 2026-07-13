@@ -180,13 +180,76 @@ function diffSignatureParamsCached(before, after) {
   return v;
 }
 
+// ── 함수 본문 diff에서 실제 변경 요소 추출(BODY/VARIABLE 문서 카드 구체화용, 결정론) ──
+// 전역/정적 변수 write(LHS)·전처리 매크로를 부호별(added/removed)로 수집한다. AI 무관·즉시.
+const EMPTY_DIFF_ELEMS = Object.freeze({
+  changedGlobals: { added: [], removed: [] },
+  macros: { added: [], removed: [] },
+  addedLines: 0, removedLines: 0, hunks: 0, truncated: false,
+});
+// 전역/정적 명명 규약: (u|s)+숫자 타입 prefix + g_/s_ 또는 bare g_/s_. 타입 prefix를 실제 토큰으로
+// 앵커해 msg_/flag_group/cfg_mode 류 오탐 방지([a-z]{0,3} 백트래킹 과매칭 수정, reviewer #1/#2).
+const _GLOBALISH = /^(?:[us]\d{1,2})?g_/;
+const _STATICISH = /^(?:[us]\d{1,2})?s_/;
+// LHS write: 식별자 + (배열첨자|멤버접근 .f/->f)* + 대입/복합대입(=(?!=)로 ==, 알파벳 op로 <=/>=/!= 제외).
+// 멤버 write(g_X.mode=…, g_H->cnt=…)도 base 전역을 잡는다(reviewer #6/#7).
+const _WRITE_LHS = /^\s*([A-Za-z_]\w*)(?:\[[^\]]*\]|(?:\.|->)\w+)*\s*(?:=(?!=)|[-+*/%|&^]=|<<=|>>=)/;
+// 전처리: ifdef/ifndef/define/undef는 직접 매크로명, #if/#elif는 defined(X)의 X만 캡처한다.
+// pragma/include는 조건부 컴파일이 아니므로 매크로로 잡지 않는다(reviewer #3/#8).
+const _PREPROC_DIRECT = /^\s*#\s*(?:ifdef|ifndef|define|undef)\s+([A-Za-z_]\w*)/;
+const _PREPROC_COND = /^\s*#\s*(?:if|elif)\b/;
+const _DEFINED_RE = /defined\s*\(?\s*([A-Za-z_]\w*)/g;
+export function extractDiffElements(fd) {
+  if (!fd) return EMPTY_DIFF_ELEMS;
+  const gAdd = new Set(), gRem = new Set(), mAdd = new Set(), mRem = new Set();
+  let addedLines = 0, removedLines = 0, hunks = 0, truncated = false;
+  for (const raw of String(fd).split('\n')) {
+    if (!raw) continue;
+    if (raw.startsWith('@@ ')) { hunks++; continue; }
+    if (raw.startsWith('+++') || raw.startsWith('---')) continue;
+    if (raw.includes('줄 생략)')) { truncated = true; continue; }  // extract_function_diffs 절단 마커
+    const sign = raw[0];
+    if (sign !== '+' && sign !== '-') continue;
+    const body = raw.slice(1);
+    if (sign === '+') addedLines++; else removedLines++;
+    const gSet = sign === '+' ? gAdd : gRem;
+    const mSet = sign === '+' ? mAdd : mRem;
+    const wm = _WRITE_LHS.exec(body);  // 1) 전역/정적 write target(멤버 write는 base 전역)
+    if (wm && (_GLOBALISH.test(wm[1]) || _STATICISH.test(wm[1]))) gSet.add(wm[1]);
+    const pd = _PREPROC_DIRECT.exec(body);  // 2) 전처리 매크로
+    if (pd) mSet.add(pd[1]);
+    else if (_PREPROC_COND.test(body)) {
+      _DEFINED_RE.lastIndex = 0;
+      let dm;
+      while ((dm = _DEFINED_RE.exec(body)) !== null) mSet.add(dm[1]);  // #if defined(X) → X
+    }
+  }
+  // cap 없이 전체 반환 — 개수를 정확히 표시(백엔드 60줄 cap이 1차 상한, 카드 표시는 listVars가 4개로 cap). reviewer #5.
+  return {
+    changedGlobals: { added: [...gAdd], removed: [...gRem] },
+    macros: { added: [...mAdd], removed: [...mRem] },
+    addedLines, removedLines, hunks, truncated,
+  };
+}
+// diffElems 캐시 — 모달 재렌더(검색 타이핑 등) 시 재계산 회피(_sigDiffCache 동일 패턴).
+const _diffElemCache = new Map();
+function extractDiffElementsCached(fd) {
+  if (!fd) return EMPTY_DIFF_ELEMS;
+  let v = _diffElemCache.get(fd);
+  if (v === undefined) {
+    v = extractDiffElements(fd);
+    if (_diffElemCache.size < 4000) _diffElemCache.set(fd, v);
+  }
+  return v;
+}
+
 // 함수 변경을 각 문서(UDS/STS/SUTS/SITS/SDS)의 '구체 편집 액션'으로 변환한다.
 // 매개변수 diff(pdiff)가 정상이면 실제 파라미터명을 넣어 "무엇을 어느 섹션에" 수준으로 구체화하고,
 // 원문이 없으면(pdiff null/failed) change_type 기반의 일반 액션으로 폴백한다. 순수·결정론(LLM 무관).
 // 참고: 백엔드 workflow/impact_ai_guide.py의 _DOC_CHANGE_SENSITIVITY도 변경유형→문서 매핑을
 //   'AI 영향도 분석 가이드' 패널용으로 독립 유지한다(파라미터 단위 아님) — 한쪽 수정 시 다른 쪽도 검토.
 // 반환: { uds:[{section,text,tone}], sts:[...], suts:[...], sits:[...], sds:[...] }
-function buildDocumentActions(d, pdiff) {
+export function buildDocumentActions(d, pdiff, diffElems = EMPTY_DIFF_ELEMS) {
   const ct = (d.changeType || '').toUpperCase();
   const changed = !!d.changed;
   const ok = !!pdiff && !pdiff.failed;
@@ -201,7 +264,34 @@ function buildDocumentActions(d, pdiff) {
   const reqN = d.requirements?.length || 0;
   const stsN = d.stsTestCases?.length || 0;
   const sutsN = d.sutsTestCases?.length || 0;
-  const A = (section, text, tone = 'neutral') => ({ section, text, tone });
+  const A = (section, text, tone = 'neutral', title = '') => ({ section, text, tone, title });
+
+  // ── 본문 diff에서 추출한 실제 변경 요소(전역 변수·전처리) — BODY/VARIABLE 구체화 근거 ──
+  const de = diffElems || EMPTY_DIFF_ELEMS;
+  const _gAset = new Set(de.changedGlobals.added), _gRset = new Set(de.changedGlobals.removed);
+  const gRemoved = de.changedGlobals.removed.filter(v => !_gAset.has(v));  // 초기화 제거(제거만)
+  const gAdded = de.changedGlobals.added.filter(v => !_gRset.has(v));      // 초기화 추가(추가만)
+  const gChanged = de.changedGlobals.added.filter(v => _gRset.has(v));     // 값 변경(양쪽 등장)
+  const condMacros = [...new Set([...de.macros.removed, ...de.macros.added])];
+  const hasGlobals = !!(gRemoved.length || gAdded.length || gChanged.length);
+  const truncNote = de.truncated ? ' (diff 일부 생략 — 원문 확인)' : '';
+  const listVars = (arr, cap = 4) => ({
+    text: arr.slice(0, cap).map(v => `\`${v}\``).join(', ') + (arr.length > cap ? ` +${arr.length - cap}개` : ''),
+    title: arr.join(', '),
+  });
+  const globalsSummary = () => {
+    const parts = [], tp = [];
+    if (gRemoved.length) { const l = listVars(gRemoved); parts.push(`제거 ${gRemoved.length}개(${l.text})`); tp.push(`제거: ${l.title}`); }
+    if (gAdded.length) { const l = listVars(gAdded); parts.push(`추가 ${gAdded.length}개(${l.text})`); tp.push(`추가: ${l.title}`); }
+    if (gChanged.length) { const l = listVars(gChanged); parts.push(`값변경 ${gChanged.length}개(${l.text})`); tp.push(`값변경: ${l.title}`); }
+    return { text: parts.join(' · '), title: tp.join(' / ') };
+  };
+  const macroSummary = condMacros.length
+    ? { text: `조건부 컴파일 ${listVars(condMacros, 3).text} 변경`, title: condMacros.join(', ') }
+    : null;
+  const bodyish = (ct === 'BODY' || ct === 'VARIABLE');  // 분류 경계가 모호한 reset류는 동일 처리
+  const useDiff = bodyish && (hasGlobals || !!macroSummary);  // 전역 또는 전처리 변경이 있으면 구체화(reviewer #4)
+
   const uds = [], sts = [], suts = [], sits = [], sds = [];
 
   // 간접 영향(직접 변경 아님): 문서 본문 수정이 아니라 '계약 유지 확인 + 회귀'가 핵심.
@@ -229,12 +319,20 @@ function buildDocumentActions(d, pdiff) {
         : A('Input/Output Parameters', '매개변수 목록 변화 없음 — 본문/주석/공백 변경 가능(원문 확인)', 'neutral'));
     }
     uds.push(A('Calling Function', '호출부 목록의 인자 사용 영향 확인', 'neutral'));
-  } else if (ct === 'BODY') {
-    uds.push(A('Description', '변경된 로직을 설명/의사코드에 반영', 'info'));
-    uds.push(A('Called Function · Used Globals', '호출 함수·사용 전역 변수 관계 재확인', 'neutral'));
-  } else if (ct === 'VARIABLE') {
-    uds.push(A('Used Globals', '전역/정적 변수 정의 갱신', 'warning'));
-    uds.push(A('Description', '변수 변경에 따른 동작 반영', 'info'));
+  } else if (bodyish) {
+    if (useDiff) {
+      if (hasGlobals) {
+        const g = globalsSummary();
+        uds.push(A('Used Globals (Global/Static)', `전역 ${g.text} — Used Globals 목록·모듈 표 Reset Value 재확인${truncNote}`, gRemoved.length ? 'danger' : 'warning', g.title));
+      }
+      uds.push(macroSummary
+        ? A('Description', `${macroSummary.text} 반영`, 'info', macroSummary.title)
+        : A('Description', '변경된 로직/변수를 Description·의사코드에 반영', 'info'));
+    } else {
+      // diff 미확보 폴백(일반 문구)
+      uds.push(A('Used Globals (Global/Static)', ct === 'VARIABLE' ? '전역/정적 변수 정의·모듈 표 Reset Value 갱신' : '사용 전역 변수·호출 함수 관계 재확인', 'warning'));
+      uds.push(A('Description', ct === 'VARIABLE' ? '변수 변경에 따른 동작 반영' : '변경된 로직을 Description/의사코드에 반영', 'info'));
+    }
   } else if (ct === 'NEW') {
     uds.push(A('Function Information', '신규 함수 항목 생성 — Prototype/Parameters/Description/Called·Calling', 'success'));
   } else if (ct === 'DELETE') {
@@ -253,6 +351,14 @@ function buildDocumentActions(d, pdiff) {
       if (added.length) sts.push(A('Pre-condition', `${listAfter(added)} 입력 초기 조건 추가`, 'success'));
       sts.push(A('Test Action', `${stsN}개 TC의 함수 호출 인자를 새 시그니처로 갱신`, 'warning'));
       if (retChanged) sts.push(A('Expected Result', '반환값 판정 기준 갱신', 'warning'));
+    } else if (bodyish && useDiff) {
+      if (hasGlobals) {
+        const g = globalsSummary();
+        sts.push(A('Pre-condition', `초기화 변경 전역의 초기 조건 재검토 — ${g.text}`, 'warning', g.title));
+        sts.push(A('Expected Result', `${stsN}개 TC의 해당 전역 기대 상태 재확인`, 'info'));
+      } else {
+        sts.push(A('Pre-condition', `${macroSummary.text} 반영 — ${stsN}개 TC 재검토`, 'warning', macroSummary.title));
+      }
     } else if (ct === 'BODY') {
       sts.push(A('Expected Result', `${stsN}개 TC의 기대 동작 재확인`, 'info'));
       sts.push(A('Test Action', '변경 로직에 맞게 시퀀스 재검토', 'info'));
@@ -274,47 +380,66 @@ function buildDocumentActions(d, pdiff) {
     if (chg.length) suts.push(A('Input Variables', `${pairText(chg)} — 타입 변경, 경계값 재계산`, 'warning'));
     if (retChanged) suts.push(A('Output Variables', '기대 출력 타입/값 갱신', 'warning'));
     suts.push(A('회귀', sutsN ? `기존 ${sutsN}개 단위 TC 재검증` : '단위 TC 신규 필요', sutsN ? 'neutral' : 'warning'));
+  } else if (bodyish && useDiff) {
+    if (hasGlobals) {
+      const g = globalsSummary();
+      suts.push(A('Expected(Output) Variables', `변경 전역의 reset 기대값 케이스 재확인/삭제 — ${g.text} (변수별 SwUTC 기대출력)`, gRemoved.length ? 'danger' : 'warning', g.title));
+    } else {
+      suts.push(A('Expected(Output) Variables', `${macroSummary.text} — 경계값·기대출력 재확인`, 'warning', macroSummary.title));
+    }
   } else if (ct === 'BODY') {
-    suts.push(A('Expected', sutsN ? `${sutsN}개 TC 경계값·기대출력 재계산` : '로직 변경 — TC 없음, 신규 생성 권장', sutsN ? 'info' : 'warning'));
+    suts.push(A('Expected(Output) Variables', sutsN ? `${sutsN}개 TC 경계값·기대출력 재계산` : '로직 변경 — TC 없음, 신규 생성 권장', sutsN ? 'info' : 'warning'));
   } else if (ct === 'NEW') {
     suts.push(A('신규 TC', '단위 TC 신규 작성 — 경계값 분석(ABV: MIN/MID/MAX/INV)', 'success'));
   } else if (ct === 'DELETE') {
     suts.push(A('TC 정리', sutsN ? `${sutsN}개 관련 단위 TC 비활성화` : '관련 단위 TC 없음', 'danger'));
   } else if (ct === 'VARIABLE') {
-    suts.push(A('입출력', '변수 입출력 매핑 확인', 'warning'));
+    suts.push(A('Input/Output Variables', '변경 전역의 입출력 매핑·기대값 확인', 'warning'));
   } else {
     suts.push(A('확인', sutsN ? `${sutsN}개 단위 TC 검토` : '관련 단위 TC 없음', 'neutral'));
   }
 
-  // ── SITS (SW 통합시험) ──
+  // ── SITS (SW 통합시험) — Data Flow 전용 컬럼 없음 → Call Chain / Input·Expected Param ──
   if (ct === 'SIGNATURE') {
     sits.push(A('Call Chain', `${d.function}의 콜체인 인자 전달 재검증(호출·피호출 양방향)`, 'warning'));
-    if (added.length) sits.push(A('Data Flow', `통합 데이터 흐름에 ${listAfter(added)} 반영`, 'success'));
+    if (added.length) sits.push(A('Input·Expected Param', `통합 입력/기대 Param에 ${listAfter(added)} 반영`, 'success'));
+  } else if (bodyish && useDiff) {
+    if (hasGlobals) {
+      const g = globalsSummary();
+      sits.push(A('Precondition', `변경 전역 초기화가 통합 진입 상태(Precondition/env)에 주는 영향 확인 — ${g.text}`, 'warning', g.title));
+    } else {
+      sits.push(A('Precondition', `${macroSummary.text}이 통합 진입 상태/분기에 주는 영향 확인`, 'warning', macroSummary.title));
+    }
   } else if (ct === 'BODY') {
     sits.push(A('시나리오', '통합 시나리오 기대값 재확인', 'info'));
+  } else if (ct === 'VARIABLE') {
+    sits.push(A('Precondition', '변경 전역이 통합 진입 상태에 주는 영향 확인', 'warning'));
   } else if (ct === 'NEW') {
-    sits.push(A('콜체인', '신규 함수의 콜체인 포함 여부 및 통합 케이스 확인', 'success'));
+    sits.push(A('Call Chain', '신규 함수의 콜체인 포함 여부 및 통합 케이스 확인', 'success'));
   } else if (ct === 'DELETE') {
-    sits.push(A('콜체인', '콜체인 단절/대체 경로 확인', 'danger'));
+    sits.push(A('Call Chain', '콜체인 단절/대체 경로 확인', 'danger'));
   } else if (ct === 'HEADER') {
     sits.push(A('의존성', '헤더 변경이 콜체인 인터페이스 의존성에 주는 영향 확인', 'neutral'));
   } else {
-    sits.push(A('확인', '통합 데이터 흐름 영향 확인', 'neutral'));
+    sits.push(A('확인', '통합 콜체인·Param 영향 확인', 'neutral'));
   }
 
-  // ── SDS (SW 아키텍처 설계) ──
+  // ── SDS (SW 아키텍처 설계 — 파서, 고정 섹션명 없음: 함수/모듈 매칭으로 서술) ──
   if (ct === 'SIGNATURE') {
-    sds.push(A('Component Interface', `모듈 인터페이스(포트/파라미터)에 ${(added.length || chg.length) ? '변경 파라미터' : '새 시그니처'} 반영`, 'warning'));
+    sds.push(A('관련 함수/모듈 매칭', `\`${d.function}\` 매칭 항목의 인터페이스(포트/파라미터)에 시그니처 변경 반영 — 원본 heading 확인`, 'warning'));
+  } else if (bodyish && useDiff) {
+    const g = hasGlobals ? globalsSummary() : macroSummary;
+    sds.push(A('관련 함수/모듈 매칭', `\`${d.function}\` 매칭 항목에 ${hasGlobals ? '전역 ' : ''}${g.text} 반영 — 고정 섹션 아님(원본 heading·relatedModules 확인)`, 'warning', g.title));
   } else if (ct === 'BODY') {
-    sds.push(A('Component Description', '컴포넌트 동작 설명 갱신', 'info'));
+    sds.push(A('관련 함수/모듈 매칭', `\`${d.function}\` 동작 설명 갱신 — 원본 heading 확인`, 'info'));
   } else if (ct === 'VARIABLE') {
-    sds.push(A('Data Flow', '데이터 흐름/인터페이스 갱신', 'warning'));
+    sds.push(A('관련 함수/모듈 매칭', `\`${d.function}\` 관련 데이터/인터페이스 갱신 — 원본 heading 확인`, 'warning'));
   } else if (ct === 'NEW') {
     sds.push(A('설계 추가', '신규 컴포넌트/함수 아키텍처 반영', 'success'));
   } else if (ct === 'DELETE') {
     sds.push(A('설계 제거', '아키텍처에서 컴포넌트/함수 제거', 'danger'));
   } else {
-    sds.push(A('확인', 'Component Description/State Transition 영향 확인', 'neutral'));
+    sds.push(A('관련 함수/모듈 매칭', 'relatedFunctions/relatedModules·changeTypes 기준 영향 확인', 'neutral'));
   }
 
   return { uds, sts, suts, sits, sds };
@@ -1326,13 +1451,14 @@ export default function ImpactGuideSection({ analysisResult }) {
             const hasRaw = !!(cd.before || cd.after);
             const pdiff = hasRaw ? diffSignatureParamsCached(cd.before, cd.after) : null;
             const sigSummary = summarizeSignatureChange(pdiff);
-            // 문서별 구체 편집 액션(결정론) — 실제 파라미터 diff·요구사항·TC 반영. LLM 무관·즉시.
-            const docActions = buildDocumentActions(d, pdiff);
+            const diffElems = extractDiffElementsCached(fd);  // 본문 diff에서 변경 전역·전처리 추출(BODY/VARIABLE 구체화)
+            // 문서별 구체 편집 액션(결정론) — 파라미터 diff·본문 변경 요소·요구사항·TC 반영. LLM 무관·즉시.
+            const docActions = buildDocumentActions(d, pdiff, diffElems);
             const DOC_CARDS = [
               { key: 'uds', icon: '📘', title: 'UDS 업데이트', note: d.requirements.length ? `관련 요구사항: ${d.requirements.slice(0, 5).join(', ')}${d.requirements.length > 5 ? ` +${d.requirements.length - 5}개` : ''}` : '' },
               { key: 'sts', icon: '📗', title: 'STS 검토', chips: d.stsTestCases },
               { key: 'suts', icon: '📙', title: 'SUTS 업데이트', chips: d.sutsTestCases },
-              { key: 'sits', icon: '📕', title: 'SITS 검토', note: '통합 콜체인·데이터 흐름' },
+              { key: 'sits', icon: '📕', title: 'SITS 검토', note: '통합 콜체인·Input/Expected Param' },
               { key: 'sds', icon: '📋', title: 'SDS 확인', note: 'SW 아키텍처 설계' },
             ];
             const exp = explain.fn === d.function ? explain : { text: '', loading: false, error: '' };
@@ -1485,7 +1611,7 @@ export default function ImpactGuideSection({ analysisResult }) {
                             {acts.map((a, i) => (
                               <li key={i} style={{ marginBottom: 5, display: 'flex', gap: 5, alignItems: 'baseline' }}>
                                 <span className={`pill pill-${a.tone}`} style={{ fontSize: 8, flexShrink: 0, whiteSpace: 'nowrap' }}>{a.section}</span>
-                                <span style={{ lineHeight: 1.4 }}>{renderInlineCode(a.text)}</span>
+                                <span style={{ lineHeight: 1.4 }} title={a.title || undefined}>{renderInlineCode(a.text)}</span>
                               </li>
                             ))}
                           </ul>

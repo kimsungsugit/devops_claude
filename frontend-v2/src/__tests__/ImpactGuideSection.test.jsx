@@ -29,7 +29,7 @@ vi.mock('../components/StatusBadge.jsx', () => ({
   ),
 }));
 
-const { default: ImpactGuideSection } = await import('../components/sections/ImpactGuideSection.jsx');
+const { default: ImpactGuideSection, extractDiffElements, buildDocumentActions } = await import('../components/sections/ImpactGuideSection.jsx');
 
 describe('ImpactGuideSection', () => {
   const mockJob = { url: 'http://jenkins.example.com/job/test-job/' };
@@ -476,5 +476,137 @@ describe('ImpactGuideSection', () => {
     expect(screen.getAllByText('시그니처').length).toBeGreaterThanOrEqual(1);
     expect(screen.getAllByText('삭제').length).toBeGreaterThanOrEqual(1);
     expect(screen.getAllByText('＋int b').length).toBeGreaterThanOrEqual(1);
+  });
+
+  // STS-IMPACT-021: VARIABLE 함수 + function_diffs → 문서 카드에 실제 전역 변수명·Used Globals 표시
+  it('상세 모달: VARIABLE 함수는 본문 diff의 실제 전역 변수를 문서 카드에 구체 표시한다', async () => {
+    const { post } = await import('../api.js');
+    post.mockResolvedValue({ ok: false });
+    const user = userEvent.setup();
+    const analysisResult = {
+      impactData: {
+        trigger: { changed_files: ['a.c'] },
+        changed_function_types: { g_reset: 'VARIABLE' },
+        impact: { direct: ['g_reset'] },
+        function_meta: { g_reset: { asil: 'A' } },
+        // function_diffs 키는 소문자(백엔드 extract_function_diffs 규약)
+        function_diffs: { g_reset: [
+          '@@ -10,5 +10,2 @@ void g_reset(void)',
+          '-#ifdef TESTCODE_FOR_VEHICLE',
+          '-    u8g_ApiIn_LinRx_AsstVentilationLevel = u8g_VENTILATION_OFF;',
+          '-#endif',
+        ].join('\n') },
+      },
+    };
+    render(<ImpactGuideSection analysisResult={analysisResult} />);
+    await user.click(screen.getByText(/상세 가이드 생성/));
+    await waitFor(() => expect(screen.getByText(/함수별 영향 가이드/)).toBeInTheDocument());
+    await user.click(screen.getByRole('button', { name: '상세' }));
+    // UDS 카드에 실제 전역 변수명 + Used Globals 섹션(결정론 구체화)
+    expect(screen.getAllByText(/u8g_ApiIn_LinRx_AsstVentilationLevel/).length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText(/Used Globals/).length).toBeGreaterThanOrEqual(1);
+    // SITS 카드에 'Data Flow' 섹션 라벨 없음(정정 확인)
+    expect(screen.queryByText('Data Flow')).not.toBeInTheDocument();
+  });
+});
+
+describe('extractDiffElements (순수 함수)', () => {
+  it('전역 write·매크로 추출, RHS 상수·로컬·비교 배제', () => {
+    const fd = [
+      '@@ -1,5 +1,4 @@ f(void)',
+      '-#ifdef TESTCODE_FOR_VEHICLE',
+      '-    u8g_Asst = u8g_VENTILATION_OFF;',
+      '-    u8g_Rear = u8g_VENTILATION_OFF;',
+      '-#endif',
+      '     if (u8g_State == u8g_ON) {',   // 비교 — write 아님
+      '-    tmp = 1;',                       // 로컬 — 배제
+      '+    u8g_Arr[3] = 5;',               // 배열 write — base
+    ].join('\n');
+    const r = extractDiffElements(fd);
+    expect(r.changedGlobals.removed).toContain('u8g_Asst');
+    expect(r.changedGlobals.removed).toContain('u8g_Rear');
+    expect(r.changedGlobals.added).toContain('u8g_Arr');            // 배열첨자 strip
+    expect(r.changedGlobals.removed).not.toContain('u8g_VENTILATION_OFF');  // RHS 상수 미포착
+    expect(r.changedGlobals.removed).not.toContain('tmp');          // 로컬 배제
+    expect(r.changedGlobals.removed).not.toContain('u8g_State');    // 비교 무포착
+    expect(r.macros.removed).toContain('TESTCODE_FOR_VEHICLE');
+  });
+
+  it('빈/undefined는 EMPTY, 절단 마커는 truncated', () => {
+    expect(extractDiffElements('').changedGlobals.removed).toEqual([]);
+    expect(extractDiffElements(undefined).changedGlobals.removed).toEqual([]);
+    const r = extractDiffElements('@@ -1,1 +1,1 @@ f(void)\n-    u8g_X = 0;\n… (+40줄 생략)');
+    expect(r.truncated).toBe(true);
+  });
+
+  it('reviewer 반례: 전역 아닌 변수(msg_len 등) 배제, 정상 전역/정적 채택', () => {
+    for (const v of ['msg_len', 'flag_group', 'cfg_mode', 'reg_val', 'org_id']) {
+      const r = extractDiffElements(`@@ -1,1 +1,1 @@ f(void)\n-    ${v} = 1;`);
+      expect(r.changedGlobals.removed).not.toContain(v);
+    }
+    for (const v of ['u8g_X', 's16g_Y', 'g_Z', 'u8s_T', 's_M']) {
+      const r = extractDiffElements(`@@ -1,1 +1,1 @@ f(void)\n-    ${v} = 1;`);
+      expect(r.changedGlobals.removed).toContain(v);
+    }
+  });
+
+  it('reviewer 반례: 구조체/포인터 멤버 write, #if defined(X), #pragma 제외', () => {
+    const rm = extractDiffElements('@@ -1,2 +1,2 @@ f(void)\n-    g_DoorState.mode = 1;\n+    g_Handle->count = 0;');
+    expect(rm.changedGlobals.removed).toContain('g_DoorState');   // 멤버 write → base 전역
+    expect(rm.changedGlobals.added).toContain('g_Handle');
+    const rd = extractDiffElements('@@ -1,1 +1,1 @@ f(void)\n-#if defined(FOO_ENABLED)\n+#if defined(BAR_ENABLED)');
+    expect(rd.macros.removed).toContain('FOO_ENABLED');           // defined(X) → X
+    expect(rd.macros.added).toContain('BAR_ENABLED');
+    expect(rd.macros.removed).not.toContain('defined');
+    const rp = extractDiffElements('@@ -1,1 +1,1 @@ f(void)\n-#pragma pack(1)\n+#pragma pack(2)');
+    expect(rp.macros.added).toEqual([]);                          // #pragma는 조건부 컴파일 아님
+    expect(rp.macros.removed).toEqual([]);
+  });
+
+  it('reviewer 반례: cap 제거로 개수 정확(15개)', () => {
+    const many = Array.from({ length: 15 }, (_, i) => `-    g_Var${i} = 0;`).join('\n');
+    const r = extractDiffElements('@@ -1,15 +1,0 @@ f(void)\n' + many);
+    expect(r.changedGlobals.removed.length).toBe(15);
+  });
+});
+
+describe('buildDocumentActions BODY/VARIABLE 구체화 (순수 함수)', () => {
+  const de = extractDiffElements([
+    '@@ -1,3 +1,1 @@ void g_reset(void)',
+    '-#ifdef TESTCODE_FOR_VEHICLE',
+    '-    u8g_Asst = u8g_VENTILATION_OFF;',
+    '-#endif',
+  ].join('\n'));
+  const d = { function: 'g_reset', changeType: 'VARIABLE', changed: true, requirements: [], stsTestCases: [], sutsTestCases: [] };
+
+  it('UDS는 실제 변수명 + Used Globals(Reset Value), SITS는 Data Flow 아님, SDS는 관련 함수/모듈 매칭', () => {
+    const r = buildDocumentActions(d, null, de);
+    const udsStr = JSON.stringify(r.uds);
+    expect(udsStr).toContain('u8g_Asst');
+    expect(udsStr).toContain('Used Globals');
+    expect(udsStr).toContain('Reset Value');
+    expect(JSON.stringify(r.sits)).not.toContain('Data Flow');
+    expect(r.sds[0].section).toBe('관련 함수/모듈 매칭');
+    expect(JSON.stringify(r.uds)).toContain('TESTCODE_FOR_VEHICLE');  // 전처리 매크로 반영
+  });
+
+  it('diffElems 없으면 일반 폴백(변수명 없음, 크래시 없음)', () => {
+    const r = buildDocumentActions(d, null);  // diffElems 기본값(EMPTY)
+    expect(r.uds.length).toBeGreaterThan(0);
+    expect(JSON.stringify(r.uds)).not.toContain('u8g_Asst');
+  });
+
+  it('reviewer #4: 전역 없이 매크로만 바뀐 BODY도 구체화(일반 폴백 아님)', () => {
+    const deMacro = extractDiffElements([
+      '@@ -1,3 +1,1 @@ void g_f(void)',
+      '-#ifdef FEATURE_X',
+      '-    DoSomething();',
+      '-#endif',
+    ].join('\n'));
+    const dMacro = { function: 'g_f', changeType: 'BODY', changed: true, requirements: [], stsTestCases: [], sutsTestCases: [] };
+    const r = buildDocumentActions(dMacro, null, deMacro);
+    // 전역 write 없어도 매크로(FEATURE_X)가 UDS Description·SDS에 반영 — 일반 폴백으로 후퇴하지 않음
+    expect(JSON.stringify(r.uds)).toContain('FEATURE_X');
+    expect(JSON.stringify(r.sds)).toContain('FEATURE_X');
   });
 });
