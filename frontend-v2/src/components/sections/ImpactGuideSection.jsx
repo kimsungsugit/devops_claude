@@ -171,7 +171,7 @@ function summarizeSignatureChange(pdiff) {
 // 모듈 레벨 Map은 리렌더와 무관하게 유지되어 같은 선언쌍은 1회만 파싱한다(순수함수라 안전).
 const _sigDiffCache = new Map();
 function diffSignatureParamsCached(before, after) {
-  const key = `${before || ''} ${after || ''}`;
+  const key = JSON.stringify([before || '', after || '']);
   let v = _sigDiffCache.get(key);
   if (v === undefined) {
     v = diffSignatureParams(before, after);
@@ -855,11 +855,19 @@ export default function ImpactGuideSection({ analysisResult }) {
       // 정규화 없이 조인하면 STS 키 'SWTR_1' vs UDS rid 'SwTR_1'이 영구 미스 → 검토 TC=0.
       // 조인 키만 정규화하고, 표시용(details.requirements)은 UDS 원본 케이스를 보존한다.
       const _normReq = (r) => String(r || '').replace(/\s+/g, '').toUpperCase();
+      // F3(reviewer sweep): funcToReqs 키는 UDS source_ids(문서 "Name" 셀 원본 케이스 — backend가
+      // 소문자화하지 않는다, jenkins.py:4025 func_name 원본 보존). 반면 guide fn은 backend by_name
+      // 정규화로 소문자다. 정규화 없이 조회하면 mixed-case 함수명(예 'EEPROM_SetByte')은
+      // funcToReqs[소문자] 미스 → 요구사항·STS TC가 통째로 0 → ISO 26262 검토범위 under-report
+      // (kjpds02는 all-lowercase라 미발현, hdpdm01/NE_GN7 CamelCase에서 발현). fnToSutsTCs와 동일하게
+      // 조인 키만 양측 소문자화하고, 표시용 requirement_id는 원본을 보존한다.
       const funcToReqs = {};
       for (const mp of udsMapping) {
         for (const fn of (mp.source_ids || [])) {
-          if (!funcToReqs[fn]) funcToReqs[fn] = new Set();
-          funcToReqs[fn].add(mp.requirement_id);
+          const fk = String(fn || '').trim().toLowerCase();
+          if (!fk) continue;
+          if (!funcToReqs[fk]) funcToReqs[fk] = new Set();
+          funcToReqs[fk].add(mp.requirement_id);
         }
       }
 
@@ -905,7 +913,10 @@ export default function ImpactGuideSection({ analysisResult }) {
       for (const fn of guideFns) {
         const changeType = changedMap.get(fn) || '';
         const isChanged = changedMap.has(fn);
-        const reqs = funcToReqs[fn] ? [...funcToReqs[fn]] : [];
+        // 조인은 소문자 정규화 키로(funcToReqs·fnToSutsTCs 양측 소문자화 — mixed-case 함수명
+        // under-report 방지). 표시용 이름(details.function)은 원본 fn을 그대로 보존한다.
+        const _fnLc = String(fn).toLowerCase();
+        const reqs = funcToReqs[_fnLc] ? [...funcToReqs[_fnLc]] : [];
         reqs.forEach(r => allReqs.add(r));
 
         const stsTcSet = new Set();
@@ -913,7 +924,6 @@ export default function ImpactGuideSection({ analysisResult }) {
           (reqToStsTCs[_normReq(rid)] || new Set()).forEach(tc => { stsTcSet.add(tc); allStsTcs.add(tc); });
         }
 
-        const _fnLc = String(fn).toLowerCase();
         const sutsTcList = fnToSutsTCs[_fnLc] ? [...fnToSutsTCs[_fnLc]] : [];
         const hop = (activeImpactGroups.direct || []).includes(fn) ? 'direct'
           : (activeImpactGroups.indirect_1hop || []).includes(fn) ? '1-hop'

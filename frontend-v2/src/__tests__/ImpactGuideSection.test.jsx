@@ -939,6 +939,46 @@ describe('ImpactGuideSection', () => {
     // 회귀 수치를 0으로 단정하지 않는다(—)
     expect(screen.getByText('직전 대비 회귀').closest('.stat-card').textContent).toContain('—');
   });
+
+  // STS-IMPACT-038: funcToReqs 조인 casing(F3) — UDS source_ids 원본케이스 ↔ 소문자 함수명 정규화
+  //  032가 요구ID 케이싱을 다뤘다면 이건 함수명 케이싱. UDS "Name" 셀은 원본 케이스로 방출되고
+  //  (jenkins.py func_name 원본) impact 함수명은 backend by_name 정규화로 소문자다. 정규화 없이
+  //  조인하면 mixed-case 함수(EEPROM_SetByte)의 요구/STS TC가 통째로 0 → 검토범위 under-report.
+  it('검토 TC 조인: UDS source_ids 원본케이스와 소문자 함수명이 정규화되어 조인된다(F3)', async () => {
+    const { post } = await import('../api.js');
+    post.mockImplementation((url) => {
+      if (url === '/api/jenkins/uds/extract-mapping') {
+        // UDS "Name" 셀 원본 케이스(mixed) — backend가 소문자화하지 않음
+        return Promise.resolve({ mapping_pairs: [{ requirement_id: 'SwTR_1', source_ids: ['EEPROM_SetByte'] }] });
+      }
+      if (url === '/api/jenkins/sts/extract-traceability') {
+        return Promise.resolve({ vcast_rows: [{ requirement_id: 'SwTR_1', testcase: 'TC_EEP_01' }] });
+      }
+      return Promise.resolve({ ok: false }); // ai-guide skip
+    });
+    const user = userEvent.setup();
+    const analysisResult = {
+      impactData: {
+        trigger: { changed_files: ['EEPROM.c'], scm_id: 'kjpds02' },
+        // impact 함수명은 backend 정규화로 소문자
+        changed_function_types: { eeprom_setbyte: 'BODY' },
+        actions: {},
+        impact: { direct: ['eeprom_setbyte'] },
+        function_meta: { eeprom_setbyte: { asil: 'B' } },
+        _linked_docs: { uds: 'U:/uds.docx', sts: 'U:/sts.xlsm' },
+      },
+    };
+    render(<ImpactGuideSection analysisResult={analysisResult} />);
+    await user.click(screen.getByText(/상세 가이드 생성/));
+    await waitFor(() => expect(screen.getByText('STS 요구 TC')).toBeInTheDocument());
+    // 함수명 케이스만 달라도 정규화 조인 → 영향 요구사항=1, STS 요구 TC=1
+    // (정규화 없으면 funcToReqs['eeprom_setbyte'] 미스 → 둘 다 0 + ⚠사유 배지)
+    const reqCard = screen.getByText('영향 요구사항').closest('.stat-card');
+    expect(within(reqCard).getByText('1')).toBeInTheDocument();
+    const stsCard = screen.getByText('STS 요구 TC').closest('.stat-card');
+    expect(within(stsCard).getByText('1')).toBeInTheDocument();
+    expect(screen.queryByText(/⚠ STS|요구ID 매칭 0/)).not.toBeInTheDocument();
+  });
 });
 
 describe('extractDiffElements (순수 함수)', () => {

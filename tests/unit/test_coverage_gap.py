@@ -181,3 +181,63 @@ def test_coverage_gap_older_build_does_not_overwrite_baseline(tmp_path, monkeypa
     )
     _funcs, meta = coverage_gap._read_baseline(str(tmp_path), "x")
     assert meta.get("revision") == "1053"
+
+
+def test_coverage_gap_collision_worst_copy_not_masked(tmp_path, monkeypatch):
+    """이름충돌(동명 다른 함수)을 전역 max로 병합하면 최선 copy가 최악 copy의 gap을 은폐한다
+    (ISO 26262 구조 커버리지 under-report). collision_names를 주면 worst-copy(min) rate를 노출해
+    변경 copy를 특정 못 해도 gap을 재검증 대상에 남긴다."""
+    import backend.routers.jenkins as jk
+    from workflow import coverage_gap
+
+    # 같은 함수명 writeblock이 서로 다른 unit에 다른 copy로: APP 60% / BOOT 100% (대소문자까지 다름).
+    def _rag_of(p):
+        if p == "APP":
+            return {"vcast_summary": {"ut_metrics": {"entries": [
+                {"unit": "EEPROM_APP", "subprogram": "writeblock",
+                 "statements": {"rate": 0.6}, "branches": {"rate": 0.6}, "pairs": {"rate": 0.6}}]}}}
+        return {"vcast_summary": {"ut_metrics": {"entries": [
+            {"unit": "EEPROM_BOOT", "subprogram": "WriteBlock",
+             "statements": {"rate": 1.0}, "branches": {"rate": 1.0}, "pairs": {"rate": 1.0}}]}}}
+    monkeypatch.setattr(jk, "_load_vectorcast_rag_from_cloudium", _rag_of)
+
+    # collision_names 미전달(구 동작) → 전역 max(100%) → ASIL D가 '충족'으로 위장(버그 재현).
+    res_masked = coverage_gap.compute_coverage_gap(
+        ["writeblock"], {"writeblock": "D"}, ["APP", "BOOT"],
+        cache_root=str(tmp_path), scm_id="c", update_baseline=False)
+    assert res_masked["functions"][0]["meets_target"] is True
+
+    # collision_names 전달(fix) → worst-copy(min 0.6) → ASIL D 미달 노출.
+    res_fix = coverage_gap.compute_coverage_gap(
+        ["writeblock"], {"writeblock": "D"}, ["APP", "BOOT"],
+        cache_root=str(tmp_path), scm_id="c", update_baseline=False,
+        collision_names={"writeblock"})
+    r0 = res_fix["functions"][0]
+    assert r0["current_rate"] == 0.6
+    assert r0["meets_target"] is False
+    assert r0["collision_worst_copy"] is True
+    assert res_fix["summary"]["collision_worst_copy"] == 1
+
+
+def test_coverage_gap_noncollision_keeps_best_evidence(tmp_path, monkeypatch):
+    """충돌 fix가 정상 함수를 낮추지 않는다 — 같은 unit의 UT/IT는 여전히 max(최선 증거).
+    함수명이 collision_names에 있어도 단일 unit이면 worst-copy로 접지 않는다(false gap 방지)."""
+    import backend.routers.jenkins as jk
+    from workflow import coverage_gap
+
+    def _rag_of(p):
+        # 같은 unit(MOD)의 UT(80%)와 IT(95%) = 동일 함수의 두 측정 → max(95%)가 최선 증거.
+        if p == "UT":
+            return {"vcast_summary": {"ut_metrics": {"entries": [
+                {"unit": "MOD", "subprogram": "foo", "branches": {"rate": 0.8}}]}}}
+        return {"vcast_summary": {"it_metrics": {"entries": [
+            {"unit": "MOD", "subprogram": "foo", "branches": {"rate": 0.95}}]}}}
+    monkeypatch.setattr(jk, "_load_vectorcast_rag_from_cloudium", _rag_of)
+    res = coverage_gap.compute_coverage_gap(
+        ["foo"], {"foo": "B"}, ["UT", "IT"],
+        cache_root=str(tmp_path), scm_id="n", update_baseline=False,
+        collision_names={"foo"})
+    r0 = res["functions"][0]
+    assert r0["current_rate"] == 0.95           # 같은 unit UT/IT는 max
+    assert r0["collision_worst_copy"] is False  # 단일 unit → worst-copy 접힘 없음
+    assert res["summary"]["collision_worst_copy"] == 0

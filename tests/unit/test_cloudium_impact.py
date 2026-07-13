@@ -189,4 +189,7 @@ def test_run_impact_update_cloudium_empty_index_warns_underreport(tmp_path, monk
         )
     )
     assert result["ok"] is True
-    assert any("under-reported" in w for w in result["warnings"])
+    # by_name(소스 인덱스)이 비면 함수 해석 불가 → "소스 인덱스 0건" 과소보고 경고를 낸다.
+    # (R2 71f0b51에서 영문 'under-reported' → 한국어로 재작성됨. 경고 존재를 검증하되 문구 변화에
+    #  견고하도록 안정 접두사로 매칭.)
+    assert any("소스 인덱스 0건" in w for w in result["warnings"])

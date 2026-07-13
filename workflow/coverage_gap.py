@@ -19,7 +19,7 @@ import json
 import os
 import re
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 # ASIL → 요구 구조 커버리지 메트릭(ISO 26262 Part 6 Table 9/12). D=MC/DC(pairs), C/B=branch, A/QM=statement.
 _ASIL_METRIC = {"D": "mcdc", "C": "branch", "B": "branch", "A": "statement", "QM": "statement"}
@@ -46,16 +46,30 @@ def _rate(d: Any) -> Optional[float]:
     return None
 
 
-def load_function_coverage(vectorcast_paths: List[str]) -> Dict[str, Dict[str, Optional[float]]]:
-    """vectorcast RAG 경로들 → {normalized_fn: {statement, branch, mcdc}} (rate 0..1, 없으면 None).
+def load_function_coverage(
+    vectorcast_paths: List[str],
+    collision_names: Optional[Set[str]] = None,
+) -> Tuple[Dict[str, Dict[str, Optional[float]]], Set[str]]:
+    """vectorcast RAG 경로들 → ({normalized_fn: {statement, branch, mcdc}}, worst_copy_fns).
 
-    같은 함수가 여러 경로/UT·IT에서 나오면 메트릭별 최대 rate(최선 증거)를 취한다.
+    같은 함수가 같은 unit의 UT·IT에서 여러 번 나오면 메트릭별 **최대** rate(같은 함수의 두 측정 =
+    최선 증거)를 취한다.
+
+    ⚠ 이름충돌(collision_names, 소문자 정규화 집합): 서로 다른 unit/파일에 정의된 **동명의 다른 함수**는
+    하나로 병합하면 안 된다. 전역 max로 병합하면 최선 copy의 rate가 최악 copy의 gap을 은폐해
+    (예: APP copy MC/DC 60% + BOOT copy 100% → merged 100%, ASIL D 함수가 '목표 충족'으로 위장)
+    ISO 26262 구조 커버리지 gap을 **under-report**한다. 변경된 copy를 이름만으로 특정할 수 없으므로,
+    충돌 함수는 여러 unit 중 **최악(min) rate**를 노출해 어느 copy에 gap이 있어도 재검증 대상에
+    남긴다(증거 부재≠충족, 안전측 과대보고). 두 번째 반환값은 이렇게 worst-copy로 접힌 함수 집합
+    (감사/표면화용).
     """
-    out: Dict[str, Dict[str, Optional[float]]] = {}
+    collision_names = collision_names or set()
+    # (fn, unit) → {statement, branch, mcdc}. 같은 unit의 UT/IT는 max(동일 함수의 최선 증거)로 합친다.
+    per_unit: Dict[Tuple[str, str], Dict[str, Optional[float]]] = {}
     try:
         from backend.routers.jenkins import _load_vectorcast_rag_from_cloudium
     except Exception:  # noqa: BLE001 — jenkins 미import 환경이면 커버리지 연동 불가, 분석은 계속
-        return out
+        return {}, set()
 
     for raw in vectorcast_paths or []:
         path = str(raw or "").strip()
@@ -85,13 +99,35 @@ def load_function_coverage(vectorcast_paths: List[str]) -> Dict[str, Dict[str, O
                 fn = _norm_fn(e.get("subprogram"))
                 if not fn:
                     continue
-                rec = out.setdefault(fn, {"statement": None, "branch": None, "mcdc": None})
+                # unit(=component_name/source file)로 copy를 구분한다 — 충돌 함수의 서로 다른 copy를
+                # 하나로 접지 않기 위한 핵심 신호. 없으면 "" (구 RAG 호환 — 그땐 전역 병합과 동일).
+                unit = str(e.get("unit") or e.get("component_name") or "").strip().lower()
+                rec = per_unit.setdefault((fn, unit), {"statement": None, "branch": None, "mcdc": None})
                 for metric, key in (("statement", "statements"), ("branch", "branches"), ("mcdc", "pairs")):
                     r = _rate(e.get(key))
                     prev_r = rec[metric]
                     if r is not None and (prev_r is None or r > prev_r):
                         rec[metric] = r
-    return out
+
+    # (fn, unit) → fn 으로 접기. 비충돌: 전역 max(기존 동작). 충돌+다중 unit: 메트릭별 최악(min) copy.
+    units_of: Dict[str, List[str]] = {}
+    for (fn, unit) in per_unit:
+        units_of.setdefault(fn, []).append(unit)
+    out: Dict[str, Dict[str, Optional[float]]] = {}
+    worst_copy_fns: Set[str] = set()
+    for fn, units in units_of.items():
+        recs = [per_unit[(fn, u)] for u in units]
+        multi_unit = len(set(units)) > 1
+        use_min = multi_unit and fn in collision_names
+        merged: Dict[str, Optional[float]] = {"statement": None, "branch": None, "mcdc": None}
+        for metric in ("statement", "branch", "mcdc"):
+            vals = [r[metric] for r in recs if isinstance(r.get(metric), (int, float))]
+            if vals:
+                merged[metric] = min(vals) if use_min else max(vals)
+        out[fn] = merged
+        if use_min:
+            worst_copy_fns.add(fn)
+    return out, worst_copy_fns
 
 
 def _baseline_path(cache_root: str, scm_id: str) -> Path:
@@ -145,6 +181,7 @@ def compute_coverage_gap(
     scm_id: str = "",
     update_baseline: bool = True,
     build_revision: str = "",
+    collision_names: Optional[Set[str]] = None,
 ) -> Dict[str, Any]:
     """영향 함수 × ASIL 타깃 대비 커버리지 gap + 직전 스냅샷 대비 delta.
 
@@ -157,7 +194,7 @@ def compute_coverage_gap(
     받아 스냅샷 revision과 비교하고, 같으면 summary.baseline_same_revision=True로 표면화한다.
     또한 더 오래된 빌드의 커버리지로 baseline을 덮어쓰지 않는다(Δ 기준 훼손 방지).
     """
-    cov = load_function_coverage(vectorcast_paths)
+    cov, _worst_copy_fns = load_function_coverage(vectorcast_paths, collision_names=collision_names)
     if not cov:
         return {"available": False, "reason": "VectorCAST 커버리지 데이터 없음(RAG metrics 미생성)",
                 "functions": [], "summary": {}}
@@ -174,6 +211,7 @@ def compute_coverage_gap(
     unknown_asil = 0       # ASIL 미상 — statement 위장 평가 금지
     unmeasured = 0         # 매칭됐으나 ASIL 타깃 메트릭이 미측정(rate=None) — 증거 부재≠목표 미달
     unmeasured_safety = 0  # 그 중 ASIL C/D (예: MC/DC 리포트 없는 ASIL D 함수)
+    collision_masked = 0   # 이름충돌로 worst-copy(최악) rate를 노출한 함수 수(감사/표면화)
     for fn in impacted_functions:
         key = _norm_fn(fn)
         asil = str(asil_by_fn.get(fn) or "").strip().upper()
@@ -184,6 +222,10 @@ def compute_coverage_gap(
             if asil in ("C", "D"):
                 unmatched_safety += 1
             continue
+        # 이름충돌로 worst-copy(최악 copy)를 노출한 함수인지 — gap이 어느 copy에 있든 재검증 대상.
+        _wc = key in _worst_copy_fns
+        if _wc:
+            collision_masked += 1
         metric = _ASIL_METRIC.get(asil)   # 기본값 없음 — 미상을 statement(최저 기준)로 위장 금지(W1)
         if metric is None:
             unknown_asil += 1
@@ -191,7 +233,7 @@ def compute_coverage_gap(
                 "function": fn, "asil": asil or "UNKNOWN", "target_metric": "unknown",
                 "statement": rec.get("statement"), "branch": rec.get("branch"), "mcdc": rec.get("mcdc"),
                 "target_rate": 1.0, "current_rate": None, "meets_target": False, "delta": None,
-                "asil_unknown": True,
+                "asil_unknown": True, "collision_worst_copy": _wc,
             })
             continue
         cur = rec.get(metric)
@@ -214,7 +256,7 @@ def compute_coverage_gap(
             "function": fn, "asil": asil, "target_metric": metric,
             "statement": rec.get("statement"), "branch": rec.get("branch"), "mcdc": rec.get("mcdc"),
             "target_rate": target, "current_rate": cur, "meets_target": meets, "delta": delta,
-            "unmeasured_target": is_unmeasured,
+            "unmeasured_target": is_unmeasured, "collision_worst_copy": _wc,
         })
 
     if update_baseline:
@@ -240,6 +282,9 @@ def compute_coverage_gap(
             "unmeasured": unmeasured,
             "unmeasured_safety": unmeasured_safety,
             "unknown_asil": unknown_asil,
+            # 이름충돌로 worst-copy(최악 copy) rate를 노출한 함수 수 — 전역 max 병합의 gap 은폐를
+            # 안전측으로 대체했음을 표면화(0이면 충돌 영향 함수 없음 또는 단일 copy만 측정됨).
+            "collision_worst_copy": collision_masked,
             "had_baseline": bool(baseline),
             # Δ(회귀) 신뢰도 3종. 하나라도 참이면 regressed 수치를 '회귀 없음/있음'으로 읽으면 안 된다.
             #  - same_revision : baseline이 이번과 같은 빌드 → Δ≡0 (비교 불가)

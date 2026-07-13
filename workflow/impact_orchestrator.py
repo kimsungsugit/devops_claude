@@ -227,7 +227,12 @@ def _uds_name_asil_map(uds_path: str) -> Dict[str, str]:
                 _n = str(getattr(_e, "name", "") or "").strip().lower()
                 _a = str(getattr(_e, "asil", "") or "").strip()
                 if _n and _a:
-                    result.setdefault(_n, _a)
+                    # first-wins가 아니라 max 등급 유지 — 같은 함수명이 여러 ASIL로 나오면(충돌 14개
+                    # 존재) 낮은 등급 채택이 escalation·커버리지 타깃 게이트를 약화(under-report).
+                    # by_name 충돌병합(:1250 max)과 동일 안전측 원칙. absent면 첫 값 보존(TBD 포함).
+                    _ex = result.get(_n)
+                    if _ex is None or _asil_rank(_a) > _asil_rank(_ex):
+                        result[_n] = _a
         except Exception:
             pass
         # 2) heading-less 레이아웃 폴백 — heading 파서가 거의 못 뽑을 때만(v1.07류). reverse-corpus는
@@ -245,7 +250,10 @@ def _uds_name_asil_map(uds_path: str) -> Dict[str, str]:
                     _a = _swufn_asil.get(_s)
                     _nl = str(_n or "").strip().lower()
                     if _nl and _a:
-                        result.setdefault(_nl, _a)
+                        # first-wins → max 등급(위 heading 파서와 동일 안전측 병합).
+                        _ex = result.get(_nl)
+                        if _ex is None or _asil_rank(_a) > _asil_rank(_ex):
+                            result[_nl] = _a
             except Exception:
                 pass
     # ⚠ 빈 맵은 캐시하지 않는다. 두 파서 모두 except로 삼켜지므로(파서 회귀·손상 docx·일시적
@@ -397,7 +405,8 @@ def _load_sits_fn_chains(
         return {}
     fn_set = {fn.strip().lower() for fn in flagged_fns}
     result: Dict[str, List[str]] = {}
-    for itc in (data.get("integrations") if isinstance(data, dict) else None) or []:
+    _integrations = (data.get("integrations") if isinstance(data, dict) else None) or []
+    for itc in _integrations:
         entry = str(itc.get("entry_fn") or "").strip()
         if entry.lower() in fn_set:
             chain = str(itc.get("call_chain") or "").strip()
@@ -405,6 +414,10 @@ def _load_sits_fn_chains(
             label = f"{tc_id}: {chain}" if tc_id else chain
             if label:
                 result.setdefault(entry, []).append(label)
+    # SUTS 로더(_load_suts_fn_tcs)와 대칭 — 중간파일에 통합케이스는 있는데 영향 함수와 entry_fn이
+    # 하나도 매칭 안 되면 조용한 0 대신 사유를 남긴다(이름 규칙 불일치 등, silent-0 방지).
+    if not result and fn_set and _integrations:
+        _warn("회귀 체인: SITS 통합케이스는 있으나 영향 함수와 entry_fn이 매칭되지 않아 통합 체인 0(이름 규칙 확인)")
     return result
 
 
@@ -1171,6 +1184,9 @@ def run_impact_update(
         # 함수별 증거 출처: "line"=실제 라인변경 확인 / "file_fatten"=파일단위 보수 포함(라인변경 미확인).
         # 프론트가 function_diffs 부재로 '증거 없음'을 추론하던 것을 백엔드 사실로 대체(단일 출처).
         _fn_evidence: Dict[str, str] = {}
+        # 이름충돌(동명 다른 함수) 집합 — coverage_gap이 서로 다른 copy를 전역 max로 병합해 gap을
+        # 은폐하지 않도록 넘긴다(source parse 성공 시 아래 overlay에서 채움; 실패 시 빈 집합).
+        _collision_names: Set[str] = set()
         _base_r = str(_meta.get("baseline_revision") or "").strip()
         _build_r = str(_meta.get("build_revision") or "").strip()
         _scm_url = str(getattr(entry, "scm_url", "") or "").strip()
@@ -1241,6 +1257,7 @@ def run_impact_update(
             # ⚠ sections는 _load_source_sections가 deepcopy로 돌려준 **이 실행 전용 사본**이므로
             #    여기서 값을 수정해도 문서 생성 경로(function_details 원본)에는 영향이 없다.
             for _cn, _ce in (sections.get("function_collisions") or {}).items():
+                _collision_names.add(str(_cn).strip().lower())  # coverage worst-copy 병합용
                 _ci = by_name.get(str(_cn).strip().lower())
                 if not isinstance(_ci, dict) or not isinstance(_ce, dict):
                     continue
@@ -1632,6 +1649,9 @@ def run_impact_update(
                     update_baseline=not trigger.dry_run,
                     # Δ 신뢰도 판정 — baseline이 '같은 빌드'면 회귀 0은 '비교 불가'(위장 방지).
                     build_revision=_build_r,
+                    # 이름충돌 함수는 서로 다른 copy를 전역 max로 병합하면 gap이 은폐된다 →
+                    # worst-copy(min) 노출로 안전측 처리(under-report 차단).
+                    collision_names=_collision_names,
                 )
             except Exception:  # noqa: BLE001 — 커버리지 연동 실패는 영향도 분석을 막지 않는다
                 coverage_gap = {"available": False, "reason": "coverage gap 계산 실패"}
