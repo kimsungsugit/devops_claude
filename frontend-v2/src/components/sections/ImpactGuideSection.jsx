@@ -5,6 +5,12 @@ import StatusBadge from '../StatusBadge.jsx';
 
 const CHANGE_TYPE_KO = { BODY: '본문', HEADER: '헤더', SIGNATURE: '시그니처', NEW: '신규', DELETE: '삭제', VARIABLE: '변수' };
 const CHANGE_TYPE_TONE = { NEW: 'success', DELETE: 'danger', SIGNATURE: 'warning', BODY: 'info', HEADER: 'neutral', VARIABLE: 'neutral' };
+// 변경 유형 툴팁 설명 — 리스트에서 hover 시 무엇인지 즉시 파악(모달 안 열어도).
+const CHANGE_TYPE_DESC = {
+  BODY: '함수 내부 로직(본문) 변경', HEADER: '헤더(매크로/타입 정의) 변경',
+  SIGNATURE: '함수 시그니처(파라미터/리턴타입) 변경', NEW: '신규 함수 추가',
+  DELETE: '함수 삭제', VARIABLE: '전역/정적 변수 변경',
+};
 // 정렬 우선순위 — 구조적 변경(시그니처/신규/삭제)을 위로.
 const CHANGE_ORDER = { SIGNATURE: 5, NEW: 4, DELETE: 4, VARIABLE: 3, HEADER: 2, BODY: 1 };
 const COVERAGE_METRIC_KO = { mcdc: 'MC/DC', branch: '분기', statement: '구문' };
@@ -358,6 +364,34 @@ function renderChangeDetailCell(kind, detail) {
   if (kind === 'HEADER') return <span className="text-muted" style={{ fontSize: 11 }}>헤더(매크로/타입) 변경</span>;
   if (kind === 'VARIABLE') return <span className="text-muted" style={{ fontSize: 11 }}>전역 변수 변경</span>;
   return <span className="text-muted" style={{ fontSize: 11 }}>본문(로직) 변경</span>;
+}
+
+// 함수별 영향 가이드 리스트의 '변경' 셀 — 유형 뱃지(유형별 색상+툴팁 설명)와, SIGNATURE면
+// 파라미터 변화 요약(＋int b 등)까지 표시해 모달을 열지 않고도 무슨 변경인지 파악하게 한다.
+function renderChangeSummaryCell(d, changeDetails) {
+  if (!d.changed) {
+    return <span className="pill pill-neutral" style={{ fontSize: 9 }} title="직접 변경 아님 — 변경 함수의 호출 관계로 영향받는 간접 함수">영향</span>;
+  }
+  const kind = (d.changeType || '').toUpperCase();
+  const cd = changeDetails[String(d.function).toLowerCase()];
+  const pdiff = (kind === 'SIGNATURE' && cd && (cd.before || cd.after)) ? diffSignatureParamsCached(cd.before, cd.after) : null;
+  const sig = summarizeSignatureChange(pdiff);
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 2, alignItems: 'flex-start' }}>
+      <span className={`pill pill-${CHANGE_TYPE_TONE[kind] || 'neutral'}`} style={{ fontSize: 9 }} title={CHANGE_TYPE_DESC[kind] || kind}>
+        {CHANGE_TYPE_KO[kind] || kind}
+      </span>
+      {sig.hasChange && (
+        <span style={{ display: 'flex', gap: 2, flexWrap: 'wrap', alignItems: 'center' }} title="매개변수/반환 변화">
+          {sig.positional && <span title="위치 추정 — 삽입/삭제 위치가 다를 수 있음" style={{ fontSize: 8 }}>⚠</span>}
+          {sig.badges.slice(0, 3).map((b, j) => (
+            <span key={j} className={`pill pill-${b.tone}`} style={{ fontSize: 8, fontFamily: 'var(--font-mono, monospace)' }}>{b.label}</span>
+          ))}
+          {sig.badges.length > 3 && <span className="text-muted" style={{ fontSize: 8 }}>+{sig.badges.length - 3}</span>}
+        </span>
+      )}
+    </div>
+  );
 }
 
 // 함수별 VectorCAST 커버리지 셀 — ASIL 타깃 메트릭 % + 충족 여부 + 직전 대비 Δ.
@@ -1231,7 +1265,7 @@ export default function ImpactGuideSection({ analysisResult }) {
             <thead>
               <tr>
                 <th style={{ width: 150 }}>함수</th>
-                <th style={{ width: 60 }}>변경</th>
+                <th style={{ width: 120 }}>변경</th>
                 <th style={{ width: 50 }}>ASIL</th>
                 <th style={{ width: 50 }}>영향</th>
                 <th style={{ width: 96 }} title="ASIL 타깃 구조 커버리지(D=MC/DC, C/B=분기, A/QM=구문) 대비. Δ=직전 대비 변화">커버리지</th>
@@ -1245,11 +1279,7 @@ export default function ImpactGuideSection({ analysisResult }) {
               {filteredGuide.map((d, i) => (
                 <tr key={i} style={{ background: d.hop === 'direct' ? 'var(--bg)' : undefined }}>
                   <td style={{ fontFamily: 'monospace', fontSize: 10, fontWeight: 600 }}>{d.function}</td>
-                  <td>
-                    {d.changed
-                      ? <span className="pill pill-warning" style={{ fontSize: 9 }}>{CHANGE_TYPE_KO[d.changeType] || d.changeType}</span>
-                      : <span className="pill pill-neutral" style={{ fontSize: 9 }} title="직접 변경 아님 — 변경 함수의 호출 관계로 영향받는 간접 함수">영향</span>}
-                  </td>
+                  <td>{renderChangeSummaryCell(d, changeDetails)}</td>
                   <td>
                     {d.asil && /^[A-D]$/.test(d.asil)
                       ? <span className={`pill ${/[CD]/.test(d.asil) ? 'pill-danger' : 'pill-warning'}`} style={{ fontSize: 9 }}>{d.asil}</span>

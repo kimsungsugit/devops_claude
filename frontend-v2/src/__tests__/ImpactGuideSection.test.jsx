@@ -454,4 +454,27 @@ describe('ImpactGuideSection', () => {
     // 위치 추정 경고 배너(모달 시그니처 섹션)
     expect(screen.getByText('위치 기반')).toBeInTheDocument();
   });
+
+  // STS-IMPACT-020: 함수별 영향 가이드 리스트 — 모달 열기 전에도 변경 유형+파라미터 요약 표시
+  it('가이드 리스트: 모달 열기 전에도 변경 유형과 파라미터 변화가 표시된다', async () => {
+    const { post } = await import('../api.js');
+    post.mockResolvedValue({ ok: false });
+    const user = userEvent.setup();
+    const analysisResult = {
+      impactData: {
+        trigger: { changed_files: ['a.c'] },
+        changed_function_types: { foo: 'SIGNATURE', gone: 'DELETE' },
+        impact: { direct: ['foo', 'gone'] },
+        function_meta: { foo: { asil: 'B' }, gone: { asil: 'A' } },
+        change_details: { foo: { before: 'int foo(int a)', after: 'int foo(int a, int b)' } },
+      },
+    };
+    render(<ImpactGuideSection analysisResult={analysisResult} />);
+    await user.click(screen.getByText(/상세 가이드 생성/));
+    await waitFor(() => expect(screen.getByText(/함수별 영향 가이드/)).toBeInTheDocument());
+    // 리스트 셀에 유형 뱃지(시그니처/삭제)와 SIGNATURE 파라미터 요약(＋int b) — 상세 클릭 없이
+    expect(screen.getAllByText('시그니처').length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText('삭제').length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText('＋int b').length).toBeGreaterThanOrEqual(1);
+  });
 });
