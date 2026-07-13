@@ -508,6 +508,54 @@ describe('ImpactGuideSection', () => {
     // SITS 카드에 'Data Flow' 섹션 라벨 없음(정정 확인)
     expect(screen.queryByText('Data Flow')).not.toBeInTheDocument();
   });
+
+  // STS-IMPACT-022: 무정보 BODY(function_diff·change_details 둘 다 없음) — 파일영향 정직 표시
+  it('상세 모달: 직접 변경 증거 없는 BODY는 "파일영향"으로 표시하고 본문 변경 단정 안 함', async () => {
+    const { post } = await import('../api.js');
+    post.mockResolvedValue({ ok: false });
+    const user = userEvent.setup();
+    const analysisResult = {
+      impactData: {
+        trigger: { changed_files: ['a.c'] },
+        changed_function_types: { g_getter: 'BODY' },
+        impact: { direct: ['g_getter'] },
+        function_meta: { g_getter: { asil: 'A' } },
+        // change_details·function_diffs 둘 다 없음 (파일 단위 보수 fatten)
+      },
+    };
+    render(<ImpactGuideSection analysisResult={analysisResult} />);
+    await user.click(screen.getByText(/상세 가이드 생성/));
+    await waitFor(() => expect(screen.getByText(/함수별 영향 가이드/)).toBeInTheDocument());
+    expect(screen.getAllByText('파일영향').length).toBeGreaterThanOrEqual(1);  // 리스트 칩
+    await user.click(screen.getByRole('button', { name: '상세' }));
+    // 직접 변경 감지 안 됨 안내 + 본문 변경 단정 없음 + 본문 원문 없음 안내
+    expect(screen.getByText(/직접 변경\(hunk\/선언\)은 감지되지 않았습니다/)).toBeInTheDocument();
+    expect(screen.queryByText(/함수 본문\(로직\)이 변경되었습니다/)).not.toBeInTheDocument();
+    expect(screen.getByText(/본문 변경 원문 없음/)).toBeInTheDocument();
+  });
+
+  // STS-IMPACT-023: hunk 있는 BODY(function_diffs 있음) — 기존 단정 유지, 파일영향 없음(과발화 가드)
+  it('상세 모달: 본문 diff 있는 BODY는 기존 "본문 변경" 단정 유지, 파일영향 칩 없음', async () => {
+    const { post } = await import('../api.js');
+    post.mockResolvedValue({ ok: false });
+    const user = userEvent.setup();
+    const analysisResult = {
+      impactData: {
+        trigger: { changed_files: ['a.c'] },
+        changed_function_types: { g_real: 'BODY' },
+        impact: { direct: ['g_real'] },
+        function_meta: { g_real: { asil: 'A' } },
+        function_diffs: { g_real: '@@ -1,2 +1,2 @@ void g_real(void)\n-    x = 1;\n+    x = 2;' },
+      },
+    };
+    render(<ImpactGuideSection analysisResult={analysisResult} />);
+    await user.click(screen.getByText(/상세 가이드 생성/));
+    await waitFor(() => expect(screen.getByText(/함수별 영향 가이드/)).toBeInTheDocument());
+    expect(screen.queryByText('파일영향')).not.toBeInTheDocument();  // hunk 있음 → 칩 없음
+    await user.click(screen.getByRole('button', { name: '상세' }));
+    expect(screen.getByText(/함수 본문\(로직\)이 변경되었습니다/)).toBeInTheDocument();  // 기존 단정 유지
+    expect(screen.queryByText(/직접 변경\(hunk\/선언\)은 감지되지 않았습니다/)).not.toBeInTheDocument();
+  });
 });
 
 describe('extractDiffElements (순수 함수)', () => {

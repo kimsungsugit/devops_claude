@@ -147,7 +147,7 @@ const PARAM_STATUS = {
 function renderInlineCode(text) {
   return String(text).split(/(`[^`]+`)/g).map((p, i) =>
     (p.length > 1 && p.startsWith('`') && p.endsWith('`'))
-      ? <code key={i} style={{ fontFamily: 'var(--font-mono, monospace)', background: 'var(--bg)', padding: '0 3px', borderRadius: 3 }}>{p.slice(1, -1)}</code>
+      ? <code key={i} style={{ fontFamily: 'var(--font-mono, monospace)', background: 'var(--bg)', padding: '0 3px', borderRadius: 3, overflowWrap: 'anywhere' }}>{p.slice(1, -1)}</code>
       : <span key={i}>{p}</span>
   );
 }
@@ -493,12 +493,15 @@ function renderChangeDetailCell(kind, detail) {
 
 // 함수별 영향 가이드 리스트의 '변경' 셀 — 유형 뱃지(유형별 색상+툴팁 설명)와, SIGNATURE면
 // 파라미터 변화 요약(＋int b 등)까지 표시해 모달을 열지 않고도 무슨 변경인지 파악하게 한다.
-function renderChangeSummaryCell(d, changeDetails) {
+function renderChangeSummaryCell(d, changeDetails, functionDiffs = {}) {
   if (!d.changed) {
     return <span className="pill pill-neutral" style={{ fontSize: 9 }} title="직접 변경 아님 — 변경 함수의 호출 관계로 영향받는 간접 함수">영향</span>;
   }
   const kind = (d.changeType || '').toUpperCase();
   const cd = changeDetails[String(d.function).toLowerCase()];
+  const fdCell = functionDiffs[String(d.function).toLowerCase()] || '';
+  // 무정보: BODY/VARIABLE인데 본문 diff·선언 원문 둘 다 없음 — 직접 변경 증거 없이 파일 단위 보수 포함(fatten)
+  const cellNoEvidence = (kind === 'BODY' || kind === 'VARIABLE') && !fdCell && !(cd && (cd.before || cd.after));
   const pdiff = (kind === 'SIGNATURE' && cd && (cd.before || cd.after)) ? diffSignatureParamsCached(cd.before, cd.after) : null;
   const sig = summarizeSignatureChange(pdiff);
   return (
@@ -506,6 +509,9 @@ function renderChangeSummaryCell(d, changeDetails) {
       <span className={`pill pill-${CHANGE_TYPE_TONE[kind] || 'neutral'}`} style={{ fontSize: 9 }} title={CHANGE_TYPE_DESC[kind] || kind}>
         {CHANGE_TYPE_KO[kind] || kind}
       </span>
+      {cellNoEvidence && (
+        <span className="pill pill-neutral" style={{ fontSize: 8 }} title="직접 변경 증거 없음(function_diff·change_details 모두 없음) — 같은 파일의 다른 변경으로 보수적 포함(파일 단위 영향)">파일영향</span>
+      )}
       {sig.hasChange && (
         <span style={{ display: 'flex', gap: 2, flexWrap: 'wrap', alignItems: 'center' }} title="매개변수/반환 변화">
           {sig.positional && <span title="위치 추정 — 삽입/삭제 위치가 다를 수 있음" style={{ fontSize: 8 }}>⚠</span>}
@@ -1404,7 +1410,7 @@ export default function ImpactGuideSection({ analysisResult }) {
               {filteredGuide.map((d, i) => (
                 <tr key={i} style={{ background: d.hop === 'direct' ? 'var(--bg)' : undefined }}>
                   <td style={{ fontFamily: 'monospace', fontSize: 10, fontWeight: 600 }}>{d.function}</td>
-                  <td>{renderChangeSummaryCell(d, changeDetails)}</td>
+                  <td>{renderChangeSummaryCell(d, changeDetails, functionDiffs)}</td>
                   <td>
                     {d.asil && /^[A-D]$/.test(d.asil)
                       ? <span className={`pill ${/[CD]/.test(d.asil) ? 'pill-danger' : 'pill-warning'}`} style={{ fontSize: 9 }}>{d.asil}</span>
@@ -1452,6 +1458,8 @@ export default function ImpactGuideSection({ analysisResult }) {
             const pdiff = hasRaw ? diffSignatureParamsCached(cd.before, cd.after) : null;
             const sigSummary = summarizeSignatureChange(pdiff);
             const diffElems = extractDiffElementsCached(fd);  // 본문 diff에서 변경 전역·전처리 추출(BODY/VARIABLE 구체화)
+            const hasDirectEvidence = hasRaw || !!fd;  // 선언 원문(cd) 또는 본문 hunk(fd) 존재
+            const noEvidence = d.changed && !hasDirectEvidence;  // 변경 표기됐으나 직접 증거 없음(파일 단위 보수 fatten)
             // 문서별 구체 편집 액션(결정론) — 파라미터 diff·본문 변경 요소·요구사항·TC 반영. LLM 무관·즉시.
             const docActions = buildDocumentActions(d, pdiff, diffElems);
             const DOC_CARDS = [
@@ -1476,6 +1484,7 @@ export default function ImpactGuideSection({ analysisResult }) {
                       {d.changed
                         ? <span className="pill pill-warning" style={{ fontSize: 10 }}>{CHANGE_TYPE_KO[d.changeType] || d.changeType}</span>
                         : <span className="pill pill-neutral" style={{ fontSize: 10 }} title="직접 변경 아님 — 간접 영향 함수">영향</span>}
+                      {noEvidence && <span className="pill pill-neutral" style={{ fontSize: 10 }} title="직접 변경 증거 없음 — 파일 단위 보수 포함(hunk/선언 미감지)">파일영향</span>}
                       <span className={`pill ${d.hop === 'direct' ? 'pill-danger' : 'pill-info'}`} style={{ fontSize: 10 }}>{d.hop}</span>
                       {d.asil && /^[A-D]$/.test(d.asil) && <span className={`pill ${/[CD]/.test(d.asil) ? 'pill-danger' : 'pill-warning'}`} style={{ fontSize: 10 }}>ASIL {d.asil}</span>}
                       {d.requirements.length > 0 && <span className="text-muted" style={{ fontSize: 10 }}>요구사항 {d.requirements.length}개</span>}
@@ -1525,8 +1534,8 @@ export default function ImpactGuideSection({ analysisResult }) {
                               return (
                                 <tr key={i} style={{ borderBottom: '1px solid var(--border-subtle, var(--border))' }}>
                                   <td style={{ padding: '3px 6px' }}><span className={`pill pill-${st.tone}`} style={{ fontSize: 8 }}>{st.mark} {st.label}</span></td>
-                                  <td style={{ padding: '3px 6px', fontFamily: 'monospace', color: r.before ? 'var(--color-danger)' : 'var(--text-muted)' }}>{r.before || '—'}</td>
-                                  <td style={{ padding: '3px 6px', fontFamily: 'monospace', color: r.after ? 'var(--color-success)' : 'var(--text-muted)' }}>{r.after || '—'}</td>
+                                  <td style={{ padding: '3px 6px', fontFamily: 'monospace', color: r.before ? 'var(--color-danger)' : 'var(--text-muted)', wordBreak: 'break-word' }}>{r.before || '—'}</td>
+                                  <td style={{ padding: '3px 6px', fontFamily: 'monospace', color: r.after ? 'var(--color-success)' : 'var(--text-muted)', wordBreak: 'break-word' }}>{r.after || '—'}</td>
                                 </tr>
                               );
                             })}
@@ -1572,6 +1581,11 @@ export default function ImpactGuideSection({ analysisResult }) {
                     </details>
                   </div>
                 )}
+                {noEvidence && (ct === 'BODY' || ct === 'VARIABLE') && (
+                  <div className="text-muted" style={{ fontSize: 11, marginBottom: 12, padding: '6px 10px', background: 'var(--bg)', borderRadius: 6, borderLeft: '3px solid var(--border)' }}>
+                    본문 변경 원문 없음 — 직접 hunk 미감지(파일 단위 보수 포함). AI 설명도 추정입니다.
+                  </div>
+                )}
 
                 {/* 🤖 AI 변경 설명 (Gemini) — 선언 원문 근거 자연어 설명 */}
                 <div style={{ marginBottom: 12, border: '1px solid var(--border)', borderRadius: 8, overflow: 'hidden' }}>
@@ -1581,14 +1595,16 @@ export default function ImpactGuideSection({ analysisResult }) {
                       {exp.loading ? '분석 중...' : (exp.text ? '다시 생성' : 'AI로 설명 생성')}
                     </button>
                   </div>
-                  {exp.text && <div style={{ padding: 10, fontSize: 12, whiteSpace: 'pre-wrap', lineHeight: 1.6 }}>{exp.text}</div>}
+                  {exp.text && <div style={{ padding: 10, fontSize: 12, whiteSpace: 'pre-wrap', lineHeight: 1.6, overflowWrap: 'anywhere' }}>{exp.text}</div>}
                   {exp.error && <div style={{ padding: 10, fontSize: 11, color: 'var(--text-muted)' }}>⚠ {exp.error}</div>}
                 </div>
 
                 {/* Change description */}
-                <div style={{ padding: '8px 10px', background: 'var(--bg)', borderRadius: 6, marginBottom: 12, fontSize: 12, borderLeft: '3px solid var(--color-warning)' }}>
+                <div style={{ padding: '8px 10px', background: 'var(--bg)', borderRadius: 6, marginBottom: 12, fontSize: 12, borderLeft: `3px solid ${noEvidence ? 'var(--border)' : 'var(--color-warning)'}` }}>
                   {!d.changed && `이 함수는 직접 변경되지 않았으나, 변경 함수와의 호출 관계(${d.hop})로 영향받는 간접 함수입니다. 인터페이스 계약이 유지되는지, 회귀 시험(SUTS/SITS) 재실행이 필요한지 확인하세요.`}
-                  {ct === 'BODY' && '함수 본문(로직)이 변경되었습니다. 동작 변경으로 인해 관련 문서의 Description, Test Action, Expected Result를 모두 재검토해야 합니다.'}
+                  {ct === 'BODY' && (hasDirectEvidence
+                    ? '함수 본문(로직)이 변경되었습니다. 동작 변경으로 인해 관련 문서의 Description, Test Action, Expected Result를 모두 재검토해야 합니다.'
+                    : '이 함수의 직접 변경(hunk/선언)은 감지되지 않았습니다. 같은 파일의 다른 변경(전처리·선언 등)으로 영향 검토 대상에 보수적으로 포함된 함수입니다(파일 단위 영향).')}
                   {ct === 'SIGNATURE' && '함수 시그니처(파라미터/리턴타입)가 변경되었습니다. 호출하는 모든 함수와 Input/Output Parameters, Pre-condition을 업데이트해야 합니다.'}
                   {ct === 'HEADER' && '헤더 파일이 변경되었습니다. 매크로/타입 정의 변경으로 이 헤더를 include하는 모든 소스 파일의 함수에 영향이 있을 수 있습니다.'}
                   {ct === 'VARIABLE' && '글로벌 변수가 변경되었습니다. 이 변수를 읽고 쓰는 모든 함수의 동작을 확인해야 합니다.'}
@@ -1599,19 +1615,24 @@ export default function ImpactGuideSection({ analysisResult }) {
                 <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 6 }}>
                   각 문서에 <strong>무엇을 어느 섹션에</strong> 반영해야 하는지 — 실제 매개변수 변화 기반(결정론).
                 </div>
+                {noEvidence && (
+                  <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 6, padding: '4px 8px', background: 'var(--bg)', borderRadius: 4 }}>
+                    ※ 직접 변경 증거가 없어(파일 단위 보수 포함) 아래 액션은 파일 변경 맥락 기준의 일반 가이드입니다.
+                  </div>
+                )}
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(250px, 1fr))', gap: 10 }}>
                   {DOC_CARDS.map(card => {
                     const acts = docActions[card.key] || [];
                     const chips = card.chips || [];
                     return (
-                      <div key={card.key} style={{ padding: 10, border: '1px solid var(--border)', borderRadius: 6 }}>
+                      <div key={card.key} style={{ padding: 10, border: '1px solid var(--border)', borderRadius: 6, minWidth: 0 }}>
                         <div style={{ fontWeight: 600, fontSize: 12, marginBottom: 6, color: 'var(--accent)' }}>{card.icon} {card.title}</div>
                         {acts.length > 0 ? (
                           <ul style={{ fontSize: 11, margin: '0 0 4px 0', padding: 0, listStyle: 'none' }}>
                             {acts.map((a, i) => (
                               <li key={i} style={{ marginBottom: 5, display: 'flex', gap: 5, alignItems: 'baseline' }}>
                                 <span className={`pill pill-${a.tone}`} style={{ fontSize: 8, flexShrink: 0, whiteSpace: 'nowrap' }}>{a.section}</span>
-                                <span style={{ lineHeight: 1.4 }} title={a.title || undefined}>{renderInlineCode(a.text)}</span>
+                                <span style={{ lineHeight: 1.4, minWidth: 0, overflowWrap: 'anywhere' }} title={a.title || undefined}>{renderInlineCode(a.text)}</span>
                               </li>
                             ))}
                           </ul>
