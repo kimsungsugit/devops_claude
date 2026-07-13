@@ -283,7 +283,7 @@ describe('ImpactGuideSection', () => {
     // Assert: 가이드 표에 직접(1)+간접(1)=2개, 간접 함수 s_Indirect가 표에 노출된다.
     // (과거엔 변경 함수만 순회 → 간접 함수 누락 + 1-hop 필터 영구 0건)
     await waitFor(() => {
-      expect(screen.getByText(/함수별 영향 가이드 \(2개\)/)).toBeInTheDocument();
+      expect(screen.getByText(/함수별 상세 \(2\)/)).toBeInTheDocument();
     });
     // s_Indirect는 '변경 상세'엔 없고 '영향 가이드' 표에만 존재 → 유일 매칭
     expect(screen.getByText('s_Indirect')).toBeInTheDocument();
@@ -342,7 +342,7 @@ describe('ImpactGuideSection', () => {
     };
     render(<ImpactGuideSection analysisResult={analysisResult} />);
     await user.click(screen.getByText(/상세 가이드 생성/));
-    await waitFor(() => expect(screen.getByText(/함수별 영향 가이드/)).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText(/함수별 상세/)).toBeInTheDocument());
     // 가이드 표의 '상세' 버튼(정확 매칭 — '상세 가이드 생성'과 구분)
     await user.click(screen.getByRole('button', { name: '상세' }));
     // 모달: 매개변수 변화 섹션 + '추가'(매개변수 pill + 문서 액션 다중) + 변경 후 원문
@@ -393,7 +393,7 @@ describe('ImpactGuideSection', () => {
     };
     render(<ImpactGuideSection analysisResult={analysisResult} />);
     await user.click(screen.getByText(/상세 가이드 생성/));
-    await waitFor(() => expect(screen.getByText(/함수별 영향 가이드/)).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText(/함수별 상세/)).toBeInTheDocument());
     await user.click(screen.getByRole('button', { name: '상세' }));
     // 콜백 param(내부 콤마 포함)이 하나로 파싱돼 변경행에 노출 — flag는 불변이라 추가/삭제 행 없음
     expect(screen.getAllByText(/void \(\*cb\)\(int,int,int\)/).length).toBeGreaterThanOrEqual(1);
@@ -422,7 +422,7 @@ describe('ImpactGuideSection', () => {
     };
     render(<ImpactGuideSection analysisResult={analysisResult} />);
     await user.click(screen.getByText(/상세 가이드 생성/));
-    await waitFor(() => expect(screen.getByText(/함수별 영향 가이드/)).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText(/함수별 상세/)).toBeInTheDocument());
     await user.click(screen.getByRole('button', { name: '상세' }));
     // 삽입된 'U8 len'만 추가 뱃지로 귀속 — 배열 src/dst는 이름 매칭돼 오귀속되지 않음
     expect(screen.getAllByText('＋U8 len').length).toBeGreaterThanOrEqual(1);
@@ -449,7 +449,7 @@ describe('ImpactGuideSection', () => {
     };
     render(<ImpactGuideSection analysisResult={analysisResult} />);
     await user.click(screen.getByText(/상세 가이드 생성/));
-    await waitFor(() => expect(screen.getByText(/함수별 영향 가이드/)).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText(/함수별 상세/)).toBeInTheDocument());
     await user.click(screen.getByRole('button', { name: '상세' }));
     // 위치 추정 경고 배너(모달 시그니처 섹션)
     expect(screen.getByText('위치 기반')).toBeInTheDocument();
@@ -471,7 +471,7 @@ describe('ImpactGuideSection', () => {
     };
     render(<ImpactGuideSection analysisResult={analysisResult} />);
     await user.click(screen.getByText(/상세 가이드 생성/));
-    await waitFor(() => expect(screen.getByText(/함수별 영향 가이드/)).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText(/함수별 상세/)).toBeInTheDocument());
     // 리스트 셀에 유형 뱃지(시그니처/삭제)와 SIGNATURE 파라미터 요약(＋int b) — 상세 클릭 없이
     expect(screen.getAllByText('시그니처').length).toBeGreaterThanOrEqual(1);
     expect(screen.getAllByText('삭제').length).toBeGreaterThanOrEqual(1);
@@ -500,7 +500,7 @@ describe('ImpactGuideSection', () => {
     };
     render(<ImpactGuideSection analysisResult={analysisResult} />);
     await user.click(screen.getByText(/상세 가이드 생성/));
-    await waitFor(() => expect(screen.getByText(/함수별 영향 가이드/)).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText(/함수별 상세/)).toBeInTheDocument());
     await user.click(screen.getByRole('button', { name: '상세' }));
     // UDS 카드에 실제 전역 변수명 + Used Globals 섹션(결정론 구체화)
     expect(screen.getAllByText(/u8g_ApiIn_LinRx_AsstVentilationLevel/).length).toBeGreaterThanOrEqual(1);
@@ -525,7 +525,7 @@ describe('ImpactGuideSection', () => {
     };
     render(<ImpactGuideSection analysisResult={analysisResult} />);
     await user.click(screen.getByText(/상세 가이드 생성/));
-    await waitFor(() => expect(screen.getByText(/함수별 영향 가이드/)).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText(/함수별 상세/)).toBeInTheDocument());
     expect(screen.getAllByText('파일영향').length).toBeGreaterThanOrEqual(1);  // 리스트 칩
     await user.click(screen.getByRole('button', { name: '상세' }));
     // 직접 변경 감지 안 됨 안내 + 본문 변경 단정 없음 + 본문 원문 없음 안내
@@ -550,7 +550,7 @@ describe('ImpactGuideSection', () => {
     };
     render(<ImpactGuideSection analysisResult={analysisResult} />);
     await user.click(screen.getByText(/상세 가이드 생성/));
-    await waitFor(() => expect(screen.getByText(/함수별 영향 가이드/)).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText(/함수별 상세/)).toBeInTheDocument());
     expect(screen.queryByText('파일영향')).not.toBeInTheDocument();  // hunk 있음 → 칩 없음
     await user.click(screen.getByRole('button', { name: '상세' }));
     expect(screen.getByText(/함수 본문\(로직\)이 변경되었습니다/)).toBeInTheDocument();  // 기존 단정 유지
@@ -603,7 +603,7 @@ describe('ImpactGuideSection', () => {
     };
     render(<ImpactGuideSection analysisResult={analysisResult} />);
     await user.click(screen.getByText(/상세 가이드 생성/));
-    await waitFor(() => expect(screen.getByText(/함수별 영향 가이드/)).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText(/함수별 상세/)).toBeInTheDocument());
     // 가이드 필터에 '파일영향 포함' 체크박스 노출, 기본 미체크 → 무정보 함수 목록 미표시
     expect(screen.getByText(/파일영향 포함 \(2\)/)).toBeInTheDocument();
     const cb = screen.getByRole('checkbox');
@@ -664,6 +664,122 @@ describe('ImpactGuideSection', () => {
     // 토글 ON → 커버리지 제외 note 사라짐(전체 포함 반영)
     await user.click(screen.getAllByRole('button', { name: /파일영향 2개 보기/ })[0]);
     expect(screen.queryByText(/파일영향\(무변경\) 2개 제외/)).not.toBeInTheDocument();
+  });
+
+  // STS-IMPACT-028: AI 요약 ↔ 함수별 상세 탭 통합 — aiGuide 있으면 기본 AI 요약, 탭 클릭 시 함수 표
+  it('탭 통합: aiGuide가 있으면 기본 AI 요약이고 함수별 상세 탭 클릭 시 함수 표가 보인다', async () => {
+    const { post } = await import('../api.js');
+    const aiGuide = {
+      ai_enriched: true,
+      risk: { grade: 'HIGH', score: 55, max_asil: 'A', justification: '위험 근거', affected_safety_functions: [] },
+      review_checklist: [],
+      test_recommendations: [{ function: 'g_changed', test_type: 'BV', description: '경계값 검증' }],
+      cross_doc_impacts: {},
+    };
+    post.mockImplementation((url) => (url === '/api/impact/ai-guide'
+      ? Promise.resolve({ ok: true, guide: aiGuide })
+      : Promise.resolve({ ok: false })));
+    const user = userEvent.setup();
+    const analysisResult = {
+      impactData: {
+        trigger: { changed_files: ['Ap.c'] },
+        changed_function_types: { g_changed: 'BODY' },
+        actions: {},
+        impact: { direct: ['g_changed'] },
+        function_meta: { g_changed: { asil: 'A' } },
+      },
+    };
+    render(<ImpactGuideSection analysisResult={analysisResult} />);
+    await user.click(screen.getByText(/상세 가이드 생성/));
+    // 기본 AI 요약 탭: 테스트 추가 제안 노출, 함수 표 subtitle(직접 변경 + 간접 영향)은 미노출
+    await waitFor(() => expect(screen.getByText(/테스트 추가 제안/)).toBeInTheDocument());
+    expect(screen.queryByText(/직접 변경 \+ 간접 영향/)).not.toBeInTheDocument();
+    // '함수별 상세 (1)' 탭 클릭 → 함수 표 노출
+    await user.click(screen.getByRole('button', { name: /함수별 상세 \(1\)/ }));
+    expect(screen.getByText(/직접 변경 \+ 간접 영향/)).toBeInTheDocument();
+  });
+
+  // STS-IMPACT-029: AI 요약의 함수명 클릭 → 기존 함수별 상세 모달(공유 오버레이, 탭 무관)
+  it('탭 통합: AI 요약의 테스트 제안 함수명을 클릭하면 상세 모달이 열린다', async () => {
+    const { post } = await import('../api.js');
+    const aiGuide = {
+      ai_enriched: true,
+      risk: { grade: 'HIGH', score: 55, max_asil: 'A', justification: 'x', affected_safety_functions: [] },
+      review_checklist: [],
+      test_recommendations: [{ function: 'g_changed', test_type: 'BV', description: '경계값' }],
+      cross_doc_impacts: {},
+    };
+    post.mockImplementation((url) => (url === '/api/impact/ai-guide'
+      ? Promise.resolve({ ok: true, guide: aiGuide })
+      : Promise.resolve({ ok: false })));
+    const user = userEvent.setup();
+    const analysisResult = {
+      impactData: {
+        trigger: { changed_files: ['Ap.c'] },
+        changed_function_types: { g_changed: 'BODY' },
+        actions: {},
+        impact: { direct: ['g_changed'] },
+        function_meta: { g_changed: { asil: 'A' } },
+      },
+    };
+    render(<ImpactGuideSection analysisResult={analysisResult} />);
+    await user.click(screen.getByText(/상세 가이드 생성/));
+    // AI 요약 탭의 테스트 제안 표에서 함수명은 클릭 가능한 버튼(renderFnRef)
+    const fnBtn = await screen.findByRole('button', { name: 'g_changed' });
+    await user.click(fnBtn);
+    // 공유 상세 모달 열림 — AI 요약 탭에서 클릭해도 오버레이로 표시
+    await waitFor(() => expect(screen.getByText(/✕ 닫기/)).toBeInTheDocument());
+  });
+
+  // STS-IMPACT-030: guide.details에 없는 함수명은 클릭 불가(일반 텍스트) — 미해석 이름 no-op 가드
+  it('탭 통합: guide에 없는 테스트 제안 함수명은 버튼이 아닌 일반 텍스트로 표시된다', async () => {
+    const { post } = await import('../api.js');
+    const aiGuide = {
+      ai_enriched: true,
+      risk: { grade: 'LOW', score: 10, max_asil: 'QM', justification: 'x', affected_safety_functions: [] },
+      review_checklist: [],
+      test_recommendations: [{ function: 'g_ghost', test_type: 'NORMAL', description: '유령' }],
+      cross_doc_impacts: {},
+    };
+    post.mockImplementation((url) => (url === '/api/impact/ai-guide'
+      ? Promise.resolve({ ok: true, guide: aiGuide })
+      : Promise.resolve({ ok: false })));
+    const user = userEvent.setup();
+    const analysisResult = {
+      impactData: {
+        trigger: { changed_files: ['Ap.c'] },
+        changed_function_types: { g_changed: 'BODY' },
+        actions: {},
+        impact: { direct: ['g_changed'] },
+        function_meta: {},
+      },
+    };
+    render(<ImpactGuideSection analysisResult={analysisResult} />);
+    await user.click(screen.getByText(/상세 가이드 생성/));
+    // g_ghost는 guide.details(변경/영향 함수)에 없음 → 일반 텍스트(버튼 아님), 클릭 no-op
+    await waitFor(() => expect(screen.getByText('g_ghost')).toBeInTheDocument());
+    expect(screen.queryByRole('button', { name: 'g_ghost' })).not.toBeInTheDocument();
+  });
+
+  // STS-IMPACT-031: 검토 TC=0 정직 사유 — STS 미연동이면 bare 0 대신 사유 배지(silent 0 금지)
+  it('검토 TC 사유: STS 미연동이면 0 대신 사유(⚠ STS 미연동)를 표시한다', async () => {
+    const { post } = await import('../api.js');
+    post.mockResolvedValue({ ok: false }); // ai-guide 스킵 + linkedDocs 없어 STS fetch도 스킵
+    const user = userEvent.setup();
+    const analysisResult = {
+      impactData: {
+        trigger: { changed_files: ['Ap.c'] },
+        changed_function_types: { g_changed: 'BODY' },
+        actions: {},
+        impact: { direct: ['g_changed'] },
+        function_meta: {},
+      },
+    };
+    render(<ImpactGuideSection analysisResult={analysisResult} />);
+    await user.click(screen.getByText(/상세 가이드 생성/));
+    // 검토 TC 스탯은 요약 패널(탭 무관)에 상시 노출 — 0 대신 사유 배지
+    await waitFor(() => expect(screen.getByText('검토 TC')).toBeInTheDocument());
+    expect(screen.getByText(/⚠ STS 미연동/)).toBeInTheDocument();
   });
 });
 

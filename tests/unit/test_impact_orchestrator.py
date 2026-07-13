@@ -934,3 +934,97 @@ def test_resolve_prefers_full_path_over_basename_collision():
     )
     assert "comm_foo" in resolved
     assert "app_foo" not in resolved
+
+
+# --- 회귀 TC 로더(cloudium worker 경유) — B1 fix 검증 ---------------------------
+
+def _fake_resolver(read_bytes_impl):
+    class _R:
+        def read_bytes(self, path):
+            return read_bytes_impl(path)
+    return _R()
+
+
+def test_load_suts_fn_tcs_reads_via_worker_not_direct_open(monkeypatch):
+    """cloudium: SUTS를 직접 load_workbook이 아니라 worker read_bytes로 읽고 파싱한다."""
+    from workflow import impact_orchestrator as orch
+    import backend.services.file_resolver as fr
+    import tools.export_suts_vectorcast as ev
+
+    monkeypatch.setattr(fr, "get_resolver", lambda: _fake_resolver(lambda p: b"XLSM-BYTES"))
+    captured = {}
+
+    def fake_build(path, *, project_id="HDPDM01", target_functions=None, source_bytes=None):
+        captured["source_bytes"] = source_bytes
+        return {"units": [
+            {"unit_name": "door_run", "test_cases": [{"base_tc_id": "TC01"}, {"base_tc_id": "TC02"}, {"base_tc_id": "TC01"}]},
+            {"unit_name": "", "test_cases": [{"base_tc_id": "TCX"}]},  # 이름 없는 유닛 스킵
+        ]}
+
+    monkeypatch.setattr(ev, "build_vectorcast_model", fake_build)
+    warns = []
+    out = orch._load_suts_fn_tcs("U:/x/SUTS.xlsm", ["door_run"], warn_sink=warns)
+    assert out == {"door_run": ["TC01", "TC02"]}  # dedup 유지
+    assert captured["source_bytes"] == b"XLSM-BYTES"  # 직접 open 아님 — worker bytes 경유
+    assert warns == []
+
+
+def test_load_suts_fn_tcs_permission_error_warns_and_empty(monkeypatch):
+    """cloudium worker 접근 실패는 silent 0이 아니라 warn_sink에 사유를 남긴다."""
+    from workflow import impact_orchestrator as orch
+    import backend.services.file_resolver as fr
+
+    def _raise(_p):
+        raise PermissionError("cloudium worker down")
+
+    monkeypatch.setattr(fr, "get_resolver", lambda: _fake_resolver(_raise))
+    warns = []
+    out = orch._load_suts_fn_tcs("U:/x/SUTS.xlsm", ["door_run"], warn_sink=warns)
+    assert out == {}
+    assert any("접근 실패" in w for w in warns)
+
+
+def test_load_suts_fn_tcs_no_unit_match_warns(monkeypatch):
+    """유닛명 매칭 0(이름 규칙 불일치)도 사유를 남긴다(silent 0 방지)."""
+    from workflow import impact_orchestrator as orch
+    import backend.services.file_resolver as fr
+    import tools.export_suts_vectorcast as ev
+
+    monkeypatch.setattr(fr, "get_resolver", lambda: _fake_resolver(lambda p: b"BYTES"))
+    monkeypatch.setattr(ev, "build_vectorcast_model", lambda *a, **k: {"units": []})
+    warns = []
+    out = orch._load_suts_fn_tcs("U:/x/SUTS.xlsm", ["door_run"], warn_sink=warns)
+    assert out == {}
+    assert any("매칭" in w for w in warns)
+
+
+def test_load_sits_fn_chains_reads_via_worker(monkeypatch):
+    """SITS 중간 JSON을 worker read_bytes로 읽고 flagged 함수의 체인만 집계한다."""
+    from workflow import impact_orchestrator as orch
+    import backend.services.file_resolver as fr
+    import json as _json
+
+    payload = _json.dumps({"integrations": [
+        {"entry_fn": "door_run", "call_chain": "a->b", "tc_id": "IT01"},
+        {"entry_fn": "other", "call_chain": "x", "tc_id": "IT99"},
+    ]}).encode("utf-8")
+    monkeypatch.setattr(fr, "get_resolver", lambda: _fake_resolver(lambda p: payload))
+    warns = []
+    out = orch._load_sits_fn_chains("U:/x/SITS.xlsm", ["door_run"], warn_sink=warns)
+    assert out == {"door_run": ["IT01: a->b"]}
+    assert warns == []
+
+
+def test_load_sits_fn_chains_missing_intermediate_warns(monkeypatch):
+    """중간파일 부재(FileNotFoundError)는 정당한 0이되 사유를 남긴다."""
+    from workflow import impact_orchestrator as orch
+    import backend.services.file_resolver as fr
+
+    def _raise(p):
+        raise FileNotFoundError(p)
+
+    monkeypatch.setattr(fr, "get_resolver", lambda: _fake_resolver(_raise))
+    warns = []
+    out = orch._load_sits_fn_chains("U:/x/SITS.xlsm", ["door_run"], warn_sink=warns)
+    assert out == {}
+    assert any("중간파일 미생성" in w for w in warns)

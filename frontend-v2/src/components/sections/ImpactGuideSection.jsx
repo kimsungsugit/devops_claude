@@ -604,14 +604,23 @@ export default function ImpactGuideSection({ analysisResult }) {
   const [demoMode, setDemoMode] = useState(false);
   // 파일영향(무정보 fatten 함수) 표시 토글 — 기본 숨김(집계·리스트에서 제외해 실변경 규모를 정직 표시).
   const [showFileImpact, setShowFileImpact] = useState(false);
+  // Track 2: AI 요약 ↔ 함수별 상세 탭. aiGuide 있으면 기본 'ai'(서머리 우선), 없으면 렌더 시 'fn' 강등.
+  const [activeTab, setActiveTab] = useState('ai');
 
   // Impact data from analysis
   const changedFiles = impact?.trigger?.changed_files ?? impact?.changed_files ?? [];
   const changedFunctions = impact?.changed_function_types ?? {};
   const changedFnEntries = Object.entries(changedFunctions);
   const actions = impact?.actions ?? impact?.documents ?? {};
+  // F2(wrong-pick 방지): scmList 폴백 시 [0](= registry 첫 entry, 타 프로젝트 규격일 수 있음)을
+  // 무조건 집지 말고 job의 scm_id(trigger.scm_id)로 매칭한다. 매칭 실패 시에만 [0] 최후 폴백.
+  const _jobScmId = impact?.trigger?.scm_id || '';
+  const _scmListMatch = (_jobScmId && Array.isArray(analysisResult?.scmList))
+    ? analysisResult.scmList.find(s => s?.id === _jobScmId)
+    : null;
   const linkedDocs = impact?._linked_docs
     ?? analysisResult?.matchedScm?.linked_docs
+    ?? _scmListMatch?.linked_docs
     ?? analysisResult?.scmList?.[0]?.linked_docs
     ?? {};
   const impactGroups = impact?.impact ?? {};
@@ -752,6 +761,8 @@ export default function ImpactGuideSection({ analysisResult }) {
       let udsMapping = [];
       let stsTCs = [];
       let sutsTCs = [];
+      // Track 1a: 검토 TC(STS 조인) = 0일 때 사유를 정직 표시하기 위한 진단 플래그.
+      let stsSheetUnrecognized = false;
 
       if (demoMode) {
         // 데모: 실제 추출 API를 데모 함수명으로 호출하면 매핑이 항상 비므로 데모 매핑을 직접 주입해
@@ -774,8 +785,9 @@ export default function ImpactGuideSection({ analysisResult }) {
             const d = await post('/api/jenkins/sts/extract-traceability', { path: linkedDocs.sts, doc_type: 'sts' });
             stsTCs = d?.vcast_rows ?? [];
             // N21: 외부 형식 SUTS/STS — 시트 미인식 시 사용자에게 명확 안내
-            if (!stsTCs.length && Array.isArray(d?.available_sheets) && typeof toast === 'function') {
-              toast('warning', `STS 시트 미인식. 사용 가능한 시트: ${d.available_sheets.join(', ')}`);
+            if (!stsTCs.length && Array.isArray(d?.available_sheets)) {
+              stsSheetUnrecognized = true;
+              if (typeof toast === 'function') toast('warning', `STS 시트 미인식. 사용 가능한 시트: ${d.available_sheets.join(', ')}`);
             }
           } catch (e) { fetchFailures.push({ doc: 'STS', msg: e?.message || '조회 실패' }); }
         }
@@ -823,6 +835,11 @@ export default function ImpactGuideSection({ analysisResult }) {
       // 가이드에서 통째로 누락(ISO 26262 under-report)됐다. 간접 함수는 변경종류 없음(changed=false)으로
       // 구분 표기하되, backend function_meta의 ASIL·커버리지·요구/시험 매핑은 동일하게 조인한다.
       const changedMap = new Map(activeFnEntries.map(([fn, k]) => [fn, k]));
+      // NOTE(F3 검토 반영): 대소문자 무관 dedup은 정상 경로에선 no-op(백엔드가 changed_types를
+      // by_name 기준 소문자로 정규화 → impact-group과 케이스 동일)이고, source_root 미해결 edge
+      // 경로에선 오히려 ASIL이 해석되는 소문자 사본을 버리고 ASIL 공백인 원본 케이스만 남겨
+      // ASIL 가시성을 떨어뜨릴 수 있어(reviewer Finding #1) 도입하지 않는다. 정확한 처리는
+      // function_meta 소문자 폴백 lookup이 필요(별도 라운드).
       const guideFns = [...new Set([
         ...changedMap.keys(),
         ...(activeImpactGroups.direct || []),
@@ -863,12 +880,21 @@ export default function ImpactGuideSection({ analysisResult }) {
       const HOP_RANK = { direct: 0, '1-hop': 1, '2-hop': 2 };
       details.sort((a, b) => (HOP_RANK[a.hop] - HOP_RANK[b.hop]) || a.function.localeCompare(b.function));
 
+      // Track 1a: 검토 TC=0을 bare 0 대신 사유로 정직 표시(silent 0 금지). 연동/시트/매칭 단계 구분.
+      let stsTcReason = null;
+      if (!demoMode && allStsTcs.size === 0) {
+        if (!linkedDocs.sts) stsTcReason = 'STS 미연동';
+        else if (fetchFailures.some(f => f.doc === 'STS')) stsTcReason = 'STS 조회 실패';
+        else if (stsSheetUnrecognized || stsTCs.length === 0) stsTcReason = 'STS 시트 미인식';
+        else stsTcReason = '요구ID 매칭 0';
+      }
       setGuide({
         details,
         fetchFailures,
         summary: {
           impactedReqs: allReqs.size,
           impactedStsTCs: allStsTcs.size,
+          stsTcReason,
         },
       });
 
@@ -1025,6 +1051,60 @@ export default function ImpactGuideSection({ analysisResult }) {
     );
   }
 
+  // Track 2: AI 요약 ↔ 함수별 상세 탭. aiGuide 없으면 함수 탭으로 강등(기존 동작/테스트 회귀 최소화).
+  const effTab = (activeTab === 'ai' && aiGuide) ? 'ai' : (guide ? 'fn' : 'ai');
+  // AI 요약의 함수명 → 기존 상세 모달. guide.details의 정규(canonical) 이름으로 해석해야
+  // 모달 IIFE의 exact-match find가 성립한다(미해석 이름이면 무시 = no-op, 크래시 방지).
+  const resolveFnName = (name) => {
+    if (!guide || !name) return null;
+    const exact = guide.details.find(x => x.function === name);
+    if (exact) return exact.function;
+    const lc = String(name).toLowerCase();
+    const ci = guide.details.find(x => String(x.function).toLowerCase() === lc);
+    return ci ? ci.function : null;
+  };
+  const openFnDetail = (name) => {
+    const canonical = resolveFnName(name);
+    if (canonical) setSelectedFn(canonical);
+  };
+  // AI 요약 함수명 렌더 — guide.details에 있으면 클릭 가능한 버튼, 없으면 일반 텍스트.
+  const renderFnRef = (name, extraStyle) => {
+    const canonical = resolveFnName(name);
+    if (!canonical) return <span style={extraStyle}>{name}</span>;
+    return (
+      <button
+        type="button"
+        onClick={() => openFnDetail(name)}
+        title="함수별 상세(시그니처·본문 diff·문서 영향·AI 설명) 열기"
+        style={{ background: 'none', border: 'none', padding: 0, color: 'var(--accent)', cursor: 'pointer', textDecoration: 'underline', font: 'inherit', ...extraStyle }}
+      >{name}</button>
+    );
+  };
+  // 탭 바 — 렌더되는 패널(한 번에 하나)의 헤더에 삽입 → 통합 패널처럼 보인다.
+  const tabBar = (
+    <div className="panel-header" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+      {aiGuide && (
+        <button type="button" onClick={() => setActiveTab('ai')}
+          style={{ background: 'none', border: 'none', padding: '4px 10px', cursor: 'pointer', font: 'inherit',
+            fontWeight: effTab === 'ai' ? 700 : 400, color: effTab === 'ai' ? 'var(--accent)' : 'var(--text-muted)',
+            borderBottom: effTab === 'ai' ? '2px solid var(--accent)' : '2px solid transparent' }}>AI 요약</button>
+      )}
+      {guide && (
+        <button type="button" onClick={() => setActiveTab('fn')}
+          style={{ background: 'none', border: 'none', padding: '4px 10px', cursor: 'pointer', font: 'inherit',
+            fontWeight: effTab === 'fn' ? 700 : 400, color: effTab === 'fn' ? 'var(--accent)' : 'var(--text-muted)',
+            borderBottom: effTab === 'fn' ? '2px solid var(--accent)' : '2px solid transparent' }}>함수별 상세 ({guide.details.length})</button>
+      )}
+      <span style={{ flex: 1 }} />
+      {effTab === 'ai' && aiGuide && (
+        <span className="text-muted text-sm">{aiGuide.ai_enriched ? 'AI-enriched' : 'deterministic'}</span>
+      )}
+      {effTab === 'fn' && guide && (
+        <span className="text-muted text-sm" title="변경(직접) 함수와 그 호출 관계로 영향받는 간접(1/2-hop) 함수를 함께 표시합니다. '영향' 필터로 hop을 좁힐 수 있습니다.">직접 변경 + 간접 영향(1/2-hop) 포함</span>
+      )}
+    </div>
+  );
+
   return (
     <div>
       {/* 백엔드 경고 표면화 — 과소보고/cloudium degrade/revision 불일치/ASIL escalation 등.
@@ -1033,7 +1113,7 @@ export default function ImpactGuideSection({ analysisResult }) {
         <div className="panel" style={{ marginBottom: 12, borderLeft: '3px solid var(--color-warning)' }}>
           <div className="text-sm" style={{ fontWeight: 700, marginBottom: 6 }}>⚠️ 분석 경고 ({impactWarnings.length})</div>
           {impactWarnings.map((w, i) => {
-            const danger = /under-reported|empty|escalation|미상|과소|MC\/DC|unavailable/i.test(String(w));
+            const danger = /under-reported|empty|escalation|미상|과소|MC\/DC|unavailable|회귀|재실행/i.test(String(w));
             return (
               <div key={i} className="text-sm" style={{ color: danger ? 'var(--color-danger)' : 'var(--text-muted)', padding: '1px 0' }}>
                 • {w}
@@ -1239,9 +1319,13 @@ export default function ImpactGuideSection({ analysisResult }) {
                 <div className="stat-value">{guide.summary.impactedReqs}</div>
                 <div className="stat-label">영향 요구사항</div>
               </div>
-              <div className="stat-card" style={{ borderLeft: '3px solid var(--color-info)' }}>
+              <div className="stat-card" style={{ borderLeft: '3px solid var(--color-info)' }}
+                title={guide.summary.stsTcReason ? `검토 TC 0 사유: ${guide.summary.stsTcReason} — STS 요구사항↔TC 조인이 성립하지 않아 재검토 대상 TC를 셀 수 없습니다.` : undefined}>
                 <div className="stat-value">{guide.summary.impactedStsTCs}</div>
                 <div className="stat-label">검토 TC</div>
+                {guide.summary.impactedStsTCs === 0 && guide.summary.stsTcReason && (
+                  <div className="text-muted" style={{ fontSize: 9, marginTop: 2, color: 'var(--color-warning)' }}>⚠ {guide.summary.stsTcReason}</div>
+                )}
               </div>
             </>
           )}
@@ -1363,13 +1447,10 @@ export default function ImpactGuideSection({ analysisResult }) {
         </div>
       )}
 
-      {/* AI Risk & Cross-Document Impact Guide */}
-      {aiGuide && (
+      {/* AI 요약 + 함수별 상세 — 탭 통합 (Track 2). 한 번에 한 탭만 렌더돼 통합 패널처럼 보인다. */}
+      {effTab === 'ai' && aiGuide && (
         <div className="panel" style={{ marginBottom: 12 }}>
-          <div className="panel-header">
-            <span className="panel-title">AI 영향도 분석 가이드</span>
-            <span className="text-muted text-sm">{aiGuide.ai_enriched ? 'AI-enriched' : 'deterministic'}</span>
-          </div>
+          {tabBar}
 
           {/* Risk Assessment */}
           <div style={{ display: 'flex', gap: 10, marginBottom: 10, alignItems: 'center' }}>
@@ -1399,9 +1480,16 @@ export default function ImpactGuideSection({ analysisResult }) {
             <div style={{ marginBottom: 10, padding: 8, background: 'var(--bg)', borderRadius: 6, borderLeft: '3px solid var(--color-danger)' }}>
               <div style={{ fontSize: 11, fontWeight: 600, marginBottom: 4 }}>안전 관련 함수</div>
               <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
-                {aiGuide.risk.affected_safety_functions.map((sf, i) => (
-                  <span key={i} className="pill pill-danger" style={{ fontSize: 9 }}>{sf}</span>
-                ))}
+                {aiGuide.risk.affected_safety_functions.map((sf, i) => {
+                  const canonical = resolveFnName(sf);
+                  return canonical ? (
+                    <button key={i} type="button" onClick={() => setSelectedFn(canonical)}
+                      className="pill pill-danger" title="함수별 상세 열기"
+                      style={{ fontSize: 9, cursor: 'pointer', border: 'none' }}>{sf}</button>
+                  ) : (
+                    <span key={i} className="pill pill-danger" style={{ fontSize: 9 }}>{sf}</span>
+                  );
+                })}
               </div>
             </div>
           )}
@@ -1416,9 +1504,19 @@ export default function ImpactGuideSection({ analysisResult }) {
                   return (
                     <div key={doc} style={{ padding: 8, border: '1px solid var(--border)', borderRadius: 6, background: 'var(--bg)' }}>
                       <div style={{ fontWeight: 700, fontSize: 11, textTransform: 'uppercase', marginBottom: 4, color: 'var(--accent)' }}>{doc}</div>
-                      {items.slice(0, 3).map((imp, i) => (
-                        <div key={i} style={{ fontSize: 10, color: 'var(--text-muted)', marginBottom: 2 }}>{imp}</div>
-                      ))}
+                      {items.slice(0, 3).map((imp, i) => {
+                        const m = String(imp).match(/^\[([^\]]+)\]/);
+                        const canonical = m ? resolveFnName(m[1]) : null;
+                        return (
+                          <div key={i} style={{ fontSize: 10, color: 'var(--text-muted)', marginBottom: 2 }}>
+                            {canonical ? (<>
+                              <button type="button" onClick={() => setSelectedFn(canonical)} title="함수별 상세 열기"
+                                style={{ background: 'none', border: 'none', padding: 0, color: 'var(--accent)', cursor: 'pointer', textDecoration: 'underline', font: 'inherit' }}>[{m[1]}]</button>
+                              {String(imp).slice(m[0].length)}
+                            </>) : imp}
+                          </div>
+                        );
+                      })}
                       {items.length > 3 && <div style={{ fontSize: 9, color: 'var(--text-muted)' }}>+{items.length - 3}건 더</div>}
                     </div>
                   );
@@ -1456,7 +1554,7 @@ export default function ImpactGuideSection({ analysisResult }) {
                 <tbody>
                   {aiGuide.test_recommendations.slice(0, 8).map((rec, i) => (
                     <tr key={i} style={{ borderBottom: '1px solid var(--border-light, var(--border))' }}>
-                      <td style={{ padding: '3px 6px', fontFamily: 'monospace', fontWeight: 600 }}>{rec.function}</td>
+                      <td style={{ padding: '3px 6px', fontFamily: 'monospace', fontWeight: 600 }}>{renderFnRef(rec.function)}</td>
                       <td style={{ padding: '3px 6px' }}><span className="pill pill-info" style={{ fontSize: 9 }}>{rec.test_type}</span></td>
                       <td style={{ padding: '3px 6px' }}>{rec.description}</td>
                     </tr>
@@ -1468,13 +1566,13 @@ export default function ImpactGuideSection({ analysisResult }) {
         </div>
       )}
 
-      {/* Detailed guide */}
+      {/* 함수별 상세 탭 (Track 2) — AI 요약과 탭 통합. 패널은 effTab==='fn'일 때만,
+          상세 모달은 guide만 있으면(탭 무관) 렌더돼 AI 요약에서 함수 클릭 시에도 뜬다. */}
       {guide && (
+        <>
+        {effTab === 'fn' && (
         <div className="panel">
-          <div className="panel-header">
-            <span className="panel-title">함수별 영향 가이드 ({guide.details.length}개)</span>
-            <span className="text-muted text-sm" title="변경(직접) 함수와 그 호출 관계로 영향받는 간접(1/2-hop) 함수를 함께 표시합니다. '영향' 필터로 hop을 좁힐 수 있습니다.">직접 변경 + 간접 영향(1/2-hop) 포함</span>
-          </div>
+          {tabBar}
 
           {/* 추출 실패 표면화 — 매핑이 실제보다 적게 보일 수 있음을 지속 노출(토스트는 사라짐) */}
           {guide.fetchFailures?.length > 0 && (
@@ -1567,8 +1665,10 @@ export default function ImpactGuideSection({ analysisResult }) {
               ))}
             </tbody>
           </table>
+        </div>
+        )}
 
-          {/* Detail modal for selected function — 화면 중앙 오버레이(스크롤 위치 무관 즉시 노출) */}
+          {/* Detail modal — 공유(탭 무관 오버레이). AI 요약/함수별 상세 어느 탭에서 클릭해도 표시. */}
           {selectedFn && (() => {
             const d = guide.details.find(x => x.function === selectedFn);
             if (!d) return null;
@@ -1777,7 +1877,7 @@ export default function ImpactGuideSection({ analysisResult }) {
               </div>
             );
           })()}
-        </div>
+        </>
       )}
     </div>
   );

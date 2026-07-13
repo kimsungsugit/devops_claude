@@ -9,7 +9,7 @@ import sys
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Set
+from typing import Any, Dict, Iterable, List, Optional, Set
 
 from backend.schemas import ScmLinkedDocs, ScmUpdateRequest
 from backend.services.scm_registry import get_registry_entry, update_entry
@@ -277,53 +277,104 @@ def _enrich_asil_from_uds(by_name: Dict[str, Any], uds_path: str) -> tuple[int, 
 
 
 def _load_suts_fn_tcs(
-    linked_doc: str, flagged_fns: List[str]
+    linked_doc: str, flagged_fns: List[str], warn_sink: Optional[List[str]] = None
 ) -> Dict[str, List[str]]:
     """Return {fn_name: [tc_id, ...]} by parsing the existing SUTS xlsm.
-    Falls back to empty dict on any error (file missing, parse failure, etc.)."""
-    if not linked_doc or not _safe_exists(Path(linked_doc)):
+
+    ⚠ cloudium(U:\\)에서는 backend가 파일을 직접 열 수 없다 — 과거 `load_workbook(linked_doc)`
+    직접 open은 `_safe_exists`가 PermissionError→False로 걸러 **조용히 0**(회귀 TC 미집계)을
+    유발했다. 반드시 worker(`get_resolver().read_bytes`) 경유 bytes로 읽는다.
+    실패는 빈 dict로 폴백하되 **사유를 warn_sink에 남겨 silent 0을 방지**한다."""
+    if not linked_doc:
+        return {}
+
+    def _warn(msg: str) -> None:
+        if warn_sink is not None:
+            warn_sink.append(msg)
+
+    try:
+        from backend.services.file_resolver import get_resolver
+        data = get_resolver().read_bytes(linked_doc)
+    except FileNotFoundError:
+        _warn("회귀 TC: 연동 SUTS 문서를 찾을 수 없어 재실행 TC 집계를 건너뜀")
+        return {}
+    except (PermissionError, OSError):
+        _warn("회귀 TC: SUTS 문서 접근 실패(cloudium worker 미기동/권한) — 재실행 TC 미집계")
+        return {}
+    except Exception:
+        return {}
+    if not data:
         return {}
     try:
         from tools.export_suts_vectorcast import build_vectorcast_model  # type: ignore
-        model = build_vectorcast_model(linked_doc, target_functions=flagged_fns)
-        result: Dict[str, List[str]] = {}
-        for unit in model.get("units") or []:
-            name = str(unit.get("unit_name") or "").strip()
-            # each test_case row carries base_tc_id (the TC block identifier)
-            tcs = [str(tc.get("base_tc_id") or "") for tc in unit.get("test_cases") or [] if tc.get("base_tc_id")]
-            if name and tcs:
-                result[name] = list(dict.fromkeys(tcs))
-        return result
-    except Exception:
+        model = build_vectorcast_model(linked_doc, target_functions=flagged_fns, source_bytes=data)
+    except ValueError:
+        _warn("회귀 TC: SUTS 문서 형식 미인식(TC 시트 없음) — 재실행 TC 미집계")
         return {}
+    except Exception:
+        _warn("회귀 TC: SUTS 파싱 실패 — 재실행 TC 미집계")
+        return {}
+    result: Dict[str, List[str]] = {}
+    for unit in model.get("units") or []:
+        name = str(unit.get("unit_name") or "").strip()
+        # each test_case row carries base_tc_id (the TC block identifier)
+        tcs = [str(tc.get("base_tc_id") or "") for tc in unit.get("test_cases") or [] if tc.get("base_tc_id")]
+        if name and tcs:
+            result[name] = list(dict.fromkeys(tcs))
+    if not result and flagged_fns:
+        _warn("회귀 TC: 영향 함수와 SUTS 유닛명이 매칭되지 않아 재실행 TC 0(이름 규칙 확인)")
+    return result
 
 
 def _load_sits_fn_chains(
-    linked_doc: str, flagged_fns: List[str]
+    linked_doc: str, flagged_fns: List[str], warn_sink: Optional[List[str]] = None
 ) -> Dict[str, List[str]]:
     """Return {entry_fn: [label, ...]} from the SITS vectorcast intermediate JSON.
-    Falls back to empty dict on any error (missing/inaccessible file — cloudium U:\\ 등)."""
+
+    intermediate(`<sits>_vectorcast.json`)는 SITS 빌더가 생성한다 — cloudium이면 worker 경유로
+    읽는다(직접 FS 금지). cloudium은 읽기전용이라 intermediate 자체가 없을 수 있고, 그때의 0은
+    정당하다(사유는 warn_sink)."""
     if not linked_doc:
         return {}
+
+    def _warn(msg: str) -> None:
+        if warn_sink is not None:
+            warn_sink.append(msg)
+
     try:
         stem = Path(linked_doc).stem
-        intermediate = Path(linked_doc).with_name(stem + "_vectorcast.json")
-        if not _safe_exists(intermediate):
-            return {}
-        data = _load_json(intermediate)
-        fn_set = {fn.strip().lower() for fn in flagged_fns}
-        result: Dict[str, List[str]] = {}
-        for itc in data.get("integrations") or []:
-            entry = str(itc.get("entry_fn") or "").strip()
-            if entry.lower() in fn_set:
-                chain = str(itc.get("call_chain") or "").strip()
-                tc_id = str(itc.get("tc_id") or "")
-                label = f"{tc_id}: {chain}" if tc_id else chain
-                if label:
-                    result.setdefault(entry, []).append(label)
-        return result
+        intermediate = str(Path(linked_doc).with_name(stem + "_vectorcast.json"))
     except Exception:
         return {}
+    try:
+        from backend.services.file_resolver import get_resolver
+        raw = get_resolver().read_bytes(intermediate)
+    except FileNotFoundError:
+        _warn("회귀 체인: SITS VectorCAST 중간파일 미생성(SITS 빌더 미실행) — 통합 체인 미집계")
+        return {}
+    except (PermissionError, OSError):
+        _warn("회귀 체인: SITS 중간파일 접근 실패(cloudium worker) — 통합 체인 미집계")
+        return {}
+    except Exception:
+        return {}
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw.decode("utf-8", "replace"))
+    except Exception:
+        _warn("회귀 체인: SITS 중간파일 JSON 파싱 실패 — 통합 체인 미집계")
+        return {}
+    fn_set = {fn.strip().lower() for fn in flagged_fns}
+    result: Dict[str, List[str]] = {}
+    for itc in (data.get("integrations") if isinstance(data, dict) else None) or []:
+        entry = str(itc.get("entry_fn") or "").strip()
+        if entry.lower() in fn_set:
+            chain = str(itc.get("call_chain") or "").strip()
+            tc_id = str(itc.get("tc_id") or "")
+            label = f"{tc_id}: {chain}" if tc_id else chain
+            if label:
+                result.setdefault(entry, []).append(label)
+    return result
 
 
 def _write_review_artifact(
@@ -1378,9 +1429,9 @@ def run_impact_update(
         regression_test_set: Dict[str, Any] = {"suts": {}, "sits": {}}
         try:
             if _lk and getattr(_lk, "suts", ""):
-                regression_test_set["suts"] = _load_suts_fn_tcs(_lk.suts, _flagged)
+                regression_test_set["suts"] = _load_suts_fn_tcs(_lk.suts, _flagged, warn_sink=warnings)
             if _lk and getattr(_lk, "sits", ""):
-                regression_test_set["sits"] = _load_sits_fn_chains(_lk.sits, _flagged)
+                regression_test_set["sits"] = _load_sits_fn_chains(_lk.sits, _flagged, warn_sink=warnings)
         except Exception:  # noqa: BLE001 — 회귀집합은 best-effort, 없어도 분석은 진행
             pass
         regression_test_set["summary"] = {

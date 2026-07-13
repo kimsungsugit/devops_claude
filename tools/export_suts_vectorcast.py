@@ -202,9 +202,16 @@ def build_vectorcast_model(
     *,
     project_id: str = "HDPDM01",
     target_functions: Optional[Iterable[str]] = None,
+    source_bytes: Optional[bytes] = None,
 ) -> Dict[str, Any]:
     target_set = {str(x or "").strip().lower() for x in (target_functions or []) if str(x or "").strip()}
-    workbook = load_workbook(suts_path, keep_vba=True, data_only=False)
+    # cloudium(U:\)에서는 backend가 파일을 직접 열 수 없어 workbook을 worker가 읽은 bytes로 받는다.
+    # source_bytes가 주어지면 그 bytes로, 아니면 로컬 경로에서 연다(로컬 모드 하위호환).
+    if source_bytes is not None:
+        import io as _io
+        workbook = load_workbook(_io.BytesIO(source_bytes), keep_vba=True, data_only=False)
+    else:
+        workbook = load_workbook(suts_path, keep_vba=True, data_only=False)
     if _TC_SHEET not in workbook.sheetnames:
         raise ValueError(f"missing worksheet: {_TC_SHEET}")
     ws = workbook[_TC_SHEET]
@@ -226,7 +233,7 @@ def build_vectorcast_model(
         "schema_version": "1.0",
         "project_id": project_id,
         "source": {
-            "suts_path": str(Path(suts_path).resolve()),
+            "suts_path": str(suts_path) if source_bytes is not None else str(Path(suts_path).resolve()),
             "generated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
         },
         "units": units,
