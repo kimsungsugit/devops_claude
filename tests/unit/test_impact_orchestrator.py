@@ -1128,3 +1128,54 @@ def test_multi_file_same_name_function_not_dropped(tmp_path, monkeypatch):
     assert result["function_meta"]["eeprom_setbyte"]["asil"] == "D"
     assert result["asil"]["escalation"] is True
     assert result["asil"]["mcdc_required"] is True
+
+
+def test_bfs_cap_scales_with_seed_count_so_2hop_computes(tmp_path, monkeypatch):
+    """seeds가 승격 임계(50)를 넘어도 BFS 탐색은 seeds에 맞춰 넉넉히 → 2-hop이 실제로 계산된다.
+
+    회귀: max_impacted_functions=50이 (1)탐색상한 (2)승격임계를 겸해서, cross-module 기본화로 seeds가
+    수백이 되면 seeds만으로 이미 초과 → depth1 직후 중단 → indirect_2hop이 **항상 미계산**이었다.
+    """
+    from backend.schemas import ScmRegisterRequest
+    from backend.services import scm_registry
+    from workflow import impact_audit, impact_orchestrator
+
+    monkeypatch.setattr(scm_registry, "REGISTRY_PATH", tmp_path / "config" / "scm_registry.json")
+    monkeypatch.setattr(impact_audit, "AUDIT_DIR", tmp_path / "audit")
+    monkeypatch.setattr(impact_audit, "_RUN_FILE_LOCKS", {})
+    monkeypatch.setattr(impact_audit, "_RUN_INTRA_LOCKS", {})
+    monkeypatch.setattr(impact_audit, "_RUN_LOCK_OWNERS", {})
+    scm_registry.register_entry(ScmRegisterRequest(
+        id="big", name="BIG", scm_type="git",
+        scm_url="https://example/repo.git", source_root=str(tmp_path / "src")))
+    monkeypatch.setattr(impact_orchestrator, "_is_cloudium_mode", lambda: False)
+    monkeypatch.setattr(impact_orchestrator, "_collect_signature_changes", lambda *a, **k: {})
+
+    # 60개 변경 함수(seeds) — 승격 임계 50 초과. 각 seed가 고유 1-hop, 그 이웃이 고유 2-hop.
+    N = 60
+    changed = {f"seed{i}": "BODY" for i in range(N)}
+    bn = {}
+    call_map = {}
+    for i in range(N):
+        bn[f"seed{i}"] = {"name": f"seed{i}", "file": f"Sources/APP/f{i}.c", "module_name": "app"}
+        bn[f"n{i}"] = {"name": f"n{i}", "file": f"Sources/APP/n{i}.c", "module_name": "app"}
+        bn[f"m{i}"] = {"name": f"m{i}", "file": f"Sources/APP/m{i}.c", "module_name": "app"}
+        call_map[f"seed{i}"] = [f"n{i}"]
+        call_map[f"n{i}"] = [f"m{i}"]
+    monkeypatch.setattr(impact_orchestrator, "classify_changed_functions", lambda *a, **k: dict(changed))
+    monkeypatch.setattr(impact_orchestrator, "_load_source_sections",
+                        lambda *a, **k: {"call_map": call_map, "function_details_by_name": bn})
+
+    # 변경 파일 = 모든 seed 파일(각 seed가 자기 파일). classify가 seed 전부를 지목하도록.
+    result = impact_orchestrator.run_impact_update(ChangeTrigger(
+        trigger_type="local", scm_id="big", source_root=str(tmp_path / "src"),
+        scm_type="git", base_ref="HEAD~1", changed_files=[f"f{i}.c" for i in range(N)],
+        dry_run=True, targets=["uds"], metadata={}))
+    assert result["ok"] is True
+    imp = result["impact"]
+    assert len(imp["direct"]) == N               # seed 60개
+    assert len(imp["indirect_1hop"]) == N        # 1-hop 완전(cap이 이걸 자르지 않음)
+    assert len(imp["indirect_2hop"]) == N        # 2-hop이 실제로 계산됨(과거엔 0)
+    assert result["impact_traversal"]["truncated"] is False
+    # 승격은 여전히 정상(seeds 60 > 임계 50)
+    assert any("exceeded limit" in w for w in result["warnings"])

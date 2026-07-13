@@ -632,11 +632,17 @@ def _get_source_sections_cached(source_root: str, max_files: int = 1200, preproc
         raise HTTPException(status_code=400, detail="source_root not found or not directory")
     key = f"{source_root}\x00pp={int(bool(preprocess))}"  # 캐시 키: 전체 경로 + preprocess(교차오염 방지)
     now = time()
+    # 소스 시그니처(경로,mtime,size,스키마버전)를 먼저 계산 — 인메모리 TTL 캐시도 시그니처로 검증한다.
+    # 과거엔 TTL 캐시가 mtime을 안 봐서, 소스를 편집하고 30분 내 재실행하면 **편집 전 함수 집합으로
+    # 분석**했다(디스크 캐시는 mtime을 보는데 인메모리가 stale을 먼저 반환). cloudium은 _sig=None →
+    # 시그니처 검증 skip(로컬 stat 무의미), 기존 TTL 동작 유지.
+    _sig = _source_root_signature(source_root, max_files)
     with _source_sections_cache_lock:
         item = _source_sections_cache.get(key)
         # Lightweight TTL cache to avoid repeated heavy parsing.
         _cache_ttl = getattr(config, "UDS_SOURCE_SECTIONS_CACHE_TTL", 1800)
-        if item and (now - float(item.get("cached_at") or 0.0) <= _cache_ttl):
+        _sig_ok = (not _sig) or (item or {}).get("signature") == _sig
+        if item and _sig_ok and (now - float(item.get("cached_at") or 0.0) <= _cache_ttl):
             payload = item.get("payload")
             if isinstance(payload, dict):
                 return deepcopy(payload)
@@ -644,7 +650,6 @@ def _get_source_sections_cached(source_root: str, max_files: int = 1200, preproc
     _log = _logging.getLogger("uvicorn.error")
     # 디스크 영속 캐시(로컬 소스만): 재기동/크래시 후 첫 요청의 풀 재파싱(수십분)을 회피한다.
     # (경로,mtime,size) 시그니처가 일치하면 파싱 없이 로드. cloudium은 시그니처=None → skip.
-    _sig = _source_root_signature(source_root, max_files)
     _disk_path = _source_sections_disk_cache_path(source_root, preprocess)
     if _sig:
         try:
@@ -655,7 +660,7 @@ def _get_source_sections_cached(source_root: str, max_files: int = 1200, preproc
                     if isinstance(_payload, dict):
                         _log.info("[source_sections] Disk cache hit for %s", key)
                         with _source_sections_cache_lock:
-                            _source_sections_cache[key] = {"payload": _payload, "cached_at": now}
+                            _source_sections_cache[key] = {"payload": _payload, "cached_at": now, "signature": _sig}
                         return deepcopy(_payload)
         except Exception as _dc_exc:  # noqa: BLE001 — 디스크캐시 실패는 파싱으로 폴백
             _log.debug("source_sections disk cache read failed: %s", _dc_exc)
@@ -665,7 +670,7 @@ def _get_source_sections_cached(source_root: str, max_files: int = 1200, preproc
     elapsed = time() - t0
     _log.info("[source_sections] Parsing finished in %.1fs for %s", elapsed, key)
     with _source_sections_cache_lock:
-        _source_sections_cache[key] = {"payload": sections, "cached_at": now}
+        _source_sections_cache[key] = {"payload": sections, "cached_at": now, "signature": _sig}
     if _sig:
         try:
             _disk_path.parent.mkdir(parents=True, exist_ok=True)

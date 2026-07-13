@@ -11,8 +11,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
-from backend.schemas import ScmLinkedDocs, ScmUpdateRequest
-from backend.services.scm_registry import get_registry_entry, update_entry
+from backend.schemas import ScmLinkedDocs
+from backend.services.scm_registry import get_registry_entry
 from workflow.change_trigger import ChangeTrigger
 from workflow.delta_update import classify_changed_functions
 from workflow.impact_audit import acquire_run_lock, release_run_lock, write_impact_audit
@@ -69,7 +69,14 @@ class ImpactOptions:
     # eeprom_setbyte 등). 과대보고는 안전측이고 impacted>50이면 어차피 검토 승격되므로 워크플로
     # 변화도 없다. 노이즈를 줄이려면 호출측에서 명시적으로 True를 지정할 것.
     same_module_only: bool = False
-    max_impacted_functions: int = 50
+    # ⚠ 이 값은 두 역할을 겸했다 — (1) BFS 탐색 상한, (2) 검토 승격 임계. cross-module 기본화로
+    # seeds가 수백(kjpds02 627)이 되면서 (1)로는 너무 작아 **seeds만으로 이미 초과 → depth1 직후
+    # 중단 → indirect_2hop이 항상 미계산**이었다. 승격 임계(review_promote_threshold)는 그대로 두고,
+    # 탐색 상한은 seeds 수에 맞춰 동적으로 넉넉히(_bfs_cap) 잡아 2-hop이 실제로 계산되게 한다.
+    max_impacted_functions: int = 50            # 검토 승격 임계(변경 없음)
+    review_promote_threshold: int = 50          # 명시적 별칭(승격 판정용)
+    # BFS 탐색 절대 상한(폭주 방지). seeds가 이보다 많으면 아래 _bfs_cap이 seeds 기준으로 키운다.
+    bfs_hard_cap: int = 5000
 
 
 def _ts() -> str:
@@ -131,12 +138,10 @@ def _load_linked_doc_summary(linked_doc: str) -> Dict[str, Any]:
 
 
 def _update_linked_doc(entry_id: str, field: str, path_text: str) -> None:
-    entry = get_registry_entry(entry_id)
-    if entry is None:
-        return
-    merged = entry.linked_docs.model_dump(mode="json")
-    merged[field] = path_text
-    update_entry(entry_id, ScmUpdateRequest(linked_docs=ScmLinkedDocs(**merged)))
+    # ⚠ 원자적 단일 필드 패치 — 과거엔 락 밖에서 entry를 읽어 전체 linked_docs 블롭을 만든 뒤
+    #   통째로 덮어써, 그 사이 다른 필드를 바꾼 동시 변경(admin 편집 등)을 조용히 되돌렸다.
+    from backend.services.scm_registry import patch_linked_doc_field
+    patch_linked_doc_field(entry_id, field, path_text)
 
 
 def _safe_exists(path: Path) -> bool:
@@ -1352,12 +1357,17 @@ def run_impact_update(
             neighbors = {}
             neighbors_cross = None
 
+        # BFS 탐색 상한 = seeds가 있어도 최소 2-hop을 계산할 여지를 두되 폭주는 막는다.
+        # seeds가 승격 임계보다 많으면(cross-module 대량 변경) seeds*4 근방까지 허용(hard cap 이내).
+        # → indirect_1hop/2hop이 seeds 규모 때문에 조기 절단되지 않는다(2hop 미계산 상시화 해소).
+        _seed_n = len(changed_types)
+        _bfs_cap = min(options.bfs_hard_cap, max(options.max_impacted_functions, _seed_n * 4))
         _bfs_stats: Dict[str, Any] = {}
         impact_groups = _hop_limited_impact(
             set(changed_types),
             neighbors,
             max_hop=options.max_hop,
-            max_impacted_functions=options.max_impacted_functions,
+            max_impacted_functions=_bfs_cap,
             stats=_bfs_stats,
         )
         sits_impact_groups: Dict[str, List[str]] | None = None
@@ -1366,7 +1376,7 @@ def run_impact_update(
                 set(changed_types),
                 neighbors_cross,
                 max_hop=options.max_hop,
-                max_impacted_functions=options.max_impacted_functions,
+                max_impacted_functions=_bfs_cap,
             )
         impacted_total = len(_impacted_union(impact_groups))
         warnings: List[str] = []
@@ -1385,10 +1395,11 @@ def run_impact_update(
         # AUTO를 검토(FLAG)로 강등할 '실질적' 사유만 모은다 — 정보성 경고(Jenkins revision/SITS
         # cross 안내 등)는 AUTO를 봉쇄하지 않는다(과보수 회귀 방지). 한도 초과·ASIL 에스컬레이션만.
         promote_to_review = False
-        if impacted_total > options.max_impacted_functions:
+        _promote_thr = options.review_promote_threshold or options.max_impacted_functions
+        if impacted_total > _promote_thr:
             promote_to_review = True
             warnings.append(
-                f"impacted function count exceeded limit ({impacted_total}>{options.max_impacted_functions}); promote to review"
+                f"impacted function count exceeded limit ({impacted_total}>{_promote_thr}); promote to review"
             )
         if sits_impact_groups is not None:
             sits_total = len(_impacted_union(sits_impact_groups))
@@ -1396,10 +1407,10 @@ def run_impact_update(
                 warnings.append(
                     f"SITS cross-module impact ({sits_total}) exceeds same-module impact ({impacted_total}); SITS uses cross-module set"
                 )
-            if sits_total > options.max_impacted_functions:
+            if sits_total > _promote_thr:
                 promote_to_review = True
                 warnings.append(
-                    f"SITS cross-module impacted ({sits_total}) exceeded limit ({options.max_impacted_functions}); promote to review"
+                    f"SITS cross-module impacted ({sits_total}) exceeded limit ({_promote_thr}); promote to review"
                 )
         # Jenkins changeSet로 파일집합을 받은 경우의 변경 '유형' 분류 출처를 투명하게 알린다.
         # editType이 있으면 빌드 changeSet 기준, 없으면 로컬 working-copy diff 기준.

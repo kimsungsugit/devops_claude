@@ -170,6 +170,31 @@ def replace_linked_docs(entry_id: str, linked_docs: ScmLinkedDocs) -> ScmRegistr
     return update_entry(entry_id, ScmUpdateRequest(linked_docs=linked_docs))
 
 
+def patch_linked_doc_field(entry_id: str, field: str, path_text: str) -> ScmRegistryEntry | None:
+    """linked_docs의 **단일 필드**만 원자적으로 갱신(read-modify-write를 락 안에서).
+
+    ⚠ 과거 impact 오케스트레이터의 `_update_linked_doc`은 락 **밖에서** entry를 읽어 linked_docs
+    전체 블롭을 만든 뒤 update_entry로 통째 덮어썼다 — 그 사이 다른 스레드/admin이 같은 entry의
+    **다른 필드**(예: uds)를 바꾸면, stale 블롭이 그 변경을 조용히 되돌렸다. 여기서는 락을 잡은 채
+    현재 값을 읽어 지정 필드만 바꾸므로 다른 필드의 동시 변경이 보존된다.
+    """
+    with _REGISTRY_LOCK:
+        store = load_registry_store()
+        for idx, entry in enumerate(store.registries):
+            if entry.id != entry_id:
+                continue
+            merged = entry.linked_docs.model_dump(mode="json")
+            merged[str(field)] = path_text
+            payload = entry.model_dump(mode="json")
+            payload["linked_docs"] = ScmLinkedDocs.model_validate(merged).model_dump(mode="json")
+            payload["updated_at"] = _now_iso()
+            updated = ScmRegistryEntry.model_validate(payload)
+            store.registries[idx] = updated
+            _save_store_unlocked(store)
+            return updated
+    return None
+
+
 DEFAULT_SCM_PASSWORD_ENV = "DEVOPS_SCM_PASSWORD"
 
 # Environment variable name validation:

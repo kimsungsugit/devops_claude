@@ -70,18 +70,32 @@ def _load_payload_with_status(path_text: str) -> tuple[Dict[str, Any], str]:
     raw = str(path_text or "").strip()
     if not raw:
         return {}, "absent"
-    payload_path = Path(raw).with_suffix(".payload.json")
+    payload_path = str(Path(raw).with_suffix(".payload.json"))
+    # cloudium(U:\ SMB)은 backend가 직접 못 읽는다 — worker resolver 경유로 읽어 변경이력 delta가
+    # cloudium에서도 산출되게 한다. FileNotFoundError=absent(진짜 부재), 접근/파싱 실패=unreadable
+    # (존재하나 못 읽음 — '생성'으로 과대보고하지 않도록 구분, M6 정직성 유지).
     try:
-        exists = payload_path.exists()
-    except Exception:
-        # exists() 자체가 PermissionError/OSError(cloudium U:\\ SMB) → 존재하나 읽기 불가로 간주.
-        return {}, "unreadable"
-    if not exists:
+        from backend.services.file_resolver import get_resolver
+        data = get_resolver().read_bytes(payload_path)
+    except FileNotFoundError:
         return {}, "absent"
-    try:
-        raw_json = json.loads(payload_path.read_text(encoding="utf-8"))
+    except (PermissionError, OSError):
+        return {}, "unreadable"
     except Exception:
-        return {}, "unreadable"  # 존재하나 읽기/파싱 실패
+        # resolver 미가용(테스트/standalone) → 로컬 직접 읽기로 폴백.
+        try:
+            _p = Path(payload_path)
+            if not _p.exists():
+                return {}, "absent"
+            data = _p.read_bytes()
+        except Exception:
+            return {}, "unreadable"
+    if not data:
+        return {}, "unreadable"
+    try:
+        raw_json = json.loads(data.decode("utf-8", "replace"))
+    except Exception:
+        return {}, "unreadable"  # 존재하나 파싱 실패
     return (raw_json if isinstance(raw_json, dict) else {}), "loaded"
 
 
