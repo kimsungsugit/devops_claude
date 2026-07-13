@@ -676,6 +676,44 @@ export default function ImpactGuideSection({ analysisResult }) {
   const visibleChangeSummary = { NEW: 0, DELETE: 0, SIGNATURE: 0, BODY: 0, HEADER: 0, VARIABLE: 0 };
   for (const [, k] of visibleFnEntries) { if (k in visibleChangeSummary) visibleChangeSummary[k] += 1; }
 
+  // ── 파일영향 분리를 요약 전 패널로 전파 — impact.direct·actions[doc].functions·coverage_gap.functions는
+  // 모두 함수명(소문자) 리스트. changed_function_types 키는 대소문자 혼용이라 소문자 kind 맵으로 조회한다. ──
+  const changedKindLower = {};
+  for (const [fn, k] of activeFnEntries) changedKindLower[String(fn).toLowerCase()] = k;
+  const nameIsNoEvidence = (name) => {
+    const lf = String(name).toLowerCase();
+    const kind = changedKindLower[lf];
+    if (!kind) return false;  // 변경 함수 목록에 없음(간접/기타) → 파일영향 아님(유지)
+    return functionHasNoEvidence(name, kind, changeDetails, functionDiffs);
+  };
+  // hideFileImpact면 무정보(파일영향) 함수명을 제외한 리스트. 아니면 원본.
+  const visibleNameList = (list) => (hideFileImpact ? (list || []).filter((n) => !nameIsNoEvidence(n)) : (list || []));
+  // 직접 영향 = 변경 함수와 동일 집합(소문자) — 실변경만 세고 파일영향은 분리.
+  const directAll = activeImpactGroups.direct || [];
+  const directVisibleCount = visibleNameList(directAll).length;
+  const directHiddenCount = directAll.length - directVisibleCount;
+  // 커버리지 — 파일영향(무변경) 함수는 이 변경이 유발한 갭이 아니므로 기본 제외(오귀속 방지).
+  // 전체 표시(토글 ON·분리 없음·제외분 0)면 백엔드 summary를 그대로 사용(재계산 divergence 방지),
+  // 파일영향을 제외할 때만 함수 리스트에서 재집계한다.
+  const covView = (() => {
+    if (!coverageGap?.available || !coverageGap.summary) return null;
+    const s = coverageGap.summary;
+    const base = { evaluated: s.evaluated ?? 0, below: s.below_target ?? 0, unmeasured: s.unmeasured ?? 0, regressed: s.regressed ?? 0, hidden: 0, hadBaseline: s.had_baseline };
+    const fns = coverageGap.functions || [];
+    if (!hideFileImpact || !fns.length) return base;
+    const vis = fns.filter((f) => !nameIsNoEvidence(f.function));
+    const hidden = fns.length - vis.length;
+    if (!hidden) return base;
+    return {
+      evaluated: vis.length,
+      below: vis.filter((f) => f.meets_target === false && !f.unmeasured_target).length,
+      unmeasured: vis.filter((f) => f.unmeasured_target).length,
+      regressed: vis.filter((f) => typeof f.delta === 'number' && f.delta < 0).length,
+      hidden,
+      hadBaseline: s.had_baseline,
+    };
+  })();
+
   const filteredGuide = useMemo(() => {
     if (!guide) return [];
     let items = guide.details;
@@ -1027,37 +1065,43 @@ export default function ImpactGuideSection({ analysisResult }) {
         </div>
       )}
       {/* MC/DC delta — VectorCAST 커버리지 ASIL 타깃 대비 gap + 이력 회귀 요약. */}
-      {coverageGap?.available && (
+      {covView && (
         <div className="panel" style={{ marginBottom: 12,
-          borderLeft: `3px solid ${(coverageGap.summary?.below_target || coverageGap.summary?.regressed) ? 'var(--color-danger)' : 'var(--color-success)'}` }}>
+          borderLeft: `3px solid ${(covView.below || covView.regressed) ? 'var(--color-danger)' : 'var(--color-success)'}` }}>
           <div className="text-sm" style={{ fontWeight: 700, marginBottom: 6 }}>
             🎯 커버리지 (ASIL 타깃 대비)
           </div>
           <div className="stats-row">
             <div className="stat-card">
               <div className="text-muted text-sm">평가된 영향 함수</div>
-              <div style={{ fontSize: 20, fontWeight: 700 }}>{coverageGap.summary?.evaluated ?? 0}</div>
+              <div style={{ fontSize: 20, fontWeight: 700 }}>{covView.evaluated}</div>
             </div>
             <div className="stat-card">
               <div className="text-muted text-sm">목표 미달</div>
-              <div style={{ fontSize: 20, fontWeight: 700, color: coverageGap.summary?.below_target ? 'var(--color-danger)' : undefined }}>
-                {coverageGap.summary?.below_target ?? 0}
+              <div style={{ fontSize: 20, fontWeight: 700, color: covView.below ? 'var(--color-danger)' : undefined }}>
+                {covView.below}
               </div>
             </div>
             <div className="stat-card" title="매칭됐으나 해당 ASIL 타깃 메트릭(예: MC/DC) 데이터가 리포트에 없는 함수 — 증거 부재(시험 실패 아님)">
               <div className="text-muted text-sm">미측정</div>
-              <div style={{ fontSize: 20, fontWeight: 700, color: coverageGap.summary?.unmeasured ? 'var(--color-warning)' : undefined }}>
-                {coverageGap.summary?.unmeasured ?? 0}
+              <div style={{ fontSize: 20, fontWeight: 700, color: covView.unmeasured ? 'var(--color-warning)' : undefined }}>
+                {covView.unmeasured}
               </div>
             </div>
             <div className="stat-card">
               <div className="text-muted text-sm">직전 대비 회귀</div>
-              <div style={{ fontSize: 20, fontWeight: 700, color: coverageGap.summary?.regressed ? 'var(--color-danger)' : undefined }}>
-                {coverageGap.summary?.regressed ?? 0}
+              <div style={{ fontSize: 20, fontWeight: 700, color: covView.regressed ? 'var(--color-danger)' : undefined }}>
+                {covView.regressed}
               </div>
             </div>
           </div>
-          {!coverageGap.summary?.had_baseline && (
+          {covView.hidden > 0 && (
+            <div className="text-muted text-sm" style={{ marginTop: 4 }}
+              title="파일영향(무변경) 함수는 이 변경이 유발한 커버리지 갭이 아니므로 기본 제외 — 위 토글로 포함하면 전체가 반영됩니다.">
+              ⓘ 실변경 함수 기준 — 파일영향(무변경) {covView.hidden}개 제외(이 변경이 유발한 갭이 아님)
+            </div>
+          )}
+          {!covView.hadBaseline && (
             <div className="text-muted text-sm" style={{ marginTop: 4 }}>직전 스냅샷 없음 — 이번 실행을 기준으로 저장(다음 분석부터 Δ 표시).</div>
           )}
         </div>
@@ -1129,6 +1173,12 @@ export default function ImpactGuideSection({ analysisResult }) {
             <button className="btn-primary btn-sm" onClick={buildGuide} disabled={loading}>
               {loading ? '분석 중...' : '상세 가이드 생성'}
             </button>
+            {hasEvidenceSplit && (
+              <button className="btn-sm" onClick={() => setShowFileImpact(v => !v)}
+                title="파일영향 = 직접 변경 증거(본문 diff·선언 변경) 없이 파일 단위 보수 분류로 포함된 함수(실제 수정 아님). 모든 집계(변경 함수·직접 영향·문서별·커버리지)에서 제외/포함을 함께 전환합니다.">
+                {showFileImpact ? `파일영향 ${noEvidenceCount}개 숨기기` : `파일영향 ${noEvidenceCount}개 보기`}
+              </button>
+            )}
             <button className="btn-sm" onClick={openInTraceability}
               title="영향받은 함수 집합으로 추적성 매트릭스(SRS↔SDS↔UDS↔STS↔SUTS↔SITS)를 필터해서 봅니다">
               추적성 매트릭스에서 보기
@@ -1168,8 +1218,16 @@ export default function ImpactGuideSection({ analysisResult }) {
             </div>
           </div>
           <div className="stat-card">
-            <div className="stat-value">{(activeImpactGroups.direct || []).length}</div>
-            <div className="stat-label">직접 영향</div>
+            <div className="stat-value">{directVisibleCount}</div>
+            <div className="stat-label">
+              직접 영향
+              {hideFileImpact && directHiddenCount > 0 && (
+                <span className="text-muted" style={{ fontSize: 9, marginLeft: 3 }}
+                  title="직접 영향 = 실제 변경된 함수. 파일영향(무변경, 파일 단위 보수 포함)은 제외 — 토글로 포함.">
+                  +{directHiddenCount} 파일영향
+                </span>
+              )}
+            </div>
           </div>
           <div className="stat-card">
             <div className="stat-value">{(activeImpactGroups.indirect_1hop || []).length + (activeImpactGroups.indirect_2hop || []).length}</div>
@@ -1195,29 +1253,36 @@ export default function ImpactGuideSection({ analysisResult }) {
           const docStats = {};
           if (guide) {
             // 가이드 표(직접 변경 + 간접 영향)와 동일 스코프로 집계 — 간접 함수가 특정 문서에
-            // 매핑되면 그 문서도 '검토 필요'로 표시한다. 요약 카드의 impactedReqs/impactedStsTCs가
-            // 이미 전체(간접 포함) 스코프라, 칩 count도 동일 스코프여야 "영향 없음 + N TC" 모순이 없다.
-            for (const d of guide.details) {
+            // 매핑되면 그 문서도 '검토 필요'로 표시한다. 파일영향(무정보) 함수는 hideFileImpact면 제외.
+            const gd = hideFileImpact
+              ? guide.details.filter(d => !(d.changed && functionHasNoEvidence(d.function, d.changeType, changeDetails, functionDiffs)))
+              : guide.details;
+            for (const d of gd) {
               if (d.requirements.length > 0) { docStats.uds = (docStats.uds || 0) + 1; }
               if (d.stsTestCases.length > 0) { docStats.sts = (docStats.sts || 0) + 1; }
               if (d.sutsTestCases.length > 0) { docStats.suts = (docStats.suts || 0) + 1; }
             }
             // SDS/SITS: 영향 함수(직접+간접)가 하나라도 있으면 검토 대상.
-            if (guide.details.length > 0) {
-              docStats.sds = guide.details.length;
-              docStats.sits = guide.details.filter(d => d.stsTestCases.length > 0).length || 0;
+            if (gd.length > 0) {
+              docStats.sds = gd.length;
+              docStats.sits = gd.filter(d => d.stsTestCases.length > 0).length || 0;
             }
           }
+          // actions fallback(가이드 미생성 시) — actions[doc].functions를 파일영향 제외로 재집계(function_count는 전체).
+          const docActionCount = (a) => (a?.functions ? visibleNameList(a.functions).length : (a?.function_count || 0));
           const docEntries = [
-            { key: 'uds', label: 'UDS', count: docStats.uds || actions.uds?.function_count || 0, status: actions.uds?.status },
-            { key: 'sts', label: 'STS', count: docStats.sts || actions.sts?.function_count || 0, status: actions.sts?.status, extra: guide ? `${guide.summary.impactedStsTCs} TC` : '' },
-            { key: 'suts', label: 'SUTS', count: docStats.suts || actions.suts?.function_count || 0, status: actions.suts?.status },
-            { key: 'sits', label: 'SITS', count: docStats.sits || actions.sits?.function_count || 0, status: actions.sits?.status },
-            { key: 'sds', label: 'SDS', count: docStats.sds || actions.sds?.function_count || 0, status: actions.sds?.status },
+            { key: 'uds', label: 'UDS', count: docStats.uds || docActionCount(actions.uds), status: actions.uds?.status },
+            { key: 'sts', label: 'STS', count: docStats.sts || docActionCount(actions.sts), status: actions.sts?.status, extra: guide ? `${guide.summary.impactedStsTCs} TC` : '' },
+            { key: 'suts', label: 'SUTS', count: docStats.suts || docActionCount(actions.suts), status: actions.suts?.status },
+            { key: 'sits', label: 'SITS', count: docStats.sits || docActionCount(actions.sits), status: actions.sits?.status },
+            { key: 'sds', label: 'SDS', count: docStats.sds || docActionCount(actions.sds), status: actions.sds?.status },
           ];
           return (
             <div style={{ marginTop: 10 }}>
-              <div className="text-sm" style={{ fontWeight: 600, marginBottom: 6 }}>문서별 영향</div>
+              <div className="text-sm" style={{ fontWeight: 600, marginBottom: 6 }}>
+                문서별 영향
+                {hideFileImpact && noEvidenceCount > 0 && <span className="text-muted" style={{ fontSize: 10, fontWeight: 400, marginLeft: 4 }}>· 실변경 함수 기준(파일영향 제외)</span>}
+              </div>
               <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                 {docEntries.map(d => {
                   const hasImpact = d.count > 0;

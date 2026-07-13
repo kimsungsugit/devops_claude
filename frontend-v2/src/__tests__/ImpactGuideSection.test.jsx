@@ -572,18 +572,18 @@ describe('ImpactGuideSection', () => {
       },
     };
     render(<ImpactGuideSection analysisResult={analysisResult} />);
-    // 기본: 파일영향 2개 숨김 — 토글 버튼·숨김 캡션·스탯 부기 노출, 무정보 함수 미표시, 증거 함수만 표시
-    expect(screen.getByRole('button', { name: /파일영향 2개 보기/ })).toBeInTheDocument();
+    // 기본: 파일영향 2개 숨김 — 토글 버튼(상단+변경상세)·숨김 캡션·스탯 부기(변경함수+직접영향) 노출
+    expect(screen.getAllByRole('button', { name: /파일영향 2개 보기/ }).length).toBeGreaterThanOrEqual(1);
     expect(screen.getByText(/파일영향 2개 숨김/)).toBeInTheDocument();
-    expect(screen.getByText('+2 파일영향')).toBeInTheDocument();   // 스탯 카드 부기(집계 분리)
+    expect(screen.getAllByText('+2 파일영향').length).toBeGreaterThanOrEqual(1);   // 스탯 부기(집계 분리)
     expect(screen.queryByText('g_getter1')).not.toBeInTheDocument();
     expect(screen.queryByText('g_getter2')).not.toBeInTheDocument();
     expect(screen.getByText('g_real')).toBeInTheDocument();
     // 토글 → 무정보 함수 표시, 버튼 라벨 전환
-    await user.click(screen.getByRole('button', { name: /파일영향 2개 보기/ }));
+    await user.click(screen.getAllByRole('button', { name: /파일영향 2개 보기/ })[0]);
     expect(screen.getByText('g_getter1')).toBeInTheDocument();
     expect(screen.getByText('g_getter2')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /파일영향 2개 숨기기/ })).toBeInTheDocument();
+    expect(screen.getAllByRole('button', { name: /파일영향 2개 숨기기/ }).length).toBeGreaterThanOrEqual(1);
   });
 
   // STS-IMPACT-025: 함수별 영향 가이드 리스트도 파일영향 기본 숨김 + 체크박스로 포함
@@ -632,6 +632,38 @@ describe('ImpactGuideSection', () => {
     expect(screen.queryByText(/파일영향.*숨김/)).not.toBeInTheDocument();
     expect(screen.getByText('foo')).toBeInTheDocument();
     expect(screen.getByText('bar')).toBeInTheDocument();
+  });
+
+  // STS-IMPACT-027: 요약 전 패널 전파 — 커버리지·직접 영향도 파일영향을 기본 제외(오귀속 방지), 토글로 포함
+  it('요약 전파: 커버리지·직접 영향도 파일영향을 기본 제외하고 토글로 포함한다', async () => {
+    const user = userEvent.setup();
+    const analysisResult = {
+      impactData: {
+        trigger: { changed_files: ['a.c'] },
+        changed_function_types: { g_real: 'BODY', g_getter1: 'BODY', g_getter2: 'BODY' },
+        impact: { direct: ['g_real', 'g_getter1', 'g_getter2'] },
+        function_meta: {},
+        function_diffs: { g_real: '@@ -1,2 +1,2 @@ void g_real(void)\n-    x = 1;\n+    x = 2;' },
+        classification: { granularity: 'line', line_classified_file_count: 1 },
+        coverage_gap: {
+          available: true,
+          summary: { evaluated: 3, below_target: 2, unmeasured: 0, regressed: 0, had_baseline: true },
+          functions: [
+            // g_real=실변경(증거), g_getter1/2=파일영향(무변경 fatten). g_getter1 미달은 이 변경 무관 오귀속
+            { function: 'g_real', meets_target: false, unmeasured_target: false, delta: 0 },
+            { function: 'g_getter1', meets_target: false, unmeasured_target: false, delta: 0 },
+            { function: 'g_getter2', meets_target: true, unmeasured_target: false, delta: 0 },
+          ],
+        },
+      },
+    };
+    render(<ImpactGuideSection analysisResult={analysisResult} />);
+    // 커버리지: 파일영향 2개(무변경) 제외 근거 note + 직접 영향/변경 함수 스탯 부기
+    expect(screen.getByText(/파일영향\(무변경\) 2개 제외/)).toBeInTheDocument();
+    expect(screen.getAllByText('+2 파일영향').length).toBeGreaterThanOrEqual(1);
+    // 토글 ON → 커버리지 제외 note 사라짐(전체 포함 반영)
+    await user.click(screen.getAllByRole('button', { name: /파일영향 2개 보기/ })[0]);
+    expect(screen.queryByText(/파일영향\(무변경\) 2개 제외/)).not.toBeInTheDocument();
   });
 });
 
