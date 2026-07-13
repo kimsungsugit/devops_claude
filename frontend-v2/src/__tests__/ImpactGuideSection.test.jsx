@@ -873,6 +873,47 @@ describe('ImpactGuideSection', () => {
     // 대소문자만 다른 unit이 정규화 조인돼 함수별 상세 SUTS 컬럼에 1 TC (정규화 없으면 '-')
     expect(screen.getByText('1 TC')).toBeInTheDocument();
   });
+
+  // STS-IMPACT-035: 증거 판정은 백엔드 function_meta.evidence가 1차 소스 —
+  // function_diff가 없어도 evidence='line'이면 '파일영향'으로 숨기지 않는다(under-report 방지).
+  it('증거 판정: function_diff가 없어도 evidence=line이면 실변경으로 집계한다', () => {
+    const analysisResult = {
+      impactData: {
+        trigger: { changed_files: ['a.c'] },
+        // g_real: diff 없음(400KB 절단 시나리오)이지만 백엔드가 line 증거 확인
+        // g_fat : 파일단위 보수 포함(fatten)
+        changed_function_types: { g_real: 'BODY', g_fat: 'BODY' },
+        impact: { direct: ['g_real', 'g_fat'] },
+        function_meta: {
+          g_real: { asil: 'D', evidence: 'line' },
+          g_fat: { asil: 'QM', evidence: 'file_fatten' },
+        },
+        function_diffs: {},   // diff 원문 없음 — 과거 로직이면 둘 다 '증거 없음'으로 오판
+        change_details: {},
+        classification: { granularity: 'mixed', evidenced_function_count: 1, fattened_function_count: 1 },
+      },
+    };
+    render(<ImpactGuideSection analysisResult={analysisResult} />);
+    // 변경 함수 = 1(g_real만) + '+1 파일영향' 부기. 과거 추론이면 0 + '+2 파일영향'이 됐을 것.
+    expect(screen.getAllByText('+1 파일영향').length).toBeGreaterThanOrEqual(1);
+    // 파일영향 토글 노출(증거 혼재) — evidence 기반 분리가 동작
+    expect(screen.getAllByRole('button', { name: /파일영향 1개 보기/ }).length).toBeGreaterThanOrEqual(1);
+  });
+
+  // STS-IMPACT-036: 콜그래프 탐색 절단(2-hop 미계산)을 '영향 없음'으로 오독하지 않게 표시
+  it('탐색 절단: impact_traversal.truncated면 간접 영향에 미계산 경고를 표시한다', () => {
+    const analysisResult = {
+      impactData: {
+        trigger: { changed_files: ['a.c'] },
+        changed_function_types: { g_a: 'BODY' },
+        impact: { direct: ['g_a'], indirect_1hop: ['g_b'], indirect_2hop: [] },
+        function_meta: {},
+        impact_traversal: { truncated: true, truncated_at_hop: 1, max_impacted_functions: 50, max_hop: 2 },
+      },
+    };
+    render(<ImpactGuideSection analysisResult={analysisResult} />);
+    expect(screen.getByText(/1-hop까지만 계산/)).toBeInTheDocument();
+  });
 });
 
 describe('extractDiffElements (순수 함수)', () => {

@@ -494,24 +494,33 @@ function renderChangeDetailCell(kind, detail) {
 // 무정보(파일영향) 판정 — 단일 출처. BODY/VARIABLE인데 function_diff(본문 hunk)·change_details(선언
 // 원문) 둘 다 없음 = 직접 변경 증거 없이 파일 단위 보수 분류(fatten)로 딸려온 함수. 전처리(#ifdef)만
 // 바뀐 파일의 안 바뀐 getter류가 여기 해당. "변경 함수" 집계를 부풀리므로 옵션(showFileImpact)으로만 노출.
-function functionHasNoEvidence(fn, kind, changeDetails, functionDiffs) {
+function functionHasNoEvidence(fn, kind, changeDetails, functionDiffs, functionMeta) {
   const k = String(kind || '').toUpperCase();
   if (k !== 'BODY' && k !== 'VARIABLE') return false;
   const lf = String(fn).toLowerCase();
+  // 1차: 백엔드 function_meta.evidence(단일 출처, "line" | "file_fatten").
+  // function_diffs 부재로 '증거 없음'을 추론하면, diff 400KB 상한 절단이나 diff 미제공 경로에서
+  // **실제 변경된 함수**(ASIL D 포함 가능)가 '파일영향'으로 오분류돼 기본 집계에서 숨는다
+  // (ISO 26262 under-report). 그래서 백엔드가 판정한 사실을 우선한다.
+  const meta = functionMeta && (functionMeta[fn] ?? functionMeta[lf]);
+  const ev = meta && meta.evidence;
+  if (ev === 'file_fatten') return true;
+  if (ev === 'line') return false;
+  // 2차(구 페이로드 호환): evidence 필드가 없는 이전 job → 기존 추론으로 폴백.
   const cd = changeDetails && changeDetails[lf];
   return !(functionDiffs && functionDiffs[lf]) && !(cd && (cd.before || cd.after));
 }
 
 // 함수별 영향 가이드 리스트의 '변경' 셀 — 유형 뱃지(유형별 색상+툴팁 설명)와, SIGNATURE면
 // 파라미터 변화 요약(＋int b 등)까지 표시해 모달을 열지 않고도 무슨 변경인지 파악하게 한다.
-function renderChangeSummaryCell(d, changeDetails, functionDiffs = {}) {
+function renderChangeSummaryCell(d, changeDetails, functionDiffs = {}, functionMeta = {}) {
   if (!d.changed) {
     return <span className="pill pill-neutral" style={{ fontSize: 9 }} title="직접 변경 아님 — 변경 함수의 호출 관계로 영향받는 간접 함수">영향</span>;
   }
   const kind = (d.changeType || '').toUpperCase();
   const cd = changeDetails[String(d.function).toLowerCase()];
   // 무정보(파일영향): 직접 변경 증거 없이 파일 단위 보수 포함(fatten) — 단일 출처 functionHasNoEvidence.
-  const cellNoEvidence = functionHasNoEvidence(d.function, kind, changeDetails, functionDiffs);
+  const cellNoEvidence = functionHasNoEvidence(d.function, kind, changeDetails, functionDiffs, functionMeta);
   const pdiff = (kind === 'SIGNATURE' && cd && (cd.before || cd.after)) ? diffSignatureParamsCached(cd.before, cd.after) : null;
   const sig = summarizeSignatureChange(pdiff);
   return (
@@ -627,8 +636,11 @@ export default function ImpactGuideSection({ analysisResult }) {
   // 분류 정밀도(백엔드 classification). "file"=파일단위 보수 분류 → "변경 함수" 수가
   // "변경 파일 내 전체 함수"의 과대추정(실제 수정 함수는 더 적음). "line"=라인 diff 정밀.
   const classification = impact?.classification ?? null;
+  // 'file' = 전부 파일단위 보수(증거 혼재 없음) → 토글 대신 '(보수 추정)' 캡션.
+  // 'mixed' = 일부만 라인증거 → isConservativeCount는 false로 두고 파일영향 토글(evidence split)로
+  //           정직하게 분리한다(빈 표 방지 + 실변경/보수 전환). 'line' = 전부 라인증거(정밀).
   const isConservativeCount = classification?.granularity === 'file';
-  // "line"=라인 diff 정밀 분류 적용됨(SIGNATURE/NEW/DELETE 함수단위 판별). 축소 파일/제외 함수 수.
+  // "line"=전 함수 라인 diff 정밀 분류(SIGNATURE/NEW/DELETE 함수단위 판별) — 'mixed'는 미포함(정직).
   const isLineClassified = classification?.granularity === 'line';
   // 백엔드 ISO 증거: 함수별 메타(ASIL 등) + 경고(과소보고/cloudium/ASIL escalation 등) + ASIL 요약.
   const functionMeta = impact?.function_meta ?? {};
@@ -650,6 +662,9 @@ export default function ImpactGuideSection({ analysisResult }) {
   }, [guide]);
   // 회귀시험 선정: 영향 함수 → 재실행 대상 SUTS TC / SITS call-chain(ISO 26262 증거).
   const regressionSet = impact?.regression_test_set ?? null;
+  // 콜그래프 탐색 절단 — 변경 함수가 상한을 넘으면 2-hop이 '미계산'인데 빈 배열로 나와
+  // "2-hop 영향 없음"으로 오독될 수 있다(백엔드 impact_traversal이 사실을 알려줌).
+  const traversal = impact?.impact_traversal ?? null;
 
   // Demo data for testing — simulates real .c file changes
   const demoFunctions = {
@@ -683,7 +698,7 @@ export default function ImpactGuideSection({ analysisResult }) {
   // ── 파일영향(무정보) 분리 — 직접 변경 증거 없이 fatten으로 딸려온 함수를 집계/리스트에서 옵션 처리 ──
   // "변경 함수" 수를 부풀리므로 기본 숨김. 라인 diff 분류(isLineClassified)이면서 증거 有/無가 혼재할
   // 때만 토글 제공(hasEvidenceSplit). 전부 보수 분류거나 전부 증거면 분리가 무의미 → 토글 없이 전체 표시.
-  const evidencedFnEntries = activeFnEntries.filter(([fn, k]) => !functionHasNoEvidence(fn, k, changeDetails, functionDiffs));
+  const evidencedFnEntries = activeFnEntries.filter(([fn, k]) => !functionHasNoEvidence(fn, k, changeDetails, functionDiffs, functionMeta));
   const noEvidenceCount = activeFnEntries.length - evidencedFnEntries.length;
   // 데모(합성 데이터, change_details/function_diffs 없음)는 전부 무정보로 잡히므로 분리 제외 — 데모가 텅 비지 않게.
   const hasEvidenceSplit = !demoMode && !isConservativeCount && noEvidenceCount > 0 && evidencedFnEntries.length > 0;
@@ -700,7 +715,7 @@ export default function ImpactGuideSection({ analysisResult }) {
     const lf = String(name).toLowerCase();
     const kind = changedKindLower[lf];
     if (!kind) return false;  // 변경 함수 목록에 없음(간접/기타) → 파일영향 아님(유지)
-    return functionHasNoEvidence(name, kind, changeDetails, functionDiffs);
+    return functionHasNoEvidence(name, kind, changeDetails, functionDiffs, functionMeta);
   };
   // hideFileImpact면 무정보(파일영향) 함수명을 제외한 리스트. 아니면 원본.
   const visibleNameList = (list) => (hideFileImpact ? (list || []).filter((n) => !nameIsNoEvidence(n)) : (list || []));
@@ -714,7 +729,16 @@ export default function ImpactGuideSection({ analysisResult }) {
   const covView = (() => {
     if (!coverageGap?.available || !coverageGap.summary) return null;
     const s = coverageGap.summary;
-    const base = { evaluated: s.evaluated ?? 0, below: s.below_target ?? 0, unmeasured: s.unmeasured ?? 0, regressed: s.regressed ?? 0, hidden: 0, hadBaseline: s.had_baseline };
+    // 미매칭/미검증 지표(백엔드 coverage_gap.py가 "증거 부재를 '충족'으로 위장 금지"로 산출).
+    // unmatched 함수는 functions[] rows에 없으므로(매칭 실패 → continue) 파일영향 필터로 재집계
+    // 불가 → summary 값을 그대로 노출하고 "전체 영향 함수 기준"임을 명시한다(무표시 = 위장).
+    const evid = {
+      unmatched: s.unmatched ?? 0,
+      unmatchedSafety: s.unmatched_safety ?? 0,
+      unmeasuredSafety: s.unmeasured_safety ?? 0,
+      unknownAsil: s.unknown_asil ?? 0,
+    };
+    const base = { evaluated: s.evaluated ?? 0, below: s.below_target ?? 0, unmeasured: s.unmeasured ?? 0, regressed: s.regressed ?? 0, hidden: 0, hadBaseline: s.had_baseline, ...evid };
     const fns = coverageGap.functions || [];
     if (!hideFileImpact || !fns.length) return base;
     const vis = fns.filter((f) => !nameIsNoEvidence(f.function));
@@ -727,6 +751,7 @@ export default function ImpactGuideSection({ analysisResult }) {
       regressed: vis.filter((f) => typeof f.delta === 'number' && f.delta < 0).length,
       hidden,
       hadBaseline: s.had_baseline,
+      ...evid,
     };
   })();
 
@@ -734,7 +759,7 @@ export default function ImpactGuideSection({ analysisResult }) {
     if (!guide) return [];
     let items = guide.details;
     // 파일영향(무정보) 숨김 — 직접 변경이나 증거 없는(fatten) 함수 제외. 간접(changed=false)은 유지.
-    if (hideFileImpact) items = items.filter(d => !(d.changed && functionHasNoEvidence(d.function, d.changeType, changeDetails, functionDiffs)));
+    if (hideFileImpact) items = items.filter(d => !(d.changed && functionHasNoEvidence(d.function, d.changeType, changeDetails, functionDiffs, functionMeta)));
     if (hopFilter !== 'all') items = items.filter(d => d.hop === hopFilter);
     if (docFilter === 'has_reqs') items = items.filter(d => d.requirements.length > 0);
     else if (docFilter === 'has_sts') items = items.filter(d => d.stsTestCases.length > 0);
@@ -1002,7 +1027,7 @@ export default function ImpactGuideSection({ analysisResult }) {
     if (demoMode) L.push('- ⚠ 데모 시나리오 (시뮬레이션 데이터)');
     L.push(`- 변경 파일: ${activeChangedFiles.length}`);
     L.push(`- 변경 함수: ${activeFnEntries.length} (신규 ${changeSummary.NEW} / 삭제 ${changeSummary.DELETE} / 시그니처 ${changeSummary.SIGNATURE} / 본문 ${changeSummary.BODY} / 헤더 ${changeSummary.HEADER} / 변수 ${changeSummary.VARIABLE})`);
-    const noEvExport = activeFnEntries.filter(([fn, kind]) => functionHasNoEvidence(fn, kind, changeDetails, functionDiffs)).length;
+    const noEvExport = activeFnEntries.filter(([fn, kind]) => functionHasNoEvidence(fn, kind, changeDetails, functionDiffs, functionMeta)).length;
     if (noEvExport > 0) L.push(`  - 이 중 파일영향(직접 변경 증거 없음, 파일 단위 보수 포함): ${noEvExport}개 → 실 수정 함수 약 ${activeFnEntries.length - noEvExport}개`);
     L.push(`- 직접 영향: ${(activeImpactGroups.direct || []).length} / 간접: ${(activeImpactGroups.indirect_1hop || []).length + (activeImpactGroups.indirect_2hop || []).length}`);
     if (asilInfo && (asilInfo.max_changed || asilInfo.escalation || asilInfo.unknown_changed_count)) {
@@ -1017,6 +1042,10 @@ export default function ImpactGuideSection({ analysisResult }) {
       const s = coverageGap.summary;
       L.push('', '## 커버리지 (ASIL 타깃 대비)');
       L.push(`- 평가 ${s.evaluated ?? 0} / 목표 미달 ${s.below_target ?? 0} / 미측정 ${s.unmeasured ?? 0} / 직전 대비 회귀 ${s.regressed ?? 0}`);
+      // 미매칭(측정 자체 없음)은 '충족'이 아니라 증거 부재 — 리포트에서도 감추지 않는다.
+      if (s.unmatched) L.push(`- ⚠ 미매칭(커버리지 데이터 없음): ${s.unmatched}개${s.unmatched_safety ? ` (ASIL C/D ${s.unmatched_safety}개 미검증)` : ''}`);
+      if (s.unmeasured_safety) L.push(`- ⚠ ASIL C/D 미측정: ${s.unmeasured_safety}개 (타깃 메트릭 데이터 없음)`);
+      if (s.unknown_asil) L.push(`- ⚠ ASIL 미상: ${s.unknown_asil}개 (최저 기준 위장 평가 금지 — 수동 확인)`);
     }
     if (regressionSet?.summary) {
       L.push('', '## 회귀시험 선정 (재실행 대상)');
@@ -1024,7 +1053,7 @@ export default function ImpactGuideSection({ analysisResult }) {
     }
     L.push('', '## 변경 함수');
     for (const [fn, kind] of activeFnEntries) {
-      const noEvMark = functionHasNoEvidence(fn, kind, changeDetails, functionDiffs) ? ' (파일영향 — 직접 변경 증거 없음)' : '';
+      const noEvMark = functionHasNoEvidence(fn, kind, changeDetails, functionDiffs, functionMeta) ? ' (파일영향 — 직접 변경 증거 없음)' : '';
       L.push(`- \`${fn}\` : ${CHANGE_TYPE_KO[kind] || kind}${noEvMark}`);
     }
     if (guide?.details?.length) {
@@ -1209,7 +1238,25 @@ export default function ImpactGuideSection({ analysisResult }) {
                 {covView.regressed}
               </div>
             </div>
+            {/* 미매칭 = VectorCAST 커버리지 데이터에 함수가 아예 없음(증거 부재). 백엔드는 이를
+                'unmatched'로 산출하며 "미검증을 안전 통과로 위장 금지"를 명시 — UI가 감추면 그 위장이
+                발생하므로 반드시 노출한다. ASIL C/D 미검증은 danger. */}
+            <div className="stat-card" title="영향 함수인데 VectorCAST 커버리지 데이터에 매칭되지 않음(측정 자체 없음) — '충족'이 아니라 증거 부재입니다. 전체 영향 함수 기준(파일영향 필터 미적용).">
+              <div className="text-muted text-sm">미매칭(측정 없음)</div>
+              <div style={{ fontSize: 20, fontWeight: 700, color: covView.unmatchedSafety ? 'var(--color-danger)' : (covView.unmatched ? 'var(--color-warning)' : undefined) }}>
+                {covView.unmatched}
+              </div>
+              {covView.unmatchedSafety > 0 && (
+                <div style={{ fontSize: 9, color: 'var(--color-danger)', marginTop: 2 }}>⚠ ASIL C/D {covView.unmatchedSafety}개 미검증</div>
+              )}
+            </div>
           </div>
+          {(covView.unmeasuredSafety > 0 || covView.unknownAsil > 0) && (
+            <div className="text-sm" style={{ marginTop: 4, color: 'var(--color-warning)' }}>
+              {covView.unmeasuredSafety > 0 && <span>⚠ ASIL C/D 미측정 {covView.unmeasuredSafety}개(타깃 메트릭 데이터 없음) </span>}
+              {covView.unknownAsil > 0 && <span>⚠ ASIL 미상 {covView.unknownAsil}개 — 최저 기준(구문)으로 위장 평가하지 않음(수동 확인 필요)</span>}
+            </div>
+          )}
           {covView.hidden > 0 && (
             <div className="text-muted text-sm" style={{ marginTop: 4 }}
               title="파일영향(무변경) 함수는 이 변경이 유발한 커버리지 갭이 아니므로 기본 제외 — 위 토글로 포함하면 전체가 반영됩니다.">
@@ -1344,9 +1391,19 @@ export default function ImpactGuideSection({ analysisResult }) {
               )}
             </div>
           </div>
-          <div className="stat-card">
+          <div className="stat-card"
+            title={traversal?.truncated
+              ? `콜그래프 탐색이 상한(${traversal.max_impacted_functions})에서 중단돼 ${traversal.truncated_at_hop}-hop까지만 계산했습니다. 그 이상 hop은 '영향 없음'이 아니라 '미계산'입니다.`
+              : undefined}>
             <div className="stat-value">{(activeImpactGroups.indirect_1hop || []).length + (activeImpactGroups.indirect_2hop || []).length}</div>
-            <div className="stat-label">간접 영향</div>
+            <div className="stat-label">
+              간접 영향
+              {!demoMode && traversal?.truncated && (
+                <span style={{ fontSize: 9, marginLeft: 3, color: 'var(--color-warning)' }}>
+                  ⚠ {traversal.truncated_at_hop}-hop까지만 계산
+                </span>
+              )}
+            </div>
           </div>
           {/* reviewer Finding#2: 함수명 기준으로 실제 조인되는 회귀 지표를 헤드라인으로 표면화.
               STS 요구기반 조인(아래 'STS 요구 TC')은 문서 요구 유형이 다르면 구조적으로 0이 될 수
@@ -1394,7 +1451,7 @@ export default function ImpactGuideSection({ analysisResult }) {
             // 가이드 표(직접 변경 + 간접 영향)와 동일 스코프로 집계 — 간접 함수가 특정 문서에
             // 매핑되면 그 문서도 '검토 필요'로 표시한다. 파일영향(무정보) 함수는 hideFileImpact면 제외.
             const gd = hideFileImpact
-              ? guide.details.filter(d => !(d.changed && functionHasNoEvidence(d.function, d.changeType, changeDetails, functionDiffs)))
+              ? guide.details.filter(d => !(d.changed && functionHasNoEvidence(d.function, d.changeType, changeDetails, functionDiffs, functionMeta)))
               : guide.details;
             for (const d of gd) {
               if (d.requirements.length > 0) { docStats.uds = (docStats.uds || 0) + 1; }
@@ -1490,7 +1547,7 @@ export default function ImpactGuideSection({ analysisResult }) {
                       <td style={{ padding: '6px 8px', fontFamily: 'var(--font-mono, monospace)', wordBreak: 'break-all' }}>{functionMeta[fn]?.display_name || fn}</td>
                       <td style={{ padding: '6px 8px' }}>
                         <StatusBadge tone={CHANGE_TYPE_TONE[kind] || 'neutral'}>{CHANGE_TYPE_KO[kind] || kind}</StatusBadge>
-                        {showFileImpact && functionHasNoEvidence(fn, kind, changeDetails, functionDiffs) && (
+                        {showFileImpact && functionHasNoEvidence(fn, kind, changeDetails, functionDiffs, functionMeta) && (
                           <span className="pill pill-neutral" style={{ fontSize: 8, marginLeft: 3 }} title="직접 변경 증거 없음(function_diff·change_details 모두 없음) — 파일 단위 보수 포함(fatten)">파일영향</span>
                         )}
                       </td>
@@ -1687,7 +1744,7 @@ export default function ImpactGuideSection({ analysisResult }) {
               {filteredGuide.map((d, i) => (
                 <tr key={i} style={{ background: d.hop === 'direct' ? 'var(--bg)' : undefined }}>
                   <td style={{ fontFamily: 'monospace', fontSize: 10, fontWeight: 600 }}>{d.function}</td>
-                  <td>{renderChangeSummaryCell(d, changeDetails, functionDiffs)}</td>
+                  <td>{renderChangeSummaryCell(d, changeDetails, functionDiffs, functionMeta)}</td>
                   <td>
                     {d.asil && /^[A-D]$/.test(d.asil)
                       ? <span className={`pill ${/[CD]/.test(d.asil) ? 'pill-danger' : 'pill-warning'}`} style={{ fontSize: 9 }}>{d.asil}</span>

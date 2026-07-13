@@ -243,7 +243,17 @@ def test_run_impact_update_precise_narrowing_line_classified(tmp_path, monkeypat
     # modvar.c=모듈스코프 var → fattened 유지(둘 다)
     assert "bar_init" in ct
     assert "bar_other" in ct
-    assert result["classification"]["granularity"] == "line"
+    # granularity 정직화: 라인증거(foo_run)와 파일단위 보수(bar_*)가 혼재 → "mixed".
+    # (과거엔 일괄 "line"이라 단정해 프론트의 '보수 추정' 경고가 꺼졌다 — 과대보고 은폐.)
+    assert result["classification"]["granularity"] == "mixed"
+    # foo_run(pure.c 본문변경) + bar_init(modvar.c 라인변경 hunk 귀속) = 라인증거 2.
+    # bar_other는 라인변경이 없는데 modvar.c가 narrow 불가(top-level var 변경)라 보수 포함된 passenger.
+    assert result["classification"]["evidenced_function_count"] == 2
+    assert result["classification"]["fattened_function_count"] == 1
+    # 함수별 증거 출처(단일 출처) — 프론트는 function_diffs 유무 추론 대신 이 값을 쓴다.
+    assert result["function_meta"]["foo_run"]["evidence"] == "line"
+    assert result["function_meta"]["bar_init"]["evidence"] == "line"
+    assert result["function_meta"]["bar_other"]["evidence"] == "file_fatten"
     # 투명성 필드: pure.c 1개 함수단위 축소, foo_extra 1개 제외(감사/프론트 노출)
     assert result["classification"]["line_classified_file_count"] == 1
     assert result["classification"]["narrow_removed_count"] == 1

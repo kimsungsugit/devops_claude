@@ -238,7 +238,17 @@ def _uds_name_asil_map(uds_path: str) -> Dict[str, str]:
                         result.setdefault(_nl, _a)
             except Exception:
                 pass
-    _UDS_NAME_ASIL_CACHE[uds_path] = result
+    # ⚠ 빈 맵은 캐시하지 않는다. 두 파서 모두 except로 삼켜지므로(파서 회귀·손상 docx·일시적
+    # MemoryError) result가 {}가 될 수 있는데, 이를 캐시하면 **프로세스 수명 내내** 모든 함수가
+    # ASIL 미상 → escalation/MC/DC 게이트 무력화(안전 위장). 다음 실행에서 재시도하게 둔다.
+    # (진짜 부재/권한거부는 위 read_bytes 예외 분기에서 이미 처리됨.)
+    if result:
+        _UDS_NAME_ASIL_CACHE[uds_path] = result
+    elif docx_bytes:
+        logger.warning(
+            "impact ASIL: UDS를 읽었으나 함수-ASIL 매핑 0건(파서 실패 가능) — 캐시하지 않고 다음 실행 재시도: %s",
+            uds_path,
+        )
     return result
 
 
@@ -827,6 +837,7 @@ def _hop_limited_impact(
     *,
     max_hop: int,
     max_impacted_functions: int,
+    stats: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, List[str]]:
     direct = sorted(seeds)
     if not seeds:
@@ -837,6 +848,7 @@ def _hop_limited_impact(
     indirect_1: Set[str] = set()
     indirect_2: Set[str] = set()
 
+    truncated_at: int = 0  # >0이면 그 depth까지만 탐색하고 중단(이후 hop은 '미계산')
     for depth in range(1, max_hop + 1):
         next_frontier: Set[str] = set()
         for func in frontier:
@@ -850,11 +862,21 @@ def _hop_limited_impact(
                 elif depth == 2:
                     indirect_2.add(neighbor)
         if len(visited) > max_impacted_functions:
+            # ⚠ 상한 초과 → 다음 depth 미탐색. 변경 함수가 많으면(예: seeds 638 > 상한 50) depth1
+            # 직후 항상 여기서 끊겨 indirect_2hop이 **영구히 빈 배열**이 된다. 빈 배열은 "2-hop 영향
+            # 없음"이 아니라 "미계산"이므로, 그 사실을 stats로 표면화해야 안전 검토자가 오독하지 않는다.
+            if depth < max_hop:
+                truncated_at = depth
             break
         frontier = next_frontier
         if not frontier:
             break
 
+    if stats is not None:
+        stats["truncated"] = truncated_at > 0
+        stats["truncated_at_hop"] = truncated_at
+        stats["visited"] = len(visited)
+        stats["max_impacted_functions"] = max_impacted_functions
     return {
         "direct": sorted(direct),
         "indirect_1hop": sorted(indirect_1),
@@ -1105,6 +1127,9 @@ def run_impact_update(
         _line_classified_files: Set[str] = set()
         _narrow_removed_n = 0  # A-4에서 정밀 narrowing으로 제거한 함수 수(감사/경고용)
         _narrow_removed_list: List[str] = []  # 제거 함수 전체 목록(durable audit 추적성 — ISO 26262)
+        # 함수별 증거 출처: "line"=실제 라인변경 확인 / "file_fatten"=파일단위 보수 포함(라인변경 미확인).
+        # 프론트가 function_diffs 부재로 '증거 없음'을 추론하던 것을 백엔드 사실로 대체(단일 출처).
+        _fn_evidence: Dict[str, str] = {}
         _base_r = str(_meta.get("baseline_revision") or "").strip()
         _build_r = str(_meta.get("build_revision") or "").strip()
         _scm_url = str(getattr(entry, "scm_url", "") or "").strip()
@@ -1174,9 +1199,23 @@ def run_impact_update(
             _asil_uds_enriched, _asil_still_missing = _enrich_asil_from_uds(
                 by_name, getattr(getattr(entry, "linked_docs", None), "uds", "") or "",
             )
+            # resolve(fatten) 전에 '실제로 지목된' 함수를 보존 — 로컬 diff 경로의 라인증거 판별용.
+            # (cloudium/editType 경로의 키는 함수명이 아니라 파일 기반이라 line 증거로 쓰지 않는다.)
+            _pre_resolve_lc = {str(k).strip().lower() for k in changed_types}
+            _pre_resolve_is_line = _classification_granularity == "line"
             changed_types = _resolve_changed_types_to_functions(
                 changed_types, trigger.changed_files, by_name, edit_types=edit_types
             )
+            # known_funcs 검증을 붙여 정밀분류를 재수행 — narrowable 게이트가 매크로/타입 오귀속
+            # (`FUNC(...)`, `u8 (*pf)(`)을 실제 함수로 오인해 파일 전체 함수를 제거(under-report)하는
+            # 것을 막는다. by_name은 여기서야 사용 가능하므로 이 시점에 재평가한다(regex 1패스).
+            if _precise_types is not None and _precise_diff_text:
+                try:
+                    _precise_types, _line_classified_files = classify_changed_functions_from_diff_text(
+                        _precise_diff_text, set(by_name)
+                    )
+                except Exception as _rexc:  # noqa: BLE001 — 재평가 실패 시 기존(보수) 결과 유지
+                    logger.debug("precise re-classification with known_funcs skipped: %s", _rexc)
             # A-4: post-resolve narrowing — resolve가 변경파일의 전체 함수로 재확장(fatten)한 것을,
             # 라인변경이 검증된 순수 편집 .c(line_classified_files)에서만 실제 라인변경 함수로 좁힌다.
             # 그 외(헤더/매크로·인클루드·모듈스코프 변경 .c)는 fatten 유지(안전측 — 라인변경 없는
@@ -1187,7 +1226,12 @@ def run_impact_update(
 
                 def _in_line_classified(_fn: str) -> bool:
                     _f = str((by_name.get(_fn) or {}).get("file") or "").replace("\\", "/").lower()
-                    return bool(_f) and any(_f.endswith(_p) for _p in _line_classified_files)
+                    if not _f:
+                        return False
+                    # ⚠ 경계 없는 endswith는 다른 파일을 오매칭한다: "…/myapp/led.c".endswith("app/led.c")
+                    # == True → 그 파일이 line-classified로 오판돼, 라인변경 없다고 함수가 **제거**된다
+                    # (under-report — 안전하지 않은 방향). 경로 구분자 경계를 강제한다.
+                    return any(_f == _p or _f.endswith("/" + _p) for _p in _line_classified_files)
 
                 _narrowed: Dict[str, str] = {}
                 for _fn, _kind in changed_types.items():
@@ -1195,12 +1239,18 @@ def run_impact_update(
                     if _in_line_classified(_fn):
                         if _pk is not None:
                             _narrowed[_fn] = _pk  # 라인변경된 함수만, 정밀 kind
+                            _fn_evidence[_fn] = "line"
                         # else: 순수 편집 파일에서 라인변경 없음 → 제거(진짜 무영향)
                     else:
                         _narrowed[_fn] = _pk if _pk is not None else _kind  # fatten 유지 + kind 승격
+                        # 함수별 증거 출처(provenance) — 프론트가 function_diffs 유무로 '증거 없음'을
+                        # 추론하던 것을 대체한다(그 추론은 diff 400KB 절단·local-diff 경로에서 실제
+                        # 변경 함수를 '파일영향'으로 오분류해 기본 집계에서 숨길 수 있었다).
+                        _fn_evidence[_fn] = "line" if _pk is not None else "file_fatten"
                 for _fn, _k in _precise_lower.items():  # 신규/삭제 함수(baseline 부재분) 편입
                     if _k in ("NEW", "DELETE") and _fn not in _narrowed:
                         _narrowed[_fn] = _k
+                        _fn_evidence[_fn] = "line"
                 # X8: 축소(제거)된 함수 감사 추적 — silent 제거 금지(ASIL C/D 리뷰 추적성).
                 _removed = sorted(set(changed_types) - set(_narrowed))
                 _narrow_removed_n = len(_removed)
@@ -1213,6 +1263,21 @@ def run_impact_update(
                     )
                 changed_types = _narrowed
                 _classification_granularity = "line"
+            else:
+                # 정밀분류 미적용(cloudium/editType 또는 로컬 diff) — resolve가 파일 전체 함수로
+                # fatten했으므로 '라인증거'는 resolve 전에 지목된 함수만이다. 나머지는 file_fatten.
+                for _fn in changed_types:
+                    _fn_evidence[_fn] = (
+                        "line" if (_pre_resolve_is_line and _fn in _pre_resolve_lc) else "file_fatten"
+                    )
+            # granularity 정직화: 스칼라 하나로는 "일부 line·일부 fatten" 상태를 표현할 수 없다.
+            # (과거엔 로컬 경로가 fatten인데도 'line'이라 단정 → 프론트 '(보수 추정)' 경고가 꺼졌다.)
+            _fatten_n = sum(1 for _v in _fn_evidence.values() if _v == "file_fatten")
+            _line_n = sum(1 for _v in _fn_evidence.values() if _v == "line")
+            if _fatten_n and _line_n:
+                _classification_granularity = "mixed"
+            elif _fatten_n and not _line_n:
+                _classification_granularity = "file"
             call_map = sections.get("call_map", {}) or {}
             neighbors = _build_neighbors(
                 call_map,
@@ -1231,11 +1296,13 @@ def run_impact_update(
             neighbors = {}
             neighbors_cross = None
 
+        _bfs_stats: Dict[str, Any] = {}
         impact_groups = _hop_limited_impact(
             set(changed_types),
             neighbors,
             max_hop=options.max_hop,
             max_impacted_functions=options.max_impacted_functions,
+            stats=_bfs_stats,
         )
         sits_impact_groups: Dict[str, List[str]] | None = None
         if neighbors_cross is not None:
@@ -1247,6 +1314,14 @@ def run_impact_update(
             )
         impacted_total = len(_impacted_union(impact_groups))
         warnings: List[str] = []
+        # 콜그래프 탐색이 상한에서 끊겼으면 빈 hop이 '영향 없음'이 아니라 '미계산'임을 명시.
+        if _bfs_stats.get("truncated"):
+            _tr_hop = _bfs_stats.get("truncated_at_hop") or 0
+            warnings.append(
+                f"콜그래프 탐색 중단: 영향 함수 {_bfs_stats.get('visited')}개가 상한"
+                f"({_bfs_stats.get('max_impacted_functions')})을 초과해 {_tr_hop}-hop까지만 계산했습니다 — "
+                f"{_tr_hop + 1}-hop 이상은 '영향 없음'이 아니라 '미계산'입니다(빈 목록 오독 주의)."
+            )
         if _asil_uds_enriched:
             warnings.append(
                 f"ASIL 보강: 소스 주석에 ASIL이 없는 함수 {_asil_uds_enriched}개를 UDS 문서에서 해석(cloudium 워커 경유)"
@@ -1380,12 +1455,21 @@ def run_impact_update(
         # AI 설명용 함수별 본문 diff 원문 — BODY 등 선언 미변경 함수도 실제 코드 변경(hunk)을 근거로
         # 제공해, Gemini가 '추정' 대신 실제 변수/로직 기반의 구체 문서 지침을 생성하도록 한다.
         function_diffs: Dict[str, str] = {}
+        _fd_stats: Dict[str, Any] = {}
         if _precise_diff_text:
             try:
                 from workflow.delta_update import extract_function_diffs
-                function_diffs = extract_function_diffs(_precise_diff_text)
+                function_diffs = extract_function_diffs(_precise_diff_text, stats=_fd_stats)
             except Exception as _fd_exc:  # noqa: BLE001 — 원문 보강 실패는 분석을 막지 않음
                 logger.debug("function_diffs extraction failed: %s", _fd_exc)
+                warnings.append("본문 diff 원문 추출 실패 — 상세 모달의 코드 근거가 비어 있을 수 있습니다(분석은 계속).")
+        if _fd_stats.get("truncated"):
+            # 전체 상한 초과로 일부 함수의 본문 diff가 생략됨. 프론트가 diff 부재를 '증거 없음'으로
+            # 오독하지 않도록 명시(evidence 필드가 1차 방어지만 표시도 정직하게).
+            warnings.append(
+                f"본문 diff 원문이 크기 상한을 넘어 {_fd_stats.get('omitted')}개 함수의 코드 근거가 생략됐습니다 "
+                "— '변경 없음'이 아니라 '원문 미수록'입니다(변경 판정은 evidence 기준)."
+            )
 
         # ── ISO 26262 증거 보강: 함수별 ASIL/메타 + ASIL 차등 + 회귀시험 선정 + 커버리지 타깃 ──
         def _asil_of(_fn: str) -> str:
@@ -1405,6 +1489,10 @@ def run_impact_update(
                 "module": str((by_name.get(fn) or {}).get("module_name") or ""),
                 "file": str((by_name.get(fn) or {}).get("file") or ""),
                 "change_type": changed_types.get(fn, ""),
+                # 증거 출처(단일 출처) — "line"=라인변경 확인 / "file_fatten"=파일단위 보수 포함
+                # (라인변경 미확인) / ""=간접 영향 함수(변경 아님). 프론트는 function_diffs 유무로
+                # 추론하지 말고 이 값을 쓴다(diff는 400KB 절단·경로별 부재로 증거 프록시가 될 수 없음).
+                "evidence": _fn_evidence.get(fn, ""),
             }
             for fn in sorted(_changed_set | _impacted_all)
         }
@@ -1425,8 +1513,14 @@ def run_impact_update(
                 f"(커버리지 타깃: {coverage_target}{_mcdc_note})"
             )
         if asil_unknown_changed:
+            # ⚠ 정책 주의(deep-review 지적): 미상은 ASIL B+ escalation과 달리 promote_to_review를
+            # 걸지 않는다 — auto_generate 모드에서 '미상(실제로는 C/D일 수 있음)' 변경이 사람 검토
+            # 없이 문서 자동 재생성으로 통과할 수 있다. 다만 CLAUDE.md 정책이 "판별 불가 시 QM으로
+            # 간주하되 reviewer에게 확인 요청"(=경고, 차단 아님)이므로 현행 유지하고 경고를 강화한다.
+            # 자동 차단이 필요하면 아래 한 줄(promote_to_review = True)을 활성화할 것.
             warnings.append(
-                f"직접 변경 함수 중 ASIL 미상 {asil_unknown_changed}개 — 안전 등급 수동 확인 필요(QM 단정 금지)"
+                f"직접 변경 함수 중 ASIL 미상 {asil_unknown_changed}개 — 안전 등급 수동 확인 필요"
+                "(QM 단정 금지). 미상 함수가 실제 ASIL C/D이면 자동 재생성 결과를 반드시 검토하십시오."
             )
         # 회귀시험 선정: 영향 함수 → 기존 SUTS TC / SITS call-chain 집계(재실행 대상 증거).
         _lk = entry.linked_docs if entry else None
@@ -1550,6 +1644,17 @@ def run_impact_update(
                 # A 정밀분류가 함수단위로 축소한 파일 수 / 라인변경 없어 제외한 함수 수(투명성).
                 "line_classified_file_count": len(_line_classified_files),
                 "narrow_removed_count": _narrow_removed_n,
+                # 증거 출처 집계 — granularity 스칼라가 감추던 실상("line"인데 대부분 fatten)을 노출.
+                # 함수별 상세는 function_meta[fn].evidence("line" | "file_fatten").
+                "evidenced_function_count": sum(1 for _v in _fn_evidence.values() if _v == "line"),
+                "fattened_function_count": sum(1 for _v in _fn_evidence.values() if _v == "file_fatten"),
+            },
+            # 콜그래프 탐색 절단 — indirect_2hop=[]이 '영향 없음'인지 '미계산'인지 구분(오독 방지).
+            "impact_traversal": {
+                "truncated": bool(_bfs_stats.get("truncated")),
+                "truncated_at_hop": int(_bfs_stats.get("truncated_at_hop") or 0),
+                "max_impacted_functions": int(_bfs_stats.get("max_impacted_functions") or 0),
+                "max_hop": int(options.max_hop),
             },
         }
         if "sits" in targets:
@@ -1698,6 +1803,16 @@ def run_impact_update(
                 # ISO 26262 추적성 — 정밀분류로 영향집합에서 제외한 함수 전체 목록(감사 레코드 durable).
                 # 안전 엔지니어가 "무엇을 왜 뺐는지"를 이 레코드에서 검증할 수 있게 한다(silent drop 금지).
                 "narrow_removed_functions": list(_narrow_removed_list),
+                # 증거 출처 집계 — granularity 스칼라가 감추던 실상("line"인데 대부분 fatten)을 노출.
+                "evidenced_function_count": sum(1 for _v in _fn_evidence.values() if _v == "line"),
+                "fattened_function_count": sum(1 for _v in _fn_evidence.values() if _v == "file_fatten"),
+            },
+            # 콜그래프 탐색 절단 — indirect_2hop=[]이 '영향 없음'인지 '미계산'인지 구분(오독 방지).
+            "impact_traversal": {
+                "truncated": bool(_bfs_stats.get("truncated")),
+                "truncated_at_hop": int(_bfs_stats.get("truncated_at_hop") or 0),
+                "max_impacted_functions": int(_bfs_stats.get("max_impacted_functions") or 0),
+                "max_hop": int(options.max_hop),
             },
         }
         # 감사기록/변경이력은 best-effort — payload가 cloudium U:\\(SMB) 접근 거부 등으로

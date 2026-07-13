@@ -548,7 +548,10 @@ function ImpactPanel({ impactData }) {
   const warnings = Array.isArray(impactData.warnings) ? impactData.warnings : [];
   const scmName = impactData._scm_name || '';
   // 분류 정밀도 — "file"이면 변경 함수 수가 "변경 파일 내 전체 함수"의 과대추정.
-  const isConservativeCount = impactData.classification?.granularity === 'file';
+  // 'file'=전부 파일단위 보수, 'mixed'=일부만 라인증거(나머지 fatten) — 둘 다 "변경 함수" 수가
+  // 과대추정이므로 보수 캡션을 띄운다. (과거엔 'mixed' 상태를 'line'이라 단정해 경고가 꺼졌다.)
+  const _gran = impactData.classification?.granularity;
+  const isConservativeCount = _gran === 'file' || _gran === 'mixed';
 
   return (
     <div>

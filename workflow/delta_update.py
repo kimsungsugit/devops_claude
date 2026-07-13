@@ -56,6 +56,47 @@ _TOPLEVEL_CHANGE = re.compile(r"^[+-][A-Za-z_{}]", re.MULTILINE)
 # (함수 시그니처엔 '='가 없어 무영향. 이 코드베이스엔 `= MACRO(` 파일스코프 초기화자 0건이나 방어적.)
 _HUNK_INIT_CTX = re.compile(r"^@@.*@@.*=.*\b\w+\s*\(", re.MULTILINE)
 
+# --- hunk 함수귀속 오탐 차단 --------------------------------------------------------
+# `_HUNK_FUNC`는 "'(' 바로 앞 식별자"를 잡으므로 함수가 아닌 컨텍스트도 매치한다:
+#   `@@ .. @@ u8 (*pf)(void)`  → 'u8'   (함수포인터/캐스트 — 타입명)
+#   `@@ .. @@ if (cond)`       → 'if'   (제어문 — svn -p가 함수 못 찾을 때)
+# 이 가비지가 흘러가면 (a) function_diffs에 존재하지 않는 함수 키가 생겨 증거가 오염되고,
+# (b) narrowable 판정의 귀속 커버리지(ctx_hunks)가 과대계상돼 "모든 hunk가 함수에 귀속됨"이
+# 거짓 성립 → 라인변경 없는 함수 제거(narrow)가 부당하게 허용된다(under-report 위험).
+# 안전성: 거부하면 ctx_hunks < total_hunks → narrowable=False → 파일단위 fatten 유지(보수측).
+# 즉 과잉 거부는 정밀도만 떨어뜨리고 절대 under-report를 만들지 않는다(자기일관적).
+_NON_FUNC_TOKENS = frozenset({
+    "if", "else", "for", "while", "switch", "case", "do", "return", "sizeof", "goto",
+    "typedef", "struct", "union", "enum", "static", "extern", "inline", "const", "volatile",
+    "register", "auto", "signed", "unsigned", "void", "char", "short", "int", "long",
+    "float", "double", "bool", "defined",
+})
+# 정수 타입 별칭(u8/U16/s32/uint8_t/size_t 등) — 캐스트·함수포인터 컨텍스트의 오귀속 토큰.
+_TYPE_ALIAS = re.compile(r"^(?:[usiUSI]\d{1,2}|u?int\d{1,2}(?:_t)?|[A-Za-z_]\w*_t)$")
+
+
+def _hunk_func_name(line: str) -> Optional[str]:
+    """hunk 헤더(`@@ .. @@ <ctx>`)에서 함수명 추출. 타입/키워드 오귀속이면 None(안전측 거부)."""
+    m = _HUNK_FUNC.match(line)
+    if not m:
+        return None
+    name = m.group(1)
+    if name in _NON_FUNC_TOKENS or _TYPE_ALIAS.match(name):
+        return None
+    return name
+
+
+def _hunk_func_names(diff_text: str) -> List[str]:
+    """diff 전체에서 유효 함수귀속 이름 목록(오탐 제외). ctx_hunks 분자와 동일 기준."""
+    out: List[str] = []
+    for ln in (diff_text or "").splitlines():
+        if not ln.startswith("@@"):
+            continue
+        nm = _hunk_func_name(ln)
+        if nm:
+            out.append(nm)
+    return out
+
 
 def _run_unified_diff(
     project_root: str,
@@ -167,8 +208,8 @@ def get_changed_functions(
             )
             for m in _FUNC_DECL_LINE.finditer(diff_text):
                 changed_funcs.add(m.group(1))
-            for m in _HUNK_FUNC.finditer(diff_text):
-                changed_funcs.add(m.group(1))
+            for _nm in _hunk_func_names(diff_text):  # 타입/키워드 오귀속 제외
+                changed_funcs.add(_nm)
         except Exception as e:
             logger.warning("Failed to parse diff for %s: %s", fpath, e)
 
@@ -211,7 +252,9 @@ def _classify_from_edit_types(
     return out
 
 
-def _classify_one_file_diff(diff_text: str, is_header: bool) -> Tuple[Dict[str, str], bool]:
+def _classify_one_file_diff(
+    diff_text: str, is_header: bool, known_funcs: Optional[Set[str]] = None
+) -> Tuple[Dict[str, str], bool]:
     """단일 파일의 unified diff → ({func: kind}, narrowable).
 
     함수단위 kind는 기존 로직과 동일(NEW/DELETE/SIGNATURE/BODY/VARIABLE/HEADER). 두 번째 반환값
@@ -220,7 +263,7 @@ def _classify_one_file_diff(diff_text: str, is_header: bool) -> Tuple[Dict[str, 
     (bare hunk 0), 전처리 지시자 변경이 없고, 컬럼0(함수 밖) 변경이 없을 때만 True. 미인식 top-level
     구성(배열·값테이블·typedef·enum·전역var·조건부컴파일 등)은 위 조건에서 걸려 False → fatten 유지.
     """
-    hunk_funcs = {m.group(1) for m in _HUNK_FUNC.finditer(diff_text)}
+    hunk_funcs = set(_hunk_func_names(diff_text))  # 타입/키워드 오귀속 제외
     # 제어 키워드(if/for/while...)는 '(' 앞에 와도 함수 선언이 아님 — 오탐 제외.
     _CTRL_KW = {"if", "for", "while", "switch", "return", "sizeof", "do", "else", "case"}
     added_decl = {m.group(1) for m in re.finditer(r"^\+\s*.*?\b(\w+)\s*\(", diff_text, re.MULTILINE) if m.group(1) not in _CTRL_KW}
@@ -285,12 +328,23 @@ def _classify_one_file_diff(diff_text: str, is_header: bool) -> Tuple[Dict[str, 
         result[func] = new_kind
 
     # allowlist — 모든 hunk가 함수로 귀속(bare 0) AND 전처리 변경 없음 AND 컬럼0 변경 없음.
+    # ctx_hunks는 **유효** 함수귀속만 센다(_hunk_func_names): 타입/키워드 오귀속(`u8 (*pf)(`,
+    # `if (`)을 귀속으로 인정하면 "모든 hunk가 함수에 귀속됨"이 거짓 성립해 narrow가 부당 허용됨.
+    _ctx_names = _hunk_func_names(diff_text)
     total_hunks = len(_HUNK_ANY.findall(diff_text))
-    ctx_hunks = len(_HUNK_FUNC.findall(diff_text))
+    ctx_hunks = len(_ctx_names)
+    # known_funcs(소스 인덱스)가 주어지면 귀속 이름이 **실제 함수**인지 검증한다. AUTOSAR 매크로
+    # (`FUNC(void, CODE) Foo(void)` → 'FUNC', `P2FUNC(...)(...)` → 'P2FUNC')처럼 정규식이 매크로를
+    # 함수로 오귀속하면, 그 파일이 narrowable로 판정돼 **실제 함수가 전부 제거**될 수 있다(under-report).
+    # 미지의 이름이 하나라도 있으면 narrow 불가(파일단위 fatten 유지 — 안전측).
+    _names_known = True
+    if known_funcs is not None:
+        _names_known = all(n.lower() in known_funcs for n in _ctx_names)
     narrowable = (
         (not is_header)
         and total_hunks > 0
         and ctx_hunks == total_hunks
+        and _names_known
         and not _PREPROC_CHANGE.search(diff_text)
         and not _TOPLEVEL_CHANGE.search(diff_text)
         and not _HUNK_INIT_CTX.search(diff_text)
@@ -363,6 +417,7 @@ def extract_function_diffs(
     *,
     max_lines_per_func: int = 60,
     max_total_chars: int = 400_000,
+    stats: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, str]:
     """svn diff에서 함수별 본문 변경 hunk를 추출한다 — AI 설명용 원문 제공(BODY 함수도 실제 코드 근거).
 
@@ -379,8 +434,7 @@ def extract_function_diffs(
             if ln.startswith("@@ "):
                 if cur_func and cur_hunk:
                     per_func.setdefault(cur_func.lower(), []).append("\n".join(cur_hunk))
-                m = _HUNK_FUNC.match(ln)
-                cur_func = m.group(1) if m else None
+                cur_func = _hunk_func_name(ln)  # 타입/키워드 오귀속은 None(가비지 키 방지)
                 cur_hunk = [ln] if cur_func else []
             elif cur_func is not None:
                 cur_hunk.append(ln)
@@ -389,20 +443,30 @@ def extract_function_diffs(
 
     out: Dict[str, str] = {}
     total = 0
+    omitted = 0
     for func, hunks in per_func.items():
         text = "\n".join(hunks)
         lines = text.splitlines()
         if len(lines) > max_lines_per_func:
             text = "\n".join(lines[:max_lines_per_func]) + f"\n… (+{len(lines) - max_lines_per_func}줄 생략)"
         if total + len(text) > max_total_chars:
-            break
+            # 전체 상한 초과 — 이후 함수는 저장하지 않는다. 과거엔 break로 **조용히** 잘려서
+            # 프론트가 "본문 diff 없음 = 직접 변경 증거 없음(파일영향)"으로 오판해 실제 변경 함수가
+            # 기본 집계에서 숨겨질 수 있었다. 누락 개수를 집계해 호출측이 표면화하게 한다.
+            omitted += 1
+            continue
         out[func] = text
         total += len(text)
+    if stats is not None:
+        stats["truncated"] = omitted > 0
+        stats["omitted"] = omitted
+        stats["total_chars"] = total
     return out
 
 
 def classify_changed_functions_from_diff_text(
     combined_diff: str,
+    known_funcs: Optional[Set[str]] = None,
 ) -> Tuple[Dict[str, str], Set[str]]:
     """`svn diff -r A:B`(-x -p) 통합 diff blob → (정밀 changed_types, line_classified_files).
 
@@ -421,7 +485,7 @@ def classify_changed_functions_from_diff_text(
     line_classified_files: Set[str] = set()
     for path, block in _split_svn_diff_by_file(combined_diff):
         is_header = path.lower().endswith((".h", ".hpp"))
-        per_file, narrowable = _classify_one_file_diff(block, is_header)
+        per_file, narrowable = _classify_one_file_diff(block, is_header, known_funcs)
         for func, new_kind in per_file.items():
             if changed_types.get(func) in {"NEW", "DELETE", "SIGNATURE", "HEADER"}:
                 continue
