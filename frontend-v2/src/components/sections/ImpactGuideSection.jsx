@@ -805,6 +805,11 @@ export default function ImpactGuideSection({ analysisResult }) {
       }
 
       // Build per-function guide
+      // F1(검토 TC=0 근본): STS extract-traceability는 requirement_id를 _normalize_req_id로
+      // 대문자화(+Sy→Sw)해 방출하지만, UDS extract-mapping은 raw regex 매치(원본 케이스)를 방출한다.
+      // 정규화 없이 조인하면 STS 키 'SWTR_1' vs UDS rid 'SwTR_1'이 영구 미스 → 검토 TC=0.
+      // 조인 키만 정규화하고, 표시용(details.requirements)은 UDS 원본 케이스를 보존한다.
+      const _normReq = (r) => String(r || '').replace(/\s+/g, '').toUpperCase();
       const funcToReqs = {};
       for (const mp of udsMapping) {
         for (const fn of (mp.source_ids || [])) {
@@ -815,8 +820,9 @@ export default function ImpactGuideSection({ analysisResult }) {
 
       const reqToStsTCs = {};
       for (const row of stsTCs) {
-        if (!reqToStsTCs[row.requirement_id]) reqToStsTCs[row.requirement_id] = new Set();
-        reqToStsTCs[row.requirement_id].add(row.testcase);
+        const rid = _normReq(row.requirement_id);
+        if (!reqToStsTCs[rid]) reqToStsTCs[rid] = new Set();
+        reqToStsTCs[rid].add(row.testcase);
       }
 
       const fnToSutsTCs = {};
@@ -855,7 +861,7 @@ export default function ImpactGuideSection({ analysisResult }) {
 
         const stsTcSet = new Set();
         for (const rid of reqs) {
-          (reqToStsTCs[rid] || new Set()).forEach(tc => { stsTcSet.add(tc); allStsTcs.add(tc); });
+          (reqToStsTCs[_normReq(rid)] || new Set()).forEach(tc => { stsTcSet.add(tc); allStsTcs.add(tc); });
         }
 
         const sutsTcList = fnToSutsTCs[fn] ? [...fnToSutsTCs[fn]] : [];

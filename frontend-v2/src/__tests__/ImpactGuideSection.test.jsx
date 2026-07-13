@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
@@ -780,6 +780,39 @@ describe('ImpactGuideSection', () => {
     // 검토 TC 스탯은 요약 패널(탭 무관)에 상시 노출 — 0 대신 사유 배지
     await waitFor(() => expect(screen.getByText('검토 TC')).toBeInTheDocument());
     expect(screen.getByText(/⚠ STS 미연동/)).toBeInTheDocument();
+  });
+
+  // STS-IMPACT-032: 검토 TC 조인 근본(F1) — UDS 원본케이스 요구ID ↔ STS 대문자 요구ID 정규화 조인
+  it('검토 TC 조인: UDS 원본케이스와 STS 대문자 요구ID가 정규화되어 조인된다(F1)', async () => {
+    const { post } = await import('../api.js');
+    post.mockImplementation((url) => {
+      if (url === '/api/jenkins/uds/extract-mapping') {
+        return Promise.resolve({ mapping_pairs: [{ requirement_id: 'SwTR_1', source_ids: ['g_changed'] }] });
+      }
+      if (url === '/api/jenkins/sts/extract-traceability') {
+        // STS 엔드포인트는 _normalize_req_id로 대문자화해 방출 → 'SWTR_1'
+        return Promise.resolve({ vcast_rows: [{ requirement_id: 'SWTR_1', testcase: 'TC_01' }] });
+      }
+      return Promise.resolve({ ok: false }); // ai-guide skip
+    });
+    const user = userEvent.setup();
+    const analysisResult = {
+      impactData: {
+        trigger: { changed_files: ['Ap.c'], scm_id: 'kjpds02' },
+        changed_function_types: { g_changed: 'BODY' },
+        actions: {},
+        impact: { direct: ['g_changed'] },
+        function_meta: { g_changed: { asil: 'A' } },
+        _linked_docs: { uds: 'U:/uds.docx', sts: 'U:/sts.xlsm' },
+      },
+    };
+    render(<ImpactGuideSection analysisResult={analysisResult} />);
+    await user.click(screen.getByText(/상세 가이드 생성/));
+    await waitFor(() => expect(screen.getByText('검토 TC')).toBeInTheDocument());
+    // 대소문자만 다른 요구ID가 정규화 조인돼 검토 TC=1 (정규화 없으면 0 + ⚠사유 배지)
+    const card = screen.getByText('검토 TC').closest('.stat-card');
+    expect(within(card).getByText('1')).toBeInTheDocument();
+    expect(screen.queryByText(/⚠ STS|요구ID 매칭 0/)).not.toBeInTheDocument();
   });
 });
 
