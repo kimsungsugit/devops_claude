@@ -888,11 +888,22 @@ export default function ImpactGuideSection({ analysisResult }) {
 
       // Track 1a: 검토 TC=0을 bare 0 대신 사유로 정직 표시(silent 0 금지). 연동/시트/매칭 단계 구분.
       let stsTcReason = null;
+      let stsTcHint = '';
       if (!demoMode && allStsTcs.size === 0) {
         if (!linkedDocs.sts) stsTcReason = 'STS 미연동';
         else if (fetchFailures.some(f => f.doc === 'STS')) stsTcReason = 'STS 조회 실패';
         else if (stsSheetUnrecognized || stsTCs.length === 0) stsTcReason = 'STS 시트 미인식';
-        else stsTcReason = '요구ID 매칭 0';
+        else {
+          stsTcReason = '요구ID 매칭 0';
+          // 라이브 진단(kjpds02): UDS는 SwSTR 구조요구 참조, STS는 SwEI/SwNTR 소프트웨어요구
+          // 참조 — 요구 유형(prefix) 자체가 달라 직접 매칭 불가. 유형 대비를 노출해 원인 명시.
+          const _pfx = (r) => (String(r).match(/^(Sw[A-Za-z]+)/i) || [null, ''])[1].toUpperCase();
+          const udsTypes = [...new Set([...allReqs].map(_pfx).filter(Boolean))].sort();
+          const stsTypes = [...new Set(stsTCs.map((r) => _pfx(r.requirement_id)).filter(Boolean))].sort();
+          if (udsTypes.length && stsTypes.length && !udsTypes.some((t) => stsTypes.includes(t))) {
+            stsTcHint = `요구 유형 상이 — UDS ${udsTypes.join('·')} ↔ STS ${stsTypes.join('·')} (직접 매칭 불가, SwRS 허브 경유 필요)`;
+          }
+        }
       }
       setGuide({
         details,
@@ -901,6 +912,7 @@ export default function ImpactGuideSection({ analysisResult }) {
           impactedReqs: allReqs.size,
           impactedStsTCs: allStsTcs.size,
           stsTcReason,
+          stsTcHint,
         },
       });
 
@@ -1326,11 +1338,14 @@ export default function ImpactGuideSection({ analysisResult }) {
                 <div className="stat-label">영향 요구사항</div>
               </div>
               <div className="stat-card" style={{ borderLeft: '3px solid var(--color-info)' }}
-                title={guide.summary.stsTcReason ? `검토 TC 0 사유: ${guide.summary.stsTcReason} — STS 요구사항↔TC 조인이 성립하지 않아 재검토 대상 TC를 셀 수 없습니다.` : undefined}>
+                title={guide.summary.stsTcReason ? `검토 TC 0 사유: ${guide.summary.stsTcReason}${guide.summary.stsTcHint ? ` — ${guide.summary.stsTcHint}` : ' — STS 요구사항↔TC 조인이 성립하지 않아 재검토 대상 TC를 셀 수 없습니다.'}` : undefined}>
                 <div className="stat-value">{guide.summary.impactedStsTCs}</div>
                 <div className="stat-label">검토 TC</div>
                 {guide.summary.impactedStsTCs === 0 && guide.summary.stsTcReason && (
                   <div className="text-muted" style={{ fontSize: 9, marginTop: 2, color: 'var(--color-warning)' }}>⚠ {guide.summary.stsTcReason}</div>
+                )}
+                {guide.summary.impactedStsTCs === 0 && guide.summary.stsTcHint && (
+                  <div className="text-muted" style={{ fontSize: 8, marginTop: 1, lineHeight: 1.3, overflowWrap: 'anywhere' }}>{guide.summary.stsTcHint}</div>
                 )}
               </div>
             </>

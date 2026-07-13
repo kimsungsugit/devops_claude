@@ -814,6 +814,37 @@ describe('ImpactGuideSection', () => {
     expect(within(card).getByText('1')).toBeInTheDocument();
     expect(screen.queryByText(/⚠ STS|요구ID 매칭 0/)).not.toBeInTheDocument();
   });
+
+  // STS-IMPACT-033: 라이브 kjpds02 재현 — UDS(SwSTR)·STS(SwEI) 요구 유형 상이 → 매칭 0 + 유형 힌트
+  it('검토 TC 사유: UDS(SwSTR)·STS(SwEI) 요구 유형이 달라 매칭 0 + 유형 힌트를 표시한다', async () => {
+    const { post } = await import('../api.js');
+    post.mockImplementation((url) => {
+      if (url === '/api/jenkins/uds/extract-mapping') {
+        return Promise.resolve({ mapping_pairs: [{ requirement_id: 'SwSTR_01', source_ids: ['g_changed'] }] });
+      }
+      if (url === '/api/jenkins/sts/extract-traceability') {
+        return Promise.resolve({ vcast_rows: [{ requirement_id: 'SWEI_01', testcase: 'SwTC_SwEI_01_01' }] });
+      }
+      return Promise.resolve({ ok: false });
+    });
+    const user = userEvent.setup();
+    const analysisResult = {
+      impactData: {
+        trigger: { changed_files: ['Ap.c'], scm_id: 'kjpds02' },
+        changed_function_types: { g_changed: 'BODY' },
+        actions: {},
+        impact: { direct: ['g_changed'] },
+        function_meta: { g_changed: { asil: 'A' } },
+        _linked_docs: { uds: 'U:/uds.docx', sts: 'U:/sts.xlsm' },
+      },
+    };
+    render(<ImpactGuideSection analysisResult={analysisResult} />);
+    await user.click(screen.getByText(/상세 가이드 생성/));
+    await waitFor(() => expect(screen.getByText('검토 TC')).toBeInTheDocument());
+    // 유형 자체가 달라(SwSTR vs SwEI) 정규화해도 매칭 0 → 사유 배지 + 유형 대비 힌트
+    expect(screen.getByText(/⚠ 요구ID 매칭 0/)).toBeInTheDocument();
+    expect(screen.getByText(/요구 유형 상이 — UDS SWSTR ↔ STS SWEI/)).toBeInTheDocument();
+  });
 });
 
 describe('extractDiffElements (순수 함수)', () => {
