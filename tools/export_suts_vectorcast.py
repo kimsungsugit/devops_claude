@@ -103,7 +103,7 @@ def _parse_sequence_row(
     sequence_no = int(seq_no) if isinstance(seq_no, int) else seq_no_text
     base_tc_id = str(unit_meta["base_tc_id"])
     sequence = {
-        "name": f"{base_tc_id}__SEQ_{int(sequence_no):02d}" if str(sequence_no).isdigit() else f"{base_tc_id}__SEQ_{sequence_no_text or row}",
+        "name": f"{base_tc_id}__SEQ_{int(sequence_no):02d}" if str(sequence_no).isdigit() else f"{base_tc_id}__SEQ_{seq_no_text or row}",
         "base_tc_id": base_tc_id,
         "sequence_no": sequence_no,
         "description": _clean_text(ws.cell(row=row, column=_SEQUENCE_TEXT_COL).value),

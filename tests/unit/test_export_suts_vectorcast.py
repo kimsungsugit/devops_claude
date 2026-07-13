@@ -110,3 +110,30 @@ def test_export_suts_to_vectorcast_model_writes_outputs(tmp_path: Path) -> None:
     loaded = json.loads(json_path.read_text(encoding="utf-8"))
     assert loaded["schema_version"] == "1.0"
     assert len(model["export_warnings"]) >= 1
+
+
+def test_parse_sequence_row_non_numeric_seq_no_no_crash():
+    """비숫자 sequence_no(else 분기)에서 NameError로 크래시하지 않는다.
+
+    회귀: L106이 미정의 `sequence_no_text`를 참조해 sequence_no가 비숫자인 SUTS(예 KJPDS02
+    SwUTS)에서 build_vectorcast_model 전체가 크래시 → 회귀 TC가 조용히 0이 되던 버그.
+    """
+    from tools.export_suts_vectorcast import (
+        _parse_sequence_row, _SEQ_NO_COL, _SEQUENCE_TEXT_COL,
+    )
+
+    class _Cell:
+        def __init__(self, v):
+            self.value = v
+
+    class _WS:
+        def cell(self, row, column):
+            if column == _SEQ_NO_COL:
+                return _Cell("A")  # 비숫자 시퀀스 번호 → else 분기 유발
+            if column == _SEQUENCE_TEXT_COL:
+                return _Cell("desc")
+            return _Cell(None)
+
+    seq, _warns = _parse_sequence_row(_WS(), 5, [], [], {"base_tc_id": "TC01", "unit_name": "foo"})
+    assert seq["name"] == "TC01__SEQ_A"  # seq_no_text 사용(수정 전엔 NameError)
+    assert seq["sequence_no"] == "A"
