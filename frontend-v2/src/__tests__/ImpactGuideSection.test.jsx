@@ -778,7 +778,7 @@ describe('ImpactGuideSection', () => {
     render(<ImpactGuideSection analysisResult={analysisResult} />);
     await user.click(screen.getByText(/상세 가이드 생성/));
     // 검토 TC 스탯은 요약 패널(탭 무관)에 상시 노출 — 0 대신 사유 배지
-    await waitFor(() => expect(screen.getByText('검토 TC')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText('STS 요구 TC')).toBeInTheDocument());
     expect(screen.getByText(/⚠ STS 미연동/)).toBeInTheDocument();
   });
 
@@ -808,9 +808,9 @@ describe('ImpactGuideSection', () => {
     };
     render(<ImpactGuideSection analysisResult={analysisResult} />);
     await user.click(screen.getByText(/상세 가이드 생성/));
-    await waitFor(() => expect(screen.getByText('검토 TC')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText('STS 요구 TC')).toBeInTheDocument());
     // 대소문자만 다른 요구ID가 정규화 조인돼 검토 TC=1 (정규화 없으면 0 + ⚠사유 배지)
-    const card = screen.getByText('검토 TC').closest('.stat-card');
+    const card = screen.getByText('STS 요구 TC').closest('.stat-card');
     expect(within(card).getByText('1')).toBeInTheDocument();
     expect(screen.queryByText(/⚠ STS|요구ID 매칭 0/)).not.toBeInTheDocument();
   });
@@ -840,10 +840,38 @@ describe('ImpactGuideSection', () => {
     };
     render(<ImpactGuideSection analysisResult={analysisResult} />);
     await user.click(screen.getByText(/상세 가이드 생성/));
-    await waitFor(() => expect(screen.getByText('검토 TC')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText('STS 요구 TC')).toBeInTheDocument());
     // 유형 자체가 달라(SwSTR vs SwEI) 정규화해도 매칭 0 → 사유 배지 + 유형 대비 힌트
     expect(screen.getByText(/⚠ 요구ID 매칭 0/)).toBeInTheDocument();
     expect(screen.getByText(/요구 유형 상이 — UDS SWSTR ↔ STS SWEI/)).toBeInTheDocument();
+  });
+
+  // STS-IMPACT-034: SUTS unit 조인 casing(reviewer Finding#1) — 032의 SUTS 대응
+  it('SUTS 조인: SUTS unit 원본케이스와 소문자 함수명이 정규화되어 조인된다', async () => {
+    const { post } = await import('../api.js');
+    post.mockImplementation((url) => {
+      if (url === '/api/jenkins/sts/extract-traceability') {
+        // suts 경로 호출 → unit은 SUTS 문서 원본 케이스(S_MotorSpd), 함수는 소문자(s_motorspd)
+        return Promise.resolve({ vcast_rows: [{ unit: 'S_MotorSpd', testcase: 'SUTS_01' }] });
+      }
+      return Promise.resolve({ ok: false }); // ai-guide skip → 함수별 상세 탭 기본
+    });
+    const user = userEvent.setup();
+    const analysisResult = {
+      impactData: {
+        trigger: { changed_files: ['Ap.c'], scm_id: 'kjpds02' },
+        changed_function_types: { s_motorspd: 'BODY' },
+        actions: {},
+        impact: { direct: ['s_motorspd'] },
+        function_meta: {},
+        _linked_docs: { suts: 'U:/suts.xlsm' }, // suts만 연동(sts 없음 → STS 컬럼 '-')
+      },
+    };
+    render(<ImpactGuideSection analysisResult={analysisResult} />);
+    await user.click(screen.getByText(/상세 가이드 생성/));
+    await waitFor(() => expect(screen.getByText(/함수별 상세/)).toBeInTheDocument());
+    // 대소문자만 다른 unit이 정규화 조인돼 함수별 상세 SUTS 컬럼에 1 TC (정규화 없으면 '-')
+    expect(screen.getByText('1 TC')).toBeInTheDocument();
   });
 });
 

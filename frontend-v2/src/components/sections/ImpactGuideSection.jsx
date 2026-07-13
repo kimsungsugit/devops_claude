@@ -641,6 +641,13 @@ export default function ImpactGuideSection({ analysisResult }) {
     for (const r of (coverageGap?.functions || [])) { if (r.function) m[r.function] = r; }
     return m;
   }, [coverageGap]);
+  // reviewer Finding#6: AI 요약 함수명 클릭 해석을 O(1)로. 매 렌더 guide.details를 함수 참조마다
+  // 선형 2회 스캔하던 것을(안전함수/문서별/테스트제안 ~33개 × 2 × N) 소문자→canonical Map으로 대체.
+  const guideFnByLc = useMemo(() => {
+    const m = new Map();
+    for (const d of (guide?.details || [])) m.set(String(d.function).toLowerCase(), d.function);
+    return m;
+  }, [guide]);
   // 회귀시험 선정: 영향 함수 → 재실행 대상 SUTS TC / SITS call-chain(ISO 26262 증거).
   const regressionSet = impact?.regression_test_set ?? null;
 
@@ -754,6 +761,10 @@ export default function ImpactGuideSection({ analysisResult }) {
       return;
     }
     setLoading(true);
+    // reviewer Finding#4: 이전 분석의 AI 요약 오염 방지. AI fetch 실패는 catch로 삼켜(L930) 성공 시에만
+    // setAiGuide되므로, 새 분석 시작 시 초기화하지 않으면 직전 분석의 위험도/안전함수/테스트제안이
+    // 함수별 상세(새 데이터)와 뒤섞여 표시된다(ISO 위험 요약 cross-analysis 오염).
+    setAiGuide(null);
     try {
       // 추출 API 실패를 삼키지 않고 수집 — '매핑 없음'(실제 부재)과 '조회 실패'(403/500/네트워크)를
       // 구분해 사용자에게 표면화한다. 과거 catch(_){}로 실패해도 성공 토스트가 뜨던 silent 버그 방지.
@@ -825,11 +836,15 @@ export default function ImpactGuideSection({ analysisResult }) {
         reqToStsTCs[rid].add(row.testcase);
       }
 
+      // F1-parallel(reviewer Finding#1): SUTS unit 컬럼도 원본 케이스 → 소문자 guide fn과 조인하려면
+      // 양측 정규화 필요. 안 하면 per-function SUTS TC/docStats.suts가 조용히 0이 되어 회귀 패널
+      // (case-insensitive)과 모순되고 ISO 회귀 증거가 과소보고된다.
       const fnToSutsTCs = {};
       for (const row of sutsTCs) {
-        const fn = row.unit || '';
-        if (!fnToSutsTCs[fn]) fnToSutsTCs[fn] = new Set();
-        fnToSutsTCs[fn].add(row.testcase);
+        const uk = String(row.unit || '').trim().toLowerCase();
+        if (!uk) continue;
+        if (!fnToSutsTCs[uk]) fnToSutsTCs[uk] = new Set();
+        fnToSutsTCs[uk].add(row.testcase);
       }
 
       const details = [];
@@ -864,7 +879,8 @@ export default function ImpactGuideSection({ analysisResult }) {
           (reqToStsTCs[_normReq(rid)] || new Set()).forEach(tc => { stsTcSet.add(tc); allStsTcs.add(tc); });
         }
 
-        const sutsTcList = fnToSutsTCs[fn] ? [...fnToSutsTCs[fn]] : [];
+        const _fnLc = String(fn).toLowerCase();
+        const sutsTcList = fnToSutsTCs[_fnLc] ? [...fnToSutsTCs[_fnLc]] : [];
         const hop = (activeImpactGroups.direct || []).includes(fn) ? 'direct'
           : (activeImpactGroups.indirect_1hop || []).includes(fn) ? '1-hop'
           : (activeImpactGroups.indirect_2hop || []).includes(fn) ? '2-hop'
@@ -892,7 +908,10 @@ export default function ImpactGuideSection({ analysisResult }) {
       if (!demoMode && allStsTcs.size === 0) {
         if (!linkedDocs.sts) stsTcReason = 'STS 미연동';
         else if (fetchFailures.some(f => f.doc === 'STS')) stsTcReason = 'STS 조회 실패';
-        else if (stsSheetUnrecognized || stsTCs.length === 0) stsTcReason = 'STS 시트 미인식';
+        else if (stsSheetUnrecognized) stsTcReason = 'STS 시트 미인식';
+        // reviewer Finding#7: 시트를 못 찾은 경우(available_sheets 반환)만 '미인식'. 시트는 인식됐으나
+        // 매핑 행이 0인 경우는 별도 사유로 구분(정직성).
+        else if (stsTCs.length === 0) stsTcReason = 'STS 매핑 0 (시트 인식·행 없음)';
         else {
           stsTcReason = '요구ID 매칭 0';
           // 라이브 진단(kjpds02): UDS는 SwSTR 구조요구 참조, STS는 SwEI/SwNTR 소프트웨어요구
@@ -1041,8 +1060,10 @@ export default function ImpactGuideSection({ analysisResult }) {
         after: cd.after || '',
         function_diff: fd,  // 본문 diff 원문 — BODY 함수도 실제 코드 근거로 AI 설명
         asil: d.asil || '',
-        // function_meta는 원본 케이스 키(impact_orchestrator.py:1326 fn 그대로) — change_details처럼
-        // 소문자화하면 대소문자 혼용 함수명(g_DrvIn_Main 등)에서 조회 실패 → module 상시 공백(reviewer W2).
+        // function_meta 키는 guideFns의 fn과 항상 같은 케이스(정상 경로=소문자, source_root 미해결
+        // edge=원본 케이스로 상호 일관 — impact_orchestrator.py:1404 sorted(_changed_set|_impacted_all)).
+        // 그래서 d.function 그대로 조회하고 소문자화하지 않는다(edge 경로에선 소문자화가 조회 실패
+        // 유발). 원본 케이스 표시명이 필요하면 functionMeta[fn].display_name 사용.
         module: functionMeta[d.function]?.module || '',
         requirements: (d.requirements || []).slice(0, 12),
       });
@@ -1074,12 +1095,8 @@ export default function ImpactGuideSection({ analysisResult }) {
   // AI 요약의 함수명 → 기존 상세 모달. guide.details의 정규(canonical) 이름으로 해석해야
   // 모달 IIFE의 exact-match find가 성립한다(미해석 이름이면 무시 = no-op, 크래시 방지).
   const resolveFnName = (name) => {
-    if (!guide || !name) return null;
-    const exact = guide.details.find(x => x.function === name);
-    if (exact) return exact.function;
-    const lc = String(name).toLowerCase();
-    const ci = guide.details.find(x => String(x.function).toLowerCase() === lc);
-    return ci ? ci.function : null;
+    if (!name) return null;
+    return guideFnByLc.get(String(name).toLowerCase()) || null;
   };
   const openFnDetail = (name) => {
     const canonical = resolveFnName(name);
@@ -1331,6 +1348,23 @@ export default function ImpactGuideSection({ analysisResult }) {
             <div className="stat-value">{(activeImpactGroups.indirect_1hop || []).length + (activeImpactGroups.indirect_2hop || []).length}</div>
             <div className="stat-label">간접 영향</div>
           </div>
+          {/* reviewer Finding#2: 함수명 기준으로 실제 조인되는 회귀 지표를 헤드라인으로 표면화.
+              STS 요구기반 조인(아래 'STS 요구 TC')은 문서 요구 유형이 다르면 구조적으로 0이 될 수
+              있어(주 신호로 오해 소지) 함수 단위 회귀 SUTS/SITS를 함께 앞세운다. */}
+          {regressionSet?.summary && (
+            <>
+              <div className="stat-card" style={{ borderLeft: '3px solid var(--color-success)' }}
+                title="변경/영향 함수에 직접 매핑된 기존 SUTS 단위시험 TC(함수명 기준 = 재실행 대상). STS 요구기반 조인과 달리 함수 단위로 정확 매칭.">
+                <div className="stat-value">{regressionSet.summary.suts_tc_count ?? 0}</div>
+                <div className="stat-label">회귀 SUTS TC</div>
+              </div>
+              <div className="stat-card" style={{ borderLeft: '3px solid var(--color-success)' }}
+                title="변경/영향 함수가 진입점인 SITS 통합시험 콜체인(재확인 대상). 0이면 SITS VectorCAST 중간파일 미생성일 수 있음.">
+                <div className="stat-value">{regressionSet.summary.sits_chain_count ?? 0}</div>
+                <div className="stat-label">회귀 SITS 체인</div>
+              </div>
+            </>
+          )}
           {guide && (
             <>
               <div className="stat-card" style={{ borderLeft: '3px solid var(--color-warning)' }}>
@@ -1338,9 +1372,9 @@ export default function ImpactGuideSection({ analysisResult }) {
                 <div className="stat-label">영향 요구사항</div>
               </div>
               <div className="stat-card" style={{ borderLeft: '3px solid var(--color-info)' }}
-                title={guide.summary.stsTcReason ? `검토 TC 0 사유: ${guide.summary.stsTcReason}${guide.summary.stsTcHint ? ` — ${guide.summary.stsTcHint}` : ' — STS 요구사항↔TC 조인이 성립하지 않아 재검토 대상 TC를 셀 수 없습니다.'}` : undefined}>
+                title={guide.summary.stsTcReason ? `STS 요구 TC 0 사유: ${guide.summary.stsTcReason}${guide.summary.stsTcHint ? ` — ${guide.summary.stsTcHint}` : ' — STS 요구사항↔TC 조인이 성립하지 않아 재검토 대상 TC를 셀 수 없습니다.'} (함수 단위 회귀는 위 회귀 SUTS/SITS 참조)` : 'STS 요구사항 기반 시험 TC(요구 유형이 UDS와 같아야 조인). 함수 단위 회귀는 회귀 SUTS/SITS 참조.'}>
                 <div className="stat-value">{guide.summary.impactedStsTCs}</div>
-                <div className="stat-label">검토 TC</div>
+                <div className="stat-label">STS 요구 TC</div>
                 {guide.summary.impactedStsTCs === 0 && guide.summary.stsTcReason && (
                   <div className="text-muted" style={{ fontSize: 9, marginTop: 2, color: 'var(--color-warning)' }}>⚠ {guide.summary.stsTcReason}</div>
                 )}
@@ -1367,10 +1401,13 @@ export default function ImpactGuideSection({ analysisResult }) {
               if (d.stsTestCases.length > 0) { docStats.sts = (docStats.sts || 0) + 1; }
               if (d.sutsTestCases.length > 0) { docStats.suts = (docStats.suts || 0) + 1; }
             }
-            // SDS/SITS: 영향 함수(직접+간접)가 하나라도 있으면 검토 대상.
+            // SDS/SITS: 영향 함수(직접+간접)가 하나라도 있으면 통합 검토 대상.
+            // reviewer Finding#3: SITS를 STS 테스트케이스 유무로 세던 것은 의미 오류(SITS≠STS)이자
+            // 깨진 STS 조인을 상속(항상 0). SDS와 동일하게 영향 함수 수로 집계(통합 시험은 콜체인
+            // 상 모든 영향 함수가 재검토 대상).
             if (gd.length > 0) {
               docStats.sds = gd.length;
-              docStats.sits = gd.filter(d => d.stsTestCases.length > 0).length || 0;
+              docStats.sits = gd.length;
             }
           }
           // actions fallback(가이드 미생성 시) — actions[doc].functions를 파일영향 제외로 재집계(function_count는 전체).

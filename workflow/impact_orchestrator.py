@@ -323,6 +323,11 @@ def _load_suts_fn_tcs(
             result[name] = list(dict.fromkeys(tcs))
     if not result and flagged_fns:
         _warn("회귀 TC: 영향 함수와 SUTS 유닛명이 매칭되지 않아 재실행 TC 0(이름 규칙 확인)")
+    # reviewer Finding#5: 파서 경고(빈 TC 블록/유닛명 누락 등)를 유실하지 않고 개수를 표면화 —
+    # 일부 유닛이 조용히 누락돼 회귀 집합이 과소 산출될 수 있음을 알린다.
+    _export_warns = model.get("export_warnings") or []
+    if _export_warns:
+        _warn(f"회귀 TC: SUTS 파싱 경고 {len(_export_warns)}건(빈 TC 블록/유닛명 누락 등) — 일부 유닛 누락 가능")
     return result
 
 
