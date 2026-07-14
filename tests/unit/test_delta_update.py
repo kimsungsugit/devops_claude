@@ -379,3 +379,66 @@ def test_classify_from_diff_text_initializer_context_not_narrowable():
     ])
     _types, lcf = classify_changed_functions_from_diff_text(blob)
     assert "sources/cfg.c" not in lcf
+
+
+def test_classify_non_allowlist_return_type_signature_delete_new_not_bodied():
+    """W1(under-report): 반환타입이 프로젝트 고유(byte/UINT8/word/Std_ReturnType/typedef)여도
+    SIGNATURE/NEW/DELETE가 BODY로 오분류되지 않는다. 과거엔 닫힌 allowlist라 실 kjpds02 ~9.5%
+    함수가 유형 유실 → SDS FLAG 누락·삭제함수 impact 유실. 반환타입을 '제어키워드 아닌 식별자'로
+    구조 인식해 해결."""
+    from workflow.delta_update import classify_changed_functions_from_diff_text
+    blob = "\n".join([
+        "Index: sources/adc.c",
+        "===================================================================",
+        "--- sources/adc.c\t(revision 100)",
+        "+++ sources/adc.c\t(revision 150)",
+        "@@ -8,3 +8,3 @@ ADC_Measure(bool w)",
+        "-byte ADC_Measure(bool w)",
+        "+byte ADC_Measure(bool w, uint8 timeout)",
+        "     return 0;",
+        "Index: sources/reader.c",
+        "===================================================================",
+        "--- sources/reader.c\t(revision 100)",
+        "+++ sources/reader.c\t(revision 150)",
+        "@@ -20,4 +20,0 @@ Old_Reader(void)",
+        "-byte Old_Reader(void)",
+        "-{",
+        "-    return 42;",
+        "-}",
+        "Index: sources/lin.c",
+        "===================================================================",
+        "--- sources/lin.c\t(revision 100)",
+        "+++ sources/lin.c\t(revision 150)",
+        "@@ -3,0 +3,4 @@ (none)",
+        "+UINT8 lin_new_reader(uint8 id)",
+        "+{",
+        "+    return id;",
+        "+}",
+        "",
+    ])
+    types, _ = classify_changed_functions_from_diff_text(blob)
+    assert types.get("ADC_Measure") == "SIGNATURE", types    # byte 반환 — 과거 BODY(SDS FLAG 유실)
+    assert types.get("Old_Reader") == "DELETE", types         # byte 반환 삭제 — 과거 BODY(impact 유실)
+    assert types.get("lin_new_reader") == "NEW", types        # UINT8 반환 신규 — 과거 BODY
+
+
+def test_classify_call_and_assignment_not_misdetected_as_declaration():
+    """반환타입 broadening의 오탐 방지: 함수 호출·대입·return문은 선언(NEW/DELETE/SIGNATURE)으로
+    오인식되지 않는다(2-토큰 `<type> <name>(` 구조 + 제어키워드 negative lookahead → over-report 억제)."""
+    from workflow.delta_update import classify_changed_functions_from_diff_text
+    blob = "\n".join([
+        "Index: sources/body_only.c",
+        "===================================================================",
+        "--- sources/body_only.c\t(revision 100)",
+        "+++ sources/body_only.c\t(revision 150)",
+        "@@ -10,4 +10,5 @@ Caller_Fn(void)",
+        "     int x;",
+        "-    x = compute(a);",
+        "+    x = compute(a) + adjust(b);",
+        "+    return helper(x);",
+        "",
+    ])
+    types, _ = classify_changed_functions_from_diff_text(blob)
+    # 본문 내 호출/대입/return만 바뀐 함수 → BODY. 호출된 compute/adjust/helper를 NEW로 오탐하지 않음.
+    assert types.get("Caller_Fn") == "BODY", types
+    assert "compute" not in types and "adjust" not in types and "helper" not in types, types

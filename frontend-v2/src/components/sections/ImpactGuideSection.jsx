@@ -570,10 +570,14 @@ function renderCoverageCell(cov) {
     );
   }
   return (
-    <span title={`${metricKo} 커버리지 ${pct} (목표 100%)${typeof d === 'number' ? `, 직전 대비 ${(d * 100).toFixed(0)}%p` : ''}`}>
+    <span title={`${metricKo} 커버리지 ${pct} (목표 100%)${typeof d === 'number' ? `, 직전 대비 ${(d * 100).toFixed(0)}%p` : ''}${cov.collision_worst_copy ? ' — 이름충돌 함수의 여러 copy 중 최악(worst-copy) 값' : ''}`}>
       <span className={`pill ${cov.meets_target ? 'pill-success' : 'pill-danger'}`} style={{ fontSize: 9 }}>
         {metricKo} {pct}
       </span>
+      {cov.collision_worst_copy && (
+        <span className="pill pill-neutral" style={{ fontSize: 8, marginLeft: 3 }}
+          title="이름충돌(동명 다른 함수)의 여러 copy 중 최악 copy 커버리지 — 변경 copy를 이름만으로 특정 못 해 gap을 안전측으로 노출(어느 copy에 gap이 있어도 재검증 대상 유지)">충돌 최악</span>
+      )}
       {deltaEl}
     </span>
   );
@@ -746,6 +750,9 @@ export default function ImpactGuideSection({ analysisResult }) {
         : s.baseline_newer_than_build ? '직전 스냅샷이 더 최신 빌드 — Δ 신뢰 불가(유령 회귀)'
           : s.baseline_revision_unknown ? '스냅샷 빌드 미상 — Δ 신뢰 불가' : '',
       baselineRevision: s.baseline_revision || '',
+      // 이름충돌로 worst-copy(최악 copy) rate를 노출한 함수 수(백엔드 collision_worst_copy) — 전역
+      // max 병합의 gap 은폐를 안전측으로 대체했음을 표면화(0이면 충돌 영향 없음/단일 copy).
+      collisionWorstCopy: s.collision_worst_copy ?? 0,
     };
     const base = { evaluated: s.evaluated ?? 0, below: s.below_target ?? 0, unmeasured: s.unmeasured ?? 0, regressed: s.regressed ?? 0, hidden: 0, hadBaseline: s.had_baseline, ...evid };
     const fns = coverageGap.functions || [];
@@ -1290,6 +1297,12 @@ export default function ImpactGuideSection({ analysisResult }) {
           )}
           {!covView.hadBaseline && (
             <div className="text-muted text-sm" style={{ marginTop: 4 }}>직전 스냅샷 없음 — 이번 실행을 기준으로 저장(다음 분석부터 Δ 표시).</div>
+          )}
+          {covView.collisionWorstCopy > 0 && (
+            <div className="text-muted text-sm" style={{ marginTop: 4 }}
+              title="이름충돌(동명 다른 함수)은 여러 copy 중 최악 copy 커버리지로 표시합니다 — 변경 copy를 이름만으로 특정할 수 없어, 어느 copy에 gap이 있어도 재검증 대상으로 남깁니다(전역 max 병합의 gap 은폐 방지, 안전측).">
+              ⓘ 이름충돌 {covView.collisionWorstCopy}개 함수는 여러 copy 중 <b>최악(worst-copy)</b> 커버리지로 표시(gap 은폐 방지)
+            </div>
           )}
         </div>
       )}

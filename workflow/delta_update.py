@@ -16,15 +16,25 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 logger = logging.getLogger(__name__)
 
 
+# 반환타입 인식: 닫힌 allowlist가 아니라 "제어키워드가 아닌 식별자"로 구조 인식한다.
+# ⚠ under-report fix: 과거엔 반환타입이 `void|int|U\d+|uint\d+_t|...` 닫힌 목록이라 프로젝트 고유
+#   반환타입(byte·word·UINT8(bare)·l_u8·Std_ReturnType·Dem_ReturnType·typedef ScanState_t 등)의
+#   함수가 func_decl_names에 안 잡혀 SIGNATURE/NEW/DELETE가 전부 BODY로 오분류됐다 → (a) 시그니처
+#   변경인데 SDS 자동 FLAG 누락, (b) 삭제 함수가 by_name 부재 + DELETE 미탐으로 impact 집합에서
+#   통째 유실. 실 kjpds02 소스 함수정의의 ~9.5%가 미인식 반환타입이었다(deep-review CONFIRMED).
+# 안전성: `<type> <name>(` 2-토큰 구조라 함수 호출(1-토큰)·대입(`x = f(`)·캐스트는 자연 배제되고,
+#   `<kw> <name>(` 형태로 오탐 가능한 제어키워드(return/else/do/case ...)만 negative lookahead로
+#   차단한다. 오인식이 남더라도 방향은 과대보고(SIGNATURE/NEW/DELETE 과다 = 검토 확대 = 안전측).
+_RET_TYPE = r"(?!(?:if|for|while|switch|return|sizeof|do|else|case|goto)\b)[A-Za-z_]\w*"
 _FUNC_DECL_LINE = re.compile(
-    r"^[+-]\s*(?:static\s+)?"
-    r"(?:void|int|uint\d+_t|int\d+_t|U\d+|S\d+|bool|float|double|char|unsigned|signed|CONSTP2VAR|P2FUNC)"
+    r"^[+-]\s*(?:(?:static|extern|inline|const|volatile)\s+)*"
+    + _RET_TYPE +
     r"[\w\s\*]*\s+(\w+)\s*\(",
     re.MULTILINE,
 )
 _FUNC_PROTO_LINE = re.compile(
     r"^[+-]\s*(?:(?:extern|static|inline|volatile|const)\s+)*"
-    r"(?:void|int|uint\d+_t|int\d+_t|U\d+|S\d+|bool|float|double|char|unsigned|signed|CONSTP2VAR|P2FUNC|FUNC)"
+    + _RET_TYPE +
     r"[\w\s\*\(\),]*?\b([A-Za-z_]\w*)\s*\([^;{}]*\)\s*;",
     re.MULTILINE,
 )

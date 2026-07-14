@@ -68,7 +68,31 @@ def test_start_impact_job_without_changed_files_completes_cleanly(tmp_path, monk
 
     loaded = impact_jobs.load_job(job_id)
     assert loaded["status"] == "completed"
-    assert loaded["result"]["warnings"] == ["no changed files detected"]
+    # I2: 사유 미상(metadata 비어 있음) → 일반 '감지되지 않음' 문구.
+    assert loaded["result"]["warnings"] == ["변경 파일이 감지되지 않았습니다."]
+
+
+def test_fast_path_surfaces_changeset_vs_authoritative_reason(tmp_path, monkeypatch):
+    """I2: '0 영향'의 사유를 표면화 — 빈 Jenkins changeSet(놓쳤을 수 있음)와 권위 svn A:B(신뢰)를
+    구분한다(silent-0 정직화)."""
+    from workflow.change_trigger import ChangeTrigger
+    from workflow import impact_jobs
+
+    monkeypatch.setattr(impact_jobs, "JOB_DIR", tmp_path / "jobs")
+
+    def _run(meta):
+        created = impact_jobs.start_impact_job(ChangeTrigger(
+            trigger_type="jenkins", scm_id="hdpdm01", source_root=str(tmp_path / "src"),
+            scm_type="svn", base_ref="", changed_files=[], dry_run=True, targets=["uds"], metadata=meta,
+        ))
+        _wait_for_job(impact_jobs, created["job_id"], timeout=10)
+        return impact_jobs.load_job(created["job_id"])["result"]["warnings"]
+
+    cs = _run({"changed_files_source": "jenkins_changeset"})
+    assert any("changeSet가 비어" in w and "확인" in w for w in cs), cs  # 주의 문구
+
+    sv = _run({"changed_files_source": "svn_revision_range"})
+    assert any("권위 svn" in w and "신뢰" in w for w in sv), sv  # 신뢰 문구
 
 
 def test_start_job_generic_runs_runner_and_completes(tmp_path, monkeypatch):

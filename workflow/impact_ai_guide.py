@@ -205,9 +205,18 @@ def assess_risk(
     # Components: ASIL weight (40%), change type weight (30%), scope weight (30%)
     asil_score = _ASIL_RANK.get(max_asil, 0) * 10  # 0-40
 
+    # I1: 단순 평균은 단일 고위험 변경(SIGNATURE 가중4)을 다수 저위험(HEADER 가중1) 속에 희석한다
+    # (예: SIGNATURE 1 + HEADER 99 → avg≈1.03 → 위험 묻힘). max에 가중(0.7)해 '가장 위험한 변경'을
+    # 반영하되 avg(0.3)로 prevalence도 남긴다. 방향은 상향(과대보고=안전측), GRADE는 여전히
+    # asil_escalation이 지배(안전함수는 등급 별도 강제). scope는 아래 scope_score가 따로 반영.
     change_scores = [_CHANGE_WEIGHT.get(ct, 1) for ct in changed_types.values()]
-    avg_change = sum(change_scores) / len(change_scores) if change_scores else 0
-    change_score = min(avg_change * 7.5, 30)  # 0-30
+    if change_scores:
+        _max_change = max(change_scores)
+        _avg_change = sum(change_scores) / len(change_scores)
+        change_metric = _max_change * 0.7 + _avg_change * 0.3
+    else:
+        change_metric = 0
+    change_score = min(change_metric * 7.5, 30)  # 0-30
 
     total_impacted = len(all_impacted)
     scope_score = min(total_impacted * 3, 30)  # 0-30

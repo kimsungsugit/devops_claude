@@ -979,6 +979,28 @@ describe('ImpactGuideSection', () => {
     expect(within(stsCard).getByText('1')).toBeInTheDocument();
     expect(screen.queryByText(/⚠ STS|요구ID 매칭 0/)).not.toBeInTheDocument();
   });
+
+  // STS-IMPACT-039: 이름충돌 worst-copy 커버리지 표면화(R5 백엔드 collision_worst_copy의 프론트 절반)
+  it('커버리지: collision_worst_copy가 있으면 최악(worst-copy) 표면화 노트를 표시한다', () => {
+    const analysisResult = {
+      impactData: {
+        trigger: { changed_files: ['Eeprom.c'] },
+        changed_function_types: { eeprom_setbyte: 'BODY' },
+        actions: {},
+        impact: { direct: ['eeprom_setbyte'] },
+        function_meta: { eeprom_setbyte: { asil: 'D', evidence: 'line' } },
+        coverage_gap: {
+          available: true,
+          functions: [{ function: 'eeprom_setbyte', asil: 'D', target_metric: 'mcdc', current_rate: 0.6, meets_target: false, collision_worst_copy: true }],
+          summary: { evaluated: 1, below_target: 1, regressed: 0, had_baseline: true, collision_worst_copy: 1 },
+        },
+      },
+    };
+    render(<ImpactGuideSection job={mockJob} analysisResult={analysisResult} />);
+    // 커버리지 요약 카드에 이름충돌 worst-copy 노트(전역 max 병합의 gap 은폐 방지 표면화)
+    expect(screen.getByText(/이름충돌 1개 함수는 여러 copy 중/)).toBeInTheDocument();
+    expect(screen.getByText(/최악\(worst-copy\)/)).toBeInTheDocument();
+  });
 });
 
 describe('extractDiffElements (순수 함수)', () => {

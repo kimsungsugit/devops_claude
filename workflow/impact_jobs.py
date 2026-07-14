@@ -36,11 +36,17 @@ def _job_path(job_id: str) -> Path:
     return JOB_DIR / f"job_{safe}.json"
 
 
-def _write_job(job: Dict[str, Any]) -> Dict[str, Any]:
+def _write_job_unlocked(job: Dict[str, Any]) -> Dict[str, Any]:
+    """락 없이 job JSON을 쓴다. 호출측이 이미 _JOB_LOCK을 잡았을 때만 사용(update_job의 원자적
+    read-modify-write). 비재진입 threading.Lock이라 락 안에서 _write_job을 부르면 데드락이 되므로 분리."""
     path = _job_path(str(job.get("job_id") or ""))
-    with _JOB_LOCK:
-        path.write_text(json.dumps(job, ensure_ascii=False, indent=2), encoding="utf-8")
+    path.write_text(json.dumps(job, ensure_ascii=False, indent=2), encoding="utf-8")
     return job
+
+
+def _write_job(job: Dict[str, Any]) -> Dict[str, Any]:
+    with _JOB_LOCK:
+        return _write_job_unlocked(job)
 
 
 # running으로 남았으나 heartbeat(15s 주기)가 이 시간 이상 끊기면 프로세스 사망으로 간주.
@@ -107,33 +113,44 @@ def update_job(
     result: Optional[Dict[str, Any]] = None,
     error: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    job = _load_job_raw(job_id)  # 순수 읽기 — reap 래퍼(load_job)를 쓰면 fail_job→update_job 재귀.
-    # heartbeat(모든 필드 None인 순수 touch)가 이미 종료된 잡을 되살리지 않도록 무시.
-    # complete_job/fail_job과 heartbeat의 read-modify-write race로 completed→running 되돌림 방지(W1).
-    if (
-        job.get("status") in {"completed", "failed"}
-        and status is None and stage is None and message is None
-        and progress is None and result is None and error is None
-    ):
-        return job
-    if status is not None:
-        job["status"] = status
-        if status == "running" and not job.get("started_at"):
-            job["started_at"] = _now_iso()
-    if stage is not None:
-        job["stage"] = stage
-    if message is not None:
-        job["message"] = message
-    if progress is not None:
-        job["progress"] = dict(progress)
-    if result is not None:
-        job["result"] = result
-    if error is not None:
-        job["error"] = error
-    job["updated_at"] = _now_iso()
-    if job.get("status") in {"completed", "failed"}:
-        job["finished_at"] = _now_iso()
-    return _write_job(job)
+    # ⚠ read-modify-write 전체를 _JOB_LOCK으로 원자화한다. 과거엔 _load_job_raw(읽기)가 락 밖,
+    #   _write_job(쓰기)만 락 안이라 RMW가 비원자적이었다 → heartbeat(별도 daemon)가 running을
+    #   읽은 직후 complete_job이 completed+result를 쓰면, heartbeat가 stale running 스냅샷을 덮어써
+    #   **완료 결과가 유실되고 잡이 running으로 되돌아가 5분 뒤 orphan failed**로 관측됐다(W1 가드는
+    #   heartbeat 읽기가 이미 terminal일 때만 막아 이 창을 못 닫음). 락 안에서 읽고 쓰면 complete와
+    #   heartbeat의 RMW가 직렬화돼 창이 사라진다. (_write_job은 락을 재획득 → 비재진입 데드락이므로
+    #   _write_job_unlocked 사용.)
+    with _JOB_LOCK:
+        job = _load_job_raw(job_id)  # 순수 읽기 — reap 래퍼(load_job)는 fail_job→update_job 재귀라 금지.
+        # heartbeat(모든 필드 None인 순수 touch)가 이미 종료된 잡을 되살리지 않도록 무시.
+        if (
+            job.get("status") in {"completed", "failed"}
+            and status is None and stage is None and message is None
+            and progress is None and result is None and error is None
+        ):
+            return job
+        # 방어 심화: terminal(completed/failed)은 최종 상태 — 늦은 on_progress/heartbeat가 status를
+        # running/queued로 명시 전달해도 되돌리지 않는다(다른 필드 갱신은 허용).
+        if job.get("status") in {"completed", "failed"} and status in {"running", "queued"}:
+            status = None
+        if status is not None:
+            job["status"] = status
+            if status == "running" and not job.get("started_at"):
+                job["started_at"] = _now_iso()
+        if stage is not None:
+            job["stage"] = stage
+        if message is not None:
+            job["message"] = message
+        if progress is not None:
+            job["progress"] = dict(progress)
+        if result is not None:
+            job["result"] = result
+        if error is not None:
+            job["error"] = error
+        job["updated_at"] = _now_iso()
+        if job.get("status") in {"completed", "failed"}:
+            job["finished_at"] = _now_iso()
+        return _write_job_unlocked(job)
 
 
 def create_job(
@@ -281,6 +298,25 @@ def _run_job(job_id: str, trigger: ChangeTrigger, options: ImpactOptions) -> Non
         # 변경 파일 0 fast-path — 페이로드 shape를 정상 실행과 동일하게 채운다. 과거엔 classification/
         # function_meta/asil/coverage_gap/regression_test_set/impact_traversal이 통째로 빠져 프론트가
         # undefined를 읽고(옵셔널 체이닝에 의존) 패널이 조용히 사라졌다 — 계약 발산 방지(X3).
+        # I2(silent-0 정직화): "0 영향"의 **사유**를 표면화한다 — 권위 svn A:B 대조로 실제 변경이
+        # 없었는지(신뢰), 아니면 빈 Jenkins changeSet 폴백이었는지(재빌드/수동 트리거 시 흔하며 놓친
+        # 변경일 수 있음)를 사용자가 구분해야 한다.
+        _fp_meta = trigger.metadata or {}
+        _fp_src = str(_fp_meta.get("changed_files_source") or "").strip()
+        if _fp_src == "svn_revision_range":
+            _fp_warn = "변경 파일 없음 — 권위 svn revision-range(A:B) 대조 결과입니다(신뢰 가능한 '0 영향')."
+        elif _fp_src == "jenkins_changeset":
+            _fp_warn = (
+                "변경 파일 없음 — Jenkins changeSet가 비어 있습니다(재빌드·수동 트리거 시 흔함). "
+                "직전 빌드 이후 실제 변경이 없거나 changeSet가 미수집일 수 있으니, '0 영향'을 확정하기 전 "
+                "baseline↔build revision을 확인하세요(권위 svn A:B 대조 권장)."
+            )
+        else:
+            _fp_warn = f"변경 파일이 감지되지 않았습니다{f'(출처: {_fp_src})' if _fp_src else ''}."
+        _fp_warns = [_fp_warn]
+        _fp_skip = str(_fp_meta.get("svn_skip_reason") or "").strip()
+        if _fp_skip:
+            _fp_warns.append(f"svn 정밀 대조 생략 사유: {_fp_skip}")
         complete_job(
             job_id,
             {
@@ -291,7 +327,7 @@ def _run_job(job_id: str, trigger: ChangeTrigger, options: ImpactOptions) -> Non
                 "change_details": {},
                 "function_diffs": {},
                 "impact": {"direct": [], "indirect_1hop": [], "indirect_2hop": []},
-                "warnings": ["no changed files detected"],
+                "warnings": _fp_warns,
                 "actions": {},
                 "function_meta": {},
                 "regression_test_set": {"suts": {}, "sits": {}, "summary": {
