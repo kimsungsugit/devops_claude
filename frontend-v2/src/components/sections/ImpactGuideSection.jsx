@@ -1513,7 +1513,12 @@ export default function ImpactGuideSection({ analysisResult }) {
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
             <span className="text-sm" style={{ fontWeight: 700 }}>🔁 회귀시험 선정 (재실행 대상)</span>
             <span style={{ flex: 1 }} />
-            {(Object.keys(regressionSet.suts || {}).length > 12 || Object.keys(regressionSet.sits || {}).length > 10 || Object.keys(guideSitsMap).length > 12) && (
+            {(Object.keys(regressionSet.suts || {}).length > 12 || Object.keys(regressionSet.sits || {}).length > 10 || Object.keys(guideSitsMap).length > 12
+              // reviewer W1: 함수-개수뿐 아니라 함수당 TC/체인-개수 절단(6/4/6 초과)도 버튼 노출 조건에 포함
+              // — 소수 함수에 TC가 몰려 "+N" 힌트만 뜨고 해제 버튼이 없는 dead-end 방지.
+              || Object.values(regressionSet.suts || {}).some(v => (v || []).length > 6)
+              || Object.values(regressionSet.sits || {}).some(v => (v || []).length > 4)
+              || Object.values(guideSitsMap).some(v => (v || []).length > 6)) && (
               <button className="btn-sm" style={{ fontSize: 10, padding: '1px 6px' }}
                 onClick={() => setRegShowAll(v => !v)}
                 title="함수별 재실행 TC/체인 목록의 절단을 해제해 전체를 봅니다(스크롤).">
@@ -1574,6 +1579,9 @@ export default function ImpactGuideSection({ analysisResult }) {
                     </div>
                   </div>
                 ))}
+                {!regShowAll && Object.keys(regressionSet.sits).length > 10 && (
+                  <div className="text-muted" style={{ fontSize: 9 }}>+{Object.keys(regressionSet.sits).length - 10}개 함수 더 · 상단 &lsquo;전체 보기&rsquo;</div>
+                )}
               </div>
             </div>
           )}

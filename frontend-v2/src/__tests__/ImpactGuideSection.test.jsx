@@ -1329,12 +1329,36 @@ describe('ImpactGuideSection', () => {
       },
     };
     render(<ImpactGuideSection analysisResult={analysisResult} />);
-    // 생성 전: 백엔드 SITS 체인 0 사유 표기(guide 아직 없음)
+    // 생성 전: 백엔드 카운트 0(suts/sits) + guideSitsMap 비어 게이트 false → 회귀 패널 자체가 미노출
+    expect(screen.queryByText(/회귀시험 선정/)).not.toBeInTheDocument();
     await user.click(screen.getByText(/상세 가이드 생성/));
     // 생성 후: SwUFn 파생 SITS 섹션 + 실 TC id + 미집계 사유
     await waitFor(() => expect(screen.getByText(/SITS 재실행 TC \(함수별 · SwUFn 브리지\)/)).toBeInTheDocument());
     expect(screen.getByText('SwITC_SwUFn_0127')).toBeInTheDocument();
     expect(screen.getByText(/SITS 통합 콜체인 0/)).toBeInTheDocument();
+  });
+
+  // STS-IMPACT-050: 회귀 더보기 버튼은 함수 수뿐 아니라 함수당 TC 수 절단(>6)에도 노출된다(reviewer W1).
+  //  단일 함수에 TC가 8개 몰리면(함수 수 1≤12) 과거엔 "+2"만 뜨고 해제 버튼이 없는 dead-end였다.
+  it('회귀 더보기: 단일 함수에 TC가 6개 초과 몰려도 "전체 보기" 버튼이 노출되고 전체 TC를 편다', async () => {
+    const user = userEvent.setup();
+    const analysisResult = {
+      impactData: {
+        trigger: { changed_files: ['Ap.c'] },
+        changed_function_types: {}, impact: {}, function_meta: {},
+        regression_test_set: {
+          suts: { s_multi: ['tc1', 'tc2', 'tc3', 'tc4', 'tc5', 'tc6', 'tc7', 'tc8'] }, sits: {},
+          summary: { suts_tc_count: 8, sits_chain_count: 0, impacted_function_count: 1 },
+        },
+      },
+    };
+    render(<ImpactGuideSection analysisResult={analysisResult} />);
+    // 함수 1개(≤12)지만 함수당 TC 8개(>6)라 버튼 노출 + tc7/tc8 절단
+    expect(screen.getByRole('button', { name: /전체 보기/ })).toBeInTheDocument();
+    expect(screen.queryByText('tc7')).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: /전체 보기/ }));
+    expect(screen.getByText('tc7')).toBeInTheDocument();
+    expect(screen.getByText('tc8')).toBeInTheDocument();
   });
 });
 
