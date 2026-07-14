@@ -640,6 +640,8 @@ export default function ImpactGuideSection({ analysisResult }) {
   const [activeTab, setActiveTab] = useState('ai');
   // 문서별 상세 탭: 좌측에서 선택한 문서(uds/sts/suts/sits/sds). null이면 렌더 시 첫 '영향 있는' 문서로 확정.
   const [selectedDoc, setSelectedDoc] = useState(null);
+  // 회귀시험 패널 '전체 보기' 토글 — 기본은 상위 N개만(잘림), true면 절단 없이 전체 노출(스크롤).
+  const [regShowAll, setRegShowAll] = useState(false);
 
   // Impact data from analysis
   const changedFiles = impact?.trigger?.changed_files ?? impact?.changed_files ?? [];
@@ -687,6 +689,16 @@ export default function ImpactGuideSection({ analysisResult }) {
   }, [guide]);
   // 회귀시험 선정: 영향 함수 → 재실행 대상 SUTS TC / SITS call-chain(ISO 26262 증거).
   const regressionSet = impact?.regression_test_set ?? null;
+  // 프론트 SwUFn 브리지로 산출된 함수별 SITS TC({fn: [SwITC_SwUFn_N]}). 백엔드 regression_test_set.sits는
+  // SITS VectorCAST 중간파일(빌더 산출물) 부재 시 0이지만(cloudium 읽기전용), 함수별 상세(buildGuide)는
+  // testcase의 SwUFn을 SUTS unit으로 풀어 SITS를 직접 조인한다 → 회귀 패널에도 이 파생값을 표면화한다.
+  const guideSitsMap = useMemo(() => {
+    const m = {};
+    for (const d of (guide?.details || [])) {
+      if (d.sitsTestCases && d.sitsTestCases.length) m[d.function] = d.sitsTestCases;
+    }
+    return m;
+  }, [guide]);
   // 콜그래프 탐색 절단 — 변경 함수가 상한을 넘으면 2-hop이 '미계산'인데 빈 배열로 나와
   // "2-hop 영향 없음"으로 오독될 수 있다(백엔드 impact_traversal이 사실을 알려줌).
   const traversal = impact?.impact_traversal ?? null;
@@ -980,8 +992,11 @@ export default function ImpactGuideSection({ analysisResult }) {
       }
 
       // F1-parallel(reviewer Finding#1): SUTS unit 컬럼도 원본 케이스 → 소문자 guide fn과 조인하려면
-      // 양측 정규화 필요. 안 하면 per-function SUTS TC/docStats.suts가 조용히 0이 되어 회귀 패널
-      // (case-insensitive)과 모순되고 ISO 회귀 증거가 과소보고된다.
+      // 양측 정규화 필요. 안 하면 per-function SUTS TC가 조용히 0이 되어 ISO 회귀 증거가 과소보고된다.
+      // ⚠ 스코프 주의: 이 함수-테이블 SUTS는 추적성 '3.SW Test Spec' 시트(unit 컬럼) 기준 = 전체 영향
+      //   함수의 '보유 시험'이다. 회귀 패널 SUTS(regression_test_set.suts)는 백엔드 '2.SW Unit Test Spec'
+      //   시트의 TC 블록(base_tc_id) 보유 기준 = '재실행 대상'이라, 다른 시트·다른 기준이므로 두 수치는
+      //   구조적으로 다를 수 있다(과거 "회귀 패널과 일치해야" 단언은 오류 — 시트가 달라 일치 보장 불가).
       const fnToSutsTCs = {};
       for (const row of sutsTCs) {
         const uk = String(row.unit || '').trim().toLowerCase();
@@ -1491,40 +1506,54 @@ export default function ImpactGuideSection({ analysisResult }) {
           )}
         </div>
       )}
-      {/* 회귀시험 선정 — 영향 함수에 매핑된 기존 SUTS TC / SITS call-chain(재실행 대상 증거, ISO 26262). */}
-      {regressionSet?.summary && ((regressionSet.summary.suts_tc_count || 0) > 0 || (regressionSet.summary.sits_chain_count || 0) > 0) && (
+      {/* 회귀시험 선정 — 영향 함수에 매핑된 기존 SUTS TC / SITS call-chain(재실행 대상 증거, ISO 26262).
+          백엔드 SITS 콜체인이 0이어도(빌더 미실행) 프론트 SwUFn 파생 SITS(guideSitsMap)가 있으면 표시. */}
+      {regressionSet?.summary && ((regressionSet.summary.suts_tc_count || 0) > 0 || (regressionSet.summary.sits_chain_count || 0) > 0 || Object.keys(guideSitsMap).length > 0) && (
         <div className="panel" style={{ marginBottom: 12, borderLeft: '3px solid var(--color-info)' }}>
-          <div className="text-sm" style={{ fontWeight: 700, marginBottom: 6 }}>🔁 회귀시험 선정 (재실행 대상)</div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+            <span className="text-sm" style={{ fontWeight: 700 }}>🔁 회귀시험 선정 (재실행 대상)</span>
+            <span style={{ flex: 1 }} />
+            {(Object.keys(regressionSet.suts || {}).length > 12 || Object.keys(regressionSet.sits || {}).length > 10 || Object.keys(guideSitsMap).length > 12) && (
+              <button className="btn-sm" style={{ fontSize: 10, padding: '1px 6px' }}
+                onClick={() => setRegShowAll(v => !v)}
+                title="함수별 재실행 TC/체인 목록의 절단을 해제해 전체를 봅니다(스크롤).">
+                {regShowAll ? '접기 ⌃' : '전체 보기 ⌄'}
+              </button>
+            )}
+          </div>
           <div className="stats-row">
             <div className="stat-card">
               <div className="text-muted text-sm">영향 함수</div>
               <div style={{ fontSize: 20, fontWeight: 700 }}>{regressionSet.summary.impacted_function_count ?? 0}</div>
             </div>
-            <div className="stat-card">
+            <div className="stat-card" title="재실행 대상 = 영향 함수 중 기존 SUTS 단위 TC('2.SW Unit Test Spec' 시트의 TC 블록)를 보유한 함수. 함수별 상세의 'SUTS TC' 컬럼은 추적성('3.SW Test Spec') 시트 기준이라 더 넓을 수 있습니다(다른 시트·기준).">
               <div className="text-muted text-sm">SUTS 재실행 TC</div>
               <div style={{ fontSize: 20, fontWeight: 700 }}>{regressionSet.summary.suts_tc_count ?? 0}</div>
             </div>
-            <div className="stat-card">
+            <div className="stat-card" title="백엔드 통합 콜체인(SITS VectorCAST 중간파일 기반) 수. cloudium 읽기전용 등으로 SITS 빌더 산출물이 없으면 0 — 이 경우 함수별 SwUFn 브리지(아래) 참조.">
               <div className="text-muted text-sm">SITS 영향 체인</div>
               <div style={{ fontSize: 20, fontWeight: 700 }}>{regressionSet.summary.sits_chain_count ?? 0}</div>
+              {Object.keys(guideSitsMap).length > 0 && (
+                <div className="text-muted" style={{ fontSize: 9, marginTop: 2, color: 'var(--color-info)' }}>+ SwUFn TC {Object.keys(guideSitsMap).length}함수</div>
+              )}
             </div>
           </div>
           {Object.keys(regressionSet.suts || {}).length > 0 && (
             <div style={{ marginTop: 8 }}>
               <div className="text-sm" style={{ fontWeight: 600, marginBottom: 4 }}>SUTS 재실행 TC (함수별)</div>
-              <div style={{ maxHeight: 120, overflow: 'auto' }}>
-                {Object.entries(regressionSet.suts).slice(0, 12).map(([fn, tcs]) => (
+              <div style={{ maxHeight: regShowAll ? 360 : 120, overflow: 'auto' }}>
+                {Object.entries(regressionSet.suts).slice(0, regShowAll ? undefined : 12).map(([fn, tcs]) => (
                   <div key={fn} style={{ fontSize: 10, padding: '2px 0' }}>
                     <span style={{ fontFamily: 'monospace', fontWeight: 600 }}>{fn}</span>
                     <span className="text-muted"> — {(tcs || []).length} TC </span>
-                    {(tcs || []).slice(0, 6).map((tc, i) => (
+                    {(tcs || []).slice(0, regShowAll ? undefined : 6).map((tc, i) => (
                       <span key={i} className="pill pill-neutral" style={{ fontSize: 8, margin: 1 }}>{tc}</span>
                     ))}
-                    {(tcs || []).length > 6 && <span className="text-muted" style={{ fontSize: 8 }}> +{(tcs || []).length - 6}</span>}
+                    {!regShowAll && (tcs || []).length > 6 && <span className="text-muted" style={{ fontSize: 8 }}> +{(tcs || []).length - 6}</span>}
                   </div>
                 ))}
-                {Object.keys(regressionSet.suts).length > 12 && (
-                  <div className="text-muted" style={{ fontSize: 9 }}>+{Object.keys(regressionSet.suts).length - 12}개 함수 더</div>
+                {!regShowAll && Object.keys(regressionSet.suts).length > 12 && (
+                  <div className="text-muted" style={{ fontSize: 9 }}>+{Object.keys(regressionSet.suts).length - 12}개 함수 더 · 상단 &lsquo;전체 보기&rsquo;</div>
                 )}
               </div>
             </div>
@@ -1532,22 +1561,53 @@ export default function ImpactGuideSection({ analysisResult }) {
           {Object.keys(regressionSet.sits || {}).length > 0 && (
             <div style={{ marginTop: 8 }}>
               <div className="text-sm" style={{ fontWeight: 600, marginBottom: 4 }}>SITS 영향 call-chain (함수별)</div>
-              <div style={{ maxHeight: 140, overflow: 'auto' }}>
-                {Object.entries(regressionSet.sits).slice(0, 10).map(([fn, chains]) => (
+              <div style={{ maxHeight: regShowAll ? 360 : 140, overflow: 'auto' }}>
+                {Object.entries(regressionSet.sits).slice(0, regShowAll ? undefined : 10).map(([fn, chains]) => (
                   <div key={fn} style={{ fontSize: 10, padding: '2px 0' }}>
                     <span style={{ fontFamily: 'monospace', fontWeight: 600 }}>{fn}</span>
                     <span className="text-muted"> — {(chains || []).length} 체인</span>
                     <div style={{ marginLeft: 10 }}>
-                      {(chains || []).slice(0, 4).map((c, i) => (
+                      {(chains || []).slice(0, regShowAll ? undefined : 4).map((c, i) => (
                         <div key={i} title={c} style={{ fontSize: 9, color: 'var(--text-muted)', fontFamily: 'monospace', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>↳ {c}</div>
                       ))}
-                      {(chains || []).length > 4 && <div className="text-muted" style={{ fontSize: 9 }}>+{(chains || []).length - 4}개 더</div>}
+                      {!regShowAll && (chains || []).length > 4 && <div className="text-muted" style={{ fontSize: 9 }}>+{(chains || []).length - 4}개 더</div>}
                     </div>
                   </div>
                 ))}
               </div>
             </div>
           )}
+          {/* 프론트 SwUFn 브리지 파생 SITS TC — 백엔드 통합 콜체인이 0(빌더 미실행)이어도 함수별 상세가
+              testcase의 SwUFn을 SUTS unit으로 풀어 SITS를 직접 조인한다. 함수 테이블 'SITS TC'와 동일 소스. */}
+          {Object.keys(guideSitsMap).length > 0 && (
+            <div style={{ marginTop: 8 }}>
+              <div className="text-sm" style={{ fontWeight: 600, marginBottom: 4 }}>SITS 재실행 TC (함수별 · SwUFn 브리지)</div>
+              <div style={{ maxHeight: regShowAll ? 360 : 120, overflow: 'auto' }}>
+                {Object.entries(guideSitsMap).slice(0, regShowAll ? undefined : 12).map(([fn, tcs]) => (
+                  <div key={fn} style={{ fontSize: 10, padding: '2px 0' }}>
+                    <span style={{ fontFamily: 'monospace', fontWeight: 600 }}>{fn}</span>
+                    <span className="text-muted"> — {(tcs || []).length} TC </span>
+                    {(tcs || []).slice(0, regShowAll ? undefined : 6).map((tc, i) => (
+                      <span key={i} className="pill pill-neutral" style={{ fontSize: 8, margin: 1 }}>{tc}</span>
+                    ))}
+                    {!regShowAll && (tcs || []).length > 6 && <span className="text-muted" style={{ fontSize: 8 }}> +{(tcs || []).length - 6}</span>}
+                  </div>
+                ))}
+                {!regShowAll && Object.keys(guideSitsMap).length > 12 && (
+                  <div className="text-muted" style={{ fontSize: 9 }}>+{Object.keys(guideSitsMap).length - 12}개 함수 더 · 상단 &lsquo;전체 보기&rsquo;</div>
+                )}
+              </div>
+            </div>
+          )}
+          {/* silent-0 금지: 백엔드 통합 콜체인 0의 사유(SITS 빌더 미실행 등)를 표면화. */}
+          {(regressionSet.summary.sits_chain_count || 0) === 0 && (() => {
+            const r = impactWarnings.find(w => /SITS/i.test(w) && /(미생성|미실행|미집계|중간파일|체인)/.test(w));
+            return (
+              <div className="text-muted" style={{ fontSize: 9, marginTop: 6, color: 'var(--color-warning)' }}>
+                ⓘ SITS 통합 콜체인 0: {r || '백엔드 SITS VectorCAST 중간파일 미생성(빌더 미실행)'}{Object.keys(guideSitsMap).length > 0 ? ' — 함수별 SwUFn 브리지 TC로 보완(위)' : ''}
+              </div>
+            );
+          })()}
         </div>
       )}
       {/* Summary */}
@@ -1950,8 +2010,8 @@ export default function ImpactGuideSection({ analysisResult }) {
                 <th style={{ width: 96 }} title="ASIL 타깃 구조 커버리지(D=MC/DC, C/B=분기, A/QM=구문) 대비. Δ=직전 대비 변화">커버리지</th>
                 <th>요구사항</th>
                 <th>STS TC</th>
-                <th>SUTS TC</th>
-                <th>SITS TC</th>
+                <th title="전체 영향 함수 기준 보유 SUTS 시험(추적성 '3.SW Test Spec' 시트, unit 컬럼). 변경 함수 '재실행 대상'(기존 TC 블록 보유)은 위 회귀 패널 참조 — 다른 시트·기준이라 수치가 더 넓을 수 있음.">SUTS TC</th>
+                <th title="전체 영향 함수 기준 보유 SITS 시험(SwUFn 브리지: testcase의 SwUFn→SUTS unit). SITS는 통합시험이라 데이터가 희소할 수 있음(요구 참조가 시스템 네임스페이스면 함수 매칭 없음).">SITS TC</th>
                 <th style={{ width: 50 }}></th>
               </tr>
             </thead>
@@ -2055,6 +2115,11 @@ export default function ImpactGuideSection({ analysisResult }) {
                       <span style={{ flex: 1 }} />
                       <span className="text-muted text-sm">{docRows.length} 함수</span>
                     </div>
+                    {effSelectedDoc === 'sits' && docRows.length > 0 && (
+                      <div className="text-muted" style={{ fontSize: 10, marginBottom: 6, color: 'var(--color-warning)' }}>
+                        ⓘ 통합 영향(cross-module) 함수 기준 — &lsquo;문서 갱신 검토 대상&rsquo;이며, 실제 SITS 시험 보유는 희소합니다(함수별 &lsquo;SITS TC&rsquo; 컬럼·회귀 패널 SwUFn 참조).
+                      </div>
+                    )}
                     {docRows.length === 0 ? (
                       <div className="text-muted text-sm" style={{ padding: 12 }}>
                         이 문서에 영향 없음.

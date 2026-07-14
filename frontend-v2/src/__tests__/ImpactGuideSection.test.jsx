@@ -1271,6 +1271,71 @@ describe('ImpactGuideSection', () => {
     await waitFor(() => expect(screen.getByText('TC_FOO_A')).toBeInTheDocument());
     expect(screen.queryByText('TC_FOO_B')).not.toBeInTheDocument();
   });
+
+  // STS-IMPACT-048: 회귀시험 패널 '전체 보기' 토글 — 12개 초과 함수 목록의 절단을 해제(사용자 요청).
+  it('회귀 더보기: SUTS 재실행 함수가 12개 초과면 절단됐다가 "전체 보기"로 전부 노출된다', async () => {
+    const user = userEvent.setup();
+    const suts = {};
+    for (let i = 1; i <= 15; i++) suts[`fn_regr_${i}`] = [`SwUTC_${i}`];
+    const analysisResult = {
+      impactData: {
+        trigger: { changed_files: ['Ap.c'] },
+        changed_function_types: {},
+        impact: {},
+        function_meta: {},
+        regression_test_set: {
+          suts, sits: {},
+          summary: { suts_tc_count: 15, sits_chain_count: 0, impacted_function_count: 15 },
+        },
+      },
+    };
+    render(<ImpactGuideSection analysisResult={analysisResult} />);
+    // 초기: 12개만(fn_regr_13은 절단) + "전체 보기" 토글 노출
+    expect(screen.getByText('fn_regr_12')).toBeInTheDocument();
+    expect(screen.queryByText('fn_regr_13')).not.toBeInTheDocument();
+    expect(screen.getByText(/3개 함수 더/)).toBeInTheDocument();
+    // 전체 보기 → 13~15 노출, "더" 표기 사라짐
+    await user.click(screen.getByRole('button', { name: /전체 보기/ }));
+    expect(screen.getByText('fn_regr_13')).toBeInTheDocument();
+    expect(screen.getByText('fn_regr_15')).toBeInTheDocument();
+    expect(screen.queryByText(/개 함수 더/)).not.toBeInTheDocument();
+  });
+
+  // STS-IMPACT-049: 회귀 패널 SITS — 백엔드 통합 콜체인 0(빌더 미실행)이어도 프론트 SwUFn 파생 SITS TC를
+  //  표시하고, 0의 사유를 표면화한다(사용자 A안 + silent-0 금지).
+  it('회귀 SITS: 백엔드 체인 0이어도 SwUFn 파생 SITS TC를 회귀 패널에 표시하고 미집계 사유를 표기한다', async () => {
+    const { post } = await import('../api.js');
+    post.mockImplementation((url) => {
+      if (url === '/api/jenkins/sts/extract-traceability') {
+        return Promise.resolve({ vcast_rows: [{ unit: 's_hash', testcase: 'SwUTC_SwUFn_0127' }] });
+      }
+      if (url === '/api/jenkins/sits/extract-traceability') {
+        return Promise.resolve({ vcast_rows: [{ requirement_id: 'SYSTEMTM_1', testcase: 'SwITC_SwUFn_0127' }] });
+      }
+      return Promise.resolve({ ok: false });
+    });
+    const user = userEvent.setup();
+    const analysisResult = {
+      impactData: {
+        trigger: { changed_files: ['Ap.c'], scm_id: 'kjpds02' },
+        changed_function_types: { s_hash: 'BODY' },
+        impact: { direct: ['s_hash'] },
+        actions: {},
+        function_meta: { s_hash: { asil: 'A' } },
+        warnings: ['회귀 체인: SITS VectorCAST 중간파일 미생성(SITS 빌더 미실행) — 통합 체인 미집계'],
+        _linked_docs: { suts: 'U:/suts.xlsm', sits: 'U:/sits.xlsm' },
+        // 회귀 패널이 렌더되려면 summary 필요(백엔드 SITS 체인은 0)
+        regression_test_set: { suts: {}, sits: {}, summary: { suts_tc_count: 0, sits_chain_count: 0, impacted_function_count: 1 } },
+      },
+    };
+    render(<ImpactGuideSection analysisResult={analysisResult} />);
+    // 생성 전: 백엔드 SITS 체인 0 사유 표기(guide 아직 없음)
+    await user.click(screen.getByText(/상세 가이드 생성/));
+    // 생성 후: SwUFn 파생 SITS 섹션 + 실 TC id + 미집계 사유
+    await waitFor(() => expect(screen.getByText(/SITS 재실행 TC \(함수별 · SwUFn 브리지\)/)).toBeInTheDocument());
+    expect(screen.getByText('SwITC_SwUFn_0127')).toBeInTheDocument();
+    expect(screen.getByText(/SITS 통합 콜체인 0/)).toBeInTheDocument();
+  });
 });
 
 describe('extractDiffElements (순수 함수)', () => {
