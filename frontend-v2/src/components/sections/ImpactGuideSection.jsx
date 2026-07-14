@@ -591,6 +591,16 @@ const DOC_STATUS = {
   failed: { tone: 'danger', label: '실패' },
 };
 
+// 문서별 상세 탭 — 문서 5종 메타(마스터 목록 아이콘/라벨). buildDocumentActions 반환 키와 lockstep.
+const DOC_KEYS = ['uds', 'sts', 'suts', 'sits', 'sds'];
+const DOC_META = {
+  uds: { label: 'UDS', icon: '📘', desc: '단위 상세 설계' },
+  sts: { label: 'STS', icon: '📗', desc: 'SW 요구 기반 시험' },
+  suts: { label: 'SUTS', icon: '📙', desc: 'SW 단위시험' },
+  sits: { label: 'SITS', icon: '📕', desc: 'SW 통합시험' },
+  sds: { label: 'SDS', icon: '📋', desc: 'SW 아키텍처 설계' },
+};
+
 export default function ImpactGuideSection({ analysisResult }) {
   const toast = useToast();
 
@@ -619,6 +629,8 @@ export default function ImpactGuideSection({ analysisResult }) {
   const [showFileImpact, setShowFileImpact] = useState(false);
   // Track 2: AI 요약 ↔ 함수별 상세 탭. aiGuide 있으면 기본 'ai'(서머리 우선), 없으면 렌더 시 'fn' 강등.
   const [activeTab, setActiveTab] = useState('ai');
+  // 문서별 상세 탭: 좌측에서 선택한 문서(uds/sts/suts/sits/sds). null이면 렌더 시 첫 '영향 있는' 문서로 확정.
+  const [selectedDoc, setSelectedDoc] = useState(null);
 
   // Impact data from analysis
   const changedFiles = impact?.trigger?.changed_files ?? impact?.changed_files ?? [];
@@ -770,6 +782,42 @@ export default function ImpactGuideSection({ analysisResult }) {
       ...evid,
     };
   })();
+
+  // ── 문서별 상세 탭 (함수-우선 → 문서-우선 전치) ──────────────────────────────────────────
+  // 멤버십은 권위 백엔드 actions[doc].functions(파일영향 제외), 편집 액션은 함수 상세 모달과 동일한
+  // 결정론 헬퍼 buildDocumentActions(d)[doc]. 신규 fetch·백엔드 변경 없음(순수 재피벗).
+  const docCounts = {};
+  for (const k of DOC_KEYS) docCounts[k] = visibleNameList(actions[k]?.functions || []).length;
+  // 최초 미선택(null)일 때만 첫 '영향 있는' 문서로 폴백. 사용자가 명시적으로 고른 문서는 0-count여도
+  // 존중해 '이 문서에 영향 없음' 빈 상태를 보여준다(reviewer W7: 0-count면 조용히 튕기던 wrong-pick 제거).
+  const effSelectedDoc = selectedDoc || (DOC_KEYS.find(k => docCounts[k] > 0) || 'uds');
+  // 우측 함수행 하단 칩 — 문서 성격에 맞는 매핑만(UDS=요구, STS/SUTS=해당 TC).
+  const docChips = (doc, d) => (doc === 'uds' ? (d.requirements || []) : doc === 'sts' ? (d.stsTestCases || []) : doc === 'suts' ? (d.sutsTestCases || []) : []);
+  // 선택 문서의 함수 행(direct 우선 정렬). activeTab==='doc'일 때만 계산 — buildDocumentActions ×N 회피.
+  const docRows = useMemo(() => {
+    if (!guide || activeTab !== 'doc') return [];
+    const byLc = new Map();
+    for (const dd of guide.details) byLc.set(String(dd.function).toLowerCase(), dd);
+    let rows = (actions[effSelectedDoc]?.functions || []).map((name) => {
+      const d = byLc.get(String(name).toLowerCase()) || null;
+      if (!d) return { name, d: null, acts: [] };
+      const cd = changeDetails[String(d.function).toLowerCase()] || {};
+      const fd = functionDiffs[String(d.function).toLowerCase()] || '';
+      const pdiff = (cd.before || cd.after) ? diffSignatureParamsCached(cd.before, cd.after) : null;
+      const acts = buildDocumentActions(d, pdiff, extractDiffElementsCached(fd))[effSelectedDoc] || [];
+      return { name: d.function, d, acts };
+    });
+    // 파일영향(직접 변경·증거 없음) 제외 — filteredGuide(L778)와 동일 규칙(간접은 유지).
+    if (hideFileImpact) rows = rows.filter(r => !(r.d?.changed && functionHasNoEvidence(r.d.function, r.d.changeType, changeDetails, functionDiffs, functionMeta)));
+    rows.sort((a, b) => {
+      const ac = a.d?.changed ? 0 : 1; const bc = b.d?.changed ? 0 : 1;
+      if (ac !== bc) return ac - bc;                                   // 직접 변경 우선
+      const ao = CHANGE_ORDER[a.d?.changeType] || 0; const bo = CHANGE_ORDER[b.d?.changeType] || 0;
+      if (ao !== bo) return bo - ao;                                    // 구조적 변경(시그니처/신규/삭제) 우선
+      return String(a.name).localeCompare(String(b.name));
+    });
+    return rows;
+  }, [guide, activeTab, effSelectedDoc, actions, changeDetails, functionDiffs, functionMeta, hideFileImpact]);
 
   const filteredGuide = useMemo(() => {
     if (!guide) return [];
@@ -1145,8 +1193,11 @@ export default function ImpactGuideSection({ analysisResult }) {
     );
   }
 
-  // Track 2: AI 요약 ↔ 함수별 상세 탭. aiGuide 없으면 함수 탭으로 강등(기존 동작/테스트 회귀 최소화).
-  const effTab = (activeTab === 'ai' && aiGuide) ? 'ai' : (guide ? 'fn' : 'ai');
+  // Track 2/문서별 상세: AI 요약 ↔ 함수별 상세 ↔ 문서별 상세 탭. aiGuide 없으면 함수 탭으로 강등,
+  // doc 탭은 guide 필요(없으면 기존 체인으로 강등 — 기존 동작/테스트 회귀 최소화).
+  const effTab = (activeTab === 'ai' && aiGuide) ? 'ai'
+    : (activeTab === 'doc' && guide) ? 'doc'
+      : (guide ? 'fn' : 'ai');
   // AI 요약의 함수명 → 기존 상세 모달. guide.details의 정규(canonical) 이름으로 해석해야
   // 모달 IIFE의 exact-match find가 성립한다(미해석 이름이면 무시 = no-op, 크래시 방지).
   const resolveFnName = (name) => {
@@ -1184,6 +1235,13 @@ export default function ImpactGuideSection({ analysisResult }) {
           style={{ background: 'none', border: 'none', padding: '4px 10px', cursor: 'pointer', font: 'inherit',
             fontWeight: effTab === 'fn' ? 700 : 400, color: effTab === 'fn' ? 'var(--accent)' : 'var(--text-muted)',
             borderBottom: effTab === 'fn' ? '2px solid var(--accent)' : '2px solid transparent' }}>함수별 상세 ({guide.details.length})</button>
+      )}
+      {guide && (
+        <button type="button" onClick={() => setActiveTab('doc')}
+          title="문서별(UDS/STS/SUTS/SITS/SDS)로 어떤 함수가 어떤 편집을 요구하는지 — 함수별 상세를 문서 관점으로 전치"
+          style={{ background: 'none', border: 'none', padding: '4px 10px', cursor: 'pointer', font: 'inherit',
+            fontWeight: effTab === 'doc' ? 700 : 400, color: effTab === 'doc' ? 'var(--accent)' : 'var(--text-muted)',
+            borderBottom: effTab === 'doc' ? '2px solid var(--accent)' : '2px solid transparent' }}>문서별 상세 ({DOC_KEYS.filter(k => docCounts[k] > 0).length})</button>
       )}
       <span style={{ flex: 1 }} />
       {effTab === 'ai' && aiGuide && (
@@ -1483,36 +1541,15 @@ export default function ImpactGuideSection({ analysisResult }) {
 
         {/* Document impact status */}
         {(() => {
-          // Build doc stats from guide details or actions
-          const docStats = {};
-          if (guide) {
-            // 가이드 표(직접 변경 + 간접 영향)와 동일 스코프로 집계 — 간접 함수가 특정 문서에
-            // 매핑되면 그 문서도 '검토 필요'로 표시한다. 파일영향(무정보) 함수는 hideFileImpact면 제외.
-            const gd = hideFileImpact
-              ? guide.details.filter(d => !(d.changed && functionHasNoEvidence(d.function, d.changeType, changeDetails, functionDiffs, functionMeta)))
-              : guide.details;
-            for (const d of gd) {
-              if (d.requirements.length > 0) { docStats.uds = (docStats.uds || 0) + 1; }
-              if (d.stsTestCases.length > 0) { docStats.sts = (docStats.sts || 0) + 1; }
-              if (d.sutsTestCases.length > 0) { docStats.suts = (docStats.suts || 0) + 1; }
-            }
-            // SDS/SITS: 영향 함수(직접+간접)가 하나라도 있으면 통합 검토 대상.
-            // reviewer Finding#3: SITS를 STS 테스트케이스 유무로 세던 것은 의미 오류(SITS≠STS)이자
-            // 깨진 STS 조인을 상속(항상 0). SDS와 동일하게 영향 함수 수로 집계(통합 시험은 콜체인
-            // 상 모든 영향 함수가 재검토 대상).
-            if (gd.length > 0) {
-              docStats.sds = gd.length;
-              docStats.sits = gd.length;
-            }
-          }
-          // actions fallback(가이드 미생성 시) — actions[doc].functions를 파일영향 제외로 재집계(function_count는 전체).
-          const docActionCount = (a) => (a?.functions ? visibleNameList(a.functions).length : (a?.function_count || 0));
+          // 카운트는 문서별 상세 탭과 동일한 단일 출처(docCounts = 권위 actions[doc].functions, 파일영향
+          // 제외)로 계산 — 요약 카드 클릭→탭 이동 시 숫자 불일치 방지(reviewer W6). 과거 docStats(요구/TC
+          // 조인 성사 여부 기반)는 join-underreport라 탭 멤버십과 어긋났다. 카드 count = 탭 함수행 수.
           const docEntries = [
-            { key: 'uds', label: 'UDS', count: docStats.uds || docActionCount(actions.uds), status: actions.uds?.status },
-            { key: 'sts', label: 'STS', count: docStats.sts || docActionCount(actions.sts), status: actions.sts?.status, extra: guide ? `${guide.summary.impactedStsTCs} TC` : '' },
-            { key: 'suts', label: 'SUTS', count: docStats.suts || docActionCount(actions.suts), status: actions.suts?.status },
-            { key: 'sits', label: 'SITS', count: docStats.sits || docActionCount(actions.sits), status: actions.sits?.status },
-            { key: 'sds', label: 'SDS', count: docStats.sds || docActionCount(actions.sds), status: actions.sds?.status },
+            { key: 'uds', label: 'UDS', count: docCounts.uds, status: actions.uds?.status },
+            { key: 'sts', label: 'STS', count: docCounts.sts, status: actions.sts?.status, extra: guide ? `${guide.summary.impactedStsTCs} TC` : '' },
+            { key: 'suts', label: 'SUTS', count: docCounts.suts, status: actions.suts?.status },
+            { key: 'sits', label: 'SITS', count: docCounts.sits, status: actions.sits?.status },
+            { key: 'sds', label: 'SDS', count: docCounts.sds, status: actions.sds?.status },
           ];
           return (
             <div style={{ marginTop: 10 }}>
@@ -1526,7 +1563,14 @@ export default function ImpactGuideSection({ analysisResult }) {
                   const st = d.status ? (DOC_STATUS[d.status] || { tone: 'neutral', label: d.status })
                     : (hasImpact ? { tone: 'warning', label: '검토 필요' } : { tone: 'neutral', label: '영향 없음' });
                   return (
-                    <div key={d.key} style={{ padding: '6px 10px', borderRadius: 6, border: `1px solid ${hasImpact ? 'var(--color-warning)' : 'var(--border)'}`, background: 'var(--bg)', minWidth: 100 }}>
+                    <div key={d.key}
+                      role={guide ? 'button' : undefined}
+                      tabIndex={guide ? 0 : undefined}
+                      aria-label={guide ? `${d.label} 문서별 상세 보기` : undefined}
+                      onClick={guide ? () => { setActiveTab('doc'); setSelectedDoc(d.key); } : undefined}
+                      onKeyDown={guide ? (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setActiveTab('doc'); setSelectedDoc(d.key); } } : undefined}
+                      title={guide ? '문서별 상세 탭에서 이 문서의 함수·편집 액션 보기' : undefined}
+                      style={{ padding: '6px 10px', borderRadius: 6, border: `1px solid ${hasImpact ? 'var(--color-warning)' : 'var(--border)'}`, background: 'var(--bg)', minWidth: 100, cursor: guide ? 'pointer' : 'default' }}>
                       <div style={{ fontWeight: 700, fontSize: 12, textTransform: 'uppercase' }}>{d.label}</div>
                       <StatusBadge tone={st.tone}>{st.label}</StatusBadge>
                       {d.count > 0 && <span className="text-muted" style={{ fontSize: 10, marginLeft: 4 }}>{d.count} 함수</span>}
@@ -1818,6 +1862,111 @@ export default function ImpactGuideSection({ analysisResult }) {
               ))}
             </tbody>
           </table>
+        </div>
+        )}
+
+        {/* 문서별 상세 탭 — 좌우 마스터-디테일. actions[doc] 멤버십 × buildDocumentActions 편집 액션(전치).
+            함수명 클릭은 공유 상세 모달(아래)을 연다. */}
+        {effTab === 'doc' && (
+        <div className="panel">
+          {tabBar}
+          <div className="text-muted text-sm" style={{ margin: '2px 0 8px' }}>
+            문서별로 어떤 함수가 어떤 편집을 요구하는지 — 좌측 문서 선택, 우측 상세(함수명 클릭 시 함수별 상세 모달).
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'minmax(130px, 190px) 1fr', gap: 12, alignItems: 'start' }}>
+            {/* 좌: 문서 마스터 목록 */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+              {DOC_KEYS.map((k) => {
+                const meta = DOC_META[k];
+                const cnt = docCounts[k];
+                const st = DOC_STATUS[actions[k]?.status] || { tone: cnt ? 'warning' : 'neutral', label: cnt ? '검토 필요' : '영향 없음' };
+                const sel = effSelectedDoc === k;
+                return (
+                  <button key={k} type="button" onClick={() => setSelectedDoc(k)}
+                    aria-label={`${meta.label} 문서 선택`} aria-pressed={sel}
+                    style={{ textAlign: 'left', padding: '7px 9px', borderRadius: 6, cursor: 'pointer', font: 'inherit',
+                      border: sel ? '2px solid var(--accent)' : '1px solid var(--border)',
+                      background: sel ? 'var(--panel)' : 'var(--bg)', opacity: cnt ? 1 : 0.55 }}>
+                    <div style={{ fontWeight: 700, fontSize: 12 }}>{meta.icon} {meta.label}</div>
+                    <div style={{ fontSize: 9, color: 'var(--text-muted)' }}>{meta.desc}</div>
+                    <div style={{ marginTop: 3, display: 'flex', gap: 4, alignItems: 'center', flexWrap: 'wrap' }}>
+                      <StatusBadge tone={st.tone}>{st.label}</StatusBadge>
+                      <span className="text-muted" style={{ fontSize: 10 }}>{cnt} 함수</span>
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+            {/* 우: 선택 문서 상세 */}
+            <div style={{ minWidth: 0 }}>
+              {(() => {
+                const meta = DOC_META[effSelectedDoc];
+                const a = actions[effSelectedDoc] || {};
+                const st = DOC_STATUS[a.status] || null;
+                const sitsReason = impactWarnings.find(w => /SITS/i.test(w) && /(미집계|미생성|미실행|체인|통합)/.test(w)) || '';
+                return (
+                  <div>
+                    <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap', marginBottom: 8, paddingBottom: 6, borderBottom: '1px solid var(--border)' }}>
+                      <span style={{ fontWeight: 700, fontSize: 14 }}>{meta.icon} {meta.label}</span>
+                      <span className="text-muted text-sm">{meta.desc}</span>
+                      {st && <StatusBadge tone={st.tone}>{st.label}</StatusBadge>}
+                      {a.mode && a.mode !== '-' && (
+                        <span className={`pill ${a.mode === 'AUTO' ? 'pill-success' : 'pill-warning'}`} style={{ fontSize: 9 }}
+                          title={a.mode === 'AUTO' ? '자동 반영 대상' : '검토 후 수동 반영(FLAG)'}>{a.mode}</span>
+                      )}
+                      <span style={{ flex: 1 }} />
+                      <span className="text-muted text-sm">{docRows.length} 함수</span>
+                    </div>
+                    {docRows.length === 0 ? (
+                      <div className="text-muted text-sm" style={{ padding: 12 }}>
+                        이 문서에 영향 없음.
+                        {effSelectedDoc === 'sits' && sitsReason && <div style={{ marginTop: 4, color: 'var(--color-warning)' }}>ⓘ {sitsReason}</div>}
+                      </div>
+                    ) : (
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 8, maxHeight: '62vh', overflow: 'auto' }}>
+                        {docRows.map((row) => {
+                          const chips = row.d ? docChips(effSelectedDoc, row.d) : [];
+                          return (
+                            <div key={row.name} style={{ padding: 8, border: '1px solid var(--border)', borderRadius: 6, background: row.d?.changed ? 'var(--bg)' : 'transparent' }}>
+                              <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap', marginBottom: row.acts.length ? 5 : 0 }}>
+                                <span style={{ fontFamily: 'monospace', fontSize: 11, fontWeight: 600 }}>{renderFnRef(row.name)}</span>
+                                {row.d?.changed
+                                  ? <span className={`pill pill-${CHANGE_TYPE_TONE[row.d.changeType] || 'neutral'}`} style={{ fontSize: 8 }} title={CHANGE_TYPE_DESC[row.d.changeType] || ''}>{CHANGE_TYPE_KO[row.d.changeType] || row.d.changeType}</span>
+                                  : <span className="pill pill-neutral" style={{ fontSize: 8 }} title="직접 변경 아님 — 간접 영향(계약 유지 확인)">{row.d?.hop || '간접'}</span>}
+                                {row.d?.asil && /^[A-D]$/.test(row.d.asil) && (
+                                  <span className={`pill ${/[CD]/.test(row.d.asil) ? 'pill-danger' : 'pill-warning'}`} style={{ fontSize: 8 }}>ASIL {row.d.asil}</span>
+                                )}
+                              </div>
+                              {row.acts.length > 0 ? (
+                                <ul style={{ fontSize: 11, margin: 0, padding: 0, listStyle: 'none' }}>
+                                  {row.acts.map((act, j) => (
+                                    <li key={j} style={{ marginBottom: 4, display: 'flex', gap: 5, alignItems: 'baseline' }}>
+                                      <span className={`pill pill-${act.tone}`} style={{ fontSize: 8, flexShrink: 0, whiteSpace: 'nowrap' }}>{act.section}</span>
+                                      <span style={{ lineHeight: 1.4, minWidth: 0, overflowWrap: 'anywhere' }} title={act.title || undefined}>{renderInlineCode(act.text)}</span>
+                                    </li>
+                                  ))}
+                                </ul>
+                              ) : row.d ? (
+                                <div className="text-sm text-muted">특이 액션 없음</div>
+                              ) : (
+                                <div className="text-sm text-muted">요구/TC 매핑 미조회(함수 상세 없음)</div>
+                              )}
+                              {chips.length > 0 && (
+                                <div style={{ marginTop: 4 }}>
+                                  {chips.slice(0, 10).map(tc => <span key={tc} className="pill pill-neutral" style={{ fontSize: 8, margin: 1 }}>{tc}</span>)}
+                                  {chips.length > 10 && <span className="text-muted" style={{ fontSize: 8 }}> +{chips.length - 10}개</span>}
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
+            </div>
+          </div>
         </div>
         )}
 

@@ -1001,6 +1001,68 @@ describe('ImpactGuideSection', () => {
     expect(screen.getByText(/이름충돌 1개 함수는 여러 copy 중/)).toBeInTheDocument();
     expect(screen.getByText(/최악\(worst-copy\)/)).toBeInTheDocument();
   });
+
+  // STS-IMPACT-040: 문서별 상세 탭 — 함수-우선 데이터의 문서-우선 전치. 좌측 문서 선택 → 우측
+  // 함수·편집 액션(buildDocumentActions), 함수명 클릭 → 공유 함수 상세 모달(백엔드 변경 없음).
+  it('문서별 상세: 탭 전환·문서 선택 시 함수·편집 액션이 보이고 함수명 클릭으로 상세 모달이 열린다', async () => {
+    const { post } = await import('../api.js');
+    post.mockResolvedValue({ ok: false }); // ai-guide/uds/sts extract 스킵 → guide만(백엔드 fetch 없이)
+    const user = userEvent.setup();
+    const analysisResult = {
+      impactData: {
+        trigger: { changed_files: ['Ap.c'] },
+        changed_function_types: { g_sig_changed: 'SIGNATURE' },
+        change_details: { g_sig_changed: { before: 'void g_sig_changed(void)', after: 'void g_sig_changed(uint8_t speed)' } },
+        impact: { direct: ['g_sig_changed'] },
+        // 문서별 멤버십(권위 backend) — uds/suts에 함수 배치
+        actions: {
+          uds: { mode: 'AUTO', status: 'review_required', function_count: 1, functions: ['g_sig_changed'] },
+          suts: { mode: 'AUTO', status: 'review_required', function_count: 1, functions: ['g_sig_changed'] },
+        },
+        function_meta: { g_sig_changed: { asil: 'C', evidence: 'line' } },
+      },
+    };
+    render(<ImpactGuideSection analysisResult={analysisResult} />);
+    await user.click(screen.getByText(/상세 가이드 생성/));
+    // 문서별 상세 (2) 탭 — uds/suts 2개 문서에 영향
+    const docTab = await screen.findByRole('button', { name: /문서별 상세 \(2\)/ });
+    await user.click(docTab);
+    // 기본 선택 = 첫 영향 문서(UDS) → SIGNATURE 편집 액션(Prototype) 노출
+    expect(screen.getByText(/함수 선언을 새 시그니처로 교체/)).toBeInTheDocument();
+    // 좌측 SUTS 선택 → 우측이 SUTS 편집 액션(단위시험 관점)으로 전환(마스터-디테일)
+    await user.click(screen.getByRole('button', { name: 'SUTS 문서 선택' }));
+    expect(screen.getByText(/단위 TC 신규 필요/)).toBeInTheDocument();
+    // 함수명 클릭 → 공유 함수 상세 모달(탭 무관 오버레이)
+    await user.click(screen.getByRole('button', { name: 'g_sig_changed' }));
+    await waitFor(() => expect(screen.getByText(/✕ 닫기/)).toBeInTheDocument());
+  });
+
+  // STS-IMPACT-041: 문서별 상세 — 명시적으로 고른 0-영향 문서는 조용히 튕기지 않고 빈 상태를
+  // 보여준다(reviewer W7 wrong-pick 폴백 제거). effSelectedDoc은 null(최초)일 때만 폴백.
+  it('문서별 상세: 영향 0 문서를 직접 선택하면 다른 문서로 튕기지 않고 "영향 없음"을 보여준다', async () => {
+    const { post } = await import('../api.js');
+    post.mockResolvedValue({ ok: false });
+    const user = userEvent.setup();
+    const analysisResult = {
+      impactData: {
+        trigger: { changed_files: ['Ap.c'] },
+        changed_function_types: { g_sig_changed: 'SIGNATURE' },
+        change_details: { g_sig_changed: { before: 'void g_sig_changed(void)', after: 'void g_sig_changed(uint8_t speed)' } },
+        impact: { direct: ['g_sig_changed'] },
+        actions: { uds: { mode: 'AUTO', status: 'review_required', function_count: 1, functions: ['g_sig_changed'] } }, // sds 없음 → 0-영향
+        function_meta: { g_sig_changed: { asil: 'C' } },
+      },
+    };
+    render(<ImpactGuideSection analysisResult={analysisResult} />);
+    await user.click(screen.getByText(/상세 가이드 생성/));
+    // uds만 영향 → 문서별 상세 (1)
+    await user.click(await screen.findByRole('button', { name: /문서별 상세 \(1\)/ }));
+    expect(screen.getByText(/함수 선언을 새 시그니처로 교체/)).toBeInTheDocument(); // 기본 UDS
+    // 0-영향 SDS 직접 선택 → uds로 튕기지 않고 빈 상태(W7 fix)
+    await user.click(screen.getByRole('button', { name: 'SDS 문서 선택' }));
+    expect(screen.getByText(/이 문서에 영향 없음/)).toBeInTheDocument();
+    expect(screen.queryByText(/함수 선언을 새 시그니처로 교체/)).not.toBeInTheDocument(); // uds로 안 튕김
+  });
 });
 
 describe('extractDiffElements (순수 함수)', () => {
