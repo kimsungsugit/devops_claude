@@ -815,8 +815,9 @@ describe('ImpactGuideSection', () => {
     expect(screen.queryByText(/⚠ STS|요구ID 매칭 0/)).not.toBeInTheDocument();
   });
 
-  // STS-IMPACT-033: 라이브 kjpds02 재현 — UDS(SwSTR)·STS(SwEI) 요구 유형 상이 → 매칭 0 + 유형 힌트
-  it('검토 TC 사유: UDS(SwSTR)·STS(SwEI) 요구 유형이 달라 매칭 0 + 유형 힌트를 표시한다', async () => {
+  // STS-IMPACT-033: 라이브 kjpds02 재현 — UDS(SwSTR)·STS(SwEI) 요구 유형이 달라 직접 조인은 0이지만
+  //  SDS(SwRS 허브) 브리지(함수→SW요구)로 조인이 성립한다. 과거엔 '요구 유형 상이' 힌트만 떴다.
+  it('검토 TC 해결: UDS(SwSTR)·STS(SwEI) 유형이 달라도 SDS(SwRS 허브) 브리지로 STS TC가 조인된다', async () => {
     const { post } = await import('../api.js');
     post.mockImplementation((url) => {
       if (url === '/api/jenkins/uds/extract-mapping') {
@@ -824,6 +825,10 @@ describe('ImpactGuideSection', () => {
       }
       if (url === '/api/jenkins/sts/extract-traceability') {
         return Promise.resolve({ vcast_rows: [{ requirement_id: 'SWEI_01', testcase: 'SwTC_SwEI_01_01' }] });
+      }
+      // SDS 브리지: 함수 g_changed ↔ SW요구 SwEI_01 (STS TC가 참조하는 SwRS 계열)
+      if (url === '/api/jenkins/sds/extract-mapping') {
+        return Promise.resolve({ sds_pairs: [{ requirement_id: 'SwEI_01', component_ids: ['g_changed'] }] });
       }
       return Promise.resolve({ ok: false });
     });
@@ -835,15 +840,16 @@ describe('ImpactGuideSection', () => {
         actions: {},
         impact: { direct: ['g_changed'] },
         function_meta: { g_changed: { asil: 'A' } },
-        _linked_docs: { uds: 'U:/uds.docx', sts: 'U:/sts.xlsm' },
+        _linked_docs: { uds: 'U:/uds.docx', sts: 'U:/sts.xlsm', sds: 'U:/sds.docx' },
       },
     };
     render(<ImpactGuideSection analysisResult={analysisResult} />);
     await user.click(screen.getByText(/상세 가이드 생성/));
     await waitFor(() => expect(screen.getByText('STS 요구 TC')).toBeInTheDocument());
-    // 유형 자체가 달라(SwSTR vs SwEI) 정규화해도 매칭 0 → 사유 배지 + 유형 대비 힌트
-    expect(screen.getByText(/⚠ 요구ID 매칭 0/)).toBeInTheDocument();
-    expect(screen.getByText(/요구 유형 상이 — UDS SWSTR ↔ STS SWEI/)).toBeInTheDocument();
+    // SDS 브리지로 g_changed→SwEI_01→SwTC_SwEI_01_01 조인 → STS 요구 TC=1, 사유 배지·요구유형상이 힌트 없음
+    const stsCard = screen.getByText('STS 요구 TC').closest('.stat-card');
+    expect(within(stsCard).getByText('1')).toBeInTheDocument();
+    expect(screen.queryByText(/요구 유형 상이|⚠ STS|⚠ SDS/)).not.toBeInTheDocument();
   });
 
   // STS-IMPACT-034: SUTS unit 조인 casing(reviewer Finding#1) — 032의 SUTS 대응
@@ -1062,6 +1068,208 @@ describe('ImpactGuideSection', () => {
     await user.click(screen.getByRole('button', { name: 'SDS 문서 선택' }));
     expect(screen.getByText(/이 문서에 영향 없음/)).toBeInTheDocument();
     expect(screen.queryByText(/함수 선언을 새 시그니처로 교체/)).not.toBeInTheDocument(); // uds로 안 튕김
+  });
+
+  // STS-IMPACT-042: SDS 미연동이면 STS 요구 TC 0을 'SDS 미연동' 사유로 정직 표기(silent-0 금지).
+  //  SwRS 허브 브리지 없이는 SwSTR↔SwEI 유형 상이로 조인 불가함을 새 진단 문구로 표면화.
+  it('검토 TC 사유: SDS 미연동이면 STS 요구 TC 0을 SDS 미연동 사유로 표기한다(요구유형상이 힌트 제거)', async () => {
+    const { post } = await import('../api.js');
+    post.mockImplementation((url) => {
+      if (url === '/api/jenkins/uds/extract-mapping') {
+        return Promise.resolve({ mapping_pairs: [{ requirement_id: 'SwSTR_01', source_ids: ['g_changed'] }] });
+      }
+      if (url === '/api/jenkins/sts/extract-traceability') {
+        return Promise.resolve({ vcast_rows: [{ requirement_id: 'SWEI_01', testcase: 'SwTC_SwEI_01_01' }] });
+      }
+      return Promise.resolve({ ok: false }); // sds 미연동(mock 없음) + ai-guide skip
+    });
+    const user = userEvent.setup();
+    const analysisResult = {
+      impactData: {
+        trigger: { changed_files: ['Ap.c'], scm_id: 'kjpds02' },
+        changed_function_types: { g_changed: 'BODY' },
+        actions: {},
+        impact: { direct: ['g_changed'] },
+        function_meta: { g_changed: { asil: 'A' } },
+        _linked_docs: { uds: 'U:/uds.docx', sts: 'U:/sts.xlsm' }, // sds 미연동
+      },
+    };
+    render(<ImpactGuideSection analysisResult={analysisResult} />);
+    await user.click(screen.getByText(/상세 가이드 생성/));
+    await waitFor(() => expect(screen.getByText('STS 요구 TC')).toBeInTheDocument());
+    const stsCard = screen.getByText('STS 요구 TC').closest('.stat-card');
+    expect(within(stsCard).getByText('0')).toBeInTheDocument();
+    expect(within(stsCard).getByText(/SDS 미연동/)).toBeInTheDocument();
+    // 옛 '요구 유형 상이' 힌트는 제거됨(허브 경유로 대체)
+    expect(screen.queryByText(/요구 유형 상이/)).not.toBeInTheDocument();
+  });
+
+  // STS-IMPACT-043: SITS — 같은 SwRS 허브 브리지(SDS 함수→SW요구 → SITS TC)로 per-function SITS TC가
+  //  함수 상세 SITS 컬럼·SITS 영향 TC 카드·함수 상세 모달 칩에 표시된다(과거엔 함수별 SITS 부재).
+  it('SITS: SwRS 브리지로 per-function SITS TC가 SITS 카드와 함수 상세 모달 칩에 표시된다', async () => {
+    const { post } = await import('../api.js');
+    post.mockImplementation((url) => {
+      if (url === '/api/jenkins/sds/extract-mapping') {
+        return Promise.resolve({ sds_pairs: [{ requirement_id: 'SwEI_01', component_ids: ['g_changed'] }] });
+      }
+      if (url === '/api/jenkins/sits/extract-traceability') {
+        return Promise.resolve({ vcast_rows: [{ requirement_id: 'SwEI_01', testcase: 'SITS_TC_01' }] });
+      }
+      return Promise.resolve({ ok: false });
+    });
+    const user = userEvent.setup();
+    const analysisResult = {
+      impactData: {
+        trigger: { changed_files: ['Ap.c'], scm_id: 'kjpds02' },
+        changed_function_types: { g_changed: 'BODY' },
+        actions: {},
+        impact: { direct: ['g_changed'] },
+        function_meta: { g_changed: { asil: 'A' } },
+        _linked_docs: { sds: 'U:/sds.docx', sits: 'U:/sits.xlsm' },
+      },
+    };
+    render(<ImpactGuideSection analysisResult={analysisResult} />);
+    await user.click(screen.getByText(/상세 가이드 생성/));
+    await waitFor(() => expect(screen.getByText('SITS 영향 TC')).toBeInTheDocument());
+    // SwRS 허브(SDS g_changed→SwEI_01) → SITS(SwEI_01→SITS_TC_01) 브리지로 SITS TC=1
+    const sitsCard = screen.getByText('SITS 영향 TC').closest('.stat-card');
+    expect(within(sitsCard).getByText('1')).toBeInTheDocument();
+    // 함수 상세 모달의 SITS 검토 카드에 실제 TC id 칩 노출
+    await user.click(screen.getByRole('button', { name: '상세' }));
+    await waitFor(() => expect(screen.getByText('SITS_TC_01')).toBeInTheDocument());
+  });
+
+  // STS-IMPACT-044: SITS 미연동이면 SITS 영향 TC 0을 사유로 정직 표기(통합 콜체인 참조 안내).
+  it('SITS 사유: SITS 미연동이면 SITS 영향 TC 0을 SITS 미연동 사유로 표기한다', async () => {
+    const { post } = await import('../api.js');
+    post.mockResolvedValue({ ok: false });
+    const user = userEvent.setup();
+    const analysisResult = {
+      impactData: {
+        trigger: { changed_files: ['Ap.c'], scm_id: 'kjpds02' },
+        changed_function_types: { g_changed: 'BODY' },
+        actions: {},
+        impact: { direct: ['g_changed'] },
+        function_meta: { g_changed: { asil: 'A' } },
+        _linked_docs: { uds: 'U:/uds.docx', sts: 'U:/sts.xlsm' }, // sits/sds 미연동
+      },
+    };
+    render(<ImpactGuideSection analysisResult={analysisResult} />);
+    await user.click(screen.getByText(/상세 가이드 생성/));
+    await waitFor(() => expect(screen.getByText('SITS 영향 TC')).toBeInTheDocument());
+    const sitsCard = screen.getByText('SITS 영향 TC').closest('.stat-card');
+    expect(within(sitsCard).getByText('0')).toBeInTheDocument();
+    expect(within(sitsCard).getByText(/SITS 미연동/)).toBeInTheDocument();
+  });
+
+  // STS-IMPACT-045: SITS SwUFn(단위) 브리지 — 실 kjpds02 재현. SITS TC는 요구가 SYSTEMTM 네임스페이스라
+  //  SwRS 허브로 0이지만, testcase(SwITC_SwUFn_0127)의 SwUFn을 SUTS TC(SwUTC_SwUFn_0127, unit=함수명)로
+  //  풀어 함수에 연결한다. 이것이 실데이터에서 SITS를 채우는 유일 경로.
+  it('SITS: 요구가 SYSTEMTM이어도 testcase의 SwUFn을 SUTS unit으로 풀어 함수에 SITS TC를 연결한다', async () => {
+    const { post } = await import('../api.js');
+    post.mockImplementation((url) => {
+      // suts 경로(doc_type suts) — SwUFn을 품은 SUTS TC로 SwUFn→함수명 맵 구성
+      if (url === '/api/jenkins/sts/extract-traceability') {
+        return Promise.resolve({ vcast_rows: [{ unit: 's_hash', testcase: 'SwUTC_SwUFn_0127' }] });
+      }
+      // SITS TC 요구는 SYSTEMTM(SwRS 허브 미매칭)이지만 testcase에 SwUFn_0127 포함
+      if (url === '/api/jenkins/sits/extract-traceability') {
+        return Promise.resolve({ vcast_rows: [{ requirement_id: 'SYSTEMTM_5', testcase: 'SwITC_SwUFn_0127' }] });
+      }
+      return Promise.resolve({ ok: false });
+    });
+    const user = userEvent.setup();
+    const analysisResult = {
+      impactData: {
+        trigger: { changed_files: ['Ap.c'], scm_id: 'kjpds02' },
+        changed_function_types: { s_hash: 'BODY' },
+        actions: {},
+        impact: { direct: ['s_hash'] },
+        function_meta: { s_hash: { asil: 'A' } },
+        _linked_docs: { suts: 'U:/suts.xlsm', sits: 'U:/sits.xlsm' }, // sts/sds 없이도 SwUFn 경로로 조인
+      },
+    };
+    render(<ImpactGuideSection analysisResult={analysisResult} />);
+    await user.click(screen.getByText(/상세 가이드 생성/));
+    await waitFor(() => expect(screen.getByText('SITS 영향 TC')).toBeInTheDocument());
+    // SwUFn 단위 브리지로 SITS TC=1 (요구 경로는 SYSTEMTM이라 0, 단위 경로가 실효)
+    const sitsCard = screen.getByText('SITS 영향 TC').closest('.stat-card');
+    expect(within(sitsCard).getByText('1')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: '상세' }));
+    await waitFor(() => expect(screen.getByText('SwITC_SwUFn_0127')).toBeInTheDocument());
+  });
+
+  // STS-IMPACT-046: SwIFn(통합함수) 토큰도 매칭(reviewer W1) — 백엔드 _SWUFN_RE=Sw[UI]Fn_ parity.
+  //  SwUFn만 매칭하면 testcase에 SwIFn이 박힌 SITS TC가 조용히 누락된다.
+  it('SITS: testcase의 SwIFn(통합함수) 토큰도 SUTS unit으로 풀어 함수에 연결한다(Sw[UI]Fn parity)', async () => {
+    const { post } = await import('../api.js');
+    post.mockImplementation((url) => {
+      if (url === '/api/jenkins/sts/extract-traceability') {
+        return Promise.resolve({ vcast_rows: [{ unit: 's_integ_fn', testcase: 'SwUTC_SwIFn_0050' }] });
+      }
+      if (url === '/api/jenkins/sits/extract-traceability') {
+        return Promise.resolve({ vcast_rows: [{ requirement_id: 'SYSTEMTM_1', testcase: 'SwITC_SwIFn_0050' }] });
+      }
+      return Promise.resolve({ ok: false });
+    });
+    const user = userEvent.setup();
+    const analysisResult = {
+      impactData: {
+        trigger: { changed_files: ['Ap.c'], scm_id: 'kjpds02' },
+        changed_function_types: { s_integ_fn: 'BODY' },
+        actions: {},
+        impact: { direct: ['s_integ_fn'] },
+        function_meta: { s_integ_fn: { asil: 'A' } },
+        _linked_docs: { suts: 'U:/suts.xlsm', sits: 'U:/sits.xlsm' },
+      },
+    };
+    render(<ImpactGuideSection analysisResult={analysisResult} />);
+    await user.click(screen.getByText(/상세 가이드 생성/));
+    await waitFor(() => expect(screen.getByText('SITS 영향 TC')).toBeInTheDocument());
+    // SwIFn_0050이 양변에서 매칭돼 SITS TC=1 (SwUFn만 매칭했다면 0)
+    const sitsCard = screen.getByText('SITS 영향 TC').closest('.stat-card');
+    expect(within(sitsCard).getByText('1')).toBeInTheDocument();
+  });
+
+  // STS-IMPACT-047: 반환형 접두사 충돌(u8g_/s8g_ 같은 base로 수렴하는 별개 함수)은 alias를 만들지 않아
+  //  오귀속하지 않는다(reviewer W3, 백엔드 _alias_safe parity). 무조건 strip이면 두 함수 req가 union됨.
+  it('STS: 반환형 접두사가 충돌하는 별개 함수는 alias 미생성으로 서로의 TC가 섞이지 않는다(_alias_safe)', async () => {
+    const { post } = await import('../api.js');
+    post.mockImplementation((url) => {
+      if (url === '/api/jenkins/sds/extract-mapping') {
+        return Promise.resolve({ sds_pairs: [
+          { requirement_id: 'SwEI_01', component_ids: ['u8g_foo'] },
+          { requirement_id: 'SwEI_02', component_ids: ['s8g_foo'] },
+        ] });
+      }
+      if (url === '/api/jenkins/sts/extract-traceability') {
+        return Promise.resolve({ vcast_rows: [
+          { requirement_id: 'SwEI_01', testcase: 'TC_FOO_A' },
+          { requirement_id: 'SwEI_02', testcase: 'TC_FOO_B' },
+        ] });
+      }
+      return Promise.resolve({ ok: false });
+    });
+    const user = userEvent.setup();
+    const analysisResult = {
+      impactData: {
+        trigger: { changed_files: ['Ap.c'], scm_id: 'kjpds02' },
+        changed_function_types: { u8g_foo: 'BODY' },
+        actions: {},
+        impact: { direct: ['u8g_foo'] },
+        function_meta: { u8g_foo: { asil: 'A' } },
+        _linked_docs: { sts: 'U:/sts.xlsm', sds: 'U:/sds.docx' },
+      },
+    };
+    render(<ImpactGuideSection analysisResult={analysisResult} />);
+    await user.click(screen.getByText(/상세 가이드 생성/));
+    await waitFor(() => expect(screen.getByText('STS 요구 TC')).toBeInTheDocument());
+    // u8g_foo는 자기 TC_FOO_A만(=1). 충돌 base g_foo alias가 생겼다면 s8g_foo의 TC_FOO_B까지 2가 됨.
+    const stsCard = screen.getByText('STS 요구 TC').closest('.stat-card');
+    expect(within(stsCard).getByText('1')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: '상세' }));
+    await waitFor(() => expect(screen.getByText('TC_FOO_A')).toBeInTheDocument());
+    expect(screen.queryByText('TC_FOO_B')).not.toBeInTheDocument();
   });
 });
 

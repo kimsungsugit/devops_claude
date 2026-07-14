@@ -30,6 +30,12 @@ const DEMO_STS_TCS = [
   { requirement_id: 'SwRS_1003', testcase: 'STS_Antipinch_021' },
   { requirement_id: 'SwRS_1010', testcase: 'STS_Buzzer_030' },
 ];
+// SITS req→TC(SwRS 허브 키). 데모는 sdsPairs가 비어 UDS-경로 union(funcToReqs→SwRS_*)으로 조인된다.
+const DEMO_SITS_TCS = [
+  { requirement_id: 'SwRS_1001', testcase: 'SITS_DrvIn_Integ_001' },
+  { requirement_id: 'SwRS_1002', testcase: 'SITS_MotorSpd_Integ_005' },
+  { requirement_id: 'SwRS_1010', testcase: 'SITS_DoorState_Integ_012' },
+];
 const DEMO_SUTS_TCS = [
   { unit: 'g_DrvIn_Main', testcase: 'SUTS_DrvIn_Main_01' },
   { unit: 's_MotorSpdCtrl_AutoClose', testcase: 'SUTS_AutoClose_01' },
@@ -264,6 +270,7 @@ export function buildDocumentActions(d, pdiff, diffElems = EMPTY_DIFF_ELEMS) {
   const reqN = d.requirements?.length || 0;
   const stsN = d.stsTestCases?.length || 0;
   const sutsN = d.sutsTestCases?.length || 0;
+  const sitsN = d.sitsTestCases?.length || 0;
   const A = (section, text, tone = 'neutral', title = '') => ({ section, text, tone, title });
 
   // ── 본문 diff에서 추출한 실제 변경 요소(전역 변수·전처리) — BODY/VARIABLE 구체화 근거 ──
@@ -299,7 +306,7 @@ export function buildDocumentActions(d, pdiff, diffElems = EMPTY_DIFF_ELEMS) {
     uds.push(A('영향 확인', `직접 변경 아님(${d.hop}) — 호출 인터페이스 계약 유지 시 문서 수정 없음`, 'neutral'));
     sts.push(A('회귀', stsN ? `${stsN}개 관련 TC 재실행 판단` : '직접 매핑 TC 없음', 'neutral'));
     suts.push(A('회귀', sutsN ? `${sutsN}개 단위 TC 재실행` : '관련 단위 TC 없음', 'neutral'));
-    sits.push(A('회귀', '통합 콜체인 재실행 — 계약 유지 확인', 'neutral'));
+    sits.push(A('회귀', sitsN ? `${sitsN}개 관련 통합 TC 재실행 판단` : '통합 콜체인 재실행 — 계약 유지 확인', 'neutral'));
     sds.push(A('상호작용', 'Component Interaction(간접 호출 관계) 유효성 확인', 'neutral'));
     return { uds, sts, suts, sits, sds };
   }
@@ -423,6 +430,8 @@ export function buildDocumentActions(d, pdiff, diffElems = EMPTY_DIFF_ELEMS) {
   } else {
     sits.push(A('확인', '통합 콜체인·Param 영향 확인', 'neutral'));
   }
+  // SwRS 허브 브리지로 조인된 실제 SITS TC가 있으면 재검증 대상으로 정량 표기(STS/SUTS와 대칭).
+  if (sitsN) sits.push(A('통합 TC', `${sitsN}개 관련 SITS TC 재검증`, 'info'));
 
   // ── SDS (SW 아키텍처 설계 — 파서, 고정 섹션명 없음: 함수/모듈 매칭으로 서술) ──
   if (ct === 'SIGNATURE') {
@@ -792,7 +801,7 @@ export default function ImpactGuideSection({ analysisResult }) {
   // 존중해 '이 문서에 영향 없음' 빈 상태를 보여준다(reviewer W7: 0-count면 조용히 튕기던 wrong-pick 제거).
   const effSelectedDoc = selectedDoc || (DOC_KEYS.find(k => docCounts[k] > 0) || 'uds');
   // 우측 함수행 하단 칩 — 문서 성격에 맞는 매핑만(UDS=요구, STS/SUTS=해당 TC).
-  const docChips = (doc, d) => (doc === 'uds' ? (d.requirements || []) : doc === 'sts' ? (d.stsTestCases || []) : doc === 'suts' ? (d.sutsTestCases || []) : []);
+  const docChips = (doc, d) => (doc === 'uds' ? (d.requirements || []) : doc === 'sts' ? (d.stsTestCases || []) : doc === 'suts' ? (d.sutsTestCases || []) : doc === 'sits' ? (d.sitsTestCases || []) : []);
   // 선택 문서의 함수 행(direct 우선 정렬). activeTab==='doc'일 때만 계산 — buildDocumentActions ×N 회피.
   const docRows = useMemo(() => {
     if (!guide || activeTab !== 'doc') return [];
@@ -830,14 +839,15 @@ export default function ImpactGuideSection({ analysisResult }) {
     else if (docFilter === 'has_suts') items = items.filter(d => d.sutsTestCases.length > 0);
     // '매핑 없음'은 요구사항·STS·SUTS TC가 모두 없을 때만 — SUTS TC만 있는 함수를 '매핑 없음'으로
     // 오분류하던 버그 수정(SUTS TC도 실제 매핑 증거).
-    else if (docFilter === 'no_mapping') items = items.filter(d => d.requirements.length === 0 && d.stsTestCases.length === 0 && d.sutsTestCases.length === 0);
+    else if (docFilter === 'no_mapping') items = items.filter(d => d.requirements.length === 0 && d.stsTestCases.length === 0 && d.sutsTestCases.length === 0 && (d.sitsTestCases || []).length === 0);
     if (searchTerm.trim()) {
       const q = searchTerm.trim().toLowerCase();
       items = items.filter(d =>
         d.function.toLowerCase().includes(q) ||
         d.requirements.some(r => r.toLowerCase().includes(q)) ||
         d.stsTestCases.some(tc => tc.toLowerCase().includes(q)) ||
-        d.sutsTestCases.some(tc => tc.toLowerCase().includes(q))
+        d.sutsTestCases.some(tc => tc.toLowerCase().includes(q)) ||
+        (d.sitsTestCases || []).some(tc => tc.toLowerCase().includes(q))
       );
     }
     return items;
@@ -861,6 +871,8 @@ export default function ImpactGuideSection({ analysisResult }) {
       let udsMapping = [];
       let stsTCs = [];
       let sutsTCs = [];
+      let sdsPairs = [];   // SDS 함수↔SwRS요구 브리지(SwRS 허브 경유 — STS/SITS TC 조인의 핵심)
+      let sitsTCs = [];    // SITS req→TC (SwRS 허브 키)
       // Track 1a: 검토 TC(STS 조인) = 0일 때 사유를 정직 표시하기 위한 진단 플래그.
       let stsSheetUnrecognized = false;
 
@@ -870,6 +882,8 @@ export default function ImpactGuideSection({ analysisResult }) {
         udsMapping = DEMO_UDS_MAPPING;
         stsTCs = DEMO_STS_TCS;
         sutsTCs = DEMO_SUTS_TCS;
+        sitsTCs = DEMO_SITS_TCS;
+        // sdsPairs는 데모에서 비움 — STS/SITS 조인은 UDS-경로(funcToReqs→SwRS_*) union으로 성립.
       } else {
         // 1. UDS func→req mapping
         if (linkedDocs.uds) {
@@ -902,6 +916,23 @@ export default function ImpactGuideSection({ analysisResult }) {
             }
           } catch (e) { fetchFailures.push({ doc: 'SUTS', msg: e?.message || '조회 실패' }); }
         }
+
+        // 4. SDS 함수↔SwRS요구 브리지(SwRS 허브) — STS TC 매칭 0의 근본 해결. UDS 설계요구(SwSTR)와
+        //    STS TC 요구(SwEI)가 계열이 달라 직접 조인 0이므로, SDS의 함수명↔SW요구 매핑으로 우회한다.
+        if (linkedDocs.sds) {
+          try {
+            const d = await post('/api/jenkins/sds/extract-mapping', { sds_path: linkedDocs.sds });
+            sdsPairs = d?.sds_pairs ?? [];
+          } catch (e) { fetchFailures.push({ doc: 'SDS', msg: e?.message || '조회 실패' }); }
+        }
+
+        // 5. SITS req→TC — 같은 SwRS 허브 경유로 per-function SITS TC 조인.
+        if (linkedDocs.sits) {
+          try {
+            const d = await post('/api/jenkins/sits/extract-traceability', { path: linkedDocs.sits });
+            sitsTCs = d?.vcast_rows ?? [];
+          } catch (e) { fetchFailures.push({ doc: 'SITS', msg: e?.message || '조회 실패' }); }
+        }
       }
 
       // Build per-function guide
@@ -910,6 +941,21 @@ export default function ImpactGuideSection({ analysisResult }) {
       // 정규화 없이 조인하면 STS 키 'SWTR_1' vs UDS rid 'SwTR_1'이 영구 미스 → 검토 TC=0.
       // 조인 키만 정규화하고, 표시용(details.requirements)은 UDS 원본 케이스를 보존한다.
       const _normReq = (r) => String(r || '').replace(/\s+/g, '').toUpperCase();
+      // SDS 컴포넌트/함수명 → bridge 키 정규화. 백엔드 _sds_comp_key(report_gen/requirements.py:86)를
+      // 완전 포팅: 소문자화 → 선행 '행번호+탭' 표 아티팩트 제거 → '(' 이전만 → 배열첨자 제거 후 재trim
+      // → 선행 '_' 제거 → 순수 C 식별자만 반환(아니면 '' 폐기 — 한글 설명문 등 거짓 bridge 차단).
+      const _sdsKey = (c) => {
+        let s = String(c || '').trim().toLowerCase();
+        if (!s) return '';
+        s = s.replace(/^\d+\s*\t/, '');          // 표 파싱 아티팩트(행번호+탭)
+        s = s.split('(')[0];                      // 시그니처 조각 제거
+        s = s.replace(/\[[^\]]*\]/g, '').trim();  // 배열첨자 제거 후 재trim(공백 잔류 방지)
+        s = s.replace(/^_+/, '');                 // 선행 '_'(_entrypoint↔entrypoint)
+        return /^[a-z_][a-z0-9_]*$/.test(s) ? s : '';
+      };
+      // 반환형 헝가리안 접두사 제거(백엔드 _strip_ret_type_prefix:115). SDS 'u16s_X' ↔ 테스트 's_X'
+      // 불일치 보정용 — 완전키는 보존하고, 충돌 안전한 base만 alias로 추가(아래 sdsFuncToReqs 참조).
+      const _stripRet = (s) => s.replace(/^(?:u8|u16|u32|s8|s16|s32)(?=[sgl]_)/, '');
       // F3(reviewer sweep): funcToReqs 키는 UDS source_ids(문서 "Name" 셀 원본 케이스 — backend가
       // 소문자화하지 않는다, jenkins.py:4025 func_name 원본 보존). 반면 guide fn은 backend by_name
       // 정규화로 소문자다. 정규화 없이 조회하면 mixed-case 함수명(예 'EEPROM_SetByte')은
@@ -944,9 +990,71 @@ export default function ImpactGuideSection({ analysisResult }) {
         fnToSutsTCs[uk].add(row.testcase);
       }
 
+      // SwRS 허브 브리지: 함수(정규화) → SW요구(SwRS) 집합. SDS sds_pairs.component_ids는 컴포넌트+
+      // 인터페이스 함수명을 모두 담고(백엔드가 _sds_comp_key로 정규화), requirement_id는 SwRS 계열.
+      // _normFn으로 반환형 접두사를 수렴시켜 impact 함수명과 매칭한다.
+      // 전체 SDS 키 선스캔 후, 반환형 접두사 base가 ①단 하나의 접두사형에서만 파생되고 ②그 base가
+      // 별도 SDS 키가 아닐 때만 alias 등록(백엔드 _alias_safe, requirements.py:2078-2103). 충돌형
+      // (u8g_X·s8g_X — 반환형 다른 별개 함수)이 같은 base로 모이면 alias를 안 만들어 오귀속을 막는다.
+      const _allSdsKeys = new Set();
+      for (const p of sdsPairs) for (const c of (p.component_ids || [])) { const k = _sdsKey(c); if (k) _allSdsKeys.add(k); }
+      const _prefBaseCount = {};
+      for (const k of _allSdsKeys) { const b = _stripRet(k); if (b !== k) _prefBaseCount[b] = (_prefBaseCount[b] || 0) + 1; }
+      const _aliasSafe = new Set();
+      for (const [b, cnt] of Object.entries(_prefBaseCount)) if (cnt === 1 && !_allSdsKeys.has(b)) _aliasSafe.add(b);
+      const sdsFuncToReqs = {};
+      for (const p of sdsPairs) {
+        const rid = _normReq(p.requirement_id);
+        for (const c of (p.component_ids || [])) {
+          const key = _sdsKey(c);
+          if (!key) continue;
+          const keys = [key];                                  // 완전키는 항상 등록
+          const alias = _stripRet(key);
+          if (alias !== key && _aliasSafe.has(alias)) keys.push(alias);  // 안전 base만 alias 추가
+          for (const kk of keys) {
+            if (!sdsFuncToReqs[kk]) sdsFuncToReqs[kk] = new Set();
+            sdsFuncToReqs[kk].add(rid);
+          }
+        }
+      }
+      // SITS req→TC — reqToStsTCs와 동일 패턴(SwRS 허브 키).
+      const reqToSitsTCs = {};
+      for (const row of sitsTCs) {
+        const rid = _normReq(row.requirement_id);
+        if (!reqToSitsTCs[rid]) reqToSitsTCs[rid] = new Set();
+        reqToSitsTCs[rid].add(row.testcase);
+      }
+      // SITS는 요구가 아니라 단위(SwUFn) 기반이다 — 실 kjpds02 SITS TC는 SYSTEMTM 네임스페이스 요구만
+      // 참조해 SwRS 허브로는 0이지만, testcase ID(SwITC_SwUFn_0112)에 SwUFn(단위함수) ID를 품는다.
+      // SUTS TC(SwUTC_SwUFn_N, unit=함수명)로 SwUFn→함수명 맵을 만들어 SITS TC를 함수에 직접 연결한다
+      // (백엔드 트레이스 매트릭스의 SITS 2-hop과 동일 원리, report_gen/requirements.py:2203).
+      // 백엔드 _SWUFN_RE(requirements.py:29)·jenkins.py:1082와 동일 — SwUFn_(단위)·SwIFn_(통합) 모두.
+      const _SWUFN_RE = /Sw[UI]Fn_\d+/ig;
+      const swufnToFn = {};
+      for (const row of sutsTCs) {
+        const unit = String(row.unit || '').trim().toLowerCase();
+        if (!unit) continue;
+        for (const m of String(row.testcase || '').match(_SWUFN_RE) || []) {
+          const k = m.toUpperCase();
+          if (!swufnToFn[k]) swufnToFn[k] = new Set();
+          swufnToFn[k].add(unit);
+        }
+      }
+      const fnToSitsTCs = {};  // 함수명(lower) → Set<SITS TC>  (SwUFn 단위 경로)
+      for (const row of sitsTCs) {
+        const tc = String(row.testcase || '');
+        for (const m of tc.match(_SWUFN_RE) || []) {
+          for (const fn of (swufnToFn[m.toUpperCase()] || [])) {
+            if (!fnToSitsTCs[fn]) fnToSitsTCs[fn] = new Set();
+            fnToSitsTCs[fn].add(tc);
+          }
+        }
+      }
+
       const details = [];
       const allReqs = new Set();
       const allStsTcs = new Set();
+      const allSitsTcs = new Set();
 
       // 가이드 행 = 변경(직접) 함수 ∪ 간접 영향 함수(1/2hop). 과거엔 changed 함수만 순회해서
       // 모든 행의 hop이 'direct'로 고정 → 1-hop/2-hop 필터가 영구히 죽고, 간접 영향 ASIL 함수가
@@ -974,10 +1082,19 @@ export default function ImpactGuideSection({ analysisResult }) {
         const reqs = funcToReqs[_fnLc] ? [...funcToReqs[_fnLc]] : [];
         reqs.forEach(r => allReqs.add(r));
 
+        // STS/SITS TC 조인 요구집합 = UDS 설계요구(정규화) ∪ SDS 브리지 SwRS요구(함수→SwRS).
+        // 순수 가산(최대 recall) — UDS 경로는 데모/타 프로젝트에서 SwRS 직접 참조 시 유효, 실 kjpds02는
+        // SDS 브리지가 실효. 두 계열이 disjoint라 겹침 없음.
+        const _fk = _sdsKey(fn);
+        const joinReqs = new Set([...reqs.map(_normReq), ...(sdsFuncToReqs[_fk] || [])]);
         const stsTcSet = new Set();
-        for (const rid of reqs) {
-          (reqToStsTCs[_normReq(rid)] || new Set()).forEach(tc => { stsTcSet.add(tc); allStsTcs.add(tc); });
+        const sitsTcSet = new Set();
+        for (const rid of joinReqs) {
+          (reqToStsTCs[rid] || new Set()).forEach(tc => { stsTcSet.add(tc); allStsTcs.add(tc); });
+          (reqToSitsTCs[rid] || new Set()).forEach(tc => { sitsTcSet.add(tc); allSitsTcs.add(tc); });
         }
+        // SITS 단위(SwUFn) 경로 — 요구 경로와 union. SITS는 통합-단위 기반이라 실데이터에선 이 경로가 실효.
+        (fnToSitsTCs[_fnLc] || new Set()).forEach(tc => { sitsTcSet.add(tc); allSitsTcs.add(tc); });
 
         const sutsTcList = fnToSutsTCs[_fnLc] ? [...fnToSutsTCs[_fnLc]] : [];
         const hop = (activeImpactGroups.direct || []).includes(fn) ? 'direct'
@@ -995,15 +1112,24 @@ export default function ImpactGuideSection({ analysisResult }) {
           requirements: reqs,
           stsTestCases: [...stsTcSet],
           sutsTestCases: sutsTcList,
+          sitsTestCases: [...sitsTcSet],
         });
       }
       // 직접(변경) → 1-hop → 2-hop 순으로 정렬(변경 함수 우선 노출), 동일 hop은 함수명순.
       const HOP_RANK = { direct: 0, '1-hop': 1, '2-hop': 2 };
       details.sort((a, b) => (HOP_RANK[a.hop] - HOP_RANK[b.hop]) || a.function.localeCompare(b.function));
 
-      // Track 1a: 검토 TC=0을 bare 0 대신 사유로 정직 표시(silent 0 금지). 연동/시트/매칭 단계 구분.
+      // Track 1a: 검토 TC=0을 bare 0 대신 사유로 정직 표시(silent 0 금지). 연동/시트/브리지 단계 구분.
+      // STS/SITS TC는 이제 SwRS 허브(SDS 함수↔SW요구 브리지) 경유로 조인되므로, 0의 사유도 STS 시트
+      // 단계 → SDS 브리지 단계 순으로 좁혀 표기한다. (과거 '요구 유형 상이 … 허브 경유 필요' 힌트는
+      // 실제로 허브를 경유하게 됐으므로 제거.)
+      const _sdsBridgeReason = () => {
+        if (!linkedDocs.sds) return 'SDS 미연동 (SwRS 허브 브리지 불가)';
+        if (fetchFailures.some(f => f.doc === 'SDS')) return 'SDS 조회 실패 (SwRS 허브 브리지 불가)';
+        if (sdsPairs.length === 0) return 'SDS 매핑 0 (함수↔SW요구 브리지 없음)';
+        return null;
+      };
       let stsTcReason = null;
-      let stsTcHint = '';
       if (!demoMode && allStsTcs.size === 0) {
         if (!linkedDocs.sts) stsTcReason = 'STS 미연동';
         else if (fetchFailures.some(f => f.doc === 'STS')) stsTcReason = 'STS 조회 실패';
@@ -1011,17 +1137,17 @@ export default function ImpactGuideSection({ analysisResult }) {
         // reviewer Finding#7: 시트를 못 찾은 경우(available_sheets 반환)만 '미인식'. 시트는 인식됐으나
         // 매핑 행이 0인 경우는 별도 사유로 구분(정직성).
         else if (stsTCs.length === 0) stsTcReason = 'STS 매핑 0 (시트 인식·행 없음)';
-        else {
-          stsTcReason = '요구ID 매칭 0';
-          // 라이브 진단(kjpds02): UDS는 SwSTR 구조요구 참조, STS는 SwEI/SwNTR 소프트웨어요구
-          // 참조 — 요구 유형(prefix) 자체가 달라 직접 매칭 불가. 유형 대비를 노출해 원인 명시.
-          const _pfx = (r) => (String(r).match(/^(Sw[A-Za-z]+)/i) || [null, ''])[1].toUpperCase();
-          const udsTypes = [...new Set([...allReqs].map(_pfx).filter(Boolean))].sort();
-          const stsTypes = [...new Set(stsTCs.map((r) => _pfx(r.requirement_id)).filter(Boolean))].sort();
-          if (udsTypes.length && stsTypes.length && !udsTypes.some((t) => stsTypes.includes(t))) {
-            stsTcHint = `요구 유형 상이 — UDS ${udsTypes.join('·')} ↔ STS ${stsTypes.join('·')} (직접 매칭 불가, SwRS 허브 경유 필요)`;
-          }
-        }
+        else stsTcReason = _sdsBridgeReason() || 'SDS 브리지 매핑 0 (영향 함수가 SDS 컴포넌트 미포함)';
+      }
+      // SITS TC 사유 — STS와 대칭(같은 SwRS 브리지). 0이어도 통합 콜체인(회귀 패널)이 보완.
+      let sitsTcReason = null;
+      if (!demoMode && allSitsTcs.size === 0) {
+        if (!linkedDocs.sits) sitsTcReason = 'SITS 미연동';
+        else if (fetchFailures.some(f => f.doc === 'SITS')) sitsTcReason = 'SITS 조회 실패';
+        else if (sitsTCs.length === 0) sitsTcReason = 'SITS 매핑 0 (시트 인식·행 없음)';
+        // SITS는 SwRS 허브(요구) ∪ SwUFn(단위) 이중 브리지로 조인. 둘 다 0이면 통합케이스가 영향 함수와
+        // 무관(요구가 시스템 네임스페이스거나 단위 불일치) — 통합 콜체인이 보완 신호.
+        else sitsTcReason = '영향 함수에 매칭되는 SITS 통합케이스 없음 — 통합 콜체인 참조';
       }
       setGuide({
         details,
@@ -1029,8 +1155,9 @@ export default function ImpactGuideSection({ analysisResult }) {
         summary: {
           impactedReqs: allReqs.size,
           impactedStsTCs: allStsTcs.size,
+          impactedSitsTCs: allSitsTcs.size,
           stsTcReason,
-          stsTcHint,
+          sitsTcReason,
         },
       });
 
@@ -1132,11 +1259,11 @@ export default function ImpactGuideSection({ analysisResult }) {
     }
     if (guide?.details?.length) {
       L.push('', '## 함수별 영향 가이드 (직접 변경 + 간접 영향)');
-      L.push('| 함수 | 변경 | ASIL | 영향 | 요구사항 | STS TC | SUTS TC |');
-      L.push('|------|------|------|------|----------|--------|---------|');
+      L.push('| 함수 | 변경 | ASIL | 영향 | 요구사항 | STS TC | SUTS TC | SITS TC |');
+      L.push('|------|------|------|------|----------|--------|---------|---------|');
       for (const d of guide.details) {
         const chLabel = d.changed ? (CHANGE_TYPE_KO[d.changeType] || d.changeType) : '영향(간접)';
-        L.push(`| \`${d.function}\` | ${chLabel} | ${d.asil || '미상'} | ${d.hop} | ${(d.requirements || []).join(' ') || '-'} | ${(d.stsTestCases || []).length} | ${(d.sutsTestCases || []).length} |`);
+        L.push(`| \`${d.function}\` | ${chLabel} | ${d.asil || '미상'} | ${d.hop} | ${(d.requirements || []).join(' ') || '-'} | ${(d.stsTestCases || []).length} | ${(d.sutsTestCases || []).length} | ${(d.sitsTestCases || []).length} |`);
       }
     }
     if (aiGuide?.risk) {
@@ -1525,14 +1652,19 @@ export default function ImpactGuideSection({ analysisResult }) {
                 <div className="stat-label">영향 요구사항</div>
               </div>
               <div className="stat-card" style={{ borderLeft: '3px solid var(--color-info)' }}
-                title={guide.summary.stsTcReason ? `STS 요구 TC 0 사유: ${guide.summary.stsTcReason}${guide.summary.stsTcHint ? ` — ${guide.summary.stsTcHint}` : ' — STS 요구사항↔TC 조인이 성립하지 않아 재검토 대상 TC를 셀 수 없습니다.'} (함수 단위 회귀는 위 회귀 SUTS/SITS 참조)` : 'STS 요구사항 기반 시험 TC(요구 유형이 UDS와 같아야 조인). 함수 단위 회귀는 회귀 SUTS/SITS 참조.'}>
+                title={guide.summary.stsTcReason ? `STS 요구 TC 0 사유: ${guide.summary.stsTcReason} (함수 단위 회귀는 회귀 SUTS/SITS 참조)` : 'STS 요구 기반 시험 TC — SDS(SwRS 허브) 브리지로 함수→SW요구→STS TC를 조인. 0이면 사유 표기.'}>
                 <div className="stat-value">{guide.summary.impactedStsTCs}</div>
                 <div className="stat-label">STS 요구 TC</div>
                 {guide.summary.impactedStsTCs === 0 && guide.summary.stsTcReason && (
                   <div className="text-muted" style={{ fontSize: 9, marginTop: 2, color: 'var(--color-warning)' }}>⚠ {guide.summary.stsTcReason}</div>
                 )}
-                {guide.summary.impactedStsTCs === 0 && guide.summary.stsTcHint && (
-                  <div className="text-muted" style={{ fontSize: 8, marginTop: 1, lineHeight: 1.3, overflowWrap: 'anywhere' }}>{guide.summary.stsTcHint}</div>
+              </div>
+              <div className="stat-card" style={{ borderLeft: '3px solid var(--color-info)' }}
+                title={guide.summary.sitsTcReason ? `SITS 영향 TC 0 사유: ${guide.summary.sitsTcReason} (통합 콜체인은 위 회귀 SITS 체인 참조)` : 'SITS 통합시험 TC — SwRS 허브(함수→SW요구) 브리지 ∪ SwUFn 단위 브리지(testcase의 SwUFn→SUTS unit)로 조인. 통합 콜체인은 회귀 SITS 체인 참조.'}>
+                <div className="stat-value">{guide.summary.impactedSitsTCs ?? 0}</div>
+                <div className="stat-label">SITS 영향 TC</div>
+                {(guide.summary.impactedSitsTCs ?? 0) === 0 && guide.summary.sitsTcReason && (
+                  <div className="text-muted" style={{ fontSize: 9, marginTop: 2, color: 'var(--color-warning)' }}>⚠ {guide.summary.sitsTcReason}</div>
                 )}
               </div>
             </>
@@ -1548,7 +1680,7 @@ export default function ImpactGuideSection({ analysisResult }) {
             { key: 'uds', label: 'UDS', count: docCounts.uds, status: actions.uds?.status },
             { key: 'sts', label: 'STS', count: docCounts.sts, status: actions.sts?.status, extra: guide ? `${guide.summary.impactedStsTCs} TC` : '' },
             { key: 'suts', label: 'SUTS', count: docCounts.suts, status: actions.suts?.status },
-            { key: 'sits', label: 'SITS', count: docCounts.sits, status: actions.sits?.status },
+            { key: 'sits', label: 'SITS', count: docCounts.sits, status: actions.sits?.status, extra: guide ? `${guide.summary.impactedSitsTCs ?? 0} TC` : '' },
             { key: 'sds', label: 'SDS', count: docCounts.sds, status: actions.sds?.status },
           ];
           return (
@@ -1774,7 +1906,7 @@ export default function ImpactGuideSection({ analysisResult }) {
           {/* 추출 실패 표면화 — 매핑이 실제보다 적게 보일 수 있음을 지속 노출(토스트는 사라짐) */}
           {guide.fetchFailures?.length > 0 && (
             <div className="text-sm" style={{ margin: '4px 0 8px', padding: '6px 10px', borderLeft: '3px solid var(--color-warning)', background: 'var(--bg)', borderRadius: 4 }}>
-              ⚠️ {guide.fetchFailures.map(f => f.doc).join(', ')} 매핑 조회 실패 — 아래 요구사항/STS/SUTS TC 매핑이 실제보다 적게 보일 수 있습니다('매핑 없음' ≠ 확정 부재). 문서 경로/권한을 확인 후 다시 생성하세요.
+              ⚠️ {guide.fetchFailures.map(f => f.doc).join(', ')} 매핑 조회 실패 — 아래 요구사항/STS/SUTS/SITS TC 매핑(및 SDS SwRS 허브 브리지)이 실제보다 적게 보일 수 있습니다('매핑 없음' ≠ 확정 부재). 문서 경로/권한을 확인 후 다시 생성하세요.
             </div>
           )}
 
@@ -1819,6 +1951,7 @@ export default function ImpactGuideSection({ analysisResult }) {
                 <th>요구사항</th>
                 <th>STS TC</th>
                 <th>SUTS TC</th>
+                <th>SITS TC</th>
                 <th style={{ width: 50 }}></th>
               </tr>
             </thead>
@@ -1850,6 +1983,11 @@ export default function ImpactGuideSection({ analysisResult }) {
                   <td style={{ fontSize: 10 }}>
                     {d.sutsTestCases.length > 0
                       ? <span className="pill pill-info" style={{ fontSize: 9 }}>{d.sutsTestCases.length} TC</span>
+                      : <span className="text-muted">-</span>}
+                  </td>
+                  <td style={{ fontSize: 10 }}>
+                    {(d.sitsTestCases || []).length > 0
+                      ? <span className="pill pill-info" style={{ fontSize: 9 }}>{d.sitsTestCases.length} TC</span>
                       : <span className="text-muted">-</span>}
                   </td>
                   <td>
@@ -1989,7 +2127,7 @@ export default function ImpactGuideSection({ analysisResult }) {
               { key: 'uds', icon: '📘', title: 'UDS 업데이트', note: d.requirements.length ? `관련 요구사항: ${d.requirements.slice(0, 5).join(', ')}${d.requirements.length > 5 ? ` +${d.requirements.length - 5}개` : ''}` : '' },
               { key: 'sts', icon: '📗', title: 'STS 검토', chips: d.stsTestCases },
               { key: 'suts', icon: '📙', title: 'SUTS 업데이트', chips: d.sutsTestCases },
-              { key: 'sits', icon: '📕', title: 'SITS 검토', note: '통합 콜체인·Input/Expected Param' },
+              { key: 'sits', icon: '📕', title: 'SITS 검토', chips: d.sitsTestCases || [], note: '통합 콜체인·Input/Expected Param' },
               { key: 'sds', icon: '📋', title: 'SDS 확인', note: 'SW 아키텍처 설계' },
             ];
             const exp = explain.fn === d.function ? explain : { text: '', loading: false, error: '' };
