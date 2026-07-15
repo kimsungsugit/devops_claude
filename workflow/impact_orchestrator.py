@@ -174,12 +174,20 @@ def _load_uds_fn_details(
         key = fn.strip().lower()
         info = by_name.get(key) or {}
         if info:
+            # 문서 매칭용으로 surface 필드 확장(라운드: 실제 문서 내용 표시) — 기존 소비처는
+            # description/inputs/outputs/asil/related만 읽으므로 추가 필드는 순수 additive(무회귀).
+            _g = list(info.get("globals_global") or []) + list(info.get("globals_static") or [])
+            _c = list(info.get("calls_list") or []) + list(info.get("called") or [])
             result[fn] = {
                 "description": str(info.get("description") or ""),
                 "inputs": info.get("inputs") or [],
                 "outputs": info.get("outputs") or [],
                 "asil": str(info.get("asil") or ""),
                 "related": str(info.get("related") or ""),
+                "prototype": str(info.get("prototype") or ""),
+                "precondition": str(info.get("precondition") or ""),
+                "globals": [str(x)[:60] for x in _g if str(x).strip()],
+                "calls": [str(x)[:60] for x in _c if str(x).strip()],
             }
     return result
 
@@ -311,9 +319,14 @@ def _enrich_asil_from_uds(by_name: Dict[str, Any], uds_path: str) -> tuple[int, 
 
 
 def _load_suts_fn_tcs(
-    linked_doc: str, flagged_fns: List[str], warn_sink: Optional[List[str]] = None
+    linked_doc: str, flagged_fns: List[str], warn_sink: Optional[List[str]] = None,
+    content_sink: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, List[str]]:
     """Return {fn_name: [tc_id, ...]} by parsing the existing SUTS xlsm.
+
+    content_sink(선택): 제공되면 {fn: [{tc_id, action, precondition, inputs, expected}]}로
+    실제 TC 내용(Test Action·실입력·실기대값)을 채운다 — 문서 카드에 '예측' 대신 실 내용 표시용.
+    회귀 집계(return {fn:[tc_id]})는 불변(순수 additive).
 
     ⚠ cloudium(U:\\)에서는 backend가 파일을 직접 열 수 없다 — 과거 `load_workbook(linked_doc)`
     직접 open은 `_safe_exists`가 PermissionError→False로 걸러 **조용히 0**(회귀 TC 미집계)을
@@ -348,13 +361,41 @@ def _load_suts_fn_tcs(
     except Exception:
         _warn("회귀 TC: SUTS 파싱 실패 — 재실행 TC 미집계")
         return {}
+    def _cap_kv(d: Any, n: int = 5) -> Dict[str, str]:
+        # {header: value} 중 비어있지 않은 상위 n개를 문자열 80자로 절단(job 크기 상한).
+        out: Dict[str, str] = {}
+        for k, v in list((d or {}).items()):
+            sv = str(v).strip()
+            if not sv:
+                continue
+            out[str(k)[:60]] = sv[:80]
+            if len(out) >= n:
+                break
+        return out
+
     result: Dict[str, List[str]] = {}
     for unit in model.get("units") or []:
         name = str(unit.get("unit_name") or "").strip()
         # each test_case row carries base_tc_id (the TC block identifier)
-        tcs = [str(tc.get("base_tc_id") or "") for tc in unit.get("test_cases") or [] if tc.get("base_tc_id")]
+        _seqs = unit.get("test_cases") or []
+        tcs = [str(tc.get("base_tc_id") or "") for tc in _seqs if tc.get("base_tc_id")]
         if name and tcs:
             result[name] = list(dict.fromkeys(tcs))
+            # 실 TC 내용 보존(문서 카드용) — 함수당 상위 3 시퀀스, action 300자.
+            if content_sink is not None:
+                seqs_out = []
+                for tc in _seqs[:3]:
+                    action = str(tc.get("description") or "").strip()
+                    pre = str(tc.get("precondition") or "").strip()
+                    seqs_out.append({
+                        "tc_id": str(tc.get("base_tc_id") or ""),
+                        "action": action[:300],
+                        "precondition": pre[:200],
+                        "inputs": _cap_kv(tc.get("inputs")),
+                        "expected": _cap_kv(tc.get("expected")),
+                    })
+                if seqs_out:
+                    content_sink[name] = seqs_out
     if not result and flagged_fns:
         _warn("회귀 TC: 영향 함수와 SUTS 유닛명이 매칭되지 않아 재실행 TC 0(이름 규칙 확인)")
     # reviewer Finding#5: 파서 경고(빈 TC 블록/유닛명 누락 등)를 유실하지 않고 개수를 표면화 —
@@ -363,6 +404,126 @@ def _load_suts_fn_tcs(
     if _export_warns:
         _warn(f"회귀 TC: SUTS 파싱 경고 {len(_export_warns)}건(빈 TC 블록/유닛명 누락 등) — 일부 유닛 누락 가능")
     return result
+
+
+# 링크 UDS docx를 worker로 1회 읽어 parse_swuds_docx 내용({name: {description, heading}})을 캐시.
+# 대형 docx(수십MB) 재-read/재파싱 회피(_UDS_NAME_ASIL_CACHE와 동일 원칙, 경로 키).
+_UDS_CONTENT_CACHE: Dict[str, Dict[str, Dict[str, Any]]] = {}
+
+
+def _load_uds_fn_content(
+    uds_path: str, flagged_fns: List[str], warn_sink: Optional[List[str]] = None
+) -> Dict[str, Dict[str, Any]]:
+    """함수별 UDS 실 내용({fn(lower): {description, heading, prototype, globals[], calls[]}}).
+
+    사이드카(생성 UDS, 로컬 `<docx>.payload.json`)의 풍부 필드를 우선하고, 없으면(=cloudium 링크
+    문서 대다수) 링크 docx를 worker(`get_resolver().read_bytes`)로 읽어 parse_swuds_docx의
+    heading+description으로 보완한다. 문서 카드에 '예측' 대신 실 내용 표시용. 실패는 빈 dict(비차단)이되
+    사유는 warn_sink로 표면화('미파싱'이 진짜 미연동인지 접근/파싱 실패인지 구분 — reviewer W3)."""
+    if not uds_path:
+        return {}
+
+    def _warn(msg: str) -> None:
+        if warn_sink is not None:
+            warn_sink.append(msg)
+    fset = {str(f).strip().lower() for f in flagged_fns}
+    out: Dict[str, Dict[str, Any]] = {}
+    # 1) 사이드카 — 풍부(description/prototype/globals/calls). cloudium 링크문서엔 대개 없음.
+    try:
+        for fn, d in (_load_uds_fn_details(uds_path, flagged_fns) or {}).items():
+            entry = {
+                "description": str(d.get("description") or "").strip()[:300],
+                "prototype": str(d.get("prototype") or "").strip()[:200],
+                "globals": [str(x) for x in (d.get("globals") or [])][:10],
+                "calls": [str(x) for x in (d.get("calls") or [])][:10],
+            }
+            if entry["description"] or entry["prototype"] or entry["globals"] or entry["calls"]:
+                out[str(fn).strip().lower()] = entry
+    except Exception:
+        pass
+    # 2) parse_swuds_docx(worker) — heading+description으로 미충족 함수 보완(경로 캐시).
+    _missing = fset - set(out.keys())
+    if _missing:
+        _entries = _UDS_CONTENT_CACHE.get(uds_path)
+        if _entries is None:
+            _entries = {}
+            try:
+                from backend.services.file_resolver import get_resolver
+                data = get_resolver().read_bytes(uds_path)
+                if data:
+                    from backend.services.swut_swuds_parser import parse_swuds_docx
+                    res = parse_swuds_docx(data)
+                    for e in (res.entries or []):
+                        n = str(getattr(e, "name", "") or "").strip().lower()
+                        if not n:
+                            continue
+                        desc = str(getattr(e, "description", "") or "").strip()
+                        head = str(getattr(e, "heading_text", "") or "").strip()
+                        if desc or head:
+                            _entries[n] = {"description": desc[:300], "heading": head[:120]}
+                if not _entries:
+                    # 파싱은 됐으나 내용 0 — heading-less 레이아웃 등(예: kjpds02 UDS). 정직 사유.
+                    _warn("문서 내용: UDS heading 파서가 내용을 추출하지 못함(heading-less 레이아웃/사이드카 부재) — UDS 카드는 '미파싱' 표기")
+            except Exception:
+                _entries = {}
+                _warn("문서 내용: UDS 접근/파싱 실패(cloudium worker/파서 예외) — UDS 카드 '미파싱'")
+            _UDS_CONTENT_CACHE[uds_path] = _entries
+        for n in _missing:
+            if n in _entries:
+                out[n] = _entries[n]
+    return out
+
+
+def _load_sds_fn_desc(
+    sds_path: str, flagged_fns: List[str], warn_sink: Optional[List[str]] = None
+) -> Dict[str, str]:
+    """함수/컴포넌트별 SDS 설명({key(lower): description}). worker bytes→tmp→_extract_sds_partition_map
+    (report_gen). 영향 함수명과 매칭되는 항목만 반환. cloudium 직접 open 금지(bytes→tmp). 실패는 빈 dict이되
+    사유는 warn_sink로 표면화(reviewer W3 — 정직성)."""
+    if not sds_path:
+        return {}
+
+    def _warn(msg: str) -> None:
+        if warn_sink is not None:
+            warn_sink.append(msg)
+
+    try:
+        from backend.services.file_resolver import get_resolver
+        data = get_resolver().read_bytes(sds_path)
+    except Exception:
+        _warn("문서 내용: SDS 접근 실패(cloudium worker 미기동/권한) — SDS 카드 '미파싱'")
+        return {}
+    if not data:
+        return {}
+    import os
+    import tempfile
+    tmp_path = ""
+    pm: Dict[str, Dict[str, str]] = {}
+    try:
+        from report_gen.requirements import _extract_sds_partition_map
+        with tempfile.NamedTemporaryFile(suffix=".docx", delete=False) as f:
+            f.write(data)
+            tmp_path = f.name
+        pm = _extract_sds_partition_map(tmp_path) or {}
+    except Exception:
+        _warn("문서 내용: SDS 파싱 실패 — SDS 카드 '미파싱'")
+        pm = {}
+    finally:
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+    fset = {str(f).strip().lower() for f in flagged_fns}
+    out: Dict[str, str] = {}
+    for key, info in pm.items():
+        k = str(key).strip().lower()
+        if k not in fset:
+            continue
+        desc = str((info or {}).get("description") or "").strip()
+        if desc:
+            out[k] = desc[:300]
+    return out
 
 
 def _load_sits_fn_chains(
@@ -1621,9 +1782,11 @@ def run_impact_update(
         _lk = entry.linked_docs if entry else None
         _flagged = sorted(_impacted_all | _changed_set)
         regression_test_set: Dict[str, Any] = {"suts": {}, "sits": {}}
+        _suts_content: Dict[str, Any] = {}  # SUTS TC 실내용(문서 카드용) — _load_suts_fn_tcs가 채움
         try:
             if _lk and getattr(_lk, "suts", ""):
-                regression_test_set["suts"] = _load_suts_fn_tcs(_lk.suts, _flagged, warn_sink=warnings)
+                regression_test_set["suts"] = _load_suts_fn_tcs(
+                    _lk.suts, _flagged, warn_sink=warnings, content_sink=_suts_content)
             if _lk and getattr(_lk, "sits", ""):
                 regression_test_set["sits"] = _load_sits_fn_chains(_lk.sits, _flagged, warn_sink=warnings)
         except Exception:  # noqa: BLE001 — 회귀집합은 best-effort, 없어도 분석은 진행
@@ -1635,6 +1798,22 @@ def run_impact_update(
             "coverage_target": coverage_target,
             "mcdc_required": mcdc_required,
         }
+        # 문서 내용 매칭(예측 대신 실 파싱 내용) — 직접 영향 함수(_changed_set) 스코프. UDS 설명/전역/호출,
+        # SUTS TC 실입력·기대값, SDS 컴포넌트 설명을 job에 담아 프론트 카드가 표시. 파일영향(증거 없음)
+        # 함수도 문서 내용은 실 파싱본이라 그대로 유효. best-effort(로더 실패=빈 dict, 분석 비차단).
+        doc_content: Dict[str, Any] = {"uds": {}, "suts": {}, "sds": {}}
+        try:
+            _direct_lc = {str(f).strip().lower() for f in _changed_set}
+            _direct_list = sorted(_changed_set)
+            # 키는 소문자 정규화(uds/sds와 일관) — 프론트 docContentFor가 항상 .toLowerCase()로 조회하므로
+            # SUTS unit_name 원본 케이스(예 'g_DrvIn_MotorSpeed')를 그대로 두면 조회 미스→'미파싱' 오표시(reviewer W1).
+            doc_content["suts"] = {str(k).strip().lower(): v for k, v in _suts_content.items() if str(k).strip().lower() in _direct_lc}
+            if _lk and getattr(_lk, "uds", ""):
+                doc_content["uds"] = _load_uds_fn_content(_lk.uds, _direct_list, warn_sink=warnings)
+            if _lk and getattr(_lk, "sds", ""):
+                doc_content["sds"] = _load_sds_fn_desc(_lk.sds, _direct_list, warn_sink=warnings)
+        except Exception:  # noqa: BLE001 — 문서 내용은 best-effort 표시 데이터(분석 비차단)
+            pass
         # MC/DC delta: 영향 함수의 VectorCAST 커버리지(statement/branch/MC/DC) → ASIL 타깃 대비 gap
         # + 직전 스냅샷 대비 delta(회귀). vectorcast 미연결/RAG metrics 없음 → available=False(분석 계속).
         coverage_gap: Dict[str, Any] = {"available": False}
@@ -1727,6 +1906,7 @@ def run_impact_update(
             "actions": actions,
             "function_meta": function_meta,
             "regression_test_set": regression_test_set,
+            "doc_content": doc_content,
             "asil": {
                 "max_changed": _max_changed_asil,
                 "escalation": asil_escalation,
@@ -1901,6 +2081,7 @@ def run_impact_update(
             "actions": actions,
             "function_meta": function_meta,
             "regression_test_set": regression_test_set,
+            "doc_content": doc_content,
             "asil": {
                 "max_changed": _max_changed_asil,
                 "escalation": asil_escalation,

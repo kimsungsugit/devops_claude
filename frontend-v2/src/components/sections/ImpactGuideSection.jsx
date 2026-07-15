@@ -728,6 +728,64 @@ export default function ImpactGuideSection({ analysisResult }) {
   const changeDetails = impact?.change_details ?? {};
   // 함수별 본문 diff 원문(AI 설명용) — BODY 등 선언 미변경 함수도 실제 코드 근거를 Gemini에 전달.
   const functionDiffs = impact?.function_diffs ?? {};
+  // 실제 문서 내용(예측 대신 실 파싱본) — 백엔드 doc_content{uds,suts,sds}(함수명 lower 키). 파일영향
+  // 함수도 문서 내용은 실 파싱이라 유효. 구 job(필드 없음)은 {}로 폴백 → 내용 블록만 미표시(무해).
+  const docContent = impact?.doc_content ?? {};
+  const docContentFor = (fn, key) => (docContent?.[key] ?? {})[String(fn || '').toLowerCase()];
+  // 문서 카드의 "실제 문서 내용" 블록 — 예측 텍스트와 별개로, 백엔드가 파싱한 실 문서 내용을 표시.
+  // uds/suts/sds만(범위). 내용 없으면 '미파싱' 정직 표기(과대 추정 금지). key='sts'/'sits'는 null(범위 외).
+  const _dcBox = { fontSize: 10, marginTop: 4, padding: '4px 6px', background: 'var(--bg)', borderRadius: 4, borderLeft: '2px solid var(--color-info)' };
+  const _dcHdr = { fontWeight: 600, fontSize: 9, color: 'var(--color-info)', marginBottom: 2 };
+  const _dcMiss = (t) => <div className="text-muted" style={{ fontSize: 9, marginTop: 4 }}>· {t}</div>;
+  const renderDocContent = (fn, key) => {
+    const c = docContentFor(fn, key);
+    if (key === 'uds') {
+      if (!c) return _dcMiss('UDS 문서 내용 미파싱(사이드카/문서 미연동)');
+      return (
+        <div style={_dcBox}>
+          <div style={_dcHdr}>📄 실제 UDS 내용</div>
+          {c.heading && <div className="text-muted" style={{ fontSize: 9 }}>{c.heading}</div>}
+          {c.description && <div style={{ overflowWrap: 'anywhere' }}>{c.description}</div>}
+          {c.prototype && <div style={{ fontFamily: 'monospace', fontSize: 9, overflowWrap: 'anywhere' }}>{c.prototype}</div>}
+          {(c.globals || []).length > 0 && <div style={{ fontSize: 9 }}><span className="text-muted">Used Globals: </span>{c.globals.join(', ')}</div>}
+          {(c.calls || []).length > 0 && <div style={{ fontSize: 9 }}><span className="text-muted">Called: </span>{c.calls.join(', ')}</div>}
+        </div>
+      );
+    }
+    if (key === 'suts') {
+      if (!c || !c.length) return _dcMiss('SUTS TC 내용 미파싱(문서 미연동/유닛 불일치)');
+      return (
+        <div style={_dcBox}>
+          <div style={_dcHdr}>📄 실제 SUTS 시험 내용</div>
+          {c.map((tc, i) => {
+            // action/precondition은 문서 포맷에 따라 값(0x0)·변수명으로 나올 수 있어 prose(공백 포함)만
+            // 노출(노이즈 억제). 실 입력/기대값(header=value)은 항상 노출(핵심 실 내용).
+            const _prose = (s) => (typeof s === 'string' && /\s/.test(s.trim()) && s.trim().length > 3 ? s.trim() : '');
+            const _act = _prose(tc.action); const _pre = _prose(tc.precondition);
+            return (
+              <div key={i} style={{ marginBottom: 3 }}>
+                <div style={{ fontFamily: 'monospace', fontSize: 9, fontWeight: 600 }}>{tc.tc_id}</div>
+                {_act && <div style={{ overflowWrap: 'anywhere' }}><span className="text-muted">Action: </span>{_act}</div>}
+                {_pre && <div style={{ fontSize: 9 }}><span className="text-muted">Pre: </span>{_pre}</div>}
+                {Object.keys(tc.inputs || {}).length > 0 && <div style={{ fontSize: 9, overflowWrap: 'anywhere' }}><span className="text-muted">In: </span>{Object.entries(tc.inputs).map(([k, v]) => `${k}=${v}`).join(', ')}</div>}
+                {Object.keys(tc.expected || {}).length > 0 && <div style={{ fontSize: 9, overflowWrap: 'anywhere' }}><span className="text-muted">Exp: </span>{Object.entries(tc.expected).map(([k, v]) => `${k}=${v}`).join(', ')}</div>}
+              </div>
+            );
+          })}
+        </div>
+      );
+    }
+    if (key === 'sds') {
+      if (!c) return _dcMiss('SDS 컴포넌트 설명 미파싱(문서 미연동/매칭 없음)');
+      return (
+        <div style={_dcBox}>
+          <div style={_dcHdr}>📄 실제 SDS 내용</div>
+          <div style={{ overflowWrap: 'anywhere' }}>{c}</div>
+        </div>
+      );
+    }
+    return null;
+  };
   // 변경종류 요약(신규/삭제/시그니처/본문/헤더/변수 개수) — 데모 포함(activeFnEntries 기준, 전체).
   const changeSummary = { NEW: 0, DELETE: 0, SIGNATURE: 0, BODY: 0, HEADER: 0, VARIABLE: 0 };
   for (const [, k] of activeFnEntries) { if (k in changeSummary) changeSummary[k] += 1; }
@@ -2168,6 +2226,7 @@ export default function ImpactGuideSection({ analysisResult }) {
                                   {chips.length > 10 && <span className="text-muted" style={{ fontSize: 8 }}> +{chips.length - 10}개</span>}
                                 </div>
                               )}
+                              {renderDocContent(row.name, effSelectedDoc)}
                             </div>
                           );
                         })}
@@ -2351,7 +2410,7 @@ export default function ImpactGuideSection({ analysisResult }) {
                 </div>
                 {noEvidence && (
                   <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 6, padding: '4px 8px', background: 'var(--bg)', borderRadius: 4 }}>
-                    ※ 직접 변경 증거가 없어(파일 단위 보수 포함) 아래 액션은 파일 변경 맥락 기준의 일반 가이드입니다.
+                    ※ 직접 변경 증거는 없으나(파일 단위 보수 포함) 아래 <strong>📄 실제 문서 내용</strong>은 파싱본입니다 — 편집 <em>액션</em>만 파일 변경 맥락 기준 일반 가이드.
                   </div>
                 )}
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(250px, 1fr))', gap: 10 }}>
@@ -2381,6 +2440,7 @@ export default function ImpactGuideSection({ analysisResult }) {
                             {chips.length > 10 && <span className="text-muted" style={{ fontSize: 9 }}> +{chips.length - 10}개</span>}
                           </div>
                         )}
+                        {renderDocContent(d.function, card.key)}
                         {card.note && <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 4 }}>{card.note}</div>}
                       </div>
                     );

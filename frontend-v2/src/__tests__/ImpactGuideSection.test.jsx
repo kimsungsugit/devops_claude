@@ -1360,6 +1360,62 @@ describe('ImpactGuideSection', () => {
     expect(screen.getByText('tc7')).toBeInTheDocument();
     expect(screen.getByText('tc8')).toBeInTheDocument();
   });
+
+  // STS-IMPACT-051: 문서 카드에 예측 대신 백엔드 doc_content의 실제 문서 내용(UDS/SUTS/SDS)이 표시된다.
+  it('실제 문서 내용: 모달 DOC_CARDS에 doc_content의 UDS/SUTS/SDS 실 내용이 표시된다', async () => {
+    const { post } = await import('../api.js');
+    post.mockResolvedValue({ ok: false });
+    const user = userEvent.setup();
+    const analysisResult = {
+      impactData: {
+        trigger: { changed_files: ['Ap.c'] },
+        changed_function_types: { s_foo: 'BODY' },
+        change_details: { s_foo: { before: 'void s_foo(void)' } },
+        impact: { direct: ['s_foo'] },
+        function_meta: { s_foo: { asil: 'A', evidence: 'line' } },
+        doc_content: {
+          uds: { s_foo: { description: 'Foo controls the motor speed', prototype: 'void s_foo(uint8 x)', globals: ['g_State'], calls: ['s_helper'] } },
+          suts: { s_foo: [{ tc_id: 'SwUTC_SwUFn_0215', action: 'Call s_foo boundary', precondition: 'init', inputs: { x: '1' }, expected: { ret: '42' } }] },
+          sds: { s_foo: 'SDS: foo handles motor control loop' },
+        },
+      },
+    };
+    render(<ImpactGuideSection analysisResult={analysisResult} />);
+    await user.click(screen.getByText(/상세 가이드 생성/));
+    await user.click(await screen.findByRole('button', { name: '상세' }));
+    await waitFor(() => expect(screen.getByText('📄 실제 UDS 내용')).toBeInTheDocument());
+    expect(screen.getByText('Foo controls the motor speed')).toBeInTheDocument();       // 실 UDS 설명
+    expect(screen.getByText('📄 실제 SUTS 시험 내용')).toBeInTheDocument();
+    expect(screen.getByText(/Call s_foo boundary/)).toBeInTheDocument();                // 실 Test Action
+    expect(screen.getByText('SwUTC_SwUFn_0215')).toBeInTheDocument();
+    expect(screen.getByText('📄 실제 SDS 내용')).toBeInTheDocument();
+    expect(screen.getByText(/foo handles motor control loop/)).toBeInTheDocument();     // 실 SDS 설명
+  });
+
+  // STS-IMPACT-052: doc_content 없는 문서는 "미파싱" 정직 표기(과대 추정 금지). 있는 문서는 실 내용.
+  it('실제 문서 내용: doc_content 없는 문서는 "미파싱" 표기, 있는 문서(SDS)는 실 내용을 표시', async () => {
+    const { post } = await import('../api.js');
+    post.mockResolvedValue({ ok: false });
+    const user = userEvent.setup();
+    const analysisResult = {
+      impactData: {
+        trigger: { changed_files: ['Ap.c'] },
+        changed_function_types: { s_bar: 'BODY' },
+        change_details: { s_bar: { before: 'void s_bar(void)' } },
+        impact: { direct: ['s_bar'] },
+        function_meta: { s_bar: { asil: 'A', evidence: 'line' } },
+        doc_content: { uds: {}, suts: {}, sds: { s_bar: 'SDS desc for bar' } }, // sds만 존재
+      },
+    };
+    render(<ImpactGuideSection analysisResult={analysisResult} />);
+    await user.click(screen.getByText(/상세 가이드 생성/));
+    await user.click(await screen.findByRole('button', { name: '상세' }));
+    await waitFor(() => expect(screen.getByText('📄 실제 SDS 내용')).toBeInTheDocument());
+    expect(screen.getByText('SDS desc for bar')).toBeInTheDocument();
+    // UDS/SUTS는 doc_content 비어 정직하게 '미파싱'
+    expect(screen.getByText(/UDS 문서 내용 미파싱/)).toBeInTheDocument();
+    expect(screen.getByText(/SUTS TC 내용 미파싱/)).toBeInTheDocument();
+  });
 });
 
 describe('extractDiffElements (순수 함수)', () => {
