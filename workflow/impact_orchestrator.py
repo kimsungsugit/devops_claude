@@ -1259,13 +1259,15 @@ def _resolve_changed_types_to_functions(
     return resolved or changed_types
 
 
-def _collect_signature_changes(trigger, meta, entry, diff_text: str = "") -> Dict[str, Dict[str, str]]:
+def _collect_signature_changes(trigger, meta, entry, diff_text: str = "", diff_sink: Optional[List[str]] = None) -> Dict[str, Dict[str, str]]:
     """함수별 시그니처 이전/이후 선언 원문을 추출한다(UI '변경 상세' 원문 표시용).
 
     - diff_text가 주어지면(A-3에서 이미 받은 svn A:B unified diff) 재-fetch 없이 그것으로 추출한다
       (fetch-once — 623KB blob을 분류와 시그니처 추출이 공유).
     - svn revision-range(baseline A ↔ build B): `svn diff -r A:B <scm_url>` 전체 unified diff 1회.
     - 로컬 git/svn working-copy: 변경 파일별 unified diff(상한 60개).
+    - diff_sink(선택): 제공되면 여기서 실제로 받은 unified diff 원문을 append한다 — 호출측이 이를
+      function_diffs 추출에 재사용(로컬 경로 "원문 절단" 해소, 재-diff 없이 blob 공유).
     best-effort — 실패/미지원이면 빈 dict(영향 분석 자체엔 무영향, UI 원문만 미표시).
     """
     from workflow.delta_update import extract_signature_changes
@@ -1290,7 +1292,10 @@ def _collect_signature_changes(trigger, meta, entry, diff_text: str = "") -> Dic
                 username=_user, password=_pw,
             )
             if int(d.get("rc", 1)) == 0:
-                return extract_signature_changes(d.get("output") or "")
+                _out = d.get("output") or ""
+                if diff_sink is not None and _out:
+                    diff_sink.append(_out)
+                return extract_signature_changes(_out)
         except Exception as exc:  # noqa: BLE001 — best-effort, 실패 흡수
             logger.debug("svn_diff_unified signature extraction failed: %s", exc)
         return {}
@@ -1306,6 +1311,8 @@ def _collect_signature_changes(trigger, meta, entry, diff_text: str = "") -> Dic
             # 폐기하지 않게 한다(sibling classify_changed_functions와 동일 패턴).
             try:
                 dt = _run_unified_diff(src, base_ref=getattr(trigger, "base_ref", ""), scm_type=scm_type, file_path=fp)
+                if diff_sink is not None and dt:
+                    diff_sink.append(dt)
                 for fn, sig in extract_signature_changes(dt or "").items():
                     merged.setdefault(fn, {}).update(sig)
             except Exception as exc:  # noqa: BLE001 — 파일 단위 실패는 건너뛴다
@@ -1757,11 +1764,15 @@ def run_impact_update(
         # 걸리게 한다. 영향 집합은 함수 '키'만 쓰므로 격상은 영향범위 무변, 방향은 단방향 안전측
         # (SDS 검토 추가). change_details 키는 소문자(프론트 조인 규약: fn.toLowerCase()).
         change_details: Dict[str, Dict[str, str]] = {}
+        # 로컬 diff 경로(_precise_diff_text 없음)에서 시그니처 추출이 뽑는 per-file diff 원문을 여기 모아
+        # function_diffs에도 공유한다(fetch-once) — 로컬 line-classified 함수가 diff 원문을 못 받아
+        # "원문 절단"으로 표시되던 것을 해소(재-diff 없이 시그니처·본문 두 소비자가 같은 blob 사용).
+        _local_diff_parts: List[str] = []
         if changed_types:
             _ct_by_lower = {str(k).strip().lower(): k for k in changed_types}
             try:
                 # A-5: A-3에서 이미 받은 diff를 재사용(fetch-once) — 없으면 종전대로 자체 fetch.
-                _sig_map = _collect_signature_changes(trigger, _meta, entry, diff_text=_precise_diff_text)
+                _sig_map = _collect_signature_changes(trigger, _meta, entry, diff_text=_precise_diff_text, diff_sink=_local_diff_parts)
             except Exception as _sig_exc:  # noqa: BLE001 — 원문 보강 실패는 분석을 막지 않음
                 logger.debug("change_details extraction failed: %s", _sig_exc)
                 _sig_map = {}
@@ -1794,10 +1805,13 @@ def run_impact_update(
         # 제공해, Gemini가 '추정' 대신 실제 변수/로직 기반의 구체 문서 지침을 생성하도록 한다.
         function_diffs: Dict[str, str] = {}
         _fd_stats: Dict[str, Any] = {}
-        if _precise_diff_text:
+        # 정밀 diff(svn A:B)가 없으면 로컬 per-file diff(위 fetch-once)를 폴백으로 사용해 함수별 본문
+        # 원문을 채운다 — evidence='line'인데 원문이 없어 "원문 절단"으로 표시되던 로컬 경로 해소.
+        _fd_source = _precise_diff_text or "".join(_local_diff_parts)
+        if _fd_source:
             try:
                 from workflow.delta_update import extract_function_diffs
-                function_diffs = extract_function_diffs(_precise_diff_text, stats=_fd_stats)
+                function_diffs = extract_function_diffs(_fd_source, stats=_fd_stats)
             except Exception as _fd_exc:  # noqa: BLE001 — 원문 보강 실패는 분석을 막지 않음
                 logger.debug("function_diffs extraction failed: %s", _fd_exc)
                 warnings.append("본문 diff 원문 추출 실패 — 상세 모달의 코드 근거가 비어 있을 수 있습니다(분석은 계속).")

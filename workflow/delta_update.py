@@ -118,10 +118,14 @@ def _run_unified_diff(
     root = Path(project_root)
 
     if scm_type == "svn":
+        # -x -p (show-c-function): @@ hunk 헤더에 함수 컨텍스트를 붙여 extract_function_diffs가
+        # 함수 귀속 가능하게 한다(svn_diff_unified와 동형). 과거 `--diff-cmd diff -x -U3`은 컨텍스트가
+        # 없어(-p 누락) 로컬 diff 경로에서 function_diffs가 빈 채로 남아 "원문 절단"을 유발했다.
+        # svn 내부 diff는 외부 diff 바이너리 의존도 없앤다. extract_signature_changes(+/- 선언)는 무해.
         cmd = ["svn", "diff"]
         if str(base_ref or "").strip():
             cmd.extend(["-r", base_ref])
-        cmd.extend(["--diff-cmd", "diff", "-x", "-U3"])
+        cmd.extend(["-x", "-p"])
         if file_path:
             cmd.append(file_path)
     else:
@@ -141,7 +145,7 @@ def _run_unified_diff(
         return result.stdout
 
     if scm_type == "svn":
-        fallback_cmd = ["svn", "diff"]
+        fallback_cmd = ["svn", "diff", "-x", "-p"]
         if file_path:
             fallback_cmd.append(file_path)
         fallback = subprocess.run(
