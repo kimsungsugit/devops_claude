@@ -189,3 +189,57 @@ def test_enrich_asil_from_uds_no_conflict_warn_when_source_ge_uds(monkeypatch):
     m._enrich_asil_from_uds(by_name, "U:/uds.docx", warn_sink=warns)
     assert by_name["s_hi"]["asil"] == "D" and by_name["s_eq"]["asil"] == "B"
     assert not any("소스 등급이 UDS보다 낮은" in w for w in warns)
+
+
+# ── SwCom-상속 폴백: 함수 ASIL이 N/A인데 소속 SwCom(SDS)엔 등급 있을 때 상속(가장 약한 폴백) ──
+
+def test_enrich_asil_from_swcom_inherits_component_grade(monkeypatch):
+    """SwUDS Related ID의 소속 SwCom → SDS 컴포넌트 등급으로 상속 보강(N/A 함수만·상향만·경고)."""
+    from workflow import impact_orchestrator as m
+
+    monkeypatch.setattr(m, "_suds_fn_swcom_map", lambda p: {
+        "s_antipinch_x": ["SwCom_13"],
+        "s_multi": ["SwCom_11", "SwCom_13"],   # 다중 소속 → max
+        "s_hasgrade": ["SwCom_13"],            # 이미 등급 → 미터치
+    })
+    monkeypatch.setattr(m, "_sds_com_asil_map", lambda p: {"SwCom_13": "A", "SwCom_11": "QM"})
+    by_name = {
+        "s_antipinch_x": {"asil": "N/A"},   # → A
+        "s_multi": {"asil": "TBD"},          # QM,A → max A
+        "s_hasgrade": {"asil": "C"},         # 이미 C → 유지(SwCom A라도 안 덮음)
+        "s_nomap": {"asil": "N/A"},          # SwCom 없음 → 유지
+    }
+    warns: list = []
+    enr, still = m._enrich_asil_from_swcom(by_name, "U:/uds.docx", "U:/sds.docx", warn_sink=warns)
+    assert by_name["s_antipinch_x"]["asil"] == "A"
+    assert by_name["s_antipinch_x"]["asil_source"] == "swcom"
+    assert by_name["s_multi"]["asil"] == "A"          # max(QM,A)
+    assert by_name["s_hasgrade"]["asil"] == "C"       # ⚠ 등급 낮추기 없음
+    assert by_name["s_nomap"]["asil"] == "N/A"        # SwCom 매핑 없음 → 유지
+    # missing=3(s_antipinch_x·s_multi·s_nomap; s_hasgrade는 C라 제외), 보강 2 → 남은 미상 1
+    assert enr == 2 and still == 1
+    assert any("소속 SwCom" in w and "2건" in w for w in warns)
+
+
+def test_enrich_asil_from_swcom_noop_without_paths():
+    from workflow.impact_orchestrator import _enrich_asil_from_swcom
+    assert _enrich_asil_from_swcom({"s_x": {"asil": "TBD"}}, "", "U:/sds.docx") == (0, 0)
+    assert _enrich_asil_from_swcom({"s_x": {"asil": "TBD"}}, "U:/uds.docx", "") == (0, 0)
+
+
+def test_sds_com_asil_map_keeps_only_swcom_keys(monkeypatch):
+    """extract_component_asil_from_sds의 이름 별칭·노이즈 키는 버리고 SwCom_NN 유효등급만(오귀속 방지)."""
+    import backend.services.file_resolver as fr
+    import backend.services.iso26262_doc_asil_extractor as ext
+    from workflow.impact_orchestrator import _SDS_COM_ASIL_CACHE, _sds_com_asil_map
+
+    _SDS_COM_ASIL_CACHE.clear()
+    monkeypatch.setattr(fr, "get_resolver", lambda: _Resolver(_valid_zip_bytes()))
+    monkeypatch.setattr(ext, "extract_component_asil_from_sds", lambda d: {
+        "SwCom_13": "A",
+        "System OS": "A",          # 이름 별칭 → 제외
+        "85.9KBe 사용중": "A",      # 노이즈 → 제외
+        "SwCom_99": "TBD",          # blank 등급 → 제외
+    })
+    out = _sds_com_asil_map("U:/sds.docx")
+    assert out == {"SwCom_13": "A"}

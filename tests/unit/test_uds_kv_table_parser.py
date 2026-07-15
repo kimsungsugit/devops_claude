@@ -97,3 +97,52 @@ def test_asil_rank_dicts_consistent_across_modules():
     from workflow.impact_orchestrator import _ASIL_RANK
 
     assert _ASIL_GRADE_RANK == _ASIL_RANK
+
+
+# ── SwCom(Related ID) 추출기 — 컴포넌트 ASIL 상속 폴백의 함수→SwCom 소스 ──
+
+def _make_uds_with_related(func_rows):
+    """func_rows: [{Name, ASIL?, Related ID}] — 각각 세로표(실 v3.02 레이아웃)."""
+    from docx import Document
+
+    doc = Document()
+    for ft in func_rows:
+        t = doc.add_table(rows=0, cols=2)
+        for label, value in ft.items():
+            c = t.add_row().cells
+            c[0].text, c[1].text = label, value
+    buf = io.BytesIO()
+    doc.save(buf)
+    return buf.getvalue()
+
+
+def test_swcom_extract_basic():
+    """Name + Related ID → {함수명(소문자): [SwCom_NN]}. SwCom_NN만 뽑고 다른 ID(SwST/SwSTR) 무시."""
+    from backend.services.iso26262_doc_asil_extractor import extract_function_swcom_from_kv_tables
+
+    data = _make_uds_with_related([
+        {"ID": "SwUFn_1", "Name": "s_antipinch_x", "ASIL": "N/A",
+         "Related ID": "SwST_01, SwCom_13, SwSTR_02"},
+    ])
+    assert extract_function_swcom_from_kv_tables(data) == {"s_antipinch_x": ["SwCom_13"]}
+
+
+def test_swcom_extract_rejects_prose_name():
+    """Name이 다단어 프로즈면 C 식별자 아님 → 제외(오귀속 차단)."""
+    from backend.services.iso26262_doc_asil_extractor import extract_function_swcom_from_kv_tables
+
+    data = _make_uds_with_related([{"Name": "power operation disable", "Related ID": "SwCom_13"}])
+    assert extract_function_swcom_from_kv_tables(data) == {}
+
+
+def test_swcom_extract_unions_duplicate_names():
+    """동명 함수가 여러 표에 나오면 SwCom 리스트 union(reviewer #1 — last-wins면 낮은등급만 남아
+    enrich max가 최고등급 못 골라 under-report). 회귀 고정."""
+    from backend.services.iso26262_doc_asil_extractor import extract_function_swcom_from_kv_tables
+
+    data = _make_uds_with_related([
+        {"Name": "s_dup", "Related ID": "SwCom_50"},   # 표1
+        {"Name": "s_dup", "Related ID": "SwCom_13"},   # 표2 — last-wins면 SwCom_13만 남음
+    ])
+    out = extract_function_swcom_from_kv_tables(data)
+    assert out == {"s_dup": ["SwCom_13", "SwCom_50"]}   # union(정렬)

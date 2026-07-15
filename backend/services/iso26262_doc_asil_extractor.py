@@ -91,6 +91,27 @@ def _norm_asil_grade(v) -> str:
     return a if a in _ASIL_GRADE_RANK else ""
 
 
+def _read_suds_document_xml(docx_bytes: bytes) -> bytes | None:
+    """SwUDS docx bytes에서 word/document.xml을 크기 가드와 함께 꺼낸다(없으면 None).
+
+    W1: 입력 96MB(DOCX_MAX_BYTES)·비압축 384MB(_KV_XML_MAX_BYTES) 상한으로 OOM/압축폭탄 방어.
+    kv-table ASIL 추출기와 SwCom(Related ID) 추출기가 공유(둘 다 세로표 세션 대상).
+    """
+    if not docx_bytes or len(docx_bytes) > DOCX_MAX_BYTES:
+        return None
+    try:
+        with zipfile.ZipFile(io.BytesIO(docx_bytes)) as z:
+            try:
+                _xi = z.getinfo("word/document.xml")
+            except KeyError:
+                return None   # docx 아님/구조 이상 → 폴백에 위임
+            if _xi.file_size > _KV_XML_MAX_BYTES:
+                return None   # 압축폭탄(비압축 폭증) 방어
+            return z.read("word/document.xml")
+    except Exception:
+        return None
+
+
 def extract_function_asil_from_kv_tables(docx_bytes: bytes) -> dict[str, str]:
     """세로 key-value SwUDS 함수 표에서 {함수명(소문자): ASIL} 추출.
 
@@ -99,25 +120,14 @@ def extract_function_asil_from_kv_tables(docx_bytes: bytes) -> dict[str, str]:
     무효등급 거부해 under-report 위험 차단). 같은 함수명 충돌은 max 등급(안전측). lxml 직접
     파싱(python-docx 미사용 → 87MB docx도 초 단위). 접근/파싱 실패는 빈 맵(비차단).
     """
-    # W1: sibling 파서(_load_doc)와 동일 입력 상한(96MB) — 거대/손상 docx OOM·과대작업 방지.
-    if not docx_bytes or len(docx_bytes) > DOCX_MAX_BYTES:
+    xml = _read_suds_document_xml(docx_bytes)
+    if xml is None:
         return {}
     try:
         from lxml import etree  # type: ignore
     except Exception:
         return {}
     w = "{%s}" % _WML_NS
-    try:
-        with zipfile.ZipFile(io.BytesIO(docx_bytes)) as z:
-            try:
-                _xi = z.getinfo("word/document.xml")
-            except KeyError:
-                return {}   # docx 아님/구조 이상 → 폴백에 위임
-            if _xi.file_size > _KV_XML_MAX_BYTES:
-                return {}   # W1: 압축폭탄(비압축 폭증) 방어
-            xml = z.read("word/document.xml")
-    except Exception:
-        return {}
 
     def _cell_text(tc) -> str:
         return "".join(t.text or "" for t in tc.iter(w + "t")).strip()
@@ -145,6 +155,58 @@ def extract_function_asil_from_kv_tables(docx_bytes: bytes) -> dict[str, str]:
             tbl.clear()  # 처리 후 즉시 비워 메모리 바운드(대용량 document.xml)
     except Exception:
         return out  # 부분 파싱분 보존(비차단)
+    return out
+
+
+_REGEX_SWCOM = re.compile(r"SwCom_\d+", re.IGNORECASE)
+
+
+def extract_function_swcom_from_kv_tables(docx_bytes: bytes) -> dict[str, list[str]]:
+    """세로 kv SwUDS 함수 표에서 {함수명(소문자): [SwCom_NN, ...]}(Related ID) 추출.
+
+    함수 ASIL이 N/A(미등급)인데 소속 SwCom은 SDS에 등급이 있을 때, **컴포넌트 ASIL 상속**
+    폴백에 쓴다(ISO 26262 표준 원칙 — 함수는 소속 SW 컴포넌트의 ASIL을 상속). ASIL 값과 무관하게
+    전 함수의 Related ID(SwCom_NN 정규화 케이스)를 뽑는다. 함수명은 순수 C 식별자만(fail-closed).
+    SwCom 참조가 없으면 그 함수는 결과에서 제외. 접근/파싱 실패는 빈 맵(비차단).
+    """
+    xml = _read_suds_document_xml(docx_bytes)
+    if xml is None:
+        return {}
+    try:
+        from lxml import etree  # type: ignore
+    except Exception:
+        return {}
+    w = "{%s}" % _WML_NS
+
+    def _cell_text(tc) -> str:
+        return "".join(t.text or "" for t in tc.iter(w + "t")).strip()
+
+    out: dict[str, list[str]] = {}
+    try:
+        for _ev, tbl in etree.iterparse(io.BytesIO(xml), events=("end",), tag=w + "tbl"):
+            name = ""
+            related = ""
+            for tr in tbl.findall(w + "tr"):
+                cells = tr.findall(w + "tc")
+                if len(cells) < 2:
+                    continue
+                label = _cell_text(cells[0]).lower().rstrip(":").strip()
+                if label == "name" and not name:
+                    name = _cell_text(cells[1])
+                elif label in ("related id", "relatedid") and not related:
+                    related = _cell_text(cells[1])
+            if name and related:
+                nl = name.strip().lower()
+                if _C_IDENT_FULL_RE.match(nl):
+                    # SwCom_NN을 정규 케이스('SwCom_13')로 정규화 — SDS 컴포넌트 맵 키와 정확매칭.
+                    swcoms = {"SwCom_" + m.split("_")[1] for m in _REGEX_SWCOM.findall(related)}
+                    if swcoms:
+                        # 동명 함수가 여러 표에 나오면 SwCom 리스트를 union(안전측 — last-wins면 낮은등급
+                        # 컴포넌트만 남아 enrich max가 최고등급을 못 골라 under-report. ASIL 병합 철학과 일치).
+                        out[nl] = sorted(set(out.get(nl, [])) | swcoms)
+            tbl.clear()
+    except Exception:
+        return out
     return out
 
 
@@ -408,6 +470,7 @@ __all__ = [
     "extract_function_name_to_swufn_from_suds",
     "extract_component_asil_from_sds",
     "extract_function_asil_from_kv_tables",
+    "extract_function_swcom_from_kv_tables",
     "extract_supplementary_asil_from_srs",
     "DOCX_MAX_BYTES",
 ]

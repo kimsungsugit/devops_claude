@@ -510,6 +510,112 @@ def _enrich_asil_from_sds(by_name: Dict[str, Any], sds_path: str, warn_sink: Opt
     return enriched, len(missing) - enriched
 
 
+_SUDS_FN_SWCOM_CACHE: Dict[str, Dict[str, List[str]]] = {}
+_SDS_COM_ASIL_CACHE: Dict[str, Dict[str, str]] = {}
+
+
+def _suds_fn_swcom_map(uds_path: str) -> Dict[str, List[str]]:
+    """SwUDS에서 {함수명(소문자): [SwCom_NN]}(Related ID) — SwCom ASIL 상속 폴백용. 경로 캐시.
+    cloudium U:\\는 워커(read_bytes) 경유. 접근/파싱 실패는 빈 맵(비차단·미캐시)."""
+    if not uds_path:
+        return {}
+    _c = _SUDS_FN_SWCOM_CACHE.get(uds_path)
+    if _c is not None:
+        return _c
+    try:
+        from backend.services.file_resolver import get_resolver
+        data = get_resolver().read_bytes(uds_path)
+    except (FileNotFoundError, PermissionError, OSError):
+        return {}
+    except Exception:
+        return {}
+    try:
+        from backend.services.iso26262_doc_asil_extractor import extract_function_swcom_from_kv_tables
+        m = extract_function_swcom_from_kv_tables(data) or {}
+    except Exception:
+        m = {}
+    if m:
+        _SUDS_FN_SWCOM_CACHE[uds_path] = m
+    return m
+
+
+def _sds_com_asil_map(sds_path: str) -> Dict[str, str]:
+    """SDS에서 {SwCom_NN: ASIL}(컴포넌트 등급, 유효등급만) — SwCom ASIL 상속 폴백용. 경로 캐시.
+    ⚠ SwCom_NN 키만 채택(extract_component_asil_from_sds가 이름 별칭·노이즈 키도 반환) — 오귀속 방지."""
+    if not sds_path:
+        return {}
+    _c = _SDS_COM_ASIL_CACHE.get(sds_path)
+    if _c is not None:
+        return _c
+    try:
+        from backend.services.file_resolver import get_resolver
+        data = get_resolver().read_bytes(sds_path)
+    except (FileNotFoundError, PermissionError, OSError):
+        return {}
+    except Exception:
+        return {}
+    result: Dict[str, str] = {}
+    try:
+        from backend.services.iso26262_doc_asil_extractor import extract_component_asil_from_sds
+        raw = extract_component_asil_from_sds(data) or {}
+        for k, v in raw.items():
+            # IGNORECASE + canonical 'SwCom_NN' — SUDS측(extract_function_swcom_from_kv_tables) 정규화와
+            # 대칭. 타 프로젝트 SDS가 'SWCOM_13'/'swcom_13'이어도 매칭(과거 대소문자 민감 silent drop, reviewer #2).
+            _m = re.fullmatch(r"SwCom_(\d+)", str(k).strip(), re.IGNORECASE)
+            if _m and not _is_blank_asil(v) and _asil_rank(v) >= 0:
+                _ck = "SwCom_" + _m.group(1)
+                # 동일 SwCom이 여러 표에 나오면 max 등급(안전측).
+                _ex = result.get(_ck)
+                if _ex is None or _asil_rank(v) > _asil_rank(_ex):
+                    result[_ck] = str(v).strip()
+    except Exception:
+        return {}
+    if result:
+        _SDS_COM_ASIL_CACHE[sds_path] = result
+    return result
+
+
+def _enrich_asil_from_swcom(
+    by_name: Dict[str, Any], uds_path: str, sds_path: str, warn_sink: Optional[List[str]] = None,
+) -> tuple[int, int]:
+    """소스·UDS·SDS 함수 등급으로도 미상인 함수를, SwUDS Related ID의 소속 SwCom → SDS 컴포넌트
+    ASIL로 폴백 보강한다(ISO 26262 컴포넌트 ASIL 상속 — 가장 약한 폴백, 우선순위 맨 마지막).
+
+    ⚠ 안전측: TBD/N/A인 함수만 채우고(상향만·등급 낮추기 없음), 여러 SwCom 소속이면 max 등급.
+    문서에 명시된 Related ID 기반이라 fuzzy 이름매칭 아님(오귀속 위험 낮음). 보강 함수엔
+    asil_source="swcom" 표식 + 경고로 표면화(SwUDS 함수별 ASIL 누락 가시화 — 문서 등급 보완 유도).
+    반환: (보강 함수 수, 보강 후 남은 미상 수).
+    """
+    if not uds_path or not sds_path or not isinstance(by_name, dict):
+        return 0, 0
+    missing = [
+        fn for fn, info in by_name.items()
+        if isinstance(info, dict) and _is_blank_asil(info.get("asil"))
+    ]
+    if not missing:
+        return 0, 0
+    fn_swcom = _suds_fn_swcom_map(uds_path)
+    if not fn_swcom:
+        return 0, len(missing)
+    com_asil = _sds_com_asil_map(sds_path)
+    if not com_asil:
+        return 0, len(missing)
+    enriched = 0
+    for fn in missing:
+        _grades = [com_asil[sc] for sc in (fn_swcom.get(fn) or []) if sc in com_asil]
+        if not _grades:
+            continue
+        by_name[fn]["asil"] = max(_grades, key=_asil_rank)  # 다중 SwCom 소속은 max(안전측)
+        by_name[fn]["asil_source"] = "swcom"
+        enriched += 1
+    if enriched and warn_sink is not None:
+        warn_sink.append(
+            f"ASIL: 함수 등급이 문서에 N/A였으나 소속 SwCom(SDS 컴포넌트) 등급으로 {enriched}건 상속 보강 "
+            "— SwUDS 함수별 ASIL 누락 가능(문서 등급 보완 권장)"
+        )
+    return enriched, len(missing) - enriched
+
+
 def _load_suts_fn_tcs(
     linked_doc: str, flagged_fns: List[str], warn_sink: Optional[List[str]] = None,
     content_sink: Optional[Dict[str, Any]] = None,
@@ -1728,6 +1834,15 @@ def run_impact_update(
                 by_name, getattr(getattr(entry, "linked_docs", None), "sds", "") or "",
                 warn_sink=warnings,
             )
+            # 그래도 남은 미상은 SwUDS 함수의 소속 SwCom(Related ID) → SDS 컴포넌트 ASIL로 상속 보강
+            # (ISO 26262 컴포넌트 ASIL 상속 — 가장 약한 폴백). SwUDS가 신규 안전함수의 ASIL 칸을 N/A로
+            # 비워둔 경우(문서 등급 누락) 소속 컴포넌트 등급으로 채운다. 상향만·등급 낮추기 없음(안전측).
+            _asil_swcom_enriched, _asil_still_missing = _enrich_asil_from_swcom(
+                by_name,
+                getattr(getattr(entry, "linked_docs", None), "uds", "") or "",
+                getattr(getattr(entry, "linked_docs", None), "sds", "") or "",
+                warn_sink=warnings,
+            )
             # resolve(fatten) 전에 '실제로 지목된' 함수를 보존 — 로컬 diff 경로의 라인증거 판별용.
             # (cloudium/editType 경로의 키는 함수명이 아니라 파일 기반이라 line 증거로 쓰지 않는다.)
             _pre_resolve_lc = {str(k).strip().lower() for k in changed_types}
@@ -2056,8 +2171,9 @@ def run_impact_update(
                 # (라인변경 미확인) / ""=간접 영향 함수(변경 아님). 프론트는 function_diffs 유무로
                 # 추론하지 말고 이 값을 쓴다(diff는 400KB 절단·경로별 부재로 증거 프록시가 될 수 없음).
                 "evidence": _fn_evidence.get(fn, ""),
-                # ASIL 출처 추적성(reviewer W4) — ""=소스 @asil/헤더(또는 미상) / "uds" / "sds"(3순위 폴백).
-                # SDS로 채워진 함수는 리뷰어가 별도 재확인하도록 다운스트림(프론트/감사)에 노출.
+                # ASIL 출처 추적성(reviewer W4) — ""=소스 @asil/헤더(또는 미상) / "uds" / "sds"(3순위) /
+                # "swcom"(4순위 최약 폴백 — 함수 N/A였으나 소속 SwCom 컴포넌트 등급 상속). 문서/SDS로 채워진
+                # 함수는 리뷰어가 별도 재확인하도록 다운스트림(프론트/감사)에 노출.
                 "asil_source": str((by_name.get(fn) or {}).get("asil_source") or ""),
             }
             for fn in sorted(_changed_set | _impacted_all)
