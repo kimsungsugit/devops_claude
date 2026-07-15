@@ -1446,6 +1446,40 @@ describe('ImpactGuideSection', () => {
     expect(within(dialog).getByText('STS verifies boundary handling')).toBeInTheDocument();
   });
 
+  // STS-IMPACT-061: STS 카드에 Test Action(시험 절차)·Expected Result(기대결과)가 표시된다(라운드 후속).
+  //  ⚠ STS expected는 string(SITS/SUTS의 kv dict 아님) → 직접 렌더(Object.entries 금지 → [object Object] 방지).
+  it('실제 STS 내용: test_action(Action)·expected(Exp, string)가 모달에 표시된다', async () => {
+    const { post } = await import('../api.js');
+    post.mockImplementation((url) => {
+      if (url === '/api/jenkins/sds/extract-mapping') return Promise.resolve({ sds_pairs: [{ requirement_id: 'SwEI_02', component_ids: ['g_changed'] }] });
+      if (url === '/api/jenkins/sts/extract-traceability') return Promise.resolve({ vcast_rows: [{ requirement_id: 'SwEI_02', testcase: 'SwTC_STS_02' }] });
+      return Promise.resolve({ ok: false });
+    });
+    const user = userEvent.setup();
+    const analysisResult = {
+      impactData: {
+        trigger: { changed_files: ['Ap.c'], scm_id: 'kjpds02' },
+        changed_function_types: { g_changed: 'BODY' },
+        impact: { direct: ['g_changed'] },
+        function_meta: { g_changed: { asil: 'A', evidence: 'line' } },
+        _linked_docs: { sts: 'U:/sts.xlsm', sds: 'U:/sds.docx' },
+        doc_content: { sts_by_tc: { SWTC_STS_02: {
+          description: 'overvoltage cutoff verify',
+          test_action: '1) apply 5.5V to input 2) wait 100ms',
+          expected: 'relay OFF, DTC 0xC101 set',
+        } } },
+      },
+    };
+    render(<ImpactGuideSection analysisResult={analysisResult} />);
+    await user.click(screen.getByText(/상세 가이드 생성/));
+    await user.click(await screen.findByRole('button', { name: '상세' }));
+    const dialog = await screen.findByRole('dialog');
+    await waitFor(() => expect(within(dialog).getByText('📄 실제 STS 시험 내용')).toBeInTheDocument());
+    expect(within(dialog).getByText('1) apply 5.5V to input 2) wait 100ms')).toBeInTheDocument();  // Action(_prose 통과)
+    expect(within(dialog).getByText('relay OFF, DTC 0xC101 set')).toBeInTheDocument();               // Exp(string 직접 렌더)
+    expect(within(dialog).queryByText(/\[object Object\]/)).toBeNull();                                // string 오처리(dict화) 방지
+  });
+
   // STS-IMPACT-054: SITS 카드 실 내용(doc_content.sits_by_tc) — SwUFn 브리지 TC ID를 정규화 조인해
   //  중간 JSON의 sub_case(사전조건/기대값)를 표시.
   it('실제 SITS 내용: 모달 SITS 카드에 sits_by_tc의 sub_case 사전조건/기대값이 표시된다', async () => {

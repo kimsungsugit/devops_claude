@@ -164,6 +164,47 @@ class TestSwUTSExcelParser:
         assert e.precondition == "TRACE 연결"
         assert e.test_method == "FNCT"
 
+    def test_sts_test_action_and_expected_extracted(self):
+        """STS 'Test Action(Sequence)'/'Expected Result' → entry.test_action/expected 채움(라운드 후속).
+
+        기존엔 _LABEL_MAP에 없어 raw_inputs(디버그)로만 흘러 콘텐츠 카드에 미표시였다."""
+        xlsm = _build_swuts_xlsm(
+            sheet_name="3.SW Test Spec",
+            header_row=6,
+            headers=[
+                "Index", "Test Case ID", "Title", "Safety Related", "Test Environment",
+                "Test Method", "Test Case Generation Method", "FS_REQ",
+                "Description", "Pre-condition", "Test Action(Sequence)",
+                "Expected Result", "SRS",
+            ],
+            data_rows=[
+                [None, "SwTC_SwEI_02_01", "과전압 차단", None, None,
+                 "FNCT", None, None, "과전압 시 릴레이 차단", "정상 전압 상태",
+                 "1) 전압을 5.5V로 인가한다 2) 100ms 대기", "릴레이 OFF, DTC 0xC101 set", "SwEI_02"],
+            ],
+        )
+        result = parse_swuts_xlsm(xlsm)
+        assert result.ok, result.parse_warnings
+        e = result.by_tc_id["SwTC_SwEI_02_01"]
+        assert e.test_action.startswith("1) 전압을 5.5V")
+        assert e.expected == "릴레이 OFF, DTC 0xC101 set"
+        # 기존 필드 회귀 없음
+        assert e.description.startswith("과전압")
+        assert e.precondition == "정상 전압 상태"
+
+    def test_sequence_still_maps_sub_index_not_test_action(self):
+        """plain 'Sequence' 헤더는 여전히 sub_index로 매핑 — test_action이 탈취하지 않음(순회순서+break)."""
+        xlsm = _build_swuts_xlsm(
+            sheet_name="2.SW Unit Test Spec",
+            headers=["TC_ID", "Description", "Test Method", "Sequence"],
+            data_rows=[["SwUTC_0009", "desc here now", "REQ", "2"]],
+        )
+        result = parse_swuts_xlsm(xlsm)
+        assert result.ok, result.parse_warnings
+        e = result.by_tc_id["SwUTC_0009"]
+        assert e.sub_index == "2"
+        assert e.test_action == ""   # 'Sequence'가 test_action으로 새지 않음
+
     def test_sheet_regex_widen_no_false_positive(self):
         """SW 추가로 STS는 잡되 SITS/SUTS 매칭 불변 + Strategy/Environment 오탐 없음."""
         from backend.services.swuts_excel_parser import _TC_SHEET_RE

@@ -820,6 +820,9 @@ export default function ImpactGuideSection({ analysisResult }) {
               {cc && cc.unit_name && <div style={{ fontSize: 9 }}><span className="text-muted">Unit: </span>{cc.unit_name}</div>}
               {cc && _prose(cc.precondition) && <div style={{ fontSize: 9 }}><span className="text-muted">Pre: </span>{_prose(cc.precondition)}</div>}
               {cc && cc.test_method && <div style={{ fontSize: 9 }}><span className="text-muted">Method: </span>{cc.test_method}</div>}
+              {/* STS 'Test Action(Sequence)'/'Expected Result' — cc.expected는 STS에선 string(SITS/SUTS의 kv dict 아님) → 직접 렌더(Object.entries 금지). 짧은 값(0x1)도 노출 위해 _prose 미적용. */}
+              {cc && _prose(cc.test_action) && <div style={{ overflowWrap: 'anywhere' }}><span className="text-muted">Action: </span>{_prose(cc.test_action)}</div>}
+              {cc && cc.expected && <div style={{ fontSize: 9, overflowWrap: 'anywhere' }}><span className="text-muted">Exp: </span>{cc.expected}</div>}
               {cc && cc.call_chain && <div style={{ fontSize: 9, fontFamily: 'monospace', overflowWrap: 'anywhere' }}><span className="text-muted">Chain: </span>{cc.call_chain}</div>}
               {cc && (cc.sub_cases || []).slice(0, 3).map((sc, j) => (
                 <div key={j} style={{ marginTop: 2, paddingLeft: 6, borderLeft: '1px solid var(--border)' }}>

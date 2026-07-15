@@ -85,6 +85,8 @@ class SwUTSEntry:
     precondition: str = ""
     test_method: str = ""     # 'REQ' / 'IFT' / 'FI'
     generation_method: str = ""  # 'ABV' / 'AEC' / 'AOR'
+    test_action: str = ""     # STS 'Test Action(Sequence)' — 시험 절차/동작(자유텍스트)
+    expected: str = ""        # STS 'Expected Result' — 기대 결과(자유텍스트 string, kv 아님)
     function_id: str = ""     # 'SwUFn_0121' — TC_ID 또는 unit_name에서 substring 추출
     raw_inputs: dict[str, str] = field(default_factory=dict)
     # 'Inpt[0]': '0x0', ... — 디버깅/추적용 (raw input col 값)
@@ -168,6 +170,11 @@ _LABEL_MAP: dict[str, tuple[str, ...]] = {
     ),
     "unit_name": ("unit", "name", "대응환경명", "componentunit"),
     "sub_index": ("sequence",),  # HDPDM01 SUTS의 sub-TC seq col (col 11)
+    # STS 'Test Action(Sequence)' / 'Expected Result' — 콘텐츠 카드 표시용(라운드 후속).
+    # ⚠ plain "sequence"는 위 sub_index가 선점(_LABEL_MAP 순회 순서 + 첫 매칭 break) → test_action은
+    # 'testactionsequence'/'testaction'/'testprocedure'만. expected는 자유텍스트(string, kv 아님).
+    "test_action": ("testactionsequence", "testaction", "testprocedure"),
+    "expected": ("expectedresult", "expected", "기대결과"),
 }
 
 
@@ -237,7 +244,7 @@ def _merge_subrow_into_entry(target: SwUTSEntry, sub: SwUTSEntry) -> None:
     """TC_ID 없는 sub-TC row 정보를 직전 TC entry로 merge.
 
     빈 field만 채움 (첫 sub-TC 값 우선). description/precondition/test_method/
-    generation_method/sub_index 대상. raw_inputs는 첫 sub-TC 것만 보존.
+    generation_method/sub_index/test_action/expected 대상. raw_inputs는 첫 sub-TC 것만 보존.
     """
     if not target.description and sub.description:
         target.description = sub.description
@@ -249,6 +256,10 @@ def _merge_subrow_into_entry(target: SwUTSEntry, sub: SwUTSEntry) -> None:
         target.generation_method = sub.generation_method
     if not target.sub_index and sub.sub_index:
         target.sub_index = sub.sub_index
+    if not target.test_action and sub.test_action:
+        target.test_action = sub.test_action
+    if not target.expected and sub.expected:
+        target.expected = sub.expected
     if not target.raw_inputs and sub.raw_inputs:
         target.raw_inputs = sub.raw_inputs
 
@@ -288,6 +299,8 @@ def _build_entry_from_row(
     test_method = _get_cell("test_method")
     generation_method = _get_cell("generation_method")
     sub_index = _get_cell("sub_index")
+    test_action = _get_cell("test_action")
+    expected = _get_cell("expected")
 
     # DC-4: 스펙 시트에 미정규 노트('REQ/BA' 원문)가 들어오면 C# TestMethodMap 등가로
     # 정규화. 이미 정규값('REQ'/'ABV' 등)이면 매핑 미존재 → mapped=False → 무변경(회귀 0).
@@ -351,6 +364,8 @@ def _build_entry_from_row(
         precondition=precondition[:500],
         test_method=test_method[:50],
         generation_method=generation_method[:50],
+        test_action=test_action[:500],
+        expected=expected[:500],
         function_id=function_id,
         raw_inputs=raw_inputs,
     )
