@@ -409,10 +409,14 @@ def _enrich_function_details_map(
                     if not isinstance(_fn_info, dict):
                         continue
                     _fvars: set = set()
+                    # inputs/outputs 원소는 소스 파서에 따라 dict({name:...}) 또는 str(예 "[OUT]
+                    # return U8 …")로 온다. dict 가정으로 .get 호출 시 str에서 AttributeError가
+                    # 나 try/except가 전체 함수 루프를 중단 → 이후 함수 HSIS 보강 전멸(실측 877/900).
+                    # dict는 name, str은 그대로 수용(HSIS 신호는 주로 globals로 매칭되므로 무해).
                     for _x in (_fn_info.get("inputs") or []):
-                        _fvars.add(str(_x.get("name") or ""))
+                        _fvars.add(str(_x.get("name") or "") if isinstance(_x, dict) else str(_x))
                     for _x in (_fn_info.get("outputs") or []):
-                        _fvars.add(str(_x.get("name") or ""))
+                        _fvars.add(str(_x.get("name") or "") if isinstance(_x, dict) else str(_x))
                     _fvars.update((_fn_info.get("globals_write") or {}).keys())
                     _fvars.update((_fn_info.get("globals_read") or {}).keys())
                     _matched_sigs = [_hvar[v] for v in _fvars if v in _hvar]
