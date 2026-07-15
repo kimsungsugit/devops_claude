@@ -14,14 +14,31 @@ export function pickScmForJob(scmList, jobUrl) {
   if (!Array.isArray(scmList) || scmList.length === 0) return null;
   if (scmList.length === 1) return scmList[0];
   const jobStr = String(jobUrl || '').toLowerCase();
+  // Jenkins job name = the URL's terminal path segment. An *exact* token match on
+  // it is the strongest signal and must beat a mere substring of a shorter id.
+  const seg = jobStr.replace(/\/+$/, '').split('/').filter(Boolean).pop() || '';
+  // Otherwise fall back to the LONGEST (most specific) substring hit, not the
+  // first in list order. Returning the first match let a shorter id shadow a
+  // longer sibling: "kjpds02" is a substring of a "kjpds02_pv" job URL, so
+  // whichever was registered first won — analysing the wrong project's specs.
+  // Longest-token wins is direction-safe too: a "kjpds02" job URL does NOT
+  // contain the longer "kjpds02_pv", so only the correct shorter id matches it.
+  let best = null;
+  let bestLen = 0;
   for (const entry of scmList) {
     const tokens = [entry.id, entry.name]
       .filter(Boolean)
       .map(s => String(s).toLowerCase())
       .filter(s => s.length >= 3);
-    if (tokens.some(t => jobStr.includes(t))) return entry;
+    for (const t of tokens) {
+      if (seg && t === seg) return entry;            // exact job-name match is decisive
+      if (jobStr.includes(t) && t.length > bestLen) {
+        best = entry;
+        bestLen = t.length;
+      }
+    }
   }
-  return null;
+  return best;
 }
 
 /**
