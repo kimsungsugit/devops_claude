@@ -4642,6 +4642,49 @@ def jenkins_sits_extract_traceability(body: Dict[str, Any]) -> Dict[str, Any]:
                     "result": "mapped",
                 })
 
+    # ── SITS 콜체인 채굴 ── spec 시트 서브행 C4의 "Interface : A -> B -> ..." 를 파싱해 TC별 체인 함수
+    # 집합을 만든다. 통합시험 콜체인에 등장하는 **깊은 callee**(entry가 아닌 함수)도 그 TC에 귀속시켜,
+    # 함수→SITS TC 브리지가 entry SwUFn뿐 아니라 체인 전체를 커버하게 한다(예: g_drvin_drv8706sq_init이
+    # SwITC_SwUFn_0112 체인에 등장 → SITS TC 획득). Strategy 1/2와 독립적으로 항상 best-effort로 시도.
+    try:
+        _spec = None
+        for _name in wb.sheetnames:
+            if "Integration Test Spec" in _name:
+                _spec = wb[_name]
+                break
+        if _spec is not None:
+            _tc_chain: Dict[str, set] = {}
+            _cur = ""
+            _CHAIN_CAP = 60  # TC당 체인 함수 상한(과대 방지)
+            _spec_max = min(_spec.max_column or 6, 6)
+            for _row in _spec.iter_rows(min_row=4, max_col=_spec_max, values_only=True):
+                _c2 = str(_row[1] or "").strip() if len(_row) > 1 else ""
+                if _c2 and _c2.upper().startswith("SWITC"):
+                    _cur = _c2
+                _c4 = str(_row[3] or "").strip() if len(_row) > 3 else ""
+                if _cur and "interface" in _c4.lower() and ("->" in _c4 or "→" in _c4):
+                    _cs = _tc_chain.setdefault(_cur, set())
+                    for _tok in _re.split(r"->|→", _c4.split(":", 1)[-1]):
+                        # C 식별자만(3자+) — 프로즈/기호 토큰 오탐 방지. 체인 귀속은 over-report(안전측).
+                        _m = _re.match(r"^\s*([A-Za-z_]\w{2,})", _tok)
+                        if _m and len(_cs) < _CHAIN_CAP:
+                            _cs.add(_m.group(1))
+            if _tc_chain:
+                _existing = {str(r.get("testcase") or "").strip().upper() for r in vcast_rows}
+                for r in vcast_rows:
+                    _ch = _tc_chain.get(str(r.get("testcase") or "").strip())
+                    if _ch:
+                        r["chain_fns"] = sorted(_ch)
+                # 체인만 있고 매핑 행이 없는 spec TC도 방출(체인 브리지 전용, req 없이 chain_fns만).
+                for _tc, _ch in _tc_chain.items():
+                    if _ch and _tc.strip().upper() not in _existing:
+                        vcast_rows.append({
+                            "requirement_id": "", "testcase": _tc, "unit": "",
+                            "source": src_label, "result": "chain", "chain_fns": sorted(_ch),
+                        })
+    except Exception:  # noqa: BLE001 — 콜체인 채굴은 best-effort(실패해도 기존 매핑은 유효)
+        pass
+
     wb.close()
 
     # Dedup

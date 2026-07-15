@@ -1151,8 +1151,9 @@ export default function ImpactGuideSection({ analysisResult }) {
       // 참조해 SwRS 허브로는 0이지만, testcase ID(SwITC_SwUFn_0112)에 SwUFn(단위함수) ID를 품는다.
       // SUTS TC(SwUTC_SwUFn_N, unit=함수명)로 SwUFn→함수명 맵을 만들어 SITS TC를 함수에 직접 연결한다
       // (백엔드 트레이스 매트릭스의 SITS 2-hop과 동일 원리, report_gen/requirements.py:2203).
-      // 백엔드 _SWUFN_RE(requirements.py:29)·jenkins.py:1082와 동일 — SwUFn_(단위)·SwIFn_(통합) 모두.
-      const _SWUFN_RE = /Sw[UI]Fn_\d+/ig;
+      // 백엔드 _SWUFN_RE(requirements.py:29)·jenkins.py:1082와 동일 — SwUFn_(단위)·SwIFn_(통합) +
+      // SwFn_(Fault Injection, SwITC_FI_SwFn_*)까지. 과거 /Sw[UI]Fn_/는 FI TC를 통째로 탈락시켰다.
+      const _SWUFN_RE = /Sw[UI]?Fn_\d+/ig;
       const swufnToFn = {};
       for (const row of sutsTCs) {
         const unit = String(row.unit || '').trim().toLowerCase();
@@ -1163,14 +1164,23 @@ export default function ImpactGuideSection({ analysisResult }) {
           swufnToFn[k].add(unit);
         }
       }
-      const fnToSitsTCs = {};  // 함수명(lower) → Set<SITS TC>  (SwUFn 단위 경로)
+      const fnToSitsTCs = {};  // 함수명(lower) → Set<SITS TC>  (SwUFn 단위 경로 + 콜체인 경로)
       for (const row of sitsTCs) {
         const tc = String(row.testcase || '');
+        // (1) SwUFn 단위 경로 — testcase의 SwUFn/SwIFn/SwFn을 SUTS unit 맵으로 함수에 연결(entry).
         for (const m of tc.match(_SWUFN_RE) || []) {
           for (const fn of (swufnToFn[m.toUpperCase()] || [])) {
             if (!fnToSitsTCs[fn]) fnToSitsTCs[fn] = new Set();
             fnToSitsTCs[fn].add(tc);
           }
+        }
+        // (2) 콜체인 경로 — 백엔드가 파싱한 "Interface : A -> B -> ..." 체인 함수(깊은 callee 포함)에 TC 귀속.
+        //     entry SwUFn뿐 아니라 체인 상 모든 함수가 그 통합시험 커버리지를 인정받는다(g_drvin 0 해소).
+        for (const cf of (row.chain_fns || [])) {
+          const fn = String(cf || '').trim().toLowerCase();
+          if (!fn) continue;
+          if (!fnToSitsTCs[fn]) fnToSitsTCs[fn] = new Set();
+          fnToSitsTCs[fn].add(tc);
         }
       }
 

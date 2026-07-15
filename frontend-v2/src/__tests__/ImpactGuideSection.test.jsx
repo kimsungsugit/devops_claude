@@ -1556,6 +1556,61 @@ describe('ImpactGuideSection', () => {
     await waitFor(() => expect(screen.getByText(/변경 영향도 요약/)).toBeInTheDocument());
     expect(screen.queryByText('파일영향')).not.toBeInTheDocument();
   });
+
+  // STS-IMPACT-059: 콜체인 채굴 — SITS TC의 chain_fns(Interface 콜체인)에 등장하는 깊은 callee가 entry
+  //  SwUFn이 아니어도 그 SITS TC를 획득한다(g_drvin 같은 함수의 SITS 0 해소).
+  it('SITS 콜체인: chain_fns의 깊은 callee가 그 SITS TC를 획득한다', async () => {
+    const { post } = await import('../api.js');
+    post.mockImplementation((url) => {
+      if (url === '/api/jenkins/sits/extract-traceability') return Promise.resolve({ vcast_rows: [
+        { requirement_id: 'SYSTEMTM_1', testcase: 'SwITC_SwUFn_0112', chain_fns: ['main', 's_sysmain_init', 'g_drvin_drv8706sq_init'] },
+      ] });
+      return Promise.resolve({ ok: false });
+    });
+    const user = userEvent.setup();
+    const analysisResult = {
+      impactData: {
+        trigger: { changed_files: ['DrvIn.c'], scm_id: 'kjpds02' },
+        changed_function_types: { g_drvin_drv8706sq_init: 'BODY' },
+        impact: { direct: ['g_drvin_drv8706sq_init'] },
+        function_meta: { g_drvin_drv8706sq_init: { asil: 'A' } },
+        _linked_docs: { sits: 'U:/sits.xlsm' },   // suts 없이도 콜체인 경로로 조인(entry SwUFn 무관)
+      },
+    };
+    render(<ImpactGuideSection analysisResult={analysisResult} />);
+    await user.click(screen.getByText(/상세 가이드 생성/));
+    await waitFor(() => expect(screen.getByText('SITS 영향 TC')).toBeInTheDocument());
+    const sitsCard = screen.getByText('SITS 영향 TC').closest('.stat-card');
+    expect(within(sitsCard).getByText('1')).toBeInTheDocument();   // 콜체인으로 1 TC(entry 아닌 깊은 callee)
+    await user.click(screen.getByRole('button', { name: '상세' }));
+    await waitFor(() => expect(screen.getByText('SwITC_SwUFn_0112')).toBeInTheDocument());
+  });
+
+  // STS-IMPACT-060: FI TC(SwITC_FI_SwFn_*)의 SwFn 토큰도 인식(_SWUFN_RE parity) — 과거 /Sw[UI]Fn_/는 탈락.
+  it('SITS FI: testcase의 SwFn(Fault Injection) 토큰도 SUTS unit으로 풀어 함수에 연결한다', async () => {
+    const { post } = await import('../api.js');
+    post.mockImplementation((url) => {
+      if (url === '/api/jenkins/sts/extract-traceability') return Promise.resolve({ vcast_rows: [{ unit: 's_fi_target', testcase: 'SwUTC_SwFn_34' }] });
+      if (url === '/api/jenkins/sits/extract-traceability') return Promise.resolve({ vcast_rows: [{ requirement_id: 'SYSTEMTM_1', testcase: 'SwITC_FI_SwFn_34' }] });
+      return Promise.resolve({ ok: false });
+    });
+    const user = userEvent.setup();
+    const analysisResult = {
+      impactData: {
+        trigger: { changed_files: ['Fi.c'], scm_id: 'kjpds02' },
+        changed_function_types: { s_fi_target: 'BODY' },
+        impact: { direct: ['s_fi_target'] },
+        function_meta: { s_fi_target: { asil: 'A' } },
+        _linked_docs: { suts: 'U:/suts.xlsm', sits: 'U:/sits.xlsm' },
+      },
+    };
+    render(<ImpactGuideSection analysisResult={analysisResult} />);
+    await user.click(screen.getByText(/상세 가이드 생성/));
+    await waitFor(() => expect(screen.getByText('SITS 영향 TC')).toBeInTheDocument());
+    // SwFn_34가 양변(SUTS unit·SITS testcase)에서 매칭돼 SITS TC=1 (구 /Sw[UI]Fn_/였다면 0)
+    const sitsCard = screen.getByText('SITS 영향 TC').closest('.stat-card');
+    expect(within(sitsCard).getByText('1')).toBeInTheDocument();
+  });
 });
 
 describe('extractDiffElements (순수 함수)', () => {
