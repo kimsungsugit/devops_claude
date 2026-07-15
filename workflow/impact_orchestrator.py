@@ -198,7 +198,7 @@ def _load_uds_fn_details(
 _UDS_NAME_ASIL_CACHE: Dict[str, Dict[str, str]] = {}
 
 
-def _uds_name_asil_map(uds_path: str) -> Dict[str, str]:
+def _uds_name_asil_map(uds_path: str, warn_sink: Optional[List[str]] = None) -> Dict[str, str]:
     """링크된 UDS(SwUDS) 문서에서 {함수명(소문자): ASIL} 맵을 추출한다.
 
     C 소스에 Doxygen `@asil` 주석이 없는 프로젝트(예: NE1AW_PORTING)는 함수 ASIL이 전부
@@ -216,17 +216,38 @@ def _uds_name_asil_map(uds_path: str) -> Dict[str, str]:
         from backend.services.file_resolver import get_resolver
         docx_bytes = get_resolver().read_bytes(uds_path)
     except FileNotFoundError:
-        _UDS_NAME_ASIL_CACHE[uds_path] = {}  # 진짜 부재 → 빈 맵 캐시(재파싱 회피)
+        # 경로/파일명이 틀렸거나(미완성 placeholder `260XXX` 등) 파일이 없음 → impact의 유일한 문서
+        # ASIL 소스가 통째로 죽는다. 정직 표면화(silent-0 방지). ⚠ 캐시하지 않아 매 실행 경고한다
+        # (파일명 오탈자/미완성은 사용자가 고쳐야 하므로 첫 실행 후 조용히 사라지면 안 됨).
+        if warn_sink is not None:
+            warn_sink.append(
+                "ASIL: 연결된 UDS 파일을 찾을 수 없습니다(경로/파일명 확인 — 미완성 placeholder 가능) — "
+                "ASIL 보강 불가, 설정에서 UDS 문서를 정상 파일로 재연결하세요."
+            )
         return {}
     except (PermissionError, OSError):
         # ⚠ 워커 미기동/네트워크 블립을 read_bytes가 PermissionError/OSError로 던진다
         # (file_resolver _ipc_call/_ensure_gate). 이걸 캐시하면 워커가 나중에 떠도 세션 내내
         # 미보강(ASIL 안전게이트 무력화) → 캐시하지 않고 다음 impact 실행서 재시도한다.
+        if warn_sink is not None:
+            warn_sink.append("ASIL: UDS 파일 접근 실패(cloudium worker 미기동/권한) — ASIL 보강 불가(다음 실행 재시도)")
         return {}
     except Exception:
         return {}  # 기타 일시 오류도 캐시 안 함
     result: Dict[str, str] = {}
     if docx_bytes:
+        # docx는 ZIP 컨테이너인데 매직/구조가 깨졌으면(미완성 파일명 `_260XXX` 등 손상) 파서가 조용히
+        # 0을 반환해 'heading-less'로 오진단된다. 손상을 명시 표면화하고(캐시 안 함→다음 실행 재시도)
+        # 조기 반환한다 — impact의 유일한 문서 ASIL 소스가 통째로 죽은 것이므로 사용자에게 알려야 한다.
+        import io as _io
+        import zipfile as _zip
+        if not _zip.is_zipfile(_io.BytesIO(docx_bytes)):
+            if warn_sink is not None:
+                warn_sink.append(
+                    "ASIL: 연결된 UDS 파일을 열 수 없습니다(손상/미완성 ZIP) — ASIL 보강 불가, "
+                    "설정에서 UDS 문서를 정상 파일로 재연결하세요."
+                )
+            return {}
         # 1) heading 기반 SwUDS 파서 — 함수명→ASIL 직접(현대/모비스 포맷).
         try:
             from backend.services.swut_swuds_parser import parse_swuds_docx
@@ -275,6 +296,10 @@ def _uds_name_asil_map(uds_path: str) -> Dict[str, str]:
             "impact ASIL: UDS를 읽었으나 함수-ASIL 매핑 0건(파서 실패 가능) — 캐시하지 않고 다음 실행 재시도: %s",
             uds_path,
         )
+        if warn_sink is not None:
+            warn_sink.append(
+                "ASIL: UDS를 읽었으나 함수-ASIL 매핑 0건(heading-less 레이아웃/파서 미매칭) — UDS 형식 확인 필요"
+            )
     return result
 
 
@@ -291,10 +316,11 @@ def _is_blank_asil(value: Any) -> bool:
     return str(value or "").strip().upper() in ("", "TBD", "N/A", "-", "UNKNOWN")
 
 
-def _enrich_asil_from_uds(by_name: Dict[str, Any], uds_path: str) -> tuple[int, int]:
+def _enrich_asil_from_uds(by_name: Dict[str, Any], uds_path: str, warn_sink: Optional[List[str]] = None) -> tuple[int, int]:
     """소스 주석에 ASIL이 없는 함수만 링크된 UDS의 함수별 ASIL로 보강한다(안전측: 소스 > UDS).
 
     소스 주석 ASIL이 있는 함수는 절대 덮지 않는다. 보강된 함수엔 `asil_source="uds"` 표식.
+    warn_sink: UDS 손상/미매칭 사유를 job warnings로 표면화(silent-0 방지).
     반환: (보강한 함수 수, 보강 후에도 남은 미상 수).
     """
     if not uds_path or not isinstance(by_name, dict):
@@ -305,7 +331,7 @@ def _enrich_asil_from_uds(by_name: Dict[str, Any], uds_path: str) -> tuple[int, 
     ]
     if not missing:
         return 0, 0
-    name_asil = _uds_name_asil_map(uds_path)
+    name_asil = _uds_name_asil_map(uds_path, warn_sink=warn_sink)
     if not name_asil:
         return 0, len(missing)
     enriched = 0
@@ -314,6 +340,94 @@ def _enrich_asil_from_uds(by_name: Dict[str, Any], uds_path: str) -> tuple[int, 
         if _a:
             by_name[fn]["asil"] = _a
             by_name[fn]["asil_source"] = "uds"
+            enriched += 1
+    return enriched, len(missing) - enriched
+
+
+_SDS_NAME_ASIL_CACHE: Dict[str, Dict[str, str]] = {}
+
+
+def _sds_name_asil_map(sds_path: str, warn_sink: Optional[List[str]] = None) -> Dict[str, str]:
+    """링크된 SDS(SwDS)에서 {함수/컴포넌트명(소문자): ASIL} 맵 — UDS ASIL 보강의 폴백 소스.
+
+    UDS 하나가 손상/부재여도 안전 등급이 통째로 미상이 되지 않도록, `_extract_sds_partition_map`
+    (함수단위 asil·인터페이스 함수는 소속 SwCom ASIL 상속)이 이미 파싱하는 asil을 재사용한다.
+    cloudium은 worker bytes 경유(직접 open 금지). 실패/손상/미존재는 빈 맵. 경로 캐시(비었으면 미캐시).
+    """
+    if not sds_path:
+        return {}
+    _cached = _SDS_NAME_ASIL_CACHE.get(sds_path)
+    if _cached is not None:
+        return _cached
+    try:
+        from backend.services.file_resolver import get_resolver
+        data = get_resolver().read_bytes(sds_path)
+    except (PermissionError, OSError):
+        return {}  # 워커 블립 — 캐시 안 함(다음 실행 재시도)
+    except Exception:
+        return {}
+    if not data:
+        return {}
+    import io as _io
+    import os as _os
+    import tempfile as _tf
+    import zipfile as _zip
+    if not _zip.is_zipfile(_io.BytesIO(data)):
+        if warn_sink is not None:
+            warn_sink.append("ASIL: SDS 파일을 열 수 없습니다(손상 ZIP) — SDS ASIL 폴백 불가")
+        return {}
+    tmp_path = ""
+    result: Dict[str, str] = {}
+    try:
+        from report_gen.requirements import _extract_sds_partition_map
+        with _tf.NamedTemporaryFile(suffix=".docx", delete=False) as f:
+            f.write(data)
+            tmp_path = f.name
+        pm = _extract_sds_partition_map(tmp_path) or {}
+        for key, info in pm.items():
+            k = str(key).strip().lower()
+            a = str((info or {}).get("asil") or "").strip()
+            if k and a and not _is_blank_asil(a):
+                # 동명 충돌은 max 등급(안전측, _uds_name_asil_map과 동일 원칙).
+                _ex = result.get(k)
+                if _ex is None or _asil_rank(a) > _asil_rank(_ex):
+                    result[k] = a
+    except Exception:
+        return {}  # 파싱 실패 — 캐시 안 함
+    finally:
+        if tmp_path:
+            try:
+                _os.unlink(tmp_path)
+            except OSError:
+                pass
+    if result:
+        _SDS_NAME_ASIL_CACHE[sds_path] = result
+    return result
+
+
+def _enrich_asil_from_sds(by_name: Dict[str, Any], sds_path: str, warn_sink: Optional[List[str]] = None) -> tuple[int, int]:
+    """UDS 보강 후에도 소스가 미상(TBD)인 함수만 SDS ASIL로 폴백 보강한다(소스 > UDS > SDS).
+
+    ⚠ 안전측: TBD인 함수만 채우고 이미 등급이 있는 함수는 절대 덮지 않는다(등급 낮추기 없음).
+    보강된 함수엔 `asil_source="sds"` 표식. 반환: (보강한 함수 수, 보강 후 남은 미상 수).
+    """
+    if not sds_path or not isinstance(by_name, dict):
+        return 0, 0
+    missing = [
+        fn for fn, info in by_name.items()
+        if isinstance(info, dict) and _is_blank_asil(info.get("asil"))
+    ]
+    if not missing:
+        return 0, 0
+    name_asil = _sds_name_asil_map(sds_path, warn_sink=warn_sink)
+    if not name_asil:
+        return 0, len(missing)
+    enriched = 0
+    for fn in missing:
+        a = name_asil.get(fn)
+        if a:
+            by_name[fn]["asil"] = a
+            by_name[fn]["asil_source"] = "sds"
             enriched += 1
     return enriched, len(missing) - enriched
 
@@ -1494,7 +1608,12 @@ def run_impact_update(
             elif trigger.changed_files:
                 changed_types = _fallback_changed_types_from_files(trigger.changed_files)
 
+        # warnings: ASIL 보강/UDS·SDS 손상 경고를 이 블록에서부터 append하므로 여기서 초기화한다
+        # (과거엔 1762에서 정의 → ASIL 블록이 warn_sink=warnings를 못 써 UnboundLocalError). 이후
+        # 코드가 이 단일 리스트에 계속 append하고 result에 실린다(재정의 금지 — 재정의 시 ASIL 경고 유실).
+        warnings: List[str] = []
         _asil_uds_enriched = 0  # UDS 문서에서 ASIL을 보강한 함수 수(소스 주석 미기재분 — 아래서 채움)
+        _asil_sds_enriched = 0  # UDS로 해석 안 된 함수를 SDS ASIL로 폴백 보강한 수
         if entry and entry.source_root:
             if callable(on_progress):
                 on_progress("impact_analysis", "영향 범위를 계산 중입니다.", {"changed_functions": len(changed_types)})
@@ -1520,6 +1639,13 @@ def run_impact_update(
             # (소스 ASIL이 있는 함수는 유지, 빈 함수만 채움 → _asil_of·에스컬레이션·커버리지 타깃에 반영)
             _asil_uds_enriched, _asil_still_missing = _enrich_asil_from_uds(
                 by_name, getattr(getattr(entry, "linked_docs", None), "uds", "") or "",
+                warn_sink=warnings,
+            )
+            # UDS 보강 후에도 남은 미상만 SDS ASIL(SwCom/인터페이스 함수)로 폴백 보강 — UDS 손상/부재
+            # 견고화. 소스 > UDS > SDS, TBD만 채움·등급 낮추기 없음(안전측).
+            _asil_sds_enriched, _asil_still_missing = _enrich_asil_from_sds(
+                by_name, getattr(getattr(entry, "linked_docs", None), "sds", "") or "",
+                warn_sink=warnings,
             )
             # resolve(fatten) 전에 '실제로 지목된' 함수를 보존 — 로컬 diff 경로의 라인증거 판별용.
             # (cloudium/editType 경로의 키는 함수명이 아니라 파일 기반이라 line 증거로 쓰지 않는다.)
@@ -1646,7 +1772,7 @@ def run_impact_update(
                 max_impacted_functions=_bfs_cap,
             )
         impacted_total = len(_impacted_union(impact_groups))
-        warnings: List[str] = []
+        # (warnings는 위 ASIL 블록에서 이미 초기화됨 — 여기서 재정의하면 ASIL 경고가 유실된다.)
         # 콜그래프 탐색이 상한에서 끊겼으면 빈 hop이 '영향 없음'이 아니라 '미계산'임을 명시.
         if _bfs_stats.get("truncated"):
             _tr_hop = _bfs_stats.get("truncated_at_hop") or 0
@@ -1658,6 +1784,10 @@ def run_impact_update(
         if _asil_uds_enriched:
             warnings.append(
                 f"ASIL 보강: 소스 주석에 ASIL이 없는 함수 {_asil_uds_enriched}개를 UDS 문서에서 해석(cloudium 워커 경유)"
+            )
+        if _asil_sds_enriched:
+            warnings.append(
+                f"ASIL 보강: UDS로 해석 안 된 함수 {_asil_sds_enriched}개를 SDS(SwCom/인터페이스 ASIL)로 폴백 해석"
             )
         # AUTO를 검토(FLAG)로 강등할 '실질적' 사유만 모은다 — 정보성 경고(Jenkins revision/SITS
         # cross 안내 등)는 AUTO를 봉쇄하지 않는다(과보수 회귀 방지). 한도 초과·ASIL 에스컬레이션만.
