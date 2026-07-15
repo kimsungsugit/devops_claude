@@ -136,6 +136,7 @@ export default function SrsSdsSection({ job, analysisResult }) {
       let reqItems = [];
       let mappingPairs = [];
       let udsFunctionIds = [];  // 전체 UDS 함수 인벤토리(SDS→UDS bridge 시드용)
+      let udsFunctionAsil = {};  // SwUDS 함수별 ASIL — 매트릭스 요구사항 ASIL max-merge 소스(under-report 해소)
       try {
         const user = getUsername();
         const previewRes = await fetch('/api/jenkins/uds/requirements-preview', {
@@ -164,6 +165,7 @@ export default function SrsSdsSection({ job, analysisResult }) {
           // 전체 UDS 함수 인벤토리 — 설계 req 참조 없는 함수까지 포함. 매트릭스 SDS→UDS
           // bridge가 전체 함수를 매칭하도록 별도 전달(mapping_pairs만으론 ~5%만 커버).
           udsFunctionIds = udsMapping?.all_function_ids || [];
+          udsFunctionAsil = udsMapping?.uds_function_asil || {};
           if (mappingPairs.length > 0) {
             toast('info', `UDS에서 ${mappingPairs.length}개 매핑 / ${udsFunctionIds.length}개 함수 추출`);
           }
@@ -391,6 +393,7 @@ export default function SrsSdsSection({ job, analysisResult }) {
         hsis_pairs: hsisPairs,  // 시스템 레벨 인터페이스 밴드(design-arm)
         sits_rows: sitsRows,
         component_asil: componentAsil,  // ASIL 결합(P5) — 요구사항별 ASIL 도출용
+        uds_function_asil: udsFunctionAsil,  // SwUDS 함수 ASIL — 매트릭스 max-merge(under-report 해소)
         // Required for server-side summary cache (dashboard TraceSummaryCard)
         job_url: job?.url || '',
         cache_root: cacheRoot || '.devops_pro_cache',

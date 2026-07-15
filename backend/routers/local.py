@@ -333,25 +333,62 @@ def _discover_hsis_path() -> Optional[str]:
     return None
 
 
+def _localize_uds_for_enrich(uds_path: Optional[str]) -> Optional[str]:
+    """SwUDS 문서를 로컬 tmp .docx로 복사해 enrich 파서가 직접 open 가능하게 한다.
+
+    enrich/하위 파서는 path.exists()/open() 로컬 fs 직접 접근이라 cloudium U: 경로를
+    직접 읽지 못한다. resolver.read_bytes(worker 8765)로 bytes를 받아 tmp .docx에 기록
+    후 그 경로를 반환한다. 호출부는 사용 후 반드시 os.unlink로 삭제해야 한다(누수 방지).
+
+    Args:
+        uds_path: SwUDS 문서 경로(로컬 또는 cloudium). 빈 값이면 None.
+
+    Returns:
+        로컬 tmp .docx 경로. 미입력 또는 접근 실패 시 None(기존 동작 불변).
+    """
+    if not uds_path or not str(uds_path).strip():
+        return None
+    try:
+        from backend.services.file_resolver import get_resolver
+        from backend.services.resolver_helpers import enforce_resolver_access
+        enforce_resolver_access(uds_path)
+        data = get_resolver().read_bytes(uds_path)
+        with tempfile.NamedTemporaryFile(suffix=".docx", delete=False) as tmp:
+            tmp.write(data)
+            return tmp.name
+    except Exception as exc:
+        _logger.warning("UDS localize for enrich skipped: %s", exc)
+        return None
+
+
 def _enrich_function_details_map(
     function_details: Optional[Dict[str, Any]],
     *,
     function_table_rows: Optional[List[List[Any]]] = None,
     req_doc_paths: Optional[List[str]] = None,
     sds_doc_paths: Optional[List[str]] = None,
+    uds_path: Optional[str] = None,
 ) -> Tuple[Dict[str, Any], List[str], List[str]]:
     details = function_details if isinstance(function_details, dict) else {}
     req_paths, sds_paths = _resolve_req_doc_sets(req_doc_paths, sds_doc_paths)
     if details:
+        _uds_tmp = _localize_uds_for_enrich(uds_path)
         try:
             enrich_function_details_with_docs(
                 details,
                 function_table_rows,
                 req_doc_paths=req_paths,
                 sds_doc_paths=sds_paths,
+                uds_doc_paths=[_uds_tmp] if _uds_tmp else None,
             )
         except Exception as exc:
             _logger.warning("function detail enrichment skipped: %s", exc)
+        finally:
+            if _uds_tmp:
+                try:
+                    os.unlink(_uds_tmp)
+                except OSError:
+                    pass
     # HSIS enrichment: functions using HSIS signal variables get
     # description_source/related_source upgraded from "inference" to "hsis"
     _hsis_p = _discover_hsis_path()
@@ -405,6 +442,7 @@ def _enrich_source_sections_with_docs(
     *,
     req_doc_paths: Optional[List[str]] = None,
     sds_doc_paths: Optional[List[str]] = None,
+    uds_path: Optional[str] = None,
 ) -> Tuple[Dict[str, Any], List[str], List[str]]:
     sections = source_sections if isinstance(source_sections, dict) else {}
     details = sections.get("function_details", {})
@@ -414,6 +452,7 @@ def _enrich_source_sections_with_docs(
         function_table_rows=table_rows if isinstance(table_rows, list) else None,
         req_doc_paths=req_doc_paths,
         sds_doc_paths=sds_doc_paths,
+        uds_path=uds_path,
     )
     sections["function_details"] = details
 
@@ -2020,6 +2059,7 @@ async def local_sts_generate(
                 function_table_rows=sections.get("function_table_rows", []),
                 req_doc_paths=req_doc_paths,
                 sds_doc_paths=sds_doc_paths,
+                uds_path=uds_path,
             )
             _api_logger.info("[STS_GENERATE][%s] parsed %d functions from source", req_id, len(function_details))
         except Exception as e:
@@ -2199,6 +2239,7 @@ async def local_sts_generate_stream(
                 function_table_rows=sections.get("function_table_rows", []),
                 req_doc_paths=req_doc_paths,
                 sds_doc_paths=sds_doc_paths,
+                uds_path=uds_path,
             )
         except Exception:
             pass
@@ -2446,6 +2487,7 @@ async def local_sts_generate_async(
                         function_table_rows=sections.get("function_table_rows", []),
                         req_doc_paths=req_doc_paths,
                         sds_doc_paths=sds_doc_paths,
+                        uds_path=uds_path,
                     )
                 except Exception as e:
                     _logger.warning("[STS_ASYNC][%s] source parsing warning: %s", job_id, e)

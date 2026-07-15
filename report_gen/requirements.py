@@ -1033,19 +1033,53 @@ def _build_req_map_from_doc_paths(doc_paths: List[str], texts: Optional[List[str
     return mapping
 
 
+def _build_uds_asil_map(uds_doc_paths: Optional[List[str]]) -> Dict[str, str]:
+    """SwUDS(v3.02 세로 key-value 표) 문서에서 {함수명(lower): ASIL 등급} 직독.
+
+    impact 파이프라인의 검증된 extract_function_asil_from_kv_tables를 재사용한다(권위 문서
+    직독 — SDS 이름 휴리스틱 매칭보다 정확). 이 파서·상위 파서가 path.exists()/open()으로
+    로컬 fs 직접 접근하므로, 호출부가 cloudium U: 경로를 로컬 tmp로 변환해 넘긴 뒤에만 유효.
+    다중 UDS·동명 함수는 max-merge(안전측 — 낮은 등급 채택은 under-report). 파싱 실패는
+    graceful skip(추적성 본류 비차단). lazy import로 계층 위생 + iso26262 모듈 로드 실패 격리.
+    """
+    out: Dict[str, str] = {}
+    for p in (uds_doc_paths or []):
+        try:
+            path = Path(str(p))
+            if not path.exists() or path.suffix.lower() != ".docx":
+                continue
+            from backend.services.iso26262_doc_asil_extractor import (
+                extract_function_asil_from_kv_tables,
+            )
+            parsed = extract_function_asil_from_kv_tables(path.read_bytes())
+            for k, v in (parsed or {}).items():
+                nk = str(k).strip().lower()
+                if not nk or not v:
+                    continue
+                if nk not in out or _ASIL_RANK.get(str(v).upper(), -1) > _ASIL_RANK.get(str(out[nk]).upper(), -1):
+                    out[nk] = v
+        except Exception:
+            continue
+    return out
+
+
 def enrich_function_details_with_docs(
     function_details: Dict[str, Dict[str, Any]],
     function_table_rows: Optional[List[List[Any]]] = None,
     *,
     req_doc_paths: Optional[List[str]] = None,
     sds_doc_paths: Optional[List[str]] = None,
+    uds_doc_paths: Optional[List[str]] = None,
 ) -> Dict[str, Dict[str, Any]]:
     if not isinstance(function_details, dict) or not function_details:
         return function_details
 
     req_paths = [str(p).strip() for p in (req_doc_paths or []) if str(p).strip()]
     sds_paths = [str(p).strip() for p in (sds_doc_paths or []) if str(p).strip()]
+    uds_paths = [str(p).strip() for p in (uds_doc_paths or []) if str(p).strip()]
     req_map = _build_req_map_from_doc_paths(req_paths) if req_paths else {}
+    # SwUDS 문서 직독 ASIL(권위) — 함수별 blank를 SDS 이름매칭보다 먼저 채운다(under-report 방지).
+    uds_name_asil = _build_uds_asil_map(uds_paths)
 
     sds_map: Dict[str, Dict[str, str]] = {}
     for path in sds_paths:
@@ -1264,6 +1298,27 @@ def enrich_function_details_with_docs(
         ):
             info["asil"] = "QM"
             info["asil_source"] = "srs_default_qm"
+
+        # SwUDS 문서 직독 ASIL — 등급 낮추기 절대 없음(상향만). 단 소스 유래(asil_source="comment",
+        # C @asil Doxygen)와 문서 유래(sds 이름휴리스틱·srs·inference·blank)를 구분한다:
+        #  · 문서 유래가 UDS보다 낮으면 → UDS로 상향(under-report 해소). SDS 오매칭·SRS 미스보다
+        #    UDS 문서 직독이 권위. UDS 문서에만 명시된 안전함수(보안접근 등)를 회복.
+        #  · 소스 코드 @asil(c_source 권위, backend/services/CLAUDE.md "c_source > swuds")이 UDS보다
+        #    낮으면 → 등급 유지 + asil_doc_conflict 표면화(자동 상향 안 함). 문서>코드 불일치는 수동
+        #    검토 신호이지 코드 등급을 문서에 맞춰 올릴 사안 아님 — impact _enrich_asil_from_uds와 lockstep.
+        #    이로써 같은 함수가 impact 탭·추적성 탭에서 모순 표시되지 않는다(deep-review W1).
+        # SDS direct/exact가 UDS보다 높은 경우(예 sf_* secure flash)는 max라 SDS 우위 보존([B]).
+        if uds_name_asil:
+            _nm = str(info.get("name") or "").strip().lower()
+            _uds_a = uds_name_asil.get(_nm) if _nm else None
+            if _uds_a:
+                _cur = str(info.get("asil") or "").strip().upper()
+                if _ASIL_RANK.get(str(_uds_a).upper(), -1) > _ASIL_RANK.get(_cur, -1):
+                    if str(info.get("asil_source") or "").strip() == "comment":
+                        info["asil_doc_conflict"] = f"source={_cur or '(빈)'}<uds={_uds_a}"
+                    else:
+                        info["asil"] = _uds_a
+                        info["asil_source"] = "uds"
 
     return function_details
 
@@ -1877,6 +1932,7 @@ def generate_uds_traceability_matrix(
     uds_function_ids: Optional[List[str]] = None,
     component_asil: Optional[Dict[str, str]] = None,
     hsis_pairs: Optional[List[Dict[str, Any]]] = None,
+    uds_function_asil: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     # ASIL 결합(P5) — {컴포넌트/함수명(lower): ASIL}. SDS 추출(component_asil)에서 전달.
     # 요구사항별 ASIL = 연결된 SDS 컴포넌트·UDS 함수의 ASIL 중 최고(QM<A<B<C<D).
@@ -1886,6 +1942,15 @@ def generate_uds_traceability_matrix(
         _kk = str(_k or "").strip().lower()
         _vv = str(_v or "").strip()
         if _kk and _vv:
+            comp_asil_map[_kk] = _vv
+    # SwUDS 문서 직독 함수 ASIL을 요구사항 ASIL 도출 소스에 max-merge. SDS 컴포넌트 ASIL만으론
+    # UDS 함수 단위 안전등급(보안접근·슬립감지 등)이 누락돼 요구사항 ASIL이 under-report될 수 있다
+    # (extract-mapping이 uds_function_asil로 전달). 같은 함수명에 SDS/UDS 등급이 다르면 max —
+    # 낮은 등급 채택은 under-report(위험), over-report는 안전측. (라이브: kjpds02_pv 함수 ASIL 갭)
+    for _k, _v in (uds_function_asil or {}).items():
+        _kk = str(_k or "").strip().lower()
+        _vv = str(_v or "").strip()
+        if _kk and _vv and (_kk not in comp_asil_map or _ASIL_RANK.get(_vv.upper(), -1) > _ASIL_RANK.get(str(comp_asil_map[_kk]).upper(), -1)):
             comp_asil_map[_kk] = _vv
 
     # Build original→normalized ID mapping to preserve display IDs

@@ -2986,16 +2986,40 @@ def _parse_excel_preview(file_path: Path, max_rows: int = 30) -> Dict[str, Any]:
     return {"filename": file_path.name, "sheets": sheets, "sheet_names": names}
 
 
-def _build_sts_function_details(source_root_path: Path, req_doc_paths: List[str], sds_doc_paths: List[str]) -> Dict[str, Any]:
+def _build_sts_function_details(source_root_path: Path, req_doc_paths: List[str], sds_doc_paths: List[str], uds_path: Optional[str] = None) -> Dict[str, Any]:
     sections = generate_uds_source_sections(str(source_root_path))
     details = sections.get("function_details", {}) if isinstance(sections, dict) else {}
     if isinstance(details, dict):
-        enrich_function_details_with_docs(
-            details,
-            sections.get("function_table_rows", []) if isinstance(sections, dict) else [],
-            req_doc_paths=req_doc_paths,
-            sds_doc_paths=sds_doc_paths,
-        )
+        # SwUDS 문서 직독 ASIL 보강 — cloudium U: 경로는 worker(resolver.read_bytes)로 받아
+        # 로컬 tmp .docx로 실체화 후 enrich에 전달(enrich 파서는 로컬 fs 직접 접근). sds/extract-mapping
+        # (canonical)과 동일 패턴. 사용 후 반드시 unlink. uds_path 없으면 기존 동작 불변.
+        _uds_tmp: Optional[str] = None
+        if uds_path and str(uds_path).strip():
+            try:
+                from backend.services.file_resolver import get_resolver
+                from backend.services.resolver_helpers import enforce_resolver_access
+                enforce_resolver_access(uds_path)
+                _data = get_resolver().read_bytes(uds_path)
+                with tempfile.NamedTemporaryFile(suffix=".docx", delete=False) as _tmp:
+                    _tmp.write(_data)
+                    _uds_tmp = _tmp.name
+            except Exception as _uds_exc:
+                _api_logger.warning("STS UDS ASIL localize skipped: %s", _uds_exc)
+                _uds_tmp = None
+        try:
+            enrich_function_details_with_docs(
+                details,
+                sections.get("function_table_rows", []) if isinstance(sections, dict) else [],
+                req_doc_paths=req_doc_paths,
+                sds_doc_paths=sds_doc_paths,
+                uds_doc_paths=[_uds_tmp] if _uds_tmp else None,
+            )
+        finally:
+            if _uds_tmp:
+                try:
+                    Path(_uds_tmp).unlink()
+                except OSError:
+                    pass
     return details if isinstance(details, dict) else {}
 
 
@@ -3104,7 +3128,7 @@ async def jenkins_sts_generate_async(
     def _worker() -> None:
         try:
             _set_progress("jenkins_sts", job_url, build_selector, {"stage": "source_analysis", "percent": 5, "message": "Analyzing source"}, job_id=job_id)
-            function_details = _build_sts_function_details(source_root_path, req_doc_paths, sds_doc_paths)
+            function_details = _build_sts_function_details(source_root_path, req_doc_paths, sds_doc_paths, uds_path=uds_path)
             result = generate_sts(
                 requirements_text=req_texts,
                 function_details=function_details,
@@ -3804,6 +3828,7 @@ def jenkins_uds_traceability_matrix(req: UdsTraceabilityMatrixRequest) -> Dict[s
             uds_function_ids=req.uds_function_ids or [],
             component_asil=req.component_asil or {},
             hsis_pairs=req.hsis_pairs or [],
+            uds_function_asil=req.uds_function_asil or {},
         )
         # 명시 RelatedID 링크 테이블 파생(P1) — hiMA식 매트릭스/감사 baseline.
         # additive: 기존 matrix dict를 변형하지 않고 새 키(link_table)만 더한다.
@@ -4045,6 +4070,16 @@ def jenkins_uds_extract_mapping(body: Dict[str, Any]) -> Dict[str, Any]:
             "source_ids": sorted(sources),
         })
 
+    # SwUDS 함수별 ASIL 직독(추적성 매트릭스 요구사항 ASIL 도출용) — 검증된 v3.02 kv-표 추출기
+    # 재사용. SDS 컴포넌트 ASIL만으론 UDS 함수 단위 안전등급이 누락돼 요구사항이 under-report되던
+    # 갭을 매트릭스에 공급(매트릭스가 comp_asil_map에 max-merge). 실패는 graceful(빈 맵).
+    uds_function_asil: Dict[str, str] = {}
+    try:
+        from backend.services.iso26262_doc_asil_extractor import extract_function_asil_from_kv_tables
+        uds_function_asil = extract_function_asil_from_kv_tables(data) or {}
+    except Exception as _asil_exc:
+        _api_logger.debug("UDS function ASIL extraction skipped: %s", _asil_exc)
+
     result = {
         "ok": True,
         "mapping_pairs": mapping_pairs,
@@ -4054,6 +4089,8 @@ def jenkins_uds_extract_mapping(body: Dict[str, Any]) -> Dict[str, Any]:
         # 함수까지 포함. 매트릭스 SDS→UDS bridge가 이 목록으로 전체 함수를 매칭한다.
         "all_function_ids": sorted(all_funcs),
         "all_functions_count": len(all_funcs),
+        # 함수명(lower)→ASIL — 매트릭스 요구사항 ASIL max-merge 소스(under-report 해소).
+        "uds_function_asil": uds_function_asil,
     }
     with _UDS_MAPPING_LOCK:
         if len(_UDS_MAPPING_CACHE) >= 16:

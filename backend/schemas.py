@@ -742,6 +742,10 @@ class UdsTraceabilityMatrixRequest(BaseModel):
     # 매트릭스가 요구사항별 ASIL(연결 컴포넌트 max)을 도출해 행/링크테이블에 부착.
     # 컴포넌트 ~1k(SwCom+함수)의 넉넉한 배수 상한.
     component_asil: Dict[str, str] = Field(default_factory=dict, max_length=20000)
+    # SwUDS 문서 직독 함수 ASIL — {함수명(lower): ASIL}. uds extract-mapping이 v3.02 kv-표에서
+    # 추출해 echo. 매트릭스가 comp_asil_map에 max-merge(SDS 컴포넌트만으론 UDS 함수 안전등급이
+    # 누락돼 요구사항 ASIL under-report). 함수 ~1k의 넉넉한 배수 상한(component_asil과 동형).
+    uds_function_asil: Dict[str, str] = Field(default_factory=dict, max_length=20000)
     # 시스템 레벨 인터페이스 밴드 — hsis extract가 요구사항↔인터페이스 신호(HSI_xx/SW변수)로 전달.
     # 신호 ~수백 행 상한의 넉넉한 배수.
     hsis_pairs: List[Dict[str, Any]] = Field(default_factory=list, max_length=20000)
