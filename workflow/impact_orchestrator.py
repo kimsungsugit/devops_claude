@@ -361,18 +361,6 @@ def _load_suts_fn_tcs(
     except Exception:
         _warn("회귀 TC: SUTS 파싱 실패 — 재실행 TC 미집계")
         return {}
-    def _cap_kv(d: Any, n: int = 5) -> Dict[str, str]:
-        # {header: value} 중 비어있지 않은 상위 n개를 문자열 80자로 절단(job 크기 상한).
-        out: Dict[str, str] = {}
-        for k, v in list((d or {}).items()):
-            sv = str(v).strip()
-            if not sv:
-                continue
-            out[str(k)[:60]] = sv[:80]
-            if len(out) >= n:
-                break
-        return out
-
     result: Dict[str, List[str]] = {}
     for unit in model.get("units") or []:
         name = str(unit.get("unit_name") or "").strip()
@@ -526,10 +514,37 @@ def _load_sds_fn_desc(
     return out
 
 
+def _cap_kv(d: Any, n: int = 5) -> Dict[str, str]:
+    """{header: value} 중 비어있지 않은 상위 n개를 80자로 절단(job 크기 상한). SITS/STS 내용 캡처 공용."""
+    out: Dict[str, str] = {}
+    for k, v in list((d or {}).items()):
+        sv = str(v).strip()
+        if not sv:
+            continue
+        out[str(k)[:60]] = sv[:80]
+        if len(out) >= n:
+            break
+    return out
+
+
+def _normTc(s: Any) -> str:
+    r"""TC/요구 ID 정규화 — 내부 공백 전부 제거 + 대문자.
+
+    프론트 `_normReq`(``replace(/\s+/g,'').toUpperCase()``) 및 백엔드 `_normalize_req_id`와 **동일**해야
+    doc_content(sts_by_tc/sits_by_tc)의 키가 프론트 `stsTestCases`/`sitsTestCases`(추적 매트릭스 testcase)와
+    조인된다. 불일치 시 내용은 조용히 사라지지 않고 프론트에서 '미파싱'으로 정직 표기된다."""
+    return "".join(str(s or "").split()).upper()
+
+
 def _load_sits_fn_chains(
-    linked_doc: str, flagged_fns: List[str], warn_sink: Optional[List[str]] = None
+    linked_doc: str, flagged_fns: List[str], warn_sink: Optional[List[str]] = None,
+    content_sink: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, List[str]]:
     """Return {entry_fn: [label, ...]} from the SITS vectorcast intermediate JSON.
+
+    content_sink(선택): 제공되면 {_normTc(tc_id): {call_chain, sub_cases:[{precondition, inputs, expected}]}}로
+    통합 TC 실 내용을 채운다(문서 카드용, TC-ID 키). 프론트가 TC-ID로 조인하므로 entry_fn 매칭과 무관하게
+    전체 TC를 담는다. 회귀 반환({entry_fn:[label]})은 불변(순수 additive).
 
     intermediate(`<sits>_vectorcast.json`)는 SITS 빌더가 생성한다 — cloudium이면 worker 경유로
     읽는다(직접 FS 금지). cloudium은 읽기전용이라 intermediate 자체가 없을 수 있고, 그때의 0은
@@ -569,17 +584,84 @@ def _load_sits_fn_chains(
     _integrations = (data.get("integrations") if isinstance(data, dict) else None) or []
     for itc in _integrations:
         entry = str(itc.get("entry_fn") or "").strip()
+        chain = str(itc.get("call_chain") or "").strip()
+        tc_id = str(itc.get("tc_id") or "")
         if entry.lower() in fn_set:
-            chain = str(itc.get("call_chain") or "").strip()
-            tc_id = str(itc.get("tc_id") or "")
             label = f"{tc_id}: {chain}" if tc_id else chain
             if label:
                 result.setdefault(entry, []).append(label)
+        # 문서 카드용 실 내용(TC-ID 키) — sub_cases의 precondition/inputs/expected 보존. 프론트가 TC-ID로
+        # 조인하므로 entry_fn 매칭과 무관하게 전체 TC를 담는다(문서 소규모, 총량 800 캡). 회귀 result는 불변.
+        _nk = _normTc(tc_id)
+        if content_sink is not None and _nk and len(content_sink) < 800:
+            _subs = [
+                {
+                    "precondition": str(sc.get("precondition") or "").strip()[:200],
+                    "inputs": _cap_kv(sc.get("inputs")),
+                    "expected": _cap_kv(sc.get("expected")),
+                }
+                for sc in (itc.get("sub_cases") or [])[:3]
+            ]
+            content_sink[_nk] = {"call_chain": chain[:200], "sub_cases": _subs}
     # SUTS 로더(_load_suts_fn_tcs)와 대칭 — 중간파일에 통합케이스는 있는데 영향 함수와 entry_fn이
     # 하나도 매칭 안 되면 조용한 0 대신 사유를 남긴다(이름 규칙 불일치 등, silent-0 방지).
     if not result and fn_set and _integrations:
         _warn("회귀 체인: SITS 통합케이스는 있으나 영향 함수와 entry_fn이 매칭되지 않아 통합 체인 0(이름 규칙 확인)")
     return result
+
+
+def _load_testspec_by_tc(
+    linked_doc: str, warn_sink: Optional[List[str]] = None, doc_label: str = "STS"
+) -> Dict[str, Any]:
+    """STS/SITS xlsm(bytes)을 표준 파서(`parse_swuts_xlsm`)로 파싱해 TC-ID 키 내용 맵을 반환한다.
+
+    반환: {_normTc(tc_id): {description, precondition, test_method, unit_name}} — 문서 카드용.
+    STS는 전용 파서가 없어 이 표준 파서 best-effort로만 도달한다. 시트/라벨 미매칭(ok=False)이면
+    과대추정 대신 빈 dict + 사유 warn(정직 '미파싱'). cloudium은 worker(read_bytes) bytes 경유.
+    (SITS는 로컬 빌드면 중간 JSON이 더 풍부하므로 이 함수는 그 폴백으로 쓰인다.)"""
+    if not linked_doc:
+        return {}
+
+    def _warn(msg: str) -> None:
+        if warn_sink is not None:
+            warn_sink.append(msg)
+
+    try:
+        from backend.services.file_resolver import get_resolver
+        data = get_resolver().read_bytes(linked_doc)
+    except FileNotFoundError:
+        _warn(f"{doc_label} 내용: 연동 문서를 찾을 수 없어 TC 내용 미파싱")
+        return {}
+    except (PermissionError, OSError):
+        _warn(f"{doc_label} 내용: 문서 접근 실패(cloudium worker) — TC 내용 미파싱")
+        return {}
+    except Exception:
+        return {}
+    if not data:
+        return {}
+    try:
+        from backend.services.swuts_excel_parser import parse_swuts_xlsm
+        res = parse_swuts_xlsm(data)
+    except Exception:
+        _warn(f"{doc_label} 내용: 표준 파서 예외 — TC 내용 미파싱")
+        return {}
+    if not getattr(res, "ok", False):
+        _warn(f"{doc_label} 내용: 표준 파서 미매칭(TC 시트/헤더 라벨 불일치) — TC 내용 미파싱(전용 파서 부재)")
+        return {}
+    out: Dict[str, Any] = {}
+    for tc_id, e in (res.by_tc_id or {}).items():
+        nk = _normTc(tc_id)
+        if not nk:
+            continue
+        if len(out) >= 800:
+            break
+        out[nk] = {
+            "description": str(getattr(e, "description", "") or "").strip()[:300],
+            "precondition": str(getattr(e, "precondition", "") or "").strip()[:200],
+            "test_method": str(getattr(e, "test_method", "") or "").strip()[:60],
+            "unit_name": str(getattr(e, "unit_name", "") or "").strip()[:80],
+        }
+    return out
 
 
 def _write_review_artifact(
@@ -1783,12 +1865,14 @@ def run_impact_update(
         _flagged = sorted(_impacted_all | _changed_set)
         regression_test_set: Dict[str, Any] = {"suts": {}, "sits": {}}
         _suts_content: Dict[str, Any] = {}  # SUTS TC 실내용(문서 카드용) — _load_suts_fn_tcs가 채움
+        _sits_by_tc: Dict[str, Any] = {}  # SITS TC 실내용(TC-ID 키) — 중간 JSON에서 _load_sits_fn_chains가 채움
         try:
             if _lk and getattr(_lk, "suts", ""):
                 regression_test_set["suts"] = _load_suts_fn_tcs(
                     _lk.suts, _flagged, warn_sink=warnings, content_sink=_suts_content)
             if _lk and getattr(_lk, "sits", ""):
-                regression_test_set["sits"] = _load_sits_fn_chains(_lk.sits, _flagged, warn_sink=warnings)
+                regression_test_set["sits"] = _load_sits_fn_chains(
+                    _lk.sits, _flagged, warn_sink=warnings, content_sink=_sits_by_tc)
         except Exception:  # noqa: BLE001 — 회귀집합은 best-effort, 없어도 분석은 진행
             pass
         regression_test_set["summary"] = {
@@ -1801,7 +1885,9 @@ def run_impact_update(
         # 문서 내용 매칭(예측 대신 실 파싱 내용) — 직접 영향 함수(_changed_set) 스코프. UDS 설명/전역/호출,
         # SUTS TC 실입력·기대값, SDS 컴포넌트 설명을 job에 담아 프론트 카드가 표시. 파일영향(증거 없음)
         # 함수도 문서 내용은 실 파싱본이라 그대로 유효. best-effort(로더 실패=빈 dict, 분석 비차단).
-        doc_content: Dict[str, Any] = {"uds": {}, "suts": {}, "sds": {}}
+        # sts_by_tc/sits_by_tc는 TC-ID 키(함수 키 아님) — 프론트가 함수별 stsTestCases/sitsTestCases(ID)로
+        # 조인한다. uds/suts/sds는 함수명(소문자) 키. 신규 키라 구 job에서도 프론트 ?? {} 폴백으로 안전.
+        doc_content: Dict[str, Any] = {"uds": {}, "suts": {}, "sds": {}, "sts_by_tc": {}, "sits_by_tc": {}}
         try:
             _direct_lc = {str(f).strip().lower() for f in _changed_set}
             _direct_list = sorted(_changed_set)
@@ -1812,6 +1898,14 @@ def run_impact_update(
                 doc_content["uds"] = _load_uds_fn_content(_lk.uds, _direct_list, warn_sink=warnings)
             if _lk and getattr(_lk, "sds", ""):
                 doc_content["sds"] = _load_sds_fn_desc(_lk.sds, _direct_list, warn_sink=warnings)
+            # STS: 전용 파서 부재 → 표준 파서 best-effort(미매칭 시 정직 '미파싱').
+            if _lk and getattr(_lk, "sts", ""):
+                doc_content["sts_by_tc"] = _load_testspec_by_tc(_lk.sts, warn_sink=warnings, doc_label="STS")
+            # SITS: 중간 JSON(로컬 빌드 — 입력/기대값 전체)을 우선, 없으면 원본 xlsm 폴백(cloudium — 설명/사전조건).
+            if _sits_by_tc:
+                doc_content["sits_by_tc"] = _sits_by_tc
+            elif _lk and getattr(_lk, "sits", ""):
+                doc_content["sits_by_tc"] = _load_testspec_by_tc(_lk.sits, warn_sink=warnings, doc_label="SITS")
         except Exception:  # noqa: BLE001 — 문서 내용은 best-effort 표시 데이터(분석 비차단)
             pass
         # MC/DC delta: 영향 함수의 VectorCAST 커버리지(statement/branch/MC/DC) → ASIL 타깃 대비 gap

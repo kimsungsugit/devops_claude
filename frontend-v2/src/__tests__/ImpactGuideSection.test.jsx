@@ -531,7 +531,7 @@ describe('ImpactGuideSection', () => {
     // 직접 변경 감지 안 됨 안내 + 본문 변경 단정 없음 + 본문 원문 없음 안내
     expect(screen.getByText(/직접 변경\(hunk\/선언\)은 감지되지 않았습니다/)).toBeInTheDocument();
     expect(screen.queryByText(/함수 본문\(로직\)이 변경되었습니다/)).not.toBeInTheDocument();
-    expect(screen.getByText(/본문 변경 원문 없음/)).toBeInTheDocument();
+    expect(screen.getByText(/본문 변경 원문이 없는 것이 정상/)).toBeInTheDocument();  // 정직화된 fatten 안내(구 '본문 변경 원문 없음')
   });
 
   // STS-IMPACT-023: hunk 있는 BODY(function_diffs 있음) — 기존 단정 유지, 파일영향 없음(과발화 가드)
@@ -1415,6 +1415,146 @@ describe('ImpactGuideSection', () => {
     // UDS/SUTS는 doc_content 비어 정직하게 '미파싱'
     expect(screen.getByText(/UDS 문서 내용 미파싱/)).toBeInTheDocument();
     expect(screen.getByText(/SUTS TC 내용 미파싱/)).toBeInTheDocument();
+  });
+
+  // STS-IMPACT-053: STS 카드도 예측이 아닌 실 파싱 내용(doc_content.sts_by_tc). 함수별 TC ID(SDS 브리지)를
+  //  TC-ID 정규화 후 백엔드 내용 맵과 조인해 모달에 표시.
+  it('실제 STS 내용: 모달 STS 카드에 sts_by_tc의 실 시험 설명이 TC-ID 조인으로 표시된다', async () => {
+    const { post } = await import('../api.js');
+    post.mockImplementation((url) => {
+      if (url === '/api/jenkins/sds/extract-mapping') return Promise.resolve({ sds_pairs: [{ requirement_id: 'SwEI_01', component_ids: ['g_changed'] }] });
+      if (url === '/api/jenkins/sts/extract-traceability') return Promise.resolve({ vcast_rows: [{ requirement_id: 'SwEI_01', testcase: 'SwTC_STS_01' }] });
+      return Promise.resolve({ ok: false });
+    });
+    const user = userEvent.setup();
+    const analysisResult = {
+      impactData: {
+        trigger: { changed_files: ['Ap.c'], scm_id: 'kjpds02' },
+        changed_function_types: { g_changed: 'BODY' },
+        impact: { direct: ['g_changed'] },
+        function_meta: { g_changed: { asil: 'A', evidence: 'line' } },
+        _linked_docs: { sts: 'U:/sts.xlsm', sds: 'U:/sds.docx' },
+        // 백엔드 키는 정규화(공백제거+대문자). 프론트가 TC 'SwTC_STS_01'을 동일 정규화해 조인.
+        doc_content: { sts_by_tc: { SWTC_STS_01: { description: 'STS verifies boundary handling', precondition: 'system initialized', test_method: 'REQ' } } },
+      },
+    };
+    render(<ImpactGuideSection analysisResult={analysisResult} />);
+    await user.click(screen.getByText(/상세 가이드 생성/));
+    await user.click(await screen.findByRole('button', { name: '상세' }));
+    const dialog = await screen.findByRole('dialog');
+    await waitFor(() => expect(within(dialog).getByText('📄 실제 STS 시험 내용')).toBeInTheDocument());
+    expect(within(dialog).getByText('STS verifies boundary handling')).toBeInTheDocument();
+  });
+
+  // STS-IMPACT-054: SITS 카드 실 내용(doc_content.sits_by_tc) — SwUFn 브리지 TC ID를 정규화 조인해
+  //  중간 JSON의 sub_case(사전조건/기대값)를 표시.
+  it('실제 SITS 내용: 모달 SITS 카드에 sits_by_tc의 sub_case 사전조건/기대값이 표시된다', async () => {
+    const { post } = await import('../api.js');
+    post.mockImplementation((url) => {
+      if (url === '/api/jenkins/sts/extract-traceability') return Promise.resolve({ vcast_rows: [{ unit: 's_hash', testcase: 'SwUTC_SwUFn_0127' }] });
+      if (url === '/api/jenkins/sits/extract-traceability') return Promise.resolve({ vcast_rows: [{ requirement_id: 'SYSTEMTM_1', testcase: 'SwITC_SwUFn_0127' }] });
+      return Promise.resolve({ ok: false });
+    });
+    const user = userEvent.setup();
+    const analysisResult = {
+      impactData: {
+        trigger: { changed_files: ['Ap.c'], scm_id: 'kjpds02' },
+        changed_function_types: { s_hash: 'BODY' },
+        impact: { direct: ['s_hash'] },
+        function_meta: { s_hash: { asil: 'A', evidence: 'line' } },
+        _linked_docs: { suts: 'U:/suts.xlsm', sits: 'U:/sits.xlsm' },
+        doc_content: { sits_by_tc: { SWITC_SWUFN_0127: { call_chain: 's_hash -> s_crc', sub_cases: [{ precondition: 'buffer ready', inputs: { len: '8' }, expected: { crc: '0xAB' } }] } } },
+      },
+    };
+    render(<ImpactGuideSection analysisResult={analysisResult} />);
+    await user.click(screen.getByText(/상세 가이드 생성/));
+    await user.click(await screen.findByRole('button', { name: '상세' }));
+    const dialog = await screen.findByRole('dialog');
+    await waitFor(() => expect(within(dialog).getByText('📄 실제 SITS 시험 내용')).toBeInTheDocument());
+    expect(within(dialog).getByText('buffer ready')).toBeInTheDocument();      // sub_case 사전조건(prose)
+    expect(within(dialog).getByText(/crc=0xAB/)).toBeInTheDocument();          // 실 기대값
+  });
+
+  // STS-IMPACT-055: TC는 매칭되나 내용 맵이 비면 과대추정 없이 정직 '미파싱' 표기.
+  it('정직 미파싱: STS TC는 매칭되나 sts_by_tc 내용이 없으면 "미파싱"으로 표기한다', async () => {
+    const { post } = await import('../api.js');
+    post.mockImplementation((url) => {
+      if (url === '/api/jenkins/sds/extract-mapping') return Promise.resolve({ sds_pairs: [{ requirement_id: 'SwEI_01', component_ids: ['g_changed'] }] });
+      if (url === '/api/jenkins/sts/extract-traceability') return Promise.resolve({ vcast_rows: [{ requirement_id: 'SwEI_01', testcase: 'SwTC_STS_01' }] });
+      return Promise.resolve({ ok: false });
+    });
+    const user = userEvent.setup();
+    const analysisResult = {
+      impactData: {
+        trigger: { changed_files: ['Ap.c'], scm_id: 'kjpds02' },
+        changed_function_types: { g_changed: 'BODY' },
+        impact: { direct: ['g_changed'] },
+        function_meta: { g_changed: { asil: 'A', evidence: 'line' } },
+        _linked_docs: { sts: 'U:/sts.xlsm', sds: 'U:/sds.docx' },
+        doc_content: { sts_by_tc: {} },   // TC는 매칭되나 내용 없음(파서 미매칭/미연동)
+      },
+    };
+    render(<ImpactGuideSection analysisResult={analysisResult} />);
+    await user.click(screen.getByText(/상세 가이드 생성/));
+    await user.click(await screen.findByRole('button', { name: '상세' }));
+    const dialog = await screen.findByRole('dialog');
+    await waitFor(() => expect(within(dialog).getByText(/STS TC 내용 미파싱/)).toBeInTheDocument());
+  });
+
+  // STS-IMPACT-056: BODY인데 evidence='file_fatten'(파일 단위 영향)이면 모달이 권위 evidence를 소비해
+  //  '파일영향' 꼬리표 + 파일 단위 영향 안내를 표시(옛 fd/cd 추론과 무관, 리스트와 일치).
+  it('BODY 무증거: file_fatten 함수는 모달에 "파일영향" 꼬리표와 파일 단위 영향 안내를 표시한다', async () => {
+    const { post } = await import('../api.js');
+    post.mockResolvedValue({ ok: false });
+    const user = userEvent.setup();
+    const analysisResult = {
+      impactData: {
+        trigger: { changed_files: ['Ap.c'] },
+        changed_function_types: { s_fatten: 'BODY' },
+        impact: { direct: ['s_fatten'] },
+        function_meta: { s_fatten: { asil: 'A', evidence: 'file_fatten' } },
+      },
+    };
+    render(<ImpactGuideSection analysisResult={analysisResult} />);
+    await user.click(screen.getByText(/상세 가이드 생성/));
+    await user.click(await screen.findByRole('button', { name: '상세' }));
+    const dialog = await screen.findByRole('dialog');
+    await waitFor(() => expect(within(dialog).getByText('파일영향')).toBeInTheDocument());
+    expect(within(dialog).getByText(/본문 변경 원문이 없는 것이 정상/)).toBeInTheDocument();  // fatten 안내(고유)
+    expect(within(dialog).queryByText('원문 절단')).not.toBeInTheDocument();
+  });
+
+  // STS-IMPACT-057: BODY evidence='line'인데 본문 원문이 없으면(400KB 절단·로컬/cloudium diff) fatten이
+  //  아니라 '원문 절단'으로 구분 표기 — 옛 추론은 이를 fatten으로 오표기했다.
+  it('BODY 원문절단: evidence=line인데 원문 없으면 "원문 절단"으로 표기하고 파일영향으로 오표기하지 않는다', async () => {
+    const { post } = await import('../api.js');
+    post.mockResolvedValue({ ok: false });
+    const user = userEvent.setup();
+    const analysisResult = {
+      impactData: {
+        trigger: { changed_files: ['Ap.c'] },
+        changed_function_types: { s_trunc: 'BODY' },
+        impact: { direct: ['s_trunc'] },
+        function_meta: { s_trunc: { asil: 'A', evidence: 'line' } },   // 실 변경이나 원문(diff/details) 없음
+      },
+    };
+    render(<ImpactGuideSection analysisResult={analysisResult} />);
+    await user.click(screen.getByText(/상세 가이드 생성/));
+    await user.click(await screen.findByRole('button', { name: '상세' }));
+    const dialog = await screen.findByRole('dialog');
+    await waitFor(() => expect(within(dialog).getByText('원문 절단')).toBeInTheDocument());
+    expect(within(dialog).getByText(/원문이 절단/)).toBeInTheDocument();
+    expect(within(dialog).queryByText('파일영향')).not.toBeInTheDocument();   // fatten 아님
+  });
+
+  // STS-IMPACT-058: 데모 모드는 합성 함수(evidence 없음)라 functionHasNoEvidence가 true지만, 데모는
+  //  '탐지 예시'이므로 변경 상세 목록의 '파일영향' 배지를 억제한다(reviewer W1 — 게이트 제거 부작용 방지).
+  it('데모 모드: 변경 상세 목록에 "파일영향" 배지가 뜨지 않는다(데모는 탐지 예시)', async () => {
+    const user = userEvent.setup();
+    render(<ImpactGuideSection job={mockJob} analysisResult={null} />);
+    await user.click(screen.getByText(/데모 시나리오로 보기/));
+    await waitFor(() => expect(screen.getByText(/변경 영향도 요약/)).toBeInTheDocument());
+    expect(screen.queryByText('파일영향')).not.toBeInTheDocument();
   });
 });
 

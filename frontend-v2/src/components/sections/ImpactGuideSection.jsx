@@ -687,6 +687,13 @@ export default function ImpactGuideSection({ analysisResult }) {
     for (const d of (guide?.details || [])) m.set(String(d.function).toLowerCase(), d.function);
     return m;
   }, [guide]);
+  // 소문자 함수명 → guide.details 항목(전체). renderDocContent(sts/sits)이 함수의 TC ID 목록
+  // (stsTestCases/sitsTestCases)을 O(1)로 찾아 doc_content(sts_by_tc/sits_by_tc)와 조인하는 데 쓴다.
+  const guideDetailByLc = useMemo(() => {
+    const m = new Map();
+    for (const d of (guide?.details || [])) m.set(String(d.function).toLowerCase(), d);
+    return m;
+  }, [guide]);
   // 회귀시험 선정: 영향 함수 → 재실행 대상 SUTS TC / SITS call-chain(ISO 26262 증거).
   const regressionSet = impact?.regression_test_set ?? null;
   // 프론트 SwUFn 브리지로 산출된 함수별 SITS TC({fn: [SwITC_SwUFn_N]}). 백엔드 regression_test_set.sits는
@@ -732,6 +739,11 @@ export default function ImpactGuideSection({ analysisResult }) {
   // 함수도 문서 내용은 실 파싱이라 유효. 구 job(필드 없음)은 {}로 폴백 → 내용 블록만 미표시(무해).
   const docContent = impact?.doc_content ?? {};
   const docContentFor = (fn, key) => (docContent?.[key] ?? {})[String(fn || '').toLowerCase()];
+  // STS/SITS 실 내용은 TC-ID 키(함수 키 아님) — 프론트가 함수별 stsTestCases/sitsTestCases(ID)로 조인한다.
+  // 백엔드 sts_by_tc/sits_by_tc는 _normalize_req_id(공백제거+대문자)로 키를 정규화하므로 조회 전 동일 정규화.
+  const stsByTc = docContent?.sts_by_tc ?? {};
+  const sitsByTc = docContent?.sits_by_tc ?? {};
+  const _normTcId = (r) => String(r || '').replace(/\s+/g, '').toUpperCase();
   // 문서 카드의 "실제 문서 내용" 블록 — 예측 텍스트와 별개로, 백엔드가 파싱한 실 문서 내용을 표시.
   // uds/suts/sds만(범위). 내용 없으면 '미파싱' 정직 표기(과대 추정 금지). key='sts'/'sits'는 null(범위 외).
   const _dcBox = { fontSize: 10, marginTop: 4, padding: '4px 6px', background: 'var(--bg)', borderRadius: 4, borderLeft: '2px solid var(--color-info)' };
@@ -781,6 +793,44 @@ export default function ImpactGuideSection({ analysisResult }) {
         <div style={_dcBox}>
           <div style={_dcHdr}>📄 실제 SDS 내용</div>
           <div style={{ overflowWrap: 'anywhere' }}>{c}</div>
+        </div>
+      );
+    }
+    if (key === 'sts' || key === 'sits') {
+      // 함수의 TC ID 목록(브리지 산출)을 백엔드 TC-ID 키 내용 맵과 조인. ID만 있고 내용 0이면 정직 미파싱.
+      const dd = guideDetailByLc.get(String(fn || '').toLowerCase());
+      const tcIds = ((key === 'sts' ? dd?.stsTestCases : dd?.sitsTestCases) || []);
+      if (!tcIds.length) return _dcMiss(key === 'sts' ? 'STS 매칭 TC 없음(요구/SDS 브리지 0)' : 'SITS 매칭 TC 없음(요구/SwUFn 브리지 0)');
+      const byTc = key === 'sts' ? stsByTc : sitsByTc;
+      const rows = tcIds.map((t) => [t, byTc[_normTcId(t)]]);
+      if (!rows.some(([, cc]) => cc)) {
+        return _dcMiss(key === 'sts'
+          ? 'STS TC 내용 미파싱(문서 미연동/전용 파서 부재)'
+          : 'SITS TC 내용 미파싱(중간파일 부재·cloudium)');
+      }
+      const _prose = (s) => (typeof s === 'string' && /\s/.test(s.trim()) && s.trim().length > 3 ? s.trim() : '');
+      return (
+        <div style={_dcBox}>
+          <div style={_dcHdr}>📄 실제 {key.toUpperCase()} 시험 내용</div>
+          {rows.slice(0, 6).map(([t, cc], i) => (
+            <div key={i} style={{ marginBottom: 3 }}>
+              <div style={{ fontFamily: 'monospace', fontSize: 9, fontWeight: 600 }}>{t}</div>
+              {!cc && <span className="text-muted" style={{ fontSize: 9 }}>· 내용 미파싱</span>}
+              {cc && _prose(cc.description) && <div style={{ overflowWrap: 'anywhere' }}>{_prose(cc.description)}</div>}
+              {cc && cc.unit_name && <div style={{ fontSize: 9 }}><span className="text-muted">Unit: </span>{cc.unit_name}</div>}
+              {cc && _prose(cc.precondition) && <div style={{ fontSize: 9 }}><span className="text-muted">Pre: </span>{_prose(cc.precondition)}</div>}
+              {cc && cc.test_method && <div style={{ fontSize: 9 }}><span className="text-muted">Method: </span>{cc.test_method}</div>}
+              {cc && cc.call_chain && <div style={{ fontSize: 9, fontFamily: 'monospace', overflowWrap: 'anywhere' }}><span className="text-muted">Chain: </span>{cc.call_chain}</div>}
+              {cc && (cc.sub_cases || []).slice(0, 3).map((sc, j) => (
+                <div key={j} style={{ marginTop: 2, paddingLeft: 6, borderLeft: '1px solid var(--border)' }}>
+                  {_prose(sc.precondition) && <div style={{ fontSize: 9 }}><span className="text-muted">Pre: </span>{_prose(sc.precondition)}</div>}
+                  {Object.keys(sc.inputs || {}).length > 0 && <div style={{ fontSize: 9, overflowWrap: 'anywhere' }}><span className="text-muted">In: </span>{Object.entries(sc.inputs).map(([k, v]) => `${k}=${v}`).join(', ')}</div>}
+                  {Object.keys(sc.expected || {}).length > 0 && <div style={{ fontSize: 9, overflowWrap: 'anywhere' }}><span className="text-muted">Exp: </span>{Object.entries(sc.expected).map(([k, v]) => `${k}=${v}`).join(', ')}</div>}
+                </div>
+              ))}
+            </div>
+          ))}
+          {rows.length > 6 && <div className="text-muted" style={{ fontSize: 9 }}>+{rows.length - 6}개 TC 더</div>}
         </div>
       );
     }
@@ -1887,8 +1937,8 @@ export default function ImpactGuideSection({ analysisResult }) {
                       <td style={{ padding: '6px 8px', fontFamily: 'var(--font-mono, monospace)', wordBreak: 'break-all' }}>{functionMeta[fn]?.display_name || fn}</td>
                       <td style={{ padding: '6px 8px' }}>
                         <StatusBadge tone={CHANGE_TYPE_TONE[kind] || 'neutral'}>{CHANGE_TYPE_KO[kind] || kind}</StatusBadge>
-                        {showFileImpact && functionHasNoEvidence(fn, kind, changeDetails, functionDiffs, functionMeta) && (
-                          <span className="pill pill-neutral" style={{ fontSize: 8, marginLeft: 3 }} title="직접 변경 증거 없음(function_diff·change_details 모두 없음) — 파일 단위 보수 포함(fatten)">파일영향</span>
+                        {!demoMode && functionHasNoEvidence(fn, kind, changeDetails, functionDiffs, functionMeta) && (
+                          <span className="pill pill-neutral" style={{ fontSize: 8, marginLeft: 3 }} title="직접 변경 증거 없음(function_diff·change_details 모두 없음) — 파일 단위 영향(fatten, 보수적 포함). 클릭 시 본문 원문 없음이 정상.">파일영향</span>
                         )}
                       </td>
                       <td style={{ padding: '6px 8px' }}>
@@ -2252,7 +2302,15 @@ export default function ImpactGuideSection({ analysisResult }) {
             const sigSummary = summarizeSignatureChange(pdiff);
             const diffElems = extractDiffElementsCached(fd);  // 본문 diff에서 변경 전역·전처리 추출(BODY/VARIABLE 구체화)
             const hasDirectEvidence = hasRaw || !!fd;  // 선언 원문(cd) 또는 본문 hunk(fd) 존재
-            const noEvidence = d.changed && !hasDirectEvidence;  // 변경 표기됐으나 직접 증거 없음(파일 단위 보수 fatten)
+            // 권위 evidence(백엔드 function_meta) 소비 — 리스트(functionHasNoEvidence)와 판정 일치.
+            // 'file_fatten'=파일 단위 영향(직접 변경 아님) · 'line'=실 라인 변경(원문은 400KB 절단·로컬/cloudium
+            // diff 경로에서 생략될 수 있음) · ''=간접/레거시 job. 옛 추론(fd/cd 유무)은 절단된 실변경을 fatten으로
+            // 오표기했다 → evidence로 구분. evidence 없는 구 job은 아래 식이 기존 동작(‖!hasDirectEvidence)로 폴백.
+            const _fnMeta = functionMeta[String(d.function).toLowerCase()] ?? functionMeta[d.function] ?? {};
+            const evKind = _fnMeta.evidence || '';
+            const isFatten = evKind === 'file_fatten';
+            const isTruncated = evKind === 'line' && !hasDirectEvidence;  // 실 변경이나 원문 절단/미수집(파일영향 아님)
+            const noEvidence = d.changed && (isFatten || (!evKind && !hasDirectEvidence));  // 파일영향(권위) — 절단 실변경 제외
             // 문서별 구체 편집 액션(결정론) — 파라미터 diff·본문 변경 요소·요구사항·TC 반영. LLM 무관·즉시.
             const docActions = buildDocumentActions(d, pdiff, diffElems);
             const DOC_CARDS = [
@@ -2277,7 +2335,8 @@ export default function ImpactGuideSection({ analysisResult }) {
                       {d.changed
                         ? <span className="pill pill-warning" style={{ fontSize: 10 }}>{CHANGE_TYPE_KO[d.changeType] || d.changeType}</span>
                         : <span className="pill pill-neutral" style={{ fontSize: 10 }} title="직접 변경 아님 — 간접 영향 함수">영향</span>}
-                      {noEvidence && <span className="pill pill-neutral" style={{ fontSize: 10 }} title="직접 변경 증거 없음 — 파일 단위 보수 포함(hunk/선언 미감지)">파일영향</span>}
+                      {noEvidence && <span className="pill pill-neutral" style={{ fontSize: 10 }} title="직접 변경 증거 없음 — 파일 단위 영향(hunk/선언 미감지, 보수적 포함)">파일영향</span>}
+                      {isTruncated && <span className="pill pill-warning" style={{ fontSize: 10 }} title="실 라인 변경이나 본문 원문이 절단/미수집됨(대용량 diff 또는 로컬/cloudium diff 경로) — 파일영향 아님">원문 절단</span>}
                       <span className={`pill ${d.hop === 'direct' ? 'pill-danger' : 'pill-info'}`} style={{ fontSize: 10 }}>{d.hop}</span>
                       {d.asil && /^[A-D]$/.test(d.asil) && <span className={`pill ${/[CD]/.test(d.asil) ? 'pill-danger' : 'pill-warning'}`} style={{ fontSize: 10 }}>ASIL {d.asil}</span>}
                       {d.requirements.length > 0 && <span className="text-muted" style={{ fontSize: 10 }}>요구사항 {d.requirements.length}개</span>}
@@ -2376,7 +2435,12 @@ export default function ImpactGuideSection({ analysisResult }) {
                 )}
                 {noEvidence && (ct === 'BODY' || ct === 'VARIABLE') && (
                   <div className="text-muted" style={{ fontSize: 11, marginBottom: 12, padding: '6px 10px', background: 'var(--bg)', borderRadius: 6, borderLeft: '3px solid var(--border)' }}>
-                    본문 변경 원문 없음 — 직접 hunk 미감지(파일 단위 보수 포함). AI 설명도 추정입니다.
+                    직접 변경 아님 — 파일 단위 영향입니다. 같은 파일의 다른 변경(전처리·선언 등)으로 검토 대상에 보수적으로 포함됐으며, 본문 변경 원문이 없는 것이 정상입니다. AI 설명도 추정입니다.
+                  </div>
+                )}
+                {isTruncated && (
+                  <div className="text-muted" style={{ fontSize: 11, marginBottom: 12, padding: '6px 10px', background: 'var(--bg)', borderRadius: 6, borderLeft: '3px solid var(--color-warning)' }}>
+                    실제 라인 변경이 있으나 본문 원문이 절단/미수집됐습니다(대용량 diff 또는 로컬/cloudium diff 경로). <strong>파일영향이 아니며</strong> 실 변경이므로 Description·Test Action·Expected Result를 재검토하세요.
                   </div>
                 )}
 
@@ -2395,7 +2459,7 @@ export default function ImpactGuideSection({ analysisResult }) {
                 {/* Change description */}
                 <div style={{ padding: '8px 10px', background: 'var(--bg)', borderRadius: 6, marginBottom: 12, fontSize: 12, borderLeft: `3px solid ${noEvidence ? 'var(--border)' : 'var(--color-warning)'}` }}>
                   {!d.changed && `이 함수는 직접 변경되지 않았으나, 변경 함수와의 호출 관계(${d.hop})로 영향받는 간접 함수입니다. 인터페이스 계약이 유지되는지, 회귀 시험(SUTS/SITS) 재실행이 필요한지 확인하세요.`}
-                  {ct === 'BODY' && (hasDirectEvidence
+                  {ct === 'BODY' && (!noEvidence
                     ? '함수 본문(로직)이 변경되었습니다. 동작 변경으로 인해 관련 문서의 Description, Test Action, Expected Result를 모두 재검토해야 합니다.'
                     : '이 함수의 직접 변경(hunk/선언)은 감지되지 않았습니다. 같은 파일의 다른 변경(전처리·선언 등)으로 영향 검토 대상에 보수적으로 포함된 함수입니다(파일 단위 영향).')}
                   {ct === 'SIGNATURE' && '함수 시그니처(파라미터/리턴타입)가 변경되었습니다. 호출하는 모든 함수와 Input/Output Parameters, Pre-condition을 업데이트해야 합니다.'}
