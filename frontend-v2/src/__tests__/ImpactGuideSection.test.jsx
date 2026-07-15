@@ -289,6 +289,30 @@ describe('ImpactGuideSection', () => {
     expect(screen.getByText('s_Indirect')).toBeInTheDocument();
   });
 
+  // STS-IMPACT-062: CamelCase 프로젝트 — function_meta/coverage는 backend by_name(소문자) 키라,
+  //  가이드 표의 ASIL 표시가 원본 CamelCase fn 직접조회로 미스하면 알려진 등급이 공백=under-report.
+  //  _fnLc 소문자 폴백으로 해소(W1). kjpds02(소문자)엔 무해, hdpdm01 계열에 영향.
+  it('가이드: CamelCase 함수의 ASIL이 소문자 function_meta 폴백으로 표시된다(under-report fix)', async () => {
+    const { post } = await import('../api.js');
+    post.mockResolvedValue({ ok: false });
+    const user = userEvent.setup();
+    const analysisResult = {
+      impactData: {
+        trigger: { changed_files: ['Eeprom.c'] },
+        changed_function_types: { EEPROM_SetByte: 'BODY' },   // 화면 fn = CamelCase(소스 원본 케이스)
+        actions: {},
+        impact: { direct: ['EEPROM_SetByte'] },
+        function_meta: { eeprom_setbyte: { asil: 'D' } },      // backend by_name = 소문자
+      },
+    };
+    render(<ImpactGuideSection analysisResult={analysisResult} />);
+    await user.click(screen.getByText(/상세 가이드 생성/));
+    // 함수명은 변경상세·영향가이드 양쪽에 등장 → getAllByText로 확인.
+    await waitFor(() => expect(screen.getAllByText('EEPROM_SetByte').length).toBeGreaterThan(0));
+    // 폴백 없으면 d.asil=''(공백)→ ASIL 'D' pill 미표시(0건). 폴백으로 가이드에 D pill 표시.
+    expect(screen.getAllByText('D').length).toBeGreaterThan(0);
+  });
+
   // STS-IMPACT-013: classification.granularity='file'이면 "변경 함수" 과대추정 정직화 라벨 노출
   it('렌더링: classification.granularity=file이면 (보수 추정) 캡션과 안내가 표시된다', () => {
     const analysisResult = {

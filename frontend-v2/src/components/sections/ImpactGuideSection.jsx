@@ -1201,7 +1201,7 @@ export default function ImpactGuideSection({ analysisResult }) {
       // by_name 기준 소문자로 정규화 → impact-group과 케이스 동일)이고, source_root 미해결 edge
       // 경로에선 오히려 ASIL이 해석되는 소문자 사본을 버리고 ASIL 공백인 원본 케이스만 남겨
       // ASIL 가시성을 떨어뜨릴 수 있어(reviewer Finding #1) 도입하지 않는다. 정확한 처리는
-      // function_meta 소문자 폴백 lookup이 필요(별도 라운드).
+      // function_meta/coverage 소문자 폴백 lookup으로 한다(아래 details.asil/coverage의 _fnLc 폴백, 해소됨).
       const guideFns = [...new Set([
         ...changedMap.keys(),
         ...(activeImpactGroups.direct || []),
@@ -1242,8 +1242,11 @@ export default function ImpactGuideSection({ analysisResult }) {
           function: fn,
           changeType,
           changed: isChanged,
-          asil: functionMeta[fn]?.asil || '',
-          coverage: coverageByFn[fn] || null,
+          // function_meta/coverage는 backend by_name(소문자) 키 — CamelCase 프로젝트(hdpdm01 계열)에서
+          // 원본 fn 직접조회가 미스해 알려진 ASIL이 공백=under-report 됐다(위 주석의 '별도 라운드' 해소).
+          // 조인부(_fnLc)와 동일 폴백. by_name은 소문자 max-merge라 폴백이 낮은등급 오선택 안 함(안전측).
+          asil: (functionMeta[fn] || functionMeta[_fnLc])?.asil || '',
+          coverage: coverageByFn[fn] || coverageByFn[_fnLc] || null,
           hop,
           requirements: reqs,
           stsTestCases: [...stsTcSet],
