@@ -235,6 +235,7 @@ def _uds_name_asil_map(uds_path: str, warn_sink: Optional[List[str]] = None) -> 
     except Exception:
         return {}  # 기타 일시 오류도 캐시 안 함
     result: Dict[str, str] = {}
+    _parse_failed = False  # 파서 예외 여부 — 결정론적 0(예외 없음)만 캐시하고 transient 실패는 미캐시.
     if docx_bytes:
         # docx는 ZIP 컨테이너인데 매직/구조가 깨졌으면(미완성 파일명 `_260XXX` 등 손상) 파서가 조용히
         # 0을 반환해 'heading-less'로 오진단된다. 손상을 명시 표면화하고(캐시 안 함→다음 실행 재시도)
@@ -263,7 +264,7 @@ def _uds_name_asil_map(uds_path: str, warn_sink: Optional[List[str]] = None) -> 
                     if _ex is None or _asil_rank(_a) > _asil_rank(_ex):
                         result[_n] = _a
         except Exception:
-            pass
+            _parse_failed = True  # transient 가능(MemoryError 등) → 아래서 0을 캐시하지 않는다
         # 2) heading-less 레이아웃 폴백 — heading 파서가 거의 못 뽑을 때만(v1.07류). reverse-corpus는
         #    자유 텍스트 근접매칭이라 프로즈를 함수명으로 오포착(false-positive→오등급 하향 위험)할 수 있고
         #    36MB docx를 2회 더 파싱하므로, heading 파서가 구조화 표에서 신뢰성 있게 뽑으면 쓰지 않는다.
@@ -284,22 +285,31 @@ def _uds_name_asil_map(uds_path: str, warn_sink: Optional[List[str]] = None) -> 
                         if _ex is None or _asil_rank(_a) > _asil_rank(_ex):
                             result[_nl] = _a
             except Exception:
-                pass
-    # ⚠ 빈 맵은 캐시하지 않는다. 두 파서 모두 except로 삼켜지므로(파서 회귀·손상 docx·일시적
-    # MemoryError) result가 {}가 될 수 있는데, 이를 캐시하면 **프로세스 수명 내내** 모든 함수가
-    # ASIL 미상 → escalation/MC/DC 게이트 무력화(안전 위장). 다음 실행에서 재시도하게 둔다.
-    # (진짜 부재/권한거부는 위 read_bytes 예외 분기에서 이미 처리됨.)
+                _parse_failed = True
+    # 캐시 정책: 비어있지 않은 결과 + **파싱 예외 없이** 나온 결정론적 0만 캐시한다.
+    # ⚠ 파서 예외(_parse_failed)로 인한 0은 transient(파서 회귀·일시적 MemoryError)일 수 있어 캐시하면
+    # 프로세스 수명 내내 ASIL 미상 → escalation/MC/DC 게이트 무력화(안전 위장) → 미캐시(다음 실행 재시도).
+    # (진짜 부재/권한거부/손상 ZIP은 위 read_bytes·is_zipfile 분기에서 이미 미캐시로 처리됨.)
     if result:
         _UDS_NAME_ASIL_CACHE[uds_path] = result
-    elif docx_bytes:
+    elif docx_bytes and not _parse_failed:
+        # 유효 zip을 파싱했으나 0건(heading-less/미매칭) — **결정론적**이므로 캐시해 대용량 UDS(예 53MB)를
+        # 매 impact 실행마다 재-read·재-parse하지 않는다(경로 교정으로 파일이 실제 열리자 매 실행 53MB
+        # 3-패스 파싱이 파이프라인을 타임아웃시켰다). 파서 개선 시 백엔드 재기동으로 캐시 무효화.
+        _UDS_NAME_ASIL_CACHE[uds_path] = {}
         logger.warning(
-            "impact ASIL: UDS를 읽었으나 함수-ASIL 매핑 0건(파서 실패 가능) — 캐시하지 않고 다음 실행 재시도: %s",
+            "impact ASIL: UDS를 읽었으나 함수-ASIL 매핑 0건(heading-less/파서 미매칭) — 캐시(재파싱 회피): %s",
             uds_path,
         )
         if warn_sink is not None:
             warn_sink.append(
                 "ASIL: UDS를 읽었으나 함수-ASIL 매핑 0건(heading-less 레이아웃/파서 미매칭) — UDS 형식 확인 필요"
             )
+    elif docx_bytes:
+        # 파싱 예외로 0 — 미캐시(다음 실행 재시도), 사유 표면화.
+        logger.warning("impact ASIL: UDS 파싱 예외로 0건 — 캐시하지 않고 다음 실행 재시도: %s", uds_path)
+        if warn_sink is not None:
+            warn_sink.append("ASIL: UDS 파싱 중 예외로 매핑 0건(일시적일 수 있음) — 다음 실행 재시도")
     return result
 
 
@@ -359,11 +369,21 @@ def _sds_name_asil_map(sds_path: str, warn_sink: Optional[List[str]] = None) -> 
     _cached = _SDS_NAME_ASIL_CACHE.get(sds_path)
     if _cached is not None:
         return _cached
+
+    def _warn(msg: str) -> None:
+        if warn_sink is not None:
+            warn_sink.append(msg)
+
     try:
         from backend.services.file_resolver import get_resolver
         data = get_resolver().read_bytes(sds_path)
+    except FileNotFoundError:
+        # FileNotFoundError는 OSError 서브클래스라 별도로 먼저 잡아 사유를 구분 표면화(reviewer W2 — UDS와 대칭).
+        _warn("ASIL: SDS 파일을 찾을 수 없습니다(경로/파일명 확인) — SDS ASIL 폴백 불가")
+        return {}
     except (PermissionError, OSError):
-        return {}  # 워커 블립 — 캐시 안 함(다음 실행 재시도)
+        _warn("ASIL: SDS 파일 접근 실패(cloudium worker 미기동/권한) — SDS ASIL 폴백 불가")
+        return {}
     except Exception:
         return {}
     if not data:
@@ -373,8 +393,7 @@ def _sds_name_asil_map(sds_path: str, warn_sink: Optional[List[str]] = None) -> 
     import tempfile as _tf
     import zipfile as _zip
     if not _zip.is_zipfile(_io.BytesIO(data)):
-        if warn_sink is not None:
-            warn_sink.append("ASIL: SDS 파일을 열 수 없습니다(손상 ZIP) — SDS ASIL 폴백 불가")
+        _warn("ASIL: SDS 파일을 열 수 없습니다(손상 ZIP) — SDS ASIL 폴백 불가")
         return {}
     tmp_path = ""
     result: Dict[str, str] = {}
@@ -385,14 +404,23 @@ def _sds_name_asil_map(sds_path: str, warn_sink: Optional[List[str]] = None) -> 
             tmp_path = f.name
         pm = _extract_sds_partition_map(tmp_path) or {}
         for key, info in pm.items():
+            info = info or {}
+            # ⚠ kind='function' 엔트리만 신뢰(reviewer W3). _extract_sds_partition_map은 SwCom 컴포넌트
+            # (짧은 이름 EEPROM/Diag 등)와 그 인터페이스 함수를 **같은 소문자 키 공간**에 넣는다 → 컴포넌트명이
+            # 무관한 C 함수명과 우연히 겹치면 잘못된 ASIL이 조용히 주입된다(silent over/under-report). 함수만.
+            if info.get("kind") != "function":
+                continue
             k = str(key).strip().lower()
-            a = str((info or {}).get("asil") or "").strip()
-            if k and a and not _is_blank_asil(a):
+            a = str(info.get("asil") or "").strip()
+            # _asil_rank>=0: {QM,A,B,C,D}만 채택(reviewer W5) — 'TBD2'/'B(잠정)' 오타값이 게이트(_ASIL_RANK.get
+            # ...,0)를 조용히 미발동시키는 under-report를 막는다.
+            if k and a and not _is_blank_asil(a) and _asil_rank(a) >= 0:
                 # 동명 충돌은 max 등급(안전측, _uds_name_asil_map과 동일 원칙).
                 _ex = result.get(k)
                 if _ex is None or _asil_rank(a) > _asil_rank(_ex):
                     result[k] = a
     except Exception:
+        _warn("ASIL: SDS 파싱 실패 — SDS ASIL 폴백 불가")
         return {}  # 파싱 실패 — 캐시 안 함
     finally:
         if tmp_path:
@@ -402,6 +430,8 @@ def _sds_name_asil_map(sds_path: str, warn_sink: Optional[List[str]] = None) -> 
                 pass
     if result:
         _SDS_NAME_ASIL_CACHE[sds_path] = result
+    else:
+        _warn("ASIL: SDS를 읽었으나 함수-ASIL 매핑 0건(kind='function' 미검출/형식) — SDS ASIL 폴백 미적용")
     return result
 
 
@@ -1975,6 +2005,9 @@ def run_impact_update(
                 # (라인변경 미확인) / ""=간접 영향 함수(변경 아님). 프론트는 function_diffs 유무로
                 # 추론하지 말고 이 값을 쓴다(diff는 400KB 절단·경로별 부재로 증거 프록시가 될 수 없음).
                 "evidence": _fn_evidence.get(fn, ""),
+                # ASIL 출처 추적성(reviewer W4) — ""=소스 @asil/헤더(또는 미상) / "uds" / "sds"(3순위 폴백).
+                # SDS로 채워진 함수는 리뷰어가 별도 재확인하도록 다운스트림(프론트/감사)에 노출.
+                "asil_source": str((by_name.get(fn) or {}).get("asil_source") or ""),
             }
             for fn in sorted(_changed_set | _impacted_all)
         }

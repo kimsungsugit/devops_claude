@@ -70,11 +70,13 @@ def test_sds_name_asil_map_extracts_asil(monkeypatch):
     _SDS_NAME_ASIL_CACHE.clear()
     monkeypatch.setattr(fr, "get_resolver", lambda: _Resolver(_valid_zip_bytes()))
     monkeypatch.setattr(rq, "_extract_sds_partition_map", lambda p: {
-        "s_foo": {"asil": "B", "description": "x"},
-        "s_bar": {"asil": "TBD"},      # blank asil → 제외
+        "s_foo": {"asil": "B", "description": "x", "kind": "function"},
+        "s_bar": {"asil": "TBD", "kind": "function"},   # blank asil → 제외
+        "eeprom": {"asil": "D", "kind": "component"},    # ⚠ 컴포넌트 → 제외(오귀속 방지, reviewer W3)
+        "s_typo": {"asil": "B(잠정)", "kind": "function"},  # 오타 등급 → 제외(_asil_rank<0, W5)
     })
     out = _sds_name_asil_map("U:/sds.docx")
-    assert out == {"s_foo": "B"}
+    assert out == {"s_foo": "B"}   # 함수·유효등급만, blank·component·오타 제외
 
 
 def test_enrich_asil_from_sds_only_tbd_no_lowering(monkeypatch):

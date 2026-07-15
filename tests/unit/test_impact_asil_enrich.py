@@ -26,7 +26,7 @@ def test_enrich_asil_fills_blank_including_tbd(monkeypatch):
         "wiper_ctrl": {"asil": "N/A"},  # placeholder → 채움
         "unknown_fn": {"asil": "TBD"},  # UDS에도 없음 → 미상 유지
     }
-    monkeypatch.setattr(io, "_uds_name_asil_map", lambda p: {
+    monkeypatch.setattr(io, "_uds_name_asil_map", lambda p, warn_sink=None: {
         "door_run": "QM",   # 소스 C를 덮으면 안 됨
         "motor_ctrl": "D",
         "lamp_set": "B",
@@ -52,7 +52,7 @@ def test_enrich_asil_noop_when_all_have_real_asil(monkeypatch):
     by_name = {"a": {"asil": "A"}, "b": {"asil": "B"}}
     called = {"n": 0}
 
-    def _map(_p):
+    def _map(_p, warn_sink=None):
         called["n"] += 1
         return {"a": "D"}
 
@@ -64,7 +64,7 @@ def test_enrich_asil_noop_when_all_have_real_asil(monkeypatch):
 
 def test_enrich_asil_empty_path_or_no_map(monkeypatch):
     assert io._enrich_asil_from_uds({"a": {"asil": "TBD"}}, "") == (0, 0)
-    monkeypatch.setattr(io, "_uds_name_asil_map", lambda p: {})
+    monkeypatch.setattr(io, "_uds_name_asil_map", lambda p, warn_sink=None: {})
     assert io._enrich_asil_from_uds({"a": {"asil": "TBD"}}, "U:/x.docx") == (0, 1)
 
 
@@ -87,8 +87,9 @@ def test_uds_name_asil_map_permission_error_not_cached(monkeypatch):
     io._UDS_NAME_ASIL_CACHE.clear()
 
 
-def test_uds_name_asil_map_filenotfound_cached(monkeypatch):
-    """진짜 부재(FileNotFoundError)는 빈 맵을 캐시(불필요한 재-read/재파싱 회피)."""
+def test_uds_name_asil_map_filenotfound_not_cached_and_warns(monkeypatch):
+    """진짜 부재(FileNotFoundError)는 캐시하지 않고 매 실행 경고한다 — 파일명/경로 오류(placeholder 260XXX
+    등)는 사용자가 고쳐야 하므로 첫 실행 후 조용히 사라지면 안 된다(Phase 3 정책 변경)."""
     io._UDS_NAME_ASIL_CACHE.clear()
     import backend.services.file_resolver as fr
 
@@ -99,9 +100,11 @@ def test_uds_name_asil_map_filenotfound_cached(monkeypatch):
             raise FileNotFoundError("no such file")
 
     monkeypatch.setattr(fr, "get_resolver", lambda *a, **k: _Stub())
-    path = "C:/x/SwUDS.docx"
-    assert io._uds_name_asil_map(path) == {}
-    assert io._UDS_NAME_ASIL_CACHE.get(path) == {}  # 캐시됨
+    path = "C:/x/SwUDS_260XXX.docx"
+    warns: list = []
+    assert io._uds_name_asil_map(path, warn_sink=warns) == {}
+    assert path not in io._UDS_NAME_ASIL_CACHE  # 미캐시 → 다음 실행 재시도
+    assert any("찾을 수 없습니다" in w for w in warns)
     io._UDS_NAME_ASIL_CACHE.clear()
 
 
