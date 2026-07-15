@@ -348,7 +348,7 @@ def _enrich_asil_from_uds(by_name: Dict[str, Any], uds_path: str, warn_sink: Opt
     """소스 주석에 ASIL이 없는 함수만 링크된 UDS의 함수별 ASIL로 보강한다(안전측: 소스 > UDS).
 
     소스 주석 ASIL이 있는 함수는 절대 덮지 않는다. 보강된 함수엔 `asil_source="uds"` 표식.
-    warn_sink: UDS 손상/미매칭 사유를 job warnings로 표면화(silent-0 방지).
+    warn_sink: UDS 손상/미매칭 사유 + 소스↔UDS 등급 불일치를 job warnings로 표면화(silent-0 방지).
     반환: (보강한 함수 수, 보강 후에도 남은 미상 수).
     """
     if not uds_path or not isinstance(by_name, dict):
@@ -369,6 +369,20 @@ def _enrich_asil_from_uds(by_name: Dict[str, Any], uds_path: str, warn_sink: Opt
             by_name[fn]["asil"] = _a
             by_name[fn]["asil_source"] = "uds"
             enriched += 1
+    # 소스↔UDS 등급 불일치 표면화(잠재 under-report 방향 가시화): 소스가 비-blank인데 UDS가 더 높은
+    # 등급이면, 소스 권위(CLAUDE.md ASIL 탐지 #1 @asil 태그) 정책상 **등급은 바꾸지 않되**(자동 상/하향
+    # 금지) 문서↔코드 불일치를 사람이 검토하도록 경고만 남긴다. 상향은 정책 변경이라 reviewer/사용자 결정.
+    _conflicts = [
+        fn for fn, info in by_name.items()
+        if isinstance(info, dict) and not _is_blank_asil(info.get("asil"))
+        and name_asil.get(fn) and _asil_rank(name_asil[fn]) > _asil_rank(info.get("asil"))
+    ]
+    if _conflicts and warn_sink is not None:
+        _sample = ", ".join(sorted(_conflicts)[:5])
+        warn_sink.append(
+            f"ASIL: 소스 등급이 UDS보다 낮은 함수 {len(_conflicts)}건 — 소스 권위 유지(등급 불변), "
+            f"문서↔코드 ASIL 불일치 수동 검토 필요: {_sample}"
+        )
     return enriched, len(missing) - enriched
 
 

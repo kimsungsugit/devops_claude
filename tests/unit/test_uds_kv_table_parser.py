@@ -88,3 +88,12 @@ def test_kv_extract_rejects_non_ascii_name():
     """비-ASCII 이름(g_foo한)은 순수 C 식별자 아님 → 거부(reviewer I2, _C_IDENT_FULL_RE re.ASCII)."""
     data = _make_uds_docx([{"Name": "g_foo한", "ASIL": "B"}])
     assert extract_function_asil_from_kv_tables(data) == {}
+
+
+def test_asil_rank_dicts_consistent_across_modules():
+    """iso26262._ASIL_GRADE_RANK ≡ impact._ASIL_RANK — 두 모듈의 ASIL 순위 정의가 drift하면
+    kv 파서 max-merge와 enrich max-merge가 불일치(잠재 오등급). 값·집합 동일성 강제(F4 drift 가드)."""
+    from backend.services.iso26262_doc_asil_extractor import _ASIL_GRADE_RANK
+    from workflow.impact_orchestrator import _ASIL_RANK
+
+    assert _ASIL_GRADE_RANK == _ASIL_RANK

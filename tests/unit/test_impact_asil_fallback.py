@@ -154,3 +154,38 @@ def test_sds_name_asil_map_skips_alias_when_base_is_real_key(monkeypatch):
     out = _sds_name_asil_map("U:/sds.docx")
     assert out.get("u16s_bar") == "B"
     assert out.get("s_bar") == "D"   # ⚠ 기존 실제 키 → u16s_bar의 B로 덮이지 않음(alias 생략)
+
+
+# ── F3: 소스↔UDS 등급 불일치 표면화(등급 불변, 경고만) ──
+
+def test_enrich_asil_from_uds_warns_on_source_lower_than_uds(monkeypatch):
+    """소스가 비-blank인데 UDS가 더 높은 등급이면 등급은 불변(소스 권위)이나 불일치 경고 표면화(F3).
+
+    잠재 under-report 방향(소스 QM이 UDS A를 침묵으로 이김)을 사람이 검토하도록 가시화."""
+    from workflow import impact_orchestrator as m
+
+    monkeypatch.setattr(m, "_uds_name_asil_map", lambda p, warn_sink=None: {"s_conflict": "A", "s_blank": "C"})
+    by_name = {
+        "s_conflict": {"asil": "QM"},   # 소스 QM < UDS A → 등급 불변(QM 유지) + 경고
+        "s_blank": {"asil": "TBD"},     # blank → UDS C로 보강
+        "s_ok": {"asil": "D"},          # UDS에 없음 → 유지
+    }
+    warns: list = []
+    enriched, _still = m._enrich_asil_from_uds(by_name, "U:/uds.docx", warn_sink=warns)
+    assert by_name["s_conflict"]["asil"] == "QM"        # ⚠ 등급 불변(소스 권위·자동 상향 금지)
+    assert "asil_source" not in by_name["s_conflict"]   # 보강 안 됨
+    assert by_name["s_blank"]["asil"] == "C"            # blank는 정상 보강
+    assert enriched == 1
+    assert any("소스 등급이 UDS보다 낮은" in w and "s_conflict" in w for w in warns)
+
+
+def test_enrich_asil_from_uds_no_conflict_warn_when_source_ge_uds(monkeypatch):
+    """소스가 UDS보다 높거나 같으면 충돌 경고 없음(정상 — 소스가 더 안전하거나 동일)."""
+    from workflow import impact_orchestrator as m
+
+    monkeypatch.setattr(m, "_uds_name_asil_map", lambda p, warn_sink=None: {"s_hi": "A", "s_eq": "B", "s_blank": "B"})
+    by_name = {"s_hi": {"asil": "D"}, "s_eq": {"asil": "B"}, "s_blank": {"asil": "TBD"}}
+    warns: list = []
+    m._enrich_asil_from_uds(by_name, "U:/uds.docx", warn_sink=warns)
+    assert by_name["s_hi"]["asil"] == "D" and by_name["s_eq"]["asil"] == "B"
+    assert not any("소스 등급이 UDS보다 낮은" in w for w in warns)
