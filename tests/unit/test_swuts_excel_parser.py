@@ -141,6 +141,38 @@ class TestSwUTSExcelParser:
         assert not result.ok
         assert any("TC 시트 미발견" in w for w in result.parse_warnings)
 
+    def test_customer_sts_sheet_now_parses(self):
+        """고객 STS 시트 '3.SW Test Spec'(Unit/Integration 없음)도 파싱된다 — _TC_SHEET_RE에 SW 추가."""
+        xlsm = _build_swuts_xlsm(
+            sheet_name="3.SW Test Spec",
+            header_row=6,
+            headers=[
+                "Index", "Test Case ID", "Title", "Safety Related", "Test Environment",
+                "Test Method", "Test Case Generation Method", "FS_REQ",
+                "Description", "Pre-condition", "Test Action(Sequence)",
+                "Expected Result", "SRS",
+            ],
+            data_rows=[
+                [None, "SwTC_SwEI_01_01", "Battery 전압 모니터", None, None,
+                 "FNCT", None, None, "Battery 전압을 주기적으로 모니터한다", "TRACE 연결", None, None, "SwEI_01"],
+            ],
+        )
+        result = parse_swuts_xlsm(xlsm)
+        assert result.ok, result.parse_warnings
+        e = result.by_tc_id["SwTC_SwEI_01_01"]
+        assert e.description.startswith("Battery 전압")
+        assert e.precondition == "TRACE 연결"
+        assert e.test_method == "FNCT"
+
+    def test_sheet_regex_widen_no_false_positive(self):
+        """SW 추가로 STS는 잡되 SITS/SUTS 매칭 불변 + Strategy/Environment 오탐 없음."""
+        from backend.services.swuts_excel_parser import _TC_SHEET_RE
+        assert _TC_SHEET_RE.search("3.SW Test Spec")               # 신규(STS)
+        assert _TC_SHEET_RE.search("3.SW Integration Test Spec")   # SITS(Integration)
+        assert _TC_SHEET_RE.search("2.SW Unit Test Spec")          # SUTS(Unit)
+        assert not _TC_SHEET_RE.search("2.SW Integration Strategy")  # Test Spec 없음
+        assert not _TC_SHEET_RE.search("2.Test Environment")       # Test Spec 없음
+
     def test_header_label_variants_normalized(self):
         """'TC ID' / 'TC_ID' / 'tc id' 모두 동일 라벨로 매칭."""
         xlsm = _build_swuts_xlsm(

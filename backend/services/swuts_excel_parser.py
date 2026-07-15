@@ -49,7 +49,10 @@ except ImportError:  # pragma: no cover - hook fail-safe
 from backend.services.test_method_map import map_test_method_note
 
 XLSM_MAX_BYTES = 64 * 1024 * 1024  # 64MB — DoS 방지
-_TC_SHEET_RE = re.compile(r"(Unit|Integration)\s*Test\s*Spec", re.IGNORECASE)
+# 고객 STS 시트는 `3.SW Test Spec`(Unit/Integration 없음) — SW/Software를 추가해 STS도 파싱한다.
+# `SW\s*Test\s*Spec`는 SW 바로 뒤가 Test인 경우만 매칭하므로 `SW Unit/Integration Test Spec`은
+# 기존 Unit/Integration 대안으로 계속 잡히고, 신규 매칭은 `3.SW Test Spec` 하나뿐(부작용 없음, 실증).
+_TC_SHEET_RE = re.compile(r"(Unit|Integration|SW|Software)\s*Test\s*Spec", re.IGNORECASE)
 _HEADER_SCAN_MAX_ROWS = 15  # 첫 15 row에서 header 자동 감지
 # 라운드 106 — 2000 → 20000. KJPDS02 PV 작성중 SwUTS(v0.10_260608)는 data
 # 7,898행(블록 1,014)인데 구 한도 2000이 silent 절단 → by_tc_id 288 entries
