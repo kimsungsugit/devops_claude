@@ -203,8 +203,9 @@ def _uds_name_asil_map(uds_path: str, warn_sink: Optional[List[str]] = None) -> 
 
     C 소스에 Doxygen `@asil` 주석이 없는 프로젝트(예: NE1AW_PORTING)는 함수 ASIL이 전부
     '미상'이 되는데, 실제 등급은 UDS 문서에 있다. UDS는 cloudium U:\\일 수 있으므로 반드시
-    워커(`get_resolver().read_bytes`) 경유로 읽는다(직접 접근 금지). heading 기반 파서
-    (`parse_swuds_docx`)를 우선하고, heading-less 레이아웃은 reverse-corpus 추출기로 보완.
+    워커(`get_resolver().read_bytes`) 경유로 읽는다(직접 접근 금지). 세로 key-value 표
+    (`extract_function_asil_from_kv_tables`, v3.02류 'Name'/'ASIL' 행 라벨)를 lxml로 우선 추출하고
+    (87MB docx도 초 단위), 부족하면 heading 파서(`parse_swuds_docx`)·reverse-corpus로 보완한다.
     접근 불가/미존재/파싱 실패는 빈 맵으로 조용히 폴백(impact 본류 비차단). 경로 캐시.
     """
     if not uds_path:
@@ -249,22 +250,39 @@ def _uds_name_asil_map(uds_path: str, warn_sink: Optional[List[str]] = None) -> 
                     "설정에서 UDS 문서를 정상 파일로 재연결하세요."
                 )
             return {}
-        # 1) heading 기반 SwUDS 파서 — 함수명→ASIL 직접(현대/모비스 포맷).
+        # 0) 세로 key-value 표 추출(lxml, python-docx 미사용 → 87MB docx도 초 단위) — v3.02류.
+        #    SwUDS v3.02는 함수마다 'Name'/'ASIL' 행 라벨 세로 표라 컬럼/heading 파서가 0건이었다
+        #    (SwUFn heading 3106개 있어도 ASIL이 '행 라벨+인접셀'이라 미검출). 빠르므로 먼저 시도하고,
+        #    충분히(≥5) 뽑으면 아래 python-docx 파서(document.xml 87MB → ~400s)를 스킵한다.
         try:
-            from backend.services.swut_swuds_parser import parse_swuds_docx
-            _res = parse_swuds_docx(docx_bytes)
-            for _e in (_res.entries or []):
-                _n = str(getattr(_e, "name", "") or "").strip().lower()
-                _a = str(getattr(_e, "asil", "") or "").strip()
-                if _n and _a:
-                    # first-wins가 아니라 max 등급 유지 — 같은 함수명이 여러 ASIL로 나오면(충돌 14개
-                    # 존재) 낮은 등급 채택이 escalation·커버리지 타깃 게이트를 약화(under-report).
-                    # by_name 충돌병합(:1250 max)과 동일 안전측 원칙. absent면 첫 값 보존(TBD 포함).
-                    _ex = result.get(_n)
+            from backend.services.iso26262_doc_asil_extractor import (
+                extract_function_asil_from_kv_tables,
+            )
+            for _n, _a in (extract_function_asil_from_kv_tables(docx_bytes) or {}).items():
+                _nl = str(_n or "").strip().lower()
+                if _nl and _a:
+                    _ex = result.get(_nl)
                     if _ex is None or _asil_rank(_a) > _asil_rank(_ex):
-                        result[_n] = _a
+                        result[_nl] = _a
         except Exception:
-            _parse_failed = True  # transient 가능(MemoryError 등) → 아래서 0을 캐시하지 않는다
+            _parse_failed = True
+        # 1) heading 기반 SwUDS 파서 — 함수명→ASIL 직접(현대/모비스 포맷). kv가 충분하면 스킵.
+        if len(result) < 5:
+            try:
+                from backend.services.swut_swuds_parser import parse_swuds_docx
+                _res = parse_swuds_docx(docx_bytes)
+                for _e in (_res.entries or []):
+                    _n = str(getattr(_e, "name", "") or "").strip().lower()
+                    _a = str(getattr(_e, "asil", "") or "").strip()
+                    if _n and _a:
+                        # first-wins가 아니라 max 등급 유지 — 같은 함수명이 여러 ASIL로 나오면(충돌 14개
+                        # 존재) 낮은 등급 채택이 escalation·커버리지 타깃 게이트를 약화(under-report).
+                        # by_name 충돌병합(:1250 max)과 동일 안전측 원칙. absent면 첫 값 보존(TBD 포함).
+                        _ex = result.get(_n)
+                        if _ex is None or _asil_rank(_a) > _asil_rank(_ex):
+                            result[_n] = _a
+            except Exception:
+                _parse_failed = True  # transient 가능(MemoryError 등) → 아래서 0을 캐시하지 않는다
         # 2) heading-less 레이아웃 폴백 — heading 파서가 거의 못 뽑을 때만(v1.07류). reverse-corpus는
         #    자유 텍스트 근접매칭이라 프로즈를 함수명으로 오포착(false-positive→오등급 하향 위험)할 수 있고
         #    36MB docx를 2회 더 파싱하므로, heading 파서가 구조화 표에서 신뢰성 있게 뽑으면 쓰지 않는다.
@@ -398,7 +416,7 @@ def _sds_name_asil_map(sds_path: str, warn_sink: Optional[List[str]] = None) -> 
     tmp_path = ""
     result: Dict[str, str] = {}
     try:
-        from report_gen.requirements import _extract_sds_partition_map
+        from report_gen.requirements import _extract_sds_partition_map, _strip_ret_type_prefix
         with _tf.NamedTemporaryFile(suffix=".docx", delete=False) as f:
             f.write(data)
             tmp_path = f.name
@@ -419,6 +437,22 @@ def _sds_name_asil_map(sds_path: str, warn_sink: Optional[List[str]] = None) -> 
                 _ex = result.get(k)
                 if _ex is None or _asil_rank(a) > _asil_rank(_ex):
                     result[k] = a
+        # 반환형 헝가리안 접두사 alias(라운드111 추적성 _alias_safe 미러 — requirements.py:2078-2103):
+        # SDS는 'u16g_drvin_motorspeed'처럼 반환형(u8/u16/u32/s8/s16/s32)을 붙여 표기하나 소스 by_name
+        # 키는 순수명('g_drvin_motorspeed') → _enrich_asil_from_sds의 정확조회 name_asil.get(fn)가 미스
+        # (폴백 커버리지 정체). base가 ① 기존 SDS 키(pm 전체, 컴포넌트 포함)가 아니고 ② 단 하나의 접두사형
+        # 에서만 파생될 때만 alias 등록 — u8g_/s8g_(unsigned/signed 반환형 = 별개 함수 가능)이 같은 base로
+        # 모이면 서로 다른 함수에 ASIL이 오union되므로 생략(over/under-report 방지, 안전측 보수).
+        _all_pm_keys = {str(_rk).strip().lower() for _rk in pm.keys()}
+        _pref_base_cnt: Dict[str, int] = {}
+        for _kk in _all_pm_keys:
+            _bb = _strip_ret_type_prefix(_kk)
+            if _bb != _kk:
+                _pref_base_cnt[_bb] = _pref_base_cnt.get(_bb, 0) + 1
+        for _k in list(result.keys()):
+            _b = _strip_ret_type_prefix(_k)
+            if _b != _k and _b not in _all_pm_keys and _pref_base_cnt.get(_b, 0) == 1:
+                result[_b] = result[_k]  # 순수명 alias에 원 등급 복제(base는 신규 키 — 기존 정확매칭 불변)
     except Exception:
         _warn("ASIL: SDS 파싱 실패 — SDS ASIL 폴백 불가")
         return {}  # 파싱 실패 — 캐시 안 함
@@ -759,7 +793,8 @@ def _load_testspec_by_tc(
 ) -> Dict[str, Any]:
     """STS/SITS xlsm(bytes)을 표준 파서(`parse_swuts_xlsm`)로 파싱해 TC-ID 키 내용 맵을 반환한다.
 
-    반환: {_normTc(tc_id): {description, precondition, test_method, unit_name}} — 문서 카드용.
+    반환: {_normTc(tc_id): {description, precondition, test_method, unit_name, test_action, expected}}
+    — 문서 카드용(test_action/expected는 STS 'Test Action(Sequence)'/'Expected Result', 자유텍스트).
     STS는 전용 파서가 없어 이 표준 파서 best-effort로만 도달한다. 시트/라벨 미매칭(ok=False)이면
     과대추정 대신 빈 dict + 사유 warn(정직 '미파싱'). cloudium은 worker(read_bytes) bytes 경유.
     (SITS는 로컬 빌드면 중간 JSON이 더 풍부하므로 이 함수는 그 폴백으로 쓰인다.)"""
@@ -804,6 +839,8 @@ def _load_testspec_by_tc(
             "precondition": str(getattr(e, "precondition", "") or "").strip()[:200],
             "test_method": str(getattr(e, "test_method", "") or "").strip()[:60],
             "unit_name": str(getattr(e, "unit_name", "") or "").strip()[:80],
+            "test_action": str(getattr(e, "test_action", "") or "").strip()[:300],
+            "expected": str(getattr(e, "expected", "") or "").strip()[:300],
         }
     return out
 

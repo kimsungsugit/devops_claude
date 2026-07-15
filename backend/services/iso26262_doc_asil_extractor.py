@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import io
 import re
+import zipfile
 
 try:
     from docx import Document  # type: ignore
@@ -68,6 +69,83 @@ def _load_doc(docx_bytes: bytes, warnings: list[str]):
     except Exception as e:
         warnings.append(f"docx 로드 실패: {type(e).__name__}: {e}")
         return None
+
+
+# ── v3.02 SwUDS 세로 key-value 함수 표 ASIL 추출 ──
+# 실 KJPDS02 SwUDS v3.02는 함수마다 '[ Function Information ]' 세로 표를 두고 행 라벨(col0)
+# 'Name'/'ASIL'에 실제 C 함수명·등급을 담는다(ASIL이 컬럼 헤더가 아니라 행 라벨). 기존
+# swut_swuds_parser(SwUFn heading 직후 표의 'ASIL' 라벨셀 옆값)·iso26262 reverse-corpus는
+# 이 레이아웃에서 0건이었다. 또한 document.xml이 87MB라 python-docx 전체 로드가 ~400s.
+# 여기선 lxml iterparse로 표만 스트리밍(초 단위)해 (Name, ASIL) 쌍만 뽑는다.
+_WML_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+_ASIL_GRADE_RANK = {"QM": 0, "A": 1, "B": 2, "C": 3, "D": 4}
+# re.ASCII: \w를 ASCII로 고정해 'g_foo한' 같은 비-ASCII 이름을 거부(reviewer I2 — "순수 C 식별자" 보장).
+_C_IDENT_FULL_RE = re.compile(r"[A-Za-z_]\w{2,}\Z", re.ASCII)
+# 압축폭탄 방지 — document.xml 비압축 크기 상한(실 v3.02=88MB, ~4.3× 마진, reviewer W1).
+_KV_XML_MAX_BYTES = 384 * 1024 * 1024
+
+
+def _norm_asil_grade(v) -> str:
+    """'A'/'ASIL B'/'QM' → 정규 등급('A'/'B'/'QM'), 무효(오타·범위밖)면 ''."""
+    a = re.sub(r"^ASIL[\s_-]*", "", str(v or "").strip().upper()).strip()
+    return a if a in _ASIL_GRADE_RANK else ""
+
+
+def extract_function_asil_from_kv_tables(docx_bytes: bytes) -> dict[str, str]:
+    """세로 key-value SwUDS 함수 표에서 {함수명(소문자): ASIL} 추출.
+
+    표당 행 라벨(col0)이 'Name'인 행의 값(col1)=C 함수명, 'ASIL'인 행의 값=등급.
+    둘 다 있고 함수명이 순수 C 식별자·등급이 유효할 때만 채택(fail-closed — 프로즈/다단어/
+    무효등급 거부해 under-report 위험 차단). 같은 함수명 충돌은 max 등급(안전측). lxml 직접
+    파싱(python-docx 미사용 → 87MB docx도 초 단위). 접근/파싱 실패는 빈 맵(비차단).
+    """
+    # W1: sibling 파서(_load_doc)와 동일 입력 상한(96MB) — 거대/손상 docx OOM·과대작업 방지.
+    if not docx_bytes or len(docx_bytes) > DOCX_MAX_BYTES:
+        return {}
+    try:
+        from lxml import etree  # type: ignore
+    except Exception:
+        return {}
+    w = "{%s}" % _WML_NS
+    try:
+        with zipfile.ZipFile(io.BytesIO(docx_bytes)) as z:
+            try:
+                _xi = z.getinfo("word/document.xml")
+            except KeyError:
+                return {}   # docx 아님/구조 이상 → 폴백에 위임
+            if _xi.file_size > _KV_XML_MAX_BYTES:
+                return {}   # W1: 압축폭탄(비압축 폭증) 방어
+            xml = z.read("word/document.xml")
+    except Exception:
+        return {}
+
+    def _cell_text(tc) -> str:
+        return "".join(t.text or "" for t in tc.iter(w + "t")).strip()
+
+    out: dict[str, str] = {}
+    try:
+        for _ev, tbl in etree.iterparse(io.BytesIO(xml), events=("end",), tag=w + "tbl"):
+            name = ""
+            grade = ""
+            for tr in tbl.findall(w + "tr"):
+                cells = tr.findall(w + "tc")
+                if len(cells) < 2:
+                    continue
+                label = _cell_text(cells[0]).lower().rstrip(":").strip()
+                if label == "name" and not name:
+                    name = _cell_text(cells[1])
+                elif label == "asil" and not grade:
+                    grade = _norm_asil_grade(_cell_text(cells[1]))
+            if name and grade:
+                nl = name.strip().lower()
+                if _C_IDENT_FULL_RE.match(nl):
+                    ex = out.get(nl)
+                    if ex is None or _ASIL_GRADE_RANK[grade] > _ASIL_GRADE_RANK.get(ex, -1):
+                        out[nl] = grade
+            tbl.clear()  # 처리 후 즉시 비워 메모리 바운드(대용량 document.xml)
+    except Exception:
+        return out  # 부분 파싱분 보존(비차단)
+    return out
 
 
 def extract_component_asil_from_sds(
@@ -329,6 +407,7 @@ __all__ = [
     "extract_function_asil_from_suds",
     "extract_function_name_to_swufn_from_suds",
     "extract_component_asil_from_sds",
+    "extract_function_asil_from_kv_tables",
     "extract_supplementary_asil_from_srs",
     "DOCX_MAX_BYTES",
 ]

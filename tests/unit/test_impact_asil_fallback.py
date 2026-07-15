@@ -100,3 +100,57 @@ def test_enrich_asil_from_sds_only_tbd_no_lowering(monkeypatch):
 def test_enrich_asil_from_sds_empty_path():
     from workflow.impact_orchestrator import _enrich_asil_from_sds
     assert _enrich_asil_from_sds({"s_foo": {"asil": "TBD"}}, "") == (0, 0)
+
+
+# ── Phase 2 (후속): 반환형 접두사 alias — SDS 'u16g_X' ↔ 소스 순수명 'g_X' 정합 ──
+
+def test_sds_name_asil_map_aliases_return_type_prefix(monkeypatch):
+    """반환형 접두사 SDS 키(u16g_drvin_motorspeed)가 순수명 alias(g_drvin_motorspeed)로도 등록 —
+    소스 by_name 키는 순수명이라 이 alias가 있어야 _enrich_asil_from_sds가 매칭(폴백 커버리지 fix)."""
+    import backend.services.file_resolver as fr
+    import report_gen.requirements as rq
+    from workflow.impact_orchestrator import _SDS_NAME_ASIL_CACHE, _sds_name_asil_map
+
+    _SDS_NAME_ASIL_CACHE.clear()
+    monkeypatch.setattr(fr, "get_resolver", lambda: _Resolver(_valid_zip_bytes()))
+    monkeypatch.setattr(rq, "_extract_sds_partition_map", lambda p: {
+        "u16g_drvin_motorspeed": {"asil": "B", "kind": "function"},
+    })
+    out = _sds_name_asil_map("U:/sds.docx")
+    assert out.get("u16g_drvin_motorspeed") == "B"   # 원 exact 키 보존
+    assert out.get("g_drvin_motorspeed") == "B"        # 순수명 alias 신규 등록
+
+
+def test_sds_name_asil_map_skips_alias_on_base_collision(monkeypatch):
+    """u8g_/s8g_(unsigned/signed 반환형 = 별개 함수 가능)이 같은 base(g_foo)로 모이면 alias 생략 —
+    서로 다른 함수에 ASIL 오union 방지(안전측 보수, 추적성 _alias_safe 미러)."""
+    import backend.services.file_resolver as fr
+    import report_gen.requirements as rq
+    from workflow.impact_orchestrator import _SDS_NAME_ASIL_CACHE, _sds_name_asil_map
+
+    _SDS_NAME_ASIL_CACHE.clear()
+    monkeypatch.setattr(fr, "get_resolver", lambda: _Resolver(_valid_zip_bytes()))
+    monkeypatch.setattr(rq, "_extract_sds_partition_map", lambda p: {
+        "u8g_foo": {"asil": "B", "kind": "function"},
+        "s8g_foo": {"asil": "C", "kind": "function"},
+    })
+    out = _sds_name_asil_map("U:/sds.docx")
+    assert out.get("u8g_foo") == "B" and out.get("s8g_foo") == "C"  # exact 보존
+    assert "g_foo" not in out    # ⚠ base 충돌 → alias 생략
+
+
+def test_sds_name_asil_map_skips_alias_when_base_is_real_key(monkeypatch):
+    """접두사형 base가 이미 별도 SDS 키(s_bar)면 alias 만들지 않고 기존 정확매칭 유지(등급 오염 방지)."""
+    import backend.services.file_resolver as fr
+    import report_gen.requirements as rq
+    from workflow.impact_orchestrator import _SDS_NAME_ASIL_CACHE, _sds_name_asil_map
+
+    _SDS_NAME_ASIL_CACHE.clear()
+    monkeypatch.setattr(fr, "get_resolver", lambda: _Resolver(_valid_zip_bytes()))
+    monkeypatch.setattr(rq, "_extract_sds_partition_map", lambda p: {
+        "u16s_bar": {"asil": "B", "kind": "function"},
+        "s_bar": {"asil": "D", "kind": "function"},
+    })
+    out = _sds_name_asil_map("U:/sds.docx")
+    assert out.get("u16s_bar") == "B"
+    assert out.get("s_bar") == "D"   # ⚠ 기존 실제 키 → u16s_bar의 B로 덮이지 않음(alias 생략)
