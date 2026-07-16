@@ -435,25 +435,54 @@ def extract_function_diffs(
 ) -> Dict[str, str]:
     """svn diff에서 함수별 본문 변경 hunk를 추출한다 — AI 설명용 원문 제공(BODY 함수도 실제 코드 근거).
 
-    각 hunk의 함수 컨텍스트(`@@ ... @@ <func>`)로 귀속하고, 한 함수의 여러 hunk는 이어붙인다.
-    함수당 max_lines_per_func 줄로 절단(AI 프롬프트 크기 관리)하고, 전체 max_total_chars를 넘으면
-    이후 함수는 저장하지 않는다(응답 폭주 방지). 반환 키는 소문자(change_details·프론트 조인 규약과 동일).
-    컨텍스트 없는 bare hunk(`@@ .. @@`만)는 함수 귀속 불가라 제외한다(-x -p 필수).
+    귀속은 **분류기 `_classify_one_file_diff`와 동일한 두 경로**를 쓴다(정렬 — "원문 절단" 근본 해소):
+      ① hunk 헤더 컨텍스트 `@@ ... @@ <func>`(`_hunk_func_name`). near-top 변경 시 svn -p가 이전
+         함수를 라벨하거나 bare hunk면 여기서 못 잡는다.
+      ② hunk 본문의 `+/-` 함수 정의 라인(`_FUNC_DECL_LINE`, 분류기 `func_decl_names`와 동일 규칙)으로
+         **재귀속**. NEW/DELETE(추가/삭제 선언)와 이동·재포맷된 시그니처(BODY로 강등)를 회복한다.
+    과거엔 ①만 써서, 분류기가 ②로 잡아 evidence='line'을 부여한 함수가 원문 없이 "원문 절단"으로
+    표시됐다(라이브 kjpds02_pv: line 261 vs 원문 117). 컨텍스트(공백 접두) 라인은 `_FUNC_DECL_LINE`의
+    `^[+-]` 앵커로 자연 제외돼 오귀속이 없다. 세그먼트는 실변경(+/-, `+++`/`---` 제외) 라인이 하나라도
+    있을 때만 방출한다(컨텍스트-only 조각이 이전 함수로 새는 것 방지 — 미혼입). 한 함수의 여러 hunk는
+    이어붙이고, 함수당 max_lines_per_func 줄로 절단(AI 프롬프트 크기 관리), 전체 max_total_chars를
+    넘으면 이후 함수는 저장하지 않는다(응답 폭주 방지). 반환 키는 소문자(change_details·프론트 조인 규약).
     """
     per_func: Dict[str, List[str]] = {}
+    _decl_reattr = 0  # 본문 선언 라인으로 재귀속된 세그먼트 수(관찰성 — @@ 헤더만으론 못 잡던 회복분)
+
+    def _emit(func: Optional[str], seg: List[str]) -> None:
+        # 실변경(+/-) 라인이 하나라도 있어야 방출 — 컨텍스트/빈 조각이 이전 cur_func로 새는 것을 차단.
+        # ⚠ `s[:1] in "+-"`는 s=""(0-length diff 라인)일 때 ""가 "+-"의 부분문자열이라 True가 돼
+        #   컨텍스트-only 세그먼트를 오방출한다(미혼입 계약 위반) → startswith 튜플 검사로 교체.
+        if func and any(s.startswith(("+", "-")) and s[:3] not in ("+++", "---") for s in seg):
+            per_func.setdefault(func.lower(), []).append("\n".join(seg))
+
     for _path, block in _split_svn_diff_by_file(combined_diff):
         cur_func = None
-        cur_hunk: List[str] = []
+        seg: List[str] = []
         for ln in block.splitlines():
             if ln.startswith("@@ "):
-                if cur_func and cur_hunk:
-                    per_func.setdefault(cur_func.lower(), []).append("\n".join(cur_hunk))
-                cur_func = _hunk_func_name(ln)  # 타입/키워드 오귀속은 None(가비지 키 방지)
-                cur_hunk = [ln] if cur_func else []
-            elif cur_func is not None:
-                cur_hunk.append(ln)
-        if cur_func and cur_hunk:  # 파일 끝 — 마지막 hunk flush
-            per_func.setdefault(cur_func.lower(), []).append("\n".join(cur_hunk))
+                _emit(cur_func, seg)
+                cur_func = _hunk_func_name(ln)  # 헤더 시드(타입/키워드 오귀속은 None)
+                seg = [ln]
+                continue
+            # 본문 +/- 함수 정의 라인 → 재귀속(분류기 func_decl_names 미러). 컨텍스트 라인은 ^[+-]
+            # 앵커로 미매치, 함수 호출(1-토큰)·대입은 `<type> <name>(` 2-토큰 구조로 자연 배제.
+            _m = _FUNC_DECL_LINE.match(ln)
+            _newfn = _m.group(1) if _m else None
+            if (
+                _newfn
+                and _newfn not in _NON_FUNC_TOKENS
+                and not _TYPE_ALIAS.match(_newfn)
+                and _newfn.lower() != (cur_func or "").lower()
+            ):
+                _emit(cur_func, seg)  # 이전 함수 세그먼트 마감(실변경 있으면)
+                cur_func = _newfn
+                seg = [ln]
+                _decl_reattr += 1
+            else:
+                seg.append(ln)
+        _emit(cur_func, seg)  # 파일 끝 — 마지막 세그먼트 flush
 
     out: Dict[str, str] = {}
     total = 0
@@ -475,6 +504,7 @@ def extract_function_diffs(
         stats["truncated"] = omitted > 0
         stats["omitted"] = omitted
         stats["total_chars"] = total
+        stats["attributed_via_decl"] = _decl_reattr
     return out
 
 
