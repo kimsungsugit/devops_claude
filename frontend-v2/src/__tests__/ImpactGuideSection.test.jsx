@@ -29,7 +29,7 @@ vi.mock('../components/StatusBadge.jsx', () => ({
   ),
 }));
 
-const { default: ImpactGuideSection, extractDiffElements, buildDocumentActions } = await import('../components/sections/ImpactGuideSection.jsx');
+const { default: ImpactGuideSection, extractDiffElements, buildDocumentActions, matchFileDiff } = await import('../components/sections/ImpactGuideSection.jsx');
 
 describe('ImpactGuideSection', () => {
   const mockJob = { url: 'http://jenkins.example.com/job/test-job/' };
@@ -1775,6 +1775,30 @@ describe('extractDiffElements noSemanticChange (포맷/이동만 — 의미 변�
   it('추가만(신규)·삭제만은 false', () => {
     expect(extractDiffElements('@@ -1,0 +1,2 @@\n+void n(void)\n+{}').noSemanticChange).toBe(false);
     expect(extractDiffElements('@@ -1,2 +1,0 @@\n-void o(void)\n-{}').noSemanticChange).toBe(false);
+  });
+});
+
+describe('matchFileDiff (#3 파일레벨 폴백 경로 매칭)', () => {
+  const fileDiffs = {
+    'sources/app/foo.c': 'DIFF_FOO',
+    'lib/bar.h': 'DIFF_BAR',
+    'sources/led.c': 'DIFF_LED',
+  };
+  it('절대 Windows 경로 → 정규화 상대 키 suffix 매칭', () => {
+    expect(matchFileDiff('C:\\Project\\Ados\\NE1AW\\Sources\\APP\\Foo.c', fileDiffs)).toBe('DIFF_FOO');
+    expect(matchFileDiff('D:/x/Lib/Bar.h', fileDiffs)).toBe('DIFF_BAR');
+  });
+  it('경계 없는 suffix 오매칭 방지(/ 경계)', () => {
+    expect(matchFileDiff('C:\\x\\Sources\\myled.c', fileDiffs)).toBe('');   // myled.c ≠ led.c
+  });
+  it('최장(가장 구체적) 매칭', () => {
+    const fd = { 'foo.c': 'SHORT', 'app/foo.c': 'LONG' };
+    expect(matchFileDiff('C:\\x\\app\\foo.c', fd)).toBe('LONG');
+  });
+  it('미매칭·빈 입력은 빈 문자열', () => {
+    expect(matchFileDiff('', fileDiffs)).toBe('');
+    expect(matchFileDiff('C:\\x\\nope.c', fileDiffs)).toBe('');
+    expect(matchFileDiff('C:\\x\\foo.c', null)).toBe('');
   });
 });
 

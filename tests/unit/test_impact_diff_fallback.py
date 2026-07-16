@@ -239,3 +239,58 @@ def test_extract_function_diffs_blank_line_not_counted_as_change():
     assert "real_fn" in out
     assert "work()" in out["real_fn"]
     assert "host_fn" not in out  # 컨텍스트+빈줄만 → 미방출(빈문자열 오판정 회귀)
+
+
+# ── extract_file_diffs (#3 파일레벨 원문 폴백) ──────────────────────────────────────
+def test_extract_file_diffs_basic_and_key_normalization():
+    """파일별 diff 블록 분할 + 정규화 상대경로 키(역슬래시→슬래시·소문자)."""
+    from workflow.delta_update import extract_file_diffs
+    diff = "\n".join([
+        "Index: Sources\\APP\\Foo.c",
+        "===================================================================",
+        "--- Sources/APP/Foo.c\t(revision 100)",
+        "+++ Sources/APP/Foo.c\t(revision 150)",
+        "@@ -1,1 +1,1 @@ void f(void)",
+        "-    a = 1;",
+        "+    a = 2;",
+        "Index: Lib/Bar.h",
+        "===================================================================",
+        "--- Lib/Bar.h\t(revision 100)",
+        "+++ Lib/Bar.h\t(revision 150)",
+        "@@ -1,1 +1,1 @@",
+        "-#define X 1",
+        "+#define X 2",
+        "",
+    ])
+    out = extract_file_diffs(diff)
+    assert "sources/app/foo.c" in out
+    assert "lib/bar.h" in out
+    assert "a = 2" in out["sources/app/foo.c"]
+    assert "#define X 2" in out["lib/bar.h"]
+
+
+def test_extract_file_diffs_per_file_line_cap():
+    """파일당 라인 캡 초과 시 절단 + '…줄 생략' 마커(프론트 파서 호환)."""
+    from workflow.delta_update import extract_file_diffs
+    body = "\n".join(f"+    x{i} = {i};" for i in range(300))
+    diff = "Index: src/big.c\n@@ -1,1 +1,300 @@ big(void)\n" + body + "\n"
+    out = extract_file_diffs(diff, max_lines_per_file=20)
+    assert "생략" in out["src/big.c"]
+    assert len(out["src/big.c"].splitlines()) <= 22
+
+
+def test_extract_file_diffs_total_cap_omits():
+    """전체 char 캡 초과 시 이후 파일 생략(stats.omitted)."""
+    from workflow.delta_update import extract_file_diffs
+    blocks = [f"Index: src/f{n}.c\n@@ -1,1 +1,1 @@ f{n}(void)\n-    a = {n};\n+    a = {n + 1};" for n in range(5)]
+    st: dict = {}
+    out = extract_file_diffs("\n".join(blocks), max_total_chars=120, stats=st)
+    assert len(out) < 5
+    assert st.get("omitted", 0) >= 1
+
+
+def test_extract_file_diffs_empty_and_no_index():
+    """빈/Index 없는 diff는 빈 맵."""
+    from workflow.delta_update import extract_file_diffs
+    assert extract_file_diffs("") == {}
+    assert extract_file_diffs("@@ -1,1 +1,1 @@ f(void)\n-a\n+b") == {}

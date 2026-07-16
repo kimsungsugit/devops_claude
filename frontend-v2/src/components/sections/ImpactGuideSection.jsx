@@ -257,6 +257,19 @@ function extractDiffElementsCached(fd) {
   return v;
 }
 
+// 절대 소스경로(Windows) → file_diffs(백엔드 extract_file_diffs의 정규화 상대경로 키) 경계 suffix 매칭.
+// basename 충돌은 '/' 경계 + 최장(가장 구체적) 매칭으로 완화(백엔드 _in_line_classified 규약과 대칭).
+export function matchFileDiff(absFile, fileDiffs) {
+  if (!absFile || !fileDiffs) return '';
+  const abs = String(absFile).replace(/\\/g, '/').toLowerCase();
+  if (fileDiffs[abs]) return fileDiffs[abs];
+  let bestKey = '';
+  for (const k of Object.keys(fileDiffs)) {
+    if ((abs === k || abs.endsWith('/' + k)) && k.length > bestKey.length) bestKey = k;
+  }
+  return bestKey ? fileDiffs[bestKey] : '';
+}
+
 // 함수 변경을 각 문서(UDS/STS/SUTS/SITS/SDS)의 '구체 편집 액션'으로 변환한다.
 // 매개변수 diff(pdiff)가 정상이면 실제 파라미터명을 넣어 "무엇을 어느 섹션에" 수준으로 구체화하고,
 // 원문이 없으면(pdiff null/failed) change_type 기반의 일반 액션으로 폴백한다. 순수·결정론(LLM 무관).
@@ -749,6 +762,8 @@ export default function ImpactGuideSection({ analysisResult }) {
   const changeDetails = impact?.change_details ?? {};
   // 함수별 본문 diff 원문(AI 설명용) — BODY 등 선언 미변경 함수도 실제 코드 근거를 Gemini에 전달.
   const functionDiffs = impact?.function_diffs ?? {};
+  // 파일레벨 원문 폴백(#3) — 함수 자체 diff 없는 함수(파일영향)의 '파일 전체 변경 보기'용. 정규화 상대경로 키.
+  const fileDiffs = impact?.file_diffs ?? {};
   // 실제 문서 내용(예측 대신 실 파싱본) — 백엔드 doc_content{uds,suts,sds}(함수명 lower 키). 파일영향
   // 함수도 문서 내용은 실 파싱이라 유효. 구 job(필드 없음)은 {}로 폴백 → 내용 블록만 미표시(무해).
   const docContent = impact?.doc_content ?? {};
@@ -2358,6 +2373,8 @@ export default function ImpactGuideSection({ analysisResult }) {
             const isTruncated = evKind === 'line' && !hasDirectEvidence;  // 실 변경이나 원문 절단/미수집(파일영향 아님)
             const noEvidence = d.changed && (isFatten || (!evKind && !hasDirectEvidence));  // 파일영향(권위) — 절단 실변경 제외
             const isFormatOnly = d.changed && diffElems.noSemanticChange;  // 본문 diff가 이동/공백/포맷만 — 의미 변경 없음
+            // 파일레벨 원문 폴백(#3) — 함수 자체 diff가 없으면(파일영향/원문절단) 그 파일의 전체 변경을 폴백 표시.
+            const fileDiffFallback = (!fd && _fnMeta.file) ? matchFileDiff(_fnMeta.file, fileDiffs) : '';
             // 문서별 구체 편집 액션(결정론) — 파라미터 diff·본문 변경 요소·요구사항·TC 반영. LLM 무관·즉시.
             const docActions = buildDocumentActions(d, pdiff, diffElems);
             const DOC_CARDS = [
@@ -2475,6 +2492,23 @@ export default function ImpactGuideSection({ analysisResult }) {
                           const color = (ln.startsWith('+') && !ln.startsWith('+++')) ? 'var(--color-success)'
                             : (ln.startsWith('-') && !ln.startsWith('---')) ? 'var(--color-danger)'
                             : ln.startsWith('@@') ? 'var(--accent)' : 'var(--text-muted)';
+                          return <div key={i} style={{ color }}>{ln || ' '}</div>;
+                        })}
+                      </pre>
+                    </details>
+                  </div>
+                )}
+                {fileDiffFallback && (
+                  <div style={{ marginBottom: 12, border: '1px solid var(--border)', borderRadius: 8, overflow: 'hidden' }}>
+                    <details>
+                      <summary style={{ padding: '6px 10px', background: 'var(--bg)', fontWeight: 700, fontSize: 12, cursor: 'pointer' }}>
+                        📄 파일 전체 변경 보기 <span className="text-muted" style={{ fontWeight: 400, fontSize: 10 }}>(이 함수는 자체 diff 없음 — 같은 파일의 구조 변경으로 보수 포함)</span>
+                      </summary>
+                      <pre style={{ margin: 0, padding: 10, fontSize: 11, fontFamily: 'var(--font-mono, monospace)', whiteSpace: 'pre-wrap', wordBreak: 'break-all', maxHeight: 320, overflow: 'auto' }}>
+                        {fileDiffFallback.split('\n').map((ln, i) => {
+                          const color = (ln.startsWith('+') && !ln.startsWith('+++')) ? 'var(--color-success)'
+                            : (ln.startsWith('-') && !ln.startsWith('---')) ? 'var(--color-danger)'
+                            : (ln.startsWith('@@') || ln.startsWith('Index:') || ln.startsWith('===')) ? 'var(--accent)' : 'var(--text-muted)';
                           return <div key={i} style={{ color }}>{ln || ' '}</div>;
                         })}
                       </pre>

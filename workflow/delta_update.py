@@ -546,6 +546,41 @@ def extract_function_diffs(
     return out
 
 
+def extract_file_diffs(
+    combined_diff: str,
+    *,
+    max_lines_per_file: int = 150,
+    max_total_chars: int = 200_000,
+    stats: Optional[Dict[str, Any]] = None,
+) -> Dict[str, str]:
+    """svn/로컬 diff를 파일별 블록으로 쪼개 캡한 맵을 반환한다 — 함수 자체 diff가 없는 함수
+    (파일영향/원문 절단)의 모달 '파일 전체 변경 보기' 폴백용. 키는 **정규화 상대경로**(소문자·슬래시,
+    파이프라인 표준 `_in_line_classified`/`_split` 규약과 동일)라 프론트가 절대경로를 경계 suffix
+    매칭한다. 파일당 max_lines_per_file 줄로 절단(`… (+N줄 생략)` 마커, 프론트 파서 호환), 전체
+    max_total_chars 초과 시 이후 파일 생략(응답 폭주 방지). `Index:` 헤더 없는 diff는 빈 맵.
+    **순수 표시용** — 변경 분류/evidence/impact 집합과 무관.
+    """
+    out: Dict[str, str] = {}
+    total = 0
+    omitted = 0
+    for _path, block in _split_svn_diff_by_file(combined_diff):
+        key = _path.replace("\\", "/").lower()
+        if not key or key in out:
+            continue
+        lines = block.splitlines()
+        if len(lines) > max_lines_per_file:
+            block = "\n".join(lines[:max_lines_per_file]) + f"\n… (+{len(lines) - max_lines_per_file}줄 생략)"
+        if total + len(block) > max_total_chars:
+            omitted += 1
+            continue
+        out[key] = block
+        total += len(block)
+    if stats is not None:
+        stats["omitted"] = omitted
+        stats["total_chars"] = total
+    return out
+
+
 def classify_changed_functions_from_diff_text(
     combined_diff: str,
     known_funcs: Optional[Set[str]] = None,

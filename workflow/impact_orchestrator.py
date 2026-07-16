@@ -2149,6 +2149,17 @@ def run_impact_update(
                 "— '변경 없음'이 아니라 '원문 미수록'입니다(변경 판정은 evidence 기준)."
             )
 
+        # 파일레벨 원문 폴백(#3): 함수 자체 diff가 없는 함수(파일영향/원문 절단)가 모달에서 '파일 전체
+        # 변경 보기'로 그 파일의 구조 변경(전처리·전역·prototype 등 fatten 유발 지점)을 확인하게 한다.
+        # 순수 표시용 additive — changed_types/evidence/impact 집합/ASIL 무영향.
+        file_diffs: Dict[str, str] = {}
+        if _fd_source:
+            try:
+                from workflow.delta_update import extract_file_diffs
+                file_diffs = extract_file_diffs(_fd_source)
+            except Exception as _fdx_exc:  # noqa: BLE001 — 폴백 원문 실패는 분석을 막지 않음
+                logger.debug("file_diffs extraction failed: %s", _fdx_exc)
+
         # ── ISO 26262 증거 보강: 함수별 ASIL/메타 + ASIL 차등 + 회귀시험 선정 + 커버리지 타깃 ──
         def _asil_of(_fn: str) -> str:
             _a = str((by_name.get(_fn) or {}).get("asil") or "").strip().upper()
@@ -2339,6 +2350,7 @@ def run_impact_update(
             "changed_function_types": dict(sorted(changed_types.items())),
             "change_details": change_details,
             "function_diffs": function_diffs,
+            "file_diffs": file_diffs,
             "impact": impact_groups,
             "warnings": warnings,
             "actions": actions,
