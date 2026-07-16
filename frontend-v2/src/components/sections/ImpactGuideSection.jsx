@@ -2023,13 +2023,13 @@ export default function ImpactGuideSection({ analysisResult }) {
             }}>
               {aiGuide.risk?.grade} ({aiGuide.risk?.score}/100)
             </div>
-            <div style={{ fontSize: 11 }}>
+            <div style={{ fontSize: 13 }}>
               <div>ASIL: <strong>{aiGuide.risk?.max_asil}</strong></div>
               {aiGuide.risk?.asil_escalation && (
                 <StatusBadge tone="danger">ASIL Escalation</StatusBadge>
               )}
             </div>
-            <div style={{ flex: 1, fontSize: 10, color: 'var(--text-muted)' }}>
+            <div style={{ flex: 1, fontSize: 13, lineHeight: 1.6, color: 'var(--text-muted)' }}>
               {aiGuide.risk?.justification}
             </div>
           </div>
@@ -2037,16 +2037,16 @@ export default function ImpactGuideSection({ analysisResult }) {
           {/* Safety Functions */}
           {aiGuide.risk?.affected_safety_functions?.length > 0 && (
             <div style={{ marginBottom: 10, padding: 8, background: 'var(--bg)', borderRadius: 6, borderLeft: '3px solid var(--color-danger)' }}>
-              <div style={{ fontSize: 11, fontWeight: 600, marginBottom: 4 }}>안전 관련 함수</div>
+              <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 4 }}>안전 관련 함수</div>
               <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
                 {aiGuide.risk.affected_safety_functions.map((sf, i) => {
                   const canonical = resolveFnName(sf);
                   return canonical ? (
                     <button key={i} type="button" onClick={() => setSelectedFn(canonical)}
                       className="pill pill-danger" title="함수별 상세 열기"
-                      style={{ fontSize: 9, cursor: 'pointer', border: 'none' }}>{sf}</button>
+                      style={{ fontSize: 11, cursor: 'pointer', border: 'none' }}>{sf}</button>
                   ) : (
-                    <span key={i} className="pill pill-danger" style={{ fontSize: 9 }}>{sf}</span>
+                    <span key={i} className="pill pill-danger" style={{ fontSize: 11 }}>{sf}</span>
                   );
                 })}
               </div>
@@ -2056,18 +2056,18 @@ export default function ImpactGuideSection({ analysisResult }) {
           {/* Cross-Document Impact */}
           {aiGuide.cross_doc_impacts && Object.keys(aiGuide.cross_doc_impacts).length > 0 && (
             <div style={{ marginBottom: 10 }}>
-              <div style={{ fontSize: 11, fontWeight: 600, marginBottom: 6 }}>문서별 변경 영향</div>
+              <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>문서별 변경 영향</div>
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(250px, 1fr))', gap: 6 }}>
                 {Object.entries(aiGuide.cross_doc_impacts).map(([doc, impacts]) => {
                   const items = Array.isArray(impacts) ? impacts : [];
                   return (
                     <div key={doc} style={{ padding: 8, border: '1px solid var(--border)', borderRadius: 6, background: 'var(--bg)' }}>
-                      <div style={{ fontWeight: 700, fontSize: 11, textTransform: 'uppercase', marginBottom: 4, color: 'var(--accent)' }}>{doc}</div>
+                      <div style={{ fontWeight: 700, fontSize: 12, textTransform: 'uppercase', marginBottom: 4, color: 'var(--accent)' }}>{doc}</div>
                       {items.slice(0, 3).map((imp, i) => {
                         const m = String(imp).match(/^\[([^\]]+)\]/);
                         const canonical = m ? resolveFnName(m[1]) : null;
                         return (
-                          <div key={i} style={{ fontSize: 10, color: 'var(--text-muted)', marginBottom: 2 }}>
+                          <div key={i} style={{ fontSize: 12, lineHeight: 1.5, color: 'var(--text-muted)', marginBottom: 2 }}>
                             {canonical ? (<>
                               <button type="button" onClick={() => setSelectedFn(canonical)} title="함수별 상세 열기"
                                 style={{ background: 'none', border: 'none', padding: 0, color: 'var(--accent)', cursor: 'pointer', textDecoration: 'underline', font: 'inherit' }}>[{m[1]}]</button>
@@ -2087,11 +2087,11 @@ export default function ImpactGuideSection({ analysisResult }) {
           {/* Review Checklist */}
           {aiGuide.review_checklist?.length > 0 && (
             <div style={{ marginBottom: 10 }}>
-              <div style={{ fontSize: 11, fontWeight: 600, marginBottom: 4 }}>리뷰 체크리스트</div>
+              <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 4 }}>리뷰 체크리스트</div>
               {aiGuide.review_checklist.map((item, i) => (
-                <div key={i} style={{ display: 'flex', gap: 6, alignItems: 'center', padding: '3px 0', fontSize: 11 }}>
+                <div key={i} style={{ display: 'flex', gap: 6, alignItems: 'center', padding: '4px 0', fontSize: 13, lineHeight: 1.5 }}>
                   <span className={`pill ${item.priority === 'CRITICAL' ? 'pill-danger' : item.priority === 'HIGH' ? 'pill-warning' : 'pill-info'}`}
-                    style={{ fontSize: 9, minWidth: 60, textAlign: 'center' }}>{item.priority}</span>
+                    style={{ fontSize: 10, minWidth: 60, textAlign: 'center' }}>{item.priority}</span>
                   <span>{item.item}</span>
                 </div>
               ))}
@@ -2101,8 +2101,8 @@ export default function ImpactGuideSection({ analysisResult }) {
           {/* Test Recommendations */}
           {aiGuide.test_recommendations?.length > 0 && (
             <div>
-              <div style={{ fontSize: 11, fontWeight: 600, marginBottom: 4 }}>테스트 추가 제안</div>
-              <table style={{ width: '100%', fontSize: 10, borderCollapse: 'collapse' }}>
+              <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 4 }}>테스트 추가 제안</div>
+              <table style={{ width: '100%', fontSize: 12, borderCollapse: 'collapse' }}>
                 <thead>
                   <tr style={{ borderBottom: '1px solid var(--border)' }}>
                     <th style={{ textAlign: 'left', padding: '3px 6px' }}>함수</th>
@@ -2114,7 +2114,7 @@ export default function ImpactGuideSection({ analysisResult }) {
                   {aiGuide.test_recommendations.slice(0, 8).map((rec, i) => (
                     <tr key={i} style={{ borderBottom: '1px solid var(--border-light, var(--border))' }}>
                       <td style={{ padding: '3px 6px', fontFamily: 'monospace', fontWeight: 600 }}>{renderFnRef(rec.function)}</td>
-                      <td style={{ padding: '3px 6px' }}><span className="pill pill-info" style={{ fontSize: 9 }}>{rec.test_type}</span></td>
+                      <td style={{ padding: '3px 6px' }}><span className="pill pill-info" style={{ fontSize: 11 }}>{rec.test_type}</span></td>
                       <td style={{ padding: '3px 6px' }}>{rec.description}</td>
                     </tr>
                   ))}
@@ -2391,7 +2391,7 @@ export default function ImpactGuideSection({ analysisResult }) {
                 style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.55)', zIndex: 1000, display: 'flex', alignItems: 'flex-start', justifyContent: 'center', padding: '5vh 16px', overflow: 'auto' }}>
                 <div onClick={e => e.stopPropagation()}
                   role="dialog" aria-modal="true" aria-label={`${d.function} 변경 상세`}
-                  style={{ background: 'var(--panel)', border: '2px solid var(--accent)', borderRadius: 10, maxWidth: 900, width: '100%', maxHeight: '90vh', overflow: 'auto', padding: 18, boxShadow: '0 10px 40px rgba(0,0,0,0.45)' }}>
+                  style={{ background: 'var(--panel)', border: '2px solid var(--accent)', borderRadius: 10, maxWidth: 1280, width: '100%', maxHeight: '92vh', overflow: 'auto', padding: 22, boxShadow: '0 10px 40px rgba(0,0,0,0.45)', fontSize: 13 }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 12, gap: 8 }}>
                   <div>
                     <span style={{ fontWeight: 700, fontSize: 16, fontFamily: 'monospace', wordBreak: 'break-all' }}>{d.function}</span>
@@ -2487,7 +2487,7 @@ export default function ImpactGuideSection({ analysisResult }) {
                       <summary style={{ padding: '6px 10px', background: 'var(--bg)', fontWeight: 700, fontSize: 12, cursor: 'pointer' }}>
                         🔧 본문 변경 원문 <span className="text-muted" style={{ fontWeight: 400, fontSize: 10 }}>(svn diff — AI 설명 근거)</span>
                       </summary>
-                      <pre style={{ margin: 0, padding: 10, fontSize: 11, fontFamily: 'var(--font-mono, monospace)', whiteSpace: 'pre-wrap', wordBreak: 'break-all', maxHeight: 320, overflow: 'auto' }}>
+                      <pre style={{ margin: 0, padding: 12, fontSize: 13, fontFamily: 'var(--font-mono, monospace)', lineHeight: 1.5, whiteSpace: 'pre-wrap', wordBreak: 'break-all', maxHeight: 420, overflow: 'auto' }}>
                         {fd.split('\n').map((ln, i) => {
                           const color = (ln.startsWith('+') && !ln.startsWith('+++')) ? 'var(--color-success)'
                             : (ln.startsWith('-') && !ln.startsWith('---')) ? 'var(--color-danger)'
@@ -2504,7 +2504,7 @@ export default function ImpactGuideSection({ analysisResult }) {
                       <summary style={{ padding: '6px 10px', background: 'var(--bg)', fontWeight: 700, fontSize: 12, cursor: 'pointer' }}>
                         📄 파일 전체 변경 보기 <span className="text-muted" style={{ fontWeight: 400, fontSize: 10 }}>(이 함수는 자체 diff 없음 — 같은 파일의 구조 변경으로 보수 포함)</span>
                       </summary>
-                      <pre style={{ margin: 0, padding: 10, fontSize: 11, fontFamily: 'var(--font-mono, monospace)', whiteSpace: 'pre-wrap', wordBreak: 'break-all', maxHeight: 320, overflow: 'auto' }}>
+                      <pre style={{ margin: 0, padding: 12, fontSize: 13, fontFamily: 'var(--font-mono, monospace)', lineHeight: 1.5, whiteSpace: 'pre-wrap', wordBreak: 'break-all', maxHeight: 420, overflow: 'auto' }}>
                         {fileDiffFallback.split('\n').map((ln, i) => {
                           const color = (ln.startsWith('+') && !ln.startsWith('+++')) ? 'var(--color-success)'
                             : (ln.startsWith('-') && !ln.startsWith('---')) ? 'var(--color-danger)'
@@ -2534,13 +2534,13 @@ export default function ImpactGuideSection({ analysisResult }) {
                 {/* 🤖 AI 변경 설명 (Gemini) — 선언 원문 근거 자연어 설명 */}
                 <div style={{ marginBottom: 12, border: '1px solid var(--border)', borderRadius: 8, overflow: 'hidden' }}>
                   <div style={{ padding: '6px 10px', background: 'var(--bg)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, borderBottom: (exp.text || exp.error) ? '1px solid var(--border)' : 'none' }}>
-                    <span style={{ fontWeight: 700, fontSize: 12 }}>🤖 AI 변경 설명 <span className="text-muted" style={{ fontWeight: 400, fontSize: 10 }}>(Gemini)</span></span>
+                    <span style={{ fontWeight: 700, fontSize: 14 }}>🤖 AI 변경 설명 <span className="text-muted" style={{ fontWeight: 400, fontSize: 11 }}>(Gemini)</span></span>
                     <button className="btn-sm" onClick={() => fetchExplanation(d)} disabled={exp.loading} style={{ flexShrink: 0 }}>
                       {exp.loading ? '분석 중...' : (exp.text ? '다시 생성' : 'AI로 설명 생성')}
                     </button>
                   </div>
-                  {exp.text && <div style={{ padding: 10, fontSize: 12, whiteSpace: 'pre-wrap', lineHeight: 1.6, overflowWrap: 'anywhere' }}>{exp.text}</div>}
-                  {exp.error && <div style={{ padding: 10, fontSize: 11, color: 'var(--text-muted)' }}>⚠ {exp.error}</div>}
+                  {exp.text && <div style={{ padding: 12, fontSize: 14, whiteSpace: 'pre-wrap', lineHeight: 1.7, overflowWrap: 'anywhere' }}>{exp.text}</div>}
+                  {exp.error && <div style={{ padding: 12, fontSize: 13, color: 'var(--text-muted)' }}>⚠ {exp.error}</div>}
                 </div>
 
                 {/* Change description */}
