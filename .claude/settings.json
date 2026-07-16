@@ -34,7 +34,6 @@
       "Bash(npm install *)",
       "Bash(npm i *)",
       "Bash(npx playwright *)",
-      "Bash(taskkill //IM excel_rename_gui_v2.exe *)",
       "Bash(taskkill //PID *)",
       "Bash(where *)",
       "Bash(choco *)",
@@ -78,9 +77,13 @@
       "Bash(rm -rf /)",
       "Bash(rm -rf ~)",
       "Bash(git push --force *)",
+      "Bash(git push --force)",
+      "Bash(git push -f *)",
+      "Bash(git push -f)",
+      "Bash(git push --force-with-lease *)",
+      "Bash(git push --force-with-lease)",
       "Bash(git reset --hard *)",
-      "Bash(drop database *)",
-      "Bash(DROP TABLE *)"
+      "Bash(git reset --hard)"
     ]
   },
   "hooks": {
@@ -101,7 +104,7 @@
           },
           {
             "type": "command",
-            "command": "echo '{\"systemMessage\":\"reminder: settings/hooks 변경 시 .bak 백업 + python -c json.load() parse 검증 의무 (CLAUDE.md L70)\"}'",
+            "command": "echo '{\"systemMessage\":\"reminder: settings/hooks 변경 시 .bak 백업 + python -c json.load() parse 검증 의무 (.claude/rules/autonomous-operation.md 참조)\"}'",
             "timeout": 2,
             "statusMessage": "Policy reminder..."
           }
@@ -128,7 +131,7 @@
             "type": "command",
             "command": "python scripts/posttoolbatch_report.py 2>/dev/null || true",
             "timeout": 10,
-            "statusMessage": "Batch report (X1~X8 trigger)..."
+            "statusMessage": "Batch report (X1~X9 trigger)..."
           }
         ]
       }

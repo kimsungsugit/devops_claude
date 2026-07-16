@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import ast
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -28,6 +29,11 @@ def _payload_file(payload: dict) -> str:
         or payload.get("tool_response", {}).get("filePath")
         or ""
     )
+
+
+def _module_missing(r: subprocess.CompletedProcess) -> bool:
+    """`python -m <mod>` 이 모듈 부재로 실패했는지 — 침묵 degrade(green 위장) 방지용."""
+    return r.returncode != 0 and "No module named" in (r.stderr or "")
 
 
 def main() -> None:

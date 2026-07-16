@@ -67,7 +67,9 @@
       "Bash(PYTHONIOENCODING=utf-8 backend/.venv/Scripts/python.exe -m pytest tests/unit/test_routers.py::TestPreviewExcelFixes -q)",
       "Bash(../backend/.venv/Scripts/python.exe -m uvicorn main:app --host 127.0.0.1 --port 9000 --log-level warning)",
       "Bash(ls backend/.venv/Scripts/python.exe)",
-      "Bash(ls .venv/Scripts/python.exe)"
+      "Bash(ls .venv/Scripts/python.exe)",
+      "Bash(taskkill //F //PID 38752)",
+      "Bash(taskkill //F //PID 28568)"
     ]
   }
 }

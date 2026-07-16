@@ -9,7 +9,7 @@ description: "백엔드/프론트엔드 서비스 상태를 점검합니다."
 
 1. **백엔드 상태 확인**
    ```bash
-   curl -s http://127.0.0.1:${BACKEND_PORT:-8000}/api/health 2>/dev/null || echo "Backend DOWN"
+   curl -s http://127.0.0.1:${BACKEND_PORT:-9000}/api/health 2>/dev/null || echo "Backend DOWN"
    ```
 
 2. **프론트엔드 상태 확인**
@@ -39,7 +39,7 @@ description: "백엔드/프론트엔드 서비스 상태를 점검합니다."
 
 7. **결과 요약**
    ```
-   Backend:  [UP/DOWN] (port ${BACKEND_PORT:-8000})
+   Backend:  [UP/DOWN] (port ${BACKEND_PORT:-9000})
    Frontend: [UP/DOWN] (port ${FRONTEND_PORT:-5174})
    Database: [OK/ERROR] (파일 크기, 마지막 수정)
    Tests:    [PASS/FAIL] (최근 실행)

@@ -16,16 +16,16 @@ trigger: 배포, 릴리스, Docker, 버전, 태깅, CI/CD 파이프라인 실행
 docker build -t devops-toolkit .
 
 # 실행
-docker run -p ${BACKEND_PORT:-8000}:${BACKEND_PORT:-8000} --env-file .env devops-toolkit
+docker run -p ${BACKEND_PORT:-9000}:${BACKEND_PORT:-9000} --env-file .env devops-toolkit
 
 # 헬스 체크
-curl -s http://localhost:${BACKEND_PORT:-8000}/api/health
+curl -s http://localhost:${BACKEND_PORT:-9000}/api/health
 ```
 
 ### 로컬 개발 서버
 ```bash
 # Backend
-uvicorn backend.main:app --host 0.0.0.0 --port ${BACKEND_PORT:-8000} --reload
+uvicorn backend.main:app --host 0.0.0.0 --port ${BACKEND_PORT:-9000} --reload
 
 # Frontend
 cd frontend-v2 && npm run build && npm run preview

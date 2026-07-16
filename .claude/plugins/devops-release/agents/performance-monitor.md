@@ -18,7 +18,7 @@ tools:
 - 로드 테스트 결과 분석
 
 ## Workflow
-1. `Bash`로 `curl -s http://127.0.0.1:8000/metrics` Prometheus 메트릭 수집
+1. `Bash`로 `curl -s http://127.0.0.1:9000/metrics` Prometheus 메트릭 수집
 2. 응답 시간 p50/p95/p99 분석
 3. `Bash`로 주요 엔드포인트 응답 시간 측정
 4. 메모리 사용량 확인 (ps, tasklist)
