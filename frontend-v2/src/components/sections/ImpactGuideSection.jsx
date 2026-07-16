@@ -191,7 +191,7 @@ function diffSignatureParamsCached(before, after) {
 const EMPTY_DIFF_ELEMS = Object.freeze({
   changedGlobals: { added: [], removed: [] },
   macros: { added: [], removed: [] },
-  addedLines: 0, removedLines: 0, hunks: 0, truncated: false,
+  addedLines: 0, removedLines: 0, hunks: 0, truncated: false, noSemanticChange: false,
 });
 // 전역/정적 명명 규약: (u|s)+숫자 타입 prefix + g_/s_ 또는 bare g_/s_. 타입 prefix를 실제 토큰으로
 // 앵커해 msg_/flag_group/cfg_mode 류 오탐 방지([a-z]{0,3} 백트래킹 과매칭 수정, reviewer #1/#2).
@@ -209,6 +209,7 @@ export function extractDiffElements(fd) {
   if (!fd) return EMPTY_DIFF_ELEMS;
   const gAdd = new Set(), gRem = new Set(), mAdd = new Set(), mRem = new Set();
   let addedLines = 0, removedLines = 0, hunks = 0, truncated = false;
+  const minusSeq = [], plusSeq = [];  // -/+ 본문 라인(순서 보존·trim) — 포맷/이동만(의미 변경 없음) 판정용
   for (const raw of String(fd).split('\n')) {
     if (!raw) continue;
     if (raw.startsWith('@@ ')) { hunks++; continue; }
@@ -217,7 +218,8 @@ export function extractDiffElements(fd) {
     const sign = raw[0];
     if (sign !== '+' && sign !== '-') continue;
     const body = raw.slice(1);
-    if (sign === '+') addedLines++; else removedLines++;
+    if (sign === '+') { addedLines++; plusSeq.push(body.trim()); }
+    else { removedLines++; minusSeq.push(body.trim()); }
     const gSet = sign === '+' ? gAdd : gRem;
     const mSet = sign === '+' ? mAdd : mRem;
     const wm = _WRITE_LHS.exec(body);  // 1) 전역/정적 write target(멤버 write는 base 전역)
@@ -230,11 +232,17 @@ export function extractDiffElements(fd) {
       while ((dm = _DEFINED_RE.exec(body)) !== null) mSet.add(dm[1]);  // #if defined(X) → X
     }
   }
+  // 포맷/이동만(의미 변경 없음): -/+ 본문이 순서·내용(공백 정규화) 동일 → 블록 이동·재들여쓰기.
+  // ⚠ 순서 비교(멀티셋 아님)라 문장 재정렬(a=1;b=a;→b=a;a=1;)은 다르게 나와 실변경으로 유지(오탐 방지).
+  //   truncated diff(60줄/400KB 상한)는 안 보이는 부분에 실변경 가능 → 판정 보류(false).
+  const noSemanticChange = !truncated && minusSeq.length > 0
+    && minusSeq.length === plusSeq.length
+    && minusSeq.every((v, i) => v === plusSeq[i]);
   // cap 없이 전체 반환 — 개수를 정확히 표시(백엔드 60줄 cap이 1차 상한, 카드 표시는 listVars가 4개로 cap). reviewer #5.
   return {
     changedGlobals: { added: [...gAdd], removed: [...gRem] },
     macros: { added: [...mAdd], removed: [...mRem] },
-    addedLines, removedLines, hunks, truncated,
+    addedLines, removedLines, hunks, truncated, noSemanticChange,
   };
 }
 // diffElems 캐시 — 모달 재렌더(검색 타이핑 등) 시 재계산 회피(_sigDiffCache 동일 패턴).
@@ -530,6 +538,8 @@ function renderChangeSummaryCell(d, changeDetails, functionDiffs = {}, functionM
   const cd = changeDetails[String(d.function).toLowerCase()];
   // 무정보(파일영향): 직접 변경 증거 없이 파일 단위 보수 포함(fatten) — 단일 출처 functionHasNoEvidence.
   const cellNoEvidence = functionHasNoEvidence(d.function, kind, changeDetails, functionDiffs, functionMeta);
+  // 포맷/이동만(의미 변경 없음) — 본문 diff가 코드 이동/공백/포맷만(순서 보존 -/+ 동일). 파일영향과 배타.
+  const cellFormatOnly = !cellNoEvidence && extractDiffElementsCached(functionDiffs[String(d.function).toLowerCase()] || '').noSemanticChange;
   const pdiff = (kind === 'SIGNATURE' && cd && (cd.before || cd.after)) ? diffSignatureParamsCached(cd.before, cd.after) : null;
   const sig = summarizeSignatureChange(pdiff);
   return (
@@ -539,6 +549,9 @@ function renderChangeSummaryCell(d, changeDetails, functionDiffs = {}, functionM
       </span>
       {cellNoEvidence && (
         <span className="pill pill-neutral" style={{ fontSize: 8 }} title="직접 변경 증거 없음(function_diff·change_details 모두 없음) — 같은 파일의 다른 변경으로 보수적 포함(파일 단위 영향)">파일영향</span>
+      )}
+      {cellFormatOnly && (
+        <span className="pill pill-neutral" style={{ fontSize: 8 }} title="본문 diff가 코드 이동·공백·포맷만 — 의미(로직) 변경 없음(재정렬 아님)">포맷/이동</span>
       )}
       {sig.hasChange && (
         <span style={{ display: 'flex', gap: 2, flexWrap: 'wrap', alignItems: 'center' }} title="매개변수/반환 변화">
@@ -636,6 +649,7 @@ export default function ImpactGuideSection({ analysisResult }) {
   const [demoMode, setDemoMode] = useState(false);
   // 파일영향(무정보 fatten 함수) 표시 토글 — 기본 숨김(집계·리스트에서 제외해 실변경 규모를 정직 표시).
   const [showFileImpact, setShowFileImpact] = useState(false);
+  const [hideFormatOnly, setHideFormatOnly] = useState(false);
   // Track 2: AI 요약 ↔ 함수별 상세 탭. aiGuide 있으면 기본 'ai'(서머리 우선), 없으면 렌더 시 'fn' 강등.
   const [activeTab, setActiveTab] = useState('ai');
   // 문서별 상세 탭: 좌측에서 선택한 문서(uds/sts/suts/sits/sds). null이면 렌더 시 첫 '영향 있는' 문서로 확정.
@@ -851,6 +865,13 @@ export default function ImpactGuideSection({ analysisResult }) {
   // 데모(합성 데이터, change_details/function_diffs 없음)는 전부 무정보로 잡히므로 분리 제외 — 데모가 텅 비지 않게.
   const hasEvidenceSplit = !demoMode && !isConservativeCount && noEvidenceCount > 0 && evidencedFnEntries.length > 0;
   const hideFileImpact = hasEvidenceSplit && !showFileImpact;
+  // 포맷/이동만(의미 변경 없음) 함수 — 본문 diff가 코드 이동/공백/포맷만이라 실 변경으로 오인되기 쉬움. 필터 제공.
+  const formatOnlyCount = useMemo(
+    () => (guide?.details || []).filter(
+      (d) => d.changed && extractDiffElementsCached(functionDiffs[String(d.function).toLowerCase()] || '').noSemanticChange,
+    ).length,
+    [guide, functionDiffs],
+  );
   const visibleFnEntries = hideFileImpact ? evidencedFnEntries : activeFnEntries;
   const visibleChangeSummary = { NEW: 0, DELETE: 0, SIGNATURE: 0, BODY: 0, HEADER: 0, VARIABLE: 0 };
   for (const [, k] of visibleFnEntries) { if (k in visibleChangeSummary) visibleChangeSummary[k] += 1; }
@@ -941,6 +962,7 @@ export default function ImpactGuideSection({ analysisResult }) {
     });
     // 파일영향(직접 변경·증거 없음) 제외 — filteredGuide(L778)와 동일 규칙(간접은 유지).
     if (hideFileImpact) rows = rows.filter(r => !(r.d?.changed && functionHasNoEvidence(r.d.function, r.d.changeType, changeDetails, functionDiffs, functionMeta)));
+    if (hideFormatOnly) rows = rows.filter(r => !(r.d?.changed && extractDiffElementsCached(functionDiffs[String(r.d.function).toLowerCase()] || '').noSemanticChange));
     rows.sort((a, b) => {
       const ac = a.d?.changed ? 0 : 1; const bc = b.d?.changed ? 0 : 1;
       if (ac !== bc) return ac - bc;                                   // 직접 변경 우선
@@ -949,13 +971,14 @@ export default function ImpactGuideSection({ analysisResult }) {
       return String(a.name).localeCompare(String(b.name));
     });
     return rows;
-  }, [guide, activeTab, effSelectedDoc, actions, changeDetails, functionDiffs, functionMeta, hideFileImpact]);
+  }, [guide, activeTab, effSelectedDoc, actions, changeDetails, functionDiffs, functionMeta, hideFileImpact, hideFormatOnly]);
 
   const filteredGuide = useMemo(() => {
     if (!guide) return [];
     let items = guide.details;
     // 파일영향(무정보) 숨김 — 직접 변경이나 증거 없는(fatten) 함수 제외. 간접(changed=false)은 유지.
     if (hideFileImpact) items = items.filter(d => !(d.changed && functionHasNoEvidence(d.function, d.changeType, changeDetails, functionDiffs, functionMeta)));
+    if (hideFormatOnly) items = items.filter(d => !(d.changed && extractDiffElementsCached(functionDiffs[String(d.function).toLowerCase()] || '').noSemanticChange));
     if (hopFilter !== 'all') items = items.filter(d => d.hop === hopFilter);
     if (docFilter === 'has_reqs') items = items.filter(d => d.requirements.length > 0);
     else if (docFilter === 'has_sts') items = items.filter(d => d.stsTestCases.length > 0);
@@ -974,7 +997,7 @@ export default function ImpactGuideSection({ analysisResult }) {
       );
     }
     return items;
-  }, [guide, hopFilter, docFilter, searchTerm, hideFileImpact, changeDetails, functionDiffs, functionMeta]);
+  }, [guide, hopFilter, docFilter, searchTerm, hideFileImpact, hideFormatOnly, changeDetails, functionDiffs, functionMeta]);
 
   // Build detailed guide
   const buildGuide = useCallback(async () => {
@@ -2129,6 +2152,13 @@ export default function ImpactGuideSection({ analysisResult }) {
                 {`파일영향 포함 (${noEvidenceCount})`}
               </label>
             )}
+            {formatOnlyCount > 0 && (
+              <label style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 12, color: 'var(--text-muted)', cursor: 'pointer' }}
+                title="본문 diff가 코드 이동·공백·포맷만이고 의미(로직) 변경이 없는 함수를 목록에서 숨깁니다.">
+                <input type="checkbox" checked={hideFormatOnly} onChange={e => setHideFormatOnly(e.target.checked)} />
+                {`포맷/이동만 숨기기 (${formatOnlyCount})`}
+              </label>
+            )}
             <span className="text-muted text-sm">{filteredGuide.length}/{guide.details.length}건</span>
           </div>
 
@@ -2327,6 +2357,7 @@ export default function ImpactGuideSection({ analysisResult }) {
             const isFatten = evKind === 'file_fatten';
             const isTruncated = evKind === 'line' && !hasDirectEvidence;  // 실 변경이나 원문 절단/미수집(파일영향 아님)
             const noEvidence = d.changed && (isFatten || (!evKind && !hasDirectEvidence));  // 파일영향(권위) — 절단 실변경 제외
+            const isFormatOnly = d.changed && diffElems.noSemanticChange;  // 본문 diff가 이동/공백/포맷만 — 의미 변경 없음
             // 문서별 구체 편집 액션(결정론) — 파라미터 diff·본문 변경 요소·요구사항·TC 반영. LLM 무관·즉시.
             const docActions = buildDocumentActions(d, pdiff, diffElems);
             const DOC_CARDS = [
@@ -2352,7 +2383,8 @@ export default function ImpactGuideSection({ analysisResult }) {
                         ? <span className="pill pill-warning" style={{ fontSize: 10 }}>{CHANGE_TYPE_KO[d.changeType] || d.changeType}</span>
                         : <span className="pill pill-neutral" style={{ fontSize: 10 }} title="직접 변경 아님 — 간접 영향 함수">영향</span>}
                       {noEvidence && <span className="pill pill-neutral" style={{ fontSize: 10 }} title="직접 변경 증거 없음 — 파일 단위 영향(hunk/선언 미감지, 보수적 포함)">파일영향</span>}
-                      {isTruncated && <span className="pill pill-warning" style={{ fontSize: 10 }} title="실 라인 변경이나 본문 원문이 절단/미수집됨(대용량 diff 또는 로컬/cloudium diff 경로) — 파일영향 아님">원문 절단</span>}
+                      {isFormatOnly && <span className="pill pill-neutral" style={{ fontSize: 10 }} title="본문 diff가 코드 이동/공백/포맷만 — 의미(로직) 변경 없음(재정렬 아님)">포맷/이동</span>}
+                      {isTruncated && <span className="pill pill-warning" style={{ fontSize: 10 }} title="실 라인 변경이나 본문 원문이 크기 상한(60줄/400KB)을 넘어 생략됨 — 파일영향 아님(변경 판정은 유효)">원문 절단</span>}
                       <span className={`pill ${d.hop === 'direct' ? 'pill-danger' : 'pill-info'}`} style={{ fontSize: 10 }}>{d.hop}</span>
                       {d.asil && /^[A-D]$/.test(d.asil) && <span className={`pill ${/[CD]/.test(d.asil) ? 'pill-danger' : 'pill-warning'}`} style={{ fontSize: 10 }}>ASIL {d.asil}</span>}
                       {d.requirements.length > 0 && <span className="text-muted" style={{ fontSize: 10 }}>요구사항 {d.requirements.length}개</span>}
@@ -2456,7 +2488,12 @@ export default function ImpactGuideSection({ analysisResult }) {
                 )}
                 {isTruncated && (
                   <div className="text-muted" style={{ fontSize: 11, marginBottom: 12, padding: '6px 10px', background: 'var(--bg)', borderRadius: 6, borderLeft: '3px solid var(--color-warning)' }}>
-                    실제 라인 변경이 있으나 본문 원문이 절단/미수집됐습니다(대용량 diff 또는 로컬/cloudium diff 경로). <strong>파일영향이 아니며</strong> 실 변경이므로 Description·Test Action·Expected Result를 재검토하세요.
+                    실제 라인 변경이 있으나 본문 원문이 크기 상한(함수당 60줄·전체 400KB)을 넘어 생략됐습니다. <strong>파일영향이 아니며</strong> 실 변경이므로 Description·Test Action·Expected Result를 재검토하세요.
+                  </div>
+                )}
+                {isFormatOnly && (
+                  <div className="text-muted" style={{ fontSize: 11, marginBottom: 12, padding: '6px 10px', background: 'var(--bg)', borderRadius: 6, borderLeft: '3px solid var(--border)' }}>
+                    본문 diff가 <strong>코드 이동·공백·포맷만</strong>이고 의미(로직) 변경은 없습니다(재정렬 아님). 관련 문서(Description·Test Action·Expected) 재검토가 불필요할 수 있습니다 — AI 설명으로 확인하세요.
                   </div>
                 )}
 
@@ -2475,9 +2512,11 @@ export default function ImpactGuideSection({ analysisResult }) {
                 {/* Change description */}
                 <div style={{ padding: '8px 10px', background: 'var(--bg)', borderRadius: 6, marginBottom: 12, fontSize: 12, borderLeft: `3px solid ${noEvidence ? 'var(--border)' : 'var(--color-warning)'}` }}>
                   {!d.changed && `이 함수는 직접 변경되지 않았으나, 변경 함수와의 호출 관계(${d.hop})로 영향받는 간접 함수입니다. 인터페이스 계약이 유지되는지, 회귀 시험(SUTS/SITS) 재실행이 필요한지 확인하세요.`}
-                  {ct === 'BODY' && (!noEvidence
-                    ? '함수 본문(로직)이 변경되었습니다. 동작 변경으로 인해 관련 문서의 Description, Test Action, Expected Result를 모두 재검토해야 합니다.'
-                    : '이 함수의 직접 변경(hunk/선언)은 감지되지 않았습니다. 같은 파일의 다른 변경(전처리·선언 등)으로 영향 검토 대상에 보수적으로 포함된 함수입니다(파일 단위 영향).')}
+                  {ct === 'BODY' && (noEvidence
+                    ? '이 함수의 직접 변경(hunk/선언)은 감지되지 않았습니다. 같은 파일의 다른 변경(전처리·선언 등)으로 영향 검토 대상에 보수적으로 포함된 함수입니다(파일 단위 영향).'
+                    : isFormatOnly
+                      ? '본문 diff가 코드 이동·공백·포맷만이고 의미(로직) 변경은 없습니다(재정렬 아님). 관련 문서 재검토가 불필요할 수 있습니다 — AI 설명으로 확인하세요.'
+                      : '함수 본문(로직)이 변경되었습니다. 동작 변경으로 인해 관련 문서의 Description, Test Action, Expected Result를 모두 재검토해야 합니다.')}
                   {ct === 'SIGNATURE' && '함수 시그니처(파라미터/리턴타입)가 변경되었습니다. 호출하는 모든 함수와 Input/Output Parameters, Pre-condition을 업데이트해야 합니다.'}
                   {ct === 'HEADER' && '헤더 파일이 변경되었습니다. 매크로/타입 정의 변경으로 이 헤더를 include하는 모든 소스 파일의 함수에 영향이 있을 수 있습니다.'}
                   {ct === 'VARIABLE' && '글로벌 변수가 변경되었습니다. 이 변수를 읽고 쓰는 모든 함수의 동작을 확인해야 합니다.'}

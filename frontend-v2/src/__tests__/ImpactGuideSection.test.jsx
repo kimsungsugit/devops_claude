@@ -1601,7 +1601,7 @@ describe('ImpactGuideSection', () => {
     await user.click(await screen.findByRole('button', { name: '상세' }));
     const dialog = await screen.findByRole('dialog');
     await waitFor(() => expect(within(dialog).getByText('원문 절단')).toBeInTheDocument());
-    expect(within(dialog).getByText(/원문이 절단/)).toBeInTheDocument();
+    expect(within(dialog).getByText(/크기 상한/)).toBeInTheDocument();   // #2: 절단 원인을 크기 상한으로 정직화
     expect(within(dialog).queryByText('파일영향')).not.toBeInTheDocument();   // fatten 아님
   });
 
@@ -1728,6 +1728,53 @@ describe('extractDiffElements (순수 함수)', () => {
     const many = Array.from({ length: 15 }, (_, i) => `-    g_Var${i} = 0;`).join('\n');
     const r = extractDiffElements('@@ -1,15 +1,0 @@ f(void)\n' + many);
     expect(r.changedGlobals.removed.length).toBe(15);
+  });
+});
+
+describe('extractDiffElements noSemanticChange (포맷/이동만 — 의미 변경 없음)', () => {
+  it('블록 이동(-/+ 동일)은 true', () => {
+    const fd = [
+      '@@ -10,4 +50,4 @@ void host(void)',
+      '-static void s_Foo( U8 a );',
+      '-{',
+      '-    do_work(a);',
+      '-}',
+      '+static void s_Foo( U8 a );',
+      '+{',
+      '+    do_work(a);',
+      '+}',
+    ].join('\n');
+    expect(extractDiffElements(fd).noSemanticChange).toBe(true);
+  });
+
+  it('단일 선언 이동(-proto; +proto; 동일)은 true', () => {
+    const fd = '@@ -5,1 +9,1 @@\n-static void s_Calc( S16 *p );\n+static void s_Calc( S16 *p );';
+    expect(extractDiffElements(fd).noSemanticChange).toBe(true);
+  });
+
+  it('재들여쓰기(공백만 다름)는 true(trim 정규화)', () => {
+    const fd = '@@ -1,2 +1,2 @@ void f(void)\n-    x = 1;\n+  x = 1;';
+    expect(extractDiffElements(fd).noSemanticChange).toBe(true);
+  });
+
+  it('실 로직 변경은 false', () => {
+    const fd = '@@ -1,1 +1,1 @@ void f(void)\n-    return a;\n+    return a + 1;';
+    expect(extractDiffElements(fd).noSemanticChange).toBe(false);
+  });
+
+  it('문장 재정렬(멀티셋 동일·순서 다름)은 false(오탐 방지)', () => {
+    const fd = '@@ -1,2 +1,2 @@ void f(void)\n-    a = 1;\n-    b = a;\n+    b = a;\n+    a = 1;';
+    expect(extractDiffElements(fd).noSemanticChange).toBe(false);
+  });
+
+  it('truncated diff(…줄 생략)는 판정 보류(false)', () => {
+    const fd = '@@ -1,1 +1,1 @@ void f(void)\n-    x = 1;\n+    x = 1;\n… (+40줄 생략)';
+    expect(extractDiffElements(fd).noSemanticChange).toBe(false);
+  });
+
+  it('추가만(신규)·삭제만은 false', () => {
+    expect(extractDiffElements('@@ -1,0 +1,2 @@\n+void n(void)\n+{}').noSemanticChange).toBe(false);
+    expect(extractDiffElements('@@ -1,2 +1,0 @@\n-void o(void)\n-{}').noSemanticChange).toBe(false);
   });
 });
 
