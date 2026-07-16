@@ -364,6 +364,72 @@ def test_diff_has_function_context():
     assert diff_has_function_context("") is False
 
 
+def test_classify_excludes_header_over_attribution():
+    """@@ 헤더 과다귀속 정정 — 헤더는 prev_fn(주석/이웃 함수)인데 실제 변경이 real_fn 정의면,
+    본문 미변경 prev_fn은 changed에서 제외되고 real_fn만 남는다(허위 evidence='line' 방지)."""
+    from workflow.delta_update import classify_changed_functions_from_diff_text
+    diff = "\n".join([
+        "Index: sources/mod.c",
+        "===================================================================",
+        "--- sources/mod.c\t(revision 100)",
+        "+++ sources/mod.c\t(revision 150)",
+        # @@ 헤더는 prev_fn을 가리키나 hunk 본문 변경은 real_fn(주석 블록 아래 이웃 함수)
+        "@@ -1200,6 +1200,6 @@ U8 prev_fn( U16 addr )",
+        "     doc_ctx();",
+        "-U8 real_fn( U16 a )",
+        "-{ return a; }",
+        "+U8 real_fn( U16 a )",
+        "+{ return a + 1; }",
+        "",
+    ])
+    types, _ = classify_changed_functions_from_diff_text(diff)
+    keys = {k.lower() for k in types}
+    assert "real_fn" in keys       # 실제 변경 함수는 유지
+    assert "prev_fn" not in keys   # 헤더-only 과다귀속은 제외
+
+
+def test_classify_keeps_enclosing_fn_on_nested_decl_in_narrowable():
+    """deep-review S3 회귀 — narrowable 파일에서 함수 본문에 들여쓴 선언성 라인(nested extern)이
+    단독 변경돼도 감싸는 실함수가 오제거되지 않는다(과다귀속 정정은 fatten에만 적용)."""
+    from workflow.delta_update import classify_changed_functions_from_diff_text
+    diff = "\n".join([
+        "Index: src/app.c",
+        "===================================================================",
+        "--- src/app.c\t(revision 100)",
+        "+++ src/app.c\t(revision 150)",
+        # 순수 함수-본문 편집(컬럼0/전처리 변경 없음) → narrowable. 변경=본문 내 들여쓴 extern 선언.
+        "@@ -10,4 +10,5 @@ void EnclosingFn( void )",
+        "     do_a();",
+        "+    extern U8 legacy_helper( U8 x );",
+        "     do_b();",
+        " }",
+        "",
+    ])
+    types, lcf = classify_changed_functions_from_diff_text(diff)
+    keys = {k.lower() for k in types}
+    assert any("app.c" in p for p in lcf)   # narrowable(line-classified) 파일 확인
+    assert "enclosingfn" in keys            # 감싸는 실함수 유지(under-report 방지)
+
+
+def test_classify_keeps_header_fnptr_proto():
+    """deep-review S2 회귀 — 헤더의 함수포인터-반환 프로토타입 변경이 오제거되지 않는다
+    (_FUNC_DECL_LINE 미매치 → func_proto_names로 실변경 증거 보강)."""
+    from workflow.delta_update import classify_changed_functions_from_diff_text
+    diff = "\n".join([
+        "Index: inc/sched.h",
+        "===================================================================",
+        "--- inc/sched.h\t(revision 100)",
+        "+++ inc/sched.h\t(revision 150)",
+        "@@ -5,3 +5,3 @@",
+        "-void (*Sched_GetCb( U8 id ))( void );",
+        "+void (*Sched_GetCb( U16 id ))( void );",
+        "",
+    ])
+    types, _ = classify_changed_functions_from_diff_text(diff)
+    keys = {k.lower() for k in types}
+    assert "sched_getcb" in keys            # 헤더 fnptr proto 유지(under-report 방지)
+
+
 def test_classify_from_diff_text_initializer_context_not_narrowable():
     """W1 하드닝 — `= MACRO(` 초기화자 값-전용 편집의 hunk 컨텍스트가 함수로 오귀속돼도
     narrowable=False(파일스코프 데이터 리더 함수 누락 방지). 함수 시그니처엔 '='가 없어 무영향."""
