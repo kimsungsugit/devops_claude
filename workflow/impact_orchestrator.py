@@ -2160,6 +2160,36 @@ def run_impact_update(
             except Exception as _fdx_exc:  # noqa: BLE001 — 폴백 원문 실패는 분석을 막지 않음
                 logger.debug("file_diffs extraction failed: %s", _fdx_exc)
 
+        # 포맷/이동만(의미 변경 없음) 함수 직접변경→파일영향 강등(사용자 요청 A안): 본문 diff가 코드
+        # 이동/공백/포맷만인 함수는 실제로 안 바뀌었으므로 evidence를 line→file_fatten으로 재분류하고
+        # 자체 diff를 드롭한다(→ '파일영향' 표시, 기존 '파일영향 숨기기' 필터로 숨김·#3 파일폴백으로 원문
+        # 확인). **changed_types(impact 집합)·ASIL 불변 = under-report 0(안전측).** truncated diff는
+        # is_noop가 보수적으로 False라 실변경 함수를 절대 강등하지 않는다.
+        try:
+            from workflow.delta_update import is_noop_function_diff
+            _noop_n = 0
+            for _fn, _txt in list(function_diffs.items()):
+                if _fn_evidence.get(_fn) == "line" and is_noop_function_diff(_txt):
+                    _fn_evidence[_fn] = "file_fatten"
+                    function_diffs.pop(_fn, None)
+                    _noop_n += 1
+            if _noop_n:
+                warnings.append(
+                    f"포맷/이동만(의미 변경 없음) 함수 {_noop_n}개를 '직접 변경'→'파일영향'으로 재분류했습니다 "
+                    "(impact 집합·ASIL 불변, '파일영향 숨기기'로 숨김 가능)."
+                )
+                # granularity 재계산(deep-review W1): 강등이 line→file_fatten을 늘렸으므로 파생 스칼라
+                # _classification_granularity를 다시 산출한다(혼재=mixed honesty 불변식 유지 — 위 1925~1930
+                # 로직과 동형, sibling 테스트와 정합). signature_distinguished는 이 값 파생이라 자동 정합.
+                _fatten_n2 = sum(1 for _v in _fn_evidence.values() if _v == "file_fatten")
+                _line_n2 = sum(1 for _v in _fn_evidence.values() if _v == "line")
+                if _fatten_n2 and _line_n2:
+                    _classification_granularity = "mixed"
+                elif _fatten_n2 and not _line_n2:
+                    _classification_granularity = "file"
+        except Exception as _noop_exc:  # noqa: BLE001 — 강등 실패는 분석을 막지 않음
+            logger.debug("format-only downgrade skipped: %s", _noop_exc)
+
         # ── ISO 26262 증거 보강: 함수별 ASIL/메타 + ASIL 차등 + 회귀시험 선정 + 커버리지 타깃 ──
         def _asil_of(_fn: str) -> str:
             _a = str((by_name.get(_fn) or {}).get("asil") or "").strip().upper()

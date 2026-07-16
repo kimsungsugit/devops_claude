@@ -294,3 +294,15 @@ def test_extract_file_diffs_empty_and_no_index():
     from workflow.delta_update import extract_file_diffs
     assert extract_file_diffs("") == {}
     assert extract_file_diffs("@@ -1,1 +1,1 @@ f(void)\n-a\n+b") == {}
+
+
+def test_is_noop_function_diff():
+    """포맷/이동만(의미 변경 없음) 판정 — 프론트 noSemanticChange 동형(순서 보존·trim)."""
+    from workflow.delta_update import is_noop_function_diff
+    assert is_noop_function_diff("@@ -1,2 +9,2 @@ f(void)\n-    a();\n-    b();\n+    a();\n+    b();") is True   # 블록 이동
+    assert is_noop_function_diff("@@ -1,1 +1,1 @@ f(void)\n-    x = 1;\n+  x = 1;") is True                     # 재들여쓰기
+    assert is_noop_function_diff("@@ -1,1 +1,1 @@ f(void)\n-    return a;\n+    return a + 1;") is False        # 실 로직
+    assert is_noop_function_diff("@@ -1,2 +1,2 @@ f(void)\n-    a = 1;\n-    b = a;\n+    b = a;\n+    a = 1;") is False  # 재정렬
+    assert is_noop_function_diff("@@ -1,1 +1,1 @@ f(void)\n-    x = 1;\n+    x = 1;\n… (+40줄 생략)") is False    # truncated 보류
+    assert is_noop_function_diff("@@ -1,1 +1,1 @@ f(void)\n     ctx();") is False                              # +/- 없음
+    assert is_noop_function_diff("") is False

@@ -546,6 +546,29 @@ def extract_function_diffs(
     return out
 
 
+def is_noop_function_diff(diff_text: str) -> bool:
+    """함수 본문 diff가 코드 이동/공백/포맷만(의미·로직 변경 없음)인지 판정.
+
+    `-`/`+` 본문 라인을 **순서 보존 + trim 정규화**로 비교해 완전히 같으면 True(블록 이동·재들여쓰기).
+    프론트 `extractDiffElements.noSemanticChange`와 동형. **⚠ 순서 비교(멀티셋 아님)** 라 문장 재정렬
+    (`a=1;b=a;`→`b=a;a=1;`)은 순서가 달라 False(실변경 유지) = 오탐 방지. truncated diff(`… (+N줄
+    생략)`)는 안 보이는 부분에 실변경 가능 → 판정 보류(False, 보수적). +/- 라인이 없으면 False.
+    """
+    minus: List[str] = []
+    plus: List[str] = []
+    for raw in str(diff_text).split("\n"):
+        if not raw or raw.startswith("@@ ") or raw.startswith("+++") or raw.startswith("---"):
+            continue
+        if "줄 생략)" in raw:
+            return False
+        c = raw[0]
+        if c == "+":
+            plus.append(raw[1:].strip())
+        elif c == "-":
+            minus.append(raw[1:].strip())
+    return bool(minus) and minus == plus
+
+
 def extract_file_diffs(
     combined_diff: str,
     *,

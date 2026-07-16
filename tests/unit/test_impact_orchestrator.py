@@ -176,7 +176,7 @@ def test_run_impact_update_classification_granularity_line_for_local_diff(tmp_pa
     assert result["classification"]["signature_distinguished"] is True
 
 
-def _setup_precise_env(tmp_path, monkeypatch, *, blob):
+def _setup_precise_env(tmp_path, monkeypatch, *, blob, by_name=None):
     """A 정밀분류 테스트 공통 셋업 — 실 editType classify 사용(subprocess 없음), svn diff는 canned."""
     from backend.schemas import ScmRegisterRequest
     from backend.services import scm_registry, local_service
@@ -190,14 +190,15 @@ def _setup_precise_env(tmp_path, monkeypatch, *, blob):
     scm_registry.register_entry(ScmRegisterRequest(
         id="kj", name="KJ", scm_type="svn",
         scm_url="https://svn.example/repo/trunk", source_root=str(tmp_path / "src")))
+    _default_by_name = {
+        "foo_run": {"name": "Foo_Run", "module_name": "m", "file": "sources/pure.c"},
+        "foo_extra": {"name": "Foo_Extra", "module_name": "m", "file": "sources/pure.c"},
+        "bar_init": {"name": "Bar_Init", "module_name": "n", "file": "sources/modvar.c"},
+        "bar_other": {"name": "Bar_Other", "module_name": "n", "file": "sources/modvar.c"},
+    }
     monkeypatch.setattr(impact_orchestrator, "_load_source_sections", lambda _sr: {
         "call_map": {},
-        "function_details_by_name": {
-            "foo_run": {"name": "Foo_Run", "module_name": "m", "file": "sources/pure.c"},
-            "foo_extra": {"name": "Foo_Extra", "module_name": "m", "file": "sources/pure.c"},
-            "bar_init": {"name": "Bar_Init", "module_name": "n", "file": "sources/modvar.c"},
-            "bar_other": {"name": "Bar_Other", "module_name": "n", "file": "sources/modvar.c"},
-        },
+        "function_details_by_name": by_name if by_name is not None else _default_by_name,
     })
     calls = {"n": 0}
 
@@ -259,6 +260,44 @@ def test_run_impact_update_precise_narrowing_line_classified(tmp_path, monkeypat
     assert result["classification"]["narrow_removed_count"] == 1
     # fetch-once: svn_diff_unified 정확히 1회(분류+시그니처 공유)
     assert calls["n"] == 1
+
+
+def test_run_impact_update_format_only_downgraded_to_file_fatten(tmp_path, monkeypatch):
+    """포맷/이동만(의미 변경 없음) 함수는 직접변경(line)→파일영향(file_fatten)으로 강등되고 자체
+    diff가 드롭된다. changed_types(impact 집합)는 불변 = under-report 0(안전)."""
+    blob = "\n".join([
+        "Index: sources/fmt.c",
+        "@@ -10,3 +50,3 @@ Fmt_Fn(void)",   # 블록 이동: -/+ 동일 = 포맷/이동만
+        "-    do_a();",
+        "-    do_b();",
+        "+    do_a();",
+        "+    do_b();",
+        "Index: sources/real.c",
+        "@@ -5,2 +5,2 @@ Real_Fn(void)",     # 실 로직 변경(대조군)
+        "-    x = 1;",
+        "+    x = 2;",
+        "",
+    ])
+    by_name = {
+        "fmt_fn": {"name": "Fmt_Fn", "module_name": "m", "file": "sources/fmt.c"},
+        "real_fn": {"name": "Real_Fn", "module_name": "n", "file": "sources/real.c"},
+    }
+    orch, _ = _setup_precise_env(tmp_path, monkeypatch, blob=blob, by_name=by_name)
+    result = orch.run_impact_update(_precise_trigger(tmp_path, ["sources/fmt.c", "sources/real.c"]))
+    ct = result["changed_function_types"]
+    fm = result["function_meta"]
+    fd = result["function_diffs"]
+    # 포맷/이동만 → file_fatten 강등 + function_diffs drop, 단 changed_types엔 유지(impact 불변)
+    assert fm["fmt_fn"]["evidence"] == "file_fatten"
+    assert "fmt_fn" not in fd
+    assert "fmt_fn" in ct
+    # 실 변경(대조군) → line 유지 + diff 보유
+    assert fm["real_fn"]["evidence"] == "line"
+    assert "real_fn" in fd
+    assert "x = 2" in fd["real_fn"]
+    # deep-review W1: 강등 후 line+fatten 혼재 → granularity 'mixed'(honesty 불변식), signature_distinguished False
+    assert result["classification"]["granularity"] == "mixed"
+    assert result["classification"]["signature_distinguished"] is False
 
 
 def test_run_impact_update_precise_fallback_on_bare_hunk(tmp_path, monkeypatch):
