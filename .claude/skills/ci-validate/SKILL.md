@@ -1,6 +1,6 @@
 ---
 name: ci-validate
-description: CI/CD 파이프라인(GitLab CI, GitHub Actions)을 검증하고 253개 pytest 테스트를 실행합니다.
+description: CI/CD 파이프라인(GitLab CI, GitHub Actions) 정의를 검증하고 pytest 스위트를 실행합니다.
 trigger: CI 파이프라인, 테스트 실행, pytest, 빌드 검증, GitLab CI, GitHub Actions 요청 시
 ---
 
@@ -13,7 +13,7 @@ CI/CD 파이프라인과 전체 테스트 스위트를 실행/검증합니다.
 ### GitLab CI (`.gitlab-ci.yml`)
 - PowerShell executor
 - Syntax check → Unit tests
-- 253개 테스트 케이스, 15분 타임아웃
+- 현재 스위트 전량, 15분 타임아웃 (개수를 고정 기재하지 말 것 — 실제 개수는 `pytest tests/unit/ --collect-only -q` 로 확인. 과거 "253개" 표기가 실제와 14배 어긋난 채 방치됐다)
 - test_impact_jobs 스킵 (hanging 방지)
 
 ### GitHub Actions (`.github/workflows/ci.yml`)
@@ -60,7 +60,7 @@ pytest tests/unit/ --cov=report_gen --cov=workflow --cov-report=term-missing
 - 실행일: {{date}}
 
 ## 테스트 결과
-- 전체: 253개
+- 전체: {{n}}개
 - 성공: {{n}}개
 - 실패: {{n}}개
 - 스킵: {{n}}개

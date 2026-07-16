@@ -40,11 +40,12 @@ trigger: 버그, 오류, 에러, 안됨, 실패, 느림, hanging, 크래시, 트
 - **진단**: `pytest tests/unit/test_impact_jobs.py -v --timeout=30`
 
 ### 2. Impact orchestrator RuntimeError
-- **파일**: `workflow/impact_orchestrator.py`
-- `line 452`: "UDS regeneration failed: {stderr}"
-- `line 464`: "SUTS regeneration requires source_root"
-- `line 508`: "SITS regeneration requires source_root"
-- `line 550`: "unsupported AUTO target: {target}"
+- **파일**: `workflow/impact_orchestrator.py` — 아래 메시지로 `grep -n` 해서 찾을 것
+  (절대 라인번호는 적지 말 것: 과거 "line 452" 표기가 실제 1281로 830줄 밀린 채 방치됐다)
+- `"UDS regeneration failed: {err}"`
+- `"SUTS regeneration requires source_root"`
+- `"SITS regeneration requires source_root"`
+- `"unsupported AUTO target: {target}"`
 - 모두 subprocess.run() 3600초 timeout
 
 ### 3. Lock 충돌
@@ -62,8 +63,10 @@ trigger: 버그, 오류, 에러, 안됨, 실패, 느림, hanging, 크래시, 트
 ```
 
 ### 5. FastAPI 글로벌 예외 핸들러
-- **파일**: `backend/main.py` (line 74-92)
-- 모든 미처리 예외를 500으로 반환, detail 300자 truncate
+- **파일**: `backend/error_handler.py` — `global_exception_handler` / `http_exception_handler`
+  (`backend/main.py`의 `app.add_exception_handler(...)` 로 등록. 과거 이 문서는 핸들러가
+  main.py 본문 74~92행에 있다고 적어뒀지만 이미 별도 모듈로 분리됐다)
+- 모든 미처리 예외를 500으로 반환, detail truncate
 - 로거: `_api_logger.error()`
 
 ### 6. Impact Router HTTP 에러

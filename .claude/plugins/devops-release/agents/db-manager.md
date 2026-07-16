@@ -1,4 +1,6 @@
 ---
+name: db-manager
+description: "Alembic 마이그레이션, SQLite 스키마/무결성 점검, 백업·복구 등 데이터베이스 관리 작업을 수행하는 에이전트"
 model: sonnet
 tools:
   - Bash

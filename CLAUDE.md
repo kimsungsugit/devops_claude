@@ -54,7 +54,7 @@ ASIL 등급은 다음 순서로 판별한다:
 
 ## Team Agents (에이전트 협업 구조)
 
-핵심 에이전트(coder, architect)는 `model: opus`, 나머지는 `model: sonnet`. 스킬은 에이전트에 위임하여 실행.
+핵심 에이전트(coder, architect, deep-reviewer)는 `model: opus`, 나머지는 `model: sonnet`. 스킬은 에이전트에 위임하여 실행.
 
 | 에이전트 | 모델 | 역할 | 호출 시점 |
 |---------|------|------|----------|
@@ -65,7 +65,7 @@ ASIL 등급은 다음 순서로 판별한다:
 | **coder** | **opus** | Python/React/C 코드 구현 | Gate 3 (구현) |
 | **tester** | sonnet | 테스트 작성/실행, ISO 26262 커버리지 + MCP 리포트 접근 | Gate 4 (검증) |
 | **reviewer** | sonnet | 보안/성능/MISRA-C/ASIL 리뷰 + MCP 코드검색/리포트 접근 | Gate 5 (light/standard depth) |
-| **deep-reviewer** | **opus** | deep depth 전용 비판 리뷰 (X1~X8 시나리오/timeline/트리 의무) | Gate 5 (deep depth — 100줄+/5파일+/키워드/ASIL) |
+| **deep-reviewer** | **opus** | deep depth 전용 비판 리뷰 (X1~X9 시나리오/timeline/트리 의무) | Gate 5 (deep depth — 100줄+/5파일+/키워드/ASIL) |
 | **documenter** | sonnet | 계획서, 변경내역, 결과보고서 작성 + Bash 실행 | Gate 6 (문서화) |
 
 ### 에이전트 ↔ 스킬 관계
@@ -110,11 +110,27 @@ python -m pytest tests/ -v --cov=backend --cov=workflow --cov=report_gen --cov-r
 - `/doc-pipeline [all|uds|sts|suts|sits|delta]` — **문서 생성**: UDS→STS→SUTS→SITS 순차 자동 생성
 
 ## Individual Skills (개별 도구)
-- `/deploy` — 배포만
-- `/health-check` — 상태 점검
-- `/impact` — 영향도 분석
-- `/devops-release:doc-gen` — 단일 문서 생성 (플러그인)
-- `/devops-release:review` — 코드 리뷰 (플러그인)
+
+전체 목록은 `.claude/skills/*/SKILL.md` (한 단계만 스캔 — 중첩 디렉터리는 discovery 안 됨).
+
+| 스킬 | 용도 |
+|------|------|
+| `/deploy` | 배포 실행·상태 확인만 (파이프라인 트리거) |
+| `/deploy-release` | Docker 빌드 + CI 검증 + 버전 태깅까지 릴리스 풀체인 |
+| `/health-check` | 백엔드(:9000)/프론트(:5174) 상태 점검 |
+| `/impact` | 백엔드 API 경유 영향도 분석 (SVN/Git 변경분 → 영향 문서) |
+| `/impact-analysis` | 로컬 오케스트레이터 dry-run — 문서 재생성 **판정**까지 |
+| `/uds-pipeline` | UDS 단일 파이프라인 (C 파싱→AI→검증→DOCX) |
+| `/ci-validate` | CI/CD 파이프라인 정의 검증 + 테스트 스위트 실행 |
+| `/debug-diagnose` | 버그·성능 이슈 체계적 진단 |
+| `/report-quality` | 보고서 품질 검증·개선 |
+| `/ui-design-system` | 프론트 디자인 토큰/CSS 변수화 |
+| `/autodoc-generate` | AutoDoc — PPT/HTML/포털/API 문서 생성 |
+
+**플러그인 제공** (devops-release):
+- 스킬: `/devops-release:doc-gen` (단일 문서 생성), `/devops-release:review` (코드 리뷰)
+- 에이전트 5종: `ci-monitor`, `doc-quality`, `db-manager`, `performance-monitor`, `security-audit`
+  — 위 **Team Agents 표(프로젝트 에이전트 9종)와 별개**이며, 플러그인 활성화 시에만 존재
 
 ## MCP Tools (devops-release 서버)
 
@@ -139,10 +155,12 @@ python -m pytest tests/ -v --cov=backend --cov=workflow --cov=report_gen --cov-r
 ## Hooks (자동 품질 게이트)
 - **SessionStart**: `.env` 자동 생성 (.env.example → .env) + git hooks 자동 활성화 (`scripts/install_git_hooks.sh`) + settings 변경 정책 reminder
 - **PreToolUse**: C/H 파일 수정 시 ASIL C/D 태그 감지 → 경고
-- **PostToolUse**: 단일 dispatcher (`scripts/posttool_dispatch.py`) — Python syntax+ruff, JSX/TS ESLint, .md broken-link/heading-jump, workflow/report_gen 변경 시 관련 pytest
-- **PostToolBatch** (신규, 2026-05-11): 병렬 Write/Edit 일괄 종료 시 `scripts/posttoolbatch_report.py` — 변경 파일 집계 + 능동 보고 X1~X8 trigger 메시지를 메인 응답에 push. **단일 파일 turn은 silent** (PostToolUse가 이미 파일별 보고), 단 ASIL C/H는 단독이어도 hint 출력. ASIL 파일은 list 앞으로 정렬되어 truncation 시에도 누락되지 않음. 출력은 `ensure_ascii=False`로 한글 가독성 유지. **메인 에이전트의 능동 보고 의무는 그대로 유지** (hook은 보조 알림이며 대체 아님)
-- **Stop**: `scripts/quality_check.py` 단일 호출 (이전 `stop_check.py` fallback 사슬 제거됨)
+- **PostToolUse**: 단일 dispatcher (`scripts/posttool_dispatch.py`) — Python syntax+ruff, JSX/TS ESLint, .md broken-link/heading-jump, workflow/report_gen 변경 시 **대응 모듈 테스트**(`tests/unit/test_<모듈>.py`)
+- **PostToolBatch** (신규, 2026-05-11): 병렬 Write/Edit 일괄 종료 시 `scripts/posttoolbatch_report.py` — 변경 파일 집계 + 능동 보고 X1~X9 trigger 메시지를 메인 응답에 push. **단일 파일 turn은 silent** (PostToolUse가 이미 파일별 보고), 단 ASIL C/H는 단독이어도 hint 출력. ASIL 파일은 list 앞으로 정렬되어 truncation 시에도 누락되지 않음. 출력은 `ensure_ascii=False`로 한글 가독성 유지. **메인 에이전트의 능동 보고 의무는 그대로 유지** (hook은 보조 알림이며 대체 아님)
+- **Stop**: `scripts/quality_check.py` 단일 호출 (이전 `stop_check.py` fallback 사슬 제거됨). **advisory 게이트** — diff 해시 캐시(동일 트리 재실행 skip), pytest는 변경 모듈 스코프, 전역 예산(`QUALITY_CHECK_BUDGET`, 기본 240s) 내 자체 종료. 전체 회귀(`tests/unit/` ≈25분)는 여기서 안 돌린다 → `--round 3` 또는 pre-commit 담당
 - **PreCompact**: git status + diff stat을 `.codex_tmp/precompact_context.json`에 저장 (출력은 schema 정합 `systemMessage` 형식)
+- **플러그인 훅** (devops-release — 프로젝트 훅과 **병합**되어 함께 발화): PreToolUse `Bash` → `scripts/validate-api-call.sh` (백엔드 :9000 미기동 시 경고), PostToolUse `Edit|Write` → `scripts/check-secrets.sh`
+- **훅 인터프리터 계약**: 훅은 정리된 PATH에서 떠서 맨 `python`이 mingw python(ruff/bcrypt 없음)으로 잡힌다. 그래서 훅 스크립트는 `scripts/_hook_env.py`의 `project_py()`로 프로젝트 venv를 명시 해석하고, 도구가 없으면 **DISABLED로 명시 보고**한다(빈 출력을 "clean/PASS"로 읽던 fake-green 차단). bash 쪽 동일 우회는 `.githooks/pre-commit`
 
 ## Gate 간 데이터 전달 프로토콜
 `/start-work` 실행 시 각 Gate에서 TaskCreate description에 구조화된 데이터를 포함:

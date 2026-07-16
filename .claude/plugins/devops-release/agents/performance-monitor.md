@@ -1,4 +1,6 @@
 ---
+name: performance-monitor
+description: "API 응답시간(p50/p95/p99), Prometheus 메트릭, 메모리/CPU를 측정해 병목을 식별하는 성능 모니터링 에이전트"
 model: sonnet
 tools:
   - Bash

@@ -1,6 +1,6 @@
 ---
 name: deploy
-description: "CI/CD 파이프라인을 실행하고 배포 상태를 확인합니다."
+description: "이미 빌드된 것을 **배포하고 상태만 확인**합니다 — 파이프라인 트리거 + 헬스 확인. Docker 이미지 빌드나 버전 태깅 같은 릴리스 준비까지 필요하면 `/deploy-release`를 쓰세요."
 ---
 
 # 배포 스킬

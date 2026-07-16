@@ -1,7 +1,7 @@
 ---
 name: impact-analysis
-description: C 소스 변경 감지 → 영향도 분석 → 문서 재생성 판정까지의 임팩트 분석 워크플로우를 실행합니다.
-trigger: 소스 변경 영향도, 임팩트 분석, 변경 감지, 문서 재생성 판정 요청 시
+description: "로컬에서 impact_orchestrator의 ACTION_MATRIX로 C 함수 변경을 분류(SIGNATURE/BODY/NEW/DELETE/HEADER)하고 **문서 재생성 여부를 판정**합니다. 백엔드 없이 동작하는 dry-run 성격. 서버에 실제 분석 잡을 걸어 진행률을 보려면 `/impact`를 쓰세요."
+trigger: 재생성 판정, ACTION_MATRIX, 함수 변경 유형 분류, 로컬 dry-run 영향도 요청 시
 ---
 
 # /impact-analysis 스킬

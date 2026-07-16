@@ -1,7 +1,7 @@
 ---
 name: deploy-release
-description: Docker 빌드, CI/CD 파이프라인, 버전 태깅, 릴리스 준비를 수행합니다.
-trigger: 배포, 릴리스, Docker, 버전, 태깅, CI/CD 파이프라인 실행 요청 시
+description: "**릴리스 풀체인** — 테스트 검증 → Docker 이미지 빌드 → 버전 태깅 → 배포까지 한 번에. 새 버전을 실제로 내보낼 때 씁니다. 빌드/태깅 없이 배포 실행·상태 확인만 하려면 `/deploy`를 쓰세요."
+trigger: 릴리스, 새 버전 배포, Docker 이미지 빌드, 버전 태깅 요청 시
 ---
 
 # /deploy-release 스킬
@@ -63,7 +63,7 @@ gh run list --limit 5
 |------|------|------|
 
 ## 테스트
-- 통과: {{n}}/253
+- 통과: {{n}}/{{total}}
 
 ## 체크리스트
 - [ ] 항목별 통과 여부
