@@ -35,8 +35,13 @@ $ARGUMENTS 에 배포 대상(환경, 브랜치 등)이 들어옵니다.
 ### STEP 1: 사전 검증
 - `git status`로 미커밋 변경 확인
   - 미커밋 변경이 있으면: "경고: 커밋되지 않은 변경 N개 파일 있음. 배포는 마지막 커밋 기준으로 진행합니다." 출력 후 계속
-- `python -m pytest tests/unit/ -q --tb=short`로 테스트 실행
+- `.venv/Scripts/python.exe -m pytest tests/unit/ -q --tb=short`로 테스트 실행
+  (맨 `pytest`/`python` 금지 — mingw 라 bcrypt 부재로 **수집 에러 15건 / 0개 실행**된다.
+   `.claude/rules/autonomous-operation.md` 인터프리터 규칙 참조)
 - 테스트 실패 시 자동 수정 후 재실행 (최대 3회)
+  - ⚠ **고치기 전에 환경부터 의심할 것.** `errors during collection` 이나
+    `ModuleNotFoundError: bcrypt` 는 **코드 결함이 아니라 인터프리터 문제**다.
+    이걸 코드 문제로 오인하면 멀쩡한 코드를 3회 고치려 든다
 
 ### STEP 2: 배포 실행
 - GitHub:

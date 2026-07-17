@@ -13,7 +13,7 @@ CI/CD 파이프라인과 전체 테스트 스위트를 실행/검증합니다.
 ### GitLab CI (`.gitlab-ci.yml`)
 - PowerShell executor
 - Syntax check → Unit tests
-- 현재 스위트 전량, 15분 타임아웃 (개수를 고정 기재하지 말 것 — 실제 개수는 `pytest tests/unit/ --collect-only -q` 로 확인. 과거 "253개" 표기가 실제와 14배 어긋난 채 방치됐다)
+- 현재 스위트 전량, 15분 타임아웃 (개수를 고정 기재하지 말 것 — 실제 개수는 `.venv/Scripts/python.exe -m pytest tests/unit/ --collect-only -q` 로 확인. 과거 "253개" 표기가 실제와 14배 어긋난 채 방치됐다)
 - test_impact_jobs 스킵 (hanging 방지)
 
 ### GitHub Actions (`.github/workflows/ci.yml`)
@@ -24,20 +24,20 @@ CI/CD 파이프라인과 전체 테스트 스위트를 실행/검증합니다.
 ### 1. 로컬 테스트
 ```bash
 # 전체 단위 테스트
-pytest tests/unit/ -v --tb=short --timeout=60 2>&1 | tail -30
+.venv/Scripts/python.exe -m pytest tests/unit/ -v --tb=short --timeout=60 2>&1 | tail -30
 
 # 특정 모듈
-pytest tests/unit/test_impact_orchestrator.py -v
-pytest tests/unit/test_generators_sts.py -v
-pytest tests/unit/test_generators_suts.py -v
+.venv/Scripts/python.exe -m pytest tests/unit/test_impact_orchestrator.py -v
+.venv/Scripts/python.exe -m pytest tests/unit/test_generators_sts.py -v
+.venv/Scripts/python.exe -m pytest tests/unit/test_generators_suts.py -v
 ```
 
 ### 2. 문법 검사
 ```bash
 # Python 구문 오류 확인
-python -m py_compile backend/main.py
-python -m py_compile workflow/impact_orchestrator.py
-python -m py_compile report_gen/source_parser.py
+.venv/Scripts/python.exe -m py_compile backend/main.py
+.venv/Scripts/python.exe -m py_compile workflow/impact_orchestrator.py
+.venv/Scripts/python.exe -m py_compile report_gen/source_parser.py
 ```
 
 ### 3. CI 설정 검증
@@ -48,10 +48,10 @@ python -m py_compile report_gen/source_parser.py
 ### 4. 결과 분석
 ```bash
 # 실패 테스트만 추출
-pytest tests/unit/ -v --tb=line 2>&1 | grep "FAILED"
+.venv/Scripts/python.exe -m pytest tests/unit/ -v --tb=line 2>&1 | grep "FAILED"
 
 # 커버리지 (선택)
-pytest tests/unit/ --cov=report_gen --cov=workflow --cov-report=term-missing
+.venv/Scripts/python.exe -m pytest tests/unit/ --cov=report_gen --cov=workflow --cov-report=term-missing
 ```
 
 ## 출력

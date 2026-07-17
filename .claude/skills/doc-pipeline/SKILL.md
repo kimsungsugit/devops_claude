@@ -30,7 +30,10 @@ $ARGUMENTS 에 생성 옵션이 들어옵니다:
   ```
 - 서버 미실행 시 **자동 시작**:
   ```bash
-  cd backend && uvicorn main:app --port ${BACKEND_PORT:-9000} &
+  # canonical 인터프리터는 backend\.venv (scripts/start.bat:15-18 참조).
+  # 맨 uvicorn 은 mingw 것이라 bcrypt 미설치 → auth_service import 에서
+  # ModuleNotFoundError 로 앱 전체가 죽는다.
+  cd backend && .venv/Scripts/python.exe -m uvicorn main:app --port ${BACKEND_PORT:-9000} &
   ```
   5초 대기 후 재확인
 - 필수 경로 확인 (source_root, SRS, SDS)

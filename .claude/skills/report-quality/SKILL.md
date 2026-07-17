@@ -48,7 +48,7 @@ trigger: 보고서 품질, 리포트 개선, analysis_summary, 커버리지 정�
 ## 검증 방법
 ```bash
 # 테스트 실행
-pytest tests/unit/ -v --tb=short -k "report"
+.venv/Scripts/python.exe -m pytest tests/unit/ -v --tb=short -k "report"
 
 # analysis_summary 확인
 cat reports/analysis_summary.md | wc -l  # 목표: 100줄+

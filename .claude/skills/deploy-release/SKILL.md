@@ -32,7 +32,9 @@ curl -s http://localhost:${BACKEND_PORT:-9000}/api/health
 ### 로컬 개발 서버
 ```bash
 # Backend
-uvicorn backend.main:app --host 0.0.0.0 --port ${BACKEND_PORT:-9000} --reload
+# canonical = backend\.venv (scripts/start.bat:15-18). 맨 uvicorn 은 mingw 것이라
+# bcrypt 미설치 → auth_service import 에서 앱 전체가 죽는다.
+backend/.venv/Scripts/python.exe -m uvicorn backend.main:app --host 0.0.0.0 --port ${BACKEND_PORT:-9000} --reload
 
 # Frontend
 cd frontend-v2 && npm run build && npm run preview
@@ -41,7 +43,7 @@ cd frontend-v2 && npm run build && npm run preview
 ## 릴리스 체크리스트
 
 ### Pre-release
-- [ ] 모든 테스트 통과 (`pytest tests/unit/ -q --timeout=90` — 전체 약 4분 40초)
+- [ ] 모든 테스트 통과 (`.venv/Scripts/python.exe -m pytest tests/unit/ -q --timeout=90` — 전체 약 4분 40초)
 - [ ] Frontend 빌드 성공 (`cd frontend-v2 && npm run build`)
 - [ ] .env.example 최신화
 - [ ] CHANGELOG 갱신

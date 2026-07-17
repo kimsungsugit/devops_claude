@@ -52,7 +52,7 @@ trigger: |
 ### Gate 4: 검증
 7. **tester** 에이전트에 위임
    ```bash
-   python -m pytest tests/unit/ -q --tb=short
+   .venv/Scripts/python.exe -m pytest tests/unit/ -q --tb=short
    cd frontend-v2 && npm test  # 프론트엔드 변경 시
    ```
 8. ISO 26262: 안전 관련 테스트(ASIL C/D) 실패 시 자동 수정하지 않고 보고
@@ -63,7 +63,7 @@ UDS/STS/SUTS 생성 작업인 경우, 생성 완료 후 자동으로 품질을 �
 
 **평가 단계:**
 ```bash
-python -c "
+.venv/Scripts/python.exe -c "
 from workflow.quality.db import init_db, get_session
 from workflow.quality.models import GenerationRun, QualitySummary
 init_db()

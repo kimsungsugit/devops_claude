@@ -37,7 +37,7 @@ trigger: 버그, 오류, 에러, 안됨, 실패, 느림, hanging, 크래시, 트
 - **파일**: `tests/unit/test_impact_jobs.py`
 - **CI 처리**: GitHub Actions에서 `--ignore` 제외, GitLab은 15분 timeout
 - **원인**: 백그라운드 스레드 동기화, _wait_for_job() 10초 하드 timeout
-- **진단**: `pytest tests/unit/test_impact_jobs.py -v --timeout=30`
+- **진단**: `.venv/Scripts/python.exe -m pytest tests/unit/test_impact_jobs.py -v --timeout=30`
 
 ### 2. Impact orchestrator RuntimeError
 - **파일**: `workflow/impact_orchestrator.py` — 아래 메시지로 `grep -n` 해서 찾을 것
@@ -79,4 +79,4 @@ trigger: 버그, 오류, 에러, 안됨, 실패, 느림, hanging, 크래시, 트
 2. **분류**: 위 에러 코드/패턴과 매칭
 3. **범위 축소**: `git log --oneline -10 --name-only` + grep
 4. **재현**: 최소 재현 케이스 → pytest 단일 테스트
-5. **수정 → 검증**: `python -m pytest tests/unit/ -q --tb=short`
+5. **수정 → 검증**: `.venv/Scripts/python.exe -m pytest tests/unit/ -q --tb=short`
