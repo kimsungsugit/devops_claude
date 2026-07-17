@@ -1,11 +1,11 @@
 {
   "mcpServers": {
     "devops-release": {
-      "command": "C:/Users/kss11/AppData/Local/Programs/Python/Python312/python.exe",
+      "command": "${CLAUDE_PROJECT_DIR:-.}/.venv/Scripts/python.exe",
       "args": ["-m", "backend.mcp.stdio_server"],
-      "cwd": "D:/Project/devops/Release_claude",
+      "cwd": "${CLAUDE_PROJECT_DIR:-.}",
       "env": {
-        "PYTHONPATH": "D:/Project/devops/Release_claude"
+        "PYTHONPATH": "${CLAUDE_PROJECT_DIR:-.}"
       }
     },
     "playwright": {

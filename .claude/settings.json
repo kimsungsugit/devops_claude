@@ -142,7 +142,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python -c \"import sys,json,re; d=json.load(sys.stdin); f=d.get('tool_input',{}).get('file_path',''); warn=''; exts=('.c','.h'); do_check=any(f.endswith(e) for e in exts); content=open(f,'r',encoding='utf-8',errors='ignore').read() if do_check and __import__('os').path.isfile(f) else ''; asil=re.search(r'@asil\\s+(C|D)',content,re.IGNORECASE) if content else None; warn=f'WARNING: ASIL {asil.group(1)} file — reviewer approval required before modifying: {f}' if asil else ''; print(json.dumps({'hookSpecificOutput':{'hookEventName':'PreToolUse','additionalContext':warn}})) if warn else None\" 2>/dev/null || true",
+            "command": "python scripts/pretool_asil_check.py 2>/dev/null || true",
             "timeout": 5,
             "statusMessage": "ASIL safety check..."
           }
@@ -167,7 +167,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python -c \"import sys,json,subprocess,os; status=subprocess.run(['git','status','--porcelain'],capture_output=True,text=True).stdout[:500]; diff_stat=subprocess.run(['git','diff','--stat'],capture_output=True,text=True).stdout[:500]; os.makedirs('.codex_tmp',exist_ok=True); open('.codex_tmp/precompact_context.json','w').write(json.dumps({'git_status':status,'git_diff_stat':diff_stat},ensure_ascii=False)); print(json.dumps({'systemMessage':'PreCompact: preserved git status + diff stat to .codex_tmp/precompact_context.json. Changed: '+status[:150]}))\" 2>/dev/null || echo '{\"systemMessage\":\"PreCompact: preserve task progress, file paths, error context, test results, MCP patterns\"}'",
+            "command": "python scripts/precompact_context.py 2>/dev/null || echo '{\"systemMessage\":\"PreCompact: preserve task progress, file paths, error context, test results, MCP patterns\"}'",
+            "timeout": 15,
             "statusMessage": "Preserving context to file..."
           }
         ]
