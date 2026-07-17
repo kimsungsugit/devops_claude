@@ -1656,8 +1656,11 @@ def generate_uds_docx(
     notes = _apply_uds_rules(notes_text, "notes")
     software_unit_design = payload.get("software_unit_design", "") or ""
     detailed_doc = _ai_document_text(ai_sections)
-    unit_structure = payload.get("unit_structure", "") or ""
-    global_data = payload.get("global_data", "") or ""
+    # NOTE: payload["unit_structure"] / payload["global_data"] (파서가 만드는 **텍스트**)는
+    # 여기서 의도적으로 쓰지 않는다 — 두 섹션은 텍스트가 아니라 구조화 데이터로 렌더된다:
+    #   "unit structure" → _render_unit_structure_image(interface/internal functions) 다이어그램
+    #   "global data"    → payload["global_vars"] 5열 테이블 (위 KEY_MOD_GLOBALS 주석 참조)
+    # 그래서 아래 섹션 분기가 `pass` 다. 텍스트를 다시 배선하면 같은 내용이 중복 출력된다.
     interface_functions = payload.get("interface_functions", "") or ""
     internal_functions = payload.get("internal_functions", "") or ""
     function_table_rows = payload.get("function_table_rows", []) or []
@@ -2381,13 +2384,6 @@ def generate_uds_docx(
         template_section_map = _extract_template_section_map(doc)
         template_section_block_map = _extract_template_section_block_map(doc)
         _clear_docx_body(doc)
-        first_heading = ""
-        for kind, payload_block in blocks:
-            if kind == "heading":
-                first_heading = str(payload_block[1]).strip()
-                break
-        if False:
-            pass
         has_contents_marker = False
         skip_table_idx = -1
         for kind, block in blocks:
@@ -2402,7 +2398,6 @@ def generate_uds_docx(
             doc.add_heading("Contents", level=2)
             _add_docx_toc(doc)
             toc_inserted = True
-        skip_next_table = False
         heading_stack: List[str] = []
         module_funcs: Dict[str, Dict[str, List[str]]] = {}
         interface_queue: List[Dict[str, Any]] = []
@@ -3077,6 +3072,11 @@ def generate_uds_docx(
                         except Exception as e:
                             _logger.warning("Failed to insert structure diagram: %s", e)
                             doc.add_paragraph("[Structure Diagram not available]")
+                # 아래 3개는 **의도적 no-op**. 헤딩 아래 본문은 텍스트가 아니라
+                # 구조화 데이터로 렌더되므로 여기서 또 쓰면 중복 출력된다:
+                #   global data        → payload["global_vars"] 5열 테이블
+                #   interface/internal → "unit structure" 다이어그램 + 함수 정보 테이블
+                # (payload["global_data"] / ["unit_structure"] 텍스트를 여기 배선하지 말 것)
                 elif key == "global data":
                     pass
                 elif key == "interface functions":
