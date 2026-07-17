@@ -127,7 +127,7 @@ while round <= MAX_ROUNDS:
     
     2. 종합 품질 검사 실행:
        python scripts/quality_check.py --round {round} --json
-       → JSON에서 counts.critical 읽기
+       → JSON에서 counts.critical **과 verified/not_run** 읽기
     
     3. 이슈 분류 및 수정:
        - Critical: coder에게 수정 위임 → 다음 라운드 진입
@@ -136,9 +136,17 @@ while round <= MAX_ROUNDS:
     4. 진행/정체 판정:
        current_critical = result["counts"]["critical"]
        
+       # ⚠ critical==0 은 "검증했고 깨끗함"이 아니라 "Critical로 분류된 게 없음"일 뿐이다.
+       #    도구 부재(DISABLED)·타임아웃(TIMEOUT)·대응 테스트 없음(no_module_tests)·
+       #    예산 초과(budget_exceeded)는 전부 Critical이 아니어서, 아무것도 안 돌렸는데도
+       #    critical==0 이 나온다. verified=False 면 그 사실을 사용자에게 **명시 보고**하고
+       #    "테스트 통과"라고 쓰지 말 것.
+       if not result.get("verified", True):
+           report(f"⚠ 미검증 항목: {result.get('not_run')} — 이 라운드는 회귀를 확인하지 못했다")
+       
        if current_critical == 0:
            if round >= MIN_ROUNDS:
-               break  # 정상 종료 → Gate 6 진행
+               break  # 정상 종료 → Gate 6 진행 (단, verified=False면 위 경고를 보고에 포함)
            # MIN_ROUNDS 미만이면 계속 (플레이키 탐지)
        
        elif prev_critical is not None:

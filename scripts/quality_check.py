@@ -1,18 +1,37 @@
-"""Comprehensive quality check — runs after code changes.
+"""Comprehensive quality check — runs after code changes (Stop 훅).
 
 Checks:
 1. Python syntax (py_compile)
 2. Ruff lint
-3. pytest (unit tests)
+3. pytest — 변경 모듈에 대응하는 test_<모듈>.py 만 (--round 3 은 전체 스위트)
 4. Frontend build (vite)
 5. Frontend tests (vitest)
 6. Code pattern issues (hardcoded values, missing null guards, etc.)
+
+이 게이트는 **advisory**다. 전체 회귀(tests/unit/ = 실측 3486 tests / 약 1480s)는
+Stop 훅 예산에 안 들어가므로 여기서 돌리지 않고 `--round 3`에서 수행한다.
+
+⚠ 전체 회귀를 **강제**하는 통제는 현재 없다. `.githooks/pre-commit`은 `timeout 1800`
+으로 올려뒀지만 `--no-verify` 커밋이면 건너뛴다. 이 스크립트의 기본 모드도
+변경 모듈 스코프(1급 모듈의 31.6%만 매핑)라 전체 회귀를 대신하지 못한다.
+"CI가 잡아주겠지"라고 가정하지 말 것.
+
+설계 불변식: **못 돌렸으면 PASS라고 쓰지 않는다.** 도구 부재는 DISABLED,
+시간 초과는 TIMEOUT, 대응 테스트 없음은 no_module_tests로 구분 보고한다.
+(과거엔 mingw 인터프리터 탓에 pytest가 bcrypt 수집 에러로 3.5초 만에 죽었는데도
+마지막 줄 "1 error"에 "failed"가 없다는 이유로 **PASS**라고 보고했다.)
+⚠ 단, 이 상태들은 `counts.critical`에 안 잡히므로 machine 소비자에겐
+non-blocking이다 — `structured.not_run` 을 함께 읽을 것.
+
+Env:
+    QUALITY_CHECK_FORCE=1    캐시·무변경 조기종료 우회 (CI 전수 점검용)
+    QUALITY_CHECK_BUDGET=N   전역 예산 초 (기본 240) — Stop 훅 timeout 안에 들어가야 함
 
 Usage:
     python scripts/quality_check.py              # single run
     python scripts/quality_check.py --round 1    # round 1 of 3 (focus: critical)
     python scripts/quality_check.py --round 2    # round 2 of 3 (focus: quality warnings)
-    python scripts/quality_check.py --round 3    # round 3 of 3 (focus: regression/edge)
+    python scripts/quality_check.py --round 3    # round 3 of 3 (focus: regression — 전체 스위트)
 """
 from __future__ import annotations
 
@@ -23,11 +42,33 @@ import py_compile
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
+
+# 같은 scripts/ 디렉터리 — sys.path[0]로 해석된다. 단 이 import가 실패하면
+# 훅 커맨드의 `2>/dev/null || true`가 traceback을 삼켜 **게이트가 통째로 침묵**하므로
+# (= 이 스크립트가 막으려는 바로 그 fake-green) 폴백을 둔다.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+try:
+    import _hook_env
+
+    _project_py = _hook_env.project_py
+    _module_missing = _hook_env.module_missing
+except Exception:  # pragma: no cover - 방어
+    def _project_py() -> str:
+        return sys.executable
+
+    def _module_missing(r: subprocess.CompletedProcess) -> bool:
+        tail = (r.stderr or "").strip().splitlines()
+        return bool(r.returncode != 0 and tail and "No module named" in tail[-1]
+                    and "ModuleNotFoundError" not in tail[-1])
 
 # Parse CLI args
 _parser = argparse.ArgumentParser(add_help=False)
-_parser.add_argument("--round", type=int, default=0, choices=[0, 1, 2, 3])
+# start-work 스킬의 적응형 루프는 MAX_ROUNDS=5까지 돈다. choices=[0..3]이던 시절
+# --round 4/5는 argparse error → exit 2 / stdout 빈 값 → 소비자의
+# result["counts"]["critical"] 파싱이 깨졌다.
+_parser.add_argument("--round", type=int, default=0, choices=[0, 1, 2, 3, 4, 5])
 _parser.add_argument("--json", action="store_true", help="Output structured JSON only")
 _args, _ = _parser.parse_known_args()
 _ROUND = _args.round
@@ -38,19 +79,52 @@ _ROUND_FOCUS = {
     1: "critical — tests + build + syntax",
     2: "quality — warnings + patterns",
     3: "regression — edge cases + full suite",
+    4: "adaptive — 잔존 Critical 재확인",
+    5: "adaptive — 최종 확인",
 }
 
 _ROOT = Path(__file__).resolve().parents[1]
 _FE = _ROOT / "frontend-v2"
 _NPM = shutil.which("npm") or "npm"
 _NPX = shutil.which("npx") or "npx"
+_PY = _project_py()
+
+# 전역 예산. Stop 훅의 timeout 안에서 반드시 스스로 끝내고 보고까지 마쳐야 한다.
+# 예산을 넘겨 훅이 밖에서 kill 되면 `2>/dev/null || true` 탓에 아무 출력도 남지
+# 않아 "이상 없음"처럼 보인다(침묵 = fake-green). 남은 예산이 없으면 각 단계를
+# 건너뛰되 그 사실을 명시 보고한다.
+# round 3은 Stop 훅이 아니라 사람이 명시 호출하는 전체 회귀라 예산이 따로다.
+_BUDGET = float(os.environ.get("QUALITY_CHECK_BUDGET", "1800" if _ROUND == 3 else "240"))
+_DEADLINE = time.monotonic() + _BUDGET
+_TIMED_OUT = 124  # GNU timeout 관례
 
 issues: list[dict] = []
 summary: dict[str, str] = {}
 
 
+def _budget_left(reserve: float = 8.0) -> float:
+    """보고 출력분(reserve)을 남긴 잔여 예산(초)."""
+    return max(0.0, _DEADLINE - time.monotonic() - reserve)
+
+
 def _run(cmd: list[str], *, cwd: str | Path | None = None, timeout: int = 60) -> subprocess.CompletedProcess:
-    return subprocess.run(cmd, capture_output=True, text=True, cwd=cwd or _ROOT, timeout=timeout)
+    """절대 예외를 던지지 않는 실행기.
+
+    TimeoutExpired가 전파되면 스크립트가 죽고, 훅 커맨드의 `2>/dev/null || true`가
+    그 죽음을 삼켜 Stop 게이트가 통째로 침묵한다(= 이상 없음처럼 보임).
+    변경 전엔 이 방어가 없었다. 다만 **과거에 실제로 타임아웃이 났던 건 아니다** —
+    그땐 훅 인터프리터가 mingw python이라 pytest가 bcrypt 수집 에러로 3.5초 만에
+    죽었고(rc=1, "1 error in 3.48s"), 90s cap에 닿을 일이 없었다. 인터프리터를
+    프로젝트 venv로 고친 **지금부터** 스위트가 실제로 ~1480s 돌기 때문에
+    이 방어가 필요해진 것이다.
+    이제 실패는 returncode로 표현되고 호출부가 명시 보고한다.
+    """
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, cwd=cwd or _ROOT, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(cmd, _TIMED_OUT, "", f"TIMEOUT after {timeout}s")
+    except (FileNotFoundError, OSError) as e:
+        return subprocess.CompletedProcess(cmd, 127, "", f"NOT FOUND: {e}")
 
 
 def _add(severity: str, category: str, file: str, message: str):
@@ -76,6 +150,17 @@ if not changed_raw.strip() and not os.environ.get("QUALITY_CHECK_FORCE"):
     sys.exit(0)
 
 changed_files = [f.strip() for f in changed_raw.splitlines() if f.strip()]
+
+# 결과 캐시는 의도적으로 두지 않는다.
+# 한때 sha256(_ROUND + git diff + git diff --cached)를 키로 결과를 캐시했으나,
+# 그 키는 **tracked diff만** 담는 반면 실제 검사(pytest/ruff/vite/vitest)는
+# 워킹 트리 전체 + 설치된 의존성 + env를 읽는다 → 키가 진짜 입력의 진부분집합.
+# 실증: untracked `tests/unit/conftest.py`가 import를 깨뜨려도 키가 그대로라
+# cache hit → 진실이 critical=1/fix_required인데 PASS/proceed를 반환했다.
+# 즉 캐시가 이 스크립트의 유일한 존재 이유(= 안 돌렸으면 PASS라고 쓰지 않기)를
+# 스스로 깨뜨렸다. 게다가 round가 매 턴 교대(0↔1/2/3)라 단일 슬롯 hit률은
+# 정작 비싼 deep 루프에서 ~0이었다. 정확히 캐시하려면 워킹 트리 전체를
+# 해싱해야 하는데 그건 배터리보다 비싸다.
 py_files = [f for f in changed_files if f.endswith(".py")]
 jsx_files = [f for f in changed_files if f.endswith((".jsx", ".tsx", ".js", ".ts")) and "frontend-v2" in f]
 
@@ -95,51 +180,124 @@ for f in py_files:
 
 # ── 3. Ruff lint ─────────────────────────────────────────────────────
 if py_files:
-    r = _run([sys.executable, "-m", "ruff", "check", "--output-format=json"] + py_files)
-    if r.stdout.strip():
+    r = _run([_PY, "-m", "ruff", "check", "--output-format=json"] + py_files, timeout=30)
+    if _module_missing(r):
+        # 예전엔 여기서 stdout이 비어 `if r.stdout.strip()`이 거짓 → lint 이슈가
+        # 영구히 0건이었다. 도구 부재는 "이상 없음"이 아니라 게이트 고장이다.
+        _add("Critical", "lint", "scripts/", "ruff 미설치 — lint 게이트 비활성(DISABLED). venv 확인 필요")
+        summary["ruff"] = "DISABLED"
+    elif r.returncode == _TIMED_OUT:
+        _add("Warning", "lint", "scripts/", "ruff 타임아웃 — lint 미검증")
+        summary["ruff"] = "TIMEOUT"
+    elif r.returncode != 0 and not r.stdout.strip():
+        # ruff는 위반이 있으면 rc=1이라 rc만으로는 판정 못 한다. 하지만 rc!=0인데
+        # stdout까지 비었으면 그건 "위반 0건"이 아니라 ruff 자체 실패(설정 오류,
+        # 인터프리터 소실 등)다. 빈 stdout을 []→"clean"으로 읽으면 원래 버그 복원.
+        _add("Critical", "lint", "scripts/", f"ruff 실행 실패(rc={r.returncode}) — lint 미검증: {(r.stderr or '').strip()[:120]}")
+        summary["ruff"] = "ERROR"
+    else:
         try:
-            ruff_issues = json.loads(r.stdout)
+            ruff_issues = json.loads(r.stdout) if r.stdout.strip() else []
             for ri in ruff_issues[:10]:
                 _add("Warning", "lint", ri.get("filename", "?"), f'{ri.get("code","")}: {ri.get("message","")}')
+            summary["ruff"] = f"{len(ruff_issues)} issues" if ruff_issues else "clean"
         except json.JSONDecodeError:
-            pass
+            _add("Warning", "lint", "scripts/", f"ruff 출력 파싱 실패: {(r.stderr or r.stdout)[:120]}")
+            summary["ruff"] = "PARSE_ERROR"
+else:
+    summary["ruff"] = "skipped"
 
-# ── 4. pytest (unit) ─────────────────────────────────────────────────
-if py_files:
-    r = _run([sys.executable, "-m", "pytest", "tests/unit/", "-x", "-q", "--tb=line", "--no-header"], timeout=90)
-    lines = r.stdout.strip().splitlines()
-    last = lines[-1] if lines else ""
-    if "failed" in last:
-        _add("Critical", "test", "tests/unit/", last)
+# ── 4. pytest ────────────────────────────────────────────────────────
+# 전체 tests/unit/은 실측 3486 tests / 약 1480s(25분)라 Stop 훅 예산에 안 들어간다.
+# 그래서 기본(round 0/1/2)은 **변경 모듈에 대응하는 테스트만** 돌린다.
+# 전체 회귀는 명시 요청(--round 3)에서 수행한다.
+# ⚠ 커버리지 한계: 1급 모듈 중 test_<stem>.py 매핑은 66/209(31.6%)뿐이고,
+#   모듈 스코프는 교차 모듈 회귀를 못 잡는다. 이 게이트는 advisory이며
+#   전체 회귀를 대신하지 않는다.
+def _module_tests(files: list[str]) -> list[str]:
+    targets: set[str] = set()
+    for f in files:
+        if f.startswith("tests/") and Path(f).name.startswith("test_"):
+            targets.add(f)  # 테스트 자체를 고친 경우
+            continue
+        cand = f"tests/unit/test_{Path(f).stem}.py"
+        if (_ROOT / cand).is_file():
+            targets.add(cand)
+    return sorted(targets)
+
+
+_full_suite = _ROUND == 3
+_test_targets = ["tests/unit/"] if _full_suite else _module_tests(py_files)
+
+if not py_files:
+    summary["pytest"] = "skipped"
+elif not _test_targets:
+    # "PASS"라고 쓰면 안 된다 — 아무것도 안 돌렸다.
+    summary["pytest"] = "no_module_tests"
+    _add("Info", "test", "tests/unit/", f"변경 {len(py_files)}개 .py에 대응하는 test_<모듈>.py 없음 — 회귀 미검증")
+elif _budget_left() < 15:
+    summary["pytest"] = "budget_exceeded"
+    _add("Warning", "test", "tests/unit/", "예산 초과로 pytest 미실행 — 회귀 미검증")
+else:
+    # round 3의 cap은 실측 스위트(~1480s)보다 커야 한다. 600s였을 땐 전체 회귀가
+    # 항상 TIMEOUT→Warning→proceed로 빠져 "전체를 돌렸다"는 착각만 만들었다.
+    _t_budget = int(min(1700 if _full_suite else 150, _budget_left()))
+    r = _run([_PY, "-m", "pytest", *_test_targets, "-x", "-q", "--tb=line", "--no-header"], timeout=_t_budget)
+    _scope = "full" if _full_suite else f"{len(_test_targets)} module tests"
+    if _module_missing(r):
+        _add("Critical", "test", "tests/unit/", "pytest 미설치 — 테스트 게이트 비활성(DISABLED). venv 확인 필요")
+        summary["pytest"] = "DISABLED"
+    elif r.returncode == _TIMED_OUT:
+        _add("Warning", "test", "tests/unit/", f"pytest 타임아웃({_t_budget}s) — 회귀 미검증({_scope})")
+        summary["pytest"] = "TIMEOUT"
+    elif r.returncode != 0:
+        # returncode 기준. 예전엔 마지막 줄의 "failed" 문자열만 봤기 때문에
+        # 수집 에러("1 error in 0.5s")가 조용히 PASS로 보고됐다.
+        lines = r.stdout.strip().splitlines()
+        last = lines[-1] if lines else (r.stderr or "")[-160:]
+        _add("Critical", "test", ", ".join(_test_targets)[:80], f"exit={r.returncode}: {last[:160]}")
         summary["pytest"] = "FAIL"
     else:
-        summary["pytest"] = "PASS"
-else:
-    summary["pytest"] = "skipped"
+        summary["pytest"] = f"PASS ({_scope})"
 
 # ── 5. Frontend build ────────────────────────────────────────────────
-if jsx_files:
-    r = _run([_NPM, "run", "build"], cwd=_FE, timeout=60)
-    if r.returncode != 0:
+if not jsx_files:
+    summary["vite_build"] = "skipped"
+elif _budget_left() < 15:
+    summary["vite_build"] = "budget_exceeded"
+    _add("Warning", "build", "frontend-v2/", "예산 초과로 vite build 미실행 — 빌드 미검증")
+else:
+    r = _run([_NPM, "run", "build"], cwd=_FE, timeout=int(min(90, _budget_left())))
+    if r.returncode == _TIMED_OUT:
+        _add("Warning", "build", "frontend-v2/", "vite build 타임아웃 — 빌드 미검증")
+        summary["vite_build"] = "TIMEOUT"
+    elif r.returncode != 0:
         err = r.stderr[-300:] if r.stderr else r.stdout[-300:]
         _add("Critical", "build", "frontend-v2/", f"vite build failed: {err}")
         summary["vite_build"] = "FAIL"
     else:
         summary["vite_build"] = "PASS"
-else:
-    summary["vite_build"] = "skipped"
 
 # ── 6. Frontend test ─────────────────────────────────────────────────
-if jsx_files:
-    r = _run([_NPX, "vitest", "run"], cwd=_FE, timeout=120)
-    if "failed" in r.stdout.lower():
+if not jsx_files:
+    summary["vitest"] = "skipped"
+elif _budget_left() < 15:
+    summary["vitest"] = "budget_exceeded"
+    _add("Warning", "test", "frontend-v2/", "예산 초과로 vitest 미실행 — 프론트 회귀 미검증")
+else:
+    r = _run([_NPX, "vitest", "run"], cwd=_FE, timeout=int(min(120, _budget_left())))
+    if r.returncode == _TIMED_OUT:
+        _add("Warning", "test", "frontend-v2/", "vitest 타임아웃 — 프론트 회귀 미검증")
+        summary["vitest"] = "TIMEOUT"
+    elif r.returncode != 0:
+        # returncode 기준. stdout에서 "failed" 문자열만 찾던 예전 방식은 vitest가
+        # 아예 기동 실패했을 때(=출력에 failed 없음) PASS로 보고했다.
         fail_line = [ln for ln in r.stdout.splitlines() if "failed" in ln.lower()]
-        _add("Critical", "test", "frontend-v2/", fail_line[0] if fail_line else "vitest failed")
+        detail = fail_line[0] if fail_line else (r.stderr or r.stdout)[-160:]
+        _add("Critical", "test", "frontend-v2/", f"exit={r.returncode}: {detail}")
         summary["vitest"] = "FAIL"
     else:
         summary["vitest"] = "PASS"
-else:
-    summary["vitest"] = "skipped"
 
 # ── 7. Code pattern issues (changed files only) ─────────────────────
 
@@ -156,7 +314,7 @@ for f in jsx_files:
         if "style=" in stripped and ("#" in stripped or "rgb(" in stripped):
             # Exclude comments
             if not stripped.startswith("//") and not stripped.startswith("*"):
-                _add("Info", "pattern", f"{f}:{i}", f"Hardcoded color in inline style — use CSS variable")
+                _add("Info", "pattern", f"{f}:{i}", "Hardcoded color in inline style — use CSS variable")
 
     # 7b. Missing toLocaleString for large numbers
     for i, line in enumerate(lines, 1):
@@ -210,15 +368,27 @@ warnings = [i for i in issues if i["severity"] == "Warning"]
 infos = [i for i in issues if i["severity"] == "Info"]
 
 # Round-aware header
-round_tag = f"Round {_ROUND}/3 ({_ROUND_FOCUS[_ROUND]})" if _ROUND > 0 else "Single run"
+round_tag = f"Round {_ROUND} ({_ROUND_FOCUS.get(_ROUND, 'full')})" if _ROUND > 0 else "Single run"
+
+# "안 돌린" 상태를 machine 소비자에게 노출한다.
+# 소비자(start-work 등)는 `counts.critical`만 읽고 0이면 proceed 한다. 그런데
+# no_module_tests / TIMEOUT / budget_exceeded 는 Critical이 아니어서, "검증 못 함"이
+# "이상 없음"과 구분되지 않은 채 통과된다. 사람용 문자열에만 성립하던 불변식을
+# 기계 계약에도 노출한다. (기존 키는 그대로 — additive 라 소비자 무손상)
+_NOT_RUN_STATES = {"DISABLED", "TIMEOUT", "no_module_tests", "budget_exceeded", "PARSE_ERROR", "ERROR"}
+_not_run = {k: v for k, v in summary.items() if v in _NOT_RUN_STATES}
 
 # Structured result (machine-parseable)
 structured = {
     "round": _ROUND,
-    "focus": _ROUND_FOCUS[_ROUND],
+    "focus": _ROUND_FOCUS.get(_ROUND, "full"),
     "pytest": summary.get("pytest", "skipped"),
+    "ruff": summary.get("ruff", "skipped"),
     "vite_build": summary.get("vite_build", "skipped"),
     "vitest": summary.get("vitest", "skipped"),
+    # verified=False 면 "Critical 0"이 "검증했고 깨끗함"을 뜻하지 않는다.
+    "verified": not _not_run,
+    "not_run": _not_run,
     "counts": {
         "critical": len(critical),
         "warning": len(warnings),
@@ -228,40 +398,42 @@ structured = {
     "issues": issues[:30],
 }
 
+_exit_code = 1 if critical else 0
+
+# 사람용 문자열은 모드와 무관하게 항상 만든다. --json 이든 아니든 같은 내용을
+# 캐시에 넣어야, 저장한 모드와 읽는 모드가 달라도 올바른 shape가 나온다.
+result_lines = [
+    f"[{round_tag}] pytest: {summary.get('pytest', '-')} | ruff: {summary.get('ruff', '-')} | vite: {summary.get('vite_build', '-')} | vitest: {summary.get('vitest', '-')}",
+    f"Issues: {len(critical)} critical, {len(warnings)} warning, {len(infos)} info"
+    + ("" if not _not_run else f" — ⚠ 미검증: {', '.join(f'{k}={v}' for k, v in _not_run.items())}"),
+]
+for issue in issues[:15]:
+    result_lines.append(f"  [{issue['severity']}] {issue['category']}: {issue['file']} — {issue['message']}")
+
+_detail = "\n".join(result_lines)
+
+# 능동 보고 리마인더. 정책 본문은 .claude/rules/self-review.md ## 보고 방식
+# (always-on @import). 모델은 이 change set을 다루는 다음 사용자 응답에
+# 4구획 능동 보고를 반드시 포함해야 한다.
+reminder = (
+    "⚠️ 능동 보고 필수 (.claude/rules/self-review.md ## 보고 방식): 다음 응답에 "
+    "(1) 변경 요약 표 (2) X1~X9 mini-checklist 표 (3) 잠재 문제 표 (있을 때) "
+    "(4) 결론 1줄을 자동 포함하라. 변경 파일 수: "
+    f"{summary.get('changed_files','?')} (py {summary.get('changed_py','?')}, "
+    f"jsx {summary.get('changed_jsx','?')})."
+)
+_sys_msg = f"[Quality Check] {' | '.join(result_lines[:2])}\n{reminder}"
+
 if _JSON_ONLY:
     print(json.dumps(structured, ensure_ascii=False))
 else:
-    result_lines = [
-        f"[{round_tag}] pytest: {summary.get('pytest', '-')} | vite: {summary.get('vite_build', '-')} | vitest: {summary.get('vitest', '-')}",
-        f"Issues: {len(critical)} critical, {len(warnings)} warning, {len(infos)} info",
-    ]
-    if issues:
-        for issue in issues[:15]:
-            result_lines.append(f"  [{issue['severity']}] {issue['category']}: {issue['file']} — {issue['message']}")
-
-    msg = " | ".join(result_lines[:2])
-    detail = "\n".join(result_lines)
-
-    # Active self-review reminder (CLAUDE.md L106 능동 보고 필수).
-    # Triggered when there are pending changes (we already early-exit when none).
-    # The model sees this as a system reminder and must include the 4-section
-    # active report (변경 요약 / X1~X8 mini-checklist / 잠재 문제 / 결론) in the
-    # NEXT user-facing response covering this change set.
-    reminder = (
-        "⚠️ 능동 보고 필수 (CLAUDE.md L106): 다음 응답에 (1) 변경 요약 표 "
-        "(2) X1~X8 mini-checklist 표 (3) 잠재 문제 표 (있을 때) "
-        "(4) 결론 1줄을 자동 포함하라. 변경 파일 수: "
-        f"{summary.get('changed_files','?')} (py {summary.get('changed_py','?')}, "
-        f"jsx {summary.get('changed_jsx','?')})."
-    )
-
     print(json.dumps({
-        "systemMessage": f"[Quality Check] {msg}\n{reminder}",
-        "detail": detail,
+        "systemMessage": _sys_msg,
+        "detail": _detail,
         "structured": structured,
     }, ensure_ascii=False))
 
 # Exit code:
 #   0 — no critical issues
 #   1 — critical issues found (caller should fix and re-run)
-sys.exit(1 if critical else 0)
+sys.exit(_exit_code)
