@@ -2396,7 +2396,11 @@ def generate_sts(
             ai_model=str((ai_config or {}).get("model", "")),
         )
     except Exception:
-        pass
+        # non-fatal 은 유지하되 **침묵은 금지**. 이 `except: pass` 가 source_root
+        # NameError 를 몇 년간 삼켜 STS 품질 기록이 통째로 유실된 걸 아무도 몰랐다.
+        # recorder 내부엔 _logger.exception 이 있지만, 인자 평가에서 터지면
+        # record_run 진입 자체가 없어 거기까지 못 간다 → 호출부에서 남긴다.
+        _logger.exception("STS quality record skipped (non-fatal)")
 
     return {
         "output_path": out,

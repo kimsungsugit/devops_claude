@@ -40,6 +40,16 @@ def _isolated_admins(tmp_path, monkeypatch):
     from backend.services import file_resolver as fr
     monkeypatch.setattr(fr, "_resolver", fr.LocalFileResolver())
 
+    # ⚠ 위에서 local 로 고정하는 순간 /api/file-mode/browse-file 이 **LOCAL 경로**
+    # (health.py "LOCAL 모드 — backend 자체 tkinter")로 들어가 pick_file 이
+    # tkinter askopenfilename **모달 대화상자**를 띄운다. admin 은 가드를 통과하므로
+    # test_admin_passes_gate 만 그 핸들러에 도달하고, 헤드리스 CI/자동 실행에는
+    # 대화상자를 닫아 줄 사람이 없어 **테스트가 영구 정지**한다(실측: pytest 가
+    # 39%에서 무한 대기). 가드 통과 여부만 보는 회귀이므로 picker 는 스텁으로 대체.
+    from backend.services import local_service as ls
+    monkeypatch.setattr(ls, "pick_file", lambda title="": ("", "cancelled"))
+    monkeypatch.setattr(ls, "pick_directory", lambda title="": ("", "cancelled"))
+
 
 # 13 endpoint × (method, path, sample body)
 _ENDPOINTS = [

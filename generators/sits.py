@@ -1729,7 +1729,9 @@ def generate_sits(
             ai_model=str((ai_config or {}).get("model", "")),
         )
     except Exception:
-        pass
+        # non-fatal 은 유지하되 침묵은 금지 (sts.py 의 동일 블록이 NameError 를
+        # 몇 년간 삼켜 품질 기록이 통째로 유실된 전례).
+        _logger.exception("SITS quality record skipped (non-fatal)")
 
     return {
         "output_path": actual_output,
