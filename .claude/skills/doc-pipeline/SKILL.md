@@ -1,6 +1,7 @@
 ---
 name: doc-pipeline
-description: "문서 생성 파이프라인. UDS->STS->SUTS->SITS 문서를 순서대로 자동 생성합니다."
+description: "ISO 26262 규격서 **4종을 순서대로** 생성합니다(UDS→STS→SUTS→SITS). 백엔드 API(:9000) 경유 비동기 실행 + 추적성 체인 검증 + documenter 연동. **UDS 하나만** 로컬에서 생성하려면 `/uds-pipeline`을 쓰세요."
+when_to_use: 문서 일괄 생성, 규격서 전체 생성, UDS STS SUTS SITS 순차, delta 재생성, 변경분만 재생성 요청 시
 ---
 
 # 문서 생성 파이프라인 워크플로우

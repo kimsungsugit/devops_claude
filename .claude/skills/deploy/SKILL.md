@@ -1,6 +1,7 @@
 ---
 name: deploy
-description: "**push → 파이프라인 트리거 + 상태 확인**. 환경(dev/staging/prod)을 인자로 받아 현재 커밋 기준으로 진행합니다. 버전 태깅이나 릴리스 전 체크리스트까지 필요하면 `/deploy-release`를 쓰세요."
+description: "**push → CI 트리거 + 상태 확인**. 현재 커밋을 origin/gitlab 양쪽에 push하고 파이프라인 결과를 봅니다. ⚠ 배포 stage는 실재하지 않는다 — 도는 건 검증 CI뿐이다. 버전 태깅·릴리스 전 체크리스트까지 필요하면 `/deploy-release`를 쓰세요."
+when_to_use: 배포해줘, push해줘, 파이프라인 돌려줘, CI 트리거, CI 상태 확인, 빌드 결과 확인 요청 시
 ---
 
 # 배포 스킬

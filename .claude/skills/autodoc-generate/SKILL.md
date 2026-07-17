@@ -1,7 +1,7 @@
 ---
 name: autodoc-generate
-description: AutoDoc 시스템으로 PPT, HTML 슬라이드, 프로젝트 포털, API 문서를 자동 생성합니다. 다국어 코드 분석 및 RAG 통합.
-when_to_use: PPT 생성, 슬라이드, 프로젝트 포털, API 문서, AutoDoc, 프레젠테이션, 다국어 코드 분석 요청 시
+description: "**별도 트리(`D:/Project/Program/AutoDoc`)** 의 발표·공유용 산출물 생성 — PPTX, Reveal.js 슬라이드, 프로젝트 포털, API 문서. 다국어 코드 분석 + RAG 통합. 이 저장소의 **ISO 26262 규격서와는 무관**하다 — UDS/STS/SUTS/SITS는 `/doc-pipeline`, UDS 단독은 `/uds-pipeline` 소관."
+when_to_use: PPT 생성, PPTX, 슬라이드, 프레젠테이션, 발표자료, 프로젝트 포털, 대시보드 문서, API 문서 추출, AutoDoc, 다국어 코드 분석 요청 시
 ---
 
 # /autodoc-generate 스킬

@@ -115,12 +115,20 @@ python -m pytest tests/ -v --cov=backend --cov=workflow --cov=report_gen --cov-r
 
 전체 목록은 `.claude/skills/*/SKILL.md` (한 단계만 스캔 — 중첩 디렉터리는 discovery 안 됨).
 
-> **frontmatter 규약**: 자동 호출 판정에 쓰이는 건 **`description` + `when_to_use`** 다(합산 1,536자 제한, 초과분은 잘림). 트리거 문구는 반드시 **`when_to_use:`** 에 쓸 것 —
-> `trigger:` 는 **공식 필드가 아니라 조용히 무시된다**(경고도 없음). 2026-07-17까지 9개 스킬이 `trigger:` 를 써서 **트리거 문구가 전부 무효**였다(`/start-work` 의 "다 고쳐/이어서/1번부터" 포함). 알 수 없는 필드는 전부 같은 식으로 사라지므로 새 필드를 쓸 땐 공식 목록을 확인할 것.
+> **frontmatter 규약**: 자동 호출 판정에 쓰이는 건 **`description` + `when_to_use`** 다(합산 1,536자 제한, 초과분은 잘림). 트리거 문구는 반드시 **`when_to_use:`** 에 쓸 것.
+>
+> 2026-07-17에 **트리거가 0인 스킬이 16개 중 16개**였다(프로젝트 14 + 플러그인 2) — 두 가지 경로로:
+> 1. **잘못된 필드명** (9개) — `trigger:` 는 **공식 필드가 아니라 조용히 무시된다**(경고도 없음). `/start-work` 의 "다 고쳐/이어서/1번부터" 가 여기 있었다. 알 수 없는 필드는 전부 같은 식으로 사라지므로 새 필드를 쓸 땐 공식 목록을 확인할 것
+> 2. **필드 자체 부재** (7개: `deploy`·`doc-pipeline`·`health-check`·`hotfix`·`impact` + 플러그인 `doc-gen`·`review`) — 위 §Workflows 가 "자동 연결"이라 부르는 `/hotfix`·`/doc-pipeline` 이 여기 있었다. 결과는 ①과 같다: **직접 타이핑해야만 걸린다**
+>
+> 공식 필드는 **16개**뿐이다(`name` `description` `when_to_use` `argument-hint` `arguments` `disable-model-invocation` `user-invocable` `allowed-tools` `disallowed-tools` `model` `effort` `context` `agent` `hooks` `paths` `shell` — [공식 문서](https://code.claude.com/docs/en/skills.md) "Frontmatter reference"). **필수 필드는 없다** — `name` 은 디렉터리명 폴백(표시 라벨일 뿐, 커맨드 이름은 디렉터리에서 온다), `description` 은 본문 첫 문단 폴백. 다만 첫 문단 폴백으론 자동 호출 매칭이 안 되므로 이 저장소는 description 을 요구한다(**프로젝트 정책**이지 스펙 위반 아님).
+>
+> 위 두 결함은 **조용히 실패**하므로 눈으로 못 본다. SKILL.md 편집 시 PostToolUse 훅이 자동 검사하고, 수동으로는:
+> `.venv/Scripts/python.exe scripts/check_skill_frontmatter.py` (`.claude/` 전체 rglob — **플러그인 스킬 포함**. 과거 `.claude/skills/*` 만 보다가 플러그인 2개를 놓쳤다)
 
 | 스킬 | 용도 |
 |------|------|
-| `/deploy` | 배포 실행·상태 확인만 (파이프라인 트리거) |
+| `/deploy` | push → **검증 CI** 트리거 + 상태 확인 (배포 stage 는 실재하지 않음 — 위 §Architecture) |
 | `/deploy-release` | 릴리스 준비 — 사전 체크리스트 + 버전 태깅(`git tag v1.x.x`) + CI 상태 확인 |
 | `/health-check` | 백엔드(:9000)/프론트(:5174) 상태 점검 |
 | `/impact` | 백엔드 API 경유 영향도 분석 (SVN/Git 변경분 → 영향 문서) |
@@ -160,7 +168,7 @@ python -m pytest tests/ -v --cov=backend --cov=workflow --cov=report_gen --cov-r
 ## Hooks (자동 품질 게이트)
 - **SessionStart**: `.env` 자동 생성 (.env.example → .env) + git hooks 자동 활성화 (`scripts/install_git_hooks.sh`) + settings 변경 정책 reminder
 - **PreToolUse**: `scripts/pretool_asil_check.py` — C/H 파일 수정 **직전** 기존 내용에서 `@asil C|D` 감지 → 경고(차단 아님)
-- **PostToolUse**: 단일 dispatcher (`scripts/posttool_dispatch.py`) — Python syntax+ruff, JSX/TS ESLint, .md broken-link/heading-jump, workflow/report_gen 변경 시 **대응 모듈 테스트**(`tests/unit/test_<모듈>.py`)
+- **PostToolUse**: 단일 dispatcher (`scripts/posttool_dispatch.py`) — Python syntax+ruff, JSX/TS ESLint, .md broken-link/heading-jump, workflow/report_gen 변경 시 **대응 모듈 테스트**(`tests/unit/test_<모듈>.py`). **SKILL.md 는 frontmatter 도 검사**(`scripts/check_skill_frontmatter.py` — 미지 필드/`when_to_use` 부재/1,536자 초과. 심각도 순 정렬 — 훅이 상위 3건만 보여주므로 순서가 곧 가시성이다)
 - **PostToolBatch** (신규, 2026-05-11): 병렬 Write/Edit 일괄 종료 시 `scripts/posttoolbatch_report.py` — 변경 파일 집계 + 능동 보고 X1~X9 trigger 메시지를 메인 응답에 push. **단일 파일 turn은 silent** (PostToolUse가 이미 파일별 보고), 단 ASIL C/H는 단독이어도 hint 출력. ASIL 파일은 list 앞으로 정렬되어 truncation 시에도 누락되지 않음. 출력은 `ensure_ascii=False`로 한글 가독성 유지. **메인 에이전트의 능동 보고 의무는 그대로 유지** (hook은 보조 알림이며 대체 아님)
 - **Stop**: `scripts/quality_check.py` 단일 호출 (이전 `stop_check.py` fallback 사슬 제거됨). **advisory 게이트** — pytest는 변경 모듈 스코프(`tests/unit/test_<모듈>.py`), 전역 예산(`QUALITY_CHECK_BUDGET`, 기본 240s) 내 자체 종료. 전체 회귀(`tests/unit/` = 3486개 / **약 4분 40초**)는 예산에 못 들어가므로 `--round 3` 또는 pre-commit 담당. **결과 캐시 없음**(tracked diff 해시가 untracked 변경을 못 봐 stale PASS를 냈던 전례 — `scripts/quality_check.py` 주석 참조)
   - **격리 규약**: Stop 훅은 변경 모듈을 **단독 실행**하므로 모든 테스트 파일이 단독으로 통과해야 한다(그래야 FAIL=진짜 회귀). `tests/unit/conftest.py`의 `_default_local_resolver`/`_default_admin_users`가 머신 상태(`config/file_mode.json`, `admin_users.json`)로부터 격리하며, 파일별 fixture가 이를 override할 수 있다. **전역 싱글톤을 teardown에서 "특정 값으로 고정"하지 말 것 — 반드시 원래 값 복원** (`file_resolver._resolver` 누설로 단독 16건이 깨졌던 전례: 커밋 584833e)
