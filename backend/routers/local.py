@@ -1056,7 +1056,8 @@ async def local_uds_generate(
             from workflow.quality.recorder import record_uds_run
             record_uds_run(quality_evaluation, output_path=str(out_path))
         except Exception:
-            pass
+            # non-fatal 은 유지하되 침묵은 금지 (608f849 참조).
+            _logger.exception("[UDS_GENERATE][%s] quality record skipped (non-fatal)", req_id)
         _logger.info("[UDS_GENERATE][%s] done file=%s (doc_only)", req_id, out_path.name)
         return {
             "ok": True,
@@ -1153,7 +1154,8 @@ async def local_uds_generate(
         from workflow.quality.recorder import record_uds_run
         record_uds_run(quality_evaluation, output_path=str(out_path))
     except Exception:
-        pass
+        # non-fatal 은 유지하되 침묵은 금지 (608f849 참조).
+        _logger.exception("[UDS_GENERATE][%s] quality record skipped (non-fatal)", req_id)
     _logger.info("[UDS_GENERATE][%s] done file=%s", req_id, out_path.name)
 
     return {
@@ -1438,7 +1440,8 @@ async def local_uds_generate_async(
                 from workflow.quality.recorder import record_uds_run
                 record_uds_run(quick_qg, output_path=str(out_path))
             except Exception:
-                pass
+                # non-fatal 은 유지하되 침묵은 금지 (608f849 참조).
+                _logger.exception("UDS quality record skipped (non-fatal)")
 
             _set_progress(
                 "local_uds", "local", "local",

@@ -143,7 +143,8 @@ def _do_summary_build(req: SwReportBuildRequest) -> Response:
             meta={"release_sw_version": getattr(req, "release_sw_version", "")},
         )
     except Exception:
-        pass
+        # non-fatal 은 유지하되 침묵은 금지 (608f849 — 동일 블록이 NameError 를 몇 년간 삼킴).
+        _logger.exception("SwReport quality record skipped (non-fatal)")
     return _build_result_to_response(
         content_io=result.xlsm_io,
         filename=result.filename,

@@ -1726,7 +1726,11 @@ def _uds_generate_from_paths(
             output_path=str(out_path),
         )
     except Exception:
-        pass
+        # non-fatal 은 유지하되 **침묵은 금지**. sts/suts/sits 의 동일한
+        # `except: pass` 가 record_run 의 NameError 를 몇 년간 삼켜 품질 기록이
+        # 통째로 유실된 전례가 있다(608f849). 여긴 enrich/quick_gate 까지 try 안에
+        # 있어 셋 중 뭐가 터져도 조용히 사라진다.
+        _logger.exception("UDS quality record skipped (non-fatal)")
 
     _progress("preview", 92, "미리보기 생성")
     preview_html = generate_uds_preview_html(uds_payload)

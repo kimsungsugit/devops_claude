@@ -2570,7 +2570,9 @@ async def jenkins_uds_generate(
             output_path=str(out_path),
         )
     except Exception:
-        pass
+        # non-fatal 은 유지하되 침묵은 금지 (sts/suts/sits 의 동일 블록이 NameError 를
+        # 몇 년간 삼켜 품질 기록이 통째로 유실된 전례 — 608f849).
+        _logger.exception("UDS quality record skipped (non-fatal)")
 
     preview_html = generate_uds_preview_html(uds_payload)
     preview_path = out_path.with_suffix(".html")

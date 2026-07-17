@@ -168,7 +168,8 @@ def _do_build(req: SwSABuildRequest) -> Response:
                 meta={"asil_level": str(getattr(meta, "asil_level", "") or "")},
             )
     except Exception:
-        pass
+        # non-fatal 은 유지하되 침묵은 금지 (608f849 — 동일 블록이 NameError 를 몇 년간 삼킴).
+        _logger.exception("SwSA quality record skipped (non-fatal)")
     return _to_response(res, meta, inputs)
 
 

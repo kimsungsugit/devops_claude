@@ -665,7 +665,8 @@ def _do_coverage_build(req: SwUTBuildRequest) -> Response:
             },
         )
     except Exception:
-        pass
+        # non-fatal 은 유지하되 침묵은 금지 (608f849 — 동일 블록이 NameError 를 몇 년간 삼킴).
+        _logger.exception("SwUT quality record skipped (non-fatal)")
     return _build_result_to_response(
         content_io=result.xlsx_io,
         filename=result.filename,
