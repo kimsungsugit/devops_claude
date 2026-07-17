@@ -137,7 +137,15 @@ def main() -> None:
                 capture_output=True, text=True, cwd=str(_ROOT / "frontend-v2"),
                 timeout=30, shell=False,
             )
-            results.append(f"eslint: {(r.stdout.strip() or 'clean')[:200]}")
+            if r.returncode != 0 and not r.stdout.strip():
+                # eslint/npx 자체 실행 실패(미설치·flat-config 오류·plugin 부재).
+                # eslint 위반은 stdout(stylish 포맷)으로 나오므로, rc≠0 + 빈 stdout 은
+                # '위반 없음'이 아니라 도구가 안 돈 것 — 빈 stdout 을 clean 으로 읽으면
+                # fake-green. ruff/pytest 분기와 동일 가드(_module_missing 은 파이썬
+                # 전용 패턴이라 Node 도구엔 안 걸려 rc 가드로 대체).
+                results.append(f"eslint: ERROR {(r.stderr.strip() or 'unknown')[:150]}")
+            else:
+                results.append(f"eslint: {(r.stdout.strip() or 'clean')[:200]}")
         except Exception as e:
             results.append(f"eslint: skipped ({type(e).__name__})")
 
