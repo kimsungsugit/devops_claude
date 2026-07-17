@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import ast
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -30,9 +31,11 @@ except Exception:  # pragma: no cover - 방어
     _PY = sys.executable
 
     def _module_missing(r: subprocess.CompletedProcess) -> bool:
+        # _hook_env.module_missing 과 **같은 allowlist 정규식**이어야 한다.
+        # (blocklist 형태는 `ImportError("No module named x")` 를 오탐한다)
         tail = (r.stderr or "").strip().splitlines()
-        return bool(r.returncode != 0 and tail and "No module named" in tail[-1]
-                    and "ModuleNotFoundError" not in tail[-1])
+        return bool(r.returncode != 0 and tail
+                    and re.match(r"^\S+: No module named \w+$", tail[-1].strip()))
 
 _t0 = time.perf_counter()
 _ROOT = Path(__file__).resolve().parents[1]
