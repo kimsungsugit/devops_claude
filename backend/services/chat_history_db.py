@@ -16,7 +16,11 @@ _logger = logging.getLogger("backend.chat_history.db")
 
 _engine = None
 _SessionLocal = None
-_lock = threading.Lock()
+# RLock 필수: get_session_factory 가 _lock 을 쥔 채 get_engine 을 부르고(재귀 acquire),
+# get_engine 의 fast-path 는 _engine 이 아직 None 인 **첫 호출**에선 안 타므로
+# 일반 Lock 이면 같은 스레드가 자기 락에 막혀 **영구 데드락**이 된다.
+# (workflow/quality/db.py 가 같은 이유로 이미 RLock 을 쓴다 — 그 주석 참조)
+_lock = threading.RLock()
 _CHAT_HISTORY_DB_FILENAME = "chat_history.sqlite"
 
 
