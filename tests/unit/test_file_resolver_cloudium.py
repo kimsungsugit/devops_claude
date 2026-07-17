@@ -29,13 +29,21 @@ def _reset_resolver_and_gate_cache(monkeypatch, tmp_path):
     생성되어 자동 통과되는 케이스 회피. 테스트용으로 _PROJECT_ROOT를 isolate된
     fake로 가짜 변경. workspace bypass 자체 검증은 개별 테스트에서 monkeypatch
     원복.
+
+    ⚠ teardown 은 **원래 값으로 복원**해야 한다. 예전엔 여기서도
+    `set_resolver(LocalFileResolver())` 를 불렀는데, 그건 복원이 아니라 **전역을
+    Local 로 고정**하는 것이라(모듈 전역 직접 변경 = monkeypatch 미개입) 이 파일이
+    돌고 나면 **이후 모든 테스트가 Local resolver 를 물려받았다**. 누설을 막으려던
+    fixture 가 곧 누설원이었다 — 실제로 test_routers.py 14건이 이 누설에 얹혀
+    통과하다가 단독 실행 시에만 실패했다(dev 머신 file_mode=cloudium).
     """
+    _orig_resolver = file_resolver._resolver  # None 일 수 있음(lazy init 전)
     file_resolver.invalidate_gate_cache()
     file_resolver.set_resolver(file_resolver.LocalFileResolver())
     monkeypatch.setattr(file_resolver, "_PROJECT_ROOT", tmp_path / "_isolated_fake_root")
     yield
     file_resolver.invalidate_gate_cache()
-    file_resolver.set_resolver(file_resolver.LocalFileResolver())
+    file_resolver._resolver = _orig_resolver
 
 
 # ---------------------------------------------------------------------------

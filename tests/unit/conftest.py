@@ -45,6 +45,32 @@ def _default_admin_users(tmp_path_factory, monkeypatch, request):
 
 
 @pytest.fixture(autouse=True)
+def _default_local_resolver(monkeypatch):
+    """파일 resolver 를 local 로 고정 — 유닛 회귀가 **머신 설정에 의존하지 않도록**.
+
+    `config/file_mode.json` 은 영속이라 dev 머신에 `mode=cloudium` 이 남아 있으면
+    `get_resolver()` 가 cloudium 으로 lazy-init 되고, Cloudium worker(127.0.0.1:8765)가
+    없는 환경에서는 파일을 만지는 모든 라우터가 **403 cloudium-blocked** 로,
+    경로 판정 헬퍼는 `absent` 대신 `unreadable` 로 떨어진다. 즉 **같은 코드가 머신에
+    따라 통과/실패**한다.
+
+    예전엔 `test_file_resolver_cloudium.py` 가 teardown 에서 전역 resolver 를 Local 로
+    바꿔놓고 가는 **누설** 덕분에 전체 실행에서만 우연히 통과했고, 개별 파일을
+    단독 실행하면 깨졌다(test_routers 14건 / test_swsa_router 1건 / impact_changes 1건).
+    그 누설을 없앤 대신 여기서 **기본값으로 명시 고정**한다.
+
+    cloudium 자체를 검증하는 회귀(test_file_resolver_cloudium / test_cloudium_*)는
+    본인 fixture 에서 resolver 를 직접 세팅하므로 fixture 우선순위상 본 default 를
+    덮어쓴다 (`_default_admin_users` 와 동일한 override 규약).
+    """
+    try:
+        from backend.services import file_resolver as fr
+    except ImportError:
+        return  # backend 외 회귀
+    monkeypatch.setattr(fr, "_resolver", fr.LocalFileResolver())
+
+
+@pytest.fixture(autouse=True)
 def _reset_kb_cache():
     """get_kb 프로세스 캐시(D8)가 테스트 간 인스턴스를 누수시키지 않도록 격리.
 

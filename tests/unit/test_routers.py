@@ -53,6 +53,10 @@ client = TestClient(app, raise_server_exceptions=False)
 # that specific request: `client.get(url, headers={"X-User": ""})`.
 client.headers["X-User"] = "test"
 
+# 파일 resolver 는 conftest 의 `_default_local_resolver` 가 local 로 고정한다
+# (머신의 config/file_mode.json=cloudium 에 의존하면 파일 계열 라우터가 전부
+#  403 cloudium-blocked 로 떨어져 이 파일이 단독 실행 시 14건 깨졌었다).
+
 
 # ═══════════════════════════════════════════════════════════════════
 # Health Router
