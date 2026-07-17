@@ -7,8 +7,12 @@ addopts = "-v --tb=short -p no:cacheprovider"
 filterwarnings = ["ignore::DeprecationWarning"]
 
 [tool.coverage.run]
-source = ["report_gen", "generators", "workflow", "backend"]
-omit = ["tests/*", "*/migrations/*", "*/__pycache__/*"]
+# scripts 를 포함해야 **훅 스크립트가 커버리지 게이트에 보인다**.
+# 예전엔 빠져 있어서 훅이 0% 여도 fail_under 게이트가 초록이었다 — 정작 그 훅들이
+# 품질 게이트 본체(quality_check/posttool_dispatch)라 fake-green 의 메타 버전이었다.
+# oneoff/ 는 일회성 진단 스크립트라 제외.
+source = ["report_gen", "generators", "workflow", "backend", "scripts"]
+omit = ["tests/*", "*/migrations/*", "*/__pycache__/*", "scripts/oneoff/*"]
 
 [tool.coverage.report]
 show_missing = true

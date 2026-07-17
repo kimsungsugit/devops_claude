@@ -146,6 +146,54 @@ def _add(severity: str, category: str, file: str, message: str):
     issues.append({"severity": severity, "category": category, "file": file, "message": message})
 
 
+#: "안 돌렸음" 을 뜻하는 상태들. 이 값이 하나라도 있으면 verified=False.
+#: RAN 상태(clean / "N issues" / PASS… / FAIL)는 절대 여기 들어가면 안 된다.
+_NOT_RUN_STATES = {
+    "DISABLED", "TIMEOUT", "no_module_tests", "budget_exceeded",
+    "PARSE_ERROR", "ERROR", "FALLBACK",
+}
+#: not_run 순회 대상 — summary 엔 changed_files 같은 메타도 섞여 있어 전체를 돌면 오염된다.
+_CHECK_KEYS = ("ruff", "pytest", "vite_build", "vitest", "hook_env")
+
+
+def _build_structured(*, not_run: dict | None = None, skipped: str = "") -> dict:
+    """`--json` 계약의 **단일 빌더**.
+
+    조기종료(무변경)와 주 경로가 각자 dict 를 조립하면 한쪽만 바뀌어 드리프트가
+    생긴다(실제로 그랬다). 소비자(`.claude/skills/start-work/SKILL.md` Gate 5)는
+    `counts.critical` 과 `verified`/`not_run` 을 읽으므로 **어느 경로로 끝나든
+    이 키들이 같은 의미로 나와야 한다**.
+
+    ⚠ `verified=False` 면 `critical==0` 이 "깨끗함" 을 뜻하지 않는다 —
+    "Critical 로 분류된 게 없음" 일 뿐이다(아무것도 안 돌렸을 수 있다).
+    """
+    nr = dict(not_run) if not_run is not None else {
+        k: summary[k] for k in _CHECK_KEYS if summary.get(k) in _NOT_RUN_STATES
+    }
+    crit = [i for i in issues if i["severity"] == "Critical"]
+    out = {
+        "round": _ROUND,
+        "focus": _ROUND_FOCUS.get(_ROUND, "full"),
+        "pytest": summary.get("pytest", "skipped"),
+        "ruff": summary.get("ruff", "skipped"),
+        "vite_build": summary.get("vite_build", "skipped"),
+        "vitest": summary.get("vitest", "skipped"),
+        # verified=False 면 "Critical 0"이 "검증했고 깨끗함"을 뜻하지 않는다.
+        "verified": not nr,
+        "not_run": nr,
+        "counts": {
+            "critical": len(crit),
+            "warning": len([i for i in issues if i["severity"] == "Warning"]),
+            "info": len([i for i in issues if i["severity"] == "Info"]),
+        },
+        "next_action": "proceed" if not crit else "fix_required",
+        "issues": issues[:30],
+    }
+    if skipped:
+        out["skipped"] = skipped
+    return out
+
+
 if _hook_env_error:
     # 폴백 중이라는 사실 자체가 finding이다. 이게 없으면 "ruff DISABLED — venv 확인"만
     # 보이고 진짜 원인(_hook_env.py 파손)은 어디에도 안 나온다.
@@ -168,18 +216,10 @@ _FORCE = bool(os.environ.get("QUALITY_CHECK_FORCE")) or _ROUND == 3
 changed_raw = _run(["git", "diff", "--name-only"]).stdout + _run(["git", "diff", "--name-only", "--cached"]).stdout
 if not changed_raw.strip() and not _FORCE:
     if _JSON_ONLY:
-        # verified/not_run을 여기서도 낸다. 없으면 소비자의 .get("verified", True)가
-        # 기본값 True로 떨어져 "아무것도 안 돌렸는데 검증됨"이 된다(fail-open).
-        print(json.dumps({
-            "round": _ROUND,
-            "focus": _ROUND_FOCUS.get(_ROUND, "full"),
-            "counts": {"critical": 0, "warning": 0, "info": 0},
-            "verified": False,
-            "not_run": {"all": "no_changes"},
-            "next_action": "proceed",
-            "issues": [],
-            "skipped": "no_changes",
-        }, ensure_ascii=False))
+        print(json.dumps(
+            _build_structured(not_run={"all": "no_changes"}, skipped="no_changes"),
+            ensure_ascii=False,
+        ))
     sys.exit(0)
 
 changed_files = [f.strip() for f in changed_raw.splitlines() if f.strip()]
@@ -407,36 +447,10 @@ infos = [i for i in issues if i["severity"] == "Info"]
 # Round-aware header
 round_tag = f"Round {_ROUND} ({_ROUND_FOCUS.get(_ROUND, 'full')})" if _ROUND > 0 else "Single run"
 
-# "안 돌린" 상태를 machine 소비자에게 노출한다.
-# 소비자(start-work 등)는 `counts.critical`만 읽고 0이면 proceed 한다. 그런데
-# no_module_tests / TIMEOUT / budget_exceeded 는 Critical이 아니어서, "검증 못 함"이
-# "이상 없음"과 구분되지 않은 채 통과된다. 사람용 문자열에만 성립하던 불변식을
-# 기계 계약에도 노출한다. (기존 키는 그대로 — additive 라 소비자 무손상)
-_NOT_RUN_STATES = {"DISABLED", "TIMEOUT", "no_module_tests", "budget_exceeded", "PARSE_ERROR", "ERROR", "FALLBACK"}
-# summary 전체가 아니라 **검사 키만** 순회한다. summary엔 changed_files 같은 메타도
-# 섞여 있어서, 나중에 누가 메타 값으로 "TIMEOUT" 같은 문자열을 넣으면 오염된다.
-_CHECK_KEYS = ("ruff", "pytest", "vite_build", "vitest", "hook_env")
-_not_run = {k: summary[k] for k in _CHECK_KEYS if summary.get(k) in _NOT_RUN_STATES}
-
-# Structured result (machine-parseable)
-structured = {
-    "round": _ROUND,
-    "focus": _ROUND_FOCUS.get(_ROUND, "full"),
-    "pytest": summary.get("pytest", "skipped"),
-    "ruff": summary.get("ruff", "skipped"),
-    "vite_build": summary.get("vite_build", "skipped"),
-    "vitest": summary.get("vitest", "skipped"),
-    # verified=False 면 "Critical 0"이 "검증했고 깨끗함"을 뜻하지 않는다.
-    "verified": not _not_run,
-    "not_run": _not_run,
-    "counts": {
-        "critical": len(critical),
-        "warning": len(warnings),
-        "info": len(infos),
-    },
-    "next_action": "proceed" if not critical else "fix_required",
-    "issues": issues[:30],
-}
+# Structured result (machine-parseable) — 조기종료 경로와 **같은 빌더**를 쓴다.
+# (예전엔 두 곳이 각자 dict 를 조립해 한쪽만 바뀌는 드리프트가 필연이었다)
+structured = _build_structured()
+_not_run = structured["not_run"]
 
 _exit_code = 1 if critical else 0
 
