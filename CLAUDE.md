@@ -115,6 +115,9 @@ python -m pytest tests/ -v --cov=backend --cov=workflow --cov=report_gen --cov-r
 
 전체 목록은 `.claude/skills/*/SKILL.md` (한 단계만 스캔 — 중첩 디렉터리는 discovery 안 됨).
 
+> **frontmatter 규약**: 자동 호출 판정에 쓰이는 건 **`description` + `when_to_use`** 다(합산 1,536자 제한, 초과분은 잘림). 트리거 문구는 반드시 **`when_to_use:`** 에 쓸 것 —
+> `trigger:` 는 **공식 필드가 아니라 조용히 무시된다**(경고도 없음). 2026-07-17까지 9개 스킬이 `trigger:` 를 써서 **트리거 문구가 전부 무효**였다(`/start-work` 의 "다 고쳐/이어서/1번부터" 포함). 알 수 없는 필드는 전부 같은 식으로 사라지므로 새 필드를 쓸 땐 공식 목록을 확인할 것.
+
 | 스킬 | 용도 |
 |------|------|
 | `/deploy` | 배포 실행·상태 확인만 (파이프라인 트리거) |

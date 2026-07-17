@@ -1,7 +1,7 @@
 ---
 name: deploy-release
 description: "**릴리스 준비** — 사전 체크리스트(테스트/프론트 빌드/.env.example/CHANGELOG) 검증 후 **버전 태깅**(git tag v1.x.x)까지. 새 버전을 끊을 때 씁니다. 태깅 없이 push→파이프라인 트리거·상태 확인만 하려면 `/deploy`를 쓰세요."
-trigger: 릴리스, 새 버전 끊기, 버전 태깅, 릴리스 전 체크리스트 요청 시
+when_to_use: 릴리스, 새 버전 끊기, 버전 태깅, 릴리스 전 체크리스트 요청 시
 ---
 
 # /deploy-release 스킬

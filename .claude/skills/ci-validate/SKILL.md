@@ -1,7 +1,7 @@
 ---
 name: ci-validate
 description: CI/CD 파이프라인(GitLab CI, GitHub Actions) 정의를 검증하고 pytest 스위트를 실행합니다.
-trigger: CI 파이프라인, 테스트 실행, pytest, 빌드 검증, GitLab CI, GitHub Actions 요청 시
+when_to_use: CI 파이프라인, 테스트 실행, pytest, 빌드 검증, GitLab CI, GitHub Actions 요청 시
 ---
 
 # /ci-validate 스킬

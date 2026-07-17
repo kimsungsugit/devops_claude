@@ -1,7 +1,7 @@
 ---
 name: start-work
 description: 모든 개발 작업의 진입점. 계획→설계→구현→테스트→리뷰→문서화를 강제하며, 변경 영역에 따라 적절한 에이전트를 자동 라우팅합니다.
-trigger: |
+when_to_use: |
   코드 변경을 수반하는 모든 요청. 신규 작업과 후속 지시 모두 포함:
   - 신규: 기능 추가, 버그 수정, 리팩토링, 개선, 구현, 개발, 만들어줘, 수정해줘, 고쳐줘, 변경해줘
   - 후속/연속: 다 고쳐, 다 수정, 이어서, 이어서 진행, 추가로, 다음 진행, 후속 처리, 계속 진행, 마저 해줘, 나머지도, 다른것도
@@ -97,7 +97,7 @@ with get_session() as s:
 
 #### Gate 5 진입 전: review_depth 결정
 
-review_depth (meta / light / standard / deep) 정의·키워드 트리거·ASIL 자동 판정·변경 통계 측정 시점은 모두 **`.claude/agents/reviewer/reviewer.md` `## 검토 깊이 자동 판정`** 단일 출처를 따른다.
+review_depth (meta / light / standard / deep) 정의·키워드 트리거·ASIL 자동 판정·변경 통계 측정 시점은 모두 **`.claude/agents/reviewer/reviewer.md` `### 검토 깊이 자동 판정`** 단일 출처를 따른다.
 
 Gate 5에서의 동작:
 - **meta** → Gate 5 생략, 메인 에이전트가 X4/X5/X6 정책 일관성만 직접 점검

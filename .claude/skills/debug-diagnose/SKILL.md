@@ -1,7 +1,7 @@
 ---
 name: debug-diagnose
 description: 버그, 오류, 성능 이슈를 체계적으로 진단합니다. 실제 에러 패턴, 로그 경로, 장애 분류 코드 내장.
-trigger: 버그, 오류, 에러, 안됨, 실패, 느림, hanging, 크래시, 트러블슈팅 요청 시
+when_to_use: 버그, 오류, 에러, 안됨, 실패, 느림, hanging, 크래시, 트러블슈팅 요청 시
 ---
 
 # /debug-diagnose 스킬

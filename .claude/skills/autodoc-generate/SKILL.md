@@ -1,7 +1,7 @@
 ---
 name: autodoc-generate
 description: AutoDoc 시스템으로 PPT, HTML 슬라이드, 프로젝트 포털, API 문서를 자동 생성합니다. 다국어 코드 분석 및 RAG 통합.
-trigger: PPT 생성, 슬라이드, 프로젝트 포털, API 문서, AutoDoc, 프레젠테이션, 다국어 코드 분석 요청 시
+when_to_use: PPT 생성, 슬라이드, 프로젝트 포털, API 문서, AutoDoc, 프레젠테이션, 다국어 코드 분석 요청 시
 ---
 
 # /autodoc-generate 스킬

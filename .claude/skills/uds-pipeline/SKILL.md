@@ -1,7 +1,7 @@
 ---
 name: uds-pipeline
 description: UDS(Unit Design Specification) 문서 생성 파이프라인을 실행합니다. C 소스 파싱 → AI 분석 → 품질 검증 → DOCX 빌드 전 과정.
-trigger: UDS 생성, 문서 생성 파이프라인, 단위설계서 작성 요청 시
+when_to_use: UDS 생성, 문서 생성 파이프라인, 단위설계서 작성 요청 시
 ---
 
 # /uds-pipeline 스킬

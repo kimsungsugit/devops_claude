@@ -1,7 +1,7 @@
 ---
 name: report-quality
 description: 보고서 품질을 검증하고 개선합니다. analysis_summary 확장, 커버리지 정규화, 정적분석 결과 통합, Domain Tests 수정.
-trigger: 보고서 품질, 리포트 개선, analysis_summary, 커버리지 정규화, Clang-Tidy 요청 시
+when_to_use: 보고서 품질, 리포트 개선, analysis_summary, 커버리지 정규화, Clang-Tidy 요청 시
 ---
 
 # /report-quality 스킬

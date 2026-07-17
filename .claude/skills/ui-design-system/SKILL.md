@@ -1,7 +1,7 @@
 ---
 name: ui-design-system
 description: React 프론트엔드의 디자인 시스템을 구축합니다. 디자인 토큰, CSS 변수화, 토스트/다이얼로그 컴포넌트, 상태 표준화.
-trigger: 디자인 토큰, CSS 변수, 하드코딩 컬러, 토스트, 확인 다이얼로그, UI 컴포넌트 표준화 요청 시
+when_to_use: 디자인 토큰, CSS 변수, 하드코딩 컬러, 토스트, 확인 다이얼로그, UI 컴포넌트 표준화 요청 시
 ---
 
 # /ui-design-system 스킬

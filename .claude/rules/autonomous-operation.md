@@ -56,11 +56,16 @@ mingw(`C:/msys64/mingw64/bin/`)를 먼저 잡는데 거기엔 **bcrypt·ruff·mc
 |------|----------------|------------------------|
 | 빌드/테스트 리포트 분석 | `report_summary`, `report_findings`, `report_coverage`, `report_log` | MCP에 없는 항목만 |
 | Git 상태 조회 | `git_status`, `git_diff`, `git_log`, `git_changed_files` | 복잡한 형식 변환 필요 시 |
-| 코드 검색 | `search_code` (file_glob/exclude_glob 필터 내장) | regex 매우 복잡할 때 |
+| 코드 검색/읽기 | `search_code` (file_glob/exclude_glob 필터 내장), `read_source_file` | regex 매우 복잡할 때 |
 | 문서 검색/열기 | `list_docs`, `search_docs`, `read_doc` | — |
 | Jenkins 빌드 캐시 분석 | `jenkins_build_summary`, `jenkins_build_status` | — |
 | Git 스테이징 | `git_stage_files` (경로 검증 내장) | — |
 | 파일 쓰기 (project_root 하위) | `write_file`, `replace_in_file` | Edit/Write 도구로 충분한 일반 케이스 |
+| MCP 서버 상태 확인 | `health_check` (5개 서버: report/git/code/docs/jenkins) | — |
+| 리포트 캐시 초기화 | `clear_report_cache` | — |
+
+> 위 표는 **20개 전부**를 담는다(2026-07-17 프로그램 대조). 도구를 추가하면 여기도 갱신할 것:
+> `.venv/Scripts/python.exe -c "import re,pathlib; print(len(re.findall(r'@mcp\.tool\(\)', pathlib.Path('backend/mcp/stdio_server.py').read_text(encoding='utf-8'))))"`
 
 **Playwright MCP**: UI 검증이 필요하면 자동으로 브라우저 열어서 확인.
 **RAG/Knowledge Base**: 문서 생성 시 기존 지식베이스 자동 참조.

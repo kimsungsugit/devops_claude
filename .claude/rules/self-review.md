@@ -4,14 +4,14 @@
 
 코드 변경 작업을 마치고 사용자에게 완료 보고하기 직전, **변경 규모에 맞는 깊이로 reviewer 에이전트를 호출**하여 비판적 자체 검토를 수행한다. PostToolUse hook의 syntax/lint는 기계적 검사일 뿐 설계·논리·동시성 같은 비판적 검토를 대체하지 않는다.
 
-**review_depth 정의 단일 출처**: `.claude/agents/reviewer/reviewer.md` `## 검토 깊이 자동 판정` 섹션을 참조. meta / light / standard / deep 4단계, 키워드 강제 승격, ASIL 자동 판정, 변경 통계 측정 시점 모두 거기에 정의돼 있다. 본 문서와 SKILL.md들은 그 정의를 그대로 따른다.
+**review_depth 정의 단일 출처**: `.claude/agents/reviewer/reviewer.md` `### 검토 깊이 자동 판정` 섹션을 참조. meta / light / standard / deep 4단계, 키워드 강제 승격, ASIL 자동 판정, 변경 통계 측정 시점 모두 거기에 정의돼 있다. 본 문서와 SKILL.md들은 그 정의를 그대로 따른다.
 
 ## 호출 정책 (review_depth 별)
 - **meta** (정책/문서만 변경) → reviewer 생략, 메인 에이전트가 X4/X5/X6만 직접 점검
 - **light** → reviewer 생략 가능, 단 미니 체크리스트(아래) 11개 항목은 메인이 직접 점검
 - **standard** → reviewer **1회 호출** (S/P/Q/R/F + X1~X9 전체)
 - **deep** → reviewer 적응형 3~5회 루프 (start-work Gate 5와 동일)
-- **혼합형** (코드 + 문서 동시 변경) → reviewer.md `## 검토 깊이 자동 판정` `#### 혼합형` 규칙 적용 — 코드/문서 그룹 분리 후 max(depth) 채택, 출력에 정책 일관성 섹션 별도 보고
+- **혼합형** (코드 + 문서 동시 변경) → reviewer.md `### 검토 깊이 자동 판정` `#### 혼합형` 규칙 적용 — 코드/문서 그룹 분리 후 max(depth) 채택, 출력에 정책 일관성 섹션 별도 보고
 
 ## 생략 조건 (light로 강등)
 - 사용자가 "검토 생략" / "리뷰 없이" / "빠르게" 명시
