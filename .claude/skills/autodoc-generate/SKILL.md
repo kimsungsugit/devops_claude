@@ -36,7 +36,18 @@ AutoDoc 시스템을 활용하여 다양한 형태의 문서를 자동 생성합
 - Markdown 테이블 생성 (메서드, URL, 파라미터)
 
 ## 다국어 코드 분석
-지원 언어 (8개):
+
+⚠ 언어 목록은 **모듈마다 다르다.** "8개"라는 단일 숫자는 어느 쪽과도 맞지 않았다
+(2026-07-17 실측). 개수를 고정 기재하지 말고 아래 SSOT 를 직접 볼 것:
+
+| 모듈 | 목록 | 개수 |
+|------|------|------|
+| `scripts/multi_lang_analyzer.py` `_EXT_LANG_MAP` | c, cpp, cs, java, go, ts, js — **Python 없음** | 7 |
+| `scripts/analyze_all.py` `LANG_EXTENSIONS` | Python, C, C++, C#, Java, JavaScript, TypeScript, Go, **Rust** | 9 |
+
+(Python 은 별도 `scripts/ast_analyzer.py` 가 담당. `tests/test_multi_lang.py` 가
+검증하는 건 위 **7개** 쪽이다.)
+
 | 언어 | 분석 항목 |
 |------|-----------|
 | C | 함수, 전역변수, include, 매크로 |
@@ -46,7 +57,7 @@ AutoDoc 시스템을 활용하여 다양한 형태의 문서를 자동 생성합
 | Go | 구조체, 인터페이스, goroutine, 채널 |
 | TypeScript | 클래스, 인터페이스, 타입, 이넘 |
 | JavaScript | 함수, 클래스, 모듈, export |
-| Python | 클래스, 함수, 데코레이터, import |
+| Python | 클래스, 함수, 데코레이터, import (※ `ast_analyzer.py` 경로) |
 
 ## RAG 통합
 - DuckDuckGo / Tavily 웹 검색
@@ -55,13 +66,23 @@ AutoDoc 시스템을 활용하여 다양한 형태의 문서를 자동 생성합
 - 캐시 지원
 
 ## 실행
-```bash
-# 테스트
-cd "${AUTODOC_DIR:-.}"
-pytest tests/ -v
 
-# PPT 생성 예시
-python -c "from autodoc import generate_pptx; generate_pptx('input.md', 'output.pptx')"
+> ⚠ **AutoDoc 은 이 저장소가 아니라 별도 트리**(`D:/Project/Program/AutoDoc`)다.
+> `AUTODOC_DIR` 은 live `.env` 에 **없고** `.env.example:87` 이 `AUTODOC_DIR=.` 이라
+> `cd "${AUTODOC_DIR:-.}"` 는 **Release_claude 루트로 전개**된다 → `pytest tests/` 가
+> 엉뚱한 3492개 스위트(약 4분 40초)를 돌린다. 기본값에 의존하지 말고 명시할 것.
+
+```bash
+# 테스트 — AUTODOC_DIR 이 실제 AutoDoc 트리를 가리키는지 먼저 확인
+AUTODOC_DIR="${AUTODOC_DIR:-D:/Project/Program/AutoDoc}"
+ls "$AUTODOC_DIR/scripts/generate_ppt.py" || { echo "AUTODOC_DIR 이 AutoDoc 트리가 아님"; exit 1; }
+cd "$AUTODOC_DIR" && python -m pytest tests/ -v   # ← AutoDoc 트리의 인터프리터 규칙을 따를 것
+
+# PPT 생성 — `autodoc` 이라는 패키지는 **존재하지 않는다**(ImportError).
+# 실제 엔트리포인트:
+#   scripts/generate_ppt.py       (CLI)
+#   scripts/pptx_gen/presentation.py
+cd "$AUTODOC_DIR" && python scripts/generate_ppt.py --help
 ```
 
 ## 핵심 파일

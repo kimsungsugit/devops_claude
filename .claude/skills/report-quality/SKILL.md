@@ -54,7 +54,13 @@ trigger: 보고서 품질, 리포트 개선, analysis_summary, 커버리지 정�
 cat reports/analysis_summary.md | wc -l  # 목표: 100줄+
 
 # 커버리지 비교
-python -c "import json; print(json.load(open('reports/coverage.json'))['line_rate'])"
+# ⚠ reports/coverage.json 은 **존재하지 않는다**(FileNotFoundError).
+#    실제 산출물은 Cobertura XML 이고 속성명도 `line_rate` 가 아니라 `line-rate`(하이픈).
+.venv/Scripts/python.exe -c "
+import xml.etree.ElementTree as ET
+r = ET.parse('reports/coverage/coverage.xml').getroot()
+print('line-rate=%s branch-rate=%s' % (r.get('line-rate'), r.get('branch-rate')))
+"
 ```
 
 ## 출력

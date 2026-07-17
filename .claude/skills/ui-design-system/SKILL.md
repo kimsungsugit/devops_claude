@@ -20,10 +20,14 @@ trigger: 디자인 토큰, CSS 변수, 하드코딩 컬러, 토스트, 확인 �
 - 15+ 인터랙티브 요소에 hover/focus 상태 없음
 
 ## 대상 파일
-- `frontend-v2/src/App.css` (4,500+ 줄)
-- `frontend-v2/src/App.jsx` (5,015 줄)
+- `frontend-v2/src/index.css` — **유일한 최상위 CSS** (2026-07-17 실측 1,817줄)
+- `frontend-v2/src/App.jsx` (2026-07-17 실측 382줄)
 - `frontend-v2/src/views/` 내 리포트 뷰들
 - `frontend-v2/src/components/` 공통 컴포넌트
+
+> ⚠ 과거 이 절은 `App.css`(4,500+줄)·`App.jsx`(5,015줄)를 지목했는데 **App.css 는
+> 존재하지 않고** App.jsx 는 실제 382줄(13배 차이)이었다. 착수 전 `ls`/`wc -l` 로
+> 재측정할 것 — 없는 파일을 대상으로 잡으면 아래 검증이 **fake-green** 이 된다.
 
 ## P0 작업 (Critical)
 
@@ -78,9 +82,20 @@ grep -rn "rgb(" frontend-v2/src/ --include="*.css" --include="*.jsx"
 - G: 빈 상태 UI 패턴
 
 ## 검증
+
+> ⚠ **대상 파일 존재를 먼저 확인**하고 grep 할 것. 없는 파일을 grep 하면 출력이
+> 비어 `wc -l` 이 **0** 을 내고, 그게 "목표: 0 충족"으로 읽힌다 — 실제로 이 절이
+> 존재하지 않는 `App.css` 를 grep 해 **영원히 통과**하고 있었다(fake-green).
+> 이 저장소가 훅에서 온종일 싸운 바로 그 패턴이다.
+
 ```bash
-# 하드코딩 컬러 잔존 확인
-grep -rn "#[0-9a-fA-F]\{6\}" frontend-v2/src/App.css | wc -l  # 목표: 0
+# 0) 대상 존재 확인 — 이게 없으면 아래 결과는 무의미
+ls -l frontend-v2/src/index.css
+
+# 하드코딩 컬러 잔존 확인 (inline style + CSS 양쪽)
+grep -rnE "#[0-9a-fA-F]{3,6}|rgb\(" frontend-v2/src --include="*.css" --include="*.jsx" | wc -l
+#   → 목표: 감소 추세. 2026-07-17 실측 baseline = 117 (inline style 기준)
+#     "0" 을 목표로 적지 말 것 — 위 fake-green 을 다시 만든다
 
 # 빌드 확인
 cd frontend-v2 && npm run build

@@ -35,13 +35,39 @@ C 소스 코드로부터 UDS 문서를 자동 생성하는 전체 파이프라�
 - 출력: `reports/` 디렉토리
 
 ## 실행 모드
-```bash
-# 드라이런 (검증만)
-python -c "from workflow.impact_orchestrator import run; run(dry_run=True)"
 
-# 실제 생성
-python -c "from workflow.impact_orchestrator import run; run(dry_run=False, auto_generate=True)"
+⚠ `from workflow.impact_orchestrator import run` 은 **존재하지 않는 심볼**이었다(ImportError).
+유일한 엔트리포인트는 `run_impact_update(trigger, *, options=None, on_progress=None)` 이고,
+`dry_run`/`auto_generate` 는 **함수 인자가 아니라 `ChangeTrigger` 속성**이다.
+
+```bash
+# 드라이런 (검증만) — 맨 python 금지, .venv 필수 (rules/autonomous-operation.md)
+.venv/Scripts/python.exe -c "
+from workflow.change_trigger import ChangeTrigger
+from workflow.impact_orchestrator import run_impact_update
+t = ChangeTrigger(
+    trigger_type='manual', scm_id='<scm_id>', source_root='<source_root>',
+    scm_type='svn', base_ref='<rev>', changed_files=['a.c'],
+    dry_run=True,
+)
+print(run_impact_update(t))
+"
+
+# 실제 생성 (AUTO 대상 실행 — auto_generate=False 면 AUTO→FLAG 로 강등된다)
+.venv/Scripts/python.exe -c "
+from workflow.change_trigger import ChangeTrigger
+from workflow.impact_orchestrator import run_impact_update
+t = ChangeTrigger(
+    trigger_type='manual', scm_id='<scm_id>', source_root='<source_root>',
+    scm_type='svn', base_ref='<rev>', changed_files=['a.c'],
+    dry_run=False, auto_generate=True,
+)
+print(run_impact_update(t))
+"
 ```
+`scm_id`/`source_root`/`base_ref` 는 `config/scm_registry.json` 의 등록값을 쓸 것
+(현재 hdpdm01 / kjpds02 / kjpds02_pv 3개 — 아래 §참고 파일).
+탐색 범위 조정은 `ImpactOptions(max_hop=…, same_module_only=…)` 를 `options=` 로 전달.
 
 ## 품질 게이트
 - [ ] 모든 함수에 증거 근거 있음
