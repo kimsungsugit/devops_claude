@@ -15,10 +15,13 @@ Checks:
 커밋이면 건너뛴다. 이 스크립트의 기본 모드는 변경 모듈 스코프(1급 모듈의
 31.6%만 매핑)라 전체 회귀를 대신하지 못한다.
 
-⚠ 모듈 스코프의 함정: 이 repo의 일부 테스트는 **단독 실행 시 실패**한다
-(test_routers.py = 단독 14 F / 전체 스위트 안에선 0 F — 다른 파일이 만들어 둔
-상태에 의존하는 격리 오염). 즉 여기서 나온 FAIL 이 진짜 회귀가 아니라 격리
-문제일 수 있다 → 의심되면 전체 스위트로 재확인할 것.
+모듈 스코프가 성립하려면 각 테스트 파일이 **단독으로 통과**해야 한다(그래야 여기서
+나온 FAIL 을 진짜 회귀로 믿을 수 있다). 한때 test_routers.py 가 단독 14 F / 전체 0 F
+였는데, 원인은 test_file_resolver_cloudium.py 가 teardown 에서 전역 resolver 를
+Local 로 **고정**(복원이 아니라)하고 가는 누설이었다 → 수정됨(584833e).
+`tests/unit/conftest.py` 의 `_default_local_resolver` / `_default_admin_users` 가
+머신 상태로부터 격리한다. **전역 싱글톤을 teardown 에서 특정 값으로 고정하지 말 것 —
+반드시 원래 값 복원.**
 
 설계 불변식: **못 돌렸으면 PASS라고 쓰지 않는다.** 도구 부재는 DISABLED,
 시간 초과는 TIMEOUT, 대응 테스트 없음은 no_module_tests로 구분 보고한다.
@@ -244,8 +247,8 @@ else:
 # ⚠ 커버리지 한계: 1급 모듈 중 test_<stem>.py 매핑은 66/209(31.6%)뿐이고,
 #   모듈 스코프는 교차 모듈 회귀를 못 잡는다. 이 게이트는 advisory이며
 #   전체 회귀를 대신하지 않는다.
-# ⚠ 격리 오염: 단독 실행 시 실패하는 테스트가 있다(위 독스트링 참조) → 여기서 나온
-#   FAIL 이 격리 문제일 수 있으니 의심되면 전체 스위트로 재확인.
+# ⚠ 단독 실행 전제: 각 테스트 파일이 단독으로 통과해야 여기 FAIL 을 믿을 수 있다
+#   (격리 규약은 위 독스트링 + tests/unit/conftest.py 참조).
 def _module_tests(files: list[str]) -> list[str]:
     targets: set[str] = set()
     for f in files:
