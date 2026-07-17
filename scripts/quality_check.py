@@ -24,8 +24,11 @@ Stop 훅 예산에 안 들어가므로 여기서 돌리지 않고 `--round 3`에
 non-blocking이다 — `structured.not_run` 을 함께 읽을 것.
 
 Env:
-    QUALITY_CHECK_FORCE=1    캐시·무변경 조기종료 우회 (CI 전수 점검용)
-    QUALITY_CHECK_BUDGET=N   전역 예산 초 (기본 240) — Stop 훅 timeout 안에 들어가야 함
+    QUALITY_CHECK_FORCE=1    무변경 조기종료 우회 (clean tree에서도 전수 점검)
+                             — `--round 3`은 이 값 없이도 강제 실행된다
+    QUALITY_CHECK_BUDGET=N   전역 예산 초 (기본 240, round 3은 1800)
+                             — Stop 훅 timeout(현재 300) 안에 들어가야 함
+    DEVOPS_HOOK_PY=<path>    인터프리터 강제 지정 (진단·CI용)
 
 Usage:
     python scripts/quality_check.py              # single run
@@ -39,6 +42,7 @@ import argparse
 import json
 import os
 import py_compile
+import re
 import shutil
 import subprocess
 import sys
@@ -49,19 +53,24 @@ from pathlib import Path
 # 훅 커맨드의 `2>/dev/null || true`가 traceback을 삼켜 **게이트가 통째로 침묵**하므로
 # (= 이 스크립트가 막으려는 바로 그 fake-green) 폴백을 둔다.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+_hook_env_error: str | None = None
 try:
     import _hook_env
 
     _project_py = _hook_env.project_py
     _module_missing = _hook_env.module_missing
-except Exception:  # pragma: no cover - 방어
+except Exception as _e:  # pragma: no cover - 방어
+    # 폴백 사실을 반드시 남긴다. 안 그러면 "ruff DISABLED — venv 확인" 만 보이는데
+    # 진짜 원인은 _hook_env.py 파손이라 개발자를 애먼 venv 디버깅으로 보낸다.
+    _hook_env_error = f"{type(_e).__name__}: {_e}"
+
     def _project_py() -> str:
         return sys.executable
 
     def _module_missing(r: subprocess.CompletedProcess) -> bool:
         tail = (r.stderr or "").strip().splitlines()
-        return bool(r.returncode != 0 and tail and "No module named" in tail[-1]
-                    and "ModuleNotFoundError" not in tail[-1])
+        return bool(r.returncode != 0 and tail
+                    and re.match(r"^\S+: No module named \w+$", tail[-1].strip()))
 
 # Parse CLI args
 _parser = argparse.ArgumentParser(add_help=False)
@@ -131,22 +140,40 @@ def _add(severity: str, category: str, file: str, message: str):
     issues.append({"severity": severity, "category": category, "file": file, "message": message})
 
 
+if _hook_env_error:
+    # 폴백 중이라는 사실 자체가 finding이다. 이게 없으면 "ruff DISABLED — venv 확인"만
+    # 보이고 진짜 원인(_hook_env.py 파손)은 어디에도 안 나온다.
+    _add("Critical", "hook", "scripts/_hook_env.py",
+         "_hook_env import 실패 → 인터프리터 해석 폴백 중(도구가 DISABLED로 보일 수 있음). "
+         f"venv가 아니라 이 파일을 먼저 확인: {_hook_env_error}")
+    summary["hook_env"] = "FALLBACK"
+
+
 # ── 1. Detect changed files ──────────────────────────────────────────
 # Early exit: nothing changed in working tree → skip all checks. This is the
 # common case for conversational turns (질의/설명/계획 논의) where Stop hook
 # would otherwise spend ~2s just to report 0 issues. Set QUALITY_CHECK_FORCE=1
 # to bypass (e.g. CI sanity sweep on a clean tree).
+#
+# round 3(전체 회귀)은 강제 실행한다. 이 모드를 돌릴 시점은 보통 **커밋 직후**인데
+# 그때 트리가 clean이라, 조기 종료하면 "전체 회귀를 돌렸다"면서 실제로는 아무것도
+# 안 도는 no-op이 된다 — 이 스크립트가 없애려는 fake-green과 같은 결말.
+_FORCE = bool(os.environ.get("QUALITY_CHECK_FORCE")) or _ROUND == 3
 changed_raw = _run(["git", "diff", "--name-only"]).stdout + _run(["git", "diff", "--name-only", "--cached"]).stdout
-if not changed_raw.strip() and not os.environ.get("QUALITY_CHECK_FORCE"):
+if not changed_raw.strip() and not _FORCE:
     if _JSON_ONLY:
+        # verified/not_run을 여기서도 낸다. 없으면 소비자의 .get("verified", True)가
+        # 기본값 True로 떨어져 "아무것도 안 돌렸는데 검증됨"이 된다(fail-open).
         print(json.dumps({
             "round": _ROUND,
             "focus": _ROUND_FOCUS.get(_ROUND, "full"),
             "counts": {"critical": 0, "warning": 0, "info": 0},
+            "verified": False,
+            "not_run": {"all": "no_changes"},
             "next_action": "proceed",
             "issues": [],
             "skipped": "no_changes",
-        }))
+        }, ensure_ascii=False))
     sys.exit(0)
 
 changed_files = [f.strip() for f in changed_raw.splitlines() if f.strip()]
@@ -229,7 +256,9 @@ def _module_tests(files: list[str]) -> list[str]:
 _full_suite = _ROUND == 3
 _test_targets = ["tests/unit/"] if _full_suite else _module_tests(py_files)
 
-if not py_files:
+if not py_files and not _full_suite:
+    # 전체 회귀(round 3)는 변경 파일 목록과 무관하게 돈다 — 커밋 직후 clean tree가
+    # 정확히 그걸 돌릴 시점이라, py_files가 비었다고 skip하면 no-op이 된다.
     summary["pytest"] = "skipped"
 elif not _test_targets:
     # "PASS"라고 쓰면 안 된다 — 아무것도 안 돌렸다.
@@ -375,8 +404,11 @@ round_tag = f"Round {_ROUND} ({_ROUND_FOCUS.get(_ROUND, 'full')})" if _ROUND > 0
 # no_module_tests / TIMEOUT / budget_exceeded 는 Critical이 아니어서, "검증 못 함"이
 # "이상 없음"과 구분되지 않은 채 통과된다. 사람용 문자열에만 성립하던 불변식을
 # 기계 계약에도 노출한다. (기존 키는 그대로 — additive 라 소비자 무손상)
-_NOT_RUN_STATES = {"DISABLED", "TIMEOUT", "no_module_tests", "budget_exceeded", "PARSE_ERROR", "ERROR"}
-_not_run = {k: v for k, v in summary.items() if v in _NOT_RUN_STATES}
+_NOT_RUN_STATES = {"DISABLED", "TIMEOUT", "no_module_tests", "budget_exceeded", "PARSE_ERROR", "ERROR", "FALLBACK"}
+# summary 전체가 아니라 **검사 키만** 순회한다. summary엔 changed_files 같은 메타도
+# 섞여 있어서, 나중에 누가 메타 값으로 "TIMEOUT" 같은 문자열을 넣으면 오염된다.
+_CHECK_KEYS = ("ruff", "pytest", "vite_build", "vitest", "hook_env")
+_not_run = {k: summary[k] for k in _CHECK_KEYS if summary.get(k) in _NOT_RUN_STATES}
 
 # Structured result (machine-parseable)
 structured = {

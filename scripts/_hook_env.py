@@ -18,6 +18,7 @@ pre-commit은 `.venv` 두 곳 다음에 PATH `python`으로 떨어지고, 여기
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -49,22 +50,24 @@ def project_py() -> str:
     return sys.executable
 
 
+#: runpy가 `python -m <없는모듈>` 에 내는 시그니처.
+#: "C:/...python.exe: No module named ruff" — 실행파일 경로 + 따옴표 없는 모듈명,
+#: 예외 클래스명 없음. **allowlist**(이 형태만 True)라 사용자 코드가 내는
+#: `ModuleNotFoundError: No module named 'x'` / `ImportError("No module named x")`
+#: 는 자연히 배제된다. 나쁜 형태를 열거하는 blocklist였다면 계속 샌다.
+_RUNPY_MISSING = re.compile(r"^\S+: No module named \w+$")
+
+
 def module_missing(r: subprocess.CompletedProcess) -> bool:
     """`python -m <mod>` 에서 **그 도구 자체가** 없어서 실패했는지 — 침묵 degrade 방지용.
 
-    stderr에 "No module named"가 있는지만 보면 **사용자 코드의**
-    ModuleNotFoundError까지 삼킨다. 예: conftest.py가 없는 패키지를 import하면
-    pytest는 rc=4 + stderr에 `ModuleNotFoundError: No module named 'x'` 를 내는데,
-    그걸 "pytest 미설치"로 보고하면 개발자를 venv 디버깅으로 오도한다.
-    runpy가 도구 부재에 내는 시그니처는 stderr **마지막 줄**의
-    `No module named <mod>` (따옴표 없음)이므로 거기에 앵커한다.
+    stderr에 "No module named"가 있는지만 보면 **사용자 코드의** import 실패까지
+    삼킨다. 예: conftest.py가 없는 패키지를 import하면 pytest는 rc=4 +
+    `ModuleNotFoundError: No module named 'x'` 를 내는데, 그걸 "pytest 미설치"로
+    보고하면 개발자를 애먼 venv 디버깅으로 보낸다. 그래서 runpy 시그니처에만
+    앵커한다(stderr 마지막 줄 기준).
     """
     if r.returncode == 0:
         return False
     tail = (r.stderr or "").strip().splitlines()
-    if not tail:
-        return False
-    # runpy: "C:/...python.exe: No module named ruff"
-    # 사용자 코드: "ModuleNotFoundError: No module named 'bcrypt'"  ← 따옴표 있음
-    last = tail[-1]
-    return "No module named" in last and "ModuleNotFoundError" not in last
+    return bool(tail and _RUNPY_MISSING.match(tail[-1].strip()))
