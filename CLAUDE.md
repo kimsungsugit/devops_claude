@@ -75,7 +75,9 @@ ASIL 등급은 다음 순서로 판별한다:
 - **Backend**: FastAPI (Python 3.12) — `backend/`
 - **Frontend**: React + Vite — `frontend-v2/` (port 5174)
 - **LLM**: Google Gemini 3 Pro / 2.5 Flash — `workflow/ai.py`
-- **CI/CD**: GitHub Actions + GitLab CI + Jenkins
+- **CI**: GitHub Actions(`ci.yml` = syntax-check + unit-tests) + GitLab CI(lint/test/frontend). **검증 전용 — 배포 스텝 없음**
+- **기동/배포**: `start.bat` + `backend\.venv` (사용자 PC). **Docker/nginx 설정은 저장소에 있으나 미사용**(과거 검토) — 되살리려면 tkinter 부재로 파일 선택 불가 + cloudium worker가 컨테이너 localhost라 사용자 PC에 안 닿는 문제부터 해결 필요
+- **Jenkins**: 이 앱의 CD가 아니라 **분석 대상 데이터 소스**(빌드 산출물을 읽어옴 — `/api/jenkins/*`)
 - **Report Engine**: `report_gen/`, `generators/`
 
 ## Build & Test Commands
@@ -116,7 +118,7 @@ python -m pytest tests/ -v --cov=backend --cov=workflow --cov=report_gen --cov-r
 | 스킬 | 용도 |
 |------|------|
 | `/deploy` | 배포 실행·상태 확인만 (파이프라인 트리거) |
-| `/deploy-release` | Docker 빌드 + CI 검증 + 버전 태깅까지 릴리스 풀체인 |
+| `/deploy-release` | 릴리스 준비 — 사전 체크리스트 + 버전 태깅(`git tag v1.x.x`) + CI 상태 확인 |
 | `/health-check` | 백엔드(:9000)/프론트(:5174) 상태 점검 |
 | `/impact` | 백엔드 API 경유 영향도 분석 (SVN/Git 변경분 → 영향 문서) |
 | `/impact-analysis` | 로컬 오케스트레이터 dry-run — 문서 재생성 **판정**까지 |
@@ -181,7 +183,7 @@ python -m pytest tests/ -v --cov=backend --cov=workflow --cov=report_gen --cov-r
 - **절대 HTTP body로 password를 받지 않음** — env 또는 registry에서만 해결
 - 우선순위: `scm_id` → `repo_url` 매칭 → entry의 `scm_password_env` → 전역 `DEVOPS_SCM_PASSWORD`
 - `scm_password_env`는 shell identifier 패턴만 허용하고 `PATH`/`HOME` 등 시스템 변수 블랙리스트
-- Docker 이미지는 `subversion` 포함(Dockerfile), 호스트 SVN auth 캐시 없음 → env 주입 필수
+- SVN auth 캐시에 의존하지 말고 env 주입할 것 (Dockerfile은 `subversion`을 포함하나 **Docker는 현재 미사용** — 아래 Architecture 참조)
 - 체크아웃 완료 시 `source/.source_complete` 센티널 기록, 이 파일 기준으로만 캐시 재사용
 - 강제 재 sync: `/api/jenkins/sync` 요청에 `force: true`
 

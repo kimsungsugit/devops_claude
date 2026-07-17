@@ -1,13 +1,25 @@
 ---
 name: deploy
-description: "이미 빌드된 것을 **배포하고 상태만 확인**합니다 — 파이프라인 트리거 + 헬스 확인. Docker 이미지 빌드나 버전 태깅 같은 릴리스 준비까지 필요하면 `/deploy-release`를 쓰세요."
+description: "**push → 파이프라인 트리거 + 상태 확인**. 환경(dev/staging/prod)을 인자로 받아 현재 커밋 기준으로 진행합니다. 버전 태깅이나 릴리스 전 체크리스트까지 필요하면 `/deploy-release`를 쓰세요."
 ---
 
 # 배포 스킬
 
 $ARGUMENTS 에 배포 대상(환경, 브랜치 등)이 들어옵니다.
 
-## 환경 매핑
+## ⚠ 먼저 알 것 — 자동 배포 파이프라인은 **없다** (2026-07-17 확인)
+
+`git push` 가 트리거하는 건 **검증 CI 뿐**이다:
+- `.github/workflows/ci.yml` → syntax-check / unit-tests / frontend-tests
+- `.gitlab-ci.yml` → stages: lint / test / frontend
+
+**어느 쪽에도 deploy stage 가 없고**, 실제 기동은 각자 PC 의 `start.bat`(+`backend\.venv`)다.
+(Docker/nginx 설정은 저장소에 있으나 미사용 — `/deploy-release` 의 Docker 절 참조)
+
+따라서 아래 환경 매핑은 **현재 실재하지 않는다.** 배포 대상이 새로 생기면 그때
+이 절을 실제 배선으로 갱신할 것. 지금 이 스킬이 하는 일 = push → CI 상태 확인.
+
+## 환경 매핑 (⚠ 미배선 — 위 참조)
 - `dev` / `development` --> 개발 서버 배포
 - `staging` / `stage` --> 스테이징 환경 배포
 - `prod` / `production` --> 운영 환경 배포 (추가 확인 필요)
