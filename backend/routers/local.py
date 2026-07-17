@@ -2065,7 +2065,7 @@ async def local_sts_generate(
                 sds_doc_paths=sds_doc_paths,
                 uds_path=uds_path,
             )
-            _api_logger.info("[STS_GENERATE][%s] parsed %d functions from source", req_id, len(function_details))
+            _logger.info("[STS_GENERATE][%s] parsed %d functions from source", req_id, len(function_details))
         except Exception as e:
             print(f"[STS_GENERATE][{req_id}] source parsing warning: {e}", flush=True)
 
@@ -2123,6 +2123,7 @@ async def local_sts_generate(
             stp_path=stp_docx_path,
             hsis_path=hsis_file_path,
             ai_config=_sts_ai_cfg,
+            source_root=source_root,  # 콤마 구분 복수 경로 그대로 전달 (품질 DB project_root)
         )
     except Exception as e:
         traceback.print_exc()
@@ -2298,6 +2299,7 @@ async def local_sts_generate_stream(
                 hsis_path=hsis_file_path2,
                 ai_config=_sts_ai_cfg2,
                 on_progress=_on_progress,
+                source_root=source_root,  # 콤마 구분 복수 경로 그대로 전달 (품질 DB project_root)
             )
             download_url = f"/api/local/sts/download/{out_filename}"
             payload = _build_excel_artifact_payload(
@@ -2486,7 +2488,16 @@ async def local_sts_generate_async(
                 try:
                     sections = _get_source_sections_cached(str(source_root_path))
                     function_details = sections.get("function_details", {})
-                    function_details, req_doc_paths, sds_doc_paths = _enrich_function_details_map(
+                    # req_doc_paths / sds_doc_paths 는 **바깥 스코프**(이 함수를 감싸는
+                    # 엔드포인트)의 변수다. 여기서 대입 타깃에 넣으면 _worker 지역변수로
+                    # 승격돼, 바로 아래 kwarg 읽기가 UnboundLocalError를 냈다.
+                    # 정확히는 **인자 평가 단계**에서 터지므로 _enrich_function_details_map
+                    # 은 호출조차 되지 않았고, 예외는 except가 "source parsing warning"
+                    # 으로만 찍었다. 이때 function_details 는 바로 위에서 이미 바인딩된
+                    # **원본(비보강) 파싱 결과**를 그대로 들고 generate_sts 로 넘어갔다
+                    # (빈 dict 아님). 즉 유실된 건 문서/HSIS 기반 **보강분**이다.
+                    # 반환된 경로 집합은 generate_sts가 쓰지 않으므로 버린다(동기판도 동일).
+                    function_details, _, _ = _enrich_function_details_map(
                         function_details,
                         function_table_rows=sections.get("function_table_rows", []),
                         req_doc_paths=req_doc_paths,
@@ -2514,6 +2525,7 @@ async def local_sts_generate_async(
                 hsis_path=hsis_file_path3,
                 ai_config=_load_sts_ai_config(),
                 on_progress=_sts_on_progress,
+                source_root=source_root,  # 콤마 구분 복수 경로 그대로 전달 (품질 DB project_root)
             )
 
             download_url = f"/api/local/sts/download/{out_filename}"

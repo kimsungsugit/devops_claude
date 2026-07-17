@@ -2805,6 +2805,13 @@ def run_test_gen(
                 return True
         return False
 
+    # exclude 경고 로깅에서도 쓰이므로 exclude 블록보다 먼저 확정한다.
+    # (예전엔 아래 `total = len(targets)` 뒤에 대입돼 있어서, exclude 로그가
+    #  log_dir 을 미바인딩 상태로 읽어 UnboundLocalError 를 냈다. 그 호출은
+    #  try 밖이라 삼켜지지도 않고 run_test_gen 전체가 죽었다 — exclude_list 가
+    #  있고 실제로 걸러지는 대상이 하나라도 있으면 항상.)
+    log_dir = reports / "agent_logs"
+
     if exclude_list:
         filtered: List[Path] = []
         for t in targets:
@@ -2827,7 +2834,6 @@ def run_test_gen(
         targets = filtered
 
     total = len(targets)
-    log_dir = reports / "agent_logs"
     timeout_sec = int(cfg.get("test_gen_timeout_sec") or os.environ.get("TEST_GEN_TIMEOUT_SEC", "300"))
 
     def _call_agent_with_timeout(

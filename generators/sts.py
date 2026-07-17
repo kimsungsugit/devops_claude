@@ -2233,6 +2233,7 @@ def generate_sts(
     hsis_path: Optional[str] = None,
     ai_config: Optional[Dict[str, Any]] = None,
     on_progress: Optional[Any] = None,
+    source_root: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Top-level STS generation pipeline.
 
@@ -2249,6 +2250,11 @@ def generate_sts(
         hsis_path: Optional path to HSIS xlsx for hardware signal enrichment
         ai_config: Optional AI config dict for Gemini enhancement
         on_progress: Optional callback(pct: int, message: str) for progress updates
+        source_root: Optional C source root(s) — 콤마 구분 복수 경로 허용.
+            품질 DB(record_run)의 project_root 로만 쓰인다. generate_suts/generate_sits
+            와 동일한 역할이며, 과거 이 파라미터가 없는 채로 record_run 이
+            source_root 를 참조해 NameError → except 로 삼켜져 **STS 품질 기록이
+            통째로 유실**되고 있었다.
 
     Returns:
         Dict with keys: output_path, quality_report, trace_coverage

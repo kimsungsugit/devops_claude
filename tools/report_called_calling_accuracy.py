@@ -5,6 +5,8 @@ import sys
 from pathlib import Path
 from typing import Dict, List, Set, Tuple
 
+import docx  # type: ignore
+
 repo_root = Path(r"D:\Project\devops\260105")
 if str(repo_root) not in sys.path:
     sys.path.insert(0, str(repo_root))

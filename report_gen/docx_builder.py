@@ -1668,6 +1668,10 @@ def generate_uds_docx(
     generation_warnings: List[str] = []
     function_details = payload.get("function_details", {}) or {}
     function_details_by_name = payload.get("function_details_by_name", {}) or {}
+    # 소스루트 폴백이 파싱해 온 call_map 을 담아 둔다. 실제 call_map 확정은 아래
+    # payload 우선 순서에서 한 번만 한다 (폴백 블록이 call_map 을 직접 건드리면
+    # 아직 바인딩 전이라 UnboundLocalError 였고, 설령 됐어도 뒤에서 덮어썼다).
+    _fallback_call_map: Dict[str, Any] = {}
     if (not function_details_by_name) and isinstance(function_details, dict):
         rebuilt: Dict[str, Dict[str, Any]] = {}
         for info in function_details.values():
@@ -1687,8 +1691,7 @@ def generate_uds_docx(
                 if fb_details:
                     function_details_by_name = fb_details
                     function_details = fallback_src.get("function_details", {})
-                    if not call_map:
-                        call_map = fallback_src.get("call_map", {}) or {}
+                    _fallback_call_map = fallback_src.get("call_map", {}) or {}
                     generation_warnings.append(f"Source root fallback used: {source_root}, found {len(fb_details)} functions")
             except Exception as e:
                 generation_warnings.append(f"Source root fallback failed: {e}")
@@ -1721,7 +1724,8 @@ def generate_uds_docx(
             }
         if rebuilt:
             function_details_by_name = rebuilt
-    call_map = payload.get("call_map", {}) or {}
+    # payload 우선, 없으면 소스루트 폴백이 파싱한 것 사용.
+    call_map = payload.get("call_map", {}) or _fallback_call_map or {}
     if isinstance(call_map, dict) and call_map:
         normalized_call_map: Dict[str, List[str]] = {}
         for k, vals in call_map.items():

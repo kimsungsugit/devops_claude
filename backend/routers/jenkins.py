@@ -8,6 +8,7 @@ import threading
 import time
 import traceback
 import uuid
+import zipfile
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -87,7 +88,7 @@ from backend.services.call_tree import (
     call_tree_to_csv,
     call_tree_to_html,
 )
-from backend.services.files import list_log_candidates, read_csv_rows, tail_text
+from backend.services.files import list_log_candidates, list_report_files, read_csv_rows, tail_text
 from backend.services.jenkins_client import JenkinsClient
 from backend.services.jenkins_helpers import _detect_reports_dir, _job_slug, _safe_artifact_path
 from backend.services.jenkins_service import (
@@ -129,6 +130,7 @@ from report_generator import (
     generate_uds_source_sections,
     generate_uds_traceability_matrix,
     generate_uds_validation_report,
+    parse_uds_preview_html,
 )
 
 try:
@@ -3140,6 +3142,7 @@ async def jenkins_sts_generate_async(
                 uds_path=uds_file_path,
                 stp_path=stp_docx_path,
                 on_progress=_on_progress,
+                source_root=str(source_root_path) if source_root_path else None,  # 품질 DB project_root
             )
             download_url = f"/api/jenkins/sts/download?job_url={job_url}&cache_root={cache_root}&filename={out_filename}"
             preview_url = f"/api/jenkins/sts/preview?job_url={job_url}&cache_root={cache_root}&filename={out_filename}"
