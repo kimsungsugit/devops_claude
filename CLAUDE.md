@@ -178,6 +178,7 @@ python -m pytest tests/ -v --cov=backend --cov=workflow --cov=report_gen --cov-r
 - 소스코드: `D:/Project/Ados/PDS64_RD/`
 - 캐시: `.devops_pro_cache/`
 - 환경설정: `.env` (절대 커밋 금지)
+- ⚠ **`D:/Project/devops/Release_claude - 복사본/` — 되병합 금지**. 별도 git 저장소(`main`)이고 HEAD가 **`d943d89` 2026-04-01 스냅샷**에 멈춰 있는 **구 하네스**다: X9 없음(X1~X8), health-check 포트 8000(현 9000), 죽은 `/dev` 스킬 존재, 품질 게이트 fake-green 수정분 없음. **canonical 은 이 트리(`Release_claude/`)** 다. 거기서 Claude Code 를 돌리거나 스킬/설정을 이쪽으로 가져오면 2026-07-17에 고친 결함들이 되살아난다 (참조용 보관본으로만 취급할 것)
 - SwUT/SwIT 빌더 관련 사용자 환경 의존 path: [`docs/builders/swut_builder.md`](docs/builders/swut_builder.md) `## SwUT 관련 path` 참조
 
 ## SCM Credential Resolution (Jenkins sync)
