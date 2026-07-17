@@ -8,13 +8,17 @@ Checks:
 5. Frontend tests (vitest)
 6. Code pattern issues (hardcoded values, missing null guards, etc.)
 
-이 게이트는 **advisory**다. 전체 회귀(tests/unit/ = 실측 3486 tests / 약 1480s)는
-Stop 훅 예산에 안 들어가므로 여기서 돌리지 않고 `--round 3`에서 수행한다.
+이 게이트는 **advisory**다. 전체 회귀(tests/unit/ = 3486개 / **약 280s**, 2회 실측
+274s·281s)는 Stop 훅 예산(기본 240s)에 살짝 못 들어가므로 `--round 3`에서 수행한다.
 
-⚠ 전체 회귀를 **강제**하는 통제는 현재 없다. `.githooks/pre-commit`은 `timeout 1800`
-으로 올려뒀지만 `--no-verify` 커밋이면 건너뛴다. 이 스크립트의 기본 모드도
-변경 모듈 스코프(1급 모듈의 31.6%만 매핑)라 전체 회귀를 대신하지 못한다.
-"CI가 잡아주겠지"라고 가정하지 말 것.
+⚠ 전체 회귀를 **강제**하는 통제는 `.githooks/pre-commit` 뿐이고, `--no-verify`
+커밋이면 건너뛴다. 이 스크립트의 기본 모드는 변경 모듈 스코프(1급 모듈의
+31.6%만 매핑)라 전체 회귀를 대신하지 못한다.
+
+⚠ 모듈 스코프의 함정: 이 repo의 일부 테스트는 **단독 실행 시 실패**한다
+(test_routers.py = 단독 14 F / 전체 스위트 안에선 0 F — 다른 파일이 만들어 둔
+상태에 의존하는 격리 오염). 즉 여기서 나온 FAIL 이 진짜 회귀가 아니라 격리
+문제일 수 있다 → 의심되면 전체 스위트로 재확인할 것.
 
 설계 불변식: **못 돌렸으면 PASS라고 쓰지 않는다.** 도구 부재는 DISABLED,
 시간 초과는 TIMEOUT, 대응 테스트 없음은 no_module_tests로 구분 보고한다.
@@ -26,7 +30,7 @@ non-blocking이다 — `structured.not_run` 을 함께 읽을 것.
 Env:
     QUALITY_CHECK_FORCE=1    무변경 조기종료 우회 (clean tree에서도 전수 점검)
                              — `--round 3`은 이 값 없이도 강제 실행된다
-    QUALITY_CHECK_BUDGET=N   전역 예산 초 (기본 240, round 3은 1800)
+    QUALITY_CHECK_BUDGET=N   전역 예산 초 (기본 240, round 3은 900)
                              — Stop 훅 timeout(현재 300) 안에 들어가야 함
     DEVOPS_HOOK_PY=<path>    인터프리터 강제 지정 (진단·CI용)
 
@@ -102,8 +106,9 @@ _PY = _project_py()
 # 예산을 넘겨 훅이 밖에서 kill 되면 `2>/dev/null || true` 탓에 아무 출력도 남지
 # 않아 "이상 없음"처럼 보인다(침묵 = fake-green). 남은 예산이 없으면 각 단계를
 # 건너뛰되 그 사실을 명시 보고한다.
-# round 3은 Stop 훅이 아니라 사람이 명시 호출하는 전체 회귀라 예산이 따로다.
-_BUDGET = float(os.environ.get("QUALITY_CHECK_BUDGET", "1800" if _ROUND == 3 else "240"))
+# round 3은 Stop 훅이 아니라 사람이 명시 호출하는 전체 회귀라 예산이 따로다
+# (스위트 ~280s + vite/vitest + 여유).
+_BUDGET = float(os.environ.get("QUALITY_CHECK_BUDGET", "900" if _ROUND == 3 else "240"))
 _DEADLINE = time.monotonic() + _BUDGET
 _TIMED_OUT = 124  # GNU timeout 관례
 
@@ -123,9 +128,7 @@ def _run(cmd: list[str], *, cwd: str | Path | None = None, timeout: int = 60) ->
     그 죽음을 삼켜 Stop 게이트가 통째로 침묵한다(= 이상 없음처럼 보임).
     변경 전엔 이 방어가 없었다. 다만 **과거에 실제로 타임아웃이 났던 건 아니다** —
     그땐 훅 인터프리터가 mingw python이라 pytest가 bcrypt 수집 에러로 3.5초 만에
-    죽었고(rc=1, "1 error in 3.48s"), 90s cap에 닿을 일이 없었다. 인터프리터를
-    프로젝트 venv로 고친 **지금부터** 스위트가 실제로 ~1480s 돌기 때문에
-    이 방어가 필요해진 것이다.
+    죽었고(rc=1, "1 error in 3.48s"), 90s cap에 닿을 일이 없었다.
     이제 실패는 returncode로 표현되고 호출부가 명시 보고한다.
     """
     try:
@@ -235,12 +238,14 @@ else:
     summary["ruff"] = "skipped"
 
 # ── 4. pytest ────────────────────────────────────────────────────────
-# 전체 tests/unit/은 실측 3486 tests / 약 1480s(25분)라 Stop 훅 예산에 안 들어간다.
-# 그래서 기본(round 0/1/2)은 **변경 모듈에 대응하는 테스트만** 돌린다.
+# 전체 tests/unit/은 3486개 / 약 280s 라 Stop 훅 예산(240s)에 살짝 못 들어간다.
+# 그래서 기본(round 0/1/2)은 **변경 모듈에 대응하는 테스트만** 돌리고,
 # 전체 회귀는 명시 요청(--round 3)에서 수행한다.
 # ⚠ 커버리지 한계: 1급 모듈 중 test_<stem>.py 매핑은 66/209(31.6%)뿐이고,
 #   모듈 스코프는 교차 모듈 회귀를 못 잡는다. 이 게이트는 advisory이며
 #   전체 회귀를 대신하지 않는다.
+# ⚠ 격리 오염: 단독 실행 시 실패하는 테스트가 있다(위 독스트링 참조) → 여기서 나온
+#   FAIL 이 격리 문제일 수 있으니 의심되면 전체 스위트로 재확인.
 def _module_tests(files: list[str]) -> list[str]:
     targets: set[str] = set()
     for f in files:
@@ -268,9 +273,9 @@ elif _budget_left() < 15:
     summary["pytest"] = "budget_exceeded"
     _add("Warning", "test", "tests/unit/", "예산 초과로 pytest 미실행 — 회귀 미검증")
 else:
-    # round 3의 cap은 실측 스위트(~1480s)보다 커야 한다. 600s였을 땐 전체 회귀가
-    # 항상 TIMEOUT→Warning→proceed로 빠져 "전체를 돌렸다"는 착각만 만들었다.
-    _t_budget = int(min(1700 if _full_suite else 150, _budget_left()))
+    # round 3의 cap은 실측 스위트(~280s)보다 넉넉해야 한다. cap이 스위트보다 짧으면
+    # 전체 회귀가 항상 TIMEOUT→Warning→proceed 로 빠져 "전체를 돌렸다"는 착각만 남는다.
+    _t_budget = int(min(900 if _full_suite else 150, _budget_left()))
     r = _run([_PY, "-m", "pytest", *_test_targets, "-x", "-q", "--tb=line", "--no-header"], timeout=_t_budget)
     _scope = "full" if _full_suite else f"{len(_test_targets)} module tests"
     if _module_missing(r):

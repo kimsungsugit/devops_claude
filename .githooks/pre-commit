@@ -36,20 +36,22 @@ else
     echo "[1/2] No Python files staged, skipping syntax check"
 fi
 
-# 2. Run pytest with 1800s timeout
-#    2026-07-17 실측: 전체 스위트 = 3486 tests / 약 1480s(25분).
-#    이전 주석의 "full 회귀 ~70s"는 20배 드리프트였고, 그 탓에 180s cap이
-#    **매번** 124로 빠져 "commit allowed"가 항상 출력됐다 = 게이트가 사실상 없었음.
-#    1800s = 실측 1480s + margin. 그래도 도달 시 명시적 경고로
-#    수동 full 회귀 권장 메시지 출력 — silent skip 회피.
+# 2. Run pytest with 900s timeout
+#    2026-07-17 실측(2회): 전체 스위트 = 3486개 / 274s·281s → 약 4분 40초.
+#    주의: 한때 "25분"으로 측정됐는데 그건 스위트가 느려서가 아니라 **hang** 이었다
+#    (chat_history_db 재진입 데드락 + test_admin_gate 의 tkinter 모달 대화상자).
+#    둘 다 고친 뒤 4분 40초로 완주하고 3485 passed / 0 failed.
+#    이전 주석의 "full 회귀 ~70s"는 드리프트였고 그 탓에 180s cap 이 매번 124로
+#    빠져 "commit allowed" 가 항상 출력됐다 = 게이트가 사실상 없었음.
+#    900s = 실측 281s + 넉넉한 margin. 도달 시 명시적 경고 — silent skip 회피.
 set +e
 if [ -d "tests/unit" ]; then
-    echo "[2/2] Running unit tests (timeout: 1800s, 전체 ~25분)..."
-    TEST_OUTPUT=$(timeout 1800 "$PROJECT_PY" -m pytest tests/unit/ -x -q --tb=short 2>&1)
+    echo "[2/2] Running unit tests (timeout: 900s, 전체 ~4분 40초)..."
+    TEST_OUTPUT=$(timeout 900 "$PROJECT_PY" -m pytest tests/unit/ -x -q --tb=short 2>&1)
     TEST_EXIT=$?
     echo "$TEST_OUTPUT" | tail -20
     if [ $TEST_EXIT -eq 124 ]; then
-        echo "⚠️ Tests timed out (1800s). Skipping — commit allowed."
+        echo "⚠️ Tests timed out (900s). Skipping — commit allowed."
         echo "   ⚠️  주의: 일부 회귀 미실행 상태로 commit. 수동 full 회귀 권장:"
         echo "        $PROJECT_PY -m pytest tests/unit/ -q --tb=short"
     elif [ $TEST_EXIT -ne 0 ]; then
