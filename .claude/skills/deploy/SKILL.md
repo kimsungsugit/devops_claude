@@ -44,19 +44,30 @@ $ARGUMENTS 에 배포 대상(환경, 브랜치 등)이 들어옵니다.
     이걸 코드 문제로 오인하면 멀쩡한 코드를 3회 고치려 든다
 
 ### STEP 2: 배포 실행
-- GitHub:
+- GitHub (`origin`) — **검증 CI 트리거**:
   ```bash
   git push origin $(git branch --show-current)
   ```
-- Jenkins (필요 시):
+- GitLab (`gitlab`) — 원격이 **2개**다. `.gitlab-ci.yml`(lint/test/frontend)은
+  이쪽에 push 해야 돈다. origin 만 push 하면 **영원히 안 돈다**:
   ```bash
-  curl -s -X POST "${JENKINS_URL}/job/${JOB_NAME}/build"
+  git push gitlab $(git branch --show-current)
   ```
+- ⚠ **Jenkins 빌드 트리거는 이 스킬의 일이 아니다.** 과거 여기 있던
+  `curl -X POST "${JENKINS_URL}/job/${JOB_NAME}/build"` 는 **동작하지 않았다** —
+  `JENKINS_URL`·`JOB_NAME` 은 `.env`/`.env.example` 어디에도 없어
+  `"/job//build"` 로 전개된다. 이 앱의 변수는 `DEVOPS_JENKINS_BASE_URL` 이고,
+  코드의 `JENKINS_URL`/`JOB_NAME` 은 **Jenkins 가 주입하는 걸 읽는 쪽**
+  (`pipeline.py:1450` = "Jenkins 안에서 도는가" 탐지)이다.
+  CLAUDE.md 대로 **Jenkins 는 이 앱의 CD 가 아니라 분석 대상 데이터 소스**다
+  (빌드 산출물을 `/api/jenkins/*` 로 읽어온다).
 
 ### STEP 3: 상태 모니터링
 - GitHub: `gh run list --limit 1` --> `gh run watch`
-- Jenkins: 진행률 API 폴링
+- GitLab: 프로젝트 CI/CD 파이프라인 페이지에서 확인
 - 실패 시 로그 확인 및 원인 분석
+  - ⚠ 수집 에러(`errors during collection`)·`ModuleNotFoundError: bcrypt` 가 보이면
+    **코드가 아니라 인터프리터 문제**다 (`.claude/rules/autonomous-operation.md`)
 
 ### STEP 4: 결과 보고
 ```

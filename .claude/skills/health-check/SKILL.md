@@ -27,9 +27,16 @@ description: "백엔드/프론트엔드 서비스 상태를 점검합니다."
    - 최근 에러 로그 추출
 
 5. **데이터베이스 상태 확인**
-   - SQLite DB 파일 존재 여부 및 크기 확인
-   - Quality DB (`workflow/quality/`) 접근 가능 여부 확인
-   - DB 마이그레이션 상태 점검
+   ```bash
+   ls -l reports/quality.sqlite reports/chat_history.sqlite 2>/dev/null
+   ```
+   - **Quality DB = `reports/quality.sqlite`** (`workflow/quality/db.py:24` +
+     `config.py:39 DEFAULT_REPORT_DIR="reports"`). ⚠ `workflow/quality/` 는
+     **파이썬 패키지**(db/models/advisor/evaluator/recorder.py)이고 DB 파일은 0건이다
+   - 접근 확인은 실제 조회로:
+     `.venv/Scripts/python.exe -c "from workflow.quality.db import init_db, get_session; init_db(); print('quality DB OK')"`
+   - ⚠ **마이그레이션 상태 점검은 대상이 없다** — alembic 도 migrations/ 도 없고
+     `init_db()` 는 `create_all(checkfirst=True)` 뿐이다
 
 6. **Git 상태**
    ```bash

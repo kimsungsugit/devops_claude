@@ -14,10 +14,14 @@ CI/CD 파이프라인과 전체 테스트 스위트를 실행/검증합니다.
 - PowerShell executor
 - Syntax check → Unit tests
 - 현재 스위트 전량, 15분 타임아웃 (개수를 고정 기재하지 말 것 — 실제 개수는 `.venv/Scripts/python.exe -m pytest tests/unit/ --collect-only -q` 로 확인. 과거 "253개" 표기가 실제와 14배 어긋난 채 방치됐다)
-- test_impact_jobs 스킵 (hanging 방지)
+- ⚠ **GitLab 은 test_impact_jobs 를 건너뛰지 않는다** (`.gitlab-ci.yml` 에 `impact_jobs`·
+  `ignore` 0건). `--ignore=tests/unit/test_impact_jobs.py` 는 **GitHub 쪽**
+  (`.github/workflows/ci.yml:58`)에만 있다 — 아래 GitHub Actions 절 참조
 
 ### GitHub Actions (`.github/workflows/ci.yml`)
-- Python setup → pip install → pytest
+- 잡 **3개**: `syntax-check`(:10) / `unit-tests`(:37) / `frontend-tests`(:70)
+- `unit-tests` 는 `--ignore=tests/unit/test_impact_jobs.py`(:58) 로 그 파일만 제외
+- ⚠ **deploy stage 없음** — 이 CI 는 검증 전용이다
 
 ## 실행 순서
 

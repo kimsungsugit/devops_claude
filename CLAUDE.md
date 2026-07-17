@@ -75,7 +75,7 @@ ASIL 등급은 다음 순서로 판별한다:
 - **Backend**: FastAPI (Python 3.12) — `backend/`
 - **Frontend**: React + Vite — `frontend-v2/` (port 5174)
 - **LLM**: Google Gemini 3 Pro / 2.5 Flash — `workflow/ai.py`
-- **CI**: GitHub Actions(`ci.yml` = syntax-check + unit-tests) + GitLab CI(lint/test/frontend). **검증 전용 — 배포 스텝 없음**
+- **CI**: GitHub Actions(`ci.yml` = syntax-check + unit-tests + frontend-tests) + GitLab CI(stages: lint/test/frontend). **검증 전용 — 배포 스텝 없음**
 - **기동/배포**: `start.bat` + `backend\.venv` (사용자 PC). **Docker/nginx 설정은 저장소에 있으나 미사용**(과거 검토) — 되살리려면 tkinter 부재로 파일 선택 불가 + cloudium worker가 컨테이너 localhost라 사용자 PC에 안 닿는 문제부터 해결 필요
 - **Jenkins**: 이 앱의 CD가 아니라 **분석 대상 데이터 소스**(빌드 산출물을 읽어옴 — `/api/jenkins/*`)
 - **Report Engine**: `report_gen/`, `generators/`

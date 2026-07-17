@@ -17,12 +17,22 @@ C 소스 코드로부터 UDS 문서를 자동 생성하는 전체 파이프라�
 
 ### Stage 2: AI 분석 강화
 - `workflow/uds_ai.py` → Gemini API 호출
-- 프롬프트 체인:
-  1. `uds_analysis.txt` - 입력 완전성 분석, 갭 식별
-  2. `uds_writer.txt` - UDS 본문 생성 (증거 기반)
-  3. `uds_logic.txt` - 로직 다이어그램 생성
-  4. `uds_reviewer.txt` - 품질 검증 (accept/retry/reject)
-  5. `uds_auditor.txt` - ISO 26262 준수 감사
+- **파일에서 읽는 프롬프트는 3개뿐**이다 (`_load_prompt()` 실호출 기준):
+
+  | 프롬프트 | 위치 | 역할 |
+  |---|---|---|
+  | `uds_reviewer.txt` | `uds_ai.py:718` | 품질 검증 (accept/retry/reject) |
+  | `uds_auditor.txt` | `uds_ai.py:764` | ISO 26262 준수 감사 |
+  | `uds_judge.txt` | `uds_ai.py:795` | 판정 |
+
+- ⚠ **`.txt` 파일이 있어도 안 읽히는 것들** — 고치려면 프롬프트 파일이 아니라
+  **코드를 고쳐야 한다**:
+  - `uds_analysis` → `uds_ai.py:550-553` **인라인 하드코딩** (`stage="uds_analysis"` 는 로그 태그일 뿐)
+  - `uds_logic` → `uds_ai.py:573-576` 인라인
+  - `uds_writer` → `ai.py:1047 _role_system_prompt()` 의 하드코딩 dict (`role="writer"`)
+
+  (`.claude/agents/prompt-engineer/prompt-engineer.md:31,58` 이 같은 사실을 이미 기록하고 있다.
+   과거 이 절은 위 3개를 "프롬프트 체인 5단"에 넣고 실제로 쓰이는 `uds_judge` 는 빠뜨렸다)
 
 ### Stage 3: 품질 검증
 - `report_gen/validation.py`

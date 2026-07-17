@@ -13,7 +13,7 @@ trigger: 릴리스, 새 버전 끊기, 버전 태깅, 릴리스 전 체크리스
 ### ⚠ Docker — **현재 미사용 (2026-07-17 확인)**
 
 과거 검토했다가 채택하지 않았다. **릴리스 절차에서 docker build 를 하지 말 것.**
-근거: CI(`.github/workflows/ci.yml`=syntax-check+unit-tests, `.gitlab-ci.yml`=lint/test/frontend)
+근거: CI(`.github/workflows/ci.yml`=syntax-check+unit-tests+frontend-tests, `.gitlab-ci.yml`=lint/test/frontend)
 어디에도 docker 스텝이 없고, 실제 기동은 `start.bat`(+`backend\.venv`)이다.
 또한 이미지가 `python:3.12-slim`(apt: git/curl/subversion만)이라 **tkinter 가 없어
 파일 선택(`/api/file-mode/browse-file`, 프론트 4곳 사용)이 동작하지 않고**,
