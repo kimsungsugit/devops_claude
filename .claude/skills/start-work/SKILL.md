@@ -127,7 +127,7 @@ while round <= MAX_ROUNDS:
        - deep-reviewer 호출 실패(403 등) 시 sonnet reviewer로 폴백, 그래도 실패하면 메인 에이전트 미니 체크리스트 11개
     
     2. 종합 품질 검사 실행:
-       python scripts/quality_check.py --round {round} --json
+       .venv/Scripts/python.exe scripts/quality_check.py --round {round} --json
        → JSON에서 counts.critical **과 verified/not_run** 읽기
     
     3. 이슈 분류 및 수정:

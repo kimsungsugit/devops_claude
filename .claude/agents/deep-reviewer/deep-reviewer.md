@@ -109,7 +109,7 @@ frontend 변경 시 `await fetch(` / `= fetch(` 직접 호출이 `api.js`의 api
 
 ## 적응형 루프 안에서의 동작
 
-start-work Gate 5 / workflow STEP 4의 deep depth 적응형 3~5회 루프에서 호출된다. 각 라운드마다 위 X1~X9를 모두 점검하되:
+start-work Gate 5 / self-review.md deep depth의 적응형 3~5회 루프에서 호출된다. 각 라운드마다 위 X1~X9를 모두 점검하되:
 
 - **Round 1**: 기능 정확성 + X1/X2 (race/stale 우선)
 - **Round 2**: X3/X4/X6 (계약/회귀/일관성)

@@ -94,7 +94,7 @@ grep 패턴으로 잡히지 않는 설계·동시성·계약 일관성 류 결�
 
 ### 검토 깊이 자동 판정
 
-본 정의가 **single source of truth**다. CLAUDE.md / start-work / workflow SKILL.md는 이 표를 참조한다. 사용자가 명시한 깊이가 있으면 그것을 우선.
+본 정의가 **single source of truth**다. CLAUDE.md / start-work SKILL.md / self-review.md는 이 표를 참조한다. 사용자가 명시한 깊이가 있으면 그것을 우선.
 
 #### 변경 통계 측정 시점
 

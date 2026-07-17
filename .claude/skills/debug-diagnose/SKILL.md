@@ -72,7 +72,7 @@ when_to_use: 원인 파악, 왜 실패하지, 왜 안되지, 진단, 트러블�
   (`backend/main.py`의 `app.add_exception_handler(...)` 로 등록. 과거 이 문서는 핸들러가
   main.py 본문 74~92행에 있다고 적어뒀지만 이미 별도 모듈로 분리됐다)
 - 모든 미처리 예외를 500으로 반환, detail truncate
-- 로거: `_api_logger.error()`
+- 로거: `logger.error()` (`error_handler.py:14` = `logging.getLogger("devops_api")`)
 
 ### 6. Impact Router HTTP 에러
 - **파일**: `backend/routers/impact.py`

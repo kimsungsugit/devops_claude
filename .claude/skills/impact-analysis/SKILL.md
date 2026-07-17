@@ -85,7 +85,9 @@ cd "<source_root>" && svn status | grep -E "\.[ch]$"
 - `report_gen/source_parser.py` - C 소스 파싱
 - `report_gen/function_analyzer.py` - 함수 분석
 - `config/scm_registry.json` — SCM 설정. **`registries` 는 리스트이고 현재 3개**
-  (`hdpdm01`, `kjpds02`, `kjpds02_pv` — 전부 `scm_type: svn`). 리비전 필드는
-  `last_revision` 이며 **현재 세 항목 다 빈 문자열**이다.
-  (과거 "base rev 527" 표기는 필드명·값·개수가 전부 실제와 달랐다 — 수치를 고정
-   기재하지 말고 필요하면 파일을 직접 읽을 것)
+  (`hdpdm01`, `kjpds02`, `kjpds02_pv` — 전부 `scm_type: svn`). 오케스트레이터가
+  실제로 소비하는 리비전 필드는 **`base_ref`** (`change_trigger.py:54` →
+  `ChangeTrigger.base_ref`, `uds-pipeline` 스킬 지시와 동일)이며 현재
+  hdpdm01=`527`, kjpds02·kjpds02_pv=`1018` 로 채워져 있다.
+  ⚠ `last_revision` 필드도 있으나 세 항목 다 빈 문자열이고 코드가 읽지 않는다 —
+  이걸 "리비전 필드"로 오인하지 말 것. 수치는 갱신될 수 있으니 필요하면 파일 직접 읽기.
