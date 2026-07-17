@@ -237,11 +237,22 @@ class TCBank:
 
     @property
     def passed_count(self) -> int:
-        """통과한 테스트 케이스 수"""
+        """통과한 테스트 케이스 수 — **모든 실행 결과가 통과**한 케이스만 센다.
+
+        `test_results[tc]` 는 그 테스트 케이스의 **실행 결과 목록**이다
+        (VectorCAST HTML 의 `ExecutionResults/testcase_header` 1건 = 실행 1회).
+        하나라도 실패했으면 그 테스트 케이스는 실패다.
+
+        ⚠ 과거 `any(...)` 였다 — 실행 10건 중 1건만 통과해도 '통과'로 셌다.
+        이 값은 vcast.py 의 API 응답(`passed_count`)과
+        `failed_count = test_count - passed_count` · `pass_rate` 로 흘러가므로,
+        **ISO 26262 시험 증거가 부풀려지고 있었다**. 파싱 루프에 남아 있던
+        죽은 `total_passed` 변수가 원래 의도(ALL)를 증언한다.
+        """
         if not self.test_results:
             return 0
-        return sum(1 for items in self.test_results.values() 
-                   if any(item.passed for item in items))
+        return sum(1 for items in self.test_results.values()
+                   if items and all(item.passed for item in items))
 
 
 class VIMLib:
@@ -457,9 +468,12 @@ class VectorCASTParser:
             raise ValueError("Not an Execution Results Report")
         
         # Execution Result 섹션 파싱
+        # (케이스 통과 판정은 TCBank.passed_count 가 test_results 에서 계산한다.
+        #  예전엔 여기서 total_passed 를 집계했지만 **아무도 읽지 않았고**, 심지어
+        #  `total_passed = False` 가 새 케이스 리셋보다 먼저라 새 케이스의 첫 실행이
+        #  실패해도 곧바로 True 로 덮이는 순서 버그까지 있었다.)
         test_name = ""
-        total_passed = True
-        
+
         for i, line in enumerate(self.lines):
             if "<!-- ExecutionResults/testcase_header -->" in line:
                 header = self._read_tc_header(filepath.stem, i, False)
@@ -474,14 +488,10 @@ class VectorCASTParser:
                         break
                 
                 if tr_item:
-                    if not tr_item.passed:
-                        total_passed = False
-                    
                     if test_name != tr_item.header.test_case_name:
                         test_name = tr_item.header.test_case_name
                         tcbank.test_results[test_name] = []
-                        total_passed = True
-                    
+
                     tcbank.test_results[test_name].append(tr_item)
                     
                     # 필드명 업데이트

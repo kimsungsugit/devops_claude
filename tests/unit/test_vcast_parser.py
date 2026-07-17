@@ -112,3 +112,56 @@ class TestVectorCASTParser:
         assert process.statements.count == 30
         assert process.statements.total == 45
         assert process.branches.count == 8
+
+
+class TestTCBankPassedCount:
+    """passed_count 는 **모든 실행 결과가 통과**한 케이스만 센다.
+
+    회귀 배경: 예전 구현이 `any(item.passed ...)` 라 실행 10건 중 1건만 통과해도
+    그 테스트 케이스를 '통과'로 셌다. 이 값은 vcast 라우터의 API 응답
+    (`passed_count`)과 `failed_count = test_count - passed_count`, `pass_rate`
+    로 흘러가므로 ISO 26262 시험 증거가 부풀려졌다. 이 속성엔 테스트가 **0건**
+    이어서 오래 살아남았다 → 아래로 고정한다.
+    """
+
+    @staticmethod
+    def _bank(spec):
+        """spec: {tc_name: [passed_bool, ...]} → TCBank"""
+        from backend.services.vcast_parser import TCBank, TestResultItem
+
+        class _H:
+            test_case_name = "x"
+
+        bank = TCBank()
+        bank.test_results = {
+            name: [TestResultItem(header=_H(), passed=p) for p in flags]
+            for name, flags in spec.items()
+        }
+        return bank
+
+    def test_all_pass_counts(self):
+        assert self._bank({"TC": [True, True, True]}).passed_count == 1
+
+    def test_any_fail_does_not_count(self):
+        assert self._bank({"TC": [True, False, True]}).passed_count == 0
+
+    def test_mixed_case_is_not_a_pass(self):
+        """실행 10건 중 1건만 통과 → 통과 아님 (구 any() 구현이 1로 셌다)."""
+        flags = [True] + [False] * 9
+        assert self._bank({"TC_MIXED": flags}).passed_count == 0
+
+    def test_counts_only_all_pass_cases(self):
+        bank = self._bank({
+            "TC_MIXED": [True] + [False] * 9,
+            "TC_ALLFAIL": [False, False],
+            "TC_ALLPASS": [True, True],
+        })
+        assert bank.passed_count == 1  # TC_ALLPASS 만
+
+    def test_empty_results(self):
+        from backend.services.vcast_parser import TCBank
+        assert TCBank().passed_count == 0
+
+    def test_empty_item_list_is_not_a_pass(self):
+        """실행 결과가 0건인 케이스는 통과로 세지 않는다 (all([]) is True 함정)."""
+        assert self._bank({"TC_EMPTY": []}).passed_count == 0
