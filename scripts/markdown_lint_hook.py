@@ -27,12 +27,14 @@ def _payload_file(payload: dict) -> str:
 
 
 def _emit(msg: str) -> None:
+    # ensure_ascii=False — 한글 메시지가 \uXXXX 로 깨지면 읽을 수 없다.
+    # (posttoolbatch_report.py 와 같은 규약)
     print(json.dumps({
         "hookSpecificOutput": {
             "hookEventName": "PostToolUse",
             "additionalContext": f"markdown: {msg}",
         }
-    }))
+    }, ensure_ascii=False))
 
 
 def main(payload: dict | None = None) -> None:
@@ -56,6 +58,29 @@ def main(payload: dict | None = None) -> None:
         return
 
     issues: list[str] = []
+
+    # SKILL.md — frontmatter 는 조용히 실패한다. `trigger:` 같은 미지 필드도,
+    # `when_to_use` 부재도 하네스가 아무 말 없이 넘어가므로 눈으로는 못 본다.
+    # (2026-07-17에 스킬 16개 — 프로젝트 14 + 플러그인 2 — **전부** 트리거 0이었다.)
+    #
+    # "스킬이 뭐냐"는 `check_skill_frontmatter.skill_location()` **단일 정의**를
+    # 따른다. 여기서 basename 만 보고 판정하면 `.venv/**/SKILL.md` 같은 서드파티
+    # 파일까지 우리 규칙으로 신고하게 되고, CLI 스캔과도 갈라진다.
+    if os.path.basename(fpath) == "SKILL.md":
+        try:
+            from pathlib import Path
+
+            _here = os.path.dirname(os.path.abspath(__file__))
+            if _here not in sys.path:
+                sys.path.insert(0, _here)
+            from check_skill_frontmatter import check_file, skill_location
+
+            if skill_location(Path(fpath))[0] != "unknown":
+                issues.extend(f"frontmatter: {m}" for m in check_file(Path(fpath)))
+        except Exception as e:
+            # 침묵하면 "검사했고 깨끗함"과 구분이 안 된다 — 이 저장소의 fake-green.
+            issues.append(f"frontmatter: 검사 불가 ({type(e).__name__}) — 통과 아님")
+
     in_code = False
     prev_level = 0
     base_dir = os.path.dirname(fpath)
