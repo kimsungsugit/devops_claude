@@ -91,7 +91,10 @@ unit-tests:
     - '[Environment]::SetEnvironmentVariable("PYTHONPATH", "$PWD", "Process")'
     - echo "=== Running Unit Tests ==="
     - python -m pip install --no-build-isolation pytest-cov 2>$null; $true
-    - python -m pytest tests/unit/ -q --tb=short --cov=backend --cov=workflow --cov=report_gen --cov=generators --cov-report=term --cov-fail-under=25
+    # scripts 포함 — 훅(quality_check/posttool_dispatch/ruff_ratchet 등)이 커버리지
+    # 게이트에 보이게(pyproject source 와 정합). fail-under 는 25 유지(GitLab 러너는
+    # core+dev 만 설치해 테스트 폐포가 축소 — 축소 환경 커버리지 미측정이라 상향 보류).
+    - python -m pytest tests/unit/ -q --tb=short --cov=backend --cov=workflow --cov=report_gen --cov=generators --cov=scripts --cov-report=term --cov-fail-under=25
   timeout: 15m
   rules:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'

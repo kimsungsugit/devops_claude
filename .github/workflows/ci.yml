@@ -56,7 +56,7 @@ jobs:
         run: |
           python -m pytest tests/unit/ -q --tb=short \
             --ignore=tests/unit/test_impact_jobs.py \
-            --cov=backend --cov=workflow --cov=report_gen --cov=generators \
+            --cov=backend --cov=workflow --cov=report_gen --cov=generators --cov=scripts \
             --cov-report=term-missing --cov-report=html:htmlcov \
             --cov-fail-under=40
 

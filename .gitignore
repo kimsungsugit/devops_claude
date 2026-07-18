@@ -13,10 +13,16 @@ pytest-cache-files-*/
 *.pyc
 *.pyo
 .coverage
+.coverage.*
 node_modules/
 
 # === IDE / 도구 ===
 .codex_tmp/
+# 유물 트리 재발 방지 — 과거 코딩에이전트/도구 산출물이 여기로 새어 `git add -A`
+# (auto_commit_push·수동 커밋)에 흡수돼 커밋된 사고가 있었다(67623fd 로 삭제).
+# 미무시면 재발하므로 선제 차단. canonical 하네스는 이 트리에 없다.
+.agents/
+.codex/
 .cursor/
 .devops_pro_cache/
 .idea/
