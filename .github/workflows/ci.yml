@@ -84,3 +84,51 @@ jobs:
       - name: Run Vitest
         working-directory: frontend-v2
         run: npm test
+
+  lint:
+    name: Lint (changed lines)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # before-SHA 가 여러 커밋 뒤일 수 있어 전체 이력 필요
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install lint tools
+        run: pip install ruff pyyaml
+
+      # ruff·frontmatter 게이트를 Claude Code 훅 밖(CI)에서도 강제. ruff 는
+      # **변경 라인만**(ruff_ratchet) — 저장소 backlog 1072건에 CI 가 익사하지
+      # 않도록. frontmatter 는 backlog 가 없어 그대로 전량 검사.
+      - name: Ruff ratchet + SKILL.md frontmatter (changed only)
+        env:
+          # push 는 이 push 의 **모든 커밋**(before..after), PR 은 base 기준.
+          # HEAD~1..HEAD 만 보면 멀티커밋 push 의 이전 커밋 위반을 놓친다(이 게이트가
+          # 방어하려는 훅 우회 경로가 정확히 멀티커밋 push 다).
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          # 빈/zero SHA(새 브랜치 첫 push)나 도달 불가면 HEAD~1 로 폴백.
+          # 폴백이 항상 유효한 base 를 보장 → 빈 range 로 인한 fail-open 차단.
+          BASE="$BASE_SHA"
+          if [ -z "$BASE" ] || [ "$BASE" = "0000000000000000000000000000000000000000" ] || ! git cat-file -e "${BASE}^{commit}" 2>/dev/null; then
+            BASE="HEAD~1"
+          fi
+          echo "diff base = $BASE"
+          CHANGED=$(git diff --name-only "$BASE" HEAD 2>/dev/null || true)
+          CHANGED_PY=$(echo "$CHANGED" | grep '\.py$' || true)
+          CHANGED_SKILL=$(echo "$CHANGED" | grep 'SKILL\.md$' || true)
+          RC=0
+          if [ -n "$CHANGED_PY" ]; then
+            echo "Ruff ratchet on changed .py"
+            python scripts/ruff_ratchet.py --base "$BASE" $CHANGED_PY || RC=$?
+          else
+            echo "No changed .py"
+          fi
+          if [ -n "$CHANGED_SKILL" ]; then
+            echo "Frontmatter on changed SKILL.md"
+            python scripts/check_skill_frontmatter.py $CHANGED_SKILL || RC=1
+          fi
+          exit $RC

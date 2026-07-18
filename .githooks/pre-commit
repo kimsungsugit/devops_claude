@@ -22,7 +22,7 @@ fi
 # 1. Python syntax check on staged .py files
 STAGED_PY=$(git diff --cached --name-only --diff-filter=ACM | grep '\.py$' || true)
 if [ -n "$STAGED_PY" ]; then
-    echo "[1/2] Checking Python syntax..."
+    echo "[1/3] Checking Python syntax..."
     for f in $STAGED_PY; do
         if [ -f "$f" ]; then
             "$PROJECT_PY" -m py_compile "$f" || {
@@ -33,10 +33,52 @@ if [ -n "$STAGED_PY" ]; then
     done
     echo "✅ Python syntax OK"
 else
-    echo "[1/2] No Python files staged, skipping syntax check"
+    echo "[1/3] No Python files staged, skipping syntax check"
 fi
 
-# 2. Run pytest with 900s timeout
+# 2. Ruff lint + SKILL.md frontmatter — Claude Code 훅(PostToolUse)에서만 돌던
+#    게이트를 commit 시점으로 승격한다. `--no-verify`·외부 에디터 편집·17시
+#    auto_commit_push 가 우회하던 구멍을 닫는다. **스테이징 파일만** 검사해
+#    레거시 backlog(ruff 위반·frontmatter)를 안 건드린다(변경 파일 ratchet).
+#    도구 부재는 DISABLED 로 명시(빈 출력을 clean 으로 읽지 않음 = anti-fake-green).
+set +e
+STAGED_SKILL=$(git diff --cached --name-only --diff-filter=ACM | grep 'SKILL\.md$')
+if [ -n "$STAGED_PY" ]; then
+    # ratchet: 변경 라인의 **신규** 위반만 차단. 저장소 ruff backlog(1072건/247파일,
+    # 2026-07-18 실측) 탓에 파일 전체 ruff 는 거의 모든 파일에서 레거시를 터뜨려
+    # 커밋을 막는다 → --no-verify 도피. scripts/ruff_ratchet.py 가 net-new 만 본다.
+    echo "[2/3] Ruff (변경 라인 한정, 레거시 제외) on staged Python..."
+    RUFF_OUT=$("$PROJECT_PY" scripts/ruff_ratchet.py --cached $STAGED_PY 2>&1)
+    RUFF_RC=$?
+    # DISABLED(rc=2) 비대칭(의도적): 로컬은 venv 드리프트가 흔해 **경고 후 허용**,
+    # CI(ci.yml/.gitlab-ci.yml)는 통제된 환경이라 DISABLED=인프라 이상 → **빌드 실패**.
+    if [ $RUFF_RC -eq 2 ]; then
+        echo "⚠️  $RUFF_OUT"
+    elif [ $RUFF_RC -ne 0 ]; then
+        echo "$RUFF_OUT"
+        echo "❌ 신규 ruff 위반. 고친 뒤 다시 커밋 (레거시 backlog 는 이 게이트가 안 막음)."
+        exit 1
+    else
+        echo "✅ $RUFF_OUT"
+    fi
+fi
+if [ -n "$STAGED_SKILL" ]; then
+    echo "[2/3] SKILL.md frontmatter 검사..."
+    FM_OUT=$("$PROJECT_PY" scripts/check_skill_frontmatter.py $STAGED_SKILL 2>&1)
+    FM_RC=$?
+    if [ $FM_RC -eq 1 ]; then
+        echo "$FM_OUT"
+        echo "❌ SKILL.md frontmatter 문제(조용한 트리거 실종 등). Commit aborted."
+        exit 1
+    elif [ $FM_RC -eq 2 ]; then
+        echo "⚠️  frontmatter 검사 DISABLED (PyYAML 미설치?). 커밋 허용."
+    elif [ -n "$FM_OUT" ]; then
+        echo "$FM_OUT"
+    fi
+fi
+set -e
+
+# 3. Run pytest with 900s timeout
 #    2026-07-17 실측(2회): 전체 스위트 = 3486개 / 274s·281s → 약 4분 40초.
 #    주의: 한때 "25분"으로 측정됐는데 그건 스위트가 느려서가 아니라 **hang** 이었다
 #    (chat_history_db 재진입 데드락 + test_admin_gate 의 tkinter 모달 대화상자).
@@ -46,7 +88,7 @@ fi
 #    900s = 실측 281s + 넉넉한 margin. 도달 시 명시적 경고 — silent skip 회피.
 set +e
 if [ -d "tests/unit" ]; then
-    echo "[2/2] Running unit tests (timeout: 900s, 전체 ~4분 40초)..."
+    echo "[3/3] Running unit tests (timeout: 900s, 전체 ~4분 40초)..."
     TEST_OUTPUT=$(timeout 900 "$PROJECT_PY" -m pytest tests/unit/ -x -q --tb=short 2>&1)
     TEST_EXIT=$?
     echo "$TEST_OUTPUT" | tail -20
@@ -61,7 +103,7 @@ if [ -d "tests/unit" ]; then
         echo "✅ Unit tests passed"
     fi
 else
-    echo "[2/2] No unit test directory found, skipping tests"
+    echo "[3/3] No unit test directory found, skipping tests"
 fi
 set -e
 

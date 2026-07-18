@@ -38,6 +38,46 @@ syntax-check:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
     - if: '$CI_COMMIT_BRANCH == "main"'
 
+# Ruff (변경 라인 한정 ratchet) + SKILL.md frontmatter — Claude Code 훅 밖에서도 강제
+ruff-frontmatter:
+  stage: lint
+  tags:
+    - shared
+  variables:
+    GIT_DEPTH: "0"   # before-SHA 가 여러 커밋 뒤일 수 있어 전체 이력 필요
+  before_script:
+    - python -m pip install --no-build-isolation ruff pyyaml 2>$null; $true
+  script:
+    - echo "=== Ruff ratchet + frontmatter (changed only) ==="
+    - |
+      # MR 은 diff base, push 는 before-SHA 기준(멀티커밋 push 의 이전 커밋도 포함).
+      # 빈/zero/도달불가 SHA 면 HEAD~1 로 폴백 → 빈 range 로 인한 fail-open 차단.
+      $base = if ($env:CI_MERGE_REQUEST_DIFF_BASE_SHA) { $env:CI_MERGE_REQUEST_DIFF_BASE_SHA } else { $env:CI_COMMIT_BEFORE_SHA }
+      $zero = "0000000000000000000000000000000000000000"
+      if (-not $base -or $base -eq $zero) { $base = "HEAD~1" }
+      git cat-file -e "$base^{commit}" 2>$null
+      if ($LASTEXITCODE -ne 0) { $base = "HEAD~1" }
+      Write-Host "diff base = $base"
+      $changed = git diff --name-only $base HEAD 2>$null
+      $rc = 0
+      $py = @($changed | Where-Object { $_ -match '\.py$' })
+      $skill = @($changed | Where-Object { $_ -match 'SKILL\.md$' })
+      if ($py.Count -gt 0) {
+        # ratchet: backlog(1072건) 익사 방지 위해 변경 라인의 신규 위반만
+        python scripts/ruff_ratchet.py --base $base @py
+        if ($LASTEXITCODE -ne 0) { $rc = $LASTEXITCODE }
+      } else { Write-Host "No changed .py" }
+      if ($skill.Count -gt 0) {
+        python scripts/check_skill_frontmatter.py @skill
+        if ($LASTEXITCODE -ne 0) { $rc = 1 }
+      }
+      if ($rc -ne 0) { exit $rc }
+      Write-Host "Lint OK"
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == "main"'
+  allow_failure: false
+
 # Unit tests
 unit-tests:
   stage: test
