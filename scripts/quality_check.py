@@ -79,6 +79,22 @@ except Exception as _e:  # pragma: no cover - 방어
         return bool(r.returncode != 0 and tail
                     and re.match(r"^\S+: No module named \w+$", tail[-1].strip()))
 
+# 침묵-except 분류기 (§7d). import 실패해도 게이트는 계속 — 침묵 검사만 skip 한다.
+# advisory 기능이라 조용히 disable 해도 "PASS 위장"이 아니다(findings 가 안 나올 뿐).
+_silence_import_error: str = ""
+try:
+    from _silence_check import _iter_added_lines, silent_excepts
+    _silence_ok = True
+except Exception as _se:  # 예외를 표면화하므로(아래) silent 아님
+    _silence_ok = False
+    _silence_import_error = f"{type(_se).__name__}: {_se}"
+
+    def silent_excepts(source: str) -> list[tuple[int, str]]:  # 폴백 스텁
+        return []
+
+    def _iter_added_lines(diff: str) -> dict[str, set[int]]:  # 폴백 스텁
+        return {}
+
 # Parse CLI args
 _parser = argparse.ArgumentParser(add_help=False)
 # start-work 스킬의 적응형 루프는 MAX_ROUNDS=5까지 돈다. choices=[0..3]이던 시절
@@ -201,6 +217,14 @@ if _hook_env_error:
          "_hook_env import 실패 → 인터프리터 해석 폴백 중(도구가 DISABLED로 보일 수 있음). "
          f"venv가 아니라 이 파일을 먼저 확인: {_hook_env_error}")
     summary["hook_env"] = "FALLBACK"
+
+if not _silence_ok:
+    # _hook_env 와 같은 원칙 — "못 돌렸으면 PASS라고 쓰지 않는다". 침묵-except 검사가
+    # import 실패로 죽으면 §7d findings 0 은 "깨끗함"이 아니라 "안 돌렸음"이다.
+    # advisory 기능이라 Critical 은 아니지만 반드시 신호한다(조용히 죽으면 fake-green).
+    _add("Warning", "hook", "scripts/_silence_check.py",
+         f"침묵-except 검사 비활성(import 실패) — §7d 미검증: {_silence_import_error}")
+    summary["silence"] = "DISABLED"
 
 
 # ── 1. Detect changed files ──────────────────────────────────────────
@@ -407,6 +431,19 @@ for f in jsx_files:
             if "&&" not in prev and "?" not in prev and "length" not in prev:
                 _add("Warning", "pattern", f"{f}:{i}", "Possible .map() without null guard — add ?. or Array.isArray check")
 
+# 침묵 except ratchet: HEAD 대비 **추가된 라인**만 net-new 로 본다. 레거시 backlog
+# (침묵 except 1294개, 정당한 것 포함)는 건드리는 파일이어도 침묵 — posttool_dispatch
+# .py:78-82 의 "레거시를 자동 변형 말고 사람이 결정" 과 같은 ratchet 원칙.
+# git diff -U0 HEAD 는 staged+unstaged 를 한 번에, 현재 워킹 파일 기준 라인번호로 준다.
+_added_lines: dict[str, set[int]] = {}
+if _silence_ok and py_files:
+    # rename-aware(-M) + **pathspec 없이**. `-- files` 로 좁히면 -M 이 old 를 못 봐
+    # rename 이 안 잡히고 파일 전체가 net-new 로 오인된다(실측). _added_lines 는
+    # 아래에서 파일 키로 조회하므로 전체 diff 를 받아도 무방하다.
+    _dh = _run(["git", "diff", "-M", "-U0", "HEAD"])
+    if _dh.returncode == 0:
+        _added_lines = _iter_added_lines(_dh.stdout)
+
 for f in py_files:
     fp = _ROOT / f
     if not fp.exists():
@@ -414,11 +451,16 @@ for f in py_files:
     content = fp.read_text(encoding="utf-8", errors="ignore")
     lines = content.splitlines()
 
-    # 7d. Bare except in Python
-    for i, line in enumerate(lines, 1):
-        stripped = line.strip()
-        if stripped == "except:" or stripped == "except Exception:":
-            _add("Warning", "pattern", f"{f}:{i}", "Bare except — consider catching specific exception types")
+    # 7d. 침묵 except (AST body-aware, net-new ratchet). ruff/E722 는 bare `except:`
+    #     만 보고 `except Exception: pass` 를 못 본다 — 그 사각지대를 AST 로 보강.
+    #     위험/정당은 구조가 동일해 구분 불가(사람 판단) → net-new 만 advisory Warning.
+    if _silence_ok:
+        _addset = _added_lines.get(f) or _added_lines.get(f.replace("\\", "/")) or set()
+        for _ln, _reason in silent_excepts(content):
+            if _ln in _addset:
+                _add("Warning", "pattern", f"{f}:{_ln}",
+                     f"신규 침묵 except ({_reason}) — broad 예외를 삼킴. 예외를 좁히거나 "
+                     f"로깅 추가, 의도면 `# silent-ok` 마커")
 
     # 7e. HTTPException swallowed by broad except
     in_try = False

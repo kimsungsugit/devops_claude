@@ -66,14 +66,59 @@ def main() -> None:
 
     # .py — syntax + ruff + auto-test
     if f.endswith(".py"):
+        _src = ""
         try:
             with open(f, encoding="utf-8", errors="ignore") as src:
-                ast.parse(src.read(), filename=f)
+                _src = src.read()
+            ast.parse(_src, filename=f)
             results.append(f"syntax OK: {fname}")
         except SyntaxError as e:
             results.append(f"syntax FAIL: {e.msg} (line {e.lineno})")
+            _src = ""  # 파싱 실패 → 침묵 검사 skip (syntax FAIL 이 이미 보고됨)
         except Exception as e:
             results.append(f"syntax skipped ({type(e).__name__})")
+            _src = ""
+
+        # 침묵 except (신규만). ruff/E722 는 bare 만 보고 `except Exception: pass` 를
+        # 못 본다. 편집으로 새로 들인 것만 알린다(net-new) — 레거시 backlog 는 조용.
+        # git diff -U0 HEAD -- <f> 는 단일 파일이라 _iter_added_lines 키가 하나뿐 →
+        # 값 union 만 하면 경로 매칭 불필요.
+        if _src:
+            try:
+                from _silence_check import _iter_added_lines, silent_excepts
+                sil = silent_excepts(_src)
+                if sil:
+                    # rename-aware(-M) + pathspec 없이 (pathspec 은 rename 감지를 막아
+                    # 파일 전체를 net-new 로 오인시킨다). f 의 repo-상대 키로 조회.
+                    d = subprocess.run(
+                        ["git", "diff", "-M", "-U0", "HEAD"],
+                        capture_output=True, text=True, cwd=str(_ROOT), timeout=5,
+                    )
+                    try:
+                        _key = Path(f).resolve().relative_to(_ROOT).as_posix()
+                    except (ValueError, OSError):
+                        _key = f.replace("\\", "/")
+                    added = _iter_added_lines(d.stdout).get(_key, set())
+                    if not added:
+                        # git diff HEAD 가 비면 untracked 신규 파일일 수 있다(그럼
+                        # 전체가 new). ls-files 로 확인해 untracked 면 전부 알린다.
+                        _ls = subprocess.run(
+                            ["git", "ls-files", "--error-unmatch", f],
+                            capture_output=True, text=True, cwd=str(_ROOT), timeout=5,
+                        )
+                        if _ls.returncode != 0:
+                            added = {ln for ln, _ in sil}
+                    new_sil = [ln for ln, _ in sil if ln in added]
+                    if new_sil:
+                        locs = ", ".join(f"L{n}" for n in new_sil[:8])
+                        if len(new_sil) > 8:
+                            locs += f" (+{len(new_sil) - 8})"
+                        results.append(
+                            f"침묵 except {len(new_sil)}건 신규: {locs} "
+                            "(broad+삼킴 — 좁히거나 로깅/`# silent-ok`)"
+                        )
+            except Exception as e:
+                results.append(f"silence-check: skipped ({type(e).__name__})")
 
         # `--fix` 미사용은 의도. (1) 훅이 방금 쓴 파일을 재작성하면 편집 도구의
         # in-memory 내용이 stale 해진다. (2) 이 게이트는 오래 fake-green이었어서
