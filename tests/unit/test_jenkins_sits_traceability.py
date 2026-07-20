@@ -223,3 +223,32 @@ def test_sits_strategy2_all_entry_fn_only_warns(tmp_path: Path) -> None:
     assert res["vcast_rows"]                 # entry_fn 행은 존재
     assert res.get("direct_mapped") == 0     # 직접 요구 매핑은 0
     assert "warning" in res                  # → 표면화
+
+
+def test_sits_strategy1_related_col_beyond_199(tmp_path: Path) -> None:
+    """Strategy 1: Related ID 열이 199열을 넘어도 스캔한다.
+
+    회귀 근거 — 과거 `max_col = min(max_column or 199, 199)` 는 199를 폴백값이자
+    **하드 상한**으로 겸용했다. 실측 KJPDS02_PV SwITS(v1.02)는 Input 82열 +
+    Expected Result 113열이 붙어 max_column=205 이고 `Related ID` 가 **204열**이라
+    통째로 스캔 밖이었다: TC 54개 중 5개만 인식돼 매핑 10행(상한 해제 시 54개/357행).
+    문서는 열렸고 시트도 찾은 상태라 경고조차 뜨지 않는 침묵 손실이었다.
+    """
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    assert ws is not None
+    ws.title = "3.SW Integration Test Spec"  # "test spec" 키워드 → Strategy 1
+    ws.cell(4, 2, "SwITC_SwUFn_0101_01")     # col 2 = TC id
+    ws.cell(4, 204, "SwCom_01, SwSTR_02")    # ★ 199 초과 — 구 코드에선 미스캔
+    # 199 이하 열도 여전히 읽혀야 한다(상한 제거가 기존 경로를 깨지 않는지).
+    ws.cell(5, 2, "SwITC_SwUFn_0112")
+    ws.cell(5, 4, "SwCom_30")
+
+    res = jenkins_sits_extract_traceability(
+        {"path": _save(wb, tmp_path, "sits_wide.xlsx")})
+
+    assert res["ok"] is True
+    pairs = {(r["requirement_id"], r["testcase"]) for r in res["vcast_rows"]}
+    assert ("SWCOM_01", "SwITC_SwUFn_0101_01") in pairs
+    assert ("SWSTR_02", "SwITC_SwUFn_0101_01") in pairs
+    assert ("SWCOM_30", "SwITC_SwUFn_0112") in pairs

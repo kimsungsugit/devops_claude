@@ -4512,6 +4512,17 @@ def jenkins_hsis_extract_mapping(body: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+# 열 스캔 상한 — 폭주 방지 가드이자 `max_column`이 None일 때(openpyxl read_only
+# 엣지)의 폴백값. 과거엔 이 두 역할을 199 하나로 겸했는데, `min(max_column, 199)`
+# 형태라 199가 **하드 상한**으로도 작동했다. 실측 KJPDS02_PV SwITS(v1.02)는 Input
+# 82열 + Expected Result 113열이 붙어 max_column=205이고 `Related ID`가 204열이라
+# 통째로 스캔 밖이었다 — 이 endpoint 실측으로 고유 요구ID **3 → 111**, 매핑행
+# 49 → 356. 시트는 찾은 상태라 warning도 안 떠서 침묵 손실이었다.
+# 성능 영향 없음: iter_rows 단일 패스라 열 확장은 O(행×열) 선형이다
+# (아래 O(행²) 경고는 `ws.cell()` 랜덤 접근에 대한 것으로 이미 제거됐다).
+_MAX_SCAN_COLS = 1024
+
+
 @router.post("/api/jenkins/sits/extract-traceability")
 def jenkins_sits_extract_traceability(body: Dict[str, Any]) -> Dict[str, Any]:
     """SITS Excel에서 TC ID↔요구사항 매핑 추출"""
@@ -4569,10 +4580,10 @@ def jenkins_sits_extract_traceability(body: Dict[str, Any]) -> Dict[str, Any]:
         empty_streak = 0
         # PERF: read_only 모드에서 ws.cell(r,c) 랜덤 접근은 호출마다 시트 상단부터
         # 재파싱돼 O(행²·열)로 폭주한다(1874행×146열 실측 ~75분). 순차 iter_rows
-        # 단일 패스는 O(행)이며 동일 파일에서 0.4초로 동작한다. 열은 4~199만 본다.
-        # max_column은 read_only 모드에서 None일 수 있음 → 그 경우 199(상한)까지
-        # 스캔해 cols 5+ req ID 누락 방지. 좁은 시트는 아래 len(row) 가드가 처리.
-        max_col = min(trace_ws.max_column or 199, 199)
+        # 단일 패스는 O(행)이며 동일 파일에서 0.4초로 동작한다. 열은 4열부터 본다.
+        # max_column은 read_only 모드에서 None일 수 있음 → 그 경우 _MAX_SCAN_COLS
+        # 까지 스캔해 cols 5+ req ID 누락 방지. 좁은 시트는 아래 len(row) 가드가 처리.
+        max_col = min(trace_ws.max_column or _MAX_SCAN_COLS, _MAX_SCAN_COLS)
         for row in trace_ws.iter_rows(min_row=4, max_col=max_col, values_only=True):
             # 1-based 열 2/3 == 0-based 인덱스 1/2
             tc_id = str(row[1] or "").strip() if len(row) > 1 else ""
@@ -4626,7 +4637,7 @@ def jenkins_sits_extract_traceability(body: Dict[str, Any]) -> Dict[str, Any]:
         # PERF: 본문 random .cell() 스캔도 Strategy 1과 동일한 O(행²) 폭주를
         # 유발하므로 header(2행)·본문 모두 iter_rows 순차 패스로 처리한다.
         related_col = -1
-        hdr_scan_max = min(spec_ws.max_column or 199, 199)
+        hdr_scan_max = min(spec_ws.max_column or _MAX_SCAN_COLS, _MAX_SCAN_COLS)
         hdr_rows = list(spec_ws.iter_rows(
             min_row=5, max_row=6, max_col=hdr_scan_max, values_only=True))
         hdr5 = hdr_rows[0] if len(hdr_rows) > 0 else ()
@@ -4641,8 +4652,9 @@ def jenkins_sits_extract_traceability(body: Dict[str, Any]) -> Dict[str, Any]:
             related_col = 145  # default SITS layout
 
         empty_streak = 0
-        # related_col(기본 145)까지 포함하도록 max_col 보장 (단 199 상한)
-        body_max_col = min(max(spec_ws.max_column or 199, related_col), 199)
+        # related_col(기본 145)까지 포함하도록 max_col 보장 (단 _MAX_SCAN_COLS 상한)
+        body_max_col = min(
+            max(spec_ws.max_column or _MAX_SCAN_COLS, related_col), _MAX_SCAN_COLS)
         for row in spec_ws.iter_rows(
                 min_row=7, max_col=body_max_col, values_only=True):
             tc_id = str(row[1] or "").strip() if len(row) > 1 else ""
