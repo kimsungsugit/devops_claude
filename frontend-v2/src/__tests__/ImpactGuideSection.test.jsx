@@ -2137,13 +2137,51 @@ describe('ImpactGuideSection — 빌드/리비전 소스 바 & 결과 영속', (
     delete localImpact.trigger.metadata.job_url;
 
     render(<ImpactGuideSection job={mockJob} analysisResult={{
-      impactData: localImpact, matchedScm: { id: 'hdpdm01' },
+      impactData: localImpact,
+      matchedScm: { id: 'hdpdm01' },
+      // 생산자가 기록한 매칭 근거. 'manual'(사용자가 직접 지정)은 가장 강한 증거다.
+      // 이 필드가 없으면 아래 테스트대로 fail-closed 된다 — matchedScm 자체는 증거가 아니다.
+      matchedScmSource: 'manual',
     }} />);
 
     expect(screen.queryByText(/이력 조회·실행을 잠갔습니다/)).not.toBeInTheDocument();
     await waitFor(() => expect(api).toHaveBeenCalledWith(
       expect.stringContaining('/api/scm/impact-jobs/hdpdm01?summary=1'),
     ));
+  });
+
+  it('안전: matchedScm이 있어도 매칭 근거가 없으면 SCM 증거로 인정하지 않는다', async () => {
+    // W-A. pickScmForJob은 후보가 하나뿐이면 job URL을 읽지도 않고 승인한다('sole').
+    // 그 결과를 그대로 실은 matchedScm을 증거로 인정하면 'SCM 1개 × Jenkins Job N개'에서
+    // 무관한 Job의 changeSet으로 그 SCM을 분석하게 되고, update_baseline=True 경로가
+    // 그 SCM의 MC/DC baseline과 감사기록을 덮어쓴다.
+    const localImpact = mkImpact({ scm: 'hdpdm01' });
+    delete localImpact.trigger.metadata.job_url;
+
+    render(<ImpactGuideSection job={mockJob} analysisResult={{
+      impactData: localImpact,
+      matchedScm: { id: 'hdpdm01' },   // 근거(matchedScmSource) 없음 → 증거 아님
+    }} />);
+
+    expect(screen.getByText(/이력 조회·실행을 잠갔습니다/)).toBeInTheDocument();
+    // 잠긴 상태에서는 이력 조회조차 나가지 않는다.
+    expect(api).not.toHaveBeenCalledWith(
+      expect.stringContaining('/api/scm/impact-jobs/'),
+    );
+  });
+
+  it('안전: 근거가 \'sole\'(후보 유일)이면 증거로 인정하지 않는다', async () => {
+    // 'manual'/'exact'/'substring'만 강한 근거다. 'sole'은 job URL과 접점이 없다.
+    const localImpact = mkImpact({ scm: 'hdpdm01' });
+    delete localImpact.trigger.metadata.job_url;
+
+    render(<ImpactGuideSection job={mockJob} analysisResult={{
+      impactData: localImpact,
+      matchedScm: { id: 'hdpdm01' },
+      matchedScmSource: 'sole',
+    }} />);
+
+    expect(screen.getByText(/이력 조회·실행을 잠갔습니다/)).toBeInTheDocument();
   });
 
   it('안전: 어느 Job의 빌드인지 증명 못 하는 이력은 재사용하지 않고 새로 분석한다', async () => {

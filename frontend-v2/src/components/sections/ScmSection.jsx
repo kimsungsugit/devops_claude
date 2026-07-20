@@ -3,6 +3,7 @@ import { post } from '../../api.js';
 import { useJenkinsCfg, useToast } from '../../App.jsx';
 import StatusBadge from '../StatusBadge.jsx';
 import { defaultCacheRoot } from '../../api.js';
+import { impactConflict, mismatchText } from '../../impactGuard.js';
 
 // 경로에서 파일명(basename)만 추출 — 전체 경로 대신 짧게 표시(전체 경로는 title로 hover 노출).
 const docBaseName = (p) => {
@@ -106,7 +107,15 @@ export default function ScmSection({ job, analysisResult }) {
   }, [job]);
 
   const selected = scmList.find(s => s.id === selectedId);
-  const changed = analysisResult?.impactData?.changed_files ?? [];
+  // 변경 파일 목록이 정말 '지금 보고 있는 것'의 것인지 대조한다(impactGuard).
+  // Job 축(Context의 결과가 다른 Job의 것) + SCM 축(위 드롭다운으로 고른 SCM과 결과를 만든
+  // SCM이 다름 — 드롭다운은 바꿀 수 있는데 impactData는 따라오지 않는다) 둘 다 본다.
+  // 표시용이라 '모순이 증명될 때만' 감춘다 — 증거 부재까지 막으면 정상 데이터를 상시로
+  // 감추게 된다(impactGuard.impactConflict 주석 참조).
+  const _conflict = impactConflict(analysisResult, job?.url, selectedId);
+  const changed = _conflict.conflict ? [] : (analysisResult?.impactData?.changed_files ?? []);
+  // 사유가 미지여도 반드시 문구가 나온다 — 감췄는데 배너가 안 뜨는 침묵 은닉 차단.
+  const changedHiddenReason = mismatchText(_conflict.reason);
 
   /* --- Filter changed files --- */
   const filteredFiles = useMemo(() => {
@@ -308,6 +317,15 @@ export default function ScmSection({ job, analysisResult }) {
       )}
 
       {/* Changed files with filter */}
+      {/* 감춘 이유를 밝힌다 — 조용히 비우면 '변경 없음'으로 오독된다. */}
+      {changedHiddenReason && (
+        <div className="panel mt-3">
+          <div className="panel-body text-sm text-muted">
+            ⚠ 변경 파일 목록을 표시하지 않았습니다 — {changedHiddenReason}
+          </div>
+        </div>
+      )}
+
       {changed.length > 0 && (
         <div className="panel mt-3">
           <div className="panel-header">

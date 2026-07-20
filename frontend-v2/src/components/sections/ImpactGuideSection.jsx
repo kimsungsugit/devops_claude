@@ -3,32 +3,14 @@ import { post, api } from '../../api.js';
 import { useToast, useJob, useJenkinsCfg } from '../../App.jsx';
 import StatusBadge from '../StatusBadge.jsx';
 import { pollImpactJob } from '../../impactPoll.js';
-import { pickScmForJob } from '../../projectLoader.js';
 import {
   impactIdentity, impactKeyOf, sameImpactTarget, sameJobUrl,
   saveImpactCurrent, loadImpactCurrent,
 } from '../../impactStore.js';
+import { targetConsistent } from '../../impactGuard.js';
 
 // 아직 어떤 대상에도 속하지 않은 가이드 슬롯(초기값).
 const UNOWNED = { value: null, owner: { key: '', ref: undefined } };
-
-/** 이 Job이 정말 이 SCM의 Job인지를 '증거'로만 판정한다.
- *
- * pickScmForJob은 후보가 하나면 job URL을 아예 읽지 않고 그대로 승인한다(체크아웃 자동해결
- * 용도의 의도된 설계). 그건 추론이지 증거가 아니므로, provenance 판정에 그대로 쓰면
- * 'SCM 1개 × Jenkins Job N개' 환경에서 무관한 Job의 changeSet으로 그 SCM을 분석하게 된다
- * (update_baseline=True라 MC/DC baseline이 덮어써진다). 단일 후보일 때는 토큰 일치를 더 요구한다.
- */
-function strictScmIdForJob(scmList, jobUrl) {
-  const picked = pickScmForJob(scmList, jobUrl);
-  if (!picked?.id) return '';
-  if (Array.isArray(scmList) && scmList.length === 1) {
-    const url = String(jobUrl || '').toLowerCase();
-    const tokens = [picked.id, picked.name].filter(Boolean).map(t => String(t).toLowerCase());
-    if (!url || !tokens.some(t => t && url.includes(t))) return '';
-  }
-  return picked.id;
-}
 
 // 변경 파일 집합의 출처 — '0 영향'이나 과소보고를 해석하려면 무엇으로 뽑았는지가 필요하다.
 const CHANGED_SOURCE_KO = {
@@ -784,34 +766,11 @@ export default function ImpactGuideSection({ analysisResult, job }) {
   // → 대상은 하나의 객체에서만 파생하고, 확정할 수 없으면 '모름'으로 둔다.
   //   scmList[0] 추측은 하지 않는다 — Dashboard도 자동매칭 실패 시 추측 대신 건너뛴다.
   // 한 걸음 더: scmId/baseRef는 analysisResult에서, jobUrl은 job prop에서 온다. 두 prop이 같은
-  // 프로젝트라는 보장이 없다 — Detail.switchProject와 Dashboard.loadFromCache 모두
-  // setSelectedJob → (await) setAnalysisResult 순서이고, 캐시 로드가 실패하면 catch가
-  // analysisResult를 갱신하지 않아 '새 Job + 옛 분석결과' 상태가 영구 지속된다.
-  // 그 상태로 트리거하면 scm_id=A × job_url=B가 나가 A의 커버리지 baseline·감사기록이 오염된다.
-  // ⚠ 형제 필드(analysisResult.jobUrl)만 보면 안 된다 — 트리거 페이로드의 scm_id는
-  // impact.trigger.scm_id에서 오므로 **impact 자신의 provenance**를 대조해야 한다.
-  // (a) analysisResult가 `{impactData}`만 남는 shape이 실재한다: 아래 setAnalysisResult가
-  //     prev=null일 때 그렇게 만든다 → jobUrl이 없어 형제 필드 검사가 통째로 단락된다.
-  // (b) unmount 후에도 살아 있던 폴링이 옛 결과를 주입하면 jobUrl은 새 Job, impactData는 옛 Job이 된다.
-  // (c) job_url 자체가 없는 결과가 실재한다: /api/local/impact/trigger 는 metadata에 job_url을
-  //     싣지 않는다. 그 경우 위 두 항이 모두 vacuous true가 되어 검사가 통째로 단락되므로,
-  //     SCM 축으로 증거를 요구한다 — 읽기 게이트(savedMatchesProject·belongsHere)와 같은
-  //     '증거 없으면 거부' 정책으로 통일한다. pickScmForJob은 Dashboard가 쓰는 것과 동일 로직.
-  const impactJobUrl = impact?.trigger?.metadata?.job_url || '';
-  // ⚠ 알려진 한계: 1순위인 matchedScm은 생산자(Dashboard·projectLoader)가 **느슨한**
-  // pickScmForJob 결과를 그대로 실어 둔 값이라, 그 갈래에서는 아래 strict 판정이 발화하지 않는다.
-  // 즉 SCM 축의 증거 강도는 "matchedScm 부재 시에만" 보장된다(있을 때는 term1의 jobUrl 일치가
-  // 방어). 구조적 해법은 생산자가 매칭 근거(수동/토큰일치/유일후보)를 함께 기록하고 소비자가
-  // '유일후보'를 증거로 인정하지 않는 것 — 생산자 변경이 필요해 후속 과제로 남긴다.
-  const scmForCurrentJob = analysisResult?.matchedScm?.id
-    || strictScmIdForJob(analysisResult?.scmList, job?.url)
-    || '';
-  const impactProvenanceOk = !impact || !job?.url || Boolean(impactJobUrl)
-    || (Boolean(scmForCurrentJob) && String(impact?.trigger?.scm_id || '') === scmForCurrentJob);
-  const projectConsistent =
-    (!analysisResult?.jobUrl || !job?.url || sameJobUrl(analysisResult.jobUrl, job.url))
-    && (!impactJobUrl || !job?.url || sameJobUrl(impactJobUrl, job.url))
-    && impactProvenanceOk;
+  // 프로젝트라는 보장이 없으므로 '이 결과가 이 Job의 것인가'를 별도로 대조해야 한다.
+  // 그 판정(3축 — 형제 필드 / impact 자신의 provenance / SCM 축)은 impactGuard.js 로 추출했다:
+  // 같은 Context를 읽는 SrsSdsSection·ScmSection도 재사용해야 하는데, 컴포넌트 렌더 본문의
+  // 파생 불린값이면 재사용할 방법이 없기 때문이다. 근거·실패 시나리오는 그 모듈 상단 참조.
+  const projectConsistent = targetConsistent(analysisResult, job?.url);
 
   const targetScm = useMemo(() => {
     if (!projectConsistent) return null;  // 대상 미확정 → 이력 조회·트리거 모두 fail-closed

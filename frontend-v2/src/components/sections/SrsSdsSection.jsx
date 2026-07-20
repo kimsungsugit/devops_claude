@@ -3,6 +3,7 @@ import { api, post, getUsername, authHeaders, buildUrl } from '../../api.js';
 import { useJenkinsCfg, useToast } from '../../App.jsx';
 import StatusBadge from '../StatusBadge.jsx';
 import { defaultCacheRoot } from '../../api.js';
+import { impactConflict, contextConflict, mismatchText } from '../../impactGuard.js';
 
 export default function SrsSdsSection({ job, analysisResult }) {
   const { cfg } = useJenkinsCfg();
@@ -33,9 +34,24 @@ export default function SrsSdsSection({ job, analysisResult }) {
     try { return JSON.parse(localStorage.getItem('devops_v2_doc_paths') || '{}'); } catch (_) { return {}; }
   }, []);
 
-  // Prefer the registry entry matched by Dashboard for THIS job; fall back to
-  // scmList[0] only when no match was recorded (single-project setups).
-  const activeScm = analysisResult?.matchedScm || analysisResult?.scmList?.[0];
+  // ⚠ 이 섹션에서 오귀속 피해가 가장 큰 건 아래 "영향 분석 결과" 패널이 아니라 activeScm이다.
+  // activeScm.linked_docs가 docPaths → loadMatrix로 흘러 추적성 매트릭스(SRS→SDS→UDS→STS→
+  // SUTS→SITS) 전체의 입력이 되기 때문. 결과 뭉치가 통째로 옛 Job의 것이면(Detail.switchProject의
+  // 캐시 로드 실패 등) 헤더는 새 Job인데 매트릭스는 옛 프로젝트 규격서로 그려진다.
+  // impactData가 null이면 impactConflict는 no_impact로 통과시키므로 여기선 contextConflict가
+  // 필요하다 — 그게 결과 뭉치 전체의 stale을 보는 유일한 축이다.
+  const _ctxConflict = contextConflict(analysisResult, job?.url);
+  const _staleContext = _ctxConflict.conflict;
+  // Prefer the registry entry matched by Dashboard for THIS job.
+  // ⚠ scmList[0] 폴백은 **단일 프로젝트일 때만** 쓴다. 다중 레지스트리에서 자동매칭이 실패한
+  // 상태(matchedScm=null)에 [0]을 집으면 다른 프로젝트의 규격서로 매트릭스를 그리면서 화면상
+  // 정상으로 보인다. Dashboard(자동매칭 실패 시 건너뜀)·ImpactGuideSection(폴백 제거)과 정책 통일.
+  const _scmList = Array.isArray(analysisResult?.scmList) ? analysisResult.scmList : [];
+  const activeScm = _staleContext
+    ? null
+    : (analysisResult?.matchedScm || (_scmList.length === 1 ? _scmList[0] : null));
+  // 자동매칭 실패로 SCM을 못 정한 상태 — 조용히 비우면 '문서 미설정'으로 오독된다.
+  const scmAmbiguous = !_staleContext && !activeScm && _scmList.length > 1;
   // Merge: SCM linked_docs takes priority, then localStorage
   const scmLinked = activeScm?.linked_docs || {};
   const docPaths = useMemo(() => ({
@@ -441,13 +457,44 @@ export default function SrsSdsSection({ job, analysisResult }) {
     }
   }, [traceFocus, loadMatrix]);
 
-  const impactData = analysisResult?.impactData;
+  // Context의 impactData가 정말 지금 보고 있는 Job/SCM의 것인지 대조한다(impactGuard).
+  // Dashboard.runAnalysis는 여러 개가 겹쳐 돌 수 있고 서버측 취소가 없어 구 실행이 완주하므로,
+  // 대조 없이 읽으면 다른 프로젝트의 변경파일·영향문서를 이 화면 것으로 표시하게 된다
+  // (ISO 26262 오보고 — 이 섹션은 요구사항 커버리지를 다루므로 특히 위험).
+  // 표시용이므로 '모순이 증명될 때만' 감춘다(impactGuard.impactConflict 주석 참조).
+  const _impactConflict = impactConflict(analysisResult, job?.url, activeScm?.id);
+  const impactData = _impactConflict.conflict ? null : analysisResult?.impactData;
+  // 사유가 미지여도 반드시 문구가 나온다(mismatchText가 일반 문구로 폴백) — 감췄는데
+  // 배너가 안 뜨는 침묵 은닉을 구조적으로 차단.
+  const impactMismatchReason = mismatchText(_impactConflict.reason);
   const impacts = impactData?.impacts ?? impactData?.impact_items ?? [];
   const changedFiles = impactData?.changed_files ?? [];
   const impactedDocs = impactData?.impacted_docs ?? impactData?.impacted_documents ?? [];
 
   return (
     <div>
+      {/* 결과 뭉치 전체가 옛 Job의 것이면 이 섹션 전부가 오귀속이다 — 추적성 매트릭스의
+          입력(activeScm.linked_docs)까지 옛 프로젝트 것이 되므로 최상단에 알린다. */}
+      {_staleContext && (
+        <div className="panel">
+          <div className="panel-body text-sm text-muted">
+            ⚠ 이 화면의 분석 결과가 현재 Job의 것이 아닙니다 — {mismatchText(_ctxConflict.reason)}
+            <div style={{ marginTop: 4 }}>
+              추적성 매트릭스와 입력 문서를 옛 프로젝트 기준으로 그리지 않도록 비워 두었습니다.
+            </div>
+          </div>
+        </div>
+      )}
+      {/* 다중 레지스트리에서 자동매칭이 실패한 상태. scmList[0]을 추측하지 않는다. */}
+      {scmAmbiguous && (
+        <div className="panel">
+          <div className="panel-body text-sm text-muted">
+            ⚠ 이 Job에 해당하는 SCM을 확정하지 못했습니다(등록 {_scmList.length}개).
+            대시보드의 SCM 선택 드롭다운에서 직접 지정한 뒤 다시 분석하세요.
+          </div>
+        </div>
+      )}
+
       {/* Input doc status */}
       <div className="panel">
         <div className="panel-header">
@@ -532,6 +579,16 @@ export default function SrsSdsSection({ job, analysisResult }) {
           </div>
         </div>
       </div>
+
+      {/* 대조 실패로 감췄다면 그 사실을 알린다 — 조용히 비우면 사용자는 '영향 없음'/'문서
+          미설정'으로 오독한다(침묵이 곧 오보고). 사유별 해소 방법은 mismatchText가 붙인다. */}
+      {impactMismatchReason && (
+        <div className="panel mt-3">
+          <div className="panel-body text-sm text-muted">
+            ⚠ 영향 분석 결과를 표시하지 않았습니다 — {impactMismatchReason}
+          </div>
+        </div>
+      )}
 
       {/* Impact data: changed files and impacted documents */}
       {impactData && (changedFiles.length > 0 || impactedDocs.length > 0) && (
