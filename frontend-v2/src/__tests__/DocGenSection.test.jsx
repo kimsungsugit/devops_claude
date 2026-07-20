@@ -15,7 +15,7 @@
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { post } from '../api.js';
+import { post, api } from '../api.js';
 
 // ── Context mock ──────────────────────────────────────────────────────
 const mockToast = vi.fn();
@@ -48,6 +48,8 @@ globalThis.fetch = vi.fn(() =>
 );
 
 const { default: DocGenSection } = await import('../components/sections/DocGenSection.jsx');
+// 폴러는 별도 모듈 — 컴포넌트 파일에서 export 하면 Fast Refresh 가 깨진다.
+const { pollProgress, pollStsProgress } = await import('../docGenPoll.js');
 
 
 /* ── 픽스처 ── */
@@ -272,4 +274,133 @@ describe('DocGenSection', () => {
     // Assert — 단일 페이지(has_more=false, page 0): 페이저 자체가 렌더되지 않음
     expect(screen.queryByText('다음 ›')).toBeNull();
   });
+});
+
+/* 취소가 '생성 완료'로 위장되지 않는가 (abort 계약)
+ *
+ * 예전엔 pollProgress/pollStsProgress 가 abort 시 null 을 돌려줬는데, 호출측의
+ * `progress?.error` 가 optional chaining 이라 null 을 무해하게 통과시켜 그대로
+ * 진행률 100% + "생성 완료" + 성공 토스트 + success:true 로 흘렀다. signal:null
+ * 하드코딩 덕에 도달 불가한 잠복 결함이었지만, ISO 26262 산출물 생성 경로에서
+ * 취소가 성공으로 위장되는 건 치명적이므로 계약을 throw 로 통일했다.
+ *
+ * 여기서는 폴러가 의존하는 progress 응답을 조작해 두 축을 고정한다:
+ *  (1) 진행 상태를 못 받으면(falsy) 성공 분기로 못 간다
+ *  (2) abort 예외는 실패 토스트도 내지 않는다(사용자 오류가 아님)
+ */
+describe('DocGenSection — 취소/이상응답이 성공으로 위장되지 않는다', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    localStorage.clear();
+  });
+
+  it('취소는 "생성 완료" 성공 토스트를 내지 않는다', async () => {
+    // 이게 원래 결함의 본체다. 폴러가 abort 시 null 을 돌려주던 시절, 호출측의
+    // `progress?.error` 가 optional chaining 이라 null 을 무해하게 통과시켜 그대로
+    // 진행률 100% + "생성 완료" + success:true 로 흘렀다.
+    const user = userEvent.setup();
+    globalThis.fetch = vi.fn(async (url) => ({
+      ok: true,
+      json: async () => (String(url).includes('/generate-async') ? { job_id: 'j1' } : { packages: [] }),
+      text: async () => '',
+    }));
+    api.mockImplementation(async (url) => {
+      if (String(url).includes('/progress')) {
+        throw new DOMException('The operation was aborted.', 'AbortError');
+      }
+      return { items: [] };
+    });
+
+    render(<DocGenSection job={makeJob()} analysisResult={makeAnalysisResult()} />);
+    await user.click(await screen.findByRole('button', { name: /UDS/ }));
+
+    // ⚠ 폴러의 첫 대기가 2000ms 다. 그 전에 단언하면 아무 일도 안 일어난 상태를
+    // '토스트 없음'으로 읽는 공허한 테스트가 된다 — 반드시 판정에 도달시킨다.
+    await waitFor(() => expect(api).toHaveBeenCalledWith(expect.stringContaining('/progress')), { timeout: 6000 });
+    await new Promise(r => setTimeout(r, 200));
+    const successCalls = mockToast.mock.calls.filter(c => c[0] === 'success');
+    expect(successCalls, JSON.stringify(mockToast.mock.calls)).toHaveLength(0);
+  }, 20000);
+
+  it('abort 예외는 실패 토스트로 보고하지 않는다', async () => {
+    // isAbortError 로 걸러지는지 — 계약이 name/message 어느 쪽이든 통과해야 한다.
+    const user = userEvent.setup();
+    globalThis.fetch = vi.fn(async (url) => ({
+      ok: true,
+      json: async () => (String(url).includes('/generate-async') ? { job_id: 'j1' } : { packages: [] }),
+      text: async () => '',
+    }));
+    api.mockImplementation(async (url) => {
+      if (String(url).includes('/progress')) {
+        throw new DOMException('The operation was aborted.', 'AbortError');
+      }
+      return { items: [] };
+    });
+
+    render(<DocGenSection job={makeJob()} analysisResult={makeAnalysisResult()} />);
+    const btn = await screen.findByRole('button', { name: /UDS/ });
+    await user.click(btn);
+
+    // 동일 — 폴러가 실제로 api() 를 때려 abort 예외가 catch 에 도달해야 의미가 있다.
+    await waitFor(() => expect(api).toHaveBeenCalledWith(expect.stringContaining('/progress')), { timeout: 6000 });
+    await new Promise(r => setTimeout(r, 200));
+    const errorCalls = mockToast.mock.calls.filter(c => c[0] === 'error');
+    expect(errorCalls, JSON.stringify(mockToast.mock.calls)).toHaveLength(0);
+  }, 20000);
+});
+
+/* 폴러 abort 계약 — signal 을 **실제로** 넘겨 검증
+ *
+ * 위 컴포넌트 레벨 테스트는 signal 을 넘기지 않아(이 화면엔 취소 UI 가 없다) 폴러의
+ * throwIfAborted 가 항상 no-op 이고, 실제로는 `api()` 가 던지는 경로만 친다. 즉 폴러를
+ * 옛 `return null` 계약으로 통째로 되돌려도 통과한다 = 계약 자체가 무커버리지였다.
+ * 여기서는 폴러를 직접 불러 signal 을 넘긴다.
+ *
+ * 특히 **`await api()` 왕복 중 도착한 중단**을 고정한다. 루프 선두와 sleep 뒤에만 검사하면
+ * done:true 응답이 그대로 return 돼 호출측이 "생성 완료 + success:true" 로 기록한다 —
+ * ISO 26262 산출물 생성 경로에서 취소가 성공으로 위장되는 창이다.
+ */
+describe('DocGenSection 폴러 — abort 계약 (signal 실배선)', () => {
+  beforeEach(() => { vi.clearAllMocks(); });
+
+  it('pollProgress: api() 왕복 중 중단되면 done:true 를 반환하지 않고 throw 한다', async () => {
+    const controller = new AbortController();
+    api.mockImplementation(async () => {
+      controller.abort();                       // 왕복 '중'에 중단이 도착한 상황
+      return { progress: { done: true, output_path: 'x.docx' } };
+    });
+
+    await expect(
+      pollProgress('http://j/job/x/', 'lastSuccessfulBuild', 'j1', 'uds', { onMsg: () => {} , signal: controller.signal })
+    ).rejects.toMatchObject({ name: 'AbortError' });
+  }, 20000);
+
+  it('pollStsProgress: api() 왕복 중 중단되면 throw 한다 (return 지점 3개 전부 차단)', async () => {
+    const controller = new AbortController();
+    api.mockImplementation(async () => {
+      controller.abort();
+      return { status: 'completed', xlsm_path: 'y.xlsm' };   // done 플래그가 아닌 경로
+    });
+
+    await expect(
+      pollStsProgress('j1', 'sts', 'http://j/job/x/', { onMsg: () => {}, signal: controller.signal })
+    ).rejects.toMatchObject({ name: 'AbortError' });
+  }, 20000);
+
+  it('pollProgress: 대기 중 중단되면 api 를 아예 부르지 않는다', async () => {
+    const controller = new AbortController();
+    controller.abort();
+    api.mockResolvedValue({ progress: { done: true } });
+
+    await expect(
+      pollProgress('http://j/job/x/', 'sel', 'j1', 'uds', { onMsg: () => {}, signal: controller.signal })
+    ).rejects.toMatchObject({ name: 'AbortError' });
+    expect(api).not.toHaveBeenCalled();
+  }, 20000);
+
+  it('중단이 없으면 정상적으로 진행 결과를 돌려준다 (과차단 방지)', async () => {
+    api.mockResolvedValue({ progress: { done: true, output_path: 'ok.docx' } });
+    const r = await pollProgress('http://j/job/x/', 'sel', 'j1', 'uds', { onMsg: () => {} });
+    expect(r.output_path).toBe('ok.docx');
+  }, 20000);
 });

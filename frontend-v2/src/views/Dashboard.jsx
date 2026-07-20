@@ -2,7 +2,7 @@ import { useState, useCallback, useRef, useEffect } from 'react';
 import { post, api, defaultCacheRoot } from '../api.js';
 import { useToast, useJenkinsCfg, useJob } from '../App.jsx';
 import { pickScmForJob, pickScmForJobWithSource, loadProjectFromCache } from '../projectLoader.js';
-import { pollImpactJob, throwIfAborted } from '../impactPoll.js';
+import { pollImpactJob, throwIfAborted, isAbortError } from '../impactPoll.js';
 import JobCard from '../components/JobCard.jsx';
 import ResultPanel from '../components/ResultPanel.jsx';
 import AggregateCharts from '../components/AggregateCharts.jsx';
@@ -19,8 +19,9 @@ const STEPS = [
 ];
 
 function stepIcon(state) {
-  if (state === 'done')  return '✓';
-  if (state === 'error') return '✕';
+  if (state === 'done')    return '✓';
+  if (state === 'error')   return '✕';
+  if (state === 'aborted') return '⏹';   // 사용자가 의도적으로 멈춤 — 실패(✕)와 구분
   return '○';
 }
 
@@ -156,6 +157,24 @@ export default function Dashboard({ onGoDetail }) {
   const applyStep = (id, state, msg = '') => {
     setStepStates(p => ({ ...p, [id]: state }));
     if (msg) setStepMsgs(p => ({ ...p, [id]: msg }));
+  };
+
+  /** 진행 중이던 단계만 '중단됨'으로 확정한다.
+   *
+   * 실행을 끊는 경로가 둘이라(stopAnalysis / loadFromCache) 한쪽만 마킹하면 그쪽에서만
+   * 스피너가 고착된다. **active 만** 바꾸고 done/error 는 보존한다 — 스테퍼는 어느
+   * 단계까지 끝났는지에 대한 사용자의 유일한 기록이라, 완료분까지 중단됨으로 덮으면
+   * 정보가 사라진다.
+   */
+  const markActiveAborted = () => {
+    setStepStates(p => {
+      const next = { ...p };
+      let touched = false;
+      for (const k of Object.keys(next)) {
+        if (next[k] === 'active') { next[k] = 'aborted'; touched = true; }
+      }
+      return touched ? next : p;
+    });
   };
 
   /* Analysis result cache keyed by jobUrl + buildNumber */
@@ -395,7 +414,7 @@ export default function Dashboard({ onGoDetail }) {
             setStep('impact', 'done', '완료');
           }
         } catch (e) {
-          if (e.message === 'AbortError') throw e;
+          if (isAbortError(e)) throw e;
           setStep('impact', 'error', e.message);
           impactData = null;
         }
@@ -408,7 +427,11 @@ export default function Dashboard({ onGoDetail }) {
       updateResult();
 
       const bn = reportData?.build_number;
-      if (bn) {
+      // isCurrent() 필수. matchedScm 이 없으면 impact 블록이 통째로 스킵돼 throwIfAborted 에
+      // 도달하지 못하고 여기까지 흘러온다 → 중단된 실행의 부분 결과(impactData:null)가
+      // 캐시에 박히고, 이후 같은 build+scmId 재실행이 그걸 "변경 없음 — 캐시된 결과"
+      // 성공 토스트와 함께 재생한다(중단이 성공으로 위장되는 또 하나의 경로).
+      if (bn && isCurrent()) {
         cacheRef.current[jobUrl] = {
           buildNumber: bn,
           scmId: matchedScm?.id || '',
@@ -421,7 +444,7 @@ export default function Dashboard({ onGoDetail }) {
         toast('success', '분석이 완료되었습니다.');
       }
     } catch (e) {
-      if (e.message !== 'AbortError' && isCurrent()) {
+      if (!isAbortError(e) && isCurrent()) {
         toast('error', `분석 중 오류: ${e.message}`);
       }
     } finally {
@@ -440,6 +463,10 @@ export default function Dashboard({ onGoDetail }) {
     // 세대를 올리면 구 실행의 finally 가 running 을 못 끄므로 여기서 명시적으로 내린다.
     abortRef.current?.abort();
     setRunning(false);
+    // stopAnalysis 와 같은 이유로 진행 중이던 단계를 '중단됨'으로 확정한다. 이게 없으면
+    // 스테퍼 렌더 조건(stepStates 비어있지 않음)은 참인데 active 세그먼트가 스피너를
+    // 계속 돌리고, running=false 라 중단 버튼도 없어 멈춘 건지 도는 건지 알 수 없다.
+    markActiveAborted();
     // 이 로드도 하나의 '실행'이다. 남의 세대만 올리고 자기 쓰기를 무가드로 두면 같은
     // last-writer-wins 가 그대로 남는다 — 캐시 로드 두 건이 겹치면(즐겨찾기 연타) 늦게
     // 끝난 쪽이 이긴다. 게다가 이 결과는 impactData:null 이라 impactConflict 가
@@ -467,6 +494,11 @@ export default function Dashboard({ onGoDetail }) {
 
   const stopAnalysis = () => {
     abortRef.current?.abort();
+    // 진행 중이던 단계를 '중단됨'으로 확정한다. 이게 없으면 active 세그먼트가 스피너를
+    // 계속 돌린 채 남고, running=false 라 중단 버튼마저 사라져 사용자는 "멈췄는지 도는지"를
+    // 알 수 없다 — 중단이 무반응처럼 보인다.
+    markActiveAborted();
+    toast('info', '분석을 중단했습니다.');
     // 세대를 올려 그 실행의 이후 쓰기를 전부 무효화한다. abort 만으로는 부족하다 —
     // signal 을 안 받는 raw post(report/summary 등)는 완주하고, 그 직후 setStep·
     // updateResult 에는 abort 검사 지점이 없어 '중단'을 눌러도 스테퍼가 계속 전진하고
@@ -724,9 +756,10 @@ export default function Dashboard({ onGoDetail }) {
                   <div
                     key={s.id}
                     className={`sync-segment${
-                      state === 'done'   ? ' seg-done'   :
-                      state === 'active' ? ' seg-active' :
-                      state === 'error'  ? ' seg-error'  : ''
+                      state === 'done'    ? ' seg-done'    :
+                      state === 'active'  ? ' seg-active'  :
+                      state === 'error'   ? ' seg-error'   :
+                      state === 'aborted' ? ' seg-aborted' : ''
                     }`}
                     title={stepMsgs[s.id] || s.label}
                   >

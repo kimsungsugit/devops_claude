@@ -302,4 +302,51 @@ describe('Dashboard — 실행 세대 가드', () => {
 
     expect(mockSetAnalysisResult).not.toHaveBeenCalled();
   }, 30000);
+
+  it("중단하면 진행 중이던 단계가 '중단됨'으로 확정된다", async () => {
+    // 예전엔 stopAnalysis 가 stepStates 를 손대지 않아 active 세그먼트가 스피너를 계속
+    // 돌린 채 고착됐다. running=false 라 '중단' 버튼마저 사라져 사용자는 멈췄는지 도는지
+    // 알 수 없었다 — 중단이 무반응처럼 보이는 상태.
+    const summaryCalls = [];
+    post.mockImplementation(async (url) => {
+      if (url === '/api/jenkins/jobs') return [JOB_A];
+      if (url === '/api/jenkins/sync-async') return { job_id: 'sync-1' };
+      if (url === '/api/jenkins/build-info') throw new Error('no cache');
+      if (url === '/api/jenkins/report/summary') {
+        const d = deferred();
+        summaryCalls.push(d);
+        return d.promise;
+      }
+      return {};
+    });
+    api.mockImplementation(async (url) => {
+      if (String(url).includes('/api/scm/list')) return { items: [{ id: 'scm-1' }] };
+      if (String(url).includes('/api/jenkins/progress')) {
+        return { progress: { done: true, checkout_ok: true } };
+      }
+      return {};
+    });
+
+    const { container } = render(<Dashboard />);
+    fireEvent.click(await screen.findByTestId('job-card'));
+    // sync 가 done 이 되고 report 가 active 로 넘어간 시점까지 기다린다. 그냥 첫 seg-active
+    // 를 기다리면 sync 가 아직 진행 중이라 '완료 단계 보존'을 검증할 수 없다.
+    await waitFor(() => {
+      expect(container.querySelector('.seg-done')).toBeTruthy();
+      expect(container.querySelector('.seg-active')).toBeTruthy();
+    }, { timeout: 10000 });
+
+    fireEvent.click(screen.getByText('중단'));
+
+    await waitFor(() => expect(container.querySelector('.seg-aborted')).toBeTruthy());
+    // 진행 중 표시가 남아 있으면 안 된다 — 스피너 고착이 이 결함의 증상이었다
+    expect(container.querySelector('.seg-active')).toBeNull();
+    expect(mockToast).toHaveBeenCalledWith('info', expect.stringContaining('중단'));
+    // 글리프까지 확인한다. 클래스만 보면 stepIcon 의 'aborted' 분기를 지워도 통과하는데,
+    // seg-aborted 는 배경이 기본과 같아 **⏹ 가 사실상 유일한 시각 신호**다.
+    expect(container.querySelector('.seg-aborted').textContent).toContain('⏹');
+    // 이미 끝난 단계는 보존해야 한다 — 스테퍼는 어디까지 끝났는지에 대한 유일한 기록이라
+    // 완료분까지 '중단됨'으로 덮으면 정보가 사라진다(sync 는 이 시점에 done 이다).
+    expect(container.querySelector('.seg-done')).toBeTruthy();
+  }, 30000);
 });

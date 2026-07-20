@@ -2,7 +2,7 @@ import { useState, useCallback, useMemo, useEffect, useRef } from 'react';
 import { post, api } from '../../api.js';
 import { useToast, useJob, useJenkinsCfg } from '../../App.jsx';
 import StatusBadge from '../StatusBadge.jsx';
-import { pollImpactJob } from '../../impactPoll.js';
+import { pollImpactJob, isAbortError } from '../../impactPoll.js';
 import {
   impactIdentity, impactKeyOf, sameImpactTarget, sameJobUrl,
   saveImpactCurrent, loadImpactCurrent,
@@ -911,7 +911,7 @@ export default function ImpactGuideSection({ analysisResult, job }) {
       loadHistory();
     } catch (e) {
       // unmount로 끊은 폴링은 사용자 오류가 아니다 — 실패로 보고하지 않는다.
-      if (e.message !== 'AbortError') toast('error', `영향도 분석 실패: ${e.message}`);
+      if (!isAbortError(e)) toast('error', `영향도 분석 실패: ${e.message}`);
     } finally {
       setSourceBusy('');
     }

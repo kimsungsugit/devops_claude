@@ -1,37 +1,8 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
 import { api, post, defaultCacheRoot, getUsername } from '../../api.js';
 import { useJenkinsCfg, useToast } from '../../App.jsx';
-
-async function pollProgress(jobUrl, buildSelector, jobId, action, { onMsg, signal }) {
-  while (true) {
-    if (signal?.aborted) return null;
-    await new Promise(r => setTimeout(r, 2000));
-    const data = await api(
-      `/api/jenkins/progress?action=${encodeURIComponent(action)}` +
-      `&job_url=${encodeURIComponent(jobUrl)}` +
-      `&build_selector=${encodeURIComponent(buildSelector)}` +
-      `&job_id=${encodeURIComponent(jobId)}`
-    );
-    const p = data?.progress || {};
-    if (p.message || p.stage) onMsg(p.message || p.stage);
-    if (p.progress != null) onMsg(`${p.message || ''} (${p.progress}%)`);
-    if (p.done || p.error) return p;
-  }
-}
-
-async function pollStsProgress(jobId, action, jobUrl, { onMsg, signal, prefix = '/api/jenkins' } = {}) {
-  while (true) {
-    if (signal?.aborted) return null;
-    await new Promise(r => setTimeout(r, 3000));
-    const qs = `job_id=${encodeURIComponent(jobId)}&job_url=${encodeURIComponent(jobUrl || '')}`;
-    const data = await api(`${prefix}/${action}/progress?${qs}`);
-    const p = data?.progress || data || {};
-    if (p.message || p.stage) onMsg(p.message || p.stage);
-    if (p.done || p.error) return p;
-    if (p.status === 'completed' || p.status === 'done') return { done: true, ...p };
-    if (p.status === 'failed' || p.status === 'error') return { error: p.error || p.message || '실패', ...p };
-  }
-}
+import { isAbortError } from '../../impactPoll.js';
+import { pollProgress, pollStsProgress } from '../../docGenPoll.js';
 
 // 미리보기 서버 페이지네이션 한 페이지 행 수(백엔드 page_size 기본값과 일치).
 const PREVIEW_PAGE_SIZE = 100;
@@ -173,24 +144,38 @@ export default function DocGenSection({ job, analysisResult, onNavigateSub }) {
         if (pct != null) setGenProgress(prev => Math.max(prev, pct));
       };
 
+      // signal 은 넘기지 않는다 — 이 화면엔 취소 UI 가 없어 배선할 컨트롤러가 없다.
+      // (죽은 `signal: null` 하드코딩을 남겨두면 "취소가 지원되는 것처럼" 읽힌다.)
       if (docType === 'uds') {
         progress = await pollProgress(job.url, cfg.buildSelector || 'lastSuccessfulBuild', data.job_id, 'uds', {
-          onMsg: onProgress, signal: null,
+          onMsg: onProgress,
         });
       } else {
         const pollPrefix = docType === 'sits' ? '/api/local' : '/api/jenkins';
         progress = await pollStsProgress(data.job_id, docType, job.url, {
-          onMsg: onProgress, signal: null, prefix: pollPrefix,
+          onMsg: onProgress, prefix: pollPrefix,
         });
       }
 
       if (progress?.error) throw new Error(progress.error);
+      // 방어선(현재 도달 불가). 두 폴러 모두 `data?.progress || {}` 를 돌려주므로 falsy 가
+      // 나올 수 없다 — 하지만 abort 가 null 을 돌려주던 시절엔 정확히 이 자리가 뚫려
+      // 취소를 '생성 완료'로 위장했다. 폴러의 반환 계약이 다시 바뀌어도 성공 분기로는
+      // 못 새도록 남겨 둔다. (테스트로 도달시킬 수 없으므로 테스트는 두지 않았다.)
+      if (!progress) throw new Error('진행 상태를 받지 못했습니다.');
 
       setGenProgress(100);
       setGenStage(`${label} 생성 완료`);
       setGenResult({ success: true, path: progress?.output_path || progress?.xlsm_path || '' });
       toast('success', `${label} 생성 완료`);
     } catch (e) {
+      // 취소는 사용자 오류가 아니다 — 실패로 보고하지 않는다. 다만 조용히 return 만 하면
+      // 진행바가 중간값(예: 55% "DOCX 생성")에 고착돼 "아직 도는 중"처럼 보인다.
+      if (isAbortError(e)) {
+        setGenStage(`${label} 생성을 중단했습니다.`);
+        setGenProgress(0);
+        return;
+      }
       toast('error', `${label} 생성 실패: ${e.message}`);
       setGenStage(`오류: ${e.message}`);
       setGenResult({ success: false, error: e.message });

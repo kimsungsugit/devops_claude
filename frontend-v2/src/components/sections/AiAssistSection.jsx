@@ -2,6 +2,7 @@ import { useState, useRef, useCallback, useEffect, Fragment } from 'react';
 import { post, postSse, api, defaultCacheRoot } from '../../api.js';
 import { useJenkinsCfg, useToast } from '../../App.jsx';
 import StatusBadge from '../StatusBadge.jsx';
+import { isAbortError } from '../../impactPoll.js';
 
 // 챗 그래프 5노드(assistant_service.answer_chat) — 진행 stepper 단계 정의
 const STEP_DEFS = [
@@ -21,11 +22,13 @@ function StepIcon({ status }) {
   if (status === 'active') return <span className="spinner" style={{ display: 'inline-block', width: 12, height: 12 }} />;
   if (status === 'done') return <span style={{ color: 'var(--success, #16a34a)', fontSize: 12, fontWeight: 700 }}>✓</span>;
   if (status === 'skipped') return <span aria-hidden title="건너뜀" style={{ color: 'var(--text-muted)', fontSize: 12, lineHeight: 1 }}>⊘</span>;
+  // 사용자가 '중단'을 누른 지점. 이 표시가 없으면 스테퍼가 통째로 비워져 어디서 끊겼는지 모른다.
+  if (status === 'aborted') return <span aria-hidden title="중단됨" style={{ color: 'var(--text-muted)', fontSize: 12, lineHeight: 1 }}>⏹</span>;
   return <span aria-hidden style={{ color: 'var(--text-muted)', fontSize: 12, lineHeight: 1 }}>○</span>;
 }
 
 // graph_node_started/finished 이벤트를 5단계 진행 표시로 렌더 (경과시간 포함)
-function ProgressStepper({ stepStatus, onCancel }) {
+function ProgressStepper({ stepStatus, onCancel, showCancel = true }) {
   return (
     <div className="row" role="status" aria-live="polite"
       style={{ gap: 2, alignItems: 'center', paddingLeft: 8, flexWrap: 'wrap', rowGap: 4 }}>
@@ -43,7 +46,8 @@ function ProgressStepper({ stepStatus, onCancel }) {
           </Fragment>
         );
       })}
-      <button className="btn-sm" onClick={onCancel} style={{ fontSize: 10, marginLeft: 8 }}>중단</button>
+      {/* 이미 끝난(중단된) 스테퍼에 '중단' 버튼을 남기면 누를 게 없는 버튼이 된다. */}
+      {showCancel && <button className="btn-sm" onClick={onCancel} style={{ fontSize: 10, marginLeft: 8 }}>중단</button>}
     </div>
   );
 }
@@ -161,6 +165,7 @@ export default function AiAssistSection({ job, analysisResult }) {
     const ctrl = new AbortController();
     abortRef.current = ctrl;
     setStreaming(true);
+    let aborted = false;   // 중단이면 finally 가 스테퍼를 비우지 않도록(중단 흔적 보존)
     try {
       await postSse('/api/chat/stream', {
         mode: job?.url ? 'jenkins' : 'local',
@@ -205,21 +210,38 @@ export default function AiAssistSection({ job, analysisResult }) {
         },
       });
     } catch (e) {
-      if (e.name !== 'AbortError') {
+      if (isAbortError(e)) {
+        // 중단 흔적을 남긴다. 아래 finally 가 스테퍼를 통째로 비우면 어느 단계에서 끊겼는지
+        // 증거가 사라져 중단이 무반응처럼 보인다 — 진행 중이던 노드를 'aborted'로 확정.
+        aborted = true;
+        setStepStatus(prev => {
+          const next = { ...prev };
+          for (const k of Object.keys(next)) {
+            if (next[k]?.status === 'active') next[k] = { ...next[k], status: 'aborted' };
+          }
+          return next;
+        });
+      } else {
         patchLastAssistant({ content: `오류: ${e.message}` });
         toast('error', e.message);
       }
     } finally {
       setPending(false);
       setStreaming(false);
-      setStepStatus({});
+      if (!aborted) setStepStatus({});
       abortRef.current = null;
-      // W2: message 이벤트 없이 스트림이 끝난 경우(네트워크 이상 등) 빈 pending 버블 정리
+      // W2: message 이벤트 없이 스트림이 끝난 경우(네트워크 이상 등) 빈 pending 버블 정리.
+      // ⚠ 중단은 실패가 아니다 — 사용자가 멈춘 걸 "응답을 받지 못했습니다"로 쓰면 장애로
+      // 오독된다. 스테퍼는 ⏹인데 버블은 '못 받았다'가 되어 신호도 엇갈린다.
       setMessages(prev => {
         const last = prev[prev.length - 1];
         if (last?.role === 'assistant' && last.pending && !last.content) {
           const n = [...prev];
-          n[n.length - 1] = { ...last, content: '(응답을 받지 못했습니다)', pending: false };
+          n[n.length - 1] = {
+            ...last,
+            content: aborted ? '(중단됨)' : '(응답을 받지 못했습니다)',
+            pending: false,
+          };
           return n;
         }
         return prev;
@@ -229,7 +251,10 @@ export default function AiAssistSection({ job, analysisResult }) {
 
   const cancel = useCallback(() => {
     try { abortRef.current?.abort(); } catch { /* noop */ }
-  }, []);
+    // 첫 graph_node 이벤트 전에 누르면 stepStatus 가 {} 라 스테퍼가 통째로 사라져 흔적이
+    // 0이 된다. Dashboard.stopAnalysis 와 같이 최소 한 줄의 피드백은 항상 남긴다.
+    toast('info', '응답 생성을 중단했습니다.');
+  }, [toast]);
 
   const resolveApproval = useCallback(async (decision) => {
     if (!approval || pending) return;
@@ -252,6 +277,10 @@ export default function AiAssistSection({ job, analysisResult }) {
     setMessages([]);
     setApproval(null);
     setThreadId('');
+    // 스테퍼도 비운다. 렌더 조건이 `streaming` 하나였을 땐 자동으로 가려졌지만, 중단 흔적을
+    // 남기려고 `stepStatus 비어있지 않음`을 추가하면서 이 경로가 뚫렸다 — 안 지우면 빈
+    // 대화 위에 이전 대화의 ⏹ 스테퍼가 남는다.
+    setStepStatus({});
     try { localStorage.removeItem(threadKey); } catch { /* noop */ }
   }, [threadKey]);
 
@@ -494,9 +523,12 @@ export default function AiAssistSection({ job, analysisResult }) {
             messages.map((m, i) => <ChatBubble key={i} message={m} onNextStep={send} />)
           )}
 
-          {/* 진행 표시 (AI 추론 스트리밍) — graph 노드별 단계 stepper */}
-          {streaming && (
-            <ProgressStepper stepStatus={stepStatus} onCancel={cancel} />
+          {/* 진행 표시 (AI 추론 스트리밍) — graph 노드별 단계 stepper.
+              중단 후에도 남긴다: streaming 만 조건으로 두면 abort 직후 finally 가
+              streaming 을 내려 스테퍼가 통째로 사라지고, 어느 단계에서 끊겼는지
+              증거가 없어져 중단이 무반응처럼 보인다. */}
+          {(streaming || Object.keys(stepStatus).length > 0) && (
+            <ProgressStepper stepStatus={stepStatus} onCancel={cancel} showCancel={streaming} />
           )}
 
           {/* 승인 카드 */}

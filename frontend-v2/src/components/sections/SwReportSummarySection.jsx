@@ -3,6 +3,7 @@ import { getUsername, authHeaders, post } from '../../api.js';
 import { useToast } from '../../App.jsx';
 import { useAdminMode } from '../../contexts/AdminContext.jsx';
 import PathPickerDialog from '../PathPickerDialog.jsx';
+import { isAbortError } from '../../impactPoll.js';
 import { loadSharedInputs, sharedDefaultsFor, applySharedDefaults, useSharedInputSync, markTouched, resolveTouched } from '../../sharedInputs.js';
 
 // API base 해석 — SwUTBuildSection과 동일 (raw fetch blob 전용. JSON은 api.js post() 사용).
@@ -269,7 +270,7 @@ export default function SwReportSummarySection() {
       triggerDownload(blob, filename);
       toast('success', `통합 Summary ${(blob.size / 1024).toFixed(0)} KB 다운로드 완료`);
     } catch (e) {
-      if (e?.name === 'AbortError') return;
+      if (isAbortError(e)) return;
       if (mountedRef.current) {
         toast('error', `Summary 빌드 실패: ${e?.message || e}`);
       }

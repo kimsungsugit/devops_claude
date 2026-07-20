@@ -1228,6 +1228,21 @@ label {
   border-color: var(--color-danger);
   color: var(--color-danger);
 }
+/* 사용자가 의도적으로 멈춘 단계. 실패(danger)가 아니므로 중립 톤 — api.js buildTone 이
+   Jenkins 의 ABORTED 를 'neutral' 로 매핑하는 것과 같은 판단이다. 위 .seg-active 펄스
+   목록(aria-pulse-live)에는 **넣지 않는다**: 펄스는 '살아있음' 신호라 중단에 붙이면
+   의미가 반전된다. */
+/* ⚠ opacity 로 죽이지 않는다. .sync-segment 기본(=pending)이 이미 --panel/--text-muted 라
+   거기에 opacity 를 얹으면 '중단됨'이 '아직 시작 안 함'보다 **더 흐려져** 대비가 역전된다.
+   중단은 사용자가 실제로 도달한 지점이므로 pending 보다 뚜렷해야 한다 — 테두리를 굵혀
+   구분하고 불투명도는 유지한다. */
+.sync-segment.seg-aborted {
+  background: var(--panel);
+  border-color: var(--text-secondary, var(--text-muted));
+  border-style: dashed;
+  color: var(--text-secondary, var(--text-muted));
+  font-weight: 600;
+}
 .sync-segment .seg-icon { font-size: 12px; }
 .sync-segment .seg-label { font-size: var(--text-xs); }
 

@@ -3,6 +3,7 @@ import { getUsername, authHeaders } from '../../api.js';
 import { useToast } from '../../App.jsx';
 import { useAdminMode } from '../../contexts/AdminContext.jsx';
 import PathPickerDialog from '../PathPickerDialog.jsx';
+import { isAbortError } from '../../impactPoll.js';
 import { loadSharedInputs, sharedDefaultsFor, applySharedDefaults, useSharedInputSync, markTouched, resolveTouched } from '../../sharedInputs.js';
 
 const API_BASE = (typeof window !== 'undefined' && window.__ARIA_API_BASE__)
@@ -262,7 +263,7 @@ export default function SwUTBuildSection() {
       triggerDownload(blob, filename);
       toast('success', `${kind.toUpperCase()} ${(blob.size / 1024).toFixed(0)} KB 다운로드 완료`);
     } catch (e) {
-      if (e?.name === 'AbortError') return;
+      if (isAbortError(e)) return;
       if (mountedRef.current) {
         toast('error', `${kind.toUpperCase()} 빌드 실패: ${e?.message || e}`);
       }
@@ -319,7 +320,7 @@ export default function SwUTBuildSection() {
         toast('warning', `일관성 검증: issue ${issues.length}건 — 카드 확인`);
       }
     } catch (e) {
-      if (e?.name === 'AbortError') return;
+      if (isAbortError(e)) return;
       if (mountedRef.current) toast('error', `일관성 검증 실패: ${e?.message || e}`);
     } finally {
       if (mountedRef.current) setConsistencyChecking(false);

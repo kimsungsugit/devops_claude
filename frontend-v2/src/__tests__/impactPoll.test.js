@@ -87,3 +87,53 @@ describe('impactPoll — abort 계약', () => {
     }
   });
 });
+
+/* isAbortError — 저장소 전체의 단일 abort 판별식
+ *
+ * 왜 관용적이어야 하는가: 저장소에 두 계열이 공존한다. 네이티브 fetch 는 `.name`이
+ * 'AbortError'인 DOMException 을 던지고(SwUT·SwIT·SwSA·SwReport·AiAssist 7곳이 그걸로 판별),
+ * impactPoll 은 합성 Error 를 던진다(Dashboard·ImpactGuideSection 3곳). 지금은 api.js 가
+ * signal 인자를 안 받아 둘이 만나지 않지만, **api.js 에 signal 을 여는 순간** 네이티브
+ * AbortError 가 message 계열 코드에 도달해 정상 취소가 "분석 중 오류: The operation was
+ * aborted." 로 오보고된다. 양쪽을 다 받아 그 잠복 결함을 미리 해체한다.
+ */
+describe('isAbortError — 두 계열 판별', () => {
+  it('impactPoll 이 던지는 에러를 abort 로 인식한다', async () => {
+    const { isAbortError, throwIfAborted } = await import('../impactPoll.js');
+    const controller = new AbortController();
+    controller.abort();
+    let caught;
+    try { throwIfAborted(controller.signal); } catch (e) { caught = e; }
+    expect(caught).toBeDefined();
+    expect(isAbortError(caught)).toBe(true);
+  });
+
+  it('throwIfAborted 가 던지는 에러는 name 도 AbortError 다 (네이티브와 동형)', async () => {
+    // `.message` 만 세팅하면 `.name` 은 'Error' 라, 이 폴러를 Sw* 섹션에서 재사용하는 순간
+    // 그쪽의 `.name === 'AbortError'` 판별을 통과하지 못해 에러 토스트로 오보고된다.
+    const { throwIfAborted } = await import('../impactPoll.js');
+    const controller = new AbortController();
+    controller.abort();
+    let caught;
+    try { throwIfAborted(controller.signal); } catch (e) { caught = e; }
+    expect(caught.name).toBe('AbortError');
+    expect(caught.message).toBe('AbortError');   // 기존 판별식·테스트 호환 유지
+  });
+
+  it('네이티브 fetch 의 DOMException 도 abort 로 인식한다', async () => {
+    const { isAbortError } = await import('../impactPoll.js');
+    // 네이티브 abort 의 실제 형태: name='AbortError', message 는 사람이 읽는 문장
+    const native = new DOMException('The operation was aborted.', 'AbortError');
+    expect(native.message).not.toBe('AbortError');   // message 만 보면 놓치는 형태임을 고정
+    expect(isAbortError(native)).toBe(true);
+  });
+
+  it('일반 에러는 abort 로 오분류하지 않는다', async () => {
+    const { isAbortError } = await import('../impactPoll.js');
+    expect(isAbortError(new Error('네트워크 오류'))).toBe(false);
+    expect(isAbortError(new TypeError('Failed to fetch'))).toBe(false);
+    expect(isAbortError({ message: 'AbortError 관련 안내' })).toBe(false);  // 부분 일치 금지
+    expect(isAbortError(null)).toBe(false);
+    expect(isAbortError(undefined)).toBe(false);
+  });
+});
