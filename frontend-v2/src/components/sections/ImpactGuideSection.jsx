@@ -1,7 +1,41 @@
 import { useState, useCallback, useMemo, useEffect, useRef } from 'react';
-import { post } from '../../api.js';
-import { useToast } from '../../App.jsx';
+import { post, api } from '../../api.js';
+import { useToast, useJob, useJenkinsCfg } from '../../App.jsx';
 import StatusBadge from '../StatusBadge.jsx';
+import { pollImpactJob } from '../../impactPoll.js';
+import { pickScmForJob } from '../../projectLoader.js';
+import {
+  impactIdentity, impactKeyOf, sameImpactTarget, sameJobUrl,
+  saveImpactCurrent, loadImpactCurrent,
+} from '../../impactStore.js';
+
+// 아직 어떤 대상에도 속하지 않은 가이드 슬롯(초기값).
+const UNOWNED = { value: null, owner: { key: '', ref: undefined } };
+
+/** 이 Job이 정말 이 SCM의 Job인지를 '증거'로만 판정한다.
+ *
+ * pickScmForJob은 후보가 하나면 job URL을 아예 읽지 않고 그대로 승인한다(체크아웃 자동해결
+ * 용도의 의도된 설계). 그건 추론이지 증거가 아니므로, provenance 판정에 그대로 쓰면
+ * 'SCM 1개 × Jenkins Job N개' 환경에서 무관한 Job의 changeSet으로 그 SCM을 분석하게 된다
+ * (update_baseline=True라 MC/DC baseline이 덮어써진다). 단일 후보일 때는 토큰 일치를 더 요구한다.
+ */
+function strictScmIdForJob(scmList, jobUrl) {
+  const picked = pickScmForJob(scmList, jobUrl);
+  if (!picked?.id) return '';
+  if (Array.isArray(scmList) && scmList.length === 1) {
+    const url = String(jobUrl || '').toLowerCase();
+    const tokens = [picked.id, picked.name].filter(Boolean).map(t => String(t).toLowerCase());
+    if (!url || !tokens.some(t => t && url.includes(t))) return '';
+  }
+  return picked.id;
+}
+
+// 변경 파일 집합의 출처 — '0 영향'이나 과소보고를 해석하려면 무엇으로 뽑았는지가 필요하다.
+const CHANGED_SOURCE_KO = {
+  svn_revision_range: 'SVN 리비전 범위',
+  jenkins_changeset: 'Jenkins changeSet',
+  local_diff_fallback: '로컬 working-copy diff',
+};
 
 const CHANGE_TYPE_KO = { BODY: '본문', HEADER: '헤더', SIGNATURE: '시그니처', NEW: '신규', DELETE: '삭제', VARIABLE: '변수' };
 const CHANGE_TYPE_TONE = { NEW: 'success', DELETE: 'danger', SIGNATURE: 'warning', BODY: 'info', HEADER: 'neutral', VARIABLE: 'neutral' };
@@ -636,12 +670,44 @@ const DOC_META = {
   sds: { label: 'SDS', icon: '📋', desc: 'SW 아키텍처 설계' },
 };
 
-export default function ImpactGuideSection({ analysisResult }) {
+export default function ImpactGuideSection({ analysisResult, job }) {
   const toast = useToast();
+  // 결과를 Context에 되싣기 위해 필요 — 복원/이력 로드가 다른 탭(ScmSection·추적성)에도 반영된다.
+  // JobCtx/JenkinsCfgCtx의 기본값이 null이라 Provider 밖 렌더에서 구조분해가 터진다 → 옵셔널로 읽는다.
+  const setAnalysisResult = useJob()?.setAnalysisResult;
+  const cfg = useJenkinsCfg()?.cfg || {};
 
   const impact = analysisResult?.impactData;
-  const [guide, setGuide] = useState(null);
-  const [aiGuide, setAiGuide] = useState(null);
+
+  // ── 상세 가이드는 '생성된 대상'에 결속된다 ────────────────────────────────
+  // Detail은 keep-alive라 대시보드가 같은 Job의 새 빌드를 분석해도 이 컴포넌트는 언마운트되지
+  // 않는다. 그때 guide만 이전 빌드 것으로 남으면, 영속 계층이 그 옛 가이드를 '새 빌드의 신원'
+  // 으로 저장해 안전 게이트(sameImpactTarget)를 그대로 통과시킨다(가이드 세탁).
+  // → 상태에 소유자 키를 함께 두고, 대상이 바뀌면 렌더·영속 양쪽에서 자동 무효화한다.
+  // 소유자는 (식별자 키, 결과 객체 참조) 쌍이다. 키만 쓰면 식별자가 비어 있는 결과들끼리(로컬
+  // 트리거·메타 부재) 키가 같아져 가이드가 넘어가고, 참조만 쓰면 데모 모드(impact=null)를
+  // 구분할 수 없다. 둘을 함께 봐야 두 경우 모두 정확해진다.
+  const impactKey = useMemo(() => impactKeyOf(impact), [impact]);
+  // 값과 소유자를 **한 덩어리로** 묶는다. 소유자를 공유하면 aiGuide만 쓰는 호출
+  // (buildGuide 진입부의 setAiGuide(null))이 guide의 소유권까지 새 대상으로 옮겨
+  // 직전 대상의 guide를 되살린다(세탁).
+  const [guideState, setGuideState] = useState(UNOWNED);
+  const [aiGuideState, setAiGuideState] = useState(UNOWNED);
+  const valueIfCurrent = (owned) => (
+    owned?.owner?.key === impactKey && owned?.owner?.ref === impact ? owned.value : null
+  );
+  const guide = valueIfCurrent(guideState);
+  const aiGuide = valueIfCurrent(aiGuideState);
+  // owner 미지정 시 쓰이는 '현재 대상'. 비동기 작업은 이 값에 기대지 말고 **시작 시점의 owner를
+  // 캡처해 명시 전달**해야 한다 — 쓰는 순간의 대상으로 찍히면 늦은 결과가 오귀속된다.
+  const ownerRef = useRef({ key: impactKey, ref: impact });
+  ownerRef.current = { key: impactKey, ref: impact };
+  const setGuide = useCallback((value, owner) => {
+    setGuideState({ value, owner: owner || ownerRef.current });
+  }, []);
+  const setAiGuide = useCallback((value, owner) => {
+    setAiGuideState({ value, owner: owner || ownerRef.current });
+  }, []);
   const [loading, setLoading] = useState(false);
   const [selectedFn, setSelectedFn] = useState(null);
   // 선택 함수의 Gemini 변경 설명(함수별). fn이 바뀌면 폐기.
@@ -670,6 +736,27 @@ export default function ImpactGuideSection({ analysisResult }) {
   // 회귀시험 패널 '전체 보기' 토글 — 기본은 상위 N개만(잘림), true면 절단 없이 전체 노출(스크롤).
   const [regShowAll, setRegShowAll] = useState(false);
 
+  // ── 빌드/리비전 소스 선택 (분석 이력 조회 + 재실행) ────────────────────────
+  const [history, setHistory] = useState([]);            // /api/scm/impact-jobs?summary=1
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [builds, setBuilds] = useState([]);              // /api/jenkins/builds (lazy)
+  const [buildsError, setBuildsError] = useState('');
+  const [pickedBuild, setPickedBuild] = useState('');
+  const [sourceBusy, setSourceBusy] = useState('');      // '' 이면 유휴, 아니면 진행 메시지
+  // 마운트 1회 하이드레이트 가드. 영속 저장 effect는 이게 true가 된 뒤에만 돈다 —
+  // 같은 커밋에서 저장이 먼저 돌면 복원 전 guide(null)로 저장분을 덮어쓴다.
+  const [hydrated, setHydrated] = useState(false);
+  // 용량(quota)으로 본문이 빠진 저장분 — 자동 재요청 대신 명시적 '복원' 버튼으로 노출.
+  const [restorable, setRestorable] = useState(null);
+  // 영속 저장이 quota로 끝내 실패했는지 — 새로고침 후 결과가 사라질 것을 미리 알린다(침묵 금지).
+  const [persistFailed, setPersistFailed] = useState(false);
+  const buildsReqRef = useRef(false);
+  const historyReqRef = useRef(0);
+  // 폴링은 unmount로 끊는다. 살려두면 프로젝트를 전환한 뒤에 옛 결과가 adoptImpact로 들어와
+  // '새 Job + 옛 분석결과' 상태를 만든다(교차 트리거의 배달 경로).
+  const pollAbortRef = useRef(null);
+  useEffect(() => () => pollAbortRef.current?.abort(), []);
+
   // Impact data from analysis
   const changedFiles = impact?.trigger?.changed_files ?? impact?.changed_files ?? [];
   const changedFunctions = impact?.changed_function_types ?? {};
@@ -681,11 +768,264 @@ export default function ImpactGuideSection({ analysisResult }) {
   const _scmListMatch = (_jobScmId && Array.isArray(analysisResult?.scmList))
     ? analysisResult.scmList.find(s => s?.id === _jobScmId)
     : null;
+  // ⚠ scmList[0] 최후 폴백은 제거했다. 이 폴백은 _jobScmId가 **어느 entry와도 안 맞을 때만**
+  // 발화하는데, 그건 곧 '다른 프로젝트의 규격서'라는 뜻이다. 그 문서로 buildGuide가 함수↔요구·
+  // TC 브리지를 만들면 화면상 정상으로 보이면서 추적성이 오귀속된다(ISO 26262 F3).
+  // 단일 SCM 저장소는 _scmListMatch가 그대로 잡으므로 정상 동작에는 영향이 없다.
   const linkedDocs = impact?._linked_docs
     ?? analysisResult?.matchedScm?.linked_docs
     ?? _scmListMatch?.linked_docs
-    ?? analysisResult?.scmList?.[0]?.linked_docs
     ?? {};
+
+  // ── 분석 대상 단일 확정 ──────────────────────────────────────────────────
+  // scmId / jobUrl / baseRef를 각자 다른 폴백 사슬로 뽑으면 'SCM A × Job B × base_ref B' 같은
+  // 교차 조합이 만들어진다. 그 조합으로 분석을 트리거하면 백엔드가 Job B의 changeSet으로
+  // SCM A를 분석해 A의 커버리지 baseline(update_baseline=True)과 감사기록을 오염시킨다.
+  // → 대상은 하나의 객체에서만 파생하고, 확정할 수 없으면 '모름'으로 둔다.
+  //   scmList[0] 추측은 하지 않는다 — Dashboard도 자동매칭 실패 시 추측 대신 건너뛴다.
+  // 한 걸음 더: scmId/baseRef는 analysisResult에서, jobUrl은 job prop에서 온다. 두 prop이 같은
+  // 프로젝트라는 보장이 없다 — Detail.switchProject와 Dashboard.loadFromCache 모두
+  // setSelectedJob → (await) setAnalysisResult 순서이고, 캐시 로드가 실패하면 catch가
+  // analysisResult를 갱신하지 않아 '새 Job + 옛 분석결과' 상태가 영구 지속된다.
+  // 그 상태로 트리거하면 scm_id=A × job_url=B가 나가 A의 커버리지 baseline·감사기록이 오염된다.
+  // ⚠ 형제 필드(analysisResult.jobUrl)만 보면 안 된다 — 트리거 페이로드의 scm_id는
+  // impact.trigger.scm_id에서 오므로 **impact 자신의 provenance**를 대조해야 한다.
+  // (a) analysisResult가 `{impactData}`만 남는 shape이 실재한다: 아래 setAnalysisResult가
+  //     prev=null일 때 그렇게 만든다 → jobUrl이 없어 형제 필드 검사가 통째로 단락된다.
+  // (b) unmount 후에도 살아 있던 폴링이 옛 결과를 주입하면 jobUrl은 새 Job, impactData는 옛 Job이 된다.
+  // (c) job_url 자체가 없는 결과가 실재한다: /api/local/impact/trigger 는 metadata에 job_url을
+  //     싣지 않는다. 그 경우 위 두 항이 모두 vacuous true가 되어 검사가 통째로 단락되므로,
+  //     SCM 축으로 증거를 요구한다 — 읽기 게이트(savedMatchesProject·belongsHere)와 같은
+  //     '증거 없으면 거부' 정책으로 통일한다. pickScmForJob은 Dashboard가 쓰는 것과 동일 로직.
+  const impactJobUrl = impact?.trigger?.metadata?.job_url || '';
+  // ⚠ 알려진 한계: 1순위인 matchedScm은 생산자(Dashboard·projectLoader)가 **느슨한**
+  // pickScmForJob 결과를 그대로 실어 둔 값이라, 그 갈래에서는 아래 strict 판정이 발화하지 않는다.
+  // 즉 SCM 축의 증거 강도는 "matchedScm 부재 시에만" 보장된다(있을 때는 term1의 jobUrl 일치가
+  // 방어). 구조적 해법은 생산자가 매칭 근거(수동/토큰일치/유일후보)를 함께 기록하고 소비자가
+  // '유일후보'를 증거로 인정하지 않는 것 — 생산자 변경이 필요해 후속 과제로 남긴다.
+  const scmForCurrentJob = analysisResult?.matchedScm?.id
+    || strictScmIdForJob(analysisResult?.scmList, job?.url)
+    || '';
+  const impactProvenanceOk = !impact || !job?.url || Boolean(impactJobUrl)
+    || (Boolean(scmForCurrentJob) && String(impact?.trigger?.scm_id || '') === scmForCurrentJob);
+  const projectConsistent =
+    (!analysisResult?.jobUrl || !job?.url || sameJobUrl(analysisResult.jobUrl, job.url))
+    && (!impactJobUrl || !job?.url || sameJobUrl(impactJobUrl, job.url))
+    && impactProvenanceOk;
+
+  const targetScm = useMemo(() => {
+    if (!projectConsistent) return null;  // 대상 미확정 → 이력 조회·트리거 모두 fail-closed
+    const list = Array.isArray(analysisResult?.scmList) ? analysisResult.scmList : [];
+    if (_jobScmId) return list.find(s => s?.id === _jobScmId) || { id: _jobScmId };
+    const matched = analysisResult?.matchedScm;
+    if (matched?.id) return list.find(s => s?.id === matched.id) || matched;
+    return null;
+  }, [projectConsistent, _jobScmId, analysisResult]);
+
+  const scmId = targetScm?.id || '';
+  // 현재 열려 있는 프로젝트의 Job만 쓴다 — 결과에 실린 job_url을 폴백으로 쓰면 타 프로젝트
+  // 결과가 로드된 순간 그 Job으로 분석을 걸어버린다.
+  const jobUrl = job?.url || analysisResult?.jobUrl || '';
+  const baseRef = targetScm?.base_ref || impact?.trigger?.base_ref || '';
+
+  const loadHistory = useCallback(async () => {
+    // 대상을 확정 못 했으면 이전 SCM의 이력을 그대로 두지 않는다(엉뚱한 이력 노출 방지).
+    if (!scmId) { setHistory([]); return; }
+    const seq = historyReqRef.current + 1;
+    historyReqRef.current = seq;
+    setHistoryLoading(true);
+    try {
+      const data = await api(`/api/scm/impact-jobs/${encodeURIComponent(scmId)}?summary=1&limit=20`);
+      // 대상 전환으로 요청이 겹치면 늦게 도착한 이전 SCM 응답이 최신을 덮을 수 있다 → 최신만 반영.
+      if (seq !== historyReqRef.current) return;
+      setHistory(Array.isArray(data?.items) ? data.items : []);
+    } catch (e) {
+      if (seq === historyReqRef.current) toast('error', `분석 이력 조회 실패: ${e.message}`);
+    } finally {
+      if (seq === historyReqRef.current) setHistoryLoading(false);
+    }
+  }, [scmId, toast]);
+
+  const loadBuildsOnce = useCallback(async () => {
+    if (buildsReqRef.current || !jobUrl) return;
+    buildsReqRef.current = true;
+    try {
+      const data = await post('/api/jenkins/builds', {
+        job_url: jobUrl, username: cfg.username, api_token: cfg.token,
+        limit: 100, verify_tls: cfg.verifyTls,
+      });
+      setBuilds(Array.isArray(data) ? data : (Array.isArray(data?.builds) ? data.builds : []));
+      setBuildsError('');
+    } catch (e) {
+      // Jenkins 미연결이어도 '이력에서 열기'는 되어야 하므로 화면을 막지 않고 사유만 표면화한다.
+      setBuilds([]);
+      setBuildsError(e.message || '빌드 목록을 불러오지 못했습니다.');
+      // 일시 장애 1회로 이 마운트 내내 빌드 선택이 영구 불능이 되면 안 된다 → 재시도 허용.
+      buildsReqRef.current = false;
+    }
+  }, [jobUrl, cfg]);
+
+  /** 결과를 화면(Context)에 싣는다. 영속 저장은 아래 effect가 단일 지점에서 담당.
+   *  guide/aiGuide를 명시로 받는 이유: 대상이 바뀌면 반드시 null로 리셋해야 하기 때문이다
+   *  (빌드 A의 가이드를 빌드 B 데이터 위에 얹으면 ASIL/커버리지 오보고). */
+  const adoptImpact = useCallback((nextImpact, jobId, nextGuide = null, nextAiGuide = null) => {
+    if (!nextImpact) return false;
+    // 어느 문(이력 드롭다운·빌드 실행·복원)으로 들어오든 '지금 열린 Job의 결과'만 싣는다.
+    // localStorage 문만 막으면(savedMatchesProject) 새로 만든 이력 문으로 같은 오염이 들어온다.
+    // 증거가 없으면 통과시키지 않는다(fail-closed) — 로컬 트리거 잡은 metadata에 job_url이 없어
+    // job_url만 보면 무검증 통과가 된다. 그 경우 SCM id로 대조한다.
+    const resultJobUrl = nextImpact?.trigger?.metadata?.job_url || '';
+    const resultScm = String(nextImpact?.trigger?.scm_id || '');
+    const belongsHere = (resultJobUrl && jobUrl) ? sameJobUrl(resultJobUrl, jobUrl)
+      : (resultScm && scmId) ? resultScm === scmId
+        : false;
+    if (!belongsHere) {
+      toast('error', '현재 열린 프로젝트의 분석 결과가 아니라 표시하지 않았습니다.');
+      return false;
+    }
+    const decorated = jobId ? { ...nextImpact, _job_id: jobId } : nextImpact;
+    // 가이드 소유자는 '새 대상'의 키로 명시 각인한다. 기본값(현재 화면 키)에 맡기면 Context가
+    // 아직 갱신되기 전이라 직전 대상의 키가 찍혀 가이드가 즉시 무효화된다.
+    const nextOwner = { key: impactKeyOf(decorated, jobId), ref: decorated };
+    setAnalysisResult?.(prev => ({ ...(prev || {}), impactData: decorated }));
+    setGuide(nextGuide, nextOwner);
+    setAiGuide(nextAiGuide, nextOwner);
+    setRestorable(null);
+    return true;
+  }, [setAnalysisResult, setGuide, setAiGuide, jobUrl, scmId, toast]);
+
+  const openHistoryItem = useCallback(async (jobId, { keepGuide = null, keepAiGuide = null } = {}) => {
+    if (!jobId) return;
+    setSourceBusy('저장된 결과를 불러오는 중...');
+    try {
+      const data = await api(`/api/scm/impact-job/${encodeURIComponent(jobId)}/result`);
+      const result = data?.result;
+      if (!result || !Object.keys(result).length) throw new Error('저장된 결과가 비어 있습니다.');
+      // adoptImpact가 프로젝트 불일치로 거절하면 성공 토스트로 위장하지 않는다(거절 사유는 거기서 알림).
+      if (adoptImpact(result, jobId, keepGuide, keepAiGuide)) {
+        toast('success', '영향분석 결과를 불러왔습니다.');
+      }
+    } catch (e) {
+      toast('error', `결과 로드 실패: ${e.message}`);
+    } finally {
+      setSourceBusy('');
+    }
+  }, [adoptImpact, toast]);
+
+  /** 선택한 빌드로 영향분석. 이미 완료된 이력이 있으면 재실행하지 않고 그 결과를 연다. */
+  const runForBuild = useCallback(async (buildNumber, { force = false } = {}) => {
+    const n = Number(buildNumber) || 0;
+    if (!n) { toast('info', '빌드 번호를 선택하세요.'); return; }
+    if (!scmId) { toast('info', '대상 SCM을 확인할 수 없습니다.'); return; }
+    if (!jobUrl) { toast('info', 'Jenkins Job URL을 확인할 수 없습니다.'); return; }
+    if (!force) {
+      // job_url까지 대조한다 — 한 SCM을 두 Jenkins Job이 공유하면 빌드번호가 충돌해
+      // 다른 Job의 결과를 이 빌드의 것으로 열어버린다(결과 오귀속).
+      // job_url이 없는 잡(로컬 트리거)은 '어느 빌드인지' 증명할 수 없으므로 재사용하지 않고
+      // 새로 분석한다 — 증거 부재를 일치로 취급하지 않는다(fail-closed).
+      const hit = history.find(h => h?.status === 'completed'
+        && Number(h?.metadata?.build_number) === n
+        && sameJobUrl(h?.metadata?.job_url, jobUrl));
+      if (hit?.job_id) { await openHistoryItem(hit.job_id); return; }
+    }
+    setSourceBusy('영향도 분석 시작 중...');
+    try {
+      const triggerRes = await post('/api/jenkins/impact/trigger-async', {
+        scm_id: scmId, build_number: n, job_url: jobUrl, base_ref: baseRef,
+        targets: ['uds', 'suts', 'sits', 'sts', 'sds'],
+      });
+      if (!triggerRes?.job_id) throw new Error('impact job_id를 받지 못했습니다.');
+      const controller = new AbortController();
+      pollAbortRef.current = controller;
+      const result = await pollImpactJob(triggerRes.job_id, {
+        onMsg: m => setSourceBusy(m), signal: controller.signal,
+      });
+      adoptImpact(result, triggerRes.job_id);
+      // 부분 실패(분석 성공 + 일부 문서 생성 실패)를 '완료'로 위장하지 않는다.
+      const failedDocs = Object.entries(result?.actions || {})
+        .filter(([, a]) => a && a.status === 'failed').map(([t]) => t.toUpperCase());
+      if (result?.partial_failure || failedDocs.length) {
+        toast('warning', `분석은 완료했으나 ${failedDocs.join(', ') || '일부 대상'} 문서 생성에 실패했습니다. 분석 결과는 유효합니다.`);
+      } else {
+        toast('success', `빌드 #${n} 영향분석 완료`);
+      }
+      loadHistory();
+    } catch (e) {
+      // unmount로 끊은 폴링은 사용자 오류가 아니다 — 실패로 보고하지 않는다.
+      if (e.message !== 'AbortError') toast('error', `영향도 분석 실패: ${e.message}`);
+    } finally {
+      setSourceBusy('');
+    }
+  }, [scmId, jobUrl, baseRef, history, openHistoryItem, adoptImpact, toast, loadHistory]);
+
+  // Job이 바뀌면 빌드 목록 캐시를 버린다(다른 프로젝트 빌드를 그대로 보여주면 오선택).
+  useEffect(() => { buildsReqRef.current = false; setBuilds([]); setBuildsError(''); setPickedBuild(''); }, [jobUrl]);
+  // 이력은 경량 투영이라 탭 진입 시 자동 조회(빌드 목록은 Jenkins 왕복이라 lazy).
+  // deps를 [loadHistory]로 두면 toast 등 상위 훅이 매 렌더 새 참조를 주는 순간 무한 조회가 된다
+  // → 트리거는 scmId 변화로 한정하고 최신 콜백은 ref로 읽는다.
+  const loadHistoryRef = useRef(loadHistory);
+  useEffect(() => { loadHistoryRef.current = loadHistory; });
+  useEffect(() => { loadHistoryRef.current?.(); }, [scmId]);
+
+  /** 저장분이 '지금 열려 있는 프로젝트'의 것인가.
+   *
+   * 이 대조 없이 주입하면 프로젝트 A의 결과가 B의 Detail 전체(영향 평가·추적성·SCM 탭이 모두
+   * 같은 Context를 소비)로 퍼지고, 화면 라벨만 A를 가리키게 된다 — ASIL/커버리지 판정의 오귀속.
+   * Detail은 selectedJob.url이 바뀌면 remount하고 캐시 로드는 impactData=null이라, 프로젝트
+   * 전환 직후 hydrate가 항상 이 경로를 탄다.
+   */
+  const savedMatchesProject = useCallback((saved) => {
+    const savedJobUrl = saved?.id?.job_url || saved?.impactData?.trigger?.metadata?.job_url || '';
+    if (savedJobUrl && jobUrl) return sameJobUrl(savedJobUrl, jobUrl);
+    const savedScm = String(saved?.id?.scm_id || '');
+    if (savedScm && scmId) return savedScm === scmId;
+    return false;  // 확인 근거가 없으면 주입하지 않는다(이력에서 명시적으로 열면 된다)
+  }, [jobUrl, scmId]);
+
+  // 마운트 하이드레이트 — 새로고침 후에도 마지막으로 보던 결과와 상세 가이드를 복원한다.
+  useEffect(() => {
+    if (hydrated) return;
+    const saved = loadImpactCurrent();
+    if (!saved) { setHydrated(true); return; }
+    // 판정 근거가 아직 없거나(프로젝트 전환 중) 두 prop이 서로 다른 프로젝트를 가리키는 동안에는
+    // latch하지 말고 다음 렌더에서 재시도한다. 여기서 latch하면 전환이 끝난 뒤에도 effect가
+    // `if (hydrated) return`으로 빠져 복원도 복원 버튼도 영영 나오지 않는다.
+    if (!projectConsistent || (!jobUrl && !scmId)) return;
+    setHydrated(true);
+    if (!savedMatchesProject(saved)) return;  // 타 프로젝트 저장분 — 손대지 않는다
+    if (impact) {
+      // Context에 이미 결과가 있다 → '같은 대상'일 때만 가이드를 얹는다(다르면 폐기).
+      if (sameImpactTarget(saved.id, impactIdentity(impact))) {
+        const owner = { key: impactKey, ref: impact };
+        setGuide(saved.guide || null, owner);
+        setAiGuide(saved.aiGuide || null, owner);
+      }
+      return;
+    }
+    if (saved.impactData) {
+      // Context에 넣는 객체와 소유자 ref가 동일해야 다음 렌더에서 가이드가 유효로 판정된다.
+      const owner = { key: impactKeyOf(saved.impactData), ref: saved.impactData };
+      setAnalysisResult?.(prev => ({ ...(prev || {}), impactData: saved.impactData }));
+      setGuide(saved.guide || null, owner);
+      setAiGuide(saved.aiGuide || null, owner);
+    } else if (saved.jobId) {
+      setRestorable(saved);  // 본문은 quota로 빠졌다 — 버튼으로 명시 복원(자동 왕복 안 함)
+    }
+  }, [hydrated, impact, impactKey, jobUrl, scmId, projectConsistent, savedMatchesProject,
+    setAnalysisResult, setGuide, setAiGuide]);
+
+  // 영속 저장 단일 지점 — 결과/가이드가 바뀔 때마다 현재 대상 키로 미러링한다.
+  // 대형 결과의 JSON 직렬화가 렌더를 막지 않도록 지연시키고, 연속 변경은 마지막 1회로 합류시킨다.
+  useEffect(() => {
+    if (!hydrated || !impact) return undefined;
+    const timer = setTimeout(() => {
+      const id = impactIdentity(impact);
+      const ok = saveImpactCurrent({ id, jobId: id.job_id, impactData: impact, guide, aiGuide });
+      // 저장 실패를 삼키면 새로고침 후 결과가 사라진 이유를 사용자가 알 수 없다(침묵 금지 정책).
+      setPersistFailed(!ok);
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [hydrated, impact, guide, aiGuide]);
   const impactGroups = impact?.impact ?? {};
   // 분류 정밀도(백엔드 classification). "file"=파일단위 보수 분류 → "변경 함수" 수가
   // "변경 파일 내 전체 함수"의 과대추정(실제 수정 함수는 더 적음). "line"=라인 diff 정밀.
@@ -1020,11 +1360,15 @@ export default function ImpactGuideSection({ analysisResult }) {
       toast('info', '변경된 함수가 없습니다.');
       return;
     }
+    // 이 작업이 '어느 대상'을 위해 시작됐는지 여기서 고정한다. 아래 쓰기들이 owner를 생략하면
+    // 쓰는 순간 화면에 떠 있는 대상으로 각인돼, 문서 추출 5회가 도는 동안 다른 빌드로 전환하면
+    // 이 대상의 데이터로 만든 가이드가 그 빌드 소유가 된다(오귀속).
+    const owner = { key: impactKey, ref: impact };
     setLoading(true);
     // reviewer Finding#4: 이전 분석의 AI 요약 오염 방지. AI fetch 실패는 catch로 삼켜(L930) 성공 시에만
     // setAiGuide되므로, 새 분석 시작 시 초기화하지 않으면 직전 분석의 위험도/안전함수/테스트제안이
     // 함수별 상세(새 데이터)와 뒤섞여 표시된다(ISO 위험 요약 cross-analysis 오염).
-    setAiGuide(null);
+    setAiGuide(null, owner);
     try {
       // 추출 API 실패를 삼키지 않고 수집 — '매핑 없음'(실제 부재)과 '조회 실패'(403/500/네트워크)를
       // 구분해 사용자에게 표면화한다. 과거 catch(_){}로 실패해도 성공 토스트가 뜨던 silent 버그 방지.
@@ -1326,6 +1670,8 @@ export default function ImpactGuideSection({ analysisResult }) {
         // 무관(요구가 시스템 네임스페이스거나 단위 불일치) — 통합 콜체인이 보완 신호.
         else sitsTcReason = '영향 함수에 매칭되는 SITS 통합케이스 없음 — 통합 콜체인 참조';
       }
+      // owner는 buildGuide 진입 시점에 고정한 값 — 도중에 대상이 바뀌었다면 이 가이드는
+      // 자동으로 무효(valueIfCurrent가 null 반환)가 되어 화면·영속 어디에도 실리지 않는다.
       setGuide({
         details,
         fetchFailures,
@@ -1336,7 +1682,7 @@ export default function ImpactGuideSection({ analysisResult }) {
           stsTcReason,
           sitsTcReason,
         },
-      });
+      }, owner);
 
       // Fetch AI risk/cross-doc guide (best-effort)
       try {
@@ -1348,10 +1694,18 @@ export default function ImpactGuideSection({ analysisResult }) {
             Object.entries(functionMeta).map(([fn, m]) => [fn, { asil: m?.asil || '' }]),
           ),
         });
-        if (aiData?.ok) setAiGuide(aiData.guide);
+        if (aiData?.ok) setAiGuide(aiData.guide, owner);
       } catch (_) { /* AI guide is optional */ }
 
-      if (fetchFailures.length) {
+      // 도중에 대상이 바뀌었으면 이 가이드는 valueIfCurrent에서 걸러져 화면에 뜨지 않는다.
+      // 그걸 '생성 완료'로 알리면 사용자는 어딘가에 결과가 있다고 오해한다(성공 위장).
+      if (ownerRef.current.key !== owner.key || ownerRef.current.ref !== owner.ref) {
+        toast('info', '가이드 생성 중 분석 대상이 바뀌어 결과를 적용하지 않았습니다. 다시 생성하세요.');
+      } else if (!demoMode && !Object.keys(linkedDocs).length) {
+        // 연결 문서가 하나도 없으면 추출 5회를 전부 건너뛴다 → 요구사항·TC 0건이 나온다.
+        // 이걸 '완료'로 알리면 사용자는 "STS 미연동"으로 오진단하고 엉뚱한 곳을 고친다.
+        toast('warning', '이 결과에 연결된 규격서 정보가 없어 요구사항·TC 매핑을 만들지 못했습니다. 설정에서 SCM의 연결 문서를 확인하세요.');
+      } else if (fetchFailures.length) {
         toast('warning', `${fetchFailures.map(f => f.doc).join('/')} 매핑 조회 실패 — 해당 문서의 요구사항/TC 매핑이 누락됐을 수 있습니다('매핑 없음'이 실제 부재가 아닐 수 있음)`);
       } else {
         toast('success', '영향도 가이드 생성 완료');
@@ -1361,7 +1715,9 @@ export default function ImpactGuideSection({ analysisResult }) {
     } finally {
       setLoading(false);
     }
-  }, [activeFnEntries, linkedDocs, actions, activeImpactGroups, demoMode, functionMeta, coverageByFn, toast]);
+    // impact/impactKey: 진입 시점 owner 캡처에 쓰인다 — deps에서 빠지면 stale 대상에 결속된다.
+  }, [activeFnEntries, linkedDocs, actions, activeImpactGroups, demoMode, functionMeta, coverageByFn,
+    toast, impact, impactKey, setGuide, setAiGuide]);
 
 
   // 영향받은 함수 집합(직접+간접+변경)을 추적성 매트릭스 focus로 넘기고 SRS/SDS 탭으로 이동.
@@ -1486,13 +1842,127 @@ export default function ImpactGuideSection({ analysisResult }) {
     }
   }, [changeDetails, functionDiffs, functionMeta]);
 
+  // ── 소스 바: 어느 빌드/리비전의 결과인지 + 이력 열람 + 빌드별 재실행 ────────────
+  // 결과가 없을 때도 반드시 보여야 한다(이력/빌드로 여기서 바로 불러올 수 있어야 하므로)
+  // → 아래 빈 상태 early-return과 메인 렌더 양쪽에 삽입한다.
+  const curMeta = impact?.trigger?.metadata || {};
+  const curBuild = Number(curMeta.build_number) || 0;
+  const curRev = String(curMeta.build_revision || '');
+  const curBase = String(curMeta.baseline_revision || '');
+  const curSource = CHANGED_SOURCE_KO[curMeta.changed_files_source] || curMeta.changed_files_source || '';
+  // 지금 보고 있는 결과가 '어느 대상의 것인지'를 항상 노출한다 — 복원/이력 열람으로 결과가 바뀌는
+  // 화면이라 라벨이 없으면 다른 빌드 결과를 현재 빌드 것으로 오독할 수 있다(안전 오보고).
+  const targetLabel = [
+    scmId,
+    curBuild ? `빌드 #${curBuild}` : '빌드 미지정',
+    curRev ? `r${curRev}` : '',
+    (curBase && curRev) ? `(기준 r${curBase})` : '',
+  ].filter(Boolean).join(' · ');
+  const selectStyle = { padding: '6px 10px', fontSize: 12, border: '1px solid var(--border)', borderRadius: 6, background: 'var(--bg)' };
+  const busy = Boolean(sourceBusy);
+  const historyLabel = (h) => {
+    const m = h?.metadata || {};
+    const b = Number(m.build_number) || 0;
+    const parts = [b ? `빌드 #${b}` : '로컬'];
+    if (m.build_revision) parts.push(`r${m.build_revision}`);
+    const when = String(h?.created_at || '').slice(0, 16).replace('T', ' ');
+    if (when) parts.push(when);
+    if (h?.status && h.status !== 'completed') parts.push(h.status === 'failed' ? '실패' : h.status);
+    const cf = h?.summary?.changed_files;
+    if (typeof cf === 'number' && cf > 0) parts.push(`${cf}파일`);
+    return parts.filter(Boolean).join(' · ');
+  };
+
+  const sourceBar = (
+    <div className="panel" style={{ marginBottom: 12 }}>
+      <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+        <span className="text-sm" style={{ fontWeight: 700 }}>분석 대상</span>
+        {impact ? (
+          <span className="text-sm" data-testid="impact-target-label" style={{ fontWeight: 600 }}>{targetLabel}</span>
+        ) : (
+          <span className="text-muted text-sm">불러온 결과 없음</span>
+        )}
+        {curSource ? (
+          <span className="text-sm"
+            title="변경 파일 집합을 무엇으로 뽑았는지 — '0 영향'/과소보고를 해석하려면 필요합니다"
+            style={{ padding: '1px 8px', borderRadius: 10, background: 'var(--bg-elevated)', color: 'var(--text-muted)' }}>
+            {curSource}
+          </span>
+        ) : null}
+        <span style={{ flex: 1 }} />
+        {busy ? <span className="text-muted text-sm">{sourceBusy}</span> : null}
+      </div>
+
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginTop: 8 }}>
+        <label className="text-muted text-sm" htmlFor="impact-history-select">분석 이력</label>
+        <select id="impact-history-select" style={{ ...selectStyle, minWidth: 250 }} value=""
+          disabled={busy || historyLoading || !history.length}
+          onChange={e => { const v = e.target.value; if (v) openHistoryItem(v); }}>
+          <option value="">
+            {historyLoading ? '조회 중...' : (history.length ? `저장된 분석 ${history.length}건 — 선택해 열기` : '저장된 분석 없음')}
+          </option>
+          {history.map(h => (
+            <option key={h.job_id} value={h.job_id} disabled={h.status !== 'completed'}>{historyLabel(h)}</option>
+          ))}
+        </select>
+        <button type="button" className="btn-secondary btn-sm" onClick={loadHistory} disabled={busy || historyLoading}>이력 새로고침</button>
+
+        <span style={{ width: 8 }} />
+
+        <label className="text-muted text-sm" htmlFor="impact-build-select">빌드</label>
+        <select id="impact-build-select" style={{ ...selectStyle, minWidth: 150 }} value={pickedBuild}
+          disabled={busy} onFocus={loadBuildsOnce} onChange={e => setPickedBuild(e.target.value)}>
+          <option value="">{builds.length ? '빌드 선택' : '클릭해 목록 불러오기'}</option>
+          {builds.map(b => (
+            <option key={b.number} value={b.number}>#{b.number}{b.result ? ` · ${b.result}` : ''}</option>
+          ))}
+        </select>
+        <button type="button" className="btn-primary btn-sm" disabled={busy || !pickedBuild}
+          onClick={() => runForBuild(pickedBuild)}
+          title="이미 분석된 빌드면 저장된 결과를 열고, 없으면 새로 분석합니다">분석</button>
+        <button type="button" className="btn-secondary btn-sm" disabled={busy || !pickedBuild}
+          onClick={() => runForBuild(pickedBuild, { force: true })}
+          title="저장된 결과가 있어도 다시 분석합니다">다시 분석</button>
+
+        {restorable ? (
+          <button type="button" className="btn-secondary btn-sm" disabled={busy}
+            onClick={() => openHistoryItem(restorable.jobId, { keepGuide: restorable.guide, keepAiGuide: restorable.aiGuide })}
+            title="브라우저 저장 용량 때문에 본문이 빠졌습니다 — 서버에서 다시 받아옵니다">
+            마지막 결과 복원{restorable.id?.build_number ? ` (빌드 #${restorable.id.build_number})` : ''}
+          </button>
+        ) : null}
+      </div>
+
+      {!projectConsistent ? (
+        <div className="text-sm" style={{ marginTop: 6, color: 'var(--color-warning)' }}>
+          현재 열린 Job과 불러온 분석 정보가 서로 다른 프로젝트를 가리켜, 잘못된 대상에 분석이 걸리지
+          않도록 이력 조회·실행을 잠갔습니다. 대시보드에서 이 프로젝트를 다시 불러오세요.
+        </div>
+      ) : null}
+      {buildsError ? (
+        <div className="text-sm" style={{ marginTop: 6, color: 'var(--color-warning)' }}>
+          빌드 목록 조회 실패: {buildsError} — '분석 이력'에서 열기는 계속 사용할 수 있습니다.
+        </div>
+      ) : null}
+      {persistFailed ? (
+        <div className="text-sm" style={{ marginTop: 6, color: 'var(--color-warning)' }}>
+          브라우저 저장 용량이 부족해 이 결과를 로컬에 보관하지 못했습니다 — 새로고침하면 사라집니다.
+          '분석 이력'에서 다시 열 수 있습니다.
+        </div>
+      ) : null}
+    </div>
+  );
+
   if (!impact && !demoMode) {
     return (
-      <div className="empty-state">
-        <div className="empty-icon">🔍</div>
-        <div className="empty-title">변경 영향도 분석 결과가 없습니다</div>
-        <div className="empty-desc">대시보드에서 동기화 & 분석을 실행하세요.<br />SCM에 base_ref가 설정되어야 변경 파일을 감지합니다.</div>
-        <button className="btn-primary btn-sm" style={{ marginTop: 8 }} onClick={() => setDemoMode(true)}>데모 시나리오로 보기</button>
+      <div>
+        {sourceBar}
+        <div className="empty-state">
+          <div className="empty-icon">🔍</div>
+          <div className="empty-title">변경 영향도 분석 결과가 없습니다</div>
+          <div className="empty-desc">위 '분석 이력'에서 과거 결과를 열거나, 빌드를 골라 분석하세요.<br />대시보드의 동기화 &amp; 분석 실행으로도 생성됩니다. SCM에 base_ref가 설정되어야 변경 파일을 감지합니다.</div>
+          <button className="btn-primary btn-sm" style={{ marginTop: 8 }} onClick={() => setDemoMode(true)}>데모 시나리오로 보기</button>
+        </div>
       </div>
     );
   }
@@ -1559,6 +2029,7 @@ export default function ImpactGuideSection({ analysisResult }) {
 
   return (
     <div>
+      {sourceBar}
       {/* 백엔드 경고 표면화 — 과소보고/cloudium degrade/revision 불일치/ASIL escalation 등.
           0 영향을 '영향 없음'으로 오인하지 않도록 안전 신호를 의사결정 화면에 노출. */}
       {impactWarnings.length > 0 && (

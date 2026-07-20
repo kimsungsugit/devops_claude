@@ -1,6 +1,7 @@
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { STORE_VERSION } from '../impactStore.js';
 
 // Mock api.js
 vi.mock('../api.js', () => ({
@@ -9,18 +10,26 @@ vi.mock('../api.js', () => ({
   defaultCacheRoot: vi.fn(() => '.devops_cache'),
 }));
 
-// Mock App.jsx contexts
-vi.mock('../App.jsx', () => ({
-  useJenkinsCfg: vi.fn(() => ({
-    cfg: {
-      username: 'admin',
-      token: 'token123',
-      cacheRoot: '.devops_pro_cache',
-      buildSelector: 'lastSuccessfulBuild',
-    },
-  })),
-  useToast: vi.fn(() => vi.fn()),
-}));
+// Mock App.jsx contexts.
+// 훅 반환값은 팩토리 클로저에 고정한다 — 매 호출 새 참조를 주면 useCallback/useEffect 체인이
+// 렌더마다 갱신돼 자동 조회가 무한 루프가 된다.
+vi.mock('../App.jsx', () => {
+  const toast = vi.fn();
+  const setAnalysisResult = vi.fn();
+  const cfg = {
+    username: 'admin',
+    token: 'token123',
+    cacheRoot: '.devops_pro_cache',
+    buildSelector: 'lastSuccessfulBuild',
+  };
+  const jobCtx = { setAnalysisResult };
+  const cfgCtx = { cfg };
+  return {
+    useJenkinsCfg: vi.fn(() => cfgCtx),
+    useToast: vi.fn(() => toast),
+    useJob: vi.fn(() => jobCtx),
+  };
+});
 
 // Mock StatusBadge
 vi.mock('../components/StatusBadge.jsx', () => ({
@@ -36,6 +45,9 @@ describe('ImpactGuideSection', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    // 영속 스토어(devops_v2_impact_current)가 테스트 간 새어나가면 다음 테스트가 이전 결과를
+    // 하이드레이트해 버린다 — 매 테스트 격리.
+    localStorage.clear();
   });
 
   // STS-IMPACT-001: impact 없을 때 빈 상태 empty-state 렌더링
@@ -1840,5 +1852,365 @@ describe('buildDocumentActions BODY/VARIABLE 구체화 (순수 함수)', () => {
     // 전역 write 없어도 매크로(FEATURE_X)가 UDS Description·SDS에 반영 — 일반 폴백으로 후퇴하지 않음
     expect(JSON.stringify(r.uds)).toContain('FEATURE_X');
     expect(JSON.stringify(r.sds)).toContain('FEATURE_X');
+  });
+});
+
+/* ── 빌드/리비전 소스 바 + 결과 영속 ─────────────────────────────────────── */
+describe('ImpactGuideSection — 빌드/리비전 소스 바 & 결과 영속', () => {
+  const IMPACT_KEY = 'devops_v2_impact_current';
+  const mockJob = { url: 'http://jenkins.example.com/job/test-job/' };
+
+  const mkImpact = ({ scm = 'hdpdm01', build = 412, rev = '1042', base = '527' } = {}) => ({
+    trigger: {
+      scm_id: scm,
+      changed_files: ['Ap_MotorCtrl.c'],
+      metadata: {
+        build_number: build, build_revision: rev, baseline_revision: base,
+        changed_files_source: 'svn_revision_range', job_url: mockJob.url,
+      },
+    },
+    changed_function_types: { g_MotorCtrl: 'BODY' },
+    actions: {},
+    impact: { direct: ['g_MotorCtrl'], indirect_1hop: [], indirect_2hop: [] },
+  });
+
+  // 실제 buildGuide 산출물 형태 — summary가 없으면 스토어가 렌더 불가로 판단해 떨군다.
+  const mkGuide = (fn) => ({
+    details: [{ function: fn, changeType: 'BODY' }],
+    fetchFailures: [],
+    summary: { impactedReqs: 0, impactedStsTCs: 0, impactedSitsTCs: 0, stsTcReason: '', sitsTcReason: '' },
+  });
+
+  // 저장분은 반드시 현재 스키마 버전을 달아야 한다 — 안 달면 loadImpactCurrent가 폐기해
+  // 테스트가 '아무 일도 안 일어나서' 통과하는 vacuous pass가 된다.
+  const seedStore = (entry) => localStorage.setItem(
+    IMPACT_KEY, JSON.stringify({ v: STORE_VERSION, savedAt: Date.now(), ...entry }),
+  );
+
+  const historyItem = (over = {}) => ({
+    job_id: 'impact_1', status: 'completed', created_at: '2026-07-19T10:00:00',
+    metadata: { build_number: 410, build_revision: '1030' },
+    summary: { changed_files: 3 },
+    ...over,
+  });
+
+  let api;
+  let post;
+
+  beforeEach(async () => {
+    vi.clearAllMocks();  // setAnalysisResult 등 App.jsx mock의 호출 이력도 테스트 간 격리
+    ({ api, post } = await import('../api.js'));
+    // clearAllMocks는 구현(mockResolvedValue)을 지우지 않아 앞 테스트가 새어나온다 → reset 후 기본값.
+    api.mockReset();
+    post.mockReset();
+    localStorage.clear();
+    api.mockResolvedValue({ items: [] });
+    post.mockResolvedValue({});
+  });
+
+  it('빈 상태에서도 소스 바(분석 이력·빌드 선택)가 렌더된다', () => {
+    // 결과가 없을 때야말로 '이력에서 불러오기'가 필요하므로 빈 상태에서 사라지면 안 된다.
+    render(<ImpactGuideSection job={mockJob} analysisResult={null} />);
+
+    expect(screen.getByText(/변경 영향도 분석 결과가 없습니다/)).toBeInTheDocument();
+    expect(screen.getByLabelText('분석 이력')).toBeInTheDocument();
+    expect(screen.getByLabelText('빌드')).toBeInTheDocument();
+  });
+
+  it('결과가 있으면 빌드/리비전/변경출처가 라벨로 표시된다', () => {
+    render(<ImpactGuideSection job={mockJob} analysisResult={{ impactData: mkImpact() }} />);
+
+    const label = screen.getByTestId('impact-target-label');
+    expect(label).toHaveTextContent('hdpdm01');
+    expect(label).toHaveTextContent('빌드 #412');
+    expect(label).toHaveTextContent('r1042');
+    expect(label).toHaveTextContent('기준 r527');
+    expect(screen.getByText('SVN 리비전 범위')).toBeInTheDocument();
+  });
+
+  it('이력 조회는 SCM id로 summary 모드를 호출한다', async () => {
+    render(<ImpactGuideSection job={mockJob} analysisResult={{ impactData: mkImpact() }} />);
+
+    await waitFor(() => expect(api).toHaveBeenCalledWith(
+      expect.stringContaining('/api/scm/impact-jobs/hdpdm01?summary=1'),
+    ));
+  });
+
+  it('이력 항목을 고르면 저장된 결과를 서버에서 불러온다', async () => {
+    const user = userEvent.setup();
+    api.mockImplementation(async (url) => {
+      if (String(url).includes('/impact-jobs/')) return { items: [historyItem()] };
+      if (String(url).includes('/result')) return { result: mkImpact({ build: 410, rev: '1030' }) };
+      return {};
+    });
+
+    render(<ImpactGuideSection job={mockJob} analysisResult={{ impactData: mkImpact() }} />);
+
+    const select = screen.getByLabelText('분석 이력');
+    await waitFor(() => expect(within(select).getAllByRole('option').length).toBeGreaterThan(1));
+    // 라벨에 빌드/리비전이 실려 어떤 실행인지 구분 가능해야 한다
+    expect(within(select).getByText(/빌드 #410 · r1030/)).toBeInTheDocument();
+
+    await user.selectOptions(select, 'impact_1');
+
+    await waitFor(() => expect(api).toHaveBeenCalledWith(
+      expect.stringContaining('/api/scm/impact-job/impact_1/result'),
+    ));
+  });
+
+  it('영속: 로드된 결과가 빌드/리비전 식별자와 함께 localStorage에 저장된다', async () => {
+    render(<ImpactGuideSection job={mockJob} analysisResult={{ impactData: mkImpact() }} />);
+
+    await waitFor(() => {
+      const saved = JSON.parse(localStorage.getItem(IMPACT_KEY) || 'null');
+      expect(saved?.id?.build_number).toBe(412);
+      expect(saved?.id?.build_revision).toBe('1042');
+      expect(saved?.impactData?.trigger?.scm_id).toBe('hdpdm01');
+    });
+  });
+
+  it('하이드레이트: Context가 비어 있어도 저장분에서 결과를 복원한다', async () => {
+    const { useJob } = await import('../App.jsx');
+    const { setAnalysisResult } = useJob();
+    seedStore({
+      id: { job_id: '', scm_id: 'hdpdm01', build_number: 412, build_revision: '1042' },
+      jobId: '', impactData: mkImpact(), guide: null, aiGuide: null,
+    });
+
+    render(<ImpactGuideSection job={mockJob} analysisResult={null} />);
+
+    // 새로고침 후 재분석 없이 Context로 결과가 되살아난다
+    await waitFor(() => expect(setAnalysisResult).toHaveBeenCalled());
+  });
+
+  it('하이드레이트: 본문이 quota로 빠졌으면 자동 재요청 대신 복원 버튼을 준다', async () => {
+    seedStore({
+      id: { job_id: 'impact_9', scm_id: 'hdpdm01', build_number: 412 },
+      jobId: 'impact_9', guide: mkGuide('g_fn'), aiGuide: null,
+    });
+
+    // 저장분에 job_url이 없으므로 SCM 대조로 검증된다 → 현재 프로젝트의 SCM을 알려준다.
+    render(<ImpactGuideSection job={mockJob} analysisResult={{ matchedScm: { id: 'hdpdm01' } }} />);
+
+    const btn = await screen.findByRole('button', { name: /마지막 결과 복원/ });
+    expect(btn).toHaveTextContent('빌드 #412');
+    // 마운트만으로 결과 본문을 자동 조회하지는 않는다(의도치 않은 왕복 방지)
+    expect(api).not.toHaveBeenCalledWith(expect.stringContaining('/result'));
+  });
+
+  it('안전: 다른 Jenkins Job의 저장분은 현재 프로젝트에 주입하지 않는다', async () => {
+    // Detail은 selectedJob.url이 바뀌면 remount하고 캐시 로드는 impactData=null이라, 프로젝트를
+    // 전환하면 hydrate가 항상 '결과 없음' 경로를 탄다. 대조 없이 주입하면 프로젝트 A의
+    // 변경함수/ASIL/커버리지가 B 화면 전체(영향·추적성·SCM 탭)에 A의 라벨로 뜬다.
+    const { useJob } = await import('../App.jsx');
+    const { setAnalysisResult } = useJob();
+    const otherProject = mkImpact({ scm: 'kjpds02' });
+    otherProject.trigger.metadata.job_url = 'http://jenkins.example.com/job/OTHER-job/';
+    seedStore({
+      id: {
+        job_id: 'impact_other', scm_id: 'kjpds02', build_number: 412,
+        job_url: 'http://jenkins.example.com/job/OTHER-job/',
+      },
+      jobId: 'impact_other', impactData: otherProject,
+      guide: mkGuide('other_fn'), aiGuide: null,
+    });
+
+    render(<ImpactGuideSection job={mockJob} analysisResult={null} />);
+
+    await waitFor(() => expect(screen.getByText(/변경 영향도 분석 결과가 없습니다/)).toBeInTheDocument());
+    expect(setAnalysisResult).not.toHaveBeenCalled();
+    // 복원 버튼으로도 열어주지 않는다 — 타 프로젝트 결과는 이 화면의 선택지가 아니다
+    expect(screen.queryByRole('button', { name: /마지막 결과 복원/ })).not.toBeInTheDocument();
+  });
+
+  it('안전: 다른 빌드의 상세 가이드는 현재 빌드에 얹히지도, 현재 빌드 신원으로 저장되지도 않는다', async () => {
+    // 가이드 세탁(laundering) 방지: 빌드 410에서 만든 가이드(ASIL/커버리지 판정 포함)가
+    // 빌드 412 데이터 위에 남으면, 영속 계층이 그것을 '412의 신원'으로 각인해 다음 하이드레이트의
+    // 안전 게이트(sameImpactTarget)를 통과시킨다. 라벨은 412를 가리키므로 사용자는 알 수 없다.
+    seedStore({
+      id: {
+        job_id: '', scm_id: 'hdpdm01', build_number: 410, build_revision: '1030',
+        job_url: mockJob.url,
+      },
+      jobId: '', impactData: mkImpact({ build: 410, rev: '1030' }),
+      guide: mkGuide('stale_fn_410'), aiGuide: null,
+    });
+
+    // 화면에는 빌드 412가 떠 있는 상태에서 마운트(저장분은 410) — 같은 프로젝트라 C1 게이트는 통과
+    render(<ImpactGuideSection job={mockJob} analysisResult={{ impactData: mkImpact({ build: 412 }) }} />);
+
+    await waitFor(() => expect(screen.getByTestId('impact-target-label')).toHaveTextContent('빌드 #412'));
+    // 410의 가이드가 렌더되지 않는다(렌더됐다면 함수별 상세 탭이 생긴다)
+    expect(screen.queryByText(/stale_fn_410/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/함수별 상세/)).not.toBeInTheDocument();
+    // 그리고 412 신원으로 410 가이드가 각인되지 않는다
+    await waitFor(() => {
+      const saved = JSON.parse(localStorage.getItem(IMPACT_KEY) || 'null');
+      expect(saved?.id?.build_number).toBe(412);
+      expect(saved?.guide).toBeFalsy();
+    });
+  });
+
+  it('이미 분석된 빌드를 고르면 재실행하지 않고 저장된 결과를 연다', async () => {
+    const user = userEvent.setup();
+    api.mockImplementation(async (url) => {
+      if (String(url).includes('/impact-jobs/')) {
+        return {
+          items: [historyItem({
+            metadata: { build_number: 412, build_revision: '1042', job_url: mockJob.url },
+          })],
+        };
+      }
+      if (String(url).includes('/result')) return { result: mkImpact() };
+      return {};
+    });
+    post.mockResolvedValue({ builds: [{ number: 412, result: 'SUCCESS' }] });
+
+    // 아직 결과는 없지만 대시보드가 SCM은 고른 상태 — 여기서 빌드를 골라 여는 흐름
+    render(<ImpactGuideSection job={mockJob} analysisResult={{ matchedScm: { id: 'hdpdm01', base_ref: '527' } }} />);
+
+    const buildSelect = screen.getByLabelText('빌드');
+    buildSelect.focus();                                   // onFocus lazy load
+    await waitFor(() => expect(within(buildSelect).getAllByRole('option').length).toBeGreaterThan(1));
+    await user.selectOptions(buildSelect, '412');
+    await user.click(screen.getByRole('button', { name: '분석' }));
+
+    await waitFor(() => expect(api).toHaveBeenCalledWith(
+      expect.stringContaining('/api/scm/impact-job/impact_1/result'),
+    ));
+    // 재실행(trigger-async)은 일어나지 않아야 한다 — 이력 재사용이 이 기능의 핵심
+    expect(post).not.toHaveBeenCalledWith('/api/jenkins/impact/trigger-async', expect.anything());
+  });
+
+  it('안전: job_url이 없는 결과는 SCM 증거 없이 트리거·이력 조회를 허용하지 않는다', async () => {
+    // /api/local/impact/trigger 결과는 metadata에 job_url이 없다. job_url 대조만 하면 이 경우
+    // 검사가 통째로 단락돼(vacuous true) scm_id=A × job_url=B 조합이 백엔드로 나가고,
+    // update_baseline=True 라 A의 MC/DC baseline이 B의 빌드로 덮어써진다.
+    const localImpact = mkImpact({ scm: 'scmA' });
+    delete localImpact.trigger.metadata.job_url;   // 로컬 트리거 산출물
+
+    render(<ImpactGuideSection job={mockJob} analysisResult={{ impactData: localImpact }} />);
+
+    // 현재 Job이 scmA의 Job이라는 증거가 없다 → 잠금 배너 + 이력 조회 자체를 하지 않는다
+    expect(screen.getByText(/이력 조회·실행을 잠갔습니다/)).toBeInTheDocument();
+    await waitFor(() => expect(api).not.toHaveBeenCalledWith(expect.stringContaining('/impact-jobs/')));
+  });
+
+  // ⚠ 아래 두 건이 덮는 것은 **matchedScm이 없을 때의 scmList 갈래뿐**이다.
+  // 프로덕션의 matchedScm writer(Dashboard·projectLoader)는 느슨한 pickScmForJob 결과를 그대로
+  // 싣기 때문에, matchedScm이 있는 경로에서는 strictScmIdForJob이 아예 발화하지 않는다.
+  // 즉 "SCM 1개 환경에서 항상 증거를 요구한다"는 시스템 속성은 아직 성립하지 않는다 —
+  // 구조적 해법은 생산자가 매칭 근거(수동/토큰일치/유일후보)를 함께 기록하는 것이며 후속 과제다.
+  it('matchedScm이 없을 때: SCM이 하나뿐이어도 Job URL과 무관하면 증거로 인정하지 않는다', async () => {
+    // pickScmForJob은 후보가 하나면 job URL을 읽지 않고 승인한다(체크아웃 자동해결용 설계).
+    // 그걸 provenance 증거로 그대로 쓰면 'SCM 1개 × Jenkins Job N개' 환경에서 무관한 Job의
+    // changeSet으로 그 SCM을 분석하게 되고, update_baseline=True라 MC/DC baseline이 덮어써진다.
+    const localImpact = mkImpact({ scm: 'totally-unrelated' });
+    delete localImpact.trigger.metadata.job_url;
+
+    render(<ImpactGuideSection job={mockJob} analysisResult={{
+      impactData: localImpact,
+      scmList: [{ id: 'totally-unrelated', name: 'totally-unrelated' }],  // 단일 등록
+    }} />);
+
+    expect(screen.getByText(/이력 조회·실행을 잠갔습니다/)).toBeInTheDocument();
+    await waitFor(() => expect(api).not.toHaveBeenCalledWith(expect.stringContaining('/impact-jobs/')));
+  });
+
+  it('matchedScm이 없을 때: SCM이 하나이고 Job URL에 이름이 있으면 증거로 인정한다(과차단 방지)', async () => {
+    // mockJob.url = .../job/test-job/ 이므로 id 'test-job'이 토큰 일치한다.
+    const localImpact = mkImpact({ scm: 'test-job' });
+    delete localImpact.trigger.metadata.job_url;
+
+    render(<ImpactGuideSection job={mockJob} analysisResult={{
+      impactData: localImpact, scmList: [{ id: 'test-job', name: 'test-job' }],
+    }} />);
+
+    expect(screen.queryByText(/이력 조회·실행을 잠갔습니다/)).not.toBeInTheDocument();
+    await waitFor(() => expect(api).toHaveBeenCalledWith(
+      expect.stringContaining('/api/scm/impact-jobs/test-job?summary=1'),
+    ));
+  });
+
+  it('job_url이 없어도 SCM 증거가 있으면 정상 동작한다(과차단 방지)', async () => {
+    const localImpact = mkImpact({ scm: 'hdpdm01' });
+    delete localImpact.trigger.metadata.job_url;
+
+    render(<ImpactGuideSection job={mockJob} analysisResult={{
+      impactData: localImpact, matchedScm: { id: 'hdpdm01' },
+    }} />);
+
+    expect(screen.queryByText(/이력 조회·실행을 잠갔습니다/)).not.toBeInTheDocument();
+    await waitFor(() => expect(api).toHaveBeenCalledWith(
+      expect.stringContaining('/api/scm/impact-jobs/hdpdm01?summary=1'),
+    ));
+  });
+
+  it('안전: 어느 Job의 빌드인지 증명 못 하는 이력은 재사용하지 않고 새로 분석한다', async () => {
+    // 로컬 트리거 잡은 metadata에 job_url이 없다. 같은 SCM을 두 Jenkins Job이 공유하면
+    // 빌드번호만으로는 '이 빌드'임을 증명할 수 없으므로, 증거 부재를 일치로 취급하면 안 된다.
+    const user = userEvent.setup();
+    api.mockImplementation(async (url) => {
+      if (String(url).includes('/impact-jobs/')) {
+        return { items: [historyItem({ metadata: { build_number: 412 } })] };  // job_url 없음
+      }
+      return {};
+    });
+    post.mockImplementation(async (url) => {
+      if (String(url).includes('/builds')) return { builds: [{ number: 412, result: 'SUCCESS' }] };
+      if (String(url).includes('trigger-async')) return { job_id: 'impact_fresh' };
+      return {};
+    });
+
+    render(<ImpactGuideSection job={mockJob} analysisResult={{ matchedScm: { id: 'hdpdm01', base_ref: '527' } }} />);
+
+    const buildSelect = screen.getByLabelText('빌드');
+    buildSelect.focus();
+    await waitFor(() => expect(within(buildSelect).getAllByRole('option').length).toBeGreaterThan(1));
+    await user.selectOptions(buildSelect, '412');
+    await user.click(screen.getByRole('button', { name: '분석' }));
+
+    // 저장된 결과를 여는 대신 새로 분석한다
+    await waitFor(() => expect(post).toHaveBeenCalledWith(
+      '/api/jenkins/impact/trigger-async', expect.objectContaining({ build_number: 412 }),
+    ));
+    expect(api).not.toHaveBeenCalledWith(expect.stringContaining('/impact-job/impact_1/result'));
+  });
+
+  it("'다시 분석'은 이력이 있어도 강제로 재실행한다", async () => {
+    const user = userEvent.setup();
+    api.mockImplementation(async (url) => {
+      if (String(url).includes('/impact-jobs/')) return { items: [historyItem({ metadata: { build_number: 412 } })] };
+      return {};
+    });
+    post.mockImplementation(async (url) => {
+      if (String(url).includes('/builds')) return { builds: [{ number: 412, result: 'SUCCESS' }] };
+      if (String(url).includes('trigger-async')) return { job_id: 'impact_new' };
+      return {};
+    });
+
+    render(<ImpactGuideSection job={mockJob} analysisResult={{ matchedScm: { id: 'hdpdm01', base_ref: '527' } }} />);
+
+    const buildSelect = screen.getByLabelText('빌드');
+    buildSelect.focus();
+    await waitFor(() => expect(within(buildSelect).getAllByRole('option').length).toBeGreaterThan(1));
+    await user.selectOptions(buildSelect, '412');
+    await user.click(screen.getByRole('button', { name: '다시 분석' }));
+
+    await waitFor(() => expect(post).toHaveBeenCalledWith(
+      '/api/jenkins/impact/trigger-async',
+      expect.objectContaining({ scm_id: 'hdpdm01', build_number: 412, job_url: mockJob.url }),
+    ));
+  });
+
+  it('빌드 목록 조회 실패를 조용히 삼키지 않고 표면화한다', async () => {
+    post.mockRejectedValue(new Error('Jenkins 연결 실패'));
+
+    render(<ImpactGuideSection job={mockJob} analysisResult={null} />);
+    screen.getByLabelText('빌드').focus();
+
+    expect(await screen.findByText(/빌드 목록 조회 실패: Jenkins 연결 실패/)).toBeInTheDocument();
+    // 이력 경로는 계속 살아 있어야 한다
+    expect(screen.getByLabelText('분석 이력')).toBeInTheDocument();
   });
 });

@@ -223,6 +223,83 @@ def list_jobs(*, scm_id: str = "", limit: int = 10) -> List[Dict[str, Any]]:
     return items
 
 
+# 이력 목록 투영에 남길 잡 헤더 필드. result(본문)는 의도적으로 제외한다.
+_SUMMARY_JOB_KEYS = (
+    "job_id", "scm_id", "trigger_type", "dry_run", "targets", "status", "stage",
+    "message", "metadata", "created_at", "updated_at", "started_at", "finished_at",
+)
+
+
+def _count(value: Any) -> int:
+    return len(value) if isinstance(value, (list, tuple, dict, set)) else 0
+
+
+def _count_impacted(groups: Any) -> int:
+    """영향 함수 수.
+
+    result의 실제 키는 ``impact``이고 hop 버킷 dict(``direct``/``indirect_1hop``/``indirect_2hop``)다.
+    ``impacted_functions``는 audit_payload(impact_orchestrator)에만 있는 키라 result에서 꺼내면
+    항상 0이 된다. 버킷 간 중복을 제거한 합집합 크기를 센다(같은 함수가 여러 hop에 걸칠 수 있다).
+    """
+    if isinstance(groups, dict):
+        seen: set = set()
+        for bucket in groups.values():
+            if isinstance(bucket, (list, tuple, set)):
+                seen.update(str(x) for x in bucket)
+        return len(seen)
+    if isinstance(groups, (list, tuple, set)):
+        return len({str(x) for x in groups})
+    return 0
+
+
+def _summarize_job(job: Dict[str, Any]) -> Dict[str, Any]:
+    """이력 목록용 경량 투영 — result 본문을 빼고 규모 카운트만 남긴다.
+
+    impact result는 함수/추적성/커버리지 맵을 담아 잡 하나가 수백 KB~MB다. 이력 드롭다운이
+    limit×full을 받으면 응답이 수십 MB로 불어난다. 목록에 필요한 건 '어느 빌드/리비전의
+    것인지(metadata) + 규모'뿐이고, 본문은 클릭 시 /impact-job/{id}/result로 따로 받는다.
+    """
+    out: Dict[str, Any] = {key: job.get(key) for key in _SUMMARY_JOB_KEYS}
+    error = job.get("error")
+    if isinstance(error, dict) and error:
+        # 실패 이력도 목록에서 사유를 보여준다(detail은 길 수 있어 code/title만).
+        out["error"] = {"code": error.get("code"), "title": error.get("title")}
+    result = job.get("result")
+    if not isinstance(result, dict):
+        out["summary"] = {}
+        return out
+    raw_trigger = result.get("trigger")
+    trigger: Dict[str, Any] = raw_trigger if isinstance(raw_trigger, dict) else {}
+    # 링크 필드 backfill: _link_metadata 도입 이전에 만들어진 잡은 최상위 metadata가 비어 있지만
+    # 같은 값이 result.trigger.metadata 안에 그대로 남아 있다(실측: 기존 207건 전부 해당).
+    # 채우지 않으면 이력 드롭다운이 과거 잡을 모두 '로컬'로 표시하고, 빌드 재사용 dedup도
+    # 걸리지 않아 이미 분석한 빌드를 매번 다시 돌리게 된다. 없는 키만 보충한다(승격값 우선).
+    backfill = _link_fields(trigger.get("metadata"))
+    if backfill:
+        merged = dict(out.get("metadata") or {})
+        for key, value in backfill.items():
+            merged.setdefault(key, value)
+        out["metadata"] = merged
+    changed = result.get("changed_files") or trigger.get("changed_files") or []
+    actions = result.get("actions") or result.get("documents") or {}
+    out["summary"] = {
+        "changed_files": _count(changed),
+        "changed_functions": _count(result.get("changed_function_types")),
+        "impacted_functions": _count_impacted(result.get("impact")),
+        "actions": {
+            str(k): str((v if isinstance(v, dict) else {}).get("status") or "")
+            for k, v in actions.items()
+        } if isinstance(actions, dict) else {},
+        "partial_failure": bool(result.get("partial_failure")),
+    }
+    return out
+
+
+def list_job_summaries(*, scm_id: str = "", limit: int = 20) -> List[Dict[str, Any]]:
+    """list_jobs의 경량판 — 이력 드롭다운 전용."""
+    return [_summarize_job(job) for job in list_jobs(scm_id=scm_id, limit=limit)]
+
+
 def _prune_jobs(keep: int = 200) -> None:
     """완료/실패한 오래된 잡 파일을 상한(keep) 초과분만 정리(누적 디스크 방지). best-effort.
 
@@ -488,13 +565,59 @@ def start_job(
     return {"ok": True, "job_id": job_id, "status": "queued", "job": load_job(job_id)}
 
 
+# 잡 metadata로 승격할 '빌드/리비전 링크' 화이트리스트.
+# trigger.metadata를 통째로 복사하면 안 된다 — scm_fallback 경로가 넣는 snapshot(전체 파일
+# 목록, change_trigger.py:70)까지 잡 JSON마다 복제돼 파일이 비대해진다.
+_LINK_META_KEYS = (
+    "job_url", "build_revision", "baseline_revision",
+    "changed_files_source", "linkage_reason", "svn_skip_reason",
+)
+
+
+def _link_fields(src: Any) -> Dict[str, Any]:
+    """metadata dict에서 빌드/리비전 링크 필드만 화이트리스트로 추린다."""
+    if not isinstance(src, dict):
+        return {}
+    out: Dict[str, Any] = {}
+    for key in _LINK_META_KEYS:
+        value = src.get(key)
+        if value is None or value == "":
+            continue
+        out[key] = value
+    # build_number는 로컬 트리거/빌드 미지정에서 0 또는 부재다. 0을 그대로 실으면 프론트가
+    # '빌드 #0'으로 오표시하므로 양수일 때만 링크로 인정한다.
+    try:
+        build_number = int(src.get("build_number") or 0)
+    except (TypeError, ValueError):
+        build_number = 0
+    if build_number > 0:
+        out["build_number"] = build_number
+    return out
+
+
+def _link_metadata(trigger: ChangeTrigger) -> Dict[str, Any]:
+    """빌드/리비전 링크 필드만 추려 잡 metadata에 심는다.
+
+    이 값들은 원래 result.trigger.metadata 안에만 있어서 '완료된 잡'에서만 꺼낼 수 있었다.
+    이력 목록이 queued/running/failed 잡까지 '어느 빌드/리비전의 것인지' 보여주려면 잡 생성
+    시점에 최상위 metadata로 승격해야 한다. _resolve_jenkins_changed_files(jenkins.py:2120)가
+    endpoint에서 SVN 범위/changeSet 해결을 이미 동기로 마친 뒤 start_impact_job이 호출되므로
+    이 시점에 값이 존재한다.
+    """
+    return _link_fields(getattr(trigger, "metadata", None))
+
+
 def start_impact_job(trigger: ChangeTrigger, *, options: Optional[ImpactOptions] = None) -> Dict[str, Any]:
     job = create_job(
         scm_id=trigger.scm_id,
         trigger_type=trigger.trigger_type,
         dry_run=trigger.dry_run,
         targets=trigger.targets,
-        metadata={"source_root": trigger.source_root, "base_ref": trigger.base_ref},
+        metadata={
+            "source_root": trigger.source_root,
+            "base_ref": trigger.base_ref,
+            **_link_metadata(trigger),
+        },
     )
     job_id = str(job["job_id"])
     update_job(

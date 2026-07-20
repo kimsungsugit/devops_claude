@@ -21,7 +21,7 @@ from backend.services.scm_registry import (
 from backend.services.local_service import svn_info_url
 from workflow.impact_audit import list_impact_audits
 from workflow.impact_changes import list_change_logs, list_function_history, list_module_history, load_change_log
-from workflow.impact_jobs import list_jobs, load_job
+from workflow.impact_jobs import list_job_summaries, list_jobs, load_job
 
 
 router = APIRouter()
@@ -305,11 +305,21 @@ def scm_impact_job_result(job_id: str) -> Dict[str, Any]:
 
 
 @router.get("/api/scm/impact-jobs/{entry_id}")
-def scm_impact_jobs(entry_id: str, limit: int = 10) -> Dict[str, Any]:
+def scm_impact_jobs(entry_id: str, limit: int = 10, summary: bool = False) -> Dict[str, Any]:
+    """SCM의 영향도 잡 이력.
+
+    summary=1이면 result 본문을 뺀 경량 투영(빌드/리비전 metadata + 규모 카운트)만 내려준다.
+    이력 드롭다운은 이 모드를 쓴다 — full은 잡당 수백 KB~MB라 limit배로 불어난다.
+    기본값 False라 기존 호출자의 응답 shape는 불변(하위호환).
+    """
     entry = get_registry_entry(entry_id)
     if entry is None:
         raise HTTPException(status_code=404, detail="registry entry not found")
-    items = list_jobs(scm_id=entry_id, limit=limit)
+    items = (
+        list_job_summaries(scm_id=entry_id, limit=limit)
+        if summary
+        else list_jobs(scm_id=entry_id, limit=limit)
+    )
     return {"ok": True, "items": items, "count": len(items)}
 
 

@@ -717,3 +717,82 @@ def test_collect_signature_changes_svn_range(monkeypatch):
     out = orch._collect_signature_changes(_T(), {"baseline_revision": "100", "build_revision": "150"}, _E())
     assert out["f"]["before"] == "int f(void)"
     assert out["f"]["after"] == "int f(int a)"
+
+
+def _wait_terminal(impact_jobs_mod, job_id: str, timeout: float = 10) -> None:
+    import time
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            job = impact_jobs_mod.load_job(job_id)
+        except (KeyError, RuntimeError):
+            time.sleep(0.05)
+            continue
+        if job.get("status") in {"completed", "failed"}:
+            return
+        time.sleep(0.05)
+    raise TimeoutError(f"Job {job_id} did not complete within {timeout}s")
+
+
+def test_trigger_async_to_history_summary_surfaces_build_and_revision(tmp_path, monkeypatch):
+    """e2e(엔드포인트 횡단): trigger-async → 잡 metadata 스탬프 → 이력 요약이 빌드/리비전 노출.
+
+    레이어별 단위테스트만 있으면 '트리거는 메타를 실었는데 목록이 안 보여준다' 식의 배선 누락이
+    빠져나간다(과거 impact 작업에서 잘못된 레이어를 두 번 고친 근본 원인이 e2e 부재였다).
+    """
+    from backend.routers import scm as scm_router
+    from backend.routers.jenkins import jenkins_impact_trigger_async
+    from backend.schemas import JenkinsImpactTriggerRequest
+    from workflow import impact_jobs
+    from workflow.change_trigger import ChangeTrigger
+
+    monkeypatch.setattr(impact_jobs, "JOB_DIR", tmp_path / "jobs")
+    monkeypatch.setattr(
+        impact_jobs, "run_impact_update",
+        lambda trigger, options=None, on_progress=None: {"ok": True, "trigger": trigger.to_dict()},
+    )
+    # 빌드 changeSet/SVN 범위 해결은 네트워크 의존 → 대체하되 meta 계약은 실제와 동일하게 준다.
+    monkeypatch.setattr(
+        "backend.routers.jenkins._resolve_jenkins_changed_files",
+        lambda req: (["Sources/APP/Ap_Door.c"], True, {
+            "changed_files_source": "svn_revision_range",
+            "baseline_revision": "527", "build_revision": "1042",
+            "linkage_reason": "svn diff --summarize -r 527:1042",
+        }),
+    )
+    # registry 파일(머신 상태) 의존 제거 — metadata 배선은 그대로 통과시킨다.
+    monkeypatch.setattr(
+        "backend.routers.jenkins.build_registry_trigger",
+        lambda **kw: ChangeTrigger(
+            trigger_type=kw["trigger_type"], scm_id=kw["scm_id"],
+            source_root=str(tmp_path / "src"), scm_type="svn",
+            base_ref=kw.get("base_ref") or "",
+            changed_files=list(kw.get("manual_changed_files") or []),
+            dry_run=bool(kw.get("dry_run")), targets=kw.get("targets"),
+            metadata=dict(kw.get("metadata") or {}),
+        ),
+    )
+
+    started = jenkins_impact_trigger_async(JenkinsImpactTriggerRequest(
+        scm_id="hdpdm01", build_number=412, job_url="http://jenkins/job/HDPDM01/",
+        base_ref="527", dry_run=True, targets=["uds"],
+    ))
+    _wait_terminal(impact_jobs, started["job_id"], timeout=10)
+
+    # scm_impact_jobs는 registry 존재 여부만 확인하므로 stub으로 통과시킨다.
+    monkeypatch.setattr("backend.routers.scm.get_registry_entry", lambda _id: object())
+    history = scm_router.scm_impact_jobs("hdpdm01", limit=10, summary=True)
+
+    item = history["items"][0]
+    assert item["metadata"]["build_number"] == 412
+    assert item["metadata"]["build_revision"] == "1042"
+    assert item["metadata"]["baseline_revision"] == "527"
+    assert item["metadata"]["changed_files_source"] == "svn_revision_range"
+    assert item["metadata"]["job_url"] == "http://jenkins/job/HDPDM01/"
+    assert item["status"] == "completed"
+    assert "result" not in item  # 목록은 경량 투영(본문은 /result로 따로)
+
+    # summary 미지정(기본값)은 기존 shape 유지 — 하위호환 회귀 방지
+    full = scm_router.scm_impact_jobs("hdpdm01", limit=10)
+    assert "result" in full["items"][0]

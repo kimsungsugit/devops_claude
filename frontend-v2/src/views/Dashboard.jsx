@@ -2,6 +2,7 @@ import { useState, useCallback, useRef, useEffect } from 'react';
 import { post, api, defaultCacheRoot } from '../api.js';
 import { useToast, useJenkinsCfg, useJob } from '../App.jsx';
 import { pickScmForJob, loadProjectFromCache } from '../projectLoader.js';
+import { pollImpactJob, throwIfAborted } from '../impactPoll.js';
 import JobCard from '../components/JobCard.jsx';
 import ResultPanel from '../components/ResultPanel.jsx';
 import AggregateCharts from '../components/AggregateCharts.jsx';
@@ -26,42 +27,23 @@ function stepIcon(state) {
 /** Poll jenkins progress until done or error */
 async function pollJenkinsProgress(jobUrl, buildSelector, jobId, action, { onMsg, signal }) {
   while (true) {
-    if (signal?.aborted) throw new Error('AbortError');
+    throwIfAborted(signal);
     await new Promise(r => setTimeout(r, 2000));
+    throwIfAborted(signal);  // 대기 중 도착한 '중단'
     const data = await api(
       `/api/jenkins/progress?action=${encodeURIComponent(action)}` +
       `&job_url=${encodeURIComponent(jobUrl)}` +
       `&build_selector=${encodeURIComponent(buildSelector)}` +
       `&job_id=${encodeURIComponent(jobId)}`
     );
+    throwIfAborted(signal);  // 요청 왕복 중 도착한 '중단'
     const p = data?.progress || {};
     if (p.message || p.stage) onMsg(p.message || p.stage);
     if (p.done || p.error) return p;
   }
 }
 
-/** Poll impact job until completed or failed */
-async function pollImpactJob(jobId, { onMsg, signal }) {
-  const t0 = Date.now();
-  while (true) {
-    if (signal?.aborted) throw new Error('AbortError');
-    await new Promise(r => setTimeout(r, 3000));
-    const data = await api(`/api/scm/impact-job/${encodeURIComponent(jobId)}`);
-    const job = data?.job || {};
-    const elapsed = Math.round((Date.now() - t0) / 1000);
-    const timeStr = elapsed > 60 ? `${Math.floor(elapsed / 60)}분 ${elapsed % 60}초` : `${elapsed}초`;
-    const msg = job.message || job.stage || '';
-    onMsg(`${msg} (${timeStr} 경과)`);
-    if (job.status === 'completed') {
-      const resultData = await api(`/api/scm/impact-job/${encodeURIComponent(jobId)}/result`);
-      return resultData?.result || {};
-    }
-    if (job.status === 'failed') {
-      const err = job.error?.title || job.error?.detail || '영향도 분석 실패';
-      throw new Error(err);
-    }
-  }
-}
+/* pollImpactJob은 impactPoll.js로 이관 — '변경 영향 평가' 탭의 빌드별 재실행과 공유한다. */
 
 /* ── Dashboard ────────────────────────────────────────────────────── */
 export default function Dashboard({ onGoDetail }) {
@@ -220,6 +202,9 @@ export default function Dashboard({ onGoDetail }) {
       matchedScm = manual || pickScmForJob(scmList, jobUrl);
 
       /* Step 1: Artifact sync */
+      // trigger-async와 같은 이유로 발사 직전에 확인한다 — sync-async는 아티팩트 다운로드 +
+      // SVN 체크아웃을 수행하는 부작용 요청이고, 서버측 취소 endpoint가 없어 한번 뜨면 완주한다.
+      throwIfAborted(signal);
       setStep('sync', 'active', '동기화 시작 중...');
       setCheckoutStatus(null);
       const syncRes = await post('/api/jenkins/sync-async', {
@@ -340,6 +325,10 @@ export default function Dashboard({ onGoDetail }) {
          would silently analyse the wrong project whenever multiple registries
          exist. When the heuristic can't pick one, skip rather than guess. */
       if (matchedScm) {
+        // '중단' 이후에 트리거가 나가면 서버는 체크아웃·문서생성·커버리지 baseline 갱신·감사기록을
+        // 모두 수행하는데 화면엔 아무 것도 안 뜬다(취소 후 침묵 실행). 부작용을 만드는 요청이므로
+        // 발사 직전에 반드시 확인한다.
+        throwIfAborted(signal);
         setStep('impact', 'active', '영향도 분석 시작 중...');
         try {
           const triggerRes = await post('/api/jenkins/impact/trigger-async', {
@@ -356,6 +345,9 @@ export default function Dashboard({ onGoDetail }) {
             signal,
             onMsg: msg => setStep('impact', 'active', msg),
           });
+          // 실행 식별자 — 영향 탭의 영속/하이드레이트가 '같은 실행인지'를 확정하는 근거이자,
+          // localStorage quota로 본문이 빠졌을 때 백엔드에서 재조회할 열쇠(impactStore 참조).
+          impactData._job_id = triggerRes.job_id;
           impactData._linked_docs = matchedScm.linked_docs || {};
           impactData._scm_name = matchedScm.name || matchedScm.id;
           // 부분 실패(분석은 성공, 일부 문서 자동 생성 실패)를 '완료'로 위장하지 않는다.
