@@ -38,8 +38,9 @@ syntax-check:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
     - if: '$CI_COMMIT_BRANCH == "main"'
 
-# Ruff (변경 라인 한정 ratchet) + SKILL.md frontmatter — Claude Code 훅 밖에서도 강제
-ruff-frontmatter:
+# Ruff + ESLint (둘 다 변경 라인 한정 ratchet) + SKILL.md frontmatter
+# — Claude Code 훅 밖에서도 강제
+ruff-eslint-frontmatter:
   stage: lint
   tags:
     - shared
@@ -62,11 +63,21 @@ ruff-frontmatter:
       $rc = 0
       $py = @($changed | Where-Object { $_ -match '\.py$' })
       $skill = @($changed | Where-Object { $_ -match 'SKILL\.md$' })
+      # 확장자는 eslint.config.js 범위(js,jsx)와 일치. node_modules 배제 필수 —
+      # PowerShell 커맨드라인 32,767자 한계를 tracked node_modules 가 넘긴다.
+      $js = @($changed | Where-Object { $_ -match 'frontend-v2/.*\.(js|jsx)$' -and $_ -notmatch '/node_modules/' })
       if ($py.Count -gt 0) {
         # ratchet: backlog(1072건) 익사 방지 위해 변경 라인의 신규 위반만
         python scripts/ruff_ratchet.py --base $base @py
         if ($LASTEXITCODE -ne 0) { $rc = $LASTEXITCODE }
       } else { Write-Host "No changed .py" }
+      if ($js.Count -gt 0) {
+        # 동일 ratchet(레거시 error 101건 제외). eslint 는 로컬 바이너리를 직접 부르므로
+        # node_modules 가 필요하다 — 변경된 JS 가 있을 때만 설치해 lint stage 를 가볍게 유지.
+        Push-Location frontend-v2; npm ci; Pop-Location
+        python scripts/eslint_ratchet.py --base $base @js
+        if ($LASTEXITCODE -ne 0) { $rc = $LASTEXITCODE }
+      } else { Write-Host "No changed frontend-v2 JS/JSX" }
       if ($skill.Count -gt 0) {
         python scripts/check_skill_frontmatter.py @skill
         if ($LASTEXITCODE -ne 0) { $rc = 1 }

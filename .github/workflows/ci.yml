@@ -97,6 +97,12 @@ jobs:
         with:
           python-version: "3.12"
 
+      # eslint ratchet 은 frontend-v2 의 **로컬** eslint 바이너리를 직접 부른다
+      # (npx 레지스트리 즉석 다운로드 의존 제거 — _hook_env.project_eslint).
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
       - name: Install lint tools
         run: pip install ruff pyyaml
 
@@ -120,12 +126,25 @@ jobs:
           CHANGED=$(git diff --name-only "$BASE" HEAD 2>/dev/null || true)
           CHANGED_PY=$(echo "$CHANGED" | grep '\.py$' || true)
           CHANGED_SKILL=$(echo "$CHANGED" | grep 'SKILL\.md$' || true)
+          # 확장자는 eslint.config.js 범위(js,jsx)와 일치. node_modules 는 tracked 파일이
+          # 다수라 배제하지 않으면 커맨드라인이 폭주한다.
+          CHANGED_JS=$(echo "$CHANGED" | grep -E 'frontend-v2/.*\.(js|jsx)$' | grep -v '/node_modules/' || true)
           RC=0
           if [ -n "$CHANGED_PY" ]; then
             echo "Ruff ratchet on changed .py"
             python scripts/ruff_ratchet.py --base "$BASE" $CHANGED_PY || RC=$?
           else
             echo "No changed .py"
+          fi
+          if [ -n "$CHANGED_JS" ]; then
+            # ruff 와 동일한 ratchet. rc=2(DISABLED)도 그대로 전파해 **빌드 실패** —
+            # CI 는 통제된 환경이라 도구 부재는 인프라 이상이지 통과가 아니다.
+            # npm ci 는 여기서만 — JS 변경이 없는 커밋(대다수)에 60초를 낭비하지 않는다.
+            echo "ESLint ratchet on changed JS/JSX"
+            (cd frontend-v2 && npm ci)
+            python scripts/eslint_ratchet.py --base "$BASE" $CHANGED_JS || RC=$?
+          else
+            echo "No changed frontend-v2 JS/JSX"
           fi
           if [ -n "$CHANGED_SKILL" ]; then
             echo "Frontmatter on changed SKILL.md"

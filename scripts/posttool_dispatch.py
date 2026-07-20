@@ -12,7 +12,6 @@ from __future__ import annotations
 import ast
 import json
 import re
-import shutil
 import subprocess
 import sys
 import time
@@ -39,7 +38,9 @@ except Exception:  # pragma: no cover - 방어
 
 _t0 = time.perf_counter()
 _ROOT = Path(__file__).resolve().parents[1]
-_NPX = shutil.which("npx") or shutil.which("npx.cmd") or "npx"
+# _NPX 제거: eslint 는 npx 가 아니라 로컬 바이너리를 직접 해석한다(_hook_env.project_eslint).
+# npx 폴백은 최종적으로 문자열 리터럴 "npx" 라 부재가 실행 시점에야 드러났고, 미설치 시
+# 레지스트리에서 받아오려 해 훅이 조용히 네트워크에 의존했다.
 
 
 def _payload_file(payload: dict) -> str:
@@ -174,23 +175,26 @@ def main() -> None:
             except Exception as e:
                 results.append(f"auto-test: skipped ({type(e).__name__})")
 
-    # .jsx/.tsx/.ts/.js (frontend-v2/) — eslint --fix
-    elif f.endswith((".jsx", ".tsx", ".ts", ".js")) and "frontend-v2" in f_norm:
+    # .jsx/.tsx/.ts/.js (frontend-v2/) — eslint ratchet (변경 라인 한정)
+    elif f.endswith((".jsx", ".js")) and "frontend-v2" in f_norm and "/node_modules/" not in f_norm:
+        # ruff 분기와 두 가지가 다르다.
+        # (1) `--fix` 미사용 — 이유는 위 ruff 분기 주석과 동일(훅이 방금 쓴 파일을 재작성하면
+        #     편집 도구의 in-memory 가 stale / backlog 상태의 --fix 는 편집과 무관한 코드까지
+        #     자동 변형). 예전 이 분기만 --fix 를 쓰고 있었다.
+        # (2) 파일 전체가 아니라 **ratchet** — frontend-v2 는 한 번도 린트된 적이 없어
+        #     레거시가 error 101건(2026-07-20 실측) 쌓여 있다. 전체 검사 결과를 200자로
+        #     잘라 보여주면 방금 만든 위반이 레거시에 묻혀 읽을 수 없다. 같은 파일의
+        #     침묵-except 검사도 PostToolUse 안에서 net-new 필터링을 한다(선례).
         try:
             r = subprocess.run(
-                [_NPX, "eslint", "--fix", "--no-error-on-unmatched-pattern", f],
-                capture_output=True, text=True, cwd=str(_ROOT / "frontend-v2"),
-                timeout=30, shell=False,
+                [_PY, str(_ROOT / "scripts" / "eslint_ratchet.py"), f],
+                capture_output=True, text=True, timeout=120,
             )
-            if r.returncode != 0 and not r.stdout.strip():
-                # eslint/npx 자체 실행 실패(미설치·flat-config 오류·plugin 부재).
-                # eslint 위반은 stdout(stylish 포맷)으로 나오므로, rc≠0 + 빈 stdout 은
-                # '위반 없음'이 아니라 도구가 안 돈 것 — 빈 stdout 을 clean 으로 읽으면
-                # fake-green. ruff/pytest 분기와 동일 가드(_module_missing 은 파이썬
-                # 전용 패턴이라 Node 도구엔 안 걸려 rc 가드로 대체).
-                results.append(f"eslint: ERROR {(r.stderr.strip() or 'unknown')[:150]}")
+            if r.returncode == 2:
+                # 미설치·config 오류·크래시. 빈 출력을 clean 으로 읽지 않는다(anti-fake-green).
+                results.append(f"eslint: DISABLED {(r.stderr.strip() or 'unknown')[:150]}")
             else:
-                results.append(f"eslint: {(r.stdout.strip() or 'clean')[:200]}")
+                results.append(f"eslint: {(r.stdout.strip() or 'clean')[:300]}")
         except Exception as e:
             results.append(f"eslint: skipped ({type(e).__name__})")
 

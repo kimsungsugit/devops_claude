@@ -62,6 +62,30 @@ if [ -n "$STAGED_PY" ]; then
         echo "✅ $RUFF_OUT"
     fi
 fi
+# ⚠ 확장자는 eslint.config.js 의 files 범위(js,jsx)와 일치시킨다. ts/tsx 를 받으면
+# config 없는 파일이 넘어가 '설정 없음' warning 으로 조용히 통과한다.
+# node_modules 는 tracked 파일이 1,464개나 되어(선재 결함) 배제하지 않으면
+# 커맨드라인 길이 한계를 넘겨 eslint 기동 자체가 실패한다.
+STAGED_JS=$(git diff --cached --name-only --diff-filter=ACM | grep -E 'frontend-v2/.*\.(js|jsx)$' | grep -v '/node_modules/')
+if [ -n "$STAGED_JS" ]; then
+    # ruff 와 같은 ratchet 원리. frontend-v2 는 오래 lint 게이트가 없어(config·의존성 부재)
+    # 레거시 error 101건(2026-07-20 실측)이 쌓였다 — 파일 전체 eslint 는 건드리는 파일마다
+    # 레거시를 터뜨려 --no-verify 도피를 부른다. scripts/eslint_ratchet.py 가 net-new 만 본다.
+    echo "[2/3] ESLint (변경 라인 한정, 레거시 제외) on staged JS/JSX..."
+    ES_OUT=$("$PROJECT_PY" scripts/eslint_ratchet.py --cached $STAGED_JS 2>&1)
+    ES_RC=$?
+    # rc=2(DISABLED) 비대칭은 ruff 와 동일: 로컬은 node_modules 미설치가 흔해 경고 후 허용,
+    # CI 는 통제된 환경이라 DISABLED=인프라 이상 → 빌드 실패.
+    if [ $ES_RC -eq 2 ]; then
+        echo "⚠️  $ES_OUT"
+    elif [ $ES_RC -ne 0 ]; then
+        echo "$ES_OUT"
+        echo "❌ 신규 ESLint 위반. 고친 뒤 다시 커밋 (레거시 backlog 는 이 게이트가 안 막음)."
+        exit 1
+    else
+        echo "✅ $ES_OUT"
+    fi
+fi
 if [ -n "$STAGED_SKILL" ]; then
     echo "[2/3] SKILL.md frontmatter 검사..."
     FM_OUT=$("$PROJECT_PY" scripts/check_skill_frontmatter.py $STAGED_SKILL 2>&1)

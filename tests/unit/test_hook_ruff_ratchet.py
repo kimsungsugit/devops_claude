@@ -151,3 +151,45 @@ def test_rel_normalizes_abs_to_repo_relative():
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
+
+
+# ── fail-open 방어 (deep-review 실측 재현, eslint 판과 동일 결함) ─────────
+# 이 두 결함은 eslint_ratchet 을 이 파일의 미러로 만들면서 **복제된 채 발견**됐다.
+# 둘 다 "위반이 있는데 rc=0" 이고, 그때 `"레거시 N건은 ratchet 로 제외"` 라는
+# 적극적 안심 문구까지 출력해 사용자가 "내 변경은 깨끗하다"로 읽게 만든다.
+
+def test_git_diff_failure_is_disabled_not_clean(monkeypatch, capsys):
+    """git diff 실패는 rc=2. 0이면 게이트 전면 무력화다.
+
+    실측: 잘못된 `--base` 로 실재하는 위반이 통과했다. git 이 실패하면 stdout 이 비어
+    added={} 가 되고 모든 위반이 '레거시'로 재분류된다. base 오타뿐 아니라
+    index.lock 경합(훅이 도는 동안 다른 프로세스가 git add)처럼 일상적 원인도 있다.
+    """
+    def _run(cmd):
+        if cmd and cmd[0] == "git":
+            return _cp(stdout="", stderr="fatal: unknown revision", rc=128)
+        return _cp(stdout=_ruff_json(("F401", "unused", 3)), rc=1)
+
+    monkeypatch.setattr(ruff_ratchet, "_run", _run)
+    rc = ruff_ratchet.main(["x.py"])
+    assert rc == 2
+    assert "git diff 실패" in capsys.readouterr().err
+
+
+def test_quoted_path_in_diff_matches_violation(monkeypatch, capsys):
+    """따옴표+8진 이스케이프 경로(한글 파일명)도 위반과 조인돼야 한다.
+
+    `core.quotepath` 기본값 탓에 비ASCII 경로는 `+++ "b/…"` 로 나온다. 파서가 못 풀면
+    키가 어긋나 그 파일 위반이 전부 '레거시'가 된다 — 한글 파일명 하나로 게이트가
+    무력화됐다(실측 재현).
+    """
+    kor = "scripts/한글probe.py"
+    octal = "".join(f"\\{b:03o}" for b in "한글probe".encode())
+    diff = (f'--- /dev/null\n+++ "b/scripts/{octal}.py"\n'
+            "@@ -0,0 +1,1 @@\n+import os\n")
+    monkeypatch.setattr(ruff_ratchet, "_run",
+                        _fake_run(diff, _ruff_json(("F401", "os unused", 1), fname=kor)))
+    rc = ruff_ratchet.main([kor])
+    out = capsys.readouterr().out
+    assert rc == 1, "따옴표 경로가 조인되지 않아 위반이 '레거시'로 샜다"
+    assert "F401" in out

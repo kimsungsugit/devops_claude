@@ -50,6 +50,31 @@ def project_py() -> str:
     return sys.executable
 
 
+#: eslint 로컬 설치 후보. npx 를 거치지 않고 바이너리를 직접 해석한다.
+#: 이유는 project_py() 와 같다 — `shutil.which("npx") or "npx"` 같은 폴백은 최종적으로
+#: **문자열 리터럴**이라 "못 찾음"이 실행 시점에야 드러나고, 게다가 npx 는 미설치 시
+#: 레지스트리에서 받아오려 해 훅이 조용히 네트워크에 의존하게 된다(실제로 그랬다).
+_ESLINT_CANDIDATES = (
+    _ROOT / "frontend-v2" / "node_modules" / ".bin" / "eslint.cmd",
+    _ROOT / "frontend-v2" / "node_modules" / ".bin" / "eslint",
+)
+
+
+def project_eslint() -> str | None:
+    """frontend-v2 의 로컬 eslint 실행파일 경로. 없으면 None(→ 호출측이 DISABLED 보고).
+
+    None 을 '위반 없음'으로 읽으면 안 된다 — project_py() 가 폴백 후에도
+    module_missing() 으로 표면화하는 것과 같은 규약이다.
+    """
+    override = os.environ.get("DEVOPS_HOOK_ESLINT")
+    if override and Path(override).is_file():
+        return override
+    for cand in _ESLINT_CANDIDATES:
+        if cand.is_file():
+            return str(cand)
+    return None
+
+
 #: runpy가 `python -m <없는모듈>` 에 내는 시그니처.
 #: "C:/...python.exe: No module named ruff" — 실행파일 경로 + 따옴표 없는 모듈명,
 #: 예외 클래스명 없음. **allowlist**(이 형태만 True)라 사용자 코드가 내는

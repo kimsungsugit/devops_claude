@@ -62,29 +62,47 @@ def _dispatch(monkeypatch, capsys, file_path: str, cp: subprocess.CompletedProce
 _JSX = "frontend-v2/src/components/Foo.jsx"
 
 
-def test_eslint_launch_failure_is_not_stamped_clean(monkeypatch, capsys):
-    """eslint 가 못 뜨면(rc≠0 + 빈 stdout) 'clean' 이 아니라 ERROR 여야 한다.
+# JS 분기는 이제 eslint 를 직접 부르지 않고 scripts/eslint_ratchet.py 를 부른다
+# (변경 라인 한정 + --fix 제거). 계약이 rc 0/1/2 로 바뀌었으므로 아래 세 테스트도
+# 그 규약을 검증한다 — 다만 **지켜야 할 속성은 그대로**다: 도구가 안 돌았을 때
+# 'clean' 으로 위장하지 않는 것.
 
-    구 코드(`(r.stdout.strip() or 'clean')`)는 여기서 'eslint: clean' 을 냈다 → FAIL.
+def test_eslint_disabled_is_not_stamped_clean(monkeypatch, capsys):
+    """ratchet 이 rc=2(DISABLED)면 'clean' 이 아니라 DISABLED 여야 한다.
+
+    rc=2 는 eslint 미설치(node_modules 부재)·flat-config 오류·크래시다. 이걸 통과로
+    읽으면 lint 가 통째로 죽은 채 초록불이 켜진다 — 이 저장소가 ruff/pytest 에서
+    이미 겪은 fake-green 이다.
     """
-    cp = _cp(1, stdout="", stderr="npm error could not determine executable to run")
+    cp = _cp(2, stdout="", stderr="eslint DISABLED (frontend-v2/node_modules 에 없음)")
     ctx = _dispatch(monkeypatch, capsys, _JSX, cp)
-    assert "eslint: ERROR" in ctx
-    assert "clean" not in ctx  # 도구가 안 돌았는데 clean 으로 위장하면 안 됨
+    assert "eslint: DISABLED" in ctx
+    assert "clean" not in ctx
 
 
 def test_eslint_clean_when_rc0(monkeypatch, capsys):
-    """모두 통과(또는 --fix 로 전부 교정)면 rc=0 + 빈 stdout → 'clean' 이 맞다."""
-    ctx = _dispatch(monkeypatch, capsys, _JSX, _cp(0, stdout="", stderr=""))
+    """신규 위반 0건이면 ratchet 이 rc=0 + 'eslint: clean' 을 stdout 으로 낸다."""
+    ctx = _dispatch(monkeypatch, capsys, _JSX, _cp(0, stdout="eslint: clean", stderr=""))
     assert "eslint: clean" in ctx
 
 
-def test_eslint_violations_are_surfaced(monkeypatch, capsys):
-    """실제 위반(rc≠0 + stdout 보고)은 그대로 노출돼야 한다(ERROR 가드에 삼켜지면 안 됨)."""
-    report = "Foo.jsx\n  3:1  error  'x' is not defined  no-undef"
+def test_eslint_new_violations_are_surfaced(monkeypatch, capsys):
+    """변경 라인의 신규 위반(rc=1)은 규칙명·위치까지 그대로 노출돼야 한다."""
+    report = ("eslint: 신규 위반 1건 (변경 라인 한정):\n"
+              "  frontend-v2/src/components/Foo.jsx:3: no-undef 'x' is not defined")
     ctx = _dispatch(monkeypatch, capsys, _JSX, _cp(1, stdout=report, stderr=""))
     assert "no-undef" in ctx
-    assert "ERROR" not in ctx  # stdout 이 있으므로 도구 실패가 아니라 위반 보고
+    assert "DISABLED" not in ctx   # 위반 보고이지 도구 실패가 아니다
+
+
+def test_eslint_legacy_only_reports_ratchet_exclusion(monkeypatch, capsys):
+    """레거시만 있으면 통과시키되 **몇 건을 제외했는지 밝힌다**.
+
+    조용히 통과시키면 backlog 가 있는지조차 모르게 된다.
+    """
+    out = "eslint: 신규 위반 0건 (레거시 16건은 ratchet 로 제외)"
+    ctx = _dispatch(monkeypatch, capsys, _JSX, _cp(0, stdout=out, stderr=""))
+    assert "레거시 16건" in ctx
 
 
 # ── ruff 분기 (형제 계약 end-to-end 잠금) ──────────────────────────────────

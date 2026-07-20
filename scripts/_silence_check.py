@@ -154,6 +154,43 @@ def silent_excepts(source: str) -> list[tuple[int, str]]:
     return out
 
 
+def _unquote_diff_path(path: str) -> str:
+    """git 이 따옴표로 감싼 diff 경로를 원래 경로로 되돌린다.
+
+    git 은 비ASCII·공백·특수문자가 든 경로를 `"b/src/\\355\\225\\234\\352\\270\\200.jsx"`
+    처럼 **따옴표 + 8진 이스케이프**로 낸다(`core.quotepath` 기본값 true).
+    이걸 그대로 두면 `startswith("b/")` 가 False 라 `b/` 접두사가 안 떨어지고 키가
+    어긋난다 → ratchet 소비자가 **모든 위반을 '레거시'로 오분류해 조용히 통과**시킨다
+    (한글 파일명 하나로 게이트가 통째로 무력화된다).
+
+    호출측이 `-c core.quotepath=false` 를 주면 8진 이스케이프는 사라지지만 공백·따옴표가
+    든 경로는 여전히 따옴표로 감싸이므로, 두 경우를 모두 여기서 처리한다.
+    """
+    if not (path.startswith('"') and path.endswith('"') and len(path) >= 2):
+        return path
+    body = path[1:-1]
+    # C 스타일 이스케이프 해제: \nnn(8진) → 바이트, \" \\ \t \n 등 → 리터럴.
+    out = bytearray()
+    i = 0
+    while i < len(body):
+        ch = body[i]
+        if ch != "\\":
+            out.extend(ch.encode("utf-8"))
+            i += 1
+            continue
+        nxt = body[i + 1] if i + 1 < len(body) else ""
+        if nxt and nxt in "01234567" and len(body) >= i + 4:
+            try:
+                out.append(int(body[i + 1:i + 4], 8))
+                i += 4
+                continue
+            except ValueError:
+                pass
+        out.extend({"n": b"\n", "t": b"\t", "r": b"\r"}.get(nxt, nxt.encode("utf-8")))
+        i += 2
+    return out.decode("utf-8", errors="replace")
+
+
 def _iter_added_lines(diff: str) -> dict[str, set[int]]:
     """`git diff -U0` 출력을 파싱해 파일별 **추가된 라인 번호**(신 파일 기준) 집합.
 
@@ -164,7 +201,7 @@ def _iter_added_lines(diff: str) -> dict[str, set[int]]:
     cur: str | None = None
     for line in diff.splitlines():
         if line.startswith("+++ "):
-            path = line[4:].strip()
+            path = _unquote_diff_path(line[4:].strip())
             if path.startswith("b/"):
                 path = path[2:]
             cur = None if path == "/dev/null" else path

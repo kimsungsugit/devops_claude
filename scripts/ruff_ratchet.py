@@ -61,7 +61,20 @@ def main(argv: list[str] | None = None) -> int:
     #    -M 은 old/new 를 둘 다 봐야 rename 을 감지하는데 `-- files` 로 좁히면 old 가
     #    배제돼 rename 이 안 잡혀 파일 전체가 'added' 로 폭주한다(실측). ruff 는 files
     #    만 검사하므로 위반은 자연히 files 로 제한되고, added 는 파일 키로 조회된다.
-    dh = _run(["git", "diff", "-M", "-U0", *diff_spec])
+    #    `-c core.quotepath=false` — 비ASCII 경로(한글 파일명)를 8진 이스케이프 없이 받는다.
+    #    이게 없으면 `+++ "b/scripts/\355..."` 형태라 `b/` 접두사가 안 떨어지고 키가 어긋나
+    #    그 파일의 위반이 전부 '레거시'로 오분류돼 **조용히 통과**한다(실측 재현).
+    dh = _run(["git", "-c", "core.quotepath=false", "diff", "-M", "-U0", *diff_spec])
+    if dh.returncode != 0:
+        # ⚠ git 실패를 안 막으면 게이트가 통째로 무력화된다. stdout 이 비어 added={} 가
+        # 되고 모든 위반이 '레거시'로 재분류돼 rc=0 + "레거시 N건 제외" 라는 안심 문구까지
+        # 나온다. 원인: base 오타(`--base` 오입력), index.lock 경합, detached 상태 등.
+        print(
+            f"git diff 실패(rc={dh.returncode}) — 변경 라인을 알 수 없어 판정 불가: "
+            f"{(dh.stderr or '').strip()[:200]}",
+            file=sys.stderr,
+        )
+        return 2
     added = _iter_added_lines(dh.stdout)  # {repo-rel path: {line, ...}}
 
     # 2) ruff 위반 (JSON)
