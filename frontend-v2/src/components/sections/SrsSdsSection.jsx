@@ -129,8 +129,13 @@ export default function SrsSdsSection({ job, analysisResult }) {
 
     // Debug: log activeDocs state
 
-    // Cache check: skip API calls if inputs haven't changed
-    const cacheKey = JSON.stringify({ srs: docPaths.srs, sds: docPaths.sds, hsis: docPaths.hsis || activeDocs.hsis, jobUrl: job?.url, sts: activeDocs.sts, suts: activeDocs.suts, sits: activeDocs.sits, syts: activeDocs.syts, syits: activeDocs.syits, vcast: (Array.isArray(activeDocs?.vectorcast) ? activeDocs.vectorcast : []).filter(Boolean).join(',') });
+    // Cache check: skip API calls if inputs haven't changed.
+    // ⚠ sourceRoot 를 반드시 포함한다 — :150 에서 요청 body 에 싣는데 이게 빠지면
+    // scmId·docPaths 가 같고 source_root 만 바뀐 재분석 후 비-force '생성'(:720)이
+    // 옛 소스트리로 만든 매트릭스를 캐시 hit 로 되쓴다. deps 에 activeScm 을 넣은
+    // 수정은 **클로저**만 고쳤고, matrixCacheRef(useRef)는 콜백 재생성에도 살아남아
+    // 이 키로 조회되므로 키에 source_root 가 없으면 여전히 stale (deep-review W1).
+    const cacheKey = JSON.stringify({ srs: docPaths.srs, sds: docPaths.sds, hsis: docPaths.hsis || activeDocs.hsis, jobUrl: job?.url, sourceRoot: activeScm?.source_root, sts: activeDocs.sts, suts: activeDocs.suts, sits: activeDocs.sits, syts: activeDocs.syts, syits: activeDocs.syits, vcast: (Array.isArray(activeDocs?.vectorcast) ? activeDocs.vectorcast : []).filter(Boolean).join(',') });
     if (!forceRefresh && matrixCacheRef.current?.key === cacheKey && matrixCacheRef.current?.data) {
       setMatrix(matrixCacheRef.current.data);
       toast('info', '캐시된 매트릭스를 사용합니다. 새로고침하려면 버튼을 다시 클릭하세요.');
@@ -447,7 +452,18 @@ export default function SrsSdsSection({ job, analysisResult }) {
       setLoadProgress('');
       if (stepWarnings.length > 0) setWarnings(stepWarnings);
     }
-  }, [job, cfg, cacheRoot, docPaths, linkedDocs, scmId, toast]);
+    // ⚠ activeScm(위 :150에서 source_root 가 요청 body 에 실린다)이 **어느 dep 에도 안
+    // 들어 있었다**. scmId 는 activeScm?.id 문자열이고, docPaths·linkedDocs 는 linked_docs
+    // 만 본다 — 즉 SCM id 를 유지한 채 source_root 만 바뀌면 이 콜백이 갱신되지 않아
+    // **옛 소스 트리로 매트릭스를 만들면서 "생성 완료" 성공 토스트**(:441)를 띄운다.
+    // 이 파일 :37-40 이 스스로 "이 섹션에서 오귀속 피해가 가장 큰 건 activeScm" 이라고
+    // 적은 그 실패 양상이다.
+    //   객체 전체(activeScm)를 넣는다 — 속성(activeScm?.source_root)만 넣으면 React
+    // Compiler(preserve-manual-memoization)가 "본문에서 추론한 의존은 activeScm 인데 소스는
+    // 더 구체적이다"라며 이 컴포넌트 최적화를 통째로 건너뛴다(조건부로 정의된 :50-52 객체라
+    // 속성 수준 추적 불가). activeScm 은 analysisResult.matchedScm 파생이라 분석 실행 때만
+    // 바뀌어 참조가 충분히 안정적이고, :453 effect 는 _autoLoadedRef 가드로 1회만 돈다.
+  }, [job, cfg, cacheRoot, docPaths, linkedDocs, scmId, activeScm, toast]);
 
   // focus(영향도 → 추적성)를 갖고 진입하면 매트릭스를 자동 생성한다(1회).
   useEffect(() => {
