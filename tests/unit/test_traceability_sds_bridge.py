@@ -834,3 +834,47 @@ def test_design_id_bridge_excludes_junk_field_labels():
     sids = mx["rows"][0]["source_ids"]
     assert "real_fn" in sids
     assert "Name" not in sids and "ID" not in sids
+
+
+# ── SUTS/VectorCAST test-row 설계-ID 브리지 (UDS 브리지의 test-arm 확장) ──
+# 시험 함수가 SDS에 이름은 없지만 UDS Related ID 설계ID(SwFn 등)로 SRS에 닿는 경우를
+# name-bridge가 놓치던 것을 보완. SUTS/VectorCAST 밴드 43→64.
+
+def test_suts_design_id_bridge():
+    """SUTS unit 함수가 UDS 설계ID(SwFn)로 SRS에 연결(SDS에 이름 없어 name-bridge는 미스)."""
+    items = [{"id": "SwTR_0101"}]
+    # SDS는 설계ID SwFn_05로만 귀속(함수명 foo_func는 SDS에 없음)
+    sds_pairs = [{"requirement_id": "SwTR_0101", "component_ids": ["SwFn_05"]}]
+    mapping_pairs = [{"requirement_id": "SwFn_05", "source_ids": ["foo_func"]}]
+    suts = [{"requirement_id": "SwUFn_01", "unit": "foo_func", "source": "SUTS", "testcase": "t1"}]
+    mx = generate_uds_traceability_matrix(
+        items, mapping_pairs=mapping_pairs, sds_pairs=sds_pairs, vcast_rows=suts)
+    row = mx["rows"][0]
+    assert row["suts_count"] >= 1            # 설계ID 브리지로만 도달 (mutation: 미배선→0)
+    assert any(t.get("trace_type") == "indirect" for t in row["suts_tests"])
+
+
+def test_vcast_design_id_bridge():
+    """VectorCAST subprogram(SwUFn)→(SUTS)함수명→(UDS 설계ID)→SRS 로 연결."""
+    items = [{"id": "SwTR_0101"}]
+    sds_pairs = [{"requirement_id": "SwTR_0101", "component_ids": ["SwFn_05"]}]
+    mapping_pairs = [{"requirement_id": "SwFn_05", "source_ids": ["foo_func"]}]
+    suts = [{"requirement_id": "SwUFn_01", "unit": "foo_func", "source": "SUTS", "testcase": "s1"}]
+    vcast = [{"subprogram": "SwUFn_01", "testcase": "SwUFn_01 (2 TC)",
+              "result": "pass", "source": "VectorCAST"}]
+    mx = generate_uds_traceability_matrix(
+        items, mapping_pairs=mapping_pairs, sds_pairs=sds_pairs, vcast_rows=suts + vcast)
+    assert mx["rows"][0]["vcast_count"] >= 1
+    assert mx["summary"]["vcast_traced_rows"] == 1
+    assert mx["summary"]["vcast_untraced_rows"] == 0
+
+
+def test_suts_vcast_design_bridge_swcom_excluded():
+    """test-row 설계-ID 브리지도 SwCom은 제외한다(UDS와 동일 안전판 상속)."""
+    items = [{"id": "SwTR_0101"}]
+    sds_pairs = [{"requirement_id": "SwTR_0101", "component_ids": ["SwCom_03"]}]
+    mapping_pairs = [{"requirement_id": "SwCom_03", "source_ids": ["comp_fn"]}]
+    suts = [{"requirement_id": "SwUFn_01", "unit": "comp_fn", "source": "SUTS", "testcase": "t1"}]
+    mx = generate_uds_traceability_matrix(
+        items, mapping_pairs=mapping_pairs, sds_pairs=sds_pairs, vcast_rows=suts)
+    assert mx["rows"][0]["suts_count"] == 0   # SwCom 제외 → 브리지 안 됨

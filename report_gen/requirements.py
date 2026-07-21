@@ -2227,6 +2227,10 @@ def generate_uds_traceability_matrix(
             if rid_srs not in _dlst:
                 _dlst.append(rid_srs)
     design_bridge_funcs: Dict[str, List[str]] = {}     # SRS 요구 → [UDS 함수 display]
+    # 역방향 맵: _sds_comp_key(함수명) → [SRS 요구] via 설계ID. SUTS/VectorCAST test-row가
+    # 시험 함수의 UDS 설계ID로 SRS에 닿게 한다(UDS 밴드와 동일 체인의 test-arm 확장 —
+    # 시험이 함수 F를 검증, F가 SwFn_05를 구현, SwFn_05가 요구 R을 실현 → 시험이 R 검증).
+    func_design_reqs: Dict[str, List[str]] = {}
     for _did, _fns in map_lookup.items():
         _reqs = design_to_reqs.get(_did)
         if not _reqs:
@@ -2238,10 +2242,15 @@ def generate_uds_traceability_matrix(
             if _fs.lower() in _UDS_FUNC_JUNK:            # junk 필드 라벨 제외(C1 방어심층)
                 continue
             _fdisp = uds_all_funcs.get(_fs.lower(), _fs)
+            _fkey = _sds_comp_key(_fs)                   # SUTS unit/VCAST resolved 함수명 조회 키공간
             for _rid in _reqs:
                 _blst = design_bridge_funcs.setdefault(_rid, [])
                 if _fdisp not in _blst:
                     _blst.append(_fdisp)
+                if _fkey:
+                    _flst = func_design_reqs.setdefault(_fkey, [])
+                    if _rid not in _flst:
+                        _flst.append(_rid)
 
     # SITS/VectorCAST 2-hop bridge용: SUTS가 제공하는 SwUFn(단위함수 ID) → 함수명 맵.
     # SITS/vcast는 testcase·subprogram에 SwUFn ID를 박아두지만 함수명/SRS ID가 없다.
@@ -2306,6 +2315,11 @@ def generate_uds_traceability_matrix(
             for r in sds_func_to_reqs.get(_sds_comp_key(unit), []):
                 if r not in mapped_rids:
                     mapped_rids.append(r)
+            # 설계-ID bridge: 시험 함수(unit)의 UDS Related ID 설계ID로도 SRS에 연결.
+            # 함수명 bridge가 SDS에 이름 없는 함수를 놓치던 것을 보완(SUTS 43→64).
+            for r in func_design_reqs.get(_sds_comp_key(unit), []):
+                if r not in mapped_rids:
+                    mapped_rids.append(r)
             for mrid in mapped_rids:
                 # 유효한 SRS 요구사항(req_id_set)으로만 간접 추적 추가 — SwSTR 등 노이즈 배제
                 if mrid != orig_rid and mrid in req_id_set:
@@ -2333,17 +2347,21 @@ def generate_uds_traceability_matrix(
             vcast_input_rows += 1
             seen_vc: set = set()
             sub_lower = subprogram.lower()
-            for mrid in sds_func_to_reqs.get(_sds_comp_key(sub_lower), []):
-                if mrid in req_id_set and mrid not in seen_vc:
-                    seen_vc.add(mrid)
-                    enriched_rows.append({**row, "requirement_id": mrid, "trace_type": "indirect"})
+            # 함수명 bridge(sds_func_to_reqs) + 설계-ID bridge(func_design_reqs) 병행 —
+            # 시험 함수의 UDS 설계ID로도 SRS에 연결(VectorCAST 43→64). seen_vc가 중복 차단.
+            for _map in (sds_func_to_reqs, func_design_reqs):
+                for mrid in _map.get(_sds_comp_key(sub_lower), []):
+                    if mrid in req_id_set and mrid not in seen_vc:
+                        seen_vc.add(mrid)
+                        enriched_rows.append({**row, "requirement_id": mrid, "trace_type": "indirect"})
             hay = subprogram + " " + str(row.get("testcase") or "")
             for swufn in _SWUFN_RE.findall(hay):
                 for fn in swufn_to_func.get(_normalize_req_id(swufn), []):
-                    for mrid in sds_func_to_reqs.get(_sds_comp_key(fn), []):
-                        if mrid in req_id_set and mrid not in seen_vc:
-                            seen_vc.add(mrid)
-                            enriched_rows.append({**row, "requirement_id": mrid, "trace_type": "indirect"})
+                    for _map in (sds_func_to_reqs, func_design_reqs):
+                        for mrid in _map.get(_sds_comp_key(fn), []):
+                            if mrid in req_id_set and mrid not in seen_vc:
+                                seen_vc.add(mrid)
+                                enriched_rows.append({**row, "requirement_id": mrid, "trace_type": "indirect"})
             if seen_vc:
                 vcast_traced_rows += 1
             else:
