@@ -10,6 +10,11 @@
 같은 ratchet 원칙이고, `posttool_dispatch.py` 의 "레거시를 자동 변형 말고 사람이
 결정" 과 정합한다.
 
+판정 로직(추가 라인 계산·untracked·경로 정규화·신규/레거시 분류·rc 규약)은
+`_ratchet_core.py` 에 있다 — eslint 판과 **같은 코드**를 쓴다. 여기 남은 건 ruff
+고유의 두 가지뿐이다: 실행 경로(`sys.executable -m ruff` + 부재 판별)와
+JSON 어댑터(flat `[{filename, location:{row}, code}]`).
+
 사용:
     ruff_ratchet.py --cached <file.py> ...      # pre-commit (staged vs HEAD)
     ruff_ratchet.py --base HEAD~1 <file.py> ... # CI (직전 커밋 대비)
@@ -25,96 +30,67 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _ratchet_core as core  # noqa: E402  판정 로직 단일 출처
 from _hook_env import module_missing as _module_missing  # noqa: E402  단일소스 판별
-from _silence_check import _iter_added_lines  # noqa: E402  공용 unified-diff 파서
 
-_ROOT = Path(__file__).resolve().parents[1]
-
-
-def _rel(path: str) -> str:
-    """ruff 가 준 절대경로를 repo-상대 forward-slash 로 (added-lines 키와 정합)."""
-    try:
-        return Path(path).resolve().relative_to(_ROOT).as_posix()
-    except (ValueError, OSError):
-        return path.replace("\\", "/")
+_ROOT = core.ROOT
+_TOOL = "ruff"
 
 
 def _run(cmd: list[str]) -> subprocess.CompletedProcess:
-    return subprocess.run(cmd, capture_output=True, text=True, cwd=str(_ROOT), timeout=60)
+    # encoding 고정 + replace — quality_check._run 과 동일 계약. git/ruff 출력은
+    # UTF-8 정본인데 text=True 만이면 locale(cp949)로 오독하거나, 잔여 non-utf8
+    # 바이트에 reader thread 가 죽어 stream 이 조용히 빈다 → 위반이 '레거시'로
+    # 오분류돼 통과. 판정 신호는 ASCII(경로/JSON)라 replace 로도 보존된다.
+    return subprocess.run(cmd, capture_output=True, text=True,
+                          encoding="utf-8", errors="replace",
+                          cwd=str(_ROOT), timeout=60)
 
 
-def main(argv: list[str] | None = None) -> int:
-    args = list(sys.argv[1:] if argv is None else argv)
-    diff_spec: list[str] = ["HEAD"]
-    if "--cached" in args:
-        args.remove("--cached")
-        diff_spec = ["--cached"]
-    if "--base" in args:
-        i = args.index("--base")
-        diff_spec = [args[i + 1]]
-        del args[i:i + 2]
+def _rel(path: str) -> str:
+    """ruff 절대경로 → repo-상대. 실패는 통과가 아니라 판정 보류(core.Disabled)."""
+    return core.rel(path)
+
+
+def _collect(files: list[str]) -> list[core.Hit]:
+    """ruff 를 돌려 위반을 공용 `Hit` 형태로. 실패는 core.Disabled 로 올린다."""
+    rf = _run([sys.executable, "-m", "ruff", "check", "--output-format=json", *files])
+    if _module_missing(rf):  # 단일소스 판별(_hook_env) — 3벌 정규식과 파리티
+        raise core.Disabled("ruff DISABLED (미설치 — venv 확인). lint 미검증(통과 아님).")
+    core.ensure_tool_ran(_TOOL, rf)
+    try:
+        violations = json.loads(rf.stdout or "[]")
+    except json.JSONDecodeError as e:
+        raise core.Disabled(
+            f"ruff 출력 파싱 실패(rc={rf.returncode}): {(rf.stderr or '')[:200]}"
+        ) from e
+    return [
+        (
+            _rel(v.get("filename", "")),
+            (v.get("location") or {}).get("row"),
+            v.get("code") or "?",
+            (v.get("message") or "").strip(),
+        )
+        for v in violations
+    ]
+
+
+def _main(argv: list[str] | None = None) -> int:
+    diff_spec, args = core.parse_cli(sys.argv[1:] if argv is None else argv)
     files = [a for a in args if a.endswith(".py")]
     if not files:
         return 0
 
-    # 1) 신규(추가/수정)된 라인 집합. rename-aware(-M) + **pathspec 없이**.
-    #    -M 은 old/new 를 둘 다 봐야 rename 을 감지하는데 `-- files` 로 좁히면 old 가
-    #    배제돼 rename 이 안 잡혀 파일 전체가 'added' 로 폭주한다(실측). ruff 는 files
-    #    만 검사하므로 위반은 자연히 files 로 제한되고, added 는 파일 키로 조회된다.
-    #    `-c core.quotepath=false` — 비ASCII 경로(한글 파일명)를 8진 이스케이프 없이 받는다.
-    #    이게 없으면 `+++ "b/scripts/\355..."` 형태라 `b/` 접두사가 안 떨어지고 키가 어긋나
-    #    그 파일의 위반이 전부 '레거시'로 오분류돼 **조용히 통과**한다(실측 재현).
-    dh = _run(["git", "-c", "core.quotepath=false", "diff", "-M", "-U0", *diff_spec])
-    if dh.returncode != 0:
-        # ⚠ git 실패를 안 막으면 게이트가 통째로 무력화된다. stdout 이 비어 added={} 가
-        # 되고 모든 위반이 '레거시'로 재분류돼 rc=0 + "레거시 N건 제외" 라는 안심 문구까지
-        # 나온다. 원인: base 오타(`--base` 오입력), index.lock 경합, detached 상태 등.
-        print(
-            f"git diff 실패(rc={dh.returncode}) — 변경 라인을 알 수 없어 판정 불가: "
-            f"{(dh.stderr or '').strip()[:200]}",
-            file=sys.stderr,
-        )
-        return 2
-    added = _iter_added_lines(dh.stdout)  # {repo-rel path: {line, ...}}
+    added = core.added_lines(
+        _run(core.git_diff_cmd(diff_spec)),
+        _run(core.git_untracked_cmd(files)),
+    )
+    new_hits, legacy = core.split_new_vs_legacy(_collect(files), added)
+    return core.emit(_TOOL, new_hits, legacy, added)
 
-    # 2) ruff 위반 (JSON)
-    rf = _run([sys.executable, "-m", "ruff", "check", "--output-format=json", *files])
-    if _module_missing(rf):  # 단일소스 판별(_hook_env) — 3벌 정규식과 파리티
-        print("ruff DISABLED (미설치 — venv 확인). lint 미검증(통과 아님).", file=sys.stderr)
-        return 2
-    if rf.returncode != 0 and not rf.stdout.strip():
-        # ruff 위반은 stdout(JSON)으로 나온다. rc≠0인데 stdout까지 비었으면 위반
-        # 0건이 아니라 ruff **자체 실패**(설정 오류·내부 크래시)다. 빈 걸 []로 읽으면
-        # "clean"으로 위장하는 fail-open — quality_check.py §3 이 이미 막는 패턴을
-        # 그대로 이식해 fail-closed(DISABLED) 로 표면화한다.
-        print(f"ruff 실행 실패(rc={rf.returncode}) — lint 미검증: {(rf.stderr or '').strip()[:200]}", file=sys.stderr)
-        return 2
-    try:
-        violations = json.loads(rf.stdout or "[]")
-    except json.JSONDecodeError:
-        print(f"ruff 출력 파싱 실패(rc={rf.returncode}): {(rf.stderr or '')[:200]}", file=sys.stderr)
-        return 2
 
-    # 3) 추가 라인에 걸린 위반만 남긴다 (net-new ratchet)
-    new_hits = []
-    for v in violations:
-        rel = _rel(v.get("filename", ""))
-        row = (v.get("location") or {}).get("row")
-        if row is not None and row in added.get(rel, set()):
-            new_hits.append((rel, row, v.get("code") or "?", (v.get("message") or "").strip()))
-
-    if not new_hits:
-        total = len(violations)
-        if total:
-            print(f"ruff: 신규 위반 0건 (레거시 {total}건은 ratchet 로 제외)")
-        else:
-            print("ruff: clean")
-        return 0
-
-    print(f"ruff: 신규 위반 {len(new_hits)}건 (변경 라인 한정):")
-    for rel, row, code, msg in sorted(new_hits):
-        print(f"  {rel}:{row}: {code} {msg}")
-    return 1
+def main(argv: list[str] | None = None) -> int:
+    return core.run_guarded(lambda: _main(argv))
 
 
 if __name__ == "__main__":

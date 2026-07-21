@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -40,9 +41,17 @@ _CONSUMER_KEYS = ("counts", "verified", "not_run")
 
 
 def _run_json(*args: str, timeout: int = 300) -> dict:
+    # QUALITY_CHECK_BUDGET 로 예산을 좁힌다 — 이 헬퍼는 **실 작업 트리**에 대고
+    # quality_check.py 를 띄우는데, 트리에 이 파일(느린 tests/unit conftest 를
+    # import 하는 테스트)의 미커밋 변경이 있으면 quality_check 가 그 스위트를 중첩
+    # 실행해 한 번에 ~250s+ 를 먹는다 — 스테이징 시점이 정확히 그 상태라 300s
+    # outer timeout 에 flaky 였다(deep-review I6). 계약 테스트는 JSON **shape** 만
+    # 검사하고(도구가 budget_exceeded=NOT_RUN 로 빠져도 counts/verified/not_run
+    # 형태·상호정합은 동일), round 파싱은 예산과 무관하므로 검증력은 그대로다.
+    env = {**os.environ, "QUALITY_CHECK_BUDGET": "20"}
     r = subprocess.run(
         [_hook_env.project_py(), str(_SCRIPT), "--json", *args],
-        capture_output=True, text=True, timeout=timeout, cwd=str(_ROOT),
+        capture_output=True, text=True, timeout=timeout, cwd=str(_ROOT), env=env,
     )
     assert r.stdout.strip(), f"--json 인데 stdout 이 비었다 (rc={r.returncode}): {r.stderr[-200:]}"
     return json.loads(r.stdout)
@@ -100,6 +109,44 @@ class TestNotRunStates:
             assert v != "clean", f"not_run[{k}]={v!r} 은 RAN 상태"
 
 
+class TestRunnerDecodeSafety:
+    """`_run` 은 서브프로세스 출력을 **utf-8 + errors=replace** 로 디코드해야 한다.
+
+    한글 Windows 에서 npm/vitest 등이 cp949 바이트(예: 0xbe)를 뱉으면, strict
+    디코드는 subprocess 의 reader thread 를 죽여 그 스트림을 **조용히 None/""** 로
+    만든다(실측: 그 예외는 main 으로 전파 안 되고 buffer 만 빈다). verdict 가 빈
+    stdout 을 읽으면 fail-green 이고, 실패 브랜치의 `r.stdout.strip()` 은 None 에
+    AttributeError 로 게이트를 통째로 죽인다.
+
+    encoding 을 안 박으면 text=True 는 locale.getpreferredencoding() 에 의존해,
+    cp949 로케일 머신에선 git·ruff 의 UTF-8 JSON 까지 오독한다 → utf-8 **고정**이
+    정본이다. 이 계약은 소스에서 직접 잠근다(되돌리면 이 테스트가 실패).
+    """
+
+    def _run_body(self) -> str:
+        import re
+        src = _SCRIPT.read_text(encoding="utf-8")
+        m = re.search(r"\ndef _run\(.*?(?=\ndef )", src, re.S)
+        assert m, "_run 함수를 못 찾음"
+        return m.group(0)
+
+    def test_run_pins_utf8_and_replace(self):
+        body = self._run_body()
+        # 유일한 subprocess.run 호출(나머지는 _run 경유)에 두 인자가 다 있어야 한다.
+        assert 'encoding="utf-8"' in body, "_run 이 encoding 을 utf-8 로 고정하지 않음 (로케일 의존 = cp949 오독)"
+        assert 'errors="replace"' in body, "_run 이 errors=replace 를 안 씀 (cp949 바이트에 reader thread 사망 → 빈 스트림)"
+
+    def test_replace_preserves_ascii_markers(self):
+        """행동 확인 — replace 는 비-utf8 바이트가 섞여도 ASCII verdict 마커를 보존한다."""
+        import subprocess as sp
+        emit = [sys.executable, "-c",
+                r'import sys; sys.stdout.buffer.write(b"PASS\xbe done\n")']
+        r = sp.run(emit, capture_output=True, text=True,
+                   encoding="utf-8", errors="replace", timeout=30)
+        assert r.stdout is not None and "PASS" in r.stdout, \
+            f"replace 로도 마커가 소실됨: {r.stdout!r}"
+
+
 class TestCleanTreeIsNotVerified:
     """조기종료(무변경) 경로도 계약을 지킨다 — fail-open 방지.
 
@@ -127,6 +174,71 @@ class TestCleanTreeIsNotVerified:
         assert d["verified"] is False, "무변경인데 verified=True → fail-open"
         assert d["not_run"], "무변경인데 not_run 이 비었다"
         assert "counts" in d, "조기종료 shape 에 counts 누락 → 소비자 파싱 실패"
+
+
+class TestUntrackedFilesAreExamined:
+    """untracked(아직 `git add` 안 한) 신규 파일도 검사 대상이다 — fake-green 방지.
+
+    tracked diff 만 보던 시절엔 새로 만든 파일이 이 스크립트의 **모든 검사에서 통째로
+    빠졌다**. 트리에 그 파일밖에 없으면 `changed_raw` 가 비어 조기종료(no_changes)로
+    빠지고, 검사한 적 없는 채 `verified` 로 통과했다. 이 스크립트가 없애려는
+    fake-green 그 자체다.
+
+    이 테스트는 fix(untracked → ls-files 로 changed 에 편입)를 되돌리면 실패한다:
+    되돌리면 untracked 뿐인 트리가 no_changes 로 조기종료해 침묵-except 가 안 잡힌다.
+    """
+
+    def _init_repo(self, root, sp):
+        sp.run(["git", "init", "-q"], cwd=root, check=True)
+        (root / "scripts").mkdir()
+        # §7d 침묵 검사는 _silence_check 를 import 한다 — 없으면 DISABLED 로 빠져
+        # 이 테스트가 무의미해진다. 세 파일 모두 복사.
+        for f in ("quality_check.py", "_hook_env.py", "_silence_check.py"):
+            (root / "scripts" / f).write_bytes((_ROOT / "scripts" / f).read_bytes())
+        sp.run(["git", "add", "-A"], cwd=root, check=True)
+        sp.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+                "commit", "-qm", "init"], cwd=root, check=True)
+
+    def test_untracked_silent_except_is_caught(self, tmp_path):
+        import subprocess as sp
+        self._init_repo(tmp_path, sp)
+        # 커밋 뒤에 놓는 untracked 신규 파일 — broad-silent except 포함.
+        (tmp_path / "newmod.py").write_text(
+            "def risky():\n"
+            "    try:\n"
+            "        do_it()\n"
+            "    except Exception:\n"
+            "        pass\n",
+            encoding="utf-8",
+        )
+        r = sp.run(
+            [_hook_env.project_py(), "scripts/quality_check.py", "--json"],
+            capture_output=True, text=True, timeout=120, cwd=str(tmp_path),
+        )
+        d = json.loads(r.stdout)
+        # 1) 조기종료로 새지 않았다 — untracked 가 '변경'으로 잡혀 검사가 돌았다.
+        assert d.get("skipped") != "no_changes", \
+            f"untracked 뿐인 트리가 no_changes 로 조기종료 → 검사 누락: {d}"
+        # 2) 그 파일의 신규 침묵-except 가 warning 으로 표면화됐다.
+        sil = [i for i in d.get("issues", [])
+               if "newmod.py" in str(i.get("file", "")) and "침묵" in str(i.get("message", ""))]
+        assert sil, f"untracked 파일의 침묵-except 미검출 (issues={d.get('issues')})"
+
+    def test_untracked_only_tree_is_not_verified_silently(self, tmp_path):
+        """untracked 파일이 clean 이어도, '검사했다'는 사실 자체가 기록돼야 한다.
+
+        조기종료가 아니라 실제 검사 경로를 탔음을 changed_files 카운트로 확인한다.
+        """
+        import subprocess as sp
+        self._init_repo(tmp_path, sp)
+        (tmp_path / "clean_new.py").write_text("X = 1\n", encoding="utf-8")
+        r = sp.run(
+            [_hook_env.project_py(), "scripts/quality_check.py", "--json"],
+            capture_output=True, text=True, timeout=120, cwd=str(tmp_path),
+        )
+        d = json.loads(r.stdout)
+        assert d.get("skipped") != "no_changes", \
+            f"untracked clean 파일도 조기종료로 새면 안 된다: {d}"
 
 
 class TestRoundArg:

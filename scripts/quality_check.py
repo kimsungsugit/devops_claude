@@ -151,7 +151,17 @@ def _run(cmd: list[str], *, cwd: str | Path | None = None, timeout: int = 60) ->
     이제 실패는 returncode로 표현되고 호출부가 명시 보고한다.
     """
     try:
-        return subprocess.run(cmd, capture_output=True, text=True, cwd=cwd or _ROOT, timeout=timeout)
+        # encoding/errors 를 **명시**한다. 안 하면 text=True 가
+        # locale.getpreferredencoding() 에 의존하는데, 한글 Windows 에서
+        # ① 로케일이 cp949 면 git·ruff 의 UTF-8 JSON 을 오독하고
+        # ② 로케일이 utf-8 이어도 npm/vitest 가 뱉는 cp949 바이트(예: 0xbe)에
+        #    reader thread 가 strict 디코드로 죽어, 그 스트림이 **조용히 ""** 가 된다.
+        #    (subprocess 의 _readerthread 예외는 main 으로 전파 안 되고 buffer 만 빈다)
+        # 빈 stdout 을 verdict 로 쓰면 fail-green 벡터다. utf-8 고정(정본)+replace 로
+        # ASCII verdict 마커("passed"/"FAIL"/JSON)는 보존하고 잔여 바이트만 U+FFFD.
+        return subprocess.run(cmd, capture_output=True, text=True,
+                              encoding="utf-8", errors="replace",
+                              cwd=cwd or _ROOT, timeout=timeout)
     except subprocess.TimeoutExpired:
         return subprocess.CompletedProcess(cmd, _TIMED_OUT, "", f"TIMEOUT after {timeout}s")
     except (FileNotFoundError, OSError) as e:
@@ -238,6 +248,26 @@ if not _silence_ok:
 # 안 도는 no-op이 된다 — 이 스크립트가 없애려는 fake-green과 같은 결말.
 _FORCE = bool(os.environ.get("QUALITY_CHECK_FORCE")) or _ROUND == 3
 changed_raw = _run(["git", "diff", "--name-only"]).stdout + _run(["git", "diff", "--name-only", "--cached"]).stdout
+
+# untracked(아직 `git add` 안 한 신규 파일)도 '변경'이다. 이게 빠져 있어서 새로
+# 만든 파일은 이 스크립트의 **모든 검사에서 통째로 빠졌다** — syntax·ruff·모듈
+# 테스트·패턴(§7a~7e)·침묵 except 전부. 실측: `except Exception: pass` 와
+# `subprocess.run(cmd, shell=True)` 가 든 untracked .py 를 두고 돌렸더니
+# `Issues: 0 critical, 0 warning` + `verified: true` + `proceed` 가 나왔다.
+# 검사하지 않은 걸 '검증됨'이라 쓰는 건 이 스크립트가 없애려는 fake-green 그 자체다.
+#
+# 아래 캐시 제거 주석(§결과 캐시)이 이미 같은 교훈을 담고 있다 — "tracked diff 는
+# untracked 변경을 못 본다". 그때는 **캐시 키**만 고치고 **파일 목록**은 같은
+# tracked-only 신호를 계속 썼다. 두 곳이 같은 결함이었다.
+#
+# `--exclude-standard` 로 .gitignore 를 존중한다(빌드 산출물·스크래치 제외).
+# 실측 0.2s / 2건이라 비용도 노이즈도 없다. git 실패 시엔 조용히 건너뛰지 않고
+# 아래 §7d 에서 판정 보류로 표면화한다.
+_untracked_cp = _run(["git", "ls-files", "--others", "--exclude-standard"])
+_untracked_raw = _untracked_cp.stdout if _untracked_cp.returncode == 0 else ""
+changed_raw += _untracked_raw
+untracked_files = {f.strip().replace("\\", "/") for f in _untracked_raw.splitlines() if f.strip()}
+
 if not changed_raw.strip() and not _FORCE:
     if _JSON_ONLY:
         print(json.dumps(
@@ -443,6 +473,11 @@ if _silence_ok and py_files:
     _dh = _run(["git", "diff", "-M", "-U0", "HEAD"])
     if _dh.returncode == 0:
         _added_lines = _iter_added_lines(_dh.stdout)
+    else:
+        # 조용히 {} 로 두면 tracked 파일의 신규 침묵-except 가 전부 '레거시'로
+        # 재분류돼 §7d 가 아무것도 안 잡는다 — 그런데 출력은 "0 warning" 이다.
+        _add("Info", "hook", "scripts/quality_check.py",
+             f"git diff 실패(rc={_dh.returncode}) — §7d 신규 침묵-except 판정 보류")
 
 for f in py_files:
     fp = _ROOT / f
@@ -456,8 +491,12 @@ for f in py_files:
     #     위험/정당은 구조가 동일해 구분 불가(사람 판단) → net-new 만 advisory Warning.
     if _silence_ok:
         _addset = _added_lines.get(f) or _added_lines.get(f.replace("\\", "/")) or set()
+        # untracked 신규 파일은 diff 에 안 나와 _addset 이 빈다. 하지만 HEAD 에 없던
+        # 파일이 '레거시' 빚을 가질 수는 없다 — 전 라인이 net-new 다. 이 분기가 없으면
+        # 새 파일에 침묵 except 를 아무리 넣어도 §7d 가 한 건도 안 잡는다.
+        _all_new = f.replace("\\", "/") in untracked_files
         for _ln, _reason in silent_excepts(content):
-            if _ln in _addset:
+            if _all_new or _ln in _addset:
                 _add("Warning", "pattern", f"{f}:{_ln}",
                      f"신규 침묵 except ({_reason}) — broad 예외를 삼킴. 예외를 좁히거나 "
                      f"로깅 추가, 의도면 `# silent-ok` 마커")

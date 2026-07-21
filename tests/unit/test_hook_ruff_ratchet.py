@@ -27,11 +27,18 @@ def _cp(stdout: str = "", stderr: str = "", rc: int = 0) -> subprocess.Completed
     return subprocess.CompletedProcess(["x"], rc, stdout, stderr)
 
 
-def _fake_run(diff_out: str, ruff_out: str, ruff_rc: int = 1, ruff_err: str = ""):
-    """git diff / ruff 호출을 명령으로 구분해 canned 결과를 돌려주는 fake."""
+def _fake_run(diff_out: str, ruff_out: str, ruff_rc: int = 1, ruff_err: str = "",
+              untracked: str = ""):
+    """git diff / git ls-files / ruff 를 명령으로 구분해 canned 결과를 돌려주는 fake.
+
+    ⚠ `git` 두 호출을 **구분해야 한다**. 예전엔 cmd[0]=='git' 하나로 뭉뚱그려
+    ls-files 에도 diff 텍스트를 돌려줬고, 그러면 diff 의 `+++ b/x.py` 같은 줄이
+    'untracked 파일 경로'로 파싱돼 added 에 쓰레기 키가 섞인다. 지금은 그래도
+    결과가 안 바뀌지만, 앞으로 그 오염이 진짜 결함을 가릴 수 있다.
+    """
     def _run(cmd):
         if cmd and cmd[0] == "git":
-            return _cp(stdout=diff_out)
+            return _cp(stdout=untracked if "ls-files" in cmd else diff_out)
         return _cp(stdout=ruff_out, stderr=ruff_err, rc=ruff_rc)
     return _run
 
@@ -129,7 +136,7 @@ def test_cached_and_base_flags_parsed(monkeypatch):
 
     def _capture(cmd):
         if cmd[0] == "git":
-            seen["diff"] = cmd
+            seen["untracked" if "ls-files" in cmd else "diff"] = cmd
             return _cp(stdout="")
         seen["ruff"] = cmd
         return _cp(stdout="[]", rc=0)
@@ -139,6 +146,9 @@ def test_cached_and_base_flags_parsed(monkeypatch):
     assert "HEAD~1" in seen["diff"] and "-M" in seen["diff"]
     assert "a.py" not in seen["diff"]   # pathspec 아님 (rename 감지 유지)
     assert "a.py" in seen["ruff"]       # 파일은 ruff 로
+    # ls-files 는 반대로 pathspec 이 **있어야** 한다 — rename 감지와 무관하고,
+    # 없으면 저장소 전체 untracked 를 훑어 무관한 파일까지 신규로 잡는다.
+    assert "a.py" in seen["untracked"] and "--others" in seen["untracked"]
     seen.clear()
     monkeypatch.setattr(ruff_ratchet, "_run", _capture)
     ruff_ratchet.main(["--cached", "a.py"])
@@ -193,3 +203,61 @@ def test_quoted_path_in_diff_matches_violation(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert rc == 1, "따옴표 경로가 조인되지 않아 위반이 '레거시'로 샜다"
     assert "F401" in out
+
+
+# ── eslint 판에만 있던 방어 3건의 파리티 (2026-07-21) ──────────────────────
+# ruff 판이 원본인데, 미러(eslint)를 만들며 발견한 fail-open 을 **미러에만** 고쳤다.
+# 그 결과 같은 조건에서 두 게이트가 다른 답을 냈다(실측):
+#     ruff_ratchet.py  _ratchet_probe.py   → rc=0 "레거시 4건은 ratchet 로 제외"
+#     eslint_ratchet.py _ratchet_probe.jsx → rc=1 no-unused-vars 보고
+# 판정 로직을 `_ratchet_core.py` 로 합쳤으므로 아래 3건은 **두 게이트에 동시에**
+# 적용된다. 세 번째 ratchet 이 생겨도 같다.
+
+def test_untracked_file_violations_are_new_not_legacy(monkeypatch, capsys):
+    """untracked 신규 파일의 위반은 전부 '신규'다 — HEAD 에 없던 파일이 레거시 빚을
+    가질 수 없다.
+
+    실측 재현: 위반 4건짜리 `.py` 를 새로 만들고 working-tree 모드로 돌리면
+    `rc=0` + "레거시 4건은 ratchet 로 제외" 가 나왔다. **방금 쓴 파일의 위반을
+    '남의 빚'이라 부르며 통과**시킨 것이라, 문구가 적극적으로 오도한다.
+    """
+    ruff_json = _ruff_json(("F401", "os unused", 1), ("F841", "x unused", 4))
+    monkeypatch.setattr(ruff_ratchet, "_run",
+                        _fake_run("", ruff_json, untracked="x.py\n"))
+    rc = ruff_ratchet.main(["x.py"])
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "F401" in out and "F841" in out
+    assert "레거시" not in out, "신규 파일 위반을 레거시로 부르면 안 된다"
+
+
+def test_rel_fallback_is_fail_closed(monkeypatch, capsys):
+    """repo 밖 경로를 정규화 못 하면 통과가 아니라 판정 보류(rc=2).
+
+    예전 폴백은 `path.replace("\\\\", "/")` 로 절대경로를 그대로 돌려줬다. added 키는
+    repo-상대라 영원히 miss → 그 파일 위반이 전부 '레거시' → 조용히 통과했다.
+    """
+    diff = "--- a/x.py\n+++ b/x.py\n@@ -1,0 +1,1 @@\n+import os\n"
+    outside = json.dumps([{
+        "filename": "/somewhere/else/x.py",
+        "code": "F401", "message": "m", "location": {"row": 1},
+    }])
+    monkeypatch.setattr(ruff_ratchet, "_run", _fake_run(diff, outside))
+    assert ruff_ratchet.main(["x.py"]) == 2
+    assert "판정 보류" in capsys.readouterr().err
+
+
+def test_violations_without_any_added_lines_are_held(monkeypatch, capsys):
+    """변경 라인 정보가 통째로 없는데 위반이 있으면 안심시키지 말고 보류(rc=2).
+
+    "레거시 N건은 ratchet 로 제외" 는 적극적 안심 문구다. added 가 비었다는 건
+    '남의 빚'이 아니라 **변경 라인을 못 얻었다**는 뜻일 수 있다(git 가드를 빠져나온
+    잔여 경우). 대가로 '스테이징이 순수 mode 변경뿐인' 희귀 케이스에서 헛보류가
+    날 수 있지만, 조용한 통과보다 낫다 — 로컬은 경고 후 허용이다.
+    """
+    monkeypatch.setattr(ruff_ratchet, "_run",
+                        _fake_run("", _ruff_json(("E711", "legacy", 10))))
+    rc = ruff_ratchet.main(["x.py"])
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "판정 보류" in err and "미분류" in err
