@@ -758,3 +758,79 @@ def test_leading_underscore_func_bridges_to_matrix():
     row = mx["rows"][0]
     assert row["requirement_id"] == "SwTR_0106"
     assert row["test_count"] >= 1  # _entrypoint 시험이 SRS 행에 연결됨
+
+
+# ── 설계-ID bridge(SRS→SDS→UDS, SwFn/SwSTR/SwST/SwTK; SwCom 제외) ──
+# UDS 함수의 Related ID 설계ID를 SDS의 설계ID→SRS요구 매핑으로 이어 UDS 밴드에 부착.
+# 여기 함수명(foo_func 등)은 SDS component_ids에 없으므로 name-bridge로는 안 붙고,
+# 오직 설계ID bridge로만 붙는다 → 이 경로를 단독 고정한다.
+
+def test_design_id_bridge_swfn_attaches_but_swcom_does_not():
+    """load-bearing: SwFn(tight)은 브리지되고 SwCom(loose)은 제외된다."""
+    items = [{"id": "SwTR_0101"}]
+    # SDS: SwTR_0101을 설계ID SwFn_05·SwCom_03에 귀속
+    sds_pairs = [{"requirement_id": "SwTR_0101", "component_ids": ["SwFn_05", "SwCom_03"]}]
+    # UDS Related ID: SwFn_05는 foo_func가, SwCom_03은 comp_only_func가 참조
+    mapping_pairs = [
+        {"requirement_id": "SwFn_05", "source_ids": ["foo_func"]},
+        {"requirement_id": "SwCom_03", "source_ids": ["comp_only_func"]},
+    ]
+    mx = generate_uds_traceability_matrix(items, mapping_pairs=mapping_pairs, sds_pairs=sds_pairs)
+    row = mx["rows"][0]
+    # SwFn bridge → foo_func 부착 (mutation A: 2c 주입 제거 시 실패)
+    assert "foo_func" in row["source_ids"]
+    # SwCom 제외 → comp_only_func 미부착 (mutation B: 정규식에 COM 추가 시 실패)
+    assert "comp_only_func" not in row["source_ids"]
+    # SDS 경유 '추정'이라 direct엔 안 들어감 (over-trace 안전판)
+    assert row.get("source_ids_direct") == []
+
+
+def test_design_id_bridge_swstr_swst_swtk():
+    """SwSTR/SwST/SwTK 세 tight namespace 모두 브리지된다."""
+    items = [{"id": "SwTR_0101"}]
+    sds_pairs = [{"requirement_id": "SwTR_0101",
+                  "component_ids": ["SwSTR_02", "SwST_03", "SwTK_04"]}]
+    mapping_pairs = [
+        {"requirement_id": "SwSTR_02", "source_ids": ["str_func"]},
+        {"requirement_id": "SwST_03", "source_ids": ["st_func"]},
+        {"requirement_id": "SwTK_04", "source_ids": ["tk_func"]},
+    ]
+    mx = generate_uds_traceability_matrix(items, mapping_pairs=mapping_pairs, sds_pairs=sds_pairs)
+    sids = mx["rows"][0]["source_ids"]
+    assert "str_func" in sids and "st_func" in sids and "tk_func" in sids
+
+
+def test_design_id_bridge_ignores_non_matrix_req():
+    """설계ID가 매트릭스 밖 요구(SwTR_9999)에만 귀속되면 브리지 안 함(req_id_set 게이트)."""
+    items = [{"id": "SwTR_0101"}]
+    sds_pairs = [{"requirement_id": "SwTR_9999", "component_ids": ["SwFn_05"]}]
+    mapping_pairs = [{"requirement_id": "SwFn_05", "source_ids": ["foo_func"]}]
+    mx = generate_uds_traceability_matrix(items, mapping_pairs=mapping_pairs, sds_pairs=sds_pairs)
+    assert "foo_func" not in (mx["rows"][0]["source_ids"] or [])
+
+
+def test_design_id_bridge_excludes_swufn_id_value():
+    """source_ids의 자기 SwUFn ID 값은 밴드에서 제외(함수명만 부착)."""
+    items = [{"id": "SwTR_0101"}]
+    sds_pairs = [{"requirement_id": "SwTR_0101", "component_ids": ["SwFn_05"]}]
+    # 파서는 source_ids에 함수명 + 자기 SwUFn ID를 함께 넣는다
+    mapping_pairs = [{"requirement_id": "SwFn_05", "source_ids": ["foo_func", "SwUFn_0203"]}]
+    mx = generate_uds_traceability_matrix(items, mapping_pairs=mapping_pairs, sds_pairs=sds_pairs)
+    sids = mx["rows"][0]["source_ids"]
+    assert "foo_func" in sids
+    assert "SwUFn_0203" not in sids
+
+
+def test_design_id_bridge_excludes_junk_field_labels():
+    """source_ids에 필드라벨 junk('Name'/'ID')가 있어도 요구에 부착되지 않는다 (deep-review C1 방어심층).
+
+    파서 echo 가드가 1차 차단하나, 문서군 편차로 junk가 mapping_pairs에 새어도 bridge가
+    막는지 고정. mutation: _UDS_FUNC_JUNK를 비우면 이 테스트 실패.
+    """
+    items = [{"id": "SwTR_0101"}]
+    sds_pairs = [{"requirement_id": "SwTR_0101", "component_ids": ["SwFn_05"]}]
+    mapping_pairs = [{"requirement_id": "SwFn_05", "source_ids": ["real_fn", "Name", "ID"]}]
+    mx = generate_uds_traceability_matrix(items, mapping_pairs=mapping_pairs, sds_pairs=sds_pairs)
+    sids = mx["rows"][0]["source_ids"]
+    assert "real_fn" in sids
+    assert "Name" not in sids and "ID" not in sids

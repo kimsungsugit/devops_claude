@@ -28,6 +28,22 @@ _logger = logging.getLogger("report_generator")
 # 재사용(7천+ 행 루프 재컴파일 방지, reviewer INFO 권고).
 _SWUFN_RE = re.compile(r"Sw[UI]Fn_\d+", re.IGNORECASE)
 
+# 설계-ID bridge(SRS→SDS→UDS) 대상 namespace — SwFn/SwSTR/SwST/SwTK만.
+# _normalize_req_id(대문자화) 출력에 매칭. SwCom(loose·컴포넌트 fan-out 중앙 101)과
+# SwUFn(함수 자기 ID)은 구조적 제외. SRS 요구(SwTR/SwEI/SwTSR 등)도 접두가 달라 불매치.
+# 앵커 ^…$로 부분매칭 차단. 실측(KJPDS02_PV): 이 집합으로 UDS 밴드 43→64(+21), fan-out
+# 중앙 22(현행 44보다 낮음). SwCom 포함 시 reach 불변(64)·fan-out 중앙 56으로 악화.
+_DESIGN_ID_BRIDGE_RE = re.compile(r"^SW(?:FN|STR|ST|TK)_\d+$")
+
+# 설계-ID bridge 방어 필터(deep-review C1): UDS Function Information 표의 값 셀이 라벨을
+# echo하는 junk 표에서 func_name='Name'/func_id='ID' 등이 harvest돼 source_ids에 섞이면
+# bridge가 이를 '함수'로 요구에 부착(over-trace). 파서 echo 가드가 1차 차단하나, 문서군
+# 편차에 대비해 조립부에서도 필드 라벨을 요구 추적 함수에서 제외한다(방어심층).
+_UDS_FUNC_JUNK = frozenset({
+    "id", "name", "type", "asil", "reuse", "prototype", "description",
+    "no", "related id", "cyber security",
+})
+
 # 미추적 VectorCAST subprogram 의미 분류용 — ISR/인터럽트/부트 핸들러 등
 # 'SRS 추적 대상이 아닌 게 당연한' 인프라 함수를 식별(트리 미추적 루트의 isr 버킷).
 # 정밀도 우선(reviewer WARNING): interrupt/exception/trap/fault 같은 무경계 부분일치는
@@ -2195,6 +2211,38 @@ def generate_uds_traceability_matrix(
         if f:
             uds_all_funcs.setdefault(f.lower(), f)
 
+    # 설계-ID bridge(SRS→SDS→UDS): UDS 함수의 Related ID 설계ID(SwFn/SwSTR/SwST/SwTK)를
+    # SDS의 '설계ID→SRS요구' 매핑으로 이어 UDS 밴드에 부착한다. comp_to_reqs(SwCom·SITS
+    # 전용)의 형제 — 여기선 SwCom 제외(loose, reach 불변·fan-out만 악화). map_lookup은
+    # 설계ID(정규화)→[함수명+자기 SwUFn ID], sds_lookup은 SRS요구→[component_ids(설계ID·함수명)].
+    design_to_reqs: Dict[str, List[str]] = {}          # 설계ID(정규화) → [SRS 요구], SwCom 제외
+    for rid_srs, comps in sds_lookup.items():
+        if rid_srs not in req_id_set:                  # 매트릭스 SRS 요구에만 시드(설계→설계 노이즈 차단)
+            continue
+        for comp in comps:
+            dkey = _normalize_req_id(comp)
+            if not _DESIGN_ID_BRIDGE_RE.match(dkey):    # SwFn/SwSTR/SwST/SwTK만; SwCom/SwUFn/함수명 배제
+                continue
+            _dlst = design_to_reqs.setdefault(dkey, [])
+            if rid_srs not in _dlst:
+                _dlst.append(rid_srs)
+    design_bridge_funcs: Dict[str, List[str]] = {}     # SRS 요구 → [UDS 함수 display]
+    for _did, _fns in map_lookup.items():
+        _reqs = design_to_reqs.get(_did)
+        if not _reqs:
+            continue
+        for _fn in _fns:
+            _fs = str(_fn).strip()
+            if _SWUFN_RE.match(_fs):                     # 함수 자기 SwUFn ID 값 제외 — 밴드엔 함수명만
+                continue
+            if _fs.lower() in _UDS_FUNC_JUNK:            # junk 필드 라벨 제외(C1 방어심층)
+                continue
+            _fdisp = uds_all_funcs.get(_fs.lower(), _fs)
+            for _rid in _reqs:
+                _blst = design_bridge_funcs.setdefault(_rid, [])
+                if _fdisp not in _blst:
+                    _blst.append(_fdisp)
+
     # SITS/VectorCAST 2-hop bridge용: SUTS가 제공하는 SwUFn(단위함수 ID) → 함수명 맵.
     # SITS/vcast는 testcase·subprogram에 SwUFn ID를 박아두지만 함수명/SRS ID가 없다.
     # SUTS의 SwUFn↔함수명(unit)으로 함수명을 얻은 뒤 SDS 함수명 bridge로 SRS에 연결.
@@ -2410,6 +2458,12 @@ def generate_uds_traceability_matrix(
         for flower, fdisp in uds_all_funcs.items():
             if rid in sds_func_to_reqs.get(_sds_comp_key(flower), []) and fdisp not in src_list:
                 src_list.append(fdisp)
+        # 설계-ID bridge(2b) 주입: name-bridge가 놓친 요구사항의 UDS 함수를 SwFn/SwSTR/
+        # SwST/SwTK 경유로 부착. SDS 경유 '추정'이라 src_direct(직접)엔 안 넣는다 →
+        # source_ids_direct 비어 유지 → link_table에서 indirect 라벨(over-trace 안전판).
+        for _bf in design_bridge_funcs.get(rid, []):
+            if _bf not in src_list:
+                src_list.append(_bf)
         sds_list = sds_lookup.get(rid, [])              # 전체(함수 포함) — ASIL 롤업·내부용
         sds_comp_list = sds_comp_lookup.get(rid, [])    # 실 설계 컴포넌트만 — 표시/집계(추적 정화)
         _scomp_set = set(sds_comp_list)

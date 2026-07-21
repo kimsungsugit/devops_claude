@@ -3933,6 +3933,10 @@ def jenkins_trace_summary(req: dict) -> Dict[str, Any]:
 _UDS_MAPPING_CACHE: Dict[str, "tuple[float, Dict[str, Any]]"] = {}
 _UDS_MAPPING_LOCK = threading.Lock()
 _UDS_MAPPING_TTL = 1800.0
+# 파서 산출 스키마 버전 — 캐시 키에 prefix해 파서 변경 시 자동 무효화(재기동 불필요).
+# helpers/uds.py:_SOURCE_SECTIONS_SCHEMA_VERSION 선례. 파서 로직 변경 시 반드시 bump.
+# v2: Related ID 행 한정 + [A-Za-z] 확대(SwFn 포착) — 설계ID→SDS→SRS bridge 지원.
+_UDS_MAPPING_SCHEMA_VERSION = "v2"
 
 
 def _docx_tables_text(data: bytes) -> Optional[List[List[List[str]]]]:
@@ -3987,8 +3991,9 @@ def jenkins_uds_extract_mapping(body: Dict[str, Any]) -> Dict[str, Any]:
     if not uds_path:
         raise HTTPException(status_code=400, detail="uds_path required")
     enforce_resolver_access(uds_path)  # C3: health.py와 일관된 방어심층
-    # TTL 캐시 — 손상 docx fallback(73MB 파싱) 재로드 pile-up 방지.
-    _ck = uds_path.replace("\\", "/").rstrip("/").lower()
+    # TTL 캐시 — 손상 docx fallback(73MB 파싱) 재로드 pile-up 방지. 스키마 버전 prefix로
+    # 파서 변경 시 stale 캐시가 옛 산출을 반환하는 것을 차단(30분 TTL 내에도 즉시 무효화).
+    _ck = _UDS_MAPPING_SCHEMA_VERSION + ":" + uds_path.replace("\\", "/").rstrip("/").lower()
     _now = time.time()
     with _UDS_MAPPING_LOCK:
         _hit = _UDS_MAPPING_CACHE.get(_ck)
@@ -4016,10 +4021,12 @@ def jenkins_uds_extract_mapping(body: Dict[str, Any]) -> Dict[str, Any]:
 
     # Extract func_id → func_name → requirement_ids from Function Information tables
     req_to_sources: Dict[str, set] = {}
-    # 전체 UDS 함수 인벤토리(함수명 + SwUFn ID) — 설계 req(SwSTR 등) 참조 유무와 무관하게
-    # 모은다. UDS 함수표의 대부분(~95%)은 자기 SwUFn ID·Name만 있고 설계 req 참조가 없어
-    # req_to_sources(=mapping_pairs)에서 누락되는데, 매트릭스의 SDS→UDS bridge는 함수명만
-    # 매칭하면 되므로 전체 목록을 별도로 전달해 "UDS 함수" 컬럼이 채워지게 한다.
+    # 전체 UDS 함수 인벤토리(함수명 + SwUFn ID) — 설계 req(SwFn/SwSTR 등) 참조 유무와
+    # 무관하게 모은다. 실측(KJPDS02_PV): 함수표의 94.8%가 Related ID에 설계 req 참조를
+    # 갖는다(과거 주석의 "~95%가 참조 없음"은 오류였다). 다만 그 설계ID(SwCom/SwFn 등)는
+    # SRS 요구 namespace(SwTR/SwEI 등)와 달라 mapping_pairs로는 매트릭스에 직접 안 붙는다.
+    # 매트릭스는 (1) 함수명 bridge + (2) 설계ID→SDS→SRS bridge로 연결하되, 둘 다 못 잡는
+    # 함수도 있으므로 전체 목록을 별도 전달해 "UDS 함수" 컬럼이 채워지게 한다.
     all_funcs: set = set()
     for rows in tables_text:
         if len(rows) < 4:
@@ -4043,13 +4050,24 @@ def jenkins_uds_extract_mapping(body: Dict[str, Any]) -> Dict[str, Any]:
                 value = cells[1]
             else:
                 value = ""
+            # 값 셀이 라벨을 그대로 echo하는 템플릿/빈 표(cells=['Name','Name',…])는 junk다.
+            # 이 echo가 func_name='Name'·func_id='ID'로 harvest돼 설계-ID bridge를 통해 요구
+            # 추적성에 '함수'로 유입되면 over-trace를 만든다(deep-review C1: HDPDM01 32/56
+            # 요구 오염, SWEI_01은 전량 junk). 정상 표는 value≠label이라 무영향.
+            # case-불문 비교 — 'Name'라벨↔'name'값 같은 변형 echo도 소스에서 제거(I5).
+            if value and value.lower() == label.lower():
+                value = ""
             if label == "ID":
                 func_id = value
             elif label == "Name":
                 func_name = value
-            # Find requirement IDs in all cells
-            for c in cells:
-                req_refs.extend(_re.findall(r"Sw[A-Z]{2,}_\d+", c))
+            elif label.lower().replace("_", " ").startswith("related id"):
+                # 설계 요구 참조는 "Related ID" 행에만 있다. 과거엔 모든 행의 모든
+                # 셀을 훑어 "Called/Calling Function" 행의 SwUFn 함수 ID까지 요구참조로
+                # 오수집했다. 행 한정 + [A-Za-z](SwFn 등 CamelCase 설계ID 포착 — 구
+                # [A-Z]{2,}는 소문자 섞인 SwFn·SwCom을 통째로 놓쳤다).
+                for c in cells:
+                    req_refs.extend(_re.findall(r"Sw[A-Za-z]{2,}_\d+", c))
 
         if func_name:
             all_funcs.add(func_name)
@@ -4312,7 +4330,7 @@ def jenkins_sts_extract_traceability(body: Dict[str, Any]) -> Dict[str, Any]:
                 func_name = str(trace_ws.cell(r, 4).value or "").strip()
                 if not tc_id:
                     continue
-                req_ids = _re.findall(r"Sw[A-Z]{2,}_\d+|Sy[A-Z]{2,}_\d+", req_raw)
+                req_ids = _re.findall(r"Sw[A-Za-z]{2,}_\d+|Sy[A-Za-z]{2,}_\d+", req_raw)
                 for rid in req_ids:
                     vcast_rows.append({
                         "requirement_id": _normalize_req_id(rid),
