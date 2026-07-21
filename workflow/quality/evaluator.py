@@ -245,7 +245,15 @@ def evaluate_coverage(summary: Dict[str, Any], *, asil: Optional[str] = None) ->
 
     passed = _safe_float(summary, "passed")
     tested = passed + _safe_float(summary, "failed")
-    metrics.append(_metric("pass_rate_pct", round(passed / max(tested, 1.0) * 100, 2), threshold=100.0))
+    # 미실행 TC(시험 공백)를 분모에 포함한다 — 안 넣으면 스위트의 10%만 돌려도
+    # pass_rate 100%·게이트 통과로 남아 ISO 26262 시험 완전성이 은폐된다(실측:
+    # passed=10/failed=0/not_executed=90 → 옛 계산 10/10=100%). **name 단위로 일치**
+    # 시킨다: passed/failed(test_results 행)·not_executed 모두 이름 단위인데,
+    # total_tcs 는 compound TC 의 서브아이템 granular(Σlen(tc_list))라 분모로 쓰면
+    # 완전실행 스위트를 오탐 FAIL 시킬 수 있다(deep-review W1). not_executed 부재면
+    # 실행분(tested)으로 폴백 — 데이터부재 과도 penalty·0除 방지.
+    denom = tested + _safe_float(summary, "not_executed")
+    metrics.append(_metric("pass_rate_pct", round(passed / max(denom, 1.0) * 100, 2), threshold=100.0))
 
     metrics.append(_metric("total_tcs", _safe_float(summary, "total_tcs")))
     return metrics

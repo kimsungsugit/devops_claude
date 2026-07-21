@@ -200,8 +200,33 @@ class TestEvaluateCoverage:
         assert by_name["mcdc_coverage_pct"]["value"] == 50.0
         assert by_name["mcdc_coverage_pct"]["threshold"] == 100.0  # ASIL D: gated
         assert by_name["branch_coverage_pct"]["threshold"] == 100.0
-        # pass_rate = 11/12
+        # pass_rate = 11/12 (여기선 passed+failed == total_tcs, 미실행 0)
         assert by_name["pass_rate_pct"]["value"] == round(11 / 12 * 100, 2)
+
+    def test_pass_rate_penalizes_not_executed_tcs(self):
+        """미실행 TC(시험 공백)는 pass_rate 분모(tested+not_executed)에 포함돼야 한다.
+
+        안 그러면 스위트의 일부만 돌려도 100% 통과로 품질게이트를 지난다 — ISO 26262
+        시험 완전성이 은폐된다. name 단위 일치: passed/failed/not_executed 모두 이름 단위
+        (total_tcs 는 compound TC 서브아이템 granular라 분모로 안 씀 — deep-review W1).
+        """
+        # 실행 10개 전부 통과 + 미실행 90개 → 분모 100
+        summary = {"passed": 10, "failed": 0, "not_executed": 90}
+        by_name = {m["metric_name"]: m for m in evaluate_coverage(summary, asil="D")}
+        assert by_name["pass_rate_pct"]["value"] == 10.0  # 10/100, NOT 10/10=100
+        assert by_name["pass_rate_pct"]["threshold"] == 100.0  # → 게이트 미충족
+
+    def test_pass_rate_falls_back_when_not_executed_absent(self):
+        """not_executed 부재면 실행분(passed+failed)으로 폴백 — 데이터부재 과도 penalty 방지.
+
+        not_executed 는 항상 ≥0 이라 분모 ≥ tested → pass_rate 는 결코 100% 를 넘지 않는다.
+        """
+        # not_executed 키 없음 → 실행분 분모
+        by_name = {m["metric_name"]: m for m in evaluate_coverage({"passed": 5, "failed": 0})}
+        assert by_name["pass_rate_pct"]["value"] == 100.0
+        # not_executed=0 명시 + 일부 실패 → 실행분 기준
+        by_name = {m["metric_name"]: m for m in evaluate_coverage({"passed": 4, "failed": 1, "not_executed": 0})}
+        assert by_name["pass_rate_pct"]["value"] == 80.0  # 4/5
 
     def test_asil_a_mcdc_info_only(self):
         summary = {"overall_statement_pct": 100.0, "overall_mcdc_pct": 0.0, "passed": 5, "failed": 0}
