@@ -1855,6 +1855,13 @@ def load_summary_with_fallback(paths: Dict[str, Path]) -> Tuple[Dict[str, Any], 
 
 _RULE_CATALOG_CACHE: Dict[str, Dict[str, str]] = {}
 _DEVIATIONS_CACHE: Dict[str, List[Dict[str, Any]]] = {}
+# deviation upsert/delete 는 load-modify-write 라 lock 없이는 lost-update 다(동시 호출이
+# 같은 목록을 읽고 각자 write → 하나가 소실). ISO 26262 deviation(정적분석 위반 수용
+# 사유)의 감사기록이 사라진다. 현 소비처는 archived Streamlit editor(ScriptRunner 스레드
+# 동시성)라 in-process RLock 으로 충분(scm_registry 와 동일 클래스). ⚠향후 multi-worker
+# FastAPI 에 배선하면 FileLock(cross-process)+atomic write 로 승격 필요(deep-review W3).
+# RLock: upsert/delete 가 자체 lock 을 잡은 load_deviations 를 재진입 호출.
+_DEVIATIONS_LOCK = threading.RLock()
 
 
 def _normalize_rule_label(rule: str) -> str:
@@ -2186,19 +2193,27 @@ def _extract_deviation_snippet(path: Path, line_num: int, *, context: int = 6) -
 def load_deviations(reports_dir: Path, force: bool = False) -> List[Dict[str, Any]]:
     rdir = Path(reports_dir).resolve()
     key = str(rdir)
-    if (not force) and key in _DEVIATIONS_CACHE:
-        return _DEVIATIONS_CACHE[key]
-    p = deviation_path(rdir)
-    if p.exists():
-        try:
-            data = json.loads(p.read_text(encoding="utf-8", errors="ignore") or "[]")
-            if isinstance(data, list):
-                _DEVIATIONS_CACHE[key] = data
-                return data
-        except Exception:
-            pass
-    _DEVIATIONS_CACHE[key] = []
-    return []
+    # 항상 **복사본**을 돌려준다 — 예전엔 캐시된 리스트를 by-ref 로 반환해, 호출자가
+    # 제자리 변형(upsert 의 items[i]=/append)하면 캐시가 오염되고 동시 reader 가
+    # writer 의 미완 상태를 봤다. lock 으로 파일/캐시 접근도 직렬화.
+    with _DEVIATIONS_LOCK:
+        if (not force) and key in _DEVIATIONS_CACHE:
+            return list(_DEVIATIONS_CACHE[key])
+        p = deviation_path(rdir)
+        if p.exists():
+            try:
+                data = json.loads(p.read_text(encoding="utf-8", errors="ignore") or "[]")
+                if isinstance(data, list):
+                    _DEVIATIONS_CACHE[key] = data
+                    return list(data)
+            except Exception as e:
+                # corrupt/절단 deviations.json 을 조용히 [] 로 삼키면 ISO 26262
+                # deviation(위반 수용 사유) 감사기록이 소리없이 사라진다 — 표면화한다.
+                _logger.warning(
+                    "deviations.json 파싱 실패 — 빈 목록으로 처리(감사기록 유실 가능): %s", e
+                )
+        _DEVIATIONS_CACHE[key] = []
+        return []
 
 
 def _deviation_id(rule_label: str, file_rel: str, line_num: int, message: str) -> str:
@@ -2210,7 +2225,6 @@ def _deviation_id(rule_label: str, file_rel: str, line_num: int, message: str) -
 def upsert_deviation(reports_dir: Path, record: Dict[str, Any]) -> str:
     rdir = Path(reports_dir).resolve()
     rdir.mkdir(parents=True, exist_ok=True)
-    items = load_deviations(rdir, force=True)
     rid = str(record.get("id") or "").strip()
     if not rid:
         rid = _deviation_id(
@@ -2225,18 +2239,21 @@ def upsert_deviation(reports_dir: Path, record: Dict[str, Any]) -> str:
     record.setdefault("created_at", now)
     record["updated_at"] = now
 
-    replaced = False
-    for i, it in enumerate(items):
-        if str(it.get("id") or "") == rid:
-            items[i] = record
-            replaced = True
-            break
-    if not replaced:
-        items.append(record)
+    # load→modify→write→publish 를 한 lock 안에서 원자적으로 (lost-update 방지).
+    with _DEVIATIONS_LOCK:
+        items = load_deviations(rdir, force=True)
+        replaced = False
+        for i, it in enumerate(items):
+            if str(it.get("id") or "") == rid:
+                items[i] = record
+                replaced = True
+                break
+        if not replaced:
+            items.append(record)
 
-    p = deviation_path(rdir)
-    p.write_text(json.dumps(items, ensure_ascii=False, indent=2), encoding="utf-8")
-    _DEVIATIONS_CACHE[str(rdir)] = items
+        p = deviation_path(rdir)
+        p.write_text(json.dumps(items, ensure_ascii=False, indent=2), encoding="utf-8")
+        _DEVIATIONS_CACHE[str(rdir)] = items
     return rid
 
 
@@ -2261,13 +2278,14 @@ def delete_deviation(reports_dir: Path, deviation_id: str) -> bool:
     did = str(deviation_id or "").strip()
     if not did:
         return False
-    items = load_deviations(rdir, force=True)
-    new_items = [it for it in items if str(it.get("id") or "") != did]
-    if len(new_items) == len(items):
-        return False
-    p = deviation_path(rdir)
-    p.write_text(json.dumps(new_items, ensure_ascii=False, indent=2), encoding="utf-8")
-    _DEVIATIONS_CACHE[str(rdir)] = new_items
+    with _DEVIATIONS_LOCK:
+        items = load_deviations(rdir, force=True)
+        new_items = [it for it in items if str(it.get("id") or "") != did]
+        if len(new_items) == len(items):
+            return False
+        p = deviation_path(rdir)
+        p.write_text(json.dumps(new_items, ensure_ascii=False, indent=2), encoding="utf-8")
+        _DEVIATIONS_CACHE[str(rdir)] = new_items
     return True
 
 
