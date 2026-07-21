@@ -4865,12 +4865,16 @@ def jenkins_syts_extract_traceability(body: Dict[str, Any]) -> Dict[str, Any]:
                 "available_sheets": list(wb.sheetnames)}
 
     max_col = min(spec_ws.max_column or _MAX_SCAN_COLS, _MAX_SCAN_COLS)
-    max_hdr_row = min(spec_ws.max_row or 1, 30)
-    # 헤더 캐시 — read_only에서 상위 30행만 한 번 읽어 랜덤 .cell() O(행²) 회피
-    hdr = {}
-    for r in range(1, max_hdr_row + 1):
-        for c in range(1, max_col + 1):
-            v = spec_ws.cell(r, c).value
+    # W2: max_row 부재(read_only dimension 메타 없음) 시 30으로 — max_col 폴백(→1024)과 대칭.
+    #     1로 붕괴하면 헤더행(예 row4)을 못 읽어 정상 시트가 침묵 empty가 된다.
+    max_hdr_row = min(spec_ws.max_row or 30, 30)
+    # 헤더 캐시 — 상위 30행을 iter_rows 단일 패스로 읽는다. read_only에서 랜덤 .cell()은
+    # 30×max_col회 = O(행²) 폭주(실측 205열 9.5s / max_col None ~60s)라 SITS 주석이 금한다.
+    hdr: Dict[tuple, str] = {}
+    for r, hrow in enumerate(
+            spec_ws.iter_rows(min_row=1, max_row=max_hdr_row, max_col=max_col, values_only=True),
+            start=1):
+        for c, v in enumerate(hrow, start=1):
             if v is not None:
                 hdr[(r, c)] = _syts_norm_header(v)
     tc_col = None
@@ -4888,7 +4892,9 @@ def jenkins_syts_extract_traceability(body: Dict[str, Any]) -> Dict[str, Any]:
         # 'Related ID'는 TC 헤더 행 또는 그 위 3행(병합 그룹헤더)에 있을 수 있다 — SyTS 핵심
         for rr in range(max(1, hdr_row - 3), hdr_row + 1):
             for c in range(1, max_col + 1):
-                if "relatedid" in hdr.get((rr, c), "") and c not in rel_cols:
+                # W3: 완전일치 — substring은 'Unrelated ID'/'Correlated ID' 오매치(over-trace
+                # 민감 파서에서 과대포용은 역방향). SITS _detect_header_cols와 동일 정렬.
+                if hdr.get((rr, c), "") in ("relatedid", "relatedids") and c not in rel_cols:
                     rel_cols.append(c)
     if not tc_col or not rel_cols:
         wb.close()
