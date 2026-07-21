@@ -253,6 +253,56 @@ def test_untracked_file_violations_are_new_not_legacy(monkeypatch, capsys):
     assert "no-unused-vars" in out and "no-empty" in out
 
 
+def test_untracked_fatal_parse_error_no_line_is_new(monkeypatch, capsys):
+    """eslint fatal parse-error 는 line 이 없을 수 있다(null). untracked 신규 파일이면
+    파일 전체가 신규라 이 위반도 신규다 — legacy 로 새면 **문법 깨진 새 .jsx 가 통과**한다.
+    (deep-review I5: split_new_vs_legacy 가 line=None 을 added=ALL_LINES 서 new 로 분류.)"""
+    fatal = json.dumps([{
+        "filePath": _abs(_F),
+        "messages": [{"ruleId": None, "line": None, "severity": 2,
+                      "message": "Parsing error: Unexpected token"}],
+    }])
+
+    def _run(cmd, cwd=None):
+        if cmd and cmd[0] == "git" and "ls-files" in cmd:
+            return _cp(stdout=f"{_F}\n")     # untracked 신규 파일
+        if cmd and cmd[0] == "git":
+            return _cp(stdout="")            # diff 는 비어 있다(untracked)
+        return _cp(stdout=fatal, rc=1)
+
+    monkeypatch.setattr(eslint_ratchet, "_run", _run)
+    monkeypatch.setattr(eslint_ratchet, "project_eslint", lambda: "/fake/eslint")
+    rc = eslint_ratchet.main([_F])
+    out = capsys.readouterr().out
+    assert rc == 1, "untracked 신규 파일의 라인 없는 fatal 이 legacy 로 샜다"
+    assert "레거시" not in out
+    assert "(parse)" in out          # ruleId 없으면 (parse) 로 보고
+    assert ":?:" in out              # line=None 은 '?' 로 출력(emit None-safe)
+
+
+def test_tracked_fatal_no_line_stays_legacy(monkeypatch, capsys):
+    """(음성 대조) tracked 파일의 라인 없는 위반은 라인 국소화가 불가하므로 legacy.
+    line=None new 분기가 untracked 전용임을 잠근다(무차별 통과 방지)."""
+    diff = f"--- a/{_F}\n+++ b/{_F}\n@@ -3,0 +3,1 @@\n+var x = 1;\n"
+    fatal = json.dumps([{
+        "filePath": _abs(_F),
+        "messages": [{"ruleId": None, "line": None, "severity": 2, "message": "Parsing error"}],
+    }])
+
+    def _run(cmd, cwd=None):
+        if cmd and cmd[0] == "git" and "ls-files" in cmd:
+            return _cp(stdout="")            # untracked 아님(tracked)
+        if cmd and cmd[0] == "git":
+            return _cp(stdout=diff)
+        return _cp(stdout=fatal, rc=1)
+
+    monkeypatch.setattr(eslint_ratchet, "_run", _run)
+    monkeypatch.setattr(eslint_ratchet, "project_eslint", lambda: "/fake/eslint")
+    rc = eslint_ratchet.main([_F])
+    assert rc == 0, "tracked 파일의 라인 없는 위반은 국소화 불가라 legacy 여야 한다"
+    assert "레거시" in capsys.readouterr().out
+
+
 def test_rel_fallback_is_fail_closed(monkeypatch, capsys):
     """repo 밖 경로를 정규화 못 하면 통과가 아니라 판정 보류(rc=2).
 

@@ -240,6 +240,35 @@ class TestUntrackedFilesAreExamined:
         assert d.get("skipped") != "no_changes", \
             f"untracked clean 파일도 조기종료로 새면 안 된다: {d}"
 
+    def test_korean_filename_is_examined(self, tmp_path):
+        """한글 파일명 `.py` 도 검사 대상이다 (deep-review I3).
+
+        git 은 비ASCII 경로를 기본값(quotepath=true)에서 따옴표+8진 이스케이프로 내는데,
+        그러면 파일목록의 `.endswith(".py")` 를 못 통과해 syntax·ruff·침묵 검사에서 통째로
+        빠졌다. quotepath=false + `_unquote_diff_path` 로 파일목록에 포함시킨다. 뮤테이션:
+        두 처리를 되돌리면 이 파일이 py_files 에서 빠져 침묵-except warning 이 안 난다.
+        """
+        import subprocess as sp
+        self._init_repo(tmp_path, sp)
+        (tmp_path / "한글모듈.py").write_text(
+            "def risky():\n"
+            "    try:\n"
+            "        do_it()\n"
+            "    except Exception:\n"
+            "        pass\n",
+            encoding="utf-8",
+        )
+        r = sp.run(
+            [_hook_env.project_py(), "scripts/quality_check.py", "--json"],
+            capture_output=True, text=True, timeout=120, cwd=str(tmp_path),
+        )
+        d = json.loads(r.stdout)
+        assert d.get("skipped") != "no_changes", \
+            f"한글명 파일이 '변경'으로 안 잡혔다 (경로 정규화 실패): {d}"
+        sil = [i for i in d.get("issues", [])
+               if "한글모듈" in str(i.get("file", "")) and "침묵" in str(i.get("message", ""))]
+        assert sil, f"한글명 파일의 침묵-except 미검출 (issues={d.get('issues')})"
+
 
 class TestRoundArg:
     """`--round` 는 start-work 루프가 1..5 로 부른다 (MAX_ROUNDS=5)."""

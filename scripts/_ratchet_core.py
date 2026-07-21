@@ -195,7 +195,15 @@ def split_new_vs_legacy(
     legacy = 0
     for hit in violations:
         path, line = hit[0], hit[1]
-        if line is not None and line in added.get(path, frozenset()):
+        path_added = added.get(path, frozenset())
+        if line is not None:
+            is_new = line in path_added
+        else:
+            # 라인 없는 위반(eslint fatal parse-error 등)은 특정 라인에 못 붙는다.
+            # untracked 신규 파일(added=ALL_LINES)이면 파일 전체가 신규라 이것도
+            # 신규다. tracked 파일은 라인 국소화 불가라 legacy 로 둔다(보수적).
+            is_new = path_added is ALL_LINES
+        if is_new:
             new_hits.append(hit)
         else:
             legacy += 1
@@ -211,8 +219,12 @@ def emit(
     """판정 결과를 출력하고 rc 를 돌려준다. 보류 사유가 있으면 Disabled."""
     if new_hits:
         print(f"{tool}: 신규 위반 {len(new_hits)}건 (변경 라인 한정):")
-        for path, line, code, msg in sorted(new_hits):
-            print(f"  {path}:{line}: {code} {msg}")
+        # line=None(라인 없는 위반)이 섞이면 튜플 정렬이 None<int 에서 TypeError.
+        # None 을 맨 앞(-1)으로 두는 key 로 안전화한다(직접 sorted(new_hits) 금지).
+        for path, line, code, msg in sorted(
+            new_hits, key=lambda h: (h[0], -1 if h[1] is None else h[1], h[2], h[3])
+        ):
+            print(f"  {path}:{line if line is not None else '?'}: {code} {msg}")
         return 1
     if legacy and not added:
         # ⚠ "레거시 N건 제외" 는 **적극적 안심 문구**다. added 가 통째로 비었는데

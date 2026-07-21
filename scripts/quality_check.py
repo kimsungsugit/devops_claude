@@ -83,7 +83,11 @@ except Exception as _e:  # pragma: no cover - 방어
 # advisory 기능이라 조용히 disable 해도 "PASS 위장"이 아니다(findings 가 안 나올 뿐).
 _silence_import_error: str = ""
 try:
-    from _silence_check import _iter_added_lines, silent_excepts
+    from _silence_check import (
+        _iter_added_lines,
+        _unquote_diff_path,
+        silent_excepts,
+    )
     _silence_ok = True
 except Exception as _se:  # 예외를 표면화하므로(아래) silent 아님
     _silence_ok = False
@@ -94,6 +98,9 @@ except Exception as _se:  # 예외를 표면화하므로(아래) silent 아님
 
     def _iter_added_lines(diff: str) -> dict[str, set[int]]:  # 폴백 스텁
         return {}
+
+    def _unquote_diff_path(path: str) -> str:  # 폴백 스텁(변경파일 목록 정규화용)
+        return path
 
 # Parse CLI args
 _parser = argparse.ArgumentParser(add_help=False)
@@ -247,7 +254,12 @@ if not _silence_ok:
 # 그때 트리가 clean이라, 조기 종료하면 "전체 회귀를 돌렸다"면서 실제로는 아무것도
 # 안 도는 no-op이 된다 — 이 스크립트가 없애려는 fake-green과 같은 결말.
 _FORCE = bool(os.environ.get("QUALITY_CHECK_FORCE")) or _ROUND == 3
-changed_raw = _run(["git", "diff", "--name-only"]).stdout + _run(["git", "diff", "--name-only", "--cached"]).stdout
+# 경로를 내는 git 호출은 `-c core.quotepath=false` — 한글 파일명을 8진 이스케이프
+# 없이 raw 로 받는다. 없으면 한글 `.py` 가 `"src/\355..."`(따옴표+8진)로 나와
+# `.endswith(".py")` 를 못 통과해 syntax·ruff·침묵 검사에서 통째로 빠진다
+# (코어 ratchet 은 이미 이렇게 처리 — quality_check 만 빠져 있었다). 잔여 따옴표
+# (공백·특수문자)는 아래 파일목록 빌드에서 `_unquote_diff_path` 가 푼다.
+changed_raw = _run(["git", "-c", "core.quotepath=false", "diff", "--name-only"]).stdout + _run(["git", "-c", "core.quotepath=false", "diff", "--name-only", "--cached"]).stdout
 
 # untracked(아직 `git add` 안 한 신규 파일)도 '변경'이다. 이게 빠져 있어서 새로
 # 만든 파일은 이 스크립트의 **모든 검사에서 통째로 빠졌다** — syntax·ruff·모듈
@@ -263,10 +275,10 @@ changed_raw = _run(["git", "diff", "--name-only"]).stdout + _run(["git", "diff",
 # `--exclude-standard` 로 .gitignore 를 존중한다(빌드 산출물·스크래치 제외).
 # 실측 0.2s / 2건이라 비용도 노이즈도 없다. git 실패 시엔 조용히 건너뛰지 않고
 # 아래 §7d 에서 판정 보류로 표면화한다.
-_untracked_cp = _run(["git", "ls-files", "--others", "--exclude-standard"])
+_untracked_cp = _run(["git", "-c", "core.quotepath=false", "ls-files", "--others", "--exclude-standard"])
 _untracked_raw = _untracked_cp.stdout if _untracked_cp.returncode == 0 else ""
 changed_raw += _untracked_raw
-untracked_files = {f.strip().replace("\\", "/") for f in _untracked_raw.splitlines() if f.strip()}
+untracked_files = {_unquote_diff_path(f.strip()).replace("\\", "/") for f in _untracked_raw.splitlines() if f.strip()}
 
 if not changed_raw.strip() and not _FORCE:
     if _JSON_ONLY:
@@ -276,7 +288,10 @@ if not changed_raw.strip() and not _FORCE:
         ))
     sys.exit(0)
 
-changed_files = [f.strip() for f in changed_raw.splitlines() if f.strip()]
+# `_unquote_diff_path`: 따옴표로 감싼 경로(한글·공백)를 raw 로 되돌린다. 이걸 안 하면
+# ① `.endswith(".py")` 미통과(위 quotepath=false 로 한글은 대개 해소되나 잔여 대비)
+# ② §7d 의 `_added_lines.get(f)` 키가 어긋난다(_iter_added_lines 는 이미 unquote 함).
+changed_files = [_unquote_diff_path(f.strip()) for f in changed_raw.splitlines() if f.strip()]
 
 # 결과 캐시는 의도적으로 두지 않는다.
 # 한때 sha256(_ROUND + git diff + git diff --cached)를 키로 결과를 캐시했으나,
@@ -470,7 +485,7 @@ if _silence_ok and py_files:
     # rename-aware(-M) + **pathspec 없이**. `-- files` 로 좁히면 -M 이 old 를 못 봐
     # rename 이 안 잡히고 파일 전체가 net-new 로 오인된다(실측). _added_lines 는
     # 아래에서 파일 키로 조회하므로 전체 diff 를 받아도 무방하다.
-    _dh = _run(["git", "diff", "-M", "-U0", "HEAD"])
+    _dh = _run(["git", "-c", "core.quotepath=false", "diff", "-M", "-U0", "HEAD"])
     if _dh.returncode == 0:
         _added_lines = _iter_added_lines(_dh.stdout)
     else:
