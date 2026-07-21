@@ -4938,8 +4938,14 @@ def jenkins_syts_extract_traceability(body: Dict[str, Any]) -> Dict[str, Any]:
 
 @router.post("/api/jenkins/syits/extract-traceability")
 def jenkins_syits_extract_traceability(body: Dict[str, Any]) -> Dict[str, Any]:
-    """시스템 통합시험(SyITS) 결과 xlsx — SITS와 동일 구조. source 라벨만 'SyITS'."""
-    return jenkins_sits_extract_traceability({**body, "source_label": "SyITS"})
+    """시스템 통합시험(SyITS) — SyTS와 동일 'System Test Spec' 계열 레이아웃이라 SyTS 전용
+    파서를 공유한다(SITS 위임 아님 — deep-review W4). 실측(KJPDS02_PV SyITS v1.02): 시트
+    '3.System Integration Test Spec', TC ID='TC ID' 헤더(col C, SyITC_), 요구=Related ID
+    (col T). 과거 SITS 위임은 Test Environment(SyTE)를 요구로, Sequence/Description **산문**의
+    'SwTC_SwTR_..' 교차참조를 SwTR 요구로 오추출해 허위 밴드(7)를 냈다. SyITS 요구는 시스템
+    레벨 Sy*(SyFN/SyII)라 SW 매트릭스엔 정당히 미조인(밴드 0 = 정직, SyTS 33→28과 동류 정정).
+    SyTS 파서는 헤더명 동적 탐지라 SyITS의 col C TC ID도 정확히 잡는다(실측 123/123)."""
+    return jenkins_syts_extract_traceability({**body, "source_label": "SyITS"})
 
 
 @router.post("/api/jenkins/uds/publish")
