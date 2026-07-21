@@ -4804,13 +4804,130 @@ def jenkins_sits_extract_traceability(body: Dict[str, Any]) -> Dict[str, Any]:
     return result
 
 
+def _syts_norm_header(s: Any) -> str:
+    """헤더 정규화 — 공백/개행/언더스코어/점 제거 + 소문자."""
+    return (str(s or "").strip().lower()
+            .replace(" ", "").replace("\n", "").replace("_", "").replace(".", ""))
+
+
 @router.post("/api/jenkins/syts/extract-traceability")
 def jenkins_syts_extract_traceability(body: Dict[str, Any]) -> Dict[str, Any]:
-    """시스템 시험(SyTS) 결과 xlsx — SITS와 동일 TC↔요구사항 구조. source 라벨만 'SyTS'.
+    """시스템 시험(SyTS) 전용 파서 — 'System Test Spec' 시트.
 
-    요구사항 ID는 SITS 경로의 `_normalize_req_id`가 SyTSR/SyNTSR→Sw*로 평탄화 →
-    비기능/안전 요구가 SW 행에 join돼 시스템 레벨 검증으로 covered 승격(결정1)."""
-    return jenkins_sits_extract_traceability({**body, "source_label": "SyTS"})
+    ⚠ SyTS 레이아웃은 SITS와 다르다(실측 KJPDS02_PV v1.02). 과거엔 SITS 파서에 위임했는데,
+    SITS 가정(TC/요구 구조)이 SyTS와 안 맞아 **Title(col C)을 testcase로, Test
+    Environment(col G, SyTE)를 requirement로 오독** → 밴드의 92.9%가 문서 Title/헤딩을
+    시험 근거로 삼는 허위 추적(over-trace)이었다. 문서별 전용 파서로 교체(사용자 결정).
+
+    SyTS 실 레이아웃: 시트 'N.System Test Spec', 상세헤더 행(예 row4)에 'Test Case ID'(col B),
+    요구 링크는 상단 병합 그룹헤더 'Related ID'(예 row3) 아래 열(col T). TC ID는 SyTC_ 형태.
+    SITS/SUTS 파서(jenkins_sits/sts_extract_traceability)는 무변경 — 회귀 위험 0.
+    """
+    import io
+    import re as _re
+
+    from backend.services.file_resolver import get_resolver
+    from backend.services.resolver_helpers import enforce_resolver_access
+
+    file_path = str(body.get("path", "")).strip()
+    source_label = str(body.get("source_label", "SyTS")).strip() or "SyTS"
+    if not file_path:
+        raise HTTPException(status_code=400, detail="path required")
+    enforce_resolver_access(file_path)  # C3
+    resolver = get_resolver()
+    try:
+        if not resolver.exists(file_path):
+            raise HTTPException(status_code=400, detail=f"파일을 찾을 수 없습니다: {file_path}")
+    except (PermissionError, OSError) as exc:
+        raise HTTPException(status_code=403, detail=f"파일 접근 거부: {exc}")
+    try:
+        import openpyxl
+        data = resolver.read_bytes(file_path)
+        wb = openpyxl.load_workbook(io.BytesIO(data), read_only=True, data_only=True)
+    except (PermissionError, OSError) as exc:
+        raise HTTPException(status_code=403, detail=f"파일 접근 거부: {exc}")
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Excel 읽기 실패: {exc}")
+
+    # 시트 선택: 'system test spec' / 'test spec' 우선(traceability 시트 아님 — 그건 TG 매트릭스)
+    spec_ws = None
+    for sn in wb.sheetnames:
+        n = _syts_norm_header(sn)
+        if "systemtestspec" in n or "testspecification" in n or "testspec" in n:
+            spec_ws = wb[sn]
+            break
+    if spec_ws is None:  # 폴백: 최대 행 시트
+        spec_ws = max((wb[sn] for sn in wb.sheetnames),
+                      key=lambda w: (w.max_row or 0), default=None)
+    if spec_ws is None:
+        wb.close()
+        return {"ok": True, "vcast_rows": [], "warning": "SyTS: 시트 없음",
+                "available_sheets": list(wb.sheetnames)}
+
+    max_col = min(spec_ws.max_column or _MAX_SCAN_COLS, _MAX_SCAN_COLS)
+    max_hdr_row = min(spec_ws.max_row or 1, 30)
+    # 헤더 캐시 — read_only에서 상위 30행만 한 번 읽어 랜덤 .cell() O(행²) 회피
+    hdr = {}
+    for r in range(1, max_hdr_row + 1):
+        for c in range(1, max_col + 1):
+            v = spec_ws.cell(r, c).value
+            if v is not None:
+                hdr[(r, c)] = _syts_norm_header(v)
+    tc_col = None
+    hdr_row = 0
+    for r in range(1, max_hdr_row + 1):
+        for c in range(1, max_col + 1):
+            h = hdr.get((r, c), "")
+            if "testcaseid" in h or h == "tcid":
+                tc_col, hdr_row = c, r
+                break
+        if tc_col:
+            break
+    rel_cols: list = []
+    if tc_col:
+        # 'Related ID'는 TC 헤더 행 또는 그 위 3행(병합 그룹헤더)에 있을 수 있다 — SyTS 핵심
+        for rr in range(max(1, hdr_row - 3), hdr_row + 1):
+            for c in range(1, max_col + 1):
+                if "relatedid" in hdr.get((rr, c), "") and c not in rel_cols:
+                    rel_cols.append(c)
+    if not tc_col or not rel_cols:
+        wb.close()
+        return {"ok": True, "vcast_rows": [],
+                "warning": f"SyTS 열 탐지 실패 (Test Case ID 열={tc_col}, Related ID 열={rel_cols}). "
+                           "시트 레이아웃을 확인하세요.",
+                "available_sheets": list(wb.sheetnames)}
+
+    _ID_RE = _re.compile(r"Sw[A-Za-z]{2,}_\d+|Sy[A-Za-z]{2,}_\d+")
+    _TC_RE = _re.compile(r"^(?:Sy|Sw)I?TC_", _re.I)  # SyTC_/SwTC_/SyITC_/SwITC_
+    vcast_rows: List[Dict[str, Any]] = []
+    current_tc = ""
+    max_data_col = min(max(tc_col, max(rel_cols)), _MAX_SCAN_COLS)
+    for row in spec_ws.iter_rows(min_row=hdr_row + 1, max_col=max_data_col, values_only=True):
+        tcv = str(row[tc_col - 1] or "").strip() if tc_col - 1 < len(row) else ""
+        if tcv:
+            current_tc = tcv
+        # TC ID 형태 아니면 스킵 — Title/설명 유입 2차 방어(열 오탐 시 빈 결과+warning으로 안전 실패)
+        if not current_tc or not _TC_RE.match(current_tc):
+            continue
+        for rc in rel_cols:
+            rv = str(row[rc - 1] or "").strip() if rc - 1 < len(row) else ""
+            if not rv:
+                continue
+            for rid in _ID_RE.findall(rv):
+                vcast_rows.append({
+                    "requirement_id": _normalize_req_id(rid),  # Sy*→Sw* 평탄화(4123)
+                    "testcase": current_tc,
+                    "source": source_label,
+                    "result": "mapped",
+                })
+    wb.close()
+    req_set = set(r["requirement_id"] for r in vcast_rows)
+    return {
+        "ok": True,
+        "vcast_rows": vcast_rows,
+        "total_mappings": len(vcast_rows),
+        "requirements_covered": len(req_set),
+    }
 
 
 @router.post("/api/jenkins/syits/extract-traceability")
