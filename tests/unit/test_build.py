@@ -8,6 +8,7 @@ import pytest
 
 from workflow.build import (
     _guess_targets_from_testname,
+    _overall_tests_ok,
     triage_ctest_output,
 )
 
@@ -101,3 +102,39 @@ class TestTriageCTestOutput:
         text = "ERROR: ThreadSanitizer\nStart 1: test_shared_data"
         r = triage_ctest_output(text)
         assert len(set(r["targets"])) == len(r["targets"])
+
+
+class TestOverallTestsOk:
+    """전체 테스트 통과 판정 (deep-review B8).
+
+    named 테스트가 없어 __all__ 센티널(name=None)만 있을 때, 예전 인라인은 all([])=무조건
+    True 라 stability_gate 에서 exit≠0 도 통과로 위장했다. 이제 센티널 exit_code 로 판정.
+    """
+
+    def test_named_tests_all_pass(self):
+        assert _overall_tests_ok(
+            [{"name": "t1", "exit_code": 0}, {"name": "t2", "exit_code": 0}], []) is True
+
+    def test_named_test_fails(self):
+        assert _overall_tests_ok(
+            [{"name": "t1", "exit_code": 0}, {"name": "t2", "exit_code": 1}], []) is False
+
+    def test_all_sentinel_nonzero_is_not_vacuous_pass(self):
+        """핵심 B8 — __all__ 센티널만(name=None) 있고 exit≠0 이면 통과 아님.
+
+        stability_gate 는 2회 실행이라 __all__ 이 2개(name=None) — 예전 all([])=True 로
+        exit≠0 을 무시했다. 뮤테이션: 이 판정을 `all(... if name is not None)` 로 되돌리면
+        all([])=True 가 돼 실패.
+        """
+        results = [{"name": None, "exit_code": 8}, {"name": None, "exit_code": 8}]
+        assert _overall_tests_ok(results, []) is False
+
+    def test_all_sentinel_zero_no_tests_tolerated(self):
+        """대조: __all__ exit0(=테스트 없음)은 파이프라인 의도상 통과(tolerance 유지)."""
+        assert _overall_tests_ok([{"name": None, "exit_code": 0}], []) is True
+
+    def test_unstable_forces_fail(self):
+        assert _overall_tests_ok([{"name": "t1", "exit_code": 0}], ["t1"]) is False
+
+    def test_empty_results_is_not_pass(self):
+        assert _overall_tests_ok([], []) is False

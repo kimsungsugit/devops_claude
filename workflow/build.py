@@ -217,6 +217,25 @@ def triage_ctest_output(ctest_text: str) -> Dict[str, Any]:
     return {"failures": failures, "targets": uniq_targets, "timeout_tests": timeout_tests}
 
 
+def _overall_tests_ok(ctest_results: List[Dict[str, Any]], unstable_tests: List[str]) -> bool:
+    """전체 테스트 통과 판정 (build_and_tests §6.4 에서 추출 — 단위 테스트 가능하게).
+
+    named 테스트가 있으면 그 exit_code, 없으면(=`__all__` 센티널만) 센티널의 exit_code 로
+    판정한다. B8 — 예전 인라인은 named 없을 때 `all(... if name is not None)` = all([]) =
+    **무조건 True** 라, stability_gate(2회 실행)에서 `__all__` 실행이 exit≠0(config 오류
+    등)이어도 통과로 위장했다. (테스트 0개 자체의 tolerance 는 파이프라인 의도 — ctest
+    `--no-tests=error` 미사용이라 '테스트 없음'=exit0 은 여전히 통과로 흐른다.)
+    """
+    if unstable_tests:
+        return False
+    named = [r for r in ctest_results if r.get("name") is not None]
+    if named:
+        return all(r.get("exit_code", 1) == 0 for r in named)
+    if ctest_results:
+        return all(r.get("exit_code", 1) == 0 for r in ctest_results)
+    return False
+
+
 def build_and_tests(
     project_root: Path,
     reports_dir: Path,
@@ -637,13 +656,8 @@ def build_and_tests(
         if unstable_tests:
             log += f"\n[Stability Gate] Unstable tests: {', '.join(unstable_tests)}\n"
 
-    # 6.4) Overall test outcome
-    if len(ctest_results) == 1 and ctest_results[0].get("name") is None:
-        tests_ok = (ctest_results[0].get("exit_code", 1) == 0)
-    else:
-        tests_ok = all(r.get("exit_code", 1) == 0 for r in ctest_results if r.get("name") is not None)
-    if unstable_tests:
-        tests_ok = False
+    # 6.4) Overall test outcome (판정 로직은 _overall_tests_ok — 테스트 가능하게 추출, B8)
+    tests_ok = _overall_tests_ok(ctest_results, unstable_tests)
 
     ctest_out = ""
     for r in ctest_results:

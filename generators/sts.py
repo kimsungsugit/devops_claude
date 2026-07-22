@@ -2373,7 +2373,12 @@ def generate_sts(
             _logger.warning("STS validation issues: %s", validation["issues"])
     except Exception as _ve:
         _logger.warning("STS validation skipped: %s", _ve)
-        validation = {"valid": True, "issues": [], "warnings": [], "stats": {}}
+        # B7 — 검증이 크래시했으면 valid:True(통과)로 위장하지 않는다. 검증을 **못 한** 것을
+        # 통과로 쓰는 fail-open 이다(미검증 ≠ 유효). valid:False + 사유를 warnings 로 표면화.
+        validation = {
+            "valid": False, "issues": [], "stats": {},
+            "warnings": [f"검증 실행 실패(미검증): {_ve}"],
+        }
 
     validation_report_path = ""
     try:

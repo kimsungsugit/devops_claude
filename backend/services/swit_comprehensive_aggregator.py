@@ -1178,11 +1178,16 @@ def _write_it301(
     ])
 
 
-def _write_it401(ws, meta: SwitcrBuildMeta, cfg: dict[str, Any]) -> None:
+def _write_it401(
+    ws, meta: SwitcrBuildMeta, cfg: dict[str, Any], warnings: list[str] | None = None,
+) -> None:
     _write_common_header(ws, meta, cfg)
     md = cfg.get("switcr_metadata", {}) or {}
     safe_write(ws, 6, 3, md.get("debugger", ""))
     _write_switcr_test_environment(ws, cfg, tool_row=65, ref_doc_row=72)
+    # W5 — 자원사용(RAM/ROM/stack) 실측(resource_usage 설정)이 없을 때 하드코딩 "Pass"+
+    # 가짜 사용량(예: =1312/4096)을 stamp 하던 것을 금지 — 노란 사용자입력 마킹. 단
+    # 템플릿상 의도적 N/A 행(동적메모리 제외 등, result 가 Pass 가 아님)은 그대로 둔다.
     defaults = {
         78: ("=1312/4096", "Pass", ""),
         79: (0.211, "Pass", ""),
@@ -1194,14 +1199,35 @@ def _write_it401(ws, meta: SwitcrBuildMeta, cfg: dict[str, Any]) -> None:
     safe_write(ws, 80, 5, "동적 메모리 사용량")
     safe_write(ws, 80, 7, "PDSM은 동적메모리를 사용하고 있지 않으므로 \n해당 시험은 제외함")
     resource_usage = md.get("resource_usage", {}) or {}
+    _missing = []
     for row, fallback in defaults.items():
-        value, result, attachment = resource_usage.get(str(row), fallback)
-        safe_write(ws, row, 11, value)
-        safe_write(ws, row, 12, result)
-        safe_write(ws, row, 13, attachment)
+        if str(row) in resource_usage:
+            value, result, attachment = resource_usage[str(row)]
+            safe_write(ws, row, 11, value)
+            safe_write(ws, row, 12, result)
+            safe_write(ws, row, 13, attachment)
+        elif str(fallback[1]).strip().lower() == "pass":
+            # 실측 없이 "Pass" 로 판정하던 자원 행 — 값·판정을 마킹(가짜 사용량 제거).
+            mark_user_input_required(ws, row, 11, hint="자원 사용량 실측 미제공")
+            mark_user_input_required(ws, row, 12, hint="자원 사용량 판정 실측 미제공")
+            safe_write(ws, row, 13, fallback[2])
+            _missing.append(row)
+        else:
+            # 의도적 N/A·템플릿 행 (동적메모리 제외 등) — 그대로.
+            value, result, attachment = fallback
+            safe_write(ws, row, 11, value)
+            safe_write(ws, row, 12, result)
+            safe_write(ws, row, 13, attachment)
+    if _missing and warnings is not None:
+        warnings.append(
+            f"[switcr] 4.IT401 자원사용 실측 미제공(row {_missing}) — K/L열 사용자입력 마킹 "
+            "(하드코딩 Pass·가짜 사용량 제거)"
+        )
 
 
-def _write_it701(ws, meta: SwitcrBuildMeta, cfg: dict[str, Any]) -> None:
+def _write_it701(
+    ws, meta: SwitcrBuildMeta, cfg: dict[str, Any], warnings: list[str] | None = None,
+) -> None:
     _write_common_header(ws, meta, cfg)
     md = cfg.get("switcr_metadata", {}) or {}
     safe_write(ws, 6, 3, md.get("debugger", ""))
@@ -1223,13 +1249,26 @@ def _write_it701(ws, meta: SwitcrBuildMeta, cfg: dict[str, Any]) -> None:
         safe_write(ws, row, 7, method)
         safe_write(ws, row, 9, action)
         safe_write(ws, row, 12, note)
+    # W5 — 안전기구(watchdog/RAM/ROM/stack/ECC/clock) 검증 결과를 실측(system_error_protection
+    # 설정) 없이 "Pass"로 조작하지 않는다. IT701 은 ASIL C/D 안전기구 증거라 무측정 Pass 는
+    # audit 무결성 위반(IT201/IT301=A2 과 같은 조작 패턴). 실측 없으면 노란 사용자입력 마킹.
     results = md.get("system_error_protection", {}) or {}
+    _missing = []
     for row in range(70, min(ws.max_row, 76) + 1):
-        result = results.get(str(row), "Pass")
         safe_write(ws, row, 6, "○")
-        safe_write(ws, row, 7, result)
+        _r = results.get(str(row))
+        if _r is not None and str(_r).strip() != "":
+            safe_write(ws, row, 7, _r)
+        else:
+            mark_user_input_required(ws, row, 7, hint="안전기구 검증 결과 실측 미제공")
+            _missing.append(row)
         safe_write(ws, row, 10, "X")
         safe_write(ws, row, 11, "N/A")
+    if _missing and warnings is not None:
+        warnings.append(
+            f"[switcr] 7.IT701 시스템오류보호(ASIL 안전기구) 결과 실측 미제공 "
+            f"(row {_missing}) — G열 사용자입력 마킹 (무측정 'Pass' 위장 제거)"
+        )
 
 
 def _write_not_applicable(ws, meta: SwitcrBuildMeta, cfg: dict[str, Any], reason: str) -> None:
@@ -1481,13 +1520,13 @@ def build_switcr_report(
 
     it401 = _find_sheet(wb, "it401")
     if it401 is not None:
-        _write_it401(it401, meta, cfg)
+        _write_it401(it401, meta, cfg, warnings)
     else:
         incomplete_sheets.append("4.IT401")
 
     it701 = _find_sheet(wb, "it701")
     if it701 is not None:
-        _write_it701(it701, meta, cfg)
+        _write_it701(it701, meta, cfg, warnings)
     else:
         incomplete_sheets.append("7.IT701")
 

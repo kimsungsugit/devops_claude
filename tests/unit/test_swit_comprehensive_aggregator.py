@@ -423,3 +423,38 @@ class TestIt201It301EvidenceGuard:
         _write_it301(ws, meta, {}, {"switcr_metadata": {}}, {}, None, [])
         assert str(ws["C90"].value or "").startswith(self._PH), \
             "미측정인데 Fail Report 가 '해당사항 없음'(상단 마킹과 모순)"
+
+    def test_it701_without_evidence_marks_safety_mechanism_results(self):
+        """W5 — 안전기구(watchdog/RAM/stack) 검증 결과를 실측 없이 'Pass'로 조작 안 함.
+
+        IT701 은 ASIL C/D 안전기구 증거다. system_error_protection 설정이 없으면 G70~ 결과를
+        노란 마킹. 뮤테이션: `results.get(str(row), "Pass")` 로 되돌리면 G70="Pass"라 실패.
+        """
+        from backend.services.swit_comprehensive_aggregator import _write_it701
+        wb, ws, meta = self._ws()
+        ws.cell(80, 1).value = "x"   # 결과 루프 range(70..min(max_row,76))가 돌도록 max_row 확보
+        warns: list[str] = []
+        _write_it701(ws, meta, {"switcr_metadata": {}}, warns)
+        assert str(ws["G70"].value or "").startswith(self._PH), "안전기구 결과가 무측정 'Pass' 조작"
+        assert any("IT701" in w and "안전기구" in w for w in warns)
+
+    def test_it701_with_evidence_stamps_result(self):
+        """대조: system_error_protection 실측 있으면 그 값 기입(마킹 아님)."""
+        from backend.services.swit_comprehensive_aggregator import _write_it701
+        wb, ws, meta = self._ws()
+        ws.cell(80, 1).value = "x"   # 결과 루프가 돌도록 max_row 확보
+        _write_it701(ws, meta, {"switcr_metadata": {"system_error_protection": {"70": "Pass"}}}, [])
+        assert ws["G70"].value == "Pass"   # 실측 제공 → 기입
+
+    def test_it401_without_evidence_marks_resource_pass_rows(self):
+        """W5 — 자원사용(RAM/ROM) 실측 없으면 하드코딩 'Pass'+가짜 사용량(=1312/4096) 대신 마킹."""
+        from backend.services.swit_comprehensive_aggregator import _write_it401
+        wb, ws, meta = self._ws()
+        warns: list[str] = []
+        _write_it401(ws, meta, {"switcr_metadata": {}}, warns)
+        # row 78 = "=1312/4096"/"Pass" 하드코딩 → 값(K78)·판정(L78) 둘 다 마킹
+        assert str(ws["K78"].value or "").startswith(self._PH), "가짜 사용량(=1312/4096)이 남았다"
+        assert str(ws["L78"].value or "").startswith(self._PH), "하드코딩 Pass 가 남았다"
+        # row 80 = 의도적 N/A(동적메모리 제외) → 그대로(마킹 아님)
+        assert ws["L80"].value == "N/A"
+        assert any("IT401" in w and "자원사용" in w for w in warns)
