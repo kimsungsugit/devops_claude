@@ -158,3 +158,30 @@ def test_suts_no_trace_sheet_returns_available(tmp_path: Path) -> None:
     res = jenkins_suts_extract_traceability({"path": _save(wb, tmp_path, "none.xlsx")})
     assert res["ok"] is False
     assert "available_sheets" in res
+
+
+def test_suts_wide_related_id_column_beyond_200(tmp_path: Path) -> None:
+    """회귀(under-trace 방지): 'Related ID' 컬럼이 200열 밖(col 205)이어도 탐지·추출된다.
+
+    실측 SwITS(v1.02)는 Input(82열)+Expected Result(113열)가 붙어 Related ID가 204열로
+    밀렸고, 구 200 하드캡(_detect_trace_header_cols)이 이를 통째로 놓쳐 고정컬럼 폴백(col6)이
+    엉뚱한 열을 읽어 매핑 0건으로 침묵 손실됐다(SITS 파서는 1024로 이미 고쳤으나 STS/SUTS
+    공유 헤더탐지는 200에 방치). SUTS(v0.10)는 189열이라 아슬히 통과하던 잠복 위험을 상한
+    통일(_MAX_SCAN_COLS=1024)로 차단. mutation: max_c 캡을 200으로 되돌리면 0건으로 실패한다.
+    over-trace 불가: req 컬럼은 'Related ID' 헤더 텍스트 앵커로만 잡혀 없는 매핑을 만들지 못한다.
+    """
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    assert ws is not None
+    ws.title = "2.SW Unit Test Spec"
+    ws.cell(3, 205, "Related ID")     # 200열 밖 — 넓은 Input/Expected 뒤로 밀린 요구 컬럼
+    ws.cell(4, 3, "TC_ID")
+    ws.cell(5, 3, "SwUTC_0121")
+    ws.cell(5, 205, "SwUFn_0121")
+    ws.cell(6, 3, "SwUTC_0122")
+    ws.cell(6, 205, "SwUFn_0122")
+    res = jenkins_suts_extract_traceability({"path": _save(wb, tmp_path, "wide.xlsx")})
+    assert res["ok"] is True
+    pairs = {(r["requirement_id"], r["testcase"]) for r in res["vcast_rows"]}
+    assert ("SWUFN_0121", "SwUTC_0121") in pairs   # 200열 밖 컬럼이 실제로 읽혔다
+    assert ("SWUFN_0122", "SwUTC_0122") in pairs

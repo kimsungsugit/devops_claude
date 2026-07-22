@@ -2052,7 +2052,12 @@ def _try_svn_revision_range(req: JenkinsImpactTriggerRequest, build_rev: str, bu
             if build_ts is not None:
                 try:
                     from datetime import timezone as _tz
-                    _iso = datetime.fromtimestamp(int(build_ts) / 1000, _tz.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                    # 밀리초까지 유지(초 절삭 금지) — 콤보박스(map_builds_to_svn_revisions)도 full-ms를
+                    # 쓰므로, 같은 정밀도라야 '선택 빌드 라벨 revision == 분석 diff revision'이 초 미만
+                    # 경계 커밋에서도 일치한다(W2). svn은 소수초 -r {…Z}를 수용(실측). Jenkins checkout도
+                    # 밀리초 타임스탬프로 svn co 하므로 이게 실제 빌드 revision과도 정확.
+                    _bd = datetime.fromtimestamp(int(build_ts) / 1000, _tz.utc)
+                    _iso = _bd.strftime("%Y-%m-%dT%H:%M:%S.") + f"{int(build_ts) % 1000:03d}Z"
                     _at = svn_revision_at_date(
                         repo_url=repo_url, when_iso=_iso, username=_cred_user, password=_cred_pw)
                     _by_ts = str(_at.get("revision") or "").strip()
@@ -4253,6 +4258,18 @@ def _load_trace_workbook(body: Dict[str, Any]):
     return wb, file_path
 
 
+# 열 스캔 상한 — 폭주 방지 가드이자 `max_column`이 None일 때(openpyxl read_only 엣지)의
+# 폴백값. 과거엔 199 하나가 폴백값과 **하드 상한**을 겸해 `min(max_column, 199)` 형태로
+# 199가 상한으로도 작동했다. 실측 KJPDS02_PV SwITS(v1.02)는 Input 82열 + Expected
+# Result 113열이 붙어 max_column=205이고 `Related ID`가 204열이라 통째로 스캔 밖이었다
+# (고유 요구ID 3→111, 매핑행 49→356. 시트는 찾아 warning도 없던 침묵 손실).
+# 이 상한은 두 곳이 공유한다: (1) _detect_trace_header_cols — STS/SUTS 헤더 탐지(정상
+# 모드 로드라 ws.cell() O(1)). (2) SITS/SyTS 파서 — read_only iter_rows 단일 패스.
+# SUTS(v0.10)는 189열이라 200 캡을 아슬히 통과했으나 더 넓은 릴리스에서 같은 침묵 손실
+# 위험이 있어 헤더 탐지도 이 상한으로 통일한다(하드 200 캡 제거). 성능 영향 없음(둘 다 선형).
+_MAX_SCAN_COLS = 1024
+
+
 def _detect_trace_header_cols(ws, unit_header_extra=()):
     """헤더 텍스트로 (header_row, tc_col, req_id_cols, unit_col) 동적 탐지(list 형식).
 
@@ -4260,7 +4277,7 @@ def _detect_trace_header_cols(ws, unit_header_extra=()):
     헤더로만 식별되는 파일 대응(상위 30행 스캔). 미탐지 시 None → 호출측 고정컬럼 fallback.
     unit_header_extra: SUTS 전용 폴백 헤더('name' 등) — 구체 unit 헤더 미발견 시에만 사용.
     """
-    max_c = min((ws.max_column or 1), 200)
+    max_c = min((ws.max_column or 1), _MAX_SCAN_COLS)
     max_r = min((ws.max_row or 1), 30)
     for hr in range(1, max_r + 1):
         tc_col = None
@@ -4725,17 +4742,6 @@ def jenkins_hsis_extract_mapping(body: Dict[str, Any]) -> Dict[str, Any]:
         except Exception as exc:  # noqa: BLE001 — 진단 optional: docx 손상 등 실패해도 hsis_pairs(주 산출물) 보존. type만 노출(경로 누설 차단)
             result["system_basis_error"] = f"SyRS 처리 실패({type(exc).__name__})"
     return result
-
-
-# 열 스캔 상한 — 폭주 방지 가드이자 `max_column`이 None일 때(openpyxl read_only
-# 엣지)의 폴백값. 과거엔 이 두 역할을 199 하나로 겸했는데, `min(max_column, 199)`
-# 형태라 199가 **하드 상한**으로도 작동했다. 실측 KJPDS02_PV SwITS(v1.02)는 Input
-# 82열 + Expected Result 113열이 붙어 max_column=205이고 `Related ID`가 204열이라
-# 통째로 스캔 밖이었다 — 이 endpoint 실측으로 고유 요구ID **3 → 111**, 매핑행
-# 49 → 356. 시트는 찾은 상태라 warning도 안 떠서 침묵 손실이었다.
-# 성능 영향 없음: iter_rows 단일 패스라 열 확장은 O(행×열) 선형이다
-# (아래 O(행²) 경고는 `ws.cell()` 랜덤 접근에 대한 것으로 이미 제거됐다).
-_MAX_SCAN_COLS = 1024
 
 
 @router.post("/api/jenkins/sits/extract-traceability")
