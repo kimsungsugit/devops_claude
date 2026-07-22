@@ -167,8 +167,11 @@ def test_build_switcr_preserves_template_and_writes_active_sheets():
     assert wb["1.IT101"]["E75"].value == 570
     assert wb["1.IT101"]["C83"].value == "함수커버리지"
     assert wb["1.IT101"]["E83"].value == "SwUFn_0101"
+    # IT201: F70(전체 인터페이스=분모)은 agg 실측이라 값 유지. G70(통과 수)은
+    # interface_passed 설정이 없어 노란 사용자입력 마킹(A2 — passed=total 100% 위장 제거).
     assert wb["2.IT201"]["F70"].value == 1
-    assert wb["2.IT201"]["G70"].value == 1
+    assert str(wb["2.IT201"]["G70"].value or "").startswith("▶ 사용자 입력 필요")
+    # IT301: _fault_injection_workbook() 이 FI 실측을 제공 → 증거 경로(값 기입 유지).
     assert wb["3.IT301"]["C85"].value == 1
     assert wb["3.IT301"]["E85"].value == 1
     assert wb["3.IT301"]["F85"].value == 1
@@ -337,3 +340,86 @@ def test_load_workbook_summary_prefers_literal_summary_cells():
     assert out["functions_total"] == 570
     assert out["functions_fail_count"] == 1
     assert out["functions_exception_count"] == 1
+
+
+class TestIt201It301EvidenceGuard:
+    """IT201 인터페이스·IT301 결함주입 증거 없을 때 통과 조작 금지 (deep-review A2).
+
+    형제 SwUTCR UT201 과 동일 원칙: 실측/설정 증거가 없으면 passed=total(100%)·5/5·PASS 를
+    무측정 stamp 하지 않고 노란 사용자입력 마킹 + 경고로 표면화한다. ISO 26262 인터페이스/
+    결함주입은 ASIL 안전기구 검증 증거라 무측정 100% 위장은 audit 무결성을 깬다.
+    """
+    _PH = "▶ 사용자 입력 필요"
+
+    def _ws(self):
+        from backend.services.swit_comprehensive_aggregator import SwitcrBuildMeta
+        wb = openpyxl.Workbook()
+        meta = SwitcrBuildMeta(
+            project_id="P", project_full_name="P", release_sw_version="1.0",
+            test_date="2025-12-05", test_engineer="T",
+        )
+        return wb, wb.active, meta
+
+    def test_it201_without_interface_passed_marks_user_input(self):
+        from backend.services.swit_comprehensive_aggregator import _write_it201
+        wb, ws, meta = self._ws()
+        warns: list[str] = []
+        # interface_passed 없음, total 은 agg 실측
+        _write_it201(ws, meta, {"total_tcs": 12}, {"switcr_metadata": {}}, [], warns)
+        assert ws["F70"].value == 12                     # 분모(전체)는 실측 유지
+        assert str(ws["G70"].value or "").startswith(self._PH), "passed=total 100% 위장이 남았다"
+        # W1 — 파생 수식 H70(=F70-G70)도 마킹돼야 한다(안 그러면 텍스트 G70 로 Excel #VALUE!).
+        assert str(ws["H70"].value or "").startswith(self._PH), "H70 이 텍스트 G70 로 #VALUE! 위험"
+        assert any("IT201" in w and "interface_passed" in w for w in warns)
+
+    def test_it201_with_interface_passed_stamps_value(self):
+        """대조: interface_passed 실측 있으면 값 기입(마킹 아님)."""
+        from backend.services.swit_comprehensive_aggregator import _write_it201
+        wb, ws, meta = self._ws()
+        _write_it201(ws, meta, {"total_tcs": 12},
+                     {"switcr_metadata": {"interface_total": 12, "interface_passed": 9}}, [], [])
+        assert ws["F70"].value == 12 and ws["G70"].value == 9
+
+    def test_it301_without_any_fi_evidence_marks_user_input(self):
+        from backend.services.swit_comprehensive_aggregator import _write_it301
+        wb, ws, meta = self._ws()
+        warns: list[str] = []
+        # FI 실측(fault_injection_summary=None) + 설정(fault_injection_*) 둘 다 없음
+        _write_it301(ws, meta, {}, {"switcr_metadata": {}}, {}, None, warns)
+        assert str(ws["E85"].value or "").startswith(self._PH), "5/5 통과 위장이 남았다"
+        assert str(ws["F85"].value or "").startswith(self._PH)
+        assert str(ws["H85"].value or "").startswith(self._PH)   # PASS 플래그 위장 제거
+        assert any("IT301" in w and "결함주입" in w for w in warns)
+
+    def test_it301_with_config_evidence_stamps_value(self):
+        """대조: fault_injection 설정 있으면 값 기입(마킹 아님)."""
+        from backend.services.swit_comprehensive_aggregator import _write_it301
+        wb, ws, meta = self._ws()
+        _write_it301(ws, meta, {},
+                     {"switcr_metadata": {"fault_injection_count": 8, "fault_injection_passed": 8}},
+                     {}, None, [])
+        assert ws["E85"].value == 8 and ws["F85"].value == 8
+        assert ws["H85"].value == 1   # 8/8 → PASS
+
+    def test_it301_count_only_marks_passed_not_fabricated(self):
+        """W2 — count(tc_count)만 있고 passed 부재면 passed=total(100% PASS) 조작 대신 마킹.
+
+        단일 bool 게이트는 이 부분증거를 통과시켜 passed=total 을 부활시켰다(deep-review W2).
+        뮤테이션: dual-flag 를 단일 `_has_fi_evidence` 로 되돌리면 F85=10(=total)이 돼 실패.
+        """
+        from backend.services.swit_comprehensive_aggregator import _write_it301
+        wb, ws, meta = self._ws()
+        warns: list[str] = []
+        _write_it301(ws, meta, {}, {"switcr_metadata": {}}, {}, {"tc_count": 10}, warns)
+        assert ws["E85"].value == 10                        # total 실측은 기입
+        assert str(ws["F85"].value or "").startswith(self._PH), "count-only 인데 passed=total 조작이 남았다"
+        assert str(ws["H85"].value or "").startswith(self._PH)   # PASS 판정도 마킹
+        assert any("IT301" in w and ("passed" in w or "count-only" in w) for w in warns)
+
+    def test_it301_unmeasured_fail_report_marks_not_none_applicable(self):
+        """W3 — FI 미측정이면 Fail Report(C90)를 '해당사항 없음'(=Fail 0=통과)으로 위장 안 함."""
+        from backend.services.swit_comprehensive_aggregator import _write_it301
+        wb, ws, meta = self._ws()
+        _write_it301(ws, meta, {}, {"switcr_metadata": {}}, {}, None, [])
+        assert str(ws["C90"].value or "").startswith(self._PH), \
+            "미측정인데 Fail Report 가 '해당사항 없음'(상단 마킹과 모순)"

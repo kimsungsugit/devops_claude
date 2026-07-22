@@ -23,6 +23,7 @@ from backend.services.excel_template_utils import (
     dot_date,
     has_vba_macros,
     inspect_vba_refs,
+    mark_user_input_required,
     safe_write,
     short_date,
     stamp_cover_document_id,
@@ -1001,6 +1002,7 @@ def _write_it201(
     agg: dict[str, Any],
     cfg: dict[str, Any],
     failures: list[dict[str, Any]],
+    warnings: list[str] | None = None,
 ) -> int:
     _write_common_header(ws, meta, cfg)
     _write_switcr_test_environment(
@@ -1009,13 +1011,29 @@ def _write_it201(
     )
     md = cfg.get("switcr_metadata", {}) or {}
     total_tcs = _int_value(md.get("interface_total"), _int_value(agg.get("total_tcs")))
-    passed = _int_value(md.get("interface_passed"), total_tcs)
-    passed = min(passed, total_tcs)
     safe_write(ws, 70, 2, "IT")
     safe_write(ws, 70, 3, "인터페이스 커버리지\n(검증된 인터페이스 / 전체 인터페이스) *100")
     safe_write(ws, 70, 6, total_tcs)
-    safe_write(ws, 70, 7, passed)
-    safe_write(ws, 70, 8, "=F70-G70")
+    # A2 — passed 실측(interface_passed) 부재 시 passed=total(=100% 커버리지) 조작 금지.
+    # 형제 SwUTCR UT201 과 동일 원칙: 명시 증거 없으면 노란 사용자입력 마킹 + 경고로
+    # 표면화한다. ISO 26262 인터페이스 검증 증거를 무측정 100% 로 위장하면 audit 무결성이
+    # 깨진다. total_tcs 는 agg 실측이라 그대로 기입(분모).
+    _if_passed = md.get("interface_passed")
+    if _if_passed is not None and str(_if_passed).strip() != "":
+        passed = min(_int_value(_if_passed), total_tcs)
+        safe_write(ws, 70, 7, passed)
+        # H70(=F70-G70)은 G70 이 숫자일 때만 유효한 수식이다. 무증거 경로에선 G70 이
+        # placeholder 텍스트라 H70 이 Excel 에서 #VALUE! 가 되므로(deep-review W1),
+        # 파생 수식 셀도 evidence 분기 안에서만 기입 — else 에선 함께 마킹(UT201식).
+        safe_write(ws, 70, 8, "=F70-G70")
+    else:
+        mark_user_input_required(ws, 70, 7, hint="인터페이스 검증 통과 수 실측 미제공")
+        mark_user_input_required(ws, 70, 8, hint="인터페이스 검증 통과 수 실측 미제공")
+        if warnings is not None:
+            warnings.append(
+                "[switcr] 2.IT201 interface_passed 실측 미제공 — G70/H70 사용자입력 마킹"
+                " (passed=total 100% 위장 제거)"
+            )
     safe_write(ws, 70, 9, '=IFERROR(G70/F70, "")')
     safe_write(ws, 70, 10, 0)
     safe_write(ws, 70, 11, 0)
@@ -1059,20 +1077,51 @@ def _write_it301(
     cfg: dict[str, Any],
     switr_summary: dict[str, Any],
     fault_injection_summary: dict[str, Any] | None = None,
+    warnings: list[str] | None = None,
 ) -> None:
     _write_common_header(ws, meta, cfg)
     _write_switcr_test_environment(ws, cfg, tool_row=70, ref_doc_row=77)
     md = cfg.get("switcr_metadata", {}) or {}
     fi = fault_injection_summary or {}
-    total = _int_value(fi.get("tc_count"), _int_value(md.get("fault_injection_count"), 5))
-    passed = _int_value(fi.get("passed_tc_count"), _int_value(md.get("fault_injection_passed"), total))
-    failed = _int_value(fi.get("failed_tc_count"), max(total - passed, 0))
-    passed = min(passed, total)
-    safe_write(ws, 85, 3, total)
-    safe_write(ws, 85, 5, total)
-    safe_write(ws, 85, 6, passed)
-    safe_write(ws, 85, 7, "=E85-F85")
-    safe_write(ws, 85, 8, 1 if total and failed == 0 else 0)
+    # A2 — 결함주입(FI)은 ASIL 안전기구 검증 증거다. total(count)/passed 를 **독립 게이트**
+    # 한다(deep-review W2): 형제 SwUTCR UT201 처럼 count 만 있고 passed 가 없으면
+    # passed=total(=100% PASS)로 조작하지 않고 F85/H85 를 노란 마킹한다. 단일 bool 이던
+    # 예전 게이트는 count-only 부분증거를 통과시켜 무측정 100% PASS 를 부활시켰다.
+    # fi(실측) 우선, 없으면 config(switcr_metadata). 값 없으면 None(마킹).
+    def _fi_present(key_fi: str, key_md: str) -> int | None:
+        for src, k in ((fi, key_fi), (md, key_md)):
+            v = src.get(k)
+            if v is not None and str(v).strip() != "":
+                return _int_value(v)
+        return None
+    _total = _fi_present("tc_count", "fault_injection_count")
+    _passed = _fi_present("passed_tc_count", "fault_injection_passed")
+    _fi_measured = _total is not None and _passed is not None
+    if _total is not None:
+        safe_write(ws, 85, 3, _total)
+        safe_write(ws, 85, 5, _total)
+    else:
+        mark_user_input_required(ws, 85, 3, hint="결함주입 TC 수 실측 미제공")
+        mark_user_input_required(ws, 85, 5, hint="결함주입 TC 수 실측 미제공")
+    if _passed is not None:
+        safe_write(ws, 85, 6, min(_passed, _total) if _total is not None else _passed)
+    else:
+        mark_user_input_required(ws, 85, 6, hint="결함주입 통과 수 실측 미제공")
+    if _total is not None and _passed is not None:
+        failed = _int_value(fi.get("failed_tc_count"), max(_total - min(_passed, _total), 0))
+        safe_write(ws, 85, 7, "=E85-F85")
+        safe_write(ws, 85, 8, 1 if _total and failed == 0 else 0)
+    else:
+        # count 또는 passed 실측이 없으면 판정/실패수를 계산하지 않는다(위장 PASS 금지).
+        failed = 0  # 미측정 — 아래 Fail Report 도 '해당사항 없음'(=통과) 대신 마킹(W3).
+        mark_user_input_required(ws, 85, 7, hint="결함주입 판정 실측 미제공")
+        mark_user_input_required(ws, 85, 8, hint="결함주입 판정 실측 미제공")
+        if warnings is not None:
+            _missing = [n for n, ok in (("count", _total is not None), ("passed", _passed is not None)) if not ok]
+            warnings.append(
+                f"[switcr] 3.IT301 결함주입 실측 부족({', '.join(_missing) or '전무'}) — "
+                "E85/F85/G85/H85 사용자입력 마킹 (count-only 100% PASS·위장 제거)"
+            )
     _prepare_it301_reference_layout(ws)
     safe_write(ws, 88, 2, "  4.2 Fail Report")
     safe_write(ws, 89, 2, "NO")
@@ -1086,11 +1135,18 @@ def _write_it301(
             safe_write(ws, row, 3, case.get("tc_id") or f"FI-{idx}")
             safe_write(ws, row, 5, "Expected/Actual mismatch in Fault Injection evidence.")
             safe_write(ws, row, 11, "Review FI_Test Case actual results and linked SwITS fault-injection TC.")
-    else:
+    elif _fi_measured:
         safe_write(ws, 90, 2, 1)
         safe_write(ws, 90, 3, "해당사항 없음")
         safe_write(ws, 90, 5, "해당사항 없음")
         safe_write(ws, 90, 11, "해당사항 없음")
+    else:
+        # W3 — FI 미측정이면 Fail Report 를 "해당사항 없음"(=Fail 0=통과)으로 위장하지
+        # 않는다. 상단 E85/F85 노란 마킹과 모순되던 것을 제거(감사자 섹션별 상충 판독 방지).
+        safe_write(ws, 90, 2, 1)
+        mark_user_input_required(ws, 90, 3, hint="결함주입 미측정 — Fail 항목 미확정")
+        mark_user_input_required(ws, 90, 5, hint="결함주입 미측정")
+        mark_user_input_required(ws, 90, 11, hint="결함주입 미측정")
     safe_write(ws, 92, 2, "  4.3 Coverage Not Completed")
     safe_write(ws, 93, 2, "NO")
     safe_write(ws, 93, 3, "Test Case")
@@ -1413,13 +1469,13 @@ def build_switcr_report(
     it201 = _find_sheet(wb, "it201")
     if it201 is not None:
         failures = _coverage_failures(agg.get("function_rows") or [], agg.get("c_function_map") or None)
-        summary["it201_coverage_rows"] = _write_it201(it201, meta, agg, cfg, failures)
+        summary["it201_coverage_rows"] = _write_it201(it201, meta, agg, cfg, failures, warnings)
     else:
         incomplete_sheets.append("2.IT201")
 
     it301 = _find_sheet(wb, "it301")
     if it301 is not None:
-        _write_it301(it301, meta, agg, cfg, switr_summary, fault_injection_summary)
+        _write_it301(it301, meta, agg, cfg, switr_summary, fault_injection_summary, warnings)
     else:
         incomplete_sheets.append("3.IT301")
 

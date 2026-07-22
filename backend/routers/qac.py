@@ -260,6 +260,8 @@ def _write_qac_impact_report(
             "",
             f"- Job: `{job_url}`",
             f"- Generated: `{datetime.now().isoformat(timespec='seconds')}`",
+            *([f"- ⚠ {summary.get('message', 'STS/SUTS 캐시 없음 — 영향도 판정 불가')}"]
+              if summary.get("status") == "insufficient_data" else []),
             f"- STS impacted: `{summary.get('sts_impacted', 0)}`",
             f"- SUTS impacted: `{summary.get('suts_impacted', 0)}`",
             f"- STS delta: `{summary.get('sts_delta', 0)}`",
@@ -351,6 +353,10 @@ def qac_jenkins_impact(
     sts_previous = _scan_excel_for_function(sts_files[1], fn_name) if len(sts_files) >= 2 else {"filename": "", "match_count": 0, "matches": []}
     suts_current = _scan_excel_for_function(suts_files[0], fn_name) if len(suts_files) >= 1 else {"filename": "", "match_count": 0, "matches": []}
     suts_previous = _scan_excel_for_function(suts_files[1], fn_name) if len(suts_files) >= 2 else {"filename": "", "match_count": 0, "matches": []}
+    # B4 — 스캔할 캐시(STS/SUTS QAC excel)가 하나도 없으면 "영향 없음"이 아니라 **데이터
+    # 없음**이다. 둘을 구분 안 하면 안전관련 변경이 캐시 미비(cache_root 오설정·미생성)
+    # 만으로 has_any_impact:false 로 흘러 의존 STS/SUTS 재검증을 조용히 우회한다.
+    data_available = bool(sts_files) or bool(suts_files)
     payload = {
         "ok": True,
         "function_name": fn_name,
@@ -374,9 +380,23 @@ def qac_jenkins_impact(
             "suts_impacted": int(suts_current.get("match_count") or 0),
             "sts_delta": int(sts_current.get("match_count") or 0) - int(sts_previous.get("match_count") or 0),
             "suts_delta": int(suts_current.get("match_count") or 0) - int(suts_previous.get("match_count") or 0),
-            "has_any_impact": bool((sts_current.get("match_count") or 0) or (suts_current.get("match_count") or 0)),
+            # 데이터 부재 시 has_any_impact 를 확정 false 로 두지 않는다(None) — 소비자가
+            # '판정 불가'로 처리하도록. 데이터 있을 때만 실제 영향 여부를 bool 로 낸다.
+            "has_any_impact": (
+                bool((sts_current.get("match_count") or 0) or (suts_current.get("match_count") or 0))
+                if data_available else None
+            ),
+            "data_available": data_available,
+            "sts_files_scanned": len(sts_files),
+            "suts_files_scanned": len(suts_files),
         },
     }
+    if not data_available:
+        payload["summary"]["status"] = "insufficient_data"
+        payload["summary"]["message"] = (
+            "STS/SUTS QAC 캐시가 없어 영향도를 판정할 수 없습니다 "
+            "(cache_root 설정 또는 STS/SUTS 생성 후 재시도)."
+        )
     report_path = _write_qac_impact_report(job_url=job_url, function_name=fn_name, payload=payload)
     payload["impact_report_path"] = str(report_path) if report_path and report_path.exists() else ""
     return payload
