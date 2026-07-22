@@ -134,6 +134,76 @@ def extract_table_metrics(tables: List[Dict[str, str]], keys: Iterable[str]) -> 
     return out
 
 
+def _first_present(d: Dict[str, Any], *keys: str) -> Optional[Any]:
+    """d에서 keys 순서로 첫 non-None 값을 반환(없으면 None).
+
+    PRQA/Helix-QAC처럼 같은 지표를 서로 다른 라벨로 쓰는 리포트에서, 포맷별 라벨을
+    순서대로 시도해 값을 회수하는 데 쓴다(첫 매치 우선).
+    """
+    for k in keys:
+        v = d.get(k)
+        if v is not None:
+            return v
+    return None
+
+
+def resolve_code_metrics(
+    analysis_summary: Any,
+    *,
+    prqa_metrics: Optional[Dict[str, Any]] = None,
+    hmr_stats: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """analysis_summary에서 code_metrics를 해석 — lizard(complexity.csv) 우선, 없으면 QAC 폴백.
+
+    상세탭(build_report_summary)과 대시보드(aggregate_stats)가 **동일 결과**를 쓰도록 단일 출처.
+    QAC LOC은 헤더 포함이라 lizard NLOC과 값·의미가 달라(값도 큼) `source='qac'`로 명시한다.
+
+    - `prqa_metrics`/`hmr_stats`가 주어지면(build_report_summary의 live RCR 파싱값) 그것을 우선 사용,
+      아니면(aggregate) `analysis_summary["prqa"]["rcr"]["summary"]`·`["hmr"]["stats"]`(캐시)에서 해석.
+    - None/비-dict는 방어(`dict(None)` 크래시 차단).
+    """
+    _as = analysis_summary if isinstance(analysis_summary, dict) else {}
+    _cm_raw = _as.get("code_metrics")
+    code_metrics = dict(_cm_raw) if isinstance(_cm_raw, dict) else {}
+    _cm_absent = all(code_metrics.get(k) is None for k in ("code_files", "functions", "nloc"))
+    if not _cm_absent:
+        if "source" not in code_metrics:
+            code_metrics["source"] = "lizard"
+        return code_metrics
+
+    # QAC 폴백 소스: live 파싱값 우선, 없으면 캐시된 analysis_summary.prqa에서.
+    _prqa_raw = _as.get("prqa")
+    _prqa: Dict[str, Any] = _prqa_raw if isinstance(_prqa_raw, dict) else {}
+    pm = prqa_metrics
+    if pm is None:
+        _rcr_raw = _prqa.get("rcr")
+        _rcr = _rcr_raw if isinstance(_rcr_raw, dict) else {}
+        pm = _rcr.get("summary")
+    pm = pm if isinstance(pm, dict) else {}
+    hs = hmr_stats
+    if hs is None:
+        _hmr_raw = _prqa.get("hmr")
+        _hmr = _hmr_raw if isinstance(_hmr_raw, dict) else {}
+        hs = _hmr.get("stats")
+    hs = hs if isinstance(hs, dict) else {}
+
+    _files = _parse_number(_first_present(pm, "Number of Files", "Number of Files (including CMA)"))
+    _loc = _parse_number(_first_present(
+        pm, "Lines of Code (source files only)", "Lines of Code (including headers)"))
+    _funcs_num = _parse_number(hs.get("functions_total"))
+    if any(v is not None for v in (_files, _loc, _funcs_num)):
+        return {
+            "code_files": int(_files) if _files is not None else None,
+            "functions": int(_funcs_num) if _funcs_num is not None else None,
+            "nloc": int(_loc) if _loc is not None else None,
+            "source": "qac",
+        }
+    return {
+        "code_files": None, "functions": None, "nloc": None,
+        "source": None, "reason": "no_complexity_csv_and_no_qac",
+    }
+
+
 def parse_prqa_rcr_summary(path: Path) -> Dict[str, Any]:
     data = parse_html_report(path)
     tables = data.get("tables") or []
@@ -142,6 +212,10 @@ def parse_prqa_rcr_summary(path: Path) -> Dict[str, Any]:
         [
             "Number of Files",
             "Lines of Code (source files only)",
+            # Helix QAC 변형 라벨 — KJPDS02_* 등 Helix 포맷 RCR은 PRQA와 라벨이 달라
+            # 파일수/LOC가 누락됐다(number_of_files=0). 두 포맷을 모두 스캔한다.
+            "Number of Files (including CMA)",
+            "Lines of Code (including headers)",
             "Diagnostic Count",
             "Rule Violation Count",
             "Violated Rules",
@@ -757,8 +831,17 @@ def build_report_summary(root_dir: Path, project_root: Optional[Path] = None) ->
 
     safe_coverage = coverage if isinstance(coverage, dict) else {}
     safe_tests = tests if isinstance(tests, dict) else {}
-    # code_metrics from analysis_summary
-    code_metrics = analysis_summary.get("code_metrics", {}) if isinstance(analysis_summary, dict) else {}
+    # code_metrics from analysis_summary — 없으면(lizard/VectorCAST complexity.csv 부재) QAC 폴백.
+    # 대시보드(aggregate_stats)와 동일 해석을 쓰도록 resolve_code_metrics 단일 출처. live RCR 파싱값
+    # (prqa_metrics)·HMR stats를 넘겨 기존 동작 그대로 유지. source/reason으로 침묵 제거(프론트 라벨).
+    code_metrics = resolve_code_metrics(
+        analysis_summary, prqa_metrics=prqa_metrics, hmr_stats=as_hmr_stats)
+    # A3: PRQA RCR 파싱 성공/실패 표식(analysis_summary 원본) — 부재 카드가 사유를 설명하도록 전파.
+    _as_prqa = analysis_summary.get("prqa", {}) if isinstance(analysis_summary, dict) else {}
+    if not isinstance(_as_prqa, dict):
+        _as_prqa = {}
+    _as_rcr_raw = _as_prqa.get("rcr")
+    _as_rcr: Dict[str, Any] = _as_rcr_raw if isinstance(_as_rcr_raw, dict) else {}
 
     summary: Dict[str, Any] = {
         "source": {
@@ -796,6 +879,9 @@ def build_report_summary(root_dir: Path, project_root: Optional[Path] = None) ->
                 "violations_by_file": prqa_rcr_details.get("violations_by_file") if isinstance(prqa_rcr_details, dict) else [],
                 "violations_files_truncated_to": prqa_rcr_details.get("files_truncated_to") if isinstance(prqa_rcr_details, dict) else None,
                 "hmr_stats": as_hmr_stats,
+                # 부재 시 사유 구분용(파일 없음 vs 파싱 실패) — 프론트 empty-state가 설명에 사용.
+                "rcr_ok": _as_rcr.get("ok"),
+                "rcr_reason": _as_rcr.get("reason"),
             },
             "code_metrics": code_metrics,
             "vectorcast": {

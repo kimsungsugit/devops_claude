@@ -4,15 +4,47 @@ import pytest
 
 from backend.services.report_parsers import (
     _clean_text,
+    _first_present,
     _is_worstrules_header,
     _parse_number,
     build_report_summary,
     parse_html_report,
     parse_prqa_rcr_details,
+    parse_prqa_rcr_summary,
     read_text_safe,
+    resolve_code_metrics,
 )
 
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures"
+
+
+# Helix QAC 포맷 RCR — PRQA와 라벨이 다르다("... (including CMA)", "... (including headers)").
+# KJPDS02_* 등이 이 포맷. 파일수/LOC 라벨 변형 + 공통 위반 라벨을 담는다.
+_HELIX_RCR_HTML = """<html><head><title>Helix QAC Rule Compliance Report</title></head><body>
+<table>
+<tr><td>Number of Files (including CMA)</td><td>126</td></tr>
+<tr><td>Lines of Code (including headers)</td><td>67464</td></tr>
+<tr><td>Total preprocessed code lines (STTLN)</td><td>21194</td></tr>
+<tr><td>Diagnostic Count</td><td>496</td></tr>
+<tr><td>Rule Violation Count</td><td>558</td></tr>
+<tr><td>Violated Rules</td><td>18</td></tr>
+<tr><td>Compliant Rules</td><td>211</td></tr>
+<tr><td>File Compliance Index</td><td>99</td></tr>
+<tr><td>Project Compliance Index</td><td>92</td></tr>
+</table></body></html>"""
+
+
+def _write_report_dir(tmp_path, *, analysis_summary, rcr_html=None):
+    """build_report_summary가 읽는 최소 report_dir 픽스처(analysis_summary.json[+RCR html])를 만든다."""
+    import json
+    rdir = tmp_path / "report"
+    rdir.mkdir()
+    (rdir / "analysis_summary.json").write_text(
+        json.dumps(analysis_summary), encoding="utf-8")
+    if rcr_html is not None:
+        # RCR을 report_dir 부모(빌드 루트)에 둔다 — KJPDS02_* 실제 레이아웃과 동일.
+        (tmp_path / "PROJ_RCR_01012026.html").write_text(rcr_html, encoding="utf-8")
+    return rdir
 
 
 class TestCleanText:
@@ -259,3 +291,126 @@ class TestPrqaRcrDetails:
         assert paths == ["../APP/config.c", "../BOOT/config.c"]
         totals = sorted(f["total"] for f in vbf)
         assert totals == [3, 5]                    # 합산(8) 아님
+
+
+class TestFirstPresent:
+    def test_returns_first_non_none(self):
+        d = {"a": None, "b": 5, "c": 9}
+        assert _first_present(d, "a", "b", "c") == 5
+
+    def test_all_missing_or_none(self):
+        assert _first_present({"a": None}, "a", "x") is None
+
+
+class TestHelixRcrLabels:
+    """Helix QAC 변형 라벨(파일수/LOC)이 PRQA 라벨과 함께 추출되는지(A1)."""
+
+    def test_helix_file_and_loc_labels_extracted(self, tmp_path):
+        p = tmp_path / "PROJ_RCR_01012026.html"
+        p.write_text(_HELIX_RCR_HTML, encoding="utf-8")
+        m = parse_prqa_rcr_summary(p)["metrics"]
+        # Helix 변형 라벨로도 파일수/LOC가 회수돼야 한다(과거엔 누락 → number_of_files=0).
+        assert m.get("Number of Files (including CMA)") == 126
+        assert m.get("Lines of Code (including headers)") == 67464
+        # 공통 위반 라벨은 여전히 정상.
+        assert m.get("Rule Violation Count") == 558
+        assert m.get("Diagnostic Count") == 496
+
+
+class TestCodeMetricsQacFallback:
+    """code_metrics: lizard(complexity.csv) 부재 시 QAC 폴백 + source/reason 표식(A2)."""
+
+    def test_qac_fallback_when_lizard_absent(self, tmp_path):
+        # KJPDS02_PV 형태: analysis_summary.code_metrics=all None + QAC RCR/HMR 존재.
+        rdir = _write_report_dir(
+            tmp_path,
+            analysis_summary={
+                "code_metrics": {"code_files": None, "functions": None, "nloc": None},
+                "prqa": {
+                    "rcr": {"ok": True, "summary": {"Rule Violation Count": 558}},
+                    "hmr": {"ok": True, "stats": {"functions_total": 881}},
+                },
+            },
+            rcr_html=_HELIX_RCR_HTML,
+        )
+        cm = build_report_summary(rdir)["kpis"]["code_metrics"]
+        assert cm["source"] == "qac"
+        assert cm["code_files"] == 126        # Helix RCR "Number of Files (including CMA)"
+        assert cm["functions"] == 881         # HMR functions_total
+        assert cm["nloc"] == 67464            # Helix RCR "Lines of Code (including headers)"
+
+    def test_lizard_kept_when_present_no_regression(self, tmp_path):
+        # HDPDM01 형태: complexity.csv 유래 code_metrics 존재 → 그대로 유지 + source='lizard'.
+        rdir = _write_report_dir(
+            tmp_path,
+            analysis_summary={
+                "code_metrics": {"code_files": 30, "functions": 349, "nloc": 4429},
+                "prqa": {"rcr": {"ok": True, "summary": {"Rule Violation Count": 577}}},
+            },
+            rcr_html=_HELIX_RCR_HTML,   # QAC가 있어도 lizard가 우선(폴백 미발동)
+        )
+        cm = build_report_summary(rdir)["kpis"]["code_metrics"]
+        assert cm["source"] == "lizard"
+        assert (cm["code_files"], cm["functions"], cm["nloc"]) == (30, 349, 4429)
+
+    def test_absent_marks_reason_when_no_lizard_no_qac(self, tmp_path):
+        # 완전 부재: lizard 없음 + QAC 리포트도 없음 → source=None + reason(침묵 제거).
+        rdir = _write_report_dir(
+            tmp_path,
+            analysis_summary={"code_metrics": {"code_files": None, "functions": None, "nloc": None}},
+        )
+        cm = build_report_summary(rdir)["kpis"]["code_metrics"]
+        assert cm["source"] is None
+        assert cm["reason"] == "no_complexity_csv_and_no_qac"
+        assert cm["code_files"] is None and cm["functions"] is None and cm["nloc"] is None
+
+    def test_code_metrics_json_null_does_not_crash(self, tmp_path):
+        # analysis_summary.code_metrics가 JSON null(None)이어도 dict(None) 크래시 없이 처리(방어).
+        rdir = _write_report_dir(tmp_path, analysis_summary={"code_metrics": None})
+        cm = build_report_summary(rdir)["kpis"]["code_metrics"]
+        assert cm["source"] is None and cm["reason"] == "no_complexity_csv_and_no_qac"
+
+
+class TestResolveCodeMetrics:
+    """resolve_code_metrics 공용 헬퍼 — 상세탭(build_report_summary)·대시보드(aggregate_stats) 단일 출처."""
+
+    def test_aggregate_path_reads_cached_prqa_summary(self):
+        # aggregate는 live 인자 없이 analysis_summary.prqa(캐시)에서 QAC 폴백을 해석한다.
+        summary = {
+            "code_metrics": {"code_files": None, "functions": None, "nloc": None},
+            "prqa": {
+                "rcr": {"summary": {"Number of Files (including CMA)": 126,
+                                    "Lines of Code (including headers)": 67464}},
+                "hmr": {"stats": {"functions_total": 881}},
+            },
+        }
+        cm = resolve_code_metrics(summary)
+        assert cm == {"code_files": 126, "functions": 881, "nloc": 67464, "source": "qac"}
+
+    def test_lizard_present_keeps_values_and_labels_source(self):
+        cm = resolve_code_metrics({"code_metrics": {"code_files": 30, "functions": 349, "nloc": 4429}})
+        assert cm["source"] == "lizard"
+        assert (cm["code_files"], cm["functions"], cm["nloc"]) == (30, 349, 4429)
+
+    def test_live_override_takes_precedence_over_cached(self):
+        # build_report_summary 경로: live RCR 파싱값(prqa_metrics)/HMR stats가 캐시보다 우선.
+        summary = {
+            "code_metrics": {"code_files": None, "functions": None, "nloc": None},
+            "prqa": {"rcr": {"summary": {"Lines of Code (source files only)": 99999}}},
+        }
+        cm = resolve_code_metrics(
+            summary,
+            prqa_metrics={"Number of Files": 126, "Lines of Code (source files only)": 67464},
+            hmr_stats={"functions_total": 881},
+        )
+        assert cm["nloc"] == 67464 and cm["code_files"] == 126 and cm["functions"] == 881
+        assert cm["source"] == "qac"
+
+    def test_absent_everywhere_marks_reason(self):
+        cm = resolve_code_metrics({"code_metrics": {}})
+        assert cm["source"] is None and cm["reason"] == "no_complexity_csv_and_no_qac"
+
+    def test_non_dict_input_is_safe(self):
+        # None/비-dict analysis_summary도 크래시 없이 부재로 처리.
+        assert resolve_code_metrics(None)["source"] is None
+        assert resolve_code_metrics({"code_metrics": None})["source"] is None

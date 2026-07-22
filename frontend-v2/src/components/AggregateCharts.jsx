@@ -220,6 +220,18 @@ export default function AggregateCharts({ projects, buildStats }) {
             color="var(--accent)"
           />
         ))}
+        {/* lizard NLOC(순수)과 QAC LOC(헤더 포함)이 섞이면 프로젝트 간 절대 비교가 부정확 — 정직 표기(silent 혼재 방지). */}
+        {projects.some(p => p.code_metrics_source === 'qac') && (
+          <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', marginTop: 'var(--sp-1)' }}>
+            * 일부 프로젝트는 lizard 미산출로 <b>QAC LOC(헤더 포함)</b>으로 대체 — 절대 비교 주의
+          </div>
+        )}
+        {/* 완전 부재(lizard·QAC 둘 다 없음) 프로젝트는 0으로 뜨는데 '진짜 0'과 구분되도록 사유를 명시(침묵 0 방지). */}
+        {projects.some(p => p.code_metrics_reason) && (
+          <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', marginTop: 'var(--sp-1)' }}>
+            † 일부 프로젝트는 코드 규모 산출물이 없어 <b>0(미집계)</b>으로 표시 — 실제 0 아님
+          </div>
+        )}
       </div>
 
       {/* 6. PRQA compliance rate comparison */}

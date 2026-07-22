@@ -103,20 +103,50 @@ describe('AnalysisSection', () => {
     expect(screen.getByText('정적분석 (Helix QAC · MISRA-C)')).toBeInTheDocument();
   });
 
-  it('code_metrics가 있으면 정적분석에 "코드 규모 (lizard)" 지표를 표시한다', () => {
+  it('code_metrics(lizard)가 있으면 정적분석에 "코드 규모 (lizard 정적계수)" 지표를 표시한다', () => {
     // Arrange — 구 '코드 메트릭' 패널은 제거되고 고유 지표가 정적분석으로 이동됨
     const result = makeAnalysisResult();
-    result.reportData.kpis.code_metrics = { code_files: 128, functions: 512, nloc: 24300 };
+    result.reportData.kpis.code_metrics = { code_files: 128, functions: 512, nloc: 24300, source: 'lizard' };
 
     // Act
     render(<AnalysisSection job={makeJob()} analysisResult={result} />);
 
     // Assert — lizard 코드 규모 카드가 정적분석 섹션에 표시(소스파일/함수수/NLOC)
-    expect(screen.getByText(/코드 규모 \(lizard\)/)).toBeInTheDocument();
+    expect(screen.getByText(/코드 규모 \(lizard 정적계수\)/)).toBeInTheDocument();
     expect(screen.getByText('소스 파일')).toBeInTheDocument();
     expect(screen.getByText('함수 수 (lizard 정적계수)')).toBeInTheDocument();
     expect(screen.getByText('NLOC')).toBeInTheDocument();
     expect(screen.getByText('24,300')).toBeInTheDocument();  // nloc toLocaleString
+  });
+
+  it('code_metrics.source=qac면 "코드 규모 (출처: Helix QAC)"와 QAC 라벨을 표시한다(KJPDS02_PV 폴백)', () => {
+    // Arrange — 빌드에 lizard 없어 QAC 리포트로 폴백된 케이스.
+    const result = makeAnalysisResult();
+    result.reportData.kpis.code_metrics = { code_files: 126, functions: 881, nloc: 67464, source: 'qac' };
+
+    // Act
+    render(<AnalysisSection job={makeJob()} analysisResult={result} />);
+
+    // Assert — 출처가 QAC로 명시되고 라벨도 QAC 계열 + 대체 안내.
+    expect(screen.getByText(/코드 규모 \(출처: Helix QAC\)/)).toBeInTheDocument();
+    expect(screen.getByText('함수 (QAC HIS)')).toBeInTheDocument();
+    expect(screen.getByText('LOC (QAC · 헤더 포함)')).toBeInTheDocument();
+    expect(screen.getByText('67,464')).toBeInTheDocument();
+    expect(screen.getByText(/Helix QAC 리포트 값으로 대체/)).toBeInTheDocument();
+  });
+
+  it('code_metrics가 완전 부재면 카드를 숨기지 않고 사유를 설명한다(침묵 제거)', () => {
+    // Arrange — lizard도 QAC도 없음(source=null + reason).
+    const result = makeAnalysisResult();
+    result.reportData.kpis.code_metrics = { code_files: null, functions: null, nloc: null, source: null, reason: 'no_complexity_csv_and_no_qac' };
+
+    // Act
+    render(<AnalysisSection job={makeJob()} analysisResult={result} />);
+
+    // Assert — 숫자 카드 없이 설명 안내 표시(문구가 <b>로 쪼개져 단일 노드 조각으로 검증).
+    expect(screen.queryByText('소스 파일')).toBeNull();
+    expect(screen.getByText('lizard/VectorCAST 커버리지 산출물')).toBeInTheDocument();
+    expect(screen.getByText(/없어 집계할 수 없습니다/)).toBeInTheDocument();
   });
 
   it('"함수 복잡도 상세" 패널 제목을 렌더링한다', () => {

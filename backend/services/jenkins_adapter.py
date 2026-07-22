@@ -594,7 +594,9 @@ def _to_int(v: Any, default: int = 0) -> int:
     try:
         if v is None:
             return default
-        s = str(v).strip()
+        # 천단위 콤마 제거 후 매칭 — 안 하면 re.search가 콤마에서 멈춰 "67,464"→67로 1000배
+        # 손상된다(PRQA LOC/파일수/진단수 등). report_parsers._parse_number와 동일 정책.
+        s = str(v).strip().replace(",", "")
         if not s:
             return default
         m = re.search(r"-?\d+", s)

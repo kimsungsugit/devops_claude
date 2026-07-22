@@ -988,16 +988,29 @@ export default function AnalysisSection({ job, analysisResult }) {
           <b>위반 건수</b>=규칙 위반 총량, <b>위반/전체 규칙</b>=위반된 규칙 종류, <b>진단 수</b>=개별 진단 메시지,{' '}
           <b>HIS Metrics</b>=함수 순환복잡도(VG, 출처: Helix QAC). CodeSonar(PDF)·SonarQube는 현재 미연결입니다.
         </div>
-        {/* 코드 규모 (lizard) — 구 '코드 메트릭' 패널에서 이동. lizard도 정적분석 도구라 여기로 통합
-            (중복이던 '라인 커버리지' 카드는 위 Line Coverage와 겹쳐 제거). */}
-        {(cm.code_files != null || cm.functions != null || cm.nloc != null) && (
+        {/* 코드 규모 — 구 '코드 메트릭' 패널에서 이동. lizard(complexity.csv) 우선, 빌드에 없으면 QAC 폴백.
+            source로 출처를 명시(QAC LOC은 헤더 포함이라 lizard NLOC과 값·의미가 다름). 완전 부재 시엔
+            카드를 숨기지 않고 사유를 설명한다(과거 조용히 사라져 '왜 안나오지'를 유발했다). */}
+        {(cm.code_files != null || cm.functions != null || cm.nloc != null) ? (
           <div style={{ marginBottom: 12 }}>
-            <div className="text-sm" style={{ fontWeight: 600, marginBottom: 4 }}>📏 코드 규모 (lizard) — 파일·함수·라인</div>
+            <div className="text-sm" style={{ fontWeight: 600, marginBottom: 4 }}>
+              📏 코드 규모 {cm.source === 'qac' ? '(출처: Helix QAC)' : '(lizard 정적계수)'} — 파일·함수·라인
+            </div>
             <div className="stats-row" style={{ marginBottom: 6 }}>
               {cm.code_files != null && <div className="stat-card"><div className="stat-value">{cm.code_files}</div><div className="stat-label">소스 파일</div></div>}
-              {cm.functions != null && <div className="stat-card"><div className="stat-value">{cm.functions}</div><div className="stat-label">함수 수 (lizard 정적계수)</div></div>}
-              {cm.nloc != null && <div className="stat-card"><div className="stat-value">{cm.nloc.toLocaleString()}</div><div className="stat-label">NLOC</div></div>}
+              {cm.functions != null && <div className="stat-card"><div className="stat-value">{cm.functions}</div><div className="stat-label">{cm.source === 'qac' ? '함수 (QAC HIS)' : '함수 수 (lizard 정적계수)'}</div></div>}
+              {cm.nloc != null && <div className="stat-card"><div className="stat-value">{cm.nloc.toLocaleString()}</div><div className="stat-label">{cm.source === 'qac' ? 'LOC (QAC · 헤더 포함)' : 'NLOC'}</div></div>}
             </div>
+            {cm.source === 'qac' && (
+              <div className="text-muted" style={{ fontSize: 10 }}>
+                * 이 빌드엔 lizard/VectorCAST 산출물이 없어 Helix QAC 리포트 값으로 대체했습니다(QAC LOC은 헤더 포함이라 lizard NLOC보다 큽니다).
+              </div>
+            )}
+          </div>
+        ) : (
+          <div className="text-muted text-sm" style={{ marginBottom: 12, padding: 8, background: 'var(--bg)', borderRadius: 6, lineHeight: 1.5 }}>
+            📏 코드 규모 — 이 빌드엔 <b>lizard/VectorCAST 커버리지 산출물</b>도 <b>Helix QAC 리포트</b>도 없어 집계할 수 없습니다.
+            (VectorCAST가 SCM 소스인 경우 함수레벨 상세를 로드해도 빌드 산출물엔 포함되지 않습니다.)
           </div>
         )}
         {prqa.rule_violation_count != null ? (<>
@@ -1127,9 +1140,14 @@ export default function AnalysisSection({ job, analysisResult }) {
             </div>
           )}
         </>) : (
-          <div className="text-muted text-sm" style={{ padding: 8 }}>
-            이 빌드 산출물에 PRQA(Helix QAC) 정적분석 결과가 없습니다. Jenkins 빌드의 PRQA HMR/RCR 리포트가 필요합니다.
-            (CodeSonar는 아래에서 SCM 정적분석 PDF로 불러올 수 있습니다.)
+          <div className="text-muted text-sm" style={{ padding: 8, lineHeight: 1.5 }}>
+            {prqa.rcr_ok === false ? (
+              <>이 빌드의 PRQA(Helix QAC) RCR 리포트를 <b>파싱하지 못했습니다</b>
+                {prqa.rcr_reason ? <> (사유: <code>{prqa.rcr_reason}</code>)</> : null}. 리포트 파일 형식/손상을 확인하세요.</>
+            ) : (
+              <>이 빌드 산출물에 PRQA(Helix QAC) 정적분석 결과가 <b>없습니다</b>. Jenkins 빌드의 PRQA HMR/RCR 리포트가 필요합니다.</>
+            )}
+            {' '}(CodeSonar는 아래에서 SCM 정적분석 PDF로 불러올 수 있습니다.)
           </div>
         )}
 
