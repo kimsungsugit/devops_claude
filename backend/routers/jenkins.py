@@ -5057,6 +5057,7 @@ def jenkins_syts_extract_traceability(body: Dict[str, Any]) -> Dict[str, Any]:
     _ID_RE = _re.compile(r"Sw[A-Za-z]{2,}_\d+|Sy[A-Za-z]{2,}_\d+")
     _TC_RE = _re.compile(r"^(?:Sy|Sw)I?TC_", _re.I)  # SyTC_/SwTC_/SyITC_/SwITC_
     vcast_rows: List[Dict[str, Any]] = []
+    sys_refs: set = set()  # 시스템 기준(SyRS) 커버리지용 — 평탄화 전 원본 Sy* 참조(HSIS와 동일)
     current_tc = ""
     max_data_col = min(max(tc_col, max(rel_cols)), _MAX_SCAN_COLS)
     for row in spec_ws.iter_rows(min_row=hdr_row + 1, max_col=max_data_col, values_only=True):
@@ -5071,6 +5072,8 @@ def jenkins_syts_extract_traceability(body: Dict[str, Any]) -> Dict[str, Any]:
             if not rv:
                 continue
             for rid in _ID_RE.findall(rv):
+                if rid.strip().upper().startswith("SY"):
+                    sys_refs.add(_re.sub(r"\s+", "", rid).upper())
                 vcast_rows.append({
                     "requirement_id": _normalize_req_id(rid),  # Sy*→Sw* 평탄화(4123)
                     "testcase": current_tc,
@@ -5079,12 +5082,34 @@ def jenkins_syts_extract_traceability(body: Dict[str, Any]) -> Dict[str, Any]:
                 })
     wb.close()
     req_set = set(r["requirement_id"] for r in vcast_rows)
-    return {
+    result: Dict[str, Any] = {
         "ok": True,
         "vcast_rows": vcast_rows,
         "total_mappings": len(vcast_rows),
         "requirements_covered": len(req_set),
     }
+    # 시스템 기준(SyRS) 커버리지 — SyTS(시스템 시험)는 SyRS 요구를 검증하는데 매트릭스가 Sy→Sw
+    # 평탄화로 작은 SW SRS(68)에 조인해 시스템-only 요구가 침묵 탈락(band 28). HSIS와 동일 근본.
+    # syrs_path 제공 시 원본 Sy* 참조를 SyRS에 조인해 참 커버리지 병행 표면화(기존 필드 불변).
+    # ⚠ SyITS(source_label='SyITS')는 carve-out — SyII/SyDB 등 시스템 설계요소 참조라 SyRS(요구)
+    #   미조인이 정상(2뿐)이므로 system_basis 산출 안 함(오분모·오경보 방지, 위임처가 미전달).
+    syrs_path = str(body.get("syrs_path", "")).strip()
+    if syrs_path and source_label == "SyTS":
+        enforce_resolver_access(syrs_path)  # C3: 2차 대칭
+        try:
+            if resolver.exists(syrs_path):
+                syrs = _load_syrs_req_set(syrs_path, resolver)
+                joined = sorted(sys_refs & syrs)
+                result["system_basis"] = {
+                    "syrs_total": len(syrs),
+                    "refs_total": len(sys_refs),
+                    "joined": len(joined),
+                    "joined_ids": joined,
+                    "unmatched": sorted(sys_refs - syrs),
+                }
+        except Exception as exc:  # noqa: BLE001 — 진단 optional: 실패해도 vcast_rows(주 산출물) 보존
+            result["system_basis_error"] = f"SyRS 처리 실패({type(exc).__name__})"
+    return result
 
 
 @router.post("/api/jenkins/syits/extract-traceability")

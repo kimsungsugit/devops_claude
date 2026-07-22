@@ -328,13 +328,25 @@ export default function SrsSdsSection({ job, analysisResult }) {
         if (!activeDocs[docKey]) continue;
         setLoadProgress(`${label} 추적성 추출 중...`);
         try {
-          const sysData = await post(ep, { path: activeDocs[docKey] });
+          // SyTS는 시스템 기준(SyRS) 커버리지 병행 계산용 syrs_path 전달(SyITS는 carve-out — 백엔드가 미산출).
+          const sysData = await post(ep, { path: activeDocs[docKey], syrs_path: docPaths.syrs || activeDocs.syrs || '' });
           if (sysData?.vcast_rows?.length) {
             for (const row of sysData.vcast_rows) vcastRows.push({ ...row, source: row.source || label, confidence: 'exact' });
             dataSources.push(`${label}: ${sysData.vcast_rows.length}건`);
           } else if (Array.isArray(sysData?.available_sheets)) {
             // 0건이 silent하지 않게 — 시트 미인식 원인 노출(SITS와 동일).
             stepWarnings.push(`${label}: ${sysData.warning || sysData.error || '시트 미인식'}. 사용 가능한 시트: ${sysData.available_sheets.join(', ')}`);
+          }
+          // 시스템 기준(SyRS) 정직 커버리지 — 밴드칩(SW분모)과 별개. SyTS는 SW 평탄화로 시스템-only
+          // 요구가 탈락해 밴드가 낮게 보인다(band 28 vs SyRS기준 112). HSIS와 동일 근본.
+          const sb = sysData?.system_basis;
+          if (sb) {
+            dataSources.push(`${label}(시스템기준 SyRS·raw): 참조 ${sb.joined}/${sb.refs_total} 조인 [밴드칩은 SW분모]`);
+            if (Array.isArray(sb.unmatched) && sb.unmatched.length > 0) {
+              stepWarnings.push(`${label}: SyRS에도 없는 참조 ${sb.unmatched.length}개(${sb.unmatched.slice(0, 5).join(', ')}) — 문서 버전 확인`);
+            }
+          } else if (sysData?.system_basis_error) {
+            stepWarnings.push(`${label} 시스템기준 커버리지 계산 실패: ${sysData.system_basis_error} (SyRS 경로/포맷 확인)`);
           }
         } catch (e) {
           stepWarnings.push(`${label} 추출 실패: ${e.message}`);

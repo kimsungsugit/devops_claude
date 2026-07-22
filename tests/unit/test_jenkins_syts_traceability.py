@@ -155,3 +155,86 @@ def test_syits_prose_swtc_not_extracted(tmp_path: Path) -> None:
     reqs = {r["requirement_id"] for r in res["vcast_rows"]}
     assert "SYFN_01" in reqs
     assert "SWTR_0501" not in reqs         # 산문 SwTC 교차참조 오추출 없음
+
+
+def _syrs_doc(tmp_path: Path, tokens: str) -> str:
+    from docx import Document
+    p = tmp_path / "syrs.docx"
+    d = Document()
+    d.add_paragraph(tokens)
+    d.save(str(p))
+    return str(p)
+
+
+def _syts_wb() -> openpyxl.Workbook:
+    """SyTS 레이아웃 — 요구는 시스템요구(SyTR_0802 등 SW SRS엔 없음)."""
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    assert ws is not None
+    ws.title = "2.System Test Spec"
+    ws.cell(3, 20, "Related ID")
+    ws.cell(4, 2, "Test Case ID")
+    ws.cell(5, 2, "SyTC_SyTR_0802_01")
+    ws.cell(5, 20, "SyTR_0802")          # SW SRS엔 없으나 SyRS엔 있는 시스템-only 요구
+    ws.cell(6, 2, "SyTC_SyEIF_01_01")
+    ws.cell(6, 20, "SyEIF_01")
+    return wb
+
+
+def test_syts_system_basis_joins_syrs(tmp_path: Path) -> None:
+    """SyTS: 평탄화 전 원본 Sy* 참조를 SyRS에 조인 — SW 매트릭스가 놓치는 시스템-only 요구 포함.
+
+    mutation: sys_refs 수집(원본 Sy* 보존)을 제거하면 joined=0이 되어 실패.
+    band는 SW 평탄화(SwTR_0802 — SW SRS 밖)라 낮으나, system_basis는 SyRS 기준 참 커버리지.
+    """
+    syrs = _syrs_doc(tmp_path, "SyTR_0802 SyEIF_01 SyEIF_06 SyTR_0101")
+    res = jenkins_syts_extract_traceability(
+        {"path": _save(_syts_wb(), tmp_path, "s.xlsx"), "syrs_path": syrs})
+    assert res["ok"] is True
+    sb = res["system_basis"]
+    assert sb["refs_total"] == 2
+    assert sb["joined"] == 2                       # SyTR_0802 + SyEIF_01 둘 다 SyRS 실재
+    assert sb["unmatched"] == []
+
+
+def test_syts_no_syrs_path_no_system_basis(tmp_path: Path) -> None:
+    """하위호환: syrs_path 미제공 시 system_basis 없음, 기존 필드 유지."""
+    res = jenkins_syts_extract_traceability(
+        {"path": _save(_syts_wb(), tmp_path, "s2.xlsx")})
+    assert res["ok"] is True
+    assert "system_basis" not in res
+    assert "vcast_rows" in res and "requirements_covered" in res
+
+
+def test_syits_carve_out_no_system_basis(tmp_path: Path) -> None:
+    """SyITS carve-out: syrs_path를 줘도 system_basis 산출 안 함.
+
+    SyITS는 SyII/SyDB 등 시스템 설계요소 참조라 SyRS(요구) 미조인이 정상(2뿐) — 오분모 방지.
+    source_label='SyITS'로 위임되므로 SyTS 파서가 system_basis를 건너뛴다.
+    """
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    assert ws is not None
+    ws.title = "3.System Integration Test Spec"
+    ws.cell(3, 20, "Related ID")
+    ws.cell(4, 3, "TC ID")
+    ws.cell(5, 3, "SyITC_SyII_01_01")
+    ws.cell(5, 20, "SyII_01")
+    syrs = _syrs_doc(tmp_path, "SyII_01 SyTR_0101")
+    res = jenkins_syits_extract_traceability(
+        {"path": _save(wb, tmp_path, "syits3.xlsx"), "syrs_path": syrs})
+    assert res["ok"] is True
+    assert "system_basis" not in res         # carve-out — SyITS는 SyRS 재기준 안 함
+
+
+def test_syts_bad_syrs_degrades(tmp_path: Path) -> None:
+    """비-docx syrs_path → 크래시 아닌 degrade, vcast_rows(주 산출물) 보존."""
+    bad = tmp_path / "bad.docx"
+    bad.write_text("not a docx", encoding="utf-8")
+    res = jenkins_syts_extract_traceability(
+        {"path": _save(_syts_wb(), tmp_path, "s3.xlsx"), "syrs_path": str(bad)})
+    assert res["ok"] is True
+    assert "vcast_rows" in res                # 주 산출물 보존
+    assert "system_basis" not in res
+    assert res.get("system_basis_error")     # fail-loud
+    assert "/" not in res["system_basis_error"] and "\\" not in res["system_basis_error"]
