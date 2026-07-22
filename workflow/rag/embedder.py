@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+import threading
 import time
 from collections import OrderedDict
 from typing import List, Optional
@@ -22,6 +23,7 @@ _logger = logging.getLogger("workflow.rag.embedder")
 # ---- 모듈 레벨 캐시 ----
 _embed_cache: OrderedDict[str, List[float]] = OrderedDict()
 _cache_max: int = 2000
+_cache_lock = threading.Lock()   # C3 — get/put 의 in→pop TOCTOU(동시 eviction 시 KeyError) 차단
 
 # ---- Lazy-loaded models ----
 _gemini_client = None
@@ -37,20 +39,36 @@ def _get_cache_max() -> int:
         return 2000
 
 
-def _cache_put(key: str, vec: List[float]) -> None:
-    global _cache_max
-    _cache_max = _get_cache_max()
-    _embed_cache[key] = vec
-    while len(_embed_cache) > _cache_max:
-        _embed_cache.popitem(last=False)
+def _cache_key(text: str) -> str:
+    """C3 — 캐시키에 model+dim 을 포함한다. 예전엔 raw text 만이라, Gemini(768)↔local(384)↔
+    random(64) 폴백이 오가면 같은 text 가 **혼합차원 벡터로 pin** 돼 cosine 유사도가
+    수치적으로 깨지거나 차원 불일치로 예외가 났다. model/dim 이 바뀌면 키가 바뀌어 stale
+    다른-차원 벡터를 안 되쓴다.
+    """
+    return f"{get_embed_model()}\x00{get_embed_dim()}\x00{text}"
 
 
-def _cache_get(key: str) -> Optional[List[float]]:
-    if key in _embed_cache:
-        vec = _embed_cache.pop(key)
-        _embed_cache[key] = vec  # move to end (LRU)
+def _cache_put(text: str, vec: List[float]) -> None:
+    # 설정 차원과 다른 폴백 벡터(local 384·random 64 등)는 캐시하지 않는다 — 그 키(현재 dim)
+    # 아래 잘못된 차원을 pin 하면 혼합차원 오염이 재발한다. 재계산은 폴백 한정이라 저비용.
+    if len(vec) != get_embed_dim():
+        return
+    key = _cache_key(text)
+    _max = _get_cache_max()
+    with _cache_lock:
+        _embed_cache[key] = vec
+        _embed_cache.move_to_end(key)
+        while len(_embed_cache) > _max:
+            _embed_cache.popitem(last=False)
+
+
+def _cache_get(text: str) -> Optional[List[float]]:
+    key = _cache_key(text)
+    with _cache_lock:
+        vec = _embed_cache.get(key)   # pop 아닌 get — TOCTOU KeyError 제거
+        if vec is not None:
+            _embed_cache.move_to_end(key)
         return vec
-    return None
 
 
 def get_embed_dim() -> int:

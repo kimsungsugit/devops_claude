@@ -9,8 +9,17 @@ from __future__ import annotations
 
 import openpyxl
 
-from backend.helpers.jenkins import _jenkins_sts_dir
+from backend.helpers.jenkins import _jenkins_sts_dir, _jenkins_suts_dir
 from backend.routers.qac import qac_jenkins_impact
+
+
+def _write_excel(dir_path, name, cell_text):
+    dir_path.mkdir(parents=True, exist_ok=True)
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "TC"
+    ws.cell(1, 1).value = cell_text
+    wb.save(dir_path / name)
 
 
 def test_no_cache_is_insufficient_data_not_no_impact(tmp_path):
@@ -29,22 +38,47 @@ def test_no_cache_is_insufficient_data_not_no_impact(tmp_path):
     assert s["sts_files_scanned"] == 0 and s["suts_files_scanned"] == 0
 
 
-def test_cache_present_gives_concrete_verdict(tmp_path):
-    """대조: STS 캐시가 있으면 has_any_impact 가 bool 로 확정된다(데이터 있음)."""
-    sts_dir = _jenkins_sts_dir(str(tmp_path))
-    sts_dir.mkdir(parents=True, exist_ok=True)
-    wb = openpyxl.Workbook()
-    ws = wb.active
-    ws.title = "TC"
-    ws.cell(1, 1).value = "EEPROM_Write called here"   # 함수명 매칭
-    wb.save(sts_dir / "sts_build1.xlsx")
-
+def test_both_caches_present_no_match_is_concrete_false(tmp_path):
+    """대조: 두 소스 캐시가 다 있고 매치 0 이면 has_any_impact=False (확정 무영향, None 아님)."""
+    _write_excel(_jenkins_sts_dir(str(tmp_path)), "sts_b1.xlsx", "unrelated content")
+    _write_excel(_jenkins_suts_dir(str(tmp_path)), "suts_b1.xlsx", "unrelated content")
     payload = qac_jenkins_impact(
         job_url="http://j/x", cache_root=str(tmp_path),
         build_selector="lastSuccessfulBuild", function_name="EEPROM_Write",
     )
     s = payload["summary"]
     assert s["data_available"] is True
-    assert s["status"] != "insufficient_data" if "status" in s else True
-    assert isinstance(s["has_any_impact"], bool)   # None 아님 — 확정 판정
-    assert s["sts_files_scanned"] >= 1
+    assert s["has_any_impact"] is False           # 두 소스 다 스캔·매치0 → 확정 무영향
+    assert s["missing_sources"] == []
+    assert "status" not in s                        # 부분/부재 아님
+    assert s["sts_files_scanned"] >= 1 and s["suts_files_scanned"] >= 1
+
+
+def test_partial_cache_one_source_missing_is_none_not_false(tmp_path):
+    """W4 — STS만 있고(매치0) SUTS 캐시 부재면 has_any_impact=None + partial_data.
+
+    예전 OR 로직은 STS만 있어도 data_available=True 라 SUTS 캐시 누락이 has_any=False 로
+    묻혔다(안전변경이 SUTS 재검증 우회). 뮤테이션: OR/무조건 bool 로 되돌리면 None 이
+    False 가 돼 실패.
+    """
+    _write_excel(_jenkins_sts_dir(str(tmp_path)), "sts_b1.xlsx", "unrelated content")  # STS만
+    payload = qac_jenkins_impact(
+        job_url="http://j/x", cache_root=str(tmp_path),
+        build_selector="lastSuccessfulBuild", function_name="EEPROM_Write",
+    )
+    s = payload["summary"]
+    assert s["has_any_impact"] is None, "SUTS 캐시 누락인데 STS만으로 무영향 단정됐다"
+    assert s["missing_sources"] == ["SUTS"]
+    assert s["status"] == "partial_data"
+    assert s["sts_files_scanned"] >= 1 and s["suts_files_scanned"] == 0
+
+
+def test_impacted_source_gives_true_even_if_other_missing(tmp_path):
+    """어느 한 소스라도 영향 확인되면 나머지 캐시 부재여도 has_any_impact=True (확정 영향)."""
+    _write_excel(_jenkins_sts_dir(str(tmp_path)), "sts_b1.xlsx", "EEPROM_Write")  # STS 매치
+    payload = qac_jenkins_impact(
+        job_url="http://j/x", cache_root=str(tmp_path),
+        build_selector="lastSuccessfulBuild", function_name="EEPROM_Write",
+    )
+    s = payload["summary"]
+    assert s["has_any_impact"] is True   # STS 영향 확인 → SUTS 미판정과 무관하게 True
