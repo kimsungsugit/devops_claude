@@ -4,7 +4,7 @@ import { useJenkinsCfg, useToast } from '../../App.jsx';
 import StatusBadge from '../StatusBadge.jsx';
 import { defaultCacheRoot } from '../../api.js';
 import { impactConflict, contextConflict, mismatchText } from '../../impactGuard.js';
-import { saveTraceMatrix, loadTraceMatrixByKey, hydrateTraceMatrix } from '../../traceMatrixStore.js';
+import { saveTraceMatrix, loadTraceMatrixByKey } from '../../traceMatrixStore.js';
 
 export default function SrsSdsSection({ job, analysisResult }) {
   const { cfg } = useJenkinsCfg();
@@ -103,6 +103,17 @@ export default function SrsSdsSection({ job, analysisResult }) {
     }).catch(() => { if (scmLinkedDocs) setLinkedDocs(scmLinkedDocs); });
   }, [scmId]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // cacheKey SHAPE 단일 출처 — loadMatrix(생성·캐시히트)와 마운트 복원 effect가 같은 키를
+  // 쓰도록. docs = 시험/vcast 문서 소스(loadMatrix는 재fetch한 activeDocs, 마운트는 state
+  // linkedDocs; 레지스트리 불변 시 둘은 수렴). 정확 키 일치만 복원하므로 입력이 하나라도
+  // 바뀌면 miss→재생성(사용자 규칙 "재실행 필요할 때만 재생성"과 정합).
+  const buildCacheKey = useCallback((docs) => JSON.stringify({
+    srs: docPaths.srs, sds: docPaths.sds, hsis: docPaths.hsis || docs.hsis,
+    jobUrl: job?.url, sourceRoot: activeScm?.source_root,
+    sts: docs.sts, suts: docs.suts, sits: docs.sits, syts: docs.syts, syits: docs.syits,
+    vcast: (Array.isArray(docs?.vectorcast) ? docs.vectorcast : []).filter(Boolean).join(','),
+  }), [docPaths, job?.url, activeScm?.source_root]);
+
   const loadMatrix = useCallback(async (forceRefresh = false) => {
     // Ensure linkedDocs is loaded from SCM before proceeding
     let activeDocs = linkedDocs;
@@ -137,9 +148,7 @@ export default function SrsSdsSection({ job, analysisResult }) {
     // 같고 source_root 만 바뀐 재분석 후 비-force '생성'이 옛 소스트리로 만든 매트릭스를 캐시
     // hit 로 되쓴다(deep-review W1). 캐시는 traceMatrixStore(모듈캐시 + localStorage)로 hoist
     // 돼 컴포넌트 언마운트(프로젝트 왕복·새로고침)를 넘겨 살아남는다 — 키에 source_root 필수.
-    const cacheKey = JSON.stringify({ srs: docPaths.srs, sds: docPaths.sds, hsis: docPaths.hsis || activeDocs.hsis, jobUrl: job?.url, sourceRoot: activeScm?.source_root, sts: activeDocs.sts, suts: activeDocs.suts, sits: activeDocs.sits, syts: activeDocs.syts, syits: activeDocs.syits, vcast: (Array.isArray(activeDocs?.vectorcast) ? activeDocs.vectorcast : []).filter(Boolean).join(',') });
-    // 마운트 하이드레이트에 쓰는 binding과 동일 부분키 — 저장 시 함께 실어 프로젝트 결속으로 복원.
-    const binding = { srs: docPaths.srs, sds: docPaths.sds, hsis: docPaths.hsis || activeDocs.hsis, jobUrl: job?.url, sourceRoot: activeScm?.source_root };
+    const cacheKey = buildCacheKey(activeDocs);
     // 캐시 히트: 입력 전체(cacheKey) 동일하면 재생성 없이 저장분 사용(모듈캐시/localStorage 경유).
     const cached = forceRefresh ? null : loadTraceMatrixByKey(cacheKey);
     if (cached) {
@@ -479,7 +488,7 @@ export default function SrsSdsSection({ job, analysisResult }) {
       // 부분 실패(step 실패) 시 캐시 저장 안 함 — 불완전 매트릭스가 '캐시 사용'으로 굳어
       // 시험 evidence 누락을 silent 은폐하는 것 방지(deep-analyze WARNING). 정상 시에만 캐시.
       if (!hadStepFailure) {
-        saveTraceMatrix(cacheKey, binding, data);  // 모듈캐시 + localStorage(재진입/새로고침 생존)
+        saveTraceMatrix(cacheKey, data);  // 모듈캐시 + localStorage(재진입/새로고침 생존)
       }
       if (dataSources.length > 0) {
         toast('success', `매트릭스 생성 완료: ${dataSources.join(', ')}`);
@@ -502,7 +511,7 @@ export default function SrsSdsSection({ job, analysisResult }) {
     // 더 구체적이다"라며 이 컴포넌트 최적화를 통째로 건너뛴다(조건부로 정의된 :50-52 객체라
     // 속성 수준 추적 불가). activeScm 은 analysisResult.matchedScm 파생이라 분석 실행 때만
     // 바뀌어 참조가 충분히 안정적이고, :453 effect 는 _autoLoadedRef 가드로 1회만 돈다.
-  }, [job, cfg, cacheRoot, docPaths, linkedDocs, scmId, activeScm, toast]);
+  }, [job, cfg, cacheRoot, docPaths, linkedDocs, scmId, activeScm, toast, buildCacheKey]);
 
   // focus(영향도 → 추적성)를 갖고 진입하면 매트릭스를 자동 생성한다(1회).
   useEffect(() => {
@@ -512,26 +521,25 @@ export default function SrsSdsSection({ job, analysisResult }) {
     }
   }, [traceFocus, loadMatrix]);
 
-  // 마운트 하이드레이트 — 프로젝트/Job 전환 왕복·새로고침 후 재진입 시 마지막 매트릭스를 즉시
-  // 복원한다(재생성 없음). keep-alive로 마운트가 유지되면 matrix가 이미 있어 건너뛰고, traceFocus
-  // 진입은 위 auto-load가 소유한다. binding(프로젝트 결속)만 맞으면 표시하며, 정확 재생성 판정은
-  // loadMatrix의 cacheKey(loadTraceMatrixByKey)가 담당 → "재실행 필요 시에만 재생성" 유지.
-  const _hydrateBinding = useMemo(() => ({
-    srs: docPaths.srs, sds: docPaths.sds, hsis: docPaths.hsis || linkedDocs.hsis,
-    jobUrl: job?.url, sourceRoot: activeScm?.source_root,
-  }), [docPaths, linkedDocs.hsis, job?.url, activeScm?.source_root]);
+  // 마운트 복원 — 프로젝트/Job 전환 왕복·새로고침 후 재진입 시 마지막 매트릭스를 즉시 복원한다
+  // (재생성 없음). keep-alive로 마운트가 유지되면 matrix가 이미 있어 건너뛰고, traceFocus 진입은
+  // 위 auto-load가 소유한다. ⚠ 복원은 **정확 키 일치**로만 한다 — 마운트 시점 cacheKey(linkedDocs
+  // 기반, 레지스트리 최신본)가 저장된 키와 완전히 같을 때만. 시험문서(STS/SUTS/…) 경로가 바뀌면
+  // 키가 달라져 miss→복원 안 함→재생성. 과거 느슨한 binding(설계문서만)은 시험문서 변경을 우회해
+  // stale 통과-실패를 current로 표시했다(deep-review Critical, ISO 26262 안전 오보고).
+  const _mountCacheKey = useMemo(() => buildCacheKey(linkedDocs), [buildCacheKey, linkedDocs]);
   useEffect(() => {
     if (matrix || traceFocus) return;   // 이미 표시 중이거나 focus 진입(auto-load 소유)이면 skip
-    const hit = hydrateTraceMatrix(_hydrateBinding);
+    const hit = loadTraceMatrixByKey(_mountCacheKey);  // 정확 키 일치만 복원
     if (hit) {
       // 외부 저장소(모듈캐시/localStorage) 하이드레이트 — 1회성 추가 렌더는 의도된 복원 동작이다
-      // (기존 ImpactGuideSection.jsx:947-976 하이드레이트와 동일 패턴, 그쪽은 rule 도입 전 grandfathered).
+      // (기존 ImpactGuideSection.jsx 하이드레이트와 동일 패턴, 그쪽은 rule 도입 전 grandfathered).
       /* eslint-disable react-hooks/set-state-in-effect */
       setMatrix(hit.data);
       setRestoredMeta({ savedAt: hit.savedAt });
       /* eslint-enable react-hooks/set-state-in-effect */
     }
-  }, [_hydrateBinding, matrix, traceFocus]);
+  }, [_mountCacheKey, matrix, traceFocus]);
 
   // Context의 impactData가 정말 지금 보고 있는 Job/SCM의 것인지 대조한다(impactGuard).
   // Dashboard.runAnalysis는 여러 개가 겹쳐 돌 수 있고 서버측 취소가 없어 구 실행이 완주하므로,
@@ -785,7 +793,7 @@ export default function SrsSdsSection({ job, analysisResult }) {
             {/* 복원 표식 — 저장분에서 되살린 매트릭스임을 명시(방금 생성한 fresh와 구분). stale을
                 fresh로 위장하지 않기 위한 정직성 배지. 새로고침 버튼이 명시 재생성 경로. */}
             {!loading && matrix && restoredMeta && (
-              <span className="text-muted text-sm" title="저장된 결과를 복원했습니다. 다시 생성하려면 새로고침을 누르세요.">
+              <span className="text-muted text-sm" title="같은 입력(문서 경로)으로 저장된 결과를 복원했습니다. VectorCAST 실행 결과는 저장 시점 빌드 기준이므로, 최신 빌드로 갱신하려면 새로고침을 누르세요.">
                 💾 저장된 결과 · {new Date(restoredMeta.savedAt).toLocaleString()}
               </span>
             )}
