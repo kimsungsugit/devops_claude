@@ -409,6 +409,22 @@ def jenkins_builds(req: JenkinsBuildsRequest) -> Dict[str, Any]:
             limit=req.limit,
             verify_tls=req.verify_tls,
         )
+        # per-build SVN revision 부착 — git 파이프라인 잡은 Jenkins에 소스 revision이 없어
+        # 빌드 시각→svn 날짜-revision으로 되찾는다(콤보박스/이력에 실제 revision 표시). scm_id가
+        # svn-type일 때만, fail-soft(부착 실패는 목록에 무해).
+        _scm_id = str(getattr(req, "scm_id", "") or "").strip()
+        if _scm_id:
+            try:
+                from backend.services.jenkins_service import map_builds_to_svn_revisions
+                from backend.services.scm_registry import get_registry_entry, resolve_scm_credentials
+                _entry = get_registry_entry(_scm_id)
+                if (_entry is not None and str(_entry.scm_type or "").lower() == "svn"
+                        and str(_entry.scm_url or "").strip()):
+                    _u, _p, _ = resolve_scm_credentials(scm_id=_scm_id)
+                    map_builds_to_svn_revisions(
+                        repo_url=str(_entry.scm_url), builds=builds, username=_u, password=_p or "")
+            except Exception as _rex:  # noqa: BLE001 — revision 부착 실패는 목록에 무해(fail-soft)
+                _logger.warning("[jenkins/builds] revision enrich failed (scm=%s): %s", _scm_id, _rex)
         _api_logger.info("[jenkins/builds] success: builds=%d", len(builds))
         return {"builds": builds}
     except Exception as e:
@@ -1989,7 +2005,7 @@ def jenkins_scm_info(req: JenkinsScmInfoRequest) -> Dict[str, Any]:
     raise HTTPException(status_code=400, detail="unsupported scm_type")
 
 
-def _try_svn_revision_range(req: JenkinsImpactTriggerRequest, build_rev: str, skip_info: Optional[Dict[str, Any]] = None):
+def _try_svn_revision_range(req: JenkinsImpactTriggerRequest, build_rev: str, build_ts: Optional[int] = None, skip_info: Optional[Dict[str, Any]] = None):
     """현재 로컬 default 버전(A) ↔ 선택 빌드 버전(B) 사이의 svn 정밀 델타를 시도한다.
 
     A = `svn info <source_root>`의 로컬 작업본 revision(오프라인, 자격증명 불필요).
@@ -2018,21 +2034,43 @@ def _try_svn_revision_range(req: JenkinsImpactTriggerRequest, build_rev: str, sk
         source_root = str(entry.source_root or "").strip()
         if not (repo_url and source_root):
             return _skip("svn entry missing scm_url or source_root")
-        from backend.services.local_service import svn_info_url, svn_diff_summarize
-        # B(build revision) 결정. Jenkins 빌드가 git으로 체크아웃하면 build_rev이 git SHA(비정수)라
-        # svn diff에 못 쓴다 → 그 경우 svn HEAD를 B로 대체한다(빌드 시점이 아닌 'svn 최신' 기준,
-        # 사용자 선택). build_rev이 svn 정수면 그대로 사용.
+        from backend.services.local_service import (
+            svn_diff_summarize,
+            svn_info_url,
+            svn_revision_at_date,
+        )
+        # B(build revision) 결정. KJPDS02_PV 등은 git 파이프라인 잡이라 Jenkins changeSet/
+        # lastBuiltRevision이 소스 SVN revision이 아니라 파이프라인 repo의 git SHA1이다(∴
+        # build_rev이 비정수). 소스는 '빌드 시각 기준'으로 svn checkout 되므로, 빌드 timestamp를
+        # SVN 날짜-revision으로 되찾는 게 정확하다(콘솔 로그의 'At revision N'과 일치 검증됨).
+        # build_rev이 svn 정수면 그대로, timestamp도 없거나 조회 실패면 최후로 svn HEAD(라벨 명시).
         _cred_user, _cred_pw, _ = resolve_scm_credentials(scm_id=req.scm_id)
+        build_rev_is_head = False
         if not str(build_rev or "").strip().isdigit():
-            _head = svn_info_url(repo_url=repo_url, username=_cred_user, password=_cred_pw)
-            _head_rev = str(_head.get("revision") or "").strip()
-            if not _head_rev.isdigit():
-                _logger.warning(
-                    "svn revision-range skipped: build_rev not numeric and svn HEAD unavailable (%s) — changeSet fallback",
-                    repo_url,
-                )
-                return _skip("build revision not numeric (git SHA?) and svn HEAD unavailable")
-            build_rev = _head_rev
+            _by_ts = ""
+            if build_ts is not None:
+                try:
+                    from datetime import timezone as _tz
+                    _iso = datetime.fromtimestamp(int(build_ts) / 1000, _tz.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                    _at = svn_revision_at_date(
+                        repo_url=repo_url, when_iso=_iso, username=_cred_user, password=_cred_pw)
+                    _by_ts = str(_at.get("revision") or "").strip()
+                except (ValueError, TypeError, OSError):
+                    _by_ts = ""
+            if _by_ts.isdigit():
+                build_rev = _by_ts  # 빌드 시각 기준 실제 checkout revision(정확)
+            else:
+                _head = svn_info_url(repo_url=repo_url, username=_cred_user, password=_cred_pw)
+                _head_rev = str(_head.get("revision") or "").strip()
+                if not _head_rev.isdigit():
+                    _logger.warning(
+                        "svn revision-range skipped: no per-build svn revision (git-pipeline job?) "
+                        "and svn HEAD unavailable (%s) — changeSet fallback",
+                        repo_url,
+                    )
+                    return _skip("no per-build svn revision and svn HEAD unavailable")
+                build_rev = _head_rev
+                build_rev_is_head = True  # 빌드 시각 revision 미확인 → HEAD 대체(프론트 라벨로 명시)
         scm_norm = repo_url.rstrip("/")
         # A(baseline revision) 결정. 우선순위:
         #  1) base_ref에 정수 svn revision이 명시되면 그걸 사용 — source_root가 export(.svn 없음)라
@@ -2076,6 +2114,7 @@ def _try_svn_revision_range(req: JenkinsImpactTriggerRequest, build_rev: str, sk
                 "changed_files_source": "svn_revision_range",
                 "baseline_revision": base_rev,
                 "build_revision": build_rev,
+                "build_revision_is_head": build_rev_is_head,
                 "jenkins_changed_file_count": 0,
                 "linkage_reason": f"local working copy already at build revision r{build_rev} (no changes)",
             }
@@ -2105,8 +2144,12 @@ def _try_svn_revision_range(req: JenkinsImpactTriggerRequest, build_rev: str, sk
             "changed_files_source": "svn_revision_range",
             "baseline_revision": base_rev,
             "build_revision": build_rev,
+            "build_revision_is_head": build_rev_is_head,
             "jenkins_changed_file_count": len(files),
-            "linkage_reason": f"svn diff --summarize -r {base_rev}:{build_rev}",
+            "linkage_reason": (
+                f"svn diff --summarize -r {base_rev}:{build_rev}"
+                + (" (build rev = svn HEAD; per-build revision unavailable)" if build_rev_is_head else "")
+            ),
         }
         edit_types = diff.get("edit_types") or {}
         if edit_types:
@@ -2142,6 +2185,7 @@ def _resolve_jenkins_changed_files(req: JenkinsImpactTriggerRequest):
     # 있고, 조회 자체가 실패(Jenkins 다운)할 수도 있다. 둘 다 svn A:B(base_ref↔HEAD)는
     # 독립적으로 성립하므로, Jenkins 결과 유무와 무관하게 svn 경로를 항상 먼저 시도한다.
     build_rev = ""
+    _build_ts: Optional[int] = None
     _jenkins_res = None
     _jenkins_err = ""
     try:
@@ -2168,6 +2212,7 @@ def _resolve_jenkins_changed_files(req: JenkinsImpactTriggerRequest):
                 verify_tls=bool(cfg.get("verifyTls", True)),
             )
             build_rev = str(_jenkins_res.get("revision") or "").strip()
+            _build_ts = _jenkins_res.get("timestamp")  # 빌드 시각 — svn 날짜-revision 해석용
     except Exception as exc:  # noqa: BLE001 — Jenkins 조회 실패는 svn/로컬로 graceful fallback
         _logger.warning("jenkins changeset fetch failed (scm=%s build=%s): %s", req.scm_id, req.build_number, exc, exc_info=True)
         _jenkins_err = f"changeset fetch failed: {exc}"[:200]
@@ -2175,7 +2220,7 @@ def _resolve_jenkins_changed_files(req: JenkinsImpactTriggerRequest):
     # ── svn revision-range: baseline(base_ref A) ↔ build_rev(B, 비정수면 svn HEAD) 정밀 델타 ──
     # svn diff --summarize -r A:B로 빌드가 몇 번 끼어 있든 A→B 전체 변경을 잡는다. Jenkins
     # 조회 실패/build_rev이 git SHA여도 독립적으로 성립(svn HEAD를 B로 대체).
-    svn_range = _try_svn_revision_range(req, build_rev, skip_info=_svn_skip)
+    svn_range = _try_svn_revision_range(req, build_rev, build_ts=_build_ts, skip_info=_svn_skip)
     if svn_range is not None:
         return svn_range
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime as _dt
 import logging
 from dataclasses import asdict
 from pathlib import Path
@@ -9,7 +10,12 @@ import config
 
 from backend.services.jenkins_client import JenkinsClient, JenkinsServerClient
 from backend.services.jenkins_adapter import ensure_frontend_summary
-from backend.services.local_service import run_git, run_svn
+from backend.services.local_service import (
+    run_git,
+    run_svn,
+    svn_date_revision_map,
+    svn_revision_at_date,
+)
 from backend.services.jenkins_helpers import _detect_reports_dir, _job_slug, _norm_job_url, _safe_artifact_path
 
 
@@ -407,6 +413,7 @@ def get_build_changed_files(
         verify_ssl=bool(verify_tls),
     )
     tree = (
+        "timestamp,"
         "changeSet[items[affectedPaths,commitId,paths[file,editType]]],"
         "changeSets[items[affectedPaths,commitId,paths[file,editType]]],"
         "actions[lastBuiltRevision[SHA1,revision]]"
@@ -455,7 +462,106 @@ def get_build_changed_files(
             break
 
     src = sorted(f for f in files if str(f).lower().endswith((".c", ".h")))
-    return {"files": src, "revision": revision, "all_count": len(files), "edit_types": edit_types}
+    return {
+        "files": src,
+        "revision": revision,
+        "all_count": len(files),
+        "edit_types": edit_types,
+        # 빌드 시각(epoch ms) — 소스가 '빌드 시각 기준'으로 svn checkout 되는 파이프라인
+        # 잡에서 per-build SVN revision을 날짜-revision으로 되찾기 위한 키(svn_revision_at_date).
+        "timestamp": data.get("timestamp"),
+    }
+
+
+def _iso_utc_to_ms(iso: str) -> Optional[int]:
+    """svn <date>(UTC ISO, 예: '2026-06-25T04:00:15.971000Z') → epoch ms. 실패 시 None."""
+    s = str(iso or "").strip()
+    if not s:
+        return None
+    try:
+        d = _dt.datetime.fromisoformat(s.replace("Z", "+00:00"))
+        if d.tzinfo is None:
+            d = d.replace(tzinfo=_dt.timezone.utc)
+        return int(d.timestamp() * 1000)
+    except (ValueError, TypeError):  # 파싱 불가 날짜 문자열 → 스킵(fail-soft)
+        return None
+
+
+def map_builds_to_svn_revisions(
+    *,
+    repo_url: str,
+    builds: List[Dict[str, Any]],
+    username: str = "",
+    password: str = "",
+    max_resolve: int = 60,
+) -> Dict[str, Any]:
+    """빌드 목록 각 항목에 per-build SVN revision을 in-place 부착한다(fail-soft).
+
+    소스가 '빌드 시각 기준'으로 svn checkout 되는 git 파이프라인 잡(예: KJPDS02_PV)에서,
+    빌드 timestamp(epoch ms)를 SVN 날짜-revision으로 매핑한다. Jenkins가 소스 SVN revision을
+    구조화 데이터로 노출하지 않으므로(git SHA1만) 이 우회가 유일한 정확 경로다.
+
+    빌드마다 svn info 하지 않고 총 svn 2회로 일괄한다: (1) 가장 오래된 빌드 시각의 floor
+    revision(svn info) + (2) [min,max] 구간 svn log(1회)의 (date,rev) 엔트리. 각 빌드는
+    'youngest rev ≤ 빌드시각'으로 계산(콘솔 로그의 'At revision N'과 일치 검증됨).
+
+    revision을 못 구하면(svn 실패/미svn 프로젝트) 조용히 미부착 — 목록 자체는 그대로 둔다.
+    max_resolve: 최신 N개만 해석(오래된 대량 빌드 과다 해석 방지).
+
+    Returns: {"ok": bool, "resolved": int, "revision_source": str|None, "error": str}
+    """
+    url = str(repo_url or "").strip()
+    if not url:
+        return {"ok": False, "resolved": 0, "revision_source": None, "error": "no repo_url"}
+    pairs: List[Tuple[int, Dict[str, Any]]] = []
+    for b in builds:
+        if isinstance(b, dict):
+            ts = b.get("timestamp")
+            if isinstance(ts, (int, float)):
+                pairs.append((int(ts), b))
+    if not pairs:
+        return {"ok": False, "resolved": 0, "revision_source": None, "error": "no build timestamps"}
+    pairs.sort(key=lambda p: p[0], reverse=True)
+    target = pairs[: max(1, int(max_resolve))]
+    ms_list = [ms for ms, _ in target]
+    min_ms, max_ms = min(ms_list), max(ms_list)
+
+    def _ms_to_iso(ms: int) -> str:
+        return _dt.datetime.fromtimestamp(ms / 1000, _dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    min_iso, max_iso = _ms_to_iso(min_ms), _ms_to_iso(max_ms)
+    # (1) floor: 가장 오래된 빌드 시각 기준 repo-wide youngest rev ≤ 그 시각(+ repo_root 확보).
+    anchor = svn_revision_at_date(repo_url=url, when_iso=min_iso, username=username, password=password)
+    _floor_str = str(anchor.get("revision") or "").strip()
+    floor_rev: Optional[int] = int(_floor_str) if _floor_str.isdigit() else None
+    # svn checkout은 '빌드 시각의 repo-wide revision'(다른 프로젝트 커밋 포함)을 잡으므로 로그도
+    # 저장소 루트를 대상으로 해야 정확하다. 프로젝트 경로 로그는 그 경로를 건드린 리비전만이라
+    # 부분집합이 돼 실제보다 낮게 매핑된다(다중 프로젝트 저장소 함정 — 실측 확인).
+    root = str(anchor.get("repo_root") or "").strip() or url
+    # (2) [min,max] 구간 repo-wide 커밋 (ms, rev).
+    entries: List[Tuple[int, int]] = []
+    if max_ms > min_ms:
+        rangemap = svn_date_revision_map(
+            repo_url=root, date_from_iso=min_iso, date_to_iso=max_iso,
+            username=username, password=password,
+        )
+        for iso, rev in (rangemap.get("entries") or []):
+            ems = _iso_utc_to_ms(iso)
+            if ems is not None:
+                entries.append((ems, int(rev)))
+    if floor_rev is None and not entries:
+        return {"ok": False, "resolved": 0, "revision_source": None,
+                "error": str(anchor.get("output") or "svn revision lookup failed")[:200]}
+    resolved = 0
+    for bms, b in target:
+        rev: Optional[int] = floor_rev
+        for ems, erev in entries:
+            if ems <= bms and (rev is None or erev > rev):
+                rev = erev
+        if rev is not None:
+            b["revision"] = str(rev)
+            resolved += 1
+    return {"ok": resolved > 0, "resolved": resolved, "revision_source": "svn_date", "error": ""}
 
 
 def sync_local_reports(

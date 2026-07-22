@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -309,6 +310,117 @@ def svn_diff_summarize(
         "files": sorted(dict.fromkeys(files)),
         "edit_types": edit_types,
     }
+
+
+# ISO-8601 UTC (초 단위, 선택적 소수부, 'Z') — svn 날짜 revision 인자에 임의 문자열 주입 차단.
+_ISO_UTC_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$")
+
+
+def _svn_creds_args(username: str, clean_pw: Optional[str]) -> Tuple[List[str], Optional[str]]:
+    """svn 명령의 자격증명 인자 조립 — password는 가능하면 stdin(argv 노출 회피)."""
+    args: List[str] = []
+    stdin_input: Optional[str] = None
+    if username.strip():
+        args += ["--username", username.strip()]
+    if clean_pw:
+        if _svn_supports_password_stdin():
+            args += ["--password-from-stdin"]
+            stdin_input = clean_pw
+        else:
+            args += ["--password", clean_pw]
+    # creds 유무와 무관하게 non-interactive — 미신뢰 cert 프롬프트가 동기 스레드를 점유하는
+    # 것을 방지한다(svn_diff_summarize와 동일 정책).
+    args += ["--non-interactive"]
+    return args, stdin_input
+
+
+def svn_revision_at_date(
+    *,
+    repo_url: str,
+    when_iso: str,
+    username: str = "",
+    password: str = "",
+    timeout_sec: int = 60,
+) -> Dict[str, Any]:
+    """`svn info -r {when_iso} <repo_url>` → 그 시각(as-of date) 기준 youngest revision.
+
+    KJPDS02_PV처럼 Jenkins가 소스를 '빌드 시각 기준'으로 svn checkout 하는 git 파이프라인
+    잡에서 빌드별 실제 SVN revision을 되찾기 위한 헬퍼. 빌드 timestamp(UTC ISO)를 넘기면 그
+    시점에 체크아웃된 revision을 돌려준다(콘솔 로그의 'At revision N'과 일치 검증됨).
+
+    when_iso 는 UTC ISO-8601(`YYYY-MM-DDTHH:MM:SSZ`)만 허용하고 svn 날짜 revision 문법
+    `-r {DATE}`로 감싸 전달한다. URL 대상이라 워킹카피 불필요(오프라인 조회 아님, 서버 조회).
+
+    Returns: {"rc": int, "output": str, "revision": str}  # revision=정수문자열 또는 ""
+    """
+    base = str(repo_url or "").strip().rstrip("/")
+    when = str(when_iso or "").strip().strip("{}")
+    if not base:
+        return {"rc": 1, "output": "repo_url required", "revision": ""}
+    if not _ISO_UTC_RE.match(when):
+        return {"rc": 1, "output": f"invalid ISO-8601 UTC datetime: {when!r}", "revision": ""}
+    clean_pw, pw_error = _sanitize_password(password)
+    if pw_error:
+        return {"rc": 1, "output": pw_error, "revision": ""}
+    cred_args, stdin_input = _svn_creds_args(username, clean_pw)
+    args: List[str] = ["svn", "info", "-r", "{" + when + "}", base] + cred_args
+    rc, out = _run_cmd(args, cwd=Path("."), timeout_sec=timeout_sec, stdin_input=stdin_input)
+    revision = ""
+    repo_root = ""
+    if rc == 0:
+        for line in out.splitlines():
+            low = line.lower()
+            if not revision and low.startswith("revision:"):
+                cand = line.split(":", 1)[1].strip()
+                revision = cand if cand.isdigit() else ""
+            elif not repo_root and low.startswith("repository root:"):
+                # 다중 프로젝트 저장소에서 repo-wide 리비전을 svn log로 뽑을 때의 로그 대상.
+                repo_root = line.split(":", 1)[1].strip()
+    return {"rc": rc, "output": out, "revision": revision, "repo_root": repo_root}
+
+
+def svn_date_revision_map(
+    *,
+    repo_url: str,
+    date_from_iso: str,
+    date_to_iso: str,
+    username: str = "",
+    password: str = "",
+    timeout_sec: int = 90,
+) -> Dict[str, Any]:
+    """`svn log --xml -r {D1}:{D2} <repo_url>` → [(iso_utc_date, revision:int), ...].
+
+    빌드 목록의 min~max 시각 사이 커밋을 1회 조회해, 각 빌드 timestamp를 'youngest rev ≤
+    date'로 매핑하기 위한 (date, rev) 테이블을 만든다(빌드마다 svn info 하지 않고 일괄).
+    항목은 revision 오름차순. 날짜 비교는 호출자가 파싱해서 수행한다(svn <date>는 UTC).
+
+    D1/D2 는 UTC ISO-8601만 허용, svn 날짜 revision `{DATE}` 문법. URL 대상.
+
+    Returns: {"rc": int, "output": str, "entries": [(iso_utc, rev_int), ...]}
+    """
+    base = str(repo_url or "").strip().rstrip("/")
+    d1 = str(date_from_iso or "").strip().strip("{}")
+    d2 = str(date_to_iso or "").strip().strip("{}")
+    if not base:
+        return {"rc": 1, "output": "repo_url required", "entries": []}
+    if not (_ISO_UTC_RE.match(d1) and _ISO_UTC_RE.match(d2)):
+        return {"rc": 1, "output": "date_from/date_to must be ISO-8601 UTC", "entries": []}
+    clean_pw, pw_error = _sanitize_password(password)
+    if pw_error:
+        return {"rc": 1, "output": pw_error, "entries": []}
+    cred_args, stdin_input = _svn_creds_args(username, clean_pw)
+    args: List[str] = [
+        "svn", "log", "--xml", "-r", "{" + d1 + "}:{" + d2 + "}", base,
+    ] + cred_args
+    rc, out = _run_cmd(args, cwd=Path("."), timeout_sec=timeout_sec, stdin_input=stdin_input)
+    entries: List[Tuple[str, int]] = []
+    if rc == 0:
+        for m in re.finditer(r'<logentry\b[^>]*\brevision="(\d+)"[^>]*>(.*?)</logentry>', out, re.S):
+            dm = re.search(r"<date>([^<]+)</date>", m.group(2))
+            if dm:
+                entries.append((dm.group(1).strip(), int(m.group(1))))
+    entries.sort(key=lambda e: e[1])
+    return {"rc": rc, "output": out, "entries": entries}
 
 
 def svn_diff_unified(

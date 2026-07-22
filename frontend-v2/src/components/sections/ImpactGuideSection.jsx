@@ -810,8 +810,10 @@ export default function ImpactGuideSection({ analysisResult, job }) {
     buildsReqRef.current = true;
     try {
       const data = await post('/api/jenkins/builds', {
+        // scm_id를 주면 백엔드가 빌드별 SVN revision(빌드 시각→svn 날짜-revision)을 붙여준다.
+        // git 파이프라인 잡은 Jenkins에 소스 revision이 없어 이 우회가 유일한 정확 경로.
         job_url: jobUrl, username: cfg.username, api_token: cfg.token,
-        limit: 100, verify_tls: cfg.verifyTls,
+        scm_id: scmId, limit: 100, verify_tls: cfg.verifyTls,
       });
       setBuilds(Array.isArray(data) ? data : (Array.isArray(data?.builds) ? data.builds : []));
       setBuildsError('');
@@ -822,7 +824,7 @@ export default function ImpactGuideSection({ analysisResult, job }) {
       // 일시 장애 1회로 이 마운트 내내 빌드 선택이 영구 불능이 되면 안 된다 → 재시도 허용.
       buildsReqRef.current = false;
     }
-  }, [jobUrl, cfg]);
+  }, [jobUrl, cfg, scmId]);
 
   /** 결과를 화면(Context)에 싣는다. 영속 저장은 아래 effect가 단일 지점에서 담당.
    *  guide/aiGuide를 명시로 받는 이유: 대상이 바뀌면 반드시 null로 리셋해야 하기 때문이다
@@ -1812,10 +1814,13 @@ export default function ImpactGuideSection({ analysisResult, job }) {
   const curSource = CHANGED_SOURCE_KO[curMeta.changed_files_source] || curMeta.changed_files_source || '';
   // 지금 보고 있는 결과가 '어느 대상의 것인지'를 항상 노출한다 — 복원/이력 열람으로 결과가 바뀌는
   // 화면이라 라벨이 없으면 다른 빌드 결과를 현재 빌드 것으로 오독할 수 있다(안전 오보고).
+  // 빌드 시각 기준 실제 revision을 못 뽑아 svn HEAD로 대체된 경우, r값 옆에 그 사실을 명시한다
+  // (침묵 fail-open 대체 — 이 값은 '이 빌드가 실제 빌드한 revision'이 아니라 현재 HEAD다).
+  const curIsHead = !!curMeta.build_revision_is_head;
   const targetLabel = [
     scmId,
     curBuild ? `빌드 #${curBuild}` : '빌드 미지정',
-    curRev ? `r${curRev}` : '',
+    curRev ? `r${curRev}${curIsHead ? ' ⚠HEAD(빌드 리비전 미확인)' : ''}` : '',
     (curBase && curRev) ? `(기준 r${curBase})` : '',
   ].filter(Boolean).join(' · ');
   const selectStyle = { padding: '6px 10px', fontSize: 12, border: '1px solid var(--border)', borderRadius: 6, background: 'var(--bg)' };
@@ -1874,7 +1879,7 @@ export default function ImpactGuideSection({ analysisResult, job }) {
           disabled={busy} onFocus={loadBuildsOnce} onChange={e => setPickedBuild(e.target.value)}>
           <option value="">{builds.length ? '빌드 선택' : '클릭해 목록 불러오기'}</option>
           {builds.map(b => (
-            <option key={b.number} value={b.number}>#{b.number}{b.result ? ` · ${b.result}` : ''}</option>
+            <option key={b.number} value={b.number}>#{b.number}{b.revision ? ` · r${b.revision}` : ''}{b.result ? ` · ${b.result}` : ''}</option>
           ))}
         </select>
         <button type="button" className="btn-primary btn-sm" disabled={busy || !pickedBuild}

@@ -47,6 +47,9 @@ class JenkinsBuildsRequest(BaseModel):
     api_token: str
     limit: int = 30
     verify_tls: bool = True
+    # 선택: 주면 빌드 목록에 per-build SVN revision을 부착한다(git 파이프라인 잡은 Jenkins에
+    # 소스 revision이 없어 빌드 시각→svn 날짜-revision으로 되찾는다). 없으면 기존과 동일.
+    scm_id: str = ""
 
 
 class JenkinsBuildInfoRequest(BaseModel):

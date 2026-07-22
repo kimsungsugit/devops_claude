@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { render, screen, waitFor, within, fireEvent } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { STORE_VERSION } from '../impactStore.js';
@@ -1926,6 +1926,34 @@ describe('ImpactGuideSection — 빌드/리비전 소스 바 & 결과 영속', (
     expect(label).toHaveTextContent('r1042');
     expect(label).toHaveTextContent('기준 r527');
     expect(screen.getByText('SVN 리비전 범위')).toBeInTheDocument();
+  });
+
+  it('빌드 시각 revision 미확인(HEAD 폴백)이면 라벨에 경고를 표시한다', () => {
+    // build_revision_is_head=true → r값이 '이 빌드가 실제 빌드한 revision'이 아니라 현재
+    // HEAD임을 명시(침묵 fail-open 대체). 이 표식이 사라지면 옛 오보고가 되살아난다.
+    const impact = mkImpact({ rev: '1077' });
+    impact.trigger.metadata.build_revision_is_head = true;
+    render(<ImpactGuideSection job={mockJob} analysisResult={{ impactData: impact }} />);
+
+    const label = screen.getByTestId('impact-target-label');
+    expect(label).toHaveTextContent('r1077');
+    expect(label).toHaveTextContent(/HEAD/);
+    expect(label).toHaveTextContent(/빌드 리비전 미확인/);
+  });
+
+  it('빌드 선택 콤보박스 옵션에 per-build SVN 리비전이 표시되고 scm_id로 조회한다', async () => {
+    post.mockImplementation((path) => {
+      if (path === '/api/jenkins/builds') {
+        return Promise.resolve({ builds: [{ number: 122, result: 'SUCCESS', revision: '1053' }] });
+      }
+      return Promise.resolve({});
+    });
+    render(<ImpactGuideSection job={mockJob} analysisResult={{ impactData: mkImpact() }} />);
+
+    fireEvent.focus(screen.getByLabelText('빌드'));  // onFocus → loadBuildsOnce
+    await waitFor(() => expect(post).toHaveBeenCalledWith(
+      '/api/jenkins/builds', expect.objectContaining({ scm_id: 'hdpdm01' })));
+    expect(await screen.findByText(/#122 · r1053 · SUCCESS/)).toBeInTheDocument();
   });
 
   it('이력 조회는 SCM id로 summary 모드를 호출한다', async () => {
