@@ -95,12 +95,14 @@ export default function BuildInfoSection({ job, analysisResult }) {
     }
   }, [job, cfg, toast, scmId]);
 
-  // Auto-load builds on mount
+  // Auto-load builds on mount + scmId 확정 시 재조회. scmId가 ''→실값으로 전이(분석 완료로
+  // matchedScm 채워짐)할 때 다시 부르지 않으면 '리비전' 컬럼이 계속 '—'로 남는다(W5 stale).
+  // deps에 scmId 포함(length 가드 제거) → 전이 시 revision 재부착. 값 동일하면 재발화 안 함.
   useEffect(() => {
-    if (job?.url && cfg.username && cfg.token && builds.length === 0) {
+    if (job?.url && cfg.username && cfg.token) {
       loadBuilds();
     }
-  }, [job?.url]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [job?.url, scmId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const pagedBuilds = builds.slice(buildPage * PAGE_SIZE, (buildPage + 1) * PAGE_SIZE);
   const totalPages = Math.ceil(builds.length / PAGE_SIZE);
@@ -118,6 +120,7 @@ export default function BuildInfoSection({ job, analysisResult }) {
     return {
       total: builds.length, success, failure,
       hasRev: revs.length > 0,
+      revCount: revs.length,
       minRev: revs.length ? Math.min(...revs) : null,
       maxRev: revs.length ? Math.max(...revs) : null,
       distinct: new Set(revs).size,
@@ -319,7 +322,7 @@ export default function BuildInfoSection({ job, analysisResult }) {
             {rollup.hasRev && (
               <span className="text-muted">· 리비전 r{rollup.minRev}→r{rollup.maxRev} · 고유 {rollup.distinct}종</span>
             )}
-            {rollup.hasRev && rollup.distinct === 1 && (
+            {rollup.revCount >= 2 && rollup.distinct === 1 && (
               <span style={{ color: 'var(--color-warning)', marginLeft: 6 }}>⚠ 모든 빌드가 같은 리비전 — 리비전 해석 확인 필요</span>
             )}
           </div>

@@ -127,6 +127,47 @@ def test_map_builds_fail_soft_svn_down(monkeypatch):
     assert "revision" not in builds[0]  # 실패 시 미부착(목록은 그대로)
 
 
+def test_map_builds_range_log_failure_is_fail_soft(monkeypatch):
+    """구간 svn log 실패(rc≠0)면 floor_rev를 전 빌드에 붙이지(over-assign) 않고 미부착(W3).
+
+    뮤테이션: rc 가드 제거하면 두 빌드 다 floor r1048 로 붙어(silent-wrong) ok:True → FAIL.
+    """
+    from backend.services import jenkins_service as js
+    monkeypatch.setattr(js, "svn_revision_at_date",
+                        lambda **k: {"rc": 0, "revision": "1048", "repo_root": "svn://x/ADOS"})
+    monkeypatch.setattr(js, "svn_date_revision_map",
+                        lambda **k: {"rc": 124, "entries": [], "output": "timeout"})
+    builds = [{"number": 1, "timestamp": _ms("2026-06-16T04:00:00Z")},
+              {"number": 2, "timestamp": _ms("2026-06-25T04:00:15Z")}]
+    res = js.map_builds_to_svn_revisions(repo_url="svn://x/ADOS/NE1AW_PORTING", builds=builds)
+    assert res["ok"] is False
+    assert all("revision" not in b for b in builds)  # over-assign 없음
+
+
+def test_map_builds_no_repo_root_is_fail_soft(monkeypatch):
+    """anchor가 repo_root를 못 주면(빈값) 프로젝트 경로 로그로 폴백하지 않고 미부착(W4).
+
+    프로젝트 경로 로그는 다중프로젝트 저장소에서 부분집합→under-map. svn_date_revision_map을
+    아예 호출하지 않는지 검증(부분집합 조회 자체를 안 함).
+    """
+    from backend.services import jenkins_service as js
+    called = {"map": False}
+    monkeypatch.setattr(js, "svn_revision_at_date",
+                        lambda **k: {"rc": 0, "revision": "1048", "repo_root": ""})
+
+    def _no_map(**k):
+        called["map"] = True
+        return {"rc": 0, "entries": []}
+
+    monkeypatch.setattr(js, "svn_date_revision_map", _no_map)
+    builds = [{"number": 1, "timestamp": _ms("2026-06-16T04:00:00Z")},
+              {"number": 2, "timestamp": _ms("2026-06-25T04:00:15Z")}]
+    res = js.map_builds_to_svn_revisions(repo_url="svn://x/ADOS/NE1AW_PORTING", builds=builds)
+    assert res["ok"] is False
+    assert called["map"] is False           # 부분집합 조회 자체를 안 함
+    assert all("revision" not in b for b in builds)
+
+
 # ── jenkins._try_svn_revision_range: build_ts → date-revision (HEAD 폴백 라벨) ──
 def _entry(**kw):
     d = {"scm_type": "svn", "scm_url": "svn://x/ADOS/NE1AW_PORTING",

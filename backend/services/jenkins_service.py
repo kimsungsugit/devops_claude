@@ -493,7 +493,7 @@ def map_builds_to_svn_revisions(
     builds: List[Dict[str, Any]],
     username: str = "",
     password: str = "",
-    max_resolve: int = 60,
+    max_resolve: int = 100,
 ) -> Dict[str, Any]:
     """빌드 목록 각 항목에 per-build SVN revision을 in-place 부착한다(fail-soft).
 
@@ -527,41 +527,50 @@ def map_builds_to_svn_revisions(
     min_ms, max_ms = min(ms_list), max(ms_list)
 
     def _ms_to_iso(ms: int) -> str:
-        return _dt.datetime.fromtimestamp(ms / 1000, _dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        # 밀리초까지 유지(초 절삭 금지) — 분석 경로(_try_svn_revision_range)도 full-ms를 쓰므로
+        # 같은 정밀도라야 콤보박스 revision == 분석 revision 이 초 미만 경계에서도 일치한다(W2).
+        d = _dt.datetime.fromtimestamp(ms / 1000, _dt.timezone.utc)
+        return d.strftime("%Y-%m-%dT%H:%M:%S.") + f"{ms % 1000:03d}Z"
 
     min_iso, max_iso = _ms_to_iso(min_ms), _ms_to_iso(max_ms)
-    # (1) floor: 가장 오래된 빌드 시각 기준 repo-wide youngest rev ≤ 그 시각(+ repo_root 확보).
+    # (1) floor + repo_root: 가장 오래된 빌드 시각 기준 repo-wide youngest rev ≤ 그 시각.
     anchor = svn_revision_at_date(repo_url=url, when_iso=min_iso, username=username, password=password)
     _floor_str = str(anchor.get("revision") or "").strip()
-    floor_rev: Optional[int] = int(_floor_str) if _floor_str.isdigit() else None
-    # svn checkout은 '빌드 시각의 repo-wide revision'(다른 프로젝트 커밋 포함)을 잡으므로 로그도
-    # 저장소 루트를 대상으로 해야 정확하다. 프로젝트 경로 로그는 그 경로를 건드린 리비전만이라
-    # 부분집합이 돼 실제보다 낮게 매핑된다(다중 프로젝트 저장소 함정 — 실측 확인).
-    root = str(anchor.get("repo_root") or "").strip() or url
-    # (2) [min,max] 구간 repo-wide 커밋 (ms, rev).
+    floor_rev = int(_floor_str) if _floor_str.isdigit() else None
+    root = str(anchor.get("repo_root") or "").strip()
+    # anchor(dated svn info) 실패 → 신뢰할 floor/repo_root 없음. 프로젝트 경로로 폴백하면 다중
+    # 프로젝트 저장소에서 svn log가 부분집합이 돼 너무 낮은 revision을 조용히 붙인다(W4) →
+    # 틀린 값 대신 미부착(fail-soft, 프론트가 '—'로 표시).
+    if floor_rev is None or not root:
+        return {"ok": False, "resolved": 0, "revision_source": None,
+                "error": str(anchor.get("output") or "svn info -r failed (no floor/repo_root)")[:200]}
+    # (2) [min,max] 구간 repo-wide 커밋 (ms, rev). svn checkout이 repo-wide revision(다른
+    #     프로젝트 커밋 포함)을 잡으므로 로그 대상은 반드시 repo_root(프로젝트 경로=부분집합).
     entries: List[Tuple[int, int]] = []
     if max_ms > min_ms:
         rangemap = svn_date_revision_map(
             repo_url=root, date_from_iso=min_iso, date_to_iso=max_iso,
             username=username, password=password,
         )
+        if int(rangemap.get("rc", 1)) != 0:
+            # 구간 로그 실패(타임아웃 등) → oldest~newest 사이 커밋을 모른다. floor_rev를 전 빌드에
+            # 붙이면 최신 빌드가 옛 revision으로 위장된다(W3, 과거 r1075 버그 형태) → 미부착.
+            return {"ok": False, "resolved": 0, "revision_source": None,
+                    "error": str(rangemap.get("output") or "svn log range failed")[:200]}
         for iso, rev in (rangemap.get("entries") or []):
             ems = _iso_utc_to_ms(iso)
             if ems is not None:
                 entries.append((ems, int(rev)))
-    if floor_rev is None and not entries:
-        return {"ok": False, "resolved": 0, "revision_source": None,
-                "error": str(anchor.get("output") or "svn revision lookup failed")[:200]}
+    # (3) 각 빌드: youngest rev ≤ 빌드시각(full-ms). floor_rev는 위 가드로 보장된 정수.
     resolved = 0
     for bms, b in target:
-        rev: Optional[int] = floor_rev
+        rev = floor_rev
         for ems, erev in entries:
-            if ems <= bms and (rev is None or erev > rev):
+            if ems <= bms and erev > rev:
                 rev = erev
-        if rev is not None:
-            b["revision"] = str(rev)
-            resolved += 1
-    return {"ok": resolved > 0, "resolved": resolved, "revision_source": "svn_date", "error": ""}
+        b["revision"] = str(rev)
+        resolved += 1
+    return {"ok": True, "resolved": resolved, "revision_source": "svn_date", "error": ""}
 
 
 def sync_local_reports(
