@@ -106,6 +106,7 @@ from backend.services.paths import is_under_any, safe_resolve_under
 from backend.services.report_parsers import (
     build_report_summary,
     find_jenkins_source_root,
+    resolve_code_metrics,
 )
 from backend.user_context import wrap_with_user
 
@@ -5880,8 +5881,9 @@ def aggregate_stats(req: dict) -> Dict[str, Any]:
         if not tests.get("ok", True):
             all_pass = False
 
-        # Code metrics
-        cm = data.get("code_metrics") or {}
+        # Code metrics — 상세탭(build_report_summary)과 동일 해석(QAC 폴백 포함) 단일 출처.
+        # 직독 cm.get() 대신 resolve_code_metrics로 KJPDS02_PV 등 lizard 부재 프로젝트도 QAC 값 반영.
+        cm = resolve_code_metrics(data)
         total_files += _safe_int(cm.get("code_files"))
         total_functions += _safe_int(cm.get("functions"))
         total_nloc += _safe_int(cm.get("nloc"))
@@ -5889,17 +5891,21 @@ def aggregate_stats(req: dict) -> Dict[str, Any]:
         # PRQA
         prqa = data.get("prqa") or {}
         crr = prqa.get("crr") or {}
-        total_diagnostics += _safe_int(crr.get("diagnostic_count"))
+        # PRQA RCR summary for compliance metrics (진단건수 RCR 우선 회수에도 재사용)
+        rcr = prqa.get("rcr") or {}
+        rcr_summary = rcr.get("summary") or {}
+        # 진단건수는 상세탭 kpis.prqa.diagnostic_count(RCR "Diagnostic Count")와 일치시킨다.
+        # Helix QAC는 CRR이 없어(RCR만) crr.diagnostic_count 직독은 KJPDS02_PV에서 0이 됐다 → RCR 우선.
+        # RCR 값이 '없을 때만'(None) CRR 폴백 — 진짜 0건을 부재로 오인해 CRR로 넘어가지 않도록.
+        _rcr_diag = rcr_summary.get("Diagnostic Count")
+        diag = _safe_int(_rcr_diag) if _rcr_diag is not None else _safe_int(crr.get("diagnostic_count"))
+        total_diagnostics += diag
         total_loc += _safe_int(crr.get("loc_source"))
         total_files_analyzed += _safe_int(crr.get("number_of_files"))
 
         # Jenkins info
         jenkins = data.get("jenkins") or {}
         ut_total = _safe_int(ut_tc.get("total"))
-
-        # PRQA RCR summary for compliance metrics
-        rcr = prqa.get("rcr") or {}
-        rcr_summary = rcr.get("summary") or {}
 
         def _parse_fraction_first(val: Any) -> int:
             """Extract first number from 'N/M' string or return int."""
@@ -5926,9 +5932,11 @@ def aggregate_stats(req: dict) -> Dict[str, Any]:
             ),
             "ut_total": _safe_int(ut_tc.get("total")),
             "it_total": _safe_int(it_tc.get("total")),
-            "diagnostics": _safe_int(crr.get("diagnostic_count")),
+            "diagnostics": diag,
             "loc": _safe_int(cm.get("nloc")),
             "functions": _safe_int(cm.get("functions")),
+            "code_metrics_source": cm.get("source"),   # 'lizard' | 'qac' | None — 프론트 LOC 출처 라벨/각주용
+            "code_metrics_reason": cm.get("reason"),   # 완전 부재(lizard·QAC 둘 다 없음) 사유 — 침묵 0 방지
             "rcr_violated_rules": _parse_fraction_first(rcr_summary.get("Violated Rules", 0)),
             "rcr_compliance_index": _parse_fraction_first(rcr_summary.get("Project Compliance Index", 0)),
         })
