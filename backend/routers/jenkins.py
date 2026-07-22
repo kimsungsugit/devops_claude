@@ -4539,6 +4539,38 @@ def jenkins_sds_extract_mapping(body: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _load_syrs_req_set(syrs_path: str, resolver) -> set:
+    """SyRS docx에서 시스템 요구 ID 집합(Sy*, 대문자)을 로드 — 시스템 기준 조인용.
+
+    HSIS/SyTS 같은 시스템레벨 밴드는 SW 요구(SwRS 68)가 아니라 시스템 요구(SyRS 116)를
+    참조하므로 이 집합에 조인해야 커버리지가 정직하다. SW 매트릭스에 Sy→Sw 평탄화 조인하면
+    시스템-only 요구(SyTR_0802 등)가 침묵 탈락해 밴드가 과소 표시된다(HSIS 6/68 근본원인,
+    실측 SyRS 기준 21/21).
+    """
+    import tempfile as _tf
+
+    from docx import Document
+    data = resolver.read_bytes(syrs_path)
+    with _tf.NamedTemporaryFile(suffix=".docx", delete=False) as _tmp:
+        _tmp.write(data)
+        _tp = _tmp.name
+    try:
+        doc = Document(_tp)
+        parts = [p.text for p in doc.paragraphs]
+        for tbl in doc.tables:
+            for row in tbl.rows:
+                for cell in row.cells:
+                    parts.append(cell.text)
+    finally:
+        try:
+            Path(_tp).unlink()
+        except OSError:
+            pass
+    # 공백 대칭(HSIS 추출 정규식과 동일 `\s*_\s*`) — 'SyTR _ 0507' 포맷도 매치 후 정규화.
+    return {re.sub(r"\s+", "", m).upper()
+            for m in re.findall(r"Sy[A-Za-z]{2,}\s*_\s*\d+", "\n".join(parts))}
+
+
 @router.post("/api/jenkins/hsis/extract-mapping")
 def jenkins_hsis_extract_mapping(body: Dict[str, Any]) -> Dict[str, Any]:
     """HSIS(HW-SW 인터페이스) xlsx에서 요구사항↔인터페이스 신호 매핑 추출.
@@ -4587,11 +4619,15 @@ def jenkins_hsis_extract_mapping(body: Dict[str, Any]) -> Dict[str, Any]:
         return n
 
     req_to_sigs: Dict[str, list] = {}
+    sys_refs: set = set()  # 시스템 기준(SyRS) 커버리지용 — 평탄화 전 원본 Sy* 참조
     for s in signals:
         related = str(s.get("related_id") or "")
         raw_ids = _re.findall(r"Sw[A-Za-z]{2,}\s*_\s*\d+|Sy[A-Za-z]{2,}\s*_\s*\d+", related)
         if not raw_ids:
             continue
+        for _rid in raw_ids:
+            if _rid.strip().upper().startswith("SY"):
+                sys_refs.add(_re.sub(r"\s+", "", _rid).upper())
         sig_label = (str(s.get("id") or "").strip()
                      or str(s.get("sw_var_name") or "").strip()
                      or str(s.get("signal_name") or "").strip())
@@ -4609,12 +4645,40 @@ def jenkins_hsis_extract_mapping(body: Dict[str, Any]) -> Dict[str, Any]:
         {"requirement_id": rid, "hsis_signals": sigs}
         for rid, sigs in sorted(req_to_sigs.items())
     ]
-    return {
+    result: Dict[str, Any] = {
         "ok": True,
         "hsis_pairs": hsis_pairs,
         "total_signals": len(signals),
         "total_requirements": len(hsis_pairs),
     }
+    # 시스템 기준(SyRS) 커버리지 — HSIS는 시스템레벨 문서라 SW 매트릭스(68)가 아니라 시스템
+    # 요구(SyRS)에 조인해야 정직하다. SW 평탄화 조인은 시스템-only 요구를 침묵 탈락시켜 밴드가
+    # 6/68로 과소 표시됐다(실측 근본원인). syrs_path 제공 시 원본 Sy* 참조를 SyRS 집합에 조인해
+    # 참 커버리지를 병행 표면화(기존 SW 필드 불변 = 하위호환).
+    syrs_path = str(body.get("syrs_path", "")).strip()
+    if syrs_path:
+        enforce_resolver_access(syrs_path)  # C3: 2차 대칭 (미들웨어 1차 뒤 방어심층)
+        try:
+            if resolver.exists(syrs_path):
+                syrs = _load_syrs_req_set(syrs_path, resolver)
+                joined = sorted(sys_refs & syrs)
+                _ifc_pfx = ("SYEIF_", "SYEI_")  # 시스템 인터페이스 요구
+                ifc_total = sorted(x for x in syrs if x.startswith(_ifc_pfx))
+                ifc_cov = [x for x in joined if x.startswith(_ifc_pfx)]
+                result["system_basis"] = {
+                    "syrs_total": len(syrs),
+                    "refs_total": len(sys_refs),
+                    "joined": len(joined),
+                    "joined_ids": joined,
+                    "interface_total": len(ifc_total),
+                    "interface_covered": len(ifc_cov),
+                    "interface_ids": ifc_cov,
+                    "interface_missing": [x for x in ifc_total if x not in ifc_cov],
+                    "unmatched": sorted(sys_refs - syrs),
+                }
+        except Exception as exc:  # noqa: BLE001 — 진단 optional: docx 손상 등 실패해도 hsis_pairs(주 산출물) 보존. type만 노출(경로 누설 차단)
+            result["system_basis_error"] = f"SyRS 처리 실패({type(exc).__name__})"
+    return result
 
 
 # 열 스캔 상한 — 폭주 방지 가드이자 `max_column`이 None일 때(openpyxl read_only

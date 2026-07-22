@@ -98,7 +98,7 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
 _CLOUDIUM_PATH_KEYS = frozenset({
     "path", "file_path", "doc_path", "document_path", "target",
     "uds_path", "sts_path", "suts_path", "sits_path",
-    "srs_path", "sds_path",
+    "srs_path", "sds_path", "syrs_path",
     "template_path", "ai_example_path", "ai_examples_path",
     "source_root", "source_dir", "report_dir", "cache_root",
     "folder", "root", "status_path",

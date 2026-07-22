@@ -221,10 +221,27 @@ export default function SrsSdsSection({ job, analysisResult }) {
         try {
           const hsisData = await post('/api/jenkins/hsis/extract-mapping', {
             hsis_path: docPaths.hsis || activeDocs.hsis,
+            syrs_path: docPaths.syrs || activeDocs.syrs || '',  // 시스템 기준(SyRS) 커버리지 계산용
           });
           hsisPairs = hsisData?.hsis_pairs || [];
           if (hsisPairs.length > 0) {
             dataSources.push(`HSIS: ${hsisPairs.length}개 인터페이스 매핑`);
+          }
+          // 시스템 기준(SyRS) 정직 커버리지 — HSIS는 시스템레벨 문서라 SW 매트릭스(68)엔 시스템-only
+          // 요구가 탈락해 밴드가 낮게(6/68) 보인다. SyRS 기준 참 커버리지를 표면화(오분모 교정).
+          const sb = hsisData?.system_basis;
+          if (sb) {
+            // 밴드칩(SW분모 6/68·매트릭스 캐시)과 별개 — 이 값은 시스템기준(SyRS분모·live·raw ID 스캔)
+            dataSources.push(`HSIS(시스템기준 SyRS·raw): 참조 ${sb.joined}/${sb.refs_total} 조인 · 인터페이스 ${sb.interface_covered}/${sb.interface_total} [밴드칩은 SW분모]`);
+            if (Array.isArray(sb.interface_missing) && sb.interface_missing.length > 0) {
+              stepWarnings.push(`HSIS: 시스템 인터페이스요구 ${sb.interface_missing.length}개 미커버(${sb.interface_missing.join(', ')}) — HSIS 문서 갱신 확인`);
+            }
+            if (Array.isArray(sb.unmatched) && sb.unmatched.length > 0) {
+              stepWarnings.push(`HSIS: SyRS에도 없는 참조 ${sb.unmatched.length}개(${sb.unmatched.slice(0, 5).join(', ')}) — 문서 버전 확인`);
+            }
+          } else if (hsisData?.system_basis_error) {
+            // fail-loud: SyRS 처리 실패(포맷/접근)를 침묵하지 않음
+            stepWarnings.push(`HSIS 시스템기준 커버리지 계산 실패: ${hsisData.system_basis_error} (SyRS 경로/포맷 확인)`);
           }
         } catch (e) {
           stepWarnings.push(`HSIS 매핑 추출 실패: ${e.message}`);
