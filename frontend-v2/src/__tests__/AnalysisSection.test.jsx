@@ -2,7 +2,7 @@
  * AnalysisSection 컴포넌트 단위 테스트
  *
  * 요구사항 추적: SRS-SECTION-ANALYSIS
- * - 커버리지가 유닛테스트/통합테스트 그룹으로 통합('커버리지 상세' 서브섹션, 구 '코드 커버리지' 패널 제거)
+ * - 커버리지를 유닛테스트(UT)/통합테스트(IT) 패널로 분리(UT+IT 합산 '커버리지 상세'·빌드 Line/Branch 카드 제거)
  * - 유닛/통합테스트 그룹의 SwUTCV/SwITCV 정합성 검증(Coverage ↔ SUTR/SITR)
  * - "VectorCAST 테스트" 패널 렌더링
  * - 정적분석 "코드 규모 (lizard)" 지표 렌더링 (구 '코드 메트릭' 패널 이동)
@@ -78,13 +78,15 @@ describe('AnalysisSection', () => {
 
   // ── 패널 렌더링 ───────────────────────────────────────────────────
 
-  it('유닛테스트 패널에 ‘커버리지 상세’ 섹션을 렌더링한다(구 ‘코드 커버리지’ 패널 통합)', () => {
-    // Arrange & Act — 표준 '코드 커버리지' 패널은 제거되고 커버리지가 유닛테스트 그룹으로 통합됨.
+  it('구 ‘코드 커버리지’ 패널과 UT+IT 합산 ‘커버리지 상세’를 제거하고 UT/IT 패널로 분리한다', () => {
+    // Arrange & Act — 별도 '코드 커버리지' 패널·유닛테스트 안에 섞이던 'UT+IT 합산 커버리지 상세'를 모두 제거.
     render(<AnalysisSection job={makeJob()} analysisResult={makeAnalysisResult()} />);
 
-    // Assert: 별도 '코드 커버리지' 패널 없음 + 유닛테스트 그룹 내 '커버리지 상세' 서브섹션 존재.
+    // Assert: 합산 서브섹션 제거 → 커버리지는 유닛/통합테스트 패널로 각각 분리(패널 자체는 항상 존재).
     expect(screen.queryByText('코드 커버리지')).toBeNull();
-    expect(screen.getByText(/커버리지 상세/)).toBeInTheDocument();
+    expect(screen.queryByText(/커버리지 상세/)).toBeNull();
+    expect(screen.getByText('유닛테스트 (Unit Test · VectorCAST UT)')).toBeInTheDocument();
+    expect(screen.getByText('통합테스트 (Integration Test · VectorCAST IT)')).toBeInTheDocument();
   });
 
   it('유닛테스트·통합테스트 패널 제목을 렌더링한다(VectorCAST 분리)', () => {
@@ -112,7 +114,7 @@ describe('AnalysisSection', () => {
     // Assert — lizard 코드 규모 카드가 정적분석 섹션에 표시(소스파일/함수수/NLOC)
     expect(screen.getByText(/코드 규모 \(lizard\)/)).toBeInTheDocument();
     expect(screen.getByText('소스 파일')).toBeInTheDocument();
-    expect(screen.getByText('함수 수 (lizard)')).toBeInTheDocument();
+    expect(screen.getByText('함수 수 (lizard 정적계수)')).toBeInTheDocument();
     expect(screen.getByText('NLOC')).toBeInTheDocument();
     expect(screen.getByText('24,300')).toBeInTheDocument();  // nloc toLocaleString
   });
@@ -127,22 +129,20 @@ describe('AnalysisSection', () => {
 
   // ── 커버리지 데이터 표시 ──────────────────────────────────────────
 
-  it('line_rate가 있을 때 Line Coverage 카드를 표시한다', () => {
-    // Arrange & Act
+  it('빌드 전체 Line Coverage 카드는 테스트 결과 탭에서 제거됐다(개요 탭과 중복)', () => {
+    // Arrange & Act — 빌드 전체 Line/Branch Coverage는 개요(ResultPanel)에만 두고, 여기선 UT/IT 커버리지로 분리.
     render(<AnalysisSection job={makeJob()} analysisResult={makeAnalysisResult()} />);
 
-    // Assert: Line Coverage 카드 표시 (구 코드 메트릭 '라인 커버리지' 중복 카드는 제거됨)
-    expect(screen.getByText('Line Coverage')).toBeInTheDocument();
-    expect(screen.getAllByText('85%').length).toBeGreaterThan(0);
+    // Assert: 빌드 Line Coverage 카드 없음(개요 탭으로 이동).
+    expect(screen.queryByText('Line Coverage')).toBeNull();
   });
 
-  it('branch_rate가 있을 때 Branch Coverage 카드를 표시한다', () => {
+  it('빌드 전체 Branch Coverage 카드도 테스트 결과 탭에서 표시하지 않는다(개요 탭으로 이동)', () => {
     // Arrange & Act
     render(<AnalysisSection job={makeJob()} analysisResult={makeAnalysisResult()} />);
 
     // Assert
-    expect(screen.getByText('Branch Coverage')).toBeInTheDocument();
-    expect(screen.getByText('72%')).toBeInTheDocument();
+    expect(screen.queryByText('Branch Coverage')).toBeNull();
   });
 
   // ── 빈 데이터 처리 ────────────────────────────────────────────────
@@ -241,7 +241,7 @@ describe('AnalysisSection', () => {
     }
   });
 
-  it('SCM 커버리지가 로드되면 코드 커버리지 패널에 구문/분기/MC-DC %를 표시한다', async () => {
+  it('SCM 커버리지(단일 UT 폴더)가 로드되면 유닛테스트 패널에 UT 구문/분기/MC-DC %를 표시한다', async () => {
     vi.useFakeTimers();
     try {
       const { post, api } = await import('../api.js');
@@ -249,7 +249,7 @@ describe('AnalysisSection', () => {
       api.mockResolvedValue({
         ok: true,
         job: { status: 'completed', result: { ok: true, source: 'cloudium', data: {
-          test_rows_count: 42, ut_reports: [], it_reports: [],
+          test_rows_count: 42, vcast_kind: 'UT', ut_reports: ['r1'], it_reports: [],
           coverage: {
             statement: { covered: 90, total: 100, rate: 0.9 },
             branch: { covered: 40, total: 50, rate: 0.8 },
@@ -269,10 +269,71 @@ describe('AnalysisSection', () => {
         await vi.advanceTimersByTimeAsync(3500);   // 폴링 1회(3s) → 완료 → setScmVcast 플러시
       });
 
-      expect(screen.getByText('구문(Statement)')).toBeInTheDocument();
+      // 단일 UT 폴더(vcast_kind='UT') → 유닛테스트 패널에 UT 커버리지 카드(구문/분기/MC-DC)
+      expect(screen.getByText('UT 구문(Statement)')).toBeInTheDocument();
       expect(screen.getByText('90%')).toBeInTheDocument();
-      // 'MC/DC'는 설명문(<b>MC/DC</b>)과 covCard 라벨 양쪽에 나오므로 getAllByText
-      expect(screen.getAllByText('MC/DC').length).toBeGreaterThan(0);
+      expect(screen.getAllByText('UT MC/DC').length).toBeGreaterThan(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('SCM summary_ut/summary_it가 있으면 UT/IT 통과·실패를 각 패널에 분리 표시한다(effVcast forward 회귀 가드)', async () => {
+    // effVcast 리터럴이 summary_ut/summary_it/test_rows_count_it를 다시 빠뜨리면 IT pass/fail 블록이
+    // 조용히 재소실되고 UT가 'UT+IT' 결합 라벨로 회귀 → 이 테스트가 그 침묵 회귀를 차단한다.
+    vi.useFakeTimers();
+    try {
+      const { post, api } = await import('../api.js');
+      post.mockResolvedValue({ ok: true, job_id: 'jsplit' });
+      api.mockResolvedValue({ ok: true, job: { status: 'completed', result: { ok: true, source: 'cloudium', data: {
+        test_rows_count: 20, test_rows_count_ut: 12, test_rows_count_it: 8,
+        ut_reports: ['u'], it_reports: ['i'],
+        summary: { total: 20, passed: 18, failed: 2, skipped: 0, unknown: 0, pass_rate: 0.9 },
+        summary_ut: { total: 12, passed: 11, failed: 1, skipped: 0, unknown: 0, pass_rate: 0.9167 },
+        summary_it: { total: 8, passed: 7, failed: 1, skipped: 0, unknown: 0, pass_rate: 0.875 },
+      } } } });
+      const result = makeAnalysisResult({ matchedScm: { id: 's', name: 'S', linked_docs: { vectorcast: ['U:/vc'] } } });
+      render(<AnalysisSection job={makeJob()} analysisResult={result} />);
+      await act(async () => {
+        fireEvent.click(screen.getByText('SCM 경로에서 불러오기'));
+        await vi.advanceTimersByTimeAsync(3500);
+      });
+      // UT 패널: UT 전용 통과 라벨(결합 'UT+IT' 아님) / IT 패널: IT 전용 통과·테스트케이스 블록 부활
+      expect(screen.getByText('통과 (UT)')).toBeInTheDocument();
+      expect(screen.getByText('통과 (IT)')).toBeInTheDocument();
+      expect(screen.getByText('테스트 케이스 (IT)')).toBeInTheDocument();
+      expect(screen.queryByText('통과 (UT+IT)')).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('다중 폴더 병합 coverage_ut/coverage_it를 UT/IT 패널에 분리 표시하고 합산은 표시하지 않는다', async () => {
+    // vcast_kind 없는 병합 payload(coverage_ut/coverage_it 분리 + coverage 합산 동봉) 라우팅 가드.
+    vi.useFakeTimers();
+    try {
+      const { post, api } = await import('../api.js');
+      post.mockResolvedValue({ ok: true, job_id: 'jmerge' });
+      api.mockResolvedValue({ ok: true, job: { status: 'completed', result: { ok: true, source: 'cloudium', data: {
+        test_rows_count: 30, ut_reports: ['u1', 'u2'], it_reports: ['i1'],
+        coverage: { statement: { covered: 100, total: 122, rate: 0.82 } },      // 합산 — 표시 안 함
+        coverage_ut: { statement: { covered: 60, total: 70, rate: 0.86 } },
+        coverage_it: { statement: { covered: 40, total: 52, rate: 0.77 } },
+      } } } });
+      const result = makeAnalysisResult({ matchedScm: { id: 's', name: 'S', linked_docs: { vectorcast: ['U:/a', 'U:/b'] } } });
+      render(<AnalysisSection job={makeJob()} analysisResult={result} />);
+      await act(async () => {
+        fireEvent.click(screen.getByText('SCM 경로에서 불러오기'));
+        await vi.advanceTimersByTimeAsync(3500);
+      });
+      // UT/IT 각 패널에 분리 커버리지 카드
+      expect(screen.getByText('UT 구문(Statement)')).toBeInTheDocument();
+      expect(screen.getByText('86%')).toBeInTheDocument();
+      expect(screen.getByText('IT 구문(Statement)')).toBeInTheDocument();
+      expect(screen.getByText('77%')).toBeInTheDocument();
+      // 합산(UT+IT) 카드는 표시 안 함 — 접두 없는 '구문(Statement)'·합산값(82%) 부재
+      expect(screen.queryByText('구문(Statement)')).toBeNull();
+      expect(screen.queryByText('82%')).toBeNull();
     } finally {
       vi.useRealTimers();
     }
@@ -507,7 +568,7 @@ describe('AnalysisSection', () => {
   });
 
   // ── 빌드 Line 0% 카드 숨김(VectorCAST 커버리지와 혼동 방지) ─────────
-  it('VectorCAST 커버리지가 있고 빌드 Line이 0%면 혼동되는 빌드 Line Coverage 카드를 숨긴다', async () => {
+  it('VectorCAST UT 커버리지가 있으면 표시하고 빌드 전체 Line Coverage 카드는 항상 제거한다', async () => {
     vi.useFakeTimers();
     try {
       const { post, api } = await import('../api.js');
@@ -515,7 +576,7 @@ describe('AnalysisSection', () => {
       api.mockResolvedValue({
         ok: true,
         job: { status: 'completed', result: { ok: true, source: 'cloudium', data: {
-          test_rows_count: 10, ut_reports: [], it_reports: [],
+          test_rows_count: 10, vcast_kind: 'UT', ut_reports: ['r1'], it_reports: [],
           coverage: { statement: { covered: 70, total: 100, rate: 0.7 }, branch: { covered: 60, total: 100, rate: 0.6 }, mcdc: { covered: 0, total: 0, rate: null } },
         } } },
       });
@@ -531,8 +592,8 @@ describe('AnalysisSection', () => {
         await vi.advanceTimersByTimeAsync(3500);
       });
 
-      // VectorCAST 구문(Statement)은 표시되고, 오해 소지의 빌드 'Line Coverage' 0% 카드는 숨김
-      expect(screen.getByText('구문(Statement)')).toBeInTheDocument();
+      // UT 커버리지(구문 70%)는 표시되고, 빌드 전체 'Line Coverage' 카드는 제거(개요 탭과 중복)
+      expect(screen.getByText('UT 구문(Statement)')).toBeInTheDocument();
       expect(screen.getByText('70%')).toBeInTheDocument();
       expect(screen.queryByText('Line Coverage')).toBeNull();
     } finally {

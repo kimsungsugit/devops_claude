@@ -39,6 +39,44 @@ function pctOf(cell) {
   return Math.round((typeof cell.rate === 'number' ? cell.rate : cell.covered / cell.total) * 100);
 }
 
+// entries[] → Map(unit → [{...entry, _kind}]) — 모듈(unit)별 함수 커버리지 드릴다운용.
+// UT/IT를 각각 넘겨 한 종류만 담는다(과거엔 UT+IT를 한 맵에 합쳐 유닛테스트 패널에 IT가 섞였다).
+function buildModuleMap(entries, kind) {
+  const m = new Map();
+  for (const e of (Array.isArray(entries) ? entries : [])) {
+    const unit = (e?.unit ?? '').trim();
+    if (!unit) continue;
+    if (!m.has(unit)) m.set(unit, []);
+    m.get(unit).push({ ...e, _kind: kind });
+  }
+  return m;
+}
+
+// build 모듈 목록(kpis.vectorcast.ut/it.modules) 우선, 없으면 entries를 unit별 구문/분기 집계로
+// 파생. 각 행에 함수 entries(드릴다운용)를 join하고 커버리지 낮은 순 정렬.
+function deriveCoverageModules(buildModules, fnMap) {
+  if (Array.isArray(buildModules) && buildModules.length > 0) {
+    return [...buildModules]
+      .map(m => ({ name: m.name, lineRate: m.line_rate, branchRate: m.branch_rate, functions: fnMap.get(m.name) || [] }))
+      .sort((a, b) => (a.lineRate ?? 101) - (b.lineRate ?? 101));
+  }
+  const out = [];
+  for (const [unit, fns] of fnMap.entries()) {
+    let sc = 0, st = 0, bc = 0, bt = 0;
+    for (const f of fns) {
+      if (f.statements?.total) { sc += f.statements.covered; st += f.statements.total; }
+      if (f.branches?.total) { bc += f.branches.covered; bt += f.branches.total; }
+    }
+    out.push({
+      name: unit,
+      lineRate: st ? Math.round((sc / st) * 1000) / 10 : null,
+      branchRate: bt ? Math.round((bc / bt) * 1000) / 10 : null,
+      functions: fns,
+    });
+  }
+  return out.sort((a, b) => (a.lineRate ?? 101) - (b.lineRate ?? 101));
+}
+
 // 모듈 커버리지 행 — 클릭 시 그 모듈(unit) 소속 함수별 커버리지로 드릴다운. 함수 entries는 scmVcast 로드 시 채워짐.
 // UT 함수는 구문/분기, IT 함수는 함수콜 셀을 가지므로 pctOf로 null이면 자동 생략(셀 종류가 출처/시험에 따라 다름).
 function ModuleCovRow({ name, lineRate, branchRate, functions }) {
@@ -738,7 +776,6 @@ export default function AnalysisSection({ job, analysisResult }) {
 
   const rd = analysisResult?.reportData;
   const kpis = rd?.kpis || {};
-  const cov = kpis.coverage || {};
   const prqa = kpis.prqa || {};
   const hmr = prqa.hmr_stats || {};
   const cm = kpis.code_metrics || {};
@@ -753,9 +790,13 @@ export default function AnalysisSection({ job, analysisResult }) {
   const effVcast = scmVcast?.data
     ? {
         test_rows_count: scmVcast.data.test_rows_count,
+        test_rows_count_ut: scmVcast.data.test_rows_count_ut ?? null,   // UT/IT 분리 TC 수 (P2)
+        test_rows_count_it: scmVcast.data.test_rows_count_it ?? null,
         ut_reports: scmVcast.data.ut_reports || [],
         it_reports: scmVcast.data.it_reports || [],
-        summary: scmVcast.data.summary || null,      // 통과/실패/pass_rate (P2)
+        summary: scmVcast.data.summary || null,      // 통과/실패/pass_rate (P2, 결합)
+        summary_ut: scmVcast.data.summary_ut || null,   // UT 전용 합부(backend _split_vcast_summary_by_source)
+        summary_it: scmVcast.data.summary_it || null,   // IT 전용 합부 — 없으면 IT pass/fail 블록이 안 뜬다
         failures: scmVcast.data.failures || [],       // 실패 testcase 목록 (P2)
         _source: scmVcast.source || 'cloudium',
       }
@@ -775,12 +816,13 @@ export default function AnalysisSection({ job, analysisResult }) {
   const utFailures = _allFailures.filter(f => String(f.source || '').toUpperCase() !== 'IT');
   const itFailures = _allFailures.filter(f => String(f.source || '').toUpperCase() === 'IT');
   const utCov = vc.ut || {};
-  const modules = utCov.modules || [];
-  // SCM 경로에서 불러온 VectorCAST 커버리지(구문/분기/MC-DC) — 빌드에 커버리지가 없을 때 표시.
-  const scmCov = scmVcast?.data?.coverage || null;        // 전체(UT+IT)
-  const scmCovUt = scmVcast?.data?.coverage_ut || null;
-  const scmCovIt = scmVcast?.data?.coverage_it || null;
-  const scmCovHas = !!(scmCov && (scmCov.statement?.total || scmCov.branch?.total || scmCov.mcdc?.total));
+  // SCM 경로 VectorCAST 커버리지(구문/분기/MC-DC) — UT/IT를 각 패널에 분리 귀속(합산 표시 안 함).
+  // 단일 폴더는 coverage 하나가 그 폴더의 한 종류라 vcast_kind로 UT/IT를 안다. 다중 폴더 병합은
+  // coverage_ut/coverage_it가 이미 분리돼 있다(backend jenkins.py _merge_vectorcast_payloads).
+  const _scmData = scmVcast?.data || null;
+  const _scmKind = String(_scmData?.vcast_kind || '').toUpperCase();
+  const scmCovUt = _scmData?.coverage_ut || (_scmKind === 'UT' ? _scmData?.coverage : null) || null;
+  const scmCovIt = _scmData?.coverage_it || (_scmKind === 'IT' ? _scmData?.coverage : null) || null;
   const qualityCfg = (() => {
     try { return JSON.parse(localStorage.getItem('devops_v2_quality') || '{}'); } catch (_) { return {}; }
   })();
@@ -789,21 +831,9 @@ export default function AnalysisSection({ job, analysisResult }) {
   if (!Number.isFinite(threshold) || threshold < 1) threshold = 15;
   threshold = Math.min(threshold, 200);
 
-  // Coverage as number
-  const covPct = typeof rd?.coverage === 'number' ? rd.coverage
-    : (cov.line_rate != null ? Math.round(cov.line_rate * 100) : null);
-  const brPct = cov.branch_rate != null ? Math.round(cov.branch_rate * 100) : null;
-  // VectorCAST SCM 커버리지(구문/분기/MC-DC)가 표시될 때, 빌드 산출물 기준 Line/Branch가 0%
-  // (이 프로젝트는 빌드 라인커버리지 미계측 → 항상 0)이면 그 카드를 숨긴다. 'Line 0%'가
-  // 'Statement 70%' 옆에 같이 보여 라인커버리지가 0인 것처럼 오인되는 것을 막는다. 빌드에 실제
-  // 커버리지가 있는 프로젝트(0이 아님)는 그대로 표시한다.
-  const showBuildLine = covPct != null && !(scmCovHas && covPct === 0);
-  const showBuildBranch = brPct != null && !(scmCovHas && brPct === 0);
-  // 빌드 산출물에 실제 커버리지가 있는지 — line_rate=0.0(데이터 없음)을 '0% 미검증'으로 오인하지
-  // 않도록. 이 프로젝트는 일반 커버리지가 아니라 VectorCAST UT/IT 커버리지를 쓰며 그 데이터는
-  // cloudium SCM 로그에 있다(빌드엔 미동기화 → covPct=0).
-  const hasAnyCoverage = (covPct != null && covPct > 0) || (brPct != null && brPct > 0)
-    || utCov.line_covered != null || utCov.branch_covered != null || modules.length > 0 || scmCovHas;
+  // 빌드 전체 Line/Branch 커버리지 카드는 제거됨 — 개요(ResultPanel) 'Line/Branch Cov'와 중복이고
+  // 이 프로젝트는 빌드 라인커버가 0%라 무의미했다. UT/IT 커버리지는 각 패널의 scmCovUt/scmCovIt·
+  // utCov/itCov로만 표시한다.
 
   // Complexity table — 빌드 complexity.csv가 없으면 SCM VectorCAST 폴더에서 추출한
   // 함수별 복잡도(complexity_rows)로 폴백(async VectorCAST 로드 시 자동 표시).
@@ -912,47 +942,20 @@ export default function AnalysisSection({ job, analysisResult }) {
   // 함수레벨 상세 로드 가능 — 빌드에 vcast 있거나(캐시) SCM 경로 등록됨. 둘 중 하나면 async 로드 호출 가능.
   const canLoadFnLevel = buildHasVcast || scmVcastPaths.length > 0;
 
-  // 모듈(unit)별 함수 entries 그룹 — 커버리지 드릴다운용. UT/IT 합쳐 unit 키로 묶고, 같은 함수는 UT/IT 각각 행.
-  const moduleFnMap = useMemo(() => {
-    const vs = scmVcast?.data?.vcast_summary || {};
-    const ue = Array.isArray(vs.ut_metrics?.entries) ? vs.ut_metrics.entries : [];
-    const ie = Array.isArray(vs.it_metrics?.entries) ? vs.it_metrics.entries : [];
-    const m = new Map();
-    const add = (e, kind) => {
-      const unit = (e?.unit ?? '').trim();
-      if (!unit) return;
-      if (!m.has(unit)) m.set(unit, []);
-      m.get(unit).push({ ...e, _kind: kind });
-    };
-    ue.forEach(e => add(e, 'UT'));
-    ie.forEach(e => add(e, 'IT'));
-    return m;
-  }, [scmVcast]);
+  // 모듈(unit)별 함수 entries — UT/IT를 분리해 각 패널이 자기 종류만 표시(모듈 드릴다운용).
+  const moduleFnMapUt = useMemo(
+    () => buildModuleMap(scmVcast?.data?.vcast_summary?.ut_metrics?.entries, 'UT'), [scmVcast]);
+  const moduleFnMapIt = useMemo(
+    () => buildModuleMap(scmVcast?.data?.vcast_summary?.it_metrics?.entries, 'IT'), [scmVcast]);
 
-  // 커버리지 모듈 행 — 빌드 산출물 모듈(kpis.vectorcast.ut.modules) 우선, 없으면(SCM-only) entries를
-  // unit별 구문/분기 집계로 파생. 각 행에 함수 entries(드릴다운용)를 join.
-  const coverageModules = useMemo(() => {
-    if (modules.length > 0) {
-      return [...modules]
-        .map(m => ({ name: m.name, lineRate: m.line_rate, branchRate: m.branch_rate, functions: moduleFnMap.get(m.name) || [] }))
-        .sort((a, b) => (a.lineRate ?? 101) - (b.lineRate ?? 101));
-    }
-    const out = [];
-    for (const [unit, fns] of moduleFnMap.entries()) {
-      let sc = 0, st = 0, bc = 0, bt = 0;
-      for (const f of fns) {
-        if (f.statements?.total) { sc += f.statements.covered; st += f.statements.total; }
-        if (f.branches?.total) { bc += f.branches.covered; bt += f.branches.total; }
-      }
-      out.push({
-        name: unit,
-        lineRate: st ? Math.round((sc / st) * 1000) / 10 : null,
-        branchRate: bt ? Math.round((bc / bt) * 1000) / 10 : null,
-        functions: fns,
-      });
-    }
-    return out.sort((a, b) => (a.lineRate ?? 101) - (b.lineRate ?? 101));
-  }, [modules, moduleFnMap]);
+  // 커버리지 모듈 행 — 빌드 산출물 모듈(kpis.vectorcast.ut/it.modules) 우선, 없으면(SCM-only) entries를
+  // unit별 집계로 파생. UT/IT 각각 산출해 해당 패널에만 표시(과거 UT+IT 합산 표는 제거).
+  const coverageModulesUt = useMemo(
+    () => deriveCoverageModules(analysisResult?.reportData?.kpis?.vectorcast?.ut?.modules, moduleFnMapUt),
+    [analysisResult, moduleFnMapUt]);
+  const coverageModulesIt = useMemo(
+    () => deriveCoverageModules(analysisResult?.reportData?.kpis?.vectorcast?.it?.modules, moduleFnMapIt),
+    [analysisResult, moduleFnMapIt]);
 
   return (
     <div>
@@ -992,7 +995,7 @@ export default function AnalysisSection({ job, analysisResult }) {
             <div className="text-sm" style={{ fontWeight: 600, marginBottom: 4 }}>📏 코드 규모 (lizard) — 파일·함수·라인</div>
             <div className="stats-row" style={{ marginBottom: 6 }}>
               {cm.code_files != null && <div className="stat-card"><div className="stat-value">{cm.code_files}</div><div className="stat-label">소스 파일</div></div>}
-              {cm.functions != null && <div className="stat-card"><div className="stat-value">{cm.functions}</div><div className="stat-label">함수 수 (lizard)</div></div>}
+              {cm.functions != null && <div className="stat-card"><div className="stat-value">{cm.functions}</div><div className="stat-label">함수 수 (lizard 정적계수)</div></div>}
               {cm.nloc != null && <div className="stat-card"><div className="stat-value">{cm.nloc.toLocaleString()}</div><div className="stat-label">NLOC</div></div>}
             </div>
           </div>
@@ -1106,7 +1109,7 @@ export default function AnalysisSection({ job, analysisResult }) {
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 8 }}>
                 <div style={{ textAlign: 'center' }}>
                   <div style={{ fontSize: 16, fontWeight: 700 }}>{hmr.functions_total}</div>
-                  <div style={{ fontSize: 9, color: 'var(--text-muted)' }}>분석 함수</div>
+                  <div style={{ fontSize: 9, color: 'var(--text-muted)' }}>분석 함수 (QAC HIS)</div>
                 </div>
                 <div style={{ textAlign: 'center' }}>
                   <div style={{ fontSize: 16, fontWeight: 700, color: hmr.vg_max > threshold ? 'var(--color-danger)' : 'var(--color-success)' }}>{hmr.vg_max}</div>
@@ -1239,7 +1242,7 @@ export default function AnalysisSection({ job, analysisResult }) {
         ))}
         {utEntries.length > 0 && (
           <div className="text-sm text-muted" style={{ marginTop: 6 }}>
-            UT 함수 {utEntries.length.toLocaleString()}개 — 함수별 커버리지는 아래 ‘커버리지 상세’의 모듈 행을 펼쳐 확인하세요.
+            UT 함수 {utEntries.length.toLocaleString()}개 — 함수별 커버리지는 아래 ‘모듈별 커버리지 (UT)’ 표의 모듈 행을 펼쳐 확인하세요.
           </div>
         )}
         {utSummary && (utSummary.total || 0) > 0 && (
@@ -1295,69 +1298,29 @@ export default function AnalysisSection({ job, analysisResult }) {
             {utFailures.length > 100 && <div className="text-muted text-sm" style={{ padding: 6, textAlign: 'center' }}>{utFailures.length - 100}건 더 있음</div>}
           </details>
         )}
-        {/* ── 커버리지 상세 (모듈·함수별 — 구 ‘코드 커버리지’ 패널에서 이동: UT 구문/분기 + IT 함수콜 합산) ── */}
-        {hasAnyCoverage && (
+        {/* ── UT 모듈별 커버리지 (단위시험 함수만 — 과거 'UT+IT 합산 커버리지 상세'를 UT 전용으로 분리) ── */}
+        {coverageModulesUt.length > 0 && (
           <div style={{ marginTop: 12, paddingTop: 10, borderTop: '1px solid var(--border)' }}>
-            <div className="text-sm" style={{ fontWeight: 600, marginBottom: 4 }}>📊 커버리지 상세 (모듈·함수별)</div>
+            <div className="text-sm" style={{ fontWeight: 600, marginBottom: 4 }}>📊 모듈별 커버리지 (UT)</div>
             <div className="text-sm text-muted" style={{ marginBottom: 8, lineHeight: 1.5 }}>
               <b>구문</b>=실행 문장, <b>분기</b>=if·switch 경로, <b>MC/DC</b>=조건 조합(ASIL C/D 필수).{' '}
-              모듈 표의 <b>행을 클릭</b>하면 함수별 커버리지(UT 구문/분기 · IT 함수콜)로 펼쳐집니다.
+              모듈 표의 <b>행을 클릭</b>하면 단위시험(UT) 함수별 커버리지로 펼쳐집니다.
             </div>
-            {scmCovHas && (
-              <div style={{ marginBottom: 8 }}>
-                <div className="text-sm text-muted" style={{ marginBottom: 4 }}>VectorCAST 커버리지 (출처: SCM 경로 — 단위/통합 합산)</div>
-                <div className="stats-row">
-                  {covCard('구문(Statement)', scmCov.statement)}
-                  {covCard('분기(Branch)', scmCov.branch)}
-                  {covCard('MC/DC', scmCov.mcdc)}
-                </div>
+            <details style={{ marginTop: 8 }} open>
+              <summary style={{ cursor: 'pointer', fontSize: 12, fontWeight: 600 }}>
+                모듈별 커버리지 ({coverageModulesUt.length}개){fnLevelLoaded ? ' — 행 클릭 시 함수별 펼침' : ' (함수 드릴다운은 함수레벨 상세 로드 후)'}
+              </summary>
+              <div style={{ maxHeight: 360, overflowY: 'auto', marginTop: 6 }}>
+                <table className="impact-table" style={{ fontSize: 10 }}>
+                  <thead><tr><th>모듈</th><th>Line Rate</th><th>Branch Rate</th><th></th></tr></thead>
+                  <tbody>
+                    {coverageModulesUt.map((m) => (
+                      <ModuleCovRow key={m.name} name={m.name} lineRate={m.lineRate} branchRate={m.branchRate} functions={m.functions} />
+                    ))}
+                  </tbody>
+                </table>
               </div>
-            )}
-            {(showBuildLine || showBuildBranch || utCov.line_covered != null || utCov.branch_covered != null) && (
-              <div className="stats-row">
-                {showBuildLine && (
-                  <div className="stat-card" style={{ borderLeft: `3px solid ${covPct >= 80 ? 'var(--color-success)' : 'var(--color-warning)'}` }}>
-                    <div className="stat-value" style={{ color: covPct >= 80 ? 'var(--color-success)' : 'var(--color-warning)' }}>{covPct}%</div>
-                    <div className="stat-label">Line Coverage</div>
-                  </div>
-                )}
-                {showBuildBranch && (
-                  <div className="stat-card" style={{ borderLeft: `3px solid ${brPct >= 80 ? 'var(--color-success)' : 'var(--color-warning)'}` }}>
-                    <div className="stat-value" style={{ color: brPct >= 80 ? 'var(--color-success)' : 'var(--color-warning)' }}>{brPct}%</div>
-                    <div className="stat-label">Branch Coverage</div>
-                  </div>
-                )}
-                {utCov.line_covered != null && (
-                  <div className="stat-card">
-                    <div className="stat-value">{utCov.line_covered?.toLocaleString()}<span style={{ fontSize: 11, fontWeight: 400 }}>/{utCov.line_total?.toLocaleString()}</span></div>
-                    <div className="stat-label">UT Statement</div>
-                  </div>
-                )}
-                {utCov.branch_covered != null && (
-                  <div className="stat-card">
-                    <div className="stat-value">{utCov.branch_covered?.toLocaleString()}<span style={{ fontSize: 11, fontWeight: 400 }}>/{utCov.branch_total?.toLocaleString()}</span></div>
-                    <div className="stat-label">UT Branch</div>
-                  </div>
-                )}
-              </div>
-            )}
-            {coverageModules.length > 0 && (
-              <details style={{ marginTop: 8 }} open>
-                <summary style={{ cursor: 'pointer', fontSize: 12, fontWeight: 600 }}>
-                  모듈별 커버리지 ({coverageModules.length}개){fnLevelLoaded ? ' — 행 클릭 시 함수별 펼침' : ' (함수 드릴다운은 함수레벨 상세 로드 후)'}
-                </summary>
-                <div style={{ maxHeight: 360, overflowY: 'auto', marginTop: 6 }}>
-                  <table className="impact-table" style={{ fontSize: 10 }}>
-                    <thead><tr><th>모듈</th><th>Line Rate</th><th>Branch Rate</th><th></th></tr></thead>
-                    <tbody>
-                      {coverageModules.map((m) => (
-                        <ModuleCovRow key={m.name} name={m.name} lineRate={m.lineRate} branchRate={m.branchRate} functions={m.functions} />
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </details>
-            )}
+            </details>
           </div>
         )}
         {/* ── SwUTCV 정합성 검증 (Coverage Report ↔ SUTR) ── */}
@@ -1461,6 +1424,13 @@ export default function AnalysisSection({ job, analysisResult }) {
             )}
           </div>
         )}
+        {/* IT 결과 전부 미분류(coverage-only) — '통과 0/실패 0'을 실패로 오인 방지(UT 패널 안내와 대칭) */}
+        {sumIt && (sumIt.total || 0) > 0 && ((sumIt.passed ?? 0) + (sumIt.failed ?? 0) === 0) && (
+          <div className="text-sm text-muted" style={{ marginTop: 8, padding: 8, background: 'var(--bg)', borderRadius: 6, lineHeight: 1.55 }}>
+            이 통합시험 데이터는 <b>커버리지 기준</b>(함수콜·구문/분기)이라 개별 시험 합부(pass/fail)가 없습니다 —
+            총 <b>{(sumIt.total ?? 0).toLocaleString()}</b>건이 결과 미분류입니다. 개별 시험 합부는 SCM의 VectorCAST 시험 로그(SITR)에 있습니다.
+          </div>
+        )}
         {scmCovIt && (scmCovIt.statement?.total || scmCovIt.branch?.total || scmCovIt.mcdc?.total) ? (
           <div className="stats-row" style={{ marginTop: 8 }}>
             {covCard('IT 구문(Statement)', scmCovIt.statement)}
@@ -1490,9 +1460,33 @@ export default function AnalysisSection({ job, analysisResult }) {
             {itFailures.length > 100 && <div className="text-muted text-sm" style={{ padding: 6, textAlign: 'center' }}>{itFailures.length - 100}건 더 있음</div>}
           </details>
         )}
-        {itEntries.length > 0 && (
+        {/* ── IT 모듈별 커버리지 (통합시험 함수만 — 함수콜 중심 드릴다운) ── */}
+        {coverageModulesIt.length > 0 && (
+          <div style={{ marginTop: 12, paddingTop: 10, borderTop: '1px solid var(--border)' }}>
+            <div className="text-sm" style={{ fontWeight: 600, marginBottom: 4 }}>📊 모듈별 커버리지 (IT)</div>
+            <div className="text-sm text-muted" style={{ marginBottom: 8, lineHeight: 1.5 }}>
+              통합시험(IT)은 <b>함수 호출(Function Call)</b> 중심입니다. 모듈 표의 <b>행을 클릭</b>하면 IT 함수별 함수콜·커버리지로 펼쳐집니다.
+            </div>
+            <details style={{ marginTop: 8 }} open>
+              <summary style={{ cursor: 'pointer', fontSize: 12, fontWeight: 600 }}>
+                모듈별 커버리지 ({coverageModulesIt.length}개){fnLevelLoaded ? ' — 행 클릭 시 함수별 펼침' : ' (함수 드릴다운은 함수레벨 상세 로드 후)'}
+              </summary>
+              <div style={{ maxHeight: 360, overflowY: 'auto', marginTop: 6 }}>
+                <table className="impact-table" style={{ fontSize: 10 }}>
+                  <thead><tr><th>모듈</th><th>Line Rate</th><th>Branch Rate</th><th></th></tr></thead>
+                  <tbody>
+                    {coverageModulesIt.map((m) => (
+                      <ModuleCovRow key={m.name} name={m.name} lineRate={m.lineRate} branchRate={m.branchRate} functions={m.functions} />
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </details>
+          </div>
+        )}
+        {itEntries.length > 0 && coverageModulesIt.length === 0 && (
           <div className="text-sm text-muted" style={{ marginTop: 6 }}>
-            IT 함수 {itEntries.length.toLocaleString()}개 — 함수별 함수콜은 유닛테스트 패널의 ‘커버리지 상세’ 모듈 표에서 행을 펼쳐 확인하세요.
+            IT 함수 {itEntries.length.toLocaleString()}개 — 모듈(unit) 정보가 없어 표로 묶지 못했습니다.
           </div>
         )}
         {!fnLevelLoaded && canLoadFnLevel && (
