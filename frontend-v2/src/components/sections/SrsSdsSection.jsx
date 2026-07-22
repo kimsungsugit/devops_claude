@@ -244,6 +244,7 @@ export default function SrsSdsSection({ job, analysisResult }) {
         setLoadProgress('STS 추적성 추출 중...');
         try {
           const stsData = await post('/api/jenkins/sts/extract-traceability', { path: activeDocs.sts, doc_type: 'sts' });
+          if (stsData?.warning) stepWarnings.push(`STS: ${stsData.warning}`);  // 오태깅 검증(H3) — 조용한 밴드 오태깅을 fail-loud로
           if (stsData?.vcast_rows?.length) {
             for (const row of stsData.vcast_rows) {
               vcastRows.push({ ...row, source: row.source || 'STS', confidence: 'exact' });
@@ -261,7 +262,8 @@ export default function SrsSdsSection({ job, analysisResult }) {
       if (activeDocs.suts) {
         setLoadProgress('SUTS 추적성 추출 중...');
         try {
-          const sutsData = await post('/api/jenkins/sts/extract-traceability', { path: activeDocs.suts, doc_type: 'suts' });
+          const sutsData = await post('/api/jenkins/suts/extract-traceability', { path: activeDocs.suts });  // SUTS 전용 파서(요구=SwUFn 함수ID, unit-bridge)
+          if (sutsData?.warning) stepWarnings.push(`SUTS: ${sutsData.warning}`);  // 오태깅 검증(H3)
           if (sutsData?.vcast_rows?.length) {
             for (const row of sutsData.vcast_rows) {
               vcastRows.push({ ...row, source: row.source || 'SUTS', confidence: 'exact' });

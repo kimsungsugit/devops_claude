@@ -892,8 +892,8 @@ describe('ImpactGuideSection', () => {
   it('SUTS 조인: SUTS unit 원본케이스와 소문자 함수명이 정규화되어 조인된다', async () => {
     const { post } = await import('../api.js');
     post.mockImplementation((url) => {
-      if (url === '/api/jenkins/sts/extract-traceability') {
-        // suts 경로 호출 → unit은 SUTS 문서 원본 케이스(S_MotorSpd), 함수는 소문자(s_motorspd)
+      if (url === '/api/jenkins/suts/extract-traceability') {
+        // suts 전용 엔드포인트 → unit은 SUTS 문서 원본 케이스(S_MotorSpd), 함수는 소문자(s_motorspd)
         return Promise.resolve({ vcast_rows: [{ unit: 'S_MotorSpd', testcase: 'SUTS_01' }] });
       }
       return Promise.resolve({ ok: false }); // ai-guide skip → 함수별 상세 탭 기본
@@ -1204,8 +1204,8 @@ describe('ImpactGuideSection', () => {
   it('SITS: 요구가 SYSTEMTM이어도 testcase의 SwUFn을 SUTS unit으로 풀어 함수에 SITS TC를 연결한다', async () => {
     const { post } = await import('../api.js');
     post.mockImplementation((url) => {
-      // suts 경로(doc_type suts) — SwUFn을 품은 SUTS TC로 SwUFn→함수명 맵 구성
-      if (url === '/api/jenkins/sts/extract-traceability') {
+      // suts 경로 — 전용 /suts 엔드포인트가 SwUFn을 품은 SUTS TC로 SwUFn→함수명 맵 구성
+      if (url === '/api/jenkins/suts/extract-traceability') {
         return Promise.resolve({ vcast_rows: [{ unit: 's_hash', testcase: 'SwUTC_SwUFn_0127' }] });
       }
       // SITS TC 요구는 SYSTEMTM(SwRS 허브 미매칭)이지만 testcase에 SwUFn_0127 포함
@@ -1240,7 +1240,7 @@ describe('ImpactGuideSection', () => {
   it('SITS: testcase의 SwIFn(통합함수) 토큰도 SUTS unit으로 풀어 함수에 연결한다(Sw[UI]Fn parity)', async () => {
     const { post } = await import('../api.js');
     post.mockImplementation((url) => {
-      if (url === '/api/jenkins/sts/extract-traceability') {
+      if (url === '/api/jenkins/suts/extract-traceability') {
         return Promise.resolve({ vcast_rows: [{ unit: 's_integ_fn', testcase: 'SwUTC_SwIFn_0050' }] });
       }
       if (url === '/api/jenkins/sits/extract-traceability') {
@@ -1342,7 +1342,7 @@ describe('ImpactGuideSection', () => {
   it('회귀 SITS: 백엔드 체인 0이어도 SwUFn 파생 SITS TC를 회귀 패널에 표시하고 미집계 사유를 표기한다', async () => {
     const { post } = await import('../api.js');
     post.mockImplementation((url) => {
-      if (url === '/api/jenkins/sts/extract-traceability') {
+      if (url === '/api/jenkins/suts/extract-traceability') {
         return Promise.resolve({ vcast_rows: [{ unit: 's_hash', testcase: 'SwUTC_SwUFn_0127' }] });
       }
       if (url === '/api/jenkins/sits/extract-traceability') {
@@ -1521,7 +1521,7 @@ describe('ImpactGuideSection', () => {
   it('실제 SITS 내용: 모달 SITS 카드에 sits_by_tc의 sub_case 사전조건/기대값이 표시된다', async () => {
     const { post } = await import('../api.js');
     post.mockImplementation((url) => {
-      if (url === '/api/jenkins/sts/extract-traceability') return Promise.resolve({ vcast_rows: [{ unit: 's_hash', testcase: 'SwUTC_SwUFn_0127' }] });
+      if (url === '/api/jenkins/suts/extract-traceability') return Promise.resolve({ vcast_rows: [{ unit: 's_hash', testcase: 'SwUTC_SwUFn_0127' }] });
       if (url === '/api/jenkins/sits/extract-traceability') return Promise.resolve({ vcast_rows: [{ requirement_id: 'SYSTEMTM_1', testcase: 'SwITC_SwUFn_0127' }] });
       return Promise.resolve({ ok: false });
     });
@@ -1660,7 +1660,7 @@ describe('ImpactGuideSection', () => {
   it('SITS FI: testcase의 SwFn(Fault Injection) 토큰도 SUTS unit으로 풀어 함수에 연결한다', async () => {
     const { post } = await import('../api.js');
     post.mockImplementation((url) => {
-      if (url === '/api/jenkins/sts/extract-traceability') return Promise.resolve({ vcast_rows: [{ unit: 's_fi_target', testcase: 'SwUTC_SwFn_34' }] });
+      if (url === '/api/jenkins/suts/extract-traceability') return Promise.resolve({ vcast_rows: [{ unit: 's_fi_target', testcase: 'SwUTC_SwFn_34' }] });
       if (url === '/api/jenkins/sits/extract-traceability') return Promise.resolve({ vcast_rows: [{ requirement_id: 'SYSTEMTM_1', testcase: 'SwITC_FI_SwFn_34' }] });
       return Promise.resolve({ ok: false });
     });

@@ -1373,8 +1373,9 @@ export default function ImpactGuideSection({ analysisResult, job }) {
         // 3. SUTS func→TC mapping
         if (linkedDocs.suts) {
           try {
-            const d = await post('/api/jenkins/sts/extract-traceability', { path: linkedDocs.suts, doc_type: 'suts' });
+            const d = await post('/api/jenkins/suts/extract-traceability', { path: linkedDocs.suts });  // SUTS 전용 파서(요구=SwUFn 함수ID)
             sutsTCs = d?.vcast_rows ?? [];
+            if (d?.warning && typeof toast === 'function') toast('warning', `SUTS: ${d.warning}`);  // 오태깅 검증(H3)
             if (!sutsTCs.length && Array.isArray(d?.available_sheets) && typeof toast === 'function') {
               toast('warning', `SUTS 시트 미인식. 사용 가능한 시트: ${d.available_sheets.join(', ')}`);
             }

@@ -4140,15 +4140,53 @@ def _normalize_req_id(rid: str) -> str:
     return rid.upper() if rid else rid
 
 
-@router.post("/api/jenkins/sts/extract-traceability")
-def jenkins_sts_extract_traceability(body: Dict[str, Any]) -> Dict[str, Any]:
-    """STS/SUTS Excel에서 Traceability 시트의 요구사항↔TC 매핑 추출"""
+# ── STS/SUTS 추적성 파서 공유 코어 ───────────────────────────────────────────
+# STS(SW 요구 기반 시험)와 SUTS(SW 단위시험)는 레이아웃·의미가 달라(STS 요구=실 SRS
+# 직접, SUTS 요구=SwUDS 함수ID SwUFn→unit-bridge 간접) 엔드포인트를 분리하되, 시트/컬럼
+# 탐지 로직은 여기서 공유한다(복제 금지 — ruff/eslint ratchet 미러 fail-open 전례).
+_TRACE_ID_RE = re.compile(r"Sw[A-Za-z]{2,}_\d+|Sy[A-Za-z]{2,}_\d+")
+_UNIT_TC_RE = re.compile(r"^S\w?UTC_", re.I)       # SwUTC_/SUTC_ = SW 단위시험 TC
+_SPEC_TC_RE = re.compile(r"^S\w?I?TC_", re.I)      # SwTC_/SwITC_ = 요구/통합시험 TC(단위 제외)
+_FUNC_ID_RE = re.compile(r"^SW(?:UFN|UDFN)_\d+$")  # 정규화된 SwUFn/SwUdFn 함수ID(요구 아님)
+
+
+def _detect_trace_doc_type(vcast_rows: list) -> str:
+    """추출된 TC 형태·요구 네임스페이스로 실제 doc-type을 추정(STS/SUTS 오태깅 감지, H3).
+
+    positive signal만 집계한다: 단위 TC(SwUTC) 또는 함수ID(SwUFn) → suts, 요구/통합
+    TC(SwTC/SwITC) → sts. 판별 불가·혼재는 '' 반환해 오경보(false-loud)를 억제 —
+    fallback 고정컬럼(TC 'TC_001' 등)엔 신호가 없어 경고가 안 뜬다.
+    """
+    n = suts = sts = 0
+    for r in vcast_rows:
+        tc = str(r.get("testcase") or "")
+        rid = str(r.get("requirement_id") or "")
+        if not tc and not rid:
+            continue
+        n += 1
+        if _UNIT_TC_RE.match(tc) or _FUNC_ID_RE.match(rid):
+            suts += 1
+        elif _SPEC_TC_RE.match(tc):
+            sts += 1
+    if n == 0:
+        return ""
+    if suts / n >= 0.6:
+        return "suts"
+    if sts / n >= 0.6:
+        return "sts"
+    return ""
+
+
+def _load_trace_workbook(body: Dict[str, Any]):
+    """STS/SUTS 추적성 파서 공유: path 검증 + resolver read + openpyxl 로드.
+
+    (wb, file_path) 반환. 오류는 HTTPException으로 raise(호출측이 그대로 전파).
+    """
     import io
 
     from backend.services.file_resolver import get_resolver
     from backend.services.resolver_helpers import enforce_resolver_access
     file_path = str(body.get("path", "")).strip()
-    doc_type = str(body.get("doc_type", "")).strip().lower()  # "sts" or "suts"
     if not file_path:
         raise HTTPException(status_code=400, detail="path required")
     enforce_resolver_access(file_path)  # C3: 명시 endpoint-local 검증
@@ -4158,8 +4196,6 @@ def jenkins_sts_extract_traceability(body: Dict[str, Any]) -> Dict[str, Any]:
             raise HTTPException(status_code=400, detail=f"파일을 찾을 수 없습니다: {file_path}")
     except (PermissionError, OSError) as exc:
         raise HTTPException(status_code=403, detail=f"파일 접근 거부: {exc}")
-    p = Path(file_path).expanduser()
-
     try:
         import openpyxl
         data = resolver.read_bytes(file_path)
@@ -4168,20 +4204,87 @@ def jenkins_sts_extract_traceability(body: Dict[str, Any]) -> Dict[str, Any]:
         raise HTTPException(status_code=403, detail=f"파일 접근 거부: {exc}")
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Excel 읽기 실패: {exc}")
+    return wb, file_path
 
-    # Find traceability sheet — 우선순위:
-    # 1) body의 sheet_name이 명시되면 그 시트 사용 (외부 도구 생성 파일 대응)
-    # 2) "traceability" / "trace" / "tc" / "test case" / "test spec" / "사양" / "트레이스" 등 자동 탐색
-    # 3) 미발견 시 available_sheets와 함께 안내 — frontend가 사용자에게 시트 선택 노출 가능
+
+def _detect_trace_header_cols(ws, unit_header_extra=()):
+    """헤더 텍스트로 (header_row, tc_col, req_id_cols, unit_col) 동적 탐지(list 형식).
+
+    KJPDS02 SwTS/SwUTS처럼 TC ID/요구 컬럼이 고정 위치가 아니라 'Test Case ID'/'SRS'
+    헤더로만 식별되는 파일 대응(상위 30행 스캔). 미탐지 시 None → 호출측 고정컬럼 fallback.
+    unit_header_extra: SUTS 전용 폴백 헤더('name' 등) — 구체 unit 헤더 미발견 시에만 사용.
+    """
+    max_c = min((ws.max_column or 1), 200)
+    max_r = min((ws.max_row or 1), 30)
+    for hr in range(1, max_r + 1):
+        tc_col = None
+        for c in range(1, max_c + 1):
+            h = str(ws.cell(hr, c).value or "").strip().lower()
+            if not h:
+                continue
+            # TC ID 컬럼: 'Test Case ID'(SwTS) / 'TC_ID'(SwUTS) 등 표기 변형 흡수.
+            # 'Test Case Generation Method'는 'testcaseid' 미포함 → 오탐 방지.
+            _hn = h.replace(" ", "").replace("_", "")
+            if "testcaseid" in _hn or _hn == "tcid":
+                tc_col = c
+                break
+        if tc_col is None:
+            continue
+        # 멀티행 헤더 대응: 'Related ID'가 TC 상세헤더보다 위 행(병합 타이틀)에 있을 수
+        # 있어 TC 행 포함 위로 3행 band를 스캔한다.
+        req_id_cols = []
+        for rr in range(max(1, hr - 3), hr + 1):
+            for c in range(1, max_c + 1):
+                if c in req_id_cols:
+                    continue
+                h = str(ws.cell(rr, c).value or "").strip().lower()
+                if not h:
+                    continue
+                # 'srs'/'swrs'는 specific해서 substring 허용, 'related'/'requirement'는
+                # 'related functionality' 등 오탐 방지 위해 완전일치(공백 제거)로 한정.
+                hn = h.replace(" ", "")
+                if ("srs" in hn or "swrs" in hn
+                        or hn in ("related", "relatedid", "relatedids",
+                                  "relatedrequirement", "relatedreq", "requirement",
+                                  "requirementid", "reqid", "trace", "traceid")):
+                    req_id_cols.append(c)
+        if req_id_cols:
+            # unit(함수명) 컬럼 — SUTS/SITS를 SDS 함수명 bridge로 SRS에 연결하기 위해
+            # 캡처(SwUTS col4 'Unit'). TC 헤더 행에서 완전일치 탐색.
+            unit_col = None
+            for c in range(1, max_c + 1):
+                h = str(ws.cell(hr, c).value or "").strip().lower()
+                if h in ("unit", "function", "function name",
+                         "unit name", "function_name", "unit_name"):
+                    unit_col = c
+                    break
+            # SUTS 전용 폴백(H2): 구체 unit 헤더 미발견 시에만 'name' 등 일반 헤더 허용.
+            # STS엔 미전달 → 오탐 방지. 내부 생성 SUTS의 col4 'Name'(함수명) 대응.
+            if unit_col is None and unit_header_extra:
+                extra = {str(x).strip().lower() for x in unit_header_extra}
+                for c in range(1, max_c + 1):
+                    h = str(ws.cell(hr, c).value or "").strip().lower()
+                    if h in extra:
+                        unit_col = c
+                        break
+            return hr, tc_col, req_id_cols, unit_col
+    return None
+
+
+def _extract_test_spec_traceability(wb, *, source_label, sheet_name_arg="",
+                                    unit_header_extra=()):
+    """STS/SUTS 'Test Spec/Traceability' 시트에서 (요구|함수)↔TC 매핑 추출 — 공유 코어.
+
+    반환: (vcast_rows, available_sheets|None). available_sheets가 비None이면 추적성
+    시트 미탐지(호출측이 error+available_sheets 응답 구성).
+    """
     trace_ws = None
     trace_type = None
-    sheet_name_arg = str(body.get("sheet_name", "")).strip()
     if sheet_name_arg and sheet_name_arg in wb.sheetnames:
         trace_ws = wb[sheet_name_arg]
         trace_type = "matrix" if "swrs" in sheet_name_arg.lower() else "list"
     else:
         # N23: keyword 좁힘 — "사양" 단독은 "기능 사양" 등 false positive 위험.
-        # "테스트 사양" / "test 사양" 처럼 test 컨텍스트 결합한 패턴만 매칭.
         _trace_keywords = ("traceability", "trace", "test case", "testcase", "test spec",
                             "테스트 사양", "테스트사양", "트레이스")
         for name in wb.sheetnames:
@@ -4192,84 +4295,16 @@ def jenkins_sts_extract_traceability(body: Dict[str, Any]) -> Dict[str, Any]:
                 break
 
     if not trace_ws:
-        all_sheets = list(wb.sheetnames)
-        wb.close()
-        return {
-            "ok": False,
-            "error": "Traceability 시트를 찾을 수 없습니다. sheet_name 인자로 명시하세요.",
-            "available_sheets": all_sheets,
-            "vcast_rows": [],
-        }
+        return [], list(wb.sheetnames)
 
-    vcast_rows = []
-    import re as _re
-
-    # 헤더 기반 컬럼 탐지 (list 형식 전용) — KJPDS02 SwTS/SwUTS "3.SW Test Spec"처럼
-    # TC ID/요구사항 컬럼이 고정 위치가 아니라 'Test Case ID' / 'SRS' 헤더로만 식별되는
-    # 파일 대응. 헤더 행을 스캔해 TC 컬럼 + 요구사항(SRS/Related/SwRS) 컬럼을 찾는다.
-    # 못 찾으면 기존 고정 컬럼(TC=5/req=6) 로직으로 fallback (하위호환).
-    def _detect_header_cols(ws):
-        # 상위 30행까지 스캔 (SwUTS는 preamble이 길어 헤더가 12행 이후). 먼저 그 행에
-        # TC ID 컬럼이 있는지 보고, 있으면 같은 행에서 요구사항/Related 컬럼을 찾는다
-        # (요구사항 컬럼을 TC 헤더 행으로 한정 → preamble/데이터 오탐 방지).
-        max_c = min((ws.max_column or 1), 200)
-        max_r = min((ws.max_row or 1), 30)
-        for hr in range(1, max_r + 1):
-            tc_col = None
-            for c in range(1, max_c + 1):
-                h = str(ws.cell(hr, c).value or "").strip().lower()
-                if not h:
-                    continue
-                # TC ID 컬럼: 'Test Case ID'(SwTS) / 'TC_ID'(SwUTS) 등 표기 변형 흡수.
-                # 'Test Case Generation Method'는 'testcaseid' 미포함 → 오탐 방지.
-                _hn = h.replace(" ", "").replace("_", "")
-                if "testcaseid" in _hn or _hn == "tcid":
-                    tc_col = c
-                    break
-            if tc_col is None:
-                continue
-            # 멀티행 헤더 대응: 'Related ID'가 TC 상세헤더(예: SwUTS row4)보다 위 행
-            # (병합 타이틀, row3)에 있을 수 있어 TC 행 포함 위로 3행 band를 스캔한다.
-            req_id_cols = []
-            for rr in range(max(1, hr - 3), hr + 1):
-                for c in range(1, max_c + 1):
-                    if c in req_id_cols:
-                        continue
-                    h = str(ws.cell(rr, c).value or "").strip().lower()
-                    if not h:
-                        continue
-                    # 요구사항/추적 링크 컬럼만 매칭. 'srs'/'swrs'는 specific해서 substring
-                    # 허용, 'related'/'requirement'는 'related functionality'/'requirement
-                    # category' 같은 오탐 방지 위해 완전일치(공백 제거)로 한정. FS_REQ 제외.
-                    hn = h.replace(" ", "")
-                    if ("srs" in hn or "swrs" in hn
-                            or hn in ("related", "relatedid", "relatedids",
-                                      "relatedrequirement", "relatedreq", "requirement",
-                                      "requirementid", "reqid", "trace", "traceid")):
-                        req_id_cols.append(c)
-            if req_id_cols:
-                # unit(함수명) 컬럼 — SUTS/SITS를 SDS 함수명 bridge로 SRS에 연결하기
-                # 위해 캡처 (SwUTS의 col4 'Unit' = 함수명). TC 헤더 행에서 완전일치 탐색.
-                unit_col = None
-                for c in range(1, max_c + 1):
-                    h = str(ws.cell(hr, c).value or "").strip().lower()
-                    if h in ("unit", "function", "function name",
-                             "unit name", "function_name", "unit_name"):
-                        unit_col = c
-                        break
-                return hr, tc_col, req_id_cols, unit_col
-        return None
-
-    # Determine source label from doc_type or auto-detect from sheet structure
+    vcast_rows: List[Dict[str, Any]] = []
     if trace_type == "matrix":
-        source_label = doc_type.upper() if doc_type in ("sts", "suts") else "STS"
-        # STS format: row 4 has req IDs as column headers, rows 5+ have TC IDs with markers
+        # matrix: row4에 요구 ID가 컬럼 헤더, rows 5+ TC ID + 교차 마커.
         req_cols = []
         for c in range(3, (trace_ws.max_column or 0) + 1):
             v = trace_ws.cell(4, c).value
             if v and ("Sw" in str(v) or "SW" in str(v).upper() or "Sy" in str(v)):
                 req_cols.append((c, _normalize_req_id(str(v).strip())))
-
         for r in range(5, (trace_ws.max_row or 0) + 1):
             tc_id = str(trace_ws.cell(r, 3).value or "").strip()
             if not tc_id:
@@ -4278,17 +4313,14 @@ def jenkins_sts_extract_traceability(body: Dict[str, Any]) -> Dict[str, Any]:
                 val = trace_ws.cell(r, col).value
                 if val is not None and str(val).strip():
                     vcast_rows.append({
-                        "requirement_id": rid,
-                        "testcase": tc_id,
-                        "source": source_label,
-                        "result": "mapped",
+                        "requirement_id": rid, "testcase": tc_id,
+                        "source": source_label, "result": "mapped",
                     })
     else:
-        source_label = doc_type.upper() if doc_type in ("sts", "suts") else "SUTS"
-        detected = _detect_header_cols(trace_ws)
+        detected = _detect_trace_header_cols(trace_ws, unit_header_extra)
         if detected:
-            # 헤더 기반: TC ID 컬럼 ↔ 요구사항 컬럼. 병합셀/연속행은 직전 TC 유지,
-            # 빈 행 50연속 시 조기 종료. 요구사항은 req 컬럼에서만 regex 추출.
+            # 헤더 기반: TC ID ↔ 요구 컬럼. 병합셀/연속행은 직전 TC carry-forward,
+            # 빈 행 50연속 시 조기 종료. 요구는 req 컬럼에서만 regex 추출.
             header_row, tc_col, req_id_cols, unit_col = detected
             empty_streak = 0
             current_tc = ""
@@ -4306,7 +4338,7 @@ def jenkins_sts_extract_traceability(body: Dict[str, Any]) -> Dict[str, Any]:
                 for rc in req_id_cols:
                     cv = str(trace_ws.cell(r, rc).value or "").strip()
                     if cv:
-                        found += _re.findall(r"Sw[A-Za-z]{2,}_\d+|Sy[A-Za-z]{2,}_\d+", cv)
+                        found += _TRACE_ID_RE.findall(cv)
                 if not tc_v and not found:
                     empty_streak += 1
                     if empty_streak >= 50:
@@ -4317,10 +4349,8 @@ def jenkins_sts_extract_traceability(body: Dict[str, Any]) -> Dict[str, Any]:
                     for rid in found:
                         vcast_rows.append({
                             "requirement_id": _normalize_req_id(rid),
-                            "testcase": current_tc,
-                            "unit": current_unit,
-                            "source": source_label,
-                            "result": "mapped",
+                            "testcase": current_tc, "unit": current_unit,
+                            "source": source_label, "result": "mapped",
                         })
         else:
             # Fallback: 기존 고정 컬럼 (TC=5, SRS req=6, func=4)
@@ -4330,26 +4360,83 @@ def jenkins_sts_extract_traceability(body: Dict[str, Any]) -> Dict[str, Any]:
                 func_name = str(trace_ws.cell(r, 4).value or "").strip()
                 if not tc_id:
                     continue
-                req_ids = _re.findall(r"Sw[A-Za-z]{2,}_\d+|Sy[A-Za-z]{2,}_\d+", req_raw)
-                for rid in req_ids:
+                for rid in _TRACE_ID_RE.findall(req_raw):
                     vcast_rows.append({
                         "requirement_id": _normalize_req_id(rid),
-                        "testcase": tc_id,
-                        "unit": func_name,
-                        "source": source_label,
-                        "result": "mapped",
+                        "testcase": tc_id, "unit": func_name,
+                        "source": source_label, "result": "mapped",
                     })
+    return vcast_rows, None
 
-    wb.close()
 
-    # Summarize
+def _finalize_trace_result(vcast_rows, avail, *, expected: str, other: str) -> Dict[str, Any]:
+    """공유: 추출 결과를 응답 dict으로 마감 + 내용검증 경고(H3) 부착.
+
+    expected/other는 'sts'|'suts' — 실제 구조가 other로 감지되면 오태깅 경고를 실어
+    조용한 밴드 오태깅(fail-open)을 fail-loud로 전환한다(추출 로직·행은 불변).
+    """
+    if avail is not None:
+        return {
+            "ok": False,
+            "error": "Traceability 시트를 찾을 수 없습니다. sheet_name 인자로 명시하세요.",
+            "available_sheets": avail,
+            "vcast_rows": [],
+        }
     req_set = set(r["requirement_id"] for r in vcast_rows)
-    return {
+    result: Dict[str, Any] = {
         "ok": True,
         "vcast_rows": vcast_rows,
         "total_mappings": len(vcast_rows),
         "requirements_covered": len(req_set),
     }
+    if _detect_trace_doc_type(vcast_rows) == other:
+        _lbl = {"sts": "SW 요구/통합시험(STS)", "suts": "SW 단위시험(SUTS)"}
+        result["warning"] = (
+            f"doc_type={expected.upper()}로 선언됐으나 추출된 TC/요구가 {_lbl[other]} "
+            "구조로 보입니다 — sts/suts 문서 링크가 뒤바뀌지 않았는지 확인하세요."
+        )
+    return result
+
+
+@router.post("/api/jenkins/sts/extract-traceability")
+def jenkins_sts_extract_traceability(body: Dict[str, Any]) -> Dict[str, Any]:
+    """STS(SW 요구 기반 시험) Excel에서 요구사항↔TC 매핑 추출 (추적성 매트릭스용).
+
+    SUTS는 레이아웃·의미가 달라(요구 컬럼=SwUDS 함수ID, unit-bridge 필요) 전용 파서
+    jenkins_suts_extract_traceability로 분리됨. 하위호환: doc_type='suts'로 들어오면
+    SUTS 전용 파서에 위임한다(구 호출자 무breakage).
+    """
+    doc_type = str(body.get("doc_type", "")).strip().lower()
+    if doc_type == "suts":
+        return jenkins_suts_extract_traceability(body)
+    wb, _fp = _load_trace_workbook(body)
+    try:
+        vcast_rows, avail = _extract_test_spec_traceability(
+            wb, source_label="STS",
+            sheet_name_arg=str(body.get("sheet_name", "")).strip())
+    finally:
+        wb.close()
+    return _finalize_trace_result(vcast_rows, avail, expected="sts", other="suts")
+
+
+@router.post("/api/jenkins/suts/extract-traceability")
+def jenkins_suts_extract_traceability(body: Dict[str, Any]) -> Dict[str, Any]:
+    """SUTS(SW 단위시험) Excel에서 함수ID↔TC 매핑 추출 (추적성 매트릭스용) — STS 전용 분리.
+
+    SUTS 요구 컬럼은 실 SRS가 아니라 SwUDS 함수ID(SwUFn)라, 매트릭스가 unit→요구 bridge로
+    간접 연결한다(direct=0, indirect가 정상). 내부 생성 SUTS의 함수명 컬럼 헤더가 'Name'
+    이라 unit 탐지에 'name' 폴백을 추가(H2). 시트/컬럼 탐지는 STS와 공유 코어
+    (_extract_test_spec_traceability) — 중복 없음.
+    """
+    wb, _fp = _load_trace_workbook(body)
+    try:
+        vcast_rows, avail = _extract_test_spec_traceability(
+            wb, source_label="SUTS",
+            sheet_name_arg=str(body.get("sheet_name", "")).strip(),
+            unit_header_extra=("name",))
+    finally:
+        wb.close()
+    return _finalize_trace_result(vcast_rows, avail, expected="suts", other="sts")
 
 
 @router.post("/api/jenkins/sds/extract-mapping")
