@@ -726,3 +726,54 @@ class TestGenerateUdsRequirementsFromDocs:
         from report_gen.requirements import generate_uds_requirements_from_docs
 
         assert generate_uds_requirements_from_docs([]) == ""
+
+
+class TestSdsComponentDescriptionAmbiguity:
+    """component_description 폴백의 다중 SwCom 모호성 처리 (deep-review Warning #2).
+
+    같은 함수가 2개+ SwCom 인터페이스에 서로 다른 설명으로 등장하면(SwCom echo/교차참조
+    과다추출 실측 패턴) 표 순서로 임의 상속하는 오귀속을 막고 component_description을 붙이지
+    않는다(honest miss). 단일 SwCom 함수는 정상 부착.
+    """
+
+    @staticmethod
+    def _sc_table(doc, sc_id, sc_desc, fn_rows):
+        """SC-Information 표 1개 추가 — 헤더/SC설명/인터페이스 함수행."""
+        # rows: 헤더 + SC ID + SC Description + 인터페이스 헤더 + 함수행들
+        tbl = doc.add_table(rows=4 + len(fn_rows), cols=3)
+        tbl.cell(0, 0).text = "Software Component Information"
+        tbl.cell(1, 0).text = "SC ID"
+        tbl.cell(1, 1).text = sc_id
+        tbl.cell(2, 0).text = "SC Description"
+        tbl.cell(2, 1).text = sc_desc
+        # 인터페이스 헤더행: No | Name | Description → in_interface + iface_header
+        tbl.cell(3, 0).text = "No"
+        tbl.cell(3, 1).text = "Name"
+        tbl.cell(3, 2).text = "Description"
+        for i, (fname, fdesc) in enumerate(fn_rows):
+            r = 4 + i
+            tbl.cell(r, 0).text = str(i + 1)  # 첫 셀 digit → 함수행 인식
+            tbl.cell(r, 1).text = fname
+            tbl.cell(r, 2).text = fdesc
+
+    def _build(self, path):
+        from docx import Document  # type: ignore
+        doc = Document()
+        # SwCom_01: s_shared(desc 비어 폴백 대상) + s_solo
+        self._sc_table(doc, "SwCom_01", "첫 컴포넌트 설명",
+                       [("s_shared", ""), ("s_solo", "")])
+        # SwCom_02: s_shared 재등장(다른 SC 설명) → 모호
+        self._sc_table(doc, "SwCom_02", "둘째 컴포넌트 설명",
+                       [("s_shared", "")])
+        doc.save(str(path))
+
+    def test_multi_swcom_ambiguous_desc_not_attached(self, tmp_path):
+        from report_gen.requirements import _extract_sds_partition_map
+        p = tmp_path / "sds_multi_swcom.docx"
+        self._build(p)
+        pm = _extract_sds_partition_map(str(p))
+        # s_shared: 두 SwCom에 다른 설명 → 모호 → component_description 미부착(오귀속 방지)
+        assert "s_shared" in pm
+        assert "component_description" not in pm["s_shared"]
+        # s_solo: 단일 SwCom → 정상 부착
+        assert pm.get("s_solo", {}).get("component_description") == "첫 컴포넌트 설명"

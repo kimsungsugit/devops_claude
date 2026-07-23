@@ -154,6 +154,42 @@ def test_load_uds_fn_details_widened(monkeypatch):
     assert set(out["s_foo"]["calls"]) == {"s_helper", "s_main"}
 
 
+def test_load_uds_fn_content_fallback_extracts_prototype(monkeypatch):
+    """링크(cloudium) UDS fallback(parse_swuds_docx)이 표의 Prototype을 채운다.
+
+    사이드카 없는 경로 — 예전엔 {description,heading}만 → prototype 조용히 빔. 이제 표에
+    Prototype 행이 있으면 채워, 영향분석 UDS 카드가 실 선언 표시 + 원문→변경안 기준선 확보.
+    """
+    import io as _io
+
+    import backend.services.file_resolver as fr
+    from docx import Document  # type: ignore
+    from workflow.impact_orchestrator import _load_uds_fn_content
+
+    # 실제 docx: heading + 표(Name/Prototype/Description) — 사이드카 없음(fallback 경로)
+    doc = Document()
+    doc.add_paragraph("SwUFn_1150 — s_TunningParamRead_16bitData")
+    tbl = doc.add_table(rows=3, cols=2)
+    for r, (k, v) in enumerate([
+        ("Name", "s_TunningParamRead_16bitData"),
+        ("Prototype", "void s_TunningParamRead_16bitData(void)"),
+        ("Description", "튜닝 파라미터를 16bit로 읽어 반환"),
+    ]):
+        tbl.cell(r, 0).text = k
+        tbl.cell(r, 1).text = v
+    buf = _io.BytesIO()
+    doc.save(buf)
+    docx_bytes = buf.getvalue()
+
+    monkeypatch.setattr(fr, "get_resolver", lambda: _FakeResolver(docx_bytes))
+    # 고유 경로(모듈 캐시 _UDS_CONTENT_CACHE 오염 회피) + 사이드카 부재로 fallback 강제
+    out = _load_uds_fn_content("U:/link_proto_test.docx", ["s_tunningparamread_16bitdata"])
+    key = "s_tunningparamread_16bitdata"
+    assert key in out
+    assert out[key]["prototype"] == "void s_TunningParamRead_16bitData(void)"
+    assert "튜닝 파라미터를 16bit" in out[key]["description"]
+
+
 def test_load_sds_fn_desc_extracts_description(monkeypatch):
     """SDS 파티션맵의 함수별 description을 영향 함수와 매칭해 반환."""
     import backend.services.file_resolver as fr
@@ -271,6 +307,22 @@ def test_load_sds_fn_desc_domain_prefix_not_stripped(monkeypatch):
     })
     # flagged 'spi_read'는 adc_read와 무관 — 닫힌 패턴은 'spi_'를 접두어로 안 봄 → 오귀속 없음
     out = _load_sds_fn_desc("U:/sds.docx", ["spi_read"])
+    assert out == {}
+
+
+def test_load_sds_fn_desc_normalized_3way_collision_excluded(monkeypatch):
+    """3개+ 원본이 같은 정규화 키로 충돌해도 정확히 제외(set 기반, 2개째부터 영구 충돌)."""
+    import backend.services.file_resolver as fr
+    import report_gen.requirements as rq
+    from workflow.impact_orchestrator import _load_sds_fn_desc
+
+    monkeypatch.setattr(fr, "get_resolver", lambda: _FakeResolver())
+    monkeypatch.setattr(rq, "_extract_sds_partition_map", lambda p: {
+        "s_bar": {"description": "설명 A", "kind": "function"},
+        "g_bar": {"description": "설명 B", "kind": "function"},
+        "l_bar": {"description": "설명 C", "kind": "function"},  # 3번째도 'bar'로 충돌
+    })
+    out = _load_sds_fn_desc("U:/sds.docx", ["u8g_bar"])  # exact miss + 3-way 정규화 충돌
     assert out == {}
 
 

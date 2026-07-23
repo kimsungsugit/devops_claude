@@ -1432,6 +1432,34 @@ describe('ImpactGuideSection', () => {
     expect(within(dialog).getAllByText(/＋ void s_foo\(uint8 x\)/).length).toBeGreaterThanOrEqual(1);
   });
 
+  // STS-IMPACT-053b2: 링크(cloudium) UDS의 prototype(백엔드 fallback 파서가 표에서 추출)이
+  //  UDS 카드에 실 선언으로 표시되고, SIGNATURE 원문→변경안의 '− 원문' 기준선으로도 쓰인다.
+  it('원문→변경안: 링크 UDS prototype이 카드 실 내용 + 원문 기준선으로 표시된다', async () => {
+    const { post } = await import('../api.js');
+    post.mockResolvedValue({ ok: false });
+    const user = userEvent.setup();
+    const analysisResult = {
+      impactData: {
+        trigger: { changed_files: ['Ap.c'] },
+        changed_function_types: { s_foo: 'SIGNATURE' },
+        change_details: { s_foo: { before: 'void s_foo(void)', after: 'void s_foo(uint8 x)' } },
+        impact: { direct: ['s_foo'] },
+        function_meta: { s_foo: { asil: 'A', evidence: 'line' } },
+        // 링크 문서: globals/calls 없이 description+prototype만(fallback 파서 산출)
+        doc_content: { uds: { s_foo: { description: 'foo', prototype: 'void s_foo(void)' } } },
+      },
+    };
+    render(<ImpactGuideSection analysisResult={analysisResult} />);
+    await user.click(screen.getByText(/상세 가이드 생성/));
+    await user.click(await screen.findByRole('button', { name: '상세' }));
+    const dialog = await screen.findByRole('dialog');
+    await waitFor(() => expect(within(dialog).getByText('📄 실제 UDS 내용')).toBeInTheDocument());
+    // prototype이 UDS 카드 실 내용으로 표시(renderDocContent) + 원문→변경안 기준선(− prototype)
+    expect(within(dialog).getAllByText(/void s_foo\(void\)/).length).toBeGreaterThanOrEqual(2);
+    expect(within(dialog).getByText(/원문 → 변경안 \(결정론\)/)).toBeInTheDocument();
+    expect(within(dialog).getAllByText(/＋ void s_foo\(uint8 x\)/).length).toBeGreaterThanOrEqual(1);
+  });
+
   // STS-IMPACT-053c: fetchExplanation 페이로드에 doc_content(현재 문서 원문)가 실린다 — LLM '원문→제안' 근거.
   it('원문→제안: AI 문장 재작성 요청 시 doc_content(현재 UDS/SDS 원문)가 페이로드에 실린다', async () => {
     const { post } = await import('../api.js');
@@ -1463,6 +1491,50 @@ describe('ImpactGuideSection', () => {
     expect(body.doc_content).toBeTruthy();
     expect(body.doc_content.uds.description).toBe('튜닝값 읽기');   // 현재 UDS 원문 전달
     expect(body.doc_content.sds).toBe('SDS: foo 컴포넌트');          // 현재 SDS 원문 전달
+  });
+
+  // STS-IMPACT-053d: STS TC 원문이 페이로드에 실린다 — buildDocContentForFn은 guide→guideDetailByLc에
+  //  의존하므로, fetchExplanation deps에 buildDocContentForFn이 없으면(stale closure, deep-review Critical)
+  //  guide 채워지기 전 빈 guideDetailByLc에 영구 결속돼 STS/SITS TC가 영구 누락된다. 이 테스트가 회귀 가드.
+  it('원문→제안: STS TC 원문이 doc_content.sts로 페이로드에 실린다(stale closure 회귀 가드)', async () => {
+    const { post } = await import('../api.js');
+    const calls = [];
+    post.mockImplementation((url, body) => {
+      if (url === '/api/impact/explain-change') { calls.push(body); return Promise.resolve({ ok: true, explanation: 'x' }); }
+      // SDS 브리지: 함수→요구, STS: 요구→TC (guide.details의 stsTestCases 채움)
+      if (url === '/api/jenkins/sds/extract-mapping') return Promise.resolve({ sds_pairs: [{ requirement_id: 'SwEI_9', component_ids: ['s_foo'] }] });
+      if (url === '/api/jenkins/sts/extract-traceability') return Promise.resolve({ vcast_rows: [{ requirement_id: 'SwEI_9', testcase: 'SwTC_STS_9' }] });
+      return Promise.resolve({ ok: false });
+    });
+    const user = userEvent.setup();
+    const analysisResult = {
+      impactData: {
+        trigger: { changed_files: ['Ap.c'], scm_id: 'kjpds02' },
+        changed_function_types: { s_foo: 'BODY' },
+        change_details: { s_foo: { before: 'void s_foo(void)' } },
+        // ⚠ function_diffs 제공 필수 — 없으면 functionDiffs=`?? {}`가 매 렌더 새 객체라
+        // fetchExplanation이 매 렌더 재생성돼 stale closure 버그가 가려진다(deep-review가 지적한
+        // 053c 테스트 갭). 세 deps를 전부 안정 참조로 만들어야 buildDocContentForFn 누락이 드러남.
+        function_diffs: { s_foo: '@@ -1 +1 @@\n-a\n+b' },
+        impact: { direct: ['s_foo'] },
+        function_meta: { s_foo: { asil: 'A', evidence: 'line' } },
+        _linked_docs: { sts: 'U:/sts.xlsm', sds: 'U:/sds.docx' },
+        doc_content: {
+          uds: { s_foo: { description: 'foo' } },
+          sts_by_tc: { SWTC_STS_9: { description: 'STS 경계 시험', test_method: 'REQ' } },
+        },
+      },
+    };
+    render(<ImpactGuideSection analysisResult={analysisResult} />);
+    await user.click(screen.getByText(/상세 가이드 생성/));
+    await user.click(await screen.findByRole('button', { name: '상세' }));
+    await user.click(await screen.findByRole('button', { name: /AI 문장 재작성/ }));
+    await waitFor(() => expect(calls.length).toBeGreaterThanOrEqual(1));
+    const body = calls[calls.length - 1];
+    // guide 채워진 뒤의 buildDocContentForFn이 STS TC를 조인해 페이로드에 실어야 함(stale면 빈 배열→누락)
+    expect(Array.isArray(body.doc_content.sts)).toBe(true);
+    expect(body.doc_content.sts.length).toBeGreaterThanOrEqual(1);
+    expect(body.doc_content.sts[0].description).toBe('STS 경계 시험');
   });
 
   // STS-IMPACT-061: STS 카드에 Test Action(시험 절차)·Expected Result(기대결과)가 표시된다(라운드 후속).

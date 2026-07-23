@@ -712,8 +712,9 @@ def _load_uds_fn_content(
 
     사이드카(생성 UDS, 로컬 `<docx>.payload.json`)의 풍부 필드를 우선하고, 없으면(=cloudium 링크
     문서 대다수) 링크 docx를 worker(`get_resolver().read_bytes`)로 읽어 parse_swuds_docx의
-    heading+description으로 보완한다. 문서 카드에 '예측' 대신 실 내용 표시용. 실패는 빈 dict(비차단)이되
-    사유는 warn_sink로 표면화('미파싱'이 진짜 미연동인지 접근/파싱 실패인지 구분 — reviewer W3)."""
+    heading+description+prototype(표 'Prototype' 행)으로 보완한다. 문서 카드에 '예측' 대신 실 내용
+    표시 + 시그니처 변경 시 원문→변경안 기준선용. 실패는 빈 dict(비차단)이되 사유는 warn_sink로
+    표면화('미파싱'이 진짜 미연동인지 접근/파싱 실패인지 구분 — reviewer W3)."""
     if not uds_path:
         return {}
 
@@ -753,8 +754,12 @@ def _load_uds_fn_content(
                             continue
                         desc = str(getattr(e, "description", "") or "").strip()
                         head = str(getattr(e, "heading_text", "") or "").strip()
-                        if desc or head:
+                        # prototype — 링크 UDS도 표에 있으면 실 선언 표시/원문→변경안 기준선(사이드카 전용 탈피).
+                        proto = str(getattr(e, "prototype", "") or "").strip()
+                        if desc or head or proto:
                             _entries[n] = {"description": desc[:300], "heading": head[:120]}
+                            if proto:
+                                _entries[n]["prototype"] = proto[:200]
                 if not _entries:
                     # 파싱은 됐으나 내용 0 — heading-less 레이아웃 등(예: kjpds02 UDS). 정직 사유.
                     _warn("문서 내용: UDS heading 파서가 내용을 추출하지 못함(heading-less 레이아웃/사이드카 부재) — UDS 카드는 '미파싱' 표기")

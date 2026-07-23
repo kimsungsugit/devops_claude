@@ -1782,7 +1782,9 @@ export default function ImpactGuideSection({ analysisResult, job }) {
     const noEvExport = activeFnEntries.filter(([fn, kind]) => functionHasNoEvidence(fn, kind, changeDetails, functionDiffs, functionMeta)).length;
     if (noEvExport > 0) L.push(`  - 이 중 파일영향(직접 변경 증거 없음, 파일 단위 보수 포함): ${noEvExport}개 → 실 수정 함수 약 ${activeFnEntries.length - noEvExport}개`);
     L.push(`- 직접 영향: ${(activeImpactGroups.direct || []).length} / 간접: ${(activeImpactGroups.indirect_1hop || []).length + (activeImpactGroups.indirect_2hop || []).length}`);
-    if (asilInfo && (asilInfo.max_changed || asilInfo.escalation || asilInfo.unknown_changed_count)) {
+    // ASIL·커버리지 섹션은 UI 패널과 동일하게 SHOW_ASIL_COVERAGE로 게이팅 — 화면에서 숨긴 걸
+    // export엔 남기면 '숨겼다고 생각했는데 문서엔 있다'는 불일치(deep-review Warning). 계산은 유지.
+    if (SHOW_ASIL_COVERAGE && asilInfo && (asilInfo.max_changed || asilInfo.escalation || asilInfo.unknown_changed_count)) {
       L.push('', '## ASIL 차등 검증');
       L.push(`- 변경 최대 ASIL: ${asilInfo.max_changed || '미상'}`);
       if (asilInfo.escalation) L.push('- ⚠ Escalation (ASIL B+ 직접 변경 — AUTO→검토)');
@@ -1790,7 +1792,7 @@ export default function ImpactGuideSection({ analysisResult, job }) {
       if (asilInfo.coverage_target) L.push(`- 커버리지 타깃: ${asilInfo.coverage_target}`);
       if (asilInfo.unknown_changed_count) L.push(`- ASIL 미상 직접변경: ${asilInfo.unknown_changed_count}개 (수동 확인 필요)`);
     }
-    if (coverageGap?.available && coverageGap.summary) {
+    if (SHOW_ASIL_COVERAGE && coverageGap?.available && coverageGap.summary) {
       const s = coverageGap.summary;
       L.push('', '## 커버리지 (ASIL 타깃 대비)');
       L.push(`- 평가 ${s.evaluated ?? 0} / 목표 미달 ${s.below_target ?? 0} / 미측정 ${s.unmeasured ?? 0} / 직전 대비 회귀 ${s.regressed ?? 0}`);
@@ -1817,7 +1819,7 @@ export default function ImpactGuideSection({ analysisResult, job }) {
         L.push(`| \`${d.function}\` | ${chLabel} | ${d.asil || '미상'} | ${d.hop} | ${(d.requirements || []).join(' ') || '-'} | ${(d.stsTestCases || []).length} | ${(d.sutsTestCases || []).length} | ${(d.sitsTestCases || []).length} |`);
       }
     }
-    if (aiGuide?.risk) {
+    if (SHOW_AI_GUIDE_TAB && aiGuide?.risk) {
       L.push('', '## AI 위험 평가');
       L.push(`- 등급: ${aiGuide.risk.grade} (${aiGuide.risk.score}/100), 최대 ASIL: ${aiGuide.risk.max_asil}`);
       if (aiGuide.risk.justification) L.push(`- 근거: ${aiGuide.risk.justification}`);
@@ -1879,7 +1881,11 @@ export default function ImpactGuideSection({ analysisResult, job }) {
     } catch (e) {
       setExplain({ fn: d.function, text: '', loading: false, error: e?.message || 'AI 설명 요청 실패' });
     }
-  }, [changeDetails, functionDiffs, functionMeta]);
+    // buildDocContentForFn 필수: guide→guideDetailByLc는 impact 안정화 이후 채워지므로, 이걸
+    // deps에서 빼면 fetchExplanation이 빈 guideDetailByLc 시점 버전에 영구 결속돼 STS/SITS TC가
+    // doc_content 페이로드에서 영구 누락된다(stale closure, deep-review Critical). changeDetails/
+    // functionDiffs/functionMeta는 impact 불변이라 이것만으론 재메모이즈 안 됨.
+  }, [changeDetails, functionDiffs, functionMeta, buildDocContentForFn]);
 
   // ── 소스 바: 어느 빌드/리비전의 결과인지 + 이력 열람 + 빌드별 재실행 ────────────
   // 결과가 없을 때도 반드시 보여야 한다(이력/빌드로 여기서 바로 불러올 수 있어야 하므로)

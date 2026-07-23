@@ -378,13 +378,20 @@ def _format_doc_content_for_prompt(doc_content: Optional[Dict]) -> str:
     try:
         uds = doc_content.get("uds")
         if isinstance(uds, dict):
-            if uds.get("description"):
-                lines.append(f"- UDS Description: {str(uds['description'])[:400]}")
-            if uds.get("prototype"):
-                lines.append(f"- UDS Prototype: {str(uds['prototype'])[:200]}")
+            # ⚠ str(x)[:N]는 슬라이스 전에 x 전체를 직렬화하므로 반드시 문자열일 때만 —
+            # 거대/중첩 비문자열 값이 오면 요청당 무한정 CPU/메모리(전역 body-size 상한 없음,
+            # deep-review Warning). globals 원소도 문자열만(비문자열은 조용히 skip).
+            _d = uds.get("description")
+            if isinstance(_d, str) and _d.strip():
+                lines.append(f"- UDS Description: {_d[:400]}")
+            _p = uds.get("prototype")
+            if isinstance(_p, str) and _p.strip():
+                lines.append(f"- UDS Prototype: {_p[:200]}")
             gl = uds.get("globals")
             if isinstance(gl, list) and gl:
-                lines.append(f"- UDS Used Globals: {', '.join(str(g) for g in gl[:10])}")
+                _gs = [g[:80] for g in gl[:10] if isinstance(g, str)]
+                if _gs:
+                    lines.append(f"- UDS Used Globals: {', '.join(_gs)}")
         sds = doc_content.get("sds")
         if isinstance(sds, str) and sds.strip():
             lines.append(f"- SDS 내용: {sds.strip()[:400]}")

@@ -489,3 +489,67 @@ class TestDescriptionExtractionKJPDS02:
         r = parse_swuds_docx(b)
         assert r.ok
         assert "간단한 설명" in r.entries[0].description
+
+
+class TestPrototypeExtraction:
+    """Prototype 추출 — 링크(cloudium) UDS도 표에 있으면 실 선언 표시/원문→변경안 기준선.
+
+    이 추출이 없어 SwUDSEntry.prototype 필드조차 없던 시절, 링크 문서 UDS 카드의 prototype이
+    표에 값이 있는데도 조용히 비었다(사이드카 전용). Name/ASIL과 동일 라벨-스캔 패턴 회귀 방지.
+    """
+
+    @staticmethod
+    def _docx(rows_spec, cols, fn_id="SwUFn_1150"):
+        from docx import Document  # type: ignore
+        doc = Document()
+        doc.add_paragraph(f"{fn_id} — s_TunningParamRead_16bitData")
+        tbl = doc.add_table(rows=len(rows_spec), cols=cols)
+        for r, cells in enumerate(rows_spec):
+            for c, txt in enumerate(cells):
+                tbl.cell(r, c).text = txt
+        buf = io.BytesIO()
+        doc.save(buf)
+        return buf.getvalue()
+
+    def test_prototype_extracted_english_label(self):
+        b = self._docx([["Prototype", "void s_TunningParamRead_16bitData(void)"]], cols=2)
+        r = parse_swuds_docx(b)
+        assert r.ok
+        assert r.entries[0].prototype == "void s_TunningParamRead_16bitData(void)"
+
+    def test_prototype_merged_label(self):
+        """병합 라벨 ['Prototype','Prototype','void f( void )'] — 반복 셀 skip."""
+        b = self._docx([["Prototype", "Prototype", "u8 s_ReadByte( u16 addr )"]], cols=3)
+        r = parse_swuds_docx(b)
+        assert r.ok
+        assert r.entries[0].prototype == "u8 s_ReadByte( u16 addr )"
+
+    def test_prototype_korean_label(self):
+        b = self._docx([["프로토타입", "void s_Init(void)"]], cols=2)
+        r = parse_swuds_docx(b)
+        assert r.ok
+        assert r.entries[0].prototype == "void s_Init(void)"
+
+    def test_prototype_absent_stays_empty(self):
+        """Prototype 행 없으면 빈 string (fail-safe) — 기존 필드 무영향."""
+        b = self._docx([["Description", "설명만"]], cols=2)
+        r = parse_swuds_docx(b)
+        assert r.ok
+        assert r.entries[0].prototype == ""
+        assert r.entries[0].description == "설명만"
+
+    def test_full_function_info_row_layout(self):
+        """KJPDS02 Function Info 다행 — Prototype/Description/ASIL 동시 추출(교차오염 없음)."""
+        rows = [
+            ["Name", "s_TunningParamRead_16bitData"],
+            ["Prototype", "void s_TunningParamRead_16bitData(void)"],
+            ["Description", "튜닝 파라미터를 16bit로 읽어 반환"],
+            ["ASIL", "A"],
+        ]
+        b = self._docx(rows, cols=2)
+        r = parse_swuds_docx(b)
+        assert r.ok
+        e = r.entries[0]
+        assert e.prototype == "void s_TunningParamRead_16bitData(void)"
+        assert "튜닝 파라미터를 16bit" in e.description
+        assert e.asil == "A"

@@ -584,6 +584,12 @@ def _extract_sds_partition_map(doc_path: str) -> Dict[str, Dict[str, str]]:
     except Exception:
         return {}
     mapping: Dict[str, Dict[str, str]] = {}
+    # component_description 폴백 출처 추적 — 같은 함수가 여러 SwCom 표에 서로 다른 설명으로
+    # 등장하면(이 프로젝트가 실측한 SwCom echo/교차참조 과다추출 패턴) 표 순서로 임의 상속하는
+    # 오귀속을 막는다: 두 번째 '다른' 설명을 만나면 모호로 표시하고 component_description을 제거
+    # (honest miss — 잘못된 컴포넌트 맥락보다 없는 편이 안전, deep-review Warning).
+    _comp_desc_src: Dict[str, str] = {}
+    _comp_desc_ambiguous: set = set()
 
     def _collapse_adjacent_duplicates(values: List[str]) -> List[str]:
         result: List[str] = []
@@ -719,10 +725,18 @@ def _extract_sds_partition_map(doc_path: str) -> Dict[str, Dict[str, str]]:
                 # 인터페이스 행 description이 비어도 소속 SwCom 설명을 폴백 필드로 부착 —
                 # 영향분석 SDS 카드가 함수 소속 컴포넌트 맥락을 표시할 수 있게(description 불변,
                 # 신규 필드라 밴드 집계·SUTS/VCAST 브리지 등 기존 소비처엔 무영향).
-                if sc_desc:
-                    fk = fn.strip().lower()
-                    if fk and fk in mapping and not mapping[fk].get("component_description"):
-                        mapping[fk]["component_description"] = sc_desc[:500]
+                fk = fn.strip().lower()
+                if sc_desc and fk and fk in mapping:
+                    _capped = sc_desc[:500]
+                    if fk in _comp_desc_ambiguous:
+                        pass  # 이미 다중 SwCom 충돌 확정 — 붙이지 않음
+                    elif fk not in _comp_desc_src:
+                        _comp_desc_src[fk] = _capped
+                        mapping[fk]["component_description"] = _capped
+                    elif _comp_desc_src[fk] != _capped:
+                        # 다른 SwCom이 다른 설명 부여 → 모호. 오귀속 방지로 제거 후 확정.
+                        _comp_desc_ambiguous.add(fk)
+                        mapping[fk].pop("component_description", None)
             continue
 
         idx_comp_id = _find_col(header_norm, ["comp id", "component id", "swcom"])

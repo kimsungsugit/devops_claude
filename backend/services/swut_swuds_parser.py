@@ -61,6 +61,9 @@ class SwUDSEntry:
     # 라운드 89: 함수 이름 (table 'Name' 행 또는 heading 'SwUFn_NNNN: name'에서).
     # coverage 함수명 ↔ ASIL reverse map 구성용 (id 직접 매칭 실패 대비).
     name: str = ""
+    # 함수 원형(table 'Prototype' 행). 링크(cloudium) UDS의 영향분석 카드가 실제 선언을
+    # 표시하고, 시그니처 변경 시 '원문→변경안' 기준선으로 쓰도록 추출. 표에 없으면 빈 string.
+    prototype: str = ""
 
 
 @dataclass
@@ -234,6 +237,40 @@ def _name_from_heading(heading: str) -> str:
     return m.group(1) if m else ""
 
 
+# Prototype 라벨 후보 — KJPDS02 Function Info 표: ID/Name/Prototype/Description/ASIL/...
+# (Name과 Description 사이 칸). ASIL/Name 추출기와 동일 라벨-스캔 패턴.
+_PROTOTYPE_LABEL_CANDIDATES = (
+    "prototype", "프로토타입", "함수원형", "함수 원형", "function prototype", "함수 프로토타입",
+)
+
+
+def _extract_prototype_from_table(tbl: Any) -> str:
+    """함수 table에서 'Prototype' 라벨 옆 첫 유효 값 추출 (Name/ASIL과 동일 패턴).
+
+    KJPDS02 v2.08 병합 라벨(['Prototype','Prototype','void f( void )',...]) 대응 —
+    라벨 이후 반복 라벨 셀 skip 후 첫 비어있지 않은 값. 실패 시 빈 string (fail-safe).
+    이 추출이 없어 링크(cloudium) UDS의 prototype이 표에 있는데도 조용히 비었다(사이드카 전용).
+    """
+    try:
+        rows = tbl.rows
+        for row in rows[:8]:
+            cells = [c.text.strip() for c in row.cells]
+            for i, c in enumerate(cells):
+                if c.lower() in _PROTOTYPE_LABEL_CANDIDATES:
+                    for nxt in cells[i + 1:]:
+                        if nxt.lower() in _PROTOTYPE_LABEL_CANDIDATES:
+                            continue
+                        if nxt:
+                            return nxt[:200]
+    except Exception as e:  # pragma: no cover — 양식 다양성 fail-safe (ASIL 추출기와 동일 로깅)
+        import logging
+        logging.getLogger(__name__).debug(
+            "_extract_prototype_from_table 파싱 예외 (양식 변종 추정): %s: %s",
+            type(e).__name__, e,
+        )
+    return ""
+
+
 def parse_swuds_docx(
     docx_bytes: bytes, parse_warnings: list[str] | None = None,
 ) -> SwUDSParseResult:
@@ -299,12 +336,15 @@ def parse_swuds_docx(
             asil = _extract_asil_from_table(node)
             # 라운드 89: 함수 이름 — table 'Name' 행 우선, 없으면 heading fallback.
             name = _extract_name_from_table(node) or _name_from_heading(last_heading or "")
+            # 함수 원형 — 동일 table 'Prototype' 행(Name/Description 사이). 없으면 빈 string.
+            prototype = _extract_prototype_from_table(node)
             entries.append(SwUDSEntry(
                 function_id=last_fn_id,
                 heading_text=last_heading or "",
                 description=description,
                 asil=asil,
                 name=name,
+                prototype=prototype,
             ))
             # 같은 heading 아래 다른 entry 추가 안 함 (중복 방지)
             last_fn_id = None
