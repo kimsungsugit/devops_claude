@@ -174,14 +174,14 @@ describe('SrsSdsSection — 추적성 매트릭스 마운트 복원', () => {
     render(<SrsSdsSection job={JOB} analysisResult={mkResult()} />);
 
     // 마운트 effect가 정착할 시간을 준 뒤 어떤 복원 배지도 없어야 한다.
-    await screen.findByText('추적성 매트릭스');   // 패널은 항상 렌더
+    await screen.findByText(/추적성 매트릭스/);   // 패널은 항상 렌더
     await waitFor(() => expect(screen.queryByText(/저장된 결과/)).not.toBeInTheDocument());
   });
 
   it('저장분이 없으면 복원 배지가 없다(생성 전 상태)', async () => {
     render(<SrsSdsSection job={JOB} analysisResult={mkResult()} />);
 
-    await screen.findByText('추적성 매트릭스');
+    await screen.findByText(/추적성 매트릭스/);
     await waitFor(() => expect(screen.queryByText(/저장된 결과/)).not.toBeInTheDocument());
   });
 });

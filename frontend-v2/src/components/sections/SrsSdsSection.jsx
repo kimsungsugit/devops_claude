@@ -481,15 +481,23 @@ export default function SrsSdsSection({ job, analysisResult }) {
         build_selector: cfg?.buildSelector || 'lastSuccessfulBuild',
       });
       // 이 시점까지의 경고 = 실제 step 실패(SUTS/SITS/VectorCAST 추출 실패·매핑 없음).
-      // VectorCAST bridge 가시성: SRS에 연결된 함수 수 / 미연결(이 SRS 범위 밖 함수).
-      // 미연결엔 단위시험된 함수(SDS 명세 공백 후보)도 포함 — 트리 'SRS 미추적 시험'에서 확인.
+      // VectorCAST bridge 가시성(§10): 미추적 수를 단일 'SDS 명세 공백'으로 단정하지 않는다 —
+      // backend가 이미 계층 분류한 값(unmapped_layer_*·unmapped_uds_linked)을 그대로 노출해
+      // '앱 설계공백 후보' vs '범위 경계(BSW/부트로더/라이브러리)' vs '단위설계엔 존재'를 구분한다.
       const vcSum = (data?.matrix?.summary) || data?.summary || {};
       if (typeof vcSum.vcast_input_rows === 'number' && vcSum.vcast_input_rows > 0) {
         const untraced = vcSum.vcast_untraced_rows ?? 0;
         if (untraced > 0) {
-          const sutsTested = vcSum.unmapped_suts_tested ?? 0;
-          const tail = sutsTested > 0 ? ` 이 중 ${sutsTested}개는 단위시험까지 됨(SDS 명세 공백 가능) — 트리 'SRS 미추적 시험'에서 확인하세요.` : ' 부트로더·ISR 등 — 정상이나, 이 수가 급증하면 SUTS/SDS 매핑을 확인하세요.';
-          stepWarnings.push(`VectorCAST ${vcSum.vcast_traced_rows}/${vcSum.vcast_input_rows} 함수가 SRS에 연결됨. ${untraced}개는 이 SRS 범위 밖.${tail}`);
+          const appLeaf = vcSum.unmapped_layer_app_leaf ?? 0;   // 실 애플리케이션 설계공백 후보(검토 우선순위 ↑)
+          const boundary = (vcSum.unmapped_layer_bsw_driver ?? 0) + (vcSum.unmapped_layer_boot_reprog ?? 0)
+            + (vcSum.unmapped_layer_lib_util ?? 0) + (vcSum.unmapped_layer_test_artifact ?? 0);  // 정당한 범위 경계
+          const udsLinked = vcSum.unmapped_uds_linked ?? 0;     // 단위설계엔 존재(SDS roll-up만 누락, 입도차)
+          const parts = [];
+          if (appLeaf) parts.push(`앱 설계공백 후보 ${appLeaf}`);
+          if (boundary) parts.push(`범위 경계(BSW·부트로더·라이브러리) ${boundary}`);
+          if (udsLinked) parts.push(`단위설계엔 존재 ${udsLinked}`);
+          const tail = parts.length ? ` 내역: ${parts.join(' · ')} — 트리 'SRS 미추적 시험'에서 확인.` : '';
+          stepWarnings.push(`전체 VectorCAST 대상 ${vcSum.vcast_input_rows}개 중 ${vcSum.vcast_traced_rows}개가 현재 경로로 SRS까지 역추적됨. 나머지 ${untraced}개는 설계 연결·범위 분류 확인 대상(단위시험·PASS와 설계 추적성은 별개 상태).${tail}`);
         }
       }
       // Attach metadata
@@ -852,7 +860,7 @@ export default function SrsSdsSection({ job, analysisResult }) {
       {/* Traceability matrix */}
       <div className="panel mt-3">
         <div className="panel-header">
-          <span className="panel-title">추적성 매트릭스</span>
+          <span className="panel-title">ISO 26262 Part 6 SW 추적성 매트릭스</span>
           <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
             {loading && loadProgress && (
               <span className="text-muted text-sm">{loadProgress}</span>
@@ -892,6 +900,13 @@ export default function SrsSdsSection({ job, analysisResult }) {
               </button>
             )}
           </div>
+        </div>
+
+        {/* 범위 배너(§2 ISO 26262 Part 6) — 이 화면이 SW 레벨 추적성임을 명시. 시스템/HW 시험 완료는
+            SW 완료율에 미포함(SyRS·HSIS는 입력 경계·상위 추적으로만 유지) — 시스템 쌍은 아래 V-model
+            요약에서 '참고'로 분리 표시. 추적 링크 존재 ≠ 시험 실행/PASS(서로 다른 상태). */}
+        <div style={{ margin: '6px 0 0', padding: '6px 12px', background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 6, fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.5 }}>
+          SW 요구·설계·구현·검증의 <strong style={{ color: 'var(--fg)' }}>양방향 추적성</strong>을 평가합니다. 시스템/HW 시험 완료는 SW 완료율에 <strong style={{ color: 'var(--fg)' }}>미포함</strong>(SyRS·HSIS는 입력 경계·상위 추적으로만 유지). 추적 링크 존재 ≠ 시험 실행/PASS — 서로 다른 상태입니다.
         </div>
 
         {/* Partial failure warnings */}
@@ -1047,49 +1062,70 @@ function _pairTone(gapGenuine) {
 
 function VModelPairSummary({ pg }) {
   // 좌 분모 0(해당 설계 밴드를 쓰는 요구 없음)이면 그 쌍은 'N/A'로 회색 표시(거짓 100% 방지).
-  const pairs = [
-    { key: 'src', label: 'Source → VectorCAST', side: '실행 결과', left: pg.srcLeft, gap: pg.srcNoVc, genuine: pg.srcNoVc },
+  // ISO 26262 Part 6 범위 정직화(§4.1/§5.1/§5.2/§8.3) — 쌍을 3그룹으로 시각 분리:
+  //  - swPairs: SW 설계↔검증 수평쌍(UDS↔SUTS, SDS↔SITS) — SW 완료율의 핵심 신호.
+  //  - execPairs: 실행 증거(Source→VectorCAST) — 설계↔검증 수평쌍이 아니라 시험명세→실행 체인.
+  //  - sysPairs: 시스템 레벨(HSIS→SyITS, SyRS→SyTS) — 참고. SW 완료율에 미포함(입력 경계/상위 추적).
+  // 각 쌍의 계산(na/done/pct/tone)은 기존과 동일 — 그룹핑만 추가(순수 표시 변경).
+  const swPairs = [
     { key: 'uds', label: 'UDS → SUTS', side: 'SW 단위시험', left: pg.udsLeft, gap: pg.udsNoSuts, genuine: pg.udsNoSuts },
     { key: 'sds', label: 'SDS → SITS', side: 'SW 통합시험', left: pg.sdsLeft, gap: pg.sdsNoSits, genuine: pg.sdsNoSitsGenuine, alt: pg.sdsNoSitsAlt },
+  ];
+  const execPairs = [
+    { key: 'src', label: 'Source → VectorCAST', side: '실행 결과', left: pg.srcLeft, gap: pg.srcNoVc, genuine: pg.srcNoVc },
+  ];
+  const sysPairs = [
     { key: 'hsis', label: 'HSIS → SyITS', side: '시스템 통합시험', left: pg.hsisLeft, gap: pg.hsisNoSyits, genuine: pg.hsisNoSyits },
     { key: 'syrs', label: 'SyRS → SyTS', side: '시스템 시험', left: pg.syrsLeft, gap: pg.syrsNoSyts, genuine: pg.syrsNoSyts },
   ];
+  const renderPair = (p) => {
+    const na = !p.left;
+    const done = na ? 0 : p.left - p.genuine;
+    const pct = na ? 0 : Math.round((done / p.left) * 100);
+    const tone = _pairTone(p.genuine);
+    const barC = na ? '#cbd5e1' : (tone === 'ok' ? COVERAGE_COLORS.covered.border : COVERAGE_COLORS.partial.border);
+    const fg = na ? 'var(--text-muted)' : (tone === 'ok' ? COVERAGE_COLORS.covered.fg : COVERAGE_COLORS.partial.fg);
+    return (
+      <div key={p.key} style={{ display: 'flex', alignItems: 'center', gap: 10, fontSize: 12 }}
+        title={na ? '이 설계 밴드를 쓰는 요구사항이 없어 해당 없음' :
+          `${p.label}: 설계 ${p.left}건 중 ${done}건 검증 완료` +
+          (p.alt ? ` · 대체검증 ${p.alt}건 제외` : '') +
+          (p.genuine ? ` · 진짜 결핍 ${p.genuine}건` : ' · 진짜 결핍 없음')}>
+        <span style={{ width: 168, fontWeight: 600, color: 'var(--fg)', whiteSpace: 'nowrap' }}>
+          {na ? '⊘' : (tone === 'ok' ? '✅' : '⚠')} {p.label}
+        </span>
+        <span style={{ width: 92, fontSize: 10, color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>{p.side}</span>
+        <div style={{ flex: 1, minWidth: 80, height: 8, background: '#e5e7eb', borderRadius: 4, overflow: 'hidden' }}>
+          <div style={{ width: `${pct}%`, height: '100%', background: barC }} />
+        </div>
+        <span style={{ width: 116, textAlign: 'right', color: fg, fontWeight: 700, whiteSpace: 'nowrap' }}>
+          {na ? '해당 없음' : `${done}/${p.left} (${pct}%)`}
+          {!na && p.genuine ? <span style={{ fontWeight: 600, fontSize: 10 }}> · 결핍 {p.genuine}</span> : null}
+        </span>
+      </div>
+    );
+  };
+  const groupLabel = (txt, note) => (
+    <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-muted)', marginTop: 2 }}>
+      {txt}{note ? <span style={{ fontWeight: 400 }}> — {note}</span> : null}
+    </div>
+  );
   return (
     <div style={{ marginBottom: 12, border: '1px solid var(--border)', borderRadius: 8, padding: '10px 14px', background: 'var(--bg)' }}>
       <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 8, color: 'var(--fg)' }}>
         V-model 수평쌍 완성도 <span style={{ fontWeight: 400, fontSize: 11, color: 'var(--text-muted)' }}>— 설계(좌) 대비 대응 검증(우) 채움 · 진짜 결핍만 '약함'</span>
       </div>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-        {pairs.map(p => {
-          const na = !p.left;
-          const done = na ? 0 : p.left - p.genuine;
-          const pct = na ? 0 : Math.round((done / p.left) * 100);
-          const tone = _pairTone(p.genuine);
-          const barC = na ? '#cbd5e1' : (tone === 'ok' ? COVERAGE_COLORS.covered.border : COVERAGE_COLORS.partial.border);
-          const fg = na ? 'var(--text-muted)' : (tone === 'ok' ? COVERAGE_COLORS.covered.fg : COVERAGE_COLORS.partial.fg);
-          return (
-            <div key={p.key} style={{ display: 'flex', alignItems: 'center', gap: 10, fontSize: 12 }}
-              title={na ? '이 설계 밴드를 쓰는 요구사항이 없어 해당 없음' :
-                `${p.label}: 설계 ${p.left}건 중 ${done}건 검증 완료` +
-                (p.alt ? ` · 대체검증 ${p.alt}건 제외` : '') +
-                (p.genuine ? ` · 진짜 결핍 ${p.genuine}건` : ' · 진짜 결핍 없음')}>
-              <span style={{ width: 168, fontWeight: 600, color: 'var(--fg)', whiteSpace: 'nowrap' }}>
-                {na ? '⊘' : (tone === 'ok' ? '✅' : '⚠')} {p.label}
-              </span>
-              <span style={{ width: 92, fontSize: 10, color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>{p.side}</span>
-              <div style={{ flex: 1, minWidth: 80, height: 8, background: '#e5e7eb', borderRadius: 4, overflow: 'hidden' }}>
-                <div style={{ width: `${pct}%`, height: '100%', background: barC }} />
-              </div>
-              <span style={{ width: 116, textAlign: 'right', color: fg, fontWeight: 700, whiteSpace: 'nowrap' }}>
-                {na ? '해당 없음' : `${done}/${p.left} (${pct}%)`}
-                {!na && p.genuine ? <span style={{ fontWeight: 600, fontSize: 10 }}> · 결핍 {p.genuine}</span> : null}
-              </span>
-            </div>
-          );
-        })}
+        {groupLabel('SW 설계 ↔ 검증 수평쌍')}
+        {swPairs.map(renderPair)}
+        {groupLabel('실행 증거', '설계↔검증 수평쌍이 아니라 시험명세→실행 체인')}
+        {execPairs.map(renderPair)}
+        <div style={{ marginTop: 4, paddingTop: 6, borderTop: '1px dashed var(--border)' }} />
+        {groupLabel('시스템 레벨 (참고)', 'SW 완료율에 미포함 · 입력 경계/상위 추적')}
+        {sysPairs.map(renderPair)}
       </div>
       <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 8 }}>
-        비율 = (설계 요구 − 진짜 결핍) / 설계 요구. 비기능(SyTS/STS)·인터페이스(HSIS/SyITS)로 검증되는 요구는 '대체검증'으로 결핍에서 제외(은폐 아님 — 상세는 아래 공백 패널·finding 시트).
+        비율 = (설계 요구 − 진짜 결핍) / 설계 요구. 비기능(SyTS/STS)·인터페이스(HSIS/SyITS)로 검증되는 요구는 '대체검증'으로 결핍에서 제외(은폐 아님 — 상세는 아래 공백 패널·finding 시트). 시스템 레벨 쌍(HSIS→SyITS·SyRS→SyTS)은 SW 완료율에 포함하지 않는 참고 지표다.
       </div>
     </div>
   );
@@ -2053,7 +2089,7 @@ function TraceMatrix({ matrix, focusFunctions = null, onClearFocus = null,
                   {Math.round(((summary?.mapped_test_count ?? (coverage.covered + coverage.partial)) / coverage.total) * 100)}%
                 </td>
                 <td style={{ padding: '8px 12px', fontSize: 11, color: 'var(--text-muted)' }}>
-                  SW시험(STS·SUTS·SITS)·시스템시험(SyTS·SyITS)·실행(VectorCAST) 테스트 매핑 기준
+                  SW시험(STS·SUTS·SITS)·시스템시험(SyTS·SyITS)·실행(VectorCAST) 테스트 매핑 기준 — 시스템시험 매핑 포함(SW covered 지표와는 별개)
                 </td>
               </tr>
             </tfoot>
@@ -2104,13 +2140,13 @@ function TraceMatrix({ matrix, focusFunctions = null, onClearFocus = null,
             <GapBadge label="orphan SUTS (시험有 설계無)" value={gapStats.orphanSuts} tone={gapStats.orphanSuts ? 'warn' : 'ok'}
               title="어느 UDS 함수에도 매핑되지 않는 SUTS 단위시험(역방향 공백) — (요구사항×시험) 쌍 기준, 공유 시험은 중복 합산" />
             {unmappedSupported ? (
-              <GapBadge label="SRS 미추적 시험 (역방향)" value={gapStats.unmappedTotal} tone={gapStats.unmappedTotal ? 'warn' : 'ok'}
-                title="시험은 됐으나 이 SRS 요구사항에 안 닿는 VectorCAST 함수(종, 중복 제거)"
+              <GapBadge label="SRS까지 역추적 안 된 구현 요소 후보 (역방향)" value={gapStats.unmappedTotal} tone={gapStats.unmappedTotal ? 'warn' : 'ok'}
+                title="시험은 됐으나 이 SRS 요구사항에 안 닿는 VectorCAST 함수(종, 중복 제거). 전량이 설계 공백은 아니며 계층 분류(앱 설계공백 후보·범위 경계·단위설계 존재)로 나뉜다 — 상단 경고·트리 'SRS 미추적 시험' 참조."
                 sub={gapStats.unmappedSuts ? `단위시험됨 ${gapStats.unmappedSuts}` : ''} />
             ) : (
               <span title="로컬 파일모드는 VectorCAST 역방향 추적(미추적 시험)을 계산하지 않습니다 — Jenkins 경로에서 확인하세요"
                 style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '4px 10px', borderRadius: 16, background: '#f3f4f6', border: '1px solid #e5e7eb', whiteSpace: 'nowrap', color: '#9ca3af' }}>
-                SRS 미추적 시험 (역방향) <span style={{ fontWeight: 700 }}>미지원</span>
+                SRS까지 역추적 안 된 구현 요소 후보 (역방향) <span style={{ fontWeight: 700 }}>미지원</span>
               </span>
             )}
           </div>
@@ -2126,11 +2162,18 @@ function TraceMatrix({ matrix, focusFunctions = null, onClearFocus = null,
                 <GapBadge label="UDS→SUTS (SW단위시험)" value={gapStats.pairGaps.udsNoSuts} tone={gapStats.pairGaps.udsNoSuts ? 'warn' : 'ok'}
                   title="단위 상세설계(UDS) 함수는 있으나 대응하는 SW 단위시험(SUTS)이 없는 요구사항 수" />
                 <GapBadge label="Source→VectorCAST" value={gapStats.pairGaps.srcNoVc} tone={gapStats.pairGaps.srcNoVc ? 'warn' : 'ok'}
-                  title="소스(UDS 함수)는 있으나 VectorCAST 실행 결과가 없는 요구사항 수" />
+                  title="소스(UDS 함수)는 있으나 VectorCAST 실행 결과가 없는 요구사항 수(실행 증거 — 설계↔검증 수평쌍 아님)" />
+              </div>
+              {/* 시스템 레벨(참고) — SW 완료율에 미포함(§4.1/§8.3). SW 공백과 시각 분리해 시스템 시험
+                  미완이 SW 결핍으로 오독되지 않게 한다. 계산값(pairGaps.*)은 동일, 표시만 분리. */}
+              <div style={{ marginTop: 8, fontSize: 11, fontWeight: 700, color: 'var(--text-muted)' }}>
+                시스템 레벨 (참고 · SW 완료율 제외)
+              </div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, fontSize: 12, marginTop: 4 }}>
                 <GapBadge label="HSIS→SyITS (시스템통합)" value={gapStats.pairGaps.hsisNoSyits} tone={gapStats.pairGaps.hsisNoSyits ? 'warn' : 'ok'}
-                  title="HW-SW 인터페이스(HSIS)는 있으나 대응하는 시스템 통합시험(SyITS)이 없는 요구사항 수 — 두 밴드가 같은 요구를 공유해야 성립" />
+                  title="HW-SW 인터페이스(HSIS)는 있으나 대응하는 시스템 통합시험(SyITS)이 없는 요구사항 수 — 두 밴드가 같은 요구를 공유해야 성립. 시스템 레벨 참고 지표로 SW 완료율에 미포함." />
                 <GapBadge label="SyRS→SyTS (시스템시험)" value={gapStats.pairGaps.syrsNoSyts} tone={gapStats.pairGaps.syrsNoSyts ? 'warn' : 'ok'}
-                  title="상위 시스템요구(SyRS)는 연결됐으나 대응하는 시스템 시험(SyTS)이 없는 요구사항 수" />
+                  title="상위 시스템요구(SyRS)는 연결됐으나 대응하는 시스템 시험(SyTS)이 없는 요구사항 수. 시스템 레벨 참고 지표로 SW 완료율에 미포함." />
               </div>
             </div>
           ) : null}
