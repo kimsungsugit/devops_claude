@@ -223,6 +223,46 @@ def list_jobs(*, scm_id: str = "", limit: int = 10) -> List[Dict[str, Any]]:
     return items
 
 
+def find_job_files_by_scm(scm_id: str, *, limit: int = 1) -> List[Path]:
+    """scm_id에 해당하는 잡 파일을 **파일명만으로**(본문 파싱 없이) 찾아 최신순 상위 N개 반환.
+
+    잡 파일명은 create_job의 job_id 포맷 그대로 `job_impact_{YYYYMMDD}_{HHMMSS}_{scm}_{uuid8}.json`
+    이고 {scm}=_sanitize_fragment(scm_id)다(:164-165, :30-36). 파일명에서 slug 세그먼트를 복원해
+    대상과 비교하고, 임베드된 타임스탬프(사전순=시간순) 내림차순으로 상위 limit개를 준다.
+
+    aggregate_stats처럼 프로젝트 N개를 도는 배치가 매 후보마다 잡 본문(VectorCAST 결과는 수 MB)을
+    파싱하지 않도록 후보 선별을 파일명으로만 한다 — 호출측이 상위 후보만 열어 검증한다. 최신 잡이
+    실패/미완료여도 그 다음 완료 잡으로 폴백하려면 limit>1로 받는다(list_jobs는 전 후보 본문을
+    json.loads 하므로 배치엔 부적합).
+
+    ⚠trigger_type은 파일명에 없어 여기서 못 거른다 — 현재는 vectorcast 잡만 job-url slug를 scm_id로
+    쓰고(jenkins.py:1655) impact 계열은 registry entry_id(예 'kjpds02')를 써서(jenkins.py:2290 등)
+    네임스페이스가 분리돼 안전하다. 향후 다른 트리거가 같은 URL-slug 관례를 재사용하면 호출측이
+    본문 status/trigger_type을 반드시 검증해야 한다.
+    """
+    if not scm_id:  # 빈/None scm_id는 어떤 잡과도 매칭하지 않는다(_sanitize_fragment("")="job" 오매칭 차단).
+        return []
+    target = _sanitize_fragment(scm_id)
+    JOB_DIR.mkdir(parents=True, exist_ok=True)
+    matches = []  # (ts_key, path)
+    for path in JOB_DIR.glob("job_impact_*.json"):
+        # stem = job_impact_{date}_{time}_{slug...}_{uuid8} → 최소 6조각.
+        parts = path.stem.split("_")
+        if len(parts) < 6:
+            continue
+        if "_".join(parts[4:-1]) != target:
+            continue
+        matches.append((f"{parts[2]}_{parts[3]}", path))  # YYYYMMDD_HHMMSS — 사전순 == 시간순
+    matches.sort(key=lambda x: x[0], reverse=True)
+    return [p for _, p in matches[:max(1, int(limit))]]
+
+
+def find_latest_job_file(scm_id: str) -> Optional[Path]:
+    """scm_id의 최신 잡 파일 1개(파일명 기준). find_job_files_by_scm(limit=1)의 편의 래퍼."""
+    files = find_job_files_by_scm(scm_id, limit=1)
+    return files[0] if files else None
+
+
 # 이력 목록 투영에 남길 잡 헤더 필드. result(본문)는 의도적으로 제외한다.
 _SUMMARY_JOB_KEYS = (
     "job_id", "scm_id", "trigger_type", "dry_run", "targets", "status", "stage",

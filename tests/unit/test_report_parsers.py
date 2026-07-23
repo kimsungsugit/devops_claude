@@ -13,6 +13,7 @@ from backend.services.report_parsers import (
     parse_prqa_rcr_summary,
     read_text_safe,
     resolve_code_metrics,
+    resolve_scm_vcast_metrics,
 )
 
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures"
@@ -414,3 +415,91 @@ class TestResolveCodeMetrics:
         # None/비-dict analysis_summary도 크래시 없이 부재로 처리.
         assert resolve_code_metrics(None)["source"] is None
         assert resolve_code_metrics({"code_metrics": None})["source"] is None
+
+
+class TestResolveScmVcastMetrics:
+    """resolve_scm_vcast_metrics — SCM 로드 이력 payload → 대시보드 경량 지표(상세탭 effVcast 미러)."""
+
+    def test_merged_payload_extracts_coverage_tc_and_pass(self):
+        payload = {
+            "coverage": {
+                "statement": {"covered": 8579, "total": 8622, "rate": 0.995},
+                "branch": {"covered": 4044, "total": 4097, "rate": 0.9871},
+                "mcdc": {"covered": 0, "total": 0, "rate": None},
+            },
+            "test_rows_count_ut": 120, "test_rows_count_it": 45,
+            "summary_ut": {"total": 120, "passed": 118, "failed": 2, "pass_rate": 0.9833},
+            "summary_it": {"total": 45, "passed": 45, "failed": 0, "pass_rate": 1.0},
+        }
+        m = resolve_scm_vcast_metrics(payload)
+        assert m is not None
+        assert m["line_rate"] == 0.995          # statement.rate가 대시보드 line_rate 소스
+        assert m["branch_rate"] == 0.9871
+        assert (m["ut_total"], m["it_total"]) == (120, 45)
+        assert (m["ut_passed"], m["it_passed"]) == (118, 45)
+
+    def test_merged_legacy_splits_by_test_rows_source(self):
+        # 병합 payload는 vcast_kind가 없고(단일폴더만 보유) split 카운트도 없다(구 payload).
+        # test_rows의 행별 source로 분리해야 IT가 UT로 오귀속되지 않는다(reviewer Critical 재현: NE1AW).
+        payload = {
+            "coverage": {"statement": {"covered": 70, "total": 100, "rate": 0.7},
+                         "branch": {"covered": 0, "total": 0, "rate": None},
+                         "mcdc": {"covered": 0, "total": 0, "rate": None}},
+            "test_rows_count": 5,
+            "test_rows": [{"source": "UT"}, {"source": "UT"}, {"source": "UT"},
+                          {"source": "IT"}, {"source": "IT"}],
+            "summary": {"total": 5, "passed": 4, "failed": 1, "pass_rate": 0.8},
+        }
+        m = resolve_scm_vcast_metrics(payload)
+        assert m is not None
+        assert (m["ut_total"], m["it_total"]) == (3, 2)   # kind 추정이었으면 (5, 0)로 오귀속됐음
+        # 병합엔 vcast_kind 없어 결합 summary를 어느 쪽에도 안 몰아줌(합격 집계 보류).
+        assert m["ut_passed"] is None and m["it_passed"] is None
+
+    def test_single_folder_ut_with_split_injected(self):
+        # 단일폴더도 multi 래퍼가 test_rows_count_ut/it·summary_ut/it를 주입한다(jenkins.py:1527-1532).
+        payload = {
+            "vcast_kind": "UT",
+            "coverage": {"statement": {"covered": 90, "total": 100, "rate": 0.9},
+                         "branch": {"covered": 0, "total": 0, "rate": None},
+                         "mcdc": {"covered": 0, "total": 0, "rate": None}},
+            "test_rows_count": 10, "test_rows_count_ut": 10, "test_rows_count_it": 0,
+            "summary_ut": {"total": 10, "passed": 9, "failed": 1, "pass_rate": 0.9},
+            "summary_it": None,
+        }
+        m = resolve_scm_vcast_metrics(payload)
+        assert m is not None
+        assert m["line_rate"] == 0.9
+        assert (m["ut_total"], m["it_total"]) == (10, 0)
+        assert m["ut_passed"] == 9
+
+    def test_old_payload_without_split_routes_by_kind(self):
+        # 2026-07-06 split 이전 payload: test_rows_count_ut/it 부재 → vcast_kind로 결합 카운트 귀속.
+        payload_it = {
+            "vcast_kind": "IT",
+            "coverage": {"statement": {"covered": 7, "total": 10, "rate": 0.7},
+                         "branch": {"covered": 0, "total": 0, "rate": None},
+                         "mcdc": {"covered": 0, "total": 0, "rate": None}},
+            "test_rows_count": 33,
+            "summary": {"total": 33, "passed": 30, "failed": 3, "pass_rate": 0.9091},
+        }
+        m = resolve_scm_vcast_metrics(payload_it)
+        assert m is not None
+        assert (m["ut_total"], m["it_total"]) == (0, 33)   # IT로 귀속
+        assert m["it_passed"] == 30 and m["ut_passed"] is None
+        assert m["line_rate"] == 0.7
+
+    def test_mcdc_total_zero_keeps_rate_none_not_zero(self):
+        # 대시보드는 statement를 line_rate로 쓰지만, total=0→rate=None 계약을 payload가 지켜야 함.
+        payload = {"coverage": {"statement": {"covered": 0, "total": 0, "rate": None}},
+                   "test_rows_count_ut": 5, "test_rows_count_it": 0}
+        m = resolve_scm_vcast_metrics(payload)
+        assert m is not None
+        assert m["line_rate"] is None       # 0% 미커버 위장 아님
+        assert m["ut_total"] == 5           # TC는 있으니 이력은 유효
+
+    def test_no_coverage_no_tests_returns_none(self):
+        assert resolve_scm_vcast_metrics(
+            {"coverage": {}, "test_rows_count_ut": 0, "test_rows_count_it": 0}) is None
+        assert resolve_scm_vcast_metrics({}) is None
+        assert resolve_scm_vcast_metrics(None) is None

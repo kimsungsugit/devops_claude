@@ -412,3 +412,55 @@ def test_list_job_summaries_labels_history_by_build_and_revision(tmp_path, monke
     assert all("result" not in i for i in items)
     # 다른 SCM의 이력이 섞이지 않는다(오귀속 방지)
     assert impact_jobs.list_job_summaries(scm_id="kjpds02", limit=10) == []
+
+
+def test_find_latest_job_file_matches_slug_and_picks_latest(tmp_path, monkeypatch):
+    # 파일명만으로 slug 매칭 + 타임스탬프 최신을 고른다(본문 파싱 없이 후보 선별).
+    from workflow import impact_jobs
+
+    jobs = tmp_path / "jobs"
+    jobs.mkdir()
+    monkeypatch.setattr(impact_jobs, "JOB_DIR", jobs)
+    slug = "http_192_168_110_40_7000_job_KJPDS02_PV"
+
+    def _touch(name):
+        (jobs / name).write_text("{}", encoding="utf-8")
+
+    _touch(f"job_impact_20260101_000000_{slug}_old00001.json")
+    _touch(f"job_impact_20260720_101010_{slug}_new00001.json")
+    # 다른 slug는 타임스탬프가 더 나중이어도 매칭 안 됨(오귀속 방지).
+    _touch("job_impact_20260721_000000_http_other_job_HDPDM01_zzz00001.json")
+    _touch("job_notimpact.json")  # 규격 외 파일명 — glob(job_impact_*)에서 제외.
+
+    latest = impact_jobs.find_latest_job_file(slug)
+    assert latest is not None
+    assert latest.name == f"job_impact_20260720_101010_{slug}_new00001.json"
+
+
+def test_find_latest_job_file_no_match_or_empty_returns_none(tmp_path, monkeypatch):
+    from workflow import impact_jobs
+
+    jobs = tmp_path / "jobs"
+    jobs.mkdir()
+    monkeypatch.setattr(impact_jobs, "JOB_DIR", jobs)
+    (jobs / "job_impact_20260720_101010_http_other_slug_aaa00001.json").write_text("{}", encoding="utf-8")
+    assert impact_jobs.find_latest_job_file("http_192_168_110_40_7000_job_KJPDS02_PV") is None
+    assert impact_jobs.find_latest_job_file("") is None  # 빈 scm_id 방어(오매칭 차단)
+
+
+def test_find_job_files_by_scm_returns_newest_first(tmp_path, monkeypatch):
+    # 리스트 변형: slug 매칭 파일을 타임스탬프 내림차순으로 상위 N개(가용성 폴백용).
+    from workflow import impact_jobs
+
+    jobs = tmp_path / "jobs"
+    jobs.mkdir()
+    monkeypatch.setattr(impact_jobs, "JOB_DIR", jobs)
+    slug = "http_x_job_A"
+    for ts, uid in [("20260101_000000", "aaa00001"), ("20260720_101010", "bbb00001"), ("20260315_120000", "ccc00001")]:
+        (jobs / f"job_impact_{ts}_{slug}_{uid}.json").write_text("{}", encoding="utf-8")
+    files = impact_jobs.find_job_files_by_scm(slug, limit=2)
+    assert [f.name for f in files] == [
+        f"job_impact_20260720_101010_{slug}_bbb00001.json",
+        f"job_impact_20260315_120000_{slug}_ccc00001.json",
+    ]
+    assert impact_jobs.find_job_files_by_scm("", limit=5) == []  # 빈 scm_id 방어

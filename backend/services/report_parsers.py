@@ -204,6 +204,95 @@ def resolve_code_metrics(
     }
 
 
+def resolve_scm_vcast_metrics(payload: Any) -> Optional[Dict[str, Any]]:
+    """SCM(cloudium) VectorCAST 로드 payload(비동기 잡 result.data)에서 대시보드용 경량 지표만 추출.
+
+    상세탭 프론트(AnalysisSection.jsx effVcast 파생)와 **동일 해석**을 써서 대시보드=상세탭 일치를
+    보장한다. 커버리지·TC가 모두 없으면 None을 반환(로드 이력이 무의미 — 폴백 대상 아님).
+
+    - line_rate/branch_rate ← coverage.statement/branch.rate (단일·병합 payload 모두 `coverage`
+      존재; total=0이면 rate=None 계약 유지 → 0% 미커버 위장 금지).
+    - ut_total/it_total ← test_rows_count_ut/it(모던). 구 payload엔 이 필드가 없어 **test_rows의
+      행별 source로 직접 분리**한다(_split_vcast_summary_by_source와 동일 규칙). ⚠병합 payload는
+      vcast_kind가 없어 kind 추정 시 IT를 전량 UT로 오귀속하므로 test_rows 우선(실측 NE1AW 6886/616).
+    - ut_passed/it_passed ← summary_ut/summary_it (없으면 결합 summary를 vcast_kind 확정 시에만 귀속).
+    """
+    if not isinstance(payload, dict):
+        return None
+    _cov_raw = payload.get("coverage")
+    cov = _cov_raw if isinstance(_cov_raw, dict) else {}
+
+    def _rate(metric: str) -> Optional[float]:
+        _cell = cov.get(metric)
+        cell = _cell if isinstance(_cell, dict) else {}
+        r = cell.get("rate")
+        return float(r) if isinstance(r, (int, float)) else None
+
+    line_rate = _rate("statement")
+    branch_rate = _rate("branch")
+
+    def _int(v: Any) -> Optional[int]:
+        return int(v) if isinstance(v, (int, float)) else None
+
+    kind = str(payload.get("vcast_kind") or "").upper()
+    ut_total = _int(payload.get("test_rows_count_ut"))
+    it_total = _int(payload.get("test_rows_count_it"))
+    if ut_total is None and it_total is None:
+        # 구 payload(split 필드 부재): test_rows의 행별 source로 직접 분리(ground truth).
+        # ⚠병합 payload는 vcast_kind가 없어 kind 추정은 IT를 전량 UT로 오귀속하므로 test_rows 우선.
+        rows = payload.get("test_rows")
+        if isinstance(rows, list):
+            it_total = sum(
+                1 for r in rows
+                if isinstance(r, dict) and str(r.get("source") or "").upper() == "IT"
+            )
+            ut_total = len(rows) - it_total
+        else:
+            # test_rows조차 없는 최소 payload: 결합 카운트를 vcast_kind로 귀속(단일폴더 최후 수단).
+            trc = _int(payload.get("test_rows_count"))
+            if trc is not None:
+                ut_total, it_total = (0, trc) if kind == "IT" else (trc, 0)
+    ut_total_i = ut_total or 0
+    it_total_i = it_total or 0
+
+    if line_rate is None and not ut_total_i and not it_total_i:
+        return None  # 이력은 있으나 대시보드에 쓸 커버리지·TC 없음.
+
+    # 합격 수는 확실할 때만 귀속: summary_ut/it가 있으면 그것, 없으면 결합 summary는 단일폴더
+    # (vcast_kind로 UT/IT 확정)에만 귀속. 병합(kind="")은 결합값을 한쪽에 몰면 오귀속이라 None
+    # (집계 보류) — 카운트와 달리 행별 합부 재분류는 여기서 하지 않는다.
+    _summary_raw = payload.get("summary")
+    _summary = _summary_raw if isinstance(_summary_raw, dict) else None
+    _sut_raw = payload.get("summary_ut")
+    if isinstance(_sut_raw, dict):
+        sut = _sut_raw
+    elif kind and kind != "IT":
+        sut = _summary
+    else:
+        sut = None
+    _sit_raw = payload.get("summary_it")
+    if isinstance(_sit_raw, dict):
+        sit = _sit_raw
+    elif kind == "IT":
+        sit = _summary
+    else:
+        sit = None
+
+    def _sm(s: Any, key: str) -> Optional[float]:
+        s = s if isinstance(s, dict) else {}
+        v = s.get(key)
+        return v if isinstance(v, (int, float)) else None
+
+    return {
+        "line_rate": line_rate,
+        "branch_rate": branch_rate,
+        "ut_total": ut_total_i,
+        "it_total": it_total_i,
+        "ut_passed": _sm(sut, "passed"),
+        "it_passed": _sm(sit, "passed"),
+    }
+
+
 def parse_prqa_rcr_summary(path: Path) -> Dict[str, Any]:
     data = parse_html_report(path)
     tables = data.get("tables") or []

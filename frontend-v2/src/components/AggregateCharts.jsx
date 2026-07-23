@@ -161,6 +161,19 @@ export default function AggregateCharts({ projects, buildStats }) {
             suffix="%"
           />
         ))}
+        {/* 빌드 라인커버리지와 SCM VectorCAST 구문커버리지가 섞이면 절대 비교가 부정확 — 정직 표기(silent 혼재 방지). */}
+        {projects.some(p => p.coverage_source === 'scm_vcast') && (
+          <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', marginTop: 'var(--sp-1)' }}>
+            * 일부 프로젝트는 SCM 로드 이력의 <b>VectorCAST 구문 커버리지</b>(빌드 라인 커버리지와 지표 상이) — 절대 비교 주의
+          </div>
+        )}
+        {/* 커버리지가 빌드·SCM 이력 모두 없어 0으로 뜨면 '진짜 0'과 구분(침묵 0 방지).
+            빌드 line_rate가 0.0 플레이스홀더면 null이 아니라 coverage_source가 null이므로 그걸로 판정. */}
+        {projects.some(p => p.coverage_source == null) && (
+          <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', marginTop: 'var(--sp-1)' }}>
+            † 일부 프로젝트는 커버리지 미집계(빌드·SCM 로드 이력 모두 없음)로 <b>0 표시</b> — 실제 0 아님
+          </div>
+        )}
       </div>
 
       {/* 3. PRQA diagnostics comparison */}
@@ -206,6 +219,12 @@ export default function AggregateCharts({ projects, buildStats }) {
           <span><span style={{ display: 'inline-block', width: 8, height: 8, background: 'var(--color-info)', borderRadius: 2, marginRight: 4 }} />UT</span>
           <span><span style={{ display: 'inline-block', width: 8, height: 8, background: 'var(--color-purple)', borderRadius: 2, marginRight: 4 }} />IT</span>
         </div>
+        {/* 빌드에 TC가 없어 SCM 로드 이력(VectorCAST)에서 회수한 개수임을 표기. */}
+        {projects.some(p => p.tests_source === 'scm_vcast') && (
+          <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', marginTop: 'var(--sp-1)' }}>
+            * 일부 프로젝트 TC 수는 SCM 로드 이력의 <b>VectorCAST UT/IT 개수</b>
+          </div>
+        )}
       </div>
 
       {/* 5. Code size comparison */}

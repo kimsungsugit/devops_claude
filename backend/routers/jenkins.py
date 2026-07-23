@@ -107,6 +107,7 @@ from backend.services.report_parsers import (
     build_report_summary,
     find_jenkins_source_root,
     resolve_code_metrics,
+    resolve_scm_vcast_metrics,
 )
 from backend.user_context import wrap_with_user
 
@@ -5755,6 +5756,62 @@ def jenkins_report_publish_async(req: JenkinsPublishRequest) -> Dict[str, Any]:
 # Aggregate stats across multiple projects
 # ──────────────────────────────────────────────────────────────────
 
+# SCM(cloudium) VectorCAST 로드 이력 → 대시보드 경량 지표 캐시.
+# key=(잡파일경로, mtime_ns) — 완료된 잡 파일은 불변이라 무-stale(새 로드는 새 파일=새 키).
+# 값은 resolve_scm_vcast_metrics의 작은 dict(또는 None)만 보존 — 수 MB 잡 본문은 캐시하지 않는다.
+# 자매 캐시 _VCAST_CLOUDIUM_PARSE_CACHE(:994)와 동일하게 lock으로 check-clear-set을 감싼다.
+_SCM_VCAST_METRICS_CACHE: Dict[Tuple[str, int], Optional[Dict[str, Any]]] = {}
+_SCM_VCAST_METRICS_LOCK = threading.Lock()
+
+
+def _scm_vcast_metrics_for_slug(scm_slug: str) -> Optional[Dict[str, Any]]:
+    """job slug의 최신 완료 VectorCAST 잡에서 대시보드용 커버리지/TC 지표를 회수.
+
+    "SCM 로드 이력이 있으면"을 구현 — cloudium 재접근 없이 reports/impact_jobs의 기존 잡 파일만
+    읽는다. find_job_files_by_scm(파일명 기반)로 최신 후보 몇 개를 받아 **최신순**으로 완료
+    +vectorcast+ok인 첫 잡을 쓴다(최신 잡이 cloudium timeout 등으로 실패해도 직전 성공 로드로
+    폴백 — 가용성 우선). 각 파일은 (path,mtime) 캐시 miss일 때만 본문을 1회 파싱한다.
+    """
+    # import 자체 실패(ImportError)는 진짜 결함이므로 삼키지 않고 표면화한다.
+    from workflow.impact_jobs import find_job_files_by_scm
+    try:
+        candidates = find_job_files_by_scm(scm_slug, limit=5)
+    except OSError:  # glob/mkdir I/O 장애 → '이력 없음'으로 graceful.
+        return None
+    for path in candidates:
+        try:
+            key = (str(path), path.stat().st_mtime_ns)
+        except OSError:
+            continue  # 파일이 사라짐 → 다음 후보.
+        with _SCM_VCAST_METRICS_LOCK:
+            has = key in _SCM_VCAST_METRICS_CACHE
+            cached = _SCM_VCAST_METRICS_CACHE.get(key)
+        if has:
+            if cached is None:
+                continue  # 캐시된 None = 이 파일은 이력 아님 → 더 오래된 후보로.
+            return cached
+        metrics: Optional[Dict[str, Any]] = None
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            if (
+                isinstance(raw, dict)
+                and raw.get("status") == "completed"
+                and raw.get("trigger_type") == "vectorcast"
+            ):
+                result = raw.get("result")
+                if isinstance(result, dict) and result.get("ok"):
+                    metrics = resolve_scm_vcast_metrics(result.get("data"))
+        except (OSError, ValueError):  # 파일 소멸(OSError)·손상/부분쓰기 JSON(JSONDecodeError⊂ValueError).
+            metrics = None
+        with _SCM_VCAST_METRICS_LOCK:
+            if len(_SCM_VCAST_METRICS_CACHE) > 128:
+                _SCM_VCAST_METRICS_CACHE.clear()
+            _SCM_VCAST_METRICS_CACHE[key] = metrics
+        if metrics is not None:
+            return metrics
+    return None
+
+
 @router.post("/api/jenkins/aggregate-stats")
 def aggregate_stats(req: dict) -> Dict[str, Any]:
     """Aggregate analysis_summary.json from latest builds of multiple jobs.
@@ -5862,28 +5919,55 @@ def aggregate_stats(req: dict) -> Dict[str, Any]:
             except (TypeError, ValueError):
                 return None
 
-        # Coverage
+        # Coverage — 빌드 산출물 우선(분모: analysis_summary.coverage)
         cov = data.get("coverage") or {}
         lr = _safe_float(cov.get("line_rate"))
         br = _safe_float(cov.get("branch_rate"))
-        if lr is not None:
-            cov_line_rates.append(lr)
-        if br is not None:
-            cov_branch_rates.append(br)
-        total_covered += _safe_int(cov.get("covered"))
-        total_lines += _safe_int(cov.get("total"))
+        cov_covered = _safe_int(cov.get("covered"))
+        cov_total_lines = _safe_int(cov.get("total"))
+        # 빌드 라인커버가 0.0이면 VectorCAST가 SCM 소스라 빌드에 안 담긴 '자리표시 0'일 때가 많다
+        # (KJPDS02_PV 실측). 테스트 카운트 0(ut_total>0 검사)과 동일하게 SCM 이력으로 폴백한다.
+        coverage_source = "build" if (lr is not None and lr > 0) else None
 
-        # Tests
+        # Tests — 빌드 산출물 우선
         tests = data.get("tests") or {}
         details = tests.get("details") or {}
         ut = details.get("ut") or {}
         it = details.get("it") or {}
         ut_tc = ut.get("testcases") or {}
         it_tc = it.get("testcases") or {}
-        total_ut_cases += _safe_int(ut_tc.get("total"))
-        passed_ut_cases += _safe_int(ut_tc.get("ok"))
-        total_it_cases += _safe_int(it_tc.get("total"))
-        passed_it_cases += _safe_int(it_tc.get("ok"))
+        ut_total = _safe_int(ut_tc.get("total"))
+        ut_ok = _safe_int(ut_tc.get("ok"))
+        it_total = _safe_int(it_tc.get("total"))
+        it_ok = _safe_int(it_tc.get("ok"))
+        tests_source = "build" if (ut_total > 0 or it_total > 0) else None
+
+        # SCM(cloudium) 로드 이력 폴백 — 빌드에 커버리지/테스트가 **없을 때만**.
+        # KJPDS02_PV류는 VectorCAST가 빌드가 아니라 SCM 경로에 있어 analysis_summary엔 0이다.
+        # 과거 로드가 남긴 reports/impact_jobs 잡 파일에서 회수(cloudium 재접근 없음).
+        # 빌드소스(HDPDM01)는 이 분기 자체를 안 타 무회귀·SCM 미조회.
+        if coverage_source is None or tests_source is None:
+            scm = _scm_vcast_metrics_for_slug(slug)
+            if scm:
+                if coverage_source is None and scm["line_rate"] is not None:
+                    lr, br, coverage_source = scm["line_rate"], scm["branch_rate"], "scm_vcast"
+                if tests_source is None and (scm["ut_total"] or scm["it_total"]):
+                    ut_total, it_total = scm["ut_total"], scm["it_total"]
+                    ut_ok = int(scm["ut_passed"]) if scm["ut_passed"] is not None else 0
+                    it_ok = int(scm["it_passed"]) if scm["it_passed"] is not None else 0
+                    tests_source = "scm_vcast"
+
+        # 해석값으로 누적(빌드-or-SCM) — 상단 avg_line_rate·total_ut_cases도 SCM 반영(X6 일관성).
+        if lr is not None:
+            cov_line_rates.append(lr)
+        if br is not None:
+            cov_branch_rates.append(br)
+        total_covered += cov_covered
+        total_lines += cov_total_lines
+        total_ut_cases += ut_total
+        passed_ut_cases += ut_ok
+        total_it_cases += it_total
+        passed_it_cases += it_ok
         if not tests.get("ok", True):
             all_pass = False
 
@@ -5911,7 +5995,6 @@ def aggregate_stats(req: dict) -> Dict[str, Any]:
 
         # Jenkins info
         jenkins = data.get("jenkins") or {}
-        ut_total = _safe_int(ut_tc.get("total"))
 
         def _parse_fraction_first(val: Any) -> int:
             """Extract first number from 'N/M' string or return int."""
@@ -5930,19 +6013,21 @@ def aggregate_stats(req: dict) -> Dict[str, Any]:
             "name": job_url.rstrip("/").split("/")[-1],
             "build_number": jenkins.get("build_number"),
             "result": jenkins.get("result"),
-            "line_rate": lr,
+            "line_rate": lr,          # 빌드 라인커버 or SCM VectorCAST 구문커버(coverage_source로 구분)
             "branch_rate": br,
             "ut_pass_rate": (
-                round(_safe_int(ut_tc.get("ok")) / ut_total, 4)
+                round(ut_ok / ut_total, 4)
                 if ut_total > 0 else None
             ),
-            "ut_total": _safe_int(ut_tc.get("total")),
-            "it_total": _safe_int(it_tc.get("total")),
+            "ut_total": ut_total,     # 빌드 or SCM VectorCAST UT TC 개수
+            "it_total": it_total,     # 빌드 or SCM VectorCAST IT TC 개수
             "diagnostics": diag,
             "loc": _safe_int(cm.get("nloc")),
             "functions": _safe_int(cm.get("functions")),
             "code_metrics_source": cm.get("source"),   # 'lizard' | 'qac' | None — 프론트 LOC 출처 라벨/각주용
             "code_metrics_reason": cm.get("reason"),   # 완전 부재(lizard·QAC 둘 다 없음) 사유 — 침묵 0 방지
+            "coverage_source": coverage_source,  # 'build' | 'scm_vcast' | None — 커버리지 출처 각주/미집계 구분
+            "tests_source": tests_source,        # 'build' | 'scm_vcast' | None — TC 개수 출처 각주용
             "rcr_violated_rules": _parse_fraction_first(rcr_summary.get("Violated Rules", 0)),
             "rcr_compliance_index": _parse_fraction_first(rcr_summary.get("Project Compliance Index", 0)),
         })
