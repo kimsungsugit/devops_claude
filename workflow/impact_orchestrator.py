@@ -1613,7 +1613,7 @@ def _collect_signature_changes(trigger, meta, entry, diff_text: str = "", diff_s
     scm_type = str(getattr(trigger, "scm_type", "") or "").lower()
     changed_files = list(getattr(trigger, "changed_files", None) or [])
     if src and scm_type in ("git", "svn") and changed_files:
-        from workflow.delta_update import _run_unified_diff
+        from workflow.delta_update import _run_unified_diff, _signature_change_rank
         merged: Dict[str, Dict[str, str]] = {}
         for fp in changed_files[:60]:
             # 파일 단위 try/except — 개별 파일 timeout/권한 오류가 앞서 성공한 파일 원문을
@@ -1623,7 +1623,13 @@ def _collect_signature_changes(trigger, meta, entry, diff_text: str = "", diff_s
                 if diff_sink is not None and dt:
                     diff_sink.append(dt)
                 for fn, sig in extract_signature_changes(dt or "").items():
-                    merged.setdefault(fn, {}).update(sig)
+                    # rank-aware 병합 — 동명 static 함수가 여러 파일에 있을 때 무변화 파일이 '나중에'
+                    # 와도 실제 변경(before!=after)을 덮지 않는다. 과거 setdefault().update()는 last-wins라
+                    # 파일 순서에 따라 실변경을 무변화로 가려 SIGNATURE인데 '원문 미확보'로 표시됐다
+                    # (whole-blob 경로 cross-file 마스킹과 동형 — _signature_change_rank 단일 출처).
+                    _prev = merged.get(fn)
+                    if _prev is None or _signature_change_rank(sig) > _signature_change_rank(_prev):
+                        merged[fn] = sig
             except Exception as exc:  # noqa: BLE001 — 파일 단위 실패는 건너뛴다
                 logger.debug("sig diff failed for %s: %s", fp, exc)
                 continue

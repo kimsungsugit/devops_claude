@@ -322,6 +322,44 @@ def test_extract_signature_changes_multiline_reconstructed():
     assert sig2["g"]["before"] == sig2["g"]["after"], sig2
 
 
+def test_extract_signature_changes_cross_file_not_masked():
+    """동명 static 함수가 여러 파일에 있고 한 파일은 무변화(동일 선언 -/+), 다른 파일은 실제 변경일 때,
+    무변화 파일이 **먼저 와도** '진짜 바뀐' before/after를 표시한다(집합 차로 동일쌍 상쇄). 과거
+    setdefault(함수당 첫 매치)는 무변화 동일쌍을 집어 before==after → orchestrator가 change_details에서
+    스킵 → 분류는 SIGNATURE인데 UI '원문 미확보'로 표시됐다(멀티라인 fix와 별개인 두 번째 미확보 경로)."""
+    from workflow.delta_update import (
+        classify_changed_functions_from_diff_text,
+        extract_signature_changes,
+    )
+    blob = "\n".join([
+        "Index: a.c",
+        "===================================================================",
+        "--- a.c\t(revision 1018)",
+        "+++ a.c\t(revision 1053)",
+        "@@ -10,3 +10,3 @@ s_foo(void)",
+        "-static U32 s_foo( U32 a );",
+        "+static U32 s_foo( U32 a );",         # a.c: 무변화(동일 선언) — 먼저 등장
+        " body_unchanged();",
+        "Index: b.c",
+        "===================================================================",
+        "--- b.c\t(revision 1018)",
+        "+++ b.c\t(revision 1053)",
+        "@@ -20,3 +20,3 @@ s_foo(void)",
+        "-static U32 s_foo( U32 a );",
+        "+static U32 s_foo( U32 a, U32 b );",  # b.c: 실제 파라미터 추가
+        " body();",
+        "",
+    ])
+    types, _ = classify_changed_functions_from_diff_text(blob)
+    sig = extract_signature_changes(blob)
+    # 분류는 SIGNATURE(b.c 실변경) — 파일 스코프 판정이라 이전에도 정확.
+    assert types.get("s_foo") == "SIGNATURE", types
+    # 핵심: before/after가 '진짜 바뀐' 쌍이라 무변화 동일쌍에 가려지지 않는다(원문 미확보 소멸).
+    assert sig.get("s_foo", {}).get("before") == "static U32 s_foo( U32 a )", sig
+    assert sig.get("s_foo", {}).get("after") == "static U32 s_foo( U32 a, U32 b )", sig
+    assert sig["s_foo"]["before"] != sig["s_foo"]["after"], sig
+
+
 def test_classify_from_diff_text_forward_decl_plus_real_change_not_masked():
     """C1: 같은 파일에 forward-decl(재정렬·무변화)과 definition(진짜 파라미터 추가)이 공존해도
     진짜 시그니처 변경이 은폐되지 않고 SIGNATURE로 유지된다(함수별 '모든' -/+ 선언 집합 비교).

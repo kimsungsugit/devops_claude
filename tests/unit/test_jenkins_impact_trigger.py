@@ -719,6 +719,36 @@ def test_collect_signature_changes_svn_range(monkeypatch):
     assert out["f"]["after"] == "int f(int a)"
 
 
+def test_collect_signature_changes_local_cross_file_not_masked(monkeypatch):
+    """로컬 diff 경로(case 2): 동명 static 함수가 여러 파일에 있을 때 무변화 파일이 '나중에' 와도
+    실제 변경을 가리지 않는다(rank-aware 병합). 과거 setdefault().update() last-wins는 파일 순서에
+    따라 실변경(before!=after)을 무변화(before==after)로 덮어 SIGNATURE인데 '원문 미확보'로 표시됐다
+    (whole-blob 경로 cross-file 마스킹과 동형)."""
+    from workflow import impact_orchestrator as orch
+    from workflow import delta_update as du
+
+    _per_file = {
+        # 변경 파일(b.c)이 먼저, 무변화 파일(a.c)이 나중 — last-wins 마스킹을 유발하는 순서.
+        "b.c": "-static U32 s_foo( U32 a );\n+static U32 s_foo( U32 a, U32 b );",  # 실제 파라미터 추가
+        "a.c": "-static U32 s_foo( U32 a );\n+static U32 s_foo( U32 a );",          # 무변화(동일 선언)
+    }
+
+    class _T:
+        scm_id = "x"; scm_type = "svn"; base_ref = ""; source_root = "D:/wc"
+        changed_files = ["b.c", "a.c"]
+
+    class _E:
+        scm_url = ""; source_root = "D:/wc"
+
+    monkeypatch.setattr(du, "_run_unified_diff",
+                        lambda src, *, base_ref, scm_type, file_path: _per_file[file_path])
+    # meta에 baseline/build revision 없음 → case 2(로컬 working-copy) 경로.
+    out = orch._collect_signature_changes(_T(), {}, _E())
+    assert out.get("s_foo", {}).get("before") == "static U32 s_foo( U32 a )", out
+    assert out.get("s_foo", {}).get("after") == "static U32 s_foo( U32 a, U32 b )", out
+    assert out["s_foo"]["before"] != out["s_foo"]["after"], out
+
+
 def _wait_terminal(impact_jobs_mod, job_id: str, timeout: float = 10) -> None:
     import time
 

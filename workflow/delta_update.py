@@ -692,6 +692,17 @@ def diff_has_function_context(diff_text: str) -> bool:
     return bool(_HUNK_FUNC.search(diff_text or ""))
 
 
+def _signature_change_rank(rec: Dict[str, str]) -> int:
+    """시그니처 변경 표시 rec의 강도(병합 우선순위): 실제 변경(before!=after)=2 > 한쪽만
+    (NEW/DELETE)=1 > 무변화(before==after)=0. 동명 함수가 여러 파일/블록에 있을 때 '실제 변경된
+    파일'을 무변화 파일에 가려지지 않게 병합하는 데 쓴다(extract_signature_changes 내부 + 로컬 diff
+    경로 orchestrator._collect_signature_changes 양쪽 단일 출처)."""
+    _bf, _af = rec.get("before"), rec.get("after")
+    if _bf and _af:
+        return 2 if _bf != _af else 0
+    return 1
+
+
 def extract_signature_changes(diff_text: str) -> Dict[str, Dict[str, str]]:
     """unified diff에서 함수별 이전(-)/이후(+) 선언 라인 원문을 추출한다.
 
@@ -699,21 +710,57 @@ def extract_signature_changes(diff_text: str) -> Dict[str, Dict[str, str]]:
       - SIGNATURE 변경: before/after 둘 다(매개변수/리턴타입 이전→이후).
       - NEW: after만 / DELETE: before만.
       - BODY(선언 라인 미변경): 결과에 없음(원문 표시 불필요).
-    한 함수에 여러 선언 라인이 잡히면 첫 라인을 유지한다(대개 1개). **멀티라인 선언(파라미터
-    줄바꿈)도 _reconstruct_diff_decls로 복원**해 before/after를 채운다 — 종전엔 여는 괄호까지만
-    잡혀('void Foo(') 미확보로 스킵됐고, 그 결과 리포맷 churn의 멀티라인 함수가 UI '원문 미확보'로
-    표시됐다(s_sha256_expand_word 등). 복원 후 before==after면 호출측(impact_orchestrator)이
-    change_details에 넣지 않아 '변화 없는 시그니처'를 렌더하지 않는다. UI '변경 상세' 원문 표시용이며,
-    변경유형 분류(classify_changed_functions)와 독립적인 best-effort 보강 데이터다.
+    **멀티라인 선언(파라미터 줄바꿈)도 _reconstruct_diff_decls로 복원**해 before/after를 채운다 —
+    종전엔 여는 괄호까지만 잡혀('void Foo(') 미확보로 스킵됐고, 그 결과 리포맷 churn의 멀티라인
+    함수가 UI '원문 미확보'로 표시됐다(s_sha256_expand_word 등). 복원 후 before==after면 호출측
+    (impact_orchestrator)이 change_details에 넣지 않아 '변화 없는 시그니처'를 렌더하지 않는다.
+
+    ⚠ cross-file 마스킹 fix: **파일 블록 단위**(Index: 분할, 분류기 _classify_one_file_diff와 동일
+    스코프)로 -선언/+선언을 집합으로 모아 집합 차로 (before,after) 쌍을 만들고, 병합 시 '실제 변경된
+    쌍(before!=after)'을 무변화 쌍(before==after)·한쪽만 있는 쌍보다 우선한다. 동명 static 함수가
+    여러 파일에 있고 한 파일은 무변화면, 과거 whole-blob setdefault(첫 매치)는 무변화 파일이 먼저 올
+    때 그 동일쌍을 집어 실제 변경 before/after를 가렸다(분류는 SIGNATURE인데 UI '원문 미확보' — 멀티라인
+    fix와 별개의 두 번째 미확보 경로). whole-blob 집합 차도 '진짜 before'가 다른 파일의 무변화 선언과
+    겹쳐 상쇄돼 before를 잃으므로, 파일 스코프 쌍 형성이 정확하다. UI '변경 상세' 원문 표시용이며,
+    변경유형 분류(classify_changed_functions)와 독립적인 best-effort 보강 데이터다(표시가 실제 변경을
+    못 잡아도 분류는 파일 스코프로 정확 — under-report 0).
     """
     out: Dict[str, Dict[str, str]] = {}
-    for polarity, func, decl in _reconstruct_diff_decls(diff_text):
-        # 복원해도 괄호 불균형(훅 절단 등)이면 온전한 선언이 아님 → 미표시(정직).
-        if not decl or decl.count("(") > decl.count(")"):
-            continue
-        rec = out.setdefault(func, {})
-        key = "after" if polarity == "+" else "before"
-        rec.setdefault(key, decl)
+    # Index: 헤더가 없으면(로컬 per-file diff 단일 blob) 전체를 한 블록으로 처리.
+    blocks = _split_svn_diff_by_file(diff_text) or [("", diff_text)]
+    for _path, block in blocks:
+        before_set: Dict[str, Set[str]] = {}
+        after_set: Dict[str, Set[str]] = {}
+        for polarity, func, decl in _reconstruct_diff_decls(block):
+            # 복원해도 괄호 불균형(훅 절단 등)이면 온전한 선언이 아님 → 미표시(정직).
+            if not decl or decl.count("(") > decl.count(")"):
+                continue
+            (after_set if polarity == "+" else before_set).setdefault(func, set()).add(decl)
+        for func in set(before_set) | set(after_set):
+            _b = before_set.get(func) or set()
+            _a = after_set.get(func) or set()
+            _removed_only = _b - _a  # 이 파일에서 실제로 제거된 고유 선언(양쪽 공통=무변화는 상쇄)
+            _added_only = _a - _b    # 이 파일에서 실제로 추가된 고유 선언
+            rec: Dict[str, str] = {}
+            if _removed_only or _added_only:
+                # 진짜 변경(제거/추가된 고유 선언)만. NEW=added_only만, DELETE=removed_only만,
+                # SIGNATURE=양쪽. 다수면 결정적(sorted 첫 원소).
+                if _removed_only:
+                    rec["before"] = sorted(_removed_only)[0]
+                if _added_only:
+                    rec["after"] = sorted(_added_only)[0]
+            elif _b and _a:
+                # 차집합이 빔(순수 재정렬·동일 선언) → 동일 쌍 유지(orchestrator가 before==after로 스킵).
+                _common = sorted(_b)[0]
+                rec["before"] = _common
+                rec["after"] = _common
+            if not rec:
+                continue
+            # 병합: '실제 변경(rank 2)'을 무변화/부분보다 우선 — 동명 함수의 변경 파일이 무변화 파일에
+            # 가려지지 않게 한다. 동순위는 먼저 온 파일 유지(결정적).
+            _prev = out.get(func)
+            if _prev is None or _signature_change_rank(rec) > _signature_change_rank(_prev):
+                out[func] = rec
     return out
 
 
