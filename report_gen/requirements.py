@@ -2735,9 +2735,16 @@ def generate_uds_traceability_matrix(
             "unmapped_uds_linked": sum(1 for u in unmapped_vcast if u.get("in_uds")),
             # UDS에도 없는(단위설계 미명세) 미추적 함수 수 — 진짜 설계 공백(검토 우선순위 ↑).
             "unmapped_design_gap": sum(1 for u in unmapped_vcast if not u.get("in_uds")),
-            # ISO 26262 SwDS 계층별 미추적 함수 수(라운드112) — '애플리케이션 설계 공백
-            # (app_leaf=실 finding)'과 '정당한 범위 경계(bsw_driver/boot_reprog/lib_util)'를
-            # 분리 집계. 프론트 루트는 unmapped_vcast list의 layer로 직접 재계산(카운트 동기).
+            # ★진짜 '실 finding' = layer축(app_leaf)이 아니라 design축(미설계)이다. app_leaf 중 대다수는
+            #  단위설계(UDS)+단위시험(SUTS)까지 된 leaf helper로 부모 SwUFn 아래 roll-up되는 '정당한
+            #  입도차'(unmapped_uds_linked)일 뿐. 진짜 검토 대상 = APP_LEAF ∩ 미설계(UDS에도 없음).
+            #  (실측 KJPDS02_PV: app_leaf 413 중 미설계 ~3 — layer만 보면 ~100배 과대 집계.)
+            "unmapped_app_design_gap": sum(
+                1 for u in unmapped_vcast if u.get("layer") == "APP_LEAF" and not u.get("in_uds")
+            ),
+            # ISO 26262 SwDS 계층(라운드112) — '코드 종류' 축(app/BSW/boot/lib/test). ⚠ layer는 갭 판정이
+            # 아니라 분류 힌트다: app_leaf ∩ in_uds = 설계+시험된 leaf roll-up(정당한 입도차),
+            # app_leaf ∩ 미설계 = 진짜 finding(위 unmapped_app_design_gap). BSW/BOOT/LIB = 정당한 범위경계.
             "unmapped_layer_app_leaf": sum(1 for u in unmapped_vcast if u.get("layer") == "APP_LEAF"),
             "unmapped_layer_bsw_driver": sum(1 for u in unmapped_vcast if u.get("layer") == "BSW_DRIVER"),
             "unmapped_layer_boot_reprog": sum(1 for u in unmapped_vcast if u.get("layer") == "BOOT_REPROG"),

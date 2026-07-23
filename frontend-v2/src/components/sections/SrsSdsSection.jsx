@@ -481,23 +481,23 @@ export default function SrsSdsSection({ job, analysisResult }) {
         build_selector: cfg?.buildSelector || 'lastSuccessfulBuild',
       });
       // 이 시점까지의 경고 = 실제 step 실패(SUTS/SITS/VectorCAST 추출 실패·매핑 없음).
-      // VectorCAST bridge 가시성(§10): 미추적 수를 단일 'SDS 명세 공백'으로 단정하지 않는다 —
-      // backend가 이미 계층 분류한 값(unmapped_layer_*·unmapped_uds_linked)을 그대로 노출해
-      // '앱 설계공백 후보' vs '범위 경계(BSW/부트로더/라이브러리)' vs '단위설계엔 존재'를 구분한다.
+      // VectorCAST bridge 가시성(§10): 미추적을 '설계 공백'으로 단정하지 않는다. 진짜 갭은 layer(app_leaf)이
+      // 아니라 design축(미설계, in_uds=False) — app_leaf 대다수는 단위설계(UDS)+단위시험(SUTS)까지 된 leaf
+      // 함수로 부모 SwUFn 아래 roll-up되는 '정당한 입도차'다(실측 KJPDS02_PV: 626 중 진짜 미설계 갭 ~3).
       const vcSum = (data?.matrix?.summary) || data?.summary || {};
       if (typeof vcSum.vcast_input_rows === 'number' && vcSum.vcast_input_rows > 0) {
         const untraced = vcSum.vcast_untraced_rows ?? 0;
         if (untraced > 0) {
-          const appLeaf = vcSum.unmapped_layer_app_leaf ?? 0;   // 실 애플리케이션 설계공백 후보(검토 우선순위 ↑)
+          const appDesignGap = vcSum.unmapped_app_design_gap ?? 0;  // 진짜 미설계 앱 갭(UDS에도 없음) — 실 검토 대상
+          const udsLinked = vcSum.unmapped_uds_linked ?? 0;         // 단위설계+시험 완료 leaf(정당한 입도차 roll-up)
           const boundary = (vcSum.unmapped_layer_bsw_driver ?? 0) + (vcSum.unmapped_layer_boot_reprog ?? 0)
-            + (vcSum.unmapped_layer_lib_util ?? 0) + (vcSum.unmapped_layer_test_artifact ?? 0);  // 정당한 범위 경계
-          const udsLinked = vcSum.unmapped_uds_linked ?? 0;     // 단위설계엔 존재(SDS roll-up만 누락, 입도차)
+            + (vcSum.unmapped_layer_lib_util ?? 0) + (vcSum.unmapped_layer_test_artifact ?? 0);  // 정당한 범위경계
           const parts = [];
-          if (appLeaf) parts.push(`앱 설계공백 후보 ${appLeaf}`);
-          if (boundary) parts.push(`범위 경계(BSW·부트로더·라이브러리) ${boundary}`);
-          if (udsLinked) parts.push(`단위설계엔 존재 ${udsLinked}`);
+          if (appDesignGap) parts.push(`진짜 미설계 갭 ${appDesignGap}(검토 대상)`);
+          if (udsLinked) parts.push(`단위설계+시험 완료 입도차 ${udsLinked}`);
+          if (boundary) parts.push(`범위경계(BSW·부트로더·라이브러리) ${boundary}`);
           const tail = parts.length ? ` 내역: ${parts.join(' · ')} — 트리 'SRS 미추적 시험'에서 확인.` : '';
-          stepWarnings.push(`전체 VectorCAST 대상 ${vcSum.vcast_input_rows}개 중 ${vcSum.vcast_traced_rows}개가 현재 경로로 SRS까지 역추적됨. 나머지 ${untraced}개는 설계 연결·범위 분류 확인 대상(단위시험·PASS와 설계 추적성은 별개 상태).${tail}`);
+          stepWarnings.push(`전체 VectorCAST 대상 ${vcSum.vcast_input_rows}개 중 ${vcSum.vcast_traced_rows}개가 SRS까지 역추적됨. 나머지 ${untraced}개는 대부분 단위설계+시험까지 된 leaf(입도차) 또는 범위경계이며, 진짜 미설계 갭은 소수다(단위시험·PASS와 설계 추적성은 별개).${tail}`);
         }
       }
       // Attach metadata
@@ -2112,7 +2112,7 @@ function TraceMatrix({ matrix, focusFunctions = null, onClearFocus = null,
               title="어느 UDS 함수에도 매핑되지 않는 SUTS 단위시험(역방향 공백) — (요구사항×시험) 쌍 기준, 공유 시험은 중복 합산" />
             {unmappedSupported ? (
               <GapBadge label="SRS까지 역추적 안 된 구현 요소 후보 (역방향)" value={gapStats.unmappedTotal} tone={gapStats.unmappedTotal ? 'warn' : 'ok'}
-                title="시험은 됐으나 이 SRS 요구사항에 안 닿는 VectorCAST 함수(종, 중복 제거). 전량이 설계 공백은 아니며 계층 분류(앱 설계공백 후보·범위 경계·단위설계 존재)로 나뉜다 — 상단 경고·트리 'SRS 미추적 시험' 참조."
+                title="시험은 됐으나 이 SRS 요구사항에 안 닿는 VectorCAST 함수(종, 중복 제거). 대부분 단위설계+시험까지 된 leaf(정당한 입도차 roll-up)·범위경계(BSW/부트/라이브러리)이며 진짜 미설계 갭은 소수다 — 상단 경고·트리 'SRS 미추적 시험' 참조."
                 sub={gapStats.unmappedSuts ? `단위시험됨 ${gapStats.unmappedSuts}` : ''} />
             ) : (
               <span title="로컬 파일모드는 VectorCAST 역방향 추적(미추적 시험)을 계산하지 않습니다 — Jenkins 경로에서 확인하세요"

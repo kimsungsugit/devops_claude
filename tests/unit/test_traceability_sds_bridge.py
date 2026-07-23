@@ -389,6 +389,28 @@ def test_unmapped_vcast_design_gap_when_not_in_uds():
     assert mx["summary"]["unmapped_uds_linked"] == 0
 
 
+def test_unmapped_app_design_gap_is_app_leaf_and_not_in_uds():
+    """진짜 '실 finding' = APP_LEAF ∩ 미설계(in_uds=False) — layer축(app_leaf 전체)이 아니라 design축.
+    design_gap(전 계층 미설계)과 구별: LIB 계층의 미설계 함수는 design_gap엔 잡히나 app_design_gap엔 안 잡힌다."""
+    items = [{"id": "SwTR_0101"}]
+    sds_pairs = [{"requirement_id": "SwTR_0101", "component_ids": ["foo_func"]}]
+    # (a) 앱 leaf(도메인명), UDS에도 없음 → 진짜 앱 갭(app_design_gap)
+    suts_a = [{"requirement_id": "SwUFn_0400", "unit": "s_appleaf_ctrl", "source": "SUTS", "testcase": "u1"}]
+    vc_a = [{"subprogram": "SwUFn_0400", "testcase": "SwUFn_0400", "result": "pass", "source": "VectorCAST"}]
+    # (b) LIB(crc32) 계층, UDS에도 없음 → design_gap이나 app_design_gap 아님(정당한 범위경계)
+    suts_b = [{"requirement_id": "SwUFn_0401", "unit": "s_crc32_calc", "source": "SUTS", "testcase": "u2"}]
+    vc_b = [{"subprogram": "SwUFn_0401", "testcase": "SwUFn_0401", "result": "pass", "source": "VectorCAST"}]
+    mx = generate_uds_traceability_matrix(
+        items, vcast_rows=suts_a + vc_a + suts_b + vc_b, sds_pairs=sds_pairs,
+        uds_function_ids=["unrelated_func"],  # 둘 다 UDS 인벤토리에 없음
+    )
+    by_sub = {u["subprogram"]: u for u in mx["unmapped_vcast"]}
+    assert by_sub["SwUFn_0400"]["layer"] == "APP_LEAF" and by_sub["SwUFn_0400"]["in_uds"] is False
+    assert by_sub["SwUFn_0401"]["layer"] == "LIB_UTIL" and by_sub["SwUFn_0401"]["in_uds"] is False
+    assert mx["summary"]["unmapped_design_gap"] == 2       # 둘 다 미설계(전 계층)
+    assert mx["summary"]["unmapped_app_design_gap"] == 1   # 진짜 앱 갭은 (a)만 — 라벨축 정직화의 핵심
+
+
 def test_unmapped_vcast_swufn_id_echo_not_counted_as_uds():
     """★UDS 인벤토리가 SwUFn ID도 포함(함수명+ID)하므로, subprogram이 SwUFn ID인 경우
     그 ID 자기-매칭(메아리)을 in_uds로 오인하면 안 된다. 함수명 해석이 없으면 in_uds=False."""
