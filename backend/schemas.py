@@ -671,6 +671,9 @@ class ImpactExplainChangeRequest(BaseModel):
     # 프론트가 docContentFor()로 조립(uds/sds/suts + sts/sits TC). 값은 서버 파싱 단계에서
     # 이미 캡된 내용이고, 소비처(explain_function_change)가 재차 캡하므로 여기선 dict로 수용.
     doc_content: Dict[str, Any] = Field(default_factory=dict)
+    # 간접영향 근거 — {hop, via, seed}. 간접(비변경) 함수가 "왜 영향받는지"(경유 노드·최초 변경함수)를
+    # LLM이 콜체인 계약 유지 관점으로 설명하게 한다. 직접 함수는 빈 dict. 값은 함수명 문자열이라 소규모.
+    impact_path: Dict[str, Any] = Field(default_factory=dict)
 
 
 class TestGenerateRequest(BaseModel):

@@ -160,6 +160,62 @@ def extract_function_asil_from_kv_tables(docx_bytes: bytes) -> dict[str, str]:
 
 _REGEX_SWCOM = re.compile(r"SwCom_\d+", re.IGNORECASE)
 
+# 세로 kv 표 Description/Prototype 행 라벨 후보(swut_swuds_parser의 가로표 후보와 동일 원칙).
+_KV_DESC_LABELS = (
+    "description", "기능 설명", "설명", "기능설명", "function description", "요약", "개요",
+)
+_KV_PROTO_LABELS = (
+    "prototype", "프로토타입", "함수원형", "함수 원형", "function prototype", "함수 프로토타입",
+)
+
+
+def extract_function_details_from_kv_tables(docx_bytes: bytes) -> dict[str, dict[str, str]]:
+    """세로 key-value SwUDS 함수 표에서 {함수명(소문자): {description, prototype}} 추출.
+
+    표당 행 라벨(col0) 'Name'=C 함수명, 'Description'/'Prototype'(한글 변종 포함)=값.
+    lxml iterparse로 표만 스트리밍(python-docx 미사용 → 50~87MB docx도 초 단위) — v3.02류
+    세로표 레이아웃. `_load_uds_fn_content` fallback이 python-docx `parse_swuds_docx`(50MB에
+    22~41s)를 쓰던 것을 대체해 속도·신뢰성(중단 시 빈 캐시 굳는 위험) 개선.
+    ASIL 추출기(`extract_function_asil_from_kv_tables`)와 동일 스캔·메모리 가드. 실패는 빈 맵.
+    """
+    xml = _read_suds_document_xml(docx_bytes)
+    if xml is None:
+        return {}
+    try:
+        from lxml import etree  # type: ignore
+    except Exception:  # silent-ok — lxml 미설치 시 빈 맵(비차단, ASIL 추출기와 동일 옵셔널 import 가드)
+        return {}
+    w = "{%s}" % _WML_NS
+
+    def _cell_text(tc) -> str:
+        return "".join(t.text or "" for t in tc.iter(w + "t")).strip()
+
+    out: dict[str, dict[str, str]] = {}
+    try:
+        for _ev, tbl in etree.iterparse(io.BytesIO(xml), events=("end",), tag=w + "tbl"):
+            name = ""
+            desc = ""
+            proto = ""
+            for tr in tbl.findall(w + "tr"):
+                cells = tr.findall(w + "tc")
+                if len(cells) < 2:
+                    continue
+                label = _cell_text(cells[0]).lower().rstrip(":").strip()
+                if label == "name" and not name:
+                    name = _cell_text(cells[1])
+                elif label in _KV_DESC_LABELS and not desc:
+                    desc = _cell_text(cells[1])
+                elif label in _KV_PROTO_LABELS and not proto:
+                    proto = _cell_text(cells[1])
+            if name and (desc or proto):
+                nl = name.strip().lower()
+                if _C_IDENT_FULL_RE.match(nl) and nl not in out:
+                    out[nl] = {"description": desc[:500], "prototype": proto[:200]}
+            tbl.clear()  # 처리 후 즉시 비워 메모리 바운드(대용량 document.xml)
+    except Exception:  # silent-ok — 부분 파싱분 보존(비차단, ASIL 추출기와 동일 fail-safe)
+        return out
+    return out
+
 
 def extract_function_swcom_from_kv_tables(docx_bytes: bytes) -> dict[str, list[str]]:
     """세로 kv SwUDS 함수 표에서 {함수명(소문자): [SwCom_NN, ...]}(Related ID) 추출.

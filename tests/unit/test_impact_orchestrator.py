@@ -65,6 +65,13 @@ def test_run_impact_update_dry_run_builds_auto_and_flag_actions(tmp_path, monkey
     assert result["actions"]["sts"]["mode"] == "FLAG"
     assert result["impact"]["indirect_1hop"] == ["door_helper"]
     assert result["impact"]["indirect_2hop"] == ["door_leaf"]
+    # 간접영향 근거(impact_paths) — 각 간접 함수의 via(경유 노드)·seed(최초 변경함수) 표면화.
+    paths = result["impact_paths"]
+    assert paths["door_helper"]["hop"] == 1
+    assert paths["door_helper"]["seed"]  # 최초 변경함수(direct)로 역추적됨
+    assert paths["door_leaf"]["hop"] == 2
+    assert paths["door_leaf"]["via"] == "door_helper"  # 2-hop은 1-hop을 경유
+    assert paths["door_leaf"]["seed"] == paths["door_helper"]["seed"]  # 같은 변경함수 뿌리
     assert any(p.name.startswith("impact_") for p in audit_dir.iterdir())
 
 

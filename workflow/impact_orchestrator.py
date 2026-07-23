@@ -746,20 +746,46 @@ def _load_uds_fn_content(
                 from backend.services.file_resolver import get_resolver
                 data = get_resolver().read_bytes(uds_path)
                 if data:
-                    from backend.services.swut_swuds_parser import parse_swuds_docx
-                    res = parse_swuds_docx(data)
-                    for e in (res.entries or []):
-                        n = str(getattr(e, "name", "") or "").strip().lower()
-                        if not n:
-                            continue
-                        desc = str(getattr(e, "description", "") or "").strip()
-                        head = str(getattr(e, "heading_text", "") or "").strip()
-                        # prototype — 링크 UDS도 표에 있으면 실 선언 표시/원문→변경안 기준선(사이드카 전용 탈피).
-                        proto = str(getattr(e, "prototype", "") or "").strip()
-                        if desc or head or proto:
-                            _entries[n] = {"description": desc[:300], "heading": head[:120]}
-                            if proto:
-                                _entries[n]["prototype"] = proto[:200]
+                    # 0) lxml 세로 kv 추출 우선(초 단위) — v3.02류 대형 docx를 python-docx
+                    # parse_swuds_docx(50MB에 22~41s)로 매번 파싱하던 것을 대체. lxml이 flagged를
+                    # 다 채우면 아래 41s 파서를 아예 건너뛴다(속도 + 중단 시 빈 캐시 굳는 위험 완화).
+                    try:
+                        from backend.services.iso26262_doc_asil_extractor import (
+                            extract_function_details_from_kv_tables,
+                        )
+                        for _n, _d in (extract_function_details_from_kv_tables(data) or {}).items():
+                            _desc = str((_d or {}).get("description") or "").strip()
+                            _proto = str((_d or {}).get("prototype") or "").strip()
+                            if _desc or _proto:
+                                _e = {"description": _desc[:300]}
+                                if _proto:
+                                    _e["prototype"] = _proto[:200]
+                                _entries[_n] = _e
+                    except Exception:  # silent-ok — lxml 실패는 아래 heading 파서로 폴백(비차단)
+                        pass
+                    # 1) heading 가로표 파서 — lxml이 flagged를 다 못 채웠을 때만(HDPDM01류 가로표
+                    # 문서는 lxml 세로kv가 0건 → 여기서 채운다). heading은 lxml이 안 주므로 보강.
+                    if _missing - set(_entries.keys()):
+                        from backend.services.swut_swuds_parser import parse_swuds_docx
+                        res = parse_swuds_docx(data)
+                        for e in (res.entries or []):
+                            n = str(getattr(e, "name", "") or "").strip().lower()
+                            if not n:
+                                continue
+                            desc = str(getattr(e, "description", "") or "").strip()
+                            head = str(getattr(e, "heading_text", "") or "").strip()
+                            # prototype — 링크 UDS도 표에 있으면 실 선언 표시/원문→변경안 기준선.
+                            proto = str(getattr(e, "prototype", "") or "").strip()
+                            _prev = _entries.get(n)
+                            if _prev is not None:
+                                # lxml이 이미 desc/proto 채움 → heading만 보강(중복 방지).
+                                if head and not _prev.get("heading"):
+                                    _prev["heading"] = head[:120]
+                                continue
+                            if desc or head or proto:
+                                _entries[n] = {"description": desc[:300], "heading": head[:120]}
+                                if proto:
+                                    _entries[n]["prototype"] = proto[:200]
                 if not _entries:
                     # 파싱은 됐으나 내용 0 — heading-less 레이아웃 등(예: kjpds02 UDS). 정직 사유.
                     _warn("문서 내용: UDS heading 파서가 내용을 추출하지 못함(heading-less 레이아웃/사이드카 부재) — UDS 카드는 '미파싱' 표기")
@@ -1477,25 +1503,30 @@ def _hop_limited_impact(
     max_hop: int,
     max_impacted_functions: int,
     stats: Optional[Dict[str, Any]] = None,
-) -> Dict[str, List[str]]:
+) -> Dict[str, Any]:
     direct = sorted(seeds)
     if not seeds:
-        return {"direct": [], "indirect_1hop": [], "indirect_2hop": []}
+        return {"direct": [], "indirect_1hop": [], "indirect_2hop": [], "paths": {}}
 
     visited = set(seeds)
     frontier = set(seeds)
     indirect_1: Set[str] = set()
     indirect_2: Set[str] = set()
+    # 간접영향 근거(사용자 요청): neighbor를 처음 발견시킨 경유 노드(parent)를 보존해 "왜 간접인지"
+    # (변경함수 → ... → 이 함수)를 표면화한다. frontier 순회 순서가 결정적이지 않을 수 있어
+    # setdefault로 첫 발견만 채택(안정). direct는 parent 없음. 순수 additive(리스트 반환 불변).
+    parent: Dict[str, str] = {}
 
     truncated_at: int = 0  # >0이면 그 depth까지만 탐색하고 중단(이후 hop은 '미계산')
     for depth in range(1, max_hop + 1):
         next_frontier: Set[str] = set()
-        for func in frontier:
-            for neighbor in neighbors.get(func, set()):
+        for func in sorted(frontier):  # 결정적 parent 선택(정렬 순회)
+            for neighbor in sorted(neighbors.get(func, set())):
                 if neighbor in visited:
                     continue
                 visited.add(neighbor)
                 next_frontier.add(neighbor)
+                parent.setdefault(neighbor, func)  # 첫 발견 경유 노드
                 if depth == 1:
                     indirect_1.add(neighbor)
                 elif depth == 2:
@@ -1516,10 +1547,23 @@ def _hop_limited_impact(
         stats["truncated_at_hop"] = truncated_at
         stats["visited"] = len(visited)
         stats["max_impacted_functions"] = max_impacted_functions
+    # 간접영향 근거 맵 — 각 간접 함수의 경유 노드(via=직전 발견자)와 seed(via 역추적한 최초 변경함수).
+    # seed는 parent 사슬을 seeds에 닿을 때까지 따라간다(cycle 방어: 최대 max_hop+1회). "왜 간접인지"를
+    # 프론트/AI가 표시하도록 job에 실린다(무향그래프라 '경유'로만 표기, caller/callee 단정 안 함).
+    paths: Dict[str, Dict[str, Any]] = {}
+    for _fn, _hop in [(f, 1) for f in indirect_1] + [(f, 2) for f in indirect_2]:
+        _via = parent.get(_fn)
+        _seed = _via
+        _steps = 0
+        while _seed is not None and _seed not in seeds and _steps <= max_hop + 1:
+            _seed = parent.get(_seed)
+            _steps += 1
+        paths[_fn] = {"hop": _hop, "via": _via or "", "seed": (_seed if _seed in seeds else (_via or ""))}
     return {
         "direct": sorted(direct),
         "indirect_1hop": sorted(indirect_1),
         "indirect_2hop": sorted(indirect_2),
+        "paths": paths,
     }
 
 
@@ -2435,6 +2479,9 @@ def run_impact_update(
             "function_diffs": function_diffs,
             "file_diffs": file_diffs,
             "impact": impact_groups,
+            # 간접영향 근거 — {fn: {hop, via, seed}}. 프론트/AI가 "왜 간접인지"(경유 노드·최초 변경함수)를
+            # 표시. impact_groups.paths와 동일(명시 top-level 키로 조회 편의). direct 함수는 미포함.
+            "impact_paths": (impact_groups.get("paths") if isinstance(impact_groups, dict) else {}) or {},
             "warnings": warnings,
             "actions": actions,
             "function_meta": function_meta,

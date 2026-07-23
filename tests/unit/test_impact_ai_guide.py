@@ -368,6 +368,49 @@ def test_format_doc_content_for_prompt_serializes_all_docs():
     assert len(s) <= 2000
 
 
+def test_explain_function_change_injects_impact_path(monkeypatch):
+    """간접영향 근거(impact_path)가 프롬프트에 주입돼 AI가 콜체인 경로를 근거로 설명한다."""
+    from workflow import impact_ai_guide
+    from workflow import ai as _ai
+    captured = {}
+
+    def _fake_call(cfg, messages, **k):
+        captured["messages"] = messages
+        return "간접 영향 설명"
+
+    monkeypatch.setattr(_ai, "load_oai_config", lambda _p: {"provider": "gemini"})
+    monkeypatch.setattr(_ai, "agent_call_text", _fake_call)
+    out = impact_ai_guide.explain_function_change(
+        function="g_SystemStatusCheck", change_type="", asil="A",
+        impact_path={"hop": 2, "via": "g_Foo", "seed": "s_Changed"},
+    )
+    assert out
+    joined = " ".join(m["content"] for m in captured["messages"])
+    # 경유 노드·변경함수·계약유지 관점이 프롬프트에 실렸는지
+    assert "s_Changed" in joined and "g_Foo" in joined
+    assert "간접 영향" in joined and "계약" in joined
+
+
+def test_explain_function_change_no_impact_path_no_indirect_section(monkeypatch):
+    """impact_path 없으면(직접 변경 함수) 간접 영향 섹션 미주입."""
+    from workflow import impact_ai_guide
+    from workflow import ai as _ai
+    captured = {}
+
+    def _cap(cfg, messages, **k):
+        captured["m"] = messages
+        return "설명"
+
+    monkeypatch.setattr(_ai, "load_oai_config", lambda _p: {"provider": "gemini"})
+    monkeypatch.setattr(_ai, "agent_call_text", _cap)
+    out = impact_ai_guide.explain_function_change(
+        function="s_foo", change_type="BODY", function_diff="@@ -1 +1 @@\n-a\n+b",
+    )
+    assert out
+    joined = " ".join(m["content"] for m in captured["m"])
+    assert "[간접 영향" not in joined  # 간접 섹션 미주입
+
+
 def test_format_doc_content_for_prompt_empty_or_bad():
     """빈/비-dict 입력은 빈 문자열(방어적)."""
     from workflow.impact_ai_guide import _format_doc_content_for_prompt

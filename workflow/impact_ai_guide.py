@@ -437,6 +437,7 @@ def explain_function_change(
     module: str = "",
     requirements: Optional[List[str]] = None,
     doc_content: Optional[Dict] = None,
+    impact_path: Optional[Dict] = None,
 ) -> Optional[str]:
     """단일 함수 변경에 대한 '원문→제안' 문서 반영안(무엇이/영향/리뷰 초점)을 LLM으로 생성.
 
@@ -468,6 +469,19 @@ def explain_function_change(
         if function_diff:
             lines.append(f"변경 코드(unified diff, '-'제거/'+'추가):\n{function_diff}")
         context = "\n".join(lines)
+        # 간접영향 근거 — 간접(비변경) 함수면 "왜 영향받는지"(변경함수 seed → via 경유)를 프롬프트에
+        # 실어 AI가 '계약 유지 확인' 관점(직접 수정 아님)으로 설명하게 한다. 무향 콜그래프라 '경유'로만.
+        if isinstance(impact_path, dict) and (impact_path.get("seed") or impact_path.get("via")):
+            _seed = str(impact_path.get("seed") or "").strip()
+            _via = str(impact_path.get("via") or "").strip()
+            _hop = str(impact_path.get("hop") or "").strip()
+            _rel = (f"변경 함수 '{_seed}' → '{_via}' 경유" if _seed and _via and _seed != _via
+                    else f"변경 함수 '{_seed}'" if _seed else f"'{_via}'")
+            context += (
+                f"\n\n[간접 영향 — 이 함수는 직접 변경되지 않음. {_rel}와의 호출 관계({_hop})로 영향. "
+                "무향 콜그래프라 호출/피호출 방향은 단정 불가. 문서 본문 수정보다 '호출 인터페이스 계약"
+                "(시그니처·전제조건·부작용) 유지 확인 + 회귀시험 재실행 판단'을 중심으로 설명하라.]"
+            )
         doc_ctx = _format_doc_content_for_prompt(doc_content)
         if doc_ctx:
             context += (

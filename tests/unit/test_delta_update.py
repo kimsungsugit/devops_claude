@@ -118,6 +118,51 @@ def test_classify_changed_functions_variable_change_uses_hunk_context(monkeypatc
     assert result["Door_Run"] == "VARIABLE"
 
 
+def test_classify_indented_local_var_is_body_not_variable():
+    """들여쓴 지역변수 추가(함수 본문 내)는 BODY — VARIABLE(글로벌 변경) 오분류 아님.
+
+    시그니처가 hunk context(무변경)인 함수에 지역변수 `+    S32 s32t_NextIdx;`가 추가되고
+    본문 로직이 바뀌면, 과거 `^[+-]\\s*`가 들여쓴 지역변수를 파일 전체 var_changed로 잡아
+    VARIABLE로 오분류했다(deep-review). 컬럼0 한정으로 BODY 정정. VARIABLE·BODY는 둘 다
+    sds FLAG 무관이라 안전 판정 불변.
+    """
+    from workflow.delta_update import classify_changed_functions_from_diff_text
+    diff = (
+        "Index: Ap_Lookup.c\n"
+        "===================================================================\n"
+        "--- Ap_Lookup.c\t(revision 1018)\n"
+        "+++ Ap_Lookup.c\t(revision 1075)\n"
+        "@@ -4804,7 +3254,8 @@ static U16 prv_FindBracketIdx(const S16 val, const U16 len)\n"
+        "     U16 u16t_NextIdx;\n"
+        "-\n"
+        "+    S32 s32t_NextIdx;\n"
+        "     if( len >= (U16)2U )\n"
+        "@@ -4819,9 +3270,9 @@ static U16 prv_FindBracketIdx(const S16 val, const U16 len)\n"
+        "-            u16t_NextIdx = (U16)(u16t_SearchIdx + 1U);\n"
+        "+            s32t_NextIdx = (S32)u16t_SearchIdx + (S32)1L;\n"
+        "+            u16t_NextIdx = (U16)s32t_NextIdx;\n"
+    )
+    types, _ = classify_changed_functions_from_diff_text(diff)
+    assert types.get("prv_FindBracketIdx") == "BODY", types  # 지역변수→BODY(VARIABLE 아님)
+
+
+def test_classify_column0_global_var_still_variable():
+    """컬럼0(모듈 레벨) 전역/정적 변경은 VARIABLE 유지 — 지역변수 fix의 무회귀 대조군."""
+    from workflow.delta_update import classify_changed_functions_from_diff_text
+    diff = (
+        "Index: modvar.c\n"
+        "===================================================================\n"
+        "--- modvar.c\t(revision 100)\n"
+        "+++ modvar.c\t(revision 150)\n"
+        "@@ -5,3 +5,3 @@ Bar_Init(void)\n"
+        "-static uint8 s_Mode;\n"
+        "+static uint8 s_Mode = 1;\n"
+        "     Bar_Sub();\n"
+    )
+    types, _ = classify_changed_functions_from_diff_text(diff)
+    assert types.get("Bar_Init") == "VARIABLE", types  # 컬럼0 전역은 VARIABLE 유지
+
+
 def test_get_changed_functions_supports_svn_unified_diff(monkeypatch, tmp_path):
     from workflow import delta_update
 

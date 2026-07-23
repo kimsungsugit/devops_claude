@@ -146,3 +146,46 @@ def test_swcom_extract_unions_duplicate_names():
     ])
     out = extract_function_swcom_from_kv_tables(data)
     assert out == {"s_dup": ["SwCom_13", "SwCom_50"]}   # union(정렬)
+
+
+def test_kv_extract_details_description_and_prototype():
+    """세로 kv 표 Name/Description/Prototype → {함수명(소문자): {description, prototype}}.
+
+    링크(cloudium) v3.02 UDS를 python-docx(50MB에 41s) 대신 lxml(초 단위)로 뽑아 영향분석
+    UDS 카드 실 내용 + 원문→변경안 기준선을 채운다. Name과 (desc 또는 proto) 둘 다 있어야 채택.
+    """
+    from backend.services.iso26262_doc_asil_extractor import extract_function_details_from_kv_tables
+    data = _make_uds_docx([
+        {"ID": "SwUFn_1596", "Name": "prv_FindBracketIdx",
+         "Prototype": "static U16 prv_FindBracketIdx(const S16 val)",
+         "Description": "배열에서 특정 값이 속한 인덱스를 찾아 반환하는 함수."},
+        {"Name": "s_foo", "Description": "foo 설명"},  # proto 없이 desc만
+    ])
+    out = extract_function_details_from_kv_tables(data)
+    assert out["prv_findbracketidx"]["description"] == "배열에서 특정 값이 속한 인덱스를 찾아 반환하는 함수."
+    assert out["prv_findbracketidx"]["prototype"] == "static U16 prv_FindBracketIdx(const S16 val)"
+    assert out["s_foo"]["description"] == "foo 설명"
+    assert out["s_foo"]["prototype"] == ""
+
+
+def test_kv_extract_details_korean_labels():
+    """한글 라벨('함수원형'/'설명')도 매칭."""
+    from backend.services.iso26262_doc_asil_extractor import extract_function_details_from_kv_tables
+    data = _make_uds_docx([{"Name": "s_init", "함수원형": "void s_init(void)", "설명": "초기화"}])
+    out = extract_function_details_from_kv_tables(data)
+    assert out["s_init"]["prototype"] == "void s_init(void)"
+    assert out["s_init"]["description"] == "초기화"
+
+
+def test_kv_extract_details_requires_name_and_content():
+    """Name만 있고 desc/proto 없으면 미채택(입력파라미터 표 등 오귀속 방지)."""
+    from backend.services.iso26262_doc_asil_extractor import extract_function_details_from_kv_tables
+    data = _make_uds_docx([{"ID": "SwUFn_1", "Name": "s_foo", "ASIL": "A"}])
+    assert extract_function_details_from_kv_tables(data) == {}
+
+
+def test_kv_extract_details_rejects_prose_name():
+    """Name이 다단어 프로즈면 C 식별자 아님 → 거부."""
+    from backend.services.iso26262_doc_asil_extractor import extract_function_details_from_kv_tables
+    data = _make_uds_docx([{"Name": "power operation disable", "Description": "설명"}])
+    assert extract_function_details_from_kv_tables(data) == {}

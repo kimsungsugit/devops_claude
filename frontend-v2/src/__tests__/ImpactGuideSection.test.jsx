@@ -1537,6 +1537,70 @@ describe('ImpactGuideSection', () => {
     expect(body.doc_content.sts[0].description).toBe('STS 경계 시험');
   });
 
+  // STS-IMPACT-053e: 간접영향 함수 모달에 "왜 간접인지"(via/seed 콜체인 근거)가 표시된다.
+  it('간접영향 근거: 간접 함수 모달에 경유 노드(via)·변경함수(seed)가 표시된다', async () => {
+    const { post } = await import('../api.js');
+    post.mockResolvedValue({ ok: false });
+    const user = userEvent.setup();
+    const analysisResult = {
+      impactData: {
+        trigger: { changed_files: ['Ap.c'] },
+        changed_function_types: { s_changed: 'BODY' },
+        change_details: { s_changed: { before: 'void s_changed(void)' } },
+        // g_indirect는 변경 안 됐지만 s_changed→g_via 경유로 2-hop 영향
+        impact: { direct: ['s_changed'], indirect_1hop: ['g_via'], indirect_2hop: ['g_indirect'] },
+        impact_paths: {
+          g_via: { hop: 1, via: 's_changed', seed: 's_changed' },
+          g_indirect: { hop: 2, via: 'g_via', seed: 's_changed' },
+        },
+        function_meta: { s_changed: { asil: 'A' }, g_indirect: { asil: 'B' } },
+      },
+    };
+    render(<ImpactGuideSection analysisResult={analysisResult} />);
+    await user.click(screen.getByText(/상세 가이드 생성/));
+    // 간접 함수 g_indirect 행의 '상세' 클릭 → 모달에 seed/via 근거
+    const rows = await screen.findAllByRole('button', { name: '상세' });
+    // g_indirect 행 찾기(2-hop) — 함수명으로 모달 열기
+    await user.click(rows[rows.length - 1]);
+    const dialog = await screen.findByRole('dialog');
+    // 간접영향 근거: 변경함수 s_changed가 모달에 노출(뱃지 + 안내문 여러 곳)
+    expect(within(dialog).getAllByText(/s_changed/).length).toBeGreaterThanOrEqual(1);
+    // '왜 간접인지' 안내에 경유/호출 관계 문구 + 경유 노드 g_via
+    expect(within(dialog).getAllByText(/호출 관계/).length).toBeGreaterThanOrEqual(1);
+    expect(within(dialog).getAllByText(/g_via/).length).toBeGreaterThanOrEqual(1);
+  });
+
+  // STS-IMPACT-053f: 간접 함수 AI 재작성 시 impact_path(경로 근거)가 페이로드에 실린다.
+  it('간접영향 근거: 간접 함수 AI 요청 시 impact_path(via/seed)가 페이로드에 실린다', async () => {
+    const { post } = await import('../api.js');
+    const calls = [];
+    post.mockImplementation((url, body) => {
+      if (url === '/api/impact/explain-change') { calls.push(body); return Promise.resolve({ ok: true, explanation: 'x' }); }
+      return Promise.resolve({ ok: false });
+    });
+    const user = userEvent.setup();
+    const analysisResult = {
+      impactData: {
+        trigger: { changed_files: ['Ap.c'] },
+        changed_function_types: { s_changed: 'BODY' },
+        change_details: { s_changed: { before: 'void s_changed(void)' } },
+        impact: { direct: ['s_changed'], indirect_1hop: ['g_indirect'], indirect_2hop: [] },
+        impact_paths: { g_indirect: { hop: 1, via: 's_changed', seed: 's_changed' } },
+        function_meta: { s_changed: { asil: 'A' }, g_indirect: { asil: 'B' } },
+      },
+    };
+    render(<ImpactGuideSection analysisResult={analysisResult} />);
+    await user.click(screen.getByText(/상세 가이드 생성/));
+    const rows = await screen.findAllByRole('button', { name: '상세' });
+    await user.click(rows[rows.length - 1]);  // g_indirect(간접)
+    await user.click(await screen.findByRole('button', { name: /AI 문장 재작성/ }));
+    await waitFor(() => expect(calls.length).toBeGreaterThanOrEqual(1));
+    const body = calls[calls.length - 1];
+    expect(body.impact_path).toBeTruthy();
+    expect(body.impact_path.seed).toBe('s_changed');
+    expect(body.impact_path.hop).toBe('1-hop');
+  });
+
   // STS-IMPACT-061: STS 카드에 Test Action(시험 절차)·Expected Result(기대결과)가 표시된다(라운드 후속).
   //  ⚠ STS expected는 string(SITS/SUTS의 kv dict 아님) → 직접 렌더(Object.entries 금지 → [object Object] 방지).
   it('실제 STS 내용: test_action(Action)·expected(Exp, string)가 모달에 표시된다', async () => {

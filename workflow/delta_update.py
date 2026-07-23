@@ -46,8 +46,14 @@ _FUNC_DECL_LINE_PLAIN = re.compile(
     r"[\w\s\*]*\s+(\w+)\s*\(",
 )
 _HUNK_FUNC = re.compile(r"^@@.*@@\s*(?:.*?\s)?(\w+)\s*\(", re.MULTILINE)
+# 모듈 레벨(컬럼0) 변수 선언만 매치 — `^[+-]` 직후 들여쓰기 없이 한정자/타입이 와야 한다.
+# 과거 `^[+-]\s*`는 들여쓴 **지역변수**(함수 본문 내 `+    S32 s32t_NextIdx;`)까지 잡아,
+# 시그니처가 hunk context(무변경)인 함수를 BODY 아닌 VARIABLE로 오분류→"글로벌 변수 변경" 오안내
+# 했다(deep-review 지적). C 전역/정적은 컬럼0, 지역은 들여쓰기라 이 경계로 구분한다. VARIABLE·BODY는
+# 둘 다 sds FLAG를 걸지 않아(ACTION_MATRIX) 안전 판정 불변 — 가이드 정확도 개선. 들여쓴 전역(#if
+# 블록 등, 드묾)은 narrowable=False 안전망으로 파일단위 보수 유지되므로 under-report 아님.
 _VAR_DECL_LINE = re.compile(
-    r"^[+-]\s*(?:static\s+)?(?:const\s+|volatile\s+|unsigned\s+|signed\s+)*"
+    r"^[+-](?:static\s+)?(?:const\s+|volatile\s+|unsigned\s+|signed\s+)*"
     r"(?:void|char|bool|float|double|int|long|short|u?int\d+(?:_t)?|U\d+|S\d+|[A-Za-z_]\w*_t)\b"
     r"(?!.*\()"
     r".*?\b([sg]_[A-Za-z0-9_]+|[A-Za-z0-9_]+)\b\s*(?:\[.*\])?\s*(?:=|;|,)",

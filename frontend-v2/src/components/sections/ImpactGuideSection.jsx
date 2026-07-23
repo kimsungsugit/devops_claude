@@ -340,7 +340,16 @@ export function buildDocumentActions(d, pdiff, diffElems = EMPTY_DIFF_ELEMS) {
 
   // 간접 영향(직접 변경 아님): 문서 본문 수정이 아니라 '계약 유지 확인 + 회귀'가 핵심.
   if (!changed) {
-    uds.push(A('영향 확인', `직접 변경 아님(${d.hop}) — 호출 인터페이스 계약 유지 시 문서 수정 없음`, 'neutral'));
+    // 간접영향 근거(백엔드 impact_paths) — 왜 이 함수가 영향받는지: 경유 노드(via)/최초 변경함수(seed).
+    // 무향 콜그래프라 '호출 관계'로만 표기(caller/callee 단정 안 함 — 과대주장 방지).
+    const _viaText = d.via && d.seed && d.via !== d.seed
+      ? `\`${d.seed}\`(변경) → \`${d.via}\` 경유로 연결`
+      : d.seed ? `변경 함수 \`${d.seed}\`와의 호출 관계로 영향`
+        : d.via ? `\`${d.via}\`와의 호출 관계로 영향` : '';
+    uds.push(A('영향 경로', _viaText
+      ? `${d.hop}: ${_viaText} — 계약(시그니처/동작) 유지 시 문서 수정 없음`
+      : `직접 변경 아님(${d.hop}) — 호출 인터페이스 계약 유지 시 문서 수정 없음`,
+      _viaText ? 'info' : 'neutral'));
     sts.push(A('회귀', stsN ? `${stsN}개 관련 TC 재실행 판단` : '직접 매핑 TC 없음', 'neutral'));
     suts.push(A('회귀', sutsN ? `${sutsN}개 단위 TC 재실행` : '관련 단위 TC 없음', 'neutral'));
     sits.push(A('회귀', sitsN ? `${sitsN}개 관련 통합 TC 재실행 판단` : '통합 콜체인 재실행 — 계약 유지 확인', 'neutral'));
@@ -1071,6 +1080,9 @@ export default function ImpactGuideSection({ analysisResult, job }) {
   const activeChangedFiles = demoMode ? ['DrvIn_Main_PDS.c', 'Ap_MotorCtrl_PDS.c'] : changedFiles;
   // 함수별 변경 상세(시그니처 이전→이후 원문). 키는 소문자 함수명(백엔드 changed_types와 동일).
   const changeDetails = impact?.change_details ?? {};
+  // 간접영향 근거 — {fn: {hop, via, seed}}. 간접 함수가 "왜 영향받는지"(경유 노드·최초 변경함수)를
+  // 표시/AI 근거로. 구 job(필드 없음)은 {} 폴백 → via/seed 빈 문자열(무해).
+  const impactPaths = impact?.impact_paths ?? {};
   // 함수별 본문 diff 원문(AI 설명용) — BODY 등 선언 미변경 함수도 실제 코드 근거를 Gemini에 전달.
   const functionDiffs = impact?.function_diffs ?? {};
   // 파일레벨 원문 폴백(#3) — 함수 자체 diff 없는 함수(파일영향)의 '파일 전체 변경 보기'용. 정규화 상대경로 키.
@@ -1634,11 +1646,16 @@ export default function ImpactGuideSection({ analysisResult, job }) {
           : (activeImpactGroups.indirect_1hop || []).includes(fn) ? '1-hop'
           : (activeImpactGroups.indirect_2hop || []).includes(fn) ? '2-hop'
           : (isChanged ? 'direct' : '1-hop');
+        // 간접영향 근거(백엔드 impact_paths) — via=경유 노드, seed=최초 변경함수. 대소문자 폴백 조회.
+        const _pathInfo = impactPaths[fn] || impactPaths[_fnLc] || null;
 
         details.push({
           function: fn,
           changeType,
           changed: isChanged,
+          // 간접(비변경) 함수가 "왜 영향받는지" — via(경유 함수)/seed(변경 함수). direct는 null.
+          via: _pathInfo?.via || '',
+          seed: _pathInfo?.seed || '',
           // function_meta/coverage는 backend by_name(소문자) 키 — CamelCase 프로젝트(hdpdm01 계열)에서
           // 원본 fn 직접조회가 미스해 알려진 ASIL이 공백=under-report 됐다(위 주석의 '별도 라운드' 해소).
           // 조인부(_fnLc)와 동일 폴백. by_name은 소문자 max-merge라 폴백이 낮은등급 오선택 안 함(안전측).
@@ -1864,6 +1881,9 @@ export default function ImpactGuideSection({ analysisResult, job }) {
         function_diff: fd,  // 본문 diff 원문 — BODY 함수도 실제 코드 근거로 AI 설명
         asil: d.asil || '',
         doc_content: buildDocContentForFn(d.function),  // 현재 문서 원문 → '원문→제안' 근거
+        // 간접영향 근거 — 간접(비변경) 함수면 AI가 콜체인 경로(변경함수 seed → via 경유)를 근거로
+        // '계약 유지 확인' 관점 설명하게 한다. 직접 변경 함수는 미전송(빈 dict).
+        impact_path: (!d.changed && (d.seed || d.via)) ? { hop: d.hop || '', via: d.via || '', seed: d.seed || '' } : {},
         // function_meta 키는 guideFns의 fn과 항상 같은 케이스(정상 경로=소문자, source_root 미해결
         // edge=원본 케이스로 상호 일관 — impact_orchestrator.py:1404 sorted(_changed_set|_impacted_all)).
         // 그래서 d.function 그대로 조회하고 소문자화하지 않는다(edge 경로에선 소문자화가 조회 실패
@@ -2922,6 +2942,13 @@ export default function ImpactGuideSection({ analysisResult, job }) {
                       {isFormatOnly && <span className="pill pill-neutral" style={{ fontSize: 10 }} title="본문 diff가 코드 이동/공백/포맷만 — 의미(로직) 변경 없음(재정렬 아님)">포맷/이동</span>}
                       {isTruncated && <span className="pill pill-warning" style={{ fontSize: 10 }} title="실 라인 변경이나 본문 원문이 크기 상한(60줄/400KB)을 넘어 생략됨 — 파일영향 아님(변경 판정은 유효)">원문 절단</span>}
                       <span className={`pill ${d.hop === 'direct' ? 'pill-danger' : 'pill-info'}`} style={{ fontSize: 10 }}>{d.hop}</span>
+                      {/* 간접영향 근거 뱃지 — 왜 이 함수가 잡혔는지(변경함수 seed → via 경유). 콜그래프 무향이라 '경유'로만 표기. */}
+                      {!d.changed && d.seed && (
+                        <span className="pill pill-neutral" style={{ fontSize: 9, fontFamily: 'monospace' }}
+                          title={`간접영향 근거: 변경 함수 '${d.seed}'${d.via && d.via !== d.seed ? ` → '${d.via}' 경유` : ''}와의 호출 관계로 이 함수가 영향받습니다(무향 콜그래프 — 호출/피호출 방향은 단정하지 않음).`}>
+                          ← {d.seed}{d.via && d.via !== d.seed ? ` · ${d.via}경유` : ''}
+                        </span>
+                      )}
                       {d.asil && /^[A-D]$/.test(d.asil) && <span className={`pill ${/[CD]/.test(d.asil) ? 'pill-danger' : 'pill-warning'}`} style={{ fontSize: 10 }}>ASIL {d.asil}</span>}
                       {d.requirements.length > 0 && <span className="text-muted" style={{ fontSize: 10 }}>요구사항 {d.requirements.length}개</span>}
                     </div>
@@ -3064,7 +3091,7 @@ export default function ImpactGuideSection({ analysisResult, job }) {
 
                 {/* Change description */}
                 <div style={{ padding: '8px 10px', background: 'var(--bg)', borderRadius: 6, marginBottom: 12, fontSize: 12, borderLeft: `3px solid ${noEvidence ? 'var(--border)' : 'var(--color-warning)'}` }}>
-                  {!d.changed && `이 함수는 직접 변경되지 않았으나, 변경 함수와의 호출 관계(${d.hop})로 영향받는 간접 함수입니다. 인터페이스 계약이 유지되는지, 회귀 시험(SUTS/SITS) 재실행이 필요한지 확인하세요.`}
+                  {!d.changed && `이 함수는 직접 변경되지 않았으나, ${d.seed ? `변경 함수 '${d.seed}'${d.via && d.via !== d.seed ? ` → '${d.via}' 경유` : ''}와의` : '변경 함수와의'} 호출 관계(${d.hop})로 영향받는 간접 함수입니다. 인터페이스 계약이 유지되는지, 회귀 시험(SUTS/SITS) 재실행이 필요한지 확인하세요.`}
                   {ct === 'BODY' && (noEvidence
                     ? '이 함수의 직접 변경(hunk/선언)은 감지되지 않았습니다. 같은 파일의 다른 변경(전처리·선언 등)으로 영향 검토 대상에 보수적으로 포함된 함수입니다(파일 단위 영향).'
                     : isFormatOnly
