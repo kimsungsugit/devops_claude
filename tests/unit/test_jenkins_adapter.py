@@ -1,5 +1,9 @@
-"""jenkins_adapter 단위 테스트 — 현재는 _to_int 숫자 파싱 방어에 집중."""
-from backend.services.jenkins_adapter import _to_int
+"""jenkins_adapter 단위 테스트 — _to_int 파싱 방어 + VectorCAST 결과 정규화(fail-safe)."""
+from backend.services.jenkins_adapter import (
+    _normalize_vcast_result,
+    _summarize_vcast_tests,
+    _to_int,
+)
 
 
 class TestToInt:
@@ -23,3 +27,42 @@ class TestToInt:
         assert _to_int("") == 0
         assert _to_int("n/a") == 0
         assert _to_int("n/a", default=-1) == -1
+
+
+class TestNormalizeVcastResult:
+    """결과 문자열 → pass/fail/skip/unknown. fail-safe: 실패/오류를 최우선 판정."""
+
+    def test_plain_pass_fail_skip_unknown(self):
+        assert _normalize_vcast_result("PASS") == "pass"
+        assert _normalize_vcast_result("FAIL") == "fail"
+        assert _normalize_vcast_result("SKIPPED") == "skip"
+        assert _normalize_vcast_result("") == "unknown"
+        assert _normalize_vcast_result("??weird??") == "unknown"
+
+    def test_error_folds_to_fail_despite_ok_substring(self):
+        # 회귀: "TOKEN ERROR"는 'OK' 부분문자열이 있어 과거 PASS로 오분류됐다(실패 위장 = 안전 위험).
+        # fail-safe 재정렬로 ERROR/FAIL이 최우선 → fail.
+        assert _normalize_vcast_result("TOKEN ERROR") == "fail"
+        assert _normalize_vcast_result("ENVIRONMENT ERROR") == "fail"
+        assert _normalize_vcast_result("FATAL") == "fail"
+
+    def test_not_run_is_skip(self):
+        assert _normalize_vcast_result("NOT RUN") == "skip"
+        assert _normalize_vcast_result("N/A") == "skip"
+
+
+class TestSummarizeVcastTests:
+    def test_pass_rate_over_total_includes_skip_unknown(self):
+        # 통과율=통과/전체(스킵·미분류 포함) — 미실행/미분류가 있어도 100% 위장 안 됨.
+        rows = [{"result": "PASS"}, {"result": "PASS"}, {"result": "FAIL"},
+                {"result": "SKIPPED"}, {"result": "??weird??"}]
+        s = _summarize_vcast_tests(rows)
+        assert s["total"] == 5
+        assert (s["passed"], s["failed"], s["skipped"], s["unknown"]) == (2, 1, 1, 1)
+        assert s["pass_rate"] == 0.4
+
+    def test_error_row_counted_as_failed_not_skip(self):
+        # Finding C/D 계약: 실행오류(ERROR)는 실패로 집계된다(스킵/미분류 아님).
+        s = _summarize_vcast_tests([{"result": "PASS"}, {"result": "RUNTIME ERROR"}])
+        assert s["passed"] == 1 and s["failed"] == 1
+        assert s["skipped"] == 0 and s["unknown"] == 0

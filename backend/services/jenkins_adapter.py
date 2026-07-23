@@ -762,12 +762,15 @@ def _map_vcast_header(name: str) -> str:
 
 def _normalize_vcast_result(value: Any) -> str:
     raw = str(value or "").strip().upper()
-    if any(tok in raw for tok in ("PASS", "OK", "SUCCESS")):
-        return "pass"
-    if any(tok in raw for tok in ("SKIP", "SKIPPED", "N/A", "NOT RUN", "NOTRUN")):
-        return "skip"
+    # fail-safe 우선순위: 실패/실행오류를 **가장 먼저** 판정한다. 과거엔 PASS 토큰("OK" 포함)을
+    # 먼저 봐서 "TOKEN ERROR"처럼 'OK' 부분문자열이 든 오류/실패가 PASS로 오분류될 수 있었다
+    # (실패를 통과로 위장 = 안전 위험). ISO 26262 시험 증거는 의심 시 non-pass로 두는 게 안전측.
     if any(tok in raw for tok in ("FAIL", "ERROR", "NG", "FATAL")):
         return "fail"
+    if any(tok in raw for tok in ("SKIP", "SKIPPED", "N/A", "NOT RUN", "NOTRUN")):
+        return "skip"
+    if any(tok in raw for tok in ("PASS", "OK", "SUCCESS")):
+        return "pass"
     return "unknown"
 
 

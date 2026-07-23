@@ -604,7 +604,10 @@ def parse_vectorcast_metrics_summary(path: Path) -> Dict[str, Any]:
     return summary
 
 
-def parse_vectorcast_aggregate_summary(path: Path, top_n: int = 6) -> Dict[str, Any]:
+def parse_vectorcast_aggregate_summary(path: Path, top_n: Optional[int] = None) -> Dict[str, Any]:
+    # top_n=None → 전체 모듈 유지(침묵 절단 금지). 과거 기본 6은 line_rate 낮은 6개만 남겨 프론트가
+    # "6개"를 전체처럼 오도했다(실측 30→6). 프론트 표는 스크롤 컨테이너라 전체 렌더에 문제 없음.
+    # 호출측이 명시적으로 상한을 줄 때만 절단(현 호출부는 미지정 → 전체).
     summary: Dict[str, Any] = {
         "path": str(path),
         "line_rate": None,
@@ -634,6 +637,9 @@ def parse_vectorcast_aggregate_summary(path: Path, top_n: int = 6) -> Dict[str, 
         if not name_match:
             continue
         name = _clean_text(name_match.group(1))
+        # VectorCAST의 "Lines Covered"는 gcov식 라인 커버리지가 아니라 **statement coverage**다
+        # (GRAND TOTALS의 "Statements" 값과 바이트 동일 — 실측 4396/4429). 따라서 아래 line_rate/
+        # module.line_rate는 사실상 구문(Statement) 커버리지이며, 프론트가 "Statement Rate"로 표기한다.
         line_match = re.search(r"(\d+)\s+of\s+(\d+)\s+Lines Covered", part)
         branch_match = re.search(r"(\d+)\s+of\s+(\d+)\s+Branches Covered", part)
         if line_match:

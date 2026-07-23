@@ -11,15 +11,16 @@ import PathPickerDialog from '../PathPickerDialog.jsx';
 // (정수 반올림만으론 미커버 규모가 드러나지 않음 — 정직 표시).
 function covCard(label, cell) {
   if (!cell || !cell.total) return null;
-  const ratio = typeof cell.rate === 'number' ? cell.rate : cell.covered / cell.total;
+  const covered = typeof cell.covered === 'number' ? cell.covered : 0;  // covered 부재 시 0 — NaN 방지
+  const ratio = typeof cell.rate === 'number' ? cell.rate : covered / cell.total;
   const pct = Math.round(ratio * 100);
-  const uncov = (cell.total ?? 0) - (cell.covered ?? 0);
+  const uncov = Math.max(0, cell.total - covered);  // 데이터 손상(covered>total)에도 음수 방지
   const color = pct >= 80 ? 'var(--color-success)' : 'var(--color-warning)';
   return (
     <div className="stat-card" style={{ borderLeft: `3px solid ${color}` }}>
       <div className="stat-value" style={{ color }}>{pct}%</div>
       <div className="stat-label">{label}</div>
-      <div className="text-muted" style={{ fontSize: 9 }}>{cell.covered?.toLocaleString()}/{cell.total?.toLocaleString()} ({(ratio * 100).toFixed(2)}%)</div>
+      <div className="text-muted" style={{ fontSize: 9 }}>{covered.toLocaleString()}/{cell.total.toLocaleString()} ({(ratio * 100).toFixed(2)}%)</div>
       <div className="text-muted" style={{ fontSize: 9 }}>미커버 {uncov.toLocaleString()}</div>
     </div>
   );
@@ -1296,7 +1297,7 @@ export default function AnalysisSection({ job, analysisResult }) {
               )}
             </div>
             <div className="text-muted" style={{ fontSize: 9, marginTop: 2, lineHeight: 1.5 }}>
-              통과율=통과/전체(스킵·미분류 포함). 미실행·실행오류·제외는 현재 VectorCAST 리포트에서 개별 구분되지 않아 스킵/미분류로 집계됩니다.
+              통과율=통과/전체(스킵·미분류 포함). 원본 결과는 통과/실패/스킵/미분류로 정규화됩니다 — 실행오류(ERROR)는 실패, 미실행(NOT RUN)은 스킵으로 집계되고, 인식 불가 결과만 미분류입니다.
             </div>
             </>
           ) : (
@@ -1316,13 +1317,14 @@ export default function AnalysisSection({ job, analysisResult }) {
             </summary>
             <div style={{ maxHeight: 250, overflowY: 'auto', marginTop: 6 }}>
               <table className="impact-table" style={{ fontSize: 10 }}>
-                <thead><tr><th>테스트케이스</th><th>함수(subprogram)</th><th>유닛</th></tr></thead>
+                <thead><tr><th>테스트케이스</th><th>함수(subprogram)</th><th>유닛</th><th>결과</th></tr></thead>
                 <tbody>
                   {utFailures.slice(0, 100).map((f, i) => (
                     <tr key={i} style={{ background: '#fee2e2' }}>
                       <td style={{ fontFamily: 'monospace', fontSize: 10 }}>{f.testcase ?? '-'}</td>
                       <td style={{ fontFamily: 'monospace', fontSize: 10 }}>{f.subprogram ?? '-'}</td>
                       <td className="text-sm" style={{ maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{f.unit ?? '-'}</td>
+                      <td style={{ fontFamily: 'monospace', fontSize: 10 }} title="원본 결과 문자열 — 실행오류(ERROR)와 검증실패(FAIL) 구분용">{f.result ?? '-'}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -1345,7 +1347,7 @@ export default function AnalysisSection({ job, analysisResult }) {
               </summary>
               <div style={{ maxHeight: 360, overflowY: 'auto', marginTop: 6 }}>
                 <table className="impact-table" style={{ fontSize: 10 }}>
-                  <thead><tr><th>모듈</th><th>Line Rate</th><th>Branch Rate</th><th></th></tr></thead>
+                  <thead><tr><th>모듈</th><th>구문(Statement)</th><th>분기(Branch)</th><th></th></tr></thead>
                   <tbody>
                     {coverageModulesUt.map((m) => (
                       <ModuleCovRow key={m.name} name={m.name} lineRate={m.lineRate} branchRate={m.branchRate} functions={m.functions} />
@@ -1491,13 +1493,14 @@ export default function AnalysisSection({ job, analysisResult }) {
             </summary>
             <div style={{ maxHeight: 250, overflowY: 'auto', marginTop: 6 }}>
               <table className="impact-table" style={{ fontSize: 10 }}>
-                <thead><tr><th>테스트케이스</th><th>함수(subprogram)</th><th>유닛</th></tr></thead>
+                <thead><tr><th>테스트케이스</th><th>함수(subprogram)</th><th>유닛</th><th>결과</th></tr></thead>
                 <tbody>
                   {itFailures.slice(0, 100).map((f, i) => (
                     <tr key={i} style={{ background: '#fee2e2' }}>
                       <td style={{ fontFamily: 'monospace', fontSize: 10 }}>{f.testcase ?? '-'}</td>
                       <td style={{ fontFamily: 'monospace', fontSize: 10 }}>{f.subprogram ?? '-'}</td>
                       <td className="text-sm" style={{ maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{f.unit ?? '-'}</td>
+                      <td style={{ fontFamily: 'monospace', fontSize: 10 }} title="원본 결과 문자열 — 실행오류(ERROR)와 검증실패(FAIL) 구분용">{f.result ?? '-'}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -1520,7 +1523,7 @@ export default function AnalysisSection({ job, analysisResult }) {
               </summary>
               <div style={{ maxHeight: 360, overflowY: 'auto', marginTop: 6 }}>
                 <table className="impact-table" style={{ fontSize: 10 }}>
-                  <thead><tr><th>모듈</th><th>Line Rate</th><th>Branch Rate</th><th></th></tr></thead>
+                  <thead><tr><th>모듈</th><th>구문(Statement)</th><th>분기(Branch)</th><th></th></tr></thead>
                   <tbody>
                     {coverageModulesIt.map((m) => (
                       <ModuleCovRow key={m.name} name={m.name} lineRate={m.lineRate} branchRate={m.branchRate} functions={m.functions} />

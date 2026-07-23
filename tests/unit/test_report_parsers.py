@@ -11,6 +11,7 @@ from backend.services.report_parsers import (
     parse_html_report,
     parse_prqa_rcr_details,
     parse_prqa_rcr_summary,
+    parse_vectorcast_aggregate_summary,
     read_text_safe,
     resolve_code_metrics,
     resolve_scm_vcast_metrics,
@@ -503,3 +504,25 @@ class TestResolveScmVcastMetrics:
             {"coverage": {}, "test_rows_count_ut": 0, "test_rows_count_it": 0}) is None
         assert resolve_scm_vcast_metrics({}) is None
         assert resolve_scm_vcast_metrics(None) is None
+
+
+class TestVcastAggregateNoSilentCap:
+    """parse_vectorcast_aggregate_summary — 모듈 침묵 절단(과거 top_n=6) 제거."""
+
+    def _write(self, tmp_path, n):
+        parts = [f"Code Coverage for mod{i}.c\n{i} of 100 Lines Covered\n{i} of 50 Branches Covered\n"
+                 for i in range(1, n + 1)]
+        p = tmp_path / "agg.html"
+        p.write_text("".join(parts), encoding="utf-8")
+        return p
+
+    def test_all_modules_returned_no_default_cap(self, tmp_path):
+        # 회귀: 과거 기본 top_n=6이 line_rate 낮은 6개만 남겨 침묵 절단(실측 30→6)했다. 기본은 전체.
+        s = parse_vectorcast_aggregate_summary(self._write(tmp_path, 8))
+        assert len(s["modules"]) == 8               # 6으로 잘리지 않음
+        assert s["line_covered"] == sum(range(1, 9)) and s["line_total"] == 800  # 헤드라인은 전체 합산
+
+    def test_explicit_top_n_still_caps(self, tmp_path):
+        # 명시 상한은 여전히 동작(호출측이 원하면 절단 가능).
+        s = parse_vectorcast_aggregate_summary(self._write(tmp_path, 8), top_n=3)
+        assert len(s["modules"]) == 3
