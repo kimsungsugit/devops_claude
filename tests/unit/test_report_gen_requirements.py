@@ -777,3 +777,85 @@ class TestSdsComponentDescriptionAmbiguity:
         assert "component_description" not in pm["s_shared"]
         # s_solo: 단일 SwCom → 정상 부착
         assert pm.get("s_solo", {}).get("component_description") == "첫 컴포넌트 설명"
+
+
+class TestSdsCompKey:
+    """_sds_comp_key: SDS component_id → 함수명 bridge 키 정규화 (§C).
+
+    SDS 추출이 component_id에 C 시그니처 조각을 붙여오는데, 반환형이 **공백으로
+    분리돼** 앞에 붙은 형태('void f( void )')를 현재는 통째로 버려 함수→SRS 역추적을
+    침묵 누락한다. fix는 선행 토큰이 **전부 알려진 C 반환형/한정자일 때만** 마지막
+    토큰을 함수명으로 채택한다 — 설명문의 마지막 단어가 함수명으로 오매칭돼
+    over-trace 되는 것(순진한 last-token 채택)을 원천 차단하는 게 핵심 대조.
+    """
+
+    def test_signature_return_prefix_recovered(self):
+        """(P) 공백분리 반환형/한정자 접두 → 함수명 복구 (현재 코드에선 FAIL 예상)."""
+        from report_gen.requirements import _sds_comp_key
+        cases = [
+            ("void f( void )",           "f"),          # 계획서 명시 케이스(void=자연어안전 타입)
+            ("static void bar( void )",  "bar"),        # 한정자 + 타입(void)
+            ("u8 s_calc(void)",          "s_calc"),     # 헝가리안 + 저장클래스
+            ("const u16 getval( void )", "getval"),     # 한정자 + 헝가리안
+            ("u8 * s_getbuf( void )",    "s_getbuf"),   # 포인터 반환형
+        ]
+        for comp, expected in cases:
+            assert _sds_comp_key(comp) == expected, \
+                f"{comp!r} → {_sds_comp_key(comp)!r} (기대 {expected!r})"
+
+    def test_description_not_mistaken_for_function(self):
+        """(N) over-trace 가드: 설명문(괄호 포함 포함)의 마지막 토큰을 함수명으로 삼지 않는다.
+
+        reset counter / do something( foo ) 는 순진한 last-token fix라면 각각
+        'counter'/'something' 이 되어 우연히 같은 이름 함수를 SRS로 잘못 추적한다.
+        이 그룹이 ''를 유지하는지가 over-trace 무회귀의 게이트다.
+        """
+        from report_gen.requirements import _sds_comp_key
+        cases = [
+            "reset counter",             # last-token이면 'counter' (오매칭)
+            "do something( foo )",       # last-token이면 'something' (오매칭)
+            "power operation disable",   # 다토큰 설명문
+            "power operation disable(swst_09) state 천이",  # 실데이터: 괄호+비화이트 첫토큰
+            "mcu 이상 감지(레지스터 미지원)",  # 한글 설명문 + 괄호
+            "swcom_35: bootloader\t115", # 표 아티팩트 + 콜론
+            "auto close",                # ★실데이터 회귀: 'auto'=저장한정자 겹침 → 괄호 없어 미적용
+            "auto closestandby",         # ★실데이터 회귀: 동상
+            "auto close( void )",        # ★가정: 괄호 있어도 auto 화이트리스트 제외로 차단(이중방어)
+            # ── deep-review W1: 화이트리스트 자연어 충돌 (기본타입/typedef 제거로 첫토큰 미등재) ──
+            "long delay( ms )",          # 'long'=자연어 → 미등재 → 미채택 (재현된 over-trace)
+            "short circuit( detect )",   # 'short'
+            "double click( fast )",      # 'double'
+            "int overflow( check )",     # 'int'
+            "char array( init )",        # 'char'
+            "byte order( swap )",        # 'byte' (벤더 typedef, 충돌 최고)
+            "word align( addr )",        # 'word'
+            "unsigned int foo(int a)",   # 기본타입 제거 trade-off: 이전 복구 → 이제 미복구
+            # ── 타입-최소-1개 게이트: 한정자 단독 선행 차단 ──
+            "static delay( ms )",        # 'static'=한정자뿐, 타입 토큰 없음 → 미채택
+            "const value( x )",          # 'const'=한정자뿐
+            # ── last-token 키워드 차단: 말단이 타입/한정자면 함수명 아님 ──
+            "void void( x )",            # 말단 'void'가 타입 키워드 → 배제
+            "const void( x )",           # 말단 'void'가 타입 키워드 → 배제
+            # ── deep-review 후속: struct/union/enum 제외(집합체 반환형은 태그 동반→차단, 단독은 자연어) ──
+            "union select( x )",         # 'union'=영어단어, 화이트 제외 → 미채택
+            "struct data( init )",       # 'struct' 제외 → 미채택
+            "struct led_state get( void )",  # 진짜 집합체 반환형도 태그(led_state)로 미복구(under-trace 안전측)
+        ]
+        for comp in cases:
+            assert _sds_comp_key(comp) == "", \
+                f"{comp!r} → {_sds_comp_key(comp)!r} (기대 '' — over-trace 가드)"
+
+    def test_existing_normalization_unchanged(self):
+        """(R) 공백 없는 기존 경로 무회귀 (§A/라운드109·112 케이스 — fix 미발동 경로)."""
+        from report_gen.requirements import _sds_comp_key
+        cases = [
+            ("s_systemhashcalculate( void", "s_systemhashcalculate"),  # 함수명 + 시그니처 꼬리
+            ("u8g_x_partnoinfo[10]",        "u8g_x_partnoinfo"),       # 배열 첨자 제거
+            ("_entrypoint",                 "entrypoint"),             # 선행 언더스코어
+            ("foo",                         "foo"),                    # 순수 식별자
+            ("",                            ""),                       # 빈 입력
+            (None,                          ""),                       # None
+        ]
+        for comp, expected in cases:
+            assert _sds_comp_key(comp) == expected, \
+                f"{comp!r} → {_sds_comp_key(comp)!r} (기대 {expected!r})"

@@ -98,6 +98,35 @@ _SDS_TABLE_ARTIFACT_RE = re.compile(r"^\d+\s*\t")   # 선행 '행번호+탭'
 _SDS_ARRAY_SUBSCRIPT_RE = re.compile(r"\[[^\]]*\]")  # 배열 첨자 [10]/[]
 _C_IDENT_RE = re.compile(r"[a-z_][a-z0-9_]*\Z")      # C 식별자(소문자화 후)
 
+# §C(공백분리 반환형): SDS가 component_id에 함수 프로토타입을 통째로 실어보내면
+# ('void f( void )', 'static u16 s_calc( void )') 반환형/저장한정자가 함수명 앞에 공백으로
+# 분리돼 붙는다. 마지막 토큰(함수명)만 채택하되 **선행이 전부 타입/한정자이고 그중 실제
+# 타입이 최소 1개**일 때만 한다(_sds_comp_key 본문). 'reset counter'/'do something(x)'의 끝
+# 단어를 함수명으로 오채택하면 곧바로 over-trace(설명문→SRS 거짓추적)이므로, 열린 last-token
+# 채택을 금지하고 이 닫힌 화이트리스트로 게이트한다. 붙은 반환형('u16s_foo')은 §A 담당(별개).
+#
+# ⚠ 화이트리스트는 **자연어 영어 단어와 겹치지 않는 것만** 담는다(deep-review W1, 재현·실증):
+# 기본 C 타입 int/long/short/char/double/float/signed/unsigned/bool 과 벤더 typedef
+# word/byte/dword/boolean 은 'long delay( ms )'·'double click( x )'·'byte order( swap )' 같은
+# 설계 라벨의 첫 단어와 겹쳐, 괄호가 뒤따르면 함수 delay/click/order 에 거짓 추적된다(auto·
+# register 를 같은 이유로 뺐던 가드 논리를 이 부류 전체로 확장). 이들을 뺀 결과 순수 시그니처
+# 'int foo()'는 못 벗기나(under-trace, 안전측), §C 이득은 이 저장소 실데이터 0건이라 손실 없고
+# over-trace 위험만 제거된다. 자연어와 안 겹치는 것(void·헝가리안 u8~f64·stdint)만 타입으로
+# 남긴다. struct/union/enum도 제외: 진짜 반환형이면 태그(struct Foo)를 동반해 lead에 비화이트
+# 토큰이 생겨 어차피 차단(복구 이득 0)이고, 단독이면 자연어('union select')로 over-trace만
+# 노출한다(deep-review 후속). '타입 토큰 최소 1개' 규칙이 한정자 단독('static delay( ms )')도 차단.
+_C_TYPE_TOKEN = frozenset({           # 실제 반환 '타입'(자연어 비충돌만) — 벗기려면 최소 1개 필수.
+    "void",
+    "u8", "u16", "u32", "u64", "s8", "s16", "s32", "s64", "f32", "f64",
+    "uint8_t", "uint16_t", "uint32_t", "uint64_t",
+    "int8_t", "int16_t", "int32_t", "int64_t",
+    "size_t", "ssize_t", "uintptr_t", "intptr_t",
+})
+_C_QUALIFIER_TOKEN = frozenset({      # 저장/타입 한정자 — 타입에 선행하나 단독으론 불충분.
+    "static", "const", "volatile", "inline", "extern",
+})
+_C_RETURN_QUALIFIER = _C_TYPE_TOKEN | _C_QUALIFIER_TOKEN   # 벗기기 허용 선행 토큰(합집합)
+
 
 def _sds_comp_key(comp: Any) -> str:
     """SDS component_id를 함수명 bridge용 정규화 키(lower)로 변환.
@@ -106,14 +135,33 @@ def _sds_comp_key(comp: Any) -> str:
     정확매칭되게 한다. 정규화 후 **순수 C 식별자가 아니면 빈 문자열을 반환**해 키를
     버린다(reviewer W1): 공백/콜론/한글/선행숫자가 남은 설명문 컴포넌트('power operation
     disable', 'mcu 이상 감지', 'swcom_35: bootloader\\t115')는 함수명과 절대 매칭되면
-    안 되므로 dict 오염·거짓 bridge 표면을 원천 차단한다. None/숫자 입력도 여기서 걸러짐.
+    안 되므로 dict 오염·거짓 bridge 표면을 원천 차단한다. None은 초입에서, 숫자('123')는
+    식별자 검증에서 걸러진다. 반환형이 공백분리된 프로토타입('void f( void )')은 선행이
+    전부 C 반환형/한정자일 때만 함수명을 채택한다(§C, _C_RETURN_QUALIFIER).
     """
+    if comp is None:                 # str(None)='None'→'none'이 유효 식별자라 아래 검증을
+        return ""                    # 통과하는 것을 초입 차단('none' 키 오염 방지)
     s = str(comp).strip().lower()
     if not s:
         return ""
     s = _SDS_TABLE_ARTIFACT_RE.sub("", s)
+    _had_paren = "(" in s            # 함수 시그니처 문맥 표지(§C 벗기기 전제)
     s = s.split("(", 1)[0]            # 'name( void' / 'name(void)' → 'name'
     s = _SDS_ARRAY_SUBSCRIPT_RE.sub("", s).strip()
+    # §C: 공백으로 분리된 반환형/저장한정자 접두 제거 ('void f( x )' → 'f'). 3중 게이트로
+    # over-trace를 차단한다(deep-review W1): ① 원본에 '('가 있던 시그니처 문맥(_had_paren)
+    # ② 말단(함수명 후보) 제외 선행 토큰이 전부 타입/한정자이고 그중 실제 타입이 최소 1개
+    # ③ 말단 토큰 자신은 타입 키워드가 아님('unsigned int( x )'→'int' 방지). 이로써 자연어
+    # 라벨('auto close'·'long delay( ms )'·'static delay( ms )')이 함수명으로 새지 않는다.
+    # 포인터 '*'는 토큰서 제거.
+    if _had_paren and " " in s:
+        _toks = [t for t in (p.strip("*") for p in s.split()) if t]
+        _lead = _toks[:-1]
+        if (len(_toks) >= 2
+                and _toks[-1] not in _C_RETURN_QUALIFIER
+                and all(t in _C_RETURN_QUALIFIER for t in _lead)
+                and any(t in _C_TYPE_TOKEN for t in _lead)):
+            s = _toks[-1]
     # 선행 언더스코어 정규화(라운드112): 링커/컴파일러 내부 표기('_entrypoint')와 설계 표기
     # ('entrypoint')의 차이로 bridge가 끊기는 것을 막는다. 실데이터 검증: SDS 키 중 선행 '_'는
     # 0개라 strip은 기존 매칭을 절대 깨지 않고(순수 가산) '_entrypoint'->'entrypoint' 1건만 새로
