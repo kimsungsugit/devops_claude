@@ -651,7 +651,7 @@ def _load_suts_fn_tcs(
     if not data:
         return {}
     try:
-        from tools.export_suts_vectorcast import build_vectorcast_model  # type: ignore
+        from tools.export_suts_vectorcast import build_vectorcast_model, bare_fn_name  # type: ignore
         model = build_vectorcast_model(linked_doc, target_functions=flagged_fns, source_bytes=data)
     except ValueError:
         _warn("회귀 TC: SUTS 문서 형식 미인식(TC 시트 없음) — 재실행 TC 미집계")
@@ -661,7 +661,10 @@ def _load_suts_fn_tcs(
         return {}
     result: Dict[str, List[str]] = {}
     for unit in model.get("units") or []:
-        name = str(unit.get("unit_name") or "").strip()
+        # unit_name은 템플릿에 따라 시그니처(HDPDM01 'void g_SysOs_WdiCtrl( void )')일 수 있어
+        # bare 식별자로 정규화한다 — 프론트/스코프 필터(_direct_lc)가 SVN diff의 bare 함수명과
+        # 조인하므로, 시그니처 그대로면 매칭 실패해 카드가 '미파싱'·회귀 TC 0이 됐다(KJPDS02는 무변경).
+        name = bare_fn_name(unit.get("unit_name"))
         # each test_case row carries base_tc_id (the TC block identifier)
         _seqs = unit.get("test_cases") or []
         tcs = [str(tc.get("base_tc_id") or "") for tc in _seqs if tc.get("base_tc_id")]

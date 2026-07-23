@@ -387,3 +387,59 @@ def test_detect_columns_partial_detection_falls_back_and_warns(tmp_path: Path) -
     assert cols.get("_detect_warning")               # 침묵 아님
     model = build_vectorcast_model(str(p), project_id="P")
     assert any(w.get("code") == "header_detect_fallback" for w in model["export_warnings"])
+
+
+def _make_signature_name_suts(path: Path) -> None:
+    """HDPDM01 실 doc처럼 'Unit Name' 컬럼이 bare 함수명이 아니라 전체 C 시그니처
+    ('void g_SysOs_WdiCtrl( void )')인 레이아웃(header_driven). 영향 target(=SVN diff의 bare
+    함수명)과 매칭하려면 시그니처를 bare로 정규화해야 한다 — 안 하면 전 유닛이 침묵 필터링돼
+    카드 '미파싱'·회귀 TC 0."""
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "2.SW Unit Test Spec"
+    ws.cell(row=5, column=14, value="Input")
+    ws.cell(row=5, column=63, value="Expected Result")
+    ws.cell(row=5, column=149, value="Related ID")
+    ws.cell(row=6, column=3, value="TC ID")
+    ws.cell(row=6, column=4, value="Name")
+    ws.cell(row=6, column=13, value="Seq. No.")
+    ws.cell(row=7, column=3, value="SwUTC_SwUFn_0001")
+    ws.cell(row=7, column=4, value="void g_SysOs_WdiCtrl( void )")   # 전체 시그니처
+    ws.cell(row=7, column=14, value="inA")
+    ws.cell(row=7, column=63, value="outA")
+    ws.cell(row=8, column=13, value=1)
+    ws.cell(row=8, column=14, value=42)
+    ws.cell(row=8, column=63, value=99)
+    wb.save(path)
+    wb.close()
+
+
+def test_bare_fn_name_extracts_identifier() -> None:
+    """시그니처↔bare 정규화: 반환타입·파라미터·포인터·한정자를 벗겨 식별자만. bare는 idempotent."""
+    from tools.export_suts_vectorcast import bare_fn_name
+
+    assert bare_fn_name("void g_SysOs_WdiCtrl( void )") == "g_SysOs_WdiCtrl"
+    assert bare_fn_name("static void s_SystemOperation( void )") == "s_SystemOperation"
+    assert bare_fn_name("uint8 * s_GetBuf( uint16 n )") == "s_GetBuf"    # 포인터 반환(분리)
+    assert bare_fn_name("uint8* s_GetBuf2(void)") == "s_GetBuf2"          # 포인터 반환(붙음)
+    assert bare_fn_name("s_sha256_update") == "s_sha256_update"           # bare → 무변경
+    assert bare_fn_name("  g_Lib_Sha256_Nb_Start  ") == "g_Lib_Sha256_Nb_Start"
+    assert bare_fn_name("") == ""
+    assert bare_fn_name(None) == ""                                       # 방어적
+
+
+def test_build_vectorcast_model_matches_signature_unit_name(tmp_path: Path) -> None:
+    """HDPDM01 회귀: unit_name이 시그니처면 bare target(SVN diff)과 매칭돼 유닛이 포함돼야 한다.
+    과거 naive .lower() 매칭이라 전량 필터링→회귀 TC/문서카드 침묵 0이 되던 근본 수정."""
+    from tools.export_suts_vectorcast import build_vectorcast_model
+
+    p = tmp_path / "sig.xlsm"
+    _make_signature_name_suts(p)
+    model = build_vectorcast_model(str(p), target_functions=["g_SysOs_WdiCtrl"])
+    assert len(model["units"]) == 1                       # 매칭됨(과거 0)
+    # 표시용 unit_name 원본(시그니처) 보존 — 빌더/VectorCAST 산출물 계약 불변
+    assert model["units"][0]["unit_name"] == "void g_SysOs_WdiCtrl( void )"
+    assert model["units"][0]["test_cases"][0]["inputs"] == {"inA": 42}
+    # 대조군: 무관 bare target은 매칭 안 됨(bare 정규화가 과대매칭 아님)
+    empty = build_vectorcast_model(str(p), target_functions=["s_unrelated"])
+    assert len(empty["units"]) == 0

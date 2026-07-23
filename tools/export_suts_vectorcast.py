@@ -306,6 +306,22 @@ def _parse_tc_block(ws: Any, start_row: int, end_row: int, cols: Dict[str, Any])
     return unit
 
 
+def bare_fn_name(name: Any) -> str:
+    """Extract the bare C identifier from a unit name that may be a full signature.
+
+    SUTS 템플릿에 따라 'Unit Name' 컬럼이 bare 함수명(KJPDS02_PV: 's_sha256_update')이거나
+    전체 시그니처(HDPDM01: 'void g_SysOs_WdiCtrl( void )')다. 영향 분석은 SVN diff의 bare
+    함수명과 매칭하므로, 시그니처는 반환타입·파라미터를 벗겨 식별자만 남긴다.
+    이미 bare면 무변경(idempotent) — KJPDS02_PV 등 bare 템플릿은 영향 없음.
+    """
+    s = str(name or "").strip()
+    if not s:
+        return s
+    head = s.split("(", 1)[0]              # 파라미터 목록('( void )') 제거
+    toks = head.replace("*", " ").split()  # 포인터 반환('*')은 식별자 문자가 아님
+    return toks[-1] if toks else s          # 반환타입·한정자(static 등) 뒤 마지막 토큰이 함수명
+
+
 def build_vectorcast_model(
     suts_path: str,
     *,
@@ -332,8 +348,13 @@ def build_vectorcast_model(
         export_warnings.append({"code": "header_detect_fallback", "message": str(_detect_warn)})
     for start_row, end_row in _iter_tc_blocks(ws, cols):
         unit = _parse_tc_block(ws, start_row, end_row, cols)
-        if target_set and unit["unit_name"].strip().lower() not in target_set:
-            continue
+        # unit_name은 템플릿에 따라 bare(KJPDS02_PV) 또는 시그니처(HDPDM01 'void f( void )')다.
+        # target(=영향 함수)은 SVN diff의 bare 이름이므로 raw·bare 양쪽으로 매칭한다 — 시그니처
+        # 템플릿에서 전 유닛이 침묵 필터링돼 회귀 TC/문서카드가 0이 되던 것 차단(superset=무회귀).
+        if target_set:
+            _un = unit["unit_name"].strip().lower()
+            if _un not in target_set and bare_fn_name(_un) not in target_set:
+                continue
         if not unit["unit_name"]:
             export_warnings.append(
                 {"code": "missing_unit_name", "message": f"TC row {start_row}: unit name is empty."}

@@ -101,6 +101,33 @@ def test_load_suts_fn_tcs_warns_only_on_unit_drops(monkeypatch):
     assert "2건" in drop_warn[0]  # empty_expected 제외, 드롭 2건만
 
 
+def test_load_suts_fn_tcs_signature_unit_name_keyed_by_bare(monkeypatch):
+    """HDPDM01: unit_name이 전체 C 시그니처면 bare 식별자로 키잉해야 프론트/스코프 필터(_direct_lc,
+    bare 함수명)가 조인된다. 과거엔 시그니처 그대로 키잉→매칭 실패로 카드 '미파싱'·회귀 TC 0이 됐다.
+    KJPDS02(bare)는 idempotent라 무변경."""
+    import backend.services.file_resolver as fr
+    import tools.export_suts_vectorcast as ev
+    from workflow.impact_orchestrator import _load_suts_fn_tcs
+
+    monkeypatch.setattr(fr, "get_resolver", lambda: _FakeResolver())
+    monkeypatch.setattr(ev, "build_vectorcast_model", lambda *a, **k: {
+        "units": [{
+            "unit_name": "void g_SysOs_WdiCtrl( void )",   # 시그니처(HDPDM01 실 doc 형태)
+            "test_cases": [{"base_tc_id": "SwUTC_SwUFn_0001",
+                            "inputs": {"a": 1}, "expected": {"r": 2}}],
+        }],
+        "export_warnings": [],
+    })
+
+    sink: dict = {}
+    result = _load_suts_fn_tcs("U:/hdpdm01.xlsm", ["g_SysOs_WdiCtrl"], content_sink=sink)
+    # bare 키로 저장 → _direct_lc(bare 함수명) 매칭 가능(과거 시그니처 키라 실패)
+    assert result == {"g_SysOs_WdiCtrl": ["SwUTC_SwUFn_0001"]}
+    assert "g_SysOs_WdiCtrl" in sink
+    assert "void g_SysOs_WdiCtrl( void )" not in sink   # 시그니처 그대로 키잉하지 않음
+    assert sink["g_SysOs_WdiCtrl"][0]["inputs"] == {"a": "1"}
+
+
 def test_load_uds_fn_details_widened(monkeypatch):
     """사이드카 payload의 globals/calls/prototype 필드가 surface에 포함(widen)됨을 확인."""
     from workflow import impact_orchestrator as m
