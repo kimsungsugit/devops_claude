@@ -38,6 +38,13 @@ _FUNC_PROTO_LINE = re.compile(
     r"[\w\s\*\(\),]*?\b([A-Za-z_]\w*)\s*\([^;{}]*\)\s*;",
     re.MULTILINE,
 )
+# 접두(+/-) 없는 순수 텍스트(OLD/NEW 투영본)용 함수 선언 매처 — _scan_decls에서 사용.
+# _FUNC_DECL_LINE과 동형이나 `^[+-]` 앵커 대신 라인 시작(선행 공백 허용)에 매칭한다.
+_FUNC_DECL_LINE_PLAIN = re.compile(
+    r"^\s*(?:(?:static|extern|inline|const|volatile)\s+)*"
+    + _RET_TYPE +
+    r"[\w\s\*]*\s+(\w+)\s*\(",
+)
 _HUNK_FUNC = re.compile(r"^@@.*@@\s*(?:.*?\s)?(\w+)\s*\(", re.MULTILINE)
 _VAR_DECL_LINE = re.compile(
     r"^[+-]\s*(?:static\s+)?(?:const\s+|volatile\s+|unsigned\s+|signed\s+)*"
@@ -317,6 +324,86 @@ def _reconstruct_diff_decls(diff_text: str):
         i = j if j > i + 1 else i + 1
 
 
+def _scan_decls(text: str) -> Dict[str, str]:
+    """접두(+/-) 없는 coherent C 텍스트(OLD/NEW 투영본)에서 함수 선언/정의 헤더를
+    {funcname: 정규화 선언원문}으로 추출. 멀티라인 파라미터를 괄호 균형까지 이어붙이고 본문 `{`·
+    프로토 `;` 이전만 취한다. **균형 복원된 선언만 기록**(절단 시 미기록 — 한쪽만 잘려 false diff
+    나는 것 방지). 함수당 첫 매치(대개 1개). _sig_changes_from_projections 전용 헬퍼."""
+    out: Dict[str, str] = {}
+    lines = text.split("\n")
+    n = len(lines)
+    i = 0
+    while i < n:
+        m = _FUNC_DECL_LINE_PLAIN.match(lines[i])
+        if not m:
+            i += 1
+            continue
+        parts = [lines[i]]
+        depth = lines[i].count("(") - lines[i].count(")")
+        j = i + 1
+        while depth > 0 and j < n and (j - i) < 16:
+            parts.append(lines[j])
+            depth += lines[j].count("(") - lines[j].count(")")
+            j += 1
+        decl = " ".join(parts)
+        _brace = decl.find("{")
+        if _brace >= 0:
+            decl = decl[:_brace]
+        decl = re.sub(r"\s+", " ", decl).strip().rstrip(";").strip()
+        if depth <= 0 and m.group(1) not in out:  # 균형 복원된 선언만(절단 제외 — false diff 방지)
+            out[m.group(1)] = decl
+        i = j if j > i + 1 else i + 1
+    return out
+
+
+def _sig_changes_from_projections(diff_text: str) -> Dict[str, Dict[str, str]]:
+    """각 hunk를 OLD 투영(context+'-')·NEW 투영(context+'+')으로 재구성해, 양쪽에서 복원한 함수
+    선언이 실제로 다른 함수만 {func:{before,after}}로 반환한다(연속행 시그니처 변경 탐지).
+
+    멀티라인 함수의 첫 줄(함수명+'(')이 context(무변경)이고 뒤 파라미터 연속행만 -/+로 바뀌면,
+    변경 라인에 `funcname(` 토큰이 없어 `_reconstruct_diff_decls`(+/- 앵커)와 func_decl_names가
+    못 잡아 SIGNATURE→VARIABLE/BODY로 under-report됐다(deep-review 발견1 — SDS 자동 FLAG 누락,
+    ISO 26262 영향증거 최악 방향). 투영 재구성은 첫 줄이 context든 +/-든 무관하게 완전 선언을
+    복원하므로 old!=new면 시그니처 변경으로 정확히 잡는다.
+
+    - before==after(리포맷 churn·무변화)·NEW/DELETE(한쪽만)는 방출 안 함 — 순수 '변경' 신호만.
+      → 안전측: old==new면 침묵(over-report 없음), churn false SIGNATURE를 되살리지 않음.
+    - 한계: hunk가 함수명 줄보다 뒤에서 시작하면(긴 파라미터 목록의 깊은 변경) 함수명 줄이 hunk
+      context 밖이라 미탐(드묾). 현 상태(전 연속행 변경 미탐)보다 열화가 아니라 개선이다.
+    """
+    out: Dict[str, Dict[str, str]] = {}
+    old_lines: List[str] = []
+    new_lines: List[str] = []
+
+    def _flush() -> None:
+        if not old_lines and not new_lines:
+            return
+        _before = _scan_decls("\n".join(old_lines))
+        _after = _scan_decls("\n".join(new_lines))
+        for _fn in set(_before) & set(_after):  # 양쪽 존재(=시그니처 변경). NEW/DELETE는 한쪽만이라 제외
+            if _before[_fn] != _after[_fn]:
+                out.setdefault(_fn, {"before": _before[_fn], "after": _after[_fn]})
+
+    for ln in diff_text.splitlines():
+        if ln.startswith("@@"):
+            _flush()  # hunk 경계에서 마감 — 서로 다른 hunk의 선언이 잘못 이어붙지 않게
+            old_lines.clear()
+            new_lines.clear()
+            continue
+        if not ln or ln[:3] in ("+++", "---") or ln.startswith("Index:") or ln.startswith("==="):
+            continue
+        c = ln[0]
+        if c == "+":
+            new_lines.append(ln[1:])
+        elif c == "-":
+            old_lines.append(ln[1:])
+        else:  # context(공백 접두) 또는 접두 없는 라인 → 양 투영 공통
+            old_lines.append(ln[1:] if c == " " else ln)
+            new_lines.append(ln[1:] if c == " " else ln)
+    _flush()
+    return out
+
+
 def _classify_one_file_diff(
     diff_text: str, is_header: bool, known_funcs: Optional[Set[str]] = None
 ) -> Tuple[Dict[str, str], bool]:
@@ -336,6 +423,10 @@ def _classify_one_file_diff(
     func_decl_names = {m.group(1) for m in _FUNC_DECL_LINE.finditer(diff_text)}
     func_proto_names = {m.group(1) for m in _FUNC_PROTO_LINE.finditer(diff_text)}
     var_changed = bool(_VAR_DECL_LINE.search(diff_text))
+    # 연속행(context-anchored) 시그니처 변경 — OLD/NEW 투영에서 복원한 선언이 실제로 다른 함수.
+    # 첫 줄이 context(무변경)라 아래 +/- 앵커 기반 분류가 놓치는 case(deep-review 발견1)를 승격용으로
+    # 미리 계산한다(before==after·churn은 방출 안 해 무영향 — 안전측).
+    _ctx_sig_changes = _sig_changes_from_projections(diff_text)
 
     # 동일 선언이 -/+ 양쪽(프로토타입 재정렬·이동, 신규 함수 삽입으로 선언 블록 밀림 등)에 나타나면
     # 함수명은 added_decl·removed_decl에 다 잡히지만 실제 시그니처 변화는 없다. 선언 원문을 비교해
@@ -430,6 +521,14 @@ def _classify_one_file_diff(
         if is_header:
             _evidenced |= {_p.lower() for _p in func_proto_names}
         result = {_f: _k for _f, _k in result.items() if _f.lower() in _evidenced}
+    # 연속행 시그니처 변경 승격 (deep-review 발견1) — **필터 후** 적용해 누락 방지. 멀티라인 선언의
+    # 첫 줄이 context(무변경)이고 파라미터 연속행만 -/+로 바뀌면 위 분기가 func_decl_names 공백으로
+    # VARIABLE/BODY로 under-report(SDS FLAG 누락)한다. OLD/NEW 투영 복원 선언이 실제로 다르면
+    # SIGNATURE로 승격(안전측 upgrade — NEW/DELETE/HEADER는 보존, 미탐 함수면 추가). before/after는
+    # extract_signature_changes가 동일 투영으로 채운다. _ctx_sig_changes는 old!=new만 담아 churn 무영향.
+    for _cfn in _ctx_sig_changes:
+        if result.get(_cfn) in (None, "BODY", "VARIABLE"):
+            result[_cfn] = "SIGNATURE"
     return result, narrowable
 
 
@@ -761,6 +860,13 @@ def extract_signature_changes(diff_text: str) -> Dict[str, Dict[str, str]]:
             _prev = out.get(func)
             if _prev is None or _signature_change_rank(rec) > _signature_change_rank(_prev):
                 out[func] = rec
+        # 연속행(context-anchored) 변경 병합 (발견1) — 선언 첫 줄이 context(무변경)이고 파라미터
+        # 연속행만 -/+로 바뀌면 위 +/- 앵커 집합-차가 못 잡는다. OLD/NEW 투영에서 복원한 실변경
+        # (before!=after, rank 2)을 채워 '원문 미확보'를 없애고 분류 승격(SIGNATURE)과 정합시킨다.
+        for _pf, _pr in _sig_changes_from_projections(block).items():
+            _pprev = out.get(_pf)
+            if _pprev is None or _signature_change_rank(_pr) > _signature_change_rank(_pprev):
+                out[_pf] = _pr
     return out
 
 

@@ -360,6 +360,93 @@ def test_extract_signature_changes_cross_file_not_masked():
     assert sig["s_foo"]["before"] != sig["s_foo"]["after"], sig
 
 
+def test_classify_continuation_line_signature_not_underreported():
+    """멀티라인 함수의 첫 줄(함수명)이 context(무변경)이고 **파라미터 연속행만** -/+로 바뀌면, 변경
+    라인에 `funcname(` 토큰이 없어 과거엔 func_decl_names 공백으로 SIGNATURE→VARIABLE/BODY로
+    under-report됐다(deep-review 발견1 — ACTION_MATRIX상 SDS 자동 FLAG 누락, ISO 26262 최악 방향).
+    OLD/NEW 투영 복원으로 SIGNATURE 정확 판정 + before/after 표시."""
+    from workflow.delta_update import (
+        classify_changed_functions_from_diff_text,
+        extract_signature_changes,
+    )
+    # (1) 끝에 파라미터 추가 (첫 줄 = context)
+    add = "\n".join([
+        "Index: APP/sha.c",
+        "--- APP/sha.c\t(revision 1018)",
+        "+++ APP/sha.c\t(revision 1053)",
+        "@@ -40,7 +40,8 @@ static U32 s_expand( U32 a,",
+        " static U32 s_expand( U32 a,",
+        "                      U32 b,",
+        "-                     U32 c )",
+        "+                     U32 c,",
+        "+                     U32 d )",
+        " {",
+        "     return a;",
+    ])
+    types, _ = classify_changed_functions_from_diff_text(add)
+    assert types.get("s_expand") == "SIGNATURE", types  # VARIABLE/BODY under-report 아님
+    sig = extract_signature_changes(add)
+    assert sig.get("s_expand", {}).get("before") == "static U32 s_expand( U32 a, U32 b, U32 c )", sig
+    assert sig.get("s_expand", {}).get("after") == "static U32 s_expand( U32 a, U32 b, U32 c, U32 d )", sig
+    assert sig["s_expand"]["before"] != sig["s_expand"]["after"]
+
+    # (2) 중간 파라미터 타입 변경(연속행) — U32 b → U16 b
+    typ = "\n".join([
+        "Index: a.c",
+        "--- a.c\t(r1)",
+        "+++ a.c\t(r2)",
+        "@@ -1,5 +1,5 @@ void k( int a,",
+        " void k( int a,",
+        "-        U32 b,",
+        "+        U16 b,",
+        "         int c )",
+        " {",
+    ])
+    types2, _ = classify_changed_functions_from_diff_text(typ)
+    assert types2.get("k") == "SIGNATURE", types2
+
+    # (3) -/+ 라인단위 교차(interleaved) — 투영은 순서무관 수집이라 복원됨(deep-review 발견2a 부수해결).
+    inter = "\n".join([
+        "Index: a.c",
+        "--- a.c\t(r1)",
+        "+++ a.c\t(r2)",
+        "@@ -1,4 +1,5 @@",
+        "-static U32 f( U32 a,",
+        "+static U32 f( U32 a,",
+        "-              U32 b )",
+        "+              U32 b,",
+        "+              U32 c )",
+        " {",
+    ])
+    types3, _ = classify_changed_functions_from_diff_text(inter)
+    sig3 = extract_signature_changes(inter)
+    assert types3.get("f") == "SIGNATURE", types3
+    assert sig3.get("f", {}).get("before") == "static U32 f( U32 a, U32 b )", sig3
+    assert sig3.get("f", {}).get("after") == "static U32 f( U32 a, U32 b, U32 c )", sig3
+
+
+def test_projection_identical_multiline_no_false_signature():
+    """리포맷 churn(첫 줄 포함 전체 -/+ 동일)은 OLD/NEW 투영이 동일 → 승격 안 함(BODY 유지).
+    발견1 승격이 c88f820의 무변화-멀티라인 판정을 되살리지(false SIGNATURE) 않음을 고정한다."""
+    from workflow.delta_update import (
+        _sig_changes_from_projections,
+        classify_changed_functions_from_diff_text,
+    )
+    churn = "\n".join([
+        "Index: a.c",
+        "--- a.c\t(r1)",
+        "+++ a.c\t(r2)",
+        "@@ -1,4 +1,4 @@",
+        "-static U32 s_x( U32 a,",
+        "-                U32 b );",
+        "+static U32 s_x( U32 a,",
+        "+                U32 b );",
+    ])
+    assert _sig_changes_from_projections(churn) == {}   # old==new → 방출 안 함(over-report 없음)
+    types, _ = classify_changed_functions_from_diff_text(churn)
+    assert types.get("s_x") == "BODY", types
+
+
 def test_classify_from_diff_text_forward_decl_plus_real_change_not_masked():
     """C1: 같은 파일에 forward-decl(재정렬·무변화)과 definition(진짜 파라미터 추가)이 공존해도
     진짜 시그니처 변경이 은폐되지 않고 SIGNATURE로 유지된다(함수별 '모든' -/+ 선언 집합 비교).
