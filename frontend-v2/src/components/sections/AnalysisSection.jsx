@@ -7,21 +7,26 @@ import { useAdminMode } from '../../contexts/AdminContext.jsx';
 import PathPickerDialog from '../PathPickerDialog.jsx';
 
 // VectorCAST 커버리지 셀({covered,total,rate}) → 통계 카드. rate는 0..1.
+// 카드 값은 정수%(가독), 상세 라인엔 소수 둘째자리·분자/분모·미커버(total-covered)를 함께 표기
+// (정수 반올림만으론 미커버 규모가 드러나지 않음 — 정직 표시).
 function covCard(label, cell) {
   if (!cell || !cell.total) return null;
-  const pct = Math.round((typeof cell.rate === 'number' ? cell.rate : cell.covered / cell.total) * 100);
+  const ratio = typeof cell.rate === 'number' ? cell.rate : cell.covered / cell.total;
+  const pct = Math.round(ratio * 100);
+  const uncov = (cell.total ?? 0) - (cell.covered ?? 0);
   const color = pct >= 80 ? 'var(--color-success)' : 'var(--color-warning)';
   return (
     <div className="stat-card" style={{ borderLeft: `3px solid ${color}` }}>
       <div className="stat-value" style={{ color }}>{pct}%</div>
       <div className="stat-label">{label}</div>
-      <div className="text-muted" style={{ fontSize: 9 }}>{cell.covered?.toLocaleString()}/{cell.total?.toLocaleString()}</div>
+      <div className="text-muted" style={{ fontSize: 9 }}>{cell.covered?.toLocaleString()}/{cell.total?.toLocaleString()} ({(ratio * 100).toFixed(2)}%)</div>
+      <div className="text-muted" style={{ fontSize: 9 }}>미커버 {uncov.toLocaleString()}</div>
     </div>
   );
 }
 
 // 데이터 출처 배지 — 🔵 Jenkins 빌드 산출물 / 🟢 SCM 직접로드(cloudium). 같은 vcast_summary 형태지만
-// 출처에 따라 가용 필드가 다름(Jenkins=함수콜 포함, SCM 폴백=구문/분기/MC-DC만)을 사용자에게 알린다.
+// 출처에 따라 가용 필드가 다름(Jenkins=함수콜 포함, SCM 폴백=구문/분기/MC/DC만)을 사용자에게 알린다.
 function SourceBadge({ source }) {
   if (!source) return null;
   const jk = source === 'jenkins';
@@ -816,7 +821,7 @@ export default function AnalysisSection({ job, analysisResult }) {
   const utFailures = _allFailures.filter(f => String(f.source || '').toUpperCase() !== 'IT');
   const itFailures = _allFailures.filter(f => String(f.source || '').toUpperCase() === 'IT');
   const utCov = vc.ut || {};
-  // SCM 경로 VectorCAST 커버리지(구문/분기/MC-DC) — UT/IT를 각 패널에 분리 귀속(합산 표시 안 함).
+  // SCM 경로 VectorCAST 커버리지(구문/분기/MC/DC) — UT/IT를 각 패널에 분리 귀속(합산 표시 안 함).
   // 단일 폴더는 coverage 하나가 그 폴더의 한 종류라 vcast_kind로 UT/IT를 안다. 다중 폴더 병합은
   // coverage_ut/coverage_it가 이미 분리돼 있다(backend jenkins.py _merge_vectorcast_payloads).
   const _scmData = scmVcast?.data || null;
@@ -1224,8 +1229,8 @@ export default function AnalysisSection({ job, analysisResult }) {
         </div>
         <div className="text-sm text-muted" style={{ padding: '0 0 8px', lineHeight: 1.55 }}>
           VectorCAST 단위시험(UT) 결과입니다. <b>테스트 케이스</b>=UT 시험 수, <b>UT 리포트</b>=리포트 폴더 수,{' '}
-          <b>통과·실패·통과율</b>=단위시험(UT) 합부, <b>Line/Branch Rate</b>=단위시험 라인·분기 커버리지.{' '}
-          ‘함수레벨 상세 불러오기’를 누르면 구문/분기/MC-DC 함수 entries가 채워집니다(ASIL C/D는 통과율 100% 권장).
+          <b>통과·실패·통과율</b>=단위시험(UT) 합부, <b>Statement/Branch Coverage</b>=단위시험 구문·분기 커버리지.{' '}
+          ‘함수레벨 상세 불러오기’를 누르면 구문/분기/MC/DC 함수 entries가 채워집니다. 시험 합격·커버리지 목표는 프로젝트 Safety Plan과 시험 완료 기준을 따릅니다.
         </div>
         {!buildHasVcast && !scmVcast && (
           <div className="text-sm text-muted" style={{ marginBottom: 6 }}>
@@ -1240,7 +1245,7 @@ export default function AnalysisSection({ job, analysisResult }) {
           )}
           <div className="stat-card"><div className="stat-value">{(effVcast.ut_reports || []).length}</div><div className="stat-label">UT 리포트</div></div>
           {tester?.vectorcast_ut_line_rate != null && (
-            <div className="stat-card"><div className="stat-value" style={{ color: tester.vectorcast_ut_line_rate >= 95 ? 'var(--color-success)' : 'var(--color-warning)' }}>{tester.vectorcast_ut_line_rate.toFixed(1)}%</div><div className="stat-label">UT Line Rate</div></div>
+            <div className="stat-card"><div className="stat-value" style={{ color: tester.vectorcast_ut_line_rate >= 95 ? 'var(--color-success)' : 'var(--color-warning)' }}>{tester.vectorcast_ut_line_rate.toFixed(1)}%</div><div className="stat-label">UT Statement Rate</div></div>
           )}
           {tester?.vectorcast_ut_branch_rate != null && (
             <div className="stat-card"><div className="stat-value" style={{ color: tester.vectorcast_ut_branch_rate >= 95 ? 'var(--color-success)' : 'var(--color-warning)' }}>{tester.vectorcast_ut_branch_rate.toFixed(1)}%</div><div className="stat-label">UT Branch Rate</div></div>
@@ -1265,6 +1270,7 @@ export default function AnalysisSection({ job, analysisResult }) {
         )}
         {utSummary && (utSummary.total || 0) > 0 && (
           ((utSummary.passed ?? 0) + (utSummary.failed ?? 0) > 0) ? (
+            <>
             <div className="stats-row" style={{ marginTop: 8 }}>
               <div className="stat-card" style={{ borderLeft: '3px solid var(--color-success)' }}>
                 <div className="stat-value" style={{ color: 'var(--color-success)' }}>{(utSummary.passed ?? 0).toLocaleString()}</div>
@@ -1277,13 +1283,22 @@ export default function AnalysisSection({ job, analysisResult }) {
               {(utSummary.skipped ?? 0) > 0 && (
                 <div className="stat-card"><div className="stat-value">{utSummary.skipped.toLocaleString()}</div><div className="stat-label">스킵</div></div>
               )}
+              {(utSummary.unknown ?? 0) > 0 && (
+                <div className="stat-card" title="통과·실패·스킵 어디에도 분류되지 않은 케이스(원본 결과 문자열 미인식) — 0으로 임의 처리하지 않고 표면화">
+                  <div className="stat-value">{utSummary.unknown.toLocaleString()}</div><div className="stat-label">미분류</div>
+                </div>
+              )}
               {utSummary.pass_rate != null && (
-                <div className="stat-card" style={{ borderLeft: `3px solid ${utSummary.pass_rate >= 0.95 ? 'var(--color-success)' : 'var(--color-warning)'}` }}>
+                <div className="stat-card" title="통과율 = 통과 / 전체(스킵·미분류 포함)" style={{ borderLeft: `3px solid ${utSummary.pass_rate >= 0.95 ? 'var(--color-success)' : 'var(--color-warning)'}` }}>
                   <div className="stat-value" style={{ color: utSummary.pass_rate >= 0.95 ? 'var(--color-success)' : 'var(--color-warning)' }}>{Math.round(utSummary.pass_rate * 100)}%</div>
                   <div className="stat-label">통과율 ({utLabelSuffix})</div>
                 </div>
               )}
             </div>
+            <div className="text-muted" style={{ fontSize: 9, marginTop: 2, lineHeight: 1.5 }}>
+              통과율=통과/전체(스킵·미분류 포함). 미실행·실행오류·제외는 현재 VectorCAST 리포트에서 개별 구분되지 않아 스킵/미분류로 집계됩니다.
+            </div>
+            </>
           ) : (
             // 결과 전부 미분류(result=None) — 빌드 산출물 VectorCAST가 '커버리지 기준'이라 per-testcase 합부가 없음.
             // '통과 0/실패 0/통과율 0%'는 오해 소지 → 미분류임을 명시(빌드 자체는 성공).
@@ -1321,12 +1336,12 @@ export default function AnalysisSection({ job, analysisResult }) {
           <div style={{ marginTop: 12, paddingTop: 10, borderTop: '1px solid var(--border)' }}>
             <div className="text-sm" style={{ fontWeight: 600, marginBottom: 4 }}>📊 모듈별 커버리지 (UT)</div>
             <div className="text-sm text-muted" style={{ marginBottom: 8, lineHeight: 1.5 }}>
-              <b>구문</b>=실행 문장, <b>분기</b>=if·switch 경로, <b>MC/DC</b>=조건 조합(ASIL C/D 필수).{' '}
+              <b>구문</b>=실행 문장, <b>분기</b>=if·switch 등 제어 경로, <b>MC/DC</b>=복합 결정문의 각 개별 조건이 결정 결과에 독립적으로 영향을 주는지 확인하는 커버리지(적용 목표는 대상 ASIL·Safety Plan 기준).{' '}
               모듈 표의 <b>행을 클릭</b>하면 단위시험(UT) 함수별 커버리지로 펼쳐집니다.
             </div>
             <details style={{ marginTop: 8 }} open>
               <summary style={{ cursor: 'pointer', fontSize: 12, fontWeight: 600 }}>
-                모듈별 커버리지 ({coverageModulesUt.length}개){fnLevelLoaded ? ' — 행 클릭 시 함수별 펼침' : ' (함수 드릴다운은 함수레벨 상세 로드 후)'}
+                모듈별 커버리지 ({coverageModulesUt.length}개, 파일/유닛 단위){fnLevelLoaded ? ' — 행 클릭 시 함수별 펼침' : ' (함수 드릴다운은 함수레벨 상세 로드 후)'}
               </summary>
               <div style={{ maxHeight: 360, overflowY: 'auto', marginTop: 6 }}>
                 <table className="impact-table" style={{ fontSize: 10 }}>
@@ -1390,15 +1405,16 @@ export default function AnalysisSection({ job, analysisResult }) {
           {vcastSource && <SourceBadge source={vcastSource} />}
         </div>
         <div className="text-sm text-muted" style={{ padding: '0 0 8px', lineHeight: 1.55 }}>
-          VectorCAST 통합시험(IT) 결과입니다. IT는 <b>함수 호출(Function Call) 커버리지</b> 중심이라 구문/분기는 약하거나 없습니다.{' '}
-          <b>IT 리포트</b>=리포트 폴더 수, <b>함수콜</b>=호출 커버리지, <b>함수 진입</b>=함수 진입 커버리지, <b>통과·실패·통과율</b>=통합시험(IT) 합부.{' '}
+          VectorCAST 통합시험(IT) 결과입니다. 통합시험의 주요 구조 커버리지는 <b>Function Coverage</b>와 <b>Call Coverage</b>이며,{' '}
+          IT 실행 과정에서 확보된 Statement·Branch·MC/DC는 실행 코드 커버리지 보조 지표로 제공합니다.{' '}
+          <b>IT 리포트</b>=리포트 폴더 수, <b>함수콜(Call)</b>=호출 커버리지, <b>함수 커버리지(Function)</b>=함수 진입 커버리지, <b>통과·실패·통과율</b>=통합시험(IT) 합부.{' '}
           함수콜 데이터는 <b>Jenkins 빌드 산출물</b> 또는 <b>SCM VectorCAST 로그</b>(폴더에 Metric report HTML이 있을 때)에서 제공됩니다.{' '}
-          <span style={{ color: 'var(--color-warning)' }}>※ 이 값은 <b>폴더 전체 함수 기준</b>입니다 — 시험 대상 함수만 집계하는 SwITCV/SITR 산출물과는 모집단(분모)이 달라 수치가 일치하지 않을 수 있습니다. 복수 SCM 폴더(APP+BOOT 등)를 합산할 때는 두 폴더에 공통으로 존재하는 공유 함수가 이중 계상될 수 있어 실제보다 높게 표시될 수 있습니다.</span>
+          <span style={{ color: 'var(--color-warning)' }}>※ <b>Function Coverage</b>의 분모는 분석 대상 함수 수, <b>Call Coverage</b>의 분모는 VectorCAST Metric Report에서 식별된 호출 지점(Function Calls) 수입니다. 시험 대상 함수만 집계하는 SwITCV/SITR 산출물과는 모집단(분모)이 달라 수치가 일치하지 않을 수 있습니다. 복수 SCM 폴더(APP+BOOT 등)를 합산하면 공유 함수/호출 관계가 중복 계상되어 커버리지 비율이 왜곡될 수 있으니, 공식 판정에는 소스 경로·함수 식별자·호출 관계 기준으로 중복 제거한 결과를 사용해야 합니다.</span>
         </div>
         <div className="stats-row">
           <div className="stat-card"><div className="stat-value">{(effVcast.it_reports || []).length}</div><div className="stat-label">IT 리포트</div></div>
           {tester?.vectorcast_it_line_rate != null && (
-            <div className="stat-card"><div className="stat-value" style={{ color: tester.vectorcast_it_line_rate >= 95 ? 'var(--color-success)' : 'var(--color-warning)' }}>{tester.vectorcast_it_line_rate.toFixed(1)}%</div><div className="stat-label">IT Line Rate</div></div>
+            <div className="stat-card"><div className="stat-value" style={{ color: tester.vectorcast_it_line_rate >= 95 ? 'var(--color-success)' : 'var(--color-warning)' }}>{tester.vectorcast_it_line_rate.toFixed(1)}%</div><div className="stat-label">IT Statement Rate</div></div>
           )}
           {tester?.vectorcast_it_branch_rate != null && (
             <div className="stat-card"><div className="stat-value" style={{ color: tester.vectorcast_it_branch_rate >= 95 ? 'var(--color-success)' : 'var(--color-warning)' }}>{tester.vectorcast_it_branch_rate.toFixed(1)}%</div><div className="stat-label">IT Branch Rate</div></div>
@@ -1406,19 +1422,22 @@ export default function AnalysisSection({ job, analysisResult }) {
           {itGrand.function_calls?.total ? (
             <div className="stat-card" style={{ borderLeft: `3px solid ${pctOf(itGrand.function_calls) >= 80 ? 'var(--color-success)' : 'var(--color-warning)'}` }}>
               <div className="stat-value" style={{ color: pctOf(itGrand.function_calls) >= 80 ? 'var(--color-success)' : 'var(--color-warning)' }}>{pctOf(itGrand.function_calls)}%</div>
-              <div className="stat-label">함수콜 커버리지</div>
-              <div className="text-muted" style={{ fontSize: 9 }}>{itGrand.function_calls.covered?.toLocaleString()}/{itGrand.function_calls.total?.toLocaleString()}</div>
+              <div className="stat-label">함수콜 커버리지 (Call Coverage)</div>
+              <div className="text-muted" style={{ fontSize: 9 }}>{itGrand.function_calls.covered?.toLocaleString()}/{itGrand.function_calls.total?.toLocaleString()} ({((itGrand.function_calls.rate ?? itGrand.function_calls.covered / itGrand.function_calls.total) * 100).toFixed(2)}%)</div>
+              <div className="text-muted" style={{ fontSize: 9 }}>미커버 호출 {((itGrand.function_calls.total ?? 0) - (itGrand.function_calls.covered ?? 0)).toLocaleString()}</div>
             </div>
           ) : null}
           {itGrand.functions?.total ? (
             <div className="stat-card">
               <div className="stat-value">{pctOf(itGrand.functions)}%</div>
-              <div className="stat-label">함수 진입</div>
-              <div className="text-muted" style={{ fontSize: 9 }}>{itGrand.functions.covered?.toLocaleString()}/{itGrand.functions.total?.toLocaleString()}</div>
+              <div className="stat-label">함수 커버리지 (Function Coverage)</div>
+              <div className="text-muted" style={{ fontSize: 9 }}>{itGrand.functions.covered?.toLocaleString()}/{itGrand.functions.total?.toLocaleString()} ({((itGrand.functions.rate ?? itGrand.functions.covered / itGrand.functions.total) * 100).toFixed(2)}%)</div>
+              <div className="text-muted" style={{ fontSize: 9 }}>미커버 함수 {((itGrand.functions.total ?? 0) - (itGrand.functions.covered ?? 0)).toLocaleString()}</div>
             </div>
           ) : null}
         </div>
         {sumIt && (sumIt.total || 0) > 0 && ((sumIt.passed ?? 0) + (sumIt.failed ?? 0) > 0) && (
+          <>
           <div className="stats-row" style={{ marginTop: 8 }}>
             {itTcCount != null && (
               <div className="stat-card"><div className="stat-value">{itTcCount.toLocaleString()}</div><div className="stat-label">테스트 케이스 (IT)</div></div>
@@ -1434,13 +1453,22 @@ export default function AnalysisSection({ job, analysisResult }) {
             {(sumIt.skipped ?? 0) > 0 && (
               <div className="stat-card"><div className="stat-value">{sumIt.skipped.toLocaleString()}</div><div className="stat-label">스킵</div></div>
             )}
+            {(sumIt.unknown ?? 0) > 0 && (
+              <div className="stat-card" title="통과·실패·스킵 어디에도 분류되지 않은 케이스(원본 결과 문자열 미인식) — 0으로 임의 처리하지 않고 표면화">
+                <div className="stat-value">{sumIt.unknown.toLocaleString()}</div><div className="stat-label">미분류</div>
+              </div>
+            )}
             {sumIt.pass_rate != null && (
-              <div className="stat-card" style={{ borderLeft: `3px solid ${sumIt.pass_rate >= 0.95 ? 'var(--color-success)' : 'var(--color-warning)'}` }}>
+              <div className="stat-card" title="통과율 = 통과 / 전체(스킵·미분류 포함)" style={{ borderLeft: `3px solid ${sumIt.pass_rate >= 0.95 ? 'var(--color-success)' : 'var(--color-warning)'}` }}>
                 <div className="stat-value" style={{ color: sumIt.pass_rate >= 0.95 ? 'var(--color-success)' : 'var(--color-warning)' }}>{Math.round(sumIt.pass_rate * 100)}%</div>
                 <div className="stat-label">통과율 (IT)</div>
               </div>
             )}
           </div>
+          <div className="text-muted" style={{ fontSize: 9, marginTop: 2, lineHeight: 1.5 }}>
+            통과율=통과/전체(스킵·미분류 포함). 미실행·실행오류·제외는 현재 VectorCAST 리포트에서 개별 구분되지 않아 스킵/미분류로 집계됩니다.
+          </div>
+          </>
         )}
         {/* IT 결과 전부 미분류(coverage-only) — '통과 0/실패 0'을 실패로 오인 방지(UT 패널 안내와 대칭) */}
         {sumIt && (sumIt.total || 0) > 0 && ((sumIt.passed ?? 0) + (sumIt.failed ?? 0) === 0) && (
@@ -1483,11 +1511,12 @@ export default function AnalysisSection({ job, analysisResult }) {
           <div style={{ marginTop: 12, paddingTop: 10, borderTop: '1px solid var(--border)' }}>
             <div className="text-sm" style={{ fontWeight: 600, marginBottom: 4 }}>📊 모듈별 커버리지 (IT)</div>
             <div className="text-sm text-muted" style={{ marginBottom: 8, lineHeight: 1.5 }}>
-              통합시험(IT)은 <b>함수 호출(Function Call)</b> 중심입니다. 모듈 표의 <b>행을 클릭</b>하면 IT 함수별 함수콜·커버리지로 펼쳐집니다.
+              통합시험(IT)은 <b>함수 호출(Function Call)</b> 중심입니다. 모듈 표의 <b>행을 클릭</b>하면 IT 함수별 함수콜·커버리지로 펼쳐집니다.{' '}
+              여기서 모듈은 <b>통합시험 대상 컴포넌트</b>(env/component) 단위라, 파일 단위로 집계되는 단위시험(UT)보다 개수가 적을 수 있습니다(누락 아님).
             </div>
             <details style={{ marginTop: 8 }} open>
               <summary style={{ cursor: 'pointer', fontSize: 12, fontWeight: 600 }}>
-                모듈별 커버리지 ({coverageModulesIt.length}개){fnLevelLoaded ? ' — 행 클릭 시 함수별 펼침' : ' (함수 드릴다운은 함수레벨 상세 로드 후)'}
+                모듈별 커버리지 ({coverageModulesIt.length}개, 통합 컴포넌트 단위){fnLevelLoaded ? ' — 행 클릭 시 함수별 펼침' : ' (함수 드릴다운은 함수레벨 상세 로드 후)'}
               </summary>
               <div style={{ maxHeight: 360, overflowY: 'auto', marginTop: 6 }}>
                 <table className="impact-table" style={{ fontSize: 10 }}>
