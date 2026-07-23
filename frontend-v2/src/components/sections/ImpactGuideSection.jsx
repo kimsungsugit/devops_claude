@@ -1205,8 +1205,16 @@ export default function ImpactGuideSection({ analysisResult, job }) {
     const byTc = key === 'sts' ? stsByTc : sitsByTc;
     return tcIds.some((t) => byTc[_normTcId(t)]);
   };
-  const renderAuthoringProposal = (d, key, cd, pdiff, diffElems, ct) => {
+  const renderAuthoringProposal = (d, key, cd, diffElems, ct) => {
+    // 간접 영향(직접 변경 아님)·삭제 함수는 '작성' 대상이 아니다 — 계약 유지 확인/항목 제거 안내는
+    // 편집 액션 패널(buildDocumentActions)이 담당한다. 경계값·신규 골격을 비변경/삭제 함수에 제안하면
+    // '직접 변경 아님·문서 수정 없음'·'항목 제거'와 모순된다(같은 카드에 상반된 지시).
+    if (!d.changed || ct === 'DELETE') return null;
     const fn = d.function;
+    // static/private 판별(헝가리안 접두어 s_=static·prv_=private) — 이들은 아키텍처 SDS·요구기반 STS에
+    // 설계상 없을 수 있다(정직 노트 대상). 공개 함수(g_·무접두어)의 SDS/요구 부재는 '정상'이 아니라 실
+    // 갭일 수 있으므로 '정상' 안심을 붙이지 않는다(은폐 방지 — 미상은 안전측으로 '확인 필요').
+    const looksPrivate = /^(?:prv_|s_)/i.test(fn);
     const c = docContentFor(fn, 'uds');
     // 파라미터 원천: 변경 후 시그니처(cd.after) 우선 → UDS prototype(현 선언) → cd.before. 경계값·골격 근거.
     const proto = (cd && cd.after) || (c && c.prototype) || (cd && cd.before) || '';
@@ -1325,7 +1333,7 @@ export default function ImpactGuideSection({ analysisResult, job }) {
     if (key === 'sts') {
       const reqs = d.requirements || [];
       if (!reqs.length) {
-        return <div className="text-muted" style={{ fontSize: 9, marginTop: 4 }}>· 요구 매핑 없음 — STS(요구 기반 시험) 작성 대상 아님(내부/static 헬퍼일 수 있음)</div>;
+        return <div className="text-muted" style={{ fontSize: 9, marginTop: 4 }}>· 요구 매핑 없음 — {looksPrivate ? 'STS(요구 기반 시험) 작성 대상 아님(내부/static 헬퍼)' : 'STS 요구 매핑 확인 필요(공개 함수는 SwRS 요구 연결 기대)'}</div>;
       }
       const has = _testSpecHasContent(fn, 'sts');
       return _box(has ? '✏ 요구 기반 TC 반영' : '🖊 STS 작성 제안 (요구 기반 TC 골격)', has ? 'warning' : 'info', (
@@ -1340,8 +1348,7 @@ export default function ImpactGuideSection({ analysisResult, job }) {
     // ── SDS (아키텍처 설계) ──
     if (key === 'sds') {
       const has = !!docContentFor(fn, 'sds');
-      const reqs = d.requirements || [];
-      const maybePrivate = !has && !reqs.length;  // SDS 없음 + 요구 없음 → static private/내부 헬퍼 가능성
+      const maybePrivate = !has && looksPrivate;  // static/private(s_·prv_)만 SDS 설계상 부재가 정상 — 공개 함수 누락은 실 갭(은폐 방지)
       const box = _box(has ? '✏ SDS 반영 (결정론)' : '🖊 SDS 작성 제안 (골격)', has ? 'warning' : 'info', (
         <>
           <div>{_lbl('Component Interface')}{_val(`${fn}${proto ? ` — ${proto}` : ''} 인터페이스 반영`)}</div>
@@ -3267,7 +3274,7 @@ export default function ImpactGuideSection({ analysisResult, job }) {
                           </div>
                         )}
                         {renderDocContent(d.function, card.key)}
-                        {renderAuthoringProposal(d, card.key, cd, pdiff, diffElems, ct)}
+                        {renderAuthoringProposal(d, card.key, cd, diffElems, ct)}
                         {card.note && <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 4 }}>{card.note}</div>}
                       </div>
                     );

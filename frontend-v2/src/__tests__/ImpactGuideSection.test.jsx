@@ -1513,6 +1513,81 @@ describe('ImpactGuideSection', () => {
     expect(within(dialog).getByText(/설계상 없을 수 있음\(정상\)/)).toBeInTheDocument();
   });
 
+  // STS-IMPACT-056: 간접(직접 변경 아님) 함수 모달엔 작성 골격·경계값을 제안하지 않는다 —
+  //  '직접 변경 아님·문서 수정 없음'(편집 액션)과 모순 방지. UDS content가 있어도(유혹) 비변경이면 제안 없음.
+  it('작성 제안: 간접(비변경) 함수엔 작성 골격·경계값을 제안하지 않는다', async () => {
+    const { post } = await import('../api.js');
+    post.mockResolvedValue({ ok: false });
+    const user = userEvent.setup();
+    const analysisResult = {
+      impactData: {
+        trigger: { changed_files: ['Ap.c'] },
+        changed_function_types: { s_changed: 'SIGNATURE' },
+        change_details: { s_changed: { before: 'void s_changed(void)', after: 'void s_changed(U16 idx)' } },
+        impact: { direct: ['s_changed'], indirect_1hop: ['g_indirect'], indirect_2hop: [] },
+        impact_paths: { g_indirect: { hop: 1, via: 's_changed', seed: 's_changed' } },
+        function_meta: { s_changed: { asil: 'A' }, g_indirect: { asil: 'B' } },
+        doc_content: { uds: { g_indirect: { prototype: 'void g_indirect(U16 n)' } } },
+      },
+    };
+    render(<ImpactGuideSection analysisResult={analysisResult} />);
+    await user.click(screen.getByText(/상세 가이드 생성/));
+    const rows = await screen.findAllByRole('button', { name: '상세' });
+    await user.click(rows[rows.length - 1]);  // g_indirect(간접)
+    const dialog = await screen.findByRole('dialog');
+    await waitFor(() => expect(within(dialog).getAllByText(/계약|직접 변경 아님/).length).toBeGreaterThanOrEqual(1));
+    expect(within(dialog).queryByText(/작성 제안/)).toBeNull();      // 작성 골격 없음
+    expect(within(dialog).queryByText('MAX=65535')).toBeNull();       // 경계값 골격 없음
+  });
+
+  // STS-IMPACT-057: DELETE(삭제) 함수엔 경계값 작성 골격을 제안하지 않는다 — 삭제는 '작성'이 아니라
+  //  '제거'(편집 액션 패널 담당). 삭제된 함수에 '이 경계값 TC를 작성' 제안은 오지시.
+  it('작성 제안: DELETE 함수엔 경계값 작성 골격을 제안하지 않는다(제거 대상)', async () => {
+    const { post } = await import('../api.js');
+    post.mockResolvedValue({ ok: false });
+    const user = userEvent.setup();
+    const analysisResult = {
+      impactData: {
+        trigger: { changed_files: ['Ap.c'] },
+        changed_function_types: { s_gone: 'DELETE' },
+        change_details: { s_gone: { before: 'void s_gone(U16 idx)' } },
+        impact: { direct: ['s_gone'] },
+        function_meta: { s_gone: { asil: 'A', evidence: 'line' } },
+      },
+    };
+    render(<ImpactGuideSection analysisResult={analysisResult} />);
+    await user.click(screen.getByText(/상세 가이드 생성/));
+    await user.click(await screen.findByRole('button', { name: '상세' }));
+    const dialog = await screen.findByRole('dialog');
+    await waitFor(() => expect(within(dialog).getByText(/해당 함수 항목 제거/)).toBeInTheDocument());  // 제거 안내(편집 액션)
+    expect(within(dialog).queryByText(/작성 제안/)).toBeNull();
+    expect(within(dialog).queryByText('MAX=65535')).toBeNull();
+  });
+
+  // STS-IMPACT-058: 공개 함수(g_)의 SDS/STS 부재는 '정상'이 아니라 실 갭일 수 있으므로 '정상' 안심을
+  //  붙이지 않는다(은폐 방지). static(s_/prv_)만 '설계상 대상 아님' 정직 노트.
+  it('작성 제안: 공개 함수(g_)의 SDS/STS 부재엔 "정상" 안심을 붙이지 않는다', async () => {
+    const { post } = await import('../api.js');
+    post.mockResolvedValue({ ok: false });
+    const user = userEvent.setup();
+    const analysisResult = {
+      impactData: {
+        trigger: { changed_files: ['Ap.c'] },
+        changed_function_types: { g_public: 'BODY' },
+        change_details: { g_public: { before: 'void g_public(void)' } },
+        impact: { direct: ['g_public'] },
+        function_meta: { g_public: { asil: 'B', evidence: 'line' } },
+      },
+    };
+    render(<ImpactGuideSection analysisResult={analysisResult} />);
+    await user.click(screen.getByText(/상세 가이드 생성/));
+    await user.click(await screen.findByRole('button', { name: '상세' }));
+    const dialog = await screen.findByRole('dialog');
+    // 공개 함수: STS는 '확인 필요'(갭 가능성), '설계상 대상 아님(정상)' 오안심 없어야
+    await waitFor(() => expect(within(dialog).getByText(/STS 요구 매핑 확인 필요/)).toBeInTheDocument());
+    expect(within(dialog).queryByText(/설계상 없을 수 있음\(정상\)/)).toBeNull();
+  });
+
   // STS-IMPACT-053c: fetchExplanation 페이로드에 doc_content(현재 문서 원문)가 실린다 — LLM '원문→제안' 근거.
   it('원문→제안: AI 문장 재작성 요청 시 doc_content(현재 UDS/SDS 원문)가 페이로드에 실린다', async () => {
     const { post } = await import('../api.js');
