@@ -684,11 +684,16 @@ def _load_suts_fn_tcs(
                     content_sink[name] = seqs_out
     if not result and flagged_fns:
         _warn("회귀 TC: 영향 함수와 SUTS 유닛명이 매칭되지 않아 재실행 TC 0(이름 규칙 확인)")
-    # reviewer Finding#5: 파서 경고(빈 TC 블록/유닛명 누락 등)를 유실하지 않고 개수를 표면화 —
-    # 일부 유닛이 조용히 누락돼 회귀 집합이 과소 산출될 수 있음을 알린다.
+    # reviewer Finding#5: 파서 경고를 유실하지 않고 표면화. 단 **유닛 누락(회귀집합 과소)** 경고는
+    # unit을 실제로 떨어뜨리는 코드(empty_test_case_block/missing_unit_name)만 센다 —
+    # empty_expected/verification_required_expected 는 시퀀스별 무해 경고(입력전용 스텝 등)라
+    # 이를 '유닛 누락'으로 합산하면 오경보다(전용 파서 컬럼탐지 수정 후 empty_expected가 다수라
+    # 994건 '누락 가능' 허위 경보가 났었다). 무해 경고는 별도 사유로만 남긴다.
     _export_warns = model.get("export_warnings") or []
-    if _export_warns:
-        _warn(f"회귀 TC: SUTS 파싱 경고 {len(_export_warns)}건(빈 TC 블록/유닛명 누락 등) — 일부 유닛 누락 가능")
+    _drop_codes = {"empty_test_case_block", "missing_unit_name"}
+    _unit_drops = sum(1 for w in _export_warns if isinstance(w, dict) and w.get("code") in _drop_codes)
+    if _unit_drops:
+        _warn(f"회귀 TC: SUTS 유닛 누락 경고 {_unit_drops}건(빈 TC 블록/유닛명 누락) — 재실행 집합 과소 가능")
     return result
 
 

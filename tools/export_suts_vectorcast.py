@@ -29,6 +29,100 @@ _OUTPUT_COL_END = 148
 _RELATED_COL = 149
 _REQ_PAT = re.compile(r"\b(?:Sw|Sy)[A-Za-z_]*_\d+\b")
 
+# 헤더 스캔 범위 — SUTS 템플릿이 2종(레이아웃 상이)이라 위 상수만으론 한쪽만 맞다.
+#   HDPDM01 v3.01 : 헤더 rows5-6, SeqNo=13 Input=14.. Expected=63.. Related=149  ← 위 상수와 일치
+#   KJPDS02_PV v1.02: 헤더 rows3-4, SeqNo=8  Inpt[0]=9.. ExpR[0]=105.. Related=189
+# 하드코딩 상수는 KJPDS02_PV에서 입력컬럼(col13=Inpt[4])을 SeqNo 게이트로 오용 → 입력 ≤4개 함수의
+# 전 시퀀스행이 '빈 블록'으로 드롭(1013중 704), 파싱된 것도 입력/기대값이 컬럼 밀림으로 오염됐다.
+_HEADER_SCAN_ROWS = 8
+_MAX_SCAN_COLS = 1024
+
+
+def _detect_columns(ws: Any) -> Dict[str, Any]:
+    """문서 헤더에서 실제 컬럼 위치를 탐지(레이아웃 적응형). 모듈 상수는 HDPDM01 기본값·폴백.
+
+    불변식(관측된 3개 레이아웃 모두 성립): SeqNo=입력시작-1, 입력끝=출력시작-1, 출력끝=Related-1.
+    전역 Input/Inpt[0]/Expected/Related 헤더가 없는 문서(구 단위테스트 픽스처)는 밴드를 탐지하지
+    못하므로 모듈 상수를 그대로 유지한다(무회귀). TC_ID(3)/Name(4)은 3개 레이아웃 공통이라 상수 유지.
+    ⚠ 'Input' 병합앵커가 KJPDS02_PV에선 SeqNo 컬럼(c8)에 걸리므로 Inpt[0]를 우선 신뢰한다."""
+    cols: Dict[str, Any] = {
+        "component": _COMPONENT_COL, "tc_id": _TC_ID_COL, "name": _NAME_COL,
+        "description": _DESCRIPTION_COL, "test_method": _TEST_METHOD_COL,
+        "gen_method": _GEN_METHOD_COL, "precondition": _PRECONDITION_COL,
+        "seq_text": _SEQUENCE_TEXT_COL, "tc_gen_method": _TC_GEN_METHOD_COL,
+        "seq_no": _SEQ_NO_COL, "input_start": _INPUT_COL_START, "input_end": _INPUT_COL_END,
+        "output_start": _OUTPUT_COL_START, "output_end": _OUTPUT_COL_END, "related": _RELATED_COL,
+    }
+    inpt0 = input_hdr = expected = related = None
+    found: Dict[str, int] = {}
+    gen_cols: List[int] = []
+    maxc = min(int(ws.max_column or 0), _MAX_SCAN_COLS)
+    for r in range(1, _HEADER_SCAN_ROWS + 1):
+        for c in range(1, maxc + 1):
+            raw = ws.cell(row=r, column=c).value
+            if raw is None:
+                continue
+            t = str(raw).strip().lower()
+            if not t:
+                continue
+            # ⚠ 개행/탭/연속공백을 단일 공백으로 접는다 — generators/suts.py 가 실제로 쓰는 헤더는
+            # "Test\nMethod"·"Gen.\nMethod"·"Test Case\nGen.Method" 처럼 **개행 삽입**이라(deep-review C1)
+            # strip/replace만으론 라벨이 안 맞아 header_driven 문서에서 test_method/gen_method 를
+            # 조용히 None(→"")으로 떨궜다(HDPDM01 생성본 재파싱 시 provenance 침묵 손실).
+            tn = " ".join(t.replace("_", " ").split())
+            if inpt0 is None and re.fullmatch(r"(?:inpt|input)\[0\]", tn):
+                inpt0 = c
+            if input_hdr is None and tn == "input":
+                input_hdr = c
+            # "expected result"로 좁힌다(W2 오탐 방지) — 스캔창(rows 1-8)이 데이터행과 겹쳐
+            # "Expected coverage…" 같은 산문이 bare "expected"에 걸려 output_start를 탈취하던 벡터 차단.
+            # 생성기/라이브 2템플릿 모두 헤더는 "Expected Result"(개행은 정규화가 접음).
+            if expected is None and tn.startswith("expected result"):
+                expected = c
+            if related is None and "related id" in tn:
+                related = c
+            if "description" not in found and tn == "description":
+                found["description"] = c
+            if "precondition" not in found and tn == "precondition":
+                found["precondition"] = c
+            if "seq_text" not in found and tn == "sequence":
+                found["seq_text"] = c
+            if "test_method" not in found and tn == "test method":
+                found["test_method"] = c
+            # "generation method"(정식) 과 "gen. method"(생성본 약어) 를 모두 포용. 'test method'는
+            # 'gen'을 포함하지 않으므로 오탐 없음.
+            if "gen" in tn and "method" in tn and c not in gen_cols:
+                gen_cols.append(c)
+    if gen_cols:
+        found["gen_method"] = gen_cols[0]
+    input_start = inpt0 or input_hdr
+    # 밴드 원자성(W1): input과 expected를 **함께** 탐지해야 밴드를 신뢰한다. input만 탐지하고 상수
+    # output/related와 섞으면 역전/혼합 밴드(예 [63..29] 공집합, 입력밴드가 expected 열 흡수)를 만들어
+    # expected 값이 input으로 오분류되는 침묵 손상이 난다 → 부분탐지는 전부 상수 폴백(구 파서 동작).
+    header_driven = input_start is not None and expected is not None
+    if input_start is not None and expected is not None:
+        cols["input_start"] = input_start
+        cols["seq_no"] = input_start - 1
+        cols["output_start"] = expected
+        cols["input_end"] = expected - 1
+        if related is not None:
+            cols["related"] = related
+            cols["output_end"] = related - 1
+    elif input_start is not None:
+        # 입력 헤더는 있는데 Expected 헤더가 없다 = 미지/변형 레이아웃. 침묵 손상 대신 사유를 남긴다(X8).
+        cols["_detect_warning"] = ("SUTS 헤더탐지: 입력 헤더는 찾았으나 'Expected Result' 미탐지 — "
+                                   "상수 레이아웃으로 폴백(밴드 오검출 방지). 컬럼 정합 수동 확인 필요")
+    # 필드 컬럼: 라벨을 찾으면 그 컬럼. 못 찾았는데 header_driven이면 그 템플릿에 컬럼이 없는 것
+    # (KJPDS02_PV는 Description/Precondition/Sequence-text 부재) → None 반환해 파서가 입력컬럼을
+    # 오독(쓰레기값)하는 대신 "" 를 쓰게 한다. header_driven이 아니면(픽스처/부분탐지) 상수 유지.
+    for key in ("description", "precondition", "seq_text", "test_method", "gen_method"):
+        if key in found:
+            cols[key] = found[key]
+        elif header_driven:
+            cols[key] = None
+    cols["tc_gen_method"] = gen_cols[1] if len(gen_cols) >= 2 else (None if header_driven else _TC_GEN_METHOD_COL)
+    return cols
+
 
 def _clean_text(value: Any) -> str:
     text = str(value or "").strip()
@@ -67,14 +161,15 @@ def _extract_related_ids(*texts: str) -> List[str]:
     return ids
 
 
-def _iter_tc_blocks(ws: Any) -> Iterable[Tuple[int, int]]:
+def _iter_tc_blocks(ws: Any, cols: Dict[str, Any]) -> Iterable[Tuple[int, int]]:
+    tc_col = cols["tc_id"] or _TC_ID_COL
     row = _DATA_START_ROW
     max_row = ws.max_row
     while row <= max_row:
-        if _clean_text(ws.cell(row=row, column=_TC_ID_COL).value):
+        if _clean_text(ws.cell(row=row, column=tc_col).value):
             start = row
             row += 1
-            while row <= max_row and not _clean_text(ws.cell(row=row, column=_TC_ID_COL).value):
+            while row <= max_row and not _clean_text(ws.cell(row=row, column=tc_col).value):
                 row += 1
             yield start, row - 1
         else:
@@ -96,17 +191,19 @@ def _parse_sequence_row(
     input_headers: List[Tuple[int, str]],
     output_headers: List[Tuple[int, str]],
     unit_meta: Dict[str, Any],
+    cols: Dict[str, Any],
 ) -> Tuple[Dict[str, Any], List[Dict[str, str]]]:
     warnings: List[Dict[str, str]] = []
-    seq_no = ws.cell(row=row, column=_SEQ_NO_COL).value
+    seq_no = ws.cell(row=row, column=cols["seq_no"] or _SEQ_NO_COL).value
     seq_no_text = _clean_text(seq_no)
     sequence_no = int(seq_no) if isinstance(seq_no, int) else seq_no_text
     base_tc_id = str(unit_meta["base_tc_id"])
+    _seq_text_col = cols.get("seq_text")
     sequence = {
         "name": f"{base_tc_id}__SEQ_{int(sequence_no):02d}" if str(sequence_no).isdigit() else f"{base_tc_id}__SEQ_{seq_no_text or row}",
         "base_tc_id": base_tc_id,
         "sequence_no": sequence_no,
-        "description": _clean_text(ws.cell(row=row, column=_SEQUENCE_TEXT_COL).value),
+        "description": _clean_text(ws.cell(row=row, column=_seq_text_col).value) if _seq_text_col else "",
         "precondition": unit_meta.get("precondition", ""),
         "inputs": {},
         "expected": {},
@@ -140,20 +237,31 @@ def _parse_sequence_row(
     return sequence, warnings
 
 
-def _parse_tc_block(ws: Any, start_row: int, end_row: int) -> Dict[str, Any]:
-    component = _clean_text(ws.cell(row=start_row, column=_COMPONENT_COL).value)
-    tc_id = _clean_text(ws.cell(row=start_row, column=_TC_ID_COL).value)
-    unit_name = _clean_text(ws.cell(row=start_row, column=_NAME_COL).value)
-    description = _clean_text(ws.cell(row=start_row, column=_DESCRIPTION_COL).value)
-    precondition = _clean_text(ws.cell(row=start_row, column=_PRECONDITION_COL).value)
-    test_method = _clean_text(ws.cell(row=start_row, column=_TEST_METHOD_COL).value)
-    gen_method = _clean_text(ws.cell(row=start_row, column=_GEN_METHOD_COL).value) or _clean_text(
-        ws.cell(row=start_row, column=_TC_GEN_METHOD_COL).value
-    )
-    related_token = _clean_text(ws.cell(row=start_row, column=_RELATED_COL).value)
-    related_ids = _extract_related_ids(description, precondition)
-    input_headers = _header_names(ws, start_row, _INPUT_COL_START, _INPUT_COL_END)
-    output_headers = _header_names(ws, start_row, _OUTPUT_COL_START, _OUTPUT_COL_END)
+def _parse_tc_block(ws: Any, start_row: int, end_row: int, cols: Dict[str, Any]) -> Dict[str, Any]:
+    def _cell(key: str, fallback: int) -> str:
+        col = cols.get(key)
+        col = col if col is not None else fallback
+        return _clean_text(ws.cell(row=start_row, column=col).value)
+
+    def _cell_opt(key: str) -> str:
+        # header_driven 템플릿에서 부재 컬럼은 None → "" (입력컬럼 오독 방지).
+        col = cols.get(key)
+        return _clean_text(ws.cell(row=start_row, column=col).value) if col is not None else ""
+
+    component = _cell("component", _COMPONENT_COL)
+    tc_id = _cell("tc_id", _TC_ID_COL)
+    unit_name = _cell("name", _NAME_COL)
+    description = _cell_opt("description")
+    precondition = _cell_opt("precondition")
+    test_method = _cell_opt("test_method")
+    gen_method = _cell_opt("gen_method") or _cell_opt("tc_gen_method")
+    related_token = _cell_opt("related")
+    # related_token(Related ID/SUDS 컬럼)도 채굴 대상에 포함(deep-review W4) — KJPDS02_PV는
+    # Description/Precondition 컬럼이 없어 산문만 쓰면 복구된 1013 유닛이 요구 추적 0이 된다.
+    # Related ID 컬럼은 존재하므로 여기서 요구/설계 ID를 뽑아 추적성을 살린다(정규식 게이트=무해).
+    related_ids = _extract_related_ids(description, precondition, related_token)
+    input_headers = _header_names(ws, start_row, cols["input_start"] or _INPUT_COL_START, cols["input_end"] or _INPUT_COL_END)
+    output_headers = _header_names(ws, start_row, cols["output_start"] or _OUTPUT_COL_START, cols["output_end"] or _OUTPUT_COL_END)
     unit = {
         "unit_name": unit_name,
         "prototype": "",
@@ -174,10 +282,11 @@ def _parse_tc_block(ws: Any, start_row: int, end_row: int) -> Dict[str, Any]:
         "gen_method": gen_method,
         "test_method": test_method,
     }
+    _seq_gate = cols["seq_no"] or _SEQ_NO_COL
     for row in range(start_row + 1, end_row + 1):
-        if ws.cell(row=row, column=_SEQ_NO_COL).value in (None, ""):
+        if ws.cell(row=row, column=_seq_gate).value in (None, ""):
             continue
-        test_case, warnings = _parse_sequence_row(ws, row, input_headers, output_headers, unit_meta)
+        test_case, warnings = _parse_sequence_row(ws, row, input_headers, output_headers, unit_meta, cols)
         test_case["metadata"] = {
             "related_ids": related_ids,
             "fid": related_token,
@@ -215,10 +324,14 @@ def build_vectorcast_model(
     if _TC_SHEET not in workbook.sheetnames:
         raise ValueError(f"missing worksheet: {_TC_SHEET}")
     ws = workbook[_TC_SHEET]
+    cols = _detect_columns(ws)
     units: List[Dict[str, Any]] = []
     export_warnings: List[Dict[str, str]] = []
-    for start_row, end_row in _iter_tc_blocks(ws):
-        unit = _parse_tc_block(ws, start_row, end_row)
+    _detect_warn = cols.pop("_detect_warning", None)
+    if _detect_warn:
+        export_warnings.append({"code": "header_detect_fallback", "message": str(_detect_warn)})
+    for start_row, end_row in _iter_tc_blocks(ws, cols):
+        unit = _parse_tc_block(ws, start_row, end_row, cols)
         if target_set and unit["unit_name"].strip().lower() not in target_set:
             continue
         if not unit["unit_name"]:

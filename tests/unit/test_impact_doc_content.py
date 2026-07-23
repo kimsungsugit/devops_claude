@@ -66,6 +66,41 @@ def test_load_suts_fn_tcs_without_sink_unchanged(monkeypatch):
     assert _load_suts_fn_tcs("U:/s.xlsm", ["s_bar"]) == {"s_bar": ["TC1"]}
 
 
+def test_load_suts_fn_tcs_warns_only_on_unit_drops(monkeypatch):
+    """유닛 누락 경고는 unit을 실제로 떨어뜨리는 코드(empty_test_case_block/missing_unit_name)만
+    센다. empty_expected(입력전용 시퀀스 등 무해)를 합산하면 오경보 — 전용 파서 컬럼탐지 수정으로
+    empty_expected가 다수(994)가 됐을 때 '유닛 누락 가능' 허위 경보가 났던 회귀를 가드."""
+    import backend.services.file_resolver as fr
+    import tools.export_suts_vectorcast as ev
+    from workflow.impact_orchestrator import _load_suts_fn_tcs
+
+    monkeypatch.setattr(fr, "get_resolver", lambda: _FakeResolver())
+
+    # (a) empty_expected만 다수 → 유닛 누락 경고 없음(오경보 방지)
+    monkeypatch.setattr(ev, "build_vectorcast_model", lambda *a, **k: {
+        "units": [{"unit_name": "s_foo", "test_cases": [{"base_tc_id": "TC1"}]}],
+        "export_warnings": [{"code": "empty_expected", "message": "x"}] * 994,
+    })
+    warns_a: list = []
+    _load_suts_fn_tcs("U:/s.xlsm", ["s_foo"], warn_sink=warns_a)
+    assert not any("유닛 누락" in w for w in warns_a)
+
+    # (b) 드롭 코드는 경고(개수는 무해 코드 제외 정확)
+    monkeypatch.setattr(ev, "build_vectorcast_model", lambda *a, **k: {
+        "units": [{"unit_name": "s_foo", "test_cases": [{"base_tc_id": "TC1"}]}],
+        "export_warnings": [
+            {"code": "empty_test_case_block", "message": "x"},
+            {"code": "missing_unit_name", "message": "y"},
+            {"code": "empty_expected", "message": "z"},  # 무해분 — 개수에서 제외돼야
+        ],
+    })
+    warns_b: list = []
+    _load_suts_fn_tcs("U:/s.xlsm", ["s_foo"], warn_sink=warns_b)
+    drop_warn = [w for w in warns_b if "유닛 누락" in w]
+    assert len(drop_warn) == 1
+    assert "2건" in drop_warn[0]  # empty_expected 제외, 드롭 2건만
+
+
 def test_load_uds_fn_details_widened(monkeypatch):
     """사이드카 payload의 globals/calls/prototype 필드가 surface에 포함(widen)됨을 확인."""
     from workflow import impact_orchestrator as m
