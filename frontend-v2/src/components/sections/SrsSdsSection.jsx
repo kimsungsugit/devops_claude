@@ -545,8 +545,11 @@ export default function SrsSdsSection({ job, analysisResult }) {
   //  2) 정확 키 miss + binding 일치(같은 프로젝트) → 마지막 매트릭스를 **stale로 명시** 복원
   //     (⚠ 배지 + '새로고침으로 재생성' 안내, stale=true). 시험문서/빌드가 드리프트해도 마지막
   //     결과가 보이되(사용자 요구), 최신이 아님을 숨기지 않는다.
+  //  3) 이미 clean(💾)으로 표시 중인데 정확 키가 miss로 바뀌면(레지스트리 수렴 후 입력 드리프트)
+  //     → clean→stale **강등**. 업그레이드(2→1)만 하고 강등을 안 하면 옛 clean 배지가 잔류해
+  //     stale-as-fresh가 된다(아래 exact-miss+matrix 분기).
   // ⚠ 과거 초판은 binding 일치를 clean 으로 복원해 stale 통과-실패를 current로 위장했다(deep-review
-  // Critical). 지금은 정확 키만 clean 이고 binding 복원은 반드시 stale 로 표시하므로 위장 불가.
+  // Critical). 지금은 정확 키만 clean 이고 binding 복원·드리프트는 반드시 stale 로 표시하므로 위장 불가.
   const _mountCacheKey = useMemo(() => buildCacheKey(linkedDocs), [buildCacheKey, linkedDocs]);
   const _mountBinding = useMemo(() => buildBinding(linkedDocs), [buildBinding, linkedDocs]);
   useEffect(() => {
@@ -570,7 +573,19 @@ export default function SrsSdsSection({ job, analysisResult }) {
       }
       return;
     }
-    if (matrix) return;   // 정확 miss인데 이미 표시 중이면 유지(불필요 재설정·fresh 훼손 방지)
+    if (matrix) {
+      // 정확 키 miss인데 매트릭스가 표시 중 = 입력이 저장 시점에서 드리프트했다(예: 관리에서
+      // 설계문서 경로가 갱신돼[L84 주석] 마운트 초기 스냅샷 키로 clean 복원됐다가, 레지스트리
+      // 수렴 후 정확 키가 어긋난 경우). clean(💾)으로 복원돼 있던 것이면 더는 current가 아니므로
+      // stale(⚠)로 **강등**해 stale-as-fresh 오배지를 막는다(effect가 stale→clean 업그레이드만
+      // 하고 clean→stale 강등을 안 하던 비대칭이 근본 — 과거 2× Critical과 같은 실패류). 표시 중인
+      // 매트릭스는 같은 프로젝트 것이고(프로젝트 전환은 remount라 matrix=null) 여전히 유효한
+      // '마지막 결과'이므로 교체 없이 배지만 강등한다. fresh(restoredMeta===null)·이미 stale은 유지.
+      if (restoredMeta && !restoredMeta.stale) {
+        setRestoredMeta({ savedAt: restoredMeta.savedAt, stale: true });
+      }
+      return;   // 표시 중이면 재설정 없이 유지(불필요 재설정·fresh 훼손 방지)
+    }
     const last = loadTraceMatrixByBinding(_mountBinding);  // 2) 같은 프로젝트 마지막 = stale
     if (last) {
       setMatrix(last.data);
@@ -587,6 +602,19 @@ export default function SrsSdsSection({ job, analysisResult }) {
   // 표시용이므로 '모순이 증명될 때만' 감춘다(impactGuard.impactConflict 주석 참조).
   const _impactConflict = impactConflict(analysisResult, job?.url, activeScm?.id);
   const impactData = _impactConflict.conflict ? null : analysisResult?.impactData;
+  // W1(Mechanism A) 완화: 복원된 매트릭스가 VectorCAST 실행 결과(vcast_input_rows>0)를 담고
+  // 있으면, 그 합부/커버리지는 저장 시점 빌드(build_selector='lastSuccessfulBuild' — 이동 포인터)
+  // 기준이다. cacheKey는 문서 '경로'만 담고 빌드번호를 못 담아, 같은 경로에 새 빌드가 올라와도
+  // exact 히트(💾 clean)가 난다 → 옛 빌드의 통과 결과가 최신처럼 보이는 stale-as-fresh(build 축).
+  // 근본 해결은 백엔드가 해석된 build_number를 응답에 실어 cacheKey에 포함하는 것(deep-review W1,
+  // 백엔드 결합·별도). 프론트 단독으로는 이 사실을 배지에 **가시적으로** 폭로한다(hover title만으론
+  // 부족 — 사용자가 💾/⚠ 배지를 안전 신호로 읽으므로). 불필요 경고 방지: vcast 없는 순수 문서
+  // 추적 매트릭스는 빌드 의존 데이터가 없어 폭로하지 않는다.
+  const _restoredBuildBasis = (() => {
+    if (!restoredMeta || !matrix) return false;
+    const s = matrix?.matrix?.summary || matrix?.summary || {};
+    return typeof s.vcast_input_rows === 'number' && s.vcast_input_rows > 0;
+  })();
   // 사유가 미지여도 반드시 문구가 나온다(mismatchText가 일반 문구로 폴백) — 감췄는데
   // 배너가 안 뜨는 침묵 은닉을 구조적으로 차단.
   const impactMismatchReason = mismatchText(_impactConflict.reason);
@@ -845,6 +873,12 @@ export default function SrsSdsSection({ job, analysisResult }) {
               ) : (
                 <span className="text-muted text-sm" title="같은 입력(문서 경로)으로 저장된 결과를 복원했습니다. VectorCAST 실행 결과는 저장 시점 빌드 기준이므로, 최신 빌드로 갱신하려면 새로고침을 누르세요.">
                   💾 저장된 결과 · {new Date(restoredMeta.savedAt).toLocaleString()}
+                  {/* W1(Mechanism A): 입력 경로는 일치(💾)하나 VectorCAST 합부/커버리지는 저장 시점
+                      빌드 기준 — 빌드번호가 cacheKey에 없어 새 빌드 회귀를 exact-hit가 못 거른다.
+                      hover title이 아닌 화면에 명시(가시 폭로)해 false-clean 을 정직화. */}
+                  {_restoredBuildBasis && (
+                    <span style={{ color: '#92400e', marginLeft: 4 }}>· 빌드 결과는 저장 시점 기준(새로고침으로 최신 확인)</span>
+                  )}
                 </span>
               )
             )}
