@@ -919,8 +919,11 @@ export default function ImpactGuideSection({ analysisResult, job }) {
     }
   }, [scmId, jobUrl, baseRef, history, openHistoryItem, adoptImpact, toast, loadHistory]);
 
-  // Job이 바뀌면 빌드 목록 캐시를 버린다(다른 프로젝트 빌드를 그대로 보여주면 오선택).
-  useEffect(() => { buildsReqRef.current = false; setBuilds([]); setBuildsError(''); setPickedBuild(''); }, [jobUrl]);
+  // Job 또는 SCM이 바뀌면 빌드 목록 캐시를 버린다(다른 프로젝트 빌드를 그대로 보여주면 오선택).
+  // ⚠ scmId 포함 필수: 초기 로드가 analysisResult(→scmId)보다 먼저면 scmId '' 로 빌드를 받아
+  // revision이 안 붙는데, 가드(buildsReqRef)가 true로 남아 ''→실값 전이 후에도 재조회가 안 돼
+  // '리비전' 컬럼이 영구 미표시로 고착된다(BuildInfoSection W5와 동일 계열).
+  useEffect(() => { buildsReqRef.current = false; setBuilds([]); setBuildsError(''); setPickedBuild(''); }, [jobUrl, scmId]);
   // 이력은 경량 투영이라 탭 진입 시 자동 조회(빌드 목록은 Jenkins 왕복이라 lazy).
   // deps를 [loadHistory]로 두면 toast 등 상위 훅이 매 렌더 새 참조를 주는 순간 무한 조회가 된다
   // → 트리거는 scmId 변화로 한정하고 최신 콜백은 ref로 읽는다.

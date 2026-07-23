@@ -1956,6 +1956,26 @@ describe('ImpactGuideSection — 빌드/리비전 소스 바 & 결과 영속', (
     expect(await screen.findByText(/#122 · r1053 · SUCCESS/)).toBeInTheDocument();
   });
 
+  it('SCM이 바뀌면 빌드 캐시를 버려 새 SCM 리비전으로 재조회한다 (I4: stale 리비전 고착 방지)', async () => {
+    // buildsReqRef 가드는 마운트당 1회 로드다. 리셋 effect가 jobUrl만 감시하면 scmId ''→실값
+    // (또는 SCM 전환) 시 가드가 안 풀려 빌드가 옛 scm_id(또는 revision 없음)로 고착된다.
+    post.mockImplementation((path) => (path === '/api/jenkins/builds'
+      ? Promise.resolve({ builds: [{ number: 122, result: 'SUCCESS', revision: '1053' }] })
+      : Promise.resolve({})));
+    const { rerender } = render(
+      <ImpactGuideSection job={mockJob} analysisResult={{ impactData: mkImpact({ scm: 'hdpdm01' }) }} />);
+    fireEvent.focus(screen.getByLabelText('빌드'));
+    await waitFor(() => expect(post).toHaveBeenCalledWith(
+      '/api/jenkins/builds', expect.objectContaining({ scm_id: 'hdpdm01' })));
+
+    post.mockClear();
+    rerender(<ImpactGuideSection job={mockJob} analysisResult={{ impactData: mkImpact({ scm: 'kjpds02_pv' }) }} />);
+    fireEvent.focus(screen.getByLabelText('빌드'));
+    // 가드가 풀려야 새 SCM으로 재조회된다(수정 전엔 재조회 없이 옛 SCM 빌드가 남음).
+    await waitFor(() => expect(post).toHaveBeenCalledWith(
+      '/api/jenkins/builds', expect.objectContaining({ scm_id: 'kjpds02_pv' })));
+  });
+
   it('이력 조회는 SCM id로 summary 모드를 호출한다', async () => {
     render(<ImpactGuideSection job={mockJob} analysisResult={{ impactData: mkImpact() }} />);
 
