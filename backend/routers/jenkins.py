@@ -5812,6 +5812,29 @@ def _scm_vcast_metrics_for_slug(scm_slug: str) -> Optional[Dict[str, Any]]:
     return None
 
 
+@router.post("/api/jenkins/scm-vcast-summary")
+def scm_vcast_summary(req: dict) -> Dict[str, Any]:
+    """단일 프로젝트 '빌드 & 아티팩트 요약' 카드용 — SCM 로드 이력의 VectorCAST 결과값(경량).
+
+    cloudium 재접근 없이 reports/impact_jobs의 최신 완료 잡만 읽는다(_scm_vcast_metrics_for_slug —
+    aggregate-stats와 동일 캐시/가용성 우선). 빌드 산출물 경로에 VectorCAST가 없거나(KJPDS02_PV:
+    test_rows 0) 전부 미분류(HDPDM01: 판정 컬럼 부재)일 때, 진짜 합부/커버리지/UT·IT를 카드에
+    폴백 공급한다. available=False면 프론트가 빌드 산출물 tester.vectorcast.summary로 폴백한다.
+
+    ⚠ 본문에서 password/경로를 받지 않는다 — job_url만으로 slug를 유도(SCM credential 규약 준수).
+    """
+    job_url = str((req or {}).get("job_url") or "").strip()
+    if not job_url:
+        return {"available": False, "reason": "job_url_required"}
+    slug = _job_slug(job_url)
+    if not slug:
+        return {"available": False, "reason": "invalid_job_url"}
+    metrics = _scm_vcast_metrics_for_slug(slug)
+    if not metrics:
+        return {"available": False}
+    return {"available": True, **metrics}
+
+
 @router.post("/api/jenkins/aggregate-stats")
 def aggregate_stats(req: dict) -> Dict[str, Any]:
     """Aggregate analysis_summary.json from latest builds of multiple jobs.

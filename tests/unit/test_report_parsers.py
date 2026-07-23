@@ -505,6 +505,28 @@ class TestResolveScmVcastMetrics:
         assert resolve_scm_vcast_metrics({}) is None
         assert resolve_scm_vcast_metrics(None) is None
 
+    def test_combined_passfail_surfaced_for_card(self):
+        # 빌드요약 카드용 — top-level summary의 결합 passed/failed/skipped/pass_rate/total 노출.
+        # (집계 차트는 UT/IT split만 쓰지만, 카드는 결합 합부를 여기서 읽는다.)
+        payload = {
+            "coverage": {"statement": {"covered": 70, "total": 100, "rate": 0.7}},
+            "test_rows_count_ut": 6, "test_rows_count_it": 4,
+            "summary": {"total": 10, "passed": 8, "failed": 1, "skipped": 1,
+                        "unknown": 0, "pass_rate": 0.8},
+        }
+        m = resolve_scm_vcast_metrics(payload)
+        assert m is not None
+        assert (m["passed"], m["failed"], m["skipped"], m["unknown"]) == (8, 1, 1, 0)
+        assert m["pass_rate"] == 0.8
+        assert m["total"] == 10
+
+    def test_combined_absent_summary_keeps_none_not_zero(self):
+        # summary가 없으면 결합 합부는 None(0% 통과 위장 금지) — TC만으로 이력은 유효.
+        m = resolve_scm_vcast_metrics({"test_rows_count_ut": 5, "test_rows_count_it": 0})
+        assert m is not None
+        assert m["ut_total"] == 5
+        assert m["passed"] is None and m["failed"] is None and m["pass_rate"] is None
+
 
 class TestVcastAggregateNoSilentCap:
     """parse_vectorcast_aggregate_summary — 모듈 침묵 절단(과거 top_n=6) 제거."""

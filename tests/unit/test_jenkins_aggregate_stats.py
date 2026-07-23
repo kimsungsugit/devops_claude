@@ -8,7 +8,7 @@ import json
 import pytest
 
 from backend.routers import jenkins as jenkins_mod
-from backend.routers.jenkins import aggregate_stats
+from backend.routers.jenkins import aggregate_stats, scm_vcast_summary
 from backend.services.jenkins_helpers import _job_slug
 from workflow import impact_jobs as impact_jobs_mod
 from workflow.impact_jobs import _sanitize_fragment
@@ -292,3 +292,44 @@ class TestAggregateStatsScmHistoryLinkage:
         p = _project_by_name(aggregate_stats({"job_urls": [url], "cache_root": str(tmp_path)}), "KJPDS02_PV")
         assert (p["ut_total"], p["it_total"]) == (3, 1)   # kind 추정이었으면 (4, 0)로 오귀속됐음
         assert p["line_rate"] == 0.7 and p["coverage_source"] == "scm_vcast"
+
+
+class TestScmVcastSummaryEndpoint:
+    """scm_vcast_summary — 단일 프로젝트 '빌드 & 아티팩트 요약' 카드용 SCM 이력 결과값(결합 합부 포함)."""
+
+    def test_returns_metrics_with_combined_passfail(self, _isolate_scm_job_history):
+        # 실측 KJPDS02_PV shape(병합 payload) — 결합 summary의 passed/failed/pass_rate를 카드에 공급.
+        url = "http://192.168.110.40:7000/job/KJPDS02_PV/"
+        payload = {
+            "coverage": {"statement": {"covered": 12428, "total": 17572, "rate": 0.7073},
+                         "branch": {"covered": 0, "total": 0, "rate": None},
+                         "mcdc": {"covered": 0, "total": 0, "rate": None}},
+            "test_rows_count_ut": 6886, "test_rows_count_it": 616,
+            "summary": {"total": 7502, "passed": 7480, "failed": 22, "skipped": 0,
+                        "unknown": 0, "pass_rate": 0.9971},
+            "summary_ut": {"total": 6886, "passed": 6870, "failed": 16, "pass_rate": 0.9977},
+            "summary_it": {"total": 616, "passed": 610, "failed": 6, "pass_rate": 0.9903},
+        }
+        _place_vcast_job(_isolate_scm_job_history, url, payload)
+        r = scm_vcast_summary({"job_url": url})
+        assert r["available"] is True
+        assert (r["ut_total"], r["it_total"]) == (6886, 616)
+        assert (r["passed"], r["failed"]) == (7480, 22)     # 결합 summary(카드 '통과/실패')
+        assert r["pass_rate"] == 0.9971
+        assert r["line_rate"] == 0.7073
+
+    def test_no_history_available_false(self):
+        # 이력 없음(autouse fixture가 빈 JOB_DIR로 격리) → available=false (프론트가 빌드 폴백).
+        r = scm_vcast_summary({"job_url": "http://192.168.110.40:7000/job/KJPDS02_PV/"})
+        assert r == {"available": False}
+
+    def test_missing_or_blank_job_url(self):
+        assert scm_vcast_summary({})["available"] is False
+        assert scm_vcast_summary({"job_url": "   "})["available"] is False
+
+    def test_failed_job_not_used(self, _isolate_scm_job_history):
+        # 미완료(failed) 잡은 카드에도 쓰지 않는다(집계와 동일 규칙).
+        url = "http://192.168.110.40:7000/job/KJPDS02_PV/"
+        _place_vcast_job(_isolate_scm_job_history, url, _KJPDS_VCAST_PAYLOAD,
+                         status="failed", uid="f0000001")
+        assert scm_vcast_summary({"job_url": url})["available"] is False

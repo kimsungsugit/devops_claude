@@ -283,6 +283,10 @@ def resolve_scm_vcast_metrics(payload: Any) -> Optional[Dict[str, Any]]:
         v = s.get(key)
         return v if isinstance(v, (int, float)) else None
 
+    # 결합 합부(카드용) — top-level summary는 전체 test_rows _summarize_vcast_tests 출력이라
+    # UT/IT 귀속 보류(병합 kind="")와 무관하게 결합 passed/failed/pass_rate는 항상 신뢰 가능하다.
+    # 대시보드 '빌드 & 아티팩트 요약' VectorCAST 카드가 '통과/실패/통과율'을 여기서 읽는다
+    # (집계 차트는 위 UT/IT split만 사용 — 결합값은 무시하므로 키 추가는 무회귀).
     return {
         "line_rate": line_rate,
         "branch_rate": branch_rate,
@@ -290,6 +294,12 @@ def resolve_scm_vcast_metrics(payload: Any) -> Optional[Dict[str, Any]]:
         "it_total": it_total_i,
         "ut_passed": _sm(sut, "passed"),
         "it_passed": _sm(sit, "passed"),
+        "passed": _sm(_summary, "passed"),
+        "failed": _sm(_summary, "failed"),
+        "skipped": _sm(_summary, "skipped"),
+        "unknown": _sm(_summary, "unknown"),
+        "pass_rate": _sm(_summary, "pass_rate"),
+        "total": _sm(_summary, "total"),
     }
 
 

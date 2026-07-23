@@ -51,6 +51,11 @@ export default function ResultPanel({ result }) {
   const [traceLoading, setTraceLoading] = useState(false);
   const [traceRefreshKey, setTraceRefreshKey] = useState(0);
 
+  /* SCM 로드 이력 VectorCAST 결과값 — 빌드 산출물 경로가 비었거나(KJPDS02_PV) 전부 미분류
+   * (HDPDM01)일 때 카드에 진짜 합부/커버리지를 폴백 공급. cloudium 재접근 없이 기존 잡 파일만
+   * 읽는 경량 엔드포인트(aggregate-stats와 동일 데이터). available=false면 빌드 산출물로 폴백. */
+  const [scmVcast, setScmVcast] = useState(null);
+
   const refreshTraceSummary = useCallback(() => {
     setTraceRefreshKey(k => k + 1);
   }, []);
@@ -72,6 +77,19 @@ export default function ResultPanel({ result }) {
       .finally(() => { if (!cancelled) setTraceLoading(false); });
     return () => { cancelled = true; };
   }, [result?.jobUrl, result?.cacheRoot, traceRefreshKey]);
+
+  useEffect(() => {
+    const jobUrl = result?.jobUrl;
+    if (!jobUrl) return;   // 미로드 — 초기 null 유지(동기 setState 회피). 프로젝트 전환은 아래 fetch가
+                           // 항상 .then에서 갱신하므로(available=false면 null) stale 없이 정리된다.
+    let cancelled = false;
+    post('/api/jenkins/scm-vcast-summary', { job_url: jobUrl })
+      .then((d) => { if (!cancelled) setScmVcast(d && d.available ? d : null); })
+      .catch(() => { if (!cancelled) setScmVcast(null); });
+    return () => { cancelled = true; };
+    // traceRefreshKey 의존: 같은 jobUrl에서 새 VectorCAST SCM 로드 후 대시보드 복귀(focus/visibility가
+    // refreshTraceSummary→traceRefreshKey 증가) 시 카드도 함께 재fetch(트레이스 카드와 동일 갱신 신호).
+  }, [result?.jobUrl, traceRefreshKey]);
 
   /* Re-fetch when dashboard tab becomes visible again (e.g., after generating matrix in SRS section) */
   useEffect(() => {
@@ -179,15 +197,61 @@ export default function ResultPanel({ result }) {
               </div>
             )}
 
-            {/* VectorCAST */}
-            {reportData?.tester?.vectorcast?.test_rows_count != null && (
-              <div style={{ flex: 1, minWidth: 100, padding: '8px 10px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--card-bg, var(--surface))' }}>
-                <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 4 }}>VectorCAST</div>
-                <div style={{ fontSize: 11 }}>
-                  <span style={{ fontWeight: 600 }}>{reportData.tester.vectorcast.test_rows_count?.toLocaleString()}</span> TC · UT {(reportData.tester.vectorcast.ut_reports || []).length} / IT {(reportData.tester.vectorcast.it_reports || []).length}
+            {/* VectorCAST — SCM 로드 이력 우선(진짜 합부/커버리지), 없으면 빌드 산출물 폴백.
+             *  빌드 경로는 KJPDS02_PV(SCM 소스)엔 test_rows 0, HDPDM01엔 판정 컬럼 부재로 전부 미분류라
+             *  결과값이 빈약 → SCM 이력의 pass/fail/통과율/UT·IT TC를 우선 표시(사용자 선택). */}
+            {(() => {
+              const bvc = reportData?.tester?.vectorcast || {};
+              const bs = bvc.summary || {};
+              const hasBuild = bvc.test_rows_count != null;
+              const scm = (scmVcast && scmVcast.available) ? scmVcast : null;
+              const useScm = !!scm && ((scm.total || 0) > 0 || (scm.ut_total || 0) > 0 || (scm.it_total || 0) > 0);
+              if (!useScm && !hasBuild) return null;
+
+              const src = useScm ? 'SCM 이력' : '빌드';
+              const total = useScm ? (scm.total ?? ((scm.ut_total || 0) + (scm.it_total || 0))) : bvc.test_rows_count;
+              const passed = useScm ? scm.passed : bs.passed;
+              const failed = useScm ? scm.failed : bs.failed;
+              const skipped = useScm ? scm.skipped : bs.skipped;
+              const unknown = useScm ? scm.unknown : bs.unknown;
+              const passRate = useScm ? scm.pass_rate : bs.pass_rate;
+              // 통과/실패로 분류된 게 하나라도 있어야 합부 라인을 띄운다(전부 미분류면 '통과율 0%' 위장 금지).
+              const classified = (passed || 0) + (failed || 0) > 0;
+
+              return (
+                <div style={{ flex: 1, minWidth: 100, padding: '8px 10px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--card-bg, var(--surface))' }}>
+                  <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 4 }}>
+                    VectorCAST <span style={{ fontWeight: 400, fontSize: 10 }}>({src})</span>
+                  </div>
+                  <div style={{ fontSize: 11 }}>
+                    <span style={{ fontWeight: 600 }}>{(total || 0).toLocaleString()}</span> TC
+                    {useScm
+                      ? <> · UT {(scm.ut_total || 0).toLocaleString()} / IT {(scm.it_total || 0).toLocaleString()}</>
+                      : <> · UT리포트 {(bvc.ut_reports || []).length} / IT리포트 {(bvc.it_reports || []).length}</>}
+                  </div>
+                  {classified ? (
+                    <div style={{ fontSize: 11, marginTop: 3 }}>
+                      <span style={{ color: 'var(--color-success)', fontWeight: 600 }}>통과 {(passed || 0).toLocaleString()}</span>
+                      {(failed || 0) > 0 && <> / <span style={{ color: 'var(--color-danger)', fontWeight: 600 }}>실패 {failed.toLocaleString()}</span></>}
+                      {(skipped || 0) > 0 && <span style={{ color: 'var(--text-muted)' }}> / 스킵 {skipped.toLocaleString()}</span>}
+                      {(unknown || 0) > 0 && <span style={{ color: 'var(--text-muted)' }}> / 미분류 {unknown.toLocaleString()}</span>}
+                      {passRate != null && (
+                        // Math.floor: 실패가 있어 <100%인데 반올림으로 "100%"를 보이는 false-pass 방지
+                        // (0.9971→99%, 진짜 1.0일 때만 100%). anti-false-pass 정책 준수.
+                        <span title="통과율 = 통과 / 전체(스킵·미분류 포함). 100% 미만은 내림 표기(실패/미분류 은폐 방지)." style={{ marginLeft: 4, fontWeight: 700, color: passRate >= 0.95 ? 'var(--color-success)' : 'var(--color-warning)' }}>
+                          · {Math.floor(passRate * 100)}%
+                        </span>
+                      )}
+                    </div>
+                  ) : (unknown || 0) > 0 ? (
+                    <div style={{ fontSize: 10, marginTop: 3, color: 'var(--text-muted)' }}
+                      title="빌드 리포트에 통과/실패 판정 컬럼이 없어 미분류입니다. 실제 합부는 SCM 로드(테스트 결과 탭)에서 확인하세요.">
+                      미분류 {(unknown || 0).toLocaleString()}
+                    </div>
+                  ) : null}
                 </div>
-              </div>
-            )}
+              );
+            })()}
           </div>
         </div>
 
