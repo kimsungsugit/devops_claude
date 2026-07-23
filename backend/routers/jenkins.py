@@ -1206,6 +1206,22 @@ def _parse_vcast_logs_from_cloudium_folder(path: str) -> Dict[str, Any]:
             _c, _t = cov_acc[_k]
             coverage[_k] = {"covered": _c, "total": _t, "rate": (round(_c / _t, 4) if _t else None)}
 
+        # deep-review C1 — 라벨 무관 데이터 가드: mcdc(pairs) 컬럼이 함수-진입 커버리지로 퇴화
+        # (전 함수 pairs.total=1·분기 변동)했으면 거짓 MC/DC(예 380/712)를 중화한다. 헤더가
+        # 'MC/DC'/'Pairs' 여도 데이터가 함수-진입이면 coverage_it.mcdc·entries[].pairs·coverage_gap
+        # (ASIL D)·Quality DB 전부 오염되므로, 폴더 집계(전 env 병합 fn_entries) 분포로 판정 후 중화.
+        if fn_entries and SA._is_degenerate_pairs(
+            [(e.get("pairs") or {}).get("total") for e in fn_entries],
+            [(e.get("branches") or {}).get("total") for e in fn_entries],
+        ):
+            coverage["mcdc"] = {"covered": 0, "total": 0, "rate": None}
+            for _e in fn_entries:
+                if _e.get("pairs"):
+                    _e["pairs"] = {"covered": 0, "total": 0, "rate": None}
+            warnings.append(
+                "[mcdc-guard] IT 'MC/DC' 컬럼이 함수-진입 커버리지로 판정(전 함수 pairs.total=1·분기 변동) — 거짓 MC/DC 중화(라벨 무관 데이터 가드)"
+            )
+
         # vcast_summary는 빌드 RAG와 동일 스키마({ut,it}_metrics.entries) — coverage_gap이
         # ut_metrics/it_metrics를 모두 읽으므로 폴더 종류(UT/IT)에 맞는 키 하나만 채운다.
         vcast_summary: Dict[str, Any] = {}

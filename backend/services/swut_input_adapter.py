@@ -334,10 +334,17 @@ def compute_coverage_rollup(function_rows: list) -> dict[str, Any]:
         tot = sum(getattr(fc, attr).total for fc in function_rows if getattr(fc, attr).total > 0)
         return round(cov / tot * 100, 2) if tot > 0 else 0.0
 
+    # deep-review C1 — 라벨 무관 데이터 가드: mcdc 컬럼이 함수-진입 커버리지로 퇴화(전 함수
+    # pairs.total=1·분기 변동)했으면 Quality DB overall_mcdc_pct 를 거짓값(예 53%) 대신 0 으로
+    # 중화(진짜 MC/DC 아님을 정직 반영 — ASIL D 100% 게이트는 어차피 미충족이나 값 위조 차단).
+    _mcdc_degenerate = _is_degenerate_pairs(
+        [fc.mcdc.total for fc in function_rows],
+        [fc.branch.total for fc in function_rows],
+    )
     return {
         "overall_statement_pct": _pct("statement"),
         "overall_branch_pct": _pct("branch"),
-        "overall_mcdc_pct": _pct("mcdc"),
+        "overall_mcdc_pct": 0.0 if _mcdc_degenerate else _pct("mcdc"),
         "functions_with_coverage": sum(1 for fc in function_rows if fc.statement.total > 0),
     }
 
@@ -491,6 +498,12 @@ def _classify_metric_label(label: str) -> str | None:
 
     ⚠ 순서 주의: 'Function Calls' 가 'Function' 을 포함하므로 call 을 먼저 판정.
     미인식 라벨은 None 을 돌려 **절대 mcdc 로 추정하지 않는다**(fail-safe).
+
+    2026-07-23 deep-review W1 — VectorCAST 의 실제 MC/DC 컬럼 용어는 **'Pairs'** 다
+    (build-bundle 헤더인식 파서 jenkins_adapter.parse_vcast_metrics_report 와 일관). 'Pairs'
+    를 인식 못 하면 진짜 MC/DC 를 침묵 드롭하므로 'pair' 도 mcdc 로 매핑한다('call' 은 위에서
+    이미 처리돼 'function calls' 오인 없음). 단 라벨은 양방향 불신 대상이라, 라벨로 mcdc 에
+    배정돼도 데이터 분포는 _is_degenerate_pairs 로 재검증(퇴화 함수-진입이면 중화)된다.
     """
     n = re.sub(r"\s+", "", (label or "").lower())
     if not n:
@@ -499,13 +512,36 @@ def _classify_metric_label(label: str) -> str | None:
         return "function_calls_coverage"
     if "function" in n:                     # "functions"
         return "function_coverage"
-    if "mc" in n and "dc" in n:             # "mcdc" / "mc/dc" / "mc|dc" / "mc-dc"
+    if ("mc" in n and "dc" in n) or "pair" in n:   # "mcdc"/"mc/dc"/"mc|dc"/"mc-dc"/"pairs"
         return "mcdc"
     if "statement" in n:                    # "statements" 또는 결합 "statement+branch"
         return "statement"
     if "branch" in n:
         return "branch"
     return None
+
+
+def _is_degenerate_pairs(pairs_totals: list, branch_totals: list) -> bool:
+    """MC/DC(pairs) 컬럼이 실제 MC/DC 가 아니라 '함수-진입 커버리지'로 퇴화했는지 판정.
+
+    2026-07-23 deep-review C1 — 헤더 라벨('MC/DC'·'Pairs')은 양방향으로 신뢰 불가
+    (MC/DC→거짓유입, Pairs→진짜드롭)하므로 **데이터 분포로 검증**한다. 퇴화 지문:
+    **전 함수 pairs.total 이 정확히 1**(무결정 함수의 0 도, 복합조건 함수의 ≥2 도 없는 단일
+    스파이크) = 함수당 1 = 함수-진입을 pairs 로 위장. 진짜 MC/DC 는 무결정 함수(pairs=0)와
+    복합조건 함수(pairs≥2)가 섞여 분포가 반드시 흩어진다.
+
+    오탐 방지 3중 가드:
+    - n<8: 소표본 우연 방지(판정 보류→False)
+    - set(pairs.total)!={1}: 0 또는 ≥2 가 하나라도 있으면 진짜(→False)
+    - max(branch.total)<=2: 전부 단일-if(branch=2,pair=1)인 자명 코드베이스는 정당하므로 제외.
+      분기>2 함수가 있는데 전 함수 pairs=1 이면 진짜 MC/DC 로 물리적 불가(다중결정→pairs≥2 강제,
+      switch→pairs=0) → 퇴화로 확정.
+    """
+    if len(pairs_totals) < 8:
+        return False
+    if {int(p or 0) for p in pairs_totals} != {1}:
+        return False
+    return max((int(b or 0) for b in branch_totals), default=0) > 2
 
 
 def _map_metric_columns(table, warn) -> list[str | None] | None:

@@ -524,6 +524,32 @@ def test_folder_parse_emits_vcast_summary_and_complexity(monkeypatch) -> None:
     assert comp["Ap_NoMcdc"]["complexity"] == 3
 
 
+def test_folder_parse_neutralizes_degenerate_mcdc(monkeypatch) -> None:
+    """deep-review C1 — mcdc(pairs) 컬럼이 함수-진입 위장(전 함수 pairs.total=1·분기 변동)이면
+    coverage.mcdc·entries[].pairs 를 중화(라벨 무관 데이터 가드). 헤더가 'MC/DC'여도 거짓 지표 차단."""
+    import backend.services.swut_input_adapter as SA
+    _patch_folder_parse(monkeypatch, exec_results={"SwIFn_0201.001": _FakeRow(True)})
+    # 12함수 전부 mcdc.total=1(covered 1/0), 분기 total 변동(3·9, max>2) = 퇴화 지문
+    funcs = [
+        _FCFull(f"fn{i}", (5, 5), (1, 9 if i % 2 else 3), (1 if i < 6 else 0, 1),
+                complexity=2, component="C")
+        for i in range(12)
+    ]
+    monkeypatch.setattr(SA, "extract_aggregate_coverage",
+                        lambda data, **_kw: (funcs, _FC((60, 60), (30, 40), (6, 12))))
+    out = J._parse_vcast_logs_from_cloudium_folder("U:/x/10.SW 통합 테스트/vs_IT")
+    # 퇴화 → coverage.mcdc 중화(grand 6/12 아님)
+    assert out["coverage"]["mcdc"] == {"covered": 0, "total": 0, "rate": None}
+    # entries pairs 도 전부 중화
+    vs = out["vcast_summary"]
+    entries = (vs.get("it_metrics") or vs.get("ut_metrics") or {}).get("entries", [])
+    assert entries and all((e.get("pairs") or {}).get("total") == 0 for e in entries)
+    # statement/branch 는 무영향(중화 대상 아님)
+    assert out["coverage"]["statement"]["total"] > 0
+    assert out["coverage"]["branch"]["total"] > 0
+    assert any("mcdc-guard" in w for w in out.get("parse_warnings", []))
+
+
 def test_folder_payload_feeds_coverage_gap(monkeypatch, tmp_path) -> None:
     """P0 end-to-end: 폴더 파서 payload가 coverage_gap을 먹여 ASIL 차등 MC/DC 평가가 동작(available=True)."""
     import backend.services.swut_input_adapter as SA

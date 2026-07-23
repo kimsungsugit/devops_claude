@@ -539,6 +539,71 @@ class TestHeaderAwareMetricMapping:
         assert any("비대칭" in w for w in warns)
 
 
+class TestDegenerateMcdcGuard:
+    """2026-07-23 deep-review C1 — 라벨 무관 데이터 가드로 '함수-진입 위장 MC/DC' 차단.
+
+    헤더 라벨('MC/DC'·'Pairs')은 양방향 불신(MC/DC→거짓유입·Pairs→진짜드롭)이라, mcdc 로
+    배정된 데이터가 함수-진입 형태로 퇴화했는지 분포로 재검증한다.
+    """
+
+    def test_classify_pairs_label_maps_to_mcdc(self):
+        # W1 — VectorCAST 실제 MC/DC 컬럼 용어 'Pairs' 인식(미인식 시 진짜 MC/DC 침묵 드롭)
+        from backend.services.swut_input_adapter import _classify_metric_label
+        assert _classify_metric_label("Pairs") == "mcdc"
+        assert _classify_metric_label("MC/DC Pairs") == "mcdc"
+        assert _classify_metric_label("Function Calls") == "function_calls_coverage"  # 'call' 우선
+        assert _classify_metric_label("Functions") == "function_coverage"
+
+    def test_degenerate_detects_function_entry_masquerade(self):
+        from backend.services.swut_input_adapter import _is_degenerate_pairs
+        # 전 함수 pairs.total==1(단일 스파이크) + 분기 변동(>2 존재) = 함수-진입 위장
+        assert _is_degenerate_pairs([1] * 20, [1, 3, 5, 9, 2] + [1] * 15) is True
+
+    def test_real_mcdc_not_flagged(self):
+        from backend.services.swut_input_adapter import _is_degenerate_pairs
+        # 무결정(0)·단일(1)·복합조건(≥2) 섞임 = 진짜 MC/DC → 미발화
+        assert _is_degenerate_pairs([0, 1, 2, 3, 0, 1, 2, 0, 1, 1], [0, 2, 4, 6, 0, 2, 4, 0, 2, 2]) is False
+
+    def test_all_single_if_not_flagged_fp_control(self):
+        from backend.services.swut_input_adapter import _is_degenerate_pairs
+        # 전부 단일 if(branch=2,pair=1) 자명 코드베이스 — 오탐 방지(max_branch<=2)
+        assert _is_degenerate_pairs([1] * 20, [2] * 20) is False
+
+    def test_small_sample_and_empty_not_flagged(self):
+        from backend.services.swut_input_adapter import _is_degenerate_pairs
+        assert _is_degenerate_pairs([1] * 5, [9] * 5) is False       # n<8
+        assert _is_degenerate_pairs([0] * 20, [3] * 20) is False     # mcdc 공백(UT)
+
+    def test_rollup_zeros_degenerate_mcdc(self):
+        from backend.services.swut_input_adapter import (
+            CoverageStats, FunctionCoverage, compute_coverage_rollup,
+        )
+        rows = []
+        for i in range(20):
+            fc = FunctionCoverage(name=f"fn{i}")
+            fc.statement = CoverageStats(covered=5, total=5, coverage_pct=1.0)
+            fc.branch = CoverageStats(covered=1, total=(3 if i % 2 else 9), coverage_pct=0.5)
+            fc.mcdc = CoverageStats(covered=(1 if i < 10 else 0), total=1, coverage_pct=(1.0 if i < 10 else 0.0))
+            rows.append(fc)
+        out = compute_coverage_rollup(rows)
+        assert out["overall_mcdc_pct"] == 0.0        # 퇴화 → 중화(거짓 50% 아님)
+        assert out["overall_statement_pct"] == 100.0  # 다른 지표 무영향
+
+    def test_rollup_keeps_real_mcdc(self):
+        from backend.services.swut_input_adapter import (
+            CoverageStats, FunctionCoverage, compute_coverage_rollup,
+        )
+        rows = []
+        for i, (pt, bt) in enumerate([(0, 0), (2, 4), (3, 6), (0, 0), (1, 2), (2, 4), (0, 0), (1, 2), (2, 4), (3, 6)]):
+            fc = FunctionCoverage(name=f"fn{i}")
+            fc.statement = CoverageStats(covered=5, total=5, coverage_pct=1.0)
+            fc.branch = CoverageStats(covered=bt, total=bt, coverage_pct=1.0) if bt else CoverageStats()
+            fc.mcdc = CoverageStats(covered=pt, total=pt, coverage_pct=1.0) if pt else CoverageStats()
+            rows.append(fc)
+        out = compute_coverage_rollup(rows)
+        assert out["overall_mcdc_pct"] > 0            # 진짜 MC/DC(분포 흩어짐) → 유지
+
+
 class TestRound77ComponentName:
     """라운드 77 T1201/T1202 — FunctionCoverage.component_name 필드 + extract 명시 주입."""
 
