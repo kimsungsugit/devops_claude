@@ -299,7 +299,7 @@ def test_folder_parse_extracts_coverage(monkeypatch) -> None:
     _patch_folder_parse(monkeypatch, exec_results={"SwUFn_0133.001": _FakeRow(True)})
     # grand_total이 90/100(구문)·40/50(분기)·8/10(MC-DC) 반환하도록 추출기 모킹.
     monkeypatch.setattr(SA, "extract_aggregate_coverage",
-                        lambda data: ([], _FC((90, 100), (40, 50), (8, 10))))
+                        lambda data, **_kw: ([], _FC((90, 100), (40, 50), (8, 10))))
     out = J._parse_vcast_logs_from_cloudium_folder("U:/x/09.SW 단위 테스트/cov_UT")
     cov = out["coverage"]
     assert cov["statement"] == {"covered": 90, "total": 100, "rate": 0.9}
@@ -507,7 +507,7 @@ def test_folder_parse_emits_vcast_summary_and_complexity(monkeypatch) -> None:
     ]
     # grand 존재(집계는 grand 사용)해도 per-function은 항상 funcs에서 모음을 검증.
     monkeypatch.setattr(SA, "extract_aggregate_coverage",
-                        lambda data: (funcs, _FC((15, 15), (8, 10), (17, 20))))
+                        lambda data, **_kw: (funcs, _FC((15, 15), (8, 10), (17, 20))))
     out = J._parse_vcast_logs_from_cloudium_folder("U:/x/09.SW 단위 테스트/vs_UT")
     entries = out["vcast_summary"]["ut_metrics"]["entries"]
     by = {e["subprogram"]: e for e in entries}
@@ -534,7 +534,7 @@ def test_folder_payload_feeds_coverage_gap(monkeypatch, tmp_path) -> None:
         _FCFull("Ap_Helper", (5, 5), (5, 5), (5, 5), complexity=2),         # 전부 100%
     ]
     monkeypatch.setattr(SA, "extract_aggregate_coverage",
-                        lambda data: (funcs, _FC((0, 0), (0, 0), (0, 0))))
+                        lambda data, **_kw: (funcs, _FC((0, 0), (0, 0), (0, 0))))
     payload = J._parse_vcast_logs_from_cloudium_folder("U:/x/09.SW 단위 테스트/e2e_UT")
     # coverage_gap이 폴더 payload를 그대로 읽도록(로더 모킹).
     monkeypatch.setattr(J, "_load_vectorcast_rag_from_cloudium", lambda p: payload)

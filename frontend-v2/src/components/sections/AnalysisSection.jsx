@@ -98,7 +98,7 @@ function ModuleCovRow({ name, lineRate, branchRate, functions }) {
         <td style={{ fontFamily: 'monospace', fontSize: 10 }}>
           {has && <span style={{ marginRight: 4, color: 'var(--text-muted)' }}>{open ? '▾' : '▸'}</span>}
           {name}
-          {has && <span className="text-muted" style={{ fontSize: 9, marginLeft: 4 }}>({functions.length} 함수)</span>}
+          {has && <span className="text-muted" style={{ fontSize: 9, marginLeft: 4 }} title="복수 VectorCAST 환경/폴더에서 수집된 함수 결과 행(엔트리) 수 — 고유 함수 수가 아닐 수 있음(폴더간 중복 미제거)">({functions.length} 함수 엔트리)</span>}
         </td>
         <td style={{ textAlign: 'center', fontWeight: 600, color: clr(lineRate) }}>{lineRate != null ? `${lineRate.toFixed(1)}%` : '-'}</td>
         <td style={{ textAlign: 'center', fontWeight: 600, color: clr(branchRate ?? 100) }}>{branchRate != null ? `${branchRate.toFixed(1)}%` : '-'}</td>
@@ -1281,14 +1281,13 @@ export default function AnalysisSection({ job, analysisResult }) {
                 <div className="stat-value" style={{ color: (utSummary.failed ?? 0) > 0 ? 'var(--color-danger)' : 'var(--color-success)' }}>{(utSummary.failed ?? 0).toLocaleString()}</div>
                 <div className="stat-label">실패 ({utLabelSuffix})</div>
               </div>
-              {(utSummary.skipped ?? 0) > 0 && (
-                <div className="stat-card"><div className="stat-value">{utSummary.skipped.toLocaleString()}</div><div className="stat-label">스킵</div></div>
-              )}
-              {(utSummary.unknown ?? 0) > 0 && (
-                <div className="stat-card" title="통과·실패·스킵 어디에도 분류되지 않은 케이스(원본 결과 문자열 미인식) — 0으로 임의 처리하지 않고 표면화">
-                  <div className="stat-value">{utSummary.unknown.toLocaleString()}</div><div className="stat-label">미분류</div>
-                </div>
-              )}
+              {/* 2026-07-23 — 스킵·미분류는 0이어도 항상 표시(0건임을 확인 가능하게, 은폐 방지) */}
+              <div className="stat-card">
+                <div className="stat-value" style={{ color: (utSummary.skipped ?? 0) > 0 ? undefined : 'var(--text-muted)' }}>{(utSummary.skipped ?? 0).toLocaleString()}</div><div className="stat-label">스킵</div>
+              </div>
+              <div className="stat-card" title="통과·실패·스킵 어디에도 분류되지 않은 케이스(원본 결과 문자열 미인식) — 0으로 임의 처리하지 않고 표면화">
+                <div className="stat-value" style={{ color: (utSummary.unknown ?? 0) > 0 ? 'var(--color-warning)' : 'var(--text-muted)' }}>{(utSummary.unknown ?? 0).toLocaleString()}</div><div className="stat-label">미분류</div>
+              </div>
               {utSummary.pass_rate != null && (
                 <div className="stat-card" title="통과율 = 통과 / 전체(스킵·미분류 포함)" style={{ borderLeft: `3px solid ${utSummary.pass_rate >= 0.95 ? 'var(--color-success)' : 'var(--color-warning)'}` }}>
                   <div className="stat-value" style={{ color: utSummary.pass_rate >= 0.95 ? 'var(--color-success)' : 'var(--color-warning)' }}>{Math.round(utSummary.pass_rate * 100)}%</div>
@@ -1297,7 +1296,14 @@ export default function AnalysisSection({ job, analysisResult }) {
               )}
             </div>
             <div className="text-muted" style={{ fontSize: 9, marginTop: 2, lineHeight: 1.5 }}>
-              통과율=통과/전체(스킵·미분류 포함). 원본 결과는 통과/실패/스킵/미분류로 정규화됩니다 — 실행오류(ERROR)는 실패, 미실행(NOT RUN)은 스킵으로 집계되고, 인식 불가 결과만 미분류입니다.
+              통과율=통과/전체(스킵·미분류 포함). 전체 = 통과+실패+스킵+미분류. 원본 결과는 통과/실패/스킵/미분류로 정규화됩니다 — 실행오류(ERROR)는 실패, 미실행(NOT RUN)은 스킵으로 집계되고, 인식 불가 결과만 미분류입니다.
+              {(() => {
+                const _t = utSummary.total ?? 0;
+                const _s = (utSummary.passed ?? 0) + (utSummary.failed ?? 0) + (utSummary.skipped ?? 0) + (utSummary.unknown ?? 0);
+                return _t === _s ? null : (
+                  <span style={{ color: 'var(--color-warning)', fontWeight: 700 }}> ⚠ 시험 상태 합계({_s.toLocaleString()})가 전체 테스트 케이스({_t.toLocaleString()})와 일치하지 않습니다.</span>
+                );
+              })()}
             </div>
             </>
           ) : (
@@ -1437,6 +1443,15 @@ export default function AnalysisSection({ job, analysisResult }) {
               <div className="text-muted" style={{ fontSize: 9 }}>미커버 함수 {((itGrand.functions.total ?? 0) - (itGrand.functions.covered ?? 0)).toLocaleString()}</div>
             </div>
           ) : null}
+          {/* 2026-07-23 (2.1) — 함수레벨 로드됐는데 Metric Report(함수/호출 커버리지)가 없으면
+              카드가 침묵 소멸하던 것 → 원본 데이터 부재를 명시(설명문이 약속한 지표의 정직 처리). */}
+          {itEntries.length > 0 && !itGrand.function_calls?.total && !itGrand.functions?.total && (
+            <div className="stat-card" style={{ borderLeft: '3px solid var(--text-muted)' }}>
+              <div className="stat-value" style={{ color: 'var(--text-muted)', fontSize: 14 }}>—</div>
+              <div className="stat-label">Function/Call Coverage</div>
+              <div className="text-muted" style={{ fontSize: 9 }}>원본 데이터 없음 (Metric Report 미확인)</div>
+            </div>
+          )}
         </div>
         {sumIt && (sumIt.total || 0) > 0 && ((sumIt.passed ?? 0) + (sumIt.failed ?? 0) > 0) && (
           <>
@@ -1452,14 +1467,13 @@ export default function AnalysisSection({ job, analysisResult }) {
               <div className="stat-value" style={{ color: (sumIt.failed ?? 0) > 0 ? 'var(--color-danger)' : 'var(--color-success)' }}>{(sumIt.failed ?? 0).toLocaleString()}</div>
               <div className="stat-label">실패 (IT)</div>
             </div>
-            {(sumIt.skipped ?? 0) > 0 && (
-              <div className="stat-card"><div className="stat-value">{sumIt.skipped.toLocaleString()}</div><div className="stat-label">스킵</div></div>
-            )}
-            {(sumIt.unknown ?? 0) > 0 && (
-              <div className="stat-card" title="통과·실패·스킵 어디에도 분류되지 않은 케이스(원본 결과 문자열 미인식) — 0으로 임의 처리하지 않고 표면화">
-                <div className="stat-value">{sumIt.unknown.toLocaleString()}</div><div className="stat-label">미분류</div>
-              </div>
-            )}
+            {/* 2026-07-23 (2.3) — 스킵·미분류는 0이어도 항상 표시(0건 확인 가능하게, 은폐 방지) */}
+            <div className="stat-card">
+              <div className="stat-value" style={{ color: (sumIt.skipped ?? 0) > 0 ? undefined : 'var(--text-muted)' }}>{(sumIt.skipped ?? 0).toLocaleString()}</div><div className="stat-label">스킵</div>
+            </div>
+            <div className="stat-card" title="통과·실패·스킵 어디에도 분류되지 않은 케이스(원본 결과 문자열 미인식) — 0으로 임의 처리하지 않고 표면화">
+              <div className="stat-value" style={{ color: (sumIt.unknown ?? 0) > 0 ? 'var(--color-warning)' : 'var(--text-muted)' }}>{(sumIt.unknown ?? 0).toLocaleString()}</div><div className="stat-label">미분류</div>
+            </div>
             {sumIt.pass_rate != null && (
               <div className="stat-card" title="통과율 = 통과 / 전체(스킵·미분류 포함)" style={{ borderLeft: `3px solid ${sumIt.pass_rate >= 0.95 ? 'var(--color-success)' : 'var(--color-warning)'}` }}>
                 <div className="stat-value" style={{ color: sumIt.pass_rate >= 0.95 ? 'var(--color-success)' : 'var(--color-warning)' }}>{Math.round(sumIt.pass_rate * 100)}%</div>
@@ -1468,7 +1482,14 @@ export default function AnalysisSection({ job, analysisResult }) {
             )}
           </div>
           <div className="text-muted" style={{ fontSize: 9, marginTop: 2, lineHeight: 1.5 }}>
-            통과율=통과/전체(스킵·미분류 포함). 미실행·실행오류·제외는 현재 VectorCAST 리포트에서 개별 구분되지 않아 스킵/미분류로 집계됩니다.
+            통과율=통과/전체(스킵·미분류 포함). 전체 = 통과+실패+스킵+미분류. 원본 결과는 통과/실패/스킵/미분류로 정규화됩니다 — 실행오류(ERROR)는 실패, 미실행(NOT RUN)은 스킵으로 집계되고, 인식 불가 결과만 미분류입니다(UT와 동일 규칙).
+            {(() => {
+              const _t = sumIt.total ?? 0;
+              const _s = (sumIt.passed ?? 0) + (sumIt.failed ?? 0) + (sumIt.skipped ?? 0) + (sumIt.unknown ?? 0);
+              return _t === _s ? null : (
+                <span style={{ color: 'var(--color-warning)', fontWeight: 700 }}> ⚠ 시험 상태 합계({_s.toLocaleString()})가 전체 테스트 케이스({_t.toLocaleString()})와 일치하지 않습니다.</span>
+              );
+            })()}
           </div>
           </>
         )}
@@ -1480,11 +1501,26 @@ export default function AnalysisSection({ job, analysisResult }) {
           </div>
         )}
         {scmCovIt && (scmCovIt.statement?.total || scmCovIt.branch?.total || scmCovIt.mcdc?.total) ? (
+          <>
           <div className="stats-row" style={{ marginTop: 8 }}>
             {covCard('IT 구문(Statement)', scmCovIt.statement)}
             {covCard('IT 분기(Branch)', scmCovIt.branch)}
             {covCard('IT MC/DC', scmCovIt.mcdc)}
+            {/* 2026-07-23 (2.5) — MC/DC 미측정 명시. 과거엔 AggregateCoverage 3번째 컬럼(Functions,
+                함수 진입)을 MC/DC 로 위치-오배정해 거짓 53%를 냈다. 백엔드가 헤더기반 매핑으로 고쳐
+                실제 MC/DC 컬럼이 없으면 mcdc=0/0 → 카드 대신 '측정 안 됨' 명시(침묵 소멸·거짓 표기 방지). */}
+            {!(scmCovIt.mcdc?.total) && (
+              <div className="stat-card" style={{ borderLeft: '3px solid var(--text-muted)' }}>
+                <div className="stat-value" style={{ color: 'var(--text-muted)', fontSize: 14 }}>—</div>
+                <div className="stat-label">IT MC/DC</div>
+                <div className="text-muted" style={{ fontSize: 9 }}>원본 리포트에서 측정 안 됨</div>
+              </div>
+            )}
           </div>
+          <div className="text-muted" style={{ fontSize: 9, marginTop: 2, lineHeight: 1.5 }}>
+            ※ 구문/분기{scmCovIt.mcdc?.total ? '/MC-DC' : ''}는 복수 SCM 폴더(APP+BOOT 등) 합산 시 공유 함수가 중복 계상되어 비율이 왜곡될 수 있습니다 — 공식 판정에는 중복 제거본을 사용하세요. MC/DC는 원본 AggregateCoverage에 실제 MC/DC 컬럼이 있을 때만 표시됩니다(함수 진입 커버리지를 MC/DC로 오표기하지 않음).
+          </div>
+          </>
         ) : null}
         {itFailures.length > 0 && (
           <details style={{ marginTop: 8 }}>
@@ -1515,7 +1551,7 @@ export default function AnalysisSection({ job, analysisResult }) {
             <div className="text-sm" style={{ fontWeight: 600, marginBottom: 4 }}>📊 모듈별 커버리지 (IT)</div>
             <div className="text-sm text-muted" style={{ marginBottom: 8, lineHeight: 1.5 }}>
               통합시험(IT)은 <b>함수 호출(Function Call)</b> 중심입니다. 모듈 표의 <b>행을 클릭</b>하면 IT 함수별 함수콜·커버리지로 펼쳐집니다.{' '}
-              여기서 모듈은 <b>통합시험 대상 컴포넌트</b>(env/component) 단위라, 파일 단위로 집계되는 단위시험(UT)보다 개수가 적을 수 있습니다(누락 아님).
+              여기서 모듈은 <b>통합시험 대상 컴포넌트</b>(env/component) 단위라, 파일 단위로 집계되는 단위시험(UT)의 파일·유닛 수와 다를 수 있습니다. 실제 누락 여부는 원본 VectorCAST 환경 및 시험 대상 컴포넌트 목록과 대조하여 판단합니다.
             </div>
             <details style={{ marginTop: 8 }} open>
               <summary style={{ cursor: 'pointer', fontSize: 12, fontWeight: 600 }}>

@@ -81,6 +81,12 @@ class FunctionCoverage:
     statement: CoverageStats = field(default_factory=CoverageStats)
     branch: CoverageStats = field(default_factory=CoverageStats)
     mcdc: CoverageStats = field(default_factory=CoverageStats)
+    # 2026-07-23 — AggregateCoverage 'Functions'(함수 진입) 컬럼 전용 필드. 과거
+    # extract_aggregate_coverage 가 %-셀을 위치로 배정해 이 컬럼을 mcdc 로 오표기했다
+    # (IT 리포트 3번째 컬럼=Functions 인데 mcdc 로 → ISO 26262 거짓 MC/DC). 헤더 기반
+    # 매핑으로 분리 보관. 대시보드 권위 함수커버리지는 Metric report grand_totals.functions
+    # (HMR, 헤더인식)라 여긴 파서 정확성/미오표기 보장용 (기본 미표시). backward-compat default.
+    function_coverage: CoverageStats = field(default_factory=CoverageStats)
     complexity: int = 0
     # 59차 F4-C 신규 — KJPDS02 v1.01 양식 row 6 'Function Calls' coverage.
     # v2.02/v3.01 양식에서는 빈 CoverageStats (default) — writer가 skip.
@@ -476,8 +482,72 @@ def _parse_metric_cell(text: str) -> CoverageStats:
     return CoverageStats(covered=covered, total=total, coverage_pct=pct / 100.0)
 
 
-def extract_aggregate_coverage(html_bytes: bytes) -> tuple[list[FunctionCoverage], FunctionCoverage]:
+def _classify_metric_label(label: str) -> str | None:
+    """AggregateCoverage metric 컬럼 헤더 라벨 → FunctionCoverage 필드명(또는 None=미인식).
+
+    2026-07-23 안전 fix — 과거 파서는 %-셀을 순서대로 statement/branch/mcdc 로 **위치 배정**해,
+    IT AggregateReport 의 3번째 컬럼(Functions=함수 진입 커버리지)을 MC/DC 로 오표기했다
+    (ISO 26262 거짓 안전지표). 이 함수는 실제 헤더 라벨로 컬럼을 판별한다.
+
+    ⚠ 순서 주의: 'Function Calls' 가 'Function' 을 포함하므로 call 을 먼저 판정.
+    미인식 라벨은 None 을 돌려 **절대 mcdc 로 추정하지 않는다**(fail-safe).
+    """
+    n = re.sub(r"\s+", "", (label or "").lower())
+    if not n:
+        return None
+    if "call" in n:                         # "functioncalls" / "calls"
+        return "function_calls_coverage"
+    if "function" in n:                     # "functions"
+        return "function_coverage"
+    if "mc" in n and "dc" in n:             # "mcdc" / "mc/dc" / "mc|dc" / "mc-dc"
+        return "mcdc"
+    if "statement" in n:                    # "statements" 또는 결합 "statement+branch"
+        return "statement"
+    if "branch" in n:
+        return "branch"
+    return None
+
+
+def _map_metric_columns(table, warn) -> list[str | None] | None:
+    """table 헤더의 col_metric 라벨을 순서대로 필드에 매핑. 헤더 미검출 시 None(=위치 폴백).
+
+    header row = %-값이 아닌 라벨 텍스트를 담은 col_metric ``<th>`` 를 가진 첫 tr(thead 우선).
+    각 index → 필드명(또는 None=미인식컬럼). 미인식 컬럼은 warn 후 None(배정 안 함).
+    """
+    thead = table.find("thead")
+    search_rows = thead.find_all("tr") if thead is not None else table.find_all("tr")
+    header_ths: list = []
+    for tr in search_rows:
+        ths = [th for th in tr.find_all("th") if "col_metric" in (th.get("class") or [])]
+        if not ths:
+            continue
+        # 값(%-패턴) 행(TOTALS 등)은 헤더가 아니므로 skip — 라벨 행만 채택
+        if any(_RE_PCT.search(th.get_text(" ", strip=True)) for th in ths):
+            continue
+        header_ths = ths
+        break
+    if not header_ths:
+        warn("[aggregate-coverage] col_metric 헤더 미검출 — 위치기반 폴백(statement/branch만, MC/DC 미측정)")
+        return None
+    mapping: list[str | None] = []
+    for th in header_ths:
+        label = th.get_text(" ", strip=True)
+        fld = _classify_metric_label(label)
+        if fld is None:
+            warn(f"[aggregate-coverage] 미인식 metric 컬럼 '{label}' — 배정 안 함(mcdc 추정 금지)")
+        mapping.append(fld)
+    return mapping
+
+
+def extract_aggregate_coverage(
+    html_bytes: bytes,
+    out_warnings: list | None = None,
+) -> tuple[list[FunctionCoverage], FunctionCoverage]:
     """SWTE AggregateCoverage HTML → per-function metrics + GRAND TOTALS.
+
+    2026-07-23 — 컬럼을 **헤더 라벨 기반**으로 매핑한다(과거 위치 배정은 IT 3번째 컬럼
+    Functions 를 mcdc 로 오표기해 거짓 MC/DC 를 냈다). ``mcdc`` 는 헤더가 실제 MC/DC 인
+    컬럼에서만 채운다. ``out_warnings`` 가 주어지면 미인식/폴백 사유를 append.
 
     Returns:
         (functions, grand_total) — functions 리스트와 합산 행.
@@ -503,6 +573,13 @@ def extract_aggregate_coverage(html_bytes: bytes) -> tuple[list[FunctionCoverage
     if table is None:
         return ([], FunctionCoverage())
 
+    def _warn(msg: str) -> None:
+        if out_warnings is not None:
+            out_warnings.append(msg)
+
+    # 2026-07-23 안전 fix — 헤더 기반 컬럼 매핑(None 이면 위치 폴백). mcdc 는 실제 MC/DC 컬럼에서만.
+    metric_field_by_idx = _map_metric_columns(table, _warn)
+
     functions: list[FunctionCoverage] = []
     grand_total = FunctionCoverage(unit_id="GRAND_TOTALS", name="GRAND TOTALS")
 
@@ -515,6 +592,7 @@ def extract_aggregate_coverage(html_bytes: bytes) -> tuple[list[FunctionCoverage
     # fix: 빈 first cell이면 이전 component_name 유지 + second cell (Subprogram)이 함수명.
     rows = table.find_all("tr")
     current_component = ""
+    _asym_warned = False  # 헤더-데이터 col_metric 비대칭 경고 1회만(flood 방지)
     for row in rows:
         cells = row.find_all(["th", "td"])
         if len(cells) < 4:
@@ -547,7 +625,6 @@ def extract_aggregate_coverage(html_bytes: bytes) -> tuple[list[FunctionCoverage
             continue
 
         metric_cells = [c.get_text(" ", strip=True) for c in cells]
-        metrics = [_parse_metric_cell(t) for t in metric_cells if _RE_PCT.search(t)]
 
         # 라운드 77 T1202 — component_name 명시 주입 (R10 C3 anomaly fix).
         fc = FunctionCoverage(
@@ -562,12 +639,41 @@ def extract_aggregate_coverage(html_bytes: bytes) -> tuple[list[FunctionCoverage
             fc.complexity = cplx
         except StopIteration:
             pass
-        if len(metrics) >= 1:
-            fc.statement = metrics[0]
-        if len(metrics) >= 2:
-            fc.branch = metrics[1]
-        if len(metrics) >= 3:
-            fc.mcdc = metrics[2]
+
+        # 2026-07-23 — 헤더 기반 metric 배정. mcdc 는 실제 MC/DC 컬럼에서만 채운다
+        # (과거 metrics[2]→mcdc 위치배정이 IT Functions 컬럼을 거짓 MC/DC 로 표기).
+        if metric_field_by_idx is not None:
+            # col_metric 셀을 순서대로 헤더 매핑 필드에 배정(빈 셀도 위치 보존 — 정렬 어긋남 방지).
+            metric_tds = [c for c in cells if "col_metric" in (c.get("class") or [])]
+            if metric_tds:
+                for _i, _td in enumerate(metric_tds):
+                    if _i >= len(metric_field_by_idx):
+                        break
+                    _fld = metric_field_by_idx[_i]
+                    if not _fld:
+                        continue
+                    _txt = _td.get_text(" ", strip=True)
+                    if _RE_PCT.search(_txt):
+                        setattr(fc, _fld, _parse_metric_cell(_txt))
+            else:
+                # deep-review W1 — 헤더엔 col_metric 이 있으나 이 데이터행 셀엔 없는 비대칭 양식.
+                # 침묵 0-커버리지(under-report) 대신 statement/branch 위치폴백(mcdc 는 안전 공백) + 1회 warn.
+                _prow = [_parse_metric_cell(t) for t in metric_cells if _RE_PCT.search(t)]
+                if _prow:
+                    if len(_prow) >= 1:
+                        fc.statement = _prow[0]
+                    if len(_prow) >= 2:
+                        fc.branch = _prow[1]
+                    if not _asym_warned:
+                        _asym_warned = True
+                        _warn("[aggregate-coverage] 데이터행 col_metric 부재(헤더-데이터 비대칭) — statement/branch 위치폴백, MC/DC 미측정")
+        else:
+            # 폴백(헤더 미인식): statement/branch 만 위치배정, mcdc 는 안전상 비움.
+            metrics = [_parse_metric_cell(t) for t in metric_cells if _RE_PCT.search(t)]
+            if len(metrics) >= 1:
+                fc.statement = metrics[0]
+            if len(metrics) >= 2:
+                fc.branch = metrics[1]
 
         if "GRAND TOTAL" in function_name.upper() or "TOTAL" in function_name.upper():
             grand_total = fc
@@ -1841,7 +1947,8 @@ def collect_from_log_folder(
         )
         try:
             data = _read_via_resolver(resolver, cov_path)
-            funcs, total = extract_aggregate_coverage(data)
+            # deep-review W2 — 파서 경고(미인식 컬럼/비대칭 폴백)를 빌더 감사로그(parse_errors)에 남김.
+            funcs, total = extract_aggregate_coverage(data, out_warnings=env_data.parse_errors)
             env_data.function_coverage = funcs
             env_data.grand_total = total
             # 2026-06-18 Item 2 — 동일 HTML annotated source에서 함수별 미커버 line
@@ -2222,7 +2329,8 @@ def collect_from_jenkins_cache(
             try:
                 with open(cov_path, "rb") as fh:
                     cov_data = fh.read()
-                funcs, total = extract_aggregate_coverage(cov_data)
+                # deep-review W2 — 파서 경고를 빌더 감사로그(parse_errors)에 남김.
+                funcs, total = extract_aggregate_coverage(cov_data, out_warnings=env_data.parse_errors)
                 env_data.function_coverage = funcs
                 env_data.grand_total = total
                 # 2026-06-18 Item 2 — 미커버 line 추출 (fail-safe).

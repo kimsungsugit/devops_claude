@@ -405,6 +405,140 @@ class TestExtractAggregateCoverage:
         assert total.branch.total == 21
 
 
+def _agg_html_col_metric(metric_headers, rows, *, with_thead=True):
+    """VC2025 양식(col_metric class) AggregateCoverage HTML 생성.
+
+    rows: list of (unit, subprogram, complexity, [metric_cell_texts]).
+    header 라벨을 실제 VectorCAST 양식대로 col_metric th 로 낸다(헤더기반 매핑 테스트용).
+    """
+    head_cells = "".join(f'<th class="col_metric">{h}</th>' for h in metric_headers)
+    header_tr = (
+        '<tr><th class="col_unit">Unit</th><th class="col_subprogram">Subprogram</th>'
+        f'<th class="col_complexity">Complexity</th>{head_cells}</tr>'
+    )
+    body = ""
+    for unit, sub, cplx, cells in rows:
+        tds = "".join(f'<td class="success col_metric">{c}</td>' for c in cells)
+        body += (
+            f'<tr><td class="col_unit">{unit}</td><td class="col_subprogram">{sub}</td>'
+            f'<td class="col_complexity">{cplx}</td>{tds}</tr>'
+        )
+    thead = f"<thead>{header_tr}</thead>" if with_thead else ""
+    inner_head = "" if with_thead else header_tr
+    return (
+        f'<html><body><h2>Metrics</h2><table>{thead}<tbody>{inner_head}{body}</tbody>'
+        "</table></body></html>"
+    ).encode("utf-8")
+
+
+class TestHeaderAwareMetricMapping:
+    """2026-07-23 안전 fix — AggregateCoverage 컬럼을 헤더 라벨로 매핑.
+
+    과거 위치배정(metrics[0/1/2]→statement/branch/mcdc)이 IT 리포트 3번째 컬럼
+    Functions(함수 진입)를 거짓 MC/DC 로 표기하던 것(ISO 26262 거짓 안전지표)을 차단한다.
+    핵심 불변식: mcdc 는 헤더가 실제 MC/DC 인 컬럼에서만 채운다.
+    """
+
+    def test_ut_two_columns_leaves_mcdc_empty(self):
+        html = _agg_html_col_metric(
+            ["Statements", "Branches"],
+            [("Cpu", "fn_a", "1", ["8 / 10 (80%)", "2 / 4 (50%)"])],
+        )
+        funcs, _ = extract_aggregate_coverage(html)
+        assert len(funcs) == 1
+        assert (funcs[0].statement.covered, funcs[0].statement.total) == (8, 10)
+        assert (funcs[0].branch.covered, funcs[0].branch.total) == (2, 4)
+        assert funcs[0].mcdc.total == 0  # MC/DC 컬럼 부재 → 비움
+
+    def test_real_mcdc_column_populates_mcdc(self):
+        html = _agg_html_col_metric(
+            ["Statements", "Branches", "MC/DC"],
+            [("Cpu", "fn_a", "1", ["8 / 8 (100%)", "2 / 2 (100%)", "3 / 5 (60%)"])],
+        )
+        funcs, _ = extract_aggregate_coverage(html)
+        assert (funcs[0].mcdc.covered, funcs[0].mcdc.total) == (3, 5)
+        assert funcs[0].function_coverage.total == 0
+
+    def test_functions_column_not_mislabeled_as_mcdc(self):
+        # IT 양식: 3번째 = Functions(함수 진입). 전 함수 1-pair·covered≡실행 = MC/DC 아님.
+        html = _agg_html_col_metric(
+            ["Statements", "Branches", "Functions"],
+            [
+                ("Ap", "s_IsDoorClosed", "3", ["0 / 4 (0%)", "0 / 3 (0%)", "0 / 1 (0%)"]),
+                ("Ap", "g_Ap_Diag", "1", ["3 / 3 (100%)", "1 / 1 (100%)", "1 / 1 (100%)"]),
+            ],
+        )
+        funcs, _ = extract_aggregate_coverage(html)
+        assert len(funcs) == 2
+        assert (funcs[0].statement.covered, funcs[0].statement.total) == (0, 4)
+        assert (funcs[0].branch.covered, funcs[0].branch.total) == (0, 3)
+        # ★ 거짓 MC/DC 차단 — 두 함수 모두 mcdc 비어야 한다
+        assert funcs[0].mcdc.total == 0
+        assert funcs[1].mcdc.total == 0
+        # Functions 는 function_coverage 로 정확 배정
+        assert (funcs[1].function_coverage.covered, funcs[1].function_coverage.total) == (1, 1)
+
+    def test_unrecognized_column_warns_and_skips_mcdc(self):
+        warns: list[str] = []
+        html = _agg_html_col_metric(
+            ["Statements", "Branches", "Frobnicate"],
+            [("Cpu", "fn_a", "1", ["8 / 8 (100%)", "2 / 2 (100%)", "9 / 9 (100%)"])],
+        )
+        funcs, _ = extract_aggregate_coverage(html, out_warnings=warns)
+        assert funcs[0].mcdc.total == 0  # 미인식 → mcdc 추정 금지
+        assert any("Frobnicate" in w or "미인식" in w for w in warns)
+
+    def test_empty_metric_cell_keeps_column_alignment(self):
+        # 빈 Function Calls 셀(" ")이어도 위치 보존 → branch 오정렬 없음.
+        html = _agg_html_col_metric(
+            ["Statements", "Branches", "Function Calls"],
+            [("Cpu", "fn_a", "1", ["8 / 10 (80%)", "2 / 4 (50%)", " "])],
+        )
+        funcs, _ = extract_aggregate_coverage(html)
+        assert (funcs[0].statement.covered, funcs[0].statement.total) == (8, 10)
+        assert (funcs[0].branch.covered, funcs[0].branch.total) == (2, 4)
+        assert funcs[0].function_calls_coverage.total == 0  # 빈 셀 → 미배정
+
+    def test_no_col_metric_falls_back_positional_without_false_mcdc(self):
+        # 헤더 클래스 없는 레거시 표 → 위치 폴백(statement/branch만), mcdc 안전상 비움.
+        warns: list[str] = []
+        html = (
+            "<html><body><h2>Metrics</h2><table><tbody>"
+            "<tr><th>Unit</th><th>Subprogram</th><th>Complexity</th>"
+            "<th>Statements</th><th>Branches</th><th>MysteryCol</th></tr>"
+            "<tr><th>Cpu</th><th>fn_a</th><th>1</th>"
+            "<th>8 / 8 (100%)</th><th>2 / 2 (100%)</th><th>5 / 9 (55%)</th></tr>"
+            "</tbody></table></body></html>"
+        ).encode("utf-8")
+        funcs, _ = extract_aggregate_coverage(html, out_warnings=warns)
+        assert (funcs[0].statement.covered, funcs[0].statement.total) == (8, 8)
+        assert (funcs[0].branch.covered, funcs[0].branch.total) == (2, 2)
+        assert funcs[0].mcdc.total == 0  # 폴백도 3번째→mcdc 오배정 안 함
+        assert any("폴백" in w or "col_metric" in w for w in warns)
+
+    def test_header_col_metric_but_data_bare_falls_back_per_row(self):
+        # deep-review W1 — 헤더엔 col_metric 있으나 데이터행 셀엔 없는 비대칭 양식:
+        # 침묵 0-커버리지 대신 statement/branch 위치폴백 + mcdc 안전 공백 + warn.
+        warns: list[str] = []
+        html = (
+            '<html><body><h2>Metrics</h2><table><thead>'
+            '<tr><th class="col_unit">Unit</th><th class="col_subprogram">Subprogram</th>'
+            '<th class="col_complexity">Complexity</th>'
+            '<th class="col_metric">Statements</th><th class="col_metric">Branches</th>'
+            '<th class="col_metric">Functions</th></tr></thead><tbody>'
+            '<tr><td>Cpu</td><td>fn_a</td><td>1</td>'
+            '<td>8 / 10 (80%)</td><td>2 / 4 (50%)</td><td>1 / 1 (100%)</td></tr>'
+            '</tbody></table></body></html>'
+        ).encode("utf-8")
+        funcs, _ = extract_aggregate_coverage(html, out_warnings=warns)
+        assert len(funcs) == 1
+        assert (funcs[0].statement.covered, funcs[0].statement.total) == (8, 10)
+        assert (funcs[0].branch.covered, funcs[0].branch.total) == (2, 4)
+        # ★ 비대칭 폴백에서도 3번째(Functions) 셀이 mcdc 로 새지 않는다
+        assert funcs[0].mcdc.total == 0
+        assert any("비대칭" in w for w in warns)
+
+
 class TestRound77ComponentName:
     """라운드 77 T1201/T1202 — FunctionCoverage.component_name 필드 + extract 명시 주입."""
 

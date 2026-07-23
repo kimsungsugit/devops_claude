@@ -369,6 +369,63 @@ describe('AnalysisSection', () => {
     }
   });
 
+  // ── 2026-07-23 VectorCAST UT/IT 표시 정정 (제안서 2.1~2.6) ──
+
+  it('IT MC/DC 컬럼 부재(mcdc 0/0)면 거짓 % 대신 "측정 안 됨" + IT 각주 UT동일규칙 + 스킵·미분류 0 표시', async () => {
+    // 2.5-front: 헤더기반 파서가 MC/DC 컬럼 없으면 mcdc 비움 → 과거 거짓 53%(=함수 진입) 대신 '측정 안 됨'.
+    // 2.2: IT 각주 ERROR→실패(UT 동일). 2.3: 스킵·미분류 0이어도 표시.
+    vi.useFakeTimers();
+    try {
+      const { post, api } = await import('../api.js');
+      post.mockResolvedValue({ ok: true, job_id: 'jmcdc' });
+      api.mockResolvedValue({ ok: true, job: { status: 'completed', result: { ok: true, source: 'cloudium', data: {
+        test_rows_count: 8, test_rows_count_it: 8, ut_reports: [], it_reports: ['i'],
+        summary_it: { total: 8, passed: 8, failed: 0, skipped: 0, unknown: 0, pass_rate: 1.0 },
+        coverage_it: {
+          statement: { covered: 40, total: 52, rate: 0.77 },
+          branch: { covered: 20, total: 40, rate: 0.5 },
+          mcdc: { covered: 0, total: 0, rate: null },   // MC/DC 컬럼 부재 → 헤더기반 파서가 비움
+        },
+      } } } });
+      const result = makeAnalysisResult({ matchedScm: { id: 's', name: 'S', linked_docs: { vectorcast: ['U:/vc'] } } });
+      render(<AnalysisSection job={makeJob()} analysisResult={result} />);
+      await act(async () => {
+        fireEvent.click(screen.getByText('SCM 경로에서 불러오기'));
+        await vi.advanceTimersByTimeAsync(3500);
+      });
+      expect(screen.getByText('원본 리포트에서 측정 안 됨')).toBeInTheDocument();  // 2.5-front
+      expect(screen.getByText(/UT와 동일 규칙/)).toBeInTheDocument();             // 2.2
+      expect(screen.getByText('스킵')).toBeInTheDocument();                        // 2.3 (0이어도)
+      expect(screen.getByText('미분류')).toBeInTheDocument();                      // 2.3 (0이어도)
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('IT 함수레벨 로드됐으나 Metric Report(함수/호출) 부재면 "원본 데이터 없음"을 표시한다(2.1)', async () => {
+    vi.useFakeTimers();
+    try {
+      const { post, api } = await import('../api.js');
+      post.mockResolvedValue({ ok: true, job_id: 'jnofc' });
+      api.mockResolvedValue({ ok: true, job: { status: 'completed', result: { ok: true, source: 'cloudium', data: {
+        test_rows_count: 3, it_reports: ['i'], ut_reports: [],
+        // it_metrics.entries 있음(함수레벨 로드) + grand_totals 없음(Metric report 부재) → 침묵 소멸 대신 명시
+        vcast_summary: { it_metrics: { entries: [
+          { unit: 'm.c', subprogram: 'fn', statements: { covered: 1, total: 1, rate: 1 } },
+        ] } },
+      } } } });
+      const result = makeAnalysisResult({ matchedScm: { id: 's', name: 'S', linked_docs: { vectorcast: ['U:/vc'] } } });
+      render(<AnalysisSection job={makeJob()} analysisResult={result} />);
+      await act(async () => {
+        fireEvent.click(screen.getByText('SCM 경로에서 불러오기'));
+        await vi.advanceTimersByTimeAsync(3500);
+      });
+      expect(screen.getByText('원본 데이터 없음 (Metric Report 미확인)')).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   // ── SwUTCV/SwITCV 정합성 검증 (Coverage Report ↔ SUTR/SITR) ──
 
   it('SwUTCV 정합성 검증: 경로 입력 후 실행하면 /api/swut/consistency/check 호출 + PASS·커버리지 요약 표시', async () => {

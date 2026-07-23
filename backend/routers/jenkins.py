@@ -1163,7 +1163,7 @@ def _parse_vcast_logs_from_cloudium_folder(path: str) -> Dict[str, Any]:
                         alt_suffixes=cov_alt, idx_cache=idx_cache, out_warnings=warnings,
                     )
                     cdata = SA._read_via_resolver(resolver, cov_path)
-                    funcs, grand = SA.extract_aggregate_coverage(cdata)
+                    funcs, grand = SA.extract_aggregate_coverage(cdata, out_warnings=warnings)
                 except (PermissionError, OSError) as e:
                     warnings.append(f"{env}: AggregateCoverage 접근 실패 ({type(e).__name__})")
                     continue
