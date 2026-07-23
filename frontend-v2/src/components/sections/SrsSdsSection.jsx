@@ -165,6 +165,7 @@ export default function SrsSdsSection({ job, analysisResult }) {
     const cached = forceRefresh ? null : loadTraceMatrixByKey(cacheKey);
     if (cached) {
       setMatrix(cached.data);
+      setWarnings(cached.data?._warnings || []);   // 저장 시점 경고 재노출(silent 은폐 방지)
       setRestoredMeta({ savedAt: cached.savedAt, stale: false });  // 정확 키 일치 = current(clean)
       toast('info', '캐시된 매트릭스를 사용합니다. 새로 생성하려면 새로고침을 누르세요.');
       return;
@@ -480,8 +481,6 @@ export default function SrsSdsSection({ job, analysisResult }) {
         build_selector: cfg?.buildSelector || 'lastSuccessfulBuild',
       });
       // 이 시점까지의 경고 = 실제 step 실패(SUTS/SITS/VectorCAST 추출 실패·매핑 없음).
-      // 아래 untraced 경고는 정보성이므로 캐시 가드 판단에서 제외하기 위해 먼저 스냅샷.
-      const hadStepFailure = stepWarnings.length > 0;
       // VectorCAST bridge 가시성: SRS에 연결된 함수 수 / 미연결(이 SRS 범위 밖 함수).
       // 미연결엔 단위시험된 함수(SDS 명세 공백 후보)도 포함 — 트리 'SRS 미추적 시험'에서 확인.
       const vcSum = (data?.matrix?.summary) || data?.summary || {};
@@ -495,15 +494,19 @@ export default function SrsSdsSection({ job, analysisResult }) {
       }
       // Attach metadata
       data._dataSources = dataSources;
+      // ⚠ 경고(stepWarnings)를 매트릭스와 함께 저장한다 — 복원 시 setWarnings로 재노출하기 위함.
+      // 과거엔 stepWarnings가 하나라도 있으면(hadStepFailure) 캐시를 통째로 막았는데, 실제 프로젝트는
+      // 데이터품질 advisory(SyRS 미매칭 참조·SITS 2-hop 등)가 상시 1건 이상이라 저장이 영구 차단돼
+      // 재진입·F5마다 매트릭스가 사라졌다(사용자 실사용 콘솔 진단으로 확인: save 함수가 한 번도
+      // 호출 안 됨 — 화면엔 매트릭스가 있는데 store는 비어 있었다). 원 취지(불완전 매트릭스가 silent
+      // 은폐)는 '경고 동반 저장 + 복원 시 재노출'로 해소된다 — 복원돼도 경고가 그대로 보이므로 은폐가
+      // 아니다. 따라서 zero-warning 게이트를 제거하고 항상 저장한다(saveTraceMatrix가 렌더 불가면 no-op).
+      data._warnings = stepWarnings;
       setMatrix(data);
       setRestoredMeta(null);  // 방금 생성한 fresh — 복원 배지 숨김(stale 위장 방지)
-      // 부분 실패(step 실패) 시 캐시 저장 안 함 — 불완전 매트릭스가 '캐시 사용'으로 굳어
-      // 시험 evidence 누락을 silent 은폐하는 것 방지(deep-analyze WARNING). 정상 시에만 캐시.
-      if (!hadStepFailure) {
-        // binding(활성 문서 기준)도 함께 저장 — 정확 키 miss 시에도 같은 프로젝트면 마지막
-        // 결과를 stale로 되살리기 위한 결속. cacheKey(정확)와 같은 activeDocs 기반이라 일관.
-        saveTraceMatrix(cacheKey, buildBinding(activeDocs), data);  // 모듈캐시 + localStorage(재진입/새로고침 생존)
-      }
+      // binding(활성 문서 기준)도 함께 저장 — 정확 키 miss 시에도 같은 프로젝트면 마지막 결과를
+      // stale로 되살리기 위한 결속. cacheKey(정확)와 같은 activeDocs 기반이라 일관.
+      saveTraceMatrix(cacheKey, buildBinding(activeDocs), data);  // 모듈캐시 + localStorage(재진입/새로고침 생존)
       if (dataSources.length > 0) {
         toast('success', `매트릭스 생성 완료: ${dataSources.join(', ')}`);
       }
@@ -562,6 +565,7 @@ export default function SrsSdsSection({ job, analysisResult }) {
       // fresh(restoredMeta===null)는 건드리지 않는다 — clean 배지로 뒤집히면 오히려 stale 위장.
       if (!matrix || restoredMeta?.stale) {
         setMatrix(exact.data);
+        setWarnings(exact.data?._warnings || []);   // 저장 시점 경고 재노출(silent 은폐 방지)
         setRestoredMeta({ savedAt: exact.savedAt, stale: false });
       }
       return;
@@ -570,6 +574,7 @@ export default function SrsSdsSection({ job, analysisResult }) {
     const last = loadTraceMatrixByBinding(_mountBinding);  // 2) 같은 프로젝트 마지막 = stale
     if (last) {
       setMatrix(last.data);
+      setWarnings(last.data?._warnings || []);   // 저장 시점 경고 재노출(stale이어도 은폐 안 함)
       setRestoredMeta({ savedAt: last.savedAt, stale: true });
     }
     /* eslint-enable react-hooks/set-state-in-effect */

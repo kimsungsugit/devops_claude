@@ -1,10 +1,21 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import LZString from 'lz-string';
 import {
   saveTraceMatrix, loadTraceMatrixByKey, loadTraceMatrixByBinding, clearTraceMatrix,
-  TRACE_STORE_VERSION,
+  TRACE_STORE_VERSION, __setTraceMaxLSCharsForTest,
 } from '../traceMatrixStore.js';
 
 const KEY = 'devops_v2_trace_matrix_current';
+
+// localStorage 미러는 lz-string 압축(compressToUTF16)으로 저장된다 — 원시 조작 테스트는 이 두
+// 헬퍼로 압축/해제를 경유한다(프로덕션 저장 경로와 동일 인코딩).
+const putLS = (obj) => localStorage.setItem(KEY, LZString.compressToUTF16(JSON.stringify(obj)));
+const readLS = () => {
+  const s = localStorage.getItem(KEY);
+  return s ? JSON.parse(LZString.decompressFromUTF16(s)) : null;
+};
+
+afterEach(() => __setTraceMaxLSCharsForTest());  // 상한을 낮춘 테스트 뒤 기본값(2M) 복원
 
 // 실제 소비자(SrsSdsSection.buildCacheKey)와 같은 SHAPE — 요구/설계/시험 문서 경로 전체 +
 // jobUrl + sourceRoot. 정확(clean) 복원은 이 전체가 일치할 때만.
@@ -103,9 +114,7 @@ describe('traceMatrixStore — binding(stale) 복원: 같은 프로젝트 마지
   });
 
   it('모듈캐시가 비어도(새로고침) localStorage에서 binding 복원', () => {
-    localStorage.setItem(KEY, JSON.stringify({
-      v: TRACE_STORE_VERSION, key: mkKey(), bindingKey: mkBinding(), data: mkMatrix(4), savedAt: 222,
-    }));
+    putLS({ v: TRACE_STORE_VERSION, key: mkKey(), bindingKey: mkBinding(), data: mkMatrix(4), savedAt: 222 });
     const stale = loadTraceMatrixByBinding(mkBinding({ suts: 'U:/suts_v1.02.xlsm' }));
     expect(stale.data.rows).toHaveLength(4);
     expect(stale.savedAt).toBe(222);
@@ -115,18 +124,32 @@ describe('traceMatrixStore — binding(stale) 복원: 같은 프로젝트 마지
 describe('traceMatrixStore — localStorage 미러(새로고침 생존)', () => {
   beforeEach(() => { clearTraceMatrix(); localStorage.clear(); });
 
-  it('저장 시 localStorage에 key와 bindingKey가 함께 미러링된다', () => {
+  it('저장 시 localStorage에 key와 bindingKey가 압축 미러링된다', () => {
     saveTraceMatrix(mkKey(), mkBinding(), mkMatrix());
-    const raw = JSON.parse(localStorage.getItem(KEY));
+    const raw = readLS();   // 압축 해제 경유
     expect(raw.v).toBe(TRACE_STORE_VERSION);
     expect(raw.key).toBe(mkKey());
     expect(raw.bindingKey).toBe(mkBinding());
     expect(Array.isArray(raw.data.rows)).toBe(true);
   });
 
+  it('대용량 매트릭스도 압축으로 localStorage에 저장된다(F5 생존 — 이번 fix 핵심)', () => {
+    // 실측: 실제 KJPDS02_PV 매트릭스는 68행에도 직렬화 4.2MB(행당 vcast 실행 다수). 압축 전이면
+    // localStorage 상한(2M)을 넘어 skip→F5 소실이었다. 압축으로 들어가는지 검증.
+    const key = mkKey();
+    const big = mkMatrix(80000);
+    const rawLen = JSON.stringify({ v: TRACE_STORE_VERSION, key, bindingKey: mkBinding(), data: big, savedAt: 1 }).length;
+    expect(rawLen).toBeGreaterThan(2_000_000);   // 원본은 상한 초과 → 과거엔 skip됐다
+    saveTraceMatrix(key, mkBinding(), big);
+    const stored = localStorage.getItem(KEY);
+    expect(stored).not.toBeNull();                    // 압축돼서 저장됨(과거엔 raw>2M라 skip)
+    expect(stored.length).toBeLessThan(2_000_000);    // 압축 결과는 상한 이하
+    expect(readLS().data.rows).toHaveLength(80000);   // 압축 해제 후 원본 그대로 복원
+  });
+
   it('모듈캐시가 비어도(새로고침 시뮬레이션) localStorage에서 정확 키 복원', () => {
     const key = mkKey();
-    localStorage.setItem(KEY, JSON.stringify({ v: TRACE_STORE_VERSION, key, bindingKey: mkBinding(), data: mkMatrix(2), savedAt: 111 }));
+    putLS({ v: TRACE_STORE_VERSION, key, bindingKey: mkBinding(), data: mkMatrix(2), savedAt: 111 });
     const hit = loadTraceMatrixByKey(key);
     expect(hit.data.rows).toHaveLength(2);
     expect(hit.savedAt).toBe(111);
@@ -134,50 +157,57 @@ describe('traceMatrixStore — localStorage 미러(새로고침 생존)', () => 
 
   it('버전이 없거나 다른 저장분은 폐기한다(구 스키마 크래시 방지)', () => {
     const key = mkKey();
-    localStorage.setItem(KEY, JSON.stringify({ v: TRACE_STORE_VERSION - 1, key, data: mkMatrix(), savedAt: 1 }));
+    putLS({ v: TRACE_STORE_VERSION - 1, key, data: mkMatrix(), savedAt: 1 });
     expect(loadTraceMatrixByKey(key)).toBeNull();
-    localStorage.setItem(KEY, JSON.stringify({ key, data: mkMatrix(), savedAt: 1 }));  // v 없음
+    putLS({ key, data: mkMatrix(), savedAt: 1 });  // v 없음
     expect(loadTraceMatrixByKey(key)).toBeNull();
   });
 
-  it('깨진 JSON / 렌더불가 저장분은 null', () => {
-    localStorage.setItem(KEY, '{not json');
+  it('압축 해제 불가 / 렌더불가 저장분은 null', () => {
+    localStorage.setItem(KEY, '{not json');   // 비압축 손상값 → decompress null/garbage → 폐기
     expect(loadTraceMatrixByKey(mkKey())).toBeNull();
-    localStorage.setItem(KEY, JSON.stringify({ v: TRACE_STORE_VERSION, key: mkKey(), data: { summary: {} }, savedAt: 1 }));
+    putLS({ v: TRACE_STORE_VERSION, key: mkKey(), data: { summary: {} }, savedAt: 1 });
     expect(loadTraceMatrixByKey(mkKey())).toBeNull();  // rows/items 없음
   });
 });
 
 describe('traceMatrixStore — 크기가드·오버사이즈', () => {
-  beforeEach(() => { clearTraceMatrix(); localStorage.clear(); });
+  // 오버사이즈 skip 경로 검증: 압축 도입 후 실제 매트릭스(4MB급)는 ~3%로 줄어 다 들어가므로,
+  // skip은 병적(수십 MB) 케이스뿐이다. 수십 MB 실압축은 느려서(lz-string 초 단위), 테스트 seam으로
+  // 상한을 아주 낮춰(압축비 무관하게 소형 매트릭스도 초과) 같은 else-branch 로직을 빠르게 탄다.
+  beforeEach(() => { clearTraceMatrix(); localStorage.clear(); __setTraceMaxLSCharsForTest(20); });
 
-  it('과대 매트릭스는 localStorage skip, 모듈캐시는 유지(안전 degrade)', () => {
+  it('압축해도 상한 초과면 localStorage skip, 모듈캐시는 유지(안전 degrade)', () => {
     const key = mkKey();
-    const huge = mkMatrix(80000);  // 직렬화 > 2MB
-    expect(JSON.stringify(huge).length).toBeGreaterThan(2_000_000);
-    expect(saveTraceMatrix(key, mkBinding(), huge)).toBe(true);   // 모듈캐시엔 저장
+    // 상한 20자 — 소형 매트릭스도 압축 후 20자를 넘는다(비-vacuous 전제).
+    expect(LZString.compressToUTF16(JSON.stringify({ v: TRACE_STORE_VERSION, key, bindingKey: mkBinding(), data: mkMatrix(3), savedAt: 1 })).length).toBeGreaterThan(20);
+    expect(saveTraceMatrix(key, mkBinding(), mkMatrix(3))).toBe(true);   // 모듈캐시엔 저장
     expect(localStorage.getItem(KEY)).toBeNull();     // localStorage는 skip
-    expect(loadTraceMatrixByKey(key).data.rows).toHaveLength(80000);  // 세션 내 복원 가능
+    expect(loadTraceMatrixByKey(key).data.rows).toHaveLength(3);  // 세션 내 복원 가능(모듈캐시)
     // 세션 내에서는 binding 복원도 여전히 동작(모듈캐시 기반).
-    expect(loadTraceMatrixByBinding(mkBinding({ suts: 'x' })).data.rows).toHaveLength(80000);
+    expect(loadTraceMatrixByBinding(mkBinding({ suts: 'x' })).data.rows).toHaveLength(3);
   });
 
   it('오버사이즈 저장이 타 프로젝트의 localStorage 미러를 축출하지 않는다(deep-review Warning)', () => {
     const keyA = mkKey({ jobUrl: 'http://j/job/A/' });
-    saveTraceMatrix(keyA, mkBinding({ jobUrl: 'http://j/job/A/' }), mkMatrix(2));   // 작은 A → localStorage = A
-    expect(JSON.parse(localStorage.getItem(KEY)).key).toBe(keyA);
+    __setTraceMaxLSCharsForTest();   // 기본값(2M) — 작은 A는 정상 저장
+    saveTraceMatrix(keyA, mkBinding({ jobUrl: 'http://j/job/A/' }), mkMatrix(2));   // localStorage = A
+    expect(readLS().key).toBe(keyA);
+    __setTraceMaxLSCharsForTest(20);  // 이후 B는 상한 초과로 skip
     const keyB = mkKey({ jobUrl: 'http://j/job/B/' });
-    saveTraceMatrix(keyB, mkBinding({ jobUrl: 'http://j/job/B/' }), mkMatrix(80000));  // 오버사이즈 B(저장 불가)
-    const raw = JSON.parse(localStorage.getItem(KEY));
+    saveTraceMatrix(keyB, mkBinding({ jobUrl: 'http://j/job/B/' }), mkMatrix(3));  // 오버사이즈 B(저장 불가)
+    const raw = readLS();
     expect(raw).not.toBeNull();
-    expect(raw.key).toBe(keyA);
+    expect(raw.key).toBe(keyA);   // A의 미러는 그대로
   });
 
   it('자기 자신이 오버사이즈로 커지면 옛 미러(같은 키)는 정리한다(stale 방지)', () => {
     const key = mkKey();
-    saveTraceMatrix(key, mkBinding(), mkMatrix(2));                        // 작을 때 저장 → 미러 존재
+    __setTraceMaxLSCharsForTest();   // 기본값 — 작을 때 정상 저장
+    saveTraceMatrix(key, mkBinding(), mkMatrix(2));                        // 미러 존재
     expect(localStorage.getItem(KEY)).not.toBeNull();
-    saveTraceMatrix(key, mkBinding(), mkMatrix(80000));                    // 같은 키가 오버사이즈로
+    __setTraceMaxLSCharsForTest(20);  // 같은 키가 상한 초과로
+    saveTraceMatrix(key, mkBinding(), mkMatrix(3));
     expect(localStorage.getItem(KEY)).toBeNull();             // 자기 옛 미러는 제거
   });
 });

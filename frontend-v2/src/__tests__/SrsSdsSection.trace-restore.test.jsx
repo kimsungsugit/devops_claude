@@ -83,6 +83,17 @@ describe('SrsSdsSection — 추적성 매트릭스 마운트 복원', () => {
     expect(screen.queryByText(/입력 변경됨/)).not.toBeInTheDocument();
   });
 
+  it('복원 시 저장된 경고를 재노출한다(zero-warning 게이트 제거의 안전 근거 — silent 은폐 방지)', async () => {
+    // 실제 프로젝트는 데이터품질 advisory(SyRS 미매칭·SITS 2-hop 등)가 상시 있어, 과거엔 그 때문에
+    // 저장이 통째로 막혔다(재진입/F5마다 소실). 이제 경고를 매트릭스와 함께 저장·복원하므로 캐시해도
+    // 은폐가 아니다 — 복원 시 경고가 그대로 보여야 한다.
+    saveTraceMatrix(keyOf(), bindingOf(), { ...mkMatrix(), _warnings: ['SITS: 2-hop 의존 경고 XYZ'] });
+    render(<SrsSdsSection job={JOB} analysisResult={mkResult()} />);
+
+    expect(await screen.findByText(/💾\s*저장된 결과/)).toBeInTheDocument();
+    expect(await screen.findByText(/2-hop 의존 경고 XYZ/)).toBeInTheDocument();
+  });
+
   it('시험문서 드리프트(binding만 일치) → ⚠ 입력 변경됨(stale) 배지', async () => {
     // 저장은 옛 SUTS(U_old) 기준 → cacheKey는 다르지만 binding(설계문서+job)은 동일.
     saveTraceMatrix(keyOf({ suts: 'U_old.xlsm' }), bindingOf(), mkMatrix());

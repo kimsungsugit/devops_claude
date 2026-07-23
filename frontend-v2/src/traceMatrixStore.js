@@ -21,16 +21,28 @@
  *
  * 2층 구조:
  *  - 모듈 레벨 Map(_mem): 같은 세션 프로젝트 왕복을 즉시 복원(크기 무제한·직렬화 불필요). 주 캐시.
- *  - localStorage 미러(현재 1건): 새로고침 생존. 매트릭스는 단일 blob이라 impactStore식 부분
- *    drop이 불가 → 크기 초과 시 localStorage skip(모듈캐시만, 재생성 가능하므로 안전 degrade).
+ *  - localStorage 미러(현재 1건, **lz-string 압축**): 새로고침 생존. ⚠ 실측상 매트릭스는 68행에도
+ *    직렬화 4.2MB(행당 vcast 실행 다수 embed)라 원본 그대로면 localStorage 5MB 한도를 넘어 F5
+ *    복원이 안 됐다. JSON은 반복 구조(키·경로·상태)라 compressToUTF16으로 ~3% 로 줄어(실측) 넉넉히
+ *    들어간다. 압축해도 상한을 넘는 극단적 경우만 localStorage skip(모듈캐시만 = 안전 degrade).
  */
+import LZString from 'lz-string';
+
 const TRACE_KEY = 'devops_v2_trace_matrix_current';
 // 저장 payload 스키마 버전. 없거나 다르면 폐기(구 스키마가 렌더를 크래시시키는 것 방지 —
-// impactStore.js:14-16과 동일 사유).
+// impactStore.js:14-16과 동일 사유). 구 비압축 엔트리는 decompress 결과가 손상돼 후속 JSON.parse가
+// 실패하고, _readLS의 try/catch가 이를 흡수해 null 로 폐기한다(크래시 없음).
 export const TRACE_STORE_VERSION = 2;
-// localStorage 직렬화 상한(~2MB). 초과 시 localStorage 저장을 건너뛰고 모듈캐시만 유지한다.
-// 매트릭스가 수천 행이면 quota(≈5MB)를 압박하므로 방어. 새로고침 생존만 포기, 세션 내 왕복은 유지.
-const MAX_LS_BYTES = 2_000_000;
+// localStorage 저장 상한(**압축 후** 문자 수, ~2MB). 압축비 실측 ~3%라 원본 ~60MB까지 수용하는
+// 여유 한도다. 압축해도 초과하는 극단적 경우만 localStorage skip → 모듈캐시만 유지(F5 생존만 포기,
+// 세션 내 왕복은 유지). quota(≈5MB) 압박 방어.
+let _maxLSChars = 2_000_000;
+// 테스트 seam — skip 경로(압축해도 상한 초과)를 수십 MB 실데이터 없이 검증하려면 상한을 낮춰야
+// 한다(lz-string 대용량 압축은 초 단위로 느리다). 프로덕션은 기본값(2M)만 쓴다. 인자 없이/양수
+// 아니면 기본값 복원.
+export function __setTraceMaxLSCharsForTest(n) {
+  _maxLSChars = (typeof n === 'number' && n > 0) ? n : 2_000_000;
+}
 // 모듈캐시 상한 — 프로젝트 여러 개 왕복 대비, 무한성장 방지(삽입순서 LRU).
 const MEM_CAP = 8;
 
@@ -48,11 +60,16 @@ function isRenderableMatrix(data) {
 
 function _readLS() {
   try {
-    const raw = JSON.parse(localStorage.getItem(TRACE_KEY) || 'null');
+    const stored = localStorage.getItem(TRACE_KEY);
+    if (!stored) return null;
+    // 압축 해제. 구(비압축) 엔트리나 손상분은 null/garbage → JSON.parse 실패 → 폐기.
+    const json = LZString.decompressFromUTF16(stored);
+    if (!json) return null;
+    const raw = JSON.parse(json);
     if (!raw || typeof raw !== 'object') return null;
     if (raw.v !== TRACE_STORE_VERSION) return null;       // 구/미상 스키마 폐기
     if (!isRenderableMatrix(raw.data)) return null;        // 깨진 저장분 폐기
-    return raw;  // { v, key, data, savedAt }
+    return raw;  // { v, key, bindingKey, data, savedAt }
   } catch {
     return null;
   }
@@ -73,15 +90,16 @@ export function saveTraceMatrix(cacheKey, bindingKey, data) {
   while (_mem.size > MEM_CAP) {
     _mem.delete(_mem.keys().next().value);
   }
-  // localStorage 미러(크기 가드).
+  // localStorage 미러(압축 + 크기 가드).
   try {
     const payload = JSON.stringify({ v: TRACE_STORE_VERSION, key: cacheKey, bindingKey: bk, data, savedAt });
-    if (payload.length <= MAX_LS_BYTES) {
-      localStorage.setItem(TRACE_KEY, payload);
+    const compressed = LZString.compressToUTF16(payload);   // JSON 반복 구조라 ~3%(실측)
+    if (compressed.length <= _maxLSChars) {
+      localStorage.setItem(TRACE_KEY, compressed);
     } else {
-      // 오버사이즈: localStorage 저장 불가(모듈캐시만 = 안전 degrade). 단 기존 미러가 '다른'
-      // 키(타 프로젝트)면 지우지 않는다 — 오버사이즈 저장이 무관한 프로젝트의 새로고침 복원까지
-      // 파괴하지 않도록(deep-review Warning). 자기 자신의 옛 미러(같은 키)만 정리한다.
+      // 압축해도 상한 초과(극단적 대용량): localStorage 저장 불가(모듈캐시만 = 안전 degrade). 단
+      // 기존 미러가 '다른' 키(타 프로젝트)면 지우지 않는다 — 오버사이즈 저장이 무관한 프로젝트의
+      // 새로고침 복원까지 파괴하지 않도록(deep-review Warning). 자기 자신의 옛 미러(같은 키)만 정리.
       const existing = _readLS();
       if (!existing || existing.key === cacheKey) {
         try { localStorage.removeItem(TRACE_KEY); } catch { /* best-effort */ }
