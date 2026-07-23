@@ -295,3 +295,82 @@ def test_explain_function_change_with_llm(monkeypatch):
     # 선언 원문이 프롬프트에 포함됐는지
     joined = " ".join(m["content"] for m in captured["messages"])
     assert "int foo(int a, int b)" in joined
+
+
+def test_explain_function_change_injects_doc_content(monkeypatch):
+    """doc_content(현재 문서 내용)가 프롬프트에 원문으로 주입돼 '원문→제안' 근거가 된다."""
+    from workflow import impact_ai_guide
+    from workflow import ai as _ai
+    captured = {}
+
+    def _fake_call(cfg, messages, **k):
+        captured["messages"] = messages
+        return "원문→제안 설명"
+
+    monkeypatch.setattr(_ai, "load_oai_config", lambda _p: {"provider": "gemini"})
+    monkeypatch.setattr(_ai, "agent_call_text", _fake_call)
+    out = impact_ai_guide.explain_function_change(
+        function="s_tunningparamread_16bitdata", change_type="BODY", asil="A",
+        function_diff="@@ -1 +1 @@\n-old\n+new",
+        doc_content={
+            "uds": {"description": "튜닝 파라미터를 16bit로 읽어 반환한다",
+                    "prototype": "void s_TunningParamRead_16bitData(void)",
+                    "globals": ["s16g_FrM30OpGain"]},
+            "sds": "16비트 튜닝값 읽기 컴포넌트",
+            "suts": [{"tc_id": "SwUTC_1150", "expected": {"out": "0x4E"}}],
+        },
+    )
+    assert out
+    joined = " ".join(m["content"] for m in captured["messages"])
+    # 각 문서 현재 내용이 프롬프트에 원문으로 실렸는지
+    assert "튜닝 파라미터를 16bit로 읽어 반환한다" in joined
+    assert "16비트 튜닝값 읽기 컴포넌트" in joined
+    assert "SwUTC_1150" in joined
+    # '원문→제안' 지시가 프롬프트에 존재
+    assert "원문" in joined and "제안" in joined
+
+
+def test_explain_function_change_without_doc_content_unchanged(monkeypatch):
+    """doc_content 미제공(None) 시 기존 동작 유지 — 문서 원문 블록 없이 정상 설명."""
+    from workflow import impact_ai_guide
+    from workflow import ai as _ai
+    captured = {}
+
+    def _cap(cfg, messages, **k):
+        captured["m"] = messages
+        return "설명"
+
+    monkeypatch.setattr(_ai, "load_oai_config", lambda _p: {"provider": "gemini"})
+    monkeypatch.setattr(_ai, "agent_call_text", _cap)
+    out = impact_ai_guide.explain_function_change(
+        function="foo", change_type="SIGNATURE",
+        before="int foo(int a)", after="int foo(int a, int b)",
+    )
+    assert out
+    joined = " ".join(m["content"] for m in captured["m"])
+    # doc_content 주입 블록 고유 마커(system 프롬프트의 지시문과 구분되는 context 삽입부)
+    assert "[현재 문서 내용(원문) —" not in joined  # 원문 블록 미주입
+
+
+def test_format_doc_content_for_prompt_serializes_all_docs():
+    """직렬화 헬퍼가 uds/sds/suts/sts/sits를 라벨링해 캡한다(방어적·부분 결과)."""
+    from workflow.impact_ai_guide import _format_doc_content_for_prompt
+    s = _format_doc_content_for_prompt({
+        "uds": {"description": "설명", "prototype": "void f(void)", "globals": ["g1", "g2"]},
+        "sds": "SDS 내용",
+        "sts": [{"tc_id": "T1", "description": "STS 시험", "inputs": {"a": "1"}}],
+    })
+    assert "UDS Description: 설명" in s
+    assert "UDS Prototype: void f(void)" in s
+    assert "UDS Used Globals: g1, g2" in s
+    assert "SDS 내용" in s
+    assert "STS TC: T1" in s
+    assert len(s) <= 2000
+
+
+def test_format_doc_content_for_prompt_empty_or_bad():
+    """빈/비-dict 입력은 빈 문자열(방어적)."""
+    from workflow.impact_ai_guide import _format_doc_content_for_prompt
+    assert _format_doc_content_for_prompt(None) == ""
+    assert _format_doc_content_for_prompt({}) == ""
+    assert _format_doc_content_for_prompt("not a dict") == ""  # type: ignore[arg-type]

@@ -716,6 +716,13 @@ def _extract_sds_partition_map(doc_path: str) -> Dict[str, Dict[str, str]]:
             for fr in func_rows:
                 fn = fr["name"].rstrip("()").strip()
                 _add_entry(fn, sc_asil, sc_related, fr.get("desc", ""), kind="function")
+                # 인터페이스 행 description이 비어도 소속 SwCom 설명을 폴백 필드로 부착 —
+                # 영향분석 SDS 카드가 함수 소속 컴포넌트 맥락을 표시할 수 있게(description 불변,
+                # 신규 필드라 밴드 집계·SUTS/VCAST 브리지 등 기존 소비처엔 무영향).
+                if sc_desc:
+                    fk = fn.strip().lower()
+                    if fk and fk in mapping and not mapping[fk].get("component_description"):
+                        mapping[fk]["component_description"] = sc_desc[:500]
             continue
 
         idx_comp_id = _find_col(header_norm, ["comp id", "component id", "swcom"])

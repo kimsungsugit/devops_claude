@@ -120,19 +120,37 @@ def _iter_blocks(doc: Any):
             yield ("tbl", Table(child, doc))
 
 
-def _extract_description_from_table(tbl: Any) -> str:
-    """함수 table의 첫 row에서 description 추출 — fail-safe로 빈 string 반환.
+# SwUDS table에서 Description 라벨 후보 — 영문/한글/변종 커버(ASIL/Name 후보와 동일 원칙).
+_DESC_LABEL_CANDIDATES = (
+    "description", "기능 설명", "설명", "기능설명",
+    "function description", "func description", "요약", "개요",
+)
 
-    Hyundai 양식 table은 보통 첫 row에 label/value 페어 — 'Description' 라벨 옆 셀.
+
+def _extract_description_from_table(tbl: Any) -> str:
+    """함수 table에서 'Description' 라벨 옆 첫 유효 값 추출 (ASIL/Name과 동일 패턴).
+
+    HDPDM01: ['Description', '튜닝...']            — 라벨 다음 셀이 값.
+    KJPDS02 v2.08: ['Description','Description','튜닝...','튜닝...'] — 라벨 2칸 merge + 값 반복.
+    → 라벨 매칭 후 i+1만 보지 말고 이후 셀을 스캔해 반복 라벨 셀을 건너뛰고 첫 비어있지 않은
+    값 채택. 또한 Description 행이 index≥5일 수 있어 행 범위 5→8 확장(Function Info:
+    ID/Name/Prototype/Description/ASIL/Cyber/Reuse/Related — ASIL이 r5). fail-safe 빈 string.
+
+    구식 버전은 `rows[:5]` + naive `cells[i+1]` + 하드코딩 라벨 3종이라, ASIL/Name 추출기가
+    받은 병합라벨 업그레이드를 못 받아 KJPDS02 양식에서 Description만 침묵 실패했다.
     """
     try:
         rows = tbl.rows
-        for row in rows[:5]:  # 처음 5 row만 스캔
+        for row in rows[:8]:
             cells = [c.text.strip() for c in row.cells]
             for i, c in enumerate(cells):
-                if c.lower() in ("description", "기능 설명", "설명"):
-                    if i + 1 < len(cells):
-                        return cells[i + 1][:500]
+                if c.lower() in _DESC_LABEL_CANDIDATES:
+                    for nxt in cells[i + 1:]:
+                        # 반복 라벨 셀은 건너뛰고 첫 비어있지 않은 값 채택.
+                        if nxt.lower() in _DESC_LABEL_CANDIDATES:
+                            continue
+                        if nxt:
+                            return nxt[:500]
     except Exception:  # pragma: no cover — 양식 다양성 fail-safe
         pass
     return ""

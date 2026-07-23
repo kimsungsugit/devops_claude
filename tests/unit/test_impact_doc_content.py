@@ -174,6 +174,121 @@ def test_load_sds_fn_desc_empty_on_no_path():
     assert _load_sds_fn_desc("", ["s_foo"]) == {}
 
 
+def test_load_sds_fn_desc_prefix_tolerant_match(monkeypatch):
+    """flagged 's_tunningparamread' vs SDS 인터페이스명 'TunningParamRead'(접두어 없음) 매칭.
+
+    exact miss여도 엔지니어링 접두어(s_/g_ 등) 정규화 대조로 SDS description을 찾는다.
+    """
+    import backend.services.file_resolver as fr
+    import report_gen.requirements as rq
+    from workflow.impact_orchestrator import _load_sds_fn_desc
+
+    monkeypatch.setattr(fr, "get_resolver", lambda: _FakeResolver())
+    monkeypatch.setattr(rq, "_extract_sds_partition_map", lambda p: {
+        "tunningparamread_16bitdata": {
+            "description": "16비트 튜닝 파라미터를 읽는다", "kind": "function",
+        },
+    })
+    out = _load_sds_fn_desc("U:/sds.docx", ["s_TunningParamRead_16bitData"])
+    # 키는 flagged fn(소문자) — 프론트 docContentFor 조회 키와 일치
+    assert out == {"s_tunningparamread_16bitdata": "16비트 튜닝 파라미터를 읽는다"}
+
+
+def test_load_sds_fn_desc_component_description_fallback(monkeypatch):
+    """인터페이스 행 description이 비면 소속 컴포넌트 설명으로 폴백(출처 라벨링)."""
+    import backend.services.file_resolver as fr
+    import report_gen.requirements as rq
+    from workflow.impact_orchestrator import _load_sds_fn_desc
+
+    monkeypatch.setattr(fr, "get_resolver", lambda: _FakeResolver())
+    monkeypatch.setattr(rq, "_extract_sds_partition_map", lambda p: {
+        "s_foo": {
+            "description": "", "component_description": "모터 제어 컴포넌트", "kind": "function",
+        },
+    })
+    out = _load_sds_fn_desc("U:/sds.docx", ["s_foo"])
+    assert out == {"s_foo": "(컴포넌트 설명) 모터 제어 컴포넌트"}
+
+
+def test_load_sds_fn_desc_exact_match_wins_over_normalized(monkeypatch):
+    """exact match가 접두어 정규화보다 우선(기존 동작 유지 — 정확 함수 설명 채택)."""
+    import backend.services.file_resolver as fr
+    import report_gen.requirements as rq
+    from workflow.impact_orchestrator import _load_sds_fn_desc
+
+    monkeypatch.setattr(fr, "get_resolver", lambda: _FakeResolver())
+    monkeypatch.setattr(rq, "_extract_sds_partition_map", lambda p: {
+        "s_foo": {"description": "정확 매칭 설명", "kind": "function"},
+        "foo": {"description": "정규화 매칭 설명", "kind": "function"},
+    })
+    out = _load_sds_fn_desc("U:/sds.docx", ["s_foo"])
+    assert out == {"s_foo": "정확 매칭 설명"}
+
+
+def test_load_sds_fn_desc_normalized_collision_excluded(monkeypatch):
+    """정규화 후 서로 다른 원본이 겹치면 모호 → 제외(잘못된 설명 붙이지 않음)."""
+    import backend.services.file_resolver as fr
+    import report_gen.requirements as rq
+    from workflow.impact_orchestrator import _load_sds_fn_desc
+
+    monkeypatch.setattr(fr, "get_resolver", lambda: _FakeResolver())
+    # 's_bar'와 'g_bar' 모두 정규화하면 'bar' → 충돌 → 접두어 매칭 포기
+    monkeypatch.setattr(rq, "_extract_sds_partition_map", lambda p: {
+        "s_bar": {"description": "설명 A", "kind": "function"},
+        "g_bar": {"description": "설명 B", "kind": "function"},
+    })
+    out = _load_sds_fn_desc("U:/sds.docx", ["u8g_bar"])  # exact miss + 정규화 충돌
+    assert out == {}
+
+
+def test_load_sds_fn_desc_normalized_only_matches_functions(monkeypatch):
+    """정규화 대조는 함수 엔트리만 — 컴포넌트 키로 오귀속하지 않는다."""
+    import backend.services.file_resolver as fr
+    import report_gen.requirements as rq
+    from workflow.impact_orchestrator import _load_sds_fn_desc
+
+    monkeypatch.setattr(fr, "get_resolver", lambda: _FakeResolver())
+    monkeypatch.setattr(rq, "_extract_sds_partition_map", lambda p: {
+        "foo": {"description": "컴포넌트 설명", "kind": "component"},
+    })
+    out = _load_sds_fn_desc("U:/sds.docx", ["s_foo"])  # 정규화하면 'foo'지만 컴포넌트라 제외
+    assert out == {}
+
+
+def test_load_sds_fn_desc_domain_prefix_not_stripped(monkeypatch):
+    """도메인 접두어(spi_/adc_)는 벗기지 않는다 — [sgl]_ 조건 불충족(X7 오귀속 차단).
+
+    열린 `^[a-z]{1,4}_`였다면 spi_read·adc_read 둘 다 'read'로 정규화돼 flagged spi_read가
+    adc_read 설명을 조용히 집었다. 닫힌 헝가리안 패턴은 둘 다 원형 유지 → exact miss → 미매칭.
+    """
+    import backend.services.file_resolver as fr
+    import report_gen.requirements as rq
+    from workflow.impact_orchestrator import _load_sds_fn_desc
+
+    monkeypatch.setattr(fr, "get_resolver", lambda: _FakeResolver())
+    monkeypatch.setattr(rq, "_extract_sds_partition_map", lambda p: {
+        "adc_read": {"description": "ADC 읽기 설명", "kind": "function"},
+    })
+    # flagged 'spi_read'는 adc_read와 무관 — 닫힌 패턴은 'spi_'를 접두어로 안 봄 → 오귀속 없음
+    out = _load_sds_fn_desc("U:/sds.docx", ["spi_read"])
+    assert out == {}
+
+
+def test_load_sds_fn_desc_hungarian_return_type_prefix(monkeypatch):
+    """반환형+저장클래스 접두어(u8g_/s16g_)도 정규화 매칭된다(닫힌 집합 내)."""
+    import backend.services.file_resolver as fr
+    import report_gen.requirements as rq
+    from workflow.impact_orchestrator import _load_sds_fn_desc
+
+    monkeypatch.setattr(fr, "get_resolver", lambda: _FakeResolver())
+    monkeypatch.setattr(rq, "_extract_sds_partition_map", lambda p: {
+        "syseepromctrl_readbyte": {"description": "EEPROM 바이트 읽기", "kind": "function"},
+    })
+    # u8g_SysEepromCtrl_ReadByte → 'u8g_' 제거 → syseepromctrl_readbyte 매칭
+    out = _load_sds_fn_desc("U:/sds.docx", ["u8g_SysEepromCtrl_ReadByte"])
+    assert out == {"u8g_syseepromctrl_readbyte": "EEPROM 바이트 읽기"}
+
+
 def test_load_sits_fn_chains_content_sink_keeps_tc_content(monkeypatch):
     """content_sink 제공 시 중간 JSON의 sub_cases(precondition/inputs/expected)를 TC-ID 키로 채우고,
     회귀 반환({entry_fn:[label]})은 flagged 함수만 유지(불변)."""

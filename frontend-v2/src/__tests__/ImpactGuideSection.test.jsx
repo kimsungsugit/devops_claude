@@ -197,7 +197,9 @@ describe('ImpactGuideSection', () => {
   });
 
   // STS-IMPACT-009: coverage_gap(MC/DC delta)이 있으면 커버리지 요약 카드 표시
-  it('렌더링: coverage_gap이 있으면 커버리지(ASIL 타깃 대비) 요약 카드가 표시된다', () => {
+  // SHOW_ASIL_COVERAGE=false (사용자 요청 2026-07): 🎯커버리지 패널은 숨겨진다.
+  // 백엔드 coverage_gap 계산은 유지되나 프론트에서 렌더 게이팅됨.
+  it('렌더링: coverage_gap이 있어도 커버리지(ASIL 타깃 대비) 패널은 숨겨진다(SHOW_ASIL_COVERAGE=false)', () => {
     // Arrange
     const analysisResult = {
       impactData: {
@@ -216,14 +218,12 @@ describe('ImpactGuideSection', () => {
     // Act
     render(<ImpactGuideSection job={mockJob} analysisResult={analysisResult} />);
 
-    // Assert: 커버리지 카드 + 미달/회귀 통계
-    expect(screen.getByText(/커버리지 \(ASIL 타깃 대비\)/)).toBeInTheDocument();
-    expect(screen.getByText(/목표 미달/)).toBeInTheDocument();
-    expect(screen.getByText(/직전 대비 회귀/)).toBeInTheDocument();
+    // Assert: 커버리지 카드가 렌더되지 않음
+    expect(screen.queryByText(/커버리지 \(ASIL 타깃 대비\)/)).not.toBeInTheDocument();
   });
 
-  // STS-IMPACT-010: impact.asil(ASIL 차등) 요약이 결정론적으로 표면화된다
-  it('렌더링: impact.asil이 있으면 ASIL 차등 검증 strip(escalation·MC/DC·미상)이 표시된다', () => {
+  // SHOW_ASIL_COVERAGE=false: 🛡️ASIL 차등 검증 패널도 숨겨진다.
+  it('렌더링: impact.asil이 있어도 ASIL 차등 검증 strip은 숨겨진다(SHOW_ASIL_COVERAGE=false)', () => {
     // Arrange
     const analysisResult = {
       impactData: {
@@ -238,11 +238,8 @@ describe('ImpactGuideSection', () => {
     // Act
     render(<ImpactGuideSection job={mockJob} analysisResult={analysisResult} />);
 
-    // Assert: ASIL 차등 strip + escalation/MC/DC/미상 표면화
-    expect(screen.getByText(/ASIL 차등 검증/)).toBeInTheDocument();
-    expect(screen.getByText(/Escalation/)).toBeInTheDocument();
-    expect(screen.getByText(/MC\/DC 필수/)).toBeInTheDocument();
-    expect(screen.getByText(/ASIL 미상 2개/)).toBeInTheDocument();
+    // Assert: ASIL 차등 strip이 렌더되지 않음
+    expect(screen.queryByText(/ASIL 차등 검증/)).not.toBeInTheDocument();
   });
 
   // STS-IMPACT-011: regression_test_set(회귀시험 선정) 카드가 표시된다
@@ -389,8 +386,8 @@ describe('ImpactGuideSection', () => {
     expect(screen.getAllByText(/int b/).length).toBeGreaterThanOrEqual(2);  // 요약 뱃지+테이블+문서 액션
     // 변경 후 원문(변경상세 패널 + 모달 접기 양쪽 노출 — 최소 1개 이상)
     expect(screen.getAllByText(/int foo\(int a, int b\)/).length).toBeGreaterThanOrEqual(1);
-    // AI 설명 버튼 노출
-    expect(screen.getByRole('button', { name: /AI로 설명 생성/ })).toBeInTheDocument();
+    // AI 원문→제안 버튼 노출(라벨 'AI 문장 재작성'으로 변경)
+    expect(screen.getByRole('button', { name: /AI 문장 재작성/ })).toBeInTheDocument();
   });
 
   // STS-IMPACT-017: 목록 '변경 상세' 셀 — SIGNATURE는 원문 raw 대신 매개변수 요약 뱃지(＋int b)
@@ -670,8 +667,9 @@ describe('ImpactGuideSection', () => {
     expect(screen.getByText('bar')).toBeInTheDocument();
   });
 
-  // STS-IMPACT-027: 요약 전 패널 전파 — 커버리지·직접 영향도 파일영향을 기본 제외(오귀속 방지), 토글로 포함
-  it('요약 전파: 커버리지·직접 영향도 파일영향을 기본 제외하고 토글로 포함한다', async () => {
+  // STS-IMPACT-027: 요약 전 패널 전파 — 직접 영향 파일영향을 기본 제외(오귀속 방지), 토글로 포함.
+  // (커버리지 패널은 SHOW_ASIL_COVERAGE=false로 숨겨졌으므로 직접영향 전파만 검증.)
+  it('요약 전파: 직접 영향도 파일영향을 기본 제외하고 토글로 포함한다', async () => {
     const user = userEvent.setup();
     const analysisResult = {
       impactData: {
@@ -681,40 +679,26 @@ describe('ImpactGuideSection', () => {
         function_meta: {},
         function_diffs: { g_real: '@@ -1,2 +1,2 @@ void g_real(void)\n-    x = 1;\n+    x = 2;' },
         classification: { granularity: 'line', line_classified_file_count: 1 },
-        coverage_gap: {
-          available: true,
-          summary: { evaluated: 3, below_target: 2, unmeasured: 0, regressed: 0, had_baseline: true },
-          functions: [
-            // g_real=실변경(증거), g_getter1/2=파일영향(무변경 fatten). g_getter1 미달은 이 변경 무관 오귀속
-            { function: 'g_real', meets_target: false, unmeasured_target: false, delta: 0 },
-            { function: 'g_getter1', meets_target: false, unmeasured_target: false, delta: 0 },
-            { function: 'g_getter2', meets_target: true, unmeasured_target: false, delta: 0 },
-          ],
-        },
       },
     };
     render(<ImpactGuideSection analysisResult={analysisResult} />);
-    // 커버리지: 파일영향 2개(무변경) 제외 근거 note + 직접 영향/변경 함수 스탯 부기
-    expect(screen.getByText(/파일영향\(무변경\) 2개 제외/)).toBeInTheDocument();
+    // 직접 영향 스탯: 파일영향 2개(무변경) 기본 제외 부기('+2 파일영향')
     expect(screen.getAllByText('+2 파일영향').length).toBeGreaterThanOrEqual(1);
-    // 토글 ON → 커버리지 제외 note 사라짐(전체 포함 반영)
+    // 토글 ON → '+N 파일영향' → '(파일영향 N 포함)'로 전환(전체 포함 반영)
     await user.click(screen.getAllByRole('button', { name: /파일영향 2개 보기/ })[0]);
-    expect(screen.queryByText(/파일영향\(무변경\) 2개 제외/)).not.toBeInTheDocument();
+    expect(screen.queryByText('+2 파일영향')).not.toBeInTheDocument();
+    expect(screen.getAllByText(/파일영향 2 포함/).length).toBeGreaterThanOrEqual(1);
   });
 
-  // STS-IMPACT-028: AI 요약 ↔ 함수별 상세 탭 통합 — aiGuide 있으면 기본 AI 요약, 탭 클릭 시 함수 표
-  it('탭 통합: aiGuide가 있으면 기본 AI 요약이고 함수별 상세 탭 클릭 시 함수 표가 보인다', async () => {
+  // STS-IMPACT-028: 'AI 요약' 탭은 SHOW_AI_GUIDE_TAB=false로 숨겨진다 — ai-guide fetch도 skip되고
+  // 함수별 상세가 기본 노출된다(탭 버튼·AI 콘텐츠 미노출). 백엔드 ai-guide 엔드포인트는 유지.
+  it('탭 통합: AI 요약 탭이 숨겨지고 함수별 상세가 기본 노출된다(SHOW_AI_GUIDE_TAB=false)', async () => {
     const { post } = await import('../api.js');
-    const aiGuide = {
-      ai_enriched: true,
-      risk: { grade: 'HIGH', score: 55, max_asil: 'A', justification: '위험 근거', affected_safety_functions: [] },
-      review_checklist: [],
-      test_recommendations: [{ function: 'g_changed', test_type: 'BV', description: '경계값 검증' }],
-      cross_doc_impacts: {},
-    };
-    post.mockImplementation((url) => (url === '/api/impact/ai-guide'
-      ? Promise.resolve({ ok: true, guide: aiGuide })
-      : Promise.resolve({ ok: false })));
+    const aiGuideCalls = [];
+    post.mockImplementation((url) => {
+      if (url === '/api/impact/ai-guide') aiGuideCalls.push(url);
+      return Promise.resolve({ ok: false });
+    });
     const user = userEvent.setup();
     const analysisResult = {
       impactData: {
@@ -727,76 +711,17 @@ describe('ImpactGuideSection', () => {
     };
     render(<ImpactGuideSection analysisResult={analysisResult} />);
     await user.click(screen.getByText(/상세 가이드 생성/));
-    // 기본 AI 요약 탭: 테스트 추가 제안 노출, 함수 표 subtitle(직접 변경 + 간접 영향)은 미노출
-    await waitFor(() => expect(screen.getByText(/테스트 추가 제안/)).toBeInTheDocument());
-    expect(screen.queryByText(/직접 변경 \+ 간접 영향/)).not.toBeInTheDocument();
-    // '함수별 상세 (1)' 탭 클릭 → 함수 표 노출
-    await user.click(screen.getByRole('button', { name: /함수별 상세 \(1\)/ }));
-    expect(screen.getByText(/직접 변경 \+ 간접 영향/)).toBeInTheDocument();
+    // 함수별 상세가 기본 노출(직접 변경 + 간접 영향), 'AI 요약' 탭 버튼·콘텐츠 미노출
+    await waitFor(() => expect(screen.getByText(/직접 변경 \+ 간접 영향/)).toBeInTheDocument());
+    expect(screen.queryByRole('button', { name: /^AI 요약/ })).not.toBeInTheDocument();
+    expect(screen.queryByText(/테스트 추가 제안/)).not.toBeInTheDocument();
+    // ai-guide LLM 호출 자체가 skip됨(불필요 비용 제거)
+    expect(aiGuideCalls.length).toBe(0);
   });
 
-  // STS-IMPACT-029: AI 요약의 함수명 클릭 → 기존 함수별 상세 모달(공유 오버레이, 탭 무관)
-  it('탭 통합: AI 요약의 테스트 제안 함수명을 클릭하면 상세 모달이 열린다', async () => {
-    const { post } = await import('../api.js');
-    const aiGuide = {
-      ai_enriched: true,
-      risk: { grade: 'HIGH', score: 55, max_asil: 'A', justification: 'x', affected_safety_functions: [] },
-      review_checklist: [],
-      test_recommendations: [{ function: 'g_changed', test_type: 'BV', description: '경계값' }],
-      cross_doc_impacts: {},
-    };
-    post.mockImplementation((url) => (url === '/api/impact/ai-guide'
-      ? Promise.resolve({ ok: true, guide: aiGuide })
-      : Promise.resolve({ ok: false })));
-    const user = userEvent.setup();
-    const analysisResult = {
-      impactData: {
-        trigger: { changed_files: ['Ap.c'] },
-        changed_function_types: { g_changed: 'BODY' },
-        actions: {},
-        impact: { direct: ['g_changed'] },
-        function_meta: { g_changed: { asil: 'A' } },
-      },
-    };
-    render(<ImpactGuideSection analysisResult={analysisResult} />);
-    await user.click(screen.getByText(/상세 가이드 생성/));
-    // AI 요약 탭의 테스트 제안 표에서 함수명은 클릭 가능한 버튼(renderFnRef)
-    const fnBtn = await screen.findByRole('button', { name: 'g_changed' });
-    await user.click(fnBtn);
-    // 공유 상세 모달 열림 — AI 요약 탭에서 클릭해도 오버레이로 표시
-    await waitFor(() => expect(screen.getByText(/✕ 닫기/)).toBeInTheDocument());
-  });
-
-  // STS-IMPACT-030: guide.details에 없는 함수명은 클릭 불가(일반 텍스트) — 미해석 이름 no-op 가드
-  it('탭 통합: guide에 없는 테스트 제안 함수명은 버튼이 아닌 일반 텍스트로 표시된다', async () => {
-    const { post } = await import('../api.js');
-    const aiGuide = {
-      ai_enriched: true,
-      risk: { grade: 'LOW', score: 10, max_asil: 'QM', justification: 'x', affected_safety_functions: [] },
-      review_checklist: [],
-      test_recommendations: [{ function: 'g_ghost', test_type: 'NORMAL', description: '유령' }],
-      cross_doc_impacts: {},
-    };
-    post.mockImplementation((url) => (url === '/api/impact/ai-guide'
-      ? Promise.resolve({ ok: true, guide: aiGuide })
-      : Promise.resolve({ ok: false })));
-    const user = userEvent.setup();
-    const analysisResult = {
-      impactData: {
-        trigger: { changed_files: ['Ap.c'] },
-        changed_function_types: { g_changed: 'BODY' },
-        actions: {},
-        impact: { direct: ['g_changed'] },
-        function_meta: {},
-      },
-    };
-    render(<ImpactGuideSection analysisResult={analysisResult} />);
-    await user.click(screen.getByText(/상세 가이드 생성/));
-    // g_ghost는 guide.details(변경/영향 함수)에 없음 → 일반 텍스트(버튼 아님), 클릭 no-op
-    await waitFor(() => expect(screen.getByText('g_ghost')).toBeInTheDocument());
-    expect(screen.queryByRole('button', { name: 'g_ghost' })).not.toBeInTheDocument();
-  });
-
+  // (제거) STS-IMPACT-029/030: 'AI 요약' 탭 내부 테스트제안 함수명 클릭(renderFnRef) 검증 2건은
+  //  SHOW_AI_GUIDE_TAB=false로 해당 탭이 렌더되지 않아 삭제. 공유 상세 모달 열림은 STS-IMPACT-015
+  //  ('상세' 버튼 → ✕ 닫기)에서 계속 커버된다.
   // STS-IMPACT-031: 검토 TC=0 정직 사유 — STS 미연동이면 bare 0 대신 사유 배지(silent 0 금지)
   it('검토 TC 사유: STS 미연동이면 0 대신 사유(⚠ STS 미연동)를 표시한다', async () => {
     const { post } = await import('../api.js');
@@ -977,9 +902,9 @@ describe('ImpactGuideSection', () => {
       },
     };
     render(<ImpactGuideSection analysisResult={analysisResult} />);
-    expect(screen.getByText(/같은 빌드 — Δ 비교 불가/)).toBeInTheDocument();
-    // 회귀 수치를 0으로 단정하지 않는다(—)
-    expect(screen.getByText('직전 대비 회귀').closest('.stat-card').textContent).toContain('—');
+    // SHOW_ASIL_COVERAGE=false: 커버리지 패널(Δ 비교불가·회귀 stat 포함)은 숨겨진다.
+    expect(screen.queryByText(/같은 빌드 — Δ 비교 불가/)).not.toBeInTheDocument();
+    expect(screen.queryByText('직전 대비 회귀')).not.toBeInTheDocument();
   });
 
   // STS-IMPACT-038: funcToReqs 조인 casing(F3) — UDS source_ids 원본케이스 ↔ 소문자 함수명 정규화
@@ -1022,8 +947,8 @@ describe('ImpactGuideSection', () => {
     expect(screen.queryByText(/⚠ STS|요구ID 매칭 0/)).not.toBeInTheDocument();
   });
 
-  // STS-IMPACT-039: 이름충돌 worst-copy 커버리지 표면화(R5 백엔드 collision_worst_copy의 프론트 절반)
-  it('커버리지: collision_worst_copy가 있으면 최악(worst-copy) 표면화 노트를 표시한다', () => {
+  // STS-IMPACT-039: 이름충돌 worst-copy 커버리지 노트 — 커버리지 패널 내부라 SHOW_ASIL_COVERAGE=false로 숨겨진다.
+  it('커버리지: collision_worst_copy 노트는 커버리지 패널과 함께 숨겨진다(SHOW_ASIL_COVERAGE=false)', () => {
     const analysisResult = {
       impactData: {
         trigger: { changed_files: ['Eeprom.c'] },
@@ -1039,9 +964,9 @@ describe('ImpactGuideSection', () => {
       },
     };
     render(<ImpactGuideSection job={mockJob} analysisResult={analysisResult} />);
-    // 커버리지 요약 카드에 이름충돌 worst-copy 노트(전역 max 병합의 gap 은폐 방지 표면화)
-    expect(screen.getByText(/이름충돌 1개 함수는 여러 copy 중/)).toBeInTheDocument();
-    expect(screen.getByText(/최악\(worst-copy\)/)).toBeInTheDocument();
+    // 커버리지 요약 카드(worst-copy 노트 포함)가 렌더되지 않음
+    expect(screen.queryByText(/이름충돌 1개 함수는 여러 copy 중/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/커버리지 \(ASIL 타깃 대비\)/)).not.toBeInTheDocument();
   });
 
   // STS-IMPACT-040: 문서별 상세 탭 — 함수-우선 데이터의 문서-우선 전치. 좌측 문서 선택 → 우측
@@ -1480,6 +1405,64 @@ describe('ImpactGuideSection', () => {
     const dialog = await screen.findByRole('dialog');
     await waitFor(() => expect(within(dialog).getByText('📄 실제 STS 시험 내용')).toBeInTheDocument());
     expect(within(dialog).getByText('STS verifies boundary handling')).toBeInTheDocument();
+  });
+
+  // STS-IMPACT-053b: UDS 카드 '원문 → 변경안'(결정론) — SIGNATURE의 Prototype(현재→cd.after)을 짝짓는다.
+  it('원문→변경안: SIGNATURE UDS 카드에 Prototype 현재값→변경후값이 결정론으로 표시된다', async () => {
+    const { post } = await import('../api.js');
+    post.mockResolvedValue({ ok: false });
+    const user = userEvent.setup();
+    const analysisResult = {
+      impactData: {
+        trigger: { changed_files: ['Ap.c'] },
+        changed_function_types: { s_foo: 'SIGNATURE' },
+        change_details: { s_foo: { before: 'void s_foo(void)', after: 'void s_foo(uint8 x)' } },
+        impact: { direct: ['s_foo'] },
+        function_meta: { s_foo: { asil: 'A', evidence: 'line' } },
+        doc_content: { uds: { s_foo: { description: 'foo', prototype: 'void s_foo(void)', globals: [] } } },
+      },
+    };
+    render(<ImpactGuideSection analysisResult={analysisResult} />);
+    await user.click(screen.getByText(/상세 가이드 생성/));
+    await user.click(await screen.findByRole('button', { name: '상세' }));
+    const dialog = await screen.findByRole('dialog');
+    // '✏ 원문 → 변경안 (결정론)' 블록 + Prototype 현재(−)·변경후(＋)
+    await waitFor(() => expect(within(dialog).getByText(/원문 → 변경안 \(결정론\)/)).toBeInTheDocument());
+    expect(within(dialog).getAllByText(/− void s_foo\(void\)/).length).toBeGreaterThanOrEqual(1);
+    expect(within(dialog).getAllByText(/＋ void s_foo\(uint8 x\)/).length).toBeGreaterThanOrEqual(1);
+  });
+
+  // STS-IMPACT-053c: fetchExplanation 페이로드에 doc_content(현재 문서 원문)가 실린다 — LLM '원문→제안' 근거.
+  it('원문→제안: AI 문장 재작성 요청 시 doc_content(현재 UDS/SDS 원문)가 페이로드에 실린다', async () => {
+    const { post } = await import('../api.js');
+    const calls = [];
+    post.mockImplementation((url, body) => {
+      if (url === '/api/impact/explain-change') { calls.push(body); return Promise.resolve({ ok: true, explanation: '원문→제안' }); }
+      return Promise.resolve({ ok: false });
+    });
+    const user = userEvent.setup();
+    const analysisResult = {
+      impactData: {
+        trigger: { changed_files: ['Ap.c'] },
+        changed_function_types: { s_foo: 'BODY' },
+        change_details: { s_foo: { before: 'void s_foo(void)' } },
+        impact: { direct: ['s_foo'] },
+        function_meta: { s_foo: { asil: 'A', evidence: 'line' } },
+        doc_content: {
+          uds: { s_foo: { description: '튜닝값 읽기', prototype: 'void s_foo(void)', globals: ['g_State'] } },
+          sds: { s_foo: 'SDS: foo 컴포넌트' },
+        },
+      },
+    };
+    render(<ImpactGuideSection analysisResult={analysisResult} />);
+    await user.click(screen.getByText(/상세 가이드 생성/));
+    await user.click(await screen.findByRole('button', { name: '상세' }));
+    await user.click(await screen.findByRole('button', { name: /AI 문장 재작성/ }));
+    await waitFor(() => expect(calls.length).toBeGreaterThanOrEqual(1));
+    const body = calls[calls.length - 1];
+    expect(body.doc_content).toBeTruthy();
+    expect(body.doc_content.uds.description).toBe('튜닝값 읽기');   // 현재 UDS 원문 전달
+    expect(body.doc_content.sds).toBe('SDS: foo 컴포넌트');          // 현재 SDS 원문 전달
   });
 
   // STS-IMPACT-061: STS 카드에 Test Action(시험 절차)·Expected Result(기대결과)가 표시된다(라운드 후속).

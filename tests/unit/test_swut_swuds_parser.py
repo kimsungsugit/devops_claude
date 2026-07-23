@@ -415,3 +415,77 @@ class TestRound87HeadingTableFallback:
         # 매핑 0건 → fallback warning 안 emit
         fallback_warnings = [w for w in result.parse_warnings if "regex fallback 적용" in w]
         assert fallback_warnings == []
+
+
+class TestDescriptionExtractionKJPDS02:
+    """Description 추출기 KJPDS02 병합라벨/rows≥5 대응 (ASIL/Name 추출기와 동일 패턴).
+
+    구식 `rows[:5]` + naive `cells[i+1]`는 병합 라벨(반복 셀)·index≥5 Description을
+    침묵 실패시켜 UDS Description이 빈 채로 표시됐다(heading만 노출). ASIL/Name 추출기가
+    받은 병합라벨 업그레이드를 Description만 못 받은 결함의 회귀 방지.
+    """
+
+    @staticmethod
+    def _docx(rows_spec, cols, fn_id="SwUFn_1150"):
+        from docx import Document  # type: ignore
+        doc = Document()
+        doc.add_paragraph(f"{fn_id} — s_TunningParamRead_16bitData")
+        tbl = doc.add_table(rows=len(rows_spec), cols=cols)
+        for r, cells in enumerate(rows_spec):
+            for c, txt in enumerate(cells):
+                tbl.cell(r, c).text = txt
+        buf = io.BytesIO()
+        doc.save(buf)
+        return buf.getvalue()
+
+    def test_merged_label_repeated_cells(self):
+        """['Description','Description','튜닝...'] — 반복 라벨 셀 skip 후 값 채택."""
+        b = self._docx(
+            [["Description", "Description", "튜닝 파라미터를 16bit로 읽어 반환한다"]], cols=3,
+        )
+        r = parse_swuds_docx(b)
+        assert r.ok
+        assert "튜닝 파라미터를 16bit" in r.entries[0].description
+
+    def test_description_row_index_beyond_5(self):
+        """Description 행이 index 5 — 구식 rows[:5]는 놓침, rows[:8]로 추출."""
+        rows = [
+            ["ID", "SwUFn_1150"],
+            ["Name", "s_TunningParamRead_16bitData"],
+            ["Prototype", "void s_TunningParamRead_16bitData(void)"],
+            ["Reuse", "N"],
+            ["Cyber", "-"],
+            ["Description", "튜닝 파라미터를 16bit로 읽어 반환한다"],
+            ["ASIL", "A"],
+        ]
+        b = self._docx(rows, cols=2)
+        r = parse_swuds_docx(b)
+        assert r.ok
+        assert "튜닝 파라미터를 16bit" in r.entries[0].description
+
+    def test_korean_merged_label_variant(self):
+        """한글 '기능설명' 병합 라벨도 매칭."""
+        b = self._docx(
+            [["기능설명", "기능설명", "16비트 튜닝값을 읽는다"]], cols=3,
+        )
+        r = parse_swuds_docx(b)
+        assert r.ok
+        assert "16비트 튜닝값을 읽는다" in r.entries[0].description
+
+    def test_empty_adjacent_cell_skipped(self):
+        """['Description','', '실제 설명'] — 빈 인접 셀 skip(구식은 빈 값 반환)."""
+        b = self._docx(
+            [["Description", "", "실제 설명 문장"]], cols=3,
+        )
+        r = parse_swuds_docx(b)
+        assert r.ok
+        assert "실제 설명 문장" in r.entries[0].description
+
+    def test_simple_hdpdm01_layout_no_regression(self):
+        """HDPDM01 단순 ['Description','값'] — 무회귀(첫 후속 셀이 곧 값)."""
+        b = self._docx(
+            [["Description", "간단한 설명"]], cols=2,
+        )
+        r = parse_swuds_docx(b)
+        assert r.ok
+        assert "간단한 설명" in r.entries[0].description

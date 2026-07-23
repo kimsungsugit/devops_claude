@@ -634,6 +634,13 @@ function renderCoverageCell(cov) {
   );
 }
 
+// ── UI 게이트(사용자 요청, 2026-07) ──────────────────────────────────────────
+// 🛡️ASIL 차등 검증·🎯커버리지(ASIL 타깃) 상시 패널과 'AI 요약' 탭을 숨긴다. 백엔드 계산
+// (impact.asil/coverage_gap)·엔드포인트(/api/impact/ai-guide)는 유지 — 여기서만 렌더 게이팅해
+// 되살리기 쉽고 회귀 위험 최소. 함수별 '🤖 AI 변경 설명' 모달 카드는 유지(원문→제안 자리).
+const SHOW_ASIL_COVERAGE = false;
+const SHOW_AI_GUIDE_TAB = false;
+
 const DOC_STATUS = {
   review_required: { tone: 'warning', label: '검토 필요' },
   completed: { tone: 'success', label: '완료' },
@@ -1172,6 +1179,49 @@ export default function ImpactGuideSection({ analysisResult, job }) {
     }
     return null;
   };
+  // per-card '원문 → 변경안' — 값이 결정론으로 확정되는 구조 필드만 짝짓는다(추정 금지).
+  // Prototype(SIGNATURE의 cd.after)·Used Globals(본문 diff 전역 변화)는 현재값→변경후값이 명확.
+  // 산문 Description 등 문장 재작성은 🤖 AI 원문→제안 카드가 담당(LLM 필요). 확정값 없으면 null.
+  const _propBox = { fontSize: 10, marginTop: 4, padding: '4px 6px', background: 'var(--bg)', borderRadius: 4, borderLeft: '2px solid var(--color-warning)' };
+  const _propMono = { fontFamily: 'var(--font-mono, monospace)', fontSize: 9, overflowWrap: 'anywhere' };
+  const renderDocProposal = (fn, key, cd, diffElems, ct) => {
+    if (key !== 'uds') return null;  // 결정론 before→after가 확정되는 문서(현재 UDS 구조 필드)
+    const c = docContentFor(fn, 'uds');
+    const rows = [];
+    // Prototype: 현재 선언(원문) → 변경 후 선언(cd.after, SIGNATURE)
+    if (ct === 'SIGNATURE' && cd && cd.after) {
+      rows.push(
+        <div key="proto">
+          <div className="text-muted" style={{ fontSize: 9 }}>Prototype</div>
+          {c?.prototype && <div style={{ ..._propMono, color: 'var(--color-danger)' }}>− {c.prototype}</div>}
+          <div style={{ ..._propMono, color: 'var(--color-success)' }}>＋ {cd.after}</div>
+        </div>,
+      );
+    }
+    // Used Globals: 현재 목록(원문) → +추가/−제거 (본문 diff 전역 변화)
+    const de = diffElems || {};
+    const gAdd = (de.changedGlobals && de.changedGlobals.added) || [];
+    const gRem = (de.changedGlobals && de.changedGlobals.removed) || [];
+    const addOnly = gAdd.filter((v) => !gRem.includes(v));
+    const remOnly = gRem.filter((v) => !gAdd.includes(v));
+    if (addOnly.length || remOnly.length) {
+      rows.push(
+        <div key="glob" style={{ marginTop: 2 }}>
+          <div className="text-muted" style={{ fontSize: 9 }}>Used Globals</div>
+          {(c?.globals || []).length > 0 && <div style={_propMono}>원문: {c.globals.join(', ')}</div>}
+          {remOnly.length > 0 && <div style={{ ..._propMono, color: 'var(--color-danger)' }}>− {remOnly.join(', ')}</div>}
+          {addOnly.length > 0 && <div style={{ ..._propMono, color: 'var(--color-success)' }}>＋ {addOnly.join(', ')}</div>}
+        </div>,
+      );
+    }
+    if (!rows.length) return null;
+    return (
+      <div style={_propBox}>
+        <div style={{ fontWeight: 600, fontSize: 9, color: 'var(--color-warning)', marginBottom: 2 }}>✏ 원문 → 변경안 (결정론)</div>
+        {rows}
+      </div>
+    );
+  };
   // 변경종류 요약(신규/삭제/시그니처/본문/헤더/변수 개수) — 데모 포함(activeFnEntries 기준, 전체).
   const changeSummary = { NEW: 0, DELETE: 0, SIGNATURE: 0, BODY: 0, HEADER: 0, VARIABLE: 0 };
   for (const [, k] of activeFnEntries) { if (k in changeSummary) changeSummary[k] += 1; }
@@ -1649,18 +1699,21 @@ export default function ImpactGuideSection({ analysisResult, job }) {
         },
       }, owner);
 
-      // Fetch AI risk/cross-doc guide (best-effort)
-      try {
-        const aiData = await post('/api/impact/ai-guide', {
-          changed_types: Object.fromEntries(activeFnEntries),
-          impact_groups: activeImpactGroups,
-          // 함수별 ASIL을 함께 보내 위험평가가 실제 ASIL을 반영(없으면 'ASIL 미상'으로 정직 표시).
-          by_name: Object.fromEntries(
-            Object.entries(functionMeta).map(([fn, m]) => [fn, { asil: m?.asil || '' }]),
-          ),
-        });
-        if (aiData?.ok) setAiGuide(aiData.guide, owner);
-      } catch (_) { /* AI guide is optional */ }
+      // Fetch AI risk/cross-doc guide (best-effort). 'AI 요약' 탭이 숨겨졌으면(SHOW_AI_GUIDE_TAB)
+      // 결과가 렌더되지 않으므로 LLM 호출 자체를 건너뛴다(불필요 비용·지연 제거).
+      if (SHOW_AI_GUIDE_TAB) {
+        try {
+          const aiData = await post('/api/impact/ai-guide', {
+            changed_types: Object.fromEntries(activeFnEntries),
+            impact_groups: activeImpactGroups,
+            // 함수별 ASIL을 함께 보내 위험평가가 실제 ASIL을 반영(없으면 'ASIL 미상'으로 정직 표시).
+            by_name: Object.fromEntries(
+              Object.entries(functionMeta).map(([fn, m]) => [fn, { asil: m?.asil || '' }]),
+            ),
+          });
+          if (aiData?.ok) setAiGuide(aiData.guide, owner);
+        } catch (_) { /* AI guide is optional */ }
+      }
 
       // 도중에 대상이 바뀌었으면 이 가이드는 valueIfCurrent에서 걸러져 화면에 뜨지 않는다.
       // 그걸 '생성 완료'로 알리면 사용자는 어딘가에 결과가 있다고 오해한다(성공 위장).
@@ -1775,6 +1828,26 @@ export default function ImpactGuideSection({ analysisResult, job }) {
   }, [activeFnEntries, activeChangedFiles, changeSummary, activeImpactGroups, asilInfo, coverageGap, regressionSet, guide, aiGuide, demoMode, changeDetails, functionDiffs, toast]);
 
   // 선택 함수의 변경을 Gemini로 설명(선언 원문 before/after 포함). LLM 미설정이면 ok=false로 폴백.
+  // 함수의 현재 문서 내용(원문) 조립 — LLM이 '원문→제안'을 실제 문장 근거로 생성하게 백엔드에 전달.
+  // uds/sds/suts는 함수키 직접 조회, sts/sits는 함수의 TC-ID를 sts_by_tc/sits_by_tc와 조인(캡).
+  const buildDocContentForFn = useCallback((fn) => {
+    const lf = String(fn || '').toLowerCase();
+    const _for = (key) => (docContent?.[key] ?? {})[lf];  // docContentFor 인라인(stale closure 회피)
+    const out = {};
+    const uds = _for('uds');
+    if (uds && (uds.description || uds.prototype || (uds.globals || []).length)) out.uds = uds;
+    const sds = _for('sds');
+    if (sds) out.sds = sds;
+    const suts = _for('suts');
+    if (Array.isArray(suts) && suts.length) out.suts = suts.slice(0, 4);
+    const dd = guideDetailByLc.get(lf);
+    for (const [k, ids, byTc] of [['sts', dd?.stsTestCases, stsByTc], ['sits', dd?.sitsTestCases, sitsByTc]]) {
+      const rows = (ids || []).map((t) => byTc[_normTcId(t)]).filter(Boolean).slice(0, 4);
+      if (rows.length) out[k] = rows;
+    }
+    return out;
+  }, [docContent, guideDetailByLc, stsByTc, sitsByTc]);
+
   const fetchExplanation = useCallback(async (d) => {
     if (!d) return;
     const cd = changeDetails[String(d.function).toLowerCase()] || {};
@@ -1788,6 +1861,7 @@ export default function ImpactGuideSection({ analysisResult, job }) {
         after: cd.after || '',
         function_diff: fd,  // 본문 diff 원문 — BODY 함수도 실제 코드 근거로 AI 설명
         asil: d.asil || '',
+        doc_content: buildDocContentForFn(d.function),  // 현재 문서 원문 → '원문→제안' 근거
         // function_meta 키는 guideFns의 fn과 항상 같은 케이스(정상 경로=소문자, source_root 미해결
         // edge=원본 케이스로 상호 일관 — impact_orchestrator.py:1404 sorted(_changed_set|_impacted_all)).
         // 그래서 d.function 그대로 조회하고 소문자화하지 않는다(edge 경로에선 소문자화가 조회 실패
@@ -1937,7 +2011,7 @@ export default function ImpactGuideSection({ analysisResult, job }) {
 
   // Track 2/문서별 상세: AI 요약 ↔ 함수별 상세 ↔ 문서별 상세 탭. aiGuide 없으면 함수 탭으로 강등,
   // doc 탭은 guide 필요(없으면 기존 체인으로 강등 — 기존 동작/테스트 회귀 최소화).
-  const effTab = (activeTab === 'ai' && aiGuide) ? 'ai'
+  const effTab = (SHOW_AI_GUIDE_TAB && activeTab === 'ai' && aiGuide) ? 'ai'
     : (activeTab === 'doc' && guide) ? 'doc'
       : (guide ? 'fn' : 'ai');
   // AI 요약의 함수명 → 기존 상세 모달. guide.details의 정규(canonical) 이름으로 해석해야
@@ -1966,7 +2040,7 @@ export default function ImpactGuideSection({ analysisResult, job }) {
   // 탭 바 — 렌더되는 패널(한 번에 하나)의 헤더에 삽입 → 통합 패널처럼 보인다.
   const tabBar = (
     <div className="panel-header" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-      {aiGuide && (
+      {SHOW_AI_GUIDE_TAB && aiGuide && (
         <button type="button" onClick={() => setActiveTab('ai')}
           style={{ background: 'none', border: 'none', padding: '4px 10px', cursor: 'pointer', font: 'inherit',
             fontWeight: effTab === 'ai' ? 700 : 400, color: effTab === 'ai' ? 'var(--accent)' : 'var(--text-muted)',
@@ -1986,7 +2060,7 @@ export default function ImpactGuideSection({ analysisResult, job }) {
             borderBottom: effTab === 'doc' ? '2px solid var(--accent)' : '2px solid transparent' }}>문서별 상세 ({DOC_KEYS.filter(k => docCounts[k] > 0).length})</button>
       )}
       <span style={{ flex: 1 }} />
-      {effTab === 'ai' && aiGuide && (
+      {SHOW_AI_GUIDE_TAB && effTab === 'ai' && aiGuide && (
         <span className="text-muted text-sm">{aiGuide.ai_enriched ? 'AI-enriched' : 'deterministic'}</span>
       )}
       {effTab === 'fn' && guide && (
@@ -2015,7 +2089,7 @@ export default function ImpactGuideSection({ analysisResult, job }) {
       )}
       {/* ASIL 차등 검증 — 직접 변경 함수의 최대 ASIL → 검증강도(escalation·MC/DC 필수·커버리지 타깃)
           를 결정론적으로 표면화(ai-guide 선택 호출과 독립, 항상 노출). 미상은 QM 단정 금지로 경고. */}
-      {asilInfo && (asilInfo.max_changed || asilInfo.escalation || (asilInfo.unknown_changed_count || 0) > 0) && (
+      {SHOW_ASIL_COVERAGE && asilInfo && (asilInfo.max_changed || asilInfo.escalation || (asilInfo.unknown_changed_count || 0) > 0) && (
         <div className="panel" style={{ marginBottom: 12, borderLeft: `3px solid ${asilInfo.escalation ? 'var(--color-danger)' : 'var(--border)'}` }}>
           <div className="text-sm" style={{ fontWeight: 700, marginBottom: 6 }}>🛡️ ASIL 차등 검증</div>
           <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', fontSize: 11 }}>
@@ -2036,7 +2110,7 @@ export default function ImpactGuideSection({ analysisResult, job }) {
         </div>
       )}
       {/* MC/DC delta — VectorCAST 커버리지 ASIL 타깃 대비 gap + 이력 회귀 요약. */}
-      {covView && (
+      {SHOW_ASIL_COVERAGE && covView && (
         <div className="panel" style={{ marginBottom: 12,
           borderLeft: `3px solid ${(covView.below || covView.regressed) ? 'var(--color-danger)' : 'var(--color-success)'}` }}>
           <div className="text-sm" style={{ fontWeight: 700, marginBottom: 6 }}>
@@ -2446,7 +2520,7 @@ export default function ImpactGuideSection({ analysisResult, job }) {
       )}
 
       {/* AI 요약 + 함수별 상세 — 탭 통합 (Track 2). 한 번에 한 탭만 렌더돼 통합 패널처럼 보인다. */}
-      {effTab === 'ai' && aiGuide && (
+      {SHOW_AI_GUIDE_TAB && effTab === 'ai' && aiGuide && (
         <div className="panel" style={{ marginBottom: 12 }}>
           {tabBar}
 
@@ -2970,12 +3044,12 @@ export default function ImpactGuideSection({ analysisResult, job }) {
                   </div>
                 )}
 
-                {/* 🤖 AI 변경 설명 (Gemini) — 선언 원문 근거 자연어 설명 */}
+                {/* 🤖 AI 원문→제안 (Gemini) — 현재 문서 내용(원문)을 근거로 문서별 변경안 문장 생성 */}
                 <div style={{ marginBottom: 12, border: '1px solid var(--border)', borderRadius: 8, overflow: 'hidden' }}>
                   <div style={{ padding: '6px 10px', background: 'var(--bg)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, borderBottom: (exp.text || exp.error) ? '1px solid var(--border)' : 'none' }}>
-                    <span style={{ fontWeight: 700, fontSize: 14 }}>🤖 AI 변경 설명 <span className="text-muted" style={{ fontWeight: 400, fontSize: 11 }}>(Gemini)</span></span>
+                    <span style={{ fontWeight: 700, fontSize: 14 }}>🤖 AI 원문→제안 <span className="text-muted" style={{ fontWeight: 400, fontSize: 11 }}>(Gemini · 각 문서 현재 문장 → 변경 후 문장)</span></span>
                     <button className="btn-sm" onClick={() => fetchExplanation(d)} disabled={exp.loading} style={{ flexShrink: 0 }}>
-                      {exp.loading ? '분석 중...' : (exp.text ? '다시 생성' : 'AI로 설명 생성')}
+                      {exp.loading ? '분석 중...' : (exp.text ? '다시 생성' : 'AI 문장 재작성')}
                     </button>
                   </div>
                   {exp.text && <div style={{ padding: 12, fontSize: 14, whiteSpace: 'pre-wrap', lineHeight: 1.7, overflowWrap: 'anywhere' }}>{exp.text}</div>}
@@ -3033,6 +3107,7 @@ export default function ImpactGuideSection({ analysisResult, job }) {
                           </div>
                         )}
                         {renderDocContent(d.function, card.key)}
+                        {renderDocProposal(d.function, card.key, cd, diffElems, ct)}
                         {card.note && <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 4 }}>{card.note}</div>}
                       </div>
                     );

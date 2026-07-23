@@ -365,6 +365,60 @@ def generate_change_summary(ctx: ImpactGuideContext, risk: RiskAssessment) -> Op
         return None
 
 
+def _format_doc_content_for_prompt(doc_content: Optional[Dict]) -> str:
+    """영향 함수의 현재 문서 내용(doc_content)을 프롬프트용 짧은 텍스트로 직렬화(방어적·캡).
+
+    구조(프론트 docContentFor 조립): {uds:{description,prototype,globals,calls}, sds:str,
+    suts:[{tc_id,action,inputs,expected}], sts:[...], sits:[...]}. 각 문서 원문을 라벨링해
+    LLM이 '원문→제안'의 실제 근거로 쓰게 한다. 과대 페이로드 방지로 전체 2000자 캡.
+    """
+    if not doc_content or not isinstance(doc_content, dict):
+        return ""
+    lines: List[str] = []
+    try:
+        uds = doc_content.get("uds")
+        if isinstance(uds, dict):
+            if uds.get("description"):
+                lines.append(f"- UDS Description: {str(uds['description'])[:400]}")
+            if uds.get("prototype"):
+                lines.append(f"- UDS Prototype: {str(uds['prototype'])[:200]}")
+            gl = uds.get("globals")
+            if isinstance(gl, list) and gl:
+                lines.append(f"- UDS Used Globals: {', '.join(str(g) for g in gl[:10])}")
+        sds = doc_content.get("sds")
+        if isinstance(sds, str) and sds.strip():
+            lines.append(f"- SDS 내용: {sds.strip()[:400]}")
+        for _key, _label in (("suts", "SUTS"), ("sts", "STS"), ("sits", "SITS")):
+            tcs = doc_content.get(_key)
+            if not isinstance(tcs, list) or not tcs:
+                continue
+            parts: List[str] = []
+            for tc in tcs[:4]:
+                if not isinstance(tc, dict):
+                    continue
+                tc_id = str(tc.get("tc_id") or "").strip()
+                bits: List[str] = []
+                for f in ("description", "action", "test_action", "precondition"):
+                    v = tc.get(f)
+                    if isinstance(v, str) and v.strip():
+                        bits.append(v.strip()[:120])
+                        break
+                for f in ("inputs", "expected"):
+                    v = tc.get(f)
+                    if isinstance(v, dict) and v:
+                        kv = ", ".join(f"{k}={val}" for k, val in list(v.items())[:6])
+                        bits.append(f"{f}: {kv}"[:160])
+                    elif isinstance(v, str) and v.strip():
+                        bits.append(f"{f}: {v.strip()[:120]}")
+                if tc_id or bits:
+                    parts.append(f"{tc_id} — {'; '.join(bits)}" if bits else tc_id)
+            if parts:
+                lines.append(f"- {_label} TC: " + " | ".join(parts))
+    except Exception:  # pragma: no cover — 방어적(부분 직렬화라도 반환)
+        logger.debug("doc_content 직렬화 부분 실패 — 부분 결과 반환", exc_info=True)
+    return "\n".join(lines)[:2000]
+
+
 def explain_function_change(
     *,
     function: str,
@@ -375,11 +429,14 @@ def explain_function_change(
     asil: str = "",
     module: str = "",
     requirements: Optional[List[str]] = None,
+    doc_content: Optional[Dict] = None,
 ) -> Optional[str]:
-    """단일 함수 변경에 대한 자연어 설명(무엇이/영향/리뷰 초점)을 LLM으로 생성.
+    """단일 함수 변경에 대한 '원문→제안' 문서 반영안(무엇이/영향/리뷰 초점)을 LLM으로 생성.
 
     선언 원문(before/after)·본문 diff(function_diff)가 있으면 실제 코드 변화(변수·조건·로직)를
     근거로 구체 설명한다. BODY 함수는 선언 변화가 없어 function_diff가 핵심 근거가 된다.
+    doc_content(각 문서의 현재 내용)가 주어지면 각 문서에 대해 '원문(현재 문장) → 제안(변경 후
+    문장)'을 실제 문장 근거로 생성한다(없으면 '현재 내용 없음' 명시 후 신규 문장 제안).
     반환: 설명 문자열, 또는 LLM 미설정/실패 시 None(caller가 결정론 폴백/미표시).
     """
     try:
@@ -404,6 +461,12 @@ def explain_function_change(
         if function_diff:
             lines.append(f"변경 코드(unified diff, '-'제거/'+'추가):\n{function_diff}")
         context = "\n".join(lines)
+        doc_ctx = _format_doc_content_for_prompt(doc_content)
+        if doc_ctx:
+            context += (
+                "\n\n[현재 문서 내용(원문) — 아래 '문서별 반영'에서 이 문장을 근거로 '원문→제안' 작성]\n"
+                + doc_ctx
+            )
         system = (
             "당신은 ISO 26262 자동차 기능안전 소프트웨어의 변경 영향 분석가입니다. "
             "C 함수 변경을 검토하는 엔지니어에게 정확하고 실행 가능한 한국어 설명을 제공합니다. "
@@ -411,7 +474,9 @@ def explain_function_change(
             "근거 자료가 없으면 반드시 '추정'임을 명시하세요. "
             "각 문서(UDS/STS/SUTS/SITS/SDS)에 '무엇을 어느 섹션에 어떻게' 반영해야 하는지 "
             "실제 변수명·함수명·상수를 넣어 구체적으로 제시하고, 시험 문서(STS/SUTS/SITS)에는 "
-            "구체적 테스트 케이스(입력값·기대값·경계값)를 제안하세요. 일반론·모호한 표현 금지."
+            "구체적 테스트 케이스(입력값·기대값·경계값)를 제안하세요. "
+            "현재 문서 내용(원문)이 주어지면 각 문서에 대해 '원문(현재 문장) → 제안(변경 후 문장)'을 "
+            "명시하세요(원문이 없으면 '현재 내용 없음'이라 적고 신규 문장을 제안). 일반론·모호한 표현 금지."
         )
         user_msg = (
             f"{context}\n\n"
@@ -421,8 +486,9 @@ def explain_function_change(
                "어떤 변수가 추가/수정됐고 어떤 로직·분기가 바뀌었는지 명시.\n\n"
                if function_diff else
                "매개변수/반환/동작 변화를 원문 근거로 2~3문장(근거 원문 없으면 '추정' 명시).\n\n")
-            + "### 2. 문서별 반영 사항\n"
-            "각 문서에 실제 변수명·함수명을 넣어 구체적으로. 해당 없으면 '영향 없음':\n"
+            + "### 2. 문서별 반영 (원문 → 제안)\n"
+            "각 문서에 실제 변수명·함수명을 넣어 '원문(현재 문장) → 제안(변경 후 문장)' 형식으로. "
+            "현재 문서 내용이 주어졌으면 그 문장을 원문으로 인용하고, 없으면 '현재 내용 없음'이라 적은 뒤 제안. 해당 없으면 '영향 없음':\n"
             "- **UDS**: Description / Prototype / Input·Output Parameters / Called·Calling / Used Globals 중 무엇을 어떻게\n"
             "- **STS**: 어떤 TC의 Pre-condition / Test Action / Expected Result를 — 구체 입력·기대값 제시\n"
             "- **SUTS**: Input·Output Variables + 추가할 단위 테스트 케이스(경계값 MIN/MID/MAX/INV, 변경된 분기 커버)\n"

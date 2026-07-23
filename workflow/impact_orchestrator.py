@@ -809,14 +809,48 @@ def _load_sds_fn_desc(
             except OSError:
                 pass
     fset = {str(f).strip().lower() for f in flagged_fns}
-    out: Dict[str, str] = {}
+    # 헝가리안 접두어(반환형? + 저장클래스 [sgl]_)만 닫힌 집합으로 제거 — SDS 인터페이스명(대개
+    # prefix 없음)과 flagged 함수명(prefix 有, 예: s_tunningparamread_16bitdata) 불일치를 흡수.
+    # ⚠ 도메인 접두어(adc_/spi_/uart_)는 [sgl]_ 조건 불충족이라 벗기지 않는다 — 열린 `[a-z]{1,4}_`
+    # 였다면 spi_read→read가 adc_read 설명을 조용히 오귀속했다(X7). report_gen `_LAYER_CORE_PREFIX_RE`
+    # 와 동일 원칙의 닫힌 패턴. exact 우선.
+    _pref = re.compile(r"^(?:u8|u16|u32|s8|s16|s32)?[sgl]_")
+
+    def _norm(name: str) -> str:
+        return _pref.sub("", str(name).strip().lower())
+
+    # 정규화 인덱스는 함수 엔트리만 대상(컴포넌트 오귀속 방지). 정규화 후 서로 다른 원본이 겹치면
+    # 모호하므로 충돌로 표시해 제외(잘못된 함수의 설명을 붙이지 않음).
+    norm_index: Dict[str, str] = {}
+    norm_collision: set = set()
     for key, info in pm.items():
-        k = str(key).strip().lower()
-        if k not in fset:
+        if (info or {}).get("kind") != "function":
+            continue
+        lk = str(key).strip().lower()
+        nk = _norm(lk)
+        if not nk:
+            continue
+        if nk in norm_index:
+            if norm_index[nk] != lk:
+                norm_collision.add(nk)
+        else:
+            norm_index[nk] = lk
+    out: Dict[str, str] = {}
+    for f in fset:
+        info = pm.get(f)  # 1) exact match(컴포넌트/함수 무관 — 기존 동작 유지)
+        if info is None:  # 2) 접두어 정규화 대조(함수 엔트리·충돌 없을 때만)
+            nf = _norm(f)
+            if nf and nf not in norm_collision and nf in norm_index:
+                info = pm.get(norm_index[nf])
+        if not info:
             continue
         desc = str((info or {}).get("description") or "").strip()
+        if not desc:  # 3) 인터페이스 행 desc가 비면 소속 컴포넌트 설명으로 폴백(출처 라벨링)
+            comp = str((info or {}).get("component_description") or "").strip()
+            if comp:
+                desc = f"(컴포넌트 설명) {comp}"
         if desc:
-            out[k] = desc[:300]
+            out[f] = desc[:300]  # 키는 flagged fn — 프론트 docContentFor 조회 키와 일치
     return out
 
 

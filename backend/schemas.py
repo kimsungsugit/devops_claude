@@ -667,6 +667,10 @@ class ImpactExplainChangeRequest(BaseModel):
     asil: str = Field(default="", max_length=20)
     module: str = Field(default="", max_length=200)
     requirements: List[str] = Field(default_factory=list, max_length=20)
+    # 영향 함수의 현재 문서 내용(원문) — LLM이 '원문→제안'을 실제 문장 근거로 생성.
+    # 프론트가 docContentFor()로 조립(uds/sds/suts + sts/sits TC). 값은 서버 파싱 단계에서
+    # 이미 캡된 내용이고, 소비처(explain_function_change)가 재차 캡하므로 여기선 dict로 수용.
+    doc_content: Dict[str, Any] = Field(default_factory=dict)
 
 
 class TestGenerateRequest(BaseModel):
