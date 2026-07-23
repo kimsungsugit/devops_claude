@@ -266,6 +266,57 @@ def _classify_from_edit_types(
     return out
 
 
+def _reconstruct_diff_decls(diff_text: str):
+    """unified diff의 함수 선언 라인을 (부호, 함수명, 선언원문)으로 순회 — **멀티라인 선언 복원**.
+
+    멀티라인 선언(파라미터가 여러 줄)은 첫 줄이 `(`만 열고 닫히지 않아, 종전엔
+    `_classify_one_file_diff`(verdict 'unknown'→보수적 SIGNATURE)와 `extract_signature_changes`
+    (빈 before/after→UI '원문 미확보')가 **둘 다 통째 스킵**했다. 그 결과 선언이 -/+ 양쪽에
+    '동일'하게 나타나는 리포맷/재정렬 churn에서 **멀티라인 함수만 false SIGNATURE로 갇혔다**
+    (kjpds02 s_sha256_expand_word·s_sha256_round_step·s_SysEepromCtrl_CopyTunningTables — 단일라인
+    형제 함수는 same→BODY로 정상 강등되는데 멀티라인만 비교 불가라 침묵 오분류). 여는 괄호가
+    균형을 이룰 때까지 **같은 부호(+/-)의 연속 라인**을 이어 붙여 온전한 선언을 복원하고, 본문
+    `{`·프로토 `;` 이후를 제거한 뒤 연속 공백을 1칸으로 정규화(정렬 패딩 차이 흡수)해 비교 가능케 한다.
+
+    - 부호는 '+' 또는 '-'. 선언원문은 정규화된 단일 문자열.
+    - 복원해도 괄호가 안 맞으면(훅 경계로 절단된 멀티라인 등) 호출측이 불균형을 보고 '미확보'로
+      보수 처리한다(과거와 동일 — under-report 방지). 단일라인 선언은 continuation 미소비 → 무변경.
+    """
+    lines = diff_text.splitlines()
+    n = len(lines)
+    i = 0
+    while i < n:
+        line = lines[i]
+        if len(line) < 2 or line[0] not in "+-" or line[:3] in ("+++", "---"):
+            i += 1
+            continue
+        m = _FUNC_DECL_LINE.match(line) or _FUNC_PROTO_LINE.match(line)
+        if not m:
+            i += 1
+            continue
+        polarity = line[0]
+        content0 = line[1:]
+        parts = [content0]
+        depth = content0.count("(") - content0.count(")")
+        j = i + 1
+        # 여는 괄호가 남아 있으면(멀티라인) 같은 부호의 다음 라인을 이어 붙인다(상한 16줄 — 폭주 방지).
+        while depth > 0 and j < n and (j - i) < 16:
+            nxt = lines[j]
+            if not nxt or nxt[0] != polarity or nxt[:3] in ("+++", "---"):
+                break
+            content = nxt[1:]
+            parts.append(content)
+            depth += content.count("(") - content.count(")")
+            j += 1
+        decl = " ".join(parts)
+        _brace = decl.find("{")           # 본문 여는 중괄호 이후는 선언부 아님 → 절단
+        if _brace >= 0:
+            decl = decl[:_brace]
+        decl = re.sub(r"\s+", " ", decl).strip().rstrip(";").strip()
+        yield polarity, m.group(1), decl
+        i = j if j > i + 1 else i + 1
+
+
 def _classify_one_file_diff(
     diff_text: str, is_header: bool, known_funcs: Optional[Set[str]] = None
 ) -> Tuple[Dict[str, str], bool]:
@@ -293,26 +344,23 @@ def _classify_one_file_diff(
     #   '첫 매치'만 담아, 같은 파일에 forward-decl(재정렬·무변화)과 definition(실변경)이 공존하면
     #   먼저 나온 forward-decl로 고정돼 진짜 시그니처 변경을 은폐한다(under-report). 전체 집합이
     #   완전히 같을 때만 'same'(순수 재정렬)으로 본다 — 하나라도 다르면 changed(SIGNATURE 유지).
+    # 멀티라인 fix: _reconstruct_diff_decls가 파라미터 줄바꿈 선언을 온전히 복원하므로, 과거처럼
+    #   멀티라인을 통째 스킵해 verdict='unknown'(보수적 SIGNATURE)에 갇히지 않는다 — -/+ 복원 선언이
+    #   동일하면 same(BODY), 다르면 changed(SIGNATURE)로 정확 판정(false SIGNATURE '원문 미확보' 차단).
     _removed_decls: Dict[str, set] = {}
     _added_decls: Dict[str, set] = {}
-    for _ln in diff_text.splitlines():
-        if len(_ln) < 2 or _ln[0] not in "+-" or _ln[:3] in ("+++", "---"):
+    for _pol, _fn, _decl in _reconstruct_diff_decls(diff_text):
+        # 복원 후에도 괄호 불균형(훅 경계로 절단된 멀티라인 등)이면 미확보 → 스킵(보수적 SIGNATURE).
+        if not _decl or _decl.count("(") > _decl.count(")"):
             continue
-        _m = _FUNC_DECL_LINE.match(_ln) or _FUNC_PROTO_LINE.match(_ln)
-        if not _m:
-            continue
-        _decl = _ln[1:].strip()
-        if _decl.endswith("{"):
-            _decl = _decl[:-1].strip()
-        if _decl.count("(") > _decl.count(")"):  # 멀티라인 선언(닫힘 부족) → 원문 미확보(스킵)
-            continue
-        (_added_decls if _ln[0] == "+" else _removed_decls).setdefault(_m.group(1), set()).add(_decl)
+        (_added_decls if _pol == "+" else _removed_decls).setdefault(_fn, set()).add(_decl)
 
     def _sig_verdict(fn: str) -> str:
         """선언 원문 비교: 'changed'(다름)/'same'(동일)/'unknown'(원문 미확보).
 
         함수의 -선언 집합과 +선언 집합을 비교 — 완전히 같으면 same(순수 재정렬), 하나라도 다르면
-        changed(진짜 변경 은폐 방지). 한쪽이라도 비면 unknown(멀티라인 등 → 보수적 SIGNATURE 유지).
+        changed(진짜 변경 은폐 방지). 한쪽이라도 비면 unknown(복원 실패·훅 절단 등 → 보수적
+        SIGNATURE 유지). 멀티라인 선언은 _reconstruct_diff_decls가 복원하므로 unknown 대상이 아니다.
         """
         _b = _removed_decls.get(fn) or set()
         _a = _added_decls.get(fn) or set()
@@ -651,29 +699,20 @@ def extract_signature_changes(diff_text: str) -> Dict[str, Dict[str, str]]:
       - SIGNATURE 변경: before/after 둘 다(매개변수/리턴타입 이전→이후).
       - NEW: after만 / DELETE: before만.
       - BODY(선언 라인 미변경): 결과에 없음(원문 표시 불필요).
-    한 함수에 여러 선언 라인이 잡히면 첫 라인을 유지한다(대개 1개). 여러 줄에 걸친 선언은
-    미지원(단일 라인 선언 가정 — C 코드 통상 단일 라인). UI '변경 상세' 원문 표시용이며,
+    한 함수에 여러 선언 라인이 잡히면 첫 라인을 유지한다(대개 1개). **멀티라인 선언(파라미터
+    줄바꿈)도 _reconstruct_diff_decls로 복원**해 before/after를 채운다 — 종전엔 여는 괄호까지만
+    잡혀('void Foo(') 미확보로 스킵됐고, 그 결과 리포맷 churn의 멀티라인 함수가 UI '원문 미확보'로
+    표시됐다(s_sha256_expand_word 등). 복원 후 before==after면 호출측(impact_orchestrator)이
+    change_details에 넣지 않아 '변화 없는 시그니처'를 렌더하지 않는다. UI '변경 상세' 원문 표시용이며,
     변경유형 분류(classify_changed_functions)와 독립적인 best-effort 보강 데이터다.
     """
     out: Dict[str, Dict[str, str]] = {}
-    for line in diff_text.splitlines():
-        if len(line) < 2 or line[0] not in "+-":
-            continue
-        if line[:3] in ("+++", "---"):  # diff 파일 헤더(+++ / ---) 제외
-            continue
-        m = _FUNC_DECL_LINE.match(line) or _FUNC_PROTO_LINE.match(line)
-        if not m:
-            continue
-        func = m.group(1)
-        decl = line[1:].strip()
-        if decl.endswith("{"):  # 본문 여는 중괄호 제거 → 순수 선언부만
-            decl = decl[:-1].strip()
-        # 멀티라인 선언(파라미터 줄바꿈)은 여는 괄호까지만 잡혀 'void Foo('로 잘린다 →
-        # before==after 은폐를 막기 위해 괄호 불균형(닫힘 부족)이면 미확보로 처리(스킵).
-        if decl.count("(") > decl.count(")"):
+    for polarity, func, decl in _reconstruct_diff_decls(diff_text):
+        # 복원해도 괄호 불균형(훅 절단 등)이면 온전한 선언이 아님 → 미표시(정직).
+        if not decl or decl.count("(") > decl.count(")"):
             continue
         rec = out.setdefault(func, {})
-        key = "after" if line[0] == "+" else "before"
+        key = "after" if polarity == "+" else "before"
         rec.setdefault(key, decl)
     return out
 

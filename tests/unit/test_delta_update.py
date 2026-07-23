@@ -247,7 +247,9 @@ def test_classify_from_diff_text_reordered_proto_not_signature():
     assert types.get("moved_fn") == "BODY", types
     assert types.get("new_fn") == "NEW", types
 
-    # unknown(멀티라인 선언 — 원문 미확보)은 보수적으로 SIGNATURE 유지(실제 시그니처 변경 놓침 방지).
+    # 멀티라인 선언도 _reconstruct_diff_decls로 복원 비교 — int c 추가로 -/+ 선언이 실제로 달라
+    # SIGNATURE로 '정확히' 판정된다(과거엔 멀티라인을 스킵→verdict 'unknown'→보수적 SIGNATURE로
+    # 우연히 통과. 동일 멀티라인은 그 경로에서 false SIGNATURE '원문 미확보'로 갇혔다 — 아래 전용 테스트).
     blob2 = "\n".join([
         "Index: sources/multi.c",
         "===================================================================",
@@ -263,6 +265,61 @@ def test_classify_from_diff_text_reordered_proto_not_signature():
     ])
     types2, _ = classify_changed_functions_from_diff_text(blob2)
     assert types2.get("multi_fn") == "SIGNATURE", types2
+
+
+def test_classify_multiline_identical_decl_is_body_not_false_signature():
+    """리포맷/재정렬 churn으로 **멀티라인** 선언이 -/+ 양쪽에 '동일'하게 나타나면 SIGNATURE가
+    아니라 BODY다(실측: kjpds02 r1018:HEAD에서 파일 전체 removed+added churn 시 s_sha256_expand_word·
+    s_sha256_round_step·s_SysEepromCtrl_CopyTunningTables가 이 패턴). 과거엔 멀티라인 첫 줄(`(`만
+    열림)을 통째 스킵→verdict 'unknown'→보수적 SIGNATURE→UI '원문 미확보'로 갇혔고, 단일라인 형제
+    함수는 same→BODY로 정상 강등되던 것과 비대칭이었다. _reconstruct_diff_decls 복원으로 -/+ 동일 판정."""
+    from workflow.delta_update import classify_changed_functions_from_diff_text
+    blob = "\n".join([
+        "Index: sources/reformat.c",
+        "===================================================================",
+        "--- sources/reformat.c\t(revision 100)",
+        "+++ sources/reformat.c\t(revision 150)",
+        "@@ -1,8 +1,8 @@",
+        "-static U32 s_expand( U32 a,",
+        "-                     U32 b,",
+        "-                     U32 c );",
+        "-static void keep_single( int x );",
+        "+static U32 s_expand( U32 a,",
+        "+                     U32 b,",
+        "+                     U32 c );",
+        "+static void keep_single( int x );",
+        "",
+    ])
+    types, _ = classify_changed_functions_from_diff_text(blob)
+    # 멀티라인·단일라인 모두 -/+ 동일 → 둘 다 BODY(false SIGNATURE '원문 미확보' 아님).
+    assert types.get("s_expand") == "BODY", types
+    assert types.get("keep_single") == "BODY", types
+
+
+def test_extract_signature_changes_multiline_reconstructed():
+    """멀티라인 선언 복원(extract_signature_changes): 실제 파라미터 변경은 before/after가 서로 다르게
+    채워져 UI가 이전→이후를 렌더하고, -/+ 동일한 리포맷 churn은 before==after(호출측이 '변화 없음'으로
+    change_details 미등록)다. 종전엔 멀티라인이면 여는 괄호까지만 잡혀 스킵→before/after 공백→'원문 미확보'."""
+    from workflow.delta_update import extract_signature_changes
+    # (a) 진짜 멀티라인 시그니처 변경(int c 추가) → before != after, 둘 다 채워짐(정규화된 단일 문자열).
+    changed = "\n".join([
+        "--- m.c\t(r1)", "+++ m.c\t(r2)", "@@ -1,2 +1,3 @@",
+        "-static void f( int a,", "-               int b );",
+        "+static void f( int a,", "+               int b,", "+               int c );",
+    ])
+    sig = extract_signature_changes(changed)
+    assert sig.get("f", {}).get("before") == "static void f( int a, int b )", sig
+    assert sig.get("f", {}).get("after") == "static void f( int a, int b, int c )", sig
+    assert sig["f"]["before"] != sig["f"]["after"]
+    # (b) 동일 멀티라인(리포맷 churn) → before == after(orchestrator가 미표시로 처리).
+    identical = "\n".join([
+        "--- m.c\t(r1)", "+++ m.c\t(r2)", "@@ -1,2 +1,2 @@",
+        "-static void g( int a,", "-               int b );",
+        "+static void g( int a,", "+               int b );",
+    ])
+    sig2 = extract_signature_changes(identical)
+    assert sig2.get("g", {}).get("before") == "static void g( int a, int b )", sig2
+    assert sig2["g"]["before"] == sig2["g"]["after"], sig2
 
 
 def test_classify_from_diff_text_forward_decl_plus_real_change_not_masked():
