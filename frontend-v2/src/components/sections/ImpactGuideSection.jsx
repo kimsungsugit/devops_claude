@@ -3,6 +3,7 @@ import { post, api } from '../../api.js';
 import { useToast, useJob, useJenkinsCfg } from '../../App.jsx';
 import StatusBadge from '../StatusBadge.jsx';
 import { pollImpactJob, isAbortError } from '../../impactPoll.js';
+import { proposeBoundaryTCs } from '../../impactBoundary.js';
 import {
   impactIdentity, impactKeyOf, sameImpactTarget, sameJobUrl,
   saveImpactCurrent, loadImpactCurrent,
@@ -1191,48 +1192,174 @@ export default function ImpactGuideSection({ analysisResult, job }) {
     }
     return null;
   };
-  // per-card '원문 → 변경안' — 값이 결정론으로 확정되는 구조 필드만 짝짓는다(추정 금지).
-  // Prototype(SIGNATURE의 cd.after)·Used Globals(본문 diff 전역 변화)는 현재값→변경후값이 명확.
-  // 산문 Description 등 문장 재작성은 🤖 AI 원문→제안 카드가 담당(LLM 필요). 확정값 없으면 null.
+  // per-card 문서 반영 제안(결정론) — 내용 있으면 '원문 → 변경안', 없으면 '작성 제안(신규 골격)'.
+  // 값이 결정론으로 확정되는 구조 필드(Prototype/Globals)·파라미터 타입 경계값만 짝짓는다(추정·환각 금지).
+  // 산문 재작성은 🤖 AI 카드가 담당(LLM 필요). 5개 문서 전부 — 막다른 '미파싱'을 건설적 작성 골격으로 대체.
   const _propBox = { fontSize: 10, marginTop: 4, padding: '4px 6px', background: 'var(--bg)', borderRadius: 4, borderLeft: '2px solid var(--color-warning)' };
   const _propMono = { fontFamily: 'var(--font-mono, monospace)', fontSize: 9, overflowWrap: 'anywhere' };
-  const renderDocProposal = (fn, key, cd, diffElems, ct) => {
-    if (key !== 'uds') return null;  // 결정론 before→after가 확정되는 문서(현재 UDS 구조 필드)
+  // STS/SITS는 doc_content가 TC-ID 키(sts_by_tc/sits_by_tc)라 함수키 조회 불가 → 함수의 TC 목록으로 실내용 존재 확인.
+  const _testSpecHasContent = (fn, key) => {
+    const dd = guideDetailByLc.get(String(fn || '').toLowerCase());
+    const tcIds = ((key === 'sts' ? dd?.stsTestCases : dd?.sitsTestCases) || []);
+    if (!tcIds.length) return false;
+    const byTc = key === 'sts' ? stsByTc : sitsByTc;
+    return tcIds.some((t) => byTc[_normTcId(t)]);
+  };
+  const renderAuthoringProposal = (d, key, cd, pdiff, diffElems, ct) => {
+    const fn = d.function;
     const c = docContentFor(fn, 'uds');
-    const rows = [];
-    // Prototype: 현재 선언(원문) → 변경 후 선언(cd.after, SIGNATURE)
-    if (ct === 'SIGNATURE' && cd && cd.after) {
-      rows.push(
-        <div key="proto">
-          <div className="text-muted" style={{ fontSize: 9 }}>Prototype</div>
-          {c?.prototype && <div style={{ ..._propMono, color: 'var(--color-danger)' }}>− {c.prototype}</div>}
-          <div style={{ ..._propMono, color: 'var(--color-success)' }}>＋ {cd.after}</div>
-        </div>,
-      );
-    }
-    // Used Globals: 현재 목록(원문) → +추가/−제거 (본문 diff 전역 변화)
-    const de = diffElems || {};
-    const gAdd = (de.changedGlobals && de.changedGlobals.added) || [];
-    const gRem = (de.changedGlobals && de.changedGlobals.removed) || [];
-    const addOnly = gAdd.filter((v) => !gRem.includes(v));
-    const remOnly = gRem.filter((v) => !gAdd.includes(v));
-    if (addOnly.length || remOnly.length) {
-      rows.push(
-        <div key="glob" style={{ marginTop: 2 }}>
-          <div className="text-muted" style={{ fontSize: 9 }}>Used Globals</div>
-          {(c?.globals || []).length > 0 && <div style={_propMono}>원문: {c.globals.join(', ')}</div>}
-          {remOnly.length > 0 && <div style={{ ..._propMono, color: 'var(--color-danger)' }}>− {remOnly.join(', ')}</div>}
-          {addOnly.length > 0 && <div style={{ ..._propMono, color: 'var(--color-success)' }}>＋ {addOnly.join(', ')}</div>}
-        </div>,
-      );
-    }
-    if (!rows.length) return null;
-    return (
-      <div style={_propBox}>
-        <div style={{ fontWeight: 600, fontSize: 9, color: 'var(--color-warning)', marginBottom: 2 }}>✏ 원문 → 변경안 (결정론)</div>
-        {rows}
+    // 파라미터 원천: 변경 후 시그니처(cd.after) 우선 → UDS prototype(현 선언) → cd.before. 경계값·골격 근거.
+    const proto = (cd && cd.after) || (c && c.prototype) || (cd && cd.before) || '';
+    const params = proto ? (parseSignatureParams(proto) || []) : [];
+    const _lbl = (t) => <div className="text-muted" style={{ fontSize: 9 }}>{t}</div>;
+    const _val = (t) => <div style={{ overflowWrap: 'anywhere' }}>{t}</div>;
+    const _box = (title, tone, children) => (
+      <div style={{ ..._propBox, borderLeft: `2px solid var(--color-${tone})` }}>
+        <div style={{ fontWeight: 600, fontSize: 9, color: `var(--color-${tone})`, marginBottom: 2 }}>{title}</div>
+        {children}
       </div>
     );
+    // 경계값 TC 골격 렌더(SUTS/SITS 공용). 파라미터 없으면 null.
+    const _boundaryRows = () => {
+      const bt = proposeBoundaryTCs(params, diffElems);
+      if (!bt.params.length && !bt.branchNote) return null;
+      return (
+        <>
+          {bt.params.map((p, i) => (
+            <div key={i} style={{ marginTop: 2 }}>
+              <div style={_propMono}><span className="text-muted">{p.param} </span>({p.type})</div>
+              <div style={{ fontSize: 9, overflowWrap: 'anywhere' }}>
+                {p.cases.map((cc, j) => (
+                  <span key={j} className="pill pill-neutral" style={{ fontSize: 8, margin: 1 }}>{cc.label}={cc.value}</span>
+                ))}
+              </div>
+            </div>
+          ))}
+          {bt.branchNote && <div className="text-muted" style={{ fontSize: 9, marginTop: 2 }}>· {bt.branchNote}</div>}
+        </>
+      );
+    };
+
+    // ── UDS ── 내용 있음: 원문 → 변경안(Prototype/Globals). 없음: 신규 작성 골격.
+    if (key === 'uds') {
+      if (c) {
+        const rows = [];
+        // Prototype: 현재 선언(원문) → 변경 후 선언(cd.after, SIGNATURE)
+        if (ct === 'SIGNATURE' && cd && cd.after) {
+          rows.push(
+            <div key="proto">
+              {_lbl('Prototype')}
+              {c.prototype && <div style={{ ..._propMono, color: 'var(--color-danger)' }}>− {c.prototype}</div>}
+              <div style={{ ..._propMono, color: 'var(--color-success)' }}>＋ {cd.after}</div>
+            </div>,
+          );
+        }
+        // Used Globals: 현재 목록(원문) → +추가/−제거 (본문 diff 전역 변화)
+        const de = diffElems || {};
+        const gAdd = (de.changedGlobals && de.changedGlobals.added) || [];
+        const gRem = (de.changedGlobals && de.changedGlobals.removed) || [];
+        const addOnly = gAdd.filter((v) => !gRem.includes(v));
+        const remOnly = gRem.filter((v) => !gAdd.includes(v));
+        if (addOnly.length || remOnly.length) {
+          rows.push(
+            <div key="glob" style={{ marginTop: 2 }}>
+              {_lbl('Used Globals')}
+              {(c.globals || []).length > 0 && <div style={_propMono}>원문: {c.globals.join(', ')}</div>}
+              {remOnly.length > 0 && <div style={{ ..._propMono, color: 'var(--color-danger)' }}>− {remOnly.join(', ')}</div>}
+              {addOnly.length > 0 && <div style={{ ..._propMono, color: 'var(--color-success)' }}>＋ {addOnly.join(', ')}</div>}
+            </div>,
+          );
+        }
+        if (!rows.length) return null;
+        return _box('✏ 원문 → 변경안 (결정론)', 'warning', rows);
+      }
+      // 내용 없음 → 신규 UDS 작성 골격
+      return _box('🖊 UDS 작성 제안 (문서에 현재 없음 — 아래 골격대로)', 'info', (
+        <>
+          <div>{_lbl('Name')}{_val(fn)}</div>
+          <div style={{ marginTop: 2 }}>{_lbl('ASIL')}{_val(d.asil && /^[A-D]$/.test(d.asil) ? `ASIL ${d.asil}` : '(안전요구 매핑 확인)')}</div>
+          {proto && <div style={{ marginTop: 2 }}>{_lbl('Prototype')}<div style={_propMono}>{proto}</div></div>}
+          {params.length > 0 && (
+            <div style={{ marginTop: 2 }}>{_lbl('Input/Output Parameters')}
+              {params.map((p, i) => <div key={i} style={_propMono}>{p.type}{p.name ? ` ${p.name}` : ''}</div>)}
+            </div>
+          )}
+          <div style={{ marginTop: 2 }}>{_lbl('Description')}{_val(`${CHANGE_TYPE_KO[ct] || ct || '변경'} — 동작/입출력/의사코드 작성`)}</div>
+        </>
+      ));
+    }
+
+    // ── SUTS (단위시험 = 경계값 분석 핵심) ──
+    if (key === 'suts') {
+      const content = docContentFor(fn, 'suts');
+      const has = Array.isArray(content) && content.length > 0;
+      const rows = _boundaryRows();
+      if (!rows) {
+        if (has) return null;
+        return _box('🖊 SUTS 작성 제안', 'info', _val('입력 파라미터 없음(void) — 전역 상태/사이드이펙트 기반 기대출력 케이스 작성'));
+      }
+      return _box(has ? '✏ 경계값 케이스 재계산/추가 (결정론)' : '🖊 SUTS 작성 제안 (경계값 TC 골격)', has ? 'warning' : 'info', (
+        <>
+          {rows}
+          <div className="text-muted" style={{ fontSize: 9, marginTop: 2 }}>· 각 경계값별 기대출력(Expected) 판정기준 작성</div>
+        </>
+      ));
+    }
+
+    // ── SITS (통합 콜체인 시나리오) ──
+    if (key === 'sits') {
+      const has = _testSpecHasContent(fn, 'sits');
+      const chain = (c && c.calls) || [];
+      const de = diffElems || {};
+      const gAll = [...new Set([...((de.changedGlobals && de.changedGlobals.added) || []), ...((de.changedGlobals && de.changedGlobals.removed) || [])])];
+      return _box(has ? '✏ 통합 시나리오 반영 (결정론)' : '🖊 SITS 작성 제안 (통합 콜체인 골격)', has ? 'warning' : 'info', (
+        <>
+          <div>{_lbl('Call Chain')}<div style={_propMono}>{chain.length ? chain.join(' → ') : `${fn} 통합 콜체인 확인`}</div></div>
+          <div style={{ marginTop: 2 }}>{_lbl('Precondition')}{_val(gAll.length ? `변경 전역 초기화 상태: ${gAll.slice(0, 4).join(', ')}` : '통합 진입 상태(env/precondition) 설정')}</div>
+          {params.length > 0 && <div className="text-muted" style={{ fontSize: 9, marginTop: 2 }}>· 통합 Input/Expected Param — SUTS 경계값을 통합 시나리오로 승격</div>}
+        </>
+      ));
+    }
+
+    // ── STS (요구 기반 시험) — 요구 매핑 있을 때만(가짜 TC 금지) ──
+    if (key === 'sts') {
+      const reqs = d.requirements || [];
+      if (!reqs.length) {
+        return <div className="text-muted" style={{ fontSize: 9, marginTop: 4 }}>· 요구 매핑 없음 — STS(요구 기반 시험) 작성 대상 아님(내부/static 헬퍼일 수 있음)</div>;
+      }
+      const has = _testSpecHasContent(fn, 'sts');
+      return _box(has ? '✏ 요구 기반 TC 반영' : '🖊 STS 작성 제안 (요구 기반 TC 골격)', has ? 'warning' : 'info', (
+        <>
+          <div>{_lbl('요구 기반 TC')}{_val(`요구 ${reqs.slice(0, 5).join(', ')}${reqs.length > 5 ? ` +${reqs.length - 5}개` : ''} 검증`)}</div>
+          <div style={{ marginTop: 2 }}>{_lbl('Test Action')}{_val(`${fn} 호출 시퀀스 — 입력/기대 결과 작성`)}</div>
+          {params.length > 0 && <div className="text-muted" style={{ fontSize: 9, marginTop: 2 }}>· Pre-condition: 위 파라미터 경계값 입력</div>}
+        </>
+      ));
+    }
+
+    // ── SDS (아키텍처 설계) ──
+    if (key === 'sds') {
+      const has = !!docContentFor(fn, 'sds');
+      const reqs = d.requirements || [];
+      const maybePrivate = !has && !reqs.length;  // SDS 없음 + 요구 없음 → static private/내부 헬퍼 가능성
+      const box = _box(has ? '✏ SDS 반영 (결정론)' : '🖊 SDS 작성 제안 (골격)', has ? 'warning' : 'info', (
+        <>
+          <div>{_lbl('Component Interface')}{_val(`${fn}${proto ? ` — ${proto}` : ''} 인터페이스 반영`)}</div>
+          <div style={{ marginTop: 2 }}>{_lbl('Behavior')}{_val(`${CHANGE_TYPE_KO[ct] || ct || '변경'} 동작 변경 반영`)}</div>
+        </>
+      ));
+      if (maybePrivate) {
+        return (
+          <>
+            <div className="text-muted" style={{ fontSize: 9, marginTop: 4 }}>· 아키텍처 SDS·요구기반 STS는 static private/내부 헬퍼엔 설계상 없을 수 있음(정상)</div>
+            {box}
+          </>
+        );
+      }
+      return box;
+    }
+
+    return null;
   };
   // 변경종류 요약(신규/삭제/시그니처/본문/헤더/변수 개수) — 데모 포함(activeFnEntries 기준, 전체).
   const changeSummary = { NEW: 0, DELETE: 0, SIGNATURE: 0, BODY: 0, HEADER: 0, VARIABLE: 0 };
@@ -3140,7 +3267,7 @@ export default function ImpactGuideSection({ analysisResult, job }) {
                           </div>
                         )}
                         {renderDocContent(d.function, card.key)}
-                        {renderDocProposal(d.function, card.key, cd, diffElems, ct)}
+                        {renderAuthoringProposal(d, card.key, cd, pdiff, diffElems, ct)}
                         {card.note && <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 4 }}>{card.note}</div>}
                       </div>
                     );

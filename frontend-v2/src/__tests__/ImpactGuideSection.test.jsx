@@ -1460,6 +1460,59 @@ describe('ImpactGuideSection', () => {
     expect(within(dialog).getAllByText(/＋ void s_foo\(uint8 x\)/).length).toBeGreaterThanOrEqual(1);
   });
 
+  // STS-IMPACT-054: 미파싱(문서 내용 없음) → 막다른 '미파싱' 대신 결정론 작성 골격 + 경계값 TC.
+  //  UDS 카드는 Name/Prototype 신규 골격, SUTS 카드는 파라미터 타입에서 유도한 실제 경계값(U16→65535).
+  it('작성 제안: 미파싱 UDS/SUTS에 결정론 작성 골격 + 경계값(U16→65535)이 표시된다', async () => {
+    const { post } = await import('../api.js');
+    post.mockResolvedValue({ ok: false });
+    const user = userEvent.setup();
+    const analysisResult = {
+      impactData: {
+        trigger: { changed_files: ['Ap.c'] },
+        changed_function_types: { s_bar: 'SIGNATURE' },
+        change_details: { s_bar: { before: 'void s_bar(void)', after: 'void s_bar(U16 idx)' } },
+        impact: { direct: ['s_bar'] },
+        function_meta: { s_bar: { asil: 'B', evidence: 'line' } },
+        // doc_content 없음 → uds/suts/sds 전부 미파싱 → 작성 골격이 대신 뜬다
+      },
+    };
+    render(<ImpactGuideSection analysisResult={analysisResult} />);
+    await user.click(screen.getByText(/상세 가이드 생성/));
+    await user.click(await screen.findByRole('button', { name: '상세' }));
+    const dialog = await screen.findByRole('dialog');
+    // UDS: 신규 작성 골격(문서에 현재 없음) + Prototype 골격
+    await waitFor(() => expect(within(dialog).getByText(/UDS 작성 제안/)).toBeInTheDocument());
+    expect(within(dialog).getAllByText(/void s_bar\(U16 idx\)/).length).toBeGreaterThanOrEqual(1);
+    // SUTS: 파라미터 U16 idx에서 유도한 실제 경계값(결정론, 일반 문구 아님)
+    expect(within(dialog).getByText(/SUTS 작성 제안 \(경계값 TC 골격\)/)).toBeInTheDocument();
+    expect(within(dialog).getByText('MAX=65535')).toBeInTheDocument();
+    expect(within(dialog).getByText('MIN=0')).toBeInTheDocument();
+  });
+
+  // STS-IMPACT-055: 요구 매핑 없는 함수의 STS는 가짜 TC를 만들지 않고 '작성 대상 아님'을 정직 표기(ISO 정직성).
+  it('작성 제안: 요구 매핑 없는 함수의 STS는 가짜 TC 대신 정직 표기', async () => {
+    const { post } = await import('../api.js');
+    post.mockResolvedValue({ ok: false });
+    const user = userEvent.setup();
+    const analysisResult = {
+      impactData: {
+        trigger: { changed_files: ['Ap.c'] },
+        changed_function_types: { prv_helper: 'BODY' },
+        change_details: { prv_helper: { before: '' } },
+        impact: { direct: ['prv_helper'] },
+        function_meta: { prv_helper: { asil: 'A', evidence: 'line' } },
+        // 요구/문서 매핑 없음(static private 헬퍼)
+      },
+    };
+    render(<ImpactGuideSection analysisResult={analysisResult} />);
+    await user.click(screen.getByText(/상세 가이드 생성/));
+    await user.click(await screen.findByRole('button', { name: '상세' }));
+    const dialog = await screen.findByRole('dialog');
+    await waitFor(() => expect(within(dialog).getByText(/요구 매핑 없음 — STS.*작성 대상 아님/)).toBeInTheDocument());
+    // SDS도 static private 가능성 정직 노트
+    expect(within(dialog).getByText(/설계상 없을 수 있음\(정상\)/)).toBeInTheDocument();
+  });
+
   // STS-IMPACT-053c: fetchExplanation 페이로드에 doc_content(현재 문서 원문)가 실린다 — LLM '원문→제안' 근거.
   it('원문→제안: AI 문장 재작성 요청 시 doc_content(현재 UDS/SDS 원문)가 페이로드에 실린다', async () => {
     const { post } = await import('../api.js');

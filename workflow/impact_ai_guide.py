@@ -426,6 +426,100 @@ def _format_doc_content_for_prompt(doc_content: Optional[Dict]) -> str:
     return "\n".join(lines)[:2000]
 
 
+# ── 경계값 유도(결정론) — C 타입 → 경계값. 프론트 src/impactBoundary.js `cTypeBoundaries`의 미러. ──
+# LLM '경계값' 제안이 일반 문구(MIN/MID/MAX)가 아니라 실제 값(0/32768/65535)을 쓰게 grounding한다
+# (결정론 골격 카드와 일관). 매핑 변경 시 프론트 impactBoundary.js도 함께 갱신할 것.
+_C_TYPE_ALIAS = {
+    "u8": "u8", "uint8": "u8", "uint8_t": "u8", "unsigned char": "u8", "uchar": "u8", "byte": "u8",
+    "u16": "u16", "uint16": "u16", "uint16_t": "u16", "unsigned short": "u16", "unsigned short int": "u16", "ushort": "u16", "word": "u16",
+    "u32": "u32", "uint32": "u32", "uint32_t": "u32", "unsigned int": "u32", "unsigned": "u32", "unsigned long": "u32", "uint": "u32", "ulong": "u32", "dword": "u32",
+    "s8": "s8", "int8": "s8", "int8_t": "s8", "sint8": "s8", "signed char": "s8", "char": "s8",
+    "s16": "s16", "int16": "s16", "int16_t": "s16", "sint16": "s16", "short": "s16", "signed short": "s16", "short int": "s16",
+    "s32": "s32", "int32": "s32", "int32_t": "s32", "sint32": "s32", "int": "s32", "signed int": "s32", "long": "s32", "signed long": "s32", "signed": "s32",
+    "boolean": "bool", "bool": "bool", "_bool": "bool", "bool_t": "bool",
+}
+_C_TYPE_BOUNDS = {
+    "u8": [("MIN", "0"), ("MID", "128"), ("MAX", "255"), ("INV", "256(범위초과)")],
+    "u16": [("MIN", "0"), ("MID", "32768"), ("MAX", "65535")],
+    "u32": [("MIN", "0"), ("MID", "2147483648"), ("MAX", "4294967295")],
+    "s8": [("MIN", "-128"), ("MID", "0"), ("MAX", "127")],
+    "s16": [("MIN", "-32768"), ("MID", "0"), ("MAX", "32767")],
+    "s32": [("MIN", "-2147483648"), ("MID", "0"), ("MAX", "2147483647")],
+    "bool": [("FALSE", "0"), ("TRUE", "1")],
+}
+_FLOAT_TYPES = {"float", "f32", "float32", "single", "double", "f64", "float64", "real", "real32", "real64", "float32_t", "float64_t"}
+
+
+def _c_type_boundaries(type_str: str) -> List[tuple]:
+    """C 타입 문자열 → [(label, value)]. 미상 타입(enum/struct/typedef)은 [](환각 금지)."""
+    if not type_str:
+        return []
+    raw = str(type_str)
+    if "*" in raw or "[" in raw:
+        return [("NULL", "NULL"), ("유효", "유효 포인터/버퍼")]
+    t = re.sub(r"\b(?:const|volatile|register)\b", " ", raw)
+    t = re.sub(r"\s+", " ", t).strip().lower()
+    if t in _FLOAT_TYPES:
+        return [("0", "0.0"), ("음수", "음의 경계값"), ("양수", "양의 경계값"), ("특수", "NaN/±Inf(해당 시)")]
+    key = _C_TYPE_ALIAS.get(t)
+    return list(_C_TYPE_BOUNDS[key]) if key else []
+
+
+def _split_top_level_commas(s: str) -> List[str]:
+    """괄호/대괄호 depth 0의 콤마로만 분리(함수 포인터 파라미터 보호)."""
+    parts: List[str] = []
+    depth = 0
+    cur: List[str] = []
+    for ch in s:
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth = max(0, depth - 1)
+        if ch == "," and depth == 0:
+            parts.append("".join(cur))
+            cur = []
+        else:
+            cur.append(ch)
+    if cur:
+        parts.append("".join(cur))
+    return [p.strip() for p in parts if p.strip()]
+
+
+def _extract_params_from_signature(sig: str) -> List[tuple]:
+    """시그니처 문자열 → [(type, name)] (프론트 parseSignatureParams 미러, 경계값 grounding용)."""
+    m = re.search(r"\(([\s\S]*)\)", sig or "")
+    if not m:
+        return []
+    inner = m.group(1).strip()
+    if not inner or inner.lower() == "void":
+        return []
+    out: List[tuple] = []
+    for raw in _split_top_level_commas(inner):
+        am = re.match(r"^([\s\S]*?)\s*((?:\[[^\]]*\])+)\s*$", raw)
+        base = am.group(1) if am else raw
+        arr = am.group(2) if am else ""
+        toks = base.replace("*", " * ").split()
+        if len(toks) > 1 and re.match(r"^[A-Za-z_]\w*$", toks[-1]):
+            name = toks[-1]
+            typ = " ".join(toks[:-1]).replace(" *", "*") + arr
+        else:
+            name, typ = "", raw
+        out.append((typ, name))
+    return out
+
+
+def _format_param_boundaries(sig: str) -> str:
+    """시그니처 → 파라미터별 경계값 grounding 텍스트(없으면 빈 문자열). 최대 12행."""
+    lines: List[str] = []
+    for typ, name in _extract_params_from_signature(sig):
+        if not name:
+            continue
+        bounds = _c_type_boundaries(typ)
+        if bounds:
+            lines.append(f"  - {name}({typ}): " + ", ".join(f"{lab}={val}" for lab, val in bounds))
+    return "\n".join(lines[:12])
+
+
 def explain_function_change(
     *,
     function: str,
@@ -487,6 +581,20 @@ def explain_function_change(
             context += (
                 "\n\n[현재 문서 내용(원문) — 아래 '문서별 반영'에서 이 문장을 근거로 '원문→제안' 작성]\n"
                 + doc_ctx
+            )
+        # 파라미터 경계값 grounding — 시그니처(after/before) 또는 UDS prototype에서 결정론 유도한 실제
+        # 경계값을 프롬프트에 실어 LLM이 일반 문구(MIN/MID/MAX)가 아닌 실제 값으로 시험 케이스를 제안하게
+        # 한다(결정론 골격 카드와 일관). 미상 타입은 유도 결과가 없어 자동 생략(환각 방지).
+        _sig_for_bounds = after or before or ""
+        if not _sig_for_bounds and isinstance(doc_content, dict):
+            _uds_dc = doc_content.get("uds")
+            if isinstance(_uds_dc, dict):
+                _sig_for_bounds = str(_uds_dc.get("prototype") or "")
+        _bounds_txt = _format_param_boundaries(_sig_for_bounds)
+        if _bounds_txt:
+            context += (
+                "\n\n[파라미터 경계값(결정론 유도 — 시험 케이스 제안에 이 실제 값을 사용)]\n"
+                + _bounds_txt
             )
         system = (
             "당신은 ISO 26262 자동차 기능안전 소프트웨어의 변경 영향 분석가입니다. "

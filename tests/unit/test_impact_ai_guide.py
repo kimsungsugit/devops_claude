@@ -368,6 +368,80 @@ def test_format_doc_content_for_prompt_serializes_all_docs():
     assert len(s) <= 2000
 
 
+def test_c_type_boundaries_mapping():
+    """C 타입 → 경계값(결정론). 프론트 src/impactBoundary.js cTypeBoundaries의 백엔드 미러."""
+    from workflow.impact_ai_guide import _c_type_boundaries
+    u16 = dict(_c_type_boundaries("U16"))
+    assert u16.get("MIN") == "0" and u16.get("MAX") == "65535"
+    assert [v for _, v in _c_type_boundaries("S8")] == ["-128", "0", "127"]
+    # 별칭(uint8_t / unsigned char / int)
+    assert any(v == "255" for _, v in _c_type_boundaries("uint8_t"))
+    assert any(v == "255" for _, v in _c_type_boundaries("unsigned char"))
+    assert any(v == "2147483647" for _, v in _c_type_boundaries("int"))
+    # boolean / 포인터·배열 / const 제거
+    assert _c_type_boundaries("boolean") == [("FALSE", "0"), ("TRUE", "1")]
+    assert ("NULL", "NULL") in _c_type_boundaries("const U8*")
+    assert ("NULL", "NULL") in _c_type_boundaries("U8[8]")
+    assert any(v == "65535" for _, v in _c_type_boundaries("const U16"))
+    # 미상 타입·빈값 → [](환각 금지)
+    assert _c_type_boundaries("MyEnum_t") == []
+    assert _c_type_boundaries("") == []
+
+
+def test_format_param_boundaries_from_signature():
+    """시그니처 → 파라미터별 경계값 grounding 텍스트(이름 없는/void 제외)."""
+    from workflow.impact_ai_guide import _format_param_boundaries
+    txt = _format_param_boundaries("void f(U16 idx, boolean flag)")
+    assert "idx(U16)" in txt and "65535" in txt
+    assert "flag(boolean)" in txt and "TRUE=1" in txt
+    assert _format_param_boundaries("void f(void)") == ""
+    assert _format_param_boundaries("void f(U16)") == ""  # 이름 없는 파라미터 제외
+
+
+def test_explain_function_change_grounds_boundary_values(monkeypatch):
+    """시그니처 파라미터에서 유도한 실제 경계값(65535)이 프롬프트에 주입돼 LLM이 일반 문구가
+    아닌 실제 값으로 시험 케이스를 제안하게 grounding한다."""
+    from workflow import impact_ai_guide
+    from workflow import ai as _ai
+    captured = {}
+
+    def _fake_call(cfg, messages, **k):
+        captured["messages"] = messages
+        return "경계값 설명"
+
+    monkeypatch.setattr(_ai, "load_oai_config", lambda _p: {"provider": "gemini"})
+    monkeypatch.setattr(_ai, "agent_call_text", _fake_call)
+    out = impact_ai_guide.explain_function_change(
+        function="s_bar", change_type="SIGNATURE", asil="B",
+        before="void s_bar(void)", after="void s_bar(U16 idx)",
+    )
+    assert out
+    joined = " ".join(m["content"] for m in captured["messages"])
+    assert "파라미터 경계값" in joined
+    assert "65535" in joined and "idx(U16)" in joined
+
+
+def test_explain_function_change_grounds_boundary_from_prototype(monkeypatch):
+    """before/after가 없어도 doc_content.uds.prototype에서 경계값을 유도한다."""
+    from workflow import impact_ai_guide
+    from workflow import ai as _ai
+    captured = {}
+
+    def _fake_call(cfg, messages, **k):
+        captured["messages"] = messages
+        return "설명"
+
+    monkeypatch.setattr(_ai, "load_oai_config", lambda _p: {"provider": "gemini"})
+    monkeypatch.setattr(_ai, "agent_call_text", _fake_call)
+    out = impact_ai_guide.explain_function_change(
+        function="s_baz", change_type="BODY", asil="A",
+        doc_content={"uds": {"prototype": "void s_baz(U8 mode)"}},
+    )
+    assert out
+    joined = " ".join(m["content"] for m in captured["messages"])
+    assert "mode(U8)" in joined and "255" in joined
+
+
 def test_explain_function_change_injects_impact_path(monkeypatch):
     """간접영향 근거(impact_path)가 프롬프트에 주입돼 AI가 콜체인 경로를 근거로 설명한다."""
     from workflow import impact_ai_guide
