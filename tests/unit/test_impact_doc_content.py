@@ -52,6 +52,57 @@ def test_load_suts_fn_tcs_content_sink_keeps_tc_content(monkeypatch):
     assert tc["expected"] == {"ret": "42"}     # 실기대값
 
 
+def test_load_suts_fn_tcs_forwards_source_loc(monkeypatch):
+    """content_sink 제공 시 exporter가 test_case["source"]로 부여한 시트·행 위치(loc)를
+    전달하는지 — 문서 카드가 'TC(행 N)를 이렇게 수정' 앵커를 표시하게 한다.
+    회귀 반환({fn:[tc_id]})은 불변(순수 additive)."""
+    import backend.services.file_resolver as fr
+    import tools.export_suts_vectorcast as ev
+    from workflow.impact_orchestrator import _load_suts_fn_tcs
+
+    monkeypatch.setattr(fr, "get_resolver", lambda: _FakeResolver())
+    monkeypatch.setattr(ev, "build_vectorcast_model", lambda *a, **k: {
+        "units": [{
+            "unit_name": "s_foo",
+            "test_cases": [{
+                "base_tc_id": "SwUTC_SwUFn_0001",
+                "expected": {"ret": 42},
+                "source": {"sheet": "2.SW Unit Test Spec", "tc_row": 42, "sequence_row": 43},
+            }],
+        }],
+        "export_warnings": [],
+    })
+
+    sink: dict = {}
+    result = _load_suts_fn_tcs("U:/suts.xlsm", ["s_foo"], content_sink=sink)
+
+    assert result == {"s_foo": ["SwUTC_SwUFn_0001"]}   # 회귀 반환 불변
+    assert sink["s_foo"][0]["loc"] == {
+        "sheet": "2.SW Unit Test Spec", "tc_row": 42, "sequence_row": 43,
+    }
+
+
+def test_load_suts_fn_tcs_no_source_omits_loc(monkeypatch):
+    """source가 없으면 loc 키를 만들지 않는다(행 번호 날조 금지 — 정직 표기)."""
+    import backend.services.file_resolver as fr
+    import tools.export_suts_vectorcast as ev
+    from workflow.impact_orchestrator import _load_suts_fn_tcs
+
+    monkeypatch.setattr(fr, "get_resolver", lambda: _FakeResolver())
+    monkeypatch.setattr(ev, "build_vectorcast_model", lambda *a, **k: {
+        "units": [{
+            "unit_name": "s_foo",
+            "test_cases": [{"base_tc_id": "TC1", "expected": {"ret": 1}}],
+        }],
+        "export_warnings": [],
+    })
+
+    sink: dict = {}
+    _load_suts_fn_tcs("U:/s.xlsm", ["s_foo"], content_sink=sink)
+    assert sink["s_foo"][0]["tc_id"] == "TC1"
+    assert "loc" not in sink["s_foo"][0]
+
+
 def test_load_suts_fn_tcs_without_sink_unchanged(monkeypatch):
     """content_sink 미제공 시 종전과 동일(회귀 반환만) — 순수 additive 확인."""
     import backend.services.file_resolver as fr

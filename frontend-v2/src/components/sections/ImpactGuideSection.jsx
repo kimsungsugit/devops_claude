@@ -3,7 +3,7 @@ import { post, api } from '../../api.js';
 import { useToast, useJob, useJenkinsCfg } from '../../App.jsx';
 import StatusBadge from '../StatusBadge.jsx';
 import { pollImpactJob, isAbortError } from '../../impactPoll.js';
-import { proposeBoundaryTCs } from '../../impactBoundary.js';
+import { proposeBoundaryTCs, formatSutsLoc } from '../../impactBoundary.js';
 import {
   impactIdentity, impactKeyOf, sameImpactTarget, sameJobUrl,
   saveImpactCurrent, loadImpactCurrent,
@@ -1130,6 +1130,7 @@ export default function ImpactGuideSection({ analysisResult, job }) {
             return (
               <div key={i} style={{ marginBottom: 3 }}>
                 <div style={{ fontFamily: 'monospace', fontSize: 9, fontWeight: 600 }}>{tc.tc_id}</div>
+                {formatSutsLoc(tc.loc) && <div className="text-muted" style={{ fontSize: 9 }}>{formatSutsLoc(tc.loc)}</div>}
                 {_act && <div style={{ overflowWrap: 'anywhere' }}><span className="text-muted">Action: </span>{_act}</div>}
                 {_pre && <div style={{ fontSize: 9 }}><span className="text-muted">Pre: </span>{_pre}</div>}
                 {Object.keys(tc.inputs || {}).length > 0 && <div style={{ fontSize: 9, overflowWrap: 'anywhere' }}><span className="text-muted">In: </span>{Object.entries(tc.inputs).map(([k, v]) => `${k}=${v}`).join(', ')}</div>}
@@ -1302,12 +1303,17 @@ export default function ImpactGuideSection({ analysisResult, job }) {
       const content = docContentFor(fn, 'suts');
       const has = Array.isArray(content) && content.length > 0;
       const rows = _boundaryRows();
+      // 실 TC 위치·ID 앵커(백엔드 loc) — "이 TC(행 N) 기준 재계산"을 명시(있을 때만·행 번호 날조 금지).
+      const _sutsLoc = has && content[0]
+        ? [content[0].tc_id ? `TC ${content[0].tc_id}` : '', formatSutsLoc(content[0].loc)].filter(Boolean).join(' · ')
+        : '';
       if (!rows) {
         if (has) return null;
         return _box('🖊 SUTS 작성 제안', 'info', _val('입력 파라미터 없음(void) — 전역 상태/사이드이펙트 기반 기대출력 케이스 작성'));
       }
       return _box(has ? '✏ 경계값 케이스 재계산/추가 (결정론)' : '🖊 SUTS 작성 제안 (경계값 TC 골격)', has ? 'warning' : 'info', (
         <>
+          {_sutsLoc && <div className="text-muted" style={{ fontSize: 9, marginBottom: 2 }}>· {_sutsLoc} 기준 재계산</div>}
           {rows}
           <div className="text-muted" style={{ fontSize: 9, marginTop: 2 }}>· 각 경계값별 기대출력(Expected) 판정기준 작성</div>
         </>
@@ -1367,6 +1373,30 @@ export default function ImpactGuideSection({ analysisResult, job }) {
     }
 
     return null;
+  };
+  // 통합 "현재 원문 → 수정안" — 실제 문서 내용(renderDocContent)과 작성 제안(renderAuthoringProposal)을
+  // 한 프레임으로 합성한다. 두 함수를 그대로 재사용하므로 미파싱 정직성·억제 규칙(간접/DELETE/private,
+  // 커밋 2b850d6)이 자동 보존된다. 함수 모달·문서별 상세 양 표면이 이 한 함수를 호출(표면 동등화).
+  const _c2pWrap = { marginTop: 6, padding: '4px 6px', border: '1px solid var(--border)', borderRadius: 4 };
+  const _c2pHdr = { fontWeight: 700, fontSize: 9, color: 'var(--color-warning)', marginBottom: 3, letterSpacing: 0.2 };
+  const _c2pArrow = { fontSize: 9, color: 'var(--color-warning)', margin: '3px 0', textAlign: 'center' };
+  const renderCurrentToProposal = (d, key, cd, diffElems, ct) => {
+    const fn = d && d.function;
+    if (!fn) return null;
+    const current = renderDocContent(fn, key);      // 실 문서 현재 내용(없으면 '미파싱' 정직 노트)
+    const proposal = renderAuthoringProposal(d, key, cd, diffElems, ct); // 억제 시 null(간접/DELETE/private/요구없음 STS)
+    // 둘 다 있으면 "현재 → 수정안" 프레임으로 묶는다. 제안이 억제된 경우엔 현재 내용만(하지 않을 변경을 암시 금지).
+    if (current && proposal) {
+      return (
+        <div style={_c2pWrap}>
+          <div style={_c2pHdr}>현재 원문 → 수정안</div>
+          {current}
+          <div style={_c2pArrow}>▼ 수정안</div>
+          {proposal}
+        </div>
+      );
+    }
+    return current || proposal || null;
   };
   // 변경종류 요약(신규/삭제/시그니처/본문/헤더/변수 개수) — 데모 포함(activeFnEntries 기준, 전체).
   const changeSummary = { NEW: 0, DELETE: 0, SIGNATURE: 0, BODY: 0, HEADER: 0, VARIABLE: 0 };
@@ -1468,12 +1498,13 @@ export default function ImpactGuideSection({ analysisResult, job }) {
     for (const dd of guide.details) byLc.set(String(dd.function).toLowerCase(), dd);
     let rows = (actions[effSelectedDoc]?.functions || []).map((name) => {
       const d = byLc.get(String(name).toLowerCase()) || null;
-      if (!d) return { name, d: null, acts: [] };
+      if (!d) return { name, d: null, acts: [], cd: {}, diffElems: EMPTY_DIFF_ELEMS, ct: '' };
       const cd = changeDetails[String(d.function).toLowerCase()] || {};
       const fd = functionDiffs[String(d.function).toLowerCase()] || '';
       const pdiff = (cd.before || cd.after) ? diffSignatureParamsCached(cd.before, cd.after) : null;
-      const acts = buildDocumentActions(d, pdiff, extractDiffElementsCached(fd))[effSelectedDoc] || [];
-      return { name: d.function, d, acts };
+      const diffElems = extractDiffElementsCached(fd);
+      const acts = buildDocumentActions(d, pdiff, diffElems)[effSelectedDoc] || [];
+      return { name: d.function, d, acts, cd, diffElems, ct: (d.changeType || '').toUpperCase() };
     });
     // 파일영향(직접 변경·증거 없음) 제외 — filteredGuide(L778)와 동일 규칙(간접은 유지).
     if (hideFileImpact) rows = rows.filter(r => !(r.d?.changed && functionHasNoEvidence(r.d.function, r.d.changeType, changeDetails, functionDiffs, functionMeta)));
@@ -3010,7 +3041,7 @@ export default function ImpactGuideSection({ analysisResult, job }) {
                                   {chips.length > 10 && <span className="text-muted" style={{ fontSize: 8 }}> +{chips.length - 10}개</span>}
                                 </div>
                               )}
-                              {renderDocContent(row.name, effSelectedDoc)}
+                              {renderCurrentToProposal(row.d || { function: row.name }, effSelectedDoc, row.cd, row.diffElems, row.ct)}
                             </div>
                           );
                         })}
@@ -3273,8 +3304,7 @@ export default function ImpactGuideSection({ analysisResult, job }) {
                             {chips.length > 10 && <span className="text-muted" style={{ fontSize: 9 }}> +{chips.length - 10}개</span>}
                           </div>
                         )}
-                        {renderDocContent(d.function, card.key)}
-                        {renderAuthoringProposal(d, card.key, cd, diffElems, ct)}
+                        {renderCurrentToProposal(d, card.key, cd, diffElems, ct)}
                         {card.note && <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 4 }}>{card.note}</div>}
                       </div>
                     );

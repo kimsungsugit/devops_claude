@@ -61,3 +61,14 @@ export function proposeBoundaryTCs(params, diffElems = null) {
   const macros = de.macros ? [...new Set([...(de.macros.removed || []), ...(de.macros.added || [])])] : [];
   return { params: out, branchNote: macros.length ? `변경된 조건부 컴파일(${macros.slice(0, 3).join(', ')}) 분기 커버 케이스 추가` : '' };
 }
+
+// SUTS TC 실 위치(백엔드 doc_content.suts[fn][i].loc = {sheet, tc_row, sequence_row}) → 표시 문자열.
+// "이 TC(행 N)를 이렇게 수정" 앵커용. 존재하는 필드만 이어붙인 정직 표기(행 번호 날조 금지) — 빈/누락은 ''.
+// ⚠ sheet 라벨은 백엔드가 넘긴 값만 쓴다(하드코딩 금지 — SUTS 템플릿별 시트명 상이, 예 '2.SW Unit Test Spec').
+export function formatSutsLoc(loc) {
+  if (!loc || typeof loc !== 'object') return '';
+  const parts = [];
+  if (loc.sheet) parts.push(`${loc.sheet} 시트`);
+  if (loc.tc_row != null && loc.tc_row !== '') parts.push(`행 ${loc.tc_row}`);
+  return parts.join(' · ');
+}

@@ -676,13 +676,20 @@ def _load_suts_fn_tcs(
                 for tc in _seqs[:3]:
                     action = str(tc.get("description") or "").strip()
                     pre = str(tc.get("precondition") or "").strip()
-                    seqs_out.append({
+                    # 실 TC 시트·행 위치(exporter가 test_case["source"]로 부여) 전달 — 문서 카드가
+                    # "이 TC(행 N)를 이렇게 수정" 앵커를 표시하게 한다. 비어있으면 생략(행 번호 날조 금지).
+                    _src = tc.get("source") or {}
+                    _loc = {k: _src.get(k) for k in ("sheet", "tc_row", "sequence_row") if _src.get(k) is not None}
+                    _seq = {
                         "tc_id": str(tc.get("base_tc_id") or ""),
                         "action": action[:300],
                         "precondition": pre[:200],
                         "inputs": _cap_kv(tc.get("inputs")),
                         "expected": _cap_kv(tc.get("expected")),
-                    })
+                    }
+                    if _loc:
+                        _seq["loc"] = _loc
+                    seqs_out.append(_seq)
                 if seqs_out:
                     content_sink[name] = seqs_out
     if not result and flagged_fns:

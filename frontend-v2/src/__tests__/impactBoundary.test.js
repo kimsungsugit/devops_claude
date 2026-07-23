@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { cTypeBoundaries, proposeBoundaryTCs } from '../impactBoundary.js';
+import { cTypeBoundaries, proposeBoundaryTCs, formatSutsLoc } from '../impactBoundary.js';
 
 // 경계값 유도(결정론) — 영향분석 '작성 제안' 골격의 수치 출처. 백엔드 _c_type_boundaries와 미러.
 describe('cTypeBoundaries — C 타입 경계값(결정론)', () => {
@@ -78,5 +78,31 @@ describe('proposeBoundaryTCs — 파라미터별 경계값 TC 골격', () => {
   it('빈/비배열 입력 방어', () => {
     expect(proposeBoundaryTCs(null).params).toEqual([]);
     expect(proposeBoundaryTCs(undefined).branchNote).toBe('');
+  });
+});
+
+describe('formatSutsLoc — SUTS TC 실 위치 표시(정직 표기)', () => {
+  it('시트+행 전체 → "시트 · 행 N"', () => {
+    expect(formatSutsLoc({ sheet: '2.SW Unit Test Spec', tc_row: 42, sequence_row: 43 }))
+      .toBe('2.SW Unit Test Spec 시트 · 행 42');
+  });
+
+  it('시트만 있으면 행 생략(존재 필드만)', () => {
+    expect(formatSutsLoc({ sheet: '2.SW Unit Test Spec' })).toBe('2.SW Unit Test Spec 시트');
+  });
+
+  it('행만 있으면 시트 생략', () => {
+    expect(formatSutsLoc({ tc_row: 7 })).toBe('행 7');
+  });
+
+  it('빈 객체/누락/null → \'\' (행 번호 날조 금지)', () => {
+    expect(formatSutsLoc({})).toBe('');
+    expect(formatSutsLoc(null)).toBe('');
+    expect(formatSutsLoc(undefined)).toBe('');
+    expect(formatSutsLoc({ tc_row: '' })).toBe('');
+  });
+
+  it('sheet 라벨은 백엔드 값 그대로(하드코딩 아님)', () => {
+    expect(formatSutsLoc({ sheet: '3.SW Test Spec', tc_row: 10 })).toBe('3.SW Test Spec 시트 · 행 10');
   });
 });

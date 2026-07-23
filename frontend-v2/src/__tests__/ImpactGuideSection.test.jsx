@@ -2546,4 +2546,110 @@ describe('ImpactGuideSection — 빌드/리비전 소스 바 & 결과 영속', (
     // 이력 경로는 계속 살아 있어야 한다
     expect(screen.getByLabelText('분석 이력')).toBeInTheDocument();
   });
+
+  // STS-IMPACT-063: 문서별 상세(Surface 2)에도 함수 모달과 동일한 '현재 원문 → 수정안' 통합 블록이
+  //  뜬다 — 과거엔 편집 액션+실 내용만 있고 작성 제안(renderAuthoringProposal)이 없던 표면 비대칭 해소.
+  it('문서별 상세 통합: 현재 실 내용 + 작성 제안이 한 "현재 원문 → 수정안" 블록으로 표시된다', async () => {
+    const { post } = await import('../api.js');
+    post.mockResolvedValue({ ok: false });
+    const user = userEvent.setup();
+    const analysisResult = {
+      impactData: {
+        trigger: { changed_files: ['Ap.c'] },
+        changed_function_types: { s_foo: 'SIGNATURE' },
+        change_details: { s_foo: { before: 'void s_foo(void)', after: 'void s_foo(uint8 x)' } },
+        impact: { direct: ['s_foo'] },
+        actions: { uds: { mode: 'AUTO', status: 'review_required', function_count: 1, functions: ['s_foo'] } },
+        function_meta: { s_foo: { asil: 'A', evidence: 'line' } },
+        doc_content: { uds: { s_foo: { description: 'foo', prototype: 'void s_foo(void)', globals: [] } } },
+      },
+    };
+    render(<ImpactGuideSection analysisResult={analysisResult} />);
+    await user.click(screen.getByText(/상세 가이드 생성/));
+    await user.click(await screen.findByRole('button', { name: /문서별 상세 \(1\)/ }));
+    // 통합 프레임 헤더 + 현재 실 내용(renderDocContent) + 작성 제안(renderAuthoringProposal) 셋 다 문서별 상세에 존재
+    await waitFor(() => expect(screen.getByText('현재 원문 → 수정안')).toBeInTheDocument());
+    expect(screen.getByText('📄 실제 UDS 내용')).toBeInTheDocument();          // 현재
+    expect(screen.getByText(/원문 → 변경안 \(결정론\)/)).toBeInTheDocument();   // 수정안(과거 문서별엔 없었음)
+    expect(screen.getByText(/＋ void s_foo\(uint8 x\)/)).toBeInTheDocument();
+  });
+
+  // STS-IMPACT-064: 문서별 상세에서도 간접(비변경) 함수는 현재 내용만 보이고 작성 제안·"현재 원문 → 수정안"
+  //  헤더가 뜨지 않는다 — 억제 규칙(renderAuthoringProposal 가드)이 양 표면에서 동일(모순 방지).
+  it('문서별 상세 억제: 간접 함수 행은 현재 내용만, 작성 제안/통합 헤더 없음', async () => {
+    const { post } = await import('../api.js');
+    post.mockResolvedValue({ ok: false });
+    const user = userEvent.setup();
+    const analysisResult = {
+      impactData: {
+        trigger: { changed_files: ['Ap.c'] },
+        changed_function_types: { s_changed: 'SIGNATURE' },
+        change_details: { s_changed: { before: 'void s_changed(void)', after: 'void s_changed(U16 n)' } },
+        impact: { direct: ['s_changed'], indirect_1hop: ['g_indirect'], indirect_2hop: [] },
+        impact_paths: { g_indirect: { hop: 1, via: 's_changed', seed: 's_changed' } },
+        // uds 문서엔 간접 함수만 배치(억제 검증 격리)
+        actions: { uds: { mode: 'AUTO', status: 'review_required', function_count: 1, functions: ['g_indirect'] } },
+        function_meta: { s_changed: { asil: 'A' }, g_indirect: { asil: 'B', evidence: 'line' } },
+        doc_content: { uds: { g_indirect: { description: 'indirect helper', prototype: 'void g_indirect(U16 n)' } } },
+      },
+    };
+    render(<ImpactGuideSection analysisResult={analysisResult} />);
+    await user.click(screen.getByText(/상세 가이드 생성/));
+    await user.click(await screen.findByRole('button', { name: /문서별 상세 \(1\)/ }));
+    // 현재 실 내용은 보이되(간접도 문서 맥락 확인 필요), 작성 제안·통합 헤더는 억제
+    await waitFor(() => expect(screen.getByText('📄 실제 UDS 내용')).toBeInTheDocument());
+    expect(screen.queryByText('현재 원문 → 수정안')).toBeNull();
+    expect(screen.queryByText(/원문 → 변경안/)).toBeNull();
+    expect(screen.queryByText(/UDS 작성 제안/)).toBeNull();
+  });
+
+  // STS-IMPACT-065: SUTS 카드가 실 TC 시트·행 위치(백엔드 loc)를 표시하고, 경계값 제안이 그 TC(행 N)
+  //  기준 재계산임을 명시한다 — "이 TC(행 N)를 이렇게 수정" 구체화(백엔드가 파싱하나 과거 버리던 위치).
+  it('SUTS 위치: 모달 SUTS 카드에 실 TC 시트·행(loc)과 "TC ... 기준 재계산"이 표시된다', async () => {
+    const { post } = await import('../api.js');
+    post.mockResolvedValue({ ok: false });
+    const user = userEvent.setup();
+    const analysisResult = {
+      impactData: {
+        trigger: { changed_files: ['Ap.c'] },
+        changed_function_types: { s_foo: 'SIGNATURE' },
+        change_details: { s_foo: { before: 'void s_foo(void)', after: 'void s_foo(U16 idx)' } },
+        impact: { direct: ['s_foo'] },
+        function_meta: { s_foo: { asil: 'A', evidence: 'line' } },
+        doc_content: { suts: { s_foo: [{ tc_id: 'SwUTC_SwUFn_0001', inputs: { x: '1' }, expected: { ret: '42' }, loc: { sheet: '2.SW Unit Test Spec', tc_row: 42 } }] } },
+      },
+    };
+    render(<ImpactGuideSection analysisResult={analysisResult} />);
+    await user.click(screen.getByText(/상세 가이드 생성/));
+    await user.click(await screen.findByRole('button', { name: '상세' }));
+    const dialog = await screen.findByRole('dialog');
+    // renderDocContent: 실 위치 라인(백엔드 loc.sheet 그대로 — 하드코딩 아님)
+    await waitFor(() => expect(within(dialog).getByText('2.SW Unit Test Spec 시트 · 행 42')).toBeInTheDocument());
+    // renderAuthoringProposal: 그 TC(행 N) 기준 재계산 앵커
+    expect(within(dialog).getByText(/TC SwUTC_SwUFn_0001 · 2\.SW Unit Test Spec 시트 · 행 42 기준 재계산/)).toBeInTheDocument();
+    // 현재 기대값(Exp)도 통합 블록에 함께 표시
+    expect(within(dialog).getByText(/ret=42/)).toBeInTheDocument();
+  });
+
+  // STS-IMPACT-066: 문서별 상세(Surface 2)의 SUTS 행에도 실 TC 시트·행(loc)이 표시된다(양 표면 동등).
+  it('SUTS 위치: 문서별 상세 SUTS 행에도 실 TC 시트·행(loc)이 표시된다', async () => {
+    const { post } = await import('../api.js');
+    post.mockResolvedValue({ ok: false });
+    const user = userEvent.setup();
+    const analysisResult = {
+      impactData: {
+        trigger: { changed_files: ['Ap.c'] },
+        changed_function_types: { s_foo: 'SIGNATURE' },
+        change_details: { s_foo: { before: 'void s_foo(void)', after: 'void s_foo(U16 idx)' } },
+        impact: { direct: ['s_foo'] },
+        actions: { suts: { mode: 'AUTO', status: 'review_required', function_count: 1, functions: ['s_foo'] } },
+        function_meta: { s_foo: { asil: 'A', evidence: 'line' } },
+        doc_content: { suts: { s_foo: [{ tc_id: 'SwUTC_SwUFn_0001', expected: { ret: '42' }, loc: { sheet: '2.SW Unit Test Spec', tc_row: 42 } }] } },
+      },
+    };
+    render(<ImpactGuideSection analysisResult={analysisResult} />);
+    await user.click(screen.getByText(/상세 가이드 생성/));
+    await user.click(await screen.findByRole('button', { name: /문서별 상세 \(1\)/ }));
+    await waitFor(() => expect(screen.getByText('2.SW Unit Test Spec 시트 · 행 42')).toBeInTheDocument());
+  });
 });
