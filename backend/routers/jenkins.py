@@ -3680,6 +3680,28 @@ def _resolve_job_build_root(job_url: str, cache_root: str) -> Optional[Path]:
     return build_dirs[0] if build_dirs else None
 
 
+# 시스템 레벨 시험 source(SyTS/SyITS) — 결정1 재정의로 SW covered 판정에서 제외한다.
+_SYS_TEST_SOURCES = frozenset({"SyTS", "SyITS"})
+
+
+def _row_has_sw_tests(row: Dict[str, Any]) -> bool:
+    """SW-레벨 시험 존재 여부(결정1: 시스템시험 SyTS/SyITS 제외 — SW covered에 미포함).
+
+    - band-split 키(sts/suts/sits/vcast): Jenkins 매트릭스의 SW 시험 밴드.
+    - flat tests[]: 양 모드 공통. flat은 SyTS/SyITS 멤버를 포함하는 상위집합이라 source로 걸러야 한다
+      (단순히 syts/syits 키만 빼면 flat/test_ids가 시스템-only 검증 행을 여전히 covered로 잡는다).
+    - test_ids(source 미상): flat이 리스트로 존재하면 위에서 판정되므로 flat 부재 시에만 폴백.
+
+    프론트 hasTestData(SrsSdsSection.jsx)와 lockstep. (local.py는 STS/SUTS만 실어 SyTS/SyITS 부재 → no-op.)
+    """
+    if row.get("sts_tests") or row.get("suts_tests") or row.get("sits_tests") or row.get("vcast_tests"):
+        return True
+    flat = row.get("tests")
+    if isinstance(flat, list):
+        return any(isinstance(t, dict) and t.get("source") not in _SYS_TEST_SOURCES for t in flat)
+    return bool(row.get("test_ids"))
+
+
 def _cache_trace_summary(matrix: Dict[str, Any], req: UdsTraceabilityMatrixRequest) -> None:
     """Persist a compact traceability summary for dashboard quick-load.
 
@@ -3746,16 +3768,9 @@ def _cache_trace_summary(matrix: Dict[str, Any], req: UdsTraceabilityMatrixReque
         if not isinstance(row, dict):
             uncovered += 1
             continue
-        has_tests = bool(
-            row.get("tests")
-            or row.get("sts_tests")
-            or row.get("suts_tests")
-            or row.get("sits_tests")
-            or row.get("syts_tests")   # 시스템 시험(결정1) — 비기능/안전 요구의 시스템 레벨 검증
-            or row.get("syits_tests")
-            or row.get("vcast_tests")
-            or row.get("test_ids")
-        )
+        # SW-레벨 시험만(결정1 재정의: 시스템시험 SyTS/SyITS 제외 — SW covered에 미포함).
+        # 상세 predicate는 _row_has_sw_tests(모듈 헬퍼, 프론트 hasTestData와 lockstep·단위테스트 대상).
+        has_tests = _row_has_sw_tests(row)
         has_design = bool(
             row.get("source_ids")
             or row.get("sds_components")

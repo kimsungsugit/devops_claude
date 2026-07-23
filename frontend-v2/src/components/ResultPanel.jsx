@@ -375,27 +375,7 @@ function TraceSummaryCard({ summary, loading, onRefresh }) {
         </div>
       )}
 
-      {/* 밴드별 추적 현황 — 각 V-model 밴드에 연결된 요구사항 수 */}
-      {summary.band_counts && Object.keys(summary.band_counts).length > 0 && (
-        <div style={{ marginTop: 'var(--sp-2)', paddingTop: 'var(--sp-2)', borderTop: '1px solid var(--border)' }}>
-          <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', marginBottom: 6 }}>
-            밴드별 추적 현황 <span style={{ fontWeight: 400 }}>· 연결된 요구사항 수 (전체 {total})</span>
-          </div>
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-            {['SyRS', 'SDS', 'HSIS', 'UDS', 'STS', 'SUTS', 'SITS', 'SyTS', 'SyITS', 'VectorCAST'].map((b) => {
-              const n = summary.band_counts[b] || 0;
-              const pct = total ? Math.round((n / total) * 100) : 0;
-              return (
-                <div key={b} title={`${b}: ${n}건 (${pct}%)`}
-                  style={{ padding: '4px 9px', borderRadius: 6, border: '1px solid var(--border)', background: n ? 'var(--card-bg, var(--surface))' : 'var(--bg)', fontSize: 11, whiteSpace: 'nowrap', opacity: n ? 1 : 0.55 }}>
-                  <span style={{ fontWeight: 600 }}>{b}</span>{' '}
-                  <span style={{ color: 'var(--text-muted)' }}>{n} ({pct}%)</span>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      )}
+      {/* '밴드별 추적 현황' 패널 제거 — SW 전용 뷰(시스템 밴드 숨김). summary.band_counts는 유지(무해). */}
     </div>
   );
 }

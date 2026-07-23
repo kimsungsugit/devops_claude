@@ -239,6 +239,41 @@ def test_asil_gap_detection():
     assert out["stats"]["asil_gap_count"] == 2
 
 
+def test_asil_ab_system_only_test_is_gap():
+    """결정1(wide): ASIL A/B가 시스템시험(SyTS/SyITS)으로만 검증되면 SW-레벨 시험 부재로
+    ANY_TEST 갭 + test_covered 미집계. C/D는 원래 SUTS·SITS 직접검사라 무영향.
+
+    프론트 hasTestData / 백엔드 _row_has_sw_tests와 동일한 SW 시험 밴드 집합(SyTS/SyITS 제외)."""
+    matrix = {"rows": [
+        {  # ASIL B + SyTS만 → SW 시험 없음 → ANY_TEST 갭
+            "requirement_id": "R_B_sys", "asil": "B",
+            "sds_components": ["cb"],
+            "syts_tests": [{"testcase": "SyTC_1", "source": "SyTS"}],
+            "sts_tests": [], "suts_tests": [], "sits_tests": [], "tests": [],
+        },
+        {  # ASIL A + SyITS만 → 동일하게 갭
+            "requirement_id": "R_A_sys", "asil": "A",
+            "sds_components": ["ca"],
+            "syits_tests": [{"testcase": "SyITC_1", "source": "SyITS"}],
+            "sts_tests": [], "suts_tests": [], "sits_tests": [], "tests": [],
+        },
+        {  # 대조군: ASIL A + STS(SW 시험) → 충족
+            "requirement_id": "R_A_sw", "asil": "A",
+            "sds_components": ["cs"],
+            "sts_tests": [{"testcase": "T1", "source": "STS"}],
+            "syts_tests": [], "suts_tests": [], "sits_tests": [], "tests": [],
+        },
+    ]}
+    ac = build_link_table(matrix)["asil_coverage"]
+    gaps = {g["target_id"]: g["missing"] for g in ac["gaps"]}
+    assert gaps["R_B_sys"] == ["ANY_TEST"]   # 시스템시험만 → SW 시험 없음
+    assert gaps["R_A_sys"] == ["ANY_TEST"]
+    assert "R_A_sw" not in gaps              # STS(SW) → 충족
+    # test_covered: SW 시험 있는 것만 집계(시스템-only 제외)
+    assert ac["by_level"]["A"]["test_covered"] == 1  # R_A_sw만
+    assert ac["by_level"]["B"]["test_covered"] == 0  # R_B_sys는 시스템-only → 미집계
+
+
 def test_asil_gaps_deterministic_and_sorted():
     a = build_link_table(_asil_matrix())["asil_coverage"]["gaps"]
     b = build_link_table(_asil_matrix())["asil_coverage"]["gaps"]

@@ -2541,7 +2541,8 @@ def generate_uds_traceability_matrix(
         sts_tests = [t for t in tests if t.get("source") == "STS"]
         suts_tests = [t for t in tests if t.get("source") == "SUTS"]
         sits_tests = [t for t in tests if t.get("source") == "SITS"]
-        # 시스템 레벨 시험(SyTS/SyITS) — 비기능/안전 요구의 시스템 레벨 검증(결정1, covered 승격).
+        # 시스템 레벨 시험(SyTS/SyITS) — 시스템 레벨 검증 증거. 결정1 재정의로 SW covered에는 미포함
+        # (참고·V-model 시스템 쌍·밴드 카운트로만 노출). 아래 syts_tests/syits_tests 필드로 분리 보존.
         syts_tests = [t for t in tests if t.get("source") == "SyTS"]
         syits_tests = [t for t in tests if t.get("source") == "SyITS"]
         # VectorCAST 실행추적(fuzzy, indirect) — V-model 통계에 별도 노출(reviewer INFO:
@@ -2603,7 +2604,7 @@ def generate_uds_traceability_matrix(
                 "sits_count": len(sits_tests),
                 "sits_direct": len(sits_direct),
                 "sits_indirect": len(sits_indirect),
-                # 시스템 레벨 시험(SyTS/SyITS) — 비기능/안전 요구의 시스템 검증(결정1)
+                # 시스템 레벨 시험(SyTS/SyITS) — 시스템 레벨 검증 증거(결정1: SW covered 미포함, 참고 보존)
                 "syts_tests": syts_tests,
                 "syts_count": len(syts_tests),
                 "syits_tests": syits_tests,

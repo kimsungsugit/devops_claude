@@ -44,12 +44,13 @@ _RELATED_TYPE = {
 # ASIL 결합(P5) — hiMA가 셀에 비노출하는 ASIL을 추적성 갭과 결합한다(차별점).
 # 등급 순위(ISO 26262: QM<A<B<C<D)와 등급별 '기대 시험 밴드'(추적성 관점, 간소화):
 #   D/C(고안전): 단위(SUTS)+통합(SITS) 시험 추적 기대.
-#   A/B: 최소 1개 시험(STS/SUTS/SITS/VectorCAST) 추적 기대.
+#   A/B: 최소 1개 SW 시험(STS/SUTS/SITS/VectorCAST) 추적 기대.
 #   QM/미상: 기대 없음(안전 무관).
 _ASIL_RANK = {"QM": 0, "A": 1, "B": 2, "C": 3, "D": 4}
-# A/B의 'ANY_TEST' 증거에 시스템시험(SyTS/SyITS) 포함. C/D의 필수 SUTS·SITS 대체엔 비포함(보수,
-# _asil_missing_bands가 SUTS/SITS를 직접 검사하므로 단위/통합 면제 오판 없음).
-_TEST_BANDS = ("STS", "SUTS", "SITS", "SyTS", "SyITS", "VectorCAST")
+# ASIL 적정성('시험추적'·A/B ANY_TEST)은 SW-레벨 시험만 인정한다 — 결정1 재정의로 시스템시험
+# (SyTS/SyITS)은 SW covered/검증에 미포함(모든 SW검증 표면 균일). C/D는 SUTS·SITS를 직접 검사.
+# jenkins.py _row_has_sw_tests / 프론트 hasTestData(SW_TEST_FIELDS)와 동일 밴드 집합(lockstep).
+_SW_TEST_BANDS = ("STS", "SUTS", "SITS", "VectorCAST")
 
 
 def _asil_missing_bands(asil: str, band_counts: Dict[str, int]) -> List[str]:
@@ -68,7 +69,7 @@ def _asil_missing_bands(asil: str, band_counts: Dict[str, int]) -> List[str]:
         if band_counts.get("SITS", 0) == 0:
             missing.append("SITS")
     else:  # ASIL A/B
-        if not any(band_counts.get(b, 0) > 0 for b in _TEST_BANDS):
+        if not any(band_counts.get(b, 0) > 0 for b in _SW_TEST_BANDS):
             missing.append("ANY_TEST")
     return missing
 
@@ -266,7 +267,7 @@ def build_link_table(matrix: Any) -> Dict[str, Any]:
         lvl = asil_by_level.setdefault(key, {"targets": 0, "test_covered": 0, "gap": 0})
         lvl["targets"] += 1
         bt = by_target[tgt]
-        if any(bt.get(b, 0) > 0 for b in _TEST_BANDS):
+        if any(bt.get(b, 0) > 0 for b in _SW_TEST_BANDS):
             lvl["test_covered"] += 1
         missing = _asil_missing_bands(a, bt)
         if missing:
