@@ -392,6 +392,22 @@ export function buildDocumentActions(d, pdiff, diffElems = EMPTY_DIFF_ELEMS) {
     return { uds, sts, suts, sits, sds };
   }
 
+  // 주석-only(비의미) 변경: C 주석만 바뀌고 코드·로직 불변 → 문서 수정 불필요. 각 문서에 중립 단일 안내로
+  // 대체한다(모달의 '문서 수정 불필요' 노트·renderAuthoringProposal 억제와 일관 — 과거엔 편집 액션에
+  // 'Description에 변경 로직 반영' 류 불릿이 남아 같은 화면에서 모순됐다, reviewer #1).
+  // ⚠ noSemanticChange(포맷/이동)는 여기서 중립화하지 않는다: 순서보존 이동이 use를 넘는 맹점(move-past-use)이
+  //   있어 실 동작변경일 수 있어(d5716f7) 편집 액션·AI 교차확인을 유지한다 — commentOnly만 확정 중립.
+  if (de.commentOnly) {
+    const _n = 'C 주석만 변경 — 코드·로직 불변, 문서 수정 불필요';
+    return {
+      uds: [A('주석만', _n, 'neutral')],
+      sts: [A('주석만', _n, 'neutral')],
+      suts: [A('주석만', _n, 'neutral')],
+      sits: [A('주석만', _n, 'neutral')],
+      sds: [A('주석만', _n, 'neutral')],
+    };
+  }
+
   // ── UDS (단위 상세 설계) ──
   if (ct === 'SIGNATURE') {
     if (posWarn) uds.push(A('주의', '매개변수 이름 매칭 불가 — 아래 귀속은 위치 추정(원문 대조 필요)', 'warning'));

@@ -2207,6 +2207,34 @@ describe('buildDocumentActions BODY/VARIABLE 구체화 (순수 함수)', () => {
     expect(JSON.stringify(r.uds)).toContain('FEATURE_X');
     expect(JSON.stringify(r.sds)).toContain('FEATURE_X');
   });
+
+  // reviewer #1: 주석-only(commentOnly) 함수는 편집 액션도 각 문서 중립 '주석만' 단일 안내로 —
+  //  과거엔 '변경 로직 반영' 불릿이 모달 '문서 수정 불필요' 노트와 같은 화면서 모순됐다.
+  it('주석-only: 편집 액션이 각 문서 중립 "주석만 — 문서 수정 불필요"만(변경 반영 불릿 없음)', () => {
+    const deCmt = extractDiffElements('@@ -1,1 +1,1 @@ void g_f( U16 idx )\n-  x = idx; /* Iintialization */\n+  x = idx; /* Initialization */');
+    expect(deCmt.commentOnly).toBe(true);
+    const dCmt = { function: 'g_f', changeType: 'BODY', changed: true, requirements: ['SwEI_1'], stsTestCases: ['T1'], sutsTestCases: ['U1'] };
+    const r = buildDocumentActions(dCmt, null, deCmt);
+    for (const key of ['uds', 'sts', 'suts', 'sits', 'sds']) {
+      expect(r[key]).toHaveLength(1);
+      expect(r[key][0].section).toBe('주석만');
+      expect(r[key][0].text).toMatch(/문서 수정 불필요/);
+    }
+    // '반영/재계산/추가/갱신' 류 변경 지시가 어느 문서에도 없다(모순 제거)
+    const allText = ['uds', 'sts', 'suts', 'sits', 'sds'].flatMap(k => r[k]).map(a => a.text).join(' ');
+    expect(allText).not.toMatch(/반영|재계산|재실행|갱신/);
+  });
+
+  // d5716f7 철학: 포맷/이동(noSemanticChange)은 중립화 대상 아님 — move-past-use 맹점 때문에 실
+  //  동작변경일 수 있어 편집 액션·AI 교차확인을 유지한다(commentOnly만 확정 중립).
+  it('포맷/이동(noSemanticChange)은 중립화하지 않는다 — "주석만" 섹션 없음(편집 액션 유지)', () => {
+    const deFmt = extractDiffElements('@@ -1,2 +1,2 @@ void g_f(void)\n-  x = 1;\n+  x = 1;');
+    expect(deFmt.noSemanticChange).toBe(true);
+    expect(deFmt.commentOnly).toBe(false);
+    const dFmt = { function: 'g_f', changeType: 'BODY', changed: true, requirements: [], stsTestCases: [], sutsTestCases: [] };
+    const r = buildDocumentActions(dFmt, null, deFmt);
+    expect(['uds', 'sts', 'suts', 'sits', 'sds'].flatMap(k => r[k]).every(a => a.section !== '주석만')).toBe(true);
+  });
 });
 
 /* ── 빌드/리비전 소스 바 + 결과 영속 ─────────────────────────────────────── */
@@ -2808,7 +2836,8 @@ describe('ImpactGuideSection — 빌드/리비전 소스 바 & 결과 영속', (
     await user.click(screen.getByText(/상세 가이드 생성/));
     await user.click(await screen.findByRole('button', { name: '상세' }));
     const dialog = await screen.findByRole('dialog');
-    await waitFor(() => expect(within(dialog).getByText('주석만')).toBeInTheDocument());
+    // '주석만'은 배지 + 편집 액션(buildDocumentActions #1) 여러 곳에 표시 → getAllByText로 검증
+    await waitFor(() => expect(within(dialog).getAllByText('주석만').length).toBeGreaterThanOrEqual(1));
     expect(within(dialog).getAllByText(/문서 수정 불필요/).length).toBeGreaterThanOrEqual(1);
     // 작성 제안(경계값 TC 골격)·경계값 pill 억제 — 허위 TC 제안 없음
     expect(within(dialog).queryByText(/경계값/)).toBeNull();
