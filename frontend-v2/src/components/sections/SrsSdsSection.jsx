@@ -1045,6 +1045,9 @@ export function deriveStatus(r) {
 }
 
 const PAGE_SIZES = [30, 50, 100];
+// 테스트 결과(pass/fail) 필터는 추적성 요약(SW 커버리지 중심)에서 화면 숨김 — 되돌리려면 true.
+// 상태·필터 로직(testResultFilter)은 그대로 유지(값 'all' 고정 → 필터 no-op)라 플래그만 켜면 즉시 복원된다.
+const SHOW_TEST_RESULT_FILTER = false;
 const SOURCE_ICONS = { STS: 'S', SUTS: 'U', SITS: 'I', SyTS: 'T', SyITS: 'Y', VectorCAST: 'V' };
 const SOURCE_COLORS = { STS: '#2563eb', SUTS: '#7c3aed', SITS: '#0891b2', SyTS: '#9333ea', SyITS: '#c026d3', VectorCAST: '#ea580c' };
 const CONFIDENCE_LABELS = { exact: 'Exact', direct: 'Direct', indirect: 'Indirect', fuzzy: 'Fuzzy', mixed: 'Mixed' };
@@ -2271,13 +2274,15 @@ function TraceMatrix({ matrix, focusFunctions = null, onClearFocus = null,
             {reqTypes.map(t => <option key={t} value={t}>{t}</option>)}
           </select>
         )}
-        <select value={testResultFilter} onChange={e => { setTestResultFilter(e.target.value); setCurrentPage(0); }}
-          style={{ padding: '6px 8px', fontSize: 12, border: '1px solid var(--border)', borderRadius: 6, background: 'var(--bg)', color: 'var(--fg)' }}>
-          <option value="all">테스트 결과</option>
-          <option value="pass">Pass 있음</option>
-          <option value="fail">Fail 있음</option>
-          <option value="no_test">테스트 없음</option>
-        </select>
+        {SHOW_TEST_RESULT_FILTER && (
+          <select value={testResultFilter} onChange={e => { setTestResultFilter(e.target.value); setCurrentPage(0); }}
+            style={{ padding: '6px 8px', fontSize: 12, border: '1px solid var(--border)', borderRadius: 6, background: 'var(--bg)', color: 'var(--fg)' }}>
+            <option value="all">테스트 결과</option>
+            <option value="pass">Pass 있음</option>
+            <option value="fail">Fail 있음</option>
+            <option value="no_test">테스트 없음</option>
+          </select>
+        )}
         {/* 보기 방식 토글: 표(기존) | 트리(신규 ID 기준 추적성 트리) */}
         <div role="group" aria-label="보기 방식" style={{ display: 'inline-flex', border: '1px solid var(--border)', borderRadius: 6, overflow: 'hidden' }}>
           <button type="button" onClick={() => setViewMode('table')} aria-pressed={viewMode === 'table'} title="표 보기"
