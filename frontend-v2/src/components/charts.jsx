@@ -80,6 +80,57 @@ export function RingGauge({ value, size = 96, strokeWidth = 12, color, label, su
   );
 }
 
+// 트렌드 라인 — SVG polyline(+옵션 area). points=[{label, value:number|null}] 오래된→최신.
+// null(측정 없음)은 선을 **분절**한다 — 0으로 이어 그리면 '위반 0'으로 위장(ISO 정직성).
+export function TrendLine({ points, width = 220, height = 48, color = 'var(--accent)', showArea = false, showDots = false, ariaLabel }) {
+  if (!Array.isArray(points) || points.length === 0) return null;
+  const vals = points.map((p) => (p?.value == null || Number.isNaN(Number(p.value)) ? null : Number(p.value)));
+  const known = vals.filter((v) => v != null);
+  if (known.length === 0) return null;
+  const maxV = Math.max(...known, 1);
+  const minV = Math.min(...known, 0);
+  const span = Math.max(maxV - minV, 1);
+  const pad = 3;
+  const x = (i) => (points.length === 1 ? width / 2 : pad + (i * (width - pad * 2)) / (points.length - 1));
+  const y = (v) => height - pad - ((v - minV) / span) * (height - pad * 2);
+  // null 지점에서 세그먼트 분할 — 각 세그먼트를 별도 polyline으로.
+  const segments = [];
+  let cur = [];
+  vals.forEach((v, i) => {
+    if (v == null) {
+      if (cur.length) segments.push(cur);
+      cur = [];
+      return;
+    }
+    cur.push([x(i), y(v), i]);
+  });
+  if (cur.length) segments.push(cur);
+  return (
+    <svg width={width} height={height} viewBox={`0 0 ${width} ${height}`} role="img"
+      aria-label={ariaLabel || `트렌드 (${known.length}개 관측)`} style={{ display: 'block', maxWidth: '100%' }}>
+      {segments.map((seg, si) => (
+        <g key={si}>
+          {showArea && seg.length > 1 && (
+            <polygon fill={color} opacity="0.12" points={[
+              ...seg.map(([px, py]) => `${px},${py}`),
+              `${seg[seg.length - 1][0]},${height - pad}`,
+              `${seg[0][0]},${height - pad}`,
+            ].join(' ')} />
+          )}
+          {seg.length > 1
+            ? <polyline fill="none" stroke={color} strokeWidth="1.6" points={seg.map(([px, py]) => `${px},${py}`).join(' ')} />
+            : <circle cx={seg[0][0]} cy={seg[0][1]} r="2" fill={color} />}
+          {showDots && seg.map(([px, py, i]) => (
+            <circle key={i} cx={px} cy={py} r="2" fill={color}>
+              <title>{`${points[i]?.label ?? i}: ${vals[i]}`}</title>
+            </circle>
+          ))}
+        </g>
+      ))}
+    </svg>
+  );
+}
+
 // 미니 트렌드 — 빌드별 막대(SVG viewBox 100x40, preserveAspectRatio none로 가로 스케일).
 // data=[{...}] 오래된→최신 순, valueKey로 값 선택. threshold 있으면 점선. 빈 데이터면 null.
 export function MiniTrend({ data, valueKey, height = 90, color = 'var(--accent)', threshold }) {

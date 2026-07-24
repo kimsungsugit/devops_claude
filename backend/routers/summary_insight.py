@@ -269,6 +269,125 @@ def jenkins_sync_backfill_status(job_id: str) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# 룰 인텔리전스 (Phase F) — 다빌드 룰 트렌드 + fix 근거 작성 예시
+# ---------------------------------------------------------------------------
+
+FIX_EXAMPLE_CACHE_NAME = "summary_rule_fix_cache.json"
+FIX_EXAMPLE_CACHE_MAX_ENTRIES = 30
+
+
+@router.post("/api/jenkins/prqa-rule-trend")
+def jenkins_prqa_rule_trend(req: dict) -> Dict[str, Any]:
+    """규칙×빌드 위반 트렌드 + 분류(resolved/decreasing/persistent/increasing/new_recent).
+
+    빌드별 규칙 카운트는 prqa_delta RCR 디스크캐시 재사용 — 첫 호출만 미캐시 빌드 수 ×
+    파싱 비용, 2회차부터 JSON 로드 + 산술(응답 cache.rcr_misses로 가시화).
+    """
+    from backend.services.prqa_rule_trend import DEFAULT_LIMIT, MAX_RULES, compute_rule_trend
+
+    body = req or {}
+    job_url = str(body.get("job_url") or "").strip()
+    if not job_url:
+        return {"ok": True, "available": False, "reason": "job_url_required"}
+    cache_root = _normalize_jenkins_cache_root(str(body.get("cache_root") or ""))
+    limit = _to_int(body.get("limit")) or DEFAULT_LIMIT
+    max_rules = _to_int(body.get("max_rules")) or MAX_RULES
+    return compute_rule_trend(
+        job_url=job_url, cache_root=cache_root,
+        limit=max(2, min(limit, 50)), max_rules=max(5, min(max_rules, 100)),
+    )
+
+
+def _fix_cache_load(path: Path) -> Dict[str, Any]:
+    data = _read_json(path)
+    entries = data.get("entries") if isinstance(data, dict) else None
+    return entries if isinstance(entries, dict) else {}
+
+
+def _fix_cache_store(path: Path, entries: Dict[str, Any]) -> None:
+    # LRU-ish 상한: generated_at 오래된 것부터 제거.
+    if len(entries) > FIX_EXAMPLE_CACHE_MAX_ENTRIES:
+        ordered = sorted(entries.items(), key=lambda kv: str(kv[1].get("generated_at") or ""))
+        entries = dict(ordered[len(ordered) - FIX_EXAMPLE_CACHE_MAX_ENTRIES:])
+    _write_cache_atomic(path, {"entries": entries})
+
+
+@router.post("/api/summary/rule-fix-example")
+def summary_rule_fix_example(req: dict) -> Dict[str, Any]:
+    """감소 규칙의 실제 fix diff 발췌 + '위반하지 않는 작성 예시'(Gemini, on-demand).
+
+    correlation_note는 서버 고정 주입(상관≠인과 — LLM 재량 배제). LLM 실패/필터 시에도
+    diff 증거는 항상 반환(결정론 폴백). 캐시 키에 diff_sha+model+prompt_version 포함.
+    """
+    import hashlib as _hashlib
+
+    from backend.services.build_inventory import find_build_meta, list_cached_builds_meta
+    from backend.services.rule_fix_examples import collect_fix_evidence
+    from workflow.rule_fix_example import (
+        CORRELATION_NOTE,
+        FIX_EXAMPLE_PROMPT_VERSION,
+        generate_fix_example,
+    )
+
+    body = req or {}
+    job_url = str(body.get("job_url") or "").strip()
+    rule = str(body.get("rule") or "").strip()
+    file = str(body.get("file") or "").strip()
+    from_build = _to_int(body.get("from_build"))
+    to_build = _to_int(body.get("to_build"))
+    if not job_url or not rule or not file or from_build is None or to_build is None:
+        return {"ok": True, "available": False, "reason": "params_required"}
+    cache_root = _normalize_jenkins_cache_root(str(body.get("cache_root") or ""))
+    metas = list_cached_builds_meta(job_url=job_url, cache_root=cache_root)
+    from_meta = find_build_meta(metas, from_build)
+    to_meta = find_build_meta(metas, to_build)
+    if from_meta is None or to_meta is None:
+        return {"ok": True, "available": False, "reason": "build_not_cached"}
+
+    evidence = collect_fix_evidence(
+        from_build_root=Path(str(from_meta.get("build_root"))),
+        to_build_root=Path(str(to_meta.get("build_root"))),
+        file=file,
+    )
+    if not evidence.get("ok"):
+        return {"ok": True, "available": False, "reason": evidence.get("reason"),
+                "rule": rule, "file": file, "from_build": from_build, "to_build": to_build}
+
+    model = _expected_insight_model()
+    key = _hashlib.sha256(
+        f"{rule}|{file}|{from_build}|{to_build}|{evidence['diff_sha']}|{model}|{FIX_EXAMPLE_PROMPT_VERSION}".encode()
+    ).hexdigest()
+    cache_path = Path(str(to_meta.get("reports_dir"))) / FIX_EXAMPLE_CACHE_NAME
+    entries = _fix_cache_load(cache_path)
+    probe = bool(body.get("probe"))
+    force = bool(body.get("force"))
+    hit = entries.get(key)
+    if hit and not force:
+        return {**hit, "cached": True}
+    if probe:
+        return {"ok": True, "available": True, "cached": False, "rule": rule, "file": file,
+                "from_build": from_build, "to_build": to_build}
+
+    gen = generate_fix_example(rule=rule, diff_excerpt=evidence["diff"]["text"],
+                               rule_context={"file": file, "from_build": from_build, "to_build": to_build})
+    payload = {
+        "ok": True, "available": True, "reason": None,
+        "rule": rule, "file": file, "from_build": from_build, "to_build": to_build,
+        "evidence": evidence["diff"],
+        "correlation_note": CORRELATION_NOTE,
+        "example": gen["example"],
+        "ai_enriched": gen["ai_enriched"],
+        "enrich_reason": gen["enrich_reason"],
+        "model": gen["model"],
+        "prompt_version": FIX_EXAMPLE_PROMPT_VERSION,
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+    }
+    entries[key] = payload
+    _fix_cache_store(cache_path, entries)
+    return {**payload, "cached": False}
+
+
+# ---------------------------------------------------------------------------
 # AI 인사이트 (Phase C) — 결정론 코어 + Gemini enrichment, on-demand + 디스크 캐시
 # ---------------------------------------------------------------------------
 
