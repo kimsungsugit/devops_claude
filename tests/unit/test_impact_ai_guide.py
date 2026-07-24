@@ -297,6 +297,49 @@ def test_explain_function_change_with_llm(monkeypatch):
     assert "int foo(int a, int b)" in joined
 
 
+def test_explain_function_change_no_semantic_suppresses_proposals(monkeypatch):
+    """no_semantic_change=True(주석/포맷/이동 only)면 프롬프트가 '문서 수정 불필요'를 요구하고
+    신규 TC·문서편집 제안 스캐폴드('추가할 단위 테스트 케이스')를 넣지 않는다(허위 AI 제안 차단)."""
+    from workflow import impact_ai_guide
+    from workflow import ai as _ai
+    captured = {}
+
+    def _fake_call(cfg, messages, **k):
+        captured["messages"] = messages
+        return "주석만 변경 — 문서 수정 불필요."
+
+    monkeypatch.setattr(_ai, "load_oai_config", lambda _p: {"provider": "gemini"})
+    monkeypatch.setattr(_ai, "agent_call_text", _fake_call)
+    out = impact_ai_guide.explain_function_change(
+        function="g_Ap_DoorCtrl_Func", change_type="BODY", asil="A",
+        function_diff="@@ -1,1 +1,1 @@\n-  x; /* Iintialization */\n+  x; /* Initialization */",
+        no_semantic_change=True,
+    )
+    assert out
+    joined = " ".join(m["content"] for m in captured["messages"])
+    assert "문서 수정 불필요" in joined                 # 비의미 지시 주입(context + user_msg)
+    assert "비의미 변경" in joined                       # context 마커
+    assert "추가할 단위 테스트 케이스" not in joined       # 기본 TC 제안 스캐폴드 미포함(허위 TC 차단)
+
+
+def test_explain_function_change_semantic_keeps_proposals(monkeypatch):
+    """no_semantic_change=False(기본)면 종전대로 문서별 제안·TC 스캐폴드를 요구(무회귀 가드)."""
+    from workflow import impact_ai_guide
+    from workflow import ai as _ai
+    captured = {}
+
+    def _fake_call(cfg, messages, **k):
+        captured["messages"] = messages
+        return "설명"
+
+    monkeypatch.setattr(_ai, "load_oai_config", lambda _p: {"provider": "gemini"})
+    monkeypatch.setattr(_ai, "agent_call_text", _fake_call)
+    impact_ai_guide.explain_function_change(
+        function="foo", change_type="SIGNATURE", after="int foo(int a, int b)")
+    joined = " ".join(m["content"] for m in captured["messages"])
+    assert "추가할 단위 테스트 케이스" in joined            # 실 변경엔 TC 제안 유지
+
+
 def test_explain_function_change_injects_doc_content(monkeypatch):
     """doc_content(현재 문서 내용)가 프롬프트에 원문으로 주입돼 '원문→제안' 근거가 된다."""
     from workflow import impact_ai_guide

@@ -148,6 +148,7 @@ def impact_explain_change(req: ImpactExplainChangeRequest) -> Dict[str, Any]:
             requirements=req.requirements,
             doc_content=req.doc_content or None,
             impact_path=req.impact_path or None,
+            no_semantic_change=req.no_semantic_change,
         )
         if explanation:
             return {"ok": True, "explanation": explanation}

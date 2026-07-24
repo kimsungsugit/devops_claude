@@ -318,7 +318,7 @@ def _build_guide_prompt_context(ctx: ImpactGuideContext, risk: RiskAssessment) -
         for group, fns in ctx.impact_groups.items():
             if fns:
                 lines.append(f"\n## 영향 범위 — {group} ({len(fns)}개)")
-                for fn in fns[:10]:
+                for fn in list(fns)[:10]:  # fns가 dict(라이브)면 fns[:10]가 KeyError → list()로 키 슬라이스 안전
                     lines.append(f"- {fn}")
 
     if ctx.suts_tcs:
@@ -532,6 +532,7 @@ def explain_function_change(
     requirements: Optional[List[str]] = None,
     doc_content: Optional[Dict] = None,
     impact_path: Optional[Dict] = None,
+    no_semantic_change: bool = False,
 ) -> Optional[str]:
     """단일 함수 변경에 대한 '원문→제안' 문서 반영안(무엇이/영향/리뷰 초점)을 LLM으로 생성.
 
@@ -575,6 +576,13 @@ def explain_function_change(
                 f"\n\n[간접 영향 — 이 함수는 직접 변경되지 않음. {_rel}와의 호출 관계({_hop})로 영향. "
                 "무향 콜그래프라 호출/피호출 방향은 단정 불가. 문서 본문 수정보다 '호출 인터페이스 계약"
                 "(시그니처·전제조건·부작용) 유지 확인 + 회귀시험 재실행 판단'을 중심으로 설명하라.]"
+            )
+        # 비의미 변경(주석/포맷/코드 이동 only) — 로직·동작 불변. LLM이 허위 문서수정·신규 TC를 내지 않게
+        # 명시 지시(프론트 결정론 억제 renderAuthoringProposal 가드와 짝 — 이중 방어).
+        if no_semantic_change:
+            context += (
+                "\n\n[비의미 변경 — 이 변경은 C 주석/포맷/코드 이동만이고 로직·동작·인터페이스 변화가 없다. "
+                "'문서 수정 불필요'를 명시하고, 신규 테스트 케이스나 문서 편집(원문→제안)을 제안하지 마라.]"
             )
         doc_ctx = _format_doc_content_for_prompt(doc_content)
         if doc_ctx:
@@ -626,6 +634,15 @@ def explain_function_change(
             "### 3. 리뷰 초점\n"
             "ASIL 등급을 고려한 확인 포인트(구체적). 확실치 않으면 '추정'이라 표기."
         )
+        if no_semantic_change:
+            # 비의미 변경 — 문서 제안·신규 TC 요구 스캐폴드 대신 '수정 불필요'만 요청(결정론 억제와 짝).
+            user_msg = (
+                f"{context}\n\n"
+                "위 변경은 주석/포맷/코드 이동만으로 로직·동작·인터페이스 변화가 없습니다. 다음만 간결히 답하세요:\n\n"
+                "### 1. 무엇이 바뀌었나\n주석/포맷 변경 내용을 1~2문장으로(코드 로직 변화 없음을 명시).\n\n"
+                "### 2. 문서 영향\n'문서 수정 불필요 — 재검토·신규 TC 불필요'를 명시하고 근거(로직 불변)를 1줄. "
+                "새 테스트 케이스나 문서 편집(원문→제안)을 절대 제안하지 마세요.\n"
+            )
         messages = [
             {"role": "system", "content": system},
             {"role": "user", "content": user_msg},

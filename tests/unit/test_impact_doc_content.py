@@ -117,6 +117,43 @@ def test_load_suts_fn_tcs_without_sink_unchanged(monkeypatch):
     assert _load_suts_fn_tcs("U:/s.xlsm", ["s_bar"]) == {"s_bar": ["TC1"]}
 
 
+def test_load_suts_fn_tcs_isolates_malformed_unit(monkeypatch):
+    """B2: 기형 유닛(예외 유발) 하나가 전체 회귀집합을 무너뜨리지 않고 격리되며, 나머지 정상 유닛은
+    집계되고 사유(N건 예외)가 warn_sink에 표면화된다(silent-0 방지)."""
+    import backend.services.file_resolver as fr
+    import tools.export_suts_vectorcast as ev
+    from workflow.impact_orchestrator import _load_suts_fn_tcs
+
+    monkeypatch.setattr(fr, "get_resolver", lambda: _FakeResolver())
+    monkeypatch.setattr(ev, "build_vectorcast_model", lambda *a, **k: {
+        "units": [
+            "not-a-dict",  # 기형: dict 아님 → 격리
+            {"unit_name": "s_ok", "test_cases": [{"base_tc_id": "TC_OK"}]},  # 정상
+        ],
+        "export_warnings": [],
+    })
+    warns: list = []
+    result = _load_suts_fn_tcs("U:/s.xlsm", ["s_ok"], warn_sink=warns)
+    assert result == {"s_ok": ["TC_OK"]}                        # 정상 유닛은 유실 없이 집계
+    assert any("예외로 건너뜀" in w for w in warns)              # 격리 사유 표면화(silent 아님)
+
+
+def test_load_suts_fn_tcs_happy_path_no_exc_warn(monkeypatch):
+    """B2: 모든 유닛 정상이면 예외 warn이 없고 결과는 종전과 byte 동일(happy-path 불변)."""
+    import backend.services.file_resolver as fr
+    import tools.export_suts_vectorcast as ev
+    from workflow.impact_orchestrator import _load_suts_fn_tcs
+
+    monkeypatch.setattr(fr, "get_resolver", lambda: _FakeResolver())
+    monkeypatch.setattr(ev, "build_vectorcast_model", lambda *a, **k: {
+        "units": [{"unit_name": "s_ok", "test_cases": [{"base_tc_id": "TC_OK"}]}],
+        "export_warnings": [],
+    })
+    warns: list = []
+    assert _load_suts_fn_tcs("U:/s.xlsm", ["s_ok"], warn_sink=warns) == {"s_ok": ["TC_OK"]}
+    assert not any("예외로 건너뜀" in w for w in warns)
+
+
 def test_load_suts_fn_tcs_warns_only_on_unit_drops(monkeypatch):
     """유닛 누락 경고는 unit을 실제로 떨어뜨리는 코드(empty_test_case_block/missing_unit_name)만
     센다. empty_expected(입력전용 시퀀스 등 무해)를 합산하면 오경보 — 전용 파서 컬럼탐지 수정으로

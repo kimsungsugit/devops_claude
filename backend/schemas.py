@@ -674,6 +674,9 @@ class ImpactExplainChangeRequest(BaseModel):
     # 간접영향 근거 — {hop, via, seed}. 간접(비변경) 함수가 "왜 영향받는지"(경유 노드·최초 변경함수)를
     # LLM이 콜체인 계약 유지 관점으로 설명하게 한다. 직접 함수는 빈 dict. 값은 함수명 문자열이라 소규모.
     impact_path: Dict[str, Any] = Field(default_factory=dict)
+    # 비의미 변경(주석/포맷/이동 only) — True면 LLM에 '문서 수정 불필요'를 지시하고 신규 TC·문서 편집을
+    # 제안하지 않게 한다(프론트 extractDiffElements.commentOnly/noSemanticChange 파생). 결정론 억제와 짝.
+    no_semantic_change: bool = Field(default=False)
 
 
 class TestGenerateRequest(BaseModel):

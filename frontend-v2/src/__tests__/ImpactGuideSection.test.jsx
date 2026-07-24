@@ -1619,6 +1619,35 @@ describe('ImpactGuideSection', () => {
     expect(body.doc_content).toBeTruthy();
     expect(body.doc_content.uds.description).toBe('튜닝값 읽기');   // 현재 UDS 원문 전달
     expect(body.doc_content.sds).toBe('SDS: foo 컴포넌트');          // 현재 SDS 원문 전달
+    expect(body.no_semantic_change).toBe(false);                     // 실 변경(SIGNATURE)이라 비의미 아님
+  });
+
+  // STS-IMPACT-069: 주석-only(비의미) 함수의 AI 요청 payload에 no_semantic_change=true가 실려 LLM이
+  //  허위 문서수정·TC 제안을 하지 않게 한다(A4 결정론 억제와 짝 — 이중 방어).
+  it('원문→제안: 주석-only 함수는 payload에 no_semantic_change=true를 실어 보낸다', async () => {
+    const { post } = await import('../api.js');
+    const calls = [];
+    post.mockImplementation((url, body) => {
+      if (url === '/api/impact/explain-change') { calls.push(body); return Promise.resolve({ ok: true, explanation: '문서 수정 불필요' }); }
+      return Promise.resolve({ ok: false });
+    });
+    const user = userEvent.setup();
+    const analysisResult = {
+      impactData: {
+        trigger: { changed_files: ['Ap.c'] },
+        changed_function_types: { s_cmt: 'BODY' },
+        change_details: { s_cmt: { before: '', after: '' } },
+        impact: { direct: ['s_cmt'] },
+        function_meta: { s_cmt: { asil: 'A', evidence: 'line' } },
+        function_diffs: { s_cmt: '@@ -1,1 +1,1 @@ void s_cmt(void)\n-    x = 1; /* Iintialization */\n+    x = 1; /* Initialization */' },
+      },
+    };
+    render(<ImpactGuideSection analysisResult={analysisResult} />);
+    await user.click(screen.getByText(/상세 가이드 생성/));
+    await user.click(await screen.findByRole('button', { name: '상세' }));
+    await user.click(await screen.findByRole('button', { name: /AI 문장 재작성/ }));
+    await waitFor(() => expect(calls.length).toBeGreaterThanOrEqual(1));
+    expect(calls[calls.length - 1].no_semantic_change).toBe(true);
   });
 
   // STS-IMPACT-053d: STS TC 원문이 페이로드에 실린다 — buildDocContentForFn은 guide→guideDetailByLc에
@@ -2034,6 +2063,52 @@ describe('extractDiffElements noSemanticChange (포맷/이동만 — 의미 변�
   it('추가만(신규)·삭제만은 false', () => {
     expect(extractDiffElements('@@ -1,0 +1,2 @@\n+void n(void)\n+{}').noSemanticChange).toBe(false);
     expect(extractDiffElements('@@ -1,2 +1,0 @@\n-void o(void)\n-{}').noSemanticChange).toBe(false);
+  });
+});
+
+describe('extractDiffElements commentOnly (주석-only — 비의미 변경)', () => {
+  it('인라인 주석 오타 수정만(코드 동일)은 commentOnly=true (사용자 실제 케이스)', () => {
+    const fd = '@@ -467,7 +509,7 @@ void g_Ap_DoorCtrl_Func( void )\n-        s_UpdateDoorState( ST_AUTO_CLOSE ); /* Iintialization */\n+        s_UpdateDoorState( ST_AUTO_CLOSE ); /* Initialization */';
+    const r = extractDiffElements(fd);
+    expect(r.commentOnly).toBe(true);
+    expect(r.noSemanticChange).toBe(false);   // 원문은 다름(주석 텍스트) → 포맷/이동 아님
+  });
+
+  it('라인 주석(//) 변경만은 commentOnly=true', () => {
+    const fd = '@@ -1,1 +1,1 @@ void f(void)\n-    x = 1;  // set x to one\n+    x = 1;  // initialize x';
+    expect(extractDiffElements(fd).commentOnly).toBe(true);
+  });
+
+  it('주석 전용 라인 변경은 commentOnly=true', () => {
+    const fd = '@@ -1,1 +1,1 @@ void f(void)\n-    /* step 1 */\n+    /* step one */';
+    expect(extractDiffElements(fd).commentOnly).toBe(true);
+  });
+
+  it('코드 변경(주석 동일)은 commentOnly=false', () => {
+    const fd = '@@ -1,1 +1,1 @@ void f(void)\n-    x = 1; /* c */\n+    x = 2; /* c */';
+    expect(extractDiffElements(fd).commentOnly).toBe(false);
+  });
+
+  it('포맷/이동(원문까지 동일)은 commentOnly=false(noSemanticChange와 배타)', () => {
+    const r = extractDiffElements('@@ -1,2 +1,2 @@\n-    x = 1;\n+    x = 1;');
+    expect(r.noSemanticChange).toBe(true);
+    expect(r.commentOnly).toBe(false);
+  });
+
+  it('문자열 리터럴 내 // 변경은 commentOnly=false(스트리퍼 문자열 인식 — 실 코드 변경)', () => {
+    // 변경이 문자열 안(주소)이라 실제 코드 변경 — naive strip이면 //뒤를 잘라 오판, 문자열-인식이라 유지
+    const fd = '@@ -1,1 +1,1 @@ void f(void)\n-    log("http://a/x");\n+    log("http://b/x");';
+    expect(extractDiffElements(fd).commentOnly).toBe(false);
+  });
+
+  it('다중라인 주석 경계(/* 미닫힘)는 commentOnly=false(보수적)', () => {
+    const fd = '@@ -1,2 +1,2 @@ void f(void)\n-    x = 1; /* start\n+    x = 1; /* begin';
+    expect(extractDiffElements(fd).commentOnly).toBe(false);
+  });
+
+  it('truncated diff는 commentOnly=false(판정 보류)', () => {
+    const fd = '@@ -1,1 +1,1 @@ void f(void)\n-    x; /* a */\n+    x; /* b */\n… (+40줄 생략)';
+    expect(extractDiffElements(fd).commentOnly).toBe(false);
   });
 });
 
@@ -2677,5 +2752,34 @@ describe('ImpactGuideSection — 빌드/리비전 소스 바 & 결과 영속', (
     await waitFor(() => expect(within(dialog).getByText(/UDS 작성 제안/)).toBeInTheDocument());
     // 없는 '현재 원문'을 암시하는 프레임 헤더는 표시하지 않는다(reviewer Critical)
     expect(within(dialog).queryByText('현재 원문 → 수정안')).toBeNull();
+  });
+
+  // STS-IMPACT-068: 주석-only(비의미) 변경은 "주석만" 배지 + "문서 수정 불필요" 안내를 표시하고
+  //  작성 제안(경계값 TC 골격)을 억제한다 — 허위 문서 수정·TC 제안 방지(사용자 지적한 g_Ap_DoorCtrl_Func 케이스).
+  it('주석-only: "주석만" 배지·"문서 수정 불필요" 표시 + 작성 제안(경계값) 억제', async () => {
+    const { post } = await import('../api.js');
+    post.mockResolvedValue({ ok: false });
+    const user = userEvent.setup();
+    const analysisResult = {
+      impactData: {
+        trigger: { changed_files: ['Ap.c'] },
+        changed_function_types: { s_cmt: 'BODY' },
+        change_details: { s_cmt: { before: '', after: '' } },
+        impact: { direct: ['s_cmt'] },
+        function_meta: { s_cmt: { asil: 'A', evidence: 'line' } },
+        // 본문 diff가 주석 오타 수정만(코드 동일) — commentOnly=true
+        function_diffs: { s_cmt: '@@ -1,1 +1,1 @@ void s_cmt( U16 idx )\n-    x = idx; /* Iintialization */\n+    x = idx; /* Initialization */' },
+        doc_content: { uds: { s_cmt: { prototype: 'void s_cmt( U16 idx )' } } },
+      },
+    };
+    render(<ImpactGuideSection analysisResult={analysisResult} />);
+    await user.click(screen.getByText(/상세 가이드 생성/));
+    await user.click(await screen.findByRole('button', { name: '상세' }));
+    const dialog = await screen.findByRole('dialog');
+    await waitFor(() => expect(within(dialog).getByText('주석만')).toBeInTheDocument());
+    expect(within(dialog).getAllByText(/문서 수정 불필요/).length).toBeGreaterThanOrEqual(1);
+    // 작성 제안(경계값 TC 골격)·경계값 pill 억제 — 허위 TC 제안 없음
+    expect(within(dialog).queryByText(/경계값/)).toBeNull();
+    expect(within(dialog).queryByText('MAX=65535')).toBeNull();
   });
 });

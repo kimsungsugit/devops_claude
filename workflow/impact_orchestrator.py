@@ -660,38 +660,51 @@ def _load_suts_fn_tcs(
         _warn("회귀 TC: SUTS 파싱 실패 — 재실행 TC 미집계")
         return {}
     result: Dict[str, List[str]] = {}
+    _unit_exc = 0  # malformed 유닛(예외) 개수 — 격리하고 사유만 표면화(전체 집합 유실 방지)
     for unit in model.get("units") or []:
-        # unit_name은 템플릿에 따라 시그니처(HDPDM01 'void g_SysOs_WdiCtrl( void )')일 수 있어
-        # bare 식별자로 정규화한다 — 프론트/스코프 필터(_direct_lc)가 SVN diff의 bare 함수명과
-        # 조인하므로, 시그니처 그대로면 매칭 실패해 카드가 '미파싱'·회귀 TC 0이 됐다(KJPDS02는 무변경).
-        name = bare_fn_name(unit.get("unit_name"))
-        # each test_case row carries base_tc_id (the TC block identifier)
-        _seqs = unit.get("test_cases") or []
-        tcs = [str(tc.get("base_tc_id") or "") for tc in _seqs if tc.get("base_tc_id")]
-        if name and tcs:
-            result[name] = list(dict.fromkeys(tcs))
-            # 실 TC 내용 보존(문서 카드용) — 함수당 상위 3 시퀀스, action 300자.
-            if content_sink is not None:
-                seqs_out = []
-                for tc in _seqs[:3]:
-                    action = str(tc.get("description") or "").strip()
-                    pre = str(tc.get("precondition") or "").strip()
-                    # 실 TC 시트·행 위치(exporter가 test_case["source"]로 부여) 전달 — 문서 카드가
-                    # "이 TC(행 N)를 이렇게 수정" 앵커를 표시하게 한다. 비어있으면 생략(행 번호 날조 금지).
-                    _src = tc.get("source") or {}
-                    _loc = {k: _src.get(k) for k in ("sheet", "tc_row", "sequence_row") if _src.get(k) is not None}
-                    _seq = {
-                        "tc_id": str(tc.get("base_tc_id") or ""),
-                        "action": action[:300],
-                        "precondition": pre[:200],
-                        "inputs": _cap_kv(tc.get("inputs")),
-                        "expected": _cap_kv(tc.get("expected")),
-                    }
-                    if _loc:
-                        _seq["loc"] = _loc
-                    seqs_out.append(_seq)
-                if seqs_out:
-                    content_sink[name] = seqs_out
+        try:
+            if not isinstance(unit, dict):
+                _unit_exc += 1
+                continue
+            # unit_name은 템플릿에 따라 시그니처(HDPDM01 'void g_SysOs_WdiCtrl( void )')일 수 있어
+            # bare 식별자로 정규화한다 — 프론트/스코프 필터(_direct_lc)가 SVN diff의 bare 함수명과
+            # 조인하므로, 시그니처 그대로면 매칭 실패해 카드가 '미파싱'·회귀 TC 0이 됐다(KJPDS02는 무변경).
+            name = bare_fn_name(unit.get("unit_name"))
+            # each test_case row carries base_tc_id (the TC block identifier)
+            _seqs = unit.get("test_cases") or []
+            tcs = [str(tc.get("base_tc_id") or "") for tc in _seqs if isinstance(tc, dict) and tc.get("base_tc_id")]
+            if name and tcs:
+                result[name] = list(dict.fromkeys(tcs))
+                # 실 TC 내용 보존(문서 카드용) — 함수당 상위 3 시퀀스, action 300자.
+                if content_sink is not None:
+                    seqs_out = []
+                    for tc in _seqs[:3]:
+                        if not isinstance(tc, dict):
+                            continue
+                        action = str(tc.get("description") or "").strip()
+                        pre = str(tc.get("precondition") or "").strip()
+                        # 실 TC 시트·행 위치(exporter가 test_case["source"]로 부여) 전달 — 문서 카드가
+                        # "이 TC(행 N)를 이렇게 수정" 앵커를 표시하게 한다. 비어있으면 생략(행 번호 날조 금지).
+                        _src = tc.get("source") or {}
+                        _src = _src if isinstance(_src, dict) else {}
+                        _loc = {k: _src.get(k) for k in ("sheet", "tc_row", "sequence_row") if _src.get(k) is not None}
+                        _seq = {
+                            "tc_id": str(tc.get("base_tc_id") or ""),
+                            "action": action[:300],
+                            "precondition": pre[:200],
+                            "inputs": _cap_kv(tc.get("inputs")),
+                            "expected": _cap_kv(tc.get("expected")),
+                        }
+                        if _loc:
+                            _seq["loc"] = _loc
+                        seqs_out.append(_seq)
+                    if seqs_out:
+                        content_sink[name] = seqs_out
+        except Exception:  # noqa: BLE001 — 한 유닛의 기형 데이터가 전체 회귀집합을 무너뜨리지 않게 격리  # silent-ok(_unit_exc로 집계·표면화)
+            _unit_exc += 1
+            continue
+    if _unit_exc:
+        _warn(f"회귀 TC: SUTS 유닛 {_unit_exc}건 파싱 예외로 건너뜀 — 재실행 집합 과소 가능(데이터 형식 확인)")
     if not result and flagged_fns:
         _warn("회귀 TC: 영향 함수와 SUTS 유닛명이 매칭되지 않아 재실행 TC 0(이름 규칙 확인)")
     # reviewer Finding#5: 파서 경고를 유실하지 않고 표면화. 단 **유닛 누락(회귀집합 과소)** 경고는
@@ -895,7 +908,7 @@ def _load_sds_fn_desc(
 def _cap_kv(d: Any, n: int = 5) -> Dict[str, str]:
     """{header: value} 중 비어있지 않은 상위 n개를 80자로 절단(job 크기 상한). SITS/STS 내용 캡처 공용."""
     out: Dict[str, str] = {}
-    for k, v in list((d or {}).items()):
+    for k, v in list((d if isinstance(d, dict) else {}).items()):  # 비-dict(리스트 등) 방어 — 유닛루프 크래시 차단
         sv = str(v).strip()
         if not sv:
             continue
@@ -960,27 +973,37 @@ def _load_sits_fn_chains(
     fn_set = {fn.strip().lower() for fn in flagged_fns}
     result: Dict[str, List[str]] = {}
     _integrations = (data.get("integrations") if isinstance(data, dict) else None) or []
+    _itc_exc = 0  # malformed 통합케이스(예외) 개수 — 격리하고 사유만 표면화(전체 체인집합 유실 방지)
     for itc in _integrations:
-        entry = str(itc.get("entry_fn") or "").strip()
-        chain = str(itc.get("call_chain") or "").strip()
-        tc_id = str(itc.get("tc_id") or "")
-        if entry.lower() in fn_set:
-            label = f"{tc_id}: {chain}" if tc_id else chain
-            if label:
-                result.setdefault(entry, []).append(label)
-        # 문서 카드용 실 내용(TC-ID 키) — sub_cases의 precondition/inputs/expected 보존. 프론트가 TC-ID로
-        # 조인하므로 entry_fn 매칭과 무관하게 전체 TC를 담는다(문서 소규모, 총량 800 캡). 회귀 result는 불변.
-        _nk = _normTc(tc_id)
-        if content_sink is not None and _nk and len(content_sink) < 800:
-            _subs = [
-                {
-                    "precondition": str(sc.get("precondition") or "").strip()[:200],
-                    "inputs": _cap_kv(sc.get("inputs")),
-                    "expected": _cap_kv(sc.get("expected")),
-                }
-                for sc in (itc.get("sub_cases") or [])[:3]
-            ]
-            content_sink[_nk] = {"call_chain": chain[:200], "sub_cases": _subs}
+        try:
+            if not isinstance(itc, dict):
+                _itc_exc += 1
+                continue
+            entry = str(itc.get("entry_fn") or "").strip()
+            chain = str(itc.get("call_chain") or "").strip()
+            tc_id = str(itc.get("tc_id") or "")
+            if entry.lower() in fn_set:
+                label = f"{tc_id}: {chain}" if tc_id else chain
+                if label:
+                    result.setdefault(entry, []).append(label)
+            # 문서 카드용 실 내용(TC-ID 키) — sub_cases의 precondition/inputs/expected 보존. 프론트가 TC-ID로
+            # 조인하므로 entry_fn 매칭과 무관하게 전체 TC를 담는다(문서 소규모, 총량 800 캡). 회귀 result는 불변.
+            _nk = _normTc(tc_id)
+            if content_sink is not None and _nk and len(content_sink) < 800:
+                _subs = [
+                    {
+                        "precondition": str(sc.get("precondition") or "").strip()[:200],
+                        "inputs": _cap_kv(sc.get("inputs")),
+                        "expected": _cap_kv(sc.get("expected")),
+                    }
+                    for sc in (itc.get("sub_cases") or [])[:3] if isinstance(sc, dict)
+                ]
+                content_sink[_nk] = {"call_chain": chain[:200], "sub_cases": _subs}
+        except Exception:  # noqa: BLE001 — 한 통합케이스의 기형 데이터가 전체 체인집합을 무너뜨리지 않게 격리  # silent-ok(_itc_exc로 집계·표면화)
+            _itc_exc += 1
+            continue
+    if _itc_exc:
+        _warn(f"회귀 체인: SITS 통합케이스 {_itc_exc}건 파싱 예외로 건너뜀 — 통합 체인 과소 가능(데이터 형식 확인)")
     # SUTS 로더(_load_suts_fn_tcs)와 대칭 — 중간파일에 통합케이스는 있는데 영향 함수와 entry_fn이
     # 하나도 매칭 안 되면 조용한 0 대신 사유를 남긴다(이름 규칙 불일치 등, silent-0 방지).
     if not result and fn_set and _integrations:
@@ -2355,15 +2378,20 @@ def run_impact_update(
         regression_test_set: Dict[str, Any] = {"suts": {}, "sits": {}}
         _suts_content: Dict[str, Any] = {}  # SUTS TC 실내용(문서 카드용) — _load_suts_fn_tcs가 채움
         _sits_by_tc: Dict[str, Any] = {}  # SITS TC 실내용(TC-ID 키) — 중간 JSON에서 _load_sits_fn_chains가 채움
-        try:
-            if _lk and getattr(_lk, "suts", ""):
+        # SUTS·SITS 회귀집계를 각각 try로 분리 — 한쪽 실패가 다른쪽을 떨어뜨리지 않게. 예외 시 사유를
+        # warn으로 표면화(과거 shared try + `except: pass`가 전량 침묵손실 = loader silent-0 정책 위배).
+        if _lk and getattr(_lk, "suts", ""):
+            try:
                 regression_test_set["suts"] = _load_suts_fn_tcs(
                     _lk.suts, _flagged, warn_sink=warnings, content_sink=_suts_content)
-            if _lk and getattr(_lk, "sits", ""):
+            except Exception as exc:  # noqa: BLE001 — best-effort, 없어도 분석은 진행(단 사유 표면화)
+                warnings.append(f"회귀 TC: SUTS 재실행 TC 집계 예외로 미집계({exc})")
+        if _lk and getattr(_lk, "sits", ""):
+            try:
                 regression_test_set["sits"] = _load_sits_fn_chains(
                     _lk.sits, _flagged, warn_sink=warnings, content_sink=_sits_by_tc)
-        except Exception:  # noqa: BLE001 — 회귀집합은 best-effort, 없어도 분석은 진행
-            pass
+            except Exception as exc:  # noqa: BLE001
+                warnings.append(f"회귀 체인: SITS 재실행 체인 집계 예외로 미집계({exc})")
         regression_test_set["summary"] = {
             "suts_tc_count": sum(len(v) for v in regression_test_set["suts"].values()),
             "sits_chain_count": sum(len(v) for v in regression_test_set["sits"].values()),
@@ -2547,8 +2575,8 @@ def run_impact_update(
             _suts_linked = getattr(linked_docs, "suts", "")
             _sits_linked = getattr(linked_docs, "sits", "")
             _shared_uds_details = _load_uds_fn_details(_uds_linked, _flag_fns) if (_has_flag and _uds_linked) else {}
-            _shared_suts_tcs = _load_suts_fn_tcs(_suts_linked, _flag_fns) if (_has_flag and _suts_linked) else {}
-            _shared_sits_chains = _load_sits_fn_chains(_sits_linked, _flag_fns) if (_has_flag and _sits_linked) else {}
+            _shared_suts_tcs = _load_suts_fn_tcs(_suts_linked, _flag_fns, warn_sink=warnings) if (_has_flag and _suts_linked) else {}
+            _shared_sits_chains = _load_sits_fn_chains(_sits_linked, _flag_fns, warn_sink=warnings) if (_has_flag and _sits_linked) else {}
             for idx, (target, info) in enumerate(action_items, start=1):
                 if info.get("mode") == "AUTO":
                     if callable(on_progress):
