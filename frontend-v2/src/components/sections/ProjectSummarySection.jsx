@@ -8,6 +8,7 @@ import { CoverageDonut, QualityGateBadge, classifyGate } from '../ResultPanel.js
 import { buildTraceMatrix } from '../../traceMatrix.js';
 import PipelineHealthStrip from './PipelineHealthStrip.jsx';
 import BuildDeltaDrilldown from './BuildDeltaDrilldown.jsx';
+import SummaryAiInsightPanel from './SummaryAiInsightPanel.jsx';
 
 /**
  * ProjectSummarySection — "📌 프로젝트 요약" 탭 (단일 뷰 건강 대시보드).
@@ -333,6 +334,9 @@ export default function ProjectSummarySection({ job, analysisResult }) {
       {/* 파이프라인 헬스 스트립 — 설계(SDS)→테스트(STS)까지 단계 상태 + 탭 딥링크 */}
       <PipelineHealthStrip trace={trace} prqa={prqa} scmVcast={scmVcast} rollup={rollup}
         latestViolationsDelta={latestViolationsDelta} />
+
+      {/* AI 인사이트(Gemini) — on-demand(버튼) + 빌드별 디스크 캐시(probe 자동 표시) */}
+      <SummaryAiInsightPanel jobUrl={jobUrl} cacheRoot={cacheRoot} scmId={scmId} trace={trace} />
 
       {/* 정적·동적 현황 (그리드) */}
       <div className="panel" style={PANEL}>
