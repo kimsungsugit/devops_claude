@@ -3,7 +3,7 @@ import { post, api, defaultCacheRoot } from '../../api.js';
 import { useToast, useJenkinsCfg } from '../../App.jsx';
 import { pickScmForJob } from '../../projectLoader.js';
 import { targetConsistent } from '../../impactGuard.js';
-import { HorizontalBar, RingGauge, MiniTrend } from '../charts.jsx';
+import { HorizontalBar, RingGauge, TrendLine } from '../charts.jsx';
 import { CoverageDonut, QualityGateBadge, classifyGate } from '../ResultPanel.jsx';
 import { buildTraceMatrix } from '../../traceMatrix.js';
 import PipelineHealthStrip from './PipelineHealthStrip.jsx';
@@ -12,6 +12,7 @@ import SummaryAiInsightPanel from './SummaryAiInsightPanel.jsx';
 import RuleTrendPanel from './RuleTrendPanel.jsx';
 import ArchitectureMetricsPanel from './ArchitectureMetricsPanel.jsx';
 import BaselineDiffPanel from './BaselineDiffPanel.jsx';
+import FunctionCoveragePanel from './FunctionCoveragePanel.jsx';
 
 /**
  * ProjectSummarySection — "📌 프로젝트 요약" 탭 (단일 뷰 건강 대시보드).
@@ -481,16 +482,29 @@ export default function ProjectSummarySection({ job, analysisResult }) {
               { key: 'violations', label: '위반', color: 'var(--color-warning)' },
               { key: 'diagnostics', label: '진단', color: 'var(--color-info)' },
               { key: 'compliance', label: '준수율(%)', color: 'var(--color-success)', threshold: 90 },
-            ].map(({ key, label, color, threshold }) => {
-              const dseries = (prqaTrend.builds || []).map(b => ({ label: `#${b.build_number}`, [key]: b[key] }));
-              const latest = dseries.length ? dseries[dseries.length - 1][key] : null;
+            ].map(({ key, label, color }) => {
+              const builds = prqaTrend.builds || [];
+              const points = builds.map((b) => ({ label: `#${b.build_number}`, value: b[key] ?? null }));
+              const latest = builds.length ? builds[builds.length - 1][key] : null;
+              const deltaKey = `${key}_delta`;
+              const latestDelta = builds.length ? builds[builds.length - 1][deltaKey] : null;
               return (
                 <div key={key}>
-                  <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', display: 'flex', justifyContent: 'space-between' }}>
-                    <span>{label}</span><b>{fmtInt(latest)}</b>
+                  <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
+                    <span>{label}</span>
+                    <span>
+                      <b style={{ fontSize: 'var(--text-md, 13px)', color: 'var(--text)' }}>{fmtInt(latest)}</b>
+                      {latestDelta != null && (
+                        <b style={{ marginLeft: 4, color: latestDelta > 0 ? 'var(--color-danger)' : latestDelta < 0 ? 'var(--color-success)' : 'var(--text-muted)' }}>
+                          {latestDelta > 0 ? `+${latestDelta}` : latestDelta === 0 ? '±0' : latestDelta}
+                        </b>
+                      )}
+                    </span>
                   </div>
-                  <MiniTrend data={dseries} valueKey={key} color={color} threshold={threshold} />
-                  <div style={{ fontSize: '10px', color: 'var(--text-muted)', textAlign: 'right' }}>#{dseries[0]?.label?.replace('#', '')} → #{dseries[dseries.length - 1]?.label?.replace('#', '')}</div>
+                  {/* TrendLine 상위호환 — 결측 빌드는 선 분절(0 위장 금지), area로 추이 가독성 강화 */}
+                  <TrendLine points={points} width={220} height={56} color={color} showArea showDots={points.length <= 20}
+                    ariaLabel={`${label} 빌드별 추이`} />
+                  <div style={{ fontSize: '10px', color: 'var(--text-muted)', textAlign: 'right' }}>{points[0]?.label} → {points[points.length - 1]?.label}</div>
                 </div>
               );
             })}
@@ -550,6 +564,9 @@ export default function ProjectSummarySection({ job, analysisResult }) {
 
       {/* 베이스라인 → 최신 변화 — 소스 스냅샷 직접 비교(영향분석 이력 비의존) */}
       <BaselineDiffPanel jobUrl={jobUrl} cacheRoot={cacheRoot} />
+
+      {/* 함수별 커버리지 + 실패 테스트 — vectorcast_detail(기존 미노출 갭) */}
+      <FunctionCoveragePanel jobUrl={jobUrl} cacheRoot={cacheRoot} />
 
       {/* 빌드 타임라인 (전체 빌드) */}
       <div className="panel" style={PANEL}>

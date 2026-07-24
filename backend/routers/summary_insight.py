@@ -388,6 +388,103 @@ def summary_rule_fix_example(req: dict) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# 품질 상세 (Phase I) — 함수단위 커버리지(기존 갭) + 실패 테스트케이스
+# ---------------------------------------------------------------------------
+
+
+@router.post("/api/summary/quality-detail")
+def summary_quality_detail(req: dict) -> Dict[str, Any]:
+    """함수(subprogram)단위 커버리지 + 실패 TC — analysis_summary.json 직독(기존 미노출 갭).
+
+    vectorcast_detail.aggregate_coverage.entries[]가 원천. 섹션별 available:false 분리 —
+    한쪽 부재가 다른 쪽을 죽이지 않는다(증거부재≠0).
+    """
+    body = req or {}
+    job_url = str(body.get("job_url") or "").strip()
+    if not job_url:
+        return {"ok": True, "available": False, "reason": "job_url_required"}
+    cache_root = _normalize_jenkins_cache_root(str(body.get("cache_root") or ""))
+    builds = list_cached_builds(job_url=job_url, cache_root=cache_root)
+    build_req = _to_int(body.get("build_number"))
+    target = _find_build(builds, build_req) if build_req is not None else (builds[0] if builds else None)
+    if target is None:
+        return {"ok": True, "available": False, "reason": "no_cached_build"}
+    reports_dir = Path(str(target.get("reports_dir") or ""))
+    worst_limit = max(1, min(_to_int(body.get("worst_limit")) or 15, 50))
+
+    data = _read_json(reports_dir / "analysis_summary.json") or {}
+    detail = data.get("vectorcast_detail") if isinstance(data.get("vectorcast_detail"), dict) else {}
+    agg = detail.get("aggregate_coverage") if isinstance(detail.get("aggregate_coverage"), dict) else {}
+    entries = [e for e in (agg.get("entries") or []) if isinstance(e, dict)]
+
+    def _rate(e: Dict[str, Any]) -> Optional[float]:
+        st = e.get("statements") if isinstance(e.get("statements"), dict) else {}
+        r = st.get("rate")
+        try:
+            return float(r) if r is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    if entries:
+        cov_st = 0
+        cov_total = 0
+        fully = 0
+        uncovered_rows: List[Dict[str, Any]] = []
+        rated: List[Dict[str, Any]] = []
+        for e in entries:
+            st = e.get("statements") if isinstance(e.get("statements"), dict) else {}
+            c, t = st.get("covered"), st.get("total")
+            try:
+                c_i, t_i = int(c), int(t)
+            except (TypeError, ValueError):
+                continue
+            cov_st += c_i
+            cov_total += t_i
+            if t_i > 0 and c_i == t_i:
+                fully += 1
+            if t_i > 0 and c_i == 0:
+                uncovered_rows.append({"unit": e.get("unit"), "subprogram": e.get("subprogram")})
+            r = _rate(e)
+            if r is not None and t_i > 0:
+                rated.append({
+                    "unit": e.get("unit"), "subprogram": e.get("subprogram"), "ccn": e.get("ccn"),
+                    "statements": st, "branches": e.get("branches"),
+                })
+        rated.sort(key=lambda e: (float((e.get("statements") or {}).get("rate") or 0), str(e.get("subprogram"))))
+        function_coverage: Dict[str, Any] = {
+            "available": True,
+            "totals": {
+                "functions": len(entries),
+                "fully_covered": fully,
+                "uncovered": len(uncovered_rows),
+                "statements": {
+                    "covered": cov_st, "total": cov_total,
+                    "rate": round(cov_st / cov_total * 100, 1) if cov_total else None,
+                },
+            },
+            "worst": rated[:worst_limit],
+            "uncovered": uncovered_rows[:50],
+        }
+    else:
+        function_coverage = {"available": False, "reason": "no_vectorcast_detail"}
+
+    failures = _vcast_failures(reports_dir)
+    failed_testcases = (
+        {"available": True, "count": len(failures), "items": failures}
+        if (reports_dir / "vectorcast_rag.json").exists()
+        else {"available": False, "reason": "no_vectorcast_rag"}
+    )
+    return {
+        "ok": True,
+        "available": True,
+        "reason": None,
+        "build_number": target.get("build_number"),
+        "function_coverage": function_coverage,
+        "failed_testcases": failed_testcases,
+    }
+
+
+# ---------------------------------------------------------------------------
 # 베이스라인→최신 변화 (Phase H) — change-log 비의존 스냅샷 직접 비교
 # ---------------------------------------------------------------------------
 
