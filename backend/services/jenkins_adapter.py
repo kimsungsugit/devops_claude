@@ -1489,6 +1489,9 @@ def parse_prqa_his_metrics_xlsx(path: Path, *, top_n: int = 30, max_rows: int = 
     data["function"] = data["function"].astype(str)
     data["file"] = data["file"].astype(str)
     data = data[~data["function"].str.match(r"^\s*Level\b", case=False, na=False)]
+    # F4: 함수명이 빈 셀(→ astype(str) 시 'nan')인 행 제외 — HIS 요약/구분 행이 실함수로 오계상되어
+    # functions_total이 881로 부풀던 off-by-1 차단(html qac_parser 실함수 880과 정합). file 필터와 대칭.
+    data = data[~data["function"].str.match(r"^\s*(nan|none)\s*$", case=False, na=False)]
     data = data[~data["file"].str.match(r"^\s*(nan|none)\s*$", case=False, na=False)]
 
     data_sorted = data.sort_values(["vg", "calls"], ascending=[False, False])

@@ -1,9 +1,46 @@
 """jenkins_adapter 단위 테스트 — _to_int 파싱 방어 + VectorCAST 결과 정규화(fail-safe)."""
+import pytest
+
 from backend.services.jenkins_adapter import (
     _normalize_vcast_result,
     _summarize_vcast_tests,
     _to_int,
+    parse_prqa_his_metrics_xlsx,
 )
+
+
+class TestPrqaHisMetricsXlsx:
+    """parse_prqa_his_metrics_xlsx — 함수 카운트에서 비-함수 행 제외(F4)."""
+
+    def _make_xlsx(self, tmp_path, data_rows):
+        openpyxl = pytest.importorskip("openpyxl")
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        # 실제 HMR xlsx 레이아웃 재현: read_excel(header=1) + data=raw.iloc[2:]가 데이터 시작점.
+        ws.append(["HIS Metrics Report", "", "", "", "", "", ""])         # pos0(헤더 위) 폐기
+        ws.append(["c0", "c1", "c2", "c3", "c4", "c5", "c6"])              # pos1 pandas 헤더
+        ws.append(["Index", "Function", "v(G)", "LEVEL", "CALLING", "CALLS", "File"])  # 스킵
+        ws.append(["", "", "(STCYC)", "", "", "", ""])                    # 스킵
+        for r in data_rows:
+            ws.append(r)
+        p = tmp_path / "PROJ_HMR_01012026.xlsx"
+        wb.save(p)
+        return p
+
+    def test_empty_function_and_level_rows_excluded(self, tmp_path):
+        p = self._make_xlsx(tmp_path, [
+            [1, "func_alpha", 5, 1, 0, 0, "alpha.c"],
+            [2, "func_beta", 3, 1, 0, 0, "beta.c"],
+            [3, None, 0, 0, 0, 0, "ghost.c"],    # 함수명 빈 셀 → astype(str) 'nan' → F4 제외
+            [4, "Level 0", 0, 0, 0, 0, "x.c"],   # HIS 요약 bin → 기존 Level 필터 제외
+        ])
+        res = parse_prqa_his_metrics_xlsx(p)
+        assert res["ok"] is True
+        # 실함수 2개만 — 과거엔 빈-함수('nan') 행이 실함수로 오계상돼 functions_total off-by-1.
+        assert res["stats"]["functions_total"] == 2
+        fns = {r["function"] for r in res["rows"]}
+        assert fns == {"func_alpha", "func_beta"}
+        assert "nan" not in fns and "Level 0" not in fns
 
 
 class TestToInt:

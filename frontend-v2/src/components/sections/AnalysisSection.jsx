@@ -1099,7 +1099,17 @@ export default function AnalysisSection({ job, analysisResult }) {
               </summary>
               <div className="text-muted" style={{ fontSize: 10, margin: '4px 0 2px' }}>
                 각 소스 파일에서 위반된 MISRA 규칙과 건수입니다 (출처: Helix QAC RCR · 파일 레벨).
+                합계는 FileStatus 위반수(권위)이며, WorstRules에 없는 규칙은 "기타 규칙 (비상위)"로 표기됩니다.
               </div>
+              {prqa.violations_attributed_total != null
+                && (prqa.filestatus_total_vc ?? prqa.rule_violation_count) != null
+                && ((prqa.filestatus_total_vc ?? prqa.rule_violation_count) - prqa.violations_attributed_total) > 0 && (
+                <div style={{ fontSize: 10, margin: '2px 0 4px', color: 'var(--color-warning)' }}>
+                  ⚠ 미귀속 위반 {Math.round((prqa.filestatus_total_vc ?? prqa.rule_violation_count) - prqa.violations_attributed_total)}건 —
+                  원본 총계({Math.round(prqa.filestatus_total_vc ?? prqa.rule_violation_count)})가 파일별 위반 합계({prqa.violations_attributed_total})를 초과합니다.
+                  원본 Helix QAC RCR 총계가 파일별 분해 합보다 큰 것으로, 그 차이는 아래 표에 나타나지 않습니다.
+                </div>
+              )}
               <div style={{ maxHeight: 320, overflowY: 'auto', marginTop: 4 }}>
                 <table className="impact-table" style={{ fontSize: 10 }}>
                   <thead><tr><th>파일</th><th>위반 규칙 (건수)</th><th>합계</th></tr></thead>
@@ -1109,7 +1119,7 @@ export default function AnalysisSection({ job, analysisResult }) {
                         <td title={f.path || '특정 파일에 귀속되지 않은 위반 (분석 카테고리)'} style={{ fontFamily: 'monospace', fontSize: 10, maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontStyle: f.path ? 'normal' : 'italic', color: f.path ? undefined : 'var(--text-muted)' }}>{f.file}</td>
                         <td style={{ fontSize: 10, lineHeight: 1.7 }}>
                           {(f.rules || []).map((r, j) => (
-                            <span key={j} style={{ display: 'inline-block', margin: '1px 3px 1px 0', padding: '0 5px', borderRadius: 8, background: 'var(--bg)', border: '1px solid var(--border, #d1d5db)', whiteSpace: 'nowrap' }}>
+                            <span key={j} title={r.residual ? 'WorstRules(상위 규칙)에 포함되지 않은 나머지 위반 — 개별 규칙 미상세' : undefined} style={{ display: 'inline-block', margin: '1px 3px 1px 0', padding: '0 5px', borderRadius: 8, background: 'var(--bg)', border: r.residual ? '1px dashed var(--border, #d1d5db)' : '1px solid var(--border, #d1d5db)', whiteSpace: 'nowrap', fontStyle: r.residual ? 'italic' : 'normal', color: r.residual ? 'var(--text-muted)' : undefined }}>
                               {r.rule} <b>{r.count}</b>
                             </span>
                           ))}

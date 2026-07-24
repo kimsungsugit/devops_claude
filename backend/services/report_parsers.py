@@ -22,6 +22,9 @@ try:
 except Exception:  # pragma: no cover - optional dependency
     pd = None  # type: ignore
 
+# parse_html_report 테이블 스캔 상한 — RCR(Helix) 13테이블을 여유 있게 포괄(과거 10은 취약).
+_MAX_HTML_TABLES = 40
+
 
 def read_text_safe(path: Path, max_bytes: int = 10 * 1024 * 1024) -> str:
     """Read text file with size limit, supporting large files up to 10MB default."""
@@ -108,7 +111,10 @@ def parse_html_report(path: Path) -> Dict[str, Any]:
             headings.append(txt)
     summary["headings"] = headings
     tables: List[Dict[str, str]] = []
-    for table in soup.find_all("table")[:10]:
+    # 테이블 스캔 상한: RCR(Helix)은 13개 테이블(summary는 table#0)이라 과거 [:10]은 무해했으나
+    # 레이아웃 변동 시 summary 테이블을 놓칠 수 있어 상향. 행 캡(아래 50)이 비용을 이미 제한하고,
+    # extract_table_metrics는 첫 매치 우선이라 summary(선두) 값을 뒤 테이블이 덮지 않는다(무회귀).
+    for table in soup.find_all("table")[:_MAX_HTML_TABLES]:
         rows: Dict[str, str] = {}
         for tr in table.find_all("tr"):
             cells = [c.get_text(" ", strip=True) for c in tr.find_all(["th", "td"])]
@@ -434,6 +440,75 @@ def _is_rcr_aggregate_row(name: str) -> bool:
     return (name or "").strip().lower() in _RCR_AGGREGATE_ROWS
 
 
+def _parse_rcr_filestatus(
+    table: Any, project_root: Optional[Path] = None, job_slug: Optional[str] = None
+) -> Tuple[List[Dict[str, Any]], Optional[int]]:
+    """RCR FileStatus 테이블 → 파일별 위반수(**권위 소스**).
+
+    반환 ``(records, total_vc)``:
+      - ``records``: 표 순서 ``[{file, path_raw, path, vc(float), violated_rules?, compliance_index?}]``
+        (집계행 'Total' 제외). ``vc`` = Violation Count(없으면 Diagnostic Count 폴백). key=path_raw
+        (title/href) or file — WorstRules 매트릭스와 **동일 키**라 파일별 조인 가능(실측 PV 13/13·HDPDM01 12/12).
+      - ``total_vc``: 집계행 'Total'의 Violation Count(있으면). ``total_vc − Σ(records.vc)`` = 파일
+        미귀속 위반(F1-b) — **같은 표 안의 자립 근거**(별도 요약테이블 헤드라인에 의존하지 않음).
+
+    FileStatus 부재/헤더 불충족이면 ``([], None)`` → 호출측이 WorstRules-only로 graceful degrade.
+    """
+    headers, rows, meta = _parse_table_matrix(table)
+    records: List[Dict[str, Any]] = []
+    total_vc: Optional[int] = None
+    if not headers:
+        return records, total_vc
+
+    def _idx(name: str) -> Optional[int]:
+        for idx, h in enumerate(headers):
+            if name.lower() in h.lower():
+                return idx
+        return None
+
+    idx_file = _idx("File")
+    # ⚠ 0-index falsy 방지: `or` 체인은 매치가 컬럼 0일 때 흘려보낸다 → 첫 non-None을 명시 선택.
+    idx_violation = next(
+        (i for i in (_idx("Violation Count"), _idx("Violations"), _idx("Diagnostic Count"))
+         if i is not None),
+        None,
+    )
+    if idx_file is None or idx_violation is None:
+        return records, total_vc
+    idx_vrules = _idx("Violated Rules")
+    idx_compliance = _idx("Compliance")
+    for row_idx, row in enumerate(rows):
+        if idx_file >= len(row) or idx_violation >= len(row):
+            continue
+        fname = row[idx_file]
+        if _is_rcr_aggregate_row(fname):
+            # 집계행 'Total'의 위반수 = 표 자립 총계(파일 미귀속 위반 산출용, 첫 집계행 채택).
+            if total_vc is None:
+                _t = _parse_number(row[idx_violation])
+                if _t is not None:
+                    total_vc = int(_t)
+            continue
+        vc = _parse_number(row[idx_violation]) or 0
+        cell_meta: Dict[str, str] = {}
+        if row_idx < len(meta) and idx_file < len(meta[row_idx]):
+            cell_meta = meta[row_idx][idx_file]
+        path_raw = cell_meta.get("title") or cell_meta.get("href") or ""
+        rec: Dict[str, Any] = {
+            "file": fname,
+            "path_raw": path_raw,
+            "path": _normalize_prqa_path(path_raw, project_root, job_slug),
+            "vc": vc,
+        }
+        if idx_vrules is not None and idx_vrules < len(row):
+            vr = _parse_number(row[idx_vrules])
+            if vr is not None:
+                rec["violated_rules"] = int(vr)
+        if idx_compliance is not None and idx_compliance < len(row):
+            rec["compliance_index"] = _clean_text(row[idx_compliance])
+        records.append(rec)
+    return records, total_vc
+
+
 def parse_prqa_rcr_details(
     path: Path,
     top_n: int = 6,
@@ -444,15 +519,20 @@ def parse_prqa_rcr_details(
     """PRQA/Helix QAC RCR HTML → 위반 상세.
 
     반환:
-      - ``top_rules``  : 규칙별 위반 합계 상위 top_n (WorstRules 열 합)
+      - ``top_rules``  : 규칙별 위반 합계 상위 top_n (WorstRules 열 합, enabled 그룹만)
       - ``top_files``  : 파일별 위반 상위 top_n (FileStatus, violated_rules/compliance_index 포함)
-      - ``violations_by_file`` : **파일 × 규칙 위반 매트릭스** — 각 파일에서 어떤 MISRA 규칙이
-        몇 건 위반됐는지. RCR이 제공하는 최대 granularity(함수/라인 위반은 RCR에 없음).
+      - ``violations_by_file`` : **파일 × 규칙 위반 상세** — 각 파일의 total은 FileStatus
+        Violation Count(권위)이고, 규칙 분해는 WorstRules(최악 규칙)에서 온다. WorstRules는 부분집합
+        이라 total − Σ(WorstRules)만큼을 ``{"rule": "기타 규칙 (비상위)", "residual": True}``로 채워
+        파일별 total이 top_files·헤드라인과 정합한다(함수/라인 위반은 RCR에 없어 파일×규칙이 최상세).
+      - ``violations_attributed_total`` : Σ FileStatus VC. 헤드라인 Rule Violation Count이 이보다
+        크면 원본 QAC RCR이 파일 미귀속 위반을 총계에 포함한 것(파서 무관) — 프론트 각주 판단용.
 
     WorstRules 테이블(행=파일, 열=Rule-8.6 등)을 앵커 대신 헤더 시그니처로 스캔하므로
     구형(bare `WorstRules`)·신형(숫자 `WorstRules1`+M3CM/Secure C 다중 테이블) 리포트 모두
     처리한다. (구 코드는 ``_find_table("WorstRules")``가 숫자 앵커를 놓쳐 신형 리포트의
-    top_rules가 비었음 — 시그니처 스캔이 이 버그도 해소.)
+    top_rules가 비었음 — 시그니처 스캔이 이 버그도 해소.) FileStatus 부재 리포트는
+    WorstRules-only로 graceful degrade(total=WorstRules 합).
     """
     data = parse_html_report(path)
     if "error" in data:
@@ -465,13 +545,23 @@ def parse_prqa_rcr_details(
         return {"path": str(path), "error": "read_failed"}
     soup = BeautifulSoup(raw, "html.parser")
 
-    # ── 파일 × 규칙 매트릭스 (WorstRules 시그니처 테이블 전부 병합) ──
+    # ── FileStatus (권위 파일별 위반수) — violations_by_file·top_files 공유 소스 ──
+    fs_node = soup.find(attrs={"name": "FileStatus"}) or soup.find(id="FileStatus")
+    fs_table = fs_node.find_next("table") if fs_node else None
+    fs_records, fs_total_vc = _parse_rcr_filestatus(fs_table, project_root, job_slug)
+
+    # ── 파일 × 규칙 매트릭스 (WorstRules 시그니처 테이블 병합 — enabled 그룹만) ──
     # 한 파일이 M3CM·Secure C 등 여러 그룹 테이블에 등장할 수 있어 규칙 카운트를 합산한다.
+    # ⚠ 'Diagnostics in Disabled Rule Groups' 하위 WorstRules는 비활성 규칙이라 컴플라이언스 위반이
+    #   아니다 — 병합하면 헤드라인(enabled 기준)을 초과하는 over-report → 관할 h2로 제외(F3).
     per_file: Dict[str, Dict[str, Any]] = {}
     rule_totals: Dict[str, float] = {}
     for table in soup.find_all("table"):
         headers, rows, meta = _parse_table_matrix(table)
         if not _is_worstrules_header(headers):
+            continue
+        h2 = table.find_previous("h2")
+        if h2 and "disabled" in _clean_text(h2.get_text(" ", strip=True)).lower():
             continue
         for row_idx, row in enumerate(rows):
             if not row or len(row) < 2:
@@ -506,8 +596,45 @@ def parse_prqa_rcr_details(
         for key in sorted(rule_totals, key=lambda k: rule_totals[k], reverse=True)[:top_n]
     ]
 
+    # ── violations_by_file: FileStatus(권위 total) 주도 재조립 + WorstRules 규칙 분해 + 잔차 ──
+    # WorstRules는 '가장 많이 위반된 규칙'만 담아 그 합은 파일 총 위반수의 부분집합이다. FileStatus
+    # Violation Count(권위)를 total로 삼고 WorstRules 분해와의 차이는 '기타 규칙 (비상위)' 잔차로
+    # 표시 → 파일별 total이 top_files와 일치하고 Σ가 헤드라인에 수렴(FileStatus 전용 파일도 복원).
+    # FileStatus 부재 리포트면 fs_records=[] → 아래 루프를 건너뛰고 WorstRules-only로 graceful degrade.
     violations_by_file: List[Dict[str, Any]] = []
-    for entry in per_file.values():
+    seen_keys: set = set()
+    for rec in fs_records:
+        vc = int(rec["vc"])
+        if vc <= 0:
+            continue
+        key = rec["path_raw"] or rec["file"]
+        seen_keys.add(key)
+        wr_rules: Dict[str, int] = per_file.get(key, {}).get("rules", {})
+        rule_list: List[Dict[str, Any]] = [
+            {"rule": r, "count": c}
+            for r, c in sorted(wr_rules.items(), key=lambda kv: (-kv[1], kv[0]))
+        ]
+        wr_sum = sum(wr_rules.values())
+        # 정상 데이터는 wr_sum ≤ vc(WorstRules는 부분집합) → total=vc(top_files와 정합). 소스 불일치로
+        # wr_sum > vc여도 total=max로 잡아 badge 합이 total을 넘는 표시(정합 위배)를 차단(W2). residual은
+        # 항상 ≥ 0이라 vc > wr_sum일 때만 '기타 규칙'을 채운다.
+        total = max(vc, wr_sum)
+        residual = total - wr_sum
+        if residual > 0:
+            # WorstRules 미포함 규칙(비상위) — 파일 total을 FileStatus 권위값에 맞춘다.
+            rule_list.append({"rule": "기타 규칙 (비상위)", "count": residual, "residual": True})
+        violations_by_file.append(
+            {
+                "file": rec["file"],
+                "path": rec["path"],
+                "total": total,
+                "rules": rule_list,
+            }
+        )
+    # WorstRules 전용(FileStatus에 없는 파일 — RCMA류 pseudo / 키 불일치 방어): WorstRules 합을 total로.
+    for key, entry in per_file.items():
+        if key in seen_keys:
+            continue
         rules = entry["rules"]
         total = sum(rules.values())
         if total <= 0:
@@ -527,58 +654,38 @@ def parse_prqa_rcr_details(
     files_truncated = len(violations_by_file) > max_files
     violations_by_file = violations_by_file[:max_files]
 
-    # ── FileStatus: 파일별 위반수 + violated_rules + compliance_index ──
-    file_status_table = None
-    node = soup.find(attrs={"name": "FileStatus"}) or soup.find(id="FileStatus")
-    if node:
-        file_status_table = node.find_next("table")
-    file_headers, file_rows, file_meta = _parse_table_matrix(file_status_table)
-
+    # ── top_files: FileStatus 파일별 위반수 상위 top_n (violated_rules/compliance_index 포함) ──
     top_files: List[Dict[str, Any]] = []
-    if file_headers:
-        def _idx(name: str) -> Optional[int]:
-            for idx, h in enumerate(file_headers):
-                if name.lower() in h.lower():
-                    return idx
-            return None
+    if fs_records:
+        scored: List[Tuple[float, Dict[str, Any]]] = []
+        for rec in fs_records:
+            score = rec["vc"]
+            if score <= 0:
+                continue  # '위반 상위 파일'은 위반 있는 파일만 — 0건 파일이 top_n을 채우지 않도록.
+            item: Dict[str, Any] = {"file": rec["file"], "count": score, "path": rec["path"]}
+            if "violated_rules" in rec:
+                item["violated_rules"] = rec["violated_rules"]
+            if "compliance_index" in rec:
+                item["compliance_index"] = rec["compliance_index"]
+            scored.append((score, item))
+        scored.sort(key=lambda x: x[0], reverse=True)
+        top_files = [item for _score, item in scored[:top_n]]
 
-        idx_file = _idx("File")
-        idx_violation = _idx("Violation Count") or _idx("Violations") or _idx("Diagnostic Count")
-        idx_vrules = _idx("Violated Rules")
-        idx_compliance = _idx("Compliance")
-        if idx_file is not None and idx_violation is not None:
-            scored: List[Tuple[float, Dict[str, Any]]] = []
-            for row_idx, row in enumerate(file_rows):
-                if idx_file >= len(row) or idx_violation >= len(row):
-                    continue
-                if _is_rcr_aggregate_row(row[idx_file]):
-                    continue
-                score = _parse_number(row[idx_violation]) or 0
-                meta = {}
-                if row_idx < len(file_meta) and idx_file < len(file_meta[row_idx]):
-                    meta = file_meta[row_idx][idx_file]
-                item: Dict[str, Any] = {
-                    "file": row[idx_file],
-                    "count": score,
-                    "path": _normalize_prqa_path(
-                        meta.get("title") or meta.get("href") or "", project_root, job_slug
-                    ),
-                }
-                if idx_vrules is not None and idx_vrules < len(row):
-                    vr = _parse_number(row[idx_vrules])
-                    if vr is not None:
-                        item["violated_rules"] = int(vr)
-                if idx_compliance is not None and idx_compliance < len(row):
-                    item["compliance_index"] = _clean_text(row[idx_compliance])
-                scored.append((score, item))
-            scored.sort(key=lambda x: x[0], reverse=True)
-            top_files = [item for _score, item in scored[:top_n]]
+    # F1-b: 파일에 귀속된 위반 합(=Σ FileStatus VC). 헤드라인(Rule Violation Count)이 이보다 크면
+    # 원본 QAC RCR 자체가 파일 미귀속 위반을 총계에 포함한 것(파서 무관) — 프론트가 각주로 고지.
+    attributed_total = (
+        int(sum(int(r["vc"]) for r in fs_records if int(r["vc"]) > 0)) if fs_records else None
+    )
 
     result: Dict[str, Any] = {
         "path": str(path),
         "top_rules": top_rules,
         "top_files": top_files,
         "violations_by_file": violations_by_file,
+        "violations_attributed_total": attributed_total,
+        # W1: FileStatus 집계행 'Total' 위반수(표 자립 총계). 프론트는 이 값 − 귀속합으로 미귀속 위반을
+        # 산출(별도 요약테이블 헤드라인 비의존). 부재(집계행 없음) 시 프론트가 헤드라인으로 폴백.
+        "filestatus_total_vc": fs_total_vc,
     }
     if files_truncated:
         result["files_truncated_to"] = max_files
@@ -983,6 +1090,9 @@ def build_report_summary(root_dir: Path, project_root: Optional[Path] = None) ->
                 "top_files": prqa_rcr_details.get("top_files") if isinstance(prqa_rcr_details, dict) else [],
                 "violations_by_file": prqa_rcr_details.get("violations_by_file") if isinstance(prqa_rcr_details, dict) else [],
                 "violations_files_truncated_to": prqa_rcr_details.get("files_truncated_to") if isinstance(prqa_rcr_details, dict) else None,
+                # 파일 귀속 위반 합(Σ FileStatus VC) + 표 자립 총계(집계행) — 둘의 차 = 미귀속 위반 각주.
+                "violations_attributed_total": prqa_rcr_details.get("violations_attributed_total") if isinstance(prqa_rcr_details, dict) else None,
+                "filestatus_total_vc": prqa_rcr_details.get("filestatus_total_vc") if isinstance(prqa_rcr_details, dict) else None,
                 "hmr_stats": as_hmr_stats,
                 # 부재 시 사유 구분용(파일 없음 vs 파싱 실패) — 프론트 empty-state가 설명에 사용.
                 "rcr_ok": _as_rcr.get("ok"),

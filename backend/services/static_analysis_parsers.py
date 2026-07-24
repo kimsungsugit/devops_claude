@@ -104,9 +104,17 @@ def parse_qac_his_pdf(src: Union[bytes, str]) -> Dict[str, Any]:
 def parse_qac_his_text(full: str) -> Dict[str, Any]:
     """추출된 HIS Metrics 텍스트 → 함수별 v(G) 요약. (PDF 분리 — 단위테스트 용이)"""
     funcs: List[Dict[str, Any]] = []
-    # 'Function: name' ... 'Values <int> <int> <int>' (앞 3개 = STCAL STM19 STCYC)
-    for m in re.finditer(r"Function:\s*(\S+)[\s\S]{0,200}?Values\s+(\d+)\s+(\d+)\s+(\d+)", full):
-        funcs.append({"function": m.group(1), "vg": int(m.group(4))})
+    # 'Function:' 경계로 블록 분할 후 각 블록의 첫 'Values <STCAL> <STM19> <STCYC> …'(3번째=v(G))를 취한다.
+    # 과거 고정 폭 윈도우([\s\S]{0,200}?)는 PDF 레이아웃상 Function↔Values 간격이 넓으면 함수를 누락했고,
+    # 블록 경계가 없어 다음 함수의 Values를 잘못 집는(cross-attribution) 위험도 있었다.
+    for block in re.split(r"Function:\s*", full)[1:]:
+        m_name = re.match(r"(\S+)", block)
+        if not m_name:
+            continue
+        m_val = re.search(r"Values\s+(\d+)\s+(\d+)\s+(\d+)", block)
+        if not m_val:
+            continue
+        funcs.append({"function": m_name.group(1), "vg": int(m_val.group(3))})
 
     vgs = [f["vg"] for f in funcs]
     summary: Dict[str, Any] = {"function_count": len(funcs)}

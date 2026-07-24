@@ -295,6 +295,158 @@ class TestPrqaRcrDetails:
         assert totals == [3, 5]                    # 합산(8) 아님
 
 
+# FileStatus(권위 위반수) 주도 재조립 — WorstRules 부분집합을 잔차로 채우고 FS-only 파일도 복원(F1).
+_RCR_RECON_HTML = """<html><head><title>Helix QAC Rule Compliance Report</title></head><body>
+ <div class="sec"><h3><a name="WorstRules1">Most Violated Rules</a></h3></div>
+ <table border="1">
+  <tr><th>Files</th><th>Rule-8.6</th><th>Rule-10.4</th></tr>
+  <tr><td align="left"><a href="..\\src\\alpha.c" title="..\\src\\alpha.c">alpha.c</a></td><td>5</td><td>0</td></tr>
+ </table>
+ <div class="sec"><h3><a name="FileStatus">File Status</a></h3></div>
+ <table border="1" id="filestat">
+  <tr><th>Files</th><th>Active Diagnostics</th><th>Violated Rules</th><th>Violation Count</th><th>Compliance Index</th></tr>
+  <tr><td align="left"><a href="..\\src\\alpha.c" title="..\\src\\alpha.c">alpha.c</a></td><td>8</td><td>2</td><td>8</td><td>96.00%</td></tr>
+  <tr><td align="left"><a href="..\\src\\beta.c" title="..\\src\\beta.c">beta.c</a></td><td>4</td><td>1</td><td>4</td><td>98.00%</td></tr>
+  <tr><td align="left">Total</td><td>12</td><td>3</td><td>12</td><td>97.00%</td></tr>
+ </table>
+</body></html>"""
+
+
+# Enabled/Disabled Rule Groups — disabled 하위 WorstRules는 병합에서 제외돼야 한다(F3).
+_RCR_DISABLED_HTML = """<html><head><title>Helix QAC Rule Compliance Report</title></head><body>
+ <h2>Diagnostics in Enabled Rule Groups</h2>
+ <div class="sec"><h3><a name="WorstRules1">Most Violated Rules</a></h3></div>
+ <table border="1">
+  <tr><th>Files</th><th>Rule-8.6</th></tr>
+  <tr><td align="left"><a href="..\\src\\en.c" title="..\\src\\en.c">en.c</a></td><td>7</td></tr>
+ </table>
+ <h2>Diagnostics in Disabled Rule Groups</h2>
+ <div class="sec"><h3><a name="WorstRules2">Most Violated Rules</a></h3></div>
+ <table border="1">
+  <tr><th>Files</th><th>Rule-99.9</th></tr>
+  <tr><td align="left"><a href="..\\src\\dis.c" title="..\\src\\dis.c">dis.c</a></td><td>50</td></tr>
+ </table>
+</body></html>"""
+
+
+# 집계행 'Total' VC가 개별 파일 합을 초과 — 표 자립 총계 포착 + 미귀속 위반(W1/F1-b).
+_RCR_UNATTRIB_HTML = """<html><head><title>Helix QAC Rule Compliance Report</title></head><body>
+ <div class="sec"><h3><a name="WorstRules1">Most Violated Rules</a></h3></div>
+ <table border="1">
+  <tr><th>Files</th><th>Rule-8.6</th></tr>
+  <tr><td align="left"><a href="..\\src\\a.c" title="..\\src\\a.c">a.c</a></td><td>8</td></tr>
+ </table>
+ <div class="sec"><h3><a name="FileStatus">File Status</a></h3></div>
+ <table border="1">
+  <tr><th>Files</th><th>Active Diagnostics</th><th>Violated Rules</th><th>Violation Count</th><th>Compliance Index</th></tr>
+  <tr><td align="left"><a href="..\\src\\a.c" title="..\\src\\a.c">a.c</a></td><td>8</td><td>1</td><td>8</td><td>96.00%</td></tr>
+  <tr><td align="left"><a href="..\\src\\b.c" title="..\\src\\b.c">b.c</a></td><td>4</td><td>1</td><td>4</td><td>98.00%</td></tr>
+  <tr><td align="left">Total</td><td>25</td><td>2</td><td>20</td><td>95.00%</td></tr>
+ </table>
+</body></html>"""
+
+
+# WorstRules 합(10)이 FileStatus VC(6)를 초과하는 소스 불일치 — badge 합 ≤ total 보장(W2).
+_RCR_WR_EXCEEDS_HTML = """<html><head><title>Helix QAC Rule Compliance Report</title></head><body>
+ <div class="sec"><h3><a name="WorstRules1">Most Violated Rules</a></h3></div>
+ <table border="1">
+  <tr><th>Files</th><th>Rule-8.6</th></tr>
+  <tr><td align="left"><a href="..\\src\\z.c" title="..\\src\\z.c">z.c</a></td><td>10</td></tr>
+ </table>
+ <div class="sec"><h3><a name="FileStatus">File Status</a></h3></div>
+ <table border="1">
+  <tr><th>Files</th><th>Active Diagnostics</th><th>Violated Rules</th><th>Violation Count</th><th>Compliance Index</th></tr>
+  <tr><td align="left"><a href="..\\src\\z.c" title="..\\src\\z.c">z.c</a></td><td>6</td><td>1</td><td>6</td><td>96.00%</td></tr>
+  <tr><td align="left"><a href="..\\src\\clean.c" title="..\\src\\clean.c">clean.c</a></td><td>0</td><td>0</td><td>0</td><td>100.00%</td></tr>
+  <tr><td align="left">Total</td><td>6</td><td>1</td><td>6</td><td>96.00%</td></tr>
+ </table>
+</body></html>"""
+
+
+class TestRcrFileStatusReconciliation:
+    """F1: violations_by_file를 FileStatus(권위 total)로 재조립 — 잔차 '기타 규칙' + FS-only 복원."""
+
+    def _details(self, tmp_path, html):
+        p = tmp_path / "PROJ_RCR_01012026.html"
+        p.write_text(html, encoding="utf-8")
+        return parse_prqa_rcr_details(p)
+
+    def test_total_matches_filestatus_not_worstrules_sum(self, tmp_path):
+        res = self._details(tmp_path, _RCR_RECON_HTML)
+        vbf = {f["file"]: f for f in res["violations_by_file"]}
+        # alpha.c: FileStatus VC=8이 total(WorstRules 합 5가 아님) → 잔차 3을 '기타 규칙'으로.
+        assert vbf["alpha.c"]["total"] == 8
+        rules = {r["rule"]: r["count"] for r in vbf["alpha.c"]["rules"]}
+        assert rules["Rule-8.6"] == 5
+        assert rules["기타 규칙 (비상위)"] == 3
+        residual = next(r for r in vbf["alpha.c"]["rules"] if r.get("residual"))
+        assert residual["count"] == 3 and residual["residual"] is True
+
+    def test_filestatus_only_file_recovered(self, tmp_path):
+        # beta.c는 WorstRules에 전혀 없지만 FileStatus VC=4 → 전량 잔차로 복원(과거엔 통째 누락).
+        res = self._details(tmp_path, _RCR_RECON_HTML)
+        vbf = {f["file"]: f for f in res["violations_by_file"]}
+        assert "beta.c" in vbf
+        assert vbf["beta.c"]["total"] == 4
+        assert vbf["beta.c"]["rules"] == [{"rule": "기타 규칙 (비상위)", "count": 4, "residual": True}]
+
+    def test_sum_equals_attributed_total_and_top_files(self, tmp_path):
+        res = self._details(tmp_path, _RCR_RECON_HTML)
+        sum_vbf = sum(f["total"] for f in res["violations_by_file"])
+        assert sum_vbf == 12
+        assert res["violations_attributed_total"] == 12
+        # 파일별 total이 top_files 위반수와 정합(같은 파일 이중 위반수 제거).
+        tf = {f["file"]: int(f["count"]) for f in res["top_files"]}
+        for f in res["violations_by_file"]:
+            assert tf[f["file"]] == f["total"]
+
+    def test_attributed_total_none_without_filestatus(self, tmp_path):
+        # FileStatus 부재(구 변형) → WorstRules-only graceful, 귀속합 None(각주 미표시).
+        res = self._details(tmp_path, _RCR_DISABLED_HTML)  # 이 픽스처엔 FileStatus 없음
+        assert res["violations_attributed_total"] is None
+
+    def test_disabled_rule_group_excluded(self, tmp_path):
+        # F3: 'Disabled Rule Groups' 하위 WorstRules(dis.c/Rule-99.9)는 병합 제외.
+        res = self._details(tmp_path, _RCR_DISABLED_HTML)
+        rule_names = {r["rule"] for r in res["top_rules"]}
+        assert "Rule-8.6" in rule_names
+        assert "Rule-99.9" not in rule_names          # 비활성 규칙 오합산 차단
+        files = {f["file"] for f in res["violations_by_file"]}
+        assert "en.c" in files and "dis.c" not in files
+
+    def test_enabled_worstrules_not_wrongly_excluded(self, tmp_path):
+        # enabled 그룹(또는 h2 부재 구형)은 'disabled' 미포함이라 제외되면 안 된다(회귀 방지).
+        res = self._details(tmp_path, _RCR_RECON_HTML)   # h2 없음 → skip 로직 무영향
+        assert any(r["rule"] == "Rule-8.6" for r in res["top_rules"])
+
+    def test_filestatus_total_vc_and_unattributed(self, tmp_path):
+        # W1: 집계행 'Total' VC(20)를 표 자립 근거로 포착. 미귀속 = 20 − Σ개별(12) = 8.
+        res = self._details(tmp_path, _RCR_UNATTRIB_HTML)
+        assert res["filestatus_total_vc"] == 20
+        assert res["violations_attributed_total"] == 12
+        assert res["filestatus_total_vc"] - res["violations_attributed_total"] == 8
+
+    def test_filestatus_total_vc_none_without_filestatus(self, tmp_path):
+        # 집계행/FileStatus 부재 → None(프론트가 헤드라인으로 폴백).
+        res = self._details(tmp_path, _RCR_DISABLED_HTML)
+        assert res["filestatus_total_vc"] is None
+
+    def test_worstrules_exceeds_filestatus_no_badge_over_total(self, tmp_path):
+        # W2: 소스 불일치(WorstRules 합 10 > FileStatus VC 6)에도 badge 합이 total을 넘지 않는다.
+        res = self._details(tmp_path, _RCR_WR_EXCEEDS_HTML)
+        z = next(f for f in res["violations_by_file"] if f["file"] == "z.c")
+        assert z["total"] == 10                                    # max(6, 10)
+        assert sum(r["count"] for r in z["rules"]) == z["total"]   # 정합(초과 표시 없음)
+        assert not any(r.get("residual") for r in z["rules"])      # residual 음수 → 잔차 미추가
+
+    def test_zero_count_file_excluded_from_top_files(self, tmp_path):
+        # I4: VC=0 파일(clean.c)은 '위반 상위 파일'에서 제외.
+        res = self._details(tmp_path, _RCR_WR_EXCEEDS_HTML)
+        tf_files = {f["file"] for f in res["top_files"]}
+        assert "z.c" in tf_files
+        assert "clean.c" not in tf_files
+
+
 class TestFirstPresent:
     def test_returns_first_non_none(self):
         d = {"a": None, "b": 5, "c": 9}
