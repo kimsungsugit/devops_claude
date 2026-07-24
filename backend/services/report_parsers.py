@@ -216,8 +216,11 @@ def resolve_scm_vcast_metrics(payload: Any) -> Optional[Dict[str, Any]]:
     상세탭 프론트(AnalysisSection.jsx effVcast 파생)와 **동일 해석**을 써서 대시보드=상세탭 일치를
     보장한다. 커버리지·TC가 모두 없으면 None을 반환(로드 이력이 무의미 — 폴백 대상 아님).
 
-    - line_rate/branch_rate ← coverage.statement/branch.rate (단일·병합 payload 모두 `coverage`
-      존재; total=0이면 rate=None 계약 유지 → 0% 미커버 위장 금지).
+    - line_rate/branch_rate ← **UT 전용** coverage_ut.statement/branch.rate 우선(대시보드 '구문
+      커버리지'는 UT 기준). coverage_ut 없으면 vcast_kind=UT일 때 top-level coverage, 그 외 합산/IT
+      폴백(coverage_basis로 플래그). total=0이면 rate=None 계약 유지 → 0% 미커버 위장 금지.
+    - coverage_basis: 'ut_statement'|'it_statement'|'combined_statement' — 프론트가 UT-미산출
+      프로젝트만 '기준 상이' 각주로 폭로. line_rate_combined: 원 합산 구문 커버리지(투명성).
     - ut_total/it_total ← test_rows_count_ut/it(모던). 구 payload엔 이 필드가 없어 **test_rows의
       행별 source로 직접 분리**한다(_split_vcast_summary_by_source와 동일 규칙). ⚠병합 payload는
       vcast_kind가 없어 kind 추정 시 IT를 전량 UT로 오귀속하므로 test_rows 우선(실측 NE1AW 6886/616).
@@ -227,20 +230,42 @@ def resolve_scm_vcast_metrics(payload: Any) -> Optional[Dict[str, Any]]:
         return None
     _cov_raw = payload.get("coverage")
     cov = _cov_raw if isinstance(_cov_raw, dict) else {}
+    _cov_ut_raw = payload.get("coverage_ut")
+    cov_ut = _cov_ut_raw if isinstance(_cov_ut_raw, dict) else {}
+    kind = str(payload.get("vcast_kind") or "").upper()
 
-    def _rate(metric: str) -> Optional[float]:
-        _cell = cov.get(metric)
+    def _rate_from(d: Dict[str, Any], metric: str) -> Optional[float]:
+        _cell = d.get(metric)
         cell = _cell if isinstance(_cell, dict) else {}
         r = cell.get("rate")
+        # rate는 payload 계약상 total>0일 때만 숫자(total=0이면 None) → 0% 미커버 위장 방지.
         return float(r) if isinstance(r, (int, float)) else None
 
-    line_rate = _rate("statement")
-    branch_rate = _rate("branch")
+    # 대시보드 '구문 커버리지'는 UT 기준 — 병합 payload의 coverage_ut(UT 전용)를 우선한다. top-level
+    # coverage는 UT+IT 합산이라 IT가 낮으면 희석된다(실측 KJPDS02 UT 99.5% vs 합산 70.7%).
+    # 우선순위: coverage_ut.statement → (단일 UT 폴더면) top-level coverage → 그 외 합산/IT 폴백(플래그).
+    _ut_stmt = _rate_from(cov_ut, "statement")
+    if _ut_stmt is not None:
+        line_rate = _ut_stmt
+        branch_rate = _rate_from(cov_ut, "branch")
+        coverage_basis = "ut_statement"
+    elif kind == "UT":
+        # 단일 UT 폴더: top-level coverage 자체가 UT다(coverage_ut 미분리).
+        line_rate = _rate_from(cov, "statement")
+        branch_rate = _rate_from(cov, "branch")
+        coverage_basis = "ut_statement"
+    else:
+        # UT 전용 데이터 없음(IT-only 폴더 또는 legacy 병합 coverage_ut 공백) → 합산/IT로 폴백.
+        # 대시보드가 이 프로젝트만 '기준 상이' 각주로 폭로한다(침묵 혼재 방지).
+        line_rate = _rate_from(cov, "statement")
+        branch_rate = _rate_from(cov, "branch")
+        coverage_basis = "it_statement" if kind == "IT" else "combined_statement"
+
+    # 투명성: UT로 승격돼도 원 합산 구문 커버리지를 함께 노출(프론트 각주/툴팁).
+    line_rate_combined = _rate_from(cov, "statement")
 
     def _int(v: Any) -> Optional[int]:
         return int(v) if isinstance(v, (int, float)) else None
-
-    kind = str(payload.get("vcast_kind") or "").upper()
     ut_total = _int(payload.get("test_rows_count_ut"))
     it_total = _int(payload.get("test_rows_count_it"))
     if ut_total is None and it_total is None:
@@ -295,6 +320,8 @@ def resolve_scm_vcast_metrics(payload: Any) -> Optional[Dict[str, Any]]:
     # (집계 차트는 위 UT/IT split만 사용 — 결합값은 무시하므로 키 추가는 무회귀).
     return {
         "line_rate": line_rate,
+        "line_rate_combined": line_rate_combined,
+        "coverage_basis": coverage_basis,
         "branch_rate": branch_rate,
         "ut_total": ut_total_i,
         "it_total": it_total_i,

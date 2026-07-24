@@ -5982,6 +5982,17 @@ def aggregate_stats(req: dict) -> Dict[str, Any]:
         # 빌드 라인커버가 0.0이면 VectorCAST가 SCM 소스라 빌드에 안 담긴 '자리표시 0'일 때가 많다
         # (KJPDS02_PV 실측). 테스트 카운트 0(ut_total>0 검사)과 동일하게 SCM 이력으로 폴백한다.
         coverage_source = "build" if (lr is not None and lr > 0) else None
+        # 커버리지 기준(basis) — 대시보드 '구문 커버리지(UT)' 라벨/각주용. 빌드 coverage.basis를 승격:
+        # vcast_ut_statements=UT 구문(기준값)·그 외(IT 구문/IT 함수/비-vcast 라인커버)는 프론트가
+        # '기준 상이' 각주로 폭로. SCM 폴백 시 아래에서 scm["coverage_basis"]로 덮어쓴다.
+        coverage_basis = None
+        line_rate_combined = None
+        if coverage_source == "build":
+            coverage_basis = {
+                "vcast_ut_statements": "ut_statement",
+                "vcast_it_statements": "it_statement",
+                "vcast_it_functions": "it_functions",
+            }.get(cov.get("basis"), "build_line")
 
         # Tests — 빌드 산출물 우선
         tests = data.get("tests") or {}
@@ -6005,6 +6016,8 @@ def aggregate_stats(req: dict) -> Dict[str, Any]:
             if scm:
                 if coverage_source is None and scm["line_rate"] is not None:
                     lr, br, coverage_source = scm["line_rate"], scm["branch_rate"], "scm_vcast"
+                    coverage_basis = scm.get("coverage_basis")
+                    line_rate_combined = scm.get("line_rate_combined")
                 if tests_source is None and (scm["ut_total"] or scm["it_total"]):
                     ut_total, it_total = scm["ut_total"], scm["it_total"]
                     ut_ok = int(scm["ut_passed"]) if scm["ut_passed"] is not None else 0
@@ -6081,6 +6094,8 @@ def aggregate_stats(req: dict) -> Dict[str, Any]:
             "code_metrics_source": cm.get("source"),   # 'lizard' | 'qac' | None — 프론트 LOC 출처 라벨/각주용
             "code_metrics_reason": cm.get("reason"),   # 완전 부재(lizard·QAC 둘 다 없음) 사유 — 침묵 0 방지
             "coverage_source": coverage_source,  # 'build' | 'scm_vcast' | None — 커버리지 출처 각주/미집계 구분
+            "coverage_basis": coverage_basis,    # 'ut_statement'|'it_statement'|'it_functions'|'combined_statement'|'build_line'|None — 구문(UT) 기준 여부 폭로
+            "line_rate_combined": line_rate_combined,  # SCM: 원 UT+IT 합산 구문 커버리지(투명성 각주/툴팁)
             "tests_source": tests_source,        # 'build' | 'scm_vcast' | None — TC 개수 출처 각주용
             "rcr_violated_rules": _parse_fraction_first(rcr_summary.get("Violated Rules", 0)),
             "rcr_compliance_index": _parse_fraction_first(rcr_summary.get("Project Compliance Index", 0)),
@@ -6089,6 +6104,9 @@ def aggregate_stats(req: dict) -> Dict[str, Any]:
     return {
         "project_count": len(projects),
         "coverage": {
+            # ⚠ avg_line_rate는 프로젝트별 lr을 basis 구분 없이 평균한다 — 대부분 UT 구문이나 UT 미산출
+            # 프로젝트(coverage_basis!='ut_statement')가 섞이면 기준이 혼재할 수 있다. 막대별 권위 기준은
+            # per-project 'coverage_basis'이며, 이 평균값은 현재 프론트 미표시(집계 카드는 buildStats 사용).
             "avg_line_rate": (
                 round(sum(cov_line_rates) / len(cov_line_rates), 4)
                 if cov_line_rates else None

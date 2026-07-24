@@ -573,21 +573,31 @@ class TestResolveCodeMetrics:
 class TestResolveScmVcastMetrics:
     """resolve_scm_vcast_metrics — SCM 로드 이력 payload → 대시보드 경량 지표(상세탭 effVcast 미러)."""
 
-    def test_merged_payload_extracts_coverage_tc_and_pass(self):
+    def test_merged_payload_prefers_ut_coverage_over_combined(self):
+        # 대시보드 '구문 커버리지'는 UT 기준 — coverage_ut(UT 전용)를 top-level coverage(UT+IT 합산)보다
+        # 우선. 실측 KJPDS02: UT 99.5% vs 합산 70.7%(IT 희석). 합산을 쓰면 이 assert가 깨진다(뮤테이션 가드).
         payload = {
-            "coverage": {
+            "coverage": {  # UT+IT 합산(IT가 낮아 희석)
+                "statement": {"covered": 12428, "total": 17572, "rate": 0.7073},
+                "branch": {"covered": 5842, "total": 8610, "rate": 0.6785},
+                "mcdc": {"covered": 0, "total": 0, "rate": None},
+            },
+            "coverage_ut": {  # UT 전용 — 대시보드 기준값
                 "statement": {"covered": 8579, "total": 8622, "rate": 0.995},
                 "branch": {"covered": 4044, "total": 4097, "rate": 0.9871},
                 "mcdc": {"covered": 0, "total": 0, "rate": None},
             },
+            "coverage_it": {"statement": {"covered": 3849, "total": 8950, "rate": 0.43}},
             "test_rows_count_ut": 120, "test_rows_count_it": 45,
             "summary_ut": {"total": 120, "passed": 118, "failed": 2, "pass_rate": 0.9833},
             "summary_it": {"total": 45, "passed": 45, "failed": 0, "pass_rate": 1.0},
         }
         m = resolve_scm_vcast_metrics(payload)
         assert m is not None
-        assert m["line_rate"] == 0.995          # statement.rate가 대시보드 line_rate 소스
-        assert m["branch_rate"] == 0.9871
+        assert m["line_rate"] == 0.995          # coverage_ut.statement (합산 0.7073 아님)
+        assert m["branch_rate"] == 0.9871        # coverage_ut.branch
+        assert m["coverage_basis"] == "ut_statement"
+        assert m["line_rate_combined"] == 0.7073  # 원 합산(투명성)
         assert (m["ut_total"], m["it_total"]) == (120, 45)
         assert (m["ut_passed"], m["it_passed"]) == (118, 45)
 
@@ -608,6 +618,8 @@ class TestResolveScmVcastMetrics:
         assert (m["ut_total"], m["it_total"]) == (3, 2)   # kind 추정이었으면 (5, 0)로 오귀속됐음
         # 병합엔 vcast_kind 없어 결합 summary를 어느 쪽에도 안 몰아줌(합격 집계 보류).
         assert m["ut_passed"] is None and m["it_passed"] is None
+        # coverage_ut 없는 legacy 병합 → 합산 폴백 + '기준 상이' 플래그(프론트 각주 대상).
+        assert m["line_rate"] == 0.7 and m["coverage_basis"] == "combined_statement"
 
     def test_single_folder_ut_with_split_injected(self):
         # 단일폴더도 multi 래퍼가 test_rows_count_ut/it·summary_ut/it를 주입한다(jenkins.py:1527-1532).
@@ -623,6 +635,7 @@ class TestResolveScmVcastMetrics:
         m = resolve_scm_vcast_metrics(payload)
         assert m is not None
         assert m["line_rate"] == 0.9
+        assert m["coverage_basis"] == "ut_statement"  # 단일 UT 폴더: top-level coverage=UT
         assert (m["ut_total"], m["it_total"]) == (10, 0)
         assert m["ut_passed"] == 9
 
@@ -640,7 +653,7 @@ class TestResolveScmVcastMetrics:
         assert m is not None
         assert (m["ut_total"], m["it_total"]) == (0, 33)   # IT로 귀속
         assert m["it_passed"] == 30 and m["ut_passed"] is None
-        assert m["line_rate"] == 0.7
+        assert m["line_rate"] == 0.7 and m["coverage_basis"] == "it_statement"  # IT-only → 비-UT 플래그
 
     def test_mcdc_total_zero_keeps_rate_none_not_zero(self):
         # 대시보드는 statement를 line_rate로 쓰지만, total=0→rate=None 계약을 payload가 지켜야 함.

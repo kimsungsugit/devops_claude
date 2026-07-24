@@ -81,12 +81,22 @@ def _isolate_scm_job_history(tmp_path, monkeypatch):
 
 
 # KJPDS02_PV류 SCM VectorCAST payload(병합 shape) — 잡 result.data에 실린다.
+# 실측 shape: top-level coverage는 UT+IT 합산(IT 희석 → 0.7073), coverage_ut(UT 전용)이 대시보드
+# '구문 커버리지(UT)' 기준값(0.995). 대시보드는 coverage_ut를 우선한다(합산 아님).
 _KJPDS_VCAST_PAYLOAD = {
-    "coverage": {
+    "coverage": {  # UT+IT 합산
+        "statement": {"covered": 12428, "total": 17572, "rate": 0.7073},
+        "branch": {"covered": 5842, "total": 8610, "rate": 0.6785},
+        "mcdc": {"covered": 0, "total": 0, "rate": None},
+    },
+    "coverage_ut": {  # UT 전용 — 대시보드 기준값
         "statement": {"covered": 8579, "total": 8622, "rate": 0.995},
         "branch": {"covered": 4044, "total": 4097, "rate": 0.9871},
         "mcdc": {"covered": 0, "total": 0, "rate": None},
     },
+    "coverage_it": {"statement": {"covered": 3849, "total": 8950, "rate": 0.43},
+                    "branch": {"covered": 0, "total": 0, "rate": None},
+                    "mcdc": {"covered": 0, "total": 0, "rate": None}},
     "test_rows_count_ut": 120, "test_rows_count_it": 45,
     "summary_ut": {"total": 120, "passed": 118, "failed": 2, "pass_rate": 0.9833},
     "summary_it": {"total": 45, "passed": 45, "failed": 0, "pass_rate": 1.0},
@@ -183,7 +193,9 @@ class TestAggregateStatsScmHistoryLinkage:
         _place_summary(tmp_path, url, _KJPDS_SUMMARY)
         _place_vcast_job(_isolate_scm_job_history, url, _KJPDS_VCAST_PAYLOAD)
         p = _project_by_name(aggregate_stats({"job_urls": [url], "cache_root": str(tmp_path)}), "KJPDS02_PV")
-        assert p["line_rate"] == 0.995                 # coverage.statement.rate
+        assert p["line_rate"] == 0.995                 # coverage_ut.statement (UT 기준, 합산 0.7073 아님)
+        assert p["coverage_basis"] == "ut_statement"
+        assert p["line_rate_combined"] == 0.7073        # 원 합산(투명성 각주용)
         assert (p["ut_total"], p["it_total"]) == (120, 45)
         assert p["coverage_source"] == "scm_vcast"
         assert p["tests_source"] == "scm_vcast"
@@ -204,7 +216,32 @@ class TestAggregateStatsScmHistoryLinkage:
         assert p["line_rate"] == 0.71                    # SCM 0.995 아님
         assert (p["ut_total"], p["it_total"]) == (8, 3)  # SCM 120/45 아님
         assert p["coverage_source"] == "build"
+        assert p["coverage_basis"] == "build_line"       # basis 부재 빌드 coverage → 비-UT 플래그
         assert p["tests_source"] == "build"
+
+    def test_build_coverage_basis_mapped_from_analysis_summary(self, tmp_path):
+        # 빌드 coverage.basis(jenkins_adapter 기록)를 대시보드 coverage_basis로 승격.
+        # vcast_ut_statements=UT 구문(기준값·무플래그), it_statements/functions·basis부재=비-UT 플래그.
+        cases = [
+            ("vcast_ut_statements", "ut_statement"),
+            ("vcast_it_statements", "it_statement"),
+            ("vcast_it_functions", "it_functions"),
+            (None, "build_line"),                    # basis 부재(비-VectorCAST 라인커버) → 플래그
+        ]
+        for i, (basis, expected) in enumerate(cases):
+            url = f"http://192.168.110.40:7000/job/BUILD_BASIS_{i}/"
+            cov = {"line_rate": 0.9, "covered": 90, "total": 100}
+            if basis is not None:
+                cov["basis"] = basis
+            summary = {
+                "jenkins": {"build_number": 1, "result": "SUCCESS"},
+                "coverage": cov, "tests": {},
+                "code_metrics": {"code_files": 1, "functions": 1, "nloc": 1}, "prqa": {},
+            }
+            _place_summary(tmp_path, url, summary)
+            p = _project_by_name(aggregate_stats({"job_urls": [url], "cache_root": str(tmp_path)}), f"BUILD_BASIS_{i}")
+            assert p["coverage_source"] == "build" and p["line_rate"] == 0.9
+            assert p["coverage_basis"] == expected
 
     def test_build_placeholder_zero_coverage_falls_back_to_scm(self, tmp_path, _isolate_scm_job_history):
         # 실측 KJPDS02_PV: 빌드 analysis_summary가 coverage.line_rate=0.0(VectorCAST가 SCM 소스라
@@ -292,6 +329,7 @@ class TestAggregateStatsScmHistoryLinkage:
         p = _project_by_name(aggregate_stats({"job_urls": [url], "cache_root": str(tmp_path)}), "KJPDS02_PV")
         assert (p["ut_total"], p["it_total"]) == (3, 1)   # kind 추정이었으면 (4, 0)로 오귀속됐음
         assert p["line_rate"] == 0.7 and p["coverage_source"] == "scm_vcast"
+        assert p["coverage_basis"] == "combined_statement"  # coverage_ut 없는 legacy → 비-UT 플래그
 
 
 class TestScmVcastSummaryEndpoint:
@@ -299,11 +337,14 @@ class TestScmVcastSummaryEndpoint:
 
     def test_returns_metrics_with_combined_passfail(self, _isolate_scm_job_history):
         # 실측 KJPDS02_PV shape(병합 payload) — 결합 summary의 passed/failed/pass_rate를 카드에 공급.
+        # coverage_ut(UT 전용)가 있으면 엔드포인트(**metrics spread)도 UT-우선 분기를 통과:
+        # line_rate=UT 구문(합산 아님), coverage_basis/line_rate_combined도 노출(카드는 합부만 소비하나 계약 고정).
         url = "http://192.168.110.40:7000/job/KJPDS02_PV/"
         payload = {
             "coverage": {"statement": {"covered": 12428, "total": 17572, "rate": 0.7073},
                          "branch": {"covered": 0, "total": 0, "rate": None},
                          "mcdc": {"covered": 0, "total": 0, "rate": None}},
+            "coverage_ut": {"statement": {"covered": 8579, "total": 8622, "rate": 0.995}},
             "test_rows_count_ut": 6886, "test_rows_count_it": 616,
             "summary": {"total": 7502, "passed": 7480, "failed": 22, "skipped": 0,
                         "unknown": 0, "pass_rate": 0.9971},
@@ -316,7 +357,9 @@ class TestScmVcastSummaryEndpoint:
         assert (r["ut_total"], r["it_total"]) == (6886, 616)
         assert (r["passed"], r["failed"]) == (7480, 22)     # 결합 summary(카드 '통과/실패')
         assert r["pass_rate"] == 0.9971
-        assert r["line_rate"] == 0.7073
+        assert r["line_rate"] == 0.995                       # UT 구문(합산 0.7073 아님)
+        assert r["coverage_basis"] == "ut_statement"
+        assert r["line_rate_combined"] == 0.7073             # 원 합산(투명성)
 
     def test_no_history_available_false(self):
         # 이력 없음(autouse fixture가 빈 JOB_DIR로 격리) → available=false (프론트가 빌드 폴백).

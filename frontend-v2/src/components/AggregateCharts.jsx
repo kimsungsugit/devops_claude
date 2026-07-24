@@ -150,7 +150,7 @@ export default function AggregateCharts({ projects, buildStats }) {
 
       {/* 2. Coverage comparison */}
       <div className="panel" style={{ boxShadow: 'none', padding: 'var(--sp-3)' }}>
-        <div style={{ fontSize: 'var(--text-sm)', fontWeight: 600, marginBottom: 'var(--sp-2)', color: 'var(--text-muted)' }}>커버리지 비교 (%)</div>
+        <div style={{ fontSize: 'var(--text-sm)', fontWeight: 600, marginBottom: 'var(--sp-2)', color: 'var(--text-muted)' }}>구문 커버리지 (UT 기준, %)</div>
         {projects.map(p => (
           <HorizontalBar
             key={p.job_url}
@@ -161,12 +161,22 @@ export default function AggregateCharts({ projects, buildStats }) {
             suffix="%"
           />
         ))}
-        {/* 빌드 라인커버리지와 SCM VectorCAST 구문커버리지가 섞이면 절대 비교가 부정확 — 정직 표기(silent 혼재 방지). */}
-        {projects.some(p => p.coverage_source === 'scm_vcast') && (
-          <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', marginTop: 'var(--sp-1)' }}>
-            * 일부 프로젝트는 SCM 로드 이력의 <b>VectorCAST 구문 커버리지</b>(빌드 라인 커버리지와 지표 상이) — 절대 비교 주의
-          </div>
-        )}
+        {/* 구문 커버리지는 UT 기준(coverage_basis='ut_statement')이 대시보드 표준값. 빌드는 vcast_ut_statements,
+            SCM은 coverage_ut를 씀. UT 구문을 못 뽑아 다른 기준으로 대체된 프로젝트만 폭로한다(침묵 혼재 방지 —
+            과거 'scm_vcast 지표 상이' 상시 각주를 basis 조건부로 대체). */}
+        {(() => {
+          const BASIS_LABEL = {
+            it_statement: 'IT 구문', it_functions: 'IT 함수',
+            combined_statement: 'UT+IT 합산', build_line: '빌드 라인커버',
+          };
+          const nonUt = projects.filter(p => p.coverage_source != null && p.coverage_basis && p.coverage_basis !== 'ut_statement');
+          if (nonUt.length === 0) return null;
+          return (
+            <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', marginTop: 'var(--sp-1)' }}>
+              * <b>{nonUt.map(p => `${p.name || '?'}(${BASIS_LABEL[p.coverage_basis] || p.coverage_basis})`).join(', ')}</b> — UT 구문 커버리지 미산출로 대체 지표 표시, 절대 비교 주의
+            </div>
+          );
+        })()}
         {/* 커버리지가 빌드·SCM 이력 모두 없어 0으로 뜨면 '진짜 0'과 구분(침묵 0 방지).
             빌드 line_rate가 0.0 플레이스홀더면 null이 아니라 coverage_source가 null이므로 그걸로 판정. */}
         {projects.some(p => p.coverage_source == null) && (
