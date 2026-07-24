@@ -355,9 +355,26 @@ def test_endpoint_cache_miss_on_model_change(tmp_path, monkeypatch):
     assert si.summary_ai_insight_endpoint({"job_url": "http://j/", "probe": True})["cached"] is False
 
 
+def _load_real_config():
+    """실 config 모듈을 sys.modules와 무관하게 파일에서 로드(격리-내성).
+
+    ⚠ test_workflow_pipeline이 config 미로드 시점이면 sys.modules['config']에 MagicMock을
+    심고 복원하지 않는다(레거시 stub 누설) — `import config`는 전체 스위트 순서에 따라
+    MagicMock을 받을 수 있어(단독 green ↔ 전체 fail), 별도 이름으로 실 파일을 직접 로드한다.
+    """
+    import importlib.util
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parents[2] / "config.py"
+    spec = importlib.util.spec_from_file_location("_config_real_p0_test", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
 def test_config_policy_gemini35_exact_and_defaults():
     """Phase 0: 표준 모델 정책 존재(스펙 정확값) + 기본 모델 전환 + 2.5 정책 비포획."""
-    import config
+    config = _load_real_config()
 
     pol = config.LLM_MODEL_POLICIES["gemini-3.5-flash-lite"]
     assert pol["max_input_tokens"] == 1048576
