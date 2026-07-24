@@ -1961,7 +1961,7 @@ function TraceMatrix({ matrix, focusFunctions = null, onClearFocus = null,
           csvEscape(u.subprogram ?? ''),
           csvEscape((Array.isArray(u.resolved_funcs) ? u.resolved_funcs : []).join('; ')),
           csvEscape(sr.length ? sr.join('; ') : '미명세'),
-          csvEscape(u.in_uds === true ? (uf.length ? uf.join('; ') : '설계됨') : (u.in_uds === false ? '미설계' : '')),
+          csvEscape(u.in_uds === true ? (uf.length ? uf.join('; ') : '설계됨') : (u.layer === 'UNRESOLVED' ? '분류불가' : (u.in_uds === false ? '미설계' : ''))),
           csvEscape(LAYER_LABELS[u.layer] ?? ''),
           csvEscape(u.category ?? ''),
           csvEscape(u.result ?? ''),
@@ -2997,6 +2997,7 @@ const LAYER_LABELS = {
   BOOT_REPROG: '부트/재프로그래밍',
   LIB_UTIL: '라이브러리',
   TEST_ARTIFACT: '시험산출물',
+  UNRESOLVED: '분류불가',   // §H: SwUFn↔함수명 미해결(설계 갭 판정 보류)
 };
 
 // SRS 미추적 시험 루트 — 시험은 됐으나 이 SRS에 안 닿는 VectorCAST 함수를 의미 버킷으로 묶는다.
@@ -3022,13 +3023,15 @@ function TraceUnmappedRoot({ unmapped, expanded, onToggle }) {
   // 미설계(in_uds=false)는 시험만 존재하는 진짜 설계 공백이라 빨강으로 별도 노출.
   // in_uds === false 만 갭으로 카운트(undefined=구 응답은 제외) — 버전 스큐 거짓 갭 방지(X6).
   const udsLinkedTotal = list.filter(u => u && u.in_uds === true).length;
-  const designGapTotal = list.filter(u => u && u.in_uds === false).length;
+  // §H: '분류불가'(UNRESOLVED, SwUFn↔함수명 미해결)는 진짜 미설계 갭이 아니므로 제외 —
+  // 백엔드 unmapped_app_design_gap과 lockstep(over-report 방지, X6 데이터 일관성).
+  const designGapTotal = list.filter(u => u && u.in_uds === false && u.layer !== 'UNRESOLVED').length;
   // ISO 26262 SwDS 계층(라운드112) — '애플리케이션 설계 공백(app_leaf=실 finding)'과
   // '정당한 범위 경계(bsw/boot/lib)'를 분리 표기. 구 응답엔 layer 없어 카운트 0 → 자동 숨김.
   // 기존 버킷/색은 그대로 두고 보조 hint 라인만 추가(보수적 단계 노출).
-  const layerCounts = { APP_LEAF: 0, BSW_DRIVER: 0, BOOT_REPROG: 0, LIB_UTIL: 0, TEST_ARTIFACT: 0 };
+  const layerCounts = { APP_LEAF: 0, BSW_DRIVER: 0, BOOT_REPROG: 0, LIB_UTIL: 0, TEST_ARTIFACT: 0, UNRESOLVED: 0 };
   for (const u of list) { if (u && u.layer && layerCounts[u.layer] !== undefined) layerCounts[u.layer] += 1; }
-  const hasLayers = (layerCounts.APP_LEAF + layerCounts.BSW_DRIVER + layerCounts.BOOT_REPROG + layerCounts.LIB_UTIL + layerCounts.TEST_ARTIFACT) > 0;
+  const hasLayers = (layerCounts.APP_LEAF + layerCounts.BSW_DRIVER + layerCounts.BOOT_REPROG + layerCounts.LIB_UTIL + layerCounts.TEST_ARTIFACT + layerCounts.UNRESOLVED) > 0;
   return (
     <li style={{ borderTop: '2px solid var(--accent)' }}>
       <div
@@ -3058,6 +3061,7 @@ function TraceUnmappedRoot({ unmapped, expanded, onToggle }) {
             {layerCounts.BSW_DRIVER > 0 && <span title="기반 SW/드라이버(HAL·LIN/CAN) — BSW 설계명세/플랫폼 범위에서 추적(애플리케이션 SDS 범위 밖)"> · BSW {layerCounts.BSW_DRIVER}</span>}
             {layerCounts.LIB_UTIL > 0 && <span title="범용 라이브러리/연산 유틸 — 호출처 컴포넌트 설계에 라이브러리로 귀속 추적"> · LIB {layerCounts.LIB_UTIL}</span>}
             {layerCounts.TEST_ARTIFACT > 0 && <span title="시험 산출물/스텁 — 추적 대상 아님"> · 시험 {layerCounts.TEST_ARTIFACT}</span>}
+            {layerCounts.UNRESOLVED > 0 && <span style={{ color: COVERAGE_COLORS.partial.fg, fontWeight: 700 }} title="SwUFn ID↔함수명 미해결 — 분류 불가(진짜 설계 갭 판정 보류, app 갭 오집계 방지)"> · 분류불가 {layerCounts.UNRESOLVED}</span>}
             <span style={{ color: COVERAGE_COLORS.partial.fg }} title="APP=애플리케이션 설계 공백(실 finding) / 부트·BSW·LIB=정당한 범위 경계"> ⓘ</span>
           </span>
         )}
