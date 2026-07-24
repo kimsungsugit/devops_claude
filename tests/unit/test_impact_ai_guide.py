@@ -444,17 +444,20 @@ def test_c_type_boundaries_mapping():
     """C 타입 → 경계값(결정론). 프론트 src/impactBoundary.js cTypeBoundaries의 백엔드 미러."""
     from workflow.impact_ai_guide import _c_type_boundaries
     u16 = dict(_c_type_boundaries("U16"))
-    assert u16.get("MIN") == "0" and u16.get("MAX") == "65535"
-    assert [v for _, v in _c_type_boundaries("S8")] == ["-128", "0", "127"]
-    # 별칭(uint8_t / unsigned char / int)
-    assert any(v == "255" for _, v in _c_type_boundaries("uint8_t"))
-    assert any(v == "255" for _, v in _c_type_boundaries("unsigned char"))
+    # unsigned은 0x hex(실제 SUTS 시험 내용과 대조 일관), signed는 음수경계라 10진 유지
+    assert u16.get("MIN") == "0x0" and u16.get("MAX") == "0xFFFF"
+    assert dict(_c_type_boundaries("U32")).get("MAX") == "0xFFFFFFFF"
+    assert dict(_c_type_boundaries("U8")).get("INV") == "0x100(범위초과)"
+    assert [v for _, v in _c_type_boundaries("S8")] == ["-128", "0", "127"]  # signed 10진 유지
+    # 별칭(uint8_t / unsigned char → hex, int → s32 10진)
+    assert any(v == "0xFF" for _, v in _c_type_boundaries("uint8_t"))
+    assert any(v == "0xFF" for _, v in _c_type_boundaries("unsigned char"))
     assert any(v == "2147483647" for _, v in _c_type_boundaries("int"))
     # boolean / 포인터·배열 / const 제거
     assert _c_type_boundaries("boolean") == [("FALSE", "0"), ("TRUE", "1")]
     assert ("NULL", "NULL") in _c_type_boundaries("const U8*")
     assert ("NULL", "NULL") in _c_type_boundaries("U8[8]")
-    assert any(v == "65535" for _, v in _c_type_boundaries("const U16"))
+    assert any(v == "0xFFFF" for _, v in _c_type_boundaries("const U16"))
     # 미상 타입·빈값 → [](환각 금지)
     assert _c_type_boundaries("MyEnum_t") == []
     assert _c_type_boundaries("") == []
@@ -464,7 +467,7 @@ def test_format_param_boundaries_from_signature():
     """시그니처 → 파라미터별 경계값 grounding 텍스트(이름 없는/void 제외)."""
     from workflow.impact_ai_guide import _format_param_boundaries
     txt = _format_param_boundaries("void f(U16 idx, boolean flag)")
-    assert "idx(U16)" in txt and "65535" in txt
+    assert "idx(U16)" in txt and "0xFFFF" in txt
     assert "flag(boolean)" in txt and "TRUE=1" in txt
     assert _format_param_boundaries("void f(void)") == ""
     assert _format_param_boundaries("void f(U16)") == ""  # 이름 없는 파라미터 제외
@@ -490,7 +493,7 @@ def test_explain_function_change_grounds_boundary_values(monkeypatch):
     assert out
     joined = " ".join(m["content"] for m in captured["messages"])
     assert "파라미터 경계값" in joined
-    assert "65535" in joined and "idx(U16)" in joined
+    assert "0xFFFF" in joined and "idx(U16)" in joined
 
 
 def test_explain_function_change_grounds_boundary_from_prototype(monkeypatch):
@@ -511,7 +514,7 @@ def test_explain_function_change_grounds_boundary_from_prototype(monkeypatch):
     )
     assert out
     joined = " ".join(m["content"] for m in captured["messages"])
-    assert "mode(U8)" in joined and "255" in joined
+    assert "mode(U8)" in joined and "0xFF" in joined
 
 
 def test_explain_function_change_injects_impact_path(monkeypatch):

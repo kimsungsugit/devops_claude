@@ -3,27 +3,28 @@ import { cTypeBoundaries, proposeBoundaryTCs, formatSutsLoc } from '../impactBou
 
 // 경계값 유도(결정론) — 영향분석 '작성 제안' 골격의 수치 출처. 백엔드 _c_type_boundaries와 미러.
 describe('cTypeBoundaries — C 타입 경계값(결정론)', () => {
-  it('U16 → 0 / 32768 / 65535', () => {
+  it('U16 → 0x0 / 0x8000 / 0xFFFF (unsigned hex)', () => {
     const vals = cTypeBoundaries('U16').map((x) => x.value);
-    expect(vals).toContain('0');
-    expect(vals).toContain('32768');
-    expect(vals).toContain('65535');
+    expect(vals).toContain('0x0');
+    expect(vals).toContain('0x8000');
+    expect(vals).toContain('0xFFFF');
   });
 
-  it('S8 → -128 / 0 / 127', () => {
+  it('S8 → -128 / 0 / 127 (signed 10진 유지)', () => {
     expect(cTypeBoundaries('S8').map((x) => x.value)).toEqual(['-128', '0', '127']);
   });
 
-  it('U8 → 255 + INV(범위초과) 케이스', () => {
+  it('U8 → 0xFF + INV(범위초과) 케이스 (unsigned hex)', () => {
     const b = cTypeBoundaries('U8');
-    expect(b.map((x) => x.value)).toContain('255');
+    expect(b.map((x) => x.value)).toContain('0xFF');
+    expect(b.find((x) => x.label === 'INV').value).toBe('0x100(범위초과)');
     expect(b.some((x) => x.label === 'INV')).toBe(true);
   });
 
-  it('별칭 매핑(uint8_t / unsigned char / int) → 정규 경계값', () => {
-    expect(cTypeBoundaries('uint8_t').map((x) => x.value)).toContain('255');
-    expect(cTypeBoundaries('unsigned char').map((x) => x.value)).toContain('255');
-    // int → s32
+  it('별칭 매핑(uint8_t / unsigned char → hex, int → s32 10진)', () => {
+    expect(cTypeBoundaries('uint8_t').map((x) => x.value)).toContain('0xFF');
+    expect(cTypeBoundaries('unsigned char').map((x) => x.value)).toContain('0xFF');
+    // int → s32 (signed 10진 유지)
     expect(cTypeBoundaries('int').map((x) => x.value)).toContain('2147483647');
   });
 
@@ -37,7 +38,7 @@ describe('cTypeBoundaries — C 타입 경계값(결정론)', () => {
   });
 
   it('const/volatile 수식어 제거 후 매칭', () => {
-    expect(cTypeBoundaries('const U16').map((x) => x.value)).toContain('65535');
+    expect(cTypeBoundaries('const U16').map((x) => x.value)).toContain('0xFFFF');
   });
 
   it('float → 특수(NaN/Inf) 케이스 포함', () => {
@@ -57,7 +58,7 @@ describe('proposeBoundaryTCs — 파라미터별 경계값 TC 골격', () => {
     const r = proposeBoundaryTCs([{ type: 'U16', name: 'idx' }, { type: 'boolean', name: 'flag' }]);
     expect(r.params).toHaveLength(2);
     expect(r.params[0].param).toBe('idx');
-    expect(r.params[0].cases.map((c) => c.value)).toContain('65535');
+    expect(r.params[0].cases.map((c) => c.value)).toContain('0xFFFF');
     expect(r.params[1].cases.map((c) => c.value)).toEqual(['0', '1']);
   });
 

@@ -1461,8 +1461,8 @@ describe('ImpactGuideSection', () => {
   });
 
   // STS-IMPACT-054: 미파싱(문서 내용 없음) → 막다른 '미파싱' 대신 결정론 작성 골격 + 경계값 TC.
-  //  UDS 카드는 Name/Prototype 신규 골격, SUTS 카드는 파라미터 타입에서 유도한 실제 경계값(U16→65535).
-  it('작성 제안: 미파싱 UDS/SUTS에 결정론 작성 골격 + 경계값(U16→65535)이 표시된다', async () => {
+  //  UDS 카드는 Name/Prototype 신규 골격, SUTS 카드는 파라미터 타입에서 유도한 실제 경계값(U16→0xFFFF).
+  it('작성 제안: 미파싱 UDS/SUTS에 결정론 작성 골격 + 경계값(U16→0xFFFF)이 표시된다', async () => {
     const { post } = await import('../api.js');
     post.mockResolvedValue({ ok: false });
     const user = userEvent.setup();
@@ -1485,8 +1485,8 @@ describe('ImpactGuideSection', () => {
     expect(within(dialog).getAllByText(/void s_bar\(U16 idx\)/).length).toBeGreaterThanOrEqual(1);
     // SUTS: 파라미터 U16 idx에서 유도한 실제 경계값(결정론, 일반 문구 아님)
     expect(within(dialog).getByText(/SUTS 작성 제안 \(경계값 TC 골격\)/)).toBeInTheDocument();
-    expect(within(dialog).getByText('MAX=65535')).toBeInTheDocument();
-    expect(within(dialog).getByText('MIN=0')).toBeInTheDocument();
+    expect(within(dialog).getByText('MAX=0xFFFF')).toBeInTheDocument();
+    expect(within(dialog).getByText('MIN=0x0')).toBeInTheDocument();
   });
 
   // STS-IMPACT-055: 요구 매핑 없는 함수의 STS는 가짜 TC를 만들지 않고 '작성 대상 아님'을 정직 표기(ISO 정직성).
@@ -1537,7 +1537,7 @@ describe('ImpactGuideSection', () => {
     const dialog = await screen.findByRole('dialog');
     await waitFor(() => expect(within(dialog).getAllByText(/계약|직접 변경 아님/).length).toBeGreaterThanOrEqual(1));
     expect(within(dialog).queryByText(/작성 제안/)).toBeNull();      // 작성 골격 없음
-    expect(within(dialog).queryByText('MAX=65535')).toBeNull();       // 경계값 골격 없음
+    expect(within(dialog).queryByText('MAX=0xFFFF')).toBeNull();       // 경계값 골격 없음
   });
 
   // STS-IMPACT-057: DELETE(삭제) 함수엔 경계값 작성 골격을 제안하지 않는다 — 삭제는 '작성'이 아니라
@@ -1561,7 +1561,7 @@ describe('ImpactGuideSection', () => {
     const dialog = await screen.findByRole('dialog');
     await waitFor(() => expect(within(dialog).getByText(/해당 함수 항목 제거/)).toBeInTheDocument());  // 제거 안내(편집 액션)
     expect(within(dialog).queryByText(/작성 제안/)).toBeNull();
-    expect(within(dialog).queryByText('MAX=65535')).toBeNull();
+    expect(within(dialog).queryByText('MAX=0xFFFF')).toBeNull();
   });
 
   // STS-IMPACT-058: 공개 함수(g_)의 SDS/STS 부재는 '정상'이 아니라 실 갭일 수 있으므로 '정상' 안심을
@@ -2841,7 +2841,7 @@ describe('ImpactGuideSection — 빌드/리비전 소스 바 & 결과 영속', (
     expect(within(dialog).getAllByText(/문서 수정 불필요/).length).toBeGreaterThanOrEqual(1);
     // 작성 제안(경계값 TC 골격)·경계값 pill 억제 — 허위 TC 제안 없음
     expect(within(dialog).queryByText(/경계값/)).toBeNull();
-    expect(within(dialog).queryByText('MAX=65535')).toBeNull();
+    expect(within(dialog).queryByText('MAX=0xFFFF')).toBeNull();
   });
 
   // STS-IMPACT-069: SUTS 카드가 백엔드 생성기 초안(doc_proposal.suts)의 경계값 입력→기대출력을 구체값으로

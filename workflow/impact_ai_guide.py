@@ -427,8 +427,8 @@ def _format_doc_content_for_prompt(doc_content: Optional[Dict]) -> str:
 
 
 # ── 경계값 유도(결정론) — C 타입 → 경계값. 프론트 src/impactBoundary.js `cTypeBoundaries`의 미러. ──
-# LLM '경계값' 제안이 일반 문구(MIN/MID/MAX)가 아니라 실제 값(0/32768/65535)을 쓰게 grounding한다
-# (결정론 골격 카드와 일관). 매핑 변경 시 프론트 impactBoundary.js도 함께 갱신할 것.
+# LLM '경계값' 제안이 일반 문구(MIN/MID/MAX)가 아니라 실제 값(unsigned=0x hex, signed=10진)을 쓰게
+# grounding한다(결정론 골격 카드·실제 시험 내용과 일관). 매핑 변경 시 프론트 impactBoundary.js도 함께 갱신.
 _C_TYPE_ALIAS = {
     "u8": "u8", "uint8": "u8", "uint8_t": "u8", "unsigned char": "u8", "uchar": "u8", "byte": "u8",
     "u16": "u16", "uint16": "u16", "uint16_t": "u16", "unsigned short": "u16", "unsigned short int": "u16", "ushort": "u16", "word": "u16",
@@ -439,9 +439,10 @@ _C_TYPE_ALIAS = {
     "boolean": "bool", "bool": "bool", "_bool": "bool", "bool_t": "bool",
 }
 _C_TYPE_BOUNDS = {
-    "u8": [("MIN", "0"), ("MID", "128"), ("MAX", "255"), ("INV", "256(범위초과)")],
-    "u16": [("MIN", "0"), ("MID", "32768"), ("MAX", "65535")],
-    "u32": [("MIN", "0"), ("MID", "2147483648"), ("MAX", "4294967295")],
+    # unsigned은 0x hex(주소/데이터/레지스터 관례, 실제 시험 내용과 대조 일관) / signed는 음수경계라 10진 유지
+    "u8": [("MIN", "0x0"), ("MID", "0x80"), ("MAX", "0xFF"), ("INV", "0x100(범위초과)")],
+    "u16": [("MIN", "0x0"), ("MID", "0x8000"), ("MAX", "0xFFFF")],
+    "u32": [("MIN", "0x0"), ("MID", "0x80000000"), ("MAX", "0xFFFFFFFF")],
     "s8": [("MIN", "-128"), ("MID", "0"), ("MAX", "127")],
     "s16": [("MIN", "-32768"), ("MID", "0"), ("MAX", "32767")],
     "s32": [("MIN", "-2147483648"), ("MID", "0"), ("MAX", "2147483647")],
