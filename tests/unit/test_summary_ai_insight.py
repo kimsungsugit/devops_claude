@@ -323,6 +323,72 @@ def test_source_reader_blocks_mid_path_traversal(tmp_path):
         read("..")
 
 
+# ── trace 큐레이션(v3) — raw 관측치의 조치 항목 오변환 차단 ─────────────────
+
+RAW_TRACE = {
+    "has_data": True,
+    "total_requirements": 68, "covered": 68, "uncovered": 0, "coverage_pct": 100.0,
+    "asil_gap_count": 0, "asil_unknown_count": 0,
+    "integrity_clean": False, "integrity_collision_count": 0,
+    "integrity_dangling_count": 111, "integrity_placeholder_count": 0,
+    "summary_raw": {
+        "vcast_input_rows": 1032, "vcast_traced_rows": 405, "vcast_untraced_rows": 627,
+        "unmapped_vcast_count": 627, "unmapped_suts_tested": 619, "unmapped_vcast_only": 6,
+        "unmapped_isr": 2, "unmapped_safety": 44, "unmapped_uds_linked": 624,
+        "unmapped_design_gap": 3, "unmapped_app_design_gap": 0,
+        "total_tests": 7543,  # 기타 raw 필드 — 큐레이션에서 드랍돼야 함
+    },
+}
+
+
+def test_curate_trace_drops_raw_and_classifies_kjpds02_shape():
+    """실측(KJPDS02_PV) shape: 미추적 627은 관측치로, 조치 축은 design_gap 3만 남는다."""
+    from workflow.summary_ai_insight import TRACE_UNTRACED_NOTE, curate_trace_summary
+
+    cur = curate_trace_summary(RAW_TRACE)
+    assert cur["has_data"] is True
+    assert "summary_raw" not in cur                      # raw 총계 LLM 유입 차단
+    vb = cur["vcast_bridge"]
+    assert vb["untraced_rows_observed"] == 627           # 관측치 라벨
+    assert vb["classification"]["design_gap"] == 3       # 유일한 조치 대상
+    assert vb["classification"]["uds_linked_granularity"] == 624
+    assert vb["classification"]["safety_token_flagged"] == 44
+    assert vb["note"] == TRACE_UNTRACED_NOTE             # 기확립 진단 문구 동봉
+    assert cur["integrity"]["dangling_count"] == 111     # 실 finding 축은 유지
+    assert curate_trace_summary(None) is None
+    assert curate_trace_summary({"has_data": False}) is None
+
+
+def test_gaps_use_design_gap_not_untraced_total():
+    """gaps에 미추적 총계(627)는 없고 design_gap(3)·dangling(111)만 조치 축으로 등장."""
+    from workflow.summary_ai_insight import curate_trace_summary, generate_summary_insight
+
+    res = generate_summary_insight(
+        _inp(trace_summary=curate_trace_summary(RAW_TRACE), vcast_failures=[], delta=None, signals=[]),
+        use_llm=False,
+    )
+    kinds = {g["kind"]: g["count"] for g in res["deterministic"]["gaps"]}
+    assert kinds.get("vcast_design_gap") == 3
+    assert kinds.get("integrity_dangling") == 111
+    assert not any(v == 627 for v in kinds.values())     # 총계가 gap으로 둔갑 금지
+    # 결정론 tester 권고가 입도차 문맥을 동봉
+    tester = res["sections"]["roles"]["tester"]
+    design_item = next(t for t in tester if "설계 갭" in t["basis"])
+    assert "진짜 설계 갭 3건" in design_item["basis"]
+    assert "입도차 624건" in design_item["basis"]        # 총계≠조치 문맥 명시
+    dangling_item = next(t for t in tester if "dangling" in t["basis"])
+    assert "111" in dangling_item["basis"]
+
+
+def test_gaps_raw_trace_fallback_dual_source():
+    """큐레이션 안 거친 raw trace(테스트/구 경로)에서도 design_gap·dangling을 읽는다."""
+    from workflow.summary_ai_insight import generate_summary_insight
+
+    res = generate_summary_insight(_inp(trace_summary=RAW_TRACE), use_llm=False)
+    kinds = {g["kind"] for g in res["deterministic"]["gaps"]}
+    assert "vcast_design_gap" in kinds and "integrity_dangling" in kinds
+
+
 def test_resolve_effective_model_override_priority(monkeypatch):
     """실호출 모델 해석 — cfg.model_override > env LLM_MODEL_OVERRIDE > cfg.model (llm_call 동일)."""
     from workflow.summary_ai_insight import resolve_effective_model

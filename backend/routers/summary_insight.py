@@ -805,6 +805,7 @@ def summary_ai_insight_endpoint(req: dict) -> Dict[str, Any]:
         SECTIONS,
         SummaryInsightInput,
         collect_code_excerpts,
+        curate_trace_summary,
         generate_summary_insight,
         top_rules_with_files,
     )
@@ -897,7 +898,9 @@ def summary_ai_insight_endpoint(req: dict) -> Dict[str, Any]:
         signals=signals,
         complexity_offenders=_complexity_offenders(build_root, reports_dir),
         vcast_failures=_vcast_failures(reports_dir),
-        trace_summary=body.get("trace_summary") if isinstance(body.get("trace_summary"), dict) else None,
+        # 큐레이션(v3) — raw summary_raw 총계(미추적 627 등 관측치)가 LLM 조치 항목으로
+        # 오변환되던 것 차단: design_gap 중심 분류 + note만 전달(기확립 진단과 lockstep).
+        trace_summary=curate_trace_summary(body.get("trace_summary") if isinstance(body.get("trace_summary"), dict) else None),
         code_excerpts=excerpts,
         arch_metrics=arch_metrics if (arch_metrics and arch_metrics.get("available")) else None,
     )

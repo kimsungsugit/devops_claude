@@ -23,8 +23,9 @@ from typing import Any, Callable, Dict, List, Optional
 logger = logging.getLogger(__name__)
 
 # 프롬프트/출력 스키마 개정 시 +1 — 라우터가 캐시 무효화 판단에 사용.
-# v2: architecture 섹션 추가(Phase G) — 전 캐시 자연 무효화.
-PROMPT_VERSION = 2
+# v2: architecture 섹션 추가(Phase G).
+# v3: trace 컨텍스트 큐레이션 — 미추적 raw 총계를 LLM이 조치 항목으로 오변환하던 것 차단.
+PROMPT_VERSION = 3
 SECTIONS = ("rules", "mistakes", "roles", "architecture")
 EXCERPT_MAX_FILES = 4
 EXCERPT_MAX_BYTES_PER_FILE = 4096
@@ -123,6 +124,69 @@ def collect_code_excerpts(
     return out
 
 
+TRACE_UNTRACED_NOTE = (
+    "VectorCAST 미추적 총계는 관측치다 — 대부분 단위설계(UDS)+단위시험(SUTS)까지 완료된 "
+    "leaf 함수의 정당한 입도차(부모 SwUFn roll-up)와 범위경계(BSW/부트/ISR)이며, "
+    "실제 조치 대상은 design_gap(단위설계 미명세)뿐이다(기확립 진단 — 총계를 조치 항목으로 만들지 말 것)."
+)
+
+
+def curate_trace_summary(trace: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """AI 입력용 trace 컨텍스트 큐레이션 — raw 관측치가 조치 항목으로 오변환되는 것 차단.
+
+    프론트가 넘기는 trace-summary 원본(summary_raw 전체 포함)을 그대로 LLM에 주면
+    관측 축(미추적 총계 627·uds_linked 624·safety 토큰 44 등)을 '추적성을 확보하라'는
+    액션으로 바꾼다 — 이는 기확립 진단(진짜 설계 갭 = unmapped_design_gap, 나머지는
+    입도차/범위경계)과 모순되는 회귀다(과거 'layer축을 실 finding으로 오라벨' 사건과 동형).
+    조치 축(uncovered/ASIL/무결성/design_gap)만 남기고 관측 축은 분류+note로 문맥화한다.
+    """
+    if not isinstance(trace, dict) or not trace.get("has_data", True):
+        return None
+    raw = trace.get("summary_raw") if isinstance(trace.get("summary_raw"), dict) else {}
+
+    def _i(src: Dict[str, Any], key: str) -> Optional[int]:
+        v = src.get(key)
+        try:
+            return int(v) if v is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    out: Dict[str, Any] = {
+        "has_data": True,
+        # 조치 축 — SRS 커버리지/ASIL/무결성은 실 finding으로 그대로 전달.
+        "total_requirements": _i(trace, "total_requirements"),
+        "covered": _i(trace, "covered"),
+        "uncovered": _i(trace, "uncovered"),
+        "coverage_pct": trace.get("coverage_pct"),
+        "asil_gap_count": _i(trace, "asil_gap_count"),
+        "asil_unknown_count": _i(trace, "asil_unknown_count"),
+        "integrity": {
+            "clean": bool(trace.get("integrity_clean", True)),
+            "collision_count": _i(trace, "integrity_collision_count"),
+            "dangling_count": _i(trace, "integrity_dangling_count"),
+            "placeholder_count": _i(trace, "integrity_placeholder_count"),
+        },
+    }
+    if _i(raw, "vcast_input_rows"):
+        design_gap = _i(raw, "unmapped_design_gap") or 0
+        app_design_gap = _i(raw, "unmapped_app_design_gap")
+        out["vcast_bridge"] = {
+            "input_rows": _i(raw, "vcast_input_rows"),
+            "traced_rows": _i(raw, "vcast_traced_rows"),
+            "untraced_rows_observed": _i(raw, "vcast_untraced_rows"),  # 관측치(조치 대상 아님)
+            "classification": {
+                "design_gap": design_gap,                     # ★유일한 실 검토 대상(단위설계 미명세)
+                "app_design_gap": app_design_gap,             # 그중 APP 레이어(우선순위 ↑)
+                "uds_linked_granularity": _i(raw, "unmapped_uds_linked"),  # 단위설계+시험 완료 leaf — 정당한 입도차
+                "suts_tested": _i(raw, "unmapped_suts_tested"),
+                "safety_token_flagged": _i(raw, "unmapped_safety"),  # 안전/진단 토큰 보유(강조 표시용 교차 집계 — 대부분 입도차와 중복)
+                "isr": _i(raw, "unmapped_isr"),
+            },
+            "note": TRACE_UNTRACED_NOTE,
+        }
+    return out
+
+
 def resolve_effective_model(cfg: Optional[Dict[str, Any]]) -> Optional[str]:
     """실호출 모델명 — llm_call과 동일 우선순위(cfg.model_override > env LLM_MODEL_OVERRIDE > cfg.model).
 
@@ -207,6 +271,20 @@ def build_deterministic_insight(inp: SummaryInsightInput) -> Dict[str, Any]:
             v = ts.get(key)
             if isinstance(v, (int, float)) and v > 0:
                 gaps.append({"kind": kind, "count": int(v)})
+        # VectorCAST 역추적 — 조치 대상은 design_gap뿐(미추적 총계는 입도차 포함 관측치라 gap 아님).
+        # 큐레이션본(vcast_bridge.classification)과 raw(summary_raw) 양쪽 수용(호출 경로 이원).
+        cls = (ts.get("vcast_bridge") or {}).get("classification") if isinstance(ts.get("vcast_bridge"), dict) else None
+        design_gap = (cls or {}).get("design_gap")
+        if design_gap is None:
+            design_gap = (ts.get("summary_raw") or {}).get("unmapped_design_gap") if isinstance(ts.get("summary_raw"), dict) else None
+        if isinstance(design_gap, (int, float)) and design_gap > 0:
+            gaps.append({"kind": "vcast_design_gap", "count": int(design_gap)})
+        # ID 정합성 dangling — 실 finding 축(참조되나 존재하지 않는 ID) 그대로 전달.
+        dangling = (ts.get("integrity") or {}).get("dangling_count") if isinstance(ts.get("integrity"), dict) else None
+        if dangling is None:
+            dangling = ts.get("integrity_dangling_count")
+        if isinstance(dangling, (int, float)) and dangling > 0:
+            gaps.append({"kind": "integrity_dangling", "count": int(dangling)})
     if inp.vcast_failures:
         gaps.append({"kind": "test_failures", "count": len(inp.vcast_failures)})
     cov = inp.headline.get("coverage_line")
@@ -261,6 +339,7 @@ def _deterministic_role_guidance(det: Dict[str, Any], inp: SummaryInsightInput) 
             "action": f"고복잡도 함수 리팩토링 검토({c.get('function')})",
             "basis": f"순환복잡도 vg={c.get('vg')}",
         })
+    vb = (inp.trace_summary or {}).get("vcast_bridge") if isinstance((inp.trace_summary or {}).get("vcast_bridge"), dict) else {}
     for g in det["gaps"]:
         if g["kind"] == "test_failures":
             tester.append({"action": "실패 테스트케이스 원인 분석·재실행 우선", "basis": f"실패 TC {g['count']}건"})
@@ -270,6 +349,14 @@ def _deterministic_role_guidance(det: Dict[str, Any], inp: SummaryInsightInput) 
             tester.append({"action": "미추적 요구에 시험 매핑 추가", "basis": f"미추적 요구 {g['count']}건"})
         elif g["kind"] == "asil_unknown":
             tester.append({"action": "ASIL 미상 요구 등급 확정(QM 단정 금지)", "basis": f"ASIL 미상 {g['count']}건"})
+        elif g["kind"] == "vcast_design_gap":
+            # 총계가 아니라 design_gap만 조치 대상 — 나머지는 정당한 입도차(기확립 진단) 명시.
+            observed = (vb or {}).get("untraced_rows_observed")
+            granularity = ((vb or {}).get("classification") or {}).get("uds_linked_granularity")
+            ctx = f" (미추적 관측 {observed}건 중 나머지는 단위설계+시험 완료 leaf 입도차 {granularity}건 등 — 조치 불필요)" if observed else ""
+            tester.append({"action": "단위설계(UDS) 미명세 함수의 설계 반영 검토", "basis": f"진짜 설계 갭 {g['count']}건{ctx}"})
+        elif g["kind"] == "integrity_dangling":
+            tester.append({"action": "추적성 ID 정합성 정리(참조되나 존재하지 않는 ID)", "basis": f"dangling {g['count']}건"})
         elif g["kind"] == "coverage_unmeasured":
             tester.append({"action": "커버리지 측정 파이프라인 연결 확인", "basis": "구문 커버리지 미측정(증거 부재)"})
     if not dev:
