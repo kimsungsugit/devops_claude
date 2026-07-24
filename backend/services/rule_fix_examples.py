@@ -50,6 +50,7 @@ def resolve_snapshot_file(build_root: Path, rcr_path: str) -> Optional[Path]:
     # (APP vs BOOT 동명 파일 오귀속). basename 질의는 전체 스캔 후 유일할 때만 채택.
     has_dir = "/" in target
     matches: List[Path] = []
+    suffix_matches: List[Path] = []
     try:
         for cand in source.rglob(basename):
             if not cand.is_file():
@@ -57,11 +58,21 @@ def resolve_snapshot_file(build_root: Path, rcr_path: str) -> Optional[Path]:
             if any(seg in _SOURCE_EXCLUDE_DIRS for seg in cand.parts):
                 continue
             rel = _norm_rel(str(cand.relative_to(source)))
-            if has_dir and (rel == target or rel.endswith("/" + target)):
-                return cand  # 디렉토리 포함 suffix 일치 — 확정
+            if rel == target:
+                return cand  # 완전 일치 — 유일 확정
+            if has_dir and rel.endswith("/" + target):
+                # 통합 deep-review W2: 첫 suffix 매치 즉시 확정은 동일 'dir/파일' suffix가
+                # 여러 루트(moduleA/APP/util.c vs moduleB/APP/util.c)에 있을 때 오귀속 —
+                # 수집 후 유일할 때만 채택(모듈의 ambiguity 정직 계약과 일관).
+                suffix_matches.append(cand)
+                continue
             matches.append(cand)
     except OSError:
         return None
+    if len(suffix_matches) == 1:
+        return suffix_matches[0]
+    if suffix_matches:
+        return None  # suffix 2개+ — ambiguous 정직 실패
     if len(matches) == 1:
         return matches[0]
     return None  # 0개(부재) 또는 2개+(ambiguous) — 오귀속보다 정직 실패

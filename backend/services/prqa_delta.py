@@ -94,9 +94,11 @@ def load_rcr_details_cached(
     if not isinstance(details, dict) or details.get("error"):
         return None
     try:
-        # tmp+replace 원자 쓰기 — 동시 요청이 반쯤 쓰인 JSON을 읽는 표면 제거(읽기측은
-        # 어차피 손상 시 재파싱으로 자가 복구하지만, 낭비 재파싱도 막는다).
-        tmp = cache_path.with_suffix(".json.tmp")
+        # tmp+replace 원자 쓰기 — writer별 유니크 tmp(고정 tmp는 동시 writer 인터리브로
+        # garbage가 rename될 수 있음 — 통합 deep-review W1과 동일 패턴 정리).
+        import uuid as _uuid
+
+        tmp = cache_path.with_name(f"{cache_path.name}.{_uuid.uuid4().hex[:8]}.tmp")
         tmp.write_text(
             json.dumps({"src": src, "details": details}, ensure_ascii=False), encoding="utf-8"
         )

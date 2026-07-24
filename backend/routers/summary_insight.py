@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -274,6 +276,9 @@ def jenkins_sync_backfill_status(job_id: str) -> Dict[str, Any]:
 
 FIX_EXAMPLE_CACHE_NAME = "summary_rule_fix_cache.json"
 FIX_EXAMPLE_CACHE_MAX_ENTRIES = 30
+# fix 캐시는 read-modify-write라 동시 생성 시 형제 엔트리가 유실된다(통합 deep-review W1
+# lost-update) — 프로세스 내 직렬화 락(uvicorn 단일 워커 전제, main.py 주석 참조).
+_FIX_CACHE_LOCK = threading.Lock()
 
 
 @router.post("/api/jenkins/prqa-rule-trend")
@@ -358,10 +363,11 @@ def summary_rule_fix_example(req: dict) -> Dict[str, Any]:
         f"{rule}|{file}|{from_build}|{to_build}|{evidence['diff_sha']}|{model}|{FIX_EXAMPLE_PROMPT_VERSION}".encode()
     ).hexdigest()
     cache_path = Path(str(to_meta.get("reports_dir"))) / FIX_EXAMPLE_CACHE_NAME
-    entries = _fix_cache_load(cache_path)
+    with _FIX_CACHE_LOCK:
+        entries = _fix_cache_load(cache_path)
+        hit = entries.get(key)
     probe = bool(body.get("probe"))
     force = bool(body.get("force"))
-    hit = entries.get(key)
     if hit and not force:
         return {**hit, "cached": True}
     if probe:
@@ -370,7 +376,7 @@ def summary_rule_fix_example(req: dict) -> Dict[str, Any]:
 
     gen = generate_fix_example(rule=rule, diff_excerpt=evidence["diff"]["text"],
                                rule_context={"file": file, "from_build": from_build, "to_build": to_build})
-    payload = {
+    payload: Dict[str, Any] = {
         "ok": True, "available": True, "reason": None,
         "rule": rule, "file": file, "from_build": from_build, "to_build": to_build,
         "evidence": evidence["diff"],
@@ -382,8 +388,11 @@ def summary_rule_fix_example(req: dict) -> Dict[str, Any]:
         "prompt_version": FIX_EXAMPLE_PROMPT_VERSION,
         "generated_at": datetime.now().isoformat(timespec="seconds"),
     }
-    entries[key] = payload
-    _fix_cache_store(cache_path, entries)
+    # RMW 원자화(락) — LLM 호출(수 초) 밖에서 재로드해 형제 엔트리 유실을 막는다(lost-update).
+    with _FIX_CACHE_LOCK:
+        entries = _fix_cache_load(cache_path)
+        entries[key] = payload
+        _fix_cache_store(cache_path, entries)
     return {**payload, "cached": False}
 
 
@@ -772,7 +781,10 @@ def _make_source_reader(source_root: str):
 
 def _write_cache_atomic(path: Path, payload: Dict[str, Any]) -> None:
     try:
-        tmp = path.with_suffix(".json.tmp")
+        # writer별 유니크 tmp(통합 deep-review W1) — 동일 캐시 동시 writer가 고정 tmp를
+        # 공유하면 바이트 인터리브 garbage가 atomic rename으로 승격된다(자가치유되나
+        # LLM 재호출 낭비). uuid suffix로 각 writer가 완전한 파일만 rename하게 한다.
+        tmp = path.with_name(f"{path.name}.{uuid.uuid4().hex[:8]}.tmp")
         tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
         tmp.replace(path)
     except OSError as exc:

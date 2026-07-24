@@ -60,6 +60,25 @@ def test_evidence_ambiguous_and_missing(tmp_path):
     assert ev4["ok"] is False and ev4["reason"] == "snapshot_missing"
 
 
+def test_dir_suffix_ambiguous_across_module_roots(tmp_path):
+    """통합 deep-review W2: 'dir/파일' suffix가 여러 모듈 루트에 존재하면 첫 매치 확정 금지."""
+    from backend.services.rule_fix_examples import collect_fix_evidence, resolve_snapshot_file
+
+    a = _snap(tmp_path, 122, {
+        "moduleA/APP/util.c": "int a1;\n", "moduleB/APP/util.c": "int b1;\n",
+    })
+    b = _snap(tmp_path, 125, {
+        "moduleA/APP/util.c": "int a1;\n", "moduleB/APP/util.c": "int b2;\n",
+    })
+    # suffix 'APP/util.c'가 두 루트에 존재 → ambiguous(None) — 오귀속 금지
+    assert resolve_snapshot_file(a, "APP/util.c") is None
+    ev = collect_fix_evidence(from_build_root=a, to_build_root=b, file="APP/util.c")
+    assert ev["ok"] is False and ev["reason"] == "file_ambiguous_in_snapshot"
+    # 전체 경로면 유일 확정
+    ev2 = collect_fix_evidence(from_build_root=a, to_build_root=b, file="moduleB/APP/util.c")
+    assert ev2["ok"] is True and "+int b2;" in ev2["diff"]["text"]
+
+
 def test_diff_cap_and_truncated_flag(tmp_path):
     from backend.services.rule_fix_examples import capped_unified_diff
 
