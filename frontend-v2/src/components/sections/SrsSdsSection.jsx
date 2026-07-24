@@ -1045,9 +1045,12 @@ export function deriveStatus(r) {
 }
 
 const PAGE_SIZES = [30, 50, 100];
-// 테스트 결과(pass/fail) 필터는 추적성 요약(SW 커버리지 중심)에서 화면 숨김 — 되돌리려면 true.
-// 상태·필터 로직(testResultFilter)은 그대로 유지(값 'all' 고정 → 필터 no-op)라 플래그만 켜면 즉시 복원된다.
-const SHOW_TEST_RESULT_FILTER = false;
+// 추적성 요약을 SW 커버리지 중심으로 화면 간소화 — 아래 요소를 숨긴다(되돌리려면 해당 플래그 true).
+// 상태·필터·데이터 로직은 모두 그대로 유지(필터값은 'all' 고정 → no-op)라 플래그만 켜면 즉시 복원된다.
+const SHOW_TRACE_EXTRA_SUMMARY = false; // '추적성 요약 상세'(상태 총계·ASIL 분포·밴드별 추적) 패널
+const SHOW_DATA_SOURCE_DETAIL = false;  // '데이터 소스 상세' details 블록
+const SHOW_TRACE_SEARCH_FILTER = false; // 검색 입력 + 전체 상태/소스/타입 드롭다운
+const SHOW_TEST_RESULT_FILTER = false;  // 테스트 결과(pass/fail) 드롭다운
 const SOURCE_ICONS = { STS: 'S', SUTS: 'U', SITS: 'I', SyTS: 'T', SyITS: 'Y', VectorCAST: 'V' };
 const SOURCE_COLORS = { STS: '#2563eb', SUTS: '#7c3aed', SITS: '#0891b2', SyTS: '#9333ea', SyITS: '#c026d3', VectorCAST: '#ea580c' };
 const CONFIDENCE_LABELS = { exact: 'Exact', direct: 'Direct', indirect: 'Indirect', fuzzy: 'Fuzzy', mixed: 'Mixed' };
@@ -2159,14 +2162,14 @@ function TraceMatrix({ matrix, focusFunctions = null, onClearFocus = null,
         </div>
       )}
 
-      {/* 추적성 요약 상세 — 상태 총계 카드 · ASIL 분포/커버리지 · 밴드별 추적 현황 (CoverageBar 아래 상시 노출) */}
-      {coverage && extraSummary && (
+      {/* 추적성 요약 상세 — 상태 총계 카드 · ASIL 분포/커버리지 · 밴드별 추적 현황 (SHOW_TRACE_EXTRA_SUMMARY로 화면 숨김) */}
+      {SHOW_TRACE_EXTRA_SUMMARY && coverage && extraSummary && (
         <TraceExtraSummary coverage={coverage} extra={extraSummary}
           onFilter={(k) => { setStatusFilter(k === 'all' ? 'all' : k); setCurrentPage(0); }} />
       )}
 
-      {/* Data sources */}
-      {summary && coverage && (
+      {/* Data sources — '데이터 소스 상세' (SHOW_DATA_SOURCE_DETAIL로 화면 숨김) */}
+      {SHOW_DATA_SOURCE_DETAIL && summary && coverage && (
         <details style={{ marginBottom: 12 }}>
           <summary className="text-sm" style={{ cursor: 'pointer', fontWeight: 600 }}>데이터 소스 상세</summary>
           {(() => {
@@ -2240,8 +2243,9 @@ function TraceMatrix({ matrix, focusFunctions = null, onClearFocus = null,
          the user lands on it without manual scrolling. */}
       <UncoveredTopList rows={rows} onPick={handlePickUncovered} />
 
-      {/* Search and filter bar */}
+      {/* Search and filter bar — 검색 입력 + 전체 상태/소스/타입은 SHOW_TRACE_SEARCH_FILTER로 화면 숨김 (보기 토글은 유지) */}
       <div style={{ display: 'flex', gap: 8, marginBottom: 10, flexWrap: 'wrap', alignItems: 'center' }}>
+        {SHOW_TRACE_SEARCH_FILTER && (<>
         <input
           type="text"
           placeholder="요구사항 ID, 함수, 파일 검색..."
@@ -2274,6 +2278,7 @@ function TraceMatrix({ matrix, focusFunctions = null, onClearFocus = null,
             {reqTypes.map(t => <option key={t} value={t}>{t}</option>)}
           </select>
         )}
+        </>)}
         {SHOW_TEST_RESULT_FILTER && (
           <select value={testResultFilter} onChange={e => { setTestResultFilter(e.target.value); setCurrentPage(0); }}
             style={{ padding: '6px 8px', fontSize: 12, border: '1px solid var(--border)', borderRadius: 6, background: 'var(--bg)', color: 'var(--fg)' }}>
