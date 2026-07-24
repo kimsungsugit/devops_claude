@@ -2652,4 +2652,30 @@ describe('ImpactGuideSection — 빌드/리비전 소스 바 & 결과 영속', (
     await user.click(await screen.findByRole('button', { name: /문서별 상세 \(1\)/ }));
     await waitFor(() => expect(screen.getByText('2.SW Unit Test Spec 시트 · 행 42')).toBeInTheDocument());
   });
+
+  // STS-IMPACT-067: (reviewer Critical fix) 현재 원문이 없는(미파싱) 함수는 '현재 원문 → 수정안' 헤더로
+  //  없는 원문을 암시하지 않는다 — 작성 골격(제안)은 그대로 뜨되 before→after 프레임은 걸지 않는다.
+  it('정직 프레임: 미파싱 문서는 "현재 원문 → 수정안" 헤더 없이 작성 골격만 표시한다', async () => {
+    const { post } = await import('../api.js');
+    post.mockResolvedValue({ ok: false });
+    const user = userEvent.setup();
+    const analysisResult = {
+      impactData: {
+        trigger: { changed_files: ['Ap.c'] },
+        changed_function_types: { s_bar: 'SIGNATURE' },
+        change_details: { s_bar: { before: 'void s_bar(void)', after: 'void s_bar(U16 idx)' } },
+        impact: { direct: ['s_bar'] },
+        function_meta: { s_bar: { asil: 'B', evidence: 'line' } },
+        // doc_content 없음 → UDS 미파싱(현재 원문 없음) → 작성 골격만
+      },
+    };
+    render(<ImpactGuideSection analysisResult={analysisResult} />);
+    await user.click(screen.getByText(/상세 가이드 생성/));
+    await user.click(await screen.findByRole('button', { name: '상세' }));
+    const dialog = await screen.findByRole('dialog');
+    // 작성 골격(제안)은 표시된다
+    await waitFor(() => expect(within(dialog).getByText(/UDS 작성 제안/)).toBeInTheDocument());
+    // 없는 '현재 원문'을 암시하는 프레임 헤더는 표시하지 않는다(reviewer Critical)
+    expect(within(dialog).queryByText('현재 원문 → 수정안')).toBeNull();
+  });
 });

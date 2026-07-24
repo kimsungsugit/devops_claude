@@ -1374,19 +1374,33 @@ export default function ImpactGuideSection({ analysisResult, job }) {
 
     return null;
   };
+  // 실제 현재 문서 내용 존재 여부 — renderDocContent의 miss 조건(_dcMiss 반환 지점)과 정확히 미러.
+  // ⚠ renderDocContent는 내용이 없어도 '미파싱' 노트(truthy)를 반환하므로, JSX truthy로 판정하면
+  //   "현재 원문"이 없는데도 있는 것으로 오판한다 → 존재 판정은 데이터로만(honesty).
+  const _dcHasContent = (fn, key) => {
+    if (key === 'sts' || key === 'sits') return _testSpecHasContent(fn, key);
+    const c = docContentFor(fn, key);
+    if (key === 'suts') return Array.isArray(c) && c.length > 0;
+    return !!c;  // uds, sds
+  };
   // 통합 "현재 원문 → 수정안" — 실제 문서 내용(renderDocContent)과 작성 제안(renderAuthoringProposal)을
-  // 한 프레임으로 합성한다. 두 함수를 그대로 재사용하므로 미파싱 정직성·억제 규칙(간접/DELETE/private,
-  // 커밋 2b850d6)이 자동 보존된다. 함수 모달·문서별 상세 양 표면이 이 한 함수를 호출(표면 동등화).
+  // 합성한다. 두 함수를 그대로 재사용해 각자의 미파싱 정직성·문구 로직을 보존하고, 프레임 헤더만 여기서
+  // 정직하게 판정한다(모달·문서별 상세 양 표면 동등화).
+  // ⚠ '현재 원문 → 수정안' 헤더/화살표는 **실제 현재 원문이 있을 때만**(_dcHasContent) 건다. 없는데
+  //   걸면 미파싱·신규 골격·'요구없음' 노트를 "현재 원문의 변경"으로 오표기한다(ISO 정직성 위배, reviewer
+  //   Critical). renderAuthoringProposal은 간접(!d.changed)·DELETE에서만 null이고 그 외엔 박스 또는
+  //   정직 노트(요구없음 STS 등)를 반환 — proposal truthy만으론 '변경안 존재'를 뜻하지 않는다.
   const _c2pWrap = { marginTop: 6, padding: '4px 6px', border: '1px solid var(--border)', borderRadius: 4 };
   const _c2pHdr = { fontWeight: 700, fontSize: 9, color: 'var(--color-warning)', marginBottom: 3, letterSpacing: 0.2 };
   const _c2pArrow = { fontSize: 9, color: 'var(--color-warning)', margin: '3px 0', textAlign: 'center' };
   const renderCurrentToProposal = (d, key, cd, diffElems, ct) => {
     const fn = d && d.function;
     if (!fn) return null;
-    const current = renderDocContent(fn, key);      // 실 문서 현재 내용(없으면 '미파싱' 정직 노트)
-    const proposal = renderAuthoringProposal(d, key, cd, diffElems, ct); // 억제 시 null(간접/DELETE/private/요구없음 STS)
-    // 둘 다 있으면 "현재 → 수정안" 프레임으로 묶는다. 제안이 억제된 경우엔 현재 내용만(하지 않을 변경을 암시 금지).
-    if (current && proposal) {
+    const current = renderDocContent(fn, key);      // 실 내용 or '미파싱' 정직 노트(항상 truthy)
+    const proposal = renderAuthoringProposal(d, key, cd, diffElems, ct); // 간접·DELETE만 null
+    // 실제 현재 원문이 있고 제안이 있을 때만 before→after 프레임. 그 외엔 프레임 없이 현재 상태·제안을
+    // 그대로 병렬(제안 박스가 '문서에 현재 없음' 골격/'요구없음' 노트로 스스로 문맥을 밝힌다).
+    if (proposal && _dcHasContent(fn, key)) {
       return (
         <div style={_c2pWrap}>
           <div style={_c2pHdr}>현재 원문 → 수정안</div>
@@ -1396,7 +1410,7 @@ export default function ImpactGuideSection({ analysisResult, job }) {
         </div>
       );
     }
-    return current || proposal || null;
+    return (current || proposal) ? <>{current}{proposal}</> : null;
   };
   // 변경종류 요약(신규/삭제/시그니처/본문/헤더/변수 개수) — 데모 포함(activeFnEntries 기준, 전체).
   const changeSummary = { NEW: 0, DELETE: 0, SIGNATURE: 0, BODY: 0, HEADER: 0, VARIABLE: 0 };
