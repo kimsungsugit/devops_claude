@@ -1051,6 +1051,7 @@ const SHOW_TRACE_EXTRA_SUMMARY = false; // '추적성 요약 상세'(상태 총�
 const SHOW_DATA_SOURCE_DETAIL = false;  // '데이터 소스 상세' details 블록
 const SHOW_TRACE_SEARCH_FILTER = false; // 검색 입력 + 전체 상태/소스/타입 드롭다운
 const SHOW_TEST_RESULT_FILTER = false;  // 테스트 결과(pass/fail) 드롭다운
+const SHOW_TRACE_GAP = false;           // '추적성 공백 (양방향)' 패널 — 설계단절·orphan·역추적 후보·V-model 수평쌍
 const SOURCE_ICONS = { STS: 'S', SUTS: 'U', SITS: 'I', SyTS: 'T', SyITS: 'Y', VectorCAST: 'V' };
 const SOURCE_COLORS = { STS: '#2563eb', SUTS: '#7c3aed', SITS: '#0891b2', SyTS: '#9333ea', SyITS: '#c026d3', VectorCAST: '#ea580c' };
 const CONFIDENCE_LABELS = { exact: 'Exact', direct: 'Direct', indirect: 'Indirect', fuzzy: 'Fuzzy', mixed: 'Mixed' };
@@ -2104,9 +2105,9 @@ function TraceMatrix({ matrix, focusFunctions = null, onClearFocus = null,
         <VModelPairSummary pg={gapStats.pairGaps} />
       ) : null}
 
-      {/* 추적성 공백 (양방향) — viewMode 무관 상시 노출. 정방향 설계 단절 + 역방향 미명세 시험.
-          deep-analyze: 공백이 covered 녹색·토글 뒤에 묻혀 감사에서 누락되는 문제 해소. */}
-      {gapStats.hasAny ? (
+      {/* 추적성 공백 (양방향) — 정방향 설계 단절 + 역방향 미명세 시험 (SHOW_TRACE_GAP로 화면 숨김).
+          gapStats 계산은 유지(트리 뷰 'SRS 미추적 시험'에도 노출) — 되돌리려면 플래그만 true. */}
+      {SHOW_TRACE_GAP && gapStats.hasAny ? (
         <div style={{ marginBottom: 12, border: `1px solid ${COVERAGE_COLORS.partial.border}`, borderLeft: `4px solid ${COVERAGE_COLORS.partial.border}`, borderRadius: 8, padding: '10px 14px', background: COVERAGE_COLORS.partial.bg + '40' }}>
           <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 6, color: COVERAGE_COLORS.partial.fg }}>
             ⚠ 추적성 공백 (양방향 — 매핑 존재만으로 가려지지 않게 상시 표시)
