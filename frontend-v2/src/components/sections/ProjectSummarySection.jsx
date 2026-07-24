@@ -11,6 +11,7 @@ import BuildDeltaDrilldown from './BuildDeltaDrilldown.jsx';
 import SummaryAiInsightPanel from './SummaryAiInsightPanel.jsx';
 import RuleTrendPanel from './RuleTrendPanel.jsx';
 import ArchitectureMetricsPanel from './ArchitectureMetricsPanel.jsx';
+import BaselineDiffPanel from './BaselineDiffPanel.jsx';
 
 /**
  * ProjectSummarySection — "📌 프로젝트 요약" 탭 (단일 뷰 건강 대시보드).
@@ -546,6 +547,9 @@ export default function ProjectSummarySection({ job, analysisResult }) {
 
       {/* 아키텍처 메트릭 — 핫스팟/결합도/대형 함수 (결정론, AI 조언은 AI 인사이트 패널) */}
       <ArchitectureMetricsPanel jobUrl={jobUrl} cacheRoot={cacheRoot} />
+
+      {/* 베이스라인 → 최신 변화 — 소스 스냅샷 직접 비교(영향분석 이력 비의존) */}
+      <BaselineDiffPanel jobUrl={jobUrl} cacheRoot={cacheRoot} />
 
       {/* 빌드 타임라인 (전체 빌드) */}
       <div className="panel" style={PANEL}>

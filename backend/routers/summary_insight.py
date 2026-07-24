@@ -388,6 +388,81 @@ def summary_rule_fix_example(req: dict) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# 베이스라인→최신 변화 (Phase H) — change-log 비의존 스냅샷 직접 비교
+# ---------------------------------------------------------------------------
+
+
+@router.post("/api/summary/baseline-diff")
+def summary_baseline_diff(req: dict) -> Dict[str, Any]:
+    """베이스라인 빌드 vs 대상 빌드의 소스 스냅샷 직접 비교(영향분석 이력 무관).
+
+    기본 쌍 = 최고령 has_source 캐시 빌드 → 최신 has_source 캐시 빌드. 결과는 target
+    reports_dir에 baseline별 파일로 캐시(키 = 양쪽 스냅샷 지문 + ALGO_VERSION, force 우회).
+    """
+    from backend.services.baseline_diff import compute_baseline_diff, snapshot_fingerprint
+    from backend.services.build_inventory import find_build_meta, list_cached_builds_meta
+
+    body = req or {}
+    job_url = str(body.get("job_url") or "").strip()
+    if not job_url:
+        return {"ok": True, "available": False, "reason": "job_url_required"}
+    cache_root = _normalize_jenkins_cache_root(str(body.get("cache_root") or ""))
+    metas = list_cached_builds_meta(job_url=job_url, cache_root=cache_root)
+    with_src = [m for m in metas if m.get("has_source")]
+    if not with_src:
+        return {"ok": True, "available": False, "reason": "no_source_snapshot"}
+    if len(with_src) < 2 and _to_int(body.get("baseline_build")) is None:
+        return {"ok": True, "available": False, "reason": "single_build_cached"}
+
+    target_req = _to_int(body.get("target_build"))
+    baseline_req = _to_int(body.get("baseline_build"))
+    target = find_build_meta(with_src, target_req) if target_req is not None else with_src[0]        # 최신
+    baseline = find_build_meta(with_src, baseline_req) if baseline_req is not None else with_src[-1]  # 최고령
+    if target is None:
+        return {"ok": True, "available": False, "reason": "snapshot_missing_target"}
+    if baseline is None:
+        return {"ok": True, "available": False, "reason": "snapshot_missing_baseline"}
+    if _to_int(target.get("build_number")) == _to_int(baseline.get("build_number")):
+        return {"ok": True, "available": False, "reason": "same_build_pair"}
+
+    base_src = Path(str(baseline.get("build_root"))) / "source"
+    tgt_src = Path(str(target.get("build_root"))) / "source"
+    base_fp = snapshot_fingerprint(base_src)
+    tgt_fp = snapshot_fingerprint(tgt_src)
+    if base_fp is None:
+        return {"ok": True, "available": False, "reason": "snapshot_missing_baseline"}
+    if tgt_fp is None:
+        return {"ok": True, "available": False, "reason": "snapshot_missing_target"}
+
+    cache_path = Path(str(target.get("reports_dir"))) / f"summary_baseline_diff_{baseline.get('build_number')}.json"
+    src_key = {"baseline_fp": base_fp, "target_fp": tgt_fp}
+    cached = _read_json(cache_path)
+    if cached and cached.get("src") == src_key and isinstance(cached.get("result"), dict) and not body.get("force"):
+        return {**cached["result"], "cached": True}
+
+    try:
+        result = compute_baseline_diff(baseline_source=base_src, target_source=tgt_src)
+    except Exception as exc:
+        _logger.warning("baseline-diff compute failed: %s", exc, exc_info=True)
+        return {"ok": True, "available": False, "reason": f"compute_failed: {type(exc).__name__}"}
+
+    payload = {
+        "ok": True,
+        "available": True,
+        "reason": None,
+        "independent_of_change_log": True,
+        "baseline": {"build_number": baseline.get("build_number"), "revision": baseline.get("revision"),
+                     "timestamp_iso": baseline.get("timestamp_iso")},
+        "target": {"build_number": target.get("build_number"), "revision": target.get("revision"),
+                   "timestamp_iso": target.get("timestamp_iso")},
+        **result,
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+    }
+    _write_cache_atomic(cache_path, {"src": src_key, "result": payload})
+    return {**payload, "cached": False}
+
+
+# ---------------------------------------------------------------------------
 # AI 인사이트 (Phase C) — 결정론 코어 + Gemini enrichment, on-demand + 디스크 캐시
 # ---------------------------------------------------------------------------
 
