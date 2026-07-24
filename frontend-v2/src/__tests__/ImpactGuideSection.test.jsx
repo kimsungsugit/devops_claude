@@ -2843,4 +2843,70 @@ describe('ImpactGuideSection — 빌드/리비전 소스 바 & 결과 영속', (
     expect(within(dialog).queryByText(/경계값/)).toBeNull();
     expect(within(dialog).queryByText('MAX=65535')).toBeNull();
   });
+
+  // STS-IMPACT-069: SUTS 카드가 백엔드 생성기 초안(doc_proposal.suts)의 경계값 입력→기대출력을 구체값으로
+  //  표시한다(플레이스홀더 '판정기준 작성'이 아니라 실 In→Exp) + 생성기의 '[검증 필요]' 마커를 보존한다.
+  it('생성 초안: SUTS 카드에 doc_proposal 경계값 In→Exp 구체값과 검증필요 마커가 표시된다', async () => {
+    const { post } = await import('../api.js');
+    post.mockResolvedValue({ ok: false });
+    const user = userEvent.setup();
+    const analysisResult = {
+      impactData: {
+        trigger: { changed_files: ['motor.c'] },
+        changed_function_types: { s_motorspeed: 'BODY' },
+        change_details: { s_motorspeed: { before: 'U16 s_motorspeed(U16 rpm)' } },
+        impact: { direct: ['s_motorspeed'] },
+        function_meta: { s_motorspeed: { asil: 'B', evidence: 'line' } },
+        _linked_docs: { suts: 'U:/suts.xlsm' },
+        doc_proposal: {
+          suts: { s_motorspeed: [
+            { strategy: 'BV_MIN', inputs: { rpm: 0 }, expected: { speed: 0 }, description: 'd' },
+            { strategy: 'BV_MAX', inputs: { rpm: 65535 }, expected: { speed: '[검증 필요] 3276' }, description: 'd' },
+          ] },
+          sits: {}, sts: {},
+        },
+      },
+    };
+    render(<ImpactGuideSection analysisResult={analysisResult} />);
+    await user.click(screen.getByText(/상세 가이드 생성/));
+    await user.click(await screen.findByRole('button', { name: '상세' }));
+    const dialog = await screen.findByRole('dialog');
+    // 생성기 산출 헤더(폴백 '경계값 TC 골격'이 아니라 '생성기 경계값 TC')
+    await waitFor(() => expect(within(dialog).getByText(/생성기 경계값 TC|경계값 케이스 재계산 \(생성기 산출\)/)).toBeInTheDocument());
+    expect(within(dialog).getByText(/rpm=0/)).toBeInTheDocument();       // 실 입력
+    expect(within(dialog).getByText(/speed=0/)).toBeInTheDocument();     // 실 기대출력
+    expect(within(dialog).getByText(/rpm=65535/)).toBeInTheDocument();
+    expect(within(dialog).getByText(/\[검증 필요\] 3276/)).toBeInTheDocument();  // 생성기 마커 보존
+  });
+
+  // STS-IMPACT-070: SITS 카드가 백엔드 생성기 초안(doc_proposal.sits)의 실 통합 콜체인(a → b → c)과
+  //  서브케이스 입력/기대값을 표시한다(UDS callee 목록 폴백이 아닌 실 통합 콜체인).
+  it('생성 초안: SITS 카드에 doc_proposal 실 통합 콜체인과 sub_case 기대값이 표시된다', async () => {
+    const { post } = await import('../api.js');
+    post.mockResolvedValue({ ok: false });
+    const user = userEvent.setup();
+    const analysisResult = {
+      impactData: {
+        trigger: { changed_files: ['motor.c'] },
+        changed_function_types: { s_entry: 'BODY' },
+        change_details: { s_entry: { before: 'void s_entry(void)' } },
+        impact: { direct: ['s_entry'] },
+        function_meta: { s_entry: { asil: 'B', evidence: 'line' } },
+        _linked_docs: { sits: 'U:/sits.xlsm' },
+        doc_proposal: {
+          suts: {},
+          sits: { s_entry: { call_chain: 's_entry -> Hal_Read -> g_State', sub_cases: [{ inputs: { rpm: 0 }, expected: { state: 1 }, precondition: 'init' }] } },
+          sts: {},
+        },
+      },
+    };
+    render(<ImpactGuideSection analysisResult={analysisResult} />);
+    await user.click(screen.getByText(/상세 가이드 생성/));
+    await user.click(await screen.findByRole('button', { name: '상세' }));
+    const dialog = await screen.findByRole('dialog');
+    // 실 통합 콜체인('->' → '→' 변환) + 생성기 헤더
+    await waitFor(() => expect(within(dialog).getByText(/생성기 통합 콜체인/)).toBeInTheDocument());
+    expect(within(dialog).getByText(/s_entry → Hal_Read → g_State/)).toBeInTheDocument();
+    expect(within(dialog).getByText(/state=1/)).toBeInTheDocument();     // sub_case 기대값
+  });
 });

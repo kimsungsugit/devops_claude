@@ -1072,6 +1072,147 @@ def _load_testspec_by_tc(
     return out
 
 
+def _build_doc_proposal(
+    sections: Dict[str, Any],
+    changed_set: set,
+    *,
+    warn_sink: Optional[List[str]] = None,
+    fn_cap: int = 50,
+    seq_cap: int = 6,
+    sub_cap: int = 3,
+    sts_tc_cap: int = 4,
+    step_cap: int = 6,
+) -> Dict[str, Any]:
+    """직접 변경 함수(changed_set)에 대해 **문서 생성기(suts/sits/sts)를 그대로 재사용**해
+    '문서를 직접 생성하는 것처럼' 구체적인 시험 초안(콜체인·경계값 입력·기대출력)을 결정론으로
+    합성한다. 표시 전용 additive — 영향집합/ACTION_MATRIX/ASIL/커버리지/회귀집계는 일절 불변.
+
+    반환:
+      {
+        "suts": {fn(lower): [{strategy, inputs:{v:val}, expected:{v:val}, description}]},
+        "sits": {fn(lower): {call_chain: "a -> b -> c", sub_cases:[{inputs, expected, precondition}]}},
+        "sts":  {fn(lower): [[{action, expected}], ...]},   # TC별 step 리스트
+      }
+
+    ⚠ 생성기의 기대출력은 소스 로직(가드/클램프) **추론값**이라 실측(VectorCAST)이 아니다.
+      생성기 내부가 판정 불가 값을 '[검증 필요]'로 표기하며, 프론트는 이를 advisory로 노출한다
+      (자동 반영 없음). 미상 타입 숫자 환각은 생성기 경계값 테이블이 차단한다.
+    ⚠ 간접(비변경) 함수는 스코프 밖 — 프론트 renderAuthoringProposal이 !d.changed에서 억제한다.
+    """
+    out: Dict[str, Any] = {"suts": {}, "sits": {}, "sts": {}}
+    if not changed_set:
+        return out
+    fdmap = sections.get("function_details") or {}
+    if not fdmap:
+        # 소스 미해결(cloudium 소스 미배선 등) — silent-0 금지, 사유 표면화(단 분석 비차단).
+        if warn_sink is not None:
+            warn_sink.append("문서 생성 초안: 소스 function_details 없음 — 생성 초안 생략")
+        return out
+    gim = sections.get("globals_info_map") or {}
+    # changed_set은 소문자 함수명. function_details 키(fid)는 임의이고 info["name"]이 실제 함수명이다.
+    # name(소문자) → fid 매핑. 동명 다중정의는 삽입순 첫 매치를 임의 대표로 택한다(reviewer I6 — 표시
+    # 전용 초안이라 by_name의 ASIL-max 병합 같은 안전측 선택은 불필요, 어느 사본이든 시험 골격은 유사).
+    name_lc_to_fid: Dict[str, str] = {}
+    for _fid, _info in fdmap.items():
+        if isinstance(_info, dict):
+            _nm = str(_info.get("name") or "").strip().lower()
+            if _nm:
+                name_lc_to_fid.setdefault(_nm, _fid)
+    targets = [fn for fn in sorted(changed_set) if fn in name_lc_to_fid][:fn_cap]
+    if not targets:
+        return out
+
+    # ── SUTS: 대상 함수만 collect_unit_functions → generate_sequences(문서 생성과 동일 경로) ──
+    # ⚠ set_globals_type_cache는 호출하지 않는다 — 전역 타입캐시를 덮어쓰면 동시 문서생성 경로를
+    #   오염시킨다. gim은 collect_unit_functions 인자로만 전달(격리). 타입 미상은 변수명 폴백.
+    # ⚠ 역방향 간섭은 감수한다(reviewer W1): generate_sequences 내부 infer_variable_type이 프로세스
+    #   전역 타입캐시를 '읽어', 타 프로젝트의 동시 문서생성(set_globals_type_cache)이 이 경계값 타입
+    #   추론에 간섭할 수 있다. 표시 전용 advisory('실행 검증 필요' 문구가 커버)라 안전 무영향이나 완전
+    #   결정론은 아니다(락 보호는 후속). 영향집합/ASIL/커버리지는 이와 무관하게 불변.
+    try:
+        from generators.suts import collect_unit_functions, generate_sequences
+
+        _sub_fd = {name_lc_to_fid[fn]: fdmap[name_lc_to_fid[fn]] for fn in targets}
+        for _unit in (collect_unit_functions(_sub_fd, gim) or []):
+            _nm = str(_unit.get("name") or "").strip().lower()
+            if _nm not in changed_set or _nm in out["suts"]:
+                continue
+            _slim = [
+                {
+                    "strategy": str(s.get("strategy") or ""),
+                    "inputs": dict(s.get("inputs") or {}),
+                    "expected": dict(s.get("expected") or {}),
+                    "description": str(s.get("description") or "")[:400],
+                }
+                for s in (generate_sequences(_unit, max_seq=seq_cap) or [])[:seq_cap]
+                if isinstance(s, dict)
+            ]
+            if _slim:
+                out["suts"][_nm] = _slim
+    except Exception as exc:  # noqa: BLE001 — best-effort 표시 초안(분석 비차단)
+        logger.debug("doc_proposal SUTS synth failed: %s", exc)
+        if warn_sink is not None:
+            warn_sink.append(f"문서 생성 초안: SUTS 시퀀스 합성 예외로 생략({exc})")
+
+    # ── SITS: collect_integration_flows(전체 필요 — cross-module callee 판정) → 대상 entry 필터 → itc ──
+    # max_flows는 전체 함수 수 이상으로 — 기본 120 캡에 대상이 정렬순서상 잘려나가는 것을 막는다.
+    try:
+        from generators.sits import collect_integration_flows, generate_itc_list
+
+        _flows = collect_integration_flows(fdmap, max_flows=max(120, len(fdmap))) or []
+        _tgt_flows = [
+            f for f in _flows
+            if str(f.get("entry_fn") or "").strip().lower() in changed_set
+        ]
+        for _itc in (generate_itc_list(_tgt_flows) if _tgt_flows else []):
+            _nm = str(_itc.get("entry_fn") or "").strip().lower()
+            if _nm not in changed_set or _nm in out["sits"]:
+                continue
+            _subs = [
+                {
+                    "inputs": dict(sc.get("inputs") or {}),
+                    "expected": dict(sc.get("expected") or {}),
+                    "precondition": str(sc.get("precondition") or "")[:200],
+                }
+                for sc in (_itc.get("sub_cases") or [])[:sub_cap]
+                if isinstance(sc, dict)
+            ]
+            out["sits"][_nm] = {
+                "call_chain": str(_itc.get("call_chain") or ""),
+                "sub_cases": _subs,
+            }
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("doc_proposal SITS synth failed: %s", exc)
+        if warn_sink is not None:
+            warn_sink.append(f"문서 생성 초안: SITS 콜체인 합성 예외로 생략({exc})")
+
+    # ── STS: 함수별 _generate_steps_from_flow(logic_flow 없으면 내부에서 _generate_simple_steps 폴백) ──
+    try:
+        from generators.sts import _generate_steps_from_flow
+
+        for fn in targets:
+            _info = fdmap[name_lc_to_fid[fn]]
+            if not isinstance(_info, dict):
+                continue
+            _tcs: List[List[Dict[str, str]]] = []
+            for _tc in (_generate_steps_from_flow(_info.get("logic_flow") or [], _info) or [])[:sts_tc_cap]:
+                _steps = [
+                    {"action": str(s.get("action") or ""), "expected": str(s.get("expected") or "")}
+                    for s in (_tc or [])[:step_cap]
+                    if isinstance(s, dict)
+                ]
+                if _steps:
+                    _tcs.append(_steps)
+            if _tcs:
+                out["sts"][fn] = _tcs
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("doc_proposal STS synth failed: %s", exc)
+        if warn_sink is not None:
+            warn_sink.append(f"문서 생성 초안: STS 시퀀스 합성 예외로 생략({exc})")
+
+    return out
+
+
 def _write_review_artifact(
     target: str,
     trigger: ChangeTrigger,
@@ -2076,6 +2217,7 @@ def run_impact_update(
             by_name = {}
             neighbors = {}
             neighbors_cross = None
+            sections = {}  # 소스 미해결(cloudium/원격) — 문서 생성 초안 입력 없음(_build_doc_proposal graceful)
 
         # BFS 탐색 상한 = seeds가 있어도 최소 2-hop을 계산할 여지를 두되 폭주는 막는다.
         # seeds가 승격 임계보다 많으면(cross-module 대량 변경) seeds*4 근방까지 허용(hard cap 이내).
@@ -2429,6 +2571,11 @@ def run_impact_update(
                 doc_content["sits_by_tc"] = _load_testspec_by_tc(_lk.sits, warn_sink=warnings, doc_label="SITS")
         except Exception:  # noqa: BLE001 — 문서 내용은 best-effort 표시 데이터(분석 비차단)
             pass
+        # 문서 생성 초안(결정론) — 직접 변경 함수(_changed_set)에 대해 문서 생성기(suts/sits/sts)를
+        # 그대로 재사용해 콜체인·경계값 입력·기대출력을 '문서를 직접 생성하는 것처럼' 합성한다.
+        # 표시 전용 additive(분석 결과 불변). sections는 소스 경로일 때만 채워지고(cloudium/원격은 {})
+        # function_details 없으면 _build_doc_proposal이 graceful 빈 dict를 돌려준다.
+        doc_proposal = _build_doc_proposal(sections, _changed_set, warn_sink=warnings)
         # MC/DC delta: 영향 함수의 VectorCAST 커버리지(statement/branch/MC/DC) → ASIL 타깃 대비 gap
         # + 직전 스냅샷 대비 delta(회귀). vectorcast 미연결/RAG metrics 없음 → available=False(분석 계속).
         coverage_gap: Dict[str, Any] = {"available": False}
@@ -2526,6 +2673,9 @@ def run_impact_update(
             "function_meta": function_meta,
             "regression_test_set": regression_test_set,
             "doc_content": doc_content,
+            # 문서 생성 초안(결정론) — {suts:{fn:[seq]}, sits:{fn:{call_chain,sub_cases}}, sts:{fn:[[step]]}}.
+            # 표시 전용 additive(구 job/미재기동 시 프론트 ?? {} 폴백). 함수 키는 소문자(doc_content와 일관).
+            "doc_proposal": doc_proposal,
             "asil": {
                 "max_changed": _max_changed_asil,
                 "escalation": asil_escalation,
@@ -2701,6 +2851,9 @@ def run_impact_update(
             "function_meta": function_meta,
             "regression_test_set": regression_test_set,
             "doc_content": doc_content,
+            # 문서 생성 초안(결정론) — {suts:{fn:[seq]}, sits:{fn:{call_chain,sub_cases}}, sts:{fn:[[step]]}}.
+            # 표시 전용 additive(구 job/미재기동 시 프론트 ?? {} 폴백). 함수 키는 소문자(doc_content와 일관).
+            "doc_proposal": doc_proposal,
             "asil": {
                 "max_changed": _max_changed_asil,
                 "escalation": asil_escalation,

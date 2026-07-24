@@ -553,3 +553,126 @@ def test_load_testspec_by_tc_honest_miss_on_parser_fail(monkeypatch):
 def test_load_testspec_by_tc_empty_on_no_path():
     from workflow.impact_orchestrator import _load_testspec_by_tc
     assert _load_testspec_by_tc("", doc_label="SITS") == {}
+
+
+# ── _build_doc_proposal: 문서 생성기(suts/sits/sts) 재사용으로 시험 초안 합성 ──
+# 배선 로직(스코프/캡/graceful/예외격리/마커보존)을 생성기 스텁으로 격리 검증한다.
+# (실 생성기 통합은 라이브 소스섹션 캐시로 별도 확인 — generate_sequences 실산출 검증)
+
+def _proposal_sections(fd=None, gim=None):
+    """generate_uds_source_sections 산출물 형태(function_details/globals_info_map) 최소 모사."""
+    return {"function_details": fd or {}, "globals_info_map": gim or {}}
+
+
+def _stub_generators(monkeypatch, *, suts_seq=None, sits_flows=None, sts_steps=None):
+    """suts/sits/sts 생성기를 결정론 스텁으로 대체(배선만 격리)."""
+    import generators.sits as gsits
+    import generators.sts as gsts
+    import generators.suts as gsuts
+    monkeypatch.setattr(
+        gsuts, "collect_unit_functions",
+        lambda fdmap, gim=None: [{"name": info["name"]} for info in fdmap.values() if isinstance(info, dict)],
+    )
+    monkeypatch.setattr(
+        gsuts, "generate_sequences",
+        lambda unit, max_seq=6: (suts_seq if suts_seq is not None
+                                 else [{"strategy": "BV_MIN", "inputs": {"x": 0}, "expected": {"ret": 0}, "description": "d"}]),
+    )
+    monkeypatch.setattr(
+        gsits, "collect_integration_flows",
+        lambda fdmap, max_flows=120: (sits_flows if sits_flows is not None
+                                      else [{"entry_fn": "s_foo", "call_chain": "s_foo -> s_dep"}]),
+    )
+    monkeypatch.setattr(
+        gsits, "generate_itc_list",
+        lambda flows, **k: [{"entry_fn": f["entry_fn"], "call_chain": f["call_chain"],
+                             "sub_cases": [{"inputs": {"x": 0}, "expected": {"ret": 0}, "precondition": "p"}]}
+                            for f in flows],
+    )
+    monkeypatch.setattr(
+        gsts, "_generate_steps_from_flow",
+        lambda lf, info: (sts_steps if sts_steps is not None else [[{"action": "call s_foo", "expected": "ok"}]]),
+    )
+
+
+def test_build_doc_proposal_reuses_generators_scoped_to_changed(monkeypatch):
+    """직접 변경 함수에 대해 suts/sits/sts 생성기를 재사용해 콜체인·경계값 입력·기대출력을 합성하고,
+    changed_set 밖 함수(s_bar)는 초안에 포함하지 않는다(스코프)."""
+    from workflow.impact_orchestrator import _build_doc_proposal
+
+    fd = {
+        "f1": {"name": "s_foo", "prototype": "U16 s_foo(U16 x)", "logic_flow": [], "calls_list": []},
+        "f2": {"name": "s_bar", "prototype": "void s_bar(void)", "logic_flow": [], "calls_list": []},
+    }
+    # SUTS 스텁이 s_foo·s_bar 둘 다 반환해도 changed_set(s_foo) 밖은 필터돼야
+    _stub_generators(monkeypatch, suts_seq=[{"strategy": "BV_MIN", "inputs": {"x": 0}, "expected": {"ret": 0}, "description": "d"}])
+    out = _build_doc_proposal(_proposal_sections(fd), {"s_foo"})
+
+    assert list(out["suts"].keys()) == ["s_foo"]                      # s_bar 제외(스코프)
+    assert out["suts"]["s_foo"][0]["inputs"] == {"x": 0}
+    assert out["suts"]["s_foo"][0]["expected"] == {"ret": 0}           # 기대출력 합성
+    assert out["sits"]["s_foo"]["call_chain"] == "s_foo -> s_dep"      # 실 통합 콜체인
+    assert out["sits"]["s_foo"]["sub_cases"][0]["expected"] == {"ret": 0}
+    assert out["sts"]["s_foo"][0][0]["action"] == "call s_foo"          # 시험 절차 스텝
+
+
+def test_build_doc_proposal_empty_changed_set_returns_empty(monkeypatch):
+    """빈 changed_set이면 생성기를 호출하지 않고 빈 dict."""
+    from workflow.impact_orchestrator import _build_doc_proposal
+    called = {"n": 0}
+    import generators.suts as gsuts
+    monkeypatch.setattr(gsuts, "collect_unit_functions", lambda *a, **k: called.__setitem__("n", called["n"] + 1) or [])
+    out = _build_doc_proposal(_proposal_sections({"f1": {"name": "s_foo"}}), set())
+    assert out == {"suts": {}, "sits": {}, "sts": {}}
+    assert called["n"] == 0
+
+
+def test_build_doc_proposal_no_function_details_warns():
+    """function_details 없음(소스 미해결)이면 빈 dict + 사유 warn(silent-0 금지)."""
+    from workflow.impact_orchestrator import _build_doc_proposal
+    warns: list = []
+    out = _build_doc_proposal({}, {"s_foo"}, warn_sink=warns)
+    assert out == {"suts": {}, "sits": {}, "sts": {}}
+    assert any("function_details 없음" in w for w in warns)
+
+
+def test_build_doc_proposal_caps_function_count(monkeypatch):
+    """fn_cap을 초과하는 변경 함수는 초안 대상에서 제외(페이로드 억제)."""
+    from workflow.impact_orchestrator import _build_doc_proposal
+    fd = {f"f{i}": {"name": f"s_fn{i}", "logic_flow": [], "calls_list": []} for i in range(5)}
+    _stub_generators(monkeypatch, sits_flows=[])
+    changed = {f"s_fn{i}" for i in range(5)}
+    out = _build_doc_proposal(_proposal_sections(fd), changed, fn_cap=2)
+    # SUTS/STS는 targets(cap=2)만 — 정확히 2개
+    assert len(out["suts"]) == 2
+    assert len(out["sts"]) == 2
+
+
+def test_build_doc_proposal_generator_exception_isolated(monkeypatch):
+    """한 생성기(SUTS) 예외가 다른 생성기(SITS/STS)를 막지 않고, 사유가 warn으로 표면화된다."""
+    from workflow.impact_orchestrator import _build_doc_proposal
+    import generators.suts as gsuts
+    fd = {"f1": {"name": "s_foo", "logic_flow": [], "calls_list": []}}
+    _stub_generators(monkeypatch)
+
+    def _boom(*a, **k):
+        raise RuntimeError("suts boom")
+    monkeypatch.setattr(gsuts, "collect_unit_functions", _boom)
+
+    warns: list = []
+    out = _build_doc_proposal(_proposal_sections(fd), {"s_foo"}, warn_sink=warns)
+    assert out["suts"] == {}                                   # SUTS는 예외로 비었으나
+    assert out["sits"]["s_foo"]["call_chain"] == "s_foo -> s_dep"   # SITS는 정상
+    assert out["sts"]["s_foo"]                                  # STS도 정상
+    assert any("SUTS 시퀀스 합성 예외" in w for w in warns)
+
+
+def test_build_doc_proposal_preserves_verification_marker(monkeypatch):
+    """생성기가 판정 불가값을 '[검증 필요]'로 표기하면 초안에 그대로 보존한다(정직성)."""
+    from workflow.impact_orchestrator import _build_doc_proposal
+    fd = {"f1": {"name": "s_foo", "logic_flow": [], "calls_list": []}}
+    _stub_generators(monkeypatch, sits_flows=[], sts_steps=[],
+                     suts_seq=[{"strategy": "BV_MAX", "inputs": {"x": 65535},
+                                "expected": {"ret": "[검증 필요] saturated"}, "description": "d"}])
+    out = _build_doc_proposal(_proposal_sections(fd), {"s_foo"})
+    assert out["suts"]["s_foo"][0]["expected"] == {"ret": "[검증 필요] saturated"}

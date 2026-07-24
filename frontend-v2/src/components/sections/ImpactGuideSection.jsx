@@ -1003,6 +1003,51 @@ export default function ImpactGuideSection({ analysisResult, job }) {
   useEffect(() => { loadHistoryRef.current = loadHistory; });
   useEffect(() => { loadHistoryRef.current?.(); }, [scmId]);
 
+  // 프로젝트 요약 탭 '빌드 행 클릭' 핸드오프(devops_v2_impact_focus_build, TTL 120s): 해당 빌드를
+  // 선택하고 완료 이력이 있으면 연다(무거운 새 분석은 자동 트리거 안 함 — 타임라인은 분석된 빌드만
+  // 보여줘 대개 완료 이력이 있다). keep-alive로 이미 마운트된 경우까지 커버하려 mount + 커스텀
+  // 이벤트 둘 다에서 확인한다(이벤트는 focusTick으로 apply effect 재실행을 유도).
+  const [focusTick, setFocusTick] = useState(0);
+  useEffect(() => {
+    // 이벤트 핸들러의 setState는 effect setup이 아니라 허용(set-state-in-effect 회피).
+    const onFocusEvent = () => setFocusTick(t => t + 1);
+    window.addEventListener('devops:impact-focus-build', onFocusEvent);
+    return () => window.removeEventListener('devops:impact-focus-build', onFocusEvent);
+  }, []);
+  useEffect(() => {
+    if (!scmId) return undefined;  // scmId 확정 전 — 소비하지 않고 다음 렌더에 재시도
+    let cancelled = false;
+    (async () => {
+      // ⚠ 소비(removeItem)는 적용 확정 시에만 — read→removeItem이 동기라 중복 적용 없음. setState는 await 이후.
+      let focus = null;
+      try {
+        const raw = localStorage.getItem('devops_v2_impact_focus_build');
+        if (raw) {
+          const o = JSON.parse(raw);
+          if (o && o.build_number != null && Date.now() - (o.ts || 0) < 120000
+              && (!o.scm_id || o.scm_id === scmId)) focus = o;
+        }
+      } catch (_) { focus = null; }
+      if (!focus) return;
+      localStorage.removeItem('devops_v2_impact_focus_build');
+      const n = Number(focus.build_number) || 0;
+      if (!n) return;
+      await loadBuildsOnce();
+      if (cancelled) return;
+      setPickedBuild(String(n));  // await 이후 setState (set-state-in-effect 회피)
+      // 완료 이력을 직접 재조회(closure의 history state는 stale일 수 있음)해, 있으면 그 결과를 연다.
+      try {
+        const data = await api(`/api/scm/impact-jobs/${encodeURIComponent(scmId)}?summary=1&limit=20`);
+        if (cancelled) return;
+        const hit = (Array.isArray(data?.items) ? data.items : []).find(h => h?.status === 'completed'
+          && Number(h?.metadata?.build_number) === n
+          && sameJobUrl(h?.metadata?.job_url, jobUrl));
+        if (hit?.job_id) openHistoryItem(hit.job_id);
+      } catch (_) { /* 이력 조회 실패 — 빌드만 선택 상태로 둔다 */ }
+    })();
+    return () => { cancelled = true; };
+  }, [scmId, jobUrl, loadBuildsOnce, openHistoryItem, focusTick]);
+
   /** 저장분이 '지금 열려 있는 프로젝트'의 것인가.
    *
    * 이 대조 없이 주입하면 프로젝트 A의 결과가 B의 Detail 전체(영향 평가·추적성·SCM 탭이 모두
@@ -1147,6 +1192,13 @@ export default function ImpactGuideSection({ analysisResult, job }) {
   // 함수도 문서 내용은 실 파싱이라 유효. 구 job(필드 없음)은 {}로 폴백 → 내용 블록만 미표시(무해).
   const docContent = impact?.doc_content ?? {};
   const docContentFor = (fn, key) => (docContent?.[key] ?? {})[String(fn || '').toLowerCase()];
+  // 문서 생성 초안(백엔드 _build_doc_proposal — 문서 생성기 재사용 결정론 합성). 전부 함수키(소문자):
+  //   suts = [{strategy, inputs:{v:val}, expected:{v:val}, description}]
+  //   sits = {call_chain: "a -> b -> c", sub_cases:[{inputs, expected, precondition}]}
+  //   sts  = [[{action, expected}], ...]   (TC별 step 리스트)
+  // 구 job/미재기동이면 {}·미매칭이면 undefined → 각 분기가 기존 골격으로 graceful 폴백.
+  const docProposal = impact?.doc_proposal ?? {};
+  const docProposalFor = (fn, key) => (docProposal?.[key] ?? {})[String(fn || '').toLowerCase()];
   // STS/SITS 실 내용은 TC-ID 키(함수 키 아님) — 프론트가 함수별 stsTestCases/sitsTestCases(ID)로 조인한다.
   // 백엔드 sts_by_tc/sits_by_tc는 _normalize_req_id(공백제거+대문자)로 키를 정규화하므로 조회 전 동일 정규화.
   const stsByTc = docContent?.sts_by_tc ?? {};
@@ -1280,6 +1332,8 @@ export default function ImpactGuideSection({ analysisResult, job }) {
     const params = proto ? (parseSignatureParams(proto) || []) : [];
     const _lbl = (t) => <div className="text-muted" style={{ fontSize: 9 }}>{t}</div>;
     const _val = (t) => <div style={{ overflowWrap: 'anywhere' }}>{t}</div>;
+    // inputs/expected 객체 → "k=v, k=v" (SUTS 시퀀스·SITS 서브케이스 공용 — reviewer I8 중복 제거)
+    const _kv = (o) => Object.entries(o || {}).map(([k, v]) => `${k}=${v}`).join(', ');
     const _box = (title, tone, children) => (
       <div style={{ ..._propBox, borderLeft: `2px solid var(--color-${tone})` }}>
         <div style={{ fontWeight: 600, fontSize: 9, color: `var(--color-${tone})`, marginBottom: 2 }}>{title}</div>
@@ -1360,7 +1414,32 @@ export default function ImpactGuideSection({ analysisResult, job }) {
     if (key === 'suts') {
       const content = docContentFor(fn, 'suts');
       const has = Array.isArray(content) && content.length > 0;
-      const rows = _boundaryRows();
+      // 백엔드 생성기(generate_sequences) 실산출 — 전략별 경계값 입력→기대출력(구체값). 이게 '문서를
+      // 직접 생성하는 것처럼'의 핵심. 없으면(SITS·구 job) 경계값 입력 pill 골격(_boundaryRows)으로 폴백.
+      const gen = docProposalFor(fn, 'suts');
+      const genSeqs = Array.isArray(gen) && gen.length ? gen : null;
+      const _genSeqRows = () => (
+        <>
+          {genSeqs.slice(0, 6).map((s, i) => {
+            const inStr = _kv(s.inputs); const expStr = _kv(s.expected);
+            // 생성기의 사람이 읽는 전략 라벨(description 첫 줄) — 원시 코드(BV_MIN) 위에 표시(reviewer W3).
+            const _stratLabel = String(s.description || '').split('\n')[0].trim();
+            return (
+              <div key={i} style={{ marginTop: 2 }}>
+                <div style={_propMono}><span className="text-muted">{s.strategy || `Seq ${i + 1}`}</span></div>
+                {_stratLabel && _stratLabel !== (s.strategy || '') && <div className="text-muted" style={{ fontSize: 9 }}>{_stratLabel}</div>}
+                {inStr && <div style={{ fontSize: 9, overflowWrap: 'anywhere' }}><span className="text-muted">In: </span>{inStr}</div>}
+                {/* 생성기 기대출력(가드/클램프 로직 추론값). 값에 '[검증 필요]'가 있으면 그대로 노출(생성기 표기). */}
+                {expStr
+                  ? <div style={{ fontSize: 9, overflowWrap: 'anywhere' }}><span className="text-muted">→ Exp: </span>{expStr}</div>
+                  : <div className="text-muted" style={{ fontSize: 9 }}>→ Exp: (기대출력 판정기준 작성 — 입출력 변수 없음)</div>}
+              </div>
+            );
+          })}
+          <div className="text-muted" style={{ fontSize: 9, marginTop: 2 }}>· 기대출력은 소스 로직(가드/클램프) 추론값 — 실행(VectorCAST) 검증 필요</div>
+        </>
+      );
+      const rows = genSeqs ? _genSeqRows() : _boundaryRows();  // 생성 시퀀스 우선, 없으면 경계값 입력 골격
       // 실 TC 위치·ID 앵커(백엔드 loc) — "이 TC(행 N) 기준 재계산"을 명시(있을 때만·행 번호 날조 금지).
       const _sutsLoc = has && content[0]
         ? [content[0].tc_id ? `TC ${content[0].tc_id}` : '', formatSutsLoc(content[0].loc)].filter(Boolean).join(' · ')
@@ -1369,11 +1448,15 @@ export default function ImpactGuideSection({ analysisResult, job }) {
         if (has) return null;
         return _box('🖊 SUTS 작성 제안', 'info', _val('입력 파라미터 없음(void) — 전역 상태/사이드이펙트 기반 기대출력 케이스 작성'));
       }
-      return _box(has ? '✏ 경계값 케이스 재계산/추가 (결정론)' : '🖊 SUTS 작성 제안 (경계값 TC 골격)', has ? 'warning' : 'info', (
+      const _sutsHdr = genSeqs
+        ? (has ? '✏ 경계값 케이스 재계산 (생성기 산출)' : '🖊 SUTS 작성 제안 (생성기 경계값 TC)')
+        : (has ? '✏ 경계값 케이스 재계산/추가 (결정론)' : '🖊 SUTS 작성 제안 (경계값 TC 골격)');
+      return _box(_sutsHdr, has ? 'warning' : 'info', (
         <>
           {_sutsLoc && <div className="text-muted" style={{ fontSize: 9, marginBottom: 2 }}>· {_sutsLoc} 기준 재계산</div>}
           {rows}
-          <div className="text-muted" style={{ fontSize: 9, marginTop: 2 }}>· 각 경계값별 기대출력(Expected) 판정기준 작성</div>
+          {/* 생성 시퀀스는 자체 기대출력 note를 포함 — 경계값 입력 골격 폴백일 때만 별도 안내. */}
+          {!genSeqs && <div className="text-muted" style={{ fontSize: 9, marginTop: 2 }}>· 각 경계값별 기대출력(Expected) 판정기준 작성</div>}
         </>
       ));
     }
@@ -1381,14 +1464,34 @@ export default function ImpactGuideSection({ analysisResult, job }) {
     // ── SITS (통합 콜체인 시나리오) ──
     if (key === 'sits') {
       const has = _testSpecHasContent(fn, 'sits');
+      // 백엔드 생성기(collect_integration_flows) 실 통합 콜체인("a -> b -> c") + 서브케이스 입력/기대값 우선.
+      // 없으면(leaf 함수·cross-module 콜 없음) UDS callee 목록(c.calls)으로 폴백(콜체인 확인 골격).
+      const gen = docProposalFor(fn, 'sits');
+      const genChain = gen && gen.call_chain ? String(gen.call_chain).replace(/\s*->\s*/g, ' → ') : '';
+      const subs = (gen && Array.isArray(gen.sub_cases)) ? gen.sub_cases : [];
       const chain = (c && c.calls) || [];
+      const chainText = genChain || (chain.length ? chain.join(' → ') : `${fn} 통합 콜체인 확인`);
       const de = diffElems || {};
       const gAll = [...new Set([...((de.changedGlobals && de.changedGlobals.added) || []), ...((de.changedGlobals && de.changedGlobals.removed) || [])])];
-      return _box(has ? '✏ 통합 시나리오 반영 (결정론)' : '🖊 SITS 작성 제안 (통합 콜체인 골격)', has ? 'warning' : 'info', (
+      const _sitsHdr = has
+        ? (genChain ? '✏ 통합 시나리오 반영 (생성기 콜체인)' : '✏ 통합 시나리오 반영 (결정론)')
+        : (genChain ? '🖊 SITS 작성 제안 (생성기 통합 콜체인)' : '🖊 SITS 작성 제안 (통합 콜체인 골격)');
+      return _box(_sitsHdr, has ? 'warning' : 'info', (
         <>
-          <div>{_lbl('Call Chain')}<div style={_propMono}>{chain.length ? chain.join(' → ') : `${fn} 통합 콜체인 확인`}</div></div>
+          <div>{_lbl('Call Chain')}<div style={_propMono}>{chainText}</div></div>
           <div style={{ marginTop: 2 }}>{_lbl('Precondition')}{_val(gAll.length ? `변경 전역 초기화 상태: ${gAll.slice(0, 4).join(', ')}` : '통합 진입 상태(env/precondition) 설정')}</div>
-          {params.length > 0 && <div className="text-muted" style={{ fontSize: 9, marginTop: 2 }}>· 통합 Input/Expected Param — SUTS 경계값을 통합 시나리오로 승격</div>}
+          {subs.slice(0, 3).map((sc, i) => {
+            const inStr = _kv(sc.inputs); const expStr = _kv(sc.expected);
+            return (inStr || expStr) ? (
+              <div key={i} style={{ marginTop: 2, paddingLeft: 6, borderLeft: '1px solid var(--border)' }}>
+                {inStr && <div style={{ fontSize: 9, overflowWrap: 'anywhere' }}><span className="text-muted">In: </span>{inStr}</div>}
+                {expStr && <div style={{ fontSize: 9, overflowWrap: 'anywhere' }}><span className="text-muted">→ Exp: </span>{expStr}</div>}
+              </div>
+            ) : null;
+          })}
+          {subs.length > 0
+            ? <div className="text-muted" style={{ fontSize: 9, marginTop: 2 }}>· 통합 기대값은 콜체인 하위 함수 산출 추론 — 실행 검증 필요</div>
+            : (params.length > 0 && <div className="text-muted" style={{ fontSize: 9, marginTop: 2 }}>· 통합 Input/Expected Param — SUTS 경계값을 통합 시나리오로 승격</div>)}
         </>
       ));
     }
@@ -1400,10 +1503,31 @@ export default function ImpactGuideSection({ analysisResult, job }) {
         return <div className="text-muted" style={{ fontSize: 9, marginTop: 4 }}>· 요구 매핑 없음 — {looksPrivate ? 'STS(요구 기반 시험) 작성 대상 아님(내부/static 헬퍼)' : 'STS 요구 매핑 확인 필요(공개 함수는 SwRS 요구 연결 기대)'}</div>;
       }
       const has = _testSpecHasContent(fn, 'sts');
-      return _box(has ? '✏ 요구 기반 TC 반영' : '🖊 STS 작성 제안 (요구 기반 TC 골격)', has ? 'warning' : 'info', (
+      // 백엔드 생성기(_generate_steps_from_flow) 실 시험 절차 — logic_flow 기반 TC별 Action→Expected 스텝.
+      // 없으면 기존 'Test Action' 골격 폴백. 요구 매핑은 위에서 이미 게이트(가짜 TC 금지)했다.
+      const gen = docProposalFor(fn, 'sts');
+      const genTcs = Array.isArray(gen) && gen.length ? gen : null;
+      const _stsHdr = has
+        ? (genTcs ? '✏ 요구 기반 TC 반영 (생성기 절차)' : '✏ 요구 기반 TC 반영')
+        : (genTcs ? '🖊 STS 작성 제안 (생성기 시험 절차)' : '🖊 STS 작성 제안 (요구 기반 TC 골격)');
+      return _box(_stsHdr, has ? 'warning' : 'info', (
         <>
           <div>{_lbl('요구 기반 TC')}{_val(`요구 ${reqs.slice(0, 5).join(', ')}${reqs.length > 5 ? ` +${reqs.length - 5}개` : ''} 검증`)}</div>
-          <div style={{ marginTop: 2 }}>{_lbl('Test Action')}{_val(`${fn} 호출 시퀀스 — 입력/기대 결과 작성`)}</div>
+          {genTcs
+            ? genTcs.slice(0, 4).map((tc, i) => (
+              <div key={i} style={{ marginTop: 2, paddingLeft: 6, borderLeft: '1px solid var(--border)' }}>
+                <div className="text-muted" style={{ fontSize: 8 }}>TC {i + 1}</div>
+                {(tc || []).slice(0, 6).map((st, j) => (
+                  <div key={j} style={{ fontSize: 9, overflowWrap: 'anywhere' }}>
+                    <span className="text-muted">Action: </span>{st.action}
+                    {st.expected && <><span className="text-muted"> → Exp: </span>{st.expected}</>}
+                  </div>
+                ))}
+              </div>
+            ))
+            : <div style={{ marginTop: 2 }}>{_lbl('Test Action')}{_val(`${fn} 호출 시퀀스 — 입력/기대 결과 작성`)}</div>}
+          {/* 생성기 Action/Expected도 로직 흐름 기반 추론값(실측 아님) — SUTS/SITS와 정직성 대칭(reviewer W2). */}
+          {genTcs && <div className="text-muted" style={{ fontSize: 9, marginTop: 2 }}>· Action/Expected는 로직 흐름 기반 추론 절차 — 실행 검증 필요</div>}
           {params.length > 0 && <div className="text-muted" style={{ fontSize: 9, marginTop: 2 }}>· Pre-condition: 위 파라미터 경계값 입력</div>}
         </>
       ));
