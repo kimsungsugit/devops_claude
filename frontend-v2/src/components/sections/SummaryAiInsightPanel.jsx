@@ -203,6 +203,33 @@ export default function SummaryAiInsightPanel({ jobUrl, cacheRoot, scmId, trace 
             </div>
           )}
 
+          {/* (d) 아키텍처 조언 */}
+          {sections.architecture && (
+            <div>
+              <div style={{ ...xs, fontWeight: 700, marginBottom: 4 }}>아키텍처 조언 — 구조적 리스크와 개선 방향</div>
+              <FallbackNote section={sections.architecture} />
+              {(sections.architecture.items || []).map((it, i) => (
+                <div key={i} style={{ ...xs, borderLeft: '3px solid var(--color-purple, var(--accent))', padding: '4px 8px', marginBottom: 6 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                    <Badge text={{ layering: '레이어링', coupling: '결합도', hotspot: '핫스팟', refactor_candidate: '리팩토링 후보' }[it.topic] || it.topic} color="var(--color-purple, var(--accent))" />
+                    <Badge text={`확신도 ${it.confidence || 'low'}`} color={CONF_COLOR[it.confidence] || 'var(--text-muted)'} />
+                  </div>
+                  {it.finding && <div>발견: {it.finding}</div>}
+                  {it.suggestion && <div>제안: {it.suggestion}</div>}
+                  {it.basis && <div style={{ color: 'var(--text-muted)' }}>근거: {it.basis}</div>}
+                  {(it.functions || []).length > 0 && <div style={{ color: 'var(--text-muted)' }}>함수: {(it.functions || []).join(', ')}</div>}
+                </div>
+              ))}
+              {sections.architecture.ai_enriched === false && (
+                <div style={{ ...xs, color: 'var(--text-muted)' }}>
+                  {det.architecture?.available === false
+                    ? '소스 스냅샷이 없어 아키텍처 분석이 제한됩니다.'
+                    : 'AI 미사용 상태 — 아래 아키텍처 메트릭 패널의 결정론 수치를 참고하세요.'}
+                </div>
+              )}
+            </div>
+          )}
+
           {/* (c) 역할별 권고 */}
           {sections.roles && (
             <div>

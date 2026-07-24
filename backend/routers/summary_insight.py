@@ -457,6 +457,86 @@ def _complexity_offenders(build_root: Path, reports_dir: Path) -> List[Dict[str,
         return []
 
 
+def _ccn_map(reports_dir: Path) -> Dict[str, int]:
+    """analysis_summary.json vectorcast_detail.aggregate_coverage.entries → {subprogram: ccn}."""
+    data = _read_json(reports_dir / "analysis_summary.json") or {}
+    detail = data.get("vectorcast_detail") if isinstance(data.get("vectorcast_detail"), dict) else {}
+    agg = detail.get("aggregate_coverage") if isinstance(detail.get("aggregate_coverage"), dict) else {}
+    out: Dict[str, int] = {}
+    for e in agg.get("entries") or []:
+        if not isinstance(e, dict):
+            continue
+        name = str(e.get("subprogram") or "").strip()
+        try:
+            ccn = int(e.get("ccn"))
+        except (TypeError, ValueError):
+            continue
+        if name and ccn > 0:
+            out[name] = ccn
+    return out
+
+
+ARCH_METRICS_CACHE_NAME = "summary_arch_metrics_cache.json"
+
+
+def _arch_src_fingerprint(build_root: Path) -> Optional[Dict[str, Any]]:
+    """소스 스냅샷 지문(stat 스캔) — 캐시 히트 판정. 스냅샷 부재는 None."""
+    source = build_root / "source"
+    if not (source / ".source_complete").exists():
+        return None
+    file_count = 0
+    total_bytes = 0
+    try:
+        for p in source.rglob("*"):
+            if p.is_file():
+                file_count += 1
+                total_bytes += p.stat().st_size
+    except OSError:
+        return None
+    from workflow.summary_arch_metrics import ARCH_METRICS_VERSION
+
+    return {"file_count": file_count, "total_bytes": total_bytes, "version": ARCH_METRICS_VERSION}
+
+
+def _arch_metrics_cached(build_root: Path, reports_dir: Path) -> Optional[Dict[str, Any]]:
+    """아키텍처 메트릭 — 스냅샷 지문 키 디스크 캐시(파싱 1회화). 스냅샷 부재는 None."""
+    src = _arch_src_fingerprint(build_root)
+    if src is None:
+        return None
+    cache_path = reports_dir / ARCH_METRICS_CACHE_NAME
+    cached = _read_json(cache_path)
+    if cached and cached.get("src") == src and isinstance(cached.get("result"), dict):
+        return {**cached["result"], "cache_hit": True}
+    from workflow.summary_arch_metrics import compute_architecture_metrics
+
+    result = compute_architecture_metrics(build_root / "source", ccn_by_function=_ccn_map(reports_dir))
+    if result.get("available"):
+        _write_cache_atomic(cache_path, {"src": src, "result": result})
+    return {**result, "cache_hit": False}
+
+
+@router.post("/api/summary/architecture-metrics")
+def summary_architecture_metrics(req: dict) -> Dict[str, Any]:
+    """소스 아키텍처 결정론 메트릭(LLM 0회) — 최신 캐시 빌드 스냅샷 기준."""
+    body = req or {}
+    job_url = str(body.get("job_url") or "").strip()
+    if not job_url:
+        return {"ok": True, "available": False, "reason": "job_url_required"}
+    cache_root = _normalize_jenkins_cache_root(str(body.get("cache_root") or ""))
+    builds = list_cached_builds(job_url=job_url, cache_root=cache_root)
+    target = next((b for b in builds if (Path(str(b.get("build_root") or "")) / "source" / ".source_complete").exists()), None)
+    if target is None:
+        return {"ok": True, "available": False, "reason": "no_source_snapshot"}
+    result = _arch_metrics_cached(
+        Path(str(target.get("build_root"))), Path(str(target.get("reports_dir")))
+    )
+    if result is None or not result.get("available"):
+        return {"ok": True, "available": False,
+                "reason": (result or {}).get("reason") or "no_source_snapshot",
+                "build_number": target.get("build_number")}
+    return {"ok": True, "reason": None, "build_number": target.get("build_number"), **result}
+
+
 def _vcast_failures(reports_dir: Path) -> List[Dict[str, Any]]:
     data = _read_json(reports_dir / "vectorcast_rag.json") or {}
     failures = data.get("failures")
@@ -619,6 +699,9 @@ def summary_ai_insight_endpoint(req: dict) -> Dict[str, Any]:
     sections_req = body.get("sections")
     sections = tuple(s for s in sections_req if s in SECTIONS) if isinstance(sections_req, list) and sections_req else SECTIONS
 
+    # 아키텍처 메트릭(Phase G) — 스냅샷 지문 디스크 캐시라 재생성 비용 낮음. 부재는 None(섹션 available:false).
+    arch_metrics = _arch_metrics_cached(build_root, reports_dir)
+
     inp = SummaryInsightInput(
         # job slug = 빌드 루트(build_N)의 부모 디렉토리명 — reports_dir.parent는 build_N이라 오라벨(W2).
         job_slug=build_root.parent.name if build_root.parent != build_root else "",
@@ -632,6 +715,7 @@ def summary_ai_insight_endpoint(req: dict) -> Dict[str, Any]:
         vcast_failures=_vcast_failures(reports_dir),
         trace_summary=body.get("trace_summary") if isinstance(body.get("trace_summary"), dict) else None,
         code_excerpts=excerpts,
+        arch_metrics=arch_metrics if (arch_metrics and arch_metrics.get("available")) else None,
     )
     result = generate_summary_insight(inp, sections=sections)
 

@@ -10,6 +10,7 @@ import PipelineHealthStrip from './PipelineHealthStrip.jsx';
 import BuildDeltaDrilldown from './BuildDeltaDrilldown.jsx';
 import SummaryAiInsightPanel from './SummaryAiInsightPanel.jsx';
 import RuleTrendPanel from './RuleTrendPanel.jsx';
+import ArchitectureMetricsPanel from './ArchitectureMetricsPanel.jsx';
 
 /**
  * ProjectSummarySection — "📌 프로젝트 요약" 탭 (단일 뷰 건강 대시보드).
@@ -542,6 +543,9 @@ export default function ProjectSummarySection({ job, analysisResult }) {
 
       {/* 룰 트렌드 — 빌드별 위반 변화 분류 + 실제 fix 근거 작성 예시 */}
       <RuleTrendPanel jobUrl={jobUrl} cacheRoot={cacheRoot} />
+
+      {/* 아키텍처 메트릭 — 핫스팟/결합도/대형 함수 (결정론, AI 조언은 AI 인사이트 패널) */}
+      <ArchitectureMetricsPanel jobUrl={jobUrl} cacheRoot={cacheRoot} />
 
       {/* 빌드 타임라인 (전체 빌드) */}
       <div className="panel" style={PANEL}>

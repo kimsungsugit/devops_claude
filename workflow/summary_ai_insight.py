@@ -23,8 +23,9 @@ from typing import Any, Callable, Dict, List, Optional
 logger = logging.getLogger(__name__)
 
 # 프롬프트/출력 스키마 개정 시 +1 — 라우터가 캐시 무효화 판단에 사용.
-PROMPT_VERSION = 1
-SECTIONS = ("rules", "mistakes", "roles")
+# v2: architecture 섹션 추가(Phase G) — 전 캐시 자연 무효화.
+PROMPT_VERSION = 2
+SECTIONS = ("rules", "mistakes", "roles", "architecture")
 EXCERPT_MAX_FILES = 4
 EXCERPT_MAX_BYTES_PER_FILE = 4096
 EXCERPT_MAX_TOTAL_BYTES = 16384
@@ -48,6 +49,7 @@ class SummaryInsightInput:
     vcast_failures: List[Dict[str, Any]] = field(default_factory=list)
     trace_summary: Optional[Dict[str, Any]] = None
     code_excerpts: List[Dict[str, Any]] = field(default_factory=list)  # [{path,bytes,text,truncated}]
+    arch_metrics: Optional[Dict[str, Any]] = None  # summary_arch_metrics 결과(부재=None)
 
 
 # ---------------------------------------------------------------------------
@@ -210,12 +212,25 @@ def build_deterministic_insight(inp: SummaryInsightInput) -> Dict[str, Any]:
     cov = inp.headline.get("coverage_line")
     if cov is None:
         gaps.append({"kind": "coverage_unmeasured", "count": None})
+    arch = inp.arch_metrics if isinstance(inp.arch_metrics, dict) else None
     return {
         "headline": dict(inp.headline),
         "top_rules": list(inp.top_rules),
         "delta_summary": delta_summary,
         "complexity_offenders": list(inp.complexity_offenders[:10]),
         "gaps": gaps,
+        # 아키텍처 요약(결정론) — 부재는 available:false(침묵 생략 금지).
+        "architecture": (
+            {
+                "available": True,
+                "snapshot": arch.get("snapshot"),
+                "hotspots": (arch.get("hotspots") or [])[:5],
+                "coupling": arch.get("coupling"),
+                "size_outliers": (arch.get("size_outliers") or [])[:5],
+            }
+            if arch and arch.get("available")
+            else {"available": False, "reason": (arch or {}).get("reason") or "no_source_snapshot"}
+        ),
     }
 
 
@@ -365,6 +380,72 @@ def enrich_mistake_patterns(cfg, inp: SummaryInsightInput, det: Dict[str, Any], 
     return out or None
 
 
+def _known_symbol_set(inp: SummaryInsightInput) -> set:
+    """아키텍처 섹션 환각 필터 어휘 — 메트릭에 등장한 함수/파일만 허용."""
+    arch = inp.arch_metrics or {}
+    out: set = set()
+    for key in ("fan", "hotspots", "size_outliers"):
+        for r in arch.get(key) or []:
+            if r.get("function"):
+                out.add(str(r["function"]))
+            if r.get("file"):
+                out.add(str(r["file"]))
+    for p in (arch.get("coupling") or {}).get("top_pairs") or []:
+        out.add(str(p.get("from_file") or ""))
+        out.add(str(p.get("to_file") or ""))
+    for e in arch.get("excerpts") or []:
+        if e.get("function"):
+            out.add(str(e["function"]))
+    out.discard("")
+    return out
+
+
+def enrich_architecture(cfg, inp: SummaryInsightInput, det: Dict[str, Any], *, agent_call=None) -> Optional[List[Dict[str, Any]]]:
+    """(d) 아키텍처 조언 — 메트릭+핫스팟 발췌 기반. 메트릭 부재/실패 시 None."""
+    arch = inp.arch_metrics
+    if not (isinstance(arch, dict) and arch.get("available")):
+        return None
+    from prompts import load_prompt
+    system = load_prompt("summary_architecture")
+    excerpt_text = "\n\n".join(
+        f"=== {e.get('function')} ({e.get('file')}{', truncated' if e.get('truncated') else ''}) ===\n{e.get('text')}"
+        for e in arch.get("excerpts") or []
+    ) or "(핫스팟 발췌 없음 — 수치만으로 판단하고 confidence를 낮출 것)"
+    payload = json.dumps({
+        "snapshot": arch.get("snapshot"),
+        "fan": arch.get("fan"),
+        "hotspots": arch.get("hotspots"),
+        "coupling": arch.get("coupling"),
+        "size_outliers": arch.get("size_outliers"),
+        "asil_functions": arch.get("asil_functions"),
+    }, ensure_ascii=False) + "\n\n[핫스팟 함수 본문 발췌]\n" + excerpt_text
+    parsed = _call_llm_json(cfg, system, payload, stage="summary_architecture", agent_call=agent_call)
+    items = parsed.get("items") if isinstance(parsed, dict) else parsed
+    if not isinstance(items, list):
+        return None
+    known = _known_symbol_set(inp)
+    out = []
+    for it in items:
+        if not isinstance(it, dict) or not it.get("finding"):
+            continue
+        functions = [f for f in (it.get("functions") or []) if str(f) in known]
+        files = [f for f in (it.get("files") or []) if str(f) in known]
+        if not functions and not files:
+            continue  # 메트릭에 없는 심볼만 언급 — 환각으로 간주
+        topic = str(it.get("topic") or "").strip() or "refactor_candidate"
+        conf = str(it.get("confidence") or "low").lower()
+        out.append({
+            "topic": topic if topic in ("layering", "coupling", "refactor_candidate", "hotspot") else "refactor_candidate",
+            "finding": it.get("finding"),
+            "suggestion": it.get("suggestion"),
+            "functions": functions,
+            "files": files,
+            "basis": it.get("basis"),
+            "confidence": conf if conf in ("high", "medium", "low") else "low",
+        })
+    return out or None
+
+
 def enrich_role_guidance(cfg, inp: SummaryInsightInput, det: Dict[str, Any], *, agent_call=None) -> Optional[Dict[str, List[Dict[str, Any]]]]:
     """(c) 개발자/테스터 역할별 권고 — basis는 입력 수치 인용 의무. 실패 시 None."""
     from prompts import load_prompt
@@ -434,6 +515,7 @@ def generate_summary_insight(
         "rules": lambda: enrich_rule_insight(cfg, inp, det, agent_call=agent_call),
         "mistakes": lambda: enrich_mistake_patterns(cfg, inp, det, agent_call=agent_call),
         "roles": lambda: enrich_role_guidance(cfg, inp, det, agent_call=agent_call),
+        "architecture": lambda: enrich_architecture(cfg, inp, det, agent_call=agent_call),
     }
     for name in sections:
         if name not in enrichers:
