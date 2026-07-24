@@ -247,7 +247,7 @@ TEST_CODE_MAX_TOKENS = 16384
 # ---------------- LLM / 에이전트 설정 ----------------
 # [TIP] 70b 모델이 너무 느리면 "llama3:8b" 또는 "phi3" 등으로 변경 고려
 # 기본 모델을 제미나이로 변경하고 싶으면 아래를 수정하세요.
-DEFAULT_LLM_MODEL = "gemini-3.1-flash-lite"
+DEFAULT_LLM_MODEL = "gemini-3.5-flash-lite"
 DEFAULT_LLM_BASE_URL_ENV = "OLLAMA_BASE_URL"
 _DEFAULT_OAI_CONFIG = _REPO_ROOT / "OAI_CONFIG_LIST"
 if _DEFAULT_OAI_CONFIG.exists():
@@ -293,6 +293,24 @@ LLM_WARN_INPUT_TOKENS = 200000
 # Model-specific policies (auto caps, temperature, margins)
 # Keys are matched by substring (case-insensitive) against model name.
 LLM_MODEL_POLICIES = {
+    # 표준 모델(무조건 이 모델 — 2026-07-25 사용자 결정). 스펙 정확값: 입력 1,048,576 / 출력 65,536.
+    # lookup은 exact-key 우선(ai.py _pick_model_policy) + substring first-match이라 "gemini-3" 앞에 둔다.
+    "gemini-3.5-flash-lite": {
+        "max_input_tokens": 1048576,
+        "max_output_tokens": 65536,
+        "max_input_tokens_by_stage": {
+            "build_fix": 200000,
+            "syntax_fix": 200000,
+            "static": 200000,
+            "domain_tests": 200000,
+            "plan_repair": 200000,
+            "test_plan": 200000,
+            "test_code": 200000,
+        },
+        "token_estimate_margin": 1.25,
+        "warn_input_tokens": 200000,
+        "temperature_default": 1.0,
+    },
     "gemini-3.1-flash-lite": {
         "max_input_tokens": 1000000,
         "max_output_tokens": 65536,
@@ -373,7 +391,7 @@ def apply_runtime_env() -> None:
 # Gemini-only 강제 사용(요청: gemini3만 사용)
 # - OAI_CONFIG_LIST가 여러 모델을 포함해도, workflow는 Gemini만 선택
 LLM_GEMINI_ONLY = os.environ.get("LLM_GEMINI_ONLY", "1").strip().lower() in ("1", "true", "yes")
-LLM_GEMINI_PREFERRED_SUBSTRING = os.environ.get("LLM_GEMINI_PREFERRED_SUBSTRING", "gemini-3.1-flash-lite").strip().lower()
+LLM_GEMINI_PREFERRED_SUBSTRING = os.environ.get("LLM_GEMINI_PREFERRED_SUBSTRING", "gemini-3.5-flash-lite").strip().lower()
 
 # [MODIFIED] 기본 출력 토큰 수 최대치로 상향 (65536)
 # Gemini 3 Pro Preview 스펙에 맞춤
@@ -512,7 +530,7 @@ CHAT_LOG_LINES = 40
 CHAT_SUMMARY_MAX_CHARS = 1600
 CHAT_ENABLE_SUMMARY = True
 CHAT_LONG_QUERY_CHARS = 800
-CHAT_MODEL_FAST = "gemini-3.1-flash-lite"
+CHAT_MODEL_FAST = "gemini-3.5-flash-lite"
 CHAT_SUMMARY_KEEP_DAYS = 7
 CHAT_SUMMARY_LOAD_FROM_FILE = True
 CHAT_SUMMARY_FILE_MAX_CHARS = 1200

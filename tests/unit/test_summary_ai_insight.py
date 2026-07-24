@@ -323,6 +323,53 @@ def test_source_reader_blocks_mid_path_traversal(tmp_path):
         read("..")
 
 
+def test_resolve_effective_model_override_priority(monkeypatch):
+    """실호출 모델 해석 — cfg.model_override > env LLM_MODEL_OVERRIDE > cfg.model (llm_call 동일)."""
+    from workflow.summary_ai_insight import resolve_effective_model
+
+    monkeypatch.delenv("LLM_MODEL_OVERRIDE", raising=False)
+    assert resolve_effective_model({"model": "gemini-2.5-flash"}) == "gemini-2.5-flash"
+    monkeypatch.setenv("LLM_MODEL_OVERRIDE", "gemini-3.5-flash-lite")
+    assert resolve_effective_model({"model": "gemini-2.5-flash"}) == "gemini-3.5-flash-lite"
+    assert resolve_effective_model({"model": "x", "model_override": "cfg-wins"}) == "cfg-wins"
+    assert resolve_effective_model(None) is None
+
+
+def test_endpoint_cache_miss_on_model_change(tmp_path, monkeypatch):
+    """Phase 0: 캐시 산출물의 model ≠ 현재 해석 모델 → cached:false(구 모델 위장 금지)."""
+    from backend.routers import summary_insight as si
+
+    meta = _prep_build(tmp_path)
+    monkeypatch.setattr(si, "list_cached_builds", lambda **k: [meta])
+    monkeypatch.delenv("LLM_MODEL_OVERRIDE", raising=False)
+    monkeypatch.setattr("workflow.impact_ai_guide._load_impact_oai_config", lambda: None, raising=True)
+    r1 = si.summary_ai_insight_endpoint({"job_url": "http://j/"})
+    assert r1["cached"] is False and r1["model"] is None
+    assert si.summary_ai_insight_endpoint({"job_url": "http://j/", "probe": True})["cached"] is True
+    # 모델 배선 변경(None → gemini-3.5) → 동일 RCR/프롬프트여도 캐시 미스
+    monkeypatch.setattr(
+        "workflow.impact_ai_guide._load_impact_oai_config",
+        lambda: {"model": "gemini-3.5-flash-lite"},
+        raising=True,
+    )
+    assert si.summary_ai_insight_endpoint({"job_url": "http://j/", "probe": True})["cached"] is False
+
+
+def test_config_policy_gemini35_exact_and_defaults():
+    """Phase 0: 표준 모델 정책 존재(스펙 정확값) + 기본 모델 전환 + 2.5 정책 비포획."""
+    import config
+
+    pol = config.LLM_MODEL_POLICIES["gemini-3.5-flash-lite"]
+    assert pol["max_input_tokens"] == 1048576
+    assert pol["max_output_tokens"] == 65536
+    assert config.DEFAULT_LLM_MODEL == "gemini-3.5-flash-lite"
+    # substring first-match(정책 lookup 폴백)에서도 3.5 키가 먼저 매칭 — 2.5(8192캡) 비포획.
+    name = "gemini-3.5-flash-lite"
+    first = next(k for k in config.LLM_MODEL_POLICIES if str(k).lower() in name)
+    assert first == "gemini-3.5-flash-lite"
+    assert "gemini-2.5" not in name
+
+
 def test_endpoint_no_cached_build(monkeypatch):
     from backend.routers import summary_insight as si
 

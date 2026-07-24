@@ -15,6 +15,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import re
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
@@ -118,6 +119,19 @@ def collect_code_excerpts(
         total += min(len(raw), budget)
         out.append({"path": p, "bytes": min(len(raw), budget), "text": snippet, "truncated": truncated})
     return out
+
+
+def resolve_effective_model(cfg: Optional[Dict[str, Any]]) -> Optional[str]:
+    """실호출 모델명 — llm_call과 동일 우선순위(cfg.model_override > env LLM_MODEL_OVERRIDE > cfg.model).
+
+    응답 `model` 필드(감사 푸터)와 캐시 히트 판정이 cfg.model만 보면, .env 하드락이 켜진
+    배포에서 표기·캐시키가 실호출 모델과 어긋난다(gemini-2.5 표기 ↔ 3.x 실호출 전례).
+    """
+    if not cfg:
+        return None
+    override = str(cfg.get("model_override") or os.environ.get("LLM_MODEL_OVERRIDE") or "").strip()
+    model = override or str(cfg.get("model") or "").strip()
+    return model or None
 
 
 def _extract_json_payload(text: str) -> Optional[Any]:
@@ -449,7 +463,7 @@ def generate_summary_insight(
                 if enriched else {"ai_enriched": False, "reason": reason, "items": []}
             )
 
-    model = str((cfg or {}).get("model") or "") or None
+    model = resolve_effective_model(cfg)
     return {
         "ok": True,
         "prompt_version": PROMPT_VERSION,

@@ -240,6 +240,22 @@ def _vcast_failures(reports_dir: Path) -> List[Dict[str, Any]]:
     return [f for f in failures if isinstance(f, dict)][:50] if isinstance(failures, list) else []
 
 
+def _expected_insight_model() -> Optional[str]:
+    """현재 배선이 인사이트 생성에 사용할 모델명(LLM 호출 0회) — 캐시 model 비교용.
+
+    cfg 해석(_load_impact_oai_config)과 override 반영(resolve_effective_model)을 실생성
+    경로와 동일하게 따라가야, 모델 교체 직후 구 모델 산출물이 cached:true로 위장하지 않는다.
+    """
+    try:
+        from workflow.impact_ai_guide import _load_impact_oai_config
+        from workflow.summary_ai_insight import resolve_effective_model
+
+        return resolve_effective_model(_load_impact_oai_config())
+    except Exception as exc:
+        _logger.debug("expected insight model resolve failed: %s", exc)
+        return None
+
+
 def _current_rcr_src(build_root: Path, reports_dir: Path) -> Optional[Dict[str, Any]]:
     """현재 RCR 원본 지문(stat만 — 파싱 없음). AI 인사이트 캐시 히트 판정용(W1).
 
@@ -323,12 +339,13 @@ def summary_ai_insight_endpoint(req: dict) -> Dict[str, Any]:
     probe = bool(body.get("probe"))
     force = bool(body.get("force"))
     cached = _read_json(cache_path)
-    # 히트 조건: 프롬프트 버전 + RCR 원본 지문(stat 1회) 일치 — 같은 빌드 디렉토리에서
-    # RCR이 교체되면(재-sync) stale 인사이트를 cached:true로 서빙하지 않는다(deep-review W1).
+    # 히트 조건: 프롬프트 버전 + RCR 원본 지문(stat 1회) + 모델 일치 — RCR 재-sync 교체
+    # (deep-review W1)나 표준 모델 교체(Phase 0) 후 stale 산출물을 cached:true로 서빙하지 않는다.
     cache_valid = (
         bool(cached)
         and cached.get("prompt_version") == PROMPT_VERSION
         and cached.get("rcr_src") == _current_rcr_src(build_root, reports_dir)
+        and cached.get("model") == _expected_insight_model()
     )
     if probe:
         if cache_valid:
