@@ -102,9 +102,11 @@ export default function ProjectSummarySection({ job, analysisResult }) {
     let cancelled = false;
     (async () => {
       try {
-        // job_url/include_all 미전달 → 서버가 Jenkins를 조회하지 않아 항상 빠름(분석된 빌드만).
-        // 전체 빌드는 아래 allBuilds 효과가 /api/jenkins/builds로 비차단 병합(Jenkins 미도달 무영향).
-        const data = await api(`/api/scm/build-timeline/${encodeURIComponent(scmId)}?limit=50`);
+        // include_all 미전달 → 서버가 Jenkins를 조회하지 않아 항상 빠름. job_url+cache_root 전달로
+        // 로컬 캐시 빌드(오프라인 메타 — Jenkins 불필요)를 서버가 병합해 '캐시의 모든 빌드'를 표면화.
+        // 전체 Jenkins 빌드는 아래 allBuilds 효과가 비차단 병합(미도달 무영향).
+        const qs = new URLSearchParams({ limit: '100', job_url: jobUrl || '', cache_root: cacheRoot || '' });
+        const data = await api(`/api/scm/build-timeline/${encodeURIComponent(scmId)}?${qs}`);
         if (cancelled) return;
         if (data && data.ok !== false) { setTimeline(data); setTlError(''); }
         else { setTimeline({ rows: [], rollup: {} }); setTlError('타임라인 조회 실패'); }
@@ -113,7 +115,7 @@ export default function ProjectSummarySection({ job, analysisResult }) {
       }
     })();
     return () => { cancelled = true; };
-  }, [scmId, jobUrl]);
+  }, [scmId, jobUrl, cacheRoot]);
 
   // ── 전체 빌드 목록(/api/jenkins/builds) — 비차단. build-timeline과 분리해 타임라인은 즉시 표시하고,
   //    Jenkins가 미도달(연결 타임아웃 ~30s)이면 조용히 분석된 빌드만 유지한다(전체빌드는 best-effort).
@@ -193,7 +195,7 @@ export default function ProjectSummarySection({ job, analysisResult }) {
     let cancelled = false;
     (async () => {
       try {
-        const data = await post('/api/jenkins/prqa-trend', { job_url: jobUrl, cache_root: cacheRoot, limit: 15 });
+        const data = await post('/api/jenkins/prqa-trend', { job_url: jobUrl, cache_root: cacheRoot, limit: 30 });
         if (!cancelled) setPrqaTrend(data || null);
       } catch { /* best-effort */ }
     })();
@@ -241,7 +243,9 @@ export default function ProjectSummarySection({ job, analysisResult }) {
       const a = byNum.get(String(num));
       if (a) {
         used.add(String(num));
-        merged.push({ ...a, build_result: b.result, build_revision: a.build_revision || b.revision, analyzed: true });
+        // 서버 캐시 병합 행(analyzed:false, cached:true)을 analyzed로 승격하지 않는다 —
+        // Jenkins 목록에 있다고 분석된 것이 아니다(분석 여부는 change-log 행만이 증거).
+        merged.push({ ...a, build_result: b.result || a.build_result, build_revision: a.build_revision || b.revision, analyzed: a.analyzed !== false });
       } else {
         merged.push({
           run_id: `__build_${num}`, analyzed: false, build_number: num,
@@ -287,6 +291,53 @@ export default function ProjectSummarySection({ job, analysisResult }) {
     if ((rollup.cumulative_flag_docs || 0) > 0) list.push({ label: `검토 대기 문서 ${rollup.cumulative_flag_docs}`, sev: 'warn' });
     return list;
   }, [trace, rollup]);
+
+  // ── 과거 빌드 백필(sync-backfill) — Jenkins 연결 시에만 의미. 미도달은 서버가 정직 실패. ──
+  const [backfill, setBackfill] = useState(null); // {job_id,total,completed,state} | {error}
+  const backfillBusy = backfill?.state === 'running';
+  const reloadTimeline = useCallback(() => {
+    setTimeline(null); setTlError('');
+    // scmId/jobUrl deps의 timeline effect는 상태 기반이라 즉시 재조회를 위해 직접 호출.
+    (async () => {
+      try {
+        const qs = new URLSearchParams({ limit: '100', job_url: jobUrl || '', cache_root: cacheRoot || '' });
+        const data = await api(`/api/scm/build-timeline/${encodeURIComponent(scmId)}?${qs}`);
+        setTimeline(data && data.ok !== false ? data : { rows: [], rollup: {} });
+      } catch { setTimeline({ rows: [], rollup: {} }); }
+    })();
+  }, [scmId, jobUrl, cacheRoot]);
+  const startBackfill = useCallback(async () => {
+    try {
+      const resp = await post('/api/jenkins/sync-backfill', {
+        job_url: jobUrl, username: cfg?.username || '', api_token: cfg?.token || '',
+        cache_root: cacheRoot, verify_tls: cfg?.verifyTls, count: 10, scm_id: scmId,
+      });
+      if (!resp?.available) {
+        const why = resp?.reason === 'jenkins_unreachable' ? 'Jenkins에 연결할 수 없습니다(캐시 기반 표시는 유지)'
+          : resp?.reason === 'nothing_to_backfill' ? '가져올 새 빌드가 없습니다(최근 빌드 전부 캐시됨)'
+          : resp?.reason === 'backfill_already_running' ? '이미 백필이 실행 중입니다'
+          : `백필 시작 실패 (${resp?.reason || 'unknown'})`;
+        toast?.('info', why);
+        return;
+      }
+      setBackfill({ job_id: resp.job_id, total: resp.total, completed: 0, state: 'running' });
+      const poll = async () => {
+        try {
+          const st = await api(`/api/jenkins/sync-backfill-status/${resp.job_id}`);
+          if (st?.available) {
+            setBackfill(st);
+            if (st.state === 'running') { setTimeout(poll, 3000); return; }
+            const errs = (st.per_build || []).filter((b) => b.status === 'error').length;
+            toast?.(errs ? 'warn' : 'success', errs ? `백필 완료 — ${errs}개 빌드 실패(상태 참조)` : `백필 완료 — ${st.completed}개 빌드 캐시됨`);
+            reloadTimeline();
+          }
+        } catch { setTimeout(poll, 5000); }
+      };
+      setTimeout(poll, 2500);
+    } catch (e) {
+      toast?.('error', `백필 요청 실패: ${String(e?.message || e)}`);
+    }
+  }, [jobUrl, cfg, cacheRoot, scmId, toast, reloadTimeline]);
 
   const openInImpact = useCallback((row) => {
     if (row.analyzed === false) return;  // 미분석 빌드는 열 상세가 없음
@@ -494,6 +545,16 @@ export default function ProjectSummarySection({ job, analysisResult }) {
           <div style={{ fontSize: 'var(--text-sm)', fontWeight: 600 }}>빌드별 변경 영향 (전체 빌드)</div>
           <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>최신순 · 분석된 빌드는 클릭</span>
           {tlBusy && <span className="spinner" />}
+          {backfillBusy && (
+            <span style={{ fontSize: 'var(--text-xs)', color: 'var(--color-info)' }}>
+              백필 중 {backfill.completed}/{backfill.total}{backfill.current_build ? ` (#${backfill.current_build})` : ''}…
+            </span>
+          )}
+          <button type="button" onClick={startBackfill} disabled={backfillBusy || !jobUrl}
+            title="Jenkins에서 최근 10개 빌드 산출물을 캐시로 가져옵니다(이미 캐시된 빌드는 건너뜀). Jenkins 미연결 시 안내만 표시됩니다."
+            style={{ marginLeft: 'auto', fontSize: 'var(--text-xs)', padding: '2px 8px', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', background: 'transparent', cursor: backfillBusy ? 'wait' : 'pointer', color: 'var(--text-muted)' }}>
+            과거 빌드 가져오기
+          </button>
         </div>
 
         {rows.length > 0 && (
@@ -564,7 +625,7 @@ export default function ProjectSummarySection({ job, analysisResult }) {
                           : '—'}
                       </td>
                       <td style={td}>
-                        {!analyzed ? <Pill text="미분석" color="var(--text-muted)" />
+                        {!analyzed ? <Pill text={r.cached ? '캐시 · 미분석' : '미분석'} color="var(--text-muted)" title={r.cached ? '캐시에 산출물 존재 — 영향 분석은 미실행' : undefined} />
                           : r.partial_failure ? <Pill text="부분실패" color="var(--color-warning)" />
                           : (r.coverage_regressed || 0) > 0 ? <Pill text="커버리지 회귀" color="var(--color-danger)" />
                           : (r.coverage_unmeasured_safety || 0) > 0 ? <Pill text="MC/DC 미측정" color="var(--color-warning)" />

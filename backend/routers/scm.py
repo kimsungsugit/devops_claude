@@ -366,7 +366,8 @@ def scm_change_history_module(entry_id: str, module_name: str, limit: int = 20) 
 
 
 @router.get("/api/scm/build-timeline/{entry_id}")
-def scm_build_timeline(entry_id: str, limit: int = 50, job_url: str = "", include_all: bool = False) -> Dict[str, Any]:
+def scm_build_timeline(entry_id: str, limit: int = 50, job_url: str = "", include_all: bool = False,
+                       cache_root: str = "") -> Dict[str, Any]:
     """프로젝트 요약 탭 — 분석된 빌드별 변경 영향 타임라인 + 누적 롤업(항상 빠름).
 
     분석된 빌드는 durable change-log(impact_changes.build_timeline, 잡 pruning 무관)에서 impact
@@ -374,6 +375,10 @@ def scm_build_timeline(entry_id: str, limit: int = 50, job_url: str = "", includ
     미도달 시 ~30s hang → 타임라인 로드 지연). '전체 빌드'는 프론트가 `/api/jenkins/builds`를 별도
     비차단으로 가져와 클라이언트에서 병합한다. include_all=true(opt-in)일 때만 서버가 list_builds로
     미분석 빌드를 병합한다(**서버 자격정보만**, SSRF fail-closed). 롤업은 분석된 빌드 기준이라 불변.
+
+    cache_root(opt-in, job_url 동반 필수): 로컬 캐시 빌드(오프라인 메타 — status.json/센티널)를
+    추가 병합한다. Jenkins 미도달 환경에서 '캐시에 있는 모든 빌드'를 표면화하는 경로 — 분석 안 된
+    캐시 빌드는 {analyzed:false, cached:true} 행으로 추가된다(응답 cache_merge에 병합 통계).
     """
     entry = get_registry_entry(entry_id)
     if entry is None:
@@ -384,8 +389,60 @@ def scm_build_timeline(entry_id: str, limit: int = 50, job_url: str = "", includ
     for r in rows:
         r["analyzed"] = True  # change-log 행 = 분석된 빌드
     enrich_note = ""
+    cache_merge: Dict[str, Any] = {"attempted": False, "merged": 0, "added": 0}
 
     ju = str(job_url or "").strip()
+    cr = str(cache_root or "").strip()
+    if ju and cr:
+        # 로컬 캐시 병합 — Jenkins/네트워크 무관(디스크 직독)이라 항상 빠르고 안전.
+        try:
+            from backend.helpers.jenkins import _normalize_jenkins_cache_root
+            from backend.services.build_inventory import list_cached_builds_meta
+
+            cache_merge["attempted"] = True
+            cached_rows = list_cached_builds_meta(job_url=ju, cache_root=_normalize_jenkins_cache_root(cr))
+            by_num = {str(r.get("build_number")): r for r in rows if r.get("build_number") is not None}
+            for cb in cached_rows:
+                num = cb.get("build_number")
+                if num is None or int(num) < 0:
+                    continue
+                existing = by_num.get(str(num))
+                if existing is not None:
+                    existing["cached"] = True
+                    if not existing.get("build_result") and cb.get("result"):
+                        existing["build_result"] = cb.get("result")
+                    if not existing.get("build_revision") and cb.get("revision"):
+                        existing["build_revision"] = cb.get("revision")
+                    cache_merge["merged"] += 1
+                    continue
+                rows.append({
+                    "run_id": f"__cached_{num}",
+                    "analyzed": False,
+                    "cached": True,
+                    "build_number": num,
+                    "build_revision": cb.get("revision"),
+                    "build_revision_is_head": False,
+                    "build_result": cb.get("result"),
+                    "timestamp": cb.get("timestamp_iso") or "",
+                    "changed_files_count": None,
+                    "changed_functions_count": None,
+                    "impact_counts": {},
+                    "max_asil": "",
+                    "max_asil_bucket": "unknown",
+                    "mcdc_required": False,
+                    "auto_docs": 0,
+                    "flag_docs": 0,
+                    "coverage_measured": False,
+                    "coverage_regressed": 0,
+                    "coverage_unmeasured_safety": 0,
+                    "partial_failure": False,
+                })
+                cache_merge["added"] += 1
+            if cache_merge["added"]:
+                rows.sort(key=lambda r: (r.get("build_number") is not None, r.get("build_number") or 0), reverse=True)
+        except Exception as exc:
+            # best-effort — 캐시 병합 실패해도 분석 타임라인은 유지(침묵 아님: note).
+            enrich_note = f"캐시 빌드 병합 실패(무시): {type(exc).__name__}"
     if ju and include_all:
         try:
             from datetime import datetime
@@ -487,5 +544,6 @@ def scm_build_timeline(entry_id: str, limit: int = 50, job_url: str = "", includ
         "rows": rows,
         "rollup": data.get("rollup") or {},
         "enrich_note": enrich_note,
+        "cache_merge": cache_merge,
         "snapshot_note": "정적·동적 분석은 현재 SCM 스냅샷 — 빌드별 결과는 추후 Jenkins 산출물 연동 시 각 빌드 행에 표시",
     }

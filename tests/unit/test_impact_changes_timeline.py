@@ -299,6 +299,50 @@ def test_scm_build_timeline_endpoint_404_unknown_entry(monkeypatch):
     assert exc.value.status_code == 404
 
 
+def test_scm_build_timeline_cache_merge(tmp_path, monkeypatch):
+    """cache_root(opt-in) 전달 시 로컬 캐시 빌드가 병합된다 — Jenkins 무의존(Phase E).
+
+    분석된 빌드(124)는 cached 주석만, 미분석 캐시 빌드(125)는 analyzed:false+cached:true 행.
+    """
+    from backend.routers import scm
+    from workflow import impact_changes
+
+    monkeypatch.setattr(impact_changes, "CHANGE_DIR", tmp_path / "impact_changes")
+    monkeypatch.setattr(scm, "get_registry_entry", lambda eid: {"id": eid})
+    impact_changes.write_change_log(
+        _record(run_id="impact_20260324_120000", build_number=124, build_revision="1053",
+                changed_types={"foo": "BODY"}, actions={"uds": {"mode": "AUTO", "status": "completed"}})
+    )
+    monkeypatch.setattr(
+        "backend.services.build_inventory.list_cached_builds_meta",
+        lambda **k: [
+            {"build_number": 125, "result": "SUCCESS", "timestamp_iso": "2026-07-24T13:00:11", "revision": "1075"},
+            {"build_number": 124, "result": "SUCCESS", "timestamp_iso": "2026-07-22T13:00:00", "revision": "1053"},
+        ],
+    )
+    resp = scm.scm_build_timeline("kj", limit=50, job_url="http://j/job/X/", cache_root=str(tmp_path))
+    assert resp["cache_merge"] == {"attempted": True, "merged": 1, "added": 1}
+    by = {r["build_number"]: r for r in resp["rows"]}
+    assert by[124]["analyzed"] is True and by[124]["cached"] is True
+    assert by[125]["analyzed"] is False and by[125]["cached"] is True
+    assert by[125]["build_revision"] == "1075" and by[125]["build_result"] == "SUCCESS"
+    assert by[125]["coverage_measured"] is False  # 미측정을 정상으로 위장하지 않음
+    # 정렬: 최신(125) 먼저
+    assert [r["build_number"] for r in resp["rows"]] == [125, 124]
+
+
+def test_scm_build_timeline_no_cache_root_keeps_legacy_shape(tmp_path, monkeypatch):
+    """cache_root 미전달 → 기존 동작 100%(cache_merge.attempted=False, 행 추가 없음)."""
+    from backend.routers import scm
+    from workflow import impact_changes
+
+    monkeypatch.setattr(impact_changes, "CHANGE_DIR", tmp_path / "impact_changes")
+    monkeypatch.setattr(scm, "get_registry_entry", lambda eid: {"id": eid})
+    resp = scm.scm_build_timeline("kj", limit=50, job_url="")
+    assert resp["cache_merge"] == {"attempted": False, "merged": 0, "added": 0}
+    assert resp["rows"] == []
+
+
 def test_scm_build_timeline_ssrf_fail_closed(tmp_path, monkeypatch):
     """job_url이 서버 baseUrl 하위가 아니면 서버 토큰을 싣지 않고 note로 고지(SSRF 차단)."""
     from backend.routers import scm

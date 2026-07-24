@@ -292,6 +292,45 @@ describe('ProjectSummarySection (재설계)', () => {
     delete window.__detailSection;
   });
 
+  it('Phase E: 서버 캐시 병합 행(analyzed:false, cached:true)은 "캐시 · 미분석" 배지 + 요청에 cache_root 동반', async () => {
+    mockTimeline = {
+      ...TIMELINE,
+      cache_merge: { attempted: true, merged: 1, added: 1 },
+      rows: [
+        {
+          run_id: '__cached_126', analyzed: false, cached: true, build_number: 126,
+          build_revision: '1075', build_result: 'SUCCESS', timestamp: '2026-07-24T13:00:11',
+          impact_counts: {}, max_asil_bucket: 'unknown', coverage_measured: false,
+        },
+        ...TIMELINE.rows,
+      ],
+    };
+    render(<ProjectSummarySection job={JOB} analysisResult={RESULT} />);
+    const row = (await screen.findByText('#126')).closest('tr');
+    expect(within(row).getByText('캐시 · 미분석')).toBeInTheDocument();
+    const { api } = await import('../api.js');
+    const timelineCall = api.mock.calls.find(([u]) => String(u).includes('build-timeline'));
+    expect(String(timelineCall[0])).toContain('cache_root=');
+  });
+
+  it('Phase E: Jenkins 병합이 캐시 행을 analyzed로 승격하지 않는다', async () => {
+    mockCfg = { username: 'u', token: 't', verifyTls: true };
+    mockTimeline = {
+      ...TIMELINE,
+      rows: [{
+        run_id: '__cached_126', analyzed: false, cached: true, build_number: 126,
+        build_revision: '1075', build_result: null, timestamp: '',
+        impact_counts: {}, max_asil_bucket: 'unknown', coverage_measured: false,
+      }],
+    };
+    mockAllBuilds = [{ number: 126, result: 'SUCCESS', timestamp: 1700000000000, revision: '1075' }];
+    render(<ProjectSummarySection job={JOB} analysisResult={RESULT} />);
+    const row = (await screen.findByText('#126')).closest('tr');
+    // Jenkins 목록에 있어도 분석된 것이 아니다 — 캐시·미분석 유지 + 결과는 보강됨.
+    expect(within(row).getByText('캐시 · 미분석')).toBeInTheDocument();
+    expect(within(row).getByText('SUCCESS')).toBeInTheDocument();
+  });
+
   it('전체 빌드 병합: Jenkins 목록의 미분석 빌드를 "미분석" 행으로 표시(비차단)', async () => {
     mockCfg = { username: 'u', token: 't', verifyTls: true };
     // timeline은 #125만 분석. Jenkins 목록엔 126(미분석)+125(분석).

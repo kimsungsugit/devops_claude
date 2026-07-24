@@ -165,6 +165,110 @@ def jenkins_prqa_delta(req: dict) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# 빌드 표면 확대 (Phase E) — 오프라인 메타 + 백필
+# ---------------------------------------------------------------------------
+
+
+@router.post("/api/jenkins/cached-builds-meta")
+def jenkins_cached_builds_meta(req: dict) -> Dict[str, Any]:
+    """캐시된 빌드 전량 + 오프라인 메타(result/timestamp/revision/보유 플래그).
+
+    Jenkins 연결 불필요 — status.json·소스 센티널 직독. "최신 N개만 보인다"의 근본
+    원인(캐시가 곧 상한)을 표면에서라도 정직하게: 캐시에 있는 만큼은 전부 보여준다.
+    """
+    body = req or {}
+    job_url = str(body.get("job_url") or "").strip()
+    if not job_url:
+        return {"ok": True, "available": False, "reason": "job_url_required", "builds": []}
+    cache_root = _normalize_jenkins_cache_root(str(body.get("cache_root") or ""))
+    from backend.services.build_inventory import list_cached_builds_meta
+
+    builds = list_cached_builds_meta(job_url=job_url, cache_root=cache_root)
+    if not builds:
+        return {"ok": True, "available": False, "reason": "no_cached_build", "builds": [], "count": 0}
+    return {"ok": True, "available": True, "reason": None, "builds": builds, "count": len(builds)}
+
+
+@router.post("/api/jenkins/sync-backfill")
+def jenkins_sync_backfill(req: dict) -> Dict[str, Any]:
+    """과거 빌드 일괄 캐시(백그라운드) — Jenkins 연결 시에만. 미도달은 정직 실패."""
+    from backend.services.build_inventory import list_cached_builds_meta
+    from backend.services.sync_backfill import (
+        MAX_BACKFILL_COUNT,
+        resolve_recent_build_numbers,
+        start_backfill,
+    )
+
+    body = req or {}
+    job_url = str(body.get("job_url") or "").strip()
+    if not job_url:
+        return {"ok": True, "available": False, "reason": "job_url_required"}
+    username = str(body.get("username") or "")
+    api_token = str(body.get("api_token") or "")
+    verify_tls = bool(body.get("verify_tls", True))
+    cache_root = _normalize_jenkins_cache_root(str(body.get("cache_root") or ""))
+    patterns = body.get("patterns") if isinstance(body.get("patterns"), list) else []
+    skip_cached = bool(body.get("skip_cached", True))
+
+    cached_numbers = {
+        n for n in (
+            _to_int(b.get("build_number"))
+            for b in list_cached_builds_meta(job_url=job_url, cache_root=cache_root)
+        ) if n is not None
+    }
+
+    raw_numbers = body.get("build_numbers")
+    if isinstance(raw_numbers, list) and raw_numbers:
+        numbers = [n for n in (_to_int(x) for x in raw_numbers) if n is not None]
+    else:
+        count = _to_int(body.get("count")) or 10
+        count = max(1, min(count, MAX_BACKFILL_COUNT))
+        try:
+            numbers = resolve_recent_build_numbers(
+                job_url=job_url, username=username, api_token=api_token,
+                verify_tls=verify_tls, count=count,
+                exclude=cached_numbers if skip_cached else set(),
+            )
+        except Exception as exc:
+            # Jenkins 미도달 — 캐시 상태로 위장하지 않는다(요약탭은 캐시 기반으로 계속 동작).
+            return {
+                "ok": True, "available": False, "reason": "jenkins_unreachable",
+                "detail": f"{type(exc).__name__}: {exc}",
+            }
+
+    skipped = sorted(n for n in numbers if n in cached_numbers) if skip_cached else []
+    accepted = [n for n in numbers if not (skip_cached and n in cached_numbers)]
+    if not accepted:
+        return {
+            "ok": True, "available": False, "reason": "nothing_to_backfill",
+            "skipped_cached": skipped,
+        }
+    started = start_backfill(
+        job_url=job_url, username=username, api_token=api_token, cache_root=cache_root,
+        verify_tls=verify_tls, patterns=[str(p) for p in patterns],
+        build_numbers=accepted,
+        scm_username=str(body.get("scm_username") or ""), scm_id=str(body.get("scm_id") or ""),
+    )
+    if not started.get("accepted"):
+        return {"ok": True, "available": False, "reason": started.get("reason"), "job_id": started.get("job_id")}
+    return {
+        "ok": True, "available": True, "reason": None,
+        "job_id": started["job_id"], "accepted": accepted, "skipped_cached": skipped,
+        "total": len(accepted),
+    }
+
+
+@router.get("/api/jenkins/sync-backfill-status/{job_id}")
+def jenkins_sync_backfill_status(job_id: str) -> Dict[str, Any]:
+    from backend.services.sync_backfill import backfill_status
+
+    status = backfill_status(job_id)
+    if status is None:
+        return {"ok": True, "available": False, "reason": "unknown_job_id"}
+    return {"ok": True, "available": True, **status}
+
+
+# ---------------------------------------------------------------------------
 # AI 인사이트 (Phase C) — 결정론 코어 + Gemini enrichment, on-demand + 디스크 캐시
 # ---------------------------------------------------------------------------
 

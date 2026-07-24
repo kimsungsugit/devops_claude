@@ -5883,7 +5883,8 @@ def jenkins_prqa_trend(req: dict) -> Dict[str, Any]:
         limit = int((req or {}).get("limit") or 15)
     except (TypeError, ValueError):
         limit = 15
-    limit = max(1, min(limit, 50))
+    # 상한 100 — 캐시 백필(sync-backfill)로 빌드가 늘어난 프로젝트의 트렌드 축 확장(Phase E).
+    limit = max(1, min(limit, 100))
     builds_meta = list_cached_builds(job_url=job_url, cache_root=cache_root)  # 최신순
     out: List[Dict[str, Any]] = []
 
