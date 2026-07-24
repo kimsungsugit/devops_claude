@@ -488,14 +488,17 @@ export default function SrsSdsSection({ job, analysisResult }) {
       if (typeof vcSum.vcast_input_rows === 'number' && vcSum.vcast_input_rows > 0) {
         const untraced = vcSum.vcast_untraced_rows ?? 0;
         if (untraced > 0) {
-          const appDesignGap = vcSum.unmapped_app_design_gap ?? 0;  // 진짜 미설계 앱 갭(UDS에도 없음) — 실 검토 대상
-          const udsLinked = vcSum.unmapped_uds_linked ?? 0;         // 단위설계+시험 완료 leaf(정당한 입도차 roll-up)
-          const boundary = (vcSum.unmapped_layer_bsw_driver ?? 0) + (vcSum.unmapped_layer_boot_reprog ?? 0)
-            + (vcSum.unmapped_layer_lib_util ?? 0) + (vcSum.unmapped_layer_test_artifact ?? 0);  // 정당한 범위경계
+          const appDesignGap = vcSum.unmapped_app_design_gap ?? 0;  // 진짜 미설계 앱 갭(APP_LEAF∩¬uds) — 실 검토 대상
+          const udsLinked = vcSum.unmapped_uds_linked ?? 0;         // 단위설계+시험 완료 leaf(in_uds, 정당한 입도차 roll-up)
+          const unresolved = vcSum.unmapped_layer_unresolved ?? 0;  // §H: SwUFn↔함수명 미해결(분류불가)
+          // 경계 미설계 = 전체 미설계(design_gap) − 앱갭 − 분류불가. design축 단일 분해라 파트합==미추적 distinct
+          // (기존 layer 기준 boundary는 in_uds 경계함수를 udsLinked와 중복집계하고 unresolved를 누락했다 — Info-1 정정).
+          const boundaryGap = Math.max(0, (vcSum.unmapped_design_gap ?? 0) - appDesignGap - unresolved);
           const parts = [];
-          if (appDesignGap) parts.push(`진짜 미설계 갭 ${appDesignGap}(검토 대상)`);
           if (udsLinked) parts.push(`단위설계+시험 완료 입도차 ${udsLinked}`);
-          if (boundary) parts.push(`범위경계(BSW·부트로더·라이브러리) ${boundary}`);
+          if (appDesignGap) parts.push(`진짜 미설계 갭 ${appDesignGap}(검토 대상)`);
+          if (boundaryGap) parts.push(`범위경계(BSW·부트·라이브러리) 미설계 ${boundaryGap}`);
+          if (unresolved) parts.push(`분류불가(SwUFn 미해결) ${unresolved}`);
           const tail = parts.length ? ` 내역: ${parts.join(' · ')} — 트리 'SRS 미추적 시험'에서 확인.` : '';
           stepWarnings.push(`전체 VectorCAST 대상 ${vcSum.vcast_input_rows}개 중 ${vcSum.vcast_traced_rows}개가 SRS까지 역추적됨. 나머지 ${untraced}개는 대부분 단위설계+시험까지 된 leaf(입도차) 또는 범위경계이며, 진짜 미설계 갭은 소수다(단위시험·PASS와 설계 추적성은 별개).${tail}`);
         }
@@ -3023,9 +3026,11 @@ function TraceUnmappedRoot({ unmapped, expanded, onToggle }) {
   // 미설계(in_uds=false)는 시험만 존재하는 진짜 설계 공백이라 빨강으로 별도 노출.
   // in_uds === false 만 갭으로 카운트(undefined=구 응답은 제외) — 버전 스큐 거짓 갭 방지(X6).
   const udsLinkedTotal = list.filter(u => u && u.in_uds === true).length;
-  // §H: '분류불가'(UNRESOLVED, SwUFn↔함수명 미해결)는 진짜 미설계 갭이 아니므로 제외 —
-  // 백엔드 unmapped_app_design_gap과 lockstep(over-report 방지, X6 데이터 일관성).
-  const designGapTotal = list.filter(u => u && u.in_uds === false && u.layer !== 'UNRESOLVED').length;
+  // 진짜 미설계 갭 = APP_LEAF ∩ ¬in_uds (Phase 1 6d16f2b: '실 finding'은 layer축이 아니라
+  // design축). 백엔드 unmapped_app_design_gap과 **정확히** lockstep — 경계(BSW/BOOT/LIB)·분류불가
+  // (UNRESOLVED)는 '진짜 설계 공백'이 아니므로 제외(트리 title '진짜 설계 공백'·경고배너와 동일 수).
+  // 경계 미설계는 아래 layer 배지가 별도 표기하므로 정보 손실 없음.
+  const designGapTotal = list.filter(u => u && u.in_uds === false && u.layer === 'APP_LEAF').length;
   // ISO 26262 SwDS 계층(라운드112) — '애플리케이션 설계 공백(app_leaf=실 finding)'과
   // '정당한 범위 경계(bsw/boot/lib)'를 분리 표기. 구 응답엔 layer 없어 카운트 0 → 자동 숨김.
   // 기존 버킷/색은 그대로 두고 보조 hint 라인만 추가(보수적 단계 노출).
