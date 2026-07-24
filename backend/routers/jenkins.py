@@ -5929,6 +5929,18 @@ def jenkins_prqa_trend(req: dict) -> Dict[str, Any]:
             }
         )
     out.reverse()  # 오래된→최신(트렌드 X축 방향)
+    # 인접 빌드 delta — 요약탭 타임라인 Δ컬럼/드릴다운 헤더 소비. 어느 한쪽 결측이면
+    # null(0 위장 금지 — ISO 정직성). 규칙×파일 단위 delta는 RCR 재파싱이 필요해
+    # /api/jenkins/prqa-delta(summary_insight 라우터)가 쌍 단위 on-demand로 제공한다.
+    prev: Dict[str, Any] | None = None
+    for r in out:
+        for k in ("violations", "diagnostics"):
+            r[f"{k}_delta"] = (
+                r[k] - prev[k]
+                if prev is not None and r.get(k) is not None and prev.get(k) is not None
+                else None
+            )
+        prev = r
     available = any(
         (r.get("violations") is not None) or (r.get("diagnostics") is not None) or (r.get("compliance") is not None)
         for r in out

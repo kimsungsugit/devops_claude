@@ -264,6 +264,8 @@ from backend.routers.sessions import router as _sessions_router  # noqa: E402
 app.include_router(_sessions_router)
 from backend.routers.scm import router as _scm_router  # noqa: E402
 app.include_router(_scm_router)
+from backend.routers.summary_insight import router as _summary_insight_router  # noqa: E402
+app.include_router(_summary_insight_router)
 from backend.routers.quality import router as _quality_router  # noqa: E402
 app.include_router(_quality_router)
 from backend.routers.swut import router as _swut_router  # noqa: E402

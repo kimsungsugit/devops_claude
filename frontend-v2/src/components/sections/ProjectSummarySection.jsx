@@ -75,8 +75,14 @@ export default function ProjectSummarySection({ job, analysisResult }) {
 
   const jobUrl = job?.url || analysisResult?.jobUrl || '';
   const cacheRoot = analysisResult?.cacheRoot || defaultCacheRoot(jobUrl);
-  const linkedDocs = useMemo(() => analysisResult?.matchedScm?.linked_docs || {}, [analysisResult]);
-  const sourceRoot = analysisResult?.matchedScm?.source_root || '';
+  // deep-review W1: analysisResult가 다른 Job의 것으로 증명되면(잡 전환 직후 stale 등)
+  // 그 문서 바인딩으로 추적성 매트릭스를 생성·영속하는 오귀속을 차단한다(scmId와 동일 게이트).
+  const docsConsistent = targetConsistent(analysisResult, job?.url);
+  const linkedDocs = useMemo(
+    () => (docsConsistent ? analysisResult?.matchedScm?.linked_docs || {} : {}),
+    [analysisResult, docsConsistent],
+  );
+  const sourceRoot = docsConsistent ? (analysisResult?.matchedScm?.source_root || '') : '';
   const scmId = useMemo(() => {
     if (!targetConsistent(analysisResult, job?.url)) return '';
     return analysisResult?.matchedScm?.id
@@ -152,6 +158,12 @@ export default function ProjectSummarySection({ job, analysisResult }) {
         let data = await post('/api/jenkins/uds/trace-summary', { job_url: jobUrl, cache_root: cacheRoot });
         if (cancelled) return;
         if (data?.has_data) { setTrace(data); return; }
+        if (!docsConsistent) {
+          // W1: stale 문서 바인딩으로는 생성하지 않는다 — analysisResult가 따라잡으면
+          // docsConsistent 변화로 이 effect가 재실행되어 정상 생성된다.
+          setTrace({ has_data: false, reason: '분석 결과가 현재 Job과 일치하지 않아 자동 생성 보류 — 대시보드에서 이 프로젝트를 다시 불러오세요' });
+          return;
+        }
         setTraceGen(true);
         const gen = await buildTraceMatrix({ linkedDocs, sourceRoot, jobUrl, cacheRoot, buildSelector: 'lastSuccessfulBuild' });
         if (cancelled) return;
@@ -168,7 +180,7 @@ export default function ProjectSummarySection({ job, analysisResult }) {
       }
     })();
     return () => { cancelled = true; };
-  }, [jobUrl, cacheRoot, traceTick, linkedDocs, sourceRoot]);
+  }, [jobUrl, cacheRoot, traceTick, linkedDocs, sourceRoot, docsConsistent]);
   const traceBusy = (!!jobUrl && trace == null) || traceGen;
 
   // ── PRQA 빌드별 트렌드 ──
@@ -187,7 +199,20 @@ export default function ProjectSummarySection({ job, analysisResult }) {
 
   // 분석된 빌드(timeline change-log) + 전체 Jenkins 빌드(allBuilds) 병합 — 미분석은 analyzed:false 행.
   const rows = useMemo(() => {
-    const analyzed = timeline?.rows || [];
+    // deep-review W2: 동일 build_number 재분석 시 최신 실행을 채택한다. rows는 최신순이라
+    // '첫 등장 우선' = 최신 우선 — 이전 last-write-wins는 구 분석이 최신을 가렸다.
+    const analyzed = [];
+    {
+      const seen = new Set();
+      for (const r of timeline?.rows || []) {
+        const key = r.build_number != null ? String(r.build_number) : null;
+        if (key != null) {
+          if (seen.has(key)) continue;
+          seen.add(key);
+        }
+        analyzed.push(r);
+      }
+    }
     if (!Array.isArray(allBuilds) || allBuilds.length === 0) return analyzed;
     const byNum = new Map();
     for (const r of analyzed) if (r.build_number != null) byNum.set(String(r.build_number), r);
@@ -226,9 +251,13 @@ export default function ProjectSummarySection({ job, analysisResult }) {
     const list = [];
     const t = trace?.has_data ? trace : null;
     if (t) {
-      const gate = classifyGate(t.coverage_pct);
-      if (gate === 'FAIL') list.push({ label: `커버리지 미달 ${Math.round(t.coverage_pct || 0)}%`, sev: 'danger' });
-      else if (gate === 'WARN') list.push({ label: `커버리지 주의 ${Math.round(t.coverage_pct || 0)}%`, sev: 'warn' });
+      // classifyGate는 소문자('pass'|'warn'|'fail') 반환 — 대문자 비교는 영구 미발동이었다.
+      // null 커버리지는 classify 자체를 건너뜀(null이 'fail'로 떨어지는 허위 미달 방지 — 증거부재≠미달).
+      if (t.coverage_pct != null) {
+        const gate = classifyGate(t.coverage_pct);
+        if (gate === 'fail') list.push({ label: `커버리지 미달 ${Math.round(t.coverage_pct)}%`, sev: 'danger' });
+        else if (gate === 'warn') list.push({ label: `커버리지 주의 ${Math.round(t.coverage_pct)}%`, sev: 'warn' });
+      }
       if ((t.uncovered || 0) > 0) list.push({ label: `미추적 요구 ${t.uncovered}`, sev: 'warn' });
       if ((t.asil_gap_count || 0) > 0) list.push({ label: `ASIL 시험 미달 ${t.asil_gap_count}`, sev: 'danger' });
       if ((t.asil_unknown_count || 0) > 0) list.push({ label: `ASIL 미상 ${t.asil_unknown_count}`, sev: 'warn' });
@@ -268,7 +297,8 @@ export default function ProjectSummarySection({ job, analysisResult }) {
           ? <Pill text={`⚠ 문제 ${problems.length}건`} color="var(--color-danger)" />
           : (trace?.has_data && <Pill text="이상 없음" color="var(--color-success)" />)}
         <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', marginLeft: 'auto' }}>
-          r{revRange.base_ref || '—'} → r{revRange.max_build_revision ?? '—'} · 분석 {fmtInt(rollup.analyzed_build_count)}빌드
+          {/* '분석 N회' — rollup은 실행(run) 단위 집계라 재분석 시 표시 행수(빌드 dedup)와 다를 수 있다(deep-review W-A). */}
+          r{revRange.base_ref || '—'} → r{revRange.max_build_revision ?? '—'} · 분석 {fmtInt(rollup.analyzed_build_count)}회
         </span>
       </div>
 

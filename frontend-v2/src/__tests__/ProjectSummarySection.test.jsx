@@ -42,6 +42,7 @@ vi.mock('../traceMatrix.js', () => ({
 }));
 
 const { default: ProjectSummarySection } = await import('../components/sections/ProjectSummarySection.jsx');
+const { buildTraceMatrix } = await import('../traceMatrix.js');
 
 const JOB = { name: 'kjpds02_pv', url: 'http://jenkins/job/KJPDS02_PV/' };
 const RESULT = {
@@ -180,6 +181,57 @@ describe('ProjectSummarySection (재설계)', () => {
     // 자동생성 후 재조회로 추적성 현황(생성 시각·미추적 KPI) 표시
     expect(await screen.findByText(/생성 시각/)).toBeInTheDocument();
     expect(screen.getByText('미추적 요구 8')).toBeInTheDocument();
+  });
+
+  it('커버리지 게이트: 미달(fail)이면 문제점 배너에 danger 칩(소문자 계약 회귀 방지)', async () => {
+    mockTrace = { ...TRACE, coverage_pct: 45 };
+    render(<ProjectSummarySection job={JOB} analysisResult={RESULT} />);
+    expect(await screen.findByText('커버리지 미달 45%')).toBeInTheDocument();
+  });
+
+  it('커버리지 게이트: 주의(warn) 구간 칩', async () => {
+    mockTrace = { ...TRACE, coverage_pct: 65 };
+    render(<ProjectSummarySection job={JOB} analysisResult={RESULT} />);
+    expect(await screen.findByText('커버리지 주의 65%')).toBeInTheDocument();
+  });
+
+  it('커버리지 게이트: null이면 칩 없음(증거부재≠미달 — 허위 0% 경보 금지)', async () => {
+    mockTrace = { ...TRACE, coverage_pct: null };
+    render(<ProjectSummarySection job={JOB} analysisResult={RESULT} />);
+    expect(await screen.findByText('미추적 요구 8')).toBeInTheDocument(); // 배너 자체는 정상
+    expect(screen.queryByText(/커버리지 미달/)).toBeNull();
+    expect(screen.queryByText(/커버리지 주의/)).toBeNull();
+  });
+
+  it('W2: 동일 빌드 재분석 시 최신 분석 행을 채택한다(구 분석이 최신을 가리지 않음)', async () => {
+    const mk = (runId, ts, fns) => ({
+      run_id: runId, timestamp: ts, build_number: 125, build_revision: '1053',
+      base_ref: '1018', changed_files_count: 1, changed_functions_count: fns,
+      impact_counts: { direct: 1, indirect_1hop: 0, indirect_2hop: 0 },
+      max_asil: 'QM', max_asil_bucket: 'unknown', mcdc_required: false,
+      auto_docs: 1, flag_docs: 0, coverage_regressed: 0, coverage_unmeasured_safety: 0,
+      coverage_measured: true, partial_failure: false, before_payload_unavailable: false,
+    });
+    // rows는 최신순 — 재분석(신, 함수 9)과 원분석(구, 함수 5)이 같은 #125.
+    mockTimeline = {
+      ok: true, entry_id: 'kj',
+      rows: [mk('r-new', '2026-03-24T13:00:00', 9), mk('r-old', '2026-03-24T12:00:00', 5)],
+      rollup: { analyzed_build_count: 2, distinct_changed_functions: 9, asil_distribution: {}, revision_range: {} },
+    };
+    render(<ProjectSummarySection job={JOB} analysisResult={RESULT} />);
+    const cells = await screen.findAllByText('#125');
+    expect(cells).toHaveLength(1); // 중복 행 없음
+    const row = cells[0].closest('tr');
+    expect(within(row).getByText('9')).toBeInTheDocument(); // 최신 분석 값
+  });
+
+  it('W1: analysisResult가 다른 Job의 것이면 추적성 자동생성을 보류한다(오귀속 차단)', async () => {
+    mockTrace = { has_data: false };
+    mockTraceGenSuccess = true; // 생성이 허용됐다면 성공했을 상황
+    const staleResult = { ...RESULT, jobUrl: 'http://jenkins/job/OTHER_JOB/' };
+    render(<ProjectSummarySection job={JOB} analysisResult={staleResult} />);
+    expect(await screen.findByText(/자동 생성 보류/)).toBeInTheDocument();
+    expect(buildTraceMatrix).not.toHaveBeenCalled();
   });
 
   it('전체 빌드 병합: Jenkins 목록의 미분석 빌드를 "미분석" 행으로 표시(비차단)', async () => {
