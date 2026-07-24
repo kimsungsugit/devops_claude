@@ -15,6 +15,7 @@ export default function SrsSdsSection({ job, analysisResult }) {
   const [loading, setLoading] = useState(false);
   const [loadProgress, setLoadProgress] = useState('');  // step description
   const [warnings, setWarnings] = useState([]);           // partial failure warnings
+  const [notices, setNotices] = useState([]);             // 정보성 요약(경고 아님) — 추적성 참고 배너
   // 표시 중인 매트릭스가 방금 생성한 fresh인지, 저장분에서 복원됐는지(모듈캐시/localStorage) 구분.
   // stale을 fresh로 위장하지 않기 위한 정직성 표식 — 복원 시 {savedAt} 세팅, fresh 생성 시 null.
   const [restoredMeta, setRestoredMeta] = useState(null);
@@ -166,6 +167,7 @@ export default function SrsSdsSection({ job, analysisResult }) {
     if (cached) {
       setMatrix(cached.data);
       setWarnings(cached.data?._warnings || []);   // 저장 시점 경고 재노출(silent 은폐 방지)
+      setNotices(cached.data?._notices || []);     // 정보성 요약도 함께 복원
       setRestoredMeta({ savedAt: cached.savedAt, stale: false });  // 정확 키 일치 = current(clean)
       toast('info', '캐시된 매트릭스를 사용합니다. 새로 생성하려면 새로고침을 누르세요.');
       return;
@@ -173,7 +175,9 @@ export default function SrsSdsSection({ job, analysisResult }) {
 
     setLoading(true);
     setWarnings([]);
+    setNotices([]);
     const stepWarnings = [];
+    const stepNotices = [];   // 정보성 요약(경고 아님) — 배너를 warnings와 분리해 amber 경고와 안 섞이게
     const dataSources = [];  // track which sources contributed
 
     try {
@@ -491,16 +495,22 @@ export default function SrsSdsSection({ job, analysisResult }) {
           const appDesignGap = vcSum.unmapped_app_design_gap ?? 0;  // 진짜 미설계 앱 갭(APP_LEAF∩¬uds) — 실 검토 대상
           const udsLinked = vcSum.unmapped_uds_linked ?? 0;         // 단위설계+시험 완료 leaf(in_uds, 정당한 입도차 roll-up)
           const unresolved = vcSum.unmapped_layer_unresolved ?? 0;  // §H: SwUFn↔함수명 미해결(분류불가)
-          // 경계 미설계 = 전체 미설계(design_gap) − 앱갭 − 분류불가. design축 단일 분해라 파트합==미추적 distinct
-          // (기존 layer 기준 boundary는 in_uds 경계함수를 udsLinked와 중복집계하고 unresolved를 누락했다 — Info-1 정정).
-          const boundaryGap = Math.max(0, (vcSum.unmapped_design_gap ?? 0) - appDesignGap - unresolved);
+          // ¬uds로 필터된 unmapped_test_artifact_gap 사용 — 전체 layer_test_artifact는 TEST_ARTIFACT∩in_uds
+          // 이론적 반례 시 design_gap에서 이중차감→음수클램프로 범위경계를 은닉한다(deep-review W1). 구 백엔드
+          // (필드 부재, 미재시작)는 layer_test_artifact로 폴백해 이전 동작 유지.
+          const testArtifact = vcSum.unmapped_test_artifact_gap ?? vcSum.unmapped_layer_test_artifact ?? 0;  // Range 등 시험 산출물(¬uds)
+          // design축(¬uds) 단일 분해: design_gap = 앱갭 + 분류불가 + 시험산출물 + 범위경계. 파트합 == design_gap 유지.
+          // (기존엔 testArtifact를 빼지 않아 Range 같은 시험 산출물이 '범위경계 미설계'로 오라벨됐다 — 정정.)
+          const boundaryGap = Math.max(0, (vcSum.unmapped_design_gap ?? 0) - appDesignGap - unresolved - testArtifact);
           const parts = [];
           if (udsLinked) parts.push(`단위설계+시험 완료 입도차 ${udsLinked}`);
           if (appDesignGap) parts.push(`진짜 미설계 갭 ${appDesignGap}(검토 대상)`);
-          if (boundaryGap) parts.push(`범위경계(BSW·부트·라이브러리) 미설계 ${boundaryGap}`);
+          if (boundaryGap) parts.push(`범위경계(BSW·부트·라이브러리) ${boundaryGap}`);
+          if (testArtifact) parts.push(`시험 산출물 ${testArtifact}(Range 등, 추적 대상 아님)`);
           if (unresolved) parts.push(`분류불가(SwUFn 미해결) ${unresolved}`);
           const tail = parts.length ? ` 내역: ${parts.join(' · ')} — 트리 'SRS 미추적 시험'에서 확인.` : '';
-          stepWarnings.push(`전체 VectorCAST 대상 ${vcSum.vcast_input_rows}개 중 ${vcSum.vcast_traced_rows}개가 SRS까지 역추적됨. 나머지 ${untraced}개는 대부분 단위설계+시험까지 된 leaf(입도차) 또는 범위경계이며, 진짜 미설계 갭은 소수다(단위시험·PASS와 설계 추적성은 별개).${tail}`);
+          // 정보성 요약(경고 아님) — 별도 notices 채널로 분리해 amber 경고 박스와 섞이지 않게 한다.
+          stepNotices.push(`전체 VectorCAST 대상 ${vcSum.vcast_input_rows}개 중 ${vcSum.vcast_traced_rows}개가 SRS까지 역추적됨. 나머지 ${untraced}개는 대부분 단위설계+시험까지 된 leaf(입도차) 또는 범위경계이며, 진짜 미설계 갭은 소수다(단위시험·PASS와 설계 추적성은 별개).${tail}`);
         }
       }
       // Attach metadata
@@ -513,6 +523,7 @@ export default function SrsSdsSection({ job, analysisResult }) {
       // 은폐)는 '경고 동반 저장 + 복원 시 재노출'로 해소된다 — 복원돼도 경고가 그대로 보이므로 은폐가
       // 아니다. 따라서 zero-warning 게이트를 제거하고 항상 저장한다(saveTraceMatrix가 렌더 불가면 no-op).
       data._warnings = stepWarnings;
+      data._notices = stepNotices;
       setMatrix(data);
       setRestoredMeta(null);  // 방금 생성한 fresh — 복원 배지 숨김(stale 위장 방지)
       // binding(활성 문서 기준)도 함께 저장 — 정확 키 miss 시에도 같은 프로젝트면 마지막 결과를
@@ -527,6 +538,7 @@ export default function SrsSdsSection({ job, analysisResult }) {
       setLoading(false);
       setLoadProgress('');
       if (stepWarnings.length > 0) setWarnings(stepWarnings);
+      if (stepNotices.length > 0) setNotices(stepNotices);
     }
     // ⚠ activeScm(위 :150에서 source_root 가 요청 body 에 실린다)이 **어느 dep 에도 안
     // 들어 있었다**. scmId 는 activeScm?.id 문자열이고, docPaths·linkedDocs 는 linked_docs
@@ -580,6 +592,7 @@ export default function SrsSdsSection({ job, analysisResult }) {
       if (!matrix || restoredMeta?.stale) {
         setMatrix(exact.data);
         setWarnings(exact.data?._warnings || []);   // 저장 시점 경고 재노출(silent 은폐 방지)
+        setNotices(exact.data?._notices || []);     // 정보성 요약도 함께 복원
         setRestoredMeta({ savedAt: exact.savedAt, stale: false });
       }
       return;
@@ -601,6 +614,7 @@ export default function SrsSdsSection({ job, analysisResult }) {
     if (last) {
       setMatrix(last.data);
       setWarnings(last.data?._warnings || []);   // 저장 시점 경고 재노출(stale이어도 은폐 안 함)
+      setNotices(last.data?._notices || []);     // 정보성 요약도 함께 복원
       setRestoredMeta({ savedAt: last.savedAt, stale: true });
     }
     /* eslint-enable react-hooks/set-state-in-effect */
@@ -917,6 +931,14 @@ export default function SrsSdsSection({ job, analysisResult }) {
           <div style={{ margin: '8px 0', padding: '8px 12px', background: '#fef3c7', border: '1px solid #fcd34d', borderRadius: 6, fontSize: 12 }}>
             <div style={{ fontWeight: 600, marginBottom: 4 }}>일부 데이터 소스에서 경고가 발생했습니다:</div>
             {warnings.map((w, i) => <div key={i} style={{ color: '#92400e' }}>• {w}</div>)}
+          </div>
+        )}
+
+        {/* 추적성 요약(참고) — 경고 아님. 정상 데이터의 정보성 안내라 중립 톤으로 warnings와 분리 렌더 */}
+        {notices.length > 0 && (
+          <div style={{ margin: '8px 0', padding: '8px 12px', background: 'var(--bg-elevated)', border: '1px solid var(--border)', borderRadius: 6, fontSize: 12, color: 'var(--text-muted)', lineHeight: 1.5 }}>
+            <div style={{ fontWeight: 600, marginBottom: 4, color: 'var(--fg)' }}>ℹ 추적성 요약 (참고)</div>
+            {notices.map((n, i) => <div key={i} style={{ color: 'var(--text-muted)' }}>• {n}</div>)}
           </div>
         )}
 
@@ -1962,7 +1984,7 @@ function TraceMatrix({ matrix, focusFunctions = null, onClearFocus = null,
     // 역방향 추적성 공백 — 'SRS 미추적 시험'(시험됐으나 이 SRS에 안 닿음) 별도 섹션.
     if (unmappedVcast.length > 0) {
       csvRows.push('');
-      csvRows.push(csvEscape(`# SRS 미추적 시험 (역방향 공백 ${unmappedVcast.length}종 — 시험됐으나 이 SRS 요구사항 미명세)`));
+      csvRows.push(csvEscape(`# SRS 미추적 시험 (역추적 미연결 ${unmappedVcast.length}종 — 시험됐으나 이 SRS 요구사항에 연결 안 됨, 대부분 정당한 입도차)`));
       csvRows.push(['Subprogram', '해석된 함수', 'SDS 설계', 'UDS 설계', 'ISO계층', '분류', 'VectorCAST 결과'].join(','));
       for (const u of unmappedVcast) {
         const sr = Array.isArray(u.sds_reqs) ? u.sds_reqs : [];
@@ -2337,9 +2359,9 @@ function TraceMatrix({ matrix, focusFunctions = null, onClearFocus = null,
         {/* 트리 전용: SRS 미추적 시험(역방향 공백) 별도 루트 표시 토글 — 데이터 있을 때만 노출 */}
         {viewMode === 'tree' && unmappedVcast.length > 0 && (
           <label style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11, cursor: 'pointer', color: 'var(--fg)', userSelect: 'none' }}
-            title="시험은 됐지만 이 SRS 요구사항에 추적되지 않는 VectorCAST 함수를 트리 하단에 별도 루트로 표시 (역방향 추적성 공백)">
+            title="시험은 됐으나 이 SRS 요구사항에 연결 안 된 VectorCAST 함수를 트리 하단에 별도 루트로 표시 — 대부분 정당한 입도차">
             <input type="checkbox" checked={includeUnmapped} onChange={e => setIncludeUnmapped(e.target.checked)} style={{ cursor: 'pointer' }} />
-            SRS 미추적 시험 포함 ({unmappedVcast.length})
+            역추적 안 된 시험 함수 표시 ({unmappedVcast.length})
           </label>
         )}
         <button className="btn-sm" onClick={exportCSV} title="CSV 내보내기" style={{ fontSize: 11 }}>
@@ -3057,14 +3079,14 @@ function TraceUnmappedRoot({ unmapped, expanded, onToggle }) {
         aria-label={`SRS 미추적 시험 ${list.length}건 ${isOpen ? '접기' : '펼치기'}`}
         onClick={() => onToggle(nodeId)}
         onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onToggle(nodeId); } }}
-        style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 12px', cursor: 'pointer', flexWrap: 'wrap', background: COVERAGE_COLORS.partial.bg + '40' }}
+        style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 12px', cursor: 'pointer', flexWrap: 'wrap', background: 'var(--bg-elevated)' }}
       >
         <span style={{ fontFamily: 'monospace', fontSize: 11 }}>{isOpen ? '▼' : '▶'}</span>
         <span style={{ fontWeight: 700, fontSize: 12 }}>🔎 SRS 미추적 시험</span>
         <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
           시험은 했으나 이 SRS 요구사항에 안 닿는 VectorCAST 함수 {list.length}종(중복 제거)
           {failTotal > 0 && <span style={{ color: '#dc2626', fontWeight: 600 }}> · {failTotal} fail</span>}
-          {safetyTotal > 0 && <span style={{ color: COVERAGE_COLORS.partial.fg, fontWeight: 700 }}> · ⚠ {safetyTotal} 안전</span>}
+          {safetyTotal > 0 && <span style={{ color: 'var(--text-muted)', fontWeight: 600 }} title="안전/진단 토큰 함수 — ISO 26262 역추적 검토 우선순위(참고 신호, 결함 아님)"> · 🛡 {safetyTotal} 안전</span>}
           {sdsLinkedTotal > 0 && <span style={{ color: COVERAGE_COLORS.partial.fg, fontWeight: 600 }} title="SDS 설계엔 명세됐으나 그 요구사항이 SRS 추적 매트릭스 밖(부분추적)"> · {sdsLinkedTotal} SDS부분</span>}
           {udsLinkedTotal > 0 && <span style={{ color: COVERAGE_COLORS.covered.fg, fontWeight: 600 }} title="UDS 단위설계엔 함수가 존재 — 시험+단위설계 완료, SDS 아키텍처 roll-up만 누락(정당한 입도차)"> · {udsLinkedTotal} UDS설계</span>}
           {designGapTotal > 0 && <span style={{ color: COVERAGE_COLORS.uncovered.fg, fontWeight: 700 }} title="UDS 단위설계에도 없음 — 시험만 존재하는 진짜 설계 공백(검토 우선순위 높음)"> · {designGapTotal} 미설계</span>}
@@ -3072,16 +3094,16 @@ function TraceUnmappedRoot({ unmapped, expanded, onToggle }) {
         {hasLayers && (
           <span style={{ flexBasis: '100%', fontSize: 11, color: 'var(--text-muted)', paddingLeft: 22 }}>
             ISO 26262 계층:
-            {layerCounts.APP_LEAF > 0 && <span style={{ color: COVERAGE_COLORS.partial.fg, fontWeight: 700 }} title="애플리케이션 구현 leaf 함수가 SDS에 함수단위로 미명세 — 아키텍처→유닛 roll-up 공백(실제 추적성 finding, 검토 권장)"> APP {layerCounts.APP_LEAF}</span>}
+            {layerCounts.APP_LEAF > 0 && <span title="애플리케이션 leaf 함수 — 대부분 단위설계(UDS)+시험 완료된 정당한 입도차(부모 SwUFn roll-up). 진짜 갭은 UDS에도 없는 것만(별도 '미설계' 뱃지)."> APP {layerCounts.APP_LEAF}</span>}
             {layerCounts.BOOT_REPROG > 0 && <span title="부트로더/재프로그래밍/EEPROM — SDS에 컴포넌트로 존재(컴포넌트 추적 성립), 별도 부트 설계 범위"> · 부트 {layerCounts.BOOT_REPROG}</span>}
             {layerCounts.BSW_DRIVER > 0 && <span title="기반 SW/드라이버(HAL·LIN/CAN) — BSW 설계명세/플랫폼 범위에서 추적(애플리케이션 SDS 범위 밖)"> · BSW {layerCounts.BSW_DRIVER}</span>}
             {layerCounts.LIB_UTIL > 0 && <span title="범용 라이브러리/연산 유틸 — 호출처 컴포넌트 설계에 라이브러리로 귀속 추적"> · LIB {layerCounts.LIB_UTIL}</span>}
             {layerCounts.TEST_ARTIFACT > 0 && <span title="시험 산출물/스텁 — 추적 대상 아님"> · 시험 {layerCounts.TEST_ARTIFACT}</span>}
-            {layerCounts.UNRESOLVED > 0 && <span style={{ color: COVERAGE_COLORS.partial.fg, fontWeight: 700 }} title="SwUFn ID↔함수명 미해결 — 분류 불가(진짜 설계 갭 판정 보류, app 갭 오집계 방지)"> · 분류불가 {layerCounts.UNRESOLVED}</span>}
-            <span style={{ color: COVERAGE_COLORS.partial.fg }} title="APP=애플리케이션 설계 공백(실 finding) / 부트·BSW·LIB=정당한 범위 경계"> ⓘ</span>
+            {layerCounts.UNRESOLVED > 0 && <span title="SwUFn ID↔함수명 미해결 — 분류 보류(진짜 설계 갭으로 단정 안 함, app 갭 오집계 방지)"> · 분류불가 {layerCounts.UNRESOLVED}</span>}
+            <span title="APP·부트·BSW·LIB은 코드 계층 분류(대부분 정당한 입도차·범위경계). 진짜 설계 갭은 별도 '미설계' 뱃지로만 표시."> ⓘ</span>
           </span>
         )}
-        <span style={{ marginLeft: 'auto', fontSize: 10, color: 'var(--text-muted)' }}>역방향 추적성 공백</span>
+        <span style={{ marginLeft: 'auto', fontSize: 10, color: 'var(--text-muted)' }}>역추적(시험→요구) 미연결</span>
       </div>
       {isOpen && (
         <ul style={{ listStyle: 'none', margin: 0, padding: '0 12px 8px 30px', background: 'var(--bg)' }}>
@@ -3103,7 +3125,7 @@ function TraceUnmappedBucket({ bucket, items, parentId, expanded, onToggle }) {
   const failN = list.filter(u => /^(fail|failed|false|0)$/i.test(String(u.result || ''))).length;
   const safetyN = list.filter(u => u && u.safety).length;  // 안전/진단 토큰 보유(W4)
   // 안전 항목이 있으면 비-warn 버킷(vcast_only/isr)이라도 amber로 승격 — 검토 신호 보존.
-  const warn = (bucket.warn || safetyN > 0) && list.length > 0;
+  const warn = bucket.warn && list.length > 0;   // safety는 중립 신호(🛡)라 버킷 amber 승격 안 함(intrinsic warn만)
   // 안전 항목을 버킷 상단으로 정렬(잘림/스크롤 시 우선 노출). 안전 없으면 원순서 유지.
   const sorted = safetyN > 0 ? [...list].sort((a, b) => (b && b.safety ? 1 : 0) - (a && a.safety ? 1 : 0)) : list;
   return (
@@ -3126,7 +3148,7 @@ function TraceUnmappedBucket({ bucket, items, parentId, expanded, onToggle }) {
           {warn ? '⚠ ' : ''}{bucket.label}
         </span>
         <span style={{ color: empty ? '#9ca3af' : 'var(--text-muted)' }}>
-          {list.length}개{failN > 0 ? ` · ${failN} fail` : ''}{safetyN > 0 ? ` · ⚠ ${safetyN} 안전` : ''}
+          {list.length}개{failN > 0 ? ` · ${failN} fail` : ''}{safetyN > 0 ? ` · 🛡 ${safetyN} 안전` : ''}
         </span>
       </div>
       {isOpen && (
@@ -3153,10 +3175,10 @@ function TraceUnmappedBucket({ bucket, items, parentId, expanded, onToggle }) {
                 // 시험만 존재하는 진짜 설계 공백을 빨강으로 강조(사용자 질문: "uds랑은 연동돼 있나").
                 const uf = Array.isArray(u.uds_funcs) ? u.uds_funcs : [];
                 return (
-                  <tr key={i} style={{ borderBottom: '1px solid var(--border)', background: u && u.safety ? COVERAGE_COLORS.partial.bg + '60' : undefined }}>
+                  <tr key={i} style={{ borderBottom: '1px solid var(--border)', background: u && u.safety ? 'var(--bg-elevated)' : undefined }}>
                     <td style={{ padding: '3px 6px', fontFamily: 'monospace', fontWeight: u && u.safety ? 700 : undefined }}
-                      title={u && u.safety ? '안전/진단 토큰 보유 — SRS 미추적이나 백워드 추적성 검토 권장' : undefined}>
-                      {u && u.safety ? '⚠ ' : ''}{u.subprogram || '-'}
+                      title={u && u.safety ? '안전/진단 토큰 보유 — 역추적 검토 참고(결함 아님)' : undefined}>
+                      {u && u.safety ? '🛡 ' : ''}{u.subprogram || '-'}
                     </td>
                     <td style={{ padding: '3px 6px', fontFamily: 'monospace', color: 'var(--text-muted)' }}>
                       {(Array.isArray(u.resolved_funcs) && u.resolved_funcs.length) ? u.resolved_funcs.join(', ') : '—'}

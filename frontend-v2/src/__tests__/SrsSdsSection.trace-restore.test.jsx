@@ -113,6 +113,19 @@ describe('SrsSdsSection — 추적성 매트릭스 마운트 복원', () => {
     expect(await screen.findByText(/CACHE-HIT 경고 ABC/)).toBeInTheDocument();
   });
 
+  it('복원 시 저장된 정보성 요약(notices)을 별도 중립 채널로 재노출한다(A1 — 경고 아님)', async () => {
+    // 정보성 배너(627 대부분 입도차 등)를 warnings가 아닌 notices 채널로 분리 저장·복원한다.
+    // cache-hit 경로(traceFocus로 격리, L168)에서 _notices가 되살아나는지 검증(setNotices 배선 보증).
+    saveTraceMatrix(keyOf(), bindingOf(), { ...mkMatrix(), _notices: ['NOTICE 요약 문구 DEF'] });
+    localStorage.setItem('devops_v2_trace_focus', JSON.stringify({ functions: ['fn_a'], ts: Date.now() }));
+    render(<SrsSdsSection job={JOB} analysisResult={mkResult()} />);
+    expect(await screen.findByText(/💾\s*저장된 결과/)).toBeInTheDocument();
+    expect(await screen.findByText(/NOTICE 요약 문구 DEF/)).toBeInTheDocument();
+    // '경고 발생' 헤더가 아니라 중립 '추적성 요약(참고)' 박스에 떠야 한다(경고 채널과 분리).
+    expect(screen.getByText(/추적성 요약 \(참고\)/)).toBeInTheDocument();
+    expect(screen.queryByText(/경고가 발생했습니다/)).not.toBeInTheDocument();
+  });
+
   it('clean 복원 매트릭스에 VectorCAST 결과(vcast_input_rows>0)가 있으면 빌드 기준 시점을 화면에 폭로한다(W1/Mechanism A 완화)', async () => {
     // exact 히트라 💾 clean이지만, VectorCAST 합부/커버리지는 저장 시점 빌드(lastSuccessfulBuild) 기준.
     // cacheKey에 빌드번호가 없어(백엔드 결합) 새 빌드 회귀를 exact-hit가 못 거른다 → 프론트는 이를

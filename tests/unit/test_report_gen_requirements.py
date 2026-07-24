@@ -794,6 +794,98 @@ class TestGenerateUdsTraceabilityMatrix:
         assert s["unmapped_layer_unresolved"] == 0, s          # UNRESOLVED 아님
         assert s["unmapped_app_design_gap"] == 1, s      # 정당한 APP_LEAF 갭 유지
 
+    def test_test_artifact_gap_field_filters_uds(self):
+        """FE-W1(deep-review): unmapped_test_artifact_gap = TEST_ARTIFACT ∩ ¬uds (배너 design축 분해용).
+        app_design_gap과 동형 — 전체 layer_test_artifact와 달리 ¬uds 필터라 boundaryGap 이중차감 방지."""
+        from report_gen.requirements import generate_uds_traceability_matrix
+        items = [{"id": "SwTR_001"}]
+        # 'Range'는 non-identifier → TEST_ARTIFACT, UDS 인벤토리 미매칭 → in_uds=False
+        vcast = [{"source": "VectorCAST", "subprogram": "Range", "testcase": "TC_01", "result": "pass"}]
+        out = generate_uds_traceability_matrix(items, vcast_rows=vcast)
+        s = out["summary"]
+        assert s["unmapped_layer_test_artifact"] == 1, s
+        assert s["unmapped_test_artifact_gap"] == 1, s   # in_uds=False라 design gap에도 포함
+        # design 분해 불변식: design_gap = app_gap + unresolved + test_artifact_gap + boundary(여기선 0)
+        assert s["unmapped_design_gap"] == 1, s
+        assert s["unmapped_app_design_gap"] == 0, s
+
+
+class TestClassifyUnmappedLayerTokens:
+    """ISO 계층 분류 정규식 보정(비앵커 인프라 토큰 추가) — 저수준 드라이버/부트/유틸을
+    올바른 계층으로 분류하고, 정상 APP 함수는 오삼키지 않음을 검증(실데이터 검증분 고정)."""
+
+    def test_bsw_tokens(self):
+        from report_gen.requirements import _classify_unmapped_layer as clf
+        # 타이머/CPU/포트핀/Processor Expert/드라이브IC — BSW로 복구돼야 함
+        for nm in [
+            "tim0_ch0_isr", "tim0_init", "rti_init", "systicktimer_interrupt",
+            "cpu_interrupt", "cpu_machineexception", "u8s_cpupllstatuscheck",
+            "pe_initialize_gpio", "pe_low_level_init", "pp1_buzzer_pwm_init",
+            "pp2_motor_pwm2_in2_init", "pj0_motor_nhz1_putval", "pl0_wake_up_interrupt",
+            "pad4_snsr_pwr_en_putval", "s_driveic_clearfaults", "u16s_driveic_check",
+        ]:
+            assert clf([nm]) == "BSW_DRIVER", nm
+
+    def test_boot_tokens(self):
+        from report_gen.requirements import _classify_unmapped_layer as clf
+        # EEPROM(비앵커)/플래시 프로그래밍/리프로그 — BOOT로 복구돼야 함
+        for nm in [
+            "s_diageepromread", "s_diageepromwrite", "s_write2eeprom_partno",
+            "s_uds_wdbi_us_cleareeprom", "s_uds_makeeepromaddr", "g_inlinemodeeepromclear",
+            "ftmrz_init", "ftmrz_prog_phrase", "pflash_send_command",
+            "eraseflashsector", "erasesectorinternal", "maininitreprogservices",
+        ]:
+            assert clf([nm]) == "BOOT_REPROG", nm
+
+    def test_lib_tokens(self):
+        from report_gen.requirements import _classify_unmapped_layer as clf
+        assert clf(["stdutilcopydata"]) == "LIB_UTIL"
+        assert clf(["stdutildataset"]) == "LIB_UTIL"
+
+    def test_boot_wins_over_substring_collision(self):
+        """eeprom(BOOT)이 'assist' 부분문자열보다 우선 — DTC 이름 속 assist는 앱 로직 아님."""
+        from report_gen.requirements import _classify_unmapped_layer as clf
+        assert clf(["s_diageepromwrite_assistfail"]) == "BOOT_REPROG"
+
+    def test_app_negative_controls_no_misclassify(self):
+        """정상 APP 함수는 신규 토큰에 오삼켜지지 않는다(bare flash/pin/lin 미추가).
+        ⚠ 예외: 'Ap_*Eeprom*'류(EEPROM 조작)는 BOOT로 감 — test_boot_ap_eeprom_documented 참조."""
+        from report_gen.requirements import _classify_unmapped_layer as clf
+        for nm in [
+            "s_buzzerstateflashing_on",   # 'flashing' ≠ flash 토큰(미추가)
+            "s_antipinchdetect_close",    # 'pin' 토큰 미추가
+            "s_manualoperationdetect",
+            "s_doorstatectrl", "s_motorspeedctrl", "s_reboundprotection",
+            "s_slipcheck_original", "s_overopencheck", "s_playprotectchk",
+            # W2(deep-review): _isr 앵커(_isr$|_isr_)로 앱 술어 _IsReady/_IsReset/_IsRunning/_IsRequest는
+            # BSW 오매치 배제(bare _isr였다면 전부 BSW로 잘못 분류됐다).
+            "s_motorctrl_isready", "s_door_isreset", "s_assist_isrunning",
+            "g_window_isrequestpending",
+        ]:
+            assert clf([nm]) == "APP_LEAF", nm
+
+    def test_boot_ap_eeprom_documented(self):
+        """W1(deep-review) 문서화: 'Ap_*Eeprom*' 앱 함수도 비앵커 eeprom으로 BOOT 재라벨된다
+        (EEPROM 조작이라 방어가능). 실데이터 2건은 in_uds=True라 app_design_gap 무영향 — 다만
+        미래 in_uds=False 앱 eeprom 함수는 갭 은닉 latent 위험(정규식 주석 참조)."""
+        from report_gen.requirements import _classify_unmapped_layer as clf
+        assert clf(["s_ap_motorctrl_reseteepromparamstate"]) == "BOOT_REPROG"
+        assert clf(["s_ap_previousctrl_reseteepromparams"]) == "BOOT_REPROG"
+
+    def test_isr_anchored_real_isr_still_bsw(self):
+        """W2(deep-review): _isr → _isr$|_isr_ 앵커 후에도 실제 ISR은 BSW 유지."""
+        from report_gen.requirements import _classify_unmapped_layer as clf
+        assert clf(["sci0_isr"]) == "BSW_DRIVER"            # _isr$ (또는 ^sci)
+        assert clf(["tim0_ch0_isr"]) == "BSW_DRIVER"        # _isr$ (또는 ^tim[0-9])
+        assert clf(["s_appmodule_isr_entry"]) == "BSW_DRIVER"  # _isr_ (중간 위치)
+
+    def test_preexisting_behavior_unchanged(self):
+        from report_gen.requirements import _classify_unmapped_layer as clf
+        assert clf([]) == "APP_LEAF"
+        assert clf(["range"]) == "TEST_ARTIFACT"
+        assert clf(["s_sha256_transform"]) == "LIB_UTIL"
+        assert clf(["g_drvin_main"]) == "BSW_DRIVER"
+
 
 class TestGenerateUdsRequirementsFromDocs:
     def test_deduplicates(self):

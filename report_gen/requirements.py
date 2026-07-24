@@ -193,23 +193,40 @@ def _strip_ret_type_prefix(key: str) -> str:
 # 분류 원칙(보수): 인프라 토큰은 함수명 core(선행 _·반환형·저장클래스 제거) 선두 앵커 위주로 잡아
 # 애플리케이션 함수(중간에 eeprom 등 포함)를 인프라로 잘못 삼켜 공백을 숨기는 것을 막는다.
 # 불확실하면 APP_LEAF(=검토 대상)로 떨어뜨려 안전측(공백 미은닉)으로 편향한다.
+# 단, 구별성이 높은(앱과 충돌 없는) 인프라 토큰은 비앵커로도 추가한다 — 선두 앵커만으론
+# 중간 위치 토큰(diageeprom·write2eeprom·pp1_..._pwm 등)을 놓쳐 인프라를 APP로 과대집계했다.
+# 추가 토큰은 KJPDS02_PV 실데이터로 검증됨(이동 103건 전부 APP→인프라 단방향, 인프라→APP 역행 0,
+# app_design_gap delta 0 — 이동분 전부 in_uds=True라 진짜갭 은닉 없음. 구조적으로 NEW_APP⊆OLD_APP
+# (제거 브랜치 0)라 app_design_gap=|APP∩¬uds|은 단조 비증가, deep-review 3중 확증).
+# s_buzzerstateflashing·s_antipinch·doorstatectrl 등 앱 도메인은 APP 유지. ⚠단, 비앵커 eeprom은
+# 'Ap_*Eeprom*' 앱 함수 2건(ResetEepromParamState 등)도 BOOT로 재라벨한다(EEPROM 조작이라 방어가능,
+# in_uds=True 무영향). bare eeprom/reprog의 잔여 latent 위험 = 미래 in_uds=False 앱 함수. _isr은
+# 저장소 _ISR_RE 규율대로 '_isr$|_isr_' 앵커(앱 술어 _IsReady/_IsReset 오매치 배제). bare flash/pin/lin 금지.
 _LAYER_CORE_PREFIX_RE = re.compile(r"^(?:u8|u16|u32|s8|s16|s32)?[sgl]_")
 _LAYER_BOOT_RE = re.compile(
     # entrypoint는 선두 앵커(^) — 'validate_entrypoint'/'check_entrypoint_valid' 같은 APP
     # 함수를 BOOT로 오삼켜 공백을 숨기지 않도록(라운드112 W2). 실 부트 엔트리는 core가 정확히
     # 'entrypoint'라 ^로 충분(실데이터 '_entrypoint'는 lstrip 후 core='entrypoint').
-    r"(^sf_|secureflash|bootload|^boot|^reprog|^clearreprog|^chkprog|^checkprog|^setreprog"
-    r"|^getreprog|^eep|^syseepromctrl|^entrypoint|jump_main|chkappisvalid|copy_shadow"
-    r"|backupsector|fccob|^linuds|linudsreprog|^writeblock$|^writeword$)",
+    r"(^sf_|secureflash|bootload|^boot|^reprog|reprog|^clearreprog|^chkprog|^checkprog|^setreprog"
+    r"|^getreprog|^eep|eeprom|^syseepromctrl|^entrypoint|jump_main|chkappisvalid|copy_shadow"
+    r"|backupsector|fccob|^linuds|linudsreprog|^writeblock$|^writeword$"
+    # 비앵커 eeprom/reprog + 플래시 프로그래밍(pflash/ftmrz/erase*sector) — diageeprom·
+    # write2eeprom·maininitreprog·플래시섹터소거를 BOOT로 복구(실데이터 검증, +32).
+    r"|pflash|ftmrz|eraseflashsector|erasesectorinternal)",
     re.I,
 )
 _LAYER_BSW_RE = re.compile(
-    r"(^adc|^pwm|^spi|^gpio|^port|^timer|^pt[0-9]|^dma|^clock|^osc|^pll|^lin|^can|^uart|^sci"
-    r"|drv8706|iim20670|^drvin|^drvout|spictrl|lintp|lin_lld|sbcm|^sbc|^hw_|^mcu_|^reg_)",
+    r"(^adc|^pwm|^spi|^gpio|^port|^timer|^tim[0-9]|systick|^rti|^cpu|_isr$|_isr_|^pt[0-9]|^dma|^clock|^osc|^pll"
+    r"|^lin|^can|^uart|^sci|^pp[0-9]|^pj[0-9]|^pad[0-9]|^pl[0-9]|^pe_"
+    # ^tim[0-9]/systick/^rti(타이머) · ^cpu(예외·인터럽트·PLL/OSC 핸들러) · _isr(ISR) ·
+    # ^pp/pj/pad/pl[0-9](포트핀 I/O) · ^pe_(Processor Expert init) · driveic(모터 드라이브 IC)
+    # 추가 — 저수준 드라이버/핸들러를 BSW로 복구(실데이터 검증, +69). 앱 도메인 오삼킴 0.
+    r"|drv8706|iim20670|driveic|^drvin|^drvout|spictrl|lintp|lin_lld|sbcm|^sbc|^hw_|^mcu_|^reg_)",
     re.I,
 )
 _LAYER_LIB_RE = re.compile(
-    r"(sha256|^aes|crc32|^lib_|_lib_|movingaverage|_conv$|_conv_|slope_conv|^math|^util)",
+    # stdutil(copydata/dataset = memcpy/memset류 표준 유틸) 추가(실데이터 검증, +2).
+    r"(sha256|^aes|crc32|^lib_|_lib_|movingaverage|_conv$|_conv_|slope_conv|^math|^util|stdutil)",
     re.I,
 )
 
@@ -2812,6 +2829,15 @@ def generate_uds_traceability_matrix(
             #  (실측 KJPDS02_PV: app_leaf 413 중 미설계 ~3 — layer만 보면 ~100배 과대 집계.)
             "unmapped_app_design_gap": sum(
                 1 for u in unmapped_vcast if u.get("layer") == "APP_LEAF" and not u.get("in_uds")
+            ),
+            # TEST_ARTIFACT 중 ¬uds (design_gap 하위집합) — 프론트 배너 design축 분해 전용(app_design_gap과 동형).
+            # ⚠ 아래 unmapped_layer_test_artifact(전체)와 구분: 그건 6버킷 합==count 불변식용이고, 이건 design_gap
+            #  정확 분해용이다. _classify는 cand[0]만 보고 TEST_ARTIFACT를 판정하나 in_uds는 _uds_cands 전체를
+            #  보므로 TEST_ARTIFACT∩in_uds가 이론상 가능(예: 첫 해석명이 시그니처형이라 non-ident인데 다른 후보가
+            #  UDS 매칭). 그때 전체 카운트를 design_gap에서 빼면 이중차감→음수 클램프로 범위경계 갭을 은닉하므로,
+            #  ¬uds로 필터한 이 필드를 배너 차감(boundaryGap = design_gap − app_gap − unresolved − 이 값)에 쓴다.
+            "unmapped_test_artifact_gap": sum(
+                1 for u in unmapped_vcast if u.get("layer") == "TEST_ARTIFACT" and not u.get("in_uds")
             ),
             # ISO 26262 SwDS 계층(라운드112) — '코드 종류' 축(app/BSW/boot/lib/test). ⚠ layer는 갭 판정이
             # 아니라 분류 힌트다: app_leaf ∩ in_uds = 설계+시험된 leaf roll-up(정당한 입도차),
