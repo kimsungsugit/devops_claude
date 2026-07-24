@@ -1249,7 +1249,10 @@ export default function ImpactGuideSection({ analysisResult, job }) {
     // 간접 영향(직접 변경 아님)·삭제 함수는 '작성' 대상이 아니다 — 계약 유지 확인/항목 제거 안내는
     // 편집 액션 패널(buildDocumentActions)이 담당한다. 경계값·신규 골격을 비변경/삭제 함수에 제안하면
     // '직접 변경 아님·문서 수정 없음'·'항목 제거'와 모순된다(같은 카드에 상반된 지시).
-    if (!d.changed || ct === 'DELETE' || diffElems?.commentOnly || diffElems?.noSemanticChange) return null;
+    // commentOnly(주석-only)만 확정 억제 — C-렉서 충실 스트리퍼라 실 코드를 주석으로 오인하지 않음(적대 25+12 검증).
+    // noSemanticChange(포맷/이동)는 **억제하지 않는다**: 순서보존 이동이 use를 넘는 경우(move-past-use)를 못 잡는
+    // 맹점이 있어(-U3 context 라인이 -/+ 사이에 끼면 발동), 확정 억제 시 실 동작변경을 '수정 불필요'로 오판(under-report).
+    if (!d.changed || ct === 'DELETE' || diffElems?.commentOnly) return null;
     const fn = d.function;
     // static/private 판별(헝가리안 접두어 s_=static·prv_=private) — 이들은 아키텍처 SDS·요구기반 STS에
     // 설계상 없을 수 있다(정직 노트 대상). 공개 함수(g_·무접두어)의 SDS/요구 부재는 '정상'이 아니라 실
@@ -2109,7 +2112,7 @@ export default function ImpactGuideSection({ analysisResult, job }) {
         // 유발). 원본 케이스 표시명이 필요하면 functionMeta[fn].display_name 사용.
         module: functionMeta[d.function]?.module || '',
         requirements: (d.requirements || []).slice(0, 12),
-        no_semantic_change: !!(d.changed && (_de.commentOnly || _de.noSemanticChange)),  // 주석/포맷/이동 = 비의미 → 제안 억제
+        no_semantic_change: !!(d.changed && _de.commentOnly),  // 주석-only만 AI 함구(확정 무변경). 포맷/이동은 move-past-use 맹점 → AI 교차확인 유지
       });
       // race 가드: 응답 도착 시 사용자가 이미 다른 함수로 전환했으면 결과 폐기(오표시/슬롯 오염 방지).
       if (selectedFnRef.current !== d.function) return;
@@ -3301,7 +3304,11 @@ export default function ImpactGuideSection({ analysisResult, job }) {
                 )}
                 {(isFormatOnly || isCommentOnly) && (
                   <div className="text-muted" style={{ fontSize: 11, marginBottom: 12, padding: '6px 10px', background: 'var(--bg)', borderRadius: 6, borderLeft: '3px solid var(--border)' }}>
-                    본문 diff가 <strong>{isCommentOnly ? 'C 주석(//·/* */)만' : '코드 이동·공백·포맷만'}</strong>이고 코드(로직) 변경은 없습니다{isCommentOnly ? '' : '(재정렬 아님)'}. <strong>문서 수정 불필요</strong> — 관련 문서(Description·Test Action·Expected) 재검토·작성 제안이 필요하지 않습니다.
+                    {isCommentOnly ? (
+                      <>본문 diff가 <strong>C 주석(//·/* */)만</strong> 변경이고 코드(로직) 변경은 없습니다. <strong>문서 수정 불필요</strong> — 관련 문서(Description·Test Action·Expected) 재검토·작성 제안이 필요하지 않습니다.</>
+                    ) : (
+                      <>본문 diff가 <strong>코드 이동·공백·포맷만</strong>이고 의미(로직) 변경은 없습니다(재정렬 아님). 관련 문서(Description·Test Action·Expected) 재검토가 불필요할 수 있으나, 순서보존 이동은 동작이 바뀔 수 있으니 <strong>AI 설명으로 확인</strong>하세요.</>
+                    )}
                   </div>
                 )}
 
@@ -3322,9 +3329,11 @@ export default function ImpactGuideSection({ analysisResult, job }) {
                   {!d.changed && `이 함수는 직접 변경되지 않았으나, ${d.seed ? `변경 함수 '${d.seed}'${d.via && d.via !== d.seed ? ` → '${d.via}' 경유` : ''}와의` : '변경 함수와의'} 호출 관계(${d.hop})로 영향받는 간접 함수입니다. 인터페이스 계약이 유지되는지, 회귀 시험(SUTS/SITS) 재실행이 필요한지 확인하세요.`}
                   {ct === 'BODY' && (noEvidence
                     ? '이 함수의 직접 변경(hunk/선언)은 감지되지 않았습니다. 같은 파일의 다른 변경(전처리·선언 등)으로 영향 검토 대상에 보수적으로 포함된 함수입니다(파일 단위 영향).'
-                    : (isFormatOnly || isCommentOnly)
-                      ? `본문 diff가 ${isCommentOnly ? 'C 주석만' : '코드 이동·공백·포맷만'}이고 코드(로직) 변경은 없습니다 — 문서 수정 불필요(재검토·작성 제안 불필요).`
-                      : '함수 본문(로직)이 변경되었습니다. 동작 변경으로 인해 관련 문서의 Description, Test Action, Expected Result를 모두 재검토해야 합니다.')}
+                    : isCommentOnly
+                      ? '본문 diff가 C 주석만 변경이고 코드(로직) 변경은 없습니다 — 문서 수정 불필요(재검토·작성 제안 불필요).'
+                      : isFormatOnly
+                        ? '본문 diff가 코드 이동·공백·포맷만이고 의미(로직) 변경은 없습니다(재정렬 아님). 관련 문서 재검토가 불필요할 수 있으나, 순서보존 이동은 동작이 바뀔 수 있으니 AI 설명으로 확인하세요.'
+                        : '함수 본문(로직)이 변경되었습니다. 동작 변경으로 인해 관련 문서의 Description, Test Action, Expected Result를 모두 재검토해야 합니다.')}
                   {ct === 'SIGNATURE' && '함수 시그니처(파라미터/리턴타입)가 변경되었습니다. 호출하는 모든 함수와 Input/Output Parameters, Pre-condition을 업데이트해야 합니다.'}
                   {ct === 'HEADER' && '헤더 파일이 변경되었습니다. 매크로/타입 정의 변경으로 이 헤더를 include하는 모든 소스 파일의 함수에 영향이 있을 수 있습니다.'}
                   {ct === 'VARIABLE' && '글로벌 변수가 변경되었습니다. 이 변수를 읽고 쓰는 모든 함수의 동작을 확인해야 합니다.'}

@@ -1650,6 +1650,38 @@ describe('ImpactGuideSection', () => {
     expect(calls[calls.length - 1].no_semantic_change).toBe(true);
   });
 
+  // STS-IMPACT-069b(C1 심층재검토): 포맷/이동(noSemanticChange)은 no_semantic_change=false로 보낸다.
+  //  commentOnly는 C-렉서 충실 스트리퍼라 확정 억제하지만, noSemanticChange는 순서보존 이동(move-past-use)을
+  //  못 잡는 맹점이 있어(context 라인이 -/+ 사이에 끼면 noSemanticChange=true) AI 함구 시 실 동작변경을
+  //  '문서 수정 불필요'로 오판(under-report). 이 pin이 깨지면 noSemanticChange가 다시 억제 버킷에 섞인 것.
+  it('원문→제안: 포맷/이동(noSemanticChange)은 no_semantic_change=false로 보낸다(move-past-use 맹점 → AI 교차확인 유지)', async () => {
+    const { post } = await import('../api.js');
+    const calls = [];
+    post.mockImplementation((url, body) => {
+      if (url === '/api/impact/explain-change') { calls.push(body); return Promise.resolve({ ok: true, explanation: '확인' }); }
+      return Promise.resolve({ ok: false });
+    });
+    const user = userEvent.setup();
+    const analysisResult = {
+      impactData: {
+        trigger: { changed_files: ['Ap.c'] },
+        changed_function_types: { s_mv: 'BODY' },
+        change_details: { s_mv: { before: '', after: '' } },
+        impact: { direct: ['s_mv'] },
+        function_meta: { s_mv: { asil: 'A', evidence: 'line' } },
+        // 순서보존 이동: `a = shared;`가 `use(a);` 아래로 내려가 동작이 바뀐다. -/+ 블록 사이 context 라인
+        // `use(a);` 때문에 minus/plus가 동일 정렬 → noSemanticChange=true(맹점). 그래도 payload는 false여야 한다.
+        function_diffs: { s_mv: '@@ -1,5 +1,5 @@ void s_mv(void)\n-    a = shared;\n-    b = 2;\n     use(a);\n+    a = shared;\n+    b = 2;' },
+      },
+    };
+    render(<ImpactGuideSection analysisResult={analysisResult} />);
+    await user.click(screen.getByText(/상세 가이드 생성/));
+    await user.click(await screen.findByRole('button', { name: '상세' }));
+    await user.click(await screen.findByRole('button', { name: /AI 문장 재작성/ }));
+    await waitFor(() => expect(calls.length).toBeGreaterThanOrEqual(1));
+    expect(calls[calls.length - 1].no_semantic_change).toBe(false);
+  });
+
   // STS-IMPACT-053d: STS TC 원문이 페이로드에 실린다 — buildDocContentForFn은 guide→guideDetailByLc에
   //  의존하므로, fetchExplanation deps에 buildDocContentForFn이 없으면(stale closure, deep-review Critical)
   //  guide 채워지기 전 빈 guideDetailByLc에 영구 결속돼 STS/SITS TC가 영구 누락된다. 이 테스트가 회귀 가드.
