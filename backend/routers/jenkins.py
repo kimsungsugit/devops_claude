@@ -5866,6 +5866,76 @@ def scm_vcast_summary(req: dict) -> Dict[str, Any]:
     return {"available": True, **metrics}
 
 
+@router.post("/api/jenkins/prqa-trend")
+def jenkins_prqa_trend(req: dict) -> Dict[str, Any]:
+    """프로젝트 요약 탭 '빌드별 변화' — PRQA 정적분석 지표의 빌드별 트렌드.
+
+    각 캐시 빌드의 report/analysis_summary.json을 **직독**해(build_report_summary의 빌드당 RCR
+    재파싱은 N배로 수 초~수십 초 → 타임아웃) prqa.rcr.summary + resolve_code_metrics로 빌드별
+    위반/진단/준수율 + 코드규모를 낸다. 값은 상세탭 kpis.prqa와 동일 소스(prqa.rcr). ⚠ VectorCAST
+    동적은 SCM 스냅샷이라 빌드마다 동일값 → 트렌드에 넣지 않는다(수평선 오해 방지, 현황 게이지로).
+    """
+    job_url = str((req or {}).get("job_url") or "").strip()
+    if not job_url:
+        return {"available": False, "reason": "job_url_required", "builds": []}
+    cache_root = _normalize_jenkins_cache_root((req or {}).get("cache_root"))
+    try:
+        limit = int((req or {}).get("limit") or 15)
+    except (TypeError, ValueError):
+        limit = 15
+    limit = max(1, min(limit, 50))
+    builds_meta = list_cached_builds(job_url=job_url, cache_root=cache_root)  # 최신순
+    out: List[Dict[str, Any]] = []
+
+    def _num(v: Any) -> int | None:
+        # RCR summary는 "64,805" 콤마 문자열일 수 있다(jenkins_adapter _to_int 콤마버그와 동일 함정).
+        if v is None:
+            return None
+        try:
+            return int(str(v).replace(",", "").strip())
+        except (TypeError, ValueError):
+            return None
+
+    for b in builds_meta[:limit]:
+        reports_dir_str = str(b.get("reports_dir") or "")
+        if not reports_dir_str:
+            continue
+        summary_path = Path(reports_dir_str) / "analysis_summary.json"
+        try:
+            if not summary_path.exists():
+                continue
+            data = json.loads(summary_path.read_text(encoding="utf-8"))
+        except Exception as exc:  # 한 빌드 파싱 실패가 트렌드 전체를 죽이지 않는다(fail-soft).
+            _api_logger.debug("prqa-trend build %s skipped: %s", b.get("build_number"), exc)
+            continue
+        if not isinstance(data, dict):
+            continue
+        prqa = data.get("prqa") if isinstance(data.get("prqa"), dict) else {}
+        rcr = prqa.get("rcr") if isinstance(prqa.get("rcr"), dict) else {}
+        rcr_summary = rcr.get("summary") if isinstance(rcr.get("summary"), dict) else {}
+        cm = resolve_code_metrics(data) if isinstance(data, dict) else {}
+        _diag = rcr_summary.get("Diagnostic Count")
+        out.append(
+            {
+                "build_number": b.get("build_number"),
+                "violations": _num(rcr_summary.get("Rule Violation Count")),
+                "diagnostics": _num(_diag) if _diag is not None else _num(rcr.get("diagnostic_count")),
+                "compliance": _num(rcr_summary.get("Project Compliance Index")),
+                "loc": cm.get("nloc") if cm.get("nloc") is not None else _num(rcr_summary.get("Lines of Code (including headers)")),
+                "functions": cm.get("functions"),
+                "code_files": cm.get("code_files") if cm.get("code_files") is not None else _num(rcr_summary.get("Number of Files (including CMA)")),
+                "code_metrics_source": cm.get("source"),
+                "rcr_ok": rcr.get("ok"),
+            }
+        )
+    out.reverse()  # 오래된→최신(트렌드 X축 방향)
+    available = any(
+        (r.get("violations") is not None) or (r.get("diagnostics") is not None) or (r.get("compliance") is not None)
+        for r in out
+    )
+    return {"available": available, "builds": out, "count": len(out)}
+
+
 @router.post("/api/jenkins/aggregate-stats")
 def aggregate_stats(req: dict) -> Dict[str, Any]:
     """Aggregate analysis_summary.json from latest builds of multiple jobs.

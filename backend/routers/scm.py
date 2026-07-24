@@ -20,7 +20,13 @@ from backend.services.scm_registry import (
 )
 from backend.services.local_service import svn_info_url
 from workflow.impact_audit import list_impact_audits
-from workflow.impact_changes import list_change_logs, list_function_history, list_module_history, load_change_log
+from workflow.impact_changes import (
+    build_timeline,
+    list_change_logs,
+    list_function_history,
+    list_module_history,
+    load_change_log,
+)
 from workflow.impact_jobs import list_job_summaries, list_jobs, load_job
 
 
@@ -357,3 +363,129 @@ def scm_change_history_module(entry_id: str, module_name: str, limit: int = 20) 
         raise HTTPException(status_code=404, detail="registry entry not found")
     items = list_module_history(entry_id, module_name, limit=limit)
     return {"ok": True, "items": items, "count": len(items)}
+
+
+@router.get("/api/scm/build-timeline/{entry_id}")
+def scm_build_timeline(entry_id: str, limit: int = 50, job_url: str = "", include_all: bool = False) -> Dict[str, Any]:
+    """프로젝트 요약 탭 — 분석된 빌드별 변경 영향 타임라인 + 누적 롤업(항상 빠름).
+
+    분석된 빌드는 durable change-log(impact_changes.build_timeline, 잡 pruning 무관)에서 impact
+    데이터로 채운다(rows에 analyzed:true). ⚠ **기본은 Jenkins를 조회하지 않는다**(list_builds가
+    미도달 시 ~30s hang → 타임라인 로드 지연). '전체 빌드'는 프론트가 `/api/jenkins/builds`를 별도
+    비차단으로 가져와 클라이언트에서 병합한다. include_all=true(opt-in)일 때만 서버가 list_builds로
+    미분석 빌드를 병합한다(**서버 자격정보만**, SSRF fail-closed). 롤업은 분석된 빌드 기준이라 불변.
+    """
+    entry = get_registry_entry(entry_id)
+    if entry is None:
+        raise HTTPException(status_code=404, detail="registry entry not found")
+
+    data = build_timeline(entry_id, limit=limit)
+    rows = data.get("rows") or []
+    for r in rows:
+        r["analyzed"] = True  # change-log 행 = 분석된 빌드
+    enrich_note = ""
+
+    ju = str(job_url or "").strip()
+    if ju and include_all:
+        try:
+            from datetime import datetime
+
+            from backend.routers.config import get_jenkins_config
+            from backend.services.jenkins_service import list_builds, map_builds_to_svn_revisions
+
+            cfg = get_jenkins_config()
+            base_url = str(cfg.get("baseUrl") or "").strip().rstrip("/")
+            job_l = ju.lower().rstrip("/")
+            under_base = bool(base_url) and (
+                job_l == base_url.lower() or job_l.startswith(base_url.lower() + "/")
+            )
+            if (not under_base) or (".." in ju):
+                # SSRF fail-closed: baseUrl 하위가 아니거나 '..'(경로 traversal) 포함이면 서버 토큰을
+                # 싣지 않는다. jenkins.py의 _resolve_jenkins_changed_files와 동일 방어.
+                enrich_note = "job_url이 서버 Jenkins baseUrl 하위가 아니거나 '..'를 포함해 빌드 조회 안 함(SSRF 차단)"
+            elif not (cfg.get("username") and cfg.get("token")):
+                enrich_note = "서버 Jenkins 자격정보 미설정 — 빌드 조회 안 함"
+            else:
+                builds = list_builds(
+                    job_url=ju,
+                    username=str(cfg.get("username") or ""),
+                    api_token=str(cfg.get("token") or ""),
+                    limit=200,
+                    verify_tls=bool(cfg.get("verifyTls", True)),
+                )
+                # svn 리비전 best-effort 부착(분석·미분석 행 일관 표시).
+                if builds and str(getattr(entry, "scm_type", "") or "").lower() == "svn" and getattr(entry, "scm_url", ""):
+                    try:
+                        map_builds_to_svn_revisions(
+                            repo_url=str(entry.scm_url), builds=builds,
+                            username=str(getattr(entry, "scm_username", "") or ""), password="", max_resolve=200,
+                        )
+                    except Exception:  # silent-ok: 리비전은 best-effort 표시 — 실패해도 빌드 행은 유지
+                        pass
+                by_num = {
+                    str(b.get("number")): b
+                    for b in builds
+                    if isinstance(b, dict) and b.get("number") is not None
+                }
+                analyzed_nums = {str(r.get("build_number")) for r in rows if r.get("build_number") is not None}
+                # 분석 행 보강(결과/소요/리비전 폴백).
+                for row in rows:
+                    b = by_num.get(str(row.get("build_number"))) if row.get("build_number") is not None else None
+                    if isinstance(b, dict):
+                        row["build_result"] = b.get("result")
+                        row["build_duration"] = b.get("duration")
+                        row["building"] = bool(b.get("building"))
+                        if not row.get("build_revision") and b.get("revision"):
+                            row["build_revision"] = b.get("revision")
+                # 미분석 빌드 최소 행 추가(전체 빌드 이력).
+                if include_all:
+                    for b in builds:
+                        num = b.get("number")
+                        if num is None or str(num) in analyzed_nums:
+                            continue
+                        ts_iso = ""
+                        try:
+                            if b.get("timestamp"):
+                                ts_iso = datetime.fromtimestamp(int(b["timestamp"]) / 1000).isoformat(timespec="seconds")
+                        except (TypeError, ValueError, OSError):
+                            ts_iso = ""
+                        rows.append({
+                            "run_id": f"__build_{num}",
+                            "analyzed": False,
+                            "build_number": num,
+                            "build_revision": b.get("revision"),
+                            "build_revision_is_head": False,
+                            "build_result": b.get("result"),
+                            "build_duration": b.get("duration"),
+                            "building": bool(b.get("building")),
+                            "timestamp": ts_iso,
+                            "changed_files_count": None,
+                            "changed_functions_count": None,
+                            "impact_counts": {},
+                            "max_asil": "",
+                            "max_asil_bucket": "unknown",
+                            "mcdc_required": False,
+                            "auto_docs": 0,
+                            "flag_docs": 0,
+                            "coverage_measured": False,
+                            "coverage_regressed": 0,
+                            "coverage_unmeasured_safety": 0,
+                            "partial_failure": False,
+                        })
+                    # build_number 내림차순(미매핑 None 마지막).
+                    rows.sort(key=lambda r: (r.get("build_number") is not None, r.get("build_number") or 0), reverse=True)
+        except Exception as exc:
+            # best-effort — 실패해도 분석된 빌드 타임라인은 그대로(침묵 아님: note+로그).
+            enrich_note = f"빌드 조회 실패(무시): {type(exc).__name__}"
+            import logging
+
+            logging.getLogger("devops_api").warning("build-timeline Jenkins 조회 실패: %s", exc)
+
+    return {
+        "ok": True,
+        "entry_id": entry_id,
+        "rows": rows,
+        "rollup": data.get("rollup") or {},
+        "enrich_note": enrich_note,
+        "snapshot_note": "정적·동적 분석은 현재 SCM 스냅샷 — 빌드별 결과는 추후 Jenkins 산출물 연동 시 각 빌드 행에 표시",
+    }

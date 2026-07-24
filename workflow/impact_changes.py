@@ -326,6 +326,34 @@ def build_change_log(
         ),
     }
 
+    # 빌드 주소화 + 안전 롤업 필드(additive) — durable 타임라인(build_timeline)이 잡 pruning
+    # 이후에도 빌드별로 정렬·집계할 수 있도록 change-log 레코드에 직접 저장한다. 기존 소비처
+    # (list_function_history/scm_change_history/ImpactDocRow)는 named key만 읽어 무영향.
+    metadata = trigger.get("metadata") if isinstance(trigger.get("metadata"), dict) else {}
+    asil_info = result.get("asil") if isinstance(result.get("asil"), dict) else {}
+    function_meta = result.get("function_meta") if isinstance(result.get("function_meta"), dict) else {}
+    cov_gap = result.get("coverage_gap") if isinstance(result.get("coverage_gap"), dict) else {}
+    cov_gap_summary = cov_gap.get("summary") if isinstance(cov_gap.get("summary"), dict) else {}
+    # 변경 함수별 ASIL(변경 함수만, 소규모) — 롤업 ASIL 분포를 distinct-함수 기준으로 정확 산출.
+    _changed_lower = {str(k).strip().lower() for k in changed_types.keys()}
+    changed_function_asil: Dict[str, str] = {
+        str(fn): str(meta.get("asil") or "")
+        for fn, meta in function_meta.items()
+        if isinstance(meta, dict) and str(fn).strip().lower() in _changed_lower
+    }
+    # 문서별 재생성(AUTO)/검토(FLAG) 모드 집계.
+    _doc_modes: Dict[str, str] = {}
+    _auto_docs = 0
+    _flag_docs = 0
+    for _doc, _info in (actions.items() if isinstance(actions, dict) else []):
+        _mode = str((_info if isinstance(_info, dict) else {}).get("mode") or "").upper()
+        if _mode:
+            _doc_modes[str(_doc)] = _mode
+        if _mode == "AUTO":
+            _auto_docs += 1
+        elif _mode == "FLAG":
+            _flag_docs += 1
+
     return {
         "run_id": run_id,
         "timestamp": datetime.now().isoformat(timespec="seconds"),
@@ -335,6 +363,26 @@ def build_change_log(
         "base_ref": str(trigger.get("base_ref") or ""),
         "changed_files": list(trigger.get("changed_files") or []),
         "changed_functions": dict(sorted(changed_types.items())),
+        # --- 빌드 주소화 + 안전 롤업 (additive; durable 타임라인용) ---
+        "build_number": metadata.get("build_number"),
+        "build_revision": metadata.get("build_revision"),
+        "build_revision_is_head": bool(metadata.get("build_revision_is_head")),
+        "baseline_revision": metadata.get("baseline_revision"),
+        "max_asil": asil_info.get("max_changed"),
+        "mcdc_required": bool(asil_info.get("mcdc_required")),
+        "asil_unknown_count": int(asil_info.get("unknown_changed_count") or 0),
+        "changed_function_asil": changed_function_asil,
+        "coverage_gap_summary": {
+            # ⚠ ISO 정직성: coverage_gap이 available=False(vcast 미연결/계산 실패)면 summary 자체가
+            # 없어 아래가 전부 0이 된다. measured로 '미측정'과 '측정 후 회귀 0'을 구분해야 타임라인이
+            # 커버리지 없는 빌드를 '정상'으로 위장하지 않는다(증거부재≠충족).
+            "measured": bool(cov_gap.get("available")),
+            "regressed": int(cov_gap_summary.get("regressed") or 0),
+            "unmatched_safety": int(cov_gap_summary.get("unmatched_safety") or 0),
+            "unmeasured_safety": int(cov_gap_summary.get("unmeasured_safety") or 0),
+        },
+        "actions_rollup": {"auto": _auto_docs, "flag": _flag_docs, "doc_modes": _doc_modes},
+        "partial_failure": bool(result.get("partial_failure")),
         "impact_counts": {
             "direct": len(impact.get("direct") or []),
             "indirect_1hop": len(impact.get("indirect_1hop") or []),
@@ -500,3 +548,144 @@ def list_module_history(scm_id: str, module_name: str, limit: int = 20) -> List[
         if len(items) >= max(1, int(limit or 20)):
             break
     return items
+
+
+def _norm_asil_bucket(asil: str) -> str:
+    """ASIL 값을 표시/집계용 버킷으로 정규화.
+
+    입력은 'ASIL C' / 'C' / 'QM' / 'TBD' / '-' / '' 등 다양(소스=주석 태그·UDS 문서·placeholder).
+    ⚠ ISO 정직성: 미상('', 'TBD', 'UNKNOWN', '-')을 QM으로 단정하지 않는다 → 'unknown' 버킷.
+    반환: 'A'|'B'|'C'|'D'|'QM'|'unknown'.
+    """
+    a = str(asil or "").strip().upper()
+    if a.startswith("ASIL"):
+        a = a[4:].strip()
+    if a.startswith("QM"):
+        return "QM"
+    head = a[:1]
+    return head if head in ("A", "B", "C", "D") else "unknown"
+
+
+def _asil_rank(asil: str) -> int:
+    """ASIL 순위(높을수록 안전 중요). QM/미상=0 → max 병합 시 실제 등급이 이긴다."""
+    return {"A": 1, "B": 2, "C": 3, "D": 4}.get(_norm_asil_bucket(asil), 0)
+
+
+def build_timeline(scm_id: str, limit: int = 50) -> Dict[str, Any]:
+    """분석된 빌드별 변경 영향 타임라인 + 프로젝트 누적 롤업(durable change-log 기반).
+
+    "분석된 빌드만" — change-log는 영향도 분석이 실제 실행된 빌드만 담는 durable 이력이라
+    (reports/impact_changes/, 잡 pruning 무관) 타임라인의 1차 소스로 적합하다. Jenkins
+    list_builds(빌드 결과/소요시간)는 엔드포인트에서 best-effort로 조인한다.
+
+    Returns: {"rows": [...최신순...], "rollup": {...누적...}}.
+    ⚠ 구 레코드(빌드 주소화 이전)는 build_number/changed_function_asil이 없어 해당 필드가
+      None/빈 맵이지만 타임라인 행 자체는 그대로 생성된다(distinct 함수 union은 changed_functions
+      이름으로 보강, ASIL은 'unknown' 처리 — 증거부재≠QM).
+    """
+    lim = max(1, int(limit or 50))
+    rows: List[Dict[str, Any]] = []
+    # 롤업 누적기 — 함수는 이름(소문자) 기준 distinct union, 충돌 시 ASIL은 max 유지(안전측).
+    fn_asil: Dict[str, str] = {}
+    files_union: set[str] = set()
+    total_auto = 0
+    total_flag = 0
+    total_regressed = 0
+    revisions: List[int] = []
+    mcdc_any = False
+
+    for item in list_change_logs(scm_id=scm_id, limit=lim):
+        try:
+            rec = load_change_log(item["run_id"])
+        except KeyError:
+            continue
+        if not rec:
+            continue
+        changed_fns = rec.get("changed_functions") if isinstance(rec.get("changed_functions"), dict) else {}
+        changed_files = rec.get("changed_files") if isinstance(rec.get("changed_files"), list) else []
+        impact_counts = rec.get("impact_counts") if isinstance(rec.get("impact_counts"), dict) else {}
+        actions_rollup = rec.get("actions_rollup") if isinstance(rec.get("actions_rollup"), dict) else {}
+        cov_summary = rec.get("coverage_gap_summary") if isinstance(rec.get("coverage_gap_summary"), dict) else {}
+        fn_asil_map = rec.get("changed_function_asil") if isinstance(rec.get("changed_function_asil"), dict) else {}
+        doc_modes = actions_rollup.get("doc_modes") if isinstance(actions_rollup.get("doc_modes"), dict) else {}
+
+        auto_docs = int(actions_rollup.get("auto") or 0)
+        flag_docs = int(actions_rollup.get("flag") or 0)
+        regressed = int(cov_summary.get("regressed") or 0)
+        mcdc_required = bool(rec.get("mcdc_required"))
+        rec_summary = rec.get("summary") if isinstance(rec.get("summary"), dict) else {}
+
+        rows.append(
+            {
+                "run_id": rec.get("run_id") or item.get("run_id"),
+                "timestamp": rec.get("timestamp") or item.get("timestamp"),
+                "build_number": rec.get("build_number"),
+                "build_revision": rec.get("build_revision"),
+                "build_revision_is_head": bool(rec.get("build_revision_is_head")),
+                "baseline_revision": rec.get("baseline_revision"),
+                "base_ref": rec.get("base_ref") or "",
+                "dry_run": bool(rec.get("dry_run")),
+                "changed_files_count": len(changed_files),
+                "changed_functions_count": len(changed_fns),
+                "impact_counts": {
+                    "direct": int(impact_counts.get("direct") or 0),
+                    "indirect_1hop": int(impact_counts.get("indirect_1hop") or 0),
+                    "indirect_2hop": int(impact_counts.get("indirect_2hop") or 0),
+                },
+                "max_asil": rec.get("max_asil") or "",
+                "max_asil_bucket": _norm_asil_bucket(rec.get("max_asil") or ""),
+                "mcdc_required": mcdc_required,
+                "asil_unknown_count": int(rec.get("asil_unknown_count") or 0),
+                "auto_docs": auto_docs,
+                "flag_docs": flag_docs,
+                "doc_modes": doc_modes,
+                "coverage_measured": bool(cov_summary.get("measured")),
+                "coverage_regressed": regressed,
+                "coverage_unmeasured_safety": int(cov_summary.get("unmeasured_safety") or 0),
+                "coverage_unmatched_safety": int(cov_summary.get("unmatched_safety") or 0),
+                "partial_failure": bool(rec.get("partial_failure")),
+                "before_payload_unavailable": bool(rec_summary.get("before_payload_unavailable")),
+            }
+        )
+
+        # --- 롤업 누적 ---
+        files_union.update(str(f) for f in changed_files)
+        for name, asil in fn_asil_map.items():
+            key = str(name).strip().lower()
+            if not key:
+                continue
+            if key not in fn_asil or _asil_rank(asil) > _asil_rank(fn_asil[key]):
+                fn_asil[key] = str(asil or "")
+        # 구 레코드는 changed_function_asil가 비었을 수 있으니 distinct union을 함수 이름으로 보강.
+        for name in changed_fns.keys():
+            key = str(name).strip().lower()
+            if key:
+                fn_asil.setdefault(key, "")
+        total_auto += auto_docs
+        total_flag += flag_docs
+        total_regressed += regressed
+        mcdc_any = mcdc_any or mcdc_required
+        rev = rec.get("build_revision")
+        if rev is not None and str(rev).strip().isdigit():
+            revisions.append(int(str(rev).strip()))
+
+    asil_distribution = {"D": 0, "C": 0, "B": 0, "A": 0, "QM": 0, "unknown": 0}
+    for asil in fn_asil.values():
+        asil_distribution[_norm_asil_bucket(asil)] += 1
+
+    rollup = {
+        "analyzed_build_count": len(rows),
+        "distinct_changed_functions": len(fn_asil),
+        "distinct_changed_files": len(files_union),
+        "cumulative_auto_docs": total_auto,
+        "cumulative_flag_docs": total_flag,
+        "cumulative_coverage_regressed": total_regressed,
+        "mcdc_required_any": mcdc_any,
+        "asil_distribution": asil_distribution,
+        "revision_range": {
+            "base_ref": rows[0].get("base_ref") if rows else "",
+            "min_build_revision": min(revisions) if revisions else None,
+            "max_build_revision": max(revisions) if revisions else None,
+        },
+    }
+    return {"rows": rows, "rollup": rollup}

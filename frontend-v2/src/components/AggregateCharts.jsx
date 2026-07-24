@@ -3,64 +3,7 @@
  * Renders only when 2+ projects are available.
  */
 
-function HorizontalBar({ label, value, max, color, suffix = '' }) {
-  const pct = max > 0 ? (value / max) * 100 : 0;
-  return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--sp-2)', marginBottom: 'var(--sp-1)' }}>
-      <span
-        style={{ width: 120, fontSize: 'var(--text-xs)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flexShrink: 0 }}
-        title={label}
-      >
-        {label}
-      </span>
-      <div style={{ flex: 1, height: 16, background: 'var(--border)', borderRadius: 'var(--radius-sm)', overflow: 'hidden' }}>
-        <div style={{ height: '100%', width: `${pct}%`, background: color, borderRadius: 'var(--radius-sm)', transition: 'width 0.4s' }} />
-      </div>
-      <span style={{ width: 55, textAlign: 'right', fontSize: 'var(--text-xs)', fontWeight: 600, flexShrink: 0 }}>
-        {typeof value === 'number' && !suffix ? value.toLocaleString() : value}{suffix}
-      </span>
-    </div>
-  );
-}
-
-function DonutChart({ segments, size = 100, strokeWidth = 16 }) {
-  const total = segments.reduce((s, seg) => s + seg.value, 0);
-  const radius = (size - strokeWidth) / 2;
-  const circumference = 2 * Math.PI * radius;
-
-  // Pre-compute offsets to avoid mutation inside render
-  const arcs = segments.reduce((acc, seg) => {
-    const pct = total > 0 ? seg.value / total : 0;
-    const dashLen = pct * circumference;
-    const prevOffset = acc.length > 0 ? acc[acc.length - 1].offset + acc[acc.length - 1].dashLen : 0;
-    acc.push({ ...seg, dashLen, offset: prevOffset });
-    return acc;
-  }, []);
-
-  return (
-    <div style={{ position: 'relative', width: size, height: size }}>
-      <svg width={size} height={size} style={{ transform: 'rotate(-90deg)' }}>
-        {arcs.map((arc, i) => (
-          <circle
-            key={i}
-            cx={size / 2}
-            cy={size / 2}
-            r={radius}
-            fill="none"
-            stroke={arc.color}
-            strokeWidth={strokeWidth}
-            strokeDasharray={`${arc.dashLen} ${circumference - arc.dashLen}`}
-            strokeDashoffset={-arc.offset}
-          />
-        ))}
-      </svg>
-      <div style={{ position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%,-50%)', textAlign: 'center' }}>
-        <div style={{ fontSize: 'var(--text-xl)', fontWeight: 700 }}>{total}</div>
-        <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>프로젝트</div>
-      </div>
-    </div>
-  );
-}
+import { HorizontalBar, DonutChart } from './charts.jsx';
 
 export default function AggregateCharts({ projects, buildStats }) {
   if (!projects || projects.length < 1) return null;
@@ -106,6 +49,7 @@ export default function AggregateCharts({ projects, buildStats }) {
             ].filter(s => s.value > 0)}
             size={80}
             strokeWidth={12}
+            centerSub="프로젝트"
           />
           <div>
             {buildCounts.success > 0 && (
