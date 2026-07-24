@@ -575,8 +575,8 @@ def _stub_generators(monkeypatch, *, suts_seq=None, sits_flows=None, sts_steps=N
     )
     monkeypatch.setattr(
         gsuts, "generate_sequences",
-        lambda unit, max_seq=6: (suts_seq if suts_seq is not None
-                                 else [{"strategy": "BV_MIN", "inputs": {"x": 0}, "expected": {"ret": 0}, "description": "d"}]),
+        lambda unit, max_seq=6, type_cache=None: (suts_seq if suts_seq is not None
+                                                  else [{"strategy": "BV_MIN", "inputs": {"x": 0}, "expected": {"ret": 0}, "description": "d"}]),
     )
     monkeypatch.setattr(
         gsits, "collect_integration_flows",
@@ -676,3 +676,92 @@ def test_build_doc_proposal_preserves_verification_marker(monkeypatch):
                                 "expected": {"ret": "[검증 필요] saturated"}, "description": "d"}])
     out = _build_doc_proposal(_proposal_sections(fd), {"s_foo"})
     assert out["suts"]["s_foo"][0]["expected"] == {"ret": "[검증 필요] saturated"}
+
+
+def test_build_doc_proposal_suts_uses_gim_types_not_global():
+    """SUTS 경계값이 gim 타입(로컬 주입)으로 산출되고 프로세스 전역 타입캐시를 오염시키지 않는다.
+
+    과거 버그: _build_doc_proposal이 set_globals_type_cache를 호출하지 않아 빈/stale 전역
+    타입캐시→uint8 폴백으로 U32 변수의 경계 max를 255로 잘못 산출했다(실측 12개 변수 상이).
+    이제 gim→{var:type} 로컬맵을 generate_sequences(type_cache=)로 명시 주입한다:
+      (a) 실 문서생성(set_globals_type_cache→전역)과 동일한 타입으로 경계 산출,
+      (b) 프로세스 전역은 일절 변이 안 함 → 동시 문서생성과 write-race/오염 차단.
+    실 생성기(스텁 아님)로 두 불변식을 함께 잠근다.
+    """
+    import generators.suts as gsuts
+    from workflow.impact_orchestrator import _build_doc_proposal
+
+    # xfer_len 은 gim 에서 U32. 함수 input 으로 노출('[IN] TYPE name' = _parse_signature_params 형식).
+    fd = {"f1": {"name": "s_xfer", "prototype": "void s_xfer(U32 xfer_len)",
+                 "inputs": ["[IN] U32 xfer_len"], "outputs": [],
+                 "logic_flow": [], "calls_list": []}}
+    gim = {"xfer_len": {"type": "U32"}}
+
+    # ⚠ 전역 타입캐시를 일부러 틀린 타입(uint8)으로 오염 — 주입이 전역을 '읽지' 않는지 검증
+    gsuts._globals_type_cache.clear()
+    gsuts._globals_type_cache["xfer_len"] = "uint8_t"
+    try:
+        out = _build_doc_proposal(_proposal_sections(fd, gim), {"s_xfer"})
+
+        # (a) SUTS 시퀀스의 xfer_len 최대 입력이 U32 max(4294967295) — uint8(255) 폴백 아님
+        seqs = out["suts"]["s_xfer"]
+        xfer_vals = [s["inputs"]["xfer_len"] for s in seqs if "xfer_len" in (s.get("inputs") or {})]
+        assert 4294967295 in xfer_vals, f"U32 경계가 반영돼야(전역 오염 무시): {xfer_vals}"
+        assert 255 not in xfer_vals                          # uint8 폴백 아님
+
+        # (b) 전역 타입캐시는 호출 후에도 오염값 그대로 — _build_doc_proposal 이 전역을 변이하지 않음
+        assert gsuts._globals_type_cache.get("xfer_len") == "uint8_t"
+    finally:
+        gsuts._globals_type_cache.clear()   # 다른 테스트 격리(전역 싱글톤 복원)
+
+
+def test_generate_sequences_type_cache_overrides_global():
+    """generate_sequences(type_cache=)가 주어지면 전역 _globals_type_cache 대신 그것을 읽고,
+    None(기본)이면 기존대로 전역을 읽는다(실 문서생성 경로 무변경 보증)."""
+    import generators.suts as gsuts
+
+    unit = {"name": "u", "input_vars": ["v"], "output_vars": [], "logic_flow": []}
+    gsuts._globals_type_cache.clear()
+    gsuts._globals_type_cache["v"] = "uint8_t"     # 전역 = uint8
+    try:
+        # type_cache 명시 주입(U32) → 전역(uint8) 무시하고 U32 경계
+        inj = [s for s in gsuts.generate_sequences(unit, type_cache={"v": "U32"})
+               if s["strategy"] == "BV_MAX"]
+        assert inj and inj[0]["inputs"]["v"] == 4294967295
+
+        # type_cache=None(기본) → 전역(uint8) 사용 = 실 문서생성 경로 무변경
+        glob = [s for s in gsuts.generate_sequences(unit)
+                if s["strategy"] == "BV_MAX"]
+        assert glob and glob[0]["inputs"]["v"] == 255
+    finally:
+        gsuts._globals_type_cache.clear()
+
+
+def test_extract_mcdc_conditions_threads_type_cache_into_recursion():
+    """_extract_mcdc_conditions의 재귀 자기호출(중첩 if/children)에도 type_cache가 스레드된다.
+
+    중첩 조건은 재귀 경로로만 도달하므로, 재귀에서 type_cache를 흘리면(과거 스냅샷 결함) 안쪽
+    var-vs-var 조건의 MC/DC 경계값이 전역(폴백 uint8)을 읽는다. 바깥 if의 children에 안쪽 if를
+    두고, 주입(U32) vs 미주입(전역 비움→uint8) 대조로 재귀 스레딩을 보증한다."""
+    import generators.suts as gsuts
+
+    gsuts._globals_type_cache.clear()   # 전역 비움 → 미주입 시 uint8 폴백(대조군)
+    try:
+        # 바깥 if(children) → 안쪽 if 'big > small'(var-vs-var, 재귀로만 도달)
+        flow = [{"type": "if", "condition": "outer > 0", "children": [
+            {"type": "if", "condition": "big > small", "children": []},
+        ]}]
+        ivars = ["big", "small", "outer"]
+
+        inj = gsuts._extract_mcdc_conditions(flow, ivars, {"big": "U32"})
+        big_inj = [c for c in inj if c[0] == "big"]
+        assert big_inj, f"중첩 var-vs-var 조건 미추출: {inj}"
+        # tuple=(var, op, rhs, true_val, false_val); '>'→true_val=bmax. U32 max면 재귀 스레드 성공.
+        assert big_inj[0][3] == 4294967295, f"재귀에 type_cache 미스레드(uint8 폴백): {big_inj}"
+
+        # 대조군: 미주입(전역 비움) → uint8 폴백(255). 재귀가 None을 흘려도 이 값이라 회귀 검출 가능.
+        glob = gsuts._extract_mcdc_conditions(flow, ivars)
+        big_glob = [c for c in glob if c[0] == "big"]
+        assert big_glob and big_glob[0][3] == 255
+    finally:
+        gsuts._globals_type_cache.clear()

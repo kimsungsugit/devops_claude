@@ -448,19 +448,40 @@ def _clean_global_name(g: str) -> str:
 _globals_type_cache: Dict[str, str] = {}
 
 
+def _gim_to_type_map(gim: Dict[str, Any]) -> Dict[str, str]:
+    """globals_info_map({var:{type:...}})에서 {var: raw_type} 타입맵을 추출한다.
+
+    ``set_globals_type_cache``(프로세스 전역 시딩)와 ``_build_doc_proposal``(로컬 type_cache
+    주입, workflow/impact_orchestrator.py)의 **단일 출처**다 — 두 곳이 독립 구현이면 한쪽만
+    고쳐 드리프트하는 전례가 있어 통합한다(비-dict/빈 타입 값 방어 포함).
+    """
+    out: Dict[str, str] = {}
+    for var_name, info in (gim or {}).items():
+        if not isinstance(info, dict):
+            continue
+        vtype = str(info.get("type") or "").strip()
+        if vtype:
+            out[str(var_name)] = vtype
+    return out
+
+
 def set_globals_type_cache(gim: Dict[str, Dict[str, str]]) -> None:
     """Populate type cache from globals_info_map for precise type resolution."""
     _globals_type_cache.clear()
-    for var_name, info in gim.items():
-        vtype = (info.get("type") or "").strip()
-        if vtype:
-            _globals_type_cache[var_name] = vtype
+    _globals_type_cache.update(_gim_to_type_map(gim))
 
 
-def infer_variable_type(var_name: str) -> str:
-    """Infer C type from variable naming convention or globals_info_map."""
-    if var_name in _globals_type_cache:
-        raw = _globals_type_cache[var_name]
+def infer_variable_type(var_name: str, type_cache: Optional[Dict[str, str]] = None) -> str:
+    """Infer C type from variable naming convention or globals_info_map.
+
+    type_cache: 명시적 {var: raw_type} 맵. 주어지면 프로세스 전역 ``_globals_type_cache``
+      대신 이것을 읽는다 — 호출자(예: 영향도 문서 초안 합성)가 전역을 변이시키지 않고
+      정확한 타입 해상도를 얻게 해 write-race/타 프로젝트 오염을 원천 차단한다.
+      None이면 기존대로 전역 캐시를 읽는다(실 문서생성 경로는 무변경).
+    """
+    cache = type_cache if type_cache is not None else _globals_type_cache
+    if var_name in cache:
+        raw = cache[var_name]
         mapped = _normalize_type(raw)
         if mapped:
             return mapped
@@ -526,6 +547,7 @@ def determine_test_method(unit: Dict[str, Any]) -> str:
 def generate_sequences(
     unit: Dict[str, Any],
     max_seq: int = _DEFAULT_SEQ_COUNT,
+    type_cache: Optional[Dict[str, str]] = None,
 ) -> List[Dict[str, Any]]:
     """Generate test sequences for a unit function.
 
@@ -584,7 +606,7 @@ def generate_sequences(
         error_expected: Dict[str, Any] = {}
         if indirect_vars:
             for _iv in indirect_vars[:4]:
-                _vtype = infer_variable_type(_iv)
+                _vtype = infer_variable_type(_iv, type_cache)
                 _bounds = (
                     _get_float_bounds_for_var(_iv) if _vtype == "float"
                     else get_boundary_values(_vtype)
@@ -614,13 +636,13 @@ def generate_sequences(
                          "description": f"{fn_name}() 반환값 검증: 반환값이 정의된 범위 내 유효한 값임을 확인"})
         return seqs[:max_seq]
 
-    var_types = {v: infer_variable_type(v) for v in input_vars}
+    var_types = {v: infer_variable_type(v, type_cache) for v in input_vars}
     var_bounds = {
         v: (_get_float_bounds_for_var(v) if t == "float" else get_boundary_values(t))
         for v, t in var_types.items()
     }
 
-    out_types = {v: infer_variable_type(v) for v in output_vars}
+    out_types = {v: infer_variable_type(v, type_cache) for v in output_vars}
     out_bounds = {
         v: (_get_float_bounds_for_var(v) if t == "float" else get_boundary_values(t))
         for v, t in out_types.items()
@@ -684,7 +706,7 @@ def generate_sequences(
 
     # GAP 6: MC/DC — Modified Condition/Decision Coverage
     # Extract conditions from logic_flow and generate True/False toggle per condition
-    _mcdc_conditions = _extract_mcdc_conditions(logic_flow, input_vars)
+    _mcdc_conditions = _extract_mcdc_conditions(logic_flow, input_vars, type_cache)
     # Add baseline FIRST (all conditions at true values)
     if _mcdc_conditions:
         strategies.append(("MCDC_BASE", "_mcdc_base"))
@@ -781,7 +803,7 @@ def generate_sequences(
             # Add the global var as input with boundary value
             if gv_idx < len(_extra_globals):
                 gv = _extra_globals[gv_idx]
-                gv_type = infer_variable_type(gv)
+                gv_type = infer_variable_type(gv, type_cache)
                 gv_bnd = _get_float_bounds_for_var(gv) if gv_type == "float" else get_boundary_values(gv_type)
                 inp_vals[gv] = _format_test_value(gv_bnd.get("min", 0), var_types.get(gv, gv_type) if gv in var_types else gv_type)
             for v in output_vars:
@@ -793,7 +815,7 @@ def generate_sequences(
                 bnd = var_bounds.get(v, _DEFAULT_BOUNDARY)
                 inp_vals[v] = _format_test_value(bnd.get("max_inv", bnd.get("max", 255) + 1), var_types.get(v, "uint8_t"))
             for gv in _extra_globals:
-                gv_type = infer_variable_type(gv)
+                gv_type = infer_variable_type(gv, type_cache)
                 gv_bnd = _get_float_bounds_for_var(gv) if gv_type == "float" else get_boundary_values(gv_type)
                 exp_vals[gv] = _format_test_value(gv_bnd.get("mid", 0), gv_type)
         elif bound_key and bound_key.startswith("_cond_"):
@@ -999,6 +1021,7 @@ def _is_state_machine_var(var_name: str) -> bool:
 def _extract_mcdc_conditions(
     logic_flow: List[Dict[str, Any]],
     input_vars: List[str],
+    type_cache: Optional[Dict[str, str]] = None,
 ) -> List[Tuple[str, str, Any, Any, Any]]:
     """Extract MC/DC-relevant conditions from logic_flow.
 
@@ -1019,13 +1042,13 @@ def _extract_mcdc_conditions(
         if ntype != "if":
             # Recurse
             for child in node.get("children", []):
-                conditions.extend(_extract_mcdc_conditions([child], input_vars))
+                conditions.extend(_extract_mcdc_conditions([child], input_vars, type_cache))
             continue
 
         cond = str(node.get("condition", "")).strip()
         if not cond:
             for child in node.get("children", []):
-                conditions.extend(_extract_mcdc_conditions([child], input_vars))
+                conditions.extend(_extract_mcdc_conditions([child], input_vars, type_cache))
             continue
 
         # Parse conditions: "var > 10", "var >= other_var", "var == CONST"
@@ -1074,7 +1097,7 @@ def _extract_mcdc_conditions(
                 if m2:
                     rhs_var = m2.group(1)
                     # Use boundary values of the input variable for MC/DC toggle
-                    iv_type = infer_variable_type(iv)
+                    iv_type = infer_variable_type(iv, type_cache)
                     iv_bnd = (
                         _get_float_bounds_for_var(iv) if iv_type == "float"
                         else get_boundary_values(iv_type)
@@ -1102,7 +1125,7 @@ def _extract_mcdc_conditions(
 
         # Recurse into children
         for child in node.get("children", []):
-            conditions.extend(_extract_mcdc_conditions([child], input_vars))
+            conditions.extend(_extract_mcdc_conditions([child], input_vars, type_cache))
 
     return conditions
 

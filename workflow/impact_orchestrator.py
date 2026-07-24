@@ -1108,7 +1108,8 @@ def _build_doc_proposal(
         if warn_sink is not None:
             warn_sink.append("문서 생성 초안: 소스 function_details 없음 — 생성 초안 생략")
         return out
-    gim = sections.get("globals_info_map") or {}
+    gim = sections.get("globals_info_map")
+    gim = gim if isinstance(gim, dict) else {}   # 손상 캐시(비-dict)에서 .items() AttributeError 방어(reviewer W1)
     # changed_set은 소문자 함수명. function_details 키(fid)는 임의이고 info["name"]이 실제 함수명이다.
     # name(소문자) → fid 매핑. 동명 다중정의는 삽입순 첫 매치를 임의 대표로 택한다(reviewer I6 — 표시
     # 전용 초안이라 by_name의 ASIL-max 병합 같은 안전측 선택은 불필요, 어느 사본이든 시험 골격은 유사).
@@ -1123,15 +1124,23 @@ def _build_doc_proposal(
         return out
 
     # ── SUTS: 대상 함수만 collect_unit_functions → generate_sequences(문서 생성과 동일 경로) ──
-    # ⚠ set_globals_type_cache는 호출하지 않는다 — 전역 타입캐시를 덮어쓰면 동시 문서생성 경로를
-    #   오염시킨다. gim은 collect_unit_functions 인자로만 전달(격리). 타입 미상은 변수명 폴백.
-    # ⚠ 역방향 간섭은 감수한다(reviewer W1): generate_sequences 내부 infer_variable_type이 프로세스
-    #   전역 타입캐시를 '읽어', 타 프로젝트의 동시 문서생성(set_globals_type_cache)이 이 경계값 타입
-    #   추론에 간섭할 수 있다. 표시 전용 advisory('실행 검증 필요' 문구가 커버)라 안전 무영향이나 완전
-    #   결정론은 아니다(락 보호는 후속). 영향집합/ASIL/커버리지는 이와 무관하게 불변.
+    # 타입 해상도(핵심): gim에서 {var: raw_type} 로컬 타입맵(_gim_to_type_map — set_globals_type_cache와
+    #   동일 단일출처)을 만들어 generate_sequences(type_cache=)로 **명시 주입**한다. 이러면 실 문서생성
+    #   (set_globals_type_cache→프로세스 전역)과 동일한 타입으로 경계값을 산출하면서도 전역을 일절 변이
+    #   시키지 않아, 동시 문서생성과의 write-race/타 프로젝트 오염을 원천 차단한다(파라미터 격리). 과거엔
+    #   set_globals_type_cache 미호출→빈/stale 전역→uint8 폴백이라 U32/UINT16/bool 변수의 경계 max 를
+    #   잘못 산출했다(실측 12개 변수 상이: 예 U32 카운터 255↔4294967295, enable 플래그 255↔1).
+    #   ⚠ gim은 collect_unit_functions 인자로도 전달하나, 그 함수 본문은 현재 gim을 사용하지 않는다
+    #     (역할 판정은 tag/이름 접두 휴리스틱). 즉 타입 해상도는 아래 type_cache 경로만 실효다.
+    #   타입 미상은 generate_sequences 내부 변수명 폴백. 영향집합/ASIL/커버리지는 이와 무관하게 불변.
     try:
-        from generators.suts import collect_unit_functions, generate_sequences
+        from generators.suts import (
+            _gim_to_type_map,
+            collect_unit_functions,
+            generate_sequences,
+        )
 
+        _local_tc = _gim_to_type_map(gim)   # try 안 — 손상 gim이어도 아래 except가 우아하게 흡수(reviewer W1)
         _sub_fd = {name_lc_to_fid[fn]: fdmap[name_lc_to_fid[fn]] for fn in targets}
         for _unit in (collect_unit_functions(_sub_fd, gim) or []):
             _nm = str(_unit.get("name") or "").strip().lower()
@@ -1144,7 +1153,7 @@ def _build_doc_proposal(
                     "expected": dict(s.get("expected") or {}),
                     "description": str(s.get("description") or "")[:400],
                 }
-                for s in (generate_sequences(_unit, max_seq=seq_cap) or [])[:seq_cap]
+                for s in (generate_sequences(_unit, max_seq=seq_cap, type_cache=_local_tc) or [])[:seq_cap]
                 if isinstance(s, dict)
             ]
             if _slim:
