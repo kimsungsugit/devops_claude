@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useCallback } from 'react';
+import { Fragment, useState, useEffect, useMemo, useCallback } from 'react';
 import { post, api, defaultCacheRoot } from '../../api.js';
 import { useToast, useJenkinsCfg } from '../../App.jsx';
 import { pickScmForJob } from '../../projectLoader.js';
@@ -6,6 +6,8 @@ import { targetConsistent } from '../../impactGuard.js';
 import { HorizontalBar, RingGauge, MiniTrend } from '../charts.jsx';
 import { CoverageDonut, QualityGateBadge, classifyGate } from '../ResultPanel.jsx';
 import { buildTraceMatrix } from '../../traceMatrix.js';
+import PipelineHealthStrip from './PipelineHealthStrip.jsx';
+import BuildDeltaDrilldown from './BuildDeltaDrilldown.jsx';
 
 /**
  * ProjectSummarySection — "📌 프로젝트 요약" 탭 (단일 뷰 건강 대시보드).
@@ -197,6 +199,20 @@ export default function ProjectSummarySection({ job, analysisResult }) {
     return () => { cancelled = true; };
   }, [jobUrl, cacheRoot]);
 
+  // ── 빌드별 PRQA delta(트렌드 응답의 인접 delta) + 드릴다운 확장 상태 ──
+  const [expandedBuild, setExpandedBuild] = useState(null);
+  const deltaByBuild = useMemo(() => {
+    const m = new Map();
+    for (const b of prqaTrend?.builds || []) {
+      if (b?.build_number != null) m.set(String(b.build_number), b);
+    }
+    return m;
+  }, [prqaTrend]);
+  const trendBuilds = prqaTrend?.builds;
+  const latestViolationsDelta = trendBuilds?.length
+    ? (trendBuilds[trendBuilds.length - 1]?.violations_delta ?? null)
+    : null;
+
   // 분석된 빌드(timeline change-log) + 전체 Jenkins 빌드(allBuilds) 병합 — 미분석은 analyzed:false 행.
   const rows = useMemo(() => {
     // deep-review W2: 동일 build_number 재분석 시 최신 실행을 채택한다. rows는 최신순이라
@@ -314,6 +330,10 @@ export default function ProjectSummarySection({ job, analysisResult }) {
         </div>
       </div>
 
+      {/* 파이프라인 헬스 스트립 — 설계(SDS)→테스트(STS)까지 단계 상태 + 탭 딥링크 */}
+      <PipelineHealthStrip trace={trace} prqa={prqa} scmVcast={scmVcast} rollup={rollup}
+        latestViolationsDelta={latestViolationsDelta} />
+
       {/* 정적·동적 현황 (그리드) */}
       <div className="panel" style={PANEL}>
         <div style={{ fontSize: 'var(--text-sm)', fontWeight: 600, marginBottom: 'var(--sp-2)' }}>
@@ -424,6 +444,46 @@ export default function ProjectSummarySection({ job, analysisResult }) {
         )}
       </div>
 
+      {/* 정적분석 위반 상세 — kpis.prqa(상세탭과 동일 소스, 추가 fetch 없음) */}
+      <div className="panel" style={PANEL}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--sp-2)', marginBottom: 'var(--sp-2)' }}>
+          <div style={{ fontSize: 'var(--text-sm)', fontWeight: 600 }}>정적분석 위반 상세 (PRQA/MISRA)</div>
+          <button type="button"
+            onClick={() => { if (typeof window.__detailSection === 'function') window.__detailSection('analysis'); }}
+            style={{ marginLeft: 'auto', fontSize: 'var(--text-xs)', padding: '2px 8px', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', background: 'transparent', cursor: 'pointer', color: 'var(--text-muted)' }}>
+            테스트 결과 탭에서 전체 보기
+          </button>
+        </div>
+        {(Array.isArray(prqa.top_rules) && prqa.top_rules.length > 0) || (Array.isArray(prqa.top_files) && prqa.top_files.length > 0) ? (
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: 'var(--sp-4)' }}>
+            <div>
+              <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', marginBottom: 4 }}>위반 상위 규칙</div>
+              {(() => {
+                const rules = (prqa.top_rules || []).slice(0, 6);
+                const max = Math.max(...rules.map((r) => r.count || 0), 1);
+                return rules.map((r) => <HorizontalBar key={r.rule} label={r.rule} value={r.count || 0} max={max} color="var(--color-warning)" />);
+              })()}
+            </div>
+            <div>
+              <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', marginBottom: 4 }}>위반 상위 파일</div>
+              {(() => {
+                const files = (prqa.top_files || []).slice(0, 6);
+                const max = Math.max(...files.map((f) => f.count || 0), 1);
+                return files.map((f) => <HorizontalBar key={f.path || f.file} label={f.file} value={f.count || 0} max={max} color="var(--color-danger)" />);
+              })()}
+            </div>
+          </div>
+        ) : (
+          <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>빌드 캐시에 PRQA 위반 상세(RCR)가 없습니다.</div>
+        )}
+        {prqa.rule_violation_count != null && prqa.violations_attributed_total != null
+          && Number(prqa.rule_violation_count) > Number(prqa.violations_attributed_total) && (
+          <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', marginTop: 'var(--sp-1)' }}>
+            * 총 위반 {fmtInt(prqa.rule_violation_count)} 중 {fmtInt(prqa.violations_attributed_total)}건만 파일에 귀속 — 나머지는 원본 QAC 리포트가 파일 미귀속으로 집계
+          </div>
+        )}
+      </div>
+
       {/* 빌드 타임라인 (전체 빌드) */}
       <div className="panel" style={PANEL}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--sp-2)', marginBottom: 'var(--sp-2)' }}>
@@ -463,16 +523,21 @@ export default function ProjectSummarySection({ job, analysisResult }) {
                   <th style={th}>빌드</th><th style={th}>리비전</th><th style={th}>결과</th><th style={th}>시각</th>
                   <th style={th}>변경 파일</th><th style={th}>변경 함수</th><th style={th}>영향(직접/1h/2h)</th>
                   <th style={th}>max ASIL</th><th style={th}>MC/DC</th><th style={th}>재생성/검토</th><th style={th}>상태</th>
+                  <th style={th} title="직전 캐시 빌드 대비 PRQA 위반 증감">Δ위반</th><th style={th}>상세</th>
                 </tr>
               </thead>
               <tbody>
                 {rows.map((r) => {
                   const analyzed = r.analyzed !== false;
                   const bucket = r.max_asil_bucket || 'unknown';
+                  const rowTrend = r.build_number != null ? deltaByBuild.get(String(r.build_number)) : null;
+                  const rowDelta = rowTrend?.violations_delta ?? null;
+                  const expanded = r.build_number != null && expandedBuild != null && String(expandedBuild) === String(r.build_number);
                   return (
-                    <tr key={r.run_id}
+                    <Fragment key={r.run_id}>
+                    <tr
                       onClick={() => openInImpact(r)}
-                      onKeyDown={(e) => { if (analyzed && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); openInImpact(r); } }}
+                      onKeyDown={(e) => { if (e.target === e.currentTarget && analyzed && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); openInImpact(r); } }}
                       role={analyzed ? 'button' : undefined} tabIndex={analyzed ? 0 : undefined}
                       aria-label={analyzed ? `빌드 #${r.build_number ?? '?'} 변경 영향 평가 열기` : undefined}
                       style={{ cursor: analyzed ? 'pointer' : 'default', opacity: analyzed ? 1 : 0.6 }}
@@ -502,7 +567,36 @@ export default function ProjectSummarySection({ job, analysisResult }) {
                           : !r.coverage_measured ? <Pill text="커버리지 미측정" color="var(--text-muted)" />
                           : <span style={{ color: 'var(--color-success)', fontWeight: 600 }}>정상</span>}
                       </td>
+                      <td style={td}>
+                        {rowDelta == null
+                          ? <span style={{ color: 'var(--text-muted)' }}>—</span>
+                          : <span style={{ fontWeight: 600, color: rowDelta > 0 ? 'var(--color-danger)' : rowDelta < 0 ? 'var(--color-success)' : 'var(--text-muted)' }}>
+                              {rowDelta > 0 ? `+${rowDelta}` : rowDelta === 0 ? '±0' : rowDelta}
+                            </span>}
+                      </td>
+                      <td style={td}>
+                        {r.build_number != null && (
+                          <button type="button"
+                            onClick={(e) => { e.stopPropagation(); setExpandedBuild(expanded ? null : r.build_number); }}
+                            aria-expanded={expanded}
+                            aria-label={`빌드 #${r.build_number} PRQA 위반 delta 상세 ${expanded ? '접기' : '펼치기'}`}
+                            title="직전 빌드 대비 위반 규칙/파일 delta 드릴다운"
+                            style={{ fontSize: 'var(--text-xs)', padding: '1px 7px', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', background: 'transparent', cursor: 'pointer', color: 'var(--text-muted)' }}>
+                            {expanded ? '▾' : '▸'}
+                          </button>
+                        )}
+                      </td>
                     </tr>
+                    {expanded && (
+                      <tr>
+                        <td colSpan={13} style={{ padding: 0, borderBottom: '1px solid var(--border)' }}>
+                          <BuildDeltaDrilldown jobUrl={jobUrl} cacheRoot={cacheRoot} scmId={scmId}
+                            buildNumber={Number(r.build_number)}
+                            onOpenImpact={analyzed ? () => openInImpact(r) : undefined} />
+                        </td>
+                      </tr>
+                    )}
+                    </Fragment>
                   );
                 })}
               </tbody>

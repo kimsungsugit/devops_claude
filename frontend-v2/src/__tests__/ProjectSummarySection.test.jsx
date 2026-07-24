@@ -12,6 +12,7 @@ let mockTimeline;
 let mockScmVcast;
 let mockTrace;
 let mockPrqaTrend;
+let mockPrqaDelta;
 let mockTraceGenSuccess;
 let mockCfg;
 let mockAllBuilds;
@@ -23,6 +24,7 @@ vi.mock('../api.js', () => ({
     if (u.includes('scm-vcast-summary')) return Promise.resolve(mockScmVcast);
     if (u.includes('trace-summary')) return Promise.resolve(mockTrace);
     if (u.includes('prqa-trend')) return Promise.resolve(mockPrqaTrend);
+    if (u.includes('prqa-delta')) return Promise.resolve(mockPrqaDelta);
     if (u.includes('/api/jenkins/builds')) return Promise.resolve(mockAllBuilds);
     return Promise.resolve({});
   }),
@@ -83,9 +85,9 @@ const TRACE = {
 const PRQATREND = {
   available: true, count: 3,
   builds: [
-    { build_number: 122, violations: 558, diagnostics: 496, compliance: 92 },
-    { build_number: 124, violations: 552, diagnostics: 492, compliance: 91 },
-    { build_number: 125, violations: 562, diagnostics: 502, compliance: 91 },
+    { build_number: 122, violations: 558, diagnostics: 496, compliance: 92, violations_delta: null, diagnostics_delta: null },
+    { build_number: 124, violations: 552, diagnostics: 492, compliance: 91, violations_delta: -6, diagnostics_delta: -4 },
+    { build_number: 125, violations: 562, diagnostics: 502, compliance: 91, violations_delta: 10, diagnostics_delta: 10 },
   ],
 };
 
@@ -96,6 +98,7 @@ describe('ProjectSummarySection (재설계)', () => {
     mockScmVcast = SCMVCAST;
     mockTrace = TRACE;
     mockPrqaTrend = PRQATREND;
+    mockPrqaDelta = { ok: true, available: false, reason: 'no_baseline_build' };
     mockTraceGenSuccess = false;
     mockCfg = {};
     mockAllBuilds = [];
@@ -232,6 +235,61 @@ describe('ProjectSummarySection (재설계)', () => {
     render(<ProjectSummarySection job={JOB} analysisResult={staleResult} />);
     expect(await screen.findByText(/자동 생성 보류/)).toBeInTheDocument();
     expect(buildTraceMatrix).not.toHaveBeenCalled();
+  });
+
+  it('타임라인 Δ위반 컬럼: 트렌드 delta를 빌드별로 조인해 +N 표기, 결측은 —', async () => {
+    render(<ProjectSummarySection job={JOB} analysisResult={RESULT} />);
+    const row = (await screen.findByText('#125')).closest('tr');
+    expect(within(row).getByText('+10')).toBeInTheDocument();
+  });
+
+  it('파이프라인 헬스 스트립: 노드 렌더 + 클릭 시 해당 탭 딥링크', async () => {
+    const user = userEvent.setup();
+    window.__detailSection = vi.fn();
+    render(<ProjectSummarySection job={JOB} analysisResult={RESULT} />);
+    expect(await screen.findByText(/파이프라인 헬스/)).toBeInTheDocument();
+    expect(screen.getByText('SDS 설계')).toBeInTheDocument();
+    expect(screen.getByText('STS 요구시험')).toBeInTheDocument();
+    await user.click(screen.getByText('UDS 상세설계').closest('button'));
+    expect(window.__detailSection).toHaveBeenCalledWith('docgen');
+    delete window.__detailSection;
+  });
+
+  it('정적분석 위반 상세: kpis.prqa top_rules/top_files를 추가 fetch 없이 렌더 + 미귀속 각주', async () => {
+    const result = {
+      ...RESULT,
+      reportData: {
+        kpis: {
+          ...RESULT.reportData.kpis,
+          prqa: {
+            ...RESULT.reportData.kpis.prqa,
+            top_rules: [{ rule: 'Rule-8.6', count: 120 }, { rule: 'Rule-2.1', count: 44 }],
+            top_files: [{ file: 'foo.c', path: 'APP/src/foo.c', count: 31 }],
+            violations_attributed_total: 550,  // 562 중 550만 귀속 → 각주
+          },
+        },
+      },
+    };
+    render(<ProjectSummarySection job={JOB} analysisResult={result} />);
+    expect(await screen.findByText('정적분석 위반 상세 (PRQA/MISRA)')).toBeInTheDocument();
+    expect(screen.getByText('Rule-8.6')).toBeInTheDocument();
+    expect(screen.getByText('foo.c')).toBeInTheDocument();
+    expect(screen.getByText(/550건만 파일에 귀속/)).toBeInTheDocument();
+  });
+
+  it('드릴다운 chevron: 클릭 시 prqa-delta 조회 + impact 핸드오프는 발생하지 않음(stopPropagation)', async () => {
+    const user = userEvent.setup();
+    window.__detailSection = vi.fn();
+    render(<ProjectSummarySection job={JOB} analysisResult={RESULT} />);
+    const row = (await screen.findByText('#125')).closest('tr');
+    await user.click(within(row).getByRole('button', { name: /펼치기/ }));
+    // 확장 패널이 available:false reason을 한국어로 노출
+    expect(await screen.findByText(/비교할 이전 캐시 빌드가 없습니다/)).toBeInTheDocument();
+    const { post } = await import('../api.js');
+    expect(post).toHaveBeenCalledWith('/api/jenkins/prqa-delta', expect.objectContaining({ build_number: 125, scm_id: 'kj' }));
+    expect(window.__detailSection).not.toHaveBeenCalled(); // 행 클릭 핸드오프 미발화
+    expect(localStorage.getItem('devops_v2_impact_focus_build')).toBeNull();
+    delete window.__detailSection;
   });
 
   it('전체 빌드 병합: Jenkins 목록의 미분석 빌드를 "미분석" 행으로 표시(비차단)', async () => {
