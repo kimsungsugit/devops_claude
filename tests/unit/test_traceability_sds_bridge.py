@@ -713,6 +713,7 @@ def test_unmapped_layer_field_and_summary_counts():
         + s["unmapped_layer_boot_reprog"]
         + s["unmapped_layer_lib_util"]
         + s["unmapped_layer_test_artifact"]
+        + s["unmapped_layer_unresolved"]   # §H: 분류불가 6번째 버킷(정합식 유지)
     )
     assert layer_sum == s["unmapped_vcast_count"]
     assert s["unmapped_layer_app_leaf"] >= 1

@@ -2343,6 +2343,9 @@ def generate_uds_traceability_matrix(
     # 구분할 신호를 summary로 노출한다. 미추적 행은 매트릭스에서 빠지므로 카운트만.
     vcast_input_rows = 0
     vcast_traced_rows = 0
+    # §G: bridge(seen_vc)로 traced된 subprogram 집합 — 같은 subprogram이 다른 행에서 bridge
+    # 실패해 미추적 목록에 잔류한 것을 loop 후 일괄 revoke(행 순서 무관). never-revoke 이중집계 해소.
+    _traced_subs: Set[str] = set()
     # 미추적(SRS 미연결) VectorCAST subprogram 목록 — 역방향 추적성 공백 가시화.
     # 시험은 했으나 이 SRS 요구사항에 안 닿는 함수(일부 보안/안전 관련이라 의미 있음).
     # 트리 뷰의 'SRS 미추적 시험 포함' 토글이 이 목록을 의미 3버킷으로 묶어 보여준다.
@@ -2431,8 +2434,13 @@ def generate_uds_traceability_matrix(
                             if mrid in req_id_set and mrid not in seen_vc:
                                 seen_vc.add(mrid)
                                 enriched_rows.append({**row, "requirement_id": mrid, "trace_type": "indirect"})
-            if seen_vc:
+            # bridge(seen_vc) 또는 direct requirement_id(orig_rid, 2367서 이미 trace_type:"direct"
+            # 로 traced)로 SRS에 연결된 행은 traced로 집계한다. direct rid 행이 subprogram bridge에
+            # 실패해도 여기서 흡수돼 untraced(unmapped_vcast) 이중집계를 막는다(§F).
+            if seen_vc or orig_rid in req_id_set:
                 vcast_traced_rows += 1
+                if seen_vc:
+                    _traced_subs.add(sub_lower)   # §G: bridge traced subprogram 수집(revoke용)
             else:
                 # SRS 미연결 — 역방향 추적 공백 목록에 distinct subprogram만 수집.
                 # SUTS bridge(swufn_to_func)로 함수명을 해석해 의미 분류한다:
@@ -2506,7 +2514,15 @@ def generate_uds_traceability_matrix(
                         # BSW_DRIVER/BOOT_REPROG/LIB_UTIL/TEST_ARTIFACT. 보고 hint이며 안전성은
                         # 직교(safety 플래그). 입력은 해석된 실제 함수명(_uds_cands) — SwUFn ID
                         # 자기-메아리를 피하고 도메인 토큰이 실린 진짜 이름으로 분류한다.
-                        "layer": _classify_unmapped_layer(_uds_cands),
+                        # §H: subprogram이 SwUFn ID인데 함수명 해석(resolved)이 없으면 UDS 대조
+                        # 입력(_uds_cands)이 비어 _classify가 APP_LEAF로 기본화되고, 진짜 설계갭
+                        # (unmapped_app_design_gap = APP_LEAF ∩ not in_uds)을 부풀린다. 실제로는
+                        # '분류 불가'(SwUFn↔함수명 미해결)이므로 UNRESOLVED 버킷으로 빼 오염을 막는다.
+                        "layer": (
+                            "UNRESOLVED"
+                            if (_SWUFN_RE.search(subprogram) and not resolved)
+                            else _classify_unmapped_layer(_uds_cands)
+                        ),
                     })
                 else:
                     # worst-case 집계: 동일 subprogram의 후속 행이 FAIL이면 기존 항목 result를
@@ -2515,6 +2531,13 @@ def generate_uds_traceability_matrix(
                     _existing = unmapped_vcast[_unmapped_idx[sub_lower]]
                     if _RESULT_FAIL_RE.match(res_str) and not _RESULT_FAIL_RE.match(str(_existing["result"])):
                         _existing["result"] = res_str
+
+    # §G: 같은 subprogram이 다른 행에서 bridge로 traced됐으면 미추적 목록에서 제거한다(never-
+    # revoke 이중집계 해소). 행 순서 무관하게 loop 후 일괄 필터 — traced 행이 unmapped 행보다
+    # 먼저 와도 정확. _unmapped_idx는 이후 미사용이라 인덱스 무효화 무해.
+    if _traced_subs:
+        unmapped_vcast = [u for u in unmapped_vcast
+                          if str(u["subprogram"]).lower() not in _traced_subs]
 
     # 의미 버킷 우선순위로 정렬 — 잘림/상단 노출 시 신호(suts_tested)가 먼저 보이도록.
     _UNMAPPED_ORDER = {"suts_tested": 0, "isr": 1, "vcast_only": 2}
@@ -2798,6 +2821,9 @@ def generate_uds_traceability_matrix(
             "unmapped_layer_boot_reprog": sum(1 for u in unmapped_vcast if u.get("layer") == "BOOT_REPROG"),
             "unmapped_layer_lib_util": sum(1 for u in unmapped_vcast if u.get("layer") == "LIB_UTIL"),
             "unmapped_layer_test_artifact": sum(1 for u in unmapped_vcast if u.get("layer") == "TEST_ARTIFACT"),
+            # §H: 분류 불가(SwUFn↔함수명 미해결) — layer 정합식(6버킷 합 == unmapped_vcast_count)의
+            # 6번째 정식 버킷. app_design_gap(APP_LEAF ∩ 미설계)엔 미포함이라 진짜 갭 과대집계를 막는다.
+            "unmapped_layer_unresolved": sum(1 for u in unmapped_vcast if u.get("layer") == "UNRESOLVED"),
         },
         # 역방향 추적성 공백 — '시험은 했으나 이 SRS에 안 닿는' VectorCAST subprogram 전체 목록.
         # 트리 뷰의 'SRS 미추적 시험 포함' 토글이 의미 3버킷으로 묶어 보여준다.

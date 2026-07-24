@@ -706,6 +706,94 @@ class TestGenerateUdsTraceabilityMatrix:
         out = generate_uds_traceability_matrix([{"id": "R1"}])
         assert out["rows"][0]["asil"] == ""
 
+    def test_vcast_direct_rid_not_double_counted(self):
+        """§F: VectorCAST 행이 direct requirement_id(매트릭스 SRS)로 이미 traced면,
+        subprogram bridge 실패해도 untraced(unmapped_vcast)로 이중집계되지 않는다."""
+        from report_gen.requirements import generate_uds_traceability_matrix
+        items = [{"id": "SwTR_001"}]
+        vcast = [{
+            "source": "VectorCAST",
+            "requirement_id": "SwTR_001",   # 매트릭스 SRS = direct traced (2367)
+            "subprogram": "unmatched_fn",   # SDS/SwUFn bridge 미매칭
+            "testcase": "TC_01",
+            "result": "pass",
+        }]
+        s = generate_uds_traceability_matrix(items, vcast_rows=vcast)["summary"]
+        assert s["vcast_traced_rows"] == 1, s      # direct로 traced
+        assert s["vcast_untraced_rows"] == 0, s    # 이중집계 해소
+        assert s["unmapped_vcast_count"] == 0, s   # unmapped 리스트에서 제외
+
+    def test_vcast_no_rid_unmatched_stays_untraced(self):
+        """대조(§F 무영향): orig_rid 없고 subprogram도 미매칭이면 진짜 untraced로 유지된다."""
+        from report_gen.requirements import generate_uds_traceability_matrix
+        items = [{"id": "SwTR_001"}]
+        vcast = [{
+            "source": "VectorCAST",
+            "subprogram": "unmatched_fn",   # rid 없음 + bridge 미매칭 = 진짜 미추적
+            "testcase": "TC_01",
+            "result": "pass",
+        }]
+        s = generate_uds_traceability_matrix(items, vcast_rows=vcast)["summary"]
+        assert s["unmapped_vcast_count"] == 1, s   # 진짜 미추적 유지
+        assert s["vcast_untraced_rows"] == 1
+
+    def test_vcast_subprogram_revoked_when_traced_in_another_row(self):
+        """§G: 같은 subprogram이 한 행에서 bridge 실패(unmapped)해도 다른 행에서 traced되면
+        미추적 목록(unmapped_vcast)에서 제거된다(never-revoke 이중집계 해소)."""
+        from report_gen.requirements import generate_uds_traceability_matrix
+        items = [{"id": "SwTR_001"}]
+        sds_pairs = [{"requirement_id": "SwTR_001", "component_ids": ["realfn"]}]
+        rows = [
+            {"source": "SUTS", "requirement_id": "SwUFn_0101", "unit": "realfn"},  # swufn_to_func 세팅
+            # 같은 subprogram, testcase에 SwUFn 없음 → bridge 실패 → unmapped 등록
+            {"source": "VectorCAST", "subprogram": "x_sub", "testcase": "TC_plain", "result": "pass"},
+            # 같은 subprogram, testcase에 SwUFn_0101 → 2-hop bridge 성공 → traced
+            {"source": "VectorCAST", "subprogram": "x_sub", "testcase": "SwUFn_0101", "result": "pass"},
+        ]
+        out = generate_uds_traceability_matrix(items, vcast_rows=rows, sds_pairs=sds_pairs)
+        names = [u["subprogram"] for u in out["unmapped_vcast"]]
+        assert "x_sub" not in names, names
+        assert out["summary"]["unmapped_vcast_count"] == 0, out["summary"]
+
+    def test_vcast_revoke_order_independent(self):
+        """§G 순서 무관: traced 행이 unmapped 행보다 먼저 와도 일괄 필터로 revoke된다."""
+        from report_gen.requirements import generate_uds_traceability_matrix
+        items = [{"id": "SwTR_001"}]
+        sds_pairs = [{"requirement_id": "SwTR_001", "component_ids": ["realfn"]}]
+        rows = [
+            {"source": "SUTS", "requirement_id": "SwUFn_0101", "unit": "realfn"},
+            # traced 행을 먼저, unmapped 행을 나중에 — first-wins 로직이면 놓치는 순서
+            {"source": "VectorCAST", "subprogram": "x_sub", "testcase": "SwUFn_0101", "result": "pass"},
+            {"source": "VectorCAST", "subprogram": "x_sub", "testcase": "TC_plain", "result": "pass"},
+        ]
+        out = generate_uds_traceability_matrix(items, vcast_rows=rows, sds_pairs=sds_pairs)
+        names = [u["subprogram"] for u in out["unmapped_vcast"]]
+        assert "x_sub" not in names, names
+
+    def test_vcast_unresolved_swufn_not_counted_as_design_gap(self):
+        """§H: SwUFn ID인데 함수명 해석 불가(resolved 빈)면 UNRESOLVED로 분류돼
+        진짜 설계갭(unmapped_app_design_gap)을 부풀리지 않는다."""
+        from report_gen.requirements import generate_uds_traceability_matrix
+        items = [{"id": "SwTR_001"}]
+        vcast = [{"source": "VectorCAST", "subprogram": "SwUFn_9999",   # SUTS 대응 없음 → 해석 불가
+                  "testcase": "TC_01", "result": "pass"}]
+        out = generate_uds_traceability_matrix(items, vcast_rows=vcast)
+        s = out["summary"]
+        assert s["unmapped_layer_unresolved"] == 1, s          # UNRESOLVED 버킷
+        assert s["unmapped_app_design_gap"] == 0, s      # 진짜 갭에서 제외(오염 방지)
+        assert [u["layer"] for u in out["unmapped_vcast"]] == ["UNRESOLVED"]
+
+    def test_vcast_named_leaf_stays_app_design_gap(self):
+        """대조(§H 무영향): SwUFn ID 아닌 함수명 subprogram은 APP_LEAF 유지(정당한 설계갭 후보)."""
+        from report_gen.requirements import generate_uds_traceability_matrix
+        items = [{"id": "SwTR_001"}]
+        vcast = [{"source": "VectorCAST", "subprogram": "some_leaf_fn",  # 함수명(SwUFn 아님), 미매칭
+                  "testcase": "TC_01", "result": "pass"}]
+        out = generate_uds_traceability_matrix(items, vcast_rows=vcast)
+        s = out["summary"]
+        assert s["unmapped_layer_unresolved"] == 0, s          # UNRESOLVED 아님
+        assert s["unmapped_app_design_gap"] == 1, s      # 정당한 APP_LEAF 갭 유지
+
 
 class TestGenerateUdsRequirementsFromDocs:
     def test_deduplicates(self):
