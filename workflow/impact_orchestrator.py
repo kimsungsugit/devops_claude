@@ -661,6 +661,7 @@ def _load_suts_fn_tcs(
         return {}
     result: Dict[str, List[str]] = {}
     _unit_exc = 0  # malformed 유닛(예외) 개수 — 격리하고 사유만 표면화(전체 집합 유실 방지)
+    _row_drops = 0  # 정상 유닛 내부의 기형 TC 행(dict 아님) — 조용히 걸러지므로 개수만 집계(정직화 완성)
     for unit in model.get("units") or []:
         try:
             if not isinstance(unit, dict):
@@ -672,6 +673,7 @@ def _load_suts_fn_tcs(
             name = bare_fn_name(unit.get("unit_name"))
             # each test_case row carries base_tc_id (the TC block identifier)
             _seqs = unit.get("test_cases") or []
+            _row_drops += sum(1 for tc in _seqs if not isinstance(tc, dict))  # 기형 행 집계(정상은 0 — happy-path 무영향)
             tcs = [str(tc.get("base_tc_id") or "") for tc in _seqs if isinstance(tc, dict) and tc.get("base_tc_id")]
             if name and tcs:
                 result[name] = list(dict.fromkeys(tcs))
@@ -705,6 +707,8 @@ def _load_suts_fn_tcs(
             continue
     if _unit_exc:
         _warn(f"회귀 TC: SUTS 유닛 {_unit_exc}건 파싱 예외로 건너뜀 — 재실행 집합 과소 가능(데이터 형식 확인)")
+    if _row_drops:
+        _warn(f"회귀 TC: SUTS TC 행 {_row_drops}건 형식 이상으로 건너뜀 — 재실행 집합 과소 가능(데이터 형식 확인)")
     if not result and flagged_fns:
         _warn("회귀 TC: 영향 함수와 SUTS 유닛명이 매칭되지 않아 재실행 TC 0(이름 규칙 확인)")
     # reviewer Finding#5: 파서 경고를 유실하지 않고 표면화. 단 **유닛 누락(회귀집합 과소)** 경고는

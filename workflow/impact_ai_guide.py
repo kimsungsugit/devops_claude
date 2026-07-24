@@ -584,26 +584,31 @@ def explain_function_change(
                 "\n\n[비의미 변경 — 이 변경은 C 주석/포맷/코드 이동만이고 로직·동작·인터페이스 변화가 없다. "
                 "'문서 수정 불필요'를 명시하고, 신규 테스트 케이스나 문서 편집(원문→제안)을 제안하지 마라.]"
             )
-        doc_ctx = _format_doc_content_for_prompt(doc_content)
-        if doc_ctx:
-            context += (
-                "\n\n[현재 문서 내용(원문) — 아래 '문서별 반영'에서 이 문장을 근거로 '원문→제안' 작성]\n"
-                + doc_ctx
-            )
-        # 파라미터 경계값 grounding — 시그니처(after/before) 또는 UDS prototype에서 결정론 유도한 실제
-        # 경계값을 프롬프트에 실어 LLM이 일반 문구(MIN/MID/MAX)가 아닌 실제 값으로 시험 케이스를 제안하게
-        # 한다(결정론 골격 카드와 일관). 미상 타입은 유도 결과가 없어 자동 생략(환각 방지).
-        _sig_for_bounds = after or before or ""
-        if not _sig_for_bounds and isinstance(doc_content, dict):
-            _uds_dc = doc_content.get("uds")
-            if isinstance(_uds_dc, dict):
-                _sig_for_bounds = str(_uds_dc.get("prototype") or "")
-        _bounds_txt = _format_param_boundaries(_sig_for_bounds)
-        if _bounds_txt:
-            context += (
-                "\n\n[파라미터 경계값(결정론 유도 — 시험 케이스 제안에 이 실제 값을 사용)]\n"
-                + _bounds_txt
-            )
+        # ⚠ 비의미 변경(no_semantic_change)이면 '원문→제안'·경계값 grounding을 **주입하지 않는다**.
+        # 이 재료들은 문서 편집·시험 케이스 제안을 유도하는데, 아래 user_msg의 '제안하지 마라' 지시와
+        # 같은 프롬프트에 공존하면 상충 신호가 된다(reviewer: 이중 방어 무력화 — '제안 금지'와 '이 경계값으로
+        # 시험 케이스 제안'이 동시 등장). 비의미 경로는 제안 재료 자체를 주지 않아 확실히 함구시킨다.
+        if not no_semantic_change:
+            doc_ctx = _format_doc_content_for_prompt(doc_content)
+            if doc_ctx:
+                context += (
+                    "\n\n[현재 문서 내용(원문) — 아래 '문서별 반영'에서 이 문장을 근거로 '원문→제안' 작성]\n"
+                    + doc_ctx
+                )
+            # 파라미터 경계값 grounding — 시그니처(after/before) 또는 UDS prototype에서 결정론 유도한 실제
+            # 경계값을 프롬프트에 실어 LLM이 일반 문구(MIN/MID/MAX)가 아닌 실제 값으로 시험 케이스를 제안하게
+            # 한다(결정론 골격 카드와 일관). 미상 타입은 유도 결과가 없어 자동 생략(환각 방지).
+            _sig_for_bounds = after or before or ""
+            if not _sig_for_bounds and isinstance(doc_content, dict):
+                _uds_dc = doc_content.get("uds")
+                if isinstance(_uds_dc, dict):
+                    _sig_for_bounds = str(_uds_dc.get("prototype") or "")
+            _bounds_txt = _format_param_boundaries(_sig_for_bounds)
+            if _bounds_txt:
+                context += (
+                    "\n\n[파라미터 경계값(결정론 유도 — 시험 케이스 제안에 이 실제 값을 사용)]\n"
+                    + _bounds_txt
+                )
         system = (
             "당신은 ISO 26262 자동차 기능안전 소프트웨어의 변경 영향 분석가입니다. "
             "C 함수 변경을 검토하는 엔지니어에게 정확하고 실행 가능한 한국어 설명을 제공합니다. "

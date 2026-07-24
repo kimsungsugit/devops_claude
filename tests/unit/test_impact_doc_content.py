@@ -154,6 +154,27 @@ def test_load_suts_fn_tcs_happy_path_no_exc_warn(monkeypatch):
     assert not any("예외로 건너뜀" in w for w in warns)
 
 
+def test_load_suts_fn_tcs_counts_malformed_row_in_good_unit(monkeypatch):
+    """reviewer #4: 정상 유닛 내부의 기형 TC 행(dict 아님)은 조용히 걸러졌었다 — 이제 개수를 집계해
+    '행 N건 형식 이상' warn으로 표면화한다(정직화 완성). 같은 유닛의 정상 행은 손실 없이 유지."""
+    import backend.services.file_resolver as fr
+    import tools.export_suts_vectorcast as ev
+    from workflow.impact_orchestrator import _load_suts_fn_tcs
+
+    monkeypatch.setattr(fr, "get_resolver", lambda: _FakeResolver())
+    monkeypatch.setattr(ev, "build_vectorcast_model", lambda *a, **k: {
+        "units": [{"unit_name": "s_ok", "test_cases": [
+            {"base_tc_id": "TC_OK"},   # 정상 행 — 유지돼야
+            "not-a-dict-row",          # 기형 행 — 격리+집계
+        ]}],
+        "export_warnings": [],
+    })
+    warns: list = []
+    result = _load_suts_fn_tcs("U:/s.xlsm", ["s_ok"], warn_sink=warns)
+    assert result == {"s_ok": ["TC_OK"]}                           # 정상 행은 유실 없음
+    assert any("행 1건 형식 이상" in w for w in warns)              # 기형 행 표면화(silent 아님)
+
+
 def test_load_suts_fn_tcs_warns_only_on_unit_drops(monkeypatch):
     """유닛 누락 경고는 unit을 실제로 떨어뜨리는 코드(empty_test_case_block/missing_unit_name)만
     센다. empty_expected(입력전용 시퀀스 등 무해)를 합산하면 오경보 — 전용 파서 컬럼탐지 수정으로

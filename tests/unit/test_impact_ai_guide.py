@@ -322,6 +322,35 @@ def test_explain_function_change_no_semantic_suppresses_proposals(monkeypatch):
     assert "추가할 단위 테스트 케이스" not in joined       # 기본 TC 제안 스캐폴드 미포함(허위 TC 차단)
 
 
+def test_explain_function_change_no_semantic_omits_grounding_even_with_doc_content(monkeypatch):
+    """reviewer: no_semantic_change=True인데 doc_content/시그니처가 주어지면 과거엔 context에 '원문→제안'
+    근거·경계값이 무조건 주입돼 'user_msg 제안 금지'와 상충(이중 방어 무력화). 이제 비의미 경로는
+    grounding 재료(doc_ctx·경계값)를 아예 주입하지 않아 LLM에 제안 유인이 남지 않는다."""
+    from workflow import impact_ai_guide
+    from workflow import ai as _ai
+    captured = {}
+
+    def _fake_call(cfg, messages, **k):
+        captured["messages"] = messages
+        return "주석만 변경 — 문서 수정 불필요."
+
+    monkeypatch.setattr(_ai, "load_oai_config", lambda _p: {"provider": "gemini"})
+    monkeypatch.setattr(_ai, "agent_call_text", _fake_call)
+    # doc_content(현재 문서 원문) + 시그니처(U16 경계값 유도 가능) 둘 다 제공 — 과거엔 이 둘이 프롬프트 오염원
+    impact_ai_guide.explain_function_change(
+        function="g_Ap_DoorCtrl_Func", change_type="BODY", asil="A",
+        after="void g_Ap_DoorCtrl_Func( U16 idx )",
+        function_diff="@@ -1,1 +1,1 @@\n-  x = idx; /* Iintialization */\n+  x = idx; /* Initialization */",
+        doc_content={"uds": {"description": "도어 상태를 갱신한다", "prototype": "void g_Ap_DoorCtrl_Func( U16 idx )"}},
+        no_semantic_change=True,
+    )
+    joined = " ".join(m["content"] for m in captured["messages"])
+    assert "문서 수정 불필요" in joined
+    assert "65535" not in joined                          # 경계값 grounding 미주입(제안 유인 제거)
+    assert "이 문장을 근거로" not in joined                # '원문→제안' 작성 지시 미주입
+    assert "도어 상태를 갱신한다" not in joined            # 현재 문서 원문(제안 재료) 미주입
+
+
 def test_explain_function_change_semantic_keeps_proposals(monkeypatch):
     """no_semantic_change=False(기본)면 종전대로 문서별 제안·TC 스캐폴드를 요구(무회귀 가드)."""
     from workflow import impact_ai_guide
