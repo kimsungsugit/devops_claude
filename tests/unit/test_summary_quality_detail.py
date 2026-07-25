@@ -4,6 +4,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 
 def _prep(tmp_path: Path, *, detail: bool = True, rag: bool = True) -> dict:
     root = tmp_path / "build_125"
@@ -183,6 +185,121 @@ def test_rag_subfolder_path_regression(tmp_path, monkeypatch):
     ft = resp["failed_testcases"]
     assert ft["available"] is True and ft["count"] == 0
     assert ft["source_path"].replace("\\", "/").endswith("vectorcast_rag/vectorcast_rag.json")
+
+
+# ── N1: SCM 입력 문서 폴백(빌드 우선) + IT 축 스키마 이원화 ────────────────
+
+_SCM_PAYLOAD = {
+    "available": True,
+    "job_file": "job_impact_20260725_113538_slug_a.json",
+    "generated_at": "2026-07-25T11:39:22+09:00",
+    "merged_sources": 4,
+    "complexity_rows": [{"function": "s_fn", "unit": "Lib_a", "complexity": 3}],
+    "ut_entries": [
+        {"unit": "Lib_a", "subprogram": "s_fn", "ccn": 3,
+         "statements": {"covered": 2, "total": 4, "rate": 0.5},
+         "branches": {"covered": 0, "total": 2, "rate": 0.0},
+         "pairs": {"covered": 0, "total": 0, "rate": None}},
+    ],
+    # 실측 스키마: SCM IT엔 functions 축이 없다(구문/분기/호출) — 구 코드는 전 행을 skip했다.
+    "it_entries": [
+        {"unit": "Ap_b'1", "subprogram": "g_it", "ccn": 1,
+         "statements": {"covered": 1, "total": 3, "rate": 0.333},
+         "branches": {"covered": 1, "total": 1, "rate": 1.0},
+         "function_calls": {"covered": 2, "total": 3, "rate": 0.667}},
+    ],
+    "failures": [{"testcase": "TC_scm_1"}],
+    "test_summary": {"total": 5, "passed": 4, "failed": 1, "pass_rate": 0.8, "ut_rows": 4, "it_rows": 1},
+}
+
+
+def _prep_empty_build(tmp_path: Path) -> dict:
+    """빌드 산출물에 함수 커버리지가 전혀 없는 상태(실측 KJPDS02_PV)."""
+    root = tmp_path / "build_124"
+    rd = root / "report"
+    rd.mkdir(parents=True)
+    (rd / "analysis_summary.json").write_text(json.dumps({"vectorcast_detail": {}}), encoding="utf-8")
+    return {"build_root": str(root), "build_number": 124, "reports_dir": str(rd), "mtime": 0}
+
+
+def test_scm_fallback_when_build_has_no_function_coverage(tmp_path, monkeypatch):
+    from backend.routers import summary_insight as si
+
+    meta = _prep_empty_build(tmp_path)
+    monkeypatch.setattr(si, "list_cached_builds", lambda **k: [meta])
+    monkeypatch.setattr(si, "_load_scm_function_entries", lambda job_url: dict(_SCM_PAYLOAD))
+    resp = si.summary_quality_detail({"job_url": "http://j/"})
+    fc = resp["function_coverage"]
+    assert fc["available"] is True and fc["source"] == "scm_vcast_job"
+    assert resp["coverage_source"] == "scm_vcast_job"
+    assert resp["coverage_source_detail"]["job_file"].startswith("job_impact_")
+    assert resp["coverage_source_detail"]["generated_at"] == "2026-07-25T11:39:22+09:00"
+    assert fc["totals"]["statements"] == {"covered": 2, "total": 4, "rate": 50.0}
+    # 빌드에 vectorcast_rag가 없으면 실패 TC도 SCM 이력으로 폴백
+    ft = resp["failed_testcases"]
+    assert ft["available"] is True and ft["source"] == "scm_vcast_job" and ft["count"] == 1
+    assert ft["test_summary"]["pass_rate"] == 0.8
+
+
+def test_build_source_takes_precedence_over_scm(tmp_path, monkeypatch):
+    """사용자 결정 고정: 빌드 산출물이 있으면 커버리지는 SCM으로 넘어가지 않는다.
+
+    (실패 TC 섹션은 별개 축이라 빌드에 vectorcast_rag가 없으면 SCM으로 폴백한다 —
+    섹션별 독립 규약. 여기서 고정하는 것은 '커버리지 소스' 우선순위뿐이다.)
+    """
+    from backend.routers import summary_insight as si
+
+    meta = _prep_metrics(tmp_path, rag_nested=True)  # 빌드에 실행 로그도 있어 SCM 경로 미발동
+    monkeypatch.setattr(si, "list_cached_builds", lambda **k: [meta])
+    monkeypatch.setattr(si, "_load_scm_function_entries",
+                        lambda job_url: pytest.fail("빌드 소스가 있는데 SCM을 조회했다"))
+    resp = si.summary_quality_detail({"job_url": "http://j/"})
+    assert resp["function_coverage"]["source"] == "vectorcast_metrics"
+    assert resp["coverage_source"] == "vectorcast_metrics"
+    assert resp["failed_testcases"]["source"] == "build_artifact"
+
+
+def test_it_axes_dynamic_for_scm_schema(tmp_path, monkeypatch):
+    """SCM IT엔 functions가 없다 — 구 코드는 전 행 skip이었고, 이제 축별로 집계한다."""
+    from backend.routers import summary_insight as si
+
+    meta = _prep_empty_build(tmp_path)
+    monkeypatch.setattr(si, "list_cached_builds", lambda **k: [meta])
+    monkeypatch.setattr(si, "_load_scm_function_entries", lambda job_url: dict(_SCM_PAYLOAD))
+    it = si.summary_quality_detail({"job_url": "http://j/"})["it_coverage"]
+    assert it["available"] is True
+    assert it["metrics_present"] == {"functions": False, "function_calls": True,
+                                     "statements": True, "branches": True}
+    assert it["totals"]["functions"] is None          # 부재 축은 0/0이 아니라 None
+    assert it["totals"]["statements"] == {"covered": 1, "total": 3, "rate": 33.3}
+    assert it["totals"]["function_calls"]["total"] == 3
+    assert it["worst"][0]["unit"] == "Ap_b"           # env 인스턴스 접미사 정규화 유지
+
+
+def test_it_axes_dynamic_for_build_schema(tmp_path, monkeypatch):
+    """빌드 IT(진입/호출)는 구문/분기가 없다 — 회귀 고정."""
+    from backend.routers import summary_insight as si
+
+    meta = _prep_metrics(tmp_path)
+    monkeypatch.setattr(si, "list_cached_builds", lambda **k: [meta])
+    it = si.summary_quality_detail({"job_url": "http://j/"})["it_coverage"]
+    assert it["metrics_present"] == {"functions": True, "function_calls": True,
+                                     "statements": False, "branches": False}
+    assert it["totals"]["functions"] == {"covered": 0, "total": 1, "rate": 0.0}
+    assert it["totals"]["statements"] is None
+
+
+def test_ccn_map_scm_fallback(tmp_path, monkeypatch):
+    """ccn 3차 폴백 — 없으면 아키텍처 핫스팟이 전원 loc_proxy로 떨어진다."""
+    from backend.routers import summary_insight as si
+
+    (tmp_path / "analysis_summary.json").write_text(
+        json.dumps({"vectorcast_detail": {}}), encoding="utf-8")
+    # 실제 헬퍼와 같은 계약: job_url이 비면 조회하지 않고 None
+    monkeypatch.setattr(si, "_load_scm_function_entries",
+                        lambda job_url: dict(_SCM_PAYLOAD) if job_url else None)
+    assert si._ccn_map(tmp_path, job_url="http://j/") == {"s_fn": 3, "g_it": 1}
+    assert si._ccn_map(tmp_path) == {}  # job_url 없으면 폴백 없음(호출 계약 유지)
 
 
 def test_rag_deep_rglob_latest_mtime(tmp_path, monkeypatch):

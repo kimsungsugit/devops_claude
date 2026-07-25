@@ -1,19 +1,54 @@
 /**
- * FunctionCoveragePanel — 함수(subprogram)단위 커버리지(UT 구문/분기 + IT 진입/호출) + 실패 TC.
- * POST /api/summary/quality-detail 소비 — 소스 키는 vectorcast_detail(구 규약) →
- * vectorcast.ut/it_metrics 폴백(L1 교정, source 캡션으로 출처 표기).
- * 섹션별 available:false 분리 렌더(증거부재≠0). IT는 구문·분기와 비교 불가한 별개 메트릭.
+ * FunctionCoveragePanel — 함수(subprogram)단위 커버리지 + 실패 TC.
+ * POST /api/summary/quality-detail 소비 — 소스는 vectorcast_detail(구 규약) →
+ * vectorcast.ut/it_metrics → **SCM 입력 문서 로드 이력**(N1) 순 폴백, source로 출처 표기.
+ * 섹션별 available:false 분리 렌더(증거부재≠0). IT 축은 소스마다 달라(빌드=진입/호출,
+ * SCM=구문/분기/호출) metrics_present 기준으로 컬럼을 동적 구성한다.
  */
 import { useEffect, useState } from 'react';
 import { post } from '../../api.js';
 
 const xs = { fontSize: 'var(--text-xs)' };
 
+// IT 축 — 응답의 metrics_present에 있는 축만 렌더(부재 축을 0%로 위장하지 않는다).
+const IT_AXES = [
+  { key: 'functions', label: '진입' },
+  { key: 'statements', label: '구문' },
+  { key: 'branches', label: '분기' },
+  { key: 'function_calls', label: '호출' },
+];
+
+const SOURCE_KO = {
+  vectorcast_detail: '빌드 산출물(detail)',
+  vectorcast_metrics: '빌드 산출물(UT/IT metrics)',
+  scm_vcast_job: 'SCM 입력 문서',
+};
+
 function ratePct(st) {
   const r = st?.rate;
   if (r == null || Number.isNaN(Number(r))) return null;
   const n = Number(r);
   return n <= 1 ? n * 100 : n;  // 0~1 비율/0~100 퍼센트 양쪽 수용(파서 포맷 편차 방어)
+}
+
+function SourceBadge({ source, detail, buildNumber }) {
+  if (!source) return null;
+  const isScm = source === 'scm_vcast_job';
+  const when = String(detail?.generated_at || '').replace('T', ' ').slice(0, 16);
+  return (
+    <span
+      aria-label="커버리지 출처"
+      title={isScm
+        ? `설정 > 연결 문서 경로 > VectorCAST 로드 결과${detail?.job_file ? ` (${detail.job_file})` : ''} — 빌드 산출물이 아닙니다`
+        : `빌드 #${buildNumber ?? '?'} 산출물에서 직접 읽음`}
+      style={{
+        ...xs, padding: '1px 7px', borderRadius: 'var(--radius-sm)', fontWeight: 600, color: '#fff',
+        background: isScm ? 'var(--color-info)' : 'var(--text-muted)',
+      }}
+    >
+      {SOURCE_KO[source] || source}{isScm && when ? ` · ${when} 로드` : ''}
+    </span>
+  );
 }
 
 export default function FunctionCoveragePanel({ jobUrl, cacheRoot }) {
@@ -37,12 +72,18 @@ export default function FunctionCoveragePanel({ jobUrl, cacheRoot }) {
   const td = { ...xs, padding: '4px 8px', whiteSpace: 'nowrap', borderBottom: '1px solid var(--border)' };
   const fc = data?.function_coverage;
   const ft = data?.failed_testcases;
+  const itc = data?.it_coverage;
+  // 보유 축만 렌더 — metrics_present가 정본이고, 구 응답(필드 부재)은 totals 존재로 폴백한다.
+  const itAxes = IT_AXES.filter((a) => (
+    itc?.metrics_present ? !!itc.metrics_present[a.key] : !!itc?.totals?.[a.key]
+  ));
 
   return (
     <div className="panel" style={{ padding: 'var(--sp-3)' }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--sp-2)', marginBottom: 'var(--sp-2)' }}>
+      <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 'var(--sp-2)', marginBottom: 'var(--sp-2)' }}>
         <div style={{ fontSize: 'var(--text-sm)', fontWeight: 600 }}>함수별 커버리지 · 실패 테스트</div>
-        {data?.build_number != null && <span style={{ ...xs, color: 'var(--text-muted)' }}>빌드 #{data.build_number} 산출물</span>}
+        {data?.build_number != null && <span style={{ ...xs, color: 'var(--text-muted)' }}>빌드 #{data.build_number}</span>}
+        <SourceBadge source={data?.coverage_source} detail={data?.coverage_source_detail} buildNumber={data?.build_number} />
         {!data && !error && <span className="spinner" />}
       </div>
       {error && <div style={{ ...xs, color: 'var(--color-danger)' }}>조회 오류: {error}</div>}
@@ -59,7 +100,7 @@ export default function FunctionCoveragePanel({ jobUrl, cacheRoot }) {
                   구문 커버리지 최저 함수 — 전체 {fc.totals.functions}개 중 완전 {fc.totals.fully_covered} · 미커버 {fc.totals.uncovered}
                   {fc.totals.statements?.rate != null && ` · 구문 ${fc.totals.statements.rate}%`}
                   {fc.totals.branches?.rate != null && ` · 분기 ${fc.totals.branches.rate}%`}
-                  {fc.source && ` · 출처 ${fc.source === 'vectorcast_metrics' ? 'UT metrics' : fc.source}`}
+                  {fc.source && ` · 출처 ${SOURCE_KO[fc.source] || fc.source}`}
                 </div>
                 <div style={{ overflowX: 'auto' }}>
                   <table style={{ borderCollapse: 'collapse', width: '100%' }}>
@@ -86,28 +127,44 @@ export default function FunctionCoveragePanel({ jobUrl, cacheRoot }) {
                 </div>
               </>
             ) : (
-              <div style={{ ...xs, color: 'var(--text-muted)' }}>이 빌드 산출물에 함수단위 커버리지 소스(vectorcast detail/metrics)가 없습니다.</div>
+              <div style={{ ...xs, color: 'var(--text-muted)' }}>
+                함수단위 커버리지 소스가 없습니다 — 빌드 산출물(vectorcast detail/metrics)에도, SCM 입력 문서 로드 이력에도 없습니다.
+                설정 &gt; 연결 문서 경로 &gt; VectorCAST를 지정하고 한 번 불러오면 여기에 표시됩니다.
+              </div>
             )}
           </div>
           <div>
-            {data?.it_coverage?.available ? (
+            {itc?.available ? (
               <>
                 <div style={{ ...xs, color: 'var(--text-muted)', marginBottom: 4 }}>
-                  통합(IT) 커버리지 — 함수 진입 {data.it_coverage.totals.functions?.rate ?? '—'}%
-                  · 호출 {data.it_coverage.totals.function_calls?.rate ?? '—'}%
-                  · 항목 {data.it_coverage.totals.entries}
-                  <span title="IT의 함수 진입/호출 커버리지는 UT 구문·분기와 기준이 달라 직접 비교할 수 없습니다"> · 구문·분기와 비교 불가</span>
+                  통합(IT) 커버리지 — 항목 {itc.totals.entries}
+                  {itAxes.map((a) => (
+                    <span key={a.key}> · {a.label} {itc.totals[a.key]?.rate ?? '—'}%</span>
+                  ))}
+                  {itc.metrics_present?.functions ? (
+                    <span title="IT의 함수 진입/호출 커버리지는 UT 구문·분기와 기준이 달라 직접 비교할 수 없습니다"> · 구문·분기와 비교 불가</span>
+                  ) : (
+                    <span title="같은 구문·분기 척도지만 통합 시험 실행 기준이라 단위(UT) 수치와 합산하면 안 됩니다"> · UT와 합산 금지</span>
+                  )}
                 </div>
                 <div style={{ overflowX: 'auto' }}>
                   <table style={{ borderCollapse: 'collapse', width: '100%' }}>
-                    <thead><tr><th style={th}>함수</th><th style={th}>유닛</th><th style={th}>진입</th><th style={th}>호출</th></tr></thead>
+                    <thead>
+                      <tr>
+                        <th style={th}>함수</th><th style={th}>유닛</th>
+                        {itAxes.map((a) => <th key={a.key} style={th}>{a.label}</th>)}
+                      </tr>
+                    </thead>
                     <tbody>
-                      {(data.it_coverage.worst || []).slice(0, 8).map((e) => (
+                      {(itc.worst || []).slice(0, 8).map((e) => (
                         <tr key={`${e.unit}:${e.subprogram}`}>
                           <td style={td}>{e.subprogram}</td>
                           <td style={{ ...td, color: 'var(--text-muted)' }}>{e.unit}</td>
-                          <td style={td}>{ratePct(e.functions) == null ? '—' : `${Math.round(ratePct(e.functions))}%`}</td>
-                          <td style={td}>{ratePct(e.function_calls) == null ? '—' : `${Math.round(ratePct(e.function_calls))}%`}</td>
+                          {itAxes.map((a) => (
+                            <td key={a.key} style={td}>
+                              {ratePct(e[a.key]) == null ? '—' : `${Math.round(ratePct(e[a.key]))}%`}
+                            </td>
+                          ))}
                         </tr>
                       ))}
                     </tbody>
@@ -115,7 +172,7 @@ export default function FunctionCoveragePanel({ jobUrl, cacheRoot }) {
                 </div>
               </>
             ) : (
-              <div style={{ ...xs, color: 'var(--text-muted)' }}>이 빌드 산출물에 통합(IT) 메트릭이 없습니다.</div>
+              <div style={{ ...xs, color: 'var(--text-muted)' }}>통합(IT) 메트릭이 없습니다(빌드 산출물·SCM 입력 문서 모두).</div>
             )}
           </div>
           <div>
@@ -123,6 +180,13 @@ export default function FunctionCoveragePanel({ jobUrl, cacheRoot }) {
               <>
                 <div style={{ ...xs, color: ft.count > 0 ? 'var(--color-danger)' : 'var(--text-muted)', marginBottom: 4 }}>
                   실패 테스트케이스 {ft.count}건
+                  {ft.test_summary?.total != null && (
+                    <> · 전체 {ft.test_summary.total}
+                      {ft.test_summary.passed != null && ` · 통과 ${ft.test_summary.passed}`}
+                      {ft.test_summary.ut_rows != null && ` (UT ${ft.test_summary.ut_rows}`}
+                      {ft.test_summary.it_rows != null && ` · IT ${ft.test_summary.it_rows})`}
+                    </>
+                  )}
                 </div>
                 {(ft.items || []).slice(0, 12).map((f, i) => (
                   <div key={i} style={{ ...xs, borderLeft: '3px solid var(--color-danger)', padding: '2px 8px', marginBottom: 4 }}>
@@ -135,9 +199,14 @@ export default function FunctionCoveragePanel({ jobUrl, cacheRoot }) {
                     출처: …{String(ft.source_path).replace(/\\/g, '/').split('/').slice(-2).join('/')}
                   </div>
                 )}
+                {ft.source === 'scm_vcast_job' && (
+                  <div style={{ ...xs, color: 'var(--text-muted)' }}>
+                    출처: SCM 입력 문서{ft.generated_at ? ` · ${String(ft.generated_at).replace('T', ' ').slice(0, 16)} 로드` : ''}
+                  </div>
+                )}
               </>
             ) : (
-              <div style={{ ...xs, color: 'var(--text-muted)' }}>이 빌드 산출물에 테스트 실행 로그(vectorcast_rag)가 없습니다.</div>
+              <div style={{ ...xs, color: 'var(--text-muted)' }}>테스트 실행 로그가 없습니다(빌드 vectorcast_rag·SCM 입력 문서 모두).</div>
             )}
           </div>
         </div>

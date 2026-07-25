@@ -594,27 +594,62 @@ def summary_rule_definition(req: dict) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def _load_vcast_function_entries(reports_dir: Path) -> Dict[str, Any]:
-    """함수단위 커버리지 entries 로드 — vectorcast_detail(구 규약) → vectorcast.ut/it_metrics 폴백.
+def _load_scm_function_entries(job_url: str) -> Optional[Dict[str, Any]]:
+    """SCM 입력 문서(연결 문서 경로 > VectorCAST) 로드 이력의 함수 entries — 부재는 None.
 
-    실측: 캐시 전 빌드에서 vectorcast_detail은 빈 {} — 실데이터는 vectorcast.ut_metrics.entries
-    (구문/분기)와 it_metrics.entries(함수 진입/호출 — 별개 메트릭 세트)에 있다(L1 잠복 결함 교정.
-    이전엔 전 빌드가 available:false). 반환 {"ut_entries", "it_entries", "source"}.
+    빌드 산출물에 함수단위 커버리지가 없는 프로젝트(실측 KJPDS02_PV)의 유일한 소스다.
+    Jenkins/cloudium 재접근 없이 기존 잡 파일만 직독한다(backend/services/scm_vcast_functions).
+    """
+    if not str(job_url or "").strip():
+        return None
+    try:
+        from backend.services.scm_vcast_functions import load_scm_function_metrics
+
+        scm = load_scm_function_metrics(job_url)
+    except Exception as exc:  # 이력 손상 등 — 빌드 경로 결과를 죽이지 않는다(fail-soft)
+        _logger.debug("scm vcast function metrics load failed (%s): %s", job_url, exc)
+        return None
+    return scm if scm.get("available") else None
+
+
+def _load_vcast_function_entries(reports_dir: Path, *, job_url: str = "") -> Dict[str, Any]:
+    """함수단위 커버리지 entries 로드 — 빌드 산출물 우선, 없으면 SCM 입력 문서 폴백.
+
+    우선순위(사용자 결정 — 빌드 우선):
+      ①vectorcast_detail(구 규약) ②vectorcast.ut/it_metrics ③SCM 로드 이력(scm_vcast_job).
+    실측: 캐시 전 빌드에서 vectorcast_detail은 빈 {} 이고, KJPDS02_PV류는 ②도 부재라 ③만이
+    함수 커버리지를 준다(UT 1014 · IT 712). 반환 {"ut_entries", "it_entries", "source",
+    "source_detail"} — source_detail은 ③일 때 잡 파일/로드 시각(출처 표기 의무).
     """
     data = _read_json(reports_dir / "analysis_summary.json") or {}
     detail = data.get("vectorcast_detail") if isinstance(data.get("vectorcast_detail"), dict) else {}
     agg = detail.get("aggregate_coverage") if isinstance(detail.get("aggregate_coverage"), dict) else {}
     det_entries = [e for e in (agg.get("entries") or []) if isinstance(e, dict)]
     if det_entries:
-        return {"ut_entries": det_entries, "it_entries": [], "source": "vectorcast_detail"}
+        return {"ut_entries": det_entries, "it_entries": [], "source": "vectorcast_detail",
+                "source_detail": None}
     vc = data.get("vectorcast") if isinstance(data.get("vectorcast"), dict) else {}
     ut_sec = vc.get("ut_metrics") if isinstance(vc.get("ut_metrics"), dict) else {}
     it_sec = vc.get("it_metrics") if isinstance(vc.get("it_metrics"), dict) else {}
     ut = [e for e in (ut_sec.get("entries") or []) if isinstance(e, dict)]
     it = [e for e in (it_sec.get("entries") or []) if isinstance(e, dict)]
     if ut or it:
-        return {"ut_entries": ut, "it_entries": it, "source": "vectorcast_metrics"}
-    return {"ut_entries": [], "it_entries": [], "source": None}
+        return {"ut_entries": ut, "it_entries": it, "source": "vectorcast_metrics",
+                "source_detail": None}
+    scm = _load_scm_function_entries(job_url)
+    if scm:
+        return {
+            "ut_entries": scm.get("ut_entries") or [],
+            "it_entries": scm.get("it_entries") or [],
+            "source": "scm_vcast_job",
+            "source_detail": {
+                "job_file": scm.get("job_file"),
+                "generated_at": scm.get("generated_at"),
+                "merged_sources": scm.get("merged_sources"),
+                "complexity_rows": len(scm.get("complexity_rows") or []),
+            },
+        }
+    return {"ut_entries": [], "it_entries": [], "source": None, "source_detail": None}
 
 
 def _norm_unit(u: Any) -> str:
@@ -679,46 +714,65 @@ def _aggregate_ut_coverage(entries: List[Dict[str, Any]], worst_limit: int) -> D
     }
 
 
-def _aggregate_it_coverage(entries: List[Dict[str, Any]], worst_limit: int) -> Dict[str, Any]:
-    """IT(함수 진입/호출) 집계 — 구문·분기와 비교 불가한 별개 메트릭 세트(프론트가 라벨 명시).
+_IT_AXES = ("functions", "function_calls", "statements", "branches")
 
+
+def _cell_pair(cell: Any) -> Optional[tuple]:
+    """{covered,total} → (covered,total). 축 자체가 없거나 비수치면 None(0으로 위장 금지)."""
+    if not isinstance(cell, dict):
+        return None
+    try:
+        return int(cell.get("covered")), int(cell.get("total"))
+    except (TypeError, ValueError):
+        return None
+
+
+def _aggregate_it_coverage(entries: List[Dict[str, Any]], worst_limit: int) -> Dict[str, Any]:
+    """IT 집계 — 소스마다 축이 다르므로 **존재하는 축만** 집계한다.
+
+    실측 스키마 편차:
+      - 빌드 산출물 IT: functions(진입) · function_calls (구문/분기 없음)
+      - SCM 로드 이력 IT: statements · branches · function_calls (**functions 없음**)
+    구 코드는 functions 결측 행을 통째로 skip해 SCM 소스에선 IT가 전부 사라졌다. 축별로
+    독립 합산하고 metrics_present로 보유 축을 표기한다(결측 축은 None — 0% 위장 금지).
     unit엔 env 인스턴스 접미사('N)가 붙을 수 있어 표기용으로 정규화한다.
     """
-    fn_cov = fn_total = call_cov = call_total = 0
+    sums: Dict[str, List[int]] = {axis: [0, 0] for axis in _IT_AXES}
+    present: Dict[str, bool] = {axis: False for axis in _IT_AXES}
     rated: List[Dict[str, Any]] = []
     for e in entries:
-        fns = e.get("functions") if isinstance(e.get("functions"), dict) else {}
-        try:
-            fc_i, ft_i = int(fns.get("covered")), int(fns.get("total"))
-        except (TypeError, ValueError):
-            continue
-        fn_cov += fc_i
-        fn_total += ft_i
-        calls = e.get("function_calls") if isinstance(e.get("function_calls"), dict) else {}
-        try:
-            call_cov += int(calls.get("covered"))
-            call_total += int(calls.get("total"))
-        except (TypeError, ValueError):
-            pass
-        if ft_i > 0 and fc_i < ft_i:
+        row_axes: Dict[str, Any] = {}
+        gap_rate: Optional[float] = None
+        for axis in _IT_AXES:
+            pair = _cell_pair(e.get(axis))
+            if pair is None:
+                continue
+            cov, tot = pair
+            present[axis] = True
+            sums[axis][0] += cov
+            sums[axis][1] += tot
+            row_axes[axis] = e.get(axis)
+            # 미달 판정 기준: 진입(functions) 우선, 없으면 구문(statements) — 소스별 주 메트릭.
+            if tot > 0 and cov < tot and axis in ("functions", "statements") and gap_rate is None:
+                gap_rate = cov / tot
+        if gap_rate is not None:
             rated.append({
                 "unit": _norm_unit(e.get("unit")), "subprogram": e.get("subprogram"),
-                "ccn": e.get("ccn"), "functions": fns, "function_calls": e.get("function_calls"),
+                "ccn": e.get("ccn"), "gap_rate": round(gap_rate, 4), **row_axes,
             })
-    rated.sort(key=lambda e: (float((e.get("functions") or {}).get("rate") or 0), str(e.get("subprogram"))))
+    rated.sort(key=lambda r: (float(r.get("gap_rate") or 0), str(r.get("subprogram"))))
+    totals: Dict[str, Any] = {"entries": len(entries)}
+    for axis in _IT_AXES:
+        if not present[axis]:
+            totals[axis] = None  # 이 소스엔 없는 축 — 0/0이 아니라 부재
+            continue
+        cov, tot = sums[axis]
+        totals[axis] = {"covered": cov, "total": tot,
+                        "rate": round(cov / tot * 100, 1) if tot else None}
     return {
         "available": True,
-        "totals": {
-            "entries": len(entries),
-            "functions": {
-                "covered": fn_cov, "total": fn_total,
-                "rate": round(fn_cov / fn_total * 100, 1) if fn_total else None,
-            },
-            "function_calls": {
-                "covered": call_cov, "total": call_total,
-                "rate": round(call_cov / call_total * 100, 1) if call_total else None,
-            },
-        },
+        "totals": totals,
+        "metrics_present": present,
         "worst": rated[:worst_limit],
     }
 
@@ -746,10 +800,11 @@ def _find_vcast_rag(reports_dir: Path) -> Optional[Path]:
 
 @router.post("/api/summary/quality-detail")
 def summary_quality_detail(req: dict) -> Dict[str, Any]:
-    """함수(subprogram)단위 커버리지(UT 구문/분기 + IT 진입/호출) + 실패 TC.
+    """함수(subprogram)단위 커버리지(UT 구문/분기 + IT 축) + 실패 TC.
 
-    소스 키: vectorcast_detail(구 규약) → vectorcast.ut/it_metrics 폴백 — source로 출처 표기.
-    섹션별 available:false 분리 — 한쪽 부재가 다른 쪽을 죽이지 않는다(증거부재≠0).
+    소스 우선순위: vectorcast_detail(구 규약) → vectorcast.ut/it_metrics → SCM 로드 이력
+    (N1 — 빌드 산출물에 함수 커버리지가 없는 프로젝트의 유일 경로). source/source_detail로
+    출처를 항상 표기한다. 섹션별 available:false 분리 — 한쪽 부재가 다른 쪽을 죽이지 않는다.
     """
     body = req or {}
     job_url = str(body.get("job_url") or "").strip()
@@ -764,30 +819,47 @@ def summary_quality_detail(req: dict) -> Dict[str, Any]:
     reports_dir = Path(str(target.get("reports_dir") or ""))
     worst_limit = max(1, min(_to_int(body.get("worst_limit")) or 15, 50))
 
-    loaded = _load_vcast_function_entries(reports_dir)
+    loaded = _load_vcast_function_entries(reports_dir, job_url=job_url)
     if loaded["ut_entries"]:
         function_coverage: Dict[str, Any] = _aggregate_ut_coverage(loaded["ut_entries"], worst_limit)
         function_coverage["source"] = loaded["source"]
+        function_coverage["source_detail"] = loaded.get("source_detail")
     else:
         function_coverage = {"available": False, "reason": "no_function_coverage_source"}
     if loaded["it_entries"]:
         it_coverage: Dict[str, Any] = _aggregate_it_coverage(loaded["it_entries"], worst_limit)
         it_coverage["source"] = loaded["source"]
+        it_coverage["source_detail"] = loaded.get("source_detail")
     else:
         it_coverage = {"available": False, "reason": "no_it_metrics"}
 
     rag_path = _find_vcast_rag(reports_dir)
     failures = _vcast_failures(rag_path)
-    failed_testcases = (
-        {"available": True, "count": len(failures), "items": failures, "source_path": str(rag_path)}
-        if rag_path is not None
-        else {"available": False, "reason": "no_vectorcast_rag"}
-    )
+    if rag_path is not None:
+        failed_testcases: Dict[str, Any] = {
+            "available": True, "count": len(failures), "items": failures,
+            "source": "build_artifact", "source_path": str(rag_path),
+        }
+    else:
+        # 빌드에 실행 로그가 없으면 SCM 로드 이력의 failures/집계로 폴백(같은 정직성 규약).
+        scm = _load_scm_function_entries(job_url)
+        if scm:
+            scm_failures = [f for f in (scm.get("failures") or []) if isinstance(f, dict)]
+            failed_testcases = {
+                "available": True, "count": len(scm_failures), "items": scm_failures,
+                "source": "scm_vcast_job", "source_path": None,
+                "test_summary": scm.get("test_summary"),
+                "generated_at": scm.get("generated_at"),
+            }
+        else:
+            failed_testcases = {"available": False, "reason": "no_vectorcast_rag"}
     return {
         "ok": True,
         "available": True,
         "reason": None,
         "build_number": target.get("build_number"),
+        "coverage_source": loaded["source"],
+        "coverage_source_detail": loaded.get("source_detail"),
         "function_coverage": function_coverage,
         "it_coverage": it_coverage,
         "failed_testcases": failed_testcases,
@@ -799,7 +871,7 @@ def summary_quality_detail(req: dict) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def _compute_test_design_payload(build_root: Path, reports_dir: Path) -> Dict[str, Any]:
+def _compute_test_design_payload(build_root: Path, reports_dir: Path, *, job_url: str = "") -> Dict[str, Any]:
     """test-design 조립(결정론) — 엔드포인트와 ai-insight(Phase M)가 공유.
 
     무캐시: 이미 로드된 JSON에 대한 순수 산술(수십 ms) — 디스크 캐시는 무효화 버그 표면만
@@ -814,8 +886,8 @@ def _compute_test_design_payload(build_root: Path, reports_dir: Path) -> Dict[st
         derive_technique_recommendations,
     )
 
-    loaded = _load_vcast_function_entries(reports_dir)
-    arch = _arch_metrics_cached(build_root, reports_dir)
+    loaded = _load_vcast_function_entries(reports_dir, job_url=job_url)
+    arch = _arch_metrics_cached(build_root, reports_dir, job_url=job_url)
     if arch and arch.get("available"):
         asil_by_fn = (arch.get("asil_functions") or {}).get("by_function") or {}
         asil_source = "comment_asil" if asil_by_fn else "no_asil_annotations"
@@ -867,7 +939,8 @@ def summary_test_design(req: dict) -> Dict[str, Any]:
     if target is None:
         return {"ok": True, "available": False, "reason": "no_cached_build"}
     payload = _compute_test_design_payload(
-        Path(str(target.get("build_root") or "")), Path(str(target.get("reports_dir") or ""))
+        Path(str(target.get("build_root") or "")), Path(str(target.get("reports_dir") or "")),
+        job_url=job_url,
     )
     return {
         "ok": True, "available": True, "reason": None,
@@ -1021,12 +1094,14 @@ def _complexity_offenders(build_root: Path, reports_dir: Path) -> List[Dict[str,
         return []
 
 
-def _ccn_map(reports_dir: Path) -> Dict[str, int]:
+def _ccn_map(reports_dir: Path, *, job_url: str = "") -> Dict[str, int]:
     """analysis_summary.json → {subprogram: ccn}.
 
     vectorcast_detail.aggregate_coverage.entries(구 규약)가 비면 vectorcast.ut_metrics/
     it_metrics.entries로 폴백 — 실측상 전 캐시 빌드에서 detail은 빈 {}이고 실데이터는
     형제 키에 있다(K1 교정 — 이전엔 항상 {} 반환 → 전 함수 loc_proxy). 중복 함수는 max.
+    N1: 빌드 산출물에 둘 다 없으면 SCM 로드 이력의 entries로 3차 폴백한다 — 이 경로가
+    없으면 KJPDS02_PV류는 ccn 조인 0%라 아키텍처 핫스팟이 전원 loc_proxy로 떨어진다.
     """
     data = _read_json(reports_dir / "analysis_summary.json") or {}
     entry_lists: List[Any] = []
@@ -1040,6 +1115,12 @@ def _ccn_map(reports_dir: Path) -> Dict[str, int]:
             sec = vc.get(key) if isinstance(vc.get(key), dict) else {}
             if sec.get("entries"):
                 entry_lists.append(sec.get("entries"))
+    if not entry_lists:
+        scm = _load_scm_function_entries(job_url)
+        if scm:
+            for key in ("ut_entries", "it_entries"):
+                if scm.get(key):
+                    entry_lists.append(scm.get(key))
     out: Dict[str, int] = {}
     for entries in entry_lists:
         for e in entries or []:
@@ -1058,8 +1139,12 @@ def _ccn_map(reports_dir: Path) -> Dict[str, int]:
 ARCH_METRICS_CACHE_NAME = "summary_arch_metrics_cache.json"
 
 
-def _arch_src_fingerprint(build_root: Path) -> Optional[Dict[str, Any]]:
-    """소스 스냅샷 지문(stat 스캔) — 캐시 히트 판정. 스냅샷 부재는 None."""
+def _arch_src_fingerprint(build_root: Path, *, ccn_count: int = 0) -> Optional[Dict[str, Any]]:
+    """소스 스냅샷 지문(stat 스캔) — 캐시 히트 판정. 스냅샷 부재는 None.
+
+    ccn_count도 지문에 넣는다(N1) — 소스가 그대로여도 ccn 조인 소스가 붙거나 바뀌면
+    complexity_source가 loc_proxy↔vcast_ccn으로 뒤집혀 핫스팟 순위가 달라지기 때문이다.
+    """
     source = build_root / "source"
     if not (source / ".source_complete").exists():
         return None
@@ -1074,12 +1159,14 @@ def _arch_src_fingerprint(build_root: Path) -> Optional[Dict[str, Any]]:
         return None
     from workflow.summary_arch_metrics import ARCH_METRICS_VERSION
 
-    return {"file_count": file_count, "total_bytes": total_bytes, "version": ARCH_METRICS_VERSION}
+    return {"file_count": file_count, "total_bytes": total_bytes,
+            "version": ARCH_METRICS_VERSION, "ccn_count": ccn_count}
 
 
-def _arch_metrics_cached(build_root: Path, reports_dir: Path) -> Optional[Dict[str, Any]]:
-    """아키텍처 메트릭 — 스냅샷 지문 키 디스크 캐시(파싱 1회화). 스냅샷 부재는 None."""
-    src = _arch_src_fingerprint(build_root)
+def _arch_metrics_cached(build_root: Path, reports_dir: Path, *, job_url: str = "") -> Optional[Dict[str, Any]]:
+    """아키텍처 메트릭 — 스냅샷+ccn 지문 키 디스크 캐시(파싱 1회화). 스냅샷 부재는 None."""
+    ccn = _ccn_map(reports_dir, job_url=job_url)
+    src = _arch_src_fingerprint(build_root, ccn_count=len(ccn))
     if src is None:
         return None
     cache_path = reports_dir / ARCH_METRICS_CACHE_NAME
@@ -1088,7 +1175,7 @@ def _arch_metrics_cached(build_root: Path, reports_dir: Path) -> Optional[Dict[s
         return {**cached["result"], "cache_hit": True}
     from workflow.summary_arch_metrics import compute_architecture_metrics
 
-    result = compute_architecture_metrics(build_root / "source", ccn_by_function=_ccn_map(reports_dir))
+    result = compute_architecture_metrics(build_root / "source", ccn_by_function=ccn)
     if result.get("available"):
         _write_cache_atomic(cache_path, {"src": src, "result": result})
     return {**result, "cache_hit": False}
@@ -1107,7 +1194,7 @@ def summary_architecture_metrics(req: dict) -> Dict[str, Any]:
     if target is None:
         return {"ok": True, "available": False, "reason": "no_source_snapshot"}
     result = _arch_metrics_cached(
-        Path(str(target.get("build_root"))), Path(str(target.get("reports_dir")))
+        Path(str(target.get("build_root"))), Path(str(target.get("reports_dir"))), job_url=job_url
     )
     if result is None or not result.get("available"):
         return {"ok": True, "available": False,
@@ -1286,7 +1373,7 @@ def summary_ai_insight_endpoint(req: dict) -> Dict[str, Any]:
     sections = tuple(s for s in sections_req if s in SECTIONS) if isinstance(sections_req, list) and sections_req else SECTIONS
 
     # 아키텍처 메트릭(Phase G) — 스냅샷 지문 디스크 캐시라 재생성 비용 낮음. 부재는 None(섹션 available:false).
-    arch_metrics = _arch_metrics_cached(build_root, reports_dir)
+    arch_metrics = _arch_metrics_cached(build_root, reports_dir, job_url=job_url)
 
     inp = SummaryInsightInput(
         # job slug = 빌드 루트(build_N)의 부모 디렉토리명 — reports_dir.parent는 build_N이라 오라벨(W2).
@@ -1305,7 +1392,7 @@ def summary_ai_insight_endpoint(req: dict) -> Dict[str, Any]:
         code_excerpts=excerpts,
         arch_metrics=arch_metrics if (arch_metrics and arch_metrics.get("available")) else None,
         # v4: 테스트 설계 결정론 payload(test-design 엔드포인트와 동일 조립) + 규칙 공식 설명(RCFInfo).
-        test_design=_compute_test_design_payload(build_root, reports_dir),
+        test_design=_compute_test_design_payload(build_root, reports_dir, job_url=job_url),
         rule_descriptions=(cur["details"].get("rule_descriptions") or {}) if cur else {},
     )
     result = generate_summary_insight(inp, sections=sections)
