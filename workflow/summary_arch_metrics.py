@@ -26,7 +26,9 @@ logger = logging.getLogger(__name__)
 #     (사분면)·indirect_calls/encapsulation(콜그래프 완전성·캡슐화).
 # v5(O3): file_graph — 모듈 다이어그램의 파일 단위 드릴다운 재료. pair_counts를 top 10만 노출하고
 #     버리던 것을 캡 안에서 전부 싣는다(실측 62파일·308엣지).
-ARCH_METRICS_VERSION = 5
+# v6(Q2): layer_graph(APP/BSW/LIB/BOOT + 역방향 검토후보) · file_graph.topo_order(DSM 정렬) ·
+#     global_coupling.top[].functions_sample(전역↔함수 이분 그래프 재료).
+ARCH_METRICS_VERSION = 6
 
 # file_graph 캡 — 실측(62/308)은 무손실. 초과 시 truncated:true로 정직 표기(_build_module_graph 규약).
 FILE_GRAPH_MAX_NODES = 400
@@ -200,6 +202,144 @@ def _build_file_graph(
         "truncated": truncated,
         "total_files": len(ranked),
         "total_edges": len(pair_counts),
+        # v6: DSM(의존 구조 매트릭스) 정렬 순서. 이 순서로 행·열을 놓으면 **상삼각에 남는 셀이
+        # 곧 순환**이라 눈으로 사이클을 짚을 수 있다(히트맵을 함수 수 순으로 놓으면 안 보인다).
+        "topo_order": _topo_order(list(kept), pair_counts),
+    }
+
+
+def _topo_order(files: List[str], pair_counts: Dict[tuple, int]) -> List[str]:
+    """SCC 응축 후 위상정렬 — DSM 행/열 순서. 순환은 한 덩어리로 묶여 내부 순서만 임의가 된다.
+
+    출력은 결정론(같은 입력 → 같은 순서)이라 캐시·테스트가 안정적이다. 그래프에 없는 파일도
+    반드시 포함한다(고립 노드를 떨구면 DSM에서 파일이 사라진다).
+    """
+    node_set = set(files)
+    adj: Dict[str, List[str]] = {f: [] for f in node_set}
+    for (a, b) in pair_counts:
+        if a in node_set and b in node_set and a != b:
+            adj[a].append(b)
+    # SCC를 하나의 super-node로 응축 — 순환이 있어도 위상정렬이 성립한다.
+    comp_of: Dict[str, int] = {}
+    for i, comp in enumerate(_tarjan_scc(adj)):
+        for f in comp:
+            comp_of[f] = i
+    next_id = len(comp_of) and max(comp_of.values()) + 1 or 0
+    for f in sorted(node_set):
+        if f not in comp_of:
+            comp_of[f] = next_id
+            next_id += 1
+    members: Dict[int, List[str]] = {}
+    for f, c in comp_of.items():
+        members.setdefault(c, []).append(f)
+    cadj: Dict[int, set] = {c: set() for c in members}
+    indeg: Dict[int, int] = {c: 0 for c in members}
+    for (a, b) in pair_counts:
+        if a not in comp_of or b not in comp_of:
+            continue
+        ca, cb = comp_of[a], comp_of[b]
+        if ca != cb and cb not in cadj[ca]:
+            cadj[ca].add(cb)
+            indeg[cb] += 1
+    # Kahn — 같은 진입차수면 컴포넌트 대표 이름 순(결정론).
+    ready = sorted((c for c, d in indeg.items() if d == 0), key=lambda c: sorted(members[c])[0])
+    order: List[str] = []
+    while ready:
+        c = ready.pop(0)
+        order.extend(sorted(members[c]))
+        for nxt in sorted(cadj[c], key=lambda x: sorted(members[x])[0]):
+            indeg[nxt] -= 1
+            if indeg[nxt] == 0:
+                ready.append(nxt)
+        ready.sort(key=lambda x: sorted(members[x])[0])
+    if len(order) < len(node_set):   # 방어: 응축이 완전하면 도달 불가(남으면 정직하게 뒤에 붙인다)
+        order.extend(sorted(node_set - set(order)))
+    return order
+
+
+# 계층 서열 — 위(상위)에서 아래(하위)로 호출하는 것이 정방향. 값이 클수록 상위.
+# TEST_ARTIFACT는 추적 대상 함수가 아니라 서열 밖(-1)이며 계층 그래프에서 제외한다.
+LAYER_ORDER = {"APP_LEAF": 3, "BSW_DRIVER": 2, "LIB_UTIL": 1, "BOOT_REPROG": 0}
+LAYER_LABEL = {
+    "APP_LEAF": "APP (응용)", "BSW_DRIVER": "BSW (드라이버)",
+    "LIB_UTIL": "LIB (유틸)", "BOOT_REPROG": "BOOT (부트/리프로그)",
+}
+LAYER_NOTE = (
+    "계층은 **함수명 휴리스틱**으로 추정한 값이며 선언된 아키텍처가 아니다 — 역방향 호출은 "
+    "'위반'이 아니라 계층화 검토 후보다. 각 항목의 함수 쌍을 열어 설계자가 직접 판정할 것."
+)
+
+
+def _build_layer_graph(
+    call_map: Dict[str, List[str]], file_of: Dict[str, str], *, max_pairs: int = 30,
+) -> Dict[str, Any]:
+    """APP/BSW/LIB/BOOT 계층 그래프 + 하위→상위 역방향 호출(검토 후보).
+
+    분류는 `report_gen.requirements._classify_unmapped_layer`(ISO 26262 SwDS 계층 규칙)를
+    재사용한다 — 같은 규칙을 두 곳에 복제하면 한쪽만 고쳐지는 표류가 생긴다. workflow →
+    report_gen 방향 import는 기존 선례가 있다(impact_orchestrator.py).
+    """
+    try:
+        from report_gen.requirements import _classify_unmapped_layer
+    except Exception as exc:  # 분류 규칙 미가용 — 계층 축만 비활성(다른 메트릭은 영향 없음)
+        logger.debug("layer classifier unavailable: %s", exc)
+        return {"available": False, "reason": "layer_classifier_unavailable"}
+
+    layer_of: Dict[str, str] = {}
+    unclassifiable = 0
+    for name in call_map:
+        try:
+            layer_of[name] = _classify_unmapped_layer([name.lower()])
+        except Exception:  # silent-ok: 개별 함수 분류 실패는 그 함수만 제외 — 아래 unclassifiable로 계수해 표면화
+            unclassifiable += 1
+    counts: Dict[str, int] = {}
+    for lay in layer_of.values():
+        counts[lay] = counts.get(lay, 0) + 1
+    if not any(k in LAYER_ORDER for k in counts):
+        return {"available": False, "reason": "no_layer_resolved"}
+
+    edges: Dict[tuple, int] = {}
+    reverse_pairs: List[Dict[str, Any]] = []
+    for caller, callees in call_map.items():
+        a = layer_of.get(caller)
+        if a not in LAYER_ORDER:
+            continue
+        for callee in callees:
+            b = layer_of.get(callee)
+            if b not in LAYER_ORDER or a == b:
+                continue
+            edges[(a, b)] = edges.get((a, b), 0) + 1
+            if LAYER_ORDER[a] < LAYER_ORDER[b]:
+                # 하위가 상위를 호출 — 계층화 원칙상 검토 대상(콜백/이벤트로 뒤집을 후보).
+                reverse_pairs.append({
+                    "caller": caller, "caller_layer": a, "caller_file": file_of.get(caller, ""),
+                    "callee": callee, "callee_layer": b, "callee_file": file_of.get(callee, ""),
+                })
+    reverse_pairs.sort(key=lambda r: (r["caller_layer"], r["caller"], r["callee"]))
+    rev_by_edge: Dict[tuple, int] = {}
+    for r in reverse_pairs:
+        key = (r["caller_layer"], r["callee_layer"])
+        rev_by_edge[key] = rev_by_edge.get(key, 0) + 1
+    return {
+        "available": True,
+        "reason": None,
+        "nodes": [
+            {"layer": k, "label": LAYER_LABEL[k], "rank": LAYER_ORDER[k], "functions": counts.get(k, 0)}
+            for k in sorted(LAYER_ORDER, key=lambda x: -LAYER_ORDER[x])
+            if counts.get(k, 0) > 0
+        ],
+        "edges": [
+            {"from": a, "to": b, "calls": c, "reverse": LAYER_ORDER[a] < LAYER_ORDER[b]}
+            for (a, b), c in sorted(edges.items(), key=lambda kv: (-kv[1], kv[0]))
+        ],
+        "reverse_total": len(reverse_pairs),
+        "reverse_pairs": reverse_pairs[:max_pairs],
+        "reverse_pairs_omitted": max(0, len(reverse_pairs) - max_pairs),
+        # 계층 그래프에서 빠진 함수를 침묵시키지 않는다: 시험 산출물로 분류된 수 + 분류 자체가
+        # 실패한 수를 각각 표기(합계가 곧 '이 그림에 없는 함수').
+        "excluded_test_artifact": counts.get("TEST_ARTIFACT", 0),
+        "unclassifiable": unclassifiable,
+        "note": LAYER_NOTE,
     }
 
 
@@ -348,7 +488,10 @@ def _global_coupling(
             rec["modules"].add(_module_of(rel))
     rows = [
         {"global": g, "functions": len(r["functions"]), "modules": len(r["modules"]),
-         "files": len(r["files"]), "module_names": sorted(r["modules"])[:6]}
+         "files": len(r["files"]), "module_names": sorted(r["modules"])[:6],
+         # v6: 전역↔함수 이분 그래프 렌더 재료. 카운트만으론 그림을 못 그린다(캡 8 + 생략 수 표기).
+         "functions_sample": sorted(r["functions"])[:8],
+         "functions_omitted": max(0, len(r["functions"]) - 8)}
         for g, r in by_global.items()
     ]
     rows.sort(key=lambda r: (-r["modules"], -r["functions"], r["global"]))
@@ -559,6 +702,7 @@ def compute_architecture_metrics(
     mutual_pairs = _mutual_file_pairs(pair_counts)
     module_graph = _build_module_graph(call_map, file_of)
     file_graph = _build_file_graph(file_of, body_lines, pair_counts)
+    layer_graph = _build_layer_graph(call_map, file_of)
     refactor_candidates = _refactor_candidates(file_of, body_lines, pair_counts, mutual_pairs)
 
     excerpts: List[Dict[str, Any]] = []
@@ -643,6 +787,8 @@ def compute_architecture_metrics(
         "module_graph": module_graph,
         # v5(O3): 모듈 노드 → 내부 파일 드릴다운 재료. 모듈 그래프와 같은 pair_counts에서 나온다.
         "file_graph": file_graph,
+        # v6(Q2): ISO 26262-6 계층 관점 — APP/BSW/LIB/BOOT와 역방향 호출(검토 후보).
+        "layer_graph": layer_graph,
         "cycles": {
             # 0건이면 빈 배열(키 자체는 항상 존재 — 프론트가 '관측 없음'을 명시 렌더).
             "file_sccs": [{"files": c, "size": len(c)} for c in file_sccs[:10]],

@@ -164,3 +164,87 @@ describe('ArchitectureGraphPanel', () => {
     expect(await screen.findByText(/소스 스냅샷이 없어 다이어그램을 만들 수 없습니다/)).toBeInTheDocument();
   });
 });
+
+// ── Q2: 계층 다이어그램 · DSM · 전역 데이터 흐름 ──
+describe('ArchitectureGraphPanel — Q2 신규 다이어그램', () => {
+  const Q2 = {
+    ...METRICS,
+    layer_graph: {
+      available: true,
+      nodes: [
+        { layer: 'APP_LEAF', label: 'APP (응용)', rank: 3, functions: 591 },
+        { layer: 'BSW_DRIVER', label: 'BSW (드라이버)', rank: 2, functions: 192 },
+        { layer: 'LIB_UTIL', label: 'LIB (유틸)', rank: 1, functions: 49 },
+      ],
+      edges: [
+        { from: 'APP_LEAF', to: 'BSW_DRIVER', calls: 64, reverse: false },
+        { from: 'BSW_DRIVER', to: 'APP_LEAF', calls: 59, reverse: true },
+      ],
+      reverse_total: 87, reverse_pairs_omitted: 57,
+      reverse_pairs: [{ caller: 'PE_Initialize_Core', caller_layer: 'BSW_DRIVER', caller_file: 'BSW/pe.c',
+                        callee: 'BATS_Init', callee_layer: 'APP_LEAF', callee_file: 'APP/bats.c' }],
+      excluded_test_artifact: 0, unclassifiable: 0,
+      note: '계층은 **함수명 휴리스틱**으로 추정한 값이며 선언된 아키텍처가 아니다 — 역방향 호출은 위반이 아니라 검토 후보다.',
+    },
+    file_graph: {
+      ...METRICS.file_graph,
+      // b.c → a.c 는 위상순(a,b,…)에서 위로 되돌아가는 호출 = 순환
+      topo_order: ['APP/a.c', 'APP/b.c', 'LIB/u.c', 'IF/i.c'],
+    },
+    global_coupling: {
+      available: true, distinct_globals: 586, cross_module_globals: 1, functions_using_globals: 413,
+      top: [{ global: 'g_shared', functions: 39, modules: 2, files: 3, module_names: ['APP', 'LIB'],
+              functions_sample: ['hi_fn', 'lo_fn'], functions_omitted: 37 }],
+      note: '파서는 읽기/쓰기를 구분하지 않는다 — 사용(참조) 기준이다.',
+    },
+  };
+
+  beforeEach(() => { vi.clearAllMocks(); mockResp = Q2; });
+
+  it('계층 다이어그램 — 밴드 렌더 + 역방향은 검토 후보로 고지', async () => {
+    render(<ArchitectureGraphPanel {...PROPS} />);
+    expect(await screen.findByRole('img', { name: '계층 다이어그램' })).toBeInTheDocument();
+    expect(screen.getByText('APP (응용)')).toBeInTheDocument();
+    expect(screen.getByText('87')).toBeInTheDocument();               // reverse_total
+    expect(screen.getByText(/위반이 아니라 검토 후보/)).toBeInTheDocument();
+  });
+
+  it('계층 — 역방향 함수 쌍을 펼쳐 사용자가 직접 판정하게 한다', async () => {
+    render(<ArchitectureGraphPanel {...PROPS} />);
+    await screen.findByRole('img', { name: '계층 다이어그램' });
+    await userEvent.click(screen.getByRole('button', { name: '함수 쌍 보기' }));
+    expect(screen.getByText('PE_Initialize_Core')).toBeInTheDocument();
+    expect(screen.getByText('BATS_Init')).toBeInTheDocument();
+    expect(screen.getByText(/\+57 생략/)).toBeInTheDocument();
+  });
+
+  it('DSM — 위상순에서 역행 셀(순환)을 붉게 세고 정렬을 토글한다', async () => {
+    render(<ArchitectureGraphPanel {...PROPS} />);
+    // topo_order [a,b,u,i] 기준 위로 되돌아가는 호출 2건: b.c→a.c, u.c→a.c
+    expect(await screen.findByText(/붉은 셀\(2\)이 순환/)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: '위상순' }));
+    expect(screen.getByRole('button', { name: '이름순' })).toBeInTheDocument();
+    expect(screen.queryByText(/이 순환/)).toBeNull();                            // 이름순이면 순환 강조 없음
+  });
+
+  it('DSM — topo_order 부재(구 캐시)는 이름순 폴백을 명시', async () => {
+    mockResp = { ...Q2, file_graph: { ...Q2.file_graph, topo_order: [] } };
+    render(<ArchitectureGraphPanel {...PROPS} />);
+    expect(await screen.findByText(/위상 순서가 이 응답에 없어 이름순으로 표시/)).toBeInTheDocument();
+  });
+
+  it('전역 데이터 흐름 — 전역↔함수 이분 그래프 + 생략 수 표기', async () => {
+    render(<ArchitectureGraphPanel {...PROPS} />);
+    expect(await screen.findByRole('img', { name: '전역 데이터 흐름' })).toBeInTheDocument();
+    expect(screen.getByText('g_shared')).toBeInTheDocument();
+    expect(screen.getByText('hi_fn')).toBeInTheDocument();
+    expect(screen.getByText(/g_shared \+37/)).toBeInTheDocument();
+  });
+
+  it('신규 블록 부재(구 캐시) — 각각 정직 안내로 폴백', async () => {
+    mockResp = { ...METRICS, layer_graph: undefined, global_coupling: undefined };
+    render(<ArchitectureGraphPanel {...PROPS} />);
+    expect(await screen.findByText(/계층 데이터가 이 응답에 없습니다/)).toBeInTheDocument();
+    expect(screen.getByText(/전역 참조가 관측되지 않았습니다/)).toBeInTheDocument();
+  });
+});

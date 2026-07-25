@@ -361,3 +361,87 @@ def test_arch_version_bumped_to_5():
     from workflow.summary_arch_metrics import ARCH_METRICS_VERSION
 
     assert ARCH_METRICS_VERSION >= 5  # v4 캐시(file_graph 없음) 재사용 금지
+
+
+# ── Q2(v6): 계층 그래프 · DSM 위상정렬 · 전역 함수 샘플 ─────────────────────
+
+# 함수명 휴리스틱(_classify_unmapped_layer)의 실제 분류에 맞춘 픽스처 —
+# PE_* → BSW_DRIVER, Ap_* → APP_LEAF, *Lib* → LIB_UTIL (분류기가 정본이므로 그에 맞춘다).
+_LAYER_SRC = {
+    "APP/app.c": "void Ap_MainTask(void) { PE_Initialize_Core(); u16g_Lib_Filter(); }\n",
+    # BSW가 APP을 부른다 = 하위→상위 역방향(검토 후보)
+    "BSW/drv.c": "void PE_Initialize_Core(void) { Ap_MainTask(); }\n",
+    "LIB/util.c": "void u16g_Lib_Filter(void) { int x = 1; }\n",
+}
+
+
+def test_layer_graph_ranks_and_detects_reverse_calls(tmp_path):
+    r = _v4(tmp_path, files=_LAYER_SRC)
+    lg = r["layer_graph"]
+    assert lg["available"] is True
+    ranks = {n["layer"]: n["rank"] for n in lg["nodes"]}
+    assert ranks["APP_LEAF"] > ranks["BSW_DRIVER"] > ranks["LIB_UTIL"]   # 상위일수록 rank 큼
+    rev = [e for e in lg["edges"] if e["reverse"]]
+    assert rev and rev[0]["from"] == "BSW_DRIVER" and rev[0]["to"] == "APP_LEAF"
+    pair = lg["reverse_pairs"][0]
+    assert pair["caller"] == "PE_Initialize_Core" and pair["callee"] == "Ap_MainTask"
+    assert pair["caller_file"] and pair["callee_file"]                   # 드릴다운용 파일 동반
+    assert lg["reverse_total"] == 1
+
+
+def test_layer_graph_labels_heuristic_limit(tmp_path):
+    """계층은 함수명 추정이라 '위반'으로 단정하면 안 된다 — note로 한계를 고지한다."""
+    lg = _v4(tmp_path, files=_LAYER_SRC)["layer_graph"]
+    assert "휴리스틱" in lg["note"] and "위반" in lg["note"]
+    # 그림에서 빠진 함수는 침묵시키지 않는다
+    assert "excluded_test_artifact" in lg and "unclassifiable" in lg
+
+
+def test_layer_graph_reverse_pairs_capped_with_omitted(tmp_path):
+    from workflow.summary_arch_metrics import _build_layer_graph
+
+    call_map = {f"Eeprom_W{i}": ["Ap_MainTask"] for i in range(40)}
+    call_map["Ap_MainTask"] = []
+    lg = _build_layer_graph(call_map, {}, max_pairs=10)
+    assert lg["reverse_total"] == 40
+    assert len(lg["reverse_pairs"]) == 10 and lg["reverse_pairs_omitted"] == 30
+
+
+def test_topo_order_puts_callers_before_callees(tmp_path):
+    """DSM 정렬: 비순환 그래프면 호출자가 피호출자보다 앞 — 상삼각이 비어야 한다."""
+    from workflow.summary_arch_metrics import _topo_order
+
+    files = ["a.c", "b.c", "c.c"]
+    pairs = {("a.c", "b.c"): 3, ("b.c", "c.c"): 2}
+    order = _topo_order(files, pairs)
+    pos = {f: i for i, f in enumerate(order)}
+    assert pos["a.c"] < pos["b.c"] < pos["c.c"]
+    assert len(order) == 3
+
+
+def test_topo_order_keeps_cycles_and_isolated_nodes():
+    """순환은 응축돼 한 덩어리로 인접, 고립 노드도 빠지지 않는다(DSM에서 파일이 사라지면 안 됨)."""
+    from workflow.summary_arch_metrics import _topo_order
+
+    files = ["a.c", "b.c", "lonely.c"]
+    pairs = {("a.c", "b.c"): 1, ("b.c", "a.c"): 1}     # 2-사이클
+    order = _topo_order(files, pairs)
+    assert set(order) == set(files) and len(order) == 3
+    assert abs(order.index("a.c") - order.index("b.c")) == 1   # 응축돼 붙어 있다
+    # 결정론 — 같은 입력이면 같은 순서
+    assert _topo_order(files, pairs) == order
+
+
+def test_global_coupling_carries_function_samples(tmp_path):
+    r = _v4(tmp_path)
+    top = {g["global"]: g for g in r["global_coupling"]["top"]}
+    rec = top["g_shared"]
+    assert rec["functions_sample"] and len(rec["functions_sample"]) <= 8
+    assert set(rec["functions_sample"]) <= {"hi_fn", "helper", "lo_fn"}
+    assert rec["functions_omitted"] == max(0, rec["functions"] - 8)
+
+
+def test_arch_version_bumped_to_6():
+    from workflow.summary_arch_metrics import ARCH_METRICS_VERSION
+
+    assert ARCH_METRICS_VERSION >= 6  # v5 캐시(layer_graph·topo_order 없음) 재사용 금지

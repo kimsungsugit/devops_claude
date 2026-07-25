@@ -58,7 +58,8 @@ describe('ArchitectureMetricsPanel v4', () => {
   it('ASIL 간섭 후보 — 등급 상이 호출과 판정 아님 고지', async () => {
     render(<ArchitectureMetricsPanel jobUrl="http://j/" cacheRoot="" />);
     expect(await screen.findByText(/등급 보유 함수 385/)).toBeInTheDocument();
-    expect(screen.getByText('419')).toBeInTheDocument();
+    // Q1: 같은 수치가 요약 스트립과 상세 섹션 양쪽에 나온다 — 둘 다 있는 것이 정상.
+    expect(screen.getAllByText('419').length).toBeGreaterThanOrEqual(1);
     // callee명은 사분면 표에도 나오므로 간섭 행 안에서 확인한다
     const edgeRow = screen.getByText(/ADC_MONITOR_Disable/).closest('tr');
     expect(edgeRow).toHaveTextContent('ADC_MONITOR_HWEnDi');
@@ -104,5 +105,37 @@ describe('ArchitectureMetricsPanel v4', () => {
     render(<ArchitectureMetricsPanel jobUrl="http://j/" cacheRoot="" />);
     expect(await screen.findByText(/주석·요구 역전파 모두 부재/)).toBeInTheDocument();
     expect(screen.getByText(/사분면을 낼 수 없습니다/)).toBeInTheDocument();
+  });
+});
+
+// ── Q1: 요약 스트립 + 아코디언 재구성 ──
+describe('ArchitectureMetricsPanel — Q1 레이아웃', () => {
+  beforeEach(() => { vi.clearAllMocks(); mockResp = { ...RESP, layer_graph: { available: true, reverse_total: 87 } }; });
+
+  it('요약 스트립에 핵심 숫자를 한 줄로 먼저 준다', async () => {
+    render(<ArchitectureMetricsPanel jobUrl="http://j/" cacheRoot="" />);
+    expect(await screen.findByText('핫스팟')).toBeInTheDocument();
+    expect(screen.getByText('파일 간 결합')).toBeInTheDocument();
+    expect(screen.getByText('계층 역방향')).toBeInTheDocument();
+    expect(screen.getByText('87')).toBeInTheDocument();          // layer_graph.reverse_total
+    expect(screen.getByText('모듈경계 공유 전역')).toBeInTheDocument();
+  });
+
+  it('테스트 투자 우선순위만 기본 펼침(나머지는 접힘)', async () => {
+    render(<ArchitectureMetricsPanel jobUrl="http://j/" cacheRoot="" />);
+    await screen.findByText('핫스팟');
+    const open = screen.getByText('테스트 투자 우선순위').closest('details');
+    expect(open).toHaveAttribute('open');
+    for (const t of ['핫스팟 · 대형 함수', '결합도 · 공유 전역', 'ASIL 간섭 · 콜그래프 완전성']) {
+      expect(screen.getByText(t).closest('details')).not.toHaveAttribute('open');
+    }
+  });
+
+  it('계층 데이터가 없으면 역방향 칸은 —(0으로 위장 금지)', async () => {
+    mockResp = { ...RESP, layer_graph: { available: false, reason: 'no_layer_resolved' } };
+    render(<ArchitectureMetricsPanel jobUrl="http://j/" cacheRoot="" />);
+    await screen.findByText('계층 역방향');
+    const cell = screen.getByText('계층 역방향').parentElement;
+    expect(cell).toHaveTextContent('—');
   });
 });

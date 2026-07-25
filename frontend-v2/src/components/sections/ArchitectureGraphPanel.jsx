@@ -224,6 +224,234 @@ function ModuleDiagram({ moduleGraph, cycles, fileGraph }) {
   );
 }
 
+/** 계층 다이어그램 — APP/BSW/LIB/BOOT를 밴드로 쌓고 계층 간 호출을 화살표로.
+ *  하위→상위 역방향은 빨간 점선(계층화 **검토 후보** — 위반 단정 아님). */
+function LayerDiagram({ layerGraph }) {
+  const [openRev, setOpenRev] = useState(false);
+  if (!layerGraph) {
+    return <div style={{ ...xs, color: 'var(--text-muted)' }}>계층 데이터가 이 응답에 없습니다(구 캐시) — 새로고침하면 표시됩니다.</div>;
+  }
+  if (!layerGraph.available) {
+    return <div style={{ ...xs, color: 'var(--text-muted)' }}>계층을 판정할 수 없습니다 ({layerGraph.reason}).</div>;
+  }
+  const nodes = layerGraph.nodes || [];
+  const BW = 300;
+  const BH = 42;
+  const GAP = 26;
+  const W = 560;
+  const H = nodes.length * (BH + GAP) + 20;
+  const yOf = (i) => 10 + i * (BH + GAP);
+  const idx = new Map(nodes.map((n, i) => [n.layer, i]));
+  const maxCalls = Math.max(...(layerGraph.edges || []).map((e) => e.calls), 1);
+  return (
+    <div>
+      <div style={{ ...xs, color: 'var(--text-muted)', marginBottom: 4 }}>
+        계층 다이어그램 (상위→하위 정방향 실선 · 하위→상위 역방향 빨간 점선)
+      </div>
+      <svg viewBox={`0 0 ${W} ${H}`} role="img" aria-label="계층 다이어그램"
+        style={{ width: '100%', maxWidth: 640, height: 'auto' }}>
+        {(layerGraph.edges || []).map((e) => {
+          const i = idx.get(e.from);
+          const j = idx.get(e.to);
+          if (i == null || j == null) return null;
+          const x = e.reverse ? 40 + BW + 30 : 40 + BW - 30;
+          const y1 = yOf(i) + BH / 2;
+          const y2 = yOf(j) + BH / 2;
+          const bow = e.reverse ? 46 : -46;
+          return (
+            <path key={`${e.from}->${e.to}`}
+              d={`M ${x} ${y1} C ${x + bow} ${y1}, ${x + bow} ${y2}, ${x} ${y2}`}
+              fill="none" stroke={e.reverse ? 'var(--color-danger)' : 'var(--text-muted)'}
+              strokeWidth={Math.min(1 + Math.log2(1 + e.calls / maxCalls * 8), 3.5)}
+              strokeDasharray={e.reverse ? '5 3' : undefined}>
+              <title>{`${e.from} → ${e.to} · ${e.calls}회${e.reverse ? ' (역방향 — 계층화 검토 후보)' : ''}`}</title>
+            </path>
+          );
+        })}
+        {nodes.map((n, i) => (
+          <g key={n.layer} transform={`translate(40,${yOf(i)})`}>
+            <title>{`${n.label} — 함수 ${n.functions}개`}</title>
+            <rect width={BW} height={BH} rx={6} style={{ fill: 'var(--bg-elevated, #ffffff)' }}
+              stroke="var(--border)" strokeWidth={1.5} />
+            <text x={12} y={19} fontSize={12} fontWeight={700} style={{ fill: 'var(--fg)' }}>{n.label}</text>
+            <text x={12} y={34} fontSize={10} style={{ fill: 'var(--text-muted)' }}>{`함수 ${n.functions}개`}</text>
+          </g>
+        ))}
+      </svg>
+      <div style={{ ...xs, marginTop: 2 }}>
+        역방향 호출 <b style={{ color: layerGraph.reverse_total > 0 ? 'var(--color-danger)' : 'var(--text)' }}>{layerGraph.reverse_total}</b>건
+        {layerGraph.reverse_total > 0 && (
+          <button type="button" style={{ ...btn, marginLeft: 6 }} onClick={() => setOpenRev(!openRev)} aria-expanded={openRev}>
+            {openRev ? '함수 쌍 접기' : '함수 쌍 보기'}
+          </button>
+        )}
+      </div>
+      {openRev && (
+        <div style={{ marginTop: 4 }}>
+          {(layerGraph.reverse_pairs || []).map((p) => (
+            <div key={`${p.caller}->${p.callee}`} style={{ ...xs, color: 'var(--text-muted)' }}>
+              · <span style={{ fontFamily: 'monospace' }}>{p.caller}</span>({p.caller_layer.split('_')[0]})
+              {' → '}<span style={{ fontFamily: 'monospace' }}>{p.callee}</span>({p.callee_layer.split('_')[0]})
+            </div>
+          ))}
+          {(layerGraph.reverse_pairs_omitted || 0) > 0 && (
+            <div style={{ ...xs, color: 'var(--text-muted)' }}>* 상위 {(layerGraph.reverse_pairs || []).length}건만 표시 (+{layerGraph.reverse_pairs_omitted} 생략)</div>
+          )}
+        </div>
+      )}
+      <div style={{ ...xs, color: 'var(--text-muted)', marginTop: 2 }}>* {layerGraph.note}</div>
+    </div>
+  );
+}
+
+const DSM_MAX = 28;
+
+/** 파일 단위 DSM — 위상정렬 순으로 놓으면 **상삼각에 남는 셀이 곧 순환**이다.
+ *  모듈 히트맵(8×8)은 덩어리라 순환이 안 보이므로 파일 레벨로 따로 그린다. */
+function DsmMatrix({ fileGraph }) {
+  const [topo, setTopo] = useState(true);
+  const view = useMemo(() => {
+    const edges = fileGraph?.edges || [];
+    if (!edges.length) return null;
+    const involved = new Set();
+    edges.forEach((e) => { involved.add(e.from); involved.add(e.to); });
+    const order = topo && (fileGraph.topo_order || []).length
+      ? (fileGraph.topo_order || []).filter((f) => involved.has(f))
+      : [...involved].sort();
+    const shown = order.slice(0, DSM_MAX);
+    const pos = new Map(shown.map((f, i) => [f, i]));
+    const cell = new Map();
+    let max = 0;
+    let upper = 0;
+    edges.forEach((e) => {
+      if (!pos.has(e.from) || !pos.has(e.to)) return;
+      cell.set(`${e.from}|${e.to}`, e.calls);
+      if (e.calls > max) max = e.calls;
+      if (pos.get(e.from) > pos.get(e.to)) upper += 1;   // 정렬 위쪽으로 되돌아가는 호출 = 순환
+    });
+    return { shown, cell, max, upper, omitted: Math.max(0, order.length - DSM_MAX) };
+  }, [fileGraph, topo]);
+
+  if (!view) {
+    return <div style={{ ...xs, color: 'var(--text-muted)' }}>파일 간 호출이 관측되지 않아 DSM을 그릴 수 없습니다.</div>;
+  }
+  const base = { ...xs, padding: '1px 3px', border: '1px solid var(--border)', textAlign: 'center', fontSize: 9 };
+  const short = (f) => String(f).split('/').pop().replace(/\.[ch]$/, '');
+  const pos = new Map(view.shown.map((f, i) => [f, i]));
+  return (
+    <div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 4 }}>
+        <span style={{ ...xs, color: 'var(--text-muted)' }}>
+          의존 구조 매트릭스(DSM) — 행→열 호출
+          {topo && <span> · 위상순 정렬이라 <b style={{ color: 'var(--color-danger)' }}>붉은 셀({view.upper})이 순환</b></span>}
+        </span>
+        <button type="button" style={btn} onClick={() => setTopo(!topo)} aria-pressed={topo}>
+          {topo ? '위상순' : '이름순'}
+        </button>
+      </div>
+      <div style={{ overflowX: 'auto' }}>
+        <table style={{ borderCollapse: 'collapse' }}>
+          <thead>
+            <tr>
+              <th style={base} />
+              {view.shown.map((c, i) => <th key={c} style={base} title={c}>{i + 1}</th>)}
+            </tr>
+          </thead>
+          <tbody>
+            {view.shown.map((r, ri) => (
+              <tr key={r}>
+                <th style={{ ...base, textAlign: 'left', whiteSpace: 'nowrap' }} title={r}>{ri + 1}. {short(r)}</th>
+                {view.shown.map((c) => {
+                  const v = r === c ? null : view.cell.get(`${r}|${c}`);
+                  const back = v != null && topo && ri > pos.get(c);
+                  const alpha = v && view.max ? (0.15 + 0.7 * (v / view.max)).toFixed(2) : 0;
+                  return (
+                    <td key={c} title={v ? `${short(r)} → ${short(c)} · ${v}회${back ? ' (순환 — 위상 역행)' : ''}` : undefined}
+                      style={{
+                        ...base,
+                        background: v ? (back ? `rgba(220, 38, 38, ${alpha})` : `rgba(37, 99, 235, ${alpha})`) : undefined,
+                        color: v ? '#fff' : 'var(--text-muted)',
+                      }}>
+                      {r === c ? '·' : (v || '')}
+                    </td>
+                  );
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {view.omitted > 0 && (
+        <div style={{ ...xs, color: 'var(--text-muted)' }}>* 표시 상한 {DSM_MAX}개 — {view.omitted}개 파일 생략</div>
+      )}
+      {!(fileGraph.topo_order || []).length && (
+        <div style={{ ...xs, color: 'var(--text-muted)' }}>* 위상 순서가 이 응답에 없어 이름순으로 표시(구 캐시)</div>
+      )}
+    </div>
+  );
+}
+
+/** 전역 데이터 흐름 — 모듈 경계를 넘는 상위 전역만 이분 그래프(왼쪽 전역 / 오른쪽 사용 함수). */
+function GlobalFlow({ globalCoupling }) {
+  const rows = useMemo(() => {
+    const top = globalCoupling?.top || [];
+    const cross = top.filter((g) => (g.modules || 0) > 1);
+    return (cross.length ? cross : top).slice(0, 5).filter((g) => (g.functions_sample || []).length);
+  }, [globalCoupling]);
+  if (!globalCoupling?.available) {
+    return <div style={{ ...xs, color: 'var(--text-muted)' }}>전역 참조가 관측되지 않았습니다.</div>;
+  }
+  if (!rows.length) {
+    return <div style={{ ...xs, color: 'var(--text-muted)' }}>전역별 사용 함수 목록이 이 응답에 없습니다(구 캐시) — 새로고침하면 표시됩니다.</div>;
+  }
+  const RH = 18;
+  const W = 560;
+  // 좌표를 렌더 전에 확정한다 — JSX 안에서 카운터를 증가시키면 렌더 순수성이 깨진다(react-hooks/immutability).
+  const totalFns = rows.reduce((a, g) => a + g.functions_sample.length, 0);
+  const H = Math.max(rows.length, totalFns) * RH + 24;
+  const laid = [];
+  let cursor = 0;
+  for (const g of rows) {
+    const fns = g.functions_sample.map((fn, k) => ({ fn, y: 16 + (cursor + k) * RH }));
+    // 전역 노드는 자기 함수들의 세로 중앙에 둔다(선이 부채꼴로 퍼져 읽기 쉬움).
+    const gy = fns.length ? (fns[0].y + fns[fns.length - 1].y) / 2 : 16 + cursor * RH;
+    laid.push({ g, fns, gy });
+    cursor += g.functions_sample.length;
+  }
+  return (
+    <div>
+      <div style={{ ...xs, color: 'var(--text-muted)', marginBottom: 4 }}>
+        전역 데이터 흐름 — 모듈 경계를 넘는 전역과 사용 함수(참조 기준, 읽기/쓰기 미구분)
+      </div>
+      <svg viewBox={`0 0 ${W} ${H}`} role="img" aria-label="전역 데이터 흐름"
+        style={{ width: '100%', maxWidth: 660, height: 'auto' }}>
+        {laid.map(({ g, fns, gy }) => (
+          <g key={g.global}>
+            {fns.map(({ fn, y }) => (
+              <g key={`${g.global}|${fn}`}>
+                <path d={bezierEdgeH(190, gy, 330, y)} fill="none" stroke="var(--text-muted)" strokeWidth={1} opacity={0.5} />
+                <text x={336} y={y + 3} fontSize={9} style={{ fill: 'var(--fg)' }}>{fn.length > 26 ? `${fn.slice(0, 25)}…` : fn}</text>
+              </g>
+            ))}
+            <text x={8} y={gy + 3} fontSize={10} fontWeight={700} style={{ fill: 'var(--fg)' }}>
+              {g.global.length > 22 ? `${g.global.slice(0, 21)}…` : g.global}
+            </text>
+            <text x={8} y={gy + 14} fontSize={8} style={{ fill: 'var(--text-muted)' }}>
+              {`${g.modules}모듈 · ${g.functions}함수`}
+            </text>
+          </g>
+        ))}
+      </svg>
+      {rows.some((g) => (g.functions_omitted || 0) > 0) && (
+        <div style={{ ...xs, color: 'var(--text-muted)' }}>
+          * 전역당 사용 함수는 상위 8개만 표시 ({rows.map((g) => `${g.global} +${g.functions_omitted || 0}`).filter((s) => !s.endsWith('+0')).join(' · ') || '생략 없음'})
+        </div>
+      )}
+      <div style={{ ...xs, color: 'var(--text-muted)' }}>* {globalCoupling.note}</div>
+    </div>
+  );
+}
+
 function CouplingHeatmap({ moduleGraph }) {
   const nodes = (moduleGraph?.nodes || []).slice(0, 20);
   const names = nodes.map((n) => n.module);
@@ -379,8 +607,12 @@ export default function ArchitectureGraphPanel({ jobUrl, cacheRoot }) {
       {data?.available && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--sp-4)' }}>
           <ModuleDiagram moduleGraph={data.module_graph} cycles={data.cycles} fileGraph={data.file_graph} />
-          {/* O4: 히트맵(위) → 핫스팟 산포(아래) 각각 전폭 — 나란히 두면 둘 다 좁아 읽기 어려웠다. */}
+          {/* Q2: 계층(ISO 26262-6 관점) → 결합 히트맵 → DSM(순환) → 전역 흐름 → 핫스팟 산포.
+              O4에서 정한 '히트맵 위 / 산포 아래' 순서는 유지하고 사이에 신규 3종을 끼운다. */}
+          <LayerDiagram layerGraph={data.layer_graph} />
           <CouplingHeatmap moduleGraph={data.module_graph} />
+          <DsmMatrix fileGraph={data.file_graph} />
+          <GlobalFlow globalCoupling={data.global_coupling} />
           <HotspotScatter hotspots={data.hotspots} />
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))', gap: 'var(--sp-4)' }}>
             <CycleList cycles={data.cycles} />
