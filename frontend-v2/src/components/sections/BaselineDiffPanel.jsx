@@ -47,8 +47,9 @@ function Pill({ text, color }) {
   );
 }
 
-/** 함수 행 — 커버리지 미달은 색으로, 미조인은 '—'로(0%로 위장 금지). */
-function FunctionRow({ fn, td }) {
+/** 함수 행 — 커버리지 미달은 색으로, 미조인은 '—'로(0%로 위장 금지).
+ *  파일 아래 자식임이 드러나게 트리 커넥터(└/├)를 붙인다 — 들여쓰기만으론 평평해 보였다. */
+function FunctionRow({ fn, td, last }) {
   const st = fn.statement;
   const tone = st == null ? 'var(--text-muted)'
     : st <= 0 ? 'var(--color-danger)'
@@ -56,7 +57,10 @@ function FunctionRow({ fn, td }) {
   const kind = KIND_KO[fn.kind] || { label: fn.kind, color: 'var(--text-muted)' };
   return (
     <tr>
-      <td style={{ ...td, paddingLeft: 22 }}>
+      <td style={{ ...td, paddingLeft: 18 }}>
+        <span aria-hidden="true" style={{ fontFamily: 'monospace', color: 'var(--text-muted)', marginRight: 6 }}>
+          {last ? '└─' : '├─'}
+        </span>
         <Pill text={kind.label} color={kind.color} />
         <span style={{ fontFamily: 'monospace' }}>{fn.name}</span>
       </td>
@@ -126,6 +130,9 @@ export default function BaselineDiffPanel({ jobUrl, cacheRoot }) {
         baseline_build: Number(baseNum), target_build: Number(tgtNum),
       });
       setData(resp);
+      // 최상단(위험 우선 정렬 1위) 파일은 기본 펼침 — 첫 화면에서 파일→함수 트리 구조가 보이게.
+      const top = (resp?.files?.changed_detail || [])[0];
+      setExpanded(top ? new Set([top.path]) : new Set());
       if (resp?.available) {
         // 같은 쌍의 정적분석 위반 delta 병행(기존 API 재사용 — best-effort).
         try {
@@ -316,14 +323,18 @@ export default function BaselineDiffPanel({ jobUrl, cacheRoot }) {
                               title="이 파일에서 변경된 함수의 최저 구문 커버리지">
                               {pct(row.worst_statement)}
                             </td>
-                            <td style={td}>—</td>
-                            <td style={td}>—</td>
+                            {/* 파일 행은 함수 단위 값이 없다 — '—' 대신 집계를 보여 빈칸처럼 보이지 않게 */}
+                            <td style={{ ...td, color: 'var(--text-muted)' }} colSpan={2}
+                              title="이 파일에서 변경된 함수 수와 커버리지 조인 성립 수">
+                              함수 {fnCount}개
+                            </td>
                             <td style={{ ...td, color: 'var(--text-muted)' }}>
                               커버리지 조인 {row.coverage_matched}/{fnCount}
                             </td>
                           </tr>
-                          {open && (row.functions || []).map((fn) => (
-                            <FunctionRow key={`${row.path}:${fn.name}:${fn.kind}`} fn={fn} td={td} />
+                          {open && (row.functions || []).map((fn, i, arr) => (
+                            <FunctionRow key={`${row.path}:${fn.name}:${fn.kind}`} fn={fn} td={td}
+                              last={i === arr.length - 1 && !(row.functions_omitted > 0)} />
                           ))}
                           {open && (row.functions_omitted || 0) > 0 && (
                             <tr><td colSpan={6} style={{ ...td, paddingLeft: 22, color: 'var(--text-muted)' }}>

@@ -24,7 +24,13 @@ logger = logging.getLogger(__name__)
 #     refactor_candidates·asil_functions.by_function 추가 (K1 — 다이어그램/테스트 어드바이저 재료).
 # v4(N5): asil_interference(간섭 자유 후보)·global_coupling(전역 공유)·coverage_complexity
 #     (사분면)·indirect_calls/encapsulation(콜그래프 완전성·캡슐화).
-ARCH_METRICS_VERSION = 4
+# v5(O3): file_graph — 모듈 다이어그램의 파일 단위 드릴다운 재료. pair_counts를 top 10만 노출하고
+#     버리던 것을 캡 안에서 전부 싣는다(실측 62파일·308엣지).
+ARCH_METRICS_VERSION = 5
+
+# file_graph 캡 — 실측(62/308)은 무손실. 초과 시 truncated:true로 정직 표기(_build_module_graph 규약).
+FILE_GRAPH_MAX_NODES = 400
+FILE_GRAPH_MAX_EDGES = 800
 EXCERPT_MAX_LINES = 80
 
 # 모듈 프록시 = 파일 상대경로의 앞 2세그먼트(예: "Sources/IF") — 최상위 1세그먼트는 실측상
@@ -156,6 +162,44 @@ def _build_module_graph(
         ],
         "edges": [{"from": a, "to": b, "calls": c} for (a, b), c in kept_edges],
         "truncated": truncated,
+    }
+
+
+def _build_file_graph(
+    file_of: Dict[str, str], body_lines: Dict[str, int], pair_counts: Dict[tuple, int],
+    *, max_nodes: int = FILE_GRAPH_MAX_NODES, max_edges: int = FILE_GRAPH_MAX_EDGES,
+) -> Dict[str, Any]:
+    """파일 단위 호출 그래프 — 모듈 노드를 클릭했을 때 그 안을 펼치기 위한 재료(v5).
+
+    모듈 그래프는 디렉터리 앞 2세그먼트 프록시라 파일 수십 개가 한 덩어리로 접힌다. 여기서
+    파일별 함수 수·본문 줄수와 파일 간 호출 엣지를 그대로 실어, 프론트가 모듈 → 파일로
+    한 단계 더 내려갈 수 있게 한다. 캡을 넘으면 truncated:true(침묵 절단 금지).
+
+    노드 선정은 **함수 수 내림차순**이고, 엣지는 **양 끝이 살아남은 노드일 때만** 싣는다 —
+    잘려나간 노드를 가리키는 엣지를 남기면 프론트가 존재하지 않는 파일을 그린다.
+    """
+    per_file_fn: Dict[str, int] = {}
+    per_file_lines: Dict[str, int] = {}
+    for fn, rel in file_of.items():
+        if not rel:
+            continue
+        per_file_fn[rel] = per_file_fn.get(rel, 0) + 1
+        per_file_lines[rel] = per_file_lines.get(rel, 0) + body_lines.get(fn, 0)
+    ranked = sorted(per_file_fn, key=lambda f: (-per_file_fn[f], f))
+    kept = set(ranked[:max_nodes])
+    edges_sorted = sorted(pair_counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    kept_edges = [(pair, c) for pair, c in edges_sorted if pair[0] in kept and pair[1] in kept]
+    truncated = len(ranked) > max_nodes or len(kept_edges) > max_edges
+    return {
+        "nodes": [
+            {"file": f, "module": _module_of(f), "functions": per_file_fn[f],
+             "lines": per_file_lines.get(f, 0)}
+            for f in ranked[:max_nodes]
+        ],
+        "edges": [{"from": a, "to": b, "calls": c} for (a, b), c in kept_edges[:max_edges]],
+        "truncated": truncated,
+        "total_files": len(ranked),
+        "total_edges": len(pair_counts),
     }
 
 
@@ -514,6 +558,7 @@ def compute_architecture_metrics(
     module_sccs = _tarjan_scc(mod_adj)
     mutual_pairs = _mutual_file_pairs(pair_counts)
     module_graph = _build_module_graph(call_map, file_of)
+    file_graph = _build_file_graph(file_of, body_lines, pair_counts)
     refactor_candidates = _refactor_candidates(file_of, body_lines, pair_counts, mutual_pairs)
 
     excerpts: List[Dict[str, Any]] = []
@@ -596,6 +641,8 @@ def compute_architecture_metrics(
                            "index_used": len(asil_index)},
         "excerpts": excerpts,
         "module_graph": module_graph,
+        # v5(O3): 모듈 노드 → 내부 파일 드릴다운 재료. 모듈 그래프와 같은 pair_counts에서 나온다.
+        "file_graph": file_graph,
         "cycles": {
             # 0건이면 빈 배열(키 자체는 항상 존재 — 프론트가 '관측 없음'을 명시 렌더).
             "file_sccs": [{"files": c, "size": len(c)} for c in file_sccs[:10]],

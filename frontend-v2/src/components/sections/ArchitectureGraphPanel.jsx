@@ -19,7 +19,101 @@ const btn = {
 
 const { NODE_W, NODE_H } = AG;
 
-function ModuleDiagram({ moduleGraph, cycles }) {
+const FILE_DRILL_LIMIT = 12;
+
+/** 선택 모듈 내부를 파일 단위로 펼친다(v5 file_graph). 모듈은 디렉터리 2세그먼트 프록시라
+ *  파일 수십 개가 한 덩어리로 접히는데, 여기서 한 단계 더 내려간다. */
+function ModuleFileDrill({ module: mod, fileGraph }) {
+  const detail = useMemo(() => {
+    const nodes = (fileGraph?.nodes || []).filter((n) => n.module === mod);
+    const inside = new Set(nodes.map((n) => n.file));
+    const edges = fileGraph?.edges || [];
+    const internal = edges.filter((e) => inside.has(e.from) && inside.has(e.to));
+    // 상호 호출(양방향) 표시 — 파일 쌍 단위 2-사이클은 리팩토링 신호다.
+    const seen = new Set(internal.map((e) => `${e.from}|${e.to}`));
+    const outbound = new Map();
+    const inbound = new Map();
+    edges.forEach((e) => {
+      if (inside.has(e.from) && !inside.has(e.to)) {
+        const m = (fileGraph.nodes.find((n) => n.file === e.to) || {}).module || '(외부)';
+        outbound.set(m, (outbound.get(m) || 0) + e.calls);
+      } else if (!inside.has(e.from) && inside.has(e.to)) {
+        const m = (fileGraph.nodes.find((n) => n.file === e.from) || {}).module || '(외부)';
+        inbound.set(m, (inbound.get(m) || 0) + e.calls);
+      }
+    });
+    return {
+      nodes: [...nodes].sort((a, b) => b.functions - a.functions),
+      internal: internal
+        .map((e) => ({ ...e, mutual: seen.has(`${e.to}|${e.from}`) }))
+        .sort((a, b) => b.calls - a.calls),
+      outbound: [...outbound.entries()].sort((a, b) => b[1] - a[1]),
+      inbound: [...inbound.entries()].sort((a, b) => b[1] - a[1]),
+    };
+  }, [mod, fileGraph]);
+
+  if (!fileGraph) {
+    return (
+      <div style={{ ...xs, color: 'var(--text-muted)' }}>
+        파일 단위 데이터가 이 응답에 없습니다(구 캐시) — 새로고침하면 표시됩니다.
+      </div>
+    );
+  }
+  const base = (f) => String(f).split('/').pop();
+  return (
+    <div style={{ marginTop: 6 }}>
+      <div style={{ ...xs, fontWeight: 600, marginBottom: 2 }}>
+        내부 파일 {detail.nodes.length}개 · 파일 간 호출 {detail.internal.length}건
+      </div>
+      <div style={{ overflowX: 'auto' }}>
+        <table style={{ borderCollapse: 'collapse', width: '100%' }}>
+          <thead>
+            <tr>
+              <th style={{ ...xs, textAlign: 'left', padding: '2px 6px', color: 'var(--text-muted)' }}>파일</th>
+              <th style={{ ...xs, textAlign: 'left', padding: '2px 6px', color: 'var(--text-muted)' }}>함수</th>
+              <th style={{ ...xs, textAlign: 'left', padding: '2px 6px', color: 'var(--text-muted)' }}>본문 줄</th>
+            </tr>
+          </thead>
+          <tbody>
+            {detail.nodes.slice(0, FILE_DRILL_LIMIT).map((n) => (
+              <tr key={n.file}>
+                <td style={{ ...xs, padding: '2px 6px' }} title={n.file}>{base(n.file)}</td>
+                <td style={{ ...xs, padding: '2px 6px' }}>{n.functions}</td>
+                <td style={{ ...xs, padding: '2px 6px', color: 'var(--text-muted)' }}>{n.lines.toLocaleString()}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {detail.nodes.length > FILE_DRILL_LIMIT && (
+        <div style={{ ...xs, color: 'var(--text-muted)' }}>* 함수 수 상위 {FILE_DRILL_LIMIT}개만 표시 (총 {detail.nodes.length}개)</div>
+      )}
+      {detail.internal.length > 0 && (
+        <div style={{ marginTop: 4 }}>
+          <div style={{ ...xs, fontWeight: 600 }}>내부 호출</div>
+          {detail.internal.slice(0, FILE_DRILL_LIMIT).map((e) => (
+            <div key={`${e.from}→${e.to}`} style={{ ...xs, color: 'var(--text-muted)' }}>
+              {base(e.from)} → {base(e.to)} · {e.calls}회
+              {e.mutual && <span style={{ color: 'var(--color-danger)' }}> ⚠상호</span>}
+            </div>
+          ))}
+          {detail.internal.length > FILE_DRILL_LIMIT && (
+            <div style={{ ...xs, color: 'var(--text-muted)' }}>* 상위 {FILE_DRILL_LIMIT}건만 표시 (총 {detail.internal.length}건)</div>
+          )}
+        </div>
+      )}
+      <div style={{ ...xs, color: 'var(--text-muted)', marginTop: 4 }}>
+        외부 유출: {detail.outbound.length ? detail.outbound.map(([m, c]) => `→${m} ${c}`).join(' · ') : '없음'}
+        {' / '}유입: {detail.inbound.length ? detail.inbound.map(([m, c]) => `←${m} ${c}`).join(' · ') : '없음'}
+      </div>
+      {fileGraph.truncated && (
+        <div style={{ ...xs, color: 'var(--text-muted)' }}>* 파일 그래프 표시 상한으로 일부 파일·관계 생략(총 {fileGraph.total_files}파일)</div>
+      )}
+    </div>
+  );
+}
+
+function ModuleDiagram({ moduleGraph, cycles, fileGraph }) {
   const [hover, setHover] = useState(null);
   const [selected, setSelected] = useState(null);
   const svgRef = useRef(null);
@@ -120,6 +214,8 @@ function ModuleDiagram({ moduleGraph, cycles }) {
               {L.cycleEdges.has(`${e.from}→${e.to}`) ? ' · 순환 참여' : ''}
             </div>
           ))}
+          {/* 모듈 = 디렉터리 2세그먼트 프록시라 파일이 접힌다 — 한 단계 더 내려간 뷰(v5) */}
+          <ModuleFileDrill module={selected} fileGraph={fileGraph} />
         </div>
       )}
     </div>
@@ -179,9 +275,10 @@ function CouplingHeatmap({ moduleGraph }) {
 function HotspotScatter({ hotspots }) {
   const pts = (hotspots || []).filter((h) => h.fan_in > 0);
   if (!pts.length) return null;
-  const W = 320;
-  const H = 180;
-  const P = 30;
+  // 전폭 배치(O4)라 viewBox를 키운다 — 320×180에선 점이 좌하단에 뭉쳐 라벨을 못 붙였다.
+  const W = 640;
+  const H = 260;
+  const P = 38;
   const maxX = Math.max(...pts.map((p) => p.fan_in), 1);
   const maxY = Math.max(...pts.map((p) => p.complexity), 1);
   const sx = (v) => P + (v / maxX) * (W - P - 10);
@@ -191,17 +288,25 @@ function HotspotScatter({ hotspots }) {
       <div style={{ ...xs, color: 'var(--text-muted)', marginBottom: 4 }}>
         핫스팟 산포 — X=fan-in · Y=복잡도 (●측정 ccn / ○줄수 추정 — 축 척도 혼합 주의)
       </div>
-      <svg viewBox={`0 0 ${W} ${H}`} width={W} height={H} role="img" aria-label="핫스팟 산포도" style={{ maxWidth: '100%' }}>
+      <svg viewBox={`0 0 ${W} ${H}`} role="img" aria-label="핫스팟 산포도"
+        style={{ width: '100%', maxWidth: 760, height: 'auto' }}>
         <line x1={P} y1={H - P} x2={W - 6} y2={H - P} stroke="var(--border)" />
         <line x1={P} y1={H - P} x2={P} y2={8} stroke="var(--border)" />
-        <text x={W - 8} y={H - P + 12} fontSize={9} textAnchor="end" style={{ fill: 'var(--text-muted)' }}>fan-in {maxX}</text>
-        <text x={P - 4} y={12} fontSize={9} textAnchor="end" style={{ fill: 'var(--text-muted)' }}>{maxY}</text>
+        <text x={W - 8} y={H - P + 14} fontSize={10} textAnchor="end" style={{ fill: 'var(--text-muted)' }}>fan-in {maxX}</text>
+        <text x={P - 6} y={14} fontSize={10} textAnchor="end" style={{ fill: 'var(--text-muted)' }}>{maxY}</text>
         {pts.map((p) => (
-          <circle key={p.function} cx={sx(p.fan_in)} cy={sy(p.complexity)} r={4}
-            fill={p.complexity_source === 'vcast_ccn' ? 'var(--accent)' : 'transparent'}
-            stroke="var(--accent)" strokeWidth={1.5}>
-            <title>{`${p.function} — fan-in ${p.fan_in} · 복잡도 ${p.complexity} (${p.complexity_source === 'vcast_ccn' ? '측정 ccn' : '줄수 추정'})`}</title>
-          </circle>
+          <g key={p.function}>
+            <circle cx={sx(p.fan_in)} cy={sy(p.complexity)} r={5}
+              fill={p.complexity_source === 'vcast_ccn' ? 'var(--accent)' : 'transparent'}
+              stroke="var(--accent)" strokeWidth={1.5}>
+              <title>{`${p.function} — fan-in ${p.fan_in} · 복잡도 ${p.complexity} (${p.complexity_source === 'vcast_ccn' ? '측정 ccn' : '줄수 추정'})`}</title>
+            </circle>
+            {/* 전폭이라 라벨을 붙일 여유가 생겼다 — 툴팁 없이도 상위 함수를 식별할 수 있게. */}
+            <text x={sx(p.fan_in) + 8} y={sy(p.complexity) + 3} fontSize={9}
+              style={{ fill: 'var(--text-muted)', pointerEvents: 'none' }}>
+              {p.function.length > 22 ? `${p.function.slice(0, 21)}…` : p.function}
+            </text>
+          </g>
         ))}
       </svg>
     </div>
@@ -271,10 +376,11 @@ export default function ArchitectureGraphPanel({ jobUrl, cacheRoot }) {
 
       {data?.available && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--sp-4)' }}>
-          <ModuleDiagram moduleGraph={data.module_graph} cycles={data.cycles} />
+          <ModuleDiagram moduleGraph={data.module_graph} cycles={data.cycles} fileGraph={data.file_graph} />
+          {/* O4: 히트맵(위) → 핫스팟 산포(아래) 각각 전폭 — 나란히 두면 둘 다 좁아 읽기 어려웠다. */}
+          <CouplingHeatmap moduleGraph={data.module_graph} />
+          <HotspotScatter hotspots={data.hotspots} />
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))', gap: 'var(--sp-4)' }}>
-            <CouplingHeatmap moduleGraph={data.module_graph} />
-            <HotspotScatter hotspots={data.hotspots} />
             <CycleList cycles={data.cycles} />
             <div>
               <div style={{ ...xs, color: 'var(--text-muted)', marginBottom: 4 }}>구조 개선 후보 (결정론 관측)</div>

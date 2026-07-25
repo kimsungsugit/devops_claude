@@ -17,12 +17,21 @@ import FunctionCoveragePanel from './FunctionCoveragePanel.jsx';
 import TestDesignPanel from './TestDesignPanel.jsx';
 
 /**
- * ProjectSummarySection — "📌 프로젝트 요약" 탭 (단일 뷰 건강 대시보드).
- * 위→아래: 문제점 배너 · 정적·동적 현황(차트) · 추적성(SW 밴드) · PRQA 빌드별 트렌드 · 빌드 타임라인(전체).
- * 데이터는 캐시 기반 소비라 "한번 생성하면 다음에 그대로" 유지(추적성만 캐시 없을 때 1회 자동생성).
+ * ProjectSummarySection — "📈 프로젝트 분석" 탭 (구 '프로젝트 요약'. 탭 id는 'summary' 유지 — Detail.jsx 주석 참조).
  *
+ * 구성: 문제점 배너 · AI 인사이트를 최상단에 두고, 나머지를 3그룹으로 나눈다.
+ *   ① 🏗 SW 아키텍처   — 아키텍처 메트릭 · 다이어그램
+ *   ② 📄 소스코드       — PRQA 트렌드 · 정적분석 위반 상세 · 룰 트렌드 · 함수별 커버리지
+ *   ③ 🔨 빌드별 변경 영향 — 베이스라인→최신 변화 · 빌드 타임라인(전체 빌드)
+ *
+ * 숨김(사용자 결정, 삭제 아님 — 복원은 아래 각 HIDDEN 주석 블록 해제): 파이프라인 헬스 스트립 ·
+ * 정적·동적 분석 현황(차트) · 추적성 현황(SW 밴드) · 테스트 설계 어드바이저.
+ * ⚠ 추적성 **패널**만 숨기고 trace fetch/자동생성 effect는 유지한다 — 문제점 배너와 AI 인사이트가
+ *   trace를 소비하므로 같이 지우면 배너가 조용히 비어 '이상 없음'으로 위장된다.
+ *
+ * 데이터는 캐시 기반 소비라 "한번 생성하면 다음에 그대로" 유지(추적성만 캐시 없을 때 1회 자동생성).
  * ISO 정직성: 커버리지 null→'—', VectorCAST는 SCM 스냅샷(빌드별 트렌드 금지), PRQA만 빌드별 트렌드,
- * ASIL 미상≠QM, MC/DC 미측정≠미달. 추적성 밴드는 SW 레벨만(시스템 SyRS/HSIS/SyTS/SyITS 제외).
+ * ASIL 미상≠QM, MC/DC 미측정≠미달.
  */
 
 const BASIS_LABEL = {
@@ -35,6 +44,20 @@ const ASIL_COLOR = {
 };
 // SW 레벨 밴드만(시스템 문서 SyRS/SyTS/SyITS + HSIS 제외 — 사용자 결정).
 const TRACE_BANDS = ['SDS', 'UDS', 'STS', 'SUTS', 'SITS', 'VectorCAST'];
+
+/**
+ * 패널 표시 스위치(사용자 결정으로 숨긴 항목) — **코드는 살려 두고 플래그만 false**.
+ * 되살리려면 해당 값을 true로. JSX 주석 처리 대신 플래그를 쓰는 이유: 주석 블록은 내부에
+ * 닫는 시퀀스가 섞이면 깨지고, 참조가 끊긴 변수·import가 lint 오류로 번져 복원 비용이 커진다.
+ * ⚠ traceability를 false로 둬도 trace fetch/자동생성 effect는 유지해야 한다 —
+ *   문제점 배너와 AI 인사이트가 trace를 소비하므로, 같이 지우면 배너가 조용히 빈다.
+ */
+const SHOW = {
+  pipelineHealth: false,
+  staticDynamic: false,
+  traceability: false,
+  testDesign: false,
+};
 
 function fmtInt(n) {
   return (n == null || Number.isNaN(Number(n))) ? '—' : Number(n).toLocaleString();
@@ -73,6 +96,19 @@ function HealthChip({ label, sev }) {
 // 차트/KPI가 잘리지 않도록 반응형 그리드(auto-fit + minmax). flex-wrap은 좁은 폭에서 클립됐음.
 const CHART_GRID = { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))', gap: 'var(--sp-3)', alignItems: 'start' };
 const PANEL = { padding: 'var(--sp-3)' };
+
+/** 그룹 구분 헤딩 — 패널이 세로로 길게 쌓이는 탭에서 어디부터 무슨 주제인지 표시. */
+function GroupHeading({ icon, title, desc }) {
+  return (
+    <div style={{
+      display: 'flex', alignItems: 'baseline', gap: 'var(--sp-2)', flexWrap: 'wrap',
+      borderTop: '2px solid var(--border)', paddingTop: 'var(--sp-2)', marginTop: 'var(--sp-2)',
+    }}>
+      <h3 style={{ margin: 0, fontSize: 'var(--text-md, 14px)', fontWeight: 700 }}>{icon} {title}</h3>
+      {desc && <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>{desc}</span>}
+    </div>
+  );
+}
 
 export default function ProjectSummarySection({ job, analysisResult }) {
   const toast = useToast();
@@ -365,7 +401,7 @@ export default function ProjectSummarySection({ job, analysisResult }) {
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--sp-3)' }}>
       {/* 헤더 + 문제 요약 */}
       <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 'var(--sp-2)' }}>
-        <div style={{ fontSize: 'var(--text-xl)', fontWeight: 700 }}>📌 {job?.name || '프로젝트'} 요약</div>
+        <div style={{ fontSize: 'var(--text-xl)', fontWeight: 700 }}>📈 {job?.name || '프로젝트'} 분석</div>
         {scmId && <Pill text={`SCM ${scmId}`} color="var(--accent)" />}
         {problems.length > 0
           ? <Pill text={`⚠ 문제 ${problems.length}건`} color="var(--color-danger)" />
@@ -386,16 +422,33 @@ export default function ProjectSummarySection({ job, analysisResult }) {
             ? <HealthChip label={trace?.has_data ? '이상 없음' : '추적성 로딩/생성 중…'} sev={trace?.has_data ? 'ok' : 'muted'} />
             : problems.map((p, i) => <HealthChip key={i} label={p.label} sev={p.sev} />)}
         </div>
+        {/* 추적성 상태 줄 — 추적성 패널을 숨긴 뒤 생성 실패 사유가 갈 곳이 없어졌다. 실패를 조용히
+            삼키면 '문제 0건'이 '이상 없음'으로 위장되므로(증거부재≠정상) 여기로 끌어올린다. */}
+        {trace && !trace.has_data && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--sp-2)', flexWrap: 'wrap', marginTop: 'var(--sp-2)' }}>
+            <span style={{ fontSize: 'var(--text-xs)', color: 'var(--color-warning)' }}>
+              ⚠ 추적성 미생성 — {trace.reason || '추적성 매트릭스가 아직 생성되지 않았습니다.'}
+            </span>
+            <button type="button" onClick={reloadTrace} disabled={traceBusy}
+              style={{ fontSize: 'var(--text-xs)', padding: '1px 8px', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', background: 'transparent', cursor: traceBusy ? 'wait' : 'pointer', color: 'var(--text-muted)' }}>
+              다시 시도
+            </button>
+            {traceBusy && <span className="spinner" />}
+          </div>
+        )}
       </div>
 
       {/* 파이프라인 헬스 스트립 — 설계(SDS)→테스트(STS)까지 단계 상태 + 탭 딥링크 */}
-      <PipelineHealthStrip trace={trace} prqa={prqa} scmVcast={scmVcast} rollup={rollup}
-        latestViolationsDelta={latestViolationsDelta} />
+      {SHOW.pipelineHealth && (
+        <PipelineHealthStrip trace={trace} prqa={prqa} scmVcast={scmVcast} rollup={rollup}
+          latestViolationsDelta={latestViolationsDelta} />
+      )}
 
       {/* AI 인사이트(Gemini) — on-demand(버튼) + 빌드별 디스크 캐시(probe 자동 표시) */}
       <SummaryAiInsightPanel jobUrl={jobUrl} cacheRoot={cacheRoot} scmId={scmId} trace={trace} />
 
       {/* 정적·동적 현황 (그리드) */}
+      {SHOW.staticDynamic && (
       <div className="panel" style={PANEL}>
         <div style={{ fontSize: 'var(--text-sm)', fontWeight: 600, marginBottom: 'var(--sp-2)' }}>
           정적·동적 분석 현황
@@ -420,8 +473,10 @@ export default function ProjectSummarySection({ job, analysisResult }) {
           </div>
         )}
       </div>
+      )}
 
-      {/* 추적성 현황 (SW 밴드만) */}
+      {/* 추적성 현황 (SW 밴드만) — 패널만 숨기고 trace fetch는 유지(문제점 배너·AI 인사이트 근거) */}
+      {SHOW.traceability && (
       <div className="panel" style={PANEL}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--sp-2)', marginBottom: 'var(--sp-2)' }}>
           <div style={{ fontSize: 'var(--text-sm)', fontWeight: 600 }}>추적성 현황 (SW)</div>
@@ -469,6 +524,19 @@ export default function ProjectSummarySection({ job, analysisResult }) {
           </>
         )}
       </div>
+      )}
+
+      {/* ━━ 그룹 ① SW 아키텍처 ━━ */}
+      <GroupHeading icon="🏗" title="SW 아키텍처" desc="소스 스냅샷 기준 구조 — 결정론 메트릭·모듈 관계" />
+
+      {/* 아키텍처 메트릭 — 핫스팟/결합도/대형 함수 + v4 4축(간섭·전역·사분면·간접호출) */}
+      <ArchitectureMetricsPanel jobUrl={jobUrl} cacheRoot={cacheRoot} />
+
+      {/* 아키텍처 다이어그램 — 모듈 관계·순환·핫스팟 산포 (K2) */}
+      <ArchitectureGraphPanel jobUrl={jobUrl} cacheRoot={cacheRoot} />
+
+      {/* ━━ 그룹 ② 소스코드 ━━ */}
+      <GroupHeading icon="📄" title="소스코드" desc="정적분석 위반·룰 변화·함수별 커버리지" />
 
       {/* PRQA 빌드별 트렌드 */}
       <div className="panel" style={PANEL}>
@@ -561,20 +629,17 @@ export default function ProjectSummarySection({ job, analysisResult }) {
       {/* 룰 트렌드 — 빌드별 위반 변화 분류 + 실제 fix 근거 작성 예시 */}
       <RuleTrendPanel jobUrl={jobUrl} cacheRoot={cacheRoot} />
 
-      {/* 아키텍처 메트릭 — 핫스팟/결합도/대형 함수 (결정론, AI 조언은 AI 인사이트 패널) */}
-      <ArchitectureMetricsPanel jobUrl={jobUrl} cacheRoot={cacheRoot} />
-
-      {/* 아키텍처 다이어그램 — 모듈 관계·순환·핫스팟 산포 (K2) */}
-      <ArchitectureGraphPanel jobUrl={jobUrl} cacheRoot={cacheRoot} />
-
-      {/* 베이스라인 → 최신 변화 — 소스 스냅샷 직접 비교(영향분석 이력 비의존) */}
-      <BaselineDiffPanel jobUrl={jobUrl} cacheRoot={cacheRoot} />
-
-      {/* 함수별 커버리지 + 실패 테스트 — vectorcast_detail(기존 미노출 갭) */}
+      {/* 함수별 커버리지 + 실패 테스트 — 빌드 산출물 → SCM 입력 문서 폴백(N1) */}
       <FunctionCoveragePanel jobUrl={jobUrl} cacheRoot={cacheRoot} />
 
       {/* 테스트 설계 어드바이저 — 기법 권고·설계-시험 갭 (L2) */}
-      <TestDesignPanel jobUrl={jobUrl} cacheRoot={cacheRoot} />
+      {SHOW.testDesign && <TestDesignPanel jobUrl={jobUrl} cacheRoot={cacheRoot} />}
+
+      {/* ━━ 그룹 ③ 빌드별 변경 영향 ━━ */}
+      <GroupHeading icon="🔨" title="빌드별 변경 영향" desc="베이스라인 대비 코드 변화 · 빌드 타임라인" />
+
+      {/* 베이스라인 → 최신 변화 — 소스 스냅샷 직접 비교(영향분석 이력 비의존) */}
+      <BaselineDiffPanel jobUrl={jobUrl} cacheRoot={cacheRoot} />
 
       {/* 빌드 타임라인 (전체 빌드) */}
       <div className="panel" style={PANEL}>

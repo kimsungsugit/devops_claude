@@ -316,3 +316,48 @@ def test_asil_functions_keeps_comment_only_contract(tmp_path):
     r = _v4(tmp_path, asil_by_function={"lo_fn": "B"})
     assert set(r["asil_functions"]["by_function"]) == {"hi_fn"}   # 주석 보유 함수만
     assert r["asil_functions"]["index_used"] == 1                 # 실제 사용 인덱스는 별도 표기
+
+
+# ── O3(v5): file_graph — 모듈 → 파일 드릴다운 재료 ──────────────────────────
+
+def test_file_graph_nodes_carry_module_attribution(tmp_path):
+    r = _v4(tmp_path)
+    fg = r["file_graph"]
+    by_file = {n["file"]: n for n in fg["nodes"]}
+    assert set(by_file) == {"APP/hi.c", "BSW/lo.c"}
+    # 모듈 귀속이 module_graph와 같은 프록시 규칙(_module_of)을 따라야 드릴다운 조인이 성립
+    assert by_file["APP/hi.c"]["module"] == "APP"
+    assert by_file["APP/hi.c"]["functions"] == 2      # hi_fn, helper
+    assert by_file["BSW/lo.c"]["functions"] == 2      # lo_fn, ptr_user
+    assert by_file["APP/hi.c"]["lines"] > 0
+    assert fg["total_files"] == 2 and fg["truncated"] is False
+
+
+def test_file_graph_edges_match_cross_file_calls(tmp_path):
+    r = _v4(tmp_path)
+    fg = r["file_graph"]
+    edges = {(e["from"], e["to"]): e["calls"] for e in fg["edges"]}
+    assert edges.get(("APP/hi.c", "BSW/lo.c")) == 1   # hi_fn → lo_fn
+    # 모듈 그래프의 cross-module 엣지와 같은 소스(pair_counts)에서 나온다
+    assert fg["total_edges"] == len(edges)
+
+
+def test_file_graph_caps_are_honest(tmp_path):
+    """캡 초과는 truncated:true. 잘린 노드를 가리키는 엣지는 남기지 않는다(유령 노드 방지)."""
+    from workflow.summary_arch_metrics import _build_file_graph
+
+    file_of = {f"fn{i}": f"m/f{i}.c" for i in range(10)}
+    body_lines = {f"fn{i}": 10 for i in range(10)}
+    pairs = {("m/f0.c", "m/f9.c"): 5, ("m/f0.c", "m/f1.c"): 3}
+    fg = _build_file_graph(file_of, body_lines, pairs, max_nodes=2, max_edges=10)
+    assert fg["truncated"] is True and fg["total_files"] == 10
+    kept = {n["file"] for n in fg["nodes"]}
+    assert len(kept) == 2
+    for e in fg["edges"]:
+        assert e["from"] in kept and e["to"] in kept
+
+
+def test_arch_version_bumped_to_5():
+    from workflow.summary_arch_metrics import ARCH_METRICS_VERSION
+
+    assert ARCH_METRICS_VERSION >= 5  # v4 캐시(file_graph 없음) 재사용 금지

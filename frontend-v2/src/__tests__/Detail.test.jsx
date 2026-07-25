@@ -150,28 +150,41 @@ describe('Detail', () => {
     expect(screen.getByText('my-job')).toBeInTheDocument();
   });
 
-  it('기본 활성 섹션은 "프로젝트 요약"이다', () => {
+  it('기본 활성 섹션은 "빌드 & 입력 데이터 정보"다', () => {
     // Arrange
     mockSelectedJob = { name: 'my-job', url: 'http://jenkins/job/my-job/' };
 
     // Act
     render(<Detail />);
 
-    // Assert — 요약이 기본 진입 탭. build는 미방문이라 아직 마운트 안 됨(keep-alive lazy).
+    // Assert — build가 기본 진입 탭. summary(프로젝트 분석)는 미방문이라 아직 마운트 안 됨(keep-alive lazy).
+    expect(screen.getByTestId('section-build')).toBeInTheDocument();
+    expect(screen.queryByTestId('section-summary')).toBeNull();
+  });
+
+  it('프로젝트 분석 탭은 라벨만 바뀌고 id는 summary 유지(딥링크 호환)', async () => {
+    // Arrange — window.__detailSection('summary')는 Dashboard 딥링크 계약이라 깨지면 안 된다.
+    const user = userEvent.setup();
+    mockSelectedJob = { name: 'my-job', url: 'http://jenkins/job/my-job/' };
+
+    // Act
+    render(<Detail />);
+    await user.click(screen.getByText('프로젝트 분석'));
+
+    // Assert
     expect(screen.getByTestId('section-summary')).toBeInTheDocument();
-    expect(screen.queryByTestId('section-build')).toBeNull();
+    act(() => { window.__detailSection('summary'); });
+    expect(screen.getByTestId('section-summary')).toBeInTheDocument();
   });
 
   // ── 섹션 탭 네비게이션 ─────────────────────────────────────────
 
   it('빌드 정보 탭에 SCM 섹션이 통합되어 함께 표시된다', async () => {
     // Arrange — 통합 래퍼(BuildInfoWithScmSection)가 BuildInfo + SCM을 함께 렌더.
-    const user = userEvent.setup();
     mockSelectedJob = { name: 'my-job', url: 'http://jenkins/job/my-job/' };
 
-    // Act — build는 더 이상 기본 진입이 아니므로 탭을 눌러 활성화.
+    // Act — build가 기본 진입 탭이라 렌더만으로 활성.
     render(<Detail />);
-    await user.click(screen.getByText(/빌드 & 입력 데이터 정보/));
 
     // Assert — 별도 SCM 탭 없이 build 탭 안에서 section-build와 section-scm이 공존(빌드 로그 아래 배치)
     expect(screen.getByTestId('section-build')).toBeInTheDocument();
@@ -226,12 +239,12 @@ describe('Detail', () => {
     mockSelectedJob = { name: 'my-job', url: 'http://jenkins/job/my-job/' };
     render(<Detail />);
 
-    // Act — 기본 진입은 summary. build(BuildInfo+SCM 통합 탭)를 먼저 방문 → 테스트 결과 방문
-    await user.click(screen.getByText(/빌드 & 입력 데이터 정보/));
+    // Act — 기본 진입이 build(BuildInfo+SCM 통합 탭). 프로젝트 분석 → 테스트 결과 순 방문
     expect(screen.getByTestId('section-scm')).toBeInTheDocument(); // 통합 탭에 SCM 포함
+    await user.click(screen.getByText('프로젝트 분석'));
     await user.click(screen.getByText('테스트 결과'));
 
-    // Assert — 활성(analysis) + 이전 방문(summary, build 통합=build/scm)이 모두 DOM에 유지(언마운트 X)
+    // Assert — 활성(analysis) + 이전 방문(build 통합=build/scm, summary)이 모두 DOM에 유지(언마운트 X)
     expect(screen.getByTestId('section-analysis')).toBeInTheDocument();
     expect(screen.getByTestId('section-scm')).toBeInTheDocument();
     expect(screen.getByTestId('section-build')).toBeInTheDocument();

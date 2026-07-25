@@ -42,6 +42,23 @@ const METRICS = {
     { kind: 'god_file', file: 'APP/a.c', functions: 20, lines: 900, in_files: 3, out_files: 2,
       basis: '함수 20개 · 본문 900줄 · 유입 3파일 · 유출 2파일' },
   ],
+  // v5(O3): 모듈 → 파일 드릴다운 재료
+  file_graph: {
+    nodes: [
+      { file: 'APP/a.c', module: 'APP', functions: 4, lines: 900 },
+      { file: 'APP/b.c', module: 'APP', functions: 2, lines: 120 },
+      { file: 'LIB/u.c', module: 'LIB', functions: 3, lines: 60 },
+      { file: 'IF/i.c', module: 'IF', functions: 1, lines: 20 },
+    ],
+    edges: [
+      { from: 'APP/a.c', to: 'APP/b.c', calls: 3 },
+      { from: 'APP/b.c', to: 'APP/a.c', calls: 1 },   // 상호 호출
+      { from: 'APP/a.c', to: 'LIB/u.c', calls: 4 },   // 외부 유출
+      { from: 'LIB/u.c', to: 'APP/a.c', calls: 1 },   // 외부 유입
+      { from: 'APP/a.c', to: 'IF/i.c', calls: 2 },
+    ],
+    truncated: false, total_files: 4, total_edges: 5,
+  },
 };
 
 const PROPS = { jobUrl: 'http://j/', cacheRoot: '' };
@@ -96,6 +113,38 @@ describe('ArchitectureGraphPanel', () => {
     expect(screen.getByText(/^→ LIB · 호출 4회 · 순환 참여$/)).toBeInTheDocument();
     expect(screen.getByText(/^← LIB · 호출 1회 · 순환 참여$/)).toBeInTheDocument();
     expect(screen.getByText(/^→ IF · 호출 2회$/)).toBeInTheDocument();
+  });
+
+  // ── O3: 모듈 → 파일 드릴다운 ──
+  it('모듈 클릭 → 내부 파일 목록 + 파일 간 호출(상호 표기) + 외부 유출입', async () => {
+    render(<ArchitectureGraphPanel {...PROPS} />);
+    await screen.findByRole('img', { name: '모듈 의존 다이어그램' });
+    await userEvent.click(screen.getByRole('button', { name: /모듈 APP/ }));
+
+    // 모듈이 2세그먼트 프록시로 접은 파일을 펼친다
+    expect(screen.getByText(/내부 파일 2개 · 파일 간 호출 2건/)).toBeInTheDocument();
+    expect(screen.getByText('a.c')).toBeInTheDocument();
+    expect(screen.getByText('b.c')).toBeInTheDocument();
+    // 양방향은 ⚠상호로 표기(2-사이클 = 리팩토링 신호)
+    expect(screen.getAllByText(/⚠상호/).length).toBeGreaterThanOrEqual(1);
+    // 모듈 경계를 넘는 호출은 유출/유입으로 집계(LIB 4회 나가고 1회 들어옴, IF 2회 나감)
+    expect(screen.getByText(/외부 유출: →LIB 4 · →IF 2/)).toBeInTheDocument();
+    expect(screen.getByText(/유입: ←LIB 1/)).toBeInTheDocument();
+  });
+
+  it('file_graph 부재(구 캐시) — 정직 안내로 폴백', async () => {
+    mockResp = { ...METRICS, file_graph: undefined };
+    render(<ArchitectureGraphPanel {...PROPS} />);
+    await screen.findByRole('img', { name: '모듈 의존 다이어그램' });
+    await userEvent.click(screen.getByRole('button', { name: /모듈 APP/ }));
+    expect(screen.getByText(/파일 단위 데이터가 이 응답에 없습니다/)).toBeInTheDocument();
+  });
+
+  it('핫스팟 산포에 함수 라벨을 붙인다(전폭 배치)', async () => {
+    render(<ArchitectureGraphPanel {...PROPS} />);
+    await screen.findByRole('img', { name: '핫스팟 산포도' });
+    expect(screen.getByText('hub')).toBeInTheDocument();
+    expect(screen.getByText('big')).toBeInTheDocument();
   });
 
   it('사이클 0건 — "관측 없음" 명시(침묵 생략 금지)', async () => {

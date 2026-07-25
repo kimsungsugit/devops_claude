@@ -45,6 +45,7 @@ vi.mock('../traceMatrix.js', () => ({
 
 const { default: ProjectSummarySection } = await import('../components/sections/ProjectSummarySection.jsx');
 const { buildTraceMatrix } = await import('../traceMatrix.js');
+const { post: mockPost } = await import('../api.js');
 
 const JOB = { name: 'kjpds02_pv', url: 'http://jenkins/job/KJPDS02_PV/' };
 const RESULT = {
@@ -105,31 +106,32 @@ describe('ProjectSummarySection (재설계)', () => {
     localStorage.clear();
   });
 
-  it('현황: 정적(PRQA) 위반/진단을 표시한다', async () => {
+  // ── Phase O: 패널 숨김 + 3그룹 재배치 ──
+
+  it('숨김(사용자 결정): 파이프라인 헬스·정적동적 현황·추적성 현황·테스트 설계는 렌더하지 않는다', async () => {
     render(<ProjectSummarySection job={JOB} analysisResult={RESULT} />);
-    expect(await screen.findByText('562')).toBeInTheDocument(); // PRQA 위반
-    expect(screen.getByText('502')).toBeInTheDocument();         // 진단
+    await screen.findByText(/⚠ 문제 \d+건/);   // 렌더 완료 대기(배너는 유지되는 축)
+    expect(screen.queryByText('정적·동적 분석 현황')).toBeNull();
+    expect(screen.queryByText('추적성 현황 (SW)')).toBeNull();
+    expect(screen.queryByText('6,886/6,886')).toBeNull();       // 정적동적 현황의 UT KPI
+    expect(screen.queryByText(/테스트 설계 어드바이저/)).toBeNull();
+    expect(screen.queryByTestId('pipeline-health')).toBeNull();
   });
 
-  it('현황: 동적(VectorCAST) UT/IT 테스트 수를 표시한다', async () => {
-    render(<ProjectSummarySection job={JOB} analysisResult={RESULT} />);
-    expect(await screen.findByText('6,886/6,886')).toBeInTheDocument(); // UT 통과/전체
-    expect(screen.getByText('616/616')).toBeInTheDocument();            // IT
-  });
-
-  it('현황: 문제점 배너에 추적성 갭을 칩으로 노출한다', async () => {
+  it('추적성 패널을 숨겨도 trace는 계속 조회한다(문제점 배너·AI 인사이트 근거)', async () => {
+    // ⚠ 회귀 방지 핵심: 패널만 숨기고 fetch까지 지우면 배너가 조용히 비어 '이상 없음'으로 위장된다.
     render(<ProjectSummarySection job={JOB} analysisResult={RESULT} />);
     expect(await screen.findByText('미추적 요구 8')).toBeInTheDocument();
     expect(screen.getByText('ASIL 미상 12')).toBeInTheDocument();
     expect(screen.getByText(/⚠ 문제 \d+건/)).toBeInTheDocument();
+    expect(mockPost.mock.calls.some(([u]) => String(u).includes('uds/trace-summary'))).toBe(true);
   });
 
-  it('현황: 추적성 현황(미추적/ASIL 미상 KPI)을 표시한다', async () => {
+  it('3그룹 헤딩(SW 아키텍처 / 소스코드 / 빌드별 변경 영향)을 표시한다', async () => {
     render(<ProjectSummarySection job={JOB} analysisResult={RESULT} />);
-    // 추적성 패널 로드(생성 시각으로 데이터 도착 확인) 후 KPI
-    expect(await screen.findByText(/생성 시각/)).toBeInTheDocument();
-    const kpi = screen.getByText('ASIL 시험 미달').closest('.panel');
-    expect(within(kpi).getByText('2')).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: /SW 아키텍처/ })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: /소스코드/ })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: /빌드별 변경 영향/ })).toBeInTheDocument();
   });
 
   it('단일 뷰: 빌드 타임라인 + PRQA 트렌드가 함께 표시된다(세그먼트 없음)', async () => {
@@ -177,13 +179,13 @@ describe('ProjectSummarySection (재설계)', () => {
     expect(await screen.findByText(/SRS 요구사항을 추출하지 못함/)).toBeInTheDocument();
   });
 
-  it('추적성 캐시 없으면 자동생성 → 성공 시 캐시 재조회로 표시(영속)', async () => {
+  it('추적성 캐시 없으면 자동생성 → 성공 시 캐시 재조회로 반영(영속)', async () => {
     mockTrace = { has_data: false };
     mockTraceGenSuccess = true;  // buildTraceMatrix ok:true → 재조회에서 has_data:true
     render(<ProjectSummarySection job={JOB} analysisResult={RESULT} />);
-    // 자동생성 후 재조회로 추적성 현황(생성 시각·미추적 KPI) 표시
-    expect(await screen.findByText(/생성 시각/)).toBeInTheDocument();
-    expect(screen.getByText('미추적 요구 8')).toBeInTheDocument();
+    // 추적성 패널은 숨김이므로 관측 지점은 배너 — 재조회 성공 시 갭 칩이 뜨고 '미생성' 경고는 사라진다.
+    expect(await screen.findByText('미추적 요구 8')).toBeInTheDocument();
+    expect(screen.queryByText(/추적성 미생성/)).toBeNull();
   });
 
   it('커버리지 게이트: 미달(fail)이면 문제점 배너에 danger 칩(소문자 계약 회귀 방지)', async () => {
@@ -243,16 +245,13 @@ describe('ProjectSummarySection (재설계)', () => {
     expect(within(row).getByText('+10')).toBeInTheDocument();
   });
 
-  it('파이프라인 헬스 스트립: 노드 렌더 + 클릭 시 해당 탭 딥링크', async () => {
-    const user = userEvent.setup();
-    window.__detailSection = vi.fn();
+  // 파이프라인 헬스 스트립은 Phase O에서 숨김(SHOW.pipelineHealth=false) — 컴포넌트 자체의
+  // 노드/딥링크 동작은 PipelineHealthStrip 전용 테스트가 계속 검증한다.
+  it('파이프라인 헬스 스트립은 숨김 상태다', async () => {
     render(<ProjectSummarySection job={JOB} analysisResult={RESULT} />);
-    expect(await screen.findByText(/파이프라인 헬스/)).toBeInTheDocument();
-    expect(screen.getByText('SDS 설계')).toBeInTheDocument();
-    expect(screen.getByText('STS 요구시험')).toBeInTheDocument();
-    await user.click(screen.getByText('UDS 상세설계').closest('button'));
-    expect(window.__detailSection).toHaveBeenCalledWith('docgen');
-    delete window.__detailSection;
+    await screen.findByText(/⚠ 문제 \d+건/);
+    expect(screen.queryByText(/파이프라인 헬스/)).toBeNull();
+    expect(screen.queryByText('SDS 설계')).toBeNull();
   });
 
   it('정적분석 위반 상세: kpis.prqa top_rules/top_files를 추가 fetch 없이 렌더 + 미귀속 각주', async () => {

@@ -12,12 +12,14 @@ import ProjectSetupSection from '../components/sections/ProjectSetupSection.jsx'
 import ProjectSummarySection from '../components/sections/ProjectSummarySection.jsx';
 
 const SECTIONS = [
-  // 프로젝트 요약 — 빌드별 변화 과정 & 정리(정적·동적 스냅샷 + 변경 영향 타임라인). 기본 진입 탭.
-  { id: 'summary', icon: '📌', label: '프로젝트 요약', Component: ProjectSummarySection },
-  // 빌드 정보 + SCM 통합 — SCM은 빌드 로그 아래에 배치(BuildInfoWithScmSection).
-  // dividerBefore: '빌드 & 입력 데이터 정보' 위에 경계선 → 요약 탭(위)과 나머지(아래) 그룹 분리.
-  { id: 'build',   icon: '🔨', label: '빌드 & 입력 데이터 정보', Component: BuildInfoWithScmSection, dividerBefore: true },
-  { id: 'analysis',icon: '📊', label: '테스트 결과', Component: AnalysisSection },
+  // 빌드 정보 + SCM 통합 — SCM은 빌드 로그 아래에 배치(BuildInfoWithScmSection). **기본 진입 탭**.
+  { id: 'build',   icon: '🔨', label: '빌드 & 입력 데이터 정보', Component: BuildInfoWithScmSection },
+  // dividerBefore: 진입 탭(위)과 분석/결과 그룹(아래) 분리.
+  { id: 'analysis',icon: '📊', label: '테스트 결과', Component: AnalysisSection, dividerBefore: true },
+  // 프로젝트 분석 — 아키텍처/소스코드/빌드별 변경 영향 3그룹(구 '프로젝트 요약').
+  // ⚠ id는 'summary' 유지 — window.__detailSection 딥링크와 keep-alive visited 키가 이 문자열을
+  //   쓰므로 라벨만 바꾼다(라벨 ≠ id). 바꾸려면 App.jsx/Dashboard 호출부까지 함께 손봐야 한다.
+  { id: 'summary', icon: '📈', label: '프로젝트 분석', Component: ProjectSummarySection },
   // 프로젝트 설정 탭 일단 숨김(hidden: true) — nav/content/외부네비에서 제외. 되돌리려면 hidden 제거.
   { id: 'setup',   icon: '⚙️', label: '프로젝트 설정', Component: ProjectSetupSection, hidden: true },
   { id: 'impact',  icon: '🔍', label: '변경 영향 평가', Component: ImpactGuideSection },
@@ -35,7 +37,7 @@ export default function Detail() {
   const { selectedJob, analysisResult, setSelectedJob, setAnalysisResult } = useJob();
   const { cfg } = useJenkinsCfg();
   const toast = useToast();
-  const [activeSection, setActiveSection] = useState('summary');
+  const [activeSection, setActiveSection] = useState('build');
   // 브레드크럼 프로젝트 전환용 — Jenkins job 목록(선택기 옵션) + 전환 진행 상태.
   const [jobs, setJobs] = useState([]);
   const [switching, setSwitching] = useState(false);
@@ -46,7 +48,7 @@ export default function Detail() {
   const [pendingSub, setPendingSub] = useState(null);
   // keep-alive: 한 번 방문한 탭은 마운트를 유지(display:none)해, 탭을 바꿔도 오래 걸려 얻은
   // 결과(VectorCAST 커버리지·영향 가이드 등 컴포넌트 로컬 상태)가 언마운트로 사라지지 않게 한다.
-  const [visited, setVisited] = useState(() => new Set(['summary']));
+  const [visited, setVisited] = useState(() => new Set(['build']));
   const jobKey = selectedJob?.url || selectedJob?.name || '';
 
   // 활성 탭을 방문 기록에 누적 — 이후 숨겨져도 마운트 유지.

@@ -104,11 +104,14 @@ describe('BaselineDiffPanel', () => {
     render(<BaselineDiffPanel {...PROPS} />);
     expect(await screen.findByText(/ASIL 주석 보유 함수 변경 1건/)).toBeInTheDocument();
     expect(screen.getByText(/safe_fn\(C\/SIGNATURE\)/)).toBeInTheDocument();
-    // 함수 상세는 파일 행을 펼쳐야 나온다(트리)
+    // O5: 최상단(위험 1위) 파일은 기본 펼침이라 시그니처 diff가 바로 보인다
+    expect(screen.getByText('- void safe_fn(int a)')).toBeInTheDocument();
+    expect(screen.getByText('+ void safe_fn(int a, int b)')).toBeInTheDocument();
+    // 접으면 사라지고, 다시 펼치면 돌아온다(토글 계약)
+    await user.click(screen.getByLabelText('APP/a.c 변경 함수 접기'));
     expect(screen.queryByText('- void safe_fn(int a)')).toBeNull();
     await user.click(screen.getByLabelText('APP/a.c 변경 함수 펼치기'));
     expect(screen.getByText('- void safe_fn(int a)')).toBeInTheDocument();
-    expect(screen.getByText('+ void safe_fn(int a, int b)')).toBeInTheDocument();
   });
 
   // ── N3: 파일 → 함수 트리 ──
@@ -121,10 +124,22 @@ describe('BaselineDiffPanel', () => {
     expect(screen.getByText(/ASIL 확보 385함수\(역전파 385\)/)).toBeInTheDocument();
   });
 
-  it('펼치면 함수별 커버리지·ASIL이 붙고 미조인은 —(0% 위장 금지)', async () => {
-    const user = userEvent.setup();
+  it('O5: 최상단 파일은 기본 펼침 + 함수 행에 트리 커넥터', async () => {
     render(<BaselineDiffPanel {...PROPS} />);
-    await user.click(await screen.findByLabelText('APP/a.c 변경 함수 펼치기'));
+    // 위험 우선 정렬 1위(APP/a.c)가 열린 채로 그려져 파일→함수 구조가 첫 화면에 보인다
+    expect(await screen.findByLabelText('APP/a.c 변경 함수 접기')).toBeInTheDocument();
+    expect(screen.getByLabelText('APP/added.c 변경 함수 펼치기')).toBeInTheDocument();
+    // 자식 행임이 드러나는 커넥터(├─ 중간 / └─ 마지막)
+    const rows = screen.getAllByText(/^[├└]─$/);
+    expect(rows.length).toBe(3);                        // a.c의 함수 3개
+    expect(rows[rows.length - 1]).toHaveTextContent('└─');
+    // 파일 행은 '—' 대신 집계를 보여 빈칸으로 보이지 않는다
+    expect(screen.getByText('함수 3개')).toBeInTheDocument();
+  });
+
+  it('펼치면 함수별 커버리지·ASIL이 붙고 미조인은 —(0% 위장 금지)', async () => {
+    render(<BaselineDiffPanel {...PROPS} />);
+    await screen.findByText('APP/a.c');
     const row = screen.getByText('body_fn').closest('tr');
     expect(row).toHaveTextContent('60%');   // statement 0.6
     expect(row).toHaveTextContent('50%');   // branch 0.5
