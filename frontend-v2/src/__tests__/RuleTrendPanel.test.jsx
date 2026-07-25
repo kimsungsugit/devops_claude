@@ -133,4 +133,19 @@ describe('RuleTrendPanel', () => {
     render(<RuleTrendPanel {...PROPS} />);
     expect(await screen.findByText(/PRQA\(RCR\) 리포트가 없습니다/)).toBeInTheDocument();
   });
+
+  it('규칙 설명(RCFInfo)이 있으면 규칙 아래 한 줄로 렌더, 없으면 생략', async () => {
+    mockTrend = {
+      ...TREND,
+      rules: [
+        { ...TREND.rules[0], description: { title: 'A project shall not contain unreachable code', enabled: true, group: 'M3CM' } },
+        TREND.rules[1], // description 없음 — 설명 줄 자체가 생략(빈 값 위장 금지)
+      ],
+    };
+    render(<RuleTrendPanel {...PROPS} />);
+    await screen.findByText('Rule-1.1');
+    expect(screen.getByText('A project shall not contain unreachable code')).toBeInTheDocument();
+    // 설명 없는 규칙의 셀에는 규칙 ID만 존재(설명 줄 미렌더)
+    expect(screen.getByText('Rule-2.2').textContent).toBe('Rule-2.2');
+  });
 });

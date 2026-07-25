@@ -536,6 +536,50 @@ def _parse_rcr_filestatus(
     return records, total_vc
 
 
+# RCFInfo 규칙 행의 상태 값 — 이 두 값이 아닌 행(수치 가중치 등)은 규칙 행이 아니다.
+_RCF_STATUS_VALUES = {"enabled", "disabled"}
+
+
+def _parse_rcr_rule_descriptions(soup: Any) -> Dict[str, Dict[str, Any]]:
+    """RCFInfo(Rule Configuration Status) → ``{rule_id: {title, enabled, group}}``.
+
+    RCR의 규칙 설명은 카운트 표(WorstRules)가 아니라 RCFInfo 표의 ``<td title=…>`` 속성에만
+    있다. 행 구조 = 들여쓰기용 빈 <td> 0~N개 + ``<td title="설명">규칙ID</td>`` +
+    ``<td>enabled|disabled</td>`` — 셀 수는 계층 깊이에 따라 3~7개 가변이라 셀 수로 판정하지
+    않는다. M3CM-1 같은 중간 노드도 WorstRules 열 키로 쓰이므로 leaf만 거르지 않고 전부 담는다.
+    RCFInfo 부재(구형 리포트)는 빈 dict — 에러 아님(설명은 부가 정보).
+    """
+    anchor = soup.find(attrs={"name": "RCFInfo"}) or soup.find(id="RCFInfo")
+    if anchor is None:
+        return {}
+    out: Dict[str, Dict[str, Any]] = {}
+    group = ""
+    for node in anchor.find_all_next(["h3", "h5", "table"]):
+        if node.name == "h3":
+            break  # 다음 섹션(StatCalc 등) 진입 — RCFInfo 관할 종료
+        if node.name == "h5":
+            group = _clean_text(node.get_text(" ", strip=True))
+            continue
+        for tr in node.find_all("tr"):
+            cells = tr.find_all("td")
+            if len(cells) < 2:
+                continue
+            status = _clean_text(cells[-1].get_text(" ", strip=True)).lower()
+            if status not in _RCF_STATUS_VALUES:
+                continue
+            rule_cell = cells[-2]
+            title = (rule_cell.get("title") or "").strip()
+            rule_id = _clean_text(rule_cell.get_text(" ", strip=True))
+            if not rule_id or not title:
+                continue
+            if re.fullmatch(r"[\d.]+", rule_id):
+                continue  # 수치 행(가중치 등) 방어 — 규칙 ID는 문자를 포함한다
+            out.setdefault(
+                rule_id, {"title": title, "enabled": status == "enabled", "group": group}
+            )
+    return out
+
+
 def parse_prqa_rcr_details(
     path: Path,
     top_n: int = 6,
@@ -713,6 +757,8 @@ def parse_prqa_rcr_details(
         # W1: FileStatus 집계행 'Total' 위반수(표 자립 총계). 프론트는 이 값 − 귀속합으로 미귀속 위반을
         # 산출(별도 요약테이블 헤드라인 비의존). 부재(집계행 없음) 시 프론트가 헤드라인으로 폴백.
         "filestatus_total_vc": fs_total_vc,
+        # 규칙 설명(RCFInfo <td title=…>) — 룰 트렌드/워크벤치가 규칙 ID로 조인. 부재 리포트는 빈 dict.
+        "rule_descriptions": _parse_rcr_rule_descriptions(soup),
     }
     if files_truncated:
         result["files_truncated_to"] = max_files

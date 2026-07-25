@@ -194,7 +194,14 @@ export default function RuleTrendPanel({ jobUrl, cacheRoot }) {
                   return (
                     <Fragment key={r.rule}>
                       <tr>
-                        <td style={td} title={r.rule}>{r.rule}</td>
+                        <td style={td} title={r.description?.title ? `${r.rule} — ${r.description.title}` : r.rule}>
+                          {r.rule}
+                          {r.description?.title && (
+                            <div style={{ ...xs, color: 'var(--text-muted)', fontWeight: 400, maxWidth: 240, overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                              {r.description.title}
+                            </div>
+                          )}
+                        </td>
                         <td style={td}><ClassBadge cls={r.classification} /></td>
                         <td style={{ ...td, minWidth: 140 }}>
                           <TrendLine width={140} height={26}

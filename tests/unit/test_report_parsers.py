@@ -713,3 +713,64 @@ class TestVcastAggregateNoSilentCap:
         # 명시 상한은 여전히 동작(호출측이 원하면 절단 가능).
         s = parse_vectorcast_aggregate_summary(self._write(tmp_path, 8), top_n=3)
         assert len(s["modules"]) == 3
+
+
+# ── RCFInfo 규칙 설명 추출 (J1) ──────────────────────────────────────────────
+# 실물 구조(KJPDS02_PV build_125 RCR): 들여쓰기용 빈 <td> 0~N개 + <td title="설명">규칙ID</td>
+# + <td>enabled|disabled</td>. 셀 수는 계층 깊이에 따라 3~7 가변 — 셀 수로 판정하면 최상위
+# 행(3셀)을 놓친다. 판정은 "마지막 셀=enabled/disabled AND 직전 셀 title 보유"여야 한다.
+_RCR_RCFINFO_HTML = """<html><head><title>Helix QAC Rule Compliance Report</title></head><body>
+ <div class="sec"><h3><a name="WorstRules1">Most Violated Rules</a></h3></div>
+ <table border="1">
+  <tr><th>Files</th><th>Rule-2.1</th></tr>
+  <tr><td align="left"><a href="a.c" title="a.c">a.c</a></td><td>3</td></tr>
+ </table>
+ <div class="sec"><h3><a name="RCFInfo">Rule Configuration Status</a></h3></div>
+ <div class="subsec"><h5>M3CM</h5></div>
+ <table border="0">
+<tr><td></td><td title="MISRA Mandatory">M3CM-1</td><td>enabled</td></tr>
+<tr><td></td><td></td><td></td><td title="A project shall not contain unreachable code">Rule-2.1</td><td>enabled</td></tr>
+<tr><td></td><td></td><td></td><td title="Trigraphs should not be used">Rule-4.2</td><td>disabled</td></tr>
+<tr><td></td><td></td><td></td><td title="가중치">0.6</td><td>enabled</td></tr>
+<tr><td></td><td></td><td></td><td>Rule-NoTitle</td><td>enabled</td></tr>
+ </table>
+ <div class="subsec"><h5>Secure C</h5></div>
+ <table border="0">
+<tr><td></td><td title="함수 포인터 변환을 금지한다">C-POS-012</td><td>enabled</td></tr>
+ </table>
+ <div class="sec"><h3><a name="StatCalc">Calculation Information</a></h3></div>
+ <table border="0">
+<tr><td></td><td title="not a rule">Rule-9.9</td><td>enabled</td></tr>
+ </table>
+</body></html>"""
+
+
+class TestRcrRuleDescriptions:
+    """J1: RCFInfo <td title> → rule_descriptions — 행 판정·그룹 귀속·관할 경계."""
+
+    def _details(self, tmp_path, html):
+        p = tmp_path / "r.html"
+        p.write_text(html, encoding="utf-8")
+        return parse_prqa_rcr_details(p)
+
+    def test_extracts_rules_with_group_and_enabled(self, tmp_path):
+        d = self._details(tmp_path, _RCR_RCFINFO_HTML)["rule_descriptions"]
+        assert d["Rule-2.1"] == {
+            "title": "A project shall not contain unreachable code",
+            "enabled": True, "group": "M3CM",
+        }
+        assert d["Rule-4.2"]["enabled"] is False           # disabled도 담는다(설정 상태 정보)
+        assert d["M3CM-1"]["title"] == "MISRA Mandatory"   # 3셀 최상위 행 — 중간 노드도 WorstRules 열 키
+        assert d["C-POS-012"]["group"] == "Secure C"       # h5 그룹 전환 추적
+        assert "함수 포인터" in d["C-POS-012"]["title"]     # 한국어 title 보존
+
+    def test_excludes_numeric_untitled_and_next_section(self, tmp_path):
+        d = self._details(tmp_path, _RCR_RCFINFO_HTML)["rule_descriptions"]
+        assert "0.6" not in d            # 수치 행(가중치) 배제
+        assert "Rule-NoTitle" not in d   # title 없는 행 — 설명 가치 없음
+        assert "Rule-9.9" not in d       # 다음 섹션(StatCalc) 표 — RCFInfo 관할 밖에서 종료
+
+    def test_absent_rcfinfo_returns_empty_dict(self, tmp_path):
+        # 구형 리포트(RCFInfo 없음) — 빈 dict이지 에러가 아니다(설명은 부가 정보).
+        d = self._details(tmp_path, _HELIX_RCR_HTML)
+        assert d["rule_descriptions"] == {}

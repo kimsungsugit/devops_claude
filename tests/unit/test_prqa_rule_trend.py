@@ -29,7 +29,16 @@ def _mk_build(tmp_path: Path, n: int, *, rcr_html: str | None) -> None:
         (root / f"X_RCR_0101202{n % 10}.html").write_text(rcr_html, encoding="utf-8")
 
 
-def _rcr(foo_r1: int, foo_r2: int, residual_vc: int = 0) -> str:
+# J1: RCFInfo(규칙 설명) 블록 — 실물 구조(빈 <td> 들여쓰기 + <td title>규칙ID + enabled).
+_RCF_BLOCK = """
+ <div class="sec"><h3><a name="RCFInfo">Rule Configuration Status</a></h3></div>
+ <div class="subsec"><h5>M3CM</h5></div>
+ <table border="0">
+  <tr><td></td><td></td><td></td><td title="one one desc">Rule-1.1</td><td>enabled</td></tr>
+ </table>"""
+
+
+def _rcr(foo_r1: int, foo_r2: int, residual_vc: int = 0, rcf: str = "") -> str:
     """WorstRules(Rule-1.1/Rule-2.2) + FileStatus(잔차 유발용 vc 가산) 최소 RCR."""
     vc = foo_r1 + foo_r2 + residual_vc
     return f"""<html><head><title>Helix QAC Rule Compliance Report</title></head><body>
@@ -42,7 +51,7 @@ def _rcr(foo_r1: int, foo_r2: int, residual_vc: int = 0) -> str:
  <table border="1">
   <tr><th>Files</th><th>Active Diagnostics</th><th>Violated Rules</th><th>Violation Count</th><th>Compliance Index</th></tr>
   <tr><td align="left"><a href="..\\src\\foo.c" title="..\\src\\foo.c">foo.c</a></td><td>1</td><td>2</td><td>{vc}</td><td>90.00%</td></tr>
- </table>
+ </table>{rcf}
 </body></html>"""
 
 
@@ -96,3 +105,30 @@ def test_rule_trend_no_cache_and_no_rcr(tmp_path):
     _mk_build(tmp_path, 1, rcr_html=None)
     out2 = compute_rule_trend(job_url="http://j/job/X/", cache_root=tmp_path)
     assert out2["available"] is False and out2["reason"] == "no_rcr_in_cached_builds"
+
+
+# ── J1: 규칙 설명(RCFInfo) 병합 + observed_range ────────────────────────────
+
+def test_rule_trend_descriptions_from_latest_analyzed_and_observed_range(tmp_path):
+    # 122엔 RCFInfo 없음, 125엔 있음 → 설명은 "설명을 가진 최신 analyzed"(125) 기준 + 출처 명시.
+    _mk_build(tmp_path, 122, rcr_html=_rcr(6, 0))
+    _mk_build(tmp_path, 124, rcr_html=None)
+    _mk_build(tmp_path, 125, rcr_html=_rcr(2, 4, rcf=_RCF_BLOCK))
+    out = compute_rule_trend(job_url="http://j/job/X/", cache_root=tmp_path)
+    assert out["descriptions_available"] is True
+    assert out["descriptions_source_build"] == 125
+    # 관측 구간 = 최초↔최신 analyzed(미분석 124는 경계가 아님) — J2 구간 증거의 from/to 쌍.
+    assert out["observed_range"] == {"from_build": 122, "to_build": 125}
+    by = {r["rule"]: r for r in out["rules"]}
+    assert by["Rule-1.1"]["description"] == {"title": "one one desc", "enabled": True, "group": "M3CM"}
+    assert by["Rule-2.2"]["description"] is None  # RCFInfo에 없는 규칙 — None(빈 문자열 위장 금지)
+
+
+def test_rule_trend_descriptions_absent(tmp_path):
+    # 전 빌드 RCFInfo 부재 — available False + 전 규칙 description None(침묵 기본값 금지).
+    _mk_build(tmp_path, 122, rcr_html=_rcr(6, 0))
+    _mk_build(tmp_path, 125, rcr_html=_rcr(2, 4))
+    out = compute_rule_trend(job_url="http://j/job/X/", cache_root=tmp_path)
+    assert out["descriptions_available"] is False
+    assert out["descriptions_source_build"] is None
+    assert all(r["description"] is None for r in out["rules"])

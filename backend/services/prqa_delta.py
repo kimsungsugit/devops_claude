@@ -21,7 +21,8 @@ logger = logging.getLogger(__name__)
 
 RCR_DETAILS_CACHE_NAME = "prqa_rcr_details_cache.json"
 # parse_prqa_rcr_details 출력 규약(키/규칙 분해 방식)이 바뀌면 +1 — 기존 캐시 전면 무효화.
-PARSER_VERSION = 1
+# v2: rule_descriptions(RCFInfo <td title>) 추출 추가 — 전 빌드 최초 1회 재파싱(~0.6s/빌드).
+PARSER_VERSION = 2
 # report_parsers.parse_prqa_rcr_details가 WorstRules 미포함 잔여 위반에 붙이는 라벨.
 RESIDUAL_RULE_LABEL = "기타 규칙 (비상위)"
 # delta 계산 시 위반 상세를 절단하지 않기 위한 사실상 무제한 캡(기본 60은 표시용 절단).

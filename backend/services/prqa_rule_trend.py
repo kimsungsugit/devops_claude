@@ -88,6 +88,10 @@ def compute_rule_trend(
     per_build_files: List[Optional[Dict[str, Dict[str, int]]]] = []
     rcr_hits = 0
     rcr_misses = 0
+    # 규칙 설명(RCFInfo) — 규칙 설정은 빌드마다 변할 수 있어 "설명을 가진 최신 analyzed 빌드"
+    # 기준으로 채택하고 출처 빌드를 응답에 명시한다(구형 리포트는 RCFInfo 자체가 없을 수 있음).
+    rule_descriptions: Dict[str, Dict[str, Any]] = {}
+    descriptions_build: Optional[int] = None
 
     for m in metas:
         num = m.get("build_number")
@@ -116,6 +120,10 @@ def compute_rule_trend(
         per_build_totals.append(totals)
         per_build_residual.append(residual)
         per_build_files.append(_file_rule_counts(loaded["details"]))
+        descs = loaded["details"].get("rule_descriptions")
+        if isinstance(descs, dict) and descs:
+            rule_descriptions = descs  # 오름차순 순회 — 마지막 대입이 곧 최신 analyzed
+            descriptions_build = num
 
     analyzed_count = sum(1 for t in per_build_totals if t is not None)
     if analyzed_count == 0:
@@ -128,6 +136,9 @@ def compute_rule_trend(
     for t in per_build_totals:
         if t:
             all_rules.update(t.keys())
+    # 최초/최신 analyzed 인덱스는 규칙과 무관 — 루프 밖에서 1회 계산(J2 구간 증거의 from/to 쌍).
+    g_last_idx = max((i for i, t in enumerate(per_build_totals) if t is not None), default=None)
+    g_first_idx = min((i for i, t in enumerate(per_build_totals) if t is not None), default=None)
     rules_out: List[Dict[str, Any]] = []
     for rule in all_rules:
         counts = [
@@ -142,8 +153,8 @@ def compute_rule_trend(
         latest_files: List[Dict[str, Any]] = []
         decreased_files: List[Dict[str, Any]] = []
         # 최신 analyzed 빌드의 파일 귀속 상위 + (감소 규칙) 최초→최신 파일별 감소.
-        last_idx = max((i for i, t in enumerate(per_build_totals) if t is not None), default=None)
-        first_idx = min((i for i, t in enumerate(per_build_totals) if t is not None), default=None)
+        last_idx = g_last_idx
+        first_idx = g_first_idx
         if last_idx is not None and per_build_files[last_idx]:
             pairs = [
                 (path, rc.get(rule, 0)) for path, rc in per_build_files[last_idx].items() if rc.get(rule, 0) > 0
@@ -174,6 +185,7 @@ def compute_rule_trend(
             "first": first,
             "net": (latest - first) if (latest is not None and first is not None) else None,
             "classification": classification,
+            "description": rule_descriptions.get(rule),  # {title, enabled, group} 또는 None
             "files_latest": latest_files,
             "decreased_files": decreased_files,
         })
@@ -198,6 +210,17 @@ def compute_rule_trend(
         "insufficient_data": insufficient,
         "rules": rules_out,
         "rules_omitted": rules_omitted,
+        "descriptions_available": bool(rule_descriptions),
+        "descriptions_source_build": descriptions_build,
+        # 관측 구간(최초↔최신 analyzed 빌드) — 미해소 규칙의 구간 증거(from/to) 호출용.
+        "observed_range": (
+            {
+                "from_build": builds[g_first_idx]["build_number"],
+                "to_build": builds[g_last_idx]["build_number"],
+            }
+            if g_first_idx is not None and g_last_idx is not None
+            else None
+        ),
         "residual": {"counts": per_build_residual, "note": "규칙 귀속 불가분(WorstRules 비상위) — 분류 제외"},
         "summary": summary,
         "cache": {"rcr_hits": rcr_hits, "rcr_misses": rcr_misses},
