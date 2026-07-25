@@ -831,21 +831,36 @@ def _complexity_offenders(build_root: Path, reports_dir: Path) -> List[Dict[str,
 
 
 def _ccn_map(reports_dir: Path) -> Dict[str, int]:
-    """analysis_summary.json vectorcast_detail.aggregate_coverage.entries → {subprogram: ccn}."""
+    """analysis_summary.json → {subprogram: ccn}.
+
+    vectorcast_detail.aggregate_coverage.entries(구 규약)가 비면 vectorcast.ut_metrics/
+    it_metrics.entries로 폴백 — 실측상 전 캐시 빌드에서 detail은 빈 {}이고 실데이터는
+    형제 키에 있다(K1 교정 — 이전엔 항상 {} 반환 → 전 함수 loc_proxy). 중복 함수는 max.
+    """
     data = _read_json(reports_dir / "analysis_summary.json") or {}
+    entry_lists: List[Any] = []
     detail = data.get("vectorcast_detail") if isinstance(data.get("vectorcast_detail"), dict) else {}
     agg = detail.get("aggregate_coverage") if isinstance(detail.get("aggregate_coverage"), dict) else {}
+    if agg.get("entries"):
+        entry_lists.append(agg.get("entries"))
+    else:
+        vc = data.get("vectorcast") if isinstance(data.get("vectorcast"), dict) else {}
+        for key in ("ut_metrics", "it_metrics"):
+            sec = vc.get(key) if isinstance(vc.get(key), dict) else {}
+            if sec.get("entries"):
+                entry_lists.append(sec.get("entries"))
     out: Dict[str, int] = {}
-    for e in agg.get("entries") or []:
-        if not isinstance(e, dict):
-            continue
-        name = str(e.get("subprogram") or "").strip()
-        try:
-            ccn = int(e.get("ccn"))
-        except (TypeError, ValueError):
-            continue
-        if name and ccn > 0:
-            out[name] = ccn
+    for entries in entry_lists:
+        for e in entries or []:
+            if not isinstance(e, dict):
+                continue
+            name = str(e.get("subprogram") or "").strip()
+            try:
+                ccn = int(e.get("ccn"))
+            except (TypeError, ValueError):
+                continue
+            if name and ccn > 0:
+                out[name] = max(out.get(name, 0), ccn)
     return out
 
 

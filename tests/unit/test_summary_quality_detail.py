@@ -80,3 +80,28 @@ def test_quality_detail_no_cached_build(monkeypatch):
     monkeypatch.setattr(si, "list_cached_builds", lambda **k: [])
     resp = si.summary_quality_detail({"job_url": "http://j/"})
     assert resp["available"] is False and resp["reason"] == "no_cached_build"
+
+
+# ── K1: _ccn_map — vectorcast_detail(빈 규약) → vectorcast.ut/it_metrics 폴백 ──
+
+def test_ccn_map_vectorcast_metrics_fallback(tmp_path):
+    from backend.routers.summary_insight import _ccn_map
+
+    (tmp_path / "analysis_summary.json").write_text(json.dumps({
+        "vectorcast_detail": {},  # 실측: 전 캐시 빌드에서 빈 dict — 구 코드는 여기서 {} 반환
+        "vectorcast": {
+            "ut_metrics": {"entries": [{"subprogram": "f1", "ccn": 3}]},
+            "it_metrics": {"entries": [{"subprogram": "f1", "ccn": 5}, {"subprogram": "g", "ccn": 2}]},
+        },
+    }), encoding="utf-8")
+    assert _ccn_map(tmp_path) == {"f1": 5, "g": 2}  # UT/IT 병합, 중복 함수는 max
+
+
+def test_ccn_map_detail_takes_precedence_when_populated(tmp_path):
+    from backend.routers.summary_insight import _ccn_map
+
+    (tmp_path / "analysis_summary.json").write_text(json.dumps({
+        "vectorcast_detail": {"aggregate_coverage": {"entries": [{"subprogram": "d", "ccn": 9}]}},
+        "vectorcast": {"ut_metrics": {"entries": [{"subprogram": "f1", "ccn": 3}]}},
+    }), encoding="utf-8")
+    assert _ccn_map(tmp_path) == {"d": 9}  # 구 규약이 채워져 있으면 그대로(폴백 미발동)
