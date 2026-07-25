@@ -96,3 +96,98 @@ describe('TestDesignPanel', () => {
     expect(screen.getByText('ISO 26262-6 §9.4.2 연계')).toBeInTheDocument();
   });
 });
+
+// ── N4: 변경 축 · IT 별도 라벨 · 필터 · 케이스 초안 ──
+describe('TestDesignPanel — N4', () => {
+  const N4 = {
+    ...RESP,
+    technique_recommendations: {
+      available: true, source_coverage: 'scm_vcast_job', asil_source: 'uds_link',
+      coverage_join: { entries: 1267, ut_rows: 1008, it_rows: 259, with_asil: 508, asil_unknown: 759 },
+      changed_axis: { available: true, baseline_build: 122, target_build: 125, count: 116 },
+      asil_counts: { comment_asil: 0, uds_link: 385, both: 0, conflict: 0, total: 385 },
+      items: [
+        { function: 's_CPUInstructionTest', unit: 'SysDiagCtrl_PDS', asil: 'A', ccn: 3,
+          metric_set: 'ut', changed: true, gap_kind: 'changed_below_target',
+          techniques: ['boundary_values'], suggested_min_cases: 3, suggested_min_cases_estimate: true,
+          basis: '변경됨 · ASIL A · 구문 80% · 분기 60% · ccn 3 · 분기 커버 최소 TC 추정 3' },
+        { function: 'g_it_only', unit: 'Ap_Main', asil: null, ccn: 1,
+          metric_set: 'it', changed: false, gap_kind: 'it_not_exercised',
+          techniques: ['boundary_values'], basis: '통합(IT) 측정 · 구문 0%' },
+      ],
+      items_omitted: 222,
+      summary: { below_target: 1, unmeasured_metric: 0, uncovered: 0, asil_unknown_with_gap: 137,
+                 mcdc_unmeasured_safety: 0, changed_with_gap: 11, it_gap: 222 },
+    },
+  };
+
+  beforeEach(() => { vi.clearAllMocks(); mockResp = N4; });
+
+  it('UT 갭과 IT 축을 분리 표기 + 변경 축 구간 표시', async () => {
+    render(<TestDesignPanel {...PROPS} />);
+    expect(await screen.findByText(/단위\(UT\) 갭 1건 관측/)).toBeInTheDocument();
+    expect(screen.getByText(/통합\(IT\) 축 222건/)).toBeInTheDocument();
+    expect(screen.getByText(/변경 함수 갭 11건/)).toBeInTheDocument();
+    expect(screen.getByText(/변경 축: #122→#125 \(116함수\)/)).toBeInTheDocument();
+    expect(screen.getByText(/ASIL 출처 요구 역전파/)).toBeInTheDocument();
+  });
+
+  it('IT 행은 별도 갭 라벨(단위 미커버와 구분)', async () => {
+    render(<TestDesignPanel {...PROPS} />);
+    expect(await screen.findByText('IT 미실행')).toBeInTheDocument();
+    expect(screen.getByText('변경·미달')).toBeInTheDocument();
+  });
+
+  it('필터 — 변경분만 고르면 IT 행이 빠진다', async () => {
+    const user = userEvent.setup();
+    render(<TestDesignPanel {...PROPS} />);
+    await screen.findByText('s_CPUInstructionTest');
+    expect(screen.getByText('g_it_only')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: '변경분만' }));
+    expect(screen.getByText('s_CPUInstructionTest')).toBeInTheDocument();
+    expect(screen.queryByText('g_it_only')).toBeNull();
+  });
+
+  it('케이스 초안 — 버튼 클릭 시 on-demand 요청 후 표 렌더', async () => {
+    const user = userEvent.setup();
+    const { post } = await import('../api.js');
+    render(<TestDesignPanel {...PROPS} />);
+    await screen.findByText('s_CPUInstructionTest');
+    post.mockImplementation((url) => {
+      if (String(url).includes('test-case-draft')) {
+        return Promise.resolve({
+          ok: true, available: true, function: 's_CPUInstructionTest',
+          file: 'Sources/SYSTEM/SysDiagCtrl_PDS.c',
+          deterministic: {
+            techniques: [{ id: 'boundary_values', label: '경계값 분석', iso_ref: 'ISO 26262-6 Table 8 1c' }],
+            suggested_min_cases: 3, suggested_min_cases_estimate: true,
+            boundary_candidates: [], coverage: { mcdc_state: 'unmeasured' },
+          },
+          cases: [{ id: 'TC1', purpose: '정상 경로', technique: 'equivalence_partitioning',
+                    preconditions: '', inputs: '파라미터 없음', expected: 'flag == OFF',
+                    covers: 'if (val != 0xAAAA5555U)' }],
+          notes: ['외부 전역 초기화 필요'], dropped_cases: 0, ai_enriched: true,
+          model: 'gemini-3.5-flash-lite', note: '초안이며 심사 판정이 아닙니다.',
+        });
+      }
+      return Promise.resolve(N4);
+    });
+    await user.click(screen.getByRole('button', { name: /s_CPUInstructionTest 케이스 초안 생성/ }));
+    expect(await screen.findByText('TC1')).toBeInTheDocument();
+    expect(screen.getByText('if (val != 0xAAAA5555U)')).toBeInTheDocument();
+    expect(screen.getByText(/최소 TC 추정 3\(McCabe 근사, 측정값 아님\)/)).toBeInTheDocument();
+    expect(screen.getByText(/초안이며 심사 판정이 아닙니다/)).toBeInTheDocument();
+  });
+
+  it('초안 실패는 정직하게 사유 표기', async () => {
+    const user = userEvent.setup();
+    const { post } = await import('../api.js');
+    render(<TestDesignPanel {...PROPS} />);
+    await screen.findByText('s_CPUInstructionTest');
+    post.mockImplementation((url) => (String(url).includes('test-case-draft')
+      ? Promise.resolve({ ok: true, available: false, reason: 'function_not_found_in_snapshot' })
+      : Promise.resolve(N4)));
+    await user.click(screen.getByRole('button', { name: /s_CPUInstructionTest 케이스 초안 생성/ }));
+    expect(await screen.findByText(/function_not_found_in_snapshot/)).toBeInTheDocument();
+  });
+});

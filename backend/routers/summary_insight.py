@@ -927,11 +927,49 @@ def _asil_index(build_root: Path, reports_dir: Path, *, job_url: str = "") -> Di
     }
 
 
+def _changed_functions_from_cache(reports_dir: Path) -> Dict[str, Any]:
+    """캐시된 baseline-diff 결과에서 변경 함수 집합을 회수(N4의 '변경 축' 재료).
+
+    여기서 diff를 새로 계산하지 않는다 — 스냅샷 2벌 파싱은 수 초라 test-design 임계경로에
+    맞지 않는다. 사용자가 베이스라인 비교를 한 번이라도 열었으면 캐시가 있고, 없으면
+    available:false로 정직하게 축을 비활성화한다(증거부재≠변경 없음).
+    """
+    from workflow.coverage_gap import _norm_fn
+
+    try:
+        cands = sorted(reports_dir.glob("summary_baseline_diff_*.json"),
+                       key=lambda p: p.stat().st_mtime_ns, reverse=True)
+    except OSError:
+        return {"available": False, "reason": "reports_dir_unreadable", "functions": set()}
+    for path in cands[:3]:
+        data = _read_json(path)
+        result = (data or {}).get("result")
+        if not isinstance(result, dict) or not result.get("available"):
+            continue
+        fns = result.get("functions") or {}
+        names: set = set()
+        for key in ("new", "deleted", "signature_changed", "body_changed"):
+            for f in fns.get(key) or []:
+                n = _norm_fn((f or {}).get("name"))
+                if n:
+                    names.add(n)
+        if not names:
+            continue
+        return {
+            "available": True, "functions": names,
+            "baseline_build": (result.get("baseline") or {}).get("build_number"),
+            "target_build": (result.get("target") or {}).get("build_number"),
+            "count": len(names),
+        }
+    return {"available": False, "reason": "no_baseline_diff_cache", "functions": set()}
+
+
 def _compute_test_design_payload(build_root: Path, reports_dir: Path, *, job_url: str = "") -> Dict[str, Any]:
     """test-design 조립(결정론) — 엔드포인트와 ai-insight(Phase M)가 공유.
 
     무캐시: 이미 로드된 JSON에 대한 순수 산술(수십 ms) — 디스크 캐시는 무효화 버그 표면만
-    늘린다(계획 판정). ASIL은 arch 캐시(v3 asil_functions.by_function — comment_asil) 재사용.
+    늘린다(계획 판정). ASIL은 주석(arch 캐시) + 요구 역전파(N2) 병합 인덱스를 쓴다 —
+    주석이 0건인 프로젝트에서 축이 통째로 죽던 것을 되살린다.
     """
     from workflow.test_design_advisor import (
         MCDC_NOTE,
@@ -943,26 +981,37 @@ def _compute_test_design_payload(build_root: Path, reports_dir: Path, *, job_url
     )
 
     loaded = _load_vcast_function_entries(reports_dir, job_url=job_url)
-    arch = _arch_metrics_cached(build_root, reports_dir, job_url=job_url)
-    if arch and arch.get("available"):
-        asil_by_fn = (arch.get("asil_functions") or {}).get("by_function") or {}
-        asil_source = "comment_asil" if asil_by_fn else "no_asil_annotations"
+    asil_idx = _asil_index(build_root, reports_dir, job_url=job_url)
+    asil_by_fn = asil_idx["by_function"]
+    counts = asil_idx["counts"]
+    if not asil_by_fn:
+        asil_source = "no_asil_source"
+    elif counts.get("comment_asil") and counts.get("uds_link"):
+        asil_source = "comment_asil+uds_link"
     else:
-        asil_by_fn = {}
-        asil_source = "no_source_snapshot"
+        asil_source = "comment_asil" if counts.get("comment_asil") else "uds_link"
+    changed = _changed_functions_from_cache(reports_dir)
 
-    if loaded["ut_entries"]:
-        rows = build_coverage_rows(loaded["ut_entries"], loaded["it_entries"], asil_by_fn)
+    if loaded["ut_entries"] or loaded["it_entries"]:
+        rows = build_coverage_rows(
+            loaded["ut_entries"], loaded["it_entries"], asil_by_fn,
+            changed_functions=changed["functions"] if changed.get("available") else None,
+        )
         recs = derive_technique_recommendations(rows)
         with_asil = sum(1 for r in rows if r["asil"])
+        ut_rows = sum(1 for r in rows if r.get("metric_set") == "ut")
         technique: Dict[str, Any] = {
             "available": True,
             "source_coverage": loaded["source"],
+            "source_detail": loaded.get("source_detail"),
             "asil_source": asil_source,
-            # SwUFn-키 프로젝트(KJPDS02)는 subprogram=SwUFn ID라 함수명 조인이 낮게 나온다 —
-            # 침묵 대신 조인 성립 수를 표면화(함정 가시화 장치).
-            "coverage_join": {"entries": len(rows), "with_asil": with_asil,
-                              "asil_unknown": len(rows) - with_asil},
+            "asil_counts": counts,
+            "asil_propagation": asil_idx["propagation"],
+            # 조인 성립 수를 항상 표면화(침묵 미조인 금지 — 함수명 규약이 프로젝트마다 다르다).
+            "coverage_join": {"entries": len(rows), "ut_rows": ut_rows,
+                              "it_rows": len(rows) - ut_rows,
+                              "with_asil": with_asil, "asil_unknown": len(rows) - with_asil},
+            "changed_axis": {k: v for k, v in changed.items() if k != "functions"},
             **recs,
         }
     else:
@@ -976,6 +1025,119 @@ def _compute_test_design_payload(build_root: Path, reports_dir: Path, *, job_url
         "design_test_gap": gap,
         "mcdc_note": MCDC_NOTE,
     }
+
+
+TEST_CASE_DRAFT_CACHE_NAME = "summary_test_case_draft_cache.json"
+_TEST_CASE_CACHE_LOCK = threading.Lock()
+
+
+@router.post("/api/summary/test-case-draft")
+def summary_test_case_draft(req: dict) -> Dict[str, Any]:
+    """함수 1개의 시험 케이스 초안 — 결정론 골격 + Gemini(on-demand, 디스크 캐시).
+
+    소스 본문·파라미터·전역·호출 + 커버리지/ASIL/ccn을 근거로 케이스 표를 만든다. 본문에
+    없는 식별자를 인용한 케이스는 폐기되고(환각 필터), LLM 미설정/실패여도 결정론 골격
+    (권고 기법·최소 TC 추정·경계값 후보)은 항상 반환한다. probe/force/캐시 규약은
+    rule-fix-example과 동일.
+    """
+    import hashlib as _hashlib
+
+    from backend.services.source_function_lookup import lookup_function
+    from workflow.coverage_gap import _norm_fn
+    from workflow.test_case_draft import (
+        TEST_CASE_DRAFT_NOTE,
+        TEST_CASE_DRAFT_PROMPT_VERSION,
+        generate_test_case_draft,
+    )
+
+    body = req or {}
+    job_url = str(body.get("job_url") or "").strip()
+    function = str(body.get("function") or "").strip()
+    if not job_url or not function:
+        return {"ok": True, "available": False, "reason": "params_required"}
+    unit = str(body.get("unit") or "").strip() or None
+    cache_root = _normalize_jenkins_cache_root(str(body.get("cache_root") or ""))
+    builds = list_cached_builds(job_url=job_url, cache_root=cache_root)
+    build_req = _to_int(body.get("build_number"))
+    target = _find_build(builds, build_req) if build_req is not None else (builds[0] if builds else None)
+    if target is None:
+        return {"ok": True, "available": False, "reason": "no_cached_build"}
+    build_root = Path(str(target.get("build_root") or ""))
+    reports_dir = Path(str(target.get("reports_dir") or ""))
+
+    # 소스 스냅샷은 최신 빌드에 없을 수 있다 — has_source 빌드 중 최신을 별도로 고른다.
+    src_meta = next(
+        (b for b in builds if (Path(str(b.get("build_root") or "")) / "source" / ".source_complete").exists()),
+        None,
+    )
+    if src_meta is None:
+        return {"ok": True, "available": False, "reason": "no_source_snapshot"}
+    src_root = Path(str(src_meta.get("build_root")))
+
+    found = lookup_function(src_root, function, unit)
+    if not found.get("ok"):
+        return {"ok": True, "available": False, "reason": found.get("reason"),
+                "function": function, "candidates": found.get("candidates")}
+
+    key_fn = _norm_fn(function)
+    cov = (_coverage_index(reports_dir, job_url=job_url) or {}).get(key_fn) or {}
+    asil_rec = (_asil_index(build_root, reports_dir, job_url=job_url)["by_function"] or {}).get(key_fn) or {}
+    design = _compute_test_design_payload(build_root, reports_dir, job_url=job_url)
+    rec = next(
+        (i for i in ((design.get("technique_recommendations") or {}).get("items") or [])
+         if _norm_fn(i.get("function")) == key_fn),
+        {},
+    )
+    context = {
+        "function": function, "unit": unit or cov.get("unit"),
+        "signature": found.get("signature"), "params": found.get("params"),
+        "globals": found.get("globals"), "calls": found.get("calls"),
+        "statement": cov.get("statement"), "branch": cov.get("branch"), "ccn": cov.get("ccn"),
+        "asil": asil_rec.get("asil") or found.get("asil"),
+        "asil_source": asil_rec.get("source") or ("comment_asil" if found.get("asil") else None),
+        "gap_kind": rec.get("gap_kind"),
+        "techniques": rec.get("techniques") or ["requirements_based", "boundary_values"],
+    }
+
+    model = _expected_insight_model() or ""
+    body_sha = _hashlib.sha256(str(found.get("body") or "").encode("utf-8", "ignore")).hexdigest()[:16]
+    cov_sig = f"{cov.get('statement')}|{cov.get('branch')}|{cov.get('ccn')}|{context['asil']}|{context['gap_kind']}"
+    cache_key = _hashlib.sha256("|".join([
+        key_fn, body_sha, cov_sig, model, str(TEST_CASE_DRAFT_PROMPT_VERSION),
+    ]).encode()).hexdigest()
+    cache_path = reports_dir / TEST_CASE_DRAFT_CACHE_NAME
+    with _TEST_CASE_CACHE_LOCK:
+        hit = _fix_cache_load(cache_path).get(cache_key)
+    if hit and not bool(body.get("force")):
+        return {**hit, "cached": True}
+    if bool(body.get("probe")):
+        return {"ok": True, "available": True, "cached": False, "function": function,
+                "file": found.get("file")}
+
+    gen = generate_test_case_draft(context=context, source_excerpt=str(found.get("body") or ""))
+    payload: Dict[str, Any] = {
+        "ok": True, "available": True, "reason": None,
+        "function": function, "unit": context["unit"], "file": found.get("file"),
+        "signature": found.get("signature"),
+        "body_truncated": bool(found.get("body_truncated")),
+        "context": {k: context[k] for k in ("statement", "branch", "ccn", "asil", "asil_source", "gap_kind")},
+        "deterministic": gen["deterministic"],
+        "cases": gen["cases"],
+        "notes": gen["notes"],
+        "dropped_cases": gen["dropped_cases"],
+        "ai_enriched": gen["ai_enriched"],
+        "enrich_reason": gen["enrich_reason"],
+        "model": gen["model"],
+        "prompt_version": TEST_CASE_DRAFT_PROMPT_VERSION,
+        "note": TEST_CASE_DRAFT_NOTE,
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+    }
+    # RMW 원자화 — LLM 호출 밖에서 재로드(형제 엔트리 lost-update 방지, fix-example과 동일).
+    with _TEST_CASE_CACHE_LOCK:
+        entries = _fix_cache_load(cache_path)
+        entries[cache_key] = payload
+        _fix_cache_store(cache_path, entries)
+    return {**payload, "cached": False}
 
 
 @router.post("/api/summary/test-design")

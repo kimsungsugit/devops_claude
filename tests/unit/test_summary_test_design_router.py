@@ -42,9 +42,13 @@ def test_coverage_only_like_hdpdm01(tmp_path, monkeypatch):
     assert resp["available"] is True
     tech = resp["technique_recommendations"]
     assert tech["available"] is True and tech["source_coverage"] == "vectorcast_metrics"
-    # 스냅샷 없는 픽스처 — ASIL 소스 부재를 침묵하지 않음
-    assert tech["asil_source"] == "no_source_snapshot"
-    assert tech["coverage_join"] == {"entries": 1, "with_asil": 0, "asil_unknown": 1}
+    # ASIL 소스 부재를 침묵하지 않음. N4에서 라벨 체계 변경: 스냅샷 유무가 아니라
+    # '어떤 소스로 등급을 얻었는가'(주석/역전파/둘 다/없음)를 말한다 — 스냅샷이 없어도
+    # 추적 링크만 있으면 등급을 얻을 수 있으므로 no_source_snapshot은 사실이 아니다.
+    assert tech["asil_source"] == "no_asil_source"
+    assert tech["asil_propagation"]["available"] is False       # 사유는 propagation이 보고
+    assert tech["coverage_join"] == {"entries": 1, "ut_rows": 1, "it_rows": 0,
+                                     "with_asil": 0, "asil_unknown": 1}
     assert tech["items"][0]["function"] == "f_half"
     assert resp["design_test_gap"] == {"available": False, "reason": "no_trace_link_table"}
     assert "미측정≠미달" in resp["mcdc_note"]
