@@ -21,8 +21,10 @@ from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
-DIFF_MAX_HUNKS = 4
-DIFF_MAX_CHARS = 6000
+# J2 상향(4/6000→8/16000): 실측 KJPDS02_PV Rule 구간 diff가 18헝크인데 4로 절단돼 증거의
+# 대부분이 잘렸다. on-demand(버튼) 전용이라 상향의 자동 비용은 0, LLM 입력 상한 내.
+DIFF_MAX_HUNKS = 8
+DIFF_MAX_CHARS = 16000
 _SOURCE_EXCLUDE_DIRS = {".svn", ".git"}
 
 

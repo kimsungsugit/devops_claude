@@ -49,8 +49,11 @@ def _classify(counts: List[Optional[int]]) -> Optional[str]:
     return None  # 예: 전 구간 0 — 표시 가치 없음(호출측에서 드랍)
 
 
-def _file_rule_counts(details: Dict[str, Any]) -> Dict[str, Dict[str, int]]:
-    """violations_by_file → {path(또는 표시명): {rule: count}} (residual 제외)."""
+def file_rule_counts(details: Dict[str, Any]) -> Dict[str, Dict[str, int]]:
+    """violations_by_file → {path(또는 표시명): {rule: count}} (residual 제외).
+
+    public: rule-unresolved-evidence 엔드포인트가 (rule, file) 구간 카운트 산출에 재사용.
+    """
     out: Dict[str, Dict[str, int]] = {}
     for f in details.get("violations_by_file") or []:
         if not isinstance(f, dict):
@@ -119,7 +122,7 @@ def compute_rule_trend(
         })
         per_build_totals.append(totals)
         per_build_residual.append(residual)
-        per_build_files.append(_file_rule_counts(loaded["details"]))
+        per_build_files.append(file_rule_counts(loaded["details"]))
         descs = loaded["details"].get("rule_descriptions")
         if isinstance(descs, dict) and descs:
             rule_descriptions = descs  # 오름차순 순회 — 마지막 대입이 곧 최신 analyzed
@@ -160,7 +163,7 @@ def compute_rule_trend(
                 (path, rc.get(rule, 0)) for path, rc in per_build_files[last_idx].items() if rc.get(rule, 0) > 0
             ]
             pairs.sort(key=lambda kv: (-kv[1], kv[0]))
-            latest_files = [{"path": p, "count": c} for p, c in pairs[:5]]
+            latest_files = [{"path": p, "count": c} for p, c in pairs[:8]]  # J2: 5→8
         if (
             classification in ("decreasing", "resolved")
             and first_idx is not None and last_idx is not None and first_idx != last_idx
@@ -177,7 +180,7 @@ def compute_rule_trend(
                         "delta": after - before,
                     })
             decreased_files.sort(key=lambda f: (f["delta"], f["path"]))
-            decreased_files = decreased_files[:5]
+            decreased_files = decreased_files[:10]  # J2: 5→10
         rules_out.append({
             "rule": rule,
             "counts": counts,

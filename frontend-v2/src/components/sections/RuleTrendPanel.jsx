@@ -10,6 +10,10 @@
 import { Fragment, useEffect, useState } from 'react';
 import { post } from '../../api.js';
 import { TrendLine } from '../charts.jsx';
+import { UnresolvedEvidenceCard } from './RuleEvidenceCards.jsx';
+
+// 미해소 분류 — 구간 증거(변경에도 위반 유지 vs 무변경 잔존) 확장 대상(J2).
+const UNRESOLVED_CLASSES = new Set(['increasing', 'persistent', 'new_recent']);
 
 const CLASS_META = {
   increasing: { label: '증가', color: 'var(--color-danger)' },
@@ -189,7 +193,12 @@ export default function RuleTrendPanel({ jobUrl, cacheRoot }) {
               </thead>
               <tbody>
                 {(data.rules || []).map((r) => {
-                  const expandable = (r.decreased_files || []).length > 0;
+                  const hasFix = (r.decreased_files || []).length > 0;
+                  const range = data.observed_range;
+                  const hasUnresolved = UNRESOLVED_CLASSES.has(r.classification)
+                    && (r.files_latest || []).length > 0
+                    && !!range && range.from_build !== range.to_build;
+                  const expandable = hasFix || hasUnresolved;
                   const expanded = expandedRule === r.rule;
                   return (
                     <Fragment key={r.rule}>
@@ -218,7 +227,7 @@ export default function RuleTrendPanel({ jobUrl, cacheRoot }) {
                             <button type="button" onClick={() => setExpandedRule(expanded ? null : r.rule)}
                               aria-expanded={expanded}
                               style={{ ...xs, padding: '1px 7px', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', background: 'transparent', cursor: 'pointer', color: 'var(--text-muted)' }}>
-                              {expanded ? '▾ 예시' : '▸ 예시'}
+                              {(expanded ? '▾ ' : '▸ ') + (hasFix ? '예시' : '증거')}
                             </button>
                           )}
                         </td>
@@ -226,12 +235,28 @@ export default function RuleTrendPanel({ jobUrl, cacheRoot }) {
                       {expanded && (
                         <tr>
                           <td colSpan={6} style={{ padding: '4px 8px', borderBottom: '1px solid var(--border)' }}>
-                            <div style={{ ...xs, color: 'var(--text-muted)', marginBottom: 2 }}>
-                              위반이 줄어든 파일 — 실제 변경을 근거로 "위반하지 않는 작성 예시"를 생성합니다.
-                            </div>
-                            {(r.decreased_files || []).map((f) => (
-                              <FixExampleCard key={f.path} jobUrl={jobUrl} cacheRoot={cacheRoot} rule={r.rule} file={f} />
-                            ))}
+                            {hasFix && (
+                              <>
+                                <div style={{ ...xs, color: 'var(--text-muted)', marginBottom: 2 }}>
+                                  위반이 줄어든 파일 — 실제 변경을 근거로 "위반하지 않는 작성 예시"를 생성합니다.
+                                </div>
+                                {(r.decreased_files || []).map((f) => (
+                                  <FixExampleCard key={f.path} jobUrl={jobUrl} cacheRoot={cacheRoot} rule={r.rule} file={f} />
+                                ))}
+                              </>
+                            )}
+                            {hasUnresolved && (
+                              <>
+                                <div style={{ ...xs, color: 'var(--text-muted)', margin: hasFix ? '6px 0 2px' : '0 0 2px' }}>
+                                  미해소 위반 파일 — 관측 구간(#{range.from_build}→#{range.to_build})의 실제 스냅샷으로
+                                  "변경에도 위반 유지"인지 "파일 무변경(위반 잔존)"인지 확인합니다.
+                                </div>
+                                {(r.files_latest || []).map((f) => (
+                                  <UnresolvedEvidenceCard key={f.path} jobUrl={jobUrl} cacheRoot={cacheRoot}
+                                    rule={r.rule} file={f} fromBuild={range.from_build} toBuild={range.to_build} />
+                                ))}
+                              </>
+                            )}
                           </td>
                         </tr>
                       )}

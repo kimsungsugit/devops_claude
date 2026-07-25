@@ -134,6 +134,36 @@ describe('RuleTrendPanel', () => {
     expect(await screen.findByText(/PRQA\(RCR\) 리포트가 없습니다/)).toBeInTheDocument();
   });
 
+  it('미해소 규칙(persistent)은 files_latest+observed_range로 증거 확장을 연다', async () => {
+    mockTrend = {
+      ...TREND,
+      observed_range: { from_build: 122, to_build: 125 },
+      rules: [
+        { rule: 'Rule-9.9', counts: [4, null, 4], latest: 4, first: 4, net: 0, classification: 'persistent',
+          files_latest: [{ path: 'APP/bar.c', count: 4 }], decreased_files: [] },
+      ],
+    };
+    render(<RuleTrendPanel {...PROPS} />);
+    await screen.findByText('Rule-9.9');
+    await userEvent.click(screen.getByText('▸ 증거'));
+    expect(screen.getByText(/미해소 위반 파일/)).toBeInTheDocument();
+    expect(screen.getByText(/구간 증거 보기/)).toBeInTheDocument();
+  });
+
+  it('미해소여도 observed_range 없으면(단일 관측) 확장 버튼 없음', async () => {
+    mockTrend = {
+      ...TREND,
+      observed_range: { from_build: 125, to_build: 125 },
+      rules: [
+        { rule: 'Rule-9.9', counts: [4], latest: 4, first: 4, net: 0, classification: 'persistent',
+          files_latest: [{ path: 'APP/bar.c', count: 4 }], decreased_files: [] },
+      ],
+    };
+    render(<RuleTrendPanel {...PROPS} />);
+    await screen.findByText('Rule-9.9');
+    expect(screen.queryByText(/▸ (예시|증거)/)).toBeNull();  // from==to — 구간 증거 성립 불가
+  });
+
   it('규칙 설명(RCFInfo)이 있으면 규칙 아래 한 줄로 렌더, 없으면 생략', async () => {
     mockTrend = {
       ...TREND,

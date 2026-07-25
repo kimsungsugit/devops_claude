@@ -396,6 +396,72 @@ def summary_rule_fix_example(req: dict) -> Dict[str, Any]:
     return {**payload, "cached": False}
 
 
+# 서버 고정 주입(LLM 무관) — 구간 관측을 인과로 격상하지 않는다(ISO 정직성).
+UNRESOLVED_NOTE = "파일 변경/무변경과 위반 잔존은 같은 빌드 구간의 관측이며 인과 판정이 아닙니다."
+
+
+@router.post("/api/summary/rule-unresolved-evidence")
+def summary_rule_unresolved_evidence(req: dict) -> Dict[str, Any]:
+    """미해소 규칙 × 파일의 구간 증거(결정론, LLM 0회) — '변경에도 위반 유지' vs '무변경 잔존'.
+
+    라인 레벨 위반 데이터가 없어(RCR=파일×규칙 카운트가 최상세) 코드 수준 근거는 빌드
+    스냅샷 diff가 유일 경로다. '파일 무변경'은 실패가 아니라 그 자체로 유효 증거(위반이
+    잔존하는 파일이 구간 내 수정된 적 없음)라 available:true + file_changed:false로 반환한다.
+    """
+    from backend.services.build_inventory import find_build_meta, list_cached_builds_meta
+    from backend.services.prqa_delta import load_rcr_details_cached
+    from backend.services.prqa_rule_trend import file_rule_counts
+    from backend.services.rule_fix_examples import collect_fix_evidence
+
+    body = req or {}
+    job_url = str(body.get("job_url") or "").strip()
+    rule = str(body.get("rule") or "").strip()
+    file = str(body.get("file") or "").strip()
+    from_build = _to_int(body.get("from_build"))
+    to_build = _to_int(body.get("to_build"))
+    if not job_url or not rule or not file or from_build is None or to_build is None:
+        return {"ok": True, "available": False, "reason": "params_required"}
+    cache_root = _normalize_jenkins_cache_root(str(body.get("cache_root") or ""))
+    metas = list_cached_builds_meta(job_url=job_url, cache_root=cache_root)
+    from_meta = find_build_meta(metas, from_build)
+    to_meta = find_build_meta(metas, to_build)
+    if from_meta is None or to_meta is None:
+        return {"ok": True, "available": False, "reason": "build_not_cached"}
+
+    # (rule, file) 구간 카운트 — diff 증거와 독립(RCR 캐시 실패 시 counts만 결측 표기, 0 위장 금지).
+    counts: Dict[str, Any] = {"from": None, "to": None}
+    counts_reason: Optional[str] = None
+    for label, meta in (("from", from_meta), ("to", to_meta)):
+        loaded = load_rcr_details_cached(
+            Path(str(meta.get("build_root") or "")), Path(str(meta.get("reports_dir") or ""))
+        )
+        if loaded is None:
+            counts_reason = "no_rcr"
+            continue
+        counts[label] = int((file_rule_counts(loaded["details"]).get(file) or {}).get(rule, 0))
+
+    evidence = collect_fix_evidence(
+        from_build_root=Path(str(from_meta.get("build_root"))),
+        to_build_root=Path(str(to_meta.get("build_root"))),
+        file=file,
+    )
+    base: Dict[str, Any] = {
+        "ok": True, "rule": rule, "file": file,
+        "from_build": from_build, "to_build": to_build,
+        "counts": counts, "note": UNRESOLVED_NOTE,
+    }
+    if counts_reason:
+        base["counts_reason"] = counts_reason
+    if evidence.get("ok"):
+        return {**base, "available": True, "reason": None, "file_changed": True,
+                "diff": evidence["diff"]}
+    if evidence.get("reason") == "file_unchanged_between_builds":
+        # 무변경은 실패가 아니라 유효 증거 — '위반 잔존 + 구간 내 파일 미수정' 관측.
+        return {**base, "available": True, "reason": None, "file_changed": False, "diff": None}
+    return {**base, "available": False, "reason": evidence.get("reason"),
+            "file_changed": None, "diff": None}
+
+
 # ---------------------------------------------------------------------------
 # 품질 상세 (Phase I) — 함수단위 커버리지(기존 갭) + 실패 테스트케이스
 # ---------------------------------------------------------------------------

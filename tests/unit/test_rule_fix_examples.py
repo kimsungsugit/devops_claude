@@ -79,6 +79,13 @@ def test_dir_suffix_ambiguous_across_module_roots(tmp_path):
     assert ev2["ok"] is True and "+int b2;" in ev2["diff"]["text"]
 
 
+def test_default_caps_expanded_j2():
+    # J2: 실측 18헝크 diff가 4헝크로 절단되던 것을 완화 — 상수 회귀 고정(침묵 하향 방지).
+    from backend.services.rule_fix_examples import DIFF_MAX_CHARS, DIFF_MAX_HUNKS
+
+    assert DIFF_MAX_HUNKS == 8 and DIFF_MAX_CHARS == 16000
+
+
 def test_diff_cap_and_truncated_flag(tmp_path):
     from backend.services.rule_fix_examples import capped_unified_diff
 
