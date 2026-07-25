@@ -466,6 +466,46 @@ RULE_DEF_CACHE_NAME = "summary_rule_definition_cache.json"
 _RULE_DEF_CACHE_LOCK = threading.Lock()
 
 
+def _collect_rule_evidence(
+    row: Dict[str, Any], metas: List[Dict[str, Any]], to_meta: Optional[Dict[str, Any]],
+    *, max_diffs: int = 2, max_excerpts: int = 2, excerpt_bytes: int = 2000,
+) -> tuple:
+    """규칙 1개의 코드 증거(결정론) — ①해소 구간 diff ②미해소 파일 발췌.
+
+    rule-definition과 coding-rulebook이 **같은 증거**를 써야 두 산출물이 어긋나지 않으므로
+    단일 출처로 둔다(복제하면 한쪽만 고쳐지는 표류가 생긴다). 반환 (diffs, excerpts).
+    """
+    from backend.services.build_inventory import find_build_meta
+    from backend.services.rule_fix_examples import collect_fix_evidence, resolve_snapshot_file
+
+    diffs: List[Dict[str, Any]] = []
+    for f in (row.get("decreased_files") or [])[:max_diffs]:
+        fm = find_build_meta(metas, f.get("from_build"))
+        tm = find_build_meta(metas, f.get("to_build"))
+        if fm is None or tm is None:
+            continue
+        ev = collect_fix_evidence(
+            from_build_root=Path(str(fm.get("build_root"))),
+            to_build_root=Path(str(tm.get("build_root"))),
+            file=str(f.get("path") or ""),
+        )
+        if ev.get("ok"):
+            diffs.append({"file": f.get("path"), "text": ev["diff"]["text"], "diff_sha": ev["diff_sha"]})
+    excerpts: List[Dict[str, Any]] = []
+    if to_meta is not None:
+        for f in (row.get("files_latest") or [])[:max_excerpts]:
+            p = resolve_snapshot_file(Path(str(to_meta.get("build_root"))), str(f.get("path") or ""))
+            if p is None:
+                continue
+            try:
+                text = p.read_text(encoding="utf-8", errors="ignore")[:excerpt_bytes]
+            except OSError:
+                continue
+            if text.strip():
+                excerpts.append({"file": f.get("path"), "text": text})
+    return diffs, excerpts
+
+
 @router.post("/api/summary/rule-definition")
 def summary_rule_definition(req: dict) -> Dict[str, Any]:
     """팀 코딩 룰 초안(LLM on-demand) — 규칙 공식 설명+트렌드+실코드 증거를 조립해 생성.
@@ -478,7 +518,6 @@ def summary_rule_definition(req: dict) -> Dict[str, Any]:
 
     from backend.services.build_inventory import find_build_meta, list_cached_builds_meta
     from backend.services.prqa_rule_trend import compute_rule_trend
-    from backend.services.rule_fix_examples import collect_fix_evidence, resolve_snapshot_file
     from workflow.rule_definition import (
         RULE_DEFINITION_NOTE,
         RULE_DEFINITION_PROMPT_VERSION,
@@ -503,34 +542,7 @@ def summary_rule_definition(req: dict) -> Dict[str, Any]:
     rng = trend.get("observed_range") or {}
     to_meta = find_build_meta(metas, rng.get("to_build"))
 
-    # 증거 조립(결정론) — ①해소 구간 diff ≤2 ②미해소 파일 발췌 ≤2(최신 analyzed 스냅샷 head).
-    evidence_diffs: List[Dict[str, Any]] = []
-    for f in (row.get("decreased_files") or [])[:2]:
-        fm = find_build_meta(metas, f.get("from_build"))
-        tm = find_build_meta(metas, f.get("to_build"))
-        if fm is None or tm is None:
-            continue
-        ev = collect_fix_evidence(
-            from_build_root=Path(str(fm.get("build_root"))),
-            to_build_root=Path(str(tm.get("build_root"))),
-            file=str(f.get("path") or ""),
-        )
-        if ev.get("ok"):
-            evidence_diffs.append(
-                {"file": f.get("path"), "text": ev["diff"]["text"], "diff_sha": ev["diff_sha"]}
-            )
-    unresolved_excerpts: List[Dict[str, Any]] = []
-    if to_meta is not None:
-        for f in (row.get("files_latest") or [])[:2]:
-            p = resolve_snapshot_file(Path(str(to_meta.get("build_root"))), str(f.get("path") or ""))
-            if p is None:
-                continue
-            try:
-                text = p.read_text(encoding="utf-8", errors="ignore")[:2000]
-            except OSError:
-                continue
-            if text.strip():
-                unresolved_excerpts.append({"file": f.get("path"), "text": text})
+    evidence_diffs, unresolved_excerpts = _collect_rule_evidence(row, metas, to_meta)
     if not evidence_diffs and not unresolved_excerpts:
         return {"ok": True, "available": False, "reason": "no_code_evidence", "rule": rule}
 
@@ -587,6 +599,107 @@ def summary_rule_definition(req: dict) -> Dict[str, Any]:
             entries[key] = payload
             _fix_cache_store(cache_path, entries)
     return {**payload, "cached": False}
+
+
+RULEBOOK_CACHE_NAME = "summary_coding_rulebook_cache.json"
+_RULEBOOK_LOCK = threading.Lock()
+
+
+@router.post("/api/summary/coding-rulebook")
+def summary_coding_rulebook(req: dict) -> Dict[str, Any]:
+    """정적분석 위반 → 팀 코딩 룰북 초안(Q4) — 규칙 배치 처리 + 카테고리 묶음 + Markdown.
+
+    기존 rule-definition은 규칙 1개씩만 냈다. 여기서는 위반 상위 규칙을 한 번에 처리해
+    카테고리(필수/요구/권고/프로젝트 관례)로 묶고 문서로 내보낼 수 있게 한다.
+    ⚠ 증거 0건 규칙은 룰북에 넣지 않고 제외 사유를 남긴다 — 일반론 룰이 섞이면 문서 신뢰가 깨진다.
+    비용: 규칙당 LLM 1회(상한 15) → on-demand + 캐시. probe는 LLM 0회로 캐시만 조회한다.
+    """
+    import hashlib as _hashlib
+
+    from backend.services.build_inventory import find_build_meta, list_cached_builds_meta
+    from backend.services.prqa_rule_trend import compute_rule_trend
+    from workflow.coding_rulebook import CODING_RULEBOOK_VERSION, build_rulebook, render_markdown
+
+    body = req or {}
+    job_url = str(body.get("job_url") or "").strip()
+    if not job_url:
+        return {"ok": True, "available": False, "reason": "job_url_required"}
+    cache_root = _normalize_jenkins_cache_root(str(body.get("cache_root") or ""))
+    max_rules = max(1, min(_to_int(body.get("max_rules")) or 8, 15))
+
+    trend = compute_rule_trend(job_url=job_url, cache_root=cache_root, limit=10, max_rules=100)
+    if not trend.get("available"):
+        return {"ok": True, "available": False, "reason": trend.get("reason") or "no_cached_build"}
+    rows = [r for r in (trend.get("rules") or []) if r.get("rule")]
+    # 최신 위반이 많은 규칙부터 — 룰북은 '지금 아픈 곳'을 먼저 다뤄야 한다.
+    rows.sort(key=lambda r: (-(r.get("latest") or 0), str(r.get("rule"))))
+    rows = rows[:max_rules]
+    if not rows:
+        return {"ok": True, "available": False, "reason": "no_rules_in_trend"}
+
+    metas = list_cached_builds_meta(job_url=job_url, cache_root=cache_root)
+    rng = trend.get("observed_range") or {}
+    to_meta = find_build_meta(metas, rng.get("to_build"))
+
+    rule_inputs: List[Dict[str, Any]] = []
+    for row in rows:
+        diffs, excerpts = _collect_rule_evidence(row, metas, to_meta)
+        # 트렌드는 규칙 행마다 description={title,enabled,group}(RCFInfo)를 직접 싣는다.
+        desc = row.get("description") if isinstance(row.get("description"), dict) else None
+        rule_inputs.append({
+            "rule": row.get("rule"),
+            "description": desc,
+            "trend_row": row,
+            "evidence_diffs": diffs,
+            "unresolved_excerpts": excerpts,
+            "counts": {"latest": row.get("latest"), "first": row.get("first")},
+        })
+
+    model = _expected_insight_model() or ""
+    key = _hashlib.sha256("|".join([
+        model, str(CODING_RULEBOOK_VERSION), str(max_rules),
+        json.dumps([[i["rule"], len(i["evidence_diffs"]), len(i["unresolved_excerpts"])]
+                    for i in rule_inputs], ensure_ascii=False),
+    ]).encode()).hexdigest()
+    cache_path = Path(str(to_meta.get("reports_dir"))) / RULEBOOK_CACHE_NAME if to_meta else None
+    hit = None
+    if cache_path is not None:
+        with _RULEBOOK_LOCK:
+            hit = _fix_cache_load(cache_path).get(key)
+    if hit and not bool(body.get("force")):
+        return {**hit, "cached": True}
+    if bool(body.get("probe")):
+        # 아직 생성 전 — 어떤 규칙이 대상이고 증거가 몇 건인지만 알린다(LLM 0회).
+        return {
+            "ok": True, "available": True, "cached": False, "generated": False,
+            "candidates": [
+                {"rule": i["rule"], "latest": (i["counts"] or {}).get("latest"),
+                 "evidence": len(i["evidence_diffs"]) + len(i["unresolved_excerpts"])}
+                for i in rule_inputs
+            ],
+        }
+
+    book = build_rulebook(rule_inputs, max_rules=max_rules)
+    payload = {
+        "ok": True, "available": True, "reason": None, "generated": True,
+        "build_number": (to_meta or {}).get("build_number"),
+        **book,
+        "markdown": render_markdown(book, project=_job_slug_label(job_url)),
+        "model": model or None,
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+    }
+    if cache_path is not None:
+        with _RULEBOOK_LOCK:
+            entries = _fix_cache_load(cache_path)
+            entries[key] = payload
+            _fix_cache_store(cache_path, entries)
+    return {**payload, "cached": False}
+
+
+def _job_slug_label(job_url: str) -> str:
+    """문서 제목용 프로젝트 라벨 — job URL 마지막 세그먼트."""
+    parts = [p for p in str(job_url or "").replace("\\", "/").split("/") if p and p != "job"]
+    return parts[-1] if parts else ""
 
 
 # ---------------------------------------------------------------------------

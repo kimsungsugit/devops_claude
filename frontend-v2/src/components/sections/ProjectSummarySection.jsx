@@ -10,6 +10,7 @@ import PipelineHealthStrip from './PipelineHealthStrip.jsx';
 import BuildDeltaDrilldown from './BuildDeltaDrilldown.jsx';
 import SummaryAiInsightPanel from './SummaryAiInsightPanel.jsx';
 import RuleTrendPanel from './RuleTrendPanel.jsx';
+import CodingRulebookPanel from './CodingRulebookPanel.jsx';
 import ArchitectureMetricsPanel from './ArchitectureMetricsPanel.jsx';
 import ArchitectureGraphPanel from './ArchitectureGraphPanel.jsx';
 import ArchitectureImprovementPanel from './ArchitectureImprovementPanel.jsx';
@@ -635,6 +636,9 @@ export default function ProjectSummarySection({ job, analysisResult }) {
 
       {/* 룰 트렌드 — 빌드별 위반 변화 분류 + 실제 fix 근거 작성 예시 */}
       <RuleTrendPanel jobUrl={jobUrl} cacheRoot={cacheRoot} />
+
+      {/* 코딩 룰북 초안 — 위반 규칙을 카테고리로 묶어 문서화 (Q4) */}
+      <CodingRulebookPanel jobUrl={jobUrl} cacheRoot={cacheRoot} />
 
       {/* 함수별 커버리지 + 실패 테스트 — 빌드 산출물 → SCM 입력 문서 폴백(N1) */}
       <FunctionCoveragePanel jobUrl={jobUrl} cacheRoot={cacheRoot} />
