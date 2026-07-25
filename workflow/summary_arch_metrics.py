@@ -22,7 +22,9 @@ logger = logging.getLogger(__name__)
 # v2: file 경로를 source 기준 상대로(절대경로 비대 — 표기/LLM/필터 어휘 경량화).
 # v3: module_graph(디렉터리 프록시 롤업)·cycles(반복 Tarjan SCC — 파일/모듈)·mutual_file_pairs·
 #     refactor_candidates·asil_functions.by_function 추가 (K1 — 다이어그램/테스트 어드바이저 재료).
-ARCH_METRICS_VERSION = 3
+# v4(N5): asil_interference(간섭 자유 후보)·global_coupling(전역 공유)·coverage_complexity
+#     (사분면)·indirect_calls/encapsulation(콜그래프 완전성·캡슐화).
+ARCH_METRICS_VERSION = 4
 EXCERPT_MAX_LINES = 80
 
 # 모듈 프록시 = 파일 상대경로의 앞 2세그먼트(예: "Sources/IF") — 최상위 1세그먼트는 실측상
@@ -206,10 +208,186 @@ def _refactor_candidates(
     return out[:top_n]
 
 
+def _asil_interference(
+    call_map: Dict[str, List[str]], file_of: Dict[str, str],
+    asil_by_fn: Dict[str, Any], *, top_n: int = 20,
+) -> Dict[str, Any]:
+    """ASIL 함수 ↔ 저/무등급 함수 호출 엣지 + 모듈별 등급 혼재(N5).
+
+    ISO 26262-6의 **freedom from interference 검토 후보**를 뽑는 장치이며 판정이 아니다:
+    등급이 높은 함수가 낮은/미상 등급 함수를 호출하면(또는 그 반대) 간섭 분석 대상이 된다.
+    등급 인덱스가 비면 available:false — 등급 부재를 'QM 전부'로 위장하지 않는다.
+    """
+    from workflow.asil_propagation import ASIL_RANK, normalize_asil
+    from workflow.coverage_gap import _norm_fn
+
+    idx: Dict[str, str] = {}
+    for k, v in (asil_by_fn or {}).items():
+        a = normalize_asil(v.get("asil") if isinstance(v, dict) else v)
+        if a:
+            idx[_norm_fn(k)] = a
+    if not idx:
+        return {"available": False, "reason": "no_asil_index", "edges": [], "modules": []}
+
+    def _rank(name: str) -> int:
+        return ASIL_RANK.get(idx.get(_norm_fn(name), ""), -1)
+
+    edges: List[Dict[str, Any]] = []
+    for caller, callees in call_map.items():
+        cr = _rank(caller)
+        for callee in callees:
+            tr = _rank(callee)
+            if cr < 0 and tr < 0:
+                continue                      # 양쪽 미상 — 간섭 판단 근거 없음
+            if cr == tr:
+                continue
+            higher, lower = (caller, callee) if cr > tr else (callee, caller)
+            edges.append({
+                "caller": caller, "callee": callee,
+                "caller_asil": idx.get(_norm_fn(caller)), "callee_asil": idx.get(_norm_fn(callee)),
+                "higher": higher, "lower": lower,
+                "caller_file": file_of.get(caller, ""), "callee_file": file_of.get(callee, ""),
+                "cross_module": _module_of(file_of.get(caller, "")) != _module_of(file_of.get(callee, "")),
+            })
+    edges.sort(key=lambda e: (-max(ASIL_RANK.get(e["caller_asil"] or "", -1),
+                                   ASIL_RANK.get(e["callee_asil"] or "", -1)),
+                              e["caller"], e["callee"]))
+
+    mod_levels: Dict[str, Dict[str, int]] = {}
+    for fn, rel in file_of.items():
+        a = idx.get(_norm_fn(fn))
+        m = _module_of(rel)
+        bucket = mod_levels.setdefault(m, {})
+        key = a or "unknown"
+        bucket[key] = bucket.get(key, 0) + 1
+    modules = []
+    for m, dist in mod_levels.items():
+        graded = {k: v for k, v in dist.items() if k != "unknown"}
+        modules.append({
+            "module": m, "distribution": dist,
+            "levels": len(graded),
+            "max_asil": max(graded, key=lambda k: ASIL_RANK.get(k, -1)) if graded else None,
+            "mixed": len(graded) > 1,
+        })
+    modules.sort(key=lambda r: (-int(r["mixed"]), -ASIL_RANK.get(r["max_asil"] or "", -1), r["module"]))
+    return {
+        "available": True,
+        "reason": None,
+        "graded_functions": len(idx),
+        "edges": edges[:top_n],
+        "edges_total": len(edges),
+        "modules": modules[:top_n],
+        "mixed_modules": sum(1 for m in modules if m["mixed"]),
+        "note": ("등급이 다른 함수 간 호출은 ISO 26262-6 freedom from interference 검토 "
+                 "후보이며 위반 판정이 아니다. 등급은 요구 역전파/주석 관측치다."),
+    }
+
+
+def _global_coupling(
+    used_globals: Dict[str, List[str]], file_of: Dict[str, str], *, top_n: int = 15,
+) -> Dict[str, Any]:
+    """전역 변수별 사용 함수/모듈 — 모듈 경계를 넘는 공유 데이터(N5).
+
+    ⚠ 파서는 read/write를 구분하지 않는다 — "다중 writer"라 부르면 거짓이다. 여기서 세는 것은
+    **사용(참조) 함수 수**와 **모듈 수**뿐이고, 경합/재진입은 이 지표로 단정할 수 없다.
+    """
+    by_global: Dict[str, Dict[str, set]] = {}
+    for fn, globs in used_globals.items():
+        for g in globs or []:
+            name = str(g or "").strip()
+            if not name:
+                continue
+            rec = by_global.setdefault(name, {"functions": set(), "modules": set(), "files": set()})
+            rec["functions"].add(fn)
+            rel = file_of.get(fn, "")
+            rec["files"].add(rel)
+            rec["modules"].add(_module_of(rel))
+    rows = [
+        {"global": g, "functions": len(r["functions"]), "modules": len(r["modules"]),
+         "files": len(r["files"]), "module_names": sorted(r["modules"])[:6]}
+        for g, r in by_global.items()
+    ]
+    rows.sort(key=lambda r: (-r["modules"], -r["functions"], r["global"]))
+    cross = [r for r in rows if r["modules"] > 1]
+    return {
+        "available": bool(rows),
+        "reason": None if rows else "no_global_usage",
+        "distinct_globals": len(rows),
+        "functions_using_globals": sum(1 for v in used_globals.values() if v),
+        "cross_module_globals": len(cross),
+        "top": rows[:top_n],
+        "note": ("파서는 읽기/쓰기를 구분하지 않는다 — 아래 수치는 '사용(참조)' 기준이며 "
+                 "다중 writer·경합을 단정하지 않는다."),
+    }
+
+
+def _coverage_complexity(
+    known: set, file_of: Dict[str, str], complexity_of,
+    coverage_by_fn: Optional[Dict[str, Any]], *, top_n: int = 15,
+) -> Dict[str, Any]:
+    """커버리지 × 복잡도 사분면 — 테스트 투자 우선순위(N5). 미조인은 별도 카운트."""
+    if not coverage_by_fn:
+        return {"available": False, "reason": "no_coverage_index"}
+    from workflow.coverage_gap import _norm_fn
+
+    idx = {_norm_fn(k): v for k, v in coverage_by_fn.items()}
+    joined: List[Dict[str, Any]] = []
+    unjoined = 0
+    for n in known:
+        rec = idx.get(_norm_fn(n))
+        st = (rec or {}).get("statement") if isinstance(rec, dict) else None
+        if not isinstance(st, (int, float)):
+            unjoined += 1
+            continue
+        comp = complexity_of(n)
+        joined.append({
+            "function": n, "file": file_of.get(n, ""),
+            "statement": round(float(st), 4), "branch": (rec or {}).get("branch"),
+            **comp,
+        })
+    if not joined:
+        return {"available": False, "reason": "no_joined_functions", "unjoined": unjoined}
+    # 복잡도 임계는 측정 ccn 기준(loc_proxy는 척도가 달라 사분면에서 제외 — 혼합 시 순위 오염).
+    measured = [r for r in joined if r["complexity_source"] == "vcast_ccn"]
+    pool = measured or joined
+    comps = sorted(r["complexity"] for r in pool)
+    hi_comp = comps[int(len(comps) * 0.75)] if comps else 0
+    quadrants = {"high_complex_low_cov": [], "high_complex_high_cov": [],
+                 "low_complex_low_cov": [], "low_complex_high_cov": 0}
+    for r in pool:
+        hi_c = r["complexity"] >= max(hi_comp, 1)
+        lo_v = r["statement"] < 0.8
+        if hi_c and lo_v:
+            quadrants["high_complex_low_cov"].append(r)
+        elif hi_c:
+            quadrants["high_complex_high_cov"].append(r)
+        elif lo_v:
+            quadrants["low_complex_low_cov"].append(r)
+        else:
+            quadrants["low_complex_high_cov"] += 1
+    for key in ("high_complex_low_cov", "high_complex_high_cov", "low_complex_low_cov"):
+        quadrants[key].sort(key=lambda r: (r["statement"], -r["complexity"], r["function"]))
+    return {
+        "available": True,
+        "reason": None,
+        "joined": len(joined),
+        "unjoined": unjoined,               # 조인 실패는 침묵 제외하지 않는다
+        "complexity_basis": "vcast_ccn" if measured else "loc_proxy",
+        "complexity_threshold": hi_comp,
+        "coverage_threshold": 0.8,
+        "counts": {k: (len(v) if isinstance(v, list) else v) for k, v in quadrants.items()},
+        "priority": quadrants["high_complex_low_cov"][:top_n],
+        "note": ("사분면 임계는 측정 복잡도 상위 25%와 구문 80% 기준이다. 커버리지 미조인 "
+                 "함수는 제외했으며 그 수를 unjoined로 표기한다."),
+    }
+
+
 def compute_architecture_metrics(
     source_dir: Path,
     *,
     ccn_by_function: Optional[Dict[str, int]] = None,
+    asil_by_function: Optional[Dict[str, Any]] = None,
+    coverage_by_function: Optional[Dict[str, Any]] = None,
     top_n: int = 10,
     excerpt_top: int = 2,
     excerpt_max_lines: int = EXCERPT_MAX_LINES,
@@ -232,7 +410,12 @@ def compute_architecture_metrics(
     call_map: Dict[str, List[str]] = {}
     file_of: Dict[str, str] = {}
     body_lines: Dict[str, int] = {}
-    asil_by_function: Dict[str, str] = {}
+    comment_asil_map: Dict[str, str] = {}
+    globals_of: Dict[str, List[str]] = {}
+    func_refs_of: Dict[str, List[str]] = {}
+    pointer_calls_of: Dict[str, List[str]] = {}
+    static_fns: set = set()
+    documented_fns: set = set()
     src_prefix = str(Path(source_dir).resolve()).replace("\\", "/").rstrip("/") + "/"
 
     def _rel_file(raw: str) -> str:
@@ -252,7 +435,15 @@ def compute_architecture_metrics(
         asil = str(f.get("comment_asil") or "").strip()
         if asil:
             # 소집합(주석 보유 함수만) — L2 테스트 어드바이저가 함수→ASIL 조인에 재사용.
-            asil_by_function[name] = asil.upper()
+            comment_asil_map[name] = asil.upper()
+        # v4(N5): 전역 사용·간접 호출·캡슐화 재료 — 파서가 이미 주는데 버려지던 필드들.
+        globals_of[name] = [str(g) for g in (f.get("used_globals") or [])]
+        func_refs_of[name] = [str(r) for r in (f.get("func_refs") or [])]
+        pointer_calls_of[name] = [str(p) for p in (f.get("pointer_calls") or [])]
+        if f.get("is_static"):
+            static_fns.add(name)
+        if str(f.get("comment_desc") or "").strip():
+            documented_fns.add(name)
     inv = _invert_calls(call_map, known)
 
     ccn_map = {str(k): v for k, v in (ccn_by_function or {}).items()}
@@ -339,9 +530,52 @@ def compute_architecture_metrics(
             "truncated": truncated,
         })
 
+    # ── v4(N5): 간섭 자유 후보 · 전역 결합 · 커버리지×복잡도 · 간접 호출/캡슐화 ──
+    # ASIL 인덱스는 주입(요구 역전파) 우선, 없으면 주석 맵 — 주석 0건 프로젝트에서도 축이 산다.
+    asil_index: Dict[str, Any] = dict(asil_by_function or {}) or dict(comment_asil_map)
+    interference = _asil_interference(call_map, file_of, asil_index)
+    global_coupling = _global_coupling(globals_of, file_of)
+    cov_complexity = _coverage_complexity(known, file_of, _complexity, coverage_by_function)
+    indirect_fns = {n for n, v in func_refs_of.items() if v} | {n for n, v in pointer_calls_of.items() if v}
+    indirect_edges = sum(len(v) for v in func_refs_of.values()) + sum(len(v) for v in pointer_calls_of.values())
+    header_defined = sorted({n for n in known if str(file_of.get(n, "")).lower().endswith(".h")})
+
     return {
         "available": True,
         "version": ARCH_METRICS_VERSION,
+        "asil_interference": interference,
+        "global_coupling": global_coupling,
+        "coverage_complexity": cov_complexity,
+        "indirect_calls": {
+            # 콜그래프(call_map)는 직접 호출만 담는다 — 함수포인터 참조/간접 호출 사이트는
+            # 엣지에 반영되지 않으므로 그 규모를 정직하게 고지한다(실측 690함수).
+            "functions_with_indirect": len(indirect_fns),
+            "reference_edges": indirect_edges,
+            "func_ref_functions": sum(1 for v in func_refs_of.values() if v),
+            "pointer_call_functions": sum(1 for v in pointer_calls_of.values() if v),
+            "top": [
+                {"function": n, "func_refs": len(func_refs_of.get(n) or ()),
+                 "pointer_calls": len(pointer_calls_of.get(n) or ()), "file": file_of.get(n, "")}
+                for n in sorted(indirect_fns,
+                                key=lambda x: (-(len(func_refs_of.get(x) or ()) + len(pointer_calls_of.get(x) or ())), x))[:10]
+            ],
+            "note": ("함수포인터 참조·간접 호출 사이트는 호출 그래프 엣지에 포함되지 않는다 — "
+                     "fan-in/out·사이클은 직접 호출 기준 하한값으로 읽어야 한다."),
+        },
+        "encapsulation": {
+            "functions": len(known),
+            # ⚠ 파서의 static 판정은 신뢰도가 낮다(실측 914함수 중 2건 — 실제 C 코드와 불일치).
+            # 비율로 제시하면 '캡슐화가 거의 없다'는 허위 결론을 부르므로 탐지 수만 싣고
+            # 한계를 note로 명시한다(측정과 추정 혼동 금지 규약).
+            "static_functions_detected": len(static_fns),
+            "static_detection_reliable": False,
+            "header_defined_functions": len(header_defined),
+            "header_defined_top": header_defined[:10],
+            "documented_functions": len(documented_fns),
+            "documented_ratio": round(len(documented_fns) / len(known), 3) if known else None,
+            "note": ("static 판정은 파서 한계로 과소 탐지된다 — 비율 해석 금지. 문서화 비율은 "
+                     "함수 주석(설명문) 보유 기준이다."),
+        },
         "snapshot": {
             "files": len({v for v in file_of.values() if v}),
             "functions": len(known),
@@ -357,7 +591,9 @@ def compute_architecture_metrics(
             "top_pairs": top_pairs,
         },
         "size_outliers": size_rows[:top_n],
-        "asil_functions": {"count": len(asil_by_function), "by_function": asil_by_function},
+        # by_function은 **소스 주석 기반**만 담는다(기존 계약 — 라우터가 이걸 역전파와 병합한다).
+        "asil_functions": {"count": len(comment_asil_map), "by_function": comment_asil_map,
+                           "index_used": len(asil_index)},
         "excerpts": excerpts,
         "module_graph": module_graph,
         "cycles": {

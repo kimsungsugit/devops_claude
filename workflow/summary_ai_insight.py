@@ -26,7 +26,9 @@ logger = logging.getLogger(__name__)
 # v2: architecture 섹션 추가(Phase G).
 # v3: trace 컨텍스트 큐레이션 — 미추적 raw 총계를 LLM이 조치 항목으로 오변환하던 것 차단.
 # v4: testing 섹션 + arch payload에 cycles/module_graph + rules에 공식 설명(RCFInfo) 주입(Phase M).
-PROMPT_VERSION = 4
+# v5(N5): architecture payload에 asil_interference·global_coupling·coverage_complexity·
+#         indirect_calls/encapsulation 추가(+환각 필터 어휘 확장).
+PROMPT_VERSION = 5
 SECTIONS = ("rules", "mistakes", "roles", "architecture", "testing")
 EXCERPT_MAX_FILES = 4
 EXCERPT_MAX_BYTES_PER_FILE = 4096
@@ -310,6 +312,23 @@ def build_deterministic_insight(inp: SummaryInsightInput) -> Dict[str, Any]:
                 "coupling": arch.get("coupling"),
                 "size_outliers": (arch.get("size_outliers") or [])[:5],
                 "cycles": arch.get("cycles"),  # v4: 사이클 관측(부재 키는 None — v2 캐시 호환)
+                # v5(N5): 결정론 요약도 새 축을 담는다 — LLM 미사용 상태에서 roles/프론트가 소비.
+                "asil_interference": {
+                    k: (arch.get("asil_interference") or {}).get(k)
+                    for k in ("available", "reason", "graded_functions", "edges_total", "mixed_modules")
+                },
+                "coverage_complexity": {
+                    k: (arch.get("coverage_complexity") or {}).get(k)
+                    for k in ("available", "reason", "joined", "unjoined", "counts")
+                },
+                "global_coupling": {
+                    k: (arch.get("global_coupling") or {}).get(k)
+                    for k in ("available", "distinct_globals", "cross_module_globals")
+                },
+                "indirect_calls": {
+                    k: (arch.get("indirect_calls") or {}).get(k)
+                    for k in ("functions_with_indirect", "reference_edges")
+                },
             }
             if arch and arch.get("available")
             else {"available": False, "reason": (arch or {}).get("reason") or "no_source_snapshot"}
@@ -529,6 +548,19 @@ def _known_symbol_set(inp: SummaryInsightInput) -> set:
         if rc.get("file"):
             out.add(str(rc["file"]))
         out.update(str(f) for f in rc.get("files") or [])
+    # v5(N5): 간섭 엣지 함수·전역명·사분면 함수·간접 호출 함수 — payload에 실린 심볼은 통과해야 한다.
+    for e in (arch.get("asil_interference") or {}).get("edges") or []:
+        out.update({str(e.get("caller") or ""), str(e.get("callee") or ""),
+                    str(e.get("caller_file") or ""), str(e.get("callee_file") or "")})
+    for m in (arch.get("asil_interference") or {}).get("modules") or []:
+        out.add(str(m.get("module") or ""))
+    for g in (arch.get("global_coupling") or {}).get("top") or []:
+        out.add(str(g.get("global") or ""))
+        out.update(str(m) for m in g.get("module_names") or [])
+    for p in (arch.get("coverage_complexity") or {}).get("priority") or []:
+        out.update({str(p.get("function") or ""), str(p.get("file") or "")})
+    for t in (arch.get("indirect_calls") or {}).get("top") or []:
+        out.update({str(t.get("function") or ""), str(t.get("file") or "")})
     out.discard("")
     return out
 
@@ -558,6 +590,24 @@ def enrich_architecture(cfg, inp: SummaryInsightInput, det: Dict[str, Any], *, a
         },
         "cycles": arch.get("cycles"),
         "refactor_candidates": arch.get("refactor_candidates"),
+        # v5(N5): 안전 간섭·전역 공유·테스트 우선순위·콜그래프 완전성 — 결정론 근거 동봉.
+        "asil_interference": {
+            k: (arch.get("asil_interference") or {}).get(k)
+            for k in ("available", "reason", "graded_functions", "edges_total", "mixed_modules", "edges", "note")
+        },
+        "global_coupling": {
+            k: (arch.get("global_coupling") or {}).get(k)
+            for k in ("available", "distinct_globals", "cross_module_globals", "top", "note")
+        },
+        "coverage_complexity": {
+            k: (arch.get("coverage_complexity") or {}).get(k)
+            for k in ("available", "reason", "joined", "unjoined", "complexity_basis", "counts", "priority", "note")
+        },
+        "indirect_calls": {
+            k: (arch.get("indirect_calls") or {}).get(k)
+            for k in ("functions_with_indirect", "reference_edges", "top", "note")
+        },
+        "encapsulation": arch.get("encapsulation"),
     }, ensure_ascii=False) + "\n\n[핫스팟 함수 본문 발췌]\n" + excerpt_text
     parsed = _call_llm_json(cfg, system, payload, stage="summary_architecture", agent_call=agent_call)
     items = parsed.get("items") if isinstance(parsed, dict) else parsed

@@ -483,10 +483,11 @@ def _td_fixture():
     }
 
 
-def test_prompt_version_and_sections_v4():
+def test_prompt_version_and_sections_v5():
     from workflow.summary_ai_insight import SECTIONS
 
-    assert PROMPT_VERSION == 4  # v4 bump — 전 AI 캐시 자연 미스(probe가 생성 버튼 노출)
+    # v5 bump(N5 아키텍처 payload 확장) — 전 AI 캐시 자연 미스(probe가 생성 버튼 노출)
+    assert PROMPT_VERSION == 5
     assert SECTIONS == ("rules", "mistakes", "roles", "architecture", "testing")
 
 

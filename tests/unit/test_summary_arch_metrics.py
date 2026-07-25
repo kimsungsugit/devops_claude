@@ -201,3 +201,118 @@ def test_architecture_section_unavailable_without_metrics():
     res = generate_summary_insight(_inp(), use_llm=False)
     assert res["sections"]["architecture"]["ai_enriched"] is False
     assert res["deterministic"]["architecture"] == {"available": False, "reason": "no_source_snapshot"}
+
+
+# ── N5(v4): 간섭 자유 후보 · 전역 결합 · 커버리지×복잡도 · 간접 호출/캡슐화 ──
+
+_V4_SRC = {
+    # used_globals는 파일에 전역 '선언'이 있어야 잡힌다(파서 실동작).
+    "APP/hi.c": (
+        "unsigned int g_shared;\n"
+        "/** @asil D */\n"
+        "void hi_fn(void) { g_shared = 1; lo_fn(); }\n"
+        "static void helper(void) { g_shared = 2; }\n"
+    ),
+    "BSW/lo.c": (
+        "extern unsigned int g_shared;\n"
+        "void lo_fn(void) { g_shared = 3; }\n"
+        "void ptr_user(void) { void (*p)(void) = &hi_fn; p(); }\n"
+    ),
+}
+_V4_NO_ASIL = {k: v.replace("/** @asil D */\n", "") for k, v in _V4_SRC.items()}
+
+
+def _v4(tmp_path, files=None, **kw):
+    src = tmp_path / "source"
+    for rel, text in (files or _V4_SRC).items():
+        p = src / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(text, encoding="utf-8")
+    return compute_architecture_metrics(src, **kw)
+
+
+def test_arch_version_bumped():
+    from workflow.summary_arch_metrics import ARCH_METRICS_VERSION
+
+    assert ARCH_METRICS_VERSION >= 4  # v3 캐시(신규 블록 없음) 재사용 금지
+
+
+def test_asil_interference_edges_and_mixed_modules(tmp_path):
+    r = _v4(tmp_path, asil_by_function={"hi_fn": "D", "lo_fn": "QM"})
+    intf = r["asil_interference"]
+    assert intf["available"] is True and intf["graded_functions"] == 2
+    edge = next(e for e in intf["edges"] if e["caller"] == "hi_fn" and e["callee"] == "lo_fn")
+    assert edge["caller_asil"] == "D" and edge["callee_asil"] == "QM"
+    assert edge["higher"] == "hi_fn" and edge["cross_module"] is True
+    assert "판정이 아니" in intf["note"]
+
+
+def test_asil_interference_honest_without_index(tmp_path):
+    """등급이 어디에도 없으면 available:false — 전부 QM으로 위장하지 않는다."""
+    intf = _v4(tmp_path, files=_V4_NO_ASIL)["asil_interference"]
+    assert intf["available"] is False and intf["reason"] == "no_asil_index"
+
+
+def test_asil_interference_falls_back_to_comment_asil(tmp_path):
+    """주입 인덱스가 없어도 소스 주석이 있으면 축이 산다(폴백 경로)."""
+    intf = _v4(tmp_path)["asil_interference"]
+    assert intf["available"] is True and intf["graded_functions"] == 1
+
+
+def test_global_coupling_counts_usage_not_writers(tmp_path):
+    r = _v4(tmp_path)
+    gc = r["global_coupling"]
+    assert gc["available"] is True
+    top = {g["global"]: g for g in gc["top"]}
+    assert top["g_shared"]["functions"] >= 3      # hi_fn/helper/lo_fn
+    assert top["g_shared"]["modules"] >= 2        # APP · BSW
+    assert gc["cross_module_globals"] >= 1
+    # read/write를 구분하지 않는다는 사실을 note가 명시(허위 'writer' 표현 금지)
+    assert "읽기/쓰기를 구분하지 않는다" in gc["note"]
+
+
+def test_indirect_calls_surface_graph_incompleteness(tmp_path):
+    r = _v4(tmp_path)
+    ic = r["indirect_calls"]
+    assert ic["functions_with_indirect"] >= 1     # ptr_user의 &hi_fn 참조
+    assert ic["reference_edges"] >= 1
+    assert "포함되지 않는다" in ic["note"]
+
+
+def test_encapsulation_marks_static_detection_unreliable(tmp_path):
+    """파서의 static 판정은 과소 탐지된다 — 비율을 제공하지 않고 한계를 명시한다."""
+    enc = _v4(tmp_path)["encapsulation"]
+    assert enc["static_detection_reliable"] is False
+    assert "static_ratio" not in enc            # 허위 '캡슐화 없음' 결론 유발 금지
+    assert enc["functions"] == 4
+    assert enc["header_defined_functions"] == 0
+    assert enc["documented_ratio"] is not None
+    assert "비율 해석 금지" in enc["note"]
+
+
+def test_coverage_complexity_quadrants_and_unjoined(tmp_path):
+    cov = {
+        "hi_fn": {"statement": 0.4, "branch": 0.2},
+        "lo_fn": {"statement": 1.0, "branch": 1.0},
+        # helper/ptr_user는 인덱스에 없음 → unjoined로 계수(침묵 제외 금지)
+    }
+    r = _v4(tmp_path, ccn_by_function={"hi_fn": 20, "lo_fn": 2},
+            coverage_by_function=cov)
+    cc = r["coverage_complexity"]
+    assert cc["available"] is True
+    assert cc["joined"] == 2 and cc["unjoined"] == 2
+    assert cc["complexity_basis"] == "vcast_ccn"
+    assert [p["function"] for p in cc["priority"]] == ["hi_fn"]   # 고복잡·저커버
+    assert cc["counts"]["high_complex_low_cov"] == 1
+
+
+def test_coverage_complexity_absent_is_honest(tmp_path):
+    cc = _v4(tmp_path)["coverage_complexity"]
+    assert cc["available"] is False and cc["reason"] == "no_coverage_index"
+
+
+def test_asil_functions_keeps_comment_only_contract(tmp_path):
+    """by_function은 주석 기반 계약 유지 — 주입 인덱스를 섞으면 라우터 병합이 이중 계산된다."""
+    r = _v4(tmp_path, asil_by_function={"lo_fn": "B"})
+    assert set(r["asil_functions"]["by_function"]) == {"hi_fn"}   # 주석 보유 함수만
+    assert r["asil_functions"]["index_used"] == 1                 # 실제 사용 인덱스는 별도 표기

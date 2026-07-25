@@ -1374,11 +1374,14 @@ def _ccn_map(reports_dir: Path, *, job_url: str = "") -> Dict[str, int]:
 ARCH_METRICS_CACHE_NAME = "summary_arch_metrics_cache.json"
 
 
-def _arch_src_fingerprint(build_root: Path, *, ccn_count: int = 0) -> Optional[Dict[str, Any]]:
+def _arch_src_fingerprint(
+    build_root: Path, *, ccn_count: int = 0, asil_count: int = 0, cov_count: int = 0,
+) -> Optional[Dict[str, Any]]:
     """소스 스냅샷 지문(stat 스캔) — 캐시 히트 판정. 스냅샷 부재는 None.
 
-    ccn_count도 지문에 넣는다(N1) — 소스가 그대로여도 ccn 조인 소스가 붙거나 바뀌면
-    complexity_source가 loc_proxy↔vcast_ccn으로 뒤집혀 핫스팟 순위가 달라지기 때문이다.
+    ccn/asil/coverage 조인 규모도 지문에 넣는다(N1·N5) — 소스가 그대로여도 조인 소스가
+    붙거나 바뀌면 complexity_source가 loc_proxy↔vcast_ccn으로 뒤집히고(핫스팟 순위 변화),
+    v4의 간섭·사분면 블록이 available:false↔true로 뒤집힌다.
     """
     source = build_root / "source"
     if not (source / ".source_complete").exists():
@@ -1395,13 +1398,26 @@ def _arch_src_fingerprint(build_root: Path, *, ccn_count: int = 0) -> Optional[D
     from workflow.summary_arch_metrics import ARCH_METRICS_VERSION
 
     return {"file_count": file_count, "total_bytes": total_bytes,
-            "version": ARCH_METRICS_VERSION, "ccn_count": ccn_count}
+            "version": ARCH_METRICS_VERSION, "ccn_count": ccn_count,
+            "asil_count": asil_count, "cov_count": cov_count}
 
 
 def _arch_metrics_cached(build_root: Path, reports_dir: Path, *, job_url: str = "") -> Optional[Dict[str, Any]]:
-    """아키텍처 메트릭 — 스냅샷+ccn 지문 키 디스크 캐시(파싱 1회화). 스냅샷 부재는 None."""
+    """아키텍처 메트릭 — 스냅샷+조인 지문 키 디스크 캐시(파싱 1회화). 스냅샷 부재는 None.
+
+    ⚠ 순환 주의: ASIL 인덱스는 요구 역전파(추적 링크)만 쓴다 — `_asil_index`를 부르면
+    그 안에서 다시 이 함수를 호출해 무한 재귀가 된다(주석 ASIL은 arch 결과에서 온다).
+    """
+    from workflow.asil_propagation import build_function_asil_map
+
     ccn = _ccn_map(reports_dir, job_url=job_url)
-    src = _arch_src_fingerprint(build_root, ccn_count=len(ccn))
+    propagated = build_function_asil_map(_load_trace_link_table(build_root, reports_dir))
+    asil_index = {
+        k: v.get("asil") for k, v in (propagated.get("by_function") or {}).items() if v.get("asil")
+    }
+    coverage_index = _coverage_index(reports_dir, job_url=job_url)
+    src = _arch_src_fingerprint(build_root, ccn_count=len(ccn),
+                                asil_count=len(asil_index), cov_count=len(coverage_index))
     if src is None:
         return None
     cache_path = reports_dir / ARCH_METRICS_CACHE_NAME
@@ -1410,7 +1426,10 @@ def _arch_metrics_cached(build_root: Path, reports_dir: Path, *, job_url: str = 
         return {**cached["result"], "cache_hit": True}
     from workflow.summary_arch_metrics import compute_architecture_metrics
 
-    result = compute_architecture_metrics(build_root / "source", ccn_by_function=ccn)
+    result = compute_architecture_metrics(
+        build_root / "source", ccn_by_function=ccn,
+        asil_by_function=asil_index, coverage_by_function=coverage_index,
+    )
     if result.get("available"):
         _write_cache_atomic(cache_path, {"src": src, "result": result})
     return {**result, "cache_hit": False}
