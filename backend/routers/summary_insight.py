@@ -794,6 +794,88 @@ def summary_quality_detail(req: dict) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# 테스트 설계 어드바이저 (Phase L2) — 커버리지×ASIL×ccn 기법 매핑 + 설계-시험 갭
+# ---------------------------------------------------------------------------
+
+
+def _compute_test_design_payload(build_root: Path, reports_dir: Path) -> Dict[str, Any]:
+    """test-design 조립(결정론) — 엔드포인트와 ai-insight(Phase M)가 공유.
+
+    무캐시: 이미 로드된 JSON에 대한 순수 산술(수십 ms) — 디스크 캐시는 무효화 버그 표면만
+    늘린다(계획 판정). ASIL은 arch 캐시(v3 asil_functions.by_function — comment_asil) 재사용.
+    """
+    from workflow.test_design_advisor import (
+        MCDC_NOTE,
+        TECHNIQUE_CATALOG,
+        TEST_DESIGN_VERSION,
+        build_coverage_rows,
+        compute_design_test_gap,
+        derive_technique_recommendations,
+    )
+
+    loaded = _load_vcast_function_entries(reports_dir)
+    arch = _arch_metrics_cached(build_root, reports_dir)
+    if arch and arch.get("available"):
+        asil_by_fn = (arch.get("asil_functions") or {}).get("by_function") or {}
+        asil_source = "comment_asil" if asil_by_fn else "no_asil_annotations"
+    else:
+        asil_by_fn = {}
+        asil_source = "no_source_snapshot"
+
+    if loaded["ut_entries"]:
+        rows = build_coverage_rows(loaded["ut_entries"], loaded["it_entries"], asil_by_fn)
+        recs = derive_technique_recommendations(rows)
+        with_asil = sum(1 for r in rows if r["asil"])
+        technique: Dict[str, Any] = {
+            "available": True,
+            "source_coverage": loaded["source"],
+            "asil_source": asil_source,
+            # SwUFn-키 프로젝트(KJPDS02)는 subprogram=SwUFn ID라 함수명 조인이 낮게 나온다 —
+            # 침묵 대신 조인 성립 수를 표면화(함정 가시화 장치).
+            "coverage_join": {"entries": len(rows), "with_asil": with_asil,
+                              "asil_unknown": len(rows) - with_asil},
+            **recs,
+        }
+    else:
+        technique = {"available": False, "reason": "no_coverage_entries"}
+
+    link_table = _read_json(Path(str(build_root)) / "report" / "trace_link_table.json")
+    if not isinstance(link_table, dict) or not link_table:
+        link_table = _read_json(reports_dir / "trace_link_table.json")
+    gap = compute_design_test_gap(link_table if isinstance(link_table, dict) else None)
+    return {
+        "version": TEST_DESIGN_VERSION,
+        "catalog": TECHNIQUE_CATALOG,
+        "technique_recommendations": technique,
+        "design_test_gap": gap,
+        "mcdc_note": MCDC_NOTE,
+    }
+
+
+@router.post("/api/summary/test-design")
+def summary_test_design(req: dict) -> Dict[str, Any]:
+    """테스트 설계 어드바이저(결정론, LLM 0회) — 기법 권고 + 설계-시험 갭. 섹션별 available 분리."""
+    body = req or {}
+    job_url = str(body.get("job_url") or "").strip()
+    if not job_url:
+        return {"ok": True, "available": False, "reason": "job_url_required"}
+    cache_root = _normalize_jenkins_cache_root(str(body.get("cache_root") or ""))
+    builds = list_cached_builds(job_url=job_url, cache_root=cache_root)
+    build_req = _to_int(body.get("build_number"))
+    target = _find_build(builds, build_req) if build_req is not None else (builds[0] if builds else None)
+    if target is None:
+        return {"ok": True, "available": False, "reason": "no_cached_build"}
+    payload = _compute_test_design_payload(
+        Path(str(target.get("build_root") or "")), Path(str(target.get("reports_dir") or ""))
+    )
+    return {
+        "ok": True, "available": True, "reason": None,
+        "build_number": target.get("build_number"),
+        **payload,
+    }
+
+
+# ---------------------------------------------------------------------------
 # 베이스라인→최신 변화 (Phase H) — change-log 비의존 스냅샷 직접 비교
 # ---------------------------------------------------------------------------
 

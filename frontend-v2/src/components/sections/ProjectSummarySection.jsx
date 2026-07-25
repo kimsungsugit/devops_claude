@@ -14,6 +14,7 @@ import ArchitectureMetricsPanel from './ArchitectureMetricsPanel.jsx';
 import ArchitectureGraphPanel from './ArchitectureGraphPanel.jsx';
 import BaselineDiffPanel from './BaselineDiffPanel.jsx';
 import FunctionCoveragePanel from './FunctionCoveragePanel.jsx';
+import TestDesignPanel from './TestDesignPanel.jsx';
 
 /**
  * ProjectSummarySection — "📌 프로젝트 요약" 탭 (단일 뷰 건강 대시보드).
@@ -571,6 +572,9 @@ export default function ProjectSummarySection({ job, analysisResult }) {
 
       {/* 함수별 커버리지 + 실패 테스트 — vectorcast_detail(기존 미노출 갭) */}
       <FunctionCoveragePanel jobUrl={jobUrl} cacheRoot={cacheRoot} />
+
+      {/* 테스트 설계 어드바이저 — 기법 권고·설계-시험 갭 (L2) */}
+      <TestDesignPanel jobUrl={jobUrl} cacheRoot={cacheRoot} />
 
       {/* 빌드 타임라인 (전체 빌드) */}
       <div className="panel" style={PANEL}>
