@@ -64,7 +64,8 @@ def test_quality_detail_sections_independent(tmp_path, monkeypatch):
     monkeypatch.setattr(si, "list_cached_builds", lambda **k: [meta])
     resp = si.summary_quality_detail({"job_url": "http://j/"})
     assert resp["function_coverage"]["available"] is False
-    assert resp["function_coverage"]["reason"] == "no_vectorcast_detail"
+    # L1: 소스가 detail 한 종이 아니게 되면서 reason 명칭 일반화(진단 문자열 — 프론트 분기 없음)
+    assert resp["function_coverage"]["reason"] == "no_function_coverage_source"
     assert resp["failed_testcases"]["available"] is True
 
     meta2 = _prep(tmp_path / "x", detail=True, rag=False)
@@ -105,3 +106,99 @@ def test_ccn_map_detail_takes_precedence_when_populated(tmp_path):
         "vectorcast": {"ut_metrics": {"entries": [{"subprogram": "f1", "ccn": 3}]}},
     }), encoding="utf-8")
     assert _ccn_map(tmp_path) == {"d": 9}  # 구 규약이 채워져 있으면 그대로(폴백 미발동)
+
+
+# ── L1: 소스 폴백·IT 분리·rag 경로 교정 ─────────────────────────────────────
+
+def _prep_metrics(tmp_path: Path, *, rag_nested: bool = False) -> dict:
+    """실측 규약: vectorcast_detail은 빈 {} — 실데이터는 vectorcast.ut/it_metrics.entries."""
+    root = tmp_path / "build_26"
+    rd = root / "report"
+    rd.mkdir(parents=True)
+    summary = {
+        "vectorcast_detail": {},
+        "vectorcast": {
+            "ut_metrics": {"entries": [
+                {"unit": "a.c", "subprogram": "f_full", "ccn": 2,
+                 "statements": {"covered": 8, "total": 8, "rate": 1.0},
+                 "branches": {"covered": 2, "total": 2, "rate": 1.0}},
+                {"unit": "a.c", "subprogram": "f_half", "ccn": 5,
+                 "statements": {"covered": 5, "total": 10, "rate": 0.5},
+                 "branches": {"covered": 1, "total": 4, "rate": 0.25}},
+            ]},
+            "it_metrics": {"entries": [
+                {"unit": "b.c'1", "subprogram": "g_it", "ccn": 1,
+                 "functions": {"covered": 0, "total": 1, "rate": 0.0},
+                 "function_calls": {"covered": 0, "total": 3, "rate": 0.0}},
+            ]},
+        },
+    }
+    (rd / "analysis_summary.json").write_text(json.dumps(summary), encoding="utf-8")
+    if rag_nested:
+        sub = rd / "vectorcast_rag"
+        sub.mkdir()
+        (sub / "vectorcast_rag.json").write_text(json.dumps({"failures": []}), encoding="utf-8")
+    return {"build_root": str(root), "build_number": 26, "reports_dir": str(rd), "mtime": 0}
+
+
+def test_fallback_to_vectorcast_metrics_available(tmp_path, monkeypatch):
+    """회귀 고정 핵심: detail 빈 {}여도 ut_metrics로 available:true (이전엔 전 빌드 false)."""
+    from backend.routers import summary_insight as si
+
+    meta = _prep_metrics(tmp_path)
+    monkeypatch.setattr(si, "list_cached_builds", lambda **k: [meta])
+    resp = si.summary_quality_detail({"job_url": "http://j/"})
+    fc = resp["function_coverage"]
+    assert fc["available"] is True and fc["source"] == "vectorcast_metrics"
+    assert fc["totals"]["statements"] == {"covered": 13, "total": 18, "rate": 72.2}
+    assert fc["totals"]["branches"] == {"covered": 3, "total": 6, "rate": 50.0}  # L1: 분기 totals 신설
+    assert [w["subprogram"] for w in fc["worst"]] == ["f_half", "f_full"]
+
+
+def test_it_coverage_section_independent_and_unit_normalized(tmp_path, monkeypatch):
+    from backend.routers import summary_insight as si
+
+    meta = _prep_metrics(tmp_path)
+    monkeypatch.setattr(si, "list_cached_builds", lambda **k: [meta])
+    resp = si.summary_quality_detail({"job_url": "http://j/"})
+    it = resp["it_coverage"]
+    assert it["available"] is True
+    assert it["totals"]["functions"] == {"covered": 0, "total": 1, "rate": 0.0}
+    assert it["totals"]["function_calls"]["total"] == 3
+    assert it["worst"][0]["unit"] == "b.c"  # env 인스턴스 접미사('1) 정규화
+    # 구 규약(detail)만 있는 빌드는 IT 섹션이 정직하게 부재
+    meta2 = _prep(tmp_path / "x", detail=True, rag=False)
+    monkeypatch.setattr(si, "list_cached_builds", lambda **k: [meta2])
+    resp2 = si.summary_quality_detail({"job_url": "http://j/"})
+    assert resp2["it_coverage"] == {"available": False, "reason": "no_it_metrics"}
+
+
+def test_rag_subfolder_path_regression(tmp_path, monkeypatch):
+    """경로 버그 회귀 고정: 실물은 vectorcast_rag/ 하위폴더 — 이전엔 항상 available:false."""
+    from backend.routers import summary_insight as si
+
+    meta = _prep_metrics(tmp_path, rag_nested=True)
+    monkeypatch.setattr(si, "list_cached_builds", lambda **k: [meta])
+    resp = si.summary_quality_detail({"job_url": "http://j/"})
+    ft = resp["failed_testcases"]
+    assert ft["available"] is True and ft["count"] == 0
+    assert ft["source_path"].replace("\\", "/").endswith("vectorcast_rag/vectorcast_rag.json")
+
+
+def test_rag_deep_rglob_latest_mtime(tmp_path, monkeypatch):
+    import os
+
+    from backend.routers import summary_insight as si
+
+    meta = _prep_metrics(tmp_path)
+    rd = Path(meta["reports_dir"])
+    old = rd / "local_upload" / "a" / "vectorcast_rag.json"
+    new = rd / "local_upload" / "b" / "vectorcast_rag.json"
+    for i, p in enumerate([old, new]):
+        p.parent.mkdir(parents=True)
+        p.write_text(json.dumps({"failures": [{"testcase": f"T{i}"}]}), encoding="utf-8")
+    os.utime(old, (1_000_000, 1_000_000))  # old를 과거로 — mtime 최신(new) 채택 검증
+    monkeypatch.setattr(si, "list_cached_builds", lambda **k: [meta])
+    resp = si.summary_quality_detail({"job_url": "http://j/"})
+    ft = resp["failed_testcases"]
+    assert ft["available"] is True and ft["items"][0]["testcase"] == "T1"

@@ -593,12 +593,162 @@ def summary_rule_definition(req: dict) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+def _load_vcast_function_entries(reports_dir: Path) -> Dict[str, Any]:
+    """함수단위 커버리지 entries 로드 — vectorcast_detail(구 규약) → vectorcast.ut/it_metrics 폴백.
+
+    실측: 캐시 전 빌드에서 vectorcast_detail은 빈 {} — 실데이터는 vectorcast.ut_metrics.entries
+    (구문/분기)와 it_metrics.entries(함수 진입/호출 — 별개 메트릭 세트)에 있다(L1 잠복 결함 교정.
+    이전엔 전 빌드가 available:false). 반환 {"ut_entries", "it_entries", "source"}.
+    """
+    data = _read_json(reports_dir / "analysis_summary.json") or {}
+    detail = data.get("vectorcast_detail") if isinstance(data.get("vectorcast_detail"), dict) else {}
+    agg = detail.get("aggregate_coverage") if isinstance(detail.get("aggregate_coverage"), dict) else {}
+    det_entries = [e for e in (agg.get("entries") or []) if isinstance(e, dict)]
+    if det_entries:
+        return {"ut_entries": det_entries, "it_entries": [], "source": "vectorcast_detail"}
+    vc = data.get("vectorcast") if isinstance(data.get("vectorcast"), dict) else {}
+    ut_sec = vc.get("ut_metrics") if isinstance(vc.get("ut_metrics"), dict) else {}
+    it_sec = vc.get("it_metrics") if isinstance(vc.get("it_metrics"), dict) else {}
+    ut = [e for e in (ut_sec.get("entries") or []) if isinstance(e, dict)]
+    it = [e for e in (it_sec.get("entries") or []) if isinstance(e, dict)]
+    if ut or it:
+        return {"ut_entries": ut, "it_entries": it, "source": "vectorcast_metrics"}
+    return {"ut_entries": [], "it_entries": [], "source": None}
+
+
+def _norm_unit(u: Any) -> str:
+    """IT unit의 env 인스턴스 접미사 제거 — "sysctrl_main_pds.c'1" → "sysctrl_main_pds.c"."""
+    s = str(u or "")
+    return s.split("'", 1)[0] if "'" in s else s
+
+
+def _aggregate_ut_coverage(entries: List[Dict[str, Any]], worst_limit: int) -> Dict[str, Any]:
+    """UT(구문/분기) 함수단위 집계 — 구 quality-detail 로직 이관 + 분기 totals 합산(L1)."""
+    cov_st = st_total = 0
+    cov_br = br_total = 0
+    fully = 0
+    uncovered_rows: List[Dict[str, Any]] = []
+    rated: List[Dict[str, Any]] = []
+    for e in entries:
+        st = e.get("statements") if isinstance(e.get("statements"), dict) else {}
+        try:
+            c_i, t_i = int(st.get("covered")), int(st.get("total"))
+        except (TypeError, ValueError):
+            continue
+        cov_st += c_i
+        st_total += t_i
+        br = e.get("branches") if isinstance(e.get("branches"), dict) else {}
+        try:
+            cov_br += int(br.get("covered"))
+            br_total += int(br.get("total"))
+        except (TypeError, ValueError):
+            pass  # 분기 결측 행 — 구문 집계는 계속(분기 totals만 미포함)
+        if t_i > 0 and c_i == t_i:
+            fully += 1
+        if t_i > 0 and c_i == 0:
+            uncovered_rows.append({"unit": e.get("unit"), "subprogram": e.get("subprogram")})
+        r = st.get("rate")
+        try:
+            r_f = float(r) if r is not None else None
+        except (TypeError, ValueError):
+            r_f = None
+        if r_f is not None and t_i > 0:
+            rated.append({
+                "unit": e.get("unit"), "subprogram": e.get("subprogram"), "ccn": e.get("ccn"),
+                "statements": st, "branches": e.get("branches"),
+            })
+    rated.sort(key=lambda e: (float((e.get("statements") or {}).get("rate") or 0), str(e.get("subprogram"))))
+    return {
+        "available": True,
+        "totals": {
+            "functions": len(entries),
+            "fully_covered": fully,
+            "uncovered": len(uncovered_rows),
+            "statements": {
+                "covered": cov_st, "total": st_total,
+                "rate": round(cov_st / st_total * 100, 1) if st_total else None,
+            },
+            "branches": {
+                "covered": cov_br, "total": br_total,
+                "rate": round(cov_br / br_total * 100, 1) if br_total else None,
+            },
+        },
+        "worst": rated[:worst_limit],
+        "uncovered": uncovered_rows[:50],
+    }
+
+
+def _aggregate_it_coverage(entries: List[Dict[str, Any]], worst_limit: int) -> Dict[str, Any]:
+    """IT(함수 진입/호출) 집계 — 구문·분기와 비교 불가한 별개 메트릭 세트(프론트가 라벨 명시).
+
+    unit엔 env 인스턴스 접미사('N)가 붙을 수 있어 표기용으로 정규화한다.
+    """
+    fn_cov = fn_total = call_cov = call_total = 0
+    rated: List[Dict[str, Any]] = []
+    for e in entries:
+        fns = e.get("functions") if isinstance(e.get("functions"), dict) else {}
+        try:
+            fc_i, ft_i = int(fns.get("covered")), int(fns.get("total"))
+        except (TypeError, ValueError):
+            continue
+        fn_cov += fc_i
+        fn_total += ft_i
+        calls = e.get("function_calls") if isinstance(e.get("function_calls"), dict) else {}
+        try:
+            call_cov += int(calls.get("covered"))
+            call_total += int(calls.get("total"))
+        except (TypeError, ValueError):
+            pass
+        if ft_i > 0 and fc_i < ft_i:
+            rated.append({
+                "unit": _norm_unit(e.get("unit")), "subprogram": e.get("subprogram"),
+                "ccn": e.get("ccn"), "functions": fns, "function_calls": e.get("function_calls"),
+            })
+    rated.sort(key=lambda e: (float((e.get("functions") or {}).get("rate") or 0), str(e.get("subprogram"))))
+    return {
+        "available": True,
+        "totals": {
+            "entries": len(entries),
+            "functions": {
+                "covered": fn_cov, "total": fn_total,
+                "rate": round(fn_cov / fn_total * 100, 1) if fn_total else None,
+            },
+            "function_calls": {
+                "covered": call_cov, "total": call_total,
+                "rate": round(call_cov / call_total * 100, 1) if call_total else None,
+            },
+        },
+        "worst": rated[:worst_limit],
+    }
+
+
+def _find_vcast_rag(reports_dir: Path) -> Optional[Path]:
+    """vectorcast_rag.json 실경로 — ①루트(구 가정) ②vectorcast_rag/ 하위(실물 정규) ③rglob 최신.
+
+    실측: 전 빌드에서 파일은 reports/vectorcast_rag/vectorcast_rag.json 하위폴더에만 있다 —
+    루트만 보던 구 코드는 항상 available:false(L1 경로 버그 교정, 같은 버그가 2곳이었음).
+    """
+    direct = reports_dir / "vectorcast_rag.json"
+    if direct.exists():
+        return direct
+    nested = reports_dir / "vectorcast_rag" / "vectorcast_rag.json"
+    if nested.exists():
+        return nested
+    try:
+        found = [p for p in reports_dir.rglob("vectorcast_rag.json") if p.is_file()]
+        if found:
+            return max(found, key=lambda p: p.stat().st_mtime)
+    except OSError:
+        pass
+    return None
+
+
 @router.post("/api/summary/quality-detail")
 def summary_quality_detail(req: dict) -> Dict[str, Any]:
-    """함수(subprogram)단위 커버리지 + 실패 TC — analysis_summary.json 직독(기존 미노출 갭).
+    """함수(subprogram)단위 커버리지(UT 구문/분기 + IT 진입/호출) + 실패 TC.
 
-    vectorcast_detail.aggregate_coverage.entries[]가 원천. 섹션별 available:false 분리 —
-    한쪽 부재가 다른 쪽을 죽이지 않는다(증거부재≠0).
+    소스 키: vectorcast_detail(구 규약) → vectorcast.ut/it_metrics 폴백 — source로 출처 표기.
+    섹션별 available:false 분리 — 한쪽 부재가 다른 쪽을 죽이지 않는다(증거부재≠0).
     """
     body = req or {}
     job_url = str(body.get("job_url") or "").strip()
@@ -613,66 +763,23 @@ def summary_quality_detail(req: dict) -> Dict[str, Any]:
     reports_dir = Path(str(target.get("reports_dir") or ""))
     worst_limit = max(1, min(_to_int(body.get("worst_limit")) or 15, 50))
 
-    data = _read_json(reports_dir / "analysis_summary.json") or {}
-    detail = data.get("vectorcast_detail") if isinstance(data.get("vectorcast_detail"), dict) else {}
-    agg = detail.get("aggregate_coverage") if isinstance(detail.get("aggregate_coverage"), dict) else {}
-    entries = [e for e in (agg.get("entries") or []) if isinstance(e, dict)]
-
-    def _rate(e: Dict[str, Any]) -> Optional[float]:
-        st = e.get("statements") if isinstance(e.get("statements"), dict) else {}
-        r = st.get("rate")
-        try:
-            return float(r) if r is not None else None
-        except (TypeError, ValueError):
-            return None
-
-    if entries:
-        cov_st = 0
-        cov_total = 0
-        fully = 0
-        uncovered_rows: List[Dict[str, Any]] = []
-        rated: List[Dict[str, Any]] = []
-        for e in entries:
-            st = e.get("statements") if isinstance(e.get("statements"), dict) else {}
-            c, t = st.get("covered"), st.get("total")
-            try:
-                c_i, t_i = int(c), int(t)
-            except (TypeError, ValueError):
-                continue
-            cov_st += c_i
-            cov_total += t_i
-            if t_i > 0 and c_i == t_i:
-                fully += 1
-            if t_i > 0 and c_i == 0:
-                uncovered_rows.append({"unit": e.get("unit"), "subprogram": e.get("subprogram")})
-            r = _rate(e)
-            if r is not None and t_i > 0:
-                rated.append({
-                    "unit": e.get("unit"), "subprogram": e.get("subprogram"), "ccn": e.get("ccn"),
-                    "statements": st, "branches": e.get("branches"),
-                })
-        rated.sort(key=lambda e: (float((e.get("statements") or {}).get("rate") or 0), str(e.get("subprogram"))))
-        function_coverage: Dict[str, Any] = {
-            "available": True,
-            "totals": {
-                "functions": len(entries),
-                "fully_covered": fully,
-                "uncovered": len(uncovered_rows),
-                "statements": {
-                    "covered": cov_st, "total": cov_total,
-                    "rate": round(cov_st / cov_total * 100, 1) if cov_total else None,
-                },
-            },
-            "worst": rated[:worst_limit],
-            "uncovered": uncovered_rows[:50],
-        }
+    loaded = _load_vcast_function_entries(reports_dir)
+    if loaded["ut_entries"]:
+        function_coverage: Dict[str, Any] = _aggregate_ut_coverage(loaded["ut_entries"], worst_limit)
+        function_coverage["source"] = loaded["source"]
     else:
-        function_coverage = {"available": False, "reason": "no_vectorcast_detail"}
+        function_coverage = {"available": False, "reason": "no_function_coverage_source"}
+    if loaded["it_entries"]:
+        it_coverage: Dict[str, Any] = _aggregate_it_coverage(loaded["it_entries"], worst_limit)
+        it_coverage["source"] = loaded["source"]
+    else:
+        it_coverage = {"available": False, "reason": "no_it_metrics"}
 
-    failures = _vcast_failures(reports_dir)
+    rag_path = _find_vcast_rag(reports_dir)
+    failures = _vcast_failures(rag_path)
     failed_testcases = (
-        {"available": True, "count": len(failures), "items": failures}
-        if (reports_dir / "vectorcast_rag.json").exists()
+        {"available": True, "count": len(failures), "items": failures, "source_path": str(rag_path)}
+        if rag_path is not None
         else {"available": False, "reason": "no_vectorcast_rag"}
     )
     return {
@@ -681,6 +788,7 @@ def summary_quality_detail(req: dict) -> Dict[str, Any]:
         "reason": None,
         "build_number": target.get("build_number"),
         "function_coverage": function_coverage,
+        "it_coverage": it_coverage,
         "failed_testcases": failed_testcases,
     }
 
@@ -925,8 +1033,11 @@ def summary_architecture_metrics(req: dict) -> Dict[str, Any]:
     return {"ok": True, "reason": None, "build_number": target.get("build_number"), **result}
 
 
-def _vcast_failures(reports_dir: Path) -> List[Dict[str, Any]]:
-    data = _read_json(reports_dir / "vectorcast_rag.json") or {}
+def _vcast_failures(rag_path: Optional[Path]) -> List[Dict[str, Any]]:
+    """vectorcast_rag의 failures[] — 경로는 _find_vcast_rag가 해석(하위폴더 실물 정규, L1)."""
+    if rag_path is None:
+        return []
+    data = _read_json(rag_path) or {}
     failures = data.get("failures")
     return [f for f in failures if isinstance(f, dict)][:50] if isinstance(failures, list) else []
 
@@ -1104,7 +1215,7 @@ def summary_ai_insight_endpoint(req: dict) -> Dict[str, Any]:
         delta=delta,
         signals=signals,
         complexity_offenders=_complexity_offenders(build_root, reports_dir),
-        vcast_failures=_vcast_failures(reports_dir),
+        vcast_failures=_vcast_failures(_find_vcast_rag(reports_dir)),
         # 큐레이션(v3) — raw summary_raw 총계(미추적 627 등 관측치)가 LLM 조치 항목으로
         # 오변환되던 것 차단: design_gap 중심 분류 + note만 전달(기확립 진단과 lockstep).
         trace_summary=curate_trace_summary(body.get("trace_summary") if isinstance(body.get("trace_summary"), dict) else None),
