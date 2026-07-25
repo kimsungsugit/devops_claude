@@ -10,7 +10,7 @@
 import { Fragment, useEffect, useState } from 'react';
 import { post } from '../../api.js';
 import { TrendLine } from '../charts.jsx';
-import { UnresolvedEvidenceCard } from './RuleEvidenceCards.jsx';
+import { RuleDefinitionCard, UnresolvedEvidenceCard } from './RuleEvidenceCards.jsx';
 
 // 미해소 분류 — 구간 증거(변경에도 위반 유지 vs 무변경 잔존) 확장 대상(J2).
 const UNRESOLVED_CLASSES = new Set(['increasing', 'persistent', 'new_recent']);
@@ -257,6 +257,7 @@ export default function RuleTrendPanel({ jobUrl, cacheRoot }) {
                                 ))}
                               </>
                             )}
+                            <RuleDefinitionCard jobUrl={jobUrl} cacheRoot={cacheRoot} rule={r.rule} />
                           </td>
                         </tr>
                       )}

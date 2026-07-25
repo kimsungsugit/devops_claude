@@ -462,6 +462,132 @@ def summary_rule_unresolved_evidence(req: dict) -> Dict[str, Any]:
             "file_changed": None, "diff": None}
 
 
+RULE_DEF_CACHE_NAME = "summary_rule_definition_cache.json"
+_RULE_DEF_CACHE_LOCK = threading.Lock()
+
+
+@router.post("/api/summary/rule-definition")
+def summary_rule_definition(req: dict) -> Dict[str, Any]:
+    """팀 코딩 룰 초안(LLM on-demand) — 규칙 공식 설명+트렌드+실코드 증거를 조립해 생성.
+
+    코드 증거(해소 diff·미해소 발췌) 0건이면 no_code_evidence 거부 — 환각 필터의 허용
+    어휘가 비어 일반론 초안이 그대로 통과하는 구멍을 막는다. note(초안≠확정 룰,
+    관측≠인과)는 서버 고정 주입. probe/force/캐시 규약은 rule-fix-example과 동일.
+    """
+    import hashlib as _hashlib
+
+    from backend.services.build_inventory import find_build_meta, list_cached_builds_meta
+    from backend.services.prqa_rule_trend import compute_rule_trend
+    from backend.services.rule_fix_examples import collect_fix_evidence, resolve_snapshot_file
+    from workflow.rule_definition import (
+        RULE_DEFINITION_NOTE,
+        RULE_DEFINITION_PROMPT_VERSION,
+        generate_rule_definition,
+    )
+
+    body = req or {}
+    job_url = str(body.get("job_url") or "").strip()
+    rule = str(body.get("rule") or "").strip()
+    if not job_url or not rule:
+        return {"ok": True, "available": False, "reason": "params_required"}
+    cache_root = _normalize_jenkins_cache_root(str(body.get("cache_root") or ""))
+
+    trend = compute_rule_trend(job_url=job_url, cache_root=cache_root, limit=10, max_rules=100)
+    if not trend.get("available"):
+        return {"ok": True, "available": False, "reason": trend.get("reason") or "no_cached_build"}
+    row = next((r for r in trend.get("rules") or [] if r.get("rule") == rule), None)
+    if row is None:
+        return {"ok": True, "available": False, "reason": "rule_not_in_trend", "rule": rule}
+
+    metas = list_cached_builds_meta(job_url=job_url, cache_root=cache_root)
+    rng = trend.get("observed_range") or {}
+    to_meta = find_build_meta(metas, rng.get("to_build"))
+
+    # 증거 조립(결정론) — ①해소 구간 diff ≤2 ②미해소 파일 발췌 ≤2(최신 analyzed 스냅샷 head).
+    evidence_diffs: List[Dict[str, Any]] = []
+    for f in (row.get("decreased_files") or [])[:2]:
+        fm = find_build_meta(metas, f.get("from_build"))
+        tm = find_build_meta(metas, f.get("to_build"))
+        if fm is None or tm is None:
+            continue
+        ev = collect_fix_evidence(
+            from_build_root=Path(str(fm.get("build_root"))),
+            to_build_root=Path(str(tm.get("build_root"))),
+            file=str(f.get("path") or ""),
+        )
+        if ev.get("ok"):
+            evidence_diffs.append(
+                {"file": f.get("path"), "text": ev["diff"]["text"], "diff_sha": ev["diff_sha"]}
+            )
+    unresolved_excerpts: List[Dict[str, Any]] = []
+    if to_meta is not None:
+        for f in (row.get("files_latest") or [])[:2]:
+            p = resolve_snapshot_file(Path(str(to_meta.get("build_root"))), str(f.get("path") or ""))
+            if p is None:
+                continue
+            try:
+                text = p.read_text(encoding="utf-8", errors="ignore")[:2000]
+            except OSError:
+                continue
+            if text.strip():
+                unresolved_excerpts.append({"file": f.get("path"), "text": text})
+    if not evidence_diffs and not unresolved_excerpts:
+        return {"ok": True, "available": False, "reason": "no_code_evidence", "rule": rule}
+
+    model = _expected_insight_model()
+    ex_sha = _hashlib.sha256(
+        "\n".join(e["text"] for e in unresolved_excerpts).encode("utf-8", "ignore")
+    ).hexdigest()[:16]
+    key = _hashlib.sha256("|".join([
+        rule, model, str(RULE_DEFINITION_PROMPT_VERSION),
+        ",".join(sorted(e["diff_sha"] for e in evidence_diffs)), ex_sha,
+    ]).encode()).hexdigest()
+    cache_path = (
+        Path(str(to_meta.get("reports_dir"))) / RULE_DEF_CACHE_NAME if to_meta is not None else None
+    )
+    hit = None
+    if cache_path is not None:
+        with _RULE_DEF_CACHE_LOCK:
+            entries = _fix_cache_load(cache_path)
+            hit = entries.get(key)
+    probe = bool(body.get("probe"))
+    force = bool(body.get("force"))
+    if hit and not force:
+        return {**hit, "cached": True}
+    if probe:
+        return {
+            "ok": True, "available": True, "cached": False, "rule": rule,
+            "evidence_used": {"fix_diffs": len(evidence_diffs),
+                              "unresolved_excerpts": len(unresolved_excerpts)},
+        }
+
+    gen = generate_rule_definition(
+        rule=rule, description=row.get("description"), trend_row=row,
+        evidence_diffs=evidence_diffs, unresolved_excerpts=unresolved_excerpts,
+    )
+    payload: Dict[str, Any] = {
+        "ok": True, "available": True, "reason": None, "rule": rule,
+        "description": row.get("description"),
+        "trend": {k: row.get(k) for k in ("classification", "first", "latest", "net")},
+        "evidence_used": {"fix_diffs": len(evidence_diffs),
+                          "unresolved_excerpts": len(unresolved_excerpts)},
+        "note": RULE_DEFINITION_NOTE,
+        "definition": gen["definition"],
+        "ai_enriched": gen["ai_enriched"],
+        "enrich_reason": gen["enrich_reason"],
+        "model": gen["model"],
+        "prompt_version": RULE_DEFINITION_PROMPT_VERSION,
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+    }
+    if cache_path is not None:
+        # RMW 원자화(락) — LLM 호출 밖에서 재로드(형제 엔트리 lost-update 방지, fix-example과 동일).
+        with _RULE_DEF_CACHE_LOCK:
+            entries = _fix_cache_load(cache_path)
+            entries[key] = payload
+            _fix_cache_store(cache_path, entries)
+    return {**payload, "cached": False}
+
+
 # ---------------------------------------------------------------------------
 # 품질 상세 (Phase I) — 함수단위 커버리지(기존 갭) + 실패 테스트케이스
 # ---------------------------------------------------------------------------
