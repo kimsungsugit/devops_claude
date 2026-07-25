@@ -534,7 +534,8 @@ def summary_rule_definition(req: dict) -> Dict[str, Any]:
     if not evidence_diffs and not unresolved_excerpts:
         return {"ok": True, "available": False, "reason": "no_code_evidence", "rule": rule}
 
-    model = _expected_insight_model()
+    # LLM 미설정이면 model=None — join이 TypeError로 죽지 않게 빈 문자열로(키 일관성 유지).
+    model = _expected_insight_model() or ""
     ex_sha = _hashlib.sha256(
         "\n".join(e["text"] for e in unresolved_excerpts).encode("utf-8", "ignore")
     ).hexdigest()[:16]
@@ -1303,6 +1304,9 @@ def summary_ai_insight_endpoint(req: dict) -> Dict[str, Any]:
         trace_summary=curate_trace_summary(body.get("trace_summary") if isinstance(body.get("trace_summary"), dict) else None),
         code_excerpts=excerpts,
         arch_metrics=arch_metrics if (arch_metrics and arch_metrics.get("available")) else None,
+        # v4: 테스트 설계 결정론 payload(test-design 엔드포인트와 동일 조립) + 규칙 공식 설명(RCFInfo).
+        test_design=_compute_test_design_payload(build_root, reports_dir),
+        rule_descriptions=(cur["details"].get("rule_descriptions") or {}) if cur else {},
     )
     result = generate_summary_insight(inp, sections=sections)
 

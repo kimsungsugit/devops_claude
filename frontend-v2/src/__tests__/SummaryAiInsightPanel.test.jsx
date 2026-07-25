@@ -121,4 +121,27 @@ describe('SummaryAiInsightPanel', () => {
     await user.click(await screen.findByText('AI 인사이트 생성'));
     expect(await screen.findByText(/RCR\) 리포트가 없어 위반 기반 인사이트가 제한/)).toBeInTheDocument();
   });
+
+  it('testing 섹션(v4) — topic 배지·심볼·근거 렌더 + 아키 cycle 배지 맵', async () => {
+    const user = userEvent.setup();
+    mockGenerate = {
+      ...DONE,
+      sections: {
+        ...DONE.sections,
+        architecture: {
+          ai_enriched: true, reason: null,
+          items: [{ topic: 'cycle', finding: '파일 순환 관측', suggestion: '인터페이스 분리 검토', functions: [], files: ['APP/a.c'], basis: 'size 2', confidence: 'medium' }],
+        },
+        testing: {
+          ai_enriched: true, reason: null,
+          items: [{ topic: 'design_gap', finding: '시험 링크 없음', suggestion: 'SUTS 케이스 설계', symbols: ['REQ-9'], basis: 'UDS 1건', confidence: 'medium' }],
+        },
+      },
+    };
+    render(<SummaryAiInsightPanel {...PROPS} />);
+    await user.click(await screen.findByText('AI 인사이트 생성'));
+    expect(await screen.findByText('설계-시험 갭')).toBeInTheDocument();     // testing topic 배지
+    expect(screen.getByText(/대상: REQ-9/)).toBeInTheDocument();
+    expect(screen.getByText('순환 의존')).toBeInTheDocument();               // arch cycle 배지 한국어 맵
+  });
 });

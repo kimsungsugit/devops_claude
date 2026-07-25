@@ -25,8 +25,9 @@ logger = logging.getLogger(__name__)
 # 프롬프트/출력 스키마 개정 시 +1 — 라우터가 캐시 무효화 판단에 사용.
 # v2: architecture 섹션 추가(Phase G).
 # v3: trace 컨텍스트 큐레이션 — 미추적 raw 총계를 LLM이 조치 항목으로 오변환하던 것 차단.
-PROMPT_VERSION = 3
-SECTIONS = ("rules", "mistakes", "roles", "architecture")
+# v4: testing 섹션 + arch payload에 cycles/module_graph + rules에 공식 설명(RCFInfo) 주입(Phase M).
+PROMPT_VERSION = 4
+SECTIONS = ("rules", "mistakes", "roles", "architecture", "testing")
 EXCERPT_MAX_FILES = 4
 EXCERPT_MAX_BYTES_PER_FILE = 4096
 EXCERPT_MAX_TOTAL_BYTES = 16384
@@ -51,6 +52,8 @@ class SummaryInsightInput:
     trace_summary: Optional[Dict[str, Any]] = None
     code_excerpts: List[Dict[str, Any]] = field(default_factory=list)  # [{path,bytes,text,truncated}]
     arch_metrics: Optional[Dict[str, Any]] = None  # summary_arch_metrics 결과(부재=None)
+    test_design: Optional[Dict[str, Any]] = None  # _compute_test_design_payload 결과(부재=None)
+    rule_descriptions: Dict[str, Dict[str, Any]] = field(default_factory=dict)  # RCFInfo {rule: {title,…}}
 
 
 # ---------------------------------------------------------------------------
@@ -291,6 +294,7 @@ def build_deterministic_insight(inp: SummaryInsightInput) -> Dict[str, Any]:
     if cov is None:
         gaps.append({"kind": "coverage_unmeasured", "count": None})
     arch = inp.arch_metrics if isinstance(inp.arch_metrics, dict) else None
+    td = inp.test_design if isinstance(inp.test_design, dict) else None
     return {
         "headline": dict(inp.headline),
         "top_rules": list(inp.top_rules),
@@ -305,9 +309,27 @@ def build_deterministic_insight(inp: SummaryInsightInput) -> Dict[str, Any]:
                 "hotspots": (arch.get("hotspots") or [])[:5],
                 "coupling": arch.get("coupling"),
                 "size_outliers": (arch.get("size_outliers") or [])[:5],
+                "cycles": arch.get("cycles"),  # v4: 사이클 관측(부재 키는 None — v2 캐시 호환)
             }
             if arch and arch.get("available")
             else {"available": False, "reason": (arch or {}).get("reason") or "no_source_snapshot"}
+        ),
+        # 테스트 설계(결정론, v4) — test_design payload 요약. LLM 없이도 프론트/roles가 소비.
+        "testing": (
+            {
+                "available": True,
+                "technique": {
+                    k: (td.get("technique_recommendations") or {}).get(k)
+                    for k in ("available", "reason", "coverage_join", "summary")
+                },
+                "design_test_gap": {
+                    k: (td.get("design_test_gap") or {}).get(k)
+                    for k in ("available", "reason", "totals", "band_missing")
+                },
+                "mcdc_note": td.get("mcdc_note"),
+            }
+            if td
+            else {"available": False, "reason": "no_test_design_input"}
         ),
     }
 
@@ -412,9 +434,17 @@ def enrich_rule_insight(cfg, inp: SummaryInsightInput, det: Dict[str, Any], *, a
     """(a) 위반 룰 해설 — 왜 위험한가/전형 원인/수정 가이드. 실패 시 None."""
     from prompts import load_prompt
     system = load_prompt("summary_rule_insight")
+    # v4: 공식 설명(RCFInfo title)을 입력 규칙 한정으로 동봉 — LLM이 규칙 의미를 지어내지 않게.
+    known_rules = _known_rule_set(inp)
+    official = {
+        r: (inp.rule_descriptions.get(r) or {}).get("title")
+        for r in known_rules
+        if (inp.rule_descriptions.get(r) or {}).get("title")
+    }
     payload = json.dumps({
         "project": inp.job_slug, "builds": [inp.baseline_build, inp.latest_build],
         "top_rules": det["top_rules"], "delta_rules": (inp.delta or {}).get("rules"),
+        "official_descriptions": official,
     }, ensure_ascii=False)
     parsed = _call_llm_json(cfg, system, payload, stage="summary_rules", agent_call=agent_call)
     items = parsed.get("items") if isinstance(parsed, dict) else parsed
@@ -483,6 +513,22 @@ def _known_symbol_set(inp: SummaryInsightInput) -> set:
     for e in arch.get("excerpts") or []:
         if e.get("function"):
             out.add(str(e["function"]))
+    # v4: 모듈/사이클/개선 후보 어휘 — payload에 실린 심볼이 필터를 통과해야 한다.
+    for n in (arch.get("module_graph") or {}).get("nodes") or []:
+        if n.get("module"):
+            out.add(str(n["module"]))
+    cycles = arch.get("cycles") or {}
+    for c in cycles.get("file_sccs") or []:
+        out.update(str(f) for f in c.get("files") or [])
+    for c in cycles.get("module_sccs") or []:
+        out.update(str(m) for m in c.get("modules") or [])
+    for p in cycles.get("mutual_file_pairs") or []:
+        out.add(str(p.get("a") or ""))
+        out.add(str(p.get("b") or ""))
+    for rc in arch.get("refactor_candidates") or []:
+        if rc.get("file"):
+            out.add(str(rc["file"]))
+        out.update(str(f) for f in rc.get("files") or [])
     out.discard("")
     return out
 
@@ -504,7 +550,14 @@ def enrich_architecture(cfg, inp: SummaryInsightInput, det: Dict[str, Any], *, a
         "hotspots": arch.get("hotspots"),
         "coupling": arch.get("coupling"),
         "size_outliers": arch.get("size_outliers"),
-        "asil_functions": arch.get("asil_functions"),
+        "asil_functions": {"count": (arch.get("asil_functions") or {}).get("count")},
+        # v4: 모듈 그래프(엣지 상위 20)·사이클·개선 후보 — 다이어그램과 같은 결정론 근거.
+        "module_graph": {
+            "nodes": (arch.get("module_graph") or {}).get("nodes"),
+            "edges": ((arch.get("module_graph") or {}).get("edges") or [])[:20],
+        },
+        "cycles": arch.get("cycles"),
+        "refactor_candidates": arch.get("refactor_candidates"),
     }, ensure_ascii=False) + "\n\n[핫스팟 함수 본문 발췌]\n" + excerpt_text
     parsed = _call_llm_json(cfg, system, payload, stage="summary_architecture", agent_call=agent_call)
     items = parsed.get("items") if isinstance(parsed, dict) else parsed
@@ -522,11 +575,82 @@ def enrich_architecture(cfg, inp: SummaryInsightInput, det: Dict[str, Any], *, a
         topic = str(it.get("topic") or "").strip() or "refactor_candidate"
         conf = str(it.get("confidence") or "low").lower()
         out.append({
-            "topic": topic if topic in ("layering", "coupling", "refactor_candidate", "hotspot") else "refactor_candidate",
+            "topic": topic if topic in ("layering", "coupling", "refactor_candidate", "hotspot", "cycle") else "refactor_candidate",
             "finding": it.get("finding"),
             "suggestion": it.get("suggestion"),
             "functions": functions,
             "files": files,
+            "basis": it.get("basis"),
+            "confidence": conf if conf in ("high", "medium", "low") else "low",
+        })
+    return out or None
+
+
+def _known_testing_symbol_set(inp: SummaryInsightInput) -> set:
+    """testing 섹션 환각 필터 어휘 — 기법 권고 함수/유닛 ∪ 설계-시험 갭 타깃 ID만 허용."""
+    td = inp.test_design or {}
+    out: set = set()
+    for it in (td.get("technique_recommendations") or {}).get("items") or []:
+        for key in ("function", "unit"):
+            if it.get(key):
+                out.add(str(it[key]))
+    gap = td.get("design_test_gap") or {}
+    for key in ("targets_with_uds_no_suts", "targets_with_uds_no_any_test"):
+        for t in gap.get(key) or []:
+            if isinstance(t, dict) and t.get("target_id"):
+                out.add(str(t["target_id"]))
+    out.discard("")
+    return out
+
+
+def enrich_testing(cfg, inp: SummaryInsightInput, det: Dict[str, Any], *, agent_call=None) -> Optional[List[Dict[str, Any]]]:
+    """(e) 테스트 설계 조언 — test_design 결정론 payload 기반(v4). 입력 부재/실패 시 None.
+
+    출력 심볼(함수/유닛/타깃 ID)이 입력 집합 밖이면 폐기 — '미측정≠미달' 규약은 프롬프트가
+    강제하고, mcdc_note는 결정론 블록이 이미 상시 전달한다.
+    """
+    td = inp.test_design
+    if not isinstance(td, dict):
+        return None
+    known = _known_testing_symbol_set(inp)
+    if not known:
+        # 인용 가능한 심볼(기법 권고 함수/갭 타깃)이 0 — 어떤 출력도 필터를 통과할 수 없으므로
+        # LLM 호출 자체를 생략(근거 없는 일반론 차단 + 비용 0). 결정론 블록이 상태를 전달한다.
+        return None
+    from prompts import load_prompt
+    system = load_prompt("summary_testing")
+    tech = td.get("technique_recommendations") or {}
+    gap = td.get("design_test_gap") or {}
+    payload = json.dumps({
+        "technique_items": (tech.get("items") or [])[:15],
+        "technique_summary": tech.get("summary"),
+        "coverage_join": tech.get("coverage_join"),
+        "design_test_gap": {
+            "totals": gap.get("totals"),
+            "band_missing": gap.get("band_missing"),
+            "no_suts_sample": (gap.get("targets_with_uds_no_suts") or [])[:10],
+            "no_any_sample": (gap.get("targets_with_uds_no_any_test") or [])[:10],
+        },
+        "mcdc_note": td.get("mcdc_note"),
+    }, ensure_ascii=False)
+    parsed = _call_llm_json(cfg, system, payload, stage="summary_testing", agent_call=agent_call)
+    items = parsed.get("items") if isinstance(parsed, dict) else parsed
+    if not isinstance(items, list):
+        return None
+    out = []
+    for it in items:
+        if not isinstance(it, dict) or not it.get("finding"):
+            continue
+        symbols = [s for s in (it.get("symbols") or []) if str(s) in known]
+        if not symbols:
+            continue  # 입력 심볼 근거가 없는 조언 — 환각으로 간주
+        topic = str(it.get("topic") or "").strip()
+        conf = str(it.get("confidence") or "low").lower()
+        out.append({
+            "topic": topic if topic in ("coverage_gap", "design_gap", "technique", "mcdc") else "technique",
+            "finding": it.get("finding"),
+            "suggestion": it.get("suggestion"),
+            "symbols": symbols,
             "basis": it.get("basis"),
             "confidence": conf if conf in ("high", "medium", "low") else "low",
         })
@@ -603,6 +727,7 @@ def generate_summary_insight(
         "mistakes": lambda: enrich_mistake_patterns(cfg, inp, det, agent_call=agent_call),
         "roles": lambda: enrich_role_guidance(cfg, inp, det, agent_call=agent_call),
         "architecture": lambda: enrich_architecture(cfg, inp, det, agent_call=agent_call),
+        "testing": lambda: enrich_testing(cfg, inp, det, agent_call=agent_call),
     }
     for name in sections:
         if name not in enrichers:

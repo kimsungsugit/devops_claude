@@ -211,7 +211,7 @@ export default function SummaryAiInsightPanel({ jobUrl, cacheRoot, scmId, trace 
               {(sections.architecture.items || []).map((it, i) => (
                 <div key={i} style={{ ...xs, borderLeft: '3px solid var(--color-purple, var(--accent))', padding: '4px 8px', marginBottom: 6 }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-                    <Badge text={{ layering: '레이어링', coupling: '결합도', hotspot: '핫스팟', refactor_candidate: '리팩토링 후보' }[it.topic] || it.topic} color="var(--color-purple, var(--accent))" />
+                    <Badge text={{ layering: '레이어링', coupling: '결합도', hotspot: '핫스팟', refactor_candidate: '리팩토링 후보', cycle: '순환 의존' }[it.topic] || it.topic} color="var(--color-purple, var(--accent))" />
                     <Badge text={`확신도 ${it.confidence || 'low'}`} color={CONF_COLOR[it.confidence] || 'var(--text-muted)'} />
                   </div>
                   {it.finding && <div>발견: {it.finding}</div>}
@@ -225,6 +225,33 @@ export default function SummaryAiInsightPanel({ jobUrl, cacheRoot, scmId, trace 
                   {det.architecture?.available === false
                     ? '소스 스냅샷이 없어 아키텍처 분석이 제한됩니다.'
                     : 'AI 미사용 상태 — 아래 아키텍처 메트릭 패널의 결정론 수치를 참고하세요.'}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* (e) 테스트 설계 조언 (v4) */}
+          {sections.testing && (
+            <div>
+              <div style={{ ...xs, fontWeight: 700, marginBottom: 4 }}>테스트 설계 조언 — 기법·설계-시험 갭</div>
+              <FallbackNote section={sections.testing} />
+              {(sections.testing.items || []).map((it, i) => (
+                <div key={i} style={{ ...xs, borderLeft: '3px solid var(--color-info)', padding: '4px 8px', marginBottom: 6 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                    <Badge text={{ coverage_gap: '커버리지 갭', design_gap: '설계-시험 갭', technique: '기법', mcdc: 'MC/DC 측정' }[it.topic] || it.topic} color="var(--color-info)" />
+                    <Badge text={`확신도 ${it.confidence || 'low'}`} color={CONF_COLOR[it.confidence] || 'var(--text-muted)'} />
+                  </div>
+                  {it.finding && <div>발견: {it.finding}</div>}
+                  {it.suggestion && <div>제안: {it.suggestion}</div>}
+                  {it.basis && <div style={{ color: 'var(--text-muted)' }}>근거: {it.basis}</div>}
+                  {(it.symbols || []).length > 0 && <div style={{ color: 'var(--text-muted)' }}>대상: {(it.symbols || []).join(', ')}</div>}
+                </div>
+              ))}
+              {sections.testing.ai_enriched === false && (
+                <div style={{ ...xs, color: 'var(--text-muted)' }}>
+                  {det.testing?.available === false
+                    ? '테스트 설계 입력이 없어 조언이 제한됩니다.'
+                    : 'AI 미사용 상태 — 아래 테스트 설계 어드바이저 패널의 결정론 권고를 참고하세요.'}
                 </div>
               )}
             </div>

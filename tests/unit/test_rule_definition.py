@@ -142,6 +142,25 @@ def test_endpoint_definition_no_code_evidence(tmp_path, monkeypatch):
     assert r["available"] is False and r["reason"] == "no_code_evidence"
 
 
+def test_endpoint_definition_model_none_does_not_crash(tmp_path, monkeypatch):
+    """LLM 미설정 배포(_expected_insight_model()=None) — 캐시 키 join이 죽지 않아야 한다.
+
+    회귀 고정: 전체 스위트에서 config 오염으로 model=None이 되자 '|'.join(TypeError) 500.
+    f-string을 쓰는 fix-example과 달리 join은 None을 못 삼킨다.
+    """
+    si = _wire(tmp_path, monkeypatch, dict(_ROW))
+    monkeypatch.setattr(si, "_expected_insight_model", lambda: None)
+    monkeypatch.setattr(
+        "workflow.rule_definition.generate_rule_definition",
+        lambda **kw: {"definition": None, "ai_enriched": False,
+                      "enrich_reason": "llm_unavailable", "model": None},
+    )
+    p = si.summary_rule_definition({**_BODY, "probe": True})
+    assert p["available"] is True  # probe가 키 계산 경로를 지나도 크래시 없음
+    r = si.summary_rule_definition(dict(_BODY))
+    assert r["available"] is True and r["ai_enriched"] is False
+
+
 def test_endpoint_definition_rule_not_in_trend_and_params(tmp_path, monkeypatch):
     si = _wire(tmp_path, monkeypatch, dict(_ROW))
     r = si.summary_rule_definition({"job_url": "http://j/", "rule": "Rule-없음"})

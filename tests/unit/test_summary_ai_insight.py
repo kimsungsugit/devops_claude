@@ -459,3 +459,117 @@ def test_endpoint_no_cached_build(monkeypatch):
     monkeypatch.setattr(si, "list_cached_builds", lambda **k: [])
     resp = si.summary_ai_insight_endpoint({"job_url": "http://j/"})
     assert resp["available"] is False and resp["reason"] == "no_cached_build"
+
+
+# ── v4: testing 섹션·규칙 공식 설명 주입·아키 사이클 payload ─────────────────
+
+def _td_fixture():
+    return {
+        "technique_recommendations": {
+            "available": True,
+            "coverage_join": {"entries": 3, "with_asil": 1, "asil_unknown": 2},
+            "items": [{"function": "Safe_Fn", "unit": "a.c", "asil": "C", "ccn": 22,
+                       "gap_kind": "below_target", "techniques": ["boundary_values"],
+                       "basis": "ASIL C · 분기 50%"}],
+            "summary": {"below_target": 1, "unmeasured_metric": 0, "uncovered": 0},
+        },
+        "design_test_gap": {
+            "available": True,
+            "totals": {"targets_with_uds": 2},
+            "band_missing": {"suts": False, "vcast": False},
+            "targets_with_uds_no_suts": [{"target_id": "REQ-9", "uds_count": 1}],
+        },
+        "mcdc_note": "MC/DC 미측정 — 미측정≠미달",
+    }
+
+
+def test_prompt_version_and_sections_v4():
+    from workflow.summary_ai_insight import SECTIONS
+
+    assert PROMPT_VERSION == 4  # v4 bump — 전 AI 캐시 자연 미스(probe가 생성 버튼 노출)
+    assert SECTIONS == ("rules", "mistakes", "roles", "architecture", "testing")
+
+
+def test_deterministic_testing_block_and_absence():
+    res = generate_summary_insight(_inp(test_design=_td_fixture()), use_llm=False)
+    dt = res["deterministic"]["testing"]
+    assert dt["available"] is True
+    assert dt["technique"]["coverage_join"]["entries"] == 3
+    assert dt["design_test_gap"]["band_missing"] == {"suts": False, "vcast": False}
+    assert "미측정≠미달" in dt["mcdc_note"]
+    assert res["sections"]["testing"]["ai_enriched"] is False  # LLM 0회 — 결정론 폴백
+    # 입력 부재 — available:false 명시(침묵 생략 금지)
+    res2 = generate_summary_insight(_inp(), use_llm=False)
+    assert res2["deterministic"]["testing"] == {"available": False, "reason": "no_test_design_input"}
+
+
+def test_enrich_testing_symbol_filter():
+    agent = _fake_agent({
+        "summary_testing": json.dumps({"items": [
+            {"topic": "coverage_gap", "finding": "f", "suggestion": "s",
+             "symbols": ["Safe_Fn"], "basis": "분기 50%", "confidence": "medium"},
+            {"topic": "design_gap", "finding": "g", "suggestion": "",
+             "symbols": ["REQ-9"], "basis": ""},
+            {"topic": "technique", "finding": "환각", "suggestion": "",
+             "symbols": ["ghost_fn"], "basis": ""},
+        ]}),
+    })
+    res = generate_summary_insight(_inp(test_design=_td_fixture()), sections=("testing",),
+                                   llm_cfg=CFG, agent_call=agent)
+    sec = res["sections"]["testing"]
+    assert sec["ai_enriched"] is True
+    # 입력 심볼(함수/유닛/타깃 ID) 밖만 언급한 항목은 드랍
+    assert [i["symbols"] for i in sec["items"]] == [["Safe_Fn"], ["REQ-9"]]
+    assert sec["items"][0]["topic"] == "coverage_gap"
+
+
+def test_rules_payload_includes_official_descriptions_for_known_only():
+    captured = {}
+
+    def agent(cfg, messages, *, role=None, stage=None, **k):
+        captured["payload"] = messages[1]["content"]
+        return json.dumps({"items": [{"rule": "Rule-8.6", "title": "t", "why_risky": "w",
+                                      "typical_cause": "c", "fix_guide": "g"}]})
+
+    res = generate_summary_insight(
+        _inp(rule_descriptions={
+            "Rule-8.6": {"title": "exactly one external definition", "enabled": True, "group": "M3CM"},
+            "Rule-미지": {"title": "x-desc"},
+        }),
+        sections=("rules",), llm_cfg=CFG, agent_call=agent,
+    )
+    assert res["sections"]["rules"]["ai_enriched"] is True
+    assert "official_descriptions" in captured["payload"]
+    assert "exactly one external definition" in captured["payload"]
+    assert "x-desc" not in captured["payload"]  # 입력 규칙 집합 밖 설명은 미동봉(payload 경량)
+
+
+def test_architecture_payload_cycles_and_module_symbol_vocab():
+    from tests.unit.test_summary_arch_metrics import _arch_fixture
+
+    arch = _arch_fixture()
+    arch["module_graph"] = {"nodes": [{"module": "APP", "files": 2, "functions": 4}],
+                            "edges": [{"from": "APP", "to": "LIB", "calls": 3}], "truncated": False}
+    arch["cycles"] = {"file_sccs": [{"files": ["APP/a.c", "APP/b.c"], "size": 2}],
+                      "module_sccs": [], "mutual_file_pairs": []}
+    arch["refactor_candidates"] = []
+    captured = {}
+
+    def agent(cfg, messages, *, role=None, stage=None, **k):
+        captured["payload"] = messages[1]["content"]
+        return json.dumps({"items": [
+            {"topic": "cycle", "finding": "파일 순환", "suggestion": "s",
+             "functions": [], "files": ["APP/a.c"], "basis": "size 2"},
+            {"topic": "coupling", "finding": "모듈 결합", "suggestion": "",
+             "functions": ["APP"], "files": [], "basis": "3회"},
+        ]})
+
+    res = generate_summary_insight(_inp(arch_metrics=arch), sections=("architecture",),
+                                   llm_cfg=CFG, agent_call=agent)
+    sec = res["sections"]["architecture"]
+    assert '"cycles"' in captured["payload"] and '"module_graph"' in captured["payload"]
+    assert sec["ai_enriched"] is True and len(sec["items"]) == 2
+    assert sec["items"][0]["topic"] == "cycle"          # v4: topic 화이트리스트 확장
+    assert sec["items"][1]["functions"] == ["APP"]      # 모듈명이 어휘를 통과
+    # 결정론 블록에도 cycles 병합
+    assert res["deterministic"]["architecture"]["cycles"]["file_sccs"][0]["size"] == 2
