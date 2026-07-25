@@ -1545,6 +1545,99 @@ def _arch_metrics_cached(build_root: Path, reports_dir: Path, *, job_url: str = 
     return {**result, "cache_hit": False}
 
 
+ARCH_IMPROVEMENT_CACHE_NAME = "summary_arch_improvement_cache.json"
+_ARCH_IMPROVE_LOCK = threading.Lock()
+
+
+@router.post("/api/summary/arch-improvement")
+def summary_arch_improvement(req: dict) -> Dict[str, Any]:
+    """아키텍처 개선(To-Be) 제안 — 결정론 후보 + Gemini 목표 구조(Q3).
+
+    결정론 후보는 LLM 없이 항상 나온다(순환 끊기·계층 정돈·집중 파일 분할 + 테스트 용이성 3종).
+    후보가 0이면 AI를 부르지 않는다 — 근거 없는 목표 구조는 그럴듯한 허구다.
+    probe/force/RMW 캐시 규약은 rule-fix-example과 동일.
+    """
+    import hashlib as _hashlib
+
+    from workflow.arch_improvement import (
+        ARCH_IMPROVEMENT_NOTE,
+        ARCH_IMPROVEMENT_PROMPT_VERSION,
+        build_candidates,
+        generate_target_design,
+        summarize,
+    )
+
+    body = req or {}
+    job_url = str(body.get("job_url") or "").strip()
+    if not job_url:
+        return {"ok": True, "available": False, "reason": "job_url_required"}
+    cache_root = _normalize_jenkins_cache_root(str(body.get("cache_root") or ""))
+    builds = list_cached_builds(job_url=job_url, cache_root=cache_root)
+    target = next(
+        (b for b in builds if (Path(str(b.get("build_root") or "")) / "source" / ".source_complete").exists()),
+        None,
+    )
+    if target is None:
+        return {"ok": True, "available": False, "reason": "no_source_snapshot"}
+    build_root = Path(str(target.get("build_root")))
+    reports_dir = Path(str(target.get("reports_dir")))
+    arch = _arch_metrics_cached(build_root, reports_dir, job_url=job_url)
+    if not (arch and arch.get("available")):
+        return {"ok": True, "available": False,
+                "reason": (arch or {}).get("reason") or "no_arch_metrics"}
+
+    # 상한 없이 한 번 세어 절단량을 알아낸다 — 표시분만 보고 '이게 전부'로 읽히면 안 된다.
+    all_candidates = build_candidates(arch, top_n=10_000)
+    candidates = build_candidates(arch)
+    summary = summarize(candidates, omitted=max(0, len(all_candidates) - len(candidates)))
+    base_payload: Dict[str, Any] = {
+        "ok": True, "available": True, "reason": None,
+        "build_number": target.get("build_number"),
+        "candidates": candidates,
+        "summary": summary,
+        "as_is": {
+            "nodes": (arch.get("module_graph") or {}).get("nodes"),
+            "edges": (arch.get("module_graph") or {}).get("edges"),
+        },
+        "note": ARCH_IMPROVEMENT_NOTE,
+        "prompt_version": ARCH_IMPROVEMENT_PROMPT_VERSION,
+    }
+
+    # 캐시 키 = 모델 + 프롬프트 버전 + **후보 지문**. 후보가 바뀌면(소스가 바뀌었다는 뜻)
+    # 목표 구조도 다시 받아야 한다(model None은 빈 문자열 — join TypeError 방지, J1 전례).
+    model = _expected_insight_model() or ""
+    fingerprint = json.dumps(
+        [[c.get("kind"), c.get("target")] for c in candidates], ensure_ascii=False,
+    )
+    key = _hashlib.sha256(
+        "|".join([model, str(ARCH_IMPROVEMENT_PROMPT_VERSION), fingerprint]).encode()
+    ).hexdigest()
+    cache_path = reports_dir / ARCH_IMPROVEMENT_CACHE_NAME
+    with _ARCH_IMPROVE_LOCK:
+        hit = _fix_cache_load(cache_path).get(key)
+    if hit and not bool(body.get("force")):
+        return {**hit, "cached": True}
+    if bool(body.get("probe")):
+        # 결정론 코어는 캐시 없이도 즉시 반환 — AI 섹션만 미생성 상태로 알린다.
+        return {**base_payload, "cached": False, "ai_enriched": False,
+                "enrich_reason": "not_generated", "target_design": None}
+
+    gen = generate_target_design(arch=arch, candidates=candidates)
+    payload = {
+        **base_payload,
+        "target_design": gen["target_design"],
+        "ai_enriched": gen["ai_enriched"],
+        "enrich_reason": gen["enrich_reason"],
+        "model": gen["model"],
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+    }
+    with _ARCH_IMPROVE_LOCK:
+        entries = _fix_cache_load(cache_path)
+        entries[key] = payload
+        _fix_cache_store(cache_path, entries)
+    return {**payload, "cached": False}
+
+
 @router.post("/api/summary/architecture-metrics")
 def summary_architecture_metrics(req: dict) -> Dict[str, Any]:
     """소스 아키텍처 결정론 메트릭(LLM 0회) — 최신 캐시 빌드 스냅샷 기준."""

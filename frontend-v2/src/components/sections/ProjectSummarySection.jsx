@@ -12,6 +12,7 @@ import SummaryAiInsightPanel from './SummaryAiInsightPanel.jsx';
 import RuleTrendPanel from './RuleTrendPanel.jsx';
 import ArchitectureMetricsPanel from './ArchitectureMetricsPanel.jsx';
 import ArchitectureGraphPanel from './ArchitectureGraphPanel.jsx';
+import ArchitectureImprovementPanel from './ArchitectureImprovementPanel.jsx';
 import BaselineDiffPanel from './BaselineDiffPanel.jsx';
 import FunctionCoveragePanel from './FunctionCoveragePanel.jsx';
 import TestDesignPanel from './TestDesignPanel.jsx';
@@ -535,8 +536,11 @@ export default function ProjectSummarySection({ job, analysisResult }) {
       {/* 아키텍처 메트릭 — 핫스팟/결합도/대형 함수 + v4 4축(간섭·전역·사분면·간접호출) */}
       <ArchitectureMetricsPanel jobUrl={jobUrl} cacheRoot={cacheRoot} />
 
-      {/* 아키텍처 다이어그램 — 모듈 관계·순환·핫스팟 산포 (K2) */}
+      {/* 아키텍처 다이어그램 — 모듈 관계·계층·DSM·전역 흐름·핫스팟 산포 (K2·Q2) */}
       <ArchitectureGraphPanel jobUrl={jobUrl} cacheRoot={cacheRoot} />
+
+      {/* 아키텍처 개선 제안(To-Be) — 결정론 후보 + AI 목표 구조 (Q3) */}
+      <ArchitectureImprovementPanel jobUrl={jobUrl} cacheRoot={cacheRoot} />
 
       {/* ━━ 그룹 ② 소스코드 ━━ */}
       <GroupHeading icon="📄" title="소스코드" desc="정적분석 위반·룰 변화·함수별 커버리지" />
