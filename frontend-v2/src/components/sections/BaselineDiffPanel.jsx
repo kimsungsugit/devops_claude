@@ -3,9 +3,11 @@
  * POST /api/summary/baseline-diff(파일 sha1 + 함수 파서 권위 분류) + 같은 쌍
  * POST /api/jenkins/prqa-delta(1차 확장 API의 baseline_build_number 재사용) 병행 표시.
  *
- * ISO: ASIL 주석 보유 함수의 변경(asil_touched)은 경고 강조 — 안전 함수 변경 리뷰 의무.
+ * N3: 수정 파일 행을 펼치면 **그 파일의 변경 함수**가 나오고, 각 함수에 커버리지(주입 조인)와
+ * ASIL(주석 + 요구 역전파)이 붙는다. 정렬은 위험 우선(ASIL→저커버→변경량), 필터로 좁힌다.
+ * ISO: ASIL 보유 함수의 변경(asil_touched)은 경고 강조 — 안전 함수 변경 리뷰 의무.
  */
-import { useCallback, useEffect, useState } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useState } from 'react';
 import { post } from '../../api.js';
 
 const xs = { fontSize: 'var(--text-xs)' };
@@ -18,12 +20,68 @@ const REASON_KO = {
   same_build_pair: '베이스라인과 대상이 같은 빌드입니다.',
 };
 
+const KIND_KO = {
+  NEW: { label: '신규', color: 'var(--color-success)' },
+  DELETE: { label: '삭제', color: 'var(--color-danger)' },
+  SIGNATURE: { label: '시그니처', color: 'var(--color-warning)' },
+  BODY: { label: '본문', color: 'var(--color-info)' },
+};
+const CHANGE_KIND_KO = { modified: '수정', added: '추가', deleted: '삭제' };
+const FILTERS = [
+  { key: 'all', label: '전체' },
+  { key: 'asil', label: 'ASIL 함수만' },
+  { key: 'gap', label: '커버리지 미달만' },
+  { key: 'signature', label: '시그니처 변경만' },
+];
+
+function pct(v) {
+  return v == null ? '—' : `${Math.round(Number(v) * 100)}%`;
+}
+
 function Pill({ text, color }) {
   return (
     <span style={{
       display: 'inline-block', padding: '1px 7px', borderRadius: 'var(--radius-sm)',
       fontSize: 'var(--text-xs)', fontWeight: 600, color: '#fff', background: color, marginRight: 4,
     }}>{text}</span>
+  );
+}
+
+/** 함수 행 — 커버리지 미달은 색으로, 미조인은 '—'로(0%로 위장 금지). */
+function FunctionRow({ fn, td }) {
+  const st = fn.statement;
+  const tone = st == null ? 'var(--text-muted)'
+    : st <= 0 ? 'var(--color-danger)'
+    : st < 1 ? 'var(--color-warning)' : 'var(--text)';
+  const kind = KIND_KO[fn.kind] || { label: fn.kind, color: 'var(--text-muted)' };
+  return (
+    <tr>
+      <td style={{ ...td, paddingLeft: 22 }}>
+        <Pill text={kind.label} color={kind.color} />
+        <span style={{ fontFamily: 'monospace' }}>{fn.name}</span>
+      </td>
+      <td style={td}>
+        {fn.asil
+          ? <span title={`출처 ${fn.asil_source || '—'}`}
+              style={{ fontWeight: 700, color: fn.asil === 'C' || fn.asil === 'D' ? 'var(--color-danger)' : 'var(--color-info)' }}>
+              {fn.asil}
+            </span>
+          : <span style={{ color: 'var(--text-muted)' }}>미상</span>}
+      </td>
+      <td style={{ ...td, fontWeight: 600, color: tone }} title={fn.metric_source ? `${fn.metric_source.toUpperCase()} 측정` : '커버리지 데이터에 이 함수가 없습니다'}>
+        {pct(st)}
+      </td>
+      <td style={td}>{pct(fn.branch)}</td>
+      <td style={td}>{fn.ccn ?? '—'}</td>
+      <td style={{ ...td, whiteSpace: 'normal' }}>
+        {fn.kind === 'SIGNATURE' && (
+          <>
+            <div style={{ fontFamily: 'monospace', color: 'var(--color-danger)' }}>- {fn.before}</div>
+            <div style={{ fontFamily: 'monospace', color: 'var(--color-success)' }}>+ {fn.after}</div>
+          </>
+        )}
+      </td>
+    </tr>
   );
 }
 
@@ -35,6 +93,27 @@ export default function BaselineDiffPanel({ jobUrl, cacheRoot }) {
   const [delta, setDelta] = useState(null);        // 같은 쌍 PRQA 위반 delta
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const [expanded, setExpanded] = useState(() => new Set());  // 펼친 파일 경로
+  const [filter, setFilter] = useState('all');
+
+  const toggle = useCallback((path) => {
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(path)) next.delete(path); else next.add(path);
+      return next;  // 새 Set 반환 — 같은 참조를 mutate하면 리렌더가 발생하지 않는다
+    });
+  }, []);
+
+  // 필터는 파일 행 기준(그 파일이 조건에 맞는 함수를 하나라도 가지면 표시).
+  const visibleRows = useMemo(() => {
+    const rows = data?.files?.changed_detail || [];
+    if (filter === 'asil') return rows.filter((r) => (r.functions || []).some((f) => f.asil));
+    if (filter === 'gap') {
+      return rows.filter((r) => (r.functions || []).some((f) => f.statement != null && f.statement < 1));
+    }
+    if (filter === 'signature') return rows.filter((r) => (r.counts?.signature || 0) > 0);
+    return rows;
+  }, [data, filter]);
 
   const runCompare = useCallback(async (baseNum, tgtNum) => {
     if (!baseNum || !tgtNum) return;
@@ -94,6 +173,7 @@ export default function BaselineDiffPanel({ jobUrl, cacheRoot }) {
   const td = { ...xs, padding: '4px 8px', borderBottom: '1px solid var(--border)' };
   const fns = data?.functions || {};
   const files = data?.files || {};
+  const gap = fns.gap_summary || null;
 
   return (
     <div className="panel" style={{ padding: 'var(--sp-3)' }}>
@@ -155,6 +235,20 @@ export default function BaselineDiffPanel({ jobUrl, cacheRoot }) {
             {data.cached && <span style={{ ...xs, color: 'var(--text-muted)' }}>캐시됨</span>}
           </div>
 
+          {/* 변경 함수 × 커버리지 갭 — 이번 변화에서 재검증할 것(최상위 신호) */}
+          {gap && (
+            <div style={{ ...xs, color: 'var(--text-muted)' }}>
+              변경 함수 {gap.changed_functions}개 중{' '}
+              <b style={{ color: gap.uncovered > 0 ? 'var(--color-danger)' : 'var(--text)' }}>미커버 {gap.uncovered}</b>
+              {' · '}<b style={{ color: gap.below_full > 0 ? 'var(--color-warning)' : 'var(--text)' }}>부분 커버 {gap.below_full}</b>
+              {' · '}커버리지 데이터 없음 {gap.coverage_unmatched}
+              {data.join_sources?.coverage && ` · 커버리지 출처 ${data.join_sources.coverage === 'scm_vcast_job' ? 'SCM 입력 문서' : '빌드 산출물'}`}
+              {data.asil_join?.injected && data.join_sources?.asil_counts && (
+                ` · ASIL 확보 ${data.join_sources.asil_counts.total}함수(역전파 ${data.join_sources.asil_counts.uds_link})`
+              )}
+            </div>
+          )}
+
           {/* ASIL 함수 변경 경고 */}
           {(data.asil_touched || []).length > 0 && (
             <div style={{ ...xs, color: 'var(--color-danger)' }}>
@@ -163,48 +257,93 @@ export default function BaselineDiffPanel({ jobUrl, cacheRoot }) {
             </div>
           )}
 
-          {/* 시그니처 변경 before/after */}
-          {(fns.signature_changed || []).length > 0 && (
-            <div style={{ overflowX: 'auto' }}>
-              <table style={{ borderCollapse: 'collapse', width: '100%' }}>
-                <thead>
-                  <tr><th style={th}>시그니처 변경 함수</th><th style={th}>이전 → 이후</th><th style={th}>ASIL</th></tr>
-                </thead>
-                <tbody>
-                  {(fns.signature_changed || []).slice(0, 10).map((f) => (
-                    <tr key={`${f.file}:${f.name}`}>
-                      <td style={{ ...td, whiteSpace: 'nowrap' }} title={f.file}>{f.name}</td>
-                      <td style={td}>
-                        <div style={{ fontFamily: 'monospace', color: 'var(--color-danger)' }}>- {f.before}</div>
-                        <div style={{ fontFamily: 'monospace', color: 'var(--color-success)' }}>+ {f.after}</div>
-                      </td>
-                      <td style={{ ...td, whiteSpace: 'nowrap' }}>{f.asil || '—'}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-
-          {/* 수정 파일 상위 */}
-          {(files.modified || []).length > 0 && (
-            <details>
-              <summary style={{ ...xs, cursor: 'pointer' }}>수정 파일 {(files.modified || []).length}개 (라인 증감)</summary>
+          {/* 변경 파일 → 함수 트리 (위험 우선 정렬) */}
+          {(data.files?.changed_detail || []).length > 0 ? (
+            <div>
+              <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 4, marginBottom: 4 }}>
+                <span style={{ ...xs, color: 'var(--text-muted)' }}>
+                  변경 파일 {(data.files.changed_detail || []).length}개
+                  {(data.files.changed_detail_omitted || 0) > 0 && ` (+${data.files.changed_detail_omitted} 생략)`}
+                  {' · '}표시 {visibleRows.length}개
+                </span>
+                {FILTERS.map((f) => (
+                  <button key={f.key} type="button" onClick={() => setFilter(f.key)}
+                    aria-pressed={filter === f.key}
+                    style={{
+                      ...xs, padding: '1px 8px', borderRadius: 'var(--radius-sm)', cursor: 'pointer',
+                      border: `1px solid ${filter === f.key ? 'var(--accent)' : 'var(--border)'}`,
+                      background: filter === f.key ? 'var(--accent)' : 'transparent',
+                      color: filter === f.key ? '#fff' : 'var(--text-muted)',
+                    }}>
+                    {f.label}
+                  </button>
+                ))}
+              </div>
               <div style={{ overflowX: 'auto' }}>
                 <table style={{ borderCollapse: 'collapse', width: '100%' }}>
-                  <thead><tr><th style={th}>파일</th><th style={th}>+ 추가</th><th style={th}>− 삭제</th></tr></thead>
+                  <thead>
+                    <tr>
+                      <th style={th}>파일 / 함수</th><th style={th}>ASIL</th>
+                      <th style={th}>구문</th><th style={th}>분기</th><th style={th}>ccn</th>
+                      <th style={th}>비고</th>
+                    </tr>
+                  </thead>
                   <tbody>
-                    {(files.modified || []).slice(0, 20).map((m) => (
-                      <tr key={m.path}>
-                        <td style={td}>{m.path}</td>
-                        <td style={{ ...td, color: 'var(--color-success)' }}>{m.lines_added ?? '—'}</td>
-                        <td style={{ ...td, color: 'var(--color-danger)' }}>{m.lines_removed ?? '—'}</td>
-                      </tr>
-                    ))}
+                    {visibleRows.map((row) => {
+                      const open = expanded.has(row.path);
+                      const fnCount = Object.values(row.counts || {}).reduce((a, b) => a + b, 0);
+                      return (
+                        <Fragment key={row.path}>
+                          <tr>
+                            <td style={td}>
+                              <button type="button" onClick={() => toggle(row.path)}
+                                aria-expanded={open} aria-label={`${row.path} 변경 함수 ${open ? '접기' : '펼치기'}`}
+                                style={{ ...xs, border: 'none', background: 'transparent', cursor: 'pointer', color: 'var(--text-muted)', padding: '0 4px 0 0' }}>
+                                {open ? '▾' : '▸'}
+                              </button>
+                              <span title={row.path}>{row.path}</span>
+                              <span style={{ ...xs, color: 'var(--text-muted)', marginLeft: 6 }}>
+                                {CHANGE_KIND_KO[row.change_kind] || row.change_kind} · 함수 {fnCount}
+                                {row.lines_added != null && ` · +${row.lines_added}/−${row.lines_removed}`}
+                              </span>
+                            </td>
+                            <td style={td}>
+                              {row.asil_max
+                                ? <Pill text={row.asil_max} color={row.asil_max === 'C' || row.asil_max === 'D' ? 'var(--color-danger)' : 'var(--color-info)'} />
+                                : <span style={{ color: 'var(--text-muted)' }}>—</span>}
+                            </td>
+                            <td style={{ ...td, fontWeight: 600, color: row.worst_statement == null ? 'var(--text-muted)' : row.worst_statement < 0.8 ? 'var(--color-danger)' : 'var(--text)' }}
+                              title="이 파일에서 변경된 함수의 최저 구문 커버리지">
+                              {pct(row.worst_statement)}
+                            </td>
+                            <td style={td}>—</td>
+                            <td style={td}>—</td>
+                            <td style={{ ...td, color: 'var(--text-muted)' }}>
+                              커버리지 조인 {row.coverage_matched}/{fnCount}
+                            </td>
+                          </tr>
+                          {open && (row.functions || []).map((fn) => (
+                            <FunctionRow key={`${row.path}:${fn.name}:${fn.kind}`} fn={fn} td={td} />
+                          ))}
+                          {open && (row.functions_omitted || 0) > 0 && (
+                            <tr><td colSpan={6} style={{ ...td, paddingLeft: 22, color: 'var(--text-muted)' }}>
+                              표시 상한으로 {row.functions_omitted}개 함수 생략
+                            </td></tr>
+                          )}
+                        </Fragment>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
-            </details>
+              {visibleRows.length === 0 && (
+                <div style={{ ...xs, color: 'var(--text-muted)' }}>선택한 필터에 해당하는 파일이 없습니다.</div>
+              )}
+            </div>
+          ) : (files.modified || []).length > 0 && (
+            <div style={{ ...xs, color: 'var(--text-muted)' }}>
+              변경 파일 {(files.modified || []).length}개 — 함수 트리는 이 응답(구 캐시)에 없습니다. '비교'를 다시 눌러 갱신하세요.
+            </div>
           )}
         </div>
       )}

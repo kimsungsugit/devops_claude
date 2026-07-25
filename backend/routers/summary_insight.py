@@ -871,6 +871,62 @@ def summary_quality_detail(req: dict) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+def _load_trace_link_table(build_root: Path, reports_dir: Path) -> Optional[Dict[str, Any]]:
+    """trace_link_table.json — 빌드 report/ 우선, reports_dir 폴백(경로 규약 이원 대응)."""
+    table = _read_json(Path(str(build_root)) / "report" / "trace_link_table.json")
+    if not isinstance(table, dict) or not table:
+        table = _read_json(reports_dir / "trace_link_table.json")
+    return table if isinstance(table, dict) and table else None
+
+
+def _coverage_index(reports_dir: Path, *, job_url: str = "") -> Dict[str, Dict[str, Any]]:
+    """{정규화 함수명: {statement, branch, ccn, metric_source}} — 0..1 스케일 통일.
+
+    UT가 1순위(단위 구조 커버리지), 없는 함수만 IT로 보완하고 metric_source로 어느 레벨의
+    측정인지 남긴다(UT와 IT를 합산하면 안 되므로 표시측이 구분할 수 있어야 한다).
+    """
+    from workflow.coverage_gap import _norm_fn
+    from workflow.test_design_advisor import _rate01
+
+    loaded = _load_vcast_function_entries(reports_dir, job_url=job_url)
+    out: Dict[str, Dict[str, Any]] = {}
+    for level, entries in (("ut", loaded.get("ut_entries") or []), ("it", loaded.get("it_entries") or [])):
+        for e in entries:
+            if not isinstance(e, dict):
+                continue
+            key = _norm_fn(e.get("subprogram"))
+            if not key or key in out:
+                continue  # UT 우선 — 이미 채워진 함수는 IT로 덮지 않는다
+            ccn = e.get("ccn") if isinstance(e.get("ccn"), (int, float)) else None
+            out[key] = {
+                "statement": _rate01(e.get("statements")),
+                "branch": _rate01(e.get("branches")),
+                "ccn": ccn,
+                "metric_source": level,
+                "unit": e.get("unit"),
+            }
+    return out
+
+
+def _asil_index(build_root: Path, reports_dir: Path, *, job_url: str = "") -> Dict[str, Any]:
+    """함수 ASIL 인덱스 — 소스 주석(arch 캐시) + 요구 역전파(추적 링크) 병합(N2).
+
+    반환 {"by_function", "counts", "propagation"} — 주석이 0건인 프로젝트에서도 등급 축이
+    살아야 하므로 역전파가 주 경로다(실측 KJPDS02_PV: 주석 0 → 역전파 385함수).
+    """
+    from workflow.asil_propagation import build_function_asil_map, merge_asil_sources
+
+    arch = _arch_metrics_cached(build_root, reports_dir, job_url=job_url)
+    comment_map = ((arch or {}).get("asil_functions") or {}).get("by_function") or {}
+    propagated = build_function_asil_map(_load_trace_link_table(build_root, reports_dir))
+    merged, counts = merge_asil_sources(comment_map, propagated)
+    return {
+        "by_function": merged,
+        "counts": counts,
+        "propagation": {k: propagated.get(k) for k in ("available", "reason", "stats", "note")},
+    }
+
+
 def _compute_test_design_payload(build_root: Path, reports_dir: Path, *, job_url: str = "") -> Dict[str, Any]:
     """test-design 조립(결정론) — 엔드포인트와 ai-insight(Phase M)가 공유.
 
@@ -912,10 +968,7 @@ def _compute_test_design_payload(build_root: Path, reports_dir: Path, *, job_url
     else:
         technique = {"available": False, "reason": "no_coverage_entries"}
 
-    link_table = _read_json(Path(str(build_root)) / "report" / "trace_link_table.json")
-    if not isinstance(link_table, dict) or not link_table:
-        link_table = _read_json(reports_dir / "trace_link_table.json")
-    gap = compute_design_test_gap(link_table if isinstance(link_table, dict) else None)
+    gap = compute_design_test_gap(_load_trace_link_table(build_root, reports_dir))
     return {
         "version": TEST_DESIGN_VERSION,
         "catalog": TECHNIQUE_CATALOG,
@@ -996,14 +1049,28 @@ def summary_baseline_diff(req: dict) -> Dict[str, Any]:
     if tgt_fp is None:
         return {"ok": True, "available": False, "reason": "snapshot_missing_target"}
 
-    cache_path = Path(str(target.get("reports_dir"))) / f"summary_baseline_diff_{baseline.get('build_number')}.json"
-    src_key = {"baseline_fp": base_fp, "target_fp": tgt_fp}
+    # 조인 재료(N3) — 대상 빌드 기준 함수 커버리지·ASIL. 부재해도 diff 자체는 산출된다.
+    tgt_reports = Path(str(target.get("reports_dir")))
+    tgt_root = Path(str(target.get("build_root")))
+    coverage_idx = _coverage_index(tgt_reports, job_url=job_url)
+    asil_idx = _asil_index(tgt_root, tgt_reports, job_url=job_url)
+
+    cache_path = tgt_reports / f"summary_baseline_diff_{baseline.get('build_number')}.json"
+    # 소스 지문만으로는 커버리지/ASIL 갱신(SCM 재로드·추적성 재생성)을 못 본다 — 조인 지문 포함.
+    src_key = {
+        "baseline_fp": base_fp, "target_fp": tgt_fp,
+        "coverage_fn_count": len(coverage_idx),
+        "asil_fn_count": len(asil_idx["by_function"]),
+    }
     cached = _read_json(cache_path)
     if cached and cached.get("src") == src_key and isinstance(cached.get("result"), dict) and not body.get("force"):
         return {**cached["result"], "cached": True}
 
     try:
-        result = compute_baseline_diff(baseline_source=base_src, target_source=tgt_src)
+        result = compute_baseline_diff(
+            baseline_source=base_src, target_source=tgt_src,
+            function_coverage=coverage_idx, asil_by_fn=asil_idx["by_function"],
+        )
     except Exception as exc:
         _logger.warning("baseline-diff compute failed: %s", exc, exc_info=True)
         return {"ok": True, "available": False, "reason": f"compute_failed: {type(exc).__name__}"}
@@ -1018,6 +1085,12 @@ def summary_baseline_diff(req: dict) -> Dict[str, Any]:
         "target": {"build_number": target.get("build_number"), "revision": target.get("revision"),
                    "timestamp_iso": target.get("timestamp_iso")},
         **result,
+        # 조인 출처 표기(N3) — 커버리지가 어느 소스에서 왔고 ASIL이 어떻게 확보됐는지.
+        "join_sources": {
+            "coverage": _load_vcast_function_entries(tgt_reports, job_url=job_url).get("source"),
+            "asil_counts": asil_idx["counts"],
+            "asil_propagation": asil_idx["propagation"],
+        },
         "generated_at": datetime.now().isoformat(timespec="seconds"),
     }
     _write_cache_atomic(cache_path, {"src": src_key, "result": payload})

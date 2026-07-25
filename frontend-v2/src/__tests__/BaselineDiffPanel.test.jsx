@@ -31,14 +31,50 @@ const META = {
 const DIFF = {
   ok: true, available: true, reason: null, independent_of_change_log: true, cached: false,
   baseline: { build_number: 122 }, target: { build_number: 125 },
-  files: { added: ['APP/added.c'], deleted: [], modified: [{ path: 'APP/a.c', lines_added: 3, lines_removed: 1 }], unchanged: 67, total_baseline: 70, total_target: 71 },
+  files: {
+    added: ['APP/added.c'], deleted: [],
+    modified: [{ path: 'APP/a.c', lines_added: 3, lines_removed: 1 }],
+    unchanged: 67, total_baseline: 70, total_target: 71,
+    // N3: 파일 → 함수 트리(위험 우선 정렬 결과)
+    changed_detail: [
+      {
+        path: 'APP/a.c', change_kind: 'modified', lines_added: 3, lines_removed: 1,
+        functions: [
+          { name: 'safe_fn', kind: 'SIGNATURE', asil: 'C', asil_source: 'uds_link',
+            before: 'void safe_fn(int a)', after: 'void safe_fn(int a, int b)',
+            statement: 0.0, branch: 0.0, ccn: 7, metric_source: 'ut' },
+          { name: 'body_fn', kind: 'BODY', asil: null, asil_source: null,
+            statement: 0.6, branch: 0.5, ccn: 3, metric_source: 'ut' },
+          { name: 'new_fn', kind: 'NEW', asil: null, asil_source: null,
+            statement: null, branch: null, ccn: null, metric_source: null },
+        ],
+        functions_omitted: 0,
+        counts: { new: 1, deleted: 0, signature: 1, body: 1 },
+        asil_max: 'C', worst_statement: 0.0, coverage_matched: 2,
+      },
+      {
+        path: 'APP/added.c', change_kind: 'added', lines_added: null, lines_removed: null,
+        functions: [{ name: 'added_file_fn', kind: 'NEW', asil: null, asil_source: null,
+                      statement: 1.0, branch: 1.0, ccn: 1, metric_source: 'it' }],
+        functions_omitted: 0,
+        counts: { new: 1, deleted: 0, signature: 0, body: 0 },
+        asil_max: null, worst_statement: 1.0, coverage_matched: 1,
+      },
+    ],
+    changed_detail_omitted: 0,
+  },
   functions: {
     new: [{ name: 'new_fn', file: 'APP/a.c', asil: null }], deleted: [],
     signature_changed: [{ name: 'safe_fn', file: 'APP/a.c', before: 'void safe_fn(int a)', after: 'void safe_fn(int a, int b)', asil: 'C' }],
     body_changed: [{ name: 'body_fn', file: 'APP/a.c', asil: null }],
     counts: { new: 1, deleted: 0, signature: 1, body: 1 },
+    gap_summary: { changed_functions: 4, with_coverage: 3, uncovered: 1, below_full: 1,
+                   asil_touched: 1, coverage_unmatched: 1 },
   },
   asil_touched: [{ name: 'safe_fn', file: 'APP/a.c', asil: 'C', change_kind: 'SIGNATURE' }],
+  coverage_join: { injected: true, functions_in_index: 3, matched: 3, unmatched: 1 },
+  asil_join: { injected: true, functions_in_index: 385 },
+  join_sources: { coverage: 'scm_vcast_job', asil_counts: { total: 385, uds_link: 385, comment_asil: 0, both: 0, conflict: 0 } },
   method: {},
 };
 const DELTA = { ok: true, available: true, totals: { cur: 562, base: 552, delta: 10 } };
@@ -63,12 +99,57 @@ describe('BaselineDiffPanel', () => {
     expect(screen.queryByRole('option', { name: '#124' })).toBeNull();
   });
 
-  it('ASIL 함수 변경 경고 + 시그니처 before/after 렌더', async () => {
+  it('ASIL 함수 변경 경고 + 펼친 함수 행의 시그니처 before/after', async () => {
+    const user = userEvent.setup();
     render(<BaselineDiffPanel {...PROPS} />);
     expect(await screen.findByText(/ASIL 주석 보유 함수 변경 1건/)).toBeInTheDocument();
     expect(screen.getByText(/safe_fn\(C\/SIGNATURE\)/)).toBeInTheDocument();
+    // 함수 상세는 파일 행을 펼쳐야 나온다(트리)
+    expect(screen.queryByText('- void safe_fn(int a)')).toBeNull();
+    await user.click(screen.getByLabelText('APP/a.c 변경 함수 펼치기'));
     expect(screen.getByText('- void safe_fn(int a)')).toBeInTheDocument();
     expect(screen.getByText('+ void safe_fn(int a, int b)')).toBeInTheDocument();
+  });
+
+  // ── N3: 파일 → 함수 트리 ──
+  it('변경 함수 갭 요약 — 미커버/부분/미조인과 조인 출처', async () => {
+    render(<BaselineDiffPanel {...PROPS} />);
+    expect(await screen.findByText(/변경 함수 4개 중/)).toBeInTheDocument();
+    expect(screen.getByText('미커버 1')).toBeInTheDocument();
+    expect(screen.getByText('부분 커버 1')).toBeInTheDocument();
+    expect(screen.getByText(/커버리지 출처 SCM 입력 문서/)).toBeInTheDocument();
+    expect(screen.getByText(/ASIL 확보 385함수\(역전파 385\)/)).toBeInTheDocument();
+  });
+
+  it('펼치면 함수별 커버리지·ASIL이 붙고 미조인은 —(0% 위장 금지)', async () => {
+    const user = userEvent.setup();
+    render(<BaselineDiffPanel {...PROPS} />);
+    await user.click(await screen.findByLabelText('APP/a.c 변경 함수 펼치기'));
+    const row = screen.getByText('body_fn').closest('tr');
+    expect(row).toHaveTextContent('60%');   // statement 0.6
+    expect(row).toHaveTextContent('50%');   // branch 0.5
+    expect(row).toHaveTextContent('3');     // ccn
+    const newRow = screen.getByText('new_fn').closest('tr');
+    expect(newRow).toHaveTextContent('—');  // 커버리지 미조인 → 0%가 아니라 —
+    // ASIL 출처가 역전파여도 등급이 표시된다
+    const safeRow = screen.getByText('safe_fn').closest('tr');
+    expect(safeRow).toHaveTextContent('C');
+  });
+
+  it('필터 — ASIL 함수만 고르면 해당 파일만 남는다', async () => {
+    const user = userEvent.setup();
+    render(<BaselineDiffPanel {...PROPS} />);
+    await screen.findByText('APP/a.c');
+    expect(screen.getByText('APP/added.c')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'ASIL 함수만' }));
+    expect(screen.getByText('APP/a.c')).toBeInTheDocument();
+    expect(screen.queryByText('APP/added.c')).toBeNull();
+  });
+
+  it('구 캐시 응답(changed_detail 없음)은 재비교 안내', async () => {
+    mockDiff = { ...DIFF, files: { ...DIFF.files, changed_detail: undefined } };
+    render(<BaselineDiffPanel {...PROPS} />);
+    expect(await screen.findByText(/함수 트리는 이 응답\(구 캐시\)에 없습니다/)).toBeInTheDocument();
   });
 
   it('같은 쌍 prqa-delta 병행 표시(위반 552→562 +10)', async () => {

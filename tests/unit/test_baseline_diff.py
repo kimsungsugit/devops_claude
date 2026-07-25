@@ -151,3 +151,99 @@ def test_endpoint_honest_failures(tmp_path, monkeypatch):
     )
     r3 = si.summary_baseline_diff({"job_url": "http://j/", "baseline_build": 125, "target_build": 125})
     assert r3["available"] is False and r3["reason"] == "same_build_pair"
+
+
+# ── N3: 파일 → 함수 트리 + 커버리지/ASIL 조인 ───────────────────────────────
+
+_COV = {
+    # safe_fn은 미커버(0%), body_fn은 부분, new_fn은 인덱스에 없음(미조인)
+    "safe_fn": {"statement": 0.0, "branch": 0.0, "ccn": 7, "metric_source": "ut"},
+    "body_fn": {"statement": 0.6, "branch": 0.5, "ccn": 3, "metric_source": "ut"},
+    "added_file_fn": {"statement": 1.0, "branch": 1.0, "ccn": 1, "metric_source": "it"},
+}
+
+
+def test_changed_detail_groups_functions_under_files(tmp_path):
+    base = _snap(tmp_path / "b122", BASE_FILES)
+    tgt = _snap(tmp_path / "b125", TGT_FILES)
+    r = compute_baseline_diff(baseline_source=base, target_source=tgt, function_coverage=_COV)
+
+    detail = {row["path"]: row for row in r["files"]["changed_detail"]}
+    assert set(detail) == {"APP/a.c", "APP/added.c", "APP/removed.c"}  # 무변경 파일은 없음
+    a = detail["APP/a.c"]
+    assert a["change_kind"] == "modified"
+    kinds = {f["name"]: f["kind"] for f in a["functions"]}
+    # gone_fn은 파일은 남고 함수만 사라진 케이스 — 파일 행 아래 DELETE로 보여야 한다
+    assert kinds == {"safe_fn": "SIGNATURE", "body_fn": "BODY", "new_fn": "NEW", "gone_fn": "DELETE"}
+    assert a["counts"] == {"new": 1, "deleted": 1, "signature": 1, "body": 1}
+    # 커버리지 조인: 값이 붙고, 미조인은 null(0%로 위장 금지)
+    by_name = {f["name"]: f for f in a["functions"]}
+    assert by_name["safe_fn"]["statement"] == 0.0 and by_name["safe_fn"]["ccn"] == 7
+    assert by_name["body_fn"]["statement"] == 0.6
+    assert by_name["new_fn"]["statement"] is None and by_name["new_fn"]["ccn"] is None
+    assert a["worst_statement"] == 0.0 and a["coverage_matched"] == 2
+    assert a["asil_max"] == "C"  # @asil C 주석 보유 함수(safe_fn) 변경
+
+    # 삭제 파일도 그 파일의 함수가 DELETE로 붙는다
+    assert [f["kind"] for f in detail["APP/removed.c"]["functions"]] == ["DELETE"]
+    assert detail["APP/added.c"]["functions"][0]["metric_source"] == "it"
+
+
+def test_changed_detail_risk_first_ordering(tmp_path):
+    base = _snap(tmp_path / "b122", BASE_FILES)
+    tgt = _snap(tmp_path / "b125", TGT_FILES)
+    r = compute_baseline_diff(baseline_source=base, target_source=tgt, function_coverage=_COV)
+    # ASIL 보유 파일이 최상단(위험 우선 정렬)
+    assert r["files"]["changed_detail"][0]["path"] == "APP/a.c"
+
+
+def test_gap_summary_and_join_transparency(tmp_path):
+    base = _snap(tmp_path / "b122", BASE_FILES)
+    tgt = _snap(tmp_path / "b125", TGT_FILES)
+    r = compute_baseline_diff(baseline_source=base, target_source=tgt, function_coverage=_COV)
+    gap = r["functions"]["gap_summary"]
+    # a.c의 SIGNATURE/BODY/NEW/DELETE 4 + added_file_fn + removed_file_fn
+    assert gap["changed_functions"] == 6
+    assert gap["with_coverage"] == 3
+    assert gap["uncovered"] == 1              # safe_fn 0%
+    assert gap["below_full"] == 1             # body_fn 60%
+    assert gap["asil_touched"] == 1
+    assert gap["coverage_unmatched"] == 3     # new_fn, gone_fn, removed_file_fn
+    assert r["coverage_join"] == {"injected": True, "functions_in_index": 3,
+                                  "matched": 3, "unmatched": 3}
+    assert r["asil_join"] == {"injected": False, "functions_in_index": 0}
+
+
+def test_injected_asil_revives_axis_without_comments(tmp_path):
+    """주석 @asil이 없는 프로젝트에서도 요구 역전파 등급이 트리에 실려야 한다(N2 연동)."""
+    no_comment = {k: v.replace("/** @asil C */\n", "") for k, v in BASE_FILES.items()}
+    no_comment_t = {k: v.replace("/** @asil C */\n", "") for k, v in TGT_FILES.items()}
+    base = _snap(tmp_path / "b122", no_comment)
+    tgt = _snap(tmp_path / "b125", no_comment_t)
+    injected = {"safe_fn": {"asil": "D", "source": "uds_link"}}
+    r = compute_baseline_diff(baseline_source=base, target_source=tgt, asil_by_fn=injected)
+    rows = {f["name"]: f for row in r["files"]["changed_detail"] for f in row["functions"]}
+    assert rows["safe_fn"]["asil"] == "D" and rows["safe_fn"]["asil_source"] == "uds_link"
+    assert rows["body_fn"]["asil"] is None  # 미상은 QM으로 단정하지 않는다
+    assert r["asil_join"]["injected"] is True
+
+
+def test_comment_and_injected_asil_merge_safely(tmp_path):
+    """주석 C vs 역전파 D면 안전측(D) 채택 — under-report 금지."""
+    base = _snap(tmp_path / "b122", BASE_FILES)
+    tgt = _snap(tmp_path / "b125", TGT_FILES)
+    r = compute_baseline_diff(baseline_source=base, target_source=tgt,
+                              asil_by_fn={"safe_fn": {"asil": "D", "source": "uds_link"}})
+    rows = {f["name"]: f for row in r["files"]["changed_detail"] for f in row["functions"]}
+    assert rows["safe_fn"]["asil"] == "D" and rows["safe_fn"]["asil_source"] == "uds_link"
+    # 같은 등급이면 both로 표기
+    r2 = compute_baseline_diff(baseline_source=base, target_source=tgt,
+                               asil_by_fn={"safe_fn": {"asil": "C", "source": "uds_link"}})
+    rows2 = {f["name"]: f for row in r2["files"]["changed_detail"] for f in row["functions"]}
+    assert rows2["safe_fn"]["asil"] == "C" and rows2["safe_fn"]["asil_source"] == "both"
+
+
+def test_algo_version_bumped_for_cache_invalidation():
+    from backend.services.baseline_diff import BASELINE_DIFF_ALGO_VERSION
+
+    assert BASELINE_DIFF_ALGO_VERSION >= 2  # v1 캐시(changed_detail 없음)를 재사용하면 안 된다
