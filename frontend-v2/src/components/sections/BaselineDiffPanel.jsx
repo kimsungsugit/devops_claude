@@ -72,8 +72,12 @@ function FunctionRow({ fn, td, last }) {
             </span>
           : <span style={{ color: 'var(--text-muted)' }}>미상</span>}
       </td>
-      <td style={{ ...td, fontWeight: 600, color: tone }} title={fn.metric_source ? `${fn.metric_source.toUpperCase()} 측정` : '커버리지 데이터에 이 함수가 없습니다'}>
+      <td style={{ ...td, fontWeight: 600, color: tone }}
+        title={fn.metric_source
+          ? `${fn.metric_source.toUpperCase()} 측정${fn.measurements > 1 ? ` · 반복 측정 ${fn.measurements}회 중 최악값` : ''}`
+          : '커버리지 데이터에 이 함수가 없습니다'}>
         {pct(st)}
+        {fn.measurements > 1 && <span style={{ color: 'var(--text-muted)', fontWeight: 400 }}>*</span>}
       </td>
       <td style={td}>{pct(fn.branch)}</td>
       <td style={td}>{fn.ccn ?? '—'}</td>

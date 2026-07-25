@@ -871,19 +871,89 @@ def summary_quality_detail(req: dict) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+# 추적 링크 테이블은 빌드 산출물(실측 2.2MB · 링크 11,747건)이라 파싱이 40ms 든다. 한 요청이
+# 이걸 3번 읽는 경로가 있어(arch 지문 · ASIL 인덱스 · 설계-시험 갭) (경로, mtime_ns, size) 키로
+# 1회화한다. 완료된 빌드 산출물은 불변이므로 stat이 같으면 내용도 같다(scm_vcast_functions와 동일 규약).
+_LINK_TABLE_CACHE: Dict[tuple, Optional[Dict[str, Any]]] = {}
+_ASIL_MAP_CACHE: Dict[tuple, Dict[str, Any]] = {}
+_LINK_TABLE_LOCK = threading.Lock()
+_LINK_TABLE_CACHE_MAX = 4
+
+
+def _stat_key(path: Path) -> Optional[tuple]:
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    return (str(path), st.st_mtime_ns, st.st_size)
+
+
 def _load_trace_link_table(build_root: Path, reports_dir: Path) -> Optional[Dict[str, Any]]:
-    """trace_link_table.json — 빌드 report/ 우선, reports_dir 폴백(경로 규약 이원 대응)."""
-    table = _read_json(Path(str(build_root)) / "report" / "trace_link_table.json")
-    if not isinstance(table, dict) or not table:
-        table = _read_json(reports_dir / "trace_link_table.json")
-    return table if isinstance(table, dict) and table else None
+    """trace_link_table.json — 빌드 report/ 우선, reports_dir 폴백(경로 규약 이원 대응). stat 키 캐시."""
+    for cand in (Path(str(build_root)) / "report" / "trace_link_table.json",
+                 reports_dir / "trace_link_table.json"):
+        key = _stat_key(cand)
+        if key is None:
+            continue
+        with _LINK_TABLE_LOCK:
+            if key in _LINK_TABLE_CACHE:
+                cached = _LINK_TABLE_CACHE[key]
+                if cached:
+                    return cached
+                continue  # 캐시된 '이 파일은 비어있음' — 다음 후보로
+        table = _read_json(cand)
+        table = table if isinstance(table, dict) and table else None
+        with _LINK_TABLE_LOCK:
+            if len(_LINK_TABLE_CACHE) >= _LINK_TABLE_CACHE_MAX:
+                _LINK_TABLE_CACHE.clear()
+            _LINK_TABLE_CACHE[key] = table
+        if table:
+            return table
+    return None
+
+
+def _propagated_asil(build_root: Path, reports_dir: Path) -> Dict[str, Any]:
+    """요구 ASIL 역전파 결과(N2) — 링크 테이블 stat 키로 1회화(11,747건 조인 재실행 회피)."""
+    from workflow.asil_propagation import build_function_asil_map
+
+    keys = tuple(
+        k for k in (
+            _stat_key(Path(str(build_root)) / "report" / "trace_link_table.json"),
+            _stat_key(reports_dir / "trace_link_table.json"),
+        ) if k is not None
+    )
+    with _LINK_TABLE_LOCK:
+        hit = _ASIL_MAP_CACHE.get(keys) if keys else None
+    if hit is not None:
+        return hit
+    result = build_function_asil_map(_load_trace_link_table(build_root, reports_dir))
+    if keys:
+        with _LINK_TABLE_LOCK:
+            if len(_ASIL_MAP_CACHE) >= _LINK_TABLE_CACHE_MAX:
+                _ASIL_MAP_CACHE.clear()
+            _ASIL_MAP_CACHE[keys] = result
+    return result
+
+
+def clear_summary_caches() -> None:
+    """테스트/운영 진단용 — 링크 테이블·ASIL 맵 프로세스 캐시 초기화."""
+    with _LINK_TABLE_LOCK:
+        _LINK_TABLE_CACHE.clear()
+        _ASIL_MAP_CACHE.clear()
 
 
 def _coverage_index(reports_dir: Path, *, job_url: str = "") -> Dict[str, Dict[str, Any]]:
-    """{정규화 함수명: {statement, branch, ccn, metric_source}} — 0..1 스케일 통일.
+    """{정규화 함수명: {statement, branch, ccn, metric_source, measurements}} — 0..1 스케일 통일.
 
-    UT가 1순위(단위 구조 커버리지), 없는 함수만 IT로 보완하고 metric_source로 어느 레벨의
-    측정인지 남긴다(UT와 IT를 합산하면 안 되므로 표시측이 구분할 수 있어야 한다).
+    두 축을 지킨다:
+    1) **레벨 우선** — UT가 1순위(단위 구조 커버리지), UT에 없는 함수만 IT로 보완하고
+       metric_source로 출처를 남긴다. UT와 IT는 목표가 달라 절대 합치지 않는다(N4에서 IT
+       미실행을 단위 미커버로 세다 허위 332건을 낸 전례).
+    2) **같은 레벨 안의 반복 측정은 최악값** — 같은 함수가 여러 unit/env에 걸쳐 측정되면
+       최선값으로 접히는 순간 갭이 은폐된다(coverage_gap.load_function_coverage·
+       test_design_advisor와 동일 규약). 구 구현은 first-wins라 **입력 순서에 따라** 값이
+       달라졌다(실측 writeblock: 같은 UT 안에 0.7647과 0.9가 공존 — 오늘은 우연히 나쁜 쪽이
+       뽑히지만 보장이 없는 잠복 결함). ccn만 최대값(보수적).
     """
     from workflow.coverage_gap import _norm_fn
     from workflow.test_design_advisor import _rate01
@@ -895,16 +965,30 @@ def _coverage_index(reports_dir: Path, *, job_url: str = "") -> Dict[str, Dict[s
             if not isinstance(e, dict):
                 continue
             key = _norm_fn(e.get("subprogram"))
-            if not key or key in out:
-                continue  # UT 우선 — 이미 채워진 함수는 IT로 덮지 않는다
+            if not key:
+                continue
+            prev = out.get(key)
+            if prev is not None and prev["metric_source"] != level:
+                continue  # 레벨 우선 — UT로 채운 함수를 IT로 덮지 않는다
             ccn = e.get("ccn") if isinstance(e.get("ccn"), (int, float)) else None
-            out[key] = {
+            rec = {
                 "statement": _rate01(e.get("statements")),
                 "branch": _rate01(e.get("branches")),
                 "ccn": ccn,
                 "metric_source": level,
                 "unit": e.get("unit"),
+                "measurements": 1,
             }
+            if prev is None:
+                out[key] = rec
+                continue
+            prev["measurements"] += 1
+            for metric in ("statement", "branch"):
+                a, b = prev.get(metric), rec.get(metric)
+                if isinstance(b, (int, float)) and (not isinstance(a, (int, float)) or b < a):
+                    prev[metric] = b          # 최악값 — 은폐 금지
+            if isinstance(ccn, (int, float)) and (not isinstance(prev.get("ccn"), (int, float)) or ccn > prev["ccn"]):
+                prev["ccn"] = ccn             # 복잡도는 최대(보수적)
     return out
 
 
@@ -914,11 +998,11 @@ def _asil_index(build_root: Path, reports_dir: Path, *, job_url: str = "") -> Di
     반환 {"by_function", "counts", "propagation"} — 주석이 0건인 프로젝트에서도 등급 축이
     살아야 하므로 역전파가 주 경로다(실측 KJPDS02_PV: 주석 0 → 역전파 385함수).
     """
-    from workflow.asil_propagation import build_function_asil_map, merge_asil_sources
+    from workflow.asil_propagation import merge_asil_sources
 
     arch = _arch_metrics_cached(build_root, reports_dir, job_url=job_url)
     comment_map = ((arch or {}).get("asil_functions") or {}).get("by_function") or {}
-    propagated = build_function_asil_map(_load_trace_link_table(build_root, reports_dir))
+    propagated = _propagated_asil(build_root, reports_dir)
     merged, counts = merge_asil_sources(comment_map, propagated)
     return {
         "by_function": merged,
@@ -1373,6 +1457,26 @@ def _ccn_map(reports_dir: Path, *, job_url: str = "") -> Dict[str, int]:
 
 ARCH_METRICS_CACHE_NAME = "summary_arch_metrics_cache.json"
 
+# 빌드(캐시 파일)별 계산 락 — 동시 요청이 같은 스냅샷을 중복 파싱하지 않도록. 전역 단일 락은
+# 서로 다른 프로젝트끼리도 직렬화시키므로 키별로 나눈다. 락 객체 자체의 생성은 _ARCH_LOCKS_GUARD로 보호.
+_ARCH_BUILD_LOCKS: Dict[str, threading.Lock] = {}
+_ARCH_LOCKS_GUARD = threading.Lock()
+_ARCH_LOCKS_MAX = 16
+
+
+def _arch_build_lock(cache_path: Path) -> threading.Lock:
+    key = str(cache_path)
+    with _ARCH_LOCKS_GUARD:
+        lock = _ARCH_BUILD_LOCKS.get(key)
+        if lock is None:
+            if len(_ARCH_BUILD_LOCKS) >= _ARCH_LOCKS_MAX:
+                # 무한 증식 방지. 사용 중인 락을 버려도 새 락으로 다시 직렬화될 뿐이라 안전하다
+                # (락은 중복 계산 회피용 최적화이지 정확성 장치가 아님 — 캐시 쓰기는 원자적).
+                _ARCH_BUILD_LOCKS.clear()
+            lock = threading.Lock()
+            _ARCH_BUILD_LOCKS[key] = lock
+        return lock
+
 
 def _arch_src_fingerprint(
     build_root: Path, *, ccn_count: int = 0, asil_count: int = 0, cov_count: int = 0,
@@ -1408,10 +1512,8 @@ def _arch_metrics_cached(build_root: Path, reports_dir: Path, *, job_url: str = 
     ⚠ 순환 주의: ASIL 인덱스는 요구 역전파(추적 링크)만 쓴다 — `_asil_index`를 부르면
     그 안에서 다시 이 함수를 호출해 무한 재귀가 된다(주석 ASIL은 arch 결과에서 온다).
     """
-    from workflow.asil_propagation import build_function_asil_map
-
     ccn = _ccn_map(reports_dir, job_url=job_url)
-    propagated = build_function_asil_map(_load_trace_link_table(build_root, reports_dir))
+    propagated = _propagated_asil(build_root, reports_dir)
     asil_index = {
         k: v.get("asil") for k, v in (propagated.get("by_function") or {}).items() if v.get("asil")
     }
@@ -1424,14 +1526,22 @@ def _arch_metrics_cached(build_root: Path, reports_dir: Path, *, job_url: str = 
     cached = _read_json(cache_path)
     if cached and cached.get("src") == src and isinstance(cached.get("result"), dict):
         return {**cached["result"], "cache_hit": True}
-    from workflow.summary_arch_metrics import compute_architecture_metrics
 
-    result = compute_architecture_metrics(
-        build_root / "source", ccn_by_function=ccn,
-        asil_by_function=asil_index, coverage_by_function=coverage_index,
-    )
-    if result.get("available"):
-        _write_cache_atomic(cache_path, {"src": src, "result": result})
+    # 빌드별 빌드 락 — 요약탭은 아키텍처 메트릭 패널과 다이어그램 패널이 이 엔드포인트를 **동시에**
+    # 부른다. 락이 없으면 캐시 미스가 겹칠 때 두 요청이 같은 스냅샷을 각각 파싱한다(실측 1.5s×2).
+    # 락 안에서 캐시를 한 번 더 확인해, 먼저 끝낸 쪽의 결과를 두 번째가 그대로 쓰게 한다.
+    with _arch_build_lock(cache_path):
+        cached = _read_json(cache_path)
+        if cached and cached.get("src") == src and isinstance(cached.get("result"), dict):
+            return {**cached["result"], "cache_hit": True}
+        from workflow.summary_arch_metrics import compute_architecture_metrics
+
+        result = compute_architecture_metrics(
+            build_root / "source", ccn_by_function=ccn,
+            asil_by_function=asil_index, coverage_by_function=coverage_index,
+        )
+        if result.get("available"):
+            _write_cache_atomic(cache_path, {"src": src, "result": result})
     return {**result, "cache_hit": False}
 
 

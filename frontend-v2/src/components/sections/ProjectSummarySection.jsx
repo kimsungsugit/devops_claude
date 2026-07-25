@@ -179,9 +179,12 @@ export default function ProjectSummarySection({ job, analysisResult }) {
   }, [jobUrl, cfg, scmId]);
 
   // ── 동적(VectorCAST) SCM 스냅샷 ──
+  // 소비처가 정적·동적 현황 패널과 파이프라인 헬스 둘뿐이라, 둘 다 숨긴 상태에서는 조회하지 않는다.
+  // (이 엔드포인트는 impact_jobs의 수 MB 잡 파일을 읽는다 — 아무도 안 보는 데이터에 쓸 비용이 아니다.)
+  const needScmVcast = SHOW.staticDynamic || SHOW.pipelineHealth;
   const [scmVcast, setScmVcast] = useState(null);
   useEffect(() => {
-    if (!jobUrl) return undefined;
+    if (!jobUrl || !needScmVcast) return undefined;
     let cancelled = false;
     (async () => {
       try {
@@ -190,7 +193,7 @@ export default function ProjectSummarySection({ job, analysisResult }) {
       } catch { /* best-effort */ }
     })();
     return () => { cancelled = true; };
-  }, [jobUrl]);
+  }, [jobUrl, needScmVcast]);
 
   // ── 추적성 요약(캐시) + 없을 때 1회 자동생성 → 디스크 영속(재방문 재생성 없음) ──
   const [trace, setTrace] = useState(null);

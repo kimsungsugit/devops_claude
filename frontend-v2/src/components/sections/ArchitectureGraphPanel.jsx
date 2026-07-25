@@ -31,14 +31,16 @@ function ModuleFileDrill({ module: mod, fileGraph }) {
     const internal = edges.filter((e) => inside.has(e.from) && inside.has(e.to));
     // 상호 호출(양방향) 표시 — 파일 쌍 단위 2-사이클은 리팩토링 신호다.
     const seen = new Set(internal.map((e) => `${e.from}|${e.to}`));
+    // 파일→모듈 조회는 Map으로 — 엣지마다 nodes.find를 돌면 캡(400노드×800엣지)에서 O(E×N)이 된다.
+    const moduleOf = new Map((fileGraph?.nodes || []).map((n) => [n.file, n.module]));
     const outbound = new Map();
     const inbound = new Map();
     edges.forEach((e) => {
       if (inside.has(e.from) && !inside.has(e.to)) {
-        const m = (fileGraph.nodes.find((n) => n.file === e.to) || {}).module || '(외부)';
+        const m = moduleOf.get(e.to) || '(외부)';
         outbound.set(m, (outbound.get(m) || 0) + e.calls);
       } else if (!inside.has(e.from) && inside.has(e.to)) {
-        const m = (fileGraph.nodes.find((n) => n.file === e.from) || {}).module || '(외부)';
+        const m = moduleOf.get(e.from) || '(외부)';
         inbound.set(m, (inbound.get(m) || 0) + e.calls);
       }
     });

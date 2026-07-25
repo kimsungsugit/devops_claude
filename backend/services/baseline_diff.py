@@ -188,6 +188,9 @@ def _build_changed_detail(
                 "before": f.get("before"), "after": f.get("after"),
                 "statement": st, "branch": br, "ccn": c.get("ccn"),
                 "metric_source": c.get("metric_source"),
+                # 같은 함수가 여러 unit/env에서 측정되면 최악값이 실린다 — 그 사실을 표기용으로 동반
+                # (test_design_advisor의 '반복 측정 N회 중 최악값'과 같은 규약).
+                "measurements": c.get("measurements"),
             })
         counts = {"new": 0, "deleted": 0, "signature": 0, "body": 0}
         for f in fns:
