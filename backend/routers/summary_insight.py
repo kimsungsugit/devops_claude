@@ -655,11 +655,21 @@ def summary_coding_rulebook(req: dict) -> Dict[str, Any]:
             "counts": {"latest": row.get("latest"), "first": row.get("first")},
         })
 
+    # 캐시 키는 증거의 **내용**을 지문화한다 — 개수만 쓰면 파일이 바뀌어도 diff가 여전히 2건이면
+    # 같은 키가 되어 낡은 룰북을 서빙한다(rule-definition이 diff_sha+ex_sha를 쓰는 이유와 동일).
     model = _expected_insight_model() or ""
+    ev_fingerprint = json.dumps([
+        [
+            i["rule"],
+            sorted(str(d.get("diff_sha") or "") for d in i["evidence_diffs"]),
+            _hashlib.sha256(
+                "\n".join(str(x.get("text") or "") for x in i["unresolved_excerpts"]).encode("utf-8", "ignore")
+            ).hexdigest()[:16],
+        ]
+        for i in rule_inputs
+    ], ensure_ascii=False)
     key = _hashlib.sha256("|".join([
-        model, str(CODING_RULEBOOK_VERSION), str(max_rules),
-        json.dumps([[i["rule"], len(i["evidence_diffs"]), len(i["unresolved_excerpts"])]
-                    for i in rule_inputs], ensure_ascii=False),
+        model, str(CODING_RULEBOOK_VERSION), str(max_rules), ev_fingerprint,
     ]).encode()).hexdigest()
     cache_path = Path(str(to_meta.get("reports_dir"))) / RULEBOOK_CACHE_NAME if to_meta else None
     hit = None
@@ -1716,11 +1726,12 @@ def summary_arch_improvement(req: dict) -> Dict[str, Any]:
         "prompt_version": ARCH_IMPROVEMENT_PROMPT_VERSION,
     }
 
-    # 캐시 키 = 모델 + 프롬프트 버전 + **후보 지문**. 후보가 바뀌면(소스가 바뀌었다는 뜻)
-    # 목표 구조도 다시 받아야 한다(model None은 빈 문자열 — join TypeError 방지, J1 전례).
+    # 캐시 키 = 모델 + 프롬프트 버전 + **후보 지문**. 지문에 basis(실측 수치)까지 넣는다 —
+    # (kind, target)만 쓰면 같은 함수의 커버리지가 41%→85%로 바뀌어도 키가 같아, AI가
+    # "구문 41%"를 인용한 낡은 목표 구조를 계속 서빙한다(model None은 빈 문자열 — join TypeError 방지).
     model = _expected_insight_model() or ""
     fingerprint = json.dumps(
-        [[c.get("kind"), c.get("target")] for c in candidates], ensure_ascii=False,
+        [[c.get("kind"), c.get("target"), c.get("basis")] for c in candidates], ensure_ascii=False,
     )
     key = _hashlib.sha256(
         "|".join([model, str(ARCH_IMPROVEMENT_PROMPT_VERSION), fingerprint]).encode()

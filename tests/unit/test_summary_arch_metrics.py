@@ -445,3 +445,12 @@ def test_arch_version_bumped_to_6():
     from workflow.summary_arch_metrics import ARCH_METRICS_VERSION
 
     assert ARCH_METRICS_VERSION >= 6  # v5 캐시(layer_graph·topo_order 없음) 재사용 금지
+
+
+def test_topo_order_handles_graph_without_any_scc():
+    """SCC가 하나도 없어도(전부 단일 노드) id 부여가 깨지지 않는다."""
+    from workflow.summary_arch_metrics import _topo_order
+
+    order = _topo_order(["only.c"], {})
+    assert order == ["only.c"]
+    assert _topo_order([], {}) == []

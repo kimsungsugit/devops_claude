@@ -129,6 +129,11 @@ def _fence(code: str) -> str:
     return f"```c\n{text}\n```\n" if text else ""
 
 
+def _cell(value: Any) -> str:
+    """Markdown 표 셀 이스케이프 — 규칙명·사유에 `|`가 섞이면 표가 통째로 깨진다."""
+    return str(value if value is not None else "").replace("|", "\\|").replace("\n", " ")
+
+
 def render_markdown(rulebook: Dict[str, Any], *, project: str = "") -> str:
     """룰북 → Markdown. **서버에서 조립**해 화면과 파일의 표기가 갈라지지 않게 한다."""
     lines: List[str] = [f"# 코딩 룰북 초안{f' — {project}' if project else ''}", ""]
@@ -170,6 +175,6 @@ def render_markdown(rulebook: Dict[str, Any], *, project: str = "") -> str:
         # 왜 빠졌는지를 문서에 남긴다 — 빠진 규칙이 '문제 없음'으로 읽히면 안 된다.
         lines += ["## 제외된 규칙", "",
                   "| 규칙 | 사유 |", "| --- | --- |"]
-        lines += [f"| {e['rule']} | {e['reason']} |" for e in rulebook["excluded"]]
+        lines += [f"| {_cell(e['rule'])} | {_cell(e['reason'])} |" for e in rulebook["excluded"]]
         lines += [""]
     return "\n".join(lines)

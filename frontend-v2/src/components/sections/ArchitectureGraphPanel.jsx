@@ -19,6 +19,19 @@ const btn = {
 
 const { NODE_W, NODE_H } = AG;
 
+/**
+ * 다이어그램 표시 스위치(사용자 결정으로 숨긴 항목) — 코드는 살려 두고 플래그만 false.
+ * 되살리려면 값을 true로. ProjectSummarySection의 SHOW와 같은 규약(주석 처리 대신 플래그).
+ *
+ * ⚠ 숨겨도 **데이터 축은 죽지 않는다**: 계층 역방향 수는 아키텍처 메트릭 요약 스트립에,
+ * 전역 공유는 같은 패널의 '결합도·공유 전역'에 남고, 둘 다 개선 제안(layer_violation·
+ * inject_global) 후보의 근거로 계속 쓰인다 — 그림만 접는 것이지 관측이 사라지는 게 아니다.
+ */
+const SHOW = {
+  layerDiagram: false,
+  globalFlow: false,
+};
+
 const FILE_DRILL_LIMIT = 12;
 
 /** 선택 모듈 내부를 파일 단위로 펼친다(v5 file_graph). 모듈은 디렉터리 2세그먼트 프록시라
@@ -320,16 +333,21 @@ function DsmMatrix({ fileGraph }) {
       : [...involved].sort();
     const shown = order.slice(0, DSM_MAX);
     const pos = new Map(shown.map((f, i) => [f, i]));
+    // 전체 순서 기준 역행 엣지도 함께 센다 — 표시분만 세면 절단된 파일의 순환이 침묵한다
+    // (실측: 58파일 중 28개만 표시 → 역행 14건 중 6건만 보였다).
+    const allPos = new Map(order.map((f, i) => [f, i]));
     const cell = new Map();
     let max = 0;
     let upper = 0;
+    let upperAll = 0;
     edges.forEach((e) => {
+      if (allPos.has(e.from) && allPos.has(e.to) && allPos.get(e.from) > allPos.get(e.to)) upperAll += 1;
       if (!pos.has(e.from) || !pos.has(e.to)) return;
       cell.set(`${e.from}|${e.to}`, e.calls);
       if (e.calls > max) max = e.calls;
       if (pos.get(e.from) > pos.get(e.to)) upper += 1;   // 정렬 위쪽으로 되돌아가는 호출 = 순환
     });
-    return { shown, cell, max, upper, omitted: Math.max(0, order.length - DSM_MAX) };
+    return { shown, cell, max, upper, upperAll, omitted: Math.max(0, order.length - DSM_MAX) };
   }, [fileGraph, topo]);
 
   if (!view) {
@@ -343,7 +361,14 @@ function DsmMatrix({ fileGraph }) {
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 4 }}>
         <span style={{ ...xs, color: 'var(--text-muted)' }}>
           의존 구조 매트릭스(DSM) — 행→열 호출
-          {topo && <span> · 위상순 정렬이라 <b style={{ color: 'var(--color-danger)' }}>붉은 셀({view.upper})이 순환</b></span>}
+          {topo && (
+            <span> · 위상순 정렬이라 <b style={{ color: 'var(--color-danger)' }}>붉은 셀이 순환</b>
+              {/* 절단되면 표시분만 세므로 전체 대비 몇 건인지 함께 준다(침묵 과소 표기 금지) */}
+              {view.upperAll > view.upper
+                ? ` — 표시 ${view.upper}건 / 전체 ${view.upperAll}건`
+                : ` ${view.upper}건`}
+            </span>
+          )}
         </span>
         <button type="button" style={btn} onClick={() => setTopo(!topo)} aria-pressed={topo}>
           {topo ? '위상순' : '이름순'}
@@ -609,10 +634,10 @@ export default function ArchitectureGraphPanel({ jobUrl, cacheRoot }) {
           <ModuleDiagram moduleGraph={data.module_graph} cycles={data.cycles} fileGraph={data.file_graph} />
           {/* Q2: 계층(ISO 26262-6 관점) → 결합 히트맵 → DSM(순환) → 전역 흐름 → 핫스팟 산포.
               O4에서 정한 '히트맵 위 / 산포 아래' 순서는 유지하고 사이에 신규 3종을 끼운다. */}
-          <LayerDiagram layerGraph={data.layer_graph} />
+          {SHOW.layerDiagram && <LayerDiagram layerGraph={data.layer_graph} />}
           <CouplingHeatmap moduleGraph={data.module_graph} />
           <DsmMatrix fileGraph={data.file_graph} />
-          <GlobalFlow globalCoupling={data.global_coupling} />
+          {SHOW.globalFlow && <GlobalFlow globalCoupling={data.global_coupling} />}
           <HotspotScatter hotspots={data.hotspots} />
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))', gap: 'var(--sp-4)' }}>
             <CycleList cycles={data.cycles} />

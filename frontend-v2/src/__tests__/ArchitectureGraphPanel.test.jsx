@@ -201,27 +201,22 @@ describe('ArchitectureGraphPanel — Q2 신규 다이어그램', () => {
 
   beforeEach(() => { vi.clearAllMocks(); mockResp = Q2; });
 
-  it('계층 다이어그램 — 밴드 렌더 + 역방향은 검토 후보로 고지', async () => {
+  // 계층 다이어그램·전역 흐름은 사용자 결정으로 숨김(SHOW 플래그) — 그림만 접었고 데이터 축은
+  // 아키텍처 메트릭 요약 스트립과 개선 제안 후보에 그대로 살아 있다.
+  it('계층 다이어그램은 숨김 상태다', async () => {
     render(<ArchitectureGraphPanel {...PROPS} />);
-    expect(await screen.findByRole('img', { name: '계층 다이어그램' })).toBeInTheDocument();
-    expect(screen.getByText('APP (응용)')).toBeInTheDocument();
-    expect(screen.getByText('87')).toBeInTheDocument();               // reverse_total
-    expect(screen.getByText(/위반이 아니라 검토 후보/)).toBeInTheDocument();
-  });
-
-  it('계층 — 역방향 함수 쌍을 펼쳐 사용자가 직접 판정하게 한다', async () => {
-    render(<ArchitectureGraphPanel {...PROPS} />);
-    await screen.findByRole('img', { name: '계층 다이어그램' });
-    await userEvent.click(screen.getByRole('button', { name: '함수 쌍 보기' }));
-    expect(screen.getByText('PE_Initialize_Core')).toBeInTheDocument();
-    expect(screen.getByText('BATS_Init')).toBeInTheDocument();
-    expect(screen.getByText(/\+57 생략/)).toBeInTheDocument();
+    await screen.findByRole('img', { name: '모듈 의존 다이어그램' });
+    expect(screen.queryByRole('img', { name: '계층 다이어그램' })).toBeNull();
+    expect(screen.queryByText('APP (응용)')).toBeNull();
+    expect(screen.queryByRole('button', { name: '함수 쌍 보기' })).toBeNull();
   });
 
   it('DSM — 위상순에서 역행 셀(순환)을 붉게 세고 정렬을 토글한다', async () => {
     render(<ArchitectureGraphPanel {...PROPS} />);
-    // topo_order [a,b,u,i] 기준 위로 되돌아가는 호출 2건: b.c→a.c, u.c→a.c
-    expect(await screen.findByText(/붉은 셀\(2\)이 순환/)).toBeInTheDocument();
+    // topo_order [a,b,u,i] 기준 위로 되돌아가는 호출 2건: b.c→a.c, u.c→a.c (절단 없음)
+    expect(await screen.findByText(/붉은 셀이 순환/)).toBeInTheDocument();
+    expect(screen.getByText(/2건/)).toBeInTheDocument();
+    expect(screen.queryByText(/전체 .*건/)).toBeNull();   // 절단이 없으면 '전체' 병기 안 함
     await userEvent.click(screen.getByRole('button', { name: '위상순' }));
     expect(screen.getByRole('button', { name: '이름순' })).toBeInTheDocument();
     expect(screen.queryByText(/이 순환/)).toBeNull();                            // 이름순이면 순환 강조 없음
@@ -233,18 +228,33 @@ describe('ArchitectureGraphPanel — Q2 신규 다이어그램', () => {
     expect(await screen.findByText(/위상 순서가 이 응답에 없어 이름순으로 표시/)).toBeInTheDocument();
   });
 
-  it('전역 데이터 흐름 — 전역↔함수 이분 그래프 + 생략 수 표기', async () => {
+  it('전역 데이터 흐름은 숨김 상태다', async () => {
     render(<ArchitectureGraphPanel {...PROPS} />);
-    expect(await screen.findByRole('img', { name: '전역 데이터 흐름' })).toBeInTheDocument();
-    expect(screen.getByText('g_shared')).toBeInTheDocument();
-    expect(screen.getByText('hi_fn')).toBeInTheDocument();
-    expect(screen.getByText(/g_shared \+37/)).toBeInTheDocument();
+    await screen.findByRole('img', { name: '모듈 의존 다이어그램' });
+    expect(screen.queryByRole('img', { name: '전역 데이터 흐름' })).toBeNull();
+    expect(screen.queryByText('g_shared')).toBeNull();
   });
 
-  it('신규 블록 부재(구 캐시) — 각각 정직 안내로 폴백', async () => {
-    mockResp = { ...METRICS, layer_graph: undefined, global_coupling: undefined };
+  it('숨겨도 DSM은 남는다(순환 가시화는 이 패널의 핵심 축)', async () => {
     render(<ArchitectureGraphPanel {...PROPS} />);
-    expect(await screen.findByText(/계층 데이터가 이 응답에 없습니다/)).toBeInTheDocument();
-    expect(screen.getByText(/전역 참조가 관측되지 않았습니다/)).toBeInTheDocument();
+    expect(await screen.findByText(/의존 구조 매트릭스\(DSM\)/)).toBeInTheDocument();
+  });
+});
+
+// ── 심층 개선: DSM 절단 시 순환 과소 표기 방지 ──
+describe('ArchitectureGraphPanel — DSM 절단 정직성', () => {
+  it('표시 상한을 넘으면 "표시 N / 전체 M"으로 병기한다(실측 6/14 침묵 사례)', async () => {
+    // 40개 파일 체인 + 뒤쪽 파일에서 앞쪽으로 되돌아가는 역행 엣지 → 상한 28에 절단된다
+    const nodes = Array.from({ length: 40 }, (_, i) => ({ file: `f${String(i).padStart(2, '0')}.c`, module: 'M', functions: 1, lines: 10 }));
+    const order = nodes.map((n) => n.file);
+    const edges = [
+      ...Array.from({ length: 39 }, (_, i) => ({ from: order[i], to: order[i + 1], calls: 1 })),
+      { from: order[5], to: order[1], calls: 1 },    // 표시 범위 안 역행
+      { from: order[35], to: order[30], calls: 1 },  // 절단 범위 밖 역행 — 침묵하면 안 된다
+    ];
+    mockResp = { ...METRICS, file_graph: { nodes, edges, topo_order: order, truncated: false, total_files: 40, total_edges: edges.length } };
+    render(<ArchitectureGraphPanel {...PROPS} />);
+    expect(await screen.findByText(/표시 1건 \/ 전체 2건/)).toBeInTheDocument();
+    expect(screen.getByText(/표시 상한 28개/)).toBeInTheDocument();
   });
 });

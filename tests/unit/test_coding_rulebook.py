@@ -142,3 +142,11 @@ def test_empty_rulebook_renders_without_error():
 
 def test_note_is_server_fixed():
     assert "초안" in CODING_RULEBOOK_NOTE and "사내 코딩 표준이 아니며" in CODING_RULEBOOK_NOTE
+
+
+def test_markdown_table_cells_escape_pipes():
+    """규칙명·사유에 `|`가 섞이면 제외 표가 통째로 깨진다 — 셀 이스케이프."""
+    book = build_rulebook([_item("A|B", diffs=0)], generate=lambda **k: _definition())
+    md = render_markdown(book)
+    assert r"| A\|B | no_code_evidence |" in md
+    assert md.count("| --- | --- |") == 1        # 표 구조가 살아 있다

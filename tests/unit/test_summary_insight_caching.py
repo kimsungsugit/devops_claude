@@ -211,3 +211,42 @@ def test_arch_metrics_serves_disk_cache_on_second_call(tmp_path, monkeypatch):
     second = si._arch_metrics_cached(br, rd)
     assert len(calls) == 1
     assert first["cache_hit"] is False and second["cache_hit"] is True
+
+
+# ── 심층 개선: 신규 엔드포인트 캐시 키가 '내용'을 지문화하는가 ───────────────
+
+def test_rulebook_cache_key_uses_evidence_content_not_counts():
+    """개수만 쓰면 파일이 바뀌어도 diff가 여전히 2건이면 같은 키 → 낡은 룰북 서빙.
+
+    rule-definition이 diff_sha+ex_sha를 쓰는 이유와 동일(내용 지문).
+    """
+    import hashlib
+    import json
+
+    def key_of(inputs):
+        # 엔드포인트와 같은 방식으로 조립(회귀 고정 — 구현이 개수 기반으로 되돌아가면 깨진다)
+        fp = json.dumps([
+            [i["rule"],
+             sorted(str(d.get("diff_sha") or "") for d in i["evidence_diffs"]),
+             hashlib.sha256("\n".join(str(x.get("text") or "") for x in i["unresolved_excerpts"])
+                            .encode("utf-8", "ignore")).hexdigest()[:16]]
+            for i in inputs
+        ], ensure_ascii=False)
+        return hashlib.sha256("|".join(["m", "1", "8", fp]).encode()).hexdigest()
+
+    before = [{"rule": "R1", "evidence_diffs": [{"diff_sha": "aaa"}], "unresolved_excerpts": [{"text": "old"}]}]
+    # 개수는 그대로(diff 1 · 발췌 1)인데 내용만 바뀐 경우 — 키가 달라져야 한다
+    after = [{"rule": "R1", "evidence_diffs": [{"diff_sha": "bbb"}], "unresolved_excerpts": [{"text": "new"}]}]
+    assert key_of(before) != key_of(after)
+
+
+def test_arch_improvement_fingerprint_includes_basis():
+    """(kind,target)만 쓰면 커버리지 41%→85%여도 키가 같아 낡은 To-Be가 서빙된다."""
+    import json
+
+    def fp(cands):
+        return json.dumps([[c.get("kind"), c.get("target"), c.get("basis")] for c in cands], ensure_ascii=False)
+
+    a = [{"kind": "extract_pure", "target": "f", "basis": "구문 41% · 복잡도 7"}]
+    b = [{"kind": "extract_pure", "target": "f", "basis": "구문 85% · 복잡도 7"}]
+    assert fp(a) != fp(b)

@@ -224,7 +224,8 @@ def _topo_order(files: List[str], pair_counts: Dict[tuple, int]) -> List[str]:
     for i, comp in enumerate(_tarjan_scc(adj)):
         for f in comp:
             comp_of[f] = i
-    next_id = len(comp_of) and max(comp_of.values()) + 1 or 0
+    # SCC에 안 들어간 노드(자기 자신만인 컴포넌트)에 새 id를 이어 붙인다.
+    next_id = (max(comp_of.values()) + 1) if comp_of else 0
     for f in sorted(node_set):
         if f not in comp_of:
             comp_of[f] = next_id
