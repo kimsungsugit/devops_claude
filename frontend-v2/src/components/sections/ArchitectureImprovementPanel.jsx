@@ -11,6 +11,8 @@
 import { Fragment, useEffect, useState } from 'react';
 import { post } from '../../api.js';
 import SummaryPanel from './SummaryPanel.jsx';
+import * as T from './summaryTable.js';
+import { TABLE, SCROLL } from './summaryTable.js';
 
 const xs = { fontSize: 'var(--text-xs)' };
 const btn = {
@@ -209,8 +211,9 @@ export default function ArchitectureImprovementPanel({ jobUrl, cacheRoot, defaul
     }
   };
 
-  const th = { ...xs, textAlign: 'left', padding: '4px 8px', color: 'var(--text-muted)', borderBottom: '1px solid var(--border)', whiteSpace: 'nowrap' };
-  const td = { ...xs, padding: '4px 8px', borderBottom: '1px solid var(--border)' };
+  // ⚠ 예전 로컬 td 에는 nowrap 이 없어 '대상/조치/근거'가 폭에 따라 두세 줄로 접히고
+  //   행 높이가 제각각이 됐다. 공통 규약으로 축을 나눈다: 식별자=말줄임, 문장=폭 제한 줄바꿈.
+  const { th, td } = T;
   const cands = (data?.candidates || []).filter((c) => (
     filter === 'all' ? true : filter === 'test' ? TESTABILITY.has(c.kind) : !TESTABILITY.has(c.kind)
   ));
@@ -272,12 +275,12 @@ export default function ArchitectureImprovementPanel({ jobUrl, cacheRoot, defaul
                 {data.playbook && data.playbook.without_detail > 0
                   && ` (${data.playbook.total}건 중 ${data.playbook.without_detail}건은 상세 재료 없음)`}
               </div>
-              <div style={{ overflowX: 'auto' }}>
-                <table style={{ borderCollapse: 'collapse', width: '100%' }}>
+              <div style={SCROLL}>
+                <table style={TABLE}>
                   <thead>
                     <tr>
                       <th style={{ ...th, width: 24 }} aria-label="상세" />
-                      <th style={th}>종류</th><th style={th}>대상</th><th style={th}>조치</th><th style={th}>근거</th><th style={th}>비용</th>
+                      <th style={th}>종류</th><th style={th}>대상</th><th style={th}>조치</th><th style={th}>근거</th><th style={{ ...th, textAlign: 'center' }}>비용</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -306,10 +309,11 @@ export default function ArchitectureImprovementPanel({ jobUrl, cacheRoot, defaul
                                 {KIND_KO[c.kind]?.label || c.kind}
                               </span>
                             </td>
-                            <td style={{ ...td, fontFamily: 'monospace', whiteSpace: 'nowrap' }} title={(c.files || []).join(', ')}>{c.target}</td>
-                            <td style={{ ...td, whiteSpace: 'normal' }}>{c.action}</td>
-                            <td style={{ ...td, color: 'var(--text-muted)', whiteSpace: 'normal' }}>{c.basis}</td>
-                            <td style={td}>{EFFORT_KO[c.effort] || c.effort}</td>
+                            <td style={{ ...T.nameTd(230), fontFamily: 'monospace' }}
+                              title={`${c.target}${(c.files || []).length ? ` — ${(c.files || []).join(', ')}` : ''}`}>{c.target}</td>
+                            <td style={T.textTd(300)}>{c.action}</td>
+                            <td style={{ ...T.textTd(280), color: 'var(--text-muted)' }}>{c.basis}</td>
+                            <td style={{ ...td, textAlign: 'center' }}>{EFFORT_KO[c.effort] || c.effort}</td>
                           </tr>
                           {open && (
                             <tr>

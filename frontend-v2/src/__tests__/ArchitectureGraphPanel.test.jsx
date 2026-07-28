@@ -215,6 +215,15 @@ describe('ArchitectureGraphPanel — Q2 신규 다이어그램', () => {
     expect(screen.queryByRole('button', { name: '함수 쌍 보기' })).toBeNull();
   });
 
+  it('구조 개선 후보를 목록이 아니라 표로 낸다', async () => {
+    // 종류/대상/근거 세 축을 한 줄 문장으로 이어 붙이면 눈이 축을 못 잡는다.
+    render(<ArchitectureGraphPanel {...PROPS} />);
+    await screen.findByRole('img', { name: '모듈 의존 다이어그램' });
+    expect(screen.getByRole('columnheader', { name: '종류' })).toBeInTheDocument();
+    expect(screen.getByRole('columnheader', { name: '대상' })).toBeInTheDocument();
+    expect(screen.getByRole('columnheader', { name: '근거' })).toBeInTheDocument();
+  });
+
   it('DSM — 위상순에서 역행 셀(순환)을 붉게 세고 정렬을 토글한다', async () => {
     render(<ArchitectureGraphPanel {...PROPS} />);
     // topo_order [a,b,u,i] 기준 위로 되돌아가는 호출 2건: b.c→a.c, u.c→a.c (절단 없음)

@@ -15,6 +15,7 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { post } from '../../api.js';
 import SummaryPanel from './SummaryPanel.jsx';
+import * as T from './summaryTable.js';
 import BuildDeltaDrilldown from './BuildDeltaDrilldown.jsx';
 
 const xs = { fontSize: 'var(--text-xs)' };
@@ -135,8 +136,9 @@ export default function BuildChangeMatrixPanel({ jobUrl, cacheRoot, baseline, de
     }
   }, [pending, cells, jobUrl, cacheRoot, baseline]);
 
-  const th = { ...xs, textAlign: 'left', padding: '4px 8px', color: 'var(--text-muted)', borderBottom: '1px solid var(--border)', whiteSpace: 'nowrap' };
-  const td = { ...xs, padding: '4px 8px', borderBottom: '1px solid var(--border)', whiteSpace: 'nowrap' };
+  // 표 서식은 summaryTable 공통 규약 — 본문 11px · 숫자 우측정렬(tabular-nums) ·
+  // 식별자는 줄바꿈 대신 말줄임. 패널마다 따로 정의하면 한 탭 안에서 표가 서로 달라 보인다.
+  const { th, td } = T;
   const rows = data?.rows || [];
   const groups = (data?.snapshot_groups || []).filter((g) => g.count > 1);
   const trust = data?.snapshot_trust;
@@ -243,11 +245,11 @@ export default function BuildChangeMatrixPanel({ jobUrl, cacheRoot, baseline, de
               <tr>
                 <th style={th} aria-label="펼치기" />
                 <th style={th}>빌드</th><th style={th}>결과</th><th style={th}>시각</th><th style={th}>리비전</th>
-                <th style={th}>스냅샷</th><th style={th}>변경 파일</th><th style={th}>변경 함수</th>
+                <th style={th}>스냅샷</th><th style={T.numTh}>변경 파일</th><th style={T.numTh}>변경 함수</th>
                 <th style={th} title="변경된 함수 중 ASIL 등급이 있는 것">ASIL 함수 변경</th>
                 {/* ⚠ 트렌드 조회가 실패하면 이 열이 전 행 `—` 가 되는데, 사유가 없으면 "변화 없음"으로
             읽힌다. 열 제목에 실패를 명시한다(증거부재 ≠ 0). */}
-        <th style={{ ...th, color: prqaTrendError ? 'var(--color-warning)' : th.color }}
+        <th style={{ ...T.numTh, color: prqaTrendError ? 'var(--color-warning)' : th.color }}
           title={prqaTrendError ? `PRQA 트렌드 조회 실패 — ${prqaTrendError}` : '직전 캐시 빌드 대비 PRQA 위반 증감'}>
           Δ위반{prqaTrendError ? ' ⚠미조회' : ''}
         </th>
@@ -275,7 +277,7 @@ export default function BuildChangeMatrixPanel({ jobUrl, cacheRoot, baseline, de
                           </button>
                         )}
                       </td>
-                      <td style={{ ...td, fontWeight: r.is_baseline ? 700 : 400 }}>
+                      <td style={{ ...T.numTd, fontWeight: r.is_baseline ? 700 : 400 }}>
                         #{r.build_number}{r.is_baseline ? ' (기준)' : ''}
                       </td>
                       <td style={td}>{r.build_result || '—'}</td>
@@ -299,7 +301,7 @@ export default function BuildChangeMatrixPanel({ jobUrl, cacheRoot, baseline, de
                             </span>
                           : <span style={{ color: 'var(--text-muted)' }}>·</span>}
                       </td>
-                      <td style={td}>
+                      <td style={T.numTd}>
                         {r.files
                           ? <span title={mixed
                               ? r.comparison_basis.reason
@@ -309,7 +311,7 @@ export default function BuildChangeMatrixPanel({ jobUrl, cacheRoot, baseline, de
                             </span>
                           : <span style={{ color: 'var(--text-muted)' }}>—</span>}
                       </td>
-                      <td style={{ ...td, fontWeight: 600 }}>
+                      <td style={{ ...T.numTd, fontWeight: 600 }}>
                         {fns
                           ? <span title={mixed
                               ? r.comparison_basis.reason
@@ -319,8 +321,8 @@ export default function BuildChangeMatrixPanel({ jobUrl, cacheRoot, baseline, de
                             </span>
                           : <PendingCell state={r.function_state} busy={busyCell === r.build_number} />}
                       </td>
-                      <td style={td}><AsilCell asil={asil} /></td>
-                      <td style={td}>
+                      <td style={T.numTd}><AsilCell asil={asil} /></td>
+                      <td style={T.numTd}>
                         {rowDelta == null
                           ? <span style={{ color: 'var(--text-muted)' }}>—</span>
                           : <span style={{ fontWeight: 600, color: rowDelta > 0 ? 'var(--color-danger)' : rowDelta < 0 ? 'var(--color-success)' : 'var(--text-muted)' }}>

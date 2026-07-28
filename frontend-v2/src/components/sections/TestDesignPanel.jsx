@@ -6,6 +6,7 @@
  */
 import { Fragment, useCallback, useEffect, useMemo, useState } from 'react';
 import { post } from '../../api.js';
+import * as T from './summaryTable.js';
 
 const xs = { fontSize: 'var(--text-xs)' };
 
@@ -153,8 +154,9 @@ export default function TestDesignPanel({ jobUrl, cacheRoot }) {
     return () => { cancelled = true; };
   }, [jobUrl, cacheRoot]);
 
-  const th = { ...xs, textAlign: 'left', padding: '4px 8px', color: 'var(--text-muted)', borderBottom: '1px solid var(--border)', whiteSpace: 'nowrap' };
-  const td = { ...xs, padding: '4px 8px', borderBottom: '1px solid var(--border)', whiteSpace: 'nowrap' };
+  // 표 서식은 summaryTable 공통 규약 — 본문 11px · 숫자 우측정렬(tabular-nums) ·
+  // 식별자는 줄바꿈 대신 말줄임. 패널마다 따로 정의하면 한 탭 안에서 표가 서로 달라 보인다.
+  const { th, td } = T;
   const tech = data?.technique_recommendations;
   const gap = data?.design_test_gap;
   const visibleItems = useMemo(() => {

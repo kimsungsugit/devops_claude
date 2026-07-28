@@ -11,6 +11,8 @@ import { fetchArchMetrics } from '../../archMetricsCache.js';
 import { AG, layoutModules } from '../archGraphLayout.js';
 import { bezierEdgeH, exportPng, exportSvg } from '../graphPrimitives.jsx';
 import SummaryPanel from './SummaryPanel.jsx';
+import * as T from './summaryTable.js';
+import { TABLE, SCROLL } from './summaryTable.js';
 
 const xs = { fontSize: 'var(--text-xs)' };
 const btn = {
@@ -153,7 +155,7 @@ function ModuleDiagram({ moduleGraph, cycles, fileGraph }) {
   return (
     <div>
       <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 4 }}>
-        <span style={{ ...xs, color: 'var(--text-muted)' }}>모듈 의존 다이어그램 (호출 수 라벨 · 순환은 빨강)</span>
+        <span style={T.figTitle}>모듈 의존 다이어그램 (호출 수 라벨 · 순환은 빨강)</span>
         <button type="button" style={btn} onClick={() => exportSvg(svgRef.current, 'architecture-modules.svg')}>SVG 저장</button>
         <button type="button" style={btn} onClick={() => exportPng(svgRef.current, 'architecture-modules.png')}>PNG 저장</button>
       </div>
@@ -360,7 +362,7 @@ function DsmMatrix({ fileGraph }) {
   return (
     <div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 4 }}>
-        <span style={{ ...xs, color: 'var(--text-muted)' }}>
+        <span style={{ ...T.figTitle, marginBottom: 0 }}>
           의존 구조 매트릭스(DSM) — 행→열 호출
           {topo && (
             <span> · 위상순 정렬이라 <b style={{ color: 'var(--color-danger)' }}>붉은 셀이 순환</b>
@@ -493,7 +495,7 @@ function CouplingHeatmap({ moduleGraph }) {
   const tdBase = { ...xs, padding: '2px 6px', border: '1px solid var(--border)', textAlign: 'center' };
   return (
     <div>
-      <div style={{ ...xs, color: 'var(--text-muted)', marginBottom: 4 }}>모듈 결합 히트맵 (행→열 호출 수)</div>
+      <div style={T.figTitle}>모듈 결합 히트맵 (행→열 호출 수)</div>
       <div style={{ overflowX: 'auto' }}>
         <table style={{ borderCollapse: 'collapse' }}>
           <thead>
@@ -541,8 +543,9 @@ function HotspotScatter({ hotspots }) {
   const sy = (v) => H - P - (v / maxY) * (H - P - 12);
   return (
     <div>
-      <div style={{ ...xs, color: 'var(--text-muted)', marginBottom: 4 }}>
-        핫스팟 산포 — X=fan-in · Y=복잡도 (●측정 ccn / ○줄수 추정 — 축 척도 혼합 주의)
+      <div style={T.figTitle}>
+        핫스팟 산포 — X=fan-in · Y=복잡도
+        <span style={{ ...T.note, fontWeight: 400 }}> (●측정 ccn / ○줄수 추정 — 축 척도 혼합 주의)</span>
       </div>
       <svg viewBox={`0 0 ${W} ${H}`} role="img" aria-label="핫스팟 산포도"
         style={{ width: '100%', maxWidth: 760, height: 'auto' }}>
@@ -574,7 +577,7 @@ function CycleList({ cycles }) {
   const mutual = cycles?.mutual_file_pairs || [];
   return (
     <div>
-      <div style={{ ...xs, color: 'var(--text-muted)', marginBottom: 4 }}>순환 의존 (파일 간 호출 기준)</div>
+      <div style={T.figTitle}>순환 의존 (파일 간 호출 기준)</div>
       {fileSccs.length === 0 && mutual.length === 0 && (
         <div style={{ ...xs, color: 'var(--text-muted)' }}>순환 의존 관측 없음 (파일 간 호출 기준)</div>
       )}
@@ -662,31 +665,52 @@ export default function ArchitectureGraphPanel({ jobUrl, cacheRoot, defaultOpen 
       )}
 
       {data?.available && (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--sp-4)' }}>
+        /* ⚠ 그림을 세로로만 쌓으니 넓은 화면에서 오른쪽이 통째로 비고 스크롤만 길어졌다
+             → 2열 그리드. DSM 만 28×28 이라 폭이 필요해 전폭(`gridColumn: 1/-1`)으로 뺀다.
+             `min(100%, 440px)` 이라 좁은 화면에선 자동으로 1열이 된다. */
+        <div style={{
+          display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 440px), 1fr))',
+          gap: 'var(--sp-4)', alignItems: 'start',
+        }}>
           <ModuleDiagram moduleGraph={data.module_graph} cycles={data.cycles} fileGraph={data.file_graph} />
           {/* Q2: 계층(ISO 26262-6 관점) → 결합 히트맵 → DSM(순환) → 전역 흐름 → 핫스팟 산포.
               O4에서 정한 '히트맵 위 / 산포 아래' 순서는 유지하고 사이에 신규 3종을 끼운다. */}
           {SHOW.layerDiagram && <LayerDiagram layerGraph={data.layer_graph} />}
           <CouplingHeatmap moduleGraph={data.module_graph} />
-          <DsmMatrix fileGraph={data.file_graph} />
+          {/* DSM(28×28)·산포도는 전폭이 필요하다 — 산포도는 viewBox 640×260 에 맞춰 만든 것이라
+              반폭(≈440px)으로 줄이면 점이 좌하단에 뭉쳐 라벨을 못 붙인다(O4에서 겪은 그 문제).
+              배치 결과: [모듈|히트맵] / [DSM] / [산포도] / [순환|개선후보] / [각주] */}
+          <div style={{ gridColumn: '1 / -1' }}><DsmMatrix fileGraph={data.file_graph} /></div>
           {SHOW.globalFlow && <GlobalFlow globalCoupling={data.global_coupling} />}
-          <HotspotScatter hotspots={data.hotspots} />
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))', gap: 'var(--sp-4)' }}>
-            <CycleList cycles={data.cycles} />
-            <div>
-              <div style={{ ...xs, color: 'var(--text-muted)', marginBottom: 4 }}>구조 개선 후보 (결정론 관측)</div>
-              {(data.refactor_candidates || []).length === 0 && (
-                <div style={{ ...xs, color: 'var(--text-muted)' }}>임계를 넘는 후보 관측 없음</div>
-              )}
-              {(data.refactor_candidates || []).map((c) => (
-                <div key={c.kind + (c.file || (c.files || []).join('|'))} style={{ ...xs, marginBottom: 2 }}>
-                  <span style={{ fontWeight: 600 }}>{c.kind === 'god_file' ? '집중 파일' : '상호 의존'}</span>{' '}
-                  {c.file || (c.files || []).join(' ↔ ')} — {c.basis}
-                </div>
-              ))}
-            </div>
+          <div style={{ gridColumn: '1 / -1' }}><HotspotScatter hotspots={data.hotspots} /></div>
+          <CycleList cycles={data.cycles} />
+          <div>
+            {/* 목록이 아니라 표다 — 종류/대상/근거 세 축이 있는데 한 줄 문장으로 이어 붙이면
+                눈이 축을 못 잡는다(같은 데이터를 다른 패널은 이미 표로 낸다). */}
+            <div style={T.figTitle}>구조 개선 후보 (결정론 관측)</div>
+            {(data.refactor_candidates || []).length === 0 ? (
+              <div style={{ ...xs, color: 'var(--text-muted)' }}>임계를 넘는 후보 관측 없음</div>
+            ) : (
+              <div style={SCROLL}>
+                <table style={TABLE}>
+                  <thead><tr><th style={T.th}>종류</th><th style={T.th}>대상</th><th style={T.th}>근거</th></tr></thead>
+                  <tbody>
+                    {(data.refactor_candidates || []).map((c) => {
+                      const target = c.file || (c.files || []).join(' ↔ ');
+                      return (
+                        <tr key={c.kind + target}>
+                          <td style={{ ...T.td, fontWeight: 600 }}>{c.kind === 'god_file' ? '집중 파일' : '상호 의존'}</td>
+                          <td style={T.nameTd(200)} title={target}>{target}</td>
+                          <td style={T.textTd(260)}>{c.basis}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
           </div>
-          <div style={{ ...xs, color: 'var(--text-muted)' }}>
+          <div style={{ gridColumn: '1 / -1', ...xs, color: 'var(--text-muted)' }}>
             * 관계=함수 호출 기반(include 미분석) · 모듈=디렉터리 프록시 · 파서 {data.snapshot?.parser_engine || '—'}
           </div>
         </div>

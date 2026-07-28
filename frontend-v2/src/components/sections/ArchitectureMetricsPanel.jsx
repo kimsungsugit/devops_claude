@@ -13,6 +13,8 @@ import { useEffect, useState } from 'react';
 import { fetchArchMetrics } from '../../archMetricsCache.js';
 import { HorizontalBar } from '../charts.jsx';
 import SummaryPanel from './SummaryPanel.jsx';
+import * as T from './summaryTable.js';
+import { TABLE, SCROLL } from './summaryTable.js';
 
 const xs = { fontSize: 'var(--text-xs)' };
 
@@ -33,7 +35,9 @@ function Stat({ label, value, tone, title }) {
 function Section({ title, desc, defaultOpen, children }) {
   return (
     <details open={defaultOpen} style={{ borderTop: '1px solid var(--border)', paddingTop: 'var(--sp-2)', marginTop: 'var(--sp-2)' }}>
-      <summary style={{ cursor: 'pointer', fontSize: 'var(--text-xs)', fontWeight: 700 }}>
+      {/* 섹션 제목이 표 본문(11px)보다 작으면 위계가 뒤집힌다 — 12px/700 로 한 단 올린다
+          (패널 h3 13px > 섹션 12px > 표 본문 11px > 각주 10px). */}
+      <summary style={{ cursor: 'pointer', fontSize: 'var(--text-base)', fontWeight: 700 }}>
         {title}
         {desc && <span style={{ fontWeight: 400, color: 'var(--text-muted)' }}> — {desc}</span>}
       </summary>
@@ -64,8 +68,9 @@ export default function ArchitectureMetricsPanel({ jobUrl, cacheRoot, defaultOpe
     //   언마운트되지 않아, 이게 없으면 캐시를 비워도 화면이 옛 빌드에 영구히 멈춘다.
   }, [jobUrl, cacheRoot, reloadToken]);
 
-  const th = { ...xs, textAlign: 'left', padding: '4px 8px', color: 'var(--text-muted)', borderBottom: '1px solid var(--border)', whiteSpace: 'nowrap' };
-  const td = { ...xs, padding: '4px 8px', borderBottom: '1px solid var(--border)', whiteSpace: 'nowrap' };
+  // 표 서식은 summaryTable 공통 규약 — 본문 11px, 숫자는 우측정렬 tabular-nums,
+  // 식별자는 줄바꿈 대신 말줄임(행 높이 균일).
+  const { th, td } = T;
   const coupling = data?.coupling || {};
   // v4~v6 블록 — 구 캐시 응답엔 없으므로 옵셔널 접근 후 정직 안내로 폴백한다.
   const intf = data?.asil_interference;
@@ -126,15 +131,15 @@ export default function ArchitectureMetricsPanel({ jobUrl, cacheRoot, defaultOpe
                   {cc.complexity_basis === 'loc_proxy' && <span title="측정 ccn이 없어 라인수 프록시 기준"> (추정 기준)</span>}
                   {' · '}고복잡·저커버 <b style={{ color: 'var(--color-danger)' }}>{cc.counts?.high_complex_low_cov ?? 0}</b>
                 </div>
-                <div style={{ overflowX: 'auto' }}>
-                  <table style={{ borderCollapse: 'collapse', width: '100%' }}>
-                    <thead><tr><th style={th}>함수</th><th style={th}>구문</th><th style={th}>복잡도</th></tr></thead>
+                <div style={SCROLL}>
+                  <table style={TABLE}>
+                    <thead><tr><th style={th}>함수</th><th style={T.numTh}>구문</th><th style={T.numTh}>복잡도</th></tr></thead>
                     <tbody>
                       {(cc.priority || []).slice(0, 10).map((p) => (
                         <tr key={p.function}>
-                          <td style={td} title={p.file}>{p.function}</td>
-                          <td style={{ ...td, color: 'var(--color-danger)', fontWeight: 600 }}>{Math.round(p.statement * 100)}%</td>
-                          <td style={td}>{p.complexity}{p.complexity_source === 'vcast_ccn' ? '' : '≈'}</td>
+                          <td style={T.nameTd(240)} title={`${p.function} — ${p.file}`}>{p.function}</td>
+                          <td style={{ ...T.numTd, color: 'var(--color-danger)', fontWeight: 600 }}>{Math.round(p.statement * 100)}%</td>
+                          <td style={T.numTd}>{p.complexity}{p.complexity_source === 'vcast_ccn' ? '' : '≈'}</td>
                         </tr>
                       ))}
                     </tbody>
@@ -152,23 +157,23 @@ export default function ArchitectureMetricsPanel({ jobUrl, cacheRoot, defaultOpe
             <div style={COLS}>
               <div>
                 <div style={{ ...xs, color: 'var(--text-muted)', marginBottom: 4 }}>핫스팟 (fan-in × 복잡도)</div>
-                <div style={{ overflowX: 'auto' }}>
-                  <table style={{ borderCollapse: 'collapse', width: '100%' }}>
+                <div style={SCROLL}>
+                  <table style={TABLE}>
                     <thead>
-                      <tr><th style={th}>함수</th><th style={th}>fan-in</th><th style={th}>복잡도</th><th style={th}>점수</th></tr>
+                      <tr><th style={th}>함수</th><th style={T.numTh}>fan-in</th><th style={T.numTh}>복잡도</th><th style={T.numTh}>점수</th></tr>
                     </thead>
                     <tbody>
                       {(data.hotspots || []).slice(0, 8).map((h) => (
                         <tr key={h.function}>
-                          <td style={td} title={h.file}>{h.function}</td>
-                          <td style={td}>{h.fan_in}</td>
-                          <td style={td}>
+                          <td style={T.nameTd(240)} title={`${h.function} — ${h.file}`}>{h.function}</td>
+                          <td style={T.numTd}>{h.fan_in}</td>
+                          <td style={T.numTd}>
                             {h.complexity}
                             <span style={{ color: 'var(--text-muted)' }} title={h.complexity_source === 'vcast_ccn' ? 'VectorCAST 측정 순환복잡도' : '본문 라인수 추정(측정 아님)'}>
                               {h.complexity_source === 'vcast_ccn' ? '' : '≈'}
                             </span>
                           </td>
-                          <td style={{ ...td, fontWeight: 600 }}>{h.score}</td>
+                          <td style={{ ...T.numTd, fontWeight: 600 }}>{h.score}</td>
                         </tr>
                       ))}
                     </tbody>
@@ -242,14 +247,14 @@ export default function ArchitectureMetricsPanel({ jobUrl, cacheRoot, defaultOpe
                       등급 보유 함수 {intf.graded_functions} · 등급 상이 호출 <b>{intf.edges_total}</b>건
                       {' · '}등급 혼재 모듈 <b>{intf.mixed_modules}</b>개
                     </div>
-                    <div style={{ overflowX: 'auto' }}>
-                      <table style={{ borderCollapse: 'collapse', width: '100%' }}>
+                    <div style={SCROLL}>
+                      <table style={TABLE}>
                         <thead><tr><th style={th}>상위 등급</th><th style={th}>→ 하위/미상</th><th style={th}>모듈 경계</th></tr></thead>
                         <tbody>
                           {(intf.edges || []).slice(0, 6).map((e) => (
                             <tr key={`${e.caller}->${e.callee}`}>
-                              <td style={td} title={e.caller_file}>{e.caller} <b>{e.caller_asil || '미상'}</b></td>
-                              <td style={td} title={e.callee_file}>{e.callee} <b>{e.callee_asil || '미상'}</b></td>
+                              <td style={T.nameTd(220)} title={`${e.caller} — ${e.caller_file}`}>{e.caller} <b>{e.caller_asil || '미상'}</b></td>
+                              <td style={T.nameTd(220)} title={`${e.callee} — ${e.callee_file}`}>{e.callee} <b>{e.callee_asil || '미상'}</b></td>
                               <td style={td}>{e.cross_module ? '넘음' : '내부'}</td>
                             </tr>
                           ))}
