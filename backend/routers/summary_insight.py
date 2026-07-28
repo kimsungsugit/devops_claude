@@ -211,13 +211,22 @@ def jenkins_sync_backfill(req: dict) -> Dict[str, Any]:
     cache_root = _normalize_jenkins_cache_root(str(body.get("cache_root") or ""))
     patterns = body.get("patterns") if isinstance(body.get("patterns"), list) else []
     skip_cached = bool(body.get("skip_cached", True))
+    pin_source = bool(body.get("pin_source", False))
+    warm_matrix = bool(body.get("warm_matrix", False))
+    baseline_build = _to_int(body.get("baseline_build"))
 
+    cached_meta = list_cached_builds_meta(job_url=job_url, cache_root=cache_root)
     cached_numbers = {
-        n for n in (
-            _to_int(b.get("build_number"))
-            for b in list_cached_builds_meta(job_url=job_url, cache_root=cache_root)
-        ) if n is not None
+        n for n in (_to_int(b.get("build_number")) for b in cached_meta) if n is not None
     }
+    if pin_source:
+        # 고정 요청일 때 '캐시됨'만으로 건너뛰면 **HEAD로 받아둔 잘못된 트리가 영원히 남는다**.
+        # 이미 고정된 빌드만 skip 대상으로 남기고, 미고정 캐시는 재수집시킨다.
+        cached_numbers = {
+            n for n in (
+                _to_int(b.get("build_number")) for b in cached_meta if b.get("source_pinned")
+            ) if n is not None
+        }
 
     raw_numbers = body.get("build_numbers")
     if isinstance(raw_numbers, list) and raw_numbers:
@@ -250,6 +259,7 @@ def jenkins_sync_backfill(req: dict) -> Dict[str, Any]:
         verify_tls=verify_tls, patterns=[str(p) for p in patterns],
         build_numbers=accepted,
         scm_username=str(body.get("scm_username") or ""), scm_id=str(body.get("scm_id") or ""),
+        pin_source=pin_source, warm_matrix=warm_matrix, baseline_build=baseline_build,
     )
     if not started.get("accepted"):
         return {"ok": True, "available": False, "reason": started.get("reason"), "job_id": started.get("job_id")}
@@ -257,6 +267,7 @@ def jenkins_sync_backfill(req: dict) -> Dict[str, Any]:
         "ok": True, "available": True, "reason": None,
         "job_id": started["job_id"], "accepted": accepted, "skipped_cached": skipped,
         "total": len(accepted),
+        "pin_source": pin_source, "warm_matrix": warm_matrix,
     }
 
 
@@ -1889,6 +1900,10 @@ def _build_meta_row(meta: Dict[str, Any]) -> Dict[str, Any]:
         "revision": meta.get("revision"),
         "source_checked_out_at": _source_checkout_iso(meta),
         "checkout_lag_days": _checkout_lag_days(meta),
+        # 스냅샷이 빌드 시점 revision으로 고정됐는지 — False면 '변화 0'을 코드 미변경으로
+        # 읽으면 안 된다(받아온 날의 HEAD 트리라 여러 빌드가 같아진다).
+        "source_pinned": bool(meta.get("source_pinned")),
+        "source_revision_source": meta.get("source_revision_source"),
     }
 
 
@@ -1996,6 +2011,17 @@ def summary_change_matrix(req: dict) -> Dict[str, Any]:
         ],
         "rows": rows,
         "pending_cells": pending,
+        # 스냅샷 신뢰도 — unpinned가 많으면 '동일 트리'는 코드 미변경이 아니라 백필이 HEAD를
+        # 받아온 결과다. 이걸 숨기면 ASIL 함수 변경이 침묵으로 과소보고된다.
+        "snapshot_trust": {
+            "pinned": sum(1 for r in rows if r.get("source_pinned")),
+            "unpinned": sum(1 for r in rows if not r.get("source_pinned")),
+            "unpinned_builds": [r["build_number"] for r in rows if not r.get("source_pinned")],
+            "note": (
+                "고정되지 않은 스냅샷은 체크아웃한 날의 트리입니다 — 여러 빌드가 같은 트리가 되어 "
+                "변화가 0으로 보입니다. '과거 빌드 가져오기'의 스냅샷 고정으로 재수집하세요."
+            ),
+        },
         "stats": {
             "rows": len(rows), "pairs_total": max(0, len(rows) - 1),
             "pairs_distinct": len({r.get("cell_id") for r in rows if r.get("cell_id")}),

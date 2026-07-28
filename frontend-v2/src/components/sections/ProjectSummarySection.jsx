@@ -144,23 +144,35 @@ export default function ProjectSummarySection({ job, analysisResult }) {
   const [srcBuilds, setSrcBuilds] = useState(null);
   const [baselineBuild, setBaselineBuild] = useState('');
   const [diffTarget, setDiffTarget] = useState('');   // BaselineDiffPanel 전용(매트릭스는 미사용)
-  useEffect(() => {
-    if (!jobUrl) return undefined;
-    let cancelled = false;
-    (async () => {
-      try {
-        const resp = await post('/api/jenkins/cached-builds-meta', { job_url: jobUrl, cache_root: cacheRoot });
-        if (cancelled) return;
-        const rows = (resp?.builds || []).filter((b) => b.has_source);
-        setSrcBuilds(rows);
-        if (rows.length >= 2) {
-          setDiffTarget(String(rows[0].build_number));                       // 최신
-          setBaselineBuild(String(rows[rows.length - 1].build_number));      // 최고령
-        }
-      } catch { /* best-effort — 두 패널이 각자 정직 실패를 표시한다 */ }
-    })();
-    return () => { cancelled = true; };
+  // 조회와 반영을 분리 — 백필 완료 후 재조회에도 같은 반영 규칙을 쓰기 위해서다.
+  const fetchSrcBuilds = useCallback(async () => {
+    if (!jobUrl) return null;
+    try {
+      const resp = await post('/api/jenkins/cached-builds-meta', { job_url: jobUrl, cache_root: cacheRoot });
+      return (resp?.builds || []).filter((b) => b.has_source);
+    } catch { return null; }   // best-effort — 두 패널이 각자 정직 실패를 표시한다
   }, [jobUrl, cacheRoot]);
+  const applySrcBuilds = useCallback((rows) => {
+    if (!rows) return;
+    setSrcBuilds(rows);
+    if (rows.length < 2) return;
+    // 사용자가 이미 고른 기준은 유지한다 — 백필 뒤 재조회가 선택을 되돌리면 방금 만든
+    // 비교 캐시와 화면 기준이 어긋나 캐시가 통째로 미스가 된다.
+    const has = (n) => rows.some((b) => String(b.build_number) === String(n));
+    setDiffTarget((prev) => (has(prev) ? prev : String(rows[0].build_number)));
+    setBaselineBuild((prev) => (has(prev) ? prev : String(rows[rows.length - 1].build_number)));
+  }, []);
+  const reloadSrcBuilds = useCallback(async () => {
+    applySrcBuilds(await fetchSrcBuilds());
+  }, [fetchSrcBuilds, applySrcBuilds]);
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      const rows = await fetchSrcBuilds();
+      if (alive) applySrcBuilds(rows);
+    })();
+    return () => { alive = false; };
+  }, [fetchSrcBuilds, applySrcBuilds]);
 
   // ── 빌드 타임라인 ──
   // ⚠ 이 fetch는 **표가 아니라 rollup**(문제점 배너·헤더 리비전 범위)을 위해 존재한다.
@@ -317,8 +329,18 @@ export default function ProjectSummarySection({ job, analysisResult }) {
   }, [trace, rollup]);
 
   // ── 과거 빌드 백필(sync-backfill) — Jenkins 연결 시에만 의미. 미도달은 서버가 정직 실패. ──
-  const [backfill, setBackfill] = useState(null); // {job_id,total,completed,state} | {error}
+  const [backfill, setBackfill] = useState(null); // {job_id,total,completed,state,phase,matrix}
+  // 스냅샷 고정: 끄면 HEAD 체크아웃이라 과거 빌드가 전부 '받아온 날의 트리'가 된다(실측 33빌드
+  // 중 26개 동일 트리 → 변화 0 + ASIL 함수 변경 침묵). 그래서 기본 ON.
+  const [pinSource, setPinSource] = useState(true);
+  const [warmMatrix, setWarmMatrix] = useState(true);
+  const [backfillCount, setBackfillCount] = useState(10);
   const backfillBusy = backfill?.state === 'running';
+  // 고정되지 않은 스냅샷 = 비교가 무의미한 빌드. 사용자가 재수집 필요성을 알 수 있게 노출.
+  const unpinnedCount = useMemo(
+    () => (srcBuilds || []).filter((b) => !b.source_pinned).length,
+    [srcBuilds],
+  );
   const reloadTimeline = useCallback(() => {
     setTimeline(null);
     // scmId/jobUrl deps의 timeline effect는 상태 기반이라 즉시 재조회를 위해 직접 호출.
@@ -334,17 +356,23 @@ export default function ProjectSummarySection({ job, analysisResult }) {
     try {
       const resp = await post('/api/jenkins/sync-backfill', {
         job_url: jobUrl, username: cfg?.username || '', api_token: cfg?.token || '',
-        cache_root: cacheRoot, verify_tls: cfg?.verifyTls, count: 10, scm_id: scmId,
+        cache_root: cacheRoot, verify_tls: cfg?.verifyTls, count: backfillCount, scm_id: scmId,
+        pin_source: pinSource, warm_matrix: warmMatrix,
+        // 비교 캐시는 **아래 패널에서 고른 기준**으로 만든다 — 다른 기준으로 만들면 표를 열 때
+        // 캐시가 통째로 미스가 되어 토글이 아무 일도 안 한 것처럼 보인다.
+        baseline_build: baselineBuild ? Number(baselineBuild) : null,
       });
       if (!resp?.available) {
         const why = resp?.reason === 'jenkins_unreachable' ? 'Jenkins에 연결할 수 없습니다(캐시 기반 표시는 유지)'
-          : resp?.reason === 'nothing_to_backfill' ? '가져올 새 빌드가 없습니다(최근 빌드 전부 캐시됨)'
+          : resp?.reason === 'nothing_to_backfill' ? (pinSource
+            ? '가져올 빌드가 없습니다(최근 빌드가 모두 캐시 + 스냅샷 고정 완료)'
+            : '가져올 새 빌드가 없습니다(최근 빌드 전부 캐시됨)')
           : resp?.reason === 'backfill_already_running' ? '이미 백필이 실행 중입니다'
           : `백필 시작 실패 (${resp?.reason || 'unknown'})`;
         toast?.('info', why);
         return;
       }
-      setBackfill({ job_id: resp.job_id, total: resp.total, completed: 0, state: 'running' });
+      setBackfill({ job_id: resp.job_id, total: resp.total, completed: 0, state: 'running', phase: 'sync' });
       const poll = async () => {
         try {
           const st = await api(`/api/jenkins/sync-backfill-status/${resp.job_id}`);
@@ -352,8 +380,15 @@ export default function ProjectSummarySection({ job, analysisResult }) {
             setBackfill(st);
             if (st.state === 'running') { setTimeout(poll, 3000); return; }
             const errs = (st.per_build || []).filter((b) => b.status === 'error').length;
-            toast?.(errs ? 'warn' : 'success', errs ? `백필 완료 — ${errs}개 빌드 실패(상태 참조)` : `백필 완료 — ${st.completed}개 빌드 캐시됨`);
+            const pinFails = (st.per_build || []).filter((b) => b.status === 'pin_failed').length;
+            const warmed = st.matrix?.completed ?? 0;
+            const parts = [`${st.completed}개 빌드 캐시`];
+            if (warmed) parts.push(`비교 캐시 ${warmed}건`);
+            if (pinFails) parts.push(`revision 고정 실패 ${pinFails}건(HEAD로 진행)`);
+            toast?.(errs || pinFails ? 'warn' : 'success',
+              errs ? `백필 완료 — ${errs}개 빌드 실패(상태 참조)` : `백필 완료 — ${parts.join(' · ')}`);
             reloadTimeline();
+            reloadSrcBuilds();
           }
         } catch { setTimeout(poll, 5000); }
       };
@@ -361,7 +396,8 @@ export default function ProjectSummarySection({ job, analysisResult }) {
     } catch (e) {
       toast?.('error', `백필 요청 실패: ${String(e?.message || e)}`);
     }
-  }, [jobUrl, cfg, cacheRoot, scmId, toast, reloadTimeline]);
+  }, [jobUrl, cfg, cacheRoot, scmId, toast, reloadTimeline, reloadSrcBuilds,
+      pinSource, warmMatrix, backfillCount, baselineBuild]);
 
   // 행 클릭 → 변경 영향 평가 탭 핸드오프는 제거됐다(사용자 결정): 표가 영향분석 실행 이력이
   // 아니라 소스 스냅샷 비교가 되면서, 잡이 실행된 빌드에만 동작하는 링크는 잡음이었다.
@@ -617,21 +653,62 @@ export default function ProjectSummarySection({ job, analysisResult }) {
       {/* ━━ 그룹 ③ 빌드별 변경 영향 ━━ */}
       <GroupHeading icon="🔨" title="빌드별 변경 영향" desc="베이스라인 대비 소스 변화 (영향분석 실행 이력과 무관)" />
 
-      <div className="panel" style={{ ...PANEL, display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 'var(--sp-2)' }}>
-        <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>
-          비교 가능한 캐시 빌드 {srcBuilds ? srcBuilds.length : '—'}개
-          {Array.isArray(allBuilds) && allBuilds.length > 0 && ` · Jenkins 빌드 ${allBuilds.length}개 중 소스 스냅샷 보유분만 비교 대상`}
-        </span>
-        {backfillBusy && (
-          <span style={{ fontSize: 'var(--text-xs)', color: 'var(--color-info)' }}>
-            백필 중 {backfill.completed}/{backfill.total}{backfill.current_build ? ` (#${backfill.current_build})` : ''}…
+      <div className="panel" style={{ ...PANEL, display: 'flex', flexDirection: 'column', gap: 'var(--sp-1)' }}>
+        <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 'var(--sp-2)' }}>
+          <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>
+            비교 가능한 캐시 빌드 {srcBuilds ? srcBuilds.length : '—'}개
+            {Array.isArray(allBuilds) && allBuilds.length > 0 && ` · Jenkins 빌드 ${allBuilds.length}개 중 소스 스냅샷 보유분만 비교 대상`}
           </span>
+          {backfillBusy && (
+            <span style={{ fontSize: 'var(--text-xs)', color: 'var(--color-info)' }}>
+              {backfill.phase === 'matrix'
+                ? `비교 캐시 계산 중 ${(backfill.matrix?.completed ?? 0) + 1}/${backfill.matrix?.total ?? '?'}${backfill.matrix?.current_build ? ` (#${backfill.matrix.current_build})` : ''}…`
+                : `빌드 가져오는 중 ${backfill.completed}/${backfill.total}${backfill.current_build ? ` (#${backfill.current_build})` : ''}…`}
+            </span>
+          )}
+          <button type="button" onClick={startBackfill} disabled={backfillBusy || !jobUrl}
+            title={`Jenkins에서 최근 ${backfillCount}개 빌드를 캐시로 가져옵니다. 스냅샷 고정을 켜면 이미 캐시됐어도 HEAD로 받은 빌드는 다시 받아옵니다.`}
+            style={{ marginLeft: 'auto', fontSize: 'var(--text-xs)', padding: '2px 8px', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', background: 'transparent', cursor: backfillBusy ? 'wait' : 'pointer', color: 'var(--text-muted)' }}>
+            과거 빌드 가져오기
+          </button>
+        </div>
+
+        {/* 가져오기 옵션 — 기본 ON. 끄면 과거 빌드가 전부 '받아온 날의 트리'가 되어 비교가 무의미해진다. */}
+        <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 'var(--sp-2)', fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>
+          <label style={{ display: 'flex', alignItems: 'center', gap: 4, cursor: 'pointer' }}
+            title="각 빌드의 소스를 그 빌드 시각의 SVN revision으로 체크아웃합니다. 끄면 지금 시점의 HEAD를 받아와 모든 빌드가 같은 트리가 됩니다.">
+            <input type="checkbox" checked={pinSource} disabled={backfillBusy}
+              onChange={(e) => setPinSource(e.target.checked)} />
+            스냅샷을 빌드 시점 revision으로 고정
+          </label>
+          <label style={{ display: 'flex', alignItems: 'center', gap: 4, cursor: 'pointer' }}
+            title="가져오기가 끝나면 아래 표의 함수 축(변경 함수·ASIL)까지 미리 계산해 둡니다.">
+            <input type="checkbox" checked={warmMatrix} disabled={backfillBusy}
+              onChange={(e) => setWarmMatrix(e.target.checked)} />
+            비교 캐시(함수 축) 자동 생성
+          </label>
+          <label style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+            가져올 빌드
+            <select value={backfillCount} disabled={backfillBusy}
+              onChange={(e) => setBackfillCount(Number(e.target.value))}
+              style={{ fontSize: 'var(--text-xs)', padding: '1px 4px' }}>
+              {[5, 10, 20, 30].map((n) => <option key={n} value={n}>{n}개</option>)}
+            </select>
+          </label>
+          {warmMatrix && (
+            <span>
+              비교 기준 {baselineBuild ? `#${baselineBuild}` : '(자동)'} — 아래 “베이스라인 → 최신 변화”에서 변경
+            </span>
+          )}
+        </div>
+
+        {/* 고정 안 된 스냅샷 경고 — '변화 0'을 코드 미변경으로 오독하지 않게 */}
+        {unpinnedCount > 0 && (
+          <div style={{ fontSize: 'var(--text-xs)', color: 'var(--color-warning)' }}>
+            ⚠ 캐시 빌드 {unpinnedCount}개는 소스가 <b>빌드 시점으로 고정되지 않았습니다</b> — 받아온 날의 HEAD 트리라
+            서로 같은 소스가 되어 아래 표에서 변화가 0으로 보입니다. 위 “스냅샷 고정”을 켠 채 다시 가져오면 재수집됩니다.
+          </div>
         )}
-        <button type="button" onClick={startBackfill} disabled={backfillBusy || !jobUrl}
-          title="Jenkins에서 최근 10개 빌드 산출물을 캐시로 가져옵니다(이미 캐시된 빌드는 건너뜀). Jenkins 미연결 시 안내만 표시됩니다."
-          style={{ marginLeft: 'auto', fontSize: 'var(--text-xs)', padding: '2px 8px', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', background: 'transparent', cursor: backfillBusy ? 'wait' : 'pointer', color: 'var(--text-muted)' }}>
-          과거 빌드 가져오기
-        </button>
       </div>
 
       {/* 베이스라인 → 최신 변화 — 소스 스냅샷 직접 비교(영향분석 이력 비의존) */}

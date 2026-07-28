@@ -34,6 +34,7 @@ function row(n, extra = {}) {
   return {
     row_key: `b${n}`, build_number: n, build_result: 'SUCCESS',
     timestamp_iso: `2026-07-${String(n).padStart(2, '0')}T13:00:00`, revision: `10${n}`,
+    source_pinned: true, source_revision_source: 'svn_date',
     snapshot_group: { count: 1, members: [n], canonical_build: n },
     is_baseline: false, identical_to_baseline: false,
     files: { added: 0, deleted: 0, modified: 2, changed: 2, unchanged: 145, changed_paths: [{ path: 'APP/a.c', change_kind: 'modified' }] },
@@ -55,9 +56,11 @@ const FILES = {
               functions: { new: 0, deleted: 0, signature: 0, body: 0, changed: 0 },
               asil: { touched: 0, by_grade: {}, max: null },
               function_state: { state: 'identical', reason: '베이스라인과 소스 트리가 바이트 동일 — 함수 차이는 계산 없이 0으로 확정' } }),
-    { row_key: 'b11', build_number: 11, is_baseline: true, snapshot_group: { count: 3, members: [13, 12, 11] },
+    { row_key: 'b11', build_number: 11, is_baseline: true, revision: '1011', source_pinned: true,
+      snapshot_group: { count: 3, members: [13, 12, 11] },
       files: null, functions: null, asil: null, function_state: { state: 'baseline' } },
   ],
+  snapshot_trust: { pinned: 4, unpinned: 0, unpinned_builds: [], note: '' },
   pending_cells: [{ cell_id: 'base__25', target_build: 25 }, { cell_id: 'base__24', target_build: 24 }],
   snapshot_groups: [{ content_sha: 'de6809e7', builds: [13, 12, 11], count: 3 }],
   stats: { rows: 4, pairs_total: 3, pairs_distinct: 2 },
@@ -161,5 +164,49 @@ describe('BuildChangeMatrixPanel', () => {
   it('베이스라인이 없으면 조회하지 않는다', async () => {
     render(<BuildChangeMatrixPanel {...PROPS} baseline="" />);
     expect(post).not.toHaveBeenCalled();
+  });
+
+  // ── 스냅샷 미고정 표면화 ────────────────────────────────────────────────
+  // '동일 트리라 변화 0'만 보여주면 사용자는 코드가 안 바뀐 것으로 읽는다. 실제 원인은
+  // 백필이 HEAD를 받아온 것이고, 그 결과 ASIL 함수 변경이 통째로 침묵한다.
+
+  it('고정되지 않은 스냅샷이 있으면 원인과 조치를 배너로 알린다', async () => {
+    const unpinned = {
+      ...FILES,
+      rows: FILES.rows.map((r) => ({ ...r, source_pinned: false, source_revision_source: 'head' })),
+      snapshot_trust: { pinned: 0, unpinned: 4, unpinned_builds: [25, 24, 13, 11], note: '' },
+    };
+    mockFiles = unpinned;
+    mockFunctions = { ...unpinned, level: 'functions' };
+    render(<BuildChangeMatrixPanel {...PROPS} />);
+    await screen.findByText('#25');
+    expect(screen.getByText(/빌드 시점으로 고정되지 않았습니다/)).toBeInTheDocument();
+    expect(screen.getByText(/코드가 안 바뀐 증거가 아닙니다/)).toBeInTheDocument();
+    expect(screen.getByText(/스냅샷 고정/)).toBeInTheDocument();   // 조치 안내
+  });
+
+  it('행의 리비전 열이 고정 여부를 구분한다', async () => {
+    const mixed = {
+      ...FILES,
+      rows: [
+        { ...FILES.rows[0], source_pinned: true },
+        { ...FILES.rows[1], source_pinned: false, source_revision_source: 'head' },
+        ...FILES.rows.slice(2),
+      ],
+      snapshot_trust: { pinned: 3, unpinned: 1, unpinned_builds: [24], note: '' },
+    };
+    mockFiles = mixed;
+    mockFunctions = { ...mixed, level: 'functions' };
+    render(<BuildChangeMatrixPanel {...PROPS} />);
+    await screen.findByText('#25');
+    expect(within(screen.getByText('#25').closest('tr')).getByText('r1025')).toBeInTheDocument();
+    // 미고정 행은 revision 값이 있어도 경고 표식이 붙는다(값만 보면 정상으로 오독한다)
+    expect(within(screen.getByText('#24').closest('tr')).getByText(/r1024 ⚠/)).toBeInTheDocument();
+  });
+
+  it('전부 고정됐으면 미고정 배너를 내지 않는다', async () => {
+    render(<BuildChangeMatrixPanel {...PROPS} />);
+    await screen.findByText('#25');
+    expect(screen.queryByText(/빌드 시점으로 고정되지 않았습니다/)).toBeNull();
   });
 });

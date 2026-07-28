@@ -96,6 +96,66 @@ def _source_is_complete(source_dir: Path) -> bool:
     return source_dir.is_dir() and _source_sentinel(source_dir).exists()
 
 
+def read_source_sentinel(source_dir: Path) -> Dict[str, str]:
+    """`.source_complete` 파싱 — 부재/손상은 {}. (build_inventory와 같은 형식)"""
+    out: Dict[str, str] = {}
+    try:
+        raw = _source_sentinel(Path(source_dir)).read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return out
+    for line in raw.splitlines():
+        key, sep, value = line.partition("=")
+        if sep:
+            out[key.strip().lower()] = value.strip()
+    return out
+
+
+def source_snapshot_is_pinned(source_dir: Path) -> bool:
+    """스냅샷이 **그 빌드의 revision**으로 고정됐는지.
+
+    고정되지 않은 스냅샷(=HEAD 체크아웃)은 '체크아웃한 시각의 트리'라, 백필로 과거 빌드를
+    한꺼번에 받아오면 전부 같은 트리가 된다 — 베이스라인 대비 변화가 0으로 보이고 ASIL 함수
+    변경이 통째로 사라진다(실측: 4개월 33빌드 중 26빌드가 동일 트리). 그래서 revision이
+    비어 있거나 출처가 head면 고정 안 됨으로 판정하고 재수집 대상이 된다.
+    """
+    meta = read_source_sentinel(source_dir)
+    if not meta.get("revision"):
+        return False
+    return meta.get("revision_source", "") not in ("", "head")
+
+
+def _ms_to_svn_iso(ms: int) -> str:
+    """epoch ms → svn 날짜-revision용 UTC ISO(밀리초 유지 — map_builds_to_svn_revisions와 동일)."""
+    d = _dt.datetime.fromtimestamp(int(ms) / 1000, _dt.timezone.utc)
+    return d.strftime("%Y-%m-%dT%H:%M:%S.") + f"{int(ms) % 1000:03d}Z"
+
+
+def resolve_build_svn_revision(
+    *, repo_url: str, build_timestamp_ms: Optional[int], username: str = "", password: str = "",
+) -> Dict[str, str]:
+    """빌드 시각 → 그 시점 SVN revision(fail-soft).
+
+    Jenkins가 소스 SVN revision을 구조화 데이터로 노출하지 않는 git 파이프라인 잡에서
+    유일한 정확 경로다(`map_builds_to_svn_revisions`와 같은 근거 — 콘솔 로그 'At revision N'
+    일치 검증됨). 실패는 빈 revision + 사유로 정직 보고하고 호출자가 HEAD로 진행한다.
+    """
+    if not str(repo_url or "").strip():
+        return {"revision": "", "error": "no repo_url"}
+    if not isinstance(build_timestamp_ms, (int, float)) or build_timestamp_ms <= 0:
+        return {"revision": "", "error": "no build timestamp"}
+    try:
+        res = svn_revision_at_date(
+            repo_url=str(repo_url).strip(), when_iso=_ms_to_svn_iso(int(build_timestamp_ms)),
+            username=username, password=password,
+        )
+    except Exception as exc:  # noqa: BLE001 — svn 실행 실패는 HEAD 폴백으로 흡수(정직 기록)
+        return {"revision": "", "error": f"{type(exc).__name__}: {exc}"}
+    rev = str(res.get("revision") or "").strip()
+    if not rev.isdigit():
+        return {"revision": "", "error": str(res.get("output") or "svn info -r returned no revision")[:200]}
+    return {"revision": rev, "error": ""}
+
+
 def _robust_rmtree(path: Path) -> None:
     """Remove a directory tree, coping with read-only files that Subversion
     leaves behind on Windows (e.g. `.svn/pristine/**`). A plain `shutil.rmtree`
@@ -158,6 +218,8 @@ def ensure_source_checkout(
     scm_username: str = "",
     scm_id: str = "",
     force: bool = False,
+    build_timestamp_ms: Optional[int] = None,
+    pin_revision: bool = False,
 ) -> Dict[str, Any]:
     import shutil
     source_dir = Path(build_root) / "source"
@@ -176,6 +238,8 @@ def ensure_source_checkout(
             scm_id=scm_id,
             force=force,
             shutil=shutil,
+            build_timestamp_ms=build_timestamp_ms,
+            pin_revision=pin_revision,
         )
 
 
@@ -190,23 +254,34 @@ def _ensure_source_checkout_inner(
     scm_id: str,
     force: bool,
     shutil,
+    build_timestamp_ms: Optional[int] = None,
+    pin_revision: bool = False,
 ) -> Dict[str, Any]:
-    if force and source_dir.exists():
+    # 고정 요청인데 기존 스냅샷이 HEAD 체크아웃이면 재수집한다. 이 재판정이 없으면 센티널만
+    # 보고 '이미 캐시됨'으로 반환해, 고정 토글을 켜도 잘못된 트리가 영원히 남는다.
+    repin = bool(pin_revision) and _source_is_complete(source_dir) and not source_snapshot_is_pinned(source_dir)
+    if (force or repin) and source_dir.exists():
         # Caller requested a fresh checkout. Remove any previous artefacts so
         # the sentinel/cache logic below behaves as if this were a first sync.
         if progress_cb:
             try:
-                progress_cb("scm_reset", {"path": str(source_dir)})
+                progress_cb("scm_reset", {"path": str(source_dir), "reason": "repin" if repin else "force"})
             except Exception:
                 pass
         _robust_rmtree(source_dir)
     if _source_is_complete(source_dir):
+        cached_meta = read_source_sentinel(source_dir)
         if progress_cb:
             try:
                 progress_cb("scm_done", {"path": str(source_dir), "skipped": True})
             except Exception:
                 pass
-        return {"ok": True, "path": str(source_dir), "scm": "cached"}
+        return {
+            "ok": True, "path": str(source_dir), "scm": "cached",
+            "revision": cached_meta.get("revision", ""),
+            "revision_source": cached_meta.get("revision_source", "") or "head",
+            "pinned": source_snapshot_is_pinned(source_dir),
+        }
     try:
         meta = client.get_scm_meta(build_selector=build_selector or "lastSuccessfulBuild")
     except Exception:
@@ -257,6 +332,28 @@ def _ensure_source_checkout_inner(
         scm = jenkins_scm or "git"
         branch = jenkins_branch
         revision = jenkins_revision
+
+    # ── 빌드 시점 revision 고정 ──────────────────────────────────────────────
+    # 위 분기가 revision을 비우는 경로(registry override 등)는 **HEAD 체크아웃**이 된다.
+    # 그러면 과거 빌드를 오늘 백필했을 때 4개월치 빌드가 전부 오늘의 트리를 받는다 —
+    # 베이스라인 대비 변화 0, ASIL 함수 변경 침묵. Jenkins에 소스 SVN revision이 없으므로
+    # 빌드 timestamp를 날짜-revision으로 되돌려 고정한다(실패는 HEAD 폴백 + 사유 기록).
+    revision_source = "jenkins" if revision else "head"
+    pin_error = ""
+    if pin_revision and scm == "svn" and not revision:
+        pinned = resolve_build_svn_revision(
+            repo_url=repo_url, build_timestamp_ms=build_timestamp_ms,
+            username=resolved_username, password=resolved_password or "",
+        )
+        if pinned.get("revision"):
+            revision = pinned["revision"]
+            revision_source = "svn_date"
+        else:
+            pin_error = str(pinned.get("error") or "")
+            _logger.warning(
+                "[ensure_source_checkout] pin_failed build_root=%s ts=%s error=%s (HEAD로 진행)",
+                build_root, build_timestamp_ms, pin_error,
+            )
 
     if not repo_url:
         _logger.warning(
@@ -345,15 +442,18 @@ def _ensure_source_checkout_inner(
     # re-checkout on the next sync, which is still correct behaviour.
     try:
         source_dir.mkdir(parents=True, exist_ok=True)
+        # revision_source는 신규 키 — 없는 구 센티널은 '고정 안 됨'으로 판정된다
+        # (source_snapshot_is_pinned). 그래야 HEAD로 받아둔 기존 스냅샷이 재수집 대상이 된다.
         _source_sentinel(source_dir).write_text(
-            f"scm={scm}\nrevision={revision}\nbranch={branch}\n",
+            f"scm={scm}\nrevision={revision}\nbranch={branch}\nrevision_source={revision_source}\n",
             encoding="utf-8",
         )
     except Exception:
         pass
     if progress_cb:
         try:
-            progress_cb("scm_done", {"path": str(source_dir)})
+            progress_cb("scm_done", {"path": str(source_dir), "revision": revision,
+                                     "revision_source": revision_source})
         except Exception:
             pass
     return {
@@ -363,6 +463,8 @@ def _ensure_source_checkout_inner(
         "repo_url": repo_url,
         "branch": branch,
         "revision": revision,
+        "revision_source": revision_source,
+        "pin_error": pin_error,
     }
 
 
@@ -612,6 +714,7 @@ def sync_jenkins_artifacts(
     scm_username: str = "",
     scm_id: str = "",
     force: bool = False,
+    pin_source_revision: bool = False,
 ) -> Tuple[Dict[str, Any], Path, Path, List[str], List[Dict[str, Any]]]:
     client = JenkinsClient(
         job_url=_norm_job_url(job_url),
@@ -698,6 +801,9 @@ def sync_jenkins_artifacts(
         scm_username=scm_username,
         scm_id=scm_id,
         force=force,
+        # 빌드 시각(epoch ms)은 이미 list_artifacts로 받아둔 값 — 고정 시 svn 날짜-revision 키.
+        build_timestamp_ms=getattr(build, "timestamp", None),
+        pin_revision=pin_source_revision,
     )
 
     reports_dir = _detect_reports_dir(build_root)
@@ -719,6 +825,9 @@ def sync_jenkins_artifacts(
             "path": checkout_result.get("path", ""),
             "revision": checkout_result.get("revision", ""),
             "branch": checkout_result.get("branch", ""),
+            # 스냅샷이 빌드 시점으로 고정됐는지 — 'head'면 체크아웃한 날의 트리다(비교 무의미).
+            "revision_source": checkout_result.get("revision_source", ""),
+            "pin_error": checkout_result.get("pin_error", ""),
         },
     }
 

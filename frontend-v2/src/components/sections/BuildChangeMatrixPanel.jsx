@@ -130,6 +130,7 @@ export default function BuildChangeMatrixPanel({ jobUrl, cacheRoot, baseline, de
   const td = { ...xs, padding: '4px 8px', borderBottom: '1px solid var(--border)', whiteSpace: 'nowrap' };
   const rows = data?.rows || [];
   const groups = (data?.snapshot_groups || []).filter((g) => g.count > 1);
+  const trust = data?.snapshot_trust;
 
   return (
     <div className="panel" style={{ padding: 'var(--sp-3)' }}>
@@ -174,7 +175,20 @@ export default function BuildChangeMatrixPanel({ jobUrl, cacheRoot, baseline, de
         </div>
       )}
 
-      {/* 동일 트리 경고 — '변화 0'을 코드 미변경으로 오독하지 않게 */}
+      {/* 스냅샷 미고정 경고 — 동일 트리의 **원인**을 짚는다. 이게 없으면 사용자가 '변화 0'을
+          코드 미변경으로 읽어 ASIL 함수 변경이 침묵으로 과소보고된다. */}
+      {trust?.unpinned > 0 && (
+        <div style={{
+          ...xs, padding: '4px 8px', borderRadius: 'var(--radius-sm)', marginBottom: 'var(--sp-2)',
+          border: '1px solid var(--color-warning)', color: 'var(--color-warning)',
+        }}>
+          ⚠ {rows.length}개 행 중 {trust.unpinned}개는 소스가 <b>빌드 시점으로 고정되지 않았습니다</b> —
+          받아온 날의 HEAD 트리라 아래 “변화 0”은 코드가 안 바뀐 증거가 아닙니다.
+          위 “과거 빌드 가져오기”에서 <b>스냅샷 고정</b>을 켜고 다시 가져오면 재수집됩니다.
+        </div>
+      )}
+
+      {/* 동일 트리 안내 — 어떤 빌드들이 같은 트리인지 */}
       {groups.length > 0 && (
         <div style={{
           ...xs, padding: '4px 8px', borderRadius: 'var(--radius-sm)', marginBottom: 'var(--sp-2)',
@@ -225,7 +239,14 @@ export default function BuildChangeMatrixPanel({ jobUrl, cacheRoot, baseline, de
                         {String(r.timestamp_iso || '').replace('T', ' ').slice(0, 16) || '—'}
                         {lag && <span style={{ color: 'var(--color-warning)' }} title={lag}> ⚠</span>}
                       </td>
-                      <td style={td}>r{r.revision || '—'}</td>
+                      <td style={td}>
+                        {r.source_pinned
+                          ? `r${r.revision}`
+                          : <span style={{ color: 'var(--color-warning)' }}
+                              title="이 빌드의 소스는 빌드 시점 revision으로 고정되지 않았습니다 — 체크아웃한 날의 HEAD 트리입니다.">
+                              {r.revision ? `r${r.revision}` : '미고정'} ⚠
+                            </span>}
+                      </td>
                       <td style={td}>
                         {r.snapshot_group?.count > 1
                           ? <span title={`동일 트리: #${(r.snapshot_group.members || []).join(' · #')}`}

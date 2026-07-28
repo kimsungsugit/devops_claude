@@ -40,9 +40,22 @@ def _parse_sentinel(source_dir: Path) -> Dict[str, str]:
         key, _, value = line.partition("=")
         key = key.strip().lower()
         value = value.strip()
-        if key in ("scm", "revision", "branch") and value:
+        if key in ("scm", "revision", "branch", "revision_source") and value:
             out[key] = value
     return out
+
+
+def _is_pinned(sentinel: Dict[str, str]) -> bool:
+    """스냅샷이 **그 빌드의 revision**으로 고정됐는지 — HEAD 체크아웃은 False.
+
+    고정되지 않은 스냅샷은 '받아온 날의 트리'라, 과거 빌드를 한꺼번에 백필하면 전부 같은
+    트리가 된다(실측: 4개월 33빌드 중 26빌드 동일). 그러면 베이스라인 대비 변화가 0으로
+    보이고 ASIL 함수 변경이 통째로 사라지므로, 이 플래그를 UI까지 올려 재수집을 유도한다.
+    `revision_source` 키가 없는 구 센티널도 고정 안 됨으로 본다(보수적).
+    """
+    if not sentinel.get("revision"):
+        return False
+    return sentinel.get("revision_source", "") not in ("", "head")
 
 
 def _read_status_json(reports_dir: Path) -> Dict[str, Any]:
@@ -73,6 +86,9 @@ def list_cached_builds_meta(*, job_url: str, cache_root: Path) -> List[Dict[str,
                 "revision": sentinel.get("revision") or None,
                 "branch": sentinel.get("branch") or None,
                 "scm": sentinel.get("scm") or None,
+                # 스냅샷 신뢰도 — False면 '변화 0'이 코드 미변경이 아니라 HEAD 체크아웃 결과다.
+                "source_pinned": _is_pinned(sentinel),
+                "source_revision_source": sentinel.get("revision_source") or None,
                 "has_source": (source_dir / SENTINEL_NAME).exists(),
                 "has_rcr": find_latest_rcr_html(build_root, reports_dir) is not None,
                 "has_analysis_summary": (reports_dir / "analysis_summary.json").exists(),

@@ -18,6 +18,7 @@ let mockCfg;
 let mockAllBuilds;
 let mockSrcBuilds;
 let mockMatrix;
+let mockBackfill;
 
 vi.mock('../api.js', () => ({
   api: vi.fn((url) => (String(url).includes('build-timeline') ? Promise.resolve(mockTimeline) : Promise.resolve({}))),
@@ -30,6 +31,7 @@ vi.mock('../api.js', () => ({
     if (u.includes('/api/jenkins/builds')) return Promise.resolve(mockAllBuilds);
     if (u.includes('cached-builds-meta')) return Promise.resolve(mockSrcBuilds);
     if (u.includes('change-matrix')) return Promise.resolve(mockMatrix);
+    if (u.includes('sync-backfill')) return Promise.resolve(mockBackfill);
     return Promise.resolve({});
   }),
   defaultCacheRoot: () => '.devops_pro_cache',
@@ -108,9 +110,10 @@ describe('ProjectSummarySection (재설계)', () => {
     mockCfg = {};
     mockAllBuilds = [];
     mockSrcBuilds = { ok: true, available: true, builds: [
-      { build_number: 125, has_source: true, timestamp_iso: '2026-07-24T13:00:11', revision: '1075' },
-      { build_number: 122, has_source: true, timestamp_iso: '2026-06-25T13:00:00', revision: '1053' },
+      { build_number: 125, has_source: true, source_pinned: true, timestamp_iso: '2026-07-24T13:00:11', revision: '1075' },
+      { build_number: 122, has_source: true, source_pinned: true, timestamp_iso: '2026-06-25T13:00:00', revision: '1053' },
     ] };
+    mockBackfill = { ok: true, available: true, job_id: 'jid', total: 10 };
     mockMatrix = {
       ok: true, available: true, level: 'files',
       baseline: { build_number: 122, timestamp_iso: '2026-06-25T13:00:00', revision: '1053' },
@@ -300,7 +303,79 @@ describe('ProjectSummarySection (재설계)', () => {
     delete window.__detailSection;
   });
 
+  // ── 과거 빌드 가져오기 옵션 (스냅샷 고정 · 비교 캐시 자동 생성) ───────────
+  // 근본 결함: 고정이 없으면 과거 빌드가 전부 '받아온 날의 HEAD 트리'라 비교가 무의미해진다
+  // (실측 33빌드 중 26개 동일 트리 → 변화 0 + ASIL 함수 변경 침묵).
 
+  describe('과거 빌드 가져오기 옵션', () => {
+    const startBackfill = async (user) => {
+      await user.click(screen.getByRole('button', { name: '과거 빌드 가져오기' }));
+      return vi.waitFor(() => {
+        const call = mockPost.mock.calls.find(([u]) => String(u).includes('sync-backfill'));
+        expect(call).toBeTruthy();
+        return call[1];
+      });
+    };
 
+    it('두 토글이 기본 ON이고 그대로 요청에 실린다', async () => {
+      const user = userEvent.setup();
+      render(<ProjectSummarySection job={JOB} analysisResult={RESULT} />);
+      await screen.findByRole('heading', { name: /빌드별 변경 영향/ });
+      const pin = screen.getByLabelText(/스냅샷을 빌드 시점 revision으로 고정/);
+      const warm = screen.getByLabelText(/비교 캐시\(함수 축\) 자동 생성/);
+      expect(pin).toBeChecked();
+      expect(warm).toBeChecked();
 
+      const body = await startBackfill(user);
+      expect(body).toMatchObject({ pin_source: true, warm_matrix: true });
+    });
+
+    it('비교 캐시는 화면에서 고른 베이스라인으로 만든다(기준 불일치 = 캐시 전량 미스)', async () => {
+      const user = userEvent.setup();
+      render(<ProjectSummarySection job={JOB} analysisResult={RESULT} />);
+      await screen.findByRole('heading', { name: /빌드별 변경 영향/ });
+      await vi.waitFor(() => {
+        expect(mockPost.mock.calls.some(([u]) => String(u).endsWith('/api/summary/change-matrix'))).toBe(true);
+      });
+      const body = await startBackfill(user);
+      // 매트릭스가 쓰는 기준과 동일해야 한다(목록 최고령 #122)
+      expect(body.baseline_build).toBe(122);
+    });
+
+    it('토글을 끄면 꺼진 채로 전달된다', async () => {
+      const user = userEvent.setup();
+      render(<ProjectSummarySection job={JOB} analysisResult={RESULT} />);
+      await screen.findByRole('heading', { name: /빌드별 변경 영향/ });
+      await user.click(screen.getByLabelText(/스냅샷을 빌드 시점 revision으로 고정/));
+      await user.click(screen.getByLabelText(/비교 캐시\(함수 축\) 자동 생성/));
+      const body = await startBackfill(user);
+      expect(body).toMatchObject({ pin_source: false, warm_matrix: false });
+    });
+
+    it('가져올 빌드 개수를 선택하면 count로 전달된다', async () => {
+      const user = userEvent.setup();
+      render(<ProjectSummarySection job={JOB} analysisResult={RESULT} />);
+      await screen.findByRole('heading', { name: /빌드별 변경 영향/ });
+      await user.selectOptions(screen.getByLabelText(/가져올 빌드/), '30');
+      const body = await startBackfill(user);
+      expect(body.count).toBe(30);
+    });
+
+    it('고정 안 된 캐시 빌드가 있으면 재수집을 안내한다', async () => {
+      mockSrcBuilds = { ok: true, available: true, builds: [
+        { build_number: 125, has_source: true, source_pinned: true },
+        { build_number: 122, has_source: true, source_pinned: false },
+        { build_number: 111, has_source: true, source_pinned: false },
+      ] };
+      render(<ProjectSummarySection job={JOB} analysisResult={RESULT} />);
+      await screen.findByRole('heading', { name: /빌드별 변경 영향/ });
+      expect(await screen.findByText(/캐시 빌드 2개는 소스가/)).toBeInTheDocument();
+    });
+
+    it('전부 고정됐으면 재수집 안내를 내지 않는다', async () => {
+      render(<ProjectSummarySection job={JOB} analysisResult={RESULT} />);
+      await screen.findByRole('heading', { name: /빌드별 변경 영향/ });
+      expect(screen.queryByText(/개는 소스가/)).toBeNull();
+    });
+  });
 });
