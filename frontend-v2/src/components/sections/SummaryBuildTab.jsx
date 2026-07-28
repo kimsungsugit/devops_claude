@@ -11,7 +11,7 @@ import BuildChangeMatrixPanel from './BuildChangeMatrixPanel.jsx';
  */
 export default function SummaryBuildTab({
   jobUrl, cacheRoot, srcBuilds, srcBuildsError, allBuilds,
-  baselineBuild, diffTarget, onChangeBaseline, onChangeTarget, deltaByBuild,
+  baselineBuild, diffTarget, onChangeBaseline, onChangeTarget, deltaByBuild, prqaTrendError,
   backfill, backfillBusy, startBackfill, unpinnedCount,
   pinSource, setPinSource, warmMatrix, setWarmMatrix, backfillCount, setBackfillCount,
 }) {
@@ -96,7 +96,7 @@ export default function SummaryBuildTab({
 
       {/* 빌드별 변경 영향 — 위 패널과 같은 베이스라인을 기준으로 각 빌드의 누적 변화 */}
       <BuildChangeMatrixPanel jobUrl={jobUrl} cacheRoot={cacheRoot}
-        baseline={baselineBuild} deltaByBuild={deltaByBuild} />
+        baseline={baselineBuild} deltaByBuild={deltaByBuild} prqaTrendError={prqaTrendError} />
     </div>
   );
 }

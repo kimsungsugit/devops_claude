@@ -7,6 +7,7 @@ import { classifyGate } from '../ResultPanel.jsx';
 import { buildTraceMatrix } from '../../traceMatrix.js';
 import { clearArchMetricsCache } from '../../archMetricsCache.js';
 import PipelineHealthStrip from './PipelineHealthStrip.jsx';
+import SummaryPanel from './SummaryPanel.jsx';
 import SummaryOverviewTab from './SummaryOverviewTab.jsx';
 import SummaryArchTab from './SummaryArchTab.jsx';
 import SummarySourceTab from './SummarySourceTab.jsx';
@@ -52,19 +53,38 @@ function Pill({ text, color, title }) {
     }}>{text}</span>
   );
 }
-function HealthChip({ label, sev }) {
+/**
+ * 문제점 칩. `to` 가 있으면 **근거가 있는 화면으로 이동하는 버튼**이 된다.
+ *
+ * 예전엔 전부 죽은 라벨이었다 — "ASIL 시험 미달 2" 를 읽고도 어디를 봐야 하는지 화면이
+ * 말해 주지 않아 사용자가 탭을 뒤져야 했다. 목적지가 불확실한 항목은 `to` 를 주지 않는다
+ * (엉뚱한 화면으로 보내는 건 안 보내는 것보다 나쁘다).
+ */
+function HealthChip({ label, sev, to, onGo }) {
   const bg = sev === 'danger' ? 'var(--color-danger)'
     : sev === 'warn' ? 'var(--color-warning)'
     : sev === 'ok' ? 'var(--color-success)' : 'var(--text-muted)';
+  const style = {
+    display: 'inline-flex', alignItems: 'center', gap: 4, padding: '3px 10px',
+    borderRadius: 'var(--radius-sm)', fontSize: 'var(--text-xs)', fontWeight: 600,
+    color: '#fff', background: bg, border: 'none',
+  };
+  if (!to) return <span style={style}>{label}</span>;
   return (
-    <span style={{
-      display: 'inline-flex', alignItems: 'center', gap: 4, padding: '3px 10px',
-      borderRadius: 'var(--radius-sm)', fontSize: 'var(--text-xs)', fontWeight: 600, color: '#fff', background: bg,
-    }}>{label}</span>
+    <button type="button" onClick={() => onGo(to)}
+      aria-label={`${label} — ${to.label}(으)로 이동`} title={`${to.label}에서 근거 보기`}
+      style={{ ...style, cursor: 'pointer' }}>
+      {label} <span aria-hidden="true">›</span>
+    </button>
   );
 }
 
-export default function ProjectSummarySection({ job, analysisResult }) {
+/** 문제점 → 근거 화면. section 은 Detail.jsx SECTIONS 의 id, sub 는 그 섹션의 서브탭. */
+const GO_TRACE = { section: 'srssds', label: '요구사항 커버리지' };
+const GO_IMPACT = { section: 'impact', label: '변경 영향 평가' };
+const GO_BUILD_TAB = { section: 'summary', sub: 'build', label: '빌드 변경 탭' };
+
+export default function ProjectSummarySection({ job, analysisResult, onSubChange, initialSub }) {
   const toast = useToast();
   const { cfg } = useJenkinsCfg();
   const rd = analysisResult?.reportData || {};
@@ -98,6 +118,24 @@ export default function ProjectSummarySection({ job, analysisResult }) {
     setMounted((prev) => (prev.has(id) ? prev : new Set(prev).add(id)));
     setSub(id);
   }, []);
+  // 외부 딥링크(`window.__detailSection('summary', 'arch')`)가 지정한 서브로 착지.
+  // 섹션만 지정하면 항상 개요에 떨어져 "아키텍처를 보라"는 링크가 사용자를 다시 헤매게 한다.
+  // ⚠ effect 가 아니라 **렌더 중 조정**이다(React 공식 "prop 변화에 state 맞추기" 패턴:
+  //   이전 prop 을 state 로 들고 비교). effect 로 하면 한 프레임 개요를 보여준 뒤 튀고,
+  //   effect 안 setState 는 캐스케이딩 렌더로 lint 게이트에도 걸린다.
+  const [seenInitialSub, setSeenInitialSub] = useState(null);
+  if (initialSub && initialSub !== seenInitialSub) {
+    setSeenInitialSub(initialSub);
+    if (VALID_SUB.has(initialSub)) {
+      setMounted((prev) => (prev.has(initialSub) ? prev : new Set(prev).add(initialSub)));
+      setSub(initialSub);
+    }
+  }
+  // 활성 서브를 부모(Detail)에 알려 breadcrumb 에 반영 — DocGenHubSection 과 같은 규약.
+  useEffect(() => {
+    const active = SUBS.find((s) => s.id === sub);
+    if (active && onSubChange) onSubChange(active.id, active.label);
+  }, [sub, onSubChange]);
   // WAI-ARIA tablist 키보드 네비게이션 (ArrowLeft/Right/Home/End + roving tabIndex).
   const onSubKeyDown = (e) => {
     const idx = SUBS.findIndex((s) => s.id === sub);
@@ -314,28 +352,30 @@ export default function ProjectSummarySection({ job, analysisResult }) {
       // null 커버리지는 classify 자체를 건너뜀(null이 'fail'로 떨어지는 허위 미달 방지 — 증거부재≠미달).
       if (t.coverage_pct != null) {
         const gate = classifyGate(t.coverage_pct);
-        if (gate === 'fail') list.push({ label: `커버리지 미달 ${Math.round(t.coverage_pct)}%`, sev: 'danger' });
-        else if (gate === 'warn') list.push({ label: `커버리지 주의 ${Math.round(t.coverage_pct)}%`, sev: 'warn' });
+        if (gate === 'fail') list.push({ label: `커버리지 미달 ${Math.round(t.coverage_pct)}%`, sev: 'danger', to: GO_TRACE });
+        else if (gate === 'warn') list.push({ label: `커버리지 주의 ${Math.round(t.coverage_pct)}%`, sev: 'warn', to: GO_TRACE });
       }
-      if ((t.uncovered || 0) > 0) list.push({ label: `미추적 요구 ${t.uncovered}`, sev: 'warn' });
-      if ((t.asil_gap_count || 0) > 0) list.push({ label: `ASIL 시험 미달 ${t.asil_gap_count}`, sev: 'danger' });
-      if ((t.asil_unknown_count || 0) > 0) list.push({ label: `ASIL 미상 ${t.asil_unknown_count}`, sev: 'warn' });
+      if ((t.uncovered || 0) > 0) list.push({ label: `미추적 요구 ${t.uncovered}`, sev: 'warn', to: GO_TRACE });
+      if ((t.asil_gap_count || 0) > 0) list.push({ label: `ASIL 시험 미달 ${t.asil_gap_count}`, sev: 'danger', to: GO_TRACE });
+      if ((t.asil_unknown_count || 0) > 0) list.push({ label: `ASIL 미상 ${t.asil_unknown_count}`, sev: 'warn', to: GO_TRACE });
       const integ = (t.integrity_collision_count || 0) + (t.integrity_dangling_count || 0);
-      if (integ > 0) list.push({ label: `ID 정합성 ${integ}`, sev: 'warn' });
+      if (integ > 0) list.push({ label: `ID 정합성 ${integ}`, sev: 'warn', to: GO_TRACE });
       const unmapped = t.summary_raw?.unmapped_vcast_count ?? t.unmapped_vcast_count;
-      if ((unmapped || 0) > 0) list.push({ label: `VectorCAST 미매칭 ${unmapped}`, sev: 'warn' });
+      if ((unmapped || 0) > 0) list.push({ label: `VectorCAST 미매칭 ${unmapped}`, sev: 'warn', to: GO_TRACE });
     }
-    if ((rollup.cumulative_coverage_regressed || 0) > 0) list.push({ label: `MC/DC 회귀 ${rollup.cumulative_coverage_regressed}`, sev: 'danger' });
-    if ((rollup.cumulative_flag_docs || 0) > 0) list.push({ label: `검토 대기 문서 ${rollup.cumulative_flag_docs}`, sev: 'warn' });
+    if ((rollup.cumulative_coverage_regressed || 0) > 0) list.push({ label: `MC/DC 회귀 ${rollup.cumulative_coverage_regressed}`, sev: 'danger', to: GO_IMPACT });
+    if ((rollup.cumulative_flag_docs || 0) > 0) list.push({ label: `검토 대기 문서 ${rollup.cumulative_flag_docs}`, sev: 'warn', to: GO_IMPACT });
     // 미고정 스냅샷은 '빌드 변경' 탭 안에만 경고가 있는데, 그 탭은 lazy 라 열기 전엔 안 보인다.
     // 이건 "변화 0"을 코드 미변경으로 오독하게 만드는 축(ASIL 함수 변경 과소보고)이라
     // 탭을 안 열어도 보이는 배너에 올린다.
-    if (unpinnedCount > 0) list.push({ label: `스냅샷 미고정 빌드 ${unpinnedCount}`, sev: 'warn' });
+    if (unpinnedCount > 0) list.push({ label: `스냅샷 미고정 빌드 ${unpinnedCount}`, sev: 'warn', to: GO_BUILD_TAB });
     return list;
   }, [trace, rollup, unpinnedCount]);
 
   // ── 과거 빌드 백필(sync-backfill) — Jenkins 연결 시에만 의미. 미도달은 서버가 정직 실패. ──
   const [backfill, setBackfill] = useState(null); // {job_id,total,completed,state,phase,matrix}
+  // 백필이 소스 스냅샷을 바꾸면 이 토큰을 올려 아키텍처 패널을 강제 재조회시킨다(위 ⚠ 참조).
+  const [archReloadToken, setArchReloadToken] = useState(0);
   // 스냅샷 고정: 끄면 HEAD 체크아웃이라 과거 빌드가 전부 '받아온 날의 트리'가 된다(실측 33빌드
   // 중 26개 동일 트리 → 변화 0 + ASIL 함수 변경 침묵). 그래서 기본 ON.
   const [pinSource, setPinSource] = useState(true);
@@ -379,10 +419,20 @@ export default function ProjectSummarySection({ job, analysisResult }) {
       if (resp.remaining_unpinned > 0) {
         toast?.('info', `이번에 ${resp.total}개를 처리합니다 — 미고정 ${resp.remaining_unpinned}개가 남아 한 번 더 실행해야 합니다`);
       }
+      // ⚠ 폴링은 **반드시 끝난다.** 예전엔 ①`available:false`(서버 재기동으로 job_id 소실)에
+      //   else 가 없어 조용히 멈췄고 ②catch 가 상한 없이 5초마다 영원히 재시도했다. 둘 다
+      //   `backfill.state`가 'running'에 굳어 가져오기 버튼·체크박스가 **영구 disabled** 됐다.
+      let pollFails = 0;
+      const giveUp = (why) => {
+        setBackfill(null);
+        toast?.('error', `백필 상태를 확인할 수 없습니다 — ${why}. 다시 시도해 주세요.`);
+      };
       const poll = async () => {
         try {
           const st = await api(`/api/jenkins/sync-backfill-status/${resp.job_id}`);
-          if (st?.available) {
+          pollFails = 0;
+          if (!st?.available) { giveUp(st?.reason || '작업 정보 없음'); return; }
+          {
             setBackfill(st);
             if (st.state === 'running') { setTimeout(poll, 3000); return; }
             const errs = (st.per_build || []).filter((b) => b.status === 'error').length;
@@ -393,13 +443,20 @@ export default function ProjectSummarySection({ job, analysisResult }) {
             if (pinFails) parts.push(`revision 고정 실패 ${pinFails}건(HEAD로 진행)`);
             toast?.(errs || pinFails ? 'warn' : 'success',
               errs ? `백필 완료 — ${errs}개 빌드 실패(상태 참조)` : `백필 완료 — ${parts.join(' · ')}`);
-            // 백필은 소스 스냅샷을 바꾼다 — 아키텍처 메트릭 공유 캐시를 비우지 않으면
-            // 그 탭만 옛 빌드를 계속 보여줘 한 화면 안에서 기준 빌드가 갈라진다.
+            // 백필은 소스 스냅샷을 바꾼다 — 캐시를 비우는 것만으론 부족하다.
+            // ⚠ keep-alive 라 아키텍처 탭 패널은 **언마운트되지 않는다** → "다음 마운트"가
+            //   오지 않아 캐시 clear 가 화면에 도달하지 못하고, 그 탭만 옛 빌드에 영구히 멈춘다.
+            //   그래서 토큰을 올려 패널 effect deps 를 실제로 흔든다.
             clearArchMetricsCache(jobUrl, cacheRoot);
+            setArchReloadToken((t) => t + 1);
             reloadTimeline();
             reloadSrcBuilds();
           }
-        } catch { setTimeout(poll, 5000); }
+        } catch (e) {
+          pollFails += 1;
+          if (pollFails >= 5) { giveUp(String(e?.message || e)); return; }
+          setTimeout(poll, 5000);
+        }
       };
       setTimeout(poll, 2500);
     } catch (e) {
@@ -407,6 +464,14 @@ export default function ProjectSummarySection({ job, analysisResult }) {
     }
   }, [jobUrl, cfg, cacheRoot, scmId, toast, reloadTimeline, reloadSrcBuilds,
       pinSource, warmMatrix, backfillCount, baselineBuild]);
+
+  // 문제점 칩 → 근거 화면. 같은 섹션(summary) 안이면 서브탭만 바꾸고, 다른 섹션이면 딥링크한다.
+  // ⚠ `window.__detailSection` 은 Detail 이 마운트돼 있을 때만 존재한다(테스트/스토리북에선 부재).
+  const goTo = useCallback((to) => {
+    if (!to) return;
+    if (to.section === 'summary') { selectSub(to.sub); return; }
+    if (typeof window.__detailSection === 'function') window.__detailSection(to.section, to.sub);
+  }, [selectSub]);
 
   // 행 클릭 → 변경 영향 평가 탭 핸드오프는 제거됐다(사용자 결정): 표가 영향분석 실행 이력이
   // 아니라 소스 스냅샷 비교가 되면서, 잡이 실행된 빌드에만 동작하는 링크는 잡음이었다.
@@ -416,7 +481,9 @@ export default function ProjectSummarySection({ job, analysisResult }) {
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--sp-3)' }}>
       {/* 헤더 + 문제 요약 — 서브탭 **위**에 둔다. "지금 괜찮은가"는 어느 탭에 있든 보여야 한다 */}
       <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 'var(--sp-2)' }}>
-        <div style={{ fontSize: 'var(--text-xl)', fontWeight: 700 }}>📈 {job?.name || '프로젝트'} 분석</div>
+        {/* 문서 heading 계층 — 패널 제목이 h3 인데 위에 아무것도 없으면 스크린리더가 h3부터
+            시작하는 평면 목록이 된다. 탭의 제목이 h2 자리다. */}
+        <h2 style={{ margin: 0, fontSize: 'var(--text-xl)', fontWeight: 700 }}>📈 {job?.name || '프로젝트'} 분석</h2>
         {scmId && <Pill text={`SCM ${scmId}`} color="var(--accent)" />}
         {problems.length > 0
           ? <Pill text={`⚠ 문제 ${problems.length}건`} color="var(--color-danger)" />
@@ -427,15 +494,19 @@ export default function ProjectSummarySection({ job, analysisResult }) {
         </span>
       </div>
 
-      {/* 문제점 배너 */}
-      <div className="panel" style={PANEL}>
-        <div style={{ fontSize: 'var(--text-sm)', fontWeight: 600, marginBottom: 'var(--sp-2)' }}>
-          문제점 / 현황 {problems.length > 0 ? `— ⚠ ${problems.length}건` : ''}
-        </div>
+      {/* 문제점 배너 — 이 탭에서 가장 중요한 카드다. 예전엔 제목이 11px/600 이라 패널 제목
+          (h3 13px/700)보다 **작았다** — 가장 중요한 것이 가장 작게 보이는 위계 역전.
+          접기는 주지 않는다: 이건 접어서 치울 성질이 아니다. */}
+      <SummaryPanel title="문제점 / 현황" collapsible={false}
+        meta={problems.length > 0 && (
+          <span style={{ fontSize: 'var(--text-xs)', color: 'var(--color-danger)', fontWeight: 600 }}>
+            ⚠ {problems.length}건
+          </span>
+        )}>
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--sp-2)' }}>
           {problems.length === 0
             ? <HealthChip label={trace?.has_data ? '이상 없음' : '추적성 로딩/생성 중…'} sev={trace?.has_data ? 'ok' : 'muted'} />
-            : problems.map((p, i) => <HealthChip key={i} label={p.label} sev={p.sev} />)}
+            : problems.map((p, i) => <HealthChip key={i} label={p.label} sev={p.sev} to={p.to} onGo={goTo} />)}
         </div>
         {/* 추적성 상태 줄 — 추적성 패널을 숨긴 뒤 생성 실패 사유가 갈 곳이 없어졌다. 실패를 조용히
             삼키면 '문제 0건'이 '이상 없음'으로 위장되므로(증거부재≠정상) 여기로 끌어올린다. */}
@@ -458,7 +529,14 @@ export default function ProjectSummarySection({ job, analysisResult }) {
             ⚠ 빌드 이력 조회 실패 — MC/DC 회귀·검토 대기 문서 지표가 이 목록에 반영되지 않았습니다 ({timelineError})
           </div>
         )}
-      </div>
+        {/* ⚠ 이 실패는 `스냅샷 미고정 빌드` 칩의 데이터 출처를 죽인다 — 고지가 없으면
+            unpinnedCount 가 0으로 붕괴해 위 pill 이 초록 "이상 없음"을 낸다(증거부재≠정상). */}
+        {srcBuildsError && (
+          <div style={{ fontSize: 'var(--text-xs)', color: 'var(--color-warning)', marginTop: 'var(--sp-2)' }}>
+            ⚠ 캐시 빌드 목록 조회 실패 — 스냅샷 미고정 여부를 판정할 수 없습니다 ({srcBuildsError})
+          </div>
+        )}
+      </SummaryPanel>
 
       {/* 파이프라인 헬스 스트립 — 설계(SDS)→테스트(STS)까지 단계 상태 + 탭 딥링크 */}
       {SHOW.pipelineHealth && (
@@ -487,13 +565,13 @@ export default function ProjectSummarySection({ job, analysisResult }) {
           <SummaryOverviewTab jobUrl={jobUrl} cacheRoot={cacheRoot} scmId={scmId}
             trace={trace} traceBusy={traceBusy} reloadTrace={reloadTrace} scmVcast={scmVcast}
             prqa={prqa} codeMetrics={cm} srcBuilds={srcBuilds} srcBuildsError={srcBuildsError}
-            violationsDelta={latestViolationsDelta} />
+            violationsDelta={latestViolationsDelta} prqaTrendError={prqaTrendError} />
         )}
       </div>
 
       <div role="tabpanel" id="summary-panel-arch" aria-labelledby="summary-tab-arch"
         tabIndex={sub === 'arch' ? 0 : -1} style={{ display: sub === 'arch' ? 'block' : 'none' }}>
-        {mounted.has('arch') && <SummaryArchTab jobUrl={jobUrl} cacheRoot={cacheRoot} />}
+        {mounted.has('arch') && <SummaryArchTab jobUrl={jobUrl} cacheRoot={cacheRoot} reloadToken={archReloadToken} />}
       </div>
 
       <div role="tabpanel" id="summary-panel-source" aria-labelledby="summary-tab-source"
@@ -511,7 +589,7 @@ export default function ProjectSummarySection({ job, analysisResult }) {
             srcBuilds={srcBuilds} srcBuildsError={srcBuildsError} allBuilds={allBuilds}
             baselineBuild={baselineBuild} diffTarget={diffTarget}
             onChangeBaseline={setBaselineBuild} onChangeTarget={setDiffTarget}
-            deltaByBuild={deltaByBuild}
+            deltaByBuild={deltaByBuild} prqaTrendError={prqaTrendError}
             backfill={backfill} backfillBusy={backfillBusy} startBackfill={startBackfill}
             unpinnedCount={unpinnedCount}
             pinSource={pinSource} setPinSource={setPinSource}

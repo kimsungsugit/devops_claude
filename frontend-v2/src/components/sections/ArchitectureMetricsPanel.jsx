@@ -21,9 +21,10 @@ function Stat({ label, value, tone, title }) {
   return (
     <div title={title} style={{ minWidth: 88 }}>
       <div style={{ ...xs, color: 'var(--text-muted)' }}>{label}</div>
-      {/* --text-lg = 14px. 예전엔 `var(--text-md, 14px)` 였는데 --text-md 가 실제로 13px 이라
-          폴백 14px 는 영구히 발동하지 않았다(의도한 크기가 아니었음). */}
-      <div style={{ fontSize: 'var(--text-lg)', fontWeight: 700, color: tone || 'var(--text)' }}>{value}</div>
+      {/* 예전엔 `var(--text-md, 14px)` 였는데 --text-md 가 실제 13px 이라 폴백 14px 는 영구히
+          발동하지 않았다 → 실제 렌더되던 값(13px)을 그대로 명시한다. 폴백을 살려 14px 로 올리면
+          패널 제목 h3(13px)보다 커져 위계가 뒤집힌다. */}
+      <div style={{ fontSize: 'var(--text-md)', fontWeight: 700, color: tone || 'var(--text)' }}>{value}</div>
     </div>
   );
 }
@@ -43,7 +44,7 @@ function Section({ title, desc, defaultOpen, children }) {
 
 const COLS = { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 'var(--sp-4)' };
 
-export default function ArchitectureMetricsPanel({ jobUrl, cacheRoot, defaultOpen = true }) {
+export default function ArchitectureMetricsPanel({ jobUrl, cacheRoot, defaultOpen = true, reloadToken = 0 }) {
   const [data, setData] = useState(null);
   const [error, setError] = useState('');
   useEffect(() => {
@@ -59,7 +60,9 @@ export default function ArchitectureMetricsPanel({ jobUrl, cacheRoot, defaultOpe
       }
     })();
     return () => { cancelled = true; };
-  }, [jobUrl, cacheRoot]);
+    // ⚠ reloadToken — 백필로 소스 스냅샷이 바뀌면 부모가 올린다. keep-alive 라 이 패널은
+    //   언마운트되지 않아, 이게 없으면 캐시를 비워도 화면이 옛 빌드에 영구히 멈춘다.
+  }, [jobUrl, cacheRoot, reloadToken]);
 
   const th = { ...xs, textAlign: 'left', padding: '4px 8px', color: 'var(--text-muted)', borderBottom: '1px solid var(--border)', whiteSpace: 'nowrap' };
   const td = { ...xs, padding: '4px 8px', borderBottom: '1px solid var(--border)', whiteSpace: 'nowrap' };

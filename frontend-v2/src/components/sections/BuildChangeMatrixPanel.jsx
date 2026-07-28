@@ -58,7 +58,7 @@ function AsilCell({ asil }) {
   );
 }
 
-export default function BuildChangeMatrixPanel({ jobUrl, cacheRoot, baseline, deltaByBuild, defaultOpen = true }) {
+export default function BuildChangeMatrixPanel({ jobUrl, cacheRoot, baseline, deltaByBuild, prqaTrendError, defaultOpen = true }) {
   const [data, setData] = useState(null);
   const [error, setError] = useState('');
   const [cells, setCells] = useState({});          // build_number → 셀 결과
@@ -76,7 +76,11 @@ export default function BuildChangeMatrixPanel({ jobUrl, cacheRoot, baseline, de
     const run = ++runRef.current;
     (async () => {
       // 리셋을 async 안에서 — effect 본문의 동기 setState는 캐스케이딩 렌더를 부른다.
-      setData(null); setCells({}); setProgress(null); stoppedRef.current = false; setError('');
+      // ⚠ busyCell 도 반드시 리셋한다 — 계산 중 베이스라인이 바뀌면 루프는 run 가드로 죽는데
+      //   `busyCell` 이 남아 헤더가 "계산 중"을 영원히 표시하고, `pending>0 && !busyCell` 가드
+      //   때문에 재시작 버튼도 안 나온다(탈출구 없음).
+      setData(null); setCells({}); setProgress(null); setBusyCell(null); setExpanded(null);
+      stoppedRef.current = false; setError('');
       const body = { job_url: jobUrl, cache_root: cacheRoot, baseline_build: Number(baseline) };
       try {
         const files = await post('/api/summary/change-matrix', { ...body, level: 'files' });
@@ -99,12 +103,16 @@ export default function BuildChangeMatrixPanel({ jobUrl, cacheRoot, baseline, de
   const computePending = useCallback(async () => {
     const run = runRef.current;
     stoppedRef.current = false;
-    const list = [...pending];
-    for (let i = 0; i < list.length; i += 1) {
-      if (run !== runRef.current) return;
-      setBusyCell(list[i].target_build);
-      setProgress({ done: i, total: list.length });
-      try {
+    // 이미 계산된 셀은 건너뛴다 — 중지 후 재개가 1번부터 다시 돌면 "12건 중 5건 했는데
+    // 또 12건"이 되어 진행이 되돌아간 것처럼 보인다.
+    // (deps 의 `cells` 로 **클릭 시점** 스냅샷을 쓴다. 콜백이 셀마다 재생성돼도 실행 중인
+    //  루프는 자기 클로저를 그대로 쓰므로 영향이 없다.)
+    const list = pending.filter((c) => !cells[c.target_build]);
+    try {
+      for (let i = 0; i < list.length; i += 1) {
+        if (run !== runRef.current) return;
+        setBusyCell(list[i].target_build);
+        setProgress({ done: i, total: list.length });
         const resp = await post('/api/summary/change-matrix/cell', {
           job_url: jobUrl, cache_root: cacheRoot,
           baseline_build: Number(baseline), target_build: list[i].target_build,
@@ -116,16 +124,16 @@ export default function BuildChangeMatrixPanel({ jobUrl, cacheRoot, baseline, de
           for (const b of resp?.shared_with_builds || [resp?.target?.build_number]) next[b] = resp;
           return next;
         });
-      } catch (e) {
-        setError(String(e?.message || e));
-        break;
+        // 중지 요청 확인은 각 셀 완료 후 — 진행 중인 요청을 중단하지는 않는다.
+        if (stoppedRef.current) break;
       }
-      // 중지 요청 확인은 각 셀 완료 후 — 진행 중인 요청을 중단하지는 않는다.
-      if (stoppedRef.current) break;
+    } catch (e) {
+      setError(String(e?.message || e));
+    } finally {
+      // ⚠ finally — 조기 return(run 가드)·예외 어느 경로로 빠져도 "계산 중"을 남기지 않는다.
+      if (run === runRef.current) { setBusyCell(null); setProgress(null); }
     }
-    setBusyCell(null);
-    setProgress(null);
-  }, [pending, jobUrl, cacheRoot, baseline]);
+  }, [pending, cells, jobUrl, cacheRoot, baseline]);
 
   const th = { ...xs, textAlign: 'left', padding: '4px 8px', color: 'var(--text-muted)', borderBottom: '1px solid var(--border)', whiteSpace: 'nowrap' };
   const td = { ...xs, padding: '4px 8px', borderBottom: '1px solid var(--border)', whiteSpace: 'nowrap' };
@@ -134,12 +142,24 @@ export default function BuildChangeMatrixPanel({ jobUrl, cacheRoot, baseline, de
   const trust = data?.snapshot_trust;
   const limitInfo = data?.row_limit;
   const mixedCount = rows.filter((r) => r.comparison_basis?.state === 'mixed').length;
+  // 헤더 신호 — 접었을 때 본문의 경고·절단 고지가 통째로 사라지는 걸 막는다.
+  // 미고정 경고는 "변화 0 = 코드 미변경" 오독을 막는 축이라 특히 숨으면 안 된다.
+  const problem = error
+    ? <span style={{ ...xs, color: 'var(--color-danger)' }}>⚠ 조회 실패 — {error}</span>
+    : data?.available === false
+      ? <span style={{ ...xs, color: 'var(--color-warning)' }}>표 생성 불가</span>
+      : trust?.unpinned > 0
+        ? <span style={{ ...xs, color: 'var(--color-warning)' }}>⚠ 스냅샷 미고정 {trust.unpinned}행 — “변화 0”은 코드 미변경 증거가 아님</span>
+        : limitInfo?.omitted_builds?.length > 0
+          ? <span style={{ ...xs, color: 'var(--color-warning)' }}>⚠ 표시 {limitInfo.shown} / 전체 {limitInfo.available} — {limitInfo.omitted_builds.length}개 빌드 생략</span>
+          : null;
 
   return (
     <SummaryPanel
       title="빌드별 변경 영향"
       defaultOpen={defaultOpen}
       caption="베이스라인 대비 누적 변화 — 소스 스냅샷 직접 비교(영향분석 실행 이력과 무관)"
+      problem={problem}
       meta={<>
         {data?.baseline?.build_number != null && (
           <span style={{ ...xs, color: 'var(--text-muted)' }}>
@@ -225,7 +245,12 @@ export default function BuildChangeMatrixPanel({ jobUrl, cacheRoot, baseline, de
                 <th style={th}>빌드</th><th style={th}>결과</th><th style={th}>시각</th><th style={th}>리비전</th>
                 <th style={th}>스냅샷</th><th style={th}>변경 파일</th><th style={th}>변경 함수</th>
                 <th style={th} title="변경된 함수 중 ASIL 등급이 있는 것">ASIL 함수 변경</th>
-                <th style={th} title="직전 캐시 빌드 대비 PRQA 위반 증감">Δ위반</th>
+                {/* ⚠ 트렌드 조회가 실패하면 이 열이 전 행 `—` 가 되는데, 사유가 없으면 "변화 없음"으로
+            읽힌다. 열 제목에 실패를 명시한다(증거부재 ≠ 0). */}
+        <th style={{ ...th, color: prqaTrendError ? 'var(--color-warning)' : th.color }}
+          title={prqaTrendError ? `PRQA 트렌드 조회 실패 — ${prqaTrendError}` : '직전 캐시 빌드 대비 PRQA 위반 증감'}>
+          Δ위반{prqaTrendError ? ' ⚠미조회' : ''}
+        </th>
               </tr>
             </thead>
             <tbody>

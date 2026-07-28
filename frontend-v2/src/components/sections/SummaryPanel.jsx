@@ -18,7 +18,8 @@ import { PANEL } from './summaryCommon.js';
  *
  * 슬롯 4개가 기존 헤더 패턴 3종을 모두 흡수한다. **meta/problem/caption 은 접어도 보인다.**
  *   meta    — 제목 옆 muted 부연(빌드 번호·건수). 접어도 보이므로 "데이터가 사라졌다"로 안 읽힌다
- *   problem — 조회 실패·산출 불가 신호. **접힘 뒤로 숨으면 안 되는 유일한 축**(아래 ⚠ 참조)
+ *   problem — 조회 실패·산출 불가·**침묵 절단** 신호. 접힘 뒤로 숨으면 안 되는 축.
+ *             ⚠ 문제가 없으면 `null` 을 넘길 것(항상 truthy 인 프래그먼트 금지 — 아래 ⚠ 참조)
  *   actions — 우측 정렬 버튼/셀렉트(생성·재생성·비교 등)
  *   caption — 제목 줄 아래 한 줄 설명(구 `marginBottom: sp-1` + 별도 캡션 div 패턴). 접어도 보인다
  *
@@ -37,7 +38,12 @@ export default function SummaryPanel({
   const autoId = useId();
   const bodyId = `${id || autoId}-body`;
   const headingId = `${id || autoId}-title`;
-  const shown = collapsible ? open : true;
+  // ⚠ 문제가 있는 패널은 **접을 수 없다.** 사유가 본문에만 있는데 접히면
+  //   "접힌 정상"과 구분이 안 되고, 헤더의 `⚠ 조회 실패` 만으로는 무엇이 왜 실패했는지 모른다
+  //   (툴팁은 터치·키보드 사용자에게 닿지 않는다). 문제가 사라지면 다시 접힌다.
+  //   ⚠ 그래서 `problem` 은 **문제가 없으면 반드시 null** 이어야 한다 — 항상 truthy 인
+  //   프래그먼트를 넘기면 모든 패널이 영구히 펼쳐진다.
+  const shown = collapsible ? (open || !!problem) : true;
 
   return (
     <section className="panel" style={PANEL} aria-labelledby={headingId}>
@@ -45,7 +51,7 @@ export default function SummaryPanel({
         display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 'var(--sp-2)',
         marginBottom: caption ? 'var(--sp-1)' : (shown ? 'var(--sp-2)' : 0),
       }}>
-        {collapsible && (
+        {collapsible && !problem && (
           <button type="button" onClick={() => setOpen((v) => !v)}
             aria-expanded={open} aria-controls={bodyId}
             aria-label={`${title} ${open ? '접기' : '펼치기'}`}

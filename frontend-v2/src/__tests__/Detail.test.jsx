@@ -81,8 +81,17 @@ vi.mock('../components/sections/ImpactGuideSection.jsx', () => ({
 vi.mock('../components/sections/ProjectSetupSection.jsx', () => ({
   default: () => <div data-testid="section-setup">ProjectSetup</div>,
 }));
+// 프로젝트 분석도 서브탭을 갖게 되면서 docgen과 같은 (onSubChange, initialSub) 규약을 쓴다.
 vi.mock('../components/sections/ProjectSummarySection.jsx', () => ({
-  default: () => <div data-testid="section-summary">ProjectSummary</div>,
+  default: ({ onSubChange, initialSub }) => {
+    mockCapturedInitialSubs.push(initialSub);
+    return (
+      <div data-testid="section-summary">
+        ProjectSummary
+        <button onClick={() => onSubChange?.('source', '소스코드')}>__setsummarysub</button>
+      </div>
+    );
+  },
 }));
 
 const { default: Detail } = await import('../views/Detail.jsx');
@@ -218,6 +227,54 @@ describe('Detail', () => {
 
     // Assert — breadcrumb 끝에 sub 라벨(SwIT)이 추가 렌더
     expect(screen.getByText('SwIT')).toBeInTheDocument();
+  });
+
+  it('프로젝트 분석의 서브탭도 breadcrumb에 표시된다', async () => {
+    const user = userEvent.setup();
+    mockSelectedJob = { name: 'my-job', url: 'http://jenkins/job/my-job/' };
+    render(<Detail />);
+    await user.click(screen.getByText('프로젝트 분석'));
+    await user.click(screen.getByText('__setsummarysub'));
+    expect(screen.getByText('소스코드')).toBeInTheDocument();
+  });
+
+  it('섹션을 벗어나면 다른 섹션의 서브 라벨이 남지 않고, 돌아오면 복원된다', async () => {
+    // ⚠ 벗어날 때 지우면 복귀 시 라벨을 잃는다 — keep-alive 라 자식이 언마운트되지 않아
+    //   재보고(onSubChange)가 없기 때문이다. 렌더 시 activeSection 으로 조회해야 한다.
+    const user = userEvent.setup();
+    mockSelectedJob = { name: 'my-job', url: 'http://jenkins/job/my-job/' };
+    render(<Detail />);
+    await user.click(screen.getByText('프로젝트 분석'));
+    await user.click(screen.getByText('__setsummarysub'));
+    expect(screen.getByText('소스코드')).toBeInTheDocument();
+
+    await user.click(screen.getByText('테스트 결과'));
+    expect(screen.queryByText('소스코드')).toBeNull();
+
+    await user.click(screen.getByText('프로젝트 분석'));
+    expect(screen.getByText('소스코드')).toBeInTheDocument();
+  });
+
+  it('__detailSection(section, sub)가 서브탭까지 착지시킨다', async () => {
+    // 서브탭이 생긴 뒤로 섹션만 지정하면 항상 첫 서브(개요)에 떨어져,
+    // "아키텍처를 보라"는 링크가 사용자를 다시 헤매게 만든다.
+    mockSelectedJob = { name: 'my-job', url: 'http://jenkins/job/my-job/' };
+    render(<Detail />);
+
+    act(() => { window.__detailSection('summary', 'arch'); });
+
+    expect(screen.getByTestId('section-summary')).toBeInTheDocument();
+    await waitFor(() => expect(mockCapturedInitialSubs).toContain('arch'));
+  });
+
+  it('sub 없이 부르면 initialSub를 강제하지 않는다(구 딥링크 계약 유지)', async () => {
+    mockSelectedJob = { name: 'my-job', url: 'http://jenkins/job/my-job/' };
+    render(<Detail />);
+
+    act(() => { window.__detailSection('summary'); });
+
+    expect(screen.getByTestId('section-summary')).toBeInTheDocument();
+    expect(mockCapturedInitialSubs.filter(Boolean)).toHaveLength(0);
   });
 
   it('레거시 생성 탭 id로 외부 네비게이션 시 docgen 허브로 라우팅 + initialSub 전달', async () => {

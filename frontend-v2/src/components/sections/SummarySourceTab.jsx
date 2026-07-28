@@ -16,6 +16,9 @@ import { SHOW, fmtInt } from './summaryCommon.js';
  *   "PRQA 트렌드 불러오는 중…" 이 영구히 남아, 사용자는 영원히 기다렸다.
  */
 
+/** 위반 상위 규칙/파일 표시 상한 — 넘으면 총계를 각주로 낸다. */
+const TOP_N = 6;
+
 const TREND_SERIES = [
   { key: 'violations', label: '위반', color: 'var(--color-warning)' },
   { key: 'diagnostics', label: '진단', color: 'var(--color-info)' },
@@ -97,17 +100,30 @@ export default function SummarySourceTab({
             <div>
               <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', marginBottom: 4 }}>위반 상위 규칙</div>
               {(() => {
-                const rules = (prqa.top_rules || []).slice(0, 6);
+                const all = prqa.top_rules || [];
+                const rules = all.slice(0, TOP_N);
                 const max = Math.max(...rules.map((r) => r.count || 0), 1);
-                return rules.map((r) => <HorizontalBar key={r.rule} label={r.rule} value={r.count || 0} max={max} color="var(--color-warning)" />);
+                return <>
+                  {rules.map((r) => <HorizontalBar key={r.rule} label={r.rule} value={r.count || 0} max={max} color="var(--color-warning)" />)}
+                  {/* 절단을 침묵시키지 않는다 — 6개만 보이는데 총계를 안 주면 "이게 전부"로 읽힌다 */}
+                  {all.length > TOP_N && (
+                    <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>* 상위 {TOP_N}개만 표시 (총 {all.length}개)</div>
+                  )}
+                </>;
               })()}
             </div>
             <div>
               <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', marginBottom: 4 }}>위반 상위 파일</div>
               {(() => {
-                const files = (prqa.top_files || []).slice(0, 6);
+                const all = prqa.top_files || [];
+                const files = all.slice(0, TOP_N);
                 const max = Math.max(...files.map((f) => f.count || 0), 1);
-                return files.map((f) => <HorizontalBar key={f.path || f.file} label={f.file} value={f.count || 0} max={max} color="var(--color-danger)" />);
+                return <>
+                  {files.map((f) => <HorizontalBar key={f.path || f.file} label={f.file} value={f.count || 0} max={max} color="var(--color-danger)" />)}
+                  {all.length > TOP_N && (
+                    <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>* 상위 {TOP_N}개만 표시 (총 {all.length}개)</div>
+                  )}
+                </>;
               })()}
             </div>
           </div>

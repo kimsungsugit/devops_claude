@@ -218,7 +218,9 @@ describe('BuildChangeMatrixPanel', () => {
     mockFunctions = { ...capped, level: 'functions' };
     render(<BuildChangeMatrixPanel {...PROPS} />);
     await screen.findByText('#25');
-    expect(screen.getByText(/표시 30 \/ 전체 33/)).toBeInTheDocument();
+    // 절단 고지는 이제 **헤더(problem 슬롯) + 본문** 두 곳에 난다 — 패널을 접어도
+    // 잘렸다는 사실이 남아야 하기 때문이다.
+    expect(screen.getAllByText(/표시 30 \/ 전체 33/).length).toBeGreaterThanOrEqual(1);
     expect(screen.getByText(/#79 · #78 · #77/)).toBeInTheDocument();
     expect(screen.getByText(/기준 빌드는 상한과 무관하게 항상 표시/)).toBeInTheDocument();
   });

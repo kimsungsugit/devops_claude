@@ -56,7 +56,9 @@ describe('SummaryPanel', () => {
     expect(screen.getByRole('button', { name: '제목 펼치기' })).toHaveAttribute('aria-expanded', 'false');
   });
 
-  it('problem 슬롯은 접힘에서도 보인다(실패가 접힘 뒤로 숨으면 안 된다)', () => {
+  it('problem 이 있으면 접히지 않는다 — 사유가 본문에 있기 때문', () => {
+    // 헤더의 `⚠ 조회 실패` 만으로는 무엇이 왜 실패했는지 모른다(툴팁은 터치·키보드에 안 닿음).
+    // 그래서 문제가 있는 동안은 강제 펼침 + 토글 자체를 내지 않는다(죽은 컨트롤 금지).
     render(
       <SummaryPanel title="다이어그램" defaultOpen={false}
         problem={<span>⚠ 조회 실패</span>}>
@@ -64,7 +66,18 @@ describe('SummaryPanel', () => {
       </SummaryPanel>,
     );
     expect(screen.getByText('⚠ 조회 실패')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: '다이어그램 펼치기' })).toBeInTheDocument();
+    expect(screen.getByText('오류: HTTP 500')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /다이어그램 (접기|펼치기)/ })).toBeNull();
+  });
+
+  it('problem 이 null 이면 평소대로 접힌다(프래그먼트 오용 회귀 가드)', () => {
+    // ⚠ 항상 truthy 인 `<>{a && …}{b && …}</>` 를 넘기면 모든 패널이 영구 펼침이 된다.
+    render(
+      <SummaryPanel title="다이어그램" defaultOpen={false} problem={null}>
+        <div>본문</div>
+      </SummaryPanel>,
+    );
+    expect(screen.getByRole('button', { name: '다이어그램 펼치기' })).toHaveAttribute('aria-expanded', 'false');
   });
 
   it('defaultOpen=false면 접힌 채로 시작하지만 meta는 계속 보인다', () => {

@@ -164,7 +164,7 @@ function StructureList({ title, nodes, edges, isTarget }) {
   );
 }
 
-export default function ArchitectureImprovementPanel({ jobUrl, cacheRoot, defaultOpen = true }) {
+export default function ArchitectureImprovementPanel({ jobUrl, cacheRoot, defaultOpen = true, reloadToken = 0 }) {
   const [data, setData] = useState(null);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
@@ -190,7 +190,9 @@ export default function ArchitectureImprovementPanel({ jobUrl, cacheRoot, defaul
       }
     })();
     return () => { cancelled = true; };
-  }, [jobUrl, cacheRoot]);
+    // ⚠ reloadToken — 백필로 소스 스냅샷이 바뀌면 부모가 올린다. keep-alive 라 이 패널은
+    //   언마운트되지 않아, 이게 없으면 캐시를 비워도 화면이 옛 빌드에 영구히 멈춘다.
+  }, [jobUrl, cacheRoot, reloadToken]);
 
   const generate = async (force) => {
     setBusy(true);

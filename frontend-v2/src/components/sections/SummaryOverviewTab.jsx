@@ -54,7 +54,7 @@ function deltaText(d) {
 
 export default function SummaryOverviewTab({
   jobUrl, cacheRoot, scmId, trace, traceBusy, reloadTrace, scmVcast,
-  prqa = {}, codeMetrics = {}, srcBuilds, srcBuildsError, violationsDelta,
+  prqa = {}, codeMetrics = {}, srcBuilds, srcBuildsError, violationsDelta, prqaTrendError,
 }) {
   const cov = trace?.has_data ? trace.coverage_pct : null;
   const covGate = cov == null ? null : classifyGate(cov);
@@ -77,8 +77,8 @@ export default function SummaryOverviewTab({
           tone={trace?.has_data && (trace.uncovered || 0) > 0 ? 'var(--color-warning)' : undefined} />
         <Kpi label="PRQA 위반"
           value={fmtInt(prqa.rule_violation_count)}
-          sub={deltaText(violationsDelta)}
-          tone={violationsDelta > 0 ? 'var(--color-danger)' : undefined} />
+          sub={prqaTrendError ? '직전 빌드 대비 — 트렌드 조회 실패' : deltaText(violationsDelta)}
+          tone={prqaTrendError ? 'var(--color-warning)' : violationsDelta > 0 ? 'var(--color-danger)' : undefined} />
         <Kpi label="PRQA 준수율"
           value={compliance == null ? '—' : `${Number(compliance).toFixed(1)}%`}
           tone={compliance == null ? undefined

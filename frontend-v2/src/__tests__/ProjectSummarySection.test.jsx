@@ -221,6 +221,46 @@ describe('ProjectSummarySection (서브탭 재구성)', () => {
     expect(mockPost.mock.calls.filter(([u]) => String(u).includes('change-matrix')).length).toBe(before);
   });
 
+  it('문제점 칩은 근거 화면으로 이동한다(죽은 라벨 금지)', async () => {
+    // "ASIL 시험 미달 2"를 읽고도 어디를 봐야 하는지 화면이 말하지 않으면 사용자가 탭을 뒤진다.
+    const user = userEvent.setup();
+    window.__detailSection = vi.fn();
+    render(<ProjectSummarySection job={JOB} analysisResult={RESULT} />);
+    await user.click(await screen.findByRole('button', { name: /미추적 요구 8 — 요구사항 커버리지/ }));
+    expect(window.__detailSection).toHaveBeenCalledWith('srssds', undefined);
+    delete window.__detailSection;
+  });
+
+  it('같은 섹션이 근거면 딥링크 대신 서브탭만 바꾼다', async () => {
+    const user = userEvent.setup();
+    window.__detailSection = vi.fn();
+    mockSrcBuilds = { ok: true, available: true, builds: [
+      { build_number: 125, has_source: true, source_pinned: true },
+      { build_number: 122, has_source: true, source_pinned: false },
+    ] };
+    render(<ProjectSummarySection job={JOB} analysisResult={RESULT} />);
+    await user.click(await screen.findByRole('button', { name: /스냅샷 미고정 빌드 1 — 빌드 변경 탭/ }));
+    expect(window.__detailSection).not.toHaveBeenCalled();
+    expect(screen.getByRole('tab', { name: '빌드 변경' })).toHaveAttribute('aria-selected', 'true');
+    delete window.__detailSection;
+  });
+
+  it('활성 서브탭을 부모에 알린다(breadcrumb 동기화)', async () => {
+    const user = userEvent.setup();
+    const onSubChange = vi.fn();
+    render(<ProjectSummarySection job={JOB} analysisResult={RESULT} onSubChange={onSubChange} />);
+    await screen.findByText(/⚠ 문제 \d+건/);
+    expect(onSubChange).toHaveBeenCalledWith('overview', '개요');
+    await gotoSub(user, '소스코드');
+    expect(onSubChange).toHaveBeenCalledWith('source', '소스코드');
+  });
+
+  it('initialSub로 들어오면 그 서브탭에 착지한다', async () => {
+    render(<ProjectSummarySection job={JOB} analysisResult={RESULT} initialSub="arch" />);
+    await screen.findByText(/⚠ 문제 \d+건/);
+    expect(screen.getByRole('tab', { name: '아키텍처' })).toHaveAttribute('aria-selected', 'true');
+  });
+
   it('캐시 빌드 목록 조회 실패를 로딩/0으로 위장하지 않는다', async () => {
     // ⚠ 실패하면 아래 두 패널이 통째로 비는데, 사유가 없으면 "빌드가 없는 것"으로 읽힌다.
     const user = userEvent.setup();
@@ -229,6 +269,30 @@ describe('ProjectSummarySection (서브탭 재구성)', () => {
     expect(await screen.findByText('조회 실패')).toBeInTheDocument();   // 개요 KPI sub
     await gotoSub(user, '빌드 변경');
     expect(await screen.findByText(/캐시 빌드 목록 조회 실패 — boom/)).toBeInTheDocument();
+  });
+
+  it('캐시 빌드 조회 실패를 배너가 고지한다 — "이상 없음" 초록 위장 금지', async () => {
+    // ⚠ 이 실패는 `스냅샷 미고정 빌드` 칩의 데이터 출처를 죽인다 → unpinnedCount 가 0으로
+    //   붕괴해 문제 0건이 되고, 헤더 pill 이 초록 "이상 없음"을 낸다(증거부재 ≠ 정상).
+    mockSrcBuildsFail = 'boom';
+    mockTrace = { ...TRACE, uncovered: 0, asil_gap_count: 0, asil_unknown_count: 0,
+      integrity_collision_count: 0, integrity_dangling_count: 0, coverage_pct: 95, summary_raw: {} };
+    render(<ProjectSummarySection job={JOB} analysisResult={RESULT} />);
+    expect(await screen.findByText(/캐시 빌드 목록 조회 실패 — 스냅샷 미고정 여부를 판정할 수 없습니다/)).toBeInTheDocument();
+  });
+
+  it('PRQA 트렌드 실패가 개요 델타·매트릭스 Δ열에도 사유로 전달된다', async () => {
+    // 부모만 알고 자식에 안 넘기면 "변화 없음"과 "못 읽음"이 구분 불가가 된다.
+    const user = userEvent.setup();
+    const { post } = await import('../api.js');
+    const orig = post.getMockImplementation();
+    post.mockImplementation((url, body) => (String(url).includes('prqa-trend')
+      ? Promise.reject(new Error('trend down')) : orig(url, body)));
+    render(<ProjectSummarySection job={JOB} analysisResult={RESULT} />);
+    expect(await screen.findByText('직전 빌드 대비 — 트렌드 조회 실패')).toBeInTheDocument();
+    await gotoSub(user, '빌드 변경');
+    expect(await screen.findByText(/Δ위반 ⚠미조회/)).toBeInTheDocument();
+    post.mockImplementation(orig);
   });
 
   it('미고정 스냅샷은 탭을 안 열어도 문제점 배너에 뜬다', async () => {

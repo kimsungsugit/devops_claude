@@ -33,6 +33,10 @@ const SECTIONS = [
 // 통합 전 개별 탭 id — 외부 네비게이션 호환용. docgen 허브로 라우팅 후 서브 선택.
 const DOCGEN_SUB_IDS = new Set(['docgen', 'reports', 'swut', 'swit', 'swsa', 'swreport']);
 
+// 각 허브의 **첫 서브** — 섹션 라벨과 사실상 같은 뜻이라 breadcrumb 에서 생략한다
+// (매번 "문서 생성 › 문서 생성", "프로젝트 분석 › 개요" 가 되면 소음이다).
+const FIRST_SUB_IDS = new Set(['docgen', 'overview']);
+
 export default function Detail() {
   const { selectedJob, analysisResult, setSelectedJob, setAnalysisResult } = useJob();
   const { cfg } = useJenkinsCfg();
@@ -41,10 +45,22 @@ export default function Detail() {
   // 브레드크럼 프로젝트 전환용 — Jenkins job 목록(선택기 옵션) + 전환 진행 상태.
   const [jobs, setJobs] = useState([]);
   const [switching, setSwitching] = useState(false);
-  // 문서 생성 허브의 활성 서브(종류) — breadcrumb 표기용.
-  const [docgenSub, setDocgenSub] = useState(null);
-  const handleSubChange = useCallback((id, label) => setDocgenSub({ id, label }), []);
-  // 레거시 생성 탭 id로 외부 라우팅 시 허브에 전달할 초기 서브(1회 소비).
+  // 서브탭을 가진 섹션(문서 생성 허브 · 프로젝트 분석)의 활성 서브 — breadcrumb 표기용.
+  // ⚠ **섹션별 맵**이지 단일 값이 아니다. 단일 값이면 ①다른 섹션의 라벨이 새거나
+  //   ②벗어날 때 지워서 복귀 시 라벨을 잃는다 — keep-alive 라 그 섹션이 언마운트되지 않아
+  //   자식의 `useEffect([sub, onSubChange])` 가 재발화하지 않기 때문이다(사용자는 소스코드
+  //   탭에 있는데 breadcrumb 만 비어 보인다). 맵 + 렌더 시 activeSection 조회로 둘 다 해결.
+  //   job 전환 시 리셋은 불필요 — 섹션 key 에 jobKey 가 있어 remount 되며 즉시 재보고한다.
+  const [sectionSubs, setSectionSubs] = useState({});   // {[sectionId]: {id, label}}
+  // ⚠ 섹션별 콜백을 **한 번만** 만든다. 매 렌더 새 함수를 넘기면 자식의 위 effect 가 매 렌더
+  //   발화하고, 그 안의 setState 가 부모를 다시 렌더시켜 무한 루프가 된다.
+  //   같은 값 재설정도 막는다 — 새 객체를 만들면 그 자체로 렌더를 한 번 더 부른다.
+  const subHandlers = useMemo(() => Object.fromEntries(SECTIONS.map((s) => [s.id,
+    (id, label) => setSectionSubs((prev) => (
+      prev[s.id]?.id === id ? prev : { ...prev, [s.id]: { id, label } }
+    )),
+  ])), []);
+  // 외부 라우팅이 지정한 초기 서브(1회 소비). {section, sub}
   const [pendingSub, setPendingSub] = useState(null);
   // keep-alive: 한 번 방문한 탭은 마운트를 유지(display:none)해, 탭을 바꿔도 오래 걸려 얻은
   // 결과(VectorCAST 커버리지·영향 가이드 등 컴포넌트 로컬 상태)가 언마운트로 사라지지 않게 한다.
@@ -68,22 +84,26 @@ export default function Detail() {
 
   // Allow external section navigation (from Dashboard)
   useEffect(() => {
-    window.__detailSection = (section) => {
+    // (section, sub?) — sub 를 주면 그 섹션의 서브탭까지 열어 착지시킨다.
+    // 서브탭이 생긴 뒤로 섹션만 지정하면 항상 첫 서브(개요/문서 생성)에 떨어져,
+    // "아키텍처를 보라"는 링크가 사용자를 다시 헤매게 만든다.
+    window.__detailSection = (section, sub) => {
       // 통합 전 개별 생성 탭 id가 들어오면 docgen 허브로 라우팅 + initialSub prop으로 서브 선택.
       if (DOCGEN_SUB_IDS.has(section)) {
         setActiveSection('docgen');
-        setPendingSub(section);
+        setPendingSub({ section: 'docgen', sub: section });
         return;
       }
-      if (SECTIONS.some(s => s.id === section && !s.hidden)) setActiveSection(section);
+      if (SECTIONS.some(s => s.id === section && !s.hidden)) {
+        setActiveSection(section);
+        if (sub) setPendingSub({ section, sub });
+      }
     };
     return () => { delete window.__detailSection; };
   }, []);
 
-  // docgen 섹션을 벗어나면 stale 서브 라벨 정리 — 복귀 시 hub remount 전 한 프레임 깜빡임 방지.
-  useEffect(() => {
-    if (activeSection !== 'docgen') setDocgenSub(null);
-  }, [activeSection]);
+  // 다른 섹션의 라벨이 새는 건 **렌더 시 activeSection 으로 조회**해서 막는다 —
+  // 벗어날 때 지우면 복귀 시(keep-alive라 재보고가 없다) 라벨을 잃는다.
 
   // initialSub는 허브가 1회 소비 → 즉시 초기화(remount마다 재강제 방지).
   useEffect(() => {
@@ -213,10 +233,13 @@ export default function Detail() {
         {switching && <span className="spinner" style={{ marginLeft: 4 }} />}
         <span>›</span>
         <span style={{ color: 'var(--accent)' }}>{current.label}</span>
-        {activeSection === 'docgen' && docgenSub && docgenSub.id !== 'docgen' && (
+        {/* 서브탭을 가진 섹션은 어느 서브에 있는지까지 breadcrumb 에 낸다. 첫 서브(docgen/overview)는
+            섹션 라벨과 사실상 같은 뜻이라 생략 — 매번 "문서 생성 › 문서 생성"이 되면 소음이다. */}
+        {sectionSubs[activeSection]
+          && !FIRST_SUB_IDS.has(sectionSubs[activeSection].id) && (
           <>
             <span>›</span>
-            <span style={{ color: 'var(--accent)' }}>{docgenSub.label}</span>
+            <span style={{ color: 'var(--accent)' }}>{sectionSubs[activeSection].label}</span>
           </>
         )}
       </div>
@@ -259,8 +282,8 @@ export default function Detail() {
                 <C
                   job={selectedJob}
                   analysisResult={analysisResult}
-                  onSubChange={s.id === 'docgen' ? handleSubChange : undefined}
-                  initialSub={s.id === 'docgen' ? pendingSub : undefined}
+                  onSubChange={subHandlers[s.id]}
+                  initialSub={pendingSub?.section === s.id ? pendingSub.sub : undefined}
                 />
               </div>
             );

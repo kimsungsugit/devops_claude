@@ -187,11 +187,10 @@ export default function RuleTrendPanel({ jobUrl, cacheRoot, defaultOpen = true }
         )}
         {!data && !error && <span className="spinner" />}
       </>}
-      /* ⚠ 기본 접힘이라 본문의 오류·불가 안내가 화면에서 사라진다 — 헤더에 신호를 남긴다 */
-      problem={<>
-        {error && <span style={{ ...xs, color: 'var(--color-danger)' }} title={error}>⚠ 조회 실패</span>}
-        {data?.available === false && <span style={{ ...xs, color: 'var(--color-warning)' }}>관측 없음</span>}
-      </>}
+      /* ⚠ 접으면 본문의 오류·불가 안내가 화면에서 사라진다 — 헤더에 신호를 남긴다(없으면 null) */
+      problem={error ? <span style={{ ...xs, color: 'var(--color-danger)' }}>⚠ 조회 실패 — {error}</span>
+        : data?.available === false ? <span style={{ ...xs, color: 'var(--color-warning)' }}>관측 없음</span>
+        : null}
     >
       {error && <div style={{ ...xs, color: 'var(--color-danger)' }}>룰 트렌드 조회 오류: {error}</div>}
       {data && data.available === false && (

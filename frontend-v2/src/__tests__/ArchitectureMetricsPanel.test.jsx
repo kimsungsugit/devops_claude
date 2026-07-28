@@ -58,6 +58,22 @@ const RESP = {
 describe('ArchitectureMetricsPanel v4', () => {
   beforeEach(() => { clearArchMetricsCache(); vi.clearAllMocks(); mockResp = RESP; });
 
+  it('reloadToken이 바뀌면 재조회한다(백필 후 stale 방지)', async () => {
+    // ⚠ 서브탭 keep-alive 라 이 패널은 언마운트되지 않는다 — 캐시를 비워도 "다음 마운트"가
+    //   오지 않아, 토큰 없이는 백필 뒤에도 옛 빌드를 영구히 표시한다.
+    const { post } = await import('../api.js');
+    const { rerender } = render(<ArchitectureMetricsPanel jobUrl="http://j/" cacheRoot="" reloadToken={0} />);
+    expect(await screen.findByText(/빌드 #125/)).toBeInTheDocument();
+    const before = post.mock.calls.length;
+
+    clearArchMetricsCache();                       // 부모가 백필 완료 시 하는 일
+    mockResp = { ...RESP, build_number: 131 };
+    rerender(<ArchitectureMetricsPanel jobUrl="http://j/" cacheRoot="" reloadToken={1} />);
+
+    expect(await screen.findByText(/빌드 #131/)).toBeInTheDocument();
+    expect(post.mock.calls.length).toBeGreaterThan(before);
+  });
+
   it('ASIL 간섭 후보 — 등급 상이 호출과 판정 아님 고지', async () => {
     render(<ArchitectureMetricsPanel jobUrl="http://j/" cacheRoot="" />);
     expect(await screen.findByText(/등급 보유 함수 385/)).toBeInTheDocument();

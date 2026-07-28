@@ -593,7 +593,7 @@ function CycleList({ cycles }) {
   );
 }
 
-export default function ArchitectureGraphPanel({ jobUrl, cacheRoot, defaultOpen = true }) {
+export default function ArchitectureGraphPanel({ jobUrl, cacheRoot, defaultOpen = true, reloadToken = 0 }) {
   const [data, setData] = useState(null);
   const [error, setError] = useState('');
   useEffect(() => {
@@ -609,7 +609,33 @@ export default function ArchitectureGraphPanel({ jobUrl, cacheRoot, defaultOpen 
       }
     })();
     return () => { cancelled = true; };
-  }, [jobUrl, cacheRoot]);
+    // ⚠ reloadToken — 백필로 소스 스냅샷이 바뀌면 부모가 올린다. keep-alive 라 이 패널은
+    //   언마운트되지 않아, 이게 없으면 캐시를 비워도 화면이 옛 빌드에 영구히 멈춘다.
+  }, [jobUrl, cacheRoot, reloadToken]);
+
+  // 헤더에 남길 신호 — 오류·산출 불가뿐 아니라 **절단**도 올린다.
+  // 절단 고지는 전부 본문 각주라, 패널을 접으면 "58파일 중 28개만 그렸다"는 사실이
+  // 화면에서 사라진다. 이 저장소가 SITS 204열 침묵 절단으로 이미 한 번 겪은 축이다.
+  const truncated = useMemo(() => {
+    if (!data?.available) return null;
+    const notes = [];
+    const fg = data.file_graph;
+    if (fg?.truncated) notes.push(`파일 그래프 ${fg.total_files ?? '?'}개 중 일부`);
+    if (data.module_graph?.truncated) notes.push('모듈 그래프 일부');
+    const revOmitted = data.layer_graph?.reverse_pairs_omitted || 0;
+    if (revOmitted > 0) notes.push(`계층 역방향 ${revOmitted}건`);
+    const dsmOmitted = Math.max(0, (fg?.nodes || []).length - DSM_MAX);
+    if (dsmOmitted > 0) notes.push(`DSM ${dsmOmitted}개 파일`);
+    return notes.length > 0 ? notes.join(' · ') : null;
+  }, [data]);
+
+  const problem = error
+    ? <span style={{ ...xs, color: 'var(--color-danger)' }}>⚠ 조회 실패 — {error}</span>
+    : data?.available === false
+      ? <span style={{ ...xs, color: 'var(--color-warning)' }}>다이어그램 미생성</span>
+      : truncated
+        ? <span style={{ ...xs, color: 'var(--color-warning)' }}>⚠ 표시 상한으로 생략 — {truncated}</span>
+        : null;
 
   return (
     <SummaryPanel
@@ -623,11 +649,9 @@ export default function ArchitectureGraphPanel({ jobUrl, cacheRoot, defaultOpen 
         )}
         {!data && !error && <span className="spinner" />}
       </>}
-      /* ⚠ 기본 접힘이라 본문의 오류·불가 안내가 화면에서 사라진다 — 헤더에 신호를 남긴다 */
-      problem={<>
-        {error && <span style={{ ...xs, color: 'var(--color-danger)' }} title={error}>⚠ 조회 실패</span>}
-        {data?.available === false && <span style={{ ...xs, color: 'var(--color-warning)' }}>다이어그램 미생성</span>}
-      </>}
+      /* ⚠ 접으면 본문의 오류·불가·**절단 고지**가 화면에서 사라진다 — 헤더에 신호를 남긴다.
+         문제가 없으면 반드시 null(항상 truthy 인 프래그먼트를 주면 영구히 펼쳐진다). */
+      problem={problem}
     >
       {error && <div style={{ ...xs, color: 'var(--color-danger)' }}>아키텍처 다이어그램 오류: {error}</div>}
       {data && data.available === false && (
