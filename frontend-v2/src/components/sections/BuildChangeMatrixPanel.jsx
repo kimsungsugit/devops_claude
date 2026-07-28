@@ -131,6 +131,8 @@ export default function BuildChangeMatrixPanel({ jobUrl, cacheRoot, baseline, de
   const rows = data?.rows || [];
   const groups = (data?.snapshot_groups || []).filter((g) => g.count > 1);
   const trust = data?.snapshot_trust;
+  const limitInfo = data?.row_limit;
+  const mixedCount = rows.filter((r) => r.comparison_basis?.state === 'mixed').length;
 
   return (
     <div className="panel" style={{ padding: 'var(--sp-3)' }}>
@@ -184,7 +186,22 @@ export default function BuildChangeMatrixPanel({ jobUrl, cacheRoot, baseline, de
         }}>
           ⚠ {rows.length}개 행 중 {trust.unpinned}개는 소스가 <b>빌드 시점으로 고정되지 않았습니다</b> —
           받아온 날의 HEAD 트리라 아래 “변화 0”은 코드가 안 바뀐 증거가 아닙니다.
-          위 “과거 빌드 가져오기”에서 <b>스냅샷 고정</b>을 켜고 다시 가져오면 재수집됩니다.
+          위 “과거 빌드 가져오기”에서 <b>스냅샷 고정</b>을 켜고 다시 가져오면, 각 빌드의 Jenkins
+          콘솔 로그에 남은 <b>실제 체크아웃 revision</b>으로 재수집합니다.
+          {mixedCount > 0 && ` 재수집이 일부만 끝나 기준이 섞인 행 ${mixedCount}개는 ⚠로 표시됩니다.`}
+        </div>
+      )}
+
+      {/* 절단 고지 — 잘렸다는 사실을 숨기면 "내 빌드가 왜 없나"에 답할 수 없다 */}
+      {limitInfo?.omitted_builds?.length > 0 && (
+        <div style={{
+          ...xs, padding: '4px 8px', borderRadius: 'var(--radius-sm)', marginBottom: 'var(--sp-2)',
+          border: '1px solid var(--border)', color: 'var(--text-muted)',
+        }}>
+          표시 {limitInfo.shown} / 전체 {limitInfo.available} — 상한({limitInfo.limit})을 넘어
+          #{limitInfo.omitted_builds.slice(0, 12).join(' · #')}
+          {limitInfo.omitted_builds.length > 12 ? ` 외 ${limitInfo.omitted_builds.length - 12}개` : ''}는 표에 없습니다.
+          {limitInfo.baseline_forced_in && ' (기준 빌드는 상한과 무관하게 항상 표시됩니다)'}
         </div>
       )}
 
@@ -218,6 +235,8 @@ export default function BuildChangeMatrixPanel({ jobUrl, cacheRoot, baseline, de
                 const asil = cell?.asil || r.asil;
                 const open = expanded === r.build_number;
                 const lag = fmtLag(r.checkout_lag_days);
+                // 기준 불일치 — 숫자는 맞지만 '이 빌드의 변화'가 아니다(부분 재수집 중 필연).
+                const mixed = r.comparison_basis?.state === 'mixed';
                 const rowDelta = deltaByBuild?.get?.(String(r.build_number))?.violations_delta ?? null;
                 return (
                   <Fragment key={r.row_key || `b${r.build_number}`}>
@@ -257,14 +276,22 @@ export default function BuildChangeMatrixPanel({ jobUrl, cacheRoot, baseline, de
                       </td>
                       <td style={td}>
                         {r.files
-                          ? <span title={`추가 ${r.files.added} · 삭제 ${r.files.deleted} · 수정 ${r.files.modified} (무변경 ${r.files.unchanged})`}>
-                              {r.files.changed}
+                          ? <span title={mixed
+                              ? r.comparison_basis.reason
+                              : `추가 ${r.files.added} · 삭제 ${r.files.deleted} · 수정 ${r.files.modified} (무변경 ${r.files.unchanged})`}
+                              style={mixed ? { color: 'var(--color-warning)', textDecoration: 'underline dotted' } : undefined}>
+                              {r.files.changed}{mixed ? ' ⚠' : ''}
                             </span>
                           : <span style={{ color: 'var(--text-muted)' }}>—</span>}
                       </td>
                       <td style={{ ...td, fontWeight: 600 }}>
                         {fns
-                          ? <span title={`신규 ${fns.new} · 삭제 ${fns.deleted} · 시그니처 ${fns.signature} · 본문 ${fns.body}`}>{fns.changed}</span>
+                          ? <span title={mixed
+                              ? r.comparison_basis.reason
+                              : `신규 ${fns.new} · 삭제 ${fns.deleted} · 시그니처 ${fns.signature} · 본문 ${fns.body}`}
+                              style={mixed ? { color: 'var(--color-warning)', textDecoration: 'underline dotted' } : undefined}>
+                              {fns.changed}{mixed ? ' ⚠' : ''}
+                            </span>
                           : <PendingCell state={r.function_state} busy={busyCell === r.build_number} />}
                       </td>
                       <td style={td}><AsilCell asil={asil} /></td>

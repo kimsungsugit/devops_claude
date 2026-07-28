@@ -254,6 +254,14 @@ def jenkins_sync_backfill(req: dict) -> Dict[str, Any]:
             "ok": True, "available": False, "reason": "nothing_to_backfill",
             "skipped_cached": skipped,
         }
+    # 한 번에 처리 못 하고 남는 미고정 빌드 수 — 상한(MAX_BACKFILL_COUNT)이 캐시 빌드 수보다
+    # 작으면 여러 번 눌러야 한다. 그 사실을 알리지 않으면 "고정했는데 왜 아직 경고가 뜨나"가 된다.
+    remaining_unpinned = 0
+    if pin_source:
+        remaining_unpinned = sum(
+            1 for b in cached_meta
+            if not b.get("source_pinned") and _to_int(b.get("build_number")) not in set(accepted)
+        )
     started = start_backfill(
         job_url=job_url, username=username, api_token=api_token, cache_root=cache_root,
         verify_tls=verify_tls, patterns=[str(p) for p in patterns],
@@ -268,6 +276,7 @@ def jenkins_sync_backfill(req: dict) -> Dict[str, Any]:
         "job_id": started["job_id"], "accepted": accepted, "skipped_cached": skipped,
         "total": len(accepted),
         "pin_source": pin_source, "warm_matrix": warm_matrix,
+        "remaining_unpinned": remaining_unpinned,
     }
 
 
@@ -1829,6 +1838,13 @@ def summary_baseline_diff(req: dict) -> Dict[str, Any]:
 # 빌드별 변경 매트릭스 — 베이스라인 고정 → 각 빌드의 누적 소스 변화 (change-log 비의존)
 # ---------------------------------------------------------------------------
 
+#: 매트릭스 표시 행 상한.
+#: 이전 값 30은 캐시 33빌드에서 #77·78·79를 **침묵 절단**했고, 하필 자동 선택된 베이스라인
+#: (#77)이 잘려 헤더는 "기준 #77"인데 표에 그 행이 없었다. 행 1개의 추가 비용은 manifest
+#: dict 비교뿐이고(스냅샷 지문은 `_matrix_context`가 이미 전 빌드분을 계산한다) 실질 0에
+#: 가까우므로, 캐시 조회 상한(`list_cached_builds` 계열)과 같은 100으로 맞춘다.
+MATRIX_ROW_LIMIT = 100
+
 _MATRIX_CELL_LOCKS: Dict[str, threading.Lock] = {}
 _MATRIX_LOCKS_GUARD = threading.Lock()
 
@@ -1892,6 +1908,33 @@ def _matrix_context(body: dict) -> Dict[str, Any]:
     }
 
 
+def _comparison_basis(baseline: Dict[str, Any], target: Dict[str, Any]) -> Dict[str, Any]:
+    """두 스냅샷을 같은 기준으로 비교할 수 있는지 — 'trusted' / 'mixed' / 'both_unpinned'.
+
+    고정 상태가 다르면 diff는 산술적으로는 맞지만 **의미가 틀린다**. 미고정 스냅샷은
+    '체크아웃한 날'의 트리이므로, 미고정 베이스라인 ↔ 고정 대상의 diff는 실제로
+    "과거 rev → 오늘"의 변화인데 화면엔 "그 빌드가 만든 변화"로 붙는다. 재수집을
+    나눠 실행하면 반드시 겪는 상태라 숨기지 않는다.
+    """
+    b = bool(baseline.get("source_pinned"))
+    t = bool(target.get("source_pinned"))
+    if b and t:
+        return {"state": "trusted"}
+    if b != t:
+        return {
+            "state": "mixed",
+            "reason": (
+                "베이스라인과 이 빌드의 소스 기준이 다릅니다"
+                f"(기준 #{baseline.get('build_number')}={'고정' if b else '미고정'} · "
+                f"이 빌드={'고정' if t else '미고정'}) — 아래 수치는 두 빌드 사이의 변화가 아닙니다."
+            ),
+        }
+    return {
+        "state": "both_unpinned",
+        "reason": "두 스냅샷 모두 빌드 시점으로 고정되지 않았습니다 — 같은 날 받아온 트리라 변화가 0으로 보입니다.",
+    }
+
+
 def _build_meta_row(meta: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "build_number": meta.get("build_number"),
@@ -1922,17 +1965,29 @@ def summary_change_matrix(req: dict) -> Dict[str, Any]:
     if "error" in ctx:
         return ctx["error"]
     level = "functions" if str(body.get("level") or "files") == "functions" else "files"
-    limit = max(1, min(_to_int(body.get("limit")) or 30, 30))
+    limit = max(1, min(_to_int(body.get("limit")) or MATRIX_ROW_LIMIT, MATRIX_ROW_LIMIT))
     baseline = ctx["baseline"]
     base_num = baseline.get("build_number")
     base_sha = ctx["sha_of"](baseline)
     base_manifest = ctx["manifest_cache"].get(base_num)
 
+    # 표시 대상 선정 — 최신순 limit개. **베이스라인은 무조건 포함**한다: 헤더가 "기준 #77"이라
+    # 쓰는데 그 행이 상한에 잘려 사라지면(실측 33빌드/상한 30 → #77·78·79 누락) 사용자는
+    # 기준을 표에서 찾을 수 없다. 잘린 사실도 응답에 명시한다(침묵 절단 금지).
+    ordered = ctx["with_src"]
+    selected = ordered[:limit]
+    if not any(m.get("build_number") == base_num for m in selected):
+        selected = selected[: max(0, limit - 1)] + [baseline]
+    omitted = [
+        m.get("build_number") for m in ordered
+        if m.get("build_number") not in {s.get("build_number") for s in selected}
+    ]
+
     rows: List[Dict[str, Any]] = []
     pending: List[Dict[str, Any]] = []
     pending_seen: set = set()
     cached_cells = 0
-    for meta in ctx["with_src"][:limit]:
+    for meta in selected:
         num = meta.get("build_number")
         row = _build_meta_row(meta)
         sha = ctx["sha_of"](meta)
@@ -1945,6 +2000,11 @@ def summary_change_matrix(req: dict) -> Dict[str, Any]:
             "is_baseline": num == base_num,
             "identical_to_baseline": bool(sha and base_sha and sha == base_sha),
             "files": None, "functions": None, "asil": None,
+            # 비교 기준 신뢰도 — 두 스냅샷의 고정 상태가 다르면 숫자가 **방향까지 뒤집힌다**.
+            # 예: 베이스라인이 미고정(오늘 HEAD)이고 대상이 고정(6월 rev)이면, 실제로는
+            # "6월→오늘의 변화"인데 화면엔 "이 빌드가 베이스라인 대비 바꾼 것"으로 붙는다.
+            # 부분 재수집 중에는 반드시 생기는 상태라 행 단위로 표시해야 한다.
+            "comparison_basis": _comparison_basis(baseline, meta),
         })
         if row["is_baseline"]:
             row["function_state"] = {"state": "baseline", "reason": "베이스라인 자신"}
@@ -2010,6 +2070,12 @@ def summary_change_matrix(req: dict) -> Dict[str, Any]:
             for sha, nums in ctx["groups"].items() if len(nums) > 1
         ],
         "rows": rows,
+        # 절단 고지 — 잘렸다는 사실을 숨기면 사용자는 "내 빌드가 왜 없나"를 알 수 없다.
+        "row_limit": {
+            "limit": limit, "shown": len(rows), "available": len(ordered),
+            "omitted_builds": sorted([b for b in omitted if b is not None], reverse=True),
+            "baseline_forced_in": bool(omitted) and base_num in {r.get("build_number") for r in rows},
+        },
         "pending_cells": pending,
         # 스냅샷 신뢰도 — unpinned가 많으면 '동일 트리'는 코드 미변경이 아니라 백필이 HEAD를
         # 받아온 결과다. 이걸 숨기면 ASIL 함수 변경이 침묵으로 과소보고된다.

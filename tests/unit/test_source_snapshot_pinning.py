@@ -202,7 +202,139 @@ def test_unpinned_cached_snapshot_is_rechecked_out_when_pinning(tmp_path, monkey
     )
     assert res["scm"] == "svn" and res["revision"] == "1053"        # 'cached' 반환이 아님
     assert len(svn_calls) == 1
-    assert not (src / "stale.c").exists()                           # 이전 트리는 제거됨
+    assert res["repin"] == {"applied": True, "previous_kept": False}
+    assert res["path"] == str(src)                                  # 스테이징이 아니라 최종 경로
+    assert not (src / "stale.c").exists()                           # 이전 트리는 교체됨
+    assert js.source_snapshot_is_pinned(src) is True
+    # 스테이징·백업 잔여물이 남으면 다음 sync의 rglob·지문 계산을 오염시킨다
+    assert not (tmp_path / "b" / js.STAGING_DIR_NAME).exists()
+    assert not (tmp_path / "b" / js.BACKUP_DIR_NAME).exists()
+
+
+def test_repin_failure_preserves_previous_snapshot(tmp_path, monkeypatch):
+    """⚠ 재수집 체크아웃이 실패해도 기존 스냅샷은 살아 있어야 한다.
+
+    선삭제하면 그 빌드는 소스를 통째로 잃어 `has_source=False`가 되고 매트릭스에서 **행이
+    사라진다** — 틀린 트리보다 나쁜 상태다(재수집 30건 중 1건만 실패해도 발생).
+    """
+    from backend.services import jenkins_service as js
+
+    monkeypatch.setattr("backend.services.scm_registry.resolve_scm_credentials",
+                        lambda **k: ("u", "p", _Entry()))
+    monkeypatch.setattr(js, "svn_revision_at_date", lambda **k: {"rc": 0, "revision": "1053"})
+    monkeypatch.setattr(js, "run_svn",
+                        lambda **kw: {"rc": 1, "output": "svn: E170013 unable to connect"})
+
+    src = tmp_path / "b" / "source"
+    _write_sentinel(src, "scm=svn\nrevision=\nbranch=master\n")
+    (src / "keep.c").write_text("original", encoding="utf-8")
+
+    res = js.ensure_source_checkout(
+        build_root=tmp_path / "b", client=_Client(), build_selector="113",
+        build_timestamp_ms=_ms("2026-05-27T04:00:09Z"), pin_revision=True,
+    )
+    assert res["ok"] is False                                   # 실패는 정직하게 보고
+    assert res["repin"] == {"applied": False, "previous_kept": True,
+                            "reason": "checkout_failed"}
+    # 핵심 단언 — 기존 트리와 센티널이 그대로다
+    assert (src / "keep.c").read_text(encoding="utf-8") == "original"
+    assert js._source_is_complete(src) is True
+    assert not (tmp_path / "b" / js.STAGING_DIR_NAME).exists()
+
+
+def test_repin_staging_does_not_pollute_source_dir(tmp_path, monkeypatch):
+    """스테이징 체크아웃은 source/ 가 아니라 형제 디렉터리로 나가야 한다."""
+    from backend.services import jenkins_service as js
+
+    svn_calls = []
+    _patch_common(monkeypatch, js, svn_calls)
+    monkeypatch.setattr(js, "svn_revision_at_date", lambda **k: {"rc": 0, "revision": "1053"})
+    _write_sentinel(tmp_path / "b" / "source", "scm=svn\nrevision=\nbranch=master\n")
+
+    js.ensure_source_checkout(
+        build_root=tmp_path / "b", client=_Client(), build_selector="113",
+        build_timestamp_ms=_ms("2026-05-27T04:00:09Z"), pin_revision=True,
+    )
+    # workdir_rel이 "source"로 하드코딩돼 있으면 스테이징이 실제 트리를 덮어쓴다
+    assert svn_calls[0]["workdir_rel"] == js.STAGING_DIR_NAME
+
+
+def test_force_still_deletes_first(tmp_path, monkeypatch):
+    """force(사용자 명시 재수집)는 종전대로 선삭제 — 비파괴 경로는 repin 전용이다."""
+    from backend.services import jenkins_service as js
+
+    svn_calls = []
+    _patch_common(monkeypatch, js, svn_calls)
+    src = tmp_path / "b" / "source"
+    _write_sentinel(src, "scm=svn\nrevision=1053\nbranch=master\nrevision_source=console\n")
+    (src / "gone.c").write_text("x", encoding="utf-8")
+
+    js.ensure_source_checkout(
+        build_root=tmp_path / "b", client=_Client(), build_selector="113", force=True,
+    )
+    assert svn_calls[0]["workdir_rel"] == "source"
+    assert not (src / "gone.c").exists()
+
+
+# ── 콘솔 로그 우선 ───────────────────────────────────────────────────────
+
+
+def test_console_revision_wins_over_svn_date(tmp_path, monkeypatch):
+    """콘솔 로그가 있으면 그 값을 쓴다 — 사실이고, 네트워크가 필요 없다."""
+    from backend.services import jenkins_service as js
+
+    svn_calls = []
+    _patch_common(monkeypatch, js, svn_calls)
+    monkeypatch.setattr(js, "svn_revision_at_date",
+                        lambda **k: (_ for _ in ()).throw(AssertionError("콘솔이 있으면 svn info 금지")))
+    build_root = tmp_path / "build_113"
+    build_root.mkdir(parents=True, exist_ok=True)
+    (build_root / "jenkins_console.log").write_text(
+        f"Updating {_Entry.scm_url} at revision '2026-05-27T13:00:09.163 +0900'\n"
+        "At revision 1042\n", encoding="utf-8")
+
+    res = js.ensure_source_checkout(
+        build_root=build_root, client=_Client(), build_selector="113",
+        build_timestamp_ms=_ms("2026-05-27T04:00:09Z"), pin_revision=True,
+    )
+    assert res["revision"] == "1042" and res["revision_source"] == "console"
+    assert svn_calls[0]["revision"] == "1042"
+
+
+def test_falls_back_to_svn_date_when_console_truncated(tmp_path, monkeypatch):
+    """로그가 상한에 걸려 SCM 구간이 잘린 빌드(실측 #105·#107)는 날짜-revision으로."""
+    from backend.services import jenkins_service as js
+
+    svn_calls = []
+    _patch_common(monkeypatch, js, svn_calls)
+    monkeypatch.setattr(js, "svn_revision_at_date", lambda **k: {"rc": 0, "revision": "1036"})
+    build_root = tmp_path / "build_107"
+    build_root.mkdir(parents=True, exist_ok=True)
+    (build_root / "jenkins_console.log").write_text("[Pipeline] End\nFinished: SUCCESS\n",
+                                                    encoding="utf-8")
+
+    res = js.ensure_source_checkout(
+        build_root=build_root, client=_Client(), build_selector="107",
+        build_timestamp_ms=_ms("2026-05-15T05:21:44Z"), pin_revision=True,
+    )
+    assert res["revision"] == "1036" and res["revision_source"] == "svn_date"
+
+
+def test_both_sources_failing_reports_both_reasons(tmp_path, monkeypatch):
+    """둘 다 실패하면 두 사유를 합쳐 보고한다 — 어느 쪽이 왜 안 됐는지 알 수 있어야 한다."""
+    from backend.services import jenkins_service as js
+
+    svn_calls = []
+    _patch_common(monkeypatch, js, svn_calls)
+    monkeypatch.setattr(js, "svn_revision_at_date",
+                        lambda **k: {"rc": 1, "revision": "", "output": "E170013 no connect"})
+
+    res = js.ensure_source_checkout(
+        build_root=tmp_path / "b", client=_Client(), build_selector="113",
+        build_timestamp_ms=_ms("2026-05-27T04:00:09Z"), pin_revision=True,
+    )
+    assert res["revision_source"] == "head"
+    assert "console_log_missing" in res["pin_error"] and "E170013" in res["pin_error"]
 
 
 def test_already_pinned_snapshot_is_reused(tmp_path, monkeypatch):

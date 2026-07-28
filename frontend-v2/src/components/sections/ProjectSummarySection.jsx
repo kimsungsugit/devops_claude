@@ -373,6 +373,11 @@ export default function ProjectSummarySection({ job, analysisResult }) {
         return;
       }
       setBackfill({ job_id: resp.job_id, total: resp.total, completed: 0, state: 'running', phase: 'sync' });
+      // 상한(서버 MAX_BACKFILL_COUNT)이 캐시 빌드 수보다 작으면 한 번에 다 못 고친다.
+      // 알리지 않으면 "고정했는데 왜 아직 경고가 뜨나"가 된다.
+      if (resp.remaining_unpinned > 0) {
+        toast?.('info', `이번에 ${resp.total}개를 처리합니다 — 미고정 ${resp.remaining_unpinned}개가 남아 한 번 더 실행해야 합니다`);
+      }
       const poll = async () => {
         try {
           const st = await api(`/api/jenkins/sync-backfill-status/${resp.job_id}`);

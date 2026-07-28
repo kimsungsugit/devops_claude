@@ -210,3 +210,72 @@ def test_matrix_honest_failures(tmp_path, monkeypatch):
     monkeypatch.setattr("backend.services.build_inventory.list_cached_builds_meta", lambda **k: [])
     assert si.summary_change_matrix({"job_url": "http://j/"})["reason"] == "no_source_snapshot"
     assert si.summary_change_matrix({})["reason"] == "job_url_required"
+
+
+# ── 행 상한 정직화 (실측: 캐시 33빌드 / 구 상한 30 → #77·78·79 침묵 절단) ──────
+
+
+def test_row_limit_never_drops_the_baseline(matrix_env):
+    """헤더가 "기준 #N"이라 쓰는데 그 행이 상한에 잘리면 사용자는 기준을 표에서 못 찾는다.
+
+    실측 회귀: 캐시 33빌드에 상한 30이라 자동 선택된 베이스라인 #77이 사라졌다.
+    """
+    si, body = matrix_env["si"], matrix_env["body"]
+    # 최신순 5개 중 베이스라인은 최고령 #10 — 상한 2면 종전 로직으론 잘려나간다.
+    resp = si.summary_change_matrix({**body, "limit": 2})
+    nums = [r["build_number"] for r in resp["rows"]]
+    assert 10 in nums, "베이스라인 행이 상한에 잘렸다"
+    assert len(nums) == 2
+    assert resp["row_limit"]["baseline_forced_in"] is True
+
+
+def test_row_limit_reports_omission_instead_of_silence(matrix_env):
+    si, body = matrix_env["si"], matrix_env["body"]
+    resp = si.summary_change_matrix({**body, "limit": 3})
+    rl = resp["row_limit"]
+    assert rl["available"] == 5 and rl["shown"] == 3 and rl["limit"] == 3
+    # 어떤 빌드가 빠졌는지 명시 — "내 빌드가 왜 없나"에 답할 수 있어야 한다
+    assert set(rl["omitted_builds"]) == {14, 13, 12, 11, 10} - {r["build_number"] for r in resp["rows"]}
+    assert rl["omitted_builds"] == sorted(rl["omitted_builds"], reverse=True)
+
+
+def test_default_limit_covers_typical_cache_size(matrix_env):
+    """기본 상한은 실사용 캐시 규모(33빌드)를 덮어야 한다 — 절단이 기본 동작이면 안 된다."""
+    si, body = matrix_env["si"], matrix_env["body"]
+    assert si.MATRIX_ROW_LIMIT >= 100
+    resp = si.summary_change_matrix(body)
+    assert resp["row_limit"]["omitted_builds"] == []
+    assert resp["row_limit"]["shown"] == resp["row_limit"]["available"] == 5
+
+
+# ── 비교 기준 신뢰도 (부분 재수집 중 필연 발생) ────────────────────────────
+
+
+def _pin(meta_rows, nums):
+    for r in meta_rows:
+        r["source_pinned"] = r["build_number"] in nums
+    return meta_rows
+
+
+def test_mixed_pinned_basis_is_labelled_not_presented_as_fact(matrix_env, monkeypatch):
+    """미고정 베이스라인 ↔ 고정 대상의 diff는 '그 빌드의 변화'가 아니다 — 라벨 필수."""
+    si, tmp = matrix_env["si"], matrix_env["tmp"]
+    rows_meta = _pin(_metas(tmp, [14, 13, 12, 11, 10]), {12, 14})   # 베이스라인 #10은 미고정
+    monkeypatch.setattr("backend.services.build_inventory.list_cached_builds_meta",
+                        lambda **k: rows_meta)
+    resp = si.summary_change_matrix(matrix_env["body"])
+    by = {r["build_number"]: r for r in resp["rows"]}
+    assert by[12]["comparison_basis"]["state"] == "mixed"
+    assert "기준이 다릅니다" in by[12]["comparison_basis"]["reason"]
+    # 둘 다 미고정이면 '변화 0'의 원인을 짚어준다(코드 미변경으로 오독 금지)
+    assert by[11]["comparison_basis"]["state"] == "both_unpinned"
+
+
+def test_both_pinned_is_trusted(matrix_env, monkeypatch):
+    si, tmp = matrix_env["si"], matrix_env["tmp"]
+    rows_meta = _pin(_metas(tmp, [14, 13, 12, 11, 10]), {10, 11, 12, 13, 14})
+    monkeypatch.setattr("backend.services.build_inventory.list_cached_builds_meta",
+                        lambda **k: rows_meta)
+    resp = si.summary_change_matrix(matrix_env["body"])
+    assert {r["comparison_basis"]["state"] for r in resp["rows"]} == {"trusted"}
+    assert resp["snapshot_trust"]["unpinned"] == 0

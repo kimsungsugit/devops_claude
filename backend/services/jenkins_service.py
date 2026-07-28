@@ -110,6 +110,10 @@ def read_source_sentinel(source_dir: Path) -> Dict[str, str]:
     return out
 
 
+#: 고정된 것으로 인정하는 revision 출처. 값이 곧 신뢰 순위이기도 하다(console > svn_date).
+PINNED_REVISION_SOURCES = ("console", "svn_date", "jenkins")
+
+
 def source_snapshot_is_pinned(source_dir: Path) -> bool:
     """스냅샷이 **그 빌드의 revision**으로 고정됐는지.
 
@@ -121,7 +125,7 @@ def source_snapshot_is_pinned(source_dir: Path) -> bool:
     meta = read_source_sentinel(source_dir)
     if not meta.get("revision"):
         return False
-    return meta.get("revision_source", "") not in ("", "head")
+    return meta.get("revision_source", "") in PINNED_REVISION_SOURCES
 
 
 def _ms_to_svn_iso(ms: int) -> str:
@@ -243,6 +247,61 @@ def ensure_source_checkout(
         )
 
 
+STAGING_DIR_NAME = "source.repin"
+BACKUP_DIR_NAME = "source.prev"
+
+
+def _repin_via_staging(
+    *, build_root: Path, source_dir: Path, client: JenkinsClient, build_selector: str,
+    progress_cb: Optional[Callable[[str, Dict[str, Any]], None]], scm_username: str,
+    scm_id: str, shutil, build_timestamp_ms: Optional[int],
+) -> Dict[str, Any]:
+    """비파괴 재수집 — 형제 디렉터리에 받아 성공했을 때만 교체한다.
+
+    기존 트리를 먼저 지우고 받으면, 체크아웃이 실패한 빌드는 소스를 통째로 잃어
+    `has_source=False`가 되고 매트릭스에서 **행 자체가 사라진다**. '틀린 트리'보다 나쁘다.
+    교체는 rename 2회(빠름)로 하고 느린 rmtree는 임계 구간 밖에서 한다.
+    """
+    staging = Path(build_root) / STAGING_DIR_NAME
+    backup = Path(build_root) / BACKUP_DIR_NAME
+    _robust_rmtree(staging)
+    result = _ensure_source_checkout_inner(
+        build_root=build_root, source_dir=staging, client=client,
+        build_selector=build_selector, progress_cb=progress_cb,
+        scm_username=scm_username, scm_id=scm_id, force=False, shutil=shutil,
+        build_timestamp_ms=build_timestamp_ms, pin_revision=True,
+    )
+    if not result.get("ok"):
+        _robust_rmtree(staging)
+        _logger.warning(
+            "[repin] checkout 실패 — 기존 스냅샷을 보존한다 build_root=%s error=%s",
+            build_root, result.get("error"),
+        )
+        result["repin"] = {"applied": False, "previous_kept": True,
+                           "reason": str(result.get("error") or "checkout_failed")}
+        return result
+    try:
+        _robust_rmtree(backup)
+        if source_dir.exists():
+            source_dir.rename(backup)
+        try:
+            staging.rename(source_dir)
+        except OSError:
+            # 교체 실패 → 원상 복구(둘 다 없는 상태로 두지 않는다)
+            if backup.exists() and not source_dir.exists():
+                backup.rename(source_dir)
+            raise
+    except OSError as exc:
+        _robust_rmtree(staging)
+        _logger.warning("[repin] swap 실패 — 기존 스냅샷 유지 build_root=%s: %s", build_root, exc)
+        return {"ok": False, "error": "repin_swap_failed", "path": str(source_dir),
+                "repin": {"applied": False, "previous_kept": True, "reason": str(exc)}}
+    _robust_rmtree(backup)
+    result["path"] = str(source_dir)
+    result["repin"] = {"applied": True, "previous_kept": False}
+    return result
+
+
 def _ensure_source_checkout_inner(
     *,
     build_root: Path,
@@ -260,12 +319,28 @@ def _ensure_source_checkout_inner(
     # 고정 요청인데 기존 스냅샷이 HEAD 체크아웃이면 재수집한다. 이 재판정이 없으면 센티널만
     # 보고 '이미 캐시됨'으로 반환해, 고정 토글을 켜도 잘못된 트리가 영원히 남는다.
     repin = bool(pin_revision) and _source_is_complete(source_dir) and not source_snapshot_is_pinned(source_dir)
-    if (force or repin) and source_dir.exists():
+    if repin:
+        # ⚠ 재수집은 **비파괴**다. 여기서 기존 트리를 먼저 지우면 새 체크아웃이 실패했을 때
+        #   (네트워크 단절·revision에 경로 부재·인증) 그 빌드는 소스를 통째로 잃고 표에서
+        #   사라진다 — 틀린 트리보다 나쁜 상태다. 그래서 스테이징 디렉터리에 받고 성공했을
+        #   때만 교체한다. force(사용자 명시 재수집)는 종전대로 선삭제를 유지한다.
+        if progress_cb:
+            try:
+                progress_cb("scm_reset", {"path": str(source_dir), "reason": "repin", "destructive": False})
+            except Exception:  # silent-ok — 진행률 콜백 실패가 체크아웃을 막으면 안 된다
+                pass
+        return _repin_via_staging(
+            build_root=build_root, source_dir=source_dir, client=client,
+            build_selector=build_selector, progress_cb=progress_cb,
+            scm_username=scm_username, scm_id=scm_id, shutil=shutil,
+            build_timestamp_ms=build_timestamp_ms,
+        )
+    if force and source_dir.exists():
         # Caller requested a fresh checkout. Remove any previous artefacts so
         # the sentinel/cache logic below behaves as if this were a first sync.
         if progress_cb:
             try:
-                progress_cb("scm_reset", {"path": str(source_dir), "reason": "repin" if repin else "force"})
+                progress_cb("scm_reset", {"path": str(source_dir), "reason": "force", "destructive": True})
             except Exception:
                 pass
         _robust_rmtree(source_dir)
@@ -341,19 +416,28 @@ def _ensure_source_checkout_inner(
     revision_source = "jenkins" if revision else "head"
     pin_error = ""
     if pin_revision and scm == "svn" and not revision:
-        pinned = resolve_build_svn_revision(
-            repo_url=repo_url, build_timestamp_ms=build_timestamp_ms,
-            username=resolved_username, password=resolved_password or "",
-        )
-        if pinned.get("revision"):
-            revision = pinned["revision"]
-            revision_source = "svn_date"
+        # ① 콘솔 로그 직독이 1순위 — 빌드가 **실제로** 체크아웃한 revision이고 네트워크가 없다.
+        from backend.services.build_revision import revision_from_console_log
+
+        from_console = revision_from_console_log(Path(build_root), repo_url=repo_url)
+        if from_console.get("revision"):
+            revision = from_console["revision"]
+            revision_source = "console"
         else:
-            pin_error = str(pinned.get("error") or "")
-            _logger.warning(
-                "[ensure_source_checkout] pin_failed build_root=%s ts=%s error=%s (HEAD로 진행)",
-                build_root, build_timestamp_ms, pin_error,
+            # ② 폴백: 빌드 시각 → svn 날짜-revision. 로그가 상한에 걸려 선두가 잘린 빌드용.
+            pinned = resolve_build_svn_revision(
+                repo_url=repo_url, build_timestamp_ms=build_timestamp_ms,
+                username=resolved_username, password=resolved_password or "",
             )
+            if pinned.get("revision"):
+                revision = pinned["revision"]
+                revision_source = "svn_date"
+            else:
+                pin_error = f"{from_console.get('reason') or 'console_unavailable'} / {pinned.get('error') or ''}".strip(" /")
+                _logger.warning(
+                    "[ensure_source_checkout] pin_failed build_root=%s ts=%s error=%s (HEAD로 진행)",
+                    build_root, build_timestamp_ms, pin_error,
+                )
 
     if not repo_url:
         _logger.warning(
@@ -397,7 +481,8 @@ def _ensure_source_checkout_inner(
     if scm == "svn":
         result = run_svn(
             project_root=str(build_root),
-            workdir_rel="source",
+            # 스테이징 재수집(_repin_via_staging)은 형제 디렉터리에 받으므로 고정 금지.
+            workdir_rel=source_dir.name,
             action="checkout",
             repo_url=repo_url,
             revision=revision,
@@ -407,7 +492,8 @@ def _ensure_source_checkout_inner(
     else:
         result = run_git(
             project_root=str(build_root),
-            workdir_rel="source",
+            # 스테이징 재수집(_repin_via_staging)은 형제 디렉터리에 받으므로 고정 금지.
+            workdir_rel=source_dir.name,
             action="clone",
             repo_url=repo_url,
             branch=branch,

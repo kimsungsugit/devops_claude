@@ -209,4 +209,52 @@ describe('BuildChangeMatrixPanel', () => {
     await screen.findByText('#25');
     expect(screen.queryByText(/빌드 시점으로 고정되지 않았습니다/)).toBeNull();
   });
+
+  // ── 행 상한 절단 고지 (실측: 캐시 33빌드 / 구 상한 30 → #77·78·79 침묵 손실) ──
+
+  it('상한에 잘린 빌드가 있으면 "표시 N / 전체 M"으로 병기한다', async () => {
+    const capped = { ...FILES, row_limit: { limit: 30, shown: 30, available: 33, omitted_builds: [79, 78, 77], baseline_forced_in: true } };
+    mockFiles = capped;
+    mockFunctions = { ...capped, level: 'functions' };
+    render(<BuildChangeMatrixPanel {...PROPS} />);
+    await screen.findByText('#25');
+    expect(screen.getByText(/표시 30 \/ 전체 33/)).toBeInTheDocument();
+    expect(screen.getByText(/#79 · #78 · #77/)).toBeInTheDocument();
+    expect(screen.getByText(/기준 빌드는 상한과 무관하게 항상 표시/)).toBeInTheDocument();
+  });
+
+  it('절단이 없으면 고지를 내지 않는다', async () => {
+    const full = { ...FILES, row_limit: { limit: 100, shown: 4, available: 4, omitted_builds: [], baseline_forced_in: false } };
+    mockFiles = full;
+    mockFunctions = { ...full, level: 'functions' };
+    render(<BuildChangeMatrixPanel {...PROPS} />);
+    await screen.findByText('#25');
+    expect(screen.queryByText(/표시 \d+ \/ 전체/)).toBeNull();
+  });
+
+  // ── 비교 기준 불일치 (부분 재수집 중 필연) ──────────────────────────────
+
+  it('기준이 섞인 행은 수치에 ⚠를 붙인다 — 그 숫자는 "이 빌드의 변화"가 아니다', async () => {
+    const mixed = {
+      ...FILES,
+      rows: [
+        { ...FILES.rows[0], source_pinned: true,
+          comparison_basis: { state: 'mixed', reason: '베이스라인과 이 빌드의 소스 기준이 다릅니다' },
+          functions: { new: 0, deleted: 0, signature: 0, body: 3, changed: 3 } },
+        { ...FILES.rows[1], comparison_basis: { state: 'trusted' } },
+        ...FILES.rows.slice(2),
+      ],
+      snapshot_trust: { pinned: 1, unpinned: 3, unpinned_builds: [24, 13, 11], note: '' },
+    };
+    mockFiles = mixed;
+    mockFunctions = { ...mixed, level: 'functions' };
+    render(<BuildChangeMatrixPanel {...PROPS} />);
+    await screen.findByText('#25');
+    const r25 = within(screen.getByText('#25').closest('tr'));
+    expect(r25.getByText('2 ⚠')).toBeInTheDocument();   // 변경 파일
+    expect(r25.getByText('3 ⚠')).toBeInTheDocument();   // 변경 함수
+    // 신뢰 가능한 행은 표식이 붙지 않는다(과잉 경고로 신호가 죽으면 안 된다)
+    expect(within(screen.getByText('#24').closest('tr')).getByText('2')).toBeInTheDocument();
+    expect(screen.getByText(/기준이 섞인 행 1개는 ⚠로 표시/)).toBeInTheDocument();
+  });
 });
