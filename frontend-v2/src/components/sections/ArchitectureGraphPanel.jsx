@@ -572,6 +572,17 @@ function HotspotScatter({ hotspots }) {
   );
 }
 
+/** 경로에서 파일명만. 전체 경로는 title 로 남긴다(같은 이름이 여러 디렉터리에 있을 수 있다). */
+const baseName = (f) => String(f).split('/').pop();
+
+const CYCLE_LIMIT = 8;
+const MUTUAL_LIMIT = 8;
+
+/**
+ * 순환 의존 — **표 2개**. 예전엔 `c.files.join(' ↔ ')` 한 줄이라 8파일 순환이
+ * `Generated_Code/Cpu.c ↔ Generated_Code/Events.c ↔ …` 로 세 줄씩 접혔고, 전체 경로가
+ * 반복돼 정작 어느 파일들이 묶였는지가 안 보였다. 파일명만 보이고 경로는 title 로 옮긴다.
+ */
 function CycleList({ cycles }) {
   const fileSccs = cycles?.file_sccs || [];
   const mutual = cycles?.mutual_file_pairs || [];
@@ -579,19 +590,73 @@ function CycleList({ cycles }) {
     <div>
       <div style={T.figTitle}>순환 의존 (파일 간 호출 기준)</div>
       {fileSccs.length === 0 && mutual.length === 0 && (
-        <div style={{ ...xs, color: 'var(--text-muted)' }}>순환 의존 관측 없음 (파일 간 호출 기준)</div>
+        <div style={T.note}>순환 의존 관측 없음 (파일 간 호출 기준)</div>
       )}
-      {fileSccs.map((c) => (
-        <div key={c.files.join('|')} style={{ ...xs, marginBottom: 2 }}>
-          <span style={{ color: 'var(--color-danger)', fontWeight: 600 }}>순환 {c.size}파일</span>{' '}
-          {c.files.join(' ↔ ')}
-        </div>
-      ))}
-      {mutual.map((p) => (
-        <div key={`${p.a}|${p.b}`} style={{ ...xs, color: 'var(--text-muted)' }}>
-          상호 호출 {p.a} → {p.b} {p.a_to_b}회 · {p.b} → {p.a} {p.b_to_a}회
-        </div>
-      ))}
+
+      {fileSccs.length > 0 && (
+        <>
+          <div style={SCROLL}>
+            <table style={TABLE}>
+              <thead><tr><th style={T.numTh}>크기</th><th style={T.th}>순환에 묶인 파일</th></tr></thead>
+              <tbody>
+                {fileSccs.slice(0, CYCLE_LIMIT).map((c) => (
+                  <tr key={c.files.join('|')}>
+                    <td style={{ ...T.numTd, color: 'var(--color-danger)', fontWeight: 600, verticalAlign: 'top' }}>
+                      {c.size}
+                    </td>
+                    {/* 여기만 줄바꿈 허용 — 파일이 8개까지 들어오므로 한 줄 고정은 불가능하다.
+                        대신 파일명 단위로만 접히게 각 이름을 nowrap 조각으로 낸다. */}
+                    <td style={{ ...T.td, whiteSpace: 'normal', lineHeight: 1.6 }}>
+                      {c.files.map((f, i) => (
+                        <span key={f}>
+                          {i > 0 && <span style={{ color: 'var(--text-muted)' }}> ↔ </span>}
+                          <span title={f} style={{ whiteSpace: 'nowrap', fontFamily: 'monospace' }}>{baseName(f)}</span>
+                        </span>
+                      ))}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          {fileSccs.length > CYCLE_LIMIT && (
+            <div style={T.note}>* 크기 상위 {CYCLE_LIMIT}개만 표시 (총 {fileSccs.length}개)</div>
+          )}
+        </>
+      )}
+
+      {mutual.length > 0 && (
+        <>
+          <div style={{ ...T.figTitle, marginTop: 'var(--sp-2)' }}>상호 호출 (2-사이클)</div>
+          <div style={SCROLL}>
+            <table style={TABLE}>
+              <thead>
+                <tr>
+                  <th style={T.th}>파일 A</th><th style={T.th}>파일 B</th>
+                  <th style={T.numTh}>A→B</th><th style={T.numTh}>B→A</th>
+                </tr>
+              </thead>
+              <tbody>
+                {mutual.slice(0, MUTUAL_LIMIT).map((p) => (
+                  <tr key={`${p.a}|${p.b}`}>
+                    <td style={{ ...T.nameTd(180), fontFamily: 'monospace' }} title={p.a}>{baseName(p.a)}</td>
+                    <td style={{ ...T.nameTd(180), fontFamily: 'monospace' }} title={p.b}>{baseName(p.b)}</td>
+                    <td style={T.numTd}>{p.a_to_b}</td>
+                    <td style={T.numTd}>{p.b_to_a}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          {mutual.length > MUTUAL_LIMIT && (
+            <div style={T.note}>* 상위 {MUTUAL_LIMIT}건만 표시 (총 {mutual.length}건)</div>
+          )}
+        </>
+      )}
+
+      {(fileSccs.length > 0 || mutual.length > 0) && (
+        <div style={T.note}>* 파일명만 표시 — 전체 경로는 각 이름에 마우스를 올리면 나옵니다</div>
+      )}
     </div>
   );
 }

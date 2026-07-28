@@ -1,6 +1,6 @@
 /** ArchitectureGraphPanel — 층위 배치(순수)·사이클 강조·드릴다운·히트맵·정직 각주. */
 import React from 'react';
-import { render, screen } from '@testing-library/react';
+import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
@@ -97,9 +97,18 @@ describe('ArchitectureGraphPanel', () => {
     // 사이클 참여 모듈은 aria-label에 명시(색 외 접근 수단)
     expect(screen.getByRole('button', { name: /모듈 APP.*순환 의존 참여/ })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /모듈 IF(?!.*순환)/ })).toBeInTheDocument();
-    // 순환 목록 + 상호 호출 수치
-    expect(screen.getByText(/순환 2파일/)).toBeInTheDocument();
-    expect(screen.getByText(/APP\/a\.c ↔ LIB\/u\.c/)).toBeInTheDocument();
+    // 순환 목록은 표다 — 크기 열 + 파일명(전체 경로는 title). 예전엔 전체 경로를
+    // `↔` 로 이어 붙인 한 줄이라 8파일 순환이 세 줄로 접혔다.
+    // ⚠ 파일명·title 은 상호 호출 표에도 나온다 — SCC 표로 범위를 좁힌다
+    const sccTable = screen.getByRole('columnheader', { name: '순환에 묶인 파일' }).closest('table');
+    expect(within(sccTable).getByTitle('APP/a.c')).toBeInTheDocument();
+    expect(within(sccTable).getByTitle('LIB/u.c')).toBeInTheDocument();
+    expect(sccTable).toHaveTextContent('a.c');
+    expect(sccTable).toHaveTextContent('u.c');
+    // 상호 호출은 별도 표(A→B / B→A 를 열로 분리 — 예전엔 '4회 · 1회' 한 문장이었다)
+    const mutualTable = screen.getByRole('columnheader', { name: 'A→B' }).closest('table');
+    expect(within(mutualTable).getByText('4')).toBeInTheDocument();
+    expect(within(mutualTable).getByText('1')).toBeInTheDocument();
     // 개선 후보(결정론 basis)
     expect(screen.getByText(/집중 파일/)).toBeInTheDocument();
     expect(screen.getByText(/함수 20개 · 본문 900줄/)).toBeInTheDocument();
@@ -126,9 +135,10 @@ describe('ArchitectureGraphPanel', () => {
     await userEvent.click(screen.getByRole('button', { name: /모듈 APP/ }));
 
     // 모듈이 2세그먼트 프록시로 접은 파일을 펼친다
-    expect(screen.getByText(/내부 파일 2개 · 파일 간 호출 2건/)).toBeInTheDocument();
-    expect(screen.getByText('a.c')).toBeInTheDocument();
-    expect(screen.getByText('b.c')).toBeInTheDocument();
+    // ⚠ 파일명은 순환 표에도 나온다 — 드릴다운 래퍼로 범위를 좁힌다
+    const drill = screen.getByText(/내부 파일 2개 · 파일 간 호출 2건/).parentElement;
+    expect(within(drill).getByTitle('APP/a.c')).toBeInTheDocument();
+    expect(within(drill).getByTitle('APP/b.c')).toBeInTheDocument();
     // 양방향은 ⚠상호로 표기(2-사이클 = 리팩토링 신호)
     expect(screen.getAllByText(/⚠상호/).length).toBeGreaterThanOrEqual(1);
     // 모듈 경계를 넘는 호출은 유출/유입으로 집계(LIB 4회 나가고 1회 들어옴, IF 2회 나감)

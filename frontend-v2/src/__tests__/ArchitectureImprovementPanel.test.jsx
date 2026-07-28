@@ -85,6 +85,27 @@ describe('ArchitectureImprovementPanel', () => {
     expect(screen.getByText(/순환 2파일 · 최소 비용 간선 2회/)).toBeInTheDocument();
   });
 
+  it('To-Be가 As-Is와 1:1로 같으면 "구조 변경 아님"을 먼저 알린다', async () => {
+    // ⚠ 실측(KJPDS02_PV): AI가 현재 모듈 8개를 그대로 되풀이하고 역할 설명만 붙였다.
+    //   표만 나란히 두면 사용자가 그걸 알아채려고 8행을 눈으로 대조해야 한다.
+    const user = userEvent.setup();
+    render(<ArchitectureImprovementPanel {...PROPS} />);
+    await screen.findByText('순환 끊기');
+    mockResp = {
+      ...BASE, ai_enriched: true, enrich_reason: null, model: 'gemini-3.5-flash-lite',
+      target_design: {
+        nodes: [{ module: 'APP', members: ['APP'], role: '응용 로직 계층', is_new: false }],
+        edges: [{ from: 'APP', to: 'LIB', why: '기존 호출' }],
+        rationale: [], dropped_nodes: 0,
+      },
+    };
+    await user.click(screen.getByRole('button', { name: /목표 구조 생성/ }));
+    expect(await screen.findByText(/1:1로 동일/)).toBeInTheDocument();
+    expect(screen.getByText(/역할 설명/)).toBeInTheDocument();
+    // '구성: 자기 자신'은 정보가 0이라 '동일'로 접는다
+    expect(screen.getByText('동일')).toBeInTheDocument();
+  });
+
   it('후보 0건 — 생성 버튼 없이 "임계 초과 없음"만 알린다', async () => {
     mockResp = { ...BASE, candidates: [], summary: { total: 0, by_kind: {}, structural: 0, testability: 0 } };
     render(<ArchitectureImprovementPanel {...PROPS} />);

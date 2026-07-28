@@ -136,31 +136,105 @@ const IMPACT_KO = {
   sample_functions: '참조 함수', pointer_symbols: '포인터', ref_functions: '참조 함수',
 };
 
-/** 모듈 구조 목록 — As-Is/To-Be를 같은 형식으로 그려 비교 가능하게 한다. */
+const EDGE_LIMIT = 10;
+
+/**
+ * To-Be 가 As-Is 의 모듈 집합과 완전히 같은가(= 구조 변경 제안이 아님).
+ * 신설이 하나라도 있거나 모듈 이름 집합이 다르면 false.
+ */
+function structureUnchanged(asIs, toBe) {
+  const a = (asIs || []).map((n) => n.module);
+  const b = (toBe || []).map((n) => n.module);
+  if (a.length === 0 || a.length !== b.length) return false;
+  if ((toBe || []).some((n) => n.is_new)) return false;
+  const setA = new Set(a);
+  return b.every((m) => setA.has(m));
+}
+
+/**
+ * 모듈 구조 — As-Is/To-Be를 **같은 표 형식**으로 그려 눈이 행 단위로 대조하게 한다.
+ *
+ * 예전엔 카드 목록이라 As-Is 는 `모듈 · 파일 N · 함수 M` 한 줄, To-Be 는 `모듈 — 역할` +
+ * `구성: …` 두 줄이었고, 의존은 `A→B(52) · C→D(28) · …` 를 이어 붙인 한 문단이었다.
+ * 두 열의 행이 안 맞아 무엇이 바뀌었는지 대조가 불가능했다.
+ */
 function StructureList({ title, nodes, edges, isTarget }) {
+  const rows = nodes || [];
+  const deps = edges || [];
   return (
     <div style={{ flex: 1, minWidth: 260 }}>
-      <div style={{ ...xs, fontWeight: 700, marginBottom: 4 }}>{title}</div>
-      {(nodes || []).length === 0 && <div style={{ ...xs, color: 'var(--text-muted)' }}>표시할 모듈이 없습니다.</div>}
-      {(nodes || []).map((n) => (
-        <div key={n.module} style={{
-          ...xs, border: '1px solid var(--border)', borderLeft: `3px solid ${n.is_new ? 'var(--color-success)' : 'var(--border)'}`,
-          borderRadius: 'var(--radius-sm)', padding: '3px 8px', marginBottom: 3,
-        }}>
-          <b>{n.module}</b>
-          {n.is_new && <span style={{ color: 'var(--color-success)' }}> · 신설</span>}
-          {isTarget
-            ? <>{n.role && <span style={{ color: 'var(--text-muted)' }}> — {n.role}</span>}
-                {(n.members || []).length > 0 && (
-                  <div style={{ color: 'var(--text-muted)' }}>구성: {(n.members || []).join(', ')}</div>
-                )}</>
-            : <span style={{ color: 'var(--text-muted)' }}> · 파일 {n.files} · 함수 {n.functions}</span>}
+      <div style={{ ...T.figTitle, fontWeight: 700 }}>{title}</div>
+      {rows.length === 0 ? (
+        <div style={T.note}>표시할 모듈이 없습니다.</div>
+      ) : (
+        <div style={SCROLL}>
+          <table style={TABLE}>
+            <thead>
+              <tr>
+                <th style={T.th}>모듈</th>
+                {isTarget
+                  ? <><th style={T.th}>역할</th><th style={T.th}>구성</th></>
+                  : <><th style={T.numTh}>파일</th><th style={T.numTh}>함수</th></>}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((n) => (
+                <tr key={n.module}>
+                  <td style={{ ...T.nameTd(180), fontWeight: 600 }} title={n.module}>
+                    {n.module}
+                    {n.is_new && <span style={{ color: 'var(--color-success)', fontWeight: 400 }}> 신설</span>}
+                  </td>
+                  {isTarget ? (
+                    <>
+                      <td style={T.textTd(220)}>{n.role || <span style={{ color: 'var(--text-muted)' }}>—</span>}</td>
+                      {/* 구성이 모듈명과 같으면 '구성: 자기 자신'을 반복하지 않는다(정보 0) */}
+                      <td style={T.textTd(200)}>
+                        {(n.members || []).length === 0 || (n.members.length === 1 && n.members[0] === n.module)
+                          ? <span style={{ color: 'var(--text-muted)' }}>동일</span>
+                          : n.members.join(', ')}
+                      </td>
+                    </>
+                  ) : (
+                    <>
+                      <td style={T.numTd}>{n.files}</td>
+                      <td style={T.numTd}>{n.functions}</td>
+                    </>
+                  )}
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </div>
-      ))}
-      {(edges || []).length > 0 && (
-        <div style={{ ...xs, color: 'var(--text-muted)', marginTop: 4 }}>
-          의존: {(edges || []).slice(0, 8).map((e) => `${e.from}→${e.to}${e.calls != null ? `(${e.calls})` : ''}`).join(' · ')}
-        </div>
+      )}
+
+      {deps.length > 0 && (
+        <>
+          <div style={{ ...T.figTitle, marginTop: 'var(--sp-2)' }}>모듈 간 의존</div>
+          <div style={SCROLL}>
+            <table style={TABLE}>
+              <thead>
+                <tr>
+                  <th style={T.th}>from → to</th>
+                  {/* To-Be 엣지엔 호출 수가 없다 — 열을 만들어 `—`로 채우면 "0회"로 오독된다 */}
+                  {!isTarget && <th style={T.numTh}>호출</th>}
+                </tr>
+              </thead>
+              <tbody>
+                {deps.slice(0, EDGE_LIMIT).map((e) => (
+                  <tr key={`${e.from}→${e.to}`}>
+                    <td style={T.nameTd(240)} title={`${e.from} → ${e.to}`}>
+                      {e.from} <span style={{ color: 'var(--text-muted)' }}>→</span> {e.to}
+                    </td>
+                    {!isTarget && <td style={T.numTd}>{e.calls ?? '—'}</td>}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          {deps.length > EDGE_LIMIT && (
+            <div style={T.note}>* 상위 {EDGE_LIMIT}건만 표시 (총 {deps.length}건)</div>
+          )}
+        </>
       )}
     </div>
   );
@@ -334,10 +408,23 @@ export default function ArchitectureImprovementPanel({ jobUrl, cacheRoot, defaul
           {/* As-Is ↔ To-Be 병렬 — 같은 형식으로 놓아야 무엇이 바뀌는지 보인다 */}
           {td2 ? (
             <div>
+              {/* ⚠ AI가 "제안"이라며 **현재 모듈을 그대로 되풀이**하는 경우가 있다(실측: 8개 전부
+                  동일, 신설 0, 구성이 자기 자신). 표만 나란히 두면 사용자가 그걸 알아채려고
+                  8행을 눈으로 대조해야 한다 — 같으면 같다고 먼저 말한다. */}
+              {structureUnchanged(data.as_is?.nodes, td2.nodes) && (
+                <div style={{ ...xs, color: 'var(--color-warning)', marginBottom: 'var(--sp-2)' }}>
+                  ⚠ 제안된 모듈 {(td2.nodes || []).length}개가 현재 구조와 <b>1:1로 동일</b>합니다
+                  (신설·분할·통합 없음) — 이 제안은 구조 변경이 아니라 <b>역할 설명</b>입니다.
+                  실제 변경안은 위 “개선 후보” 표의 상세(▸)를 보세요.
+                </div>
+              )}
               <div style={{ display: 'flex', gap: 'var(--sp-4)', flexWrap: 'wrap' }}>
                 <StructureList title="현재 (As-Is)" nodes={data.as_is?.nodes} edges={data.as_is?.edges} />
                 <StructureList title="제안 (To-Be)" nodes={td2.nodes} edges={td2.edges} isTarget />
               </div>
+              {(td2.rationale || []).length > 0 && (
+                <div style={{ ...T.figTitle, marginTop: 'var(--sp-2)' }}>제안 근거</div>
+              )}
               {(td2.rationale || []).map((r, i) => (
                 <div key={i} style={{ ...xs, color: 'var(--text-muted)' }}>· {r}</div>
               ))}
