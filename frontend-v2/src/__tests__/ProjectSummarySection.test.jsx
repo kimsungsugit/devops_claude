@@ -5,7 +5,7 @@
  * - 조회·상태는 전부 부모 소유 — 서브탭으로 내리면 그 탭을 안 연 사용자에게 배너가 조용히 빈다
  * - ISO 정직성: 커버리지 미측정≠정상, VectorCAST SCM 스냅샷
  */
-import { render, screen } from '@testing-library/react';
+import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
@@ -19,6 +19,7 @@ let mockCfg;
 let mockAllBuilds;
 let mockSrcBuilds;
 let mockSrcBuildsFail;   // 설정하면 cached-builds-meta 가 거부한다
+let mockCellGate;        // 설정하면 change-matrix/cell 이 이 promise 뒤에 해소된다(진행 표시 관찰용)
 let mockMatrix;
 let mockBackfill;
 
@@ -33,6 +34,10 @@ vi.mock('../api.js', () => ({
     if (u.includes('/api/jenkins/builds')) return Promise.resolve(mockAllBuilds);
     if (u.includes('cached-builds-meta')) {
       return mockSrcBuildsFail ? Promise.reject(new Error(mockSrcBuildsFail)) : Promise.resolve(mockSrcBuilds);
+    }
+    if (u.includes('change-matrix/cell')) {
+      const done = { ok: true, target: { build_number: 125 }, shared_with_builds: [125] };
+      return mockCellGate ? mockCellGate.then(() => done) : Promise.resolve(done);
     }
     if (u.includes('change-matrix')) return Promise.resolve(mockMatrix);
     if (u.includes('sync-backfill')) return Promise.resolve(mockBackfill);
@@ -126,6 +131,7 @@ describe('ProjectSummarySection (서브탭 재구성)', () => {
     mockCfg = {};
     mockAllBuilds = [];
     mockSrcBuildsFail = '';
+    mockCellGate = null;
     mockSrcBuilds = { ok: true, available: true, builds: [
       { build_number: 125, has_source: true, source_pinned: true, timestamp_iso: '2026-07-24T13:00:11', revision: '1075' },
       { build_number: 122, has_source: true, source_pinned: true, timestamp_iso: '2026-06-25T13:00:00', revision: '1053' },
@@ -173,21 +179,31 @@ describe('ProjectSummarySection (서브탭 재구성)', () => {
     expect(screen.getByRole('tab', { name: '개요' })).toHaveAttribute('aria-selected', 'true');
   });
 
-  it('서브탭 키보드 네비게이션(→/Home/End)과 roving tabIndex', async () => {
+  it('키보드는 **수동 활성화** — 화살표는 포커스만 옮기고 탭을 마운트하지 않는다', async () => {
+    // ⚠ 자동 활성화면 →→→ 로 지나가는 것만으로 아키텍처·소스코드가 마운트되어
+    //   lazy 로 16→6 으로 줄인 요청이 키보드 사용자에겐 통째로 복구된다.
     const user = userEvent.setup();
     render(<ProjectSummarySection job={JOB} analysisResult={RESULT} />);
     await screen.findByText(/⚠ 문제 \d+건/);
     const overview = screen.getByRole('tab', { name: '개요' });
     expect(overview).toHaveAttribute('tabindex', '0');
-    expect(screen.getByRole('tab', { name: '아키텍처' })).toHaveAttribute('tabindex', '-1');
 
     overview.focus();
     await user.keyboard('{ArrowRight}');
+    // 포커스와 roving tabIndex 는 옮겨가되, 선택은 그대로 개요다
+    expect(screen.getByRole('tab', { name: '아키텍처' })).toHaveFocus();
+    expect(screen.getByRole('tab', { name: '아키텍처' })).toHaveAttribute('tabindex', '0');
+    expect(overview).toHaveAttribute('aria-selected', 'true');
+    expect(mockPost.mock.calls.some(([u]) => String(u).includes('architecture-metrics'))).toBe(false);
+
+    // Enter 로 비로소 활성화
+    await user.keyboard('{Enter}');
     expect(screen.getByRole('tab', { name: '아키텍처' })).toHaveAttribute('aria-selected', 'true');
+
     await user.keyboard('{End}');
+    expect(screen.getByRole('tab', { name: '빌드 변경' })).toHaveFocus();
+    await user.keyboard(' ');
     expect(screen.getByRole('tab', { name: '빌드 변경' })).toHaveAttribute('aria-selected', 'true');
-    await user.keyboard('{Home}');
-    expect(screen.getByRole('tab', { name: '개요' })).toHaveAttribute('aria-selected', 'true');
   });
 
   it('안 연 서브탭은 마운트하지 않는다(첫 진입 요청 폭주 차단)', async () => {
@@ -219,6 +235,32 @@ describe('ProjectSummarySection (서브탭 재구성)', () => {
     await gotoSub(user, '개요');
     await gotoSub(user, '빌드 변경');
     expect(mockPost.mock.calls.filter(([u]) => String(u).includes('change-matrix')).length).toBe(before);
+  });
+
+  it('진행 중 작업은 서브탭 위에 뜨고, 그 탭으로 가는 버튼이 붙는다', async () => {
+    // ⚠ 진행 표시가 서브탭 안에만 있으면 탭을 옮기는 순간 표시도 중지 버튼도 사라진다
+    //   — 작업은 계속 서버를 때리는데 화면은 "아무 일도 안 일어나는 중"이 된다.
+    const user = userEvent.setup();
+    render(<ProjectSummarySection job={JOB} analysisResult={RESULT} />);
+    await screen.findByText(/⚠ 문제 \d+건/);
+    await gotoSub(user, '빌드 변경');
+    await screen.findByRole('heading', { name: '빌드별 변경 영향' });
+    // 셀 계산이 끝나기 전 상태를 관찰해야 하므로 응답을 게이트로 잡아 둔다
+    let release;
+    mockCellGate = new Promise((r) => { release = r; });
+    await user.click(await screen.findByText(/함수 축 계산 \(1건\)/));
+
+    // 개요로 옮겨도 진행 표시가 남는다.
+    // ⚠ 패널 자체 표시(display:none 이지만 DOM 에는 있다)와 상단 스트립 둘 다 잡히므로,
+    //   스트립에만 있는 '이동' 버튼으로 식별한다.
+    await gotoSub(user, '개요');
+    const goBtn = await screen.findByRole('button', { name: /빌드 변경\(으\)로/ });
+    expect(goBtn).toBeInTheDocument();
+    expect(within(goBtn.parentElement).getByText(/함수 축 계산 중/)).toBeInTheDocument();
+
+    // 끝나면 스트립이 사라진다(영구 잔존 금지)
+    release();
+    await vi.waitFor(() => expect(screen.queryByRole('button', { name: /빌드 변경\(으\)로/ })).toBeNull());
   });
 
   it('문제점 칩은 근거 화면으로 이동한다(죽은 라벨 금지)', async () => {

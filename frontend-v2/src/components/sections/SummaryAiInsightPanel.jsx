@@ -96,11 +96,15 @@ function RoleList({ title, items }) {
   );
 }
 
-export default function SummaryAiInsightPanel({ jobUrl, cacheRoot, scmId, trace }) {
+export default function SummaryAiInsightPanel({ jobUrl, cacheRoot, scmId, trace, onBusy }) {
   const [data, setData] = useState(null);
   const [phase, setPhase] = useState('probing'); // probing | idle | generating | done | error
   const [error, setError] = useState('');
   const abortRef = useRef(null);
+
+  // ⚠ 언마운트 시 진행 중인 생성을 중단한다. 없으면 프로젝트를 바꿔도 옛 요청이 살아
+  //   응답이 오고, setState 는 무시되지만 서버 LLM 호출과 토큰은 그대로 소모된다.
+  useEffect(() => () => abortRef.current?.abort(), []);
 
   // 마운트 시 probe — 캐시 있으면 자동 표시(LLM 0회). trace는 스냅샷 전달용이라 deps 제외
   // (변할 때마다 재-probe할 이유 없음 — 생성 시점 값만 실어 보낸다).
@@ -125,6 +129,7 @@ export default function SummaryAiInsightPanel({ jobUrl, cacheRoot, scmId, trace 
     abortRef.current = ctrl;
     setPhase('generating');
     setError('');
+    onBusy?.('ai', 'AI 인사이트 생성 중');
     try {
       const body = {
         job_url: jobUrl, cache_root: cacheRoot, scm_id: scmId || '',
@@ -141,6 +146,7 @@ export default function SummaryAiInsightPanel({ jobUrl, cacheRoot, scmId, trace 
       setPhase(data ? 'done' : 'error');
     } finally {
       abortRef.current = null;
+      onBusy?.('ai', null);
     }
   };
   const abort = () => { abortRef.current?.abort(); };

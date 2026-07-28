@@ -54,7 +54,7 @@ function deltaText(d) {
 
 export default function SummaryOverviewTab({
   jobUrl, cacheRoot, scmId, trace, traceBusy, reloadTrace, scmVcast,
-  prqa = {}, codeMetrics = {}, srcBuilds, srcBuildsError, violationsDelta, prqaTrendError,
+  prqa = {}, codeMetrics = {}, srcBuilds, srcBuildsError, violationsDelta, prqaTrendError, onBusy,
 }) {
   const cov = trace?.has_data ? trace.coverage_pct : null;
   const covGate = cov == null ? null : classifyGate(cov);
@@ -96,7 +96,7 @@ export default function SummaryOverviewTab({
       </div>
 
       {/* AI 인사이트(Gemini) — on-demand(버튼) + 빌드별 디스크 캐시(probe 자동 표시) */}
-      <SummaryAiInsightPanel jobUrl={jobUrl} cacheRoot={cacheRoot} scmId={scmId} trace={trace} />
+      <SummaryAiInsightPanel jobUrl={jobUrl} cacheRoot={cacheRoot} scmId={scmId} trace={trace} onBusy={onBusy} />
 
       {/* 정적·동적 현황 (그리드) — 숨김(SHOW.staticDynamic). 삭제가 아니라 플래그다 */}
       {SHOW.staticDynamic && (

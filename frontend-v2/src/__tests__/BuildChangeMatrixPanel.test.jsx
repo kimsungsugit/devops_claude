@@ -123,6 +123,35 @@ describe('BuildChangeMatrixPanel', () => {
     });
   });
 
+  it('언마운트하면 순차 계산이 멈춘다(떠난 프로젝트를 계속 계산하지 않는다)', async () => {
+    // ⚠ runRef 는 baseline 변경 때만 올라갔다 — 프로젝트를 바꿔 섹션이 remount 돼도
+    //   떠난 프로젝트의 셀 계산이 끝까지 돌았다(서버 부하 + 떠난 결과가 화면에 반영).
+    const user = userEvent.setup();
+    const { unmount } = render(<BuildChangeMatrixPanel {...PROPS} />);
+    await screen.findByText('#25');
+    await user.click(screen.getByText(/함수 축 계산 \(2건\)/));
+    await vi.waitFor(() => expect(cellCalls.length).toBeGreaterThanOrEqual(1));
+    unmount();
+    const after = cellCalls.length;
+    await new Promise((r) => setTimeout(r, 60));
+    expect(cellCalls.length).toBe(after);   // 언마운트 후 추가 계산 없음
+  });
+
+  it('진행 상태를 부모에 보고한다(탭 밖에서도 보이게)', async () => {
+    const user = userEvent.setup();
+    const onBusy = vi.fn();
+    render(<BuildChangeMatrixPanel {...PROPS} onBusy={onBusy} />);
+    await screen.findByText('#25');
+    await user.click(screen.getByText(/함수 축 계산 \(2건\)/));
+    await vi.waitFor(() => {
+      expect(onBusy.mock.calls.some(([k, l]) => k === 'matrix' && /함수 축 계산 중/.test(l || ''))).toBe(true);
+    });
+    // 끝나면 반드시 해제 — 안 그러면 상단 스트립이 영구히 남는다
+    await vi.waitFor(() => {
+      expect(onBusy.mock.calls.some(([k, l]) => k === 'matrix' && l === null)).toBe(true);
+    });
+  });
+
   it('셀 1건이 같은 스냅샷 그룹의 여러 행을 함께 채운다', async () => {
     cellResponses[25] = { ...cellResponses[25], shared_with_builds: [25, 24] };
     mockFiles = { ...FILES, pending_cells: [{ cell_id: 'base__25', target_build: 25 }] };

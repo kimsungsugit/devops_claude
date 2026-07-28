@@ -59,7 +59,7 @@ function AsilCell({ asil }) {
   );
 }
 
-export default function BuildChangeMatrixPanel({ jobUrl, cacheRoot, baseline, deltaByBuild, prqaTrendError, defaultOpen = true }) {
+export default function BuildChangeMatrixPanel({ jobUrl, cacheRoot, baseline, deltaByBuild, prqaTrendError, onBusy, defaultOpen = true }) {
   const [data, setData] = useState(null);
   const [error, setError] = useState('');
   const [cells, setCells] = useState({});          // build_number → 셀 결과
@@ -69,6 +69,11 @@ export default function BuildChangeMatrixPanel({ jobUrl, cacheRoot, baseline, de
   const runRef = useRef(0);
   // 중지 플래그는 ref — 순차 루프가 최신 값을 봐야 한다(state면 클로저에 갇혀 영원히 false다).
   const stoppedRef = useRef(false);
+
+  // ⚠ 언마운트/잡 전환에도 순차 루프를 반드시 끊는다. 예전엔 runRef 가 baseline 변경 때만
+  //   올라가서, 프로젝트를 바꿔 섹션이 remount 돼도 **떠난 프로젝트의 셀 계산 33건이 끝까지
+  //   돌았다**(서버 부하 + 떠난 프로젝트의 완료 상태가 화면에 반영). run 가드를 무효화한다.
+  useEffect(() => () => { runRef.current += 1; stoppedRef.current = true; }, []);
 
   // ── ① 파일 축 즉시 → ② 함수 축 probe(캐시된 셀만) ──
   useEffect(() => {
@@ -114,6 +119,7 @@ export default function BuildChangeMatrixPanel({ jobUrl, cacheRoot, baseline, de
         if (run !== runRef.current) return;
         setBusyCell(list[i].target_build);
         setProgress({ done: i, total: list.length });
+        onBusy?.('matrix', `함수 축 계산 중 ${i + 1}/${list.length} (#${list[i].target_build})`);
         const resp = await post('/api/summary/change-matrix/cell', {
           job_url: jobUrl, cache_root: cacheRoot,
           baseline_build: Number(baseline), target_build: list[i].target_build,
@@ -133,8 +139,9 @@ export default function BuildChangeMatrixPanel({ jobUrl, cacheRoot, baseline, de
     } finally {
       // ⚠ finally — 조기 return(run 가드)·예외 어느 경로로 빠져도 "계산 중"을 남기지 않는다.
       if (run === runRef.current) { setBusyCell(null); setProgress(null); }
+      onBusy?.('matrix', null);
     }
-  }, [pending, cells, jobUrl, cacheRoot, baseline]);
+  }, [pending, cells, jobUrl, cacheRoot, baseline, onBusy]);
 
   // 표 서식은 summaryTable 공통 규약 — 본문 11px · 숫자 우측정렬(tabular-nums) ·
   // 식별자는 줄바꿈 대신 말줄임. 패널마다 따로 정의하면 한 탭 안에서 표가 서로 달라 보인다.

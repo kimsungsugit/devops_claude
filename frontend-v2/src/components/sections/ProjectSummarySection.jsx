@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useCallback } from 'react';
+import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { post, api, defaultCacheRoot } from '../../api.js';
 import { useToast, useJenkinsCfg } from '../../App.jsx';
 import { pickScmForJob } from '../../projectLoader.js';
@@ -110,6 +110,24 @@ export default function ProjectSummarySection({ job, analysisResult, onSubChange
       || '';
   }, [analysisResult, job]);
 
+  // ── 진행 중 작업 레지스트리 ──
+  // ⚠ 진행 표시가 서브탭 **안에만** 있으면, 사용자가 다른 탭으로 옮기는 순간 "함수 축 계산 중
+  //   5/12"도 중지 버튼도 같이 사라진다. 작업은 계속 서버를 때리는데 화면은 "아무 일도 안
+  //   일어나는 중"으로 보인다. 그래서 서브탭 **위**(항상 보이는 영역)로 끌어올린다.
+  const [busyWork, setBusyWork] = useState({});   // {key: {label, sub}}
+  const reportBusy = useCallback((key, label, subId) => {
+    setBusyWork((prev) => {
+      if (!label) {
+        if (!(key in prev)) return prev;
+        const next = { ...prev }; delete next[key]; return next;
+      }
+      if (prev[key]?.label === label) return prev;
+      return { ...prev, [key]: { label, sub: subId } };
+    });
+  }, []);
+  const reportBusyBuild = useCallback((k, l) => reportBusy(k, l, 'build'), [reportBusy]);
+  const reportBusyOverview = useCallback((k, l) => reportBusy(k, l, 'overview'), [reportBusy]);
+
   // ── 서브탭 (DocGenHubSection과 동일 규약: 방문한 서브만 마운트, 이후 display:none 유지) ──
   const [sub, setSub] = useState('overview');
   const [mounted, setMounted] = useState(() => new Set(['overview']));
@@ -136,9 +154,15 @@ export default function ProjectSummarySection({ job, analysisResult, onSubChange
     const active = SUBS.find((s) => s.id === sub);
     if (active && onSubChange) onSubChange(active.id, active.label);
   }, [sub, onSubChange]);
-  // WAI-ARIA tablist 키보드 네비게이션 (ArrowLeft/Right/Home/End + roving tabIndex).
+  // WAI-ARIA tablist 키보드 네비게이션 — **수동 활성화**(화살표는 포커스만, Enter/Space로 선택).
+  // ⚠ 자동 활성화면 개요에서 →→→ 로 지나가는 것만으로 아키텍처·소스코드 탭이 마운트되어
+  //   arch-metrics · arch-improvement · rule-trend · rulebook · quality-detail 이 한꺼번에 나간다
+  //   (lazy 마운트로 16→6 으로 줄인 이득이 키보드 사용자에겐 통째로 사라진다).
+  //   WAI-ARIA 도 활성화가 네트워크를 유발하면 수동 활성화를 권고한다.
+  const [focusedSub, setFocusedSub] = useState(null);   // null이면 활성 탭이 곧 포커스 대상
+  const rovingSub = focusedSub && VALID_SUB.has(focusedSub) ? focusedSub : sub;
   const onSubKeyDown = (e) => {
-    const idx = SUBS.findIndex((s) => s.id === sub);
+    const idx = SUBS.findIndex((s) => s.id === rovingSub);
     let nextIdx = null;
     if (e.key === 'ArrowRight') nextIdx = (idx + 1) % SUBS.length;
     else if (e.key === 'ArrowLeft') nextIdx = (idx - 1 + SUBS.length) % SUBS.length;
@@ -147,8 +171,8 @@ export default function ProjectSummarySection({ job, analysisResult, onSubChange
     if (nextIdx == null) return;
     e.preventDefault();
     const id = SUBS[nextIdx].id;
+    setFocusedSub(id);
     document.getElementById(`summary-tab-${id}`)?.focus();
-    selectSub(id);
   };
 
   // ── 소스 스냅샷 빌드 목록 + 공유 베이스라인 ──
@@ -382,6 +406,10 @@ export default function ProjectSummarySection({ job, analysisResult, onSubChange
   const [warmMatrix, setWarmMatrix] = useState(true);
   const [backfillCount, setBackfillCount] = useState(10);
   const backfillBusy = backfill?.state === 'running';
+  // ⚠ 폴링은 setTimeout 체인이라 언마운트로 안 멈춘다 — 프로젝트를 바꿔도 살아남아
+  //   **떠난 프로젝트의 완료 토스트**를 띄운다(토스트에 프로젝트명이 없어 지금 것으로 읽힌다).
+  const pollAliveRef = useRef(true);
+  useEffect(() => { pollAliveRef.current = true; return () => { pollAliveRef.current = false; }; }, []);
   const reloadTimeline = useCallback(() => {
     setTimeline(null);
     // scmId/jobUrl deps의 timeline effect는 상태 기반이라 즉시 재조회를 위해 직접 호출.
@@ -425,16 +453,25 @@ export default function ProjectSummarySection({ job, analysisResult, onSubChange
       let pollFails = 0;
       const giveUp = (why) => {
         setBackfill(null);
+        reportBusy('backfill', null);
         toast?.('error', `백필 상태를 확인할 수 없습니다 — ${why}. 다시 시도해 주세요.`);
       };
       const poll = async () => {
+        if (!pollAliveRef.current) return;
         try {
           const st = await api(`/api/jenkins/sync-backfill-status/${resp.job_id}`);
           pollFails = 0;
+          if (!pollAliveRef.current) return;
           if (!st?.available) { giveUp(st?.reason || '작업 정보 없음'); return; }
           {
             setBackfill(st);
-            if (st.state === 'running') { setTimeout(poll, 3000); return; }
+            if (st.state === 'running') {
+              reportBusy('backfill', st.phase === 'matrix'
+                ? `비교 캐시 계산 중 ${(st.matrix?.completed ?? 0) + 1}/${st.matrix?.total ?? '?'}`
+                : `빌드 가져오는 중 ${st.completed}/${st.total}`, 'build');
+              setTimeout(poll, 3000); return;
+            }
+            reportBusy('backfill', null);
             const errs = (st.per_build || []).filter((b) => b.status === 'error').length;
             const pinFails = (st.per_build || []).filter((b) => b.status === 'pin_failed').length;
             const warmed = st.matrix?.completed ?? 0;
@@ -453,6 +490,7 @@ export default function ProjectSummarySection({ job, analysisResult, onSubChange
             reloadSrcBuilds();
           }
         } catch (e) {
+          if (!pollAliveRef.current) return;
           pollFails += 1;
           if (pollFails >= 5) { giveUp(String(e?.message || e)); return; }
           setTimeout(poll, 5000);
@@ -463,7 +501,7 @@ export default function ProjectSummarySection({ job, analysisResult, onSubChange
       toast?.('error', `백필 요청 실패: ${String(e?.message || e)}`);
     }
   }, [jobUrl, cfg, cacheRoot, scmId, toast, reloadTimeline, reloadSrcBuilds,
-      pinSource, warmMatrix, backfillCount, baselineBuild]);
+      pinSource, warmMatrix, backfillCount, baselineBuild, reportBusy]);
 
   // 문제점 칩 → 근거 화면. 같은 섹션(summary) 안이면 서브탭만 바꾸고, 다른 섹션이면 딥링크한다.
   // ⚠ `window.__detailSection` 은 Detail 이 마운트돼 있을 때만 존재한다(테스트/스토리북에선 부재).
@@ -544,14 +582,37 @@ export default function ProjectSummarySection({ job, analysisResult, onSubChange
           latestViolationsDelta={latestViolationsDelta} />
       )}
 
+      {/* 진행 중 작업 — 서브탭 **위**라 어느 탭에 있어도 보인다. 예전엔 각 탭 안에만 있어
+          탭을 옮기면 진행 표시도 중지 버튼도 같이 사라졌다(작업은 계속 돌면서). */}
+      {Object.keys(busyWork).length > 0 && (
+        <div style={{
+          display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 'var(--sp-2)',
+          fontSize: 'var(--text-xs)', color: 'var(--color-info)',
+        }}>
+          <span className="spinner" />
+          {Object.entries(busyWork).map(([k, w]) => (
+            <span key={k}>
+              {w.label}
+              {w.sub && w.sub !== sub && (
+                <button type="button" onClick={() => selectSub(w.sub)}
+                  style={{ marginLeft: 4, fontSize: 'var(--text-xs)', padding: '0 6px', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', background: 'transparent', cursor: 'pointer', color: 'var(--text-muted)' }}>
+                  {SUBS.find((x) => x.id === w.sub)?.label}(으)로
+                </button>
+              )}
+            </span>
+          ))}
+        </div>
+      )}
+
       {/* ── 서브탭 ── */}
       <nav className="subnav" role="tablist" aria-label="프로젝트 분석 영역" onKeyDown={onSubKeyDown}>
         {SUBS.map((s) => (
           <button key={s.id} id={`summary-tab-${s.id}`} type="button" role="tab"
             aria-selected={sub === s.id} aria-controls={`summary-panel-${s.id}`}
-            tabIndex={sub === s.id ? 0 : -1}
+            tabIndex={rovingSub === s.id ? 0 : -1}
             className={`tab-item${sub === s.id ? ' active' : ''}`}
-            onClick={() => selectSub(s.id)}>
+            onFocus={() => setFocusedSub(s.id)}
+            onClick={() => { setFocusedSub(s.id); selectSub(s.id); }}>
             {s.label}
           </button>
         ))}
@@ -565,7 +626,8 @@ export default function ProjectSummarySection({ job, analysisResult, onSubChange
           <SummaryOverviewTab jobUrl={jobUrl} cacheRoot={cacheRoot} scmId={scmId}
             trace={trace} traceBusy={traceBusy} reloadTrace={reloadTrace} scmVcast={scmVcast}
             prqa={prqa} codeMetrics={cm} srcBuilds={srcBuilds} srcBuildsError={srcBuildsError}
-            violationsDelta={latestViolationsDelta} prqaTrendError={prqaTrendError} />
+            violationsDelta={latestViolationsDelta} prqaTrendError={prqaTrendError}
+            onBusy={reportBusyOverview} />
         )}
       </div>
 
@@ -589,7 +651,7 @@ export default function ProjectSummarySection({ job, analysisResult, onSubChange
             srcBuilds={srcBuilds} srcBuildsError={srcBuildsError} allBuilds={allBuilds}
             baselineBuild={baselineBuild} diffTarget={diffTarget}
             onChangeBaseline={setBaselineBuild} onChangeTarget={setDiffTarget}
-            deltaByBuild={deltaByBuild} prqaTrendError={prqaTrendError}
+            deltaByBuild={deltaByBuild} prqaTrendError={prqaTrendError} onBusy={reportBusyBuild}
             backfill={backfill} backfillBusy={backfillBusy} startBackfill={startBackfill}
             unpinnedCount={unpinnedCount}
             pinSource={pinSource} setPinSource={setPinSource}
