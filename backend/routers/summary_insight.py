@@ -465,13 +465,63 @@ def _cross_module_counts_only(
     return out
 
 
+def _file_rule_deltas(
+    cur_details: Optional[Dict[str, Any]], base_details: Optional[Dict[str, Any]], file: str
+) -> List[Dict[str, Any]]:
+    """이 파일에서 구간 중 변한 규칙들 — 카드가 조회한 단일 규칙 옆에 붙일 전체 맥락.
+
+    RCR을 이미 로드한 자리에서 계산하므로 추가 IO 0. 한쪽이라도 없으면 빈 목록(0 위장 금지 —
+    호출측이 counts_reason으로 결측을 이미 고지한다).
+    """
+    from backend.services.prqa_rule_trend import file_rule_counts
+
+    if not cur_details or not base_details:
+        return []
+    cur = (file_rule_counts(cur_details).get(file) or {})
+    base = (file_rule_counts(base_details).get(file) or {})
+    out: List[Dict[str, Any]] = []
+    for rule in cur.keys() | base.keys():
+        c, b = int(cur.get(rule, 0)), int(base.get(rule, 0))
+        if c != b:
+            out.append({"rule": rule, "base": b, "cur": c, "delta": c - b})
+    out.sort(key=lambda r: (-r["delta"], r["rule"]))
+    return out
+
+
+def _function_attribution(
+    *, from_meta: Dict[str, Any], to_meta: Dict[str, Any], file: str
+) -> Dict[str, Any]:
+    """구간 내 이 파일의 **함수 단위** 변화(HMR = HIS Metrics Report 기반).
+
+    RCR이 파일 단위라 규칙의 함수 귀속은 원리적으로 불가하지만, 같은 빌드 산출물의 HMR은
+    함수 단위다 — 어떤 함수가 새로 생겼고 어떤 함수의 복잡도가 어떻게 변했는지는 **실측**
+    으로 답할 수 있다. 서비스가 note로 이 경계(관측≠규칙 귀속)를 함께 반환한다.
+    실패는 전부 available:false + reason (빈 목록을 '변화 없음'으로 위장하지 않는다).
+    """
+    from backend.services.his_metric_delta import load_pair_function_delta
+
+    try:
+        return load_pair_function_delta(
+            from_build_root=Path(str(from_meta.get("build_root") or "")),
+            from_reports_dir=Path(str(from_meta.get("reports_dir") or "")),
+            to_build_root=Path(str(to_meta.get("build_root") or "")),
+            to_reports_dir=Path(str(to_meta.get("reports_dir") or "")),
+            file=file,
+        )
+    except Exception as exc:  # noqa: BLE001 — 부가 정보라 본 응답을 깨뜨리면 안 된다
+        _logger.debug("function attribution failed (%s): %s", file, exc)
+        return {"available": False, "reason": "attribution_failed"}
+
+
 @router.post("/api/summary/rule-unresolved-evidence")
 def summary_rule_unresolved_evidence(req: dict) -> Dict[str, Any]:
     """미해소 규칙 × 파일의 구간 증거(결정론, LLM 0회) — '변경에도 위반 유지' vs '무변경 잔존'.
 
-    라인 레벨 위반 데이터가 없어(RCR=파일×규칙 카운트가 최상세) 코드 수준 근거는 빌드
-    스냅샷 diff가 유일 경로다. '파일 무변경'은 실패가 아니라 그 자체로 유효 증거(위반이
-    잔존하는 파일이 구간 내 수정된 적 없음)라 available:true + file_changed:false로 반환한다.
+    규칙 위반의 **줄** 정보는 RCR에 없다(파일×규칙 카운트가 최상세). 그래서 코드 수준 근거는
+    두 축으로 낸다: ① 빌드 스냅샷 diff, ② **HMR 함수 단위 메트릭 delta**(attribution) —
+    ②는 어느 함수가 새로 생겼는지·복잡도가 어떻게 변했는지까지 실측으로 좁혀준다.
+    '파일 무변경'은 실패가 아니라 그 자체로 유효 증거(위반이 잔존하는 파일이 구간 내
+    수정된 적 없음)라 available:true + file_changed:false로 반환한다.
     """
     from backend.services.build_inventory import find_build_meta, list_cached_builds_meta
     from backend.services.prqa_delta import load_rcr_details_cached
@@ -503,6 +553,7 @@ def summary_rule_unresolved_evidence(req: dict) -> Dict[str, Any]:
     # (rule, file) 구간 카운트 — diff 증거와 독립(RCR 캐시 실패 시 counts만 결측 표기, 0 위장 금지).
     counts: Dict[str, Any] = {"from": None, "to": None}
     counts_reason: Optional[str] = None
+    details: Dict[str, Optional[Dict[str, Any]]] = {"from": None, "to": None}
     for label, meta in (("from", from_meta), ("to", to_meta)):
         loaded = load_rcr_details_cached(
             Path(str(meta.get("build_root") or "")), Path(str(meta.get("reports_dir") or ""))
@@ -510,6 +561,7 @@ def summary_rule_unresolved_evidence(req: dict) -> Dict[str, Any]:
         if loaded is None:
             counts_reason = "no_rcr"
             continue
+        details[label] = loaded["details"]
         counts[label] = int((file_rule_counts(loaded["details"]).get(file) or {}).get(rule, 0))
 
     evidence = collect_fix_evidence(
@@ -521,6 +573,10 @@ def summary_rule_unresolved_evidence(req: dict) -> Dict[str, Any]:
         "ok": True, "rule": rule, "file": file,
         "from_build": from_build, "to_build": to_build,
         "counts": counts, "note": UNRESOLVED_NOTE,
+        # 규칙의 줄 귀속은 RCR에 없다 → 함수 단위 실측(HMR)으로 좁혀 준다. 부가 정보라
+        # 실패해도 본 응답(diff·counts)은 그대로 나간다.
+        "attribution": _function_attribution(from_meta=from_meta, to_meta=to_meta, file=file),
+        "file_rule_deltas": _file_rule_deltas(details["to"], details["from"], file),
     }
     if counts_reason:
         base["counts_reason"] = counts_reason

@@ -23,7 +23,105 @@ const REASON_KO = {
   // 파일 귀속이 원리적으로 없는 항목(RCMA류) — '파일을 못 찾음'과 구분해야 사용자가
   // 스냅샷 누락으로 오독하지 않는다.
   cross_module_scope: '모듈 간 분석(RCMA) 집계입니다 — 특정 파일에 귀속되지 않아 파일 diff가 없습니다',
+  // 함수 귀속(HMR) 전용 사유 — RCR(위반)과 별개 산출물이라 없을 수 있다.
+  no_hmr: '두 빌드 중 HIS 메트릭 리포트(HMR)가 없는 빌드가 있습니다',
+  file_not_in_hmr: 'HIS 메트릭 리포트에 이 파일이 없습니다 (분석 대상 외일 수 있음)',
+  file_ambiguous_in_hmr: '같은 이름 파일이 여러 경로에 있어 함수를 특정할 수 없습니다',
+  attribution_failed: '함수 단위 메트릭을 읽지 못했습니다',
 };
+
+const VERDICT_COLOR = {
+  Fail: 'var(--color-danger)',
+  Conditional: 'var(--color-warning)',
+};
+
+const CHANGE_MARK = { added: '⊕', modified: '±', removed: '⊖' };
+const CHANGE_LABEL = { added: '신규', modified: '변경', removed: '삭제' };
+
+/** 메트릭 한 칸 — 'v(G) 3→7'. 신규 함수는 base가 없으므로 값만 표기(0 위장 금지). */
+function MetricChip({ m }) {
+  return (
+    <span style={{ ...xs, color: VERDICT_COLOR[m.verdict] || 'var(--text-muted)' }}>
+      {m.label} {m.base == null ? m.cur : `${m.base}→${m.cur}`}
+    </span>
+  );
+}
+
+/**
+ * 함수 단위 귀속 — 구간에 바뀐 함수 + HIS 메트릭 변화(HMR 실측).
+ *
+ * ⚠ 이건 '이 함수가 그 규칙을 위반했다'가 아니다 — RCR은 파일 단위라 규칙의 함수/줄 귀속
+ * 정보가 원리적으로 없다. 서버 note를 그대로 노출해 그 경계를 매번 명시한다.
+ * 메트릭 값과 밴드 판정(Pass/Conditional/Fail)만 함수 단위 실측이다.
+ */
+export function FunctionAttribution({ attribution, ruleDeltas }) {
+  if (!attribution) return null;
+  if (attribution.available === false) {
+    return (
+      <div style={{ ...xs, color: 'var(--text-muted)' }}>
+        함수 단위 귀속: {REASON_KO[attribution.reason] || `조회 불가 (${attribution.reason})`}
+      </div>
+    );
+  }
+  const fns = attribution.functions || [];
+  const t = attribution.totals || {};
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+      {(ruleDeltas || []).length > 0 && (
+        <div style={xs}>
+          이 파일에서 변한 규칙:{' '}
+          {ruleDeltas.map((r, i) => (
+            <span key={r.rule}>
+              {i > 0 && ' · '}
+              <b>{r.rule}</b>
+              <span style={{ color: r.delta > 0 ? 'var(--color-danger)' : 'var(--color-success)' }}>
+                {' '}{r.delta > 0 ? `+${r.delta}` : r.delta}
+              </span>
+            </span>
+          ))}
+        </div>
+      )}
+      <div style={{ ...xs, color: 'var(--text-muted)' }}>
+        이 구간에 바뀐 함수 — 신규 {t.added ?? 0} · 변경 {t.modified ?? 0} · 삭제 {t.removed ?? 0}
+        {(attribution.omitted || 0) > 0 && ` (표시 상한으로 ${attribution.omitted}개 생략)`}
+      </div>
+      {/* 한쪽 HMR에만 파일이 있으면 그쪽 함수가 전부 신규/삭제로 보인다 — 사실로 읽히면 안 된다. */}
+      {attribution.partial && (
+        <div style={{ ...xs, color: 'var(--color-warning)' }}>
+          ⚠ {attribution.partial === 'base_missing' ? '이전' : '대상'} 빌드의 HIS 메트릭 리포트에 이 파일이 없어
+          {attribution.partial === 'base_missing' ? ' 모든 함수가 신규로' : ' 모든 함수가 삭제로'} 보입니다 —
+          파일 신설/삭제인지 그 빌드의 분석 대상에서 빠진 것인지는 구분되지 않습니다.
+        </div>
+      )}
+      {fns.length === 0 ? (
+        <div style={{ ...xs, color: 'var(--text-muted)' }}>
+          이 파일의 함수 메트릭에는 변화가 없습니다 — 변경이 메트릭에 잡히지 않는 종류(주석·상수·선언 등)일 수 있습니다.
+        </div>
+      ) : (
+        <ul style={{ margin: '2px 0 0 0', padding: 0, listStyle: 'none' }}>
+          {fns.map((f) => (
+            <li key={f.function} style={{ marginBottom: 2 }}>
+              <div style={{ ...xs, fontFamily: 'monospace', wordBreak: 'break-all' }}>
+                <span title={CHANGE_LABEL[f.change]}>{CHANGE_MARK[f.change] || '·'}</span> {f.function}
+              </div>
+              {(f.metrics || []).length > 0 && (
+                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', paddingLeft: 14 }}>
+                  {f.metrics.map((m) => <MetricChip key={m.metric} m={m} />)}
+                </div>
+              )}
+              {(f.band_crossings || []).map((c) => (
+                <div key={c.metric} style={{ ...xs, paddingLeft: 14, color: VERDICT_COLOR[c.to_verdict] || 'var(--text-muted)' }}>
+                  ⚠ {c.name} {c.base}→{c.cur} — 판정 {c.from_verdict}({c.from_band}) → <b>{c.to_verdict}({c.to_band})</b>
+                </div>
+              ))}
+            </li>
+          ))}
+        </ul>
+      )}
+      {attribution.note && <div style={{ ...xs, color: 'var(--text-muted)' }}>⚖ {attribution.note}</div>}
+    </div>
+  );
+}
 
 /**
  * 구간 변경 파일 — 파일 귀속이 없는 규칙(RCMA류)의 유일한 코드 증거.
@@ -204,6 +302,8 @@ export function UnresolvedEvidenceCard({
                 </span>
               )}
             </div>
+            {/* 함수 단위 귀속을 diff보다 먼저 — diff는 원문이고 이건 '어디를 볼지'다. */}
+            <FunctionAttribution attribution={data.attribution} ruleDeltas={data.file_rule_deltas} />
             {data.diff?.text && (
               <details>
                 <summary style={{ ...xs, cursor: 'pointer' }}>

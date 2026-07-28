@@ -20,7 +20,25 @@ def _rcr(foo_r1: int) -> str:
 </body></html>"""
 
 
-def _snap(tmp_path: Path, n: int, files: dict, *, rcr_r1: int | None = None) -> Path:
+_HMR_COLS = "CALLS (STCAL)|v(G) (STCYC)|LEVEL (STMIF)|CALLING (STM29)|STMT (STST3)"
+
+
+def _hmr(fns: dict) -> str:
+    """{함수명: [CALLS, V_G, LEVEL, CALLING, STMT]} → APP/foo.c 소속 최소 HMR."""
+    head = "".join(f"<td>{h}</td>" for h in _HMR_COLS.split("|"))
+    body = "<h3>File: C:/jenkins/workspace/P/APP/foo.c</h3>"
+    for fn, vals in fns.items():
+        cells = "".join(f"<td>{v}</td>" for v in vals)
+        body += (
+            f"<h4>Function: {fn}</h4><table>"
+            f"<tr><td>Metric</td>{head}</tr><tr><td>Values</td>{cells}</tr></table>"
+        )
+    return f"<html><head><title>Helix QAC HIS Metrics Report</title></head><body>{body}</body></html>"
+
+
+def _snap(
+    tmp_path: Path, n: int, files: dict, *, rcr_r1: int | None = None, hmr: dict | None = None
+) -> Path:
     root = tmp_path / f"build_{n}"
     (root / "report").mkdir(parents=True, exist_ok=True)
     for rel, text in files.items():
@@ -29,6 +47,8 @@ def _snap(tmp_path: Path, n: int, files: dict, *, rcr_r1: int | None = None) -> 
         p.write_text(text, encoding="utf-8")
     if rcr_r1 is not None:
         (root / f"X_RCR_0101202{n % 10}.html").write_text(_rcr(rcr_r1), encoding="utf-8")
+    if hmr is not None:
+        (root / f"X_HMR_0101202{n % 10}.html").write_text(_hmr(hmr), encoding="utf-8")
     return root
 
 
@@ -99,3 +119,63 @@ def test_ambiguous_basename_honest(tmp_path, monkeypatch):
     si = _wire(monkeypatch, a, b)
     r = si.summary_rule_unresolved_evidence({**_BODY, "file": "config.c"})
     assert r["available"] is False and r["reason"] == "file_ambiguous_in_snapshot"
+
+
+# ── 함수 단위 귀속(HMR) ────────────────────────────────────────────────────────
+# RCR은 파일×규칙이 최상세라 규칙의 '줄'을 못 준다. 같은 빌드의 HMR은 함수 단위라
+# '어느 함수가 새로 생겼고 무엇이 복잡해졌는가'까지는 실측으로 좁힐 수 있다.
+
+def test_attribution_lists_changed_functions(tmp_path, monkeypatch):
+    a = _snap(tmp_path, 122, {"APP/foo.c": "a\n"}, rcr_r1=0,
+              hmr={"keep()": [3, 3, 3, 0, 18]})
+    b = _snap(tmp_path, 125, {"APP/foo.c": "b\n"}, rcr_r1=4,
+              hmr={"keep()": [4, 7, 4, 0, 26], "fresh()": [0, 2, 1, 1, 12]})
+    si = _wire(monkeypatch, a, b)
+    r = si.summary_rule_unresolved_evidence(dict(_BODY))
+    attr = r["attribution"]
+    assert attr["available"] is True
+    assert attr["totals"] == {"added": 1, "removed": 0, "modified": 1}
+    by_name = {f["function"]: f for f in attr["functions"]}
+    assert by_name["fresh()"]["change"] == "added"
+    # 신규 함수의 base는 None — 0으로 채우면 '0에서 늘었다'는 허위 변화가 된다.
+    assert all(m["base"] is None for m in by_name["fresh()"]["metrics"])
+    assert {m["metric"]: (m["base"], m["cur"]) for m in by_name["keep()"]["metrics"]}["V_G"] == ("3", "7")
+    # 관측≠규칙 귀속 경계를 note로 상시 노출.
+    assert "판정이 아닙니다" in attr["note"]
+
+
+def test_attribution_band_crossing_surfaced(tmp_path, monkeypatch):
+    """v(G) 10→11 은 회사 ST201 밴드에서 Pass→Conditional — 값 변화와 구분해 보고한다."""
+    a = _snap(tmp_path, 122, {"APP/foo.c": "a\n"}, hmr={"grow()": [1, 10, 1, 0, 5]})
+    b = _snap(tmp_path, 125, {"APP/foo.c": "b\n"}, hmr={"grow()": [1, 11, 1, 0, 5]})
+    si = _wire(monkeypatch, a, b)
+    cross = si.summary_rule_unresolved_evidence(dict(_BODY))["attribution"]["functions"][0]["band_crossings"]
+    assert len(cross) == 1
+    assert (cross[0]["from_verdict"], cross[0]["to_verdict"]) == ("Pass", "Conditional")
+
+
+def test_attribution_absent_hmr_is_honest_and_does_not_break_evidence(tmp_path, monkeypatch):
+    """HMR이 없어도 diff·counts 본 응답은 그대로 — 부가 정보 실패가 카드를 죽이면 안 된다."""
+    a = _snap(tmp_path, 122, {"APP/foo.c": "a\n"}, rcr_r1=6)
+    b = _snap(tmp_path, 125, {"APP/foo.c": "b\n"}, rcr_r1=6)
+    si = _wire(monkeypatch, a, b)
+    r = si.summary_rule_unresolved_evidence(dict(_BODY))
+    assert r["available"] is True and r["diff"]["text"]
+    assert r["attribution"] == {"available": False, "reason": "no_hmr"}
+
+
+def test_file_rule_deltas_shows_all_changed_rules_for_the_file(tmp_path, monkeypatch):
+    """카드는 규칙 하나를 보지만, 같은 파일에서 함께 변한 규칙을 알아야 원인을 좁힌다."""
+    a = _snap(tmp_path, 122, {"APP/foo.c": "a\n"}, rcr_r1=0)
+    b = _snap(tmp_path, 125, {"APP/foo.c": "b\n"}, rcr_r1=4)
+    si = _wire(monkeypatch, a, b)
+    r = si.summary_rule_unresolved_evidence(dict(_BODY))
+    assert r["file_rule_deltas"] == [{"rule": "Rule-1.1", "base": 0, "cur": 4, "delta": 4}]
+
+
+def test_file_rule_deltas_empty_when_rcr_missing(tmp_path, monkeypatch):
+    """RCR 결측은 counts_reason으로 이미 고지된다 — 여기서 0 delta를 지어내지 않는다."""
+    a = _snap(tmp_path, 122, {"APP/foo.c": "a\n"})
+    b = _snap(tmp_path, 125, {"APP/foo.c": "b\n"})
+    si = _wire(monkeypatch, a, b)
+    assert si.summary_rule_unresolved_evidence(dict(_BODY))["file_rule_deltas"] == []
