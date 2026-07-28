@@ -225,6 +225,19 @@ describe('ArchitectureGraphPanel — Q2 신규 다이어그램', () => {
     expect(screen.queryByRole('button', { name: '함수 쌍 보기' })).toBeNull();
   });
 
+  it('그림 6종이 각각 제목 있는 프레임으로 분리된다', async () => {
+    // ⚠ 예전엔 다이어그램·히트맵·DSM·산포도가 전부 테두리 없는 맨 div 라 2열에서 뭉개졌다.
+    render(<ArchitectureGraphPanel {...PROPS} />);
+    await screen.findByRole('img', { name: '모듈 의존 다이어그램' });
+    for (const t of ['모듈 의존 다이어그램', '모듈 결합 히트맵', '의존 구조 매트릭스(DSM)',
+      '핫스팟 산포', '순환 의존', '구조 개선 후보']) {
+      expect(screen.getByText(t)).toBeInTheDocument();
+    }
+    // 컨트롤은 제목 줄 오른쪽으로 통일(예전엔 모듈 다이어그램만 제목 옆에 있었다)
+    expect(screen.getByRole('button', { name: 'SVG' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'PNG' })).toBeInTheDocument();
+  });
+
   it('구조 개선 후보를 목록이 아니라 표로 낸다', async () => {
     // 종류/대상/근거 세 축을 한 줄 문장으로 이어 붙이면 눈이 축을 못 잡는다.
     render(<ArchitectureGraphPanel {...PROPS} />);

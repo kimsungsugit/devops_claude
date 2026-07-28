@@ -37,6 +37,45 @@ const SHOW = {
 
 const FILE_DRILL_LIMIT = 12;
 
+/**
+ * 그림 한 덩어리의 공통 틀 — **제목 / 설명 / 컨트롤 / 본문 / 각주** 다섯 자리를 고정한다.
+ *
+ * 예전엔 다이어그램·히트맵·DSM·산포도가 전부 **테두리 없는 맨 div** 라 2열 그리드에서
+ * 서로 뭉개졌다. 컨트롤 위치도 제각각(모듈 다이어그램만 제목 옆에 저장 버튼)이고 각주는
+ * 본문 뒤에 아무렇게나 붙어, 어디까지가 한 그림인지 눈이 못 잡았다.
+ */
+function Figure({ title, hint, actions, note, children }) {
+  return (
+    <section style={{
+      border: '1px solid var(--border)', borderRadius: 'var(--radius-md)',
+      padding: 'var(--sp-2)', minWidth: 0,
+    }}>
+      <div style={{ display: 'flex', alignItems: 'baseline', flexWrap: 'wrap', gap: 'var(--sp-2)', marginBottom: 'var(--sp-2)' }}>
+        <span style={{ ...T.figTitle, marginBottom: 0 }}>{title}</span>
+        {hint && <span style={T.note}>{hint}</span>}
+        {actions && <span style={{ marginLeft: 'auto', display: 'flex', gap: 6 }}>{actions}</span>}
+      </div>
+      <div style={{ minWidth: 0 }}>{children}</div>
+      {note && <div style={{ ...T.note, marginTop: 'var(--sp-1)' }}>{note}</div>}
+    </section>
+  );
+}
+
+/** 색 농도 범례 — 진하기가 무엇을 뜻하는지 없으면 히트맵은 그냥 얼룩이다. */
+function ScaleLegend({ max, unit = '회' }) {
+  if (!max) return null;
+  return (
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+      <span style={T.note}>0</span>
+      {[0.15, 0.4, 0.65, 0.9].map((a) => (
+        <span key={a} style={{ width: 14, height: 10, background: `rgba(37, 99, 235, ${a})`, border: '1px solid var(--border)' }} />
+      ))}
+      <span style={T.note}>{max}{unit}</span>
+    </span>
+  );
+}
+
+
 /** 선택 모듈 내부를 파일 단위로 펼친다(v5 file_graph). 모듈은 디렉터리 2세그먼트 프록시라
  *  파일 수십 개가 한 덩어리로 접히는데, 여기서 한 단계 더 내려간다. */
 function ModuleFileDrill({ module: mod, fileGraph }) {
@@ -153,12 +192,14 @@ function ModuleDiagram({ moduleGraph, cycles, fileGraph }) {
     ? edges.filter((e) => e.from === selected || e.to === selected)
     : [];
   return (
-    <div>
-      <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 4 }}>
-        <span style={T.figTitle}>모듈 의존 다이어그램 (호출 수 라벨 · 순환은 빨강)</span>
-        <button type="button" style={btn} onClick={() => exportSvg(svgRef.current, 'architecture-modules.svg')}>SVG 저장</button>
-        <button type="button" style={btn} onClick={() => exportPng(svgRef.current, 'architecture-modules.png')}>PNG 저장</button>
-      </div>
+    <Figure
+      title="모듈 의존 다이어그램"
+      hint="호출 수 라벨 · 순환은 빨강"
+      actions={<>
+        <button type="button" style={btn} onClick={() => exportSvg(svgRef.current, 'architecture-modules.svg')}>SVG</button>
+        <button type="button" style={btn} onClick={() => exportPng(svgRef.current, 'architecture-modules.png')}>PNG</button>
+      </>}
+    >
       <div style={{ overflowX: 'auto' }}>
         <svg ref={svgRef} viewBox={`0 0 ${L.width} ${L.height}`} width={L.width} height={L.height}
           role="img" aria-label="모듈 의존 다이어그램" style={{ maxWidth: '100%', height: 'auto' }}>
@@ -236,7 +277,7 @@ function ModuleDiagram({ moduleGraph, cycles, fileGraph }) {
           <ModuleFileDrill module={selected} fileGraph={fileGraph} />
         </div>
       )}
-    </div>
+    </Figure>
   );
 }
 
@@ -354,34 +395,44 @@ function DsmMatrix({ fileGraph }) {
   }, [fileGraph, topo]);
 
   if (!view) {
-    return <div style={{ ...xs, color: 'var(--text-muted)' }}>파일 간 호출이 관측되지 않아 DSM을 그릴 수 없습니다.</div>;
+    return (
+      <Figure title="의존 구조 매트릭스(DSM)">
+        <div style={T.note}>파일 간 호출이 관측되지 않아 DSM을 그릴 수 없습니다.</div>
+      </Figure>
+    );
   }
-  const base = { ...xs, padding: '1px 3px', border: '1px solid var(--border)', textAlign: 'center', fontSize: 9 };
+  // ⚠ 셀을 정사각으로 고정한다 — 값 자릿수에 따라 열 폭이 달라지면 격자가 어긋나 매트릭스로
+  //   안 읽힌다(DSM 은 '격자에서 어느 쪽이 위/아래냐'가 정보의 전부다).
+  const base = {
+    ...xs, padding: 0, border: '1px solid var(--border)', textAlign: 'center', fontSize: 9,
+    width: 20, minWidth: 20, height: 20, boxSizing: 'border-box',
+  };
   const short = (f) => String(f).split('/').pop().replace(/\.[ch]$/, '');
   const pos = new Map(view.shown.map((f, i) => [f, i]));
   return (
-    <div>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 4 }}>
-        <span style={{ ...T.figTitle, marginBottom: 0 }}>
-          의존 구조 매트릭스(DSM) — 행→열 호출
-          {topo && (
-            <span> · 위상순 정렬이라 <b style={{ color: 'var(--color-danger)' }}>붉은 셀이 순환</b>
-              {/* 절단되면 표시분만 세므로 전체 대비 몇 건인지 함께 준다(침묵 과소 표기 금지) */}
-              {view.upperAll > view.upper
-                ? ` — 표시 ${view.upper}건 / 전체 ${view.upperAll}건`
-                : ` ${view.upper}건`}
-            </span>
-          )}
-        </span>
+    <Figure
+      title="의존 구조 매트릭스(DSM)"
+      hint={topo
+        ? <>행 → 열 호출 · 위상순이라 <b style={{ color: 'var(--color-danger)' }}>붉은 셀이 순환</b>{view.upperAll > view.upper
+            ? ` — 표시 ${view.upper}건 / 전체 ${view.upperAll}건`
+            : ` ${view.upper}건`}</>
+        : '행 → 열 호출 · 이름순(순환 강조 없음)'}
+      actions={<>
+        <ScaleLegend max={view.max} />
         <button type="button" style={btn} onClick={() => setTopo(!topo)} aria-pressed={topo}>
           {topo ? '위상순' : '이름순'}
         </button>
-      </div>
+      </>}
+      note={<>
+        열 번호는 왼쪽 행 순서와 같습니다.
+        {view.omitted > 0 && ` · 표시 상한 ${DSM_MAX}개 — ${view.omitted}개 파일 생략`}
+      </>}
+    >
       <div style={{ overflowX: 'auto' }}>
-        <table style={{ borderCollapse: 'collapse' }}>
+        <table style={{ borderCollapse: 'collapse', tableLayout: 'fixed' }}>
           <thead>
             <tr>
-              <th style={base} />
+              <th style={{ ...base, width: 'auto', minWidth: 110 }} />
               {view.shown.map((c, i) => <th key={c} style={base} title={c}>{i + 1}</th>)}
             </tr>
           </thead>
@@ -409,13 +460,11 @@ function DsmMatrix({ fileGraph }) {
           </tbody>
         </table>
       </div>
-      {view.omitted > 0 && (
-        <div style={{ ...xs, color: 'var(--text-muted)' }}>* 표시 상한 {DSM_MAX}개 — {view.omitted}개 파일 생략</div>
-      )}
+      {/* 절단 고지는 Figure 의 note 로 올라갔다 — 구 캐시 폴백만 여기 남긴다 */}
       {!(fileGraph.topo_order || []).length && (
-        <div style={{ ...xs, color: 'var(--text-muted)' }}>* 위상 순서가 이 응답에 없어 이름순으로 표시(구 캐시)</div>
+        <div style={T.note}>* 위상 순서가 이 응답에 없어 이름순으로 표시(구 캐시)</div>
       )}
-    </div>
+    </Figure>
   );
 }
 
@@ -491,23 +540,33 @@ function CouplingHeatmap({ moduleGraph }) {
     if (e.calls > max) max = e.calls;
   });
   if (!names.length) return null;
-  const short = (m) => (m.length > 14 ? `${m.slice(0, 13)}…` : m);
-  const tdBase = { ...xs, padding: '2px 6px', border: '1px solid var(--border)', textAlign: 'center' };
+  // 모듈명은 디렉터리 경로다 — 마지막 세그먼트만 쓰고 전체는 title 로. 예전의 13자 절단은
+  // `Sources/LIN/LIN_…` 처럼 **앞부분만 남아 서로 구분이 안 됐다**.
+  const short = (m) => String(m).split('/').pop();
+  // ⚠ 셀 폭을 고정한다 — padding 만 주면 값(1자리/3자리)에 따라 열 폭이 달라져 격자가 어긋난다.
+  const tdBase = {
+    ...xs, padding: 0, border: '1px solid var(--border)', textAlign: 'center',
+    width: 34, minWidth: 34, height: 22, boxSizing: 'border-box',
+  };
   return (
-    <div>
-      <div style={T.figTitle}>모듈 결합 히트맵 (행→열 호출 수)</div>
+    <Figure
+      title="모듈 결합 히트맵"
+      hint="행 → 열 호출 수"
+      actions={<ScaleLegend max={max} />}
+      note={(moduleGraph?.nodes || []).length > 20 ? '* 함수 수 상위 20개 모듈만 표시' : null}
+    >
       <div style={{ overflowX: 'auto' }}>
-        <table style={{ borderCollapse: 'collapse' }}>
+        <table style={{ borderCollapse: 'collapse', tableLayout: 'fixed' }}>
           <thead>
             <tr>
-              <th style={tdBase} />
+              <th style={{ ...tdBase, width: 'auto', minWidth: 90 }} />
               {names.map((c) => <th key={c} style={tdBase} title={c}>{short(c)}</th>)}
             </tr>
           </thead>
           <tbody>
             {names.map((r) => (
               <tr key={r}>
-                <th style={{ ...tdBase, textAlign: 'left' }} title={r}>{short(r)}</th>
+                <th style={{ ...tdBase, textAlign: 'left', width: 'auto', minWidth: 90, padding: '0 6px', whiteSpace: 'nowrap' }} title={r}>{short(r)}</th>
                 {names.map((c) => {
                   const v = r === c ? null : cell.get(`${r}|${c}`);
                   const alpha = v && max ? (0.15 + 0.75 * (v / max)).toFixed(2) : 0;
@@ -523,10 +582,7 @@ function CouplingHeatmap({ moduleGraph }) {
           </tbody>
         </table>
       </div>
-      {(moduleGraph?.nodes || []).length > 20 && (
-        <div style={{ ...xs, color: 'var(--text-muted)' }}>* 함수 수 상위 20개 모듈만 표시</div>
-      )}
-    </div>
+    </Figure>
   );
 }
 
@@ -542,13 +598,15 @@ function HotspotScatter({ hotspots }) {
   const sx = (v) => P + (v / maxX) * (W - P - 10);
   const sy = (v) => H - P - (v / maxY) * (H - P - 12);
   return (
-    <div>
-      <div style={T.figTitle}>
-        핫스팟 산포 — X=fan-in · Y=복잡도
-        <span style={{ ...T.note, fontWeight: 400 }}> (●측정 ccn / ○줄수 추정 — 축 척도 혼합 주의)</span>
-      </div>
+    <Figure
+      title="핫스팟 산포"
+      hint="X=fan-in · Y=복잡도 (●측정 ccn / ○줄수 추정 — 축 척도 혼합 주의)"
+    >
+      {/* ⚠ maxWidth 760 을 두면 전폭 행에서 오른쪽에 죽은 여백이 남는다.
+          viewBox 가 있으니 폭에 맞춰 비율대로 커지게 둔다. */}
       <svg viewBox={`0 0 ${W} ${H}`} role="img" aria-label="핫스팟 산포도"
-        style={{ width: '100%', maxWidth: 760, height: 'auto' }}>
+        preserveAspectRatio="xMidYMid meet"
+        style={{ width: '100%', height: 'auto', display: 'block' }}>
         <line x1={P} y1={H - P} x2={W - 6} y2={H - P} stroke="var(--border)" />
         <line x1={P} y1={H - P} x2={P} y2={8} stroke="var(--border)" />
         <text x={W - 8} y={H - P + 14} fontSize={10} textAnchor="end" style={{ fill: 'var(--text-muted)' }}>fan-in {maxX}</text>
@@ -568,7 +626,7 @@ function HotspotScatter({ hotspots }) {
           </g>
         ))}
       </svg>
-    </div>
+    </Figure>
   );
 }
 
@@ -587,10 +645,11 @@ function CycleList({ cycles }) {
   const fileSccs = cycles?.file_sccs || [];
   const mutual = cycles?.mutual_file_pairs || [];
   return (
-    <div>
-      <div style={T.figTitle}>순환 의존 (파일 간 호출 기준)</div>
+    <Figure title="순환 의존" hint="파일 간 호출 기준"
+      note={(fileSccs.length > 0 || mutual.length > 0)
+        ? '* 파일명만 표시 — 전체 경로는 각 이름에 마우스를 올리면 나옵니다' : null}>
       {fileSccs.length === 0 && mutual.length === 0 && (
-        <div style={T.note}>순환 의존 관측 없음 (파일 간 호출 기준)</div>
+        <div style={T.note}>순환 의존 관측 없음</div>
       )}
 
       {fileSccs.length > 0 && (
@@ -654,10 +713,7 @@ function CycleList({ cycles }) {
         </>
       )}
 
-      {(fileSccs.length > 0 || mutual.length > 0) && (
-        <div style={T.note}>* 파일명만 표시 — 전체 경로는 각 이름에 마우스를 올리면 나옵니다</div>
-      )}
-    </div>
+    </Figure>
   );
 }
 
@@ -749,12 +805,11 @@ export default function ArchitectureGraphPanel({ jobUrl, cacheRoot, defaultOpen 
           {SHOW.globalFlow && <GlobalFlow globalCoupling={data.global_coupling} />}
           <div style={{ gridColumn: '1 / -1' }}><HotspotScatter hotspots={data.hotspots} /></div>
           <CycleList cycles={data.cycles} />
-          <div>
-            {/* 목록이 아니라 표다 — 종류/대상/근거 세 축이 있는데 한 줄 문장으로 이어 붙이면
-                눈이 축을 못 잡는다(같은 데이터를 다른 패널은 이미 표로 낸다). */}
-            <div style={T.figTitle}>구조 개선 후보 (결정론 관측)</div>
+          {/* 목록이 아니라 표다 — 종류/대상/근거 세 축이 있는데 한 줄 문장으로 이어 붙이면
+              눈이 축을 못 잡는다(같은 데이터를 다른 패널은 이미 표로 낸다). */}
+          <Figure title="구조 개선 후보" hint="결정론 관측">
             {(data.refactor_candidates || []).length === 0 ? (
-              <div style={{ ...xs, color: 'var(--text-muted)' }}>임계를 넘는 후보 관측 없음</div>
+              <div style={T.note}>임계를 넘는 후보 관측 없음</div>
             ) : (
               <div style={SCROLL}>
                 <table style={TABLE}>
@@ -774,7 +829,7 @@ export default function ArchitectureGraphPanel({ jobUrl, cacheRoot, defaultOpen 
                 </table>
               </div>
             )}
-          </div>
+          </Figure>
           <div style={{ gridColumn: '1 / -1', ...xs, color: 'var(--text-muted)' }}>
             * 관계=함수 호출 기반(include 미분석) · 모듈=디렉터리 프록시 · 파서 {data.snapshot?.parser_engine || '—'}
           </div>
