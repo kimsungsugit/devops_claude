@@ -3,7 +3,7 @@
  * 핵심: AI 없이도 후보는 보여야 하고, 목표 구조 미생성 사유를 삼키지 않아야 한다.
  */
 import React from 'react';
-import { render, screen } from '@testing-library/react';
+import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
@@ -77,10 +77,15 @@ describe('ArchitectureImprovementPanel', () => {
       },
     };
     await user.click(screen.getByRole('button', { name: /목표 구조 생성/ }));
-    expect(await screen.findByText('현재 (As-Is)')).toBeInTheDocument();
-    expect(screen.getByText('제안 (To-Be)')).toBeInTheDocument();
-    expect(screen.getByText('Diag_New')).toBeInTheDocument();
-    expect(screen.getByText(/신설/)).toBeInTheDocument();
+    // 병렬 두 표 → **diff 한 표**. 같은 값을 두 번 그리지 않는다.
+    expect(await screen.findByText(/모듈 \(As-Is → To-Be 차이\)/)).toBeInTheDocument();
+    const nodeTable = screen.getByRole('columnheader', { name: '역할(제안)' }).closest('table');
+    // 신설 모듈은 현재 파일·함수가 없다 → 0이 아니라 '—'
+    const newRow = within(nodeTable).getByText('Diag_New').closest('tr');
+    expect(within(newRow).getByText('신설')).toBeInTheDocument();
+    expect(within(newRow).getAllByText('—').length).toBeGreaterThanOrEqual(2);
+    // 제거된 모듈은 상태로 표시(As-Is 에만 있던 것)
+    expect(within(nodeTable).getByText('APP')).toBeInTheDocument();
     expect(screen.getByText(/폐기한 제안 모듈 1개/)).toBeInTheDocument();
     expect(screen.getByText(/순환 2파일 · 최소 비용 간선 2회/)).toBeInTheDocument();
   });
@@ -101,9 +106,11 @@ describe('ArchitectureImprovementPanel', () => {
     };
     await user.click(screen.getByRole('button', { name: /목표 구조 생성/ }));
     expect(await screen.findByText(/1:1로 동일/)).toBeInTheDocument();
-    expect(screen.getByText(/역할 설명/)).toBeInTheDocument();
-    // '구성: 자기 자신'은 정보가 0이라 '동일'로 접는다
-    expect(screen.getByText('동일')).toBeInTheDocument();
+    // ⚠ 변경이 없으면 상태 열도, 의존 표도 그리지 않는다 — 같은 값을 두 번 볼 이유가 없다
+    expect(screen.getByText(/구조 동일 — AI가 붙인 역할 설명만/)).toBeInTheDocument();
+    expect(screen.queryByRole('columnheader', { name: '상태' })).toBeNull();
+    expect(screen.getByText(/제안이 의존 관계를 바꾸지 않았습니다/)).toBeInTheDocument();
+    expect(screen.queryByRole('columnheader', { name: 'from → to' })).toBeNull();
   });
 
   it('후보 0건 — 생성 버튼 없이 "임계 초과 없음"만 알린다', async () => {

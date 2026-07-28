@@ -7,9 +7,11 @@
  * ISO 감사 흔적: 푸터에 모델/생성 시각/캐시 여부. 마크다운 라이브러리 금지(pre-wrap).
  * X9: raw fetch 금지 — api/post 헬퍼만(api는 AbortSignal 전달용).
  */
-import { useEffect, useRef, useState } from 'react';
+import { Fragment, useEffect, useRef, useState } from 'react';
 import { api, post } from '../../api.js';
 import SummaryPanel from './SummaryPanel.jsx';
+import * as T from './summaryTable.js';
+import { TABLE, SCROLL } from './summaryTable.js';
 
 const SECTION_REASON_KO = {
   llm_unavailable: 'LLM 미설정 — 결정론 분석만 표시',
@@ -29,6 +31,46 @@ function Badge({ text, color }) {
   );
 }
 
+/**
+ * 아키텍처·테스트 조언 표 — 두 섹션의 레코드 형태가 같다(topic·confidence·finding·suggestion·
+ * basis·대상 심볼). 예전엔 카드마다 `발견: …` `제안: …` `근거: …` 라벨을 다시 찍어, 항목이
+ * 5개면 라벨만 15번 반복됐다. 열로 세우면 라벨이 헤더 한 줄로 접히고 값만 남는다.
+ */
+function AdviceTable({ items, topicKo, topicColor, symbolKey, symbolLabel }) {
+  return (
+    <div style={SCROLL}>
+      <table style={TABLE}>
+        <thead>
+          <tr>
+            <th style={T.th}>주제</th><th style={T.th}>확신도</th>
+            <th style={T.th}>발견</th><th style={T.th}>제안</th><th style={T.th}>근거</th>
+          </tr>
+        </thead>
+        <tbody>
+          {items.map((it, i) => (
+            <tr key={i}>
+              <td style={T.td}>
+                <Badge text={topicKo[it.topic] || it.topic} color={topicColor} />
+              </td>
+              <td style={T.td}>
+                <Badge text={it.confidence || 'low'} color={CONF_COLOR[it.confidence] || 'var(--text-muted)'} />
+              </td>
+              <td style={T.textTd(260)}>
+                {it.finding || <span style={{ color: 'var(--text-muted)' }}>—</span>}
+                {(it[symbolKey] || []).length > 0 && (
+                  <div style={T.note}>{symbolLabel}: {(it[symbolKey] || []).join(', ')}</div>
+                )}
+              </td>
+              <td style={T.textTd(260)}>{it.suggestion || <span style={{ color: 'var(--text-muted)' }}>—</span>}</td>
+              <td style={{ ...T.textTd(220), color: 'var(--text-muted)' }}>{it.basis || '—'}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 function FallbackNote({ section }) {
   if (section?.ai_enriched) return null;
   return (
@@ -42,7 +84,7 @@ function FallbackNote({ section }) {
 function RoleList({ title, items }) {
   return (
     <div style={{ flex: 1, minWidth: 240 }}>
-      <div style={{ ...xs, fontWeight: 700, marginBottom: 4 }}>{title}</div>
+      <div style={{ ...T.figTitle, fontWeight: 700 }}>{title}</div>
       {(items || []).map((it, i) => (
         <div key={i} style={{ ...xs, marginBottom: 6 }}>
           <b>{`${it.priority}. ${it.action}`}</b>
@@ -157,16 +199,32 @@ export default function SummaryAiInsightPanel({ jobUrl, cacheRoot, scmId, trace 
           {/* (a) 위반 룰 해설 */}
           {sections.rules && (
             <div>
-              <div style={{ ...xs, fontWeight: 700, marginBottom: 4 }}>위반 룰 해설 — 왜 위험한가</div>
+              <div style={{ ...T.figTitle, fontWeight: 700 }}>위반 룰 해설 — 왜 위험한가</div>
               <FallbackNote section={sections.rules} />
-              {(sections.rules.items || []).map((it) => (
-                <div key={it.rule} style={{ ...xs, borderLeft: '3px solid var(--color-warning)', padding: '4px 8px', marginBottom: 6 }}>
-                  <b>{it.rule}</b>{it.title ? ` — ${it.title}` : ''}
-                  {it.why_risky && <div>위험: {it.why_risky}</div>}
-                  {it.typical_cause && <div style={{ color: 'var(--text-muted)' }}>전형 원인: {it.typical_cause}</div>}
-                  {it.fix_guide && <div>수정: {it.fix_guide}</div>}
+              {(sections.rules.items || []).length > 0 && (
+                /* 규칙마다 같은 4필드가 반복된다 — `위험: …` `전형 원인: …` 을 줄마다 다시 쓰는
+                   대신 열로 세운다(라벨 반복이 사라져 값만 남는다). */
+                <div style={SCROLL}>
+                  <table style={TABLE}>
+                    <thead>
+                      <tr>
+                        <th style={T.th}>규칙</th><th style={T.th}>왜 위험한가</th>
+                        <th style={T.th}>전형 원인</th><th style={T.th}>수정 방향</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {(sections.rules.items || []).map((it) => (
+                        <tr key={it.rule}>
+                          <td style={{ ...T.nameTd(150), fontWeight: 600 }} title={it.title || it.rule}>{it.rule}</td>
+                          <td style={T.textTd(280)}>{it.why_risky || <span style={{ color: 'var(--text-muted)' }}>—</span>}</td>
+                          <td style={{ ...T.textTd(240), color: 'var(--text-muted)' }}>{it.typical_cause || '—'}</td>
+                          <td style={T.textTd(280)}>{it.fix_guide || <span style={{ color: 'var(--text-muted)' }}>—</span>}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
                 </div>
-              ))}
+              )}
               {sections.rules.ai_enriched === false && (det.top_rules || []).length > 0 && (
                 <div style={{ ...xs, color: 'var(--text-muted)' }}>
                   상위 위반: {(det.top_rules || []).slice(0, 5).map((r) => `${r.rule}(${r.count})`).join(' · ')}
@@ -178,27 +236,56 @@ export default function SummaryAiInsightPanel({ jobUrl, cacheRoot, scmId, trace 
           {/* (b) 개발자 실수 패턴 */}
           {sections.mistakes && (
             <div>
-              <div style={{ ...xs, fontWeight: 700, marginBottom: 4 }}>반복 실수 패턴 — 실제 코드 근거</div>
+              <div style={{ ...T.figTitle, fontWeight: 700 }}>반복 실수 패턴 — 실제 코드 근거</div>
               <FallbackNote section={sections.mistakes} />
-              {(sections.mistakes.items || []).map((it, i) => (
-                <div key={i} style={{ ...xs, borderLeft: '3px solid var(--color-info)', padding: '4px 8px', marginBottom: 8 }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-                    <b>{it.pattern}</b>
-                    <Badge text={`확신도 ${it.confidence || 'low'}`} color={CONF_COLOR[it.confidence] || 'var(--text-muted)'} />
-                    {(it.rules || []).map((r) => <Badge key={r} text={r} color="var(--color-warning)" />)}
-                  </div>
-                  {it.diagnosis && <div>진단: {it.diagnosis}</div>}
-                  {it.evidence_quote && (
-                    <pre style={{
-                      whiteSpace: 'pre-wrap', fontFamily: 'monospace', fontSize: 'var(--text-xs)',
-                      background: 'var(--bg-subtle)', border: '1px solid var(--border)',
-                      borderRadius: 'var(--radius-sm)', padding: '4px 8px', margin: '4px 0', overflowX: 'auto',
-                    }}>{it.evidence_quote}</pre>
-                  )}
-                  {it.improvement && <div>개선안: {it.improvement}</div>}
-                  {(it.files || []).length > 0 && <div style={{ color: 'var(--text-muted)' }}>파일: {(it.files || []).join(', ')}</div>}
+              {(sections.mistakes.items || []).length > 0 && (
+                /* 스캔은 열로, 코드 근거는 전폭 행으로. 근거를 접으면 "AI가 실제 코드를 봤는가"를
+                   확인하지 않게 되므로 숨기지 않는다(이 섹션의 신뢰성 자체가 그 인용이다). */
+                <div style={SCROLL}>
+                  <table style={TABLE}>
+                    <thead>
+                      <tr>
+                        <th style={T.th}>패턴</th><th style={T.th}>확신도</th><th style={T.th}>규칙</th>
+                        <th style={T.th}>진단</th><th style={T.th}>개선안</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {(sections.mistakes.items || []).map((it, i) => (
+                        <Fragment key={i}>
+                          <tr>
+                            <td style={{ ...T.nameTd(180), fontWeight: 600 }} title={it.pattern}>{it.pattern}</td>
+                            <td style={T.td}>
+                              <Badge text={it.confidence || 'low'} color={CONF_COLOR[it.confidence] || 'var(--text-muted)'} />
+                            </td>
+                            <td style={T.td}>
+                              {(it.rules || []).map((r) => <Badge key={r} text={r} color="var(--color-warning)" />)}
+                              {(it.rules || []).length === 0 && <span style={{ color: 'var(--text-muted)' }}>—</span>}
+                            </td>
+                            <td style={T.textTd(280)}>{it.diagnosis || <span style={{ color: 'var(--text-muted)' }}>—</span>}</td>
+                            <td style={T.textTd(280)}>{it.improvement || <span style={{ color: 'var(--text-muted)' }}>—</span>}</td>
+                          </tr>
+                          {(it.evidence_quote || (it.files || []).length > 0) && (
+                            <tr>
+                              <td colSpan={5} style={{ ...T.td, whiteSpace: 'normal', background: 'var(--bg-subtle)' }}>
+                                {(it.files || []).length > 0 && (
+                                  <div style={T.note}>파일: {(it.files || []).join(', ')}</div>
+                                )}
+                                {it.evidence_quote && (
+                                  <pre style={{
+                                    whiteSpace: 'pre-wrap', fontFamily: 'monospace', fontSize: 'var(--text-xs)',
+                                    background: 'var(--panel)', border: '1px solid var(--border)',
+                                    borderRadius: 'var(--radius-sm)', padding: '4px 8px', margin: '4px 0', overflowX: 'auto',
+                                  }}>{it.evidence_quote}</pre>
+                                )}
+                              </td>
+                            </tr>
+                          )}
+                        </Fragment>
+                      ))}
+                    </tbody>
+                  </table>
                 </div>
-              ))}
+              )}
               {sections.mistakes.ai_enriched === false && (
                 <div style={{ ...xs, color: 'var(--text-muted)' }}>AI 미사용 상태에서는 패턴 진단이 제공되지 않습니다 — 생성/재생성으로 시도하세요.</div>
               )}
@@ -208,20 +295,13 @@ export default function SummaryAiInsightPanel({ jobUrl, cacheRoot, scmId, trace 
           {/* (d) 아키텍처 조언 */}
           {sections.architecture && (
             <div>
-              <div style={{ ...xs, fontWeight: 700, marginBottom: 4 }}>아키텍처 조언 — 구조적 리스크와 개선 방향</div>
+              <div style={{ ...T.figTitle, fontWeight: 700 }}>아키텍처 조언 — 구조적 리스크와 개선 방향</div>
               <FallbackNote section={sections.architecture} />
-              {(sections.architecture.items || []).map((it, i) => (
-                <div key={i} style={{ ...xs, borderLeft: '3px solid var(--color-purple, var(--accent))', padding: '4px 8px', marginBottom: 6 }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-                    <Badge text={{ layering: '레이어링', coupling: '결합도', hotspot: '핫스팟', refactor_candidate: '리팩토링 후보', cycle: '순환 의존' }[it.topic] || it.topic} color="var(--color-purple, var(--accent))" />
-                    <Badge text={`확신도 ${it.confidence || 'low'}`} color={CONF_COLOR[it.confidence] || 'var(--text-muted)'} />
-                  </div>
-                  {it.finding && <div>발견: {it.finding}</div>}
-                  {it.suggestion && <div>제안: {it.suggestion}</div>}
-                  {it.basis && <div style={{ color: 'var(--text-muted)' }}>근거: {it.basis}</div>}
-                  {(it.functions || []).length > 0 && <div style={{ color: 'var(--text-muted)' }}>함수: {(it.functions || []).join(', ')}</div>}
-                </div>
-              ))}
+              {(sections.architecture.items || []).length > 0 && (
+                <AdviceTable items={sections.architecture.items}
+                  topicKo={{ layering: '레이어링', coupling: '결합도', hotspot: '핫스팟', refactor_candidate: '리팩토링 후보', cycle: '순환 의존' }}
+                  topicColor="var(--color-purple, var(--accent))" symbolKey="functions" symbolLabel="함수" />
+              )}
               {sections.architecture.ai_enriched === false && (
                 <div style={{ ...xs, color: 'var(--text-muted)' }}>
                   {det.architecture?.available === false
@@ -235,20 +315,13 @@ export default function SummaryAiInsightPanel({ jobUrl, cacheRoot, scmId, trace 
           {/* (e) 테스트 설계 조언 (v4) */}
           {sections.testing && (
             <div>
-              <div style={{ ...xs, fontWeight: 700, marginBottom: 4 }}>테스트 설계 조언 — 기법·설계-시험 갭</div>
+              <div style={{ ...T.figTitle, fontWeight: 700 }}>테스트 설계 조언 — 기법·설계-시험 갭</div>
               <FallbackNote section={sections.testing} />
-              {(sections.testing.items || []).map((it, i) => (
-                <div key={i} style={{ ...xs, borderLeft: '3px solid var(--color-info)', padding: '4px 8px', marginBottom: 6 }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-                    <Badge text={{ coverage_gap: '커버리지 갭', design_gap: '설계-시험 갭', technique: '기법', mcdc: 'MC/DC 측정' }[it.topic] || it.topic} color="var(--color-info)" />
-                    <Badge text={`확신도 ${it.confidence || 'low'}`} color={CONF_COLOR[it.confidence] || 'var(--text-muted)'} />
-                  </div>
-                  {it.finding && <div>발견: {it.finding}</div>}
-                  {it.suggestion && <div>제안: {it.suggestion}</div>}
-                  {it.basis && <div style={{ color: 'var(--text-muted)' }}>근거: {it.basis}</div>}
-                  {(it.symbols || []).length > 0 && <div style={{ color: 'var(--text-muted)' }}>대상: {(it.symbols || []).join(', ')}</div>}
-                </div>
-              ))}
+              {(sections.testing.items || []).length > 0 && (
+                <AdviceTable items={sections.testing.items}
+                  topicKo={{ coverage_gap: '커버리지 갭', design_gap: '설계-시험 갭', technique: '기법', mcdc: 'MC/DC 측정' }}
+                  topicColor="var(--color-info)" symbolKey="symbols" symbolLabel="대상" />
+              )}
               {sections.testing.ai_enriched === false && (
                 <div style={{ ...xs, color: 'var(--text-muted)' }}>
                   {det.testing?.available === false
@@ -262,7 +335,7 @@ export default function SummaryAiInsightPanel({ jobUrl, cacheRoot, scmId, trace 
           {/* (c) 역할별 권고 */}
           {sections.roles && (
             <div>
-              <div style={{ ...xs, fontWeight: 700, marginBottom: 4 }}>역할별 권고</div>
+              <div style={{ ...T.figTitle, fontWeight: 700 }}>역할별 권고</div>
               <FallbackNote section={sections.roles} />
               <div style={{ display: 'flex', gap: 'var(--sp-4)', flexWrap: 'wrap' }}>
                 <RoleList title="👩‍💻 개발자" items={sections.roles.developer} />

@@ -136,7 +136,7 @@ const IMPACT_KO = {
   sample_functions: '참조 함수', pointer_symbols: '포인터', ref_functions: '참조 함수',
 };
 
-const EDGE_LIMIT = 10;
+const EDGE_LIMIT = 12;
 
 /**
  * To-Be 가 As-Is 의 모듈 집합과 완전히 같은가(= 구조 변경 제안이 아님).
@@ -151,88 +151,144 @@ function structureUnchanged(asIs, toBe) {
   return b.every((m) => setA.has(m));
 }
 
-/**
- * 모듈 구조 — As-Is/To-Be를 **같은 표 형식**으로 그려 눈이 행 단위로 대조하게 한다.
- *
- * 예전엔 카드 목록이라 As-Is 는 `모듈 · 파일 N · 함수 M` 한 줄, To-Be 는 `모듈 — 역할` +
- * `구성: …` 두 줄이었고, 의존은 `A→B(52) · C→D(28) · …` 를 이어 붙인 한 문단이었다.
- * 두 열의 행이 안 맞아 무엇이 바뀌었는지 대조가 불가능했다.
- */
-function StructureList({ title, nodes, edges, isTarget }) {
-  const rows = nodes || [];
-  const deps = edges || [];
-  return (
-    <div style={{ flex: 1, minWidth: 260 }}>
-      <div style={{ ...T.figTitle, fontWeight: 700 }}>{title}</div>
-      {rows.length === 0 ? (
-        <div style={T.note}>표시할 모듈이 없습니다.</div>
-      ) : (
-        <div style={SCROLL}>
-          <table style={TABLE}>
-            <thead>
-              <tr>
-                <th style={T.th}>모듈</th>
-                {isTarget
-                  ? <><th style={T.th}>역할</th><th style={T.th}>구성</th></>
-                  : <><th style={T.numTh}>파일</th><th style={T.numTh}>함수</th></>}
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((n) => (
-                <tr key={n.module}>
-                  <td style={{ ...T.nameTd(180), fontWeight: 600 }} title={n.module}>
-                    {n.module}
-                    {n.is_new && <span style={{ color: 'var(--color-success)', fontWeight: 400 }}> 신설</span>}
-                  </td>
-                  {isTarget ? (
-                    <>
-                      <td style={T.textTd(220)}>{n.role || <span style={{ color: 'var(--text-muted)' }}>—</span>}</td>
-                      {/* 구성이 모듈명과 같으면 '구성: 자기 자신'을 반복하지 않는다(정보 0) */}
-                      <td style={T.textTd(200)}>
-                        {(n.members || []).length === 0 || (n.members.length === 1 && n.members[0] === n.module)
-                          ? <span style={{ color: 'var(--text-muted)' }}>동일</span>
-                          : n.members.join(', ')}
-                      </td>
-                    </>
-                  ) : (
-                    <>
-                      <td style={T.numTd}>{n.files}</td>
-                      <td style={T.numTd}>{n.functions}</td>
-                    </>
-                  )}
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
+/** 모듈/의존 diff 한 행. status = kept | added | removed */
+const STATUS_META = {
+  kept: { label: '유지', color: 'var(--text-muted)' },
+  added: { label: '신설', color: 'var(--color-success)' },
+  removed: { label: '제거', color: 'var(--color-danger)' },
+};
 
-      {deps.length > 0 && (
+/**
+ * As-Is ↔ To-Be **diff**. 예전엔 표 두 개를 나란히 그렸는데, 실측 To-Be 가 As-Is 와 1:1로
+ * 같아서 **모듈 8행 + 의존 10행이 통째로 두 번** 그려졌다(같은 값 36행). 사용자가 대조할 게
+ * 없는데 눈으로 훑어야 했다.
+ *
+ * → 합집합 한 표로 바꾸고 상태(유지/신설/제거)만 표시한다. 전부 '유지'면 아예 접는다.
+ */
+function diffNodes(asIs, toBe) {
+  const a = new Map((asIs || []).map((n) => [n.module, n]));
+  const b = new Map((toBe || []).map((n) => [n.module, n]));
+  const names = [...new Set([...(asIs || []).map((n) => n.module), ...(toBe || []).map((n) => n.module)])];
+  return names.map((module) => {
+    const cur = a.get(module);
+    const nxt = b.get(module);
+    const status = !cur ? 'added' : !nxt ? 'removed' : 'kept';
+    return {
+      module, status,
+      files: cur?.files ?? null, functions: cur?.functions ?? null,
+      role: nxt?.role || '',
+      // 구성이 자기 자신뿐이면 정보가 0이다 — 비워 둔다
+      members: (nxt?.members || []).filter((mem) => mem !== module),
+    };
+  });
+}
+
+function diffEdges(asIs, toBe) {
+  const key = (e) => `${e.from}→${e.to}`;
+  const a = new Map((asIs || []).map((e) => [key(e), e]));
+  const b = new Map((toBe || []).map((e) => [key(e), e]));
+  const keys = [...new Set([...a.keys(), ...b.keys()])];
+  return keys.map((k) => {
+    const cur = a.get(k);
+    const status = !cur ? 'added' : (b.has(k) ? 'kept' : 'removed');
+    return { key: k, from: (cur || b.get(k)).from, to: (cur || b.get(k)).to, calls: cur?.calls ?? null, status };
+  }).sort((x, y) => (y.calls ?? -1) - (x.calls ?? -1));
+}
+
+function StatusCell({ status }) {
+  const meta = STATUS_META[status];
+  return <td style={{ ...T.td, color: meta.color, fontWeight: status === 'kept' ? 400 : 600 }}>{meta.label}</td>;
+}
+
+/**
+ * As-Is ↔ To-Be 를 **한 표의 diff** 로 낸다.
+ * 변경이 하나도 없으면 표를 그리지 않고 "무엇이 같은지"만 한 줄로 알린다 —
+ * 같은 값을 두 번 보여 주는 건 정보가 아니라 소음이다.
+ */
+function StructureDiff({ asIsNodes, asIsEdges, toBeNodes, toBeEdges }) {
+  const nodeRows = diffNodes(asIsNodes, toBeNodes);
+  const edgeRows = diffEdges(asIsEdges, toBeEdges);
+  const nodeChanged = nodeRows.some((r) => r.status !== 'kept');
+  const edgeChanged = edgeRows.some((r) => r.status !== 'kept');
+  const hasRole = nodeRows.some((r) => r.role || r.members.length > 0);
+
+  return (
+    <div>
+      {/* 모듈 — 변경이 없어도 '역할'이 새 정보라면 표를 낸다(상태 열은 생략) */}
+      {nodeRows.length > 0 && (nodeChanged || hasRole) && (
         <>
-          <div style={{ ...T.figTitle, marginTop: 'var(--sp-2)' }}>모듈 간 의존</div>
+          <div style={{ ...T.figTitle, fontWeight: 700 }}>
+            모듈 {nodeChanged ? '(As-Is → To-Be 차이)' : '(구조 동일 — AI가 붙인 역할 설명만)'}
+          </div>
           <div style={SCROLL}>
             <table style={TABLE}>
               <thead>
                 <tr>
-                  <th style={T.th}>from → to</th>
-                  {/* To-Be 엣지엔 호출 수가 없다 — 열을 만들어 `—`로 채우면 "0회"로 오독된다 */}
-                  {!isTarget && <th style={T.numTh}>호출</th>}
+                  {nodeChanged && <th style={T.th}>상태</th>}
+                  <th style={T.th}>모듈</th>
+                  <th style={T.numTh}>파일</th>
+                  <th style={T.numTh}>함수</th>
+                  <th style={T.th}>역할(제안)</th>
                 </tr>
               </thead>
               <tbody>
-                {deps.slice(0, EDGE_LIMIT).map((e) => (
-                  <tr key={`${e.from}→${e.to}`}>
-                    <td style={T.nameTd(240)} title={`${e.from} → ${e.to}`}>
-                      {e.from} <span style={{ color: 'var(--text-muted)' }}>→</span> {e.to}
+                {nodeRows.map((r) => (
+                  <tr key={r.module} style={r.status === 'removed' ? { opacity: 0.6 } : undefined}>
+                    {nodeChanged && <StatusCell status={r.status} />}
+                    <td style={{ ...T.nameTd(200), fontWeight: 600 }} title={r.module}>{r.module}</td>
+                    {/* 신설 모듈은 현재 파일·함수가 없다 — 0이 아니라 '—' */}
+                    <td style={T.numTd}>{r.files ?? '—'}</td>
+                    <td style={T.numTd}>{r.functions ?? '—'}</td>
+                    <td style={T.textTd(260)}>
+                      {r.role || <span style={{ color: 'var(--text-muted)' }}>—</span>}
+                      {r.members.length > 0 && (
+                        <div style={T.note}>구성: {r.members.join(', ')}</div>
+                      )}
                     </td>
-                    {!isTarget && <td style={T.numTd}>{e.calls ?? '—'}</td>}
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
-          {deps.length > EDGE_LIMIT && (
-            <div style={T.note}>* 상위 {EDGE_LIMIT}건만 표시 (총 {deps.length}건)</div>
+        </>
+      )}
+
+      {/* 의존 — 동일하면 표 자체를 안 그린다(같은 10행을 두 번 볼 이유가 없다) */}
+      <div style={{ ...T.figTitle, marginTop: 'var(--sp-2)' }}>
+        모듈 간 의존 {edgeChanged ? '(As-Is → To-Be 차이)' : ''}
+      </div>
+      {edgeRows.length === 0 ? (
+        <div style={T.note}>관측된 모듈 간 의존이 없습니다.</div>
+      ) : !edgeChanged ? (
+        <div style={T.note}>
+          제안이 의존 관계를 바꾸지 않았습니다 — 현재와 동일한 {edgeRows.length}건입니다.
+          {' '}상세는 위 <b>아키텍처 다이어그램</b>의 모듈 관계도를 보세요.
+        </div>
+      ) : (
+        <>
+          <div style={SCROLL}>
+            <table style={TABLE}>
+              <thead>
+                <tr>
+                  <th style={T.th}>상태</th><th style={T.th}>from → to</th><th style={T.numTh}>현재 호출</th>
+                </tr>
+              </thead>
+              <tbody>
+                {edgeRows.slice(0, EDGE_LIMIT).map((e) => (
+                  <tr key={e.key} style={e.status === 'removed' ? { opacity: 0.6 } : undefined}>
+                    <StatusCell status={e.status} />
+                    <td style={T.nameTd(260)} title={`${e.from} → ${e.to}`}>
+                      {e.from} <span style={{ color: 'var(--text-muted)' }}>→</span> {e.to}
+                    </td>
+                    {/* 신설 간선엔 현재 호출 수가 없다 — 0으로 위장 금지 */}
+                    <td style={T.numTd}>{e.calls ?? '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          {edgeRows.length > EDGE_LIMIT && (
+            <div style={T.note}>* 변경분 우선 {EDGE_LIMIT}건만 표시 (총 {edgeRows.length}건)</div>
           )}
         </>
       )}
@@ -405,12 +461,11 @@ export default function ArchitectureImprovementPanel({ jobUrl, cacheRoot, defaul
             </>
           )}
 
-          {/* As-Is ↔ To-Be 병렬 — 같은 형식으로 놓아야 무엇이 바뀌는지 보인다 */}
+          {/* As-Is ↔ To-Be — **diff 한 표**. 병렬 두 표는 같은 값을 두 번 그렸다(실측 36행 중복) */}
           {td2 ? (
             <div>
               {/* ⚠ AI가 "제안"이라며 **현재 모듈을 그대로 되풀이**하는 경우가 있다(실측: 8개 전부
-                  동일, 신설 0, 구성이 자기 자신). 표만 나란히 두면 사용자가 그걸 알아채려고
-                  8행을 눈으로 대조해야 한다 — 같으면 같다고 먼저 말한다. */}
+                  동일, 신설 0, 구성이 자기 자신). 같으면 같다고 먼저 말한다. */}
               {structureUnchanged(data.as_is?.nodes, td2.nodes) && (
                 <div style={{ ...xs, color: 'var(--color-warning)', marginBottom: 'var(--sp-2)' }}>
                   ⚠ 제안된 모듈 {(td2.nodes || []).length}개가 현재 구조와 <b>1:1로 동일</b>합니다
@@ -418,10 +473,9 @@ export default function ArchitectureImprovementPanel({ jobUrl, cacheRoot, defaul
                   실제 변경안은 위 “개선 후보” 표의 상세(▸)를 보세요.
                 </div>
               )}
-              <div style={{ display: 'flex', gap: 'var(--sp-4)', flexWrap: 'wrap' }}>
-                <StructureList title="현재 (As-Is)" nodes={data.as_is?.nodes} edges={data.as_is?.edges} />
-                <StructureList title="제안 (To-Be)" nodes={td2.nodes} edges={td2.edges} isTarget />
-              </div>
+              <StructureDiff
+                asIsNodes={data.as_is?.nodes} asIsEdges={data.as_is?.edges}
+                toBeNodes={td2.nodes} toBeEdges={td2.edges} />
               {(td2.rationale || []).length > 0 && (
                 <div style={{ ...T.figTitle, marginTop: 'var(--sp-2)' }}>제안 근거</div>
               )}
