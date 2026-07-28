@@ -678,21 +678,29 @@ export default function ProjectSummarySection({ job, analysisResult }) {
           </button>
         </div>
 
-        {/* 가져오기 옵션 — 기본 ON. 끄면 과거 빌드가 전부 '받아온 날의 트리'가 되어 비교가 무의미해진다. */}
-        <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 'var(--sp-2)', fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>
-          <label style={{ display: 'flex', alignItems: 'center', gap: 4, cursor: 'pointer' }}
+        {/* 가져오기 옵션 — 기본 ON. 끄면 과거 빌드가 전부 '받아온 날의 트리'가 되어 비교가 무의미해진다.
+            ⚠ flex+wrap 이면 폭에 따라 임의 지점에서 접히고 항목 길이가 제각각이라 2줄이 될 때 좌측이
+            어긋난다. 균등 폭 grid(auto-fit)로 두면 몇 줄로 접히든 열이 맞는다. 라벨 자체의 중간
+            줄바꿈은 nowrap 으로 막는다(체크박스와 텍스트가 세로로 벌어지는 원인). */}
+        <div style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fit, minmax(var(--backfill-opt-col, 250px), 1fr))',
+          alignItems: 'center', gap: 'var(--sp-1) var(--sp-2)',
+          fontSize: 'var(--text-xs)', color: 'var(--text-muted)',
+        }}>
+          <label style={{ display: 'flex', alignItems: 'center', gap: 4, cursor: 'pointer', whiteSpace: 'nowrap' }}
             title="각 빌드의 소스를 그 빌드 시각의 SVN revision으로 체크아웃합니다. 끄면 지금 시점의 HEAD를 받아와 모든 빌드가 같은 트리가 됩니다.">
             <input type="checkbox" checked={pinSource} disabled={backfillBusy}
               onChange={(e) => setPinSource(e.target.checked)} />
             스냅샷을 빌드 시점 revision으로 고정
           </label>
-          <label style={{ display: 'flex', alignItems: 'center', gap: 4, cursor: 'pointer' }}
+          <label style={{ display: 'flex', alignItems: 'center', gap: 4, cursor: 'pointer', whiteSpace: 'nowrap' }}
             title="가져오기가 끝나면 아래 표의 함수 축(변경 함수·ASIL)까지 미리 계산해 둡니다.">
             <input type="checkbox" checked={warmMatrix} disabled={backfillBusy}
               onChange={(e) => setWarmMatrix(e.target.checked)} />
             비교 캐시(함수 축) 자동 생성
           </label>
-          <label style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+          <label style={{ display: 'flex', alignItems: 'center', gap: 4, whiteSpace: 'nowrap' }}>
             가져올 빌드
             <select value={backfillCount} disabled={backfillBusy}
               onChange={(e) => setBackfillCount(Number(e.target.value))}
@@ -701,7 +709,8 @@ export default function ProjectSummarySection({ job, analysisResult }) {
             </select>
           </label>
           {warmMatrix && (
-            <span>
+            /* 항목이 아니라 부연 — 전체 폭을 차지해 위 3개의 열 정렬을 흔들지 않는다 */
+            <span style={{ gridColumn: '1 / -1' }}>
               비교 기준 {baselineBuild ? `#${baselineBuild}` : '(자동)'} — 아래 “베이스라인 → 최신 변화”에서 변경
             </span>
           )}

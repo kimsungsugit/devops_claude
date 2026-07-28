@@ -50,7 +50,14 @@ ARCH = {
             {"global": "g_local", "modules": 1, "functions": 5, "functions_sample": ["x_fn"]},
         ],
     },
-    "indirect_calls": {"top": [{"function": "ptr_user", "func_refs": 3, "pointer_calls": 1, "file": "BSW/b.c"}]},
+    # v7: 실제 심볼이 있어야 시임 후보다(원시 func_refs 는 MCU 레지스터 참조를 대량 포함 —
+    # 실측 2,708건 중 실제 함수 2건. 개수만 보고 후보를 만들면 전부 오탐이 된다).
+    "indirect_calls": {"top": [
+        {"function": "ptr_user", "func_refs": 0, "pointer_calls": 1, "file": "BSW/b.c",
+         "ref_functions": [], "pointer_symbols": ["pfn_Handler"]},
+        {"function": "reg_toucher", "func_refs": 0, "pointer_calls": 0, "file": "BSW/c.c",
+         "ref_functions": [], "pointer_symbols": []},   # 심볼 0 — 후보가 되면 안 된다
+    ]},
     "coupling": {"cross_file_call_ratio": 0.27, "top_pairs": []},
 }
 
@@ -84,6 +91,18 @@ def test_testability_candidates_present_with_numeric_basis():
     assert by["inject_global"][0]["target"] == "g_shared"
     assert "읽기/쓰기 미구분" in by["inject_global"][0]["basis"]
     assert by["seam_for_pointer"][0]["target"] == "ptr_user"
+    assert by["seam_for_pointer"][0]["pointer_symbols"] == ["pfn_Handler"]
+
+
+def test_seam_candidate_requires_real_symbol():
+    """개수만 있고 실제 심볼이 없는 항목은 시임 후보가 아니다.
+
+    v7 이전에는 원시 func_refs 순으로 top 을 뽑아 MCU 레지스터(DDRADL·CPMUINT)를 참조하는
+    초기화 함수가 '함수포인터 참조 27'로 1순위 후보였다 — 스텁을 끼울 포인터가 아예 없는 곳이다.
+    """
+    targets = {c["target"] for c in build_candidates(ARCH) if c["kind"] == "seam_for_pointer"}
+    assert "ptr_user" in targets
+    assert "reg_toucher" not in targets
 
 
 def test_single_module_global_is_not_a_candidate():

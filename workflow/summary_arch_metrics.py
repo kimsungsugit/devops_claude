@@ -15,7 +15,7 @@ from __future__ import annotations
 import logging
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 #     버리던 것을 캡 안에서 전부 싣는다(실측 62파일·308엣지).
 # v6(Q2): layer_graph(APP/BSW/LIB/BOOT + 역방향 검토후보) · file_graph.topo_order(DSM 정렬) ·
 #     global_coupling.top[].functions_sample(전역↔함수 이분 그래프 재료).
-ARCH_METRICS_VERSION = 6
+ARCH_METRICS_VERSION = 7
 
 # file_graph 캡 — 실측(62/308)은 무손실. 초과 시 truncated:true로 정직 표기(_build_module_graph 규약).
 FILE_GRAPH_MAX_NODES = 400
@@ -570,6 +570,157 @@ def _coverage_complexity(
     }
 
 
+# ── 분할 축(god_file 을 '어떻게' 나눌지) ──────────────────────────────────────────
+# 실측이 단일 알고리즘을 기각했다(KJPDS02_PV god_file 8개):
+#   Ap_DoorPreCtrl_PDS.c 134함수 → 내부 콜 연결성분 78/46/9/1 (절단면 0) = 완벽한 분할선
+#   Sys_UDS_LinComp_PDS.c 90함수 → 성분은 22개로 잘게 부서지지만 이름은 WDBI 36/RDBI 27 = 읽기·쓰기 축
+#   나머지 6파일        → 최대 덩어리가 91~97%. **기계적 분할선이 없다**
+# 그래서 두 축을 다 계산해 실용 범위(2~6군집)인 쪽을 고르고, 둘 다 아니면 '축 없음'을 반환한다.
+# 억지로 군집을 지어내면 근거 없는 리팩터링 지시가 된다 — 없으면 없다고 말하는 편이 유용하다.
+SPLIT_MIN_GROUPS, SPLIT_MAX_GROUPS = 2, 6
+SPLIT_MAX_SHARE = 0.7          # 최대 덩어리가 이보다 크면 '쪼갠다'고 할 수 없다
+SPLIT_MIN_PREFIX_GROUP = 3     # 2개짜리 접두사 군집은 우연 일치가 많다
+SPLIT_MIN_PREFIX_COVER = 0.5   # 접두사 축은 파일의 절반 이상을 설명해야 축이다
+
+
+def _call_components(members: List[str], call_map: Dict[str, List[str]]) -> List[List[str]]:
+    """파일 내부 호출을 무향으로 본 연결 성분 — 성분 간 호출은 정의상 0(절단면 0)."""
+    inside = set(members)
+    adj: Dict[str, Set[str]] = {n: set() for n in members}
+    for a in members:
+        for b in call_map.get(a) or ():
+            if b in inside and b != a:
+                adj[a].add(b)
+                adj[b].add(a)
+    seen: Set[str] = set()
+    comps: List[List[str]] = []
+    for a in members:
+        if a in seen:
+            continue
+        stack, cur = [a], []
+        while stack:
+            x = stack.pop()
+            if x in seen:
+                continue
+            seen.add(x)
+            cur.append(x)
+            stack.extend(adj[x] - seen)
+        comps.append(sorted(cur))
+    comps.sort(key=lambda c: (-len(c), c[0]))
+    return comps
+
+
+def _name_prefix(name: str, depth: int = 3) -> str:
+    parts = str(name).split("_")
+    return "_".join(parts[:depth]) if len(parts) >= depth else "_".join(parts[:2])
+
+
+def _cut_edges(groups: List[List[str]], call_map: Dict[str, List[str]]) -> int:
+    """군집 간 호출 수 = 분할하면 새로 생길 파일 간 의존(분할 비용의 실측치)."""
+    owner: Dict[str, int] = {}
+    for i, g in enumerate(groups):
+        for n in g:
+            owner[n] = i
+    cut = 0
+    for a, i in owner.items():
+        for b in call_map.get(a) or ():
+            j = owner.get(b)
+            if j is not None and j != i:
+                cut += 1
+    return cut
+
+
+def split_axis_for_file(members: List[str], call_map: Dict[str, List[str]]) -> Dict[str, Any]:
+    """파일의 분할 축 제안 — 없으면 available:False(지어내지 않는다)."""
+    members = sorted(members)
+    total = len(members)
+    if total < SPLIT_MIN_GROUPS:
+        return {"available": False, "reason": "too_few_functions"}
+    axes: List[Dict[str, Any]] = []
+
+    comps = _call_components(members, call_map)
+    if len(comps) >= SPLIT_MIN_GROUPS and len(comps[0]) / total <= SPLIT_MAX_SHARE:
+        axes.append({
+            "axis": "call_component",
+            "groups": [{"label": None, "functions": c[:12], "size": len(c)} for c in comps[:SPLIT_MAX_GROUPS]],
+            "n_groups": len(comps), "cut_calls": 0,
+            "max_share": round(len(comps[0]) / total, 3), "cover": 1.0,
+        })
+
+    by_prefix: Dict[str, List[str]] = {}
+    for n in members:
+        by_prefix.setdefault(_name_prefix(n), []).append(n)
+    pg = sorted(((k, sorted(v)) for k, v in by_prefix.items() if len(v) >= SPLIT_MIN_PREFIX_GROUP),
+                key=lambda kv: (-len(kv[1]), kv[0]))
+    if pg:
+        cover = sum(len(v) for _, v in pg) / total
+        if (SPLIT_MIN_GROUPS <= len(pg) <= SPLIT_MAX_GROUPS and cover >= SPLIT_MIN_PREFIX_COVER
+                and len(pg[0][1]) / total <= SPLIT_MAX_SHARE):
+            axes.append({
+                "axis": "name_prefix",
+                "groups": [{"label": k, "functions": v[:12], "size": len(v)} for k, v in pg],
+                "n_groups": len(pg), "cut_calls": _cut_edges([v for _, v in pg], call_map),
+                "max_share": round(len(pg[0][1]) / total, 3), "cover": round(cover, 3),
+            })
+
+    if not axes:
+        return {
+            "available": False, "reason": "no_natural_split",
+            "components": len(comps),
+            "largest_component_share": round(len(comps[0]) / total, 3) if comps else 1.0,
+        }
+    # 실용 군집 수(2~6)를 최우선 — UDS 는 성분이 22개라 축으로 못 쓰고 이름 축이 정답이다.
+    axes.sort(key=lambda a: (
+        0 if SPLIT_MIN_GROUPS <= a["n_groups"] <= SPLIT_MAX_GROUPS else 1,
+        a["cut_calls"], a["max_share"],
+    ))
+    return {"available": True, "total_functions": total, **axes[0],
+            "alternative_axes": len(axes) - 1}
+
+
+def _playbook_inputs(
+    *, call_map: Dict[str, List[str]], file_of: Dict[str, str],
+    refactor_candidates: List[Dict[str, Any]], file_sccs: List[List[str]],
+    pair_counts: Dict[tuple, int], max_edge_pairs: int = 3,
+) -> Dict[str, Any]:
+    """개선 플레이북이 '어디를 어떻게'까지 말하려면 필요한 실측 재료.
+
+    집계만 남기고 버려지던 것들이다. 대상은 후보가 될 수 있는 것으로 한정해 크기를 묶는다.
+    """
+    members_of: Dict[str, List[str]] = {}
+    for fn, rel in file_of.items():
+        if rel:
+            members_of.setdefault(rel, []).append(fn)
+
+    split_axis: Dict[str, Any] = {}
+    for c in refactor_candidates:
+        if c.get("kind") != "god_file":
+            continue
+        f = str(c.get("file") or "")
+        if f and f not in split_axis:
+            split_axis[f] = split_axis_for_file(members_of.get(f) or [], call_map)
+
+    # 순환 간선 위의 **실제 함수 호출 쌍** — "이 파일이 저 파일을 부른다"로는 고칠 수 없다.
+    scc_files: set = {f for scc in file_sccs[:10] for f in scc}
+    scc_pairs = {(a, b) for (a, b) in pair_counts if a in scc_files and b in scc_files and a != b}
+    cycle_edge_functions: Dict[str, List[Dict[str, str]]] = {}
+    if scc_pairs:
+        for caller, callees in call_map.items():
+            cf = file_of.get(caller, "")
+            for callee in callees:
+                tf = file_of.get(callee, "")
+                if (cf, tf) in scc_pairs:
+                    bucket = cycle_edge_functions.setdefault(f"{cf}|{tf}", [])
+                    if len(bucket) < max_edge_pairs:
+                        bucket.append({"caller": caller, "callee": callee})
+    return {
+        "split_axis": split_axis,
+        "cycle_edge_functions": cycle_edge_functions,
+        "note": ("분할 축은 파일 내부 호출 연결성분과 함수명 접두사 중 실용적인 쪽이며, "
+                 "둘 다 임계를 못 넘으면 available:false(기계적 분할선 없음)로 둔다."),
+    }
+
+
 def compute_architecture_metrics(
     source_dir: Path,
     *,
@@ -728,6 +879,15 @@ def compute_architecture_metrics(
     cov_complexity = _coverage_complexity(known, file_of, _complexity, coverage_by_function)
     indirect_fns = {n for n, v in func_refs_of.items() if v} | {n for n, v in pointer_calls_of.items() if v}
     indirect_edges = sum(len(v) for v in func_refs_of.values()) + sum(len(v) for v in pointer_calls_of.values())
+    # ⚠ func_refs 는 '함수 아닌 심볼'을 대량 포함한다 — 실측 KJPDS02_PV 2,708건 중 프로젝트 내
+    #   함수를 실제로 가리키는 건 **2건(0.1%)**이고 나머지는 DDRADL·CPMUINT 같은 MCU 레지스터와
+    #   지역/전역 변수다. 이 수치를 '함수포인터 보유'로 읽으면 692개 함수가 시임 후보로 둔갑한다
+    #   (실제로 그렇게 표시되고 있었다). 그래서 known 교집합으로 거른 값을 따로 싣고, 스텁 시임
+    #   후보는 **거른 쪽과 pointer_calls(진짜 간접 호출 사이트)** 로만 만든다.
+    resolved_refs_of = {
+        n: sorted({r for r in v if r in known and r != n}) for n, v in func_refs_of.items()
+    }
+    seam_fns = {n for n, v in resolved_refs_of.items() if v} | {n for n, v in pointer_calls_of.items() if v}
     header_defined = sorted({n for n in known if str(file_of.get(n, "")).lower().endswith(".h")})
 
     return {
@@ -743,14 +903,27 @@ def compute_architecture_metrics(
             "reference_edges": indirect_edges,
             "func_ref_functions": sum(1 for v in func_refs_of.values() if v),
             "pointer_call_functions": sum(1 for v in pointer_calls_of.values() if v),
+            # ↓ 위 4개는 **원시 탐지량**(레지스터·변수 오탐 포함)이고, 아래가 실제 함수를 가리키는 분이다.
+            "resolved_ref_functions": sum(1 for v in resolved_refs_of.values() if v),
+            "resolved_ref_edges": sum(len(v) for v in resolved_refs_of.values()),
+            "unresolved_ref_edges": (sum(len(v) for v in func_refs_of.values())
+                                     - sum(len(v) for v in resolved_refs_of.values())),
+            "seam_functions": len(seam_fns),
+            # top 은 '스텁 시임 후보'다 — 오탐이 섞이면 없는 함수포인터를 고치라고 지시하게 되므로
+            # resolved 참조나 pointer_calls 가 있는 함수만 담는다(실측 692 → 7).
             "top": [
-                {"function": n, "func_refs": len(func_refs_of.get(n) or ()),
-                 "pointer_calls": len(pointer_calls_of.get(n) or ()), "file": file_of.get(n, "")}
-                for n in sorted(indirect_fns,
-                                key=lambda x: (-(len(func_refs_of.get(x) or ()) + len(pointer_calls_of.get(x) or ())), x))[:10]
+                {"function": n, "file": file_of.get(n, ""),
+                 "func_refs": len(resolved_refs_of.get(n) or ()),
+                 "pointer_calls": len(pointer_calls_of.get(n) or ()),
+                 "ref_functions": list(resolved_refs_of.get(n) or ())[:6],
+                 "pointer_symbols": list(pointer_calls_of.get(n) or ())[:6]}
+                for n in sorted(seam_fns,
+                                key=lambda x: (-(len(resolved_refs_of.get(x) or ()) + len(pointer_calls_of.get(x) or ())), x))[:10]
             ],
             "note": ("함수포인터 참조·간접 호출 사이트는 호출 그래프 엣지에 포함되지 않는다 — "
-                     "fan-in/out·사이클은 직접 호출 기준 하한값으로 읽어야 한다."),
+                     "fan-in/out·사이클은 직접 호출 기준 하한값으로 읽어야 한다. "
+                     "func_ref_* 는 원시 탐지량으로 MCU 레지스터·변수 참조를 대량 포함하며"
+                     "(실측 0.1%만 실제 함수), 시임 후보는 resolved/pointer 기준으로만 만든다."),
         },
         "encapsulation": {
             "functions": len(known),
@@ -797,4 +970,9 @@ def compute_architecture_metrics(
             "mutual_file_pairs": mutual_pairs[:10],
         },
         "refactor_candidates": refactor_candidates,
+        # v7: 개선 제안이 '어디를 어떻게'까지 말하기 위한 재료(분할 축·순환 간선의 실제 함수 쌍).
+        "playbook_inputs": _playbook_inputs(
+            call_map=call_map, file_of=file_of, refactor_candidates=refactor_candidates,
+            file_sccs=file_sccs, pair_counts=pair_counts,
+        ),
     }

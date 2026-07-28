@@ -326,8 +326,12 @@ def build_deterministic_insight(inp: SummaryInsightInput) -> Dict[str, Any]:
                     for k in ("available", "distinct_globals", "cross_module_globals")
                 },
                 "indirect_calls": {
+                    # resolved_* 를 같이 넣는다 — 원시 수치만 주면 LLM이 "694개 함수가 함수포인터를
+                    # 쓴다"고 쓴다(실제로는 레지스터 참조라 7개뿐). 정정은 note 로도 하지만 수치가
+                    # 함께 있어야 LLM 이 어느 쪽을 인용할지 헷갈리지 않는다.
                     k: (arch.get("indirect_calls") or {}).get(k)
-                    for k in ("functions_with_indirect", "reference_edges")
+                    for k in ("functions_with_indirect", "reference_edges",
+                              "resolved_ref_functions", "seam_functions")
                 },
             }
             if arch and arch.get("available")
@@ -605,7 +609,8 @@ def enrich_architecture(cfg, inp: SummaryInsightInput, det: Dict[str, Any], *, a
         },
         "indirect_calls": {
             k: (arch.get("indirect_calls") or {}).get(k)
-            for k in ("functions_with_indirect", "reference_edges", "top", "note")
+            for k in ("functions_with_indirect", "reference_edges",
+                      "resolved_ref_functions", "seam_functions", "top", "note")
         },
         "encapsulation": arch.get("encapsulation"),
     }, ensure_ascii=False) + "\n\n[핫스팟 함수 본문 발췌]\n" + excerpt_text

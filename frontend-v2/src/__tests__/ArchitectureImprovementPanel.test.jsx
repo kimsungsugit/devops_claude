@@ -103,3 +103,101 @@ describe('ArchitectureImprovementPanel', () => {
     expect(await screen.findByText(/소스 스냅샷이 없어 제안을 만들 수 없습니다/)).toBeInTheDocument();
   });
 });
+
+// ── 상세 플레이북 — "뭘 개선하라는 건지 모르겠다"를 없애는 층 ────────────────────
+describe('ArchitectureImprovementPanel — 상세 개선안', () => {
+  const withDetail = (detail, extra = {}) => ({
+    ...BASE,
+    candidates: [{ ...BASE.candidates[0], detail, ...extra }, BASE.candidates[1]],
+  });
+
+  beforeEach(() => { vi.clearAllMocks(); });
+
+  it('▸ 를 눌러야 상세가 나온다 — 단계·스텁 계획·코드 스케치', async () => {
+    const user = userEvent.setup();
+    mockResp = withDetail({
+      version: 1,
+      summary: 'a.c가 b.c의 B_Notify()를 직접 부르는 바람에 순환이 생긴다.',
+      steps: ['A_Cb.h에 콜백 타입을 선언한다.', 'A_Tick() 안의 직접 호출을 슬롯 호출로 바꾼다.'],
+      sketch: { lang: 'c', before: 'B_Notify();', after: 'if (s_cb != NULL) { s_cb(); }',
+        note: '타입·인자는 파서가 주지 않아 주석으로 비워 둔 스케치다 — 그대로 컴파일되지 않는다.' },
+      stub_plan: { what: ['테스트가 s_cb 에 자기 스텁을 등록한다'], gain: 'b.c 링크가 불필요해진다.' },
+      impact: { files_in_cycle: 2, edge_call_sites: 1 },
+      caveats: [],
+    });
+    render(<ArchitectureImprovementPanel {...PROPS} />);
+    await screen.findByText('순환 끊기');
+    // 접힌 상태에서는 상세가 DOM 에 없다(스캔 소음 방지)
+    expect(screen.queryByText(/A_Cb.h에 콜백 타입/)).toBeNull();
+
+    await user.click(screen.getByRole('button', { name: /상세 개선안 펼치기/ }));
+    expect(screen.getByText(/A_Cb.h에 콜백 타입/)).toBeInTheDocument();
+    expect(screen.getByText('시험 스텁 계획')).toBeInTheDocument();
+    expect(screen.getByText(/s_cb 에 자기 스텁을 등록한다/)).toBeInTheDocument();
+    expect(screen.getByText('if (s_cb != NULL) { s_cb(); }')).toBeInTheDocument();
+  });
+
+  it('코드는 스케치라고 항상 말한다 — 그대로 복사하면 컴파일이 안 되기 때문', async () => {
+    const user = userEvent.setup();
+    mockResp = withDetail({
+      version: 1, summary: 's', steps: [],
+      sketch: { lang: 'c', before: 'x', after: 'y', note: '그대로 컴파일되지 않는다.' },
+      caveats: [],
+    });
+    render(<ArchitectureImprovementPanel {...PROPS} />);
+    await screen.findByText('순환 끊기');
+    await user.click(screen.getByRole('button', { name: /상세 개선안 펼치기/ }));
+    expect(screen.getByText(/그대로 컴파일되지 않는다/)).toBeInTheDocument();
+  });
+
+  it('분할 제안 — 어느 함수가 어느 파일로 가는지 보여준다', async () => {
+    const user = userEvent.setup();
+    mockResp = withDetail({
+      version: 1, summary: '파일 내부 호출 덩어리 기준으로 2덩어리로 갈린다.',
+      steps: ['x_Env.c — 함수 7개'],
+      split_proposal: [
+        { file: 'x_Env.c', size: 7, label: 's_Env', functions: ['s_Env_Calc', 's_Env_Read'] },
+        { file: 'x_Perf.c', size: 5, label: 's_Perf', functions: ['s_Perf_Track'] },
+      ],
+      sketch: null, stub_plan: null, impact: { cut_calls: 0 }, caveats: [],
+    });
+    render(<ArchitectureImprovementPanel {...PROPS} />);
+    await screen.findByText('순환 끊기');
+    await user.click(screen.getByRole('button', { name: /상세 개선안 펼치기/ }));
+    expect(screen.getByText('x_Env.c')).toBeInTheDocument();
+    expect(screen.getByText(/s_Env_Calc, s_Env_Read/)).toBeInTheDocument();
+  });
+
+  it('분할 축이 없으면 군집을 지어내지 않고 그 사실을 말한다', async () => {
+    const user = userEvent.setup();
+    mockResp = withDetail({
+      version: 1,
+      summary: '이 파일은 **기계적 분할선이 없다** — 함수 95%가 서로 호출로 한 덩어리다.',
+      steps: ['기능(도메인) 단위로 먼저 나눈다.'],
+      sketch: null, stub_plan: null,
+      impact: { largest_component_share: 0.953 },
+      caveats: ['연결성분·이름 접두사 두 축 모두 임계 미달이라 자동 군집을 제시하지 않는다.'],
+    });
+    render(<ArchitectureImprovementPanel {...PROPS} />);
+    await screen.findByText('순환 끊기');
+    await user.click(screen.getByRole('button', { name: /상세 개선안 펼치기/ }));
+    expect(screen.getByText(/기계적 분할선이 없다/)).toBeInTheDocument();
+    expect(screen.getByText(/자동 군집을 제시하지 않는다/)).toBeInTheDocument();
+    expect(screen.queryByText(/분할 제안/)).toBeNull();
+  });
+
+  it('상세가 없는 후보는 토글이 없다 — 빈 상세를 만들지 않는다', async () => {
+    mockResp = { ...BASE, playbook: { total: 2, with_detail: 0, without_detail: 2 } };
+    render(<ArchitectureImprovementPanel {...PROPS} />);
+    await screen.findByText('순환 끊기');
+    expect(screen.queryByRole('button', { name: /상세 개선안 펼치기/ })).toBeNull();
+    expect(screen.getByText(/2건은 상세 재료 없음/)).toBeInTheDocument();
+  });
+
+  it('detail 없는 구 응답에서도 표는 그대로 뜬다(하위호환)', async () => {
+    mockResp = BASE;   // playbook 키 자체가 없음
+    render(<ArchitectureImprovementPanel {...PROPS} />);
+    expect(await screen.findByText('순환 끊기')).toBeInTheDocument();
+    expect(screen.getByText('APP/b.c → APP/a.c')).toBeInTheDocument();
+  });
+});

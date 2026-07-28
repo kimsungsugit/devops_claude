@@ -258,15 +258,33 @@ export default function ArchitectureMetricsPanel({ jobUrl, cacheRoot }) {
               </div>
               <div>
                 <div style={{ ...xs, color: 'var(--text-muted)', marginBottom: 4 }}>콜그래프 완전성 · 캡슐화</div>
-                {ind && (
+                {/* ⚠ 원시 탐지량(func_ref_*)을 '함수포인터 보유'로 읽으면 안 된다 — 실측 2,708건 중
+                    실제 함수는 2건이고 나머지는 DDRADL 같은 MCU 레지스터다. 걸러낸 값을 앞세우고
+                    원시량은 오탐 규모와 함께 뒤에 둔다. v6 이하 캐시는 걸러낸 값이 없어 구 표기로 폴백. */}
+                {ind && (ind.resolved_ref_functions != null ? (
+                  <div style={{ ...xs, marginBottom: 4 }}>
+                    간접 호출 사이트 보유 함수 <b>{ind.pointer_call_functions}</b>
+                    {' · '}함수 주소 참조 <b>{ind.resolved_ref_functions}</b>
+                    {' — '}<span style={{ color: 'var(--color-warning)' }}>위 fan-in/사이클에 미반영</span>
+                    <div style={{ color: 'var(--text-muted)' }}>
+                      * 원시 탐지 {ind.func_ref_functions}함수/{ind.reference_edges}건 중{' '}
+                      {ind.unresolved_ref_edges}건은 레지스터·변수 참조(함수 아님)라 시임 후보에서 제외
+                    </div>
+                  </div>
+                ) : (
                   <div style={{ ...xs, marginBottom: 4 }}>
                     함수포인터/간접 호출 보유 함수 <b>{ind.functions_with_indirect}</b>
                     {' · '}참조 엣지 {ind.reference_edges}건 — <span style={{ color: 'var(--color-warning)' }}>위 fan-in/사이클에 미반영</span>
                   </div>
-                )}
+                ))}
                 {(ind?.top || []).slice(0, 4).map((t) => (
                   <div key={t.function} style={{ ...xs, color: 'var(--text-muted)' }} title={t.file}>
-                    · {t.function} — 참조 {t.func_refs} / 간접호출 {t.pointer_calls}
+                    · {t.function}
+                    {(t.pointer_symbols || []).length > 0
+                      ? <> — <span style={{ fontFamily: 'monospace' }}>{t.pointer_symbols.join(', ')}</span></>
+                      : (t.ref_functions || []).length > 0
+                        ? <> — <span style={{ fontFamily: 'monospace' }}>{t.ref_functions.join(', ')}</span></>
+                        : ` — 참조 ${t.func_refs} / 간접호출 ${t.pointer_calls}`}
                   </div>
                 ))}
                 {enc && (

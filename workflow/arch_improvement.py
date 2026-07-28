@@ -66,8 +66,11 @@ def _cheapest_edge(files: List[str], edges: Dict[tuple, int]) -> Optional[Dict[s
 # 종류별 상한(아래 각 블록의 슬라이스와 일치). 전체 상한을 이 합보다 작게 잡으면 **정렬 순서상
 # 뒤에 오는 테스트 용이성 후보가 통째로 잘려나간다** — 실측에서 testability가 0이 되던 결함이라
 # 전체 상한은 종류별 상한의 합으로 둔다(절단은 반드시 omitted로 표기).
+# seam_for_pointer 2→4(v7): 원시 개수 기준일 땐 상위가 전부 오탐이라 2건도 많았지만, 실제
+# 심볼 기준으로 바뀌면서 나오는 건 전부 진짜 스텁 지점이 됐다(실측 7건 — pfn_SafetyCheck·
+# pfn_WriteExecute·pf_Handler 디스패치 테이블). 스텁 시임은 이 화면의 요구 자체라 더 보여준다.
 PER_KIND_CAP = {"break_cycle": 4, "layer_violation": 4, "split_god_file": 4,
-                "extract_pure": 3, "inject_global": 3, "seam_for_pointer": 2}
+                "extract_pure": 3, "inject_global": 3, "seam_for_pointer": 4}
 DEFAULT_TOP_N = sum(PER_KIND_CAP.values())
 
 
@@ -151,17 +154,37 @@ def build_candidates(arch: Dict[str, Any], *, top_n: int = DEFAULT_TOP_N) -> Lis
             })
 
     # ⑥ 함수포인터 시임 — 콜그래프에 안 잡히는 간접 호출은 스텁 지점이기도 하다.
+    #    ⚠ arch v7 이전에는 `top` 이 원시 func_refs 순이라 MCU 레지스터 참조 함수
+    #    (PE_Initialize_GPIO_Part1 — DDRADL·DDRJ…)가 시임 후보로 올라왔다. 실측 2,708건 중
+    #    실제 함수는 2건뿐이라 사실상 전부 오탐이었다. v7 부터 top 자체가 resolved/pointer
+    #    기준이고, 여기서도 **실제 심볼이 있는 항목만** 후보로 삼는다(구 캐시 자동 배제).
     ind = arch.get("indirect_calls") or {}
-    for t in (ind.get("top") or [])[:2]:
+    # 디스패치 테이블(s_uds_wdbi_did_tbl[i].pf_Handler)을 먼저 — 시임 하나로 핸들러 전부를
+    # 스텁으로 갈아끼울 수 있어 단일 포인터보다 시험 이득이 크다. 그 다음이 pointer_calls,
+    # 마지막이 주소 참조(ref)다. 표시 상한이 작아 순서가 곧 무엇이 보이느냐를 정한다.
+    def _seam_rank(t: Dict[str, Any]) -> tuple:
+        syms = [str(s) for s in (t.get("pointer_symbols") or [])]
+        return (0 if any("[" in s for s in syms) else 1 if syms else 2,
+                -(len(syms) + len(t.get("ref_functions") or [])),
+                str(t.get("function") or ""))
+
+    for t in sorted((ind.get("top") or []), key=_seam_rank):
+        syms = [str(s) for s in (t.get("pointer_symbols") or [])]
+        refs = [str(s) for s in (t.get("ref_functions") or [])]
+        if not (syms or refs):
+            continue
+        via = f"간접 호출 {syms[0]}" if syms else f"함수 주소 참조 {refs[0]}"
         out.append({
             "kind": "seam_for_pointer", "functions": [t.get("function")],
             "files": [t.get("file")] if t.get("file") else [],
             "target": t.get("function"),
+            "pointer_symbols": syms, "ref_functions": refs,
             "action": "간접 호출 지점을 명시적 시임(등록 API)으로 노출해 테스트에서 스텁을 끼운다",
-            "basis": f"함수포인터 참조 {t.get('func_refs')} · 간접 호출 {t.get('pointer_calls')}"
-                     f" — 콜그래프 엣지 미반영",
+            "basis": f"{via} — 콜그래프 엣지 미반영(커버리지 도구도 놓치는 경로)",
             "effort": "medium",
         })
+        if sum(1 for c in out if c["kind"] == "seam_for_pointer") >= PER_KIND_CAP["seam_for_pointer"]:
+            break
 
     out.sort(key=lambda c: (_KIND_RANK.get(c["kind"], 9), str(c.get("target") or "")))
     if len(out) > top_n:

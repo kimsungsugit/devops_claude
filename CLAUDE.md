@@ -54,15 +54,17 @@ ASIL 등급은 다음 순서로 판별한다:
 
 ## Team Agents (에이전트 협업 구조)
 
-핵심 에이전트(**planner, coder, architect, deep-reviewer**)는 `model: opus`, 나머지는 `model: sonnet`. 스킬은 에이전트에 위임하여 실행.
+핵심 에이전트(**planner, coder, architect, designer, deep-reviewer**)는 `model: opus`, 나머지는 `model: sonnet`. 스킬은 에이전트에 위임하여 실행.
 
 > planner가 2026-07-27에 sonnet → **opus로 승격**됐다(사용자 결정). 계획 단계는 잘못 세우면 그 아래 Gate 전부가 헛돌기 때문에 비용 대비 효과가 가장 크다 — 실측 사례: 사용자가 지적한 UI 결함 4건을 조사시켰더니 **지적보다 심각한 데이터 결함 2건**(IT 커버리지 분모 2.61배 부풀림, ASIL 함수 변경 22→1 과소보고)을 수치로 특정해냈다.
+>
+> designer도 2026-07-28에 **opus로 승격**됐다(사용자 결정). 이 저장소의 프론트 작업은 CSS 배치가 아니라 **"측정치를 어떤 형태로 보여야 오독하지 않는가"** 판단이 본체다 — 밴드 교차와 값 변화를 한 열에 섞지 않기, 미계산을 `0`이 아니라 `—`로 두기, 절단을 침묵시키지 않기 같은 결정이 전부 designer 몫이라 sonnet 급 판단으로는 정직성 규약이 새어나간다.
 
 | 에이전트 | 모델 | 역할 | 호출 시점 |
 |---------|------|------|----------|
 | **planner** | **opus** | 요구사항 분석, 작업 분해, 안전 영향도 평가 | Gate 1 (계획) |
 | **architect** | **opus** | 모듈 설계, 인터페이스 정의, 아키텍처 결정 | Gate 2 (backend/workflow/report_gen) |
-| **designer** | sonnet | UI/UX 설계, CSS 변수화, 접근성 | Gate 2 (frontend-v2) |
+| **designer** | **opus** | UI/UX 설계, CSS 변수화, 접근성 | Gate 2 (frontend-v2) |
 | **prompt-engineer** | sonnet | Gemini 프롬프트 체인 설계/튜닝 | Gate 2 (prompts/uds_ai.py) |
 | **coder** | **opus** | Python/React/C 코드 구현 | Gate 3 (구현) |
 | **tester** | sonnet | 테스트 작성/실행, ISO 26262 커버리지 + MCP 리포트 접근 | Gate 4 (검증) |

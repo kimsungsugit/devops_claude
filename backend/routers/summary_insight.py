@@ -2543,6 +2543,7 @@ def summary_arch_improvement(req: dict) -> Dict[str, Any]:
         generate_target_design,
         summarize,
     )
+    from workflow.arch_playbook import attach_playbooks, playbook_coverage
 
     body = req or {}
     job_url = str(body.get("job_url") or "").strip()
@@ -2567,11 +2568,16 @@ def summary_arch_improvement(req: dict) -> Dict[str, Any]:
     all_candidates = build_candidates(arch, top_n=10_000)
     candidates = build_candidates(arch)
     summary = summarize(candidates, omitted=max(0, len(all_candidates) - len(candidates)))
+    # 상세 플레이북(결정론, LLM 무관) — "무엇을"만 있던 후보에 "어디를 어떻게"를 붙인다.
+    # 재료(arch.playbook_inputs)가 없는 구 캐시에서는 detail 이 안 붙고 표는 그대로 산다.
+    candidates = attach_playbooks(candidates, arch)
+    playbook = playbook_coverage(candidates)
     base_payload: Dict[str, Any] = {
         "ok": True, "available": True, "reason": None,
         "build_number": target.get("build_number"),
         "candidates": candidates,
         "summary": summary,
+        "playbook": playbook,
         "as_is": {
             "nodes": (arch.get("module_graph") or {}).get("nodes"),
             "edges": (arch.get("module_graph") or {}).get("edges"),
@@ -2594,7 +2600,10 @@ def summary_arch_improvement(req: dict) -> Dict[str, Any]:
     with _ARCH_IMPROVE_LOCK:
         hit = _fix_cache_load(cache_path).get(key)
     if hit and not bool(body.get("force")):
-        return {**hit, "cached": True}
+        # 캐시가 값을 갖는 건 **AI 섹션뿐**이다. 결정론 코어(후보·상세 플레이북)는 방금 다시
+        # 계산했으므로 그쪽으로 덮는다 — 안 그러면 PLAYBOOK_VERSION 이 올라도 fingerprint 는
+        # 그대로라 낡은 상세가 계속 서빙된다(캐시 키에 든 건 kind/target/basis 뿐).
+        return {**hit, **base_payload, "cached": True}
     if bool(body.get("probe")):
         # 결정론 코어는 캐시 없이도 즉시 반환 — AI 섹션만 미생성 상태로 알린다.
         return {**base_payload, "cached": False, "ai_enriched": False,

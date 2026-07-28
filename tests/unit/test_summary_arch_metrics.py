@@ -454,3 +454,95 @@ def test_topo_order_handles_graph_without_any_scc():
     order = _topo_order(["only.c"], {})
     assert order == ["only.c"]
     assert _topo_order([], {}) == []
+
+
+# ── v7: 분할 축 · 순환 간선 함수 쌍 · 간접 호출 정직화 ─────────────────────────
+# 실측이 단일 알고리즘을 기각했다(god_file 8개 중 연결성분으로 갈린 건 1개, 이름으로 1개,
+# 나머지 6개는 최대 덩어리 91~97%로 분할선 없음). 그 세 갈래를 여기서 고정한다.
+
+def test_split_axis_uses_call_components_when_file_falls_apart():
+    from workflow.summary_arch_metrics import split_axis_for_file
+
+    members = ["a1", "a2", "a3", "b1", "b2"]
+    calls = {"a1": ["a2"], "a2": ["a3"], "a3": [], "b1": ["b2"], "b2": []}
+    r = split_axis_for_file(members, calls)
+    assert r["available"] is True
+    assert r["axis"] == "call_component"
+    assert r["cut_calls"] == 0          # 성분 간 호출은 정의상 0 — 그냥 잘라도 의존이 안 생긴다
+    assert [g["size"] for g in r["groups"]] == [3, 2]
+
+
+def test_split_axis_falls_back_to_name_prefix_when_components_shatter():
+    """UDS 실측: 성분은 22개로 부서지지만 이름은 WDBI/RDBI 두 축이 선명했다."""
+    from workflow.summary_arch_metrics import split_axis_for_file
+
+    members = [f"s_UDS_WDBI_{i}" for i in range(4)] + [f"s_UDS_RDBI_{i}" for i in range(3)]
+    r = split_axis_for_file(members, {m: [] for m in members})   # 서로 안 부른다 = 성분 7개
+    assert r["available"] is True and r["axis"] == "name_prefix"
+    assert [g["label"] for g in r["groups"]] == ["s_UDS_WDBI", "s_UDS_RDBI"]
+
+
+def test_split_axis_refuses_when_one_blob_dominates():
+    """실측 6/8 파일이 이 경로 — 억지 군집 대신 '없다'를 반환해야 한다."""
+    from workflow.summary_arch_metrics import split_axis_for_file
+
+    members = [f"f{i}" for i in range(10)]
+    calls = {f"f{i}": [f"f{i + 1}"] for i in range(9)}       # 한 줄로 전부 연결
+    calls["f9"] = []
+    r = split_axis_for_file(members, calls)
+    assert r["available"] is False and r["reason"] == "no_natural_split"
+    assert r["largest_component_share"] == 1.0
+
+
+def test_split_axis_cut_edges_counted_for_prefix_axis():
+    from workflow.summary_arch_metrics import split_axis_for_file
+
+    # 그룹 안에서는 사슬로 이어져 성분이 1덩어리가 되고(=성분 축 무효), 이름 축만 남는 배치.
+    # 접두사는 앞 3토큰이라 이름이 4토큰 이상이어야 군집이 생긴다(s_Mod_A_x1 → s_Mod_A).
+    members = ["s_Mod_A_x1", "s_Mod_A_x2", "s_Mod_A_x3", "s_Mod_B_y1", "s_Mod_B_y2", "s_Mod_B_y3"]
+    calls = {
+        "s_Mod_A_x1": ["s_Mod_A_x2", "s_Mod_B_y1"],   # 마지막 하나가 군집을 가로지른다
+        "s_Mod_A_x2": ["s_Mod_A_x3"], "s_Mod_A_x3": [],
+        "s_Mod_B_y1": ["s_Mod_B_y2"], "s_Mod_B_y2": ["s_Mod_B_y3"], "s_Mod_B_y3": [],
+    }
+    r = split_axis_for_file(members, calls)
+    assert r["axis"] == "name_prefix" and r["cut_calls"] == 1
+
+
+def test_indirect_calls_separates_real_pointers_from_register_reads(tmp_path):
+    """func_refs 는 MCU 레지스터·변수를 대량 포함한다(실측 2,708건 중 실제 함수 2건).
+
+    그 수치를 '함수포인터 보유'로 쓰면 시임 후보가 통째로 오탐이 된다.
+    """
+    src = tmp_path / "source"
+    (src / "BSW").mkdir(parents=True)
+    (src / "BSW" / "p.c").write_text(
+        "void real_target(void) { int z = 0; }\n"
+        "void reg_init(void) { DDRADL = 1U; DDRJ = 2U; }\n"
+        "void registrar(void) { Register(&real_target); }\n",
+        encoding="utf-8",
+    )
+    (src / ".source_complete").write_text("scm=svn\nrevision=1\n", encoding="utf-8")
+    ind = compute_architecture_metrics(src)["indirect_calls"]
+    assert ind["resolved_ref_functions"] <= ind["func_ref_functions"]
+    # 걸러낸 뒤 남는 참조는 프로젝트 안에 실제로 정의된 함수뿐이다
+    for t in ind["top"]:
+        assert t["ref_functions"] or t["pointer_symbols"]
+        for r in t["ref_functions"]:
+            assert r == "real_target"
+
+
+def test_playbook_inputs_carry_cycle_edge_function_pairs(tmp_path):
+    """'a.c 가 b.c 를 부른다'로는 못 고친다 — 어느 함수인지가 나와야 한다."""
+    src = tmp_path / "source"
+    (src / "SYS").mkdir(parents=True)
+    (src / "SYS" / "a.c").write_text("void A_Tick(void) { B_Notify(); }\n", encoding="utf-8")
+    (src / "SYS" / "b.c").write_text("void B_Notify(void) { A_Reset(); }\n"
+                                     "void A_Reset(void) { int q = 0; }\n", encoding="utf-8")
+    (src / ".source_complete").write_text("scm=svn\nrevision=1\n", encoding="utf-8")
+    m = compute_architecture_metrics(src)
+    pb = m["playbook_inputs"]
+    assert "split_axis" in pb and "cycle_edge_functions" in pb
+    if m["cycles"]["file_sccs"]:      # 순환이 잡혔다면 그 간선의 함수 쌍이 있어야 한다
+        pairs = [p for v in pb["cycle_edge_functions"].values() for p in v]
+        assert {"caller": "A_Tick", "callee": "B_Notify"} in pairs
