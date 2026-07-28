@@ -203,6 +203,13 @@ def _strip_ret_type_prefix(key: str) -> str:
 # in_uds=True 무영향). bare eeprom/reprog의 잔여 latent 위험 = 미래 in_uds=False 앱 함수. _isr은
 # 저장소 _ISR_RE 규율대로 '_isr$|_isr_' 앵커(앱 술어 _IsReady/_IsReset 오매치 배제). bare flash/pin/lin 금지.
 _LAYER_CORE_PREFIX_RE = re.compile(r"^(?:u8|u16|u32|s8|s16|s32)?[sgl]_")
+# 앱 도메인 네이밍 앵커 — 인프라 키워드를 **이름 중간에** 품은 앱 함수를 지켜낸다.
+# 실측 근거(KJPDS02_PV build_125, 함수 정의 955개): `Ap_` 접두는 APP 계층 전용 규약이다 —
+# APP 디렉터리 밖에 `Ap_*` **정의는 0건**이고 SYSTEM/IF에 보이는 것은 전부 호출이었다.
+# 이 앵커가 없으면 `s_Ap_PreviousCtrl_ResetEepromParams`(Sources/APP/Ap_DoorPreCtrl_PDS.c)가
+# 중간 'eeprom' 때문에 BOOT_REPROG로 삼켜진다. 앵커 도입 시 이동은 그 1건뿐이고
+# BSW 216·LIB 44는 불변이라, 인프라 복구(4e449dc)를 되돌리지 않는다.
+_LAYER_APP_ANCHOR_RE = re.compile(r"^ap_")
 _LAYER_BOOT_RE = re.compile(
     # entrypoint는 선두 앵커(^) — 'validate_entrypoint'/'check_entrypoint_valid' 같은 APP
     # 함수를 BOOT로 오삼켜 공백을 숨기지 않도록(라운드112 W2). 실 부트 엔트리는 core가 정확히
@@ -246,7 +253,13 @@ def _classify_unmapped_layer(names: List[str]) -> str:
     # 순수 C 식별자가 아니거나 VectorCAST range-test 산출물은 추적 대상 함수가 아님.
     if not _C_IDENT_RE.match(first.lstrip("_")) or re.match(r"^(range$|<<)", first, re.I):
         return "TEST_ARTIFACT"
-    cores = " ".join(_LAYER_CORE_PREFIX_RE.sub("", n.lstrip("_")) for n in cand)
+    core_list = [_LAYER_CORE_PREFIX_RE.sub("", n.lstrip("_")) for n in cand]
+    cores = " ".join(core_list)
+    # 앱 도메인 앵커가 인프라 키워드보다 우선한다(위 _LAYER_APP_ANCHOR_RE 주석의 실측 근거).
+    # 후보 **전부**가 앱 앵커일 때만 — 하나라도 인프라 이름이 섞이면 인프라 판정 기회를 남긴다
+    # (같은 요구에 앱·드라이버 함수가 함께 걸린 경우 인프라 쪽이 더 강한 신호다).
+    if all(_LAYER_APP_ANCHOR_RE.match(c) for c in core_list):
+        return "APP_LEAF"
     if _LAYER_BOOT_RE.search(cores):
         return "BOOT_REPROG"
     if _LAYER_BSW_RE.search(cores):

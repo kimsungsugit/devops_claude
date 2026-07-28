@@ -849,7 +849,7 @@ class TestClassifyUnmappedLayerTokens:
 
     def test_app_negative_controls_no_misclassify(self):
         """정상 APP 함수는 신규 토큰에 오삼켜지지 않는다(bare flash/pin/lin 미추가).
-        ⚠ 예외: 'Ap_*Eeprom*'류(EEPROM 조작)는 BOOT로 감 — test_boot_ap_eeprom_documented 참조."""
+        `Ap_*Eeprom*`류의 예외는 앱 앵커 도입으로 해소됐다 — test_app_eeprom_stays_app_not_boot 참조."""
         from report_gen.requirements import _classify_unmapped_layer as clf
         for nm in [
             "s_buzzerstateflashing_on",   # 'flashing' ≠ flash 토큰(미추가)
@@ -864,13 +864,26 @@ class TestClassifyUnmappedLayerTokens:
         ]:
             assert clf([nm]) == "APP_LEAF", nm
 
-    def test_boot_ap_eeprom_documented(self):
-        """W1(deep-review) 문서화: 'Ap_*Eeprom*' 앱 함수도 비앵커 eeprom으로 BOOT 재라벨된다
-        (EEPROM 조작이라 방어가능). 실데이터 2건은 in_uds=True라 app_design_gap 무영향 — 다만
-        미래 in_uds=False 앱 eeprom 함수는 갭 은닉 latent 위험(정규식 주석 참조)."""
+    def test_app_eeprom_stays_app_not_boot(self):
+        """앱 도메인 함수(`Ap_*`)는 이름 **중간**의 'eeprom'으로 BOOT에 삼켜지지 않는다.
+
+        이전 계약은 이들을 BOOT로 재라벨하고 "실데이터 2건은 in_uds=True라 무영향"으로 넘어갔으나,
+        그 docstring 자체가 latent 위험을 인정하고 있었다 — in_uds=False인 앱 eeprom 함수가
+        생기면 설계 갭이 조용히 은닉된다. ISO 26262에서 허용할 수 없는 침묵이라 `Ap_` 앵커
+        우선으로 근본 차단했다.
+
+        ⚠ 인프라 복구(4e449dc)를 되돌리지 않는다 — 실측 955개 함수 중 이동은 아래 1건뿐이고
+        BSW 216·LIB 44는 불변이다. 앵커 근거: APP 디렉터리 밖에 `Ap_*` **정의는 0건**.
+        """
         from report_gen.requirements import _classify_unmapped_layer as clf
-        assert clf(["s_ap_motorctrl_reseteepromparamstate"]) == "BOOT_REPROG"
-        assert clf(["s_ap_previousctrl_reseteepromparams"]) == "BOOT_REPROG"
+        assert clf(["s_ap_motorctrl_reseteepromparamstate"]) == "APP_LEAF"
+        assert clf(["s_ap_previousctrl_reseteepromparams"]) == "APP_LEAF"
+        # 앱 앵커가 없는 EEPROM 조작 함수는 그대로 BOOT — 복구분은 살아 있다.
+        assert clf(["s_diageepromwrite_assistfail"]) == "BOOT_REPROG"
+        assert clf(["s_write2eeprom_partno"]) == "BOOT_REPROG"
+        assert clf(["g_syseepromctrl_main"]) == "BOOT_REPROG"
+        # 후보에 인프라 이름이 섞이면 인프라 판정 기회를 남긴다(앱 앵커는 전원 일치일 때만).
+        assert clf(["s_ap_x_reseteeprom", "s_write2eeprom_partno"]) == "BOOT_REPROG"
 
     def test_isr_anchored_real_isr_still_bsw(self):
         """W2(deep-review): _isr → _isr$|_isr_ 앵커 후에도 실제 ISR은 BSW 유지."""
