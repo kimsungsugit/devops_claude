@@ -11,6 +11,9 @@ vi.mock('../api.js', () => ({
 }));
 
 import ArchitectureGraphPanel from '../components/sections/ArchitectureGraphPanel.jsx';
+// ⚠ archMetricsCache 는 모듈 레벨 싱글톤이다 — 비우지 않으면 첫 테스트의 응답이
+//   같은 (jobUrl, cacheRoot) 키로 뒤 테스트에 그대로 재사용된다(격리 오염).
+import { clearArchMetricsCache } from '../archMetricsCache.js';
 import { layoutModules } from '../components/archGraphLayout.js';
 
 const METRICS = {
@@ -83,6 +86,7 @@ describe('layoutModules (순수)', () => {
 
 describe('ArchitectureGraphPanel', () => {
   beforeEach(() => {
+    clearArchMetricsCache();
     vi.clearAllMocks();
     mockResp = METRICS;
   });
@@ -199,7 +203,7 @@ describe('ArchitectureGraphPanel — Q2 신규 다이어그램', () => {
     },
   };
 
-  beforeEach(() => { vi.clearAllMocks(); mockResp = Q2; });
+  beforeEach(() => { clearArchMetricsCache(); vi.clearAllMocks(); mockResp = Q2; });
 
   // 계층 다이어그램·전역 흐름은 사용자 결정으로 숨김(SHOW 플래그) — 그림만 접었고 데이터 축은
   // 아키텍처 메트릭 요약 스트립과 개선 제안 후보에 그대로 살아 있다.
@@ -243,6 +247,8 @@ describe('ArchitectureGraphPanel — Q2 신규 다이어그램', () => {
 
 // ── 심층 개선: DSM 절단 시 순환 과소 표기 방지 ──
 describe('ArchitectureGraphPanel — DSM 절단 정직성', () => {
+  beforeEach(() => { clearArchMetricsCache(); vi.clearAllMocks(); });
+
   it('표시 상한을 넘으면 "표시 N / 전체 M"으로 병기한다(실측 6/14 침묵 사례)', async () => {
     // 40개 파일 체인 + 뒤쪽 파일에서 앞쪽으로 되돌아가는 역행 엣지 → 상한 28에 절단된다
     const nodes = Array.from({ length: 40 }, (_, i) => ({ file: `f${String(i).padStart(2, '0')}.c`, module: 'M', functions: 1, lines: 10 }));

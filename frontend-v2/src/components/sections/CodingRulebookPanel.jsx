@@ -12,6 +12,7 @@
 import { useEffect, useState } from 'react';
 import { post } from '../../api.js';
 import { downloadBlob } from '../graphPrimitives.jsx';
+import SummaryPanel from './SummaryPanel.jsx';
 
 const xs = { fontSize: 'var(--text-xs)' };
 const btn = {
@@ -47,7 +48,7 @@ function RuleCard({ r }) {
             <div style={{ ...xs, color: 'var(--color-danger)' }}>피할 패턴</div>
             <pre style={{
               ...xs, whiteSpace: 'pre-wrap', fontFamily: 'monospace', margin: 0,
-              background: 'var(--bg-elevated, var(--hover))', border: '1px solid var(--border)',
+              background: 'var(--bg-subtle)', border: '1px solid var(--border)',
               borderRadius: 'var(--radius-sm)', padding: '3px 6px', overflowX: 'auto',
             }}>{r.avoid_pattern}</pre>
           </div>
@@ -57,7 +58,7 @@ function RuleCard({ r }) {
             <div style={{ ...xs, color: 'var(--color-success)' }}>준수 패턴</div>
             <pre style={{
               ...xs, whiteSpace: 'pre-wrap', fontFamily: 'monospace', margin: 0,
-              background: 'var(--bg-elevated, var(--hover))', border: '1px solid var(--border)',
+              background: 'var(--bg-subtle)', border: '1px solid var(--border)',
               borderRadius: 'var(--radius-sm)', padding: '3px 6px', overflowX: 'auto',
             }}>{r.comply_pattern}</pre>
           </div>
@@ -74,7 +75,7 @@ function RuleCard({ r }) {
   );
 }
 
-export default function CodingRulebookPanel({ jobUrl, cacheRoot }) {
+export default function CodingRulebookPanel({ jobUrl, cacheRoot, defaultOpen = true }) {
   const [data, setData] = useState(null);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
@@ -117,27 +118,33 @@ export default function CodingRulebookPanel({ jobUrl, cacheRoot }) {
   const totals = data?.totals || {};
 
   return (
-    <div className="panel" style={{ padding: 'var(--sp-3)' }}>
-      <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 'var(--sp-2)', marginBottom: 'var(--sp-2)' }}>
-        <div style={{ fontSize: 'var(--text-sm)', fontWeight: 600 }}>코딩 룰북 초안 (위반 → 규칙)</div>
+    <SummaryPanel
+      title="코딩 룰북 초안 (위반 → 규칙)"
+      defaultOpen={defaultOpen}
+      meta={<>
         {generated && (
           <span style={{ ...xs, color: 'var(--text-muted)' }}>
             수록 {totals.included ?? 0}건 · 제외 {totals.excluded ?? 0} · AI {totals.ai_enriched ?? 0}
           </span>
         )}
         {busy && <span className="spinner" />}
-        <div style={{ marginLeft: 'auto', display: 'flex', gap: 6 }}>
-          {generated && data?.markdown && (
-            <button type="button" style={btn} onClick={exportMd}>Markdown 저장</button>
-          )}
-          {data?.available !== false && (
-            <button type="button" style={btn} onClick={() => generate(Boolean(generated))} disabled={busy}>
-              {busy ? '생성 중…' : generated ? '재생성' : '룰북 생성 (AI)'}
-            </button>
-          )}
-        </div>
-      </div>
-
+      </>}
+      /* ⚠ 기본 접힘이라 본문의 오류·불가 안내가 화면에서 사라진다 — 헤더에 신호를 남긴다 */
+      problem={<>
+        {error && <span style={{ ...xs, color: 'var(--color-danger)' }} title={error}>⚠ 조회 실패</span>}
+        {data?.available === false && <span style={{ ...xs, color: 'var(--color-warning)' }}>대상 규칙 없음</span>}
+      </>}
+      actions={<>
+        {generated && data?.markdown && (
+          <button type="button" style={btn} onClick={exportMd}>Markdown 저장</button>
+        )}
+        {data?.available !== false && (
+          <button type="button" style={btn} onClick={() => generate(Boolean(generated))} disabled={busy}>
+            {busy ? '생성 중…' : generated ? '재생성' : '룰북 생성 (AI)'}
+          </button>
+        )}
+      </>}
+    >
       {error && <div style={{ ...xs, color: 'var(--color-danger)' }}>룰북 오류: {error}</div>}
       {data && data.available === false && (
         <div style={{ ...xs, color: 'var(--text-muted)' }}>
@@ -195,6 +202,6 @@ export default function CodingRulebookPanel({ jobUrl, cacheRoot }) {
           </div>
         </div>
       )}
-    </div>
+    </SummaryPanel>
   );
 }

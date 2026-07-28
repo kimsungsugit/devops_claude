@@ -7,6 +7,7 @@
  */
 import { useEffect, useState } from 'react';
 import { post } from '../../api.js';
+import SummaryPanel from './SummaryPanel.jsx';
 
 const xs = { fontSize: 'var(--text-xs)' };
 
@@ -77,7 +78,7 @@ function SourceBadge({ source, detail, buildNumber }) {
   );
 }
 
-export default function FunctionCoveragePanel({ jobUrl, cacheRoot }) {
+export default function FunctionCoveragePanel({ jobUrl, cacheRoot, defaultOpen = true }) {
   const [data, setData] = useState(null);
   const [error, setError] = useState('');
   useEffect(() => {
@@ -105,13 +106,15 @@ export default function FunctionCoveragePanel({ jobUrl, cacheRoot }) {
   ));
 
   return (
-    <div className="panel" style={{ padding: 'var(--sp-3)' }}>
-      <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 'var(--sp-2)', marginBottom: 'var(--sp-2)' }}>
-        <div style={{ fontSize: 'var(--text-sm)', fontWeight: 600 }}>함수별 커버리지 · 실패 테스트</div>
+    <SummaryPanel
+      title="함수별 커버리지 · 실패 테스트"
+      defaultOpen={defaultOpen}
+      meta={<>
         {data?.build_number != null && <span style={{ ...xs, color: 'var(--text-muted)' }}>빌드 #{data.build_number}</span>}
         <SourceBadge source={data?.coverage_source} detail={data?.coverage_source_detail} buildNumber={data?.build_number} />
         {!data && !error && <span className="spinner" />}
-      </div>
+      </>}
+    >
       {error && <div style={{ ...xs, color: 'var(--color-danger)' }}>조회 오류: {error}</div>}
       {data && data.available === false && (
         <div style={{ ...xs, color: 'var(--text-muted)' }}>캐시된 빌드가 없습니다.</div>
@@ -247,6 +250,6 @@ export default function FunctionCoveragePanel({ jobUrl, cacheRoot }) {
           </div>
         </div>
       )}
-    </div>
+    </SummaryPanel>
   );
 }

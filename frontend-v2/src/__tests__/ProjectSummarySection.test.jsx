@@ -1,10 +1,11 @@
 /**
- * ProjectSummarySection — 재설계(세그먼트 현황/빌드별) 단위 테스트.
- * - 현황: 문제점 배너 + 정적·동적 차트 + 추적성
- * - 빌드별: 변경 영향 타임라인 + PRQA 트렌드
+ * ProjectSummarySection — 서브탭 셸 단위 테스트.
+ * - 서브탭 밖(항상 표시): 헤더 + 문제점 배너 — 어느 탭에 있든 "지금 괜찮은가"가 보여야 한다
+ * - 서브탭 4개: 개요 / 아키텍처 / 소스코드 / 빌드 변경 (안 연 탭은 마운트 안 함)
+ * - 조회·상태는 전부 부모 소유 — 서브탭으로 내리면 그 탭을 안 연 사용자에게 배너가 조용히 빈다
  * - ISO 정직성: 커버리지 미측정≠정상, VectorCAST SCM 스냅샷
  */
-import { render, screen, within } from '@testing-library/react';
+import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
@@ -17,6 +18,7 @@ let mockTraceGenSuccess;
 let mockCfg;
 let mockAllBuilds;
 let mockSrcBuilds;
+let mockSrcBuildsFail;   // 설정하면 cached-builds-meta 가 거부한다
 let mockMatrix;
 let mockBackfill;
 
@@ -29,7 +31,9 @@ vi.mock('../api.js', () => ({
     if (u.includes('prqa-trend')) return Promise.resolve(mockPrqaTrend);
     if (u.includes('prqa-delta')) return Promise.resolve(mockPrqaDelta);
     if (u.includes('/api/jenkins/builds')) return Promise.resolve(mockAllBuilds);
-    if (u.includes('cached-builds-meta')) return Promise.resolve(mockSrcBuilds);
+    if (u.includes('cached-builds-meta')) {
+      return mockSrcBuildsFail ? Promise.reject(new Error(mockSrcBuildsFail)) : Promise.resolve(mockSrcBuilds);
+    }
     if (u.includes('change-matrix')) return Promise.resolve(mockMatrix);
     if (u.includes('sync-backfill')) return Promise.resolve(mockBackfill);
     return Promise.resolve({});
@@ -52,6 +56,9 @@ vi.mock('../traceMatrix.js', () => ({
 const { default: ProjectSummarySection } = await import('../components/sections/ProjectSummarySection.jsx');
 const { buildTraceMatrix } = await import('../traceMatrix.js');
 const { post: mockPost } = await import('../api.js');
+// ⚠ archMetricsCache 는 모듈 레벨 싱글톤이라 파일 안 테스트끼리 오염된다 —
+//   아키텍처 서브탭을 여는 테스트의 응답이 뒤 테스트로 샌다.
+const { clearArchMetricsCache } = await import('../archMetricsCache.js');
 
 const JOB = { name: 'kjpds02_pv', url: 'http://jenkins/job/KJPDS02_PV/' };
 const RESULT = {
@@ -98,8 +105,17 @@ const PRQATREND = {
   ],
 };
 
-describe('ProjectSummarySection (재설계)', () => {
+/**
+ * 서브탭 이동 헬퍼 — 예전엔 그룹 헤딩(`role="heading"`)이 렌더 동기화 지점이었지만,
+ * 이제 그 자리가 탭 버튼이라 **탭을 열어야 그 안의 패널이 마운트된다**(lazy).
+ */
+async function gotoSub(user, label) {
+  await user.click(screen.getByRole('tab', { name: label }));
+}
+
+describe('ProjectSummarySection (서브탭 재구성)', () => {
   beforeEach(() => {
+    clearArchMetricsCache();
     vi.clearAllMocks();
     mockTimeline = TIMELINE;
     mockScmVcast = SCMVCAST;
@@ -109,6 +125,7 @@ describe('ProjectSummarySection (재설계)', () => {
     mockTraceGenSuccess = false;
     mockCfg = {};
     mockAllBuilds = [];
+    mockSrcBuildsFail = '';
     mockSrcBuilds = { ok: true, available: true, builds: [
       { build_number: 125, has_source: true, source_pinned: true, timestamp_iso: '2026-07-24T13:00:11', revision: '1075' },
       { build_number: 122, has_source: true, source_pinned: true, timestamp_iso: '2026-06-25T13:00:00', revision: '1053' },
@@ -131,16 +148,130 @@ describe('ProjectSummarySection (재설계)', () => {
     localStorage.clear();
   });
 
-  // ── Phase O: 패널 숨김 + 3그룹 재배치 ──
+  // ── 서브탭 구조 ──
 
   it('숨김(사용자 결정): 파이프라인 헬스·정적동적 현황·추적성 현황·테스트 설계는 렌더하지 않는다', async () => {
+    const user = userEvent.setup();
     render(<ProjectSummarySection job={JOB} analysisResult={RESULT} />);
     await screen.findByText(/⚠ 문제 \d+건/);   // 렌더 완료 대기(배너는 유지되는 축)
+    // 개요 탭(기본): 정적동적·추적성 현황 패널은 SHOW 플래그로 숨김
     expect(screen.queryByText('정적·동적 분석 현황')).toBeNull();
     expect(screen.queryByText('추적성 현황 (SW)')).toBeNull();
     expect(screen.queryByText('6,886/6,886')).toBeNull();       // 정적동적 현황의 UT KPI
+    // 소스코드 탭: 테스트 설계 어드바이저는 SHOW.testDesign=false
+    await gotoSub(user, '소스코드');
     expect(screen.queryByText(/테스트 설계 어드바이저/)).toBeNull();
-    expect(screen.queryByTestId('pipeline-health')).toBeNull();
+  });
+
+  it('서브탭 4개를 tablist로 제공하고 기본은 개요다', async () => {
+    render(<ProjectSummarySection job={JOB} analysisResult={RESULT} />);
+    await screen.findByText(/⚠ 문제 \d+건/);
+    expect(screen.getByRole('tablist', { name: '프로젝트 분석 영역' })).toBeInTheDocument();
+    for (const label of ['개요', '아키텍처', '소스코드', '빌드 변경']) {
+      expect(screen.getByRole('tab', { name: label })).toBeInTheDocument();
+    }
+    expect(screen.getByRole('tab', { name: '개요' })).toHaveAttribute('aria-selected', 'true');
+  });
+
+  it('서브탭 키보드 네비게이션(→/Home/End)과 roving tabIndex', async () => {
+    const user = userEvent.setup();
+    render(<ProjectSummarySection job={JOB} analysisResult={RESULT} />);
+    await screen.findByText(/⚠ 문제 \d+건/);
+    const overview = screen.getByRole('tab', { name: '개요' });
+    expect(overview).toHaveAttribute('tabindex', '0');
+    expect(screen.getByRole('tab', { name: '아키텍처' })).toHaveAttribute('tabindex', '-1');
+
+    overview.focus();
+    await user.keyboard('{ArrowRight}');
+    expect(screen.getByRole('tab', { name: '아키텍처' })).toHaveAttribute('aria-selected', 'true');
+    await user.keyboard('{End}');
+    expect(screen.getByRole('tab', { name: '빌드 변경' })).toHaveAttribute('aria-selected', 'true');
+    await user.keyboard('{Home}');
+    expect(screen.getByRole('tab', { name: '개요' })).toHaveAttribute('aria-selected', 'true');
+  });
+
+  it('안 연 서브탭은 마운트하지 않는다(첫 진입 요청 폭주 차단)', async () => {
+    // ⚠ 이 단언이 재구성의 목적을 고정한다 — 예전엔 진입 즉시 11개 패널이 전부 조회했다.
+    const user = userEvent.setup();
+    render(<ProjectSummarySection job={JOB} analysisResult={RESULT} />);
+    await screen.findByText(/⚠ 문제 \d+건/);
+    const called = (frag) => mockPost.mock.calls.some(([u]) => String(u).includes(frag));
+    expect(called('architecture-metrics')).toBe(false);
+    expect(called('change-matrix')).toBe(false);
+    expect(called('prqa-rule-trend')).toBe(false);
+    expect(called('quality-detail')).toBe(false);
+
+    await gotoSub(user, '빌드 변경');
+    await vi.waitFor(() => { expect(called('change-matrix')).toBe(true); });
+    // 다른 탭 것은 여전히 안 나간다
+    expect(called('architecture-metrics')).toBe(false);
+  });
+
+  it('keep-alive: 탭을 되돌아와도 재조회하지 않는다', async () => {
+    const user = userEvent.setup();
+    render(<ProjectSummarySection job={JOB} analysisResult={RESULT} />);
+    await screen.findByText(/⚠ 문제 \d+건/);
+    await gotoSub(user, '빌드 변경');
+    await vi.waitFor(() => {
+      expect(mockPost.mock.calls.some(([u]) => String(u).includes('change-matrix'))).toBe(true);
+    });
+    const before = mockPost.mock.calls.filter(([u]) => String(u).includes('change-matrix')).length;
+    await gotoSub(user, '개요');
+    await gotoSub(user, '빌드 변경');
+    expect(mockPost.mock.calls.filter(([u]) => String(u).includes('change-matrix')).length).toBe(before);
+  });
+
+  it('캐시 빌드 목록 조회 실패를 로딩/0으로 위장하지 않는다', async () => {
+    // ⚠ 실패하면 아래 두 패널이 통째로 비는데, 사유가 없으면 "빌드가 없는 것"으로 읽힌다.
+    const user = userEvent.setup();
+    mockSrcBuildsFail = 'boom';
+    render(<ProjectSummarySection job={JOB} analysisResult={RESULT} />);
+    expect(await screen.findByText('조회 실패')).toBeInTheDocument();   // 개요 KPI sub
+    await gotoSub(user, '빌드 변경');
+    expect(await screen.findByText(/캐시 빌드 목록 조회 실패 — boom/)).toBeInTheDocument();
+  });
+
+  it('미고정 스냅샷은 탭을 안 열어도 문제점 배너에 뜬다', async () => {
+    // 경고가 '빌드 변경' 탭 안에만 있으면 lazy 라 열기 전엔 안 보인다 —
+    // '변화 0'을 코드 미변경으로 오독하게 만드는 축이라 배너로 올린다.
+    mockSrcBuilds = { ok: true, available: true, builds: [
+      { build_number: 125, has_source: true, source_pinned: true },
+      { build_number: 122, has_source: true, source_pinned: false },
+    ] };
+    render(<ProjectSummarySection job={JOB} analysisResult={RESULT} />);
+    expect(await screen.findByText('스냅샷 미고정 빌드 1')).toBeInTheDocument();
+  });
+
+  it('개요는 새 조회 없이 이미 받은 값으로 KPI를 만든다', async () => {
+    render(<ProjectSummarySection job={JOB} analysisResult={RESULT} />);
+    await screen.findByText(/⚠ 문제 \d+건/);
+    expect(screen.getByText('추적 커버리지')).toBeInTheDocument();
+    expect(screen.getByText('82%')).toBeInTheDocument();          // trace.coverage_pct
+    expect(screen.getByText('562')).toBeInTheDocument();          // prqa.rule_violation_count
+    expect(screen.getByText('823')).toBeInTheDocument();          // code_metrics.functions
+    // 개요 전용 엔드포인트는 없다 — 부모 5개 + AI probe 뿐
+    const urls = mockPost.mock.calls.map(([u]) => String(u));
+    expect(urls.some((u) => u.includes('/api/summary/') && !u.includes('ai-insight'))).toBe(false);
+  });
+
+  it('패널 제목은 role="heading"으로 잡힌다(스크린리더 점프 복원)', async () => {
+    const user = userEvent.setup();
+    render(<ProjectSummarySection job={JOB} analysisResult={RESULT} />);
+    await screen.findByText(/⚠ 문제 \d+건/);
+    await gotoSub(user, '빌드 변경');
+    expect(await screen.findByRole('heading', { name: '빌드별 변경 영향' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: '베이스라인 → 최신 변화' })).toBeInTheDocument();
+  });
+
+  it('패널은 헤더만 남기고 접을 수 있다(aria-expanded 반전)', async () => {
+    const user = userEvent.setup();
+    render(<ProjectSummarySection job={JOB} analysisResult={RESULT} />);
+    await screen.findByText(/⚠ 문제 \d+건/);
+    await gotoSub(user, '빌드 변경');
+    const btn = await screen.findByRole('button', { name: '빌드별 변경 영향 접기' });
+    expect(btn).toHaveAttribute('aria-expanded', 'true');
+    await user.click(btn);
+    expect(screen.getByRole('button', { name: '빌드별 변경 영향 펼치기' })).toHaveAttribute('aria-expanded', 'false');
   });
 
   it('추적성 패널을 숨겨도 trace는 계속 조회한다(문제점 배너·AI 인사이트 근거)', async () => {
@@ -152,11 +283,14 @@ describe('ProjectSummarySection (재설계)', () => {
     expect(mockPost.mock.calls.some(([u]) => String(u).includes('uds/trace-summary'))).toBe(true);
   });
 
-  it('3그룹 헤딩(SW 아키텍처 / 소스코드 / 빌드별 변경 영향)을 표시한다', async () => {
+  it('구 3그룹은 서브탭이 됐다 — 헤딩이 아니라 탭으로 이동한다', async () => {
+    const user = userEvent.setup();
     render(<ProjectSummarySection job={JOB} analysisResult={RESULT} />);
-    expect(await screen.findByRole('heading', { name: /SW 아키텍처/ })).toBeInTheDocument();
-    expect(screen.getByRole('heading', { name: /소스코드/ })).toBeInTheDocument();
-    expect(screen.getByRole('heading', { name: /빌드별 변경 영향/ })).toBeInTheDocument();
+    await screen.findByText(/⚠ 문제 \d+건/);
+    await gotoSub(user, '아키텍처');
+    expect(screen.getByRole('tab', { name: '아키텍처' })).toHaveAttribute('aria-selected', 'true');
+    await gotoSub(user, '소스코드');
+    expect(await screen.findByRole('heading', { name: 'PRQA 정적분석 빌드별 트렌드' })).toBeInTheDocument();
   });
 
 
@@ -233,8 +367,11 @@ describe('ProjectSummarySection (재설계)', () => {
         },
       },
     };
+    const user = userEvent.setup();
     render(<ProjectSummarySection job={JOB} analysisResult={result} />);
-    expect(await screen.findByText('정적분석 위반 상세 (PRQA/MISRA)')).toBeInTheDocument();
+    await screen.findByText(/⚠ 문제 \d+건/);
+    await gotoSub(user, '소스코드');
+    expect(await screen.findByRole('heading', { name: '정적분석 위반 상세 (PRQA/MISRA)' })).toBeInTheDocument();
     expect(screen.getByText('Rule-8.6')).toBeInTheDocument();
     expect(screen.getByText('foo.c')).toBeInTheDocument();
     expect(screen.getByText(/550건만 파일에 귀속/)).toBeInTheDocument();
@@ -272,8 +409,11 @@ describe('ProjectSummarySection (재설계)', () => {
         ...TIMELINE.rows,
       ],
     };
+    const user = userEvent.setup();
     render(<ProjectSummarySection job={JOB} analysisResult={RESULT} />);
-    await screen.findByRole('heading', { name: /빌드별 변경 영향/ });
+    await screen.findByText(/⚠ 문제 \d+건/);
+    await gotoSub(user, '빌드 변경');
+    await screen.findByRole('heading', { name: '빌드별 변경 영향' });
     expect(screen.queryByText('#—')).toBeNull();
     // 매트릭스는 change-matrix를 조회한다(build-timeline이 아니라).
     await vi.waitFor(() => {
@@ -282,8 +422,11 @@ describe('ProjectSummarySection (재설계)', () => {
   });
 
   it('베이스라인은 두 패널이 공유한다 — cached-builds-meta는 부모가 1회만 조회', async () => {
+    const user = userEvent.setup();
     render(<ProjectSummarySection job={JOB} analysisResult={RESULT} />);
-    await screen.findByRole('heading', { name: /빌드별 변경 영향/ });
+    await screen.findByText(/⚠ 문제 \d+건/);
+    await gotoSub(user, '빌드 변경');
+    await screen.findByRole('heading', { name: '빌드별 변경 영향' });
     await vi.waitFor(() => {
       expect(mockPost.mock.calls.filter(([u]) => String(u).includes('cached-builds-meta')).length).toBe(1);
     });
@@ -296,8 +439,11 @@ describe('ProjectSummarySection (재설계)', () => {
 
   it('행 클릭이 변경 영향 평가 탭으로 이동하지 않는다(핸드오프 제거)', async () => {
     window.__detailSection = vi.fn();
+    const user = userEvent.setup();
     render(<ProjectSummarySection job={JOB} analysisResult={RESULT} />);
-    await screen.findByRole('heading', { name: /빌드별 변경 영향/ });
+    await screen.findByText(/⚠ 문제 \d+건/);
+    await gotoSub(user, '빌드 변경');
+    await screen.findByRole('heading', { name: '빌드별 변경 영향' });
     expect(window.__detailSection).not.toHaveBeenCalled();
     expect(localStorage.getItem('devops_v2_impact_focus_build')).toBeNull();
     delete window.__detailSection;
@@ -320,7 +466,9 @@ describe('ProjectSummarySection (재설계)', () => {
     it('두 토글이 기본 ON이고 그대로 요청에 실린다', async () => {
       const user = userEvent.setup();
       render(<ProjectSummarySection job={JOB} analysisResult={RESULT} />);
-      await screen.findByRole('heading', { name: /빌드별 변경 영향/ });
+      await screen.findByText(/⚠ 문제 \d+건/);
+      await gotoSub(user, '빌드 변경');
+      await screen.findByRole('heading', { name: '빌드별 변경 영향' });
       const pin = screen.getByLabelText(/스냅샷을 빌드 시점 revision으로 고정/);
       const warm = screen.getByLabelText(/비교 캐시\(함수 축\) 자동 생성/);
       expect(pin).toBeChecked();
@@ -333,7 +481,9 @@ describe('ProjectSummarySection (재설계)', () => {
     it('비교 캐시는 화면에서 고른 베이스라인으로 만든다(기준 불일치 = 캐시 전량 미스)', async () => {
       const user = userEvent.setup();
       render(<ProjectSummarySection job={JOB} analysisResult={RESULT} />);
-      await screen.findByRole('heading', { name: /빌드별 변경 영향/ });
+      await screen.findByText(/⚠ 문제 \d+건/);
+      await gotoSub(user, '빌드 변경');
+      await screen.findByRole('heading', { name: '빌드별 변경 영향' });
       await vi.waitFor(() => {
         expect(mockPost.mock.calls.some(([u]) => String(u).endsWith('/api/summary/change-matrix'))).toBe(true);
       });
@@ -345,7 +495,9 @@ describe('ProjectSummarySection (재설계)', () => {
     it('토글을 끄면 꺼진 채로 전달된다', async () => {
       const user = userEvent.setup();
       render(<ProjectSummarySection job={JOB} analysisResult={RESULT} />);
-      await screen.findByRole('heading', { name: /빌드별 변경 영향/ });
+      await screen.findByText(/⚠ 문제 \d+건/);
+      await gotoSub(user, '빌드 변경');
+      await screen.findByRole('heading', { name: '빌드별 변경 영향' });
       await user.click(screen.getByLabelText(/스냅샷을 빌드 시점 revision으로 고정/));
       await user.click(screen.getByLabelText(/비교 캐시\(함수 축\) 자동 생성/));
       const body = await startBackfill(user);
@@ -355,7 +507,9 @@ describe('ProjectSummarySection (재설계)', () => {
     it('가져올 빌드 개수를 선택하면 count로 전달된다', async () => {
       const user = userEvent.setup();
       render(<ProjectSummarySection job={JOB} analysisResult={RESULT} />);
-      await screen.findByRole('heading', { name: /빌드별 변경 영향/ });
+      await screen.findByText(/⚠ 문제 \d+건/);
+      await gotoSub(user, '빌드 변경');
+      await screen.findByRole('heading', { name: '빌드별 변경 영향' });
       await user.selectOptions(screen.getByLabelText(/가져올 빌드/), '30');
       const body = await startBackfill(user);
       expect(body.count).toBe(30);
@@ -367,14 +521,20 @@ describe('ProjectSummarySection (재설계)', () => {
         { build_number: 122, has_source: true, source_pinned: false },
         { build_number: 111, has_source: true, source_pinned: false },
       ] };
+      const user = userEvent.setup();
       render(<ProjectSummarySection job={JOB} analysisResult={RESULT} />);
-      await screen.findByRole('heading', { name: /빌드별 변경 영향/ });
+      await screen.findByText(/⚠ 문제 \d+건/);
+      await gotoSub(user, '빌드 변경');
+      await screen.findByRole('heading', { name: '빌드별 변경 영향' });
       expect(await screen.findByText(/캐시 빌드 2개는 소스가/)).toBeInTheDocument();
     });
 
     it('전부 고정됐으면 재수집 안내를 내지 않는다', async () => {
+      const user = userEvent.setup();
       render(<ProjectSummarySection job={JOB} analysisResult={RESULT} />);
-      await screen.findByRole('heading', { name: /빌드별 변경 영향/ });
+      await screen.findByText(/⚠ 문제 \d+건/);
+      await gotoSub(user, '빌드 변경');
+      await screen.findByRole('heading', { name: '빌드별 변경 영향' });
       expect(screen.queryByText(/개는 소스가/)).toBeNull();
     });
   });

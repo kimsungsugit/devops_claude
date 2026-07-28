@@ -14,6 +14,7 @@
  */
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { post } from '../../api.js';
+import SummaryPanel from './SummaryPanel.jsx';
 import BuildDeltaDrilldown from './BuildDeltaDrilldown.jsx';
 
 const xs = { fontSize: 'var(--text-xs)' };
@@ -57,7 +58,7 @@ function AsilCell({ asil }) {
   );
 }
 
-export default function BuildChangeMatrixPanel({ jobUrl, cacheRoot, baseline, deltaByBuild }) {
+export default function BuildChangeMatrixPanel({ jobUrl, cacheRoot, baseline, deltaByBuild, defaultOpen = true }) {
   const [data, setData] = useState(null);
   const [error, setError] = useState('');
   const [cells, setCells] = useState({});          // build_number → 셀 결과
@@ -135,9 +136,11 @@ export default function BuildChangeMatrixPanel({ jobUrl, cacheRoot, baseline, de
   const mixedCount = rows.filter((r) => r.comparison_basis?.state === 'mixed').length;
 
   return (
-    <div className="panel" style={{ padding: 'var(--sp-3)' }}>
-      <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 'var(--sp-2)', marginBottom: 'var(--sp-1)' }}>
-        <div style={{ fontSize: 'var(--text-sm)', fontWeight: 600 }}>빌드별 변경 영향</div>
+    <SummaryPanel
+      title="빌드별 변경 영향"
+      defaultOpen={defaultOpen}
+      caption="베이스라인 대비 누적 변화 — 소스 스냅샷 직접 비교(영향분석 실행 이력과 무관)"
+      meta={<>
         {data?.baseline?.build_number != null && (
           <span style={{ ...xs, color: 'var(--text-muted)' }}>
             기준 #{data.baseline.build_number}
@@ -163,11 +166,8 @@ export default function BuildChangeMatrixPanel({ jobUrl, cacheRoot, baseline, de
             </button>
           </>
         )}
-      </div>
-      <div style={{ ...xs, color: 'var(--text-muted)', marginBottom: 'var(--sp-2)' }}>
-        베이스라인 대비 누적 변화 — 소스 스냅샷 직접 비교(영향분석 실행 이력과 무관)
-      </div>
-
+      </>}
+    >
       {error && <div style={{ ...xs, color: 'var(--color-danger)', marginBottom: 'var(--sp-2)' }}>매트릭스 조회 오류: {error}</div>}
       {data?.available === false && (
         <div style={{ ...xs, color: 'var(--text-muted)' }}>
@@ -329,7 +329,7 @@ export default function BuildChangeMatrixPanel({ jobUrl, cacheRoot, baseline, de
           * ASIL·커버리지는 빌드 #{data.join_scope.build_number} 인덱스 기준 — {data.join_scope.note}
         </div>
       )}
-    </div>
+    </SummaryPanel>
   );
 }
 

@@ -79,7 +79,7 @@ export default function BuildDeltaDrilldown({ jobUrl, cacheRoot, scmId, buildNum
   const hasChangedInfo = files.some((f) => 'in_changed_set' in f);
 
   return (
-    <div style={{ padding: 'var(--sp-2) var(--sp-3)', display: 'flex', flexDirection: 'column', gap: 'var(--sp-2)', background: 'var(--bg-elevated, var(--panel))' }}>
+    <div style={{ padding: 'var(--sp-2) var(--sp-3)', display: 'flex', flexDirection: 'column', gap: 'var(--sp-2)', background: 'var(--bg-subtle)' }}>
       {/* 헤더 — 비교 쌍 + 총계 delta */}
       <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 'var(--sp-2)' }}>
         <b style={xs}>PRQA 위반 delta</b>

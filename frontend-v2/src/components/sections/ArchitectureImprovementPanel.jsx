@@ -10,6 +10,7 @@
  */
 import { Fragment, useEffect, useState } from 'react';
 import { post } from '../../api.js';
+import SummaryPanel from './SummaryPanel.jsx';
 
 const xs = { fontSize: 'var(--text-xs)' };
 const btn = {
@@ -39,7 +40,7 @@ const REASON_KO = {
 
 const code = {
   ...xs, fontFamily: 'monospace', whiteSpace: 'pre', overflowX: 'auto',
-  background: 'var(--bg-subtle, rgba(127,127,127,0.08))', border: '1px solid var(--border)',
+  background: 'var(--bg-subtle)', border: '1px solid var(--border)',
   borderRadius: 'var(--radius-sm)', padding: '6px 8px', margin: 0, lineHeight: 1.5,
 };
 
@@ -163,7 +164,7 @@ function StructureList({ title, nodes, edges, isTarget }) {
   );
 }
 
-export default function ArchitectureImprovementPanel({ jobUrl, cacheRoot }) {
+export default function ArchitectureImprovementPanel({ jobUrl, cacheRoot, defaultOpen = true }) {
   const [data, setData] = useState(null);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
@@ -214,9 +215,10 @@ export default function ArchitectureImprovementPanel({ jobUrl, cacheRoot }) {
   const td2 = data?.target_design;
 
   return (
-    <div className="panel" style={{ padding: 'var(--sp-3)' }}>
-      <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 'var(--sp-2)', marginBottom: 'var(--sp-2)' }}>
-        <div style={{ fontSize: 'var(--text-sm)', fontWeight: 600 }}>아키텍처 개선 제안 (To-Be)</div>
+    <SummaryPanel
+      title="아키텍처 개선 제안 (To-Be)"
+      defaultOpen={defaultOpen}
+      meta={<>
         {data?.available && (
           <span style={{ ...xs, color: 'var(--text-muted)' }}>
             빌드 #{data.build_number} · 후보 {data.summary?.total ?? 0}건
@@ -225,13 +227,13 @@ export default function ArchitectureImprovementPanel({ jobUrl, cacheRoot }) {
           </span>
         )}
         {busy && <span className="spinner" />}
-        {data?.available && (data.summary?.total ?? 0) > 0 && (
-          <button type="button" style={{ ...btn, marginLeft: 'auto' }} onClick={() => generate(Boolean(td2))} disabled={busy}>
-            {busy ? '생성 중…' : td2 ? '목표 구조 재생성' : '목표 구조 생성 (AI)'}
-          </button>
-        )}
-      </div>
-
+      </>}
+      actions={data?.available && (data.summary?.total ?? 0) > 0 ? (
+        <button type="button" style={btn} onClick={() => generate(Boolean(td2))} disabled={busy}>
+          {busy ? '생성 중…' : td2 ? '목표 구조 재생성' : '목표 구조 생성 (AI)'}
+        </button>
+      ) : undefined}
+    >
       {error && <div style={{ ...xs, color: 'var(--color-danger)' }}>개선 제안 오류: {error}</div>}
       {data && data.available === false && (
         <div style={{ ...xs, color: 'var(--text-muted)' }}>
@@ -309,7 +311,7 @@ export default function ArchitectureImprovementPanel({ jobUrl, cacheRoot }) {
                           </tr>
                           {open && (
                             <tr>
-                              <td colSpan={6} style={{ ...td, background: 'var(--bg-subtle, rgba(127,127,127,0.04))' }}>
+                              <td colSpan={6} style={{ ...td, background: 'var(--bg-subtle)' }}>
                                 <PlaybookDetail detail={c.detail} />
                               </td>
                             </tr>
@@ -353,6 +355,6 @@ export default function ArchitectureImprovementPanel({ jobUrl, cacheRoot }) {
           </div>
         </div>
       )}
-    </div>
+    </SummaryPanel>
   );
 }

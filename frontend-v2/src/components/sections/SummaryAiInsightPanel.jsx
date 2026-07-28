@@ -9,6 +9,7 @@
  */
 import { useEffect, useRef, useState } from 'react';
 import { api, post } from '../../api.js';
+import SummaryPanel from './SummaryPanel.jsx';
 
 const SECTION_REASON_KO = {
   llm_unavailable: 'LLM 미설정 — 결정론 분석만 표시',
@@ -106,9 +107,9 @@ export default function SummaryAiInsightPanel({ jobUrl, cacheRoot, scmId, trace 
   const det = data?.deterministic || {};
 
   return (
-    <div className="panel" style={{ padding: 'var(--sp-3)' }}>
-      <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 'var(--sp-2)', marginBottom: 'var(--sp-2)' }}>
-        <div style={{ fontSize: 'var(--text-sm)', fontWeight: 600 }}>🤖 AI 인사이트 (Gemini)</div>
+    <SummaryPanel
+      title="🤖 AI 인사이트 (Gemini)"
+      meta={<>
         {phase === 'probing' && <span className="spinner" />}
         {phase === 'generating' && (
           <>
@@ -126,13 +127,14 @@ export default function SummaryAiInsightPanel({ jobUrl, cacheRoot, scmId, trace 
             AI 인사이트 생성
           </button>
         )}
-        {phase === 'done' && (
-          <button type="button" onClick={() => generate(true)} disabled={false}
-            style={{ ...xs, marginLeft: 'auto', padding: '2px 8px', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', background: 'transparent', cursor: 'pointer', color: 'var(--text-muted)' }}>
-            재생성
-          </button>
-        )}
-      </div>
+      </>}
+      actions={phase === 'done' ? (
+        <button type="button" onClick={() => generate(true)}
+          style={{ ...xs, padding: '2px 8px', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', background: 'transparent', cursor: 'pointer', color: 'var(--text-muted)' }}>
+          재생성
+        </button>
+      ) : undefined}
+    >
 
       {phase === 'idle' && (
         <div style={{ ...xs, color: 'var(--text-muted)' }}>
@@ -189,7 +191,7 @@ export default function SummaryAiInsightPanel({ jobUrl, cacheRoot, scmId, trace 
                   {it.evidence_quote && (
                     <pre style={{
                       whiteSpace: 'pre-wrap', fontFamily: 'monospace', fontSize: 'var(--text-xs)',
-                      background: 'var(--bg-elevated, var(--hover))', border: '1px solid var(--border)',
+                      background: 'var(--bg-subtle)', border: '1px solid var(--border)',
                       borderRadius: 'var(--radius-sm)', padding: '4px 8px', margin: '4px 0', overflowX: 'auto',
                     }}>{it.evidence_quote}</pre>
                   )}
@@ -276,6 +278,6 @@ export default function SummaryAiInsightPanel({ jobUrl, cacheRoot, scmId, trace 
           </div>
         </div>
       )}
-    </div>
+    </SummaryPanel>
   );
 }

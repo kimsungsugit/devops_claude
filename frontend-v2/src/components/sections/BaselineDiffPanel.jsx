@@ -9,6 +9,7 @@
  */
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { post } from '../../api.js';
+import SummaryPanel from './SummaryPanel.jsx';
 
 const xs = { fontSize: 'var(--text-xs)' };
 
@@ -153,7 +154,7 @@ function SnapshotTrustBanner({ data }) {
  * 갈라져 "어느 쪽이 진짜인가"를 사용자가 물어야 한다. 폴백 자체 fetch도 두지 않는다 —
  * 한 선택에 출처가 둘이면 그게 영구 버그원이다.
  */
-export default function BaselineDiffPanel({ jobUrl, cacheRoot, builds, baseline, target, onChangeBaseline, onChangeTarget }) {
+export default function BaselineDiffPanel({ jobUrl, cacheRoot, builds, baseline, target, onChangeBaseline, onChangeTarget, defaultOpen = true }) {
   const [data, setData] = useState(null);
   const [delta, setDelta] = useState(null);        // 같은 쌍 PRQA 위반 delta
   const [busy, setBusy] = useState(false);
@@ -230,29 +231,26 @@ export default function BaselineDiffPanel({ jobUrl, cacheRoot, builds, baseline,
   const gap = fns.gap_summary || null;
 
   return (
-    <div className="panel" style={{ padding: 'var(--sp-3)' }}>
-      <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 'var(--sp-2)', marginBottom: 'var(--sp-1)' }}>
-        <div style={{ fontSize: 'var(--text-sm)', fontWeight: 600 }}>베이스라인 → 최신 변화</div>
-        {builds && builds.length >= 2 && (
-          <>
-            <select aria-label="베이스라인 빌드" value={baseline} onChange={(e) => { onChangeBaseline?.(e.target.value); setData(null); }} style={sel}>
-              {builds.map((b) => <option key={b.build_number} value={b.build_number}>{buildLabel(b)}</option>)}
-            </select>
-            <span style={{ ...xs, color: 'var(--text-muted)' }}>→</span>
-            <select aria-label="대상 빌드" value={target} onChange={(e) => { onChangeTarget?.(e.target.value); setData(null); }} style={sel}>
-              {builds.map((b) => <option key={b.build_number} value={b.build_number}>{buildLabel(b)}</option>)}
-            </select>
-            <button type="button" onClick={compare} disabled={busy}
-              style={{ ...xs, padding: '2px 8px', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', background: 'transparent', cursor: busy ? 'wait' : 'pointer', color: 'var(--text-muted)' }}>
-              {busy ? '비교 중…' : '비교'}
-            </button>
-          </>
-        )}
-      </div>
-      <div style={{ ...xs, color: 'var(--text-muted)', marginBottom: 'var(--sp-2)' }}>
-        영향분석 이력(change-log)과 무관 — 소스 스냅샷 직접 비교
-      </div>
-
+    <SummaryPanel
+      title="베이스라인 → 최신 변화"
+      defaultOpen={defaultOpen}
+      caption="영향분석 이력(change-log)과 무관 — 소스 스냅샷 직접 비교"
+      meta={builds && builds.length >= 2 ? (
+        <>
+          <select aria-label="베이스라인 빌드" value={baseline} onChange={(e) => { onChangeBaseline?.(e.target.value); setData(null); }} style={sel}>
+            {builds.map((b) => <option key={b.build_number} value={b.build_number}>{buildLabel(b)}</option>)}
+          </select>
+          <span style={{ ...xs, color: 'var(--text-muted)' }}>→</span>
+          <select aria-label="대상 빌드" value={target} onChange={(e) => { onChangeTarget?.(e.target.value); setData(null); }} style={sel}>
+            {builds.map((b) => <option key={b.build_number} value={b.build_number}>{buildLabel(b)}</option>)}
+          </select>
+          <button type="button" onClick={compare} disabled={busy}
+            style={{ ...xs, padding: '2px 8px', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', background: 'transparent', cursor: busy ? 'wait' : 'pointer', color: 'var(--text-muted)' }}>
+            {busy ? '비교 중…' : '비교'}
+          </button>
+        </>
+      ) : undefined}
+    >
       {error && <div style={{ ...xs, color: 'var(--color-danger)' }}>비교 오류: {error}</div>}
       {builds && builds.length < 2 && (
         <div style={{ ...xs, color: 'var(--text-muted)' }}>소스 스냅샷 빌드가 2개 이상 필요합니다(현재 {builds.length}개) — '과거 빌드 가져오기'로 채울 수 있습니다.</div>
@@ -415,6 +413,6 @@ export default function BaselineDiffPanel({ jobUrl, cacheRoot, builds, baseline,
           )}
         </div>
       )}
-    </div>
+    </SummaryPanel>
   );
 }

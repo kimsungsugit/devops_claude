@@ -10,8 +10,9 @@
  * 한계를 고지(추정≠선언, 사용≠쓰기, 검토 후보≠위반).
  */
 import { useEffect, useState } from 'react';
-import { post } from '../../api.js';
+import { fetchArchMetrics } from '../../archMetricsCache.js';
 import { HorizontalBar } from '../charts.jsx';
+import SummaryPanel from './SummaryPanel.jsx';
 
 const xs = { fontSize: 'var(--text-xs)' };
 
@@ -20,7 +21,9 @@ function Stat({ label, value, tone, title }) {
   return (
     <div title={title} style={{ minWidth: 88 }}>
       <div style={{ ...xs, color: 'var(--text-muted)' }}>{label}</div>
-      <div style={{ fontSize: 'var(--text-md, 14px)', fontWeight: 700, color: tone || 'var(--text)' }}>{value}</div>
+      {/* --text-lg = 14px. 예전엔 `var(--text-md, 14px)` 였는데 --text-md 가 실제로 13px 이라
+          폴백 14px 는 영구히 발동하지 않았다(의도한 크기가 아니었음). */}
+      <div style={{ fontSize: 'var(--text-lg)', fontWeight: 700, color: tone || 'var(--text)' }}>{value}</div>
     </div>
   );
 }
@@ -40,7 +43,7 @@ function Section({ title, desc, defaultOpen, children }) {
 
 const COLS = { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 'var(--sp-4)' };
 
-export default function ArchitectureMetricsPanel({ jobUrl, cacheRoot }) {
+export default function ArchitectureMetricsPanel({ jobUrl, cacheRoot, defaultOpen = true }) {
   const [data, setData] = useState(null);
   const [error, setError] = useState('');
   useEffect(() => {
@@ -48,7 +51,8 @@ export default function ArchitectureMetricsPanel({ jobUrl, cacheRoot }) {
     let cancelled = false;
     (async () => {
       try {
-        const resp = await post('/api/summary/architecture-metrics', { job_url: jobUrl, cache_root: cacheRoot });
+        // 다이어그램 패널과 **같은 요청**이라 공유 캐시를 거친다(예전엔 두 패널이 각자 POST 했다).
+        const resp = await fetchArchMetrics(jobUrl, cacheRoot);
         if (!cancelled) { setData(resp); setError(''); }
       } catch (e) {
         if (!cancelled) setError(String(e?.message || e));
@@ -70,17 +74,18 @@ export default function ArchitectureMetricsPanel({ jobUrl, cacheRoot }) {
   const cycles = (data?.cycles?.file_sccs || []).length;
 
   return (
-    <div className="panel" style={{ padding: 'var(--sp-3)' }}>
-      <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 'var(--sp-2)', marginBottom: 'var(--sp-2)' }}>
-        <div style={{ fontSize: 'var(--text-sm)', fontWeight: 600 }}>아키텍처 메트릭 (소스 스냅샷)</div>
+    <SummaryPanel
+      title="아키텍처 메트릭 (소스 스냅샷)"
+      defaultOpen={defaultOpen}
+      meta={<>
         {data?.available && data?.snapshot && (
           <span style={{ ...xs, color: 'var(--text-muted)' }}>
             빌드 #{data.build_number} · 파일 {data.snapshot.files} · 함수 {data.snapshot.functions}
           </span>
         )}
         {!data && !error && <span className="spinner" />}
-      </div>
-
+      </>}
+    >
       {error && <div style={{ ...xs, color: 'var(--color-danger)' }}>아키텍처 메트릭 오류: {error}</div>}
       {data && data.available === false && (
         <div style={{ ...xs, color: 'var(--text-muted)' }}>
@@ -299,6 +304,6 @@ export default function ArchitectureMetricsPanel({ jobUrl, cacheRoot }) {
           </Section>
         </>
       )}
-    </div>
+    </SummaryPanel>
   );
 }

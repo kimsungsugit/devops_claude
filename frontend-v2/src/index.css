@@ -29,6 +29,9 @@ html, body {
   --warning: #ffab00;
   --highlight: #fffae6;
   --card-shadow: rgba(9, 30, 66, 0.08);
+  /* 카드 안의 '옴폭한 표면'(코드 블록·펼친 행). 정의 없이 참조만 하던 토큰이라
+   * 같은 의미의 <pre>가 패널마다 다른 색으로 보였다 → 여기서 단일 정의. */
+  --bg-subtle: #f4f5f7;
 
   --color-success: #22c55e;
   --color-success-soft: rgba(34, 197, 94, 0.10);
@@ -89,6 +92,7 @@ body[data-theme='dark'] {
   --success: #22c55e;
   --warning: #fbbf24;
   --card-shadow: rgba(0, 0, 0, 0.25);
+  --bg-subtle: #0d1526;
   --color-success: #4ade80;
   --color-success-soft: rgba(74, 222, 128, 0.12);
   --color-warning: #fbbf24;
@@ -197,7 +201,10 @@ body {
   font-weight: 600;
 }
 
-/* 문서 생성 허브 — 6개 생성 종류를 전환하는 옵션 세그먼트 서브내비 */
+/* 섹션 내부 서브내비 — 한 탭 안의 화면을 나누는 옵션 세그먼트.
+ * 문서 생성 허브(.docgen-subnav)가 먼저 썼고 프로젝트 분석 탭이 같은 패턴을 쓰면서
+ * 일반 이름(.subnav)으로 승격했다. .docgen-subnav 는 기존 사용처를 위한 별칭. */
+.subnav,
 .docgen-subnav {
   display: flex;
   flex-wrap: wrap;
@@ -205,6 +212,7 @@ body {
   border-bottom: 1px solid var(--border);
   margin-bottom: var(--sp-4);
 }
+.subnav .tab-item,
 .docgen-subnav .tab-item {
   padding: 8px var(--sp-3);
   font-size: var(--text-sm);
@@ -810,6 +818,7 @@ label {
   .app-header { padding: 0 var(--sp-2); height: 40px; }
   .tab-bar { overflow-x: auto; }
   .tab-item { padding: 8px var(--sp-3); font-size: var(--text-sm); white-space: nowrap; }
+  .subnav { flex-wrap: nowrap; overflow-x: auto; }
   /* 좁은 폭에서 메인 탭바와 동일하게 한 줄 가로 스크롤 유지(wrap로 인한 헤더 높이 가변 방지) */
   .docgen-subnav { flex-wrap: nowrap; overflow-x: auto; }
   .stats-row { flex-direction: column; }

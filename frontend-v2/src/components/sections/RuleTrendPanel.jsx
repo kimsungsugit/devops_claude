@@ -10,6 +10,7 @@
 import { Fragment, useEffect, useMemo, useState } from 'react';
 import { post } from '../../api.js';
 import { TrendLine } from '../charts.jsx';
+import SummaryPanel from './SummaryPanel.jsx';
 import {
   CrossModuleBadge,
   RuleDefinitionCard,
@@ -73,7 +74,7 @@ function FixExampleCard({ jobUrl, cacheRoot, rule, file }) {
   };
   const mono = {
     whiteSpace: 'pre-wrap', fontFamily: 'monospace', fontSize: 'var(--text-xs)',
-    background: 'var(--bg-elevated, var(--hover))', border: '1px solid var(--border)',
+    background: 'var(--bg-subtle)', border: '1px solid var(--border)',
     borderRadius: 'var(--radius-sm)', padding: '4px 8px', margin: '2px 0', overflowX: 'auto',
   };
   const crossModule = file?.scope === 'cross_module';
@@ -142,7 +143,7 @@ function FixExampleCard({ jobUrl, cacheRoot, rule, file }) {
   );
 }
 
-export default function RuleTrendPanel({ jobUrl, cacheRoot }) {
+export default function RuleTrendPanel({ jobUrl, cacheRoot, defaultOpen = true }) {
   const [data, setData] = useState(null);
   const [error, setError] = useState('');
   const [expandedRule, setExpandedRule] = useState(null);
@@ -174,9 +175,10 @@ export default function RuleTrendPanel({ jobUrl, cacheRoot }) {
   const td = { ...xs, padding: '4px 8px', borderBottom: '1px solid var(--border)', whiteSpace: 'nowrap' };
 
   return (
-    <div className="panel" style={{ padding: 'var(--sp-3)' }}>
-      <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 'var(--sp-2)', marginBottom: 'var(--sp-2)' }}>
-        <div style={{ fontSize: 'var(--text-sm)', fontWeight: 600 }}>룰 트렌드 (빌드별 위반 변화)</div>
+    <SummaryPanel
+      title="룰 트렌드 (빌드별 위반 변화)"
+      defaultOpen={defaultOpen}
+      meta={<>
         {data?.available && (
           <span style={{ ...xs, color: 'var(--text-muted)' }}>
             {(data.builds || []).filter((b) => b.analyzed).length}개 빌드 관측
@@ -184,8 +186,13 @@ export default function RuleTrendPanel({ jobUrl, cacheRoot }) {
           </span>
         )}
         {!data && !error && <span className="spinner" />}
-      </div>
-
+      </>}
+      /* ⚠ 기본 접힘이라 본문의 오류·불가 안내가 화면에서 사라진다 — 헤더에 신호를 남긴다 */
+      problem={<>
+        {error && <span style={{ ...xs, color: 'var(--color-danger)' }} title={error}>⚠ 조회 실패</span>}
+        {data?.available === false && <span style={{ ...xs, color: 'var(--color-warning)' }}>관측 없음</span>}
+      </>}
+    >
       {error && <div style={{ ...xs, color: 'var(--color-danger)' }}>룰 트렌드 조회 오류: {error}</div>}
       {data && data.available === false && (
         <div style={{ ...xs, color: 'var(--text-muted)' }}>
@@ -357,6 +364,6 @@ export default function RuleTrendPanel({ jobUrl, cacheRoot }) {
           </div>
         </>
       )}
-    </div>
+    </SummaryPanel>
   );
 }

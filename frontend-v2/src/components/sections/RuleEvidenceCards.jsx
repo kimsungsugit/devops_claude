@@ -218,7 +218,7 @@ const btn = {
 };
 const mono = {
   whiteSpace: 'pre-wrap', fontFamily: 'monospace', fontSize: 'var(--text-xs)',
-  background: 'var(--bg-elevated, var(--hover))', border: '1px solid var(--border)',
+  background: 'var(--bg-subtle)', border: '1px solid var(--border)',
   borderRadius: 'var(--radius-sm)', padding: '4px 8px', margin: '2px 0', overflowX: 'auto',
 };
 

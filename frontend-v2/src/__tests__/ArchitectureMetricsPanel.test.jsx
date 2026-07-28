@@ -14,6 +14,9 @@ vi.mock('../api.js', () => ({
 }));
 
 import ArchitectureMetricsPanel from '../components/sections/ArchitectureMetricsPanel.jsx';
+// ⚠ archMetricsCache 는 모듈 레벨 싱글톤이다 — 비우지 않으면 첫 테스트의 응답이
+//   같은 (jobUrl, cacheRoot) 키로 뒤 테스트에 그대로 재사용된다(격리 오염).
+import { clearArchMetricsCache } from '../archMetricsCache.js';
 
 const RESP = {
   ok: true, available: true, version: 4, build_number: 125,
@@ -53,7 +56,7 @@ const RESP = {
 };
 
 describe('ArchitectureMetricsPanel v4', () => {
-  beforeEach(() => { vi.clearAllMocks(); mockResp = RESP; });
+  beforeEach(() => { clearArchMetricsCache(); vi.clearAllMocks(); mockResp = RESP; });
 
   it('ASIL 간섭 후보 — 등급 상이 호출과 판정 아님 고지', async () => {
     render(<ArchitectureMetricsPanel jobUrl="http://j/" cacheRoot="" />);
@@ -110,7 +113,7 @@ describe('ArchitectureMetricsPanel v4', () => {
 
 // ── Q1: 요약 스트립 + 아코디언 재구성 ──
 describe('ArchitectureMetricsPanel — Q1 레이아웃', () => {
-  beforeEach(() => { vi.clearAllMocks(); mockResp = { ...RESP, layer_graph: { available: true, reverse_total: 87 } }; });
+  beforeEach(() => { clearArchMetricsCache(); vi.clearAllMocks(); mockResp = { ...RESP, layer_graph: { available: true, reverse_total: 87 } }; });
 
   it('요약 스트립에 핵심 숫자를 한 줄로 먼저 준다', async () => {
     render(<ArchitectureMetricsPanel jobUrl="http://j/" cacheRoot="" />);

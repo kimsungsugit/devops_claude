@@ -7,9 +7,10 @@
  * 복잡도 출처 혼합(vcast_ccn 측정 vs loc_proxy 줄수 추정)이라 마커 모양으로 구분한다.
  */
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { post } from '../../api.js';
+import { fetchArchMetrics } from '../../archMetricsCache.js';
 import { AG, layoutModules } from '../archGraphLayout.js';
 import { bezierEdgeH, exportPng, exportSvg } from '../graphPrimitives.jsx';
+import SummaryPanel from './SummaryPanel.jsx';
 
 const xs = { fontSize: 'var(--text-xs)' };
 const btn = {
@@ -592,7 +593,7 @@ function CycleList({ cycles }) {
   );
 }
 
-export default function ArchitectureGraphPanel({ jobUrl, cacheRoot }) {
+export default function ArchitectureGraphPanel({ jobUrl, cacheRoot, defaultOpen = true }) {
   const [data, setData] = useState(null);
   const [error, setError] = useState('');
   useEffect(() => {
@@ -600,7 +601,8 @@ export default function ArchitectureGraphPanel({ jobUrl, cacheRoot }) {
     let cancelled = false;
     (async () => {
       try {
-        const resp = await post('/api/summary/architecture-metrics', { job_url: jobUrl, cache_root: cacheRoot });
+        // 메트릭 패널과 **같은 요청**이라 공유 캐시를 거친다(예전엔 두 패널이 각자 POST 했다).
+        const resp = await fetchArchMetrics(jobUrl, cacheRoot);
         if (!cancelled) { setData(resp); setError(''); }
       } catch (e) {
         if (!cancelled) setError(String(e?.message || e));
@@ -610,17 +612,23 @@ export default function ArchitectureGraphPanel({ jobUrl, cacheRoot }) {
   }, [jobUrl, cacheRoot]);
 
   return (
-    <div className="panel" style={{ padding: 'var(--sp-3)' }}>
-      <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 'var(--sp-2)', marginBottom: 'var(--sp-2)' }}>
-        <div style={{ fontSize: 'var(--text-sm)', fontWeight: 600 }}>아키텍처 다이어그램 (모듈 관계·순환·핫스팟)</div>
+    <SummaryPanel
+      title="아키텍처 다이어그램 (모듈 관계·순환·핫스팟)"
+      defaultOpen={defaultOpen}
+      meta={<>
         {data?.available && (
           <span style={{ ...xs, color: 'var(--text-muted)' }}>
             빌드 #{data.build_number} · 모듈 {(data.module_graph?.nodes || []).length} · 관계 {(data.module_graph?.edges || []).length}
           </span>
         )}
         {!data && !error && <span className="spinner" />}
-      </div>
-
+      </>}
+      /* ⚠ 기본 접힘이라 본문의 오류·불가 안내가 화면에서 사라진다 — 헤더에 신호를 남긴다 */
+      problem={<>
+        {error && <span style={{ ...xs, color: 'var(--color-danger)' }} title={error}>⚠ 조회 실패</span>}
+        {data?.available === false && <span style={{ ...xs, color: 'var(--color-warning)' }}>다이어그램 미생성</span>}
+      </>}
+    >
       {error && <div style={{ ...xs, color: 'var(--color-danger)' }}>아키텍처 다이어그램 오류: {error}</div>}
       {data && data.available === false && (
         <div style={{ ...xs, color: 'var(--text-muted)' }}>
@@ -659,6 +667,6 @@ export default function ArchitectureGraphPanel({ jobUrl, cacheRoot }) {
           </div>
         </div>
       )}
-    </div>
+    </SummaryPanel>
   );
 }
