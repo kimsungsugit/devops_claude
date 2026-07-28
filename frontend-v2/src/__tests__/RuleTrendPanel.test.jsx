@@ -7,11 +7,13 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 let mockTrend;
 let mockFix;
+let mockWindow;
 
 vi.mock('../api.js', () => ({
   post: vi.fn((url) => {
     const u = String(url);
     if (u.includes('prqa-rule-trend')) return Promise.resolve(mockTrend);
+    if (u.includes('rule-window-changes')) return Promise.resolve(mockWindow);
     if (u.includes('rule-fix-example')) {
       return mockFix instanceof Error ? Promise.reject(mockFix) : Promise.resolve(mockFix);
     }
@@ -67,7 +69,7 @@ describe('RuleTrendPanel', () => {
     expect(screen.getAllByText('지속 발생').length).toBeGreaterThan(0);
     expect(screen.getByText('-4')).toBeInTheDocument();
     expect(screen.getByText(/2개 빌드 관측/)).toBeInTheDocument();
-    expect(screen.getByText(/미분석 빌드 자리는 선이 끊겨/)).toBeInTheDocument();
+    expect(screen.getByText(/규칙 미적용 구간은 선이 끊겨/)).toBeInTheDocument();
   });
 
   it('null 자리는 스파크라인이 분절된다(0으로 잇지 않음 — polyline 2세그먼트 아님, 점 2개)', async () => {
@@ -162,6 +164,111 @@ describe('RuleTrendPanel', () => {
     render(<RuleTrendPanel {...PROPS} />);
     await screen.findByText('Rule-9.9');
     expect(screen.queryByText(/▸ (예시|증거)/)).toBeNull();  // from==to — 구간 증거 성립 불가
+  });
+
+  it('감소 근거는 실제 감소 구간(decrease_window)을 표기하고 분류와 무관하게 열린다', async () => {
+    // 총량이 늘어난(increasing) 규칙 안에도 줄어든 파일이 있으면 예시 근거가 된다.
+    mockTrend = {
+      ...TREND,
+      rules: [{
+        rule: 'Rule-2.2', counts: [35, null, 38], latest: 38, first: 35, net: 3,
+        classification: 'increasing', files_latest: [], increased_files: [],
+        decrease_window: { from_build: 122, to_build: 123, delta: -1, file_delta: -2 },
+        decreased_files: [{ path: 'APP/foo.c', from_build: 122, to_build: 123, delta: -2, count_from: 14, count_to: 12 }],
+      }],
+    };
+    render(<RuleTrendPanel {...PROPS} />);
+    await screen.findByText('Rule-2.2');
+    await userEvent.click(screen.getByText('▸ 예시'));
+    // 규칙 총계(-1)가 아니라 아래 목록의 합(-2) — 표시와 목록이 어긋나지 않아야 한다.
+    expect(screen.getByText(/감소 구간 #122→#123 \(파일 합 -2건\)/)).toBeInTheDocument();
+    await userEvent.click(screen.getByText('작성 예시 생성'));
+    // 관측 구간(#122→#125)이 아니라 감소가 실제 일어난 구간으로 요청해야 diff가 잡힌다.
+    expect(post).toHaveBeenCalledWith('/api/summary/rule-fix-example', expect.objectContaining({
+      rule: 'Rule-2.2', file: 'APP/foo.c', from_build: 122, to_build: 123,
+    }));
+  });
+
+  it('신규 발생 규칙은 발생 구간(increase_window) 증거를 연다', async () => {
+    mockTrend = {
+      ...TREND,
+      observed_range: { from_build: 122, to_build: 125 },
+      rules: [{
+        rule: 'C-INT-003', counts: [null, null, 2], latest: 2, first: 0, net: 2,
+        classification: 'new_recent', files_latest: [{ path: 'APP/bar.c', count: 2 }],
+        decreased_files: [],
+        increase_window: { from_build: 124, to_build: 125, delta: 2, file_delta: 2 },
+        increased_files: [{ path: 'APP/bar.c', from_build: 124, to_build: 125, delta: 2, count_from: 0, count_to: 2 }],
+      }],
+    };
+    render(<RuleTrendPanel {...PROPS} />);
+    await screen.findByText('C-INT-003');
+    await userEvent.click(screen.getByText('▸ 발생'));
+    expect(screen.getByText(/발생 구간 #124→#125 \(파일 합 \+2건\)/)).toBeInTheDocument();
+    expect(screen.getByText(/구간 증거 보기 \(#124→#125\)/)).toBeInTheDocument();
+  });
+
+  it('cross_module(RCMA) 엔트리는 배지 + 사유만 — 예시 생성 버튼 없음(LLM 호출 0)', async () => {
+    mockTrend = {
+      ...TREND,
+      cross_module_keys: ['RCMA'],
+      rules: [{
+        rule: 'Rule-8.6', counts: [105, null, 99], latest: 99, first: 105, net: -6,
+        classification: 'decreasing', files_latest: [{ path: 'RCMA', count: 99, scope: 'cross_module' }],
+        decrease_window: { from_build: 122, to_build: 123, delta: -5 },
+        decreased_files: [{ path: 'RCMA', from_build: 122, to_build: 123, delta: -5, scope: 'cross_module' }],
+      }],
+    };
+    render(<RuleTrendPanel {...PROPS} />);
+    await screen.findByText('Rule-8.6');
+    await userEvent.click(screen.getByText('▸ 예시'));
+    expect(screen.getAllByText('모듈 간 분석').length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/특정 파일에 귀속되지 않아/).length).toBeGreaterThan(0);
+    expect(screen.queryByText('작성 예시 생성')).toBeNull();  // 파일 실체 없음 — 호출 자체 차단
+  });
+
+  it('cross_module이어도 구간 변경 파일은 볼 수 있다(파일이 없는 것 ≠ 볼 게 없는 것)', async () => {
+    mockTrend = {
+      ...TREND,
+      rules: [{
+        rule: 'Rule-8.6', counts: [105, null, 99], latest: 99, first: 105, net: -6,
+        classification: 'decreasing', files_latest: [{ path: 'RCMA', count: 99, scope: 'cross_module' }],
+        decrease_window: { from_build: 122, to_build: 123, delta: -5, file_delta: -5 },
+        decreased_files: [{ path: 'RCMA', from_build: 122, to_build: 123, delta: -5, scope: 'cross_module' }],
+      }],
+    };
+    mockWindow = {
+      ok: true, available: true, attribution: 'observational',
+      note: '모듈 간 분석(RCMA) 위반은 특정 파일에 귀속되지 않습니다. 아래는 같은 빌드 구간에서 변경된 파일이며, 위반 증감의 원인이라는 판정이 아닙니다(관측 ≠ 인과).',
+      totals: { changed: 26, headers: 10, decl_touched_files: 9, typedef_touched_files: 3 },
+      omitted: 0,
+      changed_files: [
+        { path: 'APP/Ap_MotorCtrl_it_PDS.h', change_kind: 'modified', lines_added: 17, lines_removed: 70, decl_touched: 29, typedef_touched: 4, is_header: true },
+        { path: 'APP/Ap_MotorCtrl_PDS.c', change_kind: 'modified', lines_added: 236, lines_removed: 1879, decl_touched: 25, typedef_touched: 2, is_header: false },
+      ],
+    };
+    render(<RuleTrendPanel {...PROPS} />);
+    await screen.findByText('Rule-8.6');
+    await userEvent.click(screen.getByText('▸ 예시'));
+    await userEvent.click(screen.getByText(/이 구간 변경 파일 보기 \(#122→#123\)/));
+    expect(await screen.findByText('APP/Ap_MotorCtrl_it_PDS.h')).toBeInTheDocument();
+    expect(screen.getByText(/변경 26개 · 헤더 10 · 선언 변경 9/)).toBeInTheDocument();
+    // 인과로 격상하지 않는다는 고지가 항상 붙어야 한다.
+    expect(screen.getByText(/관측 ≠ 인과/)).toBeInTheDocument();
+  });
+
+  it('규칙셋 도중 확장은 "#N부터 규칙 적용" + 각주로 구분(신규 발생 오독 방지)', async () => {
+    mockTrend = {
+      ...TREND,
+      ruleset_sizes: [104, null, 242],
+      rules: [{
+        ...TREND.rules[0], rule: 'C-POS-012', applied_from_build: 125, scope_narrowed: true,
+      }],
+    };
+    render(<RuleTrendPanel {...PROPS} />);
+    await screen.findByText('C-POS-012');
+    expect(screen.getByText('#125부터 규칙 적용')).toBeInTheDocument();
+    expect(screen.getByText(/규칙셋이 104→242개로 변동/)).toBeInTheDocument();
   });
 
   it('규칙 설명(RCFInfo)이 있으면 규칙 아래 한 줄로 렌더, 없으면 생략', async () => {

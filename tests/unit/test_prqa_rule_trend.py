@@ -1,9 +1,19 @@
-"""prqa_rule_trend — 규칙×빌드 분류 5종·미분석 null·insufficient_data·residual 제외."""
+"""prqa_rule_trend — 규칙×빌드 분류 5종·미분석 null·insufficient_data·residual 제외.
+
+추가 계약(2026-07-27): 규칙 미적용 빌드 null(규칙셋 확장을 '신규 발생'으로 오분류 금지) ·
+변화 구간(decrease/increase window) 기반 파일 증거 · RCMA류 pseudo 엔트리 cross_module scope.
+"""
 from __future__ import annotations
 
 from pathlib import Path
 
-from backend.services.prqa_rule_trend import _classify, compute_rule_trend
+from backend.services.prqa_rule_trend import (
+    _classify,
+    compute_rule_trend,
+    cross_module_keys,
+    is_cross_module_key,
+    rules_applied_in_build,
+)
 
 
 # ── 분류 순수 함수 ──────────────────────────────────────────────────────────
@@ -122,6 +132,140 @@ def test_rule_trend_descriptions_from_latest_analyzed_and_observed_range(tmp_pat
     by = {r["rule"]: r for r in out["rules"]}
     assert by["Rule-1.1"]["description"] == {"title": "one one desc", "enabled": True, "group": "M3CM"}
     assert by["Rule-2.2"]["description"] is None  # RCFInfo에 없는 규칙 — None(빈 문자열 위장 금지)
+
+
+# ── 규칙셋 변동 · 변화 구간 · cross_module (2026-07-27) ─────────────────────
+
+def _rcf(*rules: tuple) -> str:
+    """RCFInfo 블록 — (rule_id, enabled) 목록. 규칙 '적용 여부'의 유일 판정 근거."""
+    rows = "".join(
+        f'<tr><td></td><td title="{r} desc">{r}</td><td>{"enabled" if en else "disabled"}</td></tr>'
+        for r, en in rules
+    )
+    return f"""
+ <div class="sec"><h3><a name="RCFInfo">Rule Configuration Status</a></h3></div>
+ <div class="subsec"><h5>M3CM</h5></div>
+ <table border="0">{rows}</table>"""
+
+
+def _rcr_multi(files: dict, *, rcma: dict | None = None, rcf: str = "") -> str:
+    """파일별 규칙 카운트 + (옵션) RCMA pseudo 행(FileStatus 부재 = 파일 귀속 없음) RCR."""
+    rules = sorted({r for rc in files.values() for r in rc} | set(rcma or {}))
+    th = "".join(f"<th>{r}</th>" for r in rules)
+    wr = ""
+    for path, rc in files.items():
+        name = path.rsplit("/", 1)[-1]
+        wr += (f'<tr><td align="left"><a href="{path}" title="{path}">{name}</a></td>'
+               + "".join(f"<td>{rc.get(r, 0)}</td>" for r in rules) + "</tr>")
+    if rcma:
+        # anchor 없는 셀 → path_raw='' → 표시명이 키(실측 KJPDS02_PV RCMA 행과 동일 구조).
+        wr += '<tr><td align="left">RCMA</td>' + "".join(f"<td>{rcma.get(r, 0)}</td>" for r in rules) + "</tr>"
+    fs = ""
+    for path, rc in files.items():
+        name = path.rsplit("/", 1)[-1]
+        fs += (f'<tr><td align="left"><a href="{path}" title="{path}">{name}</a></td>'
+               f'<td>1</td><td>{len(rc)}</td><td>{sum(rc.values())}</td><td>90.00%</td></tr>')
+    return f"""<html><head><title>Helix QAC Rule Compliance Report</title></head><body>
+ <div class="sec"><h3><a name="WorstRules1">Most Violated Rules</a></h3></div>
+ <table border="1"><tr><th>Files</th>{th}</tr>{wr}</table>
+ <div class="sec"><h3><a name="FileStatus">File Status</a></h3></div>
+ <table border="1">
+  <tr><th>Files</th><th>Active Diagnostics</th><th>Violated Rules</th><th>Violation Count</th><th>Compliance Index</th></tr>
+  {fs}
+ </table>{rcf}
+</body></html>"""
+
+
+def test_ruleset_expansion_is_not_new_violation(tmp_path):
+    """규칙셋 확장(#125에 규칙 추가)은 '신규 발생'이 아니다 — 미적용 구간은 null."""
+    _mk_build(tmp_path, 122, rcr_html=_rcr_multi(
+        {"src/foo.c": {"Rule-1.1": 6}}, rcf=_rcf(("Rule-1.1", True))))
+    _mk_build(tmp_path, 125, rcr_html=_rcr_multi(
+        {"src/foo.c": {"Rule-1.1": 6, "Rule-9.9": 4}},
+        rcf=_rcf(("Rule-1.1", True), ("Rule-9.9", True))))
+    out = compute_rule_trend(job_url="http://j/job/X/", cache_root=tmp_path)
+    by = {r["rule"]: r for r in out["rules"]}
+    r99 = by["Rule-9.9"]
+    assert r99["counts"] == [None, 4]          # #122엔 검사 자체가 없었다(0 위장 금지)
+    assert r99["classification"] is None       # 관측 1개 — 추세 단정 금지
+    assert r99["classification_reason"] == "insufficient_observations"
+    assert r99["applied_from_build"] == 125 and r99["scope_narrowed"] is True
+    assert out["summary"]["new_recent"] == 0   # 규칙 확장을 코드 악화로 보고하지 않는다
+    assert out["ruleset_sizes"] == [1, 2]
+    # 검사가 계속 적용된 규칙은 그대로 0/양수 유지.
+    assert by["Rule-1.1"]["counts"] == [6, 6] and by["Rule-1.1"]["scope_narrowed"] is False
+
+
+def test_disabled_rule_counts_as_not_measured(tmp_path):
+    """비활성 규칙 구간도 null — 검사하지 않은 것을 '위반 0'으로 적지 않는다."""
+    _mk_build(tmp_path, 122, rcr_html=_rcr_multi(
+        {"src/foo.c": {"Rule-1.1": 6}}, rcf=_rcf(("Rule-1.1", True), ("Rule-9.9", False))))
+    _mk_build(tmp_path, 125, rcr_html=_rcr_multi(
+        {"src/foo.c": {"Rule-1.1": 6, "Rule-9.9": 4}},
+        rcf=_rcf(("Rule-1.1", True), ("Rule-9.9", True))))
+    by = {r["rule"]: r for r in compute_rule_trend(job_url="http://j/job/X/", cache_root=tmp_path)["rules"]}
+    assert by["Rule-9.9"]["counts"] == [None, 4]
+
+
+def test_decrease_window_finds_mid_range_fix(tmp_path):
+    """구간 **중간**에서 해소된 규칙의 파일 증거 — 전 구간(first→last) 비교로는 놓친다."""
+    rcf = _rcf(("Rule-1.1", True), ("Rule-9.9", True))
+    _mk_build(tmp_path, 120, rcr_html=_rcr_multi({"src/foo.c": {"Rule-1.1": 5, "Rule-9.9": 0}}, rcf=rcf))
+    _mk_build(tmp_path, 122, rcr_html=_rcr_multi({"src/foo.c": {"Rule-1.1": 5, "Rule-9.9": 3}}, rcf=rcf))
+    _mk_build(tmp_path, 123, rcr_html=_rcr_multi({"src/foo.c": {"Rule-1.1": 5, "Rule-9.9": 0}}, rcf=rcf))
+    by = {r["rule"]: r for r in compute_rule_trend(job_url="http://j/job/X/", cache_root=tmp_path)["rules"]}
+    r99 = by["Rule-9.9"]
+    assert r99["counts"] == [0, 3, 0] and r99["classification"] == "resolved"
+    # 감소 구간은 #122→#123(전 구간 #120→#123은 0→0으로 후보가 비었다).
+    assert r99["decrease_window"]["from_build"] == 122 and r99["decrease_window"]["to_build"] == 123
+    assert [(f["path"], f["delta"]) for f in r99["decreased_files"]] == [("src/foo.c", -3)]
+    assert r99["increase_window"]["from_build"] == 120  # 발생 구간도 함께 노출
+    assert [(f["path"], f["delta"]) for f in r99["increased_files"]] == [("src/foo.c", 3)]
+
+
+def test_decreased_files_reported_even_when_total_increases(tmp_path):
+    """총량이 늘어난 규칙 안의 감소 파일도 증거로 낸다 — '잘 된 예시'의 유일한 근거."""
+    rcf = _rcf(("Rule-1.1", True))
+    _mk_build(tmp_path, 122, rcr_html=_rcr_multi(
+        {"src/foo.c": {"Rule-1.1": 14}, "src/bar.c": {"Rule-1.1": 0}}, rcf=rcf))
+    _mk_build(tmp_path, 125, rcr_html=_rcr_multi(
+        {"src/foo.c": {"Rule-1.1": 12}, "src/bar.c": {"Rule-1.1": 5}}, rcf=rcf))
+    row = next(r for r in compute_rule_trend(job_url="http://j/job/X/", cache_root=tmp_path)["rules"]
+               if r["rule"] == "Rule-1.1")
+    assert row["classification"] == "increasing"      # 총량 14 → 17
+    assert [(f["path"], f["delta"]) for f in row["decreased_files"]] == [("src/foo.c", -2)]
+    assert [(f["path"], f["delta"]) for f in row["increased_files"]] == [("src/bar.c", 5)]
+
+
+def test_cross_module_pseudo_entry_marked_not_file(tmp_path):
+    """RCMA류 pseudo 엔트리는 scope='cross_module' — 스냅샷 조회 대상이 아니다."""
+    rcf = _rcf(("Rule-8.6", True))
+    _mk_build(tmp_path, 122, rcr_html=_rcr_multi({"src/foo.c": {}}, rcma={"Rule-8.6": 105}, rcf=rcf))
+    _mk_build(tmp_path, 125, rcr_html=_rcr_multi({"src/foo.c": {}}, rcma={"Rule-8.6": 99}, rcf=rcf))
+    out = compute_rule_trend(job_url="http://j/job/X/", cache_root=tmp_path)
+    assert out["cross_module_keys"] == ["RCMA"]
+    row = next(r for r in out["rules"] if r["rule"] == "Rule-8.6")
+    assert row["classification"] == "decreasing"
+    assert row["files_latest"] == [{"path": "RCMA", "count": 99, "scope": "cross_module"}]
+    assert [(f["path"], f.get("scope")) for f in row["decreased_files"]] == [("RCMA", "cross_module")]
+
+
+def test_cross_module_key_and_applied_helpers():
+    assert is_cross_module_key("RCMA") is True
+    assert is_cross_module_key("APP/foo.c") is False
+    assert is_cross_module_key("foo.h") is False
+    assert is_cross_module_key("") is False          # 빈 키는 판정 대상 아님
+    details = {"violations_by_file": [
+        {"file": "RCMA", "path": "", "rules": []},
+        {"file": "foo.c", "path": "", "rules": []},       # 경로 정규화 실패한 실제 파일 — 제외
+        {"file": "bar.c", "path": "src/bar.c", "rules": []},
+    ]}
+    assert cross_module_keys(details) == {"RCMA"}
+    # RCFInfo 부재 → None(판정 불가). 있으면 enabled만.
+    assert rules_applied_in_build({}) is None
+    assert rules_applied_in_build({"rule_descriptions": {
+        "A": {"enabled": True}, "B": {"enabled": False}, "C": {},
+    }}) == {"A", "C"}
 
 
 def test_rule_trend_descriptions_absent(tmp_path):

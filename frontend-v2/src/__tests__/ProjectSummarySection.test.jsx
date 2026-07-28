@@ -16,6 +16,8 @@ let mockPrqaDelta;
 let mockTraceGenSuccess;
 let mockCfg;
 let mockAllBuilds;
+let mockSrcBuilds;
+let mockMatrix;
 
 vi.mock('../api.js', () => ({
   api: vi.fn((url) => (String(url).includes('build-timeline') ? Promise.resolve(mockTimeline) : Promise.resolve({}))),
@@ -26,6 +28,8 @@ vi.mock('../api.js', () => ({
     if (u.includes('prqa-trend')) return Promise.resolve(mockPrqaTrend);
     if (u.includes('prqa-delta')) return Promise.resolve(mockPrqaDelta);
     if (u.includes('/api/jenkins/builds')) return Promise.resolve(mockAllBuilds);
+    if (u.includes('cached-builds-meta')) return Promise.resolve(mockSrcBuilds);
+    if (u.includes('change-matrix')) return Promise.resolve(mockMatrix);
     return Promise.resolve({});
   }),
   defaultCacheRoot: () => '.devops_pro_cache',
@@ -103,6 +107,24 @@ describe('ProjectSummarySection (재설계)', () => {
     mockTraceGenSuccess = false;
     mockCfg = {};
     mockAllBuilds = [];
+    mockSrcBuilds = { ok: true, available: true, builds: [
+      { build_number: 125, has_source: true, timestamp_iso: '2026-07-24T13:00:11', revision: '1075' },
+      { build_number: 122, has_source: true, timestamp_iso: '2026-06-25T13:00:00', revision: '1053' },
+    ] };
+    mockMatrix = {
+      ok: true, available: true, level: 'files',
+      baseline: { build_number: 122, timestamp_iso: '2026-06-25T13:00:00', revision: '1053' },
+      rows: [
+        { row_key: 'b125', build_number: 125, build_result: 'SUCCESS', timestamp_iso: '2026-07-24T13:00:11',
+          revision: '1075', snapshot_group: { count: 1, members: [125] }, is_baseline: false,
+          identical_to_baseline: false, files: { added: 0, deleted: 0, modified: 1, changed: 1, unchanged: 146 },
+          functions: null, asil: null, function_state: { state: 'not_computed', reason: 'level_files' }, cell_id: 'a__b' },
+        { row_key: 'b122', build_number: 122, is_baseline: true, snapshot_group: { count: 1, members: [122] },
+          files: null, functions: null, asil: null, function_state: { state: 'baseline' } },
+      ],
+      pending_cells: [{ cell_id: 'a__b', target_build: 125 }],
+      snapshot_groups: [], stats: { rows: 2 },
+    };
     localStorage.clear();
   });
 
@@ -134,43 +156,8 @@ describe('ProjectSummarySection (재설계)', () => {
     expect(screen.getByRole('heading', { name: /빌드별 변경 영향/ })).toBeInTheDocument();
   });
 
-  it('단일 뷰: 빌드 타임라인 + PRQA 트렌드가 함께 표시된다(세그먼트 없음)', async () => {
-    render(<ProjectSummarySection job={JOB} analysisResult={RESULT} />);
-    expect(await screen.findByText('#125')).toBeInTheDocument();
-    expect(screen.getByText(/PRQA 정적분석 빌드별 트렌드/)).toBeInTheDocument();
-    expect(screen.getByText(/빌드별 변경 영향 \(전체 빌드\)/)).toBeInTheDocument();
-  });
 
-  it('빌드 행 클릭 시 localStorage focus + __detailSection("impact")', async () => {
-    const user = userEvent.setup();
-    window.__detailSection = vi.fn();
-    render(<ProjectSummarySection job={JOB} analysisResult={RESULT} />);
-    const row = (await screen.findByText('#125')).closest('tr');
-    await user.click(row);
-    expect(window.__detailSection).toHaveBeenCalledWith('impact');
-    const stored = JSON.parse(localStorage.getItem('devops_v2_impact_focus_build'));
-    expect(stored.build_number).toBe(125);
-    delete window.__detailSection;
-  });
 
-  it('커버리지 미측정 빌드는 "커버리지 미측정"으로 표시(ISO 정직성)', async () => {
-    mockTimeline = {
-      ok: true, entry_id: 'kj',
-      rows: [{
-        run_id: 'r-um', timestamp: '2026-03-24T10:00:00', build_number: 200, build_revision: '1060',
-        base_ref: '1018', changed_files_count: 1, changed_functions_count: 1,
-        impact_counts: { direct: 1, indirect_1hop: 0, indirect_2hop: 0 },
-        max_asil: 'QM', max_asil_bucket: 'unknown', mcdc_required: false,
-        auto_docs: 1, flag_docs: 0, coverage_regressed: 0, coverage_unmeasured_safety: 0,
-        coverage_measured: false, partial_failure: false, before_payload_unavailable: false,
-      }],
-      rollup: { analyzed_build_count: 1, distinct_changed_functions: 1, asil_distribution: {}, revision_range: {} },
-    };
-    render(<ProjectSummarySection job={JOB} analysisResult={RESULT} />);
-    const row = (await screen.findByText('#200')).closest('tr');
-    expect(within(row).getByText('커버리지 미측정')).toBeInTheDocument();
-    expect(within(row).queryByText('정상')).toBeNull();
-  });
 
   it('추적성 캐시 없으면 자동생성 시도 — 실패 시 사유 표시', async () => {
     mockTrace = { has_data: false };
@@ -208,27 +195,6 @@ describe('ProjectSummarySection (재설계)', () => {
     expect(screen.queryByText(/커버리지 주의/)).toBeNull();
   });
 
-  it('W2: 동일 빌드 재분석 시 최신 분석 행을 채택한다(구 분석이 최신을 가리지 않음)', async () => {
-    const mk = (runId, ts, fns) => ({
-      run_id: runId, timestamp: ts, build_number: 125, build_revision: '1053',
-      base_ref: '1018', changed_files_count: 1, changed_functions_count: fns,
-      impact_counts: { direct: 1, indirect_1hop: 0, indirect_2hop: 0 },
-      max_asil: 'QM', max_asil_bucket: 'unknown', mcdc_required: false,
-      auto_docs: 1, flag_docs: 0, coverage_regressed: 0, coverage_unmeasured_safety: 0,
-      coverage_measured: true, partial_failure: false, before_payload_unavailable: false,
-    });
-    // rows는 최신순 — 재분석(신, 함수 9)과 원분석(구, 함수 5)이 같은 #125.
-    mockTimeline = {
-      ok: true, entry_id: 'kj',
-      rows: [mk('r-new', '2026-03-24T13:00:00', 9), mk('r-old', '2026-03-24T12:00:00', 5)],
-      rollup: { analyzed_build_count: 2, distinct_changed_functions: 9, asil_distribution: {}, revision_range: {} },
-    };
-    render(<ProjectSummarySection job={JOB} analysisResult={RESULT} />);
-    const cells = await screen.findAllByText('#125');
-    expect(cells).toHaveLength(1); // 중복 행 없음
-    const row = cells[0].closest('tr');
-    expect(within(row).getByText('9')).toBeInTheDocument(); // 최신 분석 값
-  });
 
   it('W1: analysisResult가 다른 Job의 것이면 추적성 자동생성을 보류한다(오귀속 차단)', async () => {
     mockTrace = { has_data: false };
@@ -239,11 +205,6 @@ describe('ProjectSummarySection (재설계)', () => {
     expect(buildTraceMatrix).not.toHaveBeenCalled();
   });
 
-  it('타임라인 Δ위반 컬럼: 트렌드 delta를 빌드별로 조인해 +N 표기, 결측은 —', async () => {
-    render(<ProjectSummarySection job={JOB} analysisResult={RESULT} />);
-    const row = (await screen.findByText('#125')).closest('tr');
-    expect(within(row).getByText('+10')).toBeInTheDocument();
-  });
 
   // 파이프라인 헬스 스트립은 Phase O에서 숨김(SHOW.pipelineHealth=false) — 컴포넌트 자체의
   // 노드/딥링크 동작은 PipelineHealthStrip 전용 테스트가 계속 검증한다.
@@ -276,71 +237,70 @@ describe('ProjectSummarySection (재설계)', () => {
     expect(screen.getByText(/550건만 파일에 귀속/)).toBeInTheDocument();
   });
 
-  it('드릴다운 chevron: 클릭 시 prqa-delta 조회 + impact 핸드오프는 발생하지 않음(stopPropagation)', async () => {
-    const user = userEvent.setup();
-    window.__detailSection = vi.fn();
-    render(<ProjectSummarySection job={JOB} analysisResult={RESULT} />);
-    const row = (await screen.findByText('#125')).closest('tr');
-    await user.click(within(row).getByRole('button', { name: /펼치기/ }));
-    // 확장 패널이 available:false reason을 한국어로 노출
-    expect(await screen.findByText(/비교할 이전 캐시 빌드가 없습니다/)).toBeInTheDocument();
-    const { post } = await import('../api.js');
-    expect(post).toHaveBeenCalledWith('/api/jenkins/prqa-delta', expect.objectContaining({ build_number: 125, scm_id: 'kj' }));
-    expect(window.__detailSection).not.toHaveBeenCalled(); // 행 클릭 핸드오프 미발화
-    expect(localStorage.getItem('devops_v2_impact_focus_build')).toBeNull();
-    delete window.__detailSection;
-  });
 
-  it('Phase E: 서버 캐시 병합 행(analyzed:false, cached:true)은 "캐시 · 미분석" 배지 + 요청에 cache_root 동반', async () => {
+
+
+  it('표는 change-log를 안 써도 rollup 배너는 그대로 발화한다(침묵 회귀 고정)', async () => {
+    // ⚠ 이 테스트가 계획의 최대 위험을 막는다: "표가 timeline을 안 쓰니 fetch도 지우자"는
+    //   다음 사람의 합리적 판단이 문제점 배너를 조용히 비운다.
     mockTimeline = {
       ...TIMELINE,
-      cache_merge: { attempted: true, merged: 1, added: 1 },
+      rollup: { ...TIMELINE.rollup, cumulative_flag_docs: 4, cumulative_coverage_regressed: 2 },
+    };
+    render(<ProjectSummarySection job={JOB} analysisResult={RESULT} />);
+    expect(await screen.findByText('MC/DC 회귀 2')).toBeInTheDocument();
+    expect(screen.getByText('검토 대기 문서 4')).toBeInTheDocument();
+    // build-timeline 조회 자체가 살아 있어야 한다(rollup의 유일한 출처).
+    const { api } = await import('../api.js');
+    expect(api.mock.calls.some(([u]) => String(u).includes('build-timeline'))).toBe(true);
+    // 헤더 리비전 범위도 rollup 소비처다.
+    expect(screen.getByText(/r1018 → r1053/)).toBeInTheDocument();
+    // 구 표의 잡 결과 축은 사라졌다.
+    expect(screen.queryByText('누적 변경 함수')).toBeNull();
+    expect(screen.queryByRole('columnheader', { name: '재생성/검토' })).toBeNull();
+  });
+
+  it('빌드별 변경 영향은 소스 스냅샷 비교로 그린다 — change-log 행은 표에 없다', async () => {
+    // 구 표는 build_number 없는 change-log 레코드가 "#—" 행으로 쌓였다(실측 89행 중 88행).
+    mockTimeline = {
+      ...TIMELINE,
       rows: [
-        {
-          run_id: '__cached_126', analyzed: false, cached: true, build_number: 126,
-          build_revision: '1075', build_result: 'SUCCESS', timestamp: '2026-07-24T13:00:11',
-          impact_counts: {}, max_asil_bucket: 'unknown', coverage_measured: false,
-        },
+        { run_id: 'old1', timestamp: '2026-05-01T00:00:00', changed_files_count: 27, changed_functions_count: 640 },
         ...TIMELINE.rows,
       ],
     };
     render(<ProjectSummarySection job={JOB} analysisResult={RESULT} />);
-    const row = (await screen.findByText('#126')).closest('tr');
-    expect(within(row).getByText('캐시 · 미분석')).toBeInTheDocument();
-    const { api } = await import('../api.js');
-    const timelineCall = api.mock.calls.find(([u]) => String(u).includes('build-timeline'));
-    expect(String(timelineCall[0])).toContain('cache_root=');
+    await screen.findByRole('heading', { name: /빌드별 변경 영향/ });
+    expect(screen.queryByText('#—')).toBeNull();
+    // 매트릭스는 change-matrix를 조회한다(build-timeline이 아니라).
+    await vi.waitFor(() => {
+      expect(mockPost.mock.calls.some(([u]) => String(u).includes('change-matrix'))).toBe(true);
+    });
   });
 
-  it('Phase E: Jenkins 병합이 캐시 행을 analyzed로 승격하지 않는다', async () => {
-    mockCfg = { username: 'u', token: 't', verifyTls: true };
-    mockTimeline = {
-      ...TIMELINE,
-      rows: [{
-        run_id: '__cached_126', analyzed: false, cached: true, build_number: 126,
-        build_revision: '1075', build_result: null, timestamp: '',
-        impact_counts: {}, max_asil_bucket: 'unknown', coverage_measured: false,
-      }],
-    };
-    mockAllBuilds = [{ number: 126, result: 'SUCCESS', timestamp: 1700000000000, revision: '1075' }];
+  it('베이스라인은 두 패널이 공유한다 — cached-builds-meta는 부모가 1회만 조회', async () => {
     render(<ProjectSummarySection job={JOB} analysisResult={RESULT} />);
-    const row = (await screen.findByText('#126')).closest('tr');
-    // Jenkins 목록에 있어도 분석된 것이 아니다 — 캐시·미분석 유지 + 결과는 보강됨.
-    expect(within(row).getByText('캐시 · 미분석')).toBeInTheDocument();
-    expect(within(row).getByText('SUCCESS')).toBeInTheDocument();
+    await screen.findByRole('heading', { name: /빌드별 변경 영향/ });
+    await vi.waitFor(() => {
+      expect(mockPost.mock.calls.filter(([u]) => String(u).includes('cached-builds-meta')).length).toBe(1);
+    });
+    // 매트릭스 요청의 baseline_build가 목록의 최고령(#122)과 일치한다.
+    await vi.waitFor(() => {
+      const call = mockPost.mock.calls.find(([u]) => String(u).endsWith('/api/summary/change-matrix'));
+      expect(call?.[1]).toMatchObject({ baseline_build: 122 });
+    });
   });
 
-  it('전체 빌드 병합: Jenkins 목록의 미분석 빌드를 "미분석" 행으로 표시(비차단)', async () => {
-    mockCfg = { username: 'u', token: 't', verifyTls: true };
-    // timeline은 #125만 분석. Jenkins 목록엔 126(미분석)+125(분석).
-    mockAllBuilds = [
-      { number: 126, result: 'SUCCESS', timestamp: 1700000000000, revision: '1055' },
-      { number: 125, result: 'SUCCESS', timestamp: 1699000000000, revision: '1053' },
-    ];
+  it('행 클릭이 변경 영향 평가 탭으로 이동하지 않는다(핸드오프 제거)', async () => {
+    window.__detailSection = vi.fn();
     render(<ProjectSummarySection job={JOB} analysisResult={RESULT} />);
-    expect(await screen.findByText('#126')).toBeInTheDocument();  // 미분석 빌드 병합됨
-    expect(screen.getByText('#125')).toBeInTheDocument();          // 분석 빌드 유지
-    const row126 = screen.getByText('#126').closest('tr');
-    expect(within(row126).getByText('미분석')).toBeInTheDocument();
+    await screen.findByRole('heading', { name: /빌드별 변경 영향/ });
+    expect(window.__detailSection).not.toHaveBeenCalled();
+    expect(localStorage.getItem('devops_v2_impact_focus_build')).toBeNull();
+    delete window.__detailSection;
   });
+
+
+
+
 });

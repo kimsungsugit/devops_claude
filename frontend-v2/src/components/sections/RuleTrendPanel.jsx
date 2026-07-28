@@ -7,13 +7,20 @@
  * ISO 정직성: 미분석 빌드 자리는 null → 스파크라인 분절('0' 위장 금지), insufficient_data면
  * 분류 배지 없음, 미지 reason도 원문 노출(침묵 금지).
  */
-import { Fragment, useEffect, useState } from 'react';
+import { Fragment, useEffect, useMemo, useState } from 'react';
 import { post } from '../../api.js';
 import { TrendLine } from '../charts.jsx';
-import { RuleDefinitionCard, UnresolvedEvidenceCard } from './RuleEvidenceCards.jsx';
+import {
+  CrossModuleBadge,
+  RuleDefinitionCard,
+  UnresolvedEvidenceCard,
+  WindowChangesCard,
+} from './RuleEvidenceCards.jsx';
 
 // 미해소 분류 — 구간 증거(변경에도 위반 유지 vs 무변경 잔존) 확장 대상(J2).
 const UNRESOLVED_CLASSES = new Set(['increasing', 'persistent', 'new_recent']);
+// 증가/발생 구간 증거를 보여줄 분류 — '언제 늘었나'가 조치 판단의 핵심인 쪽.
+const ONSET_CLASSES = new Set(['increasing', 'new_recent']);
 
 const CLASS_META = {
   increasing: { label: '증가', color: 'var(--color-danger)' },
@@ -28,6 +35,7 @@ const FIX_REASON_KO = {
   file_ambiguous_in_snapshot: '동일 이름 파일이 여러 개라 특정할 수 없습니다',
   snapshot_missing: '해당 빌드에 소스 스냅샷이 없습니다',
   build_not_cached: '해당 빌드가 캐시에 없습니다',
+  cross_module_scope: '모듈 간 분석(RCMA) 집계입니다 — 특정 파일에 귀속되지 않아 파일 diff가 없습니다',
 };
 
 const xs = { fontSize: 'var(--text-xs)' };
@@ -68,11 +76,18 @@ function FixExampleCard({ jobUrl, cacheRoot, rule, file }) {
     background: 'var(--bg-elevated, var(--hover))', border: '1px solid var(--border)',
     borderRadius: 'var(--radius-sm)', padding: '4px 8px', margin: '2px 0', overflowX: 'auto',
   };
+  const crossModule = file?.scope === 'cross_module';
   return (
     <div style={{ borderLeft: '3px solid var(--color-info)', padding: '4px 8px', marginTop: 4 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
         <span style={xs}>{file.path} <b>{file.delta}</b> (#{file.from_build}→#{file.to_build})</span>
-        {state !== 'done' && (
+        {crossModule && <CrossModuleBadge />}
+        {/* 파일 실체가 없으면 LLM 호출 자체가 무의미 — 버튼을 숨기고 사유만 노출한다.
+            단 "그럼 볼 수 있는 게 없나"에는 답이 있다: 그 구간에 바뀐 파일은 실재한다. */}
+        {crossModule && (
+          <span style={{ ...xs, color: 'var(--text-muted)' }}>{FIX_REASON_KO.cross_module_scope}</span>
+        )}
+        {!crossModule && state !== 'done' && (
           <button type="button" onClick={() => generate(false)} disabled={state === 'loading'}
             style={{ ...xs, padding: '1px 8px', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', background: 'transparent', cursor: 'pointer', color: 'var(--text-muted)' }}>
             {state === 'loading' ? '생성 중…' : '작성 예시 생성'}
@@ -145,6 +160,16 @@ export default function RuleTrendPanel({ jobUrl, cacheRoot }) {
     return () => { cancelled = true; };
   }, [jobUrl, cacheRoot]);
 
+  // 규칙셋 변동(#N에서 규칙 수가 바뀜) — '신규 발생'이 코드 악화가 아니라 검사 범위 확대일 수
+  // 있음을 각주로 알린다. 값이 하나뿐이면 null(불필요한 문구 억제).
+  const rulesetChange = useMemo(() => {
+    const sizes = (data?.ruleset_sizes || []).filter((n) => n != null);
+    if (sizes.length < 2) return null;
+    const min = Math.min(...sizes);
+    const max = Math.max(...sizes);
+    return min === max ? null : { min, max };
+  }, [data]);
+
   const th = { ...xs, textAlign: 'left', padding: '4px 8px', color: 'var(--text-muted)', borderBottom: '1px solid var(--border)', whiteSpace: 'nowrap' };
   const td = { ...xs, padding: '4px 8px', borderBottom: '1px solid var(--border)', whiteSpace: 'nowrap' };
 
@@ -193,12 +218,19 @@ export default function RuleTrendPanel({ jobUrl, cacheRoot }) {
               </thead>
               <tbody>
                 {(data.rules || []).map((r) => {
-                  const hasFix = (r.decreased_files || []).length > 0;
+                  const decFiles = r.decreased_files || [];
+                  const incFiles = r.increased_files || [];
                   const range = data.observed_range;
+                  // 감소 근거는 분류와 무관하게 노출한다 — 총량이 늘어난 규칙 안에도 줄어든
+                  // 파일이 있고, 그것이 "위반하지 않는 작성" 예시의 유일한 실코드 근거다.
+                  const hasFix = decFiles.length > 0;
+                  const hasOnset = ONSET_CLASSES.has(r.classification) && incFiles.length > 0;
+                  // 규칙이 구간 도중 적용됐으면 그 빌드가 비교 기준. from==to면 diff가 성립하지 않는다.
+                  const unresolvedFrom = r.applied_from_build ?? range?.from_build;
                   const hasUnresolved = UNRESOLVED_CLASSES.has(r.classification)
                     && (r.files_latest || []).length > 0
-                    && !!range && range.from_build !== range.to_build;
-                  const expandable = hasFix || hasUnresolved;
+                    && !!range && unresolvedFrom != null && unresolvedFrom !== range.to_build;
+                  const expandable = hasFix || hasOnset || hasUnresolved;
                   const expanded = expandedRule === r.rule;
                   return (
                     <Fragment key={r.rule}>
@@ -210,8 +242,22 @@ export default function RuleTrendPanel({ jobUrl, cacheRoot }) {
                               {r.description.title}
                             </div>
                           )}
+                          {/* 규칙셋 확장으로 도중 적용된 규칙 — '신규 발생'(코드 악화)과 구분해야 한다. */}
+                          {r.scope_narrowed && r.applied_from_build != null && (
+                            <div style={{ ...xs, color: 'var(--text-muted)', fontWeight: 400 }}
+                              title="이전 빌드에는 이 규칙이 규칙셋에 없어(또는 비활성) 검사되지 않았습니다 — 그 구간은 '위반 0'이 아니라 미측정입니다">
+                              #{r.applied_from_build}부터 규칙 적용
+                            </div>
+                          )}
                         </td>
-                        <td style={td}><ClassBadge cls={r.classification} /></td>
+                        <td style={td}>
+                          <ClassBadge cls={r.classification} />
+                          {r.classification_reason === 'insufficient_observations' && (
+                            <div style={{ ...xs, color: 'var(--text-muted)' }} title="이 규칙이 적용된 빌드가 1개뿐 — 단일 관측으로 추세를 단정하지 않습니다">
+                              관측 1개
+                            </div>
+                          )}
+                        </td>
                         <td style={{ ...td, minWidth: 140 }}>
                           <TrendLine width={140} height={26}
                             color={CLASS_META[r.classification]?.color || 'var(--accent)'}
@@ -227,7 +273,7 @@ export default function RuleTrendPanel({ jobUrl, cacheRoot }) {
                             <button type="button" onClick={() => setExpandedRule(expanded ? null : r.rule)}
                               aria-expanded={expanded}
                               style={{ ...xs, padding: '1px 7px', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', background: 'transparent', cursor: 'pointer', color: 'var(--text-muted)' }}>
-                              {(expanded ? '▾ ' : '▸ ') + (hasFix ? '예시' : '증거')}
+                              {(expanded ? '▾ ' : '▸ ') + (hasFix ? '예시' : hasOnset ? '발생' : '증거')}
                             </button>
                           )}
                         </td>
@@ -238,23 +284,58 @@ export default function RuleTrendPanel({ jobUrl, cacheRoot }) {
                             {hasFix && (
                               <>
                                 <div style={{ ...xs, color: 'var(--text-muted)', marginBottom: 2 }}>
-                                  위반이 줄어든 파일 — 실제 변경을 근거로 "위반하지 않는 작성 예시"를 생성합니다.
+                                  위반이 줄어든 파일
+                                  {/* 규칙 총계 delta가 아니라 아래 목록의 합(file_delta) — 같은 구간에
+                                      늘어난 파일이 섞이면 총계와 달라 목록과 어긋나 보인다. */}
+                                  {r.decrease_window ? ` — 감소 구간 #${r.decrease_window.from_build}→#${r.decrease_window.to_build} (파일 합 ${r.decrease_window.file_delta ?? r.decrease_window.delta}건)` : ''}
+                                  . 실제 변경을 근거로 "위반하지 않는 작성 예시"를 생성합니다.
                                 </div>
-                                {(r.decreased_files || []).map((f) => (
+                                {decFiles.map((f) => (
                                   <FixExampleCard key={f.path} jobUrl={jobUrl} cacheRoot={cacheRoot} rule={r.rule} file={f} />
+                                ))}
+                                {/* 감소분이 전부 파일 귀속 불가면 파일 diff가 하나도 안 나온다 —
+                                    그 구간에 바뀐 파일 목록이 유일하게 남는 코드 증거다. */}
+                                {r.decrease_window && decFiles.every((f) => f.scope === 'cross_module') && (
+                                  <WindowChangesCard jobUrl={jobUrl} cacheRoot={cacheRoot} rule={r.rule}
+                                    fromBuild={r.decrease_window.from_build} toBuild={r.decrease_window.to_build} />
+                                )}
+                              </>
+                            )}
+                            {hasOnset && (
+                              <>
+                                <div style={{ ...xs, color: 'var(--text-muted)', margin: hasFix ? '6px 0 2px' : '0 0 2px' }}>
+                                  위반이 늘어난 파일
+                                  {r.increase_window ? ` — ${r.classification === 'new_recent' ? '발생' : '증가'} 구간 #${r.increase_window.from_build}→#${r.increase_window.to_build} (파일 합 +${r.increase_window.file_delta ?? r.increase_window.delta}건)` : ''}
+                                  . 그 구간의 실제 스냅샷 변경을 확인합니다.
+                                </div>
+                                {incFiles.map((f) => (
+                                  <UnresolvedEvidenceCard key={f.path} jobUrl={jobUrl} cacheRoot={cacheRoot}
+                                    rule={r.rule} file={{ ...f, count: f.count_to }}
+                                    fromBuild={f.from_build} toBuild={f.to_build}
+                                    countSuffix={`(+${f.delta})`} accent="var(--color-danger)"
+                                    changedLabel="파일 변경됨 — 위반 증가"
+                                    unchangedLabel="파일 무변경 — 위반 증가(설정·타 파일 영향 가능)" />
                                 ))}
                               </>
                             )}
                             {hasUnresolved && (
                               <>
-                                <div style={{ ...xs, color: 'var(--text-muted)', margin: hasFix ? '6px 0 2px' : '0 0 2px' }}>
-                                  미해소 위반 파일 — 관측 구간(#{range.from_build}→#{range.to_build})의 실제 스냅샷으로
+                                <div style={{ ...xs, color: 'var(--text-muted)', margin: (hasFix || hasOnset) ? '6px 0 2px' : '0 0 2px' }}>
+                                  미해소 위반 파일 — 관측 구간(#{unresolvedFrom}→#{range.to_build})의 실제 스냅샷으로
                                   "변경에도 위반 유지"인지 "파일 무변경(위반 잔존)"인지 확인합니다.
                                 </div>
+                                {/* 규칙이 구간 도중 적용됐으면 그 빌드가 from — 검사조차 없던 빌드를
+                                    비교 기준으로 삼으면 '그때부터 위반'이라는 잘못된 인상을 준다. */}
                                 {(r.files_latest || []).map((f) => (
                                   <UnresolvedEvidenceCard key={f.path} jobUrl={jobUrl} cacheRoot={cacheRoot}
-                                    rule={r.rule} file={f} fromBuild={range.from_build} toBuild={range.to_build} />
+                                    rule={r.rule} file={f}
+                                    fromBuild={unresolvedFrom} toBuild={range.to_build} />
                                 ))}
+                                {/* 미해소분이 전부 파일 귀속 불가여도 구간 변경 파일은 볼 수 있다. */}
+                                {(r.files_latest || []).every((f) => f.scope === 'cross_module') && (
+                                  <WindowChangesCard jobUrl={jobUrl} cacheRoot={cacheRoot} rule={r.rule}
+                                    fromBuild={unresolvedFrom} toBuild={range.to_build} />
+                                )}
                               </>
                             )}
                             <RuleDefinitionCard jobUrl={jobUrl} cacheRoot={cacheRoot} rule={r.rule} />
@@ -271,7 +352,8 @@ export default function RuleTrendPanel({ jobUrl, cacheRoot }) {
             )}
           </div>
           <div style={{ ...xs, color: 'var(--text-muted)', marginTop: 'var(--sp-1)' }}>
-            * {data.scope_note} · 미분석 빌드 자리는 선이 끊겨 표시됩니다(0 아님)
+            * {data.scope_note} · 미분석 빌드와 규칙 미적용 구간은 선이 끊겨 표시됩니다(0 아님)
+            {rulesetChange && ` · 관측 구간에서 규칙셋이 ${rulesetChange.min}→${rulesetChange.max}개로 변동 — 도중 추가된 규칙은 '#N부터 규칙 적용'으로 표기`}
           </div>
         </>
       )}

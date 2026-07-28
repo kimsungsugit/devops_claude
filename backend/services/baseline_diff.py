@@ -27,12 +27,13 @@ import logging
 import re
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
 # v2: files.changed_detail(파일→함수 롤업 + 커버리지/ASIL 조인) 추가 — 캐시 무효화용 bump.
-BASELINE_DIFF_ALGO_VERSION = 2
+# 3: 지문에 content_sha 추가(stat 2개 충돌로 stale 서빙 가능) — bump 시 전 캐시 1회 재계산.
+BASELINE_DIFF_ALGO_VERSION = 3
 
 # 표시 캡 — 대규모 리팩토링 스냅샷에서 응답이 폭증하지 않게. 절단은 항상 omitted로 표기한다.
 MAX_DETAIL_FILES = 200
@@ -69,8 +70,90 @@ def _sha1(path: Path) -> Optional[str]:
         return None
 
 
+def source_file_manifest(source: Path) -> Optional[Dict[str, str]]:
+    """{상대경로: sha1} — 내용 지문의 원재료. 스냅샷이 비었으면 None.
+
+    이 맵을 저장해 두면 **두 스냅샷의 파일 축 비교가 dict 연산으로 끝난다**(디스크 IO 0).
+    빌드 N개를 한 화면에 그리는 매트릭스가 rglob+sha1을 N번 반복하지 않게 하는 통로다.
+    읽기 실패(`_sha1` → None) 파일은 건너뛴다 — 지문 계산에서 제외해야 아래
+    `content_sha_from_manifest`가 구 구현과 **바이트 동일한** 다이제스트를 낸다.
+    """
+    files = _iter_src_files(source)
+    if not files:
+        return None
+    out: Dict[str, str] = {}
+    for rel in sorted(files):
+        digest = _sha1(files[rel])
+        if digest is None:
+            continue
+        out[rel] = digest
+    return out
+
+
+def content_sha_from_manifest(manifest: Optional[Dict[str, str]]) -> Optional[str]:
+    """manifest → 내용 지문. ⚠ update 순서(경로 → sha1)를 절대 바꾸지 말 것.
+
+    이 다이제스트는 각 빌드의 `source_content_sha.json`에 이미 배포돼 있고, 그 값으로
+    동일 트리 그룹 판정과 기본 비교쌍 선택이 이뤄진다. 1비트만 달라져도 배포된 캐시가
+    전부 조용히 stale이 된다(회귀 고정: `test_content_sha_digest_is_pinned`).
+    """
+    if manifest is None:
+        return None
+    h = hashlib.sha1()
+    for rel in sorted(manifest):
+        h.update(rel.encode("utf-8", "ignore"))
+        h.update(manifest[rel].encode("ascii"))
+    return h.hexdigest()
+
+
+def source_content_sha(source: Path) -> Optional[str]:
+    """비교 대상(.c/.h) 내용 지문 — 정렬된 (상대경로, sha1) 목록의 sha1.
+
+    stat 2개(file_count·total_bytes)만으로는 **서로 다른 스냅샷이 같은 지문을 갖는다**.
+    실측 KJPDS02_PV에서 #111·#113·#120·#123이 전부 `{370, 9305884}`로 충돌했다(내용은
+    동일했지만, 파일 수·총바이트가 같고 내용만 다른 경우 stale 결과를 그대로 서빙한다).
+    147파일 sha1 = 0.18초로 저렴하고, 호출측이 결과를 캐시한다.
+    """
+    return content_sha_from_manifest(source_file_manifest(source))
+
+
+def compute_file_axis_from_manifests(
+    *, baseline: Optional[Dict[str, str]], target: Optional[Dict[str, str]],
+    max_paths: int = MAX_DETAIL_FILES,
+) -> Dict[str, Any]:
+    """manifest 두 벌의 순수 비교 — 파서도, sha1 재계산도, 디스크 접근도 하지 않는다.
+
+    `compute_baseline_diff`의 파일 축과 **같은 분류**를 내되 라인 수(`lines_added/removed`)는
+    내지 않는다(그건 파일을 읽어야 하고, 목록 표시엔 불필요하다). 라인 수가 필요하면
+    `compute_baseline_diff`를 쓴다.
+    """
+    a = baseline or {}
+    b = target or {}
+    added = sorted(set(b) - set(a))
+    deleted = sorted(set(a) - set(b))
+    modified = [{"path": rel} for rel in sorted(set(a) & set(b)) if a[rel] != b[rel]]
+    unchanged = sum(1 for rel in set(a) & set(b) if a[rel] == b[rel])
+    changed = len(added) + len(deleted) + len(modified)
+    return {
+        "added": added[:max_paths],
+        "deleted": deleted[:max_paths],
+        "modified": modified[:max_paths],
+        "changed": changed,
+        "unchanged": unchanged,
+        "total_baseline": len(a),
+        "total_target": len(b),
+        # 양쪽이 비어 있으면 '동일'이 아니라 비교 자체가 성립하지 않는다 — unchanged>0 조건 유지
+        # (`compute_baseline_diff`의 identical_snapshot과 같은 정의).
+        "identical_snapshot": changed == 0 and unchanged > 0,
+        "paths_omitted": max(0, changed - max_paths),
+    }
+
+
 def snapshot_fingerprint(source: Path) -> Optional[Dict[str, Any]]:
-    """스냅샷 지문(stat 스캔 — 내용 해시 아님, 완결 스냅샷 불변 전제). 부재는 None."""
+    """스냅샷 지문(stat 스캔 + 내용 해시). 부재는 None.
+
+    content_sha가 캐시 키의 실질 판별자다 — stat만으로는 충돌한다(위 함수 주석 참조).
+    """
     if not (source / ".source_complete").exists():
         return None
     files = 0
@@ -82,7 +165,11 @@ def snapshot_fingerprint(source: Path) -> Optional[Dict[str, Any]]:
                 total += p.stat().st_size
     except OSError:
         return None
-    return {"file_count": files, "total_bytes": total, "algo_version": BASELINE_DIFF_ALGO_VERSION}
+    return {
+        "file_count": files, "total_bytes": total,
+        "content_sha": source_content_sha(source),
+        "algo_version": BASELINE_DIFF_ALGO_VERSION,
+    }
 
 
 def _parse_functions(source: Path, *, max_files: int = 1200) -> Dict[Tuple[str, str], Dict[str, Any]]:
@@ -136,7 +223,7 @@ def _resolve_asil(
     return None, None
 
 
-def _build_changed_detail(
+def build_changed_detail(
     file_rows: Dict[str, Dict[str, Any]],
     fn_rows: List[Dict[str, Any]],
     function_coverage: Optional[Dict[str, Any]],
@@ -226,12 +313,18 @@ def compute_baseline_diff(
     target_source: Path,
     function_coverage: Optional[Dict[str, Any]] = None,
     asil_by_fn: Optional[Dict[str, Any]] = None,
+    parse_fn: Optional[Callable[[Path], Dict[Tuple[str, str], Dict[str, Any]]]] = None,
 ) -> Dict[str, Any]:
     """두 스냅샷 비교(순수 계산 — 캐시는 라우터). 파일 3분류 + 함수 파서 권위 분류.
 
     function_coverage / asil_by_fn은 주입식(라우터가 N1·N2 결과를 조립) — 서비스는 IO를 하지
     않는다. 부재 시 해당 컬럼은 None으로 남고 조인 성립 수만 표면화한다.
+
+    parse_fn: 함수 파싱을 호출측이 대신하도록 주입(기본은 `_parse_functions`). `parse_c_project`
+    에는 메모이제이션이 전혀 없어 같은 스냅샷도 매번 다시 파싱한다 — 빌드 N개를 한 베이스라인에
+    비교하는 매트릭스에서는 이 훅으로 내용 지문 기반 재사용을 주입한다(실측: 12쌍 83초 → 3쌍).
     """
+    parse = parse_fn or _parse_functions
     t0 = time.time()
     base_files = _iter_src_files(baseline_source)
     tgt_files = _iter_src_files(target_source)
@@ -239,6 +332,10 @@ def compute_baseline_diff(
     deleted = sorted(set(base_files) - set(tgt_files))
     modified: List[Dict[str, Any]] = []
     unchanged = 0
+    # 두 스냅샷이 바이트 동일하면 "변경 없음"이 아니라 **비교 자체가 성립하지 않는다**.
+    # 실측: 백필로 받아온 10개 빌드가 전부 같은 SVN HEAD라 서로 diff가 0이었고, 화면은
+    # 그걸 '2개월간 변화 1건'으로 표시했다(ASIL 함수 변경 22건이 1건으로 과소보고).
+    identical_snapshot = False
     for rel in sorted(set(base_files) & set(tgt_files)):
         h1, h2 = _sha1(base_files[rel]), _sha1(tgt_files[rel])
         if h1 is None or h2 is None:
@@ -256,9 +353,10 @@ def compute_baseline_diff(
         except Exception:  # silent-ok: 라인 수는 표시 부가정보 — 실패는 null로 정직 표기(변경 사실은 sha1이 이미 확정)
             la = lr = None
         modified.append({"path": rel, "lines_added": la, "lines_removed": lr})
+    identical_snapshot = not added and not deleted and not modified and unchanged > 0
 
-    base_fns = _parse_functions(baseline_source)
-    tgt_fns = _parse_functions(target_source)
+    base_fns = parse(baseline_source)
+    tgt_fns = parse(target_source)
     new_fns: List[Dict[str, Any]] = []
     del_fns: List[Dict[str, Any]] = []
     sig_changed: List[Dict[str, Any]] = []
@@ -307,7 +405,7 @@ def compute_baseline_diff(
         for kind, rows in (("NEW", new_fns), ("DELETE", del_fns), ("SIGNATURE", sig_changed), ("BODY", body_changed))
         for r in rows
     ]
-    changed_detail, detail_omitted, gap_summary = _build_changed_detail(file_rows, fn_rows, function_coverage)
+    changed_detail, detail_omitted, gap_summary = build_changed_detail(file_rows, fn_rows, function_coverage)
 
     return {
         "files": {
@@ -317,6 +415,8 @@ def compute_baseline_diff(
             "unchanged": unchanged,
             "total_baseline": len(base_files),
             "total_target": len(tgt_files),
+            # 비교 자체가 성립하지 않음(두 스냅샷 바이트 동일) — '변경 없음'과 구별해야 한다.
+            "identical_snapshot": identical_snapshot,
             # 파일 행 아래 변경 함수를 붙인 트리(위험 우선 정렬) — 기존 키와 병존.
             "changed_detail": changed_detail,
             "changed_detail_omitted": detail_omitted,

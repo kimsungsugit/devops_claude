@@ -7,7 +7,7 @@
  * ASIL(주석 + 요구 역전파)이 붙는다. 정렬은 위험 우선(ASIL→저커버→변경량), 필터로 좁힌다.
  * ISO: ASIL 보유 함수의 변경(asil_touched)은 경고 강조 — 안전 함수 변경 리뷰 의무.
  */
-import { Fragment, useCallback, useEffect, useMemo, useState } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { post } from '../../api.js';
 
 const xs = { fontSize: 'var(--text-xs)' };
@@ -93,10 +93,67 @@ function FunctionRow({ fn, td, last }) {
   );
 }
 
-export default function BaselineDiffPanel({ jobUrl, cacheRoot }) {
-  const [builds, setBuilds] = useState(null);      // has_source 캐시 빌드 목록
-  const [baseline, setBaseline] = useState('');    // 선택 빌드 번호(문자열)
-  const [target, setTarget] = useState('');
+/** 빌드 선택 라벨 — 번호만으론 어느 시점 코드인지 알 수 없어 날짜·리비전을 함께 노출한다. */
+function buildLabel(b) {
+  const when = String(b?.timestamp_iso || '').slice(5, 10).replace('-', '/');
+  const rev = b?.revision ? ` r${b.revision}` : '';
+  return `#${b?.build_number}${when ? ` · ${when}` : ''}${rev}`;
+}
+
+/**
+ * 스냅샷 신뢰도 배너 — 수치를 보기 전에 "이 비교가 성립하는가"를 먼저 알린다.
+ *
+ * 실측에서 백필로 받아온 10개 빌드가 전부 같은 SVN HEAD라 서로 diff가 0이었고, 화면은
+ * 그걸 '2개월간 변경 1건'으로 표시했다(ASIL 함수 변경이 22건 → 1건으로 과소보고).
+ * 변경 0을 조용히 빈 화면으로 두면 "안전 함수 변경 없음"으로 읽힌다 — ISO 26262에서
+ * 리뷰 의무 누락으로 이어지는 침묵이라 반드시 사유를 낸다.
+ */
+function SnapshotTrustBanner({ data }) {
+  const files = data?.files || {};
+  const identical = files.identical_snapshot === true;
+  const lagB = data?.baseline?.checkout_lag_days;
+  const lagT = data?.target?.checkout_lag_days;
+  const stale = [['베이스라인', data?.baseline, lagB], ['대상', data?.target, lagT]]
+    .filter(([, , lag]) => typeof lag === 'number' && lag >= 1);
+  const groups = (data?.snapshot_groups || []).filter((g) => g.count > 1);
+  if (!identical && stale.length === 0 && groups.length === 0) return null;
+  const box = {
+    ...xs, padding: '4px 8px', borderRadius: 'var(--radius-sm)',
+    border: `1px solid ${identical ? 'var(--color-warning)' : 'var(--border)'}`,
+    color: identical ? 'var(--color-warning)' : 'var(--text-muted)',
+    marginBottom: 'var(--sp-2)', display: 'flex', flexDirection: 'column', gap: 2,
+  };
+  return (
+    <div style={box} role={identical ? 'alert' : undefined}>
+      {identical && (
+        <div>
+          <b>⚠ 두 빌드의 소스 스냅샷이 완전히 동일합니다</b> — 코드가 안 바뀐 것이 아니라
+          같은 트리를 받아온 것이라, 이 구간의 변경·ASIL 수치는 실제 변화를 나타내지 않습니다.
+        </div>
+      )}
+      {stale.map(([label, b, lag]) => (
+        <div key={label}>
+          {label} #{b?.build_number}: 소스를 빌드 <b>{lag}일 뒤</b>에 받았습니다
+          ({String(b?.source_checked_out_at || '').replace('T', ' ').slice(0, 16)} 체크아웃)
+          — 빌드 당시 코드가 아닐 수 있습니다.
+        </div>
+      ))}
+      {groups.map((g) => (
+        <div key={g.builds.join(',')}>
+          동일 트리 재사용: #{g.builds.join(' · #')} ({g.count}개 빌드) — 이들끼리는 비교가 성립하지 않습니다.
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/**
+ * ⚠ builds/baseline/target은 **controlled** — 부모(ProjectSummarySection)가 소유한다.
+ * 아래 빌드별 변경 매트릭스가 같은 베이스라인을 쓰므로, 두 패널이 각자 조회·선택하면 기준이
+ * 갈라져 "어느 쪽이 진짜인가"를 사용자가 물어야 한다. 폴백 자체 fetch도 두지 않는다 —
+ * 한 선택에 출처가 둘이면 그게 영구 버그원이다.
+ */
+export default function BaselineDiffPanel({ jobUrl, cacheRoot, builds, baseline, target, onChangeBaseline, onChangeTarget }) {
   const [data, setData] = useState(null);
   const [delta, setDelta] = useState(null);        // 같은 쌍 PRQA 위반 delta
   const [busy, setBusy] = useState(false);
@@ -155,29 +212,15 @@ export default function BaselineDiffPanel({ jobUrl, cacheRoot }) {
   }, [jobUrl, cacheRoot]);
   const compare = useCallback(() => runCompare(baseline, target), [runCompare, baseline, target]);
 
+  // 쌍이 갖춰지면 1회 자동 비교(서버 캐시라 저비용). 목록 조회는 부모 소관.
+  const autoRef = useRef('');
   useEffect(() => {
-    if (!jobUrl) return undefined;
-    let cancelled = false;
-    (async () => {
-      try {
-        const resp = await post('/api/jenkins/cached-builds-meta', { job_url: jobUrl, cache_root: cacheRoot });
-        if (cancelled) return;
-        const rows = (resp?.builds || []).filter((b) => b.has_source);
-        setBuilds(rows);
-        if (rows.length >= 2) {
-          const tgt = String(rows[0].build_number);
-          const base = String(rows[rows.length - 1].build_number);
-          setTarget(tgt);
-          setBaseline(base);
-          // 초기 1회 자동 비교(서버 캐시라 저비용) — async 흐름 내 호출(effect 동기 setState 아님).
-          runCompare(base, tgt);
-        }
-      } catch (e) {
-        if (!cancelled) setError(String(e?.message || e));
-      }
-    })();
-    return () => { cancelled = true; };
-  }, [jobUrl, cacheRoot, runCompare]);
+    if (!jobUrl || !baseline || !target || baseline === target) return;
+    const pair = `${baseline}->${target}`;
+    if (autoRef.current === pair) return;   // 같은 쌍 재실행 방지(부모 리렌더에도 1회)
+    autoRef.current = pair;
+    runCompare(baseline, target);
+  }, [jobUrl, baseline, target, runCompare]);
 
   const sel = { fontSize: 'var(--text-xs)', padding: '2px 6px', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', background: 'var(--panel)', color: 'var(--text)' };
   const th = { ...xs, textAlign: 'left', padding: '4px 8px', color: 'var(--text-muted)', borderBottom: '1px solid var(--border)', whiteSpace: 'nowrap' };
@@ -192,12 +235,12 @@ export default function BaselineDiffPanel({ jobUrl, cacheRoot }) {
         <div style={{ fontSize: 'var(--text-sm)', fontWeight: 600 }}>베이스라인 → 최신 변화</div>
         {builds && builds.length >= 2 && (
           <>
-            <select aria-label="베이스라인 빌드" value={baseline} onChange={(e) => { setBaseline(e.target.value); setData(null); }} style={sel}>
-              {builds.map((b) => <option key={b.build_number} value={b.build_number}>#{b.build_number}</option>)}
+            <select aria-label="베이스라인 빌드" value={baseline} onChange={(e) => { onChangeBaseline?.(e.target.value); setData(null); }} style={sel}>
+              {builds.map((b) => <option key={b.build_number} value={b.build_number}>{buildLabel(b)}</option>)}
             </select>
             <span style={{ ...xs, color: 'var(--text-muted)' }}>→</span>
-            <select aria-label="대상 빌드" value={target} onChange={(e) => { setTarget(e.target.value); setData(null); }} style={sel}>
-              {builds.map((b) => <option key={b.build_number} value={b.build_number}>#{b.build_number}</option>)}
+            <select aria-label="대상 빌드" value={target} onChange={(e) => { onChangeTarget?.(e.target.value); setData(null); }} style={sel}>
+              {builds.map((b) => <option key={b.build_number} value={b.build_number}>{buildLabel(b)}</option>)}
             </select>
             <button type="button" onClick={compare} disabled={busy}
               style={{ ...xs, padding: '2px 8px', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', background: 'transparent', cursor: busy ? 'wait' : 'pointer', color: 'var(--text-muted)' }}>
@@ -217,6 +260,8 @@ export default function BaselineDiffPanel({ jobUrl, cacheRoot }) {
       {data && data.available === false && (
         <div style={{ ...xs, color: 'var(--text-muted)' }}>{REASON_KO[data.reason] || `비교할 수 없습니다 (${data.reason})`}</div>
       )}
+
+      {data?.available && <SnapshotTrustBanner data={data} />}
 
       {data?.available && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--sp-2)' }}>
@@ -355,9 +400,17 @@ export default function BaselineDiffPanel({ jobUrl, cacheRoot }) {
                 <div style={{ ...xs, color: 'var(--text-muted)' }}>선택한 필터에 해당하는 파일이 없습니다.</div>
               )}
             </div>
-          ) : (files.modified || []).length > 0 && (
+          ) : (files.modified || []).length > 0 ? (
             <div style={{ ...xs, color: 'var(--text-muted)' }}>
               변경 파일 {(files.modified || []).length}개 — 함수 트리는 이 응답(구 캐시)에 없습니다. '비교'를 다시 눌러 갱신하세요.
+            </div>
+          ) : (
+            // 이전엔 `&&` 폴백이라 변경 0이면 **아무것도 렌더되지 않았다** — 빈 화면은
+            // "변경 없음"으로 읽히고, 그게 스냅샷 문제일 때 침묵이 된다(위 배너와 한 쌍).
+            <div style={{ ...xs, color: 'var(--text-muted)' }}>
+              {files.identical_snapshot
+                ? `두 스냅샷이 동일해 비교할 변경이 없습니다 — 비교 대상 파일 ${files.unchanged ?? 0}개(위 경고 참조).`
+                : `이 구간에 변경된 .c/.h 파일이 없습니다 — 비교 대상 ${files.unchanged ?? 0}개 전부 동일.`}
             </div>
           )}
         </div>

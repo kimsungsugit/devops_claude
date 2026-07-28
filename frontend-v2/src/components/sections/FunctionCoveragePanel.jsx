@@ -31,6 +31,32 @@ function ratePct(st) {
   return n <= 1 ? n * 100 : n;  // 0~1 비율/0~100 퍼센트 양쪽 수용(파서 포맷 편차 방어)
 }
 
+/**
+ * 반복 측정 접힘 각주 — VectorCAST가 같은 함수를 환경마다 다시 측정해 entries에 중복으로
+ * 실린다. 서버가 (unit, subprogram)으로 접은 사실을 숨기면 "왜 항목 수가 줄었나"를 답할 수
+ * 없다(접기 전 712 → 후 259). 접힘이 없으면 렌더하지 않는다.
+ */
+function FoldNote({ fold }) {
+  if (!fold || !(fold.duplicated_keys > 0)) return null;
+  return (
+    <span title={`${fold.note} · 원본 ${fold.raw_entries}행 → ${fold.folded_entries}함수 · 측정값이 환경마다 다른 함수 ${fold.divergent_keys}개`}>
+      {' · '}환경 반복 측정 {fold.raw_entries - fold.folded_entries}행 접음
+      {fold.divergent_keys > 0 && ` (환경별 상이 ${fold.divergent_keys})`}
+    </span>
+  );
+}
+
+/** 반복 측정된 함수 표시 — 표의 수치가 '최대 커버' 기준임을 행 단위로 알린다. */
+function Measurements({ e }) {
+  if (!(e?.measurements > 1)) return null;
+  return (
+    <span style={{ color: 'var(--text-muted)' }}
+      title={`환경 ${e.measurements}곳에서 측정 — 표시값은 최대 커버 기준${e.divergent ? ' (환경마다 결과가 다릅니다)' : ''}`}>
+      {e.divergent ? ' ⚠' : ' *'}{e.measurements}
+    </span>
+  );
+}
+
 function SourceBadge({ source, detail, buildNumber }) {
   if (!source) return null;
   const isScm = source === 'scm_vcast_job';
@@ -101,17 +127,23 @@ export default function FunctionCoveragePanel({ jobUrl, cacheRoot }) {
                   {fc.totals.statements?.rate != null && ` · 구문 ${fc.totals.statements.rate}%`}
                   {fc.totals.branches?.rate != null && ` · 분기 ${fc.totals.branches.rate}%`}
                   {fc.source && ` · 출처 ${SOURCE_KO[fc.source] || fc.source}`}
+                  <FoldNote fold={fc.fold} />
                 </div>
                 <div style={{ overflowX: 'auto' }}>
                   <table style={{ borderCollapse: 'collapse', width: '100%' }}>
                     <thead><tr><th style={th}>함수</th><th style={th}>유닛</th><th style={th}>구문</th><th style={th}>분기</th><th style={th}>ccn</th></tr></thead>
                     <tbody>
-                      {(fc.worst || []).map((e) => {
+                      {(fc.worst || []).map((e, i) => {
                         const sp = ratePct(e.statements);
                         const bp = ratePct(e.branches);
                         return (
-                          <tr key={`${e.unit}:${e.subprogram}`}>
-                            <td style={td}>{e.subprogram}</td>
+                          // 인덱스 동반 key — 백엔드 폴딩으로 중복은 사라졌지만, 새 소스가
+                          // 축 없는 중복을 다시 실어도 렌더가 조용히 행을 삼키지 않게 한다.
+                          <tr key={`${e.unit}:${e.subprogram}:${i}`}>
+                            <td style={td}>
+                              {e.subprogram}
+                              <Measurements e={e} />
+                            </td>
                             <td style={{ ...td, color: 'var(--text-muted)' }}>{e.unit}</td>
                             <td style={{ ...td, fontWeight: 600, color: sp != null && sp < 50 ? 'var(--color-danger)' : sp != null && sp < 80 ? 'var(--color-warning)' : 'var(--text)' }}>
                               {sp == null ? '—' : `${Math.round(sp)}%`}
@@ -137,10 +169,11 @@ export default function FunctionCoveragePanel({ jobUrl, cacheRoot }) {
             {itc?.available ? (
               <>
                 <div style={{ ...xs, color: 'var(--text-muted)', marginBottom: 4 }}>
-                  통합(IT) 커버리지 — 항목 {itc.totals.entries}
+                  통합(IT) 커버리지 — 함수 {itc.totals.entries}
                   {itAxes.map((a) => (
                     <span key={a.key}> · {a.label} {itc.totals[a.key]?.rate ?? '—'}%</span>
                   ))}
+                  <FoldNote fold={itc.fold} />
                   {itc.metrics_present?.functions ? (
                     <span title="IT의 함수 진입/호출 커버리지는 UT 구문·분기와 기준이 달라 직접 비교할 수 없습니다"> · 구문·분기와 비교 불가</span>
                   ) : (
@@ -156,9 +189,12 @@ export default function FunctionCoveragePanel({ jobUrl, cacheRoot }) {
                       </tr>
                     </thead>
                     <tbody>
-                      {(itc.worst || []).slice(0, 8).map((e) => (
-                        <tr key={`${e.unit}:${e.subprogram}`}>
-                          <td style={td}>{e.subprogram}</td>
+                      {(itc.worst || []).slice(0, 8).map((e, i) => (
+                        <tr key={`${e.unit}:${e.subprogram}:${i}`}>
+                          <td style={td}>
+                            {e.subprogram}
+                            <Measurements e={e} />
+                          </td>
                           <td style={{ ...td, color: 'var(--text-muted)' }}>{e.unit}</td>
                           {itAxes.map((a) => (
                             <td key={a.key} style={td}>

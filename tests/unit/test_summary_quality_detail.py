@@ -175,6 +175,67 @@ def test_it_coverage_section_independent_and_unit_normalized(tmp_path, monkeypat
     assert resp2["it_coverage"] == {"available": False, "reason": "no_it_metrics"}
 
 
+def test_fold_repeated_measurements_not_summed(tmp_path, monkeypatch):
+    """환경별 반복 측정을 합산하면 분모가 배수로 부푼다 — 접어서 집계해야 한다.
+
+    실측 회귀 고정(KJPDS02_PV): IT 712행 = 259함수 × 최대 5환경인데 합산하면 구문 분모가
+    2854 → 7438(2.61배)이 되어 커버리지가 31.6%로 허위 하락했다. `s_System_MainLoop`는
+    covered=[0,4,4,0,0]/total=[4,4,4,4,4] — 합산 8/20(40%)은 오답이고 접으면 4/4(100%).
+    """
+    from backend.routers import summary_insight as si
+
+    root = tmp_path / "build_9"
+    rd = root / "report"
+    rd.mkdir(parents=True)
+    # 같은 (unit, subprogram)이 3환경에서 측정 — 값이 서로 다르다(divergent).
+    it_entries = [
+        {"unit": "m.c", "subprogram": "loop", "statements": {"covered": c, "total": 4}}
+        for c in (0, 4, 4)
+    ]
+    it_entries.append({"unit": "m.c", "subprogram": "solo", "statements": {"covered": 1, "total": 2}})
+    ut_entries = [
+        {"unit": "m.c", "subprogram": "dup", "ccn": c,
+         "statements": {"covered": s, "total": 10, "rate": s * 10.0},
+         "branches": {"covered": 0, "total": 2}}
+        for c, s in ((3, 2), (7, 9))
+    ]
+    (rd / "analysis_summary.json").write_text(json.dumps({"vectorcast": {
+        "ut_metrics": {"entries": ut_entries}, "it_metrics": {"entries": it_entries},
+    }}), encoding="utf-8")
+    monkeypatch.setattr(si, "list_cached_builds", lambda **k: [
+        {"build_root": str(root), "build_number": 9, "reports_dir": str(rd), "mtime": 0}])
+    resp = si.summary_quality_detail({"job_url": "http://j/"})
+
+    it = resp["it_coverage"]
+    # 합산이면 8/16, 접으면 (4/4)+(1/2) = 5/6.
+    assert it["totals"]["statements"] == {"covered": 5, "total": 6, "rate": 83.3}
+    assert it["totals"]["entries"] == 2                      # 4행 → 2함수
+    assert it["fold"]["raw_entries"] == 4 and it["fold"]["folded_entries"] == 2
+    assert it["fold"]["duplicated_keys"] == 1 and it["fold"]["divergent_keys"] == 1
+    assert it["fold"]["method"] == "max_covered_max_total"
+
+    fc = resp["function_coverage"]
+    assert fc["totals"]["functions"] == 1                     # 2행 → 1함수
+    assert fc["totals"]["statements"] == {"covered": 9, "total": 10, "rate": 90.0}
+    assert fc["totals"]["fully_covered"] == 0
+    assert fc["worst"][0]["ccn"] == 7                         # ccn은 최대값 채택
+    assert fc["worst"][0]["measurements"] == 2 and fc["worst"][0]["divergent"] is True
+    # 최악값은 버리지 않는다 — '재검증할 함수' 판단 근거.
+    assert fc["worst"][0]["statements"]["worst_covered"] == 2
+
+
+def test_fold_absent_when_no_duplicates(tmp_path, monkeypatch):
+    """중복이 없으면 접힘 통계는 0 — 정상 데이터에 불필요한 각주를 띄우지 않는다."""
+    from backend.routers import summary_insight as si
+
+    meta = _prep(tmp_path)
+    monkeypatch.setattr(si, "list_cached_builds", lambda **k: [meta])
+    fc = si.summary_quality_detail({"job_url": "http://j/"})["function_coverage"]
+    assert fc["fold"]["duplicated_keys"] == 0
+    assert fc["fold"]["raw_entries"] == fc["fold"]["folded_entries"] == 3
+    assert all("measurements" not in w for w in fc["worst"])
+
+
 def test_rag_subfolder_path_regression(tmp_path, monkeypatch):
     """경로 버그 회귀 고정: 실물은 vectorcast_rag/ 하위폴더 — 이전엔 항상 available:false."""
     from backend.routers import summary_insight as si

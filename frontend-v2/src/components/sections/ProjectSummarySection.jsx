@@ -7,7 +7,7 @@ import { HorizontalBar, RingGauge, TrendLine } from '../charts.jsx';
 import { CoverageDonut, QualityGateBadge, classifyGate } from '../ResultPanel.jsx';
 import { buildTraceMatrix } from '../../traceMatrix.js';
 import PipelineHealthStrip from './PipelineHealthStrip.jsx';
-import BuildDeltaDrilldown from './BuildDeltaDrilldown.jsx';
+import BuildChangeMatrixPanel from './BuildChangeMatrixPanel.jsx';
 import SummaryAiInsightPanel from './SummaryAiInsightPanel.jsx';
 import RuleTrendPanel from './RuleTrendPanel.jsx';
 import CodingRulebookPanel from './CodingRulebookPanel.jsx';
@@ -24,7 +24,7 @@ import TestDesignPanel from './TestDesignPanel.jsx';
  * 구성: 문제점 배너 · AI 인사이트를 최상단에 두고, 나머지를 3그룹으로 나눈다.
  *   ① 🏗 SW 아키텍처   — 아키텍처 메트릭 · 다이어그램
  *   ② 📄 소스코드       — PRQA 트렌드 · 정적분석 위반 상세 · 룰 트렌드 · 함수별 커버리지
- *   ③ 🔨 빌드별 변경 영향 — 베이스라인→최신 변화 · 빌드 타임라인(전체 빌드)
+ *   ③ 🔨 빌드별 변경 영향 — 베이스라인→최신 변화 · 빌드 타임라인(미분석 행은 기본 숨김·토글)
  *
  * 숨김(사용자 결정, 삭제 아님 — 복원은 아래 각 HIDDEN 주석 블록 해제): 파이프라인 헬스 스트립 ·
  * 정적·동적 분석 현황(차트) · 추적성 현황(SW 밴드) · 테스트 설계 어드바이저.
@@ -138,9 +138,35 @@ export default function ProjectSummarySection({ job, analysisResult }) {
       || '';
   }, [analysisResult, job]);
 
-  // ── 빌드 타임라인(전체 빌드) ──
+  // ── 소스 스냅샷 빌드 목록 + 공유 베이스라인 ──
+  // BaselineDiffPanel과 BuildChangeMatrixPanel이 **같은 기준**을 써야 한다 — 각자 조회·선택하면
+  // 두 패널의 기준이 갈라져 사용자가 "어느 쪽이 진짜인가"를 물어야 한다. 단일 출처로 둔다.
+  const [srcBuilds, setSrcBuilds] = useState(null);
+  const [baselineBuild, setBaselineBuild] = useState('');
+  const [diffTarget, setDiffTarget] = useState('');   // BaselineDiffPanel 전용(매트릭스는 미사용)
+  useEffect(() => {
+    if (!jobUrl) return undefined;
+    let cancelled = false;
+    (async () => {
+      try {
+        const resp = await post('/api/jenkins/cached-builds-meta', { job_url: jobUrl, cache_root: cacheRoot });
+        if (cancelled) return;
+        const rows = (resp?.builds || []).filter((b) => b.has_source);
+        setSrcBuilds(rows);
+        if (rows.length >= 2) {
+          setDiffTarget(String(rows[0].build_number));                       // 최신
+          setBaselineBuild(String(rows[rows.length - 1].build_number));      // 최고령
+        }
+      } catch { /* best-effort — 두 패널이 각자 정직 실패를 표시한다 */ }
+    })();
+    return () => { cancelled = true; };
+  }, [jobUrl, cacheRoot]);
+
+  // ── 빌드 타임라인 ──
+  // ⚠ 이 fetch는 **표가 아니라 rollup**(문제점 배너·헤더 리비전 범위)을 위해 존재한다.
+  //   빌드별 변경 영향 표는 이제 change-matrix(소스 스냅샷 비교)를 쓴다 — 표에서 안 쓴다고
+  //   이 fetch를 지우면 배너가 조용히 빈다(회귀 테스트가 이를 고정한다).
   const [timeline, setTimeline] = useState(null);
-  const [tlError, setTlError] = useState('');
   useEffect(() => {
     if (!scmId) return undefined;
     let cancelled = false;
@@ -152,11 +178,9 @@ export default function ProjectSummarySection({ job, analysisResult }) {
         const qs = new URLSearchParams({ limit: '100', job_url: jobUrl || '', cache_root: cacheRoot || '' });
         const data = await api(`/api/scm/build-timeline/${encodeURIComponent(scmId)}?${qs}`);
         if (cancelled) return;
-        if (data && data.ok !== false) { setTimeline(data); setTlError(''); }
-        else { setTimeline({ rows: [], rollup: {} }); setTlError('타임라인 조회 실패'); }
-      } catch (e) {
-        if (!cancelled) setTlError(String(e?.message || e));
-      }
+        if (data && data.ok !== false) setTimeline(data);
+        else setTimeline({ rows: [], rollup: {} });
+      } catch { /* rollup은 배너 부가정보 — 실패해도 나머지 패널은 그대로 */ }
     })();
     return () => { cancelled = true; };
   }, [scmId, jobUrl, cacheRoot]);
@@ -249,8 +273,7 @@ export default function ProjectSummarySection({ job, analysisResult }) {
     return () => { cancelled = true; };
   }, [jobUrl, cacheRoot]);
 
-  // ── 빌드별 PRQA delta(트렌드 응답의 인접 delta) + 드릴다운 확장 상태 ──
-  const [expandedBuild, setExpandedBuild] = useState(null);
+  // ── 빌드별 PRQA delta(트렌드 응답의 인접 delta) — 매트릭스 Δ위반 열이 소비 ──
   const deltaByBuild = useMemo(() => {
     const m = new Map();
     for (const b of prqaTrend?.builds || []) {
@@ -263,56 +286,10 @@ export default function ProjectSummarySection({ job, analysisResult }) {
     ? (trendBuilds[trendBuilds.length - 1]?.violations_delta ?? null)
     : null;
 
-  // 분석된 빌드(timeline change-log) + 전체 Jenkins 빌드(allBuilds) 병합 — 미분석은 analyzed:false 행.
-  const rows = useMemo(() => {
-    // deep-review W2: 동일 build_number 재분석 시 최신 실행을 채택한다. rows는 최신순이라
-    // '첫 등장 우선' = 최신 우선 — 이전 last-write-wins는 구 분석이 최신을 가렸다.
-    const analyzed = [];
-    {
-      const seen = new Set();
-      for (const r of timeline?.rows || []) {
-        const key = r.build_number != null ? String(r.build_number) : null;
-        if (key != null) {
-          if (seen.has(key)) continue;
-          seen.add(key);
-        }
-        analyzed.push(r);
-      }
-    }
-    if (!Array.isArray(allBuilds) || allBuilds.length === 0) return analyzed;
-    const byNum = new Map();
-    for (const r of analyzed) if (r.build_number != null) byNum.set(String(r.build_number), r);
-    const merged = [];
-    const used = new Set();
-    for (const b of allBuilds) {
-      const num = b?.number;
-      if (num == null) continue;
-      const a = byNum.get(String(num));
-      if (a) {
-        used.add(String(num));
-        // 서버 캐시 병합 행(analyzed:false, cached:true)을 analyzed로 승격하지 않는다 —
-        // Jenkins 목록에 있다고 분석된 것이 아니다(분석 여부는 change-log 행만이 증거).
-        merged.push({ ...a, build_result: b.result || a.build_result, build_revision: a.build_revision || b.revision, analyzed: a.analyzed !== false });
-      } else {
-        merged.push({
-          run_id: `__build_${num}`, analyzed: false, build_number: num,
-          build_revision: b.revision, build_result: b.result,
-          timestamp: b.timestamp ? new Date(b.timestamp).toISOString() : '',
-          impact_counts: {}, max_asil_bucket: 'unknown',
-        });
-      }
-    }
-    for (const r of analyzed) {  // Jenkins 목록에 없는 분석 행(build_number null 등)도 유지
-      const key = r.build_number != null ? String(r.build_number) : null;
-      if (key == null || !used.has(key)) merged.push(r);
-    }
-    merged.sort((x, y) => (Number(y.build_number) || 0) - (Number(x.build_number) || 0));
-    return merged;
-  }, [timeline, allBuilds]);
+  // change-log rows는 더 이상 표를 만들지 않는다(빌드별 변경 영향은 소스 스냅샷 비교로 이동).
+  // ⚠ rollup은 계속 소비된다 — 문제점 배너와 헤더 리비전 범위가 여기서 나온다.
   const rollup = useMemo(() => timeline?.rollup || {}, [timeline]);
-  const asilDist = rollup.asil_distribution || {};
   const revRange = rollup.revision_range || {};
-  const tlBusy = !!scmId && timeline == null && !tlError;
 
   // ── 문제점 집계(SW 추적성 + timeline rollup + coverage 게이트) ──
   const problems = useMemo(() => {
@@ -343,7 +320,7 @@ export default function ProjectSummarySection({ job, analysisResult }) {
   const [backfill, setBackfill] = useState(null); // {job_id,total,completed,state} | {error}
   const backfillBusy = backfill?.state === 'running';
   const reloadTimeline = useCallback(() => {
-    setTimeline(null); setTlError('');
+    setTimeline(null);
     // scmId/jobUrl deps의 timeline effect는 상태 기반이라 즉시 재조회를 위해 직접 호출.
     (async () => {
       try {
@@ -386,21 +363,13 @@ export default function ProjectSummarySection({ job, analysisResult }) {
     }
   }, [jobUrl, cfg, cacheRoot, scmId, toast, reloadTimeline]);
 
-  const openInImpact = useCallback((row) => {
-    if (row.analyzed === false) return;  // 미분석 빌드는 열 상세가 없음
-    try {
-      localStorage.setItem('devops_v2_impact_focus_build', JSON.stringify({ build_number: row.build_number, scm_id: scmId, ts: Date.now() }));
-      window.dispatchEvent(new CustomEvent('devops:impact-focus-build'));
-    } catch { /* ignore */ }
-    if (typeof window.__detailSection === 'function') window.__detailSection('impact');
-    else toast?.('info', '변경 영향 평가 탭으로 이동할 수 없습니다');
-  }, [scmId, toast]);
+  // 행 클릭 → 변경 영향 평가 탭 핸드오프는 제거됐다(사용자 결정): 표가 영향분석 실행 이력이
+  // 아니라 소스 스냅샷 비교가 되면서, 잡이 실행된 빌드에만 동작하는 링크는 잡음이었다.
+  // 그 자리는 행 펼침(변경 파일·함수 + PRQA delta)이 대신한다.
 
   const utCov = pctOrNull(scmVcast?.line_rate);
   const brCov = pctOrNull(scmVcast?.branch_rate);
   const compliance = prqa?.project_compliance_index;
-  const th = { textAlign: 'left', padding: '6px 8px', fontSize: 'var(--text-xs)', color: 'var(--text-muted)', borderBottom: '1px solid var(--border)', whiteSpace: 'nowrap' };
-  const td = { padding: '6px 8px', fontSize: 'var(--text-xs)', borderBottom: '1px solid var(--border)', whiteSpace: 'nowrap' };
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--sp-3)' }}>
@@ -645,145 +614,34 @@ export default function ProjectSummarySection({ job, analysisResult }) {
 
       {/* 테스트 설계 어드바이저 — 기법 권고·설계-시험 갭 (L2) */}
       {SHOW.testDesign && <TestDesignPanel jobUrl={jobUrl} cacheRoot={cacheRoot} />}
-
       {/* ━━ 그룹 ③ 빌드별 변경 영향 ━━ */}
-      <GroupHeading icon="🔨" title="빌드별 변경 영향" desc="베이스라인 대비 코드 변화 · 빌드 타임라인" />
+      <GroupHeading icon="🔨" title="빌드별 변경 영향" desc="베이스라인 대비 소스 변화 (영향분석 실행 이력과 무관)" />
+
+      <div className="panel" style={{ ...PANEL, display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 'var(--sp-2)' }}>
+        <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>
+          비교 가능한 캐시 빌드 {srcBuilds ? srcBuilds.length : '—'}개
+          {Array.isArray(allBuilds) && allBuilds.length > 0 && ` · Jenkins 빌드 ${allBuilds.length}개 중 소스 스냅샷 보유분만 비교 대상`}
+        </span>
+        {backfillBusy && (
+          <span style={{ fontSize: 'var(--text-xs)', color: 'var(--color-info)' }}>
+            백필 중 {backfill.completed}/{backfill.total}{backfill.current_build ? ` (#${backfill.current_build})` : ''}…
+          </span>
+        )}
+        <button type="button" onClick={startBackfill} disabled={backfillBusy || !jobUrl}
+          title="Jenkins에서 최근 10개 빌드 산출물을 캐시로 가져옵니다(이미 캐시된 빌드는 건너뜀). Jenkins 미연결 시 안내만 표시됩니다."
+          style={{ marginLeft: 'auto', fontSize: 'var(--text-xs)', padding: '2px 8px', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', background: 'transparent', cursor: backfillBusy ? 'wait' : 'pointer', color: 'var(--text-muted)' }}>
+          과거 빌드 가져오기
+        </button>
+      </div>
 
       {/* 베이스라인 → 최신 변화 — 소스 스냅샷 직접 비교(영향분석 이력 비의존) */}
-      <BaselineDiffPanel jobUrl={jobUrl} cacheRoot={cacheRoot} />
+      <BaselineDiffPanel jobUrl={jobUrl} cacheRoot={cacheRoot}
+        builds={srcBuilds} baseline={baselineBuild} target={diffTarget}
+        onChangeBaseline={setBaselineBuild} onChangeTarget={setDiffTarget} />
 
-      {/* 빌드 타임라인 (전체 빌드) */}
-      <div className="panel" style={PANEL}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--sp-2)', marginBottom: 'var(--sp-2)' }}>
-          <div style={{ fontSize: 'var(--text-sm)', fontWeight: 600 }}>빌드별 변경 영향 (전체 빌드)</div>
-          <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>최신순 · 분석된 빌드는 클릭</span>
-          {tlBusy && <span className="spinner" />}
-          {backfillBusy && (
-            <span style={{ fontSize: 'var(--text-xs)', color: 'var(--color-info)' }}>
-              백필 중 {backfill.completed}/{backfill.total}{backfill.current_build ? ` (#${backfill.current_build})` : ''}…
-            </span>
-          )}
-          <button type="button" onClick={startBackfill} disabled={backfillBusy || !jobUrl}
-            title="Jenkins에서 최근 10개 빌드 산출물을 캐시로 가져옵니다(이미 캐시된 빌드는 건너뜀). Jenkins 미연결 시 안내만 표시됩니다."
-            style={{ marginLeft: 'auto', fontSize: 'var(--text-xs)', padding: '2px 8px', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', background: 'transparent', cursor: backfillBusy ? 'wait' : 'pointer', color: 'var(--text-muted)' }}>
-            과거 빌드 가져오기
-          </button>
-        </div>
-
-        {rows.length > 0 && (
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(120px, 1fr))', gap: 'var(--sp-2)', marginBottom: 'var(--sp-3)' }}>
-            <Kpi label="누적 변경 함수" value={fmtInt(rollup.distinct_changed_functions)} sub="distinct" />
-            <Kpi label="누적 변경 파일" value={fmtInt(rollup.distinct_changed_files)} sub="distinct" />
-            <Kpi label="재생성(AUTO)" value={fmtInt(rollup.cumulative_auto_docs)} sub="문서 누적" />
-            <Kpi label="검토(FLAG)" value={fmtInt(rollup.cumulative_flag_docs)} tone={(rollup.cumulative_flag_docs || 0) > 0 ? 'var(--color-warning)' : undefined} />
-            <Kpi label="MC/DC 회귀" value={fmtInt(rollup.cumulative_coverage_regressed)} tone={(rollup.cumulative_coverage_regressed || 0) > 0 ? 'var(--color-danger)' : undefined} />
-            <Kpi label="ASIL 분포" value={
-              <span style={{ display: 'inline-flex', gap: 4, flexWrap: 'wrap' }}>
-                {['D', 'C', 'B', 'A', 'QM', 'unknown'].filter(k => (asilDist[k] || 0) > 0).map(k => (
-                  <Pill key={k} text={`${k === 'unknown' ? '미상' : k} ${asilDist[k]}`} color={ASIL_COLOR[k]} />
-                ))}
-                {['D', 'C', 'B', 'A', 'QM', 'unknown'].every(k => (asilDist[k] || 0) === 0) && '—'}
-              </span>
-            } />
-          </div>
-        )}
-
-        {tlError && <div style={{ fontSize: 'var(--text-xs)', color: 'var(--color-danger)', marginBottom: 'var(--sp-2)' }}>타임라인 조회 오류: {tlError}</div>}
-        {timeline?.enrich_note && <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', marginBottom: 'var(--sp-2)' }}>ℹ {timeline.enrich_note}</div>}
-
-        {!scmId ? (
-          <div style={{ fontSize: 'var(--text-sm)', color: 'var(--text-muted)' }}>SCM이 연결되지 않아 타임라인을 표시할 수 없습니다.</div>
-        ) : rows.length > 0 ? (
-          <div style={{ overflowX: 'auto' }}>
-            <table style={{ borderCollapse: 'collapse', width: '100%', minWidth: 760 }}>
-              <thead>
-                <tr>
-                  <th style={th}>빌드</th><th style={th}>리비전</th><th style={th}>결과</th><th style={th}>시각</th>
-                  <th style={th}>변경 파일</th><th style={th}>변경 함수</th><th style={th}>영향(직접/1h/2h)</th>
-                  <th style={th}>max ASIL</th><th style={th}>MC/DC</th><th style={th}>재생성/검토</th><th style={th}>상태</th>
-                  <th style={th} title="직전 캐시 빌드 대비 PRQA 위반 증감">Δ위반</th><th style={th}>상세</th>
-                </tr>
-              </thead>
-              <tbody>
-                {rows.map((r) => {
-                  const analyzed = r.analyzed !== false;
-                  const bucket = r.max_asil_bucket || 'unknown';
-                  const rowTrend = r.build_number != null ? deltaByBuild.get(String(r.build_number)) : null;
-                  const rowDelta = rowTrend?.violations_delta ?? null;
-                  const expanded = r.build_number != null && expandedBuild != null && String(expandedBuild) === String(r.build_number);
-                  return (
-                    <Fragment key={r.run_id}>
-                    <tr
-                      onClick={() => openInImpact(r)}
-                      onKeyDown={(e) => { if (e.target === e.currentTarget && analyzed && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); openInImpact(r); } }}
-                      role={analyzed ? 'button' : undefined} tabIndex={analyzed ? 0 : undefined}
-                      aria-label={analyzed ? `빌드 #${r.build_number ?? '?'} 변경 영향 평가 열기` : undefined}
-                      style={{ cursor: analyzed ? 'pointer' : 'default', opacity: analyzed ? 1 : 0.6 }}
-                      title={analyzed ? '클릭 → 변경 영향 평가 탭에서 이 빌드 열기' : '미분석 빌드'}>
-                      <td style={td}>{r.build_number != null ? `#${r.build_number}` : '—'}</td>
-                      <td style={td}>
-                        r{r.build_revision || '—'}
-                        {r.build_revision_is_head && <span title="HEAD 미확인" style={{ color: 'var(--color-warning)' }}> ⚠</span>}
-                      </td>
-                      <td style={td}>{r.build_result ? <Pill text={r.build_result} color={r.build_result === 'SUCCESS' ? 'var(--color-success)' : (String(r.build_result).includes('FAIL') ? 'var(--color-danger)' : 'var(--text-muted)')} /> : '—'}</td>
-                      <td style={td}>{String(r.timestamp || '').replace('T', ' ').slice(0, 16) || '—'}</td>
-                      <td style={td}>{analyzed ? fmtInt(r.changed_files_count) : '—'}</td>
-                      <td style={td}>{analyzed ? fmtInt(r.changed_functions_count) : '—'}</td>
-                      <td style={td}>{analyzed ? `${r.impact_counts?.direct ?? 0}/${r.impact_counts?.indirect_1hop ?? 0}/${r.impact_counts?.indirect_2hop ?? 0}` : '—'}</td>
-                      <td style={td}>{analyzed ? <Pill text={bucket === 'unknown' ? '미상' : bucket} color={ASIL_COLOR[bucket]} /> : '—'}</td>
-                      <td style={td}>{analyzed && r.mcdc_required ? <Pill text="필수" color="var(--color-info)" /> : '—'}</td>
-                      <td style={td}>
-                        {analyzed
-                          ? <><span style={{ color: 'var(--color-success)' }}>{r.auto_docs || 0}</span>{' / '}<span style={{ color: (r.flag_docs || 0) > 0 ? 'var(--color-warning)' : 'var(--text)' }}>{r.flag_docs || 0}</span></>
-                          : '—'}
-                      </td>
-                      <td style={td}>
-                        {!analyzed ? <Pill text={r.cached ? '캐시 · 미분석' : '미분석'} color="var(--text-muted)" title={r.cached ? '캐시에 산출물 존재 — 영향 분석은 미실행' : undefined} />
-                          : r.partial_failure ? <Pill text="부분실패" color="var(--color-warning)" />
-                          : (r.coverage_regressed || 0) > 0 ? <Pill text="커버리지 회귀" color="var(--color-danger)" />
-                          : (r.coverage_unmeasured_safety || 0) > 0 ? <Pill text="MC/DC 미측정" color="var(--color-warning)" />
-                          : !r.coverage_measured ? <Pill text="커버리지 미측정" color="var(--text-muted)" />
-                          : <span style={{ color: 'var(--color-success)', fontWeight: 600 }}>정상</span>}
-                      </td>
-                      <td style={td}>
-                        {rowDelta == null
-                          ? <span style={{ color: 'var(--text-muted)' }}>—</span>
-                          : <span style={{ fontWeight: 600, color: rowDelta > 0 ? 'var(--color-danger)' : rowDelta < 0 ? 'var(--color-success)' : 'var(--text-muted)' }}>
-                              {rowDelta > 0 ? `+${rowDelta}` : rowDelta === 0 ? '±0' : rowDelta}
-                            </span>}
-                      </td>
-                      <td style={td}>
-                        {r.build_number != null && (
-                          <button type="button"
-                            onClick={(e) => { e.stopPropagation(); setExpandedBuild(expanded ? null : r.build_number); }}
-                            aria-expanded={expanded}
-                            aria-label={`빌드 #${r.build_number} PRQA 위반 delta 상세 ${expanded ? '접기' : '펼치기'}`}
-                            title="직전 빌드 대비 위반 규칙/파일 delta 드릴다운"
-                            style={{ fontSize: 'var(--text-xs)', padding: '1px 7px', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', background: 'transparent', cursor: 'pointer', color: 'var(--text-muted)' }}>
-                            {expanded ? '▾' : '▸'}
-                          </button>
-                        )}
-                      </td>
-                    </tr>
-                    {expanded && (
-                      <tr>
-                        <td colSpan={13} style={{ padding: 0, borderBottom: '1px solid var(--border)' }}>
-                          <BuildDeltaDrilldown jobUrl={jobUrl} cacheRoot={cacheRoot} scmId={scmId}
-                            buildNumber={Number(r.build_number)}
-                            onOpenImpact={analyzed ? () => openInImpact(r) : undefined} />
-                        </td>
-                      </tr>
-                    )}
-                    </Fragment>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-        ) : (!tlBusy && !tlError) ? (
-          <div style={{ fontSize: 'var(--text-sm)', color: 'var(--text-muted)' }}>표시할 빌드가 없습니다.</div>
-        ) : null}
-      </div>
+      {/* 빌드별 변경 영향 — 위 패널과 같은 베이스라인을 기준으로 각 빌드의 누적 변화 */}
+      <BuildChangeMatrixPanel jobUrl={jobUrl} cacheRoot={cacheRoot}
+        baseline={baselineBuild} deltaByBuild={deltaByBuild} />
     </div>
   );
 }

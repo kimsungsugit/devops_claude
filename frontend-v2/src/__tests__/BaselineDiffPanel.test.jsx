@@ -1,18 +1,16 @@
 /**
  * BaselineDiffPanel — 기본 쌍(최고령→최신)·change-log 비의존 캡션·ASIL 강조·prqa-delta 병행·정직 실패.
  */
-import { render, screen } from '@testing-library/react';
+import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-let mockMeta;
 let mockDiff;
 let mockDelta;
 
 vi.mock('../api.js', () => ({
   post: vi.fn((url) => {
     const u = String(url);
-    if (u.includes('cached-builds-meta')) return Promise.resolve(mockMeta);
     if (u.includes('baseline-diff')) return Promise.resolve(mockDiff);
     if (u.includes('prqa-delta')) return Promise.resolve(mockDelta);
     return Promise.resolve({});
@@ -22,12 +20,6 @@ vi.mock('../api.js', () => ({
 const { default: BaselineDiffPanel } = await import('../components/sections/BaselineDiffPanel.jsx');
 const { post } = await import('../api.js');
 
-const META = {
-  ok: true, available: true,
-  builds: [
-    { build_number: 125, has_source: true }, { build_number: 124, has_source: false }, { build_number: 122, has_source: true },
-  ],
-};
 const DIFF = {
   ok: true, available: true, reason: null, independent_of_change_log: true, cached: false,
   baseline: { build_number: 122 }, target: { build_number: 125 },
@@ -79,12 +71,21 @@ const DIFF = {
 };
 const DELTA = { ok: true, available: true, totals: { cur: 562, base: 552, delta: 10 } };
 
-const PROPS = { jobUrl: 'http://jenkins/job/KJ/', cacheRoot: '.devops_pro_cache' };
+// controlled — builds/baseline/target은 부모(ProjectSummarySection)가 소유한다.
+// 아래 매트릭스 패널과 기준을 공유해야 해서 자체 조회를 없앴다(폴백 fetch도 없음).
+const SRC_BUILDS = [
+  { build_number: 125, has_source: true, timestamp_iso: '2026-07-24T13:00:11', revision: '1075' },
+  { build_number: 122, has_source: true, timestamp_iso: '2026-06-25T13:00:00', revision: '1053' },
+];
+const PROPS = {
+  jobUrl: 'http://jenkins/job/KJ/', cacheRoot: '.devops_pro_cache',
+  builds: SRC_BUILDS, baseline: '122', target: '125',
+  onChangeBaseline: () => {}, onChangeTarget: () => {},
+};
 
 describe('BaselineDiffPanel', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mockMeta = META;
     mockDiff = DIFF;
     mockDelta = DELTA;
   });
@@ -183,9 +184,42 @@ describe('BaselineDiffPanel', () => {
   });
 
   it('스냅샷 1개뿐이면 백필 안내', async () => {
-    mockMeta = { ok: true, available: true, builds: [{ build_number: 125, has_source: true }] };
-    render(<BaselineDiffPanel {...PROPS} />);
+    render(<BaselineDiffPanel {...PROPS} builds={[{ build_number: 125, has_source: true }]} baseline="" target="" />);
     expect(await screen.findByText(/2개 이상 필요합니다\(현재 1개\)/)).toBeInTheDocument();
+  });
+
+  it('동일 스냅샷 — 빈 화면이 아니라 경고 + 사유(ASIL 과소보고 침묵 방지)', async () => {
+    mockDiff = {
+      ...DIFF,
+      baseline: { build_number: 111, checkout_lag_days: 69.0, source_checked_out_at: '2026-07-27T09:24:27' },
+      target: { build_number: 125, checkout_lag_days: 0.0 },
+      baseline_auto_reason: 'all_identical',
+      snapshot_groups: [{ builds: [123, 121, 120, 111], count: 4 }],
+      files: { added: [], deleted: [], modified: [], unchanged: 147, identical_snapshot: true, changed_detail: [] },
+      functions: { counts: { new: 0, deleted: 0, signature: 0, body: 0 } },
+      asil_touched: [],
+    };
+    render(<BaselineDiffPanel {...PROPS} />);
+    expect(await screen.findByRole('alert')).toHaveTextContent(/소스 스냅샷이 완전히 동일/);
+    expect(screen.getByText(/빌드 당시 코드가 아닐 수 있습니다/)).toBeInTheDocument();
+    expect(screen.getByText(/동일 트리 재사용: #123 · #121 · #120 · #111/)).toBeInTheDocument();
+    // 구 코드는 `&&` 폴백이라 여기서 아무것도 렌더되지 않았다(빈 화면 = '변경 없음' 오독).
+    expect(screen.getByText(/두 스냅샷이 동일해 비교할 변경이 없습니다/)).toBeInTheDocument();
+  });
+
+  it('정상 스냅샷이면 신뢰 배너를 띄우지 않는다', async () => {
+    mockDiff = { ...DIFF, baseline: { build_number: 122, checkout_lag_days: 0.1 }, target: { build_number: 125, checkout_lag_days: 0 }, snapshot_groups: [] };
+    render(<BaselineDiffPanel {...PROPS} />);
+    await screen.findByText(/APP\/a\.c/);
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(screen.queryByText(/동일 트리 재사용/)).toBeNull();
+  });
+
+  it('빌드 선택 라벨에 날짜·리비전을 표기(번호만으론 어느 시점인지 모른다)', async () => {
+    render(<BaselineDiffPanel {...PROPS} />);
+    const sel = await screen.findByLabelText('베이스라인 빌드');
+    expect(within(sel).getByText('#122 · 06/25 r1053')).toBeInTheDocument();
+    expect(within(sel).getByText('#125 · 07/24 r1075')).toBeInTheDocument();
   });
 
   it('available:false reason 한국어 매핑', async () => {
@@ -194,14 +228,29 @@ describe('BaselineDiffPanel', () => {
     expect(await screen.findByText(/베이스라인 빌드에 소스 스냅샷이 없습니다/)).toBeInTheDocument();
   });
 
-  it('쌍 변경 후 비교 버튼 → 새 쌍으로 요청', async () => {
+  it('select 변경은 부모에게 통지만 한다(controlled) — 값 소유자는 부모', async () => {
+    // 아래 매트릭스 패널과 기준을 공유하므로 이 패널이 스스로 baseline을 바꾸면 안 된다.
     const user = userEvent.setup();
-    render(<BaselineDiffPanel {...PROPS} />);
+    const onChangeBaseline = vi.fn();
+    const onChangeTarget = vi.fn();
+    render(<BaselineDiffPanel {...PROPS} onChangeBaseline={onChangeBaseline} onChangeTarget={onChangeTarget} />);
     await screen.findByText(/신규 1/);
     await user.selectOptions(screen.getByLabelText('베이스라인 빌드'), '125');
+    expect(onChangeBaseline).toHaveBeenCalledWith('125');
     await user.selectOptions(screen.getByLabelText('대상 빌드'), '122');
-    await user.click(screen.getByText('비교'));
-    const calls = post.mock.calls.filter(([u]) => String(u).includes('baseline-diff'));
-    expect(calls[calls.length - 1][1]).toMatchObject({ baseline_build: 125, target_build: 122 });
+    expect(onChangeTarget).toHaveBeenCalledWith('122');
+  });
+
+  it('부모가 쌍을 바꾸면 새 쌍으로 자동 재비교(같은 쌍은 1회만)', async () => {
+    const { rerender } = render(<BaselineDiffPanel {...PROPS} />);
+    await screen.findByText(/신규 1/);
+    const before = post.mock.calls.filter(([u]) => String(u).includes('baseline-diff')).length;
+    rerender(<BaselineDiffPanel {...PROPS} />);          // 같은 쌍 리렌더 — 재요청 없음
+    expect(post.mock.calls.filter(([u]) => String(u).includes('baseline-diff')).length).toBe(before);
+    rerender(<BaselineDiffPanel {...PROPS} baseline="125" target="122" />);
+    await vi.waitFor(() => {
+      const calls = post.mock.calls.filter(([u]) => String(u).includes('baseline-diff'));
+      expect(calls[calls.length - 1][1]).toMatchObject({ baseline_build: 125, target_build: 122 });
+    });
   });
 });

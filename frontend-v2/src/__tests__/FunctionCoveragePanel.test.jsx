@@ -110,6 +110,48 @@ describe('FunctionCoveragePanel', () => {
     expect(screen.getAllByRole('columnheader', { name: '진입' })).toHaveLength(1);
   });
 
+  it('반복 측정 중복 행이 있어도 React key 경고 없이 전부 렌더 + 접힘 각주', async () => {
+    // 회귀 고정: 기존 fixture는 worst가 전부 유니크라 key 충돌을 못 잡았다.
+    // 실측 콘솔 경고와 같은 형태 — 동일 (unit, subprogram)이 서버 폴딩을 통과해 들어와도
+    // 행이 조용히 삼켜지거나 경고가 나면 안 된다.
+    const warn = vi.spyOn(console, 'error').mockImplementation(() => {});
+    mockResp = {
+      ...RESP,
+      it_coverage: {
+        ...RESP.it_coverage,
+        totals: { ...RESP.it_coverage.totals, entries: 259 },
+        fold: { raw_entries: 712, folded_entries: 259, duplicated_keys: 259, divergent_keys: 10, method: 'max_covered_max_total', note: 'n' },
+        worst: [
+          { unit: 'Ap_DoorPreCtrl_PDS', subprogram: 'g_GetActiveHoldingTm', measurements: 3, divergent: true,
+            functions: { covered: 0, total: 1, rate: 0 }, function_calls: { covered: 0, total: 3, rate: 0 } },
+          { unit: 'Ap_DoorPreCtrl_PDS', subprogram: 'g_GetActiveHoldingTm', measurements: 3,
+            functions: { covered: 0, total: 1, rate: 0 }, function_calls: { covered: 0, total: 3, rate: 0 } },
+        ],
+      },
+    };
+    render(<FunctionCoveragePanel jobUrl="http://j/" cacheRoot="" />);
+    expect(await screen.findAllByText('g_GetActiveHoldingTm')).toHaveLength(2);  // 두 행 모두 렌더
+    expect(screen.getByText(/환경 반복 측정 453행 접음/)).toBeInTheDocument();
+    expect(screen.getByText(/환경별 상이 10/)).toBeInTheDocument();
+    expect(warn).not.toHaveBeenCalledWith(
+      expect.stringContaining('same key'), expect.anything(), expect.anything(),
+    );
+    warn.mockRestore();
+  });
+
+  it('중복이 없으면 접힘 각주를 띄우지 않는다', async () => {
+    mockResp = {
+      ...RESP,
+      function_coverage: {
+        ...RESP.function_coverage,
+        fold: { raw_entries: 349, folded_entries: 349, duplicated_keys: 0, divergent_keys: 0, method: 'max_covered_max_total', note: 'n' },
+      },
+    };
+    render(<FunctionCoveragePanel jobUrl="http://j/" cacheRoot="" />);
+    await screen.findByText(/구문 99\.3%/);
+    expect(screen.queryByText(/환경 반복 측정/)).toBeNull();
+  });
+
   // ── N1: SCM 입력 문서 폴백 ──
   it('SCM 폴백 — 출처 배지(로드 시각)와 SCM 전용 IT 축(구문/분기/호출)', async () => {
     mockResp = SCM_RESP;

@@ -327,6 +327,7 @@ def summary_rule_fix_example(req: dict) -> Dict[str, Any]:
     import hashlib as _hashlib
 
     from backend.services.build_inventory import find_build_meta, list_cached_builds_meta
+    from backend.services.prqa_rule_trend import CROSS_MODULE_NOTE, is_cross_module_key
     from backend.services.rule_fix_examples import collect_fix_evidence
     from workflow.rule_fix_example import (
         CORRELATION_NOTE,
@@ -342,6 +343,12 @@ def summary_rule_fix_example(req: dict) -> Dict[str, Any]:
     to_build = _to_int(body.get("to_build"))
     if not job_url or not rule or not file or from_build is None or to_build is None:
         return {"ok": True, "available": False, "reason": "params_required"}
+    if is_cross_module_key(file):
+        # RCMA류 집계는 파일이 아니다 — 스냅샷을 뒤져 'file_not_in_snapshot'을 내면
+        # "파일이 사라졌다"는 오해를 부른다(실제로는 애초에 파일 귀속이 없는 항목).
+        return {"ok": True, "available": False, "reason": "cross_module_scope",
+                "cross_module_note": CROSS_MODULE_NOTE,
+                "rule": rule, "file": file, "from_build": from_build, "to_build": to_build}
     cache_root = _normalize_jenkins_cache_root(str(body.get("cache_root") or ""))
     metas = list_cached_builds_meta(job_url=job_url, cache_root=cache_root)
     from_meta = find_build_meta(metas, from_build)
@@ -400,6 +407,44 @@ def summary_rule_fix_example(req: dict) -> Dict[str, Any]:
 UNRESOLVED_NOTE = "파일 변경/무변경과 위반 잔존은 같은 빌드 구간의 관측이며 인과 판정이 아닙니다."
 
 
+def _cross_module_counts_only(
+    *, job_url: str, cache_root: Path, rule: str, file: str, from_build: int, to_build: int,
+) -> Dict[str, Any]:
+    """파일 귀속 불가 항목(RCMA류)의 구간 카운트만 반환 — 스냅샷 diff는 원리적으로 없다.
+
+    카운트는 실재하는 관측이므로 버리지 않는다(0 위장·침묵 금지). diff 부재를 파일 부재
+    (file_not_in_snapshot)로 표기하면 사용자가 '파일이 사라졌다'로 오독한다.
+    """
+    from backend.services.build_inventory import find_build_meta, list_cached_builds_meta
+    from backend.services.prqa_delta import load_rcr_details_cached
+    from backend.services.prqa_rule_trend import CROSS_MODULE_NOTE, file_rule_counts
+
+    metas = list_cached_builds_meta(job_url=job_url, cache_root=cache_root)
+    counts: Dict[str, Any] = {"from": None, "to": None}
+    counts_reason: Optional[str] = None
+    for label, bn in (("from", from_build), ("to", to_build)):
+        meta = find_build_meta(metas, bn)
+        if meta is None:
+            counts_reason = "build_not_cached"
+            continue
+        loaded = load_rcr_details_cached(
+            Path(str(meta.get("build_root") or "")), Path(str(meta.get("reports_dir") or ""))
+        )
+        if loaded is None:
+            counts_reason = "no_rcr"
+            continue
+        counts[label] = int((file_rule_counts(loaded["details"]).get(file) or {}).get(rule, 0))
+    out: Dict[str, Any] = {
+        "ok": True, "available": False, "reason": "cross_module_scope",
+        "cross_module_note": CROSS_MODULE_NOTE,
+        "rule": rule, "file": file, "from_build": from_build, "to_build": to_build,
+        "counts": counts, "file_changed": None, "diff": None, "note": UNRESOLVED_NOTE,
+    }
+    if counts_reason:
+        out["counts_reason"] = counts_reason
+    return out
+
+
 @router.post("/api/summary/rule-unresolved-evidence")
 def summary_rule_unresolved_evidence(req: dict) -> Dict[str, Any]:
     """미해소 규칙 × 파일의 구간 증거(결정론, LLM 0회) — '변경에도 위반 유지' vs '무변경 잔존'.
@@ -410,7 +455,7 @@ def summary_rule_unresolved_evidence(req: dict) -> Dict[str, Any]:
     """
     from backend.services.build_inventory import find_build_meta, list_cached_builds_meta
     from backend.services.prqa_delta import load_rcr_details_cached
-    from backend.services.prqa_rule_trend import file_rule_counts
+    from backend.services.prqa_rule_trend import file_rule_counts, is_cross_module_key
     from backend.services.rule_fix_examples import collect_fix_evidence
 
     body = req or {}
@@ -421,6 +466,13 @@ def summary_rule_unresolved_evidence(req: dict) -> Dict[str, Any]:
     to_build = _to_int(body.get("to_build"))
     if not job_url or not rule or not file or from_build is None or to_build is None:
         return {"ok": True, "available": False, "reason": "params_required"}
+    if is_cross_module_key(file):
+        # 파일 귀속이 없는 집계 항목(RCMA류) — 구간 카운트는 의미가 있으나 스냅샷 diff는 없다.
+        # 카운트만 채워 정직 반환한다(available:false + 전용 reason).
+        return _cross_module_counts_only(
+            job_url=job_url, cache_root=_normalize_jenkins_cache_root(str(body.get("cache_root") or "")),
+            rule=rule, file=file, from_build=from_build, to_build=to_build,
+        )
     cache_root = _normalize_jenkins_cache_root(str(body.get("cache_root") or ""))
     metas = list_cached_builds_meta(job_url=job_url, cache_root=cache_root)
     from_meta = find_build_meta(metas, from_build)
@@ -462,6 +514,37 @@ def summary_rule_unresolved_evidence(req: dict) -> Dict[str, Any]:
             "file_changed": None, "diff": None}
 
 
+@router.post("/api/summary/rule-window-changes")
+def summary_rule_window_changes(req: dict) -> Dict[str, Any]:
+    """구간 변경 파일 목록(결정론, LLM 0회) — 파일 귀속이 없는 규칙의 유일한 코드 증거.
+
+    RCMA류 위반은 파일 diff를 만들 수 없지만, 위반이 변한 구간에 **실제로 바뀐 소스 파일**은
+    스냅샷에 있다. 그것을 보여주되 인과로 격상하지 않는다(서버 고정 note).
+    """
+    from backend.services.build_inventory import list_cached_builds_meta
+    from backend.services.window_change_candidates import collect_window_changes, resolve_window_metas
+
+    body = req or {}
+    job_url = str(body.get("job_url") or "").strip()
+    rule = str(body.get("rule") or "").strip()
+    from_build = _to_int(body.get("from_build"))
+    to_build = _to_int(body.get("to_build"))
+    if not job_url or from_build is None or to_build is None:
+        return {"ok": True, "available": False, "reason": "params_required"}
+    cache_root = _normalize_jenkins_cache_root(str(body.get("cache_root") or ""))
+    metas = list_cached_builds_meta(job_url=job_url, cache_root=cache_root)
+    pair = resolve_window_metas(metas, from_build, to_build)
+    if pair is None:
+        return {"ok": True, "available": False, "reason": "build_not_cached",
+                "rule": rule, "from_build": from_build, "to_build": to_build}
+    from_meta, to_meta = pair
+    out = collect_window_changes(
+        from_build_root=Path(str(from_meta.get("build_root"))),
+        to_build_root=Path(str(to_meta.get("build_root"))),
+    )
+    return {**out, "rule": rule, "from_build": from_build, "to_build": to_build}
+
+
 RULE_DEF_CACHE_NAME = "summary_rule_definition_cache.json"
 _RULE_DEF_CACHE_LOCK = threading.Lock()
 
@@ -476,10 +559,21 @@ def _collect_rule_evidence(
     단일 출처로 둔다(복제하면 한쪽만 고쳐지는 표류가 생긴다). 반환 (diffs, excerpts).
     """
     from backend.services.build_inventory import find_build_meta
+    from backend.services.prqa_rule_trend import is_cross_module_key
     from backend.services.rule_fix_examples import collect_fix_evidence, resolve_snapshot_file
 
+    # 파일 귀속 불가 항목(RCMA류)은 스냅샷에 실체가 없다 — 후보에서 미리 걸러 rglob 헛돌이를
+    # 막고, 남은 실제 파일 후보가 max_diffs/max_excerpts 슬롯을 pseudo에 빼앗기지 않게 한다
+    # (실측 C-POS-012: RCMA가 감소 1위라 잘라내면 실제 파일 2건이 증거에서 탈락했다).
+    def _real(entries: Any) -> List[Dict[str, Any]]:
+        return [
+            f for f in (entries or [])
+            if isinstance(f, dict) and f.get("scope") != "cross_module"
+            and not is_cross_module_key(str(f.get("path") or ""))
+        ]
+
     diffs: List[Dict[str, Any]] = []
-    for f in (row.get("decreased_files") or [])[:max_diffs]:
+    for f in _real(row.get("decreased_files"))[:max_diffs]:
         fm = find_build_meta(metas, f.get("from_build"))
         tm = find_build_meta(metas, f.get("to_build"))
         if fm is None or tm is None:
@@ -493,7 +587,7 @@ def _collect_rule_evidence(
             diffs.append({"file": f.get("path"), "text": ev["diff"]["text"], "diff_sha": ev["diff_sha"]})
     excerpts: List[Dict[str, Any]] = []
     if to_meta is not None:
-        for f in (row.get("files_latest") or [])[:max_excerpts]:
+        for f in _real(row.get("files_latest"))[:max_excerpts]:
             p = resolve_snapshot_file(Path(str(to_meta.get("build_root"))), str(f.get("path") or ""))
             if p is None:
                 continue
@@ -544,7 +638,17 @@ def summary_rule_definition(req: dict) -> Dict[str, Any]:
 
     evidence_diffs, unresolved_excerpts = _collect_rule_evidence(row, metas, to_meta)
     if not evidence_diffs and not unresolved_excerpts:
-        return {"ok": True, "available": False, "reason": "no_code_evidence", "rule": rule}
+        # 증거 0건의 사유를 구분한다 — 파일 귀속이 원리적으로 없는 규칙(RCMA류 집계만 존재)과
+        # '스냅샷을 못 찾음'은 사용자가 취할 조치가 전혀 다르다.
+        only_pseudo = bool(
+            (row.get("files_latest") or row.get("decreased_files"))
+            and all(
+                f.get("scope") == "cross_module"
+                for f in (row.get("files_latest") or []) + (row.get("decreased_files") or [])
+            )
+        )
+        return {"ok": True, "available": False, "rule": rule,
+                "reason": "cross_module_only" if only_pseudo else "no_code_evidence"}
 
     # LLM 미설정이면 model=None — join이 TypeError로 죽지 않게 빈 문자열로(키 일관성 유지).
     model = _expected_insight_model() or ""
@@ -781,8 +885,91 @@ def _norm_unit(u: Any) -> str:
     return s.split("'", 1)[0] if "'" in s else s
 
 
+def _cell_pair(cell: Any) -> Optional[tuple]:
+    """{covered,total} → (covered,total). 축 자체가 없거나 비수치면 None(0으로 위장 금지)."""
+    if not isinstance(cell, dict):
+        return None
+    try:
+        return int(cell.get("covered")), int(cell.get("total"))
+    except (TypeError, ValueError):
+        return None
+
+
+def _fold_coverage_entries(entries: List[Dict[str, Any]], axes: tuple) -> tuple:
+    """(unit, subprogram) **반복 측정**을 접는다 — 합산하면 분모가 배수로 부푼다.
+
+    VectorCAST 리포트는 같은 함수를 환경/폴더마다 다시 측정하고, 파서·병합 단계가 그 축
+    식별자를 버려(`jenkins_adapter.parse_vcast_metrics_report` / `jenkins._merge_vectorcast_payloads`)
+    entries에 동일 키가 여러 벌 남는다. 이를 독립 관측으로 보고 더하면 실측 IT 분모가
+    2854 → 7438(2.61배)로 부풀어 커버리지가 허위로 낮아진다.
+
+    축별 **max(covered)/max(total)** 로 접는다 — "어느 환경에서든 커버됐으면 커버"가 커버리지
+    롤업의 표준 의미다(실측 `s_System_MainLoop` covered=[0,4,4,0,0]/total=[4,4,4,4,4] →
+    합산 8/20=40%는 오답, 접으면 4/4). 최악값은 버리지 않고 `worst_covered`로 함께 남겨
+    "재검증할 함수" 판단에 쓴다.
+
+    ⚠ 폴딩 키는 **정규화 전 unit** — `_norm_unit`의 `'N` 절단은 서로 다른 env를 같은 unit으로
+      만들 수 있어 표시에만 쓴다(실측 데이터엔 접미사가 없어 현재는 동일 결과).
+    반환 (folded_rows, stats).
+    """
+    groups: Dict[tuple, List[Dict[str, Any]]] = {}
+    order: List[tuple] = []
+    for e in entries:
+        key = (str(e.get("unit") or ""), str(e.get("subprogram") or ""))
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(e)
+    folded: List[Dict[str, Any]] = []
+    duplicated = divergent = 0
+    for key in order:
+        grp = groups[key]
+        if len(grp) > 1:
+            duplicated += 1
+        row = dict(grp[0])
+        row_divergent = False
+        for axis in axes:
+            pairs = [p for p in (_cell_pair(e.get(axis)) for e in grp) if p is not None]
+            if not pairs:
+                continue
+            if len(set(pairs)) > 1:
+                row_divergent = True
+            cov = max(p[0] for p in pairs)
+            tot = max(p[1] for p in pairs)
+            cell: Dict[str, Any] = {
+                "covered": cov, "total": tot,
+                "rate": round(cov / tot * 100, 1) if tot else None,
+            }
+            if len(pairs) > 1:
+                cell["worst_covered"] = min(p[0] for p in pairs)
+            row[axis] = cell
+        ccns = [e.get("ccn") for e in grp if isinstance(e.get("ccn"), (int, float))]
+        if ccns:
+            row["ccn"] = max(ccns)
+        if len(grp) > 1:
+            row["measurements"] = len(grp)
+        if row_divergent:
+            row["divergent"] = True
+            divergent += 1
+        folded.append(row)
+    stats = {
+        "raw_entries": len(entries), "folded_entries": len(folded),
+        "duplicated_keys": duplicated, "divergent_keys": divergent,
+        "method": "max_covered_max_total",
+        "note": "같은 (unit, subprogram)의 환경별 반복 측정을 접었습니다 — 축별 최대 커버/최대 총계",
+    }
+    return folded, stats
+
+
+_UT_AXES = ("statements", "branches")
+
+
 def _aggregate_ut_coverage(entries: List[Dict[str, Any]], worst_limit: int) -> Dict[str, Any]:
-    """UT(구문/분기) 함수단위 집계 — 구 quality-detail 로직 이관 + 분기 totals 합산(L1)."""
+    """UT(구문/분기) 함수단위 집계 — 구 quality-detail 로직 이관 + 분기 totals 합산(L1).
+
+    반복 측정은 `_fold_coverage_entries`로 먼저 접는다(합산 금지 — 그 docstring 참조).
+    """
+    entries, fold_stats = _fold_coverage_entries(entries, _UT_AXES)
     cov_st = st_total = 0
     cov_br = br_total = 0
     fully = 0
@@ -815,6 +1002,8 @@ def _aggregate_ut_coverage(entries: List[Dict[str, Any]], worst_limit: int) -> D
             rated.append({
                 "unit": e.get("unit"), "subprogram": e.get("subprogram"), "ccn": e.get("ccn"),
                 "statements": st, "branches": e.get("branches"),
+                **({"measurements": e["measurements"]} if e.get("measurements") else {}),
+                **({"divergent": True} if e.get("divergent") else {}),
             })
     rated.sort(key=lambda e: (float((e.get("statements") or {}).get("rate") or 0), str(e.get("subprogram"))))
     return {
@@ -834,20 +1023,11 @@ def _aggregate_ut_coverage(entries: List[Dict[str, Any]], worst_limit: int) -> D
         },
         "worst": rated[:worst_limit],
         "uncovered": uncovered_rows[:50],
+        "fold": fold_stats,  # 접힌 반복 측정 수 — 침묵 금지(수치가 왜 달라졌는지의 근거)
     }
 
 
 _IT_AXES = ("functions", "function_calls", "statements", "branches")
-
-
-def _cell_pair(cell: Any) -> Optional[tuple]:
-    """{covered,total} → (covered,total). 축 자체가 없거나 비수치면 None(0으로 위장 금지)."""
-    if not isinstance(cell, dict):
-        return None
-    try:
-        return int(cell.get("covered")), int(cell.get("total"))
-    except (TypeError, ValueError):
-        return None
 
 
 def _aggregate_it_coverage(entries: List[Dict[str, Any]], worst_limit: int) -> Dict[str, Any]:
@@ -859,7 +1039,11 @@ def _aggregate_it_coverage(entries: List[Dict[str, Any]], worst_limit: int) -> D
     구 코드는 functions 결측 행을 통째로 skip해 SCM 소스에선 IT가 전부 사라졌다. 축별로
     독립 합산하고 metrics_present로 보유 축을 표기한다(결측 축은 None — 0% 위장 금지).
     unit엔 env 인스턴스 접미사('N)가 붙을 수 있어 표기용으로 정규화한다.
+
+    ⚠ 합산 **전에** `_fold_coverage_entries`로 환경별 반복 측정을 접는다 — IT는 UT와 달리
+    반복이 지배적이라(실측 712행 = 259함수 × 최대 5환경) 접지 않으면 분모가 2.61배가 된다.
     """
+    entries, fold_stats = _fold_coverage_entries(entries, _IT_AXES)
     sums: Dict[str, List[int]] = {axis: [0, 0] for axis in _IT_AXES}
     present: Dict[str, bool] = {axis: False for axis in _IT_AXES}
     rated: List[Dict[str, Any]] = []
@@ -880,6 +1064,8 @@ def _aggregate_it_coverage(entries: List[Dict[str, Any]], worst_limit: int) -> D
                 gap_rate = cov / tot
         if gap_rate is not None:
             rated.append({
+                **({"measurements": e["measurements"]} if e.get("measurements") else {}),
+                **({"divergent": True} if e.get("divergent") else {}),
                 "unit": _norm_unit(e.get("unit")), "subprogram": e.get("subprogram"),
                 "ccn": e.get("ccn"), "gap_rate": round(gap_rate, 4), **row_axes,
             })
@@ -897,6 +1083,7 @@ def _aggregate_it_coverage(entries: List[Dict[str, Any]], worst_limit: int) -> D
         "totals": totals,
         "metrics_present": present,
         "worst": rated[:worst_limit],
+        "fold": fold_stats,
     }
 
 
@@ -1376,6 +1563,153 @@ def summary_test_design(req: dict) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+def _snapshot_stat_key(src: Path) -> Optional[Dict[str, Any]]:
+    """스냅샷 트리의 stat 요약 — 캐시 키. 재sync로 트리가 바뀌면 값이 달라진다.
+
+    ⚠ 이 키를 만드는 것 자체가 rglob 전수 stat이다(실측 13빌드 4,810파일 ≈ 1.9초). 한 요청에서
+    빌드마다 여러 번 부르지 말 것 — 호출측이 결과를 재사용해야 한다.
+    """
+    files = 0
+    total = 0
+    mtime_max = 0.0
+    try:
+        for p in src.rglob("*"):
+            if p.is_file():
+                st = p.stat()
+                files += 1
+                total += st.st_size
+                mtime_max = max(mtime_max, st.st_mtime)
+    except OSError:
+        return None
+    return {"file_count": files, "total_bytes": total, "mtime_max": round(mtime_max, 3)}
+
+
+def _snapshot_manifest_cached(meta: Dict[str, Any]) -> tuple:
+    """(content_sha, manifest) — reports_dir에 함께 캐시.
+
+    manifest({상대경로: sha1})가 있으면 **두 스냅샷의 파일 축 비교가 dict 연산으로 끝난다**.
+    빌드 N개를 한 베이스라인에 비교할 때 rglob+sha1을 N번 반복하지 않는 통로다.
+    구 캐시(`{key, sha}`만 있는 파일)는 sha 조회엔 그대로 쓰이고, manifest가 필요할 때만
+    재계산해 additive로 채운다 — 배포된 캐시를 무효화하지 않는다.
+    """
+    from backend.services.baseline_diff import content_sha_from_manifest, source_file_manifest
+
+    src = Path(str(meta.get("build_root") or "")) / "source"
+    if not src.is_dir():
+        return None, None
+    key = _snapshot_stat_key(src)
+    if key is None:
+        return None, None
+    cache_path = Path(str(meta.get("reports_dir") or "")) / "source_content_sha.json"
+    cached = _read_json(cache_path)
+    if isinstance(cached, dict) and cached.get("key") == key:
+        manifest = cached.get("manifest")
+        if isinstance(manifest, dict) and manifest:
+            return str(cached.get("sha") or content_sha_from_manifest(manifest)), manifest
+    manifest = source_file_manifest(src)
+    sha = content_sha_from_manifest(manifest)
+    if sha:
+        _write_cache_atomic(cache_path, {"key": key, "sha": sha, "manifest": manifest})
+    return sha, manifest
+
+
+def _snapshot_content_sha_cached(meta: Dict[str, Any]) -> Optional[str]:
+    """빌드 소스 스냅샷의 내용 지문 — reports_dir에 캐시(147파일 sha1 ≈ 0.18초).
+
+    sha만 필요한 호출처(동일 트리 그룹·기본 baseline 선택)는 manifest 없는 구 캐시로도
+    히트한다 — manifest를 얻자고 재계산을 유발하지 않는다.
+    """
+    from backend.services.baseline_diff import source_content_sha
+
+    src = Path(str(meta.get("build_root") or "")) / "source"
+    if not src.is_dir():
+        return None
+    key = _snapshot_stat_key(src)
+    if key is None:
+        return None
+    cache_path = Path(str(meta.get("reports_dir") or "")) / "source_content_sha.json"
+    cached = _read_json(cache_path)
+    if isinstance(cached, dict) and cached.get("key") == key and cached.get("sha"):
+        return str(cached["sha"])
+    sha = source_content_sha(src)
+    if sha:
+        _write_cache_atomic(cache_path, {"key": key, "sha": sha})
+    return sha
+
+
+def _source_checkout_iso(meta: Dict[str, Any]) -> Optional[str]:
+    """소스 스냅샷을 **언제 받아왔는지**(빌드 시각이 아니라 체크아웃 시각).
+
+    둘이 크게 어긋나면(빌드 5월 / 체크아웃 오늘) 그 스냅샷은 빌드 당시 코드가 아니라
+    나중에 받은 HEAD다 — 사용자가 수치를 믿기 전에 알아야 할 사실이다.
+    """
+    sentinel = Path(str(meta.get("build_root") or "")) / "source" / ".source_complete"
+    try:
+        return datetime.fromtimestamp(sentinel.stat().st_mtime).isoformat(timespec="seconds")
+    except OSError:
+        return None
+
+
+def _checkout_lag_days(meta: Dict[str, Any]) -> Optional[float]:
+    """빌드 시각 → 소스 체크아웃 시각의 지연(일).
+
+    크면 그 스냅샷은 **빌드 당시 코드가 아니라 나중에 받은 트리**다(실측 #111: 빌드 05-19,
+    체크아웃 07-27 = 69일). 임계값으로 판정하지 않고 값만 노출한다 — 백필은 원래 나중에
+    하는 것이라 자의적 컷오프는 정상 데이터를 오염으로 몰 수 있다. 판단은 사용자 몫.
+    """
+    built = str(meta.get("timestamp_iso") or "")
+    checked = _source_checkout_iso(meta)
+    if not built or not checked:
+        return None
+    try:
+        return round((datetime.fromisoformat(checked) - datetime.fromisoformat(built)).total_seconds() / 86400, 1)
+    except (TypeError, ValueError):
+        return None
+
+
+def _snapshot_groups(with_src: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """내용이 동일한 스냅샷끼리 묶는다 — 2개 이상이면 그 구간은 **비교가 성립하지 않는다**.
+
+    실측 KJPDS02_PV: #111~#121·#123 열 개 빌드가 바이트 동일(백필이 전부 같은 SVN HEAD를
+    받았다). 열 빌드 동안 코드가 한 글자도 안 바뀔 리 없으므로 이는 스냅샷 재사용 신호다.
+    그룹을 표면화해야 사용자가 "왜 변경이 0인가"를 알고 다른 쌍을 고를 수 있다.
+    """
+    by_sha: Dict[str, List[Any]] = {}
+    for meta in with_src:
+        sha = _snapshot_content_sha_cached(meta)
+        if sha:
+            by_sha.setdefault(sha, []).append(meta.get("build_number"))
+    return [
+        {"builds": sorted(nums, reverse=True), "count": len(nums)}
+        for nums in by_sha.values() if len(nums) > 1
+    ]
+
+
+def _pick_default_baseline(with_src: List[Dict[str, Any]], target: Dict[str, Any]) -> tuple:
+    """기본 베이스라인 = target과 **내용이 실제로 다른** 가장 오래된 스냅샷.
+
+    무조건 최고령을 잡으면 target과 바이트 동일한 스냅샷이 걸려 "변경 0"인 빈 화면이 된다.
+    ⚠ differing이라고 신뢰할 수 있는 건 아니다 — 실측 #111은 #125와 1파일만 다르지만 그
+    트리는 빌드 69일 뒤에 받은 HEAD라, 그 diff는 '#111→#125의 변화'가 아니다. 그래서 선택은
+    바꾸지 않고 `checkout_lag_days`·`snapshot_groups`로 **한계를 노출**한다(수치를 좋아
+    보이게 조작하지 않는다 — ISO 정직성).
+
+    전부 동일하면 최고령을 그대로 쓰고(reason=all_identical) identical_snapshot이 사실을
+    알린다 — 조용히 빈 화면을 내지 않는다.
+    """
+    tgt_sha = _snapshot_content_sha_cached(target)
+    if not tgt_sha:
+        return with_src[-1], "content_sha_unavailable"
+    tgt_num = _to_int(target.get("build_number"))
+    for meta in reversed(with_src):  # 오래된 것부터
+        if _to_int(meta.get("build_number")) == tgt_num:
+            continue
+        sha = _snapshot_content_sha_cached(meta)
+        if sha and sha != tgt_sha:
+            return meta, "oldest_differing_snapshot"
+    return with_src[-1], "all_identical"
+
+
 @router.post("/api/summary/baseline-diff")
 def summary_baseline_diff(req: dict) -> Dict[str, Any]:
     """베이스라인 빌드 vs 대상 빌드의 소스 스냅샷 직접 비교(영향분석 이력 무관).
@@ -1401,7 +1735,13 @@ def summary_baseline_diff(req: dict) -> Dict[str, Any]:
     target_req = _to_int(body.get("target_build"))
     baseline_req = _to_int(body.get("baseline_build"))
     target = find_build_meta(with_src, target_req) if target_req is not None else with_src[0]        # 최신
-    baseline = find_build_meta(with_src, baseline_req) if baseline_req is not None else with_src[-1]  # 최고령
+    baseline_auto_reason: Optional[str] = None
+    if baseline_req is not None:
+        baseline = find_build_meta(with_src, baseline_req)
+    elif target is None:
+        baseline = None
+    else:
+        baseline, baseline_auto_reason = _pick_default_baseline(with_src, target)
     if target is None:
         return {"ok": True, "available": False, "reason": "snapshot_missing_target"}
     if baseline is None:
@@ -1450,9 +1790,17 @@ def summary_baseline_diff(req: dict) -> Dict[str, Any]:
         "reason": None,
         "independent_of_change_log": True,
         "baseline": {"build_number": baseline.get("build_number"), "revision": baseline.get("revision"),
-                     "timestamp_iso": baseline.get("timestamp_iso")},
+                     "timestamp_iso": baseline.get("timestamp_iso"),
+                     "source_checked_out_at": _source_checkout_iso(baseline),
+                     "checkout_lag_days": _checkout_lag_days(baseline)},
         "target": {"build_number": target.get("build_number"), "revision": target.get("revision"),
-                   "timestamp_iso": target.get("timestamp_iso")},
+                   "timestamp_iso": target.get("timestamp_iso"),
+                   "source_checked_out_at": _source_checkout_iso(target),
+                   "checkout_lag_days": _checkout_lag_days(target)},
+        # 기본 쌍을 어떻게 골랐는지 — 사용자가 고르지 않은 쌍이 왜 나왔는지 답할 수 있어야 한다.
+        "baseline_auto_reason": baseline_auto_reason,
+        # 내용이 같은 스냅샷 묶음 — 이 구간끼리는 비교가 성립하지 않는다(스냅샷 재사용).
+        "snapshot_groups": _snapshot_groups(with_src),
         **result,
         # 조인 출처 표기(N3) — 커버리지가 어느 소스에서 왔고 ASIL이 어떻게 확보됐는지.
         "join_sources": {
@@ -1464,6 +1812,364 @@ def summary_baseline_diff(req: dict) -> Dict[str, Any]:
     }
     _write_cache_atomic(cache_path, {"src": src_key, "result": payload})
     return {**payload, "cached": False}
+
+
+# ---------------------------------------------------------------------------
+# 빌드별 변경 매트릭스 — 베이스라인 고정 → 각 빌드의 누적 소스 변화 (change-log 비의존)
+# ---------------------------------------------------------------------------
+
+_MATRIX_CELL_LOCKS: Dict[str, threading.Lock] = {}
+_MATRIX_LOCKS_GUARD = threading.Lock()
+
+
+def _matrix_cell_lock(cache_path: Path) -> threading.Lock:
+    """셀 캐시 경로별 락 — 두 클라이언트가 같은 쌍을 동시에 파싱하지 않게(arch 캐시와 동일 패턴)."""
+    key = str(cache_path)
+    with _MATRIX_LOCKS_GUARD:
+        lock = _MATRIX_CELL_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _MATRIX_CELL_LOCKS[key] = lock
+        return lock
+
+
+def _matrix_context(body: dict) -> Dict[str, Any]:
+    """매트릭스 두 엔드포인트의 공통 준비 — 빌드 목록·지문·그룹·베이스라인 결정.
+
+    지문 조회는 빌드당 **1회만** 한다(캐시 키 생성이 rglob 전수 stat이라 실측 13빌드 1.9초 —
+    `_snapshot_groups`와 `_pick_default_baseline`이 각각 훑던 것을 여기서 합친다).
+    """
+    from backend.services.build_inventory import find_build_meta, list_cached_builds_meta
+    from backend.services.change_matrix import canonical_build, group_by_content_sha
+
+    job_url = str(body.get("job_url") or "").strip()
+    if not job_url:
+        return {"error": {"ok": True, "available": False, "reason": "job_url_required"}}
+    cache_root = _normalize_jenkins_cache_root(str(body.get("cache_root") or ""))
+    metas = list_cached_builds_meta(job_url=job_url, cache_root=cache_root)
+    with_src = [m for m in metas if m.get("has_source")]
+    if not with_src:
+        return {"error": {"ok": True, "available": False, "reason": "no_source_snapshot"}}
+
+    sha_cache: Dict[Any, Optional[str]] = {}
+    manifest_cache: Dict[Any, Optional[Dict[str, str]]] = {}
+
+    def sha_of(meta: Dict[str, Any]) -> Optional[str]:
+        num = meta.get("build_number")
+        if num not in sha_cache:
+            sha, manifest = _snapshot_manifest_cached(meta)
+            sha_cache[num] = sha
+            manifest_cache[num] = manifest
+        return sha_cache[num]
+
+    baseline_req = _to_int(body.get("baseline_build"))
+    baseline_auto_reason: Optional[str] = None
+    if baseline_req is not None:
+        baseline = find_build_meta(with_src, baseline_req)
+    else:
+        baseline, baseline_auto_reason = _pick_default_baseline(with_src, with_src[0])
+    if baseline is None:
+        return {"error": {"ok": True, "available": False, "reason": "snapshot_missing_baseline"}}
+
+    groups = group_by_content_sha(with_src, sha_of)
+    return {
+        "job_url": job_url, "cache_root": cache_root, "metas": metas, "with_src": with_src,
+        "baseline": baseline, "baseline_auto_reason": baseline_auto_reason,
+        "sha_of": sha_of, "sha_cache": sha_cache, "manifest_cache": manifest_cache,
+        "groups": groups,
+        "canonical": {sha: canonical_build(nums) for sha, nums in groups.items()},
+    }
+
+
+def _build_meta_row(meta: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "build_number": meta.get("build_number"),
+        "build_result": meta.get("result"),
+        "timestamp_iso": meta.get("timestamp_iso"),
+        "revision": meta.get("revision"),
+        "source_checked_out_at": _source_checkout_iso(meta),
+        "checkout_lag_days": _checkout_lag_days(meta),
+    }
+
+
+@router.post("/api/summary/change-matrix")
+def summary_change_matrix(req: dict) -> Dict[str, Any]:
+    """베이스라인 → 각 빌드의 누적 변화(행 = 캐시된 빌드). **함수 축을 계산하지 않는다.**
+
+    `level="files"`는 manifest dict 비교만으로 즉시 응답하고, `level="functions"`는 캐시된 셀만
+    읽어(probe) 채운 뒤 나머지를 `pending_cells`로 남긴다 — 실제 계산은 `/cell` 전용이다.
+    베이스라인과 바이트 동일한 빌드는 파싱 없이 함수 0을 확정한다(증명이지 가정이 아님).
+    """
+    from backend.services.change_matrix import cell_id
+
+    body = req or {}
+    ctx = _matrix_context(body)
+    if "error" in ctx:
+        return ctx["error"]
+    level = "functions" if str(body.get("level") or "files") == "functions" else "files"
+    limit = max(1, min(_to_int(body.get("limit")) or 30, 30))
+    baseline = ctx["baseline"]
+    base_num = baseline.get("build_number")
+    base_sha = ctx["sha_of"](baseline)
+    base_manifest = ctx["manifest_cache"].get(base_num)
+
+    rows: List[Dict[str, Any]] = []
+    pending: List[Dict[str, Any]] = []
+    pending_seen: set = set()
+    cached_cells = 0
+    for meta in ctx["with_src"][:limit]:
+        num = meta.get("build_number")
+        row = _build_meta_row(meta)
+        sha = ctx["sha_of"](meta)
+        members = sorted(ctx["groups"].get(sha or "", []), reverse=True)
+        row.update({
+            "row_key": f"b{num}",
+            "content_sha": sha,
+            "snapshot_group": {"count": len(members), "members": members,
+                               "canonical_build": ctx["canonical"].get(sha or "")},
+            "is_baseline": num == base_num,
+            "identical_to_baseline": bool(sha and base_sha and sha == base_sha),
+            "files": None, "functions": None, "asil": None,
+        })
+        if row["is_baseline"]:
+            row["function_state"] = {"state": "baseline", "reason": "베이스라인 자신"}
+            rows.append(row)
+            continue
+        manifest = ctx["manifest_cache"].get(num)
+        if base_manifest is not None and manifest is not None:
+            from backend.services.baseline_diff import compute_file_axis_from_manifests
+
+            axis = compute_file_axis_from_manifests(baseline=base_manifest, target=manifest)
+            row["files"] = {
+                "added": len(axis["added"]), "deleted": len(axis["deleted"]),
+                "modified": len(axis["modified"]), "changed": axis["changed"],
+                "unchanged": axis["unchanged"], "total_baseline": axis["total_baseline"],
+                "total_target": axis["total_target"],
+                "changed_paths": (
+                    [{"path": p, "change_kind": "added"} for p in axis["added"]]
+                    + [{"path": p, "change_kind": "deleted"} for p in axis["deleted"]]
+                    + [{"path": m["path"], "change_kind": "modified"} for m in axis["modified"]]
+                ),
+            }
+        if row["identical_to_baseline"]:
+            # 두 트리가 바이트 동일 → 파서 산출도 동일 → 함수 차집합은 공집합. 계산 불필요.
+            row["functions"] = {"new": 0, "deleted": 0, "signature": 0, "body": 0, "changed": 0}
+            row["asil"] = {"touched": 0, "by_grade": {}, "max": None}
+            row["function_state"] = {
+                "state": "identical",
+                "reason": "베이스라인과 소스 트리가 바이트 동일 — 함수 차이는 계산 없이 0으로 확정",
+            }
+            rows.append(row)
+            continue
+        cid = cell_id(base_sha or "", sha or "")
+        row["cell_id"] = cid
+        if level == "functions":
+            hit = _read_matrix_cell(ctx, base_sha, sha)
+            if hit is not None:
+                from backend.services.change_matrix import asil_column, function_counts
+
+                enriched = _annotate_cell(ctx, hit)
+                row["functions"] = function_counts(enriched)
+                row["asil"] = asil_column(enriched)
+                row["function_state"] = {"state": "computed"}
+                cached_cells += 1
+                rows.append(row)
+                continue
+        row["function_state"] = {
+            "state": "not_computed",
+            "reason": "level_files" if level == "files" else "cell_not_cached",
+        }
+        if cid not in pending_seen:
+            pending_seen.add(cid)
+            pending.append({"cell_id": cid, "target_build": ctx["canonical"].get(sha or "") or num})
+        rows.append(row)
+
+    join = _matrix_join_scope(ctx)
+    return {
+        "ok": True, "available": True, "reason": None, "level": level,
+        "baseline": {**_build_meta_row(baseline), "content_sha": base_sha},
+        "baseline_auto_reason": ctx["baseline_auto_reason"],
+        "join_scope": join,
+        "snapshot_groups": [
+            {"content_sha": sha, "builds": sorted(nums, reverse=True), "count": len(nums)}
+            for sha, nums in ctx["groups"].items() if len(nums) > 1
+        ],
+        "rows": rows,
+        "pending_cells": pending,
+        "stats": {
+            "rows": len(rows), "pairs_total": max(0, len(rows) - 1),
+            "pairs_distinct": len({r.get("cell_id") for r in rows if r.get("cell_id")}),
+            "function_cells_cached": cached_cells,
+        },
+        "note": (
+            "영향분석 실행 이력과 무관한 소스 스냅샷 비교입니다 — 실행 이력 누적은 상단 문제점 "
+            "배너에 반영됩니다."
+        ),
+    }
+
+
+def _matrix_join_scope(ctx: Dict[str, Any]) -> Dict[str, Any]:
+    """ASIL·커버리지 인덱스는 **최신 빌드 1벌**로 고정한다.
+
+    행마다 다른 인덱스를 쓰면 ASIL 열이 행 간 비교 불가가 된다(같은 함수가 빌드마다 다른 등급으로
+    보임). 기준 빌드를 응답에 명시해 사용자가 무엇과 조인됐는지 알 수 있게 한다.
+    """
+    latest = ctx["with_src"][0]
+    reports = Path(str(latest.get("reports_dir")))
+    root = Path(str(latest.get("build_root")))
+    cov = _coverage_index(reports, job_url=ctx["job_url"])
+    asil = _asil_index(root, reports, job_url=ctx["job_url"])
+    ctx["_cov"] = cov
+    ctx["_asil"] = asil["by_function"]
+    return {
+        "build_number": latest.get("build_number"),
+        "coverage_functions": len(cov),
+        "asil_functions": len(asil["by_function"]),
+        "note": "ASIL·커버리지는 최신 빌드 기준 1벌 — 행마다 다른 인덱스를 쓰면 열이 행 간 비교 불가가 된다",
+    }
+
+
+def _matrix_cell_path(ctx: Dict[str, Any], target_sha: Optional[str], base_sha: Optional[str]) -> Optional[Path]:
+    from backend.services.build_inventory import find_build_meta
+    from backend.services.change_matrix import cell_cache_name
+
+    canon = ctx["canonical"].get(target_sha or "")
+    meta = find_build_meta(ctx["with_src"], canon)
+    if meta is None:
+        return None
+    return Path(str(meta.get("reports_dir"))) / cell_cache_name(base_sha or "")
+
+
+def _read_matrix_cell(ctx: Dict[str, Any], base_sha: Optional[str], target_sha: Optional[str]) -> Optional[Dict[str, Any]]:
+    """셀 캐시 조회 — 키는 (algo, baseline_sha, target_sha)뿐(조인 무관)."""
+    from backend.services.change_matrix import CHANGE_MATRIX_ALGO_VERSION, cell_id
+
+    path = _matrix_cell_path(ctx, target_sha, base_sha)
+    if path is None:
+        return None
+    data = _read_json(path)
+    if not isinstance(data, dict):
+        return None
+    entry = (data.get("cells") or {}).get(cell_id(base_sha or "", target_sha or ""))
+    if not isinstance(entry, dict):
+        return None
+    src = entry.get("src") or {}
+    if src.get("algo") != CHANGE_MATRIX_ALGO_VERSION or src.get("baseline_sha") != base_sha \
+            or src.get("target_sha") != target_sha:
+        return None
+    result = entry.get("result")
+    return result if isinstance(result, dict) else None
+
+
+def _annotate_cell(ctx: Dict[str, Any], cell: Dict[str, Any]) -> Dict[str, Any]:
+    from copy import deepcopy
+
+    from backend.services.change_matrix import annotate_asil_coverage
+
+    if "_asil" not in ctx:
+        _matrix_join_scope(ctx)
+    return annotate_asil_coverage(deepcopy(cell), asil_by_fn=ctx.get("_asil"),
+                                  function_coverage=ctx.get("_cov"))
+
+
+@router.post("/api/summary/change-matrix/cell")
+def summary_change_matrix_cell(req: dict) -> Dict[str, Any]:
+    """셀 1개(베이스라인 sha → 대상 sha)의 함수 축 계산. probe=true면 캐시만 조회(계산 0)."""
+    from backend.services.build_inventory import find_build_meta
+    from backend.services.change_matrix import (
+        CHANGE_MATRIX_ALGO_VERSION,
+        asil_column,
+        cell_id,
+        function_counts,
+        parse_functions_memo,
+    )
+
+    body = req or {}
+    ctx = _matrix_context(body)
+    if "error" in ctx:
+        return ctx["error"]
+    target_req = _to_int(body.get("target_build"))
+    target = find_build_meta(ctx["with_src"], target_req)
+    if target is None:
+        return {"ok": True, "available": False, "reason": "build_not_cached"}
+    baseline = ctx["baseline"]
+    base_sha = ctx["sha_of"](baseline)
+    tgt_sha = ctx["sha_of"](target)
+    cid = cell_id(base_sha or "", tgt_sha or "")
+    members = sorted(ctx["groups"].get(tgt_sha or "", []), reverse=True)
+
+    def _shape(result: Dict[str, Any], *, cached: bool) -> Dict[str, Any]:
+        enriched = _annotate_cell(ctx, result)
+        out = {
+            "ok": True, "available": True, "cell_id": cid,
+            "baseline": {**_build_meta_row(baseline), "content_sha": base_sha},
+            "target": {**_build_meta_row(target), "content_sha": tgt_sha},
+            "shared_with_builds": members,
+            "canonical_target_build": ctx["canonical"].get(tgt_sha or ""),
+            "functions": function_counts(enriched), "asil": asil_column(enriched),
+            "files": enriched.get("files"),
+            "function_state": {"state": "computed"},
+            "cached": cached, "computed_ms": result.get("computed_ms"),
+            "join_scope": _matrix_join_scope(ctx),
+        }
+        if body.get("detail"):
+            out["detail"] = {
+                "changed_detail": (enriched.get("files") or {}).get("changed_detail"),
+                "gap_summary": (enriched.get("functions") or {}).get("gap_summary"),
+                "asil_touched": enriched.get("asil_touched"),
+            }
+        return out
+
+    if base_sha and tgt_sha and base_sha == tgt_sha:
+        return {
+            "ok": True, "available": True, "cell_id": cid,
+            "baseline": {**_build_meta_row(baseline), "content_sha": base_sha},
+            "target": {**_build_meta_row(target), "content_sha": tgt_sha},
+            "shared_with_builds": members,
+            "functions": {"new": 0, "deleted": 0, "signature": 0, "body": 0, "changed": 0},
+            "asil": {"touched": 0, "by_grade": {}, "max": None},
+            "function_state": {"state": "identical",
+                               "reason": "베이스라인과 소스 트리가 바이트 동일 — 계산 없이 0으로 확정"},
+            "cached": True, "computed_ms": 0,
+        }
+
+    if not body.get("force"):
+        hit = _read_matrix_cell(ctx, base_sha, tgt_sha)
+        if hit is not None:
+            return _shape(hit, cached=True)
+    if body.get("probe"):
+        return {"ok": True, "available": True, "cached": False, "cell_id": cid,
+                "function_state": {"state": "pending"}}
+
+    cache_path = _matrix_cell_path(ctx, tgt_sha, base_sha)
+    if cache_path is None:
+        return {"ok": True, "available": False, "reason": "build_not_cached"}
+    with _matrix_cell_lock(cache_path):
+        if not body.get("force"):
+            hit = _read_matrix_cell(ctx, base_sha, tgt_sha)  # 락 안 재확인(중복 파싱 방지)
+            if hit is not None:
+                return _shape(hit, cached=True)
+        from backend.services.baseline_diff import compute_baseline_diff
+
+        base_src = Path(str(baseline.get("build_root"))) / "source"
+        tgt_src = Path(str(target.get("build_root"))) / "source"
+        try:
+            result = compute_baseline_diff(
+                baseline_source=base_src, target_source=tgt_src,
+                parse_fn=lambda p: parse_functions_memo(
+                    p, content_sha=base_sha if p == base_src else tgt_sha),
+            )
+        except Exception as exc:
+            _logger.warning("change-matrix cell compute failed: %s", exc, exc_info=True)
+            return {"ok": True, "available": False, "reason": f"compute_failed: {type(exc).__name__}"}
+        data = _read_json(cache_path)
+        cells = (data.get("cells") if isinstance(data, dict) else None) or {}
+        cells[cid] = {
+            "src": {"algo": CHANGE_MATRIX_ALGO_VERSION, "baseline_sha": base_sha, "target_sha": tgt_sha},
+            "result": result,
+        }
+        _write_cache_atomic(cache_path, {"cells": cells})
+    return _shape(result, cached=False)
 
 
 # ---------------------------------------------------------------------------

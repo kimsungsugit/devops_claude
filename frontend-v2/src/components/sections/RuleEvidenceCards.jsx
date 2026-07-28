@@ -20,7 +20,98 @@ const REASON_KO = {
   snapshot_read_failed: '스냅샷 파일을 읽지 못했습니다',
   build_not_cached: '해당 빌드가 캐시에 없습니다',
   params_required: '필수 파라미터가 없습니다',
+  // 파일 귀속이 원리적으로 없는 항목(RCMA류) — '파일을 못 찾음'과 구분해야 사용자가
+  // 스냅샷 누락으로 오독하지 않는다.
+  cross_module_scope: '모듈 간 분석(RCMA) 집계입니다 — 특정 파일에 귀속되지 않아 파일 diff가 없습니다',
 };
+
+/**
+ * 구간 변경 파일 — 파일 귀속이 없는 규칙(RCMA류)의 유일한 코드 증거.
+ * POST /api/summary/rule-window-changes (결정론, LLM 0회).
+ *
+ * "이 파일 때문에 위반이 줄었다"가 아니라 "이 구간에 이 파일들이 바뀌었다"만 말한다 —
+ * 어느 변경이 원인인지는 QAC 데이터에 없다. 그래서 note를 접힘 여부와 무관하게 노출한다.
+ */
+export function WindowChangesCard({ jobUrl, cacheRoot, rule, fromBuild, toBuild }) {
+  const [state, setState] = useState('idle');
+  const [data, setData] = useState(null);
+  const [error, setError] = useState('');
+  const load = async () => {
+    setState('loading');
+    setError('');
+    try {
+      const resp = await post('/api/summary/rule-window-changes', {
+        job_url: jobUrl, cache_root: cacheRoot, rule, from_build: fromBuild, to_build: toBuild,
+      });
+      setData(resp);
+      setState('done');
+    } catch (e) {
+      setError(String(e?.message || e));
+      setState('error');
+    }
+  };
+  const th = { ...xs, textAlign: 'left', padding: '2px 6px', color: 'var(--text-muted)', whiteSpace: 'nowrap' };
+  const td2 = { ...xs, padding: '2px 6px', whiteSpace: 'nowrap' };
+  return (
+    <div style={{ marginTop: 4 }}>
+      {state !== 'done' && (
+        <button type="button" onClick={load} disabled={state === 'loading'} style={btn}>
+          {state === 'loading' ? '조회 중…' : `이 구간 변경 파일 보기 (#${fromBuild}→#${toBuild})`}
+        </button>
+      )}
+      {error && <div style={{ ...xs, color: 'var(--color-danger)' }}>구간 변경 파일 조회 오류: {error}</div>}
+      {state === 'done' && data && (
+        data.available === false ? (
+          <div style={{ ...xs, color: 'var(--text-muted)' }}>
+            {data.reason === 'identical_snapshot'
+              ? '두 빌드의 소스 스냅샷이 동일합니다 — 이 구간에 변경된 파일이 없습니다.'
+              : REASON_KO[data.reason] || `구간 변경 파일을 조회할 수 없습니다 (${data.reason})`}
+          </div>
+        ) : (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+            <div style={{ ...xs, color: 'var(--text-muted)' }}>⚖ {data.note}</div>
+            <div style={xs}>
+              변경 {data.totals?.changed}개 · 헤더 {data.totals?.headers} · 선언 변경 {data.totals?.decl_touched_files} · typedef {data.totals?.typedef_touched_files}
+              {(data.omitted || 0) > 0 && ` (표시 상한으로 ${data.omitted}개 생략)`}
+            </div>
+            <div style={{ overflowX: 'auto' }}>
+              <table style={{ borderCollapse: 'collapse', width: '100%' }}>
+                <thead><tr><th style={th}>파일</th><th style={th}>+/−</th><th style={th}>선언 변경</th><th style={th}>typedef</th></tr></thead>
+                <tbody>
+                  {(data.changed_files || []).map((f) => (
+                    <tr key={f.path}>
+                      <td style={{ ...td2, fontFamily: 'monospace' }}>
+                        {f.path}
+                        {f.is_header && <span style={{ color: 'var(--text-muted)' }} title="헤더 파일">{' [h]'}</span>}
+                      </td>
+                      <td style={td2}>
+                        <span style={{ color: 'var(--color-success)' }}>+{f.lines_added ?? '—'}</span>
+                        {' / '}
+                        <span style={{ color: 'var(--color-danger)' }}>−{f.lines_removed ?? '—'}</span>
+                      </td>
+                      <td style={td2}>{f.decl_touched || '—'}</td>
+                      <td style={td2}>{f.typedef_touched || '—'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )
+      )}
+    </div>
+  );
+}
+
+/** 파일 귀속 불가(RCMA류) 엔트리 배지 — 목록에서 파일 행과 즉시 구분되게 한다. */
+export function CrossModuleBadge() {
+  return (
+    <span style={{
+      ...xs, padding: '1px 7px', borderRadius: 'var(--radius-sm)',
+      border: '1px dashed var(--border)', color: 'var(--text-muted)',
+    }}>모듈 간 분석</span>
+  );
+}
 
 const xs = { fontSize: 'var(--text-xs)' };
 const btn = {
@@ -37,10 +128,22 @@ function cnt(v) {
   return v == null ? '—' : v;
 }
 
-export function UnresolvedEvidenceCard({ jobUrl, cacheRoot, rule, file, fromBuild, toBuild }) {
+/**
+ * 구간 증거 카드 — (rule, file)의 from→to 스냅샷 diff + 구간 카운트.
+ *
+ * 미해소(files_latest)뿐 아니라 **발생 구간**(increased_files) 증거에도 쓰이므로 라벨을
+ * props로 받는다. 기본값은 미해소 문구 — 기존 호출부/테스트 계약 유지.
+ * cross_module 엔트리는 파일 실체가 없어 diff가 원리적으로 없다(버튼 라벨만 카운트 조회로).
+ */
+export function UnresolvedEvidenceCard({
+  jobUrl, cacheRoot, rule, file, fromBuild, toBuild,
+  countSuffix = '(최신)', changedLabel = '파일 변경됨 — 위반 유지',
+  unchangedLabel = '파일 무변경 — 위반 잔존', accent = 'var(--color-warning)',
+}) {
   const [state, setState] = useState('idle'); // idle | loading | done | error
   const [data, setData] = useState(null);
   const [error, setError] = useState('');
+  const crossModule = file?.scope === 'cross_module';
   const load = async () => {
     setState('loading');
     setError('');
@@ -57,20 +160,32 @@ export function UnresolvedEvidenceCard({ jobUrl, cacheRoot, rule, file, fromBuil
     }
   };
   return (
-    <div style={{ borderLeft: '3px solid var(--color-warning)', padding: '4px 8px', marginTop: 4 }}>
+    <div style={{ borderLeft: `3px solid ${accent}`, padding: '4px 8px', marginTop: 4 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-        <span style={xs}>{file.path} <b>{file.count}</b>건 (최신)</span>
+        <span style={xs}>{file.path} <b>{file.count}</b>건 {countSuffix}</span>
+        {crossModule && <CrossModuleBadge />}
         {state !== 'done' && (
           <button type="button" onClick={load} disabled={state === 'loading'} style={btn}>
-            {state === 'loading' ? '조회 중…' : `구간 증거 보기 (#${fromBuild}→#${toBuild})`}
+            {state === 'loading' ? '조회 중…'
+              : crossModule ? `구간 카운트 보기 (#${fromBuild}→#${toBuild})`
+              : `구간 증거 보기 (#${fromBuild}→#${toBuild})`}
           </button>
         )}
       </div>
       {error && <div style={{ ...xs, color: 'var(--color-danger)' }}>구간 증거 조회 오류: {error}</div>}
       {state === 'done' && data && (
         data.available === false ? (
-          <div style={{ ...xs, color: 'var(--text-muted)' }}>
-            {REASON_KO[data.reason] || `구간 증거를 만들 수 없습니다 (${data.reason})`}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+            <div style={{ ...xs, color: 'var(--text-muted)' }}>
+              {REASON_KO[data.reason] || `구간 증거를 만들 수 없습니다 (${data.reason})`}
+            </div>
+            {/* diff가 없어도 구간 카운트는 실재하는 관측 — 버리지 않는다. */}
+            {data.counts && (data.counts.from != null || data.counts.to != null) && (
+              <span style={xs}>
+                위반 {cnt(data.counts.from)} → {cnt(data.counts.to)}건
+                {data.counts_reason === 'no_rcr' ? ' (일부 빌드 RCR 없음)' : ''}
+              </span>
+            )}
           </div>
         ) : (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginTop: 4 }}>
@@ -80,12 +195,12 @@ export function UnresolvedEvidenceCard({ jobUrl, cacheRoot, rule, file, fromBuil
                 {data.counts_reason === 'no_rcr' ? ' (일부 빌드 RCR 없음)' : ''}
               </span>
               {data.file_changed ? (
-                <span style={{ ...xs, padding: '1px 7px', borderRadius: 'var(--radius-sm)', fontWeight: 600, color: '#fff', background: 'var(--color-warning)' }}>
-                  파일 변경됨 — 위반 유지
+                <span style={{ ...xs, padding: '1px 7px', borderRadius: 'var(--radius-sm)', fontWeight: 600, color: '#fff', background: accent }}>
+                  {changedLabel}
                 </span>
               ) : (
                 <span style={{ ...xs, padding: '1px 7px', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border)', color: 'var(--text-muted)' }}>
-                  파일 무변경 — 위반 잔존
+                  {unchangedLabel}
                 </span>
               )}
             </div>
@@ -176,6 +291,8 @@ export function RuleDefinitionCard({ jobUrl, cacheRoot, rule }) {
       <div style={{ ...xs, color: 'var(--text-muted)', marginTop: 4 }}>
         {data?.reason === 'no_code_evidence'
           ? '팀 룰 초안: 이 규칙의 코드 증거(해소 diff·미해소 발췌)가 없어 초안을 만들지 않습니다 (일반론 방지).'
+          : data?.reason === 'cross_module_only'
+          ? '팀 룰 초안: 이 규칙의 위반은 모듈 간 분석(RCMA) 집계에만 있어 파일 단위 코드 증거를 만들 수 없습니다 (일반론 방지).'
           : `팀 룰 초안을 만들 수 없습니다 (${data?.reason})`}
       </div>
     );

@@ -1,0 +1,165 @@
+/**
+ * BuildChangeMatrixPanel — 베이스라인 대비 각 빌드의 누적 소스 변화.
+ * 파일 축 즉시 · 함수 축 순차(동시성 1) · 동일 트리 그룹 공유 · 미계산은 0이 아니라 —.
+ */
+import { render, screen, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+
+let mockFiles;
+let mockFunctions;
+let cellResponses;   // target_build → 응답
+let cellCalls;       // 호출 순서 기록
+
+vi.mock('../api.js', () => ({
+  post: vi.fn((url, body) => {
+    const u = String(url);
+    if (u.endsWith('/api/summary/change-matrix')) {
+      return Promise.resolve(body?.level === 'functions' ? mockFunctions : mockFiles);
+    }
+    if (u.includes('change-matrix/cell')) {
+      cellCalls.push({ target: body?.target_build, at: Date.now() });
+      return new Promise((resolve) => {
+        setTimeout(() => resolve(cellResponses[body?.target_build]), 5);
+      });
+    }
+    return Promise.resolve({});
+  }),
+}));
+
+const { default: BuildChangeMatrixPanel } = await import('../components/sections/BuildChangeMatrixPanel.jsx');
+const { post } = await import('../api.js');
+
+function row(n, extra = {}) {
+  return {
+    row_key: `b${n}`, build_number: n, build_result: 'SUCCESS',
+    timestamp_iso: `2026-07-${String(n).padStart(2, '0')}T13:00:00`, revision: `10${n}`,
+    snapshot_group: { count: 1, members: [n], canonical_build: n },
+    is_baseline: false, identical_to_baseline: false,
+    files: { added: 0, deleted: 0, modified: 2, changed: 2, unchanged: 145, changed_paths: [{ path: 'APP/a.c', change_kind: 'modified' }] },
+    functions: null, asil: null,
+    function_state: { state: 'not_computed', reason: 'level_files' },
+    cell_id: `base__${n}`, ...extra,
+  };
+}
+
+const FILES = {
+  ok: true, available: true, level: 'files',
+  baseline: { build_number: 11, timestamp_iso: '2026-05-19T13:00:08', revision: '1018' },
+  rows: [
+    row(25),
+    row(24),
+    // 동일 트리 3개 — 파싱 없이 함수 0 확정
+    row(13, { identical_to_baseline: true, snapshot_group: { count: 3, members: [13, 12, 11], canonical_build: 11 },
+              files: { added: 0, deleted: 0, modified: 0, changed: 0, unchanged: 147, changed_paths: [] },
+              functions: { new: 0, deleted: 0, signature: 0, body: 0, changed: 0 },
+              asil: { touched: 0, by_grade: {}, max: null },
+              function_state: { state: 'identical', reason: '베이스라인과 소스 트리가 바이트 동일 — 함수 차이는 계산 없이 0으로 확정' } }),
+    { row_key: 'b11', build_number: 11, is_baseline: true, snapshot_group: { count: 3, members: [13, 12, 11] },
+      files: null, functions: null, asil: null, function_state: { state: 'baseline' } },
+  ],
+  pending_cells: [{ cell_id: 'base__25', target_build: 25 }, { cell_id: 'base__24', target_build: 24 }],
+  snapshot_groups: [{ content_sha: 'de6809e7', builds: [13, 12, 11], count: 3 }],
+  stats: { rows: 4, pairs_total: 3, pairs_distinct: 2 },
+  join_scope: { build_number: 25, coverage_functions: 812, asil_functions: 385, note: '최신 빌드 기준' },
+  note: '영향분석 실행 이력과 무관한 소스 스냅샷 비교입니다',
+};
+
+const PROPS = { jobUrl: 'http://j/', cacheRoot: '.c', baseline: '11', deltaByBuild: new Map() };
+
+describe('BuildChangeMatrixPanel', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockFiles = FILES;
+    mockFunctions = { ...FILES, level: 'functions' };
+    cellCalls = [];
+    cellResponses = {
+      25: { ok: true, available: true, cell_id: 'base__25', target: { build_number: 25 },
+            shared_with_builds: [25], functions: { new: 1, deleted: 0, signature: 1, body: 3, changed: 5 },
+            asil: { touched: 2, by_grade: { C: 1, B: 1 }, max: 'C' }, function_state: { state: 'computed' } },
+      24: { ok: true, available: true, cell_id: 'base__24', target: { build_number: 24 },
+            shared_with_builds: [24], functions: { new: 0, deleted: 0, signature: 0, body: 2, changed: 2 },
+            asil: { touched: 0, by_grade: {}, max: null }, function_state: { state: 'computed' } },
+    };
+  });
+
+  it('파일 축만으로 전 빌드 행이 즉시 뜨고, 함수/ASIL은 0이 아니라 —', async () => {
+    render(<BuildChangeMatrixPanel {...PROPS} />);
+    expect(await screen.findByText('#25')).toBeInTheDocument();
+    expect(screen.getByText('#24')).toBeInTheDocument();
+    expect(screen.getByText('#11 (기준)')).toBeInTheDocument();
+    const r25 = screen.getByText('#25').closest('tr');
+    expect(within(r25).getByText('2')).toBeInTheDocument();          // 변경 파일
+    // ISO 정직성: 미계산은 0이 아니라 —(사유 동반)
+    expect(within(r25).getAllByText(/—/).length).toBeGreaterThan(0);
+    expect(within(r25).queryByText('0')).toBeNull();
+  });
+
+  it('동일 트리 행은 계산 없이 0으로 확정 + 그룹 배지·경고 배너', async () => {
+    render(<BuildChangeMatrixPanel {...PROPS} />);
+    await screen.findByText('#13');
+    const r13 = screen.getByText('#13').closest('tr');
+    expect(within(r13).getByText('동일 트리 3')).toBeInTheDocument();
+    expect(within(r13).getAllByText('0').length).toBeGreaterThan(0);  // 함수 0이 확정돼 있다
+    // '변화 0'을 코드 미변경으로 오독하지 않게 하는 배너
+    expect(screen.getByText(/동일 트리라 이 구간의 변화는 0으로 나옵니다/)).toBeInTheDocument();
+  });
+
+  it('pending을 동시성 1로 순차 처리하고, 도착 시 행이 채워진다', async () => {
+    const user = userEvent.setup();
+    render(<BuildChangeMatrixPanel {...PROPS} />);
+    await screen.findByText('#25');
+    await user.click(screen.getByText(/함수 축 계산 \(2건\)/));
+    await vi.waitFor(() => expect(cellCalls.length).toBe(2));
+    // 두 번째 호출은 첫 번째가 끝난 뒤여야 한다(동시 발사 금지 — 파서가 겹치면 메모리·CPU 폭증)
+    expect(cellCalls[1].at).toBeGreaterThanOrEqual(cellCalls[0].at);
+    await vi.waitFor(() => {
+      const r25 = screen.getByText('#25').closest('tr');
+      expect(within(r25).getByText('5')).toBeInTheDocument();          // 변경 함수
+      expect(within(r25).getByText(/\(C1·B1\)/)).toBeInTheDocument();  // ASIL 등급 분해
+    });
+  });
+
+  it('셀 1건이 같은 스냅샷 그룹의 여러 행을 함께 채운다', async () => {
+    cellResponses[25] = { ...cellResponses[25], shared_with_builds: [25, 24] };
+    mockFiles = { ...FILES, pending_cells: [{ cell_id: 'base__25', target_build: 25 }] };
+    mockFunctions = { ...mockFiles, level: 'functions' };
+    const user = userEvent.setup();
+    render(<BuildChangeMatrixPanel {...PROPS} />);
+    await screen.findByText('#25');
+    await user.click(screen.getByText(/함수 축 계산 \(1건\)/));
+    await vi.waitFor(() => {
+      expect(within(screen.getByText('#25').closest('tr')).getByText('5')).toBeInTheDocument();
+      expect(within(screen.getByText('#24').closest('tr')).getByText('5')).toBeInTheDocument();
+    });
+    expect(cellCalls.length).toBe(1);   // 계산은 1회뿐
+  });
+
+  it('행 펼침 — 변경 파일 목록 + 함수 목록 버튼(핸드오프 아님)', async () => {
+    const user = userEvent.setup();
+    render(<BuildChangeMatrixPanel {...PROPS} />);
+    await screen.findByText('#25');
+    await user.click(screen.getByLabelText(/빌드 #25 변경 상세 펼치기/));
+    expect(screen.getByText('APP/a.c')).toBeInTheDocument();
+    expect(screen.getByText('함수 목록 보기')).toBeInTheDocument();
+  });
+
+  it('베이스라인은 읽기 전용 에코 — 이 패널에 선택 UI를 두지 않는다', async () => {
+    render(<BuildChangeMatrixPanel {...PROPS} />);
+    await screen.findByText('#25');
+    expect(screen.getByText(/기준 #11/)).toBeInTheDocument();
+    expect(screen.getByText(/위 패널에서 변경/)).toBeInTheDocument();
+    expect(screen.queryByLabelText('베이스라인 빌드')).toBeNull();   // select 중복 배치 금지
+  });
+
+  it('available:false는 사유를 낸다(빈 화면 금지)', async () => {
+    mockFiles = { ok: true, available: false, reason: 'no_source_snapshot' };
+    render(<BuildChangeMatrixPanel {...PROPS} />);
+    expect(await screen.findByText(/소스 스냅샷이 있는 캐시 빌드가 없습니다/)).toBeInTheDocument();
+  });
+
+  it('베이스라인이 없으면 조회하지 않는다', async () => {
+    render(<BuildChangeMatrixPanel {...PROPS} baseline="" />);
+    expect(post).not.toHaveBeenCalled();
+  });
+});
