@@ -58,6 +58,10 @@ const MEASURE_LABEL = {
 const ADVICE_REASON_KO = {
   no_code_evidence: '이 상충의 코드 증거(동시 위반 파일·구간 diff)를 찾지 못해 지침을 만들지 않았습니다 — 일반론 지침은 만들지 않습니다',
   cross_module_only: '이 규칙의 위반이 전부 모듈 간 분석(RCMA) 집계라 특정 파일에 귀속되지 않습니다 — 스냅샷 발췌가 원리적으로 불가능합니다(스냅샷 누락이 아닙니다)',
+  // ⚠ 위 두 사유와 **조치가 정반대**다. 여기서는 위반도 파일도 멀쩡히 있는데 소스만 없다 —
+  //    빌드를 다시 받으면 해결된다. 예전엔 이 경우도 no_code_evidence 로 나가 "도구 한계"로 읽혔다.
+  no_source_snapshot: '이 빌드에 소스 스냅샷(source/)이 없어 코드 발췌를 만들 수 없습니다 — 증거가 없는 게 아니라 소스를 아직 안 받은 것입니다(빌드 재수집으로 해결됩니다)',
+  latest_build_not_cached: '기준 빌드가 캐시에 없어 소스를 읽을 수 없습니다',
   conflict_not_found: '이 상충이 현재 후보 목록에 없습니다 (빌드가 바뀌었을 수 있습니다)',
   params_required: '필수 파라미터가 없습니다',
   mandatory_deviation_suggested: '생성된 지침이 예외 불가(mandatory) 규칙을 예외 후보로 지목해 폐기했습니다',
@@ -92,6 +96,36 @@ export function TierBadge({ tier }) {
       display: 'inline-block', padding: '1px 7px', borderRadius: 'var(--radius-sm)',
       fontSize: 'var(--text-xs)', fontWeight: 600, color: '#fff', background: meta.color,
     }}>{meta.label}</span>
+  );
+}
+
+/**
+ * 이 상충의 위반 중 **손댈 수 없는 자동 생성 파일 몫**.
+ *
+ * 왜 표 본문인가 — 실측 HDPDM01 `Rule-5.4` 는 파일 귀속 256건이 **256건 모두** 자동 생성
+ * 파일(lin_cfg.h)인데, 정렬이 위반 수 내림차순이라 "고쳐라" 목록 맨 위에 있었다.
+ * ⚠ 마커 확인이 불가능했던 상태(스냅샷 없음)의 0은 '없음'이 아니라 '못 봄'이다.
+ */
+function GeneratedShare({ generated }) {
+  const g = generated || {};
+  const total = g.attributed_total || 0;
+  const n = g.violations || 0;
+  const probeBlind = g.probe && g.probe.available === false;
+  if (n === 0) {
+    return (
+      <span style={{ ...xs, color: 'var(--text-muted)' }}
+        title={probeBlind ? '소스 스냅샷이 없어 파일 내 생성 마커를 확인하지 못했습니다 — 경로 규칙으로 판별된 것만 반영됐습니다' : undefined}>
+        {probeBlind ? '— (마커 미확인)' : '—'}
+      </span>
+    );
+  }
+  const pct = total > 0 ? Math.round((n / total) * 100) : 0;
+  const heavy = pct >= 50;
+  return (
+    <span style={{ ...xs, color: heavy ? 'var(--color-warning)' : 'var(--text-muted)', fontWeight: heavy ? 600 : 400 }}
+      title={`파일에 귀속된 위반 ${total}건 중 ${n}건이 자동 생성 파일 — 직접 수정하면 재생성 시 되돌아옵니다`}>
+      {n}/{total} ({pct}%)
+    </span>
   );
 }
 
@@ -235,13 +269,41 @@ function ConflictAdviceCard({ jobUrl, cacheRoot, conflict }) {
   );
 }
 
+/**
+ * 상한에 잘린 사실 — "이게 전부"로 읽히지 않게 목록 바로 아래 붙인다.
+ * 서버가 표시분과 **전체 건수**를 함께 주므로 프론트가 세지 않는다(두 계층이 각자 세면 갈린다).
+ */
+function MoreNote({ shown, total, unit = '건' }) {
+  if (!(total > shown)) return null;
+  return (
+    <div style={{ ...xs, color: 'var(--text-muted)' }}>
+      … 표시 상한으로 {total - shown}{unit} 더 있음 (전체 {total}{unit})
+    </div>
+  );
+}
+
 /** 상충 1건의 펼침 내용 — 메커니즘 → 실측 증거 → 해소 방향 → 지침(LLM). */
 function ConflictDetail({ jobUrl, cacheRoot, conflict }) {
   const ev = conflict.evidence || {};
+  const et = conflict.evidence_totals || {};
+  const gen = conflict.generated || {};
+  const genTotal = gen.attributed_total || 0;
+  const genShare = genTotal > 0 ? (gen.violations || 0) / genTotal : 0;
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
       {conflict.mechanism && <div style={xs}><b>왜 걸리나</b> — {conflict.mechanism}</div>}
       <div style={{ ...xs, color: 'var(--text-muted)' }}>{conflict.tier_note}</div>
+
+      {/* 손댈 수 없는 몫 — 이걸 안 보이면 "고쳐라"라고 내민 항목이 사실 전부 생성 코드일 수 있다. */}
+      {(gen.violations || 0) > 0 && (
+        <div style={{ ...xs, color: genShare >= 0.5 ? 'var(--color-warning)' : 'var(--text-muted)' }}>
+          {genShare >= 1
+            ? '⚠ 이 규칙의 파일 귀속 위반이 전부 자동 생성 파일입니다 — 손으로 고칠 코드가 없습니다.'
+            : `⚠ 이 규칙 위반 ${genTotal}건 중 ${gen.violations}건(${Math.round(genShare * 100)}%)이 자동 생성 파일입니다.`}
+          {' 직접 수정하면 재생성 시 되돌아옵니다 — 생성기 설정·템플릿 또는 예외 신청 대상입니다'}
+          {(gen.files || []).length > 0 && ` (${gen.files.map((f) => String(f).split('/').pop()).join(', ')})`}.
+        </div>
+      )}
 
       {(ev.windows || []).length > 0 && (
         <div>
@@ -252,6 +314,7 @@ function ConflictDetail({ jobUrl, cacheRoot, conflict }) {
               <b>{w.rule_down}</b> {w.delta_down} / <b>{w.rule_up}</b> +{w.delta_up}
             </div>
           ))}
+          <MoreNote shown={ev.windows.length} total={et.windows} />
         </div>
       )}
 
@@ -262,12 +325,29 @@ function ConflictDetail({ jobUrl, cacheRoot, conflict }) {
             <div key={c.file} style={xs} title={c.file}>
               {String(c.file).split('/').pop()}
               {c.scope === 'cross_module' && <span style={{ color: 'var(--text-muted)' }}> (모듈 간 집계)</span>}
+              {c.generated && <span style={{ color: 'var(--color-warning)' }}> (자동 생성)</span>}
               {' — 고칠 대상 '}
               {Object.entries(c.fixing_counts || {}).map(([r, n]) => `${r} ${n}`).join(', ')}
               {' / 걸릴 수 있음 '}
               {Object.entries(c.risk_counts || {}).map(([r, n]) => `${r} ${n}`).join(', ')}
             </div>
           ))}
+          <MoreNote shown={ev.cooccurrence.length} total={et.cooccurrence} unit="파일" />
+        </div>
+      )}
+
+      {/* 예방적 근거(상대 규칙 미발생)일 때의 조치 대상 파일 — 예전엔 서버가 주는데도
+          화면에 전혀 안 나와, 지침의 근거가 무엇인지 볼 방법이 없었다. */}
+      {(ev.cooccurrence || []).length === 0 && (conflict.fixing_files || []).length > 0 && (
+        <div>
+          <div style={T.figTitle}>고칠 규칙이 위반 중인 파일 — 상대 규칙은 아직 미발생</div>
+          {conflict.fixing_files.map((f) => (
+            <div key={f.file} style={xs} title={f.file}>
+              {String(f.file).split('/').pop()} — {f.count}건
+              {f.generated && <span style={{ color: 'var(--color-warning)' }}> (자동 생성)</span>}
+            </div>
+          ))}
+          <MoreNote shown={conflict.fixing_files.length} total={et.fixing_files} unit="파일" />
         </div>
       )}
 
@@ -287,12 +367,15 @@ function ConflictDetail({ jobUrl, cacheRoot, conflict }) {
               {' '}{(conflict.metric_risk || []).join('·')} 여유가 {conflict.metric_axis.threshold}단 이하인 함수는 없습니다.
             </div>
           ) : (
-            ev.metric_headroom.map((m) => (
-              <div key={`${m.file}-${m.function}-${m.metric}`} style={{ ...xs, color: 'var(--color-warning)' }}>
-                {m.function} · {m.label} {m.value} — <b>여유 {m.headroom}단</b>, 넘으면 {m.st_id} 판정이{' '}
-                {m.verdict}({m.band}) → <b>{m.next_verdict}({m.next_band})</b>
-              </div>
-            ))
+            <>
+              {ev.metric_headroom.map((m) => (
+                <div key={`${m.file}-${m.function}-${m.metric}`} style={{ ...xs, color: 'var(--color-warning)' }}>
+                  {m.function} · {m.label} {m.value} — <b>여유 {m.headroom}단</b>, 넘으면 {m.st_id} 판정이{' '}
+                  {m.verdict}({m.band}) → <b>{m.next_verdict}({m.next_band})</b>
+                </div>
+              ))}
+              <MoreNote shown={ev.metric_headroom.length} total={et.metric_headroom} unit="개 함수" />
+            </>
           )}
         </div>
       )}
@@ -349,10 +432,17 @@ function CoResolutionList({ items, note }) {
               <tr key={e.rules.join('~')}>
                 <td style={T.nameTd(200)}>
                   <b>{e.rules[0]}</b> ≡ <b>{e.rules[1]}</b>
-                  {e.cross_ruleset && (
+                  {/* 3-state — null 은 '같은 규칙셋'이 아니라 '규칙 설명이 없어 모름'이다. */}
+                  {e.cross_ruleset === true && (
                     <div style={{ ...xs, color: 'var(--color-info)' }}
-                      title={`서로 다른 규칙셋(${e.groups.join(' / ')})이 같은 코드를 각각 세고 있을 가능성`}>
-                      규칙셋 교차 {e.groups.filter(Boolean).join(' / ')}
+                      title={`서로 다른 규칙셋(${(e.groups || []).join(' / ')})이 같은 코드를 각각 세고 있을 가능성`}>
+                      규칙셋 교차 {(e.groups || []).filter(Boolean).join(' / ')}
+                    </div>
+                  )}
+                  {e.cross_ruleset == null && (
+                    <div style={{ ...xs, color: 'var(--text-muted)' }}
+                      title="이 빌드에 규칙 설정(RCFInfo)이 없어 두 규칙이 같은 규칙셋인지 확인하지 못했습니다">
+                      규칙셋 미상
                     </div>
                   )}
                 </td>
@@ -379,6 +469,35 @@ function CoResolutionList({ items, note }) {
       {note && <div style={T.note}>⚖ {note}</div>}
     </>
   );
+}
+
+/**
+ * 자동 생성 마커 확인이 **얼마나 완전한가**.
+ *
+ * 두 상태를 구분한다: ①스냅샷이 없어 한 건도 못 봄 ②상한에 걸려 일부만 봄.
+ * ⚠ 예전엔 숫자 하나(`generated_unprobed`)뿐이라, 스냅샷이 아예 없어 0건 확인한 상태도
+ *   `0`(= 전부 확인함)으로 나갔다 — 같은 0이 정반대를 뜻했다.
+ */
+function ProbeNote({ probe, unprobed }) {
+  if (probe && probe.available === false) {
+    return (
+      <div style={{ ...xs, color: 'var(--color-warning)' }}>
+        ⚠ 이 빌드에 소스 스냅샷(source/)이 없어 <b>파일 내 생성 마커를 한 건도 확인하지 못했습니다</b>
+        {(probe.candidates || 0) > 0 && ` (확인 대상 ${probe.candidates}개 전부)`} —
+        아래 목록은 경로 규칙(Generated_Code/·*_Cfg.c 등)으로 잡힌 것뿐이라 완전하지 않습니다.
+      </div>
+    );
+  }
+  const left = probe?.unprobed ?? unprobed ?? 0;
+  if (left > 0) {
+    return (
+      <div style={{ ...xs, color: 'var(--color-warning)' }}>
+        ⚠ 파일 {left}개는 검사 상한({probe?.cap ?? '—'}개)에 걸려 생성 마커를 확인하지 못했습니다 —
+        이 목록은 완전하지 않습니다 (위반이 많은 파일부터 확인했습니다).
+      </div>
+    );
+  }
+  return null;
 }
 
 /** 측정 근거가 불확실한 지점 — 숫자를 그대로 믿으면 안 되는 곳. */
@@ -440,6 +559,14 @@ export default function RuleConflictPanel({
           : `상충을 계산할 수 없습니다 (${data.reason})`}
       </span>
     );
+  } else if (data?.available && data?.snapshot?.available === false) {
+    // 스냅샷이 없으면 **해결 지침 전체**와 자동 생성 마커 확인이 통째로 막힌다 —
+    // 행을 펼쳐야만 알게 되면 사용자는 버튼을 누르고 나서야 실패를 본다.
+    problem = (
+      <span style={{ ...xs, color: 'var(--color-warning)' }}>
+        ⚠ 소스 스냅샷 없음 — 해결 지침·생성 마커 확인 불가
+      </span>
+    );
   } else if (omitted > 0) {
     problem = <span style={{ ...xs, color: 'var(--color-warning)' }}>⚠ 표시 상한으로 {omitted}건 생략</span>;
   }
@@ -484,6 +611,17 @@ export default function RuleConflictPanel({
             </div>
           )}
 
+          {/* 소스 스냅샷 축 — RCR·메트릭과 같은 급. 이게 없으면 코드 근거를 쓰는 모든 것이
+              막히는데, 예전엔 응답에 필드조차 없어 화면이 '지침 생성 가능'을 거짓으로 말했다. */}
+          {data.snapshot && data.snapshot.available === false && (
+            <div style={{ ...xs, color: 'var(--color-warning)' }}>
+              ⚠ 이 빌드에 <b>소스 스냅샷(source/)이 없습니다</b> —{' '}
+              {ADVICE_REASON_KO[data.snapshot.reason] || data.snapshot.reason}.
+              상충 판정 자체는 위반 리포트만으로 하므로 유효하지만, <b>해결 지침(코드 발췌)과
+              자동 생성 마커 확인은 만들 수 없습니다</b>.
+            </div>
+          )}
+
           {/* 위반 표를 못 읽었으면 '상충 없음'이 아니라 측정 실패다 — 좋은 소식으로 위장 금지. */}
           {data.latest_rcr_reason && (
             <div style={{ ...xs, color: 'var(--color-warning)' }}>
@@ -505,6 +643,9 @@ export default function RuleConflictPanel({
                     <th style={T.th}>고치려는 규칙</th>
                     <th style={T.th}>걸릴 수 있는 규칙</th>
                     <th style={T.th}>근거</th>
+                    {/* 조치 가능성을 표 본문에 둔다 — 펼쳐야만 보이면 "고쳐라" 목록 맨 위가
+                        사실은 손댈 수 없는 파일이라는 걸 아무도 모른다. */}
+                    <th style={T.th}>자동 생성 몫</th>
                     <th style={T.th}>관계</th>
                     <th style={T.th}>확신도</th>
                     <th style={T.th}>상세</th>
@@ -531,6 +672,7 @@ export default function RuleConflictPanel({
                               ))}
                           </td>
                           <td style={T.td}><TierBadge tier={c.tier} /></td>
+                          <td style={T.td}><GeneratedShare generated={c.generated} /></td>
                           <td style={T.td}>{KIND_LABEL[c.kind] || c.kind}</td>
                           <td style={T.td}>{c.confidence}</td>
                           <td style={T.td}>
@@ -542,7 +684,7 @@ export default function RuleConflictPanel({
                         </tr>
                         {open && (
                           <tr>
-                            <td colSpan={6} style={{ padding: '6px 8px', borderBottom: '1px solid var(--border)' }}>
+                            <td colSpan={7} style={{ padding: '6px 8px', borderBottom: '1px solid var(--border)' }}>
                               <ConflictDetail jobUrl={jobUrl} cacheRoot={cacheRoot} conflict={c} />
                             </td>
                           </tr>
@@ -571,14 +713,22 @@ export default function RuleConflictPanel({
 
           <div>
             <div style={T.figTitle}>자동 생성 코드의 위반</div>
+            {/* ⚠ 마커 확인의 완전성은 목록 유무와 **무관하게** 먼저 말한다. 스냅샷이 없으면
+                한 건도 못 본 것이고, 예전엔 그 상태가 "확인했고 없음"으로 보였다. */}
+            <ProbeNote probe={amb.generated_probe} unprobed={amb.generated_unprobed} />
             {(amb.generated || []).length === 0 ? (
               <div style={T.note}>자동 생성으로 판별된 위반 파일이 없습니다.</div>
             ) : (
               <>
                 <div style={T.note}>
                   직접 고치면 재생성 시 되돌아옵니다 — 생성기 설정·템플릿 또는 예외 신청 대상입니다.
-                  {(amb.generated_unprobed || 0) > 0 && (
-                    <> ⚠ 파일 {amb.generated_unprobed}개는 검사 상한에 걸려 생성 마커를 확인하지 못했습니다 — 이 목록은 완전하지 않습니다.</>
+                  {/* 분모 없이 파일 목록만 주면 "몇 개뿐이네"로 읽힌다 — 실측 HDPDM01은
+                      파일 2개가 전체 파일 귀속 위반의 68.8%였다. */}
+                  {(amb.generated_share?.attributed_total || 0) > 0 && (
+                    <> <b>파일에 귀속된 위반 {amb.generated_share.attributed_total}건 중{' '}
+                      {amb.generated_share.violations}건({Math.round(
+                        (amb.generated_share.violations / amb.generated_share.attributed_total) * 100)}%)
+                    </b>이 여기 있습니다.</>
                   )}
                 </div>
                 <div style={T.SCROLL}>
@@ -609,6 +759,9 @@ export default function RuleConflictPanel({
               "상충이 거의 없다"로 잘못 읽힌다. */}
           <div style={T.note}>
             * 지식 테이블 {data.table?.total ?? 0}쌍 대조 — 표시 {conflicts.length}건 ·
+            {/* 상한 절단을 각주에도 넣어야 합이 total 이 된다 — problem 슬롯에만 있으면
+                각주 산수가 안 맞는데 화면은 아무 말도 안 한다. */}
+            {omitted > 0 && <> 표시 상한으로 생략 {omitted}건 ·</>}
             {' '}해당 규칙 위반이 없어 제외 {data.table?.skipped_no_violation ?? 0}건
             {(data.table?.excluded || []).length > 0 && (
               <> · 상대 규칙이 이 프로젝트 규칙셋에 없어 성립하지 않음 {data.table.excluded.length}건

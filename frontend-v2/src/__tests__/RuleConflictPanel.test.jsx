@@ -50,8 +50,11 @@ const DATA = {
         cooccurrence: [{ file: 'src/IF/ApiIn_LinRxComp_PDS.c', fixing_counts: { 'Rule-10.4': 26 }, risk_counts: { 'Rule-10.8': 5 }, total: 31 }],
         metric_headroom: [],
       },
+      evidence_totals: { windows: 0, cooccurrence: 9, metric_headroom: 0, fixing_files: 23 },
       metric_axis: { applicable: false, checked: false, reason: null },
-      advice: { available: true, reason: null },
+      advice: { available: true, reason: null, basis: 'cooccurrence' },
+      fixing_files: [{ file: 'src/IF/ApiIn_LinRxComp_PDS.c', count: 26 }],
+      generated: { violations: 0, attributed_total: 26, files: [], probe: { available: true, reason: null } },
       mechanism: '캐스팅이 복합식에 걸린다',
       resolutions: ['단항 피연산자 각각에 캐스팅'],
       deviation_hint: '10.x는 전부 required',
@@ -68,8 +71,18 @@ const DATA = {
         windows: [], cooccurrence: [],
         metric_headroom: [{ file: 'src/a.c', function: 'tight()', metric: 'V_G', label: 'v(G)', value: 9, headroom: 2, st_id: 'ST201', band: '1 ~ 10', verdict: 'Pass', next_band: '11 ~ 20', next_verdict: 'Conditional' }],
       },
+      evidence_totals: { windows: 0, cooccurrence: 0, metric_headroom: 35, fixing_files: 3 },
       metric_axis: { applicable: true, checked: true, reason: null, files_checked: 1, threshold: 3 },
-      advice: { available: true, reason: null },
+      advice: { available: true, reason: null, basis: 'fixing_only' },
+      fixing_files: [
+        { file: 'src/LIN/lin_cfg.h', count: 250, generated: true },
+        { file: 'src/a.c', count: 6 },
+      ],
+      // 실측 HDPDM01 Rule-5.4 를 본뜬 값 — 조치 대상 대부분이 손댈 수 없는 파일이다.
+      generated: {
+        violations: 250, attributed_total: 256, files: ['src/LIN/lin_cfg.h'],
+        probe: { available: true, reason: null },
+      },
       mechanism: '중첩이 깊어진다', resolutions: [], deviation_hint: '',
       metric_risk: ['LEVEL', 'V_G'], confidence: 'high', refs: [],
       fixing_violations: 3,
@@ -95,7 +108,13 @@ const DATA = {
       { kind: 'unattributed', rules: [{ rule: 'Rule-8.6', unattributed: 99, total: 105 }], detail: '파일에 귀속되지 않습니다' },
     ],
     generated: [{ file: 'src/Generated_Code/PP1.c', basis: 'path', violations: 2, rules: ['C-INT-002'] }],
+    generated_probe: {
+      available: true, reason: null, candidates: 8, probed: 8, unprobed: 0, cap: 20, head_bytes: 800,
+    },
+    generated_unprobed: 0,
+    generated_share: { violations: 252, attributed_total: 315 },
   },
+  snapshot: { available: true, reason: null },
 };
 
 const props = { jobUrl: 'http://j/job/X', cacheRoot: '/c' };
@@ -253,6 +272,83 @@ describe('RuleConflictPanel', () => {
     expect(screen.getByText(/Rule-8.6 99\/105건/)).toBeTruthy();
     expect(screen.getByText('PP1.c')).toBeTruthy();
     expect(screen.getByText('경로 규칙')).toBeTruthy();
+  });
+
+  it('손댈 수 없는 자동 생성 몫을 표 본문에 낸다 — 펼쳐야만 보이면 안 된다', async () => {
+    const user = userEvent.setup();
+    render(<RuleConflictPanel {...props} data={DATA} defaultOpen />);
+    // 실측 HDPDM01 Rule-5.4 형태: 조치 대상 대부분이 재생성되면 되돌아오는 파일이다.
+    expect(screen.getByText('250/256 (98%)')).toBeTruthy();
+    await user.click(screen.getAllByRole('button', { name: /보기/ })[1]);
+    expect(screen.getByText(/이 규칙 위반 256건 중 250건\(98%\)이 자동 생성 파일/)).toBeTruthy();
+    // 같은 안내가 패널 하단 '자동 생성 코드의 위반' 섹션에도 있다 — 둘 다 있는 게 맞다.
+    expect(screen.getAllByText(/생성기 설정·템플릿 또는 예외 신청 대상/).length).toBeGreaterThan(1);
+  });
+
+  it('전부 자동 생성이면 "손으로 고칠 코드가 없다"고 말한다', async () => {
+    const user = userEvent.setup();
+    const allGen = {
+      ...DATA,
+      conflicts: [{
+        ...DATA.conflicts[1],
+        generated: { violations: 256, attributed_total: 256, files: ['src/LIN/lin_cfg.h'], probe: { available: true } },
+      }],
+    };
+    render(<RuleConflictPanel {...props} data={allGen} defaultOpen />);
+    expect(screen.getByText('256/256 (100%)')).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: /보기/ }));
+    expect(screen.getByText(/파일 귀속 위반이 전부 자동 생성 파일입니다 — 손으로 고칠 코드가 없습니다/)).toBeTruthy();
+  });
+
+  it('증거 목록이 상한에 잘리면 몇 개가 더 있는지 말한다', async () => {
+    const user = userEvent.setup();
+    render(<RuleConflictPanel {...props} data={DATA} defaultOpen />);
+    await user.click(screen.getAllByRole('button', { name: /보기/ })[0]);
+    // 동시 위반 9파일 중 1개만 표시 — 침묵하면 "이게 전부"로 읽힌다.
+    expect(screen.getByText(/표시 상한으로 8파일 더 있음 \(전체 9파일\)/)).toBeTruthy();
+    await user.click(screen.getAllByRole('button', { name: /보기/ })[1]);
+    expect(screen.getByText(/표시 상한으로 34개 함수 더 있음/)).toBeTruthy();
+  });
+
+  it('소스 스냅샷이 없으면 접혀 있어도 알리고, 지침 사유를 재수집 안내로 낸다', async () => {
+    const user = userEvent.setup();
+    const noSnap = {
+      ...DATA,
+      snapshot: { available: false, reason: 'no_source_snapshot' },
+      conflicts: [{
+        ...DATA.conflicts[0],
+        advice: { available: false, reason: 'no_source_snapshot', basis: null },
+      }],
+      ambiguities: {
+        ...DATA.ambiguities,
+        generated_probe: { available: false, reason: 'no_source_snapshot', candidates: 10, probed: 0, unprobed: 10, cap: 20 },
+        generated_unprobed: 10,
+      },
+    };
+    render(<RuleConflictPanel {...props} data={noSnap} defaultOpen />);
+    expect(screen.getByText(/소스 스냅샷 없음 — 해결 지침·생성 마커 확인 불가/)).toBeTruthy();
+    // ⚠ 마커를 한 건도 못 본 상태를 '확인했고 없음'으로 말하면 안 된다.
+    expect(screen.getByText(/파일 내 생성 마커를 한 건도 확인하지 못했습니다/)).toBeTruthy();
+    await user.click(screen.getAllByRole('button', { name: /보기/ })[0]);
+    // 'no_code_evidence'(도구 한계)와 조치가 정반대다 — 여기선 재수집하면 해결된다.
+    // 패널 배너와 행 안의 지침 카드 **양쪽**에 사유가 있어야 한다(접힘·펼침 어느 쪽에서도).
+    expect(screen.getAllByText(/증거가 없는 게 아니라 소스를 아직 안 받은 것입니다/).length).toBe(2);
+    expect(screen.queryByRole('button', { name: '지침 생성' })).toBeNull();
+  });
+
+  it('자동 생성 위반의 전체 몫(분모)을 함께 낸다', () => {
+    render(<RuleConflictPanel {...props} data={DATA} defaultOpen />);
+    expect(screen.getByText(/파일에 귀속된 위반 315건 중 252건\(80%\)/)).toBeTruthy();
+  });
+
+  it('규칙 설명이 없으면 "같은 규칙셋"이라 단정하지 않는다', () => {
+    const unknownGroups = {
+      ...DATA,
+      co_resolution: [{ ...DATA.co_resolution[0], groups: ['', ''], titles: [null, null], cross_ruleset: null }],
+    };
+    render(<RuleConflictPanel {...props} data={unknownGroups} defaultOpen />);
+    expect(screen.getByText('규칙셋 미상')).toBeTruthy();
+    expect(screen.queryByText(/규칙셋 교차/)).toBeNull();
   });
 
   it('지침은 mount 시 probe만 하고(LLM 0회) 생성 버튼을 낸다', async () => {

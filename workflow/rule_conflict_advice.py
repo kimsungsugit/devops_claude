@@ -30,7 +30,9 @@ from workflow.summary_ai_insight import _extract_json_payload, resolve_effective
 
 logger = logging.getLogger(__name__)
 
-CONFLICT_ADVICE_PROMPT_VERSION = 1
+# 2: 자동 생성 파일 지침(직접 수정 금지 → 생성기·예외·검사범위) 추가. 캐시 키에 들어가므로
+#    올리지 않으면 프롬프트만 바꾼 채 낡은 지침이 계속 서빙된다.
+CONFLICT_ADVICE_PROMPT_VERSION = 2
 
 CONFLICT_ADVICE_NOTE = (
     "이 지침은 큐레이션된 규칙 지식과 이 빌드의 관측(동시 위반·구간 변화)을 근거로 만든 "
@@ -54,6 +56,10 @@ def build_conflict_evidence_text(
             "고칠 규칙만 위반 중인 파일 발췌(상대 규칙은 아직 미발생 — 예방적)"
             if ex.get("basis") == "fixing_only" else "동시 위반 파일 발췌"
         )
+        # 자동 생성 파일은 **직접 고치면 재생성 때 되돌아온다**. 이 사실을 입력에 싣지
+        # 않으면 LLM 이 태연히 "이 파일의 이 줄을 이렇게 바꾸라"고 답한다.
+        if ex.get("generated"):
+            label += " · ⚠ 자동 생성 파일(직접 수정 대상 아님 — 생성기 설정·템플릿 또는 예외 신청)"
         parts.append(f"[{label} — {ex.get('file')}]\n{ex.get('text') or ''}")
     for d in window_diffs or []:
         parts.append(f"[구간 변경 diff — {d.get('file')}]\n{d.get('text') or ''}")
@@ -131,6 +137,12 @@ def generate_conflict_advice(
             "known_resolutions": conflict.get("resolutions"),
             "metric_risk": conflict.get("metric_risk"),
             "evidence_tier": conflict.get("tier"),
+            # 손댈 수 없는 파일의 몫 — 실측에서 한 상충의 위반 256건이 **전부** 자동 생성
+            # 파일이었다. 그걸 모르면 "코드를 이렇게 고치라"는 지침이 통째로 헛것이 된다.
+            "generated_code_share": {
+                k: (conflict.get("generated") or {}).get(k)
+                for k in ("violations", "attributed_total")
+            },
         }, ensure_ascii=False) + "\n\n" + evidence_text
         output = agent_call(cfg, [
             {"role": "system", "content": system},

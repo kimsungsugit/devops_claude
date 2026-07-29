@@ -35,6 +35,19 @@ def _norm_rel(p: str) -> str:
     return s.strip("/")
 
 
+def snapshot_dir(build_root: Optional[Path]) -> Optional[Path]:
+    """이 빌드의 소스 스냅샷 디렉토리 — 없으면 None.
+
+    스냅샷 유무는 **여러 축의 결과를 동시에 결정한다**: 코드 발췌(LLM 지침), 자동 생성
+    마커 확인, 구간 diff. 그 판정을 각자 하면 한쪽만 고쳐진다(이 저장소가 ruff/eslint
+    ratchet 에서 이미 겪은 패턴) — 여기 한 곳에서만 본다.
+    """
+    if build_root is None:
+        return None
+    source = Path(build_root) / "source"
+    return source if source.is_dir() else None
+
+
 def build_snapshot_index(build_root: Path) -> Optional[Dict[str, List[Path]]]:
     """source/ 를 **한 번만** 걸어 ``{basename(소문자): [경로]}`` 인덱스를 만든다.
 
@@ -42,8 +55,8 @@ def build_snapshot_index(build_root: Path) -> Optional[Dict[str, List[Path]]]:
     돌면 트리를 그만큼 다시 걷는다 — 실측 프로파일에서 마커 확인 8건이 전체 시간의 58%를
     먹었다. 인덱스를 넘기면 워크는 1회다. 스냅샷이 없으면 None(호출측이 rglob 폴백).
     """
-    source = Path(build_root) / "source"
-    if not source.is_dir():
+    source = snapshot_dir(build_root)
+    if source is None:
         return None
     index: Dict[str, List[Path]] = {}
     try:

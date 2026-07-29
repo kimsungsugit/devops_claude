@@ -953,7 +953,12 @@ def _collect_conflict_evidence(
             except OSError:
                 continue
             if text.strip():
-                excerpts.append({"file": e.get("file"), "text": text, "basis": basis})
+                # 자동 생성 여부를 발췌에 그대로 붙인다 — 서비스가 이미 판정해 둔 값이고,
+                # 여기서 다시 판정하면 두 계층이 갈린다(cross_module_only 때 실제로 갈렸다).
+                excerpts.append({
+                    "file": e.get("file"), "text": text, "basis": basis,
+                    **({"generated": True} if e.get("generated") else {}),
+                })
     diffs: List[Dict[str, Any]] = []
     for w in _real(evidence.get("windows"))[:max_diffs]:
         fm = find_build_meta(metas, w.get("from_build"))

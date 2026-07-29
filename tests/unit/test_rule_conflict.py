@@ -127,9 +127,10 @@ def test_window_evidence_requires_same_file_and_same_window():
             {"path": "src/z.c", "from_build": 10, "to_build": 11, "delta": 9},   # 파일 불일치 → 제외
         ]},
     }
-    out = _window_evidence(trend_rules, ["Rule-10.4"], ["Rule-10.8"])
+    out, total = _window_evidence(trend_rules, ["Rule-10.4"], ["Rule-10.8"])
     assert [(e["file"], e["rule_up"]) for e in out] == [("src/a.c", "Rule-10.8")]
     assert out[0]["delta_down"] == -3 and out[0]["delta_up"] == 2
+    assert total == 1  # 절단 여부를 화면이 알 수 있게 전체 건수도 돌려준다
 
 
 def test_headroom_evidence_uses_distance_not_exact_boundary():
@@ -146,16 +147,17 @@ def test_headroom_evidence_uses_distance_not_exact_boundary():
         "c:/w/src/a.c\x1froomy()": {"V_G": "4", "LEVEL": "1"},     # V_G 여유 7 → 임계 밖
         "c:/w/src/a.c\x1fnesting()": {"V_G": "2", "LEVEL": "5"},   # LEVEL 여유 1
     }
-    out = _headroom_evidence(functions, ["src/a.c"], ["V_G"])
+    out, total = _headroom_evidence(functions, ["src/a.c"], ["V_G"])
     # 여유가 작은 것부터 — 상한에 잘려도 가장 위험한 함수가 남는다.
     assert [(e["function"], e["headroom"]) for e in out] == [("tight()", 1), ("near()", 2)]
     assert out[0]["verdict"] == "Pass" and out[0]["next_verdict"] == "Conditional"
+    assert total == 2
     # metric_risk 가 LEVEL 이면 중첩 경계 함수가 잡힌다 — 어떤 메트릭을 미는 수정인지가 기준.
-    assert [e["function"] for e in _headroom_evidence(functions, ["src/a.c"], ["LEVEL"])] == ["nesting()"]
+    assert [e["function"] for e in _headroom_evidence(functions, ["src/a.c"], ["LEVEL"])[0]] == ["nesting()"]
     # 밴드가 정의되지 않은 메트릭은 판정하지 않는다(임계값을 지어내면 없던 위반이 생긴다).
-    assert _headroom_evidence(functions, ["src/a.c"], ["STMT"]) == []
+    assert _headroom_evidence(functions, ["src/a.c"], ["STMT"]) == ([], 0)
     # 임계를 좁히면 경계에 정확히 붙은 것만 남는다(호출측이 정한다).
-    assert [e["function"] for e in _headroom_evidence(functions, ["src/a.c"], ["V_G"], threshold=1)] \
+    assert [e["function"] for e in _headroom_evidence(functions, ["src/a.c"], ["V_G"], threshold=1)[0]] \
         == ["tight()"]
 
 
@@ -195,6 +197,21 @@ def test_co_resolution_finds_rules_counting_the_same_code():
     assert e["cross_ruleset"] is True, "서로 다른 규칙셋이면 중복 계상의 강한 신호다"
     # 겹침은 **상한**이지 확정 중복분이 아니다(줄 정보가 없다).
     assert e["overlap_upper_bound"] == 12 + 10 + 11 + 5
+
+
+def test_co_resolution_cross_ruleset_is_tri_state_when_groups_unknown():
+    """⚠ 그룹을 모르면 False(=같은 규칙셋 단정)가 아니라 **None**이다.
+
+    실측 HDPDM01 은 RCFInfo 가 없어 규칙 설명이 통째로 비는데, 그 상태에서 `False` 가
+    나갔다 — 증거 부재를 '같은 규칙셋'으로 읽히게 하는 같은 계열의 결함이다.
+    """
+    per_file = {
+        "src/a.c": {"Rule-21.1": 12, "Rule-21.2": 12},
+        "src/b.c": {"Rule-21.1": 20, "Rule-21.2": 20},
+    }
+    assert _co_resolution_candidates(per_file, set(), {})[0]["cross_ruleset"] is None
+    same = {"Rule-21.1": {"group": "M3CM"}, "Rule-21.2": {"group": "M3CM"}}
+    assert _co_resolution_candidates(per_file, set(), same)[0]["cross_ruleset"] is False
 
 
 def test_co_resolution_ignores_single_file_and_unattributed():
@@ -283,10 +300,22 @@ def _rcr(counts: dict, rcf_rules: dict | None = None, *, path: str = "src/a.c") 
 </body></html>"""
 
 
-def _mk_build(root: Path, n: int, rcr_html: str) -> None:
+_DEFAULT_SOURCES = {"src/a.c": "/* hand written */\nint a;\n"}
+
+
+def _mk_build(root: Path, n: int, rcr_html: str, *, sources: dict | None = _DEFAULT_SOURCES) -> None:
+    """캐시 빌드 1개. `sources=None` 이면 **소스 스냅샷 없는 빌드**(실측에서 흔하다).
+
+    실 빌드는 source/ 를 갖는 것이 기본이므로 픽스처도 그렇게 둔다 — 스냅샷 없는 상태를
+    기본으로 두면 '지침 불가'가 정상처럼 보여 회귀를 못 잡는다.
+    """
     b = root / "jenkins" / "http_j_job_X" / f"build_{n}"
     (b / "report").mkdir(parents=True)
     (b / f"X_RCR_010120{n:02d}.html").write_text(rcr_html, encoding="utf-8")
+    for rel, text in (sources or {}).items():
+        f = b / "source" / rel
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(text, encoding="utf-8")
 
 
 _JOB = "http://j/job/X"
@@ -460,9 +489,11 @@ def test_missing_rcfinfo_degrades_to_ruleset_unknown(tmp_path):
     _mk_build(cache, 11, _rcr({"Rule-10.4": 4}, {}))
 
     out = compute_rule_conflicts(job_url=_JOB, cache_root=cache, table_path=_table(tmp_path))
-    assert out["ruleset"] == {
-        "available": False, "enabled_count": None, "source_build": None, "reason": "no_rcfinfo",
-    }
+    assert out["ruleset"]["available"] is False
+    assert out["ruleset"]["enabled_count"] is None and out["ruleset"]["reason"] == "no_rcfinfo"
+    # ⚠ source_build 는 **규칙 수를 센 빌드**다 — 못 셌으면 None. 예전엔 여기에 트렌드의
+    #   descriptions_source_build(더 옛날 빌드일 수 있다)를 실어 두 빌드가 한 객체에 섞였다.
+    assert out["ruleset"]["source_build"] is None
     assert {c["tier"] for c in out["conflicts"]} == {"ruleset_unknown"}
     assert all(c["ruleset_unknown"] for c in out["conflicts"])
     assert any(m["kind"] == "ruleset_unknown" for m in out["ambiguities"]["measurement"])
@@ -496,15 +527,145 @@ def test_generated_code_violations_are_separated(tmp_path):
     assert out["ambiguities"]["generated_unprobed"] == 0
 
 
-def test_generated_marker_probe_limit_is_reported_not_silent(monkeypatch, tmp_path):
-    """마커 검사 상한을 넘기면 '자동 생성 없음'이 아니라 '확인 못 함'으로 고지한다."""
+def test_generated_marker_probe_limit_keeps_the_biggest_files(monkeypatch, tmp_path):
+    """상한을 넘기면 '자동 생성 없음'이 아니라 '확인 못 함'이고, **위반 많은 파일부터** 본다.
+
+    예전엔 파일명 알파벳순으로 잘려 실측 KJPDS02_DV 에서 6개가 이름 순으로 빠졌다 —
+    상한이 있는 곳에서는 무엇이 남는지가 곧 품질이다.
+    """
     import backend.services.rule_conflict as rc
 
     monkeypatch.setattr(rc, "MAX_MARKER_PROBES", 1)
+    build = tmp_path / "b"
+    (build / "source" / "src").mkdir(parents=True)
+    # 알파벳으로는 z 가 마지막이지만 위반이 압도적이라 **먼저** 검사돼야 한다.
+    (build / "source" / "src" / "z.c").write_text(
+        "/* This module is generated by Tool. */\nint z;\n", encoding="utf-8")
+    (build / "source" / "src" / "a.c").write_text("/* hand */\nint a;\n", encoding="utf-8")
+    per_file = {"src/a.c": {"Rule-10.4": 1}, "src/z.c": {"Rule-10.4": 50}}
+
+    items, probe = rc._generated_ambiguities(per_file, set(), build)
+    assert [i["file"] for i in items] == ["src/z.c"], "위반 많은 파일이 상한 안에 들어와야 한다"
+    assert probe["available"] is True and probe["probed"] == 1 and probe["unprobed"] == 1
+
+
+def test_generated_probe_reports_missing_snapshot_not_zero_unprobed(tmp_path):
+    """⚠ 스냅샷이 없으면 `unprobed=0`(전부 확인함)이 아니라 **한 건도 못 본 것**이다.
+
+    실측: 이 PC 의 캐시 루트 4개 중 3개가 소스 스냅샷 없는 빌드였고, 그 상태에서
+    화면이 "확인했고 자동 생성 아님"으로 읽혔다 — 같은 0이 정반대를 뜻했다.
+    """
+    import backend.services.rule_conflict as rc
+
     per_file = {f"src/m{i}.c": {"Rule-10.4": 1} for i in range(4)}
-    items, unprobed = rc._generated_ambiguities(per_file, set(), None)
-    assert items == []            # 경로 규칙에도 안 걸리고 스냅샷도 없다
-    assert unprobed == 3          # 1건만 검사하고 나머지는 미확인 — 침묵하지 않는다
+    items, probe = rc._generated_ambiguities(per_file, set(), tmp_path / "no_such_build")
+    assert items == []
+    assert probe["available"] is False and probe["reason"] == "no_source_snapshot"
+    assert probe["probed"] == 0 and probe["unprobed"] == 4 and probe["candidates"] == 4
+
+
+def test_generated_marker_requires_generation_wording_not_do_not_modify(tmp_path):
+    """`DO NOT MODIFY THIS TEXT` 만으로 자동 생성이라 하면 **수기 파일을 조치 대상에서 뺀다**.
+
+    실측: 세 프로젝트 전부 `Sources/SYSTEM/SysOs_Main.c` 가 이 문구로 걸렸다. 이 축의
+    목적이 "손대면 안 되는 파일 구분"이라 오탐은 고쳐야 할 코드를 건너뛰게 만든다.
+    """
+    import backend.services.rule_conflict as rc
+
+    build = tmp_path / "b"
+    (build / "source" / "src").mkdir(parents=True)
+    (build / "source" / "src" / "hand.c").write_text(
+        "/*** End of main routine. DO NOT MODIFY THIS TEXT!!! ***/\nint h;\n", encoding="utf-8")
+    (build / "source" / "src" / "gen.c").write_text(
+        "/*\n**     This component module is generated by Processor Expert. Do not modify it.\n*/\nint g;\n",
+        encoding="utf-8")
+    per_file = {"src/hand.c": {"Rule-10.4": 3}, "src/gen.c": {"Rule-10.4": 2}}
+
+    items, probe = rc._generated_ambiguities(per_file, set(), build)
+    assert [i["file"] for i in items] == ["src/gen.c"]
+    assert probe["probed"] == 2 and probe["unprobed"] == 0
+
+
+def test_conflict_reports_generated_share_of_its_own_violations(tmp_path):
+    """⚠ 상충 축과 자동 생성 축이 서로 모르면 **최상위 조치 대상이 손댈 수 없는 파일**일 수 있다.
+
+    실측 HDPDM01 `Rule-5.4` 는 파일 귀속 256건이 **256건 모두** 자동 생성 파일(lin_cfg.h)인데,
+    정렬이 위반 수 내림차순이라 "고쳐라" 목록 맨 위에 있었다. 화면이 몫을 말해야 한다.
+    """
+    cache = tmp_path / "cache"
+    rcf = {"Rule-10.4": True, "Rule-10.8": True}
+    # 같은 규칙이 수기 파일 2건 + 자동 생성 파일 8건 → 8/10 = 80%.
+    html = _rcr({"Rule-10.4": 2}, rcf) + _rcr({"Rule-10.4": 8}, rcf, path="src/Generated_Code/gen.c")
+    _mk_build(cache, 10, html)
+    _mk_build(cache, 11, html)
+
+    out = compute_rule_conflicts(job_url=_JOB, cache_root=cache, table_path=_table(tmp_path))
+    c = out["conflicts"][0]
+    assert c["generated"]["violations"] == 8 and c["generated"]["attributed_total"] == 10
+    # 경로 키는 RCR 이 적은 그대로다(`../src/…`) — 정규화는 스냅샷 해석기 몫이다.
+    assert [f.rsplit("/", 1)[-1] for f in c["generated"]["files"]] == ["gen.c"]
+    # 패널 전체 분모 — 파일 목록만 주면 "몇 개뿐이네"로 읽힌다.
+    share = out["ambiguities"]["generated_share"]
+    assert share["violations"] == 8 and share["attributed_total"] == 10
+    # 손댈 수 있는 파일이 먼저 와야 발췌·상한이 조치 가능한 증거를 남긴다.
+    assert c["fixing_files"][0]["file"].endswith("/a.c")
+    assert c["fixing_files"][0].get("generated") is None
+    assert c["fixing_files"][1].get("generated") is True
+
+
+def test_evidence_totals_expose_truncation(monkeypatch, tmp_path):
+    """상한 절단이 침묵이면 "이게 전부"로 읽힌다 — 실측 DV 는 23개 중 6개만 보였다."""
+    import backend.services.rule_conflict as rc
+
+    monkeypatch.setattr(rc, "MAX_EVIDENCE_PER_KIND", 2)
+    cache = tmp_path / "cache"
+    rcf = {"Rule-10.4": True, "Rule-10.8": True}
+    html = "".join(
+        _rcr({"Rule-10.4": 3, "Rule-10.8": 1}, rcf, path=f"src/f{i}.c") for i in range(5)
+    )
+    _mk_build(cache, 10, html)
+    _mk_build(cache, 11, html)
+
+    out = rc.compute_rule_conflicts(job_url=_JOB, cache_root=cache, table_path=_table(tmp_path))
+    c = out["conflicts"][0]
+    assert len(c["evidence"]["cooccurrence"]) == 2
+    assert c["evidence_totals"]["cooccurrence"] == 5, "전체 건수를 알아야 '외 N개'를 말할 수 있다"
+    assert c["evidence_totals"]["fixing_files"] == 5
+
+
+def test_advice_blocked_by_missing_source_snapshot_with_its_own_reason(tmp_path):
+    """위반도 파일도 멀쩡한데 **소스만 없는** 경우 — 조치는 'no_code_evidence'와 정반대다.
+
+    실측 재현 6/6: advice.available=True 로 버튼을 내밀고, 눌러야 나오는 사유가
+    'no_code_evidence'(도구 한계)로 틀리게 붙었다. 실제로는 빌드 재수집으로 해결된다.
+    """
+    cache = tmp_path / "cache"
+    rcf = {"Rule-10.4": True, "Rule-10.8": True}
+    _mk_build(cache, 10, _rcr({"Rule-10.4": 4, "Rule-10.8": 2}, rcf), sources=None)
+    _mk_build(cache, 11, _rcr({"Rule-10.4": 4, "Rule-10.8": 2}, rcf), sources=None)
+
+    out = compute_rule_conflicts(job_url=_JOB, cache_root=cache, table_path=_table(tmp_path))
+    assert out["snapshot"] == {"available": False, "reason": "no_source_snapshot"}
+    c = out["conflicts"][0]
+    assert c["evidence"]["cooccurrence"], "상충 판정 자체는 위반 리포트만으로 유효하다"
+    assert c["advice"] == {"available": False, "reason": "no_source_snapshot", "basis": None}
+
+
+def test_missing_snapshot_does_not_override_cross_module_only(tmp_path):
+    """⚠ 우선순위 — 귀속된 위반이 아예 없으면 스냅샷을 받아와도 소용없다.
+
+    두 사유가 동시에 성립할 때 'no_source_snapshot'(재수집하면 됨)을 내보내면
+    사용자가 되지도 않을 재수집을 시도한다.
+    """
+    cache = tmp_path / "cache"
+    rcf = {"Rule-10.4": True, "Rule-10.8": True}
+    html = _rcr({"Rule-10.4": 9}, rcf, path="RCMA")
+    _mk_build(cache, 10, html, sources=None)
+    _mk_build(cache, 11, html, sources=None)
+
+    out = compute_rule_conflicts(job_url=_JOB, cache_root=cache, table_path=_table(tmp_path))
+    c = next(c for c in out["conflicts"] if c["id"] == "cast-cascade")
+    assert c["advice"]["reason"] == "cross_module_only"
 
 
 def test_missing_table_reports_unavailable_not_empty(tmp_path):
