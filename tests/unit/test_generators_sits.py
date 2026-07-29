@@ -97,3 +97,162 @@ class TestQualityReportSeparatesAxes:
         }]
         qr = generate_sits_quality_report(itcs, total_source_functions=1)
         assert qr["requirement_traceability_pct"] == 100.0
+
+
+# ---------------------------------------------------------------------------
+# max_flows 캡 — 침묵 절단 + 안전등급 무관 선별
+# ---------------------------------------------------------------------------
+
+def _fd_many(n: int, *, asil_of=None):
+    """entry n개(각각 cross-module 호출 1건)를 갖는 function_details.
+
+    이름은 `Ap_F000`… 형태라 알파벳순 = 번호순이다(경계 확인이 쉬워진다).
+    """
+    asil_of = asil_of or (lambda i: "QM")
+    fd = {}
+    for i in range(n):
+        fd[f"E{i:03d}"] = {
+            "name": f"Ap_F{i:03d}",
+            "file": f"Ap_Mod{i:03d}.c",
+            "calls_list": ["Drv_Common"],
+            "inputs": [], "outputs": [], "globals_global": [], "globals_static": [],
+            "asil": asil_of(i),
+            "related": "",
+        }
+    fd["DRV"] = {
+        "name": "Drv_Common",
+        "file": "Drv_Common.c",
+        "calls_list": [],
+        "inputs": [], "outputs": [], "globals_global": [], "globals_static": [],
+        "asil": "QM", "related": "",
+    }
+    return fd
+
+
+class TestFlowCapIsSurfaced:
+    """캡이 물면 **몇 개가 잘렸는지** 남아야 한다.
+
+    회귀 대상: 수집 루프가 `len(flows) >= max_flows` 에서 그냥 break 했다. 캡 이후
+    후보는 세어지지도 않아 소비처에서 결과 길이로 되짚어도 절단을 알 수 없었다.
+    실측(KJPDS02 계열 900함수): 145개 중 25개가 조용히 사라졌고 7개가 ASIL A였다.
+    """
+
+    def test_stats_out_reports_pre_cap_total(self):
+        stats = {}
+        flows = collect_integration_flows(_fd_many(10), max_flows=4, stats_out=stats)
+        assert len(flows) == 4
+        assert stats["total_flows_found"] == 10, "캡 **전** 총량이 안 남았다"
+        assert stats["flows_emitted"] == 4
+        assert stats["flows_dropped"] == 6
+        assert stats["flow_emit_pct"] == 40.0
+        assert len(stats["dropped_entry_fns"]) == 6
+
+    def test_no_truncation_reports_zero(self):
+        """대조군: 캡에 안 닿으면 제외 0건이고 경고도 없다."""
+        stats = {}
+        collect_integration_flows(_fd_many(3), max_flows=100, stats_out=stats)
+        assert stats["flows_dropped"] == 0
+        assert stats["dropped_entry_fns"] == []
+        assert stats["dropped_safety_related_count"] == 0
+
+    def test_truncation_is_logged(self, caplog):
+        with caplog.at_level("WARNING", logger="generators.sits"):
+            collect_integration_flows(_fd_many(10), max_flows=4)
+        assert "max_flows" in caplog.text and "제외" in caplog.text, caplog.text
+
+    def test_stats_out_is_optional(self):
+        """기존 호출부(stats_out 없음)는 그대로 동작해야 한다."""
+        assert len(collect_integration_flows(_fd_many(5), max_flows=2)) == 2
+
+
+class TestFlowCapKeepsSafetyFirst:
+    """자를 때 ASIL 높은 흐름을 먼저 버리면 안 된다 (ISO 26262).
+
+    회귀 대상: 정렬 키가 함수명 알파벳순뿐이라 어느 흐름이 살아남는지가 안전등급과
+    완전히 무관했다. 실측에서 ASIL A 7건이 QM 보다 먼저 잘려나갔다.
+    """
+
+    @staticmethod
+    def _asil_of(i):
+        # 알파벳 뒤쪽(번호 큰 쪽)에 안전등급을 몰아둔다 — 옛 로직이면 전부 잘린다.
+        return {7: "D", 8: "C", 9: "A"}.get(i, "QM")
+
+    def test_safety_flows_survive_the_cap(self):
+        stats = {}
+        flows = collect_integration_flows(
+            _fd_many(10, asil_of=self._asil_of), max_flows=4, stats_out=stats)
+        kept = {f["entry_fn"]: f["asil"] for f in flows}
+        assert kept.get("Ap_F007") == "D", f"ASIL D가 잘렸다: {kept}"
+        assert kept.get("Ap_F008") == "C", f"ASIL C가 잘렸다: {kept}"
+        assert kept.get("Ap_F009") == "A", f"ASIL A가 잘렸다: {kept}"
+        assert stats["dropped_safety_related_count"] == 0
+        assert stats["dropped_asil_distribution"] == {"QM": 6}
+
+    def test_higher_asil_wins_when_cap_is_tighter_than_safety_count(self):
+        """캡이 안전관련 수보다 작으면 D > C > A 순으로 남는다."""
+        flows = collect_integration_flows(
+            _fd_many(10, asil_of=self._asil_of), max_flows=2)
+        assert sorted(f["asil"] for f in flows) == ["C", "D"]
+
+    def test_output_order_stays_alphabetical(self):
+        """선별만 안전우선이고 **출력 순서는 알파벳 그대로** — 문서 행 순서를 흔들지 않는다."""
+        flows = collect_integration_flows(
+            _fd_many(10, asil_of=self._asil_of), max_flows=5)
+        names = [f["entry_fn"] for f in flows]
+        assert names == sorted(names), names
+
+    def test_unknown_asil_ranks_after_qm(self):
+        """미상 등급을 QM 보다 우대하면 근거 없는 우선순위가 된다."""
+        flows = collect_integration_flows(
+            _fd_many(4, asil_of=lambda i: "???" if i == 3 else "QM"), max_flows=3)
+        assert "Ap_F003" not in {f["entry_fn"] for f in flows}
+
+
+class TestSwComIdIsCapIndependent:
+    """같은 모듈은 캡 값이 달라도 같은 SwCom ID 를 받아야 한다.
+
+    회귀 대상: `_infer_swcom_id` 가 캡 안쪽 루프에서 호출돼 ID 가 캡에 의존했다.
+    (실측: 이 저장소 실 프로젝트에서는 모듈 29개·변동 0건이라 무해한 변경)
+    """
+
+    def test_same_module_same_id_across_caps(self):
+        fd = _fd_many(10)
+        tight = {f["entry_fn"]: f["swcom_id"]
+                 for f in collect_integration_flows(fd, max_flows=3)}
+        loose = {f["entry_fn"]: f["swcom_id"]
+                 for f in collect_integration_flows(fd, max_flows=100)}
+        for name, sid in tight.items():
+            assert loose[name] == sid, f"{name}: 캡에 따라 SwCom 이 바뀐다 {sid} != {loose[name]}"
+
+
+class TestQualityReportExposesFlowCap:
+    @staticmethod
+    def _itc():
+        return [{
+            "tc_id": "SwITC_01", "related_ids": ["SwCom_01"],
+            "synthetic_related_ids": ["SwCom_01"],
+            "sub_cases": [], "input_vars": [], "expected_vars": [], "gen_method": "ABV",
+        }]
+
+    def test_flow_stats_are_carried_into_report(self):
+        stats = {}
+        collect_integration_flows(_fd_many(10), max_flows=4, stats_out=stats)
+        qr = generate_sits_quality_report(self._itc(), 10, flow_stats=stats)
+        cov = qr["integration_flow_coverage"]
+        assert cov["total_flows_found"] == 10
+        assert cov["flows_dropped"] == 6
+        assert cov["flow_emit_pct"] == 40.0
+
+    def test_report_without_flow_stats_stays_backward_compatible(self):
+        """구 호출부(flow_stats 없음)는 키가 비어 있을 뿐 깨지지 않는다."""
+        qr = generate_sits_quality_report(self._itc(), 1)
+        assert qr["integration_flow_coverage"] == {}
+        assert qr["total_test_cases"] == 1
+
+    def test_tc_count_alone_would_hide_the_loss(self):
+        """total_test_cases 는 캡에 잘려도 줄지 않는다 — 그래서 별도 축이 필요하다."""
+        stats = {}
+        collect_integration_flows(_fd_many(10), max_flows=4, stats_out=stats)
+        qr = generate_sits_quality_report(self._itc(), 10, flow_stats=stats)
+        assert qr["total_test_cases"] == 1
+        assert qr["integration_flow_coverage"]["flows_dropped"] == 6

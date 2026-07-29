@@ -230,6 +230,19 @@ def evaluate_sits(quality_report: Dict[str, Any]) -> MetricList:
     metrics.append(_metric("integration_density_pct", round(min(avg_sub / 7.0, 1.0) * 100, 2)))
 
     metrics.append(_metric("total_test_cases", total))
+
+    # ── 통합 흐름 캡 절단 축 (비게이트) ─────────────────────────────────────
+    # total_test_cases 는 **생성된** 흐름 수라 캡에 잘린 흐름이 있어도 줄지 않는다.
+    # 분모를 소스에서 찾은 흐름 수로 되돌린 값을 별도로 노출한다. threshold 를 안 거는
+    # 이유는 기존 프로젝트의 pass/fail 을 뒤집지 않기 위해서다(정책 결정 사항).
+    flow_cov = quality_report.get("integration_flow_coverage") or {}
+    if flow_cov.get("total_flows_found") is not None:
+        metrics.append(_metric("flow_emit_pct", _safe_float(flow_cov, "flow_emit_pct")))
+        metrics.append(_metric("flows_dropped", _safe_float(flow_cov, "flows_dropped")))
+        metrics.append(
+            _metric("dropped_safety_related_flows",
+                    _safe_float(flow_cov, "dropped_safety_related_count")),
+        )
     return metrics
 
 

@@ -46,7 +46,8 @@ _DETAIL_HEADERS = {
     _PRECOND_COL: "Precondition",
     _RELATED_COL: "SwDS",
 }
-_MAX_SUBCASES = 16
+# (`_MAX_SUBCASES = 16` 은 어디서도 참조되지 않는 죽은 상수였다 — 옆의 14 와 값이 달라
+#  "상한 16 이 걸린다" 는 오해를 부른다. 실제 상한은 아래 _DEFAULT_SUBCASES 뿐이다.)
 _DEFAULT_SUBCASES = 14  # 7 BV + 4 COND_COMB + 2 ERR_PROP + 2 GLOBAL
 
 # Boundary value sets for common C types — 7 values per type:
@@ -254,9 +255,82 @@ def _parse_req_ids(text: str) -> List[str]:
 # Core: integration flow collection
 # ---------------------------------------------------------------------------
 
+# 통합 흐름 상한. 폭주 방지용 안전밸브이지 "이만큼만 시험하면 된다"는 뜻이 아니다.
+# 실측(KJPDS02 계열 900함수)에서는 흐름 145개 중 25개가 이 값에 걸린다 — 걸리면
+# 경고 + 품질 리포트(`integration_flow_coverage`)에 남으므로 값 조정은 보고 나서 판단할 것.
+_DEFAULT_MAX_FLOWS = 120
+
+_ASIL_RANK: Dict[str, int] = {"D": 0, "C": 1, "B": 2, "A": 3, "QM": 4}
+
+
+def _asil_rank(asil: Any) -> int:
+    """ASIL 선별 우선순위 — 값이 작을수록 먼저 남긴다. 미상 등급은 QM 뒤로 보낸다."""
+    return _ASIL_RANK.get(str(asil or "").strip().upper(), len(_ASIL_RANK))
+
+
+def _select_flows_within_cap(
+    candidates: List[Dict[str, Any]],
+    max_flows: Optional[int],
+    stats_out: Optional[Dict[str, Any]] = None,
+) -> List[Dict[str, Any]]:
+    """`max_flows` 캡을 적용하되 **무엇이 잘렸는지 남기고**, 안전등급 높은 쪽을 살린다.
+
+    예전엔 수집 루프가 캡에 닿으면 그냥 `break` 했다. 정렬 키가 함수명 알파벳순이라
+    어느 흐름이 살아남는지가 **안전등급과 무관**하게 정해졌고, 잘렸다는 사실 자체가
+    어디에도 안 남았다(로그·품질 리포트 모두). 실측(KJPDS02 계열 900함수):
+    통합 흐름 145개 중 25개가 조용히 사라졌고 그 중 7개가 ASIL A 였다 —
+    같은 모듈(Sys_UDS_LinComp)이 알파벳 경계에서 두 동강 났다.
+
+    출력 순서는 알파벳 그대로 둔다(선별만 안전우선). 문서 행 순서를 흔들지 않기 위해서다.
+    """
+    total = len(candidates)
+    kept = candidates
+    dropped: List[Dict[str, Any]] = []
+
+    if max_flows is not None and 0 <= max_flows < total:
+        indexed = list(enumerate(candidates))
+        # (등급, 알파벳 순번) — 같은 등급 안에서는 기존 순서를 그대로 지킨다(결정성 유지).
+        ranked = sorted(indexed, key=lambda t: (_asil_rank(t[1].get("asil")), t[0]))
+        keep_idx = {i for i, _ in ranked[:max_flows]}
+        kept = [c for i, c in indexed if i in keep_idx]
+        dropped = [c for i, c in indexed if i not in keep_idx]
+
+    dist: Dict[str, int] = {}
+    for c in dropped:
+        key = str(c.get("asil") or "QM")
+        dist[key] = dist.get(key, 0) + 1
+    safety_dropped = sum(
+        n for a, n in dist.items() if a.strip().upper() in ("A", "B", "C", "D")
+    )
+
+    if stats_out is not None:
+        stats_out.update({
+            "total_flows_found": total,
+            "max_flows": max_flows,
+            "flows_emitted": len(kept),
+            "flows_dropped": len(dropped),
+            "flow_emit_pct": round(len(kept) / max(total, 1) * 100, 1),
+            "dropped_entry_fns": [str(c.get("fn_name") or "") for c in dropped],
+            "dropped_asil_distribution": dist,
+            "dropped_safety_related_count": safety_dropped,
+        })
+
+    if dropped:
+        _logger.warning(
+            "SITS: 통합 흐름 %d개 중 %d개만 생성한다 — max_flows=%s 캡으로 %d개 제외"
+            "(안전관련 ASIL A~D %d개 포함). 제외된 흐름은 시험 규격에 **존재하지 않는다**. "
+            "예: %s",
+            total, len(kept), max_flows, len(dropped), safety_dropped,
+            ", ".join(str(c.get("fn_name") or "") for c in dropped[:5]),
+        )
+
+    return kept
+
+
 def collect_integration_flows(
     function_details: Dict[str, Dict[str, Any]],
-    max_flows: int = 120,
+    max_flows: int = _DEFAULT_MAX_FLOWS,
+    stats_out: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     """Identify cross-module integration flows from function call graph.
 
@@ -266,6 +340,9 @@ def collect_integration_flows(
     Returns list of flow dicts:
       { flow_id, entry_fn, call_chain, functions, module_name, swcom_id,
         input_vars, expected_vars, asil, related_ids }
+
+    `stats_out` 를 주면 캡 절단 내역(총 후보 수·제외 수·제외분 ASIL 분포)을 채운다.
+    소비처에서 결과 길이로 되짚으면 절단을 못 본다 — 캡 **전** 총량이 여기서만 보인다.
     """
     # Build name → info lookup
     name_to_info: Dict[str, Dict[str, Any]] = {}
@@ -286,10 +363,13 @@ def collect_integration_flows(
         key=lambda x: str(x[1].get("name") or ""),
     )
 
+    # ── Pass 1: 자격 판정만 (싸다) — 후보를 **전부** 모은다 ──────────────────
+    # 예전엔 이 루프가 `len(flows) >= max_flows` 에서 break 했다. 그러면 캡 이후의
+    # 후보는 세어지지도 않아 "몇 개가 잘렸는지" 를 아무도 알 수 없다. 자격 판정
+    # (calls_list 유무 + cross-module callee 유무)은 dict 조회뿐이라 전량 수행해도 싸고,
+    # 비싼 변수/기대값 구성은 Pass 2 에서 선별된 것에만 한다 = 기존 비용과 동일.
+    candidates: List[Dict[str, Any]] = []
     for fid, info in sorted_items:
-        if len(flows) >= max_flows:
-            break
-
         fn_name = str(info.get("name") or "")
         if not fn_name or fn_name in seen_entries:
             continue
@@ -316,6 +396,35 @@ def collect_integration_flows(
             continue
 
         seen_entries.add(fn_name)
+
+        _cand_asil = str(info.get("asil") or "QM")
+        if _cand_asil in ("TBD", ""):
+            _cand_asil = "QM"
+
+        # ⚠ SwCom 은 **후보 전체**(알파벳순)에 대해 여기서 부여한다. 예전엔 캡 안쪽
+        # 루프에서 부여돼 **ID 가 캡 값에 의존**했다 — 캡을 바꾸면 같은 모듈이 다른
+        # SwCom 을 받는다. 후보 전체 기준이면 캡·선별 정책이 바뀌어도 ID 가 고정된다.
+        # (실측: 이 프로젝트는 캡 120/무제한 어느 쪽도 모듈 29개·ID 변동 0건 = 무해한 변경)
+        candidates.append({
+            "fid": fid,
+            "info": info,
+            "fn_name": fn_name,
+            "my_module": my_module,
+            "cross_calls": cross_calls,
+            "asil": _cand_asil,
+            "swcom_id": _infer_swcom_id(my_module, swcom_counter),
+        })
+
+    # ── 캡 적용: 안전등급 높은 쪽을 남기고, 잘린 내역을 stats_out 에 남긴다 ────
+    selected = _select_flows_within_cap(candidates, max_flows, stats_out)
+
+    # ── Pass 2: 선별된 후보만 비싼 구성 ──────────────────────────────────────
+    for _cand in selected:
+        fid = _cand["fid"]
+        info = _cand["info"]
+        fn_name = _cand["fn_name"]
+        my_module = _cand["my_module"]
+        cross_calls = _cand["cross_calls"]
 
         # Build call chain string
         chain_parts = [fn_name] + cross_calls[:4]
@@ -438,10 +547,9 @@ def collect_integration_flows(
         expected_vars: List[str] = [p[0] for p in exp_pairs[:_MAX_EXP_PARAMS]]
         expected_raws: List[str] = [p[1] for p in exp_pairs[:_MAX_EXP_PARAMS]]
 
-        # ASIL
-        asil = str(info.get("asil") or "QM")
-        if asil in ("TBD", ""):
-            asil = "QM"
+        # ASIL — Pass 1 에서 정규화한 값을 그대로 쓴다. 여기서 다시 계산하면
+        # 선별 기준(등급)과 방출 값이 갈라질 수 있다.
+        asil = _cand["asil"]
 
         # Related IDs
         related_parts: List[str] = []
@@ -468,7 +576,7 @@ def collect_integration_flows(
         # 요구 추적성 분자로 세면 항상 100%가 된다. 어느 ID가 합성인지 **삽입 지점에서**
         # 기록해 두어 품질 지표가 추측 없이 걸러낼 수 있게 한다.
         # (위 SDS map이 같은 ID를 이미 넣었다면 그건 문서 유래이므로 합성으로 치지 않는다.)
-        swcom_id = _infer_swcom_id(my_module, swcom_counter)
+        swcom_id = _cand["swcom_id"]   # Pass 1 에서 후보 전체 기준으로 부여됨
         synthetic_related: List[str] = []
         if swcom_id not in related_parts:
             related_parts.insert(0, swcom_id)
@@ -1258,6 +1366,7 @@ def generate_sits_xlsm(
 def generate_sits_quality_report(
     itcs: List[Dict[str, Any]],
     total_source_functions: int = 0,
+    flow_stats: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     total_tc = len(itcs)
     total_sub = sum(len(t.get("sub_cases") or []) for t in itcs)
@@ -1303,10 +1412,31 @@ def generate_sits_quality_report(
     )
     io_pct = round(with_io / max(total_tc, 1) * 100, 1)
 
+    # ── 통합 흐름 캡 절단 (있으면) ──────────────────────────────────────────
+    # TC 수(total_test_cases)만 보면 "흐름 120개 전부 시험함" 으로 읽힌다. 분모는
+    # 생성된 흐름 수가 아니라 **소스에서 찾은 흐름 수**다 — 캡에 잘린 만큼 규격에
+    # 아예 없는 흐름이 생기므로 그 사실을 리포트에 남긴다.
+    fs = flow_stats or {}
+    flow_cov: Dict[str, Any] = {}
+    if fs.get("total_flows_found") is not None:
+        _found = int(fs.get("total_flows_found") or 0)
+        flow_cov = {
+            "total_flows_found": _found,
+            "flows_emitted": int(fs.get("flows_emitted") or 0),
+            "flows_dropped": int(fs.get("flows_dropped") or 0),
+            "flow_emit_pct": fs.get("flow_emit_pct"),
+            "max_flows": fs.get("max_flows"),
+            "dropped_safety_related_count": int(fs.get("dropped_safety_related_count") or 0),
+            "dropped_asil_distribution": fs.get("dropped_asil_distribution") or {},
+            "dropped_entry_fns": list(fs.get("dropped_entry_fns") or []),
+        }
+
     return {
         "total_test_cases": total_tc,
         "total_sub_cases": total_sub,
         "avg_sub_cases_per_tc": avg_sub,
+        # 캡에 잘린 흐름이 있으면 비지 않는다(없으면 {} — 소비처는 .get 으로 읽는다).
+        "integration_flow_coverage": flow_cov,
         # Related ID **필드 보유율**(합성 포함) — 서식 채움 지표이지 추적성이 아니다.
         "with_related_count": with_related,
         "related_coverage_pct": related_pct,
@@ -1466,6 +1596,9 @@ def generate_sits(
     uds_path: Optional[str] = None,
     hsis_path: Optional[str] = None,
     stp_path: Optional[str] = None,
+    # ⚠ 신규 인자는 **맨 끝**에 붙인다. 중간에 끼우면 위치 인자로 부르는 호출부가
+    #    조용히 다른 값에 바인딩된다(현재 호출부 4곳은 전부 키워드지만 계약은 지킨다).
+    max_flows: int = _DEFAULT_MAX_FLOWS,
 ) -> Dict[str, Any]:
     """Top-level SITS generation pipeline.
 
@@ -1475,13 +1608,17 @@ def generate_sits(
         template_path: Optional SITS template XLSM
         project_config: Optional config dict (project_id, version, asil_level, doc_id)
         ai_config: Optional AI config dict (reserved, not used yet)
-        max_subcases: Maximum sub-cases per TC (default 5)
+        max_subcases: Maximum sub-cases per TC (default _DEFAULT_SUBCASES = 14)
+            — 중복 기재돼 있었고 "default 5"·"default 7" 둘 다 실제 값과 달랐다.
         on_progress: Optional callback(pct: int, message: str)
-        max_subcases: Maximum sub-cases per TC (default 7)
         srs_docx_path: Optional SRS DOCX for requirement ID enrichment
         sds_docx_path: Optional SDS DOCX for component context
         uds_path: Optional UDS DOCX/XLSM for function descriptions
         hsis_path: Optional HSIS XLSX for hardware signal context
+        max_flows: 통합 흐름 상한(default _DEFAULT_MAX_FLOWS = 120). 걸리면 안전등급
+            높은 흐름부터 남기고, 잘린 내역이 로그 + quality_report
+            ["integration_flow_coverage"] 에 남는다. 실측 프로젝트에서 145개 중
+            25개가 이 값에 걸린다 — 규격에 없는 흐름이 그만큼 생긴다는 뜻이다.
         stp_path: Optional STP DOCX for test strategy context
 
     Returns:
@@ -1643,7 +1780,9 @@ def generate_sits(
 
     # ── Stage 6: collect integration flows ───────────────────────────────────
     _progress(40, "통합 흐름 수집 중")
-    flows = collect_integration_flows(function_details)
+    flow_stats: Dict[str, Any] = {}
+    flows = collect_integration_flows(
+        function_details, max_flows=max_flows, stats_out=flow_stats)
 
     if not flows:
         _logger.warning("SITS: No integration flows found — check cross-module calls in source")
@@ -1656,7 +1795,16 @@ def generate_sits(
             "error": "통합 흐름을 찾을 수 없습니다. 소스 파싱 결과를 확인해주세요.",
         }
 
-    _progress(50, f"{len(flows)}개 통합 흐름 수집 완료")
+    # ⚠ "수집 완료" 는 캡에 잘렸을 때 완결을 주장하는 거짓말이 된다. 잘렸으면 그렇게 쓴다.
+    _dropped_flows = int(flow_stats.get("flows_dropped") or 0)
+    if _dropped_flows:
+        _progress(
+            50,
+            f"{len(flows)}개 통합 흐름 수집 — 전체 {flow_stats.get('total_flows_found')}개 중 "
+            f"{_dropped_flows}개는 max_flows 캡으로 제외(규격에 미포함)",
+        )
+    else:
+        _progress(50, f"{len(flows)}개 통합 흐름 수집 완료")
 
     # ── Stage 6b: balance over-concentrated Related IDs ──────────────────────
     flows = _balance_related_ids(flows)
@@ -1670,7 +1818,8 @@ def generate_sits(
 
     # ── Stage 8: quality report ──────────────────────────────────────────────
     _progress(70, "품질 보고서 생성 중")
-    quality_report = generate_sits_quality_report(itcs, total_source_functions)
+    quality_report = generate_sits_quality_report(
+        itcs, total_source_functions, flow_stats=flow_stats)
 
     # ── Stage 9: XLSM generation ─────────────────────────────────────────────
     _progress(80, "XLSM 파일 생성 중")
