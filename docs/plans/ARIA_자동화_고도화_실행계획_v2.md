@@ -335,6 +335,64 @@ DOCX 는 XLSM 라이터와 달리 **템플릿 주도**라(SwUFn heading 을 함�
 
 ---
 
+## 5-4. 품질 게이트의 vacuous truth — ✅ 완료 (2026-07-30)
+
+게이트가 **"검사 0건"을 통과로 기록**하고 있었다. 원인은 한 줄이다:
+
+```python
+gate_pass = all(m.get("gate_pass", True) for m in metrics if m.get("gate_pass") is not None)
+```
+
+필터를 거친 제너레이터가 비면 `all([])` 은 **True** 다.
+
+### 실측 (고치기 전)
+
+| 상황 | 옛 결과 |
+|---|---|
+| 알 수 없는 `doc_type` → `metrics=[]` (`recorder.py:139` 의 실제 분기) | **`gate_pass=True`**, score=0.0 — 점수 0인데 통과로 DB 기록 |
+| `config.UDS_QUALITY_GATE_THRESHOLDS` 부재/import 실패 | 11개 지표 전부 `threshold=None` → 검사 0건인데 **`gate_pass=True`** |
+| 같은 상황의 점수 | 다른 규칙(페널티 없는 `_pct` 평균)으로 계산 → 게이트 점수와 **비교 불가**. 참고지표가 높으면 오히려 **오른다**(실측 64.71 → 68.0) |
+
+두 번째가 특히 나쁘다: `try/except Exception: thresholds = {}` 가 어떤 config 실패든 삼키고
+`getattr(config, ..., {})` 가 키 rename/삭제까지 삼킨다 — **config 리팩터 한 번으로 UDS
+게이트가 경고 한 줄 없이 꺼지고**, 그 상태가 "통과"로 남는다.
+
+### 수정
+
+1. **판정을 `evaluator.compute_gate_verdict` 단일 출처로** 뽑았다(예전엔 recorder 인라인).
+   게이트 대상이 0개면 `gate_pass=False` + `reason="no_gated_metric"` — **fail-closed**.
+2. **`gated_metric_count` 를 DB 에 기록** — 나중에 DB 만 보고도 "게이트 항목이 0개였다"를
+   되짚을 수 있다. `threshold=None` 이라 판정에는 끼어들지 않는다.
+3. **UDS threshold 소실을 경고 + 지표로** — `quality_thresholds_missing` (사유도 로깅).
+4. **advisor 문구 2건 교정** — ① `gated_count==0` 이면 "통과/미통과"가 아니라 "판정 불가"로
+   말한다 ② 게이트 미통과인데 제안 0건일 때 "모든 항목이 임계값을 통과했습니다"라고
+   말하던 것을 막았다(게이트 결과와 정면 모순이었다).
+
+### 측정으로 **막은** 잘못된 변경
+
+- UDS 의 `quick_gate.gate_pass` 지표에 threshold 를 걸어 게이트화하려 했으나, 코드 주석
+  (`T5 진실원 통일`)대로 backend 의 quick_gate 가 **같은 7필드·같은 임계**를 쓰는 것이
+  확인돼 중복이었다 → 하지 않았다.
+- advisor 의 `not suggestions → "모든 항목 통과"` 가 게이트 FAIL 과 모순되는 케이스를
+  실측했더니 sits·swreport 에서는 **제안이 정상 생성**돼 재현되지 않았다. 재현되는 조건
+  (실패 지표에 advice 규칙 없음)만 좁혀 고쳤다.
+- 같은 vacuous-truth 패턴을 저장소 전체에서 훑었다 → `recorder.py:142` **한 곳뿐**
+  (복제본 없음). 이 저장소가 반복해 겪은 "한쪽만 고쳐짐" 은 이번엔 해당 없다.
+
+### 검증
+
+- 새 테스트 22건 (`tests/unit/test_quality_gate_vacuous_pass.py`) — **뮤테이션 5/5 확인**
+  (verdict 가드 제거 / recorder 인라인 복원 / missing 지표 제거 / advisor 2분기 제거)
+- **evaluator 7종 전수 계약 테스트** — 어떤 doc_type 이든 게이트 대상 ≥1 이어야 하고,
+  빈 입력은 fail-closed 여야 한다. threshold 를 떼는 회귀를 이 테스트가 잡는다
+- 음성 대조군 4건 — 정상 통과 실행·정상 config·진짜 전부통과 문구가 오염되지 않음
+- ⚠ **내 주장 1건이 테스트에서 틀린 게 드러나 정정**했다: "게이트를 잃으면 점수가 오른다"는
+  **데이터 의존**이었다(참고지표 global/static 값에 좌우 — 64.71→68.0 상승 / →59.11 하락).
+  핵심은 "항상 오른다"가 아니라 **척도가 달라 비교 불가**라는 것이라 그렇게 고정했다
+- 기존 quality 테스트 138건 통과
+
+---
+
 ## 6. 다음 라운드 후보
 
 | # | 대상 | 이유 |

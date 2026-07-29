@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from workflow.quality.evaluator import (
+    compute_gate_verdict,
     compute_overall_score,
     evaluate_coverage,
     evaluate_sits,
@@ -139,11 +140,25 @@ def _record_run_impl(
         metrics = []
 
     overall = compute_overall_score(metrics)
-    gate_pass = all(
-        m.get("gate_pass", True)
-        for m in metrics
-        if m.get("gate_pass") is not None
-    )
+    # 판정은 evaluator 단일 출처. 예전엔 여기 인라인 `all(... if gate_pass is not None)` 였고,
+    # 필터가 비면 `all([])`=True 라 **검사 0건이 통과로 기록**됐다(위 unknown doc_type 분기가
+    # 바로 그 경로 — metrics=[] → gate=True, score=0.0).
+    verdict = compute_gate_verdict(metrics)
+    gate_pass = verdict["gate_pass"]
+    if verdict["reason"] == "no_gated_metric":
+        _logger.warning(
+            "품질 게이트 항목이 0개다 (doc_type=%s, 지표 %d개) — 판정이 성립하지 않으므로 "
+            "통과로 기록하지 않는다(fail-closed). threshold 설정 또는 doc_type 을 확인할 것.",
+            doc_type, len(metrics),
+        )
+    # 게이트 대상 수를 지표로 남긴다 — DB 만 보고도 "0개였다"를 알 수 있어야 한다.
+    # threshold=None(비게이트)이라 판정에는 영향이 없다.
+    metrics = list(metrics) + [{
+        "metric_name": "gated_metric_count",
+        "value": float(verdict["gated_count"]),
+        "gate_pass": None,
+        "threshold": None,
+    }]
 
     # 2. DB 기록
     with get_session(db_path) as session:

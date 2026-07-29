@@ -310,10 +310,27 @@ def suggest_improvements(
         gate = summary.gate_pass if summary else False
         high_count = sum(1 for s in suggestions if s["priority"] == "high")
 
+        # 게이트 대상이 0개였던 실행은 "통과/미통과" 로 말할 수 없다 — 검사 자체를 안 했다.
+        # recorder 가 `gated_metric_count` 를 남기므로 그 값으로 판별한다(부재=구 실행 → None).
+        gated_obj = scores.get("gated_metric_count")
+        gated_count = int(gated_obj.value) if (gated_obj and gated_obj.value is not None) else None
+
         unsupported = not advice_rules
-        if unsupported:
+        if gated_count == 0:
+            summary_text = (
+                f"품질 점수 {overall:.1f}/100 -- **게이트 항목이 0개**라 판정이 성립하지 "
+                f"않습니다(통과 아님). threshold 설정 또는 doc_type '{doc_type}' 을 확인하세요."
+            )
+        elif unsupported:
             # 미정의 doc_type(예: sits 등)을 '모든 항목 통과'(품질 양호)로 위장하지 않는다.
             summary_text = f"doc_type '{doc_type}' 은 개선 제안 규칙이 정의되지 않았습니다."
+        elif not suggestions and not gate:
+            # 게이트는 미통과인데 제안이 0건 = 실패한 지표에 advice 규칙이 없는 경우다.
+            # '모든 항목 통과' 로 말하면 게이트 결과와 정면으로 모순된다.
+            summary_text = (
+                f"품질 점수 {overall:.1f}/100 -- 게이트 미통과이지만 해당 지표에 개선 제안 "
+                f"규칙이 없습니다. 실패 지표는 quality_scores 의 gate_pass=false 행을 확인하세요."
+            )
         elif not suggestions:
             summary_text = f"품질 점수 {overall:.1f}/100 -- 모든 항목이 임계값을 통과했습니다."
         elif gate:
@@ -329,5 +346,8 @@ def suggest_improvements(
             "suggestions": suggestions,
             "suggestion_count": len(suggestions),
             "unsupported": unsupported,
+            # 게이트 대상 수 — 0 이면 gate_pass 를 "통과/미통과" 로 읽으면 안 된다.
+            # None = 이 지표가 없던 구 실행(판별 불가).
+            "gated_metric_count": gated_count,
             "summary": summary_text,
         }

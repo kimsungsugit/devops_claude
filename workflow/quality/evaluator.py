@@ -44,11 +44,25 @@ def evaluate_uds(quality_eval: Dict[str, Any]) -> MetricList:
     """
     metrics: MetricList = []
 
+    # threshold 가 없으면 아래 7개 지표가 전부 비게이트가 되어 **게이트가 통째로
+    # 사라진다**. 예전엔 그게 조용히 통과로 기록됐다(`compute_gate_verdict` docstring 의
+    # vacuous truth). 이제 fail-closed 로 잡히지만, **왜** 그렇게 됐는지가 남아야 하므로
+    # 사유를 로깅하고 지표로도 남긴다.
+    thresholds: Dict[str, Any] = {}
+    thresholds_error = ""
     try:
         import config
-        thresholds = getattr(config, "UDS_QUALITY_GATE_THRESHOLDS", {})
-    except Exception:
-        thresholds = {}
+        thresholds = getattr(config, "UDS_QUALITY_GATE_THRESHOLDS", None) or {}
+        if not thresholds:
+            thresholds_error = "config.UDS_QUALITY_GATE_THRESHOLDS 없음/빈 값"
+    except Exception as e:   # noqa: BLE001 - 아래에서 사유를 남기고 fail-closed 로 진행
+        thresholds_error = f"config import 실패: {type(e).__name__}: {e}"
+    if thresholds_error:
+        _logger.warning(
+            "UDS 품질 게이트 threshold 를 못 읽었다 (%s) — 7개 필드 지표가 비게이트가 되어 "
+            "판정이 성립하지 않는다. compute_gate_verdict 가 fail-closed 로 처리한다.",
+            thresholds_error,
+        )
 
     quick_gate = quality_eval.get("quick_gate") or {}
     # 실제 생산자 backend._compute_quick_quality_gate 는 quick_gate.rates.*_fill(0~100)
@@ -95,6 +109,9 @@ def evaluate_uds(quality_eval: Dict[str, Any]) -> MetricList:
     metrics.append(
         _metric("confidence_gate_pass", 100.0 if quality_eval.get("confidence_gate_pass") else 0.0),
     )
+    # threshold 를 못 읽은 사실 자체를 지표로 남긴다 — 나중에 DB 를 봤을 때 "왜 게이트
+    # 항목이 0개였나" 를 되짚을 수 있어야 한다(비게이트 — 판정은 gated_count 가 한다).
+    metrics.append(_metric("quality_thresholds_missing", 1.0 if thresholds_error else 0.0))
 
     return metrics
 
@@ -351,11 +368,53 @@ def evaluate_swsa(quality_data: Dict[str, Any]) -> MetricList:
     return metrics
 
 
+def compute_gate_verdict(metrics: MetricList) -> Dict[str, Any]:
+    """MetricList -> 게이트 판정. **검사한 항목이 0개면 PASS 가 아니다.**
+
+    판정을 여기 한 곳에서만 정한다(예전엔 `recorder.py` 안에 인라인이었다).
+
+    ⚠ 예전 구현은 `all(m["gate_pass"] for m in metrics if m["gate_pass"] is not None)` 였다.
+    필터를 거친 제너레이터가 비면 `all([])` 은 **True** 다(vacuous truth). 실측 2건:
+
+    | 상황 | 옛 결과 |
+    |---|---|
+    | 알 수 없는 `doc_type` → `metrics=[]` | `gate_pass=True`, score=0.0 (점수 0인데 통과) |
+    | `config.UDS_QUALITY_GATE_THRESHOLDS` 부재/import 실패 | 11개 지표 전부 `threshold=None` → 검사 0건인데 `gate_pass=True`. 게다가 점수가 **다른 규칙**(페널티 없는 `_pct` 평균)으로 계산돼 게이트 점수와 비교 불가가 된다 — 참고지표가 높으면 실측처럼 오히려 **오른다**(64.71 → 68.0) |
+
+    ISO 26262 품질 게이트에서 "검사하지 않음" 을 통과로 기록하면 그 자체가 거짓 증거다.
+    그래서 게이트 대상이 0개면 **fail-closed**(False + 사유)로 낸다.
+
+    Returns:
+        `{"gate_pass": bool, "gated_count": int, "failed_count": int, "reason": str|None}`
+    """
+    gated = [m for m in metrics if m.get("gate_pass") is not None]
+    if not gated:
+        return {
+            "gate_pass": False,
+            "gated_count": 0,
+            "failed_count": 0,
+            "reason": "no_gated_metric",
+        }
+    failed = [m for m in gated if not m.get("gate_pass")]
+    return {
+        "gate_pass": not failed,
+        "gated_count": len(gated),
+        "failed_count": len(failed),
+        "reason": None,
+    }
+
+
 def compute_overall_score(metrics: MetricList) -> float:
     """MetricList -> 종합 점수 (0~100).
 
     gate_pass가 있는 메트릭만 점수 계산에 포함.
     gate_pass=False 항목은 0.5x 페널티.
+
+    ⚠ threshold 가 하나도 없으면 아래 폴백(=`_pct` 값 평균)으로 떨어지는데, 그 점수는
+    **게이트 점수와 같은 척도가 아니다**(페널티가 없으므로 오히려 높게 나온다). 그 상태는
+    `compute_gate_verdict` 가 `reason="no_gated_metric"` 으로 판정하고 recorder 가
+    `gated_metric_count=0` 을 함께 기록하므로, 추이 그래프에서 이 점수를 게이트 점수와
+    나란히 읽으면 안 된다.
     """
     scored = [m for m in metrics if m.get("threshold") is not None]
     if not scored:
