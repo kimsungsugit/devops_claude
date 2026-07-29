@@ -10,6 +10,16 @@
 //   - `[검증 필요]` 마커는 생성기 표기 그대로 통과시킨다.
 
 import { useState } from 'react';
+
+// AI 서술문 필드 → 화면 라벨. 한 컴포넌트가 SUTS/SITS 양쪽을 그리므로 필드에 맞춰야 한다
+// (SITS 를 '시험 목적'이라 부르면 통합 시나리오 설명을 시험 목적으로 오독한다).
+const PROSE_LABEL = {
+  suts_description: '시험 목적',
+  sits_description: '통합 시나리오',
+  sts_purpose: '시험 목적',
+  uds_description: 'Description',
+  sds_behavior: 'Behavior',
+};
 import { VERDICT, buildTsv, normalizeNumeric } from '../../../impactDocDraft.js';
 
 const PREVIEW_ROWS = 3;
@@ -189,8 +199,16 @@ export default function DocProposalTable({
 
       {proseText && (
         <div style={{ fontSize: 9, marginBottom: 3, padding: '2px 4px', background: 'var(--panel)', borderRadius: 3 }}>
-          <span className="text-muted">시험 목적: </span>{proseText}
+          {/* 라벨은 필드에 맞춘다 — SITS 는 '시험 목적'이 아니라 통합 시나리오 설명이다. */}
+          <span className="text-muted">{PROSE_LABEL[proseField] || '서술문'}: </span>{proseText}
           <span className="pill pill-info" style={{ fontSize: 8, marginLeft: 4 }}>AI 보강</span>
+          {/* 프롬프트 예산으로 근거가 줄면 그 사실을 밝힌다 — 다른 절단 표기와 같은 규약.
+              "전부 보고 쓴 문장"과 "일부만 보고 쓴 문장"은 검토 강도가 달라야 한다. */}
+          {(prose.trimmed_nodes || []).length > 0 && (
+            <div className="text-muted" style={{ fontSize: 8, marginTop: 1 }}>
+              · 근거 일부만 사용({prose.trimmed_nodes.join(', ')}) — 프롬프트 상한으로 축소됨
+            </div>
+          )}
         </div>
       )}
       {proseProblem && <div className="text-muted" style={{ fontSize: 9, marginBottom: 3 }}>· 서술문: {proseProblem}</div>}

@@ -655,10 +655,15 @@ export function reconcileSitsDocTcs({ docTcs, fn, changeType, diffElems, join, n
  *    예전엔 이쪽에도 `유지`를 붙였는데, 문서와 비교한 적이 없으므로 "그대로 두라"고 말할
  *    근거가 없다(오늘 SUTS 쪽에서 고친 '근거 없는 유지'와 같은 부류).
  *
- * `changeAfter`: SIGNATURE 변경의 변경 후 선언. `doc_proposal.uds` 노드가 없는 구 job에서도
- * Prototype 짝을 만들 수 있게 호출부가 `change_details[fn].after` 를 직접 넘긴다.
+ * `changeAfter`: 변경 후 선언. `doc_proposal.uds` 노드가 없는 구 job에서도 Prototype 짝을
+ * 만들 수 있게 호출부가 `change_details[fn].after` 를 직접 넘긴다.
+ *
+ * ⚠ `changeType`: Prototype diff는 **SIGNATURE 일 때만** 낸다. 백엔드는 `prototype_after` 를
+ * 변경유형과 무관하게 기록하므로(`change_details[fn].after` 를 그대로 echo), 이 게이트가 없으면
+ * 본문만 바뀐 함수에도 "선언이 − 에서 ＋ 로 바뀐다"는 **없는 변경**을 그린다. 게이트를 호출부
+ * 인자(`changeAfter` 를 안 넘기는 식)로 대신하면 `proposal.prototype_after` 폴백이 그걸 되살린다.
  */
-export function reconcileUds({ udsContent, proposal, diffElems, changeAfter } = {}) {
+export function reconcileUds({ udsContent, proposal, diffElems, changeAfter, changeType } = {}) {
   const c = udsContent && typeof udsContent === 'object' ? udsContent : {};
   const p = proposal && typeof proposal === 'object' ? proposal : {};
   const de = diffElems || {};
@@ -671,7 +676,7 @@ export function reconcileUds({ udsContent, proposal, diffElems, changeAfter } = 
   // ⚠ '원문'으로 보여주는 값은 **문서 원문(udsContent)** 이 먼저다. proposal 은 소스에서
   //   파생된 값이라, 그걸 "원문:"이라 이름 붙여 그리면 소스 추론값을 문서 내용으로 위장한다.
   const before = String(c.prototype || p.prototype || '');
-  const after = String(changeAfter || p.prototype_after || '');
+  const after = String(changeType === 'SIGNATURE' ? (changeAfter || p.prototype_after || '') : '');
   if (after && after !== before) {
     items.push({ field: 'Prototype', before, after, verdict: VERDICT.MODIFY });
   }

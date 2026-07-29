@@ -1396,6 +1396,14 @@ export default function ImpactGuideSection({ analysisResult, job }) {
     // AI 서술문(선택 보강) — 값이 아니라 문장만. 없으면 각 분기가 그대로 결정론만 표시한다.
     const _prose = docProse[String(fn).toLowerCase()] || null;
     const _proseText = (f) => (_prose && _prose.ok && (_prose.fields || {})[f]) || '';
+    // 프롬프트 예산으로 근거가 줄었으면 밝힌다 — "전부 보고 쓴 문장"과 "일부만 보고 쓴 문장"은
+    // 검토 강도가 달라야 한다(다른 절단 표기와 같은 규약).
+    const _proseTrim = () => {
+      const t = (_prose && _prose.trimmed_nodes) || [];
+      return t.length
+        ? <div className="text-muted" style={{ fontSize: 8 }}>· 근거 일부만 사용({t.join(', ')}) — 프롬프트 상한으로 축소됨</div>
+        : null;
+    };
     // 폐기 사유는 **그 필드를 표시하는 카드에서** 말해야 한다. 예전엔 SUTS 카드에만 있어서,
     // UDS/SDS는 버튼을 눌러도 화면이 요청 전과 똑같았고 사용자는 이유를 알 수 없었다(무한 재시도).
     const _proseWhy = (f) => {
@@ -1461,10 +1469,19 @@ export default function ImpactGuideSection({ analysisResult, job }) {
           udsContent: c,
           proposal: docProposalFor(fn, 'uds'),
           diffElems,
-          // SIGNATURE 일 때만 짝짓는다 — BODY 변경에 선언 diff 를 그리면 없는 변경을 말하게 된다.
-          changeAfter: (ct === 'SIGNATURE' && cd && cd.after) ? cd.after : '',
+          // SIGNATURE 게이트는 **모듈이** 갖는다 — 여기서 `changeAfter` 를 비우는 것만으론
+          // `proposal.prototype_after`(백엔드가 변경유형과 무관하게 echo) 폴백이 되살려서
+          // BODY 변경에도 선언 diff 가 그려진다.
+          changeType: ct,
+          changeAfter: (cd && cd.after) || '',
         });
+        // ⚠ echo 항목(호출 함수·Precondition)만으로 '변경안' 프레임을 세우면 안 된다.
+        //   그건 소스 내용을 되비추는 참고값이지 "이렇게 고쳐라"가 아니다 — 변경이 없는데도
+        //   `✏ 원문 → 변경안` 헤더 아래 내용이 차서, 아래의 "결정론 변경안 없음" 안내가
+        //   구조적으로 뜨지 않게 된다(배선하면서 새로 생긴 구멍).
+        const _udsHasProposal = _uds.items.some((it) => it.verdict);
         _uds.items.forEach((it, i) => {
+          if (!_udsHasProposal) return;   // 제안이 하나도 없으면 참고값도 이 프레임에 넣지 않는다
           if (it.field === 'Prototype') {
             rows.push(
               <div key="proto">
@@ -1500,6 +1517,7 @@ export default function ImpactGuideSection({ analysisResult, job }) {
             <div key="desc" style={{ marginTop: 2 }}>
               {_lbl('Description')}
               <div>{_udsProse} <span className="pill pill-info" style={{ fontSize: 8 }}>AI 보강</span></div>
+              {_proseTrim()}
             </div>,
           );
         } else if ((docProposalFor(fn, 'uds') || {}).description_source === 'ai_required') {
@@ -1833,7 +1851,7 @@ export default function ImpactGuideSection({ analysisResult, job }) {
           <div style={{ marginTop: 2 }}>
             {_lbl('시험 목적')}
             {_stsProse
-              ? <div>{_stsProse} <span className="pill pill-info" style={{ fontSize: 8 }}>AI 보강</span></div>
+              ? <div>{_stsProse} <span className="pill pill-info" style={{ fontSize: 8 }}>AI 보강</span>{_proseTrim()}</div>
               : <div className="text-muted" style={{ fontSize: 9 }}>
                 {_proseWhy('sts_purpose') || '요구 검증 목적 문장은 결정론 근거 없음(SUTS 카드의 [🤖 서술문 보강]으로 생성)'}
               </div>}
@@ -1901,7 +1919,7 @@ export default function ImpactGuideSection({ analysisResult, job }) {
           <div style={{ marginTop: 2 }}>
             {_lbl('Behavior')}
             {_sdsProse
-              ? <div>{_sdsProse} <span className="pill pill-info" style={{ fontSize: 8 }}>AI 보강</span></div>
+              ? <div>{_sdsProse} <span className="pill pill-info" style={{ fontSize: 8 }}>AI 보강</span>{_proseTrim()}</div>
               : <div className="text-muted" style={{ fontSize: 9 }}>
                 {_proseWhy('sds_behavior')
                   || `${CHANGE_TYPE_KO[ct] || ct || '변경'} — 서술문은 결정론 근거 없음(SUTS 카드의 [🤖 서술문 보강]으로 생성)`}

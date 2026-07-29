@@ -46,6 +46,20 @@ FLOAT_TYPES = {
     "real", "real32", "real64", "float32_t", "float64_t",
 }
 
+# 경계값은 없지만 **프로젝트가 타입으로 인정하는** 토큰. `generators/sits.py`의 타입 정규식이
+# U64/S64를 인정하고 폭만 32비트로 접어 쓴다(경계값 정의가 없어서). 이 집합은 "이게 타입이냐"
+# 어휘 판정 전용이며 `C_TYPE_ALIAS`에 넣으면 안 된다 — 거기 넣으면 `c_type_boundaries()`가
+# `C_TYPE_BOUNDS[key]`에서 KeyError로 죽는다(경계값 항목이 없으므로).
+_WIDE_TYPE_TOKENS = {
+    "u64", "s64", "uint64", "uint64_t", "int64", "int64_t", "sint64",
+    "unsigned long long", "signed long long", "long long",
+}
+
+# 타입 어휘 전체 — "이 토큰이 C 타입인가"만 묻는 곳에서 쓴다(예: AI 산문 환각 게이트가
+# `U16`의 16을 '값'으로 오인하지 않도록 면제). ⚠ 여기서 폭을 `\d{1,2}` 같은 패턴으로 열면
+# `U48`·`u7` 처럼 **없는 타입이 면제되어** 환각이 그대로 통과한다(실측).
+KNOWN_TYPE_TOKENS: set = set(C_TYPE_ALIAS) | FLOAT_TYPES | _WIDE_TYPE_TOKENS
+
 # 정규화 키 → generators 계열 타입명. 1번 계열(_TYPE_BOUNDARIES)과의 수치 대조에 쓴다.
 GENERATOR_TYPE_NAME: Dict[str, str] = {
     "u8": "uint8_t", "u16": "uint16_t", "u32": "uint32_t",

@@ -240,6 +240,7 @@ describe('reconcileUds — 항목 단위 원문→변경안', () => {
       udsContent: { prototype: 'void s_foo(U16 x)', globals: ['g_a'] },
       proposal: { prototype: 'void s_foo(U16 x)', prototype_after: 'void s_foo(U32 x)', globals: ['g_a'] },
       diffElems: { changedGlobals: { added: ['g_b'], removed: ['g_c'] } },
+      changeType: 'SIGNATURE',   // 선언 diff는 SIGNATURE 에서만 (아래 BODY 케이스가 회귀 가드)
     });
     const proto = r.items.find((i) => i.field === 'Prototype');
     expect(proto.verdict).toBe(VERDICT.MODIFY);
@@ -250,6 +251,25 @@ describe('reconcileUds — 항목 단위 원문→변경안', () => {
     expect(globals.removed).toEqual(['g_c']);
     expect(globals.added).toEqual(['g_b']);
     expect(globals.before).toBe('g_a');       // '원문'은 문서 원문(udsContent) 기준
+  });
+
+  it('BODY 변경엔 선언 diff를 그리지 않는다 (백엔드 prototype_after는 변경유형과 무관하게 echo)', () => {
+    // 백엔드는 change_details[fn].after 를 변경유형과 무관하게 doc_proposal.uds.prototype_after
+    // 로 넣는다. 게이트가 없으면 본문만 바뀐 함수에 "선언이 − 에서 ＋ 로 바뀐다"는 **없는
+    // 변경**이 그려진다. 호출부에서 changeAfter 만 비우는 방식으론 이 폴백이 되살린다.
+    const args = {
+      udsContent: { prototype: 'void s_foo(U16 x)' },
+      proposal: { prototype_after: 'void s_foo(U32 x)' },
+    };
+    expect(reconcileUds({ ...args, changeType: 'BODY' }).items
+      .find((i) => i.field === 'Prototype')).toBeUndefined();
+    // SIGNATURE 면 그린다
+    const sig = reconcileUds({ ...args, changeType: 'SIGNATURE' }).items
+      .find((i) => i.field === 'Prototype');
+    expect(sig.verdict).toBe(VERDICT.MODIFY);
+    expect(sig.after).toBe('void s_foo(U32 x)');
+    // changeType 미지정(구 호출부)도 안전측 — 선언 변경을 단정하지 않는다
+    expect(reconcileUds(args).items.find((i) => i.field === 'Prototype')).toBeUndefined();
   });
 
   it("'원문'으로 표시할 값은 문서 원문이 우선 — 소스 파생값을 원문으로 위장하지 않는다", () => {
@@ -788,5 +808,30 @@ describe('unknownTypes — 타입이 판정에 실제로 쓰일 때만 경보 (D
       genSeqs: null, varTypes: { x: { type: 'U16', source: 'globals_map' } },
     });
     expect(r.unknownTypes).toEqual([]);
+  });
+});
+
+describe('reconcileUds — 참고값(echo)과 제안(verdict)의 구분', () => {
+  it('제안이 하나도 없으면 verdict 항목이 0이다 (호출부가 프레임을 세우지 않게)', () => {
+    // 소스에서 뽑은 호출 함수·Precondition 만 있는 조합. 이건 "이렇게 고쳐라"가 아니라
+    // 참고값이라, 이것만으로 '원문 → 변경안' 프레임을 세우면 변경이 없는데 변경안이 있는
+    // 것처럼 보이고 "변경안 없음" 안내가 구조적으로 못 뜬다.
+    const r = reconcileUds({
+      udsContent: { prototype: 'void s_foo(void)' },
+      proposal: { calls: ['Hal_Read'], precondition: 'init done' },
+      changeType: 'BODY',
+    });
+    expect(r.items.length).toBeGreaterThan(0);
+    expect(r.items.some((i) => i.verdict)).toBe(false);
+    expect(r.items.every((i) => i.echo)).toBe(true);
+  });
+
+  it('의사코드 개요는 제안이다 (작성 재료 — verdict 있음)', () => {
+    const r = reconcileUds({
+      udsContent: { prototype: 'void s_foo(void)' },
+      proposal: { logic_flow: ['read', 'clamp'], calls: ['Hal_Read'] },
+      changeType: 'BODY',
+    });
+    expect(r.items.some((i) => i.verdict === VERDICT.ADD)).toBe(true);
   });
 });
