@@ -6,8 +6,11 @@ SDS component mapping, and source code analysis.
 from __future__ import annotations
 
 import logging
+import os
 import re
+import threading
 import time
+from collections import OrderedDict
 from copy import copy
 from datetime import datetime
 from pathlib import Path
@@ -67,7 +70,65 @@ _MERGE_COLS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 12]  # 0-indexed → cols A,B,C,D,E
 _CENTER_COLS = {1, 4, 5, 6, 7, 13}  # #, Safety, TestEnv, TestMethod, GenMethod, SRS
 
 _SDS_MAP_CACHE: Optional[Dict[str, Dict[str, str]]] = None
-_HSIS_SIGNALS_CACHE: Optional[Dict[str, Any]] = None  # {sw_var_names, signals, pat}
+
+# ── HSIS 파서 캐시 ───────────────────────────────────────────────────────────
+# 키는 **파일 정체성**(정규화 경로, mtime_ns, size)이다. 과거엔 경로를 무시하는 단일
+# 전역이라, 장기 기동 서버(`backend/routers/local.py`)가 프로젝트 A의 HSIS를 한 번 읽으면
+# 이후 프로젝트 B의 STS/SUTS/SITS 생성이 A의 HW 신호를 그대로 받았다 — 경고 한 줄 없이.
+# 실측: 전혀 다른 빈 문서 경로로 재호출해도 첫 파일의 signal 20건이 **동일 객체로** 반환됐다.
+# mtime_ns/size 를 키에 넣으므로 파일이 바뀌면 자동 무효화된다.
+_HSIS_CACHE_MAX = 8
+_HSIS_SIGNALS_CACHE: "OrderedDict[Tuple[str, int, int], Dict[str, Any]]" = OrderedDict()
+_HSIS_CACHE_LOCK = threading.Lock()
+
+# HSIS 데이터 행 판정에 쓰는 ID 패턴. 두 파서가 공유한다(아래 `_is_hsis_data_row`).
+_HSI_ID_PAT = re.compile(r"HSI_?\d+", re.I)
+_HSIS_REQ_ID_PAT = re.compile(r"S[wy][A-Za-z]{1,}_?\d+")
+
+
+def _is_hsis_data_row(sig_id: Any, related_id: Any) -> bool:
+    """HSIS 데이터 행인가 — `_load_hsis_signals`/`parse_hsis_signals` 공용 판정.
+
+    HSI ID가 있거나 Related 열에 Sw/Sy 요구 ID가 있으면 데이터 행이다.
+    과거 `_load_hsis_signals`는 HSI ID만 봐서 ID 열이 빈 행을 통째로 버렸다
+    (실측 HDPDM01 v5.00: 21건 중 1건 — `Battery Power / u16g_ApiIn_Vsup / SyEI_01`).
+    판정을 파서마다 따로 두면 한쪽만 고쳐지고 다른 쪽이 잠복하므로 여기로 묶는다.
+    """
+    return bool(
+        _HSI_ID_PAT.match(str(sig_id or "").strip())
+        or _HSIS_REQ_ID_PAT.search(str(related_id or ""))
+    )
+
+
+def _hsis_cache_key(p: Path) -> Optional[Tuple[str, int, int]]:
+    """(정규화 경로, mtime_ns, size). stat 실패 시 None → 캐시를 아예 쓰지 않는다."""
+    try:
+        st = p.stat()
+        resolved = str(p.resolve())
+    except OSError as exc:
+        _logger.debug("HSIS 캐시 키 산출 실패(%s) — 캐시 없이 진행: %s", exc, p)
+        return None
+    return (os.path.normcase(resolved), st.st_mtime_ns, st.st_size)
+
+
+def _hsis_cache_get(key: Optional[Tuple[str, int, int]]) -> Optional[Dict[str, Any]]:
+    if key is None:
+        return None
+    with _HSIS_CACHE_LOCK:
+        hit = _HSIS_SIGNALS_CACHE.get(key)
+        if hit is not None:
+            _HSIS_SIGNALS_CACHE.move_to_end(key)
+        return hit
+
+
+def _hsis_cache_put(key: Optional[Tuple[str, int, int]], value: Dict[str, Any]) -> None:
+    if key is None:
+        return
+    with _HSIS_CACHE_LOCK:
+        _HSIS_SIGNALS_CACHE[key] = value
+        _HSIS_SIGNALS_CACHE.move_to_end(key)
+        while len(_HSIS_SIGNALS_CACHE) > _HSIS_CACHE_MAX:
+            _HSIS_SIGNALS_CACHE.popitem(last=False)
 
 
 def _load_default_sds_map() -> Dict[str, Dict[str, str]]:
@@ -350,11 +411,9 @@ def _load_hsis_signals(hsis_path: str) -> Dict[str, Any]:
           'signals': List[Dict],              # full signal info
           'pat': re.Pattern,                  # extended hw signal pattern
         }
-    """
-    global _HSIS_SIGNALS_CACHE
-    if _HSIS_SIGNALS_CACHE is not None:
-        return _HSIS_SIGNALS_CACHE
 
+    결과는 파일 정체성(경로+mtime_ns+size)으로 캐시된다 — `_hsis_cache_key` 주석 참조.
+    """
     empty: Dict[str, Any] = {"sw_var_names": [], "signals": [], "pat": _HW_SIGNAL_PAT}
 
     if not hsis_path:
@@ -363,6 +422,11 @@ def _load_hsis_signals(hsis_path: str) -> Dict[str, Any]:
     if not p.exists():
         _logger.warning("HSIS file not found: %s", hsis_path)
         return empty
+
+    cache_key = _hsis_cache_key(p)
+    cached = _hsis_cache_get(cache_key)
+    if cached is not None:
+        return cached
 
     try:
         import openpyxl  # type: ignore
@@ -409,9 +473,10 @@ def _load_hsis_signals(hsis_path: str) -> Dict[str, Any]:
                 header_found = True
             continue
 
-        # Data rows: must have ID like HSI_XX
+        # Data rows: HSI ID가 있거나 Related에 Sw/Sy 요구 ID가 있으면 데이터 행
         sig_id = cells[_COL_ID] if len(cells) > _COL_ID else ""
-        if not sig_id or not re.match(r"HSI_\d+", sig_id, re.I):
+        related = cells[_COL_RELATED] if len(cells) > _COL_RELATED else ""
+        if not _is_hsis_data_row(sig_id, related):
             continue
 
         sig_name = cells[_COL_SIG_NAME] if len(cells) > _COL_SIG_NAME else ""
@@ -419,7 +484,6 @@ def _load_hsis_signals(hsis_path: str) -> Dict[str, Any]:
         direction = cells[_COL_DIRECTION] if len(cells) > _COL_DIRECTION else ""
         characteristics = cells[_COL_CHARACTERISTICS] if len(cells) > _COL_CHARACTERISTICS else ""
         sw_var = cells[_COL_SW_VAR] if len(cells) > _COL_SW_VAR else ""
-        related = cells[_COL_RELATED] if len(cells) > _COL_RELATED else ""
 
         if not sig_name and not sw_var:
             continue
@@ -441,7 +505,7 @@ def _load_hsis_signals(hsis_path: str) -> Dict[str, Any]:
 
     if not signals:
         _logger.info("HSIS: no signals parsed from %s (sheet=%s)", hsis_path, sheet_name)
-        _HSIS_SIGNALS_CACHE = empty
+        _hsis_cache_put(cache_key, empty)
         return empty
 
     # Collect SW variable names for pattern building
@@ -478,8 +542,9 @@ def _load_hsis_signals(hsis_path: str) -> Dict[str, Any]:
         "signals": signals,
         "pat": extended_pat,
     }
-    _HSIS_SIGNALS_CACHE = result
-    _logger.info("HSIS loaded: %d signals, %d SW var names", len(signals), len(sw_var_names))
+    _hsis_cache_put(cache_key, result)
+    _logger.info("HSIS loaded: %d signals, %d SW var names from %s",
+                 len(signals), len(sw_var_names), hsis_path)
     return result
 
 
@@ -565,7 +630,7 @@ def parse_hsis_signals(hsis_path: str) -> Dict[str, Any]:
     # ID 컬럼 disambiguation — 헤더 'id'가 여러 개(Arch Element ID·Connector ID)라
     # 데이터에서 HSI_\d+ 빈도 최대 컬럼을 ID로 확정.
     id_col = cols.get("id", -1)
-    _hsi = re.compile(r"HSI_?\d+", re.I)
+    _hsi = _HSI_ID_PAT
     if id_col < 0 or not any(_hsi.match(dr[id_col]) for dr in data_rows[:30] if id_col < len(dr)):
         best, best_cnt = -1, 0
         max_c = max((len(dr) for dr in data_rows[:50]), default=0)
@@ -580,7 +645,6 @@ def parse_hsis_signals(hsis_path: str) -> Dict[str, Any]:
     swvar_col = cols.get("swvar", -1)
     signame_col = cols.get("signame", -1)
     dir_col = cols.get("dir", -1)
-    _idpat = re.compile(r"S[wy][A-Za-z]{1,}_?\d+")
 
     def _get(dr: List[str], ci: int) -> str:
         return dr[ci] if 0 <= ci < len(dr) else ""
@@ -591,7 +655,7 @@ def parse_hsis_signals(hsis_path: str) -> Dict[str, Any]:
         related = _get(dr, related_col)
         swv = _get(dr, swvar_col)
         # 데이터 행: HSI ID가 있거나 Related에 Sw/Sy ID가 있어야(설명/공백 행 스킵)
-        if not (_hsi.match(sid) or _idpat.search(related)):
+        if not _is_hsis_data_row(sid, related):
             continue
         if not related and not swv:
             continue
@@ -2199,8 +2263,11 @@ def enhance_test_cases_with_ai(
         if hsis_signals and hsis_signals.get("signals"):
             hsis_lines = []
             for sig in hsis_signals["signals"][:15]:
+                # ID 열이 빈 HSIS 행도 이제 채택되므로(`_is_hsis_data_row`) 라벨을 비워두지
+                # 않는다 — 빈 라벨은 LLM이 ID를 지어내게 만든다.
+                _label = sig["id"] or sig["related_id"] or "(HSI ID 미기재)"
                 hsis_lines.append(
-                    f"  {sig['id']}: {sig['signal_name']} "
+                    f"  {_label}: {sig['signal_name']} "
                     f"(SW: {sig['sw_var_name']}, Dir: {sig['direction']}, "
                     f"Char: {sig['characteristics'][:40]})"
                 )

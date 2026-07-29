@@ -52,7 +52,68 @@ _DEFAULT_TEST_ENV = "SwTE_01"
 _SDS_MAP_CACHE: Optional[Dict[str, Dict[str, str]]] = None
 
 
+def _merge_sds_partition_map(
+    merged: Dict[str, Dict[str, str]], data: Dict[str, Dict[str, str]]
+) -> None:
+    """first-wins 병합 — 이미 값이 있는 필드는 덮어쓰지 않는다."""
+    for key, value in data.items():
+        if key not in merged:
+            merged[key] = dict(value)
+            continue
+        for field in ("asil", "related", "description"):
+            if value.get(field) and not merged[key].get(field):
+                merged[key][field] = value[field]
+
+
+def load_sds_map_from(sds_docx_path: str) -> Dict[str, Dict[str, str]]:
+    """사용자가 지정한 SDS 문서 하나에서 파티션 맵(ASIL/related/description)을 읽는다.
+
+    `_load_default_sds_map`(저장소 `docs/` 글롭)과 달리 **경로를 그대로 존중**한다.
+    SUTS 생성기는 오래도록 `sds_docx_path` 인자를 받고도 본문에서 쓰지 않아,
+    프로젝트가 무엇이든 저장소 `docs/`에 들어있는 SDS(현재 HDPDM01)로 ASIL을 채웠다
+    — 다른 프로젝트의 안전 등급이 조용히 섞이는 경로였다.
+    """
+    if not sds_docx_path:
+        return {}
+    merged: Dict[str, Dict[str, str]] = {}
+    try:
+        _merge_sds_partition_map(merged, _extract_sds_partition_map(sds_docx_path))
+    except Exception as exc:
+        _logger.warning("SDS 파티션 맵 파싱 실패 — ASIL 보강 생략: %s (%s)", sds_docx_path, exc)
+        return {}
+    return merged
+
+
+def _resolve_sds_map(sds_docx_path: Optional[str]) -> Optional[Dict[str, Dict[str, str]]]:
+    """SUTS ASIL 보강에 쓸 SDS 맵을 확보한다. None이면 호출자가 폴백을 쓴다.
+
+    입력은 resolver 경유(`_resolved_doc_input`)라 cloudium worker-only 경로도 잡는다.
+    지정했는데 못 쓰게 된 경우는 **반드시 경고를 남긴다** — 폴백(저장소 `docs/` 글롭)이
+    조용히 대신하면, 다른 프로젝트의 ASIL로 채워진 산출물을 정상으로 오인한다.
+    """
+    if not sds_docx_path:
+        return None
+    with _resolved_doc_input(sds_docx_path, "SDS") as local:
+        if not local:
+            _logger.warning(
+                "SUTS: SDS 입력을 확보하지 못해 ASIL 보강이 저장소 docs/ 폴백(프로젝트 무관)으로 "
+                "넘어간다: %s", sds_docx_path)
+            return None
+        sds_map = load_sds_map_from(local)
+    if not sds_map:
+        _logger.warning(
+            "SUTS: SDS를 지정했으나 파티션 0건 — ASIL 보강이 저장소 docs/ 폴백(프로젝트 무관)으로 "
+            "넘어간다: %s", sds_docx_path)
+        return None
+    _logger.info("SUTS: SDS 파티션 %d건 로드 — ASIL 출처=%s", len(sds_map), sds_docx_path)
+    return sds_map
+
+
 def _load_default_sds_map() -> Dict[str, Dict[str, str]]:
+    """저장소 `docs/`의 SDS 글롭 폴백.
+
+    ⚠ 프로젝트 무관이다 — 호출자가 SDS 경로를 알고 있으면 `load_sds_map_from`을 쓸 것.
+    """
     global _SDS_MAP_CACHE
     if _SDS_MAP_CACHE is not None:
         return _SDS_MAP_CACHE
@@ -62,14 +123,7 @@ def _load_default_sds_map() -> Dict[str, Dict[str, str]]:
         for path in docs_dir.glob("*.docx"):
             if "sds" not in path.name.lower():
                 continue
-            data = _extract_sds_partition_map(str(path))
-            for key, value in data.items():
-                if key not in merged:
-                    merged[key] = dict(value)
-                    continue
-                for field in ("asil", "related", "description"):
-                    if value.get(field) and not merged[key].get(field):
-                        merged[key][field] = value[field]
+            _merge_sds_partition_map(merged, _extract_sds_partition_map(str(path)))
     _SDS_MAP_CACHE = merged
     return merged
 
@@ -283,15 +337,22 @@ _REG_PAT = re.compile(r"^REG_|^lin_|^PS\.|^DiagData\.")
 def collect_unit_functions(
     function_details: Dict[str, Dict[str, Any]],
     globals_info_map: Optional[Dict[str, Dict[str, str]]] = None,
+    sds_map: Optional[Dict[str, Dict[str, str]]] = None,
 ) -> List[Dict[str, Any]]:
     """Collect and structure unit functions from report_generator output.
 
     Matching reference SUTS patterns: variables can appear as BOTH input and
     output (read-modify-write). Local temps are excluded. REG_ and state
     vars are placed in output. Caps at reasonable counts per function.
+
+    Args:
+        sds_map: ASIL/related 보강에 쓸 SDS 파티션 맵. None이면 저장소 `docs/` 글롭
+            폴백(`_load_default_sds_map`)을 쓴다 — **프로젝트 무관**이므로 호출자가
+            대상 프로젝트의 SDS를 알고 있으면 `load_sds_map_from`으로 만들어 넘길 것.
     """
     gim = globals_info_map or {}
-    sds_map = _load_default_sds_map()
+    if sds_map is None:
+        sds_map = _load_default_sds_map()
     units: List[Dict[str, Any]] = []
 
     for fid, info in function_details.items():
@@ -2282,8 +2343,12 @@ def generate_suts(
     except Exception:
         pass
 
+    if sds_docx_path:
+        _progress(29, "SDS 설계 컨텍스트 로드 중")
+    _sds_map = _resolve_sds_map(sds_docx_path)
+
     _progress(30, "유닛 함수 수집 중")
-    units = collect_unit_functions(function_details, globals_info_map)
+    units = collect_unit_functions(function_details, globals_info_map, sds_map=_sds_map)
 
     if not units:
         _logger.warning("No unit functions found!")

@@ -351,3 +351,130 @@ class TestStsColumnSchemaSsot:
         pytest.importorskip("openpyxl")
         path = self._write(tmp_path, [self._tc()])
         assert via_suts(path)["stats"] == via_sts(path)["stats"]
+
+
+class TestHsisSignalCache:
+    r"""HSIS 파서 캐시/행 판정 회귀.
+
+    회귀 대상 2건 (실측 HDPDM01_HSIS v5.00):
+      1) 캐시가 경로를 무시하는 단일 전역이라, 서버가 프로젝트 A의 HSIS를 한 번 읽으면
+         이후 프로젝트 B의 STS/SUTS/SITS가 A의 HW 신호를 **동일 객체로** 받았다.
+      2) `HSI_\d+` ID가 있는 행만 채택해, ID 열이 빈 행이 통째로 버려졌다(21건 중 1건 —
+         'Battery Power / u16g_ApiIn_Vsup / SyEI_01').
+    """
+
+    # OLD 파서의 고정 0-based 열 → openpyxl 1-based
+    _C_ID, _C_NAME, _C_TYPE = 6, 7, 8
+    _C_DIR, _C_CHAR, _C_SWVAR, _C_REL = 12, 13, 20, 21
+
+    @pytest.fixture(autouse=True)
+    def _clear_cache(self):
+        """모듈 전역 캐시는 테스트 간 누설되면 안 된다 — 원래 내용을 복원한다."""
+        from generators.sts import _HSIS_SIGNALS_CACHE
+        saved = dict(_HSIS_SIGNALS_CACHE)
+        _HSIS_SIGNALS_CACHE.clear()
+        yield
+        _HSIS_SIGNALS_CACHE.clear()
+        _HSIS_SIGNALS_CACHE.update(saved)
+
+    def _write(self, path, rows):
+        """rows: [(id, signal_name, sw_var, related), ...]"""
+        openpyxl = pytest.importorskip("openpyxl")
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "2.HSIS"
+        ws.cell(row=4, column=self._C_ID, value="ID")
+        ws.cell(row=4, column=self._C_NAME, value="Signal Name")
+        ws.cell(row=4, column=self._C_SWVAR, value="SW Variable Name")
+        ws.cell(row=4, column=self._C_REL, value="Related ID")
+        for i, (sid, name, swvar, rel) in enumerate(rows):
+            r = 5 + i
+            ws.cell(row=r, column=self._C_ID, value=sid)
+            ws.cell(row=r, column=self._C_NAME, value=name)
+            ws.cell(row=r, column=self._C_TYPE, value="Digital")
+            ws.cell(row=r, column=self._C_DIR, value="IN")
+            ws.cell(row=r, column=self._C_CHAR, value="0...255")
+            ws.cell(row=r, column=self._C_SWVAR, value=swvar)
+            ws.cell(row=r, column=self._C_REL, value=rel)
+        wb.save(str(path))
+        wb.close()
+        return str(path)
+
+    def test_different_files_do_not_share_a_cached_result(self, tmp_path):
+        from generators.sts import _load_hsis_signals
+        a = self._write(tmp_path / "a.xlsx", [("HSI_01", "SIG_A", "u8g_A", "SwTR_0001")])
+        b = self._write(tmp_path / "b.xlsx", [("HSI_02", "SIG_B", "u8g_B", "SwTR_0002")])
+
+        ra = _load_hsis_signals(a)
+        rb = _load_hsis_signals(b)
+
+        assert ra["sw_var_names"] == ["u8g_A"]
+        # 과거엔 여기서 A의 결과가 그대로 나왔다(경고 없음)
+        assert rb["sw_var_names"] == ["u8g_B"], "두 번째 파일이 첫 파일 캐시를 받았다"
+        assert rb is not ra
+
+    def test_same_file_is_cached(self, tmp_path):
+        from generators.sts import _load_hsis_signals
+        p = self._write(tmp_path / "a.xlsx", [("HSI_01", "SIG_A", "u8g_A", "SwTR_0001")])
+        assert _load_hsis_signals(p) is _load_hsis_signals(p)
+
+    def test_cache_invalidates_when_file_changes(self, tmp_path):
+        import time as _t
+
+        from generators.sts import _load_hsis_signals
+        p = tmp_path / "a.xlsx"
+        self._write(p, [("HSI_01", "SIG_A", "u8g_A", "SwTR_0001")])
+        first = _load_hsis_signals(str(p))
+        _t.sleep(0.01)
+        self._write(p, [("HSI_01", "SIG_A", "u8g_CHANGED", "SwTR_0001")])
+        second = _load_hsis_signals(str(p))
+        assert second["sw_var_names"] == ["u8g_CHANGED"], "mtime/size 변경이 무효화되지 않았다"
+        assert second is not first
+
+    def test_cache_is_bounded(self, tmp_path):
+        from generators.sts import _HSIS_CACHE_MAX, _HSIS_SIGNALS_CACHE, _load_hsis_signals
+        for i in range(_HSIS_CACHE_MAX + 4):
+            p = self._write(tmp_path / f"f{i}.xlsx", [(f"HSI_{i:02d}", "S", f"u8g_{i}", "SwTR_1")])
+            _load_hsis_signals(p)
+        assert len(_HSIS_SIGNALS_CACHE) <= _HSIS_CACHE_MAX
+
+    def test_row_without_hsi_id_is_kept_when_related_has_req_id(self, tmp_path):
+        """ID 열이 비어도 Related에 Sw/Sy 요구 ID가 있으면 데이터 행이다."""
+        from generators.sts import _load_hsis_signals, parse_hsis_signals
+        p = self._write(tmp_path / "a.xlsx", [
+            ("HSI_01", "SIG_A", "u8g_A", "SwTR_0001"),
+            ("", "Battery Power", "u16g_ApiIn_Vsup", "SyEI_01"),   # 과거 여기서 버려졌다
+            ("", "설명 문구일 뿐", "", ""),                          # 진짜 비데이터 행 — 여전히 제외
+        ])
+        old = _load_hsis_signals(p)
+        assert len(old["signals"]) == 2
+        assert "u16g_ApiIn_Vsup" in old["sw_var_names"]
+
+        # 두 파서가 같은 판정을 써야 한다(한쪽만 고치면 다른 쪽이 잠복한다)
+        new = parse_hsis_signals(p)
+        assert {(s["id"], s["sw_var_name"], s["related_id"]) for s in old["signals"]} == \
+               {(s["id"], s["sw_var_name"], s["related_id"]) for s in new["signals"]}
+
+    def test_data_row_predicate_rejects_noise(self):
+        from generators.sts import _is_hsis_data_row
+        assert _is_hsis_data_row("HSI_12", "")
+        assert _is_hsis_data_row("HSI12", "")
+        assert _is_hsis_data_row("", "SyEI_01")
+        assert _is_hsis_data_row("", "SwTR_0101")
+        assert not _is_hsis_data_row("", "")
+        assert not _is_hsis_data_row("설명", "해당 없음")
+        assert not _is_hsis_data_row(None, None)
+
+    def test_unparseable_file_does_not_poison_other_files(self, tmp_path):
+        """빈/깨진 HSIS의 empty 결과가 전역을 덮어 다른 파일까지 비우면 안 된다."""
+        openpyxl = pytest.importorskip("openpyxl")
+        from generators.sts import _load_hsis_signals
+        blank = tmp_path / "blank.xlsx"
+        wb = openpyxl.Workbook()
+        wb.active.title = "2.HSIS"
+        wb.save(str(blank))
+        wb.close()
+
+        assert _load_hsis_signals(str(blank))["signals"] == []
+        good = self._write(tmp_path / "good.xlsx", [("HSI_01", "SIG_A", "u8g_A", "SwTR_0001")])
+        assert _load_hsis_signals(good)["sw_var_names"] == ["u8g_A"]

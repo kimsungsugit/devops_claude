@@ -618,6 +618,24 @@ def generate_uds_ai_sections(
             ]
             sections["document"] = "\n".join([ln for ln in doc_lines if ln is not None]).strip()
         sections["quality_warnings"] = _quality_warnings(sections)
+        # ─── 미검토 경로임을 반환 계약에 명시 ───
+        # 이 분기는 아래 순차 경로의 reviewer/auditor/semantic/judge 루프를 **전혀 타지 않는다**
+        # (여기서 바로 return 한다). 과거엔 그 사실이 반환값 어디에도 없어서, 소비자는 검증을
+        # 통과한 초안과 구분할 수 없었다 — 키 자체가 없으니 `.get()`은 None(=falsy)을 주고
+        # 그게 "문제 없음"으로 읽혔다. 순차 경로와 **같은 키**를 채우되 값으로 미검토를 말한다.
+        sections["confidence"] = 0.0
+        sections["semantic_validated"] = False
+        sections["semantic_report"] = SemanticReport().to_dict()
+        sections["ai_review_decision"] = "not_reviewed"
+        sections["ai_review_retry_count"] = 0
+        sections["quality_warnings"].append(
+            "[ai-review] UDS_PARALLEL_SECTIONS=True 경로로 생성됨 — reviewer/auditor/"
+            "semantic 검증/judge를 수행하지 않은 미검토 초안이다. 승인 결과가 아니므로 검토 필요"
+        )
+        logger.warning(
+            "UDS 섹션을 병렬 경로로 생성했다 — 검증 루프(reviewer/auditor/semantic/judge) 미수행. "
+            "config.UDS_PARALLEL_SECTIONS=False 로 두면 검증을 탄다."
+        )
         return sections
 
     system_prompt = (

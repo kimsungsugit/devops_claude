@@ -293,3 +293,95 @@ class TestResolvedDocInput:
         monkeypatch.setattr(fr, "get_resolver", lambda: _Broken())
         with _resolved_doc_input("U:/x.docx", "UDS") as p:
             assert p is None
+
+
+class TestSdsMapIsProjectScoped:
+    """`sds_docx_path`가 실제로 ASIL 출처가 되어야 한다.
+
+    회귀 대상: 이 인자는 시그니처·docstring에만 있고 본문에서 쓰이지 않아, ASIL이 항상
+    저장소 `docs/` 글롭(현재 HDPDM01 SDS)에서 채워졌다 — 다른 프로젝트의 SUTS를 만들어도
+    HDPDM01의 안전 등급이 조용히 섞이는 경로였다.
+    """
+
+    _DETAILS = {
+        "SwUFn_001": {
+            "id": "SwUFn_001",
+            "name": "S_Motor_Init",
+            "prototype": "void S_Motor_Init(void)",
+            "module_name": "MotorCtrl_PDS",
+            "asil": "TBD",
+        }
+    }
+
+    def test_injected_map_wins_over_repo_docs_fallback(self, monkeypatch):
+        from generators import suts as gsuts
+
+        called = {"default": 0}
+        monkeypatch.setattr(gsuts, "_load_default_sds_map",
+                            lambda: called.__setitem__("default", called["default"] + 1) or {
+                                "motor control": {"asil": "D", "related": "", "description": ""}})
+
+        units = gsuts.collect_unit_functions(
+            self._DETAILS, None,
+            sds_map={"motor control": {"asil": "A", "related": "SwTR_0101", "description": ""}},
+        )
+        assert units[0]["asil"] == "A", "주입한 SDS 맵이 무시되고 폴백이 쓰였다"
+        assert called["default"] == 0, "sds_map을 줬는데도 저장소 docs/ 폴백을 읽었다"
+
+    def test_no_map_still_uses_fallback(self, monkeypatch):
+        """대조군: 맵을 안 주면 기존 폴백 동작이 그대로여야 한다."""
+        from generators import suts as gsuts
+        monkeypatch.setattr(gsuts, "_load_default_sds_map",
+                            lambda: {"motor control": {"asil": "D", "related": "", "description": ""}})
+        units = gsuts.collect_unit_functions(self._DETAILS, None)
+        assert units[0]["asil"] == "D"
+
+    def test_resolve_returns_none_and_warns_when_path_unusable(self, monkeypatch, caplog):
+        """지정했는데 못 쓰면 폴백이 조용히 대신하면 안 된다 — 경고가 남아야 한다."""
+        import backend.services.file_resolver as fr
+        from generators.suts import _resolve_sds_map
+
+        class _Empty:
+            mode = "cloudium"
+            def is_file(self, p):
+                return False
+            def read_bytes(self, p):
+                raise AssertionError("호출되면 안 됨")
+
+        monkeypatch.setattr(fr, "get_resolver", lambda: _Empty())
+        with caplog.at_level("WARNING", logger="generators.suts"):
+            assert _resolve_sds_map("U:/nope/SDS.docx") is None
+        assert "SDS" in caplog.text and "폴백" in caplog.text, caplog.text
+
+    def test_resolve_returns_none_and_warns_when_map_is_empty(self, monkeypatch, caplog, tmp_path):
+        from generators import suts as gsuts
+        src = tmp_path / "SDS.docx"
+        src.write_bytes(b"x")
+        monkeypatch.setattr(gsuts, "load_sds_map_from", lambda p: {})
+        with caplog.at_level("WARNING", logger="generators.suts"):
+            assert gsuts._resolve_sds_map(str(src)) is None
+        assert "파티션 0건" in caplog.text, caplog.text
+
+    def test_resolve_passes_map_through(self, monkeypatch, tmp_path):
+        from generators import suts as gsuts
+        src = tmp_path / "SDS.docx"
+        src.write_bytes(b"x")
+        expected = {"motor control": {"asil": "B", "related": "", "description": ""}}
+        monkeypatch.setattr(gsuts, "load_sds_map_from", lambda p: expected)
+        assert gsuts._resolve_sds_map(str(src)) == expected
+
+    def test_blank_path_is_not_an_error(self):
+        from generators.suts import _resolve_sds_map
+        assert _resolve_sds_map(None) is None
+        assert _resolve_sds_map("") is None
+
+    def test_load_sds_map_from_survives_parse_failure(self, monkeypatch, caplog):
+        from generators import suts as gsuts
+
+        def _boom(_p):
+            raise ValueError("깨진 docx")
+
+        monkeypatch.setattr(gsuts, "_extract_sds_partition_map", _boom)
+        with caplog.at_level("WARNING", logger="generators.suts"):
+            assert gsuts.load_sds_map_from("x.docx") == {}
+        assert "파싱 실패" in caplog.text
