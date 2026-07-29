@@ -1190,3 +1190,63 @@ def test_shrink_noop_under_budget_records_nothing():
     out = _shrink_doc_content(small, warn_sink=warns)
     assert warns == []
     assert "suts_omitted" not in out
+
+
+def test_sits_chain_cap_raised_and_truncation_flagged(monkeypatch):
+    """통합 콜체인 상한을 올리고 **절단 사실을 명시**한다.
+
+    ⚠ 실측(실 job 4,194건): 중앙값 182자인데 34%가 300 캡에 걸려 함수명 중간에서 잘렸다
+    ("… -> u32g_Fra"). 잘린 뒤쪽에 변경 함수가 있으면 화면이 "포함 여부 미확정"밖에 말할 수
+    없다. 길이로 되짚는 대신 플래그로 알린다 — 정확히 캡 길이인 원문을 절단으로 오판하지 않게."""
+    import backend.services.file_resolver as fr
+    import backend.services.swuts_excel_parser as parser
+    from workflow.impact_orchestrator import _CHAIN_TEXT_CAP, _load_testspec_by_tc
+
+    long_chain = "Interface : " + " -> ".join(f"fn_{i}" for i in range(200))
+    assert len(long_chain) > _CHAIN_TEXT_CAP
+    short_chain = "Interface : a -> b"
+
+    class _E:
+        def __init__(self, desc):
+            self.description = desc
+            self.precondition = ""
+            self.test_method = "REQ, IFT"
+            self.unit_name = ""
+            self.test_action = ""
+            self.expected = ""
+
+    class _Res:
+        ok = True
+        by_tc_id = {"SwITC_LONG": _E(long_chain), "SwITC_SHORT": _E(short_chain)}
+
+    monkeypatch.setattr(fr, "get_resolver", lambda: _FakeResolver())
+    monkeypatch.setattr(parser, "parse_swuts_xlsm", lambda *a, **k: _Res())
+
+    out = _load_testspec_by_tc("U:/sits.xlsm", doc_label="SITS")
+    long_row = out["SWITC_LONG"]
+    short_row = out["SWITC_SHORT"]
+
+    # 상한이 300이 아니라 _CHAIN_TEXT_CAP 이다(예전 캡이면 34%가 잘렸다)
+    assert len(long_row["description"]) == _CHAIN_TEXT_CAP > 300
+    assert long_row["description_truncated"] is True
+    # 짧은 체인은 절단이 아니다 — 길이 휴리스틱이었다면 구분이 안 됐다
+    assert short_row["description"] == short_chain
+    assert short_row["description_truncated"] is False
+
+
+def test_shrink_reduces_chain_text_but_records_it():
+    """예산 초과 시 콜체인 텍스트를 되돌리되 절단 사실을 남긴다(침묵 축소 금지)."""
+    from workflow.impact_orchestrator import _shrink_doc_content
+
+    chain = "Interface : " + " -> ".join(f"fn_{i}" for i in range(200))
+    dc = {
+        "suts": {}, "suts_meta": {},
+        "sits_by_tc": {f"TC{i}": {"call_chain": chain, "chain_truncated": False, "sub_cases": []}
+                       for i in range(200)},
+    }
+    warns: list = []
+    out = _shrink_doc_content(dc, warn_sink=warns, budget=50_000)
+
+    tc0 = out["sits_by_tc"]["TC0"]
+    assert len(tc0["call_chain"]) < len(chain)
+    assert tc0["chain_truncated"] is True, "되돌린 사실을 안 남기면 화면이 완전한 체인으로 오독한다"

@@ -1739,7 +1739,12 @@ export default function ImpactGuideSection({ analysisResult, job }) {
       // 예전엔 이때 원문 TC 5건을 통째로 무시하고 "`<fn>` 통합 콜체인 확인" 두 줄만 냈다.
       const _sitsDocTcs = _testSpecRows(fn, 'sits');
       if (_sitsDocTcs.length) {
-        const draft = reconcileSitsDocTcs({ docTcs: _sitsDocTcs, fn, changeType: ct, diffElems });
+        const draft = reconcileSitsDocTcs({
+          docTcs: _sitsDocTcs, fn, changeType: ct, diffElems,
+          // 조인 근거를 그대로 넘긴다 — 표시 텍스트로 재추론하지 않는다(절단 무관).
+          join: guideDetailByLc.get(String(fn).toLowerCase())?.sitsJoin,
+          normTc: _normTcId,
+        });
         return (
           <DocProposalTable
             title="✏ 통합 시나리오 재검증 (문서 원문 기준)"
@@ -2243,6 +2248,13 @@ export default function ImpactGuideSection({ analysisResult, job }) {
         }
       }
       const fnToSitsTCs = {};  // 함수명(lower) → Set<SITS TC>  (SwUFn 단위 경로 + 콜체인 경로)
+      // ⚠ 조인 **경로**를 따로 보존한다. union만 남기면 "이 TC가 왜 이 함수에 붙었는지"를 잃어버려,
+      //   소비처가 화면용 **절단된** 콜체인 텍스트로 그걸 다시 추론하게 된다 — 그러면 300자 뒤에
+      //   있는 함수를 못 찾아 전부 '검증필요'가 된다(실측: 실데이터 3건 전부). 여기 `chain_fns`는
+      //   백엔드가 파싱한 **전체 체인**이라 절단이 없다.
+      const fnToSitsByChain = {};   // 콜체인에 실재 → 재검증 확정
+      const fnToSitsByUnit = {};    // SwUFn 단위(entry) 경로 → 재검증 확정
+      const _addTo = (map, fn, tc) => { if (!map[fn]) map[fn] = new Set(); map[fn].add(tc); };
       for (const row of sitsTCs) {
         const tc = String(row.testcase || '');
         // (1) SwUFn 단위 경로 — testcase의 SwUFn/SwIFn/SwFn을 SUTS unit 맵으로 함수에 연결(entry).
@@ -2250,6 +2262,7 @@ export default function ImpactGuideSection({ analysisResult, job }) {
           for (const fn of (swufnToFn[m.toUpperCase()] || [])) {
             if (!fnToSitsTCs[fn]) fnToSitsTCs[fn] = new Set();
             fnToSitsTCs[fn].add(tc);
+            _addTo(fnToSitsByUnit, fn, tc);
           }
         }
         // (2) 콜체인 경로 — 백엔드가 파싱한 "Interface : A -> B -> ..." 체인 함수(깊은 callee 포함)에 TC 귀속.
@@ -2259,6 +2272,7 @@ export default function ImpactGuideSection({ analysisResult, job }) {
           if (!fn) continue;
           if (!fnToSitsTCs[fn]) fnToSitsTCs[fn] = new Set();
           fnToSitsTCs[fn].add(tc);
+          _addTo(fnToSitsByChain, fn, tc);
         }
       }
 
@@ -2332,6 +2346,11 @@ export default function ImpactGuideSection({ analysisResult, job }) {
           stsTestCases: [...stsTcSet],
           sutsTestCases: sutsTcList,
           sitsTestCases: [...sitsTcSet],
+          // 조인 근거(정규화 TC ID) — 소비처가 절단된 표시 텍스트로 재추론하지 않게.
+          sitsJoin: {
+            chain: new Set([...(fnToSitsByChain[_fnLc] || [])].map(_normTcId)),
+            unit: new Set([...(fnToSitsByUnit[_fnLc] || [])].map(_normTcId)),
+          },
         });
       }
       // 직접(변경) → 1-hop → 2-hop 순으로 정렬(변경 함수 우선 노출), 동일 hop은 함수명순.

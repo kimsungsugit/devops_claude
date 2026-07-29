@@ -614,7 +614,7 @@ describe('reconcileSitsDocTcs — 생성기 서브케이스가 없어도 원문 
     expect(full.length).toBeLessThan(300);
     const r = reconcileSitsDocTcs({ docTcs: [tc('SwITC_1', full)], fn: 's_x', changeType: 'BODY' });
     expect(r.rows[0].note).toBe('');
-    expect(r.rows[0].evidence).toMatch(/요구\/단위 경유/);
+    expect(r.rows[0].evidence).toMatch(/요구 경유/);   // 단위 경로는 이제 별도 확정 판정
   });
 
   it('변경 종류별로 확인 항목이 다르다(일반론 금지)', () => {
@@ -630,5 +630,62 @@ describe('reconcileSitsDocTcs — 생성기 서브케이스가 없어도 원문 
   it('원문 TC가 없으면 빈 결과(호출부가 기존 골격으로 폴백)', () => {
     expect(reconcileSitsDocTcs({ docTcs: [], fn: 's_x' }).rows).toEqual([]);
     expect(reconcileSitsDocTcs({}).rows).toEqual([]);
+  });
+});
+
+describe('SITS 판정 — 추적성 조인 근거를 쓰고 절단은 백엔드 플래그로', () => {
+  const norm = (s) => String(s || '').replace(/\s+/g, '').toUpperCase();
+  const tc = (id, d, cut) => ({ tc_id: id, description: d, description_truncated: cut, test_method: 'IFT' });
+
+  it('조인 근거가 있으면 절단된 체인이라도 재검증으로 확정한다', () => {
+    // ⚠ 회귀 가드: 화면용 텍스트로 재추론하면 300자 뒤의 함수를 못 찾아 전부 '검증필요'가
+    // 된다(실측 5/5). 추적성 `chain_fns`는 **전체 체인** 기준이라 절단과 무관하다.
+    const docTcs = [tc('SwITC_1', 'Interface : main -> ... -> u32g_Fra', true)];
+    const before = reconcileSitsDocTcs({ docTcs, fn: 's_x', changeType: 'HEADER', normTc: norm });
+    expect(before.rows[0].verdict).toBe(VERDICT.UNKNOWN);
+
+    const after = reconcileSitsDocTcs({
+      docTcs, fn: 's_x', changeType: 'HEADER', normTc: norm,
+      join: { chain: new Set(['SWITC_1']), unit: new Set() },
+    });
+    expect(after.rows[0].verdict).toBe(VERDICT.REVERIFY);
+    expect(after.rows[0].evidence).toMatch(/추적성 전체 체인 기준/);
+  });
+
+  it('단위(SwUFn) 진입 경로도 재검증 확정 — 근거를 구분해 밝힌다', () => {
+    const r = reconcileSitsDocTcs({
+      docTcs: [tc('SwITC_2', 'Interface : a -> b')], fn: 's_x', changeType: 'BODY', normTc: norm,
+      join: { chain: new Set(), unit: new Set(['SWITC_2']) },
+    });
+    expect(r.rows[0].verdict).toBe(VERDICT.REVERIFY);
+    expect(r.rows[0].evidence).toMatch(/단위\(SwUFn\) 진입 함수/);
+  });
+
+  it('요구 경유 조인만 있으면 확정하지 않는다(과잉 승격 금지)', () => {
+    const r = reconcileSitsDocTcs({
+      docTcs: [tc('SwITC_3', 'Interface : a -> b')], fn: 's_x', changeType: 'BODY', normTc: norm,
+      join: { chain: new Set(), unit: new Set() },
+    });
+    expect(r.rows[0].verdict).toBe(VERDICT.UNKNOWN);
+    expect(r.rows[0].evidence).toMatch(/요구 경유로 조인/);
+  });
+
+  it('절단 판정은 백엔드 플래그 우선 — 길이로 오판하지 않는다', () => {
+    const long = `Interface : ${Array.from({ length: 60 }, (_v, i) => `fn_${i}`).join(' -> ')}`;
+    expect(long.length).toBeGreaterThan(300);
+    // 플래그가 false면 길이가 길어도 완전한 체인이다(캡을 1200으로 올렸다)
+    const full = reconcileSitsDocTcs({ docTcs: [tc('T', long, false)], fn: 's_x', normTc: norm });
+    expect(full.rows[0].note).toBe('');
+    expect(full.rows[0].evidence).toMatch(/요구 경유로 조인/);
+    // 플래그가 true면 절단으로 본다
+    const cut = reconcileSitsDocTcs({ docTcs: [tc('T', long, true)], fn: 's_x', normTc: norm });
+    expect(cut.rows[0].note).toMatch(/콜체인 원문 절단/);
+  });
+
+  it('플래그 없는 구 job은 길이 휴리스틱으로 폴백(하위호환)', () => {
+    const legacy = { tc_id: 'T', description: `Interface : ${'a -> '.repeat(70)}b`, test_method: 'IFT' };
+    expect(legacy.description.length).toBeGreaterThan(300);
+    const r = reconcileSitsDocTcs({ docTcs: [legacy], fn: 's_x', normTc: norm });
+    expect(r.rows[0].note).toMatch(/콜체인 원문 절단/);
   });
 });

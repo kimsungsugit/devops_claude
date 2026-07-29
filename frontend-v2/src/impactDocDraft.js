@@ -503,16 +503,17 @@ export function reconcileSits({ docTcs, gen, varTypes, diffElems } = {}) {
 // SITS 원문 TC의 콜체인 텍스트. `_load_sits_fn_chains`(중간 JSON)는 `call_chain`을 주지만,
 // 원본 xlsm 폴백(`_load_testspec_by_tc`)은 "Interface : a -> b -> c"를 description/test_action에
 // 담아 온다 — 실사용에서는 이 폴백이 흔하다(SITS 빌더 미실행 시).
-// 백엔드가 필드별로 다른 상한으로 자른다 — 절단 판정은 **원본 필드 길이**로 해야 한다.
-// 추출된 체인 길이로 재면 "Interface : " 접두어만큼 짧아져 완전한 체인을 절단으로 오판한다.
-const SITS_FIELD_CAP = { call_chain: 200, description: 300, test_action: 300 };
+// 절단 여부는 **백엔드가 명시한 플래그**를 쓴다. 길이로 되짚으면 정확히 캡 길이인 완전한
+// 원문을 절단으로 오판한다(실측: 250자 완전 체인이 절단으로 찍혔다). 플래그가 없는 구 job만
+// 길이 휴리스틱으로 폴백한다(그 시절 캡: call_chain 200 / description·test_action 300).
+const SITS_LEGACY_CAP = { call_chain: 200, description: 300, test_action: 300 };
 
 function sitsChainOf(tc) {
   if (!tc || typeof tc !== 'object') return { chain: '', truncated: false };
   const pick = (field, raw) => {
     const s = String(raw || '');
-    // 상한에 정확히 닿았으면 잘렸다고 본다(1~2자 여유는 두지 않는다 — 캡은 정확히 [:N]이다).
-    const truncated = s.length >= SITS_FIELD_CAP[field];
+    const flag = tc[`${field === 'call_chain' ? 'chain' : field}_truncated`];
+    const truncated = flag === undefined ? s.length >= SITS_LEGACY_CAP[field] : !!flag;
     const m = s.match(/interface\s*:?\s*(.+)/is);
     const chain = (m && m[1].includes('->')) ? m[1].trim() : (s.includes('->') ? s.trim() : '');
     return chain ? { chain, truncated } : null;
@@ -549,20 +550,35 @@ const SITS_FOCUS = {
  * ⚠ 콜체인 텍스트는 백엔드가 200~300자로 자른다 — 변경 함수가 안 보인다고 "영향 없음"이라
  *   단정하지 않는다(절단된 뒤쪽에 있을 수 있다). 그 경우는 '확인 필요'로 남긴다.
  */
-export function reconcileSitsDocTcs({ docTcs, fn, changeType, diffElems } = {}) {
+export function reconcileSitsDocTcs({ docTcs, fn, changeType, diffElems, join, normTc } = {}) {
   const tcs = (Array.isArray(docTcs) ? docTcs : []).filter((t) => t && typeof t === 'object');
   const target = String(fn || '').trim().toLowerCase();
   const { touched } = globalSets(diffElems);
   const focus = SITS_FOCUS[String(changeType || '').toUpperCase()] || '변경 반영 여부 확인';
+  // 추적성 조인 근거 — 백엔드가 파싱한 **전체 콜체인**(`chain_fns`) 기준이라 절단이 없다.
+  // 화면용 텍스트로 재추론하면 300자 뒤의 함수를 못 찾아 전부 '검증필요'가 된다(실측).
+  const byChain = (join && join.chain) || new Set();
+  const byUnit = (join && join.unit) || new Set();
+  const norm = typeof normTc === 'function' ? normTc : ((s) => String(s || '').replace(/\s+/g, '').toUpperCase());
 
   const rows = tcs.map((tc, i) => {
     const { chain, truncated } = sitsChainOf(tc);
     const fns = chainFns(chain);
+    const nk = norm(tc.tc_id);
+    // 우선순위: 추적성 조인(정확) → 표시 텍스트 매칭(보조) → 전역 → 미확정
+    const joinedByChain = byChain.has(nk);
+    const joinedByUnit = byUnit.has(nk);
     const inChain = !!target && fns.has(target);
     const gHit = [...touched].filter((g) => chain.toLowerCase().includes(String(g).toLowerCase()));
     let verdict;
     let evidence;
-    if (inChain) {
+    if (joinedByChain) {
+      verdict = VERDICT.REVERIFY;
+      evidence = '콜체인에 변경 함수 포함(추적성 전체 체인 기준)';
+    } else if (joinedByUnit) {
+      verdict = VERDICT.REVERIFY;
+      evidence = '이 통합시험의 단위(SwUFn) 진입 함수';
+    } else if (inChain) {
       verdict = VERDICT.REVERIFY;
       evidence = '콜체인에 변경 함수 포함';
     } else if (gHit.length) {
@@ -572,7 +588,7 @@ export function reconcileSitsDocTcs({ docTcs, fn, changeType, diffElems } = {}) 
       verdict = VERDICT.UNKNOWN;
       evidence = truncated
         ? '콜체인 원문이 절단됨 — 포함 여부 미확정'
-        : '요구/단위 경유로 조인 — 콜체인에서 직접 확인 불가';
+        : '요구 경유로 조인 — 콜체인에서 직접 확인 불가';
     }
     return {
       key: `tc-${i}`,

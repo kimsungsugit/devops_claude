@@ -3508,7 +3508,8 @@ describe('ImpactGuideSection — SITS 원문 TC 재검증 표', () => {
     // 원문 콜체인이 화살표로 표시되고, 변경 함수가 그 안에 있으므로 재검증 + 근거
     expect(within(dialog).getAllByText(/s_Ap_ExecuteControlFunctions → g_Ap_MotorCtrl_GetComSpeed/).length).toBeGreaterThanOrEqual(1);
     expect(within(dialog).getAllByText('재검증').length).toBeGreaterThanOrEqual(1);
-    expect(within(dialog).getByText(/콜체인에 변경 함수 포함/)).toBeInTheDocument();
+    // 근거는 조인 경로별로 다르다 — 추적성(전체 체인) / 단위 진입 / 표시 텍스트 매칭
+    expect(within(dialog).getByText(/콜체인에 변경 함수 포함|단위\(SwUFn\) 진입 함수/)).toBeInTheDocument();
     // HEADER 변경이므로 인터페이스 의존성 축을 지목
     expect(within(dialog).getAllByText(/인터페이스 의존성/).length).toBeGreaterThanOrEqual(1);
     // 값 제안으로 오독하지 않도록 명시

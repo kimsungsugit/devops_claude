@@ -1042,7 +1042,20 @@ def _shrink_doc_content(
                             cols[side] = lst[:kv_n]
                             cols["truncated"] = True
         for tc in (doc_content.get("sits_by_tc") or {}).values():
-            subs = tc.get("sub_cases") if isinstance(tc, dict) else None
+            if not isinstance(tc, dict):
+                continue
+            # 콜체인 텍스트는 상한을 1200으로 올렸다(실측 34%가 300에서 잘렸다). 예산 초과 시엔
+            # 여기서 되돌리되 **절단 사실을 기록**한다 — 안 그러면 화면이 "포함 여부 미확정"을
+            # 근거 없이 말하거나, 반대로 잘린 체인을 완전한 것으로 오독한다.
+            _txt_cap = 600 if kv_n >= 8 else 300
+            for _f, _flag in (("call_chain", "chain_truncated"),
+                              ("description", "description_truncated"),
+                              ("test_action", "test_action_truncated")):
+                _v = tc.get(_f)
+                if isinstance(_v, str) and len(_v) > _txt_cap:
+                    tc[_f] = _v[:_txt_cap]
+                    tc[_flag] = True
+            subs = tc.get("sub_cases")
             if not isinstance(subs, list):
                 continue
             del subs[sub_n:]
@@ -1108,6 +1121,20 @@ def _shrink_doc_content(
                 "— 해당 함수 카드는 [전체 초안 불러오기]로 조회"
             )
     return doc_content
+
+
+# 통합 콜체인 텍스트 상한. 실측(실 job 4,194건): 중앙값 182자인데 **34%가 300 캡에 걸려**
+# 잘려 나갔다("… -> u32g_Fra" 처럼 함수명 중간에서 끊긴다). 잘린 뒤쪽에 변경 함수가 있으면
+# 화면이 "포함 여부 미확정"밖에 말할 수 없으므로 상한을 넉넉히 잡는다(≈40 hop).
+# 예산 초과 시엔 `_shrink_doc_content`가 다시 줄이되 **절단 사실을 기록**한다.
+_CHAIN_TEXT_CAP = 1200
+
+
+def _cap_text(s: Any, cap: int) -> tuple:
+    """(잘린 문자열, 잘렸는지). 길이 추측 대신 **절단 사실을 그대로 실어 보내기 위한** 헬퍼 —
+    소비처가 `len(s) >= cap` 으로 되짚으면 정확히 cap 길이인 원문을 절단으로 오판한다."""
+    t = str(s or "").strip()
+    return (t[:cap], len(t) > cap)
 
 
 def _normTc(s: Any) -> str:
@@ -1199,8 +1226,10 @@ def _load_sits_fn_chains(
                     }
                     for sc in _all_subs[:sub_cap]
                 ]
+                _chain_txt, _chain_cut = _cap_text(chain, _CHAIN_TEXT_CAP)
                 content_sink[_nk] = {
-                    "call_chain": chain[:200],
+                    "call_chain": _chain_txt,
+                    "chain_truncated": _chain_cut,
                     "sub_cases": _subs,
                     "sub_total": len(_all_subs),   # 절단 전 실제 개수(silent 절단 금지)
                     "entry_fn": entry,
@@ -1265,12 +1294,19 @@ def _load_testspec_by_tc(
             continue
         if len(out) >= 800:
             break
+        # ⚠ SITS 폴백 shape에서는 통합 콜체인("Interface : a -> b -> …")이 description/test_action에
+        #   담겨 온다. 300자 캡이면 실 데이터의 34%가 함수명 중간에서 잘려 변경 함수 포함 여부를
+        #   판정할 수 없다(실측 4,194건, 중앙값 182·최대가 정확히 300) → 체인 상한을 따로 준다.
+        _desc, _desc_cut = _cap_text(getattr(e, "description", ""), _CHAIN_TEXT_CAP)
+        _act, _act_cut = _cap_text(getattr(e, "test_action", ""), _CHAIN_TEXT_CAP)
         out[nk] = {
-            "description": str(getattr(e, "description", "") or "").strip()[:300],
+            "description": _desc,
+            "description_truncated": _desc_cut,
             "precondition": str(getattr(e, "precondition", "") or "").strip()[:200],
             "test_method": str(getattr(e, "test_method", "") or "").strip()[:60],
             "unit_name": str(getattr(e, "unit_name", "") or "").strip()[:80],
-            "test_action": str(getattr(e, "test_action", "") or "").strip()[:300],
+            "test_action": _act,
+            "test_action_truncated": _act_cut,
             "expected": str(getattr(e, "expected", "") or "").strip()[:300],
         }
     return out
