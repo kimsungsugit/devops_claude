@@ -60,6 +60,7 @@ docs/*
 !docs/rounds/
 !docs/builders/
 !docs/api/
+!docs/plans/
 !docs/admin-operations.md
 project_docs/
 *.log
