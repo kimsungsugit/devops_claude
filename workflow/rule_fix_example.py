@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, Optional, Sequence
 
 from workflow.summary_ai_insight import _extract_json_payload, resolve_effective_model
 
@@ -42,23 +42,38 @@ def _identifiers(text: str) -> set:
     return {m.group(0).lower() for m in _IDENT_RE.finditer(text or "")}
 
 
-def hallucination_check(example: Dict[str, Any], diff_text: str, rule: str) -> Optional[str]:
-    """예시가 입력 근거를 벗어나면 사유 문자열 반환(폐기), 통과면 None."""
-    echoed_rule = str(example.get("rule") or "").strip()
+def code_hallucination_check(
+    payload: Dict[str, Any], evidence_text: str, rule: str, *, code_keys: Sequence[str],
+) -> Optional[str]:
+    """LLM 산출물의 코드가 입력 근거를 벗어나면 사유 문자열 반환(폐기), 통과면 None.
+
+    **판정 로직의 단일 출처** — 산출물 종류(fix 예시 / 룰 초안 / 상충 지침)마다 코드 키
+    이름만 다르고 판정은 같다. 예전엔 같은 로직이 모듈마다 복제돼 있었고, 그런 복제는
+    한쪽만 고쳐져 조용히 갈라진다(이 저장소가 ruff/eslint ratchet 에서 이미 겪었다).
+    rule 에코가 어긋나면(다른 규칙 이야기를 하고 있으면) 그 자체로 폐기 사유다.
+    """
+    echoed_rule = str(payload.get("rule") or "").strip()
     if echoed_rule and echoed_rule != rule:
         return "rule_echo_mismatch"
-    allowed = _identifiers(diff_text) | _C_COMMON
-    for key in ("avoid_pattern", "compliant_pattern"):
-        code = str(example.get(key) or "")
+    allowed = _identifiers(evidence_text) | _C_COMMON
+    for key in code_keys:
+        code = str(payload.get(key) or "")
         if not code.strip():
             continue
         idents = _identifiers(code)
         unknown = {i for i in idents if i not in allowed}
         # 새 지역 변수명 한둘은 허용(설명용 예시) — 그러나 절반 이상이 미지 식별자면
-        # diff와 무관한 코드를 지어낸 것으로 간주한다.
+        # 근거와 무관한 코드를 지어낸 것으로 간주한다.
         if idents and len(unknown) > max(2, len(idents) // 2):
             return "hallucinated_identifiers"
     return None
+
+
+def hallucination_check(example: Dict[str, Any], diff_text: str, rule: str) -> Optional[str]:
+    """예시가 입력 근거를 벗어나면 사유 문자열 반환(폐기), 통과면 None."""
+    return code_hallucination_check(
+        example, diff_text, rule, code_keys=("avoid_pattern", "compliant_pattern"),
+    )
 
 
 def generate_fix_example(

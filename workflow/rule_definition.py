@@ -17,7 +17,7 @@ import json
 import logging
 from typing import Any, Callable, Dict, List, Optional
 
-from workflow.rule_fix_example import _C_COMMON, _identifiers
+from workflow.rule_fix_example import code_hallucination_check
 from workflow.summary_ai_insight import _extract_json_payload, resolve_effective_model
 
 logger = logging.getLogger(__name__)
@@ -33,21 +33,13 @@ RULE_DEFINITION_NOTE = (
 def definition_hallucination_check(
     definition: Dict[str, Any], evidence_text: str, rule: str
 ) -> Optional[str]:
-    """초안이 입력 근거를 벗어나면 사유 문자열 반환(폐기), 통과면 None."""
-    echoed = str(definition.get("rule") or "").strip()
-    if echoed and echoed != rule:
-        return "rule_echo_mismatch"
-    allowed = _identifiers(evidence_text) | _C_COMMON
-    for key in ("avoid_pattern", "comply_pattern"):
-        code = str(definition.get(key) or "")
-        if not code.strip():
-            continue
-        idents = _identifiers(code)
-        unknown = {i for i in idents if i not in allowed}
-        # 설명용 지역 변수 한둘은 허용 — 과반이 미지 식별자면 증거 밖 코드를 지어낸 것.
-        if idents and len(unknown) > max(2, len(idents) // 2):
-            return "hallucinated_identifiers"
-    return None
+    """초안이 입력 근거를 벗어나면 사유 문자열 반환(폐기), 통과면 None.
+
+    판정은 `code_hallucination_check` 단일 출처 — 여기선 이 산출물의 코드 키만 지정한다.
+    """
+    return code_hallucination_check(
+        definition, evidence_text, rule, code_keys=("avoid_pattern", "comply_pattern"),
+    )
 
 
 def build_evidence_text(

@@ -18,6 +18,7 @@ import {
   UnresolvedEvidenceCard,
   WindowChangesCard,
 } from './RuleEvidenceCards.jsx';
+import { TierBadge } from './RuleConflictPanel.jsx';
 
 // 미해소 분류 — 구간 증거(변경에도 위반 유지 vs 무변경 잔존) 확장 대상(J2).
 const UNRESOLVED_CLASSES = new Set(['increasing', 'persistent', 'new_recent']);
@@ -144,7 +145,37 @@ function FixExampleCard({ jobUrl, cacheRoot, rule, file }) {
   );
 }
 
-export default function RuleTrendPanel({ jobUrl, cacheRoot, defaultOpen = true }) {
+/**
+ * 이 규칙을 고칠 때 걸릴 수 있는 규칙 — 상충 데이터(부모가 1회 조회)의 규칙별 발췌.
+ * 여기서 조회하지 않는다: 같은 값을 상충 패널도 쓰므로 부모가 한 번만 받아 내려준다.
+ */
+function ConflictHints({ hints, onFocus }) {
+  if (!hints?.length) return null;
+  return (
+    <div style={{ marginTop: 6, paddingTop: 4, borderTop: '1px dashed var(--border)' }}>
+      {hints.map((h) => (
+        <div key={h.id} style={{ ...xs, display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+          <TierBadge tier={h.tier} />
+          <span style={{ color: 'var(--color-warning)' }}>⚠ 이 룰을 고치면 걸릴 수 있음:</span>
+          <span>
+            {h.risk.length > 0 ? h.risk.join(' · ') : '규칙이 아닌 프로세스 요구와 충돌'}
+            {h.metricRisk?.length > 0 && ` (메트릭 ${h.metricRisk.join('·')} 상승)`}
+          </span>
+          {onFocus && (
+            <button type="button" onClick={() => onFocus(h.id)}
+              style={{ ...xs, padding: '1px 7px', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', background: 'transparent', cursor: 'pointer', color: 'var(--text-muted)' }}>
+              상충 패널에서 보기
+            </button>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+export default function RuleTrendPanel({
+  jobUrl, cacheRoot, defaultOpen = true, conflictHints, onFocusConflict,
+}) {
   const [data, setData] = useState(null);
   const [error, setError] = useState('');
   const [expandedRule, setExpandedRule] = useState(null);
@@ -238,7 +269,10 @@ export default function RuleTrendPanel({ jobUrl, cacheRoot, defaultOpen = true }
                   const hasUnresolved = UNRESOLVED_CLASSES.has(r.classification)
                     && (r.files_latest || []).length > 0
                     && !!range && unresolvedFrom != null && unresolvedFrom !== range.to_build;
-                  const expandable = hasFix || hasOnset || hasUnresolved;
+                  // 상충만 있고 파일 증거가 없는 규칙도 펼칠 수 있어야 한다 — 안 그러면
+                  // "고치면 걸린다"는 정보가 행에 표시되고도 열 수 없는 죽은 마커가 된다.
+                  const hints = conflictHints?.[r.rule] || [];
+                  const expandable = hasFix || hasOnset || hasUnresolved || hints.length > 0;
                   const expanded = expandedRule === r.rule;
                   return (
                     <Fragment key={r.rule}>
@@ -255,6 +289,13 @@ export default function RuleTrendPanel({ jobUrl, cacheRoot, defaultOpen = true }
                             <div style={{ ...xs, color: 'var(--text-muted)', fontWeight: 400 }}
                               title="이전 빌드에는 이 규칙이 규칙셋에 없어(또는 비활성) 검사되지 않았습니다 — 그 구간은 '위반 0'이 아니라 미측정입니다">
                               #{r.applied_from_build}부터 규칙 적용
+                            </div>
+                          )}
+                          {/* 접힌 상태에서도 보이는 마커 — 펼쳐야만 알 수 있으면 조망이 안 된다. */}
+                          {hints.length > 0 && (
+                            <div style={{ ...xs, color: 'var(--color-warning)', fontWeight: 400 }}
+                              title={`고칠 때 걸릴 수 있는 규칙: ${hints.flatMap((h) => h.risk).join(', ') || '규칙 아닌 프로세스 요구'}`}>
+                              ⚠ 상충 {hints.length}건
                             </div>
                           )}
                         </td>
@@ -346,6 +387,7 @@ export default function RuleTrendPanel({ jobUrl, cacheRoot, defaultOpen = true }
                                 )}
                               </>
                             )}
+                            <ConflictHints hints={hints} onFocus={onFocusConflict} />
                             <RuleDefinitionCard jobUrl={jobUrl} cacheRoot={cacheRoot} rule={r.rule} />
                           </td>
                         </tr>

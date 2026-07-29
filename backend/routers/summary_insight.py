@@ -886,6 +886,188 @@ def summary_coding_rulebook(req: dict) -> Dict[str, Any]:
     return {**payload, "cached": False}
 
 
+CONFLICT_ADVICE_CACHE_NAME = "summary_rule_conflict_advice_cache.json"
+_CONFLICT_ADVICE_LOCK = threading.Lock()
+
+
+@router.post("/api/summary/rule-conflicts")
+def summary_rule_conflicts(req: dict) -> Dict[str, Any]:
+    """룰 상충 후보 + 애매한 지점(결정론, LLM 0회).
+
+    "이 규칙을 고치면 저 규칙에 걸린다"를 큐레이션 지식(config/misra_rule_conflicts.json)과
+    이 빌드의 관측(동시 위반·구간 변화·HIS 메트릭 여유)으로 판정한다. 상대 규칙이 규칙셋에
+    없거나 비활성이면 후보에서 제외 — 그 규칙으로는 걸릴 수 없으므로 경고가 헛것이 된다.
+    """
+    from backend.services.rule_conflict import DEFAULT_MAX_CONFLICTS, compute_rule_conflicts
+
+    body = req or {}
+    job_url = str(body.get("job_url") or "").strip()
+    if not job_url:
+        return {"ok": True, "available": False, "reason": "job_url_required"}
+    cache_root = _normalize_jenkins_cache_root(str(body.get("cache_root") or ""))
+    limit = _to_int(body.get("limit")) or 15
+    max_conflicts = _to_int(body.get("max_conflicts")) or DEFAULT_MAX_CONFLICTS
+    return compute_rule_conflicts(
+        job_url=job_url, cache_root=cache_root,
+        limit=max(2, min(limit, 50)), max_conflicts=max(5, min(max_conflicts, 100)),
+    )
+
+
+def _collect_conflict_evidence(
+    conflict: Dict[str, Any], metas: List[Dict[str, Any]], to_meta: Optional[Dict[str, Any]],
+    *, max_excerpts: int = 2, max_diffs: int = 2, excerpt_bytes: int = 2200,
+) -> tuple:
+    """상충 1건의 코드 증거 — ①두 규칙이 함께 위반된 파일 발췌 ②구간 diff.
+
+    파일 귀속이 없는 항목(RCMA류)은 스냅샷에 실체가 없으므로 미리 걸러 슬롯을 뺏기지
+    않게 한다(rule-definition의 `_collect_rule_evidence`와 같은 이유). 반환 (excerpts, diffs).
+    """
+    from backend.services.build_inventory import find_build_meta
+    from backend.services.prqa_rule_trend import is_cross_module_key
+    from backend.services.rule_fix_examples import collect_fix_evidence, resolve_snapshot_file
+
+    def _real(entries: Any) -> List[Dict[str, Any]]:
+        return [
+            e for e in (entries or [])
+            if isinstance(e, dict) and e.get("scope") != "cross_module"
+            and not is_cross_module_key(str(e.get("file") or ""))
+        ]
+
+    evidence = conflict.get("evidence") or {}
+    excerpts: List[Dict[str, Any]] = []
+    if to_meta is not None:
+        for e in _real(evidence.get("cooccurrence"))[:max_excerpts]:
+            p = resolve_snapshot_file(Path(str(to_meta.get("build_root"))), str(e.get("file") or ""))
+            if p is None:
+                continue
+            try:
+                text = p.read_text(encoding="utf-8", errors="ignore")[:excerpt_bytes]
+            except OSError:
+                continue
+            if text.strip():
+                excerpts.append({"file": e.get("file"), "text": text})
+    diffs: List[Dict[str, Any]] = []
+    for w in _real(evidence.get("windows"))[:max_diffs]:
+        fm = find_build_meta(metas, w.get("from_build"))
+        tm = find_build_meta(metas, w.get("to_build"))
+        if fm is None or tm is None:
+            continue
+        ev = collect_fix_evidence(
+            from_build_root=Path(str(fm.get("build_root"))),
+            to_build_root=Path(str(tm.get("build_root"))),
+            file=str(w.get("file") or ""),
+        )
+        if ev.get("ok"):
+            diffs.append({"file": w.get("file"), "text": ev["diff"]["text"], "diff_sha": ev["diff_sha"]})
+    return excerpts, diffs
+
+
+@router.post("/api/summary/rule-conflict-advice")
+def summary_rule_conflict_advice(req: dict) -> Dict[str, Any]:
+    """상충 1건의 해결 지침(LLM on-demand) — 둘 다 만족하는 작성·처리 순서·예외 후보.
+
+    코드 증거 0건이면 no_code_evidence 거부(일반론 지침 차단) — rule-definition과 같은
+    게이트다. probe/force/캐시 규약도 동일. 지식 테이블의 mechanism·resolutions는 결정론
+    산출이라 LLM 실패 시에도 rule-conflicts 응답에 이미 들어 있다.
+    """
+    import hashlib as _hashlib
+
+    from backend.services.build_inventory import find_build_meta, list_cached_builds_meta
+    from backend.services.rule_conflict import compute_rule_conflicts
+    from workflow.rule_conflict_advice import (
+        CONFLICT_ADVICE_NOTE,
+        CONFLICT_ADVICE_PROMPT_VERSION,
+        generate_conflict_advice,
+    )
+
+    body = req or {}
+    job_url = str(body.get("job_url") or "").strip()
+    conflict_id = str(body.get("conflict_id") or "").strip()
+    if not job_url or not conflict_id:
+        return {"ok": True, "available": False, "reason": "params_required"}
+    cache_root = _normalize_jenkins_cache_root(str(body.get("cache_root") or ""))
+
+    computed = compute_rule_conflicts(job_url=job_url, cache_root=cache_root, max_conflicts=100)
+    if not computed.get("available"):
+        return {"ok": True, "available": False, "reason": computed.get("reason") or "no_cached_build"}
+    conflict = next(
+        (c for c in computed.get("conflicts") or [] if c.get("id") == conflict_id), None
+    )
+    if conflict is None:
+        return {"ok": True, "available": False, "reason": "conflict_not_found", "conflict_id": conflict_id}
+
+    metas = list_cached_builds_meta(job_url=job_url, cache_root=cache_root)
+    to_meta = find_build_meta(metas, computed.get("build_number"))
+    excerpts, diffs = _collect_conflict_evidence(conflict, metas, to_meta)
+    if not excerpts and not diffs:
+        # 증거 0건의 사유를 구분한다 — 파일 귀속이 원리적으로 없는 상충(RCMA류 집계만)과
+        # '스냅샷을 못 찾음'은 사용자가 취할 조치가 다르다.
+        ev = conflict.get("evidence") or {}
+        observed = (ev.get("cooccurrence") or []) + (ev.get("windows") or [])
+        only_pseudo = bool(observed) and all(e.get("scope") == "cross_module" for e in observed)
+        return {
+            "ok": True, "available": False, "conflict_id": conflict_id,
+            "reason": "cross_module_only" if only_pseudo else "no_code_evidence",
+            "evidence_tier": conflict.get("tier"),
+        }
+
+    model = _expected_insight_model() or ""
+    ex_sha = _hashlib.sha256(
+        "\n".join(e["text"] for e in excerpts).encode("utf-8", "ignore")
+    ).hexdigest()[:16]
+    # ⚠ 지식 테이블 내용도 지문에 넣는다 — mechanism·resolutions가 그대로 프롬프트에
+    #    들어가므로, 테이블만 고치면 코드 증거는 그대로라 키가 안 바뀌고 낡은 지침이 서빙된다.
+    #    (테이블의 version 필드는 수동이라 편집 시 안 올릴 수 있어 근거로 삼지 않는다.)
+    table_sha = _hashlib.sha256(json.dumps({
+        k: conflict.get(k) for k in ("kind", "mechanism", "resolutions", "deviation_hint", "metric_risk")
+    }, ensure_ascii=False, sort_keys=True).encode("utf-8", "ignore")).hexdigest()[:16]
+    key = _hashlib.sha256("|".join([
+        conflict_id, model, str(CONFLICT_ADVICE_PROMPT_VERSION),
+        ",".join(sorted(d["diff_sha"] for d in diffs)), ex_sha, table_sha,
+    ]).encode()).hexdigest()
+    cache_path = (
+        Path(str(to_meta.get("reports_dir"))) / CONFLICT_ADVICE_CACHE_NAME if to_meta is not None else None
+    )
+    hit = None
+    if cache_path is not None:
+        with _CONFLICT_ADVICE_LOCK:
+            hit = _fix_cache_load(cache_path).get(key)
+    if hit and not bool(body.get("force")):
+        return {**hit, "cached": True}
+    if bool(body.get("probe")):
+        return {
+            "ok": True, "available": True, "cached": False, "conflict_id": conflict_id,
+            "evidence_used": {"cooccurrence_excerpts": len(excerpts), "window_diffs": len(diffs)},
+        }
+
+    gen = generate_conflict_advice(
+        conflict=conflict, cooccurrence_excerpts=excerpts, window_diffs=diffs,
+    )
+    payload: Dict[str, Any] = {
+        "ok": True, "available": True, "reason": None,
+        "conflict_id": conflict_id,
+        "fixing": [m.get("rule") for m in conflict.get("fixing") or []],
+        "risk": [m.get("rule") for m in conflict.get("risk") or []],
+        "evidence_tier": conflict.get("tier"),
+        "evidence_used": {"cooccurrence_excerpts": len(excerpts), "window_diffs": len(diffs)},
+        "evidence_files": [e["file"] for e in excerpts] + [d["file"] for d in diffs],
+        "note": CONFLICT_ADVICE_NOTE,
+        "advice": gen["advice"],
+        "ai_enriched": gen["ai_enriched"],
+        "enrich_reason": gen["enrich_reason"],
+        "model": gen["model"],
+        "prompt_version": CONFLICT_ADVICE_PROMPT_VERSION,
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+    }
+    if cache_path is not None:
+        # RMW 원자화(락) — LLM 호출 밖에서 재로드(형제 엔트리 lost-update 방지).
+        with _CONFLICT_ADVICE_LOCK:
+            entries = _fix_cache_load(cache_path)
+            entries[key] = payload
+            _fix_cache_store(cache_path, entries)
+    return {**payload, "cached": False}
+
+
 def _job_slug_label(job_url: str) -> str:
     """문서 제목용 프로젝트 라벨 — job URL 마지막 세그먼트."""
     parts = [p for p in str(job_url or "").replace("\\", "/").split("/") if p and p != "job"]

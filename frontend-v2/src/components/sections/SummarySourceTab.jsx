@@ -1,19 +1,28 @@
+import { useEffect, useMemo, useState } from 'react';
+import { post } from '../../api.js';
 import { HorizontalBar, TrendLine } from '../charts.jsx';
 import SummaryPanel from './SummaryPanel.jsx';
 import RuleTrendPanel from './RuleTrendPanel.jsx';
+import RuleConflictPanel from './RuleConflictPanel.jsx';
 import CodingRulebookPanel from './CodingRulebookPanel.jsx';
 import FunctionCoveragePanel from './FunctionCoveragePanel.jsx';
 import TestDesignPanel from './TestDesignPanel.jsx';
 import { SHOW, fmtInt } from './summaryCommon.js';
 
 /**
- * 소스코드 서브탭 — 정적분석 위반·룰 변화·함수별 커버리지.
+ * 소스코드 서브탭 — 정적분석 위반·룰 변화·룰 상충·함수별 커버리지.
  *
  * PRQA 트렌드와 위반 상세는 별도 컴포넌트가 아니라 여기 인라인이다(부모가 이미 받아 둔
  * `prqaTrend`·`kpis.prqa` 를 쓰므로 추가 조회가 없다).
  *
  * ⚠ 트렌드 조회 실패를 로딩으로 위장하지 않는다 — 예전엔 catch 가 침묵이라 실패하면
  *   "PRQA 트렌드 불러오는 중…" 이 영구히 남아, 사용자는 영원히 기다렸다.
+ *
+ * ⚠ **룰 상충은 여기서 한 번만 조회한다.** 룰 트렌드 표의 '이 룰을 고치면' 인라인과 상충
+ *   패널이 같은 값을 써야 하고, 각자 부르면 서버에서 `compute_rule_trend` 가 두 번 돈다
+ *   (이 탭은 이미 그 낭비를 백로그로 남긴 적이 있다). 조회는 이 탭에 두되 — 소스코드 탭
+ *   전용 데이터라 다른 탭의 배너를 비우지 않는다 — 에러 상태도 **함께** 내려보낸다.
+ *   안 내려보내면 패널이 '값 없음'과 '못 읽음'을 구분하지 못한다.
  */
 
 /** 위반 상위 규칙/파일 표시 상한 — 넘으면 총계를 각주로 낸다. */
@@ -32,6 +41,47 @@ export default function SummarySourceTab({
   const hasTrend = !!prqaTrend?.available && trendBuilds.length > 0;
   const hasViolationDetail = (Array.isArray(prqa.top_rules) && prqa.top_rules.length > 0)
     || (Array.isArray(prqa.top_files) && prqa.top_files.length > 0);
+
+  const [conflicts, setConflicts] = useState(null);
+  const [conflictsError, setConflictsError] = useState('');
+  const [conflictsToken, setConflictsToken] = useState(0);
+  // 룰 트렌드 행에서 '상충 패널에서 보기'를 누르면 그 상충을 펼친 채로 패널을 연다.
+  // nonce 를 함께 올린다 — id 만 쓰면 사용자가 패널을 접은 뒤 **같은** 버튼을 다시 눌렀을 때
+  // key 가 그대로라 아무 반응이 없는 죽은 버튼이 된다.
+  const [focus, setFocus] = useState({ id: '', nonce: 0 });
+
+  useEffect(() => {
+    if (!jobUrl) return undefined;
+    let cancelled = false;
+    (async () => {
+      try {
+        const resp = await post('/api/summary/rule-conflicts', {
+          job_url: jobUrl, cache_root: cacheRoot, limit: 15,
+        });
+        if (!cancelled) { setConflicts(resp); setConflictsError(''); }
+      } catch (e) {
+        if (!cancelled) setConflictsError(String(e?.message || e));
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [jobUrl, cacheRoot, conflictsToken]);
+
+  // 규칙 → 그 규칙을 고칠 때 걸릴 수 있는 것들. 룰 트렌드 표가 행마다 조회하는 인덱스라
+  // 서버 by_rule(규칙→상충 id)만으로는 부족하다(위험 규칙 이름과 등급까지 필요).
+  const conflictHints = useMemo(() => {
+    const out = {};
+    for (const c of conflicts?.conflicts || []) {
+      for (const m of c.fixing || []) {
+        if (!out[m.rule]) out[m.rule] = [];
+        out[m.rule].push({
+          id: c.id, tier: c.tier, kind: c.kind,
+          risk: (c.risk || []).map((r) => r.rule),
+          metricRisk: c.metric_risk || [],
+        });
+      }
+    }
+    return out;
+  }, [conflicts]);
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--sp-3)' }}>
@@ -139,7 +189,19 @@ export default function SummarySourceTab({
       </SummaryPanel>
 
       {/* 룰 트렌드 — 빌드별 위반 변화 분류 + 실제 fix 근거 작성 예시 */}
-      <RuleTrendPanel jobUrl={jobUrl} cacheRoot={cacheRoot} defaultOpen={false} />
+      <RuleTrendPanel jobUrl={jobUrl} cacheRoot={cacheRoot} defaultOpen={false}
+        conflictHints={conflictHints}
+        onFocusConflict={(id) => setFocus((f) => ({ id, nonce: f.nonce + 1 }))} />
+
+      {/* 룰 상충·판단 지점 — 고치면 걸릴 룰 + 숫자만으로 판단하면 안 되는 곳
+          ⚠ key 에 focus 를 넣어 '상충 패널에서 보기'가 패널을 펼친 채 재마운트하게 한다.
+             SummaryPanel 의 열림은 defaultOpen 초기값이라 외부에서 나중에 열 수 없다.
+             데이터는 이 부모가 쥐고 있으므로 재마운트로 재조회가 나지 않는다. */}
+      <RuleConflictPanel key={`conflict-${focus.id}-${focus.nonce}`}
+        jobUrl={jobUrl} cacheRoot={cacheRoot}
+        data={conflicts} error={conflictsError}
+        onRetry={() => { setConflictsError(''); setConflictsToken((n) => n + 1); }}
+        defaultOpen={!!focus.id} focusId={focus.id} />
 
       {/* 코딩 룰북 초안 — 위반 규칙을 카테고리로 묶어 문서화 (Q4) */}
       <CodingRulebookPanel jobUrl={jobUrl} cacheRoot={cacheRoot} defaultOpen={false} />
