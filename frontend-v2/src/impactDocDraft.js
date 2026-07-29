@@ -555,6 +555,25 @@ function sitsChainOf(tc) {
     || { chain: '', truncated: false };
 }
 
+/** 조인 근거를 Set으로 정규화한다. Set·배열·이터러블을 받고, 그 외 truthy는 **유실**로 본다.
+ *
+ * 호출부의 `guide`는 localStorage에 JSON으로 영속된다 → `JSON.stringify(new Set(['A']))`는
+ * `"{}"`. 복원된 `{}`는 truthy라 `(join && join.chain) || new Set()` 폴백을 그대로 통과하고
+ * 바로 다음 `.has()`에서 TypeError로 터진다(실사용 크래시). 생산측을 배열로 고쳤지만 이
+ * 모듈은 순수 함수라 호출부 형태를 신뢰하지 않는다.
+ *
+ * 그리고 **유실을 침묵시키지 않는다**: "근거가 있었는데 직렬화로 사라진 것"과 "애초에 조인이
+ * 없던 것"은 화면에서 다른 말을 해야 한다. 조용히 빈 Set으로 강등하면 구 저장분을 복원한
+ * 사용자는 크래시 대신 **이유 없이 줄어든 '재검증' 판정**을 보게 되는데, 그건 크래시보다
+ * 발견하기 어렵다(재분석하면 조인이 돌아온다는 사실도 알 길이 없다).
+ */
+function toJoinSet(v) {
+  if (v instanceof Set) return { set: v, lost: false };
+  if (Array.isArray(v)) return { set: new Set(v), lost: false };
+  if (v && typeof v[Symbol.iterator] === 'function') return { set: new Set(v), lost: false };
+  return { set: new Set(), lost: !!v };
+}
+
 // 콜체인 텍스트에서 함수명 토큰 추출(대소문자 무시 비교용).
 function chainFns(chain) {
   return new Set(String(chain || '').split(/\s*->\s*/).map((x) => x.trim().toLowerCase()).filter(Boolean));
@@ -588,8 +607,11 @@ export function reconcileSitsDocTcs({ docTcs, fn, changeType, diffElems, join, n
   const focus = SITS_FOCUS[String(changeType || '').toUpperCase()] || '변경 반영 여부 확인';
   // 추적성 조인 근거 — 백엔드가 파싱한 **전체 콜체인**(`chain_fns`) 기준이라 절단이 없다.
   // 화면용 텍스트로 재추론하면 300자 뒤의 함수를 못 찾아 전부 '검증필요'가 된다(실측).
-  const byChain = (join && join.chain) || new Set();
-  const byUnit = (join && join.unit) || new Set();
+  const _chainJoin = toJoinSet(join && join.chain);
+  const _unitJoin = toJoinSet(join && join.unit);
+  const byChain = _chainJoin.set;
+  const byUnit = _unitJoin.set;
+  const joinLost = _chainJoin.lost || _unitJoin.lost;
   const norm = typeof normTc === 'function' ? normTc : ((s) => String(s || '').replace(/\s+/g, '').toUpperCase());
 
   const rows = tcs.map((tc, i) => {
@@ -617,9 +639,11 @@ export function reconcileSitsDocTcs({ docTcs, fn, changeType, diffElems, join, n
       evidence = `콜체인에 변경 전역 포함(${gHit.slice(0, 2).join(', ')})`;
     } else {
       verdict = VERDICT.UNKNOWN;
-      evidence = truncated
-        ? '콜체인 원문이 절단됨 — 포함 여부 미확정'
-        : '요구 경유로 조인 — 콜체인에서 직접 확인 불가';
+      // 유실이 절단보다 앞선다 — 절단은 "문서를 열어 확인"이지만 유실은 "재분석하면 복구"라
+      // 사용자가 할 일이 다르다.
+      if (joinLost) evidence = '추적성 조인 근거가 저장분 복원에서 유실됨 — 재분석 필요';
+      else if (truncated) evidence = '콜체인 원문이 절단됨 — 포함 여부 미확정';
+      else evidence = '요구 경유로 조인 — 콜체인에서 직접 확인 불가';
     }
     return {
       key: `tc-${i}`,
@@ -641,6 +665,8 @@ export function reconcileSitsDocTcs({ docTcs, fn, changeType, diffElems, join, n
     rows,
     unknownTypes: [],
     newColumns: [],
+    // 카드가 배너로 표면화한다 — 판정이 조용히 약해진 채로 남지 않게.
+    joinLost,
     totals: { docShown: rows.length, docTotal: rows.length, proposed: rows.length },
   };
 }

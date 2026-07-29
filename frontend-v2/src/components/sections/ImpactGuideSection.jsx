@@ -1811,6 +1811,8 @@ export default function ImpactGuideSection({ analysisResult, job }) {
               // 판정은 "이 TC를 다시 봐야 하는가"이지 값 제안이 아니다 — 오독 방지.
               '값 제안이 아니라 **재검증 대상 판정**이다(통합 입력/기대값은 SITS 빌더 실행 후 생성)',
               draft.rows.some((r) => r.note) ? '일부 콜체인이 표시 상한으로 잘렸다 — 포함 여부를 단정하지 않는다' : '',
+              // 구 저장분(조인 근거를 Set으로 직렬화하던 시절) 복원 — 판정이 약해진 이유를 말한다.
+              draft.joinLost ? '추적성 조인 근거가 저장분에서 유실됐다 — 재분석하면 콜체인 기준 판정이 복구된다' : '',
             ].filter(Boolean)}
             prose={_prose}
             proseField="sits_description"
@@ -2424,9 +2426,14 @@ export default function ImpactGuideSection({ analysisResult, job }) {
           sutsTestCases: sutsTcList,
           sitsTestCases: [...sitsTcSet],
           // 조인 근거(정규화 TC ID) — 소비처가 절단된 표시 텍스트로 재추론하지 않게.
+          // ⚠ **배열로 담는다.** guide는 localStorage에 JSON으로 영속되는데
+          // `JSON.stringify(new Set(['A']))`는 `"{}"` 다 — 경고 없이 근거가 통째로 사라진다.
+          // 게다가 복원된 `{}`는 truthy라 소비처의 `|| new Set()` 폴백도 통과해 `.has()`에서
+          // TypeError로 터졌다(새로고침 후 탭 전체가 ErrorBoundary로 떨어짐). 위
+          // stsTestCases/sitsTestCases/requirements가 전부 `[...set]`인 것과 같은 이유다.
           sitsJoin: {
-            chain: new Set([...(fnToSitsByChain[_fnLc] || [])].map(_normTcId)),
-            unit: new Set([...(fnToSitsByUnit[_fnLc] || [])].map(_normTcId)),
+            chain: [...(fnToSitsByChain[_fnLc] || [])].map(_normTcId),
+            unit: [...(fnToSitsByUnit[_fnLc] || [])].map(_normTcId),
           },
         });
       }

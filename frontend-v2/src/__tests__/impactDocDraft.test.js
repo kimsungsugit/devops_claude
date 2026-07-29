@@ -737,6 +737,41 @@ describe('SITS 판정 — 추적성 조인 근거를 쓰고 절단은 백엔드 
     const r = reconcileSitsDocTcs({ docTcs: [legacy], fn: 's_x', normTc: norm });
     expect(r.rows[0].note).toMatch(/콜체인 원문 절단/);
   });
+
+  it('조인 근거를 배열로 받아도 동작한다 — guide는 JSON으로 영속되므로 배열이 정본이다', () => {
+    // ⚠ 회귀 가드: 생산측(ImpactGuideSection의 sitsJoin)이 Set을 담으면 localStorage 왕복에서
+    //   `{}`로 소멸한다. 그래서 배열이 계약이고, 이 테스트가 그 계약을 고정한다.
+    const r = reconcileSitsDocTcs({
+      docTcs: [tc('SwITC_1', 'Interface : a -> b')], fn: 's_x', changeType: 'BODY', normTc: norm,
+      join: { chain: ['SWITC_1'], unit: [] },
+    });
+    expect(r.rows[0].verdict).toBe(VERDICT.REVERIFY);
+    expect(r.rows[0].evidence).toMatch(/추적성 전체 체인 기준/);
+    expect(r.joinLost).toBe(false);
+  });
+
+  it('localStorage 왕복으로 조인이 `{}`가 돼도 크래시하지 않고 유실을 밝힌다', () => {
+    // 실사용 크래시 재현: `JSON.stringify(new Set(['A']))` === '{}' 이고, `{}`는 truthy라
+    // `|| new Set()` 폴백을 통과해 `.has()`에서 TypeError로 터졌다(탭 전체가 ErrorBoundary행).
+    const roundTripped = JSON.parse(JSON.stringify({ chain: new Set(['SWITC_1']), unit: new Set() }));
+    expect(roundTripped.chain).toEqual({});          // 손실이 실제로 일어남을 먼저 못박는다
+
+    const r = reconcileSitsDocTcs({
+      docTcs: [tc('SwITC_1', 'Interface : a -> b')], fn: 's_x', changeType: 'BODY', normTc: norm,
+      join: roundTripped,
+    });
+    expect(r.rows[0].verdict).toBe(VERDICT.UNKNOWN);  // 근거가 없으니 승격하지 않는다(안전측)
+    // 그렇다고 침묵하지도 않는다 — '원래 없었음'과 '유실됨'은 사용자가 할 일이 다르다.
+    expect(r.joinLost).toBe(true);
+    expect(r.rows[0].evidence).toMatch(/유실/);
+    expect(r.rows[0].evidence).toMatch(/재분석/);
+  });
+
+  it('조인 인자가 아예 없으면 유실이 아니다 — 오경보 금지', () => {
+    const r = reconcileSitsDocTcs({ docTcs: [tc('SwITC_1', 'Interface : a -> b')], fn: 's_x', normTc: norm });
+    expect(r.joinLost).toBe(false);
+    expect(r.rows[0].evidence).toMatch(/요구 경유로 조인/);
+  });
 });
 
 describe('비수치 값 — 문자열이 같으면 유지다 (W7)', () => {

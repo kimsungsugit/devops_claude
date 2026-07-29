@@ -2399,6 +2399,28 @@ describe('ImpactGuideSection — 빌드/리비전 소스 바 & 결과 영속', (
     });
   });
 
+  it('영속: guide에 담기는 조인 근거는 JSON-safe여야 한다 (Set은 `{}`로 소멸)', async () => {
+    // ⚠ 실사용 크래시 회귀 가드. `sitsJoin`을 `new Set(...)`으로 담았더니
+    // `JSON.stringify` 가 `"{}"` 로 만들어 **경고 없이** 근거가 사라졌고, 새로고침 후 복원된
+    // `{}` 가 소비처의 `.has()` 에서 TypeError → 탭 전체가 ErrorBoundary로 떨어졌다.
+    // 바로 옆 stsTestCases/sitsTestCases/requirements 가 전부 `[...set]` 인 이유가 이것이다.
+    render(<ImpactGuideSection job={mockJob} analysisResult={{ impactData: mkImpact() }} />);
+    // guide는 버튼으로만 생성된다 — 렌더만으로는 저장분에 details가 안 실려 vacuous pass가 된다.
+    fireEvent.click(screen.getByRole('button', { name: '상세 가이드 생성' }));
+
+    let details;
+    await waitFor(() => {
+      const saved = JSON.parse(localStorage.getItem(IMPACT_KEY) || 'null');
+      details = saved?.guide?.details;
+      // vacuous pass 방지 — 가이드가 실제로 저장됐는지부터 확인한다
+      expect(Array.isArray(details) && details.length).toBeTruthy();
+    });
+    for (const d of details) {
+      expect(Array.isArray(d.sitsJoin?.chain)).toBe(true);
+      expect(Array.isArray(d.sitsJoin?.unit)).toBe(true);
+    }
+  });
+
   it('하이드레이트: Context가 비어 있어도 저장분에서 결과를 복원한다', async () => {
     const { useJob } = await import('../App.jsx');
     const { setAnalysisResult } = useJob();
