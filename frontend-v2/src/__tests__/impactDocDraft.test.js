@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
-  VERDICT, baseVar, normalizeNumeric, reconcileSuts, reconcileSits, reconcileUds, buildTsv,
+  VERDICT, baseVar, normalizeNumeric, reconcileSuts, reconcileSits, reconcileSitsDocTcs,
+  reconcileUds, buildTsv,
 } from '../impactDocDraft.js';
 
 // 사용자가 실제로 본 화면의 데이터. 원문은 g_sys_error_his[0..4]를 다루는데 예전 수정안은
@@ -550,5 +551,84 @@ describe('절단 축 분리 — 기대 축 절단이 판정을 뒤집지 않는�
       varTypes: {},
     });
     expect(r.rows[0].verdict).toBe(VERDICT.KEEP);   // 기대 축만 절단 → 판정 유지
+  });
+});
+
+describe('reconcileSitsDocTcs — 생성기 서브케이스가 없어도 원문 TC를 쓴다', () => {
+  // ⚠ 사용자 지적: SITS 수정안이 "`<fn>` 통합 콜체인 확인" 두 줄뿐이었다. 원문엔 TC 5건이
+  // 콜체인·Method까지 있었는데 **통째로 무시**했다. SITS 빌더 미실행(중간 JSON 없음) 조합이
+  // 실사용에서 흔한데, 그때 생성기 서브케이스가 없다는 이유로 원문을 안 봤다.
+  const tc = (id, desc, method = 'REQ, IFT') => ({ tc_id: id, description: desc, test_method: method });
+
+  it('원문 TC마다 콜체인·Method·확인 항목을 낸다', () => {
+    const r = reconcileSitsDocTcs({
+      docTcs: [tc('SwITC_1', 'Interface : a -> b -> c'), tc('SwITC_2', 'Interface : d -> e')],
+      fn: 's_x', changeType: 'HEADER',
+    });
+    expect(r.mode).toBe('tc');
+    expect(r.rows).toHaveLength(2);
+    expect(r.rows[0].tcId).toBe('SwITC_1');
+    expect(r.rows[0].chain).toBe('a → b → c');
+    expect(r.rows[0].method).toBe('REQ, IFT');
+    expect(r.rows[0].focus).toMatch(/인터페이스 의존성/);
+  });
+
+  it('콜체인에 변경 함수가 있으면 재검증 + 근거(대소문자 무시)', () => {
+    const r = reconcileSitsDocTcs({
+      docTcs: [tc('SwITC_1', 'Interface : a -> g_Ap_MotorCtrl_GetComSpeed -> b')],
+      fn: 'g_ap_motorctrl_getcomspeed', changeType: 'BODY',
+    });
+    expect(r.rows[0].verdict).toBe(VERDICT.REVERIFY);
+    expect(r.rows[0].evidence).toMatch(/콜체인에 변경 함수 포함/);
+    // '유지' 계열 라벨을 재사용하면 재검증 지시가 정반대로 읽힌다
+    expect(r.rows[0].verdict).not.toBe(VERDICT.KEEP);
+    expect(r.rows[0].verdict).not.toBe(VERDICT.RECHECK);
+  });
+
+  it('변경 전역이 콜체인에 있어도 재검증', () => {
+    const r = reconcileSitsDocTcs({
+      docTcs: [tc('SwITC_1', 'Interface : a -> g_sys_error_his -> b')],
+      fn: 's_other', changeType: 'VARIABLE',
+      diffElems: { changedGlobals: { added: ['g_sys_error_his'], removed: [] } },
+    });
+    expect(r.rows[0].verdict).toBe(VERDICT.REVERIFY);
+    expect(r.rows[0].evidence).toMatch(/변경 전역 포함/);
+  });
+
+  it('콜체인이 절단됐으면 "영향 없음"으로 단정하지 않는다', () => {
+    // 백엔드가 description 을 300자로 자른다 — 잘린 뒤쪽에 변경 함수가 있을 수 있다.
+    const long = `Interface : ${Array.from({ length: 40 }, (_v, i) => `fn_${i}`).join(' -> ')}`;
+    expect(long.length).toBeGreaterThan(300);
+    const r = reconcileSitsDocTcs({ docTcs: [tc('SwITC_1', long.slice(0, 300))], fn: 's_x', changeType: 'BODY' });
+    expect(r.rows[0].verdict).toBe(VERDICT.UNKNOWN);
+    expect(r.rows[0].evidence).toMatch(/절단됨 — 포함 여부 미확정/);
+    expect(r.rows[0].note).toMatch(/콜체인 원문 절단/);
+  });
+
+  it('절단 판정은 **원본 필드 길이**로 — 완전한 긴 체인을 절단으로 오판하지 않는다', () => {
+    // ⚠ 회귀 가드: 추출된 체인 길이(≥195)로 재면 250자짜리 완전 체인이 절단으로 찍혔다(실측).
+    const full = 'Interface : s_Ap_ExecuteControlFunctions -> g_Ap_MotorCtrl_Func -> s_MotorStateCtrl'
+      + ' -> s_MotorState_FreeStop -> s_MotorCtrl -> s_MotorCtrl_DetermineFromFreeStop'
+      + ' -> u8s_MotorCtrl_IsShortMode -> s_MotorSpeedModeSelection -> s_MotorSpeedCtrl -> s_MotorCompensation';
+    expect(full.length).toBeGreaterThan(195);
+    expect(full.length).toBeLessThan(300);
+    const r = reconcileSitsDocTcs({ docTcs: [tc('SwITC_1', full)], fn: 's_x', changeType: 'BODY' });
+    expect(r.rows[0].note).toBe('');
+    expect(r.rows[0].evidence).toMatch(/요구\/단위 경유/);
+  });
+
+  it('변경 종류별로 확인 항목이 다르다(일반론 금지)', () => {
+    const mk = (ctype) => reconcileSitsDocTcs({
+      docTcs: [tc('T', 'Interface : a -> b')], fn: 's_x', changeType: ctype,
+    }).rows[0].focus;
+    expect(mk('SIGNATURE')).toMatch(/인자 계약/);
+    expect(mk('BODY')).toMatch(/통합 기대값/);
+    expect(mk('DELETE')).toMatch(/제거되는 경로/);
+    expect(new Set([mk('HEADER'), mk('SIGNATURE'), mk('BODY')]).size).toBe(3);
+  });
+
+  it('원문 TC가 없으면 빈 결과(호출부가 기존 골격으로 폴백)', () => {
+    expect(reconcileSitsDocTcs({ docTcs: [], fn: 's_x' }).rows).toEqual([]);
+    expect(reconcileSitsDocTcs({}).rows).toEqual([]);
   });
 });

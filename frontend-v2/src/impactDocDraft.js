@@ -23,6 +23,9 @@ export const VERDICT = {
   MODIFY: '값수정',
   ADD: '신규추가',
   UNKNOWN: '검증필요',
+  // SITS 원문 TC 판정 전용 — "이 값을 유지/수정하라"가 아니라 "이 통합 TC를 다시 돌려라"다.
+  // KEEP/RECHECK 라벨을 재사용하면 "유지"로 읽혀 재검증 지시가 정반대로 전달된다.
+  REVERIFY: '재검증',
 };
 
 // 배열 첨자를 뗀 기본 변수명. 표시·컬럼은 첨자를 보존하고 **타입 조회만** base로 한다
@@ -494,6 +497,104 @@ export function reconcileSits({ docTcs, gen, varTypes, diffElems } = {}) {
     // docTotal은 **절단 전** 원문 서브케이스 수. 예전엔 docShown과 같은 값이라
     // '총 N건 중 M건' 배너가 구조적으로 절대 뜨지 않았다(SUTS엔 있는 안전장치가 SITS엔 없었다).
     totals: { docShown: docSubs.length, docTotal: docSubTotal || docSubs.length, proposed: rows.length },
+  };
+}
+
+// SITS 원문 TC의 콜체인 텍스트. `_load_sits_fn_chains`(중간 JSON)는 `call_chain`을 주지만,
+// 원본 xlsm 폴백(`_load_testspec_by_tc`)은 "Interface : a -> b -> c"를 description/test_action에
+// 담아 온다 — 실사용에서는 이 폴백이 흔하다(SITS 빌더 미실행 시).
+// 백엔드가 필드별로 다른 상한으로 자른다 — 절단 판정은 **원본 필드 길이**로 해야 한다.
+// 추출된 체인 길이로 재면 "Interface : " 접두어만큼 짧아져 완전한 체인을 절단으로 오판한다.
+const SITS_FIELD_CAP = { call_chain: 200, description: 300, test_action: 300 };
+
+function sitsChainOf(tc) {
+  if (!tc || typeof tc !== 'object') return { chain: '', truncated: false };
+  const pick = (field, raw) => {
+    const s = String(raw || '');
+    // 상한에 정확히 닿았으면 잘렸다고 본다(1~2자 여유는 두지 않는다 — 캡은 정확히 [:N]이다).
+    const truncated = s.length >= SITS_FIELD_CAP[field];
+    const m = s.match(/interface\s*:?\s*(.+)/is);
+    const chain = (m && m[1].includes('->')) ? m[1].trim() : (s.includes('->') ? s.trim() : '');
+    return chain ? { chain, truncated } : null;
+  };
+  return pick('call_chain', tc.call_chain)
+    || pick('description', tc.description)
+    || pick('test_action', tc.test_action)
+    || { chain: '', truncated: false };
+}
+
+// 콜체인 텍스트에서 함수명 토큰 추출(대소문자 무시 비교용).
+function chainFns(chain) {
+  return new Set(String(chain || '').split(/\s*->\s*/).map((x) => x.trim().toLowerCase()).filter(Boolean));
+}
+
+// 변경 종류별로 이 통합 TC에서 **무엇을 봐야 하는가**. 일반론이 아니라 축을 특정한다.
+const SITS_FOCUS = {
+  HEADER: '헤더 타입·매크로 변경 — 콜체인 경계의 인터페이스 의존성(호출 규약·크기·정렬) 확인',
+  SIGNATURE: '시그니처 변경 — 콜체인 상위 호출부의 인자 계약 확인',
+  BODY: '본문 변경 — 콜체인 하위 산출이 만드는 통합 기대값 재확인',
+  VARIABLE: '전역/변수 변경 — 통합 진입 상태(Precondition)와 전파 경로 확인',
+  NEW: '신규 함수 — 이 콜체인에 편입되는지, 편입되면 통합 케이스 추가 필요',
+  DELETE: '삭제 함수 — 콜체인에서 제거되는 경로와 대체 경로 확인',
+};
+
+/**
+ * SITS 초안(원문 TC 기반) — 생성기 서브케이스가 없을 때.
+ *
+ * 실사용에서 흔한 조합이다: 문서에는 통합 TC가 여럿 있고 콜체인·Method도 적혀 있는데,
+ * SITS 빌더를 안 돌려 중간 JSON이 없어 서브케이스(입력/기대값)가 없다. 예전엔 이 경우
+ * **원문을 통째로 무시하고** "`<fn>` 통합 콜체인 확인" 두 줄만 냈다.
+ *
+ * 여기서는 조인된 TC마다 **무엇을 왜 다시 봐야 하는지**를 원문 근거로 말한다.
+ * ⚠ 콜체인 텍스트는 백엔드가 200~300자로 자른다 — 변경 함수가 안 보인다고 "영향 없음"이라
+ *   단정하지 않는다(절단된 뒤쪽에 있을 수 있다). 그 경우는 '확인 필요'로 남긴다.
+ */
+export function reconcileSitsDocTcs({ docTcs, fn, changeType, diffElems } = {}) {
+  const tcs = (Array.isArray(docTcs) ? docTcs : []).filter((t) => t && typeof t === 'object');
+  const target = String(fn || '').trim().toLowerCase();
+  const { touched } = globalSets(diffElems);
+  const focus = SITS_FOCUS[String(changeType || '').toUpperCase()] || '변경 반영 여부 확인';
+
+  const rows = tcs.map((tc, i) => {
+    const { chain, truncated } = sitsChainOf(tc);
+    const fns = chainFns(chain);
+    const inChain = !!target && fns.has(target);
+    const gHit = [...touched].filter((g) => chain.toLowerCase().includes(String(g).toLowerCase()));
+    let verdict;
+    let evidence;
+    if (inChain) {
+      verdict = VERDICT.REVERIFY;
+      evidence = '콜체인에 변경 함수 포함';
+    } else if (gHit.length) {
+      verdict = VERDICT.REVERIFY;
+      evidence = `콜체인에 변경 전역 포함(${gHit.slice(0, 2).join(', ')})`;
+    } else {
+      verdict = VERDICT.UNKNOWN;
+      evidence = truncated
+        ? '콜체인 원문이 절단됨 — 포함 여부 미확정'
+        : '요구/단위 경유로 조인 — 콜체인에서 직접 확인 불가';
+    }
+    return {
+      key: `tc-${i}`,
+      tcId: String(tc.tc_id || ''),
+      chain: chain.replace(/\s*->\s*/g, ' → '),
+      method: String(tc.test_method || ''),
+      precondition: String(tc.precondition || ''),
+      unit: String(tc.unit_name || ''),
+      verdict,
+      evidence,
+      focus,
+      note: truncated ? '콜체인 원문 절단(백엔드 표시 상한) — 전체는 문서에서 확인' : '',
+    };
+  });
+
+  return {
+    mode: 'tc',
+    columns: [],
+    rows,
+    unknownTypes: [],
+    newColumns: [],
+    totals: { docShown: rows.length, docTotal: rows.length, proposed: rows.length },
   };
 }
 

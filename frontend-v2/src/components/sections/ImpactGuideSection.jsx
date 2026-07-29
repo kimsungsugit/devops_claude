@@ -4,7 +4,7 @@ import { useToast, useJob, useJenkinsCfg } from '../../App.jsx';
 import StatusBadge from '../StatusBadge.jsx';
 import { pollImpactJob, isAbortError } from '../../impactPoll.js';
 import { proposeBoundaryTCs, formatSutsLoc } from '../../impactBoundary.js';
-import { reconcileSuts, reconcileSits } from '../../impactDocDraft.js';
+import { reconcileSuts, reconcileSits, reconcileSitsDocTcs } from '../../impactDocDraft.js';
 import DocProposalTable from './impact/DocProposalTable.jsx';
 import {
   impactIdentity, impactKeyOf, sameImpactTarget, sameJobUrl,
@@ -1730,6 +1730,33 @@ export default function ImpactGuideSection({ analysisResult, job }) {
               // 생성기 서브케이스 절단(백엔드 total/truncated)을 침묵시키지 않는다.
               draft.genTruncated ? `생성기 통합 케이스 ${draft.genTotal}건 중 ${draft.rows.length}건 표시` : '',
               draft.docPartial ? '원문 일부만 파싱됨 — 아래 판정은 "문서에 없음"을 단정하지 않는다' : '',
+            ].filter(Boolean)}
+          />
+        );
+      }
+      // 생성기 서브케이스가 없어도 **원문 통합 TC가 있으면** 그걸 근거로 재검증 표를 만든다.
+      // 실사용에서 흔한 조합이다(SITS 빌더 미실행 → 중간 JSON 없음 → 서브케이스 없음).
+      // 예전엔 이때 원문 TC 5건을 통째로 무시하고 "`<fn>` 통합 콜체인 확인" 두 줄만 냈다.
+      const _sitsDocTcs = _testSpecRows(fn, 'sits');
+      if (_sitsDocTcs.length) {
+        const draft = reconcileSitsDocTcs({ docTcs: _sitsDocTcs, fn, changeType: ct, diffElems });
+        return (
+          <DocProposalTable
+            title="✏ 통합 시나리오 재검증 (문서 원문 기준)"
+            tone="warning"
+            draft={draft}
+            meta={[
+              { label: '관련 통합 TC', value: `${draft.rows.length}건`, src: 'document' },
+              {
+                label: 'Precondition',
+                value: gAll.length ? `변경 전역 초기화 상태: ${gAll.slice(0, 4).join(', ')}` : '통합 진입 상태(env/precondition) 설정',
+                src: gAll.length ? 'document' : 'generator',
+              },
+            ]}
+            notes={[
+              // 판정은 "이 TC를 다시 봐야 하는가"이지 값 제안이 아니다 — 오독 방지.
+              '값 제안이 아니라 **재검증 대상 판정**이다(통합 입력/기대값은 SITS 빌더 실행 후 생성)',
+              draft.rows.some((r) => r.note) ? '일부 콜체인이 표시 상한으로 잘렸다 — 포함 여부를 단정하지 않는다' : '',
             ].filter(Boolean)}
           />
         );

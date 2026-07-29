@@ -3461,3 +3461,57 @@ describe('DocProposalTable TSV — 화면과 같은 값을 내보낸다', () => 
     expect(tsv).toContain('0x0');
   });
 });
+
+describe('ImpactGuideSection — SITS 원문 TC 재검증 표', () => {
+  // ⚠ 사용자 지적: SITS 수정안이 "g_ap_motorctrl_getcomspeed 통합 콜체인 확인" + Precondition
+  // 두 줄뿐이었다. 원문엔 TC 5건이 콜체인·Method까지 있었는데 생성기 서브케이스가 없다는
+  // 이유로 전부 무시했다(SITS 빌더 미실행 = 실사용에서 흔한 조합).
+  it('생성기 서브케이스가 없어도 원문 TC별 재검증 표를 그린다', async () => {
+    const { post } = await import('../api.js');
+    // 함수→SITS TC 브리지는 추적성 응답(SwUFn 경로)에서 만들어진다
+    // 조인 경로: SUTS 가 unit→SwUFn ID 를 주고, 같은 SwUFn ID 를 가진 SITS TC 가 붙는다.
+    post.mockImplementation((url) => {
+      if (url === '/api/jenkins/suts/extract-traceability') {
+        return Promise.resolve({ vcast_rows: [{ unit: 'g_ap_motorctrl_getcomspeed', testcase: 'SwUTC_SwUFn_0504' }] });
+      }
+      if (url === '/api/jenkins/sits/extract-traceability') {
+        return Promise.resolve({ vcast_rows: [{ requirement_id: 'R1', testcase: 'SwITC_SwUFn_0504_02' }] });
+      }
+      return Promise.resolve({ ok: false });
+    });
+    const user = userEvent.setup();
+    const impactData = {
+      trigger: { changed_files: ['motor.h'], scm_id: 'kjpds02' },
+      changed_function_types: { g_ap_motorctrl_getcomspeed: 'HEADER' },
+      change_details: { g_ap_motorctrl_getcomspeed: { before: 'U16 g_ap_motorctrl_getcomspeed(void)' } },
+      impact: { direct: ['g_ap_motorctrl_getcomspeed'] },
+      function_meta: { g_ap_motorctrl_getcomspeed: { asil: 'B', evidence: 'line' } },
+      _linked_docs: { suts: 'U:/suts.xlsm', sits: 'U:/sits.xlsm' },
+      // 폴백 shape — sub_cases 없음, description 에 "Interface : ..."
+      doc_content: {
+        sits_by_tc: {
+          SWITC_SWUFN_0504_02: {
+            description: 'Interface : s_Ap_ExecuteControlFunctions -> g_Ap_MotorCtrl_GetComSpeed -> s_MotorCtrl',
+            test_method: 'REQ, IFT',
+          },
+        },
+      },
+      doc_proposal: { suts: {}, sits: {}, sts: {}, uds: {}, sds: {}, suts_meta: {}, var_types: {}, source: 'document' },
+    };
+    render(<ImpactGuideSection analysisResult={{ impactData }} />);
+    await user.click(screen.getByText(/상세 가이드 생성/));
+    await user.click(await screen.findByRole('button', { name: '상세' }));
+    const dialog = await screen.findByRole('dialog');
+
+    // 예전 두 줄 골격이 아니라 재검증 표
+    await waitFor(() => expect(within(dialog).getByText(/통합 시나리오 재검증 \(문서 원문 기준\)/)).toBeInTheDocument());
+    // 원문 콜체인이 화살표로 표시되고, 변경 함수가 그 안에 있으므로 재검증 + 근거
+    expect(within(dialog).getAllByText(/s_Ap_ExecuteControlFunctions → g_Ap_MotorCtrl_GetComSpeed/).length).toBeGreaterThanOrEqual(1);
+    expect(within(dialog).getAllByText('재검증').length).toBeGreaterThanOrEqual(1);
+    expect(within(dialog).getByText(/콜체인에 변경 함수 포함/)).toBeInTheDocument();
+    // HEADER 변경이므로 인터페이스 의존성 축을 지목
+    expect(within(dialog).getAllByText(/인터페이스 의존성/).length).toBeGreaterThanOrEqual(1);
+    // 값 제안으로 오독하지 않도록 명시
+    expect(within(dialog).getByText(/재검증 대상 판정/)).toBeInTheDocument();
+  });
+});

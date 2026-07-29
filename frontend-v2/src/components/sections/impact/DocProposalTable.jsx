@@ -20,6 +20,7 @@ const VERDICT_TONE = {
   [VERDICT.MODIFY]: 'warning',
   [VERDICT.ADD]: 'success',
   [VERDICT.UNKNOWN]: 'danger',
+  [VERDICT.REVERIFY]: 'warning',
 };
 
 const cellStyle = { padding: '2px 4px', borderBottom: '1px solid var(--border)', verticalAlign: 'top' };
@@ -82,6 +83,8 @@ export default function DocProposalTable({
   if (!rows.length && !(meta || []).length) return null;
   const shown = expanded ? rows : rows.slice(0, PREVIEW_ROWS);
   const seqMode = draft.mode === 'sequence' || draft.mode === 'subcase';
+  // 'tc' 모드 — 원문 통합 TC별로 "왜 다시 봐야 하는가"를 말한다(값 제안이 아니라 재검증 지시).
+  const tcMode = draft.mode === 'tc';
   const columns = seqMode ? (draft.columns || []) : [];
 
   // TSV — 열 순서는 호출부(백엔드 문서 컬럼)가 정한다. JS에 하드코딩하지 않는다.
@@ -103,6 +106,14 @@ export default function DocProposalTable({
         })),
       }));
       return buildTsv(cols, flat);
+    }
+    if (tcMode) {
+      return buildTsv([
+        { key: 'tcId', label: 'TC ID' }, { key: 'chain', label: '통합 콜체인(원문)' },
+        { key: 'method', label: 'Method' }, { key: 'precondition', label: 'Precondition' },
+        { key: 'verdict', label: '판정' }, { key: 'evidence', label: '근거' },
+        { key: 'focus', label: '확인할 것' },
+      ], rows);
     }
     const cols = [{ key: 'variable', label: '변수' }, { key: 'type', label: '타입' },
       { key: 'boundary', label: '경계' }, { key: 'proposed', label: '제안 Input' },
@@ -208,7 +219,7 @@ export default function DocProposalTable({
           <table style={{ borderCollapse: 'collapse', fontSize: 9, width: '100%' }}>
             <thead>
               <tr>
-                {seqMode ? (
+                {seqMode && (
                   <>
                     <th style={headStyle}>전략/케이스</th>
                     {columns.map((c) => (
@@ -217,7 +228,16 @@ export default function DocProposalTable({
                       </th>
                     ))}
                   </>
-                ) : (
+                )}
+                {tcMode && (
+                  <>
+                    <th style={headStyle}>TC ID</th>
+                    <th style={headStyle}>통합 콜체인(원문)</th>
+                    <th style={headStyle}>Method</th>
+                    <th style={headStyle}>확인할 것</th>
+                  </>
+                )}
+                {!seqMode && !tcMode && (
                   <>
                     <th style={headStyle}>변수</th>
                     <th style={headStyle}>타입</th>
@@ -233,7 +253,7 @@ export default function DocProposalTable({
             <tbody>
               {shown.map((r) => (
                 <tr key={r.key}>
-                  {seqMode ? (
+                  {seqMode && (
                     <>
                       <td style={cellStyle}>
                         <div style={monoStyle}>{r.strategy || `#${r.caseNum ?? r.seqNum}`}</div>
@@ -246,7 +266,21 @@ export default function DocProposalTable({
                         <td key={c.key} style={cellStyle}><CellValue {...(r.cells[c.key] || {})} /></td>
                       ))}
                     </>
-                  ) : (
+                  )}
+                  {tcMode && (
+                    <>
+                      <td style={{ ...cellStyle, ...monoStyle, whiteSpace: 'nowrap' }}>{r.tcId || <span className="text-muted">—</span>}</td>
+                      <td style={{ ...cellStyle, ...monoStyle, maxWidth: 420 }}>
+                        {r.chain || <span className="text-muted">원문에 콜체인 없음</span>}
+                        {r.unit && <div className="text-muted" style={{ fontSize: 8 }}>Unit: {r.unit}</div>}
+                        {r.precondition && <div className="text-muted" style={{ fontSize: 8 }}>Pre: {r.precondition}</div>}
+                        {r.note && <div className="text-muted" style={{ fontSize: 8 }}>⚠ {r.note}</div>}
+                      </td>
+                      <td style={cellStyle}>{r.method || <span className="text-muted">—</span>}</td>
+                      <td style={cellStyle}>{r.focus}</td>
+                    </>
+                  )}
+                  {!seqMode && !tcMode && (
                     <>
                       <td style={{ ...cellStyle, ...monoStyle }}>{r.variable}</td>
                       <td style={cellStyle}>
