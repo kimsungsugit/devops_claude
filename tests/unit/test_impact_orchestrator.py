@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from workflow.change_trigger import ChangeTrigger
 from pathlib import Path
+
+from workflow.change_trigger import ChangeTrigger
 
 
 def test_run_impact_update_dry_run_builds_auto_and_flag_actions(tmp_path, monkeypatch):
@@ -186,7 +187,7 @@ def test_run_impact_update_classification_granularity_line_for_local_diff(tmp_pa
 def _setup_precise_env(tmp_path, monkeypatch, *, blob, by_name=None):
     """A 정밀분류 테스트 공통 셋업 — 실 editType classify 사용(subprocess 없음), svn diff는 canned."""
     from backend.schemas import ScmRegisterRequest
-    from backend.services import scm_registry, local_service
+    from backend.services import local_service, scm_registry
     from workflow import impact_audit, impact_orchestrator
 
     audit_dir = tmp_path / "audit"
@@ -859,7 +860,8 @@ def test_run_impact_update_includes_coverage_gap(tmp_path, monkeypatch):
     """linked vectorcast가 있으면 coverage_gap을 result에 싣고, ASIL C/D 미달 시 검토 강등 + 경고."""
     from backend.schemas import ScmRegisterRequest
     from backend.services import scm_registry
-    from workflow import coverage_gap as cg, impact_audit, impact_orchestrator
+    from workflow import coverage_gap as cg
+    from workflow import impact_audit, impact_orchestrator
 
     monkeypatch.setattr(scm_registry, "REGISTRY_PATH", tmp_path / "config" / "scm_registry.json")
     monkeypatch.setattr(impact_audit, "AUDIT_DIR", tmp_path / "audit")
@@ -896,7 +898,8 @@ def test_run_impact_update_no_coverage_data_with_safety_promotes(tmp_path, monke
     """vectorcast 연결됐으나 커버리지 데이터 없음 + ASIL C/D 영향 → 미검증을 안전 통과로 보지 않고 경고+검토 강등."""
     from backend.schemas import ScmRegisterRequest
     from backend.services import scm_registry
-    from workflow import coverage_gap as cg, impact_audit, impact_orchestrator
+    from workflow import coverage_gap as cg
+    from workflow import impact_audit, impact_orchestrator
 
     monkeypatch.setattr(scm_registry, "REGISTRY_PATH", tmp_path / "config" / "scm_registry.json")
     monkeypatch.setattr(impact_audit, "AUDIT_DIR", tmp_path / "audit")
@@ -1020,9 +1023,9 @@ def _fake_resolver(read_bytes_impl):
 
 def test_load_suts_fn_tcs_reads_via_worker_not_direct_open(monkeypatch):
     """cloudium: SUTS를 직접 load_workbook이 아니라 worker read_bytes로 읽고 파싱한다."""
-    from workflow import impact_orchestrator as orch
     import backend.services.file_resolver as fr
     import tools.export_suts_vectorcast as ev
+    from workflow import impact_orchestrator as orch
 
     monkeypatch.setattr(fr, "get_resolver", lambda: _fake_resolver(lambda p: b"XLSM-BYTES"))
     captured = {}
@@ -1044,8 +1047,8 @@ def test_load_suts_fn_tcs_reads_via_worker_not_direct_open(monkeypatch):
 
 def test_load_suts_fn_tcs_permission_error_warns_and_empty(monkeypatch):
     """cloudium worker 접근 실패는 silent 0이 아니라 warn_sink에 사유를 남긴다."""
-    from workflow import impact_orchestrator as orch
     import backend.services.file_resolver as fr
+    from workflow import impact_orchestrator as orch
 
     def _raise(_p):
         raise PermissionError("cloudium worker down")
@@ -1059,9 +1062,9 @@ def test_load_suts_fn_tcs_permission_error_warns_and_empty(monkeypatch):
 
 def test_load_suts_fn_tcs_no_unit_match_warns(monkeypatch):
     """유닛명 매칭 0(이름 규칙 불일치)도 사유를 남긴다(silent 0 방지)."""
-    from workflow import impact_orchestrator as orch
     import backend.services.file_resolver as fr
     import tools.export_suts_vectorcast as ev
+    from workflow import impact_orchestrator as orch
 
     monkeypatch.setattr(fr, "get_resolver", lambda: _fake_resolver(lambda p: b"BYTES"))
     monkeypatch.setattr(ev, "build_vectorcast_model", lambda *a, **k: {"units": []})
@@ -1073,9 +1076,10 @@ def test_load_suts_fn_tcs_no_unit_match_warns(monkeypatch):
 
 def test_load_sits_fn_chains_reads_via_worker(monkeypatch):
     """SITS 중간 JSON을 worker read_bytes로 읽고 flagged 함수의 체인만 집계한다."""
-    from workflow import impact_orchestrator as orch
-    import backend.services.file_resolver as fr
     import json as _json
+
+    import backend.services.file_resolver as fr
+    from workflow import impact_orchestrator as orch
 
     payload = _json.dumps({"integrations": [
         {"entry_fn": "door_run", "call_chain": "a->b", "tc_id": "IT01"},
@@ -1090,8 +1094,8 @@ def test_load_sits_fn_chains_reads_via_worker(monkeypatch):
 
 def test_load_sits_fn_chains_missing_intermediate_warns(monkeypatch):
     """중간파일 부재(FileNotFoundError)는 정당한 0이되 사유를 남긴다."""
-    from workflow import impact_orchestrator as orch
     import backend.services.file_resolver as fr
+    from workflow import impact_orchestrator as orch
 
     def _raise(p):
         raise FileNotFoundError(p)

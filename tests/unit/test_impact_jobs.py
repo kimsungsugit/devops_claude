@@ -2,8 +2,8 @@ from __future__ import annotations
 
 
 def test_start_impact_job_completes_with_sync_thread(tmp_path, monkeypatch):
-    from workflow.change_trigger import ChangeTrigger
     from workflow import impact_jobs
+    from workflow.change_trigger import ChangeTrigger
 
     monkeypatch.setattr(impact_jobs, "JOB_DIR", tmp_path / "jobs")
 
@@ -44,8 +44,8 @@ def test_start_impact_job_completes_with_sync_thread(tmp_path, monkeypatch):
 
 
 def test_start_impact_job_without_changed_files_completes_cleanly(tmp_path, monkeypatch):
-    from workflow.change_trigger import ChangeTrigger
     from workflow import impact_jobs
+    from workflow.change_trigger import ChangeTrigger
 
     monkeypatch.setattr(impact_jobs, "JOB_DIR", tmp_path / "jobs")
 
@@ -75,8 +75,8 @@ def test_start_impact_job_without_changed_files_completes_cleanly(tmp_path, monk
 def test_fast_path_surfaces_changeset_vs_authoritative_reason(tmp_path, monkeypatch):
     """I2: '0 영향'의 사유를 표면화 — 빈 Jenkins changeSet(놓쳤을 수 있음)와 권위 svn A:B(신뢰)를
     구분한다(silent-0 정직화)."""
-    from workflow.change_trigger import ChangeTrigger
     from workflow import impact_jobs
+    from workflow.change_trigger import ChangeTrigger
 
     monkeypatch.setattr(impact_jobs, "JOB_DIR", tmp_path / "jobs")
 
@@ -162,8 +162,8 @@ def test_partial_failure_preserves_analysis_result(tmp_path, monkeypatch):
     audit_path)가 통째로 사라지고 클라이언트엔 error만 갔다. 이제 완료 처리하고 결과를 전달하되,
     message와 actions[t].status="failed"로 실패를 정직하게 표면화한다.
     """
-    from workflow.change_trigger import ChangeTrigger
     from workflow import impact_jobs
+    from workflow.change_trigger import ChangeTrigger
 
     monkeypatch.setattr(impact_jobs, "JOB_DIR", tmp_path / "jobs")
     monkeypatch.setattr(

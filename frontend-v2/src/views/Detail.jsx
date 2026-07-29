@@ -69,11 +69,13 @@ export default function Detail() {
 
   // 활성 탭을 방문 기록에 누적 — 이후 숨겨져도 마운트 유지.
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- 활성 탭을 방문 기록에 누적 — keep-alive 를 위한 파생 집합 갱신
     setVisited((v) => (v.has(activeSection) ? v : new Set(v).add(activeSection)));
   }, [activeSection]);
 
   // activeSection 최신값을 ref로 추적 — jobKey 변경 effect가 stale closure 없이 현재 탭을 읽도록.
   const activeSectionRef = useRef(activeSection);
+  // eslint-disable-next-line react-hooks/refs -- activeSection 최신값 ref 추적 — effect 로 옮기면 jobKey 변경과 동시 발생 시 순서가 갈린다
   activeSectionRef.current = activeSection;
 
   // job 변경 시 keep-alive 초기화 — 이전 job의 stale 상태/숨은 섹션 재요청 방지(key도 jobKey 포함).

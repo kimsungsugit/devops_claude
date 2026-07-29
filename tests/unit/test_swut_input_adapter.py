@@ -14,13 +14,13 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from backend.services.swut_input_adapter import (  # noqa: E402
-    CoverageStats,
-    EnvironmentData,
-    FunctionCoverage,
-    SwUTSession,
-    ExecutionRow,
     SWTE_LAYOUT,
     VC2025_LAYOUT,
+    CoverageStats,
+    EnvironmentData,
+    ExecutionRow,
+    FunctionCoverage,
+    SwUTSession,
     _detect_log_layout,
     _extract_env_from_filename,
     _norm_env_stem,
@@ -266,6 +266,7 @@ class TestResolveLatestReleaseFolder:
     def test_w6_large_candidate_count_performance(self, tmp_path):
         """38차 W6: 100개 후보 디렉토리 → 1초 미만 처리 (성능)."""
         import time
+
         from backend.services.file_resolver import LocalFileResolver
         from backend.services.swut_input_adapter import _resolve_latest_release_folder
         # 100 release 후보 + 01.TestCaseDataReport 각각
@@ -289,6 +290,7 @@ class TestResolveLatestReleaseFolder:
         Windows에서는 symlink 권한 제약으로 skip — 환경 검증.
         """
         import platform
+
         from backend.services.file_resolver import LocalFileResolver
         from backend.services.swut_input_adapter import _resolve_latest_release_folder
         # 실 release 생성 후 symlink 추가
@@ -576,7 +578,9 @@ class TestDegenerateMcdcGuard:
 
     def test_rollup_zeros_degenerate_mcdc(self):
         from backend.services.swut_input_adapter import (
-            CoverageStats, FunctionCoverage, compute_coverage_rollup,
+            CoverageStats,
+            FunctionCoverage,
+            compute_coverage_rollup,
         )
         rows = []
         for i in range(20):
@@ -591,7 +595,9 @@ class TestDegenerateMcdcGuard:
 
     def test_rollup_keeps_real_mcdc(self):
         from backend.services.swut_input_adapter import (
-            CoverageStats, FunctionCoverage, compute_coverage_rollup,
+            CoverageStats,
+            FunctionCoverage,
+            compute_coverage_rollup,
         )
         rows = []
         for i, (pt, bt) in enumerate([(0, 0), (2, 4), (3, 6), (0, 0), (1, 2), (2, 4), (0, 0), (1, 2), (2, 4), (3, 6)]):
@@ -1231,7 +1237,8 @@ class TestEnhanceFunctionCoverageWithFile:
 
     def test_normal_matching_injects_file(self):
         from backend.services.swut_input_adapter import (
-            enhance_function_coverage_with_file, FunctionCoverage,
+            FunctionCoverage,
+            enhance_function_coverage_with_file,
         )
         function_rows = [
             FunctionCoverage(unit_id="SwUFn_0101", name="main", file=""),
@@ -1248,7 +1255,8 @@ class TestEnhanceFunctionCoverageWithFile:
 
     def test_no_matching_keeps_empty(self):
         from backend.services.swut_input_adapter import (
-            enhance_function_coverage_with_file, FunctionCoverage,
+            FunctionCoverage,
+            enhance_function_coverage_with_file,
         )
         function_rows = [
             FunctionCoverage(unit_id="SwUFn_0101", name="vcast_only", file=""),
@@ -1260,7 +1268,8 @@ class TestEnhanceFunctionCoverageWithFile:
 
     def test_partial_matching_only_inject_matched(self):
         from backend.services.swut_input_adapter import (
-            enhance_function_coverage_with_file, FunctionCoverage,
+            FunctionCoverage,
+            enhance_function_coverage_with_file,
         )
         function_rows = [
             FunctionCoverage(unit_id="SwUFn_0101", name="main", file=""),
@@ -1502,7 +1511,9 @@ class TestAggregateSessionUnmatchedResults:
     @staticmethod
     def _env_with_unmatched():
         from backend.services.swut_input_adapter import (
-            EnvironmentData, ExecutionRow, SwUTSession,
+            EnvironmentData,
+            ExecutionRow,
+            SwUTSession,
         )
         env = EnvironmentData(
             env_name="SwIT_SwUFn_0104",
@@ -1551,7 +1562,10 @@ class TestAggregateSessionUnmatchedResults:
 
     def test_all_matched_no_warning_backward_compat(self):
         from backend.services.swut_input_adapter import (
-            EnvironmentData, ExecutionRow, SwUTSession, aggregate_session,
+            EnvironmentData,
+            ExecutionRow,
+            SwUTSession,
+            aggregate_session,
         )
         env = EnvironmentData(
             env_name="SWTE_01",

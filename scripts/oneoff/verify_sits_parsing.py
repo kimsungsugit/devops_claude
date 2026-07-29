@@ -37,9 +37,11 @@ def step1_raw_document(sits_path: str) -> None:
     print("\n========== STEP 1: SwITS 문서 직접 파싱 (파서 무관 = 진실값) ==========")
     print("path:", sits_path)
     try:
-        import openpyxl
-        from backend.services.file_resolver import get_resolver
         import io
+
+        import openpyxl
+
+        from backend.services.file_resolver import get_resolver
         data = get_resolver().read_bytes(sits_path)
         wb = openpyxl.load_workbook(io.BytesIO(data), data_only=True, read_only=True)
     except Exception as exc:  # noqa: BLE001
@@ -73,7 +75,6 @@ def step2_parser_output(sits_path: str) -> None:
     """[파서] SITS extract 엔드포인트가 같은 파일에서 실제로 몇 케이스를 뽑는지."""
     print("\n========== STEP 2: SITS extract 파서 결과 (백엔드가 뽑는 값) ==========")
     try:
-        from backend.services import file_resolver as fr
         # 로컬 파일이면 local resolver 강제(파싱 로직만 검증). cloudium 실경로면 주석 처리.
         # fr._resolver = fr.LocalFileResolver()
         from backend.routers.jenkins import jenkins_sits_extract_traceability
@@ -119,6 +120,7 @@ def step4_cloudium_read_completeness(entry) -> None:
     """
     print("\n========== STEP 4: cloudium worker read 완전성 진단 ==========")
     import time
+
     from backend.services import file_resolver as fr
     try:
         mode = fr.get_file_mode()

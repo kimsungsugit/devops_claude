@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import json
 import logging
 import os
-import json
 import re
 import subprocess
 import sys
@@ -17,7 +17,6 @@ from workflow.change_trigger import ChangeTrigger
 from workflow.delta_update import classify_changed_functions
 from workflow.impact_audit import acquire_run_lock, release_run_lock, write_impact_audit
 from workflow.impact_changes import build_change_log, write_change_log
-
 
 logger = logging.getLogger(__name__)
 
@@ -662,7 +661,7 @@ def _load_suts_fn_tcs(
     if not data:
         return {}
     try:
-        from tools.export_suts_vectorcast import build_vectorcast_model, bare_fn_name  # type: ignore
+        from tools.export_suts_vectorcast import bare_fn_name, build_vectorcast_model  # type: ignore
         model = build_vectorcast_model(linked_doc, target_functions=flagged_fns, source_bytes=data)
     except ValueError:
         _warn("회귀 TC: SUTS 문서 형식 미인식(TC 시트 없음) — 재실행 TC 미집계")
@@ -1446,7 +1445,6 @@ def _build_doc_proposal(
             determine_test_method,
             generate_sequences,
         )
-
         from workflow.impact_doc_draft import build_var_types
 
         _local_tc = _gim_to_type_map(gim)   # try 안 — 손상 gim이어도 아래 except가 우아하게 흡수(reviewer W1)
@@ -3311,7 +3309,8 @@ def run_impact_update(
                     _ai_guide = None
                     try:
                         from workflow.impact_ai_guide import (
-                            generate_impact_guide, ImpactGuideContext,
+                            ImpactGuideContext,
+                            generate_impact_guide,
                         )
                         # 루프 밖에서 1회 로드한 공용 문서 데이터 재사용(재파싱 제거).
                         _ctx = ImpactGuideContext(

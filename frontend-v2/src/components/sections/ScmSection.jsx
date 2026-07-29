@@ -113,7 +113,11 @@ export default function ScmSection({ job, analysisResult }) {
   // 표시용이라 '모순이 증명될 때만' 감춘다 — 증거 부재까지 막으면 정상 데이터를 상시로
   // 감추게 된다(impactGuard.impactConflict 주석 참조).
   const _conflict = impactConflict(analysisResult, job?.url, selectedId);
-  const changed = _conflict.conflict ? [] : (analysisResult?.impactData?.changed_files ?? []);
+  // ⚠ useMemo — 두 폴백(`[]` · `?? []`)이 매 렌더 새 배열이라 아래 필터 useMemo 가 매번 재계산됐다.
+  const changed = useMemo(
+    () => (_conflict.conflict ? [] : (analysisResult?.impactData?.changed_files ?? [])),
+    [_conflict.conflict, analysisResult],
+  );
   // 사유가 미지여도 반드시 문구가 나온다 — 감췄는데 배너가 안 뜨는 침묵 은닉 차단.
   const changedHiddenReason = mismatchText(_conflict.reason);
 

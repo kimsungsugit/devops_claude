@@ -15,7 +15,6 @@ from backend.services.prqa_rule_trend import (
     rules_applied_in_build,
 )
 
-
 # ── 분류 순수 함수 ──────────────────────────────────────────────────────────
 
 def test_classify_five_kinds_and_priority():

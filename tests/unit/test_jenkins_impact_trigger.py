@@ -127,9 +127,9 @@ def test_get_build_changed_files_edit_types_empty_when_only_affected_paths(monke
 
 def test_resolve_jenkins_changed_files_propagates_edit_types(monkeypatch):
     """get_build_changed_files의 edit_types가 trigger metadata로 전파된다(비어 있으면 생략)."""
-    from backend.routers import jenkins as jr
     import backend.routers.config as cfgmod
     import backend.services.jenkins_service as jsvc
+    from backend.routers import jenkins as jr
     from backend.schemas import JenkinsImpactTriggerRequest
 
     monkeypatch.setattr(cfgmod, "get_jenkins_config",
@@ -150,9 +150,9 @@ def test_resolve_jenkins_changed_files_propagates_edit_types(monkeypatch):
 
 
 def test_resolve_jenkins_changed_files_injects_build_changeset(monkeypatch):
-    from backend.routers import jenkins as jr
     import backend.routers.config as cfgmod
     import backend.services.jenkins_service as jsvc
+    from backend.routers import jenkins as jr
     from backend.schemas import JenkinsImpactTriggerRequest
 
     monkeypatch.setattr(cfgmod, "get_jenkins_config", lambda: {"username": "u", "token": "t", "baseUrl": "http://j", "verifyTls": True})
@@ -169,8 +169,8 @@ def test_resolve_jenkins_changed_files_injects_build_changeset(monkeypatch):
 
 
 def test_resolve_jenkins_changed_files_fallback_without_credentials(monkeypatch):
-    from backend.routers import jenkins as jr
     import backend.routers.config as cfgmod
+    from backend.routers import jenkins as jr
     from backend.schemas import JenkinsImpactTriggerRequest
 
     monkeypatch.setattr(cfgmod, "get_jenkins_config", lambda: {"username": "", "token": "", "verifyTls": True})
@@ -184,9 +184,9 @@ def test_resolve_jenkins_changed_files_fallback_without_credentials(monkeypatch)
 
 def test_resolve_jenkins_changed_files_rejects_foreign_job_url(monkeypatch):
     """SSRF 방지: job_url이 설정된 baseUrl 하위가 아니면 서버 토큰을 안 보내고 fallback."""
-    from backend.routers import jenkins as jr
     import backend.routers.config as cfgmod
     import backend.services.jenkins_service as jsvc
+    from backend.routers import jenkins as jr
     from backend.schemas import JenkinsImpactTriggerRequest
 
     monkeypatch.setattr(cfgmod, "get_jenkins_config",
@@ -232,8 +232,8 @@ class _FakeSvnEntry:
 
 def _patch_svn_range(monkeypatch, *, entry, info_rev, repo_root="https://svn.example/repo",
                      diff=None, diff_boom=False):
-    import backend.services.scm_registry as reg
     import backend.services.local_service as ls
+    import backend.services.scm_registry as reg
     monkeypatch.setattr(reg, "get_registry_entry", lambda _sid: entry)
     monkeypatch.setattr(reg, "resolve_scm_credentials", lambda **_k: ("u", "p", None))
     monkeypatch.setattr(ls, "svn_info_url", lambda **_k: {
@@ -331,9 +331,9 @@ def test_try_svn_revision_range_git_buildrev_uses_svn_head(monkeypatch):
     KJPDS02_PV 시나리오: 소스=svn, 빌드=git → build_revision이 git SHA40. base_ref=1018(A)와
     svn HEAD(B)로 diff.
     """
-    from backend.routers import jenkins as jr
-    import backend.services.scm_registry as reg
     import backend.services.local_service as ls
+    import backend.services.scm_registry as reg
+    from backend.routers import jenkins as jr
     from backend.schemas import JenkinsImpactTriggerRequest
 
     entry = _FakeSvnEntry(scm_url="svn://host/ADOS/NE1AW_PORTING",
@@ -368,9 +368,9 @@ def test_try_svn_revision_range_uses_numeric_base_ref(monkeypatch):
     KJPDS02_PV 시나리오: NE1AW_PORTING이 svn export라 svn info 불가 → base_ref=1018(커밋
     메시지 ver 0.05.17)을 baseline으로 명시.
     """
-    from backend.routers import jenkins as jr
-    import backend.services.scm_registry as reg
     import backend.services.local_service as ls
+    import backend.services.scm_registry as reg
+    from backend.routers import jenkins as jr
     from backend.schemas import JenkinsImpactTriggerRequest
 
     entry = _FakeSvnEntry(scm_url="svn://host/ADOS/NE1AW_PORTING",
@@ -401,9 +401,9 @@ def test_try_svn_revision_range_uses_numeric_base_ref(monkeypatch):
 
 def test_try_svn_revision_range_multipath_picks_matching_wc(monkeypatch):
     """멀티패스 source_root(app,boot)에서 scm_url(app=NE1AW)과 같은 repo인 작업본 rev를 A로 쓴다."""
-    from backend.routers import jenkins as jr
-    import backend.services.scm_registry as reg
     import backend.services.local_service as ls
+    import backend.services.scm_registry as reg
+    from backend.routers import jenkins as jr
     from backend.schemas import JenkinsImpactTriggerRequest
 
     entry = _FakeSvnEntry(
@@ -477,9 +477,9 @@ def test_try_svn_revision_range_diff_failure_returns_none(monkeypatch):
 
 def test_resolve_jenkins_changed_files_uses_svn_revision_range(monkeypatch):
     """전체 _resolve 경로: svn A:B 결과가 단일 빌드 changeSet을 대체한다."""
-    from backend.routers import jenkins as jr
     import backend.routers.config as cfgmod
     import backend.services.jenkins_service as jsvc
+    from backend.routers import jenkins as jr
     from backend.schemas import JenkinsImpactTriggerRequest
 
     monkeypatch.setattr(cfgmod, "get_jenkins_config",
@@ -507,11 +507,11 @@ def test_resolve_jenkins_svn_range_when_jenkins_down(monkeypatch):
 
     KJPDS02_PV 실장애 시나리오: Jenkins(.40) WinError 10060 → 그래도 svn(.33)로 분석.
     """
-    from backend.routers import jenkins as jr
     import backend.routers.config as cfgmod
     import backend.services.jenkins_service as jsvc
-    import backend.services.scm_registry as reg
     import backend.services.local_service as ls
+    import backend.services.scm_registry as reg
+    from backend.routers import jenkins as jr
     from backend.schemas import JenkinsImpactTriggerRequest
 
     monkeypatch.setattr(cfgmod, "get_jenkins_config",
@@ -540,9 +540,9 @@ def test_resolve_jenkins_svn_range_when_jenkins_down(monkeypatch):
 
 def test_resolve_jenkins_changed_files_svn_range_falls_back_to_changeset(monkeypatch):
     """svn info 실패 시 단일 빌드 changeSet(build_revision 정수여도)로 graceful 폴백."""
-    from backend.routers import jenkins as jr
     import backend.routers.config as cfgmod
     import backend.services.jenkins_service as jsvc
+    from backend.routers import jenkins as jr
     from backend.schemas import JenkinsImpactTriggerRequest
 
     monkeypatch.setattr(cfgmod, "get_jenkins_config",
@@ -654,14 +654,19 @@ def test_try_svn_revision_range_reverse_direction_returns_none(monkeypatch):
 
 def test_collect_signature_changes_reverse_returns_empty(monkeypatch):
     """A>B이면 svn_diff_unified를 호출하지 않고 빈 dict(역방향 원문 뒤집힘 방지)."""
-    from workflow import impact_orchestrator as orch
     import backend.services.local_service as ls
+    from workflow import impact_orchestrator as orch
 
     class _T:
-        scm_id = "x"; scm_type = "svn"; base_ref = ""; changed_files = ["a.c"]; source_root = "D:/wc"
+        scm_id = "x"
+        scm_type = "svn"
+        base_ref = ""
+        changed_files = ["a.c"]
+        source_root = "D:/wc"
 
     class _E:
-        scm_url = "https://svn.example/repo/trunk"; source_root = "D:/wc"
+        scm_url = "https://svn.example/repo/trunk"
+        source_root = "D:/wc"
 
     def _boom(**_k):
         raise AssertionError("svn_diff_unified must not run for A>B")
@@ -701,15 +706,20 @@ def test_svn_diff_unified_runs(monkeypatch):
 
 def test_collect_signature_changes_svn_range(monkeypatch):
     """svn A:B 경로: baseline/build revision이 있으면 전체 unified diff로 시그니처 추출."""
-    from workflow import impact_orchestrator as orch
     import backend.services.local_service as ls
     import backend.services.scm_registry as reg
+    from workflow import impact_orchestrator as orch
 
     class _T:
-        scm_id = "x"; scm_type = "svn"; base_ref = ""; changed_files = ["a.c"]; source_root = "D:/wc"
+        scm_id = "x"
+        scm_type = "svn"
+        base_ref = ""
+        changed_files = ["a.c"]
+        source_root = "D:/wc"
 
     class _E:
-        scm_url = "https://svn.example/repo/trunk"; source_root = "D:/wc"
+        scm_url = "https://svn.example/repo/trunk"
+        source_root = "D:/wc"
 
     monkeypatch.setattr(reg, "resolve_scm_credentials", lambda **_k: ("u", "p", None))
     monkeypatch.setattr(ls, "svn_diff_unified", lambda **_k: {
@@ -724,8 +734,8 @@ def test_collect_signature_changes_local_cross_file_not_masked(monkeypatch):
     실제 변경을 가리지 않는다(rank-aware 병합). 과거 setdefault().update() last-wins는 파일 순서에
     따라 실변경(before!=after)을 무변화(before==after)로 덮어 SIGNATURE인데 '원문 미확보'로 표시됐다
     (whole-blob 경로 cross-file 마스킹과 동형)."""
-    from workflow import impact_orchestrator as orch
     from workflow import delta_update as du
+    from workflow import impact_orchestrator as orch
 
     _per_file = {
         # 변경 파일(b.c)이 먼저, 무변화 파일(a.c)이 나중 — last-wins 마스킹을 유발하는 순서.
@@ -734,11 +744,15 @@ def test_collect_signature_changes_local_cross_file_not_masked(monkeypatch):
     }
 
     class _T:
-        scm_id = "x"; scm_type = "svn"; base_ref = ""; source_root = "D:/wc"
+        scm_id = "x"
+        scm_type = "svn"
+        base_ref = ""
+        source_root = "D:/wc"
         changed_files = ["b.c", "a.c"]
 
     class _E:
-        scm_url = ""; source_root = "D:/wc"
+        scm_url = ""
+        source_root = "D:/wc"
 
     monkeypatch.setattr(du, "_run_unified_diff",
                         lambda src, *, base_ref, scm_type, file_path: _per_file[file_path])

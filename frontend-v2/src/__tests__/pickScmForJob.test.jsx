@@ -6,7 +6,8 @@
  * repo_url 기반 자동 매칭으로 안전하게 fallback 한다.
  */
 import { describe, it, expect } from 'vitest';
-import { pickScmForJob } from '../views/Dashboard.jsx';
+// 정본 경로 — 구현은 projectLoader 에 있다(예전엔 views/Dashboard 의 re-export 를 탔다).
+import { pickScmForJob } from '../projectLoader.js';
 
 describe('pickScmForJob', () => {
   it('빈 리스트면 null', () => {

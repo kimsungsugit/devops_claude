@@ -16,12 +16,15 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-import pytest
+import pytest  # noqa: E402  (sys.path 부트스트랩 뒤라 순서가 의도됨)
 
-import backend.services.assistant_service as asvc
-import backend.services.chat_approval_store as cas
-from backend.mcp.report_server import ReportMCPServer
-from backend.services.chat_history_db import init_db, reset_engine
+import backend.services.assistant_service as asvc  # noqa: E402  (sys.path 부트스트랩 뒤라 순서가 의도됨)
+import backend.services.chat_approval_store as cas  # noqa: E402  (sys.path 부트스트랩 뒤라 순서가 의도됨)
+from backend.mcp.report_server import ReportMCPServer  # noqa: E402  (sys.path 부트스트랩 뒤라 순서가 의도됨)
+from backend.services.chat_history_db import (  # noqa: E402  (sys.path 부트스트랩 뒤라 순서가 의도됨)
+    init_db,
+    reset_engine,
+)
 
 
 @pytest.fixture(autouse=True)

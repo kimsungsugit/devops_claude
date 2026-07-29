@@ -8,10 +8,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import workflow.ai as _wai  # monkeypatch 타깃 (lazy import가 이 모듈 속성을 읽음)
 from workflow.impact_ai_guide import (
-    assess_risk,
-    analyze_cross_document_impact,
-    generate_impact_guide,
     ImpactGuideContext,
+    analyze_cross_document_impact,
+    assess_risk,
+    generate_impact_guide,
 )
 
 
@@ -162,7 +162,7 @@ class TestGenerateImpactGuide:
 
 def test_unknown_asil_not_silently_defaulted_to_qm():
     """ASIL 정보가 없으면 QM(비안전)으로 단정하지 않고 UNKNOWN으로 표시 + 수동확인 체크리스트(안전측, CLAUDE.md #4)."""
-    from workflow.impact_ai_guide import generate_impact_guide, ImpactGuideContext
+    from workflow.impact_ai_guide import ImpactGuideContext, generate_impact_guide
 
     g = generate_impact_guide(ImpactGuideContext(
         changed_types={"foo": "BODY"},
@@ -177,7 +177,7 @@ def test_unknown_asil_not_silently_defaulted_to_qm():
 
 def test_known_asil_still_classified():
     """명시적 ASIL D는 정상 분류(회귀 보호)."""
-    from workflow.impact_ai_guide import generate_impact_guide, ImpactGuideContext
+    from workflow.impact_ai_guide import ImpactGuideContext, generate_impact_guide
 
     g = generate_impact_guide(ImpactGuideContext(
         changed_types={"safety_fn": "SIGNATURE"},
@@ -265,8 +265,8 @@ class TestLLMEnrichmentWiring:
 
 def test_explain_function_change_no_llm_returns_none(monkeypatch):
     """LLM 미설정이면 None(결정론 폴백) — 프론트가 매개변수 diff로 대체."""
-    from workflow import impact_ai_guide
     from workflow import ai as _ai
+    from workflow import impact_ai_guide
     monkeypatch.setattr(_ai, "load_oai_config", lambda _p: None)
     out = impact_ai_guide.explain_function_change(
         function="foo", change_type="SIGNATURE",
@@ -277,8 +277,8 @@ def test_explain_function_change_no_llm_returns_none(monkeypatch):
 
 def test_explain_function_change_with_llm(monkeypatch):
     """LLM 설정 시 선언 원문을 프롬프트에 넣어 설명 문자열 반환."""
-    from workflow import impact_ai_guide
     from workflow import ai as _ai
+    from workflow import impact_ai_guide
     captured = {}
 
     def _fake_call(cfg, messages, **k):
@@ -300,8 +300,8 @@ def test_explain_function_change_with_llm(monkeypatch):
 def test_explain_function_change_no_semantic_suppresses_proposals(monkeypatch):
     """no_semantic_change=True(주석/포맷/이동 only)면 프롬프트가 '문서 수정 불필요'를 요구하고
     신규 TC·문서편집 제안 스캐폴드('추가할 단위 테스트 케이스')를 넣지 않는다(허위 AI 제안 차단)."""
-    from workflow import impact_ai_guide
     from workflow import ai as _ai
+    from workflow import impact_ai_guide
     captured = {}
 
     def _fake_call(cfg, messages, **k):
@@ -326,8 +326,8 @@ def test_explain_function_change_no_semantic_omits_grounding_even_with_doc_conte
     """reviewer: no_semantic_change=True인데 doc_content/시그니처가 주어지면 과거엔 context에 '원문→제안'
     근거·경계값이 무조건 주입돼 'user_msg 제안 금지'와 상충(이중 방어 무력화). 이제 비의미 경로는
     grounding 재료(doc_ctx·경계값)를 아예 주입하지 않아 LLM에 제안 유인이 남지 않는다."""
-    from workflow import impact_ai_guide
     from workflow import ai as _ai
+    from workflow import impact_ai_guide
     captured = {}
 
     def _fake_call(cfg, messages, **k):
@@ -353,8 +353,8 @@ def test_explain_function_change_no_semantic_omits_grounding_even_with_doc_conte
 
 def test_explain_function_change_semantic_keeps_proposals(monkeypatch):
     """no_semantic_change=False(기본)면 종전대로 문서별 제안·TC 스캐폴드를 요구(무회귀 가드)."""
-    from workflow import impact_ai_guide
     from workflow import ai as _ai
+    from workflow import impact_ai_guide
     captured = {}
 
     def _fake_call(cfg, messages, **k):
@@ -371,8 +371,8 @@ def test_explain_function_change_semantic_keeps_proposals(monkeypatch):
 
 def test_explain_function_change_injects_doc_content(monkeypatch):
     """doc_content(현재 문서 내용)가 프롬프트에 원문으로 주입돼 '원문→제안' 근거가 된다."""
-    from workflow import impact_ai_guide
     from workflow import ai as _ai
+    from workflow import impact_ai_guide
     captured = {}
 
     def _fake_call(cfg, messages, **k):
@@ -404,8 +404,8 @@ def test_explain_function_change_injects_doc_content(monkeypatch):
 
 def test_explain_function_change_without_doc_content_unchanged(monkeypatch):
     """doc_content 미제공(None) 시 기존 동작 유지 — 문서 원문 블록 없이 정상 설명."""
-    from workflow import impact_ai_guide
     from workflow import ai as _ai
+    from workflow import impact_ai_guide
     captured = {}
 
     def _cap(cfg, messages, **k):
@@ -476,8 +476,8 @@ def test_format_param_boundaries_from_signature():
 def test_explain_function_change_grounds_boundary_values(monkeypatch):
     """시그니처 파라미터에서 유도한 실제 경계값(65535)이 프롬프트에 주입돼 LLM이 일반 문구가
     아닌 실제 값으로 시험 케이스를 제안하게 grounding한다."""
-    from workflow import impact_ai_guide
     from workflow import ai as _ai
+    from workflow import impact_ai_guide
     captured = {}
 
     def _fake_call(cfg, messages, **k):
@@ -498,8 +498,8 @@ def test_explain_function_change_grounds_boundary_values(monkeypatch):
 
 def test_explain_function_change_grounds_boundary_from_prototype(monkeypatch):
     """before/after가 없어도 doc_content.uds.prototype에서 경계값을 유도한다."""
-    from workflow import impact_ai_guide
     from workflow import ai as _ai
+    from workflow import impact_ai_guide
     captured = {}
 
     def _fake_call(cfg, messages, **k):
@@ -519,8 +519,8 @@ def test_explain_function_change_grounds_boundary_from_prototype(monkeypatch):
 
 def test_explain_function_change_injects_impact_path(monkeypatch):
     """간접영향 근거(impact_path)가 프롬프트에 주입돼 AI가 콜체인 경로를 근거로 설명한다."""
-    from workflow import impact_ai_guide
     from workflow import ai as _ai
+    from workflow import impact_ai_guide
     captured = {}
 
     def _fake_call(cfg, messages, **k):
@@ -542,8 +542,8 @@ def test_explain_function_change_injects_impact_path(monkeypatch):
 
 def test_explain_function_change_no_impact_path_no_indirect_section(monkeypatch):
     """impact_path 없으면(직접 변경 함수) 간접 영향 섹션 미주입."""
-    from workflow import impact_ai_guide
     from workflow import ai as _ai
+    from workflow import impact_ai_guide
     captured = {}
 
     def _cap(cfg, messages, **k):

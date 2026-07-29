@@ -30,6 +30,7 @@ try:
 except ImportError:  # pragma: no cover
     openpyxl = None  # type: ignore[assignment]
 
+from backend.services.array_collapse import build as _collapse_build
 from backend.services.excel_template_utils import (
     build_release_history_row,
     dot_date,
@@ -51,13 +52,13 @@ from backend.services.excel_template_utils import (
     write_signature_block,
     write_value_after_label,
 )
-
-# 31차 W27: TC name에서 SwUFn_NNNN 함수 ID 추출 (Coverage builder와 동일 패턴).
-_TC_FN_RE = re.compile(r"(SwUFn_\d+)")
-from backend.services.array_collapse import build as _collapse_build
 from backend.services.swut_builder_helpers import extract_warnings_from_session
 from backend.services.swut_input_adapter import SwUTSession, aggregate_session
 from backend.services.swut_meta import BuildMetaBase
+
+# 31차 W27: TC name에서 SwUFn_NNNN 함수 ID 추출 (Coverage builder와 동일 패턴).
+# 위치는 import 블록 **아래** — 예전엔 import 사이에 끼어 뒤쪽 import 가 전부 E402 였다.
+_TC_FN_RE = re.compile(r"(SwUFn_\d+)")
 
 
 def _collapsed_value_cell(grp, data: dict) -> str:

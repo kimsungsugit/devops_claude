@@ -46,7 +46,8 @@ def test_extract_function_diffs_attributes_from_context():
 
 def test_collect_signature_changes_shares_local_diff_via_sink(monkeypatch, tmp_path):
     """로컬 경로에서 받은 per-file diff 원문을 diff_sink에 모아 function_diffs 소비자와 공유(재-diff 없음)."""
-    from workflow import delta_update, impact_orchestrator as m
+    from workflow import delta_update
+    from workflow import impact_orchestrator as m
 
     fake_diff = (
         "Index: DrvIn.c\n"

@@ -1874,16 +1874,11 @@ def local_traceability(
         for fid in fids:
             suts_tcs_for_req.extend(fid_to_suts.get(fid, []))
 
-        has_uds = len(fids) > 0
-        has_sts = len(sts_tcs) > 0
-        has_suts = len(suts_tcs_for_req) > 0
-
         # SDS 컴포넌트 매핑 (V-Model 아키텍처 설계 계층) — 정화: 컴포넌트만 표시, 함수는 분리.
         sds_comps_all = sds_req_to_comps.get(norm_rid, [])
         sds_comps = sds_req_to_design_comps.get(norm_rid, [])  # 실 SwCom/모듈만(함수 fan-out 제외)
         _scset = set(sds_comps)
         sds_funcs = [c for c in sds_comps_all if c not in _scset]  # 인터페이스 함수(분리)
-        has_sds = len(sds_comps) > 0 or len(sds_funcs) > 0  # 커버리지는 컴포넌트 또는 함수(회귀 방지)
 
         # tests 배열 통합 (Jenkins generate_uds_traceability_matrix 형식)
         tests: List[Dict[str, Any]] = []

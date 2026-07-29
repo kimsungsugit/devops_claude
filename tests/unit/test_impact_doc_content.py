@@ -271,8 +271,9 @@ def test_load_uds_fn_content_fallback_extracts_prototype(monkeypatch):
     """
     import io as _io
 
-    import backend.services.file_resolver as fr
     from docx import Document  # type: ignore
+
+    import backend.services.file_resolver as fr
     from workflow.impact_orchestrator import _load_uds_fn_content
 
     # 실제 docx: heading + 표(Name/Prototype/Description) — 사이드카 없음(fallback 경로)
@@ -454,6 +455,7 @@ def test_load_sits_fn_chains_content_sink_keeps_tc_content(monkeypatch):
     """content_sink 제공 시 중간 JSON의 sub_cases(precondition/inputs/expected)를 TC-ID 키로 채우고,
     회귀 반환({entry_fn:[label]})은 flagged 함수만 유지(불변)."""
     import json
+
     import backend.services.file_resolver as fr
     from workflow.impact_orchestrator import _load_sits_fn_chains
 
@@ -495,6 +497,7 @@ def test_load_sits_fn_chains_content_sink_keeps_tc_content(monkeypatch):
 def test_load_sits_fn_chains_without_sink_unchanged(monkeypatch):
     """content_sink 미제공 시 회귀 반환만(순수 additive)."""
     import json
+
     import backend.services.file_resolver as fr
     from workflow.impact_orchestrator import _load_sits_fn_chains
 
@@ -657,8 +660,8 @@ def test_build_doc_proposal_caps_function_count(monkeypatch):
 
 def test_build_doc_proposal_generator_exception_isolated(monkeypatch):
     """한 생성기(SUTS) 예외가 다른 생성기(SITS/STS)를 막지 않고, 사유가 warn으로 표면화된다."""
-    from workflow.impact_orchestrator import _build_doc_proposal
     import generators.suts as gsuts
+    from workflow.impact_orchestrator import _build_doc_proposal
     fd = {"f1": {"name": "s_foo", "logic_flow": [], "calls_list": []}}
     _stub_generators(monkeypatch)
 

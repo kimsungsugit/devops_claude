@@ -341,8 +341,8 @@ def generate_change_summary(ctx: ImpactGuideContext, risk: RiskAssessment) -> Op
     매 호출 TypeError→debug 흡수되어 AI 강화가 영구 비활성이던 버그를 방지.
     """
     try:
-        from workflow.ai import agent_call_text
         from prompts import load_prompt
+        from workflow.ai import agent_call_text
 
         cfg = _load_impact_oai_config()
         if not cfg:
@@ -677,8 +677,8 @@ def suggest_test_additions(
     반환: LLM 제안 리스트, 또는 LLM 미설정/실패/파싱실패 시 None(caller가 결정론 폴백).
     """
     try:
-        from workflow.ai import agent_call_text
         from prompts import load_prompt
+        from workflow.ai import agent_call_text
 
         cfg = _load_impact_oai_config()
         if not cfg:

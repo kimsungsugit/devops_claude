@@ -13,9 +13,9 @@ _ROOT = Path(__file__).resolve().parents[2]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-import pytest
+import pytest  # noqa: E402  (sys.path 부트스트랩 뒤라 순서가 의도됨)
 
-import workflow.ai as ai
+import workflow.ai as ai  # noqa: E402  (sys.path 부트스트랩 뒤라 순서가 의도됨)
 
 
 @pytest.fixture(autouse=True)

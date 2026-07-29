@@ -43,7 +43,10 @@ vi.mock('../api.js', () => ({
   defaultCacheRoot: vi.fn(() => ''),
 }));
 
-const { default: AnalysisSection, saModules } = await import('../components/sections/AnalysisSection.jsx');
+const { default: AnalysisSection } = await import('../components/sections/AnalysisSection.jsx');
+// saModules 는 컴포넌트 파일 밖(staticAnalysis.js)으로 이관됐다 — 컴포넌트 파일이
+// 컴포넌트 아닌 것을 export 하면 Fast Refresh 가 깨진다.
+const { saModules } = await import('../staticAnalysis.js');
 
 /* ── 픽스처 ── */
 const makeJob = () => ({

@@ -119,7 +119,9 @@ def test_parse_sequence_row_non_numeric_seq_no_no_crash():
     SwUTS)에서 build_vectorcast_model 전체가 크래시 → 회귀 TC가 조용히 0이 되던 버그.
     """
     from tools.export_suts_vectorcast import (
-        _parse_sequence_row, _SEQ_NO_COL, _SEQUENCE_TEXT_COL,
+        _SEQ_NO_COL,
+        _SEQUENCE_TEXT_COL,
+        _parse_sequence_row,
     )
 
     class _Cell:
@@ -233,6 +235,7 @@ def test_detect_columns_kjpds02_layout(tmp_path: Path) -> None:
     """KJPDS02_PV 레이아웃: SeqNo=8(=Inpt[0]-1), Input=9.., Expected=20.., Related=30.
     부재 컬럼(Description/Precondition/Sequence-text)은 None(입력컬럼 오독 방지)."""
     from openpyxl import load_workbook
+
     from tools.export_suts_vectorcast import _detect_columns
 
     p = tmp_path / "kj.xlsm"
@@ -256,8 +259,9 @@ def test_detect_columns_kjpds02_layout(tmp_path: Path) -> None:
 def test_kjpds02_low_input_fn_recovered(tmp_path: Path) -> None:
     """핵심 회귀: 입력 2개 함수의 시퀀스행이 col13(구 SeqNo 게이트)에 없어 통째로 드롭되던 것 →
     header-구동 게이트(c8)로 복구. SUTS 카드 '미파싱'의 근본 수정."""
-    from tools.export_suts_vectorcast import build_vectorcast_model
     from openpyxl import load_workbook
+
+    from tools.export_suts_vectorcast import build_vectorcast_model
 
     p = tmp_path / "kj.xlsm"
     _make_kjpds02_style_suts(p)
@@ -279,9 +283,16 @@ def test_kjpds02_low_input_fn_recovered(tmp_path: Path) -> None:
 def test_detect_columns_hdpdm01_layout_matches_constants(tmp_path: Path) -> None:
     """HDPDM01 레이아웃 무회귀: 탐지가 모듈 상수와 동일 컬럼 산출."""
     from openpyxl import load_workbook
+
     from tools.export_suts_vectorcast import (
-        _detect_columns, _SEQ_NO_COL, _INPUT_COL_START, _OUTPUT_COL_START, _RELATED_COL,
-        _DESCRIPTION_COL, _PRECONDITION_COL, _SEQUENCE_TEXT_COL,
+        _DESCRIPTION_COL,
+        _INPUT_COL_START,
+        _OUTPUT_COL_START,
+        _PRECONDITION_COL,
+        _RELATED_COL,
+        _SEQ_NO_COL,
+        _SEQUENCE_TEXT_COL,
+        _detect_columns,
     )
 
     p = tmp_path / "hd.xlsm"
@@ -341,6 +352,7 @@ def test_detect_columns_tolerates_newline_headers(tmp_path: Path) -> None:
     """C1(deep-review Critical): generators/suts.py 생성본 헤더는 개행 삽입이라 정규화가 개행을
     접지 않으면 test_method/gen_method 가 header_driven 문서에서 조용히 None→"" 로 손실됐다."""
     from openpyxl import load_workbook
+
     from tools.export_suts_vectorcast import _detect_columns
 
     p = tmp_path / "nl.xlsm"
@@ -375,7 +387,8 @@ def test_detect_columns_partial_detection_falls_back_and_warns(tmp_path: Path) -
     """W1(deep-review): input만 탐지하고 expected 미탐지 시 밴드 혼합(역전 [63..29]·입력이 expected
     열 흡수)을 만들지 않고 전부 상수 폴백 + header_detect_fallback 경고로 표면화(X8)."""
     from openpyxl import load_workbook
-    from tools.export_suts_vectorcast import _detect_columns, _SEQ_NO_COL, _INPUT_COL_START
+
+    from tools.export_suts_vectorcast import _INPUT_COL_START, _SEQ_NO_COL, _detect_columns
 
     p = tmp_path / "partial.xlsm"
     _make_partial_header_suts(p)

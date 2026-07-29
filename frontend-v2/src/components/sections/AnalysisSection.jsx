@@ -3,6 +3,7 @@ import { post, api } from '../../api.js';
 import { useJenkinsCfg, useToast } from '../../App.jsx';
 import StatusBadge from '../StatusBadge.jsx';
 import { defaultCacheRoot } from '../../api.js';
+import { saModules } from '../../staticAnalysis.js';
 import { useAdminMode } from '../../contexts/AdminContext.jsx';
 import PathPickerDialog from '../PathPickerDialog.jsx';
 
@@ -352,13 +353,6 @@ function clearVcastJob(jobUrl) {
 }
 
 // ── SCM 정적분석 도구 모듈 카드 (도구별 APP/BOOT 모듈 반복) ──────────────────
-// 백엔드 응답: sa[tool] = {ok, modules:[{label, module_folder, source, ...}]}.
-// 하위호환: modules 배열이 없으면(구 응답) 단일 객체를 1-모듈로 취급.
-export function saModules(tool) {
-  if (!tool) return [];
-  if (Array.isArray(tool.modules)) return tool.modules;
-  return tool.ok ? [tool] : [];
-}
 
 function SaModuleLabel({ m, extra }) {
   return (
@@ -844,8 +838,12 @@ export default function AnalysisSection({ job, analysisResult }) {
   // Complexity table — 빌드 complexity.csv가 없으면 SCM VectorCAST 폴더에서 추출한
   // 함수별 복잡도(complexity_rows)로 폴백(async VectorCAST 로드 시 자동 표시).
   // 빌드 complexity 응답이 비어도({rows:[]}) SCM 폴백이 nullish 단락으로 가려지지 않도록 길이 기반 폴백.
-  const buildComplexityRows = complexity?.rows ?? complexity?.functions ?? [];
-  const rows = buildComplexityRows.length ? buildComplexityRows : (scmVcast?.data?.complexity_rows ?? []);
+  // ⚠ useMemo 로 감싸야 한다 — `?? []` 폴백이 **매 렌더 새 배열**을 만들어, 이걸 deps 로 쓰는
+  //   아래 세 useMemo(필터/정렬/집계)가 렌더마다 전부 재계산됐다(react-hooks/exhaustive-deps).
+  const rows = useMemo(() => {
+    const buildComplexityRows = complexity?.rows ?? complexity?.functions ?? [];
+    return buildComplexityRows.length ? buildComplexityRows : (scmVcast?.data?.complexity_rows ?? []);
+  }, [complexity, scmVcast]);
   const filteredRows = useMemo(() => {
     let items = [...rows];
     if (compFilter.trim()) {
@@ -940,7 +938,7 @@ export default function AnalysisSection({ job, analysisResult }) {
   const vSum = scmVcast?.data?.vcast_summary || {};
   const utEntries = Array.isArray(vSum.ut_metrics?.entries) ? vSum.ut_metrics.entries : [];
   const itEntries = Array.isArray(vSum.it_metrics?.entries) ? vSum.it_metrics.entries : [];
-  const utGrand = vSum.ut_metrics?.grand_totals || {};
+  // utGrand 는 UT 카드가 함수레벨 entries 를 직접 쓰도록 바뀌며 쓰이지 않게 됐다(미사용 제거).
   const itGrand = vSum.it_metrics?.grand_totals || {};
   const fnLevelLoaded = utEntries.length > 0 || itEntries.length > 0;
   // 출처: SCM 로드면 그 source, 아니면 빌드에 vcast 있을 때 jenkins.

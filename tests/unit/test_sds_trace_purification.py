@@ -50,8 +50,8 @@ def test_uds_confidence_honest_direct_vs_bridge():
     """Phase 2: link_table에서 직접 UDS=direct, SDS 브리지 회복 UDS=indirect."""
     m, _ = _build()
     lt = build_link_table(m)
-    uds = {l["related_id"]: l["confidence"] for l in lt["links"]
-           if l["target_id"] == "SwTR_01" and l["source"] == "UDS"}
+    uds = {lnk["related_id"]: lnk["confidence"] for lnk in lt["links"]
+           if lnk["target_id"] == "SwTR_01" and lnk["source"] == "UDS"}
     assert uds.get("sf_DirectUds") == "direct"
     assert uds.get("g_func_3") == "indirect"
 
@@ -60,7 +60,7 @@ def test_sds_band_links_exclude_functions():
     """회귀: SDS_COMPONENT 링크가 함수 fan-out 없이 실 컴포넌트만 → 18(=16+2)건."""
     m, _ = _build()
     lt = build_link_table(m)
-    sds_links = [l for l in lt["links"] if l["source"] == "SDS"]
+    sds_links = [lnk for lnk in lt["links"] if lnk["source"] == "SDS"]
     assert len(sds_links) == 18  # 분리 전이면 39(=36+3)
 
 

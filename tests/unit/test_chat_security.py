@@ -19,10 +19,13 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-import pytest
+import pytest  # noqa: E402  (sys.path 부트스트랩 뒤라 순서가 의도됨)
 
-from backend.services.chat_history_db import init_db, reset_engine
-from backend.services.chat_history_service import (
+from backend.services.chat_history_db import (  # noqa: E402  (sys.path 부트스트랩 뒤라 순서가 의도됨)
+    init_db,
+    reset_engine,
+)
+from backend.services.chat_history_service import (  # noqa: E402  (sys.path 부트스트랩 뒤라 순서가 의도됨)
     delete_conversation,
     list_conversations,
     load_history,

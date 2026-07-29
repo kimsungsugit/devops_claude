@@ -61,6 +61,12 @@ def _synth_template_bytes() -> bytes:
     return bio.getvalue()
 
 
+# ⚠ 템플릿은 합성하지만 QAC XML 은 실 샘플을 쓴다 — `.codex_tmp/` 는 .gitignore 대상이라
+#   **새로 clone 한 어떤 머신에서도 존재하지 않는다**(CI 든 신규 개발자 PC 든). 이 파일의
+#   다른 클래스들은 이미 같은 가드를 달고 있는데 여기만 빠져 있어, 샘플이 없는 환경에서
+#   FileNotFoundError 로 실패했다(실측: GitHub Actions 2건). 없는 입력은 '실패'가 아니라
+#   '측정 불가'이고, skip 은 사유가 남으므로 침묵 통과가 아니다.
+@pytest.mark.skipif(not os.path.exists(_XML), reason="실 QAC XML 샘플 없음")
 class TestSyntheticGraceful:
     def test_build_fills_and_marks(self):
         tpl = _synth_template_bytes()

@@ -1,17 +1,18 @@
 """Auto-generated router: impact"""
-from fastapi import APIRouter, HTTPException
-from typing import Any, Dict, List
 import json
+import logging
 import re
 import traceback
-import logging
 import uuid
-from pathlib import Path
 from datetime import datetime
+from pathlib import Path
+from typing import Any, Dict, List
+
+from fastapi import APIRouter, HTTPException
 
 from backend.schemas import (
-    ImpactAnalyzeRequest,
     ImpactAiGuideRequest,
+    ImpactAnalyzeRequest,
     ImpactDocDraftRequest,
     ImpactDocProseRequest,
     ImpactExplainChangeRequest,
@@ -83,7 +84,8 @@ def impact_analyze(req: ImpactAnalyzeRequest) -> Dict[str, Any]:
     if req.include_ai_guide:
         try:
             from workflow.impact_ai_guide import (
-                generate_impact_guide, ImpactGuideContext,
+                ImpactGuideContext,
+                generate_impact_guide,
             )
             # analyze()는 변경 '유형' 분류/by_name을 산출하지 않으므로 이전엔 빈 컨텍스트로
             # 위험이 항상 LOW로 위장됐다. 영향 집합(impacted_functions)을 direct로 매핑해
@@ -118,7 +120,8 @@ def impact_ai_guide(req: ImpactAiGuideRequest) -> Dict[str, Any]:
     """Generate AI risk assessment and cross-document impact guide."""
     try:
         from workflow.impact_ai_guide import (
-            generate_impact_guide, ImpactGuideContext,
+            ImpactGuideContext,
+            generate_impact_guide,
         )
         ctx = ImpactGuideContext(
             changed_types=req.changed_types or {},

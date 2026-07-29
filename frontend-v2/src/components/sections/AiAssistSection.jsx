@@ -96,6 +96,7 @@ export default function AiAssistSection({ job, analysisResult }) {
   useEffect(() => {
     let tid = '';
     try { tid = localStorage.getItem(threadKey) || ''; } catch { /* noop */ }
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- job(threadKey) 전환 시 대화 상태 리셋 — prop 변경에 따른 파생 상태 재설정
     setThreadId(tid);
     setMessages([]);
     setApproval(null);
@@ -121,6 +122,7 @@ export default function AiAssistSection({ job, analysisResult }) {
     }
   }, []);
 
+  // eslint-disable-next-line react-hooks/set-state-in-effect -- 마운트 시 RAG 상태 로드 — 콜백 첫 줄의 로딩 플래그 setState
   useEffect(() => { loadRagStatus(); }, [loadRagStatus]);
 
   // 마지막 assistant 버블을 patch

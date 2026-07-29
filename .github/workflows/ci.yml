@@ -44,6 +44,13 @@ jobs:
     #   skipif 로 넘기면 CI 가 그 33건을 영영 안 보게 되므로 러너를 맞춘다.
     runs-on: windows-latest
     needs: syntax-check
+    # ⚠ windows 러너의 로캘은 영문(cp1252)이라 **한글 출력이 UnicodeEncodeError 로 죽는다.**
+    #   개발 PC 는 한국어 로캘(cp949)이라 이 차이가 로컬에서는 안 보인다. 실측: 훅 계약
+    #   테스트가 `quality_check.py --json` 을 서브프로세스로 띄우는데, 스크립트의 한글
+    #   진단문이 인코딩되지 않아 stdout 이 통째로 비고 `json.loads('')` 로 6건이 깨졌다.
+    #   UTF-8 모드는 서브프로세스에도 상속되므로 잡 전체에 건다.
+    env:
+      PYTHONUTF8: "1"
     steps:
       - uses: actions/checkout@v4
 

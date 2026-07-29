@@ -17,8 +17,8 @@ Deployment notes:
 from __future__ import annotations
 
 import json
-import sys
 import logging
+import sys
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
@@ -108,11 +108,13 @@ async def _lifespan(app_instance):
     # 45차 C1: 빈 users.json + BOOTSTRAP_ADMIN_USER/PASSWORD env면 첫 사용자 자동 등록.
     # 첫 로그인 시 must_change_password=True로 PW 변경 강제.
     try:
+        from backend.services.admin_users import mask_user as _mask
         from backend.services.users import (
             bootstrap_admin_user_from_env as _bootstrap_user,
+        )
+        from backend.services.users import (
             warmup_dummy_hash as _warmup_dummy_hash,
         )
-        from backend.services.admin_users import mask_user as _mask
         _user_result = _bootstrap_user()
         _safe_user_log = {
             "action": _user_result.get("action"),
@@ -163,8 +165,8 @@ async def _lifespan(app_instance):
 
         # 39차: 사용자 추가 cloudium prefixes (config/cloudium_extra_prefixes.json) 자동 merge
         try:
-            from backend.services.cloudium_extra_prefixes import load_extra_prefixes
             from backend.routers.health import _apply_extra_prefixes_to_resolver
+            from backend.services.cloudium_extra_prefixes import load_extra_prefixes
             _extra = load_extra_prefixes()
             if _extra:
                 _apply_extra_prefixes_to_resolver(_extra)
@@ -196,6 +198,7 @@ from backend.middleware import (  # noqa: E402
     RequestLoggingMiddleware,
     SecurityHeadersMiddleware,
 )
+
 app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(RequestLoggingMiddleware)
 app.add_middleware(RateLimitMiddleware)
@@ -205,16 +208,19 @@ app.add_middleware(RateLimitMiddleware)
 app.add_middleware(CloudiumGateMiddleware)
 
 from backend.user_context import UserContextMiddleware  # noqa: E402
+
 app.add_middleware(UserContextMiddleware)
 
 
 # 표준 에러 핸들러 (error_handler.py에서 단일 관리)
 from backend.error_handler import global_exception_handler, http_exception_handler  # noqa: E402
+
 app.add_exception_handler(Exception, global_exception_handler)
 app.add_exception_handler(HTTPException, http_exception_handler)
 
 # **W-N1 fix**: cloudium 정책 위반 응답을 미들웨어와 동일 shape로 통일
 from backend.middleware import CloudiumBlockedException, _cloudium_blocked_response  # noqa: E402
+
 
 async def _cloudium_blocked_exception_handler(request, exc: CloudiumBlockedException):
     return _cloudium_blocked_response(exc.detail)
@@ -226,59 +232,82 @@ app.add_exception_handler(CloudiumBlockedException, _cloudium_blocked_exception_
 # Register modular routers
 # ---------------------------------------------------------------------------
 from backend.routers.health import router as _health_router  # noqa: E402
+
 app.include_router(_health_router)
 
 # 42차 W2: health의 admin only sub-router (file-mode add/remove/list/browse-file).
 from backend.routers.health import admin_router as _health_admin_router  # noqa: E402
+
 app.include_router(_health_admin_router)
 
 # 40차: 인증/권한 endpoint (GET /api/auth/me + /api/auth/admins)
 from backend.routers.auth import router as _auth_router  # noqa: E402
+
 app.include_router(_auth_router)
 
 from backend.routers.chat import router as _chat_router  # noqa: E402
+
 app.include_router(_chat_router)
 from backend.routers.code import router as _code_router  # noqa: E402
+
 app.include_router(_code_router)
 from backend.routers.config import router as _config_router  # noqa: E402
+
 app.include_router(_config_router)
 from backend.routers.excel import router as _excel_router  # noqa: E402
+
 app.include_router(_excel_router)
 from backend.routers.exports import router as _exports_router  # noqa: E402
+
 app.include_router(_exports_router)
 from backend.routers.impact import router as _impact_router  # noqa: E402
+
 app.include_router(_impact_router)
 from backend.routers.profiles import router as _profiles_router  # noqa: E402
+
 app.include_router(_profiles_router)
 from backend.routers.qac import router as _qac_router  # noqa: E402
+
 app.include_router(_qac_router)
 from backend.routers.test_gen import router as _test_gen_router  # noqa: E402
+
 app.include_router(_test_gen_router)
 from backend.routers.vcast import router as _vcast_router  # noqa: E402
+
 app.include_router(_vcast_router)
 from backend.routers.jenkins import router as _jenkins_router  # noqa: E402
+
 app.include_router(_jenkins_router)
 from backend.routers.local import router as _local_router  # noqa: E402
+
 app.include_router(_local_router)
 from backend.routers.sessions import router as _sessions_router  # noqa: E402
+
 app.include_router(_sessions_router)
 from backend.routers.scm import router as _scm_router  # noqa: E402
+
 app.include_router(_scm_router)
 from backend.routers.summary_insight import router as _summary_insight_router  # noqa: E402
+
 app.include_router(_summary_insight_router)
 from backend.routers.quality import router as _quality_router  # noqa: E402
+
 app.include_router(_quality_router)
 from backend.routers.swut import router as _swut_router  # noqa: E402
+
 app.include_router(_swut_router)
 # 33차 라운드 — SwIT (Software Integration Test) Coverage Report v2.02
 from backend.routers.swit import router as _swit_router  # noqa: E402
+
 app.include_router(_swit_router)
 # SwSA (Software Static Analysis Report) — QAC/PMD 로그 자동 빌드
 from backend.routers.swsa import router as _swsa_router  # noqa: E402
+
 app.include_router(_swsa_router)
 
 # SwReport (SW Test Result Report) — 레벨별 산출물 → ES95411 통합 Summary
 from backend.routers.swreport import router as _swreport_router  # noqa: E402
+
 app.include_router(_swreport_router)
 
 # ---------------------------------------------------------------------------
@@ -286,10 +315,10 @@ app.include_router(_swreport_router)
 # ---------------------------------------------------------------------------
 _frontend_dist = repo_root / "frontend-v2" / "dist"
 if (_frontend_dist / "index.html").exists():
-    from fastapi.staticfiles import StaticFiles  # noqa: E402
-    from fastapi.responses import FileResponse  # noqa: E402
-
     import mimetypes
+
+    from fastapi.responses import FileResponse  # noqa: E402
+    from fastapi.staticfiles import StaticFiles  # noqa: E402
     mimetypes.add_type("application/javascript", ".js")
     mimetypes.add_type("text/css", ".css")
     mimetypes.add_type("image/svg+xml", ".svg")

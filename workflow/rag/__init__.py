@@ -44,6 +44,29 @@ from workflow.rag.ingestor import (
     ingest_uds_reference,
 )
 
+# 위 두 블록은 **하위 호환 재수출**이다(chunker/ingestor 로 분리하기 전 경로를 쓰는 코드용).
+# `__all__` 로 그 의도를 명시하지 않으면 F401 "imported but unused" 로 잡힌다 — 실제로는
+# 지우면 안 되는 공개 표면이라 '미사용'이 아니라 '여기서만 안 쓰는 것'이다.
+# ⚠ 이 모듈을 `import *` 하는 곳은 없고(속성 접근만), 따라서 `__all__` 추가는 런타임 무영향.
+__all__ = [
+    "REQ_ID_PATTERN",
+    "_chunk_by_req_ids",
+    "_chunk_c_by_function",
+    "_chunk_docx_by_heading",
+    "_chunk_source_file",
+    "_chunk_text",
+    "_chunk_xlsx_rows",
+    "_collect_files_from_paths",
+    "_extract_req_ids_from_text",
+    "_infer_vectorcast_tags",
+    "_read_and_chunk_file",
+    "_read_text_from_file",
+    "_split_paths",
+    "ingest_external_sources",
+    "ingest_runtime_summary",
+    "ingest_uds_reference",
+]
+
 _rag_logger = logging.getLogger("workflow.rag")
 _RAG_PERF_LOG = str(os.environ.get("DEVOPS_RAG_PERF_LOG", "0")).strip().lower() in ("1", "true", "yes")
 

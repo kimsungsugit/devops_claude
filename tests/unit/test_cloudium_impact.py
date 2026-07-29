@@ -6,8 +6,8 @@ from workflow.change_trigger import ChangeTrigger
 
 
 def test_is_cloudium_mode_reflects_resolver(monkeypatch):
-    from workflow import impact_orchestrator as io
     import backend.services.file_resolver as fr
+    from workflow import impact_orchestrator as io
 
     class _Fake:
         mode = "cloudium"
@@ -22,8 +22,8 @@ def test_is_cloudium_mode_reflects_resolver(monkeypatch):
 
 def test_generate_uds_source_sections_via_cloudium_resolver(monkeypatch):
     """cloudium 모드면 os.walk/open 없이 resolver(list_dir+read_bytes)로 소스를 읽는다."""
-    import report_gen.uds_generator as ug
     import backend.services.file_resolver as fr
+    import report_gen.uds_generator as ug
 
     calls = {"list": 0, "read": 0, "walk_blocked": True}
     fake_c = b"void Ap_Door_Run(void){ Ap_Helper(); }\nvoid Ap_Helper(void){}\n"
@@ -99,10 +99,10 @@ def test_run_impact_update_cloudium_downgrades_auto_and_skips_diff(tmp_path, mon
 
 def test_impact_analyze_runs_in_process(tmp_path, monkeypatch):
     """impact.py가 subprocess 대신 in-process analyze()를 호출한다(local 모드)."""
-    from backend.routers import impact as imod
-    from backend.schemas import ImpactAnalyzeRequest
     import backend.services.file_resolver as fr
     import tools.impact_analysis as tia
+    from backend.routers import impact as imod
+    from backend.schemas import ImpactAnalyzeRequest
 
     (tmp_path / "x.c").write_text("void f(void){}", encoding="utf-8")
 
@@ -125,10 +125,10 @@ def test_impact_analyze_runs_in_process(tmp_path, monkeypatch):
 
 def test_impact_analyze_ai_guide_not_fake_low(tmp_path, monkeypatch):
     """include_ai_guide=True면 빈 컨텍스트 LOW 위장이 아니라 scope/ASIL미상 기반 평가가 나온다."""
-    from backend.routers import impact as imod
-    from backend.schemas import ImpactAnalyzeRequest
     import backend.services.file_resolver as fr
     import tools.impact_analysis as tia
+    from backend.routers import impact as imod
+    from backend.schemas import ImpactAnalyzeRequest
 
     (tmp_path / "x.c").write_text("void f(void){}", encoding="utf-8")
 
@@ -147,10 +147,11 @@ def test_impact_analyze_ai_guide_not_fake_low(tmp_path, monkeypatch):
 
 def test_impact_analyze_cloudium_worker_down_returns_400(monkeypatch):
     """cloudium worker 다운 시 is_dir 예외가 500이 아닌 깨끗한 400으로 처리된다."""
+    from fastapi import HTTPException
+
+    import backend.services.file_resolver as fr
     from backend.routers import impact as imod
     from backend.schemas import ImpactAnalyzeRequest
-    import backend.services.file_resolver as fr
-    from fastapi import HTTPException
 
     class _DownCloud:
         mode = "cloudium"

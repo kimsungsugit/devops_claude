@@ -1,14 +1,15 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
 import { post, api, defaultCacheRoot } from '../api.js';
 import { useToast, useJenkinsCfg, useJob } from '../App.jsx';
-import { pickScmForJob, pickScmForJobWithSource, loadProjectFromCache } from '../projectLoader.js';
+import { pickScmForJobWithSource, loadProjectFromCache } from '../projectLoader.js';
 import { pollImpactJob, throwIfAborted, isAbortError } from '../impactPoll.js';
 import JobCard from '../components/JobCard.jsx';
 import ResultPanel from '../components/ResultPanel.jsx';
 import AggregateCharts from '../components/AggregateCharts.jsx';
 
-// pickScmForJob은 projectLoader로 이관됨 — 기존 import 경로(views/Dashboard) 호환 위해 re-export.
-export { pickScmForJob };
+// pickScmForJob 은 projectLoader 로 이관됐다. 예전엔 여기서 re-export 했으나 소비처가
+// 레거시 테스트 1곳뿐이라 그쪽을 정본 경로로 돌리고 제거했다(컴포넌트 외 export 는
+// react-refresh 를 깨뜨린다 — react-refresh/only-export-components).
 
 /* ── Step definitions ─────────────────────────────────────────────── */
 const STEPS = [

@@ -4,17 +4,21 @@
 from __future__ import annotations
 
 import os
+import os as _os
 import re
+import threading as _threading
+import time as _time
+from collections import OrderedDict as _OrderedDict
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
-
-from backend.dependencies.admin import require_admin
 from pydantic import BaseModel, Field, field_validator
 
 import config
+from backend.dependencies.admin import require_admin
 from backend.error_handler import APIError
+
 # C3: 공유 헬퍼로 이동 — health.py / jenkins.py 등이 동일 검증 사용 (방어 비대칭 해소)
 from backend.services.resolver_helpers import enforce_resolver_access as _enforce_resolver_access
 
@@ -35,10 +39,6 @@ except ImportError:
 # 무효화: ① TTL(_preview_ttl, 기본 120s). ② local 모드는 (mtime,size) 시그니처로 정확 무효화
 #   (cloudium은 backend가 U: 경로를 stat 못 함 → sig=None → TTL만). ③ file_mode 전환·
 #   /cache/clear 시 clear_preview_cache로 전량 무효화(cross-mode 오염 방지).
-import os as _os
-import threading as _threading
-import time as _time
-from collections import OrderedDict as _OrderedDict
 
 _PREVIEW_CACHE_LOCK = _threading.Lock()
 _PREVIEW_BYTES_BUDGET = 128 * 1024 * 1024   # 바이트 캐시 총량 상한
@@ -309,7 +309,9 @@ def _apply_extra_prefix_to_resolver(prefix: str) -> dict:
     Returns: 갱신된 resolver config.
     """
     from backend.services.file_resolver import (
-        CloudiumFileResolver, get_resolver, switch_mode,
+        CloudiumFileResolver,
+        get_resolver,
+        switch_mode,
     )
     resolver = get_resolver()
     if not isinstance(resolver, CloudiumFileResolver):
@@ -325,7 +327,9 @@ def _apply_extra_prefix_to_resolver(prefix: str) -> dict:
 def _apply_extra_prefixes_to_resolver(prefixes: list[str]) -> dict:
     """여러 prefix 일괄 적용 (startup auto-merge에서 사용)."""
     from backend.services.file_resolver import (
-        CloudiumFileResolver, get_resolver, switch_mode,
+        CloudiumFileResolver,
+        get_resolver,
+        switch_mode,
     )
     resolver = get_resolver()
     if not isinstance(resolver, CloudiumFileResolver):
@@ -655,8 +659,8 @@ def _extract_docx_sheets(doc) -> List[Dict[str, Any]]:
 def _docx_relmap(data: bytes) -> Dict[str, str]:
     """docx의 word/_rels/document.xml.rels에서 이미지 rId→Target 맵을 추출(작음)."""
     import io as _io
-    import zipfile
     import xml.etree.ElementTree as ET
+    import zipfile
     out: Dict[str, str] = {}
     try:
         with zipfile.ZipFile(_io.BytesIO(data)) as z:
@@ -694,6 +698,7 @@ def preview_excel_file(body: PreviewExcelRequest):
     직접 file system을 stat/open하면 WinError 5 (액세스 거부)가 발생.
     """
     import io
+
     from backend.services.file_resolver import get_resolver
 
     file_path = body.path.strip()
@@ -838,7 +843,7 @@ def preview_excel_file(body: PreviewExcelRequest):
             return {"ok": True, "filename": p.name, "sheets": [{
                 "name": "Content",
                 "headers": ["Line"],
-                "rows": [[l] for l in lines],
+                "rows": [[line] for line in lines],
                 "has_more": len(all_lines) > row_end,
                 "total_rows": len(all_lines),
                 "total_cols": 1,
@@ -883,7 +888,9 @@ def preview_image(path: str, image_id: str):
     WinError 5 발생).
     """
     import io
+
     from fastapi.responses import Response
+
     from backend.services.file_resolver import get_resolver
     _enforce_resolver_access(path)
 

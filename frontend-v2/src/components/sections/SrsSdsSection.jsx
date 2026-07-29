@@ -1043,7 +1043,8 @@ function hasTestData(r) {
 //  - nonfunctional(SwNTR/SwNTSR): 설계 분해 없이 시험으로 직접 검증(결정1) → UDS/SITS 구조적 불요.
 //  - interface(SwEI/SwEIF): SDS→HSIS 실현·시스템 통합시험(SyITS)으로 검증 → SITS 구조적 불요.
 // RAW 철자(정규화 전)라 Sy* 접두도 인정(백엔드 jenkins/local lockstep).
-export function _reqClass(rid) {
+// 이 파일 안에서만 쓰인다(외부 import 0) — export 를 달아 두면 react-refresh 가 깨진다.
+function _reqClass(rid) {
   const s = String(rid || '').toUpperCase();
   if (['SWNTR', 'SWNTSR', 'SYNTR', 'SYNTSR'].some(p => s.startsWith(p))) return 'nonfunctional';
   if (['SWEI', 'SWEIF', 'SYEI', 'SYEIF'].some(p => s.startsWith(p))) return 'interface';
@@ -1676,6 +1677,7 @@ function TraceMatrix({ matrix, focusFunctions = null, onClearFocus = null,
   useEffect(() => { setCurrentPage(0); setExpandedReqId(null); setExpandedTreeNodes(new Set()); }, [rows]);
 
   // 펼친 행이 바뀌면(다른 행 열기·현재 행 접기) 인라인 뷰도 닫는다 — 이전 행 함수/요구사항의 뷰가 남는 것 방지.
+  // eslint-disable-next-line react-hooks/set-state-in-effect -- 행 집합(rows)이 바뀌면 페이지·펼침 상태를 리셋 — 파생 상태 동기화(React 공식 패턴)
   useEffect(() => { setInlineView(null); }, [expandedReqId]);
 
   // 트리 펼침은 page-absolute nodeId를 쓰므로 페이지 이동엔 유지되지만, 행 집합/정렬/
@@ -3851,11 +3853,13 @@ function CallTreeView({ job, cacheRoot, buildSelector, sourceRoot, seedFns, toas
   }, [labelMode, switViewData, switMap, fetchSwitMap, data, job, cacheRoot, buildSelector, sourceRoot, depth, includeExternal, toast]);
 
   // 새 콜트리 로드 시 라벨 모드/매핑 초기화(이전 트리 매핑을 새 트리에 잘못 적용 방지).
+  // eslint-disable-next-line react-hooks/set-state-in-effect -- 새 콜트리 로드 시 라벨 모드/매핑 리셋 — 이전 트리 매핑의 오적용 방지
   useEffect(() => { switSeq.current += 1; setLabelMode('func'); setSwitMap(null); setSwitViewData(null); }, [data]);
 
   // SwIT ID 뷰 활성 시 재구성 트리(switViewData)를, 아니면 원본 data를 렌더 소스로. 원본은 불변 보존.
   const activeData = (labelMode === 'swit' && switViewData) ? switViewData : data;
-  const trees = Array.isArray(activeData?.trees) ? activeData.trees : [];
+  // ⚠ useMemo — `: []` 폴백이 매 렌더 새 배열이라 아래 정렬 useMemo 가 매번 재계산됐다.
+  const trees = useMemo(() => (Array.isArray(activeData?.trees) ? activeData.trees : []), [activeData]);
   const st = activeData?.stats || {};
   // 진입점(boot)→ISR→일반 순 정렬(역방향은 이름순). load의 _ctBootExpansion과 동일 정렬 함수·동일
   // reverse(로드된 데이터 기준 st.reverse)라 자동펼침 path가 정합.
@@ -4146,6 +4150,7 @@ function InlineCallTree({ fn, job, cacheRoot, buildSelector, sourceRoot, onOpenF
   }, [bare, hasSource, jobUrl, cacheRoot, buildSelector, sourceRoot, depth]);
 
   // 마운트 + 방향/깊이 변경 시 자동 로드 (load가 depth를 deps로 물어 깊이 변경 시 재조회)
+  // eslint-disable-next-line react-hooks/set-state-in-effect -- 마운트·방향/깊이 변경 시 자동 로드 — load 내부의 로딩 플래그 setState
   useEffect(() => { load(direction); }, [direction, load]);
 
   // depthInput → depth 디바운스(350ms) — number input 타이핑 중 키마다 재조회하던 낭비(W1) 차단.
@@ -4155,7 +4160,8 @@ function InlineCallTree({ fn, job, cacheRoot, buildSelector, sourceRoot, onOpenF
     return () => clearTimeout(t);
   }, [depthInput]);
 
-  const trees = Array.isArray(data?.trees) ? data.trees : [];
+  // ⚠ useMemo — 위 블록과 같은 이유(폴백 배열의 매 렌더 새 참조).
+  const trees = useMemo(() => (Array.isArray(data?.trees) ? data.trees : []), [data]);
   const st = data?.stats || {};
   const reverse = direction === 'caller';
   const sortedTrees = useMemo(() => _ctSortRoots(trees, st.reverse), [trees, st.reverse]);
@@ -4538,6 +4544,7 @@ function TraceReqGraphView({ rows, focusFunctions = null, linkTable = null, init
   useEffect(() => {
     // 노드 생존 시 보존하되, root('__root__')는 nodeXY에 항상 있으므로 요구사항 동일(label===reqId)일 때만
     // 보존 — 안 그러면 요구사항 전환 후에도 root 상세패널이 옛 reqId를 영구 표시(stale).
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- 그래프 교체 시 선택 노드 보존/무효화 — stale 상세패널 방지
     setSelNode(prev => (prev && graph && graph.nodeXY[prev.id] && (!prev.isRoot || prev.label === graph.reqId)) ? prev : null);
     setHoverId(null); setFocusId(null);
   }, [graph]);
@@ -5023,6 +5030,7 @@ function TraceFuncGraphView({ rows, focusFunctions = null, initialFn = '', embed
   const graph = useMemo(() => (selectedFn ? _buildFuncGraph(selectedFn, rows, focusSet, visibleKeys) : null), [selectedFn, rows, focusSet, visibleKeys]);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- 위와 동일(함수 그래프 축)
     setSelNode(prev => (prev && graph && graph.nodeXY[prev.id] && (!prev.isRoot || prev.label === graph.funcId)) ? prev : null);
     setHoverId(null); setFocusId(null);
   }, [graph]);

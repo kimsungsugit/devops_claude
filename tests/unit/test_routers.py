@@ -1071,8 +1071,8 @@ class TestPreviewExcelFixes:
 
     @pytest.fixture(autouse=True)
     def _force_local_resolver(self):
-        from backend.services import file_resolver as _fr
         from backend.routers import health as _health
+        from backend.services import file_resolver as _fr
         prev = _fr.get_resolver()
         _fr.set_resolver(_fr.LocalFileResolver())
         # 미리보기 캐시는 path 키 + TTL이므로, mkstemp가 경로를 재사용하면 직전
@@ -1200,8 +1200,9 @@ class TestPreviewExcelFixes:
     def test_preview_excel_docx_corrupt_image_recovers(self):
         """깨진 임베드 이미지 docx도 _safe_docx_open으로 500 없이 200 반환
         (UDS/SDS BadZipFile 에러 버그)."""
-        import docx as _docx
         import io
+
+        import docx as _docx
         corrupt = self._corrupt_docx()
         # 전제: raw python-docx는 실패
         with pytest.raises(Exception):

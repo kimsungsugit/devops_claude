@@ -136,9 +136,29 @@ def test_load_payload_with_status_distinguishes_absent_unreadable(monkeypatch, t
     (tmp_path / "doc.payload.json").write_text('{"test_case_count": 5}', encoding="utf-8")
     payload, status = impact_changes._load_payload_with_status(str(p))
     assert status == "loaded" and payload.get("test_case_count") == 5
-    # unreadable(exists가 PermissionError)
+    # unreadable — 경로가 둘이고 **둘 다** 고정해야 결과가 머신에 안 좌우된다.
+    # ⚠ 구현은 resolver(`get_resolver().read_bytes`)를 **먼저** 부른다. resolver 를 스텁하지
+    #   않으면 그것이 던지는 예외 종류가 머신 상태(file_mode.json·cloudium 가용성)에 좌우돼
+    #   판정이 갈린다 — 실측: CI 에서 FileNotFoundError 가 나 'absent' 로 떨어지면서
+    #   아래 `Path.exists` 몽키패치에 닿지도 못했다(로컬 통과 / CI 실패).
+    import backend.services.file_resolver as _fr
+
+    # ① resolver 가 권한거부를 던지는 경로 — cloudium U:\ SMB 의 실제 케이스
+    class _Denied:
+        def read_bytes(self, *a, **k):
+            raise PermissionError("[WinError 5]")
+
+    monkeypatch.setattr(_fr, "get_resolver", lambda *a, **k: _Denied())
+    assert impact_changes._load_payload_with_status("U:/x.docx") == ({}, "unreadable")
+
+    # ② resolver 미가용 → 로컬 직접 읽기 폴백에서 권한거부
+    def _unavailable(*a, **k):
+        raise RuntimeError("resolver 미가용")
+
     def _raise(self, *a, **k):
         raise PermissionError("[WinError 5]")
+
+    monkeypatch.setattr(_fr, "get_resolver", _unavailable)
     monkeypatch.setattr(Path, "exists", _raise)
     assert impact_changes._load_payload_with_status("U:/x.docx") == ({}, "unreadable")
 
