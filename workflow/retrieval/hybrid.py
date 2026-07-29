@@ -74,6 +74,13 @@ def _report_hits(question: str, report_dir: Optional[Path], top_k: int = 5) -> L
             synth_lines.append(f"findings count: {len(findings)}")
         if not synth_lines:
             synth_lines.append(f"report directory available: {report_dir.name}")
+        # 합성 요약은 **검색된 근거가 아니다** — 리포트 파일에서 조립한 대체물이다.
+        # 예전엔 점수를 0.35 로 하드코딩했는데, 위 KB 근거는 RRF 융합 점수라 상한이
+        # 0.0328(k=60)이다. 그래서 합성 항목이 **항상 실제 근거보다 위**에 정렬되고
+        # `retrieve_contexts` 의 top_k 슬롯을 먼저 차지했다. 실제 근거보다 아래로 두고,
+        # 근거 텍스트 자체에도 합성임을 명시한다(LLM 이 컨텍스트만 보고 판단하므로).
+        real_scores = [float(h.get("score") or 0.0) for h in hits]
+        synth_score = min(real_scores) * 0.5 if real_scores else 0.05
         hits.append(
             {
                 "hit_id": "report-synth",
@@ -81,11 +88,12 @@ def _report_hits(question: str, report_dir: Optional[Path], top_k: int = 5) -> L
                 "source_type": "report",
                 "uri": f"report://session/{report_dir.name}",
                 "path": str(report_dir),
-                "label": "report_summary",
+                "label": "report_summary(합성)",
                 "metadata": {"synthetic": True},
-                "chunk_text": "\n".join(synth_lines)[:1200],
-                "score": 0.35,
-                "rerank_score": 0.35,
+                "chunk_text": ("[합성 요약 — KB 검색 결과가 아니라 리포트 파일에서 조립한 값]\n"
+                               + "\n".join(synth_lines))[:1200],
+                "score": synth_score,
+                "rerank_score": synth_score,
             }
         )
     return hits

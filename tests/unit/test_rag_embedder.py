@@ -51,12 +51,15 @@ class TestCosineSimilarity:
         from workflow.rag.embedder import cosine_similarity
         assert cosine_similarity([], []) == 0.0
 
-    def test_dimension_mismatch_pads(self):
+    def test_dimension_mismatch_returns_zero(self):
+        """차원 불일치는 **0.0**(관계 미확인) — 예전엔 zero-pad 해서 1.0 을 냈다.
+
+        pad 는 "없는 차원의 값이 전부 0" 이라는 근거 없는 가정이고, 실제로는 64차원 폴백
+        KB 와 768차원 Gemini 질의를 앞 64차원만으로 비교해 **무의미한 수를 그럴듯한
+        유사도로 위장**했다. 상세: `tests/unit/test_rag_embed_provenance.py`.
+        """
         from workflow.rag.embedder import cosine_similarity
-        a = [1.0, 0.0]
-        b = [1.0, 0.0, 0.0, 0.0]
-        result = cosine_similarity(a, b)
-        assert result == pytest.approx(1.0, abs=1e-6)
+        assert cosine_similarity([1.0, 0.0], [1.0, 0.0, 0.0, 0.0]) == 0.0
 
     def test_zero_vector(self):
         from workflow.rag.embedder import cosine_similarity

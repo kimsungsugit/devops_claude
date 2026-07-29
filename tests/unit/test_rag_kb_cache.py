@@ -24,7 +24,17 @@ from workflow.rag import KnowledgeBase, _clear_kb_cache, get_kb
 @pytest.fixture
 def kb_env(monkeypatch, tmp_path):
     """sqlite 저장소 + 임베딩 네트워크 차단 + 캐시 ON 기본."""
-    monkeypatch.setattr(emb, "get_embedding", lambda text: [float(len(str(text)) % 5)] * 8)
+    # 스텁은 실제 시그니처를 그대로 미러링해야 한다 — `get_embedding` 은 출처를 기록하는
+    # `meta_out` 을 받는다(`tests/unit/test_rag_embed_provenance.py`). 스텁이 그걸 빼먹으면
+    # 프로덕션이 아니라 **테스트만** TypeError 로 죽는다.
+    def _stub_embedding(text, *, meta_out=None):
+        vec = [float(len(str(text)) % 5)] * 8
+        if meta_out is not None:
+            meta_out.update({"embed_source": "stub", "embed_model": "stub",
+                             "embed_dim": len(vec), "degraded": False})
+        return vec
+
+    monkeypatch.setattr(emb, "get_embedding", _stub_embedding)
     monkeypatch.setattr(config, "KB_GLOBAL_DIR", "")
     monkeypatch.setattr(config, "KB_SOURCES_DIR", "")
     monkeypatch.setattr(config, "KB_STORAGE", "sqlite")

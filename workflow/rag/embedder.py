@@ -5,6 +5,16 @@ Fallback chain:
 2. External HTTP API (KB_EMBED_URL env)
 3. sentence-transformers all-MiniLM-L6-v2 (384dim)
 4. Seeded random vectors (64dim) - last resort
+
+⚠ **4번은 의미 신호가 0인 벡터다.** 이걸로 만든 유사도 랭킹은 랭킹이 아니라 난수 정렬이다.
+반환 타입이 `List[float]` 하나뿐이라 소비처가 1~3번과 4번을 **구분할 방법이 없었고**, 실측
+결과 저장소의 실 KB 엔트리 102건이 **전부 64차원 무작위 벡터**였다(Gemini 키 부재). 그 상태로
+`semantic_search` 는 102건 중 52건을 "관련 근거"로 통과시켰다 — 경고 0건.
+
+그래서 출처를 관측 가능하게 만들었다: `get_embedding(text, meta_out={})` 가
+`embed_source`/`embed_model`/`embed_dim`/`degraded` 를 기록한다(additive kwarg — 기존
+소비처 9곳 무영향). `degraded=True` 면 소비처는 **랭킹에 쓰지 말아야** 한다
+(`workflow/rag/searcher.py::semantic_search` 가 그렇게 한다).
 """
 from __future__ import annotations
 
@@ -14,11 +24,14 @@ import os
 import threading
 import time
 from collections import OrderedDict
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 
 _logger = logging.getLogger("workflow.rag.embedder")
+
+# 의미 신호가 없는 출처 — 이 벡터로 만든 랭킹은 랭킹이 아니다(판정 단일 출처).
+_DEGRADED_SOURCES = frozenset({"random"})
 
 # ---- 모듈 레벨 캐시 ----
 _embed_cache: OrderedDict[str, List[float]] = OrderedDict()
@@ -48,10 +61,15 @@ def _cache_key(text: str) -> str:
     return f"{get_embed_model()}\x00{get_embed_dim()}\x00{text}"
 
 
-def _cache_put(text: str, vec: List[float]) -> None:
+def _cache_put(text: str, vec: List[float], *, degraded: bool = False) -> None:
     # 설정 차원과 다른 폴백 벡터(local 384·random 64 등)는 캐시하지 않는다 — 그 키(현재 dim)
     # 아래 잘못된 차원을 pin 하면 혼합차원 오염이 재발한다. 재계산은 폴백 한정이라 저비용.
     if len(vec) != get_embed_dim():
+        return
+    # 의미 신호가 없는 무작위 벡터는 차원이 우연히 맞아도 캐시하지 않는다. 캐시에 들어가면
+    # 캐시 히트를 "정상 임베딩"으로 되읽어(`_cache_get` 은 출처를 안 나름) degraded 표시가
+    # 소멸한다 — 설정 dim 이 64 인 구성에서 실제로 그렇게 새어나간다.
+    if degraded:
         return
     key = _cache_key(text)
     _max = _get_cache_max()
@@ -251,8 +269,20 @@ def _embed_local(text: str) -> Optional[List[float]]:
 # ==============================================================
 
 def _embed_random(text: str, dim: int = 64) -> List[float]:
-    """동일 입력 -> 동일 벡터 (seed 고정)."""
-    seed = abs(hash(text)) % (2**32)
+    """동일 입력 -> 동일 벡터 (seed 고정).
+
+    ⚠ 이 벡터에는 **의미 신호가 없다**. 폴백 체인이 전부 실패했을 때 호출자를 죽이지 않기
+    위한 자리 채움일 뿐이므로, 이걸로 만든 유사도는 랭킹 근거가 될 수 없다
+    (`get_embedding` 이 `meta_out["degraded"]=True` 로 표시한다).
+
+    seed 는 `hashlib` 로 만든다. 예전엔 내장 `hash(text)` 였는데 파이썬의 str 해시는
+    **프로세스마다 무작위화**된다(`sys.flags.hash_randomization=1`, `PYTHONHASHSEED` 미설정).
+    실측: 같은 문자열이 세 프로세스에서 전부 다른 벡터였다. 그래서 docstring 의 "seed 고정"
+    이 거짓이었고, 더 나쁘게는 **어제 저장한 KB 벡터와 오늘 만든 질의 벡터가 통계적으로
+    무관**해져 폴백 검색이 자기 자신과도 일관되지 않았다.
+    """
+    digest = hashlib.blake2b(text.encode("utf-8", "surrogatepass"), digest_size=8).digest()
+    seed = int.from_bytes(digest, "big") % (2**32)
     rng = np.random.default_rng(seed)
     return rng.normal(size=dim).astype(float).tolist()
 
@@ -261,51 +291,101 @@ def _embed_random(text: str, dim: int = 64) -> List[float]:
 # Public API
 # ==============================================================
 
-def get_embedding(text: str) -> List[float]:
+def _note_embed(meta_out: Optional[Dict[str, Any]], source: str, vec: List[float]) -> None:
+    """임베딩 출처를 표준 키로 기록한다 — **degraded 판정의 단일 출처**.
+
+    `degraded=True` 는 "이 벡터에 의미 신호가 없다"는 뜻이다. 판정을 소비처마다 복제하면
+    한쪽만 고쳐지는 게 이 저장소가 반복해 겪은 실패 모드라(`_is_hsis_data_row`·`_ratchet_core`)
+    여기 한 곳에서만 정한다.
+    """
+    if meta_out is None:
+        return
+    meta_out["embed_source"] = source
+    meta_out["embed_dim"] = len(vec or [])
+    # cache 히트는 설정 dim 과 일치하고 degraded 가 아닌 벡터만 담기므로(위 `_cache_put`)
+    # 설정 모델명이 곧 그 벡터의 모델이다.
+    meta_out["embed_model"] = get_embed_model() if source in ("gemini", "cache") else source
+    meta_out["degraded"] = source in _DEGRADED_SOURCES
+
+
+def get_embedding(text: str, *, meta_out: Optional[Dict[str, Any]] = None) -> List[float]:
     """텍스트 임베딩 반환 (폴백 체인 적용).
+
+    Args:
+        meta_out: 주면 임베딩 **출처**를 기록한다(additive — 기존 호출 9곳 무영향).
+                  `{"embed_source","embed_model","embed_dim","degraded"}`.
+                  `degraded=True` 는 무작위 폴백 = 의미 신호 없음 → 랭킹에 쓰면 안 된다.
 
     Returns:
         float 리스트 (차원은 사용된 모델에 따라 다름)
     """
     text = (text or "").strip()
     if not text:
+        _note_embed(meta_out, "empty", [])
         return []
 
     cached = _cache_get(text)
     if cached is not None:
+        _note_embed(meta_out, "cache", cached)
         return cached
 
     # 1) Gemini
     vec = _embed_gemini(text)
     if vec:
         _cache_put(text, vec)
+        _note_embed(meta_out, "gemini", vec)
         return vec
 
     # 2) External HTTP
     vec = _embed_http(text)
     if vec:
         _cache_put(text, vec)
+        _note_embed(meta_out, "http", vec)
         return vec
 
     # 3) Local model
     vec = _embed_local(text)
     if vec:
         _cache_put(text, vec)
+        _note_embed(meta_out, "local", vec)
         return vec
 
-    # 4) Random fallback
+    # 4) Random fallback — 의미 신호 없음. 캐시하지 않는다(`degraded=True` 표시가 캐시
+    #    히트에서 소멸하는 것을 막는다). 재계산은 blake2b seed 라 저렴하고 결정적이다.
     vec = _embed_random(text, dim=64)
-    _cache_put(text, vec)
+    _cache_put(text, vec, degraded=True)
+    _note_embed(meta_out, "random", vec)
     return vec
 
 
-def get_embeddings_batch(texts: List[str]) -> List[List[float]]:
+def get_embeddings_batch(
+    texts: List[str], *, meta_out: Optional[Dict[str, Any]] = None
+) -> List[List[float]]:
     """배치 임베딩 (Gemini 배치 -> 개별 폴백).
+
+    Args:
+        meta_out: 주면 **배치 전체의** 출처 분포를 기록한다 —
+                  `{"embed_sources": {source: count}, "degraded_count": int, "degraded": bool}`.
+                  개별 폴백은 텍스트마다 출처가 다를 수 있어 단일 값으로 접지 않는다.
 
     Returns:
         각 텍스트에 대한 embedding 리스트
     """
+    sources: Dict[str, int] = {}
+
+    def _tally(src: str) -> None:
+        sources[src] = sources.get(src, 0) + 1
+
+    def _finish() -> None:
+        if meta_out is None:
+            return
+        degraded_n = sum(n for s, n in sources.items() if s in _DEGRADED_SOURCES)
+        meta_out["embed_sources"] = dict(sources)
+        meta_out["degraded_count"] = degraded_n
+        meta_out["degraded"] = degraded_n > 0
+
     if not texts:
+        _finish()
         return []
 
     # 캐시에서 먼저 찾기
@@ -321,11 +401,13 @@ def get_embeddings_batch(texts: List[str]) -> List[List[float]]:
         cached = _cache_get(t)
         if cached is not None:
             results[i] = cached
+            _tally("cache")
         else:
             uncached_indices.append(i)
             uncached_texts.append(t)
 
     if not uncached_texts:
+        _finish()
         return [r for r in results if r is not None]
 
     # Gemini 배치 시도
@@ -334,25 +416,34 @@ def get_embeddings_batch(texts: List[str]) -> List[List[float]]:
         for idx, text, vec in zip(uncached_indices, uncached_texts, batch_vecs):
             results[idx] = vec
             _cache_put(text, vec)
+            _tally("gemini")
     else:
-        # 배치 실패 -> 개별 폴백
+        # 배치 실패 -> 개별 폴백. 텍스트마다 출처가 갈릴 수 있어 개별로 집계한다.
         for i, idx in enumerate(uncached_indices):
-            results[idx] = get_embedding(uncached_texts[i])
+            one: Dict[str, Any] = {}
+            results[idx] = get_embedding(uncached_texts[i], meta_out=one)
+            _tally(str(one.get("embed_source") or "unknown"))
 
+    _finish()
     return [r if r is not None else [] for r in results]
 
 
 def cosine_similarity(a: List[float], b: List[float]) -> float:
-    """코사인 유사도 계산."""
+    """코사인 유사도 계산.
+
+    ⚠ **차원이 다르면 0.0** 을 낸다("관계 미확인"). 예전엔 짧은 쪽을 zero-pad 했는데,
+    임베딩에서 그건 "없는 차원의 값이 전부 0" 이라고 **가정**하는 것이고 그런 가정을
+    보장하는 임베딩 모델은 없다. 실제로 이 저장소의 KB 는 64차원 폴백 벡터로 채워져 있고
+    Gemini 키가 생기면 질의는 768차원이 된다 — pad 는 앞 64차원만으로 계산한 무의미한 수를
+    **그럴듯한 유사도로 위장**해서 내놓았다. 0.0 이면 `semantic_search` 의 `score <= 0.0`
+    필터가 걸러내고, 몇 건이 걸러졌는지는 `stats_out` 으로 보고된다(침묵 드롭 아님).
+    """
     a_arr = np.array(a, dtype=float)
     b_arr = np.array(b, dtype=float)
     if a_arr.size == 0 or b_arr.size == 0:
         return 0.0
-    # 차원 불일치 시 짧은 쪽 zero-pad
     if a_arr.size != b_arr.size:
-        max_dim = max(a_arr.size, b_arr.size)
-        a_arr = np.pad(a_arr, (0, max_dim - a_arr.size))
-        b_arr = np.pad(b_arr, (0, max_dim - b_arr.size))
+        return 0.0
     na = np.linalg.norm(a_arr)
     nb = np.linalg.norm(b_arr)
     if na == 0.0 or nb == 0.0:

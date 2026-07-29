@@ -276,6 +276,65 @@ DOCX 는 XLSM 라이터와 달리 **템플릿 주도**라(SwUFn heading 을 함�
 
 ---
 
+## 5-3. RAG 근거의 정직성 — ✅ 완료 (2026-07-30)
+
+`rag/embedder.py` 를 "예산·재시도 공유" 관점으로 보러 갔다가 **훨씬 심한 것**을 실측했다.
+남은 항목(§6 #5)이 예상한 결함이 아니었으므로 판정을 여기로 옮긴다.
+
+### 실측 (고치기 전)
+
+| 측정 | 값 |
+|---|---|
+| 저장소 실 KB 엔트리의 벡터 | **102/102 건이 64차원 무작위 난수** (Gemini 키 부재 → 최후 폴백) |
+| `semantic_search` 가 "관련 근거" 로 통과시킨 수 | **52/102 건**, 점수 0.20~0.25, 경고 **0건** |
+| 반환 항목에 열화 표시 | **없음** (`embed_degraded`·`embed_model`·`warning` 전부 부재) |
+| `_embed_random` 프로세스간 결정성 | **없음** — 같은 문자열이 3개 프로세스에서 전부 다른 벡터 (docstring 은 "seed 고정" 이라고 주장) |
+| `cosine_similarity` 64 vs 768 | **zero-pad 후 계산** → 앞 64차원만 쓴 무의미한 수를 그럴듯한 유사도로 위장 |
+| 이 근거의 소비처 | **9곳** — assistant 답변, `report_gen/docx_builder.py:2102`(**생성 문서 본문**), `backend/helpers/uds.py:1493`, `pipeline.py:3222` 등 |
+
+즉 "근거 없음" 이 아니라 **난수를 근거로 제시**하고 있었고, 그게 생성 문서에까지 흘렀다.
+
+### 수정 (커밋 대기)
+
+1. **출처 관측** — `get_embedding(text, meta_out={})` 가
+   `embed_source`/`embed_model`/`embed_dim`/`degraded` 를 기록한다(additive kwarg — 기존 호출
+   9곳 무영향). `degraded` 판정은 `_note_embed` **단일 출처**.
+2. **열화 벡터로 랭킹하지 않는다** — `semantic_search` 는 질의 임베딩이 `degraded` 면 `[]` +
+   경고 + `stats_out["semantic_disabled_reason"]`. `hybrid_search` 는 keyword 단독으로 강등되고
+   **RRF 로 감싸지 않는다**(감싸면 점수 척도가 ≤0.0328 로 바뀌어 소비처가 오독).
+3. **차원 불일치는 위장하지 않는다** — `cosine_similarity` mismatch → `0.0`("관계 미확인").
+   `semantic_search` 는 몇 건이 그래서 빠졌는지 세어 보고한다(침묵 드롭 아님).
+4. **무작위 벡터는 캐시하지 않는다** — 설정 dim 이 64 면 캐시에 들어가고, 캐시 히트는
+   `source="cache"` 로 되읽혀 **열화 표시가 소멸**했다.
+5. **`_embed_random` seed 를 `hashlib.blake2b`** 로 — 프로세스 경계에서도 결정적.
+6. **저장 엔트리에 출처를 심는다** — `metadata["embed"]`(이미 JSON 컬럼이라 스키마 변경 0).
+   실 KB 102건은 사후 판별이 불가능했다.
+7. **합성 요약이 실제 근거보다 위에 오던 것** — `retrieval/hybrid.py::_report_hits` 의
+   합성 항목 점수가 `0.35` 하드코딩이라 RRF 근거(상한 0.0328)를 **항상 눌렀다**.
+   실제 근거 최솟값 아래로 내리고 `chunk_text` 에도 "[합성 요약]" 을 명시(LLM 은 metadata
+   플래그를 안 읽는다).
+
+### 부수 발견 — 고치지 않고 사실만 남긴 것
+
+`assistant_service._kb_hints` 의 `score < 0.3` 컷은 RRF 상한 0.0328 대비
+**구조적으로 통과 불가**다(`< 0.3` = Initial commit, RRF = a9cd852 — 리팩터가 척도를 10배
+바꿨는데 소비처 문턱이 그대로 남았다). 다만 이 함수는 **호출자 0건(dead code)** 이라 라이브
+영향이 없다. 되살릴 때 먼저 고치도록 docstring 에 사유를 박아 뒀고, 척도 계약은
+`test_rrf_score_upper_bound_is_documented` 가 앵커로 고정한다.
+
+### 검증
+
+- 새 테스트 27건 (`tests/unit/test_rag_embed_provenance.py`) — **뮤테이션 6/6 확인**
+  (M1 pad 복원 / M2 `hash()` 복원 / M3 degraded 가드 제거 / M4 dim 집계 제거 /
+  M5 keyword 폴백 제거 / M6 합성점수 0.35 복원 → 각각 해당 테스트가 실패)
+- **음성 대조군** 포함 — 정상 임베딩에서는 semantic 이 살아 있고 RRF 융합이 유지된다
+  (없으면 `return []` 무조건 실행으로도 통과하는 공허한 테스트가 된다)
+- 화석 테스트 1건 교정 — `test_dimension_mismatch_pads` 는 결함을 단언하고 있었다
+- `test_rag_kb_cache.py` 의 `get_embedding` 스텁이 시그니처를 미러링하지 않아 깨졌다 → 수정
+- 회귀 **4,823 passed / 1 skipped** (병렬 245s), ruff ratchet 신규 위반 0
+
+---
+
 ## 6. 다음 라운드 후보
 
 | # | 대상 | 이유 |
@@ -283,8 +342,10 @@ DOCX 는 XLSM 라이터와 달리 **템플릿 주도**라(SwUFn heading 을 함�
 | ~~1~~ | ~~pre-commit 900s 예산 (P1)~~ | ✅ 완료 — 위 P1 참조 |
 | ~~2~~ | ~~`report_gen/` DOCX 라이터 대조 (P2)~~ | ✅ 완료 — 아래 별도 절 |
 | ~~3~~ | ~~`impact_orchestrator.py:135` (P0 잔여)~~ | ✅ 완료 — 위 P0 참조 |
-| 4 | LLM redaction + 모델 echo 대조 (CORE-006 잔여) | 프롬프트 redaction 저장소 전체 0건. 응답 전문이 `agent_*.md` 에 무삭제로 디스크에 남는다(HTTP 에러 본문 포함). `workflow/ai_validator.py` 의 시크릿 검사는 **모듈 전체가 dead code**(프로덕션 호출자 0) |
-| 🟡 5 | 3개 egress 경로 통합 | **부분 완료(L5, 2026-07-30)** — 어댑터 3종이 절단·모델 검사를 공유하게 됐다(`_completion_meta` → `ai.py` 단일 출처). 잔여: 예산·재시도·stage cap 공유, `rag/embedder.py`(자체 client·자체 키) |
+| ~~4~~ | ~~LLM redaction + 모델 echo 대조~~ | ✅ 완료 — §5-1 L4/L6 |
+| 🟡 5 | 3개 egress 경로 통합 | **부분 완료(L5 + §5-3, 2026-07-30)** — 어댑터 3종이 절단·모델 검사를 공유하고(`_completion_meta` → `ai.py` 단일 출처), `rag/embedder.py` 는 출처·열화를 보고한다. **잔여: 예산·재시도·stage cap 공유**(embedder 는 여전히 자체 client·자체 키 해석) |
+| 6 | `stats_out` 을 UI 까지 배선 | `semantic_disabled_reason` 이 지금은 로그 경고에만 뜬다. assistant 응답에 "KB 시맨틱 검색 비활성(임베딩 백엔드 없음)" 을 표시하면 사용자가 근거 부재를 오해하지 않는다. SSE payload shape 변경이라 별건 |
+| 7 | 실 KB 재인덱싱 | 지금 KB 102건은 전부 난수 벡터라 시맨틱 축이 통째로 무용이다. 임베딩 백엔드를 붙이면 **기존 엔트리는 여전히 64차원**이라 dim mismatch 로 전량 제외된다 — 재인덱싱 경로가 없다(운영 결정 필요) |
 
 ---
 

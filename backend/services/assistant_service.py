@@ -520,6 +520,19 @@ def _build_context_fallback_answer(
 
 
 def _kb_hints(question: str, report_dir: Optional[Path]) -> Tuple[str, List[str]]:
+    """⚠ **호출자 0건 (dead code)** — 라이브 KB 근거 경로는
+    `_retrieval_hints` → `workflow/retrieval/hybrid.py::_report_hits` 다.
+
+    되살릴 때 **먼저 고쳐야 할 결함**: 아래 `float(score) < 0.3` 컷은 `kb.search` 가
+    keyword/semantic 단독 점수를 낸다는 가정에서 왔는데, 지금은 RRF 융합 점수를 낸다.
+    RRF 상한은 `2/(k+1)` = **0.0328**(k=60 기본값)이라 이 문턱은 **구조적으로 통과 불가**다.
+    `_kb_hints` 는 role/stage 를 안 넘기므로 부스트도 req_id 정확일치(+0.4) 하나뿐 —
+    질문에 요구ID 가 없으면 KB 근거가 전량 탈락하고, 반환값 `("", [])` 은 "KB 가 비었음"
+    과 구별되지 않는다. (`< 0.3` 은 Initial commit, RRF 는 a9cd852 — 리팩터가 척도를
+    10배 바꿨는데 소비처 문턱은 그대로 남은 경우다.)
+
+    되살릴 거면 `_search_type` 으로 척도를 구분하거나 최고점 대비 상대 컷을 쓸 것.
+    """
     started = time.perf_counter()
     if not report_dir:
         return "", []

@@ -252,7 +252,8 @@ class KnowledgeBase:
         text = (content or "").strip()
         if not text:
             return
-        vec = self._get_embedding(text)
+        embed_meta: Dict[str, Any] = {}
+        vec = self._get_embedding(text, meta_out=embed_meta)
         req_ids = _extract_req_ids_from_text(text)
         entry: Dict[str, Any] = {
             "id": self._new_id(),
@@ -272,6 +273,7 @@ class KnowledgeBase:
             "metadata": {
                 "req_ids": req_ids,
                 "source_type": str(category or "general"),
+                "embed": self._embed_provenance(embed_meta),
             },
         }
         self._append_new_entry(entry, write_to_disk=True)
@@ -903,9 +905,30 @@ class KnowledgeBase:
         with self._lock:
             self.data.append(entry)
 
-    def _get_embedding(self, text: str) -> List[float]:
+    def _get_embedding(
+        self, text: str, *, meta_out: Optional[Dict[str, Any]] = None
+    ) -> List[float]:
         from workflow.rag.embedder import get_embedding
-        return get_embedding(text)
+        return get_embedding(text, meta_out=meta_out)
+
+    @staticmethod
+    def _embed_provenance(meta: Dict[str, Any]) -> Dict[str, Any]:
+        """저장 엔트리에 남길 임베딩 출처.
+
+        `metadata` 는 이미 JSON 컬럼이라 **스키마 변경 없이** sqlite·JSON 파일·pgvector
+        세 저장소 모두에 실린다(`_db_upsert` 는 컬럼을 명시 열거하므로 top-level 신규 키는
+        sqlite 에 저장되지 않는다 — 그래서 metadata 안에 넣는다).
+
+        왜 필요한가: 실측 결과 이 저장소의 실 KB 엔트리 102건이 전부 64차원 무작위 폴백
+        벡터였는데, 엔트리 어디에도 그 사실이 없어 **사후에 구분할 방법이 없었다**. 벡터 길이로
+        추정할 수는 있지만 그건 추정이고, 설정 dim 이 바뀌면 추정도 깨진다.
+        """
+        return {
+            "source": meta.get("embed_source"),
+            "model": meta.get("embed_model"),
+            "dim": meta.get("embed_dim"),
+            "degraded": bool(meta.get("degraded")),
+        }
 
     # ---------------- 퍼블릭 API ----------------
 
@@ -1032,7 +1055,8 @@ class KnowledgeBase:
         # 신규 엔트리: 임베딩(네트워크 round-trip)은 절대 락 밖에서 계산한다.
         # (락 해제 ~ _append_new_entry 사이 동일 패턴 동시 삽입은 드문 중복으로,
         #  dedup 이 best-effort 이므로 허용 — 크래시/유실 없음.)
-        vec = self._get_embedding(ctx)
+        embed_meta: Dict[str, Any] = {}
+        vec = self._get_embedding(ctx, meta_out=embed_meta)
         entry: Dict[str, Any] = {
             "id": self._new_id(),
             "error_raw": error_msg,
@@ -1050,6 +1074,8 @@ class KnowledgeBase:
             "timestamp": datetime.utcnow().isoformat(),
             "source_file": "",  # _append_new_entry 에서 채움
             "project_root": project_root or "",
+            # 임베딩 출처 — 이 엔트리의 vector 가 실측 임베딩인지 무작위 폴백인지 사후 판별용.
+            "metadata": {"embed": self._embed_provenance(embed_meta)},
         }
         self._append_new_entry(entry, write_to_disk=True)
         self._enforce_max_entries()
