@@ -726,8 +726,11 @@ def _load_suts_fn_tcs(
                 if meta_sink is not None:
                     _cols = unit.get("columns")
                     _cols = _cols if isinstance(_cols, dict) else {}
-                    _in = [str(x) for x in (_cols.get("inputs") or []) if str(x).strip()]
-                    _exp = [str(x) for x in (_cols.get("expected") or []) if str(x).strip()]
+                    # ⚠ 키 상한을 `_cap_kv` 와 **동일하게** 적용한다. 다르면 60자 초과 헤더가
+                    #   행 키(60자 절단)와 다른 문자열이 되어 대조가 영구 실패한다(실측: 문서에
+                    #   값이 있는데 '신규추가' + 현재값 공란).
+                    _in = [str(x)[:_KV_KEY_CAP] for x in (_cols.get("inputs") or []) if str(x).strip()]
+                    _exp = [str(x)[:_KV_KEY_CAP] for x in (_cols.get("expected") or []) if str(x).strip()]
                     _md = unit.get("metadata")
                     _md = _md if isinstance(_md, dict) else {}
                     _meta: Dict[str, Any] = {
@@ -958,6 +961,28 @@ def _as_dict(v: Any) -> Dict[str, Any]:
     return v if isinstance(v, dict) else {}
 
 
+# kv 키(=시트 컬럼명) 상한. ⚠ `doc_content.suts_meta[fn].columns` 와 **같은 값**이어야 한다 —
+# 다르면 60자 초과 헤더가 서로 다른 문자열이 되어 대조가 영구 실패하고, 문서에 값이 있는데도
+# 화면이 '신규추가'라고 말한다(실측). 배열 첨자·구조체 멤버가 붙으면 60자는 쉽게 넘는다.
+_KV_KEY_CAP = 120
+
+
+def _kv_scalar(v: Any) -> str:
+    """셀 값 → 표시 문자열. ⚠ `str(dict)` 를 그대로 쓰면 안 된다 — SUTS exporter 가 `[검증 필요]`
+    셀을 `{"verification_required": True, "raw": "…"}` dict 로 파싱하는데, 그게 화면과 TSV 에
+    Python dict repr(`{'verification_required': True, …}`)로 유출된다(문서 복사 대상 문자열)."""
+    if isinstance(v, dict):
+        for key in ("raw", "value", "text"):
+            if v.get(key) not in (None, ""):
+                return str(v[key]).strip()
+        if v.get("verification_required"):
+            return "[검증 필요]"
+        return ""
+    if isinstance(v, (list, tuple)):
+        return ", ".join(_kv_scalar(x) for x in v if _kv_scalar(x))
+    return str(v).strip()
+
+
 def _cap_kv(d: Any, n: int = 5) -> Dict[str, str]:
     """{header: value} 중 비어있지 않은 상위 n개를 80자로 절단(job 크기 상한). SITS/STS 내용 캡처 공용.
 
@@ -965,10 +990,10 @@ def _cap_kv(d: Any, n: int = 5) -> Dict[str, str]:
     호출부에서 `n=` 을 명시해 올린다(기본을 올리면 무관한 경로까지 부푼다)."""
     out: Dict[str, str] = {}
     for k, v in list((d if isinstance(d, dict) else {}).items()):  # 비-dict(리스트 등) 방어 — 유닛루프 크래시 차단
-        sv = str(v).strip()
+        sv = _kv_scalar(v)
         if not sv:
             continue
-        out[str(k)[:60]] = sv[:80]
+        out[str(k)[:_KV_KEY_CAP]] = sv[:80]
         if len(out) >= n:
             break
     return out
@@ -1150,7 +1175,7 @@ def _load_sits_fn_chains(
     linked_doc: str, flagged_fns: List[str], warn_sink: Optional[List[str]] = None,
     content_sink: Optional[Dict[str, Any]] = None,
     *,
-    sub_cap: int = 6, kv_cap: int = 12,
+    sub_cap: int = 14, kv_cap: int = 12,
 ) -> Dict[str, List[str]]:
     """Return {entry_fn: [label, ...]} from the SITS vectorcast intermediate JSON.
 
@@ -1159,7 +1184,11 @@ def _load_sits_fn_chains(
     (문서 카드용, TC-ID 키). 프론트가 TC-ID로 조인하므로 entry_fn 매칭과 무관하게 전체 TC를 담는다.
     회귀 반환({entry_fn:[label]})은 불변(순수 additive).
 
-    sub_cap: 서브케이스 표시 상한(과거 3 고정). 절단 시 sub_total로 실제 개수를 표면화한다.
+    sub_cap: 서브케이스 표시 상한. ⚠ 생성기 기본값(`generators.sits._DEFAULT_SUBCASES` = 14)과
+    **같아야 한다** — 문서가 그 생성기 산출물이라 더 작게 잡으면 `sub_total(14) > loaded(6)`가
+    상시 참이 되고, 프론트가 "원문 일부만 로드 → 없다고 단정 불가"로 강등해 **'문서에 없음'
+    신호가 통째로 죽는다**(실측: 미매칭 케이스가 신규추가 대신 전부 검증필요).
+    절단이 실제로 나면 sub_total로 표면화한다. 예산 초과 시엔 `_shrink_doc_content`가 다시 줄인다.
 
     intermediate(`<sits>_vectorcast.json`)는 SITS 빌더가 생성한다 — cloudium이면 worker 경유로
     읽는다(직접 FS 금지). cloudium은 읽기전용이라 intermediate 자체가 없을 수 있고, 그때의 0은
@@ -1316,7 +1345,7 @@ def _empty_doc_proposal() -> Dict[str, Any]:
     """doc_proposal의 빈 골격 — 노드 목록의 단일 출처(키 추가 시 여기만 고친다)."""
     return {
         "suts": {}, "sits": {}, "sts": {}, "uds": {}, "sds": {},
-        "suts_meta": {}, "var_types": {}, "source": "",
+        "suts_meta": {}, "sts_meta": {}, "var_types": {}, "source": "",
     }
 
 
@@ -1545,8 +1574,15 @@ def _build_doc_proposal(
             _info = fdmap[name_lc_to_fid[fn]]
             if not isinstance(_info, dict):
                 continue
+            # ⚠ 절단 **전** 전량을 먼저 받아 총량을 잰다. `[:sts_tc_cap]`를 먼저 걸면 프론트가
+            #   이미 잘린 수(6)를 총량으로 말하게 된다("생성기 TC 6건 중 4건 표시" — 실제로는
+            #   20건일 수 있다). SUTS `gen_total`에서 같은 함정을 이미 한 번 고쳤다.
+            _all_tc = [t for t in (_generate_steps_from_flow(_info.get("logic_flow") or [], _info) or []) if t]
             _tcs: List[List[Dict[str, str]]] = []
-            for _tc in (_generate_steps_from_flow(_info.get("logic_flow") or [], _info) or [])[:sts_tc_cap]:
+            _step_cut = False
+            for _tc in _all_tc[:sts_tc_cap]:
+                if len(_tc) > step_cap:
+                    _step_cut = True
                 _steps = [
                     {"action": str(s.get("action") or ""), "expected": str(s.get("expected") or "")}
                     for s in (_tc or [])[:step_cap]
@@ -1556,6 +1592,13 @@ def _build_doc_proposal(
                     _tcs.append(_steps)
             if _tcs:
                 out["sts"][fn] = _tcs
+                out["sts_meta"][fn] = {
+                    "gen_total": len(_all_tc),
+                    "gen_shown": len(_tcs),
+                    "gen_truncated": len(_all_tc) > sts_tc_cap,
+                    "step_truncated": _step_cut,
+                    "step_cap": step_cap,
+                }
     except Exception as exc:  # noqa: BLE001
         logger.debug("doc_proposal STS synth failed: %s", exc)
         if warn_sink is not None:

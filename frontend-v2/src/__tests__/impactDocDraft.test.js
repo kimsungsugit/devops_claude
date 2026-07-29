@@ -438,7 +438,7 @@ describe('판정 거짓 — 근거 없이 단정하지 않는다', () => {
       varTypes: {},
     });
     expect(r.docPartial).toBe(true);
-    expect(r.rows[0].note).toMatch(/서브케이스 일부만 로드/);
+    expect(r.rows[0].note).toMatch(/서브케이스가 원문보다 적게 로드됨/);
     // 절단 전 총량이 배너 근거가 된다(예전엔 docShown과 같아 배너가 구조적으로 안 떴다)
     expect(r.totals.docTotal).toBe(9);
     expect(r.totals.docShown).toBe(1);
@@ -687,5 +687,77 @@ describe('SITS 판정 — 추적성 조인 근거를 쓰고 절단은 백엔드 
     expect(legacy.description.length).toBeGreaterThan(300);
     const r = reconcileSitsDocTcs({ docTcs: [legacy], fn: 's_x', normTc: norm });
     expect(r.rows[0].note).toMatch(/콜체인 원문 절단/);
+  });
+});
+
+describe('비수치 값 — 문자열이 같으면 유지다 (W7)', () => {
+  // "normalizeNumeric 실패 시 문자열 비교로 강등하지 않는다"는 규칙은
+  // `'0'` vs `'0x0'` 을 문자열로 달리 보지 말라는 뜻이지, **동일한 문자열끼리도 못 맞춘다**는
+  // 뜻이 아니었다. 그 오독 때문에 문서에 `p=NULL`, `mode=IDLE`이 그대로 있는데 '신규추가'가 떴다.
+  const cols = ['p', 'mode'];
+  const cd = { inputs: cols, expected: cols, sheet: 'S' };
+  const rows = [{ tc_id: 'T1', inputs: { p: 'NULL', mode: 'IDLE' }, expected: {}, source: {} }];
+
+  it('원문과 같은 비수치 문자열은 유지 판정', () => {
+    const gen = [{ strategy: 'S', seq_num: 1, inputs: { p: 'NULL', mode: 'IDLE' }, expected: {} }];
+    const r = reconcileSuts({ docRows: rows, docColumns: cd, genSeqs: gen, varTypes: {} });
+    expect(r.rows[0].verdict).toBe(VERDICT.KEEP);
+    expect(r.rows[0].cells['input:p'].current).toBe('NULL');
+  });
+
+  it('앞뒤 공백만 다른 것도 같은 값', () => {
+    const gen = [{ strategy: 'S', seq_num: 1, inputs: { p: ' NULL ', mode: 'IDLE' }, expected: {} }];
+    const r = reconcileSuts({ docRows: rows, docColumns: cd, genSeqs: gen, varTypes: {} });
+    expect(r.rows[0].verdict).toBe(VERDICT.KEEP);
+  });
+
+  it('문자열이 실제로 다르면 여전히 신규추가', () => {
+    const gen = [{ strategy: 'S', seq_num: 1, inputs: { p: 'NULL', mode: 'RUN' }, expected: {} }];
+    const r = reconcileSuts({ docRows: rows, docColumns: cd, genSeqs: gen, varTypes: {} });
+    expect(r.rows[0].verdict).toBe(VERDICT.ADD);
+  });
+
+  it("'0' vs '0x0' 은 여전히 진법 무관 동등 (문자열 비교로 후퇴하지 않았다)", () => {
+    const numRows = [{ tc_id: 'T1', inputs: { p: '0' }, expected: {}, source: {} }];
+    const gen = [{ strategy: 'S', seq_num: 1, inputs: { p: '0x0' }, expected: {} }];
+    const r = reconcileSuts({
+      docRows: numRows, docColumns: { inputs: ['p'], expected: ['p'], sheet: 'S' },
+      genSeqs: gen, varTypes: {},
+    });
+    expect(r.rows[0].verdict).toBe(VERDICT.KEEP);
+  });
+});
+
+describe('unknownTypes — 타입이 판정에 실제로 쓰일 때만 경보 (D7)', () => {
+  it('시퀀스 모드는 경계값을 쓰지 않으므로 타입 미상 경보가 없다', () => {
+    // 시퀀스 모드의 값은 생성기가 이미 준 것이라 타입으로 경계값을 만들지 않는다.
+    // 예전엔 여기서도 unknownTypes를 채워 "타입 미상 2건"이라는 무의미한 경고가 떴다.
+    const gen = [{ strategy: 'S', seq_num: 1, inputs: { x: '1' }, expected: { r: '2' } }];
+    const r = reconcileSuts({
+      docRows: [{ tc_id: 'T', inputs: { x: '1' }, expected: { r: '2' }, source: {} }],
+      docColumns: { inputs: ['x'], expected: ['r'], sheet: 'S' },
+      genSeqs: gen, varTypes: {},
+    });
+    expect(r.mode).toBe('sequence');
+    expect(r.unknownTypes).toEqual([]);
+  });
+
+  it('경계값 모드는 입력 축 미상만 센다 (기대 축은 경계값을 만들지 않는다)', () => {
+    const r = reconcileSuts({
+      docRows: [{ tc_id: 'T', inputs: { x: '1' }, expected: { r: '2' }, source: {} }],
+      docColumns: { inputs: ['x'], expected: ['r'], sheet: 'S' },
+      genSeqs: null, varTypes: {},
+    });
+    expect(r.mode).toBe('boundary');
+    expect(r.unknownTypes).toEqual(['x']);
+  });
+
+  it('타입이 알려지면 경보 없음', () => {
+    const r = reconcileSuts({
+      docRows: [{ tc_id: 'T', inputs: { x: '1' }, expected: {}, source: {} }],
+      docColumns: { inputs: ['x'], expected: [], sheet: 'S' },
+      genSeqs: null, varTypes: { x: { type: 'U16', source: 'globals_map' } },
+    });
+    expect(r.unknownTypes).toEqual([]);
   });
 });

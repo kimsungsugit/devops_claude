@@ -3516,3 +3516,90 @@ describe('ImpactGuideSection — SITS 원문 TC 재검증 표', () => {
     expect(within(dialog).getByText(/재검증 대상 판정/)).toBeInTheDocument();
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 4차 심층 라운드 — 절단 총량 정직성(W5) / 생략 함수 모순(W6)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('ImpactGuideSection — 절단·생략 표기 정직성', () => {
+  const base = (over = {}) => ({
+    _job_id: 'job_w',
+    trigger: { changed_files: ['a.c'] },
+    changed_function_types: { s_foo: 'BODY' },
+    change_details: { s_foo: { before: 'void s_foo(U16 x)' } },
+    impact: { direct: ['s_foo'] },
+    function_meta: { s_foo: { asil: 'B', evidence: 'line' } },
+    _linked_docs: { suts: 'U:/suts.xlsm', sts: 'U:/sts.xlsx', uds: 'U:/uds.docx' },
+    doc_content: { suts: {}, suts_meta: {} },
+    doc_proposal: { suts: {}, sits: {}, sts: {}, sts_meta: {}, uds: {}, sds: {}, suts_meta: {}, var_types: {}, source: 'generator' },
+    ...over,
+  });
+
+  const open = async (impactData, { withReqs = false } = {}) => {
+    const { post } = await import('../api.js');
+    // STS 카드는 요구 매핑(d.requirements)이 있을 때만 뜬다(가짜 TC 금지 게이트).
+    // requirements는 **UDS func→req** 매핑에서만 온다 — SDS 브리지는 STS/SITS TC 조인용이라
+    // 여기선 게이트를 열지 못한다.
+    post.mockImplementation((url) => {
+      if (withReqs && url === '/api/jenkins/uds/extract-mapping') {
+        return Promise.resolve({ mapping_pairs: [{ requirement_id: 'SwRS_02', source_ids: ['s_foo'] }] });
+      }
+      return Promise.resolve({ ok: false });
+    });
+    const user = userEvent.setup();
+    render(<ImpactGuideSection analysisResult={{ impactData }} />);
+    await user.click(screen.getByText(/상세 가이드 생성/));
+    await user.click(await screen.findByRole('button', { name: '상세' }));
+    return { user, dialog: await screen.findByRole('dialog') };
+  };
+
+  // W5: 백엔드가 sts_tc_cap(6)으로 자른 뒤라 화면의 배열 길이는 이미 6이다. 그걸 총량이라
+  //     말하면 "6건 중 4건"이라 적히지만 생성기는 20건을 냈다.
+  it('W5: STS 절단 총량은 백엔드 sts_meta(절단 전)를 쓴다', async () => {
+    const tcs = Array.from({ length: 6 }, (_, i) => [{ action: `call s_foo #${i}`, expected: 'ok' }]);
+    const { dialog } = await open(base({
+      doc_proposal: {
+        suts: {}, sits: {}, sts: { s_foo: tcs },
+        sts_meta: { s_foo: { gen_total: 20, gen_shown: 6, gen_truncated: true, step_truncated: true, step_cap: 6 } },
+        uds: {}, sds: {}, suts_meta: {}, var_types: {}, source: 'generator',
+      },
+    }), { withReqs: true });
+    await waitFor(() => expect(within(dialog).getByText(/생성기 TC 20건 중 4건 표시/)).toBeInTheDocument());
+    // 스텝 절단도 백엔드 플래그로 — 프론트에서 tc.length>6으로 재면 영구 false(이미 잘린 배열)
+    expect(within(dialog).getByText(/각 TC의 절차는 6스텝까지만 표시/)).toBeInTheDocument();
+  });
+
+  it('W5: 절단이 없으면 절단 문구를 만들지 않는다', async () => {
+    const tcs = Array.from({ length: 2 }, (_, i) => [{ action: `call s_foo #${i}`, expected: 'ok' }]);
+    const { dialog } = await open(base({
+      doc_proposal: {
+        suts: {}, sits: {}, sts: { s_foo: tcs },
+        sts_meta: { s_foo: { gen_total: 2, gen_shown: 2, gen_truncated: false, step_truncated: false, step_cap: 6 } },
+        uds: {}, sds: {}, suts_meta: {}, var_types: {}, source: 'generator',
+      },
+    }), { withReqs: true });
+    await waitFor(() => expect(within(dialog).getByText(/call s_foo #0/)).toBeInTheDocument());
+    expect(within(dialog).queryByText(/생성기 TC .*건 중/)).toBeNull();
+    expect(within(dialog).queryByText(/스텝까지만 표시/)).toBeNull();
+  });
+
+  // W6: 생략은 doc_content(원문)에서만 일어나고 doc_proposal(생성기 산출)은 남는다.
+  //     예전 가드는 `!genSeqs` 를 함께 걸어, 생성기 시퀀스가 있으면 생략 배너를 건너뛰고
+  //     "🖊 SUTS 작성 제안" + 전 행 '신규추가'를 그렸다 — 문서에 있는 TC를 없다고 단정.
+  it('W6: 페이로드로 생략된 함수는 생성기 초안이 있어도 "문서에 없음"이라 하지 않는다', async () => {
+    const { dialog } = await open(base({
+      doc_content: {
+        suts: {}, suts_meta: {},
+        suts_omitted: { reason: 'payload_budget', count: 1, functions: ['s_foo'] },
+      },
+      doc_proposal: {
+        suts: { s_foo: [{ strategy: 'BV_MIN', inputs: { 'g_a[0]': '0x0' }, expected: {} }] },
+        sits: {}, sts: {}, sts_meta: {}, uds: {}, sds: {},
+        suts_meta: { s_foo: { component: 'SwCom_11' } }, var_types: {}, source: 'generator',
+      },
+    }));
+    await waitFor(() => expect(within(dialog).getByText(/분석 결과에서 생략됨/)).toBeInTheDocument());
+    expect(within(dialog).queryByText(/SUTS 작성 제안/)).toBeNull();
+    expect(within(dialog).queryByText('신규추가')).toBeNull();
+  });
+});

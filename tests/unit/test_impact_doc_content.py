@@ -916,8 +916,13 @@ def test_load_sits_fn_chains_keeps_case_label_and_sub_total(monkeypatch):
     _load_sits_fn_chains("U:/sits.xlsm", ["s_entry"], content_sink=sink)
 
     tc = sink["SWITC_SWUFN_0101"]               # _normTc(공백제거+대문자)
-    assert len(tc["sub_cases"]) == 6            # 과거 3 → 6
+    # 캡(14)이 생성기 기본 서브케이스 수와 같아졌으므로 9건은 **전량** 실린다.
+    # 캡이 9보다 작으면 sub_total > len(sub_cases) 가 상시 참이 되어 프론트의
+    # '문서에 없음' 신호가 죽는다(W3) — 그 회귀 가드는 아래 sub_cap 테스트가 맡는다.
+    assert len(tc["sub_cases"]) == 9            # 과거 3 → 6 → 캡 상향으로 전량
     assert tc["sub_total"] == 9                 # 절단 전 실제 개수(표면화)
+    # 프론트는 `sub_total > len(sub_cases)` 로 부분로드를 판정한다 → 여기선 부분로드 아님
+    assert tc["sub_total"] == len(tc["sub_cases"])
     assert tc["sub_cases"][0]["case_label"] == "0 [EC0:무효-하한]"
     assert tc["entry_fn"] == "s_entry"
     assert tc["gen_method"] == "AEC"
@@ -1250,3 +1255,79 @@ def test_shrink_reduces_chain_text_but_records_it():
     tc0 = out["sits_by_tc"]["TC0"]
     assert len(tc0["call_chain"]) < len(chain)
     assert tc0["chain_truncated"] is True, "되돌린 사실을 안 남기면 화면이 완전한 체인으로 오독한다"
+
+
+def test_sts_meta_reports_pre_truncation_totals(monkeypatch):
+    """W5: STS 총량은 `sts_tc_cap` 을 걸기 **전** 값이어야 한다.
+
+    예전엔 `[:sts_tc_cap]` 를 먼저 잘라 담아서 프론트가 "생성기 TC 6건 중 4건 표시"라고
+    말했다 — 실제 생성기는 10건을 냈는데도. 스텝 절단도 프론트에서 `tc.length > 6` 으로 재면
+    이미 잘린 배열이라 영구 false(dead code) → 백엔드가 플래그로 기록한다.
+    """
+    from workflow.impact_orchestrator import _build_doc_proposal
+
+    fd = {"f1": {"name": "s_foo", "logic_flow": [], "calls_list": []}}
+    steps10 = [[{"action": f"a{i}-{j}", "expected": "ok"} for j in range(8)] for i in range(10)]
+    _stub_generators(monkeypatch, sts_steps=steps10, sits_flows=[])
+    out = _build_doc_proposal(_proposal_sections(fd), {"s_foo"}, sts_tc_cap=6, step_cap=6)
+
+    assert len(out["sts"]["s_foo"]) == 6                  # 화면에 담기는 건 캡만큼
+    m = out["sts_meta"]["s_foo"]
+    assert m["gen_total"] == 10, "절단 전 총량 — 6이면 캡값을 총량이라 우기는 것"
+    assert m["gen_shown"] == 6
+    assert m["gen_truncated"] is True
+    assert m["step_truncated"] is True and m["step_cap"] == 6
+
+
+def test_sts_meta_absent_truncation_flags_when_under_cap(monkeypatch):
+    """캡 미만이면 절단 플래그가 꺼져야 한다(없는 절단을 경고하지 않는다)."""
+    from workflow.impact_orchestrator import _build_doc_proposal
+
+    fd = {"f1": {"name": "s_foo", "logic_flow": [], "calls_list": []}}
+    _stub_generators(monkeypatch, sts_steps=[[{"action": "a", "expected": "ok"}]], sits_flows=[])
+    out = _build_doc_proposal(_proposal_sections(fd), {"s_foo"}, sts_tc_cap=6, step_cap=6)
+
+    m = out["sts_meta"]["s_foo"]
+    assert (m["gen_total"], m["gen_shown"]) == (1, 1)
+    assert m["gen_truncated"] is False and m["step_truncated"] is False
+
+
+def test_cap_kv_scalarizes_dict_and_list_values():
+    """W8: SUTS 파서가 `[검증 필요]` 셀을 dict 로 주는데 `str(dict)` 를 쓰면 화면·TSV 에
+    Python dict repr 이 그대로 유출된다(`{'verification_required': True, ...}`)."""
+    from workflow.impact_orchestrator import _cap_kv
+
+    # exporter `_normalize_scalar` 는 `raw` 에 원문 전체("[검증 필요] 3276")를 담는다
+    assert _cap_kv({"r": {"verification_required": True, "raw": "[검증 필요] 3276"}}) == {"r": "[검증 필요] 3276"}
+    # raw 없이 플래그만 → 마커 문자열
+    assert _cap_kv({"r": {"verification_required": True}}) == {"r": "[검증 필요]"}
+    # list → 쉼표 결합 (dict repr / 대괄호 유출 없음)
+    assert _cap_kv({"r": ["0x1", "0x2"]}) == {"r": "0x1, 0x2"}
+    # 평범한 스칼라 경로는 불변
+    assert _cap_kv({"x": 0, "y": "0x10"}) == {"x": "0", "y": "0x10"}
+
+
+def test_cap_kv_caps_long_column_keys_consistently():
+    """I3: kv 키 상한이 `doc_content.suts_meta[fn].columns` 상한과 **같아야** 한다.
+    다르면 긴 헤더가 서로 다른 문자열이 되어 대조가 영구 실패 → 문서에 값이 있는데 '신규추가'."""
+    from workflow.impact_orchestrator import _KV_KEY_CAP, _cap_kv
+
+    long_key = "g_very_long_structure_name.member_with_a_long_name[12].sub_member_field_name_x"
+    assert len(long_key) > 60, "케이스 전제: 60자 초과 헤더"
+    (k,) = _cap_kv({long_key: "0x0"}).keys()
+    assert k == long_key[:_KV_KEY_CAP]
+    assert _KV_KEY_CAP >= 120, "짧으면 배열 첨자·구조체 멤버 헤더가 뭉개진다"
+
+
+def test_sits_sub_cap_matches_generator_default(monkeypatch):
+    """W3: `sub_cap` 이 생성기 기본 서브케이스 수보다 작으면 `sub_total > loaded` 가 상시 참이라
+    프론트의 '문서에 없음' 신호가 영구 무력화된다(전부 '검증 필요'로 붕괴)."""
+    import inspect
+
+    from generators.sits import _DEFAULT_SUBCASES
+    from workflow.impact_orchestrator import _load_sits_fn_chains
+
+    sub_cap = inspect.signature(_load_sits_fn_chains).parameters["sub_cap"].default
+    assert sub_cap >= _DEFAULT_SUBCASES, (
+        f"sub_cap={sub_cap} < 생성기 기본 {_DEFAULT_SUBCASES} — docPartial 상시 참"
+    )

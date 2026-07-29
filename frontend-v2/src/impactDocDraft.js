@@ -58,12 +58,36 @@ export function normalizeNumeric(v) {
   return neg ? -n : n;
 }
 
-// 두 값이 같은 수치인가. 어느 한쪽이라도 비수치면 null(판정 보류 — false가 아니다).
+// 두 값이 같은가. 수치는 진법 무관 비교, **양쪽이 비수치면 문자열 완전 일치만** 참으로 본다.
+//
+// ⚠ "문자열 비교로 강등하지 않는다"는 규약은 `'0'`과 `'0x0'`을 다른 값으로 보지 말라는 뜻이지,
+//   `'NULL'`과 `'NULL'`을 비교하지 말라는 뜻이 아니다. 완전 일치는 모호하지 않다 — 이걸 막았더니
+//   포인터/ENUM 입력(`NULL`·`IDLE`)이 문서에 그대로 있는데도 매칭이 안 돼 전부 '신규추가'가 됐다
+//   (이미 있는 TC를 중복 작성하라는 지시). 다르면 여전히 null(보류) — 표기 차이일 수 있다.
+// 값 문자열 정규화 — 앞뒤/내부 공백을 접고 대소문자를 무시한다. 시트는 사람이 적어서
+// `TRUE`/`true`, `MODE_A` / `MODE_A ` 같은 표기 흔들림이 흔한데, 그걸 '다른 값'이라 하면
+// 없는 차이를 신규추가로 단정하게 된다.
+function _vnorm(v) {
+  return String(v ?? '').trim().replace(/\s+/g, ' ').toUpperCase();
+}
+
 function sameValue(a, b) {
   const na = normalizeNumeric(a);
   const nb = normalizeNumeric(b);
-  if (na === null || nb === null) return null;
-  return na === nb;
+  if (na !== null && nb !== null) return na === nb;
+  if (na === null && nb === null) {
+    // ⚠ "문자열 비교로 강등하지 않는다"는 규칙은 `'0'` vs `'0x0'` 을 문자열로 갈라 보지
+    //   말라는 뜻이다 — 그 경우는 위 수치 분기가 이미 잡는다. 여기까지 온 건 **양쪽 다
+    //   수치가 아닌** 값이라, 같으면 같다고 하고 다르면 다르다고 하는 게 맞다.
+    //   예전엔 둘 다 null(보류)로 돌려보내, 문서에 `mode=IDLE` 이 있는데 생성기가 `mode=RUN`
+    //   을 제안하면 그 변수를 **비교에서 빼버려** 나머지 한 변수만 맞아도 '유지'가 됐다
+    //   (= 문서에 없는 케이스를 "이미 있으니 두라"고 지시 — 거짓 유지).
+    const sa = _vnorm(a);
+    const sb = _vnorm(b);
+    if (sa && sb) return sa === sb;
+  }
+  // 한쪽만 수치이거나 한쪽이 비었으면 진짜 모호하다(`'NULL'` vs `'0'`) → 판정 보류.
+  return null;
 }
 
 // 변경 전역 분류 — buildDocumentActions와 동일 근거(added∩removed = 값 변경).
@@ -199,7 +223,11 @@ export function reconcileSuts({ docRows, docColumns, genSeqs, varTypes, diffElem
   const columns = orderedColumns(docColumns, rows, seqs);
   const names = uniqueNames(columns);
   const { changed, touched } = globalSets(diffElems);
-  const unknownTypes = names.filter((n) => !typeOf(varTypes, n));
+  // ⚠ 타입 미상은 **경계값 모드에서만** 문제다 — 그때만 타입으로 경계값을 유도하기 때문이다.
+  //   시퀀스 모드는 생성기가 구체값을 주므로 타입이 없어도 아쉬울 게 없는데, 모드와 무관하게
+  //   세면 "경계값 자동 유도 불가"라는 **없는 문제**를 매번 경고한다(cry wolf). 입력 축만 센다.
+  const unknownTypes = seqs.length ? [] : uniqueNames(columns.filter((c) => c.side === SIDE.IN))
+    .filter((n) => !typeOf(varTypes, n));
 
   // 문서에 없는 시그니처 파라미터 — 원문 컬럼과 **섞지 않고** 따로 표기한다.
   // (섞으면 "원문은 g_sys_error_his인데 제안은 u16t_Data" 불일치가 그대로 재발한다.)
@@ -414,11 +442,14 @@ export function reconcileSits({ docTcs, gen, varTypes, diffElems } = {}) {
   );
   const docUnparsed = tcs.length > 0 && docSubs.length === 0;          // 전부 미파싱
   const docPartial = !docUnparsed && (tcsUnparsed > 0 || subShort);     // 일부만 확보
+  // 해당하는 축만 말한다 — 예전엔 미파싱이 0건인데도 "원문 TC 1건 중 0건 미파싱"이라 적었다.
   const incompleteNote = docUnparsed
     ? '원문 서브케이스 미파싱(SITS 중간파일 부재) — 신규/유지 판정 불가'
     : (docPartial
-      ? `원문 TC ${tcs.length}건 중 ${tcsUnparsed}건 미파싱${subShort ? '·서브케이스 일부만 로드' : ''}`
-        + ' — 문서에 없다고 단정 불가'
+      ? [
+        tcsUnparsed ? `원문 TC ${tcs.length}건 중 ${tcsUnparsed}건 미파싱` : '',
+        subShort ? '서브케이스가 원문보다 적게 로드됨' : '',
+      ].filter(Boolean).join(' · ') + ' — 문서에 없다고 단정 불가'
       : '');
   const columns = orderedColumns(null, docSubs, subs);
   const names = uniqueNames(columns);

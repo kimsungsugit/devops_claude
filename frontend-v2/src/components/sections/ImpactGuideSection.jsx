@@ -1563,7 +1563,11 @@ export default function ImpactGuideSection({ analysisResult, job }) {
       // ⚠ 단, 페이로드 상한으로 **생략된** 함수는 예외다 — "문서에 없다"가 아니라 "job에 안 실렸다"이고,
       //   그걸 신규 작성 골격으로 표시하면 실제로는 있는 TC를 없다고 말하게 된다. 이때는 조회 버튼이
       //   있는 표(빈 draft + 안내)를 그려 사용자가 실제로 회복할 수 있게 한다.
-      if (!has && !genSeqs && !_fullHasData && sutsIsOmitted(fn)) {
+      // ⚠ `!genSeqs` 조건을 함께 걸면 안 된다. 생략은 `doc_content`(원문)에서만 일어나고
+      //   `doc_proposal.suts`(생성기 산출)는 그대로 남으므로, 생략된 함수인데 genSeqs가 있으면
+      //   이 가드를 지나쳐 "🖊 SUTS **작성 제안**" + 전 행 '신규추가'가 된다 — 문서에 있는 TC를
+      //   "없다"고 단정하는 것이다. 원문이 없고(has=false) 생략된 함수면 무조건 여기서 잡는다.
+      if (!has && !_fullHasData && sutsIsOmitted(fn)) {
         const _o = _full;
         return (
           <DocProposalTable
@@ -1808,13 +1812,27 @@ export default function ImpactGuideSection({ analysisResult, job }) {
             : <div style={{ marginTop: 2 }}>{_lbl('Test Action')}{_val(`${fn} 호출 시퀀스 — 입력/기대 결과 작성`)}</div>}
           {/* 생성기 Action/Expected도 로직 흐름 기반 추론값(실측 아님) — SUTS/SITS와 정직성 대칭(reviewer W2). */}
           {genTcs && <div className="text-muted" style={{ fontSize: 9, marginTop: 2 }}>· Action/Expected는 로직 흐름 기반 추론 절차 — 실행 검증 필요</div>}
-          {/* 절단을 침묵시키지 않는다 — SUTS/SITS엔 있는 표기가 STS에만 없었다. */}
-          {genTcs && genTcs.length > 4 && (
-            <div className="text-muted" style={{ fontSize: 9, marginTop: 2 }}>· 생성기 TC {genTcs.length}건 중 4건만 표시</div>
-          )}
-          {genTcs && genTcs.some((tc) => (tc || []).length > 6) && (
-            <div className="text-muted" style={{ fontSize: 9, marginTop: 2 }}>· 각 TC의 절차는 6스텝까지만 표시</div>
-          )}
+          {/* 절단을 침묵시키지 않는다 — SUTS/SITS엔 있는 표기가 STS에만 없었다.
+              ⚠ 총량은 백엔드 `sts_meta.gen_total`(절단 전)을 쓴다. `genTcs.length`는 이미 잘린
+              수라 "6건 중 4건"처럼 실제(20건)보다 작게 말한다. 스텝 절단도 백엔드가 기록한다 —
+              프론트에서 `tc.length > 6`으로 재면 이미 잘려 온 배열이라 영구 false(dead code). */}
+          {(() => {
+            const m = (docProposal?.sts_meta ?? {})[String(fn).toLowerCase()] || {};
+            const shown = Math.min(genTcs ? genTcs.length : 0, 4);
+            return (
+              <>
+                {m.gen_truncated && (
+                  <div className="text-muted" style={{ fontSize: 9, marginTop: 2 }}>· 생성기 TC {m.gen_total}건 중 {shown}건 표시 — 전체는 문서 생성 시 산출</div>
+                )}
+                {!m.gen_truncated && genTcs && genTcs.length > 4 && (
+                  <div className="text-muted" style={{ fontSize: 9, marginTop: 2 }}>· 생성기 TC {genTcs.length}건 중 {shown}건 표시</div>
+                )}
+                {m.step_truncated && (
+                  <div className="text-muted" style={{ fontSize: 9, marginTop: 2 }}>· 각 TC의 절차는 {m.step_cap}스텝까지만 표시</div>
+                )}
+              </>
+            );
+          })()}
           {params.length > 0 && <div className="text-muted" style={{ fontSize: 9, marginTop: 2 }}>· Pre-condition: 위 파라미터 경계값 입력</div>}
         </>
       ));
