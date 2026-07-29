@@ -312,3 +312,100 @@ class TestComputeOverallScore:
 
     def test_empty_metrics(self):
         assert compute_overall_score([]) == 0.0
+
+
+class TestEvaluateStsExecutableCoverage:
+    """실행 시험 기준 커버리지가 게이트 지표 옆에 함께 나와야 한다.
+
+    회귀 대상: `requirement_coverage_pct`(threshold 70)는 검증방법을 가리지 않아,
+    코드 리뷰(RVW)로만 덮인 요구도 covered로 센다. 실측 — 소스 함수를 하나도 못 잡은
+    경우 이 값이 100.0%인데 실행 시험 기준은 57.1%(27건이 리뷰만)였다.
+    """
+
+    @staticmethod
+    def _report(**cov):
+        base = {"total_reqs": 10, "covered_reqs": 10, "pct": 100.0}
+        base.update(cov)
+        return {
+            "total_test_cases": 20, "completeness_pct": 90.0, "safety_test_cases": 5,
+            "requirement_coverage": base,
+            "test_method_distribution": {"FIT": 10, "RVW": 10},
+        }
+
+    @staticmethod
+    def _by_key(metrics):
+        return {m["metric_name"]: m for m in metrics}
+
+    def test_executable_axis_is_reported_separately(self):
+        from workflow.quality.evaluator import evaluate_sts
+        got = self._by_key(evaluate_sts(self._report(
+            executable_pct=57.1, executable_covered_reqs=6, review_only_count=4)))
+        assert "requirement_coverage_pct" in got and "executable_coverage_pct" in got
+        assert got["requirement_coverage_pct"]["value"] == 100.0
+        assert got["executable_coverage_pct"]["value"] == 57.1, \
+            "두 축이 같은 값을 보고하면 구분이 안 된다"
+        assert got["review_only_reqs_count"]["value"] == 4
+
+    def test_executable_metric_is_not_gated(self):
+        """게이트 전환은 기존 pass/fail을 뒤집으므로 이 지표는 threshold가 없어야 한다."""
+        from workflow.quality.evaluator import evaluate_sts
+        got = self._by_key(evaluate_sts(self._report(
+            executable_pct=10.0, review_only_count=9)))
+        assert got["executable_coverage_pct"]["threshold"] is None
+        assert got["executable_coverage_pct"]["gate_pass"] is None
+        # 대조군: 기존 게이트는 그대로 살아 있어야 한다
+        assert got["requirement_coverage_pct"]["threshold"] == 70.0
+
+    def test_absent_executable_key_adds_nothing(self):
+        """구 버전 quality_report(검증방법 축 없음)도 그대로 동작해야 한다."""
+        from workflow.quality.evaluator import evaluate_sts
+        got = self._by_key(evaluate_sts(self._report()))
+        assert "executable_coverage_pct" not in got
+        assert "requirement_coverage_pct" in got
+
+
+class TestEvaluateStsFunctionAxis:
+    """함수 기준 TC 보유율이 요구 단위 지표 옆에 함께 나와야 한다.
+
+    회귀 대상: requirement_coverage_pct / executable_coverage_pct 는 **둘 다 요구 단위**라
+    요구당 TC 상한이 끊어낸 함수를 못 본다. 실측(HDPDM01): 요구 100.0% / 실행시험 87.3%
+    인데 함수 기준은 6.4%(747개 중 48개)였다.
+    """
+
+    @staticmethod
+    def _report(gen_stats):
+        return {
+            "total_test_cases": 20, "completeness_pct": 90.0, "safety_test_cases": 5,
+            "requirement_coverage": {"total_reqs": 10, "covered_reqs": 10, "pct": 100.0,
+                                     "executable_pct": 87.3, "review_only_count": 1},
+            "test_method_distribution": {"FNCT": 20},
+            "generation_stats": gen_stats,
+        }
+
+    @staticmethod
+    def _by_key(metrics):
+        return {m["metric_name"]: m for m in metrics}
+
+    def test_function_axis_is_reported(self):
+        from workflow.quality.evaluator import evaluate_sts
+        got = self._by_key(evaluate_sts(self._report(
+            {"function_tc_coverage_pct": 6.4, "functions_without_tc": 699,
+             "mapped_functions": 747, "max_tc_per_req": 5})))
+        assert got["function_tc_coverage_pct"]["value"] == 6.4
+        assert got["functions_without_tc"]["value"] == 699.0
+        # 세 축이 서로 다른 값을 보고해야 구분이 된다
+        assert got["requirement_coverage_pct"]["value"] == 100.0
+        assert got["executable_coverage_pct"]["value"] == 87.3
+
+    def test_function_axis_is_not_gated(self):
+        from workflow.quality.evaluator import evaluate_sts
+        got = self._by_key(evaluate_sts(self._report(
+            {"function_tc_coverage_pct": 1.0, "functions_without_tc": 900})))
+        assert got["function_tc_coverage_pct"]["threshold"] is None
+        assert got["function_tc_coverage_pct"]["gate_pass"] is None
+
+    def test_absent_generation_stats_adds_nothing(self):
+        from workflow.quality.evaluator import evaluate_sts
+        got = self._by_key(evaluate_sts(self._report({})))
+        assert "function_tc_coverage_pct" not in got
+        assert "requirement_coverage_pct" in got

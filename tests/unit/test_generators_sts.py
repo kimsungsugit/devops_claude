@@ -478,3 +478,209 @@ class TestHsisSignalCache:
         assert _load_hsis_signals(str(blank))["signals"] == []
         good = self._write(tmp_path / "good.xlsx", [("HSI_01", "SIG_A", "u8g_A", "SwTR_0001")])
         assert _load_hsis_signals(good)["sw_var_names"] == ["u8g_A"]
+
+
+class TestCoverageSeparatesVerificationMethod:
+    r"""커버리지가 실행시험과 코드리뷰(RVW)를 구분해야 한다.
+
+    회귀 대상: `generate_traceability_matrix`가 `test_method`를 전혀 보지 않고
+    `srs_id`만으로 covered를 세, `_generate_review_steps`가 만든 RVW TC("소스 코드에서
+    구현부 확인")가 실행 시험과 동일하게 계상됐다.
+    실측(HDPDM01 SRS 63건): 보고 100.0% vs 실행시험 87.3% = 12.7%p 부풀림.
+    """
+
+    @staticmethod
+    def _tc(tid, srs, method):
+        return {"id": tid, "srs_id": srs, "test_method": method}
+
+    @staticmethod
+    def _reqs(*ids):
+        return [{"id": i} for i in ids]
+
+    def test_review_only_req_is_excluded_from_executable_axis(self):
+        from generators.sts import generate_traceability_matrix
+        trace = generate_traceability_matrix(
+            [self._tc("T1", "SwTR_0001", "FIT"), self._tc("T2", "SwTR_0002", "RVW")],
+            self._reqs("SwTR_0001", "SwTR_0002"),
+        )
+        cov = trace["coverage"]
+        assert cov["covered_reqs"] == 2 and cov["pct"] == 100.0   # 기존 계약 불변
+        assert cov["executable_covered_reqs"] == 1
+        assert cov["executable_pct"] == 50.0
+        assert cov["review_only_reqs"] == ["SwTR_0002"]
+        assert cov["review_only_count"] == 1
+
+    def test_req_with_both_methods_counts_as_executable(self):
+        """같은 요구에 실행 TC가 하나라도 있으면 review-only가 아니다."""
+        from generators.sts import generate_traceability_matrix
+        cov = generate_traceability_matrix(
+            [self._tc("T1", "SwTR_0001", "RVW"), self._tc("T2", "SwTR_0001", "FNCT")],
+            self._reqs("SwTR_0001"),
+        )["coverage"]
+        assert cov["executable_covered_reqs"] == 1
+        assert cov["review_only_reqs"] == []
+
+    def test_all_executable_methods_count(self):
+        from generators.sts import generate_traceability_matrix
+        methods = ["FIT", "FNCT", "RBT", "ELCT"]
+        tcs = [self._tc(f"T{i}", f"SwTR_000{i}", m) for i, m in enumerate(methods, 1)]
+        cov = generate_traceability_matrix(tcs, self._reqs(*[t["srs_id"] for t in tcs]))["coverage"]
+        assert cov["executable_covered_reqs"] == 4
+        assert cov["review_only_count"] == 0
+
+    def test_method_case_is_normalized(self):
+        from generators.sts import generate_traceability_matrix
+        cov = generate_traceability_matrix(
+            [self._tc("T1", "SwTR_0001", "rvw")], self._reqs("SwTR_0001"))["coverage"]
+        assert cov["review_only_count"] == 1
+
+    def test_quality_report_names_the_review_only_reqs(self):
+        from generators.sts import generate_quality_report, generate_traceability_matrix
+        reqs = self._reqs("SwTR_0001", "SwTR_0002")
+        tcs = [self._tc("T1", "SwTR_0001", "FIT"), self._tc("T2", "SwTR_0002", "RVW")]
+        qr = generate_quality_report(tcs, generate_traceability_matrix(tcs, reqs))
+        warns = qr["coverage_warnings"]
+        assert len(warns) == 1
+        assert "SwTR_0002" in warns[0] and "100.0" in warns[0] and "50.0" in warns[0]
+
+    def test_no_warning_when_everything_is_executable(self):
+        """대조군: 실행시험만 있으면 경고가 없어야 한다(무조건 경고 방지)."""
+        from generators.sts import generate_quality_report, generate_traceability_matrix
+        reqs = self._reqs("SwTR_0001")
+        tcs = [self._tc("T1", "SwTR_0001", "FNCT")]
+        qr = generate_quality_report(tcs, generate_traceability_matrix(tcs, reqs))
+        assert qr["coverage_warnings"] == []
+
+
+class TestReqFunctionMappingSdsSource:
+    r"""요구-함수 매핑의 SDS 폴백은 프로젝트에 종속돼야 한다.
+
+    회귀 대상: `map_requirements_to_functions`가 `_load_default_sds_map()`(저장소 docs/
+    글롭)만 봤다. 실측(HDPDM01): 요구-함수 링크 5,992건이 **100%** 이 폴백에서 나왔고
+    (끄면 0/63), 요구 ID는 프로젝트 간 네임스페이스가 겹쳐 오매핑이 걸러지지도 않는다.
+    """
+
+    _REQS = [{"id": "SwTR_0001"}, {"id": "SwTR_0002"}]
+    _FD = {"SwUFn_001": {"id": "SwUFn_001", "name": "S_Motor_Init",
+                         "module_name": "MotorCtrl", "related": ""}}
+
+    def test_injected_map_wins_over_repo_docs_fallback(self, monkeypatch):
+        from generators import sts as gsts
+        monkeypatch.setattr(gsts, "_load_default_sds_map",
+                            lambda: {"motorctrl": {"related": "SwTR_0002", "asil": "", "description": ""}})
+        got = gsts.map_requirements_to_functions(
+            self._REQS, self._FD,
+            sds_map={"motorctrl": {"related": "SwTR_0001", "asil": "", "description": ""}},
+        )
+        assert got["SwTR_0001"] == ["SwUFn_001"], "주입한 SDS 맵이 무시됐다"
+        assert got["SwTR_0002"] == [], "저장소 폴백이 주입을 덮었다"
+
+    def test_none_still_uses_fallback(self, monkeypatch):
+        """대조군: 안 주면 기존 폴백 동작 유지(후방 호환)."""
+        from generators import sts as gsts
+        monkeypatch.setattr(gsts, "_load_default_sds_map",
+                            lambda: {"motorctrl": {"related": "SwTR_0002", "asil": "", "description": ""}})
+        got = gsts.map_requirements_to_functions(self._REQS, self._FD)
+        assert got["SwTR_0002"] == ["SwUFn_001"]
+
+    def test_empty_injected_map_does_not_silently_fall_back(self, monkeypatch):
+        """빈 dict를 명시로 주면 폴백을 쓰지 않는다(None과 구분)."""
+        from generators import sts as gsts
+        monkeypatch.setattr(gsts, "_load_default_sds_map",
+                            lambda: {"motorctrl": {"related": "SwTR_0002", "asil": "", "description": ""}})
+        got = gsts.map_requirements_to_functions(self._REQS, self._FD, sds_map={})
+        assert got["SwTR_0001"] == [] and got["SwTR_0002"] == []
+
+
+class TestTcCapTruncationIsSurfaced:
+    r"""요구당 TC 상한이 끊어낸 함수들이 기록돼야 한다.
+
+    회귀 대상: `max_tc_per_req`(기본 5)는 요구당 **함수 루프 자체**를 끊는다. 요구에
+    함수가 수백 개 매핑되면 대부분이 시험 없이 남는데 그 사실이 어디에도 없었다.
+    실측(HDPDM01): 매핑 함수 747개 중 TC 보유 48개(6.4%), 요구 35/37 이 상한 도달,
+    그런데 요구 커버리지는 100.0%.
+    """
+
+    @staticmethod
+    def _fd(n):
+        return {f"SwUFn_{i:03d}": {"id": f"SwUFn_{i:03d}", "name": f"S_Fn_{i}",
+                                   "prototype": f"void S_Fn_{i}(void)",
+                                   "inputs": [], "outputs": [], "logic_flow": []}
+                for i in range(1, n + 1)}
+
+    def test_stats_record_functions_left_untested(self):
+        from generators.sts import generate_test_cases
+        fd = self._fd(10)
+        stats = {}
+        tcs = generate_test_cases(
+            [{"id": "SwTR_0001", "req_type": "TR"}], fd,
+            {"SwTR_0001": list(fd)}, {"max_tc_per_req": 5}, stats_out=stats,
+        )
+        assert len(tcs) == 5
+        assert stats["max_tc_per_req"] == 5
+        assert stats["mapped_functions"] == 10
+        assert stats["functions_with_tc"] == 5
+        assert stats["functions_without_tc"] == 5
+        assert stats["function_tc_coverage_pct"] == 50.0
+        assert stats["requirements_truncated"] == ["SwTR_0001"]
+        assert stats["requirements_truncated_count"] == 1
+
+    def test_no_truncation_recorded_when_under_cap(self):
+        """대조군: 상한에 안 닿으면 절단 기록이 없어야 한다(무조건 경고 방지)."""
+        from generators.sts import generate_test_cases
+        fd = self._fd(2)
+        stats = {}
+        generate_test_cases([{"id": "SwTR_0001", "req_type": "TR"}], fd,
+                            {"SwTR_0001": list(fd)}, {"max_tc_per_req": 5}, stats_out=stats)
+        assert stats["functions_without_tc"] == 0
+        assert stats["requirements_truncated"] == []
+        assert stats["function_tc_coverage_pct"] == 100.0
+
+    def test_stats_out_is_optional(self):
+        """기존 호출부(4-arg)는 그대로 동작해야 한다."""
+        from generators.sts import generate_test_cases
+        fd = self._fd(3)
+        assert generate_test_cases([{"id": "SwTR_0001", "req_type": "TR"}], fd,
+                                   {"SwTR_0001": list(fd)}) != []
+
+    def test_quality_report_warns_with_function_axis(self):
+        from generators.sts import (
+            generate_quality_report,
+            generate_test_cases,
+            generate_traceability_matrix,
+        )
+        fd = self._fd(10)
+        reqs = [{"id": "SwTR_0001", "req_type": "TR"}]
+        stats = {}
+        tcs = generate_test_cases(reqs, fd, {"SwTR_0001": list(fd)},
+                                  {"max_tc_per_req": 5}, stats_out=stats)
+        qr = generate_quality_report(tcs, generate_traceability_matrix(tcs, reqs),
+                                     generation_stats=stats)
+        hit = [w for w in qr["coverage_warnings"] if "max_tc_per_req" in w]
+        assert len(hit) == 1, qr["coverage_warnings"]
+        assert "747" not in hit[0]                     # 실측 수치 하드코딩 금지
+        assert "10개 중 5개" in hit[0] and "SwTR_0001" in hit[0]
+        assert qr["generation_stats"]["functions_without_tc"] == 5
+
+    def test_no_truncation_warning_when_all_functions_tested(self):
+        from generators.sts import (
+            generate_quality_report,
+            generate_test_cases,
+            generate_traceability_matrix,
+        )
+        fd = self._fd(2)
+        reqs = [{"id": "SwTR_0001", "req_type": "TR"}]
+        stats = {}
+        tcs = generate_test_cases(reqs, fd, {"SwTR_0001": list(fd)},
+                                  {"max_tc_per_req": 5}, stats_out=stats)
+        qr = generate_quality_report(tcs, generate_traceability_matrix(tcs, reqs),
+                                     generation_stats=stats)
+        assert [w for w in qr["coverage_warnings"] if "max_tc_per_req" in w] == []
+
+    def test_quality_report_without_stats_stays_backward_compatible(self):
+        from generators.sts import generate_quality_report, generate_traceability_matrix
+        tcs = [{"id": "T1", "srs_id": "SwTR_0001", "test_method": "FNCT",
+                "steps": [{"action": "a", "expected": "b"}, {"action": "c", "expected": "d"}]}]
+        qr = generate_quality_report(tcs, generate_traceability_matrix(tcs, [{"id": "SwTR_0001"}]))
+        assert qr["generation_stats"] == {}
+        assert [w for w in qr["coverage_warnings"] if "max_tc_per_req" in w] == []

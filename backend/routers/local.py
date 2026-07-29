@@ -11,7 +11,7 @@ import traceback
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
@@ -331,6 +331,54 @@ def _discover_hsis_path() -> Optional[str]:
     except Exception:
         pass
     return None
+
+
+def _discover_srs_docx() -> Optional[str]:
+    """저장소 `docs/` 에서 SRS docx 하나를 고른다(프로젝트 무관)."""
+    for p in _discover_default_req_docs().get("req", []):
+        if "srs" in p.lower() and p.endswith(".docx"):
+            return p
+    return None
+
+
+def _discover_sds_docx() -> Optional[str]:
+    """저장소 `docs/` 에서 SDS docx 하나를 고른다(프로젝트 무관)."""
+    for p in _discover_default_req_docs().get("sds", []):
+        return p
+    return None
+
+
+def _doc_or_discovered(
+    resolved: Optional[str],
+    user_supplied: Any,
+    discover: Callable[[], Optional[str]],
+    *,
+    label: str,
+    tag: str = "",
+) -> Optional[str]:
+    """해석된 경로가 없을 때 자동 탐색을 쓸지 결정한다.
+
+    자동 탐색(저장소 `docs/` 글롭)은 사용자가 **아무것도 안 준 경우에만** 쓴다.
+    사용자가 경로를 줬는데 해석에 실패했다면(대표 사례: cloudium worker-only `U:\\…` —
+    로컬 `Path.exists()` 가 항상 False) **대체하지 않고 경고만 남긴다**.
+
+    과거엔 두 경우를 `if not resolved:` 하나로 묶어, 지정한 문서를 못 읽으면 저장소
+    `docs/` 에 들어있는 **다른 프로젝트 문서**(현재 HDPDM01)로 조용히 바꿔치기했다.
+    로그가 "auto-discovered" 라 기능처럼 읽혔고, SDS 는 요구-함수 매핑 전체를 좌우하므로
+    산출물이 통째로 남의 프로젝트 설계 기준이 됐다.
+    """
+    if resolved:
+        return resolved
+    if user_supplied:
+        _logger.warning(
+            "%s%s: 지정한 입력을 해석하지 못해 건너뛴다 — 저장소 docs/ 문서로 대체하지 "
+            "않는다(다른 프로젝트 오염 방지)", tag, label)
+        return None
+    picked = discover()
+    if picked:
+        _logger.info("%s%s 미지정 — 저장소 docs/ 에서 자동 탐색(프로젝트 무관): %s",
+                     tag, label, picked)
+    return picked
 
 
 def _localize_uds_for_enrich(uds_path: Optional[str]) -> Optional[str]:
@@ -1640,12 +1688,16 @@ def local_traceability(
     # SDS 컴포넌트 수가 갈리지 않도록(함수 fan-out 24배 과대 방지).
     sds_req_to_comps: Dict[str, List[str]] = {}
     sds_req_to_design_comps: Dict[str, List[str]] = {}
+    # 아래 map_requirements_to_functions 의 폴백 출처로도 쓴다 — 안 넘기면 저장소 docs/
+    # 글롭(프로젝트 무관)이 대신한다.
+    sds_partition_map: Optional[Dict[str, Any]] = None
     if sds_path:
         sds_p = Path(sds_path).expanduser().resolve()
         if not is_under_any(sds_p, [repo_root, sds_p.parent.resolve()]):
             raise HTTPException(status_code=403, detail="SDS 경로 접근이 허용되지 않습니다")
         if sds_p.exists() and sds_p.is_file():
             partition_map = _extract_sds_partition_map(str(sds_p))
+            sds_partition_map = partition_map or None
             for comp_key, info in partition_map.items():
                 related = info.get("related", "")
                 if not related:
@@ -1683,7 +1735,8 @@ def local_traceability(
             pass
 
     # Map requirements to functions
-    req_to_fids = map_requirements_to_functions(reqs, function_details)
+    req_to_fids = map_requirements_to_functions(reqs, function_details,
+                                                sds_map=sds_partition_map)
 
     # Keyword-based fallback mapping if related fields are TBD
     _kw_map = {
@@ -2041,13 +2094,9 @@ async def local_sts_generate(
             pass
 
     # Fallback: auto-discover SRS from docs/ if not yet resolved
-    if not srs_docx_path:
-        _auto_docs = _discover_default_req_docs()
-        for _auto_p in _auto_docs.get("req", []):
-            if "srs" in _auto_p.lower() and _auto_p.endswith(".docx"):
-                srs_docx_path = _auto_p
-                _logger.info("[STS_GENERATE][%s] auto-discovered SRS: %s", req_id, srs_docx_path)
-                break
+    srs_docx_path = _doc_or_discovered(
+        srs_docx_path, bool(req_paths_list or req_files), _discover_srs_docx,
+        label="SRS", tag=f"[STS_GENERATE][{req_id}] ")
 
     if not req_texts and not srs_docx_path:
         raise HTTPException(status_code=400, detail="SRS 문서를 최소 1개 이상 제공해주세요.")
@@ -2081,15 +2130,12 @@ async def local_sts_generate(
 
     sds_docx_path = _resolve_opt(sds_path)
     # Fallback: auto-discover SDS from docs/ if not provided
-    if not sds_docx_path:
-        _auto_docs = _discover_default_req_docs()
-        for _auto_p in _auto_docs.get("sds", []):
-            sds_docx_path = _auto_p
-            _logger.info("[STS_GENERATE][%s] auto-discovered SDS: %s", req_id, sds_docx_path)
-            break
+    sds_docx_path = _doc_or_discovered(sds_docx_path, sds_path, _discover_sds_docx,
+                                       label="SDS", tag=f"[STS_GENERATE][{req_id}] ")
     uds_file_path = _resolve_opt(uds_path)
     stp_docx_path = _resolve_opt(stp_path)
-    hsis_file_path = _resolve_opt(hsis_path) or _discover_hsis_path()
+    hsis_file_path = _doc_or_discovered(_resolve_opt(hsis_path), hsis_path,
+                              _discover_hsis_path, label="HSIS")
 
     # Resolve template
     tpl_path: Optional[str] = None
@@ -2261,7 +2307,8 @@ async def local_sts_generate_stream(
     sds_docx_path = _resolve_opt2(sds_path)
     uds_file_path = _resolve_opt2(uds_path)
     stp_docx_path = _resolve_opt2(stp_path)
-    hsis_file_path2 = _resolve_opt2(hsis_path) or _discover_hsis_path()
+    hsis_file_path2 = _doc_or_discovered(_resolve_opt2(hsis_path), hsis_path,
+                              _discover_hsis_path, label="HSIS")
 
     tpl_path: Optional[str] = None
     if template_path:
@@ -2415,13 +2462,9 @@ async def local_sts_generate_async(
             pass
 
     # Fallback: auto-discover SRS from docs/ if not yet resolved
-    if not srs_docx_path:
-        _auto_docs2 = _discover_default_req_docs()
-        for _auto_p2 in _auto_docs2.get("req", []):
-            if "srs" in _auto_p2.lower() and _auto_p2.endswith(".docx"):
-                srs_docx_path = _auto_p2
-                _logger.info("[STS_GENERATE_ASYNC] auto-discovered SRS: %s", srs_docx_path)
-                break
+    srs_docx_path = _doc_or_discovered(
+        srs_docx_path, bool(req_paths_list or req_files), _discover_srs_docx,
+        label="SRS", tag="[STS_GENERATE_ASYNC] ")
 
     if not req_texts and not srs_docx_path:
         raise HTTPException(status_code=400, detail="SRS 문서를 최소 1개 이상 제공해주세요.")
@@ -2441,15 +2484,12 @@ async def local_sts_generate_async(
 
     sds_docx_path = _resolve_opt3(sds_path)
     # Fallback: auto-discover SDS from docs/ if not provided
-    if not sds_docx_path:
-        _auto_docs3 = _discover_default_req_docs()
-        for _auto_p3 in _auto_docs3.get("sds", []):
-            sds_docx_path = _auto_p3
-            _logger.info("[STS_GENERATE_ASYNC] auto-discovered SDS: %s", sds_docx_path)
-            break
+    sds_docx_path = _doc_or_discovered(sds_docx_path, sds_path, _discover_sds_docx,
+                                       label="SDS", tag="[STS_GENERATE_ASYNC] ")
     uds_file_path = _resolve_opt3(uds_path)
     stp_docx_path = _resolve_opt3(stp_path)
-    hsis_file_path3 = _resolve_opt3(hsis_path) or _discover_hsis_path()
+    hsis_file_path3 = _doc_or_discovered(_resolve_opt3(hsis_path), hsis_path,
+                              _discover_hsis_path, label="HSIS")
 
     # 콤마 구분 복수 경로 지원: 첫 번째 경로로 검증, 전체를 generate에 전달
     _first_root = source_root.split(",")[0].strip() if source_root else ""
@@ -2683,18 +2723,12 @@ async def local_suts_generate(
     sds_docx = _resolve_doc_path(sds_path)
     uds_file = _resolve_doc_path(uds_path)
     # Fallback: auto-discover SRS/SDS/HSIS from docs/ if not provided
-    if not srs_docx:
-        _suts_defaults = _discover_default_req_docs()
-        for _sp in _suts_defaults.get("req", []):
-            if "srs" in _sp.lower() and _sp.endswith(".docx"):
-                srs_docx = _sp
-                break
-    if not sds_docx:
-        _suts_defaults = _discover_default_req_docs()
-        for _sp in _suts_defaults.get("sds", []):
-            sds_docx = _sp
-            break
-    hsis_suts = _resolve_doc_path(hsis_path) or _discover_hsis_path()
+    srs_docx = _doc_or_discovered(srs_docx, srs_path, _discover_srs_docx,
+                                  label="SRS", tag="[SUTS_GENERATE] ")
+    sds_docx = _doc_or_discovered(sds_docx, sds_path, _discover_sds_docx,
+                                  label="SDS", tag="[SUTS_GENERATE] ")
+    hsis_suts = _doc_or_discovered(_resolve_doc_path(hsis_path), hsis_path,
+                              _discover_hsis_path, label="HSIS")
 
     base_dir = _resolve_report_dir(report_dir)
     out_filename, out_path = _build_local_excel_output(base_dir, "suts", "suts_local", tpl_path)
@@ -2793,18 +2827,12 @@ async def local_suts_generate_stream(
     sds_docx_stream = _res_doc(sds_path)
     uds_file_stream = _res_doc(uds_path)
     # Fallback: auto-discover SRS/SDS/HSIS from docs/ if not provided
-    if not srs_docx_stream:
-        _suts_defs2 = _discover_default_req_docs()
-        for _sp2 in _suts_defs2.get("req", []):
-            if "srs" in _sp2.lower() and _sp2.endswith(".docx"):
-                srs_docx_stream = _sp2
-                break
-    if not sds_docx_stream:
-        _suts_defs2 = _discover_default_req_docs()
-        for _sp2 in _suts_defs2.get("sds", []):
-            sds_docx_stream = _sp2
-            break
-    hsis_suts_stream = _res_doc(hsis_path) or _discover_hsis_path()
+    srs_docx_stream = _doc_or_discovered(srs_docx_stream, srs_path, _discover_srs_docx,
+                                         label="SRS", tag="[SUTS_STREAM] ")
+    sds_docx_stream = _doc_or_discovered(sds_docx_stream, sds_path, _discover_sds_docx,
+                                         label="SDS", tag="[SUTS_STREAM] ")
+    hsis_suts_stream = _doc_or_discovered(_res_doc(hsis_path), hsis_path,
+                              _discover_hsis_path, label="HSIS")
 
     base_dir = _resolve_report_dir(report_dir)
     out_filename, out_path = _build_local_excel_output(base_dir, "suts", "suts_local", tpl_path)
@@ -2923,7 +2951,8 @@ async def local_suts_generate_async(
     srs_docx_async = _res_async(srs_path)
     sds_docx_async = _res_async(sds_path)
     uds_file_async = _res_async(uds_path)
-    hsis_suts_async = _res_async(hsis_path) or _discover_hsis_path()
+    hsis_suts_async = _doc_or_discovered(_res_async(hsis_path), hsis_path,
+                              _discover_hsis_path, label="HSIS")
 
     base_dir = _resolve_report_dir(report_dir)
     out_filename, out_path = _build_local_excel_output(base_dir, "suts", "suts_local", tpl_path)
@@ -3118,7 +3147,8 @@ async def local_sits_generate(
     srs_docx = _resolve_doc_path_sits(srs_path)
     sds_docx = _resolve_doc_path_sits(sds_path)
     uds_file = _resolve_doc_path_sits(uds_path)
-    hsis_file = _resolve_doc_path_sits(hsis_path) or _discover_hsis_path()
+    hsis_file = _doc_or_discovered(_resolve_doc_path_sits(hsis_path), hsis_path,
+                              _discover_hsis_path, label="HSIS")
     stp_file = _resolve_doc_path_sits(stp_path)
 
     base_dir = _resolve_report_dir(report_dir)
@@ -3218,7 +3248,8 @@ async def local_sits_generate_stream(
     srs_docx_stream = _res_doc_sits(srs_path)
     sds_docx_stream = _res_doc_sits(sds_path)
     uds_file_stream = _res_doc_sits(uds_path)
-    hsis_stream = _res_doc_sits(hsis_path) or _discover_hsis_path()
+    hsis_stream = _doc_or_discovered(_res_doc_sits(hsis_path), hsis_path,
+                              _discover_hsis_path, label="HSIS")
     stp_stream = _res_doc_sits(stp_path)
 
     base_dir = _resolve_report_dir(report_dir)
@@ -3339,7 +3370,8 @@ async def local_sits_generate_async(
     srs_docx_async = _res_async_sits(srs_path)
     sds_docx_async = _res_async_sits(sds_path)
     uds_file_async = _res_async_sits(uds_path)
-    hsis_async = _res_async_sits(hsis_path) or _discover_hsis_path()
+    hsis_async = _doc_or_discovered(_res_async_sits(hsis_path), hsis_path,
+                              _discover_hsis_path, label="HSIS")
     stp_async = _res_async_sits(stp_path)
 
     base_dir = _resolve_report_dir(report_dir)

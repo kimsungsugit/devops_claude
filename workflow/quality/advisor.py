@@ -52,9 +52,29 @@ _STS_ADVICE = {
         "threshold": 80.0,
     },
     "requirement_coverage_pct": {
-        "label": "요구사항 커버리지",
+        "label": "요구사항 커버리지(검증방법 무관)",
         "low_advice": "요구사항 ID와 연결되지 않은 TC가 많습니다. SRS 문서 경로(srs_docx_path)를 지정하고, 요구사항 매핑 규칙을 확인하세요.",
         "threshold": 70.0,
+    },
+    "executable_coverage_pct": {
+        "label": "실행 시험 기준 커버리지",
+        "low_advice": "요구사항이 실행 시험 없이 코드 리뷰(RVW)로만 덮여 있습니다. 소스 경로(source_root)와 SDS 경로를 지정해 요구-함수 매핑을 확보하면 실행 가능한 TC가 생성됩니다.",
+        "threshold": None,
+    },
+    "review_only_reqs_count": {
+        "label": "리뷰로만 덮인 요구 수",
+        "low_advice": "",
+        "threshold": None,
+    },
+    "function_tc_coverage_pct": {
+        "label": "함수 기준 TC 보유율",
+        "low_advice": "요구당 TC 상한(max_tc_per_req)에 걸려 매핑된 함수 대부분이 시험 없이 남습니다. 상한을 올리거나, 요구-함수 매핑을 좁혀(모듈 단위 → 함수 단위 SDS Related ID) 요구당 함수 수를 줄이세요.",
+        "threshold": None,
+    },
+    "functions_without_tc": {
+        "label": "시험 없는 매핑 함수 수",
+        "low_advice": "",
+        "threshold": None,
     },
     "method_diversity_pct": {
         "label": "테스트 방법 다양성",

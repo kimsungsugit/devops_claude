@@ -31,6 +31,12 @@ _REQ_ID_PAT = re.compile(
 _TEST_METHODS = {"FIT", "FNCT", "RBT", "RVW", "ELCT"}
 _GEN_METHODS = {"AOR", "AOI", "AEC", "ABV", "ERG", "AFD", "ADF", "AUC", "STA", "ASV"}
 
+# 실행 산출물이 없는 검증방법. RVW 는 "소스 코드에서 구현부 확인" 같은 **사람이 읽는**
+# 활동이라(`_generate_review_steps`) 실행 시험과 증거 성격이 다르다.
+# 커버리지를 방법 구분 없이 한 숫자로 내면 "100%"가 실행시험 100%인지 리뷰 포함인지
+# 구분되지 않는다 — 실측(HDPDM01 SRS 63건): 보고 100.0% vs 실행시험 87.3%.
+_REVIEW_ONLY_METHODS = {"RVW"}
+
 _DEFAULT_TEST_ENV = "SwTE_01"
 _MAX_TC_PER_REQ = 5
 _MAX_STEPS_PER_TC = 15
@@ -844,13 +850,23 @@ def _classify_req_type(req_id: str) -> str:
 def map_requirements_to_functions(
     requirements: List[Dict[str, Any]],
     function_details: Dict[str, Dict[str, Any]],
+    sds_map: Optional[Dict[str, Dict[str, str]]] = None,
 ) -> Dict[str, List[str]]:
     """Map requirement IDs to lists of function IDs (fid).
 
     Uses the `related` field in function_details to find reverse mapping.
+
+    Args:
+        sds_map: `related` 필드로 못 잇는 함수를 요구에 잇는 **폴백 매핑 출처**.
+            None이면 저장소 `docs/` 글롭(`_load_default_sds_map`)을 쓰는데 이는
+            **프로젝트 무관**이다 — 실측(HDPDM01): 요구-함수 링크 5,992건이 100%
+            이 폴백에서 나왔다(폴백을 끄면 0/63). 요구 ID(`SwTR_0101` 등)는
+            프로젝트 간 네임스페이스가 겹쳐 오매핑이 걸러지지도 않으므로,
+            호출자가 대상 프로젝트의 SDS를 알고 있으면 반드시 넘길 것.
     """
     req_to_fids: Dict[str, List[str]] = {r["id"]: [] for r in requirements}
-    sds_map = _load_default_sds_map()
+    if sds_map is None:
+        sds_map = _load_default_sds_map()
 
     for fid, info in function_details.items():
         if not isinstance(info, dict):
@@ -1455,11 +1471,26 @@ def generate_test_cases(
     req_to_fids: Dict[str, List[str]],
     project_config: Optional[Dict[str, Any]] = None,
     hsis_signals: Optional[Dict[str, Any]] = None,
+    stats_out: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
-    """Generate all test cases from requirements and function details."""
+    """Generate all test cases from requirements and function details.
+
+    Args:
+        stats_out: 주면 생성 통계를 채워 넣는다(절단 표면화용). 요구당 TC 상한
+            `max_tc_per_req`(기본 5)은 **함수 루프 자체를 끊으므로**, 요구에 매핑된
+            함수가 많으면 대부분이 시험 없이 남는다. 그 사실이 어디에도 안 남으면
+            요구 단위 커버리지 100%가 "다 시험됨"으로 읽힌다.
+            실측(HDPDM01): 매핑 함수 747개 중 TC 를 얻은 것 48개(93.6% 무시험),
+            요구 35/37 이 상한에 도달, 그런데 보고 커버리지는 100.0%였다.
+    """
     config = project_config or {}
     max_tc = config.get("max_tc_per_req", _MAX_TC_PER_REQ)
     test_env = config.get("default_test_env", _DEFAULT_TEST_ENV)
+
+    # 캡 **전** 총량을 먼저 센다 — 소비처에서 결과 길이로 되짚으면 절단을 못 본다.
+    mapped_fids: set = set()
+    used_fids: set = set()
+    truncated_reqs: List[str] = []
 
     project_asil = str(config.get("asil_level") or config.get("asil") or "").strip()
     _proj_is_safety = bool(
@@ -1491,9 +1522,12 @@ def generate_test_cases(
                 ))
             continue
 
+        mapped_fids.update(fids)
         tc_counter = 0
         for fid in fids:
             if tc_counter >= max_tc:
+                # 남은 함수는 시험 없이 버려진다 — 이 사실을 반드시 남긴다
+                truncated_reqs.append(rid)
                 break
             info = function_details.get(fid, {})
             if not isinstance(info, dict):
@@ -1506,6 +1540,7 @@ def generate_test_cases(
                 if tc_counter >= max_tc:
                     break
                 tc_counter += 1
+                used_fids.add(fid)
                 tc_id = _make_tc_id(rid, tc_counter)
                 all_tcs.append(_build_tc_dict(
                     tc_id=tc_id, req=req, steps=_ensure_min_steps(steps, info),
@@ -1513,6 +1548,18 @@ def generate_test_cases(
                     test_env=test_env, is_safety=is_safety,
                     func_name=info.get("name"),
                 ))
+
+    if stats_out is not None:
+        stats_out.update({
+            "max_tc_per_req": max_tc,
+            "mapped_functions": len(mapped_fids),
+            "functions_with_tc": len(used_fids),
+            "functions_without_tc": len(mapped_fids - used_fids),
+            "function_tc_coverage_pct": round(
+                len(used_fids) / max(len(mapped_fids), 1) * 100, 1),
+            "requirements_truncated": sorted(set(truncated_reqs)),
+            "requirements_truncated_count": len(set(truncated_reqs)),
+        })
 
     return all_tcs
 
@@ -1628,27 +1675,37 @@ def generate_traceability_matrix(
 
     Returns:
         {"req_ids": [...], "tc_ids": [...], "matrix": {tc_id: {req_id: 1/0}},
-         "coverage": {"total_reqs": N, "covered_reqs": N, "pct": float}}
+         "coverage": {"total_reqs": N, "covered_reqs": N, "pct": float,
+                      "executable_covered_reqs": N, "executable_pct": float,
+                      "review_only_reqs": [...], "review_only_count": N}}
+
+    `covered_reqs`/`pct`는 **검증방법을 가리지 않은** 값이다(기존 계약 유지).
+    거기에 검증방법 축을 더한다 — 아래 `_REVIEW_ONLY_METHODS` 주석 참조.
     """
     req_ids = sorted(set(r["id"] for r in requirements))
     tc_ids = [tc["id"] for tc in test_cases]
     matrix: Dict[str, Dict[str, int]] = {}
     covered_reqs: set = set()
+    exec_covered: set = set()
 
     for tc in test_cases:
         tid = tc["id"]
         srs = tc.get("srs_id", "")
+        is_executable = str(tc.get("test_method") or "").upper() not in _REVIEW_ONLY_METHODS
         row: Dict[str, int] = {}
         for rid in req_ids:
             if rid == srs:
                 row[rid] = 1
                 covered_reqs.add(rid)
+                if is_executable:
+                    exec_covered.add(rid)
             else:
                 row[rid] = 0
         matrix[tid] = row
 
     total = len(req_ids)
     covered = len(covered_reqs)
+    review_only = sorted(covered_reqs - exec_covered)
     return {
         "req_ids": req_ids,
         "tc_ids": tc_ids,
@@ -1657,6 +1714,11 @@ def generate_traceability_matrix(
             "total_reqs": total,
             "covered_reqs": covered,
             "pct": round(covered / max(total, 1) * 100, 1),
+            # ── 검증방법 축 (additive) ──
+            "executable_covered_reqs": len(exec_covered),
+            "executable_pct": round(len(exec_covered) / max(total, 1) * 100, 1),
+            "review_only_reqs": review_only,
+            "review_only_count": len(review_only),
         },
     }
 
@@ -1668,6 +1730,7 @@ def generate_traceability_matrix(
 def generate_quality_report(
     test_cases: List[Dict[str, Any]],
     trace: Dict[str, Any],
+    generation_stats: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     total_tc = len(test_cases)
     complete = sum(1 for tc in test_cases if tc.get("steps") and len(tc["steps"]) >= 2)
@@ -1681,6 +1744,37 @@ def generate_quality_report(
         gen_methods[g] = gen_methods.get(g, 0) + 1
 
     cov = trace.get("coverage", {})
+
+    # 리뷰로만 덮인 요구는 숫자 옆에 반드시 말로 남긴다 — `requirement_coverage.pct`만
+    # 읽는 소비자에게는 실행시험 100%와 구분되지 않기 때문이다.
+    coverage_warnings: List[str] = []
+    review_only = list(cov.get("review_only_reqs") or [])
+    if review_only:
+        shown = ", ".join(review_only[:10])
+        suffix = f" 외 {len(review_only) - 10}건" if len(review_only) > 10 else ""
+        coverage_warnings.append(
+            f"[coverage] 요구 {len(review_only)}건은 실행 시험 없이 코드 리뷰(RVW)로만 덮였다 — "
+            f"보고 커버리지 {cov.get('pct')}%는 리뷰를 포함한 값이고 "
+            f"실행 시험 기준은 {cov.get('executable_pct')}%다 ({shown}{suffix})"
+        )
+
+    # TC 상한에 걸려 시험 없이 남은 함수 — 요구 단위 커버리지는 이 절단을 반영하지 않는다.
+    gen_stats = generation_stats or {}
+    without_tc = int(gen_stats.get("functions_without_tc") or 0)
+    if without_tc:
+        trunc = list(gen_stats.get("requirements_truncated") or [])
+        shown = ", ".join(trunc[:8])
+        suffix = f" 외 {len(trunc) - 8}건" if len(trunc) > 8 else ""
+        coverage_warnings.append(
+            f"[coverage] 요구당 TC 상한(max_tc_per_req="
+            f"{gen_stats.get('max_tc_per_req')})에 걸려 매핑된 함수 "
+            f"{gen_stats.get('mapped_functions')}개 중 {gen_stats.get('functions_with_tc')}개만 "
+            f"TC 를 가진다(함수 기준 {gen_stats.get('function_tc_coverage_pct')}%, "
+            f"무시험 {without_tc}개). 요구 커버리지 {cov.get('pct')}%는 요구 단위 값이라 "
+            f"이 절단을 반영하지 않는다"
+            + (f" — 상한 도달 요구: {shown}{suffix}" if trunc else "")
+        )
+
     return {
         "total_test_cases": total_tc,
         "complete_test_cases": complete,
@@ -1689,6 +1783,8 @@ def generate_quality_report(
         "requirement_coverage": cov,
         "test_method_distribution": methods,
         "gen_method_distribution": gen_methods,
+        "coverage_warnings": coverage_warnings,
+        "generation_stats": gen_stats,
     }
 
 
@@ -2365,29 +2461,41 @@ def generate_sts(
     sds_summary = ""
     stp_ctx = ""
 
+    # 이 맵은 function_details 보강뿐 아니라 **요구-함수 매핑의 폴백 출처**로도 쓰인다
+    # (`map_requirements_to_functions`). None으로 두면 저장소 `docs/` 글롭(프로젝트 무관)이
+    # 대신하는데, 실측상 요구-함수 링크 전량이 그 폴백에서 나온다.
+    sds_partition_map: Optional[Dict[str, Dict[str, str]]] = None
+
     if sds_docx_path:
         _progress(7, "SDS 설계 컨텍스트 로드 중")
         sds_summary = _load_sds_summary(sds_docx_path)
         if sds_summary:
             _logger.info("SDS summary loaded (%d chars)", len(sds_summary))
-            # Also enrich function_details with SDS partition map
-            try:
-                from report_gen.requirements import _extract_sds_partition_map
-                sds_map = _extract_sds_partition_map(sds_docx_path)
-                if sds_map:
-                    for fid, info in function_details.items():
-                        if not isinstance(info, dict):
-                            continue
-                        for cand in _function_sds_candidates(info):
-                            entry = sds_map.get(cand.lower())
-                            if entry:
-                                if entry.get("asil") and not info.get("asil"):
-                                    info["asil"] = entry["asil"]
-                                if entry.get("description") and not info.get("sds_description"):
-                                    info["sds_description"] = entry["description"]
-                                break
-            except Exception as _e:
-                _logger.debug("SDS partition map enrichment skipped: %s", _e)
+        # ⚠ 파티션 맵 추출을 summary 유무에 종속시키지 않는다 — 과거엔 `if sds_summary:`
+        # 안에 있어서, 요약 절이 안 잡히는 SDS면 파티션 표가 멀쩡해도 맵을 아예 안 만들고
+        # 조용히 저장소 폴백으로 넘어갔다.
+        try:
+            from report_gen.requirements import _extract_sds_partition_map
+            sds_partition_map = _extract_sds_partition_map(sds_docx_path) or None
+        except Exception as _e:
+            _logger.warning("SDS 파티션 맵 추출 실패 — 요구-함수 매핑이 저장소 docs/ "
+                            "폴백(프로젝트 무관)으로 넘어간다: %s (%s)", sds_docx_path, _e)
+        if sds_partition_map:
+            _logger.info("SDS 파티션 %d건 로드 — 출처=%s", len(sds_partition_map), sds_docx_path)
+            for fid, info in function_details.items():
+                if not isinstance(info, dict):
+                    continue
+                for cand in _function_sds_candidates(info):
+                    entry = sds_partition_map.get(cand.lower())
+                    if entry:
+                        if entry.get("asil") and not info.get("asil"):
+                            info["asil"] = entry["asil"]
+                        if entry.get("description") and not info.get("sds_description"):
+                            info["sds_description"] = entry["description"]
+                        break
+        else:
+            _logger.warning("SDS를 지정했으나 파티션 0건 — 요구-함수 매핑이 저장소 docs/ "
+                            "폴백(프로젝트 무관)으로 넘어간다: %s", sds_docx_path)
 
     if uds_path:
         _progress(8, "UDS 함수 설명 로드 중")
@@ -2426,16 +2534,27 @@ def generate_sts(
     _progress(25, f"요구사항 {len(reqs)}개 파싱 완료")
 
     _progress(30, "요구사항-함수 매핑 중")
-    req_to_fids = map_requirements_to_functions(reqs, function_details)
+    req_to_fids = map_requirements_to_functions(reqs, function_details,
+                                                sds_map=sds_partition_map)
     mapped = sum(1 for v in req_to_fids.values() if v)
     _progress(40, f"{mapped}/{len(reqs)}개 요구사항 매핑 완료")
 
     _progress(45, "테스트 케이스 생성 중")
+    gen_stats: Dict[str, Any] = {}
     test_cases = generate_test_cases(
         reqs, function_details, req_to_fids, project_config,
         hsis_signals=hsis_signals or None,
+        stats_out=gen_stats,
     )
     _progress(60, f"테스트 케이스 {len(test_cases)}개 생성 완료")
+    if gen_stats.get("functions_without_tc"):
+        _logger.warning(
+            "STS: TC 상한(%s)에 걸려 매핑 함수 %s개 중 %s개만 시험한다 (무시험 %s개, "
+            "상한 도달 요구 %s건) — 요구 커버리지는 이 절단을 반영하지 않는다",
+            gen_stats.get("max_tc_per_req"), gen_stats.get("mapped_functions"),
+            gen_stats.get("functions_with_tc"), gen_stats.get("functions_without_tc"),
+            gen_stats.get("requirements_truncated_count"),
+        )
 
     if ai_config:
         _progress(65, "AI 향상 적용 중")
@@ -2451,7 +2570,7 @@ def generate_sts(
     trace = generate_traceability_matrix(test_cases, reqs)
 
     _progress(82, "품질 리포트 생성 중")
-    quality = generate_quality_report(test_cases, trace)
+    quality = generate_quality_report(test_cases, trace, generation_stats=gen_stats)
 
     _progress(85, "XLSM 파일 생성 중")
     out = generate_sts_xlsm(template_path, test_cases, trace, output_path, project_config)

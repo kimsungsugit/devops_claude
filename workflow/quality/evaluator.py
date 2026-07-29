@@ -119,10 +119,29 @@ def evaluate_sts(quality_report: Dict[str, Any]) -> MetricList:
     safety_pct = round(safety / max(total, 1) * 100, 2)
     metrics.append(_metric("safety_tc_pct", safety_pct))
 
-    # 요구사항 커버리지
+    # 요구사항 커버리지 — 검증방법을 가리지 않은 값(= ID 연결률). 게이트는 이 축을 유지한다
+    # (지표 라벨·조언이 "요구사항 ID와 연결되지 않은 TC" 를 말하므로 의미가 맞다).
     req_cov = quality_report.get("requirement_coverage") or {}
     cov_pct = _safe_float(req_cov, "covered_pct", default=_safe_float(req_cov, "pct"))
     metrics.append(_metric("requirement_coverage_pct", cov_pct, threshold=70.0))
+
+    # 실행 시험 기준 커버리지 — **비게이트**(현 pass/fail 을 바꾸지 않기 위해).
+    # 위 값은 코드 리뷰(RVW)로만 덮인 요구도 포함하므로 둘이 갈린다.
+    # 실측: 소스 함수를 하나도 못 잡은 경우 위 값은 100.0%, 이 값은 57.1%(27건이 리뷰만).
+    # 즉 게이트 통과 여부를 위 숫자만으로 읽으면 "시험됨"으로 오독한다.
+    if "executable_pct" in req_cov:
+        metrics.append(_metric("executable_coverage_pct", _safe_float(req_cov, "executable_pct")))
+        metrics.append(_metric("review_only_reqs_count", _safe_float(req_cov, "review_only_count")))
+
+    # 함수 기준 커버리지 — **비게이트**. 요구당 TC 상한(max_tc_per_req)이 함수 루프를 끊어
+    # 매핑된 함수 대부분이 시험 없이 남는데, 위 두 값은 전부 요구 단위라 그걸 못 본다.
+    # 실측(HDPDM01): 요구 커버리지 100.0% / 실행시험 87.3% 인데 함수 기준은 6.4%(747→48)였다.
+    gen_stats = quality_report.get("generation_stats") or {}
+    if "function_tc_coverage_pct" in gen_stats:
+        metrics.append(
+            _metric("function_tc_coverage_pct", _safe_float(gen_stats, "function_tc_coverage_pct")))
+        metrics.append(
+            _metric("functions_without_tc", _safe_float(gen_stats, "functions_without_tc")))
 
     # 테스트 방법 다양성 (종류 수 / 5, 상한 100%)
     methods = quality_report.get("test_method_distribution") or {}
