@@ -38,7 +38,10 @@ vi.mock('../components/StatusBadge.jsx', () => ({
   ),
 }));
 
-const { default: ImpactGuideSection, extractDiffElements, buildDocumentActions, matchFileDiff } = await import('../components/sections/ImpactGuideSection.jsx');
+const { default: ImpactGuideSection } = await import('../components/sections/ImpactGuideSection.jsx');
+// 순수 함수는 impactDiffElements.js 로 이관됐다(컴포넌트 파일의 비-컴포넌트 export 는
+// Fast Refresh 를 깨뜨린다 — react-refresh/only-export-components).
+const { extractDiffElements, buildDocumentActions, matchFileDiff } = await import('../impactDiffElements.js');
 
 describe('ImpactGuideSection', () => {
   const mockJob = { url: 'http://jenkins.example.com/job/test-job/' };
