@@ -35,6 +35,17 @@ _RELATED_COL = 145     # ER — Related ID (SwCom_xx, SwSTR_xx …)
 
 _MAX_INPUT_PARAMS = _INPUT_COL_END - _INPUT_COL_START + 1   # 67
 _MAX_EXP_PARAMS = _EXP_COL_END - _EXP_COL_START + 1        # 70
+
+# Row 6 상세 헤더(열 번호 → 라벨). `generate_sits_xlsm`이 시트에 쓰는 값이자, 영향도 탭의
+# 문서 초안이 Excel 붙여넣기 TSV 열 순서를 얻는 **단일 출처**다(복제 금지 — suts와 동일 원칙).
+_DETAIL_HEADERS = {
+    _TCID_COL: "TC ID",
+    _DESC_COL: "Description",
+    _CHAIN_COL: "Call Chain",
+    _GEN_COL: "Test Case Generation Method",
+    _PRECOND_COL: "Precondition",
+    _RELATED_COL: "SwDS",
+}
 _MAX_SUBCASES = 16
 _DEFAULT_SUBCASES = 14  # 7 BV + 4 COND_COMB + 2 ERR_PROP + 2 GLOBAL
 
@@ -1111,15 +1122,9 @@ def generate_sits_xlsm(
     _fill_and_merge(5, _RELATED_COL, _RELATED_COL, "Related ID")
     ws.row_dimensions[5].height = 18
 
-    # ── Row 6: detail headers ───────────────────────────────────────────────
-    detail_headers: Dict[int, str] = {
-        _TCID_COL: "TC ID",
-        _DESC_COL: "Description",
-        _CHAIN_COL: "Call Chain",
-        _GEN_COL: "Test Case Generation Method",
-        _PRECOND_COL: "Precondition",
-        _RELATED_COL: "SwDS",
-    }
+    # ── Row 6: detail headers ── 정의는 모듈 상수 `_DETAIL_HEADERS`(단일 출처) ──
+    # 별칭이 아니라 사본 — 이후 누가 여기서 헤더를 덧쓰더라도 모듈 상수가 오염되지 않게.
+    detail_headers: Dict[int, str] = dict(_DETAIL_HEADERS)
     for col_i in range(1, _RELATED_COL + 1):
         cell = ws.cell(row=6, column=col_i)
         cell.fill = hdr_fill

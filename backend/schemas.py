@@ -1,6 +1,7 @@
 """Pydantic request/response models for the backend API."""
 from __future__ import annotations
 
+import json
 from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -677,6 +678,45 @@ class ImpactExplainChangeRequest(BaseModel):
     # 비의미 변경(주석/포맷/이동 only) — True면 LLM에 '문서 수정 불필요'를 지시하고 신규 TC·문서 편집을
     # 제안하지 않게 한다(프론트 extractDiffElements.commentOnly/noSemanticChange 파생). 결정론 억제와 짝.
     no_semantic_change: bool = Field(default=False)
+
+
+class ImpactDocDraftRequest(BaseModel):
+    """POST /api/impact/doc-draft 입력 — 한 함수의 **전체** 문서 초안(온디맨드).
+
+    job JSON에는 요약(SUTS 10 시퀀스 / SITS 6 서브케이스)만 싣고, 사용자가 '전체 보기'를
+    누를 때만 생성기 기본값(24 / 14) 전량을 만든다 — 전부 job에 실으면 페이로드가 폭증한다.
+    소스가 미해결(cloudium)이면 문서 원문 기준으로 자동 폴백하고 `source`로 근거를 밝힌다.
+    """
+    job_id: str = Field(default="", max_length=200)
+    function: str = Field(default="", max_length=200)
+    doc: str = Field(default="suts", max_length=10)
+
+
+class ImpactDocProseRequest(BaseModel):
+    """POST /api/impact/doc-prose 입력 — 결정론 초안에 붙일 **서술문만** 생성(선택 기능).
+
+    값(경계값·Input/Expected·TC ID·판정)은 결정론이 소유하고 AI가 바꾸지 않는다. 여기 오는
+    `deterministic`은 프론트가 이미 화면에 그린 초안 데이터 그대로이며, 서버는 그 안에 등장한
+    숫자·식별자만 허용 집합으로 삼아 응답을 사후 검사한다(환각 필드 폐기).
+    """
+    function: str = Field(default="", max_length=200)
+    signature: str = Field(default="", max_length=4000)
+    function_diff: str = Field(default="", max_length=8000)
+    # 결정론 초안(문서별 노드 + 표 행). 프롬프트 주입 전 12000자로 자르지만, 그 절단은 **직렬화
+    # 이후**에 일어나므로 대용량 body가 그대로 파싱·직렬화된다 — 입구에서 크기를 막는다.
+    deterministic: Dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("deterministic")
+    @classmethod
+    def _cap_deterministic(cls, v: Dict[str, Any]) -> Dict[str, Any]:
+        """직렬화 크기 상한(256KB). 프론트가 보내는 실측은 수 KB 수준이라 정상 사용엔 무영향."""
+        try:
+            size = len(json.dumps(v, ensure_ascii=False))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("deterministic must be JSON-serializable") from exc
+        if size > 256_000:
+            raise ValueError(f"deterministic payload too large: {size} bytes (max 256000)")
+        return v
 
 
 class TestGenerateRequest(BaseModel):

@@ -2760,8 +2760,11 @@ describe('ImpactGuideSection — 빌드/리비전 소스 바 & 결과 영속', (
     const dialog = await screen.findByRole('dialog');
     // renderDocContent: 실 위치 라인(백엔드 loc.sheet 그대로 — 하드코딩 아님)
     await waitFor(() => expect(within(dialog).getByText('2.SW Unit Test Spec 시트 · 행 42')).toBeInTheDocument());
-    // renderAuthoringProposal: 그 TC(행 N) 기준 재계산 앵커
-    expect(within(dialog).getByText(/TC SwUTC_SwUFn_0001 · 2\.SW Unit Test Spec 시트 · 행 42 기준 재계산/)).toBeInTheDocument();
+    // renderAuthoringProposal: 대조 대상 원문 앵커.
+    // ⚠ 예전 문구는 "이 TC **기준 재계산**"이었는데 임의 첫 행(content[0])을 근거로 단정하는
+    //   표현이었다(deep-review W6). 표에선 행마다 자체 근거가 붙으므로 여기선 "무엇과 대조했는가"만
+    //   사실대로 말한다 — TC·행 정보 자체는 그대로 노출된다.
+    expect(within(dialog).getByText(/대조 원문: TC SwUTC_SwUFn_0001 · 2\.SW Unit Test Spec 시트 · 행 42/)).toBeInTheDocument();
     // 현재 기대값(Exp)도 통합 블록에 함께 표시
     expect(within(dialog).getByText(/ret=42/)).toBeInTheDocument();
   });
@@ -2873,10 +2876,22 @@ describe('ImpactGuideSection — 빌드/리비전 소스 바 & 결과 영속', (
     const dialog = await screen.findByRole('dialog');
     // 생성기 산출 헤더(폴백 '경계값 TC 골격'이 아니라 '생성기 경계값 TC')
     await waitFor(() => expect(within(dialog).getByText(/생성기 경계값 TC|경계값 케이스 재계산 \(생성기 산출\)/)).toBeInTheDocument());
-    expect(within(dialog).getByText(/rpm=0/)).toBeInTheDocument();       // 실 입력
-    expect(within(dialog).getByText(/speed=0/)).toBeInTheDocument();     // 실 기대출력
-    expect(within(dialog).getByText(/rpm=65535/)).toBeInTheDocument();
+    // 문서 작성급 표 — 실제 SUTS 시트처럼 Input 그룹과 Expected Result 그룹이 **별도 열**이다.
+    // (예전 'rpm=0' 인라인 표기에서 표 셀로 옮겼다. 같은 변수가 양쪽 열에 오므로 열 분리가 필수 —
+    //  합치면 입력값이 있을 때 기대값이 가려진다.)
+    const th = (re) => within(dialog).getByText(
+      (_t, el) => el?.tagName === 'TH' && re.test(el.textContent || ''),
+    );
+    expect(th(/^In\s*rpm$/)).toBeInTheDocument();
+    expect(th(/^Exp\s*speed$/)).toBeInTheDocument();
+    expect(within(dialog).getByText('BV_MIN')).toBeInTheDocument();
+    expect(within(dialog).getByText('BV_MAX')).toBeInTheDocument();
+    // 값 자체는 손실 없이 셀에 그대로(rpm 0/65535, speed 0)
+    expect(within(dialog).getAllByText('0').length).toBeGreaterThanOrEqual(2);
+    expect(within(dialog).getByText('65535')).toBeInTheDocument();
     expect(within(dialog).getByText(/\[검증 필요\] 3276/)).toBeInTheDocument();  // 생성기 마커 보존
+    // 원문이 없으므로 전부 '신규추가' — 없는 현재값을 지어내지 않는다
+    expect(within(dialog).getAllByText('신규추가').length).toBeGreaterThanOrEqual(2);
   });
 
   // STS-IMPACT-070: SITS 카드가 백엔드 생성기 초안(doc_proposal.sits)의 실 통합 콜체인(a → b → c)과
@@ -2907,6 +2922,542 @@ describe('ImpactGuideSection — 빌드/리비전 소스 바 & 결과 영속', (
     // 실 통합 콜체인('->' → '→' 변환) + 생성기 헤더
     await waitFor(() => expect(within(dialog).getByText(/생성기 통합 콜체인/)).toBeInTheDocument());
     expect(within(dialog).getByText(/s_entry → Hal_Read → g_State/)).toBeInTheDocument();
-    expect(within(dialog).getByText(/state=1/)).toBeInTheDocument();     // sub_case 기대값
+    // sub_case Input/Expected가 표 열로 분리 표시(값 손실 없음 — 예전 'state=1' 인라인 표기 대체)
+    const th = (re) => within(dialog).getByText(
+      (_t, el) => el?.tagName === 'TH' && re.test(el.textContent || ''),
+    );
+    expect(th(/^In\s*rpm$/)).toBeInTheDocument();
+    expect(th(/^Exp\s*state$/)).toBeInTheDocument();
+    expect(within(dialog).getByText('1')).toBeInTheDocument();           // sub_case 기대값
+    expect(within(dialog).getByText(/Pre: init/)).toBeInTheDocument();   // sub_case precondition
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 문서 작성급 초안 표 (STS-IMPACT-071~078)
+//
+// 사용자 지적: "수정안이 굉장히 짧다 — 본문은 길고 디테일한데". 근본 원인 두 가지였다:
+//  (A) 제안이 원문에 grounding되지 않음 — 원문은 g_sys_error_his[0..4]를 다루는데 제안은
+//      시그니처 파라미터(u16t_Data)의 경계값만 보여줬다(서로 다른 변수).
+//  (B) cloudium(소스 미해결)이면 doc_proposal이 통째로 비어 골격만 남았다.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('ImpactGuideSection — 문서 작성급 초안 표', () => {
+  const COLS = ['g_sys_error_his[0]', 'g_sys_error_his[1]'];
+  const sutsRows = (vals) => vals.map((v) => ({
+    tc_id: 'SwUTC_SwUFn_1219',
+    loc: { sheet: '2.SW Unit Test Spec', tc_row: 2103 },
+    inputs: Object.fromEntries(COLS.map((c) => [c, v])),
+    expected: Object.fromEntries(COLS.map((c) => [c, v])),
+  }));
+
+  const baseImpact = (over = {}) => ({
+    trigger: { changed_files: ['diag.c'] },
+    changed_function_types: { s_updateerrorcode: 'SIGNATURE' },
+    change_details: {
+      s_updateerrorcode: {
+        before: 'void s_updateerrorcode(void)',
+        after: 'void s_updateerrorcode(U16 u16t_Data)',
+      },
+    },
+    impact: { direct: ['s_updateerrorcode'] },
+    function_meta: { s_updateerrorcode: { asil: 'C', evidence: 'line' } },
+    _linked_docs: { suts: 'U:/suts.xlsm' },
+    doc_content: {
+      suts: { s_updateerrorcode: sutsRows(['0x0', '0x8000', '0x87E7']) },
+      suts_meta: {
+        s_updateerrorcode: {
+          columns: { inputs: COLS, expected: COLS, sheet: '2.SW Unit Test Spec' },
+          component: 'SwCom_07', test_method: 'FNCT', gen_method: 'AEC, ABV',
+          related_ids: ['SwRS_0101'], seq_total: 12, seq_shown: 3,
+        },
+      },
+    },
+    doc_proposal: {
+      suts: {}, sits: {}, sts: {}, uds: {}, sds: {}, suts_meta: {},
+      var_types: { s_updateerrorcode: { g_sys_error_his: { type: 'U16', source: 'doc_annotation' } } },
+      source: 'document',
+    },
+    ...over,
+  });
+
+  const openModal = async (impactData) => {
+    const { post } = await import('../api.js');
+    post.mockResolvedValue({ ok: false });
+    const user = userEvent.setup();
+    render(<ImpactGuideSection analysisResult={{ impactData }} />);
+    await user.click(screen.getByText(/상세 가이드 생성/));
+    await user.click(await screen.findByRole('button', { name: '상세' }));
+    return { user, dialog: await screen.findByRole('dialog') };
+  };
+
+  // STS-IMPACT-071: 제안 표의 대상 변수가 **원문 컬럼**에서 온다 — 시그니처 파라미터로 대체되지 않는다.
+  it('원문 grounding: 제안 변수가 원문 컬럼(g_sys_error_his[..])이고 시그니처 파라미터가 아니다', async () => {
+    const { dialog } = await openModal(baseImpact());
+    await waitFor(() => expect(within(dialog).getAllByText('g_sys_error_his[0]').length).toBeGreaterThanOrEqual(1));
+    // 문서에 없는 시그니처 파라미터는 원문 컬럼과 섞지 않고 '신규 컬럼 추가 검토'로 따로 표기
+    expect(within(dialog).getByText(/문서에 없는 파라미터 u16t_Data/)).toBeInTheDocument();
+  });
+
+  // STS-IMPACT-072: 원문에 있는 경계값은 '유지', 없는 경계값은 '신규추가'.
+  it('판정: 원문에 있는 MIN/MID는 유지, 없는 MAX는 신규추가', async () => {
+    const { dialog } = await openModal(baseImpact());
+    await waitFor(() => expect(within(dialog).getAllByText('유지').length).toBeGreaterThanOrEqual(1));
+    expect(within(dialog).getAllByText('신규추가').length).toBeGreaterThanOrEqual(1);
+    expect(within(dialog).getAllByText('0xFFFF').length).toBeGreaterThanOrEqual(1);   // 빠진 MAX 제안
+    // 유지 판정엔 실 TC·행 근거가 붙는다(행 번호 날조 금지 — 원문 loc 그대로)
+    expect(within(dialog).getAllByText(/TC SwUTC_SwUFn_1219 · 2\.SW Unit Test Spec 시트 · 행 2103/).length)
+      .toBeGreaterThanOrEqual(1);
+  });
+
+  // STS-IMPACT-073: 근거 없는 '값수정'을 발행하지 않는다(0x87E7은 U16 범위 안).
+  it('판정: 하드 근거 없이는 값수정을 요구하지 않는다', async () => {
+    const { dialog } = await openModal(baseImpact());
+    await waitFor(() => expect(within(dialog).getAllByText('유지').length).toBeGreaterThanOrEqual(1));
+    expect(within(dialog).queryByText('값수정')).toBeNull();
+  });
+
+  // STS-IMPACT-074: 타입 미상 컬럼엔 숫자를 만들지 않는다 — uint8_t 기본값 환각 회귀 가드.
+  it('환각 차단: 타입 미상 컬럼은 경계값 숫자 없이 검증필요로만 표시된다', async () => {
+    const impactData = baseImpact();
+    impactData.doc_proposal.var_types = {};   // 타입 해상 실패
+    const { dialog } = await openModal(impactData);
+    await waitFor(() => expect(within(dialog).getAllByText('검증필요').length).toBeGreaterThanOrEqual(1));
+    // 셀 안내 + 하단 요약 두 곳에 표기(둘 다 정직 표기라 중복이 정상)
+    expect(within(dialog).getAllByText(/타입 미상 .*경계값 자동 유도 불가/).length).toBeGreaterThanOrEqual(1);
+    // generators.suts.infer_variable_type의 uint8_t 기본값이 새면 0xFF가 나온다
+    expect(within(dialog).queryByText('0xFF')).toBeNull();
+    expect(within(dialog).queryByText('0xFFFF')).toBeNull();
+  });
+
+  // STS-IMPACT-075: 기본 3건 미리보기 + '전체 N건 보기' 확장.
+  it('확장: 기본 3건만 보이고 전체 보기로 펼친다', async () => {
+    const { user, dialog } = await openModal(baseImpact());
+    await waitFor(() => expect(within(dialog).getByText(/전체 \d+건 보기/)).toBeInTheDocument());
+    expect(within(dialog).getByText(/제안 \d+건 중 3건 표시/)).toBeInTheDocument();
+    const before = within(dialog).getAllByText(/유지|신규추가/).length;
+    await user.click(within(dialog).getByText(/전체 \d+건 보기/));
+    await waitFor(() => expect(within(dialog).getAllByText(/유지|신규추가/).length).toBeGreaterThan(before));
+    expect(within(dialog).getByText('접기')).toBeInTheDocument();
+  });
+
+  // STS-IMPACT-075b: 원문 절단(총 12건 중 3건만 대조)을 침묵시키지 않는다.
+  it('정직성: 원문 절단을 "N건 중 M건"으로 표면화한다', async () => {
+    const { dialog } = await openModal(baseImpact());
+    await waitFor(() => expect(within(dialog).getByText(/원문 12건 중 3건만 대조/)).toBeInTheDocument());
+  });
+
+  // STS-IMPACT-076: cloudium(소스 미해결) 폴백 — 생성기 없이도 표가 뜨고 근거 라벨이 '문서 원문 기준'.
+  it('cloudium 폴백: 생성기 초안이 없어도 문서 원문 기준 표가 뜬다', async () => {
+    const { dialog } = await openModal(baseImpact());
+    await waitFor(() => expect(within(dialog).getByText(/경계값 케이스 재계산\/추가 \(문서 원문 기준\)/)).toBeInTheDocument());
+    // 문서 메타(Component/Test Method/Gen.Method/Related ID)도 함께 — 예전엔 통째로 버려졌다
+    expect(within(dialog).getByText('SwCom_07')).toBeInTheDocument();
+    expect(within(dialog).getByText('FNCT')).toBeInTheDocument();
+    expect(within(dialog).getByText('AEC, ABV')).toBeInTheDocument();
+    expect(within(dialog).getByText('SwRS_0101')).toBeInTheDocument();
+  });
+
+  // STS-IMPACT-077: (067 확장) doc_proposal.uds/sds가 생겨도, 실 원문이 없으면 before→after 프레임 금지.
+  it('정직 프레임: uds/sds 초안 노드가 있어도 원문이 없으면 "현재 원문 → 수정안" 헤더가 없다', async () => {
+    const impactData = baseImpact({ doc_content: {} });   // 원문 없음
+    impactData.doc_proposal.uds = {
+      s_updateerrorcode: { prototype: 'void s_updateerrorcode(void)', description_source: 'ai_required' },
+    };
+    impactData.doc_proposal.sds = { s_updateerrorcode: { behavior_source: 'ai_required' } };
+    const { dialog } = await openModal(impactData);
+    await waitFor(() => expect(within(dialog).getByText(/UDS 작성 제안/)).toBeInTheDocument());
+    expect(within(dialog).queryByText('현재 원문 → 수정안')).toBeNull();
+  });
+
+  // STS-IMPACT-078: (064/068 확장) 간접·DELETE·주석-only에는 신규 표도 뜨지 않는다.
+  it('억제 유지: 간접(비변경) 함수엔 초안 표가 뜨지 않는다', async () => {
+    const impactData = baseImpact({
+      changed_function_types: { s_seed: 'BODY' },
+      change_details: { s_seed: { before: 'void s_seed(void)' } },
+      impact: { direct: ['s_seed'], indirect_1hop: ['s_updateerrorcode'] },
+      function_meta: { s_updateerrorcode: { asil: 'C', evidence: 'line' }, s_seed: { asil: 'C', evidence: 'line' } },
+    });
+    const { post } = await import('../api.js');
+    post.mockResolvedValue({ ok: false });
+    const user = userEvent.setup();
+    render(<ImpactGuideSection analysisResult={{ impactData }} />);
+    await user.click(screen.getByText(/상세 가이드 생성/));
+    // 간접 함수 행의 '상세' 버튼(두 번째)
+    const buttons = await screen.findAllByRole('button', { name: '상세' });
+    await user.click(buttons[buttons.length - 1]);
+    const dialog = await screen.findByRole('dialog');
+    await waitFor(() => expect(within(dialog).getAllByText(/간접/).length).toBeGreaterThanOrEqual(1));
+    expect(within(dialog).queryByText(/Excel용 TSV 복사/)).toBeNull();
+    expect(within(dialog).queryByText('신규추가')).toBeNull();
+  });
+
+  it('억제 유지: 주석-only 변경엔 초안 표가 뜨지 않는다', async () => {
+    const impactData = baseImpact({
+      changed_function_types: { s_updateerrorcode: 'BODY' },
+      change_details: { s_updateerrorcode: { before: '', after: '' } },
+      function_diffs: {
+        s_updateerrorcode: '@@ -1,1 +1,1 @@ void s_updateerrorcode( void )\n-    x = 1; /* Iintialization */\n+    x = 1; /* Initialization */',
+      },
+    });
+    const { dialog } = await openModal(impactData);
+    await waitFor(() => expect(within(dialog).getAllByText('주석만').length).toBeGreaterThanOrEqual(1));
+    expect(within(dialog).queryByText(/Excel용 TSV 복사/)).toBeNull();
+    expect(within(dialog).queryByText('신규추가')).toBeNull();
+  });
+
+  // TSV 복사 — 클립보드 성공 경로에서 실제 열 순서(문서 컬럼)를 담는다.
+  it('TSV: 클립보드에 문서 컬럼 순서 그대로 복사한다', async () => {
+    const { user, dialog } = await openModal(baseImpact());
+    // ⚠ userEvent.setup()이 navigator.clipboard를 자체 스텁으로 덮으므로 **setup 이후에** 주입한다.
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+    Object.defineProperty(window, 'isSecureContext', { value: true, configurable: true });
+    await user.click(within(dialog).getByText(/Excel용 TSV 복사/));
+    await waitFor(() => expect(writeText).toHaveBeenCalled());
+    const tsv = writeText.mock.calls[0][0];
+    expect(tsv.split('\n')[0]).toContain('변수');
+    expect(tsv).toContain('g_sys_error_his[0]');
+    expect(tsv).toContain('0xFFFF');
+    expect(within(dialog).getByText(/복사됨/)).toBeInTheDocument();
+  });
+
+  it('TSV: 클립보드 실패를 침묵시키지 않고 사유 + 수동 복사 폴백을 노출한다', async () => {
+    const { user, dialog } = await openModal(baseImpact());
+    Object.defineProperty(navigator, 'clipboard', { value: undefined, configurable: true });
+    Object.defineProperty(window, 'isSecureContext', { value: false, configurable: true });
+    document.execCommand = vi.fn(() => false);
+    await user.click(within(dialog).getByText(/Excel용 TSV 복사/));
+    await waitFor(() => expect(within(dialog).getByText(/자동 복사 실패/)).toBeInTheDocument());
+    expect(within(dialog).getByText(/Ctrl\+C/)).toBeInTheDocument();
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 온디맨드 전체 초안 — job에는 요약만, '전체 초안 불러오기'로 생성기 전량(24 시퀀스)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('ImpactGuideSection — 온디맨드 전체 초안', () => {
+  const COLS = ['g_a[0]'];
+  const impactWithJob = () => ({
+    _job_id: 'impact_test_1',
+    trigger: { changed_files: ['diag.c'] },
+    changed_function_types: { s_foo: 'BODY' },
+    change_details: { s_foo: { before: 'void s_foo(U16 x)' } },
+    impact: { direct: ['s_foo'] },
+    function_meta: { s_foo: { asil: 'C', evidence: 'line' } },
+    _linked_docs: { suts: 'U:/suts.xlsm' },
+    doc_content: {
+      suts: { s_foo: [{ tc_id: 'T1', loc: { sheet: 'S', tc_row: 10 }, inputs: { 'g_a[0]': '0x0' }, expected: { 'g_a[0]': '0x0' } }] },
+      suts_meta: { s_foo: { columns: { inputs: COLS, expected: COLS, sheet: 'S' }, seq_total: 24, seq_shown: 1 } },
+    },
+    doc_proposal: {
+      suts: {}, sits: {}, sts: {}, uds: {}, sds: {}, suts_meta: {},
+      var_types: { s_foo: { g_a: { type: 'U16', source: 'globals_map' } } },
+      source: 'document',
+    },
+  });
+
+  const openWith = async (postImpl) => {
+    const { post } = await import('../api.js');
+    post.mockImplementation(postImpl);
+    const user = userEvent.setup();
+    render(<ImpactGuideSection analysisResult={{ impactData: impactWithJob() }} />);
+    await user.click(screen.getByText(/상세 가이드 생성/));
+    await user.click(await screen.findByRole('button', { name: '상세' }));
+    return { user, post, dialog: await screen.findByRole('dialog') };
+  };
+
+  it('전체 초안 불러오기: 서버 전량 응답으로 표가 교체된다', async () => {
+    const seqs = Array.from({ length: 24 }, (_v, i) => ({
+      strategy: `S${i}`, description: `케이스 ${i}`,
+      inputs: { 'g_a[0]': `0x${i}` }, expected: { 'g_a[0]': `0x${i}` },
+    }));
+    const { user, post, dialog } = await openWith((url, body) => {
+      if (url === '/api/impact/doc-draft') {
+        expect(body).toMatchObject({ job_id: 'impact_test_1', function: 's_foo', doc: 'suts' });
+        return Promise.resolve({
+          ok: true, source: 'generator', proposal: seqs,
+          meta: { component: 'SwCom_09', total: 24 },
+          var_types: { g_a: { type: 'U16', source: 'globals_map' } },
+          columns: { inputs: COLS, expected: COLS },
+          doc_rows: [], warnings: [],
+        });
+      }
+      return Promise.resolve({ ok: false });
+    });
+    await user.click(within(dialog).getByText(/전체 초안 불러오기/));
+    // ⚠ '불러왔습니다'는 **새 시퀀스를 실제로 받았을 때만** — 문서 폴백은 meta만 주므로
+    //    건수를 함께 말해 거짓 완료를 막는다.
+    await waitFor(() => expect(within(dialog).getByText(/전체 초안 24건을 불러왔습니다/)).toBeInTheDocument());
+    expect(post).toHaveBeenCalledWith('/api/impact/doc-draft', expect.objectContaining({ doc: 'suts' }));
+    expect(within(dialog).getByText(/전체 24건 보기/)).toBeInTheDocument();
+    expect(within(dialog).getByText('SwCom_09')).toBeInTheDocument();
+    // 다 불러왔으면 버튼은 사라진다(중복 요청 방지)
+    expect(within(dialog).queryByText(/전체 초안 불러오기/)).toBeNull();
+  });
+
+  it('전체 초안 실패를 침묵시키지 않고 **한국어 사유**를 표시한다', async () => {
+    // 서버는 원시 enum(`reason`)과 한국어 사유(`warnings`)를 함께 준다. reason만 노출하면
+    // 사용자가 무엇을 해야 할지 알 수 없다 — warnings를 우선한다.
+    const { user, dialog } = await openWith((url) => (
+      url === '/api/impact/doc-draft'
+        ? Promise.resolve({
+          ok: false, reason: 'empty_proposal',
+          warnings: ["전체 초안: 's_foo' 에 대한 SUTS 초안을 만들지 못했습니다(소스·문서 모두 미해결)"],
+        })
+        : Promise.resolve({ ok: false })
+    ));
+    await user.click(within(dialog).getByText(/전체 초안 불러오기/));
+    await waitFor(() => expect(within(dialog).getByText(/소스·문서 모두 미해결/)).toBeInTheDocument());
+    expect(within(dialog).queryByText(/empty_proposal/)).toBeNull();
+    // 실패했으므로 버튼은 남아 재시도할 수 있어야 한다
+    expect(within(dialog).getByText(/전체 초안 불러오기/)).toBeInTheDocument();
+  });
+
+  it('ok=true여도 새 시퀀스가 없으면 "불러왔습니다"라고 하지 않는다(문서 폴백)', async () => {
+    const { user, dialog } = await openWith((url) => (
+      url === '/api/impact/doc-draft'
+        ? Promise.resolve({
+          ok: true, source: 'document', proposal: null,
+          meta: { component: 'SwCom_09' }, var_types: {}, columns: null, doc_rows: [], warnings: [],
+        })
+        : Promise.resolve({ ok: false })
+    ));
+    await user.click(within(dialog).getByText(/전체 초안 불러오기/));
+    await waitFor(() => expect(within(dialog).getByText(/새 시퀀스 없음/)).toBeInTheDocument());
+    expect(within(dialog).queryByText(/불러왔습니다\(생성기 전량\)/)).toBeNull();
+    // 재시도 여지를 남긴다
+    expect(within(dialog).getByText(/전체 초안 불러오기/)).toBeInTheDocument();
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// AI 서술문 보강 — **값은 결정론이 소유하고 AI는 문장만 쓴다**
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('ImpactGuideSection — AI 서술문 보강', () => {
+  const COLS = ['g_a[0]'];
+  const impactForProse = () => ({
+    _job_id: 'impact_test_2',
+    trigger: { changed_files: ['diag.c'] },
+    changed_function_types: { s_foo: 'BODY' },
+    change_details: { s_foo: { before: 'void s_foo(U16 x)' } },
+    impact: { direct: ['s_foo'] },
+    function_meta: { s_foo: { asil: 'C', evidence: 'line' } },
+    _linked_docs: { suts: 'U:/suts.xlsm' },
+    doc_content: {
+      suts: { s_foo: [{ tc_id: 'T1', loc: { sheet: 'S', tc_row: 10 }, inputs: { 'g_a[0]': '0x0' }, expected: { 'g_a[0]': '0x0' } }] },
+      suts_meta: { s_foo: { columns: { inputs: COLS, expected: COLS, sheet: 'S' }, seq_total: 1, seq_shown: 1 } },
+      uds: { s_foo: { prototype: 'void s_foo(U16 x)', globals: ['g_a'], calls: [] } },
+    },
+    doc_proposal: {
+      suts: {}, sits: {}, sts: {}, sds: {},
+      uds: { s_foo: { prototype: 'void s_foo(U16 x)', description_source: 'ai_required' } },
+      suts_meta: {}, var_types: { s_foo: { g_a: { type: 'U16', source: 'globals_map' } } },
+      source: 'document',
+    },
+  });
+
+  const openProse = async (postImpl) => {
+    const { post } = await import('../api.js');
+    post.mockImplementation(postImpl);
+    const user = userEvent.setup();
+    render(<ImpactGuideSection analysisResult={{ impactData: impactForProse() }} />);
+    await user.click(screen.getByText(/상세 가이드 생성/));
+    await user.click(await screen.findByRole('button', { name: '상세' }));
+    return { user, post, dialog: await screen.findByRole('dialog') };
+  };
+
+  it('서술문 보강: 통과한 문장만 AI 보강 배지와 함께 표시된다', async () => {
+    const { user, post, dialog } = await openProse((url) => (
+      url === '/api/impact/doc-prose'
+        ? Promise.resolve({
+          ok: true,
+          fields: { suts_description: '경계 입력에서 이력 갱신을 확인한다.', uds_description: 'g_a 를 갱신한다.' },
+          dropped_fields: [],
+        })
+        : Promise.resolve({ ok: false })
+    ));
+    await user.click(within(dialog).getByRole('button', { name: /서술문 보강/ }));
+    await waitFor(() => expect(within(dialog).getByText(/경계 입력에서 이력 갱신을 확인한다/)).toBeInTheDocument());
+    expect(within(dialog).getAllByText('AI 보강').length).toBeGreaterThanOrEqual(1);
+    // 결정론 페이로드를 근거로 넘긴다(서버가 이걸로 환각을 대조한다)
+    expect(post).toHaveBeenCalledWith('/api/impact/doc-prose', expect.objectContaining({
+      function: 's_foo', deterministic: expect.anything(),
+    }));
+  });
+
+  it('환각 폐기 사유를 침묵시키지 않는다 — 표의 값이 정본임을 밝힌다', async () => {
+    const { user, dialog } = await openProse((url) => (
+      url === '/api/impact/doc-prose'
+        ? Promise.resolve({
+          ok: false, fields: {},
+          dropped_fields: [{ field: 'suts_description', reason: 'unknown_number', token: '0xDEAD' }],
+          reason: 'all_fields_filtered',
+        })
+        : Promise.resolve({ ok: false })
+    ));
+    await user.click(within(dialog).getByRole('button', { name: /서술문 보강/ }));
+    await waitFor(() => expect(within(dialog).getByText(/결정론 값에 없는 수치\(0xDEAD\)가 포함돼 폐기/)).toBeInTheDocument());
+    // 폐기 사유는 **그 필드를 표시하는 카드마다** 나온다 — SUTS 표에만 있으면 UDS/SDS 카드는
+    // 요청 전과 똑같아 사용자가 이유를 알 수 없다(무한 재시도).
+    expect(within(dialog).getAllByText(/표의 값이 정본입니다/).length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('LLM 미설정이면 결정론 표는 그대로 남고 사유만 표시한다', async () => {
+    const { user, dialog } = await openProse((url) => (
+      url === '/api/impact/doc-prose'
+        ? Promise.resolve({ ok: false, fields: {}, dropped_fields: [], reason: 'llm_unavailable' })
+        : Promise.resolve({ ok: false })
+    ));
+    await user.click(within(dialog).getByRole('button', { name: /서술문 보강/ }));
+    // 원시 enum이 아니라 한국어 사유 — 카드마다 자기 필드 사유를 말한다
+    await waitFor(() => expect(within(dialog).getAllByText(/LLM 미설정 — 결정론 표만 표시합니다/).length).toBeGreaterThanOrEqual(1));
+    expect(within(dialog).queryByText(/llm_unavailable/)).toBeNull();
+    // 표(판정 마커)는 사라지지 않는다
+    expect(within(dialog).getAllByText(/유지|신규추가/).length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('보강 전 UDS Description은 동어반복 대신 "근거 없음"을 정직하게 밝힌다', async () => {
+    const { dialog } = await openProse(() => Promise.resolve({ ok: false }));
+    await waitFor(() => expect(
+      within(dialog).getByText(/Description 문장은 결정론 근거가 없음/),
+    ).toBeInTheDocument());
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// deep-review 2차 Critical 회귀 가드 (C1 죽은 회복 버튼 / C2 TSV 데이터 손실 / C3 대상 교차 stale)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('ImpactGuideSection — 2차 Critical 회귀', () => {
+  const mkImpact = (over = {}) => ({
+    _job_id: 'job_c',
+    trigger: { changed_files: ['a.c'] },
+    changed_function_types: { s_omit: 'BODY' },
+    change_details: { s_omit: { before: 'void s_omit(U16 x)' } },
+    impact: { direct: ['s_omit'] },
+    function_meta: { s_omit: { asil: 'B', evidence: 'line' } },
+    _linked_docs: { suts: 'U:/suts.xlsm' },
+    // 페이로드 상한으로 생략된 함수 — '문서에 없음'이 아니다
+    doc_content: { suts: {}, suts_meta: {}, suts_omitted: { reason: 'payload_budget', count: 1, functions: ['s_omit'] } },
+    doc_proposal: { suts: {}, sits: {}, sts: {}, uds: {}, sds: {}, suts_meta: {}, var_types: {}, source: 'document' },
+    ...over,
+  });
+
+  const open = async (postImpl, impactData) => {
+    const { post } = await import('../api.js');
+    post.mockImplementation(postImpl);
+    const user = userEvent.setup();
+    const view = render(<ImpactGuideSection analysisResult={{ impactData }} />);
+    await user.click(screen.getByText(/상세 가이드 생성/));
+    await user.click(await screen.findByRole('button', { name: '상세' }));
+    return { user, view, dialog: await screen.findByRole('dialog') };
+  };
+
+  // C1: 생략 회복 버튼이 성공 응답을 무시하고 같은 빈 표를 다시 그려 무한 재클릭이 되던 것.
+  it('C1: 생략 함수 회복 — 응답이 오면 화면이 실제로 바뀐다', async () => {
+    const seqs = [{ strategy: 'BV_MIN', inputs: { 'g_a[0]': '0x0' }, expected: { 'g_a[0]': '0x0' } }];
+    const { user, dialog } = await open((url) => (
+      url === '/api/impact/doc-draft'
+        ? Promise.resolve({
+          ok: true, source: 'generator', proposal: seqs,
+          meta: { component: 'SwCom_11' }, var_types: { g_a: { type: 'U16' } },
+          columns: { inputs: ['g_a[0]'], expected: ['g_a[0]'] }, doc_rows: [], warnings: [],
+        })
+        : Promise.resolve({ ok: false })
+    ), mkImpact());
+
+    await waitFor(() => expect(within(dialog).getByText(/분석 결과에서 생략됨/)).toBeInTheDocument());
+    await user.click(within(dialog).getByText(/전체 초안 불러오기/));
+    // 응답 후에는 생략 배너가 사라지고 실제 표가 그려져야 한다
+    await waitFor(() => expect(within(dialog).getByText('BV_MIN')).toBeInTheDocument());
+    expect(within(dialog).queryByText(/분석 결과에서 생략됨/)).toBeNull();
+    expect(within(dialog).getByText('SwCom_11')).toBeInTheDocument();
+  });
+
+  it('C1: 서버도 복구 못 하면 "다시 눌러라"로 방치하지 않는다', async () => {
+    const { user, dialog } = await open((url) => (
+      url === '/api/impact/doc-draft'
+        ? Promise.resolve({ ok: true, source: 'document', proposal: null, meta: null, var_types: {}, columns: null, doc_rows: [], warnings: [] })
+        : Promise.resolve({ ok: false })
+    ), mkImpact());
+    await user.click(within(dialog).getByText(/전체 초안 불러오기/));
+    await waitFor(() => expect(within(dialog).getByText(/서버도 이 함수의 원문을 복구하지 못했습니다/)).toBeInTheDocument());
+    expect(within(dialog).queryByText(/전체 초안 불러오기/)).toBeNull();   // 헛된 재클릭 유도 금지
+  });
+
+  // C3: 재분석해도 초안이 남아 구 리비전 시퀀스를 새 결과처럼 보여주던 것.
+  it('C3: 분석 대상이 바뀌면 이전 전체 초안이 남지 않는다', async () => {
+    const seqs = [{ strategy: 'OLD_BUILD_SEQ', inputs: { 'g_a[0]': '0x0' }, expected: {} }];
+    const first = mkImpact({
+      doc_content: {
+        suts: { s_omit: [{ tc_id: 'T1', inputs: { 'g_a[0]': '0x0' }, expected: {} }] },
+        suts_meta: { s_omit: { columns: { inputs: ['g_a[0]'], expected: [] }, seq_total: 1, seq_shown: 1 } },
+      },
+    });
+    const { user, view, dialog } = await open((url) => (
+      url === '/api/impact/doc-draft'
+        ? Promise.resolve({ ok: true, source: 'generator', proposal: seqs, meta: {}, var_types: {}, columns: null, doc_rows: [], warnings: [] })
+        : Promise.resolve({ ok: false })
+    ), first);
+    await user.click(within(dialog).getByText(/전체 초안 불러오기/));
+    await waitFor(() => expect(within(dialog).getByText('OLD_BUILD_SEQ')).toBeInTheDocument());
+
+    // 같은 탭에서 다른 빌드로 재분석(언마운트 없음) — impact 참조/키가 바뀐다
+    const second = mkImpact({
+      trigger: { changed_files: ['a.c', 'b.c'] },
+      doc_content: {
+        suts: { s_omit: [{ tc_id: 'T9', inputs: { 'g_a[0]': '0xFF' }, expected: {} }] },
+        suts_meta: { s_omit: { columns: { inputs: ['g_a[0]'], expected: [] }, seq_total: 1, seq_shown: 1 } },
+      },
+    });
+    view.rerender(<ImpactGuideSection analysisResult={{ impactData: second }} />);
+    await waitFor(() => expect(screen.queryByText('OLD_BUILD_SEQ')).toBeNull());
+  });
+});
+
+describe('DocProposalTable TSV — 화면과 같은 값을 내보낸다', () => {
+  // C2: TSV가 `proposed || ''`라 생성기가 안 채운(또는 절단된) 컬럼이 공란으로 나가,
+  // Excel에 붙여넣는 순간 그 열의 실제 값이 지워졌다(ISO 문서 데이터 손실).
+  it('C2: 제안이 없는 컬럼은 원문값을 그대로 내보낸다(공란으로 덮지 않음)', async () => {
+    const impactData = {
+      _job_id: 'job_t',
+      trigger: { changed_files: ['a.c'] },
+      changed_function_types: { s_t: 'BODY' },
+      change_details: { s_t: { before: 'void s_t(U16 x)' } },
+      impact: { direct: ['s_t'] },
+      function_meta: { s_t: { asil: 'B', evidence: 'line' } },
+      _linked_docs: { suts: 'U:/s.xlsm' },
+      doc_content: {
+        suts: { s_t: [{ tc_id: 'T1', inputs: { keep_me: '0xABCD', touched: '0x0' }, expected: {} }] },
+        suts_meta: { s_t: { columns: { inputs: ['keep_me', 'touched'], expected: [] }, seq_total: 1, seq_shown: 1 } },
+      },
+      // 생성기는 touched 만 제안 — keep_me 는 건드리지 않는다
+      doc_proposal: {
+        suts: { s_t: [{ strategy: 'BV_MIN', inputs: { touched: '0x0' }, expected: {} }] },
+        sits: {}, sts: {}, uds: {}, sds: {}, suts_meta: {},
+        var_types: { s_t: { keep_me: { type: 'U16' }, touched: { type: 'U16' } } }, source: 'generator',
+      },
+    };
+    const { post } = await import('../api.js');
+    post.mockResolvedValue({ ok: false });
+    const user = userEvent.setup();
+    render(<ImpactGuideSection analysisResult={{ impactData }} />);
+    await user.click(screen.getByText(/상세 가이드 생성/));
+    await user.click(await screen.findByRole('button', { name: '상세' }));
+    const dialog = await screen.findByRole('dialog');
+
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+    Object.defineProperty(window, 'isSecureContext', { value: true, configurable: true });
+    await user.click(within(dialog).getByText(/Excel용 TSV 복사/));
+    await waitFor(() => expect(writeText).toHaveBeenCalled());
+
+    const tsv = writeText.mock.calls[0][0];
+    // 화면엔 0xABCD가 보이는데 TSV가 공란이면 붙여넣기 시 원문이 지워진다
+    expect(tsv).toContain('0xABCD');
+    expect(tsv).toContain('0x0');
   });
 });

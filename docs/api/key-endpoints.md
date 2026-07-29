@@ -7,6 +7,13 @@
 - `POST /api/jenkins/suts/generate-async` — SUTS 생성
 - `POST /api/local/sits/generate-async` — SITS 생성
 - `POST /api/jenkins/impact/trigger-async` — Impact 분석
+- **`POST /api/impact/doc-draft`** — 한 함수의 **전체** 문서 초안(온디맨드). body `{job_id, function, doc:'uds'|'sds'|'sts'|'suts'|'sits'}`, 응답 `{ok, proposal, meta, var_types, columns, doc_rows, source:'generator'|'document', source_root, warnings[]}`. job JSON엔 요약(SUTS 10 시퀀스 / SITS 6 서브케이스)만 실리고 여기서만 생성기 기본값(24/14) 전량을 만든다 — 전부 job에 실으면 페이로드가 폭증한다(실측: `doc_content.suts`의 함수 수는 변경 함수 집합 크기로 **상한 없음**, p50 242 / max 724). 소스 미해결(cloudium)이면 문서 원문 기준으로 자동 폴백하고 `source`로 근거를 밝힌다.
+  - `meta`/`columns`/`doc_rows`는 **SUTS 축 전용** — `doc≠'suts'`면 `null`(다른 문서의 열 순서로 TSV를 만들지 않게)
+  - `proposal`이 비어도 `meta`/`columns`/`var_types` 중 하나라도 있으면 `ok:true`(문서 폴백은 시퀀스를 만들지 않는 게 정상). **전부** 비면 `ok:false, reason:'empty_proposal'` — `ok:true`로 빈 결과를 주면 프론트가 "불러왔습니다"를 표시하고 버튼까지 없애 재시도가 막힌다
+  - `source_root`: 실제로 합성에 쓴 소스 경로. job 실행 이후 SCM registry가 바뀌었으면 `warnings`에 불일치를 남긴다
+  - 404=job 없음 / 409=running
+  - ⚠ 관련: `doc_content.suts_omitted = {reason:'payload_budget', count, functions[]}` — 예산 초과 시 `_shrink_doc_content`가 **함수 축**까지 줄이고 생략된 함수를 기록한다. 프론트는 이걸 '문서에 TC 없음(미파싱)'과 구분해 이 엔드포인트로 회복하도록 안내해야 한다
+- **`POST /api/impact/doc-prose`** — 결정론 초안에 붙일 **서술문만** 생성(선택, Gemini). body `{function, signature, function_diff, deterministic}`, 응답 `{ok, fields{uds_description,sds_behavior,suts_description,sts_purpose,sits_description}, dropped_fields[], note, reason}`. **값(경계값·Input/Expected·TC ID·판정)은 결정론이 소유하고 AI가 바꾸지 않는다** — 응답의 숫자·식별자를 요청 `deterministic`과 대조해 환각 필드만 폐기(`dropped_fields`에 사유). LLM 미설정/실패는 `ok:false`(예외 없음) — 프론트는 표를 그대로 유지
 - `GET /api/jenkins/progress` — 진행률 조회
 - **`POST /api/jenkins/uds/traceability-matrix`** — 추적성 매트릭스(V-model 6단계: SRS→SDS→UDS→STS→SUTS→SITS/VectorCAST) 생성. 프론트가 5개 추출 엔드포인트로 모은 7배열을 echo back → P&F 함수명 bridge. '추적성 분석' 섹션(구 'SRS/SDS 매핑', 2026-06 rename)
 - **`POST /api/jenkins/call-tree`** — 함수 호출 트리. body `{job_url, cache_root, build_selector, source_root?, entry(콤마 구분), max_depth, include_external, engine}`. `engine='precise'`(tree-sitter `parse_c_project`, 기본)는 호출엣지+콜백+ASIL 메타 추출, 미가용 시 `regex` 자동 폴백. 응답 `{trees[], missing[], stats{engine,functions,edges,files_scanned}}`. cached build root 필수

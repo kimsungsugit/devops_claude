@@ -1,4 +1,7 @@
 import { describe, it, expect } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { dirname, resolve } from 'node:path';
 import { cTypeBoundaries, proposeBoundaryTCs, formatSutsLoc } from '../impactBoundary.js';
 
 // 경계값 유도(결정론) — 영향분석 '작성 제안' 골격의 수치 출처. 백엔드 _c_type_boundaries와 미러.
@@ -50,6 +53,38 @@ describe('cTypeBoundaries — C 타입 경계값(결정론)', () => {
     expect(cTypeBoundaries('struct Foo')).toEqual([]);
     expect(cTypeBoundaries('')).toEqual([]);
     expect(cTypeBoundaries(null)).toEqual([]);
+  });
+});
+
+// 백엔드 workflow/c_type_bounds.py 와의 드리프트 방지. 예전엔 양쪽이 서로를 "미러"라고
+// 주석으로만 선언한 복제본이라 한쪽만 고치면 조용히 갈라졌다(경고 없음). 이제 공유 픽스처
+// tests/fixtures/c_type_bounds.json 을 Python(test_c_type_bounds_mirror.py)과 여기가 함께
+// assert 하므로, 어느 쪽을 고쳐도 픽스처를 재생성하지 않으면 양쪽 테스트가 동시에 깨진다.
+describe('cTypeBoundaries ↔ 백엔드 공유 픽스처 정합', () => {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const fixture = JSON.parse(
+    readFileSync(resolve(here, '../../../tests/fixtures/c_type_bounds.json'), 'utf-8'),
+  );
+  const pairs = (rows) => rows.map(([label, value]) => ({ label, value }));
+
+  it('모든 타입 별칭이 픽스처와 동일한 [{label,value}] 을 낸다', () => {
+    const aliasEntries = Object.entries(fixture.alias);
+    expect(aliasEntries.length).toBeGreaterThan(0);
+    for (const [alias, key] of aliasEntries) {
+      expect(cTypeBoundaries(alias), `별칭 '${alias}' 드리프트`).toEqual(pairs(fixture.bounds[key]));
+    }
+  });
+
+  it('float 계열 전체가 픽스처의 float 케이스와 동일', () => {
+    expect(fixture.float_types.length).toBeGreaterThan(0);
+    for (const t of fixture.float_types) {
+      expect(cTypeBoundaries(t), `float 별칭 '${t}' 드리프트`).toEqual(pairs(fixture.float_cases));
+    }
+  });
+
+  it('포인터/배열이 픽스처의 포인터 케이스와 동일', () => {
+    expect(cTypeBoundaries('U8*')).toEqual(pairs(fixture.pointer));
+    expect(cTypeBoundaries('U8[8]')).toEqual(pairs(fixture.pointer));
   });
 });
 

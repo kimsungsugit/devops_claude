@@ -13,6 +13,10 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
+# 경계값 표시 테이블의 단일 출처. 별칭(`_c_type_boundaries`)은 기존 임포트 계약
+# (tests/unit/test_impact_ai_guide.py:445) 보존용 재-export — 상세는 아래 §경계값 유도 주석.
+from workflow.c_type_bounds import c_type_boundaries as _c_type_boundaries
+
 logger = logging.getLogger(__name__)
 
 
@@ -426,44 +430,15 @@ def _format_doc_content_for_prompt(doc_content: Optional[Dict]) -> str:
     return "\n".join(lines)[:2000]
 
 
-# ── 경계값 유도(결정론) — C 타입 → 경계값. 프론트 src/impactBoundary.js `cTypeBoundaries`의 미러. ──
+# ── 경계값 유도(결정론) — C 타입 → 경계값 ────────────────────────────────────────
 # LLM '경계값' 제안이 일반 문구(MIN/MID/MAX)가 아니라 실제 값(unsigned=0x hex, signed=10진)을 쓰게
-# grounding한다(결정론 골격 카드·실제 시험 내용과 일관). 매핑 변경 시 프론트 impactBoundary.js도 함께 갱신.
-_C_TYPE_ALIAS = {
-    "u8": "u8", "uint8": "u8", "uint8_t": "u8", "unsigned char": "u8", "uchar": "u8", "byte": "u8",
-    "u16": "u16", "uint16": "u16", "uint16_t": "u16", "unsigned short": "u16", "unsigned short int": "u16", "ushort": "u16", "word": "u16",
-    "u32": "u32", "uint32": "u32", "uint32_t": "u32", "unsigned int": "u32", "unsigned": "u32", "unsigned long": "u32", "uint": "u32", "ulong": "u32", "dword": "u32",
-    "s8": "s8", "int8": "s8", "int8_t": "s8", "sint8": "s8", "signed char": "s8", "char": "s8",
-    "s16": "s16", "int16": "s16", "int16_t": "s16", "sint16": "s16", "short": "s16", "signed short": "s16", "short int": "s16",
-    "s32": "s32", "int32": "s32", "int32_t": "s32", "sint32": "s32", "int": "s32", "signed int": "s32", "long": "s32", "signed long": "s32", "signed": "s32",
-    "boolean": "bool", "bool": "bool", "_bool": "bool", "bool_t": "bool",
-}
-_C_TYPE_BOUNDS = {
-    # unsigned은 0x hex(주소/데이터/레지스터 관례, 실제 시험 내용과 대조 일관) / signed는 음수경계라 10진 유지
-    "u8": [("MIN", "0x0"), ("MID", "0x80"), ("MAX", "0xFF"), ("INV", "0x100(범위초과)")],
-    "u16": [("MIN", "0x0"), ("MID", "0x8000"), ("MAX", "0xFFFF")],
-    "u32": [("MIN", "0x0"), ("MID", "0x80000000"), ("MAX", "0xFFFFFFFF")],
-    "s8": [("MIN", "-128"), ("MID", "0"), ("MAX", "127")],
-    "s16": [("MIN", "-32768"), ("MID", "0"), ("MAX", "32767")],
-    "s32": [("MIN", "-2147483648"), ("MID", "0"), ("MAX", "2147483647")],
-    "bool": [("FALSE", "0"), ("TRUE", "1")],
-}
-_FLOAT_TYPES = {"float", "f32", "float32", "single", "double", "f64", "float64", "real", "real32", "real64", "float32_t", "float64_t"}
-
-
-def _c_type_boundaries(type_str: str) -> List[tuple]:
-    """C 타입 문자열 → [(label, value)]. 미상 타입(enum/struct/typedef)은 [](환각 금지)."""
-    if not type_str:
-        return []
-    raw = str(type_str)
-    if "*" in raw or "[" in raw:
-        return [("NULL", "NULL"), ("유효", "유효 포인터/버퍼")]
-    t = re.sub(r"\b(?:const|volatile|register)\b", " ", raw)
-    t = re.sub(r"\s+", " ", t).strip().lower()
-    if t in _FLOAT_TYPES:
-        return [("0", "0.0"), ("음수", "음의 경계값"), ("양수", "양의 경계값"), ("특수", "NaN/±Inf(해당 시)")]
-    key = _C_TYPE_ALIAS.get(t)
-    return list(_C_TYPE_BOUNDS[key]) if key else []
+# grounding한다(결정론 골격 카드·실제 시험 내용과 일관).
+#
+# 테이블 본체는 `workflow/c_type_bounds.py`가 단일 출처다(임포트는 파일 상단) — 예전엔 이 파일과
+# 프론트 `impactBoundary.js`가 서로를 "미러"라 주석만 달아둔 복제본이라 한쪽만 고치면 조용히 갈라졌다.
+# 이제 `tests/fixtures/c_type_bounds.json`을 Python·vitest가 함께 assert하고,
+# `tests/unit/test_c_type_bounds_mirror.py`가 실 문서 산출 테이블(generators/*.py)과의 수치
+# 정합까지 검사한다.
 
 
 def _split_top_level_commas(s: str) -> List[str]:

@@ -4,6 +4,8 @@ import { useToast, useJob, useJenkinsCfg } from '../../App.jsx';
 import StatusBadge from '../StatusBadge.jsx';
 import { pollImpactJob, isAbortError } from '../../impactPoll.js';
 import { proposeBoundaryTCs, formatSutsLoc } from '../../impactBoundary.js';
+import { reconcileSuts, reconcileSits } from '../../impactDocDraft.js';
+import DocProposalTable from './impact/DocProposalTable.jsx';
 import {
   impactIdentity, impactKeyOf, sameImpactTarget, sameJobUrl,
   saveImpactCurrent, loadImpactCurrent,
@@ -12,6 +14,17 @@ import { targetConsistent } from '../../impactGuard.js';
 
 // 아직 어떤 대상에도 속하지 않은 가이드 슬롯(초기값).
 const UNOWNED = { value: null, owner: { key: '', ref: undefined } };
+
+// AI 서술문 실패 사유(백엔드 `workflow/impact_doc_prose.py`의 reason) → 사용자 문구.
+// 원시 enum을 그대로 노출하면 사용자가 다음에 무엇을 해야 할지 알 수 없다.
+const PROSE_REASON_KO = {
+  llm_unavailable: 'LLM 미설정 — 결정론 표만 표시합니다',
+  no_deterministic_payload: '결정론 초안이 없어 서술문을 요청하지 않았습니다',
+  llm_empty_or_invalid: 'AI 응답이 비었거나 형식이 올바르지 않습니다 — 다시 시도해 보세요',
+  all_fields_filtered: 'AI 초안이 전부 환각 검사에 걸려 폐기됐습니다 — 표의 값이 정본입니다',
+  llm_error: 'AI 호출이 실패했습니다 — 잠시 후 다시 시도해 보세요',
+  'doc-prose failed': '서술문 생성 중 서버 오류가 발생했습니다',
+};
 
 // 변경 파일 집합의 출처 — '0 영향'이나 과소보고를 해석하려면 무엇으로 뽑았는지가 필요하다.
 const CHANGED_SOURCE_KO = {
@@ -1199,6 +1212,50 @@ export default function ImpactGuideSection({ analysisResult, job }) {
   // 구 job/미재기동이면 {}·미매칭이면 undefined → 각 분기가 기존 골격으로 graceful 폴백.
   const docProposal = impact?.doc_proposal ?? {};
   const docProposalFor = (fn, key) => (docProposal?.[key] ?? {})[String(fn || '').toLowerCase()];
+  // 문서 작성급 초안의 부가 노드(신규):
+  //   var_types  = {fn: {base_var: {type, source}}}  — 경계값 산출의 타입 근거. **키 부재 = 미상**이라
+  //                프론트는 숫자를 만들지 않는다(uint8_t 기본값 환각 차단 — workflow/impact_doc_draft.py).
+  //   suts_meta  = {fn: {component, test_method, gen_method, asil, srs_req_ids, precondition, total}}
+  //                생성기 산출(doc_proposal) 우선, 없으면 문서 원문(doc_content.suts_meta) 폴백.
+  //   doc_content.suts_meta[fn].columns = 시트 헤더 원문(열 순서 보존) — 재계산 대상 변수집합이자
+  //                Excel 붙여넣기 열 순서의 권위 소스. 시그니처로 유추하면 원문과 다른 변수를 가리킨다.
+  const varTypesFor = (fn) => (docProposal?.var_types ?? {})[String(fn || '').toLowerCase()] ?? {};
+  const docSutsMeta = docContent?.suts_meta ?? {};
+  // 생성기 산출과 문서 원문을 **필드 단위로** 합친다. 노드 통째로 고르면(all-or-nothing) 한쪽의
+  // Component/Test Method/Gen.Method/Related ID가 통째로 가려진다.
+  // ⚠ 각 값의 출처(`_src`)는 **백엔드가 필드별로 명시한 것**을 쓴다. "어느 노드에 있었나"로
+  //   추측하면 문서 폴백(같은 노드에 문서 원문을 싣는다)에서 판정이 역전돼, 문서에 실제로 적힌
+  //   값에 "(추론)" 배지가 붙어 사용자가 멀쩡한 원문을 의심하게 된다.
+  const _META_FIELDS = ['component', 'test_method', 'gen_method', 'asil', 'precondition', 'prototype'];
+  const _mergeSutsMeta = (gen, doc) => {
+    if (!gen && !doc) return null;
+    const out = { _src: {} };
+    for (const f of _META_FIELDS) {
+      const gv = gen && gen[f];
+      const dv = doc && doc[f];
+      if (gv) { out[f] = gv; out._src[f] = gen?._src?.[f] || 'generator'; } else if (dv) { out[f] = dv; out._src[f] = 'document'; }
+    }
+    // 요구 ID 필드명은 출처마다 다르다 — 생성기는 srs_req_ids(UDS/SDS 매핑), 문서는 related_ids
+    // (시트 Related ID 컬럼). ⚠ `[] || x`는 JS에서 `[]`(truthy)이라 length로 판정해야 폴백이 는다.
+    const genReq = (gen && (gen.srs_req_ids || gen.related_ids)) || [];
+    const docReq = (doc && (doc.related_ids || doc.srs_req_ids)) || [];
+    out.related_ids = genReq.length ? genReq : docReq;
+    out._src.related_ids = genReq.length ? (gen?._src?.srs_req_ids || 'generator') : 'document';
+    // 총량은 **두 축을 절대 섞지 않는다**(C1): 문서 TC 수 vs 생성기 시퀀스 수는 서로 다른 양이다.
+    out.doc_total = (gen && gen.doc_total) ?? (doc ? (doc.seq_total ?? null) : null);
+    out.doc_shown = (gen && gen.doc_shown) ?? (doc ? (doc.seq_shown ?? null) : null);
+    out.gen_total = gen ? (gen.gen_total ?? null) : null;
+    out.gen_truncated = !!(gen && gen.gen_truncated);
+    return out;
+  };
+  const sutsColumnsFor = (fn) => (docSutsMeta[String(fn || '').toLowerCase()] ?? {}).columns ?? null;
+  // 페이로드 상한으로 job에서 **생략된** 함수인지. '문서에 TC 없음(미파싱)'과 반드시 구분해야
+  // 한다 — 구분하지 않으면 실제로는 문서에 있는 TC를 "없다"고 표시하게 된다.
+  const _sutsOmitted = docContent?.suts_omitted ?? null;
+  const sutsIsOmitted = (fn) => !!(_sutsOmitted
+    && (_sutsOmitted.functions || []).includes(String(fn || '').toLowerCase()));
+  // 초안 근거 라벨 — 'generator'(소스 파싱 후 생성기 재사용) vs 'document'(소스 미해결, 문서 원문 기준).
+  const proposalSource = String(docProposal?.source || '');
   // STS/SITS 실 내용은 TC-ID 키(함수 키 아님) — 프론트가 함수별 stsTestCases/sitsTestCases(ID)로 조인한다.
   // 백엔드 sts_by_tc/sits_by_tc는 _normalize_req_id(공백제거+대문자)로 키를 정규화하므로 조회 전 동일 정규화.
   const stsByTc = docContent?.sts_by_tc ?? {};
@@ -1313,7 +1370,21 @@ export default function ImpactGuideSection({ analysisResult, job }) {
     const byTc = key === 'sts' ? stsByTc : sitsByTc;
     return tcIds.some((t) => byTc[_normTcId(t)]);
   };
-  const renderAuthoringProposal = (d, key, cd, diffElems, ct) => {
+  // 함수에 조인된 STS/SITS TC들의 **실 원문 행**(초안 대조용). 조인 규약은 _testSpecHasContent와 동일:
+  // 함수→TC-ID 브리지는 프론트에만 있고(요구 ∪ SwUFn 경로), 백엔드 doc_content는 TC-ID 키다.
+  const _testSpecRows = (fn, key) => {
+    const dd = guideDetailByLc.get(String(fn || '').toLowerCase());
+    const tcIds = ((key === 'sts' ? dd?.stsTestCases : dd?.sitsTestCases) || []);
+    const byTc = key === 'sts' ? stsByTc : sitsByTc;
+    return tcIds
+      .map((t) => { const v = byTc[_normTcId(t)]; return v ? { ...v, tc_id: v.tc_id || t } : null; })
+      .filter(Boolean);
+  };
+  // `meta`(선택 out-param): 반환값이 **제안이 아니라 진단 노트**면 `meta.isNote = true`.
+  // 프레임("현재 원문 → 수정안")은 진짜 제안일 때만 걸어야 한다 — 노트에 걸면 "요구 매핑 없음"이나
+  // "변경안 없음" 같은 진단이 "원문을 이렇게 고쳐라"로 읽힌다.
+  const renderAuthoringProposal = (d, key, cd, diffElems, ct, meta) => {
+    const _note = (node) => { if (meta) meta.isNote = true; return node; };
     // 간접 영향(직접 변경 아님)·삭제 함수는 '작성' 대상이 아니다 — 계약 유지 확인/항목 제거 안내는
     // 편집 액션 패널(buildDocumentActions)이 담당한다. 경계값·신규 골격을 비변경/삭제 함수에 제안하면
     // '직접 변경 아님·문서 수정 없음'·'항목 제거'와 모순된다(같은 카드에 상반된 지시).
@@ -1322,6 +1393,23 @@ export default function ImpactGuideSection({ analysisResult, job }) {
     // 맹점이 있어(-U3 context 라인이 -/+ 사이에 끼면 발동), 확정 억제 시 실 동작변경을 '수정 불필요'로 오판(under-report).
     if (!d.changed || ct === 'DELETE' || diffElems?.commentOnly) return null;
     const fn = d.function;
+    // AI 서술문(선택 보강) — 값이 아니라 문장만. 없으면 각 분기가 그대로 결정론만 표시한다.
+    const _prose = docProse[String(fn).toLowerCase()] || null;
+    const _proseText = (f) => (_prose && _prose.ok && (_prose.fields || {})[f]) || '';
+    // 폐기 사유는 **그 필드를 표시하는 카드에서** 말해야 한다. 예전엔 SUTS 카드에만 있어서,
+    // UDS/SDS는 버튼을 눌러도 화면이 요청 전과 똑같았고 사용자는 이유를 알 수 없었다(무한 재시도).
+    const _proseWhy = (f) => {
+      if (!_prose || _prose.loading || _proseText(f)) return '';
+      const d = (_prose.dropped_fields || []).find((x) => x && x.field === f);
+      if (d) {
+        return d.reason === 'unknown_number'
+          ? `AI 초안이 결정론에 없는 수치(${d.token})를 포함해 폐기됨 — 표의 값이 정본입니다`
+          : `AI 초안이 근거 없는 식별자(${d.token})를 포함해 폐기됨`;
+      }
+      if (_prose.error) return _prose.error;
+      if (_prose.ok === false && _prose.reason) return PROSE_REASON_KO[_prose.reason] || _prose.reason;
+      return '';
+    };
     // static/private 판별(헝가리안 접두어 s_=static·prv_=private) — 이들은 아키텍처 SDS·요구기반 STS에
     // 설계상 없을 수 있다(정직 노트 대상). 공개 함수(g_·무접두어)의 SDS/요구 부재는 '정상'이 아니라 실
     // 갭일 수 있으므로 '정상' 안심을 붙이지 않는다(은폐 방지 — 미상은 안전측으로 '확인 필요').
@@ -1391,7 +1479,35 @@ export default function ImpactGuideSection({ analysisResult, job }) {
             </div>,
           );
         }
-        if (!rows.length) return null;
+        // Description은 결정론 근거가 없어 백엔드가 'ai_required'로 비워둔 자리 — AI 보강이
+        // 들어왔을 때만 채우고, 없으면 무엇이 비었는지 정직하게 밝힌다(동어반복 금지).
+        const _udsProse = _proseText('uds_description');
+        if (_udsProse) {
+          rows.push(
+            <div key="desc" style={{ marginTop: 2 }}>
+              {_lbl('Description')}
+              <div>{_udsProse} <span className="pill pill-info" style={{ fontSize: 8 }}>AI 보강</span></div>
+            </div>,
+          );
+        } else if ((docProposalFor(fn, 'uds') || {}).description_source === 'ai_required') {
+          const _why = _proseWhy('uds_description');
+          rows.push(
+            <div key="desc" className="text-muted" style={{ fontSize: 9, marginTop: 2 }}>
+              {/* 요청 후 폐기됐으면 그 사유를 말한다 — 아니면 화면이 요청 전과 똑같아 이유를 알 수 없다. */}
+              · {_why || 'Description 문장은 결정론 근거가 없음 — SUTS 카드의 [🤖 서술문 보강]으로 생성'}
+            </div>,
+          );
+        }
+        if (!rows.length) {
+          // ⚠ null을 돌려주면 원문만 뜨고 **왜 수정안이 없는지 화면에 한 줄도 없다**(구 job의
+          //   BODY 변경에서 흔하다 — 시그니처·전역 변화가 없고 doc_proposal 노드도 없는 조합).
+          return _note(
+            <div className="text-muted" style={{ fontSize: 9, marginTop: 4 }}>
+              · 결정론 변경안 없음 — 시그니처·전역 변화가 감지되지 않았고 생성기 초안도 없습니다
+              (구 분석 결과이면 재실행 시 초안이 생성됩니다)
+            </div>,
+          );
+        }
         return _box('✏ 원문 → 변경안 (결정론)', 'warning', rows);
       }
       // 내용 없음 → 신규 UDS 작성 골격
@@ -1414,51 +1530,155 @@ export default function ImpactGuideSection({ analysisResult, job }) {
     if (key === 'suts') {
       const content = docContentFor(fn, 'suts');
       const has = Array.isArray(content) && content.length > 0;
-      // 백엔드 생성기(generate_sequences) 실산출 — 전략별 경계값 입력→기대출력(구체값). 이게 '문서를
-      // 직접 생성하는 것처럼'의 핵심. 없으면(SITS·구 job) 경계값 입력 pill 골격(_boundaryRows)으로 폴백.
+      // 백엔드 생성기(generate_sequences) 실산출 — 전략별 경계값 입력→기대출력(구체값).
       const gen = docProposalFor(fn, 'suts');
       const genSeqs = Array.isArray(gen) && gen.length ? gen : null;
-      const _genSeqRows = () => (
-        <>
-          {genSeqs.slice(0, 6).map((s, i) => {
-            const inStr = _kv(s.inputs); const expStr = _kv(s.expected);
-            // 생성기의 사람이 읽는 전략 라벨(description 첫 줄) — 원시 코드(BV_MIN) 위에 표시(reviewer W3).
-            const _stratLabel = String(s.description || '').split('\n')[0].trim();
-            return (
-              <div key={i} style={{ marginTop: 2 }}>
-                <div style={_propMono}><span className="text-muted">{s.strategy || `Seq ${i + 1}`}</span></div>
-                {_stratLabel && _stratLabel !== (s.strategy || '') && <div className="text-muted" style={{ fontSize: 9 }}>{_stratLabel}</div>}
-                {inStr && <div style={{ fontSize: 9, overflowWrap: 'anywhere' }}><span className="text-muted">In: </span>{inStr}</div>}
-                {/* 생성기 기대출력(가드/클램프 로직 추론값). 값에 '[검증 필요]'가 있으면 그대로 노출(생성기 표기). */}
-                {expStr
-                  ? <div style={{ fontSize: 9, overflowWrap: 'anywhere' }}><span className="text-muted">→ Exp: </span>{expStr}</div>
-                  : <div className="text-muted" style={{ fontSize: 9 }}>→ Exp: (기대출력 판정기준 작성 — 입출력 변수 없음)</div>}
-              </div>
-            );
-          })}
-          <div className="text-muted" style={{ fontSize: 9, marginTop: 2 }}>· 기대출력은 소스 로직(가드/클램프) 추론값 — 실행(VectorCAST) 검증 필요</div>
-        </>
-      );
-      const rows = genSeqs ? _genSeqRows() : _boundaryRows();  // 생성 시퀀스 우선, 없으면 경계값 입력 골격
-      // 실 TC 위치·ID 앵커(백엔드 loc) — "이 TC(행 N) 기준 재계산"을 명시(있을 때만·행 번호 날조 금지).
-      const _sutsLoc = has && content[0]
-        ? [content[0].tc_id ? `TC ${content[0].tc_id}` : '', formatSutsLoc(content[0].loc)].filter(Boolean).join(' · ')
-        : '';
-      if (!rows) {
-        if (has) return null;
-        return _box('🖊 SUTS 작성 제안', 'info', _val('입력 파라미터 없음(void) — 전역 상태/사이드이펙트 기반 기대출력 케이스 작성'));
+      // 대조 대상 원문의 TC·행 앵커(중복 제거). "무엇과 비교했는가"는 사실이라 표시 가능하고,
+      // "이 TC 기준으로 재계산하라"는 단정은 매칭 행이 정해진 뒤에만 가능하다(행별 evidence 담당).
+      const _sutsAnchors = (() => {
+        if (!has) return '';
+        const seen = new Set();
+        const parts = [];
+        for (const r of content) {
+          const a = [r.tc_id ? `TC ${r.tc_id}` : '', formatSutsLoc(r.loc)].filter(Boolean).join(' · ');
+          if (a && !seen.has(a)) { seen.add(a); parts.push(a); }
+          if (parts.length >= 2) break;
+        }
+        if (!parts.length) return '';
+        const more = seen.size < content.length ? ` 외 ${content.length - parts.length}건` : '';
+        return `대조 원문: ${parts.join(' / ')}${more}`;
+      })();
+
+      // ⚠ 전체 초안(온디맨드) 상태는 **모든 분기보다 먼저** 계산한다. 아래 조기 반환들이 job
+      //   데이터(has/genSeqs)만 보고 갈리는데, 응답이 도착해도 그 값들은 그대로라 같은 분기를
+      //   다시 타 화면이 안 변하고 사용자는 무한 재클릭하게 된다.
+      const _fullKey = `${String(fn).toLowerCase()}:suts`;
+      const _full = fullDraft[_fullKey];
+      const _fullOk = !!(_full && _full.ok);
+      const _fullHasData = !!(_fullOk && ((Array.isArray(_full.proposal) && _full.proposal.length)
+        || (Array.isArray(_full.doc_rows) && _full.doc_rows.length)));
+
+      // 원문도 생성기 초안도 없으면 근거가 시그니처뿐이다 — 그땐 문서 컬럼을 지어낼 수 없으므로
+      // 기존 파라미터 경계값 골격을 그대로 쓴다(문서에 없는 함수의 '신규 작성' 안내로 정당).
+      // ⚠ 단, 페이로드 상한으로 **생략된** 함수는 예외다 — "문서에 없다"가 아니라 "job에 안 실렸다"이고,
+      //   그걸 신규 작성 골격으로 표시하면 실제로는 있는 TC를 없다고 말하게 된다. 이때는 조회 버튼이
+      //   있는 표(빈 draft + 안내)를 그려 사용자가 실제로 회복할 수 있게 한다.
+      if (!has && !genSeqs && !_fullHasData && sutsIsOmitted(fn)) {
+        const _o = _full;
+        return (
+          <DocProposalTable
+            title="⤓ SUTS 원문이 분석 결과에서 생략됨"
+            tone="info"
+            draft={{ mode: 'boundary', columns: [], rows: [], unknownTypes: [], newColumns: [], totals: {} }}
+            meta={[{ label: '상태', value: '페이로드 상한으로 생략(문서에 없다는 뜻이 아님)' }]}
+            notes={[
+              _o && _o.error ? `전체 초안: ${_o.error}` : '',
+              // 소스가 미해결(cloudium)이면 서버도 시퀀스를 만들 수 없다 — 성공했는데 빈 응답이
+              // 온 경우를 "다시 눌러라"로 방치하지 않는다.
+              (_fullOk && !_fullHasData)
+                ? '서버도 이 함수의 원문을 복구하지 못했습니다(소스 미해결) — 문서에서 직접 확인하세요'
+                : '아래 버튼으로 서버에서 이 함수만 다시 합성합니다',
+            ].filter(Boolean)}
+            onLoadFull={_fullOk ? null : () => loadFullDraft(fn, 'suts')}
+            loadingFull={!!fullDraftBusy[_fullKey]}
+          />
+        );
       }
+      if (!has && !genSeqs && !_fullHasData) {
+        const rows = _boundaryRows();
+        if (!rows) {
+          return _box('🖊 SUTS 작성 제안', 'info', _val('입력 파라미터 없음(void) — 전역 상태/사이드이펙트 기반 기대출력 케이스 작성'));
+        }
+        return _box('🖊 SUTS 작성 제안 (경계값 TC 골격)', 'info', (
+          <>
+            {rows}
+            <div className="text-muted" style={{ fontSize: 9, marginTop: 2 }}>· 각 경계값별 기대출력(Expected) 판정기준 작성</div>
+          </>
+        ));
+      }
+
+      // 문서 작성급 초안 — 컬럼 집합을 **원문에서** 가져와 경계값이 이미 있는지(유지) 없는지(신규추가)
+      // 판정한다. 예전엔 시그니처 파라미터만 봐서 원문(g_sys_error_his[0..4])과 다른 변수를 제안했다.
+      // ⚠ 얕은 병합(`{...a, ...b}`)은 **금지**다. `_src`가 통째로 덮이거나 남아, 값은 전체 초안
+      //   것으로 바뀌었는데 출처 배지는 job 시점 것이 남는다(추론값이 "문서 원문"으로 읽힘).
+      //   같은 필드별 병합기를 태워 `_src`도 값과 함께 따라오게 한다.
+      const sMeta = _mergeSutsMeta(
+        (_fullOk && _full.meta) || (docProposal?.suts_meta ?? {})[String(fn).toLowerCase()] || null,
+        docSutsMeta[String(fn).toLowerCase()] || null,
+      ) || {};
+      // 전체 초안이 실제로 **새 시퀀스를 가져왔는지**. 문서 폴백은 meta만 주고 시퀀스는 안 만들므로
+      // ok=true여도 표가 그대로일 수 있다 — 그때 "생성기 전량을 불러왔습니다"는 거짓말이다.
+      const _fullSeqs = (_fullOk && Array.isArray(_full.proposal) && _full.proposal.length) ? _full.proposal : null;
+      const draft = reconcileSuts({
+        docRows: has ? content : ((_fullOk && _full.doc_rows) || []),
+        docColumns: (_fullOk && _full.columns) || sutsColumnsFor(fn),
+        genSeqs: _fullSeqs || genSeqs,
+        // ⚠ 백엔드가 `var_types`를 `or {}`로 **항상 dict**로 준다. `{}`는 JS에서 truthy라
+        //   `||` 로 고르면 job이 해상해둔 타입맵이 빈 dict에 말소되고 전 행이 '검증필요'로 뒤집힌다.
+        varTypes: (_fullOk && Object.keys(_full.var_types || {}).length) ? _full.var_types : varTypesFor(fn),
+        diffElems,
+        sigParams: params,
+        // ⚠ '원문 N건 중 M건' 은 **문서 TC 수**만 쓴다. 생성기 시퀀스 수(gen_total)를 여기 넣으면
+        //   존재하지 않는 원문 절단을 경고하거나(문서 2건에 "10건 중 2건") 실제 절단을 과소보고한다.
+        // sMeta는 이미 `_full.meta`까지 병합된 결과다 — 여기서 다시 고르면 병합 규칙이 두 벌이 된다.
+        docTotal: sMeta.doc_total ?? undefined,
+      });
+      if (!draft.rows.length) {
+        const rows = _boundaryRows();
+        if (!rows) return has ? null : _box('🖊 SUTS 작성 제안', 'info', _val('입력 파라미터 없음(void) — 전역 상태/사이드이펙트 기반 기대출력 케이스 작성'));
+        return _box(has ? '✏ 경계값 케이스 재계산/추가 (결정론)' : '🖊 SUTS 작성 제안 (경계값 TC 골격)', has ? 'warning' : 'info', rows);
+      }
+      const _srcLabel = proposalSource === 'document' ? '문서 원문 기준' : '결정론';
       const _sutsHdr = genSeqs
         ? (has ? '✏ 경계값 케이스 재계산 (생성기 산출)' : '🖊 SUTS 작성 제안 (생성기 경계값 TC)')
-        : (has ? '✏ 경계값 케이스 재계산/추가 (결정론)' : '🖊 SUTS 작성 제안 (경계값 TC 골격)');
-      return _box(_sutsHdr, has ? 'warning' : 'info', (
-        <>
-          {_sutsLoc && <div className="text-muted" style={{ fontSize: 9, marginBottom: 2 }}>· {_sutsLoc} 기준 재계산</div>}
-          {rows}
-          {/* 생성 시퀀스는 자체 기대출력 note를 포함 — 경계값 입력 골격 폴백일 때만 별도 안내. */}
-          {!genSeqs && <div className="text-muted" style={{ fontSize: 9, marginTop: 2 }}>· 각 경계값별 기대출력(Expected) 판정기준 작성</div>}
-        </>
-      ));
+        : (has ? `✏ 경계값 케이스 재계산/추가 (${_srcLabel})` : `🖊 SUTS 작성 제안 (${_srcLabel})`);
+      return (
+        <DocProposalTable
+          title={_sutsHdr}
+          tone={has ? 'warning' : 'info'}
+          draft={draft}
+          // ⚠ 각 값이 **문서 원문**인지 **생성기 추론값**인지 밝힌다. 라벨이 없으면 사용자가
+          //   determine_test_method 같은 추론값을 원문으로 오인해 그대로 문서에 옮겨 적는다.
+          meta={[
+            { label: 'Component', value: sMeta.component, src: sMeta._src?.component },
+            { label: 'Test Method', value: sMeta.test_method, src: sMeta._src?.test_method },
+            { label: 'Gen.Method', value: sMeta.gen_method, src: sMeta._src?.gen_method },
+            { label: 'Safety Related', value: sMeta.asil ? `ASIL ${sMeta.asil}` : '', src: sMeta._src?.asil },
+            { label: 'Precondition', value: sMeta.precondition, src: sMeta._src?.precondition },
+            { label: 'Related ID', value: (sMeta.related_ids || []).join(', '), src: sMeta._src?.related_ids },
+          ]}
+          notes={[
+            // ⚠ 예전엔 content[0](임의 첫 행)을 "이 TC **기준** 재계산"이라 단정해, 실제 매칭 행이
+            //   아닌 곳을 근거로 제시했다. 이제 행마다 자체 근거(evidence)가 붙으므로 여기서는
+            //   "무엇과 대조했는지"만 사실대로 나열한다(단정 아님).
+            _sutsAnchors,
+            genSeqs ? '기대출력은 소스 로직(가드/클램프) 추론값 — 실행(VectorCAST) 검증 필요'
+              : '각 경계값별 기대출력(Expected) 판정기준 작성',
+            sMeta.gen_truncated ? `생성기 시퀀스 ${sMeta.gen_total}건 중 일부만 표시 — [전체 초안 불러오기]로 전량 조회` : '',
+            // TSV 열이 조용히 줄면 Excel 붙여넣기가 통째로 밀린다 — 반드시 표면화.
+            (sutsColumnsFor(fn) || {}).truncated ? '⚠ 문서 컬럼이 페이로드 상한으로 축소됨 — TSV 열이 원본 시트보다 적습니다' : '',
+            _full && _full.error ? `전체 초안: ${_full.error}` : '',
+            // ⚠ ok=true여도 시퀀스가 안 왔을 수 있다(문서 폴백은 meta만 준다). 그때 "전량을
+            //   불러왔습니다"는 거짓이므로 실제로 받은 것을 말한다.
+            _fullSeqs ? `전체 초안 ${_fullSeqs.length}건을 불러왔습니다(생성기 전량)` : '',
+            (_fullOk && !_fullSeqs) ? '전체 초안: 새 시퀀스 없음 — 소스 미해결로 문서 원문 기준 메타만 갱신했습니다' : '',
+            // 실패 경로의 사유는 이미 `_full.error`에 합쳐져 있다 — 성공했을 때만 별도로 편다(중복 방지).
+            ...((_fullOk && _full.warnings) || []),
+          ].filter(Boolean)}
+          // 새 시퀀스를 실제로 받았을 때만 버튼을 거둔다 — meta만 갱신된 경우엔 재시도 여지를 남긴다.
+          onLoadFull={_fullSeqs ? null : () => loadFullDraft(fn, 'suts')}
+          loadingFull={!!fullDraftBusy[_fullKey]}
+          // 서술문만 AI로 보강 — 표의 값 셀은 이 호출로 절대 바뀌지 않는다(값=결정론 소유).
+          prose={_prose}
+          onEnrichProse={() => loadDocProse(
+            fn,
+            { suts: draft.rows, suts_meta: sMeta, uds: docProposalFor(fn, 'uds') || {}, columns: draft.columns },
+            proto,
+            functionDiffs[String(fn).toLowerCase()] || '',
+          )}
+          proseField="suts_description"
+        />
+      );
     }
 
     // ── SITS (통합 콜체인 시나리오) ──
@@ -1476,22 +1696,49 @@ export default function ImpactGuideSection({ analysisResult, job }) {
       const _sitsHdr = has
         ? (genChain ? '✏ 통합 시나리오 반영 (생성기 콜체인)' : '✏ 통합 시나리오 반영 (결정론)')
         : (genChain ? '🖊 SITS 작성 제안 (생성기 통합 콜체인)' : '🖊 SITS 작성 제안 (통합 콜체인 골격)');
+      // 서브케이스가 있으면 문서 작성급 표(케이스 라벨 + Input/Expected 열 + 판정). 없으면 기존 골격.
+      if (subs.length) {
+        const draft = reconcileSits({
+          docTcs: _testSpecRows(fn, 'sits'),
+          gen,
+          varTypes: varTypesFor(fn),
+          diffElems,
+        });
+        draft.callChain = chainText;   // 폴백 콜체인(UDS callee)도 표에 그대로 보이게
+        return (
+          <DocProposalTable
+            title={_sitsHdr}
+            tone={has ? 'warning' : 'info'}
+            draft={draft}
+            // ⚠ 이 값들은 **전부 생성기 산출**이다(문서 원문이 아니다). SUTS는 필드마다 출처를
+            //   넘기는데 SITS만 안 넘겨서, 생성기가 합성한 TC ID(`SwITC_…`)가 원문 TC ID처럼
+            //   보였다 — "근거 없는 TC ID를 만들지 않는다" 규약 정면 위배.
+            meta={[
+              { label: 'TC ID', value: gen.tc_id ? `${gen.tc_id} (제안 ID — 실제 채번 필요)` : '', src: 'generator' },
+              { label: 'Gen.Method', value: gen.gen_method, src: 'generator' },
+              { label: 'Safety Related', value: gen.asil ? `ASIL ${gen.asil}` : '', src: 'generator' },
+              { label: 'Component', value: gen.module_name, src: 'generator' },
+              { label: 'Related ID', value: (gen.related_ids || []).join(', '), src: 'generator' },
+              {
+                label: 'Precondition',
+                value: gAll.length ? `변경 전역 초기화 상태: ${gAll.slice(0, 4).join(', ')}` : '통합 진입 상태(env/precondition) 설정',
+                src: 'generator',
+              },
+            ]}
+            notes={[
+              '통합 기대값은 콜체인 하위 함수 산출 추론 — 실행 검증 필요',
+              // 생성기 서브케이스 절단(백엔드 total/truncated)을 침묵시키지 않는다.
+              draft.genTruncated ? `생성기 통합 케이스 ${draft.genTotal}건 중 ${draft.rows.length}건 표시` : '',
+              draft.docPartial ? '원문 일부만 파싱됨 — 아래 판정은 "문서에 없음"을 단정하지 않는다' : '',
+            ].filter(Boolean)}
+          />
+        );
+      }
       return _box(_sitsHdr, has ? 'warning' : 'info', (
         <>
           <div>{_lbl('Call Chain')}<div style={_propMono}>{chainText}</div></div>
           <div style={{ marginTop: 2 }}>{_lbl('Precondition')}{_val(gAll.length ? `변경 전역 초기화 상태: ${gAll.slice(0, 4).join(', ')}` : '통합 진입 상태(env/precondition) 설정')}</div>
-          {subs.slice(0, 3).map((sc, i) => {
-            const inStr = _kv(sc.inputs); const expStr = _kv(sc.expected);
-            return (inStr || expStr) ? (
-              <div key={i} style={{ marginTop: 2, paddingLeft: 6, borderLeft: '1px solid var(--border)' }}>
-                {inStr && <div style={{ fontSize: 9, overflowWrap: 'anywhere' }}><span className="text-muted">In: </span>{inStr}</div>}
-                {expStr && <div style={{ fontSize: 9, overflowWrap: 'anywhere' }}><span className="text-muted">→ Exp: </span>{expStr}</div>}
-              </div>
-            ) : null;
-          })}
-          {subs.length > 0
-            ? <div className="text-muted" style={{ fontSize: 9, marginTop: 2 }}>· 통합 기대값은 콜체인 하위 함수 산출 추론 — 실행 검증 필요</div>
-            : (params.length > 0 && <div className="text-muted" style={{ fontSize: 9, marginTop: 2 }}>· 통합 Input/Expected Param — SUTS 경계값을 통합 시나리오로 승격</div>)}
+          {params.length > 0 && <div className="text-muted" style={{ fontSize: 9, marginTop: 2 }}>· 통합 Input/Expected Param — SUTS 경계값을 통합 시나리오로 승격</div>}
         </>
       ));
     }
@@ -1500,7 +1747,8 @@ export default function ImpactGuideSection({ analysisResult, job }) {
     if (key === 'sts') {
       const reqs = d.requirements || [];
       if (!reqs.length) {
-        return <div className="text-muted" style={{ fontSize: 9, marginTop: 4 }}>· 요구 매핑 없음 — {looksPrivate ? 'STS(요구 기반 시험) 작성 대상 아님(내부/static 헬퍼)' : 'STS 요구 매핑 확인 필요(공개 함수는 SwRS 요구 연결 기대)'}</div>;
+        // ⚠ 이건 **제안이 아니라 진단 노트**다 — 프레임에 넣으면 "이렇게 고쳐라"로 읽힌다.
+        return _note(<div className="text-muted" style={{ fontSize: 9, marginTop: 4 }}>· 요구 매핑 없음 — {looksPrivate ? 'STS(요구 기반 시험) 작성 대상 아님(내부/static 헬퍼)' : 'STS 요구 매핑 확인 필요(공개 함수는 SwRS 요구 연결 기대)'}</div>);
       }
       const has = _testSpecHasContent(fn, 'sts');
       // 백엔드 생성기(_generate_steps_from_flow) 실 시험 절차 — logic_flow 기반 TC별 Action→Expected 스텝.
@@ -1528,6 +1776,13 @@ export default function ImpactGuideSection({ analysisResult, job }) {
             : <div style={{ marginTop: 2 }}>{_lbl('Test Action')}{_val(`${fn} 호출 시퀀스 — 입력/기대 결과 작성`)}</div>}
           {/* 생성기 Action/Expected도 로직 흐름 기반 추론값(실측 아님) — SUTS/SITS와 정직성 대칭(reviewer W2). */}
           {genTcs && <div className="text-muted" style={{ fontSize: 9, marginTop: 2 }}>· Action/Expected는 로직 흐름 기반 추론 절차 — 실행 검증 필요</div>}
+          {/* 절단을 침묵시키지 않는다 — SUTS/SITS엔 있는 표기가 STS에만 없었다. */}
+          {genTcs && genTcs.length > 4 && (
+            <div className="text-muted" style={{ fontSize: 9, marginTop: 2 }}>· 생성기 TC {genTcs.length}건 중 4건만 표시</div>
+          )}
+          {genTcs && genTcs.some((tc) => (tc || []).length > 6) && (
+            <div className="text-muted" style={{ fontSize: 9, marginTop: 2 }}>· 각 TC의 절차는 6스텝까지만 표시</div>
+          )}
           {params.length > 0 && <div className="text-muted" style={{ fontSize: 9, marginTop: 2 }}>· Pre-condition: 위 파라미터 경계값 입력</div>}
         </>
       ));
@@ -1537,10 +1792,30 @@ export default function ImpactGuideSection({ analysisResult, job }) {
     if (key === 'sds') {
       const has = !!docContentFor(fn, 'sds');
       const maybePrivate = !has && looksPrivate;  // static/private(s_·prv_)만 SDS 설계상 부재가 정상 — 공개 함수 누락은 실 갭(은폐 방지)
+      // Behavior 문단은 결정론 근거가 없다. 예전엔 `"본문 동작 변경 반영"` 같은 **동어반복
+      // 플레이스홀더**를 채워 정보가 있는 척했다 — 그건 지금 상태를 알려주는 게 아니라 가린다.
+      // 값이 있으면(AI 보강) 채우고, 없으면 비어 있음을 밝힌다.
+      const _sdsProse = _proseText('sds_behavior');
+      const _sdsGen = docProposalFor(fn, 'sds') || {};
       const box = _box(has ? '✏ SDS 반영 (결정론)' : '🖊 SDS 작성 제안 (골격)', has ? 'warning' : 'info', (
         <>
           <div>{_lbl('Component Interface')}{_val(`${fn}${proto ? ` — ${proto}` : ''} 인터페이스 반영`)}</div>
-          <div style={{ marginTop: 2 }}>{_lbl('Behavior')}{_val(`${CHANGE_TYPE_KO[ct] || ct || '변경'} 동작 변경 반영`)}</div>
+          {_sdsGen.interface_after && _sdsGen.interface_after !== _sdsGen.interface_before && (
+            <div style={{ marginTop: 2 }}>
+              {_lbl('Interface 변경')}
+              <div style={{ ..._propMono, color: 'var(--color-danger)' }}>− {_sdsGen.interface_before}</div>
+              <div style={{ ..._propMono, color: 'var(--color-success)' }}>＋ {_sdsGen.interface_after}</div>
+            </div>
+          )}
+          <div style={{ marginTop: 2 }}>
+            {_lbl('Behavior')}
+            {_sdsProse
+              ? <div>{_sdsProse} <span className="pill pill-info" style={{ fontSize: 8 }}>AI 보강</span></div>
+              : <div className="text-muted" style={{ fontSize: 9 }}>
+                {_proseWhy('sds_behavior')
+                  || `${CHANGE_TYPE_KO[ct] || ct || '변경'} — 서술문은 결정론 근거 없음(SUTS 카드의 [🤖 서술문 보강]으로 생성)`}
+              </div>}
+          </div>
         </>
       ));
       if (maybePrivate) {
@@ -1579,10 +1854,13 @@ export default function ImpactGuideSection({ analysisResult, job }) {
     const fn = d && d.function;
     if (!fn) return null;
     const current = renderDocContent(fn, key);      // 실 내용 or '미파싱' 정직 노트(항상 truthy)
-    const proposal = renderAuthoringProposal(d, key, cd, diffElems, ct); // 간접·DELETE만 null
-    // 실제 현재 원문이 있고 제안이 있을 때만 before→after 프레임. 그 외엔 프레임 없이 현재 상태·제안을
-    // 그대로 병렬(제안 박스가 '문서에 현재 없음' 골격/'요구없음' 노트로 스스로 문맥을 밝힌다).
-    if (proposal && _dcHasContent(fn, key)) {
+    // ⚠ 위 주석이 "proposal truthy만으론 '변경안 존재'를 뜻하지 않는다(요구없음 STS 등)"라고 이미
+    //   적어놨는데 코드는 반대 방향만 막고 있었다 — 진단 노트가 "▼ 수정안" 프레임에 들어갔다.
+    //   이제 렌더러가 `_meta.isNote`로 직접 알려준다(호출부가 조건을 재구현하지 않는다).
+    const _meta = {};
+    const proposal = renderAuthoringProposal(d, key, cd, diffElems, ct, _meta); // 간접·DELETE만 null
+    // 실제 현재 원문이 있고 **진짜 제안**이 있을 때만 before→after 프레임.
+    if (proposal && !_meta.isNote && _dcHasContent(fn, key)) {
       return (
         <div style={_c2pWrap}>
           <div style={_c2pHdr}>현재 원문 → 수정안</div>
@@ -2227,6 +2505,77 @@ export default function ImpactGuideSection({ analysisResult, job }) {
     }
     return out;
   }, [docContent, guideDetailByLc, stsByTc, sitsByTc]);
+
+  // 온디맨드 전체 초안 — job JSON엔 요약(SUTS 10 시퀀스)만 실리므로, 사용자가 '전체 초안 불러오기'를
+  // 누를 때만 서버가 생성기 기본값(24) 전량을 만든다. 전부 job에 실으면 페이로드가 폭증한다.
+  // ⚠ race 가드(seq 카운터)를 쓰지 않는다. 결과가 `${fn}:${doc}` **키별로 격리**돼 있어 늦게 온
+  //   응답이 다른 함수의 칸을 덮을 수 없다 — 전역 카운터를 두면 막을 오염은 없이 사용자의 클릭만
+  //   삼키고(A 요청 중 B를 누르면 A 응답 폐기), 더 나쁘게는 A가 '불러오는 중…'에 영구 고정된다.
+  // ⚠ 키가 `fn:doc`뿐이라 **함수는 격리되지만 분석 대상은 격리되지 않는다**. 같은 탭에서 빌드
+  //   #100 → #120으로 재분석하면 `impact`만 바뀌고 이 상태는 남아, 동명 함수 카드가 구 리비전
+  //   소스로 만든 시퀀스를 "생성기 전량"으로 표시한다(파일 상단이 '가이드 세탁'이라 부르는 계열).
+  //   `guide`/`aiGuide`가 owner 키로 막는 것을 신규 두 상태만 안 하고 있었다 — 대상이 바뀌면 비운다.
+  const [fullDraft, setFullDraft] = useState({});   // {`${fnLc}:${doc}`: {ok, proposal, meta, ...} | {error}}
+  const [fullDraftBusy, setFullDraftBusy] = useState({});   // {key: true}
+  const draftOwnerRef = useRef(impactKey);
+  if (draftOwnerRef.current !== impactKey) {
+    // 렌더 중 동기 리셋 — useEffect로 미루면 교체 직후 한 프레임 동안 구 대상 초안이 그려진다.
+    draftOwnerRef.current = impactKey;
+    if (Object.keys(fullDraft).length) setFullDraft({});
+    if (Object.keys(fullDraftBusy).length) setFullDraftBusy({});
+  }
+  const loadFullDraft = useCallback(async (fn, doc) => {
+    const key = `${String(fn || '').toLowerCase()}:${doc}`;
+    const jobId = impact?._job_id;
+    if (!jobId) {
+      setFullDraft((p) => ({ ...p, [key]: { error: '잡 ID 없음 — 분석을 다시 실행하면 전체 초안을 불러올 수 있습니다.' } }));
+      return;
+    }
+    setFullDraftBusy((p) => ({ ...p, [key]: true }));
+    try {
+      const res = await post('/api/impact/doc-draft', { job_id: jobId, function: fn, doc });
+      // 실패해도 서버가 준 한국어 사유(warnings)를 버리지 않는다 — `reason`은 원시 enum이라
+      // 그대로 노출하면 사용자가 무엇을 해야 할지 알 수 없다.
+      const _why = ((res?.warnings || []).join(' / ')) || res?.error || res?.reason;
+      setFullDraft((p) => ({
+        ...p,
+        [key]: res?.ok ? res : { error: _why || '전체 초안을 불러오지 못했습니다.', warnings: res?.warnings || [] },
+      }));
+    } catch (e) {
+      setFullDraft((p) => ({ ...p, [key]: { error: e?.message || '전체 초안 요청 실패' } }));
+    } finally {
+      // 어떤 경로로 끝나도 반드시 해제 — 남겨두면 버튼이 disabled로 굳어 재시도가 불가능하다.
+      setFullDraftBusy((p) => ({ ...p, [key]: false }));
+    }
+  }, [impact]);
+
+  // AI 서술문 보강(선택) — **값은 결정론이 소유하고 AI는 산문만 쓴다**. 서버가 응답의 숫자·식별자를
+  // 결정론 페이로드와 대조해 환각 필드를 폐기하므로, 여기서는 표의 값 셀을 절대 갱신하지 않는다.
+  // race 가드 없음 — 이유는 loadFullDraft 주석과 동일(결과가 함수 키별로 격리돼 있다).
+  // 대상 교체 시 리셋도 같은 이유로 필요하다(위 draftOwnerRef 주석 참조).
+  const [docProse, setDocProse] = useState({});   // {fnLc: {loading, ok, fields, dropped_fields, reason, error}}
+  const proseOwnerRef = useRef(impactKey);
+  if (proseOwnerRef.current !== impactKey) {
+    proseOwnerRef.current = impactKey;
+    if (Object.keys(docProse).length) setDocProse({});
+  }
+  const loadDocProse = useCallback(async (fn, deterministic, signature, functionDiff) => {
+    const key = String(fn || '').toLowerCase();
+    setDocProse((p) => ({ ...p, [key]: { loading: true } }));
+    try {
+      const res = await post('/api/impact/doc-prose', {
+        function: fn, signature: signature || '', function_diff: functionDiff || '',
+        deterministic: deterministic || {},
+      });
+      // 원시 enum(reason)은 그대로 노출하지 않는다 — 표시용 한국어를 함께 싣는다.
+      setDocProse((p) => ({
+        ...p,
+        [key]: { ...(res || {}), loading: false, reasonText: PROSE_REASON_KO[res?.reason] || '' },
+      }));
+    } catch (e) {
+      setDocProse((p) => ({ ...p, [key]: { loading: false, ok: false, error: e?.message || '서술문 요청 실패' } }));
+    }
+  }, []);
 
   const fetchExplanation = useCallback(async (d) => {
     if (!d) return;

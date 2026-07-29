@@ -28,6 +28,17 @@ _OUTPUT_COL_END = 148      # C148 (max 86 output vars)
 _RELATED_COL = 149         # C149
 _SEQ_COL = 13              # C13
 
+# Row 6 고정 컬럼 헤더(열 번호 → 라벨). `generate_suts_xlsm`이 시트에 쓰는 값이자,
+# 영향도 탭의 문서 초안이 Excel 붙여넣기 TSV 열 순서를 얻는 **단일 출처**다
+# (예전엔 함수 지역변수라 밖에서 못 읽어 재작성될 뻔했다 — 복제 금지).
+_FIXED_HEADERS = {
+    2: "Component", 3: "TC ID", 4: "Name", 5: "Description",
+    6: "Safety\nRelated", 7: "Test\nEnvironment", 8: "Test\nMethod",
+    9: "Gen.\nMethod", 10: "Precondition",
+    11: "Sequence", 12: "Test Case\nGen.Method", _SEQ_COL: "Seq.\nNo.",
+}
+_RELATED_HEADER = "SUDS"   # Row 6의 Related ID 컬럼 라벨
+
 _MAX_SEQUENCES = 10
 _DEFAULT_SEQ_COUNT = 24  # 6 BV + 4 COND + 6 SWITCH + 3 LOOP + 3 GLOBAL + 1 VOID + 6 MC/DC
 
@@ -1490,15 +1501,9 @@ def generate_suts_xlsm(
     _fill_and_merge(5, _RELATED_COL, _RELATED_COL, "Related ID")
     ws.row_dimensions[5].height = 18
 
-    # Row 6: sub-headers (fixed columns)
+    # Row 6: sub-headers (fixed columns) — 정의는 모듈 상수 `_FIXED_HEADERS`(단일 출처).
     # Cols 11 (K)=Sequence(action text), 12 (L)=Test Case Gen.Method(per-seq), 13 (M)=Seq No.
-    fixed_headers = {
-        2: "Component", 3: "TC ID", 4: "Name", 5: "Description",
-        6: "Safety\nRelated", 7: "Test\nEnvironment", 8: "Test\nMethod",
-        9: "Gen.\nMethod", 10: "Precondition",
-        11: "Sequence", 12: "Test Case\nGen.Method", _SEQ_COL: "Seq.\nNo.",
-    }
-    for c, h in fixed_headers.items():
+    for c, h in _FIXED_HEADERS.items():
         cell = ws.cell(row=6, column=c, value=h)
         cell.font = hdr_font
         cell.fill = hdr_fill

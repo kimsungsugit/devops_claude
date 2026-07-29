@@ -40,9 +40,13 @@ _BROAD_NAMES = {"Exception", "BaseException"}
 #: body 안에 이 이름의 호출이 있으면 "삼키지 않음"으로 보고 면제한다.
 #: 과탐(정당한 침묵 놓침)보다 **under-report**(가짜 Warning 억제) 쪽으로 기운다 —
 #: nudge 게이트라 조용한 편이 낫다. 부분 문자열 매칭이라 관대하다.
+#: ⚠ `_call_name`은 **속성명만** 돌려준다(`_logger.exception` → `"exception"`). 그래서
+#:   객체명에 'log'가 들어가도 소용이 없고, 메서드명 자체가 힌트에 있어야 한다. 이 때문에
+#:   `logger.exception(...)`(로그+삼킴의 정석 관용구)이 통째로 오탐이었다 — routers/impact.py
+#:   한 파일에서만 4건. "exception"을 추가해 그 계열을 면제한다.
 _LOG_HINTS = (
     "log", "warn", "error", "critical", "print", "report",
-    "trace", "debug", "notify", "alert", "emit", "capture", "raise",
+    "trace", "debug", "notify", "alert", "emit", "capture", "raise", "exception",
 )
 
 #: body/except 줄에 이 문자열이 있으면 저자가 침묵을 명시 승인한 것.

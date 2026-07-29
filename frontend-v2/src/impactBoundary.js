@@ -4,8 +4,11 @@
 // SUTS/SITS 경계값 TC 골격을 만들 때 쓴다. C 함수 파라미터 타입 → 경계값 케이스로 결정론 변환.
 // 컴포넌트 파일과 분리(react-refresh/only-export-components) + 순수 함수라 단위 테스트 용이.
 //
-// ⚠ 백엔드 workflow/impact_ai_guide.py의 `_c_type_boundaries`가 동일 매핑을 미러링한다
-//   (AI 카드의 '경계값' 제안을 같은 실제 값으로 grounding) — 한쪽 수정 시 다른 쪽도 갱신할 것.
+// ⚠ 백엔드 단일 출처는 `workflow/c_type_bounds.py` 다(예전엔 impact_ai_guide.py 안에 복제본이
+//   있었고 "한쪽 수정 시 다른 쪽도"라는 주석만으로 동기화를 기대했다 — 조용히 갈라졌다).
+//   지금은 `tests/fixtures/c_type_bounds.json` 을 Python(test_c_type_bounds_mirror.py)과
+//   vitest(__tests__/impactBoundary.test.js)가 **함께 assert** 하므로, 어느 쪽을 고치든
+//   픽스처를 재생성하지 않으면 양쪽 테스트가 동시에 깨진다. 재생성 명령은 픽스처 테스트 참조.
 
 // C 타입 문자열 → 경계값 케이스 [{label, value}].
 // 프로젝트 표준 Hungarian 타입(U8/U16/U32/S8/S16/S32/boolean) + 일반 C/AUTOSAR 별칭 커버.

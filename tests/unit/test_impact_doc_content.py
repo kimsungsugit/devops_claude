@@ -609,30 +609,37 @@ def test_build_doc_proposal_reuses_generators_scoped_to_changed(monkeypatch):
     out = _build_doc_proposal(_proposal_sections(fd), {"s_foo"})
 
     assert list(out["suts"].keys()) == ["s_foo"]                      # s_bar 제외(스코프)
-    assert out["suts"]["s_foo"][0]["inputs"] == {"x": 0}
-    assert out["suts"]["s_foo"][0]["expected"] == {"ret": 0}           # 기대출력 합성
+    # ⚠ 값은 **문자열**이다 — doc_proposal도 doc_content와 같이 `_cap_kv`를 태워 표기를
+    #   통일했다(예전엔 생성기만 native int라 화면에서 "0 → 0x0" 같은 허위 변경이 그려졌다).
+    assert out["suts"]["s_foo"][0]["inputs"] == {"x": "0"}
+    assert out["suts"]["s_foo"][0]["expected"] == {"ret": "0"}         # 기대출력 합성(문자열 통일)
     assert out["sits"]["s_foo"]["call_chain"] == "s_foo -> s_dep"      # 실 통합 콜체인
-    assert out["sits"]["s_foo"]["sub_cases"][0]["expected"] == {"ret": 0}
+    assert out["sits"]["s_foo"]["sub_cases"][0]["expected"] == {"ret": "0"}
     assert out["sts"]["s_foo"][0][0]["action"] == "call s_foo"          # 시험 절차 스텝
 
 
 def test_build_doc_proposal_empty_changed_set_returns_empty(monkeypatch):
-    """빈 changed_set이면 생성기를 호출하지 않고 빈 dict."""
-    from workflow.impact_orchestrator import _build_doc_proposal
+    """빈 changed_set이면 생성기를 호출하지 않고 모든 노드가 빈 채로 반환."""
+    from workflow.impact_orchestrator import _build_doc_proposal, _empty_doc_proposal
     called = {"n": 0}
     import generators.suts as gsuts
     monkeypatch.setattr(gsuts, "collect_unit_functions", lambda *a, **k: called.__setitem__("n", called["n"] + 1) or [])
     out = _build_doc_proposal(_proposal_sections({"f1": {"name": "s_foo"}}), set())
-    assert out == {"suts": {}, "sits": {}, "sts": {}}
+    assert out == _empty_doc_proposal()
     assert called["n"] == 0
 
 
 def test_build_doc_proposal_no_function_details_warns():
-    """function_details 없음(소스 미해결)이면 빈 dict + 사유 warn(silent-0 금지)."""
-    from workflow.impact_orchestrator import _build_doc_proposal
+    """소스도 문서도 없으면 **모든 노드가 빈 채로** 반환 + 사유 warn(silent-0 금지).
+
+    ⚠ 노드가 늘어도(uds/sds/var_types/suts_meta) 이 경로는 전부 비어 있어야 한다 —
+    `_empty_doc_proposal()`과 정확히 같은지로 검사해 새 노드가 몰래 채워지는 것을 막는다."""
+    from workflow.impact_orchestrator import _build_doc_proposal, _empty_doc_proposal
     warns: list = []
     out = _build_doc_proposal({}, {"s_foo"}, warn_sink=warns)
-    assert out == {"suts": {}, "sits": {}, "sts": {}}
+    assert out == _empty_doc_proposal()
+    assert all(not v for k, v in out.items() if k != "source")
+    assert out["source"] == ""      # 근거 없음 — generator도 document도 아니다
     assert any("function_details 없음" in w for w in warns)
 
 
@@ -706,7 +713,7 @@ def test_build_doc_proposal_suts_uses_gim_types_not_global():
         # (a) SUTS 시퀀스의 xfer_len 최대 입력이 U32 max(4294967295) — uint8(255) 폴백 아님
         seqs = out["suts"]["s_xfer"]
         xfer_vals = [s["inputs"]["xfer_len"] for s in seqs if "xfer_len" in (s.get("inputs") or {})]
-        assert 4294967295 in xfer_vals, f"U32 경계가 반영돼야(전역 오염 무시): {xfer_vals}"
+        assert "4294967295" in xfer_vals, f"U32 경계가 반영돼야(전역 오염 무시): {xfer_vals}"
         assert 255 not in xfer_vals                          # uint8 폴백 아님
 
         # (b) 전역 타입캐시는 호출 후에도 오염값 그대로 — _build_doc_proposal 이 전역을 변이하지 않음
@@ -765,3 +772,421 @@ def test_extract_mcdc_conditions_threads_type_cache_into_recursion():
         assert big_glob and big_glob[0][3] == 255
     finally:
         gsuts._globals_type_cache.clear()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 문서 작성급 초안 — 원문 grounding 원재료(컬럼/메타/캡 표면화)
+#
+# 사용자가 본 "TC 3건 × 변수 5개"는 문서의 실제 크기가 아니라 `_seqs[:3]`·`_cap_kv(n=5)`의
+# **절단값**이었고 아무 표기가 없었다. 캡을 올리고, 절단이 남았으면 seq_total로 드러낸다.
+# 컬럼명은 시트 헤더 원문이라 "재계산 대상 변수집합"의 권위 소스다(시그니처 유추 금지).
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _suts_model_with_columns(n_seq: int = 10, n_kv: int = 14) -> dict:
+    """입력 컬럼 n_kv개 × 시퀀스 n_seq개를 가진 모델(캡 검증용)."""
+    cols = [f"g_arr[{i}]" for i in range(n_kv)]
+    return {
+        "units": [{
+            "unit_name": "void s_foo( void )",     # 시그니처 템플릿 — bare 정규화 확인 겸용
+            "component": "SwCom_07\n(diag)",
+            "metadata": {"gen_method": "AEC, ABV", "test_method": "FNCT",
+                         "related_ids": ["SwRS_0101", "SwDS_02"]},
+            "columns": {"inputs": cols, "expected": ["ret"], "sheet": "2.SW Unit Test Spec"},
+            "test_cases": [
+                {
+                    "base_tc_id": "SwUTC_SwUFn_1219",
+                    "description": f"seq {i}",
+                    "inputs": {c: f"0x{i}" for c in cols},
+                    "expected": {"ret": "0x0"},
+                    "source": {"sheet": "2.SW Unit Test Spec", "tc_row": 2103, "sequence_row": 2104 + i},
+                }
+                for i in range(n_seq)
+            ],
+        }],
+        "export_warnings": [],
+    }
+
+
+def test_load_suts_fn_tcs_meta_sink_carries_columns_and_document_meta(monkeypatch):
+    """meta_sink에 시트 헤더 원문 컬럼 + component/test_method/gen_method/related_ids가 실린다.
+
+    컬럼명이 곧 '재계산 대상 변수집합'이자 Excel 붙여넣기 열 순서다 — 파서가 이미 뽑아둔
+    값을 옮길 뿐(재파싱 없음). 열 **순서 보존**이 계약이라 set 비교가 아니라 list 비교."""
+    import backend.services.file_resolver as fr
+    import tools.export_suts_vectorcast as ev
+    from workflow.impact_orchestrator import _load_suts_fn_tcs
+
+    monkeypatch.setattr(fr, "get_resolver", lambda: _FakeResolver())
+    monkeypatch.setattr(ev, "build_vectorcast_model", lambda *a, **k: _suts_model_with_columns(2, 3))
+
+    meta: dict = {}
+    result = _load_suts_fn_tcs("U:/suts.xlsm", ["s_foo"], meta_sink=meta)
+
+    assert result == {"s_foo": ["SwUTC_SwUFn_1219"]}       # 회귀 반환 불변
+    m = meta["s_foo"]                                       # 키는 bare 정규화된 함수명
+    assert m["columns"]["inputs"] == ["g_arr[0]", "g_arr[1]", "g_arr[2]"]  # 열 순서 보존
+    assert m["columns"]["expected"] == ["ret"]
+    assert m["columns"]["sheet"] == "2.SW Unit Test Spec"
+    assert m["component"].startswith("SwCom_07")
+    assert m["test_method"] == "FNCT"
+    assert m["gen_method"] == "AEC, ABV"
+    assert m["related_ids"] == ["SwRS_0101", "SwDS_02"]
+
+
+def test_load_suts_fn_tcs_columns_preserve_array_subscripts(monkeypatch):
+    """배열 첨자(`g_sys_error_his[0]`)를 벗기지 않는다.
+
+    생성기(`generators/suts.py:_extract_var_names`)는 첨자를 strip하지만 그건 실 문서생성
+    경로다. 초안 grounding은 **문서 컬럼 그대로**여야 원문 셀과 1:1 대응한다."""
+    import backend.services.file_resolver as fr
+    import tools.export_suts_vectorcast as ev
+    from workflow.impact_orchestrator import _load_suts_fn_tcs
+
+    cols = [f"g_sys_error_his[{i}]" for i in range(5)]
+    model = {
+        "units": [{
+            "unit_name": "s_updateerrorcode",
+            "columns": {"inputs": cols, "expected": cols, "sheet": "2.SW Unit Test Spec"},
+            "test_cases": [{"base_tc_id": "T1", "inputs": {c: "0x0" for c in cols},
+                            "expected": {c: "0x0" for c in cols}}],
+        }],
+        "export_warnings": [],
+    }
+    monkeypatch.setattr(fr, "get_resolver", lambda: _FakeResolver())
+    monkeypatch.setattr(ev, "build_vectorcast_model", lambda *a, **k: model)
+
+    meta: dict = {}
+    content: dict = {}
+    _load_suts_fn_tcs("U:/s.xlsm", ["s_updateerrorcode"], content_sink=content, meta_sink=meta)
+
+    assert meta["s_updateerrorcode"]["columns"]["inputs"] == cols
+    assert list(content["s_updateerrorcode"][0]["inputs"]) == cols
+
+
+def test_load_suts_fn_tcs_caps_are_raised_and_truncation_is_surfaced(monkeypatch):
+    """기본 캡이 8시퀀스·12변수로 올라가고, 잘린 만큼은 seq_total로 드러난다(silent 절단 금지)."""
+    import backend.services.file_resolver as fr
+    import tools.export_suts_vectorcast as ev
+    from workflow.impact_orchestrator import _load_suts_fn_tcs
+
+    monkeypatch.setattr(fr, "get_resolver", lambda: _FakeResolver())
+    monkeypatch.setattr(ev, "build_vectorcast_model", lambda *a, **k: _suts_model_with_columns(10, 14))
+
+    content: dict = {}
+    meta: dict = {}
+    _load_suts_fn_tcs("U:/s.xlsm", ["s_foo"], content_sink=content, meta_sink=meta)
+
+    rows = content["s_foo"]
+    assert len(rows) == 8                       # 과거 3 → 8
+    assert len(rows[0]["inputs"]) == 12         # 과거 5 → 12
+    assert meta["s_foo"]["seq_total"] == 10     # 문서의 실제 개수
+    assert meta["s_foo"]["seq_shown"] == 8      # 표시된 개수 → 프론트가 '10건 중 8건'
+
+
+def test_cap_kv_default_stays_five_for_shared_callers():
+    """`_cap_kv` 기본값 5는 STS/SITS 폴백 캡처와 공용이라 불변 — 상향은 호출부 `n=`로만."""
+    from workflow.impact_orchestrator import _cap_kv
+
+    src = {f"k{i}": i for i in range(20)}
+    assert len(_cap_kv(src)) == 5
+    assert len(_cap_kv(src, n=12)) == 12
+
+
+def test_load_sits_fn_chains_keeps_case_label_and_sub_total(monkeypatch):
+    """SITS 서브케이스의 case_label(AEC 등가분할 라벨)과 절단 전 총 개수를 보존한다."""
+    import json as _json
+
+    import backend.services.file_resolver as fr
+    from workflow.impact_orchestrator import _load_sits_fn_chains
+
+    payload = {"integrations": [{
+        "entry_fn": "s_entry", "call_chain": "s_entry -> Hal_Read", "tc_id": "SwITC_SwUFn_0101",
+        "gen_method": "AEC", "related_ids": ["SwDS_11"],
+        "sub_cases": [
+            {"case_label": f"{i} [EC{i}:무효-하한]", "precondition": f"env{i}",
+             "inputs": {"rpm": i}, "expected": {"state": i}}
+            for i in range(9)
+        ],
+    }]}
+    monkeypatch.setattr(fr, "get_resolver",
+                        lambda: _FakeResolver(_json.dumps(payload).encode("utf-8")))
+
+    sink: dict = {}
+    _load_sits_fn_chains("U:/sits.xlsm", ["s_entry"], content_sink=sink)
+
+    tc = sink["SWITC_SWUFN_0101"]               # _normTc(공백제거+대문자)
+    assert len(tc["sub_cases"]) == 6            # 과거 3 → 6
+    assert tc["sub_total"] == 9                 # 절단 전 실제 개수(표면화)
+    assert tc["sub_cases"][0]["case_label"] == "0 [EC0:무효-하한]"
+    assert tc["entry_fn"] == "s_entry"
+    assert tc["gen_method"] == "AEC"
+    assert tc["related_ids"] == ["SwDS_11"]
+
+
+def test_shrink_doc_content_degrades_and_warns():
+    """예산 초과 시 단계적으로 줄이되 **사유를 반드시 남긴다**(절단 침묵 금지)."""
+    from workflow.impact_orchestrator import _shrink_doc_content
+
+    big = {
+        "suts": {f"fn{i}": [
+            {"tc_id": f"T{j}", "inputs": {f"v{k}": "0x1234" * 4 for k in range(12)},
+             "expected": {f"e{k}": "0x1234" * 4 for k in range(12)}}
+            for j in range(8)
+        ] for i in range(40)},
+        "sits_by_tc": {f"TC{i}": {"sub_cases": [
+            {"inputs": {f"v{k}": "0x1234" * 4 for k in range(12)}, "expected": {}}
+            for _ in range(6)
+        ]} for i in range(40)},
+    }
+    warns: list = []
+    out = _shrink_doc_content(big, warn_sink=warns, budget=50_000)
+
+    # 경고는 "상한으로 축소"가 아니라 **실제 도달 크기**를 밝혀야 한다 — 지배항(TC 개수)은
+    # 축소 대상이 아니라 상한을 못 맞출 수 있고, 그때 "상한으로 축소"는 지킨 것처럼 읽힌다.
+    assert any("페이로드 축소" in w and "상한" in w for w in warns), "절단을 침묵시키면 안 된다"
+    assert len(out["suts"]["fn0"]) <= 5
+    assert len(out["sits_by_tc"]["TC0"]["sub_cases"]) <= 4
+
+
+def test_shrink_doc_content_noop_under_budget():
+    """예산 이내면 손대지 않고 경고도 없다(불필요한 노이즈 금지)."""
+    from workflow.impact_orchestrator import _shrink_doc_content
+
+    small = {"suts": {"fn": [{"tc_id": "T1", "inputs": {"x": "1"}, "expected": {"r": "2"}}] * 8},
+             "sits_by_tc": {}}
+    warns: list = []
+    out = _shrink_doc_content(small, warn_sink=warns)
+
+    assert warns == []
+    assert len(out["suts"]["fn"]) == 8
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# doc_proposal 확장 — 버려지던 문서 컬럼 복원 / UDS·SDS 노드 / cloudium 문서 폴백
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_build_doc_proposal_restores_suts_document_columns(monkeypatch):
+    """Component/Test Method/Gen.Method/ASIL/Related ID/Precondition을 **함수당 1회** 싣는다.
+
+    생성기가 이미 산출하는데 예전 슬림화가 통째로 버려서 카드가 시험 값만 보여줬다.
+    행마다 반복하면 시퀀스 수만큼 페이로드가 부풀므로 suts_meta로 분리한다."""
+    import generators.suts as gsuts
+    from workflow.impact_orchestrator import _build_doc_proposal
+
+    _stub_generators(monkeypatch, suts_seq=[
+        {"strategy": "BV_MIN", "inputs": {"x": 0}, "expected": {"ret": 0}, "description": "d", "seq_num": 1},
+        {"strategy": "BV_MAX", "inputs": {"x": 255}, "expected": {"ret": 1}, "description": "d2", "seq_num": 2},
+    ])
+    monkeypatch.setattr(gsuts, "collect_unit_functions", lambda fdmap, gim=None: [{
+        "name": "s_foo", "component": "SwCom_07\n(diag)", "asil": "C",
+        "srs_req_ids": ["SwRS_0101"], "precondition": "system initialized",
+        "prototype": "void s_foo(U16 x)", "input_vars": ["x"], "output_vars": ["ret"],
+    }])
+    monkeypatch.setattr(gsuts, "determine_test_method", lambda u: "FNCT")
+    monkeypatch.setattr(gsuts, "determine_gen_method", lambda u: "AEC, ABV")
+
+    out = _build_doc_proposal(_proposal_sections({"f1": {"name": "s_foo"}}), {"s_foo"})
+
+    assert out["source"] == "generator"
+    m = out["suts_meta"]["s_foo"]
+    assert m["component"].startswith("SwCom_07")
+    assert (m["test_method"], m["gen_method"]) == ("FNCT", "AEC, ABV")
+    assert m["asil"] == "C"
+    assert m["srs_req_ids"] == ["SwRS_0101"]
+    assert m["precondition"] == "system initialized"
+    # 생성기 축은 gen_* — 문서 TC 수(doc_total)와 절대 같은 슬롯에 두지 않는다(C1)
+    assert m["gen_total"] == 2 and m["gen_truncated"] is False
+    assert "total" not in m, "문서 축과 혼동되는 이름 금지"
+    assert out["suts"]["s_foo"][0]["seq_num"] == 1        # 시퀀스 번호도 복원
+    # 메타는 행에 반복되지 않는다(페이로드 계약)
+    assert "component" not in out["suts"]["s_foo"][0]
+
+
+def test_build_doc_proposal_restores_sits_case_labels_and_meta(monkeypatch):
+    """SITS의 case_label(AEC 등가분할)·tc_id·gen_method·related_ids를 보존."""
+    import generators.sits as gsits
+    from workflow.impact_orchestrator import _build_doc_proposal
+
+    _stub_generators(monkeypatch)
+    monkeypatch.setattr(gsits, "generate_itc_list", lambda flows, **k: [{
+        "entry_fn": "s_foo", "call_chain": "s_foo -> s_dep", "tc_id": "SwITC_SwUFn_0101",
+        "gen_method": "AEC", "related_ids": ["SwDS_11"], "asil": "B", "module_name": "diag",
+        "sub_cases": [{"case_num": i, "case_label": "%d [EC%d:무효-하한]" % (i, i),
+                       "inputs": {"x": i}, "expected": {"ret": i}, "precondition": "p"}
+                      for i in range(9)],
+    }])
+
+    out = _build_doc_proposal(_proposal_sections({"f1": {"name": "s_foo"}}), {"s_foo"})
+
+    s = out["sits"]["s_foo"]
+    assert s["tc_id"] == "SwITC_SwUFn_0101"
+    assert (s["gen_method"], s["asil"], s["module_name"]) == ("AEC", "B", "diag")
+    assert s["related_ids"] == ["SwDS_11"]
+    assert len(s["sub_cases"]) == 6          # sub_cap 기본 3 → 6
+    assert s["total"] == 9 and s["truncated"] is True   # 절단 표면화
+    assert s["sub_cases"][0]["case_label"] == "0 [EC0:무효-하한]"
+
+
+def test_build_doc_proposal_var_types_omit_unknown(monkeypatch):
+    """var_types는 타입이 해상된 변수만 — 미상은 키 부재(uint8_t 기본값 환각 차단)."""
+    import generators.suts as gsuts
+    from workflow.impact_orchestrator import _build_doc_proposal
+
+    _stub_generators(monkeypatch, suts_seq=[
+        {"strategy": "BV_MIN", "inputs": {"g_sys_error_his[0]": 0, "u16t_Data": 0},
+         "expected": {"g_sys_error_his[0]": 0}, "description": "d"},
+    ])
+    monkeypatch.setattr(gsuts, "collect_unit_functions",
+                        lambda fdmap, gim=None: [{"name": "s_foo", "input_vars": [], "output_vars": []}])
+
+    sections = _proposal_sections({"f1": {"name": "s_foo"}})
+    sections["globals_info_map"] = {"g_sys_error_his": {"type": "U16"}}
+    out = _build_doc_proposal(sections, {"s_foo"})
+
+    vt = out["var_types"]["s_foo"]
+    assert vt["g_sys_error_his"]["type"] == "uint16_t"   # 첨자 접힘 + 실측 타입
+    assert vt["u16t_Data"]["type"] == "uint16_t"         # 이름 규칙
+    assert all(v["type"] != "uint8_t" for v in vt.values()), "미상→uint8_t 기본값이 새면 안 된다"
+
+
+def test_build_doc_proposal_uds_sds_nodes_do_not_invent_prose(monkeypatch):
+    """UDS/SDS 노드는 구조 항목만 채우고 산문은 지어내지 않는다(*_source: ai_required)."""
+    from workflow.impact_orchestrator import _build_doc_proposal
+
+    _stub_generators(monkeypatch, sits_flows=[])
+    fd = {"f1": {"name": "s_foo", "prototype": "void s_foo(U16 x)",
+                 "inputs": ["[IN] U16 x"], "outputs": ["[OUT] U8 ret"],
+                 "globals_global": ["g_a"], "globals_static": ["s_b"],
+                 "calls_list": ["s_dep"], "logic_flow": ["if (x > 0)"],
+                 "precondition": "init", "asil": "C", "module_name": "diag"}}
+    out = _build_doc_proposal(_proposal_sections(fd), {"s_foo"},
+                              change_details={"s_foo": {"after": "void s_foo(U32 x)"}})
+
+    u = out["uds"]["s_foo"]
+    assert u["prototype"] == "void s_foo(U16 x)"
+    assert u["prototype_after"] == "void s_foo(U32 x)"
+    assert u["globals"] == ["g_a", "s_b"]
+    assert u["calls"] == ["s_dep"] and u["logic_flow"] == ["if (x > 0)"]
+    assert u["description_source"] == "ai_required"      # 산문 창작 금지
+    assert "description" not in u
+
+    s = out["sds"]["s_foo"]
+    assert s["interface_before"] == "void s_foo(U16 x)"
+    assert s["interface_after"] == "void s_foo(U32 x)"
+    assert s["behavior_source"] == "ai_required"
+    assert s["related_ids"] == [], "신규 요구 ID를 창작하지 않는다"
+
+
+def test_build_doc_proposal_document_fallback_when_source_unresolved():
+    """소스 미해결(cloudium)이어도 문서 원문이 있으면 초안 원재료를 만든다.
+
+    실사용 화면이 골격만 남던 근본 원인 — sections={}면 통째로 빈 dict를 돌려줬다.
+    시퀀스(`suts`)는 만들지 않는다: 생성기 없이 시험 값을 지어내면 환각이다."""
+    from workflow.impact_orchestrator import _build_doc_proposal
+
+    cols = ["g_sys_error_his[%d]" % i for i in range(5)]
+    doc_content = {
+        "suts": {"s_updateerrorcode": [
+            {"tc_id": "SwUTC_SwUFn_1219", "inputs": {c: "0x0" for c in cols},
+             "expected": {c: "0x0" for c in cols},
+             "loc": {"sheet": "2.SW Unit Test Spec", "tc_row": 2103}},
+        ]},
+        "suts_meta": {"s_updateerrorcode": {
+            "columns": {"inputs": cols, "expected": cols, "sheet": "2.SW Unit Test Spec"},
+            "component": "SwCom_07", "test_method": "FNCT", "gen_method": "AEC, ABV",
+            "related_ids": ["SwRS_0101"], "seq_total": 12, "seq_shown": 8,
+        }},
+        # UDS payload의 어노테이션(`[IN] U16 …`) — 소스가 없는 cloudium에서 유일한 타입 근거
+        "uds": {"s_updateerrorcode": {"prototype": "void s_updateerrorcode(U16 u16t_Data)",
+                                      "globals": ["[IN] U16 g_sys_error_his"], "calls": []}},
+    }
+    warns: list = []
+    out = _build_doc_proposal(
+        {}, {"s_updateerrorcode"}, warn_sink=warns,
+        doc_content=doc_content,
+        change_details={"s_updateerrorcode": {"after": "void s_updateerrorcode(U8 d)"}})
+
+    assert out["source"] == "document"
+    assert any("문서 원문 기준" in w for w in warns), "폴백 사용 사실을 표면화해야 한다"
+    assert out["suts"] == {}, "생성기 없이 시퀀스를 지어내면 안 된다"
+    # 원문 컬럼(첨자 포함) ↔ UDS 어노테이션 조인 — 배열 첨자는 base로 접힌다
+    _vt = out["var_types"]["s_updateerrorcode"]["g_sys_error_his"]
+    assert _vt == {"type": "uint16_t", "source": "doc_annotation"}
+    m = out["suts_meta"]["s_updateerrorcode"]
+    assert (m["component"], m["test_method"], m["gen_method"]) == ("SwCom_07", "FNCT", "AEC, ABV")
+    assert m["doc_total"] == 12 and m["doc_shown"] == 8
+    assert "total" not in m and "gen_total" not in m
+    assert out["uds"]["s_updateerrorcode"]["prototype_after"] == "void s_updateerrorcode(U8 d)"
+    assert out["uds"]["s_updateerrorcode"]["logic_flow"] == [], "소스 없이 의사코드를 만들지 않는다"
+
+
+def test_build_doc_proposal_document_fallback_unknown_type_yields_no_var_type():
+    """문서 폴백에서도 미상 타입은 var_types에 넣지 않는다(숫자 제안 억제)."""
+    from workflow.impact_orchestrator import _build_doc_proposal
+
+    doc_content = {
+        "suts": {"s_foo": [{"tc_id": "T1", "inputs": {"SomeEnum_Mode": "IDLE"}, "expected": {}}]},
+        "suts_meta": {"s_foo": {"columns": {"inputs": ["SomeEnum_Mode"], "expected": []}}},
+    }
+    out = _build_doc_proposal({}, {"s_foo"}, doc_content=doc_content)
+    assert "s_foo" not in out["var_types"]
+
+
+def test_shrink_drops_functions_only_as_last_resort_and_records_them():
+    """행·변수를 다 줄여도 초과면 **함수 축**을 자르되, 빠진 함수를 기록한다.
+
+    ⚠ 기록이 없으면 프론트가 '문서에 TC 없음(미파싱)'과 구분하지 못해, 실제로는 문서에 있는
+    TC를 "없다"고 표시한다. 무조건 자르지 않는 이유는 기존에 보이던 원문이 사라지는 회귀이기 때문."""
+    from workflow.impact_orchestrator import _shrink_doc_content
+
+    big = {
+        "suts": {f"fn{i:04d}": [
+            {"tc_id": f"T{j}", "inputs": {f"v{k}": "0x1234" * 6 for k in range(12)},
+             "expected": {f"e{k}": "0x1234" * 6 for k in range(12)}}
+            for j in range(8)
+        ] for i in range(400)},
+        "suts_meta": {f"fn{i:04d}": {"columns": {"inputs": [f"v{k}" for k in range(12)], "expected": []},
+                                     "seq_total": 8, "seq_shown": 8} for i in range(400)},
+        "sits_by_tc": {},
+    }
+    warns: list = []
+    out = _shrink_doc_content(big, warn_sink=warns, budget=200_000)
+
+    assert len(out["suts"]) < 400, "지배항인 함수 축이 마지막에 줄어야 한다"
+    om = out.get("suts_omitted")
+    assert om and om["reason"] == "payload_budget"
+    assert om["count"] == 400 - len(out["suts"])
+    assert om["functions"], "어떤 함수가 빠졌는지 알 수 있어야 '미파싱'과 구분된다"
+    # 남은 함수의 meta도 함께 정리돼야 한다(고아 meta 금지)
+    assert set(out["suts_meta"]) == set(out["suts"])
+    assert any("함수" in w and "생략" in w for w in warns)
+
+
+def test_shrink_does_not_claim_reduction_when_nothing_shrank():
+    """이미 최소 표본이라 0바이트도 안 줄었는데 "축소"라고 보고하면 안 된다(실측 흔한 경로)."""
+    from workflow.impact_orchestrator import _shrink_doc_content
+
+    # 시퀀스 1건·변수 1개 — 어떤 강등 단계로도 더 줄일 게 없다. 크기는 함수 개수에서 온다.
+    tight = {
+        "suts": {f"fn{i:04d}": [{"tc_id": "T", "inputs": {"v": "0x1"}, "expected": {}}] for i in range(4000)},
+        "suts_meta": {}, "sits_by_tc": {},
+    }
+    warns: list = []
+    _shrink_doc_content(tight, warn_sink=warns, budget=100)
+
+    joined = " ".join(warns)
+    assert "축소 여지 없음" in joined or "생략" in joined
+    assert "시퀀스 3건·변수 5개) 0KB" not in joined
+
+
+def test_shrink_noop_under_budget_records_nothing():
+    from workflow.impact_orchestrator import _shrink_doc_content
+
+    small = {"suts": {"fn": [{"tc_id": "T1", "inputs": {"x": "1"}, "expected": {}}]},
+             "suts_meta": {}, "sits_by_tc": {}}
+    warns: list = []
+    out = _shrink_doc_content(small, warn_sink=warns)
+    assert warns == []
+    assert "suts_omitted" not in out

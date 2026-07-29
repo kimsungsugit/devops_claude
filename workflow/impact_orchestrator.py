@@ -619,12 +619,23 @@ def _enrich_asil_from_swcom(
 def _load_suts_fn_tcs(
     linked_doc: str, flagged_fns: List[str], warn_sink: Optional[List[str]] = None,
     content_sink: Optional[Dict[str, Any]] = None,
+    meta_sink: Optional[Dict[str, Any]] = None,
+    *,
+    seq_cap: int = 8, kv_cap: int = 12, col_cap: int = 80,
 ) -> Dict[str, List[str]]:
     """Return {fn_name: [tc_id, ...]} by parsing the existing SUTS xlsm.
 
     content_sink(선택): 제공되면 {fn: [{tc_id, action, precondition, inputs, expected}]}로
     실제 TC 내용(Test Action·실입력·실기대값)을 채운다 — 문서 카드에 '예측' 대신 실 내용 표시용.
     회귀 집계(return {fn:[tc_id]})는 불변(순수 additive).
+
+    meta_sink(선택): {fn: {columns:{inputs[],expected[],sheet}, component, test_method,
+    gen_method, related_ids[]}}. columns는 **이 TC 블록의 시트 헤더 원문**(열 순서 보존)이라
+    ① 재계산 대상 변수집합의 권위 소스이고 ② Excel 붙여넣기 컬럼 순서가 된다.
+
+    seq_cap/kv_cap: 문서 카드가 보여줄 시퀀스·변수 개수 상한. 과거 3/5 고정이라 사용자가 본
+    "TC 3건 × 변수 5개"가 문서의 실제 크기가 아니라 **절단값**이었는데 표기가 없었다.
+    상향하고, 절단이 발생하면 seq_total/col_truncated로 표면화한다.
 
     ⚠ cloudium(U:\\)에서는 backend가 파일을 직접 열 수 없다 — 과거 `load_workbook(linked_doc)`
     직접 open은 `_safe_exists`가 PermissionError→False로 걸러 **조용히 0**(회귀 TC 미집계)을
@@ -677,10 +688,10 @@ def _load_suts_fn_tcs(
             tcs = [str(tc.get("base_tc_id") or "") for tc in _seqs if isinstance(tc, dict) and tc.get("base_tc_id")]
             if name and tcs:
                 result[name] = list(dict.fromkeys(tcs))
-                # 실 TC 내용 보존(문서 카드용) — 함수당 상위 3 시퀀스, action 300자.
+                # 실 TC 내용 보존(문서 카드용) — 함수당 상위 seq_cap 시퀀스, action 300자.
                 if content_sink is not None:
                     seqs_out = []
-                    for tc in _seqs[:3]:
+                    for tc in _seqs[:seq_cap]:
                         if not isinstance(tc, dict):
                             continue
                         action = str(tc.get("description") or "").strip()
@@ -690,18 +701,51 @@ def _load_suts_fn_tcs(
                         _src = tc.get("source") or {}
                         _src = _src if isinstance(_src, dict) else {}
                         _loc = {k: _src.get(k) for k in ("sheet", "tc_row", "sequence_row") if _src.get(k) is not None}
+                        _in_all = _as_dict(tc.get("inputs"))
+                        _exp_all = _as_dict(tc.get("expected"))
                         _seq = {
                             "tc_id": str(tc.get("base_tc_id") or ""),
                             "action": action[:300],
                             "precondition": pre[:200],
-                            "inputs": _cap_kv(tc.get("inputs")),
-                            "expected": _cap_kv(tc.get("expected")),
+                            "inputs": _cap_kv(_in_all, n=kv_cap),
+                            "expected": _cap_kv(_exp_all, n=kv_cap),
                         }
+                        # ⚠ 이 행이 잘렸다는 사실을 반드시 실어 보낸다. 잘린 변수는 프론트 대조에서
+                        #   `undefined`라 **판정에서 제외**되는데, 표기가 없으면 "비교 결과 같다"와
+                        #   구분되지 않아 실제로는 값이 다른 TC를 '유지'로 단정하게 된다(거짓 유지).
+                        if len(_in_all) > kv_cap or len(_exp_all) > kv_cap:
+                            _seq["kv_truncated"] = True
+                            _seq["kv_total"] = {"inputs": len(_in_all), "expected": len(_exp_all)}
                         if _loc:
                             _seq["loc"] = _loc
                         seqs_out.append(_seq)
                     if seqs_out:
                         content_sink[name] = seqs_out
+                # 문서 메타 + 실 컬럼명(문서 작성급 초안의 grounding 소스). 파서가 이미 뽑아둔
+                # 값을 그대로 옮길 뿐이라 재파싱 비용 0. 절단은 반드시 표면화(silent 금지).
+                if meta_sink is not None:
+                    _cols = unit.get("columns")
+                    _cols = _cols if isinstance(_cols, dict) else {}
+                    _in = [str(x) for x in (_cols.get("inputs") or []) if str(x).strip()]
+                    _exp = [str(x) for x in (_cols.get("expected") or []) if str(x).strip()]
+                    _md = unit.get("metadata")
+                    _md = _md if isinstance(_md, dict) else {}
+                    _meta: Dict[str, Any] = {
+                        "columns": {
+                            "inputs": _in[:col_cap],
+                            "expected": _exp[:col_cap],
+                            "sheet": str(_cols.get("sheet") or ""),
+                        },
+                        "component": str(unit.get("component") or "")[:80],
+                        "test_method": str(_md.get("test_method") or "")[:40],
+                        "gen_method": str(_md.get("gen_method") or "")[:40],
+                        "related_ids": [str(x) for x in (_md.get("related_ids") or [])][:10],
+                        "seq_total": len(_seqs),          # 문서의 실제 시퀀스 수(절단 전)
+                        "seq_shown": min(len(_seqs), seq_cap),
+                    }
+                    if len(_in) > col_cap or len(_exp) > col_cap:
+                        _meta["columns"]["truncated"] = True
+                    meta_sink[name] = _meta
         except Exception:  # noqa: BLE001 — 한 유닛의 기형 데이터가 전체 회귀집합을 무너뜨리지 않게 격리  # silent-ok(_unit_exc로 집계·표면화)
             _unit_exc += 1
             continue
@@ -909,8 +953,16 @@ def _load_sds_fn_desc(
     return out
 
 
+def _as_dict(v: Any) -> Dict[str, Any]:
+    """dict면 그대로, 아니면 빈 dict — 손상/누락 노드에서 `.get()` 크래시 방어."""
+    return v if isinstance(v, dict) else {}
+
+
 def _cap_kv(d: Any, n: int = 5) -> Dict[str, str]:
-    """{header: value} 중 비어있지 않은 상위 n개를 80자로 절단(job 크기 상한). SITS/STS 내용 캡처 공용."""
+    """{header: value} 중 비어있지 않은 상위 n개를 80자로 절단(job 크기 상한). SITS/STS 내용 캡처 공용.
+
+    ⚠ 기본값 5는 STS/SITS 폴백 캡처가 공유하므로 바꾸지 말 것 — SUTS/SITS 상세 캡처는
+    호출부에서 `n=` 을 명시해 올린다(기본을 올리면 무관한 경로까지 부푼다)."""
     out: Dict[str, str] = {}
     for k, v in list((d if isinstance(d, dict) else {}).items()):  # 비-dict(리스트 등) 방어 — 유닛루프 크래시 차단
         sv = str(v).strip()
@@ -920,6 +972,142 @@ def _cap_kv(d: Any, n: int = 5) -> Dict[str, str]:
         if len(out) >= n:
             break
     return out
+
+
+# doc_content 직렬화 예산(바이트). 초과하면 아래 _shrink_doc_content가 단계적으로 줄인다.
+_DOC_CONTENT_BUDGET = 600_000
+# 강등 단계: (SUTS 시퀀스 수, SITS 서브케이스 수, 변수 kv 수)
+_DOC_CONTENT_SHRINK_STEPS = ((5, 4, 12), (3, 3, 8), (3, 3, 5))
+# 최후 강등: 함수 축. 실측상 `doc_content.suts`의 함수 수는 `_changed_set` 크기(상한 없음, p50 242 /
+# max 724)라 **행·변수를 아무리 줄여도 지배항이 남는다**. 무조건 자르면 기존에 보이던 원문이
+# 사라지므로(회귀) 예산 초과일 때만 자르고, **빠진 함수 목록을 기록**해 프론트가 '미파싱'이 아니라
+# "페이로드 상한으로 생략 — [전체 초안 불러오기]로 조회"라고 말할 수 있게 한다.
+_DOC_CONTENT_FN_STEPS = (120, 60)
+
+
+def _shrink_doc_content(
+    doc_content: Dict[str, Any],
+    warn_sink: Optional[List[str]] = None,
+    budget: int = _DOC_CONTENT_BUDGET,
+) -> Dict[str, Any]:
+    """doc_content가 예산을 넘으면 **제자리에서** 단계적으로 줄이고 사유를 표면화한다.
+
+    재파싱 없이 이미 만들어진 구조만 잘라낸다(로더 재호출 = xlsm 재파싱이라 비싸다).
+    ⚠ 절단은 반드시 warn으로 남긴다 — 과거 `_seqs[:3]`·`_cap_kv(n=5)`가 아무 표기 없이
+    잘라내는 바람에 사용자가 본 "TC 3건 × 변수 5개"를 문서의 실제 크기로 오인했다.
+    `seq_total`/`sub_total`/`columns.truncated`는 그대로 보존되므로 프론트가
+    '총 N건 중 M건'을 계속 정직하게 표시한다.
+    """
+    def _size() -> int:
+        try:
+            return len(json.dumps(doc_content, ensure_ascii=False))
+        except Exception:  # noqa: BLE001 — 크기 측정 실패는 강등 판단 불가일 뿐(원본 유지)
+            logger.debug("doc_content 크기 측정 실패 — 강등 생략", exc_info=True)
+            return 0
+
+    size = _size()
+    initial = size
+    if size <= budget:
+        return doc_content
+    applied = ()  # 실제 적용된 강등 단계(경고 문구 근거) — 루프 미진입 시 빈 튜플
+
+    def _cap_row_kv(row: Any, kv_n: int) -> None:
+        if not isinstance(row, dict):
+            return
+        for fld in ("inputs", "expected"):
+            kv = row.get(fld)
+            if isinstance(kv, dict) and len(kv) > kv_n:
+                row[fld] = dict(list(kv.items())[:kv_n])
+                row["kv_truncated"] = True   # 부분 대조임을 프론트가 알아야 '유지'로 단정하지 않는다
+
+    for seq_n, sub_n, kv_n in _DOC_CONTENT_SHRINK_STEPS:
+        applied = (seq_n, sub_n, kv_n)
+        _meta = doc_content.get("suts_meta") or {}
+        for fn, rows in (doc_content.get("suts") or {}).items():
+            if not isinstance(rows, list):
+                continue
+            del rows[seq_n:]
+            for r in rows:
+                _cap_row_kv(r, kv_n)
+            # 표시 개수를 실제와 맞춘다 — 안 맞추면 '총 N건 중 M건'이 축소 전 값을 말해
+            # 절단이 없는 것처럼 보인다(silent 절단 재발).
+            m = _meta.get(fn)
+            if isinstance(m, dict):
+                m["seq_shown"] = len(rows)
+                cols = m.get("columns")
+                if isinstance(cols, dict):
+                    for side in ("inputs", "expected"):
+                        lst = cols.get(side)
+                        if isinstance(lst, list) and len(lst) > kv_n:
+                            cols[side] = lst[:kv_n]
+                            cols["truncated"] = True
+        for tc in (doc_content.get("sits_by_tc") or {}).values():
+            subs = tc.get("sub_cases") if isinstance(tc, dict) else None
+            if not isinstance(subs, list):
+                continue
+            del subs[sub_n:]
+            for sc in subs:
+                _cap_row_kv(sc, kv_n)
+        size = _size()
+        if size <= budget:
+            break
+    # 행·변수를 다 줄였는데도 초과면 남은 지배항은 **함수 수**다(실측 확인). 여기서만 함수를 자른다.
+    _omitted: List[str] = []
+    if size > budget:
+        for fn_n in _DOC_CONTENT_FN_STEPS:
+            _suts = doc_content.get("suts") or {}
+            if len(_suts) <= fn_n:
+                break
+            keep = sorted(_suts)[:fn_n]
+            keep_set = set(keep)
+            # ⚠ 단계마다 **누적**해야 한다. 매번 덮어쓰면 마지막 단계에서 빠진 것만 남아
+            #   "생략 60건"이라고 보고하면서 실제로는 340건이 빠진다(과소 보고).
+            _omitted.extend(k for k in sorted(_suts) if k not in keep_set)
+            doc_content["suts"] = {k: _suts[k] for k in keep}
+            _meta_all = doc_content.get("suts_meta") or {}
+            doc_content["suts_meta"] = {k: v for k, v in _meta_all.items() if k in keep_set}
+            size = _size()
+            if size <= budget:
+                break
+        if _omitted:
+            # 어떤 함수가 빠졌는지 남긴다 — 없으면 프론트가 '미파싱'(문서에 TC 없음)과 구분하지 못해
+            # 실제로는 문서에 있는 TC를 "없다"고 표시하게 된다.
+            # ⚠ 목록을 자르면 안 된다 — 잘린 뒤의 함수는 프론트가 '생략됨'을 알 수 없어 다시
+            #   "문서에 없음(신규 작성)"으로 표시된다(이 기록을 만든 이유가 바로 그것). 이름은
+            #   함수당 ~30B라 최악(724개)에도 ~22KB로, 방금 절감한 MB 단위에 비하면 무시할 수준.
+            doc_content["suts_omitted"] = {
+                "reason": "payload_budget",
+                "count": len(_omitted),
+                "functions": _omitted,
+            }
+    if warn_sink is not None and applied:
+        # ⚠ 문구가 사실과 달라선 안 된다:
+        #   ① "상한으로 축소"만 쓰면 상한을 **지켰다**고 읽힌다 → 실제 도달 크기를 함께 밝힌다.
+        #   ② 실 데이터에서는 이미 구 캡(시퀀스 3·변수 5)에 포화돼 **0바이트도 안 줄어드는** 경우가
+        #      흔한데(실측), 그때도 "축소"라고 보고하면 하지 않은 일을 했다고 말하는 것이다.
+        #   여기서 줄지 않는 축은 `sits_by_tc`의 **TC 개수**와 `uds`/`sds`/`sts_by_tc`다
+        #   (컬럼은 위에서 실제로 줄인다 — 예전 주석이 반대로 적혀 있었다).
+        _saved = initial - size
+        _ok = size <= budget
+        if _saved <= 0:
+            warn_sink.append(
+                f"문서 내용: 페이로드 {size // 1000}KB(상한 {budget // 1000}KB 초과)이나 "
+                "축소 여지 없음 — 이미 최소 표본이며 남은 크기는 TC/함수 개수에서 온다"
+            )
+        else:
+            warn_sink.append(
+                f"문서 내용: 페이로드 축소(시퀀스 {applied[0]}건·변수 {applied[2]}개"
+                + (f"·함수 {len(doc_content.get('suts') or {})}개" if _omitted else "")
+                + f") {initial // 1000}KB → {size // 1000}KB / 상한 {budget // 1000}KB"
+                + ("" if _ok else " — **상한 초과 유지**(TC 개수는 축소 대상 아님)")
+                + " — 전체는 문서 카드의 [전체 초안 불러오기]로 조회"
+            )
+        if _omitted:
+            warn_sink.append(
+                f"문서 내용: 페이로드 상한으로 함수 {len(_omitted)}개의 SUTS 원문을 job에서 생략 "
+                "— 해당 함수 카드는 [전체 초안 불러오기]로 조회"
+            )
+    return doc_content
 
 
 def _normTc(s: Any) -> str:
@@ -934,12 +1122,17 @@ def _normTc(s: Any) -> str:
 def _load_sits_fn_chains(
     linked_doc: str, flagged_fns: List[str], warn_sink: Optional[List[str]] = None,
     content_sink: Optional[Dict[str, Any]] = None,
+    *,
+    sub_cap: int = 6, kv_cap: int = 12,
 ) -> Dict[str, List[str]]:
     """Return {entry_fn: [label, ...]} from the SITS vectorcast intermediate JSON.
 
-    content_sink(선택): 제공되면 {_normTc(tc_id): {call_chain, sub_cases:[{precondition, inputs, expected}]}}로
-    통합 TC 실 내용을 채운다(문서 카드용, TC-ID 키). 프론트가 TC-ID로 조인하므로 entry_fn 매칭과 무관하게
-    전체 TC를 담는다. 회귀 반환({entry_fn:[label]})은 불변(순수 additive).
+    content_sink(선택): 제공되면 {_normTc(tc_id): {call_chain, entry_fn, gen_method, related_ids,
+    sub_cases:[{case_label, precondition, inputs, expected}], sub_total}}로 통합 TC 실 내용을 채운다
+    (문서 카드용, TC-ID 키). 프론트가 TC-ID로 조인하므로 entry_fn 매칭과 무관하게 전체 TC를 담는다.
+    회귀 반환({entry_fn:[label]})은 불변(순수 additive).
+
+    sub_cap: 서브케이스 표시 상한(과거 3 고정). 절단 시 sub_total로 실제 개수를 표면화한다.
 
     intermediate(`<sits>_vectorcast.json`)는 SITS 빌더가 생성한다 — cloudium이면 worker 경유로
     읽는다(직접 FS 금지). cloudium은 읽기전용이라 intermediate 자체가 없을 수 있고, 그때의 0은
@@ -994,15 +1187,26 @@ def _load_sits_fn_chains(
             # 조인하므로 entry_fn 매칭과 무관하게 전체 TC를 담는다(문서 소규모, 총량 800 캡). 회귀 result는 불변.
             _nk = _normTc(tc_id)
             if content_sink is not None and _nk and len(content_sink) < 800:
+                _all_subs = [sc for sc in (itc.get("sub_cases") or []) if isinstance(sc, dict)]
                 _subs = [
                     {
+                        # case_label(AEC 등가분할 라벨 '1 [EC1:무효-하한]' 등)은 생성기가 이미
+                        # 만들어 두는데 여기서 버려져 카드가 케이스 성격을 못 보여줬다.
+                        "case_label": str(sc.get("case_label") or "").strip()[:80],
                         "precondition": str(sc.get("precondition") or "").strip()[:200],
-                        "inputs": _cap_kv(sc.get("inputs")),
-                        "expected": _cap_kv(sc.get("expected")),
+                        "inputs": _cap_kv(sc.get("inputs"), n=kv_cap),
+                        "expected": _cap_kv(sc.get("expected"), n=kv_cap),
                     }
-                    for sc in (itc.get("sub_cases") or [])[:3] if isinstance(sc, dict)
+                    for sc in _all_subs[:sub_cap]
                 ]
-                content_sink[_nk] = {"call_chain": chain[:200], "sub_cases": _subs}
+                content_sink[_nk] = {
+                    "call_chain": chain[:200],
+                    "sub_cases": _subs,
+                    "sub_total": len(_all_subs),   # 절단 전 실제 개수(silent 절단 금지)
+                    "entry_fn": entry,
+                    "gen_method": str(itc.get("gen_method") or "")[:40],
+                    "related_ids": [str(x) for x in (itc.get("related_ids") or [])][:10],
+                }
         except Exception:  # noqa: BLE001 — 한 통합케이스의 기형 데이터가 전체 체인집합을 무너뜨리지 않게 격리  # silent-ok(_itc_exc로 집계·표면화)
             _itc_exc += 1
             continue
@@ -1072,16 +1276,27 @@ def _load_testspec_by_tc(
     return out
 
 
+def _empty_doc_proposal() -> Dict[str, Any]:
+    """doc_proposal의 빈 골격 — 노드 목록의 단일 출처(키 추가 시 여기만 고친다)."""
+    return {
+        "suts": {}, "sits": {}, "sts": {}, "uds": {}, "sds": {},
+        "suts_meta": {}, "var_types": {}, "source": "",
+    }
+
+
 def _build_doc_proposal(
     sections: Dict[str, Any],
     changed_set: set,
     *,
     warn_sink: Optional[List[str]] = None,
+    doc_content: Optional[Dict[str, Any]] = None,
+    change_details: Optional[Dict[str, Any]] = None,
     fn_cap: int = 50,
-    seq_cap: int = 6,
-    sub_cap: int = 3,
-    sts_tc_cap: int = 4,
+    seq_cap: int = 10,
+    sub_cap: int = 6,
+    sts_tc_cap: int = 6,
     step_cap: int = 6,
+    kv_cap: int = 12,
 ) -> Dict[str, Any]:
     """직접 변경 함수(changed_set)에 대해 **문서 생성기(suts/sits/sts)를 그대로 재사용**해
     '문서를 직접 생성하는 것처럼' 구체적인 시험 초안(콜체인·경계값 입력·기대출력)을 결정론으로
@@ -1089,25 +1304,46 @@ def _build_doc_proposal(
 
     반환:
       {
-        "suts": {fn(lower): [{strategy, inputs:{v:val}, expected:{v:val}, description}]},
-        "sits": {fn(lower): {call_chain: "a -> b -> c", sub_cases:[{inputs, expected, precondition}]}},
-        "sts":  {fn(lower): [[{action, expected}], ...]},   # TC별 step 리스트
+        "suts": {fn(lower): [{strategy, inputs:{v:val}, expected:{v:val}, description, seq_num}]},
+        "suts_meta": {fn: {component, test_method, gen_method, asil, srs_req_ids,
+                           precondition, prototype, total, truncated}},   # 함수당 1회
+        "sits": {fn: {call_chain, sub_cases:[{inputs, expected, precondition, case_label}],
+                      tc_id, gen_method, related_ids, asil, module_name, total, truncated}},
+        "sts":  {fn: [[{action, expected}], ...]},   # TC별 step 리스트
+        "uds":  {fn: {prototype, inputs[], outputs[], globals[], calls[], logic_flow[],
+                      precondition, asil, description_source}},
+        "sds":  {fn: {component, asil, related_ids[], interface_before/after, behavior_source}},
+        "var_types": {fn: {base_var: {type, source}}},   # 프론트 판정의 타입 근거
+        "source": "generator" | "document",
       }
 
+    ⚠ 메타는 **함수당 1회**만 싣는다(행마다 반복 금지) — 페이로드가 함수 수에만 비례한다.
     ⚠ 생성기의 기대출력은 소스 로직(가드/클램프) **추론값**이라 실측(VectorCAST)이 아니다.
       생성기 내부가 판정 불가 값을 '[검증 필요]'로 표기하며, 프론트는 이를 advisory로 노출한다
       (자동 반영 없음). 미상 타입 숫자 환각은 생성기 경계값 테이블이 차단한다.
+    ⚠ 산문(UDS Description·SDS Behavior)은 결정론 근거가 없어 값을 만들지 않고
+      `*_source: "ai_required"`로 표기한다 — 동어반복 플레이스홀더가 정보인 척하지 않게.
     ⚠ 간접(비변경) 함수는 스코프 밖 — 프론트 renderAuthoringProposal이 !d.changed에서 억제한다.
+
+    소스 미해결(cloudium/원격)이면 `sections`가 비는데, 그때도 **연동 문서 원문**(doc_content)이
+    있으면 그걸 근거로 초안을 합성한다(`source="document"`). 소스가 안 잡히는 환경이 곧 문서는
+    읽히는 환경이라, 이 폴백이 없으면 실사용 화면에서 초안이 통째로 비어 골격만 남았다.
     """
-    out: Dict[str, Any] = {"suts": {}, "sits": {}, "sts": {}}
+    out: Dict[str, Any] = _empty_doc_proposal()
     if not changed_set:
         return out
     fdmap = sections.get("function_details") or {}
     if not fdmap:
-        # 소스 미해결(cloudium 소스 미배선 등) — silent-0 금지, 사유 표면화(단 분석 비차단).
+        if not (doc_content or change_details):
+            # 소스도 문서도 없음 — silent-0 금지, 사유 표면화(단 분석 비차단).
+            if warn_sink is not None:
+                warn_sink.append("문서 생성 초안: 소스 function_details 없음 — 생성 초안 생략")
+            return out
         if warn_sink is not None:
-            warn_sink.append("문서 생성 초안: 소스 function_details 없음 — 생성 초안 생략")
-        return out
+            warn_sink.append(
+                "문서 생성 초안: 소스 미해결 — 연동 문서 원문 기준으로 초안 합성(생성기 미사용)")
+        return _build_doc_proposal_from_documents(
+            out, changed_set, doc_content or {}, change_details or {}, fn_cap=fn_cap)
     gim = sections.get("globals_info_map")
     gim = gim if isinstance(gim, dict) else {}   # 손상 캐시(비-dict)에서 .items() AttributeError 방어(reviewer W1)
     # changed_set은 소문자 함수명. function_details 키(fid)는 임의이고 info["name"]이 실제 함수명이다.
@@ -1121,7 +1357,10 @@ def _build_doc_proposal(
                 name_lc_to_fid.setdefault(_nm, _fid)
     targets = [fn for fn in sorted(changed_set) if fn in name_lc_to_fid][:fn_cap]
     if not targets:
+        # 아무것도 만들지 않았으면 source도 비워 둔다 — 'generator'라 라벨하면 프론트가
+        # "생성기 산출"이라 표기하는데 산출물이 없다(빈 근거에 출처를 붙이지 않는다).
         return out
+    out["source"] = "generator"
 
     # ── SUTS: 대상 함수만 collect_unit_functions → generate_sequences(문서 생성과 동일 경로) ──
     # 타입 해상도(핵심): gim에서 {var: raw_type} 로컬 타입맵(_gim_to_type_map — set_globals_type_cache와
@@ -1135,10 +1374,15 @@ def _build_doc_proposal(
     #   타입 미상은 generate_sequences 내부 변수명 폴백. 영향집합/ASIL/커버리지는 이와 무관하게 불변.
     try:
         from generators.suts import (
+            _DEFAULT_SEQ_COUNT,
             _gim_to_type_map,
             collect_unit_functions,
+            determine_gen_method,
+            determine_test_method,
             generate_sequences,
         )
+
+        from workflow.impact_doc_draft import build_var_types
 
         _local_tc = _gim_to_type_map(gim)   # try 안 — 손상 gim이어도 아래 except가 우아하게 흡수(reviewer W1)
         _sub_fd = {name_lc_to_fid[fn]: fdmap[name_lc_to_fid[fn]] for fn in targets}
@@ -1146,18 +1390,67 @@ def _build_doc_proposal(
             _nm = str(_unit.get("name") or "").strip().lower()
             if _nm not in changed_set or _nm in out["suts"]:
                 continue
-            _slim = [
-                {
+            # ⚠ `generate_sequences`는 내부에서 `seqs[:max_seq]`로 잘라 돌려준다(generators/suts.py:648).
+            #   seq_cap을 그대로 넘기면 반환 길이가 항상 ≤seq_cap이라 "총 몇 개를 만들 수 있는지"를
+            #   알 수 없고, len>cap이 성립할 수 없어 truncated가 영구 False(dead code)가 된다.
+            #   생성기 기본값(_DEFAULT_SEQ_COUNT)까지 만들어 **진짜 총량**을 재고, 표시분만 잘라 싣는다.
+            _all_seq = [s for s in (generate_sequences(_unit, max_seq=max(seq_cap, _DEFAULT_SEQ_COUNT),
+                                                       type_cache=_local_tc) or [])
+                        if isinstance(s, dict)]
+            # ⚠ inputs/expected를 `dict(...)` 그대로 실으면 시퀀스마다 SUTS 입력 49 + 출력 86개를
+            #   통째로 싣는다(실측: doc_proposal의 64%가 이 노드). doc_content 쪽과 같은 캡을 적용하고,
+            #   잘렸으면 프론트가 '유지'로 단정하지 않도록 `kv_truncated`를 함께 보낸다.
+            _slim = []
+            for s in _all_seq[:seq_cap]:
+                _sin = _as_dict(s.get("inputs"))
+                _sexp = _as_dict(s.get("expected"))
+                _row = {
                     "strategy": str(s.get("strategy") or ""),
-                    "inputs": dict(s.get("inputs") or {}),
-                    "expected": dict(s.get("expected") or {}),
+                    "inputs": _cap_kv(_sin, n=kv_cap),
+                    "expected": _cap_kv(_sexp, n=kv_cap),
                     "description": str(s.get("description") or "")[:400],
+                    "seq_num": s.get("seq_num"),
                 }
-                for s in (generate_sequences(_unit, max_seq=seq_cap, type_cache=_local_tc) or [])[:seq_cap]
-                if isinstance(s, dict)
-            ]
-            if _slim:
-                out["suts"][_nm] = _slim
+                if len(_sin) > kv_cap or len(_sexp) > kv_cap:
+                    _row["kv_truncated"] = True
+                    _row["kv_total"] = {"inputs": len(_sin), "expected": len(_sexp)}
+                _slim.append(_row)
+            if not _slim:
+                continue
+            out["suts"][_nm] = _slim
+            # 문서 컬럼(Component/Test Method/Gen.Method/Safety Related/Precondition/Related ID)은
+            # 생성기가 이미 산출하는데 예전 슬림화가 통째로 버려서 카드가 시험 값만 보여줬다.
+            # 행마다 반복하면 페이로드가 시퀀스 수만큼 부푸니 **함수당 1회**만 싣는다.
+            out["suts_meta"][_nm] = {
+                # ⚠ `_src`는 **백엔드가 필드별로 명시**한다. 프론트가 "어느 노드에 있었나"로
+                #   추측하면 문서 폴백(같은 노드에 문서 원문을 싣는다)에서 판정이 역전돼,
+                #   문서에 실제로 적힌 값에 "(추론)" 배지가 붙는다.
+                "_src": {f: "generator" for f in (
+                    "component", "test_method", "gen_method", "asil",
+                    "srs_req_ids", "precondition", "prototype")},
+                "component": str(_unit.get("component") or "")[:80],
+                "test_method": determine_test_method(_unit),
+                "gen_method": determine_gen_method(_unit),
+                "asil": str(_unit.get("asil") or ""),
+                "srs_req_ids": [str(x) for x in (_unit.get("srs_req_ids") or [])][:10],
+                "precondition": str(_unit.get("precondition") or "")[:200],
+                "prototype": str(_unit.get("prototype") or "")[:200],
+                # ⚠ 이름을 `total`로 두면 안 된다 — 프론트의 '원문 N건 중 M건' 슬롯이 **문서 TC 수**
+                #   (doc_content.suts_meta[fn].seq_total)를 뜻하는데, 같은 이름이면 생성기 시퀀스 수가
+                #   그 자리에 들어가 존재하지 않는 원문 절단을 경고한다(실측 2건 문서에 "10건 중 2건").
+                #   두 수는 서로 다른 양이므로 슬롯을 분리한다.
+                "gen_total": len(_all_seq),
+                "gen_shown": min(len(_all_seq), seq_cap),
+                "gen_truncated": len(_all_seq) > seq_cap,
+            }
+            # 프론트 판정의 타입 근거. 미상은 **키 부재**(uint8_t 기본값 환각 차단 — impact_doc_draft 참조).
+            _vars = list(_unit.get("input_vars") or []) + list(_unit.get("output_vars") or [])
+            for _s in _slim:
+                _vars.extend(_s["inputs"].keys())
+                _vars.extend(_s["expected"].keys())
+            _vt = build_var_types(_vars, _local_tc)
+            if _vt:
+                out["var_types"][_nm] = _vt
     except Exception as exc:  # noqa: BLE001 — best-effort 표시 초안(분석 비차단)
         logger.debug("doc_proposal SUTS synth failed: %s", exc)
         if warn_sink is not None:
@@ -1177,18 +1470,31 @@ def _build_doc_proposal(
             _nm = str(_itc.get("entry_fn") or "").strip().lower()
             if _nm not in changed_set or _nm in out["sits"]:
                 continue
+            _all_sub = [sc for sc in (_itc.get("sub_cases") or []) if isinstance(sc, dict)]
             _subs = [
                 {
-                    "inputs": dict(sc.get("inputs") or {}),
-                    "expected": dict(sc.get("expected") or {}),
+                    # SUTS와 동일 캡 — 통합 TC도 입력 67 / 기대 70 컬럼까지 갈 수 있다.
+                    "inputs": _cap_kv(sc.get("inputs"), n=kv_cap),
+                    "expected": _cap_kv(sc.get("expected"), n=kv_cap),
                     "precondition": str(sc.get("precondition") or "")[:200],
+                    # case_label(AEC 등가분할 라벨 '1 [EC1:무효-하한]')은 생성기가 이미 만드는데
+                    # 예전 슬림화가 버려서 카드가 케이스 성격을 못 보여줬다.
+                    "case_label": str(sc.get("case_label") or "")[:80],
+                    "case_num": sc.get("case_num"),
                 }
-                for sc in (_itc.get("sub_cases") or [])[:sub_cap]
-                if isinstance(sc, dict)
+                for sc in _all_sub[:sub_cap]
             ]
             out["sits"][_nm] = {
                 "call_chain": str(_itc.get("call_chain") or ""),
                 "sub_cases": _subs,
+                # 문서 컬럼(TC ID / Gen.Method / Related ID(SwDS))도 생성기 산출인데 버려졌었다.
+                "tc_id": str(_itc.get("tc_id") or ""),
+                "gen_method": str(_itc.get("gen_method") or "")[:40],
+                "related_ids": [str(x) for x in (_itc.get("related_ids") or [])][:10],
+                "asil": str(_itc.get("asil") or ""),
+                "module_name": str(_itc.get("module_name") or "")[:80],
+                "total": len(_all_sub),
+                "truncated": len(_all_sub) > sub_cap,
             }
     except Exception as exc:  # noqa: BLE001
         logger.debug("doc_proposal SITS synth failed: %s", exc)
@@ -1219,6 +1525,115 @@ def _build_doc_proposal(
         if warn_sink is not None:
             warn_sink.append(f"문서 생성 초안: STS 시퀀스 합성 예외로 생략({exc})")
 
+    # ── UDS/SDS: 생성기가 없으므로 function_details를 문서 항목 형태로 정리만 한다 ──
+    # 산문(Description/Behavior)은 결정론 근거가 없다 → 값을 만들지 않고 *_source로 표기.
+    _cd = _as_dict(change_details)
+    for fn in targets:
+        _info = fdmap[name_lc_to_fid[fn]]
+        if not isinstance(_info, dict):
+            continue
+        _after = str(_as_dict(_cd.get(fn)).get("after") or "")
+        _proto = str(_info.get("prototype") or "")[:200]
+        out["uds"][fn] = {
+            "prototype": _proto,
+            "prototype_after": _after[:200],   # SIGNATURE 변경 시 변경 후 선언(없으면 빈 문자열)
+            "inputs": [str(x)[:120] for x in (_info.get("inputs") or [])][:20],
+            "outputs": [str(x)[:120] for x in (_info.get("outputs") or [])][:20],
+            "globals": [str(x)[:80] for x in
+                        (list(_info.get("globals_global") or []) + list(_info.get("globals_static") or []))][:30],
+            "calls": [str(x)[:80] for x in (_info.get("calls_list") or [])][:30],
+            "logic_flow": [str(x)[:160] for x in (_info.get("logic_flow") or [])][:12],
+            "precondition": str(_info.get("precondition") or "")[:200],
+            "asil": str(_info.get("asil") or ""),
+            "module_name": str(_info.get("module_name") or "")[:80],
+            # 산문은 결정론 불가 — 지어내지 않고 AI 보강 대상임을 명시(동어반복 플레이스홀더 금지).
+            "description_source": "ai_required",
+        }
+        out["sds"][fn] = {
+            "component": str(_info.get("module_name") or "")[:80],
+            "asil": str(_info.get("asil") or ""),          # 원문 echo — 승격/창작 없음
+            "related_ids": [],                              # 신규 요구 ID 창작 금지(원문에만 근거)
+            "interface_before": _proto,
+            "interface_after": _after[:200],
+            "behavior_source": "ai_required",
+        }
+
+    return out
+
+
+def _build_doc_proposal_from_documents(
+    out: Dict[str, Any],
+    changed_set: set,
+    doc_content: Dict[str, Any],
+    change_details: Dict[str, Any],
+    *,
+    fn_cap: int = 50,
+) -> Dict[str, Any]:
+    """소스 미해결(cloudium/원격)일 때 **연동 문서 원문**만으로 초안 원재료를 만든다.
+
+    시퀀스(`out["suts"]`)는 **만들지 않는다** — 생성기 없이 시험 시퀀스를 지어내면 환각이다.
+    대신 프론트 reconciler가 판정 표를 구성할 재료를 준다:
+      - `var_types`: 문서 컬럼명 + 이름 규칙으로 해상(미상은 키 부재 → 숫자 제안 없음)
+      - `suts_meta`: 문서가 이미 갖고 있는 Component/Test Method/Gen.Method/Related ID
+      - `uds`/`sds`: prototype 원문→변경 후, Used Globals 원문
+    이 경로가 없으면 실사용 화면(cloudium)에서 초안이 통째로 비어 골격만 남는다.
+    """
+    from workflow.impact_doc_draft import build_var_types, collect_var_names
+
+    out["source"] = "document"
+    _suts = _as_dict(doc_content.get("suts"))
+    _meta = _as_dict(doc_content.get("suts_meta"))
+    _uds = _as_dict(doc_content.get("uds"))
+    for fn in sorted(changed_set)[:fn_cap]:
+        rows = _suts.get(fn)
+        dmeta = _as_dict(_meta.get(fn))
+        cols = _as_dict(dmeta.get("columns"))
+        # 타입 해상도: gim(소스 실측)이 없으므로 **UDS 어노테이션**(`[IN] U16 g_x`)을 주 근거로,
+        # 없으면 이름 규칙으로 떨어진다. 둘 다 없으면 키 부재 = 미상 = 숫자 제안 억제.
+        _uc = _as_dict(_uds.get(fn))
+        _annot = list(_uc.get("globals") or []) + list(_uc.get("calls") or [])
+        names = collect_var_names(rows, cols)
+        if names:
+            vt = build_var_types(names, {}, annotated=_annot)
+            if vt:
+                out["var_types"][fn] = vt
+        if dmeta:
+            # ⚠ 축 이름을 생성기 경로(gen_*)와 **구분**한다 — 문서 TC 수와 생성기 시퀀스 수는 서로
+            #   다른 양이라 한 슬롯에 섞이면 프론트가 없는 절단을 경고한다(deep-review C1).
+            out["suts_meta"][fn] = {
+                # 여기 값은 전부 **문서 원문 echo**다(생성기 추론이 아니다). 노드 위치가 같다고
+                # 'generator'로 라벨하면 멀쩡한 원문에 "(추론)" 배지가 붙어 사용자가 의심하게 된다.
+                "_src": {f: "document" for f in (
+                    "component", "test_method", "gen_method", "srs_req_ids")},
+                "component": str(dmeta.get("component") or ""),
+                "test_method": str(dmeta.get("test_method") or ""),
+                "gen_method": str(dmeta.get("gen_method") or ""),
+                "asil": "",                                   # 소스 미해결 — 문서에 ASIL 컬럼 없음
+                "srs_req_ids": list(dmeta.get("related_ids") or []),
+                "precondition": "",
+                "prototype": "",
+                "doc_total": int(dmeta.get("seq_total") or 0),
+                "doc_shown": int(dmeta.get("seq_shown") or 0),
+            }
+        _c = _as_dict(_uds.get(fn))
+        _after = str(_as_dict(change_details.get(fn)).get("after") or "")
+        _proto = str(_c.get("prototype") or "")[:200]
+        if _c or _after:
+            out["uds"][fn] = {
+                "prototype": _proto,
+                "prototype_after": _after[:200],
+                "inputs": [], "outputs": [],
+                "globals": [str(x)[:80] for x in (_c.get("globals") or [])][:30],
+                "calls": [str(x)[:80] for x in (_c.get("calls") or [])][:30],
+                "logic_flow": [],                             # 소스 없음 — 의사코드 창작 금지
+                "precondition": "", "asil": "", "module_name": "",
+                "description_source": "ai_required",
+            }
+            out["sds"][fn] = {
+                "component": "", "asil": "", "related_ids": [],
+                "interface_before": _proto, "interface_after": _after[:200],
+                "behavior_source": "ai_required",
+            }
     return out
 
 
@@ -2532,13 +2947,15 @@ def run_impact_update(
         _flagged = sorted(_impacted_all | _changed_set)
         regression_test_set: Dict[str, Any] = {"suts": {}, "sits": {}}
         _suts_content: Dict[str, Any] = {}  # SUTS TC 실내용(문서 카드용) — _load_suts_fn_tcs가 채움
+        _suts_meta: Dict[str, Any] = {}  # SUTS 문서 메타+실 컬럼명(문서 초안 grounding) — 동 loader가 채움
         _sits_by_tc: Dict[str, Any] = {}  # SITS TC 실내용(TC-ID 키) — 중간 JSON에서 _load_sits_fn_chains가 채움
         # SUTS·SITS 회귀집계를 각각 try로 분리 — 한쪽 실패가 다른쪽을 떨어뜨리지 않게. 예외 시 사유를
         # warn으로 표면화(과거 shared try + `except: pass`가 전량 침묵손실 = loader silent-0 정책 위배).
         if _lk and getattr(_lk, "suts", ""):
             try:
                 regression_test_set["suts"] = _load_suts_fn_tcs(
-                    _lk.suts, _flagged, warn_sink=warnings, content_sink=_suts_content)
+                    _lk.suts, _flagged, warn_sink=warnings,
+                    content_sink=_suts_content, meta_sink=_suts_meta)
             except Exception as exc:  # noqa: BLE001 — best-effort, 없어도 분석은 진행(단 사유 표면화)
                 warnings.append(f"회귀 TC: SUTS 재실행 TC 집계 예외로 미집계({exc})")
         if _lk and getattr(_lk, "sits", ""):
@@ -2559,13 +2976,20 @@ def run_impact_update(
         # 함수도 문서 내용은 실 파싱본이라 그대로 유효. best-effort(로더 실패=빈 dict, 분석 비차단).
         # sts_by_tc/sits_by_tc는 TC-ID 키(함수 키 아님) — 프론트가 함수별 stsTestCases/sitsTestCases(ID)로
         # 조인한다. uds/suts/sds는 함수명(소문자) 키. 신규 키라 구 job에서도 프론트 ?? {} 폴백으로 안전.
-        doc_content: Dict[str, Any] = {"uds": {}, "suts": {}, "sds": {}, "sts_by_tc": {}, "sits_by_tc": {}}
+        doc_content: Dict[str, Any] = {
+            "uds": {}, "suts": {}, "sds": {}, "sts_by_tc": {}, "sits_by_tc": {},
+            # suts_meta: 함수당 1회(행마다 반복하지 않는다 — 페이로드가 함수 수에만 비례).
+            # {fn: {columns:{inputs[],expected[],sheet}, component, test_method, gen_method,
+            #       related_ids[], seq_total, seq_shown}}
+            "suts_meta": {},
+        }
         try:
             _direct_lc = {str(f).strip().lower() for f in _changed_set}
             _direct_list = sorted(_changed_set)
             # 키는 소문자 정규화(uds/sds와 일관) — 프론트 docContentFor가 항상 .toLowerCase()로 조회하므로
             # SUTS unit_name 원본 케이스(예 'g_DrvIn_MotorSpeed')를 그대로 두면 조회 미스→'미파싱' 오표시(reviewer W1).
             doc_content["suts"] = {str(k).strip().lower(): v for k, v in _suts_content.items() if str(k).strip().lower() in _direct_lc}
+            doc_content["suts_meta"] = {str(k).strip().lower(): v for k, v in _suts_meta.items() if str(k).strip().lower() in _direct_lc}
             if _lk and getattr(_lk, "uds", ""):
                 doc_content["uds"] = _load_uds_fn_content(_lk.uds, _direct_list, warn_sink=warnings)
             if _lk and getattr(_lk, "sds", ""):
@@ -2578,13 +3002,22 @@ def run_impact_update(
                 doc_content["sits_by_tc"] = _sits_by_tc
             elif _lk and getattr(_lk, "sits", ""):
                 doc_content["sits_by_tc"] = _load_testspec_by_tc(_lk.sits, warn_sink=warnings, doc_label="SITS")
-        except Exception:  # noqa: BLE001 — 문서 내용은 best-effort 표시 데이터(분석 비차단)
-            pass
+        except Exception as exc:  # noqa: BLE001 — 문서 내용은 best-effort 표시 데이터(분석 비차단)
+            # 과거 `pass`라 조립 실패가 통째로 침묵했다 — 프론트는 '미파싱'만 보고 이유를 알 수 없었다.
+            # 개별 로더는 자체 warn을 남기므로 여기 걸리는 건 조립 자체의 예외다(사유 표면화).
+            logger.debug("doc_content 조립 실패", exc_info=True)
+            warnings.append(f"문서 내용: 조립 예외로 일부 문서 원문이 비어 있음({exc})")
+        # 페이로드 예산 초과 시 단계적 축소 + 사유 표면화(절단 침묵 금지).
+        _shrink_doc_content(doc_content, warn_sink=warnings)
         # 문서 생성 초안(결정론) — 직접 변경 함수(_changed_set)에 대해 문서 생성기(suts/sits/sts)를
         # 그대로 재사용해 콜체인·경계값 입력·기대출력을 '문서를 직접 생성하는 것처럼' 합성한다.
         # 표시 전용 additive(분석 결과 불변). sections는 소스 경로일 때만 채워지고(cloudium/원격은 {})
         # function_details 없으면 _build_doc_proposal이 graceful 빈 dict를 돌려준다.
-        doc_proposal = _build_doc_proposal(sections, _changed_set, warn_sink=warnings)
+        # doc_content/change_details도 넘긴다 — 소스 미해결(cloudium)이면 그걸 근거로 폴백 합성한다
+        # (소스가 안 잡히는 환경이 곧 문서는 읽히는 환경이라, 없으면 화면에 골격만 남는다).
+        doc_proposal = _build_doc_proposal(
+            sections, _changed_set, warn_sink=warnings,
+            doc_content=doc_content, change_details=change_details)
         # MC/DC delta: 영향 함수의 VectorCAST 커버리지(statement/branch/MC/DC) → ASIL 타깃 대비 gap
         # + 직전 스냅샷 대비 delta(회귀). vectorcast 미연결/RAG metrics 없음 → available=False(분석 계속).
         coverage_gap: Dict[str, Any] = {"available": False}

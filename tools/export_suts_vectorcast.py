@@ -272,6 +272,16 @@ def _parse_tc_block(ws: Any, start_row: int, end_row: int, cols: Dict[str, Any])
             "test_method": test_method,
             "related_ids": related_ids,
         },
+        # 이 TC 블록이 실제로 쓰는 Input/Expected 컬럼명(시트 헤더행 원문). 시퀀스 dict의
+        # inputs/expected 키와 동일 문자열이며 **시트 열 순서를 보존**한다.
+        # 영향도 탭의 문서 초안이 (a) 재계산 대상 변수집합과 (b) Excel 붙여넣기 컬럼 순서를
+        # 여기서 얻는다 — 시그니처 파라미터로 유추하면 원문과 다른 변수를 가리키게 된다
+        # (실측: 원문은 g_sys_error_his[0..4], 유추는 u16t_Data). VectorCAST 산출에는 무영향.
+        "columns": {
+            "inputs": [n for _, n in input_headers],
+            "expected": [n for _, n in output_headers],
+            "sheet": _TC_SHEET,
+        },
         "test_cases": [],
         "warnings": [],
     }
