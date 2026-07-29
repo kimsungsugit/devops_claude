@@ -893,6 +893,17 @@ def generate_uds_ai_sections(
     sections["semantic_report"] = semantic_report.to_dict()
     # quality_warnings에 [semantic] prefix 추가 — warning_categories breakdown 통합
     sections["quality_warnings"].extend(semantic_report.warning_messages)
+    # ─── reviewer/auditor/judge 최종 판정 표면화 ───
+    # 위 retry 루프는 max_retries를 소진하면 decision이 여전히 "reject"/"retry"인 결과를
+    # 그대로 최종본으로 돌려준다. 그 사실이 반환값 어디에도 없으면 소비자는 승인된 초안과
+    # 구분할 수 없다(초안 자체는 진단 가치가 있으니 버리지 않되, 상태는 반드시 밝힌다).
+    sections["ai_review_decision"] = decision
+    sections["ai_review_retry_count"] = retry_count
+    if decision != "accept":
+        sections["quality_warnings"].append(
+            f"[ai-review] 판정 '{decision}'이 재시도 {retry_count}회 후에도 해소되지 않은 초안 — "
+            f"승인 결과가 아니므로 검토 필요 (사유: {str(reason or '미기재')[:200]})"
+        )
     return sections
 
 
@@ -973,8 +984,15 @@ def _build_func_desc_prompt(batch: List[Dict[str, Any]], *, pass_num: int = 1) -
 def generate_ai_function_descriptions(
     function_details: Dict[str, Dict[str, Any]],
     module_map: Optional[Dict[str, str]] = None,
+    body_snippets: Optional[Dict[str, str]] = None,
 ) -> Dict[str, str]:
     """Generate AI descriptions for functions that currently have inference-only descriptions.
+
+    Args:
+        function_details: {fid: detail}. 여기엔 함수 body가 없다 — 2차 refinement용 본문은
+            `body_snippets`로 별도 전달한다(uds_generator의 `function_body_snippets`).
+        module_map: {함수명_소문자: 모듈명}.
+        body_snippets: {fid: body 앞부분}. 없으면 2차 패스는 건너뛴다.
 
     Returns a dict mapping fid to AI-generated description.
     Also includes name-based keys for backward compatibility.
@@ -1120,16 +1138,27 @@ def generate_ai_function_descriptions(
     logger.info("AI function description pass 1: %d unique names, %d fid-mapped / %d candidates",
                 len(results) - fid_count, fid_count, len(candidates))
 
-    # Pass 2: refine with body snippets for functions that got pass-1 results
+    # Pass 2: refine with body snippets for functions that got pass-1 results.
+    # body는 function_details가 아니라 별도 맵에서 온다 — detail dict엔 body 계열 키가 아예
+    # 없어서, 인자가 없으면 이 패스는 통째로 no-op다(과거엔 그 사실이 로그에도 안 남았다).
     pass2_candidates = []
+    _snips = body_snippets if isinstance(body_snippets, dict) else {}
+    _skip_no_body = 0
     for item in candidates:
         name = item["name"]
         if name.lower() not in results:
             continue
         fid = item.get("fid", "")
         finfo = function_details.get(fid, {})
-        body = str(finfo.get("body_text") or "")[:400]
+        # 우선순위: 전용 맵 → detail의 legacy body 키(외부 호출자가 채워 넣은 경우).
+        body = str(
+            _snips.get(fid)
+            or finfo.get("body_text")
+            or finfo.get("body")
+            or ""
+        )[:400]
         if not body or len(body) < 20:
+            _skip_no_body += 1
             continue
         pass2_candidates.append({
             **item,
@@ -1137,6 +1166,12 @@ def generate_ai_function_descriptions(
             "body_snippet": body,
         })
 
+    if not pass2_candidates:
+        logger.info(
+            "AI function description pass 2 skipped: 0 candidates "
+            "(body 없음 %d건 / body_snippets 인자 %s)",
+            _skip_no_body, "제공됨" if _snips else "없음",
+        )
     if pass2_candidates:
         pass2_batches = [pass2_candidates[i:i + _FUNC_DESC_BATCH_SIZE]
                          for i in range(0, len(pass2_candidates), _FUNC_DESC_BATCH_SIZE)]

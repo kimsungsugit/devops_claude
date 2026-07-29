@@ -33,12 +33,34 @@ _MAX_TC_PER_REQ = 5
 _MAX_STEPS_PER_TC = 15
 
 _HEADER_ROW = 6
-_COL_HEADERS = [
-    "", "Test Case ID", "Title", "Safety\nRelated",
-    "Test\nEnvironment", "Test\nMethod", "Test Case\nGen. Method",
-    "FS_REQ", "Description", "Pre-condition",
-    "Test Action\n(Sequence)", "Expected Result", "SRS",
+
+# ── STS 시트 열 스키마 (SSOT) ────────────────────────────────────────────────
+# (열 번호 1-indexed, 필드 키, row 6 헤더 라벨).
+# writer(generate_sts_xlsm)와 validator(validate_sts_xlsm)가 **같은 출처**를 봐야 한다.
+# 과거엔 validator가 SUTS 레이아웃 상수를 그대로 재사용해 5/6/4열(TestEnv·TestMethod·
+# SafetyRelated)을 Action·Expected·요구ID로 읽었다 → 실제 Action/Expected가 전부 비어도
+# "정상"으로 통과하고, 요구 링크율은 Safety Related 채움률을 보고했다.
+_STS_SCHEMA: List[Tuple[int, str, str]] = [
+    (1,  "seq",              ""),
+    (2,  "tc_id",            "Test Case ID"),
+    (3,  "title",            "Title"),
+    (4,  "safety_related",   "Safety\nRelated"),
+    (5,  "test_environment", "Test\nEnvironment"),
+    (6,  "test_method",      "Test\nMethod"),
+    (7,  "gen_method",       "Test Case\nGen. Method"),
+    (8,  "fs_req",           "FS_REQ"),
+    (9,  "description",      "Description"),
+    (10, "precondition",     "Pre-condition"),
+    (11, "action",           "Test Action\n(Sequence)"),
+    (12, "expected",         "Expected Result"),
+    (13, "srs",              "SRS"),
 ]
+STS_COL: Dict[str, int] = {key: col for col, key, _ in _STS_SCHEMA}
+_COL_HEADERS = [label for _, _, label in _STS_SCHEMA]
+_LAST_COL = _STS_SCHEMA[-1][0]
+# 산출물이 이 필드들을 비운 채 나오면 시험 명세로서 의미가 없다 — validator 필수 축.
+_STS_REQUIRED_FIELDS = ("tc_id", "action", "expected", "srs")
+
 _COL_WIDTHS = [4.0, 20.5, 52.0, 10.0, 12.0, 10.6, 10.4, 13.0, 61.5, 36.0, 61.0, 77.0, 14.0]
 _MERGE_COLS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 12]  # 0-indexed → cols A,B,C,D,E,F,G,H,I,J,M (K,L per-step)
 # Columns that get center alignment (not wrap)
@@ -1734,22 +1756,24 @@ def generate_sts_xlsm(
             ws.cell(row=r, column=1, value=tc_counter).font = data_font
             ws.cell(row=r, column=1).alignment = center_align
 
-            ws.cell(row=r, column=2, value=tc["id"] if si == 0 else None).font = data_font
-            ws.cell(row=r, column=3, value=tc["title"] if si == 0 else None).font = data_font
-            ws.cell(row=r, column=4, value=tc.get("safety_related", "") if si == 0 else None).font = data_font
-            ws.cell(row=r, column=5, value=tc.get("test_environment", "") if si == 0 else None).font = data_font
-            ws.cell(row=r, column=6, value=tc.get("test_method", "") if si == 0 else None).font = data_font
-            ws.cell(row=r, column=7, value=tc.get("gen_method", "") if si == 0 else None).font = data_font
-            ws.cell(row=r, column=8, value=tc.get("fs_req", "") if si == 0 else None).font = data_font
-            ws.cell(row=r, column=9, value=tc.get("description", "") if si == 0 else None).font = data_font
-            ws.cell(row=r, column=10, value=tc.get("precondition", "") if si == 0 else None).font = data_font
+            # 열 번호는 전부 STS_COL(SSOT) 경유 — validator가 같은 상수를 본다.
+            ws.cell(row=r, column=STS_COL["tc_id"], value=tc["id"] if si == 0 else None).font = data_font
+            ws.cell(row=r, column=STS_COL["title"], value=tc["title"] if si == 0 else None).font = data_font
+            ws.cell(row=r, column=STS_COL["safety_related"], value=tc.get("safety_related", "") if si == 0 else None).font = data_font
+            ws.cell(row=r, column=STS_COL["test_environment"], value=tc.get("test_environment", "") if si == 0 else None).font = data_font
+            ws.cell(row=r, column=STS_COL["test_method"], value=tc.get("test_method", "") if si == 0 else None).font = data_font
+            ws.cell(row=r, column=STS_COL["gen_method"], value=tc.get("gen_method", "") if si == 0 else None).font = data_font
+            ws.cell(row=r, column=STS_COL["fs_req"], value=tc.get("fs_req", "") if si == 0 else None).font = data_font
+            ws.cell(row=r, column=STS_COL["description"], value=tc.get("description", "") if si == 0 else None).font = data_font
+            ws.cell(row=r, column=STS_COL["precondition"], value=tc.get("precondition", "") if si == 0 else None).font = data_font
 
-            ws.cell(row=r, column=11, value=step.get("action", "")).font = data_font
-            ws.cell(row=r, column=12, value=step.get("expected", "")).font = data_font
+            # step 단위 열(병합하지 않는다 — TC당 여러 행)
+            ws.cell(row=r, column=STS_COL["action"], value=step.get("action", "")).font = data_font
+            ws.cell(row=r, column=STS_COL["expected"], value=step.get("expected", "")).font = data_font
 
-            ws.cell(row=r, column=13, value=tc.get("srs_id", "") if si == 0 else None).font = data_font
+            ws.cell(row=r, column=STS_COL["srs"], value=tc.get("srs_id", "") if si == 0 else None).font = data_font
 
-            for ci in range(1, 14):
+            for ci in range(1, _LAST_COL + 1):
                 ws.cell(row=r, column=ci).border = thin_border
                 ws.cell(row=r, column=ci).alignment = (
                     center_align if ci in _CENTER_COLS else wrap_align
@@ -2367,7 +2391,6 @@ def generate_sts(
 
     _progress(92, "생성 문서 자동 검증 중")
     try:
-        from generators.suts import validate_sts_xlsm
         validation = validate_sts_xlsm(out)
         if validation.get("issues"):
             _logger.warning("STS validation issues: %s", validation["issues"])
@@ -2422,13 +2445,185 @@ def generate_sts(
 # Document validation
 # ---------------------------------------------------------------------------
 
+_STS_SHEET_CANDIDATES = ("3.SW Integration Test Spec", "2.SW Test Spec")
+
+
+def _normalize_header(value: Any) -> str:
+    """헤더 라벨 비교용 정규화 — 개행·공백·구두점 제거 후 소문자."""
+    return re.sub(r"[^a-z0-9]", "", str(value or "").lower())
+
+
+def _detect_sts_columns(ws: Any, header_row: int = _HEADER_ROW) -> Tuple[Dict[str, int], List[str]]:
+    """header_row의 라벨로 필드→열 번호를 찾는다. 못 찾은 필드는 스키마 상수로 폴백.
+
+    열 번호 하드코딩만 쓰면 템플릿이 한 칸만 밀려도 **엉뚱한 열을 조용히 읽는다**(이 파일
+    상단 _STS_SCHEMA 주석의 실제 사고). 반대로 헤더 탐지만 쓰면 헤더가 없는 구 산출물에서
+    아무것도 못 읽는다. 둘을 합치고, 폴백을 썼다는 사실은 호출자에게 알린다.
+
+    Returns: (필드→열, 폴백을 쓴 필드 목록)
+    """
+    label_to_key = {_normalize_header(label): key for _, key, label in _STS_SCHEMA if label}
+    found: Dict[str, int] = {}
+    try:
+        # read_only 워크북은 .cell() 호출마다 시트를 재파싱한다 — 헤더 한 줄도 iter_rows로.
+        max_col = min(int(ws.max_column or 0), 64)   # 폭주 방지 — STS는 13열
+        header_vals = next(
+            ws.iter_rows(min_row=header_row, max_row=header_row,
+                         max_col=max_col, values_only=True),
+            (),
+        )
+        for col, raw in enumerate(header_vals, 1):
+            key = label_to_key.get(_normalize_header(raw))
+            if key and key not in found:             # 중복 헤더는 첫 번째만 채택
+                found[key] = col
+    except Exception as exc:
+        _logger.warning("STS header 탐지 실패(상수 폴백): %s", exc)
+
+    fallback_fields = [k for k in STS_COL if k not in found]
+    cols = {**STS_COL, **found}
+    return cols, fallback_fields
+
+
+def validate_sts_xlsm(xlsm_path: str) -> Dict[str, Any]:
+    """생성된 STS XLSM의 구조·데이터 품질 검증.
+
+    ⚠ 이 함수는 **STS 전용**이다. 과거엔 generators.suts에 있으면서 SUTS 레이아웃 상수를
+    그대로 썼다 — writer가 11/12/13열(Action/Expected/SRS)에 쓰는데 validator는 5/6/4열
+    (TestEnvironment/TestMethod/SafetyRelated)을 읽어, Action·Expected가 전부 비어도
+    "이상 없음"이 되고 요구 링크율은 Safety Related 채움률을 보고했다.
+    """
+    issues: List[str] = []
+    warnings: List[str] = []
+    stats: Dict[str, Any] = {}
+
+    try:
+        from openpyxl import load_workbook
+    except ImportError:
+        return {"valid": False, "issues": ["openpyxl not installed"], "warnings": [], "stats": {}}
+
+    p = Path(xlsm_path)
+    if not p.exists():
+        return {"valid": False, "issues": [f"File not found: {xlsm_path}"], "warnings": [], "stats": {}}
+
+    try:
+        wb = load_workbook(str(p), read_only=True, data_only=True)
+    except Exception as e:
+        return {"valid": False, "issues": [f"Cannot open: {e}"], "warnings": [], "stats": {}}
+
+    try:
+        stats["sheets"] = wb.sheetnames
+        stats["sheet_count"] = len(wb.sheetnames)
+
+        for s in ("Cover", "History", "1.Introduction"):
+            if s not in wb.sheetnames:
+                warnings.append(f"Optional sheet missing: {s}")
+
+        sts_sheet = next((c for c in _STS_SHEET_CANDIDATES if c in wb.sheetnames), None)
+        if not sts_sheet:
+            issues.append("No STS main sheet found")
+            return {"valid": False, "issues": issues, "warnings": warnings, "stats": stats}
+
+        ws = wb[sts_sheet]
+        max_row = ws.max_row or 0
+        stats["max_row"] = max_row
+        stats["max_col"] = ws.max_column or 0
+        stats["sheet"] = sts_sheet
+
+        cols, fallback_fields = _detect_sts_columns(ws)
+        stats["columns"] = dict(cols)
+        if fallback_fields:
+            # 필수 축이 헤더에서 안 잡히면 잘못된 열을 읽고 있을 수 있다 — 침묵 금지.
+            missing_required = [f for f in _STS_REQUIRED_FIELDS if f in fallback_fields]
+            if missing_required:
+                warnings.append(
+                    "헤더에서 못 찾아 상수 위치로 판독한 필수 열: "
+                    + ", ".join(missing_required)
+                )
+
+        tc_count = 0
+        empty_title_tcs = 0
+        no_step_tcs = 0
+        no_expected_tcs = 0
+        reqs_linked = 0
+
+        # ⚠ read_only 워크북에서 ws.cell(row=N, ...) 랜덤 접근은 매 호출마다 시트를 다시
+        # 훑어 O(행²)가 된다(이 저장소 실측 전례: 75분 → iter_rows 0.9초). 한 번만 순회한다.
+        needed = ("tc_id", "title", "action", "expected", "srs")
+        max_needed_col = max(cols[f] for f in needed)
+
+        def _val(row_vals: Tuple[Any, ...], field: str) -> str:
+            idx = cols[field] - 1
+            return str(row_vals[idx] or "").strip() if idx < len(row_vals) else ""
+
+        # TC ID는 첫 스텝 행에만 있고 Action/Expected는 스텝마다 있다 — TC 블록 단위로 본다.
+        cur_has_action = cur_has_expected = False
+        has_open_tc = False
+
+        def _close_tc() -> None:
+            nonlocal no_step_tcs, no_expected_tcs
+            if not cur_has_action:
+                no_step_tcs += 1
+            if not cur_has_expected:
+                no_expected_tcs += 1
+
+        for row_vals in ws.iter_rows(
+            min_row=_HEADER_ROW + 1, max_row=max_row,
+            max_col=max_needed_col, values_only=True,
+        ):
+            tc_id = _val(row_vals, "tc_id")
+            if tc_id:
+                if has_open_tc:
+                    _close_tc()
+                tc_count += 1
+                has_open_tc = True
+                cur_has_action = cur_has_expected = False
+                if not _val(row_vals, "title"):
+                    empty_title_tcs += 1
+                if _val(row_vals, "srs"):
+                    reqs_linked += 1
+            if not has_open_tc:
+                continue   # TC 시작 전 잔여 행 — 어느 TC에도 귀속되지 않는다
+            if _val(row_vals, "action"):
+                cur_has_action = True
+            if _val(row_vals, "expected"):
+                cur_has_expected = True
+        if has_open_tc:
+            _close_tc()
+
+        stats["tc_count"] = tc_count
+        stats["empty_title_tcs"] = empty_title_tcs
+        stats["no_step_tcs"] = no_step_tcs
+        stats["no_expected_tcs"] = no_expected_tcs
+        stats["reqs_linked"] = reqs_linked
+        stats["req_linkage_pct"] = round(reqs_linked / tc_count * 100, 1) if tc_count else 0
+
+        if tc_count == 0:
+            issues.append("No test cases found")
+        if empty_title_tcs > tc_count * 0.3:
+            issues.append(f"Over 30% TCs lack titles ({empty_title_tcs}/{tc_count})")
+        # Action/Expected 부재는 "시험을 수행할 수 없다"는 뜻이라 경고가 아니라 결함이다.
+        if tc_count and no_step_tcs == tc_count:
+            issues.append(f"All TCs lack action steps ({no_step_tcs}/{tc_count})")
+        elif no_step_tcs > tc_count * 0.5:
+            warnings.append(f"Over 50% TCs lack action steps ({no_step_tcs}/{tc_count})")
+        if tc_count and no_expected_tcs == tc_count:
+            issues.append(f"All TCs lack expected results ({no_expected_tcs}/{tc_count})")
+        elif no_expected_tcs > tc_count * 0.5:
+            warnings.append(f"Over 50% TCs lack expected results ({no_expected_tcs}/{tc_count})")
+        if tc_count > 0 and reqs_linked == 0:
+            warnings.append("No TCs linked to requirements")
+    finally:
+        wb.close()
+
+    return {"valid": len(issues) == 0, "issues": issues, "warnings": warnings, "stats": stats}
+
+
 def validate_sts_output(xlsm_path: str) -> Dict[str, Any]:
     """Validate a generated STS XLSM for structural completeness.
 
     Returns dict with 'valid' bool, 'issues' list, 'warnings' list, and 'stats' dict.
     """
     try:
-        from generators.suts import validate_sts_xlsm
         return validate_sts_xlsm(xlsm_path)
     except ImportError:
         pass
@@ -2465,7 +2660,6 @@ def generate_sts_validation_report(
 
     Writes a .validation.md file next to the XLSM and returns its path.
     """
-    from generators.suts import validate_sts_xlsm
     validation = validate_sts_xlsm(xlsm_path)
     stats = validation.get("stats", {})
     issues = validation.get("issues", [])

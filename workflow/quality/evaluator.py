@@ -181,10 +181,22 @@ def evaluate_sits(quality_report: Dict[str, Any]) -> MetricList:
     metrics: MetricList = []
     total = _safe_float(quality_report, "total_test_cases")
 
-    # 요구사항 추적성 (related ID 연결 비율)
+    # 요구사항 추적성 — **합성 SwCom을 제외한** 실제 요구/설계 ID 기준.
+    # 과거엔 related_coverage_pct(Related ID 필드 보유율)를 그대로 썼는데, SITS 생성기가
+    # 모든 flow에 순번 기반 SwCom_XX를 무조건 삽입하므로 그 값은 사실상 항상 100%였다 →
+    # 요구 링크가 0건이어도 threshold 70을 통과했다. 구 리포트엔 새 키가 없어 0.0으로
+    # 떨어지고 게이트가 실패하는데, 그게 "미측정을 통과로 바꾸지 않는" fail-closed 방향이다.
     metrics.append(
         _metric("requirement_traceability_pct",
-                _safe_float(quality_report, "related_coverage_pct"), threshold=70.0),
+                _safe_float(quality_report, "requirement_traceability_pct"), threshold=70.0),
+    )
+    # Related ID 필드 보유율은 서식 채움 지표로 별도 보존(게이트 미반영 — threshold 없음).
+    metrics.append(
+        _metric("related_field_filled_pct", _safe_float(quality_report, "related_coverage_pct")),
+    )
+    metrics.append(
+        _metric("synthetic_only_related_count",
+                _safe_float(quality_report, "synthetic_only_related_count")),
     )
     # I/O 커버리지 (입출력 변수 보유 TC 비율)
     metrics.append(

@@ -213,3 +213,83 @@ class TestGenerateSutsWorkbook:
         assert ws.cell(row=7, column=9).value
         assert ws.cell(row=7, column=10).value == "Power on reset complete"
         wb.close()
+
+
+class TestResolvedDocInput:
+    r"""문서 입력(SRS/UDS/HSIS)은 resolver 경유로 확보한다.
+
+    회귀 대상: `Path(p).is_file()`만 보던 코드는 cloudium worker-only 경로(U:\ 등)에서
+    항상 False라 보강 블록을 **경고 없이** 통째로 건너뛰었다.
+    """
+
+    def test_local_file_is_passed_through_without_copy(self, tmp_path):
+        from generators.suts import _resolved_doc_input
+        src = tmp_path / "SRS.docx"
+        src.write_bytes(b"payload")
+        with _resolved_doc_input(str(src), "SRS") as p:
+            assert p == str(src)      # 로컬이면 임시 복사 없음
+
+    def test_blank_path_yields_none(self):
+        from generators.suts import _resolved_doc_input
+        with _resolved_doc_input("", "SRS") as p:
+            assert p is None
+        with _resolved_doc_input(None, "UDS") as p:
+            assert p is None
+
+    def test_worker_only_path_is_materialized(self, monkeypatch, tmp_path):
+        """로컬에 없지만 resolver가 읽을 수 있으면 임시 파일로 실체화한다."""
+        import backend.services.file_resolver as fr
+        from generators.suts import _resolved_doc_input
+
+        remote = "U:/docs/HSIS.xlsx"
+
+        class _Worker:
+            mode = "cloudium"
+            def is_file(self, p):
+                return str(p) == remote
+            def read_bytes(self, p):
+                return b"remote-bytes"
+
+        monkeypatch.setattr(fr, "get_resolver", lambda: _Worker())
+        seen = {}
+        with _resolved_doc_input(remote, "HSIS") as p:
+            assert p is not None and p != remote
+            assert Path(p).read_bytes() == b"remote-bytes"
+            assert Path(p).suffix == ".xlsx"   # 파서가 확장자로 분기하므로 보존 필수
+            seen["path"] = p
+        # with 종료 시 정리
+        assert not Path(seen["path"]).exists()
+
+    def test_missing_everywhere_yields_none_with_warning(self, monkeypatch, caplog):
+        import backend.services.file_resolver as fr
+        from generators.suts import _resolved_doc_input
+
+        class _Empty:
+            mode = "cloudium"
+            def is_file(self, p):
+                return False
+            def read_bytes(self, p):
+                raise AssertionError("read_bytes must not be called when is_file() is False")
+
+        monkeypatch.setattr(fr, "get_resolver", lambda: _Empty())
+        with caplog.at_level("WARNING", logger="generators.suts"):
+            with _resolved_doc_input("U:/nope.docx", "SRS") as p:
+                assert p is None
+        # 침묵 skip이 원래 결함이었다 — 사유가 반드시 남아야 한다
+        assert "SRS" in caplog.text and "nope.docx" in caplog.text, caplog.text
+
+    def test_read_failure_does_not_raise(self, monkeypatch):
+        """resolver가 있다고 했는데 읽기가 깨져도 생성 자체는 계속된다(보강만 생략)."""
+        import backend.services.file_resolver as fr
+        from generators.suts import _resolved_doc_input
+
+        class _Broken:
+            mode = "cloudium"
+            def is_file(self, p):
+                return True
+            def read_bytes(self, p):
+                raise OSError("worker timeout")
+
+        monkeypatch.setattr(fr, "get_resolver", lambda: _Broken())
+        with _resolved_doc_input("U:/x.docx", "UDS") as p:
+            assert p is None

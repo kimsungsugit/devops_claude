@@ -156,7 +156,8 @@ class TestEvaluateSITS:
     def test_basic(self):
         data = {
             "total_test_cases": 10,
-            "related_coverage_pct": 80.0,
+            "related_coverage_pct": 100.0,          # 합성 SwCom 포함 — 서식 채움 지표
+            "requirement_traceability_pct": 80.0,   # 합성 제외 — 게이트 대상
             "io_coverage_pct": 65.0,
             "avg_sub_cases_per_tc": 3.5,
             "gen_method_distribution": {"normal": 5, "boundary": 3, "stress": 2},
@@ -169,6 +170,34 @@ class TestEvaluateSITS:
         assert by_name["method_diversity_pct"]["value"] == 100.0
         # integration_density: 3.5 / 7 = 50%
         assert by_name["integration_density_pct"]["value"] == 50.0
+
+    def test_related_field_fill_is_not_traceability(self):
+        """합성 SwCom으로 Related ID가 다 차 있어도 요구 추적성 게이트는 통과하지 않는다.
+
+        회귀 대상: evaluate_sits가 related_coverage_pct(항상 ~100%)를
+        requirement_traceability_pct로 그대로 썼다 → 요구 링크 0건도 threshold 70 통과.
+        """
+        data = {
+            "total_test_cases": 10,
+            "related_coverage_pct": 100.0,
+            "requirement_traceability_pct": 0.0,
+            "synthetic_only_related_count": 10,
+        }
+        by_name = {m["metric_name"]: m for m in evaluate_sits(data)}
+        assert by_name["requirement_traceability_pct"]["value"] == 0.0
+        assert by_name["requirement_traceability_pct"]["gate_pass"] is False
+        # 서식 채움 지표는 보존하되 점수/게이트에 반영하지 않는다
+        assert by_name["related_field_filled_pct"]["value"] == 100.0
+        assert by_name["related_field_filled_pct"]["threshold"] is None
+        assert by_name["synthetic_only_related_count"]["value"] == 10.0
+
+    def test_missing_new_key_is_fail_closed(self):
+        """새 키가 없는 구 리포트는 0.0(미측정)으로 떨어져 게이트가 실패해야 한다."""
+        by_name = {m["metric_name"]: m for m in evaluate_sits({
+            "total_test_cases": 5, "related_coverage_pct": 100.0,
+        })}
+        assert by_name["requirement_traceability_pct"]["value"] == 0.0
+        assert by_name["requirement_traceability_pct"]["gate_pass"] is False
 
     def test_empty(self):
         assert len(evaluate_sits({})) > 0

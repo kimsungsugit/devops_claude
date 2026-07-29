@@ -226,3 +226,57 @@ def test_put_by_name_preserves_identity_and_records_collisions():
     _put_by_name(by_name, "solo_fn", solo, coll)
     assert "solo_fn" not in coll
     assert by_name["solo_fn"] is solo
+
+
+class TestFunctionBodySnippets:
+    """AI 2차 refinement가 읽는 body 맵. detail dict엔 body 계열 키가 없다.
+
+    회귀 방지: 이 맵이 없으면 uds_ai의 pass 2가 조용히 no-op가 된다(생산자 부재로
+    실제로 한 번도 실행된 적 없던 경로). detail 안에 넣지 않는 이유는 by_name이
+    같은 객체를 참조해 캐시 JSON에 두 번 직렬화되기 때문.
+    """
+
+    _SRC = """\
+void Ap_Door_Run(void)
+{
+    if (g_door_state > 0U)
+    {
+        Ap_Door_Open();
+    }
+    else
+    {
+        Ap_Door_Close();
+    }
+}
+
+void Ap_Door_Open(void)
+{
+    g_door_state = 1U;
+}
+"""
+
+    def _sections(self, tmp_path):
+        from report_gen.uds_generator import generate_uds_source_sections
+        (tmp_path / "Ap_Door.c").write_text(self._SRC, encoding="utf-8")
+        return generate_uds_source_sections(str(tmp_path))
+
+    def test_snippets_are_emitted_and_keyed_by_fid(self, tmp_path):
+        sections = self._sections(tmp_path)
+        snips = sections.get("function_body_snippets")
+        assert isinstance(snips, dict) and snips, "body snippet 맵이 비었다"
+        # 키는 function_details의 fid와 같은 축이어야 uds_ai가 조회할 수 있다
+        assert set(snips) <= set(sections.get("function_details") or {})
+        joined = "".join(snips.values())
+        assert "g_door_state" in joined
+
+    def test_snippet_is_capped(self, tmp_path):
+        from report_gen.uds_generator import _BODY_SNIPPET_MAX
+        snips = self._sections(tmp_path).get("function_body_snippets") or {}
+        assert all(len(v) <= _BODY_SNIPPET_MAX for v in snips.values())
+
+    def test_snippets_are_not_duplicated_into_detail(self, tmp_path):
+        """detail에 실리면 by_name(별칭 포함)으로 중복 직렬화된다 — 계약상 금지."""
+        sections = self._sections(tmp_path)
+        for detail in (sections.get("function_details") or {}).values():
+            assert "body_snippet" not in detail
+            assert "body_text" not in detail

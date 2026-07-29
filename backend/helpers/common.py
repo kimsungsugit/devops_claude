@@ -203,10 +203,14 @@ def _build_excel_artifact_summary(artifact_type: str, result: Optional[Dict[str,
             or (payload.get("validation") or {}).get("stats", {}).get("flow_count")
             or tc_count  # fallback: 1 flow per ITC
         )
-        # covered_reqs: from trace_coverage, or quality_report.with_related_count
+        # covered_reqs: from trace_coverage, or quality_report의 **실제 요구 ID** 카운트.
+        # with_related_count(Related ID 필드 보유 수)를 폴백으로 쓰면 안 된다 — SITS는 모든
+        # flow에 순번 기반 합성 SwCom_XX를 삽입하므로 그 값은 사실상 TC 총수와 같아
+        # "Covered Reqs"가 항상 만점처럼 보인다. 구 산출물엔 새 키가 없어 0으로 떨어지는데,
+        # 미측정을 만점으로 보이게 하는 것보다 0이 정직하다.
         covered_reqs = int(
             trace.get("covered_reqs")
-            or quality.get("with_related_count")
+            or quality.get("with_requirement_trace_count")
             or 0
         )
         primary = [

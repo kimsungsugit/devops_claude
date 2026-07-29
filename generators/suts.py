@@ -7,8 +7,11 @@ and multiple test sequences (boundary values, error conditions, etc.).
 from __future__ import annotations
 
 import logging
+import os
 import re
+import tempfile
 import time
+from contextlib import contextmanager
 from copy import copy
 from datetime import datetime
 from pathlib import Path
@@ -2078,93 +2081,78 @@ def validate_suts_xlsm(
     return {"valid": len(issues) == 0, "issues": issues, "stats": stats}
 
 
+@contextmanager
+def _resolved_doc_input(path: Optional[str], label: str):
+    """문서 입력(SRS/UDS/HSIS)을 **로컬에서 열 수 있는 경로**로 확보한다.
+
+    과거엔 `Path(p).is_file()`만 봤다. cloudium 모드에서 U:\\ 같은 경로는 backend 프로세스에
+    권한이 없어(worker exe만 접근 가능) 항상 False가 되고, 보강 블록이 **경고 한 줄 없이**
+    통째로 skip됐다 — 산출물엔 "요구 ID 없음"으로만 남아 원인을 알 수 없었다.
+
+    로컬에 있으면 원래 경로를 그대로 돌려주고(추가 I/O 0), worker에만 있으면 resolver로
+    bytes를 읽어 임시 파일로 materialize한 뒤 종료 시 지운다. 어느 쪽도 아니면 None을
+    yield하되 **사유를 warning으로 남긴다**.
+
+    Yields: 열 수 있는 로컬 경로(str) 또는 None.
+    """
+    raw = str(path or "").strip()
+    if not raw:
+        yield None
+        return
+    try:
+        if Path(raw).is_file():
+            yield raw
+            return
+    except OSError as exc:      # 권한 거부(U:\ 등) — 로컬 판정 불가일 뿐 부재는 아니다
+        _logger.debug("%s: 로컬 stat 실패(%s) — resolver로 재시도", label, exc)
+
+    resolver = None
+    try:
+        from backend.services.file_resolver import get_resolver
+        resolver = get_resolver()
+    except Exception as exc:    # standalone 실행 등 backend 미가용
+        _logger.warning("%s 입력을 건너뜀 — 로컬에 없고 resolver도 불가: %s (%s)", label, raw, exc)
+        yield None
+        return
+
+    try:
+        if not resolver.is_file(raw):
+            _logger.warning("%s 입력을 건너뜀 — resolver(mode=%s)에도 없음: %s",
+                            label, getattr(resolver, "mode", "?"), raw)
+            yield None
+            return
+        data = resolver.read_bytes(raw)
+    except Exception as exc:
+        _logger.warning("%s 입력 읽기 실패 — 보강 생략: %s (%s)", label, raw, exc)
+        yield None
+        return
+
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            suffix=Path(raw).suffix or ".bin", prefix=f"{label}_", delete=False,
+        ) as fh:
+            fh.write(data)
+            tmp_path = fh.name
+        _logger.info("%s: worker 경로를 임시 파일로 materialize (%d bytes)", label, len(data))
+        yield tmp_path
+    finally:
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                _logger.debug("%s: 임시 파일 정리 실패 %s", label, tmp_path)
+
+
 def validate_sts_xlsm(xlsm_path: str) -> Dict[str, Any]:
-    """Validate generated STS XLSM for structural and data quality."""
-    issues: List[str] = []
-    warnings: List[str] = []
-    stats: Dict[str, Any] = {}
+    """STS 검증 — 구현은 generators.sts로 이관됐다(하위호환 re-export).
 
-    try:
-        from openpyxl import load_workbook
-    except ImportError:
-        return {"valid": False, "issues": ["openpyxl not installed"], "warnings": [], "stats": {}}
-
-    p = Path(xlsm_path)
-    if not p.exists():
-        return {"valid": False, "issues": [f"File not found: {xlsm_path}"], "warnings": [], "stats": {}}
-
-    try:
-        wb = load_workbook(str(p), read_only=True, data_only=True)
-    except Exception as e:
-        return {"valid": False, "issues": [f"Cannot open: {e}"], "warnings": [], "stats": {}}
-
-    stats["sheets"] = wb.sheetnames
-    stats["sheet_count"] = len(wb.sheetnames)
-
-    expected_sheets = ["Cover", "History", "1.Introduction"]
-    for s in expected_sheets:
-        if s not in wb.sheetnames:
-            warnings.append(f"Optional sheet missing: {s}")
-
-    sts_sheet = None
-    for candidate in ["3.SW Integration Test Spec", "2.SW Test Spec"]:
-        if candidate in wb.sheetnames:
-            sts_sheet = candidate
-            break
-
-    if not sts_sheet:
-        issues.append("No STS main sheet found")
-        wb.close()
-        return {"valid": False, "issues": issues, "warnings": warnings, "stats": stats}
-
-    ws = wb[sts_sheet]
-    max_row = ws.max_row or 0
-    max_col = ws.max_column or 0
-    stats["max_row"] = max_row
-    stats["max_col"] = max_col
-
-    tc_count = 0
-    empty_title_tcs = 0
-    no_step_tcs = 0
-    no_expected_tcs = 0
-    reqs_linked = 0
-    for r in range(7, max_row + 1):
-        tc_id = ws.cell(row=r, column=2).value
-        if tc_id and str(tc_id).strip():
-            tc_count += 1
-            title = ws.cell(row=r, column=3).value
-            if not title or not str(title).strip():
-                empty_title_tcs += 1
-            step_action = ws.cell(row=r, column=5).value
-            if not step_action or not str(step_action).strip():
-                no_step_tcs += 1
-            expected_val = ws.cell(row=r, column=6).value
-            if not expected_val or not str(expected_val).strip():
-                no_expected_tcs += 1
-            req_ref = ws.cell(row=r, column=4).value
-            if req_ref and str(req_ref).strip():
-                reqs_linked += 1
-
-    stats["tc_count"] = tc_count
-    stats["empty_title_tcs"] = empty_title_tcs
-    stats["no_step_tcs"] = no_step_tcs
-    stats["no_expected_tcs"] = no_expected_tcs
-    stats["reqs_linked"] = reqs_linked
-    stats["req_linkage_pct"] = round(reqs_linked / tc_count * 100, 1) if tc_count else 0
-
-    if tc_count == 0:
-        issues.append("No test cases found")
-    if empty_title_tcs > tc_count * 0.3:
-        issues.append(f"Over 30% TCs lack titles ({empty_title_tcs}/{tc_count})")
-    if no_step_tcs > tc_count * 0.5:
-        warnings.append(f"Over 50% TCs lack action steps ({no_step_tcs}/{tc_count})")
-    if no_expected_tcs > tc_count * 0.5:
-        warnings.append(f"Over 50% TCs lack expected results ({no_expected_tcs}/{tc_count})")
-    if tc_count > 0 and reqs_linked == 0:
-        warnings.append("No TCs linked to requirements")
-
-    wb.close()
-    return {"valid": len(issues) == 0, "issues": issues, "warnings": warnings, "stats": stats}
+    이 함수가 여기 있던 동안 SUTS 레이아웃 상수(5/6/4열)로 STS를 읽어 Action·Expected가
+    비어도 통과시켰다. 열 스키마는 산출물을 쓰는 모듈이 소유해야 한다 — generators.sts의
+    `_STS_SCHEMA`가 writer·validator 공통 출처다. 기존 import 경로는 그대로 둔다.
+    """
+    from generators.sts import validate_sts_xlsm as _impl
+    return _impl(xlsm_path)
 
 
 # ---------------------------------------------------------------------------
@@ -2310,68 +2298,79 @@ def generate_suts(
     _progress(35, f"{len(units)}개 유닛 함수 수집 완료")
 
     # ── SRS requirement ID enrichment ────────────────────────────────────
-    if srs_docx_path and Path(srs_docx_path).is_file():
-        _progress(36, "SRS 요구사항 ID 보강 중")
-        try:
-            from generators.sts import parse_srs_docx_tables
-            srs_reqs = parse_srs_docx_tables(srs_docx_path)
-            if srs_reqs:
-                # Build function_name → req_ids map from SRS data
-                fn_to_reqs: Dict[str, List[str]] = {}
-                for req in srs_reqs:
-                    req_id = req.get("id", "")
-                    if not req_id:
-                        continue
-                    related = str(req.get("related_id") or req.get("verification") or "")
-                    desc = str(req.get("description") or req.get("name") or "")
-                    # Find function name references in requirement text
-                    for m in re.finditer(r"\b([A-Za-z_]\w*(?:_pds|_init|_main|_run|_update|_check|_calc|_set|_get|_proc))\b", related + " " + desc):
-                        fn_key = m.group(1).lower()
-                        if fn_key not in fn_to_reqs:
-                            fn_to_reqs[fn_key] = []
-                        if req_id not in fn_to_reqs[fn_key]:
-                            fn_to_reqs[fn_key].append(req_id)
-                # Enrich units that have no srs_req_ids yet
-                for unit in units:
-                    if unit.get("srs_req_ids"):
-                        continue
-                    fn_lower = unit["name"].lower()
-                    direct = fn_to_reqs.get(fn_lower)
-                    if direct:
-                        unit["srs_req_ids"] = ", ".join(direct[:4])
-                _logger.info("SRS enrichment: %d reqs parsed, %d units have req IDs now",
-                             len(srs_reqs),
-                             sum(1 for u in units if u.get("srs_req_ids")))
-        except Exception as _e:
-            _logger.debug("SRS enrichment skipped: %s", _e)
+    # 입력 경로는 resolver 경유로 확보한다(worker-only 입력의 침묵 skip 차단 —
+    # _resolved_doc_input 주석 참조). 아래 UDS/HSIS 블록도 같은 규약.
+    with _resolved_doc_input(srs_docx_path, "SRS") as _srs_local:
+        if _srs_local:
+            _progress(36, "SRS 요구사항 ID 보강 중")
+            try:
+                from generators.sts import parse_srs_docx_tables
+                srs_reqs = parse_srs_docx_tables(_srs_local)
+                if srs_reqs:
+                    # Build function_name → req_ids map from SRS data
+                    fn_to_reqs: Dict[str, List[str]] = {}
+                    for req in srs_reqs:
+                        req_id = req.get("id", "")
+                        if not req_id:
+                            continue
+                        related = str(req.get("related_id") or req.get("verification") or "")
+                        desc = str(req.get("description") or req.get("name") or "")
+                        # Find function name references in requirement text
+                        for m in re.finditer(r"\b([A-Za-z_]\w*(?:_pds|_init|_main|_run|_update|_check|_calc|_set|_get|_proc))\b", related + " " + desc):
+                            fn_key = m.group(1).lower()
+                            if fn_key not in fn_to_reqs:
+                                fn_to_reqs[fn_key] = []
+                            if req_id not in fn_to_reqs[fn_key]:
+                                fn_to_reqs[fn_key].append(req_id)
+                    # Enrich units that have no srs_req_ids yet
+                    for unit in units:
+                        if unit.get("srs_req_ids"):
+                            continue
+                        fn_lower = unit["name"].lower()
+                        direct = fn_to_reqs.get(fn_lower)
+                        if direct:
+                            unit["srs_req_ids"] = ", ".join(direct[:4])
+                    _logger.info("SRS enrichment: %d reqs parsed, %d units have req IDs now",
+                                 len(srs_reqs),
+                                 sum(1 for u in units if u.get("srs_req_ids")))
+            except Exception as _e:
+                _logger.warning("SRS enrichment skipped: %s", _e)
 
     # ── UDS function description enrichment ──────────────────────────────
-    if uds_path and Path(uds_path).is_file():
-        _progress(37, "UDS 함수 설명 보강 중")
-        try:
-            from generators.sts import _load_uds_descriptions
-            uds_descs = _load_uds_descriptions(uds_path)
-            if uds_descs:
-                enriched_count = 0
-                for unit in units:
-                    fn_lower = unit["name"].lower()
-                    uds_desc = uds_descs.get(fn_lower)
-                    if uds_desc and len(uds_desc) > len(unit.get("description") or ""):
-                        unit["description"] = uds_desc
-                        enriched_count += 1
-                _logger.info("UDS descriptions enriched for %d units", enriched_count)
-        except Exception as _e:
-            _logger.debug("UDS description enrichment skipped: %s", _e)
+    with _resolved_doc_input(uds_path, "UDS") as _uds_local:
+        if _uds_local:
+            _progress(37, "UDS 함수 설명 보강 중")
+            try:
+                from generators.sts import _load_uds_descriptions
+                uds_descs = _load_uds_descriptions(_uds_local)
+                if uds_descs:
+                    enriched_count = 0
+                    for unit in units:
+                        fn_lower = unit["name"].lower()
+                        uds_desc = uds_descs.get(fn_lower)
+                        if uds_desc and len(uds_desc) > len(unit.get("description") or ""):
+                            unit["description"] = uds_desc
+                            enriched_count += 1
+                    _logger.info("UDS descriptions enriched for %d units", enriched_count)
+            except Exception as _e:
+                _logger.warning("UDS description enrichment skipped: %s", _e)
 
     # ── HSIS signal enrichment ────────────────────────────────────────────
     # Uses HSIS xlsx to enrich: srs_req_ids (from related_id), variable
     # boundary hints from characteristics (e.g. "0...255"), and srs_req_ids
     # for units that read/write HSIS signal SW variables.
-    if hsis_path and Path(hsis_path).is_file():
-        _progress(38, "HSIS 신호 보강 중")
+    # 파일 접근만 with 안에서 끝낸다 — 아래 가공은 메모리 데이터라 임시 파일이 필요 없다.
+    _hsis_data: Optional[Dict[str, Any]] = None
+    with _resolved_doc_input(hsis_path, "HSIS") as _hsis_local:
+        if _hsis_local:
+            _progress(38, "HSIS 신호 보강 중")
+            try:
+                from generators.sts import _load_hsis_signals
+                _hsis_data = _load_hsis_signals(_hsis_local)
+            except Exception as _hsis_exc:
+                _logger.warning("HSIS 파싱 실패 — 보강 생략: %s", _hsis_exc)
+    if _hsis_data:
         try:
-            from generators.sts import _load_hsis_signals
-            _hsis_data = _load_hsis_signals(hsis_path)
             _hsis_signals = _hsis_data.get("signals", [])
             if _hsis_signals:
                 # Build sw_var_name → signal dict (one var can split by \n/,)

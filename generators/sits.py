@@ -462,10 +462,17 @@ def collect_integration_flows(
                     break
         except Exception:
             pass
-        # Assign SwCom
+        # Assign SwCom.
+        # ⚠ _infer_swcom_id는 **모듈 등장 순번**으로 만든 합성 ID다(실제 SDS component ID가
+        # 아니다). 모든 flow에 무조건 들어가므로 related_ids는 절대 비지 않는다 — 이 값을
+        # 요구 추적성 분자로 세면 항상 100%가 된다. 어느 ID가 합성인지 **삽입 지점에서**
+        # 기록해 두어 품질 지표가 추측 없이 걸러낼 수 있게 한다.
+        # (위 SDS map이 같은 ID를 이미 넣었다면 그건 문서 유래이므로 합성으로 치지 않는다.)
         swcom_id = _infer_swcom_id(my_module, swcom_counter)
+        synthetic_related: List[str] = []
         if swcom_id not in related_parts:
             related_parts.insert(0, swcom_id)
+            synthetic_related.append(swcom_id)
 
         # Deduplicate while preserving order
         seen_rel: set = set()
@@ -509,6 +516,8 @@ def collect_integration_flows(
             "indirect_vars": indirect_vars_list,
             "asil": asil,
             "related_ids": deduped_related,
+            # related_ids 중 순번 기반 합성분(요구 추적성 분자에서 제외 — 위 삽입부 주석)
+            "synthetic_related_ids": synthetic_related,
             "logic_flow": info.get("logic_flow") or [],
         })
 
@@ -828,6 +837,7 @@ def generate_itc_list(
             "input_vars": effective_input_vars,
             "expected_vars": effective_expected_vars,
             "related_ids": flow["related_ids"],
+            "synthetic_related_ids": flow.get("synthetic_related_ids") or [],
             "sub_cases": sub_cases,
             "asil": flow["asil"],
         })
@@ -1263,6 +1273,23 @@ def generate_sits_quality_report(
     with_related = sum(1 for t in itcs if t.get("related_ids"))
     related_pct = round(with_related / max(total_tc, 1) * 100, 1)
 
+    # ── 요구 추적성은 Related ID 보유율과 다른 축이다 ──
+    # collect_integration_flows가 모든 flow에 순번 기반 합성 SwCom_XX를 삽입하므로
+    # related_ids는 절대 비지 않는다 → related_pct는 사실상 항상 100%다. 그 값을 요구
+    # 추적성으로 쓰면 요구 링크가 하나도 없어도 게이트를 통과한다. 여기서는 **삽입 지점이
+    # 기록한 synthetic_related_ids를 뺀 실제 ID**로만 분자를 센다(문자열 prefix 추측 아님 —
+    # SDS 문서에서 온 진짜 SwCom ID는 합성으로 분류되지 않는다).
+    def _real_related(t: Dict[str, Any]) -> List[str]:
+        synth = set(t.get("synthetic_related_ids") or [])
+        return [r for r in (t.get("related_ids") or []) if r not in synth]
+
+    with_req_trace = sum(1 for t in itcs if _real_related(t))
+    req_trace_pct = round(with_req_trace / max(total_tc, 1) * 100, 1)
+    # related_ids는 있으나 전부 합성인 TC — "링크 있음"으로 보이지만 추적 근거는 0이다.
+    synthetic_only_count = sum(
+        1 for t in itcs if (t.get("related_ids") and not _real_related(t))
+    )
+
     swcom_dist: Dict[str, int] = {}
     for t in itcs:
         rids = t.get("related_ids") or []
@@ -1280,8 +1307,13 @@ def generate_sits_quality_report(
         "total_test_cases": total_tc,
         "total_sub_cases": total_sub,
         "avg_sub_cases_per_tc": avg_sub,
+        # Related ID **필드 보유율**(합성 포함) — 서식 채움 지표이지 추적성이 아니다.
         "with_related_count": with_related,
         "related_coverage_pct": related_pct,
+        # 실제 요구/설계 ID 기준 추적성(합성 SwCom 제외) — 품질 게이트가 쓰는 값.
+        "with_requirement_trace_count": with_req_trace,
+        "requirement_traceability_pct": req_trace_pct,
+        "synthetic_only_related_count": synthetic_only_count,
         "with_io_count": with_io,
         "io_coverage_pct": io_pct,
         "gen_method_distribution": gen_dist,
@@ -1395,7 +1427,9 @@ def generate_sits_validation_report(
             f"| 총 TC 수 | {qr.get('total_test_cases', 0)} |",
             f"| 총 Sub-case 수 | {qr.get('total_sub_cases', 0)} |",
             f"| Related ID 보유 TC | {qr.get('with_related_count', 0)} |",
-            f"| Related ID 커버리지 | {qr.get('related_coverage_pct', 0)}% |",
+            f"| Related ID 커버리지 (합성 포함) | {qr.get('related_coverage_pct', 0)}% |",
+            f"| 요구 추적성 (합성 SwCom 제외) | {qr.get('requirement_traceability_pct', 0)}% |",
+            f"| 합성 ID만 있는 TC | {qr.get('synthetic_only_related_count', 0)} |",
             f"| I/O 파라미터 보유 TC | {qr.get('with_io_count', 0)} |",
             f"| I/O 커버리지 | {qr.get('io_coverage_pct', 0)}% |",
             f"| 생성 방법 분포 | {qr.get('gen_method_distribution', {})} |",

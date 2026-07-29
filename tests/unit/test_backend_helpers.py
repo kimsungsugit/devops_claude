@@ -272,6 +272,41 @@ class TestBuildExcelArtifactSummary:
         result = _build_excel_artifact_summary("unknown", {})
         assert result["primary"] == []
 
+    @staticmethod
+    def _covered_reqs(summary):
+        return next(x["value"] for x in summary["secondary"] if x["key"] == "covered_reqs")
+
+    def test_sits_covered_reqs_ignores_synthetic_related_count(self):
+        """'Covered Reqs'가 합성 SwCom 보유 수를 폴백으로 쓰면 항상 만점처럼 보인다.
+
+        회귀 대상: with_related_count(=Related ID 필드 보유 TC 수) 폴백. SITS는 모든 flow에
+        순번 기반 SwCom_XX를 삽입하므로 그 값은 사실상 TC 총수와 같다.
+        """
+        summary = _build_excel_artifact_summary("sits", {
+            "test_case_count": 10,
+            "quality_report": {
+                "with_related_count": 10,            # 합성 포함 — 신뢰 불가
+                "with_requirement_trace_count": 3,   # 실제 요구 ID 기준
+            },
+        })
+        assert self._covered_reqs(summary) == 3
+
+    def test_sits_covered_reqs_prefers_trace_coverage(self):
+        summary = _build_excel_artifact_summary("sits", {
+            "test_case_count": 10,
+            "trace_coverage": {"covered_reqs": 7},
+            "quality_report": {"with_related_count": 10, "with_requirement_trace_count": 3},
+        })
+        assert self._covered_reqs(summary) == 7
+
+    def test_sits_covered_reqs_zero_when_unmeasured(self):
+        """구 산출물(새 키 없음)은 0 — 미측정을 만점으로 보이게 하지 않는다."""
+        summary = _build_excel_artifact_summary("sits", {
+            "test_case_count": 10,
+            "quality_report": {"with_related_count": 10},
+        })
+        assert self._covered_reqs(summary) == 0
+
 
 class TestSafeExtractZip:
     def test_extract(self, tmp_path):

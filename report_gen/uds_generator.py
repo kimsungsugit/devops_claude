@@ -111,6 +111,10 @@ from report_gen.utils import (
 
 _logger = logging.getLogger("report_generator")
 
+# function_body_snippets 항목 1건의 최대 길이. 소비자(workflow.uds_ai 2차 refinement)가
+# 프롬프트에 400자만 싣는다 — 그보다 크게 저장하면 캐시만 커지고 쓰이지 않는다.
+_BODY_SNIPPET_MAX = 400
+
 def generate_uds_logic_items(
     texts: List[str],
     mode: str,
@@ -259,7 +263,7 @@ def generate_uds_source_sections(
     component_map: Optional[Dict[str, Dict[str, str]]] = None,
     sds_partition_map: Optional[Dict[str, Dict[str, str]]] = None,
     preprocess: bool = True,
-) -> Dict[str, str]:
+) -> Dict[str, Any]:   # 값은 str·list·dict 혼합(function_details 등) — 과거 Dict[str, str]는 오기
     # 콤마/세미콜론 구분 복수 소스 루트 지원
     _raw_roots = [p.strip() for p in str(source_root).replace(";", ",").split(",") if p.strip()]
 
@@ -333,6 +337,11 @@ def generate_uds_source_sections(
     function_table_rows: List[List[str]] = []
     function_details: Dict[str, Dict[str, Any]] = {}
     function_details_by_name: Dict[str, Dict[str, Any]] = {}
+    # {fid: body 앞부분}. AI 2차 description refinement(uds_ai)가 유일한 소비자다.
+    # **detail dict 안이 아니라 별도 맵**인 이유: detail은 by_name(별칭 포함 1,160건)이 같은
+    # 객체를 참조해 캐시 JSON에 두 번 직렬화되고, impact 문서초안 등 다른 소비자에게도 실려
+    # 나간다. 여기 두면 fid 기준 1회(실측 900건 ≈ +360KB)로 끝나고 detail 계약도 안 바뀐다.
+    function_body_snippets: Dict[str, str] = {}
     # 동일 이름 함수의 다중 정의(파일 간 충돌) 기록 — {name_lower: {files:[...], asil: max}}.
     # by_name은 last-wins(동일성 보존)이라 이 정보가 없으면 영향분석이 다른 사본을 누락한다.
     function_collisions: Dict[str, Dict[str, Any]] = {}
@@ -1226,6 +1235,8 @@ def generate_uds_source_sections(
                 "logic": "Auto(call tree)" if called_list else "",
             }
             function_details[fn_id] = detail
+            if body_text:
+                function_body_snippets[fn_id] = body_text[:_BODY_SNIPPET_MAX]
             _put_by_name(function_details_by_name, name, detail, function_collisions)
         # Fallback: AST에서 누락된 함수도 병합 (regex 기반 수집분)
         _ast_names = {r[3] for r in function_table_rows if len(r) >= 4}
@@ -1389,6 +1400,8 @@ def generate_uds_source_sections(
                     "logic": "Auto(call tree)" if called_list else "",
                 }
                 function_details[fn_id] = detail
+                if body_text:
+                    function_body_snippets[fn_id] = body_text[:_BODY_SNIPPET_MAX]
                 _put_by_name(function_details_by_name, name, detail, function_collisions)
         if globals_detailed:
             for g in globals_detailed:
@@ -2022,6 +2035,8 @@ def generate_uds_source_sections(
         "function_table_rows": function_table_rows,
         "function_details": function_details,
         "function_details_by_name": function_details_by_name,
+        # {fid: body 앞 400자}. detail 밖에 두어 by_name 중복 직렬화를 피한다(위 선언부 주석).
+        "function_body_snippets": function_body_snippets,
         # 동일 이름 다중정의(파일 간 충돌) — by_name은 last-wins이므로 이 맵이 없으면 영향분석이
         # 다른 사본의 파일 변경을 놓치고(under-report) 낮은 ASIL로 오판한다. {name: {files, asil}}.
         "function_collisions": function_collisions,

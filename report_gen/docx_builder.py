@@ -2288,7 +2288,14 @@ def generate_uds_docx(
             _logger.info("AI function description: %d inference-sourced functions, starting AI generation", inference_count)
             try:
                 from workflow.uds_ai import generate_ai_function_descriptions
-                ai_descs = generate_ai_function_descriptions(function_details, module_map if isinstance(module_map, dict) else None)
+                # body는 detail dict에 없다 — 파서가 별도 맵으로 싣는다(uds_generator
+                # function_body_snippets). 안 넘기면 2차 refinement가 조용히 no-op다.
+                _body_snips = payload.get("function_body_snippets")
+                ai_descs = generate_ai_function_descriptions(
+                    function_details,
+                    module_map if isinstance(module_map, dict) else None,
+                    body_snippets=_body_snips if isinstance(_body_snips, dict) else None,
+                )
                 if ai_descs:
                     applied = 0
                     for fid, info in function_details.items():
