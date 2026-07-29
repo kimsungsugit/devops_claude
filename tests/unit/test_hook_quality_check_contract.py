@@ -155,12 +155,22 @@ class TestCleanTreeIsNotVerified:
     """
 
     def test_no_changes_reports_unverified(self, tmp_path, monkeypatch):
+        import os
         import subprocess as sp
-        # 깨끗한 git 트리를 만들어 조기종료 경로를 강제
+        # 깨끗한 git 트리를 만들어 조기종료 경로를 강제.
+        # ⚠ '깨끗함'이 **머신에 따라 달라지면 안 된다.** 이 테스트는 개발 PC 에선 통과하는데
+        #   GitHub Actions 에선 조기종료가 안 걸려 실패했다(verified:True 로 fail-open 오탐).
+        #   무변경 판정은 `git diff` + `git ls-files --others` 이므로, 실행이 남기는 부산물
+        #   (`__pycache__/`)이 하나라도 생기면 트리가 더러워져 다른 경로로 샌다.
         sp.run(["git", "init", "-q"], cwd=tmp_path, check=True)
         (tmp_path / "scripts").mkdir()
-        for f in ("quality_check.py", "_hook_env.py"):
+        # `_silence_check.py` 도 복사한다 — quality_check 가 import 하는 의존이고,
+        # 빠지면 §7d 비활성 Warning 이 섞여 무엇을 검증한 건지 흐려진다
+        # (같은 파일의 TestUntrackedFilesAreExamined 는 이미 3개를 복사한다 — 그쪽에만 있던 가드).
+        for f in ("quality_check.py", "_hook_env.py", "_silence_check.py"):
             (tmp_path / "scripts" / f).write_bytes((_ROOT / "scripts" / f).read_bytes())
+        # 부산물 차단 2중: .gitignore(실 저장소와 동일) + 바이트코드 미생성.
+        (tmp_path / ".gitignore").write_text("__pycache__/\n*.pyc\n", encoding="utf-8")
         sp.run(["git", "add", "-A"], cwd=tmp_path, check=True)
         sp.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
                 "commit", "-qm", "init"], cwd=tmp_path, check=True)
@@ -168,7 +178,9 @@ class TestCleanTreeIsNotVerified:
         r = sp.run(
             [_hook_env.project_py(), "scripts/quality_check.py", "--json"],
             capture_output=True, text=True, timeout=120, cwd=str(tmp_path),
+            env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
         )
+        assert r.stdout.strip(), f"--json 인데 stdout 이 비었다 (rc={r.returncode}): {r.stderr[-400:]}"
         d = json.loads(r.stdout)
         assert d.get("skipped") == "no_changes", f"조기종료 경로가 아님: {d}"
         assert d["verified"] is False, "무변경인데 verified=True → fail-open"
