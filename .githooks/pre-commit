@@ -64,8 +64,9 @@ if [ -n "$STAGED_PY" ]; then
 fi
 # ⚠ 확장자는 eslint.config.js 의 files 범위(js,jsx)와 일치시킨다. ts/tsx 를 받으면
 # config 없는 파일이 넘어가 '설정 없음' warning 으로 조용히 통과한다.
-# node_modules 는 tracked 파일이 1,464개나 되어(선재 결함) 배제하지 않으면
-# 커맨드라인 길이 한계를 넘겨 eslint 기동 자체가 실패한다.
+# node_modules 배제는 유지한다 — tracked 였던 2,186개는 이제 추적 해제됐지만(Initial commit
+# 에 휩쓸려 들어온 것), 누군가 다시 `git add -f` 하면 커맨드라인 길이 한계를 넘겨 eslint
+# 기동 자체가 실패한다. 방어는 남겨 두는 게 싸다.
 STAGED_JS=$(git diff --cached --name-only --diff-filter=ACM | grep -E 'frontend-v2/.*\.(js|jsx)$' | grep -v '/node_modules/')
 if [ -n "$STAGED_JS" ]; then
     # ruff 와 같은 ratchet 원리. frontend-v2 는 오래 lint 게이트가 없어(config·의존성 부재)

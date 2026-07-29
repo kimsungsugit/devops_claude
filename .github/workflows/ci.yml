@@ -153,8 +153,8 @@ jobs:
           CHANGED=$(for f in $CHANGED; do [ -f "$f" ] && echo "$f"; done)
           CHANGED_PY=$(echo "$CHANGED" | grep '\.py$' || true)
           CHANGED_SKILL=$(echo "$CHANGED" | grep 'SKILL\.md$' || true)
-          # 확장자는 eslint.config.js 범위(js,jsx)와 일치. node_modules 는 tracked 파일이
-          # 다수라 배제하지 않으면 커맨드라인이 폭주한다.
+          # 확장자는 eslint.config.js 범위(js,jsx)와 일치. node_modules 배제는 유지 —
+          # tracked 였던 2,186개는 추적 해제됐지만 다시 add 되면 커맨드라인이 폭주한다.
           CHANGED_JS=$(echo "$CHANGED" | grep -E 'frontend-v2/.*\.(js|jsx)$' | grep -v '/node_modules/' || true)
           RC=0
           if [ -n "$CHANGED_PY" ]; then
