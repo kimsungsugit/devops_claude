@@ -934,9 +934,17 @@ def _collect_conflict_evidence(
         ]
 
     evidence = conflict.get("evidence") or {}
+    # 동시 위반 파일이 1순위. 없으면 **고칠 규칙만 위반 중인 파일**로 폴백한다 —
+    # 상대 규칙이 아직 안 걸렸을 뿐 고칠 코드는 실재하고, 예방적 경고가 이 기능의 핵심
+    # 용도다(실측: 최대 항목 169건이 이 폴백 없이는 통째로 지침 불가였다).
+    sources = _real(evidence.get("cooccurrence"))
+    basis = "cooccurrence"
+    if not sources:
+        sources = _real(conflict.get("fixing_files"))
+        basis = "fixing_only"
     excerpts: List[Dict[str, Any]] = []
     if to_meta is not None:
-        for e in _real(evidence.get("cooccurrence"))[:max_excerpts]:
+        for e in sources[:max_excerpts]:
             p = resolve_snapshot_file(Path(str(to_meta.get("build_root"))), str(e.get("file") or ""))
             if p is None:
                 continue
@@ -945,7 +953,7 @@ def _collect_conflict_evidence(
             except OSError:
                 continue
             if text.strip():
-                excerpts.append({"file": e.get("file"), "text": text})
+                excerpts.append({"file": e.get("file"), "text": text, "basis": basis})
     diffs: List[Dict[str, Any]] = []
     for w in _real(evidence.get("windows"))[:max_diffs]:
         fm = find_build_meta(metas, w.get("from_build"))

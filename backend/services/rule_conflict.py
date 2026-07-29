@@ -62,6 +62,18 @@ MARKER_HEAD_BYTES = 800
 # 왜 1이 아닌가: 단일 exit 변환·재귀 제거 같은 준수 리팩터링은 복잡도·중첩을 1단이 아니라
 # 2~5단 올린다. 1로 두면 상한에 정확히 붙은 함수만 잡혀 실측 두 프로젝트에서 발화 0이었다.
 HEADROOM_THRESHOLD = 3
+# 동반 해소 후보 판정 — 두 규칙이 같은 코드를 세고 있는지 데이터로 추정한다.
+# 파일 1개 우연 일치를 후보로 올리면 노이즈라 최소 2파일, 공존 파일의 과반이 일치해야 한다
+# (실측 Rule-2.2↔C-POS-012 는 4파일 중 3파일 일치 = 0.75 — 완전 일치만 요구하면 놓친다).
+CO_RES_MIN_FILES = 2
+CO_RES_MIN_RATIO = 0.6
+CO_RES_MAX = 12
+
+CO_RESOLUTION_NOTE = (
+    "두 규칙의 파일별 위반 수가 일치한다는 관측이며, 같은 코드 줄을 가리킨다는 증명이 "
+    "아닙니다 — QAC 리포트는 파일×규칙 카운트가 최상세라 줄 정보가 없습니다. "
+    "겹침 수는 상한이지 확정 중복분이 아닙니다."
+)
 
 CONFLICT_NOTE = (
     "상충 후보는 큐레이션된 규칙 지식과 이 빌드의 관측(동시 위반·메트릭 여유)을 결합한 "
@@ -318,6 +330,67 @@ def _headroom_evidence(
     # 여유가 작은 것부터 — 상한에 잘려도 가장 위험한 함수가 남는다.
     out.sort(key=lambda e: (int(e["headroom"]), str(e["file"]), str(e["function"]), str(e["metric"])))
     return out[:MAX_EVIDENCE_PER_KIND]
+
+
+def _co_resolution_candidates(
+    per_file: Dict[str, Dict[str, int]], pseudo: Set[str], descriptions: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    """**함께 해소될 수 있는 규칙 쌍** — 같은 코드를 두 규칙이 각각 셌을 가능성.
+
+    상충("고치면 걸린다")의 반대편이고, 사용자 질문의 빠진 반쪽이다. 실측 근거:
+    KJPDS02_PV 에서 `Rule-2.2`(dead code)와 `C-POS-012`("Remove 'Dead Code'")가 세 파일에서
+    카운트까지 **정확히 일치**했다(12=12 · 10=10 · 11=11). MISRA(M3CM)와 회사 규칙셋(HKCCM)이
+    같은 코드를 각각 센 것이다. 그러면 한쪽을 고칠 때 다른 쪽도 함께 줄고, 위반 총계에는
+    같은 코드가 두 번 들어가 있다.
+
+    ⚠ 지식 테이블이 아니라 **데이터가 말하게** 한다 — 회사 규칙셋은 프로젝트마다 다르고
+    142개를 미리 알 수 없다. 대신 판정 근거를 전부 실어 보내 사용자가 검증할 수 있게 한다.
+
+    ⚠ 정직성: RCR 은 파일×규칙 카운트가 최상세라 **같은 줄인지는 확인할 수 없다**.
+    카운트 일치는 상관이지 증명이 아니다 — `overlap_upper_bound` 라는 이름이 그 경계다
+    (확정 중복분이 아니라 상한). 파일 귀속이 없는 항목(RCMA)은 애초에 제외한다.
+    """
+    real = {
+        p: rc for p, rc in per_file.items()
+        if rc and not (p in pseudo or is_cross_module_key(p))
+    }
+    rules = sorted({r for rc in real.values() for r in rc})
+    out: List[Dict[str, Any]] = []
+    for i, a in enumerate(rules):
+        for b in rules[i + 1:]:
+            both = [p for p, rc in real.items() if rc.get(a, 0) > 0 and rc.get(b, 0) > 0]
+            if len(both) < CO_RES_MIN_FILES:
+                continue
+            same = [p for p in both if real[p][a] == real[p][b]]
+            if len(same) < CO_RES_MIN_FILES or len(same) / len(both) < CO_RES_MIN_RATIO:
+                continue
+            ga = (descriptions.get(a) or {}).get("group") or ""
+            gb = (descriptions.get(b) or {}).get("group") or ""
+            out.append({
+                "rules": [a, b],
+                "titles": [
+                    (descriptions.get(a) or {}).get("title"),
+                    (descriptions.get(b) or {}).get("title"),
+                ],
+                "groups": [ga, gb],
+                # 규칙셋이 다르면 '중복 계상'의 강한 신호다 — 같은 셋 안의 인접 규칙
+                # (10.6/10.8 처럼)은 원래 관련이라 놀랍지 않다.
+                "cross_ruleset": bool(ga and gb and ga != gb),
+                "files": len(both),
+                "identical_files": len(same),
+                "strength": "identical" if len(same) == len(both) else "mostly_identical",
+                # 겹칠 수 있는 최대치(상한) — 확정 중복분이 아니다.
+                "overlap_upper_bound": sum(min(real[p][a], real[p][b]) for p in both),
+                "totals": {
+                    a: sum(rc.get(a, 0) for rc in real.values()),
+                    b: sum(rc.get(b, 0) for rc in real.values()),
+                },
+                "sample_files": [
+                    {"file": p, a: real[p][a], b: real[p][b]} for p in same[:3]
+                ],
+            })
+    out.sort(key=lambda e: (-int(e["overlap_upper_bound"]), e["rules"][0], e["rules"][1]))
+    return out[:CO_RES_MAX]
 
 
 def _measurement_ambiguities(
@@ -622,13 +695,30 @@ def compute_rule_conflicts(
         usable = [
             e for e in (cooc + windows) if e.get("scope") != "cross_module"
         ]
+        # 고칠 규칙이 실제 파일에 귀속된 위반을 가진 파일들 — 상대 규칙이 아직 0건이어도
+        # **고칠 코드는 실재한다**. 이 기능의 핵심 용도가 예방적 경고인데, 동시 위반만
+        # 근거로 삼으면 가장 큰 항목이 통째로 막힌다(실측: Rule-2.2+C-POS-012 169건이
+        # 실파일 5개·82건 귀속인데도 상대 규칙 위반이 0이라 지침 불가였다).
+        fixing_file_rows = sorted(
+            (
+                {"file": p, "count": sum(rc.get(r, 0) for r in fixing)}
+                for p, rc in per_file.items()
+                if not (p in pseudo or is_cross_module_key(p))
+                and sum(rc.get(r, 0) for r in fixing) > 0
+            ),
+            key=lambda e: (-int(e["count"]), str(e["file"])),
+        )[:MAX_EVIDENCE_PER_KIND]
         if usable:
-            advice = {"available": True, "reason": None}
+            advice = {"available": True, "reason": None, "basis": "cooccurrence"}
+        elif fixing_file_rows:
+            # 예방적 — 상대 규칙은 아직 안 걸렸다. LLM 에 그 사실을 명시해 "이미 걸려 있다"는
+            # 서술을 막는다(프롬프트가 아니라 입력 데이터로 알린다).
+            advice = {"available": True, "reason": None, "basis": "fixing_only"}
         elif fixing_total > 0 and fixing_cross == fixing_total:
-            advice = {"available": False, "reason": "cross_module_only",
+            advice = {"available": False, "reason": "cross_module_only", "basis": None,
                       "unattributed": fixing_cross, "total": fixing_total}
         else:
-            advice = {"available": False, "reason": "no_code_evidence"}
+            advice = {"available": False, "reason": "no_code_evidence", "basis": None}
 
         # 실측 증거(관측)는 RCFInfo 유무와 무관하게 유효하다 — 같은 파일에 두 규칙 위반이
         # 함께 있다는 건 그 자체로 사실이다. 반면 증거가 하나도 없을 때의 근거는 '상대 규칙이
@@ -658,6 +748,8 @@ def compute_rule_conflicts(
             # 빈 evidence 의 뜻을 확정하는 두 필드 — 없으면 화면이 '안전'으로 오독한다.
             "metric_axis": metric_axis,
             "advice": advice,
+            # 고칠 규칙이 실제로 위반 중인 파일 — 상대 규칙이 아직 0건일 때 예방적 지침의 근거.
+            "fixing_files": fixing_file_rows,
             "mechanism": entry["mechanism"],
             "resolutions": entry["resolutions"],
             "deviation_hint": entry["deviation_hint"],
@@ -731,6 +823,9 @@ def compute_rule_conflicts(
         "conflicts": conflicts,
         "conflicts_omitted": omitted,
         "by_rule": by_rule,
+        # 상충의 반대편 — "고치면 걸린다"만 보여주면 질문의 반쪽만 답하는 것이다.
+        "co_resolution": _co_resolution_candidates(per_file, pseudo, descriptions),
+        "co_resolution_note": CO_RESOLUTION_NOTE,
         "ambiguities": {
             "conflict": judgement,
             "measurement": _measurement_ambiguities(trend, details, per_file, pseudo, applied),

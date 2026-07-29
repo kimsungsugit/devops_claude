@@ -77,6 +77,17 @@ const DATA = {
   ],
   conflicts_omitted: 0,
   by_rule: { 'Rule-10.4': ['cast-cascade'], 'Rule-15.5': ['single-exit-nesting'] },
+  co_resolution: [
+    {
+      rules: ['C-POS-012', 'Rule-2.2'],
+      titles: ['Remove Dead Code', 'A project shall not contain dead code'],
+      groups: ['HKCCM', 'M3CM'], cross_ruleset: true,
+      files: 4, identical_files: 3, strength: 'mostly_identical',
+      overlap_upper_bound: 38, totals: { 'C-POS-012': 44, 'Rule-2.2': 38 },
+      sample_files: [{ file: 'src/a.c', 'C-POS-012': 12, 'Rule-2.2': 12 }],
+    },
+  ],
+  co_resolution_note: '파일별 위반 수가 일치한다는 관측이며 같은 코드 줄이라는 증명이 아닙니다.',
   ambiguities: {
     conflict: [{ id: 'cast-cascade', tier: 'cooccurrence', fixing: ['Rule-10.4'], risk: ['Rule-10.8'], categories: ['required'], kind: 'fix_induces', confidence: 'high' }],
     measurement: [
@@ -206,6 +217,34 @@ describe('RuleConflictPanel', () => {
   it('상충 0건이면 테이블 대조 사실과 함께 알린다', () => {
     render(<RuleConflictPanel {...props} data={{ ...DATA, conflicts: [], by_rule: {} }} defaultOpen />);
     expect(screen.getByText(/지식 테이블에 등재된 상충 관계에 해당하는 것이 없습니다/)).toBeTruthy();
+  });
+
+  it('함께 해소될 수 있는 규칙을 겹침 상한·근거와 함께 보여준다', () => {
+    render(<RuleConflictPanel {...props} data={DATA} defaultOpen />);
+    expect(screen.getByText(/함께 해소될 수 있는 규칙/)).toBeTruthy();
+    expect(screen.getByText(/규칙셋 교차 HKCCM \/ M3CM/)).toBeTruthy();
+    expect(screen.getByText(/공존 4파일 중/)).toBeTruthy();
+    // 겹침은 '상한'이지 확정 중복분이 아님을 note 로 상시 고지한다.
+    expect(screen.getByText(/같은 코드 줄이라는 증명이 아닙니다/)).toBeTruthy();
+  });
+
+  it('예방적 지침(상대 규칙 미발생)임을 근거 성격으로 밝힌다', async () => {
+    const user = userEvent.setup();
+    const preventive = {
+      ...DATA,
+      conflicts: [{
+        ...DATA.conflicts[0],
+        evidence: { windows: [], cooccurrence: [], metric_headroom: [] },
+        advice: { available: true, reason: null, basis: 'fixing_only' },
+        risk: [{ rule: 'Rule-10.8', title: 'composite cast', count: 0, category: 'required' }],
+        fixing_files: [{ file: 'src/a.c', count: 7 }],
+      }],
+    };
+    render(<RuleConflictPanel {...props} data={preventive} defaultOpen />);
+    await user.click(screen.getByRole('button', { name: /보기/ }));
+    expect(screen.getByText(/예방적 — 상대 규칙 아직 미발생/)).toBeTruthy();
+    // 막지 않는다 — 고칠 코드가 실재하므로 지침을 만들 수 있다.
+    await waitFor(() => expect(screen.getByRole('button', { name: '지침 생성' })).toBeTruthy());
   });
 
   it('애매한 지점 3종을 각 섹션으로 보여준다', () => {

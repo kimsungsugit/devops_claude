@@ -48,7 +48,13 @@ def build_conflict_evidence_text(
     """
     parts: List[str] = []
     for ex in cooccurrence_excerpts or []:
-        parts.append(f"[동시 위반 파일 발췌 — {ex.get('file')}]\n{ex.get('text') or ''}")
+        # 발췌의 성격을 라벨로 구분한다 — '고칠 규칙만 위반 중'인 파일을 '동시 위반'이라
+        # 적으면 LLM 이 상대 규칙도 이미 걸린 것처럼 서술한다(입력으로 사실을 알린다).
+        label = (
+            "고칠 규칙만 위반 중인 파일 발췌(상대 규칙은 아직 미발생 — 예방적)"
+            if ex.get("basis") == "fixing_only" else "동시 위반 파일 발췌"
+        )
+        parts.append(f"[{label} — {ex.get('file')}]\n{ex.get('text') or ''}")
     for d in window_diffs or []:
         parts.append(f"[구간 변경 diff — {d.get('file')}]\n{d.get('text') or ''}")
     return "\n\n".join(parts)

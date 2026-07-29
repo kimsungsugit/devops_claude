@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 from backend.services.rule_conflict import (
+    _co_resolution_candidates,
     _headroom_evidence,
     _measurement_ambiguities,
     _window_evidence,
@@ -170,6 +171,44 @@ def test_band_headroom_skips_same_verdict_bands():
     assert band_headroom("V_G", "nan") is None
 
 
+def test_co_resolution_finds_rules_counting_the_same_code():
+    """두 규칙셋이 같은 코드를 각각 세는 경우 — 실측 Rule-2.2 ↔ C-POS-012(12=12·10=10·11=11).
+
+    한쪽을 고치면 다른 쪽도 함께 줄고, 위반 총계에는 같은 코드가 두 번 들어가 있다.
+    """
+    per_file = {
+        "src/a.c": {"Rule-2.2": 12, "C-POS-012": 12, "Rule-8.6": 3},
+        "src/b.c": {"Rule-2.2": 10, "C-POS-012": 10},
+        "src/c.c": {"Rule-2.2": 11, "C-POS-012": 11},
+        "src/d.c": {"Rule-2.2": 5, "C-POS-012": 9},   # 공존하나 불일치 → 비율에 반영
+    }
+    descs = {
+        "Rule-2.2": {"title": "dead code", "group": "M3CM"},
+        "C-POS-012": {"title": "Remove Dead Code", "group": "HKCCM"},
+    }
+    out = _co_resolution_candidates(per_file, set(), descs)
+    assert len(out) == 1
+    e = out[0]
+    assert e["rules"] == ["C-POS-012", "Rule-2.2"]
+    assert e["files"] == 4 and e["identical_files"] == 3
+    assert e["strength"] == "mostly_identical"
+    assert e["cross_ruleset"] is True, "서로 다른 규칙셋이면 중복 계상의 강한 신호다"
+    # 겹침은 **상한**이지 확정 중복분이 아니다(줄 정보가 없다).
+    assert e["overlap_upper_bound"] == 12 + 10 + 11 + 5
+
+
+def test_co_resolution_ignores_single_file_and_unattributed():
+    """파일 1개 우연 일치는 후보가 아니고, 파일 귀속이 없는 항목(RCMA)은 애초에 제외."""
+    single = {"src/a.c": {"Rule-1.1": 4, "Rule-2.2": 4}}
+    assert _co_resolution_candidates(single, set(), {}) == []
+    # RCMA 안에서만 일치하는 쌍은 파일이 아니므로 후보가 될 수 없다.
+    pseudo_only = {
+        "RCMA": {"Rule-1.1": 4, "Rule-2.2": 4},
+        "RCMA2": {"Rule-1.1": 7, "Rule-2.2": 7},
+    }
+    assert _co_resolution_candidates(pseudo_only, {"RCMA", "RCMA2"}, {}) == []
+
+
 def test_measurement_ambiguity_ruleset_change_spans_unanalyzed_build():
     """미분석 빌드(None)를 사이에 두고도 규칙셋 변동을 잡아야 한다 — 실측 회귀 지점."""
     trend = {
@@ -288,7 +327,8 @@ def test_conflict_detected_as_cooccurrence_when_both_rules_hit_same_file(tmp_pat
     # 정상 측정이면 null — 값이 있으면 '상충 없음'이 아니라 위반 표를 못 읽은 것이다.
     assert out["latest_rcr_reason"] is None
     # 동시 위반 증거가 있으면 지침 생성 가능 — 프론트가 버튼을 내기 전에 아는 근거.
-    assert c["advice"] == {"available": True, "reason": None}
+    # basis 는 근거의 성격(동시 위반 vs 예방적)이라 화면·LLM 이 표현을 바꾼다.
+    assert c["advice"] == {"available": True, "reason": None, "basis": "cooccurrence"}
     # 이 상충은 metric_risk 가 없다 → 메트릭 축은 '해당 없음'(못 봄이 아니다).
     assert c["metric_axis"]["applicable"] is False
 
@@ -335,6 +375,26 @@ def test_advice_reports_cross_module_only_when_all_violations_unattributed(tmp_p
     assert c["advice"]["unattributed"] == 9 and c["advice"]["total"] == 9
     # 파일 귀속이 없으니 메트릭 축도 함수를 특정할 수 없다(HMR 유무와 별개 사유).
     assert c["evidence"]["cooccurrence"] == []
+
+
+def test_advice_falls_back_to_fixing_files_for_preventive_warning(tmp_path):
+    """상대 규칙이 아직 0건이어도 **고칠 코드는 실재**한다 — 예방적 경고가 이 기능의 핵심 용도.
+
+    동시 위반만 근거로 삼으면 가장 큰 항목이 통째로 막힌다(실측: Rule-2.2+C-POS-012
+    169건이 실파일 5개에 귀속돼 있는데도 지침 불가였다).
+    """
+    cache = tmp_path / "cache"
+    rcf = {"Rule-10.4": True, "Rule-10.8": True}
+    # 고칠 규칙(10.4)만 위반, 상대(10.8)는 0건 → 동시 위반 없음.
+    _mk_build(cache, 10, _rcr({"Rule-10.4": 7}, rcf))
+    _mk_build(cache, 11, _rcr({"Rule-10.4": 7}, rcf))
+
+    out = compute_rule_conflicts(job_url=_JOB, cache_root=cache, table_path=_table(tmp_path))
+    c = out["conflicts"][0]
+    assert c["evidence"]["cooccurrence"] == []
+    assert c["advice"]["available"] is True
+    assert c["advice"]["basis"] == "fixing_only", "예방적 근거임을 화면·LLM 이 알아야 한다"
+    assert [e["file"] for e in c["fixing_files"]] and c["fixing_files"][0]["count"] == 7
 
 
 def test_advice_unavailable_when_all_evidence_is_cross_module(tmp_path):

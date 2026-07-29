@@ -185,9 +185,16 @@ function ConflictAdviceCard({ jobUrl, cacheRoot, conflict }) {
             {advice ? '재생성' : '지침 생성'}
           </button>
         )}
+        {/* 근거의 **성격**을 밝힌다 — 예방적 지침을 '이미 걸려 있다'로 읽으면 안 된다. */}
+        {conflict.advice?.basis === 'fixing_only' && !blocked && (
+          <span style={{ ...xs, color: 'var(--color-info)' }}
+            title="상대 규칙은 이 빌드에서 아직 위반이 없습니다 — 지침은 '고치면 그때 걸린다'는 예측입니다">
+            예방적 — 상대 규칙 아직 미발생
+          </span>
+        )}
         {data?.evidence_used && (
           <span style={{ ...xs, color: 'var(--text-muted)' }}>
-            근거: 동시 위반 발췌 {data.evidence_used.cooccurrence_excerpts ?? 0}건 · 구간 diff {data.evidence_used.window_diffs ?? 0}건
+            근거: 코드 발췌 {data.evidence_used.cooccurrence_excerpts ?? 0}건 · 구간 diff {data.evidence_used.window_diffs ?? 0}건
           </span>
         )}
       </div>
@@ -312,6 +319,65 @@ function ConflictDetail({ jobUrl, cacheRoot, conflict }) {
 
       <ConflictAdviceCard jobUrl={jobUrl} cacheRoot={cacheRoot} conflict={conflict} />
     </div>
+  );
+}
+
+/**
+ * 함께 해소될 수 있는 규칙 — 상충의 **반대편**.
+ *
+ * "고치면 걸린다"만 보여주면 질문의 반쪽만 답하는 것이다. 실측에서 MISRA `Rule-2.2`와
+ * 회사 규칙 `C-POS-012`("Remove 'Dead Code'")가 파일별 카운트까지 일치했다 — 한쪽을
+ * 고치면 다른 쪽도 함께 줄고, 위반 총계에는 같은 코드가 두 번 들어가 있다.
+ * ⚠ 줄 정보가 없어 '같은 코드'라고 단정하지 않는다(서버 note 상시 노출).
+ */
+function CoResolutionList({ items, note }) {
+  if (!items?.length) {
+    return <div style={T.note}>파일별 위반 수가 일치하는 규칙 쌍이 없습니다.</div>;
+  }
+  return (
+    <>
+      <div style={T.SCROLL}>
+        <table style={T.TABLE}>
+          <thead>
+            <tr>
+              <th style={T.th}>규칙 쌍</th><th style={T.numTh}>겹침(상한)</th>
+              <th style={T.th}>근거</th><th style={T.th}>규칙 내용</th>
+            </tr>
+          </thead>
+          <tbody>
+            {items.map((e) => (
+              <tr key={e.rules.join('~')}>
+                <td style={T.nameTd(200)}>
+                  <b>{e.rules[0]}</b> ≡ <b>{e.rules[1]}</b>
+                  {e.cross_ruleset && (
+                    <div style={{ ...xs, color: 'var(--color-info)' }}
+                      title={`서로 다른 규칙셋(${e.groups.join(' / ')})이 같은 코드를 각각 세고 있을 가능성`}>
+                      규칙셋 교차 {e.groups.filter(Boolean).join(' / ')}
+                    </div>
+                  )}
+                </td>
+                <td style={T.numTd}>
+                  {e.overlap_upper_bound}
+                  <div style={{ ...xs, color: 'var(--text-muted)', fontWeight: 400 }}>
+                    총 {e.totals[e.rules[0]]}/{e.totals[e.rules[1]]}
+                  </div>
+                </td>
+                <td style={T.td}
+                  title={(e.sample_files || []).map((s) => `${String(s.file).split('/').pop()}: ${e.rules[0]}=${s[e.rules[0]]} ${e.rules[1]}=${s[e.rules[1]]}`).join('\n')}>
+                  공존 {e.files}파일 중 <b>{e.identical_files}</b>개에서 수치 일치
+                </td>
+                <td style={T.textTd(300)}>
+                  {e.titles.filter(Boolean).length === 0
+                    ? <span style={{ color: 'var(--text-muted)' }}>이 빌드 리포트에 규칙 설명이 없습니다</span>
+                    : e.titles.map((t, i) => <div key={e.rules[i]}>{t || '—'}</div>)}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {note && <div style={T.note}>⚖ {note}</div>}
+    </>
   );
 }
 
@@ -488,6 +554,15 @@ export default function RuleConflictPanel({
               </table>
             </div>
           )}
+
+          <div>
+            <div style={T.figTitle}>함께 해소될 수 있는 규칙 — 같은 코드를 두 규칙이 셌을 가능성</div>
+            <div style={T.note}>
+              한쪽을 고치면 다른 쪽도 함께 줄어듭니다. 조치 우선순위를 정할 때와,
+              위반 총계를 읽을 때(같은 코드가 두 번 들어가 있습니다) 함께 보세요.
+            </div>
+            <CoResolutionList items={data.co_resolution} note={data.co_resolution_note} />
+          </div>
 
           <div>
             <div style={T.figTitle}>측정 근거가 불확실한 지점</div>

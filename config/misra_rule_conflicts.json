@@ -1,8 +1,18 @@
 {
   "version": 1,
   "source_note": "MISRA-C:2012 규칙 본문과 Helix QAC 규칙 설명을 근거로 사람이 정리한 큐레이션 지식이다. 도구가 산출한 판정이 아니며, 팀 검토·승인 전에는 코딩 룰이 아니다. '고치면 걸린다'는 그 방향의 전형적 수정이 유발할 수 있는 위반이지 반드시 발생한다는 뜻이 아니다.",
-  "category_note": "MISRA 등급 — mandatory=예외 불가, required=deviation 승인 시 허용, advisory=권고(문서화 완화). 상대 규칙의 등급이 낮을수록 그쪽을 예외 처리할 여지가 크다.",
+  "category_note": "MISRA 등급 — mandatory=예외 불가, required=deviation 승인 시 허용, advisory=권고(문서화 완화). 상대 규칙의 등급이 낮을수록 그쪽을 예외 처리할 여지가 크다. C-* 는 회사 규칙셋(Helix QAC HKCCM)이라 MISRA 등급 체계 밖이며, 등급은 팀 규약을 따른다(여기서는 project 로 표기).",
   "rule_categories": {
+    "C-POS-012": "project",
+    "C-INT-001": "project",
+    "C-INT-002": "project",
+    "C-INT-003": "project",
+    "C-INT-006": "project",
+    "C-DCI-006": "project",
+    "Rule-2.1": "required",
+    "Rule-8.3": "required",
+    "Rule-5.6": "required",
+    "Rule-5.8": "required",
     "Rule-2.1": "required",
     "Rule-2.2": "required",
     "Rule-5.1": "required",
@@ -566,6 +576,118 @@
       "metric_risk": [],
       "confidence": "low",
       "refs": ["MISRA-C:2012 Rule 21.3", "Rule 18.1"]
+    },
+    {
+      "id": "dead-code-removal-safety",
+      "when_fixing": ["Rule-2.2", "Rule-2.1", "C-POS-012"],
+      "may_violate": ["Rule-14.3", "Rule-15.7", "Rule-16.4", "Rule-17.4"],
+      "kind": "process_tension",
+      "mechanism": "dead code로 지적된 코드가 실제로는 방어 검사·오류 처리 분기인 경우가 있다. 지우면 14.3(불변 제어식)이 함께 사라지지만, if/else 체인의 else나 switch의 default를 지우면 15.7/16.4에 걸리고, 값을 반환하던 경로를 지우면 17.4(모든 경로 return, mandatory)가 깨진다.",
+      "resolutions": [
+        "지우기 전에 그 코드가 **안전 요구에 근거한 방어 코드인지** 먼저 확인한다 — ASIL C/D 함수라면 코드가 아니라 deviation으로 처리할 사안이다.",
+        "'도달 불가'가 정적 분석의 가정(예: 인자 범위)에 의존한다면, 그 가정이 호출 계약으로 실제 보장되는지 확인한다. 보장되지 않으면 dead code가 아니다.",
+        "빌드 변형(#if)으로 비활성인 코드라면 삭제가 아니라 빌드 구성 정리가 맞다.",
+        "지운 뒤 15.7/16.4/17.4를 재측정한다 — 한 번에 옮겨가는 위반이다."
+      ],
+      "deviation_hint": "17.4는 mandatory라 예외 불가 — 반환 경로는 반드시 남긴다. 2.2/2.1은 required지만 안전 요구 근거가 있으면 deviation 신청이 정당하다.",
+      "metric_risk": [],
+      "confidence": "high",
+      "refs": ["MISRA-C:2012 Rule 2.2", "Rule 17.4", "ISO 26262-6 방어적 프로그래밍"]
+    },
+    {
+      "id": "composite-cast-unwind",
+      "when_fixing": ["Rule-10.6", "Rule-10.8"],
+      "may_violate": ["Rule-10.1", "Rule-10.3", "Rule-10.4"],
+      "kind": "fix_induces",
+      "mechanism": "복합식 캐스팅(10.8)이나 넓은 타입 대입(10.6)을 없애려고 캐스팅을 걷어내면 피연산자 타입이 다시 어긋나 10.1/10.3/10.4로 돌아간다. 10.x는 서로의 해소책이 서로의 위반이라 한 방향으로만 고치면 위반이 번호만 바꿔 순환한다.",
+      "resolutions": [
+        "식 단위가 아니라 **데이터 흐름 단위**로 타입을 정한다 — 입력·중간·출력 타입을 먼저 확정하고 그에 맞춰 한 번에 고친다.",
+        "중간 변수로 폭과 부호를 명시하면 캐스팅 없이 10.1/10.4/10.6/10.8을 동시에 만족할 수 있다.",
+        "고친 뒤 10.x **전체**를 재측정한다 — 하나만 보면 옮겨간 걸 해소로 오인한다."
+      ],
+      "deviation_hint": "10.x는 전부 required. 순환이 끝나지 않으면 타입 설계 자체를 바꾸는 게 유일한 출구다.",
+      "metric_risk": [],
+      "confidence": "high",
+      "refs": ["MISRA-C:2012 Appendix D Essential Type Rules"]
+    },
+    {
+      "id": "unsigned-wrap-guard",
+      "when_fixing": ["C-INT-002"],
+      "may_violate": ["Rule-14.3", "Rule-2.2", "Rule-10.4"],
+      "kind": "fix_induces",
+      "mechanism": "부호 없는 연산의 wrap을 막으려고 범위 검사를 넣으면, 그 검사가 정적으로 항상 참/거짓이면 14.3에 걸리고 그 안의 처리는 2.2가 된다. 검사 상수의 타입이 피연산자와 다르면 10.4까지 따라온다.",
+      "resolutions": [
+        "검사 대신 **연산 폭을 넓혀** wrap 자체가 불가능하게 만든다(uint16_t 덧셈을 uint32_t로).",
+        "검사가 필요하면 상수에 부호 없는 접미사를 붙여 타입을 맞춘다.",
+        "정적으로 항상 참인 검사는 런타임 검사가 아니라 assert/정적 단언으로 옮긴다."
+      ],
+      "deviation_hint": "C-INT-002는 회사 규칙셋이라 등급이 프로젝트 정의를 따른다 — RCFInfo의 활성 여부와 팀 규약을 확인할 것.",
+      "metric_risk": ["V_G"],
+      "confidence": "medium",
+      "refs": ["CERT C INT30-C", "Helix QAC HKCCM C-INT-002"]
+    },
+    {
+      "id": "integer-conversion-guard",
+      "when_fixing": ["C-INT-001", "C-INT-003"],
+      "may_violate": ["Rule-10.3", "Rule-10.4", "Rule-10.8"],
+      "kind": "fix_induces",
+      "mechanism": "정수 변환에서 데이터 손실을 막으려 명시 캐스팅을 넣으면 MISRA essential type 규칙(10.3/10.4)과 복합식 캐스팅 금지(10.8)에 그대로 걸린다. 회사 규칙셋(CERT 계열)과 MISRA가 같은 코드에 서로 다른 요구를 건다.",
+      "resolutions": [
+        "캐스팅으로 봉합하지 말고 **인터페이스 타입을 통일**한다 — 두 규칙셋을 동시에 만족하는 유일한 방향이다.",
+        "변환이 불가피한 경계(프로토콜·레지스터)는 전용 변환 함수 한 곳에 모으고, 그 파일에만 예외를 신청한다.",
+        "고친 뒤 두 규칙셋을 **함께** 재측정한다 — 한쪽만 보면 다른 쪽으로 옮겨간 걸 못 본다."
+      ],
+      "deviation_hint": "MISRA 10.x는 required. 회사 규칙과 충돌하는 지점은 팀이 어느 쪽을 우선할지 먼저 정해야 개별 deviation이 의미를 갖는다.",
+      "metric_risk": [],
+      "confidence": "medium",
+      "refs": ["CERT C INT31-C", "MISRA-C:2012 Rule 10.3", "Helix QAC HKCCM C-INT-001/003"]
+    },
+    {
+      "id": "identifier-scope-shortening",
+      "when_fixing": ["Rule-5.6", "Rule-5.8"],
+      "may_violate": ["Rule-5.1", "Rule-5.4", "Rule-8.6"],
+      "kind": "fix_induces",
+      "mechanism": "typedef 이름(5.6)이나 외부 링키지 식별자(5.8)의 유일성을 맞추려 이름을 바꾸면, 바뀐 이름이 앞 31자에서 다른 외부 식별자와 겹치거나(5.1) 매크로와 충돌하고(5.4), 정의를 옮기는 과정에서 8.6이 새로 생긴다.",
+      "resolutions": [
+        "개별 이름을 고치지 말고 **모듈 접두어 체계**를 먼저 정한 뒤 일괄 적용한다.",
+        "변경 전에 전체 심볼을 뽑아 31자 절단 후 중복을 확인한다 — 하나씩 고치면 충돌이 옮겨 다닌다.",
+        "typedef와 객체·함수의 이름공간을 접두어로 분리한다."
+      ],
+      "deviation_hint": "5.x는 전부 required. 명명 규약 개정이 개별 deviation보다 근본적이다.",
+      "metric_risk": [],
+      "confidence": "medium",
+      "refs": ["MISRA-C:2012 Rule 5.6", "Rule 5.8", "Rule 5.1"]
+    },
+    {
+      "id": "incompatible-declaration-fix",
+      "when_fixing": ["C-DCI-006"],
+      "may_violate": ["Rule-8.4", "Rule-8.6", "Rule-8.3"],
+      "kind": "fix_induces",
+      "mechanism": "호환되지 않는 선언을 맞추려고 선언을 고치면, 그 심볼의 정의와 선언이 여러 곳에 흩어져 있을 때 8.3(선언 일관성)·8.4(호환 선언 가시성)·8.6(단일 외부 정의)이 연쇄로 드러난다.",
+      "resolutions": [
+        "심볼마다 **선언은 헤더 하나, 정의는 .c 하나**로 정리하고 정의 .c가 그 헤더를 포함하게 한다 — 8.3/8.4/8.6이 함께 해소된다.",
+        "중복 선언을 지우기 전에 각 선언의 타입이 실제로 같은지 확인한다(다르면 호출 규약이 깨진다).",
+        "벤더 헤더가 원인이면 수정 대상에서 분리하고 예외 목록으로 관리한다."
+      ],
+      "deviation_hint": "8.x는 required. 이 항목들은 같은 정리 작업으로 함께 해소되므로 나눠 고치지 말 것.",
+      "metric_risk": [],
+      "confidence": "medium",
+      "refs": ["MISRA-C:2012 Rule 8.4", "Rule 8.6", "Helix QAC HKCCM C-DCI-006"]
+    },
+    {
+      "id": "shift-bounds-guard",
+      "when_fixing": ["C-INT-006"],
+      "may_violate": ["Rule-12.2", "Rule-14.3", "Rule-10.4"],
+      "kind": "fix_induces",
+      "mechanism": "시프트 폭이 음수이거나 피연산자 비트 수를 넘지 않게 검사를 넣으면, 폭이 상수라 검사가 항상 참이 되어 14.3에 걸린다. 검사를 빼고 캐스팅으로 폭을 맞추면 10.4·12.2로 옮겨간다.",
+      "resolutions": [
+        "시프트 폭을 **상수 또는 열거형**으로 고정하고 그 값이 타입 비트 수 미만임을 정적으로 보장한다 — 런타임 검사 자체가 불필요해진다.",
+        "폭이 런타임 값이면 마스킹(`n & 0x1Fu`)으로 범위를 강제한다(분기 없음 → 14.3 회피)."
+      ],
+      "deviation_hint": "12.2는 required, 14.3도 required — 검사보다 상수·마스킹 설계가 낫다.",
+      "metric_risk": ["V_G"],
+      "confidence": "medium",
+      "refs": ["CERT C INT34-C", "MISRA-C:2012 Rule 12.2"]
     },
     {
       "id": "volatile-access-sequencing",
