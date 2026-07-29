@@ -21,6 +21,33 @@ from typing import Any, Dict, List, Optional
 logger = logging.getLogger(__name__)
 
 
+def _completion_meta(requested_model: str, resp: Any, *, finish_raw: Any = "__from_resp__") -> Dict[str, Any]:
+    """응답 완결성 + 실제로 답한 모델을 표준 키로 만든다.
+
+    ⚠ 이 어댑터 스택은 `workflow/ai.py::llm_call` 을 **거치지 않는 독립 egress** 다
+    (`assistant_service._call_anthropic`, `scripts/generate_periodic_reports.py` 가 여기를
+    쓴다). 그래서 llm_call 에 넣은 검사가 여기 없으면 같은 결함이 이 경로에만 남는다:
+
+      · `finish_reason` 미확인 → 토큰 상한 절단·안전필터 차단이 완결본과 구분 안 됨
+      · 응답이 밝힌 모델 미확인 → 산출물의 모델 근거를 확인하지 않음
+
+    **판정은 `ai.py` 단일 출처**를 쓰고 여기서는 공급자별 shape 추출만 한다
+    (Gemini `candidates[].finish_reason` / OpenAI `choices[0].finish_reason` /
+    Anthropic `stop_reason`). 판정 복제는 이 저장소가 반복해 겪은 실패 모드다.
+    """
+    from workflow.ai import (  # 지연 import — ai.py 는 무겁고 어댑터는 단독으로도 쓰인다
+        _extract_finish_reason,
+        note_effective_model,
+        note_finish_reason_value,
+    )
+
+    meta: Dict[str, Any] = {}
+    raw = _extract_finish_reason(resp) if finish_raw == "__from_resp__" else finish_raw
+    note_finish_reason_value(meta, raw)
+    note_effective_model(meta, str(requested_model), resp, None)
+    return meta
+
+
 class LLMAdapter(ABC):
     """Abstract base class for LLM providers."""
 
@@ -102,7 +129,8 @@ class GeminiAdapter(LLMAdapter):
                     "prompt_tokens": getattr(um, "prompt_token_count", 0),
                     "completion_tokens": getattr(um, "candidates_token_count", 0),
                 }
-            return {"output": text_out, "usage": usage}
+            return {"output": text_out, "usage": usage,
+                    **_completion_meta(self.model, resp)}
 
         raise ImportError("google-genai SDK not installed")
 
@@ -147,7 +175,11 @@ class OpenAIAdapter(LLMAdapter):
                 "prompt_tokens": resp.usage.prompt_tokens,
                 "completion_tokens": resp.usage.completion_tokens,
             }
-        return {"output": text_out, "usage": usage}
+        # OpenAI 는 `choices[0].finish_reason`("length"=토큰 상한, "content_filter"=차단),
+        # 모델 echo 는 top-level `resp.model`.
+        _oa_fr = getattr(resp.choices[0], "finish_reason", None) if resp.choices else None
+        return {"output": text_out, "usage": usage,
+                **_completion_meta(self.model, resp, finish_raw=_oa_fr)}
 
 
 class AnthropicAdapter(LLMAdapter):
@@ -198,7 +230,10 @@ class AnthropicAdapter(LLMAdapter):
             "prompt_tokens": getattr(resp.usage, "input_tokens", 0),
             "completion_tokens": getattr(resp.usage, "output_tokens", 0),
         }
-        return {"output": text_out, "usage": usage}
+        # Anthropic 은 `stop_reason` 이다("end_turn"=정상, "max_tokens"=절단).
+        return {"output": text_out, "usage": usage,
+                **_completion_meta(self.model, resp,
+                                   finish_raw=getattr(resp, "stop_reason", None))}
 
 
 _ADAPTER_MAP = {

@@ -321,3 +321,85 @@ class TestFallbackBranchIsNotAWeakerCopy:
     def test_fallback_keeps_legacy_key(self):
         """기존 `model_fallback` 키를 없애면 (읽는 곳은 없지만) 로그 계약이 깨진다."""
         assert "model_fallback" in self._fallback_src()
+
+
+# ---------------------------------------------------------------------------
+# L5 — 독립 egress(어댑터 스택)가 같은 검사를 우회하던 것
+# ---------------------------------------------------------------------------
+
+class TestAdapterStackSharesTheJudgment:
+    r"""`workflow/llm_adapters.py` 는 `ai.llm_call` 을 **안 거치는 독립 egress** 다.
+
+    `backend/services/assistant_service.py::_call_anthropic` 과
+    `scripts/generate_periodic_reports.py` 가 의도적으로 여기를 쓴다. llm_call 에 넣은
+    검사가 어댑터에 없으면 같은 결함(잘린 응답을 완결본으로 취급, 모델 근거 부재)이
+    **그 경로에만** 남는다.
+
+    판정은 `ai.py` 단일 출처(`note_finish_reason_value` / `note_effective_model`)를 쓰고
+    어댑터는 공급자별 shape 추출만 한다.
+    """
+
+    def test_completion_meta_marks_truncation(self):
+        from workflow.llm_adapters import _completion_meta
+
+        m = _completion_meta("claude-x", object(), finish_raw="max_tokens")
+        assert m["truncated"] is True
+        assert m["finish_reason"] == "MAX_TOKENS"
+
+    def test_anthropic_end_turn_is_normal(self):
+        """대조군 — Anthropic 정상 종료(`end_turn`)를 절단으로 오판하면 안 된다."""
+        from workflow.llm_adapters import _completion_meta
+
+        assert _completion_meta("claude-x", object(), finish_raw="end_turn")["truncated"] is False
+
+    def test_openai_length_is_truncation(self):
+        from workflow.llm_adapters import _completion_meta
+
+        assert _completion_meta("gpt-x", object(), finish_raw="length")["truncated"] is True
+
+    def test_model_echo_is_compared(self):
+        from workflow.llm_adapters import _completion_meta
+
+        m = _completion_meta("claude-3-5-sonnet", {"model": "claude-3-opus"}, finish_raw="end_turn")
+        assert m["model_mismatch"] is True
+
+    def test_unknown_finish_is_not_truncation(self):
+        from workflow.llm_adapters import _completion_meta
+
+        m = _completion_meta("m", object(), finish_raw=None)
+        assert m["truncated"] is False
+        assert m["finish_reason_available"] is False
+
+    @pytest.mark.parametrize("adapter_name", ["GeminiAdapter", "OpenAIAdapter", "AnthropicAdapter"])
+    def test_every_adapter_returns_completion_meta(self, adapter_name):
+        """세 어댑터 중 하나라도 빠지면 그 공급자에서만 결함이 남는다."""
+        import inspect
+
+        from workflow import llm_adapters as mod
+
+        src = inspect.getsource(getattr(mod, adapter_name).generate)
+        assert "_completion_meta" in src, f"{adapter_name} 가 완결성/모델 정보를 안 낸다"
+
+    def test_judgment_is_not_duplicated_in_adapters(self):
+        """어댑터가 자체 판정 목록을 만들면 ai.py 와 갈라진다."""
+        import inspect
+
+        from workflow import llm_adapters as mod
+
+        src = inspect.getsource(mod)
+        assert "note_finish_reason_value" in src, "판정을 ai.py 단일 출처에서 안 가져온다"
+        assert "_OK_FINISH_REASONS" not in src, "어댑터가 정상종료 목록을 복제했다"
+
+
+class TestAnthropicChatPathIsConsistent:
+    """같은 챗이 공급자에 따라 다르게 정직하면 안 된다."""
+
+    def test_truncated_response_is_not_returned_as_answer(self):
+        import inspect
+
+        from backend.services import assistant_service as svc
+
+        src = inspect.getsource(svc._call_anthropic)
+        assert 'result.get("truncated")' in src, (
+            "Anthropic 경로만 잘린 답변을 완결 답변으로 돌려준다 "
+            "(agent_call 경로는 절단을 재시도 사유로 다룬다)")

@@ -426,6 +426,30 @@ def _logger_finish_debug(exc: Exception) -> None:
     logger.debug("finish_reason 추출 실패(응답 shape 불일치) — 절단 판정 보류: %s", exc)
 
 
+def note_finish_reason_value(
+    meta_out: Optional[Dict[str, Any]],
+    raw: Any,
+    log_dir: Optional[Path] = None,
+) -> None:
+    """이미 뽑아낸 finish_reason 값으로 완결성을 기록한다 — **판정 단일 출처**.
+
+    공급자마다 필드 위치가 다르다(Gemini `candidates[].finish_reason`, OpenAI
+    `choices[0].finish_reason`, Anthropic `stop_reason`). shape 추출은 호출자가 하고
+    "이게 절단인가" 판정만 여기서 한다 — 세 어댑터와 `llm_call` 이 같은 함수를 쓴다.
+    (판정 복제는 이 저장소가 반복해 겪은 실패 모드다.)
+    """
+    fr = _norm_finish_reason(raw)
+    truncated = bool(fr) and fr not in _OK_FINISH_REASONS
+    if meta_out is not None:
+        meta_out["finish_reason"] = fr
+        meta_out["finish_reason_available"] = bool(fr)
+        meta_out["truncated"] = truncated
+    if truncated:
+        logger.warning("LLM 응답이 비정상 종료됐다(finish_reason=%s) — 잘린 초안일 수 있다", fr)
+        if log_dir:
+            _agent_log(log_dir, "warning", f"응답이 비정상 종료: finish_reason={fr}")
+
+
 def _note_finish_reason(meta_out: Optional[Dict[str, Any]], resp: Any,
                         log_dir: Optional[Path]) -> None:
     """finish_reason 을 meta 에 싣고, 비정상이면 경고를 남긴다.
@@ -434,19 +458,8 @@ def _note_finish_reason(meta_out: Optional[Dict[str, Any]], resp: Any,
     버리면 그게 더 나쁘다. 대신 `finish_reason_available=False` 로 남겨 "확인 못 함" 과
     "확인했고 정상" 을 구분한다.
     """
-    fr = _extract_finish_reason(resp)
-    if meta_out is None:
-        if fr and fr not in _OK_FINISH_REASONS and log_dir:
-            _agent_log(log_dir, "warning", f"응답이 비정상 종료: finish_reason={fr}")
-        return
-    meta_out["finish_reason"] = fr
-    meta_out["finish_reason_available"] = bool(fr)
-    truncated = bool(fr) and fr not in _OK_FINISH_REASONS
-    meta_out["truncated"] = truncated
-    if truncated:
-        logger.warning("LLM 응답이 비정상 종료됐다(finish_reason=%s) — 잘린 초안일 수 있다", fr)
-        if log_dir:
-            _agent_log(log_dir, "warning", f"응답이 비정상 종료: finish_reason={fr}")
+    # 판정은 `note_finish_reason_value` 단일 출처 — 여기선 Gemini shape 추출만 한다.
+    note_finish_reason_value(meta_out, _extract_finish_reason(resp), log_dir)
 
 
 def _extract_response_model(resp: Any) -> str:
@@ -513,6 +526,12 @@ def _note_effective_model(
                        f"모델 불일치: 요청={answered_by} / 응답={reported}")
     else:
         meta_out["model_mismatch"] = False
+
+
+# `workflow/llm_adapters.py`(별도 provider 스택)가 같은 판정을 쓰도록 공개한다.
+# ⚠ 어댑터는 `ai.llm_call` 을 안 거치는 **독립 egress** 라, 여기 검사가 어댑터에 없으면
+#   같은 결함(잘린 응답을 완결본으로 취급, 모델 근거 부재)이 그 경로에만 남는다.
+note_effective_model = _note_effective_model
 
 
 def _extract_gemini_text(resp: Any) -> Optional[str]:

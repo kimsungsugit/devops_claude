@@ -1412,6 +1412,21 @@ def _call_anthropic(cfg: Dict[str, Any], messages: List[Dict[str, str]]) -> Tupl
         result = adapter.generate(
             messages, temperature=temperature, max_tokens=max_tokens, timeout=timeout,
         ) or {}
+        # ⚠ 잘린 응답(max_tokens/차단)을 완결 답변으로 돌려주지 않는다. 다른 챗 경로
+        # (`agent_call`)는 절단을 재시도 사유로 다뤄 소진 시 빈 답을 내므로, 이쪽만
+        # 잘린 답을 통과시키면 **같은 챗이 공급자에 따라 다르게 정직해진다**.
+        # 코드를 돌려주면 `_run_llm_candidates` 가 다음 후보로 넘어간다.
+        if result.get("truncated"):
+            _chat_perf_logger.warning(
+                "anthropic 응답이 비정상 종료(finish_reason=%s) — 후보 폴백",
+                result.get("finish_reason"),
+            )
+            return "", "truncated_response"
+        if result.get("model_mismatch"):
+            _chat_perf_logger.warning(
+                "anthropic 요청 모델(%s)과 응답 모델(%s) 불일치",
+                cfg.get("model"), result.get("model_reported"),
+            )
         return str(result.get("output") or "").strip(), ""
     except ImportError:
         return "", "anthropic_sdk_missing"

@@ -196,6 +196,24 @@ echo 가 없으면 **불일치로 단정하지 않는다**(모르는 것은 모�
 `_note_finish_reason` 이 빠져 있어 **폴백 응답이 잘려도 완결본으로 통과**했다. 같이 메움.
 복사본 분기에 검사가 빠지는 건 이 저장소가 반복해 겪은 패턴이라 AST 테스트로 고정했다.
 
+### L5 — 독립 egress 가 같은 검사를 우회했다 (2026-07-30)
+
+`workflow/llm_adapters.py` 의 어댑터 3종은 `{"output","usage"}` 만 돌려줬다 —
+`finish_reason` 미확인, 모델 echo 미확인, 재시도·예산 없음. 이 스택은
+`assistant_service._call_anthropic` 과 `scripts/generate_periodic_reports.py` 가
+**의도적으로 쓰는 독립 경로**라, L1/L4 수정이 이 경로엔 닿지 않았다.
+
+→ `_completion_meta` 로 세 어댑터가 **`ai.py` 단일 출처 판정**을 쓰게 했다
+(`note_finish_reason_value` / `note_effective_model`). 공급자별 shape 추출만 어댑터가 한다:
+Gemini `candidates[].finish_reason` / OpenAI `choices[0].finish_reason` /
+Anthropic `stop_reason`(`end_turn` 정상, `max_tokens` 절단).
+
+소비처도 맞췄다: `_call_anthropic` 이 잘린 응답을 완결 답변으로 돌려주지 않고 후보
+폴백 코드를 낸다 — 다른 챗 경로(`agent_call`)는 절단을 재시도 사유로 다루므로, 이쪽만
+통과시키면 **같은 챗이 공급자에 따라 다르게 정직해진다**.
+
+테스트가 어댑터의 판정 복제(`_OK_FINISH_REASONS` 자체 보유)를 금지한다.
+
 ### 조사 보고 정정 — redaction 노출은 훨씬 좁다
 
 "응답 전문이 `agent_*.md` 에 무삭제로 남는다" 는 **2개 호출부 한정**이다(AST 전수 조사:
@@ -248,7 +266,7 @@ DOCX 는 XLSM 라이터와 달리 **템플릿 주도**라(SwUFn heading 을 함�
 | ~~2~~ | ~~`report_gen/` DOCX 라이터 대조 (P2)~~ | ✅ 완료 — 아래 별도 절 |
 | ~~3~~ | ~~`impact_orchestrator.py:135` (P0 잔여)~~ | ✅ 완료 — 위 P0 참조 |
 | 4 | LLM redaction + 모델 echo 대조 (CORE-006 잔여) | 프롬프트 redaction 저장소 전체 0건. 응답 전문이 `agent_*.md` 에 무삭제로 디스크에 남는다(HTTP 에러 본문 포함). `workflow/ai_validator.py` 의 시크릿 검사는 **모듈 전체가 dead code**(프로덕션 호출자 0) |
-| 5 | 3개 egress 경로 통합 | `llm_adapters`·`rag.embedder` 가 `llm_call` 의 예산·재시도·stage cap 을 전부 우회 |
+| 🟡 5 | 3개 egress 경로 통합 | **부분 완료(L5, 2026-07-30)** — 어댑터 3종이 절단·모델 검사를 공유하게 됐다(`_completion_meta` → `ai.py` 단일 출처). 잔여: 예산·재시도·stage cap 공유, `rag/embedder.py`(자체 client·자체 키) |
 
 ---
 
