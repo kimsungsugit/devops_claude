@@ -222,3 +222,102 @@ class TestSourceVocabularyMatchesProducers:
              "related": "SwRS_1", "related_source": "srs"},
         ])
         assert "분류 불가 출처값" not in txt
+
+
+# ---------------------------------------------------------------------------
+# L4 — 어느 모델이 답했는지 meta 가 거짓을 말하던 것
+# ---------------------------------------------------------------------------
+
+class _RespModel:
+    def __init__(self, model_version=None):
+        if model_version is not None:
+            self.model_version = model_version
+
+
+class TestEffectiveModelIsRecorded:
+    r"""`meta_out["model"]` 은 호출 **전** cfg 값으로 한 번만 찍혔다.
+
+    400 폴백이 성공하면 답한 모델은 `model_fallback` 이라는 **다른 키**에만 갔고,
+    그 키는 저장소 어디서도 읽히지 않았다. `meta.get("model")` 을 읽는 소비처
+    (`workflow/gui_utils.py` 의 `ai_model` 2곳)는 **실패한 모델**을 산출물의 모델
+    근거로 기록했다. `.env` 가 특정 모델을 하드락하는 운영 방식이라 이 값은 근거의 일부다.
+    """
+
+    def test_model_key_holds_the_answering_model(self):
+        from workflow.ai import _note_effective_model
+
+        meta = {"model_requested": "gemini-3.5-flash-lite", "model": "gemini-3.5-flash-lite"}
+        _note_effective_model(meta, "gemini-2.5-flash", _RespModel("gemini-2.5-flash"), None)
+        assert meta["model"] == "gemini-2.5-flash", "폴백 후에도 실패한 모델이 남았다"
+        assert meta["model_requested"] == "gemini-3.5-flash-lite"
+
+    def test_provider_echo_is_captured(self):
+        from workflow.ai import _note_effective_model
+
+        meta: dict = {}
+        _note_effective_model(meta, "gemini-2.5-flash", _RespModel("gemini-2.5-flash-001"), None)
+        assert meta["model_reported"] == "gemini-2.5-flash-001"
+
+    def test_version_suffix_is_not_a_mismatch(self):
+        """대조군 — 정확일치를 요구하면 정상 응답이 전부 불일치로 잡힌다."""
+        from workflow.ai import _note_effective_model
+
+        meta: dict = {}
+        _note_effective_model(meta, "gemini-2.5-flash", _RespModel("gemini-2.5-flash-001"), None)
+        assert meta["model_mismatch"] is False
+
+    def test_different_model_is_flagged(self):
+        from workflow.ai import _note_effective_model
+
+        meta: dict = {}
+        _note_effective_model(meta, "gemini-3.5-flash-lite", _RespModel("gemini-1.5-pro"), None)
+        assert meta["model_mismatch"] is True
+
+    def test_absent_echo_does_not_claim_mismatch(self):
+        """모르는 것을 불일치로 단정하면 거짓 경고가 난다."""
+        from workflow.ai import _note_effective_model
+
+        meta: dict = {}
+        _note_effective_model(meta, "gemini-2.5-flash", _RespModel(), None)
+        assert meta["model_reported"] == ""
+        assert meta["model_mismatch"] is False
+
+    def test_openai_dict_shape_is_supported(self):
+        from workflow.ai import _note_effective_model
+
+        meta: dict = {}
+        _note_effective_model(meta, "gpt-4o-mini", {"model": "gpt-4o-mini-2024"}, None)
+        assert meta["model_reported"] == "gpt-4o-mini-2024"
+        assert meta["model_mismatch"] is False
+
+    def test_meta_out_none_does_not_crash(self):
+        from workflow.ai import _note_effective_model
+
+        _note_effective_model(None, "m", _RespModel("m"), None)
+
+
+class TestFallbackBranchIsNotAWeakerCopy:
+    """폴백 분기는 정상 경로의 복사본이라 검사가 빠지기 쉽다 — 실제로 둘이 빠져 있었다."""
+
+    @staticmethod
+    def _fallback_src() -> str:
+        import inspect
+
+        from workflow import ai as ai_mod
+
+        src = inspect.getsource(ai_mod.llm_call)
+        i = src.find("is_bad_request and fallback_model")
+        assert i > 0, "폴백 분기를 못 찾았다 — 구조가 바뀌었으면 이 테스트도 갱신할 것"
+        return src[i:i + 1800]
+
+    def test_fallback_checks_finish_reason(self):
+        assert "_note_finish_reason" in self._fallback_src(), (
+            "폴백 응답이 잘려도 완결본으로 통과한다")
+
+    def test_fallback_records_effective_model(self):
+        assert "_note_effective_model" in self._fallback_src(), (
+            "폴백 후에도 model 키가 실패한 모델을 가리킨다")
+
+    def test_fallback_keeps_legacy_key(self):
+        """기존 `model_fallback` 키를 없애면 (읽는 곳은 없지만) 로그 계약이 깨진다."""
+        assert "model_fallback" in self._fallback_src()

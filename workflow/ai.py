@@ -449,6 +449,72 @@ def _note_finish_reason(meta_out: Optional[Dict[str, Any]], resp: Any,
             _agent_log(log_dir, "warning", f"응답이 비정상 종료: finish_reason={fr}")
 
 
+def _extract_response_model(resp: Any) -> str:
+    """응답 객체가 **실제로 답한 모델**을 밝히면 그 값을 뽑는다. 없으면 빈 문자열."""
+    for attr in ("model_version", "model"):
+        try:
+            v = getattr(resp, attr, None)
+        except Exception:  # silent-ok: SDK 프로퍼티가 던지면 다음 후보로 넘어가면 된다.
+            # 결과가 "" 여도 `_models_compatible` 가 **불일치로 단정하지 않으므로**
+            # 삼켜도 거짓 판정이 안 난다(모르는 것은 모른다고 남는다).
+            v = None
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+    if isinstance(resp, dict):
+        for key in ("model_version", "model"):
+            v = resp.get(key)
+            if isinstance(v, str) and v.strip():
+                return v.strip()
+    return ""
+
+
+def _models_compatible(requested: str, reported: str) -> bool:
+    """provider 가 버전 접미사를 붙여 돌려주는 경우까지 같은 모델로 본다.
+
+    예: 요청 `gemini-2.5-flash` → 응답 `gemini-2.5-flash-001`. 정확일치를 요구하면
+    정상 응답이 전부 불일치로 잡혀 경고가 무의미해진다.
+    """
+    a = str(requested or "").strip().lower()
+    b = str(reported or "").strip().lower()
+    if not a or not b:
+        return True          # 한쪽을 모르면 불일치라고 단정하지 않는다
+    return a.startswith(b) or b.startswith(a)
+
+
+def _note_effective_model(
+    meta_out: Optional[Dict[str, Any]],
+    answered_by: str,
+    resp: Any,
+    log_dir: Optional[Path],
+) -> None:
+    """**실제로 답한 모델**을 meta 에 확정하고, provider echo 와 어긋나면 경고한다.
+
+    회귀 대상(2026-07-29): `meta_out["model"]` 은 호출 **전** cfg 값으로 한 번만 찍혔다.
+    400 폴백이 성공하면 `model_fallback` 이라는 **다른 키**에만 기록돼, `meta.get("model")`
+    을 읽는 소비처(`gui_utils` 의 `ai_model` 2곳)는 **실패한 모델**을 답한 모델로 기록했다.
+    그리고 `model_fallback` 은 저장소 어디서도 읽히지 않았다.
+
+    `.env` 가 특정 모델을 하드락하는 운영 방식이라 "어느 모델이 이 문장을 썼는가" 는
+    산출물 근거의 일부다 — 틀린 값을 남기면 안 된다.
+    """
+    if meta_out is None:
+        return
+    meta_out["model"] = str(answered_by)          # 기존 키 = **답한** 모델(하위호환 유지)
+    reported = _extract_response_model(resp)
+    meta_out["model_reported"] = reported
+    if reported and not _models_compatible(answered_by, reported):
+        meta_out["model_mismatch"] = True
+        logger.warning(
+            "요청 모델(%s)과 응답이 밝힌 모델(%s)이 다르다 — 산출물의 모델 근거가 어긋난다",
+            answered_by, reported,
+        )
+        if log_dir:
+            _agent_log(log_dir, "warning",
+                       f"모델 불일치: 요청={answered_by} / 응답={reported}")
+    else:
+        meta_out["model_mismatch"] = False
+
+
 def _extract_gemini_text(resp: Any) -> Optional[str]:
     """Gemini SDK 응답 객체에서 텍스트만 안전 추출, repr 전체 덤프 방지용"""
     try:
@@ -602,6 +668,9 @@ def llm_call(
         elif "gemini" in str(model).lower():
             temperature = float(getattr(config, "DEFAULT_LLM_TEMPERATURE_GEMINI", 1.0))
     if meta_out is not None:
+        # 요청 모델. 실제로 답한 모델은 호출 뒤 `_note_effective_model` 이 `model` 키를
+        # 덮어쓴다(400 폴백이 뜨면 답한 모델이 달라진다).
+        meta_out["model_requested"] = model
         meta_out["model"] = model
         if model_override:
             meta_out["model_override"] = model_override
@@ -867,6 +936,7 @@ def llm_call(
                     if log_dir:
                         _agent_log(log_dir, "assistant", text or "")
                     _note_finish_reason(meta_out, resp, log_dir)
+                    _note_effective_model(meta_out, str(model), resp, log_dir)
                     if meta_out is not None:
                         meta_out["sdk"] = "google-genai"
                         meta_out["ok"] = True
@@ -898,10 +968,17 @@ def llm_call(
                             text, resp = _try_gemini(str(fallback_model), int(reduced_tokens))
                             if log_dir:
                                 _agent_log(log_dir, "assistant", text or "")
+                            # ⚠ 이 분기는 정상 경로의 복사본인데 아래 둘이 빠져 있었다:
+                            #  · 절단 검사 — 폴백 응답이 잘려도 완결본으로 통과했다
+                            #  · 실제 답한 모델 확정 — `model` 은 **실패한 모델**로 남고
+                            #    답한 모델은 아무도 안 읽는 `model_fallback` 에만 갔다
+                            _note_finish_reason(meta_out, resp, log_dir)
+                            _note_effective_model(meta_out, str(fallback_model), resp, log_dir)
                             if meta_out is not None:
                                 meta_out["sdk"] = "google-genai"
                                 meta_out["ok"] = True
-                                meta_out["model_fallback"] = str(fallback_model)
+                                meta_out["model_fallback"] = str(fallback_model)  # 기존 키 유지
+                                meta_out["model_fallback_from"] = str(model)
                                 try:
                                     cand = getattr(resp, "candidates", None)
                                     if cand and hasattr(cand[0], "content"):
@@ -968,6 +1045,7 @@ def llm_call(
                     if log_dir:
                         _agent_log(log_dir, "assistant", text or "")
                     _note_finish_reason(meta_out, response, log_dir)
+                    _note_effective_model(meta_out, str(model), response, log_dir)
                     if meta_out is not None:
                         meta_out["sdk"] = "google-generativeai"
                         meta_out["ok"] = True
@@ -1074,6 +1152,9 @@ def llm_call(
             # OpenAI 호환 응답은 finish_reason 이 choices[0] 에 있다(Gemini 와 shape 가 다르다).
             # "length" = 토큰 상한 절단, "content_filter" = 차단 — 둘 다 완결된 응답이 아니다.
             _oa_fr = _norm_finish_reason((data["choices"][0] or {}).get("finish_reason"))
+            # OpenAI 호환 응답은 top-level `model` 에 **실제로 응답한 모델**을 담는다 —
+            # 요청과 다르면(게이트웨이 라우팅·모델 폐기 등) 산출물의 모델 근거가 어긋난다.
+            _note_effective_model(meta_out, str(model), data, log_dir)
             if meta_out is not None:
                 meta_out["ok"] = True
                 meta_out["finish_reason"] = _oa_fr
