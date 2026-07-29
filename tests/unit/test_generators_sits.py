@@ -7,8 +7,11 @@
 from __future__ import annotations
 
 from generators.sits import (
+    _DESC_COL,
+    _TCID_COL,
     collect_integration_flows,
     generate_sits_quality_report,
+    validate_sits_xlsm,
 )
 
 
@@ -256,3 +259,61 @@ class TestQualityReportExposesFlowCap:
         qr = generate_sits_quality_report(self._itc(), 10, flow_stats=stats)
         assert qr["total_test_cases"] == 1
         assert qr["integration_flow_coverage"]["flows_dropped"] == 6
+
+
+# ---------------------------------------------------------------------------
+# validate_sits_xlsm — sub-case 계수를 desc 프리픽스로 추측하지 않는다
+# ---------------------------------------------------------------------------
+
+def _write_min_sits(path, sub_labels):
+    """TC 1건 + 주어진 라벨의 sub-case 행을 갖는 최소 SITS 시트."""
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "4.SW Integration Test Spec"
+    ws.cell(row=7, column=_TCID_COL, value="SwITC_01")
+    ws.cell(row=7, column=_DESC_COL, value="Verify integration: Ap_Door_Run → Drv_Motor_Set")
+    for i, label in enumerate(sub_labels, start=8):
+        ws.cell(row=i, column=_DESC_COL, value=label)   # sub-case 행엔 TC ID 없음
+    wb.save(str(path))
+    return str(path)
+
+
+class TestValidatorCountsLabelledSubCases:
+    r"""회귀 대상: 검증기가 `re.match(r"^\d", desc)` 로 sub-case 를 셌다.
+
+    라이터는 `case_label or case_num` 을 쓰고 case_label 은 `COND_1 [...]` 처럼 **문자**로
+    시작한다 — 라이터 포맷이 바뀌었는데 리더 휴리스틱이 안 따라갔다. 실측(실 프로젝트
+    120 TC): 파일에 1288행이 있는데 840 만 세어 34.8% 과소, avg 7.0(실제 10.7).
+    그런데도 valid 는 True 였다.
+    """
+
+    def test_letter_prefixed_labels_are_counted(self, tmp_path):
+        labels = ["COND_1 [g_u8State=최솟값]", "ERR_PROP_1 [하한 초과]", "GLOBAL_2 [x]"]
+        p = _write_min_sits(tmp_path / "s.xlsx", labels)
+        st = validate_sits_xlsm(p)["stats"]
+        assert st["sub_case_count"] == 3, "문자로 시작하는 sub-case 가 누락됐다"
+        assert st["tc_count"] == 1
+
+    def test_digit_prefixed_labels_still_counted(self, tmp_path):
+        """대조군: 기존에 세던 숫자 시작 라벨도 그대로 세어야 한다(회귀 방지)."""
+        p = _write_min_sits(tmp_path / "s.xlsx", ["1", "2", "3", "4"])
+        assert validate_sits_xlsm(p)["stats"]["sub_case_count"] == 4
+
+    def test_mixed_labels_are_all_counted(self, tmp_path):
+        p = _write_min_sits(tmp_path / "s.xlsx", ["1", "COND_1 [a]", "2", "ERR_PROP_1 [b]"])
+        st = validate_sits_xlsm(p)["stats"]
+        assert st["sub_case_count"] == 4
+        assert st["avg_sub_per_tc"] == 4.0
+
+    def test_blank_rows_are_not_counted(self, tmp_path):
+        """빈 desc 를 세면 반대 방향으로 거짓말한다."""
+        p = _write_min_sits(tmp_path / "s.xlsx", ["COND_1 [a]", "", "   ", "COND_2 [b]"])
+        assert validate_sits_xlsm(p)["stats"]["sub_case_count"] == 2
+
+    def test_tc_row_is_not_double_counted_as_subcase(self, tmp_path):
+        """TC 행도 desc 를 갖는다 — 구조 판정이 TC 를 sub 로 겹쳐 세면 안 된다."""
+        p = _write_min_sits(tmp_path / "s.xlsx", ["COND_1 [a]"])
+        st = validate_sits_xlsm(p)["stats"]
+        assert (st["tc_count"], st["sub_case_count"]) == (1, 1)

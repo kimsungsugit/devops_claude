@@ -17,6 +17,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from generators._artifact_check import apply_write_back_check
+
 _logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -1495,7 +1497,16 @@ def validate_sits_xlsm(xlsm_path: str) -> Dict[str, Any]:
             desc_val = row[_DESC_COL - 1] if len(row) >= _DESC_COL else None
             if tc_id_val and str(tc_id_val).startswith("SwITC_"):
                 tc_count += 1
-            elif desc_val is not None and re.match(r"^\d", str(desc_val).strip()):
+            elif desc_val is not None and str(desc_val).strip():
+                # ⚠ 예전엔 `re.match(r"^\d", desc)` 였다 — desc 가 숫자로 시작할 때만
+                # sub-case 로 셌다. 그런데 라이터는 `case_label or case_num` 을 쓰고
+                # case_label 은 `COND_1 [...]`·`ERR_PROP_1 [...]`·`GLOBAL_*` 처럼 문자로
+                # 시작한다. 라이터 포맷이 바뀌었는데 리더 휴리스틱이 안 따라간 것이다.
+                # 실측(실 프로젝트 120 TC): 파일에 1288행이 있는데 840 만 세어 34.8% 과소,
+                # avg_sub_per_tc 도 7.0(실제 10.7)이었다. 그런데 valid 는 True 였다.
+                # 판정을 프리픽스 추측이 아니라 **구조**로 바꾼다: 라이터는 sub-case 행에
+                # TC ID 를 절대 안 쓰고 _DESC_COL 은 항상 채운다(위 writer 참조).
+                # 이 시트는 template 이 있어도 통째로 지우고 다시 만들므로 잔여행이 없다.
                 sub_count += 1
 
         stats["tc_count"] = tc_count
@@ -1890,6 +1901,15 @@ def generate_sits(
     # ── Stage 10: validation ─────────────────────────────────────────────────
     _progress(90, "XLSM 검증 중")
     validation = validate_sits_xlsm(actual_output)
+    # 파일에서 되읽은 수가 실제로 만든 수와 같은지 대조한다. 이게 없으면 라이터가
+    # 흘려도 `valid: True` 가 나오고, 호출자에게 가는 test_case_count 는 파일이 아니라
+    # 생성기가 세어준 값이라 아무도 눈치채지 못한다.
+    validation = apply_write_back_check(validation, {
+        "tc_count": len(itcs),
+        "sub_case_count": sum(len(t.get("sub_cases") or []) for t in itcs),
+    })
+    if not validation.get("valid"):
+        _logger.warning("SITS validation issues: %s", validation.get("issues"))
 
     # ── Stage 11: validation report ──────────────────────────────────────────
     _progress(95, "검증 보고서 생성 중")

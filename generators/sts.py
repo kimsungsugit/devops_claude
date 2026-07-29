@@ -16,6 +16,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from generators._artifact_check import apply_write_back_check
 from report_gen.requirements import _extract_sds_partition_map
 
 _logger = logging.getLogger(__name__)
@@ -2578,6 +2579,10 @@ def generate_sts(
     _progress(92, "생성 문서 자동 검증 중")
     try:
         validation = validate_sts_xlsm(out)
+        # 생성 수 ↔ 파일 기록 수 대조(세 생성기 공용 단일 출처). 이게 없으면 아래
+        # 반환값의 test_case_count 는 **파일이 아니라 생성기가 세어준 값**이라,
+        # 라이터가 흘려도 호출자는 끝까지 모른다.
+        validation = apply_write_back_check(validation, {"tc_count": len(test_cases)})
         if validation.get("issues"):
             _logger.warning("STS validation issues: %s", validation["issues"])
     except Exception as _ve:

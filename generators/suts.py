@@ -16,6 +16,8 @@ from copy import copy
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+
+from generators._artifact_check import apply_write_back_check
 from report_gen.requirements import _extract_sds_partition_map
 
 _logger = logging.getLogger(__name__)
@@ -2607,6 +2609,14 @@ def generate_suts(
 
     _progress(90, "생성 문서 자동 검증 중")
     validation = validate_suts_xlsm(out)
+    # 생성 수 ↔ 파일 기록 수 대조. `validate_suts_xlsm` 에 `expected_tc_range`/
+    # `expected_seq_range` 인자가 **있는데도** 호출부 4곳이 전부 기본값 None 이라
+    # 그 대조는 한 번도 실행된 적이 없었다 — 정답(total_seq)이 바로 윗줄에 있는데도.
+    # 판정 로직은 세 생성기 공용 단일 출처(`_artifact_check`)로 통일한다.
+    validation = apply_write_back_check(validation, {
+        "tc_count": len(units),
+        "seq_count": total_seq,
+    })
     if validation.get("issues"):
         _logger.warning("SUTS validation issues: %s", validation["issues"])
 
