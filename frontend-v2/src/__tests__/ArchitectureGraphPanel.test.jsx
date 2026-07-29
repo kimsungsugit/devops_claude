@@ -238,6 +238,16 @@ describe('ArchitectureGraphPanel — Q2 신규 다이어그램', () => {
     expect(screen.getByRole('button', { name: 'PNG' })).toBeInTheDocument();
   });
 
+  it('그림 4종은 전폭 span 없이 같은 2열 그리드에 놓인다(2×2)', async () => {
+    // ⚠ DSM·산포도를 전폭으로 두면 산포도(viewBox 640×260)가 늘어나 가운데가 텅 빈다.
+    //   4개가 같은 격자에 있어야 2×2 로 접힌다.
+    const { container } = render(<ArchitectureGraphPanel {...PROPS} />);
+    await screen.findByRole('img', { name: '모듈 의존 다이어그램' });
+    const spans = [...container.querySelectorAll('[style*="grid-column"]')]
+      .filter((el) => el.querySelector('svg, table'));
+    expect(spans).toHaveLength(0);   // 그림에 전폭 span 없음
+  });
+
   it('구조 개선 후보를 목록이 아니라 표로 낸다', async () => {
     // 종류/대상/근거 세 축을 한 줄 문장으로 이어 붙이면 눈이 축을 못 잡는다.
     render(<ArchitectureGraphPanel {...PROPS} />);

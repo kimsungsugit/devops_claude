@@ -403,9 +403,10 @@ function DsmMatrix({ fileGraph }) {
   }
   // ⚠ 셀을 정사각으로 고정한다 — 값 자릿수에 따라 열 폭이 달라지면 격자가 어긋나 매트릭스로
   //   안 읽힌다(DSM 은 '격자에서 어느 쪽이 위/아래냐'가 정보의 전부다).
+  //   16px 은 2×2 반폭(≈550px)에 28열 + 행 라벨이 들어가는 크기다.
   const base = {
     ...xs, padding: 0, border: '1px solid var(--border)', textAlign: 'center', fontSize: 9,
-    width: 20, minWidth: 20, height: 20, boxSizing: 'border-box',
+    width: 16, minWidth: 16, height: 16, boxSizing: 'border-box',
   };
   const short = (f) => String(f).split('/').pop().replace(/\.[ch]$/, '');
   const pos = new Map(view.shown.map((f, i) => [f, i]));
@@ -432,14 +433,16 @@ function DsmMatrix({ fileGraph }) {
         <table style={{ borderCollapse: 'collapse', tableLayout: 'fixed' }}>
           <thead>
             <tr>
-              <th style={{ ...base, width: 'auto', minWidth: 110 }} />
+              <th style={{ ...base, width: 'auto', minWidth: 80 }} />
               {view.shown.map((c, i) => <th key={c} style={base} title={c}>{i + 1}</th>)}
             </tr>
           </thead>
           <tbody>
             {view.shown.map((r, ri) => (
               <tr key={r}>
-                <th style={{ ...base, textAlign: 'left', whiteSpace: 'nowrap' }} title={r}>{ri + 1}. {short(r)}</th>
+                {/* 행 라벨은 셀 규격(16px 정사각)에서 빼 준다 — 안 그러면 이름이 통째로 잘린다 */}
+                <th style={{ ...base, textAlign: 'left', whiteSpace: 'nowrap', width: 'auto', minWidth: 80, padding: '0 4px' }}
+                  title={r}>{ri + 1}. {short(r)}</th>
                 {view.shown.map((c) => {
                   const v = r === c ? null : view.cell.get(`${r}|${c}`);
                   const back = v != null && topo && ri > pos.get(c);
@@ -589,7 +592,8 @@ function CouplingHeatmap({ moduleGraph }) {
 function HotspotScatter({ hotspots }) {
   const pts = (hotspots || []).filter((h) => h.fan_in > 0);
   if (!pts.length) return null;
-  // 전폭 배치(O4)라 viewBox를 키운다 — 320×180에선 점이 좌하단에 뭉쳐 라벨을 못 붙였다.
+  // viewBox 640×260 — 320×180에선 점이 좌하단에 뭉쳐 라벨을 못 붙였다(O4).
+  // 2×2 반폭(≈550px)에서도 viewBox 가 비율대로 줄어들 뿐이라 상대 배치는 유지된다.
   const W = 640;
   const H = 260;
   const P = 38;
@@ -602,8 +606,8 @@ function HotspotScatter({ hotspots }) {
       title="핫스팟 산포"
       hint="X=fan-in · Y=복잡도 (●측정 ccn / ○줄수 추정 — 축 척도 혼합 주의)"
     >
-      {/* ⚠ maxWidth 760 을 두면 전폭 행에서 오른쪽에 죽은 여백이 남는다.
-          viewBox 가 있으니 폭에 맞춰 비율대로 커지게 둔다. */}
+      {/* ⚠ maxWidth 를 두면 칸보다 좁게 그려져 오른쪽에 죽은 여백이 남는다.
+          viewBox 가 있으니 칸 폭에 맞춰 비율대로 그리게 둔다. */}
       <svg viewBox={`0 0 ${W} ${H}`} role="img" aria-label="핫스팟 산포도"
         preserveAspectRatio="xMidYMid meet"
         style={{ width: '100%', height: 'auto', display: 'block' }}>
@@ -618,10 +622,11 @@ function HotspotScatter({ hotspots }) {
               stroke="var(--accent)" strokeWidth={1.5}>
               <title>{`${p.function} — fan-in ${p.fan_in} · 복잡도 ${p.complexity} (${p.complexity_source === 'vcast_ccn' ? '측정 ccn' : '줄수 추정'})`}</title>
             </circle>
-            {/* 전폭이라 라벨을 붙일 여유가 생겼다 — 툴팁 없이도 상위 함수를 식별할 수 있게. */}
+            {/* 라벨 — 툴팁 없이도 상위 함수를 식별할 수 있게. 2×2 반폭에서 viewBox 가
+                0.86배로 줄므로 22자는 서로 겹친다 → 16자로 자른다(전체는 <title>). */}
             <text x={sx(p.fan_in) + 8} y={sy(p.complexity) + 3} fontSize={9}
               style={{ fill: 'var(--text-muted)', pointerEvents: 'none' }}>
-              {p.function.length > 22 ? `${p.function.slice(0, 21)}…` : p.function}
+              {p.function.length > 16 ? `${p.function.slice(0, 15)}…` : p.function}
             </text>
           </g>
         ))}
@@ -798,12 +803,13 @@ export default function ArchitectureGraphPanel({ jobUrl, cacheRoot, defaultOpen 
               O4에서 정한 '히트맵 위 / 산포 아래' 순서는 유지하고 사이에 신규 3종을 끼운다. */}
           {SHOW.layerDiagram && <LayerDiagram layerGraph={data.layer_graph} />}
           <CouplingHeatmap moduleGraph={data.module_graph} />
-          {/* DSM(28×28)·산포도는 전폭이 필요하다 — 산포도는 viewBox 640×260 에 맞춰 만든 것이라
-              반폭(≈440px)으로 줄이면 점이 좌하단에 뭉쳐 라벨을 못 붙인다(O4에서 겪은 그 문제).
-              배치 결과: [모듈|히트맵] / [DSM] / [산포도] / [순환|개선후보] / [각주] */}
-          <div style={{ gridColumn: '1 / -1' }}><DsmMatrix fileGraph={data.file_graph} /></div>
+          {/* 그림 4종을 **2×2** 로 — 전폭으로 두면 산포도(viewBox 640×260)가 늘어나 가운데가
+              텅 비고, DSM 도 오른쪽에 여백만 남는다. 반폭 기준으로 DSM 셀을 16px 로 줄여
+              (28×16 + 라벨 ≈ 538px) 한 칸에 들어가게 맞췄다.
+              배치: [모듈|히트맵] / [DSM|산포도] / [순환|개선후보] / [각주] */}
+          <DsmMatrix fileGraph={data.file_graph} />
           {SHOW.globalFlow && <GlobalFlow globalCoupling={data.global_coupling} />}
-          <div style={{ gridColumn: '1 / -1' }}><HotspotScatter hotspots={data.hotspots} /></div>
+          <HotspotScatter hotspots={data.hotspots} />
           <CycleList cycles={data.cycles} />
           {/* 목록이 아니라 표다 — 종류/대상/근거 세 축이 있는데 한 줄 문장으로 이어 붙이면
               눈이 축을 못 잡는다(같은 데이터를 다른 패널은 이미 표로 낸다). */}
