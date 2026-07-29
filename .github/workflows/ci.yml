@@ -75,8 +75,16 @@ jobs:
         env:
           PYTHONPATH: ${{ github.workspace }}
         run: |
-          python -m pytest tests/unit/ -q --tb=short \
-            --ignore=tests/unit/test_impact_jobs.py \
+          # `-rs` = **skip 사유를 로그에 이름과 함께 남긴다.** 없으면 요약이 "26 skipped" 뿐이라
+          # 무엇이 검증되지 않았는지 알 길이 없다 — 실측: SwSA 빌더의 실데이터 테스트 25건이
+          # `.codex_tmp/`(gitignore) 샘플 부재로 CI 에선 통째로 skip 되는데 초록불만 보였다.
+          # 이 저장소의 anti-fake-green 계약(도구·데이터 부재를 clean 으로 읽지 않는다)과 같은 이유.
+          #
+          # ⚠ `--ignore=tests/unit/test_impact_jobs.py` 를 **제거**했다. CI 최초 도입 커밋
+          #   (6066596)에 사유 없이 들어와 19건이 계속 미검증이었다. 지금 파일엔 CI 적대적
+          #   요소가 없고(절대경로·네트워크·tkinter·subprocess 0건), windows·xdist·UTF-8
+          #   조건에서 19 passed 를 확인했다. 다시 제외해야 한다면 **사유를 여기 적을 것**.
+          python -m pytest tests/unit/ -q -rs --tb=short \
             --cov=backend --cov=workflow --cov=report_gen --cov=generators --cov=scripts \
             --cov-report=term-missing --cov-report=html:htmlcov \
             --cov-fail-under=40
