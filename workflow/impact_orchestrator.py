@@ -118,6 +118,17 @@ def _extract_req_ids(info: Dict[str, Any]) -> List[str]:
     return list(dict.fromkeys(reqs))
 
 
+def _as_str_list(v: Any) -> List[str]:
+    """외부 JSON 에서 온 값을 문자열 리스트로 안전 변환.
+
+    list/tuple 이 아니면 빈 리스트. **str 을 그대로 순회하면 글자 단위로 쪼개진다** —
+    경고 한 줄이 리포트 수백 줄이 된다.
+    """
+    if isinstance(v, (list, tuple)):
+        return [str(x) for x in v]
+    return []
+
+
 def _load_linked_doc_summary(linked_doc: str) -> Dict[str, Any]:
     if not linked_doc:
         return {}
@@ -128,11 +139,34 @@ def _load_linked_doc_summary(linked_doc: str) -> Dict[str, Any]:
     quality = payload.get("quality_report") if isinstance(payload.get("quality_report"), dict) else {}
     trace = payload.get("trace_coverage") if isinstance(payload.get("trace_coverage"), dict) else {}
     req_cov = quality.get("requirement_coverage") if isinstance(quality.get("requirement_coverage"), dict) else {}
+    gen = quality.get("generation_stats") if isinstance(quality.get("generation_stats"), dict) else {}
+    flow = (quality.get("integration_flow_coverage")
+            if isinstance(quality.get("integration_flow_coverage"), dict) else {})
+    # ⚠ `req_cov["pct"]` 는 **검증방법 무관** 커버리지다 — RVW(수동 코드리뷰)만으로 커버된
+    # 요구도 분자에 든다. 예전엔 영향도 리포트가 이 값 하나만 실었다. 실측 프로젝트에서:
+    #     requirement pct 100.0  /  실행시험 87.3  /  함수 기준 6.4  (무시험 함수 699개)
+    # 리포트 독자는 "요구 커버리지 100%" 만 보고 나머지 셋과 경고 2건은 못 봤다.
+    # 같은 품질 리포트 안에 이미 있는 값이므로 **날라주기만 하면 된다**(키는 additive —
+    # 값이 없는 구 payload/다른 문서종은 렌더러가 줄 자체를 생략한다).
     return {
         "payload_path": str(payload_path),
         "test_case_count": payload.get("test_case_count") or quality.get("total_test_cases") or "",
         "requirement_coverage_pct": req_cov.get("pct", ""),
         "trace_coverage_pct": trace.get("pct", ""),
+        # ── 같은 커버리지의 다른 축 ──
+        "executable_coverage_pct": req_cov.get("executable_pct", ""),
+        "review_only_reqs": req_cov.get("review_only_count", ""),
+        "function_tc_coverage_pct": gen.get("function_tc_coverage_pct", ""),
+        "functions_without_tc": gen.get("functions_without_tc", ""),
+        # ── SITS: 캡에 잘린 통합 흐름 ──
+        "flow_emit_pct": flow.get("flow_emit_pct", ""),
+        "flows_dropped": flow.get("flows_dropped", ""),
+        "dropped_safety_related_flows": flow.get("dropped_safety_related_count", ""),
+        # ── 생성기가 남긴 경고 — 예전엔 통째로 유실됐다 ──
+        # ⚠ **순회 대상**을 먼저 검사한다. `or []` 만으로는 int 가 오면 TypeError 로
+        # 영향도 리포트 전체가 죽고, str 이 오면 **글자 단위로 순회**해 경고 수백 줄이
+        # 쏟아진다. payload 는 외부 JSON 이라 shape 를 신뢰할 수 없다.
+        "coverage_warnings": _as_str_list(quality.get("coverage_warnings")),
     }
 
 
@@ -1771,10 +1805,30 @@ def _write_review_artifact(
             [
                 f"- Linked payload: `{doc_summary.get('payload_path') or '-'}`",
                 f"- Linked test cases: `{doc_summary.get('test_case_count') or '-'}`",
-                f"- Linked requirement coverage: `{doc_summary.get('requirement_coverage_pct') or '-'}`",
+                # ⚠ 축을 라벨에 박는다. 예전엔 그냥 "requirement coverage" 라 100.0 을 보면
+                #    "다 커버됐다" 로 읽혔는데, 실제로는 RVW(수동 리뷰)만으로 커버된 요구도
+                #    분자에 들어 있다. 아래 축들과 나란히 놓여야 비로소 정직한 수치가 된다.
+                f"- Linked requirement coverage (검증방법 무관): "
+                f"`{doc_summary.get('requirement_coverage_pct') or '-'}`",
                 f"- Linked trace coverage: `{doc_summary.get('trace_coverage_pct') or '-'}`",
             ]
         )
+        # 값이 없는 구 payload·다른 문서종은 줄 자체를 생략한다(빈 행으로 지면만 차지 X).
+        for label, key in (
+            ("실행 가능한 시험 기준 커버리지", "executable_coverage_pct"),
+            ("RVW(수동 리뷰)로만 커버된 요구", "review_only_reqs"),
+            ("함수 기준 시험 커버리지", "function_tc_coverage_pct"),
+            ("시험이 없는 함수", "functions_without_tc"),
+            ("통합 흐름 생성률", "flow_emit_pct"),
+            ("캡으로 제외된 통합 흐름", "flows_dropped"),
+            ("제외된 흐름 중 안전관련(ASIL A~D)", "dropped_safety_related_flows"),
+        ):
+            val = doc_summary.get(key, "")
+            if val != "" and val is not None:
+                lines.append(f"- {label}: `{val}`")
+        # 생성기가 남긴 경고는 예전엔 통째로 유실됐다 — 수치보다 이쪽이 행동을 바꾼다.
+        for warn in doc_summary.get("coverage_warnings") or []:
+            lines.append(f"- ⚠ {warn}")
     lines.extend(
         [
             "",

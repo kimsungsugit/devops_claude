@@ -117,7 +117,14 @@
 
 - ✅ STS-001 / STS-002 / SITS-001A / SUTS-001
 - ✅ §3 의 9건
-- ⬜ **남은 것**: `workflow/impact_orchestrator.py:135` 이 부풀린 `requirement_coverage_pct` 를 영향도 리포트에 노출
+- ✅ **영향도 리포트가 부풀린 커버리지 하나만 싣던 것** — `_load_linked_doc_summary` 가
+  `requirement_coverage["pct"]`(검증방법 무관, RVW 포함)만 뽑아 실었다. 같은 품질 리포트
+  안에 있던 정직한 축이 전부 유실됐다. 실측: 리포트엔 `100.0` 만 / 실행시험 `87.3` ·
+  함수 기준 `6.4`(무시험 함수 699) · **생성기 경고 2건**은 미노출.
+  → 축 전부 + 경고를 전달하고 라벨에 축을 명시(`검증방법 무관`). SITS 흐름 캡 축도 함께.
+  키는 additive 라 구 payload·타 문서종은 렌더러가 줄을 생략한다.
+  곁가지로 `coverage_warnings` 가 외부 JSON 이라 int 면 크래시·str 이면 **글자 단위 순회**
+  하던 것을 `_as_str_list` 로 차단(테스트가 잡았다).
 
 ### P1 — 게이트 자체의 신뢰성
 
@@ -184,7 +191,7 @@
 |---|---|---|
 | ~~1~~ | ~~pre-commit 900s 예산 (P1)~~ | ✅ 완료 — 위 P1 참조 |
 | 2 | `report_gen/` DOCX 라이터 대조 (P2) | XLSM 만 덮었다 — 같은 결함군이 DOCX 경로에 그대로 남아 있을 수 있다 |
-| 3 | `impact_orchestrator.py:135` (P0 잔여) | 부풀린 커버리지가 영향도 리포트로 새어나간다 |
+| ~~3~~ | ~~`impact_orchestrator.py:135` (P0 잔여)~~ | ✅ 완료 — 위 P0 참조 |
 | 4 | LLM redaction + 모델 echo 대조 (CORE-006 잔여) | 프롬프트 redaction 저장소 전체 0건. 응답 전문이 `agent_*.md` 에 무삭제로 디스크에 남는다(HTTP 에러 본문 포함). `workflow/ai_validator.py` 의 시크릿 검사는 **모듈 전체가 dead code**(프로덕션 호출자 0) |
 | 5 | 3개 egress 경로 통합 | `llm_adapters`·`rag.embedder` 가 `llm_call` 의 예산·재시도·stage cap 을 전부 우회 |
 
