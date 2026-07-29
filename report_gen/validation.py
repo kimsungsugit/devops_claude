@@ -110,6 +110,55 @@ def _has_doc_input_slot(prototype: str) -> bool:
         return False
     return True
 
+def _norm_fn_key(name: Any) -> str:
+    """함수명 매칭 키 — **빌더가 쓰는 정규화를 그대로 재사용**한다.
+
+    검증기가 자체 정규화를 만들면 빌더는 매칭했는데 검증기는 "누락" 이라 하는(또는 그 반대)
+    거짓 보고가 난다. 실측: 정확일치 기준 교집합 211 vs 빌더 정규화 기준 271 — 60건 차이.
+    """
+    # 지연 import — docx_builder 는 python-docx 를 요구하고, 이 모듈은 그것 없이도
+    # 다른 검증에 쓰인다. import 실패 시 소문자 폴백은 **더 느슨한** 매칭이라
+    # "누락" 을 과다 보고할 뿐 없는 함수를 있다고 하지 않는다(안전한 방향).
+    try:
+        from report_gen.docx_builder import _normalize_symbol_name
+    except ImportError:
+        return str(name or "").strip().lower()
+    return _normalize_symbol_name(str(name or "")).lower()
+
+
+def _payload_function_names(sidecar: Path) -> Tuple[set, str]:
+    """`*.payload.json` 사이드카에서 함수명 집합. 실패하면 (빈집합, 사유)."""
+    try:
+        raw = json.loads(sidecar.read_text(encoding="utf-8", errors="replace"))
+    except Exception as exc:
+        return set(), f"{type(exc).__name__}: {exc}"
+    details = raw.get("function_details") if isinstance(raw, dict) else None
+    if not isinstance(details, dict):
+        return set(), "function_details 가 dict 가 아니다"
+    names = {
+        _norm_fn_key(v.get("name"))
+        for v in details.values()
+        if isinstance(v, dict) and str(v.get("name") or "").strip()
+    }
+    return {n for n in names if n}, ""
+
+
+def _docx_heading_function_names(doc: Any) -> set:
+    """DOCX 의 `SwUFn_NNNN: name` 형태 heading 에서 함수명 집합."""
+    out: set = set()
+    for para in getattr(doc, "paragraphs", []) or []:
+        style = str(getattr(getattr(para, "style", None), "name", "") or "")
+        if not style.startswith("Heading"):
+            continue
+        text = (getattr(para, "text", "") or "").strip()
+        m = re.search(r"\bSwUFn_\d+\b\s*[:\-]?\s*(.+)", text, flags=re.I)
+        if m:
+            key = _norm_fn_key(m.group(1))
+            if key:
+                out.add(key)
+    return out
+
+
 def validate_uds_docx_structure(docx_path: str) -> Dict[str, Any]:
     result: Dict[str, Any] = {
         "docx_path": docx_path,
@@ -168,6 +217,53 @@ def validate_uds_docx_structure(docx_path: str) -> Dict[str, Any]:
         {"header": h, "count": c}
         for h, c in header_counter.most_common(10)
     ]
+
+    # ── 입력 대비 대조 ────────────────────────────────────────────────────────
+    # 위 검사는 전부 **문서 내부 정합성**이다(heading 수 ↔ 표 수, logic 행 ↔ 이미지).
+    # "몇 개가 들어와야 했는가" 를 안 보므로 양방향 불일치가 통째로 침묵했다. 실측:
+    #
+    #   payload 함수 1개든 100개든 → 문서는 항상 SwUFn 섹션 429개, ok=True, issues 0건
+    #   실 데이터(소스 900 / 템플릿 421, 빌더 정규화 기준 교집합 271):
+    #     · 문서에 못 실리는 소스 함수  629개 (69.9%)  ← 조용히 누락
+    #     · 데이터 없는 템플릿 heading  150개          ← 빈 함수 명세로 출력
+    #
+    # DOCX 는 XLSM 라이터와 달리 **템플릿 주도**다(이미 있는 SwUFn heading 을 함수명으로
+    # 매칭해 채운다). 템플릿이 부분집합을 담는 게 의도일 수 있으므로 `ok` 판정은 건드리지
+    # 않고(기존 verdict 뒤집기 금지) `warnings` 로 수치를 드러낸다.
+    result.setdefault("warnings", [])
+    _sidecar = path.with_suffix(".payload.json")
+    if not _sidecar.exists():
+        # ⚠ 대조를 **못 한** 것이지 통과가 아니다. 이 구분이 없으면 사이드카가 사라진
+        # 산출물이 "대조하고 깨끗함" 과 같아 보인다.
+        result["expected_functions"] = None
+        result["warnings"].append(
+            f"payload 사이드카 없음({_sidecar.name}) — 입력 대비 대조 불가(미검증)")
+    else:
+        _pay_names, _pay_err = _payload_function_names(_sidecar)
+        if _pay_err:
+            result["expected_functions"] = None
+            result["warnings"].append(f"payload 사이드카를 읽지 못해 대조 불가: {_pay_err}")
+        else:
+            _doc_names = _docx_heading_function_names(doc)
+            _matched = _pay_names & _doc_names
+            result["expected_functions"] = len(_pay_names)
+            result["matched_functions"] = len(_matched)
+            _missing = sorted(_pay_names - _doc_names)
+            _empty = sorted(_doc_names - _pay_names)
+            # ⚠ 개수는 **절단 전**에 따로 담는다. 소비처가 절단된 리스트 길이로 개수를
+            # 되짚으면 629건이 "50건" 이 된다(이 저장소가 반복해 겪은 함정).
+            result["missing_from_docx_count"] = len(_missing)
+            result["headings_without_payload_count"] = len(_empty)
+            result["payload_functions_missing_from_docx"] = _missing[:50]
+            result["docx_headings_without_payload"] = _empty[:50]
+            if _missing:
+                result["warnings"].append(
+                    f"소스 함수 {len(_missing)}개가 문서에 없다 — 템플릿에 대응 SwUFn "
+                    f"heading 이 없어 조용히 빠졌다(예: {', '.join(_missing[:5])})")
+            if _empty:
+                result["warnings"].append(
+                    f"템플릿 heading {len(_empty)}개에 대응 소스 함수가 없다 — "
+                    f"**빈 함수 명세**로 출력된다(예: {', '.join(_empty[:5])})")
     if result["function_info_table_count"] != result["swufn_heading_count"]:
         result["issues"].append(
             f"SwUFn headings({result['swufn_heading_count']}) != FunctionInfo tables({result['function_info_table_count']})"
@@ -195,12 +291,40 @@ def generate_uds_validation_report(docx_path: str, out_path: str) -> str:
     lines.append(f"- FunctionInfo tables: `{report.get('function_info_table_count')}`")
     lines.append(f"- Logic rows: `{report.get('logic_row_count')}`")
     lines.append(f"- Logic rows with image: `{report.get('logic_with_image_count')}`")
+    # ── 입력 대비 대조 ── 위 수치는 전부 문서 **내부** 값이다. 입력이 몇 개였는지 같이
+    # 보여야 "429개 섹션" 이 완결의 증거인지 빈 껍데기인지 판단할 수 있다.
+    _exp = report.get("expected_functions", "__absent__")
+    if _exp is None:
+        lines.append("- Payload 함수 수: `대조 불가(사이드카 없음/읽기 실패)`")
+    elif _exp != "__absent__":
+        lines.append(f"- Payload 함수 수: `{_exp}`")
+        lines.append(f"- 문서에 실린 함수(매칭): `{report.get('matched_functions')}`")
+        # ⚠ 개수는 **절단 전** 값(`*_count`)을 쓴다. 아래 리스트는 예시용으로 50개까지만
+        # 담기므로 그 길이를 개수로 쓰면 629건이 "50건" 이 된다.
+        _miss = report.get("payload_functions_missing_from_docx") or []
+        _emptyh = report.get("docx_headings_without_payload") or []
+        _miss_n = report.get("missing_from_docx_count", len(_miss))
+        _empty_n = report.get("headings_without_payload_count", len(_emptyh))
+        if _miss_n:
+            lines.append(f"- ⚠ 문서에 없는 소스 함수: `{_miss_n}건` (예: {', '.join(_miss[:5])})")
+        if _empty_n:
+            lines.append(f"- ⚠ 데이터 없는 템플릿 heading: `{_empty_n}건` (예: {', '.join(_emptyh[:5])})")
     lines.append("")
     issues = report.get("issues") or []
     lines.append("## Issues")
     if issues:
         for issue in issues:
             lines.append(f"- {issue}")
+    else:
+        lines.append("- none")
+    lines.append("")
+    # ⚠ warnings 는 `ok` 판정을 바꾸지 않는다(템플릿이 부분집합을 담는 게 의도일 수 있다).
+    # 대신 수치를 드러내 "ok=True 니까 다 들어갔다" 는 오독을 막는다.
+    warnings_list = report.get("warnings") or []
+    lines.append("## Warnings (입력 대비)")
+    if warnings_list:
+        for w in warnings_list:
+            lines.append(f"- {w}")
     else:
         lines.append("- none")
     lines.append("")

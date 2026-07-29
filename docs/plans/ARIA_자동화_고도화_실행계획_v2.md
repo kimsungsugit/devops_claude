@@ -185,12 +185,44 @@
 
 ---
 
+## 5-2. UDS DOCX 입력 대비 대조 — ✅ 완료 (2026-07-29)
+
+`validate_uds_docx_structure` 가 문서 **내부 정합성**만 봤다(heading 수 ↔ 표 수, logic 행 ↔
+이미지 수). "몇 개가 들어와야 했는가" 를 모르므로 양방향 불일치가 통째로 침묵했다.
+
+| 실측 | 값 |
+|---|---|
+| payload 함수 1 / 5 / 20 / 100 → 문서 SwUFn 섹션 | **항상 429**, `ok=True`, issues 0건 |
+| 실 데이터(소스 900 / 템플릿 함수명 421, 빌더 정규화 기준) | 교집합 **271** |
+| 문서에 못 실리는 소스 함수 | **629개 (69.9%)** — 조용히 누락 |
+| 데이터 없는 템플릿 heading | **150개** — 빈 함수 명세로 출력 |
+
+429 는 admin 설정 템플릿(`docs/(HDPDM01_SUDS)_template_tokenized.docx`)의 heading 수다
+(`template_path=None` → `config.resolve_uds_template_path()` 폴백 = **프로덕션 동작**).
+DOCX 는 XLSM 라이터와 달리 **템플릿 주도**라(SwUFn heading 을 함수명으로 매칭해 채움)
+누락과 빈 채움이 둘 다 가능하다.
+
+**수정**: payload 가 `.payload.json` 사이드카로 DOCX 옆에 이미 기록되므로 검증기가 스스로
+찾아 대조한다 — **호출부 4곳 무변경**. 함수명 키는 **빌더 자신의 `_normalize_symbol_name`
+을 재사용**한다(검증기가 자체 정규화를 만들면 판정이 갈라진다 — 실측 정확일치 211 vs
+빌더 정규화 271, 60건 차이). 사이드카 부재는 `expected_functions=None` + "대조 불가(미검증)"
+로 **통과가 아니다**.
+
+⚠ `ok` 판정은 **바꾸지 않았다**. 템플릿이 부분집합을 담는 게 의도일 수 있어 실패로 만들면
+정상 산출물이 대량 오탐된다. 대신 `warnings` 로 수치를 드러내 "ok=True 니까 다 들어갔다"
+는 오독을 막는다(대조군 테스트로 고정).
+
+곁가지: 리포트가 **절단된 예시 리스트 길이를 개수로** 써서 629건이 "50건 이상" 으로
+찍혔다(이 저장소가 반복해 겪은 함정). `*_count` 를 절단 전에 따로 담아 교정.
+
+---
+
 ## 6. 다음 라운드 후보
 
 | # | 대상 | 이유 |
 |---|---|---|
 | ~~1~~ | ~~pre-commit 900s 예산 (P1)~~ | ✅ 완료 — 위 P1 참조 |
-| 2 | `report_gen/` DOCX 라이터 대조 (P2) | XLSM 만 덮었다 — 같은 결함군이 DOCX 경로에 그대로 남아 있을 수 있다 |
+| ~~2~~ | ~~`report_gen/` DOCX 라이터 대조 (P2)~~ | ✅ 완료 — 아래 별도 절 |
 | ~~3~~ | ~~`impact_orchestrator.py:135` (P0 잔여)~~ | ✅ 완료 — 위 P0 참조 |
 | 4 | LLM redaction + 모델 echo 대조 (CORE-006 잔여) | 프롬프트 redaction 저장소 전체 0건. 응답 전문이 `agent_*.md` 에 무삭제로 디스크에 남는다(HTTP 에러 본문 포함). `workflow/ai_validator.py` 의 시크릿 검사는 **모듈 전체가 dead code**(프로덕션 호출자 0) |
 | 5 | 3개 egress 경로 통합 | `llm_adapters`·`rag.embedder` 가 `llm_call` 의 예산·재시도·stage cap 을 전부 우회 |
