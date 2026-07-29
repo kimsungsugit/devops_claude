@@ -60,6 +60,15 @@ class CoverageStats:
     covered: int = 0
     total: int = 0
     coverage_pct: float = 0.0  # 0.0~1.0
+    # ⚠ 2026-07-29 — 이 타입은 **실측값과 합성값을 함께 나른다**. 합성값은 커버리지를
+    # 잰 결과가 아니라 "로그에 존재함/없음" 을 1/1·0/1 로 표현한 표식이다
+    # (`swit_coverage_aggregator._align_function_rows_to_template`,
+    #  `flatten_sub_functions`). 구분자가 없어서 소비처가 둘을 같이 합산했고, 실측:
+    #     HMR 미제공(전부 합성) → overall_statement_pct = **100.0**  ← 측정 0건인데
+    #     실측 30% + 합성 19개  → 41.18  (11.18%p 부풀림)
+    # 100.0 은 evaluator 의 statement_coverage_pct(threshold=100) 게이트를 통과한다.
+    # 값 자체는 그대로 두되(문서 O/X 표기가 이걸 쓴다) 집계에서 걸러낼 수 있게 표시만 한다.
+    measured: bool = True
 
     @property
     def passed(self) -> bool:
@@ -321,6 +330,157 @@ def aggregate_session(session: SwUTSession) -> dict[str, Any]:
     }
 
 
+# ---------------------------------------------------------------------------
+# Final Test Result 판정 — SUTR / SITR / Coverage 공용 단일 출처
+# ---------------------------------------------------------------------------
+#
+# 회귀 대상(2026-07-29 실측): `Final Test Result` 셀에 **집계와 무관한 정적 상수**가
+# 찍히고 있었다. 각 BuildMeta 의 `final_test_result` 기본값("OK" / Coverage 는 "PASS")이
+# 그대로 시트에 들어가는데, 라우터·워크플로 어디에서도 그 값을 계산해 대입하지 않는다
+# (grep 0건 — 테스트조차 정적 기본값을 단언하고 있었다). 결과:
+#
+#     시나리오                     Actual Pass ratio    Final Test Result
+#     전부 실패 (passed=0/failed=5)          0.0                   OK   ← 거짓 PASS
+#     전부 미실행 (tested=0)         (사용자 입력 필요)              OK   ← 증거 0인데 OK
+#
+# 한 문서 안에서 "Pass ratio 0.0" 과 "Final Test Result: OK" 가 나란히 찍혔고 경고도
+# 0건이었다. ISO 26262 산출물에서 이건 라이브 거짓 PASS 다.
+#
+# 판정을 여기 한 곳에만 둔다 — 같은 판정을 여러 빌더에 복제했다가 한쪽만 고쳐져
+# 다른 쪽이 잠복한 전례가 반복됐다(`_is_hsis_data_row`, `_ratchet_core`,
+# `generators/_artifact_check.py` 단일화).
+
+# 문서별 판정 어휘. key = 각 BuildMeta 의 기존 `final_test_result` 기본값(= 긍정 토큰).
+# 값 = (긍정, 부정, 미실행). 기존 기본값을 긍정 토큰으로 재사용하므로 **전부 통과인
+# 산출물은 오늘과 글자 그대로 같은 값**이 나온다(하위호환).
+_VERDICT_VOCAB: dict[str, tuple[str, str, str]] = {
+    "OK": ("OK", "NG", "N/A"),        # SUTR / SITR / comprehensive
+    "PASS": ("PASS", "FAIL", "N/A"),  # Coverage
+    "Pass": ("Pass", "Fail", "N/A"),
+}
+
+
+def compute_final_result(
+    agg: dict[str, Any],
+    *,
+    positive_token: str = "OK",
+) -> dict[str, Any]:
+    """실측 집계에서 Final Test Result 를 도출한다.
+
+    Args:
+        agg: `aggregate_session()` 결과 (`tested`/`passed`/`failed`/`not_executed`)
+        positive_token: 이 문서의 "합격" 표기. 각 BuildMeta 의 기존 기본값을 그대로 넘긴다.
+
+    Returns:
+        {"verdict": "ok"|"ng"|"na", "display": str, "reason": str}
+
+    판정 순서(순서가 의미를 바꾼다):
+        1. 실행된 TC 가 0 → `na`. **`ok` 아님** — 아무것도 안 돌렸으면 합격 근거가 없다.
+           여기서 `ng` 로 쓰면 "시험했는데 실패" 라는 다른 거짓말이 된다.
+        2. failed 또는 not_executed 가 1건이라도 있으면 → `ng`.
+        3. 그 외 → `ok`.
+
+    ⚠ 승인 deviation 은 이 값을 **바꾸지 않는다**. deviation 은 별도 release gate
+    후보이지 raw 판정의 수정 수단이 아니다(계획서 UTR-001 원칙).
+    """
+    pos, neg, na = _VERDICT_VOCAB.get(
+        str(positive_token or "").strip(),
+        # 미지 어휘: 긍정 토큰만 그대로 쓰고 부정은 보수적으로 NG. 긍정과 절대 같지 않게.
+        (str(positive_token or "OK"), "NG", "N/A"),
+    )
+
+    def _n(key: str) -> int:
+        try:
+            return int(agg.get(key) or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    tested = _n("tested")
+    failed = _n("failed")
+    not_executed = _n("not_executed")
+
+    if tested <= 0:
+        return {
+            "verdict": "na",
+            "display": na,
+            "reason": f"실행된 TC 0건(총 {_n('total')}건, 미실행 {not_executed}건) — 합격 근거 없음",
+        }
+    if failed > 0 or not_executed > 0:
+        return {
+            "verdict": "ng",
+            "display": neg,
+            "reason": f"실패 {failed}건 / 미실행 {not_executed}건 (실행 {tested}건)",
+        }
+    return {
+        "verdict": "ok",
+        "display": pos,
+        "reason": f"실행 {tested}건 전부 통과",
+    }
+
+
+def compute_coverage_final_result(
+    function_rows: list,
+    *,
+    positive_token: str = "PASS",
+) -> dict[str, Any]:
+    """Coverage 문서용 Final Test Result — **커버리지 달성** 기준(pass/fail 아님).
+
+    ⚠ `compute_final_result` 와 분리한 이유: Coverage 산출물의 Final Test Result 는
+    "TC 가 통과했는가" 가 아니라 "커버리지가 채워졌는가" 다. 실제로 KJPDS02 v1.01
+    템플릿의 해당 셀은 `=IF(AND(B13=C9,...),"OK","NG")` 라는 **커버리지 비교 수식**이다.
+    두 문서에 같은 pass/fail 판정을 쓰면 의미가 뒤바뀐다.
+
+    판정:
+        1. 실측(`total > 0`) 함수가 하나도 없으면 → `na`. 측정 자체를 안 했다.
+        2. `total > 0 and covered < total` 인 함수가 하나라도 있으면 → `ng`.
+           (술어는 `backend/routers/swut.py::_coverage_stats_incomplete` 와 동일 규칙)
+        3. 그 외 → `ok`.
+
+    목표치(%) 대비 판정이 아니라 **미달 함수 존재 여부**로 본다 — 목표치보다 보수적이고,
+    저장소가 이미 쓰는 술어와 같아서 두 판정이 갈라지지 않는다.
+    """
+    pos, neg, na = _VERDICT_VOCAB.get(
+        str(positive_token or "").strip(),
+        (str(positive_token or "PASS"), "NG", "N/A"),
+    )
+
+    measured = 0
+    incomplete: list[str] = []
+    for fc in function_rows or []:
+        for attr in ("statement", "branch"):
+            st = getattr(fc, attr, None)
+            total = int(getattr(st, "total", 0) or 0)
+            covered = int(getattr(st, "covered", 0) or 0)
+            # 합성 표식(measured=False)은 달성 판정 근거가 아니다 — 전부 합성이면 `na`.
+            if total <= 0 or not getattr(st, "measured", True):
+                continue
+            measured += 1
+            if covered < total:
+                name = str(getattr(fc, "name", "") or getattr(fc, "unit_id", "") or "?")
+                if name not in incomplete:
+                    incomplete.append(name)
+
+    if measured == 0:
+        return {
+            "verdict": "na",
+            "display": na,
+            "reason": f"실측 커버리지 0건(함수 {len(function_rows or [])}개) — 달성 근거 없음",
+        }
+    if incomplete:
+        return {
+            "verdict": "ng",
+            "display": neg,
+            "reason": (
+                f"미달 함수 {len(incomplete)}개 (예: {', '.join(incomplete[:5])})"
+            ),
+        }
+    return {
+        "verdict": "ok",
+        "display": pos,
+        "reason": f"실측 {measured}개 축 전부 100%",
+    }
+
+
 def compute_coverage_rollup(function_rows: list) -> dict[str, Any]:
     """FunctionCoverage list → 전체 구문/분기/MC-DC 커버리지 % (0~100).
 
@@ -329,10 +489,22 @@ def compute_coverage_rollup(function_rows: list) -> dict[str, Any]:
     ISO 26262 coverage 로 인정. MC-DC 는 FunctionCoverage.mcdc(:83)에 파싱돼 있으나
     그동안 어느 summary 에도 노출 안 되던 dead 데이터 — 여기서 표면화한다.
     """
-    def _pct(attr: str) -> float:
-        cov = sum(getattr(fc, attr).covered for fc in function_rows if getattr(fc, attr).total > 0)
-        tot = sum(getattr(fc, attr).total for fc in function_rows if getattr(fc, attr).total > 0)
-        return round(cov / tot * 100, 2) if tot > 0 else 0.0
+    def _rows(attr: str) -> list:
+        # `measured=False` 는 커버리지를 잰 값이 아니라 존재 표식(1/1·0/1)이다 — 합산 제외.
+        return [
+            getattr(fc, attr) for fc in function_rows
+            if getattr(fc, attr).total > 0 and getattr(getattr(fc, attr), "measured", True)
+        ]
+
+    def _pct(attr: str) -> float | None:
+        rows = _rows(attr)
+        tot = sum(st.total for st in rows)
+        if tot <= 0:
+            # ⚠ 예전엔 0.0 이었다 — "측정 안 함"과 "실측 0%"가 같은 값이 됐다.
+            # None = 미측정. 게이트는 이 값을 **미평가**로 다뤄야 한다(0 으로 강등해
+            # FAIL 시키는 것도 정직하지 않다).
+            return None
+        return round(sum(st.covered for st in rows) / tot * 100, 2)
 
     # deep-review C1 — 라벨 무관 데이터 가드: mcdc 컬럼이 함수-진입 커버리지로 퇴화(전 함수
     # pairs.total=1·분기 변동)했으면 Quality DB overall_mcdc_pct 를 거짓값(예 53%) 대신 0 으로
@@ -346,6 +518,18 @@ def compute_coverage_rollup(function_rows: list) -> dict[str, Any]:
         "overall_branch_pct": _pct("branch"),
         "overall_mcdc_pct": 0.0 if _mcdc_degenerate else _pct("mcdc"),
         "functions_with_coverage": sum(1 for fc in function_rows if fc.statement.total > 0),
+        # 분모가 몇 개 함수에서 왔는지 — 백분율만 보면 "1개 함수 100%"와
+        # "200개 함수 100%"가 같아 보인다. 미측정(None)과도 함께 읽어야 한다.
+        "measured_functions": {
+            "statement": len(_rows("statement")),
+            "branch": len(_rows("branch")),
+            "mcdc": len(_rows("mcdc")),
+        },
+        # 실측 아닌 존재-표식으로 채워진 행 수(집계에서 제외된 분량).
+        "synthesized_rows": sum(
+            1 for fc in function_rows
+            if not getattr(fc.statement, "measured", True)
+        ),
     }
 
 
@@ -880,10 +1064,13 @@ def flatten_sub_functions(
                 continue
             seen_names.add(name)
             unit_id = f"SwUFn_{safe_comp}_{mod_idx}_{order}"
+            # measured=False — executed 불리언에서 만든 1/1·0/1 표식이지 구문 커버리지
+            # 측정값이 아니다. 실측과 섞어 합산하면 분모가 함수 수로 바뀐다.
             stats = CoverageStats(
                 covered=1 if executed else 0,
                 total=1,
                 coverage_pct=1.0 if executed else 0.0,
+                measured=False,
             )
             out.append(FunctionCoverage(
                 unit_id=unit_id,

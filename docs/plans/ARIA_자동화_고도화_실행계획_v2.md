@@ -78,10 +78,10 @@
 
 | ID | 항목 | 상태 | 비고 |
 |---|---|---|---|
-| UTR-001 | 결과 상태 fail-closed | ⬜ | 계획서가 지적한 "0분모 100%" 는 **오진**(§1) — 실제 남은 건 다른 축 |
-| UTCV-001 | 구조 커버리지 원시값 보존 | ⬜ | `raw_numerator`/`raw_denominator` 0건 |
-| ITR-001 | 통합시험 결과 ↔ call edge 정합 | ⬜ | |
-| ITCV-001 | Function Call coverage ↔ graph reconciliation | ⬜ | |
+| UTR-001 | 결과 상태 fail-closed | 🟡 | **Final Result 도출 완료**(`compute_final_result`) — 실측: 실패 5/5 인 SUTR 이 `OK` 로 찍히고 있었다(경고 0건). 잔여: raw verdict 문자열 보존, deviation 별도 집계 |
+| UTCV-001 | 구조 커버리지 원시값 보존 | 🟡 | **실측/합성 구분 완료**(`CoverageStats.measured`) — 실측: HMR 미제공 시 rollup 이 **100.0%**(측정 0건인데 ASIL 게이트 통과), 실측 30%+합성이 41.18% 로 부풀림. 잔여: `applicable` 정책축, exception disposition |
+| ITR-001 | 통합시험 결과 ↔ call edge 정합 | ⛔ | **현재 데이터로 구현 불가.** VectorCAST 가 edge 식별자를 안 준다 — HMR 은 함수당 스칼라(`covered_calls`/`total_calls`)뿐이고 `call_tree.py` ↔ 커버리지 코드 참조 0건. 계획서 자신도 SITS-004 에서 인정한다. edge 계측 로그가 생기면 재검토 |
+| ITCV-001 | Function Call coverage ↔ graph reconciliation | ⬜ | 같은 제약. `Functions`/`Function Calls` 분리는 `FunctionCallsMetric` 에 이미 있음 |
 | TRACE-001 | 추적 링크 graph SSOT | ⬜ | |
 | RAG-001~003 | revision-aware ingestion / 승인 피드백 / 6-domain KB | ⬜ | |
 

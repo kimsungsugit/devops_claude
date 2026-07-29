@@ -275,6 +275,28 @@ def evaluate_coverage(summary: Dict[str, Any], *, asil: Optional[str] = None) ->
     metrics: MetricList = []
     a = str(asil or "").upper().strip()
 
+    # ── 미측정 축 표면화 (게이트는 그대로 둔다) ──────────────────────────────
+    # `compute_coverage_rollup` 은 실측 분모가 0 이면 이제 None 을 낸다(예전엔 0.0 —
+    # "측정 안 함"과 "실측 0%"가 같은 값이었다). `_safe_float` 가 None 을 0.0 으로
+    # 접으므로 **게이트 판정 자체는 오늘과 동일**하다(미측정 → 0.0 → threshold 100 FAIL).
+    # 일부러 그렇게 둔다: ASIL 필수 커버리지 축을 "미평가" 로 바꾸면 지금 FAIL 하던 것이
+    # 판정 없음으로 완화된다. 대신 **FAIL 의 사유**를 아래 지표로 구분 가능하게 만든다
+    # ("커버리지가 0%" 가 아니라 "측정 자체를 안 함").
+    _unmeasured = [
+        ax for ax, key in (
+            ("statement", "overall_statement_pct"),
+            ("branch", "overall_branch_pct"),
+            ("mcdc", "overall_mcdc_pct"),
+        )
+        if summary.get(key) is None
+    ]
+    metrics.append(_metric("coverage_unmeasured_axes", float(len(_unmeasured))))
+    _measured_fn = (summary.get("measured_functions") or {}) if isinstance(summary, dict) else {}
+    metrics.append(_metric("coverage_measured_functions",
+                           _safe_float(_measured_fn, "statement")))
+    metrics.append(_metric("coverage_synthesized_rows",
+                           _safe_float(summary, "synthesized_rows")))
+
     metrics.append(
         _metric("statement_coverage_pct", _safe_float(summary, "overall_statement_pct"), threshold=100.0),
     )

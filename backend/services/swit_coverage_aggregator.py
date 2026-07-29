@@ -399,15 +399,22 @@ def _align_function_rows_to_template(
             )
             calls = getattr(best, "function_calls_coverage", CoverageStats())
             if not calls or calls.total <= 0:
-                calls = CoverageStats(covered=1, total=1, coverage_pct=1.0)
+                # measured=False — 이건 커버리지 측정 결과가 아니라 "로그에 있음" 표식이다.
+                # 표식을 실측처럼 합산하면 HMR 미제공 프로젝트가 rollup 100% 가 된다(실측 확인).
+                calls = CoverageStats(covered=1, total=1, coverage_pct=1.0, measured=False)
         else:
             missing.append(f"{unit_id}:{fn_name}")
-            calls = CoverageStats(covered=0, total=1, coverage_pct=0.0)
+            calls = CoverageStats(covered=0, total=1, coverage_pct=0.0, measured=False)
         fc = FunctionCoverage(
             unit_id=unit_id,
             name=fn_name,
-            statement=CoverageStats(covered=1 if present else 0, total=1, coverage_pct=1.0 if present else 0.0),
-            branch=CoverageStats(covered=1 if present else 0, total=1, coverage_pct=1.0 if present else 0.0),
+            # ⚠ statement/branch 도 실측이 아니라 **함수가 로그에 존재하는가**를 1/1·0/1 로
+            # 표현한 값이다(SwIT Coverage 시트는 O/X 표기). measured=False 로 표시해
+            # Quality DB roll-up 이 이걸 실측 커버리지로 합산하지 않게 한다.
+            statement=CoverageStats(covered=1 if present else 0, total=1,
+                                    coverage_pct=1.0 if present else 0.0, measured=False),
+            branch=CoverageStats(covered=1 if present else 0, total=1,
+                                 coverage_pct=1.0 if present else 0.0, measured=False),
             function_calls_coverage=calls,
             component_name=_component_from_swufn(unit_id),
         )

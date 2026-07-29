@@ -61,6 +61,7 @@ from backend.services.swut_input_adapter import (
     FunctionCoverage,
     SwUTSession,
     aggregate_session,
+    compute_coverage_final_result,
     compute_coverage_rollup,
 )
 from backend.services.swut_meta import BuildMetaBase
@@ -297,10 +298,26 @@ def _write_test_summary_sheet(
                          meta.test_engineer,
                          "테스트 엔지니어 이름", out_warnings)
     # 라운드 96-final C-1 — 템플릿 OK/NG 수식 보존 (KJPDS02 v1.01 C10).
+    # ⚠ 수식이 **없는** 양식(HDPDM01 v3.01 등 빈 셀)에서는 예전에 meta 정적 기본값
+    # "PASS" 리터럴이 그대로 들어갔다 — 미달 함수가 있어도 PASS 로 보였다. 수식 보존
+    # 분기는 그대로 두고, 폴백 값만 실측에서 도출한 값으로 바꾼다.
+    # (판정은 커버리지 달성 기준 — pass/fail 기준인 SUTR 과 의미가 다르므로 별도 함수)
+    _cfr = compute_coverage_final_result(
+        agg.get("function_rows") or [], positive_token=meta.final_test_result,
+    )
     _write_label_keep_formula(
         ws, labels.get("final_test_result", "Final Test Result"),
-        meta.final_test_result, out_warnings,
+        _cfr["display"], out_warnings,
     )
+    if _cfr["verdict"] != "ok" and out_warnings is not None:
+        out_warnings.append(
+            f"[final-result] Coverage Final Test Result = '{_cfr['display']}' — {_cfr['reason']}"
+            " (템플릿에 판정 수식이 있으면 수식이 우선)"
+        )
+    if summary is not None:
+        summary["final_result"] = _cfr["display"]
+        summary["final_result_verdict"] = _cfr["verdict"]
+        summary["final_result_reason"] = _cfr["reason"]
 
     # 54차 T283: v2.02 양식 신규 row — TC stats / Requirements
     _write_v202_extra_rows(ws, agg, layout, summary, out_warnings)

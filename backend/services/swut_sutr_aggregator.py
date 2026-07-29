@@ -53,7 +53,11 @@ from backend.services.excel_template_utils import (
     write_value_after_label,
 )
 from backend.services.swut_builder_helpers import extract_warnings_from_session
-from backend.services.swut_input_adapter import SwUTSession, aggregate_session
+from backend.services.swut_input_adapter import (
+    SwUTSession,
+    aggregate_session,
+    compute_final_result,
+)
 from backend.services.swut_meta import BuildMetaBase
 
 # 31차 W27: TC name에서 SwUFn_NNNN 함수 ID 추출 (Coverage builder와 동일 패턴).
@@ -298,8 +302,21 @@ def _write_test_summary(
     else:
         _write_label_or_mark(ws, labels.get("actual_pass_ratio", "Actual Pass ratio"), "",
                              "실행된 TC 없음 — log 또는 deviation 확인", out_warnings)
+    # ⚠ 예전엔 `meta.final_test_result`(정적 기본값 "OK")를 그대로 썼다 — 실패 5/5 인
+    # 산출물도 "OK" 로 찍혔다. 이제 집계에서 도출한다. 판정은 swut_input_adapter 단일 출처.
+    # meta 값은 이 문서의 **긍정 토큰**으로만 쓴다(전부 통과면 오늘과 같은 값 → 하위호환).
+    _fr = compute_final_result(agg, positive_token=meta.final_test_result)
     _write_label(ws, labels.get("final_test_result", "Final Test Result"),
-                 meta.final_test_result, out_warnings)
+                 _fr["display"], out_warnings)
+    if _fr["verdict"] != "ok" and out_warnings is not None:
+        out_warnings.append(
+            f"[final-result] Final Test Result = '{_fr['display']}' — {_fr['reason']}"
+        )
+    if summary is not None:
+        # xlsx 를 열어보지 않고도 판정을 알 수 있게 API 응답에도 싣는다.
+        summary["final_result"] = _fr["display"]
+        summary["final_result_verdict"] = _fr["verdict"]
+        summary["final_result_reason"] = _fr["reason"]
 
     # 55-fix-3 W10: helper 추출 — swut_coverage와 단일 source. inline 중복 제거.
     from backend.services.swut_coverage_aggregator import (

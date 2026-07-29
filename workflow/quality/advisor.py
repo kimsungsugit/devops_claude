@@ -116,6 +116,24 @@ _SUTS_ADVICE = {
 # DB에 기록된 threshold(score_obj.threshold)가 있을 때(=ASIL 게이트 대상)만 제안.
 # QM/ASIL A 모듈은 evaluate_coverage 가 threshold=None 으로 저장 → 제안 skip.
 _SWUT_ADVICE = {
+    # ── 커버리지 FAIL 의 **사유** 구분 (비게이트) ──────────────────────────
+    # "커버리지 0%" 와 "측정 자체를 안 함" 은 다른 조치를 요구한다. 예전엔 둘 다 0.0 이라
+    # 구분이 불가능했다(HMR 미제공 프로젝트는 오히려 합성값 때문에 100.0 이 나왔다).
+    "coverage_unmeasured_axes": {
+        "label": "미측정 커버리지 축 수",
+        "low_advice": "0 이 아니면 그 축은 실측이 없습니다 — TC 를 늘려도 값이 안 변합니다. VectorCAST 산출물(.cov/HMR)이 수집됐는지, 대상 함수가 하니스에 포함됐는지 먼저 확인하세요.",
+        "threshold": None,
+    },
+    "coverage_measured_functions": {
+        "label": "실측 커버리지 함수 수(구문 축 분모)",
+        "low_advice": "백분율만 보면 '1개 함수 100%'와 '200개 함수 100%'가 같아 보입니다. 이 값이 작으면 커버리지 수치의 근거가 얇습니다.",
+        "threshold": None,
+    },
+    "coverage_synthesized_rows": {
+        "label": "합성(존재표식) 행 수",
+        "low_advice": "실측이 아니라 '로그에 있음'을 1/1 로 표현한 행입니다. 집계에서는 제외되지만, 이 값이 크면 문서의 O/X 표기 대부분이 실측 근거가 없다는 뜻입니다.",
+        "threshold": None,
+    },
     "statement_coverage_pct": {
         "label": "구문 커버리지(Statement)",
         "low_advice": "구문 커버리지가 100% 미만입니다(전 ASIL 필수). 실행되지 않은 코드 라인을 위한 TC를 추가하고, VectorCAST 빌드 산출물(.cov)이 최신인지·대상 함수가 테스트 하니스에 포함됐는지 확인하세요.",

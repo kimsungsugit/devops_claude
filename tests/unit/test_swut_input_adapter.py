@@ -1581,3 +1581,121 @@ class TestAggregateSessionUnmatchedResults:
         agg = aggregate_session(session)
         assert agg["passed"] == 1 and agg["unmatched_result_tcs"] == []
         assert not [w for w in session.parse_warnings if "[aggregate]" in w]
+
+
+class TestMeasuredFlagSeparatesRealFromSynthesized:
+    """실측 커버리지와 "존재 표식"(1/1·0/1)을 구분한다.
+
+    회귀 대상(2026-07-29 실측): 같은 `CoverageStats` 타입이 둘을 구분 없이 날랐고
+    `compute_coverage_rollup` 이 함께 합산했다:
+
+        HMR 미제공(전부 합성) → overall_statement_pct = **100.0**   ← 측정 0건인데
+        실측 30/100 + 합성 19개 → 41.18                            ← 11.18%p 부풀림
+        측정 0건               → 0.0                              ← 실측 0% 와 구분 불가
+
+    100.0 은 evaluator 의 statement_coverage_pct(threshold=100) 게이트를 **통과**한다.
+    """
+
+    @staticmethod
+    def _fc(name, st, br=None):
+        from backend.services.swut_input_adapter import CoverageStats, FunctionCoverage
+        return FunctionCoverage(unit_id=name, name=name,
+                                statement=st, branch=br or CoverageStats())
+
+    def test_measured_defaults_true(self):
+        """기존 생성부(위치·키워드 인자)는 손대지 않아도 실측으로 남는다."""
+        from backend.services.swut_input_adapter import CoverageStats
+        assert CoverageStats(69, 69, 1.0).measured is True
+        assert CoverageStats(covered=1, total=2).measured is True
+
+    def test_all_synthesized_reports_not_measured_not_100(self):
+        from backend.services.swut_input_adapter import CoverageStats, compute_coverage_rollup
+        synth = CoverageStats(1, 1, 1.0, measured=False)
+        out = compute_coverage_rollup([self._fc(f"f{i}", synth) for i in range(20)])
+        assert out["overall_statement_pct"] is None, "합성값이 100% 로 집계됐다"
+        assert out["measured_functions"]["statement"] == 0
+        assert out["synthesized_rows"] == 20
+
+    def test_mixed_reports_only_the_real_measurement(self):
+        from backend.services.swut_input_adapter import CoverageStats, compute_coverage_rollup
+        synth = CoverageStats(1, 1, 1.0, measured=False)
+        real = CoverageStats(30, 100, 0.30)
+        out = compute_coverage_rollup(
+            [self._fc("real", real)] + [self._fc(f"s{i}", synth) for i in range(19)])
+        assert out["overall_statement_pct"] == 30.0, "합성이 분자·분모를 채워 부풀렸다"
+        assert out["measured_functions"]["statement"] == 1
+
+    def test_nothing_measured_is_none_not_zero(self):
+        from backend.services.swut_input_adapter import CoverageStats, compute_coverage_rollup
+        out = compute_coverage_rollup([self._fc(f"f{i}", CoverageStats()) for i in range(5)])
+        assert out["overall_statement_pct"] is None, "미측정이 실측 0% 와 같은 값이다"
+
+    def test_real_measurements_are_unchanged(self):
+        """대조군 — 실측만 있는 프로젝트의 수치는 오늘과 같아야 한다."""
+        from backend.services.swut_input_adapter import CoverageStats, compute_coverage_rollup
+        out = compute_coverage_rollup([
+            self._fc("a", CoverageStats(69, 69, 1.0)),
+            self._fc("b", CoverageStats(30, 100, 0.30)),
+        ])
+        assert out["overall_statement_pct"] == 58.58
+        assert out["synthesized_rows"] == 0
+
+    def test_coverage_verdict_ignores_synthesized(self):
+        from backend.services.swut_input_adapter import (
+            CoverageStats,
+            compute_coverage_final_result,
+        )
+        synth = CoverageStats(1, 1, 1.0, measured=False)
+        r = compute_coverage_final_result([self._fc(f"f{i}", synth) for i in range(10)])
+        assert r["verdict"] == "na", "합성 100% 를 '달성' 으로 읽었다"
+
+
+class TestSynthesisSitesAreMarked:
+    """합성 지점 중 하나라도 표식을 빠뜨리면 그 경로만 다시 부풀린다.
+
+    합성의 시그니처는 **`total` 이 리터럴**이라는 것이다 — 실측은 분모가 데이터에서
+    오므로(`m.total_calls`, `ctot`) 리터럴일 수 없다. 그래서 `total=<상수>` 인 생성만
+    검사한다(실측 생성부에 표식을 요구하면 거짓 실패가 난다).
+    """
+
+    @staticmethod
+    def _unmarked_literal_synthesis(src: str) -> list[str]:
+        import ast
+
+        out = []
+        for node in ast.walk(ast.parse(src)):
+            if not (isinstance(node, ast.Call)
+                    and getattr(node.func, "id", "") == "CoverageStats"):
+                continue
+            tot = next((k.value for k in node.keywords if k.arg == "total"), None)
+            if not (isinstance(tot, ast.Constant) and isinstance(tot.value, int)
+                    and tot.value > 0):
+                continue          # 분모가 리터럴이 아니면 실측 — 검사 대상 아님
+            if not any(k.arg == "measured" for k in node.keywords):
+                out.append(ast.unparse(node)[:90])
+        return out
+
+    def test_flatten_sub_functions_marks_synthesized(self):
+        import inspect
+
+        from backend.services import swut_input_adapter as m
+
+        missing = self._unmarked_literal_synthesis(inspect.getsource(m.flatten_sub_functions))
+        assert missing == [], f"표식 없는 합성 CoverageStats: {missing}"
+
+    def test_swit_template_alignment_marks_synthesized(self):
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parents[2]
+        src = (root / "backend/services/swit_coverage_aggregator.py").read_text(encoding="utf-8")
+        missing = self._unmarked_literal_synthesis(src)
+        assert missing == [], f"표식 없는 합성 CoverageStats: {missing}"
+
+    def test_guard_is_not_vacuous(self):
+        """대조군 — 표식을 뺀 코드에서는 실제로 잡혀야 한다."""
+        bad = "CoverageStats(covered=1, total=1, coverage_pct=1.0)"
+        good = "CoverageStats(covered=1, total=1, coverage_pct=1.0, measured=False)"
+        real = "CoverageStats(covered=m.covered_calls, total=m.total_calls, coverage_pct=1.0)"
+        assert self._unmarked_literal_synthesis(bad) != []
+        assert self._unmarked_literal_synthesis(good) == []
+        assert self._unmarked_literal_synthesis(real) == []
