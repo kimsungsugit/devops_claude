@@ -103,23 +103,55 @@ fi
 set -e
 
 # 3. Run pytest with 900s timeout
-#    2026-07-17 실측(2회): 전체 스위트 = 3486개 / 274s·281s → 약 4분 40초.
-#    주의: 한때 "25분"으로 측정됐는데 그건 스위트가 느려서가 아니라 **hang** 이었다
-#    (chat_history_db 재진입 데드락 + test_admin_gate 의 tkinter 모달 대화상자).
-#    둘 다 고친 뒤 4분 40초로 완주하고 3485 passed / 0 failed.
-#    이전 주석의 "full 회귀 ~70s"는 드리프트였고 그 탓에 180s cap 이 매번 124로
-#    빠져 "commit allowed" 가 항상 출력됐다 = 게이트가 사실상 없었음.
-#    900s = 실측 281s + 넉넉한 margin. 도달 시 명시적 경고 — silent skip 회피.
+#
+# ## 스위트가 예산을 향해 자라고 있었다 (실측)
+#
+#   2026-07-17  3,486개 / 281s      ← 아래 "900s = 281s + margin" 의 근거였던 값
+#   2026-07-29  4,603개 / 451s
+#   2026-07-29  4,638개 / 590s      ← 예산까지 여유 310초. 두 주 만에 2.1배
+#
+# 900s 에 닿으면 `timeout` 은 124 를 주는데, 예전 코드는 그걸 받아
+# `"Skipping — commit allowed"` 를 찍고 **커밋을 통과시켰다**. 즉 스위트가 조금만 더
+# 자라면 이 게이트는 스스로 무게이트로 강등된다 — 그러고도 "검사했다"는 인상만 남는다.
+# 같은 결함이 실제로 있었다: 예전 주석의 "full 회귀 ~70s" 드리프트 때문에 180s cap 이
+# **매번** 124 로 빠져 게이트가 사실상 없던 시기가 있었다.
+#
+# ## 두 갈래로 고친다
+#
+# (a) 예산에 닿을 일을 없앤다 — pytest-xdist 가 있으면 `-n auto`.
+#     실측(18코어): 590s → **179s**, 결과는 직렬과 완전 일치(4,638 passed / 1 skipped).
+#     xdist 는 워커가 별도 **프로세스**라 전역 싱글톤 오염이 오히려 줄어든다.
+# (b) 그래도 닿으면 **통과시키지 않는다**(fail-closed).
+#     이 저장소에서 "오래 걸린다"의 실체는 느림이 아니라 **hang** 이었다
+#     (chat_history_db 재진입 데드락 + test_admin_gate 의 tkinter 모달 — 고친 뒤 4분 40초).
+#     179s 짜리가 900s 를 먹었다면 그건 hang 이고, hang 은 통과시킬 대상이 아니다.
+#     정말 장비가 느린 것뿐이라면 `--no-verify` 로 넘기되 그건 **의식적 결정**이어야 한다.
 set +e
 if [ -d "tests/unit" ]; then
-    echo "[3/3] Running unit tests (timeout: 900s, 전체 ~4분 40초)..."
-    TEST_OUTPUT=$(timeout 900 "$PROJECT_PY" -m pytest tests/unit/ -x -q --tb=short 2>&1)
+    # xdist 유무를 실제 import 로 확인한다. 없으면 조용히 직렬로 도는 게 아니라 **명시**한다
+    # (도구 부재를 clean 으로 읽지 않는다 = 이 저장소의 anti-fake-green 계약).
+    if "$PROJECT_PY" -c "import xdist" >/dev/null 2>&1; then
+        PYTEST_PAR="-n auto"
+        echo "[3/3] Running unit tests (병렬 -n auto, 실측 ~3분 / timeout 900s)..."
+    else
+        PYTEST_PAR=""
+        echo "[3/3] Running unit tests (**직렬** — pytest-xdist 미설치 / timeout 900s)..."
+        echo "   ⚠️  직렬은 실측 590s 라 예산 900s 까지 여유가 310초뿐이다."
+        echo "       설치 권장: $PROJECT_PY -m pip install pytest-xdist"
+    fi
+    # `-k 30`: TERM 30초 뒤에도 살아 있으면 KILL. 병렬 실행은 워커가 손자 프로세스라
+    # TERM 만으로는 남을 수 있다(hang 이면 특히). 남은 워커가 다음 실행의 CPU 를 먹으면
+    # "왜 갑자기 느리지" 로 오진하게 된다.
+    TEST_OUTPUT=$(timeout -k 30 900 "$PROJECT_PY" -m pytest tests/unit/ $PYTEST_PAR -x -q --tb=short 2>&1)
     TEST_EXIT=$?
     echo "$TEST_OUTPUT" | tail -20
     if [ $TEST_EXIT -eq 124 ]; then
-        echo "⚠️ Tests timed out (900s). Skipping — commit allowed."
-        echo "   ⚠️  주의: 일부 회귀 미실행 상태로 commit. 수동 full 회귀 권장:"
-        echo "        $PROJECT_PY -m pytest tests/unit/ -q --tb=short"
+        echo "❌ Unit tests가 900s 예산을 넘겼다. Commit aborted."
+        echo "   이 저장소에서 예산 초과의 실체는 대부분 **hang** 이었다(데드락·모달 대화상자)."
+        echo "   미검증을 통과로 바꾸지 않는다 — 원인을 먼저 확인할 것:"
+        echo "        $PROJECT_PY -m pytest tests/unit/ -x -q --tb=short --durations=20"
+        echo "   장비가 느린 것뿐이라고 판단되면 --no-verify 로 넘길 수 있다(의식적 결정)."
+        exit 1
     elif [ $TEST_EXIT -ne 0 ]; then
         echo "❌ Unit tests failed. Commit aborted."
         exit 1
