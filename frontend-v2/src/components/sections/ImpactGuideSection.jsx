@@ -4,7 +4,7 @@ import { useToast, useJob, useJenkinsCfg } from '../../App.jsx';
 import StatusBadge from '../StatusBadge.jsx';
 import { pollImpactJob, isAbortError } from '../../impactPoll.js';
 import { proposeBoundaryTCs, formatSutsLoc } from '../../impactBoundary.js';
-import { reconcileSuts, reconcileSits, reconcileSitsDocTcs } from '../../impactDocDraft.js';
+import { reconcileSuts, reconcileSits, reconcileSitsDocTcs, reconcileUds } from '../../impactDocDraft.js';
 import DocProposalTable from './impact/DocProposalTable.jsx';
 import {
   impactIdentity, impactKeyOf, sameImpactTarget, sameJobUrl,
@@ -1453,32 +1453,45 @@ export default function ImpactGuideSection({ analysisResult, job }) {
     if (key === 'uds') {
       if (c) {
         const rows = [];
-        // Prototype: 현재 선언(원문) → 변경 후 선언(cd.after, SIGNATURE)
-        if (ct === 'SIGNATURE' && cd && cd.after) {
-          rows.push(
-            <div key="proto">
-              {_lbl('Prototype')}
-              {c.prototype && <div style={{ ..._propMono, color: 'var(--color-danger)' }}>− {c.prototype}</div>}
-              <div style={{ ..._propMono, color: 'var(--color-success)' }}>＋ {cd.after}</div>
-            </div>,
-          );
-        }
-        // Used Globals: 현재 목록(원문) → +추가/−제거 (본문 diff 전역 변화)
-        const de = diffElems || {};
-        const gAdd = (de.changedGlobals && de.changedGlobals.added) || [];
-        const gRem = (de.changedGlobals && de.changedGlobals.removed) || [];
-        const addOnly = gAdd.filter((v) => !gRem.includes(v));
-        const remOnly = gRem.filter((v) => !gAdd.includes(v));
-        if (addOnly.length || remOnly.length) {
-          rows.push(
-            <div key="glob" style={{ marginTop: 2 }}>
-              {_lbl('Used Globals')}
-              {(c.globals || []).length > 0 && <div style={_propMono}>원문: {c.globals.join(', ')}</div>}
-              {remOnly.length > 0 && <div style={{ ..._propMono, color: 'var(--color-danger)' }}>− {remOnly.join(', ')}</div>}
-              {addOnly.length > 0 && <div style={{ ..._propMono, color: 'var(--color-success)' }}>＋ {addOnly.join(', ')}</div>}
-            </div>,
-          );
-        }
+        // 항목 판정은 `impactDocDraft.reconcileUds` 단일 출처다. 예전엔 Prototype·Used Globals
+        // 판정 로직이 이 파일에도 한 벌 있어서 **모듈은 테스트에서만 돌고 화면은 사본을 썼다**
+        // (드리프트). 그 사이 백엔드가 만들던 Logic Flow·Called Functions·Precondition 은
+        // 화면에 한 줄도 나오지 않았다.
+        const _uds = reconcileUds({
+          udsContent: c,
+          proposal: docProposalFor(fn, 'uds'),
+          diffElems,
+          // SIGNATURE 일 때만 짝짓는다 — BODY 변경에 선언 diff 를 그리면 없는 변경을 말하게 된다.
+          changeAfter: (ct === 'SIGNATURE' && cd && cd.after) ? cd.after : '',
+        });
+        _uds.items.forEach((it, i) => {
+          if (it.field === 'Prototype') {
+            rows.push(
+              <div key="proto">
+                {_lbl('Prototype')}
+                {it.before && <div style={{ ..._propMono, color: 'var(--color-danger)' }}>− {it.before}</div>}
+                <div style={{ ..._propMono, color: 'var(--color-success)' }}>＋ {it.after}</div>
+              </div>,
+            );
+          } else if (it.field === 'Used Globals') {
+            rows.push(
+              <div key="glob" style={{ marginTop: 2 }}>
+                {_lbl('Used Globals')}
+                {it.before && <div style={_propMono}>원문: {it.before}</div>}
+                {it.removed.length > 0 && <div style={{ ..._propMono, color: 'var(--color-danger)' }}>− {it.removed.join(', ')}</div>}
+                {it.added.length > 0 && <div style={{ ..._propMono, color: 'var(--color-success)' }}>＋ {it.added.join(', ')}</div>}
+              </div>,
+            );
+          } else {
+            // 참고값(echo)은 '유지' 같은 판정을 붙이지 않는다 — 문서와 대조한 적이 없다.
+            rows.push(
+              <div key={`uds-${i}`} style={{ marginTop: 2 }}>
+                {_lbl(it.echo ? `${it.field} (소스 기준 참고 — 문서 대조 아님)` : it.field)}
+                <div style={{ ..._propMono, whiteSpace: 'pre-wrap' }}>{it.after || it.before}</div>
+              </div>,
+            );
+          }
+        });
         // Description은 결정론 근거가 없어 백엔드가 'ai_required'로 비워둔 자리 — AI 보강이
         // 들어왔을 때만 채우고, 없으면 무엇이 비었는지 정직하게 밝힌다(동어반복 금지).
         const _udsProse = _proseText('uds_description');
@@ -1674,9 +1687,19 @@ export default function ImpactGuideSection({ analysisResult, job }) {
           loadingFull={!!fullDraftBusy[_fullKey]}
           // 서술문만 AI로 보강 — 표의 값 셀은 이 호출로 절대 바뀌지 않는다(값=결정론 소유).
           prose={_prose}
+          // ⚠ 요청 1회가 5개 문서 필드를 만든다(버튼은 여기 하나뿐 — UDS/SDS/STS/SITS 카드가
+          //   그 결과를 각자 소비한다). 그러니 페이로드도 **5개 문서 근거를 모두** 실어야 한다.
+          //   SUTS 노드만 보내던 동안 sts_purpose·sits_description은 근거 없이 작성됐고,
+          //   환각 게이트의 허용 집합에도 그 문서의 어휘가 없어 대조가 헛돌았다.
           onEnrichProse={() => loadDocProse(
             fn,
-            { suts: draft.rows, suts_meta: sMeta, uds: docProposalFor(fn, 'uds') || {}, columns: draft.columns },
+            {
+              suts: draft.rows, suts_meta: sMeta, columns: draft.columns,
+              uds: docProposalFor(fn, 'uds') || {},
+              sds: docProposalFor(fn, 'sds') || {},
+              sts: docProposalFor(fn, 'sts') || [],
+              sits: docProposalFor(fn, 'sits') || {},
+            },
             proto,
             functionDiffs[String(fn).toLowerCase()] || '',
           )}
@@ -1735,6 +1758,10 @@ export default function ImpactGuideSection({ analysisResult, job }) {
               draft.genTruncated ? `생성기 통합 케이스 ${draft.genTotal}건 중 ${draft.rows.length}건 표시` : '',
               draft.docPartial ? '원문 일부만 파싱됨 — 아래 판정은 "문서에 없음"을 단정하지 않는다' : '',
             ].filter(Boolean)}
+            // SUTS 카드 버튼이 만든 5개 필드 중 sits_description 은 **표시 표면이 없어**
+            // 생성·환각검사까지 하고 버려졌다. 여기서 소비한다(값 셀은 그대로 결정론 소유).
+            prose={_prose}
+            proseField="sits_description"
           />
         );
       }
@@ -1767,6 +1794,8 @@ export default function ImpactGuideSection({ analysisResult, job }) {
               '값 제안이 아니라 **재검증 대상 판정**이다(통합 입력/기대값은 SITS 빌더 실행 후 생성)',
               draft.rows.some((r) => r.note) ? '일부 콜체인이 표시 상한으로 잘렸다 — 포함 여부를 단정하지 않는다' : '',
             ].filter(Boolean)}
+            prose={_prose}
+            proseField="sits_description"
           />
         );
       }
@@ -1794,9 +1823,21 @@ export default function ImpactGuideSection({ analysisResult, job }) {
       const _stsHdr = has
         ? (genTcs ? '✏ 요구 기반 TC 반영 (생성기 절차)' : '✏ 요구 기반 TC 반영')
         : (genTcs ? '🖊 STS 작성 제안 (생성기 시험 절차)' : '🖊 STS 작성 제안 (요구 기반 TC 골격)');
+      const _stsProse = _proseText('sts_purpose');
       return _box(_stsHdr, has ? 'warning' : 'info', (
         <>
           <div>{_lbl('요구 기반 TC')}{_val(`요구 ${reqs.slice(0, 5).join(', ')}${reqs.length > 5 ? ` +${reqs.length - 5}개` : ''} 검증`)}</div>
+          {/* 시험 목적(산문)은 결정론 근거가 없어 AI 보강 자리다. SDS Behavior와 같은 규약:
+              보강이 오면 채우고, 폐기됐으면 사유를 말한다. 예전엔 백엔드가 sts_purpose를
+              만들고 환각 검사까지 해놓고 **표시 표면이 없어** 그대로 버렸다. */}
+          <div style={{ marginTop: 2 }}>
+            {_lbl('시험 목적')}
+            {_stsProse
+              ? <div>{_stsProse} <span className="pill pill-info" style={{ fontSize: 8 }}>AI 보강</span></div>
+              : <div className="text-muted" style={{ fontSize: 9 }}>
+                {_proseWhy('sts_purpose') || '요구 검증 목적 문장은 결정론 근거 없음(SUTS 카드의 [🤖 서술문 보강]으로 생성)'}
+              </div>}
+          </div>
           {genTcs
             ? genTcs.slice(0, 4).map((tc, i) => (
               <div key={i} style={{ marginTop: 2, paddingLeft: 6, borderLeft: '1px solid var(--border)' }}>

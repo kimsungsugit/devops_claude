@@ -29,7 +29,9 @@ from workflow.summary_ai_insight import _extract_json_payload, resolve_effective
 
 logger = logging.getLogger(__name__)
 
-IMPACT_DOC_PROSE_PROMPT_VERSION = 1
+# v2: 문서별 노드(uds/sds/sts/suts/sits)를 모두 싣고 "자기 노드 근거로만" 규칙을 명시.
+# v1은 SUTS 노드만 보내면서 5개 필드를 요구해 sts_purpose·sits_description이 근거 없이 작성됐다.
+IMPACT_DOC_PROSE_PROMPT_VERSION = 2
 
 PROSE_FIELDS = (
     "uds_description", "sds_behavior", "suts_description", "sts_purpose", "sits_description",
@@ -47,11 +49,22 @@ _IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]{2,}")
 # C 타입 토큰 안의 숫자는 **값이 아니라 비트폭**이다(U16의 16, int32_t의 32, float64의 64).
 # 값 대조에서 빼지 않으면 "U16 폭 입력의 경계를 확인한다" 같은 **정상 문장이 폐기**된다
 # (실측: 결정론 페이로드에 U16 문자열이 없는 조합 — 타입 미상 케이스에서 흔하다).
-# ⚠ 식별자 검사에서는 빼지 않는다 — 거기선 'u16'이 허용 어휘(_PROSE_COMMON)로 이미 통과한다.
-_TYPE_TOKEN_RE = re.compile(
-    r"\b(?:[usUS]\d{1,2}|(?:u?int|sint|float|real)\d{1,2}(?:_t)?|float|double|bool|boolean)\b",
-    re.I,
-)
+#
+# ⚠ 폭을 `\d{1,2}` 로 열어두면 **없는 타입이 면제된다**: `U48`·`S99`·`u7`·`uint99` 가 숫자
+#   검사(비트폭이라며 제거)와 식별자 검사(타입 어휘라며 면제)를 **둘 다** 통과해, 안전 문서
+#   초안에 "U48 폭 입력" 같은 환각 타입이 그대로 실렸다(실측). 면제 대상은 이 프로젝트가
+#   실제로 아는 타입뿐이어야 하므로 어휘를 `c_type_bounds` 단일 출처에서 만든다 —
+#   타입이 늘면 거기만 고치면 되고, 여기서 다시 폭을 넓히는 일이 없다.
+def _build_type_token_re() -> "re.Pattern[str]":
+    from workflow.c_type_bounds import C_TYPE_ALIAS, FLOAT_TYPES
+
+    words = {w for w in (*C_TYPE_ALIAS, *FLOAT_TYPES) if w}
+    # 다어절('unsigned char')은 공백 유연 매칭, 긴 것부터 — 'unsigned'가 'unsigned char'를 선점하지 않게.
+    alts = [re.escape(w).replace(r"\ ", r"\s+") for w in sorted(words, key=len, reverse=True)]
+    return re.compile(r"\b(?:" + "|".join(alts) + r")\b", re.I)
+
+
+_TYPE_TOKEN_RE = _build_type_token_re()
 
 # 서술문에 흔히 등장하는 일반 어휘 — 식별자 검사에서 면제(한국어 문장 속 영문 토큰).
 _PROSE_COMMON = {

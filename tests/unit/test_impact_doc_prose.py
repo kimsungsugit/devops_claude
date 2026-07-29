@@ -207,3 +207,35 @@ def test_real_hallucinated_value_is_still_dropped_after_type_exemption():
     )
     assert out["ok"] is False
     assert out["dropped_fields"][0]["token"] == "0xDEAD"
+
+
+def test_type_token_exemption_covers_only_real_types():
+    r"""I8: 타입 토큰 면제 어휘가 `\d{1,2}`로 열려 있으면 **없는 타입이 면제된다**.
+
+    `U48`·`S99`·`u7`·`uint99`는 숫자 검사(비트폭이라며 제거)와 식별자 검사(타입 어휘라며
+    면제)를 **둘 다** 통과해, 안전 문서 초안에 "U48 폭 입력" 같은 환각 타입이 그대로 실렸다.
+    """
+    from workflow.c_type_bounds import C_TYPE_ALIAS, FLOAT_TYPES
+    from workflow.impact_doc_prose import _TYPE_TOKEN_RE
+
+    for real in ("U16", "u8", "int32_t", "uint16_t", "float64", "unsigned char", "boolean"):
+        assert _TYPE_TOKEN_RE.search(real), f"실제 타입 {real}이 면제되지 않으면 정상 문장이 폐기된다"
+    for fake in ("U48", "S99", "u7", "uint99", "int99_t", "float128"):
+        assert not _TYPE_TOKEN_RE.search(fake), f"{fake}는 이 프로젝트에 없는 타입이다"
+    # 어휘는 c_type_bounds 단일 출처에서 온다 — 타입이 늘면 거기만 고친다
+    for word in list(C_TYPE_ALIAS)[:5] + sorted(FLOAT_TYPES)[:3]:
+        assert _TYPE_TOKEN_RE.search(word), word
+
+
+def test_fake_type_width_is_dropped_but_real_type_survives():
+    """게이트 통과 여부로 확인 — 정규식 단위가 아니라 실제 판정."""
+    from workflow.impact_doc_prose import filter_prose
+
+    fake = filter_prose({"uds_description": "입력은 U48 폭이므로 상한을 확인한다"}, {"0", "65535"}, {"s_foo"})
+    assert fake["fields"] == {}
+    assert fake["dropped_fields"][0]["reason"] == "unknown_number"
+    assert fake["dropped_fields"][0]["token"] == "48"
+
+    real = filter_prose({"uds_description": "입력은 U16 폭이므로 상한을 확인한다"}, {"0", "65535"}, {"s_foo"})
+    assert real["fields"]["uds_description"].startswith("입력은 U16")
+    assert real["dropped_fields"] == []

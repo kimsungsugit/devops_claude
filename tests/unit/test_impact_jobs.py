@@ -464,3 +464,80 @@ def test_find_job_files_by_scm_returns_newest_first(tmp_path, monkeypatch):
         f"job_impact_20260315_120000_{slug}_ccc00001.json",
     ]
     assert impact_jobs.find_job_files_by_scm("", limit=5) == []  # 빈 scm_id 방어
+
+
+def test_write_job_is_compact_and_atomic(tmp_path, monkeypatch):
+    """job JSON은 기계가 읽는다 — `indent=2`는 실측 표본을 38.5% 부풀렸다(215개 331MB).
+
+    그리고 `write_text`는 truncate 후 쓰기라, heartbeat(15초)와 폴링이 겹치면 클라이언트가
+    **잘린 JSON**을 읽는다. 임시파일 + `os.replace` 로 바꾼다.
+    """
+    import json
+
+    from workflow import impact_jobs
+
+    monkeypatch.setattr(impact_jobs, "JOB_DIR", tmp_path / "jobs")
+    job = {"job_id": "impact_1", "status": "running", "result": {"a": [1, 2], "b": {"c": "값"}}}
+    impact_jobs._write_job(job)
+
+    path = impact_jobs._job_path("impact_1")
+    raw = path.read_text(encoding="utf-8")
+    assert json.loads(raw) == job
+    assert "\n" not in raw, "indent=2면 개행이 들어간다 — compact 아님"
+    assert '"a":[1,2]' in raw and " " not in raw.split('"b"')[0].split('"a"')[1][:8]
+    assert "값" in raw, "ensure_ascii=False 유지(한글이 이스케이프로 부풀지 않게)"
+    # 임시파일을 남기지 않는다 — 남으면 디스크가 계속 먹힌다
+    assert list((tmp_path / "jobs").glob("*.tmp")) == []
+
+
+def test_write_job_falls_back_when_replace_is_blocked(tmp_path, monkeypatch):
+    """Windows에서 대상 파일이 읽히는 중이면 `os.replace`가 PermissionError다.
+
+    거기서 그냥 던지면 heartbeat 스레드가 죽어 잡이 orphan으로 회수된다 — 읽기 쪽의
+    잘린 JSON보다 **나쁜** 실패다. 재시도 후 직접 쓰기로 폴백해 상태 유실을 막는다.
+    """
+    import json
+
+    from workflow import impact_jobs
+
+    monkeypatch.setattr(impact_jobs, "JOB_DIR", tmp_path / "jobs")
+    calls = {"n": 0}
+
+    def _always_blocked(src, dst):
+        calls["n"] += 1
+        raise PermissionError("in use")
+
+    monkeypatch.setattr(impact_jobs.os, "replace", _always_blocked)
+    monkeypatch.setattr(impact_jobs, "sleep", lambda *_a: None)   # 재시도 대기 제거
+
+    job = {"job_id": "impact_2", "status": "running"}
+    impact_jobs._write_job(job)          # 예외를 던지지 않는다
+
+    assert calls["n"] >= 2, "한 번 실패했다고 바로 포기하지 않는다"
+    assert json.loads(impact_jobs._job_path("impact_2").read_text(encoding="utf-8")) == job
+    assert list((tmp_path / "jobs").glob("*.tmp")) == []
+
+
+def test_prune_removes_only_stale_temp_files(tmp_path, monkeypatch):
+    """임시파일 잔해는 목록 glob(`job_*.json`)에 안 걸려 화면엔 안 보이지만 디스크는 먹는다.
+    단, **쓰기 중인 남의 임시파일**을 지우면 그 잡의 상태가 날아가므로 오래된 것만."""
+    import os
+    import time
+
+    from workflow import impact_jobs
+
+    jobs = tmp_path / "jobs"
+    jobs.mkdir(parents=True)
+    monkeypatch.setattr(impact_jobs, "JOB_DIR", jobs)
+
+    fresh = jobs / "job_impact_a.json.111.tmp"
+    stale = jobs / "job_impact_b.json.222.tmp"
+    fresh.write_text("{}", encoding="utf-8")
+    stale.write_text("{}", encoding="utf-8")
+    old = time.time() - 7200
+    os.utime(stale, (old, old))
+
+    impact_jobs._prune_jobs(keep=200)
+
+    assert fresh.exists(), "방금 쓰인 임시파일을 지우면 진행 중인 잡의 상태가 유실된다"
+    assert not stale.exists()

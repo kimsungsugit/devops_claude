@@ -245,8 +245,37 @@ describe('reconcileUds — 항목 단위 원문→변경안', () => {
     expect(proto.verdict).toBe(VERDICT.MODIFY);
     expect(proto.after).toBe('void s_foo(U32 x)');
     const globals = r.items.find((i) => i.field === 'Used Globals');
-    expect(globals.after).toContain('− g_c');
-    expect(globals.after).toContain('＋ g_b');
+    // Δ는 **구조화**해서 넘긴다 — 예전엔 '− g_c  ＋ g_b' 한 줄 문자열이라 렌더가 색을
+    // 나눠 칠할 수 없었고, 그래서 화면은 이 모듈을 안 쓰고 사본 로직을 따로 갖고 있었다.
+    expect(globals.removed).toEqual(['g_c']);
+    expect(globals.added).toEqual(['g_b']);
+    expect(globals.before).toBe('g_a');       // '원문'은 문서 원문(udsContent) 기준
+  });
+
+  it("'원문'으로 표시할 값은 문서 원문이 우선 — 소스 파생값을 원문으로 위장하지 않는다", () => {
+    const r = reconcileUds({
+      udsContent: { prototype: 'void s_foo(U16 x)', globals: ['g_doc'] },
+      proposal: { prototype: 'void s_foo(U16 x)', globals: ['g_src_derived'] },
+      diffElems: { changedGlobals: { added: ['g_b'], removed: [] } },
+    });
+    expect(r.items.find((i) => i.field === 'Used Globals').before).toBe('g_doc');
+  });
+
+  it('대조하지 않은 항목엔 판정을 붙이지 않는다 (근거 없는 유지 금지)', () => {
+    const r = reconcileUds({
+      udsContent: { prototype: 'void s_foo(void)' },
+      proposal: { calls: ['Hal_Read'], precondition: 'init done', logic_flow: ['read', 'clamp'] },
+    });
+    const calls = r.items.find((i) => i.field === 'Called Functions');
+    const pre = r.items.find((i) => i.field === 'Precondition');
+    expect(calls.echo).toBe(true);
+    expect(calls.verdict).toBe('');
+    expect(pre.echo).toBe(true);
+    expect(pre.verdict).toBe('');
+    // 변화가 없으면 Prototype/Globals 항목 자체를 만들지 않는다(원문 블록이 이미 보여준다)
+    expect(r.items.find((i) => i.field === 'Prototype')).toBeUndefined();
+    // 의사코드 개요는 '작성 재료' 제안이라 ADD — 문서와 대조한 판정이 아니다
+    expect(r.items.find((i) => i.field.startsWith('Logic Flow')).verdict).toBe(VERDICT.ADD);
   });
 
   it('산문은 만들지 않고 보류 표기만 (동어반복 플레이스홀더 금지)', () => {

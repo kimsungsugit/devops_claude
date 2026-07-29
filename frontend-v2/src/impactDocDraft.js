@@ -646,10 +646,19 @@ export function reconcileSitsDocTcs({ docTcs, fn, changeType, diffElems, join, n
 }
 
 /**
- * UDS 초안 — 원문 → 변경안의 항목 단위 diff(Prototype / Used Globals / Calls).
+ * UDS 초안 — 원문 → 변경안의 항목 단위 diff(Prototype / Used Globals / Calls / Logic Flow).
  * 산문(Description)은 결정론 근거가 없어 값을 만들지 않고 `descriptionPending`으로만 표시한다.
+ *
+ * 항목은 두 부류다 — 섞으면 안 된다:
+ *  - `verdict` 있는 항목 = **대조해서 차이를 찾은 것**(Prototype 변경, 전역 추가/제거)
+ *  - `echo: true` 항목 = 대조하지 않고 **그대로 보여주는 참고값**(호출 함수·Precondition).
+ *    예전엔 이쪽에도 `유지`를 붙였는데, 문서와 비교한 적이 없으므로 "그대로 두라"고 말할
+ *    근거가 없다(오늘 SUTS 쪽에서 고친 '근거 없는 유지'와 같은 부류).
+ *
+ * `changeAfter`: SIGNATURE 변경의 변경 후 선언. `doc_proposal.uds` 노드가 없는 구 job에서도
+ * Prototype 짝을 만들 수 있게 호출부가 `change_details[fn].after` 를 직접 넘긴다.
  */
-export function reconcileUds({ udsContent, proposal, diffElems } = {}) {
+export function reconcileUds({ udsContent, proposal, diffElems, changeAfter } = {}) {
   const c = udsContent && typeof udsContent === 'object' ? udsContent : {};
   const p = proposal && typeof proposal === 'object' ? proposal : {};
   const de = diffElems || {};
@@ -659,36 +668,33 @@ export function reconcileUds({ udsContent, proposal, diffElems } = {}) {
   const remSet = new Set(gRem);
   const items = [];
 
-  const before = String(p.prototype || c.prototype || '');
-  const after = String(p.prototype_after || '');
+  // ⚠ '원문'으로 보여주는 값은 **문서 원문(udsContent)** 이 먼저다. proposal 은 소스에서
+  //   파생된 값이라, 그걸 "원문:"이라 이름 붙여 그리면 소스 추론값을 문서 내용으로 위장한다.
+  const before = String(c.prototype || p.prototype || '');
+  const after = String(changeAfter || p.prototype_after || '');
   if (after && after !== before) {
     items.push({ field: 'Prototype', before, after, verdict: VERDICT.MODIFY });
-  } else if (before) {
-    items.push({ field: 'Prototype', before, after: '', verdict: VERDICT.KEEP });
   }
 
-  const curGlobals = (p.globals && p.globals.length ? p.globals : (c.globals || [])).map(String);
+  const curGlobals = ((c.globals && c.globals.length ? c.globals : (p.globals || [])) || []).map(String);
   const addOnly = gAdd.filter((v) => !remSet.has(v));
   const remOnly = gRem.filter((v) => !addSet.has(v));
   if (addOnly.length || remOnly.length) {
     items.push({
       field: 'Used Globals',
       before: curGlobals.join(', '),
-      after: [
-        remOnly.length ? `− ${remOnly.join(', ')}` : '',
-        addOnly.length ? `＋ ${addOnly.join(', ')}` : '',
-      ].filter(Boolean).join('  '),
+      added: addOnly.map(String),
+      removed: remOnly.map(String),
       verdict: VERDICT.MODIFY,
     });
-  } else if (curGlobals.length) {
-    items.push({ field: 'Used Globals', before: curGlobals.join(', '), after: '', verdict: VERDICT.KEEP });
   }
 
-  const calls = (p.calls && p.calls.length ? p.calls : (c.calls || [])).map(String);
-  if (calls.length) items.push({ field: 'Called Functions', before: calls.join(', '), after: '', verdict: VERDICT.KEEP });
+  // 아래는 대조 결과가 아니라 **작성 재료**다 — 백엔드가 소스에서 뽑아둔 것을 화면에 전달만 한다.
   const flow = (p.logic_flow || []).map(String);
   if (flow.length) items.push({ field: 'Logic Flow (의사코드 개요)', before: '', after: flow.join('\n'), verdict: VERDICT.ADD });
-  if (p.precondition) items.push({ field: 'Precondition', before: String(p.precondition), after: '', verdict: VERDICT.KEEP });
+  const calls = ((p.calls && p.calls.length ? p.calls : (c.calls || [])) || []).map(String);
+  if (calls.length) items.push({ field: 'Called Functions', before: calls.join(', '), after: '', verdict: '', echo: true });
+  if (p.precondition) items.push({ field: 'Precondition', before: String(p.precondition), after: '', verdict: '', echo: true });
 
   return {
     items,

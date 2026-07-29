@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 import traceback
 import uuid
@@ -38,9 +39,41 @@ def _job_path(job_id: str) -> Path:
 
 def _write_job_unlocked(job: Dict[str, Any]) -> Dict[str, Any]:
     """락 없이 job JSON을 쓴다. 호출측이 이미 _JOB_LOCK을 잡았을 때만 사용(update_job의 원자적
-    read-modify-write). 비재진입 threading.Lock이라 락 안에서 _write_job을 부르면 데드락이 되므로 분리."""
+    read-modify-write). 비재진입 threading.Lock이라 락 안에서 _write_job을 부르면 데드락이 되므로 분리.
+
+    두 가지를 지킨다:
+      1. **compact 직렬화** — job JSON은 기계가 읽는다(`load_job`). `indent=2`는 실측 표본에서
+         파일을 **38.5% 부풀렸다**(215개 331MB). 사람이 볼 일이 있으면 `python -m json.tool`.
+      2. **원자적 교체** — `write_text`는 truncate 후 쓰기라, heartbeat가 15초마다 덮어쓰는
+         동안 폴링 클라이언트가 **잘린 JSON**을 읽어 "failed to read job state"를 볼 수 있다.
+         같은 디렉터리 임시파일에 쓰고 `os.replace`(동일 볼륨이면 Windows도 원자적)로 바꾼다.
+    """
     path = _job_path(str(job.get("job_id") or ""))
-    path.write_text(json.dumps(job, ensure_ascii=False, indent=2), encoding="utf-8")
+    payload = json.dumps(job, ensure_ascii=False, separators=(",", ":"))
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    try:
+        tmp.write_text(payload, encoding="utf-8")
+        # ⚠ Windows의 replace는 대상이 **읽히는 중이면** PermissionError다(Python의 open은
+        #   FILE_SHARE_DELETE를 안 준다). 폴링 클라이언트와 15초 heartbeat가 겹치면 실제로 난다.
+        #   여기서 그냥 던지면 heartbeat가 죽어 job이 orphan으로 회수된다 — 읽기 쪽 잘린 JSON보다
+        #   **나쁜** 실패로 바뀐다. 짧게 재시도하고, 그래도 안 되면 종전 방식(직접 쓰기)으로 쓴다.
+        for attempt in range(4):
+            try:
+                os.replace(tmp, path)
+                break
+            except PermissionError:
+                if attempt == 3:
+                    path.write_text(payload, encoding="utf-8")   # 원자성 포기, 유실은 막는다
+                    tmp.unlink(missing_ok=True)
+                    break
+                sleep(0.05 * (attempt + 1))
+    except Exception:
+        # 교체 실패 시 임시파일을 남기지 않는다(디렉터리 오염 → 다음 목록 조회가 파싱 실패).
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
     return job
 
 
@@ -350,6 +383,15 @@ def _prune_jobs(keep: int = 200) -> None:
         files = sorted(JOB_DIR.glob("job_*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
     except Exception:
         return
+    # 원자적 쓰기의 임시파일 잔해 — 프로세스가 write와 replace 사이에서 죽으면 남는다.
+    # 목록 glob(`job_*.json`)엔 안 걸리므로 화면엔 안 보이지만 디스크는 계속 먹는다.
+    _now = datetime.now().timestamp()
+    for stale in JOB_DIR.glob("job_*.json.*.tmp"):
+        try:
+            if _now - stale.stat().st_mtime > 3600:   # 쓰기 중인 남의 파일을 지우지 않는다
+                stale.unlink()
+        except OSError:
+            continue
     for path in files[keep:]:
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
