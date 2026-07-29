@@ -35,6 +35,8 @@ const DATA = {
     excluded: [{ id: 'tu-local-static', reason: 'counterpart_inactive', fixing: ['Rule-8.6'], inactive: ['Rule-8.7'] }],
   },
   ruleset: { available: true, enabled_count: 242, source_build: 125, reason: null },
+  metrics: { available: true, reason: null, function_count: 822, headroom_threshold: 3 },
+  latest_rcr_reason: null,
   conflicts: [
     {
       id: 'cast-cascade', kind: 'fix_induces', tier: 'cooccurrence',
@@ -48,6 +50,8 @@ const DATA = {
         cooccurrence: [{ file: 'src/IF/ApiIn_LinRxComp_PDS.c', fixing_counts: { 'Rule-10.4': 26 }, risk_counts: { 'Rule-10.8': 5 }, total: 31 }],
         metric_headroom: [],
       },
+      metric_axis: { applicable: false, checked: false, reason: null },
+      advice: { available: true, reason: null },
       mechanism: '캐스팅이 복합식에 걸린다',
       resolutions: ['단항 피연산자 각각에 캐스팅'],
       deviation_hint: '10.x는 전부 required',
@@ -62,8 +66,10 @@ const DATA = {
       risk_filtered: [{ rule: 'Rule-99.9', reason: 'not_in_ruleset' }],
       evidence: {
         windows: [], cooccurrence: [],
-        metric_headroom: [{ file: 'src/a.c', function: 'tight()', metric: 'V_G', label: 'v(G)', value: 10, st_id: 'ST201', band: '1 ~ 10', verdict: 'Pass', next_band: '11 ~ 20', next_verdict: 'Conditional' }],
+        metric_headroom: [{ file: 'src/a.c', function: 'tight()', metric: 'V_G', label: 'v(G)', value: 9, headroom: 2, st_id: 'ST201', band: '1 ~ 10', verdict: 'Pass', next_band: '11 ~ 20', next_verdict: 'Conditional' }],
       },
+      metric_axis: { applicable: true, checked: true, reason: null, files_checked: 1, threshold: 3 },
+      advice: { available: true, reason: null },
       mechanism: '중첩이 깊어진다', resolutions: [], deviation_hint: '',
       metric_risk: ['LEVEL', 'V_G'], confidence: 'high', refs: [],
       fixing_violations: 3,
@@ -116,14 +122,68 @@ describe('RuleConflictPanel', () => {
     expect(screen.getByText(/단항 피연산자 각각에 캐스팅/)).toBeTruthy();
   });
 
-  it('메트릭 여유 경고에 밴드 교차를 명시한다', async () => {
+  it('메트릭 여유 경고에 남은 거리와 밴드 교차를 명시한다', async () => {
     const user = userEvent.setup();
     render(<RuleConflictPanel {...props} data={DATA} defaultOpen />);
     await user.click(screen.getAllByRole('button', { name: /보기/ })[1]);
-    expect(screen.getByText(/tight\(\).*v\(G\) 10/)).toBeTruthy();
+    // '경계에 정확히 붙음'이 아니라 **남은 거리**를 보여준다 — 실제 수정은 1단이 아니다.
+    expect(screen.getByText(/tight\(\).*v\(G\) 9/)).toBeTruthy();
+    expect(screen.getByText(/여유 2단/)).toBeTruthy();
     expect(screen.getByText(/Conditional/)).toBeTruthy();
     // 규칙셋에 없어 걸러진 상대는 감추지 않는다.
     expect(screen.getByText(/규칙셋에 없어 제외: Rule-99.9/)).toBeTruthy();
+  });
+
+  it('메트릭 축을 못 봤으면 "여유 있음"이 아니라 사유를 낸다', async () => {
+    const user = userEvent.setup();
+    const noHmr = {
+      ...DATA,
+      metrics: { available: false, reason: 'no_hmr', function_count: null, headroom_threshold: 3 },
+      conflicts: [{
+        ...DATA.conflicts[1],
+        evidence: { windows: [], cooccurrence: [], metric_headroom: [] },
+        metric_axis: { applicable: true, checked: false, reason: 'no_hmr' },
+      }],
+    };
+    render(<RuleConflictPanel {...props} data={noHmr} defaultOpen />);
+    // 패널 상단 배너 — 모든 행을 펼쳐야만 알 수 있으면 안 된다.
+    expect(screen.getByText(/HIS 메트릭\(HMR\)을 읽지 못했습니다/)).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: /보기/ }));
+    expect(screen.getByText(/확인하지 못했습니다.*HIS 메트릭 리포트\(HMR\)가 없습니다/)).toBeTruthy();
+  });
+
+  it('메트릭 축을 봤고 여유가 있으면 그렇게 말한다(빈 화면 금지)', async () => {
+    const user = userEvent.setup();
+    const roomy = {
+      ...DATA,
+      conflicts: [{
+        ...DATA.conflicts[1],
+        evidence: { windows: [], cooccurrence: [], metric_headroom: [] },
+        metric_axis: { applicable: true, checked: true, reason: null, files_checked: 4, threshold: 3 },
+      }],
+    };
+    render(<RuleConflictPanel {...props} data={roomy} defaultOpen />);
+    await user.click(screen.getByRole('button', { name: /보기/ }));
+    expect(screen.getByText(/4개 파일을 확인했고.*여유가 3단 이하인 함수는 없습니다/)).toBeTruthy();
+  });
+
+  it('위반이 전부 미귀속이면 버튼을 내기 전에 원리적 불가를 알린다', async () => {
+    const user = userEvent.setup();
+    const crossOnly = {
+      ...DATA,
+      conflicts: [{
+        ...DATA.conflicts[0],
+        evidence: { windows: [], cooccurrence: [], metric_headroom: [] },
+        advice: { available: false, reason: 'cross_module_only', unattributed: 99, total: 99 },
+      }],
+    };
+    render(<RuleConflictPanel {...props} data={crossOnly} defaultOpen />);
+    await user.click(screen.getByRole('button', { name: /보기/ }));
+    expect(screen.getByText(/원리적으로 불가능합니다\(스냅샷 누락이 아닙니다\)/)).toBeTruthy();
+    expect(screen.getByText(/위반 99\/99건이 미귀속/)).toBeTruthy();
+    // 누를 수 없는 버튼을 내지 않고, 확인 요청도 보내지 않는다.
+    expect(screen.queryByRole('button', { name: '지침 생성' })).toBeNull();
+    expect(post).not.toHaveBeenCalledWith('/api/summary/rule-conflict-advice', expect.anything());
   });
 
   it('조회 실패는 접혀 있어도 헤더에 남는다(problem 슬롯)', () => {

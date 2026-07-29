@@ -131,19 +131,43 @@ def test_window_evidence_requires_same_file_and_same_window():
     assert out[0]["delta_down"] == -3 and out[0]["delta_up"] == 2
 
 
-def test_headroom_evidence_flags_only_functions_without_band_room():
+def test_headroom_evidence_uses_distance_not_exact_boundary():
+    """⚠ 여유를 '+1이면 밴드가 바뀌나'로만 보면 실측에서 아무것도 안 걸린다.
+
+    실제 준수 리팩터링은 복잡도를 1단이 아니라 2~5단 올린다. 임계 이하 거리를 재야
+    v(G)=9 같은 함수(HDPDM01 s_LinTx_DTC 실사례)가 잡힌다.
+    """
+    # LEVEL 밴드는 1~5 Pass 라 여유가 금방 좁아진다 — V_G 축 확인이 LEVEL 에 오염되지
+    # 않도록 V_G 대상 함수들의 LEVEL 은 넉넉히(1 → 여유 5, 임계 밖) 둔다.
     functions = {
-        "c:/w/src/a.c\x1ftight()": {"V_G": "10", "LEVEL": "3"},   # v(G) 10 = Pass 상한 → +1이면 Conditional
-        "c:/w/src/a.c\x1froomy()": {"V_G": "4", "LEVEL": "2"},    # 여유 있음 → 제외
-        "c:/w/src/a.c\x1fnesting()": {"V_G": "2", "LEVEL": "5"},  # LEVEL 5 = Pass 상한
+        "c:/w/src/a.c\x1ftight()": {"V_G": "10", "LEVEL": "1"},    # V_G 여유 1
+        "c:/w/src/a.c\x1fnear()": {"V_G": "9", "LEVEL": "1"},      # V_G 여유 2 — 구 구현은 놓쳤다
+        "c:/w/src/a.c\x1froomy()": {"V_G": "4", "LEVEL": "1"},     # V_G 여유 7 → 임계 밖
+        "c:/w/src/a.c\x1fnesting()": {"V_G": "2", "LEVEL": "5"},   # LEVEL 여유 1
     }
     out = _headroom_evidence(functions, ["src/a.c"], ["V_G"])
-    assert [e["function"] for e in out] == ["tight()"]
+    # 여유가 작은 것부터 — 상한에 잘려도 가장 위험한 함수가 남는다.
+    assert [(e["function"], e["headroom"]) for e in out] == [("tight()", 1), ("near()", 2)]
     assert out[0]["verdict"] == "Pass" and out[0]["next_verdict"] == "Conditional"
     # metric_risk 가 LEVEL 이면 중첩 경계 함수가 잡힌다 — 어떤 메트릭을 미는 수정인지가 기준.
     assert [e["function"] for e in _headroom_evidence(functions, ["src/a.c"], ["LEVEL"])] == ["nesting()"]
     # 밴드가 정의되지 않은 메트릭은 판정하지 않는다(임계값을 지어내면 없던 위반이 생긴다).
     assert _headroom_evidence(functions, ["src/a.c"], ["STMT"]) == []
+    # 임계를 좁히면 경계에 정확히 붙은 것만 남는다(호출측이 정한다).
+    assert [e["function"] for e in _headroom_evidence(functions, ["src/a.c"], ["V_G"], threshold=1)] \
+        == ["tight()"]
+
+
+def test_band_headroom_skips_same_verdict_bands():
+    """V_G 11~20 과 21~30 은 **둘 다 Conditional** — 20→21 을 '나빠짐'으로 세면 안 된다."""
+    from backend.services.his_metric_delta import band_headroom
+
+    assert band_headroom("V_G", 10)["headroom"] == 1      # Pass 상한 → 11에서 Conditional
+    assert band_headroom("V_G", 20)["headroom"] == 11     # 21은 여전히 Conditional, Fail은 31
+    assert band_headroom("V_G", 20)["next_verdict"] == "Fail"
+    assert band_headroom("V_G", 31) is None               # 이미 최악 밴드 — 여유 0이 아니라 개념 부재
+    assert band_headroom("STMT", 100) is None             # 밴드 미정의
+    assert band_headroom("V_G", "nan") is None
 
 
 def test_measurement_ambiguity_ruleset_change_spans_unanalyzed_build():
@@ -263,6 +287,74 @@ def test_conflict_detected_as_cooccurrence_when_both_rules_hit_same_file(tmp_pat
     assert out["ambiguities"]["conflict"][0]["id"] == "cast-cascade"
     # 정상 측정이면 null — 값이 있으면 '상충 없음'이 아니라 위반 표를 못 읽은 것이다.
     assert out["latest_rcr_reason"] is None
+    # 동시 위반 증거가 있으면 지침 생성 가능 — 프론트가 버튼을 내기 전에 아는 근거.
+    assert c["advice"] == {"available": True, "reason": None}
+    # 이 상충은 metric_risk 가 없다 → 메트릭 축은 '해당 없음'(못 봄이 아니다).
+    assert c["metric_axis"]["applicable"] is False
+
+
+def test_metric_axis_distinguishes_not_applicable_from_unmeasured(tmp_path):
+    """metric_headroom 이 비었을 때 '여유 있음'과 '못 봄'이 구분돼야 한다.
+
+    RCR 축엔 latest_rcr_reason 을 달아 놓고 메트릭 축을 빼놓은 게 직전 라운드의 비대칭이었다.
+    이 픽스처엔 HMR 이 없으므로 metric_risk 를 가진 상충은 checked=False 여야 한다.
+    """
+    cache = tmp_path / "cache"
+    rcf = {"Rule-15.5": True, "Rule-15.4": True}
+    _mk_build(cache, 10, _rcr({"Rule-15.5": 3}, rcf))
+    _mk_build(cache, 11, _rcr({"Rule-15.5": 3}, rcf))
+    table = _write_table(tmp_path / "t2.json", [{
+        "id": "single-exit", "when_fixing": ["Rule-15.5"], "may_violate": ["Rule-15.4"],
+        "kind": "fix_induces", "metric_risk": ["LEVEL", "V_G"], "confidence": "high",
+    }], categories={"Rule-15.5": "advisory", "Rule-15.4": "advisory"})
+
+    out = compute_rule_conflicts(job_url=_JOB, cache_root=cache, table_path=table)
+    assert out["metrics"]["available"] is False and out["metrics"]["reason"] == "no_hmr"
+    axis = out["conflicts"][0]["metric_axis"]
+    assert axis["applicable"] is True and axis["checked"] is False and axis["reason"] == "no_hmr"
+    # 증거 부재를 '여유 있음'으로 접지 않았다 — headroom 은 비어 있지만 사유가 함께 있다.
+    assert out["conflicts"][0]["evidence"]["metric_headroom"] == []
+
+
+def test_advice_reports_cross_module_only_when_all_violations_unattributed(tmp_path):
+    """Rule-8.6 99/99 처럼 위반이 전부 RCMA 면 파일 증거는 **원리적으로** 없다.
+
+    '못 찾음'(no_code_evidence)으로 보고하면 사용자는 스냅샷 재수집을 시도한다 —
+    실제로는 도구 한계라 아무리 재수집해도 안 나온다.
+    """
+    cache = tmp_path / "cache"
+    rcf = {"Rule-10.4": True, "Rule-10.8": True}
+    # RCMA(파일 귀속 없음)에만 위반이 있는 RCR — path 없는 pseudo 행.
+    html = _rcr({"Rule-10.4": 9}, rcf, path="RCMA")
+    _mk_build(cache, 10, html)
+    _mk_build(cache, 11, html)
+
+    out = compute_rule_conflicts(job_url=_JOB, cache_root=cache, table_path=_table(tmp_path))
+    c = next(c for c in out["conflicts"] if c["id"] == "cast-cascade")
+    assert c["advice"]["reason"] == "cross_module_only"
+    assert c["advice"]["unattributed"] == 9 and c["advice"]["total"] == 9
+    # 파일 귀속이 없으니 메트릭 축도 함수를 특정할 수 없다(HMR 유무와 별개 사유).
+    assert c["evidence"]["cooccurrence"] == []
+
+
+def test_advice_unavailable_when_all_evidence_is_cross_module(tmp_path):
+    """증거가 **있어도** 전부 모듈 간 집계면 스냅샷 발췌는 못 만든다.
+
+    이걸 available:True 로 두면 버튼을 눌러야만 실패를 알고, 그때 나오는 사유도 틀린다
+    (증거 수집기가 pseudo 항목을 걸러내므로 'no_code_evidence' 로 떨어진다).
+    """
+    cache = tmp_path / "cache"
+    rcf = {"Rule-10.4": True, "Rule-10.8": True}
+    # 두 규칙이 **RCMA 안에서** 함께 위반 → cooccurrence 는 잡히지만 scope=cross_module.
+    html = _rcr({"Rule-10.4": 9, "Rule-10.8": 4}, rcf, path="RCMA")
+    _mk_build(cache, 10, html)
+    _mk_build(cache, 11, html)
+
+    out = compute_rule_conflicts(job_url=_JOB, cache_root=cache, table_path=_table(tmp_path))
+    c = next(c for c in out["conflicts"] if c["id"] == "cast-cascade")
+    assert c["evidence"]["cooccurrence"], "동시 위반 관측 자체는 있어야 한다(버리지 않는다)"
+    assert all(e.get("scope") == "cross_module" for e in c["evidence"]["cooccurrence"])
+    assert c["advice"]["available"] is False and c["advice"]["reason"] == "cross_module_only"
 
 
 def test_absent_counterpart_rule_is_filtered_with_reason(tmp_path):

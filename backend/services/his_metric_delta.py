@@ -189,6 +189,49 @@ def band_verdict(metric_name: str, value: Any) -> Optional[Dict[str, str]]:
     return None
 
 
+def band_headroom(metric_name: str, value: Any) -> Optional[Dict[str, Any]]:
+    """현재 값에서 **판정이 나빠지기까지 남은 여유**(정수 거리). 밴드 미정의/비숫자면 None.
+
+    왜 `band_verdict(v)` vs `band_verdict(v+1)` 비교로 부족한가: 그건 값이 밴드 상한에
+    **정확히** 붙은 함수만 잡는다. 실제 리팩터링은 1단이 아니라 2~5단을 올린다 — 단일 exit
+    변환은 중첩을, 재귀 제거는 복잡도를 그만큼 밀어올린다. 실측에서도 그 차이가 컸다:
+    HDPDM01의 V_G==10(상한 정확히)은 5개뿐이지만 8~10(여유 ≤3)은 29개다.
+    거리를 돌려주고 **임계는 호출측이 정하게** 한다.
+
+    이미 최악 밴드에 있어 더 나빠질 곳이 없으면 None(여유 0이 아니다 — 개념이 다르다).
+    """
+    banded = _BANDED.get(str(metric_name))
+    if banded is None:
+        return None
+    try:
+        v = int(str(value).strip())
+    except (TypeError, ValueError, AttributeError):
+        return None
+    st_id, disp, bands = banded
+    # 각 밴드의 시작값 — 상한만 정의돼 있으므로 앞 밴드의 상한 + 1이 다음 밴드의 시작.
+    entries: List[Tuple[int, Optional[int], str, str]] = []
+    prev_upper: Optional[int] = None
+    for upper, label, verdict in bands:
+        entries.append((0 if prev_upper is None else prev_upper + 1, upper, label, verdict))
+        prev_upper = upper
+    idx = next(
+        (i for i, (_s, upper, _l, _v) in enumerate(entries) if upper is None or v <= upper), None
+    )
+    if idx is None:
+        return None
+    cur_start, _cur_upper, cur_label, cur_verdict = entries[idx]
+    for start, _upper, label, verdict in entries[idx + 1:]:
+        # 같은 판정이 이어지는 밴드는 건너뛴다 — V_G 는 11~20 과 21~30 이 둘 다
+        # Conditional 이라, 20→21 을 '나빠짐'으로 세면 없던 위험을 만든다.
+        if verdict != cur_verdict:
+            return {
+                "headroom": start - v, "st_id": st_id, "name": disp,
+                "band": cur_label, "verdict": cur_verdict,
+                "next_band": label, "next_verdict": verdict,
+            }
+    return None
+
+
 def _resolve_file_key(functions: Dict[str, Dict[str, str]], file: str) -> Tuple[List[str], str]:
     """대상 파일에 속한 함수 키들을 경로 suffix 매칭으로 고른다.
 

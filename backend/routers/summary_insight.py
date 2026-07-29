@@ -1000,16 +1000,21 @@ def summary_rule_conflict_advice(req: dict) -> Dict[str, Any]:
     to_meta = find_build_meta(metas, computed.get("build_number"))
     excerpts, diffs = _collect_conflict_evidence(conflict, metas, to_meta)
     if not excerpts and not diffs:
-        # 증거 0건의 사유를 구분한다 — 파일 귀속이 원리적으로 없는 상충(RCMA류 집계만)과
-        # '스냅샷을 못 찾음'은 사용자가 취할 조치가 다르다.
-        ev = conflict.get("evidence") or {}
-        observed = (ev.get("cooccurrence") or []) + (ev.get("windows") or [])
-        only_pseudo = bool(observed) and all(e.get("scope") == "cross_module" for e in observed)
-        return {
+        # 증거 0건의 사유는 **서비스가 이미 판정해 둔 것**을 쓴다(conflict.advice).
+        # 여기서 다시 세면 판정이 갈린다 — 실제로 갈렸었다: 관측 목록이 비어 있으면
+        # `all()` 이 공허참을 못 만들어 'cross_module_only' 가 영원히 안 나왔고, 위반이
+        # 전부 RCMA 라 원리적으로 파일 증거가 없는 규칙(Rule-8.6 99/99)이 '못 찾음'으로
+        # 보고됐다. 사용자가 취할 조치가 다르다(재수집 vs 도구 한계 수용).
+        pre = conflict.get("advice") or {}
+        out: Dict[str, Any] = {
             "ok": True, "available": False, "conflict_id": conflict_id,
-            "reason": "cross_module_only" if only_pseudo else "no_code_evidence",
+            "reason": pre.get("reason") or "no_code_evidence",
             "evidence_tier": conflict.get("tier"),
         }
+        if pre.get("unattributed") is not None:
+            out["unattributed"] = pre["unattributed"]
+            out["violations_total"] = pre.get("total")
+        return out
 
     model = _expected_insight_model() or ""
     ex_sha = _hashlib.sha256(

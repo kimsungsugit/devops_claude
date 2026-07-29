@@ -35,10 +35,37 @@ def _norm_rel(p: str) -> str:
     return s.strip("/")
 
 
-def resolve_snapshot_file(build_root: Path, rcr_path: str) -> Optional[Path]:
+def build_snapshot_index(build_root: Path) -> Optional[Dict[str, List[Path]]]:
+    """source/ 를 **한 번만** 걸어 ``{basename(소문자): [경로]}`` 인덱스를 만든다.
+
+    같은 스냅샷에서 여러 파일을 해석할 때 `resolve_snapshot_file` 이 파일마다 `rglob` 을
+    돌면 트리를 그만큼 다시 걷는다 — 실측 프로파일에서 마커 확인 8건이 전체 시간의 58%를
+    먹었다. 인덱스를 넘기면 워크는 1회다. 스냅샷이 없으면 None(호출측이 rglob 폴백).
+    """
+    source = Path(build_root) / "source"
+    if not source.is_dir():
+        return None
+    index: Dict[str, List[Path]] = {}
+    try:
+        for cand in source.rglob("*"):
+            if not cand.is_file():
+                continue
+            if any(seg in _SOURCE_EXCLUDE_DIRS for seg in cand.parts):
+                continue
+            index.setdefault(cand.name.lower(), []).append(cand)
+    except OSError:
+        return None
+    return index
+
+
+def resolve_snapshot_file(
+    build_root: Path, rcr_path: str, *, index: Optional[Dict[str, List[Path]]] = None,
+) -> Optional[Path]:
     """RCR의 파일 경로를 빌드 source/ 스냅샷의 실제 파일로 해석.
 
     ① 정규화 suffix 조인(세그먼트 경계) ② basename 검색. 다중 매치 → None(ambiguous).
+    `index`(=`build_snapshot_index` 산출)를 주면 트리 워크 없이 후보를 뽑는다 — **판정
+    로직은 그대로**라 인덱스 유무로 결과가 갈리지 않는다(복제하면 한쪽만 고쳐진다).
     """
     source = Path(build_root) / "source"
     if not source.is_dir():
@@ -53,8 +80,11 @@ def resolve_snapshot_file(build_root: Path, rcr_path: str) -> Optional[Path]:
     has_dir = "/" in target
     matches: List[Path] = []
     suffix_matches: List[Path] = []
+    # 인덱스는 이미 파일·제외디렉토리 필터를 거쳤지만, 아래 루프의 가드를 그대로 통과시켜
+    # 두 경로가 같은 판정을 받게 한다(폴백 rglob 과 결과가 갈리면 안 된다).
+    candidates = source.rglob(basename) if index is None else index.get(basename.lower(), [])
     try:
-        for cand in source.rglob(basename):
+        for cand in candidates:
             if not cand.is_file():
                 continue
             if any(seg in _SOURCE_EXCLUDE_DIRS for seg in cand.parts):

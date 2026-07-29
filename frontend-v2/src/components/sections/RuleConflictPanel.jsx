@@ -57,11 +57,19 @@ const MEASURE_LABEL = {
 
 const ADVICE_REASON_KO = {
   no_code_evidence: '이 상충의 코드 증거(동시 위반 파일·구간 diff)를 찾지 못해 지침을 만들지 않았습니다 — 일반론 지침은 만들지 않습니다',
-  cross_module_only: '증거가 모듈 간 분석(RCMA) 집계뿐이라 파일 단위 코드를 특정할 수 없습니다',
+  cross_module_only: '이 규칙의 위반이 전부 모듈 간 분석(RCMA) 집계라 특정 파일에 귀속되지 않습니다 — 스냅샷 발췌가 원리적으로 불가능합니다(스냅샷 누락이 아닙니다)',
   conflict_not_found: '이 상충이 현재 후보 목록에 없습니다 (빌드가 바뀌었을 수 있습니다)',
   params_required: '필수 파라미터가 없습니다',
   mandatory_deviation_suggested: '생성된 지침이 예외 불가(mandatory) 규칙을 예외 후보로 지목해 폐기했습니다',
   hallucinated_identifiers: '생성된 코드가 실제 증거에 없는 식별자를 써서 폐기했습니다',
+};
+
+/** 메트릭 축을 못 본 사유 — 빈 목록을 '여유 있음'으로 읽히게 하지 않는다. */
+const METRIC_AXIS_REASON_KO = {
+  no_hmr: '이 빌드에 HIS 메트릭 리포트(HMR)가 없습니다',
+  hmr_empty: 'HIS 메트릭 리포트에서 함수를 읽지 못했습니다',
+  latest_build_not_cached: '기준 빌드가 캐시에 없습니다',
+  no_attributed_file: '이 규칙의 위반이 특정 파일에 귀속되지 않아 함수를 특정할 수 없습니다',
 };
 
 const mono = {
@@ -106,7 +114,10 @@ function RuleChip({ meta }) {
  * mount 시 probe만 한다(LLM 0회) — 캐시가 있으면 바로 보여주고, 없으면 생성 버튼.
  */
 function ConflictAdviceCard({ jobUrl, cacheRoot, conflict }) {
-  const [state, setState] = useState('probing'); // probing | ready | loading | done | error
+  // 서버가 이미 '증거가 없어 지침을 못 만든다'를 판정해 두었다 — 그러면 probe 요청조차
+  // 보내지 않는다(누르고 나서야 알게 하는 대신 미리 사유를 보여준다).
+  const blocked = conflict.advice?.available === false ? conflict.advice : null;
+  const [state, setState] = useState(blocked ? 'blocked' : 'probing');
   const [data, setData] = useState(null);
   const [error, setError] = useState('');
 
@@ -129,6 +140,7 @@ function ConflictAdviceCard({ jobUrl, cacheRoot, conflict }) {
   //   요청이 두 번 나간다(렌더는 순수해야 한다). 카드 자체가 행을 펼쳤을 때만 마운트되므로
   //   마운트가 곧 사용자의 의도이고, deps 는 조회 대상 3개면 충분하다.
   useEffect(() => {
+    if (blocked) return undefined;
     let cancelled = false;
     (async () => {
       try {
@@ -143,7 +155,7 @@ function ConflictAdviceCard({ jobUrl, cacheRoot, conflict }) {
       }
     })();
     return () => { cancelled = true; };
-  }, [jobUrl, cacheRoot, conflict.id]);
+  }, [jobUrl, cacheRoot, conflict.id, blocked]);
 
   const generate = (force) => {
     setState('loading');
@@ -160,6 +172,12 @@ function ConflictAdviceCard({ jobUrl, cacheRoot, conflict }) {
     <div style={{ borderLeft: '3px solid var(--accent)', padding: '4px 8px', marginTop: 6 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
         <span style={{ ...xs, fontWeight: 600 }}>해결 지침</span>
+        {blocked && (
+          <span style={{ ...xs, color: 'var(--text-muted)' }}>
+            {ADVICE_REASON_KO[blocked.reason] || `생성 불가 (${blocked.reason})`}
+            {blocked.unattributed != null && ` (위반 ${blocked.unattributed}/${blocked.total}건이 미귀속)`}
+          </span>
+        )}
         {state === 'probing' && <span style={{ ...xs, color: 'var(--text-muted)' }}>확인 중…</span>}
         {state === 'loading' && <span style={{ ...xs, color: 'var(--text-muted)' }}>생성 중…</span>}
         {canAct && (
@@ -246,15 +264,29 @@ function ConflictDetail({ jobUrl, cacheRoot, conflict }) {
         </div>
       )}
 
-      {(ev.metric_headroom || []).length > 0 && (
+      {/* 메트릭 축 — 빈 목록의 뜻을 서버 판정(metric_axis)으로 확정한다.
+          '봤는데 여유 있음'과 '못 봄'을 같은 화면으로 두면 후자가 안전으로 읽힌다. */}
+      {conflict.metric_axis?.applicable && (
         <div>
-          <div style={T.figTitle}>메트릭 여유 없음 — 이 수정이 밴드를 넘길 수 있는 함수</div>
-          {ev.metric_headroom.map((m) => (
-            <div key={`${m.file}-${m.function}-${m.metric}`} style={{ ...xs, color: 'var(--color-warning)' }}>
-              {m.function} · {m.label} {m.value} — 한 단계만 올라도 {m.st_id} 판정이{' '}
-              {m.verdict}({m.band}) → <b>{m.next_verdict}({m.next_band})</b>
+          <div style={T.figTitle}>메트릭 여유 — 이 수정이 밴드를 넘길 수 있는 함수</div>
+          {conflict.metric_axis.checked === false ? (
+            <div style={{ ...xs, color: 'var(--color-warning)' }}>
+              ⚠ 확인하지 못했습니다 — {METRIC_AXIS_REASON_KO[conflict.metric_axis.reason] || conflict.metric_axis.reason}.
+              이 수정은 {(conflict.metric_risk || []).join('·')} 를 밀어올릴 수 있으나 그 여유를 측정하지 못했습니다.
             </div>
-          ))}
+          ) : (ev.metric_headroom || []).length === 0 ? (
+            <div style={T.note}>
+              이 규칙 위반 파일의 함수 {conflict.metric_axis.files_checked}개 파일을 확인했고,
+              {' '}{(conflict.metric_risk || []).join('·')} 여유가 {conflict.metric_axis.threshold}단 이하인 함수는 없습니다.
+            </div>
+          ) : (
+            ev.metric_headroom.map((m) => (
+              <div key={`${m.file}-${m.function}-${m.metric}`} style={{ ...xs, color: 'var(--color-warning)' }}>
+                {m.function} · {m.label} {m.value} — <b>여유 {m.headroom}단</b>, 넘으면 {m.st_id} 판정이{' '}
+                {m.verdict}({m.band}) → <b>{m.next_verdict}({m.next_band})</b>
+              </div>
+            ))
+          )}
         </div>
       )}
 
@@ -374,6 +406,15 @@ export default function RuleConflictPanel({
             <div style={{ ...xs, color: 'var(--color-warning)' }}>
               ⚠ 이 빌드의 RCR에 규칙 설정(RCFInfo)이 없어 <b>상대 규칙이 실제로 검사되는지 확인하지 못했습니다</b> —
               아래 후보 중 일부는 그 규칙이 꺼져 있어 실제로는 걸리지 않을 수 있습니다.
+            </div>
+          )}
+          {/* 메트릭 축 부재는 RCFInfo 부재와 같은 급의 침묵이다 — 상충별 표시와 별개로
+              패널 상단에도 낸다(모든 행을 펼쳐야 알 수 있으면 안 된다). */}
+          {data.metrics && data.metrics.available === false && (
+            <div style={{ ...xs, color: 'var(--color-warning)' }}>
+              ⚠ HIS 메트릭(HMR)을 읽지 못했습니다 —{' '}
+              {METRIC_AXIS_REASON_KO[data.metrics.reason] || data.metrics.reason}.
+              복잡도·중첩을 밀어올리는 수정(단일 exit 변환, 재귀 제거 등)의 <b>여유 판정이 빠진 상태</b>입니다.
             </div>
           )}
 
@@ -496,7 +537,7 @@ export default function RuleConflictPanel({
             {' '}해당 규칙 위반이 없어 제외 {data.table?.skipped_no_violation ?? 0}건
             {(data.table?.excluded || []).length > 0 && (
               <> · 상대 규칙이 이 프로젝트 규칙셋에 없어 성립하지 않음 {data.table.excluded.length}건
-                {' ('}{data.table.excluded.map((e) => `${e.fixing.join('/')}→${e.inactive.join('/')}`).join(', ')}{')'}
+                {' ('}{data.table.excluded.map((e) => `${(e.fixing || []).join('/')}→${(e.inactive || []).join('/') || '상대 규칙 미정의'}`).join(', ')}{')'}
               </>
             )}
           </div>

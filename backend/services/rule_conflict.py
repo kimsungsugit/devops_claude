@@ -35,7 +35,12 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from backend.services.build_inventory import find_build_meta, list_cached_builds_meta
-from backend.services.his_metric_delta import METRIC_LABEL, _resolve_file_key, band_verdict, load_his_metrics_cached
+from backend.services.his_metric_delta import (
+    METRIC_LABEL,
+    _resolve_file_key,
+    band_headroom,
+    load_his_metrics_cached,
+)
 from backend.services.prqa_delta import load_rcr_details_cached
 from backend.services.prqa_rule_trend import (
     compute_rule_trend,
@@ -53,6 +58,10 @@ MAX_EVIDENCE_PER_KIND = 6
 # 자동 생성 마커 확인은 파일을 열어야 한다 — 경로로 이미 판정된 건 건너뛰고 나머지만, 상한 내에서.
 MAX_MARKER_PROBES = 20
 MARKER_HEAD_BYTES = 800
+# 밴드 여유 임계 — 이 값 이하로 남은 함수를 "여유 없음"으로 본다.
+# 왜 1이 아닌가: 단일 exit 변환·재귀 제거 같은 준수 리팩터링은 복잡도·중첩을 1단이 아니라
+# 2~5단 올린다. 1로 두면 상한에 정확히 붙은 함수만 잡혀 실측 두 프로젝트에서 발화 0이었다.
+HEADROOM_THRESHOLD = 3
 
 CONFLICT_NOTE = (
     "상충 후보는 큐레이션된 규칙 지식과 이 빌드의 관측(동시 위반·메트릭 여유)을 결합한 "
@@ -186,13 +195,15 @@ def is_generated_path(path: str) -> bool:
     return bool(_GENERATED_NAME_RE.search(s.rsplit("/", 1)[-1]))
 
 
-def _marker_in_snapshot(build_root: Optional[Path], path: str) -> bool:
+def _marker_in_snapshot(
+    build_root: Optional[Path], path: str, index: Optional[Dict[str, List[Path]]] = None,
+) -> bool:
     """스냅샷 파일 머리에 생성 마커가 있는지 — 경로로 판정 못 한 파일의 2차 확인."""
     if build_root is None:
         return False
     from backend.services.rule_fix_examples import resolve_snapshot_file
 
-    resolved = resolve_snapshot_file(Path(build_root), path)
+    resolved = resolve_snapshot_file(Path(build_root), path, index=index)
     if resolved is None:
         return False
     try:
@@ -270,11 +281,15 @@ def _cooccurrence_evidence(
 
 def _headroom_evidence(
     functions: Dict[str, Dict[str, str]], files: List[str], metrics: List[str],
+    *, threshold: int = HEADROOM_THRESHOLD,
 ) -> List[Dict[str, Any]]:
-    """T3 — metric_risk 메트릭이 **한 단계만 올라도 밴드가 나빠지는** 함수.
+    """T3 — metric_risk 메트릭의 **밴드 여유가 임계 이하**인 함수.
 
-    "복잡도가 높다"가 아니라 "여유가 없다"를 본다. 이미 Fail인 함수는 더 나빠질 밴드가
-    없어 여기 안 걸리지만, 그건 별도로 위험하므로 verdict를 실어 보낸다.
+    "복잡도가 높다"가 아니라 "여유가 없다"를 본다. 여유가 정확히 1인 함수만 잡으면
+    (구 구현) 실제 리팩터링 규모와 안 맞아 아무것도 안 걸린다 — 실측에서 이 등급은
+    두 프로젝트 어디서도 발화하지 않았다. 거리를 재고 임계로 거른다(`band_headroom`).
+    이미 최악 밴드(Fail)인 함수는 더 나빠질 곳이 없어 여기 안 잡히지만, 그건 여유
+    문제가 아니라 이미 실패한 것이라 별도 축이다.
     """
     out: List[Dict[str, Any]] = []
     if not functions or not metrics:
@@ -286,28 +301,22 @@ def _headroom_evidence(
         for key in keys:
             vals = functions.get(key) or {}
             for metric in metrics:
-                raw = vals.get(metric)
-                if raw is None:
-                    continue
-                try:
-                    value = int(str(raw).strip())
-                except (TypeError, ValueError):
-                    continue
-                cur = band_verdict(metric, value)
-                nxt = band_verdict(metric, value + 1)
-                if cur is None or nxt is None or cur.get("verdict") == nxt.get("verdict"):
+                room = band_headroom(metric, vals.get(metric))
+                if room is None or room["headroom"] > threshold:
                     continue
                 out.append({
                     "file": f,
                     "function": key.split("\x1f", 1)[1] if "\x1f" in key else key,
                     "metric": metric,
                     "label": METRIC_LABEL.get(metric, metric),
-                    "value": value,
-                    "st_id": cur.get("st_id"),
-                    "band": cur.get("band"), "verdict": cur.get("verdict"),
-                    "next_band": nxt.get("band"), "next_verdict": nxt.get("verdict"),
+                    "value": int(str(vals.get(metric)).strip()),
+                    "headroom": room["headroom"],
+                    "st_id": room["st_id"],
+                    "band": room["band"], "verdict": room["verdict"],
+                    "next_band": room["next_band"], "next_verdict": room["next_verdict"],
                 })
-    out.sort(key=lambda e: (str(e["file"]), str(e["function"]), str(e["metric"])))
+    # 여유가 작은 것부터 — 상한에 잘려도 가장 위험한 함수가 남는다.
+    out.sort(key=lambda e: (int(e["headroom"]), str(e["file"]), str(e["function"]), str(e["metric"])))
     return out[:MAX_EVIDENCE_PER_KIND]
 
 
@@ -415,9 +424,20 @@ def _generated_ambiguities(
     반환 (목록, 마커 검사를 못 한 파일 수). 두 번째 값이 0이 아니면 목록이 완전하지
     않다 — 호출측이 그 사실을 응답에 실어야 한다(절단을 침묵시키지 않는다).
     """
+    from backend.services.rule_fix_examples import build_snapshot_index
+
     out: List[Dict[str, Any]] = []
     probes = 0
     unprobed = 0
+    # 마커 확인은 파일마다 스냅샷 트리를 걷는다 — 인덱스를 1회 만들어 재사용한다
+    # (실측 프로파일에서 이 rglob 반복이 전체 시간의 58%였다). 경로로 판정되는 파일만
+    # 있으면 인덱스는 안 만든다.
+    index = None
+    if build_root is not None and any(
+        rc and not (p in pseudo or is_cross_module_key(p)) and not is_generated_path(p)
+        for p, rc in per_file.items()
+    ):
+        index = build_snapshot_index(Path(build_root))
     for path, rc in sorted(per_file.items()):
         if not rc or path in pseudo or is_cross_module_key(path):
             continue
@@ -426,7 +446,7 @@ def _generated_ambiguities(
             basis = "path"
         elif probes < MAX_MARKER_PROBES:
             probes += 1
-            if _marker_in_snapshot(build_root, path):
+            if _marker_in_snapshot(build_root, path, index):
                 basis = "marker"
         else:
             unprobed += 1  # 상한 초과 — 자동 생성일 수도 있으나 확인하지 못했다
@@ -473,8 +493,13 @@ def compute_rule_conflicts(
     # 최신 빌드의 RCR을 못 읽으면 위반 표가 통째로 비어 '상충 없음'처럼 보인다 — 그건
     # 좋은 소식이 아니라 측정 실패다. 사유를 따로 들고 나가 화면이 구분할 수 있게 한다.
     latest_rcr_reason: Optional[str] = None
+    # ⚠ 메트릭 축도 **같은 규약**이 필요하다. HMR이 없으면 headroom 증거가 빈 목록이 되는데,
+    #   그건 '여유 있음'이 아니라 '못 봄'이다. RCR에만 사유를 달고 메트릭 축을 빼놓은 게
+    #   직전 라운드의 비대칭이었다(같은 종류의 침묵을 한쪽에서만 막았다).
+    metrics_reason: Optional[str] = None
     if to_meta is None:
         latest_rcr_reason = "latest_build_not_cached"
+        metrics_reason = "latest_build_not_cached"
     else:
         loaded = load_rcr_details_cached(
             build_root, Path(str(to_meta.get("reports_dir") or ""))
@@ -487,8 +512,12 @@ def compute_rule_conflicts(
             pseudo = cross_module_keys(details)
             applied = rules_applied_in_build(details)
         hmr = load_his_metrics_cached(build_root, Path(str(to_meta.get("reports_dir") or "")))
-        if hmr is not None:
+        if hmr is None:
+            metrics_reason = "no_hmr"
+        else:
             functions = hmr.get("functions") or {}
+            if not functions:
+                metrics_reason = "hmr_empty"
 
     descriptions: Dict[str, Any] = details.get("rule_descriptions") or {}
     categories: Dict[str, str] = table.get("rule_categories") or {}
@@ -527,7 +556,8 @@ def compute_rule_conflicts(
     excluded: List[Dict[str, Any]] = []
     for entry in table.get("conflicts") or []:
         # ① 고칠 대상: 실제로 위반이 있는 규칙만. 위반 0인 규칙을 '고칠 때'를 경고할 이유가 없다.
-        fixing = [r for r in entry["when_fixing"] if _violating(r) > 0 and _active(r) is not False]
+        #    (`_active` 는 위반>0 이면 True 를 돌려주므로 여기서 다시 물을 필요가 없다.)
+        fixing = [r for r in entry["when_fixing"] if _violating(r) > 0]
         if not fixing:
             skipped_no_violation += 1
             continue
@@ -543,8 +573,11 @@ def compute_rule_conflicts(
         if not risky and entry["kind"] != "process_tension":
             # 상대 규칙이 전부 걸러졌다 — 이 프로젝트에선 상충이 성립하지 않는다(좋은 소식이지만
             # 근거를 남긴다: 규칙 설정이 바뀌면 되살아나는 후보다).
+            # 상대 규칙 자체가 테이블에 없는 항목(may_violate 빈 배열)은 다른 사유다 —
+            # '비활성이라 성립 안 함'으로 적으면 없는 규칙을 껐다고 말하는 셈이다.
             excluded.append({
-                "id": entry["id"], "reason": "counterpart_inactive",
+                "id": entry["id"],
+                "reason": "counterpart_inactive" if filtered else "no_counterpart_rule",
                 "fixing": fixing, "inactive": [f["rule"] for f in filtered],
             })
             continue
@@ -556,6 +589,46 @@ def compute_rule_conflicts(
             if any(rc.get(r, 0) > 0 for r in fixing) and not (p in pseudo or is_cross_module_key(p))
         ]
         headroom = _headroom_evidence(functions, fixing_files, entry["metric_risk"])
+        # 이 상충의 메트릭 축을 실제로 볼 수 있었나 — 빈 목록의 뜻을 여기서 확정한다.
+        #   n/a  = 이 상충은 메트릭을 밀지 않는다(볼 게 없다)
+        #   측정 = 봤고 여유가 임계보다 크다 / 여유 없는 함수를 찾았다
+        #   불가 = HMR 부재·파일 미귀속 등으로 못 봤다 ← 이걸 '여유 있음'으로 접으면 안 된다
+        if not entry["metric_risk"]:
+            metric_axis: Dict[str, Any] = {"applicable": False, "checked": False, "reason": None}
+        elif metrics_reason is not None:
+            metric_axis = {"applicable": True, "checked": False, "reason": metrics_reason}
+        elif not fixing_files:
+            metric_axis = {"applicable": True, "checked": False, "reason": "no_attributed_file"}
+        else:
+            metric_axis = {
+                "applicable": True, "checked": True, "reason": None,
+                "files_checked": len(fixing_files), "threshold": HEADROOM_THRESHOLD,
+            }
+
+        # 이 상충으로 LLM 지침을 만들 수 있는가 — 버튼을 누르기 전에 알 수 있어야 한다.
+        # 위반이 전부 파일 미귀속(RCMA)이면 스냅샷 발췌가 **원리적으로** 불가능하다:
+        # '못 찾음'과 '없음'은 사용자가 취할 조치가 다르다(전자는 재수집, 후자는 도구 한계).
+        fixing_total = fixing_cross = 0
+        for p, rc in per_file.items():
+            n = sum(rc.get(r, 0) for r in fixing)
+            if n <= 0:
+                continue
+            fixing_total += n
+            if p in pseudo or is_cross_module_key(p):
+                fixing_cross += n
+        # ⚠ 증거가 **있어도 전부 cross_module 이면** 스냅샷 발췌는 못 만든다
+        #    (`_collect_conflict_evidence` 가 pseudo 항목을 걸러낸다). 그걸 available:True 로
+        #    두면 버튼을 눌러야만 실패를 알게 되고, 그때 나오는 사유도 틀린다.
+        usable = [
+            e for e in (cooc + windows) if e.get("scope") != "cross_module"
+        ]
+        if usable:
+            advice = {"available": True, "reason": None}
+        elif fixing_total > 0 and fixing_cross == fixing_total:
+            advice = {"available": False, "reason": "cross_module_only",
+                      "unattributed": fixing_cross, "total": fixing_total}
+        else:
+            advice = {"available": False, "reason": "no_code_evidence"}
 
         # 실측 증거(관측)는 RCFInfo 유무와 무관하게 유효하다 — 같은 파일에 두 규칙 위반이
         # 함께 있다는 건 그 자체로 사실이다. 반면 증거가 하나도 없을 때의 근거는 '상대 규칙이
@@ -582,6 +655,9 @@ def compute_rule_conflicts(
             "risk": [_rule_meta(r, descriptions, categories, rule_totals) for r in risky],
             "risk_filtered": filtered,
             "evidence": {"windows": windows, "cooccurrence": cooc, "metric_headroom": headroom},
+            # 빈 evidence 의 뜻을 확정하는 두 필드 — 없으면 화면이 '안전'으로 오독한다.
+            "metric_axis": metric_axis,
+            "advice": advice,
             "mechanism": entry["mechanism"],
             "resolutions": entry["resolutions"],
             "deviation_hint": entry["deviation_hint"],
@@ -644,6 +720,14 @@ def compute_rule_conflicts(
         },
         # 최신 빌드의 위반 표가 비어 있는 사유(측정 실패 vs 진짜 0) — null이면 정상 측정.
         "latest_rcr_reason": latest_rcr_reason,
+        # 메트릭 축(HMR) 가용성 — RCR과 대칭. metric_headroom 이 비었을 때 '여유 있음'인지
+        # '못 봄'인지는 이 필드로만 구분된다.
+        "metrics": {
+            "available": metrics_reason is None,
+            "reason": metrics_reason,
+            "function_count": len(functions) or None,
+            "headroom_threshold": HEADROOM_THRESHOLD,
+        },
         "conflicts": conflicts,
         "conflicts_omitted": omitted,
         "by_rule": by_rule,
