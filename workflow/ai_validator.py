@@ -1,9 +1,22 @@
 """AI 응답 검증 레이어
 
-LLM 출력의 구조, 품질, 안전성을 검증합니다.
+⚠ **이 모듈은 프로덕션에서 호출되지 않는다**(2026-07-30 확인 — importer 는
+`tests/unit/test_ai_validator.py` 뿐). 아래 목록은 **제공하는 API** 이지 지금 돌고 있는
+검사가 아니다. "민감정보 노출 방지" 를 하고 있다고 읽으면 안 된다.
+
+실제로 도는 것은 다른 곳에 있다:
+  · 나가는 프롬프트의 시크릿 가리기 → `workflow/ai.py::sanitize_messages`
+    (정규식 추측이 아니라 **env 의 실제 값과 대조** — 여기 `_check_safety` 의
+     `password\\s*[=:]` · IP 정규식은 이 저장소에선 오탐이 심하다. 프롬프트에
+     Jenkins URL 과 C 소스가 늘 들어가 거의 매 호출 경고가 뜬다 = 소음)
+  · 응답 완결성(절단·차단) → `workflow/ai.py::note_finish_reason_value`
+  · 환각 차단 allow-list → `workflow/rule_fix_example.py::code_hallucination_check`
+  · 근거 정합 → `workflow/llm_semantic_validator.py`
+
+제공 API(미사용):
 - 구조 검증: JSON 파싱, 필수 필드 확인
 - 품질 검증: 최소 길이, 언어 일관성, 할루시네이션 감지
-- 안전성 검증: 코드 인젝션, 민감정보 노출 방지
+- 안전성 검증: 코드 인젝션, 민감정보 노출 방지 — **응답**만 보고 경고만 낸다(차단 아님)
 """
 from __future__ import annotations
 

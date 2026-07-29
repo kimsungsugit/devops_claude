@@ -21,6 +21,17 @@ from typing import Any, Dict, List, Optional
 logger = logging.getLogger(__name__)
 
 
+def _sanitize_outgoing(messages: List[Dict[str, str]]) -> List[Dict[str, str]]:
+    """나가는 프롬프트에서 **실제 설정된 시크릿 값**을 가린다(판정은 ai.py 단일 출처).
+
+    정규식 추측이 아니라 env 의 실제 값과 문자열 대조라 오탐이 원리적으로 없다.
+    설정된 시크릿이 없으면 완전 no-op.
+    """
+    from workflow.ai import sanitize_messages
+
+    return sanitize_messages(messages)
+
+
 def _completion_meta(requested_model: str, resp: Any, *, finish_raw: Any = "__from_resp__") -> Dict[str, Any]:
     """응답 완결성 + 실제로 답한 모델을 표준 키로 만든다.
 
@@ -68,6 +79,8 @@ class LLMAdapter(ABC):
         """Generate a response from the LLM.
 
         Returns dict with at least {"output": str, "usage": dict}.
+        구현체는 본문 첫 줄에서 `_sanitize_outgoing(messages)` 를 호출해야 한다
+        (이 스택은 llm_call 을 안 거치는 독립 egress — 시크릿 가리기가 여기서 따로 필요).
         """
 
     @property
@@ -91,6 +104,9 @@ class GeminiAdapter(LLMAdapter):
         max_tokens: int = 65536,
         timeout: float = 300.0,
     ) -> Dict[str, Any]:
+        # ⚠ 이 스택은 llm_call 을 안 거치는 독립 egress 다 — 프롬프트 시크릿
+        #    가리기도 여기서 따로 해야 한다(판정은 ai.py 단일 출처).
+        messages = _sanitize_outgoing(messages)
         try:
             from google import genai as genai_new
         except ImportError:
@@ -150,6 +166,9 @@ class OpenAIAdapter(LLMAdapter):
         max_tokens: int = 65536,
         timeout: float = 300.0,
     ) -> Dict[str, Any]:
+        # ⚠ 이 스택은 llm_call 을 안 거치는 독립 egress 다 — 프롬프트 시크릿
+        #    가리기도 여기서 따로 해야 한다(판정은 ai.py 단일 출처).
+        messages = _sanitize_outgoing(messages)
         try:
             import openai
         except ImportError:
@@ -197,6 +216,9 @@ class AnthropicAdapter(LLMAdapter):
         max_tokens: int = 65536,
         timeout: float = 300.0,
     ) -> Dict[str, Any]:
+        # ⚠ 이 스택은 llm_call 을 안 거치는 독립 egress 다 — 프롬프트 시크릿
+        #    가리기도 여기서 따로 해야 한다(판정은 ai.py 단일 출처).
+        messages = _sanitize_outgoing(messages)
         try:
             import anthropic
         except ImportError:

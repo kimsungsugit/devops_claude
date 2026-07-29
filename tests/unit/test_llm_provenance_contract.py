@@ -403,3 +403,100 @@ class TestAnthropicChatPathIsConsistent:
         assert 'result.get("truncated")' in src, (
             "Anthropic 경로만 잘린 답변을 완결 답변으로 돌려준다 "
             "(agent_call 경로는 절단을 재시도 사유로 다룬다)")
+
+
+# ---------------------------------------------------------------------------
+# L6 — 나가는 프롬프트의 시크릿
+# ---------------------------------------------------------------------------
+
+class TestOutgoingSecretRedaction:
+    r"""프롬프트에 실제 시크릿이 들어가면 가린다 — **정규식 추측이 아니라 값 대조**.
+
+    `workflow/ai_validator.py` 에 시크릿 탐지가 있지만 모듈 전체가 dead code 이고
+    (프로덕션 호출자 0건), 그 검사는 프롬프트가 아니라 **응답**을 보며 경고만 낸다.
+    게다가 정규식(`password\s*[=:]`·IP)이 이 저장소에선 오탐이 심하다 — 프롬프트에
+    Jenkins URL 과 C 소스가 늘 들어가 거의 매 호출 경고가 뜬다(= 소음이 되어 무의미).
+
+    그래서 env 의 **실제 값**과 문자열 대조만 한다. 오탐이 원리적으로 없다.
+    """
+
+    SECRET = "AIzaSyFAKE_TEST_KEY_1234567890abcdef"
+
+    @pytest.fixture()
+    def with_secret(self, monkeypatch):
+        monkeypatch.setenv("GOOGLE_API_KEY", self.SECRET)
+
+    def test_real_secret_is_redacted(self, with_secret):
+        from workflow.ai import redact_known_secrets
+
+        out, names = redact_known_secrets(f"키는 {self.SECRET} 이다")
+        assert self.SECRET not in out
+        assert names == ["GOOGLE_API_KEY"]
+
+    def test_lookalike_text_is_untouched(self, with_secret):
+        """대조군 — IP·`password` 같은 단어가 든 정상 프롬프트를 훼손하면 안 된다."""
+        from workflow.ai import redact_known_secrets
+
+        text = "Jenkins 192.168.110.40:7000. password = check_pw(x); 를 분석하라"
+        out, names = redact_known_secrets(text)
+        assert out == text and names == []
+
+    def test_no_secret_configured_is_noop(self, monkeypatch):
+        from workflow.ai import sanitize_messages
+
+        for n in ("GOOGLE_API_KEY", "GEMINI_API_KEY", "OPENAI_API_KEY",
+                  "ANTHROPIC_API_KEY", "OAI_API_KEY", "DEVOPS_SCM_PASSWORD",
+                  "DEVOPS_JENKINS_API_TOKEN", "JENKINS_TOKEN", "JENKINS_API_TOKEN"):
+            monkeypatch.delenv(n, raising=False)
+        msgs = [{"role": "user", "content": "x"}]
+        assert sanitize_messages(msgs) is msgs      # 사본조차 안 만든다
+
+    def test_short_value_is_not_used_as_a_needle(self, monkeypatch):
+        """짧은 값은 본문에 우연히 등장한다 — 멀쩡한 프롬프트를 훼손하면 안 된다."""
+        monkeypatch.setenv("JENKINS_TOKEN", "abc")
+        from workflow.ai import redact_known_secrets
+
+        out, names = redact_known_secrets("abcdef 를 계산한다")
+        assert out == "abcdef 를 계산한다" and names == []
+
+    def test_original_messages_are_not_mutated(self, with_secret):
+        from workflow.ai import sanitize_messages
+
+        msgs = [{"role": "user", "content": f"키 {self.SECRET}"}]
+        out = sanitize_messages(msgs)
+        assert self.SECRET in msgs[0]["content"], "원본을 훼손했다"
+        assert self.SECRET not in out[0]["content"]
+
+    def test_non_dict_entries_survive(self, with_secret):
+        from workflow.ai import sanitize_messages
+
+        assert sanitize_messages(["문자열", None])[0] == "문자열"
+
+    def test_llm_call_sanitizes_before_sending(self):
+        import inspect
+
+        from workflow import ai as ai_mod
+
+        src = inspect.getsource(ai_mod.llm_call)
+        assert "sanitize_messages(messages)" in src
+        # 절단 **뒤**여야 한다 — 앞이면 `[REDACTED:...]` 가 잘려 시크릿 일부가 남는다
+        assert src.index("_trim_messages_to_token_budget(messages") < src.index("sanitize_messages(messages)")
+
+    @pytest.mark.parametrize("adapter_name", ["GeminiAdapter", "OpenAIAdapter", "AnthropicAdapter"])
+    def test_every_adapter_sanitizes(self, adapter_name):
+        import inspect
+
+        from workflow import llm_adapters as mod
+
+        src = inspect.getsource(getattr(mod, adapter_name).generate)
+        assert "_sanitize_outgoing(messages)" in src, f"{adapter_name} 는 프롬프트를 안 가린다"
+
+
+class TestDeadValidatorIsLabelled:
+    """docstring 이 '하고 있다' 고 주장하면 리뷰어가 보호받고 있다고 읽는다."""
+
+    def test_module_states_it_is_not_wired(self):
+        from workflow import ai_validator
+
+        doc = ai_validator.__doc__ or ""
+        assert "프로덕션에서 호출되지 않는다" in doc

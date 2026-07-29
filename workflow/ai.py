@@ -528,6 +528,83 @@ def _note_effective_model(
         meta_out["model_mismatch"] = False
 
 
+# ---------------------------------------------------------------------------
+# 나가는 프롬프트에서 **실제 설정된 시크릿**만 가린다
+# ---------------------------------------------------------------------------
+#
+# `workflow/ai_validator.py` 에 시크릿 탐지(`_check_safety`)가 있지만 **모듈 전체가
+# dead code** 다(프로덕션 호출자 0건 — 테스트만 참조). 게다가 그 검사는
+#   ① 프롬프트가 아니라 **응답**을 보고
+#   ② 경고만 낼 뿐 가리지 않으며
+#   ③ 정규식이 `password\s*[=:]` · IP 주소라 이 저장소에선 오탐이 심하다
+#      (프롬프트에 Jenkins URL·C 소스가 늘 들어간다 → 거의 매 호출 경고 = 소음).
+#
+# 그래서 **정규식 추측을 안 쓴다.** env 에 실제로 설정된 값과 문자열 대조만 한다 —
+# 진짜 API 키가 프롬프트에 들어간 경우에만 걸리므로 오탐이 원리적으로 없다.
+_SECRET_ENV_NAMES: Tuple[str, ...] = (
+    "GOOGLE_API_KEY", "GEMINI_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY",
+    "OAI_API_KEY", "DEVOPS_SCM_PASSWORD", "DEVOPS_JENKINS_API_TOKEN",
+    "JENKINS_TOKEN", "JENKINS_API_TOKEN",
+)
+# 짧은 값은 본문에 우연히 등장할 수 있다(예: 6자리 토큰). 우연 일치로 멀쩡한 프롬프트를
+# 훼손하지 않도록 하한을 둔다.
+_MIN_SECRET_LEN = 12
+
+
+def _known_secret_values() -> List[Tuple[str, str]]:
+    """(env 이름, 값) — 설정돼 있고 충분히 긴 것만."""
+    out: List[Tuple[str, str]] = []
+    for name in _SECRET_ENV_NAMES:
+        v = (os.environ.get(name) or "").strip()
+        if len(v) >= _MIN_SECRET_LEN:
+            out.append((name, v))
+    return out
+
+
+def redact_known_secrets(text: str) -> Tuple[str, List[str]]:
+    """프롬프트에 실제 시크릿 값이 그대로 있으면 가린다. (가린 텍스트, 걸린 env 이름들)"""
+    if not text:
+        return text, []
+    hit: List[str] = []
+    out = text
+    for name, value in _known_secret_values():
+        if value in out:
+            out = out.replace(value, f"[REDACTED:{name}]")
+            hit.append(name)
+    return out, hit
+
+
+def sanitize_messages(messages: Any) -> Any:
+    """메시지 목록의 content 에서 실제 시크릿을 가린다(원본 불변, 사본 반환).
+
+    걸리면 **경고**한다 — 시크릿이 프롬프트에 들어갔다는 건 그 자체로 사고 신호다
+    (어느 코드 경로가 넣었는지 추적해야 한다). 값은 절대 로그에 남기지 않는다.
+    """
+    if not isinstance(messages, list):
+        return messages
+    if not _known_secret_values():
+        return messages          # 설정된 시크릿이 없으면 완전 no-op
+    out = []
+    hits: List[str] = []
+    for m in messages:
+        if not isinstance(m, dict):
+            out.append(m)
+            continue
+        c = m.get("content")
+        if isinstance(c, str):
+            red, names = redact_known_secrets(c)
+            if names:
+                hits.extend(names)
+                m = {**m, "content": red}
+        out.append(m)
+    if hits:
+        logger.warning(
+            "나가는 프롬프트에서 시크릿을 발견해 가렸다: %s — 어느 경로가 넣었는지 확인 필요",
+            ", ".join(sorted(set(hits))),
+        )
+    return out
+
+
 # `workflow/llm_adapters.py`(별도 provider 스택)가 같은 판정을 쓰도록 공개한다.
 # ⚠ 어댑터는 `ai.llm_call` 을 안 거치는 **독립 egress** 라, 여기 검사가 어댑터에 없으면
 #   같은 결함(잘린 응답을 완결본으로 취급, 모델 근거 부재)이 그 경로에만 남는다.
@@ -825,6 +902,9 @@ def llm_call(
         messages = _trim_messages_to_token_budget(messages, max_input_tokens)
         if meta_out is not None:
             meta_out["input_tokens_est"] = sum(_estimate_tokens(m.get("content", "")) for m in messages)
+    # ⚠ 절단 **뒤**에 가린다. 앞에서 가리면 `[REDACTED:...]` 자체가 절단에 잘려 나가
+    # 시크릿 일부가 남을 수 있다. 여기가 프롬프트가 네트워크로 나가기 직전 지점이다.
+    messages = sanitize_messages(messages)
 
     # -----------------------------------------------------------------------
     # 1) Google Gemini
