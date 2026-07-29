@@ -28,7 +28,7 @@
 | 계획서 주장 | 실제 (코드 대조) |
 |---|---|
 | SwUTR/SwUTCV 가 total=0 을 100% 로 처리 | **이미 fail-closed.** `swut_sutr_aggregator` 가 N/A+경고, `swut_input_adapter` 가 `passed>total` 차단, `compute_coverage_rollup` 이 degenerate MC/DC 중화 |
-| 생성기들이 제각각 LLM 에 전체 파일 전달 | 호출 11곳이 거의 전부 `workflow/ai.py` 의 `llm_call`/`agent_call` **단일 진입점** 경유 → gateway 신설이 아니라 **기존 진입점에 정책 계층**을 얹는 게 맞다. 단 redaction 코드는 실제로 0건 |
+| ~~생성기들이 제각각 LLM 에 전체 파일 전달~~ | ⚠ **이 판정은 2026-07-29 에 정정됐다.** "거의 전부 단일 진입점" 은 사실이 아니다 — 독립 egress 가 **3개**다: ①`workflow/ai.py::llm_call`(예산·재시도·stage cap 있음) ②`workflow/llm_adapters.py::*Adapter.generate`(`ai.py` 와 코드 공유 0 — `assistant_service._call_anthropic`·`scripts/generate_periodic_reports.py` 가 **의도적으로 우회**) ③`workflow/rag/embedder.py`(자체 `genai.Client`+자체 키). 즉 CORE-006 은 "정책 계층만" 이 아니라 **경로가 갈라져 있다는 사실 자체**가 문제다. redaction 은 여전히 0건 |
 | `SwCom_XX` placeholder 미감지 | `report_gen/trace_integrity.py` 가 placeholder·정규화충돌·dangling 감사 **이미 구현** |
 | UDS provenance 부족 | `description_source`/`asil_source`/`related_source`/`calls_source`/`range_source` **이미 존재** |
 
@@ -51,7 +51,7 @@
 | CORE-003 | 근거·추정·검증 결과 공통 계약 | 🟡 | provenance 필드는 이미 존재. `not_measured` 계약은 **0건** |
 | CORE-004 | 품질 DB ↔ 승인 피드백 | ⬜ | |
 | CORE-005 | Baseline Manifest 기반 fail-closed gate | 🟡 | validator 예외 fail-closed 는 됨(STS B7). **baseline mismatch 축은 미착수** |
-| CORE-006 | 공통 LLM Context Gateway | ⬜ | `ContextGateway` 0건, redaction 0건. **단 §1 대로 gateway 신설은 불필요** — `agent_call` 에 정책 계층만 |
+| CORE-006 | 공통 LLM Context Gateway | 🟡 | **응답 완결성 검증 완료**(아래 L1). redaction 은 여전히 0건. ⚠ §1 의 "이미 단일 진입점" 판정은 **틀렸다** — 아래 정정 참조 |
 
 ### 2.2 문서별
 
@@ -132,7 +132,10 @@
   windows 러너에서 직렬로 도는 만큼 느리다(coverage 병행 시 xdist 설정 주의). 별건.
 - ⬜ **CI 가 `test_impact_jobs.py` 를 `--ignore` 로 제외한다** — 로컬은 돌고 CI 는 안 도는 파일이 하나 있다.
 - ⬜ CORE-003 `not_measured` **경량** 계약 (전면 스키마 아님) — 미측정을 0/PASS 와 구분
-- ⬜ CORE-006 대체안: `agent_call` 에 경로·시크릿 redaction + 응답 ID 대조 (gateway 신설 아님)
+- ✅ **LLM 응답 완결성 + 근거 등급 정직성 3건**(L1/L2/L3) — 아래 별도 절
+- ⬜ CORE-006 잔여: `agent_call` 에 경로·시크릿 redaction(저장소 전체 0건), 모델 echo 대조
+  (`meta_out["model"]` 은 호출 **전** config 값이라 응답 출처를 대조하지 않는다),
+  그리고 위 3개 egress 경로 통합
 
 ### P2 — 결과 왕복
 
@@ -159,6 +162,22 @@
 
 ---
 
+## 5-1. LLM·근거 축 3건 — ✅ 완료 (2026-07-29)
+
+전부 "확인하지 못한 것을 확인한 것처럼 다룬다" 는 같은 부류다.
+
+| # | 결함 | 실측 재현 | 조치 |
+|---|---|---|---|
+| L1 | **잘린 응답과 완결된 응답을 구분하지 못했다** — `finish_reason` 이 저장소 전체 **0건** | `STOP`/`MAX_TOKENS`/`SAFETY`/`RECITATION` 네 경우 전부 "절단 신호 없음". 잘린 초안이 완결 산출물로 문서에 들어감 | `_note_finish_reason` 신설(Gemini 신·구 SDK + OpenAI 호환 **3경로**). `agent_call` 이 절단을 **재시도 사유**로 처리 — 소진 시 `ok=False` 라 호출자가 "생성 실패" 를 본다. ⚠ shape 를 못 읽으면 절단으로 **치지 않는다**(`finish_reason_available` 로 "확인 못 함"과 "확인했고 정상" 구분) |
+| L2 | **근거 없이 provenance 를 승격했다** | `asil d`→`D` **정규화만** 했는데 `inference`→`rule` / ASIL 이 **아예 없어** QM 기본값을 쓴 경우도 `rule`(0.75) / 출처가 `None` 이어도 `rule` | 정규화는 근거가 아니므로 출처 **불변**. 근거 없는 기본값은 `"default"` 로 명시 |
+| L3 | **모르는 출처를 조용히 `inference` 로 접었다** | 생산 어휘 `uds`·`swcom`·`rag`·`module_inherit`·`default`·`srs_default_qm` 이 전부 미지값 → 문서 유래는 0.95→0.60 **과소**, 근거 없는 기본값은 실제 추론과 **동급**. 게다가 표에 "추론" 이라 **찍혀서** 리뷰어가 그 분류를 사실로 읽는다 | 어휘를 생산값에 맞춰 확장(+등급). 미지값은 `inference` 가 아니라 `unknown`(0.30) 이고 **보고서에 목록으로 노출** |
+
+⚠ 이 프로젝트 캐시(900함수)에는 L3 드리프트 값이 **없다**(`asil_source` 900/900 `inference`).
+드리프트 값은 이후 enrichment 단계에서 붙으므로 **데이터로는 재현하지 못했다** — 코드 대조로만
+확인했다. 별건으로, 이 프로젝트는 전 함수 ASIL·Related 출처가 `inference` 라 신뢰도 **전원 D등급**이다.
+
+---
+
 ## 6. 다음 라운드 후보
 
 | # | 대상 | 이유 |
@@ -166,7 +185,8 @@
 | ~~1~~ | ~~pre-commit 900s 예산 (P1)~~ | ✅ 완료 — 위 P1 참조 |
 | 2 | `report_gen/` DOCX 라이터 대조 (P2) | XLSM 만 덮었다 — 같은 결함군이 DOCX 경로에 그대로 남아 있을 수 있다 |
 | 3 | `impact_orchestrator.py:135` (P0 잔여) | 부풀린 커버리지가 영향도 리포트로 새어나간다 |
-| 4 | UTCV-001 원시 분자·분모 (P2) | 계획서 항목 중 실측 피해가 가장 클 후보 |
+| 4 | LLM redaction + 모델 echo 대조 (CORE-006 잔여) | 프롬프트 redaction 저장소 전체 0건. 응답 전문이 `agent_*.md` 에 무삭제로 디스크에 남는다(HTTP 에러 본문 포함). `workflow/ai_validator.py` 의 시크릿 검사는 **모듈 전체가 dead code**(프로덕션 호출자 0) |
+| 5 | 3개 egress 경로 통합 | `llm_adapters`·`rag.embedder` 가 `llm_call` 의 예산·재시도·stage cap 을 전부 우회 |
 
 ---
 

@@ -1273,32 +1273,63 @@ def generate_asil_related_confidence_report(
                         else:
                             info["related_source"] = "reference"
 
+    # ⚠ 2026-07-29 — 이 어휘와 **실제 생산 어휘가 벌어져 있었다.** 코드가 실제로 넣는
+    # 값 중 `uds`·`swcom`·`rag`·`module_inherit`·`default`·`srs_default_qm`·`call_graph`
+    # 는 전부 미지값이라 조용히 `inference`(0.60)로 접혔다. 양방향으로 틀린다:
+    #   - 문서 유래(`uds`/`swcom`)가 0.95 여야 하는데 0.60 (과소)
+    #   - 근거 없는 기본값(`default`/`srs_default_qm`)이 실제 추론과 **동급** (과대)
+    # 게다가 표에는 "추론" 이라고 **찍혀서** 리뷰어가 그 분류를 사실로 읽는다.
     src_labels = {
         "comment": "주석",
         "sds": "SDS",
         "srs": "SRS",
+        "uds": "UDS",              # requirements.py:1436, impact_orchestrator.py:369
+        "swcom": "SDS component",  # impact_orchestrator.py:608
         "reference": "레퍼런스",
-        "rule": "룰",
         "ai": "AI",
+        "rag": "지식베이스",         # docx_builder.py:2124
+        "call_graph": "콜그래프",    # docx_builder.py:2268 (calls_source)
+        "rule": "룰",
+        "module_inherit": "모듈 상속",  # docx_builder.py:1897
         "inference": "추론",
+        "default": "기본값(근거 없음)",  # docx_builder.py:1900, helpers/uds.py
+        "unknown": "미상(분류 불가)",
     }
     src_score = {
         "comment": 1.00,
         "sds": 0.95,
         "srs": 0.95,
+        "uds": 0.95,
+        "swcom": 0.95,
         "reference": 0.90,
         "ai": 0.85,
+        "rag": 0.85,
+        "call_graph": 0.80,
         "rule": 0.75,
+        "module_inherit": 0.70,   # 모듈에서 물려받음 — 명시 규칙보다 약하다
         "inference": 0.60,
+        # 근거가 **없어서** 쓴 값. 추론보다 낮아야 한다 — 추론은 최소한 무언가를 보고 한 것이다.
+        "default": 0.30,
+        # 어휘에 없는 값. 조용히 '추론' 으로 접지 않는다 — 모른다는 사실 자체가 정보다.
+        "unknown": 0.30,
     }
+    _src_aliases = {
+        "sds_match": "sds",
+        "hsis": "sds",
+        "srs_default_qm": "default",   # SRS 에 없어서 QM 기본 — 기본값이다
+    }
+    # 미지값을 모아 보고서에 노출한다(어휘 드리프트를 조용히 흡수하지 않는다).
+    unknown_src_values: Dict[str, int] = {}
 
     def _norm_src(v: Any) -> str:
         s = str(v or "").strip().lower()
-        if s == "sds_match":
-            return "sds"
-        if s == "hsis":
-            return "sds"
-        return s if s in src_labels else "inference"
+        if s in _src_aliases:
+            return _src_aliases[s]
+        if s in src_labels:
+            return s
+        if s:
+            unknown_src_values[s] = unknown_src_values.get(s, 0) + 1
+        return "unknown"
 
     def _score_for(info: Dict[str, Any]) -> float:
         ds = _norm_src(info.get("description_source"))
@@ -1460,7 +1491,17 @@ def generate_asil_related_confidence_report(
     lines.append(f"- Total functions: `{total}`")
     lines.append(f"- Overall confidence score: `{avg_score:.3f}` (grade: `{_overall_grade(avg_score)}`)")
     lines.append(f"- Low confidence threshold: `< 0.80`")
-    lines.append("- Source categories: `SDS / SRS / 주석 / 추론` (레퍼런스/룰 포함)")
+    lines.append("- Source categories: `SDS / SRS / UDS / 주석 / 지식베이스 / 룰 / 추론 / 기본값`")
+    # ⚠ 어휘에 없는 출처값을 조용히 '추론' 으로 접지 않는다. 접으면 리뷰어가 표에 찍힌
+    # "추론" 을 사실로 읽는다 — 실제로는 분류를 못 한 것이다. 여기서 명시한다.
+    if unknown_src_values:
+        _uk = ", ".join(f"`{k}`×{v}" for k, v in sorted(unknown_src_values.items(),
+                                                        key=lambda x: (-x[1], x[0]))[:20])
+        lines.append(
+            f"- ⚠ **분류 불가 출처값 {len(unknown_src_values)}종**: {_uk} — "
+            "어휘에 없어 `미상(0.30)` 으로 계산했다. 생산 지점이 새 출처를 추가했다면 "
+            "`report_gen/validation.py` 의 `src_labels`/`src_score` 에 등급과 함께 등록할 것."
+        )
     lines.append("")
     lines.extend(_dump_counter("Description Source", desc_count))
     lines.extend(_dump_counter("ASIL Source", asil_count))

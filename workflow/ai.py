@@ -376,6 +376,79 @@ def _agent_log(log_dir: Path, role: str, content: str) -> None:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# 응답 완결성 — 잘린 응답을 완결된 응답과 구분한다
+# ---------------------------------------------------------------------------
+#
+# 회귀 대상(2026-07-29): `finish_reason` 이 저장소 전체에 **0건**이었다. 즉 토큰 상한
+# 절단(MAX_TOKENS)·안전필터 차단(SAFETY)·인용 차단(RECITATION)이 정상 완료(STOP)와
+# 구분되지 않았다. 실측 재현:
+#
+#     시나리오          finish_reason   추출 결과                      절단 신호
+#     완전한 응답        STOP           함수는 ... CRC 를 계산한다.      없음
+#     토큰 상한에 잘림    MAX_TOKENS     함수는 ... CRC 를              없음
+#     안전필터 차단      SAFETY         함수는                        없음
+#
+# 호출자는 넷을 전혀 구분할 수 없었고, **잘린 초안이 완결된 산출물로 문서에 들어갔다.**
+#
+# 정상 종료로 인정하는 값. provider/SDK 마다 enum·문자열·정수가 섞여 오므로
+# 마지막 dotted segment 만 취해 대문자로 정규화한다.
+_OK_FINISH_REASONS = frozenset({"STOP", "FINISH_REASON_STOP", "END_TURN", "COMPLETE", "1"})
+
+
+def _norm_finish_reason(v: Any) -> str:
+    """`FinishReason.MAX_TOKENS` / `"MAX_TOKENS"` / `2` 를 하나로 정규화."""
+    if v is None:
+        return ""
+    s = str(v).strip()
+    if "." in s:
+        s = s.rsplit(".", 1)[-1]
+    return s.upper()
+
+
+def _extract_finish_reason(resp: Any) -> str:
+    """Gemini 응답에서 finish_reason 을 뽑는다. 못 뽑으면 빈 문자열(=판정 보류)."""
+    try:
+        candidates = getattr(resp, "candidates", None) or []
+        for c in candidates:
+            fr = getattr(c, "finish_reason", None)
+            if fr is None and isinstance(c, dict):
+                fr = c.get("finish_reason") or c.get("finishReason")
+            norm = _norm_finish_reason(fr)
+            if norm:
+                return norm
+    except Exception as exc:  # noqa: BLE001 - SDK shape 는 버전마다 다르다
+        _logger_finish_debug(exc)
+    return ""
+
+
+def _logger_finish_debug(exc: Exception) -> None:
+    logger.debug("finish_reason 추출 실패(응답 shape 불일치) — 절단 판정 보류: %s", exc)
+
+
+def _note_finish_reason(meta_out: Optional[Dict[str, Any]], resp: Any,
+                        log_dir: Optional[Path]) -> None:
+    """finish_reason 을 meta 에 싣고, 비정상이면 경고를 남긴다.
+
+    ⚠ 빈 문자열(못 뽑음)은 **절단으로 치지 않는다** — SDK shape 를 모른다고 정상 응답을
+    버리면 그게 더 나쁘다. 대신 `finish_reason_available=False` 로 남겨 "확인 못 함" 과
+    "확인했고 정상" 을 구분한다.
+    """
+    fr = _extract_finish_reason(resp)
+    if meta_out is None:
+        if fr and fr not in _OK_FINISH_REASONS and log_dir:
+            _agent_log(log_dir, "warning", f"응답이 비정상 종료: finish_reason={fr}")
+        return
+    meta_out["finish_reason"] = fr
+    meta_out["finish_reason_available"] = bool(fr)
+    truncated = bool(fr) and fr not in _OK_FINISH_REASONS
+    meta_out["truncated"] = truncated
+    if truncated:
+        logger.warning("LLM 응답이 비정상 종료됐다(finish_reason=%s) — 잘린 초안일 수 있다", fr)
+        if log_dir:
+            _agent_log(log_dir, "warning", f"응답이 비정상 종료: finish_reason={fr}")
+
+
 def _extract_gemini_text(resp: Any) -> Optional[str]:
     """Gemini SDK 응답 객체에서 텍스트만 안전 추출, repr 전체 덤프 방지용"""
     try:
@@ -793,6 +866,7 @@ def llm_call(
                     text, resp = _try_gemini(str(model), int(num_predict))
                     if log_dir:
                         _agent_log(log_dir, "assistant", text or "")
+                    _note_finish_reason(meta_out, resp, log_dir)
                     if meta_out is not None:
                         meta_out["sdk"] = "google-genai"
                         meta_out["ok"] = True
@@ -893,6 +967,7 @@ def llm_call(
                     text = _extract_gemini_text(response)
                     if log_dir:
                         _agent_log(log_dir, "assistant", text or "")
+                    _note_finish_reason(meta_out, response, log_dir)
                     if meta_out is not None:
                         meta_out["sdk"] = "google-generativeai"
                         meta_out["ok"] = True
@@ -996,8 +1071,18 @@ def llm_call(
             content = data["choices"][0]["message"]["content"]
             if log_dir:
                 _agent_log(log_dir, "assistant", content)
+            # OpenAI 호환 응답은 finish_reason 이 choices[0] 에 있다(Gemini 와 shape 가 다르다).
+            # "length" = 토큰 상한 절단, "content_filter" = 차단 — 둘 다 완결된 응답이 아니다.
+            _oa_fr = _norm_finish_reason((data["choices"][0] or {}).get("finish_reason"))
             if meta_out is not None:
                 meta_out["ok"] = True
+                meta_out["finish_reason"] = _oa_fr
+                meta_out["finish_reason_available"] = bool(_oa_fr)
+                meta_out["truncated"] = bool(_oa_fr) and _oa_fr not in _OK_FINISH_REASONS
+            if _oa_fr and _oa_fr not in _OK_FINISH_REASONS:
+                logger.warning("LLM 응답이 비정상 종료됐다(finish_reason=%s) — 잘린 초안일 수 있다", _oa_fr)
+                if log_dir:
+                    _agent_log(log_dir, "warning", f"응답이 비정상 종료: finish_reason={_oa_fr}")
             return content
         except Exception as e:
             last_err = str(e)
@@ -1261,6 +1346,13 @@ def agent_call(
         reason = "" if valid else "no_reply"
         if not valid and isinstance(llm_meta, dict) and llm_meta.get("error"):
             reason = f"llm_error:{llm_meta.get('error')}"
+        # ⚠ 잘린 응답(MAX_TOKENS / SAFETY / RECITATION / length …)을 정상 출력으로 받으면
+        # **잘린 초안이 완결된 산출물로 문서에 들어간다**. 기존 재시도 기계를 그대로 쓴다 —
+        # validator 실패와 같은 등급의 재시도 사유다. 재시도를 다 써도 계속 잘리면
+        # ok=False 로 끝나므로 호출자가 "생성 실패" 를 본다(잘린 초안을 받는 것보다 낫다).
+        if valid and isinstance(llm_meta, dict) and llm_meta.get("truncated"):
+            valid = False
+            reason = f"truncated:{llm_meta.get('finish_reason') or 'unknown'}"
         if valid and validator:
             try:
                 vres = validator(reply)

@@ -338,12 +338,16 @@ def _enrich_function_quality_fields(uds_payload: Dict[str, Any]) -> None:
         asil_norm = _normalize_asil_simple(info.get("asil"))
         if asil_norm:
             info["asil"] = asil_norm
-            if _normalize_field_source(info.get("asil_source")) == "inference":
-                info["asil_source"] = "rule"
+            # ⚠ 예전엔 여기서 `asil_source` 를 inference → rule 로 **승격**했다.
+            # 한 일은 `"asil d"` → `"D"` 정규화뿐인데 근거 등급이 0.60 → 0.75 로 올랐다.
+            # **정규화는 새 근거가 아니다.** 출처는 원래 값을 그대로 둔다.
         else:
-            # Use QM as conservative default when no explicit ASIL mapping exists.
+            # 명시적 ASIL 매핑이 없어 QM 으로 보수적 기본값을 쓴다.
+            # ⚠ 예전엔 이걸 `"rule"`(0.75)로 적었다 — 근거가 **없어서** 기본값을 쓴 건데
+            # 실제 규칙 유도보다 높은 등급을 받았다. 기본값은 기본값이라고 적는다.
+            # (`report_gen/validation.py` 의 출처 어휘가 `default` 를 최저 등급으로 안다)
             info["asil"] = "QM"
-            info["asil_source"] = "rule"
+            info["asil_source"] = "default"
         if _is_blank_value(info.get("related") or info.get("related_id") or info.get("related_ids")):
             inferred_related = _infer_related_id_simple(info)
             if inferred_related:
