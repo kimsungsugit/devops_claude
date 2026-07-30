@@ -1725,9 +1725,17 @@ def _uds_generate_from_paths(
     if not ok_swcom:
         swcom_context_path = None
     swcom_diff_path = out_path.with_suffix(".swcom_diff.md")
-    ref_docx = Path(getattr(config, "UDS_REF_SUDS_PATH", ""))
+    # ⚠ 예전엔 지정 경로가 없으면 저장소 `docs/` 의 HDPDM01 SUDS 로 **조용히 대체**했다.
+    #   운영자가 자기 프로젝트 문서를 지정했는데 경로가 틀리면, 아무 말 없이 **다른
+    #   프로젝트와의 diff** 를 산출물로 내놓게 된다. 같은 패턴을 이 저장소가
+    #   `backend/routers/local.py::_pick_doc_path` 에서 이미 고쳤다 — 지정이 실패하면
+    #   대체하지 말고 건너뛴다.
+    ref_docx = Path(str(getattr(config, "UDS_REF_SUDS_PATH", "") or ""))
     if not ref_docx.exists():
-        ref_docx = repo_root / "docs" / "(HDPDM01_SUDS) Software Unit Design Specification_v1.07_240213.docx"
+        _logger.warning(
+            "참조 SUDS 를 찾지 못해 SwCom diff 리포트를 건너뛴다(%s) — 저장소 docs/ 의 "
+            "다른 프로젝트 문서로 대체하지 않는다", ref_docx,
+        )
     if ref_docx.exists():
         ok_swcom_diff, _ = _run_report_with_timeout(
             lambda: generate_swcom_context_diff_report(str(ref_docx), str(out_path), str(swcom_diff_path)),

@@ -1606,6 +1606,75 @@ def _add_blank_table(
     return table
 
 
+# 참조 SUDS 신원 판정용 — 문서 종류/일반 명사는 프로젝트 식별자가 아니다.
+_REF_TOKEN_STOPWORDS = frozenset({
+    "SUDS", "SWUDS", "SRS", "SWRS", "SDS", "SWSA", "UDS", "STS", "SUTS", "SITS",
+    "SYRS", "SYTS", "HSIS", "SPEC", "SPECIFICATION", "SOFTWARE", "UNIT", "DESIGN",
+    "DOCUMENT", "REPORT", "FINAL", "DRAFT", "TEMPLATE", "TOKENIZED", "LOCAL",
+    # `reference.docx` 같은 범용 파일명이 `REFERENCE` 를 프로젝트 ID 로 만들면,
+    # 신원 판정이 "확인 불가" 가 아니라 "다른 프로젝트" 로 잘못 확정된다(테스트가 잡았다).
+    "REFERENCE", "REVISION", "VERSION", "COMMON", "SAMPLE", "OUTPUT",
+})
+# ISO 26262 등급 어휘. 참조 문서 파싱이 어긋나면 프로토타입 문자열 같은 게 ASIL 로 들어온다
+# — 실측: 참조 SUDS 416 블록 중 1건이 `asil='void s_Init_SystemManagementFunc( void )'`.
+_VALID_ASIL = frozenset({"A", "B", "C", "D", "QM"})
+
+
+def _project_tokens(text: Any) -> Set[str]:
+    """문자열에서 프로젝트 식별자 후보 토큰을 뽑는다(대문자 영숫자 5자 이상)."""
+    out: Set[str] = set()
+    for tok in re.split(r"[^A-Za-z0-9]+", str(text or "")):
+        t = tok.strip().upper()
+        if len(t) >= 5 and t not in _REF_TOKEN_STOPWORDS and not t.isdigit():
+            out.add(t)
+    return out
+
+
+def _reference_identity_verdict(uds_payload: Any, ref_path: Path) -> Dict[str, Any]:
+    """참조 SUDS 가 **이 프로젝트의** 문서인지 판정한다.
+
+    ⚠ 왜 필요한가 — 실측(2026-07-31):
+    `config.UDS_REF_SUDS_PATH` 의 기본값은 저장소 `docs/` 의 **HDPDM01 SUDS**(40.7MB)다.
+    그런데 생성 시 이 문서를 무조건 읽어 **함수명만으로** 매칭해 대상 프로젝트의 함수에
+    `asil`·`related`·`description`·`logic` 등을 덧씌웠다. 참조 문서는 416 블록 전부가
+    `asil` 을 갖고 있고(**A 280 / QM 135**), 다른 프로젝트에서 이름이 겹치기만 하면
+    그 등급이 들어간다. ASIL 하향은 ISO 26262 에서 가장 위험한 방향의 오류다.
+
+    같은 패턴을 이 저장소가 이미 두 번 고쳤다 — `backend/routers/local.py::_pick_doc_path`
+    ("지정 문서를 못 읽으면 저장소 docs/ 로 바꿔치기") 와 SUTS ASIL 이 HDPDM01 로 채워지던
+    건. 여기가 남은 사이트다.
+
+    Returns:
+        `same_project` — `True`(확인됨) / `False`(다름) / `None`(판정 불가).
+        판정 불가는 **확인됨이 아니다** — 안전 필드는 fail-closed 로 막는다.
+    """
+    ref_tokens = _project_tokens(ref_path.stem)
+    payload_tokens: Set[str] = set()
+    if isinstance(uds_payload, dict):
+        for key in ("project_name", "module_name"):
+            payload_tokens |= _project_tokens(uds_payload.get(key))
+        for p in (uds_payload.get("source_docs") or [])[:50]:
+            payload_tokens |= _project_tokens(Path(str(p)).stem)
+        summary = uds_payload.get("summary")
+        if isinstance(summary, dict):
+            payload_tokens |= _project_tokens(summary.get("project"))
+
+    if not ref_tokens:
+        return {"same_project": None, "reason": "ref_no_token",
+                "ref_tokens": sorted(ref_tokens), "payload_tokens": sorted(payload_tokens)}
+    if not payload_tokens:
+        return {"same_project": None, "reason": "payload_no_token",
+                "ref_tokens": sorted(ref_tokens), "payload_tokens": sorted(payload_tokens)}
+    shared = ref_tokens & payload_tokens
+    return {
+        "same_project": bool(shared),
+        "reason": "token_match" if shared else "token_mismatch",
+        "ref_tokens": sorted(ref_tokens),
+        "payload_tokens": sorted(payload_tokens),
+        "shared_tokens": sorted(shared),
+    }
+
+
 def gen_stats_path(output_path: str) -> Path:
     """생성 통계 sidecar 경로 — `<out>.gen_stats.json`.
 
@@ -2175,7 +2244,24 @@ def generate_uds_docx(
     ref_related_by_name: Dict[str, str] = {}
     from config import UDS_REF_SUDS_PATH
     ref_doc_path = Path(UDS_REF_SUDS_PATH)
+    _ref_identity = _reference_identity_verdict(uds_payload, ref_doc_path)
+    _ref_safety_ok = _ref_identity["same_project"] is True
+    _ref_stats: Dict[str, Any] = {
+        "identity": _ref_identity,
+        "safety_fields_applied": 0,
+        "safety_fields_blocked": 0,
+        "descriptive_fields_applied": 0,
+        "invalid_asil_rejected": 0,
+    }
     if ref_doc_path.exists():
+        if not _ref_safety_ok:
+            # 침묵 금지 — 이 문서는 **다른 프로젝트의 설계서**일 수 있다.
+            _logger.warning(
+                "참조 SUDS 의 프로젝트 신원을 확인하지 못했다(%s: ref=%s vs payload=%s) — "
+                "ASIL·Related 는 적용하지 않는다. 서술 필드만 보강한다. "
+                "이 프로젝트의 SUDS 를 쓰려면 UDS_REF_SUDS_PATH 를 지정할 것.",
+                _ref_identity["reason"], _ref_identity["ref_tokens"], _ref_identity["payload_tokens"],
+            )
         try:
             ref_doc = docx.Document(str(ref_doc_path))
             ref_map = _extract_function_info_from_docx(ref_doc)
@@ -2195,7 +2281,8 @@ def generate_uds_docx(
                     continue
                 bname = _normalize_symbol_name(str(block.get("name") or "")).lower()
                 brel = str(block.get("related") or "").strip()
-                if bname and brel:
+                # ref_related_by_name 도 안전축(Related ID)이다 — 신원 미확인이면 채우지 않는다.
+                if bname and brel and _ref_safety_ok:
                     ref_related_by_name[bname] = brel
                 for key in ["description", "asil", "related", "precondition", "logic"]:
                     cur = str(target.get(key) or "").strip()
@@ -2206,13 +2293,34 @@ def generate_uds_docx(
                         if (not cur) or cur.startswith("Auto-generated from"):
                             target[key] = incoming
                             target["description_source"] = "reference"
+                            _ref_stats["descriptive_fields_applied"] += 1
                     elif key in {"asil", "related"}:
-                        if (not cur) or cur in {"TBD", "N/A", "-"}:
-                            target[key] = incoming
-                            target[f"{key}_source"] = "reference"
+                        # ── 안전·추적성 축 ──
+                        # ASIL 과 Related ID 는 ISO 26262 판정의 권위 필드다. 다른 프로젝트
+                        # 문서에서 이름만 겹쳐 흘러들면 남의 요구 ID 추적이나 등급 오염이
+                        # 된다. 신원이 확인된 경우에만 적용한다.
+                        #
+                        # ⚠ 판정 **순서**가 중요하다. 예전 초안은 신원 게이트를 맨 앞에 뒀는데,
+                        #   그러면 어차피 적용되지 않았을 시도까지 "차단" 으로 세어 막은 양을
+                        #   부풀린다. 실측: `asil` 은 이 지점 이전에 이미 `QM`(source=default)
+                        #   으로 채워져 있어 애초에 적용 대상이 아니었는데도 차단 1건으로
+                        #   집계됐다. 적용 자격 → 값 유효성 → 신원 순으로 본다.
+                        if not ((not cur) or cur in {"TBD", "N/A", "-"}):
+                            continue
+                        if key == "asil" and incoming.upper() not in _VALID_ASIL:
+                            # 참조 파싱이 어긋나 프로토타입 문자열 등이 ASIL 로 들어오는 경우.
+                            _ref_stats["invalid_asil_rejected"] += 1
+                            continue
+                        if not _ref_safety_ok:
+                            _ref_stats["safety_fields_blocked"] += 1
+                            continue
+                        target[key] = incoming
+                        target[f"{key}_source"] = "reference"
+                        _ref_stats["safety_fields_applied"] += 1
                     else:
                         if (not cur) or (key == "precondition" and cur.upper() in {"N/A", "TBD", "-"}):
                             target[key] = incoming
+                            _ref_stats["descriptive_fields_applied"] += 1
                 if block.get("inputs") and not target.get("inputs"):
                     target["inputs"] = block.get("inputs")
                 if block.get("outputs") and not target.get("outputs"):
@@ -3403,7 +3511,15 @@ def generate_uds_docx(
                 round(100.0 * len(_matched_fn_names) / len(_payload_fn_names), 2)
                 if _payload_fn_names else None      # 분모 0 = 미측정(0% 아님)
             ),
+            # 참조 SUDS 를 얼마나·왜 적용했는지. 로그에만 남기면 산출물 검토자가 못 본다.
+            "reference_suds": _ref_stats,
         }
+        if _ref_stats["safety_fields_blocked"]:
+            _logger.warning(
+                "참조 SUDS 의 ASIL·Related %d건을 적용하지 않았다 — 프로젝트 신원 미확인(%s). "
+                "이 프로젝트의 SUDS 를 UDS_REF_SUDS_PATH 로 지정하면 적용된다.",
+                _ref_stats["safety_fields_blocked"], _ref_stats["identity"]["reason"],
+            )
         if _unmatched or _empty_headings or _boilerplate_headings:
             _logger.warning(
                 "UDS DOCX 생성 충실도: payload 함수 %d개 중 %d개 반영(%.1f%%). "
