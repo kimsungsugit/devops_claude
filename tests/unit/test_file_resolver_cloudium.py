@@ -639,8 +639,19 @@ def test_gate_cache_ttl_is_one_second():
     assert file_resolver._GATE_CACHE_TTL == 1.0
 
 
-def test_invalidate_gate_cache_resets_snapshot(mock_worker):
-    """invalidate_gate_cache 호출 시 다음 is_gate_running이 캐시 무시하고 재검사 (IPC ping)."""
+def test_invalidate_gate_cache_resets_snapshot(mock_worker, monkeypatch):
+    """invalidate_gate_cache 호출 시 다음 is_gate_running이 캐시 무시하고 재검사 (IPC ping).
+
+    ⚠ TTL 을 크게 고정한다. 프로덕션 `_GATE_CACHE_TTL = 1.0`(초)인데 첫 호출은 **실제 TCP
+    왕복**이라, 전체 스위트를 xdist 로 돌릴 때 그 왕복이 1초를 넘기면 두 번째 호출 시점에
+    캐시가 이미 만료돼 ping 이 한 번 더 가고 아래 단정이 깨진다. 실측: 이 파일은 격리 시
+    4/4 통과인데 전체 스위트에서 두 개 테스트가 서로 다른 라운드에 실패해 **커밋 게이트를
+    반복 차단**했다(게이트가 불안정하면 `--no-verify` 로 유도된다).
+
+    이 테스트가 검증할 대상은 **무효화 로직**이지 벽시계가 아니다. TTL 만료 자체는 아래
+    `test_gate_cache_expires_after_ttl` 이 시계를 통제해 따로 검증한다.
+    """
+    monkeypatch.setattr(file_resolver, "_GATE_CACHE_TTL", 3600.0)
     calls = {"n": 0}
     real_handler = mock_worker.handlers["ping"]
     def _counted_ping(args):
@@ -657,6 +668,34 @@ def test_invalidate_gate_cache_resets_snapshot(mock_worker):
     file_resolver.invalidate_gate_cache()
     file_resolver.is_gate_running(host=mock_worker.host, port=mock_worker.port)
     assert calls["n"] == n_after_first + 1
+
+
+def test_gate_cache_expires_after_ttl(mock_worker, monkeypatch):
+    """TTL 만료 후에는 캐시를 안 쓰고 다시 ping 한다.
+
+    기존엔 `_GATE_CACHE_TTL == 1.0` 이라는 **값만** 단정하고 만료 **동작**은 어디서도
+    검증하지 않았다. 시계는 `time.monotonic` 을 대체해 통제한다 — 실제로 기다리면 그게
+    다시 벽시계 의존이 된다.
+
+    뮤테이션: `now - cached_ts < _GATE_CACHE_TTL` 을 무조건 True 로 바꾸면 ping 이 늘지 않아 실패.
+    """
+    monkeypatch.setattr(file_resolver, "_GATE_CACHE_TTL", 1.0)
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(file_resolver.time, "monotonic", lambda: clock["t"])
+    calls = {"n": 0}
+    real_handler = mock_worker.handlers["ping"]
+    mock_worker.handlers["ping"] = lambda args: (calls.__setitem__("n", calls["n"] + 1),
+                                                 real_handler(args))[1]
+
+    file_resolver.invalidate_gate_cache()
+    file_resolver.is_gate_running(host=mock_worker.host, port=mock_worker.port)
+    first = calls["n"]
+    clock["t"] += 0.5                      # TTL 안 — 캐시 hit
+    file_resolver.is_gate_running(host=mock_worker.host, port=mock_worker.port)
+    assert calls["n"] == first, "TTL 이내인데 재조회했다"
+    clock["t"] += 1.0                      # TTL 초과 — 재조회
+    file_resolver.is_gate_running(host=mock_worker.host, port=mock_worker.port)
+    assert calls["n"] == first + 1, "TTL 을 넘겼는데 stale 캐시를 썼다"
 
 
 # ---------------------------------------------------------------------------

@@ -86,6 +86,28 @@ repo_root = Path(__file__).resolve().parents[2]
 
 
 
+def _read_gen_stats(out_path: Path) -> Dict[str, Any]:
+    """DOCX 라이터가 남긴 생성 통계 sidecar 를 읽는다.
+
+    ⚠ **왜 파일 경유인가**: 문서 생성은 `subprocess.run([python, "-c", inline, ...])` 로
+    돌고 반환값을 버린다. 그래서 in-process 반환/`stats_out` 은 여기 닿지 않는다
+    (`report_gen/docx_builder.py::gen_stats_path` 참조).
+
+    부재/파싱 실패는 `{}` 로 낸다 — 호출자가 그걸 **미측정으로 명시**해야 하고
+    "문제 없음" 으로 접어선 안 된다.
+    """
+    try:
+        from report_gen.docx_builder import gen_stats_path
+        p = gen_stats_path(str(out_path))
+        if not p.exists():
+            return {}
+        data = json.loads(p.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception as e:   # noqa: BLE001 - 통계 부재는 생성 실패가 아니다
+        _logger.warning("생성 통계 sidecar 읽기 실패(%s) — 미측정으로 기록한다", e)
+        return {}
+
+
 def _compute_quick_quality_gate(uds_payload: Dict[str, Any]) -> Dict[str, Any]:
     by_name = uds_payload.get("function_details_by_name")
     rows: List[Dict[str, Any]] = []
@@ -1207,18 +1229,39 @@ def _generate_docx_with_retry(
                 check=False,
             )
             if run.returncode == 0 and out_path.exists() and out_path.stat().st_size > 0:
+                # ⚠ 위 판정은 "파일이 있고 0바이트가 아님" 뿐이다. 이 라이터는 **템플릿
+                # 주도**라 payload 함수가 템플릿에 없으면 문서에 안 들어가는데, 그래도
+                # returncode 0 + 파일 존재는 성립한다. 실측(HDPDM01): payload 432개 중
+                # 95개(22.0%)가 미반영이고 빈 heading 74개인 문서가 "success" 였다.
+                # 성공/실패 판정은 **바꾸지 않는다**(템플릿이 의도된 부분집합일 수 있어
+                # 뒤집으면 대량 오탐) — 대신 수치를 checkpoint 에 실어 침묵을 없앤다.
+                gen_stats = _read_gen_stats(out_path)
+                record: Dict[str, Any] = {
+                    "stage": stage,
+                    "status": "success",
+                    "ended_at": datetime.now().isoformat(timespec="seconds"),
+                    "stdout_tail": (run.stdout or "")[-1000:],
+                }
+                if gen_stats:
+                    record["gen_stats"] = gen_stats
+                    unmatched = gen_stats.get("unmatched_payload_count")
+                    empty = gen_stats.get("empty_heading_count")
+                    if (isinstance(unmatched, int) and unmatched > 0) or (
+                        isinstance(empty, int) and empty > 0
+                    ):
+                        total = gen_stats.get("payload_functions") or 0
+                        record["warnings"] = [
+                            f"payload 함수 {total}개 중 {gen_stats.get('matched_functions')}개 반영"
+                            f"(반영률 {gen_stats.get('match_pct')}%). 템플릿에 대응 heading 이 없어"
+                            f" 문서에 반영되지 않은 함수 {unmatched}개, 내용 없이 남은 heading"
+                            f" {empty}개(삭제 표기 {gen_stats.get('deleted_heading_count')}개는 제외)."
+                        ]
+                        _logger.warning("UDS DOCX 생성 충실도: %s", record["warnings"][0])
+                else:
+                    # sidecar 부재 = 미측정. "문제 없음" 과 구분해 명시한다.
+                    record["gen_stats_missing"] = True
                 checkpoint.write_text(
-                    json.dumps(
-                        {
-                            "stage": stage,
-                            "status": "success",
-                            "ended_at": datetime.now().isoformat(timespec="seconds"),
-                            "stdout_tail": (run.stdout or "")[-1000:],
-                        },
-                        ensure_ascii=False,
-                        indent=2,
-                    ),
-                    encoding="utf-8",
+                    json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8",
                 )
                 return True, ""
             err = ((run.stderr or "") + "\n" + (run.stdout or "")).strip()[-2000:]

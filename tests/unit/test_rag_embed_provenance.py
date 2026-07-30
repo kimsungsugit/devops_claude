@@ -152,10 +152,18 @@ class TestBatchProvenance:
 # 2. _embed_random 프로세스간 결정성
 # ==============================================================
 
+#: 서브프로세스에서 `embedder.py` 를 **패키지 `__init__` 우회**로 직접 로드한다.
+#  `from workflow.rag.embedder import ...` 는 `workflow/rag/__init__.py` → `config`·chunker·
+#  ingestor → `workflow.ai`(무거움) 체인을 끌어와 서브프로세스 3개가 **40.77초**였고, 부하
+#  하에서 120s timeout 에 걸려 flaky 했다(실측: 게이트에서 실패). 직접 로드는 **0.6초**다.
+#  embedder.py 의 모듈 레벨 import 는 stdlib + numpy 뿐이라 우회가 안전하다(intra-package
+#  import 는 전부 함수 안 lazy).
 _DETERMINISM_SNIPPET = (
-    "import sys; sys.path.insert(0, r'{root}');"
-    "from workflow.rag.embedder import _embed_random;"
-    "print(repr(_embed_random('ASIL D coverage', dim=4)))"
+    "import importlib.util, pathlib;"
+    "p = pathlib.Path(r'{root}') / 'workflow' / 'rag' / 'embedder.py';"
+    "spec = importlib.util.spec_from_file_location('emb_direct', p);"
+    "m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m);"
+    "print(repr(m._embed_random('ASIL D coverage', dim=4)))"
 )
 
 

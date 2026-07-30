@@ -9,6 +9,7 @@ import logging
 # Module-level (top-level payload, List[List[str]] 5-column table):
 #   KEY_MOD_GLOBALS = "global_vars"    — global var definitions table
 #   KEY_MOD_STATICS = "static_vars"    — static var definitions table
+import json
 import os
 import re
 from datetime import datetime
@@ -1605,12 +1606,53 @@ def _add_blank_table(
     return table
 
 
+def gen_stats_path(output_path: str) -> Path:
+    """생성 통계 sidecar 경로 — `<out>.gen_stats.json`.
+
+    ⚠ **파일로 남겨야 하는 이유**: 프로덕션 경로는 `backend/helpers/uds.py:1194` 의
+    exec 문자열을 **서브프로세스**로 돌리고 반환값을 버린다. 성공 판정도
+    `returncode == 0 and out_path.exists() and size > 0` 뿐이다. 그래서 in-process
+    `stats_out` 만으로는 호출자에게 아무것도 못 전달한다.
+    """
+    return Path(str(output_path) + ".gen_stats.json")
+
+
+_STAT_SAMPLE_CAP = 50
+
+
+def _write_gen_stats(output_path: str, stats: Dict[str, Any]) -> None:
+    """생성 통계를 sidecar 로 남긴다. 실패해도 문서 생성을 깨지 않는다."""
+    try:
+        gen_stats_path(output_path).write_text(
+            json.dumps(stats, ensure_ascii=False, indent=2), encoding="utf-8",
+        )
+    except Exception as e:   # noqa: BLE001 - 통계 기록 실패가 산출물을 막아선 안 된다
+        _logger.warning("생성 통계 sidecar 기록 실패(%s) — 문서 자체는 정상", e)
+
+
 def generate_uds_docx(
     template_path: Optional[str],
     uds_payload: Dict[str, Any],
     output_path: str,
     ai_config: Optional[Dict[str, Any]] = None,
+    *,
+    stats_out: Optional[Dict[str, Any]] = None,
 ) -> str:
+    """UDS DOCX 생성.
+
+    Args:
+        stats_out: 주면 생성 통계를 넣는다(additive). **같은 내용이 항상
+            `<output_path>.gen_stats.json` 으로도 기록된다** — 프로덕션은 서브프로세스라
+            반환값·in-process dict 가 호출자에게 닿지 않는다(`gen_stats_path` 참조).
+
+    ⚠ 이 라이터는 **템플릿 주도**다: SwUFn 표는 템플릿의 heading 을 순회하며 payload 함수를
+    찾아 채운다. 따라서 **템플릿에 heading 이 없는 payload 함수는 문서에 안 들어가고**,
+    payload 에 없는 heading 은 빈 껍데기로 남는다. 둘 다 예전엔 **어디에도 보고되지 않았다.**
+
+    실측(HDPDM01 실 템플릿 + 실 payload): payload 함수 432개 중 템플릿과 겹치는 337개만
+    반영되고 **95개(22.0%)가 미반영**, 빈 heading **74개**. 그런데 프로덕션 성공 판정은
+    "파일이 있고 0바이트가 아님" 뿐이라 이 상태가 `status: "success"` 로 기록됐다.
+    """
     try:
         import docx  # type: ignore
     except Exception as exc:
@@ -2337,6 +2379,10 @@ def generate_uds_docx(
     if tbd_asil > 0 or tbd_related > 0:
         _logger.warning("UDS TBD residual: asil_tbd=%d/%d, related_tbd=%d/%d", tbd_asil, total_fn, tbd_related, total_fn)
 
+    # 호출자가 준 것인지 config 기본값인지 구분해 통계에 남긴다 — 둘 다 `mode="template"`
+    # 이라 예전엔 "이 템플릿을 누가 골랐나" 를 사후에 알 수 없었다. 반영률이 낮을 때
+    # 원인이 프로젝트 템플릿 미지정인지 템플릿 자체인지 갈리는 지점이다.
+    template_source = "argument" if template_path else "none"
     if not template_path:
         # Delegate to config.resolve_uds_template_path() so the admin API
         # and the generator always agree on the effective template path.
@@ -2345,6 +2391,7 @@ def generate_uds_docx(
             resolved = resolve_uds_template_path()
             if resolved:
                 template_path = resolved
+                template_source = "config_fallback"
         except Exception as exc:
             _logger.debug("UDS template fallback resolution failed: %s", exc)
 
@@ -2384,6 +2431,18 @@ def generate_uds_docx(
         #    {{REFERENCE_TABLE}} paragraph we didn't catch above).
         _replace_docx_text(doc, replacements)
         if _template_has_placeholders(doc):
+            # 토큰 치환 전용 템플릿 — SwUFn 표를 순회하지 않으므로 함수 반영률 개념이 없다.
+            # 통계를 **안 남기면** 소비처가 "통계 부재 = 문제 없음" 으로 읽으므로 mode 를
+            # 명시해서 남긴다(미측정과 정상을 구분).
+            _write_gen_stats(output_path, {
+                "mode": "placeholder_substitution",
+                "template_path": str(template_path or ""),
+                "template_source": template_source,
+                "payload_functions": None,
+                "matched_functions": None,
+                "match_pct": None,
+                "note": "토큰 치환 템플릿이라 SwUFn 함수 반영률이 적용되지 않는다(미측정).",
+            })
             doc.save(str(out))
             return str(out)
         # 템플릿에 치환 키가 없으면, 구조만 복제하고 콘텐츠는 새로 작성
@@ -2654,6 +2713,70 @@ def generate_uds_docx(
             "version information": template_section_map.get("version information", ""),
         }
         note_added: set[str] = set()
+
+        # ── 생성 충실도 계측 ───────────────────────────────────────────────────
+        # 이 라이터는 템플릿 heading 을 순회하므로 **payload 함수 ↔ 문서 반영**이 1:1 이
+        # 아니다. 예전엔 그 격차가 어디에도 안 남아, 22.0% 가 미반영인 문서가
+        # "성공" 으로 기록됐다. resolver 는 heading 만으로 빈 껍데기를 합성하는 폴백이
+        # 여럿이라 **호출 결과를 실제로 분류**해야 한다(선언적 집합 차집합은 퍼지 매칭을
+        # 과소 계상해 거짓 경고를 낸다).
+        # 템플릿이 **삭제된 함수**로 표시한 heading 은 비어 있는 게 정상이다 — 갭으로 세면
+        # 오탐이 된다. 실측(HDPDM01 템플릿 430 heading): `(삭제)` 9건 + `(New, 삭제)` 1건
+        # = 10건. 괄호 안 어휘 전수 조사에서 나온 것은 `(New)`·`(NEW)`·`(삭제)` 뿐이라
+        # 삭제 계열만 면제한다. 다른 프로젝트가 다른 어휘를 쓰면 여기 추가할 것.
+        _deleted_marker = re.compile(r"\([^)]*(?:삭제|제거|delete[d]?)[^)]*\)", re.I)
+
+        _payload_fn_names: Set[str] = set()
+        for _src in (function_details, function_details_by_name):
+            if isinstance(_src, dict):
+                for _v in _src.values():
+                    if isinstance(_v, dict) and _v.get("name"):
+                        _payload_fn_names.add(
+                            _normalize_symbol_name(str(_v.get("name"))).lower())
+        _matched_fn_names: Set[str] = set()
+        _empty_headings: List[str] = []
+        _deleted_headings: List[str] = []
+        _boilerplate_headings: List[str] = []
+
+        def _note_fn_match(title_text: str, info: Any) -> None:
+            """heading 하나가 payload 로 채워졌는지 vs 빈 껍데기인지 분류.
+
+            세 축으로 나눈다 — 섞으면 수치가 부풀거나 경고가 오탐이 된다:
+              · **반영**      : payload 의 실제 내용이 표에 들어갔다
+              · **합성만**    : 이름만 맞고 내용은 생성기가 만든 보일러플레이트다
+              · **의도된 빈칸**: 템플릿이 "삭제" 로 표기한 heading
+              · 나머지        : 실제 갭
+
+            ⚠ 합성을 분리하는 이유(실측): `_finalize_function_fields` 는 내용이 **완전히 빈**
+            함수에도 `description="alpha은(는) alpha 관련 연산을 수행하고…"`, `asil="QM"`,
+            `related="TBD"` 를 채운다. 그걸 "반영" 으로 세면 내용 0인 함수가 반영률을 올린다.
+
+            ⚠ **description 축은 이 지표에서 제외한다.** 합성 여부를 판별할 수단이 둘 다 못
+            쓴다: ①`description_source` 는 `_resolve_related_asil_desc` 가 **출처 미기록을 전부
+            `"inference"` 로 확정**해 사람이 쓴 설명까지 그 값이 된다(실측 확인 — 별도 결함)
+            ②`_is_generic_description` 은 합성기 자신의 출력(`…관련 연산을 수행하고…`)을
+            generic 으로 보지 않는다. 고장난 판정을 지표에서 흉내내면 결함이 복제되므로
+            **생성기가 만들지 않는 필드만** 근거로 삼는다. 그 결과 설명만 있고
+            prototype/inputs/outputs/logic 이 전무한 함수는 갭으로 잡히는데, 단위 상세 설계
+            문서 기준으로는 그게 맞다.
+            """
+            name = ""
+            if isinstance(info, dict):
+                name = _normalize_symbol_name(str(info.get("name") or "")).lower()
+            # `_finalize_function_fields` 가 만들지 **않는** 필드들 — 있으면 진짜 내용이다.
+            has_hard_content = isinstance(info, dict) and any(
+                info.get(k) for k in ("prototype", "inputs", "outputs", "logic")
+            )
+            known = bool(name) and name in _payload_fn_names
+            if known and has_hard_content:
+                _matched_fn_names.add(name)
+            elif _deleted_marker.search(str(title_text)):
+                _deleted_headings.append(str(title_text)[:200])
+            elif known:
+                # 이름은 payload 에 있는데 내용이 전부 합성이다 — 갭이지만 원인이 다르다.
+                _boilerplate_headings.append(str(title_text)[:200])
+            else:
+                _empty_headings.append(str(title_text)[:200])
 
         def _resolve_function_info(title_text: str, key_text: str) -> Dict[str, Any]:
             info: Optional[Dict[str, Any]] = None
@@ -3128,6 +3251,7 @@ def generate_uds_docx(
                     else:
                         rows, cols, style = 18, 6, None
                     info = _resolve_function_info(str(title), key)
+                    _note_fn_match(str(title), info)
                     _build_function_info_table(info, rows, cols, style)
                     if target_idx is not None:
                         skip_table_idx = target_idx
@@ -3255,6 +3379,46 @@ def generate_uds_docx(
                     toc_inserted = True
         _normalize_function_info_tables(doc)
         _remove_docx_paragraphs(doc, ["N/A"])
+        _unmatched = sorted(_payload_fn_names - _matched_fn_names)
+        _stats = {
+            "mode": "template",
+            "template_path": str(template_path or ""),
+            "template_source": template_source,
+            "payload_functions": len(_payload_fn_names),
+            "matched_functions": len(_matched_fn_names),
+            # ⚠ 총량은 캡 **전**에 센다. 아래 sample 은 잘린 예시이므로 그 길이로 총량을
+            #    되짚으면 안 된다(이 저장소가 반복해 겪은 함정).
+            "unmatched_payload_count": len(_unmatched),
+            "unmatched_payload_sample": _unmatched[:_STAT_SAMPLE_CAP],
+            # 실제 갭 — 삭제 표기 heading 은 여기서 제외한다(아래 별도 축).
+            "empty_heading_count": len(_empty_headings),
+            "empty_heading_sample": _empty_headings[:_STAT_SAMPLE_CAP],
+            # 의도된 빈 heading(템플릿이 "삭제" 로 표기) — 갭 아님. 섞으면 경고가 오탐이 된다.
+            "deleted_heading_count": len(_deleted_headings),
+            "deleted_heading_sample": _deleted_headings[:_STAT_SAMPLE_CAP],
+            # 이름은 payload 에 있는데 내용이 전부 생성기 합성 — "반영" 으로 세면 부풀림.
+            "boilerplate_only_count": len(_boilerplate_headings),
+            "boilerplate_only_sample": _boilerplate_headings[:_STAT_SAMPLE_CAP],
+            "match_pct": (
+                round(100.0 * len(_matched_fn_names) / len(_payload_fn_names), 2)
+                if _payload_fn_names else None      # 분모 0 = 미측정(0% 아님)
+            ),
+        }
+        if _unmatched or _empty_headings or _boilerplate_headings:
+            _logger.warning(
+                "UDS DOCX 생성 충실도: payload 함수 %d개 중 %d개 반영(%.1f%%). "
+                "템플릿에 대응 heading 이 없어 **문서에 반영되지 않은 함수 %d개**, "
+                "내용이 전부 생성기 합성인 heading %d개, 내용 없이 남은 heading %d개 "
+                "(삭제 표기 %d개는 갭에서 제외). 템플릿이 의도된 부분집합이 아니면 "
+                "템플릿/프로젝트 설정을 확인할 것. 상세: %s",
+                len(_payload_fn_names), len(_matched_fn_names),
+                100.0 * len(_matched_fn_names) / max(len(_payload_fn_names), 1),
+                len(_unmatched), len(_boilerplate_headings), len(_empty_headings),
+                len(_deleted_headings), gen_stats_path(output_path).name,
+            )
+        if stats_out is not None:
+            stats_out.update(_stats)
+        _write_gen_stats(output_path, _stats)
         doc.save(str(out))
         return str(out)
 
@@ -3754,6 +3918,30 @@ def generate_uds_docx(
             if desc:
                 doc.add_paragraph(str(desc))
 
+    # 비템플릿 폴백 — 문서를 payload 로부터 새로 쓰므로 반영 누락이 원리적으로 없다.
+    # 그래도 mode 를 남긴다(통계 부재를 "정상"으로 오독하지 않게).
+    _nt_fn_names = {
+        _normalize_symbol_name(str(v.get("name"))).lower()
+        for src in (payload.get("function_details"), payload.get("function_details_by_name"))
+        if isinstance(src, dict)
+        for v in src.values()
+        if isinstance(v, dict) and v.get("name")
+    }
+    _nt_stats = {
+        "mode": "no_template",
+        "template_path": "",
+        "template_source": "none",
+        "payload_functions": len(_nt_fn_names),
+        "matched_functions": len(_nt_fn_names),
+        "unmatched_payload_count": 0,
+        "unmatched_payload_sample": [],
+        "empty_heading_count": 0,
+        "empty_heading_sample": [],
+        "match_pct": 100.0 if _nt_fn_names else None,
+    }
+    if stats_out is not None:
+        stats_out.update(_nt_stats)
+    _write_gen_stats(output_path, _nt_stats)
     doc.save(str(out))
     return str(out)
 

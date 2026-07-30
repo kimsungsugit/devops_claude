@@ -11,7 +11,7 @@
 > ⚠ 이 문서를 `plans/` 나 `docs/` 루트에 두면 안 된다 — 둘 다 `.gitignore` 에 막혀 있다
 > (`plans/`, `docs/*`). `docs/` 는 allow-list 방식이라 `!docs/plans/` 를 추가해 열었다.
 >
-> 최종 갱신: 2026-07-29 / 대조 기준 커밋: `6da9e96`
+> 최종 갱신: 2026-07-30 / 대조 기준 커밋: `03eedf1`
 
 ---
 
@@ -19,7 +19,7 @@
 
 외부 계획서는 **그대로 따르면 안 된다.** 이미 구현된 것을 문제로 적어둔 항목이 여럿이고,
 가장 큰 덩어리(CORE-000)는 이 저장소 규모에서 수개월짜리인데 그것을 P0 로 두었다.
-실측으로 재현된 것만 골라 5개 라운드에 걸쳐 고쳤고, **계획서에 없던 결함을 더 많이 찾았다.**
+실측으로 재현된 것만 골라 9개 라운드에 걸쳐 고쳤고, **계획서에 없던 결함을 더 많이 찾았다.**
 
 ---
 
@@ -460,6 +460,70 @@ Gemini 재시도 3회, `_clip_input`(상한 초과 시 **자르고 보고**, 단
 
 ---
 
+## 5-6. UDS DOCX 생성 충실도 — ✅ 완료 (2026-07-30)
+
+P2 백로그의 `report_gen/` DOCX 라이터 대조. XLSM 3종은 `6da9e96` 로 붙였지만 DOCX 는 미점검이었다.
+
+### 실측 (고치기 전)
+
+| 항목 | 값 |
+|---|---|
+| 프로덕션 성공 판정 | **`returncode == 0 and out_path.exists() and size > 0`** 뿐 |
+| payload 함수 (실 HDPDM01) | 432 |
+| 템플릿 SwUFn heading | 430 |
+| 문서에 반영 | 336 |
+| **템플릿에 heading 이 없어 미반영** | **96 = 22.2%** |
+| 내용 없이 남은 heading | 75 (그중 템플릿이 "삭제" 로 표기 **10**) |
+| 생성 시점 보고 표면 | **없음** |
+
+즉 **함수 22%가 빠진 문서가 `status: "success"`** 로 기록됐다.
+
+### 측정으로 확인한 설계 제약
+
+프로덕션은 `backend/helpers/uds.py` 의 exec 문자열을 **서브프로세스**로 돌리고 반환값을
+버린다. 그래서 in-process `stats_out` 은 호출자에 닿지 않고 **파일 sidecar 가 필수**다.
+
+### 수정
+
+- `generate_uds_docx(..., stats_out=)` + **항상** `<out>.gen_stats.json` 기록. 3개 save
+  경로(template / placeholder_substitution / no_template) 전부 `mode` 를 남긴다 —
+  통계 부재를 "정상" 으로 오독하지 않게.
+- 매칭은 **resolver 호출 결과를 실제로 분류**한다. 선언적 집합 차집합은 퍼지 매칭(`endswith`
+  tolerance·시그니처 폴백)을 과소 계상해 거짓 경고를 낸다.
+- **3축 분리** — 섞으면 수치가 부풀거나 경고가 오탐이 된다:
+  `unmatched_payload`(문서에 없음) / `boilerplate_only`(이름만 맞고 내용은 합성) /
+  `deleted_heading`(템플릿이 "삭제" 표기 = 갭 아님) / `empty_heading`(나머지 갭)
+- `template_source`: `argument` / `config_fallback` / `none` — `template_path=None` 은
+  "템플릿 없음" 이 아니라 `resolve_uds_template_path()` 가 저장소 기본 템플릿을 해결한다
+  (의도된 admin 동작). 누가 골랐는지 안 남으면 반영률 저하 원인을 못 가른다.
+- 총량은 **캡 전**에 센다. 분모 0 → `match_pct=None`(0% 아님).
+- `backend/helpers/uds.py`: sidecar 를 읽어 checkpoint 에 `gen_stats` + `warnings` 기록.
+  부재는 `gen_stats_missing: true` 로 명시. **성공/실패 판정은 뒤집지 않았다** —
+  템플릿이 의도된 부분집합일 수 있어 뒤집으면 대량 오탐(§5-2 와 같은 판단).
+
+### 측정 중 드러난 **별건 결함 2건** (이 라운드에서 고치지 않음)
+
+| # | 결함 | 근거 |
+|---|---|---|
+| D1 | **사람이 쓴 description 이 `description_source="inference"` 로 강등된다.** `_resolve_related_asil_desc`(`docx_builder.py:1948`)가 **출처 미기록을 전부 `"inference"` 로 확정**한다(asil·related 도 동일). "미기록"과 "추론"은 다른 사실이다. 정직한 값은 `unknown` 이지만 provenance 점수(0.60→0.30)가 전 프로젝트에서 내려가므로 **정책 결정**이다 | 실측: 사람이 쓴 설명을 넣고 생성 → 생성 후 payload 엔트리가 `description_source='inference'` |
+| D2 | **생성마다 저장소 고정 참조 SUDS(40.7MB, HDPDM01)를 읽어 함수 정보를 채운다.** `config.UDS_REF_SUDS_PATH` 고정값 + 매칭은 **함수명만**. 빈/TBD 필드만 채우고 `*_source="reference"` 를 남기는 가드는 있으나 **어느 문서인지 안 남는다** — 다른 프로젝트 생성 시 HDPDM01 의 ASIL·Related ID 가 들어갈 수 있다(§3 의 "SUTS ASIL 이 HDPDM01 로 채워짐" 과 같은 패턴, 다른 사이트) | 생성 31.9초 중 **24.3초**가 이 읽기. 함수 2개 payload 인데 `table.text` 64,312회 |
+
+D1 은 이 라운드 지표에서 **회피**했다(설명 축을 근거로 안 쓴다 — 고장난 판정을 지표에서
+흉내내면 결함이 복제된다). D2 는 성능·정확성 양쪽이라 별 라운드가 필요하다.
+
+### 검증
+
+- 새 테스트 24건 (`tests/unit/test_uds_docx_gen_stats.py`) — **뮤테이션 6/6**
+  (sidecar 기록 / 계측 호출 / 삭제 분기 / description 축 / 캡 전 총량 / shape 검사)
+- ⚠ **테스트가 내 전제 2건을 반증했다**: ①`template_path=None` 이 `no_template` 이 아니라
+  config 폴백으로 template 경로를 탄다 ②`_finalize_function_fields` 가 빈 함수에 설명·ASIL·
+  related 를 합성해 "내용 없음" 단정이 성립하지 않는다. 둘 다 테스트를 실제 동작에 맞췄다.
+- ⚠ **테스트 실행시간 711초 → 96초**: `template_path=None` 인 테스트가 실 저장소 템플릿
+  (430 heading)을 끌어와 **하나가 313.88초**였다. fixture 로 `UDS_REF_SUDS_PATH`·
+  `resolve_uds_template_path` 를 차단(테스트가 40MB 저장소 산출물에 의존할 이유가 없다).
+
+---
+
 ## 6. 다음 라운드 후보
 
 | # | 대상 | 이유 |
@@ -471,6 +535,8 @@ Gemini 재시도 3회, `_clip_input`(상한 초과 시 **자르고 보고**, 단
 | ~~5~~ | ~~3개 egress 경로 통합~~ | ✅ 완료 — §5-5. 키 해석 단일화(근본 원인)·재시도·입력 상한·폴백 사유. **잔여: 토큰 예산·stage cap 공유**(임베딩은 단발 호출이라 예산 개념이 llm_call 과 다름 — 별건) |
 | ~~6~~ | ~~`stats_out` 을 UI 까지 배선~~ | ✅ 완료 — §5-5 #1 (`retrieval_notes` 신규 응답 키 + 프론트 경고 배너) |
 | ~~7~~ | ~~실 KB 재인덱싱~~ | ✅ 완료 — §5-5 #2 (`reindex_embeddings` + `scripts/reindex_kb.py`). **운영 조치 남음**: 실 KB 에 실제로 돌려야 시맨틱 축이 복구된다(`--dry-run` 먼저) |
+| 🔴 D1 | provenance 가 "미기록" 을 `inference` 로 확정 | §5-6 참조. `_resolve_related_asil_desc` 가 description/asil/related 세 축 모두 미기록→`inference`. 사람이 쓴 설명이 추론으로 강등된다. 정직한 값은 `unknown` 인데 점수가 0.60→0.30 으로 내려가 **전 프로젝트 품질 수치가 이동**한다 → 정책 결정 필요 |
+| 🔴 D2 | 생성마다 저장소 고정 HDPDM01 SUDS(40.7MB) 로 함수 정보 채움 | §5-6 참조. 매칭은 함수명만이라 타 프로젝트 생성 시 HDPDM01 ASIL·Related 가 유입 가능. 성능도 생성 31.9초 중 24.3초. §3 의 "SUTS ASIL 이 HDPDM01 로 채워짐" 과 **같은 패턴 다른 사이트** |
 | 8 | UTCV-001 잔여 | `applicable` 정책축·커버리지 예외 disposition. 이 저장소에 해당 축이 **존재하지 않아** 신규 기능 개발이다(결함 수정 아님) — 사용자 판단 필요 |
 | 9 | 템플릿↔소스 프로젝트 불일치 | 소스 900함수 중 271개만 HDPDM01 템플릿에 존재(629건=69.9% 부재). 의도된 부분집합인지 오배치인지는 프로젝트 설정 판단이 필요해 `ok` verdict 는 뒤집지 않고 수치만 노출해 둔 상태 |
 | 10 | `workflow/ai_validator.py` | dead code(호출자 0). 살릴지 지울지는 정책 결정 — 사용자 몫으로 남김 |
