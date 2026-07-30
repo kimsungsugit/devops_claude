@@ -87,6 +87,95 @@ def test_backward_compat_no_design_component_ids():
     assert isinstance(lt["links"], list)
 
 
+# ── canonical 접기(라운드114) — I2 합집합 불변식 ────────────────────────────
+#
+# SwCom 표는 ID(`swcom_14`)와 이름(`door control`)을 별개 키로 등록한다. 밴드에서 둘을
+# canonical 로 접으면 표시는 1개가 되지만, 접힌 원 키가 어디로 갔는지 소비처가 모르면
+# 차집합(`sds_functions` = component_ids − sds_components)이 **둘 다 함수로** 집어삼킨다.
+# 그래서 `folded_component_ids` 를 함께 싣고, 아래 세 테스트가 그 계약을 고정한다.
+
+
+def _folded_matrix(design, folded=None, comps=None):
+    pair = {
+        "requirement_id": "SwTR_01",
+        "component_ids": comps if comps is not None else ["swcom_14", "door control", "g_iface"],
+        "design_component_ids": design,
+    }
+    if folded is not None:
+        pair["folded_component_ids"] = folded
+    m = generate_uds_traceability_matrix(
+        [{"id": "SwTR_01", "name": "x"}], mapping_pairs=[], vcast_rows=[],
+        sds_pairs=[pair], sits_rows=[], uds_function_ids=[], component_asil={},
+    )
+    return m, m["rows"][0]
+
+
+def test_folded_alias_not_double_counted_as_function():
+    """B8 — 접힌 원 키는 sds_functions 로 새지 않는다."""
+    _, row = _folded_matrix(["SwCom_14"], folded=["swcom_14", "door control"])
+    assert row["sds_components"] == ["SwCom_14"]
+    assert row["sds_functions"] == ["g_iface"]     # 접힌 두 키가 아니라 진짜 함수만
+
+
+def test_missing_folded_field_degrades_to_pre_folding_behaviour():
+    """B9 — 구 응답·구 캐시(folded 필드 부재)는 접기 이전 동작 그대로.
+
+    새 필드를 모르는 저장분이 조용히 다른 수치를 내면 안 된다. 부재 = 빈 집합 = 무동작.
+    """
+    _, row = _folded_matrix(["SwCom_14"])           # folded 미제공
+    assert row["sds_components"] == ["SwCom_14"]
+    assert set(row["sds_functions"]) == {"swcom_14", "door control", "g_iface"}
+
+
+def test_union_invariant_components_plus_folded_plus_functions_covers_all():
+    """B10 — I2 항등식: sds_components ∪ folded ∪ sds_functions ⊇ component_ids.
+
+    누락(커버리지 하락)과 중복(밴드 부풀림)을 동시에 차단하는 유일한 어서션이다.
+    """
+    _, row = _folded_matrix(["SwCom_14"], folded=["swcom_14", "door control"])
+    union = {c.lower() for c in row["sds_components"]} | {"swcom_14", "door control"} \
+        | {c.lower() for c in row["sds_functions"]}
+    assert union >= {"swcom_14", "door control", "g_iface"}
+    # 중복 없음: components 와 functions 는 교집합이 비어야 한다.
+    assert not ({c.lower() for c in row["sds_components"]}
+                & {c.lower() for c in row["sds_functions"]})
+
+
+def test_coverage_and_asil_invariant_under_purification():
+    """C11 — 정화 전/후로 **커버리지와 ASIL 은 변하지 않는다**.
+
+    밴드에서 뺀 것이 `sds_functions` 로 흘러가고 `has_design` 이 둘의 OR 을 보기 때문에
+    (`jenkins.py` `_row_bands`/`local.py`/`SrsSdsSection.jsx` 3-site 동일) 커버리지는
+    구조적으로 불변이어야 한다. 이 어서션이 깨지면 I2 가 새고 있다는 뜻이다.
+    """
+    comps = ["swcom_14", "door control", "g_iface"]
+    asil = {"swcom_14": "B", "door control": "B", "g_iface": "B"}
+
+    def _run(pair_extra):
+        pair = {"requirement_id": "SwTR_01", "component_ids": comps, **pair_extra}
+        return generate_uds_traceability_matrix(
+            [{"id": "SwTR_01", "name": "x"}], mapping_pairs=[], vcast_rows=[],
+            sds_pairs=[pair], sits_rows=[], uds_function_ids=[], component_asil=asil,
+        )
+
+    before = _run({"design_component_ids": ["swcom_14", "door control"]})   # 접기 전(66 상태)
+    after = _run({"design_component_ids": ["SwCom_14"],
+                  "folded_component_ids": ["swcom_14", "door control"]})    # 접기 후(33 상태)
+
+    b_row, a_row = before["rows"][0], after["rows"][0]
+    # 설계 연결 여부(has_design 의 SDS 절) 완전 일치
+    assert (bool(b_row["sds_components"]) or bool(b_row["sds_functions"])) is \
+           (bool(a_row["sds_components"]) or bool(a_row["sds_functions"]))
+    # 행 ASIL 완전 일치 — 롤업은 sds_list(전체) 기반이라 접기와 무관
+    assert b_row.get("asil") == a_row.get("asil")
+    # 커버리지 지표 완전 일치
+    for key in ("coverage_pct", "full_coverage_pct", "safety_pct"):
+        assert before["summary"].get(key) == after["summary"].get(key), key
+    # 밴드 수치만 내려간다
+    assert after["summary"]["total_sds_components"] < before["summary"]["total_sds_components"]
+    assert after["summary"]["mapped_sds_count"] <= before["summary"]["mapped_sds_count"]
+
+
 if __name__ == "__main__":
     import pytest
     pytest.main([__file__, "-v"])

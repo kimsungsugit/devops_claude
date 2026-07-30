@@ -1668,9 +1668,11 @@ def local_traceability(
     report_dir: str = Form(""),
 ) -> Dict[str, Any]:
     """Build full traceability matrix: SRS -> Functions -> Test Cases."""
-    import re as _re
-
-    from report_gen.requirements import _extract_sds_partition_map, _normalize_req_id
+    from report_gen.requirements import (
+        _extract_sds_partition_map,
+        _normalize_req_id,
+        build_sds_component_maps,
+    )
     from sts_generator import (
         map_requirements_to_functions,
         parse_srs_docx_tables,
@@ -1684,10 +1686,12 @@ def local_traceability(
 
     # Parse SDS component mapping (V-Model 설계 계층)
     # 추적 정화: sds_req_to_comps=컴포넌트+함수 전체(브리지/함수 표시용), sds_req_to_design_comps=
-    # 실 SwCom/모듈만(SDS 밴드 집계용). Jenkins 경로(jenkins.py sds extract)와 동일 정화 — 모드 간
-    # SDS 컴포넌트 수가 갈리지 않도록(함수 fan-out 24배 과대 방지).
+    # 실 SwCom/모듈만(SDS 밴드 집계용). 판정은 report_gen.requirements.build_sds_component_maps
+    # 단일 출처 — Jenkins 경로(jenkins.py sds extract)와 같은 함수를 쓰므로 모드 간 SDS 컴포넌트
+    # 수가 갈릴 수 없다(예전엔 두 곳이 복제라 한쪽만 고쳐지면 갈렸다).
     sds_req_to_comps: Dict[str, List[str]] = {}
     sds_req_to_design_comps: Dict[str, List[str]] = {}
+    sds_req_to_folded_comps: Dict[str, List[str]] = {}
     # 아래 map_requirements_to_functions 의 폴백 출처로도 쓴다 — 안 넘기면 저장소 docs/
     # 글롭(프로젝트 무관)이 대신한다.
     sds_partition_map: Optional[Dict[str, Any]] = None
@@ -1698,27 +1702,10 @@ def local_traceability(
         if sds_p.exists() and sds_p.is_file():
             partition_map = _extract_sds_partition_map(str(sds_p))
             sds_partition_map = partition_map or None
-            for comp_key, info in partition_map.items():
-                related = info.get("related", "")
-                # ⚠ backend/routers/jenkins.py:4596 과 **동일 게이트** — Related ID 없는 SDS 엔트리를
-                # 버린다. 단 인과는 jenkins 경로에만 성립한다: 이 로컬 경로는
-                # generate_uds_traceability_matrix 를 호출하지 않고 unmapped_vcast 도 만들지 않으므로,
-                # 여기서 버려지는 엔트리는 _all_sds_keys·unmapped_sds_name_hit 과 무관하다.
-                # (jenkins 경로에서는 이 게이트가 SDS 이름 집합을 불완전하게 만들어 하한선이 된다.)
-                # SDS 이름 완전 집합이 필요해지면 두 곳을 함께 고칠 lockstep 대상이다.
-                if not related:
-                    continue
-                is_function = info.get("kind") == "function"
-                raw_ids = _re.findall(r"Sw[A-Za-z]{2,}\s*_\s*\d+|Sy[A-Za-z]{2,}\s*_\s*\d+", related)
-                for rid in raw_ids:
-                    norm = _normalize_req_id(rid)
-                    sds_req_to_comps.setdefault(norm, [])
-                    if comp_key not in sds_req_to_comps[norm]:
-                        sds_req_to_comps[norm].append(comp_key)
-                    if not is_function:
-                        sds_req_to_design_comps.setdefault(norm, [])
-                        if comp_key not in sds_req_to_design_comps[norm]:
-                            sds_req_to_design_comps[norm].append(comp_key)
+            _sds_maps = build_sds_component_maps(partition_map)
+            sds_req_to_comps = _sds_maps["req_to_comps"]
+            sds_req_to_design_comps = _sds_maps["req_to_design_comps"]
+            sds_req_to_folded_comps = _sds_maps["req_to_folded_comps"]
 
     # Parse requirements
     reqs: List[Dict[str, Any]] = []
@@ -1884,7 +1871,10 @@ def local_traceability(
         sds_comps_all = sds_req_to_comps.get(norm_rid, [])
         sds_comps = sds_req_to_design_comps.get(norm_rid, [])  # 실 SwCom/모듈만(함수 fan-out 제외)
         _scset = set(sds_comps)
-        sds_funcs = [c for c in sds_comps_all if c not in _scset]  # 인터페이스 함수(분리)
+        # canonical 접기로 sds_comps 에서 사라진 원 키 — 함께 빼지 않으면 함수로 이중 계상된다.
+        _folded = set(sds_req_to_folded_comps.get(norm_rid, []))
+        sds_funcs = [c for c in sds_comps_all
+                     if c not in _scset and c not in _folded]  # 인터페이스 함수(분리)
 
         # tests 배열 통합 (Jenkins generate_uds_traceability_matrix 형식)
         tests: List[Dict[str, Any]] = []

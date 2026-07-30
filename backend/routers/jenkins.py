@@ -4537,12 +4537,11 @@ def jenkins_suts_extract_traceability(body: Dict[str, Any]) -> Dict[str, Any]:
 @router.post("/api/jenkins/sds/extract-mapping")
 def jenkins_sds_extract_mapping(body: Dict[str, Any]) -> Dict[str, Any]:
     """SDS 문서에서 SwCom↔요구사항 매핑 추출 (추적성 매트릭스용)"""
-    import re as _re
     import tempfile
 
     from backend.services.file_resolver import get_resolver
     from backend.services.resolver_helpers import enforce_resolver_access
-    from report_gen.requirements import _extract_sds_partition_map, _normalize_req_id
+    from report_gen.requirements import _extract_sds_partition_map, build_sds_component_maps
 
     sds_path = str(body.get("sds_path", "")).strip()
     if not sds_path:
@@ -4575,50 +4574,25 @@ def jenkins_sds_extract_mapping(body: Dict[str, Any]) -> Dict[str, Any]:
         return {"ok": True, "sds_pairs": [], "total_components": 0, "total_requirements": 0}
 
     # Build requirement_id → [component_names] mapping
-    # W3: Apply _normalize_req_id to handle whitespace/case in related IDs
-    req_to_comps: Dict[str, list] = {}
-    comp_set = set()
-    # ASIL 결합(P5) — partition_map은 컴포넌트/함수별 ASIL을 이미 보유(_extract_sds_partition_map
-    # 가 SwCom ASIL 컬럼·모듈 ASIL 헤더에서 채움). 매트릭스가 요구사항별 ASIL을 도출할 수
-    # 있도록 {컴포넌트명(lower): ASIL} 맵을 그대로 노출(additive). related 없는 asil-only
-    # 엔트리(SwCom 정의 행 등)도 포함 — req의 component_id가 그 행을 가리킬 수 있음.
-    component_asil: Dict[str, str] = {}
-    for comp_key, info in partition_map.items():
-        casil = str(info.get("asil") or "").strip()
-        if casil:
-            component_asil[str(comp_key).strip().lower()] = casil
-    # 함수/컴포넌트 분리(추적 정화): design_component_ids = 실 SwCom/모듈만(kind!='function').
-    # SDS 밴드 집계가 인터페이스 함수 fan-out으로 24배 부풀려지던 것 차단. 함수는 component_ids에
-    # 그대로 남아 SUTS/VCAST 브리지(sds_func_to_reqs)에는 영향 없음.
-    req_to_design_comps: Dict[str, list] = {}
-    design_comp_set = set()
-    for comp_key, info in partition_map.items():
-        related = info.get("related", "")
-        if not related:
-            continue
-        # Match IDs allowing optional internal whitespace (e.g., "SwRS_ 001")
-        raw_ids = _re.findall(r"Sw[A-Za-z]{2,}\s*_\s*\d+|Sy[A-Za-z]{2,}\s*_\s*\d+", related)
-        req_ids = [_normalize_req_id(rid) for rid in raw_ids]
-        if req_ids:
-            comp_name = comp_key
-            is_function = info.get("kind") == "function"
-            comp_set.add(comp_name)
-            if not is_function:
-                design_comp_set.add(comp_name)
-            for rid in req_ids:
-                req_to_comps.setdefault(rid, [])
-                if comp_name not in req_to_comps[rid]:
-                    req_to_comps[rid].append(comp_name)
-                if not is_function:
-                    req_to_design_comps.setdefault(rid, [])
-                    if comp_name not in req_to_design_comps[rid]:
-                        req_to_design_comps[rid].append(comp_name)
+    # 판정은 report_gen.requirements.build_sds_component_maps 단일 출처. 여기(Jenkins 모드)와
+    # local.py(로컬 모드)가 같은 로직을 복제하던 것을 합쳤다 — 정규화·게이트·함수/컴포넌트
+    # 분리 근거는 전부 그 docstring 참조. 이 파일에는 I/O 와 응답 조립만 남긴다.
+    _maps = build_sds_component_maps(partition_map)
+    req_to_comps = _maps["req_to_comps"]
+    req_to_design_comps = _maps["req_to_design_comps"]
+    req_to_folded_comps = _maps["req_to_folded_comps"]
+    component_asil = _maps["component_asil"]
+    comp_set = _maps["comp_set"]
+    design_comp_set = _maps["design_comp_set"]
 
     sds_pairs = [
         {
             "requirement_id": rid,
             "component_ids": comps,  # 컴포넌트+함수 전체(브리지 호환)
             "design_component_ids": req_to_design_comps.get(rid, []),  # 실 SwCom/모듈만(SDS 밴드용)
+            # ID 키·이름 키를 canonical 로 접으며 사라진 원 키. 소비처가 차집합으로
+            # sds_functions 를 낼 때 함께 빼지 않으면 접힌 키가 함수로 이중 계상된다.
+            "folded_component_ids": req_to_folded_comps.get(rid, []),
         }
         for rid, comps in sorted(req_to_comps.items())
     ]

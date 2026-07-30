@@ -647,6 +647,41 @@ def _safe_docx_open(source: Any) -> Any:
     return docx.Document(buf)
 
 
+# ── SDS 파티션 엔트리의 kind 체계 ──────────────────────────────────────────────
+# 예전엔 'component'/'function' 2종뿐이었고 `_add_entry` 의 기본값이 'component' 라,
+# 11개 호출지점 중 인터페이스 함수 행(1곳)만 명시하고 나머지 10곳이 전부 컴포넌트로
+# 등록됐다. 그 결과 SDS 밴드에 상태명('initial'/'standby'/'auto close')과 설계ID
+# ('SwFn_'/'SwSTR_'/'SwST_')가 섞여 실 컴포넌트 33개가 201개로 부풀었다(HDPDM01 실측).
+#
+# 랭크는 "같은 키가 여러 표에서 다른 성격으로 등장할 때 무엇이 이기는가"를 정한다.
+# component 가 모두를 이기는 것은 종전과 동일하고, function 이 약한 kind 를 이기는 것이
+# 신규다(예전엔 약한 kind 가 먼저 걸리면 함수 승격이 막혔다).
+_SDS_KIND_RANK = {
+    "component": 4,       # SwCom ID·이름 표 — 밴드에 세는 유일한 kind
+    "function": 3,        # SwCom 인터페이스 함수 — 브리지·영향분석 ASIL 전용
+    "design_element": 1,  # 설계 블록의 name(상태명: initial/standby/auto close)
+    "design_id": 1,       # SwFn_/SwSTR_/SwST_ — 설계 ID 이지 컴포넌트 아님
+    "table_row": 1,       # 범용 표 폴백 — 헤더만 맞은 미확인 행
+    "heading": 1,         # 문단 heading 잔재
+}
+# ⚠ **긍정형** 화이트리스트여야 한다. 예전의 부정형(`kind != 'function'`)이면 새 kind 가
+# 전부 그대로 밴드를 통과해 이 분류가 무효가 된다.
+_SDS_BAND_KINDS = frozenset({"component"})
+# kind 없는 레거시 엔트리(구 캐시·외부 주입)는 분류 이전 동작을 그대로 보존한다.
+_SDS_DEFAULT_KIND = "component"
+
+# SwCom ID 추출 — 표기 혼재(`SwCom_7` / `Sw Com 07` / `SwCom-7`)를 제로패딩 canonical 로.
+# `report_gen/utils.py::_normalize_swcom_label` 과 같은 관용 규칙이되, 그쪽은 주변 텍스트를
+# 보존하는 **라벨** 정규화라 목적이 다르다(`Door Control(SwCom_14)` → 같은 문자열).
+_SWCOM_ID_RE = re.compile(r"\bSw\s*Com\s*[_\s-]?\s*(\d{1,3})\b", re.I)
+
+
+def _canonical_swcom_id(text: str) -> str:
+    """`SwCom_7` / `Sw Com 07` → `SwCom_07`. SwCom ID 가 없으면 빈 문자열."""
+    m = _SWCOM_ID_RE.search(str(text or ""))
+    return f"SwCom_{int(m.group(1)):02d}" if m else ""
+
+
 def _extract_sds_partition_map(doc_path: str) -> Dict[str, Dict[str, str]]:
     try:
         pass  # type: ignore
@@ -680,24 +715,32 @@ def _extract_sds_partition_map(doc_path: str) -> Dict[str, Dict[str, str]]:
             result.append(value)
         return result
 
-    def _add_entry(name: str, asil: str, related: str, desc: str, kind: str = "component") -> None:
+    def _add_entry(name: str, asil: str, related: str, desc: str, kind: str = "component",
+                   canonical: str = "") -> None:
         key = str(name or "").strip().lower()
         if not key:
             return
         entry = mapping.get(key, {})
+        # canonical: 같은 SwCom 을 가리키는 ID 키(`swcom_14`)와 이름 키(`door control`)를
+        # 한 컴포넌트로 접기 위한 표시/집계용 앵커. 조회 키(원 키)는 그대로 살려 둔다 —
+        # Related ID 가 컴포넌트를 이름으로만 참조한 요구의 링크가 끊기면 안 된다.
+        if canonical and not entry.get("canonical"):
+            entry["canonical"] = canonical
         if asil and not entry.get("asil"):
             entry["asil"] = asil
         if related and not entry.get("related"):
             entry["related"] = related
         if desc and not entry.get("description"):
             entry["description"] = desc
-        # kind: 'component'(SwCom/모듈) vs 'function'(인터페이스 함수). SDS 밴드/링크 집계는
-        # 컴포넌트만 세어 함수 fan-out 과대표기(요구사항당 16→413)를 막는다. 함수는 SUTS/VCAST
-        # 브리지에는 그대로 쓰인다. 같은 키가 컴포넌트로도 등록되면 'component'가 권위(우선).
-        if kind == "component":
-            entry["kind"] = "component"
-        elif not entry.get("kind"):
-            entry["kind"] = "function"
+        # kind 승격은 `_SDS_KIND_RANK` 비교로 한다 — 같은 키가 여러 표에서 다른 성격으로
+        # 등장할 때 강한 쪽이 이긴다. SDS 밴드/링크 집계는 'component' 만 세어 함수
+        # fan-out 과대표기(요구사항당 16→413)를 막고, 함수는 SUTS/VCAST 브리지에 그대로 쓰인다.
+        # ⚠ 예전 코드는 인자 `kind` 를 무시하고 "function" 을 하드코딩했다 — kind 가 2종일
+        #    때만 우연히 맞았고, 약한 kind 가 먼저 걸리면 함수 승격이 막혔다.
+        _new = kind if kind in _SDS_KIND_RANK else _SDS_DEFAULT_KIND
+        _cur = entry.get("kind")
+        if _cur is None or _SDS_KIND_RANK[_new] > _SDS_KIND_RANK.get(_cur, 0):
+            entry["kind"] = _new
         mapping[key] = entry
 
     def _find_col(norm_headers: List[str], keywords: List[str]) -> int:
@@ -793,10 +836,12 @@ def _extract_sds_partition_map(doc_path: str) -> Dict[str, Dict[str, str]]:
             sc_asil = sc_data.get("asil", "") or swcom_asil_map.get(sc_id.lower(), "")
             sc_related = sc_data.get("related", "")
             sc_desc = sc_data.get("description", "")
+            # ID 키와 이름 키는 **같은 표의 같은 행**에서 나온 같은 컴포넌트다 → 같은 canonical.
+            sc_canon = _canonical_swcom_id(sc_id)
             if sc_id:
-                _add_entry(sc_id, sc_asil, sc_related, sc_desc)
+                _add_entry(sc_id, sc_asil, sc_related, sc_desc, kind="component", canonical=sc_canon)
             if sc_name:
-                _add_entry(sc_name, sc_asil, sc_related, sc_desc)
+                _add_entry(sc_name, sc_asil, sc_related, sc_desc, kind="component", canonical=sc_canon)
             for fr in func_rows:
                 fn = fr["name"].rstrip("()").strip()
                 _add_entry(fn, sc_asil, sc_related, fr.get("desc", ""), kind="function")
@@ -830,9 +875,10 @@ def _extract_sds_partition_map(doc_path: str) -> Dict[str, Dict[str, str]]:
                 casil = cells[idx_comp_asil] if idx_comp_asil < len(cells) else ""
                 if cid and casil:
                     swcom_asil_map[cid.lower()] = casil
-                    _add_entry(cid, casil, "", "")
+                    cid_canon = _canonical_swcom_id(cid)
+                    _add_entry(cid, casil, "", "", kind="component", canonical=cid_canon)
                     if cname:
-                        _add_entry(cname, casil, "", "")
+                        _add_entry(cname, casil, "", "", kind="component", canonical=cid_canon)
             continue
 
         idx_name = _find_col(header_norm, [
@@ -860,28 +906,35 @@ def _extract_sds_partition_map(doc_path: str) -> Dict[str, Dict[str, str]]:
                         block[cells[attr_idx].lower()] = cells[cont_idx]
                 bid = block.get("id", "")
                 if bid and re.match(r"Sw\w+_\d+", bid):
+                    # Attribute/Contents 세로 블록 — `name` 은 상태명('initial'/'standby'/
+                    # 'auto close'), `id` 는 설계ID(SwFn_/SwSTR_/SwST_). 둘 다 컴포넌트가
+                    # 아니므로 밴드에서 제외한다(HDPDM01 실측 201개 중 131개가 여기서 왔다).
                     _add_entry(
                         block.get("name", bid),
                         block.get("asil", ""),
                         block.get("related id", block.get("related", "")),
                         block.get("description", "")[:500],
+                        kind="design_element",
                     )
                     _add_entry(
                         bid,
                         block.get("asil", ""),
                         block.get("related id", block.get("related", "")),
                         block.get("description", "")[:500],
+                        kind="design_id",
                     )
             continue
         for row in table.rows[1:]:
             cells = [c.text.strip() for c in row.cells]
             if idx_name >= len(cells):
                 continue
+            # 범용 표 폴백 — 헤더 이름만 맞은 미확인 행이라 컴포넌트로 단정할 수 없다.
             _add_entry(
                 cells[idx_name],
                 cells[idx_asil] if idx_asil >= 0 and idx_asil < len(cells) else "",
                 cells[idx_rel] if idx_rel >= 0 and idx_rel < len(cells) else "",
                 cells[idx_desc] if idx_desc >= 0 and idx_desc < len(cells) else "",
+                kind="table_row",
             )
 
     _asil_pat = re.compile(r"\bASIL[\s\-_]*([A-D](?:\s*\([A-D]\))?)\b|\bQM\b", re.I)
@@ -902,7 +955,7 @@ def _extract_sds_partition_map(doc_path: str) -> Dict[str, Dict[str, str]]:
         is_heading = hasattr(para, "style") and para.style and "heading" in str(para.style.name or "").lower()
         if heading_m or is_heading or swcom_m:
             if current_module and desc_buffer:
-                _add_entry(current_module, "", "", " ".join(desc_buffer).strip())
+                _add_entry(current_module, "", "", " ".join(desc_buffer).strip(), kind="heading")
                 desc_buffer = []
             candidate = heading_m.group(1).strip() if heading_m else txt
             candidate = re.sub(r"^\d+\.?\d*\.?\s*", "", candidate).strip()
@@ -914,17 +967,121 @@ def _extract_sds_partition_map(doc_path: str) -> Dict[str, Dict[str, str]]:
             asil_m = _asil_pat.search(txt)
             if asil_m:
                 asil_val = "QM" if asil_m.group(0).strip().upper().startswith("QM") else asil_m.group(1)[0].upper()
-                _add_entry(current_module, asil_val, "", "")
+                _add_entry(current_module, asil_val, "", "", kind="heading")
                 current_asil = asil_val
             req_ids = re.findall(r"\b(Sw(?:TR|TSR|NTR|NTSR|CNF|EI|ST|STR|Fn|TK)_\d+)\b", txt)
             if req_ids:
-                _add_entry(current_module, "", ", ".join(req_ids), "")
+                _add_entry(current_module, "", ", ".join(req_ids), "", kind="heading")
             if not asil_m and not req_ids and len(txt) > 10 and not txt.startswith(("Table", "Figure")):
                 desc_buffer.append(txt)
     if current_module and desc_buffer:
-        _add_entry(current_module, "", "", " ".join(desc_buffer).strip()[:500])
+        _add_entry(current_module, "", "", " ".join(desc_buffer).strip()[:500], kind="heading")
 
     return mapping
+
+
+# SDS Related ID 안의 요구/설계 ID 토큰. 내부 공백 허용("SwRS_ 001") — 두 라우터가
+# 각자 복제해 쓰던 정규식을 여기로 단일화했다.
+_SDS_RELATED_ID_RE = re.compile(r"Sw[A-Za-z]{2,}\s*_\s*\d+|Sy[A-Za-z]{2,}\s*_\s*\d+")
+
+
+def build_sds_component_maps(partition_map: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """SDS 파티션 맵 → 요구사항별 컴포넌트 맵. **SDS 밴드 판정의 단일 출처.**
+
+    `backend/routers/jenkins.py`(Jenkins 모드)와 `backend/routers/local.py`(로컬 모드)가
+    같은 판정을 복제하고 있던 것을 합쳤다. 복제 시절엔 한쪽만 고쳐져 모드 간 SDS 컴포넌트
+    수가 갈릴 수 있었다 — `scripts/_ratchet_core.py` 가 ruff/eslint ratchet 에서 같은
+    문제를 해결한 선례를 따른다.
+
+    반환 키:
+      ``req_to_comps``        요구ID → [컴포넌트+함수 **전체**]. 브리지 3종
+                              (``sds_func_to_reqs``/``design_to_reqs``/``comp_to_reqs``)이
+                              여기 의존하므로 **절대 줄이지 말 것**.
+      ``req_to_design_comps`` 요구ID → [실 SwCom/모듈만]. SDS 밴드 집계·표시용.
+                              같은 컴포넌트의 ID 키·이름 키는 canonical 로 접힌다.
+      ``req_to_folded_comps`` 요구ID → [접기로 사라진 **원 키**]. 소비처가 차집합
+                              (``sds_functions``)을 낼 때 여기 실린 키를 함께 빼야 한다.
+      ``component_asil``      컴포넌트/함수명(lower) → ASIL.
+      ``comp_set``            ``req_to_comps`` 에 실린 distinct 키.
+      ``design_comp_set``     ``req_to_design_comps`` 에 실린 distinct 표시 라벨.
+
+    ⚠ ``related`` 없는 엔트리는 두 맵 모두에서 탈락한다. 이 게이트 때문에 SDS 이름 집합은
+    **불완전**하며(하한선), Jenkins 경로의 ``_all_sds_keys``·``unmapped_sds_name_hit`` 은
+    그 하한선 위에서 계산된다. 로컬 경로는 ``generate_uds_traceability_matrix`` 를 호출하지
+    않아 이 인과가 성립하지 않는다. SDS 이름 완전 집합이 필요해지면 여기를 고친다.
+
+    ⚠ ``component_asil`` 만 게이트 **밖**에서 전 엔트리를 순회한다 — 요구의 component_id 가
+    related 없는 SwCom 정의 행을 가리킬 수 있기 때문(P5 ASIL 결합).
+
+    통합 전 두 라우터의 실측 차이는 ``if req_ids:`` 가드 유무 하나뿐이었고, 가드가 없는 쪽도
+    빈 리스트면 루프가 무동작이라 **맵 결과는 동치**다. 여기서는 가드 있는 쪽(jenkins)을 채택해
+    ``comp_set`` 의 의미("요구ID를 실제로 하나 이상 낳은 엔트리")를 보존한다.
+    """
+    req_to_comps: Dict[str, List[str]] = {}
+    req_to_design_comps: Dict[str, List[str]] = {}
+    req_to_folded_comps: Dict[str, List[str]] = {}
+    comp_set: Set[str] = set()
+    design_comp_set: Set[str] = set()
+    component_asil: Dict[str, str] = {}
+
+    for comp_key, info in (partition_map or {}).items():
+        if not isinstance(info, dict):
+            continue
+        casil = str(info.get("asil") or "").strip()
+        if casil:
+            component_asil[str(comp_key).strip().lower()] = casil
+
+    for comp_key, info in (partition_map or {}).items():
+        if not isinstance(info, dict):
+            continue
+        related = info.get("related", "")
+        if not related:
+            continue
+        req_ids = [_normalize_req_id(rid) for rid in _SDS_RELATED_ID_RE.findall(str(related))]
+        if not req_ids:
+            continue
+        # ⚠ **긍정형** 화이트리스트. 예전의 부정형(`kind != "function"`)이면 상태명·설계ID·
+        # 표 폴백 잔재가 전부 그대로 밴드를 통과한다.
+        # kind 부재(구 캐시·외부 주입) **와** 미등록 kind 문자열은 둘 다 `_SDS_DEFAULT_KIND`
+        # 로 흡수한다 — `_add_entry` 의 fail-safe 와 같은 규칙이어야 한다. 여기만 미지 kind 를
+        # 탈락시키면, 나중에 `_add_entry` 에 kind 를 추가하고 `_SDS_KIND_RANK` 등록을 잊었을 때
+        # 그 엔트리가 **경고 없이 밴드에서 사라진다**(밴드 제외는 등록이라는 명시 행위여야 한다).
+        _kind = str(info.get("kind") or "").strip().lower()
+        if _kind not in _SDS_KIND_RANK:
+            _kind = _SDS_DEFAULT_KIND
+        is_band = _kind in _SDS_BAND_KINDS
+        # 표시 라벨 = canonical(`SwCom_14`) 우선. 없으면 원 키 그대로 — SwCom 표에 없는
+        # 고아 이름이 조용히 사라지지 않게.
+        canon = str(info.get("canonical") or "").strip()
+        display = canon or comp_key
+        comp_set.add(comp_key)
+        if is_band:
+            design_comp_set.add(display)
+        for rid in req_ids:
+            bucket = req_to_comps.setdefault(rid, [])
+            if comp_key not in bucket:
+                bucket.append(comp_key)
+            if is_band:
+                dbucket = req_to_design_comps.setdefault(rid, [])
+                if display not in dbucket:
+                    dbucket.append(display)
+                # ⚠ 접기로 사라진 **원 키**를 반드시 남긴다. 이게 없으면 소비처의 차집합
+                #   (sds_components 를 뺀 나머지 = sds_functions)이 `swcom_14` 와
+                #   `door control` 을 **둘 다 함수로** 밀어 넣어 이중 계상된다.
+                #   canonical 이 원 키와 다르면 원 키 자신도 folded 대상이다(대소문자 불일치).
+                if canon and canon != comp_key:
+                    fbucket = req_to_folded_comps.setdefault(rid, [])
+                    if comp_key not in fbucket:
+                        fbucket.append(comp_key)
+
+    return {
+        "req_to_comps": req_to_comps,
+        "req_to_design_comps": req_to_design_comps,
+        "req_to_folded_comps": req_to_folded_comps,
+        "component_asil": component_asil,
+        "comp_set": comp_set,
+        "design_comp_set": design_comp_set,
+    }
 
 
 def _load_component_map() -> Dict[str, Dict[str, str]]:
@@ -2201,6 +2358,29 @@ def generate_uds_traceability_matrix(
                 dexisting.append(c)
         sds_comp_lookup[rid] = dexisting
 
+    # canonical 접기로 sds_components 에서 사라진 **원 키**. 차집합(sds_functions)에서 함께
+    # 빼지 않으면 `swcom_14`·`door control` 이 둘 다 인터페이스 함수로 이중 계상된다.
+    # 구 응답·구 캐시엔 이 필드가 없다 → 빈 set → 접기 이전 동작 그대로(회귀 없음).
+    sds_folded_lookup: Dict[str, List[str]] = {}
+    for row in (sds_pairs or []):
+        if not isinstance(row, dict):
+            continue
+        rid = _normalize_req_id(str(row.get("requirement_id") or ""))
+        if not rid:
+            continue
+        fcomps = row.get("folded_component_ids") or []
+        if isinstance(fcomps, str):
+            fcomps = [c.strip() for c in fcomps.split(",") if c.strip()]
+        elif isinstance(fcomps, list):
+            fcomps = [str(c).strip() for c in fcomps if str(c).strip()]
+        else:
+            fcomps = []
+        fexisting = sds_folded_lookup.get(rid, [])
+        for c in fcomps:
+            if c not in fexisting:
+                fexisting.append(c)
+        sds_folded_lookup[rid] = fexisting
+
     # ── Test rows: merge STS/SUTS/VectorCAST + SITS ──
     all_test_rows = list(vcast_rows or [])
     for row in (sits_rows or []):
@@ -2666,7 +2846,9 @@ def generate_uds_traceability_matrix(
         sds_list = sds_lookup.get(rid, [])              # 전체(함수 포함) — ASIL 롤업·내부용
         sds_comp_list = sds_comp_lookup.get(rid, [])    # 실 설계 컴포넌트만 — 표시/집계(추적 정화)
         _scomp_set = set(sds_comp_list)
-        sds_func_list = [c for c in sds_list if c not in _scomp_set]  # 인터페이스 함수(별도)
+        _folded_set = set(sds_folded_lookup.get(rid, []))   # canonical 로 접힌 원 키
+        sds_func_list = [c for c in sds_list
+                         if c not in _scomp_set and c not in _folded_set]  # 인터페이스 함수(별도)
         hsis_list = hsis_lookup.get(rid, [])            # HSIS 인터페이스 신호(시스템 레벨 design-arm)
         # ASIL 결합(P5) — 요구사항 ASIL = 연결된 SDS 컴포넌트·UDS 함수의 최고 ASIL.
         # 컴포넌트/함수명(lower)으로 comp_asil_map 조회. 맵 없거나 매칭 0이면 ''(graceful).
