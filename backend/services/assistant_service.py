@@ -582,17 +582,30 @@ def _retrieval_hints(
     question_type: str,
     report_dir: Optional[Path],
     ui_context: Optional[Dict[str, Any]],
+    notes_out: Optional[List[str]] = None,
 ) -> Tuple[str, List[str], List[Dict[str, Any]]]:
+    """근거 블록 텍스트 + sources + citations.
+
+    Args:
+        notes_out: 주면 검색 진단(KB 시맨틱 축 비활성 등)을 넣는다. 근거가 적거나 없을 때
+            **왜** 그런지를 사용자 응답(`retrieval_notes`)과 LLM 컨텍스트 양쪽에 전달하기
+            위한 채널이다 — "KB 가 비었음" 과 "검색이 동작 안 함" 은 다른 상황이다.
+    """
     started = time.perf_counter()
+    local_notes: List[str] = []
     hits = retrieve_contexts(
         question=question,
         question_type=question_type,
         report_dir=report_dir,
         ui_context=ui_context,
         top_k=6,
+        notes_out=local_notes,
     )
+    if notes_out is not None:
+        notes_out.extend(local_notes)
     if not hits:
-        return "", [], []
+        # hits 가 비어도 note 는 남긴다 — 진단이 사라지면 "근거 없음" 으로만 보인다.
+        return ("\n".join(f"- RET#note: {n}" for n in local_notes), [], [])
 
     lines: List[str] = []
     sources: List[str] = []
@@ -619,13 +632,17 @@ def _retrieval_hints(
         )
     if _CHAT_PERF_LOG:
         _chat_perf_logger.info(
-            "retrieval_hints report_dir=%s question_chars=%d hits=%d elapsed_ms=%.1f",
+            "retrieval_hints report_dir=%s question_chars=%d hits=%d elapsed_ms=%.1f notes=%d",
             report_dir,
             len(question or ""),
             len(lines),
             (time.perf_counter() - started) * 1000.0,
+            len(local_notes),
         )
-    return "\n".join(lines), sources, citations
+    # 진단은 근거 목록 **앞**에 둔다 — LLM 이 뒤쪽 컨텍스트를 절단할 수 있고, 근거의
+    # 신뢰 범위를 먼저 알아야 한다.
+    note_lines = [f"- RET#note: {n}" for n in local_notes]
+    return "\n".join(note_lines + lines), sources, citations
 
 
 def _call_mcp_tool(
@@ -961,7 +978,14 @@ def _build_context(
     progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
     graph_state: Optional[Any] = None,
     cancel_check: Optional[Callable[[], bool]] = None,
+    notes_out: Optional[List[str]] = None,
 ) -> Tuple[str, List[str], List[Dict[str, Any]]]:
+    """LLM 컨텍스트 블록 + sources + citations.
+
+    Args:
+        notes_out: 주면 검색 진단을 넣는다(반환 튜플 arity 는 유지 — additive).
+            응답의 `retrieval_notes` 로 사용자에게 전달된다.
+    """
     def _cancelled() -> bool:
         # 클라이언트 disconnect 시 남은 컨텍스트 블록 진입을 막아 좀비 작업 단축
         return bool(cancel_check and cancel_check())
@@ -1263,6 +1287,7 @@ def _build_context(
         question_type=question_type,
         report_dir=report_dir,
         ui_context=ui_context,
+        notes_out=notes_out,
     ) if (policy.get("include_kb") or question_type in ("code", "docs")) and not _cancelled() else ("", [], [])
     if retrieval_text:
         blocks.append(_format_block("retrieval", _trim_text(retrieval_text, max_chars=3500)))
@@ -1540,6 +1565,7 @@ def answer_chat(
             "sources": [],
             "citations": [],
             "evidence": [],
+            "retrieval_notes": [],
             "next_steps": [],
             "structured": {"answer": "", "evidence": [], "next_steps": []},
             "approval_required": False,
@@ -1565,6 +1591,10 @@ def answer_chat(
     context = ""
     prompt_chars = 0
     last_llm_error = ""
+    # 근거 검색 진단(KB 시맨틱 축 비활성 등) — 근거가 적거나 없을 때 **왜** 그런지를
+    # 응답의 `retrieval_notes` 로 사용자에게 알린다. 경고는 근거가 아니므로
+    # `evidence`/`citations` 에 섞지 않는다.
+    retrieval_notes: List[str] = []
 
     def _node_classify(_state):
         return {"intent": question_type}
@@ -1573,6 +1603,7 @@ def answer_chat(
         nonlocal context_elapsed_ms, sources, context, citations
         started = time.perf_counter()
         context, sources, citations = _build_context(
+            notes_out=retrieval_notes,
             mode=mode,
             question=question,
             report_dir=resolved_report_dir,
@@ -1738,6 +1769,7 @@ def answer_chat(
             "sources": sources,
             "citations": citations,
             "evidence": _build_evidence(citations=citations, sources=sources),
+            "retrieval_notes": list(retrieval_notes),
             "next_steps": _default_next_steps(question_type),
             "structured": {"answer": fallback, "evidence": [], "next_steps": _default_next_steps(question_type)},
             "approval_required": bool(state.approval_required),
@@ -1754,6 +1786,7 @@ def answer_chat(
             "sources": sources,
             "citations": citations,
             "evidence": _build_evidence(citations=citations, sources=sources),
+            "retrieval_notes": list(retrieval_notes),
             "next_steps": ["작업 내용을 검토합니다.", "승인 또는 거절을 선택합니다."],
             "approval_required": True,
             "approval_request": state.approval_request,
@@ -1838,6 +1871,7 @@ def answer_chat(
         "sources": sources,
         "citations": citations,
         "evidence": combined_evidence,
+        "retrieval_notes": list(retrieval_notes),
         "next_steps": next_steps,
         "approval_required": bool(state.approval_required),
         "approval_request": state.approval_request,

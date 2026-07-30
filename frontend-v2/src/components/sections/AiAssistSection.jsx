@@ -204,6 +204,7 @@ export default function AiAssistSection({ job, analysisResult }) {
             patchLastAssistant({
               content: r.answer || '(빈 응답)',
               evidence: r.evidence || [],
+              retrievalNotes: r.retrieval_notes || [],
               nextSteps: r.next_steps || [],
             });
           } else if (t === 'error') {
@@ -266,7 +267,8 @@ export default function AiAssistSection({ job, analysisResult }) {
     setMessages(prev => [...prev, { role: 'assistant', content: '', pending: true }]);
     try {
       const r = await post('/api/chat/approval/resolve', { approval_id: ap.approval_id, decision });
-      patchLastAssistant({ content: r.answer || '', evidence: r.evidence || [], nextSteps: r.next_steps || [] });
+      patchLastAssistant({ content: r.answer || '', evidence: r.evidence || [],
+        retrievalNotes: r.retrieval_notes || [], nextSteps: r.next_steps || [] });
     } catch (e) {
       toast('error', e.message);
       setMessages(prev => prev.slice(0, -1));
@@ -589,6 +591,10 @@ function ChatBubble({ message, onNextStep }) {
   const isUser = message.role === 'user';
   const evidence = Array.isArray(message.evidence) ? message.evidence : [];
   const nextSteps = Array.isArray(message.nextSteps) ? message.nextSteps : [];
+  // 근거 검색 진단(KB 시맨틱 축 비활성 등). 근거 목록은 <details> 로 접혀 있는데 접힘은
+  // 실패를 삼키므로, 이 경고는 **접지 않고 항상 노출**한다 — 근거가 적은 이유를 사용자가
+  // "KB 가 비었나 보다" 로 오독하지 않게 하는 유일한 표면이다.
+  const retrievalNotes = Array.isArray(message.retrievalNotes) ? message.retrievalNotes : [];
   return (
     <div style={{ display: 'flex', justifyContent: isUser ? 'flex-end' : 'flex-start' }}>
       <div style={{
@@ -611,6 +617,26 @@ function ChatBubble({ message, onNextStep }) {
         }}>
           {message.content || (message.pending ? '⋯' : '')}
         </div>
+
+        {/* 검색 진단 — 항상 노출(접지 않음). 근거의 신뢰 범위를 먼저 알려야 한다. */}
+        {!isUser && retrievalNotes.length > 0 && (
+          <div
+            role="status"
+            style={{
+              fontSize: 11,
+              lineHeight: 1.5,
+              padding: '6px 10px',
+              borderRadius: 6,
+              border: '1px solid var(--warning-border, var(--border))',
+              background: 'var(--warning-bg, var(--bg-subtle, var(--bg)))',
+              color: 'var(--warning-text, var(--text))',
+            }}
+          >
+            {retrievalNotes.map((note, i) => (
+              <div key={i}>⚠ {note}</div>
+            ))}
+          </div>
+        )}
 
         {/* 근거 (접이식) */}
         {!isUser && evidence.length > 0 && (

@@ -912,7 +912,7 @@ class KnowledgeBase:
         return get_embedding(text, meta_out=meta_out)
 
     @staticmethod
-    def _embed_provenance(meta: Dict[str, Any]) -> Dict[str, Any]:
+    def _embed_provenance(meta: Dict[str, Any], *, text_field: str = "") -> Dict[str, Any]:
         """저장 엔트리에 남길 임베딩 출처.
 
         `metadata` 는 이미 JSON 컬럼이라 **스키마 변경 없이** sqlite·JSON 파일·pgvector
@@ -922,13 +922,138 @@ class KnowledgeBase:
         왜 필요한가: 실측 결과 이 저장소의 실 KB 엔트리 102건이 전부 64차원 무작위 폴백
         벡터였는데, 엔트리 어디에도 그 사실이 없어 **사후에 구분할 방법이 없었다**. 벡터 길이로
         추정할 수는 있지만 그건 추정이고, 설정 dim 이 바뀌면 추정도 깨진다.
+
+        `text_field` 는 **어떤 필드의 값으로 임베딩했는지**를 남긴다. 재인덱싱(임베딩 백엔드가
+        바뀌었을 때 벡터를 다시 계산)이 이 정보 없이는 추측에 의존한다 — `learn` 은
+        `error_clean`, `add_document` 는 `context` 로 임베딩하는데 엔트리만 봐서는 구분이
+        어렵다. 없는 구 엔트리는 `reindex_embeddings` 가 휴리스틱을 쓰고 **그 건수를 보고**한다.
         """
         return {
             "source": meta.get("embed_source"),
             "model": meta.get("embed_model"),
             "dim": meta.get("embed_dim"),
             "degraded": bool(meta.get("degraded")),
+            "text_field": text_field,
         }
+
+    # ---------------- 재인덱싱 ----------------
+
+    _REINDEX_TEXT_FALLBACK = ("context", "error_clean", "fix")
+
+    def reindex_embeddings(
+        self,
+        *,
+        force: bool = False,
+        dry_run: bool = False,
+        limit: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """저장된 엔트리의 벡터를 **현재 임베딩 백엔드로 다시 계산**한다.
+
+        왜 필요한가: 임베딩 백엔드(Gemini 키 등)를 새로 붙여도 **기존 벡터는 그대로**다.
+        예전 벡터가 64차원 무작위 폴백이면 새 질의(768차원)와 차원이 달라
+        `semantic_search` 가 전량 제외한다 — 즉 백엔드를 붙여도 시맨틱 축이 복구되지 않고,
+        그 사실은 `semantic_skipped_dim_mismatch` 카운터에만 남는다. 이 저장소의 실 KB
+        102건이 정확히 그 상태였고 되살릴 경로가 **없었다**.
+
+        Args:
+            force: 이미 현재 model+dim 인 엔트리도 다시 계산. 백엔드가 **열화 상태**일 때도
+                진행(기본은 거부 — 무작위 벡터로 덮어쓰는 무의미한 쓰기를 막는다).
+            dry_run: 계산·쓰기 없이 무엇이 대상인지만 센다.
+            limit: 처리 상한(대용량 KB 를 나눠 돌릴 때).
+
+        Returns:
+            `{"total","reindexed","skipped_current","skipped_no_text","text_field_guessed",
+              "failed","dry_run","aborted_reason"}` — 건드리지 않은 건수도 전부 보고한다.
+        """
+        from workflow.rag.embedder import get_embed_dim, get_embed_model
+
+        stats: Dict[str, Any] = {
+            "total": 0, "reindexed": 0, "skipped_current": 0, "skipped_no_text": 0,
+            "text_field_guessed": 0, "failed": 0, "dry_run": bool(dry_run),
+            "aborted_reason": None,
+        }
+
+        # 백엔드가 열화면 재인덱싱은 무작위 벡터를 다시 쓰는 것뿐이다 — 거부하고 사유를 낸다.
+        probe: Dict[str, Any] = {}
+        self._get_embedding("embedding backend probe", meta_out=probe)
+        stats["backend_source"] = probe.get("embed_source")
+        stats["backend_dim"] = probe.get("embed_dim")
+        if probe.get("degraded") and not force:
+            stats["aborted_reason"] = (
+                f"임베딩 백엔드가 열화 상태({probe.get('embed_source')}) — 재인덱싱해도 "
+                "무작위 벡터를 다시 쓸 뿐이다. 백엔드를 설정하거나 force=True 로 강제할 것."
+            )
+            _rag_logger.warning("reindex_embeddings 중단: %s", stats["aborted_reason"])
+            return stats
+
+        cur_model, cur_dim = get_embed_model(), get_embed_dim()
+        with self._lock:
+            targets = [dict(e) for e in self.data]
+        stats["total"] = len(targets)
+
+        for entry in targets:
+            if limit is not None and stats["reindexed"] >= limit:
+                break
+            meta = entry.get("metadata") or {}
+            prev = meta.get("embed") or {}
+            if (not force and not prev.get("degraded")
+                    and prev.get("model") == cur_model and prev.get("dim") == cur_dim):
+                stats["skipped_current"] += 1
+                continue
+
+            field = str(prev.get("text_field") or "")
+            if not field:
+                # 구 엔트리 — 어느 필드로 임베딩했는지 기록이 없다. 휴리스틱을 쓰되 센다.
+                field = next(
+                    (f for f in self._REINDEX_TEXT_FALLBACK if str(entry.get(f) or "").strip()),
+                    "",
+                )
+                if field:
+                    stats["text_field_guessed"] += 1
+            text = str(entry.get(field) or "").strip() if field else ""
+            if not text:
+                stats["skipped_no_text"] += 1
+                continue
+            if dry_run:
+                stats["reindexed"] += 1
+                continue
+
+            try:
+                new_meta: Dict[str, Any] = {}
+                vec = self._get_embedding(text, meta_out=new_meta)
+                if not vec:
+                    stats["failed"] += 1
+                    continue
+                entry["vector"] = vec
+                entry["metadata"] = {
+                    **meta,
+                    "embed": self._embed_provenance(new_meta, text_field=field),
+                }
+                self._persist_entry(entry)
+                # 메모리 상의 엔트리도 갱신 — 다음 검색이 새 벡터를 쓰게 한다.
+                with self._lock:
+                    for live in self.data:
+                        if live.get("id") == entry.get("id"):
+                            live["vector"] = entry["vector"]
+                            live["metadata"] = entry["metadata"]
+                            break
+                stats["reindexed"] += 1
+            except Exception:
+                _rag_logger.warning("엔트리 %s 재인덱싱 실패", entry.get("id"), exc_info=True)
+                stats["failed"] += 1
+
+        _rag_logger.info("reindex_embeddings: %s", stats)
+        return stats
+
+    def _persist_entry(self, entry: Dict[str, Any]) -> None:
+        """엔트리 1건을 디스크 + DB 양쪽에 반영(재인덱싱용)."""
+        sf = str(entry.get("source_file") or "") or f"{entry.get('id')}.json"
+        entry["source_file"] = sf
+        self._write_atomic(self.base_dir / sf, entry)
+        if self.storage == "pgvector":
+            self._pg_upsert(entry)
+        else:
+            self._db_upsert(entry)
 
     # ---------------- 퍼블릭 API ----------------
 
@@ -942,9 +1067,16 @@ class KnowledgeBase:
         stage: Optional[str] = None,
         categories: Optional[List[str]] = None,
         category: Optional[str] = None,
+        stats_out: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
         """
         에러 메시지를 기반으로 과거 성공 패턴 검색
+
+        Args:
+            stats_out: 주면 검색 진단을 기록한다(additive — 기존 호출 9곳 무영향).
+                `semantic_disabled_reason` 이 채워지면 시맨틱 축이 동작하지 않은 것이고,
+                결과는 keyword 근거만이다. 소비처가 "근거 없음" 과 구분할 수 있어야 한다
+                (`workflow/rag/searcher.py::semantic_search` 참조).
         """
         started = _time.perf_counter()
 
@@ -956,7 +1088,17 @@ class KnowledgeBase:
             # pgvector: 기존 DB 레벨 검색 유지 (self.data 미사용)
             query = _normalize_message(error_msg)
             req_ids = _extract_req_ids_from_text(query)
-            q_vec = self._get_embedding(query)
+            pg_meta: Dict[str, Any] = {}
+            q_vec = self._get_embedding(query, meta_out=pg_meta)
+            if stats_out is not None:
+                # pgvector 경로는 DB 레벨 벡터 검색이라 searcher 를 안 거친다 —
+                # 열화 판정을 여기서 직접 옮겨 적는다(판정 자체는 embedder 단일 출처).
+                stats_out["query_embed_source"] = pg_meta.get("embed_source")
+                stats_out["query_embed_dim"] = pg_meta.get("embed_dim")
+                stats_out["semantic_disabled_reason"] = (
+                    f"degraded_query_embedding:{pg_meta.get('embed_source')}"
+                    if pg_meta.get("degraded") else None
+                )
             rows = self._pg_search(
                 q_vec,
                 query=query,
@@ -982,17 +1124,20 @@ class KnowledgeBase:
                 snap, query, top_k,
                 tags=tags, role=role, stage=stage,
                 categories=norm_cats or None,
+                stats_out=stats_out,
             )
 
         if _RAG_PERF_LOG:
             _rag_logger.info(
-                "rag_search storage=%s entries=%d query_chars=%d top_k=%d hits=%d elapsed_ms=%.1f",
+                "rag_search storage=%s entries=%d query_chars=%d top_k=%d hits=%d elapsed_ms=%.1f%s",
                 self.storage,
                 entries_n,
                 len(query),
                 top_k,
                 len(rows),
                 (_time.perf_counter() - started) * 1000.0,
+                (f" semantic_disabled={stats_out.get('semantic_disabled_reason')}"
+                 if stats_out and stats_out.get("semantic_disabled_reason") else ""),
             )
         return rows
 

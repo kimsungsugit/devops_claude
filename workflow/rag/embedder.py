@@ -24,7 +24,7 @@ import os
 import threading
 import time
 from collections import OrderedDict
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -32,6 +32,43 @@ _logger = logging.getLogger("workflow.rag.embedder")
 
 # 의미 신호가 없는 출처 — 이 벡터로 만든 랭킹은 랭킹이 아니다(판정 단일 출처).
 _DEGRADED_SOURCES = frozenset({"random"})
+
+# 재시도: 실패하면 체인이 무작위 벡터로 내려가고 `learn()` 은 그걸 **영구 저장**한다.
+# 즉 일시적 429/503 하나가 KB 엔트리를 영구 오염시킨다(`_embed_http` 는 원래 2회였다).
+_EMBED_ATTEMPTS = 3
+_EMBED_RETRY_SLEEP = 1.0
+
+
+def _get_max_input_chars() -> int:
+    """임베딩 입력 상한(문자). text-embedding-004 는 2048 토큰이 상한이다.
+
+    상한을 넘기면 API 가 거부하고, 체인은 그걸 **무작위 벡터**로 갈음한다 — 즉 "너무 길다"가
+    "의미 없는 벡터"로 조용히 바뀐다. 예전엔 길이 가드가 **전무**했다(패턴 검색 0건).
+    실측: 저장소 실 KB 의 임베딩 입력은 최대 4,000자였으나 `add_document` 는 임의 길이를
+    받는다.
+    """
+    try:
+        import config
+        return int(getattr(config, "RAG_EMBED_MAX_INPUT_CHARS", 6000))
+    except Exception:  # silent-ok: config 부재/파싱 실패 시 문서화된 기본값으로 진행.
+        # 이 모듈의 다른 config 리더(`get_embed_dim`·`_get_cache_max`)와 같은 규약이며,
+        # 상한을 못 읽는 것 자체가 판정을 바꾸지 않는다(절단이 발생하면 별도로 경고한다).
+        return 6000
+
+
+def _clip_input(text: str, *, reasons: Optional[List[str]] = None) -> str:
+    """상한 초과 시 **자르고 보고**한다. 침묵 절단이 아니라 기록되는 절단이다."""
+    limit = _get_max_input_chars()
+    if limit <= 0 or len(text) <= limit:
+        return text
+    _logger.warning(
+        "임베딩 입력이 상한을 넘어 잘랐다: %d자 → %d자. 뒷부분은 벡터에 반영되지 않는다 "
+        "(자르지 않으면 API 가 거부하고 무작위 벡터로 떨어진다).",
+        len(text), limit,
+    )
+    if reasons is not None:
+        reasons.append(f"input_truncated: {len(text)}자 → {limit}자")
+    return text[:limit]
 
 # ---- 모듈 레벨 캐시 ----
 _embed_cache: OrderedDict[str, List[float]] = OrderedDict()
@@ -111,15 +148,59 @@ def get_embed_model() -> str:
 # 1. Gemini Embedding
 # ==============================================================
 
+def resolve_google_api_key() -> Tuple[str, str]:
+    """Gemini/Google 키를 **`llm_call` 과 같은 출처들**에서 해석한다.
+
+    ⚠ 이 함수가 생긴 이유 — 실측된 라이브 결함:
+    이 저장소의 Gemini 키는 `OAI_CONFIG_LIST` 에 있고(2건, len 39) **env 는 전부 비어
+    있다**. 그런데 embedder 는 env 만 읽었으므로 클라이언트 생성이 항상 실패해
+    HTTP→local→**무작위 벡터**로 떨어졌다. 그 결과 저장소 실 KB 102건의 벡터가 전부
+    난수였다. `workflow/ai.py::llm_call` 은 같은 키를 `cfg["api_key"]` 로 읽어 정상
+    동작했다 — **같은 자격증명, 두 개의 해석기, 한쪽만 조용히 실패**한 경우다.
+
+    (앞선 라운드에서 이 상태를 "Gemini 키 부재" 로 적었는데 사실이 아니었다. 키는 있고,
+    embedder 가 있는 곳을 안 봤다.)
+
+    Returns:
+        `(api_key, source)` — source 는 `"env:NAME"` / `"oai_config"` / `""`(못 찾음).
+    """
+    for name in ("GEMINI_API_KEY", "GOOGLE_API_KEY"):
+        v = str(os.environ.get(name) or "").strip()
+        if v:
+            return v, f"env:{name}"
+    # env 에 없으면 llm_call 이 쓰는 정본 로더를 그대로 쓴다(경로·캐시·파싱 규칙 공유).
+    try:
+        from workflow.ai import load_oai_configs
+        for cfg in load_oai_configs(None) or []:
+            if not isinstance(cfg, dict):
+                continue
+            model = str(cfg.get("model") or "").lower()
+            api_type = str(cfg.get("api_type") or cfg.get("provider") or "").lower()
+            if "gemini" not in model and "goog" not in api_type:
+                continue
+            v = str(cfg.get("api_key") or "").strip()
+            if v:
+                return v, "oai_config"
+    except Exception as e:   # noqa: BLE001 - 키 해석 실패는 폴백 사유로 보고만 한다
+        _logger.debug("oai_config 에서 Gemini 키 해석 실패: %s", e)
+    return "", ""
+
+
 def _init_gemini_client():
     """Gemini 클라이언트 초기화 (lazy)."""
     global _gemini_client
     if _gemini_client is not None:
         return _gemini_client
 
-    api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY", "")
+    api_key, key_source = resolve_google_api_key()
     if not api_key:
+        _logger.warning(
+            "Gemini 임베딩 키를 못 찾았다 (env GEMINI_API_KEY/GOOGLE_API_KEY 및 "
+            "OAI_CONFIG_LIST 모두) — 폴백 체인으로 내려간다. 최후 폴백은 무작위 벡터라 "
+            "시맨틱 검색이 무효가 된다."
+        )
         return None
+    _logger.info("Gemini 임베딩 키 출처: %s", key_source)
 
     try:
         from google import genai  # 신 SDK (google-genai)
@@ -134,29 +215,51 @@ def _init_gemini_client():
         return None
 
 
-def _embed_gemini(text: str) -> Optional[List[float]]:
-    """Gemini text-embedding-004로 단일 텍스트 임베딩."""
+def _embed_gemini(text: str, *, reasons: Optional[List[str]] = None) -> Optional[List[float]]:
+    """Gemini text-embedding-004로 단일 텍스트 임베딩.
+
+    ⚠ **재시도가 필수인 이유**: 실패하면 체인이 HTTP→local→**무작위 벡터**로 내려가고,
+    `learn()` 경로에서는 그 무작위 벡터가 **영구 저장**된다. 즉 일시적인 429/503 하나가
+    KB 엔트리를 영구히 오염시킨다. 예전엔 재시도가 0회였다(`_embed_http` 는 2회였는데
+    정작 1순위 백엔드만 없었다).
+
+    Args:
+        reasons: 주면 실패 사유를 누적한다 — "왜 무작위로 떨어졌는지" 를 추적 가능하게.
+    """
     client = _init_gemini_client()
     if client is None:
+        if reasons is not None:
+            reasons.append("gemini: 클라이언트 없음(키 미해석 또는 SDK 미설치)")
         return None
 
     model = get_embed_model()
-    try:
-        # 신 SDK: client.models.embed_content()
-        response = client.models.embed_content(
-            model=model,
-            contents=text,
-            config={"task_type": "RETRIEVAL_DOCUMENT"},
-        )
-        emb = getattr(response, "embedding", None)
-        if emb is None and hasattr(response, "embeddings") and response.embeddings:
-            emb = response.embeddings[0]
-        if emb:
-            return [float(v) for v in emb]
-        return None
-    except Exception as e:
-        _logger.warning("Gemini embedding failed: %s", e)
-        return None
+    text = _clip_input(text, reasons=reasons)
+    last_err = ""
+    for attempt in range(_EMBED_ATTEMPTS):
+        try:
+            # 신 SDK: client.models.embed_content()
+            response = client.models.embed_content(
+                model=model,
+                contents=text,
+                config={"task_type": "RETRIEVAL_DOCUMENT"},
+            )
+            emb = getattr(response, "embedding", None)
+            if emb is None and hasattr(response, "embeddings") and response.embeddings:
+                emb = response.embeddings[0]
+            if emb:
+                return [float(v) for v in emb]
+            last_err = "응답에 embedding 이 없음"
+            break   # 형식 문제는 재시도해도 같다
+        except Exception as e:
+            last_err = f"{type(e).__name__}: {e}"
+            if attempt < _EMBED_ATTEMPTS - 1:
+                _logger.warning("Gemini embedding 실패(%d/%d), 재시도: %s",
+                                attempt + 1, _EMBED_ATTEMPTS, last_err)
+                time.sleep(_EMBED_RETRY_SLEEP * (attempt + 1))
+    _logger.warning("Gemini embedding 최종 실패: %s", last_err)
+    if reasons is not None:
+        reasons.append(f"gemini: {last_err}")
+    return None
 
 
 def _embed_gemini_batch(texts: List[str]) -> Optional[List[List[float]]]:
@@ -174,7 +277,9 @@ def _embed_gemini_batch(texts: List[str]) -> Optional[List[List[float]]]:
 
     all_vecs: List[List[float]] = []
     for i in range(0, len(texts), batch_size):
-        batch = texts[i:i + batch_size]
+        # 단건 경로(`_embed_gemini`)와 **같은 상한**을 적용한다. 한쪽만 자르면 같은 텍스트가
+        # 배치에서는 API 거부(→무작위), 단건에서는 절단으로 갈려 결과가 경로에 따라 달라진다.
+        batch = [_clip_input(t) for t in texts[i:i + batch_size]]
         try:
             # 신 SDK 배치 임베딩
             response = client.models.embed_content(
@@ -206,29 +311,41 @@ def _embed_gemini_batch(texts: List[str]) -> Optional[List[List[float]]]:
 # 2. External HTTP API (기존 KB_EMBED_URL)
 # ==============================================================
 
-def _embed_http(text: str) -> Optional[List[float]]:
+def _embed_http(text: str, *, reasons: Optional[List[str]] = None) -> Optional[List[float]]:
     """외부 HTTP API로 임베딩 (기존 호환)."""
     embed_url = os.environ.get("KB_EMBED_URL", "").strip()
     if not embed_url:
+        if reasons is not None:
+            reasons.append("http: KB_EMBED_URL 미설정")
         return None
 
     try:
         import requests  # type: ignore
     except ImportError:
+        if reasons is not None:
+            reasons.append("http: requests 미설치")
         return None
 
+    text = _clip_input(text, reasons=reasons)
+    last_err = ""
     for attempt in range(2):
         try:
             resp = requests.post(embed_url, json={"text": text}, timeout=5)
             resp.raise_for_status()
             vec = resp.json().get("vector") or []
-            return [float(v) for v in vec] if vec else None
+            if vec:
+                return [float(v) for v in vec]
+            last_err = "응답에 vector 가 없음"
+            break
         except Exception as e:
+            last_err = f"{type(e).__name__}: {e}"
             if attempt == 0:
                 _logger.warning("HTTP embedding failed (attempt 1), retrying: %s", e)
                 time.sleep(1.5)
 
-    _logger.warning("HTTP embedding failed after retries")
+    _logger.warning("HTTP embedding failed after retries: %s", last_err)
+    if reasons is not None:
+        reasons.append(f"http: {last_err}")
     return None
 
 
@@ -236,11 +353,13 @@ def _embed_http(text: str) -> Optional[List[float]]:
 # 3. Local sentence-transformers
 # ==============================================================
 
-def _embed_local(text: str) -> Optional[List[float]]:
+def _embed_local(text: str, *, reasons: Optional[List[str]] = None) -> Optional[List[float]]:
     """sentence-transformers 로컬 모델."""
     global _st_model, _st_model_tried
 
     if _st_model_tried and _st_model is None:
+        if reasons is not None:
+            reasons.append("local: 앞선 시도에서 로드 실패(재시도 안 함)")
         return None
 
     if _st_model is None:
@@ -251,9 +370,13 @@ def _embed_local(text: str) -> Optional[List[float]]:
             _logger.info("Loaded local embedding model: all-MiniLM-L6-v2 (384dim)")
         except ImportError:
             _logger.debug("sentence-transformers not installed")
+            if reasons is not None:
+                reasons.append("local: sentence-transformers 미설치")
             return None
         except Exception as e:
             _logger.warning("Failed to load local model: %s", e)
+            if reasons is not None:
+                reasons.append(f"local: 모델 로드 실패 {type(e).__name__}: {e}")
             return None
 
     try:
@@ -261,6 +384,8 @@ def _embed_local(text: str) -> Optional[List[float]]:
         return [float(v) for v in vec]
     except Exception as e:
         _logger.warning("Local embedding failed: %s", e)
+        if reasons is not None:
+            reasons.append(f"local: {type(e).__name__}: {e}")
         return None
 
 
@@ -291,7 +416,8 @@ def _embed_random(text: str, dim: int = 64) -> List[float]:
 # Public API
 # ==============================================================
 
-def _note_embed(meta_out: Optional[Dict[str, Any]], source: str, vec: List[float]) -> None:
+def _note_embed(meta_out: Optional[Dict[str, Any]], source: str, vec: List[float],
+                *, reasons: Optional[List[str]] = None) -> None:
     """임베딩 출처를 표준 키로 기록한다 — **degraded 판정의 단일 출처**.
 
     `degraded=True` 는 "이 벡터에 의미 신호가 없다"는 뜻이다. 판정을 소비처마다 복제하면
@@ -306,6 +432,10 @@ def _note_embed(meta_out: Optional[Dict[str, Any]], source: str, vec: List[float
     # 설정 모델명이 곧 그 벡터의 모델이다.
     meta_out["embed_model"] = get_embed_model() if source in ("gemini", "cache") else source
     meta_out["degraded"] = source in _DEGRADED_SOURCES
+    # 왜 이 출처로 떨어졌는지 — `degraded=True` 만으로는 "키 미해석"·"429"·"입력 초과"를
+    # 구분할 수 없어 운영자가 고칠 수 없다.
+    if reasons:
+        meta_out["embed_fallback_reasons"] = list(reasons)
 
 
 def get_embedding(text: str, *, meta_out: Optional[Dict[str, Any]] = None) -> List[float]:
@@ -313,7 +443,8 @@ def get_embedding(text: str, *, meta_out: Optional[Dict[str, Any]] = None) -> Li
 
     Args:
         meta_out: 주면 임베딩 **출처**를 기록한다(additive — 기존 호출 9곳 무영향).
-                  `{"embed_source","embed_model","embed_dim","degraded"}`.
+                  `{"embed_source","embed_model","embed_dim","degraded"}` +
+                  폴백이 일어났으면 `embed_fallback_reasons`(왜 내려갔는지).
                   `degraded=True` 는 무작위 폴백 = 의미 신호 없음 → 랭킹에 쓰면 안 된다.
 
     Returns:
@@ -329,32 +460,34 @@ def get_embedding(text: str, *, meta_out: Optional[Dict[str, Any]] = None) -> Li
         _note_embed(meta_out, "cache", cached)
         return cached
 
+    reasons: List[str] = []
+
     # 1) Gemini
-    vec = _embed_gemini(text)
+    vec = _embed_gemini(text, reasons=reasons)
     if vec:
         _cache_put(text, vec)
-        _note_embed(meta_out, "gemini", vec)
+        _note_embed(meta_out, "gemini", vec, reasons=reasons)
         return vec
 
     # 2) External HTTP
-    vec = _embed_http(text)
+    vec = _embed_http(text, reasons=reasons)
     if vec:
         _cache_put(text, vec)
-        _note_embed(meta_out, "http", vec)
+        _note_embed(meta_out, "http", vec, reasons=reasons)
         return vec
 
     # 3) Local model
-    vec = _embed_local(text)
+    vec = _embed_local(text, reasons=reasons)
     if vec:
         _cache_put(text, vec)
-        _note_embed(meta_out, "local", vec)
+        _note_embed(meta_out, "local", vec, reasons=reasons)
         return vec
 
     # 4) Random fallback — 의미 신호 없음. 캐시하지 않는다(`degraded=True` 표시가 캐시
     #    히트에서 소멸하는 것을 막는다). 재계산은 blake2b seed 라 저렴하고 결정적이다.
     vec = _embed_random(text, dim=64)
     _cache_put(text, vec, degraded=True)
-    _note_embed(meta_out, "random", vec)
+    _note_embed(meta_out, "random", vec, reasons=reasons)
     return vec
 
 

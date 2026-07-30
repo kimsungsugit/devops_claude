@@ -393,6 +393,73 @@ gate_pass = all(m.get("gate_pass", True) for m in metrics if m.get("gate_pass") 
 
 ---
 
+## 5-5. RAG 근본 원인 + 재인덱싱 + 진단 배선 — ✅ 완료 (2026-07-30)
+
+§5-3 에서 "실 KB 102건이 전부 무작위 벡터" 를 고쳤지만 **왜 그렇게 됐는지**는 틀리게 적었다.
+
+### ⚠ 앞선 판정 정정 — "Gemini 키 부재" 가 아니었다
+
+키는 **실재한다**. `OAI_CONFIG_LIST` 에 2건(len 39) 있고 **env 는 전부 비어 있다**:
+
+| 경로 | 키를 어디서 읽나 | 결과 |
+|---|---|---|
+| `workflow/ai.py::llm_call` | `cfg["api_key"]` (`load_oai_configs`) | **정상 동작** |
+| `workflow/rag/embedder.py` | `os.environ` **만** | 클라이언트 생성 실패 → HTTP → local → **무작위 벡터** |
+
+**같은 자격증명 · 두 개의 해석기 · 한쪽만 조용히 실패.** 이게 KB 가 난수였던 근본 원인이고,
+"키가 없다" 는 내 판정은 사실이 아니었다. 앞선 라운드 커밋 메시지·§5-3 의 "(Gemini 키 부재)"
+표기는 이 절로 정정한다.
+
+### 그 밖에 실측된 격차
+
+| 항목 | 옛 상태 |
+|---|---|
+| `_embed_gemini` 재시도 | **0회**(`_embed_http` 는 2회) — 일시적 429 하나가 `learn()` 엔트리를 **영구** 오염 |
+| 입력 길이 가드 | **전무**(`max_input`·`[:N]`·`truncat`·`2048` 패턴 전부 0건) — 상한 초과 → API 거부 → 무작위 벡터 |
+| 폴백 사유 | 미기록 — `degraded=True` 만 있어 "키 미해석"·"429"·"입력 초과" 구분 불가 |
+| 재인덱싱 경로 | **없음** — 백엔드를 붙여도 기존 64차원 벡터가 남아 dim mismatch 로 전량 제외 |
+
+### 수정 (3건 한 묶음)
+
+**#1 진단을 사용자까지 배선** — `KnowledgeBase.search(stats_out=)` → `_report_hits(notes_out=)`
+→ `retrieve_contexts` → `_retrieval_hints` → 응답 `retrieval_notes` + LLM 컨텍스트
+(`RET#note` 를 근거 **앞**에 둔다 — 뒤쪽은 절단될 수 있고 신뢰 범위를 먼저 알아야 한다) →
+프론트 `AiAssistSection` 경고 배너. **경고는 근거가 아니므로 `evidence`/`citations` 에 섞지
+않았고**, 근거 목록이 `<details>` 로 접혀 있어 **접지 않고 항상 노출**한다.
+`_report_hits` 의 `stats_out` 미지원 TypeError 폴백은 **일부러 두지 않았다** — 두면 stub
+불일치가 조용히 "진단 없음" 으로 삼켜진다(실제로 이 결정이 테스트 19건을 요란하게 깨뜨려
+stub 3종을 고치게 만들었다 = 의도한 동작).
+
+**#2 재인덱싱** — `KnowledgeBase.reindex_embeddings(force/dry_run/limit)` +
+`scripts/reindex_kb.py` CLI. 백엔드가 **열화 상태면 거부**(무작위 벡터를 다시 쓰는 무의미한
+쓰기 방지, `force` 로 우회 가능). 멱등(두 번째는 전량 skip). `metadata.embed.text_field` 를
+신설해 어느 필드로 임베딩했는지 기록 — 구 엔트리는 휴리스틱을 쓰고 **그 건수를 보고**한다.
+
+**#3 egress 격차** — `resolve_google_api_key()`(env → `load_oai_configs` 동일 출처),
+Gemini 재시도 3회, `_clip_input`(상한 초과 시 **자르고 보고**, 단건·배치 **같은 상한**),
+`embed_fallback_reasons`(어느 백엔드가 왜 실패했는지).
+
+### 실측 (수정 후)
+
+| 검증 | 결과 |
+|---|---|
+키 해석 | `('설정됨 len=39', 'oai_config')` — env 없이도 찾는다 |
+재시도 | API 호출 1회 → **3회**, 사유 기록됨 |
+입력 상한 | 20,000자 → 6,000자 + `input_truncated` 사유 |
+폴백 사유 | gemini/http/local **3건 전부** 기록 |
+재인덱싱 | 실 KB 20건: 64차원 → 8차원 전량 교체, 출처 각인, 2회차 전량 skip |
+**재인덱싱 효과** | 시맨틱 검색 **0건 → 5건**, `dim_mismatch 20 → 0` |
+
+### 검증
+
+- 새 테스트 27건 (`test_rag_egress_and_reindex.py`) — **뮤테이션 6/6**
+  (키 폴백 / 재시도 루프 / 배치 상한 / 열화 거부 가드 / 벡터 교체 / note 생성)
+- 음성 대조군 5건 — 정상 키·1회 성공·상한 미만·정상 백엔드·정상 검색에서 부작용 없음
+- **스텁 시그니처 회귀 19건**을 내 변경이 드러냈고 3종(`_embed_*` lambda, `_FakeKB.search`,
+  `get_embedding`) 전부 실제 시그니처로 미러링
+
+---
+
 ## 6. 다음 라운드 후보
 
 | # | 대상 | 이유 |
@@ -401,9 +468,12 @@ gate_pass = all(m.get("gate_pass", True) for m in metrics if m.get("gate_pass") 
 | ~~2~~ | ~~`report_gen/` DOCX 라이터 대조 (P2)~~ | ✅ 완료 — 아래 별도 절 |
 | ~~3~~ | ~~`impact_orchestrator.py:135` (P0 잔여)~~ | ✅ 완료 — 위 P0 참조 |
 | ~~4~~ | ~~LLM redaction + 모델 echo 대조~~ | ✅ 완료 — §5-1 L4/L6 |
-| 🟡 5 | 3개 egress 경로 통합 | **부분 완료(L5 + §5-3, 2026-07-30)** — 어댑터 3종이 절단·모델 검사를 공유하고(`_completion_meta` → `ai.py` 단일 출처), `rag/embedder.py` 는 출처·열화를 보고한다. **잔여: 예산·재시도·stage cap 공유**(embedder 는 여전히 자체 client·자체 키 해석) |
-| 6 | `stats_out` 을 UI 까지 배선 | `semantic_disabled_reason` 이 지금은 로그 경고에만 뜬다. assistant 응답에 "KB 시맨틱 검색 비활성(임베딩 백엔드 없음)" 을 표시하면 사용자가 근거 부재를 오해하지 않는다. SSE payload shape 변경이라 별건 |
-| 7 | 실 KB 재인덱싱 | 지금 KB 102건은 전부 난수 벡터라 시맨틱 축이 통째로 무용이다. 임베딩 백엔드를 붙이면 **기존 엔트리는 여전히 64차원**이라 dim mismatch 로 전량 제외된다 — 재인덱싱 경로가 없다(운영 결정 필요) |
+| ~~5~~ | ~~3개 egress 경로 통합~~ | ✅ 완료 — §5-5. 키 해석 단일화(근본 원인)·재시도·입력 상한·폴백 사유. **잔여: 토큰 예산·stage cap 공유**(임베딩은 단발 호출이라 예산 개념이 llm_call 과 다름 — 별건) |
+| ~~6~~ | ~~`stats_out` 을 UI 까지 배선~~ | ✅ 완료 — §5-5 #1 (`retrieval_notes` 신규 응답 키 + 프론트 경고 배너) |
+| ~~7~~ | ~~실 KB 재인덱싱~~ | ✅ 완료 — §5-5 #2 (`reindex_embeddings` + `scripts/reindex_kb.py`). **운영 조치 남음**: 실 KB 에 실제로 돌려야 시맨틱 축이 복구된다(`--dry-run` 먼저) |
+| 8 | UTCV-001 잔여 | `applicable` 정책축·커버리지 예외 disposition. 이 저장소에 해당 축이 **존재하지 않아** 신규 기능 개발이다(결함 수정 아님) — 사용자 판단 필요 |
+| 9 | 템플릿↔소스 프로젝트 불일치 | 소스 900함수 중 271개만 HDPDM01 템플릿에 존재(629건=69.9% 부재). 의도된 부분집합인지 오배치인지는 프로젝트 설정 판단이 필요해 `ok` verdict 는 뒤집지 않고 수치만 노출해 둔 상태 |
+| 10 | `workflow/ai_validator.py` | dead code(호출자 0). 살릴지 지울지는 정책 결정 — 사용자 몫으로 남김 |
 
 ---
 

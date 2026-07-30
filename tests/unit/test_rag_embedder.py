@@ -180,9 +180,9 @@ class TestGetEmbedding:
     def test_fallback_returns_vector(self, monkeypatch):
         """With all external backends disabled, should fall back to random."""
         from workflow.rag import embedder
-        monkeypatch.setattr(embedder, "_embed_gemini", lambda t: None)
-        monkeypatch.setattr(embedder, "_embed_http", lambda t: None)
-        monkeypatch.setattr(embedder, "_embed_local", lambda t: None)
+        monkeypatch.setattr(embedder, "_embed_gemini", lambda t, reasons=None: None)
+        monkeypatch.setattr(embedder, "_embed_http", lambda t, reasons=None: None)
+        monkeypatch.setattr(embedder, "_embed_local", lambda t, reasons=None: None)
         embedder._embed_cache.clear()
         vec = embedder.get_embedding("test input")
         assert len(vec) == 64  # random fallback dim

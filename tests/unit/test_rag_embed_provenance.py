@@ -29,9 +29,9 @@ import pytest
 class TestEmbedProvenance:
     def _isolate(self, monkeypatch, *, gemini=None, http=None, local=None):
         from workflow.rag import embedder
-        monkeypatch.setattr(embedder, "_embed_gemini", lambda t: gemini)
-        monkeypatch.setattr(embedder, "_embed_http", lambda t: http)
-        monkeypatch.setattr(embedder, "_embed_local", lambda t: local)
+        monkeypatch.setattr(embedder, "_embed_gemini", lambda t, reasons=None: gemini)
+        monkeypatch.setattr(embedder, "_embed_http", lambda t, reasons=None: http)
+        monkeypatch.setattr(embedder, "_embed_local", lambda t, reasons=None: local)
         embedder._embed_cache.clear()
         return embedder
 
@@ -117,9 +117,9 @@ class TestBatchProvenance:
         """
         from workflow.rag import embedder
         monkeypatch.setattr(embedder, "_embed_gemini_batch", lambda ts: None)
-        monkeypatch.setattr(embedder, "_embed_gemini", lambda t: None)
-        monkeypatch.setattr(embedder, "_embed_http", lambda t: None)
-        monkeypatch.setattr(embedder, "_embed_local", lambda t: None)
+        monkeypatch.setattr(embedder, "_embed_gemini", lambda t, reasons=None: None)
+        monkeypatch.setattr(embedder, "_embed_http", lambda t, reasons=None: None)
+        monkeypatch.setattr(embedder, "_embed_local", lambda t, reasons=None: None)
         embedder._embed_cache.clear()
         meta = {}
         out = embedder.get_embeddings_batch(["a", "b"], meta_out=meta)
@@ -230,14 +230,14 @@ def _entry(eid, vec, ctx="coverage 미달", weight=1.0):
 class TestSemanticSearchDegraded:
     def _degraded(self, monkeypatch):
         from workflow.rag import embedder
-        monkeypatch.setattr(embedder, "_embed_gemini", lambda t: None)
-        monkeypatch.setattr(embedder, "_embed_http", lambda t: None)
-        monkeypatch.setattr(embedder, "_embed_local", lambda t: None)
+        monkeypatch.setattr(embedder, "_embed_gemini", lambda t, reasons=None: None)
+        monkeypatch.setattr(embedder, "_embed_http", lambda t, reasons=None: None)
+        monkeypatch.setattr(embedder, "_embed_local", lambda t, reasons=None: None)
         embedder._embed_cache.clear()
 
     def _working(self, monkeypatch, vec):
         from workflow.rag import embedder
-        monkeypatch.setattr(embedder, "_embed_gemini", lambda t: list(vec))
+        monkeypatch.setattr(embedder, "_embed_gemini", lambda t, reasons=None: list(vec))
         monkeypatch.setattr(embedder, "get_embed_dim", lambda: len(vec))
         monkeypatch.setattr(embedder, "get_embed_model", lambda: "m-ok")
         embedder._embed_cache.clear()
@@ -306,9 +306,9 @@ class TestHybridSearchDegraded:
         """
         from workflow.rag import embedder
         from workflow.rag.searcher import hybrid_search
-        monkeypatch.setattr(embedder, "_embed_gemini", lambda t: None)
-        monkeypatch.setattr(embedder, "_embed_http", lambda t: None)
-        monkeypatch.setattr(embedder, "_embed_local", lambda t: None)
+        monkeypatch.setattr(embedder, "_embed_gemini", lambda t, reasons=None: None)
+        monkeypatch.setattr(embedder, "_embed_http", lambda t, reasons=None: None)
+        monkeypatch.setattr(embedder, "_embed_local", lambda t, reasons=None: None)
         embedder._embed_cache.clear()
         data = [_entry("a", [0.5] * 64, ctx="coverage 미달 원인")]
         stats = {}
@@ -321,7 +321,7 @@ class TestHybridSearchDegraded:
         """음성 대조군 — 정상 임베딩에서는 융합이 유지된다."""
         from workflow.rag import embedder
         from workflow.rag.searcher import hybrid_search
-        monkeypatch.setattr(embedder, "_embed_gemini", lambda t: [1.0, 0.0])
+        monkeypatch.setattr(embedder, "_embed_gemini", lambda t, reasons=None: [1.0, 0.0])
         monkeypatch.setattr(embedder, "get_embed_dim", lambda: 2)
         embedder._embed_cache.clear()
         data = [_entry("a", [1.0, 0.0], ctx="coverage 미달 원인")]
@@ -360,9 +360,9 @@ class TestStoredProvenance:
         뮤테이션: `"metadata": {"embed": ...}` 를 지우면 KeyError 로 실패.
         """
         from workflow.rag import KnowledgeBase, embedder
-        monkeypatch.setattr(embedder, "_embed_gemini", lambda t: None)
-        monkeypatch.setattr(embedder, "_embed_http", lambda t: None)
-        monkeypatch.setattr(embedder, "_embed_local", lambda t: None)
+        monkeypatch.setattr(embedder, "_embed_gemini", lambda t, reasons=None: None)
+        monkeypatch.setattr(embedder, "_embed_http", lambda t, reasons=None: None)
+        monkeypatch.setattr(embedder, "_embed_local", lambda t, reasons=None: None)
         embedder._embed_cache.clear()
 
         kb = KnowledgeBase(tmp_path)
@@ -375,7 +375,7 @@ class TestStoredProvenance:
 
     def test_add_document_stamps_embed_provenance(self, tmp_path, monkeypatch):
         from workflow.rag import KnowledgeBase, embedder
-        monkeypatch.setattr(embedder, "_embed_gemini", lambda t: [0.1, 0.2])
+        monkeypatch.setattr(embedder, "_embed_gemini", lambda t, reasons=None: [0.1, 0.2])
         monkeypatch.setattr(embedder, "get_embed_dim", lambda: 2)
         monkeypatch.setattr(embedder, "get_embed_model", lambda: "m-doc")
         embedder._embed_cache.clear()
@@ -405,7 +405,9 @@ class TestSyntheticReportHitRanking:
         from workflow.retrieval import hybrid
 
         class _FakeKB:
-            def search(self, q, top_k=5):
+            # 스텁은 실제 시그니처를 미러링해야 한다 — `_report_hits` 는 진단을 받기 위해
+            # `stats_out` 을 넘긴다(TypeError 폴백을 일부러 두지 않았으므로 불일치는 즉시 드러난다).
+            def search(self, q, top_k=5, stats_out=None, **_kw):
                 return [{"id": "real1", "error_clean": "실제 근거", "fix": "f",
                          "score": 0.03, "source_file": "real1.json"}]
 
@@ -421,7 +423,7 @@ class TestSyntheticReportHitRanking:
         from workflow.retrieval import hybrid
 
         class _EmptyKB:
-            def search(self, q, top_k=5):
+            def search(self, q, top_k=5, stats_out=None, **_kw):
                 return []
 
         monkeypatch.setattr(hybrid, "get_kb", lambda d: _EmptyKB())
