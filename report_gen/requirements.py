@@ -2269,6 +2269,24 @@ def generate_uds_traceability_matrix(
         if _b != _k:
             _prefixed_base_count[_b] = _prefixed_base_count.get(_b, 0) + 1
     _alias_safe = {b for b, c in _prefixed_base_count.items() if c == 1 and b not in _all_sds_keys}
+    # ── 원시 SDS 이름 인덱스(대칭 정규화) — 라운드113 ──────────────────────────────
+    # ⚠ 이건 '추적'이 아니라 '이름 존재' 인덱스다. 바로 위 alias 보정은 SDS 키 쪽에만
+    # _strip_ret_type_prefix 를 걸고, 접두사형이 2개 이상 충돌하면 alias 를 아예 포기한다
+    # (_alias_safe — over-trace 보수 처리). 그래서 표기 규약이 어긋난 함수는 브리지 두 맵
+    # (sds_func_to_reqs / sds_all_func_to_reqs)이 **동시에** 미스해 'SDS 미명세'로 거짓 보고된다.
+    # 두 맵은 같은 루프·같은 키·같은 소스에서 in_matrix 게이트 하나만 다르므로 한쪽이 놓치면
+    # 다른 쪽도 놓친다(unmapped_sds_linked 가 구조적으로 0 인 이유 — 집계부 주석 참조).
+    # 여기서 **양변에 동일 정규화**를 걸어 그 실패 모드만 별도 채널로 노출한다.
+    # 절대 sds_reqs/traced/covered/in_uds 에 먹이지 않는다(순수 보고용).
+    _sds_name_index: Dict[str, List[str]] = {}   # strip(key) → [원 SDS 키...]
+    _sds_core_index: Dict[str, List[str]] = {}   # core(key)  → [원 SDS 키...] (저장클래스까지 제거)
+    # ⚠ sorted() 필수 — _all_sds_keys 는 set 이고 CPython 문자열 해시는 프로세스마다
+    # randomize 되므로, 정렬 없이 순회하면 아래 리스트 순서가 재기동마다 바뀐다. 그러면
+    # sds_name_hits 의 표시 캡이 '임의의 N개'를 조용히 고르게 되어 CSV 감사 증빙과
+    # localStorage 영속 매트릭스가 같은 입력에도 달라진다(베이스라인 diff에 유령 변경).
+    for _k in sorted(_all_sds_keys):
+        _sds_name_index.setdefault(_strip_ret_type_prefix(_k), []).append(_k)
+        _sds_core_index.setdefault(_LAYER_CORE_PREFIX_RE.sub("", _k), []).append(_k)
     for rid_srs, comps in sds_lookup.items():
         in_matrix = rid_srs in req_id_set
         for comp in comps:
@@ -2498,8 +2516,12 @@ def generate_uds_traceability_matrix(
                     # SRS엔 미추적이라도 '설계엔 닿는'(SDS 연동) 함수면 매트릭스 밖 req를 노출.
                     # 정확매칭(정규화 키)이므로 거짓양성 없음. 비면 프론트는 'SDS 미명세'로 표기
                     # → 'SRS·SDS 모두 미명세' 추적성 공백을 정직히 가시화(라운드 109).
+                    # 후보를 아래 이름 대조와 **공유**한다 — hit ⊇ linked 단조성(항등식
+                    # variant == hit − linked)을 코드 수준에서 보장하기 위함. _uds_cands 는
+                    # SwUFn ID 를 제외해 후보가 좁으므로 여기 쓰면 항등식이 음수가 될 수 있다.
+                    _sds_cands = [sub_lower, *resolved]
                     sds_reqs: List[str] = []
-                    for cand in [sub_lower, *resolved]:
+                    for cand in _sds_cands:
                         for r in sds_all_func_to_reqs.get(_sds_comp_key(cand), []):
                             if r not in sds_reqs:
                                 sds_reqs.append(r)
@@ -2517,6 +2539,31 @@ def generate_uds_traceability_matrix(
                         disp = uds_all_funcs.get(cand) or uds_all_funcs.get(_sds_comp_key(cand))
                         if disp and disp not in uds_funcs:
                             uds_funcs.append(disp)
+                    # 원시 SDS 이름 대조(라운드113) — 요구ID 브리지가 아니라 '이름이 SDS에
+                    # 있는가'만 본다. 강한 신호부터 티어를 소진하고 첫 히트에서 멈춘다:
+                    #   exact      : 정확 키 일치(기존 sds_reqs 와 동치 — 신규 정보 없음)
+                    #   ret_prefix : 반환형 접두사만 다름(u16s_X ↔ s_X). SDS 실측 충돌률 0.5%
+                    #   core       : 저장클래스까지 다름(s_X ↔ g_X). 가장 약한 신호 — 별개 함수일
+                    #                수 있으므로 티어를 항상 함께 노출해 '힌트'로만 쓰게 한다
+                    _sds_hits: List[str] = []
+                    _sds_match = ""
+                    for _tier in ("exact", "ret_prefix", "core"):
+                        for cand in _sds_cands:
+                            _k = _sds_comp_key(cand)
+                            if not _k:
+                                continue
+                            if _tier == "exact":
+                                _raws = [_k] if _k in _all_sds_keys else []
+                            elif _tier == "ret_prefix":
+                                _raws = _sds_name_index.get(_strip_ret_type_prefix(_k), [])
+                            else:
+                                _raws = _sds_core_index.get(_LAYER_CORE_PREFIX_RE.sub("", _k), [])
+                            for _raw in _raws:
+                                if _raw not in _sds_hits:
+                                    _sds_hits.append(_raw)
+                        if _sds_hits:
+                            _sds_match = _tier
+                            break
                     _unmapped_idx[sub_lower] = len(unmapped_vcast)
                     unmapped_vcast.append({
                         "subprogram": subprogram,
@@ -2527,6 +2574,18 @@ def generate_uds_traceability_matrix(
                         "category": category,
                         # SDS 설계에 명세된 SRS 요구사항(매트릭스 밖 포함) — 비면 'SDS 미명세'.
                         "sds_reqs": sds_reqs,
+                        # ── 라운드113: 원시 SDS **이름** 대조(요구ID 브리지와 독립) ──
+                        # sds_reqs 가 비었는데 여기 값이 있으면 = 'SDS는 이 함수를 명세하는데 요구ID
+                        # 연결만 끊김'(표기 규약 드리프트) → 설계 공백이 아니라 브리지·명명 결함이다.
+                        # ⚠ 한계: 이름 출처가 sds_lookup(=component_ids)이라 파서가 Related ID 없는
+                        #   SDS 엔트리를 버린다(backend/routers/jenkins.py:4596-4598). 따라서
+                        #   '히트=SDS에 있다'는 참이지만 '미히트=SDS에 없다'는 결론지을 수 없다(불완전 집합).
+                        # ⚠ 표시 캡(8). 총량을 함께 실어 절단을 표면화한다 — 캡만 두고 총량을
+                        #   숨기면 UI·CSV가 '전부'라고 오독한다(열 상한 침묵 손실과 같은 결함 클래스).
+                        "sds_name_hits": _sds_hits[:8],
+                        "sds_name_hits_total": len(_sds_hits),
+                        "sds_name_match": _sds_match,          # "" | "exact" | "ret_prefix" | "core"
+                        "sds_name_ambiguous": len(_sds_hits) > 1,
                         # UDS 단위설계 인벤토리에 존재하는 정규 함수명(비면 '단위설계 미명세' = 진짜 갭).
                         "uds_funcs": uds_funcs,
                         "in_uds": bool(uds_funcs),
@@ -2827,8 +2886,28 @@ def generate_uds_traceability_matrix(
             # 버킷과 무관하게 안전/진단 토큰을 가진 미추적 함수 수 — 프론트 amber 강조·뱃지용(W4).
             "unmapped_safety": sum(1 for u in unmapped_vcast if u.get("safety")),
             # SRS 미추적이지만 SDS 설계엔 명세된(역방향 부분추적) 함수 수 — 프론트 'SDS:<req>' 뱃지용.
-            # 정규화 fix 후 KJPDS02 실데이터에선 0(설계가 이 함수들을 명세 안 함). 라운드 109.
+            # ⚠ 이 지표는 구조적으로 거의 항상 0 이다(라운드113 정정). sds_reqs 는
+            #   sds_all_func_to_reqs 를, traced 판정은 sds_func_to_reqs 를 조회하는데 두 맵은 같은
+            #   루프·같은 키·같은 소스에서 in_matrix 게이트 하나만 다르게 만들어진다. 따라서 값이
+            #   채워지려면 '그 함수의 SDS 요구가 전부 매트릭스 밖'이라는 극단 조건이 필요하고,
+            #   키 정규화가 어긋나면 두 맵이 **동시에** 미스한다. 0 은 "설계가 이 함수들을 명세
+            #   안 함"을 **의미하지 않는다** — 코드가 보장하는 건 '매트릭스 밖 요구에만 귀속된
+            #   미추적 함수가 0' 뿐이다. 실제 SDS 명세 여부는 아래 unmapped_sds_name_hit 을 볼 것.
+            #   (구 주석 "설계가 이 함수들을 명세 안 함"은 과한 결론이라 정정. 라운드 109→113)
             "unmapped_sds_linked": sum(1 for u in unmapped_vcast if u.get("sds_reqs")),
+            # 미추적 함수 중 **SDS 이름 집합(정규화 키)에 이름이 존재**하는 수(요구ID 연결 무관, 라운드113).
+            # 이름 집합이 Related ID 있는 엔트리만 담으므로 하한선(lower bound)이다 — 미히트를
+            # '미명세'로 읽지 말 것.
+            # ⚠ SDS component_ids 에 SwUFn 같은 **시험 ID**가 섞여 있으면 exact 티어가 그 ID 자기-메아리를
+            #   히트로 센다(함수명 일치가 아님). 단 그 경우 sds_reqs 도 함께 채워지므로 아래 신규 신호
+            #   (variant = 이름은 있고 요구ID는 없음)에는 들어가지 않는다 — 오염은 hit 총계에만 국한.
+            "unmapped_sds_name_hit": sum(1 for u in unmapped_vcast if u.get("sds_name_hits")),
+            # ★신규 신호: 이름은 SDS에 있는데 요구ID 브리지는 끊긴 수 = '설계 공백'이 아니라 '브리지 결함'.
+            #  항등식: unmapped_sds_name_variant == unmapped_sds_name_hit − unmapped_sds_linked
+            #  (sds_reqs 비공백 ⟹ 반드시 name_hit — exact 티어가 같은 키공간을 보므로 단조. 테스트 고정)
+            "unmapped_sds_name_variant": sum(
+                1 for u in unmapped_vcast if u.get("sds_name_hits") and not u.get("sds_reqs")
+            ),
             # SRS 미추적이지만 UDS 단위설계엔 존재하는 함수 수 — '시험+단위설계 완료, SDS
             # 아키텍처 roll-up만 누락'(정당한 입도차). KJPDS02 실데이터 661/662.
             # (unmapped_sds_linked와 동일 패턴: 캐시 trace_summary.json·감사·문서화용 집계이며,

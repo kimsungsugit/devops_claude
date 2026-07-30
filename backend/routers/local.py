@@ -1700,6 +1700,12 @@ def local_traceability(
             sds_partition_map = partition_map or None
             for comp_key, info in partition_map.items():
                 related = info.get("related", "")
+                # ⚠ backend/routers/jenkins.py:4596 과 **동일 게이트** — Related ID 없는 SDS 엔트리를
+                # 버린다. 단 인과는 jenkins 경로에만 성립한다: 이 로컬 경로는
+                # generate_uds_traceability_matrix 를 호출하지 않고 unmapped_vcast 도 만들지 않으므로,
+                # 여기서 버려지는 엔트리는 _all_sds_keys·unmapped_sds_name_hit 과 무관하다.
+                # (jenkins 경로에서는 이 게이트가 SDS 이름 집합을 불완전하게 만들어 하한선이 된다.)
+                # SDS 이름 완전 집합이 필요해지면 두 곳을 함께 고칠 lockstep 대상이다.
                 if not related:
                     continue
                 is_function = info.get("kind") == "function"

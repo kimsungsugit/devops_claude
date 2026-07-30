@@ -511,6 +511,15 @@ export default function SrsSdsSection({ job, analysisResult }) {
           const tail = parts.length ? ` 내역: ${parts.join(' · ')} — 트리 'SRS 미추적 시험'에서 확인.` : '';
           // 정보성 요약(경고 아님) — 별도 notices 채널로 분리해 amber 경고 박스와 섞이지 않게 한다.
           stepNotices.push(`전체 VectorCAST 대상 ${vcSum.vcast_input_rows}개 중 ${vcSum.vcast_traced_rows}개가 SRS까지 역추적됨. 나머지 ${untraced}개는 대부분 단위설계+시험까지 된 leaf(입도차) 또는 범위경계이며, 진짜 미설계 갭은 소수다(단위시험·PASS와 설계 추적성은 별개).${tail}`);
+          // 라운드113: SDS 이름은 있는데 요구ID 브리지만 끊긴 건 '설계 공백'이 아니라 '추적
+          // 브리지·명명 규약' 문제라, 위 design축 분해(parts)와 섞지 않고 별도 문장으로 낸다.
+          // 채널도 stepNotices(정보) 고정 — stepWarnings는 실제 step 실패만 담는다.
+          const sdsNameVariant = vcSum.unmapped_sds_name_variant ?? 0;
+          if (sdsNameVariant > 0) {
+            // ⚠ 분모 명시 — 앞 문장의 untraced 는 '행' 수, 이건 중복 제거한 '함수' 수라 "이 중"으로
+            // 쓰면 부분집합을 잘못 주장한다. 드릴다운 경로(2단 뒤)도 함께 안내한다.
+            stepNotices.push(`미추적 함수(중복 제거) 중 ${sdsNameVariant}개는 SDS 이름 집합에 같은 함수 이름이 있으나 요구ID 연결만 끊겼습니다(반환형/저장클래스 접두사 표기 차이). 설계 공백이 아니라 추적 브리지·명명 규약 정합 문제입니다. 트리 뷰에서 '역추적 안 된 시험 함수 표시'를 켜면 'SDS 설계' 열에 ≈ 로 표기됩니다. ⚠ SDS 이름 집합은 Related ID가 있는 엔트리만 담아 이 수치는 하한선입니다.`);
+          }
         }
       }
       // Attach metadata
@@ -1987,14 +1996,26 @@ function TraceMatrix({ matrix, focusFunctions = null, onClearFocus = null,
     if (unmappedVcast.length > 0) {
       csvRows.push('');
       csvRows.push(csvEscape(`# SRS 미추적 시험 (역추적 미연결 ${unmappedVcast.length}종 — 시험됐으나 이 SRS 요구사항에 연결 안 됨, 대부분 정당한 입도차)`));
-      csvRows.push(['Subprogram', '해석된 함수', 'SDS 설계', 'UDS 설계', 'ISO계층', '분류', 'VectorCAST 결과'].join(','));
+      csvRows.push(['Subprogram', '해석된 함수', 'SDS 설계', 'SDS 이름일치', 'UDS 설계', 'ISO계층', '분류', 'VectorCAST 결과'].join(','));
       for (const u of unmappedVcast) {
         const sr = Array.isArray(u.sds_reqs) ? u.sds_reqs : [];
         const uf = Array.isArray(u.uds_funcs) ? u.uds_funcs : [];
         csvRows.push([
           csvEscape(u.subprogram ?? ''),
           csvEscape((Array.isArray(u.resolved_funcs) ? u.resolved_funcs : []).join('; ')),
-          csvEscape(sr.length ? sr.join('; ') : '미명세'),
+          // 라운드113: '미명세' 단정 대신 이름 대조 결과로 4분기(표 셀과 동일 의미론).
+          // 필드 부재(구 응답)는 '이름 미발견'이 아니라 공란 — 미계산을 단정으로 굳히지 않는다.
+          csvEscape(sr.length ? sr.join('; ')
+            : !Array.isArray(u.sds_name_hits) ? ''
+              : (u.sds_name_hits.length ? '이름일치(요구ID 미연결)' : '이름 미발견')),
+          // 표와 대칭: sds_reqs 가 있으면 그쪽이 이미 요구ID를 싣고, exact 티어는 SDS component 에
+          // 섞인 SwUFn 시험 ID 자기-메아리를 '이름일치'로 오승격할 수 있다 → variant 조건에서만 채운다.
+          csvEscape((!sr.length && Array.isArray(u.sds_name_hits) && u.sds_name_hits.length)
+            ? `${u.sds_name_match || '?'}: ${u.sds_name_hits.join('; ')}`
+              + ((u.sds_name_hits_total ?? 0) > u.sds_name_hits.length
+                ? ` +${u.sds_name_hits_total - u.sds_name_hits.length}` : '')
+              + (u.sds_name_ambiguous ? ' (모호)' : '')
+            : ''),
           csvEscape(u.in_uds === true ? (uf.length ? uf.join('; ') : '설계됨') : (u.layer === 'UNRESOLVED' ? '분류불가' : (u.in_uds === false ? '미설계' : ''))),
           csvEscape(LAYER_LABELS[u.layer] ?? ''),
           csvEscape(u.category ?? ''),
@@ -3038,6 +3059,14 @@ const LAYER_LABELS = {
   UNRESOLVED: '분류불가',   // §H: SwUFn↔함수명 미해결(설계 갭 판정 보류)
 };
 
+// 라운드113 SDS 이름 대조 티어 라벨 — 확신도 내림차순(exact > ret_prefix > core).
+// 백엔드가 "티어를 항상 함께 노출해 힌트로만 쓰게 한다"를 계약으로 두므로 표시 표면에 반드시 싣는다.
+const _SDS_TIER_LABEL = {
+  exact: '정확 일치',
+  ret_prefix: '반환형 접두사 차이',
+  core: '저장클래스 차이',
+};
+
 // SRS 미추적 시험 루트 — 시험은 됐으나 이 SRS에 안 닿는 VectorCAST 함수를 의미 버킷으로 묶는다.
 // 요구사항 루트와 nodeId 네임스페이스(__unmapped__)를 분리해 펼침 상태 충돌을 막는다.
 function TraceUnmappedRoot({ unmapped, expanded, onToggle }) {
@@ -3056,6 +3085,12 @@ function TraceUnmappedRoot({ unmapped, expanded, onToggle }) {
   // SDS 설계엔 명세됐으나 SRS만 끊긴 함수(역방향 부분추적). 정규화 fix 후 KJPDS02=0이나
   // 타 데이터/향후 대비 표기(라운드 109). >0일 때만 노출(safetyTotal 패턴과 동일).
   const sdsLinkedTotal = list.filter(u => u && Array.isArray(u.sds_reqs) && u.sds_reqs.length > 0).length;
+  // 라운드113: 이름은 SDS 원문에 있는데 요구ID 브리지만 끊긴 수. sdsLinkedTotal이 구조적으로
+  // 거의 항상 0인 사각(같은 키공간을 두 맵이 공유해 동시 미스)을 덮는 별도 신호다.
+  // ⚠ 설계 공백이 아니라 표기 규약 드리프트이므로 중립색으로만 노출(amber/red 금지).
+  const sdsNameVariantTotal = list.filter(u => u
+    && Array.isArray(u.sds_name_hits) && u.sds_name_hits.length > 0
+    && !(Array.isArray(u.sds_reqs) && u.sds_reqs.length > 0)).length;
   // UDS(단위설계) 연동 — SRS 역추적이 끊겨도 함수가 단위설계엔 존재(시험+단위설계 완료).
   // 사용자 질문("SDS 미추적이어도 UDS엔 연동돼 있나")의 직접 답: 대다수가 UDS엔 존재한다.
   // 미설계(in_uds=false)는 시험만 존재하는 진짜 설계 공백이라 빨강으로 별도 노출.
@@ -3090,6 +3125,8 @@ function TraceUnmappedRoot({ unmapped, expanded, onToggle }) {
           {failTotal > 0 && <span style={{ color: '#dc2626', fontWeight: 600 }}> · {failTotal} fail</span>}
           {safetyTotal > 0 && <span style={{ color: 'var(--text-muted)', fontWeight: 600 }} title="안전/진단 토큰 함수 — ISO 26262 역추적 검토 우선순위(참고 신호, 결함 아님)"> · 🛡 {safetyTotal} 안전</span>}
           {sdsLinkedTotal > 0 && <span style={{ color: COVERAGE_COLORS.partial.fg, fontWeight: 600 }} title="SDS 설계엔 명세됐으나 그 요구사항이 SRS 추적 매트릭스 밖(부분추적)"> · {sdsLinkedTotal} SDS부분</span>}
+          {/* 라운드113: 중립색 고정 — 설계 공백이 아니라 표기 규약 드리프트다(amber/red 금지). */}
+          {sdsNameVariantTotal > 0 && <span style={{ color: 'var(--text-muted)', fontWeight: 600 }} title="SDS 이름 집합(정규화 키)에 같은 함수 이름이 있으나 요구ID 브리지가 끊김(반환형/저장클래스 접두사 표기 차이) — 설계 공백이 아니라 추적 도구·명명 규약 문제. 이름 집합은 Related ID 있는 엔트리만 담아 이 수치는 하한선."> · {sdsNameVariantTotal} SDS이름일치</span>}
           {udsLinkedTotal > 0 && <span style={{ color: COVERAGE_COLORS.covered.fg, fontWeight: 600 }} title="UDS 단위설계엔 함수가 존재 — 시험+단위설계 완료, SDS 아키텍처 roll-up만 누락(정당한 입도차)"> · {udsLinkedTotal} UDS설계</span>}
           {designGapTotal > 0 && <span style={{ color: COVERAGE_COLORS.uncovered.fg, fontWeight: 700 }} title="UDS 단위설계에도 없음 — 시험만 존재하는 진짜 설계 공백(검토 우선순위 높음)"> · {designGapTotal} 미설계</span>}
         </span>
@@ -3160,7 +3197,9 @@ function TraceUnmappedBucket({ bucket, items, parentId, expanded, onToggle }) {
               <tr style={{ background: '#e5e7eb' }}>
                 <th style={{ padding: '3px 6px', textAlign: 'left' }}>Subprogram</th>
                 <th style={{ padding: '3px 6px', textAlign: 'left' }}>해석된 함수</th>
-                <th style={{ padding: '3px 6px', textAlign: 'left' }} title="SDS(설계)에 함수명으로 명세된 SRS 요구사항. SRS 미추적이라도 설계엔 닿으면 표기, 없으면 'SRS·SDS 모두 미명세'">SDS 설계</th>
+                {/* 라운드113: 구 툴팁의 "없으면 'SRS·SDS 모두 미명세'" 단정을 철회했다 — 브리지 두 맵이
+                    같은 키공간을 공유해 동시 미스하므로 빈 값은 'SDS에 없음'을 뜻하지 않는다. */}
+                <th style={{ padding: '3px 6px', textAlign: 'left' }} title="SDS(설계)에 함수명으로 명세된 SRS 요구사항. △=요구ID까지 연결됨(단 매트릭스 밖 요구), ≈=이름은 SDS에 있으나 요구ID 브리지가 끊김(표기 규약 차이), '이름 미발견'=이름 집합에서 못 찾음(집합이 불완전하므로 '설계에 없다'는 단정 아님), —=구 응답으로 미계산">SDS 설계</th>
                 <th style={{ padding: '3px 6px', textAlign: 'left' }} title="UDS(단위설계) 인벤토리에 함수가 존재하는지. SRS 역추적이 끊겨도 단위설계엔 명세돼 있으면 '시험+단위설계 완료, SDS 아키텍처 roll-up만 누락'(정당한 입도차)이고, 없으면 시험만 존재하는 진짜 설계 공백">UDS 설계</th>
                 <th style={{ padding: '3px 6px', textAlign: 'left' }} title="ISO 26262 SwDS 계층. 애플리케이션=구현 leaf가 SDS에 함수단위 미명세(실 finding) / 부트·BSW·라이브러리=정당한 범위 경계(컴포넌트·플랫폼·라이브러리 추적)">ISO계층</th>
                 <th style={{ padding: '3px 6px', textAlign: 'center', width: 50 }}>결과</th>
@@ -3188,8 +3227,26 @@ function TraceUnmappedBucket({ bucket, items, parentId, expanded, onToggle }) {
                     {sr.length > 0
                       ? <td style={{ padding: '3px 6px', fontFamily: 'monospace', color: COVERAGE_COLORS.partial.fg, fontWeight: 600 }}
                           title={`SDS 설계엔 명세됨(요구사항 ${sr.join(', ')}) — 단 이 요구사항은 SRS 추적 매트릭스 밖이라 SRS까지 안 닿음(부분추적)`}>△ {sr.join(', ')}</td>
-                      : <td style={{ padding: '3px 6px', color: '#9ca3af', fontStyle: 'italic' }}
-                          title="SDS 설계에도 함수명으로 명세되지 않음 — SRS·SDS 모두 미명세">미명세</td>}
+                      : (Array.isArray(u.sds_name_hits) && u.sds_name_hits.length > 0)
+                        /* 라운드113: 요구ID 브리지는 끊겼지만 SDS 이름 집합에 같은 이름이 있는 경우.
+                           설계 공백이 아니라 표기 규약 드리프트라 중립색으로만 표기한다.
+                           ⚠ core 티어(저장클래스 s_↔g_)는 별개 함수일 개연이 높아 ambiguous 여부와
+                           무관하게 헤지를 상시 노출한다 — 백엔드의 '티어 항상 노출' 계약. */
+                        ? <td style={{ padding: '3px 6px', fontFamily: 'monospace', color: 'var(--text-muted)' }}
+                            title={`SDS 이름 집합에 같은 함수 이름이 있으나 요구ID 브리지가 끊김 — ${_SDS_TIER_LABEL[u.sds_name_match] || u.sds_name_match}. 설계 공백이 아니라 추적 브리지·명명 규약 문제다.${u.sds_name_match === 'core' ? ' ⚠ 저장클래스가 달라 별개 함수일 수 있음(가장 약한 신호).' : ''}${u.sds_name_ambiguous ? ` ⚠ 후보 ${u.sds_name_hits_total ?? u.sds_name_hits.length}건이라 모호.` : ''} ⚠ 표시값은 정규화 키라 문서 원문 표기와 다를 수 있다(대소문자·반환형 토큰 제거됨).`}>
+                            ≈ {u.sds_name_hits.join(', ')}
+                            {(u.sds_name_hits_total ?? 0) > u.sds_name_hits.length
+                              ? ` +${u.sds_name_hits_total - u.sds_name_hits.length}` : ''}
+                            {u.sds_name_match
+                              ? <span style={{ fontSize: 10, opacity: 0.75 }}> [{_SDS_TIER_LABEL[u.sds_name_match] || u.sds_name_match}]</span>
+                              : null}</td>
+                        : !Array.isArray(u.sds_name_hits)
+                          /* 구 백엔드 응답·구 localStorage 복원 — 계산이 돌지 않은 상태를 '못 찾았다'는
+                             단정으로 렌더하면 전 행이 거짓 음성이 된다(바로 아래 in_uds 와 동일 규약). */
+                          ? <td style={{ padding: '3px 6px', color: '#9ca3af', fontStyle: 'italic' }}
+                              title="SDS 이름 대조 정보 없음(구 응답 형식·구 저장분) — 매트릭스 재생성 후 표기됨">—</td>
+                          : <td style={{ padding: '3px 6px', color: '#9ca3af', fontStyle: 'italic' }}
+                              title="SDS 이름 집합에서 이 함수명을 찾지 못함. ⚠ 이름 집합은 Related ID가 있는 SDS 엔트리만 담으므로(불완전) '설계에 없다'고 단정할 수 없다">이름 미발견</td>}
                     {/* in_uds 미존재(구 백엔드 응답·버전 스큐)는 중립('—')으로 — 미설계(빨강)로
                         오인하면 backend 재시작 전 전이 상태에서 전 항목이 거짓 갭으로 보인다(X6). */}
                     {typeof (u && u.in_uds) !== 'boolean'
