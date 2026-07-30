@@ -1084,6 +1084,43 @@ def build_sds_component_maps(partition_map: Optional[Dict[str, Any]]) -> Dict[st
     }
 
 
+# 거친 입도 임계 — 실 컴포넌트의 이 비율을 **초과**해 연결되면 변별력 없음으로 본다.
+_SDS_COARSE_RATIO = 0.4
+# 총 컴포넌트가 이보다 적으면 미적용 — 3개 중 2개 같은 소규모에서 비율이 무의미해진다.
+_SDS_COARSE_MIN_COMPONENTS = 5
+
+
+def annotate_sds_coarse(rows: Optional[List[Dict[str, Any]]]) -> Tuple[int, int]:
+    """행별 ``sds_coarse`` 플래그를 채우고 ``(실 컴포넌트 총수, coarse 행 수)`` 반환.
+
+    한 요구사항이 실 설계 컴포넌트의 40%를 넘게 참조하면 "이 요구가 어느 설계에
+    대응하는가"를 좁히지 못한다(예: SwCom Related-ID 에 SwTR 을 통째로 나열). 결함이
+    아니라 **문서 입도 신호**다.
+
+    분모는 반드시 **정화 후 실 컴포넌트**여야 한다. 상태명·설계ID·목차줄까지 세던 동안
+    분모가 6배로 부풀어(HDPDM01 201 vs 실 33) 임계가 80.4 로 떠 있었고, 최대 행이
+    34개라 이 지표는 **한 번도 발화하지 않았다**(0/63 → 정화 후 8/63).
+
+    Jenkins 경로(`generate_uds_traceability_matrix`)와 local 경로(`local.py`)가 각자
+    세면 같은 문서가 모드에 따라 다른 값을 내므로 단일 출처로 둔다 —
+    `build_sds_component_maps` 와 같은 이유.
+    """
+    _rows = [r for r in (rows or []) if isinstance(r, dict)]
+    total = len({
+        str(c).strip().lower()
+        for r in _rows for c in (r.get("sds_components") or []) if str(c).strip()
+    })
+    coarse_count = 0
+    if total >= _SDS_COARSE_MIN_COMPONENTS:
+        threshold = _SDS_COARSE_RATIO * total
+        for r in _rows:
+            is_coarse = len(r.get("sds_components") or []) > threshold
+            r["sds_coarse"] = is_coarse
+            if is_coarse:
+                coarse_count += 1
+    return total, coarse_count
+
+
 def _load_component_map() -> Dict[str, Dict[str, str]]:
     # report_gen/docs/ → 프로젝트 루트 docs/ 순으로 탐색
     candidates = [
@@ -2993,22 +3030,7 @@ def generate_uds_traceability_matrix(
             _cc = str(_c).strip()
             if _cc:
                 _rel["SDS"].append(_cc)
-    # 거친 입도 경고(추적 정화): 한 요구사항이 실 설계 컴포넌트의 큰 비율(>40%)에 연결되면
-    # 'coarse'로 표시 — SDS 작성 입도가 거칠어(예: SwCom Related-ID에 SwTR 전체 나열) 추적 변별력이
-    # 낮음을 정직하게 드러낸다. 함수 fan-out 제거 후의 실 컴포넌트 기준이라 의미 있음. 임계 40%
-    # 보수적, 총 컴포넌트 5개 미만이면 미적용(소규모 노이즈 방지).
-    _total_sds_comps = len({
-        str(c).strip().lower()
-        for r in matrix for c in (r.get("sds_components") or []) if str(c).strip()
-    })
-    _coarse_count = 0
-    if _total_sds_comps >= 5:
-        _coarse_threshold = 0.4 * _total_sds_comps
-        for r in matrix:
-            _is_coarse = len(r.get("sds_components") or []) > _coarse_threshold
-            r["sds_coarse"] = _is_coarse
-            if _is_coarse:
-                _coarse_count += 1
+    _total_sds_comps, _coarse_count = annotate_sds_coarse(matrix)
 
     try:
         integrity = build_integrity_audit(req_ids, norm_to_raws, _ref, _rel)

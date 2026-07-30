@@ -169,6 +169,10 @@ def curate_trace_summary(trace: Optional[Dict[str, Any]]) -> Optional[Dict[str, 
             "clean": bool(trace.get("integrity_clean", True)),
             "collision_count": _i(trace, "integrity_collision_count"),
             "dangling_count": _i(trace, "integrity_dangling_count"),
+            # 결함인 dangling 만(= suspect). foreign(계층참조)은 SDS Related ID 의 설계ID를
+            # 요구ID로 읽어 생기는 구조적 항목이라 조치 대상이 아니다 — 상세 패널도 '정합성 ✓'
+            # 판정에서 제외한다. 구 캐시엔 이 키가 없으므로 None 이 될 수 있다(아래 gaps 참조).
+            "dangling_suspect_count": _i(trace, "integrity_dangling_suspect_count"),
             "placeholder_count": _i(trace, "integrity_placeholder_count"),
         },
     }
@@ -284,12 +288,31 @@ def build_deterministic_insight(inp: SummaryInsightInput) -> Dict[str, Any]:
             design_gap = (ts.get("summary_raw") or {}).get("unmapped_design_gap") if isinstance(ts.get("summary_raw"), dict) else None
         if isinstance(design_gap, (int, float)) and design_gap > 0:
             gaps.append({"kind": "vcast_design_gap", "count": int(design_gap)})
-        # ID 정합성 dangling — 실 finding 축(참조되나 존재하지 않는 ID) 그대로 전달.
-        dangling = (ts.get("integrity") or {}).get("dangling_count") if isinstance(ts.get("integrity"), dict) else None
+        # ID 정합성 dangling — 실 finding 축(참조되나 존재하지 않는 ID).
+        # **suspect 만** 센다. foreign(계층참조)은 SDS Related ID 안의 설계ID(SwFn_/SwST_ 등)를
+        # 요구ID로 읽어 생기는 구조적 항목이라 결함이 아니고, 상세 패널도 '정합성 ✓' 판정에서
+        # 제외한다. 전량(dangling_count)을 넘기면 LLM 이 없는 결함을 근거로 조치 항목을 쓴다
+        # (동봉 HDPDM01 실측: 전량 4 중 3건이 설계ID = 75% 허위).
+        #
+        # 구 캐시엔 suspect 축이 없다. 그때 전량으로 조용히 되돌아가면 예전 부풀린 수치가
+        # 정확한 값인 척 다시 흐르고, 아예 빼면 결함이 침묵한다 — 둘 다 안 된다. 전량을
+        # 쓰되 `unrefined` 로 표시해 소비처가 "정제 전 수치"임을 알 수 있게 한다.
+        _integ_raw = ts.get("integrity")
+        _integ: Dict[str, Any] = _integ_raw if isinstance(_integ_raw, dict) else {}
+        dangling = _integ.get("dangling_suspect_count")
         if dangling is None:
-            dangling = ts.get("integrity_dangling_count")
+            dangling = ts.get("integrity_dangling_suspect_count")
+        unrefined = False
+        if dangling is None:
+            dangling = _integ.get("dangling_count")
+            if dangling is None:
+                dangling = ts.get("integrity_dangling_count")
+            unrefined = dangling is not None
         if isinstance(dangling, (int, float)) and dangling > 0:
-            gaps.append({"kind": "integrity_dangling", "count": int(dangling)})
+            _gap: Dict[str, Any] = {"kind": "integrity_dangling", "count": int(dangling)}
+            if unrefined:
+                _gap["unrefined"] = True
+            gaps.append(_gap)
     if inp.vcast_failures:
         gaps.append({"kind": "test_failures", "count": len(inp.vcast_failures)})
     cov = inp.headline.get("coverage_line")
@@ -401,7 +424,11 @@ def _deterministic_role_guidance(det: Dict[str, Any], inp: SummaryInsightInput) 
             ctx = f" (미추적 관측 {observed}건 중 나머지는 단위설계+시험 완료 leaf 입도차 {granularity}건 등 — 조치 불필요)" if observed else ""
             tester.append({"action": "단위설계(UDS) 미명세 함수의 설계 반영 검토", "basis": f"진짜 설계 갭 {g['count']}건{ctx}"})
         elif g["kind"] == "integrity_dangling":
-            tester.append({"action": "추적성 ID 정합성 정리(참조되나 존재하지 않는 ID)", "basis": f"dangling {g['count']}건"})
+            # 정제된 수치는 '오참조 의심'(suspect)만. 구 캐시에서 온 정제 전 전량이면
+            # 계층참조(구조적·정상)가 섞여 있으므로 근거 문구에서 그렇다고 밝힌다.
+            _basis = (f"정제 전 dangling 전량 {g['count']}건(계층참조 포함 — 재생성 필요)"
+                      if g.get("unrefined") else f"오참조 의심 {g['count']}건")
+            tester.append({"action": "추적성 ID 정합성 정리(참조되나 존재하지 않는 ID)", "basis": _basis})
         elif g["kind"] == "coverage_unmeasured":
             tester.append({"action": "커버리지 측정 파이프라인 연결 확인", "basis": "구문 커버리지 미측정(증거 부재)"})
     if not dev:

@@ -1671,6 +1671,7 @@ def local_traceability(
     from report_gen.requirements import (
         _extract_sds_partition_map,
         _normalize_req_id,
+        annotate_sds_coarse,
         build_sds_component_maps,
     )
     from sts_generator import (
@@ -1949,6 +1950,10 @@ def local_traceability(
     safety_total = sum(1 for r in rows if r.get("asil") and r["asil"].upper() not in ("QM", "TBD", ""))
     safety_covered = sum(1 for r in rows if _derive(r) == "covered" and r.get("asil") and r["asil"].upper() not in ("QM", "TBD", ""))
     mapped_sds_count = sum(1 for r in rows if r.get("sds_components"))
+    # 거친 입도 — Jenkins 경로(generate_uds_traceability_matrix)와 **같은 헬퍼**로 센다.
+    # 각자 세면 같은 문서가 모드에 따라 다른 값을 내고, local 만 빠지면 이 신호가 조용히
+    # 사라진다(프론트 칩은 summary.sds_coarse_count 부재를 0으로 읽어 아무것도 안 띄운다).
+    _sds_total_comps, sds_coarse_count = annotate_sds_coarse(rows)
     mapped_source_count = sum(1 for r in rows if r.get("source_ids"))
     mapped_test_count = sum(1 for r in rows if r.get("test_count"))
     total_tests = sum(r.get("test_count", 0) for r in rows)
@@ -1992,7 +1997,13 @@ def local_traceability(
             "safety_covered": safety_covered,
             "safety_pct": round(safety_covered / max(safety_total, 1) * 100, 1),
             # 정화: 실 설계 컴포넌트 distinct 수(함수 fan-out 제외) — Jenkins 경로와 동일 의미.
-            "total_sds_components": len({c for cs in sds_req_to_design_comps.values() for c in cs}),
+            # **행 기준**으로 센다(annotate_sds_coarse 반환값). 예전엔 sds_req_to_design_comps
+            # 전량을 셌는데, 거기엔 매트릭스 행이 없는 요구(SRS 에 없는 ID)의 컴포넌트까지 들어가
+            # 거친 입도 임계의 분모(행 기준)와 표시 총수가 어긋났다 — 툴팁이 "33개 중 40%"라
+            # 적으면서 실제로는 다른 분모로 판정하는 상태. Jenkins 경로도 행 기준이라 이게 lockstep.
+            "total_sds_components": _sds_total_comps,
+            # 거친 입도 요구 수 — Jenkins summary 와 같은 키. 없으면 프론트 칩이 침묵한다.
+            "sds_coarse_count": sds_coarse_count,
             "total_functions": len(function_details),
             "total_sts_test_cases": len(sts_test_cases),
             "total_suts_test_cases": total_suts_fns,

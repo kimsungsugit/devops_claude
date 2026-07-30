@@ -165,7 +165,9 @@ export default function SummaryOverviewTab({
                 <MiniKpi label="미추적 요구" value={fmtInt(trace.uncovered)} tone={(trace.uncovered || 0) > 0 ? 'var(--color-warning)' : undefined} />
                 <MiniKpi label="ASIL 시험 미달" value={fmtInt(trace.asil_gap_count)} tone={(trace.asil_gap_count || 0) > 0 ? 'var(--color-danger)' : undefined} />
                 <MiniKpi label="ASIL 미상" value={fmtInt(trace.asil_unknown_count)} tone={(trace.asil_unknown_count || 0) > 0 ? 'var(--color-warning)' : undefined} />
-                <MiniKpi label="ID 정합성" value={fmtInt((trace.integrity_collision_count || 0) + (trace.integrity_dangling_count || 0))} />
+                {/* dangling 은 '오참조 의심'(suspect)만 결함 — foreign(계층참조)은 SDS Related ID 의
+                    설계ID(SwFn_/SwST_)라 V-model 상 정상이고 상세 패널도 결함에서 뺀다. 구 캐시 폴백. */}
+                <MiniKpi label="ID 정합성" value={fmtInt((trace.integrity_collision_count || 0) + (trace.integrity_dangling_suspect_count ?? trace.integrity_dangling_count ?? 0))} />
                 <MiniKpi label="VectorCAST 미매칭" value={fmtInt(trace.summary_raw?.unmapped_vcast_count ?? trace.unmapped_vcast_count)} />
               </div>
             </div>

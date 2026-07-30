@@ -176,6 +176,79 @@ def test_coverage_and_asil_invariant_under_purification():
     assert after["summary"]["mapped_sds_count"] <= before["summary"]["mapped_sds_count"]
 
 
+# ── 거친 입도 단일 출처 (Jenkins ↔ local lockstep) ──────────────────────────
+#
+# 이 지표는 밴드 정화 전까지 **한 번도 발화하지 않았다**. 분모가 상태명·설계ID·목차줄까지
+# 세던 동안 HDPDM01 기준 201 이었고 임계가 80.4 인데 최대 행이 34 였다(0/63). 정화로
+# 분모가 33 이 되자 임계 13.2 에서 8건이 드러났다. 즉 분모 오염이 지표를 죽인다 —
+# 두 모드가 각자 세면 같은 문서가 모드에 따라 다른 값을 낸다.
+
+def test_annotate_coarse_denominator_is_row_based_distinct():
+    """분모는 행에 실제로 실린 sds_components 의 distinct(대소문자 무시)."""
+    from report_gen.requirements import annotate_sds_coarse
+
+    rows = [
+        {"sds_components": ["SwCom_01", "SwCom_02", "SwCom_03"]},
+        {"sds_components": ["swcom_01", "SwCom_04", "SwCom_05"]},   # swcom_01 은 중복
+    ]
+    total, coarse = annotate_sds_coarse(rows)
+    assert total == 5                       # 01·02·03·04·05
+    assert coarse == 2                      # 3 > 0.4*5 = 2.0 → 두 행 다
+
+
+def test_annotate_coarse_skips_small_denominator():
+    """컴포넌트 5개 미만이면 비율이 무의미 — 플래그 자체를 달지 않는다."""
+    from report_gen.requirements import annotate_sds_coarse
+
+    rows = [{"sds_components": ["SwCom_01", "SwCom_02", "SwCom_03"]}]
+    total, coarse = annotate_sds_coarse(rows)
+    assert (total, coarse) == (3, 0)
+    assert "sds_coarse" not in rows[0]      # 미적용은 False 가 아니라 부재(오독 방지)
+
+
+def test_annotate_coarse_boundary_is_strict_greater():
+    """정확히 40%는 coarse 아님 — '초과'가 계약이다."""
+    from report_gen.requirements import annotate_sds_coarse
+
+    rows = [{"sds_components": [f"SwCom_{i:02d}" for i in range(1, 5)]},      # 4/10 = 40%
+            {"sds_components": [f"SwCom_{i:02d}" for i in range(1, 11)]}]     # 10/10
+    total, coarse = annotate_sds_coarse(rows)
+    assert total == 10
+    assert rows[0]["sds_coarse"] is False
+    assert rows[1]["sds_coarse"] is True
+    assert coarse == 1
+
+
+def test_annotate_coarse_tolerates_junk_rows():
+    """None·비-dict 행이 섞여도 죽지 않는다(캐시 복원 경로 방어)."""
+    from report_gen.requirements import annotate_sds_coarse
+
+    assert annotate_sds_coarse(None) == (0, 0)
+    assert annotate_sds_coarse([None, "x", {"sds_components": None}]) == (0, 0)
+
+
+def test_both_modes_use_the_shared_coarse_helper():
+    """구조 가드 — 한쪽이 자기 식으로 다시 세면 모드 간 값이 갈린다.
+
+    `total_sds_components` 도 같은 헬퍼의 행 기준 분모를 써야 한다. local 은 예전에
+    `sds_req_to_design_comps` 전량(매트릭스에 없는 요구의 컴포넌트 포함)을 세서
+    거친 입도 임계의 분모와 표시 총수가 어긋나 있었다.
+    """
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2]
+    local_src = (root / "backend" / "routers" / "local.py").read_text(encoding="utf-8", errors="ignore")
+    req_src = (root / "report_gen" / "requirements.py").read_text(encoding="utf-8", errors="ignore")
+
+    assert "annotate_sds_coarse(rows)" in local_src, "local 경로가 공용 헬퍼를 안 쓴다"
+    assert '"sds_coarse_count": sds_coarse_count' in local_src, "local summary 에 키가 없다"
+    # local 이 분모를 자기 식으로 다시 세면 안 된다.
+    assert "len({c for cs in sds_req_to_design_comps.values() for c in cs})" not in local_src
+    # 판정식은 헬퍼 안에만 있어야 한다.
+    assert req_src.count("_SDS_COARSE_RATIO * total") == 1
+    assert "0.4 * _total_sds_comps" not in req_src
+
+
 if __name__ == "__main__":
     import pytest
     pytest.main([__file__, "-v"])

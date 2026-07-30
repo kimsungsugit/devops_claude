@@ -1378,6 +1378,11 @@ function CrossMatrixView({ rows, linkTable, fullMatrix, exportMeta }) {
   const layerTitle = layerEntries.map(([k, v]) => `${k} ${v}건`).join(' · ');
   // 단일 계층이 foreign 전부를 차지하면 칩 라벨에 그 계층명을 직접 노출(예: 'SwDS(설계) 참조').
   const foreignLayerLabel = layerEntries.length === 1 ? layerEntries[0][0] : null;
+  // 거친 입도 — 백엔드 summary 에서 직접 읽는다(integ 와 같은 fullMatrix 경로). 구 캐시엔
+  // 없을 수 있어 0 폴백. 임계는 백엔드와 같은 식(0.4 × 실 컴포넌트 총수)을 툴팁 표시용으로만 재계산.
+  const coarseCount = fullMatrix?.summary?.sds_coarse_count || 0;
+  const coarseTotal = fullMatrix?.summary?.total_sds_components || 0;
+  const coarseThreshold = Math.floor(0.4 * coarseTotal);
 
   if (built.length === 0) {
     return <div style={{ padding: 24, textAlign: 'center', color: 'var(--text-muted)' }}>표시할 요구사항이 없습니다.</div>;
@@ -1462,6 +1467,19 @@ function CrossMatrixView({ rows, linkTable, fullMatrix, exportMeta }) {
               background: COVERAGE_COLORS.partial.bg, color: COVERAGE_COLORS.partial.fg,
             }}>
             placeholder {integStats.placeholder_count}
+          </span>
+        )}
+        {/* 거친 입도(sds_coarse) — 한 요구가 실 SDS 컴포넌트의 40% 초과에 연결되면 추적 변별력이 없다.
+            분모가 상태명·설계ID·목차줄까지 세던 동안(HDPDM01 201 vs 실 33) 임계가 80.4로 떠서 이
+            지표는 한 번도 발화하지 않았다. 밴드 정화 후 8건이 드러났다 — 계산만 되고 표시가 없었으므로 칩 신설. */}
+        {coarseCount > 0 && (
+          <span title={`거친 입도 — 한 요구사항이 실 SDS 컴포넌트 ${coarseTotal}개 중 40%(${coarseThreshold}개) 초과에 연결됨. SDS Related ID 작성 입도가 거칠어 "이 요구가 어느 설계에 대응하는가"를 좁히지 못한다. 결함이 아니라 문서 입도 신호.`}
+            style={{
+              fontSize: 11, padding: '3px 8px', borderRadius: 12, fontWeight: 600,
+              border: `1px solid ${COVERAGE_COLORS.partial.border}`,
+              background: COVERAGE_COLORS.partial.bg, color: COVERAGE_COLORS.partial.fg,
+            }}>
+            거친 입도 {coarseCount}
           </span>
         )}
         {integ && integNoDefect && (

@@ -3862,6 +3862,12 @@ def _cache_trace_summary(matrix: Dict[str, Any], req: UdsTraceabilityMatrixReque
         "integrity_clean": bool(integ_stats.get("clean", True)),
         "integrity_collision_count": int(integ_stats.get("collision_count") or 0),
         "integrity_dangling_count": int(integ_stats.get("dangling_count") or 0),
+        # dangling 중 **결함인 것만**. foreign(계층참조 — SwFn_/SwST_ 같은 설계ID가 SDS
+        # Related ID 에 적힌 것)은 V-model 상 정상이라 결함이 아니다. 상세 패널은 이미
+        # suspect 만으로 '정합성 ✓'를 판정하는데(SrsSdsSection.jsx `integNoDefect`), 요약
+        # 배너·KPI 는 dangling_count 전량을 세어 같은 문서를 6건 vs 3건으로 달리 보고했다.
+        # 두 표면 lockstep 용 필드 — 기존 integrity_dangling_count 는 호환 위해 유지한다.
+        "integrity_dangling_suspect_count": int(integ_stats.get("dangling_suspect_count") or 0),
         "integrity_placeholder_count": int(integ_stats.get("placeholder_count") or 0),
     }
 

@@ -382,7 +382,12 @@ export default function ProjectSummarySection({ job, analysisResult, onSubChange
       if ((t.uncovered || 0) > 0) list.push({ label: `미추적 요구 ${t.uncovered}`, sev: 'warn', to: GO_TRACE });
       if ((t.asil_gap_count || 0) > 0) list.push({ label: `ASIL 시험 미달 ${t.asil_gap_count}`, sev: 'danger', to: GO_TRACE });
       if ((t.asil_unknown_count || 0) > 0) list.push({ label: `ASIL 미상 ${t.asil_unknown_count}`, sev: 'warn', to: GO_TRACE });
-      const integ = (t.integrity_collision_count || 0) + (t.integrity_dangling_count || 0);
+      // dangling 은 '오참조 의심'(suspect)만 결함이다. foreign(계층참조 — SDS Related ID 에
+      // 적힌 SwFn_/SwST_ 같은 설계ID)은 V-model 상 정상이라 상세 패널도 '정합성 ✓' 판정에서
+      // 제외한다(SrsSdsSection `integNoDefect`). 전량을 세면 같은 문서를 배너는 6건, 상세는
+      // 3건으로 보고한다(동봉 HDPDM01 실측). 구 캐시엔 suspect 축이 없어 전량으로 폴백한다.
+      const dang = t.integrity_dangling_suspect_count ?? t.integrity_dangling_count ?? 0;
+      const integ = (t.integrity_collision_count || 0) + dang;
       if (integ > 0) list.push({ label: `ID 정합성 ${integ}`, sev: 'warn', to: GO_TRACE });
       const unmapped = t.summary_raw?.unmapped_vcast_count ?? t.unmapped_vcast_count;
       if ((unmapped || 0) > 0) list.push({ label: `VectorCAST 미매칭 ${unmapped}`, sev: 'warn', to: GO_TRACE });
