@@ -557,6 +557,20 @@ RAG_CHUNK_STRATEGIES = {
     "default": {"size": RAG_CHUNK_SIZE, "overlap": RAG_CHUNK_OVERLAP},
 }
 
+# ---------------- RAG embedding backend ----------------
+# ⚠ 이 두 값이 여기 있는 이유: 예전엔 `workflow/rag/embedder.py` 안의 하드코딩
+# 기본값뿐이었고, 그 모델(`text-embedding-004`)이 v1beta 에서 **삭제돼 404** 를 내는
+# 동안에도 아무 설정 표면에 안 나타났다. 404 는 폴백 체인이 흡수해 KB 전체가 무작위
+# 벡터가 됐다 — 모델이 죽었다는 사실 자체가 어디에도 안 보였다.
+#
+# 두 값은 **짝**이다. RAG_EMBED_MODEL 을 바꾸면 native 차원이 달라질 수 있고,
+# 차원이 어긋나면 embedder 가 그 벡터를 저장하지 않고 오류로 보고한다(fail-closed).
+# gemini-embedding-001 은 native 3072 이며 MRL 절단(768/1536/3072)을 지원한다.
+# 모델 변경 후에는 **반드시 재인덱싱**할 것: `scripts/reindex_kb.py <report_dir>`
+# (차원·모델이 다른 기존 벡터는 cosine 비교가 성립하지 않아 검색에서 제외된다).
+RAG_EMBED_MODEL = os.environ.get("RAG_EMBED_MODEL", "gemini-embedding-001").strip()
+RAG_EMBED_DIM = int(os.environ.get("RAG_EMBED_DIM", "768") or 768)
+
 # ---------------- UDS Generation Constants ----------------
 UDS_MAX_SOURCE_FILES = 1200
 UDS_MAX_ITEMS_PER_CATEGORY = 120

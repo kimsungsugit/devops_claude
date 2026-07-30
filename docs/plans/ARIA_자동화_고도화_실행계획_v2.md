@@ -524,6 +524,61 @@ D1 은 이 라운드 지표에서 **회피**했다(설명 축을 근거로 안 �
 
 ---
 
+## 5-7. 임베딩 백엔드가 죽어 있었다 — 겹친 결함 3층 — ✅ 완료 (2026-07-31)
+
+§5-5 에서 "KB 가 난수인 진짜 원인은 키 미해석" 이라 적고 고쳤다. 그런데 실 KB 에
+재인덱싱을 돌리자 **§5-5 에서 만든 fail-closed 가드가 거부**했다 — 백엔드가 여전히
+`random` 이었다. 가드가 없었으면 63건을 난수로 다시 덮어쓰고 "완료" 로 끝났을 것이다.
+
+### 실측 — 결함이 층으로 겹쳐 있었다
+
+| # | 결함 | 실측 |
+|---|---|---|
+| E1 | 모델명 `text-embedding-004` 가 **v1beta 에서 삭제**됨 | `404 NOT_FOUND`. 살아 있는 embedContent 모델은 `gemini-embedding-001` / `gemini-embedding-2(-preview)` **3개뿐** |
+| E2 | 신 SDK 응답 언팩이 틀림 | `response.embeddings[0]` 는 pydantic `ContentEmbedding`. `__iter__` 가 값이 아니라 **`('values', [...])` 튜플**을 낸다 → 옛 코드 `[float(v) for v in emb]` = `TypeError`. **단건·배치 두 곳에 복제** |
+| E3 | 차원 불일치 | `gemini-embedding-001` native = **3072**, 설정 = 768. `config` 에는 `RAG_EMBED_MODEL`·`RAG_EMBED_DIM` 이 **아예 없었다**(모듈 내부 하드코딩만) |
+
+**E1 만 고치면 소용없다.** API 가 200 을 줘도 E2 의 TypeError 가 `except Exception` 에
+잡혀 재시도 3회를 태우고 폴백 체인 → **무작위 벡터**로 귀결된다. E2 까지 고쳐도 E3
+때문에 `_cache_put` 이 모든 벡터를 캐시 거부하고(매 호출이 API 왕복) pgvector
+`VECTOR(768)` 삽입이 실패한다 — 전부 조용히.
+
+부수 실측 — MRL 절단은 정규화를 깬다: `output_dimensionality` 미지정 3072 는
+L2 = 1.000000 이지만 768 절단은 **0.585940**, 1536 은 **0.689938**.
+
+### 수정
+
+1. **E1** — 기본 모델 `gemini-embedding-001`. `RAG_EMBED_MODEL`/`RAG_EMBED_DIM` 을
+   `config.py` 로 올려 env 로 덮을 수 있게 했다. 모델이 또 죽어도 설정 표면에서 보인다
+2. **E2** — `_coerce_embedding_values()` 단일 함수. `.values` 속성 / 순수 list / dict 를
+   전부 받고, 언팩 불가는 예외가 아니라 `None`(재시도 3배 낭비 방지). **단건·배치가
+   같은 함수를 쓴다** — 복제가 되살아나면 AST 계약 테스트가 잡는다
+3. **E3** — 요청에 `output_dimensionality` 를 **명시**하고 `_normalize_vec()` 로 재정규화.
+   그래도 어긋나면 `_check_dim()` 이 **저장하지 않고 오류 로그**(fail-closed) — 기대값과
+   실제값을 둘 다 적어 조치 가능하게. 혼합 차원 KB 는 cosine 이 0.0 을 내 해당 엔트리가
+   영구히 검색에서 빠지는데, 예전엔 `_cache_put` 이 조용히 캐시만 거부해 **아무 표면에도
+   안 나왔다**
+
+### 실측 (수정 후)
+
+- 단건: `embed_source=gemini`, `dim=768`, `L2=1.000000`, `degraded=False`
+- 의미 판별력: 관련쌍 cos **0.9469** vs 무관쌍 **0.6949**
+- 실 KB 63건 재인덱싱 **63/63 성공 · 실패 0**. 2회차는 `skipped_current=63`(멱등)
+- 시맨틱 검색 `semantic_ranked` **0 → 63**, `skipped_dim_mismatch=0`,
+  `semantic_disabled_reason=None`
+
+### 검증
+
+- 새 테스트 28건(`tests/unit/test_rag_embed_model_contract.py`) — **뮤테이션 6/6**
+  (모델명 / 언팩 / `output_dimensionality` / 차원검사 / 정규화 / 배치 복제 재발)
+- ⚠ **테스트가 내 fix 의 버그를 잡았다**: `_coerce_embedding_values` 가 dict 를
+  `getattr(obj,"values")` 로 먼저 보는 바람에 **내장 메서드**를 벡터로 취급했다
+  (dict 분기가 도달 불가). isinstance 순서를 뒤집어 수정
+- 기존 테스트 2건을 차원 인지하도록 갱신 — 스텁이 2·4차원을 반환하며 통과하고 있었다.
+  차원 검사가 생기며 드러난 것이므로 **의도된 파장**이다
+
+---
+
 ## 6. 다음 라운드 후보
 
 | # | 대상 | 이유 |
@@ -534,7 +589,7 @@ D1 은 이 라운드 지표에서 **회피**했다(설명 축을 근거로 안 �
 | ~~4~~ | ~~LLM redaction + 모델 echo 대조~~ | ✅ 완료 — §5-1 L4/L6 |
 | ~~5~~ | ~~3개 egress 경로 통합~~ | ✅ 완료 — §5-5. 키 해석 단일화(근본 원인)·재시도·입력 상한·폴백 사유. **잔여: 토큰 예산·stage cap 공유**(임베딩은 단발 호출이라 예산 개념이 llm_call 과 다름 — 별건) |
 | ~~6~~ | ~~`stats_out` 을 UI 까지 배선~~ | ✅ 완료 — §5-5 #1 (`retrieval_notes` 신규 응답 키 + 프론트 경고 배너) |
-| ~~7~~ | ~~실 KB 재인덱싱~~ | ✅ 완료 — §5-5 #2 (`reindex_embeddings` + `scripts/reindex_kb.py`). **운영 조치 남음**: 실 KB 에 실제로 돌려야 시맨틱 축이 복구된다(`--dry-run` 먼저) |
+| ~~7~~ | ~~실 KB 재인덱싱~~ | ✅ 완료 — §5-5 #2 + **§5-7 에서 실제 실행**(63/63, 시맨틱 0→63). 돌려 보니 백엔드가 죽어 있었고(모델 404) 가드가 그걸 잡았다 |
 | 🔴 D1 | provenance 가 "미기록" 을 `inference` 로 확정 | §5-6 참조. `_resolve_related_asil_desc` 가 description/asil/related 세 축 모두 미기록→`inference`. 사람이 쓴 설명이 추론으로 강등된다. 정직한 값은 `unknown` 인데 점수가 0.60→0.30 으로 내려가 **전 프로젝트 품질 수치가 이동**한다 → 정책 결정 필요 |
 | 🔴 D2 | 생성마다 저장소 고정 HDPDM01 SUDS(40.7MB) 로 함수 정보 채움 | §5-6 참조. 매칭은 함수명만이라 타 프로젝트 생성 시 HDPDM01 ASIL·Related 가 유입 가능. 성능도 생성 31.9초 중 24.3초. §3 의 "SUTS ASIL 이 HDPDM01 로 채워짐" 과 **같은 패턴 다른 사이트** |
 | 8 | UTCV-001 잔여 | `applicable` 정책축·커버리지 예외 disposition. 이 저장소에 해당 축이 **존재하지 않아** 신규 기능 개발이다(결함 수정 아님) — 사용자 판단 필요 |

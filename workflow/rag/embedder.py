@@ -1,7 +1,7 @@
 """Embedding layer for RAG Knowledge Base.
 
 Fallback chain:
-1. Google Gemini text-embedding-004 (768dim)
+1. Google Gemini gemini-embedding-001 (기본 768dim — MRL 절단 + 재정규화)
 2. External HTTP API (KB_EMBED_URL env)
 3. sentence-transformers all-MiniLM-L6-v2 (384dim)
 4. Seeded random vectors (64dim) - last resort
@@ -39,8 +39,15 @@ _EMBED_ATTEMPTS = 3
 _EMBED_RETRY_SLEEP = 1.0
 
 
+# Gemini 임베딩 기본 모델. **하드코딩된 모델명이 조용히 죽은 전례가 있다** —
+# `text-embedding-004` 는 v1beta 에서 제거돼 404 를 내고 있었고(2026-07-30 실측),
+# 그 404 는 폴백 체인에 흡수돼 KB 전체가 무작위 벡터가 됐다. 모델명은 config 로 뺀다.
+_DEFAULT_EMBED_MODEL = "gemini-embedding-001"
+_DEFAULT_EMBED_DIM = 768
+
+
 def _get_max_input_chars() -> int:
-    """임베딩 입력 상한(문자). text-embedding-004 는 2048 토큰이 상한이다.
+    """임베딩 입력 상한(문자). gemini-embedding-001 은 2048 토큰이 상한이다.
 
     상한을 넘기면 API 가 거부하고, 체인은 그걸 **무작위 벡터**로 갈음한다 — 즉 "너무 길다"가
     "의미 없는 벡터"로 조용히 바뀐다. 예전엔 길이 가드가 **전무**했다(패턴 검색 0건).
@@ -130,18 +137,106 @@ def get_embed_dim() -> int:
     """현재 설정된 embedding 차원 반환."""
     try:
         import config
-        return int(getattr(config, "RAG_EMBED_DIM", 768))
+        return int(getattr(config, "RAG_EMBED_DIM", _DEFAULT_EMBED_DIM))
     except Exception:
-        return 768
+        return _DEFAULT_EMBED_DIM
 
 
 def get_embed_model() -> str:
     """현재 설정된 embedding 모델명 반환."""
     try:
         import config
-        return str(getattr(config, "RAG_EMBED_MODEL", "text-embedding-004"))
+        return str(getattr(config, "RAG_EMBED_MODEL", _DEFAULT_EMBED_MODEL))
     except Exception:
-        return "text-embedding-004"
+        return _DEFAULT_EMBED_MODEL
+
+
+def _coerce_embedding_values(obj: Any) -> Optional[List[float]]:
+    """SDK 임베딩 응답 1건 -> `List[float]`. **단건·배치가 같은 이 함수를 쓴다.**
+
+    ⚠ 이 함수가 생긴 이유 — 실측된 라이브 결함:
+    신 SDK(`google-genai`)의 `response.embeddings[i]` 는 `list` 가 아니라 pydantic
+    모델 `ContentEmbedding` 이다. pydantic 의 `__iter__` 는 값이 아니라 **`(필드명, 값)`
+    튜플**을 낸다. 그래서 예전 코드 `[float(v) for v in emb]` 는
+    `float(('values', [...]))` 를 시도해 **TypeError** 를 냈다. 그 예외는 `except
+    Exception` 에 잡혀 재시도 3회를 태우고 폴백 체인으로 내려가 **무작위 벡터**가 됐다.
+    즉 모델명을 고쳐 API 가 200 을 줘도 결과는 그대로 난수였다 — 결함이 층으로 겹쳐 있어
+    앞의 하나만 고치면 뒤의 하나가 조용히 이어받는다.
+
+    단건 경로와 배치 경로에 언팩이 **복제**돼 있어 양쪽 다 같은 방식으로 깨져 있었다.
+    한쪽만 고치면 나머지가 잠복하므로(이 저장소의 반복된 실패 모드) 단일 출처로 둔다.
+    """
+    if obj is None:
+        return None
+    # ⚠ dict 를 **먼저** 본다. `getattr(dict, "values")` 는 None 이 아니라 내장 메서드를
+    #   돌려주므로, getattr 를 앞에 두면 dict 분기가 영영 도달하지 않고 그 메서드가
+    #   벡터로 취급된다(이 테스트가 실제로 잡았다).
+    if isinstance(obj, dict):
+        vals = obj.get("values")
+    elif isinstance(obj, (list, tuple)):
+        vals = obj
+    else:
+        # pydantic ContentEmbedding — 값은 `.values` 에 있다. `__iter__` 를 쓰면 안 된다.
+        vals = getattr(obj, "values", None)
+    if vals is None or isinstance(vals, (str, bytes)) or not hasattr(vals, "__iter__"):
+        return None
+    try:
+        out = [float(v) for v in vals]
+    except (TypeError, ValueError) as e:
+        _logger.warning("임베딩 응답 언팩 실패(%s: %s) — 형식이 바뀌었는지 확인할 것", type(e).__name__, e)
+        return None
+    return out or None
+
+
+def _normalize_vec(vec: List[float]) -> List[float]:
+    """L2 정규화. MRL 절단 벡터는 정규화가 **깨져서** 온다.
+
+    실측(gemini-embedding-001): `output_dimensionality` 미지정 3072 는 L2=1.000000 이지만
+    768 로 절단하면 L2=0.585940, 1536 은 0.689938 이다. cosine 은 자체적으로 노름을
+    나누므로 랭킹은 견디지만, 저장 벡터의 노름이 제각각이면 dot-product 를 쓰는 소비처
+    (pgvector 연산자 교체·향후 최적화)에서 조용히 틀린다. 저장 전에 맞춰 둔다.
+    """
+    arr = np.asarray(vec, dtype=float)
+    norm = float(np.linalg.norm(arr))
+    if not np.isfinite(norm) or norm <= 0.0:
+        return vec
+    return (arr / norm).tolist()
+
+
+def _embed_request_config() -> Dict[str, Any]:
+    """Gemini embed 요청 config — 단건·배치 공용(요청 형태가 갈리면 결과도 갈린다).
+
+    `output_dimensionality` 를 **명시**한다. gemini-embedding-001 의 native 차원은
+    3072 라, 지정하지 않으면 설정값(기본 768)과 어긋난 벡터가 돌아온다. 그러면
+    `_cache_put` 이 전부 캐시를 거부하고(매 호출이 API 왕복) pgvector 스키마
+    `VECTOR(768)` 삽입도 실패한다 — 전부 조용히.
+    """
+    return {
+        "task_type": "RETRIEVAL_DOCUMENT",
+        "output_dimensionality": get_embed_dim(),
+    }
+
+
+def _check_dim(vec: List[float], *, source: str, reasons: Optional[List[str]] = None) -> Optional[List[float]]:
+    """설정 차원과 실제 반환 차원이 다르면 **저장하지 않는다**(fail-closed).
+
+    혼합 차원 벡터가 KB 에 들어가면 `cosine_similarity` 가 0.0 을 내고 그 엔트리는
+    영구히 검색에서 빠진다 — 그런데 `_cache_put` 은 차원이 안 맞는 벡터를 조용히 캐시만
+    거부할 뿐이라 **아무 표면에도 안 나온다**. 설정 오류는 조용한 성능·품질 절벽이 아니라
+    읽을 수 있는 오류여야 한다.
+    """
+    want = get_embed_dim()
+    if len(vec) == want:
+        return vec
+    msg = (
+        f"{source} 임베딩 차원 불일치: 설정 RAG_EMBED_DIM={want} 인데 실제 {len(vec)} 를 받았다. "
+        f"config.RAG_EMBED_DIM 을 {len(vec)} 로 맞추거나 모델/차원 설정을 확인할 것 "
+        f"— 이 벡터는 저장하지 않는다(혼합 차원 KB 방지)."
+    )
+    _logger.error(msg)
+    if reasons is not None:
+        reasons.append(f"{source}: dim {len(vec)} != 설정 {want}")
+    return None
 
 
 # ==============================================================
@@ -241,14 +336,16 @@ def _embed_gemini(text: str, *, reasons: Optional[List[str]] = None) -> Optional
             response = client.models.embed_content(
                 model=model,
                 contents=text,
-                config={"task_type": "RETRIEVAL_DOCUMENT"},
+                config=_embed_request_config(),   # type: ignore[arg-type]
             )
             emb = getattr(response, "embedding", None)
-            if emb is None and hasattr(response, "embeddings") and response.embeddings:
-                emb = response.embeddings[0]
-            if emb:
-                return [float(v) for v in emb]
-            last_err = "응답에 embedding 이 없음"
+            _batch = getattr(response, "embeddings", None)
+            if emb is None and _batch:
+                emb = _batch[0]
+            vec = _coerce_embedding_values(emb)
+            if vec:
+                return _check_dim(_normalize_vec(vec), source="gemini", reasons=reasons)
+            last_err = "응답에 embedding 이 없거나 언팩 불가"
             break   # 형식 문제는 재시도해도 같다
         except Exception as e:
             last_err = f"{type(e).__name__}: {e}"
@@ -284,18 +381,26 @@ def _embed_gemini_batch(texts: List[str]) -> Optional[List[List[float]]]:
             # 신 SDK 배치 임베딩
             response = client.models.embed_content(
                 model=model,
-                contents=batch,
-                config={"task_type": "RETRIEVAL_DOCUMENT"},
+                contents=batch,                   # type: ignore[arg-type]
+                config=_embed_request_config(),   # type: ignore[arg-type]
             )
             embeddings = getattr(response, "embeddings", None)
-            if embeddings and len(embeddings) > 0:
-                for emb in embeddings:
-                    vec = emb if isinstance(emb, list) else list(emb)
-                    all_vecs.append([float(v) for v in vec])
-            elif hasattr(response, "embedding") and response.embedding:
-                all_vecs.append([float(v) for v in response.embedding])
-            else:
+            if not embeddings:
+                single = getattr(response, "embedding", None)
+                embeddings = [single] if single else []
+            if not embeddings:
                 return None
+            # 언팩·정규화·차원검사를 단건 경로와 **같은 함수**로 한다. 예전엔 배치 쪽이
+            # `list(emb)` 로 따로 풀어 pydantic 모델을 (필드명, 값) 튜플로 만들었다.
+            for emb in embeddings:
+                vec = _coerce_embedding_values(emb)
+                if not vec:
+                    _logger.warning("Gemini batch embedding: 응답 1건 언팩 실패 — 배치 전체를 폴백시킨다")
+                    return None
+                checked = _check_dim(_normalize_vec(vec), source="gemini_batch")
+                if checked is None:
+                    return None
+                all_vecs.append(checked)
         except Exception as e:
             _logger.warning("Gemini batch embedding failed at batch %d: %s", i // batch_size, e)
             return None

@@ -130,19 +130,24 @@ class TestRetry:
         assert any("429" in r for r in reasons)
 
     def test_success_on_first_attempt_does_not_retry(self, monkeypatch):
-        """음성 대조군 — 성공하면 재시도하지 않는다(불필요한 API 호출 방지)."""
+        """음성 대조군 — 성공하면 재시도하지 않는다(불필요한 API 호출 방지).
+
+        스텁 차원을 `get_embed_dim` 에 맞춘다: 반환 벡터는 차원 검사(`_check_dim`)를
+        통과해야 하고, 이미 정규화된 값이라 `_normalize_vec` 이 그대로 통과시킨다.
+        """
         from workflow.rag import embedder
         calls = {"n": 0}
+        monkeypatch.setattr(embedder, "get_embed_dim", lambda: 2)
 
         class _Ok:
             class models:
                 @staticmethod
                 def embed_content(**_kw):
                     calls["n"] += 1
-                    return type("R", (), {"embeddings": [[0.1, 0.2]]})()
+                    return type("R", (), {"embeddings": [[1.0, 0.0]]})()
 
         monkeypatch.setattr(embedder, "_init_gemini_client", lambda: _Ok())
-        assert embedder._embed_gemini("텍스트") == [0.1, 0.2]
+        assert embedder._embed_gemini("텍스트") == [1.0, 0.0]
         assert calls["n"] == 1
 
     def test_malformed_response_is_not_retried(self, monkeypatch):
@@ -199,6 +204,7 @@ class TestInputClip:
         """
         from workflow.rag import embedder
         monkeypatch.setattr(embedder, "_get_max_input_chars", lambda: 10)
+        monkeypatch.setattr(embedder, "get_embed_dim", lambda: 4)
         seen = {}
 
         class _Cap:
