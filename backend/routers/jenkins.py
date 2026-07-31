@@ -56,6 +56,7 @@ from backend.helpers import (
     evaluate_vectorcast_readiness,
     load_vectorcast_project_config,
 )
+from backend.helpers.sds import is_sds_filename, is_srs_filename
 from backend.schemas import (
     CallTreePreviewRequest,
     CodeSonarRequest,
@@ -2448,7 +2449,7 @@ async def jenkins_uds_generate(
         )
     sds_doc_paths: List[str] = []
     for p in req_doc_paths:
-        if "sds" in Path(p).name.lower():
+        if is_sds_filename(p):
             sds_doc_paths.append(str(p))
     if source_sections:
         details = source_sections.get("function_details", {})
@@ -3141,9 +3142,9 @@ async def jenkins_sts_generate_async(
                 req_texts.append(text.strip())
                 if p.suffix.lower() == ".docx":
                     req_doc_paths.append(str(p))
-                if "sds" in p.name.lower():
+                if is_sds_filename(p.name):
                     sds_doc_paths.append(str(p))
-                if not srs_docx_path and "srs" in p.name.lower() and p.suffix.lower() == ".docx":
+                if not srs_docx_path and is_srs_filename(p.name) and p.suffix.lower() == ".docx":
                     srs_docx_path = str(p)
         except Exception:
             continue
@@ -3160,9 +3161,9 @@ async def jenkins_sts_generate_async(
                 req_texts.append(text.strip())
                 if tmp_path.suffix.lower() == ".docx":
                     req_doc_paths.append(str(tmp_path))
-                if "sds" in f.filename.lower():
+                if is_sds_filename(f.filename):
                     sds_doc_paths.append(str(tmp_path))
-                if not srs_docx_path and "srs" in f.filename.lower() and suffix == ".docx":
+                if not srs_docx_path and is_srs_filename(f.filename) and suffix == ".docx":
                     srs_docx_path = str(tmp_path)
         except Exception:
             continue

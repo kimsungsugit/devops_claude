@@ -60,7 +60,7 @@ from backend.helpers import (
     evaluate_vectorcast_readiness,
     load_vectorcast_project_config,
 )
-from backend.helpers.sds import build_sds_view_model
+from backend.helpers.sds import build_sds_view_model, is_sds_filename, is_srs_filename
 from backend.schemas import (
     EditorReadAbsRequest,
     EditorReadRequest,
@@ -242,9 +242,9 @@ def _discover_default_req_docs() -> Dict[str, List[str]]:
         return result
     for path in docs_dir.glob("*.docx"):
         lower = path.name.lower()
-        if "srs" in lower or "sds" in lower:
+        if is_srs_filename(lower) or is_sds_filename(lower):
             result["req"].append(str(path))
-        if "sds" in lower:
+        if is_sds_filename(lower):
             result["sds"].append(str(path))
     return result
 
@@ -302,9 +302,42 @@ def _resolve_req_doc_sets(
     req_doc_paths: Optional[List[str]] = None,
     sds_doc_paths: Optional[List[str]] = None,
 ) -> Tuple[List[str], List[str]]:
+    """요구/SDS 문서 경로 확정 — 저장소 `docs/` 글롭은 **아무것도 안 준 경우에만**.
+
+    예전엔 사용자가 준 경로에 저장소 글롭을 **무조건 이어붙였다**(`user + defaults`).
+    그러면 어느 프로젝트를 돌리든 저장소 동봉 HDPDM01 SDS 가 항상 섞인다.
+    `enrich_function_details_with_docs` 의 병합은 first-wins 라, 사용자 문서가 **빈칸인
+    항목을 HDPDM01 의 ASIL·요구ID 가 채우고**, 사용자 문서에 아예 없는 함수는 HDPDM01
+    엔트리가 통째로 추가된다.
+
+    실측(KJPDS02 SwDS ↔ 저장소 HDPDM01 SwDS): 함수 엔트리 **473개(KJPDS02 의 80.9%)가
+    이름 충돌**하고 그 **전부**가 HDPDM01 쪽에 asil·related 를 갖고 있었다 —
+    예: `adc0_stop_current_workaround` ← HDPDM01 의 `SwTR_0107, SwNTR_0103`.
+
+    같은 규율이 이 파일의 `_doc_or_discovered`(SRS)와 `generators/suts.py`
+    `load_sds_map_from`(커밋 `1bfdee9` "프로젝트 간 오염 3건")에 이미 있다 —
+    여기만 빠져 있었다. 그쪽은 "해석 실패 시 대체 금지"였는데 여기는 조건조차 없었다.
+    """
+    user_req = _dedupe_paths([p for p in (req_doc_paths or []) if str(p or "").strip()])
+    user_sds = _dedupe_paths([p for p in (sds_doc_paths or []) if str(p or "").strip()])
+    # 사용자가 준 요구 문서 중 이름에 'sds' 가 든 것도 SDS 로 인정 — Jenkins 경로
+    # (`jenkins.py` `sds_doc_paths` 구성)와 동일 규칙이라 모드 간 결과가 갈리지 않는다.
+    if not user_sds and user_req:
+        user_sds = _dedupe_paths([p for p in user_req if is_sds_filename(p)])
+    if user_req or user_sds:
+        if not user_sds:
+            # 침묵 금지 — SDS 없이 진행하면 ASIL/요구 보강이 비는데, 그게 저장소 문서로
+            # 채워지는 것보다는 낫다. 다만 왜 비었는지는 남긴다.
+            _logger.warning(
+                "SDS 미지정 — 저장소 docs/ 문서로 대체하지 않는다(다른 프로젝트 오염 방지). "
+                "함수별 ASIL/요구 보강은 생략된다")
+        return user_req, user_sds
     defaults = _discover_default_req_docs()
-    req_paths = _dedupe_paths(list(req_doc_paths or []) + list(defaults.get("req") or []))
-    sds_paths = _dedupe_paths(list(sds_doc_paths or []) + list(defaults.get("sds") or []))
+    req_paths = _dedupe_paths(list(defaults.get("req") or []))
+    sds_paths = _dedupe_paths(list(defaults.get("sds") or []))
+    if req_paths or sds_paths:
+        _logger.info("요구/SDS 문서 미지정 — 저장소 docs/ 에서 자동 탐색(프로젝트 무관): "
+                     "req %d · sds %d", len(req_paths), len(sds_paths))
     return req_paths, sds_paths
 
 
@@ -337,7 +370,7 @@ def _discover_hsis_path() -> Optional[str]:
 def _discover_srs_docx() -> Optional[str]:
     """저장소 `docs/` 에서 SRS docx 하나를 고른다(프로젝트 무관)."""
     for p in _discover_default_req_docs().get("req", []):
-        if "srs" in p.lower() and p.endswith(".docx"):
+        if is_srs_filename(p) and p.endswith(".docx"):
             return p
     return None
 
@@ -850,9 +883,9 @@ async def local_uds_generate(
             if p.suffix.lower() == ".docx":
                 req_doc_paths.append(str(p))
             fname_lower = p.name.lower()
-            if "srs" in fname_lower:
+            if is_srs_filename(fname_lower):
                 srs_texts.append(text.strip())
-            elif "sds" in fname_lower:
+            elif is_sds_filename(fname_lower):
                 sds_texts.append(text.strip())
                 if p.suffix.lower() in {".docx", ".doc"}:
                     sds_doc_paths.append(str(p))
@@ -1319,7 +1352,7 @@ async def local_uds_generate_async(
             # SDS 파티션 맵 로드 (Related ID + ASIL 전파)
             _async_sds_pmap: Dict[str, Dict[str, str]] = {}
             for rp in req_paths_list:
-                if rp.lower().endswith(".docx") and "sds" in rp.lower():
+                if rp.lower().endswith(".docx") and is_sds_filename(rp):
                     try:
                         from report_gen.requirements import _extract_sds_partition_map
                         _async_sds_pmap.update(_extract_sds_partition_map(rp))
@@ -1371,9 +1404,9 @@ async def local_uds_generate_async(
                     if p.suffix.lower() == ".docx":
                         req_doc_paths.append(str(p))
                     fname_lower = p.name.lower()
-                    if "srs" in fname_lower:
+                    if is_srs_filename(fname_lower):
                         srs_texts.append(text.strip())
-                    elif "sds" in fname_lower:
+                    elif is_sds_filename(fname_lower):
                         sds_texts.append(text.strip())
                         if p.suffix.lower() in {".docx", ".doc"}:
                             sds_doc_paths.append(str(p))
@@ -2080,9 +2113,9 @@ async def local_sts_generate(
                     req_texts.append(text.strip())
                     if p.suffix.lower() == ".docx":
                         req_doc_paths.append(str(p))
-                        if "sds" in p.name.lower():
+                        if is_sds_filename(p.name):
                             sds_doc_paths.append(str(p))
-                    if not srs_docx_path and "srs" in p.name.lower() and p.suffix.lower() == ".docx":
+                    if not srs_docx_path and is_srs_filename(p.name) and p.suffix.lower() == ".docx":
                         srs_docx_path = str(p)
         except Exception:
             pass
@@ -2100,9 +2133,9 @@ async def local_sts_generate(
                 req_texts.append(text.strip())
                 if tmp_path.suffix.lower() == ".docx":
                     req_doc_paths.append(str(tmp_path))
-                    if "sds" in f.filename.lower():
+                    if is_sds_filename(f.filename):
                         sds_doc_paths.append(str(tmp_path))
-                if not srs_docx_path and "srs" in f.filename.lower() and suffix == ".docx":
+                if not srs_docx_path and is_srs_filename(f.filename) and suffix == ".docx":
                     srs_docx_path = str(tmp_path)
         except Exception:
             pass
@@ -2264,9 +2297,9 @@ async def local_sts_generate_stream(
                     req_texts.append(text.strip())
                     if p.suffix.lower() == ".docx":
                         req_doc_paths.append(str(p))
-                        if "sds" in p.name.lower():
+                        if is_sds_filename(p.name):
                             sds_doc_paths.append(str(p))
-                    if not srs_docx_path and "srs" in p.name.lower() and p.suffix.lower() == ".docx":
+                    if not srs_docx_path and is_srs_filename(p.name) and p.suffix.lower() == ".docx":
                         srs_docx_path = str(p)
         except Exception:
             pass
@@ -2284,9 +2317,9 @@ async def local_sts_generate_stream(
                 req_texts.append(text.strip())
                 if tmp_path.suffix.lower() == ".docx":
                     req_doc_paths.append(str(tmp_path))
-                    if "sds" in f.filename.lower():
+                    if is_sds_filename(f.filename):
                         sds_doc_paths.append(str(tmp_path))
-                if not srs_docx_path and "srs" in f.filename.lower() and suffix == ".docx":
+                if not srs_docx_path and is_srs_filename(f.filename) and suffix == ".docx":
                     srs_docx_path = str(tmp_path)
         except Exception:
             pass
@@ -2448,9 +2481,9 @@ async def local_sts_generate_async(
                     req_texts.append(text.strip())
                     if p.suffix.lower() == ".docx":
                         req_doc_paths.append(str(p))
-                        if "sds" in p.name.lower():
+                        if is_sds_filename(p.name):
                             sds_doc_paths.append(str(p))
-                    if not srs_docx_path and "srs" in p.name.lower() and p.suffix.lower() == ".docx":
+                    if not srs_docx_path and is_srs_filename(p.name) and p.suffix.lower() == ".docx":
                         srs_docx_path = str(p)
         except Exception:
             pass
@@ -2468,9 +2501,9 @@ async def local_sts_generate_async(
                 req_texts.append(text.strip())
                 if tmp_path.suffix.lower() == ".docx":
                     req_doc_paths.append(str(tmp_path))
-                    if "sds" in f.filename.lower():
+                    if is_sds_filename(f.filename):
                         sds_doc_paths.append(str(tmp_path))
-                if not srs_docx_path and "srs" in f.filename.lower() and suffix == ".docx":
+                if not srs_docx_path and is_srs_filename(f.filename) and suffix == ".docx":
                     srs_docx_path = str(tmp_path)
         except Exception:
             pass
