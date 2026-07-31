@@ -44,9 +44,20 @@ PLACEHOLDER_VALUES = frozenset({"", "tbd", "n/a", "na", "-", "none"})
 #   - "inference"     : 생성기가 추론/합성 (0.60)
 #   - "module_inherit": 모듈에서 물려받음 (0.70)
 #   - "rule"          : 이름 규칙 등 기계적 규칙 (0.75)
+#   - "generated_doc" : 자기 산출물(생성 DOCX)에서 회수, 원 유래 불명 (0.30)
 # `comment`(1.00)·`sds`/`srs`/`uds`/`swcom`(0.95)·`rag`(0.85)·`call_graph`(0.80) 은
 # 실제 근거를 본 것이므로 약하지 않다.
-WEAK_SOURCES = frozenset({"", "unknown", "default", "inference", "module_inherit", "rule"})
+#
+# ⚠ 이 집합과 `validation.py::src_score` 는 **함께 움직여야 한다**. 실제로 한 번
+#   갈라졌다: `generated_doc`(0.30)을 점수표에만 넣고 여기 빠뜨려, 최약체가 여기선
+#   "강한 출처" 로 분류됐다. 경계는 `tests/unit/test_confidence_provenance_laundering.py`
+#   의 `TestWeakSourceTableAgreesWithScores` 가 양방향으로 고정한다.
+WEAK_SOURCES = frozenset(
+    {"", "unknown", "default", "generated_doc", "inference", "module_inherit", "rule"}
+)
+
+# 약함/강함을 가르는 점수 경계. `rule`(0.75)까지가 약함, `call_graph`(0.80)부터 강함.
+WEAK_SCORE_MAX = 0.75
 
 
 def is_weak_source(src: Any) -> bool:

@@ -297,6 +297,68 @@ class TestVocabulary:
 
 
 # ---------------------------------------------------------------------------
+# 두 표가 갈라지지 않게 — 실제로 한 번 갈라졌다
+# ---------------------------------------------------------------------------
+
+def _src_score_table() -> dict[str, float]:
+    """`validation.py::src_score` 를 AST 로 읽는다(import 부작용 없이)."""
+    tree = ast.parse(MODULE.read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Dict) or not node.keys:
+            continue
+        if not all(
+            isinstance(v, ast.Constant) and isinstance(v.value, (int, float))
+            for v in node.values
+        ):
+            continue
+        keys = {k.value for k in node.keys if isinstance(k, ast.Constant)}
+        if {"comment", "inference", "default"} <= keys:
+            return {
+                str(k.value): float(v.value)
+                for k, v in zip(node.keys, node.values)
+                if isinstance(k, ast.Constant)
+                and isinstance(v, ast.Constant)
+                and isinstance(v.value, (int, float))
+            }
+    raise AssertionError("src_score 표를 찾지 못했다")
+
+
+class TestWeakSourceTableAgreesWithScores:
+    """`WEAK_SOURCES`(판정)와 `src_score`(점수)는 함께 움직여야 한다.
+
+    회귀: `generated_doc`(0.30)을 점수표에만 넣고 `WEAK_SOURCES` 에 빠뜨려, 최약체가
+    `is_weak_source()` 에서는 **강한 출처**로 분류됐다. 이 함수는 payload 를 제자리
+    변경하므로 그 값이 하류로 새고, 더 나은 근거가 와도 덮이지 않게 된다.
+    """
+
+    def test_every_low_scoring_source_is_weak(self):
+        from report_gen.provenance import WEAK_SCORE_MAX, is_weak_source
+
+        offenders = [
+            (src, sc) for src, sc in _src_score_table().items()
+            if sc <= WEAK_SCORE_MAX and not is_weak_source(src)
+        ]
+        assert not offenders, f"점수는 약한데 판정은 강하다: {offenders}"
+
+    def test_every_high_scoring_source_is_strong(self):
+        from report_gen.provenance import WEAK_SCORE_MAX, is_weak_source
+
+        offenders = [
+            (src, sc) for src, sc in _src_score_table().items()
+            if sc > WEAK_SCORE_MAX and is_weak_source(src)
+        ]
+        assert not offenders, f"점수는 강한데 판정은 약하다: {offenders}"
+
+    def test_every_weak_source_has_a_score(self):
+        """점수표에 없는 라벨은 `src_score.get(..., 0.6)` 기본값으로 조용히 접힌다."""
+        from report_gen.provenance import WEAK_SOURCES
+
+        scores = _src_score_table()
+        missing = sorted(s for s in WEAK_SOURCES if s and s not in scores)
+        assert not missing, f"WEAK_SOURCES 에만 있고 점수가 없다: {missing}"
+
+
+# ---------------------------------------------------------------------------
 # 구조 계약 — 모양→출처 분류가 되살아나지 않게
 # ---------------------------------------------------------------------------
 
