@@ -26,21 +26,70 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-# [Google Gemini SDK Import]
-try:
-    # New SDK (recommended): pip install google-genai
-    from google import genai as genai_new  # type: ignore
-except Exception:  # pragma: no cover
-    genai_new = None  # type: ignore
+# ── [Google Gemini SDK — **지연 로딩**] ────────────────────────────────────────
+# ⚠ 실측(2026-07-31): 이 두 SDK 를 모듈 레벨에서 즉시 import 하면
+#     google.genai ≈ 36초 + google.generativeai ≈ 10초
+#   이 든다(3회 재현, warm cache). 그 결과 `backend.helpers.uds` import 가 **52초**였고
+#   그 비용을 **백엔드 기동**·**모든 pytest 워커**·`workflow.ai` 를 스치는 모든 스크립트가
+#   LLM 을 한 번도 호출하지 않아도 지불했다.
+#
+#   게다가 `google.generativeai` 는 **수명이 끝난 패키지**다("All support ... has ended").
+#   실제 사용처는 아래 legacy fallback 한 곳뿐인데 항상 로드되고 FutureWarning 을 뿌렸다.
+#
+#   같은 저장소의 `workflow/llm_adapters.py:111` 은 이미 함수 안에서 지연 import 한다 —
+#   여기만 즉시 로드였다.
+#
+# 계약 유지: 외부(`workflow/pipeline.py:2246`)는 `getattr(ai, "genai_new", None)` 로
+# **가용성**을 묻는다. PEP 562 모듈 `__getattr__` 로 그 이름들을 그대로 유지하되,
+# 접근 시점에 로드한다(가용성 판단은 LLM 을 쓰기 직전이므로 그때 내는 비용이 맞다).
+_SDK_NAMES = ("genai_new", "genai_legacy", "HarmCategory", "HarmBlockThreshold")
+_sdk_cache: Dict[str, Any] = {}
+_sdk_errors: Dict[str, str] = {}
+_sdk_lock = threading.Lock()
 
-try:
-    # Legacy SDK (deprecated): pip install google-generativeai
-    import google.generativeai as genai_legacy  # type: ignore
-    from google.generativeai.types import HarmBlockThreshold, HarmCategory  # type: ignore
-except Exception:  # pragma: no cover
-    genai_legacy = None  # type: ignore
-    HarmCategory = None  # type: ignore
-    HarmBlockThreshold = None  # type: ignore
+
+def _load_gemini_sdks() -> None:
+    """두 SDK 를 한 번만 로드한다. 실패는 **사유를 남긴다**(조용한 None 금지)."""
+    if _sdk_cache:
+        return
+    with _sdk_lock:
+        if _sdk_cache:
+            return
+        loaded: Dict[str, Any] = dict.fromkeys(_SDK_NAMES)
+        try:
+            from google import genai as _genai_new  # type: ignore
+            loaded["genai_new"] = _genai_new
+        except Exception as e:  # pragma: no cover - 환경 의존
+            _sdk_errors["genai_new"] = f"{type(e).__name__}: {e}"
+        try:
+            import google.generativeai as _genai_legacy  # type: ignore
+            from google.generativeai.types import HarmBlockThreshold as _HBT  # type: ignore
+            from google.generativeai.types import HarmCategory as _HC  # type: ignore
+            loaded["genai_legacy"] = _genai_legacy
+            loaded["HarmCategory"] = _HC
+            loaded["HarmBlockThreshold"] = _HBT
+        except Exception as e:  # pragma: no cover - 환경 의존
+            _sdk_errors["genai_legacy"] = f"{type(e).__name__}: {e}"
+        _sdk_cache.update(loaded)
+    if _sdk_errors:
+        import logging
+        logging.getLogger("workflow.ai").info(
+            "Gemini SDK 일부 미가용(폴백 체인에 반영됨): %s", _sdk_errors)
+
+
+def _sdk(name: str) -> Any:
+    """SDK 심볼을 지연 해석한다. 모듈 내부 참조는 **전부 이걸 쓴다**.
+
+    (모듈 `__getattr__` 은 모듈 **밖** 접근에만 불린다 — 내부 전역 조회에는 안 걸린다.)
+    """
+    _load_gemini_sdks()
+    return _sdk_cache.get(name)
+
+
+def __getattr__(name: str) -> Any:   # PEP 562 — 외부의 `ai.genai_new` 접근 호환
+    if name in _SDK_NAMES:
+        return _sdk(name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 try:
     import requests  # type: ignore
@@ -89,9 +138,10 @@ def create_gemini_cached_context(
     if not api_key:
         return None
 
-    if genai_new is not None:
+    _gn = _sdk("genai_new")
+    if _gn is not None:
         try:
-            client = genai_new.Client(api_key=api_key)
+            client = _gn.Client(api_key=api_key)
             from google.genai import types as genai_types
             cached = client.caches.create(
                 model=model,
@@ -977,7 +1027,8 @@ def llm_call(
             prompt = f"[SYSTEM]\n{system_instruction}\n\n{prompt}"
 
         # 1-a) New SDK (google-genai)
-        if genai_new is not None:
+        _gn = _sdk("genai_new")
+        if _gn is not None:
             last_err = ""
             allow_legacy_after_network_denied = str(
                 cfg.get("legacy_fallback_on_network_denied")
@@ -1001,7 +1052,7 @@ def llm_call(
                     client_kwargs["http_options"] = genai_types.HttpOptions(
                         timeout=int(gemini_read_timeout * 1000)
                     )
-                    client = genai_new.Client(**client_kwargs)  # type: ignore[attr-defined]
+                    client = _gn.Client(**client_kwargs)  # type: ignore[attr-defined]
                     gen_cfg = genai_types.GenerateContentConfig(
                         temperature=temperature,
                         max_output_tokens=int(max_tokens),
@@ -1012,7 +1063,7 @@ def llm_call(
                     if system_instruction:
                         gen_cfg.system_instruction = system_instruction  # type: ignore[attr-defined]
                 except Exception:  # pragma: no cover
-                    client = genai_new.Client(**client_kwargs)  # type: ignore[attr-defined]
+                    client = _gn.Client(**client_kwargs)  # type: ignore[attr-defined]
                     gen_cfg = {
                         "temperature": temperature,
                         "max_output_tokens": int(max_tokens),
@@ -1097,33 +1148,35 @@ def llm_call(
                 meta_out["error"] = meta_out.get("error") or last_err
 
         # 1-b) Legacy SDK (google-generativeai, deprecated fallback)
-        if genai_legacy is not None:
+        _gl = _sdk("genai_legacy")
+        if _gl is not None:
             last_err = ""
             # configure를 1회만 실행 (글로벌 상태 변경 최소화)
-            if not getattr(genai_legacy, "_configured", False):
-                genai_legacy.configure(api_key=api_key)  # type: ignore[union-attr]
-                genai_legacy._configured = True  # type: ignore[attr-defined]
+            if not getattr(_gl, "_configured", False):
+                _gl.configure(api_key=api_key)  # type: ignore[union-attr]
+                _gl._configured = True  # type: ignore[attr-defined]
             for attempt in range(max(1, retries)):
                 try:
 
                     # legacy는 구조화된 role보다 prompt 문자열 전달이 안전
                     if system_instruction:
-                        gemini_model = genai_legacy.GenerativeModel(  # type: ignore[union-attr]
+                        gemini_model = _gl.GenerativeModel(  # type: ignore[union-attr]
                             model_name=str(model),
                             system_instruction=system_instruction,
                         )
                     else:
-                        gemini_model = genai_legacy.GenerativeModel(  # type: ignore[union-attr]
+                        gemini_model = _gl.GenerativeModel(  # type: ignore[union-attr]
                             model_name=str(model),
                         )
 
                     safety_settings = None
-                    if HarmCategory is not None and HarmBlockThreshold is not None:
+                    _hc, _hbt = _sdk("HarmCategory"), _sdk("HarmBlockThreshold")
+                    if _hc is not None and _hbt is not None:
                         safety_settings = {
-                            HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
-                            HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
-                            HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
-                            HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
+                            _hc.HARM_CATEGORY_HARASSMENT: _hbt.BLOCK_NONE,
+                            _hc.HARM_CATEGORY_HATE_SPEECH: _hbt.BLOCK_NONE,
+                            _hc.HARM_CATEGORY_SEXUALLY_EXPLICIT: _hbt.BLOCK_NONE,
+                            _hc.HARM_CATEGORY_DANGEROUS_CONTENT: _hbt.BLOCK_NONE,
                         }
 
                     generation_config: Dict[str, Any] = {

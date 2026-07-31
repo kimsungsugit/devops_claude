@@ -1475,12 +1475,34 @@ def generate_sits_quality_report(
             "dropped_entry_fns": list(fs.get("dropped_entry_fns") or []),
         }
 
+    # SDS 기반 Related 보강 실적. **조건 없이** 싣는다 — 0 건이야말로 실어야 하는 값이다.
+    # ⚠ 이걸 빠뜨렸다가 자체 감사에서 잡혔다: `collect_integration_flows` 가 `stats_out`
+    #   으로 `sds_*` 를 내보내도 여기서 **이름 지정한 8개 키만** 골라 담아 전부 버려졌고,
+    #   그래서 보강 실적은 로그에만 남았다(품질 리포트는 API 로 나가지만 로그는 안 나간다).
+    #   "보고를 추가했다" 와 "보고가 도달한다" 는 다른 문제다.
+    sds_enrich: Dict[str, Any] = {}
+    if fs.get("sds_lookups") is not None:
+        _lk = int(fs.get("sds_lookups") or 0)
+        _hit = int(fs.get("sds_swcom_hits") or 0)
+        sds_enrich = {
+            "source": fs.get("sds_source"),            # argument | repo_docs_glob
+            "map_entries": int(fs.get("sds_map_entries") or 0),
+            "lookups": _lk,
+            "key_hits": int(fs.get("sds_key_hits") or 0),
+            "swcom_hits": _hit,
+            # 분모 0 = 미측정(0% 아님) — 이 저장소 규약
+            "yield_pct": round(100.0 * _hit / _lk, 2) if _lk else None,
+        }
+
     return {
         "total_test_cases": total_tc,
         "total_sub_cases": total_sub,
         "avg_sub_cases_per_tc": avg_sub,
         # 캡에 잘린 흐름이 있으면 비지 않는다(없으면 {} — 소비처는 .get 으로 읽는다).
         "integration_flow_coverage": flow_cov,
+        # SDS 보강이 **어느 문서로 몇 건** 산출했는지. 저장소 폴백(프로젝트 무관)이면
+        # source 로 드러난다.
+        "sds_related_enrichment": sds_enrich,
         # Related ID **필드 보유율**(합성 포함) — 서식 채움 지표이지 추적성이 아니다.
         "with_related_count": with_related,
         "related_coverage_pct": related_pct,

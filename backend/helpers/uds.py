@@ -108,6 +108,47 @@ def _read_gen_stats(out_path: Path) -> Dict[str, Any]:
         return {}
 
 
+def _gen_stats_result_fields(out_path: Path) -> Dict[str, Any]:
+    """DOCX 생성 충실도를 **API 응답 표면**에 올릴 필드로 만든다.
+
+    ⚠ 자체 감사(2026-07-31)에서 잡힌 격차: 이 수치는 sidecar 와
+    `<out>.docx.stage.json` checkpoint 에 기록되는데, **checkpoint 를 읽는 코드가
+    저장소 전체에 하나도 없다**(write-only). 로그 경고도 백엔드 로그에만 남는다.
+    그래서 "침묵을 없앴다" 는 절반만 사실이었다 — 산출물을 검토하는 사람이 보는
+    표면(다른 `*_path` 리포트들과 같은 자리)에는 없었다.
+
+    **보고를 추가하는 것과 보고가 도달하는 것은 다른 문제다.**
+
+    Returns:
+        `gen_stats_path`(sidecar 경로) + `gen_stats_summary`(핵심 수치).
+        sidecar 가 없으면 `gen_stats_summary=None` — **미측정을 "문제 없음" 과 구분**한다.
+    """
+    try:
+        from report_gen.docx_builder import gen_stats_path
+        p = gen_stats_path(str(out_path))
+    except Exception as e:   # noqa: BLE001 - 경로 해석 실패는 생성 실패가 아니다
+        _logger.warning("생성 통계 경로 해석 실패(%s) — 충실도를 미측정으로 보고한다: %s",
+                        type(e).__name__, e)
+        return {"gen_stats_path": "", "gen_stats_summary": None}
+    stats = _read_gen_stats(out_path)
+    if not stats:
+        return {"gen_stats_path": "", "gen_stats_summary": None}
+    return {
+        "gen_stats_path": str(p) if p.exists() else "",
+        "gen_stats_summary": {
+            "mode": stats.get("mode"),
+            "template_source": stats.get("template_source"),
+            "payload_functions": stats.get("payload_functions"),
+            "matched_functions": stats.get("matched_functions"),
+            "match_pct": stats.get("match_pct"),      # 분모 0 이면 None(미측정)
+            "unmatched_payload_count": stats.get("unmatched_payload_count"),
+            "empty_heading_count": stats.get("empty_heading_count"),
+            "deleted_heading_count": stats.get("deleted_heading_count"),
+            "reference_suds": stats.get("reference_suds"),
+        },
+    }
+
+
 def _compute_quick_quality_gate(uds_payload: Dict[str, Any]) -> Dict[str, Any]:
     by_name = uds_payload.get("function_details_by_name")
     rows: List[Dict[str, Any]] = []
@@ -1810,4 +1851,10 @@ def _uds_generate_from_paths(
         "quality_gate_path": str(quality_gate_path) if quality_gate_path else "",
         "impact_path": str(impact_path) if impact_path else "",
         "residual_tbd_report_path": str(residual_tbd_path) if residual_tbd_path else "",
+        # DOCX 생성 충실도 — 다른 리포트들과 **같은 표면**에 올린다.
+        # ⚠ 자체 감사에서 잡힌 것: 이 수치는 sidecar 와 `.docx.stage.json` checkpoint 에
+        #   기록되는데, checkpoint 를 읽는 코드가 저장소 전체에 **하나도 없다**(write-only).
+        #   그래서 "침묵을 없앴다" 고 적었지만 실제로는 로그와 파일에만 남았다.
+        #   보고를 추가하는 것과 보고가 **도달하는** 것은 다른 문제다.
+        **_gen_stats_result_fields(out_path),
     }

@@ -747,6 +747,76 @@ D2 의 신원 게이트가 먼저 들어갔으므로, 이 변경을 해도 타 �
 
 ---
 
+## 5-11. 자체 감사 — "보고를 추가한 것" vs "보고가 도달한 것" — ✅ 완료 (2026-07-31)
+
+앞선 라운드들이 침묵을 없앤다며 `stats_out`/sidecar 를 여러 개 늘렸다.
+**그 수치가 사람이 보는 표면까지 실제로 도달하는지** 를 사후 감사했더니 두 곳이 끊겨
+있었다 — 고치려던 결함군과 같은 모양이다.
+
+| # | 격차 | 실측 |
+|---|---|---|
+| R1 | SITS `sds_*` 키가 품질 리포트에 안 실림 | `generate_sits_quality_report` 가 `flow_stats` 에서 **이름 지정한 8개 키만** 골라 담는다. 새 키는 전부 버려져 **로그에만** 남았다(품질 리포트는 API 로 나가지만 로그는 안 나간다) |
+| R2 | UDS 충실도가 API 응답에 없음 | sidecar 와 `<out>.docx.stage.json` 에 기록되는데 **checkpoint 를 읽는 코드가 저장소 전체에 0개**(write-only). 다른 `*_path` 리포트들과 달리 결과 dict 에 없었다 |
+
+**수정**: SITS 품질 리포트에 `sds_related_enrichment`(조건 없이 — 0 이야말로 실어야 할 값),
+UDS 결과 dict 에 `gen_stats_path` + `gen_stats_summary`(sidecar 부재는 `None`=미측정).
+
+### 곁가지 — 테스트 스위트의 vacuous truth 사냥 (유효한 **음성** 결과)
+
+프로덕션의 `all([])` 를 고쳤으니 **검증 계층**도 같은지 봤다. 정적 탐지는 오탐이 많아
+**테스트 자체에 뮤테이션**을 걸었다(`assert all(X for…)` → `all(False for…)`,
+`assert not any(X…)` → `not any(True…)`, 루프 첫 줄에 `assert False`).
+
+- 대상 136건 중 **118건이 뮤테이션에 걸려 실패** = 단언이 실제로 하중을 받고 있다
+- 생존 18건은 전부 **"빈 것이 곧 단언 대상"** 인 정당한 케이스(개별 확인)
+- **for 루프 46건 전부 실제로 순회** — vacuous 0건
+
+→ 결함이 아니므로 만들지 않았다. 스위트의 vacuous 노출은 사실상 없다.
+
+---
+
+## 5-12. Gemini SDK 를 즉시 로드하던 것 — 기동·테스트가 46초를 헛되이 지불 — ✅ 완료 (2026-07-31)
+
+위 감사 중 테스트 하나가 유난히 느려 파고들다 발견했다.
+
+### 실측
+
+| 대상 | 비용(3회 재현, warm cache) |
+|---|---|
+| `google.genai` | **≈ 36초** |
+| `google.generativeai` (**수명 종료 패키지**) | **≈ 10초** |
+| `backend.helpers.uds` import 전체 | **52.7초** → **15.5초** |
+
+`workflow/ai.py` 가 두 SDK 를 **모듈 레벨**에서 즉시 import 했다. 그래서
+**백엔드 기동**·**모든 pytest 워커**·`workflow.ai` 를 스치는 모든 스크립트가 LLM 을
+한 번도 호출하지 않아도 46초를 냈다. `google.generativeai` 는 *"All support … has
+ended"* 를 매 실행 찍는 EOL 패키지이고 실사용처는 legacy fallback 한 곳뿐이다.
+
+같은 저장소의 `workflow/llm_adapters.py:111` 은 **이미 함수 안에서 지연 import** 한다 —
+여기만 즉시 로드였다(패턴 불일치).
+
+### 수정
+
+- `_load_gemini_sdks()` + `_sdk(name)` 지연 로더(스레드 락, 1회 로드).
+  로드 실패는 `_sdk_errors` 에 **사유를 남긴다**(조용한 `None` 금지)
+- 외부 계약 유지: `workflow/pipeline.py:2246` 이 `getattr(ai, "genai_new", None)` 로
+  가용성을 묻는다 → **PEP 562 모듈 `__getattr__`** 로 이름 4개를 그대로 유지
+- ⚠ 모듈 `__getattr__` 은 **모듈 밖** 접근에만 불린다. 내부 전역 조회에는 안 걸리므로
+  내부 참조 9블록을 전부 `_sdk("…")` 로 바꿨다(안 바꾸면 `NameError`)
+
+### 검증
+
+- 실제 LLM 호출로 확인: 응답 `서울`, `sdk=google-genai`, `finish_reason=STOP`, `truncated=False`
+- `import backend.helpers.uds` 후 `google.genai`/`google.generativeai` 가
+  `sys.modules` 에 **없음**(별도 프로세스)
+- 새 테스트 14건(`test_ai_lazy_sdk.py`) + 14건(`test_report_reachability.py`) — **뮤테이션 8/8**
+- ⚠ 테스트가 스스로 40.77초를 쓰고 있었다(계약 검증이 실제 로드를 유발). 캐시 스텁으로
+  교체 — **이 라운드가 없애려는 비용을 테스트가 도로 지불하면 안 된다**
+- ⚠ `test_report_reachability` 초안이 253초였다: `Path("backend").rglob("*")` 가
+  **`backend/.venv` 까지 훑었다**(실측 70,189 엔트리/21.5초). `os.walk` 가지치기로 교정
+
+---
+
 ## 6. 다음 라운드 후보
 
 | # | 대상 | 이유 |
