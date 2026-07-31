@@ -932,6 +932,19 @@ ended"* 를 매 실행 찍는 EOL 패키지이고 실사용처는 legacy fallbac
 > 절 안에만, 17 은 계획서에 아예 없었다. 2026-07-31 에 전부 이 표로 올렸다.
 > **잔여를 완료 행 안에 적지 말 것** — 완료 표시가 잔여까지 덮는다.
 
+### plan-mode 파일(VectorCAST 축 3작업)의 실측 상태 — 2026-07-31 확인
+
+세션 밖 plan 파일(`~/.claude/plans/*.md`)에 VectorCAST 결과·커버리지 축 3작업이
+적혀 있다. 그 파일은 저장소가 아니라 **세션에 딸려** 다니므로, 새 세션이 이미 끝난
+것을 다시 하지 않도록 상태를 여기 고정한다.
+
+| plan 작업 | 실측 상태 | 근거 |
+|---|---|---|
+| 1. `Final Test Result` 를 실제 집계에서 도출 | ✅ SUTR·Coverage 완료 | `swut_input_adapter.py::compute_final_result`(SUTR) / `::compute_coverage_final_result`(Coverage — **달성 기준이라 판정을 의도적으로 분리**). 호출: `swut_sutr_aggregator.py:308`, `swut_coverage_aggregator.py:306` |
+| 1-b. 같은 판정을 SITR 에도 | ⛔ **대상 표면이 없다** | `swit_sitr_aggregator.py` 에 `final_test_result` **0건** — SITR 은 그 셀을 쓰지 않는다. `swit_comprehensive_aggregator.py:63` 의 `= "OK"` 는 **소비처 0인 dead default**(`.final_test_result` 참조 전수 3건이 전부 SwUT 계열). 배선하면 없는 결함에 코드를 더하는 것 |
+| 2. 실측값과 합성값을 타입에서 구분 | ✅ 완료 | `CoverageStats.measured`(`swut_input_adapter.py:71`). 합성값은 달성 판정에서 제외(`:455`), 전부 합성이면 `na` |
+| 3. 가중평균 오류 교정 | ⏸ 미착수 — **사유가 코드에 기록됨** | `workflow/vcast_traceability.py` 는 **어디서도 import 되지 않는다**. 게다가 이 계층엔 분자·분모가 없어(`_parse_pct` 가 백분율만 뽑음) 파서가 counts 를 보존하도록 먼저 바꿔야 한다 — 둘 다 모듈 docstring 에 명시. 되살릴 때 같이 고칠 것 |
+
 ---
 
 ## 7. 작업 규약 (이 저장소 고유)
