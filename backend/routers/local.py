@@ -114,6 +114,7 @@ from backend.services.local_service import (
 )
 from backend.services.paths import is_under_any
 from backend.user_context import wrap_with_user
+from report_gen.provenance import is_weak_source
 from report_generator import (
     _build_req_map_from_doc_paths,
     enrich_function_details_with_docs,
@@ -471,7 +472,7 @@ def _enrich_function_details_map(
                     if not _matched_sigs:
                         continue
                     # Upgrade description_source from inference → hsis
-                    if _fn_info.get("description_source", "inference") in {"inference", ""}:
+                    if is_weak_source(_fn_info.get("description_source") or "inference"):
                         _fn_info["description_source"] = "hsis"
                     # Set related if currently TBD/empty
                     _cur_rel = str(_fn_info.get("related") or "").strip()
@@ -1693,6 +1694,7 @@ def local_traceability(
     sds_req_to_comps: Dict[str, List[str]] = {}
     sds_req_to_design_comps: Dict[str, List[str]] = {}
     sds_req_to_folded_comps: Dict[str, List[str]] = {}
+    sds_req_to_element_comps: Dict[str, List[str]] = {}
     # 아래 map_requirements_to_functions 의 폴백 출처로도 쓴다 — 안 넘기면 저장소 docs/
     # 글롭(프로젝트 무관)이 대신한다.
     sds_partition_map: Optional[Dict[str, Any]] = None
@@ -1707,6 +1709,7 @@ def local_traceability(
             sds_req_to_comps = _sds_maps["req_to_comps"]
             sds_req_to_design_comps = _sds_maps["req_to_design_comps"]
             sds_req_to_folded_comps = _sds_maps["req_to_folded_comps"]
+            sds_req_to_element_comps = _sds_maps["req_to_element_comps"]
 
     # Parse requirements
     reqs: List[Dict[str, Any]] = []
@@ -1874,8 +1877,13 @@ def local_traceability(
         _scset = set(sds_comps)
         # canonical 접기로 sds_comps 에서 사라진 원 키 — 함께 빼지 않으면 함수로 이중 계상된다.
         _folded = set(sds_req_to_folded_comps.get(norm_rid, []))
+        # 설계 요소(설계ID·상태명·표행·heading)는 함수가 아니다 — 함께 빼지 않으면 차집합이
+        # "컴포넌트 아닌 것 = 함수" 로 접어 UI 가 상태명·목차 줄을 '멤버 함수'로 표시한다.
+        # Jenkins 경로(requirements.py sds_elem_list)와 같은 분리다.
+        _elem = set(sds_req_to_element_comps.get(norm_rid, []))
+        sds_elems = [c for c in sds_comps_all if c in _elem and c not in _scset]
         sds_funcs = [c for c in sds_comps_all
-                     if c not in _scset and c not in _folded]  # 인터페이스 함수(분리)
+                     if c not in _scset and c not in _folded and c not in _elem]  # 함수만
 
         # tests 배열 통합 (Jenkins generate_uds_traceability_matrix 형식)
         tests: List[Dict[str, Any]] = []
@@ -1906,7 +1914,8 @@ def local_traceability(
         rows.append({
             "requirement_id": rid,
             "sds_components": sds_comps,        # 실 설계 컴포넌트만(함수 fan-out 제외)
-            "sds_functions": sds_funcs,         # 인터페이스 함수(분리, 투명성·브리지)
+            "sds_functions": sds_funcs,         # 인터페이스 함수(분리, 투명성·브리지) — 함수만
+            "sds_design_elements": sds_elems,   # 설계ID·상태명·표행 — 함수 아님(Jenkins 경로 lockstep)
             # 전체 함수 유지 — 과거 [:10] 절단은 UDS 함수를 최대 ~188개 silent 누락시켜
             # 트리의 단위시험 미연결/orphan SUTS 계산을 거짓으로 만들었다(deep-analyze).
             # Jenkins 경로(generate_uds_traceability_matrix)는 전량 싣는다 — 표시는 프론트가 스크롤로 제한.
@@ -1928,8 +1937,11 @@ def local_traceability(
     def _derive(r):
         # 추적 정화: sds_functions 포함 — 함수로만 추적된 요구사항이 설계 없음으로 회귀하지 않게
         # (프론트 DESIGN_FIELDS·Jenkins _cache_trace_summary와 lockstep). 이게 실제 요약 집계 사이트.
-        # jenkins _cache_trace_summary / 프론트 DESIGN_FIELDS와 동일 8필드 디텍터(lockstep 실현).
+        # jenkins _cache_trace_summary / 프론트 DESIGN_FIELDS와 동일 9필드 디텍터(lockstep 실현).
+        # sds_design_elements: 설계ID·상태명 등. sds_functions 를 '함수만'으로 정화하면서
+        # 분리됐다 — 빼면 14행(HDPDM01 실측)이 uncovered 로 회귀한다.
         has_d = (bool(r.get("sds_components")) or bool(r.get("sds_functions"))
+                 or bool(r.get("sds_design_elements"))
                  or bool(r.get("source_ids")) or bool(r.get("hsis_signals"))
                  or bool(r.get("functions")) or bool(r.get("mapping"))
                  or bool(r.get("sds")) or bool(r.get("source_mapping")))

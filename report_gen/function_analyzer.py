@@ -9,6 +9,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Set
 
+from report_gen.provenance import is_weak_source
 from report_gen.utils import (
     _normalize_related_ids,
     _normalize_swufn_id,
@@ -842,7 +843,7 @@ def _classify_description_quality(
         return "high"
     if _is_generic_description(s):
         return "low"
-    if src in {"inference", "module_inherit", "default", "rule", ""}:
+    if is_weak_source(src):
         if len(s) > 30:
             return "medium"
         return "low"

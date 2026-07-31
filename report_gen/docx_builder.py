@@ -1,7 +1,5 @@
 """report_gen.docx_builder - Auto-split from report_generator.py"""
 # Re-import common dependencies
-import logging
-
 # Payload field name constants (canonical source: report_gen.uds_generator)
 # Function-level (per-function, List[str]):
 #   KEY_FN_GLOBALS = "globals_global"  — global vars used by the function
@@ -10,6 +8,7 @@ import logging
 #   KEY_MOD_GLOBALS = "global_vars"    — global var definitions table
 #   KEY_MOD_STATICS = "static_vars"    — static var definitions table
 import json
+import logging
 import os
 import re
 from datetime import datetime
@@ -35,6 +34,7 @@ from report_gen.function_analyzer import (
     _parse_signature_outputs,
     _parse_signature_params,
 )
+from report_gen.provenance import is_weak_source, unrecorded_source
 from report_gen.requirements import (
     _extract_doc_section,
     _extract_function_info_from_docx,
@@ -2014,32 +2014,43 @@ def generate_uds_docx(
         info: Dict[str, Any],
         sds_info: Optional[Dict[str, str]],
     ) -> None:
+        # ⚠ 예전엔 세 축 모두 무조건 `"inference"` 였다. 실측(2026-07-31): 사람이 쓴 설명,
+        #   실제 등급 `C`, 실제 `SwFn_07` 을 넣고 생성했더니 **셋 다 `inference`** 로 찍혔다
+        #   — 아무것도 추론하지 않았는데 보고서 표에는 "추론" 이라고 나오고 점수는 0.60 이다.
+        #   생산자(`report_gen/function_analyzer.py`)는 **자기가 한 행위에 묶어서** 라벨한다
+        #   (합성했을 때만 `inference`, QM 을 채웠을 때만 `default`). 여기도 그 규약을 따른다.
+        _d = str(info.get("description") or "")
+        info.setdefault("description_source", "")
         if not str(info.get("description_source") or "").strip():
-            info["description_source"] = "inference"
+            info["description_source"] = unrecorded_source(
+                _d, generic=bool(_d) and _is_generic_description(_d))
         if not str(info.get("asil_source") or "").strip():
-            info["asil_source"] = "inference"
+            info["asil_source"] = unrecorded_source(info.get("asil"))
         if not str(info.get("related_source") or "").strip():
-            info["related_source"] = "inference"
-        _weak_sources = {"", "inference", "default", "module_inherit"}
+            info["related_source"] = unrecorded_source(info.get("related"))
+        # `unknown` 도 약한 출처다 — 빠뜨리면 뒤따르는 주석·SDS·SRS 근거가 덮어쓰지 못해
+        # "출처를 모른다" 가 "출처가 확정됐다" 처럼 굳는다(업그레이드 경로 차단).
+        # 약한 출처 판정은 `report_gen/provenance.py` 단일 출처를 쓴다 —
+        # 집합 리터럴을 여기 다시 적으면 새 라벨이 생길 때 한쪽만 갱신된다.
         c_asil = str(info.get("comment_asil") or "").strip()
         c_rel = str(info.get("comment_related") or "").strip()
         cur_asil_src = str(info.get("asil_source") or "").strip()
         cur_rel_src = str(info.get("related_source") or "").strip()
-        if c_asil and cur_asil_src in _weak_sources:
+        if c_asil and is_weak_source(cur_asil_src):
             info["asil"] = c_asil
             info["asil_source"] = "comment"
-        if c_rel and cur_rel_src in _weak_sources:
+        if c_rel and is_weak_source(cur_rel_src):
             info["related"] = c_rel
             info["related_source"] = "comment"
         if sds_info:
             cur_asil_src = str(info.get("asil_source") or "").strip()
-            if cur_asil_src in _weak_sources:
+            if is_weak_source(cur_asil_src):
                 sds_asil = sds_info.get("asil")
                 if sds_asil:
                     info["asil"] = sds_asil
                     info["asil_source"] = "sds"
             cur_rel_src = str(info.get("related_source") or "").strip()
-            if cur_rel_src in _weak_sources:
+            if is_weak_source(cur_rel_src):
                 sds_related = sds_info.get("related")
                 if sds_related:
                     info["related"] = sds_related
@@ -2088,12 +2099,14 @@ def generate_uds_docx(
                         seen_sw.append(sid_norm)
                 info["related"] = ", ".join(seen_sw)
                 info["related_source"] = "inference"
+        # 값을 **비우면서** 출처를 "추론" 이라고 적으면, 아무것도 없는 칸이 근거 0.60 을
+        # 받는다. 근거가 없어서 비운 것이므로 `default`(근거 없음, 0.30)가 사실이다.
         if (not info.get("asil")) or str(info.get("asil")).strip() in {"", "TBD"}:
             info["asil"] = ""
-            info["asil_source"] = "inference"
+            info["asil_source"] = "default"
         if (not info.get("related")) or str(info.get("related")).strip() in {"", "TBD"}:
             info["related"] = ""
-            info["related_source"] = "inference"
+            info["related_source"] = "default"
 
     _inherit_module_asil(function_details, fn_module_map)
 
@@ -2196,7 +2209,9 @@ def generate_uds_docx(
                 for fid, info in function_details.items():
                     if not isinstance(info, dict):
                         continue
-                    if str(info.get("description_source") or "").strip() != "inference":
+                    # 약한 출처면 RAG 로 보강한다(예전엔 `!= "inference"` 라 `unknown`·
+                    # `default` 인 함수가 보강 대상에서 통째로 빠졌다).
+                    if not is_weak_source(info.get("description_source")):
                         continue
                     if _scanned >= _enrich_max:
                         _logger.info("RAG enrich cap reached (%d funcs) — 나머지 skip", _enrich_max)
@@ -2351,7 +2366,8 @@ def generate_uds_docx(
             for src_key in ("asil", "asil_source", "related", "related_source",
                             "description", "description_source"):
                 val = info.get(src_key)
-                if val and (not target.get(src_key) or (src_key.endswith("_source") and target.get(src_key) == "inference")):
+                if val and (not target.get(src_key)
+                            or (src_key.endswith("_source") and is_weak_source(target.get(src_key)))):
                     target[src_key] = val
             for g_key in ("globals_global", "globals_static"):
                 src_g = info.get(g_key)
@@ -2432,7 +2448,7 @@ def generate_uds_docx(
     if ai_func_desc_enable and isinstance(function_details, dict):
         inference_count = sum(
             1 for v in function_details.values()
-            if isinstance(v, dict) and str(v.get("description_source") or "").strip().lower() in {"inference", "rule", ""}
+            if isinstance(v, dict) and is_weak_source(v.get("description_source"))
         )
         if inference_count > 0:
             _logger.info("AI function description: %d inference-sourced functions, starting AI generation", inference_count)

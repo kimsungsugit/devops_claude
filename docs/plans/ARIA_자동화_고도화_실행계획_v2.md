@@ -644,6 +644,67 @@ D2 의 신원 게이트가 먼저 들어갔으므로, 이 변경을 해도 타 �
 
 ---
 
+## 5-9. 출처 어휘 정직화 + 판정 단일화 (D1) — ✅ 완료 (2026-07-31)
+
+### 실측 (고치기 전)
+
+`_resolve_related_asil_desc` 가 출처 미기록을 **세 축 모두 무조건 `"inference"`** 로
+확정했다. 사람이 쓴 설명·실제 등급 `C`·실제 `SwFn_07` 을 넣고 **실제로 생성**한 결과:
+
+| 필드 | 값 | 옛 출처 | 실제 |
+|---|---|---|---|
+| description | `CAN 수신 버퍼를 검증한다` | `inference` (0.60, 표기 **"추론"**) | 사람이 씀 |
+| asil | `C` | `inference` | 주어진 값 |
+| related | `SwFn_07` | `inference` | 주어진 값 |
+
+아무것도 추론하지 않았는데 리뷰어가 보는 표에 "추론" 으로 찍힌다. 반대로 값을 **비우면서**
+`related_source="inference"` 를 적는 자리도 있어 빈 칸이 같은 0.60 을 받았다 —
+**두 방향으로 동시에** 틀렸다.
+
+`validation.py` 의 `src_labels`/`src_score` 엔 `unknown`(미상, 0.30)과 `default`
+(기본값·근거 없음, 0.30)가 **이미 1급 어휘**였다. 쓰지 않았을 뿐이다. 생산자
+(`function_analyzer.py`)는 이미 **자기가 한 행위에 묶어** 라벨한다(합성했을 때만
+`inference`, QM 을 채웠을 때만 `default`) — 규약은 있었고 이 지점만 어겼다.
+
+### ⚠ 라벨 하나가 판정 7곳을 건드렸다
+
+`unknown` 을 도입하려 하니 **"이 출처는 약한가?"** 판정이 서로 다른 리터럴로 복제돼
+있었다: `{"", "inference"}` / `{"inference","rule",""}` /
+`{"inference","module_inherit","default","rule",""}` / `!= "inference"` / `== "inference"` …
+
+그대로 뒀으면 5곳이 `unknown` 을 **강한 출처로 오인**해 *"출처를 모른다"* 가
+*"확정됐다"* 처럼 굳고, 뒤따르는 주석·SDS·SRS 근거가 덮어쓰지 못했을 것이다.
+라벨 하나 고치려다 다섯 곳에 구멍을 내는 whack-a-mole 이다.
+
+### 수정
+
+1. `report_gen/provenance.py` 신설 — `WEAK_SOURCES` / `is_weak_source()` /
+   `unrecorded_source()` **판정 단일 출처**
+2. `unrecorded_source()` 는 **값을 보고** 라벨한다:
+   자리표시자 → `default` · 생성기 문구 → `inference` · 실제 값인데 출처 미기록 → `unknown`
+3. 값을 비우면서 `inference` 를 적던 2곳 → `default`
+4. 판정 복제 6곳을 `is_weak_source()` 로 전환
+   (`docx_builder` 4곳 + `function_analyzer` + `routers/local.py`)
+5. RAG 보강 게이트가 `!= "inference"` 라 `unknown`·`default` 함수를 통째로 빼던 것도 함께 교정
+
+### 검증
+
+- 새 테스트 47건(`tests/unit/test_provenance_vocabulary.py`) — **뮤테이션 6/6**
+- 회귀 **5,051 passed / 1 skipped**
+- 회귀 방지 핵심: 주석 근거 업그레이드(`comment_asil` → `asil_source="comment"`)가
+  `unknown` 상태에서도 동작하는지 **실제 생성으로** 확인
+- AST 계약 테스트로 **판정 리터럴 재등장을 금지**
+
+### 남은 사이트 (의도적 미전환)
+
+`report_gen/requirements.py::enrich_function_details_with_docs` 의 `{"", "inference"}`
+1곳. 작업 시점에 그 파일이 **다른 세션의 미커밋 작업**을 담고 있어 손대지 않았다
+(내가 넣었던 편집은 외과적으로 되돌렸고, 남의 변경은 그대로 보존).
+남은 집합은 `WEAK_SOURCES` 의 **진부분집합**이라 *덜* 덮어쓸 뿐 *잘못* 덮어쓰지는
+않는다 — 안전한 방향의 격차다. 잊지 않도록 테스트가 이 상태를 감시한다.
+
+---
+
 ## 6. 다음 라운드 후보
 
 | # | 대상 | 이유 |
@@ -655,7 +716,7 @@ D2 의 신원 게이트가 먼저 들어갔으므로, 이 변경을 해도 타 �
 | ~~5~~ | ~~3개 egress 경로 통합~~ | ✅ 완료 — §5-5. 키 해석 단일화(근본 원인)·재시도·입력 상한·폴백 사유. **잔여: 토큰 예산·stage cap 공유**(임베딩은 단발 호출이라 예산 개념이 llm_call 과 다름 — 별건) |
 | ~~6~~ | ~~`stats_out` 을 UI 까지 배선~~ | ✅ 완료 — §5-5 #1 (`retrieval_notes` 신규 응답 키 + 프론트 경고 배너) |
 | ~~7~~ | ~~실 KB 재인덱싱~~ | ✅ 완료 — §5-5 #2 + **§5-7 에서 실제 실행**(63/63, 시맨틱 0→63). 돌려 보니 백엔드가 죽어 있었고(모델 404) 가드가 그걸 잡았다 |
-| 🔴 D1 | provenance 가 "미기록" 을 `inference` 로 확정 | §5-6 참조. `_resolve_related_asil_desc` 가 description/asil/related 세 축 모두 미기록→`inference`. 사람이 쓴 설명이 추론으로 강등된다. 정직한 값은 `unknown` 인데 점수가 0.60→0.30 으로 내려가 **전 프로젝트 품질 수치가 이동**한다 → 정책 결정 필요 |
+| ~~D1~~ | ~~provenance 가 "미기록" 을 `inference` 로 확정~~ | ✅ 완료 — §5-9. 값을 보고 `default`/`inference`/`unknown` 을 가르고, 판정 복제 6곳을 `report_gen/provenance.py` 단일 출처로 전환. **점수 이동은 의도한 것**(0.60 은 부풀린 값이었다) |
 | ~~D2~~ | ~~저장소 고정 HDPDM01 SUDS 로 함수 정보 채움~~ | ✅ 완료 — §5-8. 신원 게이트 + 안전축/서술축 분리 + ASIL 어휘 검사 + 하드코딩 폴백 제거. **성능(생성 31.9초 중 24.3초)은 미해결** — 신원 불일치여도 문서는 여전히 읽는다(서술축 때문). 신원 판정을 읽기 **전에** 하고 불일치면 아예 안 읽는 최적화는 별건 |
 | 🔴 D3 | 약한 출처(`default`/`inference`)가 강한 근거(참조 SUDS)를 선점 | §5-8 참조. `asil` 은 병합 전 `QM` 으로, `description` 은 합성문으로 칸이 차 자기 프로젝트 SUDS 의 ASIL 416건이 영영 안 들어간다. `_weak_sources` 어휘가 이미 있으므로 자격 조건을 바꾸면 되나 **HDPDM01 수치가 이동** → 정책 결정 |
 | 8 | UTCV-001 잔여 | `applicable` 정책축·커버리지 예외 disposition. 이 저장소에 해당 축이 **존재하지 않아** 신규 기능 개발이다(결함 수정 아님) — 사용자 판단 필요 |
