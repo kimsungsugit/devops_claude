@@ -147,12 +147,20 @@ def build_trace_xlsx(matrix: Any, meta: Optional[Dict[str, Any]] = None) -> byte
                 sds_cols.append(c)
         # SyRS=상위 provenance라 하위 커버리지 total/핑크 판정에서 제외(build_link_table·프론트와 일치).
         total = sum(len(bands[b]) for b in bands if b != "SyRS")
+        # 밴드 **밖**의 설계 근거 — SDS 밴드는 실 컴포넌트만 세므로(추적 정화), 인터페이스 함수와
+        # 설계요소(SwFn_/SwST_ 설계ID·상태명)로만 연결된 요구는 전 밴드가 비어 total=0 이 된다.
+        # 그걸 그대로 '추적 0건'(분홍)으로 찍으면 **감사 문서가 화면과 모순**된다 — 화면은
+        # has_design(components OR functions OR design_elements)으로 covered 라고 말한다.
+        # HDPDM01 실측: 정화 전 0건 → 정화 후 14건이 이 상태였다.
+        design_other = len([c for c in (row.get("sds_functions") or []) if str(c).strip()]) + \
+            len([c for c in (row.get("sds_design_elements") or []) if str(c).strip()])
         built.append({
             "rid": rid,
             "name": str(row.get("requirement_name") or "").strip(),
             "asil": str(row.get("asil") or "").strip().upper(),
             "bands": bands,
             "total": total,
+            "design_other": design_other,
         })
     sds_cols = sorted(sds_cols)[:_MAX_COLS]
 
@@ -190,10 +198,24 @@ def build_trace_xlsx(matrix: Any, meta: Optional[Dict[str, Any]] = None) -> byte
         ws.cell(r, 2, cov_txt)
         r += 1
     total_reqs = len(built)
-    uncovered_n = sum(1 for b in built if b["total"] == 0)
+    # '추적 0건' = 밴드도 밴드 밖 설계 근거도 없는 진짜 고아. design_other 를 빼먹으면
+    # 화면이 covered 라 부르는 행을 감사 문서가 분홍으로 찍는다(§_row_bands 위 주석).
+    uncovered_n = sum(1 for b in built if b["total"] == 0 and not b["design_other"])
+    band_only_n = sum(1 for b in built if b["total"] == 0 and b["design_other"])
     ws.cell(r, 1, "요구사항 수").font = bold
-    ws.cell(r, 2, f"{total_reqs}건 (추적 0건 {uncovered_n}건, ASIL 갭 {len(gap_ids)}건, 미상 {int(asil_cov.get('unknown_count') or 0)}건)")
-    r += 2
+    _band_only_txt = f", 밴드 외 설계근거만 {band_only_n}건" if band_only_n else ""
+    ws.cell(r, 2, f"{total_reqs}건 (추적 0건 {uncovered_n}건{_band_only_txt}, "
+                  f"ASIL 갭 {len(gap_ids)}건, 미상 {int(asil_cov.get('unknown_count') or 0)}건)")
+    r += 1
+    if band_only_n:
+        # 밴드 칸이 전부 비어 있는데 분홍이 아닌 행의 사유를 **문서 안에** 남긴다.
+        # 안 적으면 감사자가 "빈 행이 왜 통과인가"를 화면과 대조해야만 알 수 있다.
+        ws.cell(r, 1, "밴드 외 설계근거").font = bold
+        ws.cell(r, 2, f"{band_only_n}건 — SDS 밴드는 실 컴포넌트(SwCom)만 집계한다. "
+                      f"설계ID(SwFn_/SwST_)·상태명·인터페이스 함수로만 연결된 요구는 밴드가 비지만 "
+                      f"설계 추적은 존재한다(화면 커버리지와 동일 기준). 상세는 '링크' 시트.")
+        r += 1
+    r += 1
 
     has_asil = bool(asil_cov.get("has_asil"))
     # 표 헤더
@@ -211,9 +233,12 @@ def build_trace_xlsx(matrix: Any, meta: Optional[Dict[str, Any]] = None) -> byte
 
     for bi, b in enumerate(built):
         rr = head_row + 1 + bi
-        uncovered = b["total"] == 0
+        # 밴드 밖 설계 근거가 있으면 '추적 0건'(분홍)이 아니다 — 다만 밴드 칸이 전부 비어
+        # 보이므로 amber 로 "검토 필요"를 남긴다(무표시로 두면 빈 행이 정상처럼 읽힌다).
+        band_only = b["total"] == 0 and bool(b["design_other"])
+        uncovered = b["total"] == 0 and not b["design_other"]
         gaprow = b["rid"] in gap_ids
-        row_fill = pink_fill if uncovered else (amber_fill if gaprow else None)
+        row_fill = pink_fill if uncovered else (amber_fill if (gaprow or band_only) else None)
         ws.cell(rr, 1, _cs(b["rid"])).font = bold
         ws.cell(rr, 2, _cs(b["name"]))
         col = 3
