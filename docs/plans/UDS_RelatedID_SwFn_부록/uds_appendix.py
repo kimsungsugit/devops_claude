@@ -1,8 +1,14 @@
 # -*- coding: utf-8 -*-
-"""요청서 부록 생성 — UDS Related ID 현황(A) + SwFn 카탈로그(B).
+"""요청서 부록 B(SwFn 카탈로그) 생성 + UDS Related ID 현황 집계.
 
 UDS 는 함수 1개당 kv 표(좌=라벨, 우=값) 1개다. 같은 표 안에서 '함수명' 라벨과
 'Related ID' 라벨을 짝지어 뽑는다.
+
+⚠ **부록 A 는 이 스크립트가 만들지 않는다.** 초판에서는 여기서 900행짜리 A 를 썼으나,
+대상이 앱 계층 390행으로 재산정되면서 소유권이 `swfn_assign_appendix.py` 로 넘어갔다.
+한 산출물에 생산자가 둘이면 나중에 도는 쪽이 조용히 덮는다 — 실제로 요청서 §6 의 실행
+순서(`swfn_assign_appendix` → `uds_appendix`)대로 돌리면 **390행/8열이 900행/5열로
+되돌아갔다.** 그래서 여기서는 A 를 쓰지 않고 현황 수치만 출력한다.
 """
 import collections
 import io
@@ -106,11 +112,8 @@ print(f"\nSwFn 카탈로그 {len(swfn)}건 / 요구 보유 {sum(1 for v in swfn.
 print(f"  ASIL 표기 보유 {sum(1 for v in swfn.values() if v['asil'])}")
 
 # ── TSV 출력 ────────────────────────────────────────────────────────────────
+# 부록 A 는 여기서 쓰지 않는다(위 docstring 참조 — 소유자는 swfn_assign_appendix.py).
 OUT.mkdir(parents=True, exist_ok=True)
-with (OUT / "appendix_A_swcom_only.tsv").open("w", encoding="utf-8-sig", newline="") as f:
-    f.write("SwUFn ID\t함수명\tPrototype(발췌)\t현재 Related ID\t추가할 SwFn (팀 기입)\n")
-    for r in swcom_only:
-        f.write(f"{r['uid']}\t{r['unit']}\t{r['proto']}\t{r['related']}\t\n")
 
 
 def _num(k):
@@ -123,5 +126,6 @@ with (OUT / "appendix_B_swfn_catalog.tsv").open("w", encoding="utf-8-sig", newli
     for k in sorted(swfn, key=_num):
         v = swfn[k]
         f.write(f"{k}\t{v['asil'] or '-'}\t{', '.join(v['reqs']) or '-'}\t{v['desc']}\n")
-print(f"\n출력: {OUT/'appendix_A_swcom_only.tsv'} ({len(swcom_only)}행)")
-print(f"      {OUT/'appendix_B_swfn_catalog.tsv'} ({len(swfn)}행)")
+print(f"\n출력: {OUT / 'appendix_B_swfn_catalog.tsv'} ({len(swfn)}행)")
+print(f"참고: SwCom 단독 {len(swcom_only)}행 — 요청 대상(앱 계층 390행) 부록 A 는 "
+      f"swfn_assign_appendix.py 가 생성한다")
