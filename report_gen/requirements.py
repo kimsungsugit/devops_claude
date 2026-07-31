@@ -1020,6 +1020,7 @@ def build_sds_component_maps(partition_map: Optional[Dict[str, Any]]) -> Dict[st
     req_to_comps: Dict[str, List[str]] = {}
     req_to_design_comps: Dict[str, List[str]] = {}
     req_to_folded_comps: Dict[str, List[str]] = {}
+    req_to_element_comps: Dict[str, List[str]] = {}
     comp_set: Set[str] = set()
     design_comp_set: Set[str] = set()
     component_asil: Dict[str, str] = {}
@@ -1054,6 +1055,10 @@ def build_sds_component_maps(partition_map: Optional[Dict[str, Any]]) -> Dict[st
         # 고아 이름이 조용히 사라지지 않게.
         canon = str(info.get("canonical") or "").strip()
         display = canon or comp_key
+        # 밴드도 함수도 아닌 것 = 설계 요소(설계ID·상태명·미확인 표행·heading 잔재).
+        # 소비처의 차집합은 "컴포넌트가 아닌 것 = 함수"라 가정하므로, 이걸 따로 실어 주지
+        # 않으면 상태명 `standby` 와 목차 줄이 **인터페이스 함수로 표시**된다(실측 21.3%).
+        is_element = (not is_band) and _kind != "function"
         comp_set.add(comp_key)
         if is_band:
             design_comp_set.add(display)
@@ -1061,6 +1066,10 @@ def build_sds_component_maps(partition_map: Optional[Dict[str, Any]]) -> Dict[st
             bucket = req_to_comps.setdefault(rid, [])
             if comp_key not in bucket:
                 bucket.append(comp_key)
+            if is_element:
+                ebucket = req_to_element_comps.setdefault(rid, [])
+                if comp_key not in ebucket:
+                    ebucket.append(comp_key)
             if is_band:
                 dbucket = req_to_design_comps.setdefault(rid, [])
                 if display not in dbucket:
@@ -1078,6 +1087,8 @@ def build_sds_component_maps(partition_map: Optional[Dict[str, Any]]) -> Dict[st
         "req_to_comps": req_to_comps,
         "req_to_design_comps": req_to_design_comps,
         "req_to_folded_comps": req_to_folded_comps,
+        # 밴드도 함수도 아닌 설계 요소 — 소비처가 "컴포넌트 아닌 것 = 함수" 로 접지 않도록.
+        "req_to_element_comps": req_to_element_comps,
         "component_asil": component_asil,
         "comp_set": comp_set,
         "design_comp_set": design_comp_set,
@@ -2418,6 +2429,31 @@ def generate_uds_traceability_matrix(
                 fexisting.append(c)
         sds_folded_lookup[rid] = fexisting
 
+    # 밴드도 함수도 아닌 설계 요소(설계ID `SwFn_`/`SwST_`·상태명 `standby`·미확인 표행·
+    # heading 잔재). 차집합은 "컴포넌트가 아닌 것 = 함수" 라 접으므로 이걸 따로 빼지 않으면
+    # 목차 줄까지 **인터페이스 함수**로 표시된다(HDPDM01 실측 634 중 135 = 21.3%,
+    # 63행 중 52행 오염, SWNTR_0408 은 10/10 전부 비-함수).
+    # 구 응답·구 캐시엔 이 필드가 없다 → 빈 set → 전부 sds_functions 로(=이 분리 이전 동작).
+    sds_element_lookup: Dict[str, List[str]] = {}
+    for row in (sds_pairs or []):
+        if not isinstance(row, dict):
+            continue
+        rid = _normalize_req_id(str(row.get("requirement_id") or ""))
+        if not rid:
+            continue
+        ecomps = row.get("design_element_ids") or []
+        if isinstance(ecomps, str):
+            ecomps = [c.strip() for c in ecomps.split(",") if c.strip()]
+        elif isinstance(ecomps, list):
+            ecomps = [str(c).strip() for c in ecomps if str(c).strip()]
+        else:
+            ecomps = []
+        eexisting = sds_element_lookup.get(rid, [])
+        for c in ecomps:
+            if c not in eexisting:
+                eexisting.append(c)
+        sds_element_lookup[rid] = eexisting
+
     # ── Test rows: merge STS/SUTS/VectorCAST + SITS ──
     all_test_rows = list(vcast_rows or [])
     for row in (sits_rows or []):
@@ -2884,8 +2920,13 @@ def generate_uds_traceability_matrix(
         sds_comp_list = sds_comp_lookup.get(rid, [])    # 실 설계 컴포넌트만 — 표시/집계(추적 정화)
         _scomp_set = set(sds_comp_list)
         _folded_set = set(sds_folded_lookup.get(rid, []))   # canonical 로 접힌 원 키
+        # 설계 요소(설계ID·상태명·미확인 표행·heading)는 함수가 아니다 — 함께 빼지 않으면
+        # 차집합이 "컴포넌트 아닌 것 = 함수" 로 접어 UI 가 목차 줄을 '멤버 함수'로 표시한다.
+        _elem_set = set(sds_element_lookup.get(rid, []))
+        sds_elem_list = [c for c in sds_list if c in _elem_set and c not in _scomp_set]
         sds_func_list = [c for c in sds_list
-                         if c not in _scomp_set and c not in _folded_set]  # 인터페이스 함수(별도)
+                         if c not in _scomp_set and c not in _folded_set
+                         and c not in _elem_set]            # 인터페이스 함수만
         hsis_list = hsis_lookup.get(rid, [])            # HSIS 인터페이스 신호(시스템 레벨 design-arm)
         # ASIL 결합(P5) — 요구사항 ASIL = 연결된 SDS 컴포넌트·UDS 함수의 최고 ASIL.
         # 컴포넌트/함수명(lower)으로 comp_asil_map 조회. 맵 없거나 매칭 0이면 ''(graceful).
@@ -2960,7 +3001,12 @@ def generate_uds_traceability_matrix(
                 # T1: SRS→SDS (아키텍처 추적) — 실 설계 컴포넌트만(인터페이스 함수 fan-out 제외, 추적 정화)
                 "sds_components": sds_comp_list,
                 # 인터페이스 함수(투명성·드릴다운). SDS 밴드 집계엔 미포함, SUTS/VCAST 브리지엔 사용됨.
+                # **함수만** — 설계ID·상태명·표행·heading 은 아래 sds_design_elements 로 분리한다.
                 "sds_functions": sds_func_list,
+                # 설계 요소 — SwFn_/SwST_ 설계ID, 상태명(`standby`), 미확인 표행, heading 잔재.
+                # 밴드(컴포넌트)도 함수도 아니지만 **설계 근거로는 유효**하므로 has_design 에 포함한다
+                # (3-site lockstep: jenkins `has_design`, local `_derive`, 프론트 DESIGN_FIELDS).
+                "sds_design_elements": sds_elem_list,
                 # 인터페이스 밴드(시스템 레벨 design-arm) — HSIS 신호(HSI_xx/SW변수). SwEI 등 인터페이스 요구의 realization.
                 "hsis_signals": hsis_list,
                 # 상위 추적 — 이 요구가 유도된 상위 시스템 요구(SyRS: SyTR/SyTSR/SyEI…). SR→SyRS→SwRS 체인.

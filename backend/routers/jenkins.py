@@ -3775,6 +3775,7 @@ def _cache_trace_summary(matrix: Dict[str, Any], req: UdsTraceabilityMatrixReque
             row.get("source_ids")
             or row.get("sds_components")
             or row.get("sds_functions")  # 추적 정화: 함수로만 추적된 요구사항 커버리지 회귀 방지(프론트 DESIGN_FIELDS lockstep)
+            or row.get("sds_design_elements")  # 설계ID·상태명 등 — 함수 분리 시 이게 없으면 14행이 uncovered 로 회귀
             or row.get("hsis_signals")   # 시스템 인터페이스(HSIS) realization — SwEI 등 인터페이스 요구 커버(결정1)
             or row.get("functions")
             or row.get("mapping")
@@ -4587,6 +4588,7 @@ def jenkins_sds_extract_mapping(body: Dict[str, Any]) -> Dict[str, Any]:
     req_to_comps = _maps["req_to_comps"]
     req_to_design_comps = _maps["req_to_design_comps"]
     req_to_folded_comps = _maps["req_to_folded_comps"]
+    req_to_element_comps = _maps["req_to_element_comps"]
     component_asil = _maps["component_asil"]
     comp_set = _maps["comp_set"]
     design_comp_set = _maps["design_comp_set"]
@@ -4599,6 +4601,10 @@ def jenkins_sds_extract_mapping(body: Dict[str, Any]) -> Dict[str, Any]:
             # ID 키·이름 키를 canonical 로 접으며 사라진 원 키. 소비처가 차집합으로
             # sds_functions 를 낼 때 함께 빼지 않으면 접힌 키가 함수로 이중 계상된다.
             "folded_component_ids": req_to_folded_comps.get(rid, []),
+            # 밴드도 함수도 아닌 설계 요소(설계ID·상태명·미확인 표행·heading). 이걸 안 실으면
+            # 소비처 차집합이 "컴포넌트 아닌 것 = 함수" 로 접어 상태명 `standby` 와 목차 줄이
+            # **인터페이스 함수로 표시**된다(HDPDM01 실측 634 중 135 = 21.3%).
+            "design_element_ids": req_to_element_comps.get(rid, []),
         }
         for rid, comps in sorted(req_to_comps.items())
     ]

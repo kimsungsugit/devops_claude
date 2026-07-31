@@ -1020,7 +1020,10 @@ const DESIGN_FIELDS = [
   // sds_functions: 추적 정화 후 인터페이스 함수가 sds_components에서 분리됐다. 함수로만 추적되는
   // 요구사항이 '설계 없음(uncovered)'으로 회귀하지 않도록 hasDesign 판정에 포함(백엔드 lockstep).
   // hsis_signals: 시스템 인터페이스(HSIS) realization — SwEI 등 인터페이스 요구 커버(결정1, 백엔드 has_design lockstep).
-  'source_ids', 'sds_components', 'sds_functions', 'hsis_signals', 'functions', 'mapping', 'sds', 'source_mapping',
+  // sds_design_elements: 설계ID(SwFn_/SwST_)·상태명·표행 등. sds_functions 를 '함수만'으로
+  // 정화하면서 분리됐다 — 빼면 이것만 가진 요구(HDPDM01 실측 14행)가 uncovered 로 회귀한다.
+  'source_ids', 'sds_components', 'sds_functions', 'sds_design_elements', 'hsis_signals',
+  'functions', 'mapping', 'sds', 'source_mapping',
 ];
 // SW-레벨 시험 밴드(band-split — Jenkins 매트릭스에서 채워짐). SyTS/SyITS(시스템 레벨)는 제외 —
 // 결정1 재정의: 시스템 시험 완료는 SW covered에 포함하지 않는다(백엔드 _cache_trace_summary lockstep).
@@ -4489,9 +4492,12 @@ function _buildReqGraph(row, focusSet, visibleKeys, linkTable) {
   // 분리된 인터페이스 함수(추적 정화) — 그래프 노드로는 안 그려 정화를 유지하되, 데이터 존재는
   // 범례/패널로 정직하게 노출(함수가 UI에서 완전 소실되지 않도록).
   const sdsFunctions = (Array.isArray(row?.sds_functions) ? row.sds_functions : []).map(s => String(s).trim()).filter(Boolean);
+  // 설계 요소(설계ID·상태명·표행) — 함수와 **분리**해 표시한다. 구 응답·구 캐시엔 이 필드가
+  // 없고 그때는 전부 sds_functions 에 들어 있으므로 빈 배열이면 분리 이전 표시 그대로다.
+  const sdsElements = (Array.isArray(row?.sds_design_elements) ? row.sds_design_elements : []).map(s => String(s).trim()).filter(Boolean);
   // SyRS 상위 추적(배지) — 그래프 좌표 무변경, root 위 배지로 노출(SR→SyRS→SwRS 체인). 풀 부모 컬럼은 후속.
   const syrsParents = (Array.isArray(row?.syrs_parents) ? row.syrs_parents : []).map(s => String(s).trim()).filter(Boolean);
-  return { reqId, reqName, asil, isSafety, safetyGap, safetyMissing, sdsFunctions, syrsParents, columns, edges, width, height, nodeXY, rootY };
+  return { reqId, reqName, asil, isSafety, safetyGap, safetyMissing, sdsFunctions, sdsElements, syrsParents, columns, edges, width, height, nodeXY, rootY };
 }
 
 function _bez(x1, y1, x2, y2) {
@@ -4761,12 +4767,15 @@ function TraceReqGraphView({ rows, focusFunctions = null, linkTable = null, init
             <span style={{ opacity: 0.6 }} title="hiMA UCOneIDTrace 표기 대응 — 설계=집(△지붕)/단위설계=역집/시험스펙=타원/단위시험=◇/통합시험=8각/요구사항=□">
               모양: 설계▭집·단위설계▽·시험◯◇⯃
             </span>
-            {graph.sdsFunctions.length > 0 && (
+            {(graph.sdsFunctions.length > 0 || graph.sdsElements.length > 0) && (
               <button type="button" onClick={() => setShowSdsFns(v => !v)} aria-expanded={showSdsFns}
-                title="SDS 인터페이스 함수 — 추적 정화로 설계 컴포넌트와 분리(SDS 밴드 집계 제외). 단위시험(SUTS)·VectorCAST 추적의 근거. 클릭해 목록 보기."
+                title="SDS 밴드(설계 컴포넌트)에 안 세는 나머지 추적 근거 — 인터페이스 함수와 설계 요소(설계ID·상태명 등). 단위시험(SUTS)·VectorCAST 추적의 근거. 클릭해 목록 보기."
                 style={{ display: 'inline-flex', alignItems: 'center', gap: 4, padding: '2px 8px', fontSize: 11, border: '1px solid var(--border)', borderRadius: 12,
                   background: showSdsFns ? 'var(--accent)' : 'var(--bg)', color: showSdsFns ? '#fff' : 'var(--fg)', cursor: 'pointer' }}>
-                함수 {graph.sdsFunctions.length} {showSdsFns ? '▲' : '▼'}
+                {/* 함수와 설계요소를 한 숫자로 합치면 상태명·목차줄이 '함수'로 표시된다(실측 21.3%) */}
+                함수 {graph.sdsFunctions.length}
+                {graph.sdsElements.length > 0 && ` · 설계요소 ${graph.sdsElements.length}`}
+                {' '}{showSdsFns ? '▲' : '▼'}
               </button>
             )}
             <div style={{ marginLeft: 'auto', display: 'inline-flex', gap: 6 }}>
@@ -4777,18 +4786,37 @@ function TraceReqGraphView({ rows, focusFunctions = null, linkTable = null, init
             </div>
           </div>
 
-          {/* SDS 인터페이스 함수 펼침 패널(추적 정화로 분리된 함수 — 기본 접힘, 그래프 노드 재팽창 방지) */}
-          {showSdsFns && graph.sdsFunctions.length > 0 && (
-            <div style={{ marginBottom: 8, padding: 10, border: '1px solid var(--border)', borderRadius: 8, background: 'var(--panel, #f9fafb)', maxHeight: 170, overflow: 'auto' }}>
-              <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 6 }}>
-                SDS 인터페이스 함수 {graph.sdsFunctions.length}개 — 설계 컴포넌트의 멤버 함수(SDS 밴드 집계엔 미포함, SUTS/VectorCAST 단위시험 추적 근거)
-              </div>
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
-                {graph.sdsFunctions.slice(0, 500).map((fn, i) => (
-                  <span key={i} style={{ fontSize: 10, padding: '1px 6px', borderRadius: 4, background: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--fg)' }}>{fn}</span>
-                ))}
-                {graph.sdsFunctions.length > 500 && <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>… +{graph.sdsFunctions.length - 500}</span>}
-              </div>
+          {/* 펼침 패널 — 함수와 설계요소를 **분리해** 보여준다. 한 목록으로 합쳐 '멤버 함수'라
+              라벨하던 동안 상태명(`standby`)·설계ID(`SwST_01`)·목차 줄이 함수로 표시됐다
+              (HDPDM01 실측 634 중 135 = 21.3%, 63행 중 52행). 기본 접힘은 유지. */}
+          {showSdsFns && (graph.sdsFunctions.length > 0 || graph.sdsElements.length > 0) && (
+            <div style={{ marginBottom: 8, padding: 10, border: '1px solid var(--border)', borderRadius: 8, background: 'var(--panel, #f9fafb)', maxHeight: 220, overflow: 'auto' }}>
+              {graph.sdsFunctions.length > 0 && (
+                <>
+                  <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 6 }}>
+                    SDS 인터페이스 함수 {graph.sdsFunctions.length}개 — 설계 컴포넌트의 멤버 함수(SDS 밴드 집계엔 미포함, SUTS/VectorCAST 단위시험 추적 근거)
+                  </div>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                    {graph.sdsFunctions.slice(0, 500).map((fn, i) => (
+                      <span key={i} style={{ fontSize: 10, padding: '1px 6px', borderRadius: 4, background: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--fg)' }}>{fn}</span>
+                    ))}
+                    {graph.sdsFunctions.length > 500 && <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>… +{graph.sdsFunctions.length - 500}</span>}
+                  </div>
+                </>
+              )}
+              {graph.sdsElements.length > 0 && (
+                <>
+                  <div style={{ fontSize: 11, color: 'var(--text-muted)', margin: `${graph.sdsFunctions.length > 0 ? 10 : 0}px 0 6px` }}>
+                    SDS 설계 요소 {graph.sdsElements.length}개 — 설계ID(SwFn_/SwST_)·상태명·표 항목. <b>함수가 아니다</b>(SDS 밴드 집계엔 미포함, 설계 추적 근거로는 유효)
+                  </div>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                    {graph.sdsElements.slice(0, 500).map((el, i) => (
+                      <span key={i} style={{ fontSize: 10, padding: '1px 6px', borderRadius: 4, background: 'var(--bg)', border: '1px dashed var(--border)', color: 'var(--text-muted)' }}>{el}</span>
+                    ))}
+                    {graph.sdsElements.length > 500 && <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>… +{graph.sdsElements.length - 500}</span>}
+                  </div>
+                </>
+              )}
             </div>
           )}
 
